@@ -1,10 +1,11 @@
 # ADR-0031 — 记忆的模型可调用入口：`retrieve_memory` / `remember_this`
 
-- **Status**: Proposed（契约已冻结，待实现）
+- **Status**: Proposed（原 V1 工具契约由 #300 对 V2 写删路径作了部分细化；分支实现尚待集成）
 - **Date**: 2026-09-13
 - **Deciders**: 用户（工具名、返回形状、描述要求逐条裁定）+ 本 Agent（机制设计）
 - **Related**:
   - Issue #202（本 ADR 对应票）
+  - Issue #300 / MEM-V2-4（V2 显式命令与治理 API）
   - ADR-0024（Memory Provider seam）、ADR-0026（记忆生命周期 / 硬删 outbox）、ADR-0020b（context providers 运行时消费）
   - ADR-0023（prompt 注册表，本 ADR 不新增文案模板，但受其约束）
   - `memory/capability.py`（"只有一条路径"的原始措辞必须按 §5 精确修订）
@@ -239,6 +240,7 @@ def rank_entries(entries: Iterable[MemoryEntry], *, now: datetime | None = None)
 | #21 Optional Capability 故障不拖垮 Core | 检索异常 → 工具失败结果；写入异常 → 工具失败结果（**实现要求**：`remember_this` 必须 catch provider 异常并翻译成 `ToolResult.failure`，不得让异常穿透到 runtime 的异常臂——那会把一次记忆写入故障升级成整个 run 失败） |
 | #11 权限是运行时边界，不靠 Prompt | namespace 不来自参数（`extra="forbid"`）；`forget_memory` 保持 `DANGER` + 审批；`remember_this` 在只读策略下被执行器拒绝 |
 | #7 统一执行路径 | 三个工具都注册进 `ToolRegistry`，走 `ToolExecutor` 唯一路径，无旁路 |
+
 | #4 Event ≠ Diagnostic Log | 注册表不落事件（§4.2） |
 
 ---
@@ -297,3 +299,39 @@ def rank_entries(entries: Iterable[MemoryEntry], *, now: datetime | None = None)
 3. `tool_scope` 需要同步修订（D8），否则新工具在非 main 档位下静默消失——这正是 #198（档位静默收窄、界面不提示）的同一类缺陷。
 
 **未决（实现时必须回填）**：无阻塞项；若 `TRANSIENT_ERROR` 在只读工具上的既有重试策略与预期不符，实现 PR 里记录实测行为。
+
+---
+
+## 11. Addendum — V2 explicit commands and governance (#300)
+
+This addendum supersedes only the V1 write/delete behavior above when the V2 service is
+available. `retrieve_memory` remains on the V1 capability until the V2 recall adapter from
+#299 is integrated; the recall-explanation endpoint reports durable `MEMORY_RECALLED` events
+and does not itself perform retrieval or emit those events.
+
+- `remember_this` writes a typed V2 record only when the current user-authored message contains
+  both a positive, explicit remember instruction and the proposed content in the same command
+  clause. Any negated or opt-out instruction anywhere in that message vetoes the whole write, even
+  when the requested content is otherwise safe; the user can send that fact separately. An
+  assistant's judgment that a fact may be useful later is not consent. Content in a different
+  sentence and credential-like content are rejected. Every free-text payload field must be a
+  case- and whitespace-insensitive substring of the proposed content; this keeps structured payload
+  text within the content the user explicitly authorized. When the content contains negation, only
+  a semantic payload whose `fact` preserves the full content is accepted; substring-only extraction
+  and negative episodic/procedural payloads are rejected because they cannot prove that polarity was
+  preserved. Scope comes from the trusted
+  session/workspace ledger: project-linked sessions create project memories; other sessions create
+  user-global memories. Provenance is the source user event, and the record is marked
+  `explicit_command`.
+- `forget_memory` requires an explicit forget instruction in the current user-authored message.
+  A query must also come from that message. Multiple matches are read-only candidates; deletion
+  requires the user to select a candidate by `memory_id` in a subsequent message. V2 deletion
+  erases record versions immediately and retains only content-free hashes in a 30-day tombstone
+  while the derived-index delete is relayed through the durable outbox. Expired tombstones are
+  purged at service startup and hourly for long-lived processes.
+- The authenticated V2 governance routes add list/filter, detail, version history, authoritative
+  edit, idempotent single delete, confirmed bulk delete, per-user extraction/recall settings, and
+  per-session recall explanations. They use the existing trusted identity and workspace ledger;
+  client-supplied project selectors do not establish authorization.
+- These decisions do not retire the V1 store or its fallback. Cross-version clean-slate cutover
+  and legacy-path retirement remain owned by #303 / MEM-V2-7.

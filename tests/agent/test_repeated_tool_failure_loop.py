@@ -79,10 +79,10 @@ def _registry() -> ToolRegistry:
     return reg
 
 
-def _runtime(model: ScriptedModel, max_steps: int = 20) -> AgentRuntime:
+def _runtime(model: ScriptedModel, max_agent_turns: int = 20) -> AgentRuntime:
     reg = _registry()
     return AgentRuntime(
-        model=model, registry=reg, executor=ToolExecutor(reg), max_steps=max_steps,
+        model=model, registry=reg, executor=ToolExecutor(reg), max_agent_turns=max_agent_turns,
     )
 
 
@@ -108,7 +108,7 @@ class TestRepeatedToolFailureGuardInLoop:
         scripted = ScriptedModel([
             _tool_call("fail", {"command": "ls"}, i) for i in range(6)
         ])
-        runtime = _runtime(scripted, max_steps=20)
+        runtime = _runtime(scripted, max_agent_turns=20)
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "反复试同一个失败命令")
@@ -142,7 +142,7 @@ class TestRepeatedToolFailureGuardInLoop:
         scripted = ScriptedModel([
             _tool_call("fail", {"command": f"cmd{i}"}, i) for i in range(6)
         ])
-        runtime = _runtime(scripted, max_steps=10)
+        runtime = _runtime(scripted, max_agent_turns=10)
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "每轮换不同命令")
@@ -170,7 +170,7 @@ class TestRepeatedToolFailureGuardInLoop:
             _tool_call("flaky", {"command": "boom"}, 2),  # soft @ 3
             _tool_call("flaky", {"command": "ok"}, 3),     # 指纹变 → 清零
         ] + [_tool_call("flaky", {"command": "ok"}, i) for i in range(4, 9)])
-        runtime = _runtime(scripted, max_steps=15)
+        runtime = _runtime(scripted, max_agent_turns=15)
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "成功穿插")
@@ -192,7 +192,7 @@ class TestRepeatedToolFailureGuardInLoop:
             _tool_call("fail", {"command": "x"}, 4),
             _tool_call("flaky", {"command": "boom"}, 5),
         ])
-        runtime = _runtime(scripted, max_steps=10)
+        runtime = _runtime(scripted, max_agent_turns=10)
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "交替调不同工具")

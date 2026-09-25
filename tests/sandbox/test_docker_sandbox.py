@@ -80,6 +80,8 @@ def test_exec_runs_in_workspace_and_stop_is_idempotent(docker_sandbox: object) -
 @docker_required
 def test_timeout_stops_late_workspace_mutation(docker_sandbox: object) -> None:
     marker = "/workspace/late-timeout-marker"
+    # Keep Docker's cold container startup outside the command timeout being tested.
+    assert docker_sandbox.exec("true", timeout=10).exit_code == 0
     # 预算 1.0s / 写入点 2.5s：预算必须够命令启动（printf before 有输出，断言才非平凡），
     # 又必须早于写入点——0.2s 会让容器冷启动吃掉全部预算，命令根本没跑起来。
     result = docker_sandbox.exec(

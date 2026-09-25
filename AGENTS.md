@@ -492,17 +492,24 @@ origin/main
 → diff 检查 + 门禁全绿（§14.10）
 → **审查覆盖闸门**：`python scripts/check_review_coverage.py` exit 0
    （范围 / 两类例外 / 信任边界见 §14.10 与协议 §7 第 8 条——**代码提交只有「补一次审查」一条路**）
-→ merge 到本地 main（快进优先）
+→ 集成目标落在本地 main（快进优先）
 → **先比 `HEAD^{tree}`，不等才跑全量门禁**：`git -C <集成 clone> rev-parse main^{tree}`
    与施工 clone 的 `HEAD^{tree}` 比——相等即证明「跑过门禁的树 = 被集成的树」，不必再跑
    （机制与实测见协议 §7 第 8 条末段）；不等才在集成 clone 里跑全量门禁
 → 确认前后端集成正常
-→ git push origin main（当前主开发执行，常设授权见 §14.4）
+→ 把该短分支 push 到 origin 并开 PR 指向 main（**需单独批准**，§14.4）
+→ **`gate0` 必须绿**（服务端必需状态检查；工作流见 `.github/workflows/gate0.yml`）
+→ 合并该 PR（**需单独批准**，§14.4）
+→ `git fetch origin` 后把本地 main 对齐到新的 `origin/main`（§14.5）
 → 通知另一条线把 main 合回来（§14.9）
 ```
 
-**先合并到本地 `main` 并验证，再 push GitHub。** GitHub 不是仓库之间交换代码的必经步骤。
-除非用户明确要求，否则不要默认「先 push feature 分支再通过 GitHub PR merge」。
+**`main` 受服务端保护（2026-09-26 起）**：`git push origin main` 被服务端拒绝
+（`GH006`，"Changes must be made through a pull request"）⇒ 集成**只能**走
+「推分支 → 开 PR → `gate0` 绿 → 合并 PR」这一条通道。机制、边界与破窗条款见 §14.4。
+
+**本地 `main` 是验证场所，不是发布通道。** 「先合并到本地 `main` 并验证」仍然成立——它让
+冲突与门禁都在可控范围内解决；但那一结果必须再经由上面那个 PR，才进得了 `origin/main`。
 
 ## 13.5 `git diff` 的用途
 
@@ -592,14 +599,43 @@ remote-tracking ref；不触碰工作树与本地分支。允许无批准执行�
 
 ## 14.4 Git 授权分类
 
+### main 受服务端保护（2026-09-26 起）
+
+`main` 上开着分支保护（`gh api repos/EricKingWhy/intelligence-agent/branches/main/protection` 可读回）：
+
+```text
+必需状态检查   gate0（app = github-actions；名字取自 .github/workflows/gate0.yml 的 jobs.gate0.name）
+strict         true  —— 分支必须与 main 同步才能合并
+enforce_admins true  —— 对 owner 也生效，没有旁路主体
+force-push     禁止
+删除分支       禁止
+允许的合并方式 仅 merge commit（squash 与 rebase 已关闭）
+```
+
+⇒ **`git push origin main` 对所有人（含 owner）被服务端拒绝**，报
+`GH006: Protected branch update failed … Changes must be made through a pull request`，
+并附「Required status check "gate0" is expected」。这条**不是**被谁取消了，而是**物理上不可
+执行**——照旧授权去执行，得到的只是这个错误。
+
+因此集成通道改成 `推集成分支 → 开 PR → gate0 绿 → 合并 PR`。
+
+- **破窗只有一条**：**显式关掉这条保护规则**（仓库 Settings，或 `gh api -X DELETE …/protection`）。
+  这是审计可见的动作，且必须先在对话里说明理由；**不得**把它当作绕过门禁的常规手段，
+  也**不得**用 `--admin` 合并（`enforce_admins` 为真时它同样不生效）。
+- **它保证什么**：保护开启之后进 main 的每一笔提交都经过 `gate0`（6 条机械车道 + 覆盖闸门）
+  且经由 PR。**它不保证**：闸门本身不可被改——改 `.github/workflows/gate0.yml`、
+  `scripts/gate0.py`、`scripts/check_review_coverage.py` 或台账的 PR，其改动会被执行，且仍报出
+  一个叫 `gate0` 的绿检查；那是人对账的活。完整清单见该工作流头部注释。
+- **历史提交不在闸门内**：保护只对开启之后进 main 的提交成立。
+
 ### 常设授权（不必每次重新批准）
 
 用户 2026-09-16 明确：**集成完成后由当前主开发执行 `push origin main`**，不必每次单独确认。
+⚠ **该条自 2026-09-26 起失效**——不是被撤销，而是上面那条保护让它的对象不存在了。
 
 ```text
 把 main 合回自己的短分支        # 同步动作，§14.9 要求
-集成：把验证过的短分支合进 main
-集成验证通过后：git push origin main
+集成：把验证过的短分支合进本地 main
 ```
 
 前置条件（缺一不可）：
@@ -611,14 +647,19 @@ remote-tracking ref；不触碰工作树与本地分支。允许无批准执行�
 ### 需用户明确批准（每次单独确认）
 
 ```text
-在 feature / 短分支上 git push      # 向外发布未集成的工作，不在常设授权内
-GitHub PR Merge
+在 feature / 短分支上 git push      # 向外发布未集成的工作
+GitHub PR Merge                     # 集成通道的最后一跳（保护开启后新增的必经步骤）
 git cherry-pick
 git revert
 冲突解决后的 git add               # 先按 §14.7 做逐文件语义分析并报告
 Branch 删除
 Worktree 删除
 ```
+
+⚠ **代价要说清**：保护开启前，「集成」是**零批准**动作（常设授权）。开启后它的对象
+（`push origin main`）不可执行，集成落成「推集成分支」+「合并该 PR」两步，**两步各自都落在
+上栏** ⇒ 一次集成 = **两次单独批准**。是否把这两步也纳为常设授权，是**尚未决定**的事；
+在那之前按本栏执行，不要自行合并。
 
 ### 默认禁止（除非用户针对具体操作明确批准）
 
@@ -649,13 +690,14 @@ origin/main
     ↓
 feature branch   ← 在这里解决 Conflict、Test、Review（push 不在这里，见下）
     ↓
-main             ← feature branch 稳定后再合入 main
+main             ← feature branch 稳定后再合入本地 main（验证场所，不是发布通道）
     ↓
-push origin main ← 集成动作，由当前主开发执行（§14.4 常设授权）
+推集成分支 → 开 PR → gate0 绿 → 合并该 PR ← 进 origin/main 的唯一通道（§14.4）
 ```
 
-**Push 不在 feature 分支上做**：feature 分支上的 `git push` 属"向外发布未集成的工作"，
-需要用户单独批准（§14.4）。集成线只在合入 `main` 之后推。
+**Push 的目标变了（2026-09-26 起）**：以前「集成线只在合入 `main` 之后推」，推的是 `main`；
+现在 `main` 的直推被服务端拒绝（`GH006`），推的**必须**是集成分支，再由 PR 进 `main`。
+这两个动作各需用户单独批准（§14.4）。
 
 不要优先在 `main` 上解决复杂业务 Conflict。
 
@@ -734,6 +776,11 @@ A 合入 `main` 后，之前针对 B 做的 Conflict 判断**全部视为可能�
   `.sh` 是**冻结的语义参考**（依赖 coreutils，本机默认 PATH 下跑不动；2026-09-22 台账拆到
   `docs/review_ledger.d/` 后它只认单文件、表达不了「双读」）⇒ **唯一可运行权威是 `.py`**
   （拆分前布局的同树对照结论见 `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4；口径登记见协议 §8.8.5）；
+- **服务端 `gate0` 必须绿（2026-09-26 起）**：它是 `main` 的**必需状态检查**——由
+  `.github/workflows/gate0.yml` 在 PR 上跑**同一套** 6 条机械车道（不是第二套判据实现）。
+  它把「忘了跑」与「本地 `--no-verify`」两条路径封死，但**同一份脚本 ≠ 同一个环境**：
+  本地绿推不出 CI 绿（实测反例：`ruff` 的 EXE001 只在 Unix 生效，Windows 本地永远看不见）。
+  它是**门禁而非可选**：不满就合不进去（§14.4）；
 - **门禁读数来自机器落盘**：`docs/gate/<sha>.json`（`scripts/gate0.py` 每次**裸全量**运行写出：
   `sha` + `^{tree}` + 每车道结论 + 墙钟 + 工具版本 + 该次运行的工作树证据；`--replay <file>`
   可独立复核判定）。**Gate-0 这 6 条机械车道**的读数一律**引用该文件**，不手抄终端数字 ——

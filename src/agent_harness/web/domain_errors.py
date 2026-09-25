@@ -69,6 +69,24 @@ fork 父时不删（不级联、不静默 orphan），detail 带子会话数量�
 （`POST /api/sessions/{id}/permission`）。机制 / 不复用 `ActiveRunConflict` 的理由见 ADR-0041
 §4.1。上表已补该端点行。
 
+**T3 追加（#308）**：新增 `BudgetRejection` 家族三档 `: 422`——预算配置不可接受：迁移期
+alias `max_steps` 与新字段 `budget.local.max_agent_turns` **同时出现且不等**（`BudgetAliasConflict`）、
+下层声明的 ceiling **越过生效上层**（`BudgetCeilingExceeded`，ADR-0044 D1/D8）。判定发生在
+**任何 model / tool / child 工作开始前**（ADR-0044 D9：与其余 422 同类——输入不可接受且未开工），
+被拒请求不落盘、不写消耗预算的事件。命中端点：`POST /api/sessions`、
+`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/messages`（**两种模式都判**，且判定
+早于分支：同一条请求体不该因为运行态不同而换状态码）。
+`POST /api/sessions/{id}/queue/flush` **不在**其中：它不带 budget 入参，重投的 fuse 只由
+Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上抛不出这三档。
+
+**T4 追加（#312）**：新增 `BudgetConflict: 409`——恢复暂停 run 的 CAS 比较失败
+（`expected_version` 过期 / `run_id` 不是被暂停的那个 / 本会话最新逻辑 run 不在暂停态 /
+绝对 ceiling 没真高于已消耗），以及"暂停原因或 `resume_basis` 的前置条件本票未实现"
+（`#315` deadline / `#317` stuck 各自负责）。与 T3 的 422 档分界是 PRD §9 的原文：
+**形状非法 422、状态对不上 409**——判定都在 `agent_harness.agent.run_budget.validate_resume`
+（单一规则来源），且都在任何 model / tool / child 工作与任何落盘之前（被拒请求零副作用）。
+命中端点目前只有 `POST /api/sessions/{id}/resume`：同 run 续跑只存在于这个恢复面。
+
 ## 设计取舍（为什么不再往前一步）
 
 - **不用 FastAPI 全局 `exception_handler`**：那会把整张表应用到每个端点，使一个本来
@@ -84,6 +102,12 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from agent_harness.agent.budget import (
+    BudgetAliasConflict,
+    BudgetCeilingExceeded,
+    BudgetConflict,
+    BudgetRejection,
+)
 from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.session.errors import (
     ActiveRunConflict,
@@ -123,6 +147,11 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     InvalidDecision: 422,
     UnknownModel: 422,
     InvalidForkBoundary: 422,
+    # T3 / #308（ADR-0044 D1/D8/D9）：预算配置不可接受——alias 冲突 / 越过生效上层
+    # ceiling。父类与两个子类各自登记（精确类型索引）。
+    BudgetRejection: 422,
+    BudgetAliasConflict: 422,
+    BudgetCeilingExceeded: 422,
     # 404：目标不存在（approve 的三个来源有意不可区分，见模块 docstring）
     SessionNotFound: 404,
     ApprovalQueueMissing: 404,
@@ -131,6 +160,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     WorkspaceNotFound: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
+    # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立——expected_version
+    # 过期、run_id 不是被暂停的那个、没有暂停 run、ceiling 没真高于已消耗。请求形状
+    # 合法（那是 422 的 T3 档），是**状态对不上**，且判定在任何落盘之前发生。
+    BudgetConflict: 409,
     RecoveryConflict: 409,
     ApprovalAlreadyResolved: 409,
     SteerTargetNotFound: 409,

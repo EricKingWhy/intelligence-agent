@@ -52,7 +52,7 @@ async def _build_runtime(
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="sess-persona",
             workspace=tmp_path / "workspaces" / "sess-persona",
-            max_steps=5,
+            max_agent_turns=5,
             agent_profile=agent_profile,
         )
 

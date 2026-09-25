@@ -23,12 +23,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, resumeSession, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
+import type { RunLimitField } from '../lib/runBudget';
 import { forgetResumeAttempt, maxEventSeq, nextResumeAttempt, readStoredSessionId, writeStoredSessionId, type ResumeAttempts } from '../lib/sessionRestore';
 
 /** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
@@ -1034,11 +1035,13 @@ export function useSession() {
       sessionId: string,
       content: string,
       opts?: {
-        maxSteps?: number;
         /** 字段集直接取自 /messages 的请求契约——Omit 出 amend 面，不会随
          *  请求契约增删字段而漂移。mode 可被 amend 覆盖（steer 通道复用同一
-         *  端点，见 sendSteer）。 */
-        amend?: Omit<SendMessagePayload, 'content' | 'max_steps'>;
+         *  端点，见 sendSteer）。
+         *
+         *  #308：`maxSteps` 选项随迁移移除——续聊不再主动发送任何 local fuse
+         *  数字，缺省由后端按 Deployment/AgentProfile 解析（默认 500）。 */
+        amend?: Omit<SendMessagePayload, 'content' | 'budget'>;
       },
     ) => {
       setError(null);
@@ -1163,7 +1166,6 @@ export function useSession() {
         const amend = opts?.amend ?? {};
         await deliver({
           content,
-          max_steps: opts?.maxSteps ?? 10,
           ...amend,
           mode: amend.mode === 'steer' ? 'steer' : 'queue',
         });
@@ -1387,6 +1389,112 @@ export function useSession() {
     [refreshSessions],
   );
 
+  /** `#312` T4：同 run 恢复被预算暂停的逻辑 run（POST /resume，**不带 task**）。
+   *
+   *  与 `recover` 的分工（两个入口互不替代）：recover 修**崩溃遗留**（缺 run 终态 /
+   *  悬空工具调用），本函数接上**非终态暂停**的那个逻辑 run。暂停的会话不会被
+   *  `isRecoverableRun` 判为可恢复（`run/paused` 已收口当前执行区间，见 runState
+   *  的 scanRuns），所以不会出现两个按钮抢同一件事。
+   *
+   *  成功路径复用既有流消费机器：后端以 SSE 回（`_run_stream_response`），
+   *  `attachLiveStream` 接管后续帧（游标记账 / seenSeqs 去重 / 终态收尾全部同一套）。
+   *  攒包判别沿用 `raceEarlyResponse`：409/422 是短 JSON 会当场落定，正常流式的响应头
+   *  可能被压到 run 结束——窗外就直接按 launched 用 WS 接流，迟到的落定再按"判错了"
+   *  纠正（同 flushQueue 的手势）。
+   *
+   *  被拒（409/422，后端**零副作用**）**不改任何本地状态**：不碰 conversation、不清
+   *  调用方的 ceiling 输入，只做两件用户看得见的事——显示后端 detail，并 `selectSession`
+   *  同一 id 触发**既有历史装载 effect** 重读 durable log（不变量 #22：刷新后屏幕上的
+   *  暂停事实 / consumed / version 必须是服务器的那一份，而不是我们记着的旧版本）。
+   *  用户据此把 ceiling 抬得更高再来一次。
+   *
+   *  `#313`：抬的是**卡住的那一维**（`dimension`），值是绝对值。cost 维传十进制字符串
+   *  （保住 wire 精度，后端 `parse_cost_ceiling` 数与串都收）；未点名的维度由后端沿用
+   *  暂停时的 ceiling。 */
+  const resumePausedRun = useCallback(
+    async (
+      sessionId: string,
+      request: {
+        runId: string;
+        expectedVersion: number;
+        dimension: RunLimitField;
+        value: number | string;
+      },
+    ): Promise<void> => {
+      setError(null);
+      // 与 sendFollowUp 入口同一套代际/流状态重置：这是一次新的在途执行。
+      liveSidRef.current = sessionId;
+      setReconnecting(false);
+      terminalSeenRef.current = false;
+      reconnectRef.current.reset();
+      streamGenRef.current += 1;
+      const gen = streamGenRef.current;
+      setMode({ kind: 'live', sessionId });
+
+      /** 失败收尾：作废本代际（挂上的流与重连定时器一起失效）→ 回到 viewing
+       *  同一会话（触发历史重读，把本地投影拉回服务器真值）→ 显示原因。
+       *  用 `selectSession` 而不是 `setMode`：多出的那几步（取消订阅、清 stream
+       *  引用、忘掉接流去重记账）正是"这条流已经作废"该做的事。 */
+      const fail = (message: string) => {
+        if (streamGenRef.current !== gen) return;
+        selectSession(sessionId);
+        setError(message);
+      };
+
+      try {
+        const pending = resumeSession(sessionId, {
+          run_id: request.runId,
+          resume_basis: 'budget_increase',
+          budget: {
+            expected_version: request.expectedVersion,
+            run: { [request.dimension]: request.value },
+          },
+        });
+        const res = await raceEarlyResponse(pending);
+        if (res !== null) {
+          if (!res.ok || !res.body) {
+            fail(`恢复失败：HTTP ${res.status}`);
+            return;
+          }
+          const contentType = res.headers.get('content-type') ?? '';
+          if (contentType.includes('text/event-stream')) {
+            attachLiveStream(res, gen, conversationRef.current);
+            return;
+          }
+          // 2xx 但非事件流不在契约里：不猜它是什么，如实报出来并要求刷新。
+          fail(`恢复失败：响应不是事件流（${res.status}）`);
+          return;
+        }
+        // 窗外 = 判为 launched：改用 WS 接流。游标取**本会话**真实 max seq，理由同
+        // sendFollowUp（WS 快照会重放整段历史，旧终态会把 terminalSeen 提前置真）。
+        const conv = conversationRef.current;
+        const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+        lastAppliedSeqRef.current = cursor;
+        attachLiveStream(wsStreamResponse(sessionId, cursor), gen, conversationRef.current);
+        // 悬挂的 promise 仍会落定：真是事件流就什么都不做，否则说明判错了。
+        void pending
+          .then((late) => {
+            if (streamGenRef.current !== gen) return;
+            const contentType = late.headers.get('content-type') ?? '';
+            if (late.ok && contentType.includes('text/event-stream')) return;
+            return readErrorDetail(late).then((detail) => {
+              fail(`恢复失败：${detail || `HTTP ${late.status}`}`);
+            });
+          })
+          .catch((e: unknown) => {
+            fail(`恢复失败：${(e as Error).message}`);
+          });
+      } catch (e) {
+        if (e instanceof ResumeRejectionError) {
+          fail(`恢复被拒绝：${e.message}`);
+          return;
+        }
+        fail(`恢复失败：${(e as Error).message}`);
+      }
+    },
+    [attachLiveStream, selectSession],
+  );
+
   /** T7 #137：切换会话当前模型（POST /api/sessions/{id}/model）。
    *
    * - 切换不打断在途 run——下一轮 run 从事件流派生当前模型生效
@@ -1580,6 +1688,7 @@ export function useSession() {
     removeSession,
     setArchived,
     recover,
+    resumePausedRun,
     refreshSessions,
     changeModel,
     changePermission,

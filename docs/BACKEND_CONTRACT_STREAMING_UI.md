@@ -201,7 +201,8 @@ WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的�
 - `"orphaned"`：孤儿回收（零订阅者连续 300s，`RUN_DISCONNECT_GRACE_SECONDS` 可调）；
 - `"identical_tool_failure_loop"`：同错熔断硬保险丝（ADR-0014）；
 - `"provider_content_moderation"`：provider 内容审查拒绝输入（如阿里云 `data_inspection_failed`，仅模型调用在途时分类）；与 `data.message` 成对出现（固定可读文案），provider 回显原文只进服务端日志；
-- `"max_steps_exceeded"`：模型连续请求工具不收敛，撞 `max_steps` 保险丝（`data.message` 说明轮数）；
+- ~~`"max_steps_exceeded"`~~：**运行期已不可达**（`#312` 起本地保险丝撞线不再失败，改落**非终态**
+  `run/paused`，见本节末）；只有 `#312` 之前写下的历史会话载荷里还会出现，读到按"失败"渲染即可；
 - **其余未分类失败**：`reason` = **异常类型名**（`RateLimitError` / `ProxyError` / `ConnectionError` …），`data.message` = 固定兜底句（`运行失败（<类型名>），未分类异常；完整原始信息见后端日志`）。
 
 ⚠ **`reason` 是开集，不是枚举**（#222 起）：运行期路径上它**总有值**，只对上面
@@ -210,6 +211,13 @@ WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的�
 内部英文串）。取值域与三态呈现的完整口径见 `docs/adr/0033-run-failure-attribution-surface.md`。
 `run/completed` 语义不变。**断连永远不会出现在终态原因里**。
 （上下文超限另有独立终态 `reason=context_window_exceeded` + `data.message`，见 02 §17。）
+
+**非终态：`run/paused` / `run/resumed`（`#312`）**：预算到顶时本次执行落一条 `run/paused` 收口——
+它是**非终态**（没有悬空工具调用，逻辑 run 还没结束；`run/resumed` 带 `expected_version` 在**同一个
+`run_id`** 上续跑）。前端**不得**把 `run/paused` 当终态渲染（`RUN_TERMINAL_TYPES` 刻意不含它），
+也不要因此认定 run 死了：暂停态的可见事实（consumed / limits / continuation / version）由
+`run/paused.data` 投影重建，刷新与重放都得到同一份。事件枚举见 `docs/EVENT_VOCABULARY.md`，
+载荷形状与恢复判据见 `03 §3.4` / `11 §6.1`。
 
 ## 5. 前端迁移清单（建议 ticket 顺序）
 

@@ -33,6 +33,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -40,14 +41,17 @@ from enum import Enum
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
 )
 from agent_harness.memory.extractor import _is_runtime_injected
 from agent_harness.session import MODEL_COMPLETED, USER_MESSAGE, SessionEvent
 
-#: 能触发记忆形成的终态：正常完成 + 两张获批的受控失败（max-steps、同错熔断）。
+#: 能触发记忆形成的终态：正常完成 + 一张获批的受控失败（同错熔断）。
+#: `#312`（T4）起预算/保险丝到顶**不再是失败终态**，而是非终态 `run/paused`
+#: （`02 §5.2` / `03 §3.4`）——那时的 run 还没结束，抽记忆是过早的；同 run 由
+#: `run/resumed` 接回，最终仍会走到完成臂并在这里入队。故旧的
+#: `max_steps_exceeded` 从白名单移除（该终态在运行时已不可达）。
 ELIGIBLE_TERMINAL_STATUSES = frozenset({
-    STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+    STATUS_COMPLETED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
 })
 
 #: 取消类终态（ADR-0016 §2.1：断连消费 = `cancelled`；孤儿回收 = `orphaned`）。
@@ -65,6 +69,12 @@ MEMORY_OPT_OUT_FIELD = "memory_opt_out"
 #: 未获批的失败终态上（`failed`），本来就过不了终态那一关。多收一个 `model/failed`
 #: 会是一条永远走不到的兜底分支，而不是多一层保护。
 _MODEL_RESPONSE_EVENT_TYPE = MODEL_COMPLETED
+_OPT_OUT_TEXT = re.compile(
+    r"(?:\b(?:do\s+not|don't|dont)\s+remember\s+(?:this|the\s+current)\s+"
+    r"(?:chat|conversation|session)\b|"
+    r"不要记住(?:这|本)次(?:聊天|对话)|不要把(?:这|本)次对话记下来|本轮不要记忆)",
+    re.IGNORECASE,
+)
 
 
 class FormationSkipReason(str, Enum):
@@ -132,6 +142,9 @@ def _skip(reason: FormationSkipReason) -> RunEndEligibility:
 
 
 def _opts_out(event: SessionEvent) -> bool:
-    """该用户消息是否声明"别记这次"。只看我们自己的结构化字段，不做内容启发式。"""
+    """该用户消息是否声明"别记这次"，只影响包含该 user/message 的当前 run。"""
     data = event.data if isinstance(event.data, dict) else {}
-    return bool(data.get(MEMORY_OPT_OUT_FIELD))
+    content = data.get("content")
+    return bool(data.get(MEMORY_OPT_OUT_FIELD)) or (
+        isinstance(content, str) and bool(_OPT_OUT_TEXT.search(content))
+    )

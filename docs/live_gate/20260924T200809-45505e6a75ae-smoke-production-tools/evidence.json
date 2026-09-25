@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "scenario_id": "smoke-production-tools",
+  "scenario_version": 1,
+  "verdict": "BLOCKED",
+  "reason": "配置链建不起来：provider 'mimo' 缺少 API key，必须在 .env 中配置 MODEL_API_KEY",
+  "missing_preconditions": [
+    "配置链建不起来：provider 'mimo' 缺少 API key，必须在 .env 中配置 MODEL_API_KEY"
+  ],
+  "created_at": "2026-09-24T20:08:09.214+00:00",
+  "sha": "45505e6a75ae6821e7798e086b4b44551fd91059",
+  "tree": "02002825d310e3d492c61ca30944a76173a752c8",
+  "worktree": {
+    "head_sha": "45505e6a75ae6821e7798e086b4b44551fd91059",
+    "tree": "02002825d310e3d492c61ca30944a76173a752c8",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "",
+    "model_name": "",
+    "base_url_host": "",
+    "credential_names": [],
+    "fallback_provider_id": "",
+    "fallback_model_name": ""
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": false,
+    "deleted": false,
+    "env_allowlisted": true,
+    "teardown": "",
+    "workspace_ids": []
+  },
+  "capability": {
+    "verdict": "BLOCKED",
+    "reason": "配置链建不起来：provider 'mimo' 缺少 API key，必须在 .env 中配置 MODEL_API_KEY",
+    "probes": []
+  },
+  "attempts": [],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "预算 / 暂停恢复 / 卡死 / deadline / 委派树五类场景（后续票的场景，本票只给注册入口）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

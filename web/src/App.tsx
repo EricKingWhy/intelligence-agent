@@ -25,6 +25,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
+import { PausedPanel } from './components/PausedPanel';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
@@ -43,6 +44,7 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
+import { ceilingDraftValue, minResumeValue, pauseFacts } from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
   createEmptySession,
@@ -112,6 +114,7 @@ export default function App() {
     removeSession,
     setArchived,
     recover,
+    resumePausedRun,
     refreshSessions,
     changeModel,
     changePermission,
@@ -522,14 +525,12 @@ export default function App() {
       // 新会话：无 selectedId → startSession 创建新会话。
       if (selectedId) {
         void sendMessage(selectedId, task, {
-          maxSteps: 10,
           amend: toAmendFields(composerControls),
         });
         return;
       }
       void submitTask({
         task,
-        max_steps: 10,
         auto_approve: true,
         ...toCreateControls(composerControls),
       });
@@ -552,7 +553,6 @@ export default function App() {
       try {
         const created = await createEmptySession({
           cwd: project.path,
-          max_steps: 10,
           auto_approve: true,
           ...(permissionMode ? { permission_mode: permissionMode } : {}),
         });
@@ -679,7 +679,6 @@ export default function App() {
     (fromSeq: number, newContent: string) => {
       if (!selectedId) return;
       void sendMessage(selectedId, newContent, {
-        maxSteps: 10,
         amend: { supersedes_seq: fromSeq },
       });
     },
@@ -696,7 +695,6 @@ export default function App() {
     (item: UndeliveredInput) => {
       if (!selectedId) return;
       void sendMessage(selectedId, item.content, {
-        maxSteps: 10,
         amend: { mode: 'steer', queue_id: item.id },
       });
     },
@@ -720,7 +718,6 @@ export default function App() {
     (item: UndeliveredInput, newContent: string) => {
       if (!selectedId) return;
       void sendMessage(selectedId, newContent, {
-        maxSteps: 10,
         amend: { mode: 'queue', queue_id: item.id },
       });
     },
@@ -768,6 +765,71 @@ export default function App() {
       conversation !== null &&
       isRecoverableRun(conversation.events),
     [selectedId, streaming, loadingHistory, conversation],
+  );
+
+  // ── 预算暂停的恢复入口（`#312`）──
+  //
+  // 面板由投影的 `conversation.run_paused` 驱动（不变量 #22）——`run/resumed` 一到
+  // 它自己消失，刷新/重放得到同一个投影。这里只持有**用户意图**（草稿数字与"正在
+  // 提交哪一个 run"），这两样都不是会话事实，也不参与对账。
+  //
+  // 草稿按暂停的 run_id 记账，而不是一个裸字符串：①切换会话/切到另一个暂停的 run 时
+  // 不该沿用上一个 run 的数字；②同 `run_id` 的重复渲染（含恢复被拒后的日志重读）**保留**
+  // 用户已输入的值——那正是"409 后刷新、输入不丢"的实现方式（不写 effect、不写
+  // localStorage，纯 derive）。
+  const [pauseDraft, setPauseDraft] = useState<{ runId: string; value: string } | null>(null);
+  /** 正在提交恢复的 run_id（null = 无在途请求）。按 run 记账的理由同草稿：切走后
+   *  按钮不该被上一个 run 的在途请求永久禁用。 */
+  const [resumingRunId, setResumingRunId] = useState<string | null>(null);
+
+  const paused = conversation?.run_paused ?? null;
+  const pausedFacts = useMemo(() => (paused ? pauseFacts(paused) : null), [paused]);
+  /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
+   *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
+   *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
+   *  默认值按**命中的维度**给：被 requests 卡住时填一个只够 turns 的数字，提交了也是
+   *  必然 409（`#313`）。 */
+  const pauseDefaultDraft = useMemo(() => {
+    if (pausedFacts === null) return '1';
+    const target = pausedFacts.dimensions.find(
+      (fact) => fact.spec.dimension === pausedFacts.resumeTarget.dimension,
+    );
+    if (target === undefined) return String(pausedFacts.minResumeCeiling);
+    const minimum = minResumeValue(pausedFacts.resumeTarget, target);
+    return minimum === null ? '' : String(minimum);
+  }, [pausedFacts]);
+  const pauseCeilingDraft =
+    paused === null
+      ? ''
+      : pauseDraft?.runId === paused.run_id
+        ? pauseDraft.value
+        : pauseDefaultDraft;
+  // 面板只在**非流式**时在场（同 interrupt-banner）：恢复请求成功后会立刻接上
+  // live 流，那一小段窗口里 `run_paused` 可能还没被 run/resumed 清掉——那时露出
+  // 一个"恢复"按钮等于给用户一个重复提交 CAS 的机会。
+  const canResumePaused = paused !== null && selectedId !== null && !streaming;
+
+  const handleResumePaused = useCallback(() => {
+    if (!paused || selectedId === null) return;
+    const value = ceilingDraftValue(paused, pauseCeilingDraft);
+    if (value === null) return; // 预校验未过（按钮也已禁用）：不发必然 409 的请求
+    setResumingRunId(paused.run_id);
+    void resumePausedRun(selectedId, {
+      runId: paused.run_id,
+      expectedVersion: paused.version,
+      // 抬的是**卡住的那一维**（`#313`）：requests / tokens / cost 的暂停点抬 turns
+      // 是无效动作，后端会按未点名的维度沿用旧 ceiling 判 409。
+      dimension: pauseFacts(paused).resumeTarget.resumeField,
+      value,
+    }).finally(() => setResumingRunId(null));
+  }, [paused, selectedId, pauseCeilingDraft, resumePausedRun]);
+
+  const handlePauseCeilingChange = useCallback(
+    (value: string) => {
+      if (!paused) return;
+      setPauseDraft({ runId: paused.run_id, value });
+    },
+    [paused],
   );
 
   // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
@@ -1096,6 +1158,18 @@ export default function App() {
                 : '上次运行在首个步骤开始前中断'}
               （原因：{conversation.run_interrupted.reason}）
             </div>
+          )}
+          {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
+              出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
+              暂停有（抬高绝对 ceiling → 同 run 恢复）。 */}
+          {canResumePaused && paused && (
+            <PausedPanel
+              paused={paused}
+              ceilingDraft={pauseCeilingDraft}
+              onCeilingDraftChange={handlePauseCeilingChange}
+              onResume={handleResumePaused}
+              resuming={resumingRunId === paused.run_id}
+            />
           )}
           {/* 中心列 tab 集（#182）：`Chat` 恒存在 + 能力声明为真的面（PRD §2.1）。
               Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏

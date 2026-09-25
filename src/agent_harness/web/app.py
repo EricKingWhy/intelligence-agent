@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,12 +19,13 @@ import jwt
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
+from agent_harness.agent.budget import BudgetConflict, BudgetRejection
 from agent_harness.assembly import RecoveryStores, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
@@ -142,6 +144,167 @@ class _AmendValueValidators(BaseModel):
         return v
 
 
+class LocalBudgetRequest(BaseModel):
+    """`budget.local` 子对象（#308）：local AgentRuntime fuse 的**请求覆盖**。
+
+    只声明**本票已实现**的作用域，且刻意 `extra="forbid"`：`budget.session`
+    （SessionBudget，`#318`）还没实现，客户端提前发它必须**响亮失败**
+    （422 "Extra inputs are not permitted"）而不是被静默忽略——"不静默截断"
+    是 ADR-0044 D1/D8 的明文要求。谁实现那个作用域，谁在这里加字段。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_agent_turns: int | None = Field(default=None, ge=1)
+
+
+class RunBudgetRequest(BaseModel):
+    """`budget.run` 子对象（`#312` 建 / `#313` 扩到四维，`11 §6.1`）：逻辑 run 的**绝对** ceiling。
+
+    `#313` 起四维可用：turns / model_requests / total_tokens / cost_usd。**可执行性**
+    不在这一层判（pydantic 只管形状）：本链强制不了某个维度时由
+    `agent/run_budget.validate_ceiling_enforceability` 在**首个 Provider 请求之前**
+    给 422——web 层不重述那条判定（`budget_claims` 只摊平）。
+
+    剩余三维（`max_tool_calls` / `deadline_at` / `tool_call_limits`）**照样声明**，理由是
+    PRD §3 把公开形状冻结成"全形 + 可空"：只设 run 的 PRD 全形请求体是**合法形状**，
+    用 `extra="forbid"` 把 `max_tool_calls: null` 打成 422 会把合法客户端拒之门外。
+    反过来，给它们赋**非空值**才是 "客户端以为设了、运行时没实现" —— 那必须 422 而不是
+    静默忽略（ADR-0044 D1/D8），所以下面用 `model_validator` 逐个挡下。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_agent_turns_total: int | None = Field(default=None, ge=1)
+    max_model_requests: int | None = Field(default=None, ge=1)
+    max_total_tokens: int | None = Field(default=None, ge=1)
+    #: 成本 ceiling：非负十进制（`11 §6.1`）。wire 上字符串最稳、数也收——
+    #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
+    #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
+    max_cost_usd: Decimal | None = Field(default=None, ge=0)
+    # 以下三维：`null` / `{}`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
+    max_tool_calls: int | None = None
+    deadline_at: str | None = None
+    tool_call_limits: dict[str, int] | None = None
+
+    @model_validator(mode="after")
+    def _reject_unimplemented_dimensions(self) -> RunBudgetRequest:
+        for name in (
+            "max_tool_calls",
+            "deadline_at",
+            "tool_call_limits",
+        ):
+            value = getattr(self, name)
+            if value is None or value == {}:
+                continue
+            raise ValueError(
+                f"budget.run.{name} 尚未实现（#313 实现了 turns / model_requests / "
+                f"total_tokens / cost_usd；tool 配额与 deadline 见后续票）；"
+                f"收到 {name} 不静默忽略，请去掉它"
+            )
+        return self
+
+
+class BudgetRequest(BaseModel):
+    """请求体里的可选 `budget` 对象（`11 §6.1` 的公开形状）。
+
+    作用域就位情况（谁实现谁加）：`local`（#308）、`run`（#312）；`session`
+    （`#318`）仍未实现 ⇒ 提前发它照样响亮 422（`extra="forbid"`）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: 预算版本（CAS，`03 §3.4`）：同 run 恢复暂停预算时**必填**（客户端必须证明自己
+    #: 看到的暂停是当前的那一份），首次创建省略。它是"这次预算变更"的属性、
+    #: 不是某个作用域的 ceiling，所以按 PRD §3 的冻结形状与 `local`/`run`/`session`
+    #: **平级**——别挪进 `run` 里。
+    expected_version: int | None = Field(default=None, ge=1)
+    local: LocalBudgetRequest | None = None
+    run: RunBudgetRequest | None = None
+
+
+def budget_claims(
+    budget: BudgetRequest | None,
+    max_steps: int | None,
+    *,
+    resume_surface: bool = False,
+) -> dict[str, Any]:
+    """把请求体的预算声明摊平成领域入口的关键字参数。
+
+    刻意**只摊平、不判定**语义：相等 / 不等 / 越权的规则住在
+    `agent_harness.agent.budget.resolve_local_fuse`，暂停恢复的 CAS 与 ceiling 判定
+    住在 `agent_harness.agent.run_budget.validate_resume`（各自单一规则来源，HTTP 与
+    WS 共用同一份判定，web 层不再解释一遍）。
+
+    `resume_surface` 是**形状级**的唯一例外：`budget.expected_version` 只在
+    "更新已持久化的暂停预算"时有意义（PRD §3）。创建会话与投递消息都会启动**新**
+    run——没有可比较的版本，所以那两个入口收到它就是矛盾请求 ⇒ 422（交给
+    `BudgetRejection` 走既有 422 映射），不静默丢掉一个客户端明确表达过的意图。
+    """
+    local = budget.local if budget is not None else None
+    run = budget.run if budget is not None else None
+    claims: dict[str, Any] = {
+        "local_max_agent_turns": local.max_agent_turns if local is not None else None,
+        "max_steps": max_steps,
+        # `#312` 一维 + `#313` 三维：**只摊平**（四个领域参数名与 `budget.run.*`
+        # 一一对应）。形态由 pydantic 挡，可执行性由领域层
+        # `validate_ceiling_enforceability` 在首个 Provider 请求之前挡
+        # （生产链 reports_cost=False ⇒ 显式 max_cost_usd 恒 422——那是规格要求的
+        # 诚实行为，不是缺陷；见 ADR-0044 D2 第 3 条 + D9 的 422 清单）。
+        "run_max_agent_turns_total": (
+            run.max_agent_turns_total if run is not None else None
+        ),
+        "run_max_model_requests": (
+            run.max_model_requests if run is not None else None
+        ),
+        "run_max_total_tokens": run.max_total_tokens if run is not None else None,
+        "run_max_cost_usd": run.max_cost_usd if run is not None else None,
+    }
+    expected = budget.expected_version if budget is not None else None
+    if expected is not None:
+        if not resume_surface:
+            raise BudgetRejection(
+                "budget.expected_version 只在恢复暂停 run 时才有意义"
+                "（本入口会启动新 run，没有可比较的预算版本）；请去掉它"
+            )
+        claims["expected_version"] = expected
+    return claims
+
+
+def ws_budget_claims(msg: dict[str, Any]) -> dict[str, Any]:
+    """WS `send_message` 帧里的 budget（#308）：与 HTTP 入口同一套字段与规则。
+
+    WS 帧是裸 dict（没有 pydantic 模型做解析），所以形状校验在这里显式做：
+    **未知键 / 非法形状当场拒绝**（`ValueError` → 错误帧），不静默丢弃——
+    `budget.session` 尚未实现，静默忽略等于让客户端以为设了预算。
+
+    `expected_version` 走与 HTTP 消息入口同一条规则（`resume_surface=False`）：
+    WS 帧只能投递消息（不是恢复面），带版本是矛盾请求 ⇒ 错误帧。
+
+    `budget.local.max_agent_turns` 与迁移期 alias `max_steps` 的**语义**判定
+    （相等接受 / 不等 422 / 越权 422）仍在领域层 `resolve_local_fuse`，本函数只摊平。
+    """
+    raw = msg.get("budget")
+    alias = msg.get("max_steps")
+    budget: BudgetRequest | None = None
+    if raw is not None:
+        if not isinstance(raw, dict):
+            raise ValueError("budget must be an object")
+        try:
+            budget = BudgetRequest.model_validate(raw)
+        except ValidationError as error:
+            first = error.errors()[0] if error.errors() else {}
+            where = ".".join(str(part) for part in first.get("loc", ()))
+            raise ValueError(f"budget 形状非法：{where} {first.get('msg', '')}".strip()) from error
+    if alias is not None and (isinstance(alias, bool) or not isinstance(alias, int)):
+        raise ValueError("max_steps must be an integer")
+    try:
+        return budget_claims(budget, alias)
+    except BudgetRejection as error:
+        # WS 层只回错误帧（同一个 except 通道），把领域异常翻成帧文本。
+        raise ValueError(str(error)) from error
+
+
 class CreateSessionRequest(_AmendValueValidators):
     """POST /api/sessions 的请求体。"""
 
@@ -159,7 +322,14 @@ class CreateSessionRequest(_AmendValueValidators):
     # 不复制），并自动注册为项目 + 归组。与 `workspace` 互斥（同时非空 → 422）。
     # 形态/存在性/是否目录的校验在 SessionService._resolve_cwd（领域层，与 CLI 共用）。
     cwd: str | None = None
-    max_steps: int = Field(default=10, ge=1, le=200)  # 非正数 / 过大 → 422（防客端刷爆循环预算）
+    # local fuse（#308）：公共字段 `budget.local.max_agent_turns`，`max_steps` 是迁移期
+    # deprecated alias（规则见 `agent/budget.py`；这里只挡形状：非正数 → 422）。
+    #
+    # 这里刻意**没有** `le=` 上限：生效上限 = min(Deployment, 档位声明)（判定见
+    # `agent/budget.py`）；一个与策略无关的数字只会造成两种假象——"200 以内随便传"与
+    # "策略允许 500 却被 200 挡住"。
+    budget: BudgetRequest | None = None
+    max_steps: int | None = Field(default=None, ge=1)
     # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
     # PermissionPolicy；未知值 → 422。permission_mode 决定 ToolExecutor 的 policy
     # 上限，审批本身仍走 ApprovalCallback（默认 auto-approve）。
@@ -226,9 +396,29 @@ class ApproveRequest(BaseModel):
 
 
 class ResumeRequest(_AmendValueValidators):
-    """POST /api/sessions/{id}/resume 的请求体。"""
+    """POST /api/sessions/{id}/resume 的请求体。
 
-    task: str = Field(min_length=1, max_length=100_000)
+    **两种恢复形态（#312）**，按 `task` 是否存在区分：
+
+      * 给了 `task`——既有语义，逐字不变：把这段文本当**新任务**续聊（新
+        user/message + 新 run_id）。此时再带 `run_id` / `resume_basis` /
+        `budget.expected_version` 是矛盾组合 ⇒ 422（判定在领域层，不静默选一边）。
+      * 不给 `task`——**同 run 续跑**（暂停恢复）：必须带被暂停的 `run_id`、
+        `resume_basis`，以及 `budget.run.max_agent_turns_total` + `budget.expected_version`
+        （绝对 ceiling + CAS 版本）。缺声明 ⇒ 422；状态对不上（版本过期 / 不是暂停
+        的那个 run / ceiling 没真提高 / 有在途 run）⇒ 409，且零副作用。
+    """
+
+    task: str | None = Field(default=None, min_length=1, max_length=100_000)
+    # 同 run 续跑的三个声明（同形恢复面，PRD §9）。合法值集合 / CAS 比较都在领域层
+    # `agent_harness.agent.run_budget.validate_resume`（单一规则来源）——这里只挡形状。
+    run_id: str | None = Field(default=None, min_length=1)
+    resume_basis: str | None = Field(default=None, min_length=1)
+    # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。`max_steps` 必须在这里
+    # 一起出现：alias 规则是**全局**的（`02 §5.1` D8），漏掉它会让 `{max_steps:8,
+    # budget:{…9}}` 在本端点静默通过、在创建端点 422。
+    budget: BudgetRequest | None = None
+    max_steps: int | None = Field(default=None, ge=1)
     # staged amend 字段（可选，None = 默认行为）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
@@ -257,7 +447,10 @@ class SendMessageRequest(_AmendValueValidators):
 
     content: str = Field(min_length=1, max_length=100_000)
     mode: str = Field(default="queue", pattern="^(queue|steer)$")
-    max_steps: int = Field(default=10, ge=1, le=200)
+    # local fuse（#308）：与创建端点同一套字段与规则。生效值只有 idle → launched
+    # 消费；queued / steer 只判定、丢弃（`11 §6.1`——判定照跑是为了让状态码与运行态无关）。
+    budget: BudgetRequest | None = None
+    max_steps: int | None = Field(default=None, ge=1)
     supersedes_seq: int | None = Field(default=None, ge=0)
     queue_id: str | None = None
     # staged amend 字段（可选，None = 默认行为）
@@ -476,6 +669,7 @@ class AppState:
                 # (session_id, run_id) 从**运行时空正在写的那一份**日志切本轮事件。
                 wiring = await wire_capabilities(
                     registry, config, settings=self.settings, sessions=self.store,
+                    workspace_index=self.workspace_index,
                 )
                 # 先落字段再查 _closed：锁在手上，shutdown 必然排在本次释放之后，
                 # 它会从字段上取走这份 wiring 并关闭——绝不静默丢弃。
@@ -638,6 +832,38 @@ def _sse_response(
     return EventSourceResponse(
         generator, headers=headers, ping=SSE_PING_INTERVAL_SECONDS,
     )
+
+
+def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
+    """生效 local fuse 的**只读投影**：响应头形式（`#308` Must Do）。
+
+    为什么是响应头：SSE 响应没有 JSON 体可承载元数据（`X-Permission-Mode` 就是为解决
+    同一个问题立的先例），而 JSON 分支与 SSE 分支用同一条通道才能"两处一致"。
+
+    值一律取自 `agent.budget.LocalFuse.as_projection()`（**单一形状**：客户端可见的字段与
+    它们的取值只定义一次，这里只做"字段名 → 响应头名"的映射，不重新组装事实）。用了迁移期
+    `max_steps` 时另加 `Deprecation: true` 与 `Warning: 299 …`（RFC 8594 / RFC 7234 §5.5
+    的标准形状）——这就是 R5 要的 deprecation signal：旧客户端不改代码也能看到自己用的是
+    废弃字段，且文案里的字段名同样来自投影（改别名只改一处）。
+
+    `fuse is None` ⇒ 空 dict（没有生效 fuse 的响应不投影：queued / steered 分支）。反向
+    的抑制发生在**调用点**：`launch=False` 的只建会话**有**生效 fuse，但那个值是请求级、
+    没有任何 run 消费它（`11 §6.1` 只把 budget 挂在启动 run 上），所以调用点刻意不投影。
+    """
+    if fuse is None:
+        return {}
+    projection = fuse.as_projection()
+    headers = {
+        "X-Local-Max-Agent-Turns": str(projection["max_agent_turns"]),
+        "X-Local-Fuse-Source": projection["source"],
+    }
+    deprecation = projection.get("deprecation")
+    if deprecation:
+        headers["Deprecation"] = "true"
+        headers["Warning"] = (
+            f'299 - "{deprecation["field"]} is deprecated; use {deprecation["replacement"]}"'
+        )
+    return headers
 
 
 def _run_stream_response(
@@ -1031,7 +1257,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 task=req.task,
                 workspace_name=req.workspace,
                 cwd=req.cwd,
-                max_steps=req.max_steps,
+                **budget_claims(req.budget, req.max_steps),
                 permission_mode=permission_mode,
                 permission_mode_explicit=permission_mode_explicit,
                 auto_approve_explicit=auto_approve_explicit,
@@ -1039,12 +1265,19 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 amend=AmendOptions.from_request(req),
                 launch=launch,
             )
-        except (WorkspaceNameInvalid, InvalidDecision) as e:
+        except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
-        headers = {"X-Permission-Mode": permission_mode.value}
+        # 只读投影（#308 Must Do）：生效 local fuse + 来源，SSE 与 JSON 两条路径都带
+        # （SSE 没有 JSON 体可承载元数据，`X-Permission-Mode` 是同一条先例）。
+        #
+        # 只建会话（`launch=False`）**不投影** fuse：那个值按"本次请求若启动 run 会生效几轮"
+        # 解析，而它既不持久化、也没被任何 run 消费（后续 `/messages` 会按当时的 Deployment
+        # 重新解析）——回一个请求级数字当会话级 ceiling 是假事实。
+        fuse_headers = _local_fuse_headers(result.local_fuse) if launch else {}
+        headers = {"X-Permission-Mode": permission_mode.value, **fuse_headers}
 
         # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
         # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题
@@ -1137,11 +1370,14 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.post("/api/sessions/{session_id}/resume")
     async def resume_session(session_id: str, req: ResumeRequest):
-        """最小 Resume（Phase 5）：重建 Session 后追加一轮新 user input。
+        """恢复会话：新任务续聊（带 task）或同 run 续跑（不带 task，`#312`）。
 
-        这是「续跑」而非精确恢复中断 run：Session.resume() 重建 append-only
+        带 task 时是「续跑」而非精确恢复中断 run：Session.resume() 重建 append-only
         历史与 dangling 修复，RunManager.launch 驱动一轮新的 Agent Loop。
-        在途 session 拒绝 409，避免同一 session 并发两轮。
+        不带 task 时接上被暂停的逻辑 run：锁内 CAS 校验（run_id + expected_version +
+        resume_basis + 绝对 ceiling）通过后落 `run/resumed`，再以**同一 run_id** 启动
+        一次新执行；被拒请求（422/409）不建目录、不落事件、不启动任何模型/工具工作。
+        在途 session 一律 409，避免同一 session 并发两轮。
         """
         service = session_service(app.state.agent)
         amend = AmendOptions.from_request(req)
@@ -1150,6 +1386,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             result = await service.resume_and_launch(
                 session_id=session_id,
                 task=req.task,
+                resume_run_id=req.run_id,
+                resume_basis=req.resume_basis,
+                **budget_claims(req.budget, req.max_steps, resume_surface=True),
                 amend=amend,
             )
         except (
@@ -1159,17 +1398,43 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             RecoveryConflict,
             SeqConflict,
             WorkspaceBindingConflict,
+            BudgetRejection,
+            BudgetConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留需人工裁决的 UNKNOWN
             # tool_call，不伪造结果（不变量 #14）。
             # WorkspaceBindingConflict → 409（#266）：cwd 锚与沙箱映射互相矛盾，
             # 拒绝静默选边（判定见 `service._reconcile_workspace_binding`）。
+            # BudgetConflict → 409（#312）：CAS 版本过期 / 不是暂停的那个 run /
+            # ceiling 没真提高 / 有在途 run——请求形状合法但状态对不上，且
+            # **零副作用**（判定在任何落盘之前，见 `validate_resume`）。
             raise http_error(e) from e
 
         session_id = result.session.session_id
         return _run_stream_response(
             app.state.agent, result.run, result.subscriber, session_id,
+            headers=_local_fuse_headers(result.local_fuse),
         )
+
+    @app.get("/api/sessions/{session_id}/budget")
+    async def get_session_budget(session_id: str) -> dict[str, Any]:
+        """run 预算投影（`#313`，`11 §6.1`）：identity / version / 绝对 ceilings /
+        consumed / remaining / **可执行性** / 暂停原因 + continuation。
+
+        只读、幂等、**不启 run、不写事件**（`11 §6.1` 把投影定位成"客户端读当前
+        账本"，不是另一条会改状态的通道）。真相全部来自 append-only 事件
+        （`SessionEvent` 派生，`derive_run_budget`）——刷新 / 重启 / replay 之后
+        同一个会话给出同一份投影（不变量 #22：Web 不维护第二套 Session 真相）。
+
+        四维里某维不可得时是 `null`（unavailable），**永不** 0；`enforcement` 说明
+        本部署的 Provider 链能不能真的强制某一维（生产链 `max_cost_usd=unavailable`
+        ⇒ 显式配它会被 422 拒绝，见 `model/accounting.py`）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            return await service.budget_projection(session_id)
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
 
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:
@@ -1562,7 +1827,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = session_service(app.state.agent)
         amend = AmendOptions.from_request(req)
-        # 契约（handoff §3.1 / P3）：只有 idle → launched 才消费 amend；在途 run
+        # 契约（handoff §3.1 / P3）：只有 idle → launched 才**消费** amend；在途 run
         # 的 queued 消息与 steer 一律忽略这些字段。因此引用类字段（model /
         # context_providers，取值集合来自运行时 catalog / wiring，可能已失效）
         # 只在这条路径上校验——否则一个失效引用会 422 掉用户刚敲的消息。
@@ -1574,14 +1839,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         ):
             await _validate_amend_for_existing_session(app.state.agent, amend)
         else:
-            # 未被消费：按契约丢弃（与改动前 send_message 的忽略语义一致）。
-            amend = AmendOptions()
+            # 未被消费。但**只丢弃消费性字段**，`agent_profile` 要留给预算判定：它同时是
+            # 生效 local fuse 的一个输入（档位 ceiling），丢掉它会让同一份 body 的状态码
+            # 取决于"此刻有没有 run"——#308 的判定与运行态无关要求这条轴也可判。
+            # 不消费 = 不启动 run ⇒ 没有任何别处会读它（`SessionService.send_message`
+            # 只在判定与 idle 分支用 amend）。
+            amend = AmendOptions(agent_profile=req.agent_profile)
         try:
             result = await service.send_message(
                 session_id=session_id,
                 content=req.content,
                 mode=req.mode,
-                max_steps=req.max_steps,
+                **budget_claims(req.budget, req.max_steps),
                 amend=amend,
                 supersedes_seq=req.supersedes_seq,
                 queue_id=req.queue_id,
@@ -1596,6 +1865,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,
+            BudgetRejection,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
@@ -1606,12 +1876,19 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
         if result.status == "launched":
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
-            return _launched_response(app, result, session_id)
+            return _launched_response(
+                app, result, session_id,
+                headers=_local_fuse_headers(result.local_fuse),
+            )
         # queued / steered：JSON 确认（不打开流——前端订阅既有 SSE/WS）。
+        # 这两条分支**没有**生效 local fuse 可投影（本请求没产生 run，`11 §6.1` 只把
+        # budget 挂在 idle 消息启动上）——所以刻意不给响应头：一个 None 投影成 0 或
+        # 默认值都是假事实（不变量 #21 同族）。
         return result.to_response()
 
     def _launched_response(
-        app: FastAPI, result, session_id: str
+        app: FastAPI, result, session_id: str,
+        *, headers: dict[str, str] | None = None,
     ) -> EventSourceResponse:
         """launched 分支的统一 SSE 响应（/messages 与 /queue/flush 共用）。
 
@@ -1620,6 +1897,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         return _run_stream_response(
             app.state.agent, result.run, result.subscriber, session_id,
+            headers=headers,
         )
 
     @app.get("/api/sessions/{session_id}/queue")
@@ -1680,7 +1958,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
         if launched is None:
             return {"status": "idle"}
-        return _launched_response(app, launched, session_id)
+        # 与 `/messages` 的 launched 分支**同一投影**（同一段响应组装）：重投的 run 也消费
+        # 了生效 fuse，客户端在两条入口上读到的 ceiling 必须是同一个事实。
+        return _launched_response(
+            app, launched, session_id,
+            headers=_local_fuse_headers(launched.local_fuse),
+        )
 
     @app.post("/api/sessions/{session_id}/queue/{queue_id}/cancel")
     async def cancel_queue_item(session_id: str, queue_id: str) -> dict[str, str]:

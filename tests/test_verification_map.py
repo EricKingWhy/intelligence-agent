@@ -143,9 +143,9 @@ def test_map_has_uniform_line_endings_and_tabs():
     assert raw.endswith(b"\n"), "map 应以换行结尾"
     lone_cr = raw.count(b"\r") - raw.count(b"\r\n")
     lone_lf = raw.count(b"\n") - raw.count(b"\r\n")
-    assert lone_cr == 0 and lone_lf == 0, (
+    assert lone_cr == 0 and lone_lf in (0, raw.count(b"\n")), (
         f"行尾不统一：游离 CR={lone_cr}、游离 LF={lone_lf}（半转换会污染最后一列；"
-        "本仓 autocrlf=true ⇒ 只查统一性，不查具体口径）")
+        "只接受全 CRLF 或全 LF，不要求某一种具体口径）")
 
 
 def test_layers_are_unique_and_columns_match_the_header():

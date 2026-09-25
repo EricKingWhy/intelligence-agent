@@ -70,6 +70,8 @@ class CapabilityWiring:
     #: 因为调用方要**按名字**取它注入 runtime，而不是去生命周期列表里按类型翻。
     #: 未装配（模型角色没配 / 调用方没提供会话日志）时恒 `None` ⇒ 终结臂走"没有宿主"的旧路径。
     memory_formation: Any | None = None
+    #: Shared V2 authority/index service for recall, commands, and governance routes.
+    memory_v2: Any | None = None
     # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 aclose 关闭。
     lifecycle: list[Any] = field(default_factory=list)
     # Multi-Agent（Phase 13，ADR-0015）：delegate 工具已进 tools，但其依赖
@@ -91,12 +93,21 @@ class CapabilityWiring:
     async def aclose(self) -> None:
         """关闭本次装配持有的全部生命周期资源；逐项故障隔离——进程退出路径，
         一项失败不阻断其余清理。"""
+        # Formation jobs share the provider's vector store. Stop and drain them before
+        # MemoryComponents.close() tears down that store.
+        if self.memory_formation is not None:
+            try:
+                await self.memory_formation.aclose()
+            except Exception:
+                logger.warning("memory formation 关闭失败（继续其余清理）", exc_info=True)
         if self.memory is not None:
             try:
                 await self.memory.close()
             except Exception:
                 logger.warning("memory 组件关闭失败（继续其余清理）", exc_info=True)
         for obj in self.lifecycle:
+            if obj is self.memory_formation:
+                continue
             aclose = getattr(obj, "aclose", None)
             if aclose is None:
                 continue
@@ -162,57 +173,84 @@ async def _wire_memory(
     ))
 
 
-async def _wire_memory_formation(
+async def _wire_memory_v2(
     settings: Settings, wiring: CapabilityWiring, *, sessions: JsonlSessionStore | None,
+    workspace_index: Any | None = None,
 ) -> None:
-    """在**已活的** V1 记忆之上接出 V2 形成管线（#298 T7b）。
+    """Wire V2 recall, governance commands, and optional formation (#299 / #300).
 
-    闸门是**装配结果**而不是配置项：`wiring.memory is not None` 才是"这个进程真的有记忆"
-    ——它一次覆盖三种形态（CAPABILITIES 里没有 memory / `enabled: false` 被关掉 / 组件
-    没配齐而降级），正是 PRD §5.6.4「关闭记忆 = 同时关掉自动抽取与自动召回」的落点。
-    所以这里**不该**再有第二个开关。
-
-    为什么不塞进 `_wire_memory`：那条路的入参形状是"一个 capability 的 cfg + 它的 provider
-    名"，而 V2 管线既不吃 cfg 也不认 provider（它只认 `memory.primary` 这个模型角色）；
-    硬塞进去就得给 `_BUILTIN_WIRING` 里其余六个 factory 各加一个用不上的参数。
-
-    失败按 OPTIONAL 降级（与 `wire_capabilities` 循环里的同一条纪律）：V2 管线起不来不该
-    让整个应用起不来，更不该影响 V1 记忆——那才是此刻在服务用户的路径。
+    The initialized V1 memory provider supplies the vector client. Recall and governance do
+    not require a model role; only the background formation runner needs ``memory.primary``.
     """
-    if sessions is None or wiring.memory is None:
+    if wiring.memory is None:
         return
-    from agent_harness.memory.v2.assembly import build_memory_formation
+
+    # V1 automatic recall inserts text into SystemMessage. Remove it before attempting V2
+    # setup so a degraded V2 service cannot put recalled text into the privileged channel.
+    wiring.context_providers[:] = [
+        provider for provider in wiring.context_providers
+        if getattr(provider, "name", None) != "memory"
+    ]
     from agent_harness.model.config import ConfigError
 
     try:
-        runner = await build_memory_formation(settings, sessions=sessions)
+        # Keep optional imports inside the degradation boundary.
+        from agent_harness.memory.v2.assembly import (
+            build_memory_formation,
+            build_memory_v2_service,
+        )
+        from agent_harness.memory.v2.recall import MemoryV2ContextProvider
+        from agent_harness.memory.v2.roles import resolve_memory_roles
+        from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
+
+        vector_store = getattr(wiring.memory, "vectors", None)
+        service = await build_memory_v2_service(settings, vector_store=vector_store)
+        if sessions is None:
+            runner = None
+        else:
+            roles = resolve_memory_roles(settings)
+            runner = await build_memory_formation(
+                settings, sessions=sessions, memory_v2=service,
+                vector_store=vector_store, workspace_index=workspace_index, roles=roles,
+            )
     except ConfigError as error:
-        # 配置类故障**响亮上抛**，不降级（T8 两轴审查 P2 修）：`roles.resolve_memory_roles`
-        # 自己的契约就是"配错了要响亮"（缺 `MODEL_API_KEY` / provider 名非法都抛
-        # `ConfigError`），而 `ConfigError` 不是 `CapabilityError` 的子类 —— 下面那条宽
-        # `except Exception` 原本会把它一起吞掉。后果是把"你配错了"降级成"你没配"：
-        # 运维看到 `degradations["memory_v2"] = init_failed`，而真正的原因（`AGENT_MODELS`
-        # 坏）只留在 traceback 里。与主循环对 `CapabilityError` 的分流（见本文件 `wire_capabilities`
-        # 的 `except CapabilityError: raise`）及 `_wire_mcp` 的 `ConfigError → CapabilityError`
-        # 是同一条纪律：**降级只留给外部/环境故障**。
         raise CapabilityError(
             f"capability 'memory' 的 V2 形成管线配置错误：{error}", code="init_failed"
         ) from error
     except Exception:
         logger.warning(
-            "V2 记忆形成装配失败，按 %s 降级跳过（V1 记忆不受影响）",
+            "V2 记忆装配失败，按 %s 降级跳过（V1 capability 与显式工具仍可用）",
             Degradation.OPTIONAL_RUNTIME.value, exc_info=True,
         )
         wiring.degradations["memory_v2"] = DegradeReason.INIT_FAILED.value
         return
-    if runner is None:
-        # 模型角色没配：装配层已经记了一行 warning 说清原因，这里不再重复登记——
-        # "没配"是缺省状态（`degradations` 的字段约定：只登记非缺省的原因）。
-        return
-    wiring.memory_formation = runner
-    # 生命周期挂通道：`aclose` 先停泵（此后拒绝新 run）再有界地排空在飞 job。
-    wiring.lifecycle.append(runner)
 
+    wiring.memory_v2 = service
+    if sessions is not None:
+        v2_context = MemoryV2ContextProvider(
+            service, workspace_index=workspace_index,
+            timeout_seconds=settings.memory_search_timeout_seconds,
+        )
+        wiring.context_providers.append(_MemorySettingsContextProvider(v2_context, service))
+    for contributor in wiring.tool_contributors:
+        if isinstance(contributor, _MemoryCapabilityProvider) and sessions is not None:
+            contributor.use_v2_retrieval()
+            contributor.use_v2_commands(
+                service, sessions, workspace_index=workspace_index,
+            )
+    if sessions is not None:
+        wiring.tool_contributors.append(_ToolsProvider([
+            RetrieveMemoryV2Tool(
+                service, workspace_index=workspace_index,
+                timeout_seconds=settings.memory_search_timeout_seconds,
+            ),
+        ]))
+    service.start_tombstone_purger()
+    wiring.lifecycle.append(service)
+    if runner is not None:
+        wiring.memory_formation = runner
+        # Stop/drain the runner before the shared vector provider is closed.
+        wiring.lifecycle.append(runner)
 
 def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
     """规整 options 里的目录/路径选项为 list[Path]，容忍 str/Path 单值写法。
@@ -414,29 +452,100 @@ class _WebSearchCapabilityProvider:
 
 
 class _MemoryCapabilityProvider:
-    """ContributesTools 适配（memory，#159 AC4）。
-
-    为什么需要一个**额外的** wrapper 而不是把 `contributes_tools` 塞进
-    `LangMemMemoryCapability`：工具的落点必须是"契约 + 唯一执行路径（不变量 #7）"，
-    而具体 provider 是可替换的（seam A / ARCH-6）——工具塞进 LangMem 实现就把"遗忘入口"
-    绑死在一个 provider 上了。websearch 的做法是把 wrapper **当成**注册的 provider；
-    memory 不能照抄：`registry.optional("memory")` 必须**是** capability 本身
-    （`test_memory_provider_seam` 钉住这条），所以这个 wrapper 走 `CapabilityWiring.tool_contributors`
-    这条**同一个收集循环**的第二个来源（见 `wire_capabilities` 末尾），而不是偷塞进 `wiring.tools`。
-    """
+    """Contributes memory tools through the shared ToolRegistry collection path."""
 
     def __init__(self, capability: MemoryCapability, timeout_seconds: float = 10.0) -> None:
         self._capability = capability
         self._timeout_seconds = timeout_seconds
+        self._include_v1_retrieval = True
+        self._v2_commands: list[Any] | None = None
+
+    def use_v2_retrieval(self) -> None:
+        self._include_v1_retrieval = False
+
+    def use_v2_commands(
+        self, service: Any, sessions: JsonlSessionStore, *, workspace_index: Any | None = None,
+    ) -> None:
+        from agent_harness.memory.v2.tools import (
+            ForgetMemoryV2Tool,
+            RememberMemoryV2Tool,
+        )
+
+        self._v2_commands = [
+            RememberMemoryV2Tool(service, sessions, workspace_index=workspace_index),
+            ForgetMemoryV2Tool(service, sessions, workspace_index=workspace_index),
+        ]
 
     def contributes_tools(self) -> list[Any]:
-        # #202 / ADR-0031：三个记忆工具（读 retrieve_memory / 写 remember_this /
-        # 删 forget_memory）都随 capability 存在而存在（D5）——不写 runtime 特判。
-        return [
-            RetrieveMemoryTool(self._capability, timeout_seconds=self._timeout_seconds),
-            RememberThisTool(self._capability),
-            ForgetMemoryTool(self._capability),
-        ]
+        tools = (
+            list(self._v2_commands)
+            if self._v2_commands is not None
+            else [RememberThisTool(self._capability), ForgetMemoryTool(self._capability)]
+        )
+        if self._include_v1_retrieval:
+            tools.insert(
+                0, RetrieveMemoryTool(self._capability, timeout_seconds=self._timeout_seconds),
+            )
+        return tools
+
+
+class _ToolsProvider:
+    """Contributes already constructed tools through the common registry collection path."""
+
+    def __init__(self, tools: list[Any]) -> None:
+        self._tools = tools
+
+    def contributes_tools(self) -> list[Any]:
+        return list(self._tools)
+
+class _MemorySettingsContextProvider:
+    """Apply the durable per-user recall switch around the existing provider."""
+
+    name = "memory"
+
+    def __init__(self, provider: Any, service: Any) -> None:
+        self._provider = provider
+        self._service = service
+
+    async def select(self, session: Any, token_budget: int) -> list[Any]:
+        import logging
+
+        from agent_harness.identity import get_identity_context
+        from agent_harness.memory.v2.types import TrustedMemoryIdentity
+        from agent_harness.session import run_context_var
+        from agent_harness.session.event import MEMORY_DEGRADED
+
+        identity = get_identity_context()
+        if "user" not in identity.scopes:
+            return []
+        try:
+            settings = await self._service.get_settings(
+                TrustedMemoryIdentity(identity.tenant_id, identity.user_id),
+            )
+        except Exception as error:  # noqa: BLE001 — optional memory failure must not block a run.
+            logging.getLogger(__name__).warning(
+                "V2 memory settings unavailable; skipping automatic recall (%s)",
+                type(error).__name__,
+            )
+            try:
+                reason_code = (
+                    "retrieval_timeout" if isinstance(error, TimeoutError)
+                    else "authorization_denied" if isinstance(error, PermissionError)
+                    else "retrieval_unavailable"
+                )
+                session.append(MEMORY_DEGRADED, {
+                    "operation": "recall", "stage": "retrieval",
+                    "reason_code": reason_code, "job_id": None,
+                    "attempts": 1, "fallback_used": False,
+                }, run_id=run_context_var.get())
+            except Exception:  # noqa: BLE001 — a logging failure must not fail this optional provider.
+                logging.getLogger(__name__).warning(
+                    "Could not persist Memory V2 settings degradation",
+                )
+            return []
+        if not settings.recall_enabled:
+            return []
+        return await self._provider.select(session, token_budget)
 
 
 class _MultiagentCapabilityProvider:
@@ -583,6 +692,7 @@ async def wire_capabilities(
     *,
     settings: Settings,
     sessions: JsonlSessionStore | None = None,
+    workspace_index: Any | None = None,
 ) -> CapabilityWiring:
     """按 config 驱动 builtin 接线；未知 capability / 未知 provider 显式报错（不静默忽略）。
 
@@ -592,10 +702,10 @@ async def wire_capabilities(
     失败的能力不会出现在 Registry 里，Consumer 走 optional() 的 None 降级路径
     （08 §7 验收：Optional Provider 故障可以降级）；REQUIRED_CORE 则向上抛。
 
-    `sessions`（#298 T7b）：运行时空在写的那个会话日志存储。装配 V2 记忆形成管线要它
-    （执行 job 时按 `(session_id, run_id)` 从日志切这一轮的事件）。**不提供 = 不装配 V2
-    形成**（`memory_formation` 恒 None）：测试与不跑 V2 的调用方因此零改动，而生产的两处
-    调用点（`web/app.py` 的 `get_wiring` / `assemble_wiring`）各自把自己手上的 store 传进来。
+    `sessions`（#298 T7b）：运行时空在写的那个会话日志存储。治理 service 独立装配；V2
+    自动召回、显式命令与形成管线需要会话身份或事件来源，缺少 store 时保持关闭。形成 job
+    按 `(session_id, run_id)` 从日志读取本轮事件。生产的两处调用点（`web/app.py` 的
+    `get_wiring` / `assemble_wiring`）各自把手上的 store 传进来。
     """
     wiring = CapabilityWiring()
     for name, cfg in config.items():
@@ -632,6 +742,11 @@ async def wire_capabilities(
             wiring.degradations[name] = DegradeReason.INIT_FAILED.value
             continue
 
+    # Wire V2 recall and governance before the common contributor collection loop.
+    await _wire_memory_v2(
+        settings, wiring, sessions=sessions, workspace_index=workspace_index,
+    )
+
     # 收集工具贡献：已启用的 provider（demo capability 走这条）**加上**第二来源
     # `tool_contributors`（#159）。一个循环、一条 `isinstance` 规则、零旁路——没有任何
     # 地方直接往 `wiring.tools` 里 append。
@@ -645,7 +760,4 @@ async def wire_capabilities(
         if isinstance(contributor, ContributesTools):
             wiring.tools.extend(contributor.contributes_tools())
 
-    # V2 记忆形成（#298 T7b）：在工具收集**之后**接，因为它的闸门是"V1 记忆真的活了"
-    # （`wiring.memory` 只在 `_wire_memory` 成功时被设置），与工具贡献无关。
-    await _wire_memory_formation(settings, wiring, sessions=sessions)
     return wiring

@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "scenario_id": "smoke-production-tools",
+  "scenario_version": 1,
+  "verdict": "PASS",
+  "reason": "",
+  "missing_preconditions": [],
+  "created_at": "2026-09-24T20:06:56.749+00:00",
+  "sha": "45505e6a75ae6821e7798e086b4b44551fd91059",
+  "tree": "02002825d310e3d492c61ca30944a76173a752c8",
+  "worktree": {
+    "head_sha": "45505e6a75ae6821e7798e086b4b44551fd91059",
+    "tree": "02002825d310e3d492c61ca30944a76173a752c8",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove(RuntimeError)",
+    "workspace_ids": [
+      "1b4c67551216cf50",
+      "909f8fe7ffe7b5b4",
+      "789d224438dbeab9"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-24T20:06:15.624+00:00",
+      "ended_at": "2026-09-24T20:06:28.646+00:00",
+      "status": "PASS",
+      "duration_ms": 13022,
+      "session_id": "smoke-production-tools-a1-55aad4a9",
+      "run_id": "a81bc876-8283-4f67-9ef8-d95731e7f8a3",
+      "run_status": "completed",
+      "steps": 3,
+      "event_count": 14,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260924T200615-45505e6a75ae-smoke-production-tools/attempt-1.jsonl",
+      "events_sha256": "5ef676d843553467dea649f6221d31fdeb2624de92e5447f82771fd92d699eb4",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "已创建内容为 live-gate-ok 的 notes.txt，确认该目录是 git 仓库（最新提交 ee064c4 seed），且状态显示 notes.txt 为未跟踪文件。",
+      "workspace_id": "1b4c67551216cf50",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-24T20:06:28.646+00:00",
+      "ended_at": "2026-09-24T20:06:44.599+00:00",
+      "status": "PASS",
+      "duration_ms": 15952,
+      "session_id": "smoke-production-tools-a2-65875a0f",
+      "run_id": "46ef63ea-a4fd-4415-9f2f-106d98d9d1ab",
+      "run_status": "completed",
+      "steps": 3,
+      "event_count": 14,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260924T200615-45505e6a75ae-smoke-production-tools/attempt-2.jsonl",
+      "events_sha256": "32bca8729e40e34e63a112ba392a27e8b0d4c5435d3f34aab091bd152c56ebd3",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我创建了 notes.txt（内容为 live-gate-ok），确认该目录是 git 仓库（最新提交为 96fc50b seed），并查看到仓库状态显示 notes.txt 为未跟踪文件。",
+      "workspace_id": "909f8fe7ffe7b5b4",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-24T20:06:44.599+00:00",
+      "ended_at": "2026-09-24T20:06:56.617+00:00",
+      "status": "PASS",
+      "duration_ms": 12017,
+      "session_id": "smoke-production-tools-a3-52048b68",
+      "run_id": "a8b898dd-a35e-4d2f-94bf-0dd2b7e4ad4b",
+      "run_status": "completed",
+      "steps": 3,
+      "event_count": 14,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260924T200615-45505e6a75ae-smoke-production-tools/attempt-3.jsonl",
+      "events_sha256": "478eb4a5d858fa4073bd5bf1959ffba59ec7e0729d4905e19274d4959fede28d",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我创建了 notes.txt（内容为 live-gate-ok），用 `git log --oneline -1` 确认这是 git 仓库（最新提交为 c3a0ec3 seed），并通过 git_status 看到仓库中新增未跟踪文件 notes.txt。",
+      "workspace_id": "789d224438dbeab9",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260924T200615-45505e6a75ae-smoke-production-tools/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260924T200615-45505e6a75ae-smoke-production-tools/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260924T200615-45505e6a75ae-smoke-production-tools/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "预算 / 暂停恢复 / 卡死 / deadline / 委派树五类场景（后续票的场景，本票只给注册入口）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

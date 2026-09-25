@@ -236,7 +236,9 @@ class TestFakeProviderFullDispatch:
         assert registry.get("memory") is components.capability
         assert wiring.memory is components
         assert wiring.memory_writer is components.writeback
-        assert [p.name for p in wiring.context_providers] == ["memory"]
+        # The V1 capability remains available, but automatic recall is disabled without
+        # the session ledger needed to resolve trusted V2 identity.
+        assert wiring.context_providers == []
 
     @pytest.mark.asyncio
     async def test_dispatched_capability_is_actually_usable(self, tmp_path, monkeypatch):

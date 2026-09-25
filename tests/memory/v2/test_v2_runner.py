@@ -364,6 +364,37 @@ async def test_the_job_identity_comes_from_the_request_context(env: Env) -> None
     assert _memory_rows(env)[0]["user_id"] == "user-z"
 
 
+@pytest.mark.asyncio
+async def test_the_job_project_comes_from_the_trusted_session_binding(env: Env) -> None:
+    _seed_run(env)
+
+    class WorkspaceIndex:
+        def workspace_of_session(self, session_id: str):
+            assert session_id == SESSION
+            return type("Workspace", (), {"id": "project-x"})()
+
+    runner = _runner(env, _unscripted(), workspace_index=WorkspaceIndex())
+    await _notify(runner, env)
+    await runner.drain()
+
+    assert _job_rows(env)[0]["project_id"] == "project-x"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_project_binding_narrows_the_job_to_user_global(env: Env) -> None:
+    _seed_run(env)
+
+    class BrokenWorkspaceIndex:
+        def workspace_of_session(self, _session_id: str):
+            raise RuntimeError("do not expose this detail")
+
+    runner = _runner(env, _unscripted(), workspace_index=BrokenWorkspaceIndex())
+    await _notify(runner, env)
+    await runner.drain()
+
+    assert _job_rows(env)[0]["project_id"] is None
+
+
 @pytest.mark.parametrize(
     ("case", "overrides", "runner_kwargs"),
     [
@@ -402,6 +433,31 @@ async def test_opt_out_and_missing_model_reply_enqueue_nothing(env: Env) -> None
         assert await _notify(runner, env, session_id=session_id) is None
     await runner.drain()
     assert _job_rows(env) == []
+
+
+@pytest.mark.asyncio
+async def test_durable_extraction_setting_gates_each_subsequent_run(env: Env) -> None:
+    identity = IdentityContext(tenant_id="local", user_id="local", scopes=["user", "session"])
+    token = set_identity_context(identity)
+    trusted = TrustedMemoryIdentity("local", "local")
+    try:
+        await env.service.update_settings(trusted, extraction_enabled=False)
+        runner = _runner(env, _working(calls=1), memory_v2=env.service)
+        try:
+            _seed_run(env, run_id="disabled-by-setting")
+            assert await _notify(runner, env, run_id="disabled-by-setting") is None
+            assert _job_rows(env) == []
+
+            await env.service.update_settings(trusted, extraction_enabled=True)
+            _seed_run(env, run_id="enabled-by-setting")
+            assert await _notify(runner, env, run_id="enabled-by-setting") is not None
+            await runner.drain()
+            assert len(_job_rows(env)) == 1
+            assert len(_memory_rows(env)) == 1
+        finally:
+            await runner.aclose()
+    finally:
+        identity_context_var.reset(token)
 
 
 # --------------------------------------------------------------------------------------

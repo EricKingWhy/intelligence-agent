@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,8 +16,11 @@ from pathlib import Path
 import jwt
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
-from agent_harness.capability.base import DegradeReason
+from agent_harness.capability.base import CapabilityRegistry, DegradeReason
+from agent_harness.capability.config import parse_capabilities_config
+from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.identity import (
     IdentityContext,
@@ -24,10 +29,30 @@ from agent_harness.identity import (
 )
 from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.types import MemoryScope, memory_session_var
+from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.tools import _RememberV2Args
+from agent_harness.memory.v2.types import (
+    MemoryKind,
+    SemanticCategory,
+    SemanticPayload,
+    TrustedMemoryIdentity,
+)
+from agent_harness.memory.v2.types import (
+    MemoryScope as MemoryScopeV2,
+)
 from agent_harness.memory.vector_store import VectorStoreError
-from agent_harness.session.event import EVENT_TYPES as SESSION_EVENT_TYPES
+from agent_harness.session import Session
+from agent_harness.session.event import (
+    EVENT_TYPES as SESSION_EVENT_TYPES,
+)
+from agent_harness.session.event import (
+    MEMORY_RECALLED,
+    USER_MESSAGE,
+    SessionEvent,
+)
 from agent_harness.web.app import create_app
 from agent_harness.web.memory import _DEGRADED_MESSAGE
+from tests.memory.v2._records import make_draft
 
 _SECRET = "memory-api-test-signing-secret-at-least-32"
 _ALICE = IdentityContext("acme", "alice", ["user"])
@@ -91,6 +116,63 @@ def memory_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         yield client, components
 
 
+@pytest.mark.asyncio
+async def test_v2_governance_api_works_without_session_store_and_closes_in_its_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    components = _FakeMemoryComponents()
+    monkeypatch.setattr(
+        "agent_harness.capability.factories.build_memory_components",
+        lambda settings, *, provider="builtin": components,
+    )
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+        jwt_secret=_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
+    )
+    app = create_app(settings, enable_cors=False)
+    owner_loop = asyncio.get_running_loop()
+    start_loops = []
+    close_loops = []
+    original_start = MemoryV2Service.start_tombstone_purger
+    original_aclose = MemoryV2Service.aclose
+
+    def _track_start(service, **kwargs):
+        start_loops.append(asyncio.get_running_loop())
+        return original_start(service, **kwargs)
+
+    async def _track_aclose(service):
+        close_loops.append(asyncio.get_running_loop())
+        await original_aclose(service)
+
+    monkeypatch.setattr(MemoryV2Service, "start_tombstone_purger", _track_start)
+    monkeypatch.setattr(MemoryV2Service, "aclose", _track_aclose)
+    async with app.router.lifespan_context(app):
+        state = app.state.agent
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(
+            registry, parse_capabilities_config(settings.capabilities), settings=settings,
+        )
+        state._registry, state._wiring = registry, wiring
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            settings_response = await client.get(
+                "/api/memory-settings", headers=_auth(_ALICE),
+            )
+            filtered_response = await client.get(
+                "/api/memories?kind=semantic", headers=_auth(_ALICE),
+            )
+
+        assert settings_response.status_code == 200, settings_response.text
+        assert set(settings_response.json()) == {"extraction_enabled", "recall_enabled"}
+        assert filtered_response.status_code == 200, filtered_response.text
+        assert filtered_response.json() == []
+
+    assert start_loops == close_loops == [owner_loop]
+    assert components.closed
+
+
 async def _seed(components: _FakeMemoryComponents, identity: IdentityContext,
                 content: str, metadata: dict | None = None, *,
                 scope: MemoryScope = MemoryScope.USER, session_id: str | None = None) -> str:
@@ -114,6 +196,19 @@ async def _contents(components: _FakeMemoryComponents, identity: IdentityContext
         return [entry.content for entry in await components.capability.list_entries(MemoryScope.USER, 50)]
     finally:
         identity_context_var.reset(token)
+
+
+async def _seed_v2(client: TestClient, identity: IdentityContext, content: str):
+    """Seed the authoritative V2 store without relying on the model or HTTP write path."""
+    _registry, wiring = await client.app.state.agent.get_wiring()
+    assert wiring.memory_v2 is not None
+    return await wiring.memory_v2.create(
+        make_draft(
+            content=content,
+            source_event_ids=[hashlib.sha256(content.encode("utf-8")).hexdigest()],
+        ),
+        TrustedMemoryIdentity(identity.tenant_id, identity.user_id),
+    )
 
 
 @pytest.mark.asyncio
@@ -163,6 +258,10 @@ async def test_list_paginates_and_clamps(memory_app):
     assert client.get("/api/memories?limit=0", headers=_auth(_ALICE)).status_code == 422
     assert client.get("/api/memories?limit=10000", headers=_auth(_ALICE)).status_code == 422
     assert client.get("/api/memories?offset=-1", headers=_auth(_ALICE)).status_code == 422
+    assert client.get("/api/memories?offset=10001", headers=_auth(_ALICE)).status_code == 422
+    assert client.get(
+        f"/api/memories?offset={2**63}", headers=_auth(_ALICE),
+    ).status_code == 422
 
 
 @pytest.mark.asyncio
@@ -363,3 +462,421 @@ def test_origin_gate_is_wired_on_memory_routes(tmp_path: Path, monkeypatch: pyte
         assert cross_origin.status_code == 403, cross_origin.text
         # 非浏览器发起（无 Origin）放行——本地信任模式的既定口径。
         assert client.get("/api/memories").status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_v2_list_filters_detail_versions_edit_stale_version_and_identity(memory_app):
+    client, _components = memory_app
+    record = await _seed_v2(client, _ALICE, "用户偏好简洁的解释")
+    case_folded = await _seed_v2(client, _ALICE, "用户使用 TypeScript")
+    headers = _auth(_ALICE)
+
+    listed = client.get(
+        "/api/memories?q=解释&kind=semantic&status=active&scope=user_global&limit=10&offset=0",
+        headers=headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()] == [record.id]
+    assert client.get(
+        "/api/memories?q=typescript&kind=semantic", headers=headers,
+    ).json()[0]["id"] == case_folded.id
+    assert client.get("/api/memories?kind=episodic", headers=headers).json() == []
+    assert client.get("/api/memories?scope=project", headers=headers).json() == []
+    all_v2 = client.get("/api/memories?kind=semantic&limit=10", headers=headers).json()
+    second_page = client.get(
+        "/api/memories?kind=semantic&limit=1&offset=1", headers=headers,
+    ).json()
+    assert len(all_v2) == 2 and second_page == all_v2[1:2]
+    assert client.get(
+        "/api/memories?kind=semantic&limit=1&offset=2", headers=headers,
+    ).json() == []
+
+    detail = client.get(f"/api/memories/{record.id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["source_type"] == "automatic"
+    assert detail.json()["evidence"] == [{
+        "role": "user", "hash": "hash-1",
+    }]
+    assert "excerpt" not in detail.text
+    assert len(client.get(f"/api/memories/{record.id}/versions", headers=headers).json()) == 1
+
+    edit_body = {
+        "expected_version": 1,
+        "content": "用户编辑后的偏好",
+        "payload": {
+            "kind": "semantic", "subject": "回答风格", "fact": "用户编辑后的偏好",
+            "category": "preference",
+        },
+    }
+    edited = client.patch(f"/api/memories/{record.id}", headers=headers, json=edit_body)
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["version"] == 2 and edited.json()["source_type"] == "user_edit"
+    edited_id = edited.json()["id"]
+    mismatched = {
+        **edit_body,
+        "expected_version": 2,
+        "payload": {
+            "kind": "episodic", "situation": "situation", "action": "action",
+            "outcome": "outcome", "lesson": "lesson",
+        },
+    }
+    assert client.patch(
+        f"/api/memories/{edited_id}", headers=headers, json=mismatched,
+    ).status_code == 422
+    blank = {**edit_body, "expected_version": 2, "content": "  "}
+    assert client.patch(
+        f"/api/memories/{edited_id}", headers=headers, json=blank,
+    ).status_code == 422
+    stale = client.patch(
+        f"/api/memories/{edited_id}", headers=headers, json=edit_body,
+    )
+    assert stale.status_code == 409
+    assert len(client.get(f"/api/memories/{record.id}/versions", headers=headers).json()) == 2
+
+    assert client.get(f"/api/memories/{record.id}", headers=_auth(_BOB)).status_code == 404
+    forged = {**edit_body, "user_id": "bob"}
+    assert client.patch(
+        f"/api/memories/{record.id}", headers=headers, json=forged,
+    ).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_v2_project_filter_uses_resolved_workspace_and_identity(memory_app, tmp_path):
+    client, _components = memory_app
+    state = client.app.state.agent
+    await state.ensure_stores()
+    project_path = tmp_path / "authorized-project"
+    project_path.mkdir()
+    workspace = await state.workspace_index.create(project_path, title="Authorized project")
+    _registry, wiring = await state.get_wiring()
+    assert wiring.memory_v2 is not None
+    trusted = TrustedMemoryIdentity(_ALICE.tenant_id, _ALICE.user_id, workspace.id)
+    record = await wiring.memory_v2.create(make_draft(
+        scope=MemoryScopeV2.PROJECT, project_id=workspace.id,
+        content="project-only preference", source_event_ids=["project-api-event"],
+    ), trusted)
+
+    response = client.get(
+        f"/api/memories?scope=project&project_id={workspace.id}", headers=_auth(_ALICE),
+    )
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()] == [record.id]
+    assert client.get(
+        "/api/memories?scope=project&project_id=unknown-project", headers=_auth(_ALICE),
+    ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_web_remember_tool_uses_project_scope_from_workspace_ledger(memory_app, tmp_path):
+    client, _components = memory_app
+    state = client.app.state.agent
+    await state.ensure_stores()
+    project_path = tmp_path / "remember-project"
+    project_path.mkdir()
+    workspace = await state.workspace_index.create(project_path, title="Remember project")
+    session_id = "remember-project-session"
+    session = Session.start(state.store, session_id=session_id, cwd=project_path)
+    session.append(USER_MESSAGE, {"content": "Please remember this project uses pnpm"})
+    await state.workspace_index.attach_session(session_id)
+
+    _registry, wiring = await state.get_wiring()
+    remember = next(tool for tool in wiring.tools if tool.name == "remember_this")
+    assert remember._workspace_index is state.workspace_index
+    assert wiring.memory_v2 is not None
+
+    identity_token = set_identity_context(_ALICE)
+    session_token = memory_session_var.set(session_id)
+    try:
+        result = await remember.execute(_RememberV2Args(
+            content="this project uses pnpm",
+            kind=MemoryKind.SEMANTIC,
+            payload=SemanticPayload(
+                subject="project", fact="uses pnpm",
+                category=SemanticCategory.PROJECT_FACT,
+            ),
+        ))
+    finally:
+        memory_session_var.reset(session_token)
+        identity_context_var.reset(identity_token)
+
+    assert result.ok
+    trusted = TrustedMemoryIdentity(_ALICE.tenant_id, _ALICE.user_id, workspace.id)
+    record = await wiring.memory_v2._store.get(result.data["memory_id"], trusted)
+    assert record.scope is MemoryScopeV2.PROJECT
+    assert record.project_id == workspace.id
+
+
+@pytest.mark.asyncio
+async def test_v2_delete_is_idempotent_erases_index_and_leaves_only_tombstone(memory_app):
+    from agent_harness.memory.v2._sqlite import connect
+    from agent_harness.memory.v2.index import MemoryV2IndexRelay
+
+    client, _components = memory_app
+    record = await _seed_v2(client, _ALICE, "只在删除前存在的正文")
+    _registry, wiring = await client.app.state.agent.get_wiring()
+    service = wiring.memory_v2
+    assert service is not None
+    trusted = TrustedMemoryIdentity("acme", "alice")
+    await MemoryV2IndexRelay(service._store, service._index).flush()
+    assert await service.search(
+        "删除前存在", trusted, scope=MemoryScopeV2.USER_GLOBAL, limit=10,
+    )
+
+    deleted = client.delete(f"/api/memories/{record.id}", headers=_auth(_ALICE))
+    replay = client.delete(f"/api/memories/{record.id}", headers=_auth(_ALICE))
+    assert deleted.status_code == 200 and deleted.json() == {"id": record.id, "deleted": True}
+    assert replay.status_code == 200 and replay.json() == {"id": record.id, "deleted": False}
+    assert await service.search(
+        "删除前存在", trusted, scope=MemoryScopeV2.USER_GLOBAL, limit=10,
+    ) == []
+
+    async with connect(service._store.database_path) as connection:
+        async with connection.execute("PRAGMA table_info(memory_v2_tombstones)") as cursor:
+            columns = await cursor.fetchall()
+        async with connection.execute("SELECT * FROM memory_v2_tombstones") as cursor:
+            tombstones = await cursor.fetchall()
+        async with connection.execute("SELECT content FROM memory_v2_records") as cursor:
+            records = await cursor.fetchall()
+    assert {row["name"] for row in columns} == {
+        "memory_id", "root_id", "tenant_id", "user_id", "scope", "project_id",
+        "version", "deleted_at", "expires_at", "deletion_reason", "content_hashes",
+        "source_hashes",
+    }
+    assert len(tombstones) == 1 and records == []
+    assert "只在删除前存在的正文" not in str(dict(tombstones[0]))
+
+
+@pytest.mark.asyncio
+async def test_v2_tombstone_reads_are_authorized_and_content_free(memory_app):
+    client, _components = memory_app
+    first = await _seed_v2(client, _ALICE, "只在删除前存在的敏感正文")
+    _registry, wiring = await client.app.state.agent.get_wiring()
+    assert wiring.memory_v2 is not None
+    trusted = TrustedMemoryIdentity(_ALICE.tenant_id, _ALICE.user_id)
+    edited = await wiring.memory_v2.edit(
+        first.id, trusted, expected_version=1,
+        content="只在删除前存在的另一段敏感正文",
+        payload=SemanticPayload(
+            subject="风格", fact="简洁", category=SemanticCategory.PREFERENCE,
+        ),
+    )
+    latest_id = edited.id
+    receipt = await wiring.memory_v2.delete(first.id, trusted)
+    assert receipt.deleted
+
+    listed = client.get("/api/memories?status=deleted&limit=10", headers=_auth(_ALICE))
+    assert listed.status_code == 200, listed.text
+    tombstones = listed.json()
+    assert {item["id"] for item in tombstones} == {first.id, latest_id}
+    assert all(set(item) == {
+        "id", "root_id", "scope", "project_id", "status", "deleted_at",
+    } for item in tombstones)
+    assert all(item["root_id"] == first.root_id for item in tombstones)
+    assert all(item["status"] == "deleted" and item["scope"] == "user_global" for item in tombstones)
+    assert all(isinstance(item["deleted_at"], str) and item["deleted_at"] for item in tombstones)
+    assert "敏感正文" not in listed.text
+    assert "content_hashes" not in listed.text and "source_hashes" not in listed.text
+    assert "deletion_reason" not in listed.text and "tenant_id" not in listed.text
+
+    by_id = client.get(f"/api/memories/{first.id}", headers=_auth(_ALICE))
+    history = client.get(f"/api/memories/{first.id}/versions", headers=_auth(_ALICE))
+    assert by_id.status_code == 200 and by_id.json() in tombstones
+    assert history.status_code == 200
+    assert [item["id"] for item in history.json()] == [latest_id, first.id]
+    assert all(item["status"] == "deleted" for item in history.json())
+    assert "敏感正文" not in by_id.text and "敏感正文" not in history.text
+
+    assert client.get(
+        "/api/memories?status=deleted&q=敏感正文", headers=_auth(_ALICE),
+    ).json() == []
+    matches = client.get(
+        f"/api/memories?status=deleted&q={first.id}", headers=_auth(_ALICE),
+    ).json()
+    assert {item["id"] for item in matches} == {first.id, latest_id}
+    assert client.get(
+        "/api/memories?status=deleted&kind=semantic", headers=_auth(_ALICE),
+    ).json() == []
+
+    assert client.get(f"/api/memories/{first.id}", headers=_auth(_BOB)).status_code == 404
+    assert client.get(
+        f"/api/memories/{first.id}/versions", headers=_auth(_BOB),
+    ).status_code == 404
+    assert client.get("/api/memories?status=deleted", headers=_auth(_BOB)).json() == []
+
+    from agent_harness.memory.v2._sqlite import connect
+
+    async with connect(wiring.memory_v2._store.database_path) as connection:
+        await connection.execute(
+            "UPDATE memory_v2_tombstones SET expires_at=? WHERE root_id=?",
+            ("2000-01-01T00:00:00+00:00", first.root_id),
+        )
+        await connection.commit()
+    assert client.get("/api/memories?status=deleted", headers=_auth(_ALICE)).json() == []
+    assert client.get(f"/api/memories/{first.id}", headers=_auth(_ALICE)).status_code == 404
+    assert client.get(
+        f"/api/memories/{first.id}/versions", headers=_auth(_ALICE),
+    ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_v2_project_tombstone_reads_require_the_matching_trusted_project(memory_app, tmp_path):
+    client, _components = memory_app
+    state = client.app.state.agent
+    await state.ensure_stores()
+    project_path = tmp_path / "tombstone-project"
+    project_path.mkdir()
+    workspace = await state.workspace_index.create(project_path, title="Tombstone project")
+    other_project_path = tmp_path / "other-tombstone-project"
+    other_project_path.mkdir()
+    other_workspace = await state.workspace_index.create(
+        other_project_path, title="Other tombstone project",
+    )
+    _registry, wiring = await state.get_wiring()
+    assert wiring.memory_v2 is not None
+    trusted = TrustedMemoryIdentity(_ALICE.tenant_id, _ALICE.user_id, workspace.id)
+    record = await wiring.memory_v2.create(make_draft(
+        scope=MemoryScopeV2.PROJECT,
+        project_id=workspace.id,
+        content="项目记忆删除前的正文",
+        source_event_ids=["project-tombstone-source"],
+    ), trusted)
+    receipt = await wiring.memory_v2.delete(record.id, trusted)
+    assert receipt.deleted
+
+    assert client.get("/api/memories?status=deleted", headers=_auth(_ALICE)).json() == []
+    scoped = client.get(
+        f"/api/memories?status=deleted&scope=project&project_id={workspace.id}",
+        headers=_auth(_ALICE),
+    )
+    assert scoped.status_code == 200, scoped.text
+    assert [item["id"] for item in scoped.json()] == [record.id]
+    assert scoped.json()[0]["project_id"] == workspace.id
+    assert "项目记忆删除前的正文" not in scoped.text
+
+    authorized_detail = client.get(
+        f"/api/memories/{record.id}?project_id={workspace.id}", headers=_auth(_ALICE),
+    )
+    authorized_history = client.get(
+        f"/api/memories/{record.id}/versions?project_id={workspace.id}",
+        headers=_auth(_ALICE),
+    )
+    assert authorized_detail.status_code == 200
+    assert authorized_detail.json() == scoped.json()[0]
+    assert authorized_history.status_code == 200
+    assert authorized_history.json() == [scoped.json()[0]]
+
+    other_project_list = client.get(
+        f"/api/memories?status=deleted&scope=project&project_id={other_workspace.id}",
+        headers=_auth(_ALICE),
+    )
+    assert other_project_list.status_code == 200 and other_project_list.json() == []
+    assert client.get(
+        f"/api/memories/{record.id}?project_id={other_workspace.id}",
+        headers=_auth(_ALICE),
+    ).status_code == 404
+    assert client.get(
+        f"/api/memories/{record.id}/versions?project_id={other_workspace.id}",
+        headers=_auth(_ALICE),
+    ).status_code == 404
+
+    assert client.get(
+        f"/api/memories/{record.id}", headers=_auth(_ALICE),
+    ).status_code == 404
+    assert client.get(
+        f"/api/memories?status=deleted&scope=project&project_id={workspace.id}",
+        headers=_auth(_BOB),
+    ).json() == []
+    assert client.get(
+        f"/api/memories/{record.id}?project_id={workspace.id}", headers=_auth(_BOB),
+    ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_v2_index_failure_reports_committed_delete_and_retains_retry(memory_app):
+    from agent_harness.memory.v2.index import MemoryV2IndexRelay
+
+    client, _components = memory_app
+    record = await _seed_v2(client, _ALICE, "索引故障时仍已删除")
+    _registry, wiring = await client.app.state.agent.get_wiring()
+    service = wiring.memory_v2
+    assert service is not None
+    trusted = TrustedMemoryIdentity("acme", "alice")
+    await MemoryV2IndexRelay(service._store, service._index).flush()
+    service._index.fail_delete = RuntimeError("injected index failure")
+
+    response = client.delete(f"/api/memories/{record.id}", headers=_auth(_ALICE))
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "memory_index_delete_pending"
+    with pytest.raises(KeyError):
+        await service.read(record.id, trusted)
+    assert [item.operation.value for item in await service._store.pending()] == ["delete"]
+    assert await service.search(
+        "索引故障", trusted, scope=MemoryScopeV2.USER_GLOBAL, limit=10,
+    ) == []
+
+    service._index.fail_delete = None
+    await service._relay.flush()
+    assert await service._store.pending() == []
+
+
+@pytest.mark.asyncio
+async def test_v2_bulk_confirmation_settings_and_session_recall_redaction(memory_app):
+    client, _components = memory_app
+    first = await _seed_v2(client, _ALICE, "用户偏好第一条")
+    second = await _seed_v2(client, _ALICE, "用户偏好第二条")
+    headers = _auth(_ALICE)
+
+    assert client.post(
+        "/api/memories/bulk-delete", headers=headers,
+        json={"kind": "semantic", "confirmation": "delete"},
+    ).status_code == 422
+    settings1 = client.patch(
+        "/api/memory-settings", headers=headers, json={"extraction_enabled": False},
+    )
+    assert settings1.status_code == 200
+    assert settings1.json() == {"extraction_enabled": False, "recall_enabled": True}
+    settings2 = client.patch(
+        "/api/memory-settings", headers=headers, json={"recall_enabled": False},
+    )
+    assert settings2.status_code == 200
+    assert settings2.json() == {"extraction_enabled": False, "recall_enabled": False}
+    assert client.get("/api/memory-settings", headers=headers).json() == settings2.json()
+    assert client.get(f"/api/memories/{first.id}", headers=headers).status_code == 200
+    assert client.get(f"/api/memories/{second.id}", headers=headers).status_code == 200
+
+    bulk = client.post(
+        "/api/memories/bulk-delete", headers=headers,
+        json={"kind": "semantic", "confirmation": "DELETE"},
+    )
+    assert bulk.status_code == 200, bulk.text
+    assert bulk.json()["affected_count"] == 2
+    assert client.get("/api/memories", headers=headers).json() == []
+
+    recalled = await _seed_v2(client, _ALICE, "被召回但不回显的正文")
+    state = client.app.state.agent
+    await state.ensure_stores()
+    session_id = "recall-explanation-session"
+    state.store.append_event(session_id, SessionEvent(
+        seq=0, type=MEMORY_RECALLED, session_id=session_id, run_id="run-1",
+        data={"memories": [{
+            "memory_id": recalled.id, "version": recalled.version,
+            "content": "不可信的事件正文", "ranking": {
+                "ranking_version": "hybrid-v1", "score": 0.91,
+                "private_note": "不允许透传",
+            },
+        }]},
+    ))
+    explanation = client.get(
+        f"/api/sessions/{session_id}/memory-recalls", headers=headers,
+    )
+    assert explanation.status_code == 200, explanation.text
+    payload = explanation.json()[0]
+    assert payload["memories"][0]["memory_id"] == recalled.id
+    assert payload["memories"][0]["ranking"] == {
+        "ranking_version": "hybrid-v1", "score": 0.91,
+    }
+    assert "不可信的事件正文" not in explanation.text
+    assert "不允许透传" not in explanation.text
+    assert client.get(
+        f"/api/sessions/{session_id}/memory-recalls", headers=_auth(_BOB),
+    ).json() == []

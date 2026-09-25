@@ -1,7 +1,8 @@
 """#263（#247 子票）— AgentRuntime 的 run/run_stream 事件序列基线（golden）。
 
 **问题**（票面）：`_drive` 的终结分支散在六处（context 超限 / completed /
-max_steps / 同错熔断硬触发 / 取消 / 顶层异常），每一处只被各自的窄用例零散覆盖
+local fuse（`#312` 起改走非终态 `run/paused`）/ 同错熔断硬触发 / 取消 / 顶层异常），
+每一处只被各自的窄用例零散覆盖
 （断言"这条事件在/不在"），**没有一条"整段序列长什么样、按什么顺序"的可执行基线**。
 #264 要把终结臂从 `_drive` 里提出来，先得有能在提取前后逐字比对的事实。
 
@@ -55,12 +56,13 @@ max_steps / 同错熔断硬触发 / 取消 / 顶层异常），每一处只被�
 `model/failed(2)`（异常臂与取消臂的 `_TerminalContext`）、`tool/call(2)`、`run/failed(1)`/`(None)`。
 #264 若"顺手统一"这些形状或搬表达式时漏掉 `step_base`，基线必须变红。
 
-**死参数（#264 必须先懂这条）**：`max_steps` / `hard_guard` / `provider_error` 三个臂的
+**死参数（#264 必须先懂这条）**：`hard_guard` / `provider_error` 两个臂的
 `failure_terminal(steps=step_base + steps)` 是**死参数**——`_RunFinalizer.failure_terminal`
 （`runtime.py:246-271`）不转发 `steps`，`Session.end_run`（`session.py:424-436`）也没有
-`step_id` 形参 ⇒ 这三臂的终态 `step_id` **恒为 None**，改或删那个实参**不可观测**（本文件的
+`step_id` 形参 ⇒ 这两臂的终态 `step_id` **恒为 None**，改或删那个实参**不可观测**（本文件的
 `(run/failed, None)` 对只钉"它就是 None"）。反之若让 `steps` 真的生效（终态带上 step_id），
-那是行为变更，这条基线会红。
+那是行为变更，这条基线会红。（`#312` T4 之前这张表里还有 `max_steps` 臂，同属这一族；
+它现在走**非终态**的 `run/paused`，收口事件显式带 `step_base + steps`。）
 
 **接线是冻结的**：默认场景用 `ToolExecutor(registry)`，即**无 Ledger** ⇒
 `tracks_operations=False` ⇒ `model/completed` 在工具批次之前立即落盘。生产接线
@@ -101,10 +103,14 @@ from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.agent.guards import RepeatedToolFailureGuard
+from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
+    REASON_BUDGET_EXHAUSTED,
+    TRIGGER_LOCAL_TURNS,
+)
 from agent_harness.agent.types import (
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
 )
 from agent_harness.context.compactor import ContextWindowExceededError
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
@@ -113,6 +119,7 @@ from agent_harness.session import (
     MODEL_DELTA,
     MODEL_FAILED,
     MODEL_FALLBACK,
+    MODEL_REQUEST,
     MODEL_STARTED,
     REASONING_COMPLETED,
     REASONING_DELTA,
@@ -120,6 +127,7 @@ from agent_harness.session import (
     REASONING_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_PAUSED,
     RUN_STARTED,
     SESSION_STARTED,
     STREAM_ONLY_TYPES,
@@ -152,7 +160,7 @@ STREAM_FACT_TYPES = frozenset({
 })
 
 # 终态 data 里"给人读的文案"：**键必须在、值必须是非空 str**，但措辞不逐字钉——
-# 措辞不是序列事实（max_steps 的具体文案另有 tests/agent/test_agent_loop.py 精确断言）。
+# 措辞不是序列事实（各失败臂的固定文案另有 tests/agent/test_agent_loop.py 等精确断言）。
 PROSE = "<prose>"
 PROSE_KEYS = frozenset({"message"})
 
@@ -423,7 +431,8 @@ async def _ledger_runtime(wiring: _Wiring) -> AgentRuntime:
 
     Ledger 必须先 initialize（否则写 Ledger 抛错、run 直接走异常臂），故 builder
     是 async。注意这里的时序与无 Ledger 场景**不同**：`model/completed` 被推迟到
-    工具批次之后（`runtime.py:924-936` 的 `defer_model_event`）。
+    工具批次之后（`agent/runtime.py` 的 `defer_model_event`，按
+    `bool(tool_calls) and executor.tracks_operations` 判定——**不看预算**）。
     """
     registry = _registry()
     ledger = SqliteOperationLedger(wiring.tmp_path / "state.db")
@@ -443,34 +452,39 @@ def _scenarios() -> tuple[Scenario, ...]:
             note="无工具一轮到底",
             build=lambda w: _runtime(_simple_model(), memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_REQUEST,
                      MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "answer", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
-                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED,
-                             RUN_COMPLETED),),
+                   (MODEL_REQUEST, 2), (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST,
+                             MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
             name="tool_ok",
             note="一轮工具（成功）后收尾；无 Ledger 接线 ⇒ model/completed 先于 tool/call",
             build=lambda w: _runtime(_two_rounds_model(), memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, MODEL_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TEXT_DELTA, MODEL_REQUEST, MODEL_COMPLETED,
+                     RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
-                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (TEXT_DELTA, 3), (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3),
+                   (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                             TOOL_CALL, TOOL_RESULT, MODEL_REQUEST, MODEL_COMPLETED,
+                             RUN_COMPLETED),),
         ),
         Scenario(
             name="tool_error",
@@ -479,36 +493,44 @@ def _scenarios() -> tuple[Scenario, ...]:
                                      registry=_registry(_FailingEchoTool()),
                                      memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, MODEL_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TEXT_DELTA, MODEL_REQUEST, MODEL_COMPLETED,
+                     RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
-                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (TEXT_DELTA, 3), (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3),
+                   (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                             TOOL_CALL, TOOL_RESULT, MODEL_REQUEST, MODEL_COMPLETED,
+                             RUN_COMPLETED),),
         ),
         Scenario(
             name="tool_ok_with_ledger",
             note="生产接线（带 Ledger）：model/completed 被推迟到工具批次之后",
             build=_ledger_runtime,
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TOOL_CALL, MODEL_COMPLETED, TOOL_RESULT,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TOOL_CALL, MODEL_COMPLETED,
-                     TOOL_RESULT, MODEL_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, TOOL_CALL,
+                     MODEL_COMPLETED, TOOL_RESULT, TEXT_DELTA, MODEL_REQUEST,
+                     MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST, TOOL_CALL,
+                     MODEL_COMPLETED, TOOL_RESULT, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "done", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TOOL_CALL, 2),
-                   (MODEL_COMPLETED, 2), (TOOL_RESULT, 2), (TEXT_DELTA, 3),
-                   (MODEL_COMPLETED, 3), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, TOOL_CALL, MODEL_COMPLETED,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_COMPLETED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (TOOL_CALL, 2), (MODEL_COMPLETED, 2), (TOOL_RESULT, 2),
+                   (TEXT_DELTA, 3), (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3),
+                   (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, TOOL_CALL,
+                             MODEL_COMPLETED, TOOL_RESULT, MODEL_REQUEST,
+                             MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
             name="fallback",
@@ -524,38 +546,48 @@ def _scenarios() -> tuple[Scenario, ...]:
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_FALLBACK,
-                     MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA, MODEL_FALLBACK,
-                     MODEL_COMPLETED, RUN_COMPLETED),
+            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_REQUEST, MODEL_REQUEST,
+                     MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA, MODEL_REQUEST,
+                     MODEL_REQUEST, MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "fallback 的回答", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
-                   (MODEL_FALLBACK, 2), (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_FALLBACK,
-                             MODEL_COMPLETED, RUN_COMPLETED),),
+                   (MODEL_REQUEST, 2), (MODEL_REQUEST, 2), (MODEL_FALLBACK, 2),
+                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_REQUEST,
+                             MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
-            name="max_steps",
-            note="模型不收敛撞保险丝：第 2 轮不再执行工具，直接 run/failed",
+            name="local_fuse_pause",
+            note="模型不收敛撞 local fuse（#312 T4 起不再是失败）：第 3 轮的准入判定在"
+                 "模型调用之前命中 ⇒ 留 2 轮 model/completed，收口是**非终态**的 "
+                 "run/paused。fuse 不吃'预留 closeout 那一轮'（预留是 run ceiling 的算法，"
+                 "EB-2 的 500 步到顶就是到顶）⇒ 被接纳的轮数 = fuse 值。closeout 那次"
+                 "调用拿到的剧本轮次不是 continuation JSON "
+                 "⇒ closeout_source=deterministic（有界模型调用失败不得反噬暂停）",
             build=lambda w: _runtime(
-                ScriptedModel([_tool_call(i) for i in range(6)]), max_steps=2,
+                ScriptedModel([_tool_call(i) for i in range(6)]), max_agent_turns=2,
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     MODEL_COMPLETED, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, MODEL_STARTED, MODEL_COMPLETED, RUN_FAILED),
-            terminal=RUN_FAILED,
-            terminal_payload={"reason": STATUS_MAX_STEPS_EXCEEDED, "message": PROSE,
-                              "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (MODEL_COMPLETED, 3),
-                   (RUN_FAILED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, MODEL_COMPLETED, RUN_FAILED),),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL,
+                     TOOL_RESULT, MODEL_REQUEST, RUN_PAUSED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, MODEL_STARTED,
+                     MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
+                     MODEL_REQUEST, RUN_PAUSED),
+            terminal=None,
+            terminal_payload={},
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (MODEL_REQUEST, 3), (MODEL_COMPLETED, 3), (TOOL_CALL, 3),
+                   (TOOL_RESULT, 3), (MODEL_REQUEST, 3), (RUN_PAUSED, 3)),
+            # 暂停**不是**终态 ⇒ 不触发记忆形成（`memory/v2/eligibility.py` 的白名单里
+            # 没有 paused）；"0 次提交"是事实，不是没测。
+            memory_submits=(),
         ),
         Scenario(
             name="context_exceeded",
@@ -579,13 +611,14 @@ def _scenarios() -> tuple[Scenario, ...]:
                  "异常臂也不写记忆",
             build=lambda w: _runtime(_ExplodingModel(), memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_FAILED, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_FAILED, RUN_FAILED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST, MODEL_FAILED,
+                     RUN_FAILED),
             terminal=RUN_FAILED,
             terminal_payload={"reason": "RuntimeError", "message": PROSE,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_FAILED, 2),
-                   (RUN_FAILED, None)),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_FAILED, 2), (RUN_FAILED, None)),
         ),
         Scenario(
             name="hard_guard",
@@ -598,22 +631,26 @@ def _scenarios() -> tuple[Scenario, ...]:
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     TOOL_FAILURE_GUARD, USER_MESSAGE, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE,
+                     MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
                      TOOL_FAILURE_GUARD, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                     TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE, MODEL_STARTED,
-                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
+                     MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD,
+                     USER_MESSAGE, MODEL_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                     TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),
             terminal=RUN_FAILED,
             terminal_payload={"reason": STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
                               "trace_id": None, "trace_url": None},
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_COMPLETED, 2),
-                   (TOOL_CALL, 2), (TOOL_RESULT, 2), (TOOL_FAILURE_GUARD, 2),
-                   (USER_MESSAGE, 2), (MODEL_COMPLETED, 3), (TOOL_CALL, 3),
-                   (TOOL_RESULT, 3), (TOOL_FAILURE_GUARD, 3), (RUN_FAILED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED, TOOL_CALL,
-                             TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE, MODEL_COMPLETED,
-                             TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
+                   (TOOL_FAILURE_GUARD, 2), (USER_MESSAGE, 2), (MODEL_REQUEST, 3),
+                   (MODEL_COMPLETED, 3), (TOOL_CALL, 3), (TOOL_RESULT, 3),
+                   (TOOL_FAILURE_GUARD, 3), (RUN_FAILED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
+                             TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE,
+                             MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
+                             TOOL_FAILURE_GUARD, RUN_FAILED),),
         ),
         Scenario(
             name="checkpoint_error",
@@ -622,16 +659,17 @@ def _scenarios() -> tuple[Scenario, ...]:
                                      checkpoint_policy=_ExplodingCheckpointPolicy(),
                                      memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+            durable=(USER_MESSAGE, RUN_STARTED, TEXT_DELTA, MODEL_REQUEST,
                      MODEL_COMPLETED, RUN_COMPLETED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, TEXT_DELTA,
+                     MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "answer", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (TEXT_DELTA, 2),
-                   (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED,
-                             RUN_COMPLETED),),
+                   (MODEL_REQUEST, 2), (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
+            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST,
+                             MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
             name="generator_exit_pre_run",
@@ -664,14 +702,14 @@ def _scenarios() -> tuple[Scenario, ...]:
             note="模型在途被取消：在途模型调用补 model/failed，两段都不进流",
             build=lambda w: _runtime(_BlockingModel(), memory_writer=w.memory),
             drive=_cancel_while_blocked,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_FAILED, RUN_FAILED),
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
             emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED),
             terminal=RUN_FAILED,
             terminal_payload={"reason": CANCEL_REASON, "trace_id": None, "trace_url": None},
             terminal_step_id=0,
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_FAILED, 2),
-                   (RUN_FAILED, 1)),
-            discarded=(MODEL_FAILED, RUN_FAILED),
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
+                   (MODEL_FAILED, 2), (RUN_FAILED, 1)),
+            discarded=(MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
             run_twin=False,
         ),
         Scenario(
@@ -761,10 +799,17 @@ async def _run(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", SCENARIO_IDS)
 async def test_durable_sequence_matches_golden(name: str, tmp_path: Any) -> None:
-    """落盘（durable）序列逐条等于基线。"""
+    """落盘（durable）序列逐条等于基线。
+
+    **两侧都过 `_collapse`**：基线表可以并列写同一个类型来表达"连续两次"
+    （`#313` 的 `fallback` 就是这样——一次决策对应两次实际请求，两条
+    `model/request` 相邻）。重数不在这条用例里判，它归 `_counted`：这里钉顺序、
+    那里钉次数，二者合起来才是"次数与顺序不变"。
+    """
     scenario, _emitted, session = await _run(name, tmp_path)
     types = [e.type for e in _persisted(session)]
-    assert _collapse(types) == scenario.durable, f"{scenario.name}：durable 序列偏离基线"
+    assert _collapse(types) == _collapse(list(scenario.durable)), \
+        f"{scenario.name}：durable 序列偏离基线"
 
 
 @pytest.mark.asyncio
@@ -788,9 +833,9 @@ async def test_durable_counts_match_golden(name: str, tmp_path: Any) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", SCENARIO_IDS)
 async def test_emitted_sequence_matches_golden(name: str, tmp_path: Any) -> None:
-    """流（含 ephemeral 帧）序列逐条等于基线。"""
+    """流（含 ephemeral 帧）序列逐条等于基线（两侧都过 `_collapse`，理由同上）。"""
     scenario, emitted, _session = await _run(name, tmp_path)
-    assert _collapse([e.type for e in emitted]) == scenario.emitted, \
+    assert _collapse([e.type for e in emitted]) == _collapse(list(scenario.emitted)), \
         f"{scenario.name}：emitted 序列偏离基线"
 
 
@@ -877,6 +922,57 @@ async def test_discarded_segment_is_exactly_the_declared_one(
         f"{scenario.name}：未进流的落盘段条数与声明不符"
 
 
+@pytest.mark.asyncio
+async def test_pause_payload_key_set_is_pinned(tmp_path: Any) -> None:
+    """`run/paused` 载荷的**整个键集**（`#312` / `03 §3.4`）。
+
+    暂停是**非终态**，所以它不走 `test_terminal_is_unique_and_last` 那条路（那条只认
+    `RUN_TERMINAL_TYPES`），键集就没人钉——而 `03 §3.4` 对这两个事件的字段是逐键写明
+    的契约：少一个（例如 `resume_requirements`）客户端就无法区分"没有前置条件"与
+    "这条事件根本不是暂停"；多一个（例如 `trace_url`——它只在终态回调里合成，暂停时
+    还不存在）就是凭空造事实。
+
+    取值只钉**机械字段**（reason / 维度 / 版本 / 消耗 / 两档 limits / closeout 来源）：
+    `continuation` 的文案由模型或确定性组装产出，不是序列事实（它另有各自的用例）。
+    """
+    _scenario, _emitted, session = await _run("local_fuse_pause", tmp_path)
+    paused = [e for e in session.events if e.type == RUN_PAUSED]
+
+    assert len(paused) == 1
+    data = paused[0].data
+    assert set(data) == {
+        "reason", "trigger_dimension", "budget_version", "consumed", "limits",
+        "continuation", "closeout_source", "resume_requirements", "trace_id",
+    }, "run/paused 的字段清单是 `03 §3.4` 的契约（多一个/少一个都变红）"
+    assert data["reason"] == REASON_BUDGET_EXHAUSTED
+    assert data["trigger_dimension"] == TRIGGER_LOCAL_TURNS
+    assert data["budget_version"] == 1
+    # 计数点是"被接纳的产出轮"（fuse=2 ⇒ 2 轮）；closeout 不进这个 counter
+    # （`#313` 起它进 `model_requests`：`02 §5.1` 把 closeout 与 primary/fallback
+    # 并列为一次**实际** Provider 请求）。本场景 3 次请求 = 2 轮 primary + 1 次
+    # closeout，两条计数点各自独立——这正是"turns ≠ requests"的最小证据。
+    assert data["consumed"] == {
+        "agent_turns": 2, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+    }, (
+        "consumed 四维全在；token / cost 是本场景替身模型**不自报**的维度 ⇒ null"
+        "（`11 §6.1`：不可得 ≠ 0），不是 0"
+    )
+    assert data["limits"] == {
+        "local": {"max_agent_turns": 2, "source": "deployment"},
+        "run": {
+            "max_agent_turns_total": None, "max_model_requests": None,
+            "max_total_tokens": None, "max_cost_usd": None,
+        },
+    }, "limits 按作用域各还原生投影（`11 §6.1`）；run 档四维全在，没配的是 null"
+    assert data["closeout_source"] == CLOSEOUT_DETERMINISTIC
+    assert data["resume_requirements"] == []
+    # continuation 的四个键齐（`next_safe_action` 非空）；文案本身不在这里钉
+    assert set(data["continuation"]) == {
+        "completed", "remaining", "blockers", "next_safe_action",
+    }
+    assert data["trace_id"] is None, "本场景没有装配 tracer（NullTracer）"
+
+
 # ---------------------------------------------------------------------------
 # AC3：序列级不变量（与基线表相互独立，用来抓"表改对了但结构坏了"）
 # ---------------------------------------------------------------------------
@@ -898,7 +994,7 @@ async def test_terminal_is_unique_and_last(name: str, tmp_path: Any) -> None:
     """终态至多一条；有终态时必须是最后一条，且载荷的**整个键集**与信封与基线相等。
 
     载荷必须钉：各失败臂的**终态类型相同**（都是 `run/failed`），只有 `reason`
-    区分它们——只钉类型的话，改错臂（例如把熔断的 reason 写成 max_steps）不会被
+    区分它们——只钉类型的话，改错臂（例如把熔断的 reason 写成另一条臂的）不会被
     发现。人读文案（`message`）只钉"键在、值是非空 str"（措辞不是序列事实）。
 
     信封也必须钉：`end_run` 派不带 step_id（None），context 臂与取消臂显式带
@@ -972,7 +1068,8 @@ def test_goldens_two_channels_are_mutually_consistent(name: str) -> None:
     scenario = GOLDENS[name]
     from_emitted = [t for t in scenario.emitted if t not in STREAM_ONLY_TYPES]
     combined = from_emitted + list(scenario.discarded)
-    assert _collapse(combined) == scenario.durable, f"{scenario.name}：两条通道的表互不自洽"
+    assert _collapse(combined) == _collapse(list(scenario.durable)), \
+        f"{scenario.name}：两条通道的表互不自洽"
     assert _counted(combined) == _counted(list(scenario.durable)), \
         f"{scenario.name}：两条通道的计数互不自洽"
 
@@ -1107,13 +1204,14 @@ async def test_memory_writeback_submits_the_declared_events(name: str, tmp_path:
 
 # 只在"已跑完一轮"的 session 上才分岔的臂。
 # 前三条显式写 `step_base + steps` ⇒ 第二轮必须是 1（不是 0）；
-# 后三条走 `end_run`，其 `steps=` 是死参数（见文件头"死参数"段）⇒ 恒 None，
+# 后两条走 `end_run`，其 `steps=` 是死参数（见文件头"死参数"段）⇒ 恒 None，
 # 这一半钉的是"它**仍然**是 None"：哪天那参数真的生效（= 行为变更），基线必红。
+# `local_fuse_pause` 不在本表：它的收口事件是**非终态**的 `run/paused`（#312 T4），
+# 落在下面 `_TURN2_ENVELOPE_ARMS` 的"全事件信封"覆盖里（含它自己的 step_id）。
 _TURN2_TERMINAL_ARMS = (
     ("context_exceeded", 1),
     ("generator_exit_post_run", 1),
     ("cancel_while_blocked", 1),
-    ("max_steps", None),
     ("hard_guard", None),
     ("provider_error", None),
 )

@@ -7,12 +7,17 @@ import { describe, expect, it } from 'vitest';
 import {
   MEMORY_MAX_LIMIT,
   MEMORY_PAGE_SIZE,
+  MEMORY_CONTENT_MAX_CHARS,
   formatMemoryTime,
   hasMoreAfter,
+  memoryPayloadDraft,
+  memoryPayloadFromDraft,
   refetchLimit,
   scopeLabel,
+  validateMemoryEdit,
   withoutIds,
 } from './memory';
+import type { MemoryPayload } from './memoryV2Api';
 import type { MemorySummary } from '../types';
 
 const row = (id: string): MemorySummary => ({
@@ -83,5 +88,44 @@ describe('refetchLimit', () => {
   it('不越过后端硬上界 200（越界就是 422：回滚重拉与"重试"会永久失败）', () => {
     expect(refetchLimit(250)).toBe(MEMORY_MAX_LIMIT);
     expect(refetchLimit(10_000)).toBe(MEMORY_MAX_LIMIT);
+  });
+});
+
+describe('Memory V2 editor contract', () => {
+  it('builds only the payload fields required by each kind', () => {
+    expect(memoryPayloadFromDraft('episodic', {
+      situation: 'service outage', action: 'restarted worker', outcome: 'recovered', lesson: 'check queue',
+    })).toEqual({
+      kind: 'episodic',
+      situation: 'service outage',
+      action: 'restarted worker',
+      outcome: 'recovered',
+      lesson: 'check queue',
+    });
+    expect(memoryPayloadFromDraft('semantic', {
+      subject: 'user', fact: 'likes tea', category: 'preference',
+    })).toEqual({
+      kind: 'semantic', subject: 'user', fact: 'likes tea', category: 'preference',
+    });
+    expect(memoryPayloadDraft({
+      kind: 'procedural', trigger: 'deploy', procedure: 'run checks', success_condition: 'green',
+    })).toEqual({
+      kind: 'procedural', trigger: 'deploy', procedure: 'run checks', success_condition: 'green',
+    });
+    expect(memoryPayloadFromDraft('semantic', { subject: 'user', fact: 'likes tea' })).toBeNull();
+  });
+
+  it('uses code-point limits and rejects blank or incomplete edits before submission', () => {
+    const record = { kind: 'semantic' as const, status: 'active' as const };
+    const payload: MemoryPayload = {
+      kind: 'semantic', subject: 'user', fact: 'likes tea', category: 'preference',
+    };
+    expect(validateMemoryEdit(record, '😀'.repeat(MEMORY_CONTENT_MAX_CHARS), payload)).toEqual([]);
+    expect(validateMemoryEdit(record, '😀'.repeat(MEMORY_CONTENT_MAX_CHARS + 1), payload))
+      .toContain(`记忆正文不能超过 ${MEMORY_CONTENT_MAX_CHARS} 个字符。`);
+    expect(validateMemoryEdit(record, '  ', payload)).toContain('记忆正文不能为空。');
+    expect(validateMemoryEdit(record, 'ok', { ...payload, fact: ' ' })).toContain('事实不能为空。');
+    expect(validateMemoryEdit({ kind: 'semantic', status: 'superseded' }, 'ok', payload))
+      .toContain('只有当前有效的 V2 记忆可以编辑。');
   });
 });

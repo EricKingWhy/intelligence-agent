@@ -26,6 +26,7 @@ ack 按 revision 匹配」；它们服务两套不同的记录契约，合并任
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Protocol
 
@@ -139,6 +140,9 @@ class MemoryV2IndexRelay:
     def __init__(self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex) -> None:
         self._store = store
         self._index = index
+        # Serialize fetched outbox work with governance deletion so a stale upsert
+        # cannot finish after a delete and recreate the derived vector.
+        self._lock = asyncio.Lock()
         self._failure_counts: dict[str, int] = {}
         self._failure_revisions: dict[str, str] = {}
         # 与 `_failure_counts` / `_failure_revisions` 完全分开：这个只驱动告警升级，
@@ -149,6 +153,19 @@ class MemoryV2IndexRelay:
         self._ack_failure_revisions: dict[str, str] = {}
 
     async def flush(self) -> int:
+        async with self._lock:
+            return await self._flush()
+
+    async def delete_now(self, memories) -> None:
+        """Remove vectors after authoritative tombstones commit, under the relay lock."""
+        async with self._lock:
+            for memory in memories:
+                await self._index.delete(
+                    memory.memory_id, tenant_id=memory.tenant_id, user_id=memory.user_id,
+                    scope=memory.scope, project_id=memory.project_id,
+                )
+
+    async def _flush(self) -> int:
         count = 0
         after_id = ""
         while page := await self._store.pending(after_id=after_id):

@@ -37,7 +37,7 @@ Matt SDD 负责：
 `当前模块如何澄清、规格化、拆分和施工`
 
 推荐流程（**阶段固定，Skill 名不固定**——按当前环境实际可用的能力选，不要伪造不存在的命令；
-口径见 `AGENTS.md` §5 与 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 2 条）：
+口径见 `AGENTS.md` §10 与 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 2 条）：
 
 ```text
 需求仍有重大歧义或需要补足领域术语
@@ -50,7 +50,7 @@ Matt SDD 负责：
 → GitHub Issue / Ticket 拆分
 
 用户授权当前 Ticket
-→ 按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 实施；使用当前环境可用的 Skill，适用时测试先行
+→ 按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3.1-lite 实施；使用当前环境可用的 Skill，适用时测试先行
 
 完成
 → focused Test / lint / type check
@@ -94,9 +94,11 @@ Matt SDD 负责：
    无显式 `depends_on`、无数据依赖、无资源冲突、Permission 允许、Tool Contract 允许。
    依赖来源优先 `depends_on` / `resource_keys` / Tool metadata / 同文件冲突。
    V1 不使用 LLM 自由文本猜 DAG。
-7. **危险 Git 默认禁止**：`reset --hard` / `rebase` / `push --force` / `branch -D`。
-   `merge` / `push` 的授权分类见 `AGENTS.md` §14.4（集成与 `push origin main` 是常设授权，
-   feature 分支上的 push 仍需单独批准）。
+7. **危险 Git 默认禁止**：`reset --hard` / `rebase` / `push --force` / `push --force-with-lease` / `branch -D`。
+   `merge` / `push` 的授权分类见 `AGENTS.md` §14.4。⚠ **`push origin main` 自 2026-09-26 起
+   已不是常设授权**——main 开了服务端分支保护（必需检查 `gate0`、`enforce_admins` 为真），
+   直推被拒（`GH006`）；集成改走「推集成分支 → 开 PR → `gate0` 绿 → 合并 PR」，
+   而这两步各自仍需用户单独批准。
 
 ---
 

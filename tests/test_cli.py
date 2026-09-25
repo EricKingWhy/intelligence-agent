@@ -15,6 +15,7 @@ from agent_harness.agent import AgentEvent
 from agent_harness.cli import StreamRenderer, run
 from agent_harness.session import (
     MODEL_COMPLETED,
+    MODEL_REQUEST,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
@@ -115,9 +116,10 @@ async def test_cli_run_streams_persists_session_and_returns_final_text(
         lambda config, **kw: ScriptedModel([AIMessage(content="你好世界")], chunk_size=2),
     )
     out: list[str] = []
-    final = await run("打个招呼", write=out.append)
+    outcome = await run("打个招呼", write=out.append)
 
-    assert final == "你好世界"
+    assert outcome.final_text == "你好世界"
+    assert outcome.paused is False, "正常完成不是暂停（#312：两者都可能没有回答，必须可区分）"
     streamed = "".join(out)
     assert "你好" in streamed and "世界" in streamed, "回答经 delta 流式可见"
 
@@ -126,13 +128,16 @@ async def test_cli_run_streams_persists_session_and_returns_final_text(
     (session_id,) = store.list_session_ids()
     types = [event.type for event in store.read_events(session_id)]
     assert types == [SESSION_STARTED, USER_MESSAGE, RUN_STARTED,
-                     TEXT_DELTA, MODEL_COMPLETED, RUN_COMPLETED]
+                     TEXT_DELTA, MODEL_REQUEST, MODEL_COMPLETED, RUN_COMPLETED]
 
 
 @pytest.mark.asyncio
 async def test_cli_run_failed_returns_empty_final_text(tmp_path, monkeypatch):
     """失败的 run 不抛异常（runtime 契约：失败事实由终结事件承载）——
-    返回空 final_text 供 main() 转 SystemExit(1)，渲染层已告知原因。"""
+    返回空 final_text 供 main() 转 SystemExit(1)，渲染层已告知原因。
+
+    `#312`：失败**不是**暂停（`paused=False`）——两者都没有回答，退出码必须区分。
+    """
     from agent_harness.config import Settings
 
     class ExplodingModel:
@@ -152,6 +157,7 @@ async def test_cli_run_failed_returns_empty_final_text(tmp_path, monkeypatch):
         "agent_harness.assembly.create_chat_model", lambda config, **kw: ExplodingModel(),
     )
     out: list[str] = []
-    final = await run("触发失败", write=out.append)
-    assert final == ""
+    outcome = await run("触发失败", write=out.append)
+    assert outcome.final_text == ""
+    assert outcome.paused is False
     assert "[run failed]" in "".join(out)

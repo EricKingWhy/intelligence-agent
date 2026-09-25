@@ -48,7 +48,7 @@ Explicit commands and HTTP operations use the same V2 authority/lifecycle bounda
 
 ## Requirements
 
-- **R1:** “Remember X” bypasses only the durable-value threshold; it still requires valid type/scope/payload, blocks secrets, and requires explicit consent for sensitive content.
+- **R1:** “Remember X” bypasses only the durable-value threshold; it still requires valid type/scope/payload, blocks secrets, and requires explicit consent for sensitive content. For `remember_this`, any negative-consent or opt-out wording anywhere in the current user message vetoes the entire write. Free-text payload fields must stay within the explicitly consented `content`. If that content contains negation, only a semantic payload whose `fact` preserves the full content is accepted; substring-only extraction and negative episodic/procedural payloads are rejected because they cannot prove polarity preservation.
 - **R2:** “Do not remember this chat” suppresses Formation for that turn and does not change global settings.
 - **R3:** “Forget X” deletes only an unambiguous authorized active match. Multiple matches return a selection set and mutate nothing until one is selected.
 - **R4:** Disabling memory disables automatic extraction and recall independently according to the two stored settings and never deletes records.
@@ -103,3 +103,10 @@ parallelizable: with #298 and #299 after #297
 - Deleted content is absent from every content-bearing persistence/observability surface tested.
 - ADR conflicts are explicitly superseded rather than left contradictory.
 - Review coverage, tracker, and PHASE_STATUS are updated after integration.
+
+## Validation Record (2026-09-25)
+
+- Full pytest on tree `edcd89ffbd2025f3efcdae5b3a5157828ce87ac6`: `3811 passed, 2 skipped, 49 deselected, 0 failed, 11 warnings` in 670.15s. Command: `PYTHONUTF8=1`, empty `PYTHONPATH`, `.venv/Scripts/python.exe -m pytest tests/ -q --no-header -p no:cacheprovider -p no:randomly`.
+- The existing Docker timeout test failure was caused by cold container startup consuming its 1s command budget. Prewarming the same sandbox before the measured command fixed the test; the updated test passed 3/3. Full-suite output still contained 11 warnings, including two aiosqlite worker-thread warnings; both named tests passed isolated reruns with that warning promoted to an error.
+- `ruff check .` passed. Gate-0 passed 6/6 for tree `43f54699724d024f32edddaafa55933b1ff71047`; machine record: `docs/gate/250496228ade71c1b49c1a371b13d55f32d9e7ac.json`. The branch-range Gate-0 run also passed 6/6.
+- The real Milvus integration test passed (1 test). Review coverage passed on the branch.

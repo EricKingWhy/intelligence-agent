@@ -49,6 +49,9 @@ class TestSessionEventDTO:
             "run/completed",
             "run/failed",
             "run/interrupted",
+            # #312 T4：暂停/恢复是 durable 生命周期事实（非终态暂停 + 同一 run 接回）
+            "run/paused",
+            "run/resumed",
             "user/message",
             "text/delta",
             "model/completed",
@@ -90,6 +93,13 @@ class TestSessionEventDTO:
             # 不带内容（事件流不是第二份记忆真相，不变量 #22）；与
             # memory/degraded 并列但语义不同——那条是降级信号，这条是成功写入。
             "memory/updated",
+            # MEM-V2-3 (#299)：redacted explanation of each automatic recall.
+            "memory/recalled",
+            # #313 T5：**每一次实际 Provider 请求**恰一条（primary / fallback /
+            # closeout；被拒绝或传输失败的请求也在计数内）。它是 `02 §5.1` 里
+            # `model_requests` / `total_tokens` / `cost_usd` 三个 counter 的**唯一**
+            # 计数点——`model/completed` 只数被接纳进 loop 的决策（= agent_turns）。
+            "model/request",
         }
         assert EVENT_TYPES == expected
 

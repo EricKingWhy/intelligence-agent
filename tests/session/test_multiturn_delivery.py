@@ -23,6 +23,7 @@ from agent_harness.config import Settings
 from agent_harness.model.scripted import RequestSnapshot, ScriptedModel
 from agent_harness.session import (
     RUN_COMPLETED,
+    RUN_PAUSED,
     RUN_STARTED,
     USER_MESSAGE,
     Session,
@@ -168,9 +169,10 @@ class TwoTurnScriptedModel(GateScriptedModel):
     `operations.tool_call_id` 唯一约束让 run 2 直接 run/failed。这个替身在每次
     模型调用时生成**新** tool_call_id（按调用计数），多 run 复用安全。
 
-    ⚠ 剧本每次都吐 tool_call 会让模型永不收敛（第 11 次调用撞 max_steps 保险丝
-    ⇒ run/failed）。``turns_with_tools`` 控制带 tool 的调用次数，之后吐纯文本
-    收尾——"第二个 run 的第一次调用就收尾"用默认 1。
+    ⚠ 剧本每次都吐 tool_call 会让模型永不收敛（一直转下去会撞 local fuse：`#312` T4
+    起收口成**非终态** `run/paused`，在此之前是 `run/failed`；默认 fuse=500 轮，
+    短用例写不出"跑满保险丝"这条路径）。``turns_with_tools`` 控制带 tool 的调用次数，
+    之后吐纯文本收尾——"第二个 run 的第一次调用就收尾"用默认 1。
     """
 
     def __init__(
@@ -268,8 +270,52 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
     assert harness.human_texts(session_id) == ["A", "B"]
 
 
-# ── T2 / T3：steer 注入同一 run，A+B 都在链上 ──────────────────────────
+@pytest.mark.asyncio
+async def test_queue_does_not_relay_across_a_paused_run(tmp_path, monkeypatch):
+    """暂停的执行**不驱动接力**：排队输入留在队列里，只由显式 resume 唤醒（`#312` R4）。
 
+    为什么这条不能省（它是与上面那条正向用例成对的负向面）：接力会在暂停之上直接开出
+    **新的 run_id**，而 ceiling 是按逻辑 run 记账的——那等于绕开刚生效的上限，且
+    "暂停"这件事对用户就白发生了。所以 `ManagedRun.paused` 必须抑制终态回调。
+
+    构造：run 的 ceiling 取 2（1 个产出轮 + 为 closeout 预留的那一轮）⇒ 第一个普通轮
+    之后必然暂停；模型在第 1 个响应后一直挂在 gate 上，测试在这个窗口里入队 B。
+    """
+    gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [_TOOL_TURN, AIMessage(content="第一轮收尾")], gate=gate,
+    )
+    launched = await harness.service.create_and_launch(
+        task="A", run_max_agent_turns_total=2,
+    )
+    session_id = launched.session.session_id
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1, what="run 1 起跑",
+    )
+
+    queued = await harness.service.send_message(
+        session_id=session_id, content="B", mode="queue",
+    )
+    assert queued.status == "queued"
+
+    gate.set()
+    await harness.wait_for(
+        lambda: harness.of_type(session_id, RUN_PAUSED), what="run/paused 落盘",
+    )
+    # 暂停之后模型**不会**再被调用（closeout 那次调用由预算闸门放行，不是普通轮）：
+    # 这里只等"接力真的没有发生"的那一小段窗口，避免把"还没轮到"读成"不会做"。
+    await asyncio.sleep(0.2)
+
+    assert len(harness.of_type(session_id, RUN_STARTED)) == 1, "暂停不得由接力开出新 run"
+    assert harness.of_type(session_id, QUEUE_CONSUMED) == [], "排队输入必须留在队列里"
+    assert harness.of_type(session_id, RUN_COMPLETED) == []
+    # 排队的输入没有丢：它仍是 durable 事实里的"未投递输入"，等一个显式 resume
+    # （本票不做"暂停 + 队列"的合并恢复，所以这里只钉"还在"，不钉它何时被投递）。
+    pending = await harness.service.list_undelivered_inputs(session_id)
+    assert [item.content for item in pending] == ["B"]
+
+
+# ── T2 / T3：steer 注入同一 run，A+B 都在链上 ──────────────────────────
 
 @pytest.mark.asyncio
 async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):
@@ -539,3 +585,137 @@ async def test_steer_message_is_not_marked_as_runtime_injected(tmp_path, monkeyp
     # 用户首次发言（A）与引导（B）都参与抽取 ⇒ 两者口径一致
     first_user = harness.of_type(session_id, USER_MESSAGE)[0]
     assert _is_runtime_injected(first_user) is False
+
+
+# ── #308（T3）：在途通道也判定 budget 请求体 ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatch):
+    """run 在途时发的消息**不消费** budget，但**判定照跑**。
+
+    同一份请求体不该因为"此刻有没有 run"而换语义：`{max_steps:8, budget:9}` 在空转
+    会话上 422，在活跃 run 上也必须是拒绝，而不是静默入队——入队那版还会在下一次
+    投递时按 deployment 默认启动（`deliver_next_undelivered` 不带请求级覆盖）。
+
+    判定要看的**所有**声明都在这里逐项过：请求字段 / alias / 档位 ceiling（后者经
+    `amend.agent_profile` 传入，web 层在非启动分支只保留这一个字段——见
+    `tests/web/test_web_amend_validation.py::test_in_flight_message_keeps_only_the_profile_for_judgement`）。
+
+    HTTP 层的同一判据（steer 先 422 后 409 的顺序）在
+    `tests/web/test_budget_local_fuse_api.py::test_steer_judges_the_budget_body_before_the_target_check`；
+    这里用 gate 把 run 钉在在途，覆盖 queued 分支。
+    """
+    import dataclasses
+
+    from agent_harness.agent.budget import BudgetAliasConflict, BudgetCeilingExceeded
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+    from agent_harness.session.service import AmendOptions
+
+    gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [AIMessage(content="答")], gate=gate,
+    )
+    launched = await harness.service.create_and_launch(task="A")
+    session_id = launched.session.session_id
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
+        what="run 起跑（gate 把它钉在模型调用上）",
+    )
+    before = [e.type for e in harness.events(session_id)]
+
+    with pytest.raises(BudgetAliasConflict) as conflict:
+        await harness.service.send_message(
+            session_id=session_id, content="B", mode="queue",
+            local_max_agent_turns=9, max_steps=8,
+        )
+    assert "8" in str(conflict.value) and "9" in str(conflict.value)
+
+    with pytest.raises(BudgetCeilingExceeded):
+        await harness.service.send_message(
+            session_id=session_id, content="B", mode="queue",
+            local_max_agent_turns=10_000,
+        )
+
+    # steer 分支同一条判定（顺序也在：预算拒绝先于"steer 必须有在途 run"）。
+    with pytest.raises(BudgetAliasConflict):
+        await harness.service.send_message(
+            session_id=session_id, content="B", mode="steer",
+            local_max_agent_turns=9, max_steps=8,
+        )
+
+    # 档位 ceiling 也参与判定：内置三档位声明 None（出厂不写死数字），所以这里把
+    # coding 档位改成声明 40——非启动分支若丢掉 agent_profile，这条会读成 200 queued。
+    monkeypatch.setitem(
+        BUILTIN_PROFILES, "coding",
+        dataclasses.replace(BUILTIN_PROFILES["coding"], max_agent_turns=40),
+    )
+    with pytest.raises(BudgetCeilingExceeded) as over_profile:
+        await harness.service.send_message(
+            session_id=session_id, content="B", mode="queue",
+            amend=AmendOptions(agent_profile="coding"),
+            local_max_agent_turns=300,
+        )
+    assert "40" in str(over_profile.value), str(over_profile.value)
+
+    # 被拒请求零副作用：事件流**逐条**不变（只比"某两个类型不在列表里"会放过
+    # queue/cancelled、message/superseded 这类新写的记录）。
+    assert [e.type for e in harness.events(session_id)] == before
+
+    # 合法（且不消费）的旧字段仍照旧排队：迁移期兼容不能被这条判定收紧掉。
+    queued = await harness.service.send_message(
+        session_id=session_id, content="B", mode="queue", max_steps=9,
+    )
+    assert queued.status == "queued"
+    assert [e.data["content"] for e in harness.of_type(session_id, MESSAGE_QUEUED)] == ["B"]
+
+    gate.set()
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_COMPLETED)) == 2,
+        what="排队项被接力成第二个 run 并跑完",
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_queue_edit_keeps_the_old_queued_item(tmp_path, monkeypatch):
+    """带 `queue_id` 的被拒请求**不得**先取消旧排队项。
+
+    `queue_id` 的语义是"旧项被取消 + 新内容重新投递"（ADR-0030 §4.4）；新内容
+    从未被接受时只剩前半句——用户既丢了旧项，也没收到新内容。所以预算判定必须
+    早于 `cancel_queue` 那次落盘（同 `_assert_supersedable` 已立的纪律）。
+    """
+    from agent_harness.agent.budget import BudgetAliasConflict
+
+    gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [AIMessage(content="答")], gate=gate,
+    )
+    launched = await harness.service.create_and_launch(task="A")
+    session_id = launched.session.session_id
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
+        what="run 起跑（gate 把它钉在模型调用上）",
+    )
+
+    queued = await harness.service.send_message(
+        session_id=session_id, content="旧项", mode="queue",
+    )
+    assert queued.status == "queued"
+    queue_id = queued.queued_message.queue_id
+    before = [e.type for e in harness.events(session_id)]
+
+    with pytest.raises(BudgetAliasConflict):
+        await harness.service.send_message(
+            session_id=session_id, content="新内容", mode="queue",
+            queue_id=queue_id, local_max_agent_turns=9, max_steps=8,
+        )
+
+    assert [e.type for e in harness.events(session_id)] == before, "被拒请求不得落盘"
+    pending = await harness.service.list_undelivered_inputs(session_id)
+    assert [p.input_id for p in pending] == [queue_id], "旧排队项必须原样还在"
+
+    gate.set()
+    await harness.wait_for(
+        lambda: harness.of_type(session_id, QUEUE_CONSUMED),
+        what="旧排队项仍被接力消费",
+    )

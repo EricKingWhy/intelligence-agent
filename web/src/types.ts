@@ -486,12 +486,101 @@ export interface ApprovalDecision {
   time?: string;
 }
 
+/** `run/paused.data.continuation`（`03 §3.4`：已完成 / 剩余 / 阻塞 / 下一步安全动作）。
+ *
+ *  只做**形状宽容读**：四个键缺任一 ⇒ 整体 null（不补齐、不用空串占位）——
+ *  确定性 continuation 与模型 closeout 都按同一契约落盘，读到畸形就如实说"没有
+ *  continuation"，而不是编一个空壳让 UI 看起来有内容。 */
+export interface RunContinuation {
+  completed: string[];
+  remaining: string[];
+  blockers: string[];
+  next_safe_action: string;
+}
+
+/** 四维账目里的一维读数（`#313`）：`null` = 载荷没带该维（老暂停 / 字段缺失），
+ *  **不是** 0（`11 §6.1` 的不可得 ≠ 0）。
+ *
+ *  `cost_usd` 在 wire 上是十进制**字符串**（二进制浮点相等不是契约），这里原样保留
+ *  字符串，不做 float 化——要算差值请用 `lib/runBudget.ts` 的十进制减法。 */
+export interface RunBudgetDimensionFacts {
+  agent_turns: number | null;
+  model_requests: number | null;
+  total_tokens: number | null;
+  cost_usd: string | null;
+}
+
+/** `data.limits.run` 的**四维** ceiling 视图（`#313`）：键名是载荷自己的 `max_*`
+ *  形态（与 `run_budget.RunLimits` 的字段名逐字相同，也与恢复请求 `budget.run` 的键
+ *  逐字相同——同一个名字在三个地方，别在前端另起同义词）。`null` = 该维**没配**
+ *  ceiling（unlimited，不是 0）。 */
+export interface RunLimitsFacts {
+  max_agent_turns_total: number | null;
+  max_model_requests: number | null;
+  max_total_tokens: number | null;
+  max_cost_usd: string | null;
+}
+
+/** `run/paused` 的折叠结果（`#312` T4）：一个**非终态**的暂停事实。
+ *
+ *  语义边界（`#305` PRD / `03 §5`）：暂停只收口**当前这段执行区间**，逻辑 run 仍在场
+ *  ——所以它不是 completed / failed / interrupted / NEED_RECONCILE 中的任何一个，
+ *  UI 必须能单独认出来（本字段存在 + `run_status === 'paused'`）。
+ *
+ *  字段全部来自事件真值（不变量 #22），名字刻意与后端载荷键对齐，方便逐字段对照
+ *  （`agent_harness.agent.run_budget.build_pause_data`）：
+ *  - `version` ← `data.budget_version`：CAS 的比较对象，恢复请求原样带回
+ *    （陈旧 ⇒ 后端 409，零副作用）。
+ *  - `consumed_agent_turns` ← `data.consumed.agent_turns`：**暂停那一刻的账**（快照，
+ *    不是重算值）——恢复保留它，UI 显示它。
+ *  - `run_limit` ← `data.limits.run.max_agent_turns_total`：绝对 ceiling；
+ *    **null = 无 ceiling**（`11 §6.1`：不可用 ≠ 0，绝不渲染成「还剩 0 轮」）。
+ *  - `consumed_dimensions` / `run_limits` ← `data.consumed` / `data.limits.run` 的
+ *    **四维**视图（`#313`）：暂停可能落在 requests / tokens / cost 上，只读 turn 那一维
+ *    会把"被 requests 卡住"显示成"消耗 0 轮、无上限"。两者为 null 表示载荷没带这组键
+ *    （老暂停），不是"四维都是 0"。
+ *  - `local_fuse` ← `data.limits.local`：单实例保险丝。命中它时**没有** run ceiling
+ *    可抬（要改的是部署/档位预算），故两种暂停原因的恢复动作不同，分开存。
+ *  - `trace_id` 恒有键、可为 null（暂停不合成 trace URL）。 */
+export interface RunPausedInfo {
+  /** 被暂停的逻辑 run——恢复请求必须原样带它（不许换 run_id）。 */
+  run_id: string;
+  /** `data.budget_version`：CAS 版本，恢复时回传为 `expected_version`。 */
+  version: number;
+  /** 暂停事件自己的 seq（`run/paused` 的 durable 位置）——对账/去重用。 */
+  pause_seq: number | null;
+  /** `budget_exhausted`（本票唯一值；deadline / stuck 属 #315 / #317）。 */
+  reason: string;
+  /** 命中的 ceiling 维度：四个 run 维之一，或 `local.max_agent_turns`。 */
+  trigger_dimension: string;
+  consumed_agent_turns: number;
+  /** run 作用域绝对 ceiling；null = 未配（无 ceiling，不是 0）。 */
+  run_limit: number | null;
+  /** `#313`：四维消耗快照（`data.consumed`）；载荷没带 ⇒ null（不是全 0）。 */
+  consumed_dimensions: RunBudgetDimensionFacts | null;
+  /** `#313`：run 作用域四个绝对 ceiling（`data.limits.run`）；载荷没带 ⇒ null。 */
+  run_limits: RunLimitsFacts | null;
+  /** local 作用域保险丝快照；事件没带（旧/畸形载荷）时为 null。 */
+  local_fuse: { max_agent_turns: number; source: string } | null;
+  /** 暂停那一刻的续跑指引；形状不合契约时 null（不伪造进度）。 */
+  continuation: RunContinuation | null;
+  /** `model` = 预算内那次有界 closeout；`deterministic` = 只由持久事实组装。 */
+  closeout_source: string;
+  /** 恢复前置条件（预算暂停为空数组——预算恢复不需要额外证据）。 */
+  resume_requirements: string[];
+  trace_id: string | null;
+}
+
 export interface ConversationState {
   session_id: string;
   turns: Turn[];
   /** The turn currently receiving events, if streaming. */
   active_step_id: number | null;
-  run_status: 'idle' | 'running' | 'completed' | 'failed';
+  /** `paused`（`#312`）= 逻辑 run 在预算到顶处**非终态**收口，等客户端抬高绝对
+   *  ceiling 后以同一 run_id 续跑。它与 completed / failed / interrupted 并列而
+   *  **不可互相替代**：暂停不写 run/completed|failed（后端不变量），前端也不许把
+   *  它显示成三者之一——否则用户会把"等着被恢复"读成"已经结束"。 */
+  run_status: 'idle' | 'running' | 'completed' | 'failed' | 'paused';
   /** run/failed.data.reason === 'cancelled'（客户端断连，df4f7d8→da394a9 批语义）
    *  时为 true——Run Pulse 显示「已取消」（中断 ≠ 错误，同 bash stopped 语义域）。 */
   run_cancelled: boolean;
@@ -581,6 +670,12 @@ export interface ConversationState {
    *  事件之前就死了（run/started 不带 step，检测器只能沿用后续事件的 step_id）
    *  ——UI 应说「首个步骤开始前中断」，不要渲染成「第 ? 步」。 */
   run_interrupted: { step_id: number | null; interrupted_seq: number | null; reason: string } | null;
+  /** `#312` T4：最近一个 `run/paused` 的折叠结果。null = 无暂停（或已被
+   *  `run/resumed` 收起——恢复那一刻它就该消失，因为该逻辑 run 又跑起来了）。
+   *
+   *  与 `run_interrupted` 是**两个**事实，别合并：中断 = 进程重启打断（终态、
+   *  不可恢复），暂停 = 预算到顶（非终态、可被同 run 恢复）。UI 必须分别呈现。 */
+  run_paused: RunPausedInfo | null;
   /** #220：`run/failed.data` 的失败归因折叠。两个键**互相独立**（`session.end_run` 各自
    *  判空）：`reason` 是机器可读码——已分类故障给 `provider_*`，未分类给异常类型名
    *  （#222 起 reason 在运行期路径上**总有值**），`message` 是随附文案——已分类的供应商

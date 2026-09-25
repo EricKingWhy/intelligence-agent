@@ -20,14 +20,26 @@
 - **`.sh` 是语义参考实现，冻结**：`docs/SDD_WORKFLOW_PROTOCOL.md` **按行号**引用它
   （`check_review_coverage.sh:51` 的 `DOC_PATTERN`、`:74-75` 的 fail-closed 形状），
   所以**不要**把 `.sh` 改成包装脚本，也不要重排它的行。
-- **本文件是等价实现**，口径逐条对齐 `.sh`；凡是 `.sh` 里的实测坑（见其注释）本文件原样继承。
-- 两者必须**同 tip 同结论**：三元组（总数 / 已审查 / 待判定）与 ❌ 集合逐项相同。
-  日常跑哪一个都行；改动任一侧的语义时，另一侧必须同步。
+- **自 2026-09-23 起本文件是权威实现**（协议 **§8.8.4 第 4 行**：`.sh` 保持冻结、只对拆分前台账
+  布局成立）。台账已拆到 `docs/review_ledger.d/`，而 `.sh` 只读旧单文件 ⇒ 它在当前布局下
+  **跑不到判定循环**（实测 `exit 1`、只输出「台账里没有审查行」）⇒ "同 tip 同结论"只在
+  **拆分前布局**可比。该边界与 `.sh` 的归宿（删除 / 改为历史制品）登记在
+  `docs/agents/SDD_ACCELERATION_AUDIT.md` §9.4.1，**留待用户裁决**。
+- ⇒ 本文件曾写的"改动任一侧的语义时，另一侧必须同步"**已作废**（它写于 2026-09-22，早于上述
+  冻结）：方案 C（docs-only 自动归属）与「零新增内容」两条判据都**只进本文件、不改 `.sh`**。
+  改 `.sh` 等于改一个已冻结、且归宿待裁决的制品，且其改动在当前布局下**根本无法与本文对照验证**。
 
 ## 与 `.sh` 的已知（且无害）差异
 
+- **本文档新增的两条判据 `.sh` 里没有**（方案 C 的 docs-only 自动归属、`zero_content_parent`
+  的零新增内容）—— 见上节：`.sh` 冻结且只对拆分前布局成立，两条都只进本文件。这**不是放松**：
+  两条的输入都是 git 对象给出的**客观事实**（路径 / 树），比"作者写一行白名单声明"更强。
 - 输出中 `%-44s` 的 desc 列对齐：bash printf 与 python 的宽度计算在**多字节中文**上可能差几个
   空格。验收比对的是**三元组 + ❌ 集合**，不是逐字节 stdout。
+- 末行的归属枚举：`.sh:186` 列的是「审查行 / 白名单 / 台账记账」，本文件列的是**能真正构成归属的
+  那几类**（审查行 / 台账记账 / docs-only / 零新增内容）—— 故意**不含白名单**：`[whitelist]` 那一支
+  已**不可能放行任何提交**（能走到它的提交必然不是 docs-only，或改动文件核对不了，两条都是失败
+  分支；2026-09-26 两轴 Standards 轴证出、并逐条复核）。纯措辞、不参与判定。
 - 本文件用 `git cat-file --batch-check` 一次解掉全部 rev、用一次 `git show` 批量取文件表，
   因此比 `.sh`（逐条起子进程）快一到两个数量级；**判定逻辑不变**。
 
@@ -38,9 +50,13 @@
     LEDGER_DIR=path/to/dir python scripts/check_review_coverage.py     # 默认 docs/review_ledger.d
     python scripts/check_review_coverage.py --list       # 只打印范围与覆盖数；仍有缺口时退 2
 
-判据：`<最早台账 base>..HEAD` 的**每条 commit 都必须在台账里有归属**——审查行 / `[whitelist]` 段
-里逐条自校验过 docs-only 的 commit / **恰好只改台账文件本身**的记账提交。
-**代码提交永远不能走白名单**，只有"补一次审查"一条路。
+判据：`<最早台账 base>..HEAD` 的**每条 commit 都必须在台账里有归属**——审查行 / 改动文件
+**全部**命中文档路径的 docs-only 自动归属 / **恰好只改台账文件本身**的记账提交 / **整棵树逐字
+等于某个父提交的树**的零新增内容提交。四类里只有第一类需要人写台账；后三类都是 git 对象给出的
+客观事实。
+**代码提交永远不能走白名单**，只有"补一次审查"一条路——且 `[whitelist]` 段自 2026-09-23 起已
+**不再能放行任何提交**（能走到那一支的提交必然不是 docs-only，或改动文件核对不了），旧条目只剩
+"未被用到"告警的功能；旧条目的去留属**用户裁决项**（见上文 `.sh` 冻结与归宿段）。
 
 ## 双读过渡（issue #293）
 
@@ -84,6 +100,10 @@ LEDGER_PATH = "docs/review_ledger.tsv"
 #: 台账目录（issue #293）：**一文件一条**。不存在 = 空（过渡期两处都认，见模块 docstring "双读过渡"）。
 LEDGER_DIR = "docs/review_ledger.d"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40,64} (commit|tag) \d+$")
+#: `git cat-file --batch-check` 对 `<rev>^{tree}` 的输出形状（`<sha> tree <size>`）。
+#: **不扩展 `FULL_SHA_RE`** 去兼收 `tree`：那个模式还用作"这一行像不像 commit 行"的判据
+#: （`files_of` 拿它给自己造的哨兵行校验），放宽它会让"解出来的是棵树"悄悄通过 commit 检查。
+TREE_SHA_RE = re.compile(r"^[0-9a-f]{40,64} tree \d+$")
 
 #: 描述字段 lint 的规则名集合（issue #295 / 缺陷 7）。**测试按集合断言**：
 #: 加规则不该让守卫红，删 / 改名现有规则必须红。
@@ -136,10 +156,12 @@ _BOLD_PAIR_RE = re.compile(r"\*\*(?=[^\s*])(?:[^*]|\*(?!\*))*?\*\*")
 _GLOB_STARS_RE = re.compile(r"(?<=[A-Za-z0-9_./-])\*\*(?=[/\s,，。）)]|$)")
 
 FAIL_HELP = """
-闸门失败。处置（二选一，不要改台账蒙过去）：
-  · 对这些 commit **补一次审查**（两轴 /code-review，范围写进台账的新行）；
-  · 或者：若它们确实只是文档改动 ⇒ 在台账 [whitelist] 段声明（脚本会校验 docs-only）。
-  协议原文：docs/SDD_WORKFLOW_PROTOCOL.md §7。
+闸门失败。处置（不要改台账蒙过去）：
+  · 这些 commit 动了代码 ⇒ **补一次审查**（两轴 /code-review，范围写进台账的新行）；
+  · 若确认只是文档改动 ⇒ 归属**本该自动**（脚本按路径机械判定）；仍失败说明它的改动文件
+    **核对不了**（合并提交的 `--cc` 空表）或含非文档文件。⚠ **别写 `[whitelist]`**：那一支
+    自 2026-09-23 起已不再放行任何提交（写进去只会得到一个 ⚠ 未用到，见协议 §7 第 8 条）。
+  协议原文与全部例外条款：docs/SDD_WORKFLOW_PROTOCOL.md §7 第 8 条。
 """
 
 
@@ -442,6 +464,72 @@ def format_auto_attribution(short: str, subject: str, files: list[str]) -> str:
     return f"✅ docs-only（按路径自动归属）: {short}  {subject} — {' + '.join(files)}"
 
 
+def zero_content_parent(sha: str, parents: list[str], trees: dict[str, str | None]) -> str | None:
+    """`sha` 的整棵树是否**逐字等于**某个父提交的树 ⇒ 该提交零新增内容。命中则返回那个父。
+
+    ## 为什么需要它（结构性缺陷，2026-09-26 两例实测）
+
+    `strict: true` 要求分支与 `main` 同步，而 `rebase` 属默认禁止项 ⇒ 只能先把 `main` 并进分支。
+    于是 GitHub 合出来的 merge 与**父提交二（分支顶端）逐文件相同** ⇒ `git show --cc --name-only`
+    空表 ⇒ `is_docs_only` 与白名单那支**都** fail-closed（空表 = "核对不了"，它们 fail-closed 是对的）
+    ⇒ **每个 PR 合入都会在 `main` 顶端重造一个 ❌**（`c8e04cb9` / `da7dfef1` 各实测一次，后者是前者
+    处置落地**当天**再复现的）。squash / rebase 绕不开：它们重写 sha ⇒ 台账区间行的 `tip` 不再是
+    HEAD 的祖先 ⇒ 闸门**判不了**（比判红更糟）。
+
+    ## 它不是放松（这是本判据成立的全部理由）
+
+    空文件表是**"核对不了"** —— 枚举失败也是空表，所以不能据以放行。但**树对象相等**不是
+    "没看到问题"，是**正向证明**：这个提交的整棵树逐字等于某个父的整棵树，故它不可能携带任何
+    未被那个父覆盖的内容，而那个父自身（及其祖先）仍各自按原判据归属。两条**互相独立**的 git
+    通路（`--cc` 文件表 vs tree 对象）得出同一结论时才放行 —— 与 `is_docs_only` 用"路径客观事实"
+    取代"作者声明"是同一个思路。
+
+    ## 已知残余（登记，不阻断）
+
+    文件表为空**且树不等于任何父**的 merge（两侧各改不同文件、结果取并集：每个文件都等于某个父的
+    blob ⇒ `--cc` 为空，而整棵树既不等于父 1 也不等于父 2）**仍 fail-closed**。刻意如此：它的内容
+    是两侧的并集，"零新增"对它不成立。
+
+    ⚠ **本判据只治 GitHub PR 合入那一种形状，别读成"空表问题被根治了"**。2026-09-26 用**本文件
+    自己的 `files_of`** 实测本仓区间 `089524a~1..da7dfef1`（713 笔 commit / 21 个 merge），21 个
+    merge 分四类：
+
+    - 树 == 某父：**2**（恰好就是两笔 PR merge `c8e04cb9` / `da7dfef1`）⇒ 对"每个 PR 合入都重现"
+      这条病，覆盖率 **2/2**；
+    - 文件表为空**且**树 ≠ 任何父：**3**（`cbe2e0ccb` / `2fb974ff8` / `cbe3b09e9`）—— **本判据不
+      放行**它们，这才是上面那条"刻意保留的残余"，至今靠台账行覆盖；
+    - 文件表非空且全部是文档：**12** —— 由**另一条**机械判据（docs-only 按路径自动归属）覆盖，
+      与本条无关；
+    - 文件表非空且含代码：**4**（`1049a59c1` / `b636a0050` / `3b4e93c6f` / `080cc1464`）—— 需要
+      **真实审查行**。
+
+    ⇒ 别把"树 ≠ 某父"当成残余：那是 19 个（3 + 12 + 4），其中 16 个今天已被别的路径机械覆盖
+    （**第一轮改写曾把这 19 个全说成"取并集形状、全靠台账行"，是错的**）。要连那 3 个一起放行，
+    判据得从「树 == 某个**父**的树」放松成「合并未引入任何新 blob ⇒ 每个改动文件都等于某个父的
+    blob」之类 —— 那是**更弱**的一条（"合并没带来新内容" ≠ "这个提交零新增内容"），不在本批
+    范围内，需单独裁决。
+    """
+    if not parents:
+        return None                     # 根提交：没有父可比 —— 不是"零新增"，是"无从判定"
+    target = trees.get(sha)
+    if not target:
+        return None                     # 解不出树 ⇒ 核对不了 ⇒ fail-closed
+    for parent in parents:
+        if trees.get(parent) == target:
+            return parent
+    return None
+
+
+def format_zero_content(short: str, subject: str, parent: str, tree: str) -> str:
+    """渲染零新增内容归属的一行（**打印树与父的完整 sha**）。
+
+    这一行的全部价值是**可复算**：审计者拿父的全 sha 跑一次 `git diff --name-only <父> <sha>`
+    就该得到空输出。只印短 sha 会让"别处的同名缩写"有机会冒充，而这条判据的正当性完全建立在
+    "机械可验"上 ⇒ 这里不用缩写（行会长一点，但每个 PR 合入最多出现一次）。
+    """
+    return f"✅ 零新增内容（树 {tree} == 父 {parent} 的树）: {short}  {subject}"
+
+
 # --------------------------------------------------------------------------- #
 # 提交图：一次 rev-list 拿全图，之后全靠内存可达性（不再逐条起子进程）
 # --------------------------------------------------------------------------- #
@@ -483,18 +571,29 @@ def make_ancestors(graph: dict[str, list[str]]):
     return ancestors, is_ancestor
 
 
-def resolve_many(revs: list[str]) -> dict[str, str | None]:
-    """一次 `git cat-file --batch-check` 解掉全部 `<rev>^{commit}`；失败映射为 None。"""
+def resolve_many(revs: list[str], peel: str = "^{commit}",
+                 expect: re.Pattern[str] = FULL_SHA_RE) -> dict[str, str | None]:
+    """一次 `git cat-file --batch-check` 解掉全部 `<rev><peel>`；失败（或形状不符 `expect`）映射为 None。
+
+    `peel` / `expect` 是为「树」加的：`resolve_trees` 用 `^{tree}` + `TREE_SHA_RE`。
+    校验形状而不只看返回码，是因为 `--batch-check` 对不存在的对象**也退 0**、只是该行变成
+    `<input> missing`（不校验就会把一个报错文本当成 sha 用下去）。
+    """
     uniq = sorted(set(revs))
     if not uniq:
         return {}
-    proc = git("cat-file", "--batch-check", input_text="".join(f"{r}^{{commit}}\n" for r in uniq))
+    proc = git("cat-file", "--batch-check", input_text="".join(f"{r}{peel}\n" for r in uniq))
     out: dict[str, str | None] = {}
     lines = proc.stdout.split("\n")
     for rev, line in zip(uniq, lines):
         line = line.strip()
-        out[rev] = line.split(" ")[0] if FULL_SHA_RE.match(line) else None
+        out[rev] = line.split(" ")[0] if expect.match(line) else None
     return out
+
+
+def resolve_trees(revs: list[str]) -> dict[str, str | None]:
+    """一次解掉全部 rev 的**树** sha（`resolve_many` 的树版）。解不出的映射为 None ⇒ 判据 fail-closed。"""
+    return resolve_many(revs, peel="^{tree}", expect=TREE_SHA_RE)
 
 
 def short_and_subject(shas: list[str]) -> dict[str, tuple[str, str]]:
@@ -645,8 +744,30 @@ def main(argv: list[str]) -> int:
     meta = short_and_subject(missing)
     filemap = files_of(missing)
 
+    # 零新增内容（树 == 某父的树）只在**文件表为空**时才可能成立，故只对那批算，且一次批量解树
+    # —— 循环里不起子进程（与本文件其余部分的批量风格一致）。
+    # ⚠ 这不是"缩小判据范围"：`--cc` 列出的文件就是**与所有父都不同**的那些 ⇒ 文件表非空 ⟹
+    #   树必不等于任一父（判据在那里恒为 None，算它纯属浪费）。
+    zero_parent: dict[str, tuple[str, str]] = {}
+    cand = [sha for sha in missing if not filemap.get(sha)]
+    if cand:
+        cand_parents = [p for sha in cand for p in graph.get(sha, ())]
+        trees = resolve_trees(cand + cand_parents)
+        for sha in cand:
+            hit = zero_content_parent(sha, graph.get(sha, []), trees)
+            if hit is not None:
+                # 判据成立时 `trees[sha]` 必然非空（它就是与父相等的那棵树），`.get(…, "")` 只为类型。
+                zero_parent[sha] = (trees.get(sha, "") or "", hit)
+
     for sha in missing:
         short, subject = meta.get(sha, (sha[:7], ""))
+        # 零新增内容（**最强的一条**：正向证明，与"核对不了"相反）⇒ 排在最前。
+        # 合并提交的文件表本来就是空的，故下面两条对它必然为假 —— 顺序只影响打印的标签。
+        if sha in zero_parent:
+            tree, parent = zero_parent[sha]
+            print(format_zero_content(short, subject, parent, tree))
+            continue
+
         # 台账自身的记账动作**自动放行**：恰好只改 docs/review_ledger.tsv 的提交机械可验、藏不了代码；
         # 而"把这件事记进台账"本身又要被记账是**死循环**（实测 2026-09-17 绕了三轮）。
         # 收窄条件：夹带任何其他文件（含 scripts/）即回落到正常判定。
@@ -658,6 +779,10 @@ def main(argv: list[str]) -> int:
         # 与白名单相比这是**更强**的证据（路径客观事实 > 作者声明），所以放在白名单之前，
         # 且**不需要**作者再写一行声明。⚠ 顺序有讲究：先 `is_docs_only` 再回落白名单，
         # 因为已有的大量白名单行现在只是冗余（不删也能跑 —— 白名单分支仍在）。
+        # ⚠⚠ 2026-09-26 两轴复核：`is_docs_only` 为假 ⇒ `files_docs` 里**必有**非文档文件 ⇒
+        # 下面白名单那一支只能落到两个**失败**分支（空表 / `bad` 非空），于是 `✅ 白名单(docs-only)`
+        # **不可达** ⇒ `[whitelist]` 段如今唯一的产出是"未被用到"告警。代码**保留不动**（去留属
+        # 用户裁决项，见文件头 `.sh` 冻结与归宿段），但别把它读成一条仍在生效的放行路径。
         files_docs = filemap.get(sha, [])
         if is_docs_only(files_docs):
             print(format_auto_attribution(short, subject, files_docs))
@@ -704,7 +829,8 @@ def main(argv: list[str]) -> int:
 
     # 口径门：断言的是"每条 commit 都有台账归属"，**不是**"审查确实发生过"——台账是声明式输入，
     # 审查行的真实性由人对账（详见 docs/SDD_WORKFLOW_PROTOCOL.md §7 第 8 条的信任边界）。
-    print(f"✅ 台账覆盖闸门通过：{base_literal}..HEAD 每条 commit 均有归属（审查行 / 白名单 / 台账记账）。")
+    print(f"✅ 台账覆盖闸门通过：{base_literal}..HEAD 每条 commit 均有归属"
+          f"（审查行 / docs-only / 台账记账 / 零新增内容）。")
     return 0
 
 
