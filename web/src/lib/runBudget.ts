@@ -135,9 +135,15 @@ interface DecimalText {
 
 /** 十进制的读数 / 比较 / 加减（cost 维）：**绝不 float 化**（`11 §6.1`：二进制浮点
  *  相等不是契约）。按小数点对齐后做整数运算，因而不引入任何近似；形状不可解析 ⇒
- *  null（= unavailable），不猜也不四舍五入。 */
-function parseDecimalText(raw: string | number): DecimalText | null {
+ *  null（= unavailable），不猜也不四舍五入。
+ *
+ *  入参宽容到 `undefined`（而不只是 `null`）：本模块的读数是**导出**给调用方的纯
+ *  函数，非规范载荷（缺键）与"值不可得"在渲染上同一处置——都该显示 unavailable，
+ *  而不是在 `raw.trim()` 上抛 TypeError 把整个面板带崩。 */
+function parseDecimalText(raw: string | number | null | undefined): DecimalText | null {
+  if (raw === null || raw === undefined) return null;
   const text = typeof raw === 'number' ? String(raw) : raw.trim();
+  if (!text) return null;
   const match = /^([+-]?)(\d+)(?:\.(\d*))?$/.exec(text);
   if (!match) return null;
   const sign = match[1];
@@ -180,11 +186,12 @@ function addDecimal(raw: string | number, extra: number): string | null {
  *  不合 ⇒ null = unavailable——"算不出剩余"就如实说不知道，比编一个 0 更接近事实
  *  （与 CLI `_dimension_remaining` 同一判据）。 */
 export function dimensionRemaining(
-  consumed: number | string | null,
-  ceiling: number | string | null,
+  consumed: number | string | null | undefined,
+  ceiling: number | string | null | undefined,
   decimal: boolean,
 ): number | string | null {
-  if (consumed === null || ceiling === null) return null;
+  if (consumed === null || consumed === undefined) return null;
+  if (ceiling === null || ceiling === undefined) return null;
   if (!decimal) {
     if (typeof consumed !== 'number' || typeof ceiling !== 'number') return null;
     return Math.max(ceiling - consumed, 0);

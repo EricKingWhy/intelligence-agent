@@ -513,7 +513,8 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
 
     - `version`：初始 1，每条 `run/resumed` +1（CAS 的比较对象，`03 §3.4`）。
     - `consumed`：四维各自按计数点累计（`consumed_from_events`）。
-    - `paused`：最后一条 `run/paused` 之后**没有** `run/resumed` 也没有终态 → 仍在暂停。
+    - `paused`：最后一条 `run/paused` 之后**没有** `run/resumed` **也没有终态** → 仍在
+      暂停（终态压过暂停，见下）。
     - `terminal_type`：终态事件的状态名（`03 §5`：`completed` / `failed` / `interrupted`）。
     """
     items = [event for event in events if event.run_id == run_id]
@@ -555,6 +556,14 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
             terminal_type = None
         elif event.type in _TERMINAL_TYPES:
             terminal_type = _TERMINAL_STATE[event.type]
+            # 终态**压过**暂停（`03 §5`：终态与 paused 互斥）。事件顺序是判据：
+            # 暂停只收口"当前这段执行区间"，其后若真落了终态事件，这个 run 就已经
+            # 结束了——留着 `paused` 会让投影同时说"等恢复"与"已失败"
+            # （`state=paused` 配 `terminal_type=failed`、`resumable=False`），
+            # 客户端按 `state` 判可恢复性就会给一个已失败的 run 亮恢复入口。
+            # 今天没有生产写入点会走这条（暂停后没有活着的循环可被取消，interrupt
+            # 扫描也在 `run/paused` 处收口），但对账链一接进来它就是第一个踩到的边界。
+            paused = None
     return RunBudgetState(
         run_id=run_id,
         version=version,

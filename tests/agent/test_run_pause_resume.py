@@ -215,7 +215,7 @@ async def test_provider_reported_cost_is_summed_exactly_across_steps_and_closeou
 
     `#313` 的 cost 维只有一条来源：Provider 自己报的归属成本（`02 §5.1`：只统计
     Provider 自报的值，不臆造费率表）。本用例把这条正路走一遍：普通轮与 closeout
-    各报一次，四次请求（2 个被接纳的轮 + 1 次被拒的轮 + closeout）合计必须**逐字**
+    各报一次，三次请求（2 个被接纳的轮 + 1 次 closeout）合计必须**逐字**
     等于手工相加的十进制值——`float` 累加会让 `0.0025 × 3` 变成 `0.007500000000000001`，
     而 wire 上的成本是十进制（`11 §6.1`：二进制浮点相等不是契约）。
 

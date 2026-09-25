@@ -971,6 +971,35 @@ def test_project_budget_running_state_carries_the_enforcement_projection() -> No
     assert "reason" not in projection, "没有暂停原因时不落恒为 null 的键（缺席 ≠ 空值）"
 
 
+def test_a_terminal_event_after_a_pause_supersedes_it() -> None:
+    """终态**压过**暂停：`run/paused` 之后又落了终态 ⇒ 这个 run 已经结束。
+
+    事件顺序是判据（`03 §5`：`paused` 与三个终态互斥）。留着暂停态会让同一份投影
+    同时说两件事——`state="paused"` 配 `terminal_type="failed"`、`resumable=False`
+    ——客户端按 `state` 判"能不能恢复"就会给一个已失败的 run 亮恢复入口。
+    （修后重审的限定发现：暂停分支曾无条件压过终态；今天没有生产写入点会走这条，
+    但对账链接进来时它是第一个边界。）
+    """
+    for terminal_event, expected in (
+        (RUN_COMPLETED, "completed"), (RUN_FAILED, "failed"), (RUN_INTERRUPTED, "interrupted"),
+    ):
+        events = [_started(), _ev(2, MODEL_COMPLETED), _paused(3), _ev(4, terminal_event)]
+        state = derive_run_budget(events, RUN_ID)
+
+        assert state.paused is None, f"{terminal_event} 之后不该还留着暂停态"
+        assert state.terminal_type == expected
+        assert state.resumable is False, "终态不可恢复"
+        projection = project_budget(state, accounting=USAGE_ONLY)
+        assert projection["state"] == expected, "投影说的是那一个终态的名字，不是 paused"
+
+    # 暂停仍是最后一条事件时，暂停态照旧（本用例不得顺手改掉正常路径）。
+    still_paused = derive_run_budget(
+        [_started(), _ev(2, MODEL_COMPLETED), _paused(3)], RUN_ID,
+    )
+    assert still_paused.paused is not None
+    assert project_budget(still_paused, accounting=USAGE_ONLY)["state"] == "paused"
+
+
 def test_project_budget_terminal_and_none_states() -> None:
     terminal = derive_run_budget([_started(), _ev(2, MODEL_COMPLETED), _ev(3, RUN_COMPLETED)], RUN_ID)
     assert project_budget(terminal, accounting=USAGE_ONLY)["state"] == "completed", (

@@ -13,6 +13,7 @@ import {
   ceilingDraftError,
   ceilingDraftValue,
   dimensionLabel,
+  dimensionRemaining,
   minResumeValue,
   pauseFacts,
 } from './runBudget';
@@ -181,6 +182,17 @@ describe('pauseFacts —— 与 CLI 同一口径的展示数字（#312）', () =
     // 计量维度的建议默认值 = consumed + 1（不是"最小合法值"）。
     expect(minResumeValue(cost.resumeTarget, cost.tripped!)).toBe('1.10');
     expect(cost.resumeTarget.resumeFlag).toBe('--run-cost-usd');
+  });
+
+  it('非规范载荷（缺键 / undefined）：如实 unavailable，不抛异常崩面板', () => {
+    // 修后重审的限定发现：十进制分支原先只挡 `null`，`undefined` 会在 `raw.trim()`
+    // 上抛 TypeError。本模块的读数是导出给调用方的纯函数，两种"没有值"必须同一处置。
+    expect(dimensionRemaining(undefined, '2.00', true)).toBeNull();
+    expect(dimensionRemaining('0.10', undefined, true)).toBeNull();
+    expect(dimensionRemaining(null, '2.00', true)).toBeNull();
+    expect(dimensionRemaining(undefined, 5, false)).toBeNull();
+    expect(dimensionRemaining(3, undefined, false)).toBeNull();
+    expect(dimensionRemaining('0.10', '0.30', true)).toBe('0.20');
   });
 
   it('老暂停载荷（无四维组）：turns 维照旧，其余三维不列（不编 unavailable 噪声）', () => {

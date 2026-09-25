@@ -32,7 +32,7 @@
 - `derive_run_budget(events, run_id)` —— 派生账本（replay 等价的唯一判定点）
 - `pause_trigger(...)` —— 准入判定，**位置在 loop 顶部、任何工作之前**；`TRIGGER_RUN_TURNS` / `TRIGGER_LOCAL_TURNS`
 - `closeout_capacity(...)` —— 收口预留（`RESERVED_CLOSEOUT_TURNS = 1`）
-- `resume_ceiling_ok` / `validate_resume` —— **CAS 的唯一判定点**（`expected_version` + 绝对 ceiling 真高于已消耗 + `resume_basis`）
+- `resume_headroom_ok` / `validate_resume` —— **CAS 的唯一判定点**（`expected_version` + 绝对 ceiling 真高于已消耗 + `resume_basis`）
 - `build_limits_snapshot` / `build_pause_data` / `build_resume_data` / `as_run_started_budget`
 - `normalize_continuation` / `deterministic_continuation` / `latest_paused_run`
 
