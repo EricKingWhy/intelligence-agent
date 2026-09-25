@@ -226,7 +226,18 @@ class LongTaskPastLegacyTurnLimitScenario:
                 error=f"{type(error).__name__}: {error}",
             )
 
+        # 终态读盘 + **独立复读**（新的 store 实例重新读盘）：两次读盘逐条同序 ==
+        # 轨迹在判定时已经静止。这条不是礼节 —— `#312` 实测：可选能力的收尾会
+        # **追加** durable 事实（`MemoryWriteback.close()` 在 `run/completed` 之后
+        # 落一条 `memory/degraded`），早读会让证据里的事件数比 runner 随后复制的
+        # 轨迹少一行，`validator.py` 的「记录值 ↔ 轨迹行数」比对如实判 FAIL ——
+        # 那是一次**取证缺陷**，却长得像产品缺陷。
+        # 本场景自建运行时（不经 capability 栈 ⇒ 当前没有后写者），复读用来**证明**
+        # 这一点而不是假设它。**将来若在此接上 capability 栈**：它的收尾必须排在
+        # 读盘之前（`pause_resume.py` 的 `state.shutdown()`，实现于 `089de04`）——
+        # 不要把读盘放进 `try` 而把收尾留在 `finally`（那正是假 FAIL 的形状）。
         events = store.read_events(ctx.session_id)
+        replayed = JsonlSessionStore(root=ctx.session_root).read_events(ctx.session_id)
         tool_calls = [
             str(event.data.get("tool_name"))
             for event in events
@@ -238,6 +249,7 @@ class LongTaskPastLegacyTurnLimitScenario:
         assertions = self._assertions(
             ctx=ctx, run_status=result.status, tool_calls=tool_calls,
             run_id=run_id, events=events, steps=result.steps, fuse=fuse,
+            replayed=replayed,
         )
         return AttemptOutcome(
             ok=all(item.ok for item in assertions),
@@ -247,13 +259,14 @@ class LongTaskPastLegacyTurnLimitScenario:
             steps=result.steps,
             tool_calls=tool_calls,
             assertions=assertions,
-            event_count=len(events),
+            # 记**复读**的条数：它是场景能给出的最后一读，也是 runner 随即将复制的那份
+            event_count=len(replayed),
             output_tail=result.final_text[-2000:],
         )
 
     def _assertions(
         self, *, ctx: ScenarioContext, run_status: str, tool_calls: list[str],
-        run_id: str, events: list[Any], steps: int, fuse: Any,
+        run_id: str, events: list[Any], steps: int, fuse: Any, replayed: list[Any],
     ) -> list[AssertionResult]:
         """结构性判据（机械可检，不是 LLM judge）。"""
         from agent_harness.agent.budget import SOURCE_DEPLOYMENT
@@ -304,6 +317,18 @@ class LongTaskPastLegacyTurnLimitScenario:
             AssertionResult(
                 name="no_dangling_tool_calls", ok=not dangling,
                 detail=f"悬空 call={dangling}",
+            ),
+            AssertionResult(
+                name="durable_replay_matches_live",
+                ok=(
+                    [(event.seq, event.type) for event in events]
+                    == [(event.seq, event.type) for event in replayed]
+                ),
+                detail=(
+                    f"独立复读（新 store 实例）{len(replayed)} 条事件与首读逐条同序；"
+                    "同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份"
+                    "（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+                ),
             ),
             AssertionResult(
                 name="session_identity_present",

@@ -69,33 +69,44 @@ def _events(*, steps: int, fuse_tripped: bool, bash_calls: int = TRANSITIONS) ->
 
     `fuse_tripped=True` 时把 `max_steps_exceeded` 写进一次 run/failed（模拟旧行为——
     这正是"撞 fuse 的 run 不该被记成通过"的输入）。
+
+    每条带 `seq`（与持久化 `SessionEvent` 同名同义）：`durable_replay_matches_live`
+    按 `(seq, type)` 逐条比，替身没有 seq 就比不出"复读与首读同序"这件事。
     """
     events: list[Any] = [
-        SimpleNamespace(type="run/started", data={"turn_index": 1}, run_id="run-long-1"),
+        SimpleNamespace(seq=1, type="run/started", data={"turn_index": 1}, run_id="run-long-1"),
     ]
     for index in range(1, steps + 1):
-        events.append(SimpleNamespace(type="model/completed", data={"content": ""}, run_id="run-long-1"))
+        events.append(SimpleNamespace(
+            seq=len(events) + 1, type="model/completed", data={"content": ""},
+            run_id="run-long-1",
+        ))
         if index <= bash_calls:
             call_id = f"call-{index}"
             events.append(SimpleNamespace(
-                type="tool/call", data={"tool_call_id": call_id, "tool_name": "bash"},
+                seq=len(events) + 1, type="tool/call",
+                data={"tool_call_id": call_id, "tool_name": "bash"},
                 run_id="run-long-1",
             ))
             events.append(SimpleNamespace(
-                type="tool/result", data={"tool_call_id": call_id, "tool_name": "bash"},
+                seq=len(events) + 1, type="tool/result",
+                data={"tool_call_id": call_id, "tool_name": "bash"},
                 run_id="run-long-1",
             ))
     events.append(SimpleNamespace(
-        type="tool/call", data={"tool_call_id": "call-write", "tool_name": "write"},
+        seq=len(events) + 1, type="tool/call",
+        data={"tool_call_id": "call-write", "tool_name": "write"},
         run_id="run-long-1",
     ))
     events.append(SimpleNamespace(
-        type="tool/result", data={"tool_call_id": "call-write", "tool_name": "write"},
+        seq=len(events) + 1, type="tool/result",
+        data={"tool_call_id": "call-write", "tool_name": "write"},
         run_id="run-long-1",
     ))
     if fuse_tripped:
         events.append(SimpleNamespace(
-            type="run/failed", data={"reason": "max_steps_exceeded", "message": "撞保险丝"},
+            seq=len(events) + 1, type="run/failed",
+            data={"reason": "max_steps_exceeded", "message": "撞保险丝"},
             run_id="run-long-1",
         ))
     return events
@@ -103,7 +114,7 @@ def _events(*, steps: int, fuse_tripped: bool, bash_calls: int = TRANSITIONS) ->
 
 def _assertions_for(
     *, steps: int, fuse_tripped: bool, files: dict[str, str], bash_calls: int = TRANSITIONS,
-    tool_calls: list[str] | None = None,
+    tool_calls: list[str] | None = None, replayed: list[Any] | None = None,
 ) -> dict[str, Any]:
     events = _events(steps=steps, fuse_tripped=fuse_tripped, bash_calls=bash_calls)
     calls = tool_calls if tool_calls is not None else ["bash"] * bash_calls + ["write"]
@@ -115,6 +126,7 @@ def _assertions_for(
         events=events,
         steps=steps,
         fuse=LocalFuse(max_agent_turns=500, source=SOURCE_DEPLOYMENT),
+        replayed=list(events) if replayed is None else replayed,
     )
     return {item.name: item for item in results}
 
@@ -229,3 +241,26 @@ def test_assertions_reject_missing_tool_or_model_work(tmp_path):
         bash_calls=TRANSITIONS,
     )
     assert not no_model["model_requests_observed"].ok
+
+
+def test_assertions_reject_a_trajectory_that_grew_after_the_first_read(tmp_path):
+    """首读之后又被追加一行 → 不通过（`#312` 假 FAIL 的根因，`089de04` 的同一形态）。
+
+    形态就是取证缺陷：场景读了 N 条并据此记 `event_count=N`，而 runner 随后复制的
+    轨迹是 N+1 行（可选能力收尾落一条 `memory/degraded`）⇒ `validator.py` 的
+    「记录值 ↔ 轨迹行数」比对判 FAIL，看起来像产品缺陷。复读与首读不同序就是它的
+    机械特征，必须**在场景里**判红，而不是留给复核者去猜计数差从哪来。
+    """
+    events = _events(steps=TRANSITIONS + 1, fuse_tripped=False)
+    grown = list(events) + [SimpleNamespace(
+        seq=len(events) + 1, type="memory/degraded", data={"reason": "writeback"},
+        run_id="run-long-1",
+    )]
+    results = _assertions_for(
+        steps=TRANSITIONS + 1, fuse_tripped=False, files=_consistent_files(),
+        replayed=grown,
+    )
+    assert not results["durable_replay_matches_live"].ok
+    # 其余断言与这件事无关：它们仍然全绿 —— 判红只由"轨迹动了"触发（鉴别力在这一点上）
+    failed = {name for name, item in results.items() if not item.ok}
+    assert failed == {"durable_replay_matches_live"}
