@@ -56,6 +56,16 @@ async def test_live_project_cross_session_recall_at_six(tmp_path) -> None:
     assert not any(divergence[key] for key in ("tracked", "hidden", "risky")), (
         "live Recall@6 evidence must run without tracked, hidden-index, or risky-input divergence"
     )
+    untracked_ignore_files = _git_output(
+        "ls-files", "--others", "--exclude-per-directory=CON",
+        "--", ":(glob)**/.gitignore",
+    ).splitlines()
+    ignored_runtime_roots = (".venv/", ".pytest_cache/", ".ruff_cache/")
+    untrusted_ignore_files = [
+        path for path in untracked_ignore_files
+        if not any(path.startswith(root) for root in ignored_runtime_roots)
+    ]
+    assert not untrusted_ignore_files, "untracked .gitignore files must not shape evidence checks"
     code_commit = _git_output("rev-parse", "HEAD")
     code_tree = _git_output("rev-parse", "HEAD^{tree}")
     settings = Settings()
