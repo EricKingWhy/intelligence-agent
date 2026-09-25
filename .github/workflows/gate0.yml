@@ -6,8 +6,9 @@
 # 不随仓库分发**（别的 clone 不启用就等于没有），且 `git push --no-verify` 可绕过。2026-09-25
 # 之前本仓**零 CI**，所以 main 上的一切门禁都是自愿的 —— 这正是 #213 事故的成因。
 # 把同一套门禁搬到服务端、并在 main 上开 `gate0` 为**必需状态检查**之后，"忘了跑"与
-# "本地 --no-verify"这两条路径被封死；剩下的只有「显式关掉分支保护」与「改闸门自己」，
-# 后者见下方"它保证什么 / 不保证什么"。
+# "本地 --no-verify"这两条路径被封死；剩下的只有三条：「显式关掉分支保护」、「改闸门自己」、
+# 「`enforce_admins` 不为真时，有权限者**直接推 main**（这条在仓库设置的审计里看不出来）」。
+# 后两条见下方"它保证什么 / 不保证什么"。⚠ 这是**条件句**，不是既成事实。
 #
 # 它跑什么
 #
@@ -26,24 +27,32 @@
 #    的 `files_of` 走 `--cc`，干净 merge 无输出）⇒ 不显式检出头提交，**每个 PR 都会假红**。
 # ② `fetch-depth: 0`：覆盖闸门沿祖先链判可达性（`git rev-list --parents HEAD` 要全图），
 #    浅克隆会让它判错或判不了。
-# ③ 只跑 `pull_request`，**不跑 push**：PR 合并后 main 顶端是一个 merge 提交，而它要被覆盖闸门
-#    承认需要"后续的台账行"（本仓既有做法，见 `chore(review-ledger): cover <merge>` 那一族提交）。
-#    若在 push 上跑，main 会在每次合并后**变红直到补行**。
-#    ⚠ 不跑 push **不等于"没有自锁"，只是把红点搬到下一个 PR**：main 顶端那个尚未记账的 merge
-#    提交，会被后续任何从 main 开出的 PR 的覆盖区间包含 ⇒ coverage 红（`strict` 要求分支与
-#    main 同步，会更快撞上）。处置 = 在该 PR 内补一行台账（只动台账的提交自动放行）。
+# ③ 只跑 `pull_request`，**不跑 push**：PR 合并后 main 顶端会多出一个**新提交**（merge / squash /
+#    rebase 皆然），而它要被覆盖闸门承认需要"后续的台账行"（本仓既有做法，见
+#    `chore(review-ledger): cover <merge>` 那一族提交）。若在 push 上跑，main 会在每次集成后
+#    **变红直到补行**。
+#    ⚠ 不跑 push **不等于"没有自锁"，只是把红点搬到下一个 PR**：main 顶端那个尚未记账的提交，
+#    会被后续任何从 main 开出的 PR 的覆盖区间包含 ⇒ coverage 红（`strict` 要求分支与 main
+#    同步，会更快撞上）。覆盖区间的**左端取自台账里最早、且能被 HEAD 到达的 base**，只能变宽、
+#    不会因后加的行收窄。处置 = 在该 PR 内补一行台账（只动台账的提交自动放行）。
 #
 # 它保证什么 / 不保证什么
 #
 # 保证：**没有"已过闸门"的提交之外的东西进得了 main** —— 前提是分支保护确实开着、
-#       `enforce_admins` 为真、且必需检查名与 `jobs.gate0.name` 一致。
-# 不保证：**闸门本身不可被改**。`pull_request` 事件执行的是 PR **头提交**里的这份 workflow，
-#       而必需检查之名取自 `jobs.gate0.name` ⇒ 一个能改这个文件的 PR 可以顺手改掉闸门，
-#       却仍然报出一个叫 `gate0` 的绿检查。同类输入还有 `scripts/gate0.py`（车道 argv / 词表）、
-#       `scripts/check_review_coverage.py`、`docs/review_ledger.tsv`（其判据是"每条 commit 有归属"，
+#       `enforce_admins` 为真、必需检查名与 `jobs.gate0.name` 一致，**且只对保护开启之后
+#       进 main 的提交成立**（main 上的历史提交不在闸门内）。本批落点当时实测：main 尚未开
+#       保护（`gh api .../branches/main/protection` = 404、`rulesets` = `[]`）⇒ 自开启之时起算。
+# 不保证：**闸门本身不可被改**。`pull_request` 事件在 PR 的 **merge 上下文**里执行 workflow
+#       ⇒ **改了这个文件**的 PR，其改动会被执行；而必需检查之名取自 `jobs.gate0.name`
+#       ⇒ 它仍报出一个叫 `gate0` 的绿检查。（写"merge 上下文"而非"头提交"：PR 没动这个文件时，
+#       取到的其实是 base 的版本。）
+#       同类输入还有 `scripts/gate0.py`（车道 argv / 词表）、`scripts/check_review_coverage.py`、
+#       `docs/review_ledger.tsv` 与 `docs/review_ledger.d/`（其判据是"每条 commit 有归属"，
 #       **不证明**审查真的发生过）、`docs/agents/verification.map.tsv`、
-#       `tests/test_verification_map.py`；更隐蔽的是闸门**读的配置**：新增根 `ruff.toml`
-#       （或 pyproject 里 `[tool.ruff] select = []`）、根 `conftest.py`、`web/tsconfig.json`
+#       `tests/test_verification_map.py` 及另两个生成物守卫测试、`tests/conftest.py`；
+#       更隐蔽的是闸门**读的配置**：新增根 `ruff.toml`（或 pyproject 里 `[tool.ruff] select = []`）、
+#       pyproject 的 `[tool.pytest.ini_options].addopts`（例如 `--collect-only` ⇒ guards 车道
+#       **零用例退 0**）、`web/.oxlintrc.json`、`web/tsconfig.json`、根 `conftest.py`
 #       都能静默关掉一条车道。⇒ 分支保护解决的是"闸门挡不挡得住手滑"，不是"挡不挡得住
 #       有权改它的人"。
 #
