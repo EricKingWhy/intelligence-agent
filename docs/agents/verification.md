@@ -153,7 +153,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 ### ⑭ 验证映射与 `--affected`（受影响面的机器化；issue #292）
 
 - **产物**：`docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的**机械映射**
-  （**24 行 × 8 列**）。feature 四要素由其中**五列**承载（`Driving it with <harness>` 拆成 `lanes` +
+  （**25 行 × 8 列**）。feature 四要素由其中**五列**承载（`Driving it with <harness>` 拆成 `lanes` +
   `focused`），逐一对齐 `docs/agents/skills/create-verification-skill` §3
   （`Sub-features` → `sub_features`；`How to get to it (user POV)` → `how_to_get_to_it`；
   `Driving it with <harness>` → `lanes` + `focused`；`Gotchas` → `gotchas`），另加三个**机械列**：
