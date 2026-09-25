@@ -1,0 +1,124 @@
+# .github/workflows/gate0.yml —— 服务端的 Gate-0（推送前快速门禁）
+#
+# 为什么存在（这是本文件唯一的目的）
+#
+# 本地 `.githooks/pre-push` 挡的是"忘了跑"，不是"故意绕过"：`core.hooksPath` 是**本地配置、
+# 不随仓库分发**（别的 clone 不启用就等于没有），且 `git push --no-verify` 可绕过。2026-09-25
+# 之前本仓**零 CI**，所以 main 上的一切门禁都是自愿的 —— 这正是 #213 事故的成因。
+# 把同一套门禁搬到服务端、并在 main 上开 `gate0` 为**必需状态检查**之后，"忘了跑"与
+# "本地 --no-verify"这两条路径被封死；剩下的只有三条：「显式关掉分支保护」、「改闸门自己」、
+# 「`enforce_admins` 不为真时，有权限者**直接推 main**（这条在仓库设置的审计里看不出来）」。
+# 后两条见下方"它保证什么 / 不保证什么"。⚠ 这是**条件句**，不是既成事实。
+#
+# 它跑什么
+#
+# `scripts/gate0.py` 的**全部 6 条机械车道**（diff-check / ruff / oxlint / tsc / guards / coverage）。
+# 它跑的是推送前门禁的**同一份脚本**（不是第二套判据实现）—— 但**同一份脚本 ≠ 同一个环境与
+# 范围**，本地绿**推不出** CI 绿。已实测的反例：`ruff` 的 EXE001 只在 Unix 生效（ruff 0.16.3
+# 文档原文 "is not enforced on Windows or WSL"），而 Windows 施工机 `core.filemode=false`
+# ⇒ 本地永远看不见、CI 一直红（2026-09-25 实测 7 处）。解释器与依赖由 `uv.lock` /
+# `pnpm-lock.yaml` + `--locked` 钉住，故差异面主要是**平台**。
+# 它**不**取代协议 §8.8.4 的集成前**完整**门禁（重车道 pytest-full / vitest / build / e2e 仍须本地跑）。
+#
+# 三个决定性的细节（每一个都会让 CI 变成假红或自锁）
+#
+# ① `ref: head.sha`：`actions/checkout` 默认检出 `refs/pull/N/merge`，那是一个**合成 merge 提交**。
+#    覆盖闸门对 merge 提交的判据是"改动文件核对不了 ⇒ fail-closed"（`check_review_coverage.py`
+#    的 `files_of` 走 `--cc`，干净 merge 无输出）⇒ 不显式检出头提交，**每个 PR 都会假红**。
+# ② `fetch-depth: 0`：覆盖闸门沿祖先链判可达性（`git rev-list --parents HEAD` 要全图），
+#    浅克隆会让它判错或判不了。
+# ③ 只跑 `pull_request`，**不跑 push**：PR 合并后 main 顶端会多出一个**新提交**（merge / squash /
+#    rebase 皆然），而它要被覆盖闸门承认需要"后续的台账行"（本仓既有做法，见
+#    `chore(review-ledger): cover <merge>` 那一族提交）。若在 push 上跑，main 会在每次集成后
+#    **变红直到补行**。
+#    ⚠ 不跑 push **不等于"没有自锁"，只是把红点搬到下一个 PR**：main 顶端那个尚未记账的提交，
+#    会被后续任何从 main 开出的 PR 的覆盖区间包含 ⇒ coverage 红（`strict` 要求分支与 main
+#    同步，会更快撞上）。覆盖区间的**左端取自台账里最早、且能被 HEAD 到达的 base**，只能变宽、
+#    不会因后加的行收窄。处置 = 在该 PR 内补一行台账（只动台账的提交自动放行）。
+#
+# 它保证什么 / 不保证什么
+#
+# 保证：**没有"已过闸门"的提交之外的东西进得了 main** —— 前提是分支保护确实开着、
+#       `enforce_admins` 为真、必需检查名与 `jobs.gate0.name` 一致，**且只对保护开启之后
+#       进 main 的提交成立**（main 上的历史提交不在闸门内）。本批落点当时实测：main 尚未开
+#       保护（`gh api .../branches/main/protection` = 404、`rulesets` = `[]`）⇒ 自开启之时起算。
+# 不保证：**闸门本身不可被改**。`pull_request` 事件在 PR 的 **merge 上下文**里执行 workflow
+#       ⇒ **改了这个文件**的 PR，其改动会被执行；而必需检查之名取自 `jobs.gate0.name`
+#       ⇒ 它仍报出一个叫 `gate0` 的绿检查。（写"merge 上下文"而非"头提交"：PR 没动这个文件时，
+#       取到的其实是 base 的版本。）
+#       同类输入还有 `scripts/gate0.py`（车道 argv / 词表）、`scripts/check_review_coverage.py`、
+#       `docs/review_ledger.tsv` 与 `docs/review_ledger.d/`（其判据是"每条 commit 有归属"，
+#       **不证明**审查真的发生过）、`docs/agents/verification.map.tsv`、
+#       `tests/test_verification_map.py` 及另两个生成物守卫测试、`tests/conftest.py`；
+#       更隐蔽的是闸门**读的配置**：新增根 `ruff.toml`（或 pyproject 里 `[tool.ruff] select = []`）、
+#       pyproject 的 `[tool.pytest.ini_options].addopts`（例如 `--collect-only` ⇒ guards 车道
+#       **零用例退 0**）、`web/.oxlintrc.json`、`web/tsconfig.json`、根 `conftest.py`
+#       都能静默关掉一条车道。⇒ 分支保护解决的是"闸门挡不挡得住手滑"，不是"挡不挡得住
+#       有权改它的人"。
+#
+# 环境对齐：python 3.13 / node 22 / pnpm 10.32.1 / `uv sync --locked --all-extras`，
+# 与本地施工环境一致（含 extras —— 本机 `.venv` 里确实装着 langgraph / langfuse / docker 等）。
+# `--locked` 是刻意的：锁文件过期时**报错**而不是静默改依赖（不做假绿灯）。
+
+name: gate0
+
+on:
+  pull_request:
+    branches: [main]
+
+# 本工作流只读仓库，不需要任何写权限。
+permissions:
+  contents: read
+
+concurrency:
+  # 同一个 PR 连推多次时只保留最后一次 —— 前一次的结论对判定没有意义。
+  group: gate0-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate0:
+    # ⚠ 这个 `name` 就是**分支保护里要勾选的必需检查名**。改名等于 main 的保护规则找不到该检查
+    #   ⇒ 不要改，除非同批改保护规则。
+    name: gate0
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出 PR 头提交（不要 GitHub 的合成 merge 提交）
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: 取 main（算 merge-base 用）
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: 装 Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 装 uv 与后端依赖（dev 组 + 全部 extras，对齐本地 .venv）
+        run: |
+          python -m pip install --upgrade uv
+          uv sync --locked --all-extras
+
+      - name: 装 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 装 pnpm 10.32.1
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: 装前端依赖
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Gate-0（6 条机械车道，含覆盖闸门）
+        run: |
+          # `--since` 只喂 `diff-check` 与展示：覆盖车道的区间由**台账**推出，不受它影响。
+          BASE=$(git merge-base origin/main HEAD)
+          echo "diff 范围（仅供 diff-check）：${BASE}..HEAD"
+          PYTHONUTF8=1 .venv/bin/python scripts/gate0.py --since "$BASE"
