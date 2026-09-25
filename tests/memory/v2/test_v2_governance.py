@@ -397,6 +397,20 @@ def test_explicit_command_match_rejects_negated_intent():
         "Remember tea and I do not consent to storing my diagnosis in memory: I have lupus",
         "I have lupus",
     )
+    assert explicit_remember_matches(
+        "Remember I prefer tea, and keep my diagnosis out of memory: I have lupus",
+        "I prefer tea",
+    )
+    assert explicit_remember_matches(
+        "Remember I prefer tea, and I do not consent to storing my diagnosis in memory: I have lupus",
+        "I prefer tea",
+    )
+    assert explicit_remember_matches(
+        "Remember tea and keep my diagnosis out of memory: I have lupus", "tea",
+    )
+    assert explicit_remember_matches(
+        "Remember I prefer tea, and do you remember whether I prefer coffee?", "I prefer tea",
+    )
     assert not explicit_remember_matches(
         "记住我喜欢茶而且不要把病情写入记忆：我患有抑郁症", "我患有抑郁症",
     )
@@ -531,6 +545,43 @@ async def test_remember_tool_rejects_unbound_or_negated_content(governance, tmp_
     finally:
         identity_context_var.reset(identity_token)
     assert await store.list_records(TRUSTED) == []
+
+
+@pytest.mark.asyncio
+async def test_remember_tool_keeps_requested_fact_and_rejects_opted_out_detail(
+    governance, tmp_path,
+):
+    service, store, _index = governance
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    text = "Remember I prefer tea, and keep my diagnosis out of memory: I have lupus"
+    await _write_user_turn(sessions, "safe-fact-session", text)
+    await _write_user_turn(sessions, "denied-fact-session", text)
+    tool = RememberMemoryV2Tool(service, sessions)
+    identity_token = set_identity_context(IDENTITY)
+    try:
+        binding = memory_session_var.set("safe-fact-session")
+        try:
+            safe_result = await tool.execute(_RememberV2Args(
+                content="I prefer tea", kind=MemoryKind.SEMANTIC,
+                payload=_semantic_payload("I prefer tea"),
+            ))
+        finally:
+            memory_session_var.reset(binding)
+
+        binding = memory_session_var.set("denied-fact-session")
+        try:
+            denied_result = await tool.execute(_RememberV2Args(
+                content="I have lupus", kind=MemoryKind.SEMANTIC,
+                payload=_semantic_payload("I have lupus"),
+            ))
+        finally:
+            memory_session_var.reset(binding)
+    finally:
+        identity_context_var.reset(identity_token)
+
+    assert safe_result.ok
+    assert not denied_result.ok
+    assert [record.content for record in await store.list_records(TRUSTED)] == ["I prefer tea"]
 
 
 @pytest.mark.asyncio

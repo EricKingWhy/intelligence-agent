@@ -63,8 +63,8 @@ _REMEMBER_NEGATION = re.compile(
     re.IGNORECASE,
 )
 _REMEMBER_RECALL_QUESTION = re.compile(
-    r"\bremember\s+(?:if|whether)\b|"
-    r"(?:记得|记住)[^。！？!?;；\r\n]*(?:是否|是不是|有没有|有无|有沒有|有無|吗|么|嗎|麼)",
+    r"^\s*(?:if|whether)\b|"
+    r"(?:是否|是不是|有没有|有无|有沒有|有無|吗|么|嗎|麼)",
     re.IGNORECASE,
 )
 _FORGET_INTENT = re.compile(
@@ -131,15 +131,15 @@ async def current_user_message(sessions: Any, session_id: str) -> SessionEvent |
 
 def explicit_remember_matches(user_text: str, content: str) -> bool:
     """Require the proposed fact to be in the clause governed by the user's command."""
-    if (
-        _REMEMBER_NEGATION.search(user_text)
-        or _REMEMBER_RECALL_QUESTION.search(user_text)
-        or not content.strip()
-    ):
+    if not content.strip():
         return False
     clause = _command_clause(user_text, _REMEMBER_INTENT)
     proposed = content.strip().strip(" \t\r\n\"'“”‘’.,!?。！？;；")
-    return bool(proposed and proposed.casefold() in clause.casefold())
+    folded = proposed.casefold()
+    if not folded or folded not in clause.casefold() or _REMEMBER_RECALL_QUESTION.search(clause):
+        return False
+    negation = _REMEMBER_NEGATION.search(clause)
+    return negation is None or folded in clause[:negation.start()].casefold()
 
 
 def explicit_forget_matches(user_text: str, memory_id: str) -> bool:
