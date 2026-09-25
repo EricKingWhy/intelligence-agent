@@ -1,6 +1,6 @@
 /** Recent authoritative memory list state for the management panel. */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { MemoryError, describeMemoryError, isMemoryDisabled } from '../lib/api';
 import {
   deleteMemoryRecord,
@@ -46,6 +46,10 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
   const scope = filters.scope;
   const projectId = filters.project_id;
   const filterKey = JSON.stringify([query, kind ?? '', status ?? '', scope ?? '', projectId ?? '']);
+  const activeFilterKey = useRef(filterKey);
+  useLayoutEffect(() => {
+    activeFilterKey.current = filterKey;
+  }, [filterKey]);
   const apiFilters = useMemo<MemoryFilters>(() => ({
     ...(query ? { q: query } : {}),
     ...(kind ? { kind } : {}),
@@ -68,6 +72,7 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
   const generation = useRef(0);
 
   const refetch = useCallback(async (limit: number) => {
+    if (activeFilterKey.current !== filterKey) return;
     const gen = ++generation.current;
     try {
       const rows = await listMemoryRecords(limit, 0, apiFilters);
