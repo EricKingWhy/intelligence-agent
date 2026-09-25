@@ -27,16 +27,23 @@
 
 ## 变异实测（2026-09-26；`WBI_GATE_UNDER_TEST` 指向打了变异的副本，只跑本文件）
 
-**被抓到的**（每条都被**恰好预期**的用例抓住）：
+⚠ **副本来必须放在仓库之外**（例如 `%TEMP%`）才能照抄下面的条数：本文件那条形状校验用例原先依赖
+"闸门所在目录是个仓库"，而变异钩子恰恰把闸门复制到仓库外 ⇒ `REPO_ROOT` 不是仓库、`rev-parse HEAD`
+返回空串 ⇒ 它会**以一个与判据无关的理由**红，让 M1/M2 各多红一条。已改成**自建临时仓库 +
+`monkeypatch` 指 `REPO_ROOT`**，故下面的条数**位置无关**（2026-09-26 两轴修后重审实测到并修掉）。
 
-- **M1 拆掉接线**（判定循环里 `if False and sha in zero_parent:`）⇒ **只红正控那条端到端**，
-  其余 8 条（7 条判据层 + 反控端到端）**全绿** ⇒ 「判据层测试看不见接线」不是推断，是实测。
-- **M2 判据偷懒**（文件表为空就 `return parents[0]`，即"凡是空表就放行"）⇒ 红 4 条，
-  含 `…_still_fail_closed_end_to_end` ⇒ 反控确实拦得住那条假实现。
+**被抓到的**（每条都被**恰好预期**的用例抓住；条数为仓库外副本的实得值）：
+
+- **M1 拆掉接线**（判定循环里 `if False and sha in zero_parent:`）⇒ **只红正控那条端到端**
+  （`test_merge_with_parent_tree_is_attributed_end_to_end`），其余 8 条**全绿**（实得
+  `1 failed, 8 passed`）⇒ 「判据层测试看不见接线」不是推断，是实测。
+- **M2 判据偷懒**（`zero_content_parent` 直接 `return parents[0] if parents else None`，即"有父就
+  算零新增"）⇒ 红 4 条（实得 `4 failed, 5 passed`），含 `…_still_fail_closed_end_to_end`
+  ⇒ 反控确实拦得住那条假实现。
 - **M3 去掉 `target` 真值守卫**（`None == None` 判等）⇒ **只红** `…_tree_cannot_be_resolved`。
 - **M15 去掉 `expect.match(line)` 形状校验**（`missing` 那行被当成 sha 取用）⇒ **只红**
-  `test_resolve_trees_rejects_a_line_that_is_not_a_tree`；本条是补写的，此前**无任何用例**能抓它
-  —— 那正是"注释声称 fail-closed、测试却没钉住"的唯一一处。
+  `test_resolve_trees_rejects_a_line_that_is_not_a_tree`（实得 `1 failed, 8 passed`）；本条是补写的，
+  此前**无任何用例**能抓它 —— 那正是"注释声称 fail-closed、测试却没钉住"的唯一一处。
 
 **未被抓到、但也不该被证伪（逐条定级，别读成漏网）**：
 
@@ -143,7 +150,7 @@ def test_prints_full_shas_for_recomputation(gate):
     assert tree in text and parent in text, f"必须打印树与父的完整 sha（实得 {text!r}）"
 
 
-def test_resolve_trees_rejects_a_line_that_is_not_a_tree(gate):
+def test_resolve_trees_rejects_a_line_that_is_not_a_tree(gate, tmp_path, monkeypatch):
     """**反控**：`resolve_many` 必须按**行的形状**判成败，不能只看退出码 / 无条件取首段。
 
     为什么这是 `resolve_trees` 的**命门**：`git cat-file --batch-check` 对**不存在的对象也退 0**，
@@ -151,11 +158,21 @@ def test_resolve_trees_rejects_a_line_that_is_not_a_tree(gate):
     得到**两个 `missing` 字样**、彼此 `==` ⇒ 一个解不出树的父会被判成"与提交同树" ⇒ **fail-closed
     被悄悄拔掉**。所以这里既要钉"不存在的对象 ⇒ None"，也要钉两条正则**互不兼收**
     （`FULL_SHA_RE` 故意不收 `tree` 行：它还兼任 commit 行的形状判据，放宽它等于把哨兵行也认了）。
-    """
-    real = gate.git("rev-parse", "HEAD").stdout.strip()
-    assert len(real) == 40, f"环境异常：拿不到 HEAD 的完整 sha（{real!r}）"
-    bogus = "0" * 40
 
+    ⚠ **自建仓库、不依赖"闸门所在的那个仓库"**：变异测试的钩子 `WBI_GATE_UNDER_TEST` 会把闸门复制到
+    **仓库之外**（甚至 `%TEMP%`）再跑，那时模块的 `REPO_ROOT` 不是仓库、`git rev-parse HEAD` 返回空串,
+    用例就会以一个**与判据无关**的理由红（两轴修后重审实测到这一点）。所以这里把 `REPO_ROOT`
+    `monkeypatch` 到本用例自己造的仓库上 —— 位置无关，变异结果才有意义。
+    """
+    repo = tmp_path / "probe"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "gate-test")
+    _git(repo, "config", "user.email", "gate-test@example.invalid")
+    real = _commit(repo, "a.txt", "a\n", "c0")
+    monkeypatch.setattr(gate, "REPO_ROOT", str(repo))
+
+    bogus = "0" * 40
     trees = gate.resolve_trees([real, bogus])
     assert trees[real] is not None and len(trees[real]) == 40, f"真实 rev 必须解出树：{trees[real]!r}"
     assert trees[bogus] is None, f"不存在的对象必须映射为 None，实得 {trees[bogus]!r}"
