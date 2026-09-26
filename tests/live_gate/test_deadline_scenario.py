@@ -115,7 +115,7 @@ EXPECTED_ASSERTIONS = {
     "expired_deadline_resume_refused",
     "deadline_outcome_is_safe_or_needs_reconcile",
     "resume_contract_holds",
-    "resumed_leg_did_new_work",
+    "resumed_leg_admitted_new_work",
     "run_ended_in_a_safe_state",
     "uncertain_mutation_recorded_as_unproven",
     "no_new_admission_after_the_deadline",
@@ -228,7 +228,7 @@ def _resume_payload(*, consumed: dict[str, Any]) -> dict[str, Any]:
 
 
 def _events(
-    *, arm: str = "safe", ending: str = "paused", work_after_resume: bool = True,
+    *, arm: str = "safe", ending: str = "paused", resumed_work: str = "tool",
 ) -> list[Any]:
     """自洽的轨迹：到点（腿 1）⇒ 换新时刻恢复（仅 Arm A）⇒ 按 `ending` 收尾。
 
@@ -243,8 +243,9 @@ def _events(
 
     第二条腿的收尾形状由模型当下的选择决定（真实运行两种都出现过）：`ending="paused"`
     是又干到到点，`ending="completed"` 是它自己写一句话收尾，`ending="failed"` 是
-    **不安全**的第三种（只用于反例）。`work_after_resume=False` 造出"恢复后零新调用"
-    的走过场形状（同样只用于反例）。
+    **不安全**的第三种（只用于反例）。`resumed_work` 造出恢复后那一轮的三种形状：
+    `"tool"` = 请求 + 工具调用（设计形状）、`"text"` = 只有请求 + 一句话回答
+    （**实测形状**：两次真实运行 6 次尝试都是它）、`"none"` = 什么都没有（反例）。
     """
     events: list[Any] = []
     seq = 0
@@ -277,6 +278,12 @@ def _events(
         add("model/completed", {"content": ""})
         add("tool/call", {"tool_name": TOOL_CALL_NAME, "tool_call_id": call_id})
         add("tool/result", {"tool_call_id": call_id})
+
+    def answered() -> None:
+        """恢复后模型只答了一句话（**真实运行观测到的形状**）：有请求、无工具调用。"""
+        add(MODEL_REQUEST, {"role": "primary", "outcome": "completed",
+                            "usage": {"total_tokens": PRIMARY_TOKENS}})
+        add("model/completed", {"content": "已达截止时间，报告当前进度"})
 
     def facts_until(cutoff: int) -> dict[str, Any]:
         """到截止点为止的四维（与 `accounting.request_accounting` 同一份重算）。"""
@@ -315,8 +322,10 @@ def _events(
     ))
     add("run/resumed", {**_resume_payload(consumed=facts_until(pause_seq)),
                         "from_pause_seq": pause_seq})
-    if work_after_resume:
+    if resumed_work == "tool":
         turn(CALL_AFTER_RESUME)
+    elif resumed_work == "text":
+        answered()
     if ending == "completed":
         add("run/completed", {"final_text": "已达截止时间，报告当前进度"})
     elif ending == "failed":
@@ -600,13 +609,13 @@ def test_red_clean_ledger_cannot_be_read_as_reconcile(tmp_path):
 
     红的落点是**恢复面**那三条，不是"结局分类"：分类只看账本有没有欠账，账本干净
     时它本来就该报 Arm A —— 错的是"该续跑却没续跑"（`resume_contract_holds` /
-    `resumed_leg_did_new_work` / `run_ended_in_a_safe_state`）。
+    `resumed_leg_admitted_new_work` / `run_ended_in_a_safe_state`）。
     """
     events = _events(arm="needs_reconcile")
     assertions = _assertions(tmp_path, events, operations=_ops(debt=False))
     failed = _failed(assertions)
     assert "resume_contract_holds" in failed
-    assert "resumed_leg_did_new_work" in failed
+    assert "resumed_leg_admitted_new_work" in failed
     assert "run_ended_in_a_safe_state" in failed
     assert "final_budget_state" in failed, "没有恢复事件 ⇒ 派生版本仍是 1"
 
@@ -737,8 +746,12 @@ def test_red_arm_a_resume_must_carry_a_new_future_instant(tmp_path):
         assert "resume_contract_holds" in _failed(assertions), label
 
 
-def test_red_resume_that_starts_no_new_work(tmp_path):
-    """恢复之后没有任何 `tool/call` ⇒ "续跑"是假的（信息屏障保证还有活要干）。"""
+def test_resume_verdict_is_about_admission_not_about_the_tool_choice(tmp_path):
+    """把恢复后的 `tool/call` 抽掉（请求仍在）⇒ **不**判红：那是模型的选择，不是契约。
+
+    判据从 `≥1 tool/call` 改成 `≥1 接纳`（Provider 请求或 ToolCall）的依据在这里被钉住：
+    抽掉工具调用只剩请求 ⇒ 绿；把整轮抽掉（`resumed_work="none"`，见下一条）⇒ 红。
+    """
     events = _events(arm="safe")
     resumed = next(event for event in events if event.type == "run/resumed")
     trimmed = [
@@ -746,7 +759,7 @@ def test_red_resume_that_starts_no_new_work(tmp_path):
         if not (event.type in ("tool/call", "tool/result") and event.seq > resumed.seq)
     ]
     assertions = _assertions(tmp_path, trimmed)
-    assert "resumed_leg_did_new_work" in _failed(assertions)
+    assert "resumed_leg_admitted_new_work" not in _failed(assertions), _failed(assertions)
 
 
 def test_red_resume_that_starts_a_second_execution_of_the_same_run(tmp_path):
@@ -829,7 +842,7 @@ def test_red_missing_pause_or_resume(tmp_path):
         operations=_ops(debt=False), legs=_default_legs(resumed=True),
     ))
     assert "resume_contract_holds" in failed
-    assert "resumed_leg_did_new_work" in failed
+    assert "resumed_leg_admitted_new_work" in failed
     assert "run_ended_in_a_safe_state" in failed
     assert "final_budget_state" in failed
 
@@ -1011,10 +1024,26 @@ def test_safe_arm_accepts_the_completed_ending(tmp_path):
     assert _failed(assertions) == set(), _failed(assertions)
 
 
-def test_red_resume_without_new_work(tmp_path):
-    """恢复后一个新调用都没接纳 ⇒ 判红（"恢复"不是走过场）。"""
-    assertions = _assertions(tmp_path, _events(work_after_resume=False))
-    assert "resumed_leg_did_new_work" in _failed(assertions)
+def test_red_resume_that_admits_nothing(tmp_path):
+    """恢复后一条新工作都没被接纳（连 Provider 请求都没有）⇒ 判红（"恢复"不是走过场）。"""
+    assertions = _assertions(tmp_path, _events(resumed_work="none"))
+    assert "resumed_leg_admitted_new_work" in _failed(assertions)
+
+
+def test_observed_real_shape_is_accepted(tmp_path):
+    """**实测形状**：恢复后那一轮只有 Provider 请求 + 一句话回答，然后 `run/completed`。
+
+    2026-09-26 的两次真实运行（6 次尝试）全是这个形状：到点暂停在模型看来没有可见标记
+    ⇒ 它选择收尾。判据只要求"新窗口里真的接纳过工作"（请求或工具调用），因为
+    "模型用不用工具"是它的选择、不是产品契约；残余登记见 ADR-0046。
+    这条用例把那个判断钉在**观测到的形状**上：形状变了就会红，而不是被悄悄放过。
+    """
+    assertions = _assertions(tmp_path, _events(resumed_work="text", ending="completed"))
+    assert _failed(assertions) == set(), _failed(assertions)
+    detail = next(
+        item for item in assertions if item.name == "resumed_leg_admitted_new_work"
+    ).detail
+    assert "Provider 请求=1" in detail and "tool/call=0" in detail, detail
 
 
 def test_red_unsafe_ending_after_resume(tmp_path):

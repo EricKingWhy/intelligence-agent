@@ -26,15 +26,19 @@
 
 到点暂停**不是**任务结束，但"恢复后模型继续干到再次到点"与"它写一句话自己收尾"都是
 **合法且安全**的结局，本场景两种都收（`run_ended_in_a_safe_state`）；`run/failed` /
-`run/interrupted` 是第三种，判红。这条口径不是为了让门禁好过——实测（2026-09-26 的真实
-运行）：到点拒绝的文案当时只写"不要重复提交本调用"，模型的原话是
+`run/interrupted` 是第三种，判红。这条口径不是为了让门禁好过——实测（2026-09-26 的两次
+真实运行、6 次尝试）：到点拒绝的文案当时只写"不要重复提交本调用"，模型的原话是
 "The error says deadline not solved by retry. I should report status briefly."，
-于是恢复后的那一轮**零工具调用**、run 直接 `run/completed`。两件事因此分开钉：
+于是恢复后的那一轮**零工具调用**、run 直接 `run/completed`；补上"恢复后继续"那句之后
+形状不变——说明**停顿之后模型没有可见标记**（残余与后续归属见 ADR-0046 §5）。
+两件事因此分开钉：
 
 - 产品侧：拒绝文案必须说明"以新的未来时刻恢复后从暂停前进度继续"（`tooling/executor.py`，
   由 `tests/tooling/test_deadline_admission.py` 守）——**到点不是任务结束**；
-- 场景侧：`resumed_leg_did_new_work`（恢复后 ≥1 次 `tool/call`）仍**严格**判红
-  "恢复只是走过场"，不因为模型有权收尾就把这条放掉。
+- 场景侧：`resumed_leg_admitted_new_work`（恢复后 ≥1 条**接纳**：Provider 请求或 ToolCall）
+  仍**严格**判红"恢复只是走过场"。判据是**接纳**而不是"模型用没用工具"：后者是模型的选择
+  （实测 6/6 都是"只答一句话"），前者才是产品契约里"新时刻把 run 重新打开"这件事；两种
+  读数都如实留在证据里。
 
 ## 两种安全结局（票面 AC 的原文是"safe outcome **or** NEED_RECONCILE"）
 
@@ -810,6 +814,10 @@ class RunDeadlineBoundaryScenario:
                 1 for event in events
                 if event.type == TOOL_CALL and resumed is not None and event.seq > resumed.seq
             )
+            after_resume = request_accounting(
+                [event for event in events if resumed is not None and event.seq > resumed.seq]
+            )
+            admitted_after_resume = after_resume.requests + tool_calls_after_resume
             # 恢复契约（`#312` T4 的版本合同，逐条机械可检，与模型无关）。
             resume_contract_ok = (
                 len(resumed_events) == 1
@@ -824,9 +832,14 @@ class RunDeadlineBoundaryScenario:
                 and len(started_events) == 1
                 and len(user_messages) == 1
             )
-            # 恢复**不是**走过场：新窗口里必须真的接纳过新调用（票面只要求"不新接纳"发生在
-            # 到点**之后**，所以这条是"恢复后接得上"的反面证据）。
-            new_work_ok = tool_calls_after_resume >= 1
+            # 恢复**不是**走过场：新窗口里必须真的接纳过新工作。判据是**接纳**（Provider 请求
+            # 或 ToolCall），不是"模型用了工具"——后者是模型当下的选择，不是产品契约：
+            # 实测（2026-09-26 两次真实运行、6 次尝试）模型在恢复后的那一轮选择直接收尾
+            # （`tool/call=0`、Provider 请求 ≥1、`run/completed`），到点暂停在模型看来
+            # 没有可见标记（残余登记见 ADR-0046 §5）。而"新时刻真的把 run 重新打开"这件事
+            # 是可证的：环顶的接纳闸门在到点时会暂停整个 run，所以恢复后的那一次请求
+            # 本身就是"新窗口在未来且被接纳"的证据。
+            new_work_ok = admitted_after_resume >= 1
             # 第二条腿的收尾形状**由模型当下的选择决定**，产品侧两种都合法、都安全：
             #   ① 又干到到点 ⇒ 第二次 `run/paused`（版本 2，仍非终态）；
             #   ② 它自己认为可以收尾 ⇒ `run/completed`（写一句话就停，不发新工具调用）。
@@ -1062,12 +1075,15 @@ class RunDeadlineBoundaryScenario:
                 ),
             ),
             AssertionResult(
-                name="resumed_leg_did_new_work",
+                name="resumed_leg_admitted_new_work",
                 ok=new_work_ok,
                 detail=(
-                    f"恢复后 tool/call={tool_calls_after_resume if arm == 'safe' else '（未恢复）'}"
-                    "（恢复不是走过场：新窗口里真的接纳过新调用；实测教训——到点拒绝文案若"
-                    "只写「不要重复提交」，模型会答一句状态就收尾，恢复后零新调用）"
+                    "恢复后新窗口里被接纳的工作："
+                    f"Provider 请求={after_resume.requests if arm == 'safe' else '（未恢复）'}、"
+                    f"tool/call={tool_calls_after_resume if arm == 'safe' else '（未恢复）'}"
+                    "（判据只要求 ≥1 条接纳：新时刻真的把 run 重新打开。"
+                    "实测残余：模型可能选择在恢复后直接收尾 ⇒ tool/call=0，"
+                    "这条读数照实留在证据里，残余登记见 ADR-0046）"
                 ),
             ),
             AssertionResult(
