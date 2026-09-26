@@ -1164,22 +1164,46 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
  *  不给 task = 同 run 续跑，此时必须带 `run_id` + `resume_basis` +
  *  `budget.expected_version` + 绝对 ceiling（缺声明 422、状态对不上 409）。
  *
- *  `budget.run` 的键是四个 run 维度里**卡住的那一个**（`#313`：`max_agent_turns_total`
- *  / `max_model_requests` / `max_total_tokens` / `max_cost_usd`，与后端
- *  `RunLimitsBody` 的字段名逐字相同）。值是**绝对值**不是增量：后端要求这一维恢复后
- *  至少放得下一次新准入（turns / requests 要 `> consumed + 1`，tokens / cost 要
- *  `> consumed`），低到不能继续的 ceiling 会被 409 拒掉；未点名的维度**沿用**暂停时的
- *  ceiling（不清空、不重置 counter——ADR-0044 D1/D3）。cost 维传十进制**字符串**
- *  （保住 wire 精度；后端 `parse_cost_ceiling` 数与串都收）。
+ *  `budget.run` 的键是**卡住的那一维**（`#313` / `#314`）：
+ *  - 四个 `max_*` 之一（`max_agent_turns_total` / `max_model_requests` /
+ *    `max_total_tokens` / `max_cost_usd`，与后端 `RunLimitsBody` 的字段名逐字相同）；
+ *  - 或 `tool_call_limits`（`#314`：工具名 → 正整数**绝对** ceiling）——per-tool 配额
+ *    是"一维变多维"的那一维，它的点名单位是**工具名**。
+ *
+ *  值是**绝对值**不是增量：后端要求这一维恢复后至少放得下一次新准入（turns /
+ *  requests 要 `> consumed + 1`，tokens / cost / 工具配额要 `> consumed`），低到不能
+ *  继续的 ceiling 会被 409 拒掉；未点名的维度**沿用**暂停时的 ceiling（不清空、不重置
+ *  counter——ADR-0044 D1/D3），`tool_call_limits` 还是**逐键**合并（点名哪个工具就抬
+ *  哪个，未点名的保留）。cost 维传十进制**字符串**（保住 wire 精度；后端
+ *  `parse_cost_ceiling` 数与串都收），工具配额只收正整数。
  *  `expected_version` 与 `run` 平级（PRD §3 的冻结形状——它是"这次预算变更"的属性，
  *  不是某个作用域的 ceiling）。 */
+export interface ResumeRunLimitsBody extends Partial<Record<RunLimitField, number | string>> {
+  /** `#314`：per-tool 绝对配额（工具名 → 正整数）。 */
+  tool_call_limits?: Record<string, number>;
+}
+
 export interface ResumePausedRunPayload {
   run_id: string;
   resume_basis: 'budget_increase';
   budget: {
     expected_version: number;
-    run: Partial<Record<RunLimitField, number | string>>;
+    run: ResumeRunLimitsBody;
   };
+}
+
+/** 恢复目标（`lib/runBudget.ts` 的 `pauseFacts().resumeTarget` 的 wire 形态）：run 维
+ *  给字段名，工具配额给工具名。两种目标写进 `budget.run` 的键不同，所以由这里**一处**
+ *  决定形状——调用方（useSession）不再自己拼键名，漂移就没有第二个地方可发生。 */
+export type ResumePausedRunTarget =
+  | { kind: 'run'; field: RunLimitField; value: number | string }
+  | { kind: 'tool'; tool: string; value: number };
+
+/** 恢复请求的 `budget.run`：点名的目标 → 新绝对值（`#314` 起两种目标）。 */
+export function resumeRunLimitsBody(target: ResumePausedRunTarget): ResumeRunLimitsBody {
+  return target.kind === 'run'
+    ? { [target.field]: target.value }
+    : { tool_call_limits: { [target.tool]: target.value } };
 }
 
 /** 恢复请求被拒（409/422 且**零副作用**：后端判定在任何落盘之前）。

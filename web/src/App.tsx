@@ -44,7 +44,7 @@ import { isPaletteShortcut, type CommandItem } from './lib/commands';
 import { withTimeout } from './lib/timeout';
 import { applyTheme, initTheme, type Theme } from './lib/theme';
 import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
-import { ceilingDraftValue, minResumeValue, pauseFacts } from './lib/runBudget';
+import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget } from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
   createEmptySession,
@@ -783,21 +783,16 @@ export default function App() {
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
 
   const paused = conversation?.run_paused ?? null;
-  const pausedFacts = useMemo(() => (paused ? pauseFacts(paused) : null), [paused]);
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
    *  默认值按**命中的维度**给：被 requests 卡住时填一个只够 turns 的数字，提交了也是
-   *  必然 409（`#313`）。 */
-  const pauseDefaultDraft = useMemo(() => {
-    if (pausedFacts === null) return '1';
-    const target = pausedFacts.dimensions.find(
-      (fact) => fact.spec.dimension === pausedFacts.resumeTarget.dimension,
-    );
-    if (target === undefined) return String(pausedFacts.minResumeCeiling);
-    const minimum = minResumeValue(pausedFacts.resumeTarget, target);
-    return minimum === null ? '' : String(minimum);
-  }, [pausedFacts]);
+   *  必然 409（`#313`）。取值口径住在 `defaultResumeDraft`（`#314` 的工具配额维在那
+   *  一张表里统一处理，别在这里再分一遍支）。 */
+  const pauseDefaultDraft = useMemo(
+    () => (paused === null ? '1' : (defaultResumeDraft(paused) ?? '')),
+    [paused],
+  );
   const pauseCeilingDraft =
     paused === null
       ? ''
@@ -814,13 +809,16 @@ export default function App() {
     const value = ceilingDraftValue(paused, pauseCeilingDraft);
     if (value === null) return; // 预校验未过（按钮也已禁用）：不发必然 409 的请求
     setResumingRunId(paused.run_id);
+    // 抬的是**卡住的那一维**（`#313` / `#314`）：requests / tokens / cost 的暂停点抬
+    // turns 是无效动作，后端会按未点名的维度沿用旧 ceiling 判 409；工具配额同理——
+    // 它的点名单位是工具名（`resumeRequestTarget` 给出该维的 wire 形态）。
+    const target = resumeRequestTarget(paused);
     void resumePausedRun(selectedId, {
       runId: paused.run_id,
       expectedVersion: paused.version,
-      // 抬的是**卡住的那一维**（`#313`）：requests / tokens / cost 的暂停点抬 turns
-      // 是无效动作，后端会按未点名的维度沿用旧 ceiling 判 409。
-      dimension: pauseFacts(paused).resumeTarget.resumeField,
-      value,
+      ...(target.kind === 'run'
+        ? { kind: 'run' as const, field: target.field, value }
+        : { kind: 'tool' as const, tool: target.tool, value: value as number }),
     }).finally(() => setResumingRunId(null));
   }, [paused, selectedId, pauseCeilingDraft, resumePausedRun]);
 

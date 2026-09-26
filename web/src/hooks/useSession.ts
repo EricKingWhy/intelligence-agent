@@ -23,13 +23,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, resumeSession, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
 import { MAX_RECONNECT_ATTEMPTS, RECONNECT_BANNER_DELAY_MS, RECONNECT_STALL_MS, ReconnectController } from '../lib/reconnect';
 import { RUN_TERMINAL_TYPES, hasUnterminatedRun, unpairedToolCallIds } from '../lib/runState';
-import type { RunLimitField } from '../lib/runBudget';
 import { forgetResumeAttempt, maxEventSeq, nextResumeAttempt, readStoredSessionId, writeStoredSessionId, type ResumeAttempts } from '../lib/sessionRestore';
 
 /** 流式帧 vs 当前模式一致性判别（不变量 #22：UI 不维护第二套真相）。
@@ -1408,18 +1407,18 @@ export function useSession() {
    *  暂停事实 / consumed / version 必须是服务器的那一份，而不是我们记着的旧版本）。
    *  用户据此把 ceiling 抬得更高再来一次。
    *
-   *  `#313`：抬的是**卡住的那一维**（`dimension`），值是绝对值。cost 维传十进制字符串
-   *  （保住 wire 精度，后端 `parse_cost_ceiling` 数与串都收）；未点名的维度由后端沿用
-   *  暂停时的 ceiling。 */
+   *  `#313` / `#314`：抬的是**卡住的那一维**（`target`），值是绝对值。run 维传字段名
+   *  + 值（cost 维传十进制字符串，保住 wire 精度，后端 `parse_cost_ceiling` 数与串都
+   *  收）；工具配额传工具名 + 正整数（`#314`）。未点名的维度由后端沿用暂停时的
+   *  ceiling（工具配额逐键合并）。`budget.run` 的键名由 `resumeRunLimitsBody` 一处
+   *  决定——两种目标的形状差异不在这里再解释一遍。 */
   const resumePausedRun = useCallback(
     async (
       sessionId: string,
       request: {
         runId: string;
         expectedVersion: number;
-        dimension: RunLimitField;
-        value: number | string;
-      },
+      } & ResumePausedRunTarget,
     ): Promise<void> => {
       setError(null);
       // 与 sendFollowUp 入口同一套代际/流状态重置：这是一次新的在途执行。
@@ -1447,7 +1446,7 @@ export function useSession() {
           resume_basis: 'budget_increase',
           budget: {
             expected_version: request.expectedVersion,
-            run: { [request.dimension]: request.value },
+            run: resumeRunLimitsBody(request),
           },
         });
         const res = await raceEarlyResponse(pending);

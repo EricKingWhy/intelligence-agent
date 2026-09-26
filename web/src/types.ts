@@ -508,17 +508,34 @@ export interface RunBudgetDimensionFacts {
   model_requests: number | null;
   total_tokens: number | null;
   cost_usd: string | null;
+  /** `#314`：已**接纳**的逻辑工具调用总数（一次多调用批次里的每条各算一格；
+   *  ToolExecutor 的 retry **不**再各算一格）。载荷没带 ⇒ null（T6 之前的暂停
+   *  快照），**不是** 0。 */
+  tool_calls: number | null;
+  /** `#314`：真实执行尝试总数（含 retry，含失败与取消的尝试）。与 `tool_calls`
+   *  是**两个 counter，不是别名**（`02 §5.1`）。 */
+  tool_attempts: number | null;
+  /** `#314`：工具名 → 已接纳逻辑调用数。null = 未知（旧快照），`{}` = 一个都没调
+   *  ——两者必须可分辨（同 `cost_usd` 的"缺失 ≠ 0"口径）。 */
+  tool_calls_by_tool: Record<string, number> | null;
+  /** `#314`：工具名 → 实际尝试次数；与上一张表同构（各占一维）。 */
+  tool_attempts_by_tool: Record<string, number> | null;
 }
 
 /** `data.limits.run` 的**四维** ceiling 视图（`#313`）：键名是载荷自己的 `max_*`
  *  形态（与 `run_budget.RunLimits` 的字段名逐字相同，也与恢复请求 `budget.run` 的键
  *  逐字相同——同一个名字在三个地方，别在前端另起同义词）。`null` = 该维**没配**
- *  ceiling（unlimited，不是 0）。 */
+ *  ceiling（unlimited，不是 0）。
+ *
+ *  `#314` 的 per-tool 配额**不是第五个 `max_*` 键**：它是"一维变多维"的那一维
+ *  （工具名 → 绝对 ceiling），所以另起一个映射字段；`{}` = 一个工具配额都没配
+ *  （unlimited），null = 载荷没带这张表。 */
 export interface RunLimitsFacts {
   max_agent_turns_total: number | null;
   max_model_requests: number | null;
   max_total_tokens: number | null;
   max_cost_usd: string | null;
+  tool_call_limits: Record<string, number> | null;
 }
 
 /** `run/paused` 的折叠结果（`#312` T4）：一个**非终态**的暂停事实。

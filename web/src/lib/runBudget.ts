@@ -14,13 +14,16 @@
  *  "消耗 0 轮、无上限"**，那是在陈述一件没发生过的事。
  *
  *  这里**不做**任何会话状态判断——输入就是投影出来的暂停事实，输出是要渲染的文本
- *  片段与数字。渲染组件（`components/PausedPanel.tsx`）只负责排版。 */
+ *  片段与数字。渲染组件（`components/PausedPanel.tsx`）只负责排版。
+ *
+ *  `#314` 起有一维是**动态**的：per-tool 配额（`run.tool_call_limits.<工具名>`）。
+ *  它不在 `RUN_DIMENSIONS` 这张定长表里，而由 `toolQuotaFacts` 按工具名排序给出
+ *  （顺序确定才可复现，与后端 `run_budget.tool_dimensions` 同一取舍）。两个 counter
+ *  也在这里分开报：`calls` 是**被接纳**的逻辑调用数（一次多调用批次里的每条各算一
+ *  格），`attempts` 含 ToolExecutor 的 retry——报告成一对数字，是因为它们本来就不是
+ *  同一个量（`02 §5.1`）。 */
 
-import type {
-  RunBudgetDimensionFacts,
-  RunLimitsFacts,
-  RunPausedInfo,
-} from '../types';
+import type { RunPausedInfo } from '../types';
 
 /** 后端暂停判据里的两个常量（**只做展示口径，判定权威在后端**）。
  *
@@ -41,6 +44,24 @@ export type RunLimitField =
   | 'max_total_tokens'
   | 'max_cost_usd';
 
+/** 四维**标量**读数的键（`data.consumed` 里那几个整数 / 十进制字段）。
+ *
+ *  工具配额的两张映射表（`tool_calls_by_tool` / `tool_attempts_by_tool`）刻意**不在**
+ *  这张表能指的键里：它们是动态维度（工具名 → 计数），逐名断言的是 `ToolQuotaFact`；
+ *  把它们放进来会让"一维"这个词同时指着两种粒度。 */
+export type RunScalarConsumedKey =
+  | 'agent_turns'
+  | 'model_requests'
+  | 'total_tokens'
+  | 'cost_usd';
+
+/** `data.limits.run` 里四维**标量** ceiling 的键（理由同上：工具配额是映射表）。 */
+export type RunScalarCeilingKey =
+  | 'max_agent_turns_total'
+  | 'max_model_requests'
+  | 'max_total_tokens'
+  | 'max_cost_usd';
+
 /** 一个 run 作用域维度在**四份**口径里的名字（事件里的触发名、消耗快照的键、
  *  ceiling 的键、恢复请求的字段、CLI 的开关）。放在一张表里是为了让"加一维"只有
  *  一处要改——散在几个 switch 里就会漏掉一个（`#313` 的 requests / tokens / cost
@@ -51,9 +72,9 @@ export interface RunDimensionSpec {
   /** 人话标签（与 CLI `_RESUME_FLAGS` 的开关名同源，见 `resumeFlag`）。 */
   label: string;
   /** `data.consumed` 里的键。 */
-  consumedKey: keyof RunBudgetDimensionFacts;
+  consumedKey: RunScalarConsumedKey;
   /** `data.limits.run` 里的键。 */
-  ceilingKey: keyof RunLimitsFacts;
+  ceilingKey: RunScalarCeilingKey;
   /** 恢复请求 `budget.run` 的字段名。 */
   resumeField: RunLimitField;
   /** 抬高这一维的 CLI 开关（提示文案用；后端 `cli._RESUME_FLAGS` 的镜像）。 */
@@ -107,6 +128,103 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
     decimal: true,
   },
 ];
+
+/** per-tool 配额维度的名字前缀（后端 `run_budget.TRIGGER_RUN_TOOL_PREFIX` 的镜像）。
+ *  工具配额是**动态维度**：每个配了配额的工具名各占一维
+ *  `run.tool_call_limits.<工具名>`，所以它不在 `RUN_DIMENSIONS` 这张定长表里。 */
+export const TOOL_DIMENSION_PREFIX = 'run.tool_call_limits.';
+
+/** 配额维度名 → 工具名；不是 per-tool 维度时 null（后端 `tool_name_of_dimension` 同判）。 */
+export function toolDimensionName(dimension: string): string | null {
+  if (!dimension.startsWith(TOOL_DIMENSION_PREFIX)) return null;
+  const name = dimension.slice(TOOL_DIMENSION_PREFIX.length);
+  return name || null;
+}
+
+/** 工具名 → 它的配额维度名（`trigger_dimension` 的那个形态）。 */
+export function toolQuotaDimension(name: string): string {
+  return `${TOOL_DIMENSION_PREFIX}${name}`;
+}
+
+/** 一个工具的配额读数（`#314`）：两个 counter 分开给，文本字段同 `DimensionFact`
+ *  的渲染口径（`unavailable` / `unlimited`，**永不**写 0 冒充）。 */
+export interface ToolQuotaFact {
+  /** 工具名（后端注册名，恢复请求点名它）。 */
+  name: string;
+  /** `run.tool_call_limits.<name>`（`trigger_dimension` 的取值）。 */
+  dimension: string;
+  /** 人话标签（命中暂停时面板与提示共用同一句）。 */
+  label: string;
+  /** 已**接纳**的逻辑调用数；null = 账目未知（旧快照 / 载荷没带那张表）。 */
+  calls: number | null;
+  /** 实际尝试次数（含 retry）；null = 未知。**不是** calls 的别名。 */
+  attempts: number | null;
+  /** 该工具的绝对 ceiling；null = 没配配额（unlimited，不是 0）。 */
+  ceiling: number | null;
+  /** ceiling − calls（下限 0）；任一侧缺 ⇒ null。 */
+  remaining: number | null;
+  callsText: string;
+  attemptsText: string;
+  ceilingText: string;
+  remainingText: string;
+  tripped: boolean;
+}
+
+/** 单个工具的配额读数：两个 counter 各取各的键、ceiling 取配置表里的那一条。 */
+function toolQuotaFact(name: string, paused: RunPausedInfo): ToolQuotaFact {
+  const calls = paused.consumed_dimensions?.tool_calls_by_tool?.[name] ?? null;
+  const attempts = paused.consumed_dimensions?.tool_attempts_by_tool?.[name] ?? null;
+  const ceiling = paused.run_limits?.tool_call_limits?.[name] ?? null;
+  const dimension = toolQuotaDimension(name);
+  // 复用四维那一份"剩余"的算法（十进制分支在这里取不到，收窄成整数读数；工具配额
+  // 本来只按整数计量——`tool_call_limits` 在 wire 上是 `dict[str, int]`）。
+  const remainingRaw = dimensionRemaining(calls, ceiling, false);
+  const remaining = typeof remainingRaw === 'number' ? remainingRaw : null;
+  return {
+    name,
+    dimension,
+    label: `工具 ${name} 的本 run 调用配额到顶（${dimension}）`,
+    calls,
+    attempts,
+    ceiling,
+    remaining,
+    callsText: calls === null ? 'unavailable' : String(calls),
+    attemptsText: attempts === null ? 'unavailable' : String(attempts),
+    ceilingText: ceiling === null ? 'unlimited' : String(ceiling),
+    remainingText: remaining === null ? 'unavailable' : String(remaining),
+    tripped: paused.trigger_dimension === dimension,
+  };
+}
+
+/** 本 run 有事实可说的工具配额：**配了配额的 ∪ 实际调用过的**，按工具名排序。
+ *
+ *  为什么是两个来源的并集（与 CLI `_tool_dimension_lines` 同一取舍）：
+ *  - 只看配置 ⇒ 漏掉"没配配额但调了 7 次"——那是可观测性要的事实；
+ *  - 只看计数 ⇒ 漏掉"配了却一次没调"——配额确实存在，也是事实。
+ *  两者都空 ⇒ 空表（不渲染这一节，同 CLI 不为空表打印表头）。
+ *
+ *  `calls` 表未知（null）时**不是**当 0 处理：那时只列配置了的工具名，它们的读数是
+ *  null ⇒ 渲染成 unavailable（`11 §6.1`：不可得 ≠ 0）。 */
+export function toolQuotaFacts(paused: RunPausedInfo): ToolQuotaFact[] {
+  const limits = paused.run_limits?.tool_call_limits ?? null;
+  const calls = paused.consumed_dimensions?.tool_calls_by_tool ?? null;
+  const names = new Set<string>([
+    ...Object.keys(limits ?? {}),
+    ...Object.keys(calls ?? {}),
+  ]);
+  return [...names].sort().map((name) => toolQuotaFact(name, paused));
+}
+
+/** 工具配额恢复的最小合法**绝对** ceiling = `calls + 1`。
+ *
+ *  后端 `resume_headroom_ok` 对 per-tool 维的判据是 `consumed < ceiling`（`>=` 会在
+ *  下次准入立刻再次暂停），所以最小合法值就是"已接纳的调用数 + 1"。**不含** closeout
+ *  预留：预留的语义是"保证暂停时还收得了口"（`02 §5.2`），而 closeout 是一次模型
+ *  请求、不产生任何工具调用——给它留一格会让"配额 = 3"实际允许 4 次调用。
+ *  账目未知（calls = null）⇒ null（后端必然 409，前端不编数字）。 */
+export function minToolQuotaValue(fact: ToolQuotaFact): number | null {
+  return fact.calls === null ? null : fact.calls + 1;
+}
 
 /** 一个维度的展示读数（数字或十进制字符串；null = 载荷没带这一维 / 该维不可得）。
  *  文本字段是渲染口径：`unavailable` / `unlimited`，**永不**写 0 冒充（`11 §6.1`）。 */
@@ -264,6 +382,37 @@ function dimensionFact(spec: RunDimensionSpec, paused: RunPausedInfo): Dimension
   };
 }
 
+/** 恢复请求要抬的那一维（`#314` 起有**两种**目标）。
+ *
+ *  - `run`：四个 run 限额之一（恢复请求的键是 `budget.run.max_*`）；
+ *  - `tool`：per-tool 配额（键是 `budget.run.tool_call_limits.<工具名>`）——配额是
+ *    "一维变多维"的那一维，它的**点名单位是工具名**，所以恢复目标不能再用一个字段名
+ *    表示。这正是不把它塞进 `RunDimensionSpec[]` 的原因：那张表的每一项都对应一个
+ *    固定的 `max_*` 字段，而工具维的基数是无穷的。
+ *
+ *  命中 local fuse / 未知维度时回落到 turns 维（与后端 `cli._RESUME_FLAGS` 的回落
+ *  口径一致——抬 run ceiling 是唯一一个任何 run 都读得懂的维度）。 */
+export type ResumeTarget =
+  | { kind: 'run'; spec: RunDimensionSpec }
+  | { kind: 'tool'; quota: ToolQuotaFact };
+
+/** 恢复输入框那一行显示的目标名：与恢复请求的键路径同一形态
+ *  （`max_model_requests` / `tool_call_limits.glob`）。 */
+export function resumeTargetLabel(target: ResumeTarget): string {
+  return target.kind === 'run'
+    ? target.spec.resumeField
+    : `tool_call_limits.${target.quota.name}`;
+}
+
+/** 抬高这一维的 CLI 开关（提示文案用；后端 `cli._RESUME_FLAGS` / `_resume_command_tail`
+ *  的镜像）。工具配额给的是**真实 argv 形状**（`NAME=N` 在同一个参数里），与 CLI 的
+ *  `resume_hint` 逐字一致——提示必须是一条能照抄执行的命令，不是示意。 */
+export function resumeTargetCliFlag(target: ResumeTarget): string {
+  return target.kind === 'run'
+    ? `${target.spec.resumeFlag} N`
+    : `--run-tool-limit ${target.quota.name}=N`;
+}
+
 export interface PauseFacts {
   /** turns 维的读数（保留给既有消费端：面板的恢复输入默认落在这一维）。 */
   consumed: number;
@@ -283,13 +432,17 @@ export interface PauseFacts {
    *  `_extra_dimension_lines` 同一取舍：老暂停只有 turns，多打三行 `unavailable /
    *  unlimited` 是噪声不是信息）。 */
   dimensions: DimensionFact[];
-  /** 真正触发暂停的那一维的读数；暂停落在 local fuse（非 run 维）时为 null
-   *  ——那时没有"某一维到顶"的 run 读数可报，不能拿 turns 冒充。 */
+  /** 真正触发暂停的那一维的读数；暂停落在 local fuse（非 run 维）或某个**工具配额**
+   *  上时为 null——那时没有"某一维到顶"的 run 读数可报，不能拿 turns 冒充
+   *  （工具配额命中的读数在 `trippedTool` 里）。 */
   tripped: DimensionFact | null;
-  /** 恢复输入指向的维度：命中的 run 维；local fuse / 未知维度回落到 turns
-   *  （与后端 `cli._RESUME_FLAGS` 的回落口径一致——抬 run ceiling 是唯一一个任何
-   *  run 都读得懂的维度）。 */
-  resumeTarget: RunDimensionSpec;
+  /** `#314`：本 run 有事实可说的工具配额（配置过的 ∪ 调用过的，按工具名排序）。 */
+  toolQuotas: ToolQuotaFact[];
+  /** `#314`：真正触发暂停的那个**工具配额**；命中 run 维 / local fuse 时为 null。 */
+  trippedTool: ToolQuotaFact | null;
+  /** 恢复输入指向的维度：命中的 run 维、或命中的**工具配额**；local fuse / 未知维度
+   *  回落到 turns（见 `ResumeTarget` 的理由）。 */
+  resumeTarget: ResumeTarget;
 }
 
 /** 恢复请求的最小合法绝对 turn ceiling（**绝对值**，不是增量）。 */
@@ -321,16 +474,23 @@ export function minResumeValue(
  *  点名要抬哪一维、抬到多少才算数、以及"已消耗不重置"这条语义）。
  *
  *  可数维度说"至少 N"；计量维度不能这么说——它的判据是"严格大于已消耗"，
- *  说"至少 N"会把一个虚假的下限当成规则（N 只是默认值）。 */
+ *  说"至少 N"会把一个虚假的下限当成规则（N 只是默认值）。工具配额（`#314`）是
+ *  可数的，且最小值就是"已接纳调用数 + 1"（不留 closeout 预留）。 */
 export function resumeInputHint(facts: PauseFacts): string {
-  const spec = facts.resumeTarget;
+  const target = facts.resumeTarget;
+  if (target.kind === 'tool') {
+    return `抬的是 ${resumeTargetLabel(target)}（CLI: ${resumeTargetCliFlag(target)}，至少 ${String(
+      minToolQuotaValue(target.quota),
+    )}）；已消耗不重置，恢复沿用同一 run_id`;
+  }
+  const spec = target.spec;
   const fact =
     facts.dimensions.find((row) => row.spec.dimension === spec.dimension) ?? null;
   const minimum = fact === null ? null : minResumeValue(spec, fact);
   const requirement = spec.decimal
     ? `须严格大于已消耗 ${fact?.consumedText ?? 'unavailable'}（默认给到 ${String(minimum)}）`
     : `至少 ${String(minimum)}`;
-  return `抬的是 ${spec.resumeField}（CLI: ${spec.resumeFlag} N，${requirement}）；已消耗不重置，恢复沿用同一 run_id`;
+  return `抬的是 ${spec.resumeField}（CLI: ${resumeTargetCliFlag(target)}，${requirement}）；已消耗不重置，恢复沿用同一 run_id`;
 }
 
 export function pauseFacts(paused: RunPausedInfo): PauseFacts {
@@ -340,9 +500,19 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
   const dimensions = facts.filter(
     (fact, index) => index === 0 || fact.consumed !== null || fact.ceiling !== null,
   );
-  const resumeTarget =
-    RUN_DIMENSIONS.find((spec) => spec.dimension === paused.trigger_dimension) ??
-    RUN_DIMENSIONS[0];
+  const toolQuotas = toolQuotaFacts(paused);
+  const trippedTool = toolQuotas.find((quota) => quota.tripped) ?? null;
+  // 恢复目标：命中的**工具配额**优先（它是动态维度，抬 turns 解不了它的暂停）；否则
+  // 按命中的 run 维取；local fuse / 未知维度回落到 turns（`ResumeTarget` 的理由）。
+  const resumeTarget: ResumeTarget =
+    trippedTool !== null
+      ? { kind: 'tool', quota: trippedTool }
+      : {
+          kind: 'run',
+          spec:
+            RUN_DIMENSIONS.find((spec) => spec.dimension === paused.trigger_dimension) ??
+            RUN_DIMENSIONS[0],
+        };
   return {
     consumed: typeof turnsFact.consumed === 'number' ? turnsFact.consumed : 0,
     ceiling: typeof turnsFact.ceiling === 'number' ? turnsFact.ceiling : null,
@@ -355,8 +525,60 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
     minResumeCeiling: minResumeCeiling(paused.consumed_agent_turns),
     dimensions,
     tripped: facts.find((fact) => fact.tripped) ?? null,
+    toolQuotas,
+    trippedTool,
     resumeTarget,
   };
+}
+
+/** 工具配额草稿的预校验（判据与后端 `resume_headroom_ok` 对 per-tool 维一致：严格
+ *  大于已接纳的调用数）。 */
+function toolDraftError(quota: ToolQuotaFact, draft: string): string | null {
+  const text = draft.trim();
+  if (!text) return `请填绝对 ceiling（${quota.label}）`;
+  // per-tool 配额的 wire 形状是 `dict[str, int]`（`parse_tool_call_limits` 拒 bool /
+  // 非整数 / <1）⇒ 形状先按"正整数"判，再判"够不够"（顺序同 run 维）。
+  if (!/^\d+$/.test(text)) return 'ceiling 必须是正整数';
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < 1) return 'ceiling 必须是正整数';
+  const minimum = minToolQuotaValue(quota);
+  if (minimum === null) {
+    return '已消耗读数不可得：这一维配了 ceiling 而账目未知时后端会拒绝恢复（409）';
+  }
+  if (value < minimum) {
+    return `ceiling 必须大于已消耗 ${quota.callsText} 次调用（至少 ${minimum}），否则恢复后立刻会再次暂停`;
+  }
+  return null;
+}
+
+/** 恢复请求的目标（App 组装请求体用）：run 维给恢复字段名，工具配额给工具名。
+ *  与 `resumeTargetLabel` 是同一份事实的两种消费者（那是给人看的键路径，这是给
+ *  `budget.run` 用的键）。 */
+export type ResumeRequestTarget =
+  | { kind: 'run'; field: RunLimitField }
+  | { kind: 'tool'; tool: string };
+
+export function resumeRequestTarget(paused: RunPausedInfo): ResumeRequestTarget {
+  const target = pauseFacts(paused).resumeTarget;
+  return target.kind === 'run'
+    ? { kind: 'run', field: target.spec.resumeField }
+    : { kind: 'tool', tool: target.quota.name };
+}
+
+/** 输入框草稿的默认值：卡住的那一维**恰好合法**的最小值（零点击可提交）——它只是
+ *  草稿初值，不是"权威 ceiling"。算不出（账目未知）⇒ null（调用方给空串，不编数字）。 */
+export function defaultResumeDraft(paused: RunPausedInfo): string | null {
+  const facts = pauseFacts(paused);
+  const target = facts.resumeTarget;
+  if (target.kind === 'tool') {
+    const minimum = minToolQuotaValue(target.quota);
+    return minimum === null ? null : String(minimum);
+  }
+  const fact =
+    facts.dimensions.find((row) => row.spec.dimension === target.spec.dimension) ?? null;
+  if (fact === null) return String(facts.minResumeCeiling);
+  const minimum = minResumeValue(target.spec, fact);
+  return minimum === null ? null : String(minimum);
 }
 
 /** 绝对 ceiling 输入框的预校验（**只为省一次必然 409 的往返**，不是规则来源）。
@@ -368,7 +590,11 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
  *  点，填一个只够 turns 的数字是解决不了问题的，提示必须点名同一维。 */
 export function ceilingDraftError(paused: RunPausedInfo, draft: string): string | null {
   const facts = pauseFacts(paused);
-  const spec = facts.resumeTarget;
+  const target = facts.resumeTarget;
+  // `#314`：工具配额的判据与 run 维不同（严格大于已接纳调用数，且 wire 形状是整数），
+  // 所以分派到它自己的那一份校验里。
+  if (target.kind === 'tool') return toolDraftError(target.quota, draft);
+  const spec = target.spec;
   const fact = facts.dimensions.find((row) => row.spec.dimension === spec.dimension) ?? null;
   const text = draft.trim();
   if (!text) return `请填绝对 ceiling（${spec.label}）`;
@@ -407,16 +633,17 @@ export function ceilingDraftError(paused: RunPausedInfo, draft: string): string 
 }
 
 /** 合法输入 → 提交用的值；非法返回 null（调用方据此禁用按钮）。
- *  整数维返回 number，十进制维返回**字符串**（保住 wire 上的十进制精度；
- *  后端 `parse_cost_ceiling` 两者都收）。 */
+ *  整数维（含 `#314` 的工具配额）返回 number，十进制维返回**字符串**（保住 wire 上的
+ *  十进制精度；后端 `parse_cost_ceiling` 两者都收，而工具配额只收整数）。 */
 export function ceilingDraftValue(
   paused: RunPausedInfo,
   draft: string,
 ): number | string | null {
   if (ceilingDraftError(paused, draft) !== null) return null;
-  const spec = pauseFacts(paused).resumeTarget;
+  const target = pauseFacts(paused).resumeTarget;
   const text = draft.trim();
-  return spec.decimal ? text : Number(text);
+  if (target.kind === 'tool') return Number(text);
+  return target.spec.decimal ? text : Number(text);
 }
 
 /** continuation 的分段标签（`03 §3.4` 四键；与 CLI `_continuation_lines` 同序）。 */
