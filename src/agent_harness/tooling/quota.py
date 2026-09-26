@@ -39,7 +39,7 @@ class ToolQuotaWindow:
     AgentRuntime 的 `execute_batch` 调用点拥有）。
     """
 
-    __slots__ = ("_limits", "_consumed")
+    __slots__ = ("_consumed", "_limits")
 
     def __init__(
         self,
