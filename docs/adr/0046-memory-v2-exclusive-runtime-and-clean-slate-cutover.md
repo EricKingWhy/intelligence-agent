@@ -30,17 +30,17 @@ MEM-V2-1 到 MEM-V2-6 已交付 V2 生命周期、持久化、形成、召回与
 | `<workspace_dir>/memory-v2.db` | `memory_v2_records`（包括 Profile tier）、`memory_v2_outbox`、`memory_v2_tombstones`、`memory_v2_settings`、`memory_v2_jobs` |
 | 已配置的 Milvus Memory collection | 仅该精确 collection：drop 后按 V2 schema 重建 |
 
-只允许预期数据库文件、allowlist 表和 Memory collection schema。未知 SQLite object、符号链接/硬链接、宽泛/未解析 collection 名、与 Knowledge 同名的 collection、非 Memory schema、待提交 SQLite WAL/journal 或活动 workspace writer 均导致拒绝。target id 以 SHA-256 指纹写入输出，避免回显 `.env` 中的值。
+只允许预期数据库文件、allowlist 表和 Memory collection schema。Milvus schema 必须精确包含 V2 字段及类型、VARCHAR 长度、`id` 主键、`tenant_id` 分区键、关闭的动态字段和正向 vector dimension。未知 SQLite object、符号链接/硬链接、宽泛/未解析或不存在的 collection 名、与 Knowledge 同名的 collection、非 Memory schema、待提交 SQLite WAL/journal 或活动 workspace writer 均导致拒绝。Milvus URI 与认证凭证共同参与目标 SHA-256 指纹；输出只记录指纹，不回显 `.env` 值。仅已有有效 fence 的中断恢复允许 collection 暂时不存在。
 
 ### D3 — 先只读计划，再用计划哈希确认执行
 
-`--dry-run` 只读取 SQLite、Milvus、Knowledge 与保留域的计数/结构指纹，不调用写接口。`--apply` 要求调用者提交本次 dry-run 的 `plan_sha256`，并在取得 workspace lock 后重新计算计划；任何目标、计数或保留域变化都会拒绝执行。
+`--dry-run` 只读取 SQLite、Milvus、Knowledge 与保留域的计数/结构指纹，不调用写接口。`--apply` 要求调用者提交本次 dry-run 的 `plan_sha256`；取得 workspace lock 后先发布 startup fence，再异步重算计划，任何目标、计数或保留域变化都会拒绝执行。计划把 Milvus URI 与认证凭证绑定到仅输出 SHA-256 的目标指纹，防止相同 collection 名在另一服务/账号下被误清理。
 
 计划、fence 和报告只记录文件/collection 指纹、schema 指纹、计数、时间与结果状态，不含 memory 内容或凭证值；不创建内容备份。
 
 ### D4 — workspace lock 与持久 fence 阻止新写入
 
-执行前必须取得和 web/CLI 一致的 `InstanceLock`。`ALLOW_SHARED_ROOT` escape hatch 开启时拒绝执行。操作在 workspace 中创建 `.memory-cutover-in-progress` fence；正常 web/CLI 启动在 fence 存在时失败关闭。只有 `--resume` 可在目标及 preservation baseline 仍匹配时继续。完成报告落盘后才删除 fence。
+执行前必须取得和 web/CLI 一致的 `InstanceLock`。`ALLOW_SHARED_ROOT` escape hatch 开启时拒绝执行。操作先将 `.memory-cutover-in-progress` 写入同目录临时文件并 fsync，再原子替换为 fence；正常 web/CLI 启动在 fence 存在时失败关闭。只有 `--resume` 可在目标及 preservation baseline 仍匹配时继续。完成报告落盘后才删除 fence。
 
 ### D5 — SQLite 旧页与派生索引同时清除
 

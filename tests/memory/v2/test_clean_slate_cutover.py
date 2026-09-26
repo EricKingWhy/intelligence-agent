@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from agent_harness.config import Settings
 from agent_harness.identity import IdentityContext
@@ -27,13 +29,13 @@ from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from tests.memory.v2._records import make_draft
 
 _MEMORY_FIELDS = [
-    {"name": "id", "type": "VARCHAR", "params": {}, "is_primary": True},
-    {"name": "memory_id", "type": "VARCHAR", "params": {}},
-    {"name": "tenant_id", "type": "VARCHAR", "params": {}, "is_partition_key": True},
-    {"name": "user_id", "type": "VARCHAR", "params": {}},
-    {"name": "scope", "type": "VARCHAR", "params": {}},
-    {"name": "session_id", "type": "VARCHAR", "params": {}},
-    {"name": "content", "type": "VARCHAR", "params": {}},
+    {"name": "id", "type": "VARCHAR", "params": {"max_length": 64}, "is_primary": True},
+    {"name": "memory_id", "type": "VARCHAR", "params": {"max_length": 2048}},
+    {"name": "tenant_id", "type": "VARCHAR", "params": {"max_length": 2048}, "is_partition_key": True},
+    {"name": "user_id", "type": "VARCHAR", "params": {"max_length": 2048}},
+    {"name": "scope", "type": "VARCHAR", "params": {"max_length": 2048}},
+    {"name": "session_id", "type": "VARCHAR", "params": {"max_length": 2048}},
+    {"name": "content", "type": "VARCHAR", "params": {"max_length": 65535}},
     {"name": "metadata", "type": "JSON", "params": {}},
     {"name": "vector", "type": "FLOAT_VECTOR", "params": {"dim": 2}},
 ]
@@ -50,7 +52,9 @@ class FakeMilvus:
         self.dropped: list[str] = []
         self.closed = False
         self.fail_initialize_once = False
-        self.fields = list(_MEMORY_FIELDS)
+        self.fields = [{**field, "params": dict(field["params"])} for field in _MEMORY_FIELDS]
+        self.auto_id = False
+        self.enable_dynamic_field = False
 
     async def connect(self) -> list[str]:
         return list(self.collections)
@@ -70,7 +74,11 @@ class FakeMilvus:
     async def _call(self, operation: str, **kwargs):
         name = kwargs["collection_name"]
         if operation == "describe_collection":
-            return {"auto_id": False, "fields": self.fields}
+            return {
+                "auto_id": self.auto_id,
+                "enable_dynamic_field": self.enable_dynamic_field,
+                "fields": self.fields,
+            }
         if operation == "query":
             return [{"count(*)": len(self.collections[name])}]
         if operation == "upsert":
@@ -127,6 +135,25 @@ def _install_fake(monkeypatch, fake: FakeMilvus) -> None:
     monkeypatch.setattr(cutover, "build_memory_vector_client", lambda _settings: fake)
 
 
+def test_interrupted_fence_write_does_not_publish_a_broken_marker(tmp_path, monkeypatch):
+    plan = {
+        "plan_sha256": "a" * 64,
+        "workspace_identity_sha256": "b" * 64,
+        "milvus_memory_collection": {"identity_sha256": "c" * 64},
+    }
+
+    def interrupted_dump(_record, stream, **_kwargs):
+        stream.write("{")
+        raise OSError("simulated partial fence write")
+
+    monkeypatch.setattr(cutover.json, "dump", interrupted_dump)
+    with pytest.raises(cutover.CutoverRefused, match="cutover_fence_create_failed"):
+        cutover._write_fence(tmp_path, plan)
+
+    assert not (tmp_path / CUTOVER_FENCE_FILENAME).exists()
+    assert list(tmp_path.glob(f".{CUTOVER_FENCE_FILENAME}.*.tmp")) == []
+
+
 def _sqlite_bytes(settings: Settings) -> dict[str, bytes]:
     root = Path(settings.workspace_dir)
     return {
@@ -155,6 +182,47 @@ async def test_dry_run_is_read_only_and_contains_counts_without_memory_content(t
     assert str(settings.workspace_dir) not in serialized
     assert plan["milvus_memory_collection"]["row_count"] == 1
     assert plan["knowledge_collection"]["row_count"] == 1
+    assert fake.dropped == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_plan_binds_milvus_target_without_emitting_credentials_or_uri(
+    tmp_path, monkeypatch,
+):
+    settings = _settings(tmp_path)
+    fake = FakeMilvus(settings)
+    _install_fake(monkeypatch, fake)
+
+    plan = await cutover.build_plan(settings)
+    uri_plan = await cutover.build_plan(
+        settings.model_copy(update={"milvus_uri": "https://different.example.test"}),
+    )
+    credential_plan = await cutover.build_plan(
+        settings.model_copy(update={"milvus_token": SecretStr("different-test-only")}),
+    )
+
+    assert plan["milvus_target_identity_sha256"] != uri_plan["milvus_target_identity_sha256"]
+    assert plan["milvus_target_identity_sha256"] != credential_plan[
+        "milvus_target_identity_sha256"
+    ]
+    assert plan["plan_sha256"] != uri_plan["plan_sha256"]
+    assert plan["plan_sha256"] != credential_plan["plan_sha256"]
+    serialized = json.dumps(plan)
+    assert settings.milvus_uri not in serialized
+    assert settings.milvus_token.get_secret_value() not in serialized
+
+
+@pytest.mark.asyncio
+async def test_dry_run_refuses_missing_configured_memory_collection(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    fake = FakeMilvus(settings)
+    fake.collections.pop(settings.milvus_collection)
+    _install_fake(monkeypatch, fake)
+
+    with pytest.raises(cutover.CutoverRefused, match="configured_memory_collection_not_found"):
+        await cutover.build_plan(settings)
+
+    assert settings.milvus_collection not in fake.collections
     assert fake.dropped == []
 
 
@@ -270,6 +338,46 @@ async def test_interrupted_cutover_stays_fenced_and_can_resume_same_plan(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_cutover_publishes_startup_fence_before_locked_inventory_await(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    await _seed_databases(settings)
+    fake = FakeMilvus(settings)
+    _install_fake(monkeypatch, fake)
+    plan = await cutover.build_plan(settings)
+    root = Path(settings.workspace_dir)
+    locked_inventory_started = asyncio.Event()
+    resume_locked_inventory = asyncio.Event()
+    original_build_plan = cutover.build_plan
+    call_count = 0
+
+    async def paused_build_plan(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            locked_inventory_started.set()
+            await resume_locked_inventory.wait()
+        return await original_build_plan(*args, **kwargs)
+
+    monkeypatch.setattr(cutover, "build_plan", paused_build_plan)
+    task = asyncio.create_task(cutover.apply_plan(
+        settings,
+        expected_plan_sha256=plan["plan_sha256"],
+        report_path=tmp_path / "fenced-report.json",
+    ))
+    try:
+        await asyncio.wait_for(locked_inventory_started.wait(), timeout=3)
+        assert (root / CUTOVER_FENCE_FILENAME).exists()
+        with pytest.raises(InstanceLockError, match="reset is incomplete"):
+            InstanceLock(root).acquire()
+    finally:
+        resume_locked_inventory.set()
+    report = await task
+
+    assert report["status"] == "completed"
+    assert not (root / CUTOVER_FENCE_FILENAME).exists()
+
+
+@pytest.mark.asyncio
 async def test_cutover_refuses_unknown_sqlite_tables_without_mutation(tmp_path, monkeypatch):
     import sqlite3
     from pathlib import Path
@@ -321,6 +429,37 @@ async def test_cutover_refuses_collection_with_extra_non_memory_fields(tmp_path,
     settings = _settings(tmp_path)
     fake = FakeMilvus(settings)
     fake.fields.append({"name": "unrelated_payload", "type": "VARCHAR", "params": {}})
+    _install_fake(monkeypatch, fake)
+
+    with pytest.raises(cutover.CutoverRefused, match="configured_collection_schema_not_memory"):
+        await cutover.build_plan(settings)
+
+    assert fake.dropped == []
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "varchar_length", "dynamic_field", "field_type", "auto_id",
+        "primary_field", "partition_field",
+    ],
+)
+@pytest.mark.asyncio
+async def test_cutover_refuses_collection_with_non_v2_schema_shape(tmp_path, monkeypatch, mismatch):
+    settings = _settings(tmp_path)
+    fake = FakeMilvus(settings)
+    if mismatch == "varchar_length":
+        fake.fields[1]["params"]["max_length"] = 64
+    elif mismatch == "dynamic_field":
+        fake.enable_dynamic_field = True
+    elif mismatch == "field_type":
+        fake.fields[1]["type"] = "JSON"
+    elif mismatch == "auto_id":
+        fake.auto_id = True
+    elif mismatch == "primary_field":
+        fake.fields[0]["is_primary"] = False
+    else:
+        fake.fields[2]["is_partition_key"] = False
     _install_fake(monkeypatch, fake)
 
     with pytest.raises(cutover.CutoverRefused, match="configured_collection_schema_not_memory"):

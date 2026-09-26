@@ -16,6 +16,7 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -257,6 +258,17 @@ def _preserved_local_domains(settings: Settings, root: Path) -> dict[str, Any]:
     }
 
 
+def _milvus_type_name(value: Any) -> str:
+    if isinstance(value, str):
+        return value.rsplit(".", 1)[-1].upper()
+    try:
+        from pymilvus import DataType
+
+        return DataType(value).name
+    except (ImportError, TypeError, ValueError):
+        return ""
+
+
 async def _milvus_collection_inventory(vectors: Any, settings: Settings, name: str) -> dict[str, Any]:
     collections = await vectors.connect()
     present = name in collections
@@ -270,18 +282,63 @@ async def _milvus_collection_inventory(vectors: Any, settings: Settings, name: s
         return result
     description = await vectors._call("describe_collection", collection_name=name)
     if name == settings.milvus_collection:
-        fields = {item.get("name"): item for item in description.get("fields", [])}
+        field_list = description.get("fields", [])
+        if not isinstance(field_list, list) or not all(
+            isinstance(item, dict) for item in field_list
+        ):
+            raise CutoverRefused("configured_collection_schema_not_memory")
+        fields = {item.get("name"): item for item in field_list}
         expected_fields = {
             "id", "memory_id", "tenant_id", "user_id", "scope", "session_id",
             "content", "metadata", "vector",
         }
-        vector_params = fields.get("vector", {}).get("params", {})
+        expected_types = {
+            "id": "VARCHAR", "memory_id": "VARCHAR", "tenant_id": "VARCHAR",
+            "user_id": "VARCHAR", "scope": "VARCHAR", "session_id": "VARCHAR",
+            "content": "VARCHAR", "metadata": "JSON", "vector": "FLOAT_VECTOR",
+        }
+        expected_max_lengths = {
+            "id": 64,
+            "memory_id": 2048,
+            "tenant_id": 2048,
+            "user_id": 2048,
+            "scope": 2048,
+            "session_id": 2048,
+            "content": 65535,
+        }
+        field_params = {field_name: item.get("params") for field_name, item in fields.items()}
+        vector_params = field_params.get("vector")
+        vector_dimension = vector_params.get("dim") if isinstance(vector_params, dict) else None
+        primary_fields = {
+            field_name for field_name, item in fields.items() if item.get("is_primary", False)
+        }
+        partition_fields = {
+            field_name for field_name, item in fields.items()
+            if item.get("is_partition_key", False)
+        }
         if (
-            set(fields) != expected_fields
-            or bool(description.get("auto_id", False))
-            or not fields.get("id", {}).get("is_primary", False)
-            or not fields.get("tenant_id", {}).get("is_partition_key", False)
-            or int(vector_params.get("dim", 0)) <= 0
+            len(fields) != len(field_list)
+            or set(fields) != expected_fields
+            or {
+                field_name: _milvus_type_name(item.get("type"))
+                for field_name, item in fields.items()
+            } != expected_types
+            or {
+                field_name: field_params[field_name].get("max_length")
+                for field_name in expected_max_lengths
+                if isinstance(field_params.get(field_name), dict)
+            } != expected_max_lengths
+            or any(
+                not isinstance(field_params.get(field_name), dict)
+                for field_name in expected_fields
+            )
+            or description.get("auto_id") is not False
+            or description.get("enable_dynamic_field") is not False
+            or primary_fields != {"id"}
+            or partition_fields != {"tenant_id"}
+            or not isinstance(vector_dimension, int)
+            or isinstance(vector_dimension, bool)
+            or vector_dimension <= 0
         ):
             raise CutoverRefused("configured_collection_schema_not_memory")
     rows = await vectors._call(
@@ -323,7 +380,21 @@ def _validate_memory_target(settings: Settings) -> None:
         raise CutoverRefused("embedding_configuration_unavailable")
 
 
-async def build_plan(settings: Settings) -> dict[str, Any]:
+def _milvus_target_identity(settings: Settings) -> str:
+    target = json.dumps(
+        {
+            "uri": settings.milvus_uri,
+            "credential": settings.milvus_token.get_secret_value(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _sha256(target)
+
+
+async def build_plan(
+    settings: Settings, *, allow_missing_memory_collection: bool = False,
+) -> dict[str, Any]:
     """Build a content-free read-only plan. It never creates files or collections."""
     _validate_memory_target(settings)
     root = _workspace_root(settings)
@@ -336,6 +407,8 @@ async def build_plan(settings: Settings) -> dict[str, Any]:
         memory_collection = await _milvus_collection_inventory(
             vectors, settings, settings.milvus_collection,
         )
+        if not memory_collection["exists"] and not allow_missing_memory_collection:
+            raise CutoverRefused("configured_memory_collection_not_found")
         knowledge_collection = None
         if settings.knowledge_collection:
             knowledge_collection = await _milvus_collection_inventory(
@@ -345,6 +418,7 @@ async def build_plan(settings: Settings) -> dict[str, Any]:
         await vectors.close()
     plan = {
         "workspace_identity_sha256": _path_fingerprint(root),
+        "milvus_target_identity_sha256": _milvus_target_identity(settings),
         "sqlite_targets": databases,
         "milvus_memory_collection": memory_collection,
         "knowledge_collection": knowledge_collection,
@@ -463,13 +537,26 @@ def _write_fence(root: Path, plan: dict[str, Any]) -> Path:
         "started_at": datetime.now(UTC).isoformat(),
         "baseline_plan": plan,
     }
+    temporary_path: Path | None = None
     try:
-        with path.open("x", encoding="utf-8") as stream:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=root, prefix=f".{path.name}.", suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
             json.dump(record, stream, sort_keys=True)
             stream.flush()
             os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
     except OSError as error:
         raise CutoverRefused("cutover_fence_create_failed") from error
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
     return path
 
 
@@ -477,6 +564,8 @@ def _resume_matches(current: dict[str, Any], fence: dict[str, Any]) -> bool:
     baseline = fence["baseline_plan"]
     if (
         current["workspace_identity_sha256"] != baseline["workspace_identity_sha256"]
+        or current["milvus_target_identity_sha256"]
+        != baseline["milvus_target_identity_sha256"]
         or current["preserved_domains_before"] != baseline["preserved_domains_before"]
         or current["knowledge_collection"] != baseline["knowledge_collection"]
     ):
@@ -525,7 +614,9 @@ async def apply_plan(
 ) -> dict[str, Any]:
     root = _workspace_root(settings)
     fence_record = _read_fence(root)
-    current_plan = await build_plan(settings)
+    current_plan = await build_plan(
+        settings, allow_missing_memory_collection=fence_record is not None,
+    )
     if fence_record is None:
         if current_plan["plan_sha256"] != expected_plan_sha256:
             raise CutoverRefused("plan_changed_since_dry_run")
@@ -546,14 +637,19 @@ async def apply_plan(
         raise CutoverRefused("workspace_writer_is_active") from error
     fence = None
     try:
+        # Publish the startup fence before the first await while holding the instance lock.
+        fence = _write_fence(root, plan)
         # Recompute under the process lock; no writer may change the target after this point.
-        locked_plan = await build_plan(settings)
+        locked_plan = await build_plan(
+            settings, allow_missing_memory_collection=fence_record is not None,
+        )
         if fence_record is None:
             if locked_plan["plan_sha256"] != expected_plan_sha256:
+                fence.unlink()
+                fence = None
                 raise CutoverRefused("plan_changed_while_acquiring_writer_fence")
         elif not _resume_matches(locked_plan, fence_record):
             raise CutoverRefused("interrupted_cutover_target_or_preserved_state_changed")
-        fence = _write_fence(root, plan)
         results = [
             _clear_sqlite_database(_sqlite_target(root, name))
             for name in _DATABASE_TABLES
@@ -593,6 +689,7 @@ async def apply_plan(
             "status": "completed",
             "completed_at": datetime.now(UTC).isoformat(),
             "plan_sha256": expected_plan_sha256,
+            "milvus_target_identity_sha256": plan["milvus_target_identity_sha256"],
             "sqlite_results": [
                 {
                     **result,

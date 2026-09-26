@@ -22,7 +22,7 @@ SessionEvent、`harness.db` 中的 session metadata/checkpoint、workspace 文�
 uv run --locked python -m agent_harness.memory.v2.cutover --dry-run
 ```
 
-执行前人工确认计划中的数据库/table allowlist、行数、Memory collection 身份指纹/Schema/行数、Knowledge count/schema 和 preservation 指纹均符合预期，且 `backup_created` 为 `false`。身份以 hash 输出，避免把 `.env` 值回显；请在本机私下核对 `.env` 中的 `WORKSPACE_DIR`、Memory collection 配置与预期目标，不要把凭证或环境文件内容贴入日志/聊天。
+执行前人工确认计划中的数据库/table allowlist、行数、Memory collection 身份指纹/Schema/行数、Knowledge count/schema 和 preservation 指纹均符合预期，且 `backup_created` 为 `false`。Milvus endpoint 与认证凭证共同绑定到目标 hash，输出不包含其原值；请在本机私下核对 workspace 与 collection 配置确实指向批准的目标，不要把凭证或环境文件内容贴入日志/聊天。新 cutover 若目标 collection 不存在会拒绝执行；仅带有效 fence 的中断恢复可接受 collection 暂缺。
 
 用**同一份 dry-run** 输出中的 `plan_sha256` 执行，报告路径必须在 workspace root 外且不存在：
 
