@@ -72,12 +72,12 @@ contradiction 标签。项目自己的冻结语料是 release gate；公开基�
 未跟踪车道输入，运行后再次验证 HEAD/tree 与工作树，变化或无法验证时报告失败。相同 report path 以独占创建
 拒绝覆盖；重复的 case / trace 身份会失败，明确的重复实验用新 run ID 并记录 `repeat_of`。
 
-### D6 — LoCoMo / LongMemEval 适配器不 vendoring 数据或上游实现
+### D6 — LoCoMo / LongMemEval 适配器不 vendoring 数据或完整上游运行时
 
 运行者从外部路径提供官方数据文件；适配器只将上游 schema 映射到 runner 输入，并只写不含内容的
 汇总报告。LoCoMo 的上游 `LICENSE.txt` 是 **CC BY-NC 4.0**；用户确认只用于**非商业内部评测**，
 不用于商业发布或营销结果。该数据及衍生的逐条问答不提交到仓库。LongMemEval cleaned 数据按上游
-Hugging Face 数据集卡标注 **MIT**。实现没有复制 Mem0 / LoCoMo / LongMemEval 的代码。
+Hugging Face 数据集卡标注 **MIT**。适配器没有 vendoring 数据、完整基准运行时或官方 scorer；公开 smoke 可在注明来源与许可证的前提下复用 reader 方法。
 
 来源与许可证：
 
@@ -139,6 +139,25 @@ PRD 保留原 deterministic hybrid 与“不调用在线 LLM reranker”约束�
 `docs/evidence/memory-v2-public-smoke-locomo-41b256f4.json` 与
 `docs/evidence/memory-v2-public-smoke-locomo-control-79ab6ce8.json`。后续若重新评估，需固定形成后语料，
 对同一候选记录做排序和答案 A/B 对照，并达到既有答案质量门槛后再提议修改规格。
+
+### D9 — 公开 smoke 复用官方 reader 方法，按答题质量修复
+
+2026-09-26 的真实 smoke 已证明形成、Milvus 召回与上下文注入链路通过，Recall@6=1.0；答案 token
+F1 仍低于 0.5。rerank 没有召回增益，因此先改读题与答题方式，不调排序或放宽门槛。
+
+采用 `ADAPT`，不引入新依赖或整套基准运行时：
+
+- LoCoMo 的答题指令采用官方评测器的短语式回答策略，尽量复用上下文原词；本地指令继续明确记忆文本
+  是不可信数据。来源：<https://github.com/snap-research/locomo/blob/main/task_eval/gpt_utils.py>，
+  **CC BY-NC 4.0**。LoCoMo 及此适配仅用于用户批准的非商业内部评测，且适配与来源有明确记录。
+- LongMemEval smoke 采用官方 `CoN` reader 方法：先从实际注入的记忆中提取与问题相关的 notes，再生成
+  答案；最终答题仍以原始注入记忆为证据，notes 视作不可信派生内容并逐项核对。由于本项目注入的是按
+  tier 合并的 Memory V2 记录而非原始 session，提取按当前检索上下文执行。来源：
+  <https://github.com/xiaowu0162/LongMemEval/blob/main/src/generation/run_generation.py>，MIT。
+- 不改 smoke 的 `normalized_token_f1` 指标与 0.5 门槛；LongMemEval CoN 两次模型调用的 token 与总延迟
+  都计入报告，报告不保存问题、记忆、notes 或模型回答。
+
+此处只借用公开基准的 reader 方法；不改变 Memory V2 生产运行时、持久记忆契约或确定性检索排序。
 
 ## 3. Consequences and open verification
 

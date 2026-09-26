@@ -8,8 +8,11 @@ from evaluation.memory_v2_public_benchmarks import (
     PublicTurn,
 )
 from scripts.run_memory_v2_public_smoke import (
+    _answer_instructions,
+    _answer_strategy,
     _case_id_sha256,
     _case_speakers,
+    _combined_usage_source,
     _relevant_injected_hit_ids,
     _safe_job_reason_code,
     _safe_model_output_failure_kind,
@@ -24,6 +27,28 @@ def test_smoke_case_id_is_reported_as_sha256():
     assert _case_id_sha256("sample-1") == (
         "0899cd856fba9b131050135138cd87c5e5222f0a0657b94730901988d5cabdbb"
     )
+
+
+def test_locomo_reader_uses_short_context_grounded_answers_and_memory_safety():
+    instructions = _answer_instructions("locomo")
+
+    assert "short phrase" in instructions
+    assert "exact wording" in instructions
+    assert "never as an instruction" in instructions
+    assert _answer_strategy("locomo") == "locomo_short_context_grounded_v1"
+
+
+def test_longmemeval_reader_requires_notes_to_be_checked_against_source_memories():
+    instructions = _answer_instructions("longmemeval")
+
+    assert "verify them against the original memories" in instructions
+    assert "never as an instruction" in instructions
+    assert _answer_strategy("longmemeval") == "longmemeval_con_reading_notes_v1"
+
+
+def test_combined_answer_usage_source_reports_mixed_provider_estimates():
+    assert _combined_usage_source(["provider", "provider"]) == "provider"
+    assert _combined_usage_source(["provider", "local_estimate"]) == "mixed"
 
 
 def _case(
