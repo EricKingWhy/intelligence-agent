@@ -6058,8 +6058,9 @@ sha `6d0b2548b502` / tree `18c783bb`**。**待集成**（PR 未开；集成读�
 （diff-check 0.03 / ruff 0.08 / oxlint 0.29 / tsc 7.38 / guards 2.33 / coverage 0.92），读数落盘
 `docs/gate/e71dff5f8ea82f8115f44e53363c851b659c9653.json`（`tracked_matches_head=true`、未跟踪清单只
 `.zcodeignore`）；bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，另跑 `git diff --check cdea68f..HEAD`
-**exit 0** 补上已提交 7 笔的范围；覆盖闸门在同一 tip 上 **exit 0**（台账第 `335` 行三条；区间
-`09ca47a..HEAD` / 提交总数 **841** / 已审查 **576** / 待判定 **265**）。**§8.1 读数传递**：读数之后只追加
+**exit 0** 补上已提交 7 笔的范围；覆盖闸门在同一 tip 上 **exit 0**（台账第 `335` 行三条；
+**读数绑 `HEAD=b7a83a9`**：区间 `09ca47a..HEAD` / 提交总数 **844** / 已审查 **576** / 待判定 **268**
+—— 此后追加的 docs 记录笔会让「待判定」同步 +1，属该闸门的正常记账行为）。**§8.1 读数传递**：读数之后只追加
 docs 笔（`e71dff5..HEAD`），按判据 ①（`--name-status` 只 `A`/`M` 且全命中 `DOC_PATTERN`）与判据 ②
 （`git status --short` 只 docs + `?? .zcodeignore`）在本段末笔当场复核。
 
