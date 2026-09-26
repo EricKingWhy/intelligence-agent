@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
 import { applyEvent, initConversation, projectHistory, summarizeEvent } from './projection';
+import { deadlineInstant } from './runBudget';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   // 恒带 `time`：真实事件都带（durable log 的 SessionEvent.time）。夹具省掉它会让
@@ -274,6 +275,75 @@ describe('run/paused 的 per-tool 事实（`#314` T6）', () => {
     expect(summarizeEvent(toolQuotaPausedEvent())).toBe(
       'run.tool_call_limits.glob · 1 次调用/上限 1',
     );
+  });
+});
+
+/** `#315`：deadline 到点的暂停（真实载荷形状：`limits.run.deadline_at` 是 RFC 3339 UTC
+ *  **文本**，与四个 `max_*` 同住一张表）。 */
+function deadlinePausedEvent(
+  run: Record<string, unknown> = { max_agent_turns_total: 8, deadline_at: '2026-09-26T04:10:00Z' },
+): AgentEvent {
+  return ev({
+    type: EventType.RUN_PAUSED,
+    seq: 9,
+    step_id: 2,
+    data: {
+      reason: 'deadline',
+      trigger_dimension: 'run.deadline_at',
+      budget_version: 1,
+      consumed: {
+        agent_turns: 2,
+        model_requests: 3,
+        total_tokens: 40,
+        cost_usd: null,
+        tool_calls: 1,
+        tool_attempts: 1,
+        tool_calls_by_tool: { bash: 1 },
+        tool_attempts_by_tool: { bash: 1 },
+      },
+      limits: {
+        local: { max_agent_turns: 500, source: 'deployment' },
+        run,
+      },
+      continuation: {
+        completed: ['到点前已完成的工作'],
+        remaining: ['暂停发生在回合之间的稳定边界'],
+        blockers: ['run.deadline_at 到点：2026-09-26T04:10:00Z'],
+        next_safe_action: '换一个未来时刻后以同一 run_id 恢复',
+      },
+      closeout_source: 'deterministic',
+      resume_requirements: [],
+      trace_id: 'trace-deadline',
+    },
+  });
+}
+
+describe('run/paused 的 deadline 事实（`#315` T7）', () => {
+  it('limits.run.deadline_at 逐字进投影，面板读得到它（事件 → 投影 → 消费端一条链）', () => {
+    // 这一格是 `#315` 的 `tsc -b` 抓回来的：类型加了 `deadline_at`，而解析器没读它
+    // ⇒ `run_limits.deadline_at` 在生产路径上恒为 undefined，面板的"绝对截止时刻"
+    // 一行永远拿不到值。手工构造 `RunPausedInfo` 的用例看不见这一格，所以钉在**投影**上。
+    const s = projectHistory('s', [deadlinePausedEvent()]);
+    expect(s.run_paused?.trigger_dimension).toBe('run.deadline_at');
+    expect(s.run_paused?.run_limits?.deadline_at).toBe('2026-09-26T04:10:00Z');
+    expect(deadlineInstant(s.run_paused!)).toBe('2026-09-26T04:10:00Z');
+  });
+
+  it('整键缺席 ⇒ null（没配 deadline），不是空串、也不是编出来的时刻', () => {
+    const s = projectHistory('s', [deadlinePausedEvent({ max_agent_turns_total: 8 })]);
+    expect(s.run_paused?.run_limits?.deadline_at).toBeNull();
+    expect(s.run_paused?.run_limits?.max_agent_turns_total).toBe(8);
+  });
+
+  it('数 / 空串 **不**当时刻收下（后端 `parse_deadline_at` 收不了它们）', () => {
+    // cost 维的读法（数也当读数）在 deadline 维是错的：`0` 是 epoch 秒还是毫秒？
+    // 后端只认带时区的文本 ⇒ 前端把它收成时刻等于编一个任何事件里都不存在的读数。
+    const asNumber = projectHistory('s', [deadlinePausedEvent({ deadline_at: 0 })]);
+    expect(asNumber.run_paused?.run_limits?.deadline_at).toBeNull();
+    const blank = projectHistory('s', [deadlinePausedEvent({ deadline_at: '  ' })]);
+    expect(blank.run_paused?.run_limits?.deadline_at).toBeNull();
+    const trimmed = projectHistory('s', [deadlinePausedEvent({ deadline_at: ' 2026-09-26T04:10:00Z ' })]);
+    expect(trimmed.run_paused?.run_limits?.deadline_at).toBe('2026-09-26T04:10:00Z');
   });
 });
 

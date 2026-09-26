@@ -688,6 +688,20 @@ function dimensionDecimalText(raw: Record<string, unknown>, key: string): string
   return num === undefined ? null : String(num);
 }
 
+/** 某个键的**时刻文本**（deadline 维，`#315`）：wire 上是 RFC 3339 UTC 的**文本**
+ *  （后端 `build_pause_data` 把 `deadline_at` 摊平成 `limits.run` 的一个键）。
+ *
+ *  与 `dimensionDecimalText` 分开的理由是形状判据不同：数在 cost 维是合法读数
+ *  （`0.3` 与 `"0.3"` 同义），在 deadline 维**不是**——`0` / epoch 毫秒都进不了后端
+ *  `parse_deadline_at`，前端把它收成时刻等于编出一个任何事件里都不存在的读数。
+ *  所以这里只认非空字符串；形状本身（带时区 / 严格未来）仍由 `runBudget.parseInstant`
+ *  与恢复草稿校验负责，本层不写第二份规则。 */
+function dimensionInstantText(raw: Record<string, unknown>, key: string): string | null {
+  const value = raw[key];
+  if (typeof value !== 'string') return null;
+  return value.trim() === '' ? null : value.trim();
+}
+
 /** 分维计数表（`#314`：工具名 → 计数）：**整键缺席 ⇒ null**（未知），空对象 ⇒ `{}`
  *  （已知，一个都没有）——两者的区别与 `cost_usd` 的"缺失 ≠ 0"同源。
  *
@@ -738,6 +752,9 @@ function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
     max_model_requests: dimensionNumber(raw, 'max_model_requests'),
     max_total_tokens: dimensionNumber(raw, 'max_total_tokens'),
     max_cost_usd: dimensionDecimalText(raw, 'max_cost_usd'),
+    // `#315`：deadline 维（与四个 `max_*` 同住 `limits.run`，但判的是时刻先后）。
+    // 缺席 / 不是文本 ⇒ null（没配 deadline）——**不是**"值缺失 ⇒ 编一个"。
+    deadline_at: dimensionInstantText(raw, 'deadline_at'),
     // `#314`：`tool_call_limits` 是**绝对** ceiling 表（不是 remaining），
     // 未配置的工具名不出现在表里（表缺席 = 没配任何工具配额）。下限是 1：
     // 后端只收正整数 ceiling（`parse_tool_call_limits`），`0` 必然在那个入口 422。

@@ -169,7 +169,7 @@ describe('pauseFacts —— 与 CLI 同一口径的展示数字（#312）', () =
         },
         run_limits: {
           max_agent_turns_total: 8, max_model_requests: 4,
-          max_total_tokens: null, max_cost_usd: null, tool_call_limits: {},
+          max_total_tokens: null, max_cost_usd: null, deadline_at: null, tool_call_limits: {},
         },
       }),
     );
@@ -199,7 +199,7 @@ describe('pauseFacts —— 与 CLI 同一口径的展示数字（#312）', () =
         },
         run_limits: {
           max_agent_turns_total: null, max_model_requests: null,
-          max_total_tokens: null, max_cost_usd: '0.30', tool_call_limits: {},
+          max_total_tokens: null, max_cost_usd: '0.30', deadline_at: null, tool_call_limits: {},
         },
       }),
     );
@@ -287,6 +287,7 @@ describe('per-tool 配额（`#314` T6）—— 动态维度、两个 counter、�
         max_model_requests: null,
         max_total_tokens: null,
         max_cost_usd: null,
+        deadline_at: null,
         tool_call_limits: { glob: 1, bash: 5 },
       },
       ...overrides,
@@ -359,6 +360,7 @@ describe('per-tool 配额（`#314` T6）—— 动态维度、两个 counter、�
           max_model_requests: null,
           max_total_tokens: null,
           max_cost_usd: null,
+          deadline_at: null,
           tool_call_limits: {},
         },
       }),
