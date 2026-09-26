@@ -5918,8 +5918,14 @@ coverage 1.29），读数落盘 `docs/gate/72541eed2909c54c1be2e15571be9bde69078
 合进分支 ⇒ 集成本身不引入新内容）⇒ PR merge 的树 = 父二 `91eb76f` 的树，按覆盖闸门「**零新增内容**」判据
 （B-47）**自动归属、无需补台账行**（本票台账 327–334 覆盖 `f13ed0d..1444e2e` 的全部代码与证据笔）。
 `#315` **CLOSED**（2026-09-26T18:21:49Z，§14.12）：关单评论含 PR / merge sha / Live Gate 证据目录 /
-两轴与六轮审查判定 / 门禁与重车道读数 / 两条既有红如实披露 / 残余清单。**集成读数**见本段末
-（数字取自 `docs/gate/**` 落盘文件本身，不手抄）。
+两轴与六轮审查判定 / 门禁与重车道读数 / 两条既有红如实披露 / 残余清单。**集成读数**（数字取自 `docs/gate/**` 落盘文件本身，不手抄）：
+- **landed 树** `91eb76f` / tree `e858c6231a7c`（= 被集成的树）裸全量 **6/6 PASS**，墙钟 **16.85s**（diff-check 0.13 / ruff 0.07 / oxlint 0.24 / tsc 11.68 / guards 3.50 / coverage 1.24），
+  `tracked_matches_head=true`；未跟踪清单 = `.zcodeignore` + 本票上一笔刚落、当时尚未提交的 `c87dcb9….json`（两份都不是车道输入 ⇒ 不影响判定）；读数落盘 `docs/gate/91eb76f824b8b6cf2871fbee81df59cff0d907ef.json`。
+- **本落账笔** `c87dcb9` / tree `e86443d86c4a` 裸全量 **6/6 PASS**，墙钟 **18.1s**（diff-check 0.05 / ruff 0.92 / oxlint 0.31 / tsc 10.70 / guards 5.01 / coverage 1.10），
+  读数落盘 `docs/gate/c87dcb9d3ff27a6db1a65bebeb87d2aaa36ad13c.json`（本笔与其后的读数落盘同属 docs-only ⇒ 覆盖闸门按路径自动归属）。
+- **补范围**：bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，另跑 `git diff --check f13ed0d..HEAD` **exit 0**
+  补上「已提交未推送」全区间（`git rev-list --count f13ed0d..HEAD` = 25）；**覆盖闸门 exit 0**（台账仍 327–334）。
+- **重车道没有重跑**（见上：输入面零改动）⇒ 重车道读数仍以代码冻结树 `cf1879d` 为准。
 
 **§14.9 集成后回补**：`origin/main` 前进到 `5ea64103` ⇒ **前端 / A 链**（`D:\intelligence-agent-frontend`）与
 **集成区**（`D:\intelligence-agent`）的 `main` 落后，两条线在下一次开工前先自检
