@@ -34,11 +34,12 @@ SQLite 与派生索引仍是业务数据所有者。
 
 Memory V2 observation 只发送稳定的标识、阶段、模型别名、动作、kind、scope、计数、reason code、
 attempt/fallback、schema/safety 结果、延迟、token 数、成本及 SHA-256 哈希。输入、输出、候选内容、
-证据、provider response、秘密凭证和自由文本错误不发送。官方 SDK 可能自动把项目 `public_key`
-附在 OTel `scope.attributes.public_key`；按用户批准，它是非秘密路由标识，只允许出现在该
-instrumentation scope 字段，不视为应用内容或秘密凭证。`secret_key` 及 public key 在其他字段中的
-出现仍由真实 trace Gate 拦截。哈希在进程内由规范化内容计算后，只将摘要交给 Langfuse；结构化字段
-通过 sink allowlist 和有限 token 格式过滤。
+证据、provider response、秘密凭证和自由文本错误不发送。官方 SDK 会自动把项目 `public_key`
+附在 OTel `scope.attributes.public_key`；实际 trace API 回读将该 instrumentation scope 投影为
+`metadata.scope.attributes.public_key`（trace 与 observation 都可能出现）。按用户批准，它是非秘密
+路由标识，只允许出现在直接 scope 字段或该精确 API 投影，不视为应用内容或秘密凭证。`secret_key`
+及 public key 在其他字段中的出现仍由真实 trace Gate 拦截。哈希在进程内由规范化内容计算后，只将
+摘要交给 Langfuse；结构化字段通过 sink allowlist 和有限 token 格式过滤。
 
 模型调用的输入 token 是本地估算值，并标注 `input_tokens_estimated`；输出 token 如可估算也标注来源。
 当前 invoker 不提供定价来源，所以按用户批准将 `cost_usd` 如实记为 `null`，不伪造费用；只有可信费率

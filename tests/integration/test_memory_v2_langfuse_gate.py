@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 from collections.abc import Mapping
+from copy import deepcopy
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -14,6 +16,7 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.observability import LangfuseSink
+from agent_harness.observability.sink import sanitize_memory_metadata
 from agent_harness.session import RUN_COMPLETED
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
@@ -42,19 +45,28 @@ def _scope_payload(item):
 
 def _is_sdk_public_key_path(path: str) -> bool:
     parts = path.split(".")
-    if len(parts) == 5:
-        return (
-            parts[0] == "trace_payload"
-            and _is_index(parts[1], "traces")
-            and parts[2:] == ["scope", "attributes", "public_key"]
-        )
-    return (
-        len(parts) == 6
-        and parts[0] == "trace_payload"
-        and _is_index(parts[1], "traces")
-        and _is_index(parts[2], "observations")
-        and parts[3:] == ["scope", "attributes", "public_key"]
+    if len(parts) < 5 or parts[0] != "trace_payload" or not _is_index(parts[1], "traces"):
+        return False
+    offset = 2
+    if len(parts) > offset and _is_index(parts[offset], "observations"):
+        offset += 1
+    return parts[offset:] in (
+        ["scope", "attributes", "public_key"],
+        ["metadata", "scope", "attributes", "public_key"],
     )
+
+
+def _contains_app_scope_projection(value: Any, path: str = "") -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            next_path = f"{path}.{key}" if path else str(key)
+            if next_path.split(".")[-3:] == ["scope", "attributes", "public_key"]:
+                return True
+            if _contains_app_scope_projection(item, next_path):
+                return True
+    if isinstance(value, (list, tuple)):
+        return any(_contains_app_scope_projection(item, path) for item in value)
+    return False
 
 
 def _is_index(value: str, name: str) -> bool:
@@ -75,11 +87,32 @@ def test_langfuse_public_key_exception_is_limited_to_trace_scope_fields():
         "trace_payload.traces[0].scope.attributes.public_key",
     )
     assert _is_sdk_public_key_path(
-        "trace_payload.traces[0].observations[1].scope.attributes.public_key",
-    )
-    assert not _is_sdk_public_key_path(
         "trace_payload.traces[0].metadata.scope.attributes.public_key",
     )
+    assert _is_sdk_public_key_path(
+        "trace_payload.traces[0].observations[1].scope.attributes.public_key",
+    )
+    assert _is_sdk_public_key_path(
+        "trace_payload.traces[0].observations[1].metadata.scope.attributes.public_key",
+    )
+    assert not _is_sdk_public_key_path(
+        "trace_payload.traces[0].metadata.application.scope.attributes.public_key",
+    )
+    assert not _is_sdk_public_key_path(
+        "trace_payload.metadata.scope.attributes.public_key",
+    )
+
+
+def test_memory_app_metadata_cannot_supply_the_sdk_scope_projection():
+    projections = (
+        {"scope": {"attributes": {"public_key": "app-route-id"}}},
+        {"scope.attributes.public_key": "app-route-id"},
+        {"scope.attributes": {"public_key": "app-route-id"}},
+        {"scope": {"attributes.public_key": "app-route-id"}},
+    )
+    assert all(sanitize_memory_metadata(value) == {} for value in projections)
+    assert all(_contains_app_scope_projection(value) for value in projections)
+    assert not _contains_app_scope_projection({"scope": "user_global"})
 
 
 @pytest.mark.integration
@@ -95,18 +128,49 @@ async def test_memory_v2_real_langfuse_trace_omits_content(tmp_path):
     from langfuse.api.commons.errors.not_found_error import NotFoundError
 
     base_url = os.environ.get("LANGFUSE_BASE_URL", "")
+    def record_application_metadata(metadata: Any) -> None:
+        if isinstance(metadata, Mapping):
+            sink.application_metadata.append(deepcopy(dict(metadata)))
+
+    class _RecordingObservation:
+        def __init__(self, observation):
+            self._observation = observation
+
+        def __getattr__(self, name: str):
+            return getattr(self._observation, name)
+
+        def start_observation(self, *args, **kwargs):
+            record_application_metadata(kwargs.get("metadata"))
+            child = self._observation.start_observation(*args, **kwargs)
+            return _RecordingObservation(child) if child is not None else None
+
+        def update(self, **kwargs):
+            record_application_metadata(kwargs.get("metadata"))
+            return self._observation.update(**kwargs)
+
+        def end(self, *args, **kwargs):
+            record_application_metadata(kwargs.get("metadata"))
+            return self._observation.end(*args, **kwargs)
+
     class _RecordingLangfuseSink(LangfuseSink):
         memory_trace_ids: set[str]
+        application_metadata: list[dict[str, Any]]
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self.memory_trace_ids = set()
+            self.application_metadata = []
 
         def start_observation(self, *, name: str, **kwargs):
+            record_application_metadata(kwargs.get("metadata"))
             observation = super().start_observation(name=name, **kwargs)
             if name.startswith("memory-") and observation is not None:
                 self.memory_trace_ids.add(observation.trace_id)
-            return observation
+            return _RecordingObservation(observation) if observation is not None else None
+
+        def trace_attributes(self, **kwargs):
+            record_application_metadata(kwargs.get("metadata"))
+            return super().trace_attributes(**kwargs)
 
     sink = _RecordingLangfuseSink(
         public_key=public_key,
@@ -265,6 +329,11 @@ async def test_memory_v2_real_langfuse_trace_omits_content(tmp_path):
             if not _is_sdk_public_key_path(path)
         ]
         secret_key_paths = matching_paths(payload_data, secret_key, "trace_payload")
+        assert sink.application_metadata
+        assert not any(
+            _contains_app_scope_projection(metadata)
+            for metadata in sink.application_metadata
+        ), "application metadata supplied the SDK scope projection"
         assert not unexpected_public_key_paths and not secret_key_paths, (
             "Langfuse trace exposed a secret or placed its public routing key outside "
             "the SDK instrumentation scope: "
