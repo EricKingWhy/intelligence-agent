@@ -5625,7 +5625,7 @@ docs/review_ledger.d/` 的最大序号是 **210**，T1 的 `300-d0e2dcb-ec006c7`
 | 8 | `baf763bc` | 修复 | **权威 ruff 车道抓回的 `RUF023`**：`ToolQuotaWindow.__slots__` 按自然序（一行换序） |
 | 9 | `02b72220` | 证据 | Live Gate **重跑证据入库**（`docs/live_gate/20260926T020152-462c5bd31cb8-…`，绑定 `462c5bd3` / tree `ddaa252c`） |
 | 10 | 本记录笔 | docs | Gate-0 裸全量读数落盘（`docs/gate/9ec35deaa8338e4618c66a540623780fecef9387.json`）+ 本段门禁读数 + 归档同读数订正 + `PHASE_STATUS` 追加读数 |
-| 11 | 本集成落账笔 | docs | **集成落账**（PR #330 / merge `5e1236e9`）+ §14.9 回补通知 + 本笔 Gate-0 读数落盘（`docs/gate/<本笔 tip>.json`） |
+| 11 | 本集成落账笔 | docs | **集成落账**（PR #330 / merge `5e1236e9`）+ §14.9 回补通知 + 本笔 Gate-0 读数落盘（`docs/gate/c542974af10cf079679dedd4ef258396c45ca288.json`，tip `c542974` / tree `2f049c698071`，**6/6 PASS**，26.9s） |
 
 **两轴独立审查（各一独立只读子代理，读范围即 `718ab562..69a6092` 的 34 文件差）**：
 
