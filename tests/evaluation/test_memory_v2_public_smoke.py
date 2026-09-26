@@ -13,6 +13,7 @@ from scripts.run_memory_v2_public_smoke import (
     _relevant_injected_hit_ids,
     _safe_job_reason_code,
     _safe_model_output_failure_kind,
+    _source_sessions_for_top_k,
     _turn_event_type,
     finalize_smoke_report,
     select_smoke_case,
@@ -24,6 +25,20 @@ def test_smoke_case_id_is_reported_as_sha256():
     assert _case_id_sha256("sample-1") == (
         "0899cd856fba9b131050135138cd87c5e5222f0a0657b94730901988d5cabdbb"
     )
+
+
+def test_top_k_source_session_projection_is_unique_and_content_free():
+    hits = [
+        SimpleNamespace(record=SimpleNamespace(source_session_id=session_id))
+        for session_id in ("local-a", "local-a", "local-b", "unknown")
+    ]
+
+    sessions, pollution = _source_sessions_for_top_k(
+        hits, {"local-a": "public-a", "local-b": "public-b"}, limit=4,
+    )
+
+    assert sessions == ["public-a", "public-b"]
+    assert pollution == 1
 
 
 def _case(

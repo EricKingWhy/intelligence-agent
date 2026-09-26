@@ -35,6 +35,11 @@ from agent_harness.memory.v2.recall import (
     keyword_terms,
     rank_memory,
 )
+from agent_harness.memory.v2.reranker import (
+    MAX_RERANK_CANDIDATES,
+    RERANKING_VERSION,
+    MemoryV2Reranker,
+)
 from agent_harness.memory.v2.store import (
     MemoryDeletionReceiptV2,
     MemorySettingsV2,
@@ -96,10 +101,12 @@ class MemoryV2Service:
     def __init__(
         self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex,
         *, relay: MemoryV2IndexRelay | None = None,
+        reranker: MemoryV2Reranker | None = None,
     ) -> None:
         self._store = store
         self._index = index
         self._relay = relay
+        self._reranker = reranker
         self._tombstone_purger: asyncio.Task | None = None
 
     def start_tombstone_purger(self, *, interval_seconds: float = 3600) -> None:
@@ -344,6 +351,37 @@ class MemoryV2Service:
             ),
         ) for record, dense in candidates.values()]
         ranked.sort(key=lambda hit: (-float(hit.explanation["score"]), hit.record.id))
+        if self._reranker is not None and ranked:
+            rerank_window = ranked[:MAX_RERANK_CANDIDATES]
+            try:
+                ordering = await self._reranker.rerank(
+                    query, [hit.record.content for hit in rerank_window],
+                )
+                indices = [index for index, _score in ordering]
+                if (len(ordering) != len(rerank_window)
+                        or any(type(index) is not int for index in indices)
+                        or set(indices) != set(range(len(rerank_window)))
+                        or any(type(score) not in (int, float) or not math.isfinite(score)
+                               for _index, score in ordering)):
+                    raise ValueError("invalid reranker ordering")
+                reranked: list[RankedMemory] = []
+                for rank, (index, score) in enumerate(ordering, start=1):
+                    hit = rerank_window[index]
+                    reranked.append(RankedMemory(
+                        record=hit.record,
+                        explanation={
+                            **hit.explanation,
+                            "ranking_version": RERANKING_VERSION,
+                            "reranker_rank": rank,
+                            "reranker_score": round(float(score), 6),
+                        },
+                    ))
+                ranked = reranked + ranked[len(rerank_window):]
+            except Exception as error:  # noqa: BLE001 — optional ranking must fail open.
+                logger.warning(
+                    "Memory V2 reranker unavailable (%s); preserving hybrid ranking",
+                    type(error).__name__,
+                )
         return ranked[:min(limit, 128)]
 
     @staticmethod

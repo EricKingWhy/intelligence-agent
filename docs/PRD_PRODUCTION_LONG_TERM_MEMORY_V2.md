@@ -62,7 +62,7 @@ The final cutover starts with an empty V2 long-term-memory store. Old long-term-
 2. Sharing memories across different users or teams.
 3. Treating full conversation transcripts, SessionEvents, checkpoints, tool logs, or artifacts as long-term memories.
 4. Retaining a content backup of existing long-term-memory records during the clean-slate reset.
-5. Using an online LLM reranker during recall.
+5. Using a generative model to rewrite or summarize retrieved memories during recall.
 6. Building a durable pending-candidate queue that keeps retrying after both memory models exhaust their budgets. This is a later evolution; this delivery records a degraded terminal job result and writes nothing.
 7. Allowing a memory provider, LangMem, Milvus, or Langfuse to own the Agent Runtime, identity, permission, retry, or persistence contract.
 8. Guaranteeing a target score on public LoCoMo or LongMemEval during the first release. The first run establishes a non-blocking baseline; project-specific quality and security gates are blocking.
@@ -173,7 +173,7 @@ A USER/profile fact requires a direct user statement or an explicit user confirm
 
 1. **Given** an authenticated run with memory enabled, **when** context is assembled, **then** it may combine the same user's global profile with active memories from the current project.
 2. **Given** a new conversation B, **when** a relevant memory was formed in conversation A, **then** B can recall it without using A's SessionEvent history as context.
-3. **Given** candidate memories are retrieved, **when** ranking occurs, **then** dense similarity and keyword matching are combined, followed by deterministic filtering/reranking using status, type, importance, strength, scope, and retrieval decay. No online LLM reranker is called.
+3. **Given** candidate memories are retrieved, **when** ranking occurs, **then** dense similarity and keyword matching are combined, followed by deterministic filtering/reranking using status, type, importance, strength, scope, and retrieval decay. A configured non-generative cross-encoder may rerank at most 20 active candidates only after SQLite has revalidated tenant, user, and scope. It receives the query and candidate content without identity or routing metadata. Missing configuration, timeout, provider failure, or invalid output preserves the deterministic hybrid order; no generated text is consumed.
 4. The always-visible Profile budget is at most 500 model-input tokens. Retrieved Collection memory is at most 800 model-input tokens, at most six complete records, and at most three records of any one kind.
 5. Retrieved memory is injected as non-privileged data, not as instructions. The Memory Search Tool remains available for on-demand retrieval beyond automatic budgets.
 6. Every automatically recalled memory exposes a redacted explanation containing its memory ID, kind, scope, source type, source/version reference, and deterministic ranking contributions. It does not expose another user's data, hidden prompt content, raw evidence, or secrets.
@@ -307,7 +307,7 @@ All mutation endpoints derive tenant/user/project authority from trusted server 
 1. Existing modules may be refactored and new internal modules may be introduced, but AgentRuntime must not acquire provider-specific branches.
 2. Existing APIs may gain backward-compatible fields and filters; breaking changes require an approved replacement contract and migration.
 3. The durable job must reuse the existing SQLite/Event/Outbox persistence substrate. A memory-specific table or record type inside that substrate is permitted; a separate queue service or in-memory-only owner is not. It must meet recovery, idempotency, ownership, and observability acceptance criteria.
-4. Dense/keyword fusion and deterministic ranking weights are implementation choices, but the fixed filters, budgets, quality gates, and no-online-LLM-reranker constraint apply.
+4. Dense/keyword fusion and deterministic ranking weights are implementation choices. A non-generative cross-encoder may rerank at most 20 authorized active candidates when explicitly configured; missing configuration or provider failure preserves deterministic hybrid ordering. The fixed filters, budgets, and quality gates still apply.
 5. LangMem internals may be reused or adapted with license attribution. Equivalent behavior may be implemented behind the provider seam if LangMem cannot satisfy a contract.
 6. The Web UI may choose local component organization and interaction details while preserving the fixed API behavior, accessibility, confirmation, and visible states.
 

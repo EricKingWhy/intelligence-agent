@@ -219,11 +219,15 @@ class MemoryV2ContextProvider:
                 ) if query.strip() else []
                 messages, selected_profile, selected_collection = self._fit(
                     profiles, collections, token_budget,
-            )
+                )
             run_id = run_context_var.get()
             if run_id is not None and (selected_profile or selected_collection):
+                ranking_version = (
+                    str(selected_collection[0].explanation.get("ranking_version", RANKING_VERSION))
+                    if selected_collection else RANKING_VERSION
+                )
                 session.append(MEMORY_RECALLED, {
-                    "ranking_version": RANKING_VERSION,
+                    "ranking_version": ranking_version,
                     "memories": [
                         *(recall_event_item(hit, MemoryTier.PROFILE) for hit in selected_profile),
                         *(recall_event_item(hit, MemoryTier.COLLECTION) for hit in selected_collection),
