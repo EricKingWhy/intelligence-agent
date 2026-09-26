@@ -94,6 +94,7 @@ parallelizable: with #301 and #303 after dependencies are integrated
 - Public benchmark adapter smoke and license/attribution review.
 - Selection tests cover the user-evidence F1 threshold, dataset-specific evidence scope and role mapping, smallest-eligible selection, and fail-closed behavior.
 - Expanded LongMemEval user-turn evidence selection has one real smoke report: the eligible sample passed the selection F1 gate (0.631579), but formation degraded on `embedding_unavailable`; no memory was committed or injected, Recall@6=0, answer F1=0.421053, and `chain_verified=false`. Runner cleanup and an independent Milvus query confirmed zero temporary smoke collections. See `docs/evidence/memory-v2-public-smoke-longmemeval-6224d862.json`; this is failed evidence and does not satisfy the real-chain acceptance.
+- A retry with another authorized local embedding configuration failed the Milvus initialization probe with `embedding_unavailable` before formation and produced no report. Independent Milvus verification again found zero temporary smoke collections; the real-chain gate remains open pending a stable embedding service.
 - Real public smoke uses the same configurable recall timeout as production wiring.
 - Equal-size eligible cases prefer stronger user evidence; smoke reports content-free active memory tier/kind counts and uses a bounded 1,200-second formation drain.
 - Mutation tests proving the gate detects below-threshold, duplicate, and unawaited/all-failed conditions.

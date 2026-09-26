@@ -109,6 +109,8 @@ formation job 因 `embedding_unavailable` 降级、没有提交记忆，Recall@6
 报告没有原始问题、答案或对话文本，脱敏检查也未发现这些原文。报告保存在
 `docs/evidence/memory-v2-public-smoke-longmemeval-6224d862.json`。独立 embedding 探针曾成功返回
 1024 维向量，但 smoke 运行期间再次失败；因此 #302 的真实链路验收仍未满足，不能按通过处理。
+随后用另一份已授权的本机 embedding 配置重试，Milvus 初始化探针仍以 `embedding_unavailable`
+失败且未生成报告。独立 Milvus 查询再次确认没有 `memv2pub_*` 临时 collection。
 LoCoMo 仍只用于非商业内部评测。
 为适配 harness 的 user/assistant 来源权威，LoCoMo 将对话中首位参与者映射为评测 user persona，
 其余参与者映射为非权威 assistant evidence；LongMemEval 保留数据集提供的角色。报告记录这一映射，
