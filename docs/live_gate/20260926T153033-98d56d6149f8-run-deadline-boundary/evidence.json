@@ -1,0 +1,557 @@
+{
+  "schema_version": 1,
+  "scenario_id": "run-deadline-boundary",
+  "scenario_version": 1,
+  "verdict": "PASS",
+  "reason": "",
+  "missing_preconditions": [],
+  "created_at": "2026-09-26T15:34:02.485+00:00",
+  "sha": "98d56d6149f821e94060a139fa6eeaf16c83338d",
+  "tree": "9c037d91f43d3420d63700181d7d31abbf7573aa",
+  "worktree": {
+    "head_sha": "98d56d6149f821e94060a139fa6eeaf16c83338d",
+    "tree": "9c037d91f43d3420d63700181d7d31abbf7573aa",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "e47e111768ae5672",
+      "2c1835c7c67f849b",
+      "7ebabed67ead835a"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-26T15:30:33.791+00:00",
+      "ended_at": "2026-09-26T15:31:44.400+00:00",
+      "status": "PASS",
+      "duration_ms": 70609,
+      "session_id": "run-deadline-boundary-a1-b0de2c7d",
+      "run_id": "736dca56-3238-43a6-ba89-f2b9f25232b6",
+      "run_status": "paused",
+      "steps": 7,
+      "event_count": 71,
+      "tool_calls": [
+        "read",
+        "read",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash"
+      ],
+      "events_ref": "docs/live_gate/20260926T153033-98d56d6149f8-run-deadline-boundary/attempt-1.jsonl",
+      "events_sha256": "7bbf150622bb32ee2f31289a4a730f71f4723b590d233e62b627293ad34afdf4",
+      "assertions": [
+        {
+          "name": "deadline_pause_snapshot",
+          "ok": true,
+          "detail": "run/paused=2 reason='deadline' trigger='run.deadline_at' closeout='deterministic' resume_requirements=[] run.deadline_at=2026-09-26T15:31:03.894449Z（期望 2026-09-26T15:31:03.894449Z） version=1"
+        },
+        {
+          "name": "deadline_pause_precedes_any_terminal",
+          "ok": true,
+          "detail": "暂停=2；暂停之前无终态事件=True；run/started=1（到点只是收口，逻辑 run 未终结）；收尾形状=到点再次暂停（版本 2，非终态）"
+        },
+        {
+          "name": "deadline_pause_continuation_contract",
+          "ok": true,
+          "detail": "continuation 四键形状（next_safe_action 非空）：齐"
+        },
+        {
+          "name": "real_work_admitted_before_the_deadline",
+          "ok": true,
+          "detail": "到点前被接纳的产出轮=2；primary 请求=2（真实 provider）；tool/call=3（真实 BashTool 在一次性 Sandbox 里跑过）；chain-steps.txt=5/40（结构上跑不完）"
+        },
+        {
+          "name": "deadline_pause.request_count",
+          "ok": true,
+          "detail": "payload model_requests=2 agent_turns=2；轨迹重算：agent_turns=2 model_requests=2（角色 primary:2，失败 0） total_tokens=10611（自报 2/2 格） cost_usd=未知（自报 0/2 格）"
+        },
+        {
+          "name": "deadline_pause.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=10611；轨迹 10611（自报 2/2 格；不可得不得记 0）"
+        },
+        {
+          "name": "deadline_pause.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/2 格；不臆造费率）"
+        },
+        {
+          "name": "expired_deadline_resume_refused",
+          "ok": true,
+          "detail": "沿用已到点时刻恢复：被拒=True，事件流一字未改=True，原因=BudgetConflict: 恢复必须把绝对 ceiling 提高到能继续（consumed={'agent_turns': 2, 'model_requests': 2, 'total_tokens': 10611, 'cost_usd': None, 'tool_calls': 3, 'tool_attempts': 3, 'tool_calls_by_tool': {'bash': 1, 'read': 2}, 'tool_attempts_by_tool': {'bash': 1, 'read': 2}}）；仍放不下一次新准入的维度见 limits={'max_agent_turns_total': None, 'max_model_requests': None, 'max_total_tokens': None, 'max_cost_usd': None, 'deadline_at': '2026-09-26T15:31:03.894449Z', 'tool_call_limits': {}}（deadline 维度的判据是「严格在未来」，沿用一个已过去的时刻同样在这里被拒）"
+        },
+        {
+          "name": "deadline_outcome_is_safe_or_needs_reconcile",
+          "ok": true,
+          "detail": "Arm A（safe）：账本无欠账/无悬空；换新时刻后 run/resumed=1（同一 run_id，1→2，新 deadline=2026-09-26T15:31:35.323148Z），恢复后 tool/call=5，收尾=到点再次暂停（版本 2，非终态）"
+        },
+        {
+          "name": "uncertain_mutation_recorded_as_unproven",
+          "ok": true,
+          "detail": "生产 BashTool（MUTATING）+ 生产 Ledger：调用 A 在 deadline 前被接纳、超时收尾 ⇒ error_code=ErrorCode.TIMEOUT state=OperationState.UNKNOWN needs_reconcile=True 副作用计数=1（副作用已落地 ⇒ 真的证不出结论，不是「其实没发生」）"
+        },
+        {
+          "name": "no_new_admission_after_the_deadline",
+          "ok": true,
+          "detail": "到点后再发同一条 MUTATING 调用：error_code=ErrorCode.DEADLINE_EXCEEDED retryable=False 账上留行=False 副作用计数=1（拒收 = 不留行 + 没执行 —— 三个证据同向）"
+        },
+        {
+          "name": "unreconciled_debt_blocks_recovery",
+          "ok": true,
+          "detail": "生产恢复入口被拒=True（RecoveryConflict）；账行状态=OperationState.UNKNOWN（拒绝不顺手改账）；恢复后副作用计数=1（没有盲重跑）；执行域会话的投影 reconcile_pending=['call-uncertain-1']（主会话那份=[]）"
+        },
+        {
+          "name": "projection_matches_ledger_debt",
+          "ok": true,
+          "detail": "投影 reconcile_pending=[] == 账本欠账 []（客户端读到的就是账本事实）"
+        },
+        {
+          "name": "run_identity_and_task_shape",
+          "ok": true,
+          "detail": "run_id=736dca56-3238-43a6-ba89-f2b9f25232b6 user/message=1（同 run 续跑不落新任务文本）tool_calls=8 事件里的 run_id 集合=['736dca56-3238-43a6-ba89-f2b9f25232b6']"
+        },
+        {
+          "name": "resume_contract_holds",
+          "ok": true,
+          "detail": "换新时刻后的恢复契约（`#312` T4 的版本合同）：run/resumed=1 同一 run_id、版本 1→2、from_pause_seq=23、无新 run/started、无新 user/message=True"
+        },
+        {
+          "name": "resumed_leg_admitted_new_work",
+          "ok": true,
+          "detail": "恢复后新窗口里被接纳的工作：Provider 请求=5、tool/call=5（判据只要求 ≥1 条接纳：新时刻真的把 run 重新打开。实测残余：模型可能选择在恢复后直接收尾 ⇒ tool/call=0，这条读数照实留在证据里，残余登记见 ADR-0046）"
+        },
+        {
+          "name": "run_ended_in_a_safe_state",
+          "ok": true,
+          "detail": "收尾形状=到点再次暂停（版本 2，非终态）（暂停/完成都安全，失败与中断判红）"
+        },
+        {
+          "name": "final_budget_state",
+          "ok": true,
+          "detail": "派生账本 version=2（safe 结局下期望 2） paused=True（期望 True：终态压过暂停，两者互斥） terminal=False（期望 False）"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 71 条事件与内存态逐条同序；派生账本（version / limits / consumed / paused / terminal）一致"
+        },
+        {
+          "name": "stream_mirrors_pause",
+          "ok": true,
+          "detail": "首次执行的 live 流里 run/paused=1；续跑执行的 live 流=['model/completed', 'tool/result', 'run/paused']"
+        },
+        {
+          "name": "no_fuse_trip",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "no_dangling_tool_calls_in_run",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 tool_calls=8"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "给出新的未来 run.deadline_at（RFC 3339 UTC 绝对时刻）后以同一 run_id 恢复：本次 deadline=2026-09-26T15:31:03.894449Z 已到点（已到点）；恢复请求需带 expected_version 与 resume_basis=budget_increase",
+      "workspace_id": "e47e111768ae5672",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-26T15:31:44.400+00:00",
+      "ended_at": "2026-09-26T15:32:51.129+00:00",
+      "status": "PASS",
+      "duration_ms": 66729,
+      "session_id": "run-deadline-boundary-a2-a066519e",
+      "run_id": "959c014d-176b-4f19-85e8-32c80017068f",
+      "run_status": "paused",
+      "steps": 9,
+      "event_count": 130,
+      "tool_calls": [
+        "read",
+        "read",
+        "bash",
+        "bash",
+        "bash",
+        "read",
+        "bash",
+        "bash",
+        "bash",
+        "bash"
+      ],
+      "events_ref": "docs/live_gate/20260926T153033-98d56d6149f8-run-deadline-boundary/attempt-2.jsonl",
+      "events_sha256": "17ab86b82db8fd6e75163ae56cf45559adc4bf44c8f840e9756fc00fcdd41982",
+      "assertions": [
+        {
+          "name": "deadline_pause_snapshot",
+          "ok": true,
+          "detail": "run/paused=2 reason='deadline' trigger='run.deadline_at' closeout='deterministic' resume_requirements=[] run.deadline_at=2026-09-26T15:32:14.513559Z（期望 2026-09-26T15:32:14.513559Z） version=1"
+        },
+        {
+          "name": "deadline_pause_precedes_any_terminal",
+          "ok": true,
+          "detail": "暂停=2；暂停之前无终态事件=True；run/started=1（到点只是收口，逻辑 run 未终结）；收尾形状=到点再次暂停（版本 2，非终态）"
+        },
+        {
+          "name": "deadline_pause_continuation_contract",
+          "ok": true,
+          "detail": "continuation 四键形状（next_safe_action 非空）：齐"
+        },
+        {
+          "name": "real_work_admitted_before_the_deadline",
+          "ok": true,
+          "detail": "到点前被接纳的产出轮=4；primary 请求=4（真实 provider）；tool/call=5（真实 BashTool 在一次性 Sandbox 里跑过）；chain-steps.txt=5/40（结构上跑不完）"
+        },
+        {
+          "name": "deadline_pause.request_count",
+          "ok": true,
+          "detail": "payload model_requests=4 agent_turns=4；轨迹重算：agent_turns=4 model_requests=4（角色 primary:4，失败 0） total_tokens=21866（自报 4/4 格） cost_usd=未知（自报 0/4 格）"
+        },
+        {
+          "name": "deadline_pause.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=21866；轨迹 21866（自报 4/4 格；不可得不得记 0）"
+        },
+        {
+          "name": "deadline_pause.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/4 格；不臆造费率）"
+        },
+        {
+          "name": "expired_deadline_resume_refused",
+          "ok": true,
+          "detail": "沿用已到点时刻恢复：被拒=True，事件流一字未改=True，原因=BudgetConflict: 恢复必须把绝对 ceiling 提高到能继续（consumed={'agent_turns': 4, 'model_requests': 4, 'total_tokens': 21866, 'cost_usd': None, 'tool_calls': 4, 'tool_attempts': 4, 'tool_calls_by_tool': {'bash': 2, 'read': 2}, 'tool_attempts_by_tool': {'bash': 2, 'read': 2}}）；仍放不下一次新准入的维度见 limits={'max_agent_turns_total': None, 'max_model_requests': None, 'max_total_tokens': None, 'max_cost_usd': None, 'deadline_at': '2026-09-26T15:32:14.513559Z', 'tool_call_limits': {}}（deadline 维度的判据是「严格在未来」，沿用一个已过去的时刻同样在这里被拒）"
+        },
+        {
+          "name": "deadline_outcome_is_safe_or_needs_reconcile",
+          "ok": true,
+          "detail": "Arm A（safe）：账本无欠账/无悬空；换新时刻后 run/resumed=1（同一 run_id，1→2，新 deadline=2026-09-26T15:32:45.276919Z），恢复后 tool/call=5，收尾=到点再次暂停（版本 2，非终态）"
+        },
+        {
+          "name": "uncertain_mutation_recorded_as_unproven",
+          "ok": true,
+          "detail": "生产 BashTool（MUTATING）+ 生产 Ledger：调用 A 在 deadline 前被接纳、超时收尾 ⇒ error_code=ErrorCode.TIMEOUT state=OperationState.UNKNOWN needs_reconcile=True 副作用计数=1（副作用已落地 ⇒ 真的证不出结论，不是「其实没发生」）"
+        },
+        {
+          "name": "no_new_admission_after_the_deadline",
+          "ok": true,
+          "detail": "到点后再发同一条 MUTATING 调用：error_code=ErrorCode.DEADLINE_EXCEEDED retryable=False 账上留行=False 副作用计数=1（拒收 = 不留行 + 没执行 —— 三个证据同向）"
+        },
+        {
+          "name": "unreconciled_debt_blocks_recovery",
+          "ok": true,
+          "detail": "生产恢复入口被拒=True（RecoveryConflict）；账行状态=OperationState.UNKNOWN（拒绝不顺手改账）；恢复后副作用计数=1（没有盲重跑）；执行域会话的投影 reconcile_pending=['call-uncertain-1']（主会话那份=[]）"
+        },
+        {
+          "name": "projection_matches_ledger_debt",
+          "ok": true,
+          "detail": "投影 reconcile_pending=[] == 账本欠账 []（客户端读到的就是账本事实）"
+        },
+        {
+          "name": "run_identity_and_task_shape",
+          "ok": true,
+          "detail": "run_id=959c014d-176b-4f19-85e8-32c80017068f user/message=1（同 run 续跑不落新任务文本）tool_calls=10 事件里的 run_id 集合=['959c014d-176b-4f19-85e8-32c80017068f']"
+        },
+        {
+          "name": "resume_contract_holds",
+          "ok": true,
+          "detail": "换新时刻后的恢复契约（`#312` T4 的版本合同）：run/resumed=1 同一 run_id、版本 1→2、from_pause_seq=41、无新 run/started、无新 user/message=True"
+        },
+        {
+          "name": "resumed_leg_admitted_new_work",
+          "ok": true,
+          "detail": "恢复后新窗口里被接纳的工作：Provider 请求=5、tool/call=5（判据只要求 ≥1 条接纳：新时刻真的把 run 重新打开。实测残余：模型可能选择在恢复后直接收尾 ⇒ tool/call=0，这条读数照实留在证据里，残余登记见 ADR-0046）"
+        },
+        {
+          "name": "run_ended_in_a_safe_state",
+          "ok": true,
+          "detail": "收尾形状=到点再次暂停（版本 2，非终态）（暂停/完成都安全，失败与中断判红）"
+        },
+        {
+          "name": "final_budget_state",
+          "ok": true,
+          "detail": "派生账本 version=2（safe 结局下期望 2） paused=True（期望 True：终态压过暂停，两者互斥） terminal=False（期望 False）"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 130 条事件与内存态逐条同序；派生账本（version / limits / consumed / paused / terminal）一致"
+        },
+        {
+          "name": "stream_mirrors_pause",
+          "ok": true,
+          "detail": "首次执行的 live 流里 run/paused=1；续跑执行的 live 流=['model/completed', 'tool/result', 'run/paused']"
+        },
+        {
+          "name": "no_fuse_trip",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "no_dangling_tool_calls_in_run",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 tool_calls=10"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "给出新的未来 run.deadline_at（RFC 3339 UTC 绝对时刻）后以同一 run_id 恢复：本次 deadline=2026-09-26T15:32:14.513559Z 已到点（已到点）；恢复请求需带 expected_version 与 resume_basis=budget_increase",
+      "workspace_id": "2c1835c7c67f849b",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-26T15:32:51.129+00:00",
+      "ended_at": "2026-09-26T15:34:02.327+00:00",
+      "status": "PASS",
+      "duration_ms": 71197,
+      "session_id": "run-deadline-boundary-a3-1a99032d",
+      "run_id": "4be66474-12ab-4fbb-926f-a11f5111459b",
+      "run_status": "completed",
+      "steps": 5,
+      "event_count": 63,
+      "tool_calls": [
+        "read",
+        "read",
+        "bash",
+        "bash",
+        "bash"
+      ],
+      "events_ref": "docs/live_gate/20260926T153033-98d56d6149f8-run-deadline-boundary/attempt-3.jsonl",
+      "events_sha256": "17a3ffccd9869273966a8595047d8048a84c4e7d4333d69b691ebda3d39b86e1",
+      "assertions": [
+        {
+          "name": "deadline_pause_snapshot",
+          "ok": true,
+          "detail": "run/paused=1 reason='deadline' trigger='run.deadline_at' closeout='deterministic' resume_requirements=[] run.deadline_at=2026-09-26T15:33:21.235896Z（期望 2026-09-26T15:33:21.235896Z） version=1"
+        },
+        {
+          "name": "deadline_pause_precedes_any_terminal",
+          "ok": true,
+          "detail": "暂停=1；暂停之前无终态事件=True；run/started=1（到点只是收口，逻辑 run 未终结）；收尾形状=恢复后由模型收尾（run/completed）"
+        },
+        {
+          "name": "deadline_pause_continuation_contract",
+          "ok": true,
+          "detail": "continuation 四键形状（next_safe_action 非空）：齐"
+        },
+        {
+          "name": "real_work_admitted_before_the_deadline",
+          "ok": true,
+          "detail": "到点前被接纳的产出轮=4；primary 请求=4（真实 provider）；tool/call=5（真实 BashTool 在一次性 Sandbox 里跑过）；chain-steps.txt=2/40（结构上跑不完）"
+        },
+        {
+          "name": "deadline_pause.request_count",
+          "ok": true,
+          "detail": "payload model_requests=4 agent_turns=4；轨迹重算：agent_turns=4 model_requests=4（角色 primary:4，失败 0） total_tokens=21871（自报 4/4 格） cost_usd=未知（自报 0/4 格）"
+        },
+        {
+          "name": "deadline_pause.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=21871；轨迹 21871（自报 4/4 格；不可得不得记 0）"
+        },
+        {
+          "name": "deadline_pause.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/4 格；不臆造费率）"
+        },
+        {
+          "name": "expired_deadline_resume_refused",
+          "ok": true,
+          "detail": "沿用已到点时刻恢复：被拒=True，事件流一字未改=True，原因=BudgetConflict: 恢复必须把绝对 ceiling 提高到能继续（consumed={'agent_turns': 4, 'model_requests': 4, 'total_tokens': 21871, 'cost_usd': None, 'tool_calls': 4, 'tool_attempts': 4, 'tool_calls_by_tool': {'bash': 2, 'read': 2}, 'tool_attempts_by_tool': {'bash': 2, 'read': 2}}）；仍放不下一次新准入的维度见 limits={'max_agent_turns_total': None, 'max_model_requests': None, 'max_total_tokens': None, 'max_cost_usd': None, 'deadline_at': '2026-09-26T15:33:21.235896Z', 'tool_call_limits': {}}（deadline 维度的判据是「严格在未来」，沿用一个已过去的时刻同样在这里被拒）"
+        },
+        {
+          "name": "deadline_outcome_is_safe_or_needs_reconcile",
+          "ok": true,
+          "detail": "Arm A（safe）：账本无欠账/无悬空；换新时刻后 run/resumed=1（同一 run_id，1→2，新 deadline=2026-09-26T15:33:54.604145Z），恢复后 tool/call=0，收尾=恢复后由模型收尾（run/completed）"
+        },
+        {
+          "name": "uncertain_mutation_recorded_as_unproven",
+          "ok": true,
+          "detail": "生产 BashTool（MUTATING）+ 生产 Ledger：调用 A 在 deadline 前被接纳、超时收尾 ⇒ error_code=ErrorCode.TIMEOUT state=OperationState.UNKNOWN needs_reconcile=True 副作用计数=1（副作用已落地 ⇒ 真的证不出结论，不是「其实没发生」）"
+        },
+        {
+          "name": "no_new_admission_after_the_deadline",
+          "ok": true,
+          "detail": "到点后再发同一条 MUTATING 调用：error_code=ErrorCode.DEADLINE_EXCEEDED retryable=False 账上留行=False 副作用计数=1（拒收 = 不留行 + 没执行 —— 三个证据同向）"
+        },
+        {
+          "name": "unreconciled_debt_blocks_recovery",
+          "ok": true,
+          "detail": "生产恢复入口被拒=True（RecoveryConflict）；账行状态=OperationState.UNKNOWN（拒绝不顺手改账）；恢复后副作用计数=1（没有盲重跑）；执行域会话的投影 reconcile_pending=['call-uncertain-1']（主会话那份=[]）"
+        },
+        {
+          "name": "projection_matches_ledger_debt",
+          "ok": true,
+          "detail": "投影 reconcile_pending=[] == 账本欠账 []（客户端读到的就是账本事实）"
+        },
+        {
+          "name": "run_identity_and_task_shape",
+          "ok": true,
+          "detail": "run_id=4be66474-12ab-4fbb-926f-a11f5111459b user/message=1（同 run 续跑不落新任务文本）tool_calls=5 事件里的 run_id 集合=['4be66474-12ab-4fbb-926f-a11f5111459b']"
+        },
+        {
+          "name": "resume_contract_holds",
+          "ok": true,
+          "detail": "换新时刻后的恢复契约（`#312` T4 的版本合同）：run/resumed=1 同一 run_id、版本 1→2、from_pause_seq=40、无新 run/started、无新 user/message=True"
+        },
+        {
+          "name": "resumed_leg_admitted_new_work",
+          "ok": true,
+          "detail": "恢复后新窗口里被接纳的工作：Provider 请求=1、tool/call=0（判据只要求 ≥1 条接纳：新时刻真的把 run 重新打开。实测残余：模型可能选择在恢复后直接收尾 ⇒ tool/call=0，这条读数照实留在证据里，残余登记见 ADR-0046）"
+        },
+        {
+          "name": "run_ended_in_a_safe_state",
+          "ok": true,
+          "detail": "收尾形状=恢复后由模型收尾（run/completed）（暂停/完成都安全，失败与中断判红）"
+        },
+        {
+          "name": "final_budget_state",
+          "ok": true,
+          "detail": "派生账本 version=2（safe 结局下期望 2） paused=False（期望 False：终态压过暂停，两者互斥） terminal=True（期望 True）"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 63 条事件与内存态逐条同序；派生账本（version / limits / consumed / paused / terminal）一致"
+        },
+        {
+          "name": "stream_mirrors_pause",
+          "ok": true,
+          "detail": "首次执行的 live 流里 run/paused=1；续跑执行的 live 流=['model/request', 'model/completed', 'run/completed']"
+        },
+        {
+          "name": "no_fuse_trip",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "no_dangling_tool_calls_in_run",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 tool_calls=5"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "给出新的未来 run.deadline_at（RFC 3339 UTC 绝对时刻）后以同一 run_id 恢复：本次 deadline=2026-09-26T15:33:21.235896Z 已到点（已到点）；恢复请求需带 expected_version 与 resume_basis=budget_increase",
+      "workspace_id": "7ebabed67ead835a",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260926T153033-98d56d6149f8-run-deadline-boundary/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260926T153033-98d56d6149f8-run-deadline-boundary/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260926T153033-98d56d6149f8-run-deadline-boundary/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "run-deadline-boundary"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的四条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

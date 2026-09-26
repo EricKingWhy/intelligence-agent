@@ -45,6 +45,7 @@ from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.web.app import session_service
+from tests.session.ledger_doubles import idle_operation_ledger
 
 _READ_ONLY = PermissionPolicy.READ_ONLY
 _WRITE = PermissionPolicy.WORKSPACE_WRITE
@@ -72,6 +73,7 @@ def _state(tmp_path) -> MagicMock:
     state.run_manager.get_active = MagicMock(return_value=None)
     state.run_manager.launch = MagicMock(return_value=(MagicMock(), MagicMock()))
     state.get_wiring = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    state.operation_ledger = idle_operation_ledger()
     state.ensure_stores = AsyncMock()
     state.stores = MagicMock()
     # 审批队列字典必须是真 dict：pending 闸门会 .get(session_id)。

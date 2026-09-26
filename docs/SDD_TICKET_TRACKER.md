@@ -5696,3 +5696,230 @@ per-tool `bash=12/14/12`）在 `RUF023` 处置后**不再覆盖本树** ⇒ 保�
 ② 畸形计数条目两端显示不同（不可达输入）；③ `take()` 之后的抛点（当前调用链窗口随批次消失）；
 ④ 崩溃 + 恢复的记账缺口属 `#315`；⑤ Live Gate 场景的 `bash` 配额余量随真实轨迹浮动（实测 12–14 次，
 ceiling 24 = 结构下限的两倍），撞线会让 `run_completed` 判红、处置是抬高余量（已在场景内写明）。
+
+---
+
+## T7（`#315`，B 链第七票）：run 的**绝对 deadline** —— 到点收口、换新时刻同 run 续跑、未证副作用先对账（2026-09-26 · 实现 + 六轮审查面 + 真实证据闭合，**待集成**）
+
+**状态**：✅ 交付、**六轮**审查面（发现两轴 → 处置 → 补审两轴 → 处置 → 定向两轴 → 处置 → 修后重审）全部闭合、
+真实 Live Gate 两次重跑与重车道读数、覆盖闸门闭合。分支 `zcode/T315-run-deadline`，基点 `f13ed0d393`
+（= T6 落账合并 `#331` 之后的 `origin/main`）。
+**代码冻结树 = `cf1879d`**（其后只有 Live Gate 证据笔与 docs 笔；`git diff --stat cf1879d..1444e2e -- src tests evaluation web scripts .github` **为空**）。
+**最终 Live Gate 证据绑定 sha `cf1879d3` / tree `99a8b465`**。**待集成**（§14.4：推分支 + 合 PR 两步各需单独批准；`main` 已受服务端保护）。
+
+**票面**：GitHub `#315`（父票 `#305`；`blocked_by: #313` / `#314` 均已完成）。规格落点 `03 §3.4` + `03 §5` +
+`04 §9.1` + `07 §4/§6/§7` + `11 §6.1`：run 可以配一个**绝对时刻**的 deadline；到点后**不硬杀**，在稳定边界收口成非终态的
+`run/paused`（`reason=deadline`、closeout 确定性、零新 Provider 请求）；**已到点的调用不再被接纳**（准入前被拒、
+不消耗配额、不落 Ledger）；换一个**新的未来时刻**带 CAS 在**同一条 run** 上续跑；暂停那一刻若有 MUTATING 工具超时的
+**未证副作用**，必须先对账（`03 §5`「对账优先于恢复」），否则恢复被 409 挡死。CLI / Web / 投影三面同源呈现。
+
+**交付序列**（16 笔已落地 + 3 笔记录；父链逐笔线性）：
+
+| # | commit | 内容 | 规模 |
+| --- | --- | --- | --- |
+| 1 | `9496226` | 实现 | 后端核心 `run_budget` / `runtime` / `service` / `recovery` / `executor` / `result` + 服务面 `web/app.py` / `cli.py` + 前端 `runBudget.ts` / `PausedPanel.tsx` / `types.ts` / `api.ts` + Live Gate 场景 v1 + 全量测试面（37 文件 / +8490 −157） |
+| 2 | `0285418` | 修复 | 真实运行三连 FAIL 抓回：场景读错**投影键**（TypeError）+ 到点拒绝文案未说明「恢复后续跑」 |
+| 3 | `1a88b79` | 证据 | 被拒的 Live Gate 运行入库（`20260926T083245-9496226e7518-…`，三连 FAIL 的原始读数） |
+| 4 | `509a229` | 修复 | 恢复面判据从「模型用没用工具」改成「**接纳**」——实测 6/6 只答一句话 |
+| 5 | `3cd8253` | 证据 | 第二次被拒的运行入库（`20260926T095353-1a88b799bed6-…`，每次恰 1 条红，已收窄） |
+| 6 | `6f1a9b4` | 证据 | Live Gate **3/3 PASS** 证据入库（`20260926T100829-3cd8253f0625-…`，树 `dd233064`） |
+| 7 | `5a542f3` | 修复 | runner 的 `scope.does_not_cover` 与已落地场景对齐（四类已落地） |
+| 8 | `03c1830` | docs | **ADR-0046**（D1–D9 + §5 证据 + §6.1 已知边界） |
+| 9 | `aa003b4` | 修复 | **两轴审查的 P1 处置**：对账闸门与暂停原因解耦 + 模型 closeout 也走 `blocked_by` 改写 |
+| 10 | `24a1acc` | 测试 | 补两处空泛通道用例（Arm A 空账本 / Arm B 逐条点名）+ 拆开预算暂停的两个检查点 |
+| 11 | `98d56d6` | 修复 | **补审 findings 处置**：执行域 `utc_now()` 单点 + 等值边界用例、点名判据只认 id、投影判据收紧、口径对齐、权威 ruff 抓回 2 条 |
+| 12 | `0697ec4` | 证据 | Live Gate **第一次重跑**证据入库（`20260926T153033-98d56d6149f8-…`，绑定 `98d56d61` / tree `9c037d91`） |
+| 13 | `71f19f8` | 修复 | **权威前端车道 `tsc -b` 抓回的真缺陷**：投影没读 `limits.run.deadline_at` ⇒ Web「绝对截止时刻」那一行在真机上是空的（+95 −2） |
+| 14 | `c6d9cd6` | 修复 | **定向两轴审查处置**：CLI 补 deadline 时刻行（P2：票面 Must Do 在 CLI 上名存实亡）、投影读严、Timeline 报时刻（+127 −23） |
+| 15 | `cf1879d` | 测试 | **修后重审 8 条 P3 收尾**（恢复块断言 + 判定分叉登记订正；无生产行为变更，+54 −14） |
+| 16 | `1444e2e` | 证据 | Live Gate **最终重跑**证据入库（`20260926T171722-cf1879d3cf32-…`，绑定 `cf1879d3` / tree `99a8b465`） |
+| 17 | `28995ce` | docs | 本记录笔：台账 331–334 + 归档小节 + `PHASE_STATUS` 索引 + ADR-0046 §5 读数 |
+| 18 | 本读数笔 | docs | `docs/gate/<sha>.json` 落盘 + 门禁读数行（tip `28995ce` 的裸全量） |
+| 19 | 本集成落账笔 | docs | 集成落账（PR / merge）+ §14.9 回补通知 + 本笔 Gate-0 读数落盘 |
+
+**两轴独立审查（发现阶段，各一独立只读子代理，冻结 sha `03c1830`，读范围 = `f13ed0d..03c1830`）**：
+
+- **Standards 轴：PASS-WITH-FINDINGS**（0 P0 / 0 P1 / **4 P2** / 4 P3）。
+- **Correctness/Spec 轴：PASS-WITH-FINDINGS**（0 P0 / **P1×1** / 2 P2 / 6 P3）。**唯一的 P1**（两轴合计）：
+  对账闸门原先写成 `if reason == REASON_DEADLINE`，而恢复闸门（`session/service.py`）是 **session 级**、只读 Ledger
+  不读 reason ⇒「**预算**暂停 + 一条 MUTATING 超时留下的未证行」会落成暗示可安全续跑的暂停（载荷写着"提高 ceiling
+  后恢复"），而那次恢复必被 409 挡死——正是 `03 §5` / ADR-0044 D4 禁止的形态。**P1 的后半**：`blocked_by` 的改写原先
+  只在确定性 continuation 那一支生效，预算暂停走 `CLOSEOUT_MODEL` 分支 ⇒ 模型写的"继续第二步"被原样留下。
+
+**处置（`aa003b4`）**：① 闸门调用改**无条件**（判据只看 `storage.needs_reconcile`，不看 reason）；
+② `_raise_deadline_reconcile` → `_raise_reconcile_required`；③ 新增 `run_budget.apply_blocked_by`，两个 continuation
+来源（确定性 + 模型）共用同一处改写；④ `deadline_reached()` 抽出，agent 侧三处消费者共用；⑤ 投影 `state` 的覆盖条件由
+「非终态」收窄为「暂停态」（原先会把**在途** run 误报成 `needs_reconcile`）；⑥ 场景 Arm A 加 `bool(operations)`
+（`all(...)` 对空列表恒真 = 空泛通过）、Arm B 点名判据 `any`→`all`（每条欠账都要被点名）；⑦ 前端 `parseInstant` 只认
+**大写** `Z`（后端 `fromisoformat` 对小写 `z` 抛 ValueError ⇒ 422，而 `Date.parse` 收小写 ⇒ 原先会放行一次必然 422 的往返；
+`t` / 空格是**有意的保守**，不是分叉）。`24a1acc` 补两处空泛通道用例。
+
+**两轴补审（§8.3 第 4/8 条，各一独立只读子代理，冻结 sha `24a1acc`，读范围 = `03c1830..24a1acc` 的 13 文件差）**：
+
+- **Standards 轴：PASS-WITH-FINDINGS**（0 P0 / 0 P1 / **1 P2** / 5 P3）。
+- **Correctness/Spec 轴：PASS-WITH-FINDINGS**（0 P0 / 0 P1 / **1 P2** / 2 P3）。
+- 两轴各自**独立复核**了 P1 的两半都已闭合（闸门去条件 + 两个来源共用改写），并各自跑出**互不相同**的变异失败集；
+  两轴**各自独立**认定修复批次没有引入 P0/P1 ⇒ §8.3 第 4 条的停止条件未触发。
+
+**补审 findings 处置（`98d56d6`）**：
+
+- **P2（Correctness）执行域的"到点那一刻"零鉴别力**：闸门内联 `datetime.now(UTC)`，把 `>=` 写成 `>` 时 **68 条 deadline
+  用例全绿**（`>=` 与 `>` 只在 `now == deadline_at` 那一点上结论相反，靠真实挂钟碰不到），而 ADR-0046 D2 / `04 §9.1`
+  明写"到点那一刻就停，不留缝"。处置：执行域收出自己的 `utc_now()` 单点（跨层例外：`tooling/**` 不 import `agent/**`，
+  照 `run_budget.utc_now` 的**设计**在本域放同形状的一处）+ 补「正好到点 ⇒ 拒 / 差一微秒 ⇒ 收」的正反用例。
+- **P2/P3（两轴各报一次）闸门作用域**：暂停收口是 **run 级**（它产出的是本 run 暂停载荷的 blockers），另两个读者
+  （Resume 开工前闸门 + 投影 / Recovery 裁决收集面）是 **session 级**。该分叉**今天不可达**（会话里有未结清行 ⇒ 任何新
+  run 的开工被 409 挡住）⇒ **不修**，写进 ADR-0046 §6.1 #7 并把 `operation.py` 的读者面注释补齐第三处。
+- **P3（Correctness）Arm B 的点名判据接受"工具名命中"**：名字不唯一，而 `apply_blocked_by` 只追加不校验 ⇒ 一段无关文案里
+  偶然出现同名工具就能凑出"被点名" ⇒ 收紧成**只认 id**。
+- **P3（Standards）**：投影 `state` 的覆盖条件收紧为 `resumable`（暂停**且**非终态，"能恢复"才是那条理由的准确判据）；
+  `runtime.py` 一处过期注释；ADR §5.1 的条数与 `--collect-only` 实测对齐；前端 `parseInstant` 的 JSDoc 收尾换行。
+  "暂停 **且** 终态"这一形状不可派生 ⇒ 登记 §6.1 #8，不改投影第一分支（它定的是投影的**键集**）。
+- **权威 ruff 车道抓回 2 条**（`ISC004` `evaluation/live_gate/runner.py` 的隐式拼接、`RUF022`
+  `src/agent_harness/storage/__init__.py` 的 `__all__` 顺序）：各审查轮只在改动过的文件上跑 ruff，而 `scripts/gate0.py`
+  车道 ② 跑**全仓** `ruff check .` —— 与 T5（27 条）、T6（`RUF023`）同一形态。处置均为静态等价改写，`ruff check .` 全绿。
+  **代价如实记**：`src/**` 一变 ⇒ 场景与全量 pytest 均重跑（读数见下）。
+
+**权威前端车道抓回的真缺陷（`71f19f8`；先于定向审查，来源是 Gate-0 车道 ④）**：最终树上 `npx tsc -b` **rc=2 / 9 处
+TS2741** —— `#315` 给 `RunLimitsFacts` 加了必需键 `deadline_at`，而投影解析器 `parseRunLimitFacts` 没读它 ⇒ 生产路径上
+`run_limits.deadline_at` 恒 `undefined`，而暂停面板「绝对截止时刻」那一行的唯一来源（`runBudget.deadlineInstant`）读的
+正是它 ⇒ 票面「CLI / Web / 投影三面同源呈现」在 Web 投影这一面**残缺**（真机上面板里那一行没有时刻）。既有用例看不见这一格：
+它们手工构造 `RunPausedInfo`，绕过了投影解析器。处置：新增 `dimensionInstantText`（只认**非空字符串**——数在 cost 维是
+合法读数，在 deadline 维不是）+ `parseRunLimitFacts` 补读该键 + 3 条钉在**投影**上的用例 + 三处夹具补键；
+红证：把那一行读去掉 ⇒ 该 3 条全红（`expected undefined to be null`）。读数：tsc 修前 rc 2 / 修后 **rc 0**。
+**与 T5/T6 同一形态**：权威车道抓回的是"每个文件单测都绿、合起来才看得见"的那一类缺口。
+
+**定向两轴审查（§8.3 第 4 条"内容变过 ⇒ 重新审"；各一独立只读子代理，冻结 sha `71f19f8`，读范围 `0697ec4..71f19f8`）**：
+
+- 两轴各 **0 P0 / 0 P1**，findings 全数处置（含 **1 条 P2**：CLI 上票面 Must Do 的「Show deadline … CLI」名存实亡——
+  暂停摘要只打 `dimension=run.deadline_at`，**时刻从不出现**，而 Web 面板与投影都打得出那个时刻 ⇒ 三面同源在 CLI 这一面
+  只有通道名、没有事实）。
+- 其余为可读性 / 口径 / 夹具类（Timeline 摘要把 turns 的 `2/8` 摆在 `run.deadline_at` 名下、宽松读法与后端**事件回读**
+  `_deadline_or_none` 不等价、夹具 `blockers` 没照后端确定性模板写、指针指向 `build_pause_data` 而不是
+  `RunLimits.as_projection`、形状校验的归属写宽）。
+
+**处置（`c6d9cd6`）**：① CLI 新增 `_deadline_dimension_lines`，暂停块与恢复块都打 `deadline: <时刻>`
+（没配 ⇒ `unlimited`，形状认不出 ⇒ `unavailable`，**键缺席 ⇒ 零行**——不拿一片 `unavailable` 当信息）；
+② `dimensionInstantText` 收严：带首尾空白的文本不再当场收下（后端事件回读 `_deadline_or_none` **不** strip
+⇒ 同一份 durable 事件两端读数分叉）；③ `summarizeRunPaused` 加 deadline 分支：Timeline 报**那个时刻**，
+不再拿 turns 的 `2/8` 冒充；④ 注释与夹具订正；⑤ ADR-0045 §6.1 登记唯一剩下的分叉（**不可达输入**）。
+
+**修后重审（冻结 sha `c6d9cd6`，读范围 `71f19f8..c6d9cd6`）与 8 条 P3 收尾（`cf1879d`）**：两轴各 0 P0 / 0 P1，
+给出 8 条 P3（去重后按各轴**自己给的处方**收尾）。这一笔只动测试断言、注释与登记文本，**不改任何生产判据**：
+
+- **恢复块那一行原先零覆盖**（两轴各报一次；机械证据：删掉它 27 条 CLI 用例全绿）⇒ 补正/否定两条断言
+  （否定只圈恢复块内——`resume_command` 会先回顾暂停块，旧时刻出现在那里是合法的）。
+- `isDeadlinePause` 的 `||` 两个析取支各自从未被单独覆盖（`&&` 变异全绿）⇒ 表驱动用例 + 把"两个消费端分支次序相反、
+  会分叉的载荷不可达、回落标签将来要按 `reason` 取"登记进注释。
+- ADR-0045 §6.1 的 `#315` 条目订正：`null` 那一格 CLI 报 `unlimited`、畸形形状报 `unavailable`（原稿把两格混成一句）；
+  分叉集合是"任何 `_deadline_or_none` 收不下的**文本**"，不止"非 ISO 文本"。
+- `_deadline_dimension_lines` 的 docstring 收窄（恢复块给的是 deadline 暂停的**新**时刻，其余恢复是**沿用**值）。
+- 本轮处置**不含新生产代码面** ⇒ 按 §8.3 第 8 条不触发"发现阶段补审"。
+
+**作者变异红证（三轮，副本均置于仓库之外，主工作树全程未动；失败集互不相同）**：
+
+- **修复轮（冻结 sha `03c1830`，10 个变异）**：M1a executor deadline 闸门移到配额闸门之后 ⇒ 1 红；M1b 删掉该闸门 ⇒ 4 红；
+  M2「未证」标记不再要求 MUTATING ⇒ 1 红；M3 恢复不再要求严格未来 ⇒ 2 红；M4 投影不再覆盖 state ⇒ 1 红；M5 前端又收小写 z
+  ⇒ 1 红；M6 闸门退回"只在 deadline 暂停时跑" ⇒ 2 红；M7 模型 closeout 跳过 `apply_blocked_by` ⇒ 1 红；M8 Arm A 去掉
+  `bool(operations)` ⇒ 1 红；M9 Arm B 的 `all` 改回 `any` ⇒ 1 红。**M7 的失败集是 M6 的真子集**（如实登记，不当作两组独立证据）。
+- **处置轮（冻结 sha `98d56d6`，4 个变异）**：执行域闸门 `>=` → `>` ⇒ 1 红（**正是那条 P2 的证明**：在老代码上同一个变异
+  **零杀伤**）；Arm B 的 id 分支恒 False ⇒ 2 红；Arm B 的 `all` → `any` ⇒ 1 红；投影覆盖条件恒 False ⇒ 2 红。
+- **本段两轮（`71f19f8` / `c6d9cd6` / `cf1879d`，7 个变异）**：删 `parseRunLimitFacts` 那一行 ⇒ 3 红；
+  删读行之后 **4 红**（新用例进来后同一变异杀伤力更大）；投影退回**宽容读法**（带空白那一格）⇒ 1 红；
+  删 Timeline 的 deadline 分支 ⇒ 1 红（`run.deadline_at · 2/8`）；CLI helper 返回零行 ⇒ 2 红；
+  CLI 照单全收（印 `None`）⇒ 1 红；恢复块丢行 ⇒ 1 红；恢复块改打旧暂停时刻 ⇒ 1 红。
+
+**真实 Live Gate（真模型 `mimo-v2.6-flash` + 生产工具 + 生产默认 local sandbox）** ——
+**最终**证据绑定 sha `cf1879d3` / tree `99a8b465`：
+
+| 证据目录 | 绑定树 | 判定 | 读数 |
+| --- | --- | --- | --- |
+| `20260926T171722-cf1879d3cf32-run-deadline-boundary`（**最终**） | `99a8b465` | PASS 3/3 | 68.4s / 66.4s / 52.1s，每次 **23/23 断言**；收尾形状 **paused / paused / completed** |
+| `20260926T153033-98d56d6149f8-run-deadline-boundary` | `9c037d91` | PASS 3/3 | 70.6s / 66.7s / 71.2s，每次 23/23 断言；已动过 CLI 与投影 ⇒ 由本份取代，保留作原始依据 |
+| `20260926T100829-3cd8253f0625-run-deadline-boundary` | `dd233064` | PASS 3/3 | 修复批次**之前**的场景口径 ⇒ 保留入库作原始依据 |
+| `20260926T095353-1a88b799bed6-run-deadline-boundary` | `9496226e` 系 | **FAIL**（3/3，每次恰 1 条红：`resumed_leg_did_new_work`） | 恢复面判据写窄，已收窄 ⇒ 保留作原始依据 |
+| `20260926T083245-9496226e7518-run-deadline-boundary` | `9496226e` | **FAIL**（三连） | 场景读错投影键（TypeError）⇒ 保留作原始依据 |
+
+**最终那份的机器读数**：`sha cf1879d3` / `tree 99a8b465`（`worktree.tracked_matches_head=true`、
+未跟踪清单只有 `.zcodeignore`）；三次 attempt 的收尾形状 **paused / paused / completed** ⇒ ADR-0046 **D9 的两种安全结局
+在同一次 3/3 内各出现**（validator 对两次暂停结局给的是结构性 ⚠️「轨迹里没有该 run 的终态事件」而不是 FAIL：暂停本就是
+非终态收尾）。每次 attempt 内：`deadline_pause_snapshot`（`reason=deadline` / `trigger=run.deadline_at` /
+`closeout=deterministic` / `resume_requirements=[]`）、`deadline_pause_precedes_any_terminal`、
+`real_work_admitted_before_the_deadline`（真实 Provider 请求 3/5/6 轮 + 真实 BashTool 在一次性 Sandbox 里跑过，
+`chain-steps.txt` 只跑到 7/40、10/40、4/40 ⇒ 结构上跑不完）、`expired_deadline_resume_refused`、
+`deadline_outcome_is_safe_or_needs_reconcile`（Arm A/B 各自完整成立）、`uncertain_mutation_recorded_as_unproven`
+（生产 BashTool MUTATING 超时 ⇒ `TIMEOUT` + `UNKNOWN` + `needs_reconcile=True`，副作用计数 1）、
+`no_new_admission_after_the_deadline`（到点后再发同一条 ⇒ `DEADLINE_EXCEEDED` + **账上不留行** + 副作用计数不动）、
+`unreconciled_debt_blocks_recovery`（生产恢复入口被拒 `RecoveryConflict`、拒绝不顺手改账、**没有盲重跑**，
+执行域那份投影 `reconcile_pending=['call-uncertain-1']`）、`resume_contract_holds`、`durable_replay_matches_live`、
+`stream_mirrors_pause`、`no_dangling_tool_calls_in_run`、`no_fuse_trip`。独立复核
+`scripts/live_gate.py validate <evidence.json> --require-pass` ⇒ 声明 PASS 且证据自洽、
+**24 条检查 0 FAIL、exit 0**；`seams` 空、`secret_scan` 0 命中、`sandbox.deleted=true`（一次性工作区已核实销毁）、
+`scope.does_not_cover` 如实列出三条未覆盖面（委派树场景 / Docker 后端 / 模型语义质量）。
+
+**重车道读数（命令与树写死；读数为 2026-09-26 夜间采集，跨午夜如实登记）**：
+
+- **后端全量 pytest**（`PYTHONUTF8=1 ./.venv/Scripts/python.exe -m pytest -q -p no:randomly`）在同一棵代码树上跑过三遍：
+  - 第 1 遍（工作树 `0697ec4`）：**3 failed / 4273 passed / 14 skipped / 50 deselected in 614.87s**；
+  - 第 2 遍（同上树）：**1 failed / 4275 passed / 14 skipped / 50 deselected in 683.80s**；收集总数两遍都是 **4276**
+    ⇒ 第 2 遍**恰好**是第 1 遍那两条非既有红**翻绿**，没有别的位移；
+  - 第 3 遍（**代码冻结树 `cf1879d`**，工作树 = `1444e2e`）：**1 failed / 4277 passed / 14 skipped / 50 deselected
+    in 720.53s**；收集总数 **4278** = 4276 + 2（`c6d9cd6` 新加的两条 CLI 用例）。
+- **唯一稳定红 = 既有环境项（已证非本票回归）**：`tests/memory/test_memory_v2_recall_dataset.py::test_frozen_project_recall_corpus_is_versioned_and_cross_session`
+  —— `dataset_sha256()` 是 `path.read_bytes()` 的哈希，本 clone `core.autocrlf=true` ⇒ 工作树是 CRLF 而同 blob 是 LF
+  （`git ls-files --eol` 实测 `i/lf w/crlf`、文件 234 处 CRLF、裸 LF 0）：工作树字节 `6c834bb8…` ↔ 测试钉住的字面量
+  `8b33b9da…`，**把 CRLF 归一成 LF 后哈希逐字节等于那个字面量**（实测）⇒ 同一份内容两个读数。T7 对 `tests/memory/**` 与
+  `evaluation/memory_v2_recall.py` **零改动**；在 `main`（`f13ed0d`）的外部 clone 上跑全量同格式：**1 failed（同一条）/
+  4184 passed** ⇒ 与本票无关。T5 / T6 已按 §8.6 第 1 条各登记过一次（同一条）。
+- **两条一次性红（第 1 遍出现、第 2/3 遍消失）如实登记**：`tests/sandbox/test_exec_hardening.py::test_docker_exec_create_late_result_is_reaped_after_cancel`
+  与 `tests/web/test_memory_api.py::test_v2_list_filters_detail_versions_edit_stale_version_and_identity`。
+  **未取得失败签名**（第 1 遍只留了汇总行，没有 traceback）⇒ 按 §8.6 第 3 条**不能**登记为已知 flake，也**不**当既有红。
+  已做的三项机械复核：① 同一棵树后续两遍全量零复现；② 两条 node id 单独连跑 **12 轮**（每轮 4 个 CPU 忙循环负载，
+  pytest 自报 7.5s→19.3s 被拉长 ⇒ 负载真实）**12/12 全绿**；③ `main` 的外部 clone 上全量也未出现。
+  **两条都登记为「待用户裁决」**（是否按未知红阻断 / 是否授权补做定位）；若集成后复现，按未知红处理。
+- **前端五车道（`web/`，代码冻结树 `cf1879d`）**：`npx tsc -b` **rc 0**；`npx vitest run` **73 文件 / 1157 passed**
+  （62.55s，rc 0）；`npx oxlint` **41 warnings / 0 errors**（220 文件 / 116 规则 / 277ms）；
+  `npx vite build` **rc 0**；`npx playwright test --workers=2` **458 passed / 2 failed**（13.1m）。
+- **那 2 条 e2e 红已证为既有（非本票回归）**：`web/e2e/control-row.spec.ts:251`「#201 档位收窄提示」在两个 viewport 各 1 条，
+  断言期望字面量 `该档位声明开放 13 个工具（全部档位声明 18 个）`，而实际渲染 `…12 个工具（全部档位声明 17 个）`。
+  归因（机械证据）：该字面量由 `11fb4060` 写进 spec，`dd8e85e1` 把共享夹具 `web/e2e/fixtures.ts` 的 `tool_scope` 改成
+  `open:12 / total:17`（夹具文件头注明"逐值镜像后端实测值"）却**没有**同步 spec 字面量 —— 渲染的正是夹具值。
+  两个文件在本票区间**零改动**（`git diff --stat f13ed0d..HEAD -- web/e2e/` 为空）；在 **`f13ed0d` 的独立 clone**
+  （`D:\ia-t7-baseline`）上跑同一条 spec ⇒ **同样 2 条红、同一实收串**。处置：**不修**（属 `#201` 的 AC 面，
+  另一条线正在该面上工作 ⇒ §14.13(a) 文件级避让），登记 + 集成记录披露，**不报告为"全绿"**。
+- **e2e 的环境替用如实登记**：5173 被**另一条线**的 live 会话占着（`D:\intelligence-agent\web` 的 vite + 一个
+  chrome-devtools-mcp 浏览器），而 `playwright.config.ts` 按 `#209` 的设计**拒绝复用**别的 clone 的 dev server、
+  也不肯让出端口 ⇒ 本次用**替用配置**（端口 5183，projects / workers=2 / trace / `reuseExistingServer: false` /
+  `--strictPort` / 配置加载期守卫全部逐字同源）跑完即删（跑后 `git status --short` 只有 `?? .zcodeignore`）。
+
+**门禁（Gate-0 裸全量，tip `28995ce` / tree `215e16e2f244`）**：**6/6 PASS**，墙钟 **41.05s**
+（diff-check 0.04 / ruff 0.87 / oxlint 0.62 / tsc 33.64 / guards 4.25 / coverage 1.62），读数落盘
+`docs/gate/28995ce96dcf4da87054f1bc605e1023e205a6c3.json`（`tracked_matches_head=true`、未跟踪清单只
+`.zcodeignore`）；bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，另跑 `git diff --check f13ed0d..HEAD`
+**exit 0** 补上「已提交未推送」那 17 笔的范围；覆盖闸门在**同一 tip** 上 **exit 0**（台账 331–334 四行新行，
+`089524a~1..HEAD` 每条 commit 均有归属）。该 json 由**本读数笔**入库（`.json` 在 docs-only 白名单里 ⇒
+**无需**新台账行）。
+
+**集成前复跑（先回后正之后的树）**：`main` 在本票期间前进了 3 笔（`9b8bde42` CLAUDE.md 对齐 + tracker 残余④、
+`5f640259` 其 Gate-0 读数、`063487a7` 合并 PR #332），全部是 docs / `docs/gate/**` ⇒ 与本票改动面只有
+`docs/SDD_TICKET_TRACKER.md` 相交（对方改在 L3925 附近、本票在 EOF 追加）⇒ **`git merge origin/main` 无冲突**
+（merge `72541ee`；`git diff --stat cf1879d..HEAD -- src tests evaluation web scripts .github` 仍为空
+⇒ **代码冻结树不变**）。合并后在**集成候选 tip `72541ee` / tree `9a834ae55551`** 上重跑裸全量：
+**6/6 PASS**，墙钟 **22.66s**（diff-check 0.06 / ruff 0.08 / oxlint 0.26 / tsc 11.67 / guards 9.29 /
+coverage 1.29），读数落盘 `docs/gate/72541eed2909c54c1be2e15571be9bde690786ca.json`
+（`tracked_matches_head=true`、未跟踪清单只 `.zcodeignore`）；`git diff --check f13ed0d..HEAD` 亦 exit 0。
+**没有重跑重车道**：合并带来的只有文档与 `docs/gate/**`（对 pytest / vitest / e2e 的输入面零改动），
+重车道读数仍以代码冻结树 `cf1879d` 为准 —— 这一点在集成记录里如实写明。
+
+**审查轮次分类（§8.3）**：发现阶段两轴（`f13ed0d..03c1830`）→ 处置 `aa003b4` + `24a1acc` → **修后重审**两轴
+（冻结 `24a1acc`）→ **发现阶段补审**（§8.3 第 8 条，本票一次，已用尽）→ 处置 `98d56d6` → 权威车道抓回前端缺陷 `71f19f8`
+→ **定向两轴审查**（内容又变过，冻结 `71f19f8`）→ 处置 `c6d9cd6` → **修后重审**（冻结 `c6d9cd6`）→ 8 条 P3 收尾 `cf1879d`
+（该笔只动测试/注释/登记，**无新生产面** ⇒ 不再触发补审）。
+
+**残余（登记，不阻断）**：① reconcile 裁决没有提交面（ADR-0046 §6.1 #1：`resume` 与 `recover` 都会 409，
+而"我查过了"没有地方可以说）；② 已签发的 child 不继承父的 deadline（#2，归 `#318`）；③ deadline 路径上没有模型可见的
+恢复标记（#3，产品侧补偿是 D8 的拒绝文案）；④ `max_tool_calls` 仍声明不受理（#4，非空 ⇒ 422）；⑤ Web 的暂停呈现读事件流、
+不读预算投影（#5，前端票）；⑥ 对账闸门的 run 级 / session 级分叉（#7，**不可达**）；⑦ 投影第一个分支不看终态（#8，
+形状不可由事件派生）；⑧ `limits.run.deadline_at` 的形状不由显示层复判 + CLI `unlimited` / Web `unavailable` 的**用词差**
+（ADR-0045 §6.1，不可达输入）；⑨ **两条一次性 pytest 红无失败签名**（见上，待用户裁决）；⑩ 一条 e2e 既有红
+（`#201` 的 spec 字面量陈旧，已证非本票回归，前端面）。

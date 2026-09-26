@@ -1179,6 +1179,9 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
  *  `expected_version` 与 `run` 平级（PRD §3 的冻结形状——它是"这次预算变更"的属性，
  *  不是某个作用域的 ceiling）。 */
 export interface ResumeRunLimitsBody extends Partial<Record<RunLimitField, number | string>> {
+  /** `#315`：deadline 维（RFC 3339 UTC 文本）。它是 `RunLimitField` 里唯一的**文本**
+   *  维——后端 `parse_deadline_at` 只收带时区的时刻，数不是合法形状。 */
+  deadline_at?: string;
   /** `#314`：per-tool 绝对配额（工具名 → 正整数）。 */
   tool_call_limits?: Record<string, number>;
 }
@@ -1197,13 +1200,18 @@ export interface ResumePausedRunPayload {
  *  决定形状——调用方（useSession）不再自己拼键名，漂移就没有第二个地方可发生。 */
 export type ResumePausedRunTarget =
   | { kind: 'run'; field: RunLimitField; value: number | string }
-  | { kind: 'tool'; tool: string; value: number };
+  | { kind: 'tool'; tool: string; value: number }
+  /** `#315`：deadline 暂停的恢复目标是**新的绝对截止时刻**（RFC 3339 UTC 文本）。
+   *  与 run 维分开成一个 kind，是因为值域不同（文本 vs 数）且拒绝理由不同——把时刻
+   *  塞进 `field: 'deadline_at'` 会让"这个值该是数还是时刻"只能靠字段名反推。 */
+  | { kind: 'deadline'; field: 'deadline_at'; value: string };
 
-/** 恢复请求的 `budget.run`：点名的目标 → 新绝对值（`#314` 起两种目标）。 */
+/** 恢复请求的 `budget.run`：点名的目标 → 新绝对值（`#314` 起两种目标，`#315` 加 deadline）。 */
 export function resumeRunLimitsBody(target: ResumePausedRunTarget): ResumeRunLimitsBody {
-  return target.kind === 'run'
-    ? { [target.field]: target.value }
-    : { tool_call_limits: { [target.tool]: target.value } };
+  if (target.kind === 'tool') {
+    return { tool_call_limits: { [target.tool]: target.value } };
+  }
+  return { [target.field]: target.value };
 }
 
 /** 恢复请求被拒（409/422 且**零副作用**：后端判定在任何落盘之前）。

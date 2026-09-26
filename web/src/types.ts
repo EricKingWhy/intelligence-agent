@@ -535,6 +535,11 @@ export interface RunLimitsFacts {
   max_model_requests: number | null;
   max_total_tokens: number | null;
   max_cost_usd: string | null;
+  /** `#315` 的 deadline 维：RFC 3339 UTC 绝对时刻**文本**；null = 没配 deadline。
+   *  它不是"第五个 `max_*`"（判的是时刻先后，不是 consumed 与 ceiling 比大小），
+   *  但 wire 形状同样是 `limits.run` 的一个键，所以与四维平级地放在这里。 */
+  deadline_at: string | null;
+  /** `#314`：per-tool 绝对配额（工具名 → 正整数）。 */
   tool_call_limits: Record<string, number> | null;
 }
 
@@ -566,9 +571,12 @@ export interface RunPausedInfo {
   version: number;
   /** 暂停事件自己的 seq（`run/paused` 的 durable 位置）——对账/去重用。 */
   pause_seq: number | null;
-  /** `budget_exhausted`（本票唯一值；deadline / stuck 属 #315 / #317）。 */
+  /** 暂停原因（`03 §3.4` 的取值域）：`budget_exhausted` 或 `deadline`（`#315`）；
+   *  `stuck` 属 `#317`。两条原因对应**不同的恢复动作**：前者抬某个 ceiling，后者换
+   *  一个新的未来时刻——面板据此换文案（`runBudget.pauseReasonLabel`），不合并成一个
+   *  "预算问题"。 */
   reason: string;
-  /** 命中的 ceiling 维度：四个 run 维之一，或 `local.max_agent_turns`。 */
+  /** 命中的维度：四个 run 维之一、`local.max_agent_turns`，或 `run.deadline_at`（`#315`）。 */
   trigger_dimension: string;
   consumed_agent_turns: number;
   /** run 作用域绝对 ceiling；null = 未配（无 ceiling，不是 0）。 */
@@ -583,7 +591,9 @@ export interface RunPausedInfo {
   continuation: RunContinuation | null;
   /** `model` = 预算内那次有界 closeout；`deterministic` = 只由持久事实组装。 */
   closeout_source: string;
-  /** 恢复前置条件（预算暂停为空数组——预算恢复不需要额外证据）。 */
+  /** 恢复前置条件（**空数组** = 该暂停不需要额外证据）：`budget_exhausted` 与
+   *  `deadline` 两类暂停都是空的（`03 §3.4`）——deadline 的恢复依据是"点名一个未来
+   *  时刻"，那是恢复请求自己的字段，不是额外证据（`#317` 的 stuck 才会有非空项）。 */
   resume_requirements: string[];
   trace_id: string | null;
 }

@@ -259,3 +259,16 @@ Web 侧一处刻意的**逐字镜像**：配了配额但从未调用过的工具
   不带 `budget_delta` ⇒ 崩溃前已接纳、且已写下 PENDING/RUNNING 的那次调用在账上记 0
   （少记，方向=放宽）。它属 `#315` 的副作用 reconcile 面，本票不改；影响仅限终态 run 的
   投影（那个 run 已不可恢复，丢失的计数进不了任何后续准入判定）。
+- **`limits.run.deadline_at` 的形状不由显示层复判（`#315` 增补）**：值若是"非空且无首尾
+  空白的**文本**"，CLI 与 Web 都**照契约原样**显示（`deadline: <文本>` / 面板的"绝对截止
+  时刻"）；其余形状一律读作"这一维没有时刻"——CLI 对显式 `null` 报 `unlimited`（与同块
+  `limit unlimited` 同词）、对数 / 布尔 / 空串 / 带首尾空白报 `unavailable`，Web 侧一概
+  `null`。⇒ 判定同源，但 `null` 那一格的**词**两端不同（CLI `unlimited` vs 面板
+  `unavailable`；对 `reason=deadline` 的暂停读起来别扭，而该形状不可由真实写入者产生）。
+  剩下的分叉是"非空、无首尾空白、但 `agent/run_budget._deadline_or_none` 收不下的**文本**"
+  ——非 ISO（`garbage`）、无时区的朴素 ISO（`2026-09-26T04:10:00`）、小写 `z`
+  （`…04:10:00z`）：两端照契约原样显示成时刻，而回读侧 `fromisoformat` 抛 ValueError
+  ⇒ 读作"没配"。**不可达输入**（唯一写入者是 `RunLimits.as_projection` 的 `_deadline_text`，
+  恒为 `…Z` 收尾的 RFC 3339 文本）⇒ 只登记，不在显示层写第二份 RFC 3339 解析。带时区 /
+  严格未来的形状判据属恢复草稿那一关（`deadlineDraftError` → `parseInstant`，与请求面
+  `parse_deadline_at` 同口径）；请求面 `strip`、事件回读面不 `strip` 是 D7 冻结的既有分界。

@@ -966,11 +966,13 @@ async def test_pause_payload_key_set_is_pinned(tmp_path: Any) -> None:
         "run": {
             "max_agent_turns_total": None, "max_model_requests": None,
             "max_total_tokens": None, "max_cost_usd": None,
+            # `#315`：deadline 是 run 档的一维（没配 ⇒ null，不是缺键）。
+            "deadline_at": None,
             # `#314`：per-tool 配额是 run 档的**动态**维度（未配置 ⇒ 空表，
             # 不是缺键——缺键会让客户端分不清"没这一维"与"这一维是空的"）。
             "tool_call_limits": {},
         },
-    }, "limits 按作用域各还原生投影（`11 §6.1`）；run 档四维全在，没配的是 null"
+    }, "limits 按作用域各还原生投影（`11 §6.1`）；run 档各维全在，没配的是 null"
     assert data["closeout_source"] == CLOSEOUT_DETERMINISTIC
     assert data["resume_requirements"] == []
     # continuation 的四个键齐（`next_safe_action` 非空）；文案本身不在这里钉
