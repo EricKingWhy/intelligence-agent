@@ -75,6 +75,7 @@ EXPECTED_ASSERTIONS = {
     "positive_leg_artifact_on_disk",
     "ledger_rows_for_every_call",
     "unquiescent_owner_produced_by_production_execution",
+    "owner_leg_leaves_no_tool_call_events",
     "refused_leg_blocked_with_stable_reason",
     "refusal_left_the_owner_untouched",
     "refused_leg_work_still_settled",
@@ -115,7 +116,8 @@ class _WriteThenAnswerModel:
 
     产物名与内容从**任务文本**里解析（`completion._task` 的稳定措辞）—— 三条腿各自写自己的
     产物，所以"产物内容相等"这条断言是这条替身在真的按任务干活，而不是写死的常量。
-    接缝只有一个：`create_chat_model`（工具 / 执行器 / 账本 / 运行时 / 会话全是生产实现）。
+    接缝只有模型客户端一处：`ModelConfig.from_settings` 与 `create_chat_model`（工具 / 执行器 /
+    账本 / 运行时 / 会话全是生产实现）。
     """
 
     #: 任务文本里的产物契约（`_task` 的措辞；解析不出来就明确报错，不猜）。
@@ -167,18 +169,30 @@ class _WriteThenAnswerModel:
         )
 
 
-def _patch_provider(monkeypatch: pytest.MonkeyPatch, **model_kwargs: Any) -> None:
-    """把**模型客户端**这一个接缝换成离线替身（其余全部是生产实现）。"""
+def _patch_provider(
+    monkeypatch: pytest.MonkeyPatch, **model_kwargs: Any,
+) -> list[_WriteThenAnswerModel]:
+    """把**模型客户端**这一个接缝换成离线替身（其余全部是生产实现）。
+
+    每次 `create_chat_model` 造一个**新**替身（它的 `_cursor == 0` 就是"一条腿两次决策"
+    这一步的形状，三条腿各造一个才与真实运行同构）。返回造出来的全部替身，调用方能据此
+    核对运行时绑给模型的生产工具集 —— 否则 `bound_tools` 是没人看的状态。
+    """
     monkeypatch.setattr(
         ModelConfig, "from_settings",
         classmethod(lambda cls, settings: SimpleNamespace(
             model_name="offline-scripted", provider_id="offline", fallback=None,
         )),
     )
-    monkeypatch.setattr(
-        "agent_harness.model.provider.create_chat_model",
-        lambda config, request_timeout=None: _WriteThenAnswerModel(**model_kwargs),
-    )
+    created: list[_WriteThenAnswerModel] = []
+
+    def _factory(config: Any, request_timeout: Any = None) -> _WriteThenAnswerModel:
+        model = _WriteThenAnswerModel(**model_kwargs)
+        created.append(model)
+        return model
+
+    monkeypatch.setattr("agent_harness.model.provider.create_chat_model", _factory)
+    return created
 
 
 def _run_scenario(ctx: ScenarioContext) -> Any:
@@ -215,6 +229,9 @@ def test_prepare_blocks_without_python_and_seeds_the_owner_script(tmp_path):
 
     script = sandbox.read_text(UNCERTAIN_SCRIPT)
     assert UNCERTAIN_SENTINEL in script and str(UNCERTAIN_SLEEP_SECONDS) in script
+    # 追加模式是"跑了正好一次"那条断言的承重件：覆盖写会让重跑与单跑在读数上同形
+    # （哨兵行数会恒为 1），于是 `owner_side_effect_happened_exactly_once` 变成装饰。
+    assert '.open("a"' in script, "哨兵必须是追加写，否则数不出重跑"
     assert _sentinel_count(sandbox) == 0, "副作用只能由那次真实调用产生"
     for artifact in (POSITIVE_ARTIFACT, REFUSED_ARTIFACT, RESUMED_ARTIFACT):
         try:
@@ -329,7 +346,7 @@ def test_scenario_passes_end_to_end_with_the_provider_seam_stubbed(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ):
     """三条腿连起来全绿；durable 面独立复读：三次执行、两条终态、owner 被裁决结清。"""
-    _patch_provider(monkeypatch)
+    models = _patch_provider(monkeypatch)
     ctx = _context(tmp_path)
     assert asyncio.run(SCENARIO.prepare(ctx)) == []
 
@@ -338,6 +355,15 @@ def test_scenario_passes_end_to_end_with_the_provider_seam_stubbed(
     assert outcome.ok is True, _details(outcome.assertions)
     assert {item.name for item in outcome.assertions} == EXPECTED_ASSERTIONS
     assert outcome.session_id == ctx.session_id
+    # 运行时真的把生产工具集绑给模型（"生产工具被用上"的接线前提，不只是类路径判据）。
+    # 绑定的形状是 registry.export_model_definitions() 的 dict（name/description/parameters）。
+    assert models, "场景必须真的造过模型客户端"
+    bound = sorted({
+        str(definition.get("name", ""))
+        for model in models
+        for definition in model.bound_tools or []
+    })
+    assert "write" in bound, f"模型拿到的是 {bound}"
 
     # durable 面（不看场景给的读数，自己重读一遍）：三次执行、两条终态、被挡的那次没有终态。
     events = JsonlSessionStore(root=ctx.session_root).read_events(ctx.session_id)
@@ -361,7 +387,8 @@ def test_scenario_passes_end_to_end_with_the_provider_seam_stubbed(
     rows = {row.tool_call_id: row for row in asyncio.run(ledger.list_for_session(ctx.session_id))}
     assert rows[OWNER_CALL_ID].state is OperationState.SUCCEEDED
     assert has_unproven_side_effect(rows[OWNER_CALL_ID]) is False
-    assert rows[OWNER_CALL_ID].reconcile_meta == '{"verdict": "side_effect_confirmed", "note": "live-gate 裁决"}'
+    # 只钉"裁决内容覆盖了标记"，不钉 json.dumps 的空格（那属于落盘格式，改格式不是回归）
+    assert "side_effect_confirmed" in (rows[OWNER_CALL_ID].reconcile_meta or "")
     # 三条腿各自的产物都在（含被挡的那次：拒绝的是收口，不是工作）
     sandbox = ctx.sandbox
     assert sandbox.read_text(POSITIVE_ARTIFACT) == POSITIVE_CONTENT

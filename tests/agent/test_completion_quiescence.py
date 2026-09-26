@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from agent_harness.session import (
     AGENT_DELEGATION_STARTED,
     Session,
 )
+from agent_harness.session.approval import unresolved_approval_ids
 from agent_harness.session.event import (
     MODEL_COMPLETED,
     OPERATION_RECONCILE_REQUIRED,
@@ -55,6 +57,7 @@ from agent_harness.session.event import (
     TOOL_RESULT,
     SessionEvent,
 )
+from agent_harness.session.service import _InteractiveCallbackHolder
 from agent_harness.storage import SqliteOperationLedger
 from agent_harness.storage.operation import (
     Operation,
@@ -63,6 +66,8 @@ from agent_harness.storage.operation import (
     unproven_meta,
 )
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
+from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.contract import ToolPermission
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -92,6 +97,18 @@ class _EchoTool(Tool):
 
     async def execute(self, args: BaseModel) -> ToolResult:
         return ToolResult.success("probe ok")
+
+
+class _DangerTool(_EchoTool):
+    """DANGER 级调用：在默认 WORKSPACE_WRITE policy 下必须过审批关卡。"""
+
+    @property
+    def name(self) -> str:
+        return "danger"
+
+    @property
+    def permission(self) -> ToolPermission:
+        return ToolPermission.DANGER
 
 
 class _RecordingPolicy(CompletionPolicy):
@@ -212,7 +229,7 @@ def _terminal_events(session: Session) -> list[str]:
 
 
 def test_quiescent_report_when_nothing_is_outstanding() -> None:
-    report = collect_quiescence_report(events=[], operations=[])
+    report = collect_quiescence_report(events=[], new_tool_calls=False, operations=[])
 
     assert report.quiescent is True
     assert report.refusal_reason() is None
@@ -222,7 +239,9 @@ def test_quiescent_report_when_nothing_is_outstanding() -> None:
 
 def test_dangling_tool_call_is_a_blocker() -> None:
     """谓词 1：`model/completed` 请求过、但会话里没有对应 `tool/result`。"""
-    report = collect_quiescence_report(events=_events_with_model_tool_call("call-dangling"))
+    report = collect_quiescence_report(
+        events=_events_with_model_tool_call("call-dangling"), new_tool_calls=False,
+    )
 
     assert [b.kind for b in report.blockers] == [QUIESCENCE_DANGLING_TOOL]
     assert report.blockers[0].refs == ("call-dangling",)
@@ -235,7 +254,7 @@ def test_a_synthesised_recovery_result_clears_the_dangling_predicate() -> None:
         _event(TOOL_RESULT, {"tool_call_id": "call-dangling", "content": "恢复分类"}),
     ]
 
-    assert collect_quiescence_report(events=events).quiescent
+    assert collect_quiescence_report(events=events, new_tool_calls=False).quiescent
 
 
 def test_unresolved_approval_is_a_blocker() -> None:
@@ -246,7 +265,7 @@ def test_unresolved_approval_is_a_blocker() -> None:
         _event(PERMISSION_RESOLVED, {"approval_id": "a-2", "decision": "deny"}),
     ]
 
-    report = collect_quiescence_report(events=events)
+    report = collect_quiescence_report(events=events, new_tool_calls=False)
 
     assert [b.kind for b in report.blockers] == [QUIESCENCE_UNRESOLVED_APPROVAL]
     assert report.blockers[0].refs == ("a-1",)
@@ -260,7 +279,7 @@ def test_unfinished_child_agent_is_a_blocker() -> None:
         _event(AGENT_DELEGATION_FINISHED, {"child_session_id": "child-2"}),
     ]
 
-    report = collect_quiescence_report(events=events)
+    report = collect_quiescence_report(events=events, new_tool_calls=False)
 
     assert [b.kind for b in report.blockers] == [QUIESCENCE_ACTIVE_CHILD]
     assert report.blockers[0].refs == ("child-1",)
@@ -272,7 +291,9 @@ def test_unfinished_child_agent_is_a_blocker() -> None:
 )
 def test_unsettled_operation_is_a_blocker(state: OperationState) -> None:
     """谓词 4：账本行停在 PENDING / RUNNING / UNKNOWN（未定 reconcile 状态）。"""
-    report = collect_quiescence_report(events=[], operations=[_operation("c-1", state=state)])
+    report = collect_quiescence_report(
+        events=[], new_tool_calls=False, operations=[_operation("c-1", state=state)],
+    )
 
     assert [b.kind for b in report.blockers] == [QUIESCENCE_UNSETTLED_OPERATION]
     assert report.blockers[0].refs == ("c-1",)
@@ -291,7 +312,7 @@ def test_unsettled_operation_is_a_blocker(state: OperationState) -> None:
 )
 def test_pending_reconcile_is_a_blocker(operation: Operation) -> None:
     """谓词 5：已进对账流程的欠账——`NEED_RECONCILE` 行，或带"副作用未证"标记的行。"""
-    report = collect_quiescence_report(events=[], operations=[operation])
+    report = collect_quiescence_report(events=[], new_tool_calls=False, operations=[operation])
 
     assert [b.kind for b in report.blockers] == [QUIESCENCE_PENDING_RECONCILE]
     assert report.blockers[0].refs == ("c-1",)
@@ -313,7 +334,9 @@ def test_settled_operations_of_every_terminal_state_are_not_blockers() -> None:
         _operation("c-3", state=OperationState.CANCELLED),
     ]
 
-    assert collect_quiescence_report(events=[], operations=operations).quiescent
+    assert collect_quiescence_report(
+        events=[], new_tool_calls=False, operations=operations,
+    ).quiescent
 
 
 def test_combined_blockers_keep_spec_order_and_reason_is_sorted() -> None:
@@ -364,7 +387,11 @@ def test_ledger_objections_cover_needs_reconcile_for_every_state() -> None:
     """
     for state in OperationState:
         operation = _operation("c-1", state=state)
-        kinds = set(collect_quiescence_report(events=[], operations=[operation]).kinds)
+        kinds = set(
+            collect_quiescence_report(
+                events=[], new_tool_calls=False, operations=[operation],
+            ).kinds
+        )
 
         if needs_reconcile(operation):
             assert kinds, f"{state} 欠对账却没有被完成闸门挡住"
@@ -469,6 +496,51 @@ async def test_each_blocker_independently_prevents_completion(
     assert RUN_PAUSED not in types
     # 拒绝是**无副作用**的：不推 reconcile、不改账本、不落任何新事件（除 loop 自己的）。
     assert OPERATION_RECONCILE_REQUIRED not in types
+
+
+@pytest.mark.asyncio
+async def test_cancelled_approval_does_not_wedge_the_session(tmp_path: Path) -> None:
+    """被取消的审批不许留下无主事实（两轴审查 P1 的回归钉）。
+
+    闸门是**会话级**的（ADR-0047 D1），而谓词 2 的判据是"有 `tool/approval-requested`
+    无 `permission/resolved`"：一条永远配不上的请求会让这段会话此后每次 run 都
+    `quiescence_blocked`，且没有任何写入方能结清它。交互式 callback 在取消 / 异常退出时
+    必须按 fail-closed 补上决议（reason 里的"未批准"是事实，不是猜测）。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "operations.db")
+    await ledger.initialize()
+    session = make_session(tmp_path)
+    queue = PendingApprovalQueue()
+    holder = _InteractiveCallbackHolder(queue=queue, timeout_seconds=0)
+    holder.bind_session(session)
+    registry = ToolRegistry()
+    registry.register(_DangerTool())
+    runtime = AgentRuntime(
+        ScriptedModel([
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call-approval", "name": "danger", "args": {}}],
+            ),
+            AIMessage(content="done"),
+        ]),
+        registry,
+        ToolExecutor(registry, operation_ledger=ledger, approval_callback=holder),
+    )
+
+    task = asyncio.create_task(runtime.run(session, "danger it"))
+    while not queue.pending_ids():
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert unresolved_approval_ids(session.events) == []
+    report = collect_quiescence_report(
+        events=session.events,
+        operations=await ledger.list_for_session(session.session_id),
+        new_tool_calls=False,
+    )
+    assert QUIESCENCE_UNRESOLVED_APPROVAL not in report.kinds
 
 
 @pytest.mark.asyncio

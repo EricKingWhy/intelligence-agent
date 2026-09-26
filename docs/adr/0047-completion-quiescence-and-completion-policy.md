@@ -33,7 +33,7 @@
 
 | 事实 | 证据 |
 | --- | --- |
-| 六条谓词的 durable 事实源**都已存在** | 悬空：`session/derive.collect_dangling`；审批：`tool/approval-requested` / `permission/resolved`；子代理：`agent/delegation-started` / `-finished`；账本：`OperationLedger.list_for_session` + `storage.needs_reconcile` |
+| 六条谓词的 durable 事实源**都已存在** | 悬空：`session/derive.detect_dangling`（底层 `collect_dangling` 是同一份判定）；审批：`tool/approval-requested` / `permission/resolved`；子代理：`agent/delegation-started` / `-finished`；账本：`OperationLedger.list_for_session` + `storage.needs_reconcile` |
 | 完成边界只有一个，且已收口在一条臂上 | `runtime.py` 第 5 步 → `_terminal_completed`（`#263`/`#264` 的 golden 基线冻结了顺序与 append 次数） |
 | 非终态收口已有先例（不落终态、run 逻辑上仍开着） | `_terminal_paused`（`#312`）；恢复扫描给悬空 run 补 `run/interrupted`（`03 §5`） |
 | `detect_dangling` 只认"有请求无结果" | 恢复期合成的 `tool/result`（`Session.resume`，`_mark_dangling=True`）就是 `02 §5.4` 第 1 条里的**恢复分类**，故它不再算悬空 |
@@ -60,10 +60,10 @@ blocked 状态在 SSE/WS/CLI/Web 上的**渲染**（客户端票）；暂停 / �
 
 | # | 谓词（`02 §5.4`） | 判据 | blocker kind |
 | --- | --- | --- | --- |
-| 1 | 没有已接纳但缺结果或恢复分类的工具调用 | `derive.collect_dangling(events)` 非空 | `dangling_tool` |
+| 1 | 没有已接纳但缺结果或恢复分类的工具调用 | `derive.detect_dangling(events)` 非空 | `dangling_tool` |
 | 2 | 没有未决的 `ApprovalRequest` | `session/approval.unresolved_approval_ids(events)` 非空（`approval_id` 维度配对：requested 减 resolved） | `unresolved_approval` |
 | 3 | 没有活动或待恢复的子 Agent | `agent/delegation-started` 减 `agent/delegation-finished`（`child_session_id` 维度）非空 | `active_child` |
-| 4 | 没有 pending / unknown 的 Ledger 记录 | 账本行 `state ∈ {PENDING, RUNNING, UNKNOWN}` | `unsettled_operation` |
+| 4 | 没有 pending / unknown 的 Ledger 记录 | 账本行 `state ∈ {PENDING, RUNNING, UNKNOWN}`（`RUNNING` 也算：它同样不是"已结清"） | `unsettled_operation` |
 | 5 | 没有 pending 的 reconcile 操作 | 账本行 `state is NEED_RECONCILE` **或** 带"副作用未证"标记（`storage.needs_reconcile`） | `pending_reconcile` |
 | 6 | 最新被接纳的模型决策不再请求新工具调用 | 调用方传入的 `new_tool_calls` 为真 | `new_tool_calls` |
 
@@ -71,8 +71,10 @@ blocked 状态在 SSE/WS/CLI/Web 上的**渲染**（客户端票）；暂停 / �
 它们描述的是"这个会话里还有没有未结清的世界状态"。按 run 过滤会把上一个执行留下的欠账
 放行成"本次 run 完成"——正是 `03 §5`「对账优先于恢复」要挡住的事。谓词 4 与 5 的分界不是
 重复实现：4 = 未定 reconcile 状态的在途 / 未知行（`07 §6`：`PENDING` 可证明"没开始"，
-但"没开始"≠"已结清"，完成闸门照样挡住它），5 = 已进对账流程的欠账。两者的**并集**恰好是
-服务层恢复闸门用的 `storage.needs_reconcile`（`#315`），三个读者读同一份落盘事实。
+但"没开始"≠"已结清"，完成闸门照样挡住它），5 = 已进对账流程的欠账。两者的**并集严格覆盖**
+服务层恢复闸门用的 `storage.needs_reconcile`（`#315`）——它**故意不含 `PENDING`**（"还没开始"
+不欠对账、可重执行），而完成闸门连 `PENDING` 一起挡；三个读者读同一份落盘事实，判据各自
+如实收窄，不是同一把尺子。
 
 **没有 Operation Ledger 的部署**（`executor.operation_ledger is None`）：谓词 4/5 空真（没有行
 可查），报告照常给出。这是"证明账本里没有欠账"的诚实读数，不是豁免。
@@ -94,7 +96,7 @@ blocked 状态在 SSE/WS/CLI/Web 上的**渲染**（客户端票）；暂停 / �
 `02 §5.4` 的原话是"调用它**之前** MUST 先证明六条"——所以非静止时 policy **根本不被调用**，
 "域策略绕过 quiescence / 权限 / 账本检查"在实现上不可能发生（不是靠约定，是靠调用图）。
 
-### D3 — 不静止的表示：**不落任何事件**，保持未解 owner 活动
+### D3 — 不静止的表示：**blocked 臂零写入**，保持未解 owner 活动
 
 `02 §5.4` 给的三条出口里，本票选第一条（"保持未解 owner 活动"），因为另外两条在该时点都
 没有准确的载体：
@@ -107,9 +109,16 @@ blocked 状态在 SSE/WS/CLI/Web 上的**渲染**（客户端票）；暂停 / �
 - `run/interrupted` 是**崩溃恢复态**（`03 §5` 点名的唯一产生者是启动扫描），运行期自己写
   它等于伪造一次崩溃。
 
-所以 blocked 收口是：**本次执行正常结束，但不写任何 SessionEvent、不落终态**。逻辑 run 仍开着，
-未解 owner（悬空调用 / 未决审批 / 子会话 / 账本行）**原样留在 durable 状态里**，这就是它准确
-的表示。可观察面三处：
+所以 blocked 收口是：**本次执行正常结束，blocked 臂自己不写任何 SessionEvent、不落终态**。
+逻辑 run 仍开着，未解 owner（悬空调用 / 未决审批 / 子会话 / 账本行）**原样留在 durable 状态里**，
+这就是它准确的表示。
+
+写清边界（两轴审查订正）：走到闸门之前，本轮**已经**按既有的稳定边界落了这一步的
+`model/completed` 与 `MODEL_COMPLETED` checkpoint（关掉 `defer_model_event` 的那一支恰好就是
+"模型不再请求工具"这一步）。"零写入"说的是**闸门这个臂**——它不追加终态、不推 reconcile、
+不改账本、不写 Checkpoint、不做记忆形成；不是"这次执行在 durable 面上没有痕迹"。
+
+可观察面三处：
 
 1. `AgentRunResult.status = STATUS_QUIESCENCE_BLOCKED` + `reason`（进程内调用方，如子 run 的
    `provider.py`、CLI）；
@@ -167,7 +176,9 @@ class CompletionDecision:
 
 - **确定性用例**（`tests/agent/test_completion_quiescence.py`）：六条谓词各自独立阻断 +
   组合阻断 + 全部静止后默认策略接受且**恰一条** `run/completed` + 自定义拒绝策略（不改
-  quiescence 状态：账本与事件流逐字节不变）+ 结清后重入通过 + 单终态。
+  quiescence 状态：账本与事件流既有的那一段逐字节不变，本次执行只追加自己的 loop 事件）
+  + 结清后重入通过 + 单终态。另有取消审批的回归钉（P1：取消不许留下配不上
+  `permission/resolved` 的请求，否则会话被永久锁住）。
 - **纯函数用例**（同文件）：`collect_quiescence_report` 的每条 kind 与 kind 组合、`reason` 的
   确定性、空真（无账本）分支。
 - **既有契约不回退**：`tests/agent/test_event_sequence_golden.py`（冻结的顺序与 append 次数）、
@@ -176,7 +187,9 @@ class CompletionDecision:
   + 生产账本，**同一会话三条腿**——
   1. 静止 ⇒ 收口（并断言 `run/completed` 之前该次调用的 `tool/result` 已 durable、账本行已终态）；
   2. 真实执行域产出一条未结清 owner（生产 `BashTool` 跑一个先落副作用、再睡过工具超时的脚本
-     ⇒ `UNKNOWN` + 未证标记），同会话下一次真实执行被拒收口，且 owner 行逐字段不变；
+     ⇒ `UNKNOWN` + 未证标记；脚本**追加**写哨兵 ⇒ "副作用只发生一次"是可数的，不是形状判据），
+     该腿**不落任何** `tool/call` / `tool/result` / `tool/output_delta`（逐条核，不靠注释自证），
+     同会话下一次真实执行被拒收口，且 owner 行逐字段不变；
   3. 按 classify（`UNKNOWN`→`NEED_RECONCILE`）→ adjudicate（→`SUCCEEDED`，裁决内容覆盖未证
      标记）两步结清 ⇒ 重入通过。
   断言面另外要求**独立重算**（不经过 Runtime 的纯函数对同一份 durable 事实复读）与"摘掉账本
@@ -203,3 +216,24 @@ class CompletionDecision:
 4. **`PENDING` 行也算 blocker**（D1 表第 4 条）：`07 §6` 说它"能证明尚未启动、可按策略重执行"，
    但那句话的宾语是**重执行**，不是**完成**。一个还没开始的调用同样说明"这次 run 没有把
    它该做的事做完"。
+5. **审批类 blocker 的结清面只有一半**（两轴审查 P1 的残余）：闸门是会话级的，而一条配不上
+   `permission/resolved` 的 `tool/approval-requested` 会让这段会话此后每次 run 都 blocked。
+   两条成因分开处置——
+   - **run 被取消 / 异常退出**：已修。交互式 callback 在非正常退出时按 fail-closed 补一条
+     `permission/resolved(deny)` 并清掉 pending（`session/approval.py`），
+     `test_cancelled_approval_does_not_wedge_the_session` 钉住"取消后闸门不再有 phantom blocker"。
+   - **进程重启**：**仍未修**。审批队列是纯内存的，重启后没有任何写入方能让那条陈旧请求
+     变成 resolved（`/approve` 对不存在的 id 404，后端行为符合冻结契约）。⇒ 需要恢复层
+     （启动扫描，`03 §5` 里 `run/interrupted` 的同一责任域）决定"陈旧请求按 fail-closed 落决议"
+     还是别的语义词。**不在本票范围**：改它要动恢复契约，属恢复票。
+6. **委派树里 blocked 子 run 映射成 `failed`**：`multiagent/provider.py` 只区分
+   `completed` / 其余 → 父看到的是子代理失败，而不是"子会话有未结清工作"。语义上没说错
+   （子确实没完成），但它改变了域流程的父可见行为，而委派侧的正式语义归 `#318`。
+7. **blocked run 在同一进程里不可续跑**：续跑的前提是 `run/paused`（`session/service.py`
+   的 409 判据），而本票刻意不落暂停 ⇒ 同 run 只能等重启扫描补 `run/interrupted`（逻辑上
+   仍在途的 run 被标成崩溃恢复态，是"不落暂停"的代价）。客户端目前只能靠"没有终态"推断。
+8. **deadline 过期与闸门同轮相遇时，闸门赢**：deadline 只在循环顶判（`runtime.py`），若模型
+   恰好在这一轮不再请求工具且账本有欠账，收口是 `quiescence_blocked` 而不是
+   `run/paused(deadline)` + `operation/reconcile-required`。两条路都 fail-closed，但**优先级
+   没有被任何规格写明**；先按"闸门在完成边界上、deadline 在循环顶上"实现，写在这里备查
+   （若将来要反过来，改的是两个判据的先后，不是闸门本身）。

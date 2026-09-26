@@ -112,14 +112,16 @@ _UNCERTAIN_SCRIPT_SOURCE = f'''"""Live Gate 完成闸门场景（#316）：副�
 
 它被生产 `BashTool` 调用（MUTATING）⇒ 工具超时收尾时，账上留 UNKNOWN + "副作用未证"：
 `{UNCERTAIN_SENTINEL}` 已经写出来了，谁也证明不了它"没发生"（`07 §7`）。
+**追加**而不是覆盖写：哨兵行数 = 这条命令真跑过几次（`owner_side_effect_happened_exactly_once`
+读的就是它——覆盖写会让"重跑过一次"和"跑过一次"在读数上不可区分）。
 """
 
 import pathlib
 import time
 
-pathlib.Path("{UNCERTAIN_SENTINEL}").write_text("{UNCERTAIN_SENTINEL_LINE}", encoding="utf-8")
+with pathlib.Path("{UNCERTAIN_SENTINEL}").open("a", encoding="utf-8") as handle:
+    handle.write("{UNCERTAIN_SENTINEL_LINE}\\n")
 time.sleep({UNCERTAIN_SLEEP_SECONDS})
-print("finished")
 '''
 
 
@@ -150,7 +152,7 @@ def _safe_read(sandbox: Any, name: str) -> str:
 
 
 def _sentinel_count(sandbox: Any) -> int:
-    """副作用计数：`uncertain.py` 每成功跑一次追加一行（重跑会多一行）。"""
+    """副作用计数：`uncertain.py` 每成功跑一次**追加**一行（重跑会多一行，见脚本源码）。"""
     return _safe_read(sandbox, UNCERTAIN_SENTINEL).count(UNCERTAIN_SENTINEL_LINE)
 
 
@@ -275,9 +277,12 @@ async def _produce_unquiescent_owner(ctx: ScenarioContext, *, ledger: Any, sessi
     所以收尾时的 `UNKNOWN` 是**真的不知道**（不是"其实什么都没发生"）。
 
     为什么不借模型的手造它：见模块 docstring 第 2 条（"让真实模型恰好发一条会超时的命令"
-    不是结构保证）。本调用**不落 SessionEvent** —— `ToolExecutor.execute` 本身不写事件，
-    生产链路里事件由 Runtime 在它外侧写；所以这条 owner 在 durable 面上是**账本事实**，
-    闸门的谓词 4/5 读的正是它（谓词 1 的悬空调用是**另一类**事实，由崩溃恢复链结清）。
+    不是结构保证）。本调用在 durable 面上是**账本事实**：`ToolExecutor.execute` 自己不写
+    `tool/call` / `tool/result`（生产链路里那两个事件由 Runtime 在它外侧写），而这条命令
+    在 sleep 之前不说话 ⇒ 也不会触发 executor 的 `tool/output_delta` 流式落盘。
+    这一点由 `owner_leg_leaves_no_tool_call_events` 逐条核，不靠注释自证——否则
+    "owner 只是一行账本事实"这句话会随脚本改动悄悄失效（悬空谓词会凭空多出一条
+    活过结清的 blocker，第 3 条腿就永远回不来了）。
     """
     from agent_harness.storage import OperationContext
     from agent_harness.tooling import (
@@ -486,6 +491,7 @@ class CompletionQuiescenceGateScenario:
             RUN_PAUSED,
             RUN_STARTED,
             TOOL_CALL,
+            TOOL_OUTPUT_DELTA,
             TOOL_RESULT,
         )
         from agent_harness.storage import (
@@ -631,6 +637,25 @@ class CompletionQuiescenceGateScenario:
                     f"{getattr(owner_result, 'error_code', None)}；"
                     f"副作用计数={legs['owner'].get('sentinel_after_call')}"
                     "（副作用已落地 ⇒ 真的证不出结论，不是「其实没发生」）"
+                ),
+            ),
+            AssertionResult(
+                name="owner_leg_leaves_no_tool_call_events",
+                ok=(
+                    not [
+                        event for event in events
+                        if str(event.data.get("tool_call_id") or "") == OWNER_CALL_ID
+                    ]
+                    and not [event for event in events if event.type == TOOL_OUTPUT_DELTA]
+                ),
+                detail=(
+                    "owner 调用在事件流里留下的条数="
+                    f"{len([e for e in events if str(e.data.get('tool_call_id') or '') == OWNER_CALL_ID])}"
+                    "（`ToolExecutor.execute` 不写 `tool/call` / `tool/result`；"
+                    "一旦它留下了，悬空谓词就会多出一条活过结清的 blocker，第 3 条腿必然失败）；"
+                    f"`tool/output_delta` 总数={len([e for e in events if e.type == TOOL_OUTPUT_DELTA])}"
+                    "（executor 在带 session 执行时会挂输出流，命令一说话就落盘 —— "
+                    "本场景的脚本在 sleep 之前不说话，所以 owner 是**账本事实**）"
                 ),
             ),
             # ── 第 2 条腿：未静止 ⇒ 拒绝收口，且拒绝零副作用 ─────────────────

@@ -137,8 +137,8 @@ def _unfinished_child_sessions(events: Sequence[SessionEvent]) -> list[str]:
 def collect_quiescence_report(
     *,
     events: Sequence[SessionEvent],
+    new_tool_calls: bool,
     operations: Sequence[Operation] = (),
-    new_tool_calls: bool = False,
 ) -> QuiescenceReport:
     """按 `02 §5.4` 的编号顺序聚合六条谓词（顺序固定 ⇒ 报告可逐条断言）。
 
@@ -146,6 +146,10 @@ def collect_quiescence_report(
     Operation Ledger 的本会话行（**没有 Ledger 的部署传空序列**：那是"账本里没有
     欠账"的空真，不是豁免）；`new_tool_calls` = 最新被接纳的模型决策是否请求了工具
     （由调用方给，本函数看不到"最新"这件事）。
+
+    `new_tool_calls` **没有默认值**：默认 False 等于"忘了传就当作静止"，那是把
+    fail-open 写进函数签名（`02 §5.4` 第 6 条恰恰是关于**最新**决策的形状，只有调用点
+    知道）。`operations` 有默认值是因为"这个部署没有 Ledger"是一种合法形态。
     """
     blockers: list[QuiescenceBlocker] = []
 

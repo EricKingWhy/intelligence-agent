@@ -2259,27 +2259,19 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, steps: int, report: QuiescenceReport,
         source: str, reason: str | None,
     ) -> None:
-        """完成闸门未通过臂（`#316` / `02 §5.4` / ADR-0047 D3）：**不写任何东西**。
+        """完成闸门未通过臂（`#316` / `02 §5.4` / ADR-0047 D3）：**本臂零写入**。
 
-        为什么一条事件都不落、也不落终态：`03 §5` 把 `run/paused` 的原因冻结成
-        预算 / deadline / stuck 三类（这里一个都不成立），`run/interrupted` 是启动扫描
-        专有的崩溃恢复态，而 `run/failed` / `run/completed` 都会给一个仍有未结清
-        owner 的逻辑 run 写下终局。`02 §5.4` 给的三条出口里因此选第一条——**保持未解
-        owner 活动**：悬空调用 / 未决审批 / 子会话 / 账本欠账原样留在 durable 状态里，
-        本次执行只是停下来。run 仍是非终态、未暂停 ⇒ 下一次执行走到同一闸门会重新
-        聚合一次（本闸门无缓存，"未解工作结清后重入同一完成闸门"即此）。
+        契约（都在票面 AC 上，代码本身看不出来）：
+        - 不 append 任何 SessionEvent、不落终态、不推 reconcile、不改 Ledger、不写
+          Checkpoint、不做记忆形成——拒绝的同时改状态会让"重入即重试"变成非幂等；
+        - 观测在途句柄（`_Telemetry`）**不**在这里收口：逻辑 run 还没结束，同一 run_id
+          的后续执行会接着写这一段 trace；
+        - 走本臂之前，本轮已按既有稳定边界落了 `model/completed` 与对应 Checkpoint
+          （那一支恰好就是"模型不再请求工具"这一步）——"零写入"说的是本臂。
 
-        **无副作用**是契约，不只是省事（票面 AC：policy 拒绝 MUST NOT 改变 quiescence
-        状态）：本路径不推 reconcile、不改 Ledger、不写 Checkpoint、不做记忆形成。
-        把未证行点成欠账是**暂停收口**（`_raise_reconcile_required`，T7：暂停暗示可恢复，
-        所以必须先把"不知道"落成 durable 事实）与崩溃恢复的职责，不是拒绝的职责；
-        拒绝顺手改状态还会让"重入即重试"变成非幂等操作。
-
-        可观察面三处（都不含凭证或参数值）：本结果的状态与理由、`agent_decision` 诊断行、
-        以及 durable 状态本身（那条未结清的事实）。wire 层对这个状态的专门渲染不在本票。
-
-        观测在途句柄（`_Telemetry`）**不**在这里收口：与暂停臂同理，逻辑 run 还没结束，
-        同一 run_id 的后续执行会接着写这一段 trace（收口它等于替一个仍在途的 run 写结局）。
+        为什么不落终态 / 不落 `run/paused`、为什么选"保持未解 owner 活动"这条出口：
+        ADR-0047 D3。状态与理由进 `AgentRunResult`，另落一条 `agent_decision` 诊断行
+        （`blockers` 只含 kind 与 id，不含任何凭证或参数值）。
         """
         self._log(
             "agent_decision", "完成闸门未通过：未解工作仍然活动，本次执行不落终态",

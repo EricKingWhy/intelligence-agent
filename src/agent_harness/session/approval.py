@@ -114,6 +114,33 @@ class InteractiveCallbackHolder:
                 # 先写入者胜（一次性语义）：采用人类决策，不覆盖。
                 settled = self._queue.resolved_response(approval_id)
                 response = settled if settled is not None else timeout_deny
+        except BaseException:
+            # 等审批的一方再也不会回来了（run 取消 / 进程退出 / 其他异常）：durable 事实
+            # 仍必须**成对**。否则这条 `tool/approval-requested` 永远等不到结清它的写入方，
+            # 而完成闸门谓词 2（`02 §5.4`）读的正是这个配对 —— 一个取消掉的 run 会把整段
+            # 会话锁成永不可完成（`#316` 的离线端到端用例复现过）。
+            # fail-closed：没有批准就是拒绝；`expire` 同时清掉 pending（取消后迟到的 /approve
+            # 拿 409 而不是静默生效）。`expire` 返回 False = 有人先裁决了（与超时分支同一把
+            # 尺子：先写入者胜，绝不覆盖既有决策）。
+            fallback = ApprovalResponse(
+                approved=False,
+                reason="审批等待被中断（run 取消或退出），按 fail-closed 拒绝",
+                decision=PermissionDecision.DENY,
+            )
+            settled = (
+                fallback
+                if self._queue.expire(approval_id, fallback)
+                else self._queue.resolved_response(approval_id) or fallback
+            )
+            self._session.append(
+                "permission/resolved",
+                {
+                    "approval_id": approval_id,
+                    "decision": settled.decision.value,
+                    "reason": settled.reason,
+                },
+            )
+            raise
         self._session.append(
             "permission/resolved",
             {
