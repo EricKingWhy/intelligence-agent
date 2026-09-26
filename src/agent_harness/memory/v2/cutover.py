@@ -642,6 +642,8 @@ async def apply_plan(
     fence = None
     mutation_started = False
     try:
+        if resume and _read_fence(root) != fence_record:
+            raise CutoverRefused("interrupted_cutover_fence_changed_while_acquiring_writer_lock")
         if fence_record is None and (root / CUTOVER_FENCE_FILENAME).exists():
             raise CutoverRefused("cutover_fence_appeared_while_acquiring_writer_lock")
         # Publish the startup fence before the first await while holding the instance lock.

@@ -347,6 +347,69 @@ async def test_interrupted_cutover_stays_fenced_and_can_resume_same_plan(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_stale_resume_cannot_republish_fence_and_delete_new_memory(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    await _seed_databases(settings)
+    fake = FakeMilvus(settings)
+    fake.fail_initialize_once = True
+    _install_fake(monkeypatch, fake)
+    plan = await cutover.build_plan(settings)
+    root = Path(settings.workspace_dir)
+
+    with pytest.raises(RuntimeError, match="simulated adapter outage"):
+        await cutover.apply_plan(
+            settings,
+            expected_plan_sha256=plan["plan_sha256"],
+            report_path=tmp_path / "failed-report.json",
+        )
+    stale_fence = cutover._read_fence(root)
+    assert stale_fence is not None
+
+    await cutover.apply_plan(
+        settings,
+        expected_plan_sha256=plan["plan_sha256"],
+        report_path=tmp_path / "successful-resume-report.json",
+        resume=True,
+    )
+    assert not (root / CUTOVER_FENCE_FILENAME).exists()
+
+    service = await build_memory_v2_service(settings, vector_store=fake)
+    await service.create(
+        make_draft(content="new memory after cutover", source_event_ids=["new-event"]),
+        TrustedMemoryIdentity("tenant", "new-user"),
+    )
+    await service._relay.flush()
+    await service.aclose()
+    dropped_before = list(fake.dropped)
+    real_read_fence = cutover._read_fence
+    reads = 0
+
+    def stale_first_read(workspace_root):
+        nonlocal reads
+        reads += 1
+        return stale_fence if reads == 1 else real_read_fence(workspace_root)
+
+    monkeypatch.setattr(cutover, "_read_fence", stale_first_read)
+    with pytest.raises(
+        cutover.CutoverRefused,
+        match="interrupted_cutover_fence_changed_while_acquiring_writer_lock",
+    ):
+        await cutover.apply_plan(
+            settings,
+            expected_plan_sha256=plan["plan_sha256"],
+            report_path=tmp_path / "stale-resume-report.json",
+            resume=True,
+        )
+
+    assert reads >= 2
+    assert fake.dropped == dropped_before
+    assert len(fake.collections[settings.milvus_collection]) == 1
+    with sqlite3.connect(root / MEMORY_V2_DATABASE_NAME) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM memory_v2_records").fetchone()[0] == 1
+    assert not (root / CUTOVER_FENCE_FILENAME).exists()
+
+
+@pytest.mark.asyncio
 async def test_apply_cli_refuses_to_resume_existing_fence(tmp_path, monkeypatch, capsys):
     settings = _settings(tmp_path)
     fake = FakeMilvus(settings)

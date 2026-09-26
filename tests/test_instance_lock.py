@@ -252,6 +252,74 @@ def test_normal_startup_refuses_active_shared_root_lease_after_primary_releases(
     assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
 
 
+def test_lease_scan_cannot_remove_a_writer_still_registering(tmp_path: Path) -> None:
+    holder = InstanceLock(tmp_path).acquire()
+    ready = tmp_path / "lease-created"
+    proceed = tmp_path / "allow-lease-lock"
+    registered = tmp_path / "lease-registered"
+    finish = tmp_path / "finish-writer"
+    script = f"""
+import time
+from pathlib import Path
+import agent_harness.instance_lock as locks
+
+root = Path({str(tmp_path)!r})
+ready = Path({str(ready)!r})
+proceed = Path({str(proceed)!r})
+registered = Path({str(registered)!r})
+finish = Path({str(finish)!r})
+real_take_os_lock = locks._take_os_lock
+
+def pause_before_lease_lock(fd):
+    if list(root.glob(".instance-shared-root-*.lease")) and not ready.exists():
+        ready.write_text("ready", encoding="utf-8")
+        while not proceed.exists():
+            time.sleep(0.01)
+    real_take_os_lock(fd)
+
+locks._take_os_lock = pause_before_lease_lock
+holder = locks.InstanceLock(root).acquire()
+registered.write_text("registered", encoding="utf-8")
+while not finish.exists():
+    time.sleep(0.01)
+holder.release()
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+    )
+    try:
+        _wait_for_ready(ready)
+        holder.release()
+
+        during_registration = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+        assert during_registration.returncode == 3
+        assert "lease registry is busy" in during_registration.stdout
+        assert len(list(tmp_path.glob(".instance-shared-root-*.lease"))) == 1
+
+        proceed.touch()
+        _wait_for_ready(registered)
+        after_registration = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+        assert after_registration.returncode == 3
+        assert "workspace writer is active" in after_registration.stdout
+    finally:
+        proceed.touch()
+        finish.touch()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
+        holder.release()
+
+    assert proc.returncode == 0, proc.stderr.read() if proc.stderr else ""
+    assert _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""}).returncode == 0
+
+
 def test_escape_hatch_rechecks_fence_after_registering_lease(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv(ALLOW_SHARED_ROOT_ENV, "1")
     real_take_lock = instance_lock_module._take_os_lock

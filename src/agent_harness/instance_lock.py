@@ -37,6 +37,8 @@ import os
 import sys
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -68,6 +70,7 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _WIN_LOCK_OFFSET = 1 << 20
 _SHARED_ROOT_LEASE_PREFIX = ".instance-shared-root-"
 _SHARED_ROOT_LEASE_SUFFIX = ".lease"
+_SHARED_ROOT_REGISTRY_FILENAME = ".instance-shared-root-registry.lock"
 
 #: 进程内注册表：key = 锁文件的规范化真实路径。同进程重复装配返回同一把锁。
 _lock_by_path: dict[str, InstanceLock] = {}
@@ -120,6 +123,24 @@ def _release_os_lock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+@contextmanager
+def _shared_root_registry_lock(root: Path) -> Iterator[None]:
+    """Serialize lease publication with scans that remove stale lease files."""
+    fd = os.open(root / _SHARED_ROOT_REGISTRY_FILENAME, os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
+    try:
+        _take_os_lock(fd)
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                _release_os_lock(fd)
+            except OSError:
+                pass
+        os.close(fd)
+
+
 class InstanceLock:
     """`root` 目录的单实例锁。用法：``lock = InstanceLock(root).acquire()``。
 
@@ -142,27 +163,28 @@ class InstanceLock:
         self._holders = 0
 
     def _create_shared_root_lease(self) -> tuple[Path, int]:
-        path = self._root / f"{_SHARED_ROOT_LEASE_PREFIX}{uuid.uuid4().hex}{_SHARED_ROOT_LEASE_SUFFIX}"
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-        locked = False
-        try:
-            _take_os_lock(fd)
-            locked = True
-            payload = f"pid={os.getpid()}\nstarted_at={datetime.now(UTC).isoformat()}\n"
-            os.write(fd, payload.encode("utf-8"))
-            return path, fd
-        except BaseException:
-            if locked:
+        with _shared_root_registry_lock(self._root):
+            path = self._root / f"{_SHARED_ROOT_LEASE_PREFIX}{uuid.uuid4().hex}{_SHARED_ROOT_LEASE_SUFFIX}"
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            locked = False
+            try:
+                _take_os_lock(fd)
+                locked = True
+                payload = f"pid={os.getpid()}\nstarted_at={datetime.now(UTC).isoformat()}\n"
+                os.write(fd, payload.encode("utf-8"))
+                return path, fd
+            except BaseException:
+                if locked:
+                    try:
+                        _release_os_lock(fd)
+                    except OSError:
+                        pass
+                os.close(fd)
                 try:
-                    _release_os_lock(fd)
+                    path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            os.close(fd)
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+                raise
 
     def _release_shared_root_lease(self) -> None:
         fd, self._shared_lease_fd = self._shared_lease_fd, None
@@ -182,6 +204,15 @@ class InstanceLock:
 
     def assert_no_shared_root_writers(self) -> None:
         """Refuse startup or cutover while another process holds an escape-hatch lease."""
+        try:
+            with _shared_root_registry_lock(self._root):
+                self._scan_shared_root_writers()
+        except OSError as error:
+            raise InstanceLockError(
+                "The shared-root lease registry is busy or unavailable; refusing startup or cutover."
+            ) from error
+
+    def _scan_shared_root_writers(self) -> None:
         pattern = f"{_SHARED_ROOT_LEASE_PREFIX}*{_SHARED_ROOT_LEASE_SUFFIX}"
         for path in sorted(self._root.glob(pattern)):
             try:

@@ -42,6 +42,8 @@ MEM-V2-1 到 MEM-V2-6 已交付 V2 生命周期、持久化、形成、召回与
 
 执行前必须取得和 web/CLI 一致的 `InstanceLock`。`ALLOW_SHARED_ROOT` escape hatch 开启时拒绝执行。操作先将 `.memory-cutover-in-progress` 写入同目录临时文件并 fsync，再原子替换为 fence；正常 web/CLI 启动在 fence 存在时失败关闭。逃生门启动会持有每进程 OS 锁定的 writer lease，并在注册后复查 fence；未开启逃生门的普通启动在取得主锁后也扫描 lease，有活动 writer 时拒绝启动；cutover 在首次异步盘点前再次扫描 lease，有活动 lease 就在任何数据变更前拒绝。异常退出由 OS 释放 lease，后续启动或 cutover 可清理 stale lease。切换前必须先重启旧版本应用进程，使其具备 lease 注册行为。只有 `--resume` 可在目标及 preservation baseline 仍匹配时继续；`--apply` 遇到已有 fence 会拒绝。完成报告落盘后才删除 fence。
 
+Writer lease 从创建到取得 OS 锁期间，与扫描、清理 stale lease 共用短时 registry lock；registry 忙或不可用时扫描失败关闭。`--resume` 取得主锁后还会重读完整 fence，若它在等待主锁期间已改变或被移除，就在任何数据变更前拒绝恢复。
+
 ### D5 — SQLite 旧页与派生索引同时清除
 
 对 allowlist 表以 `BEGIN IMMEDIATE` 清空并提交，启用 `secure_delete`，随后执行 `VACUUM`；若使用 WAL，则要求 truncate checkpoint 完成。最终检查所有 allowlist 行数为零且 SQLite freelist 为零。Milvus 只 drop 已验证的 Memory collection，重建后查询零行；V2 首次形成成功后仍由 SQLite outbox 收敛派生索引。

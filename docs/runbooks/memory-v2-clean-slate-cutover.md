@@ -26,6 +26,8 @@ uv run --locked python -m agent_harness.memory.v2.cutover --dry-run
 
 如果执行因活动 shared-root writer lease 被拒，先正常停止该应用实例，再重新运行 dry-run 并用新 plan hash 执行；不要手动删 lease 或 fence。旧版本进程必须先退出，因为它们不会登记 lease。
 
+Lease 注册与 stale lease 扫描由短时 registry lock 串行化；若报告 registry 忙或不可用，应先确认并停止正在注册的 writer，再重试，不要手动删 registry lock 文件。
+
 用**同一份 dry-run** 输出中的 `plan_sha256` 执行，报告路径必须在 workspace root 外且不存在：
 
 ```powershell
@@ -47,7 +49,7 @@ uv run --locked python -m agent_harness.memory.v2.cutover `
   --report "$env:TEMP\memory-v2-clean-slate-resume-report.json"
 ```
 
-恢复前会比较原始 dry-run baseline、SQLite 目标和 Knowledge/本地保留指纹。任何变化都会拒绝恢复；保留 fence 并调查，不要绕过校验。成功时报告写入后才移除 fence。
+恢复前会比较原始 dry-run baseline、SQLite 目标和 Knowledge/本地保留指纹；取得 workspace 主锁后还会重读完整 fence。任何变化或 fence 已被另一恢复进程移除都会拒绝恢复；若已有成功报告，应先核实结果，不要重放旧的 `--resume`。成功时报告写入后才移除 fence。
 
 ## 回滚边界
 
