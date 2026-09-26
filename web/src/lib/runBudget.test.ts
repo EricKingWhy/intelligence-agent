@@ -469,6 +469,20 @@ describe('deadline 暂停（`#315` T7）—— 判的是时刻，不是"consumed
     expect(ceilingDraftValue(paused, '2099-01-01T00:00:00')).toBeNull();
   });
 
+  it('小写 z 要拒：后端只认大写 Z（`fromisoformat` 对小写抛 ValueError ⇒ 422）', () => {
+    // 这一格极易漏：`Date.parse` **收**小写 z（比 ES 规范宽），所以"交给它判"会放行，
+    // 而后端 `datetime.fromisoformat('…z')` 抛 ValueError ⇒ 一次必然 422 的往返。
+    //
+    // 反向的一格**不**跟：小写 `t` 与空格分隔符后端其实都收（`fromisoformat` 比 RFC
+    // 更宽），前端只是更保守地要求 `T`——那是形状口味，不是"必然被拒"。**只有大小写
+    // 的 Z 这一格是"前端放行 ⇒ 后端 422"的真分叉**（实测：Python 3.13）。
+    const paused = deadlinePaused();
+    expect(deadlineDraftError(paused, '2099-01-01T00:00:00z')).toContain('时区');
+    // 大写 Z 与显式偏移照旧放行（偏移那一支与 z 的大小写无关）。
+    expect(deadlineDraftError(paused, '2099-01-01T00:00:00Z')).toBeNull();
+    expect(deadlineDraftError(paused, '2099-01-01T08:00:00+08:00')).toBeNull();
+  });
+
   it('恢复请求目标给的是字段名 deadline_at（不是某个 ceiling 字段）', () => {
     expect(resumeRequestTarget(deadlinePaused())).toEqual({
       kind: 'deadline', field: 'deadline_at',

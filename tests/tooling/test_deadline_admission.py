@@ -36,10 +36,12 @@ from agent_harness.tooling import (
     Tool,
     ToolCall,
     ToolExecutor,
+    ToolPermission,
     ToolRegistry,
     ToolResult,
     ToolSideEffect,
 )
+from agent_harness.tooling.approval import ApprovalRequest, ApprovalResponse
 from agent_harness.tooling.quota import ToolQuotaWindow
 
 
@@ -92,6 +94,18 @@ class _SlowMutatingTool(_CountingTool):
         self.call_count += 1
         await asyncio.sleep(0.5)
         return ToolResult.success("写完了")
+
+
+class _DangerTool(_CountingTool):
+    """DANGER 权限：在默认 WORKSPACE_WRITE policy 下**必须**走审批闸门。"""
+
+    @property
+    def name(self) -> str:
+        return "danger_op"
+
+    @property
+    def permission(self) -> ToolPermission:
+        return ToolPermission.DANGER
 
 
 class _DeterministicFailTool(_CountingTool):
@@ -179,6 +193,61 @@ async def test_deadline_in_the_past_does_not_burn_the_per_tool_quota(tmp_path: P
 
     accepted = await executor.execute(_call("c2", "count"), tool_quota=window)
     assert accepted.result.ok is True, "同一个配额仍然可用（没有虚耗）"
+    assert tool.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_deadline_is_checked_before_approval_is_ever_asked() -> None:
+    """闸门在审批**之前**：到点的调用不该先弹一次人工审批（ADR-0046 §2 D2）。
+
+    为什么要专门钉住：审批是一条**外部可见、可能阻塞很久**的旁路（真人点按钮）。
+    顺序反了的话，一次注定被拒的调用会把审批人叫醒，而他的批准毫无用处——到点的
+    时刻不会因为这次批准变到未来。判据用"回调有没有被调用"，不是看错误码：错误码
+    只能说明最终报了哪个错，说明不了审批有没有先跑一轮。
+    """
+    tool = _DangerTool()
+    asked: list[ApprovalRequest] = []
+
+    async def _approve(request: ApprovalRequest) -> ApprovalResponse:
+        asked.append(request)
+        return ApprovalResponse(approved=True)
+
+    executor = ToolExecutor(
+        _registry(tool), approval_callback=_approve,
+    )
+
+    execution = await executor.execute(
+        _call("c1", "danger_op"),
+        run_deadline=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    assert asked == [], "到点 ⇒ 审批人根本不该被打扰"
+    assert execution.result.error_code is ErrorCode.DEADLINE_EXCEEDED
+    assert execution.result.error_code is not ErrorCode.PERMISSION_DENIED, (
+        "报 PERMISSION_DENIED 会让模型去改参数/换工具，而真正的问题是时刻已过"
+    )
+    assert tool.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_same_danger_tool_is_approved_and_runs_before_the_deadline() -> None:
+    """反例（证明上一个用例不是"审批路径压根没接通"）：未到点时审批照常发生。"""
+    tool = _DangerTool()
+    asked: list[ApprovalRequest] = []
+
+    async def _approve(request: ApprovalRequest) -> ApprovalResponse:
+        asked.append(request)
+        return ApprovalResponse(approved=True)
+
+    executor = ToolExecutor(_registry(tool), approval_callback=_approve)
+
+    execution = await executor.execute(
+        _call("c1", "danger_op"),
+        run_deadline=datetime.now(UTC) + timedelta(seconds=60),
+    )
+
+    assert execution.result.ok is True
+    assert [request.tool_name for request in asked] == ["danger_op"]
     assert tool.call_count == 1
 
 

@@ -1359,6 +1359,27 @@ def test_projection_keeps_terminal_state_but_still_reports_the_debt() -> None:
     assert projection["reconcile"]["tool_call_ids"] == ["c-1"]
 
 
+def test_projection_keeps_active_for_an_in_flight_run_with_debt() -> None:
+    """在途 run 带着欠账 ⇒ `state` 仍是 `active`，欠账由 `reconcile` 子对象表达。
+
+    这条与上一条的分界是**事实**，不是口味：`active` 说的是"这个 run 现在还在跑"，
+    它是真的（一条 MUTATING 超时留下的未证行不改变这件事——后续轮次照旧在接纳工作）；
+    `needs_reconcile` 覆盖 `state` 的理由是"客户端只看 state 就会给一个点了必然 409 的
+    恢复入口"，而**能恢复**这件事只对暂停成立。2026-09-26 两轴审查的 P3（来源 =
+    Correctness 轴）指出：覆盖条件原本写成"非终态"⇒ 在途 run 会被误报成
+    `needs_reconcile`，客户端据此把一条正在跑的 run 显示成"要人工对账"。
+    """
+    state = derive_run_budget([_started(1, ceiling=None)], RUN_ID)
+
+    projection = project_budget(state, accounting=USAGE_ONLY, reconcile_pending=["c-1"])
+
+    assert projection["state"] == "active", "还在跑就是还在跑"
+    assert projection["reconcile"] == {
+        "state": STATE_NEEDS_RECONCILE, "tool_call_ids": ["c-1"],
+    }, "欠账照样报出来——只是不冒充 run 的状态"
+    assert "reason" not in projection, "在途 run 没有暂停原因可读（与其它非暂停态同形状）"
+
+
 def test_projection_omits_the_reconcile_key_when_nothing_is_owed() -> None:
     """空列表**不落键**：没有欠账与欠账为空不是同一件事。"""
     state = derive_run_budget([_started(1, ceiling=None), _ev(2, RUN_COMPLETED)], RUN_ID)

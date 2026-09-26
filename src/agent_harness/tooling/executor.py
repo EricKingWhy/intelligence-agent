@@ -150,9 +150,10 @@ class _ToolFailure:
         落盘）——不自动重试，交模型决定是否重发（不变量 #14：UNKNOWN 高风险工具
         不盲重跑）。
 
-        注意本路径**不**产生 NEED_RECONCILE：run 内该操作按终态 FAILED 落盘；
-        UNKNOWN / ReconcileCallback 是**崩溃恢复**侧的对应机制
-        （recovery/coordinator.py）——两者同源（未知副作用不盲重跑）不同触发面。
+        注意本路径**是** run 内 `UNKNOWN` + "副作用未证"标记的唯一来源
+        （`_settle_state` 把 MUTATING 超时落成 `UNKNOWN`，见那里的判据）。"要不要因此
+        不再续跑"（`NEED_RECONCILE`）不在执行域决定——那是稳定边界 / 恢复面的判定
+        （ADR-0046 §2 D4）。与崩溃恢复侧同源（未知副作用不盲重跑，不变量 #14）不同触发面。
         """
         retryable = tool.side_effect is not ToolSideEffect.MUTATING
         limit = tool.timeout_seconds
@@ -395,12 +396,13 @@ class ToolExecutor:
             return denied
 
         # -- **接纳点**（`04 §9.1` 的"唯一接纳点"，`#314` 的唯一计数点）--
-        # 到这里为止的拒绝闸门全部通过（registry / args / 配额 / approval / 配置），
+        # 到这里为止的拒绝闸门全部通过（registry / args / deadline / 配额 / approval /
+        # 配置），
         # 再往下就是**为这条规范化逻辑调用做真实工作**（Ledger → 观测 → retry loop）。
         # 所以 `tool_calls` 只在这里记一次——它的携带方式是结果收口时的
         # `budget_delta`（见本文件 `_admitted_delta`），而不是某个内存计数器：
         # 计数器会与落盘事实漂移，事件派生值不会。
-        # 四条 return 分支都**不**在这里，它们各自带 0 增量（准入前被拒不消耗配额）。
+        # 五条 return 分支都**不**在这里，它们各自带 0 增量（准入前被拒不消耗配额）。
 
         if self._operation_ledger is not None:
             assert operation_context is not None
@@ -544,22 +546,18 @@ class ToolExecutor:
     ) -> tuple[OperationState, str | None]:
         """收尾时写进 Ledger 的状态 + 可选的 reconcile 标记（`#315` / `07 §4`、`07 §7`）。
 
-        三种情形，判据只用 `result` 的确定性字段（不解析错误字符串）：
+        判据只用 `result` 的确定性字段（不解析错误字符串）：
 
-        - 成功 ⇒ `SUCCEEDED`（不含标记）；
-        - 确定性失败 ⇒ `FAILED`（既有语义**逐字不变**）；
-        - **MUTATING + TIMEOUT** ⇒ `UNKNOWN` + "副作用未证"标记。这条路径在
-          `_ToolFailure.from_timeout` 里已经写明"命令可能仍在运行，或已部分生效"，
-          即这次尝试**给不出**"没落地"的证据。落 `FAILED` 等于替工具断言它没生效
-          ——那正是 `07 §7` 禁止的（write/edit 不确定 ⇒ NEED_RECONCILE），也是本票
-          Must-NOT 里"不得把未证副作用标成 failed"的落点。
-          为什么是 `UNKNOWN` 而不是直接 `NEED_RECONCILE`：状态机只允许
-          `RUNNING → UNKNOWN → NEED_RECONCILE` 两步链（`storage/sqlite.py`
-          的迁移表，`07 §4`），"要不要现在就对账"是**稳定边界**（deadline）或
-          崩溃恢复的决定，不是执行域能替上层拍的板。
+        - 成功 ⇒ `SUCCEEDED`（不含标记）；确定性失败 ⇒ `FAILED`（既有语义逐字不变）；
+        - **MUTATING + TIMEOUT** ⇒ `UNKNOWN` + "副作用未证"标记。`_ToolFailure.from_timeout`
+          已经写明这次尝试"给不出没落地的证据"，落 `FAILED` 等于替工具断言它没生效
+          （`07 §7` 禁止）。
+        - **为什么不是直接 `NEED_RECONCILE`**：状态机只允许 `RUNNING → UNKNOWN →
+          NEED_RECONCILE` 两步链（`storage/sqlite.py` 的迁移表），"要不要现在就对账"
+          是稳定边界的决定，不是执行域能替上层拍的板。
 
         `retryable` 不参与本判定：它说的是"要不要在 run 内再试一次"（由重试循环
-        消费），与本行"世界状态是否已知"是两件事。
+        消费），与本行"世界状态是否已知"是两件事。完整机制叙述见 ADR-0046 §2 D4。
         """
         if result.ok:
             return OperationState.SUCCEEDED, None

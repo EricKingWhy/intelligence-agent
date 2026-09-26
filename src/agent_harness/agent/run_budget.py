@@ -132,6 +132,25 @@ def utc_now() -> datetime:
     """
     return datetime.now(UTC)
 
+
+def deadline_reached(deadline_at: datetime | None, *, now: datetime) -> bool:
+    """到点了吗（`#315` / ADR-0046 §2 D1）——**唯一**的边界判据。
+
+    `now >= deadline_at`，到点那一刻就停，不留半格余量："时刻"没有"下一次"可言
+    （与 `consumed vs ceiling` 那类"还能不能再花一点"的判定不同，后者才有差一格的问题）。
+    `deadline_at is None` ⇒ 不设 deadline，永不判"到点"（**不是**"立刻到点"）。
+    形状由请求面 `parse_deadline_at` 卡死成 RFC 3339 UTC、事件回读走 `_deadline_or_none`，
+    所以这里不会再遇到朴素时间。
+
+    为什么抽出来：这条比较在 agent 侧有三处消费者（`pause_trigger` 的准入判定 /
+    `closeout_capacity` / `resume_headroom_ok`），三处各自写一遍就会各自漂移。
+    ⚠ **跨层边界（如实登记，不是遗漏）**：`ToolExecutor` 那道闸门用的是同一个比较但
+    **不复用本函数**——`tooling/**` 不依赖 `agent/**`（工具运行时不该认识 run 预算），
+    两边的一致只能靠"同一语义 + 各自用例"维持（ADR-0046 §2 D2 记了这条边界）。
+    """
+    return deadline_at is not None and now >= deadline_at
+
+
 #: 准入判定的顺序（命中即返回，**只报一个**维度）。turns 在最前：它是
 #: `#308` 起就存在的维度、也是客户端最先配的那个；同一时刻多维度同时到顶时，
 #: 报哪一个不影响客户端的动作（抬高全部到顶的 ceiling 才能继续），所以顺序
@@ -985,10 +1004,8 @@ def pause_trigger(
     `TRIGGER_ORDER` / `closeout_capacity` / `resume_headroom_ok` 的逐维扫描（那些表描述
     "consumed vs ceiling"），它的恢复判据另行实现（见 `resume_headroom_ok`）。
     """
-    if run_limits.deadline_at is not None:
-        moment = now if now is not None else utc_now()
-        if moment >= run_limits.deadline_at:
-            return TRIGGER_RUN_DEADLINE
+    if deadline_reached(run_limits.deadline_at, now=now if now is not None else utc_now()):
+        return TRIGGER_RUN_DEADLINE
     for dimension in RUN_DIMENSIONS:
         if _dimension_reached(dimension, consumed=consumed, limits=run_limits):
             return dimension
@@ -1118,7 +1135,7 @@ def closeout_capacity(
     不发请求，所以它在到点后仍然可用——这正是"暂停必须永远收得了口"的保证。
     """
     moment = now if now is not None else utc_now()
-    if run_limits.deadline_at is not None and moment >= run_limits.deadline_at:
+    if deadline_reached(run_limits.deadline_at, now=moment):
         return False
     return all(
         _dimension_headroom(dimension, consumed=consumed, limits=run_limits)
@@ -1150,12 +1167,13 @@ def resume_headroom_ok(
 
     这是本实现对冻结清单的**收紧**读法（`11 §6.1` 只点名「ceiling 降到已消耗之下 ⇒
     409」）：比该条更严一格，因此不会放过任何冻结文本要求拒绝的请求，只是额外拒绝
-    "恢复了但一轮都跑不了"的请求。收紧的边界如实登记在 tracker（T4 段与 T5 段各一条，
-    T7 段补 deadline 那一条），若产品要放开，改这里一处即可（前端只做展示提示，不做判定）。
+    "恢复了但一轮都跑不了"的请求。收紧的边界如实登记在 `docs/SDD_TICKET_TRACKER.md`
+    的 T4 / T5 / T7 三段（deadline 那一条在 T7），若产品要放开，改这里一处即可
+    （前端只做展示提示，不做判定）。
     """
     if limits.deadline_at is not None:
         moment = now if now is not None else utc_now()
-        if limits.deadline_at <= moment:
+        if deadline_reached(limits.deadline_at, now=moment):
             return False
     return not any(
         _dimension_reached(dimension, consumed=consumed, limits=limits)
@@ -1615,22 +1633,24 @@ def project_budget(
     `state` 取 `03 §5` 冻结词表的原词：暂停态由 `PausedRun.as_projection()` 给
     `paused`，非暂停态给 `active`，终态给**那一个**终态事件的名字
     （`completed` / `failed` / `interrupted`）——不合并成一个 `terminal`：客户端要据此
-    分辨"跑完了"与"炸了"，用一个笼统词就得自己再去翻事件。词表里另有 `needs_reconcile`，
-    本链还没有把它落成 run 事件的入口（对账链归 `#305` 侧的后续票），所以这里**产不出**
-    它——不产不等于可以拿别的词顶替。
+    分辨"跑完了"与"炸了"，用一个笼统词就得自己再去翻事件。词表里的 `needs_reconcile`
+    只有一个来源：下面的 `reconcile_pending` 覆盖（`#315`），且只覆盖**暂停态**。
     唯一的例外是 `none`：会话里**一个 run 都没有**时不存在 run 状态可言，冻结词表不为
     这种情形留词；本投影用 `none` 表示"无可投影的 run"，并把这一条登记在此（它与
     `active` 的区别是测试与客户端都要认得的）。
 
     `reconcile_pending`（`#315`）：本 run 在 Operation Ledger 上**仍欠着对账**的
     tool_call_id 列表。由调用方查账本得出——本函数是纯派生投影，不碰存储（同
-    `local_fuse` 的分工）。非空时的两条读法：
+    `local_fuse` 的分工）。非空时一律附 `reconcile` 子对象，而 `state` 只在**暂停态**
+    被它覆盖成 `needs_reconcile`（`03 §5`）：
 
-      * run **未终态** ⇒ `state` 报 `needs_reconcile`（`03 §5`），并附 `reconcile`
-        子对象。这是**覆盖**而非替换：`reason` / `trigger_dimension` / `continuation`
-        照旧在——"为什么停"与"停了之后欠了什么"是两件事，都要能看见。覆盖的理由是
-        客户端只看 `state` 就会把这条 run 当普通暂停，给出一个点了必然 409 的恢复
-        入口（`03 §5`：对账优先于恢复），状态词是唯一的那个刹车灯。
+      * run **暂停** ⇒ `state` 报 `needs_reconcile`。这是**覆盖**而非替换：
+        `reason` / `trigger_dimension` / `continuation` 照旧在——"为什么停"与"停了
+        之后欠了什么"是两件事，都要能看见。覆盖的理由是客户端只看 `state` 就会把这条
+        run 当普通暂停，给出一个点了必然 409 的恢复入口（`03 §5`：对账优先于恢复），
+        状态词是唯一的那个刹车灯。
+      * run **在途** ⇒ `state` 仍是 `active`（它确实还在跑：一条 MUTATING 超时留下的
+        未证行不改变这件事），欠账由 `reconcile` 子对象表达。
       * run **已终态** ⇒ `state` 保持终态名（`completed` 是既成事实，不能因为账本上
         另有一笔欠账就把它报成没跑完），`reconcile` 子对象照旧出现，让"这个会话还欠
         一笔对账"有地方可读。
@@ -1655,7 +1675,12 @@ def project_budget(
             "state": STATE_NEEDS_RECONCILE,
             "tool_call_ids": sorted(reconcile_pending),
         }
-        if state.terminal_type is None:
+        # **只有暂停态**才覆盖 `state`：那个理由（"客户端只看 state 就会给出一个点了
+        # 必然 409 的恢复入口"）只对暂停成立。在途 run 报 `active` 才是事实——它确实
+        # 还在跑（一条 MUTATING 超时留下的未证行不改变这一点）；已终态的 run 报它自己
+        # 那个终态名（`completed` 是既成事实）。两种情形下 `reconcile` 子对象照旧出现，
+        # 欠账照样看得见。
+        if state.paused is not None:
             projection["state"] = STATE_NEEDS_RECONCILE
     projection["enforcement"] = accounting.as_projection()
     return projection
@@ -1728,11 +1753,9 @@ def deterministic_continuation(
     账目**未知**的维度在文案里写"未知"而不是 0（`11 §6.1`：不可得 ≠ 0；这里的一句
     "已花 0 元"会直接骗到正在决定要不要继续的人）。
 
-    `blocked_by`（`#315`）：**暂停收口时已经确证**的额外阻塞项，由调用方给出
-    （今天唯一的生产者是"存在未 reconcile 的副作用"，见 AgentRuntime 的 deadline
-    边界）。它们进 `blockers` 并且会改写 `next_safe_action`——一个"先对账"的动作
-    **不能**与"抬高 ceiling 后恢复"并列出现：后者会把运行者直接引到一条被 409
-    拒绝的路上（`03 §5`：对账优先于恢复）。
+    `blocked_by`（`#315`）交给 `apply_blocked_by` 统一改写——**模型给的 continuation
+    走的是同一个改写**（见那里的理由）："已确证的阻塞项"是事实，不是某种 continuation
+    来源的装饰。
     """
     items = [event for event in events if event.run_id == run_id]
     tool_results = sum(1 for event in items if event.type == TOOL_RESULT)
@@ -1753,7 +1776,7 @@ def deterministic_continuation(
             f"ceiling={_value_text(ceiling)}；"
             f"恢复请求需带 expected_version 与 resume_basis={RESUME_BASIS_BUDGET_INCREASE}"
         )
-    return {
+    return apply_blocked_by({
         "completed": [
             (
                 f"本逻辑 run 已消耗 {consumed.agent_turns} 个 agent turn、"
@@ -1785,12 +1808,39 @@ def deterministic_continuation(
                 if trigger_dimension != TRIGGER_RUN_DEADLINE
                 else f"{trigger_dimension} 已到点：deadline={_value_text(ceiling)}"
             ),
-            *blocked_by,
         ],
-        CONTINUATION_ACTION_KEY: (
-            _reconcile_first_action(blocked_by) if blocked_by else action
-        ),
-    }
+        CONTINUATION_ACTION_KEY: action,
+    }, blocked_by)
+
+
+def apply_blocked_by(
+    continuation: dict[str, Any], blocked_by: Sequence[str],
+) -> dict[str, Any]:
+    """把**已确证**的额外阻塞项并进一份 continuation（`#315`，两个来源共用）。
+
+    `blocked_by` 今天唯一的来源是 `AgentRuntime._raise_reconcile_required`：
+    "存在未 reconcile 的副作用"。它与 continuation 是**模型给的**还是确定性组装的
+    无关——那件事已经确证了（Ledger 行 + 已落盘事件），不是某种来源才有的装饰。
+
+    ⚠ 这一处是 2026-09-26 两轴审查那个 P1 的**后半**：前半是"闸门不以暂停原因为条件"
+    （见 runtime），后半是"改写不能只发生在确定性那一支"——预算暂停在模型 closeout
+    成功时会走 `CLOSEOUT_MODEL` 分支，若那里不改写，暂停载荷就留着模型写的
+    "提高 ceiling 后恢复"，而那次恢复必被 409 挡死（`03 §5` / ADR-0044 D4 禁止的
+    "暗示可安全续跑"）。
+
+    改写两件事：`blockers` 追加（同一条已存在则不重复追加）、`next_safe_action` 换成
+    `_reconcile_first_action`。返回**新字典**（调用方的对象不被就地改）。
+    """
+    if not blocked_by:
+        return continuation
+    merged = dict(continuation)
+    blockers = list(merged.get("blockers") or [])
+    for item in blocked_by:
+        if item not in blockers:
+            blockers.append(item)
+    merged["blockers"] = blockers
+    merged[CONTINUATION_ACTION_KEY] = _reconcile_first_action(blocked_by)
+    return merged
 
 
 def _reconcile_first_action(blocked_by: Sequence[str]) -> str:

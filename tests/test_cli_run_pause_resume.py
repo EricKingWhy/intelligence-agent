@@ -709,11 +709,10 @@ async def test_quota_rejections_do_not_trip_the_repeated_failure_guard(monkeypat
 def test_resume_hint_gives_a_real_instant_for_the_deadline_dimension():
     """deadline 的提示必须是一条**能照抄**的命令：值给时刻，判据给"未来"。
 
-    自查发现的缺陷（本票引入 `_RESUME_FLAGS["run.deadline_at"]` 之后暴露）：通用拼装会
-    给出 `--run-deadline N（N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮）`
+    为什么 deadline 要单开一条分支：通用拼装会给出
+    `--run-deadline N（N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮）`
     ——值不是数字（是 RFC 3339 时刻），判据也不是"比消耗大"（是"必须是一个未来时刻"）。
-    per-tool 维当初就是因为同类问题（`--run-tool-limit bash N` 跑不起来）单开一条分支，
-    deadline 同理。
+    per-tool 维当初就是因为同类问题（`--run-tool-limit bash N` 跑不起来）单开一条分支。
     """
     hint = resume_hint("sess-42", data={
         **_PAUSE_DATA,

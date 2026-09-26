@@ -238,7 +238,7 @@ def _events(
     预算暂停那一侧）。
 
     `arm="needs_reconcile"` 时按生产顺序组装 Arm B 该有的三件套：对账事件 →
-    （带 blockers 的）`run/paused`，文案与 `runtime._raise_deadline_reconcile` /
+    （带 blockers 的）`run/paused`，文案与 `runtime._raise_reconcile_required` /
     `run_budget._reconcile_first_action` 逐字同形。
 
     第二条腿的收尾形状由模型当下的选择决定（真实运行两种都出现过）：`ending="paused"`
@@ -568,7 +568,7 @@ def test_needs_reconcile_arm_passes_on_a_trajectory_that_names_the_debt(tmp_path
 def test_needs_reconcile_arm_is_red_when_the_debt_is_not_named(tmp_path):
     """Arm B 的语义就是"点名"：continuation 不提欠账 ⇒ 必须判红（不是"也算安全"）。
 
-    这一条同时钉住 `blockers` 的判据是**子串**：`runtime._raise_deadline_reconcile`
+    这一条同时钉住 `blockers` 的判据是**子串**：`runtime._raise_reconcile_required`
     给的是 `工具 '<name>'（tool_call_id=<id>）…` 这样的整句，拿 id 去 `in <list>`
     做的是相等比较，会恒红。
     """

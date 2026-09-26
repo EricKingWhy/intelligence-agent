@@ -177,12 +177,15 @@ export function deadlineInstant(paused: RunPausedInfo): string | null {
  *  为什么自己判时区而不是直接 `Date.parse`：后端 `parse_deadline_at` 对**朴素时间**
  *  （无时区）一律 422——同一份请求在不同机器上代表不同瞬时。`Date.parse` 会把
  *  `2026-09-26T04:30:00` 当本地时间收下，于是前端放行、后端拒——一次必然 422 的往返，
- *  且提示词还是错的（说好的格式其实不合法）。 */
-function parseInstant(raw: string | null | undefined): number | null {
+ *  且提示词还是错的（说好的格式其实不合法）。
+ *
+ *  `Z` 只认**大写**（`#315` 的审查发现）：后端走 `datetime.fromisoformat`，它收 `Z`
+ *  与 `+00:00`、对小写 `z` 抛 `ValueError` ⇒ 422。`Date.parse` 那边反而收小写
+ *  （JS 的实现比 ES 规范宽），所以"交给 Date.parse 判"会正好漏掉这一格。 */function parseInstant(raw: string | null | undefined): number | null {
   if (raw === null || raw === undefined) return null;
   const text = raw.trim();
   if (!text) return null;
-  if (!/(?:[Zz]|[+-]\d{2}:?\d{2})$/.test(text)) return null;
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(text)) return null;
   const ms = Date.parse(text);
   return Number.isFinite(ms) ? ms : null;
 }

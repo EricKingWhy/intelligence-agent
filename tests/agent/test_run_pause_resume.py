@@ -810,6 +810,70 @@ async def test_a_read_only_timeout_at_the_deadline_does_not_claim_reconcile(tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_budget_pause_also_promotes_the_unproven_mutation(tmp_path) -> None:
+    """对账闸门**不以暂停原因为条件**：预算暂停带着未证行时同样点名（`#315`）。
+
+    为什么单列一条（2026-09-26 两轴审查的 P1，来源 = Correctness 轴）：闸门原先只长在
+    deadline 边界（`if reason == deadline`），而**恢复闸门是 session 级的**——它读的是
+    Ledger 上有没有未结清的行，不读暂停原因。于是"预算暂停 + 一条 MUTATING 超时留下的
+    未证行"会落成一个暗示可安全续跑的暂停（载荷里写着"提高 ceiling 后恢复"），而那次
+    恢复必被开工前的 409 挡死——正是 `03 §5` / ADR-0044 D4 禁止的形态。
+
+    这条同时钉住**模型 closeout 那一支**：预算暂停的 closeout 有容量 ⇒ 走 `CLOSEOUT_MODEL`
+    （deadline 那支没容量 ⇒ 恒走确定性 fallback，光看 deadline 用例看不出这里的缺口）。
+    所以本用例既要求"账本被点名"，也要求"模型写的那句'继续第二步'被改写成先对账"。
+    全程**不给 deadline**：这就是"与原因无关"的构造。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    scripted = ScriptedModel([_write_round(1), _continuation_json()])
+    runtime = _runtime(
+        scripted, ceiling=2, operation_ledger=ledger, tools=[_SlowMutatingTool()],
+    )
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "把配置改掉")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED, "这条停的是预算，不是 deadline"
+    assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
+    assert paused.data["closeout_source"] == CLOSEOUT_MODEL, (
+        "有容量 ⇒ 模型给了 continuation ⇒ 走的正是那条曾经漏掉改写的分支"
+    )
+
+    operation = await ledger.get(session.session_id, f"{TOOL_ID}_1")
+    assert operation is not None
+    assert has_unproven_side_effect(operation) is True
+    assert operation.state is OperationState.NEED_RECONCILE, (
+        "RUNNING → UNKNOWN → NEED_RECONCILE 两步链由状态机强制（`07 §4`）"
+    )
+    reconcile_events = [
+        e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED
+    ]
+    assert len(reconcile_events) == 1 and reconcile_events[0].run_id == paused.run_id
+    types = [e.type for e in session.events]
+    assert types.index(OPERATION_RECONCILE_REQUIRED) < types.index(RUN_PAUSED)
+
+    continuation = paused.data["continuation"]
+    assert len(continuation["blockers"]) == 1, (
+        "模型自己写的 blockers 是空的（它认为没什么挡住继续），产品只**追加**已确证的"
+        "那一条——不替模型编一条到顶说明（`02 §5.2`：不许伪造进展），也不把它的空列表"
+        "当成'没有阻塞'"
+    )
+    assert continuation["completed"] == ["已完成第一步"], (
+        "模型写的 completed 照旧：改写只碰 blockers 与 next_safe_action"
+    )
+    blocker = continuation["blockers"][0]
+    assert "slow_write" in blocker and f"{TOOL_ID}_1" in blocker
+    action = continuation[CONTINUATION_ACTION_KEY]
+    assert "先 reconcile" in action
+    assert "提高绝对 ceiling" not in action, (
+        "在 reconcile 解除前那次恢复会被 409 拒——不能指一条走不通的路"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_second_execution_does_not_duplicate_the_reconcile_event(tmp_path) -> None:
     """同一 run 再收口一次：`operation/reconcile-required` 只留一条（`#30` 的老规矩）。
 

@@ -88,9 +88,9 @@
 
 ### D2 — 准入边界：**唯一决定点**在 loop 顶部，三处准入面各自把闸
 
-deadline 的判定函数只有一处（`run_budget.pause_trigger`，deadline **先判**且判据不同：
-`now >= deadline_at` 即到点——到点那一刻就停，不留"正好等于还有一次机会"的缝）；三处准入面
-各自调用它：
+deadline 的判定只有一种语义（`now >= deadline_at` 即到点——到点那一刻就停，不留"正好等于
+还有一次机会"的缝），落成一个共用函数 `run_budget.deadline_reached(deadline_at, now=…)`，
+agent 侧三处消费者共用它（`pause_trigger` / `closeout_capacity` / `resume_headroom_ok`）：
 
 | 准入面 | 闸门位置 | 到点后的行为 |
 | --- | --- | --- |
@@ -99,13 +99,23 @@ deadline 的判定函数只有一处（`run_budget.pause_trigger`，deadline **�
 | ToolCall | `ToolExecutor.execute` **阶段 2.35** | 该调用被拒：`ErrorCode.DEADLINE_EXCEEDED`、`retryable=False` |
 | 子 Agent | 委派是一次 `delegate` **ToolCall**（`DelegateTool`），走同一条 executor 路径 | 同一道闸门：到点后不再签发新 child |
 
+**跨层例外（如实登记）**：`ToolExecutor` 那道闸门**不用** `deadline_reached`，而是拿裸时刻
+（`run_deadline`）做同一个比较——`tooling/**` 不依赖 `agent/**`（工具运行时不该认识 run 预算，
+分层实测确认这条依赖方向不存在）。所以"只有一个判据函数"这句话的准确边界是：**agent 侧
+唯一**，执行域那处是同一语义的第二个实现，两边的一致性由各自用例维持（`#315` 的两组
+用例：`tests/tooling/test_deadline_admission.py` 与 `tests/agent/test_run_pause_resume.py`）。
+
 `ToolExecutor` 里那道闸门的位置是**契约**，不是口味：
 
 - 在 **approval 之前**：一个注定不被接纳的调用不该先弹一次人工审批（审批可能等一个回合，
-  而 deadline 已经过去了）；
+  而 deadline 已经过去了）；判据是"审批回调有没有被调用"，不是最终错误码——错误码只能
+  说明报了哪个错，说明不了审批有没有先跑一轮；
 - 在 per-tool 配额的 `take()` **之前**、**Ledger 建行之前**：所以被拒的调用**不占配额**
   （没有配对的 `release()` 义务）、**没有 Ledger 行**（"从没开始过"不需要对账）、
   `budget_delta` 记显式 0（与 `#314` 的四类早退同一族）。
+
+上述顺序**逐条**有用例钉住（`tests/tooling/test_deadline_admission.py`：到点拒收零副作用 /
+不占配额 / 审批未被询问，外加"未到点时审批照常发生"的反例）。
 
 **与 ADR-0039 的关系**：这里的 `run_deadline` 是一个**准入判据**，不产生第二个 per-attempt
 deadline——`tool.execute` 的超时边界仍由 executor 自己建立（`t0 + tool.timeout_seconds`
@@ -114,14 +124,23 @@ deadline——`tool.execute` 的超时边界仍由 executor 自己建立（`t0 +
 
 ### D3 — 到点后的稳定边界收口：顺序固定，恰好一条 `run/paused`
 
-`AgentRuntime._terminal_paused`（`reason=deadline` 时）依次做四件事：
+`AgentRuntime._terminal_paused`（**任何原因的暂停**都走这一段）依次做四件事：
 
 1. **对账闸门**（见 D4）：把本 run 里"副作用未证"的 Operation 提升到 `NEED_RECONCILE` 并落
    `operation/reconcile-required`。位置在 continuation **之前**——"存在未结清的副作用"是
    continuation 必须如实写出的事实（它要进 `blockers`、并把 `next_safe_action` 从"抬高 ceiling
    后恢复"换成"先 reconcile"）。
+   **闸门不以暂停原因为条件**（⚠ 这条是两轴审查那个 P1 的整改点）：恢复闸门是 **session 级**的，
+   它读 Ledger 上有没有未结清的行，不读 `reason`。所以"预算暂停 + 一条 MUTATING 超时留下的
+   未证行"同样必须被点名——否则那次暂停会落成暗示可安全续跑的形态（载荷里写着"升高 ceiling
+   后恢复"），而恢复必被 409 挡死，正是 `03 §5` / ADR-0044 D4 禁止的。判据只看
+   `storage.needs_reconcile`，不看 reason。
 2. **closeout**：有容量 ⇒ 一次**有界**模型调用产出 continuation；到点后容量恒为没有 ⇒
    **确定性** continuation（只用已持久化事实组装，不伪造进展 / 成功 / 工具结果）。
+   `blocked_by` 的改写对**两个来源都生效**（`run_budget.apply_blocked_by`，⚠ 同一条 P1 的
+   后半）：模型写的那份 continuation 也要被追加 blockers 并改写 `next_safe_action`。deadline
+   暂停没有容量 ⇒ 恒走确定性那一支，只看 deadline 用例看不出这处缺口；预算暂停走的是
+   `CLOSEOUT_MODEL` 那一支。
 3. 落**恰好一条** `run/paused`（durable、**非终态**）并镜像给流消费者。
 4. 本次执行到此收口：**不**落 `run/completed` / `run/failed`，**不**做记忆形成，
    **不**新增 Checkpoint 边界。
@@ -143,15 +162,16 @@ deadline——`tool.execute` 的超时边界仍由 executor 自己建立（`t0 +
 写入者是 `ToolExecutor._settle_state`：**MUTATING + TIMEOUT** ⇒ `UNKNOWN` + 标记。
 理由：`_ToolFailure.from_timeout` 已经写明"命令可能仍在运行，或已部分生效"，即这次尝试
 **给不出**"没落地"的证据；落 `FAILED` 等于替工具断言它没生效（`07 §7` 禁止）。
-**为什么不是直接 `NEED_RECONCILE`**：状态机只允许两步链，"要不要现在就对账"是**稳定边界**
-（deadline）或崩溃恢复的决定，不是执行域能替上层拍的板。
+**为什么不是直接 `NEED_RECONCILE`**：状态机只允许两步链（`RUNNING → UNKNOWN →
+NEED_RECONCILE`），"要不要现在就对账"是**稳定边界**（暂停收口）或崩溃恢复的决定，不是
+执行域能替上层拍的板。
 
 裁决落地时用裁决内容**覆盖**这一格（`_commit_reconcile`）——覆盖即"疑问已解除"，
 所以不需要第二个"清除"标记。读法**宽容**：`reconcile_meta` 缺失 / 非 JSON / 形状不对 ⇒ `False`
 （腐烂的历史数据只让这一项失效，不让整个判定抛错）。
 
-**三个读者读同一份落盘事实**（谁都不另存内存标记）：`AgentRuntime._raise_deadline_reconcile`
-（deadline 稳定边界）、`SessionService._unreconciled_tool_calls`（恢复闸门 + 投影）、
+**三个读者读同一份落盘事实**（谁都不另存内存标记）：`AgentRuntime._raise_reconcile_required`
+（暂停收口，**与 reason 无关**）、`SessionService._unreconciled_tool_calls`（恢复闸门 + 投影）、
 `RecoveryCoordinator.recover` 的裁决收集面。第三处本票同时修了一个**收集面缺口**：
 非悬空但未证的行（tool/call 与 tool/result 都齐、只是那条 result 说"状态未知"）
 旧判据永远看不到，而 resume 闸门读的正是这一份裁决要求。配套地，裁决回填
@@ -167,12 +187,15 @@ deadline——`tool.execute` 的超时边界仍由 executor 自己建立（`t0 +
   self._has_unreconciled_operations(session_id)` ⇒ 先 `recover()`。生产装配的
   `RecoveryCoordinator` **不带** `ReconcileCallback` ⇒ 安全拒绝（`RecoveryConflict` → **409**
   「存在未 reconcile 的副作用」），零副作用。这正是"不盲目重跑高风险副作用"要的结果。
-- **投影**（`project_budget(..., reconcile_pending=…)`）：欠账非空且 run **未终态** ⇒
+- **投影**（`project_budget(..., reconcile_pending=…)`）：欠账非空且 run **处于暂停** ⇒
   `state` 报 `needs_reconcile`（`03 §5` 词表原词）并附 `reconcile` 子对象。这是**覆盖**而非替换：
   `reason` / `trigger_dimension` / `continuation` 照旧在（"为什么停"与"停了之后欠了什么"
   是两件事）。覆盖的理由是客户端只看 `state` 就会把这条 run 当普通暂停，给出一个点了必然 409
-  的恢复入口。run **已终态** ⇒ `state` 保持终态名（`completed` 是既成事实，不能因为账本上另有
-  一笔欠账就报成没跑完），`reconcile` 子对象照旧出现。
+  的恢复入口。run **在途（active）** ⇒ `state` 仍是 `active`（它确实还在跑——一条未证行不改变
+  这件事），欠账由 `reconcile` 子对象表达；run **已终态** ⇒ `state` 保持终态名（`completed`
+  是既成事实，不能因为账本上另有一笔欠账就报成没跑完），`reconcile` 子对象照旧出现。
+  ⚠ 覆盖条件写成"非终态"曾把在途 run 误报成 `needs_reconcile`（两轴审查的 P3）——"能恢复"
+  这件事只对**暂停**成立，所以覆盖也只对暂停成立。
 
 投影的 `reconcile_pending` 由**调用方**查账本得出（`SessionService.budget_projection` 是唯一
 读 Ledger 的一处）——`project_budget` 是纯派生函数，不碰存储（与 `local_fuse` 同一分工）。
@@ -282,9 +305,9 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
 
 | 用例文件 | 条数 | 钉住的事实 |
 | --- | ---: | --- |
-| `tests/tooling/test_deadline_admission.py` | 8 | 到点在 approval / 配额 `take()` / Ledger **之前**被拒；不烧 per-tool 配额；未来 deadline 不改变任何行为；批次层同一条闸门；`_settle_state` 对 MUTATING+超时打"未证"标记、对确定性失败与只读超时不打 |
-| `tests/agent/test_run_budget.py` | 79 | `parse_deadline_at` 的形状（归一化 / 朴素时间 / 畸形值）；deadline 先判且映射到自己的 reason；**同一瞬**不停（`now >= deadline_at` 才停）；到点后 `closeout_capacity` 恒 false；恢复要求严格未来；未点名 ⇒ 沿用旧时刻被拒；continuation 点名新时刻与边界；`blocked_by` 把 reconcile 顶到预算动作之前；投影的 `reconcile` 键（非空落键 / 空不落键） |
-| `tests/agent/test_run_pause_resume.py` | 17 | 稳定边界收口顺序、版本 1→2、快照含 closeout、非终态 |
+| `tests/tooling/test_deadline_admission.py` | 10 | 到点在 approval / 配额 `take()` / Ledger **之前**被拒（含"到点时审批回调根本不被调用"与"未到点时它照常被调用"的正反两条）；不烧 per-tool 配额；未来 deadline 不改变任何行为；批次层同一条闸门；`_settle_state` 对 MUTATING+超时打"未证"标记、对确定性失败与只读超时不打 |
+| `tests/agent/test_run_budget.py` | 80 | `parse_deadline_at` 的形状（归一化 / 朴素时间 / 畸形值）；deadline 先判且映射到自己的 reason；**同一瞬**不停（`now >= deadline_at` 才停）；到点后 `closeout_capacity` 恒 false；恢复要求严格未来；未点名 ⇒ 沿用旧时刻被拒；continuation 点名新时刻与边界；`blocked_by` 把 reconcile 顶到预算动作之前；投影的 `reconcile` 键（暂停态覆盖 / 在途态不覆盖 / 空不落键） |
+| `tests/agent/test_run_pause_resume.py` | 18 | 稳定边界收口顺序、版本 1→2、快照含 closeout、非终态；deadline 与**预算**两条暂停各自把未证行升到 `NEED_RECONCILE` 并改写 continuation（后者走 `CLOSEOUT_MODEL` 分支） |
 | `tests/recovery/test_deadline_restart.py` | 2 | **kill / restart**：已知结果的 mutating 不欠账也不重跑；未知结果的 mutating 拒绝恢复且**永不**重跑（真子进程） |
 | `tests/recovery/test_reconcile.py` | 26 | 裁决链（含"非悬空但未证"的收集面与"只补缺的那一半 `tool/result`"） |
 | `tests/web/test_run_pause_resume_api.py` | 15 | HTTP 面：422（形状）/ 409（状态）分界、`reconcile` 投影、resume 契约 |
@@ -292,7 +315,8 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
 | `tests/live_gate/test_deadline_scenario.py` | 41 | 场景的判定本身（含三条**判红**用例：读错投影键、恢复后零准入、恢复后的不安全收尾） |
 | `tests/agent/test_event_sequence_golden.py` | 243（本票只改 4 行） | golden：deadline 只新增事实，既有会话的序列逐字不变 |
 
-前端：`web/src/lib/runBudget.test.ts`（+97 行）、`web/src/components/PausedPanel.test.tsx`（+60 行）。
+前端：`web/src/lib/runBudget.test.ts`（+97 行，含"小写 `z` 必须被拒"这一格）、
+`web/src/components/PausedPanel.test.tsx`（+60 行）。
 
 ### 5.2 Live Gate（票面 AC 的强制证据）
 
@@ -306,11 +330,30 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
   **两种合法结局在同一次 3/3 内各出现过**（D9 的实测依据）。
 - 被拒的两次运行**同样入库**（不删）：`9496226e7518`（投影键读错 ⇒ TypeError 3/3）、
   `1a88b799bed6`（恢复面判据写成"必须再调工具" ⇒ 2/3）。
+- ⚠ **上述证据产生于审查修复之前的场景代码**：修后场景口径有两处收紧（Arm A 要求账本
+  **非空**、Arm B 的 blockers 判据 `any`→`all`）⇒ 修复批次后**重新跑过 3/3**，读数见 §5.4
+  （旧的这份仍是有效证据——收紧的是"空账本/部分点名也会绿"这两条空泛通道，不影响旧 PASS
+  的结论方向）。
 
 ### 5.3 门禁读数
 
-- Gate-0 六条机械车道：`docs/gate/<sha>.json`（本票集成时那次裸全量运行的落盘读数）。
-- 审查覆盖闸门：`scripts/check_review_coverage.py` 退出 0。
+- Gate-0 六条机械车道：`docs/gate/<sha>.json`（**集成时**那次裸全量运行的落盘读数；本 ADR
+  定稿时该文件尚未产生，不在此处预写数字——§14.10 禁止手抄读数）。
+- 审查覆盖闸门：`scripts/check_review_coverage.py` 退出 0（同上，集成前的**前置条件**，
+  不是写作本文时的既成事实）。
+- 重车道（全量 pytest / vitest / build / e2e）的读数同样来自**可复跑的命令 + 写进集成记录**，
+  不在本文内手抄。
+
+### 5.4 作者红证与变异证据（`#315` 的审查修复轮）
+
+- **红证（变更前的树上）**：`tests/tooling/test_deadline_admission.py` 收集期 ImportError
+  （`has_unproven_side_effect` 不存在）、`tests/recovery/test_deadline_restart.py` 收集期
+  ImportError（`REASON_DEADLINE` 不存在）、前端新增用例中 6 条在旧实现上失败。
+- **变异（隔离副本 `PYTHONPATH=<copy>/src`，主工作树不动）**：6 个变异各自有**不同的失败集**
+  （位置契约 / 标记判据 / 恢复严格未来 / 投影覆盖 / 前端草稿校验 / 预算暂停的闸门条件），
+  其中 M1a 的失败集是 M1b 的真子集（位置契约由"少了就有一格被烧配额"这一条单点钉住），
+  如实登记而不是当成两组独立证据。
+- **修后补审**：两个轴在同一冻结 sha/tree 上复审（互不可替换），每条发现都有对应的改动或用例。
 
 ---
 
@@ -320,10 +363,10 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
 
 1. **reconcile 裁决没有提交面。** `ReconcileCallback` 只在进程内可注入，
    生产装配的 `SessionService.recover()` **不传**它 ⇒ `POST /recover` 遇到第一行
-   RUNNING/UNKNOWN 就 409。后果：deadline 暂停若同时升了 `NEED_RECONCILE`，
-   对 HTTP 客户端是**硬停**——`resume` 409、`recover` 也 409，而"我查过了：它确实落地了 /
-   确实没落地"这句话**没有地方可以说**。拒绝本身是规格要的（`03 §5`、不变量 #14），
-   缺的是裁决入口；本票不新增（属对账链的后续票）。
+   RUNNING/UNKNOWN 就 409。后果：一次暂停若同时升了 `NEED_RECONCILE`（deadline 或预算
+   都算，见 D3），对 HTTP 客户端是**硬停**——`resume` 409、`recover` 也 409，而"我查过了：
+   它确实落地了 / 确实没落地"这句话**没有地方可以说**。拒绝本身是规格要的（`03 §5`、
+   不变量 #14），缺的是裁决入口；本票不新增（属对账链的后续票）。
 2. **已签发的 child 不继承父的 deadline。** `multiagent/provider.py::_run_child` 不向 child
    传 launch 预算，child 在自己的作用域里跑（`LaunchRunBudget()` 默认无 deadline）
    ⇒ 父到点后，一个**在途** child 仍会发出它自己的 Provider 请求。按 ADR-0044 D4 的字面，
@@ -337,3 +380,12 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
    不在这里重复叙述。
 4. **`max_tool_calls`（工具调用**总数**的 ceiling）仍声明不受理**（非空 ⇒ 422）：
    规格只冻结"按名字的显式配额"，总数只观测不设限（ADR-0045 §6.1 同一条登记）。
+5. **Web 的暂停呈现读事件流，不读预算投影。** `runState.ts` 的脉冲与 `PausedPanel` 的数据
+   都来自 `run/paused` 事件（以及 `operation/reconcile-required` 入队的
+   `reconcile_queue`），而 `state=needs_reconcile` 与 `reconcile` 子对象是**投影**这一侧的
+   事实（`GET /api/sessions/{id}/budget`）。后果：一条"暂停 + 欠对账"的 run 在 UI 上仍显示
+   "已暂停"并给出恢复输入，点了必被 409 拒（`03 §5`）。后端那一侧是对的（投影与恢复闸门
+   都按同一判据），缺的是前端把投影当作刹车灯——属前端票，本票只登记。
+6. **模型 closeout 的 `blockers` 只被追加，不被校验。** `apply_blocked_by` 保证"已确证的
+   阻塞项一定在列表里"，但模型仍可能写别的（或写空）——产品侧不替它判断"这条算不算阻塞"
+   （`02 §5.2`：不许伪造进展，也不许替模型编它的自述）。

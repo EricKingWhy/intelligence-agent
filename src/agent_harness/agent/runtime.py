@@ -45,11 +45,11 @@ from agent_harness.agent.guards import (
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
-    REASON_DEADLINE,
     BudgetConsumed,
     LaunchRunBudget,
     RunLimits,
     add_consumed,
+    apply_blocked_by,
     as_run_started_budget,
     build_limits_snapshot,
     build_pause_data,
@@ -1890,10 +1890,12 @@ class AgentRuntime:
 
         顺序（每一条都是契约事实，不是实现口味）：
 
-        1. **对账闸门**（`#315`，只在 `reason=deadline` 时）：本 run 里"副作用未证"的
-           Operation 先提升到 `NEED_RECONCILE` 并落 `operation/reconcile-required`
-           （见 `_raise_deadline_reconcile`）。到点后世界状态可能已经变了，而本次执行
-           正要停下——此时"不知道"必须**落成 durable 事实**，不能只留在进程内存里。
+        1. **对账闸门**（`#315`，ADR-0046 §2 D4）：本 run 里"副作用未证"的 Operation 先
+           提升到 `NEED_RECONCILE` 并落 `operation/reconcile-required`
+           （见 `_raise_reconcile_required`）。**不以暂停原因为条件**——恢复闸门是
+           session 级的，预算暂停带着未点名的未证行同样会被那次 409 挡死。到点后世界
+           状态可能已经变了，而本次执行正要停下——此时"不知道"必须**落成 durable
+           事实**，不能只留在进程内存里。
         2. **closeout**：先看还剩不剩容量（`closeout_capacity`）——剩则用**一次**
            有界模型调用产出 continuation（`closeout_source=model`）；没容量、调用失败
            或产出不合契约 ⇒ 落**确定性** continuation（只用已持久化事实，不伪造进展/
@@ -1916,16 +1918,19 @@ class AgentRuntime:
         session = arms.session
         envelope_step = arms.envelope_step(steps)
         reason = reason_for_dimension(trigger_dimension)
-        # deadline 边界上的对账闸门（`#315` / ADR-0044 D4）：位置在 continuation
+        # 暂停收尾前的对账闸门（`#315` / ADR-0046 §2 D4）：位置在 continuation
         # **之前**——"存在未 reconcile 的副作用"是 continuation 必须如实写出的事实
         # （它要进 blockers 并改写 next_safe_action），不能等 continuation 定稿后
         # 再补一句。返回的是**已提升到 NEED_RECONCILE 的**那些调用（含事件已落盘）。
-        blocked_by: tuple[str, ...] = ()
-        reconcile_events: list[SessionEvent] = []
-        if reason == REASON_DEADLINE:
-            reconcile_events, blocked_by = await self._raise_deadline_reconcile(
-                arms, run_id=arms.run_id, step_id=envelope_step,
-            )
+        #
+        # **不以暂停原因为条件**（2026-09-26 两轴审查的 P1 缺陷，来源 = Correctness 轴）：
+        # 恢复闸门（`session/service.py`）是 session 级、与暂停原因无关的 ⇒ 预算暂停
+        # 若带着一条未点名的未证行，它的 continuation 仍会指示"抬高 ceiling 后恢复"，
+        # 而那次恢复必被 409 挡死——正是 `03 §5` / ADR-0044 D4 禁止的
+        # "暗示可安全续跑的暂停"。所以判据只看账本（`needs_reconcile`），不看 reason。
+        reconcile_events, blocked_by = await self._raise_reconcile_required(
+            arms, run_id=arms.run_id, step_id=envelope_step,
+        )
         consumed_before = self._execution_consumed(
             launch, session, arms.memory_event_start,
         )
@@ -1985,19 +1990,19 @@ class AgentRuntime:
             AgentRunResult(status=STATUS_PAUSED, final_text="", steps=steps),
         )
 
-    async def _raise_deadline_reconcile(
+    async def _raise_reconcile_required(
         self, arms: _TerminalArms, *, run_id: str | None, step_id: int,
     ) -> tuple[list[SessionEvent], tuple[str, ...]]:
-        """deadline 边界上把"副作用未证"的 Operation 提升到 NEED_RECONCILE（`#315`）。
+        """在**任何原因的暂停**收尾前，把"副作用未证"的 Operation 提升到 `NEED_RECONCILE`。
 
         判据只在 `storage.needs_reconcile` 一处（非终态，或带"副作用未证"标记）——
         典型来源是 MUTATING 工具超时：执行域在收尾那一刻就把行留成 `UNKNOWN` 并打上
         标记（`ToolExecutor._settle_state`），因为那次尝试**给不出**"没落地"的证据。
 
         为什么在**本方法**做、而不在执行域顺手做完：执行域只如实记录"我不知道"；
-        "要不要因此不再续跑"是稳定边界的决定（`03 §5`：对账优先于恢复；ADR-0044
-        D4：到点后不得落一个暗示可安全续跑的暂停）。放在这里让整条链只有一个决定点：
-        `到点 ⇒ 暂停 ⇒ 有未证副作用则同时升 NEED_RECONCILE`。
+        "要不要因此不再续跑"是稳定边界的决定（`03 §5`：对账优先于恢复；ADR-0044 D4：
+        不得落一个暗示可安全续跑的暂停）。放在这里让整条链只有一个决定点：
+        `暂停 ⇒ 有未证副作用则同时升 NEED_RECONCILE`。
 
         三件事，顺序固定（Ledger 先于事件——durable 状态先于对它的公告）：
         1. Ledger 推进到 `NEED_RECONCILE`（`RUNNING → UNKNOWN → NEED_RECONCILE`
@@ -2122,7 +2127,16 @@ class AgentRuntime:
         if normalized is None:
             logger.warning("closeout 产出不合契约——回落确定性 continuation")
             return fallback, CLOSEOUT_DETERMINISTIC, [request_event]
-        return normalized, CLOSEOUT_MODEL, [request_event]
+        # 模型给的 continuation 也过 `apply_blocked_by`（`#315`；2026-09-26 两轴审查
+        # 那个 P1 的后半）。**为什么不能在模型分支上省掉**：`blocked_by` 是已确证的事实
+        # （Ledger 行 + 事件都已落盘），而预算暂停的 closeout 走的是**这一支**
+        # （deadline 那支没有容量 ⇒ 恒走确定性 fallback，所以光看 deadline 用例看不出
+        # 这一处缺口）。省掉的话，预算暂停的载荷会留着模型写的"提高 ceiling 后恢复"，
+        # 而那次恢复必被开工前的 409 挡死——`03 §5` / ADR-0044 D4 禁止的
+        # "暗示可安全续跑"。
+        return (
+            apply_blocked_by(normalized, blocked_by), CLOSEOUT_MODEL, [request_event],
+        )
 
     async def _terminal_context_exceeded(
         self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,

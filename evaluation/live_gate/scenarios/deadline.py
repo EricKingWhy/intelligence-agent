@@ -30,7 +30,7 @@
 真实运行、6 次尝试）：到点拒绝的文案当时只写"不要重复提交本调用"，模型的原话是
 "The error says deadline not solved by retry. I should report status briefly."，
 于是恢复后的那一轮**零工具调用**、run 直接 `run/completed`；补上"恢复后继续"那句之后
-形状不变——说明**停顿之后模型没有可见标记**（残余与后续归属见 ADR-0046 §5）。
+形状不变——说明**停顿之后模型没有可见标记**（残余与后续归属见 ADR-0046 §6.1）。
 两件事因此分开钉：
 
 - 产品侧：拒绝文案必须说明"以新的未来时刻恢复后从暂停前进度继续"（`tooling/executor.py`，
@@ -143,7 +143,7 @@ DEADLINE_SECONDS = 30.0
 RESUME_DEADLINE_SECONDS = 30.0
 
 #: 链步数 = 模型决策数下界（见模块 docstring 的信息屏障）。
-#: 40 × 2s = 80s 的纯工具时间 > 两次窗口之和（50s）⇒ 结构上跑不完。
+#: 40 × 2s = 80s 的纯工具时间 > 两次窗口之和（30+30=60s）⇒ 结构上跑不完。
 TRANSITIONS = 40
 
 #: 单步的固定耗时（秒）。它同时是"循环作弊"的防护：把 40 步塞进一次 bash 调用
@@ -568,7 +568,7 @@ class RunDeadlineBoundaryScenario:
 
         - 调用 A：在 deadline **之前**被接纳（`run_deadline` 是个未来时刻）⇒ 命令先落
           副作用、再挂到工具超时 ⇒ 执行器按 `07 §7` 落 `UNKNOWN` + "副作用未证"；
-        - 调用 B：工具超时（3s）已经把墙钟推过那个时刻 ⇒ 接纳闸门拒收
+        - 调用 B：工具超时（5s）已经把墙钟推过那个时刻（接纳窗口只有 3s）⇒ 接纳闸门拒收
           （`DEADLINE_EXCEEDED`、账上**不留行**、脚本没跑 ⇒ 副作用计数不变）。
 
         之后用生产恢复入口（`SessionService.recover`）证明"欠对账 ⇒ 拒绝恢复"，并核对
@@ -760,8 +760,12 @@ class RunDeadlineBoundaryScenario:
         arm = "needs_reconcile" if debt else "safe"
         unreconciled_ok = (
             (
-                # Arm A：账本干净（每一条都是终态）+ 无悬空调用
-                not debt
+                # Arm A：账本干净（每一条都是终态）+ 无悬空调用。
+                # `bool(operations)` 不是装饰：`all(...)` 对**空列表**恒真，账本一行都没
+                # 写进去时这条会空泛通过——"每条都是终态"在没有任何一条时不成其为证据
+                # （2026-09-26 两轴审查的 P2，来源 = Correctness 轴）。
+                bool(operations)
+                and not debt
                 and not dangling_tool_call_ids(events)
                 and all(
                     operation.state in (
@@ -774,14 +778,17 @@ class RunDeadlineBoundaryScenario:
             )
             if arm == "safe"
             else (
-                # Arm B：暂停必须点名这些欠账（事件 + continuation），不是"悄悄带着债停"
+                # Arm B：暂停必须点名这些欠账（事件 + continuation），不是"悄悄带着债停"。
+                # **每一条**欠账都要被点名 ⇒ `all` 不是 `any`：`any` 只要求"至少有一条
+                # 被点名"，两条欠账只点名一条时它会绿——而那正是"悄悄带着债停"的一半
+                # （2026-09-26 两轴审查的 P2，来源 = Correctness 轴）。
                 bool(reconcile_events)
                 and all(str(event.run_id or "") == run_id for event in reconcile_events)
-                # blockers 是**文案**（`runtime._raise_deadline_reconcile` 按
+                # blockers 是**文案**（`runtime._raise_reconcile_required` 按
                 # `工具 '<name>'（tool_call_id=<id>）…` 组装），不是 id 的集合 ⇒ 判据是
                 # **子串**，不是列表成员（`in` 对字符串列表做的是相等比较，写错这一处
                 # 会让本判据恒红而不报错）。
-                and any(
+                and all(
                     any(
                         operation.tool_call_id in str(blocker)
                         or operation.tool_name in str(blocker)
@@ -836,7 +843,7 @@ class RunDeadlineBoundaryScenario:
             # 或 ToolCall），不是"模型用了工具"——后者是模型当下的选择，不是产品契约：
             # 实测（2026-09-26 两次真实运行、6 次尝试）模型在恢复后的那一轮选择直接收尾
             # （`tool/call=0`、Provider 请求 ≥1、`run/completed`），到点暂停在模型看来
-            # 没有可见标记（残余登记见 ADR-0046 §5）。而"新时刻真的把 run 重新打开"这件事
+            # 没有可见标记（残余登记见 ADR-0046 §6.1）。而"新时刻真的把 run 重新打开"这件事
             # 是可证的：环顶的接纳闸门在到点时会暂停整个 run，所以恢复后的那一次请求
             # 本身就是"新窗口在未来且被接纳"的证据。
             new_work_ok = admitted_after_resume >= 1
