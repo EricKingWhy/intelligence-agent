@@ -5611,7 +5611,7 @@ docs/review_ledger.d/` 的最大序号是 **210**，T1 的 `300-d0e2dcb-ec006c7`
 `budget.run.tool_call_limits` 按**已注册**工具名给正整数**绝对**上限，缺省 = 不限（但仍计数）；
 用尽 ⇒ 复用 T4 的暂停生命周期（**可恢复**，不是终态）。
 
-**交付序列**（9 笔：实现 4 + 处置 2 + 证据 2 + 修复 1；父链逐笔显式指定）：
+**交付序列**（10 笔：实现 4 + 处置 2 + 证据 2 + 修复 1 + 记录 1；父链逐笔显式指定）：
 
 | # | commit | 规模 | 内容 |
 | --- | --- | --- | --- |
@@ -5624,6 +5624,7 @@ docs/review_ledger.d/` 的最大序号是 **210**，T1 的 `300-d0e2dcb-ec006c7`
 | 7 | `25186e11` | 证据 | Live Gate **首版证据入库**（`docs/live_gate/20260926T012418-317cf2cb02c9-…`，绑定 `317cf2cb` / tree `2b906371`；ruff 处置后**不再覆盖本树** ⇒ 按 T5 同例保留作原始依据） |
 | 8 | `baf763bc` | 修复 | **权威 ruff 车道抓回的 `RUF023`**：`ToolQuotaWindow.__slots__` 按自然序（一行换序） |
 | 9 | `02b72220` | 证据 | Live Gate **重跑证据入库**（`docs/live_gate/20260926T020152-462c5bd31cb8-…`，绑定 `462c5bd3` / tree `ddaa252c`） |
+| 10 | 本记录笔 | docs | Gate-0 裸全量读数落盘（`docs/gate/9ec35deaa8338e4618c66a540623780fecef9387.json`）+ 本段门禁读数 + 归档同读数订正 + `PHASE_STATUS` 追加读数 |
 
 **两轴独立审查（各一独立只读子代理，读范围即 `718ab562..69a6092` 的 34 文件差）**：
 
@@ -5679,6 +5680,11 @@ per-tool `bash=12/14/12`）在 `RUF023` 处置后**不再覆盖本树** ⇒ 保�
 新文件 `src/agent_harness/tooling/quota.py:42` 的 `RUF023 __slots__ is not sorted` 一直没被这条权威车道看见（与 T5 的 27 条同一形态）。
 处置 = `__slots__` 两项**换序**（纯元组顺序，无逻辑 / 无默认值 / 无 wire 形状变更；**不是**关掉这条 lint）于 `baf763bc`。**代价如实记**：
 `src/**` 一变 ⇒ Live Gate 首版证据与新树无关、**场景重跑**（上表即重跑读数），全量 pytest 同样重跑。该笔**无独立审查轮覆盖**（一行 lint 修复，如实登记）。
+
+**门禁（Gate-0 裸全量，tip `9ec35dea` / tree `658b90b0ad04`）**：**6/6 PASS**，墙钟 **24.96s**（diff-check 0.04 / ruff 0.09 / oxlint 1.44 / tsc 18.66 / guards 3.44 / coverage 1.30），读数落盘
+`docs/gate/9ec35deaa8338e4618c66a540623780fecef9387.json`（`tracked_matches_head=true`、未跟踪清单只 `.zcodeignore`）；bare 运行不带 `--since`
+⇒ 车道 ① 只查工作树，另跑 `git diff --check 718ab562..HEAD` **exit 0** 补上「已提交未推送」那 11 笔的范围；
+覆盖闸门在**同一 tip** 上 **exit 0**（台账 180 行、0 条 ❌）。重车道读数见上面的全量 pytest / vitest 段与 Live Gate 表。
 
 **残余（登记，不阻断）**：① HARD 熔断优先于配额暂停的重叠区（ADR §6.1，刻意，若产品要改变优先级是另一票）；
 ② 畸形计数条目两端显示不同（不可达输入）；③ `take()` 之后的抛点（当前调用链窗口随批次消失）；
