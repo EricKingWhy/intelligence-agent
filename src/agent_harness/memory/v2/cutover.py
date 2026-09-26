@@ -610,10 +610,14 @@ def _report_target(path: Path, workspace_root: Path) -> Path:
 
 
 async def apply_plan(
-    settings: Settings, *, expected_plan_sha256: str, report_path: Path,
+    settings: Settings, *, expected_plan_sha256: str, report_path: Path, resume: bool = False,
 ) -> dict[str, Any]:
     root = _workspace_root(settings)
     fence_record = _read_fence(root)
+    if fence_record is not None and not resume:
+        raise CutoverRefused("interrupted_cutover_requires_resume")
+    if resume and fence_record is None:
+        raise CutoverRefused("no_interrupted_cutover_to_resume")
     current_plan = await build_plan(
         settings, allow_missing_memory_collection=fence_record is not None,
     )
@@ -771,7 +775,10 @@ async def _main(argv: list[str] | None = None) -> int:
             if fence is None:
                 raise CutoverRefused("no_interrupted_cutover_to_resume")
             result = await apply_plan(
-                settings, expected_plan_sha256=fence["plan_sha256"], report_path=args.report,
+                settings,
+                expected_plan_sha256=fence["plan_sha256"],
+                report_path=args.report,
+                resume=True,
             )
         else:
             if not args.confirm_plan_sha256 or not args.report:

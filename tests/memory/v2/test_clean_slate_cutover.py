@@ -325,16 +325,49 @@ async def test_interrupted_cutover_stays_fenced_and_can_resume_same_plan(tmp_pat
     with pytest.raises(InstanceLockError, match="reset is incomplete"):
         InstanceLock(root).acquire()
 
+    with pytest.raises(cutover.CutoverRefused, match="interrupted_cutover_requires_resume"):
+        await cutover.apply_plan(
+            settings,
+            expected_plan_sha256=plan["plan_sha256"],
+            report_path=tmp_path / "apply-must-not-resume.json",
+        )
+    assert (root / CUTOVER_FENCE_FILENAME).exists()
+
     report = await cutover.apply_plan(
         settings,
         expected_plan_sha256=plan["plan_sha256"],
         report_path=tmp_path / "resumed-report.json",
+        resume=True,
     )
 
     assert report["status"] == "completed"
     assert report["preserved_domains_unchanged"] is True
     assert not (root / CUTOVER_FENCE_FILENAME).exists()
     assert fake.dropped == [settings.milvus_collection]
+
+
+@pytest.mark.asyncio
+async def test_apply_cli_refuses_to_resume_existing_fence(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path)
+    fake = FakeMilvus(settings)
+    _install_fake(monkeypatch, fake)
+    plan = await cutover.build_plan(settings)
+    root = Path(settings.workspace_dir)
+    cutover._write_fence(root, plan)
+    monkeypatch.setattr(cutover, "Settings", lambda: settings)
+
+    exit_code = await cutover._main([
+        "--apply",
+        "--confirm-plan-sha256",
+        plan["plan_sha256"],
+        "--report",
+        str(tmp_path / "report.json"),
+    ])
+
+    assert exit_code == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "interrupted_cutover_requires_resume"
+    assert (root / CUTOVER_FENCE_FILENAME).exists()
+    assert fake.dropped == []
 
 
 @pytest.mark.asyncio
@@ -391,7 +424,7 @@ async def test_cutover_refuses_shared_root_writer_before_mutation(tmp_path, monk
 
     monkeypatch.setattr(InstanceLock, "assert_no_shared_root_writers", active_shared_writer)
 
-    with pytest.raises(cutover.CutoverRefused, match="shared_root_workspace_writer_is_active"):
+    with pytest.raises(cutover.CutoverRefused, match="workspace_writer_is_active"):
         await cutover.apply_plan(
             settings,
             expected_plan_sha256=plan["plan_sha256"],

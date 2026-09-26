@@ -14,7 +14,7 @@ SessionEvent、`harness.db` 中的 session metadata/checkpoint、workspace 文�
 
 ## 执行
 
-在已集成 #303 代码的仓库根目录运行。执行前先重启/停止所有旧版本应用进程，确保没有仍在运行但不登记 shared-root lease 的实例。cutover 会取得 workspace `InstanceLock`、原子发布 startup fence，并检查活动 shared-root writer lease；若发现活动 writer，会在数据变更前拒绝执行。`ALLOW_SHARED_ROOT` escape hatch 必须在 cutover 进程中关闭。
+在已集成 #303 代码的仓库根目录运行。执行前先重启/停止所有旧版本应用进程，确保没有仍在运行但不登记 shared-root lease 的实例。未开启逃生门的普通启动若取得主锁后仍发现活动 shared-root lease，会拒绝启动；cutover 会取得 workspace `InstanceLock`、原子发布 startup fence，并再次检查活动 lease，发现活动 writer 会在数据变更前拒绝执行。异常退出留下的 stale lease 会由后续启动或 cutover 清理。`ALLOW_SHARED_ROOT` escape hatch 必须在 cutover 进程中关闭。
 
 先做只读计划：
 

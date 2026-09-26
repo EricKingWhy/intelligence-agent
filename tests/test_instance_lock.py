@@ -221,6 +221,37 @@ def test_escape_hatch_lease_blocks_cutover_until_writer_exits(tmp_path: Path) ->
     assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
 
 
+def test_normal_startup_refuses_active_shared_root_lease_after_primary_releases(
+    tmp_path: Path,
+) -> None:
+    holder = InstanceLock(tmp_path).acquire()
+    ready = tmp_path / "shared-root-ready"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+    )
+    try:
+        _wait_for_ready(ready)
+        assert len(list(tmp_path.glob(".instance-shared-root-*.lease"))) == 1
+        holder.release()
+
+        normal_startup = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+        assert normal_startup.returncode == 3
+        assert "workspace writer is active" in normal_startup.stdout
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+        holder.release()
+
+    next_startup = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+    assert next_startup.returncode == 0, f"{next_startup.stdout}\n{next_startup.stderr}"
+    assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
+
+
 def test_escape_hatch_rechecks_fence_after_registering_lease(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv(ALLOW_SHARED_ROOT_ENV, "1")
     real_take_lock = instance_lock_module._take_os_lock

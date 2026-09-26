@@ -181,7 +181,7 @@ class InstanceLock:
                 logger.warning("清理 shared-root 租约文件失败：%s", path)
 
     def assert_no_shared_root_writers(self) -> None:
-        """Refuse cutover while another process holds an escape-hatch lease."""
+        """Refuse startup or cutover while another process holds an escape-hatch lease."""
         pattern = f"{_SHARED_ROOT_LEASE_PREFIX}*{_SHARED_ROOT_LEASE_SUFFIX}"
         for path in sorted(self._root.glob(pattern)):
             try:
@@ -190,24 +190,26 @@ class InstanceLock:
                 continue
             except OSError as error:
                 raise InstanceLockError(
-                    "A shared-root writer lease cannot be inspected; refusing cutover."
+                    "A shared-root writer lease cannot be inspected; refusing startup or cutover."
                 ) from error
             if not path.is_file() or path.is_symlink() or info.st_nlink != 1:
-                raise InstanceLockError("A shared-root writer lease is invalid; refusing cutover.")
+                raise InstanceLockError(
+                    "A shared-root writer lease is invalid; refusing startup or cutover."
+                )
             try:
                 fd = os.open(path, os.O_RDWR)
             except FileNotFoundError:
                 continue
             except OSError as error:
                 raise InstanceLockError(
-                    "A shared-root writer lease cannot be inspected; refusing cutover."
+                    "A shared-root writer lease cannot be inspected; refusing startup or cutover."
                 ) from error
             try:
                 try:
                     _take_os_lock(fd)
                 except OSError as error:
                     raise InstanceLockError(
-                        "A shared-root workspace writer is active; stop it before cutover."
+                        "A shared-root workspace writer is active; stop it before startup or cutover."
                     ) from error
             finally:
                 os.close(fd)
@@ -217,7 +219,7 @@ class InstanceLock:
                 pass
             except OSError as error:
                 raise InstanceLockError(
-                    "A stale shared-root writer lease cannot be removed; refusing cutover."
+                    "A stale shared-root writer lease cannot be removed; refusing startup or cutover."
                 ) from error
 
     def acquire(self) -> InstanceLock:
@@ -283,6 +285,18 @@ class InstanceLock:
                 self._holders = 1
                 _lock_by_path[self._key] = self
                 return self
+
+            if not _escape_hatch_enabled():
+                try:
+                    self.assert_no_shared_root_writers()
+                except BaseException:
+                    try:
+                        _release_os_lock(fd)
+                    except OSError:
+                        pass
+                    finally:
+                        os.close(fd)
+                    raise
 
             self._fd = fd
             self._holders = 1
