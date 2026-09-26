@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from agent_harness.session.event import (
     PERMISSION_CHANGED,
+    PERMISSION_RESOLVED,
     SESSION_STARTED,
     TOOL_APPROVAL_REQUESTED,
     SessionEvent,
@@ -113,6 +114,44 @@ class InteractiveCallbackHolder:
                 # 先写入者胜（一次性语义）：采用人类决策，不覆盖。
                 settled = self._queue.resolved_response(approval_id)
                 response = settled if settled is not None else timeout_deny
+        except BaseException:
+            # 等审批的一方再也不会回来了（run 取消 / 进程退出 / 其他异常）：durable 事实
+            # 仍必须**成对**。否则这条 `tool/approval-requested` 永远等不到结清它的写入方，
+            # 而完成闸门谓词 2（`02 §5.4`）读的正是这个配对 —— 一个取消掉的 run 会把整段
+            # 会话锁成永不可完成（`#316` 的离线端到端用例复现过）。
+            # fail-closed：没有批准就是拒绝；`expire` 同时清掉 pending（取消后迟到的 /approve
+            # 拿 409 而不是静默生效）。`expire` 返回 False = 有人先裁决了（与超时分支同一把
+            # 尺子：先写入者胜，绝不覆盖既有决策）。
+            fallback = ApprovalResponse(
+                approved=False,
+                reason="审批等待被中断（run 取消或退出），按 fail-closed 拒绝",
+                decision=PermissionDecision.DENY,
+            )
+            settled = (
+                fallback
+                if self._queue.expire(approval_id, fallback)
+                else self._queue.resolved_response(approval_id) or fallback
+            )
+            try:
+                self._session.append(
+                    "permission/resolved",
+                    {
+                        "approval_id": approval_id,
+                        "decision": settled.decision.value,
+                        "reason": settled.reason,
+                    },
+                )
+            except Exception:
+                # 结清写入自己失败（存储故障）时**不能**顶掉原异常：这条 except 分支
+                # 在取消 / 退出的栈上，换掉它会让 runtime 的取消臂不匹配、run 被记成
+                # `run/failed`（`02 §17` 要求取消与失败分开）。代价是这条请求在 durable
+                # 面仍不成对——记 ERROR 供排查，不静默（ADR-0047 §4 残余 5）。
+                logger.exception(
+                    "审批中断时的 fail-closed 结清写入失败：approval_id=%s 在事件流里"
+                    "仍不成对，完成闸门谓词 2 会继续阻断本会话",
+                    approval_id,
+                )
+            raise
         self._session.append(
             "permission/resolved",
             {
@@ -272,6 +311,32 @@ def effective_auto_approve(events: list[SessionEvent]) -> bool | None:
     return declared_auto_approve(events)
 
 
+def unresolved_approval_ids(events: list[SessionEvent]) -> list[str]:
+    """会话里**已请求但没有裁决**的 ``approval_id``（`02 §5.4` 第 2 条的判据，T8 #316）。
+
+    配对键是 ``approval_id``（两个写入者都在这个键上落事件）：``tool/approval-requested``
+    由交互式 callback 在**等待决策之前**落盘，``permission/resolved`` 在决策（或
+    fail-closed 超时）之后落盘——所以"有 requested 无 resolved"恰好是"这次审批还没
+    结论"，与 `PendingApprovalQueue` 的进程内视图同源同义（队列本身不进 SessionEvent，
+    不变量 #4）。
+
+    按事件出现顺序返回（可复现），同一 id 多条 requested 只算一次；缺 ``approval_id``
+    的事件跳过（腐烂数据只让这一项失去判据，不抛错——与 `declared_permission_mode`
+    同一条纪律）。
+    """
+    requested: dict[str, None] = {}
+    resolved: set[str] = set()
+    for event in events:
+        approval_id = event.data.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            continue
+        if event.type == TOOL_APPROVAL_REQUESTED:
+            requested.setdefault(approval_id, None)
+        elif event.type == PERMISSION_RESOLVED:
+            resolved.add(approval_id)
+    return [approval_id for approval_id in requested if approval_id not in resolved]
+
+
 def append_permission_change(session: Session, change: PermissionChange) -> PermissionChange:
     """追加 ``permission/changed``——PERMISSION_CHANGED 的**唯一**写入口（F18-A #282）。
 
@@ -299,4 +364,5 @@ __all__ = [
     "declared_permission_mode",
     "effective_auto_approve",
     "effective_permission_mode",
+    "unresolved_approval_ids",
 ]

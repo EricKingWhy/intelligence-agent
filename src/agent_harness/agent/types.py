@@ -28,6 +28,10 @@ STATUS_COMPLETED = "completed"
 # `run_id` 接回（`02 §5.2` / `03 §3.4`）。T3 迁移期的 `max_steps_exceeded` 终态
 # 随本票消失：撞保险丝不再是失败，而是一次可恢复的暂停。
 STATUS_PAUSED = "paused"
+# 完成闸门未通过（`#316` T8）：本次执行既不落终态也不落 `run/paused`——未解 owner
+# （悬空调用 / 未决审批 / 子会话 / 账本欠账）保持活动，run 逻辑上仍在途（`02 §5.4`
+# 的第一条出口）。理由在 `AgentRunResult.reason`，诊断面另有 `agent_decision` 一行。
+STATUS_QUIESCENCE_BLOCKED = "quiescence_blocked"
 STATUS_CONTEXT_WINDOW_EXCEEDED = "context_window_exceeded"
 # 同错熔断硬终止（ADR-0014 #69）：模型连续 N 次同指纹失败工具调用后，
 # AgentRuntime 强制 end_run(failed)，防止步数/token 烧穿。
@@ -49,11 +53,15 @@ class AgentRunResult:
       continuation 另有事件字段承载，不复用 final_text）。
     - steps: 模型被调用的轮数（不是工具个数）。一个含多个 tool_call 的响应仍算 1 步，
       避免 ceiling 出现 off-by-one。
+    - reason: 非正常收口时的稳定理由（`#316` 完成闸门未通过：quiescence 的
+      `quiescence_blocked:<kind,...>` 或策略自己的串）。正常完成 / 暂停 / 既有失败态
+      为 None——它们各自的理由在事件里，不在这里重复一份。
     """
 
     status: str
     final_text: str
     steps: int
+    reason: str | None = None
 
     @property
     def completed(self) -> bool:
