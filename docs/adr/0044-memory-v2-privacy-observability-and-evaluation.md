@@ -103,6 +103,12 @@ evidence F1 更高者，再以 case ID 稳定打破平局；无合格样例则�
 批准将 LongMemEval 的证据范围从逐 turn 标注扩展至答案相关 session 中的 user turns：此前唯一
 合格样例只形成 Profile，未产生 Milvus 命中；扩展规则让另一个具备合格 user evidence 的样例可供
 真实链路验证。选例证据 F1 门槛与真实回答的 F1 验收相互独立，前者不能替代后者。
+扩展后的真实 LongMemEval smoke 选中 user-evidence F1=0.631579 的样例，但本次未通过：一个
+formation job 因 `embedding_unavailable` 降级、没有提交记忆，Recall@6=0、注入数为 0、回答 F1 为
+0.421053，`chain_verified=false`。runner 报告及随后独立 Milvus 查询都确认临时 collection 已清理；
+报告没有原始问题、答案或对话文本，脱敏检查也未发现这些原文。报告保存在
+`docs/evidence/memory-v2-public-smoke-longmemeval-6224d862.json`。独立 embedding 探针曾成功返回
+1024 维向量，但 smoke 运行期间再次失败；因此 #302 的真实链路验收仍未满足，不能按通过处理。
 LoCoMo 仍只用于非商业内部评测。
 为适配 harness 的 user/assistant 来源权威，LoCoMo 将对话中首位参与者映射为评测 user persona，
 其余参与者映射为非权威 assistant evidence；LongMemEval 保留数据集提供的角色。报告记录这一映射，
