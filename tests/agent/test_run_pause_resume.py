@@ -810,6 +810,37 @@ async def test_a_read_only_timeout_at_the_deadline_does_not_claim_reconcile(tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_budget_pause_points_the_ledger_debt(tmp_path) -> None:
+    """预算暂停的**账本面**：那一行升到 NEED_RECONCILE + 落一条对账事件。
+
+    与下面那条端到端用例分工（两处的变异是不同的检查点，分开钉住才能分别证明）：
+    这一条只看"账本有没有被点名"，不看 continuation 文案——所以它在"改写漏了"这种
+    缺陷下仍然是绿的（那正是它存在的意义：把两种缺陷的失败面分开）。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    scripted = ScriptedModel([_write_round(1), _continuation_json()])
+    runtime = _runtime(
+        scripted, ceiling=2, operation_ledger=ledger, tools=[_SlowMutatingTool()],
+    )
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "把配置改掉")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    operation = await ledger.get(session.session_id, f"{TOOL_ID}_1")
+    assert operation is not None
+    assert has_unproven_side_effect(operation) is True
+    assert operation.state is OperationState.NEED_RECONCILE
+    reconcile_events = [
+        e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED
+    ]
+    assert len(reconcile_events) == 1 and reconcile_events[0].run_id == paused.run_id
+    assert reconcile_events[0].data["tool_call_id"] == f"{TOOL_ID}_1"
+
+
+@pytest.mark.asyncio
 async def test_a_budget_pause_also_promotes_the_unproven_mutation(tmp_path) -> None:
     """对账闸门**不以暂停原因为条件**：预算暂停带着未证行时同样点名（`#315`）。
 
@@ -821,8 +852,8 @@ async def test_a_budget_pause_also_promotes_the_unproven_mutation(tmp_path) -> N
 
     这条同时钉住**模型 closeout 那一支**：预算暂停的 closeout 有容量 ⇒ 走 `CLOSEOUT_MODEL`
     （deadline 那支没容量 ⇒ 恒走确定性 fallback，光看 deadline 用例看不出这里的缺口）。
-    所以本用例既要求"账本被点名"，也要求"模型写的那句'继续第二步'被改写成先对账"。
-    全程**不给 deadline**：这就是"与原因无关"的构造。
+    所以本用例既要求"账本被点名"（另一条用例单独钉），也要求"模型写的那句'继续第二步'
+    被改写成先对账"。全程**不给 deadline**：这就是"与原因无关"的构造。
     """
     ledger = SqliteOperationLedger(tmp_path / "state.db")
     await ledger.initialize()

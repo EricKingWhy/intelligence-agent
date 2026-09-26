@@ -620,6 +620,47 @@ def test_red_clean_ledger_cannot_be_read_as_reconcile(tmp_path):
     assert "final_budget_state" in failed, "没有恢复事件 ⇒ 派生版本仍是 1"
 
 
+def test_red_empty_ledger_cannot_be_read_as_clean(tmp_path):
+    """**空账本**不能算"干净"：`all(…)` 对空列表恒真 ⇒ 一行都没有时必须判红。
+
+    这条钉的是 2026-09-26 两轴审查（Correctness 轴）发现的**空泛通道**：Arm A 的判据
+    里有"每一条操作都是终态"这种全称句，而全称句在零元素上无条件为真。于是"账本一行
+    都没写进去"（例如执行域压根没接 Ledger、或建行那一步静默失败）会被读成"全部收尾
+    干净"——一次真实运行白绿，没有任何东西会报错。
+    """
+    events = _events(arm="safe")
+
+    assertions = _assertions(tmp_path, events, operations=[])
+
+    assert "deadline_outcome_is_safe_or_needs_reconcile" in _failed(assertions)
+
+
+def test_red_every_debt_row_must_be_named_not_just_one_of_them(tmp_path):
+    """**每一条**欠账都要被点名：只点名其中一条 ⇒ 判红（`all` 不是 `any`）。
+
+    同一次审查发现的第二处空泛通道：判据原先是"debt 里**存在**一条被点名"，于是两条
+    欠账只点名一条时它会绿——而那正是"悄悄带着债停"的一半（另半个欠账对运行者不可见，
+    恢复时却同样会被 409 挡住）。造法：轨迹里的 blockers 只点名 `CALL_TWO`（生产形状），
+    但账本上两条都是 `NEED_RECONCILE`。
+
+    ⚠ 第二条欠账必须换一个**工具名**：判据（与生产文案一致）接受"id 命中**或**工具名
+    命中"，两条同名工具会让它们互相"顶替"对方的点名，`all` 与 `any` 就没有区别了
+    —— 这条测试曾经因为这个构造错误而空转（实测：改对了才红）。
+    """
+    events = _events(arm="needs_reconcile")
+    operations = _ops(debt=True)
+    operations[0].state = OperationState.NEED_RECONCILE
+    operations[0].tool_name = "another_tool"
+
+    assertions = _assertions(tmp_path, events, operations=operations)
+
+    failed = _failed(assertions)
+    assert "deadline_outcome_is_safe_or_needs_reconcile" in failed
+    assert "projection_matches_ledger_debt" not in failed, (
+        "投影那一条跟着账本走（两条都报出来）⇒ 红的只能是'没点名'这件事"
+    )
+
+
 def test_red_pause_payload_must_be_a_deadline_pause(tmp_path):
     """暂停字段错（reason / trigger / closeout / resume_requirements / 版本）⇒ 判红。"""
     events = _events(arm="safe")
