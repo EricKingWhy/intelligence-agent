@@ -34,6 +34,8 @@ import {
   postApproval,
   renameProject,
   reorderProjectSession,
+  resumeRunLimitsBody,
+  resumeSession,
   sendMessage,
   startSession,
   createEmptySession,
@@ -1259,5 +1261,45 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     );
     await expect(createEmptySession({ cwd: 'D:/x', auto_approve: true }))
       .rejects.toThrow('task 与 launch=false 互斥');
+  });
+});
+
+describe('resumeSession — 同 run 恢复的 ceiling 形状（`#313` / `#314`）', () => {
+  it('run 维：点名字段 + 绝对值；cost 维传十进制字符串（键是字段名本身）', async () => {
+    const cap = captureFetch();
+    await resumeSession('s1', {
+      run_id: 'run-1',
+      resume_basis: 'budget_increase',
+      budget: {
+        expected_version: 3,
+        run: resumeRunLimitsBody({ kind: 'run', field: 'max_cost_usd', value: '0.30' }),
+      },
+    });
+    expect(cap.calls).toHaveLength(1);
+    expect(cap.calls[0].url).toBe('/api/sessions/s1/resume');
+    expect(cap.calls[0].body).toEqual({
+      run_id: 'run-1',
+      resume_basis: 'budget_increase',
+      budget: { expected_version: 3, run: { max_cost_usd: '0.30' } },
+    });
+  });
+
+  it('工具配额维：写进 `tool_call_limits.<工具名>`，且**不带**任何 `max_*` 键', async () => {
+    const cap = captureFetch();
+    await resumeSession('s1', {
+      run_id: 'run-1',
+      resume_basis: 'budget_increase',
+      budget: {
+        expected_version: 3,
+        run: resumeRunLimitsBody({ kind: 'tool', tool: 'glob', value: 5 }),
+      },
+    });
+    const body = cap.calls[0].body as {
+      budget: { run: Record<string, unknown> };
+    };
+    // per-tool 的关键是**逐键合并**的语义（后端 `run_budget.resume_limits`）：点名哪个
+    // 工具就抬哪个，未点名的保留——所以这里只带那一个键，剩下的由后端沿用。
+    expect(body.budget.run).toEqual({ tool_call_limits: { glob: 5 } });
+    expect(body.budget.run).not.toHaveProperty('max_agent_turns_total');
   });
 });

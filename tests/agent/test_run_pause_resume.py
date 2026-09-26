@@ -61,7 +61,13 @@ from agent_harness.session import (
 )
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import SqliteOperationLedger
-from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
+from agent_harness.tooling import (
+    ErrorCode,
+    Tool,
+    ToolExecutor,
+    ToolRegistry,
+    ToolResult,
+)
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -93,11 +99,13 @@ def _runtime(
     model, *, ceiling: int | None, consumed: int = 0, run_id: str | None = None,
     version: int = 1, local_fuse: int = 500,
     operation_ledger: SqliteOperationLedger | None = None,
+    tool_call_limits: dict[str, int] | None = None,
 ) -> AgentRuntime:
     """一个执行实例：`local_fuse` 是本实例的保险丝，`run_budget` 是启动时的 run 账本。
 
     `operation_ledger` 给了就按**生产接线**挂上（`tracks_operations=True`）——那会让
     `model/completed` 走到延迟落盘分支，是另一条时序（不是配置口味）。
+    `tool_call_limits`（`#314`）是 run 档的 per-tool 绝对配额（未配 ⇒ 该工具不限）。
     """
     registry = ToolRegistry()
     registry.register(_EchoTool())
@@ -106,7 +114,11 @@ def _runtime(
         executor=ToolExecutor(registry, operation_ledger=operation_ledger),
         max_agent_turns=local_fuse, local_fuse_source=SOURCE_DEPLOYMENT,
         run_budget=LaunchRunBudget(
-            version=version, limits=RunLimits(max_agent_turns_total=ceiling),
+            version=version,
+            limits=RunLimits(
+                max_agent_turns_total=ceiling,
+                tool_call_limits=tool_call_limits or {},
+            ),
             consumed=BudgetConsumed(agent_turns=consumed), run_id=run_id,
         ),
     )
@@ -187,6 +199,10 @@ async def test_model_closeout_is_a_model_request_not_an_accepted_turn(tmp_path) 
     assert paused.data["closeout_source"] == CLOSEOUT_MODEL
     assert paused.data["consumed"] == {
         "agent_turns": 2, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+        # `#314`：两轮各一条被接纳的 echo 调用（各一次尝试）——预算是**运行**事实，
+        # 与幂等无关：被接纳就算，哪怕工具这次是读操作。
+        "tool_calls": 2, "tool_attempts": 2,
+        "tool_calls_by_tool": {"echo": 2}, "tool_attempts_by_tool": {"echo": 2},
     }, "四维快照：2 个被接纳的轮 + 3 次真实请求（2 个普通轮 + 1 次 closeout）"
     assert paused.data["limits"]["run"]["max_agent_turns_total"] == 3
     assert paused.data["continuation"] == {
@@ -322,6 +338,9 @@ async def test_no_model_call_at_all_when_the_closeout_has_no_capacity(tmp_path) 
     assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
     assert paused.data["consumed"] == {
         "agent_turns": 1, "model_requests": 0, "total_tokens": 0, "cost_usd": "0",
+        # `#314`：工具维同源（启动上下文里就是空的 0/{}，本执行没有工具批次）
+        "tool_calls": 0, "tool_attempts": 0,
+        "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
     }, "快照沿用启动上下文，不重数（本执行一个请求都没发 ⇒ 空和真的是 0）"
     assert paused.data["budget_version"] == 2
     assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
@@ -460,6 +479,9 @@ async def test_local_fuse_counts_the_current_execution_not_the_run_ledger(tmp_pa
     # run 账本：启动 3 + 本执行 2 个普通轮 = 5；closeout 那一次是 model_requests
     assert paused.data["consumed"] == {
         "agent_turns": 5, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+        # `#314`：工具维只数**本执行**接纳的调用（启动上下文里的工具账是空的）
+        "tool_calls": 2, "tool_attempts": 2,
+        "tool_calls_by_tool": {"echo": 2}, "tool_attempts_by_tool": {"echo": 2},
     }
     assert paused.data["closeout_source"] == CLOSEOUT_MODEL
     assert paused.data["limits"]["run"]["max_agent_turns_total"] is None
@@ -514,3 +536,72 @@ async def test_paused_stream_ends_cleanly_on_the_pause_frame(tmp_path) -> None:
     assert frames[-1].type == RUN_PAUSED
     assert frames[-1].seq is not None, "暂停是 durable 事实（要参与重连重放）"
     assert [f.type for f in frames if f.type in (RUN_COMPLETED, RUN_FAILED)] == []
+
+
+# ── `#314` T6：per-tool 配额的 run 生命周期 ──────────────────────────────
+
+
+def _two_call_round(idx: int) -> AIMessage:
+    """同一轮里对同一工具发**两条**调用（一次多调用批次的最小形状）。"""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"id": f"{TOOL_ID}_{idx}a", "name": "echo", "args": {"text": f"t{idx}a"}},
+            {"id": f"{TOOL_ID}_{idx}b", "name": "echo", "args": {"text": f"t{idx}b"}},
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_tool_quota_blocks_the_extra_call_and_pauses_the_run(tmp_path) -> None:
+    """同一批两条 echo、配额 1：第二条在**接纳前**被拒，run 按 T4 的生命周期暂停。
+
+    票面（`#314`）要的三件事在同一条时间线上：
+
+    - 配额是**逻辑调用**的绝对上限（不是"每轮一次"）：同一批的第一条照常执行、
+      第二条被拒——判定在接纳点之前，所以拒绝**不**消耗配额；
+    - 拒绝可审计：结果里 `error_code=BUDGET_EXHAUSTED`，同一条结果的
+      `budget_delta.tool_calls=0`（"没消耗"是记录里的字面事实）；
+    - 用尽 ⇒ 复用 T4 的暂停生命周期（一条非终态 `run/paused`），而**不是**把 run
+      判失败；`trigger_dimension` 指名那一维 `run.tool_call_limits.echo`。
+    """
+    scripted = ScriptedModel([_two_call_round(1), _continuation_json()])
+    runtime = _runtime(scripted, ceiling=3, tool_call_limits={"echo": 1})
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "同一轮里把 echo 调两次")
+
+    assert result.status == STATUS_PAUSED
+    results = [e for e in session.events if e.type == TOOL_RESULT]
+    assert len(results) == 2, "两条 tool/call 各有自己的结果（保序配对）"
+    payloads = [json.loads(e.data["content"]) for e in results]
+    assert [p["ok"] for p in payloads] == [True, False]
+    assert payloads[1]["error_code"] == ErrorCode.BUDGET_EXHAUSTED.value
+    assert [e.data["budget_delta"]["tool_calls"] for e in results] == [1, 0]
+
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["trigger_dimension"] == "run.tool_call_limits.echo"
+    assert paused.data["consumed"]["tool_calls"] == 1
+    assert paused.data["consumed"]["tool_calls_by_tool"] == {"echo": 1}
+    assert paused.data["limits"]["run"]["tool_call_limits"] == {"echo": 1}
+    assert [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)] == []
+
+    # ── 续跑：抬高**绝对**配额（不是增量）⇒ 同一工具再次可用，run 走到完成 ──
+    resumed = ScriptedModel([_tool_round(2), AIMessage(content="做完了")])
+    resumed_runtime = _runtime(
+        resumed, ceiling=5, consumed=paused.data["consumed"]["agent_turns"],
+        run_id=paused.run_id, version=paused.data["budget_version"] + 1,
+        tool_call_limits={"echo": 2},
+    )
+    final = await resumed_runtime.run(session, None)
+
+    assert final.status == STATUS_COMPLETED
+    assert [e.type for e in session.events].count(RUN_PAUSED) == 1, (
+        "抬高配额之后不再触发暂停：计数是**累计**的（1 + 1 = 2 = 新 ceiling）"
+    )
+    state = derive_run_budget(session.events, paused.run_id)
+    assert state.consumed.tool_calls_by_tool == {"echo": 2}
+    assert state.consumed.tool_attempts_by_tool == {"echo": 2}
+    assert state.consumed_turns == 3, (
+        "恢复不重置任何 counter（`#314` 沿用 T4 的账）：暂停前 1 轮 + 续跑 2 轮"
+    )

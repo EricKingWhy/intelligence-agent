@@ -39,6 +39,7 @@ from agent_harness.agent.run_budget import (
     LaunchRunBudget,
     latest_paused_run,
     run_limits_from_request,
+    tool_name_of_dimension,
 )
 from agent_harness.assembly import (
     assemble_wiring,
@@ -249,6 +250,76 @@ _EXTRA_RUN_DIMENSIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _tool_dimension_lines(data: dict, *, carried: bool = False) -> list[str]:
+    """per-tool 配额摘要行（`#314`）：**只**渲染有事实可说的工具。
+
+    "有事实可说" = 配过 ceiling（`limits.run.tool_call_limits`）或账上已有接纳计数
+    （`consumed.tool_calls_by_tool`）。老事件（`#314` 之前）两个键都没有 ⇒ 零行
+    ——与 `_extra_dimension_lines` 同一条纪律（不拿一片 `unavailable` 当信息）。
+
+    `tool_calls`（逻辑调用）与 `tool_attempts`（真实尝试，含 retry）**分别**打出来：
+    `02 §5.1` 明文不许把它们混同，挤进一格会让人以为它们是同一个计数器。
+
+    读数的判据是"**表在不在**"，不是"键在不在"（`agent/run_budget.BudgetConsumed.calls_for`
+    的同一口径：`{}` = 已知且一个都没调用，`None` = 未知）。反例（两轴审查共同发现）：
+    配了 ceiling 却从未调用过的工具（`{"bash": 3}` + `{}`）曾被渲染成 `unavailable calls`，
+    而**同一份** durable 事件的服务端投影给的是 `remaining 3`——同一事实两个互相矛盾的读数，
+    正是 `11 §6.1` 要消灭的那种不一致。
+
+    表在而**那一格的值**形状不合（非整数 / 负数 / 布尔）⇒ 仍报 `unavailable`，**不**印那个
+    值、也不当 0：认不出的读数不可得（与 `_dimension_remaining` 同一条收窄纪律）。这不是
+    可达输入——唯一的写入者是接纳点的 `budget_delta`（恒为非负整数）——而是"不编数字"的
+    兜底；前端在同一格上会显示 0（它的解析器把畸形条目整条丢掉），差异登记在 ADR-0045 §6。
+    """
+    limits = ((data.get("limits") or {}).get("run") or {}).get("tool_call_limits") or {}
+    consumed = data.get("consumed") or {}
+    calls = _per_tool_table(consumed, "tool_calls_by_tool")
+    attempts = _per_tool_table(consumed, "tool_attempts_by_tool")
+    names = set(limits)
+    for table in (calls, attempts):
+        if table is not None:
+            names |= set(table)
+    lines: list[str] = []
+    for name in sorted(names):
+        ceiling = limits.get(name)
+        used = _per_tool_count(calls, name)
+        tried = _per_tool_count(attempts, name)
+        lines.append(
+            f"  tool {name}: {'carried ' if carried else ''}consumed "
+            f"{'unavailable' if used is None else used} calls"
+            f" / {'unavailable' if tried is None else tried} attempts"
+            f" / limit {'unlimited' if ceiling is None else ceiling}"
+            f" (remaining {_dimension_remaining(used, ceiling)})\n"
+        )
+    return lines
+
+
+def _per_tool_table(consumed: dict, key: str) -> dict | None:
+    """从 durable `consumed` 里取一张 per-tool 表：**认不出形状一律 None（未知）**。
+
+    三种情况各不相同，`or {}` 会把前两种合成一种：
+      * 键缺席（`#314` 之前的老事件）⇒ 未知；
+      * 值是 `None`（显式未知）⇒ 未知；
+      * 值是 `{}` ⇒ **已知**且一个都没调用。
+    """
+    table = consumed.get(key)
+    return table if isinstance(table, dict) else None
+
+
+def _per_tool_count(table: dict | None, name: str) -> object:
+    """per-tool 表里某工具的读数：表未知 ⇒ None（unavailable），缺名 ⇒ 0，值畸形 ⇒ None。
+
+    `None` 与 0 是两件事（`11 §6.1`：不可得 ≠ 0），所以**只**在"表在、这个名字也在、
+    值是非负整数"三者同时成立时才给出数字。
+    """
+    if table is None:
+        return None
+    value = table.get(name, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _dimension_remaining(consumed: object, ceiling: object) -> str:
     """某一维度的 remaining 文案（不可得 / 不可算一律 unavailable，**永不** 0）。
 
@@ -327,6 +398,7 @@ def render_pause_block(data: dict) -> str:
         ),
     ]
     lines.extend(_extra_dimension_lines(data))
+    lines.extend(_tool_dimension_lines(data))
     continuation = data.get("continuation")
     if isinstance(continuation, dict) and continuation:
         lines.append("  continuation:\n")
@@ -348,23 +420,84 @@ _RESUME_FLAGS: dict[str, str] = {
 }
 
 
+def parse_run_tool_limits(raw: list[str] | None) -> dict[str, int]:
+    """`--run-tool-limit NAME=N`（可重复）→ `budget.run.tool_call_limits` 的形状输入。
+
+    只做 **argv 层**的切分与整数化（`"N"` → int）；"工具名是否合法、值是否为正整数"
+    仍由领域层 `parse_tool_call_limits` 判——CLI 不写第二份形状规则（`run` / `resume` /
+    Web 三个入口共用同一份 422 口径）。
+
+    缺 `=`（连名字和值都分不出来）与重复点名同一个工具都在这里拒绝：两者都是
+    **命令行用法**问题，而"重复"若按 argv 惯例静默取最后一个，用户会以为自己设的是
+    另一个数字（配额上不允许这种静默覆盖）。
+    """
+    if not raw:
+        return {}
+    parsed: dict[str, int] = {}
+    for item in raw:
+        name, sep, value = item.partition("=")
+        if not sep:
+            raise ValueError(f"--run-tool-limit 需要 NAME=N 形式，收到 {item!r}")
+        if name in parsed:
+            raise ValueError(f"--run-tool-limit 重复点名了工具 {name!r}（不静默取最后一个）")
+        try:
+            parsed[name] = int(value)
+        except ValueError:
+            raise ValueError(
+                f"--run-tool-limit {item!r} 的值必须是整数（收到 {value!r}）"
+            ) from None
+    return parsed
+
+
+def _resume_command_tail(dimension: str) -> str:
+    """触发维度 → 恢复命令行里"抬高它"的那半截（值的位置留 `N`）。
+
+    per-tool 维度的开关形状与四维**不同**：它是 `--run-tool-limit <name>=N`（名字与值
+    在同一个 argv 里），四维是 `--flag N`（开关与值分列）。所以这里连值一起给——
+    只给开关名再拼一个空格 + `N` 会得到 `--run-tool-limit bash N`，那是**跑不起来**的
+    假指令（提示的价值全在"照抄能跑"）。
+    """
+    tool_name = tool_name_of_dimension(dimension)
+    if tool_name is not None:
+        return f"--run-tool-limit {tool_name}=N"
+    return f"{_RESUME_FLAGS.get(dimension, '--run-turns-total')} N"
+
+
+def _resume_ceiling_rule(dimension: str) -> str:
+    """尾句里"N 该比什么大"的判据：**per-tool 维与四维不是同一条**。
+
+    四维（turns / requests）的 ceiling 判定含一次 closeout 预留（`02 §5.2`：保证暂停时
+    还收得了口），所以"N 必须高于 consumed + 预留 closeout 轮"成立。per-tool 维**不**预留
+    ——closeout 是一次模型请求、不产生任何工具调用，给它留一格会让"配额 = 3"实际允许 4 次
+    调用（`agent/run_budget._dimension_reached` 的第三类临界点，ADR-0045 D4）⇒ 那条尾句在
+    工具维上是一句与实现相反的话（前端同级提示给的是"至少 calls+1"）。
+    """
+    if tool_name_of_dimension(dimension) is not None:
+        return (
+            "N 是**绝对** ceiling，必须严格大于已接纳的调用数（该维不预留 closeout）；"
+            "不是增量"
+        )
+    return "N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮；不是增量"
+
+
 def resume_hint(session_id: str, *, data: dict) -> str:
     """暂停之后"接下来怎么做"的一行指令（`#312` 建 / `#313` 按维度点名开关）。
 
     ceiling 用占位符 `N`：抬高多少是用户/运维的决定，CLI **不替它猜**一个数字
     （猜出来的"建议值"会被当成策略，且绝对 ceiling 与增量是两种语义）。
 
-    开关按 `trigger_dimension` 取（不是写死 turns）：暂停可能落在 requests / token /
-    cost 维度上，提示里给一个抬不动它的开关是**假指令**（PRD §11：CLI 显示的就是
-    durable 事实本身）。未知维度（本票之外的暂停原因）回落到 turns 开关——那是
-    `#308` 起一直存在的维度，也是唯一一个任何 run 都读得懂的。
+    开关与**判据**都按 `trigger_dimension` 取（不是写死 turns）：暂停可能落在
+    requests / token / cost / **per-tool 配额**（`#314`）维度上，提示里给一个抬不动它的
+    开关、或给一条与该维相反的判据，都是**假指令**（PRD §11：CLI 显示的就是 durable
+    事实本身）。未知维度（本票之外的暂停原因）回落到 turns 开关——那是 `#308` 起一直
+    存在的维度，也是唯一一个任何 run 都读得懂的。
     """
     dimension = str(data.get("trigger_dimension", ""))
-    flag = _RESUME_FLAGS.get(dimension, "--run-turns-total")
     return (
         f"  resume: agent-harness resume {session_id}"
-        f" {flag} N --expected-version {data.get('budget_version', '')}"
-        "  (N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮；不是增量)\n"
+        f" {_resume_command_tail(dimension)}"
+        f" --expected-version {data.get('budget_version', '')}"
+        f"  ({_resume_ceiling_rule(dimension)})\n"
     )
 
 
@@ -384,6 +517,7 @@ def render_resume_block(data: dict) -> str:
         ),
     ]
     lines.extend(_extra_dimension_lines(data, carried=True))
+    lines.extend(_tool_dimension_lines(data, carried=True))
     return "".join(lines)
 
 
@@ -408,6 +542,7 @@ async def run(
     run_model_requests: int | None = None,
     run_total_tokens: int | None = None,
     run_cost_usd: str | None = None,
+    run_tool_limits: dict[str, int] | None = None,
     write: Callable[[str], None] | None = None,
 ) -> RunOutcome:
     """跑一次 Agent Loop：流式渲染到 write，返回 `RunOutcome`。
@@ -432,6 +567,10 @@ async def run(
     `#313`：另外三个 run 维度（`run_model_requests` / `run_total_tokens` /
     `run_cost_usd`）同一条纪律、同一份 422 规则（`run_limits_from_request`）。
     cost 是十进制**字符串**（`11 §6.1`：二进制浮点相等不是契约），由领域层解析。
+
+    `#314`：`run_tool_limits` 是 per-tool 绝对配额（工具名 → 正整数），域名/形状与
+    Web 的 `budget.run.tool_call_limits` 同源；"名字已注册"由装配层在首个 Provider
+    请求之前判（同一条 422 通道）。
     """
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -477,6 +616,7 @@ async def run(
                     max_model_requests=run_model_requests,
                     max_total_tokens=run_total_tokens,
                     max_cost_usd=run_cost_usd,
+                    tool_call_limits=run_tool_limits,
                     accounting=HARNESS_MODEL_ACCOUNTING,
                 ),
             ),
@@ -578,7 +718,18 @@ def _main_dispatch() -> None:
         help="本次 run 的**绝对** 成本 ceiling（budget.run.max_cost_usd，十进制；"
              "只统计 Provider 自报的归属成本——不臆造费率表，报告不了的链上恒 422）",
     )
+    parser.add_argument(
+        "--run-tool-limit", action="append", default=None, metavar="NAME=N",
+        help="本次 run 对某个已注册工具的**绝对**调用次数上限"
+             "（budget.run.tool_call_limits；可重复，如 --run-tool-limit bash=3）。"
+             "用尽后该工具的新调用在接纳前被拒并让 run 暂停，用 `agent-harness resume` "
+             "抬高后接上同一个 run。",
+    )
     args = parser.parse_args(argv)
+    try:
+        tool_limits = parse_run_tool_limits(args.run_tool_limit)
+    except ValueError as error:
+        parser.error(str(error))
     outcome = asyncio.run(
         run(
             args.message,
@@ -586,6 +737,7 @@ def _main_dispatch() -> None:
             run_model_requests=args.run_model_requests,
             run_total_tokens=args.run_total_tokens,
             run_cost_usd=args.run_cost_usd,
+            run_tool_limits=tool_limits,
         )
     )
     if outcome.paused:
@@ -870,6 +1022,7 @@ async def resume_command(
     run_model_requests: int | None = None,
     run_total_tokens: int | None = None,
     run_cost_usd: str | None = None,
+    run_tool_limits: dict[str, int] | None = None,
     expected_version: int,
     run_id: str | None = None,
     basis: str = RESUME_BASIS_BUDGET_INCREASE,
@@ -919,6 +1072,7 @@ async def resume_command(
         run_max_model_requests=run_model_requests,
         run_max_total_tokens=run_total_tokens,
         run_max_cost_usd=run_cost_usd,
+        run_tool_call_limits=run_tool_limits,
         expected_version=expected_version,
     )
     # 恢复后的版本事实**取自事件**（`run/resumed` 在 launch 之前落盘，不在 live
@@ -971,6 +1125,11 @@ def _main_resume(argv: list[str]) -> None:
         help="抬高后的**绝对** 成本 ceiling（budget.run.max_cost_usd，十进制）",
     )
     parser.add_argument(
+        "--run-tool-limit", action="append", default=None, metavar="NAME=N",
+        help="抬高后的**绝对** per-tool 调用上限（budget.run.tool_call_limits；"
+             "可重复，如 --run-tool-limit bash=10）。未点名的工具沿用暂停时的配额。",
+    )
+    parser.add_argument(
         "--expected-version", type=int, required=True,
         help="客户端看到的预算版本（CAS；版本过期 ⇒ 409，不启动任何工作）",
     )
@@ -986,15 +1145,20 @@ def _main_resume(argv: list[str]) -> None:
     if (
         args.run_turns_total is None and args.run_model_requests is None
         and args.run_total_tokens is None and args.run_cost_usd is None
+        and not args.run_tool_limit
     ):
         # 一个都不给 = 去掉全部 run ceiling，而不是"抬高"：那是另一件事（普通续聊也能做到），
         # 不在 `resume` 的语义里。CLI 层拒绝，不给用户一个看不出差别的成功。
         parser.error(
             "至少给一个绝对 ceiling（--run-turns-total / --run-model-requests / "
-            "--run-total-tokens / --run-cost-usd）"
+            "--run-total-tokens / --run-cost-usd / --run-tool-limit）"
         )
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        tool_limits = parse_run_tool_limits(args.run_tool_limit)
+    except ValueError as error:
+        parser.error(str(error))
     try:
         outcome = asyncio.run(resume_command(
             args.session_id,
@@ -1002,6 +1166,7 @@ def _main_resume(argv: list[str]) -> None:
             run_model_requests=args.run_model_requests,
             run_total_tokens=args.run_total_tokens,
             run_cost_usd=args.run_cost_usd,
+            run_tool_limits=tool_limits,
             expected_version=args.expected_version,
             run_id=args.run_id,
             basis=args.basis,

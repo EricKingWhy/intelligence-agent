@@ -48,6 +48,25 @@
 12+ 次决策的长路是"计数器在高轮数下不漂移"的**真实样本**：`model_requests` /
 `total_tokens` / `cost_usd` 与轨迹重算结果对账（判据与理由见 `accounting.py`），
 于是"长跑之后账还对得上"有机械证据，而不靠人看数字。
+
+## 工具账与配额面（`#314` T6）
+
+本场景跑的是**生产工具实现**（`BUILTIN_LOCAL_TOOLS` 装进生产 `ToolRegistry`、经生产
+`ToolExecutor` 执行），并且**显式配了一个 per-tool 绝对 ceiling**。这两件事加在一起才有
+T6 要的证据面：
+
+1. **实现身份落进证据**：每个被调用的工具名都记下它的**实现类路径**，而且每条
+   `tool/result` 都带执行域写的 `budget_delta` 兄弟键 —— 那个键只有生产接纳点会写
+   （`tooling/executor.py` 的 `emit_result_event`），所以"跑的是生产实现"不是自称；
+2. **逻辑调用与尝试分开记**：`tool_calls`（接纳点每个逻辑调用记一次）与 `tool_attempts`
+   （实际尝试次数，含 retry）各自与轨迹重算对账，per-tool 两表与账本、复读账本逐项一致；
+3. **配额是"被消费的绝对 ceiling"，不是低默认**：`bash` 配了显式 ceiling（见 `BASH_QUOTA`，
+   两倍结构下界 ⇒ 本场景不期望撞线），`write` **没配** —— 两个工具都照常计数
+   （"未配 ceiling ≠ 不计数"），证据里同时看得见这两种形状。
+
+它**不**证明撞线/恢复：那是 `budget-pause-resume-same-run` 与确定性用例的射程
+（`tests/test_cli_run_pause_resume.py` 的真 glob 端到端），本场景的 ceiling 刻意留足余量 ——
+撞线会让 `run_completed` 如实判红，处置是抬高这个余量，不是放松断言。
 """
 
 from __future__ import annotations
@@ -55,7 +74,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agent_harness.session import MODEL_COMPLETED, RUN_COMPLETED
+from agent_harness.session import MODEL_COMPLETED, RUN_COMPLETED, TOOL_CALL, TOOL_RESULT
 from evaluation.assertions import dangling_tool_call_ids
 from evaluation.live_gate.registry import AttemptOutcome, ScenarioContext
 from evaluation.live_gate.scenarios.accounting import (
@@ -66,10 +85,22 @@ from evaluation.live_gate.scenarios.accounting import (
 from evaluation.live_gate.schema import AssertionResult
 
 SCENARIO_ID = "long-task-past-legacy-turn-limit"
-SCENARIO_VERSION = 2
+#: v2（`#313` T5）：断言集加入四维账本对账；v3（`#314` T6）：加入工具实现身份 /
+#: 逻辑调用与尝试分开记 / per-tool 配额这三面（下面 `QUOTA_TOOL` 那一段）。
+SCENARIO_VERSION = 3
 
 #: 链步数 = 模型决策数下界（见模块 docstring 的信息屏障）。12 > 旧上限 10。
 TRANSITIONS = 12
+
+#: 显式 per-tool 绝对 ceiling（`#314` T6）配在哪个工具上。
+QUOTA_TOOL = "bash"
+
+#: 该 ceiling 的取值 = 两倍结构下界。为什么要配一个**不会撞线**的 ceiling：`#314` 的
+#: 配额闸门只在配了 ceiling 时才建窗口（`runtime` 里的 `ToolQuotaWindow`），不配就永远
+#: 走不到"预留 / 计数"这条生产代码路径 —— 那 T6 的 Live Gate 证据就只剩"没配时照常跑"。
+#: 余量按实测取（bash 用量 14–16 次）：24 留出 ~1.5 倍；**撞线不是失败而是信号** ——
+#: 说明余量不够了，处置是抬高它（`run_completed` 会如实判红，不洗成通过）。
+BASH_QUOTA = TRANSITIONS * 2
 
 #: 旧产品行为的上限（`max_steps=10`）。它不是配置项：断言记录"越过了多少"用。
 LEGACY_TURN_LIMIT = 10
@@ -149,6 +180,31 @@ def _event_text(event: Any) -> str:
         return str(getattr(event, "type", ""))
 
 
+def _delta_count(delta: Any, key: str) -> int | None:
+    """从 `budget_delta` 里读一个计数；形不合（缺键 / 非整数 / 负数）返回 `None`。
+
+    `None` 与 0 是两件事：0 是"这条调用没消耗配额"（准入前被拒的显式记录），
+    `None` 是"读不出这件事"——取证上必须分开，否则畸形数据会被读成健康读数。
+    """
+    if not isinstance(delta, dict):
+        return None
+    value = delta.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _is_production_impl(path: str) -> bool:
+    """实现是不是**产品核心**里的类（`#314`：证据要记"跑的是生产实现"）。
+
+    为什么不能只看工具名：名字相同不保证实现相同（替身可以叫 `bash`）。类路径骗不过去
+    —— Live Gate 场景与用例替身都定义在 `evaluation.*` / `tests.*` 下，产品工具在
+    `agent_harness.*`。全新命名空间里的工具会让这条**判红**（fail-closed）：那时该做的
+    是把新命名空间显式纳进来，而不是让"生产实现"这句话悄悄失去鉴别力。
+    """
+    return path.startswith("agent_harness.")
+
+
 class LongTaskPastLegacyTurnLimitScenario:
     """真实长任务：逐格推进 12 步（>旧上限 10），断言链状态与产物一致。"""
 
@@ -156,7 +212,8 @@ class LongTaskPastLegacyTurnLimitScenario:
     version = SCENARIO_VERSION
     description = (
         "真实模型经生产解析的 local fuse 驱动 bash/write 逐格推进 12 步（>旧 10 轮上限）；"
-        "断言 run 完成、无 max_steps_exceeded、模型请求与工具调用真实发生"
+        "断言 run 完成、无 max_steps_exceeded、模型请求与工具调用真实发生，"
+        "并记录生产工具实现身份与 per-tool 逻辑调用/尝试两套计数（含显式绝对 ceiling）"
     )
 
     async def prepare(self, ctx: ScenarioContext) -> list[str]:
@@ -190,7 +247,12 @@ class LongTaskPastLegacyTurnLimitScenario:
         """跑一次真实 run。**异常一律转 `ok=False`**（runner 兜底捕获是第二道）。"""
         from agent_harness.agent import AgentRuntime
         from agent_harness.agent.budget import resolve_local_fuse
+        from agent_harness.agent.run_budget import (
+            LaunchRunBudget,
+            run_limits_from_request,
+        )
         from agent_harness.assembly import BUILTIN_LOCAL_TOOLS
+        from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
         from agent_harness.model.config import ModelConfig
         from agent_harness.model.provider import create_chat_model
         from agent_harness.session import JsonlSessionStore, Session
@@ -215,6 +277,22 @@ class LongTaskPastLegacyTurnLimitScenario:
                 )
                 registry.register(tool_cls(ctx.sandbox, **kwargs))
 
+            # 实现身份（`#314` T6）：证据要记"哪个类的哪个工具真的跑过"——工具**名**
+            # 相同不保证是同一个实现（替身可以叫 bash）。名字 → 类路径，随断言落盘。
+            tool_impls = {
+                tool.name: f"{type(tool).__module__}.{type(tool).__qualname__}"
+                for tool in registry.list()
+            }
+
+            # 显式 per-tool 绝对 ceiling（`#314`）：走**生产请求解析**
+            # （`run_limits_from_request`，与 Web / CLI / SessionService 同一份规则），
+            # 不手搓 `RunLimits`。配额闸门只在配了 ceiling 时才建窗口，所以这一行也是
+            # "真实 run 会走到预留 / 计数那条生产路径"的前提（见 BASH_QUOTA 的注释）。
+            limits = run_limits_from_request(
+                tool_call_limits={QUOTA_TOOL: BASH_QUOTA},
+                accounting=HARNESS_MODEL_ACCOUNTING,
+            )
+
             async def auto_approve(_request: Any) -> ApprovalResponse:
                 return ApprovalResponse(approved=True, reason="live-gate-auto-approve")
 
@@ -230,6 +308,8 @@ class LongTaskPastLegacyTurnLimitScenario:
                 model, registry, executor,
                 max_agent_turns=fuse.max_agent_turns,
                 primary_model_name=config.model_name,
+                # 新 run（`run_id=None`）：version=1、账本从 0 起，与生产首次启动同形。
+                run_budget=LaunchRunBudget(limits=limits),
             )
             result = await runtime.run(session, TASK)
         except Exception as error:  # noqa: BLE001 - 失败要如实记录（runner 统一脱敏）
@@ -261,7 +341,7 @@ class LongTaskPastLegacyTurnLimitScenario:
         assertions = self._assertions(
             ctx=ctx, run_status=result.status, tool_calls=tool_calls,
             run_id=run_id, events=events, steps=result.steps, fuse=fuse,
-            replayed=replayed,
+            replayed=replayed, tool_impls=tool_impls, limits=limits,
         )
         return AttemptOutcome(
             ok=all(item.ok for item in assertions),
@@ -279,9 +359,11 @@ class LongTaskPastLegacyTurnLimitScenario:
     def _assertions(
         self, *, ctx: ScenarioContext, run_status: str, tool_calls: list[str],
         run_id: str, events: list[Any], steps: int, fuse: Any, replayed: list[Any],
+        tool_impls: dict[str, str], limits: Any,
     ) -> list[AssertionResult]:
         """结构性判据（机械可检，不是 LLM judge）。"""
         from agent_harness.agent.budget import SOURCE_DEPLOYMENT
+        from agent_harness.agent.run_budget import derive_run_budget
 
         final_token = _safe_read(ctx.sandbox, TOKEN_FILE).strip()
         steps_recorded = _safe_read(ctx.sandbox, STEPS_FILE).strip()
@@ -296,6 +378,62 @@ class LongTaskPastLegacyTurnLimitScenario:
         facts = request_accounting(events)
         terminal = next(
             (event.data for event in events if event.type == RUN_COMPLETED), None,
+        )
+        # ── 工具账面（`#314` T6）────────────────────────────────────────────
+        # 三个来源各自独立、互不推导，全部落进同一条断言里比：
+        #  ① 轨迹增量面：每条 `tool/result` 的执行域增量（`budget_delta`，只有接纳点会写）；
+        #  ② 账本面：`derive_run_budget` 从 append-only 事件重算的 run 账（含 per-tool 两表）；
+        #  ③ 复读面：用**重新读盘**的事件再算一次同一个账本。
+        # ①==② 证明"接纳点记的账 == 事件派生的账"；②==③ 证明"per-tool 账随重放稳定"。
+        tool_results = [event for event in events if event.type == TOOL_RESULT]
+        # 工具名从哪读（干跑实测，别改回去）：`tool/result` 的载荷**没有** `tool_name`
+        # 兄弟键——名字在两处：结果的 `content`（ToolResult JSON）里，以及接纳点写的
+        # `budget_delta.tool_name`。而"这条结果属于哪次调用"由 `tool_call_id` 定，
+        # 该 id 在**执行前**预持久化的 `tool/call` 上有名字 ⇒ 按 id 配对读它，才能判
+        # "增量被记到了对的工具上"（读 `event.data["tool_name"]` 只会得到空串，
+        # 于是 13/13 全算名字不一致——那不是产品缺陷，是我读错了地方）。
+        call_names = {
+            str(event.data.get("tool_call_id") or ""): str(event.data.get("tool_name") or "")
+            for event in events if event.type == TOOL_CALL
+        }
+        carrier_ok = 0
+        carrier_malformed = 0
+        name_mismatch = 0
+        rejected = 0
+        admitted_by_tool: dict[str, int] = {}
+        attempts_by_tool: dict[str, int] = {}
+        for event in tool_results:
+            delta = event.data.get("budget_delta")
+            calls = _delta_count(delta, "tool_calls")
+            attempts = _delta_count(delta, "tool_attempts")
+            if calls is None or attempts is None:
+                carrier_malformed += 1
+                continue
+            carrier_ok += 1
+            call_id = str(event.data.get("tool_call_id") or "")
+            name = str(delta.get("tool_name") or "") if isinstance(delta, dict) else ""
+            if name != call_names.get(call_id, ""):
+                name_mismatch += 1
+            if calls == 0:
+                # 准入前被拒 / 未执行：显式 0 增量（`_rejected_delta`），不消耗配额。
+                rejected += 1
+                continue
+            admitted_by_tool[name] = admitted_by_tool.get(name, 0) + calls
+            attempts_by_tool[name] = attempts_by_tool.get(name, 0) + attempts
+        ledger = derive_run_budget(events, run_id) if run_id else None
+        replay_ledger = derive_run_budget(replayed, run_id) if run_id else None
+        consumed = ledger.consumed if ledger is not None else None
+        quota_ceiling = (
+            consumed.remaining(ledger.limits)["tool_call_limits"].get(QUOTA_TOOL)
+            if consumed is not None and ledger is not None else None
+        )
+        observed = sorted(set(tool_calls))
+        impl_text = ", ".join(
+            f"{name}→{tool_impls.get(name) or '未注册'}" for name in observed
+        ) or "无"
+        calls_text = (
+            f"tool_calls={consumed.tool_calls} tool_attempts={consumed.tool_attempts}"
+            if consumed is not None else "tool_calls=未知 tool_attempts=未知"
         )
         return [
             AssertionResult(
@@ -338,6 +476,89 @@ class LongTaskPastLegacyTurnLimitScenario:
                 name="tool_work_observed",
                 ok=bash_calls >= TRANSITIONS and "write" in tool_calls,
                 detail=f"bash={bash_calls} write={tool_calls.count('write')}（共 {len(tool_calls)} 次）",
+            ),
+            # ── `#314` T6：生产实现身份 / 逻辑调用与尝试分开记 / per-tool 配额 ──
+            AssertionResult(
+                name="production_tools_used",
+                ok=(
+                    bool(observed)
+                    and all(_is_production_impl(tool_impls.get(name, "")) for name in observed)
+                    and bool(tool_results)
+                    and carrier_malformed == 0
+                    and name_mismatch == 0
+                ),
+                detail=(
+                    f"实现={impl_text}（判据：类路径落在产品核心 `agent_harness.*`）；"
+                    f"带接纳点增量的 tool/result={carrier_ok}/{len(tool_results)}"
+                    f"（畸形={carrier_malformed} 名字不一致={name_mismatch}）"
+                ),
+            ),
+            AssertionResult(
+                name="tool_calls_counted_once",
+                ok=(
+                    consumed is not None
+                    and consumed.tool_calls_by_tool == admitted_by_tool
+                    and consumed.tool_calls == len(tool_calls) - rejected
+                    and consumed.tool_calls >= TRANSITIONS
+                ),
+                detail=(
+                    f"逻辑调用={consumed.tool_calls if consumed is not None else '未知'}"
+                    f"（tool/call={len(tool_calls)} − 准入前被拒={rejected}）"
+                    f"；per-tool 表={dict(sorted(admitted_by_tool.items()))}"
+                    "（每个被接纳的规范化调用记一次：表 = 轨迹增量的和）"
+                ),
+            ),
+            AssertionResult(
+                name="tool_attempts_counted_separately",
+                ok=(
+                    consumed is not None
+                    and consumed.tool_attempts_by_tool == attempts_by_tool
+                    and consumed.tool_attempts is not None
+                    and consumed.tool_calls is not None
+                    and consumed.tool_attempts >= consumed.tool_calls >= 1
+                ),
+                detail=(
+                    f"{calls_text}；per-tool 尝试表={dict(sorted(attempts_by_tool.items()))}"
+                    "（两个独立计数，不是别名：本 run 无 retry ⇒ 相等；"
+                    "retry 只会让 attempts 更大）"
+                ),
+            ),
+            AssertionResult(
+                name="tool_quota_explicit_and_scoped",
+                ok=(
+                    ledger is not None
+                    and consumed is not None
+                    and dict(limits.tool_call_limits) == {QUOTA_TOOL: BASH_QUOTA}
+                    and dict(ledger.limits.tool_call_limits) == dict(limits.tool_call_limits)
+                    and (consumed.calls_for(QUOTA_TOOL) or 0) >= TRANSITIONS
+                    and (consumed.calls_for(QUOTA_TOOL) or 0) < BASH_QUOTA
+                    and "write" not in ledger.limits.tool_call_limits
+                    and (consumed.calls_for("write") or 0) >= 1
+                ),
+                detail=(
+                    f"请求的 run.limits.tool_call_limits="
+                    f"{dict(sorted(limits.tool_call_limits.items()))}"
+                    f"；落盘 run/started 的 ceiling="
+                    f"{dict(sorted((ledger.limits.tool_call_limits if ledger else {}).items()))}"
+                    f"；{QUOTA_TOOL} 已接纳="
+                    f"{consumed.calls_for(QUOTA_TOOL) if consumed else None}"
+                    f"（剩余={quota_ceiling}，未撞线）"
+                    f"；write 未配 ceiling 但已接纳="
+                    f"{consumed.calls_for('write') if consumed else None}"
+                    "（未配 ≠ 不计数、也不给低默认）"
+                ),
+            ),
+            AssertionResult(
+                name="tool_accounting_replay_stable",
+                ok=(
+                    ledger is not None and replay_ledger is not None
+                    and ledger.consumed == replay_ledger.consumed
+                    and ledger.limits == replay_ledger.limits
+                ),
+                detail=(
+                    f"复读账本 == 首读账本（含 per-tool 两表与 tool_call_limits）：{calls_text}"
+                    "（重放不重算配额，也不漂移）"
+                ),
             ),
             AssertionResult(
                 name="no_dangling_tool_calls", ok=not dangling,

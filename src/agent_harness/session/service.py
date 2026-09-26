@@ -158,7 +158,7 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from agent_harness.capability.base import CapabilityRegistry
     from agent_harness.capability.wiring import CapabilityWiring
@@ -242,18 +242,25 @@ def _run_limits(
     max_model_requests: int | None,
     max_total_tokens: int | None,
     max_cost_usd: Decimal | str | float | None,
+    tool_call_limits: Mapping[str, Any] | None = None,
 ) -> RunLimits:
-    """四个 run 作用域 ceiling → `RunLimits`（形态校验 + 可执行性判定）。
+    """run 作用域 ceiling → `RunLimits`（形态校验 + 可执行性判定）。
 
     规则本体在 `agent/run_budget.py::run_limits_from_request`（Web / CLI 共用同一份，
     422 的口径只有一处）；这里只把本部署的**账目能力声明**绑上——`HARNESS_MODEL_ACCOUNTING`
     是部署事实，不是请求事实。
+
+    `tool_call_limits`（`#314`）：per-tool 绝对配额（工具名 → 正整数）。**形态**在这里判
+    （`parse_tool_call_limits`，非法即 422）；「名字已注册」判不了——注册表是
+    `build_runtime` 的产物，那条判定在装配层（`validate_tool_call_limits_registered`），
+    同样在首个 Provider 请求之前。
     """
     return run_limits_from_request(
         max_agent_turns_total=max_agent_turns_total,
         max_model_requests=max_model_requests,
         max_total_tokens=max_total_tokens,
         max_cost_usd=max_cost_usd,
+        tool_call_limits=tool_call_limits,
         accounting=HARNESS_MODEL_ACCOUNTING,
     )
 
@@ -641,6 +648,7 @@ class SessionService:
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
         run_max_cost_usd: Decimal | str | float | None = None,
+        run_tool_call_limits: Mapping[str, Any] | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -694,6 +702,7 @@ class SessionService:
             max_model_requests=run_max_model_requests,
             max_total_tokens=run_max_total_tokens,
             max_cost_usd=run_max_cost_usd,
+            tool_call_limits=run_tool_call_limits,
         )
 
         # 校验顺序即契约（PRD §4.1）：先"二选一"（两个都给了就没有优先级问题可言），
@@ -854,6 +863,7 @@ class SessionService:
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
         run_max_cost_usd: Decimal | str | float | None = None,
+        run_tool_call_limits: Mapping[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
@@ -905,6 +915,7 @@ class SessionService:
             max_model_requests=run_max_model_requests,
             max_total_tokens=run_max_total_tokens,
             max_cost_usd=run_max_cost_usd,
+            tool_call_limits=run_tool_call_limits,
         )
         # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
         amend = _amend_with_session_model(amend, existing, self._settings)
@@ -1306,6 +1317,7 @@ class SessionService:
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
         run_max_cost_usd: Decimal | str | float | None = None,
+        run_tool_call_limits: Mapping[str, Any] | None = None,
     ) -> SendMessageResult:
         """续聊消息入口（统一 CLI / Web 续聊路径）。
 
@@ -1415,6 +1427,7 @@ class SessionService:
                 run_max_model_requests=run_max_model_requests,
                 run_max_total_tokens=run_max_total_tokens,
                 run_max_cost_usd=run_max_cost_usd,
+                run_tool_call_limits=run_tool_call_limits,
             )
             result = SendMessageResult(
                 status="launched",

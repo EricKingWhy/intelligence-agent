@@ -343,12 +343,13 @@ def test_unknown_key_in_budget_rejected_not_silently_ignored(tmp_path):
 
 
 def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
-    """尚未实现的作用域 / 维度一律 422（T4 开 turns、T5 `#313` 再开 requests / tokens）。
+    """尚未实现的作用域 / 维度一律 422（T4 开 turns、T5 `#313` 再开 requests / tokens、
+    T6 `#314` 再开 per-tool 配额）。
 
     "先看起来接受、其实不生效"是最坏的一种兼容：用户会以为预算在管。宁可
-    显式拒绝——本用例钉住**仍未实现**的三类（`budget.session` 属 T10 / `#318`；
-    PRD §3 冻结形状里 run 的 tool 配额与 deadline 属后续票；`expected_version`
-    在**创建**入口没有可比较的版本，属 T4 的形状规则）：
+    显式拒绝——本用例钉住**仍未实现**的两类（`budget.session` 属 T10 / `#318`；
+    PRD §3 冻结形状里 run 的 `max_tool_calls` 与 `deadline_at` 属后续票）加上
+    `expected_version` 在**创建**入口的形状规则：
 
       * `budget.run` 里仍未实现的维给了**非空值** ⇒ 422（给了 `null` / `{}` 则合法，
         见 `tests/web/test_run_pause_resume_api.py` 的 PRD 全形用例）；
@@ -359,6 +360,9 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
     本链的 Provider 集成不自报归属成本 ⇒ 这条 ceiling 现在无法强制执行 ⇒ 按
     `11 §6.1` 在首个请求前 422（判定见 `agent/run_budget.validate_ceiling_enforceability`），
     而不是收下一个永远不会触发的数字。
+
+    `tool_call_limits` 自 `#314` 起**已实现**，所以从本名单移出——它的形状与"名字已
+    注册"两条判定各有自己的用例（后者见下一个用例，那里同时钉住它的副作用边界）。
     """
     app, client = _web(tmp_path)
     probe = _ModelProbe()
@@ -368,12 +372,46 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
             {"budget": {"run": {"max_tool_calls": 5}}},
             {"budget": {"run": {"max_cost_usd": "0.01"}}},
             {"budget": {"run": {"deadline_at": "2026-09-25T00:00:00Z"}}},
-            {"budget": {"run": {"tool_call_limits": {"read_file": 3}}}},
             {"budget": {"expected_version": 3}},
         ):
             resp = client.post("/api/sessions", json={"task": "hi", **payload})
             assert resp.status_code == 422, f"{payload} 应被拒：{resp.text}"
     _assert_rejected_without_side_effects(app, probe)
+
+
+def test_tool_call_limits_requires_registered_names(tmp_path):
+    """`budget.run.tool_call_limits` 的工具名必须**已注册**（`#314` / `04 §9.1`）⇒ 422。
+
+    给一个本 run 调不到的名字配配额是**请求本身**有问题（客户端以为它在限制什么），
+    所以拒绝整个请求，而不是运行期静默忽略（ADR-0044 D1/D8 的"不静默截断"）。
+
+    副作用边界比形状级拒绝**松一档**，且这是刻意的（登记在 ADR-0045）：注册表是
+    装配层的产物（内置 + artifact 读回 + capability，再按 profile 收窄），"哪些工具
+    已注册"在 `build_runtime` 之前没有事实可言 ⇒ 这条判定只能落在注册表定型处。
+    它的保证是 `11 §6.1` 的原话——**不发起任何 Provider 请求、不执行任何工具、
+    不启动任何 child、不落任何消耗预算的事件**（本用例用"连 session 都没落盘"来钉：
+    没有 session 就没有任何事件可言）；工作目录与模型**对象**此时已存在，它们不是
+    Provider 请求。别把这条判定想成与形状级拒绝同级——形状非法时连工作目录都没有。
+    """
+    app, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"run": {"tool_call_limits": {"read_file": 3}}}},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "未注册" in resp.text, resp.text
+    assert list(app.state.agent.sessions_root.iterdir()) == [], "不得落盘 session"
+
+    # 正控：换成**已注册**的工具名（内置只读工具 `read`）⇒ 接受并真跑起来
+    with probe:
+        ok = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"run": {"tool_call_limits": {"read": 3}}}},
+        )
+    assert ok.status_code == 200, ok.text
+    assert probe.calls, "合法请求必须真的构造模型"
 
 
 # ── resume / messages：同一条通道 ──

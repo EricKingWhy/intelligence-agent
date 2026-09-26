@@ -149,11 +149,15 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
             # `#313` 起快照是**四维**的：0 个被接纳的轮 + 1 次真实请求（closeout 那次，
             # 它没报 usage / cost ⇒ 那两个维度是"未知"而不是 0，`11 §6.1`）
             "consumed": {"agent_turns": 0, "model_requests": 1,
-                         "total_tokens": None, "cost_usd": None},
+                         "total_tokens": None, "cost_usd": None,
+                         # `#314`：工具维同快照在场（本场景一个工具都没跑 ⇒ 0 / 空表）
+                         "tool_calls": 0, "tool_attempts": 0,
+                         "tool_calls_by_tool": {}, "tool_attempts_by_tool": {}},
             "limits": {
                 "local": {"max_agent_turns": 500, "source": "deployment"},
                 "run": {"max_agent_turns_total": 1, "max_model_requests": None,
-                        "max_total_tokens": None, "max_cost_usd": None},
+                        "max_total_tokens": None, "max_cost_usd": None,
+                        "tool_call_limits": {}},
             },
             "continuation": {
                 "completed": ["已读完配置"],
@@ -203,11 +207,15 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
         "budget_version": 2,
         # 恢复**不重置**消耗：快照等于暂停那一刻的账（新工作之后由 model/completed 累加）
         "consumed": {"agent_turns": 0, "model_requests": 1,
-                     "total_tokens": None, "cost_usd": None},
+                     "total_tokens": None, "cost_usd": None,
+                     # `#314`：工具维沿用暂停快照（未点名的维度不重置，与四维同一规则）
+                     "tool_calls": 0, "tool_attempts": 0,
+                     "tool_calls_by_tool": {}, "tool_attempts_by_tool": {}},
         "limits": {
             "local": {"max_agent_turns": 500, "source": "deployment"},
             "run": {"max_agent_turns_total": 4, "max_model_requests": None,
-                    "max_total_tokens": None, "max_cost_usd": None},
+                    "max_total_tokens": None, "max_cost_usd": None,
+                    "tool_call_limits": {}},
         },
         "resume_basis": "budget_increase",
     }
@@ -475,15 +483,20 @@ def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
         assert paused["data"]["closeout_source"] == "model"
         assert paused["data"]["consumed"] == {
             "agent_turns": 0, "model_requests": 1, "total_tokens": 20, "cost_usd": None,
+            # `#314`：本场景没有工具调用 ⇒ 工具维 0 / 空表（键必须在场）
+            "tool_calls": 0, "tool_attempts": 0,
+            "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
         }, "0 个被接纳的轮 + 1 次 closeout 请求（它自报的 20 token 进了账）"
         assert paused["data"]["limits"]["run"] == {
             "max_agent_turns_total": None, "max_model_requests": 1,
             "max_total_tokens": 500, "max_cost_usd": None,
+            "tool_call_limits": {},
         }
         started = _one(events, "run/started")
         assert started["data"]["budget"]["run"] == {
             "max_agent_turns_total": None, "max_model_requests": 1,
             "max_total_tokens": 500, "max_cost_usd": None,
+            "tool_call_limits": {},
         }, "启动快照落盘 ⇒ 重启后能重建客户端配的 ceiling"
 
         before = _events(client, session_id)
@@ -514,6 +527,8 @@ def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
         "max_model_requests": 3,          # 请求点名
         "max_total_tokens": 500,          # 未点名 ⇒ 沿用暂停时的 ceiling（不是被清空）
         "max_cost_usd": None,
+        # `#314`：per-tool 配额同样"未点名就沿用"（暂停时是空的 ⇒ 恢复后仍是空的）
+        "tool_call_limits": {},
     }
 
 
@@ -590,6 +605,7 @@ def test_enforceable_token_ceiling_is_accepted_and_snapshotted(tmp_path):
         "max_model_requests": 3,
         "max_total_tokens": 500,
         "max_cost_usd": None,
+        "tool_call_limits": {},
     }, "配置的 ceiling 必须落进 run/started（重启后从这里重建）"
 
 

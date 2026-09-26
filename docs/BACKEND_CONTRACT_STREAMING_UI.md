@@ -48,6 +48,7 @@
 | `reasoning/interrupted` | ✅ | `{}` | 块异常收（显式取消 / 孤儿回收 / 模型失败）；已落盘 delta 保留部分内容（16.4）。 |
 | `tool/output_delta` | ✅ | `{tool_call_id, channel:"stdout"\|"stderr", delta}` | 工具输出增量（合帧、channel 保真）。每 channel 每 tool_call 上限 64KB，超出静默停发——`tool/result` 仍是完整真相（截断/artifact 语义不变），前端对已流式渲染的 tool 可用 result 的元数据（exit_code 等）而不重复铺 stdout/stderr 文本。 |
 | `tool/call` | ✅（时序变更） | 不变 | **现在在执行前落盘**；其后才可能跟 output_delta；执行后 `tool/result` 终态。 |
+| `tool/result` | ✅（载荷**新增可选键**，`#314`） | `{tool_call_id, content}` + 可选 `budget_delta: {tool_name, tool_calls, tool_attempts}` | run 预算的工具增量来源：`tool_calls` 记被**接纳**的逻辑调用（0 或 1），`tool_attempts` 记这次调用的真实执行尝试数（含 retry）。**准入前被拒**的调用记**显式 0**（拒绝理由在 `content` 的 `error_code` 里，可审计）；由悬空修复合成的结果**不带这个键**（不是接纳点产物）。两个 counter **不是别名**，客户端不得互相顶替；run 账本按这个键**求和**（0 = 无贡献）。完整读法见 `docs/adr/0045-tool-call-accounting-and-per-tool-quotas.md`。 |
 | `model/started` | ❌（stream-only） | `{step}` | 活跃信号，seq=null，重放不出现（首个 delta 隐含开始）。**请求侧模型名不在这里**（stream-only = 刷新后什么都不剩），见下一条 `run/started`。 |
 | `model/delta` | ❌（legacy 不发射） | — | 词汇保留，运行时不再产生。 |
 | `run/started` | ✅ | `{turn_index, agent_profile, model?}` | `model` 是 **#226 的加法**：本轮**请求侧**模型标识（装配自 `ModelConfig.model_name`，即进请求体的那个 `model` 值）。**它是配置侧事实**——本轮若一次模型调用都没发生，它表示"打算用谁"、不代表已发出去（"实际用过谁"只有 `model/completed` 的回显能证明）。**缺键 = 旧版后端或调用方未给**（读作"未知"，不得拿上一轮的值顶替）。它与 `model/completed.data.model`（provider **回显**）是**两个独立事实**，任何一侧缺失都不许用另一侧冒充——口径见 `docs/adr/0034-request-side-model-identity.md`。 |
@@ -218,6 +219,14 @@ WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的�
 也不要因此认定 run 死了：暂停态的可见事实（consumed / limits / continuation / version）由
 `run/paused.data` 投影重建，刷新与重放都得到同一份。事件枚举见 `docs/EVENT_VOCABULARY.md`，
 载荷形状与恢复判据见 `03 §3.4` / `11 §6.1`。
+
+**`#314` 起 `trigger_dimension` 可以是 per-tool 配额**：取值形态 `run.tool_call_limits.<工具名>`
+（每个配了配额的工具名各占一维，按名排序判定）。这时 `data.consumed` 带两张分维表
+（`tool_calls_by_tool` / `tool_attempts_by_tool`，另有它们的和 `tool_calls` / `tool_attempts`），
+`data.limits.run` 带 `tool_call_limits`（工具名 → 绝对 ceiling）；**表缺席（`null`）与表为空（`{}`）
+是两件事**（未知 ≠ 0），客户端别把它们渲染成同一个数。恢复请求点名的是**那个工具**
+（`budget.run.tool_call_limits: {"<工具名>": N}`，**逐键**合并：未点名的工具配额沿用、删不掉），
+而不是某个 `max_*` 字段；CLI 侧对应的开关是 `--run-tool-limit NAME=N`。
 
 ## 5. 前端迁移清单（建议 ticket 顺序）
 

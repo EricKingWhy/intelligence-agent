@@ -654,8 +654,11 @@ async def test_pause_arm_is_nonterminal_and_closes_the_execution(
     assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
     paused = kit.since(mark)[-1]
     assert paused.run_id == RUN_ID
+    # `#314`：工具维恒在快照里（本用例不执行任何工具 ⇒ 0 / 空表，不是缺键）
     assert paused.data["consumed"] == {
         "agent_turns": 2, "model_requests": 1, "total_tokens": None, "cost_usd": None,
+        "tool_calls": 0, "tool_attempts": 0,
+        "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
     }
     assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
     assert kit.result_holder[0].status == STATUS_PAUSED

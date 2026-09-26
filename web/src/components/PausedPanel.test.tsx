@@ -90,12 +90,16 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
         trigger_dimension: 'run.max_model_requests',
         consumed_agent_turns: 3,
         run_limit: 8,
-        consumed_dimensions: { agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: null },
+        consumed_dimensions: {
+          agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: null,
+          tool_calls: 0, tool_attempts: 0, tool_calls_by_tool: {}, tool_attempts_by_tool: {},
+        },
         run_limits: {
           max_agent_turns_total: 8,
           max_model_requests: 4,
           max_total_tokens: null,
           max_cost_usd: null,
+          tool_call_limits: {},
         },
       }),
     );
@@ -118,12 +122,14 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
         trigger_dimension: 'run.max_cost_usd',
         consumed_dimensions: {
           agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: '1.25',
+          tool_calls: 0, tool_attempts: 0, tool_calls_by_tool: {}, tool_attempts_by_tool: {},
         },
         run_limits: {
           max_agent_turns_total: null,
           max_model_requests: null,
           max_total_tokens: null,
           max_cost_usd: '1.25',
+          tool_call_limits: {},
         },
       }),
       { draft: '1.50' },
@@ -172,5 +178,74 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
 
   it('输入框是受控的：草稿原样回显（用户输入不丢）', () => {
     expect(render(paused(), { draft: '42' })).toContain('value="42"');
+  });
+
+  it('暂停落在 per-tool 配额（`#314`）：两个 counter 分开显示，恢复输入点名那个工具', () => {
+    const html = render(
+      paused({
+        trigger_dimension: 'run.tool_call_limits.glob',
+        consumed_agent_turns: 2,
+        run_limit: 8,
+        consumed_dimensions: {
+          agent_turns: 2, model_requests: 3, total_tokens: 40, cost_usd: null,
+          // 一次逻辑调用、三次真实尝试：retry 不是新的逻辑调用（`02 §5.1`）。
+          tool_calls: 1, tool_attempts: 3,
+          tool_calls_by_tool: { glob: 1 }, tool_attempts_by_tool: { glob: 3 },
+        },
+        run_limits: {
+          max_agent_turns_total: 8,
+          max_model_requests: null,
+          max_total_tokens: null,
+          max_cost_usd: null,
+          tool_call_limits: { glob: 1, bash: 5 },
+        },
+      }),
+      { draft: '2' },
+    );
+    // 标题报的是**那个工具**的读数（不是 turns 的 2/8）。
+    expect(html).toContain('工具 glob 的本 run 调用配额到顶（run.tool_call_limits.glob）');
+    expect(html).toContain('已消耗 1 次调用（3 次尝试）');
+    expect(html).toContain('绝对 ceiling 1');
+    expect(html).toContain('剩余 0');
+    // 清单逐工具一行，两个 counter 分开写；配了没调过的工具也在——表已知时读数就是
+    // **0 / 剩余 = ceiling**（后端 `BudgetConsumed.calls_for` 的口径：表在 ⇒ 缺名 = 0）。
+    expect(html).toContain('tool glob: consumed 1 calls / 3 attempts / limit 1（剩余 0） · 到顶');
+    expect(html).toContain('tool bash: consumed 0 calls / 0 attempts / limit 5（剩余 5）');
+    // 恢复输入抬的是工具配额（键路径 + 真实 argv 形状的 CLI 开关）。
+    expect(html).toContain('绝对 ceiling（tool_call_limits.glob）');
+    expect(html).toContain('抬的是 tool_call_limits.glob');
+    expect(html).toContain('--run-tool-limit glob=N');
+    // turns 维没到顶照旧列着（事实完整），但它不是卡住的那一维。
+    expect(html).toContain('agent_turns: 2 / limit 8（剩余 6）');
+  });
+
+  it('命中 run 维时也照旧列出工具配额清单（它是事实，不是"卡住的那一维"）', () => {
+    const html = render(
+      paused({
+        consumed_dimensions: {
+          agent_turns: 3, model_requests: 4, total_tokens: 120, cost_usd: null,
+          tool_calls: 2, tool_attempts: 2,
+          tool_calls_by_tool: { glob: 2 }, tool_attempts_by_tool: { glob: 2 },
+        },
+        run_limits: {
+          max_agent_turns_total: 8,
+          max_model_requests: null,
+          max_total_tokens: null,
+          max_cost_usd: null,
+          tool_call_limits: {},
+        },
+      }),
+      { draft: '10' },
+    );
+    expect(html).toContain('tool glob: consumed 2 calls / 2 attempts / limit unlimited（剩余 unavailable）');
+    expect(html).not.toContain(' · 到顶（run.tool_call_limits');
+    // 恢复输入照旧抬 turns（工具配额只是清单里的事实）。
+    expect(html).toContain('绝对 ceiling（max_agent_turns_total）');
+  });
+
+  it('没有任何工具配额事实时不渲染这一节（老暂停：多打一片 unavailable 是噪声）', () => {
+    const html = render(paused());
+    expect(html).not.toContain('tool ');
+    expect(html).not.toContain('tool_call_limits');
   });
 });

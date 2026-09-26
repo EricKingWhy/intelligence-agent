@@ -32,9 +32,11 @@ from agent_harness.cli import (
 from agent_harness.config import Settings
 from agent_harness.session import (
     RUN_COMPLETED,
+    RUN_FAILED,
     RUN_PAUSED,
     RUN_RESUMED,
     RUN_STARTED,
+    TOOL_FAILURE_GUARD,
     USER_MESSAGE,
 )
 from agent_harness.session.store import JsonlSessionStore
@@ -214,6 +216,117 @@ def test_resume_hint_names_the_flag_of_the_tripped_dimension():
         text = resume_hint("sess-42", data={**_PAUSE_DATA, "trigger_dimension": dimension})
         assert f"{flag} N" in text, f"{dimension} 应给 {flag}：{text}"
         assert "--expected-version 1" in text
+
+
+def test_resume_hint_gives_the_per_tool_flag_in_its_real_argv_shape():
+    """`#314`：per-tool 维度的提示必须是 `--run-tool-limit <name>=N`。
+
+    这个开关的名字与值在**同一个 argv** 里（`NAME=N`），与四维的 `--flag N` 不同。
+    只给开关名再拼一个 ` N` 会得到 `--run-tool-limit glob N`——argparse 会把它读成
+    "缺 NAME=N 形式"，照抄就报错：提示的全部价值在"照抄能跑"。
+    """
+    text = resume_hint(
+        "sess-42",
+        data={**_PAUSE_DATA, "trigger_dimension": "run.tool_call_limits.glob"},
+    )
+
+    assert "--run-tool-limit glob=N" in text
+    assert "--expected-version 1" in text
+
+
+def test_resume_hint_states_the_ceiling_rule_of_the_tripped_dimension():
+    """尾句的"N 该比什么大"必须与**该维**的实现一致（两轴审查 Standards 面发现）。
+
+    turns / requests 的 ceiling 判定含一次 closeout 预留（`02 §5.2`：保证暂停时还收得了
+    口），per-tool 维**不**含——closeout 是一次模型请求、不产生任何工具调用，给它留一格会
+    让"配额 = 3"实际允许 4 次调用（`run_budget._dimension_reached` 第三类临界点 / ADR-0045
+    D4）。一条四维共用的尾句会在工具维上写出一句与实现相反的话（前端同级提示给的是
+    "至少 calls+1"，两处必须说同一件事）。
+    """
+    tool = resume_hint(
+        "sess-42", data={**_PAUSE_DATA, "trigger_dimension": "run.tool_call_limits.glob"},
+    )
+    assert "严格大于已接纳的调用数" in tool
+    assert "必须高于 consumed + 预留 closeout 轮" not in tool
+
+    turns = resume_hint(
+        "sess-42", data={**_PAUSE_DATA, "trigger_dimension": "run.max_agent_turns_total"},
+    )
+    assert "高于 consumed + 预留 closeout 轮" in turns
+
+
+def test_parse_run_tool_limits_rejects_ambiguous_argv():
+    """`NAME=N` 的坏形状在**命令行层**就拒绝（形状规则本体仍在领域层）。"""
+    assert cli.parse_run_tool_limits(None) == {}
+    assert cli.parse_run_tool_limits(["glob=2", "bash=3"]) == {"glob": 2, "bash": 3}
+    for bad in (["glob"], ["glob=2", "glob=3"], ["glob=many"]):
+        with pytest.raises(ValueError):
+            cli.parse_run_tool_limits(bad)
+
+
+def test_pause_block_renders_per_tool_quota_lines():
+    """`#314`：摘要里 per-tool 的 calls / attempts / limit 各自成事实（不混同）。
+
+    `tool_calls`（逻辑调用）与 `tool_attempts`（真实尝试）是两个 counter——挤成
+    一格会让人以为它们是同一个数（`02 §5.1`）。老事件（两个键都没有）⇒ 零行。
+    """
+    text = render_pause_block({
+        **_PAUSE_DATA,
+        "trigger_dimension": "run.tool_call_limits.glob",
+        "consumed": {
+            "agent_turns": 2, "tool_calls": 3, "tool_attempts": 5,
+            "tool_calls_by_tool": {"glob": 2, "bash": 1},
+            "tool_attempts_by_tool": {"glob": 4, "bash": 1},
+        },
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": None, "tool_call_limits": {"glob": 2}},
+        },
+    })
+
+    assert "tool glob: consumed 2 calls / 4 attempts / limit 2 (remaining 0)" in text
+    # bash 只有账（没配 ceiling）⇒ 仍要显示：它是"上限不限"的事实，不是没有事实
+    assert "tool bash: consumed 1 calls / 1 attempts / limit unlimited" in text
+    # 老事件（没有 per-tool 两个键）⇒ 一行都不打
+    assert "tool " not in render_pause_block(_PAUSE_DATA)
+
+
+def test_pause_block_reads_a_missing_name_in_a_known_table_as_zero():
+    """`#314`：表**已知**而某工具名不在表里 ⇒ 0，不是 unavailable（两轴审查共同发现）。
+
+    反例：配了 ceiling 却从未调用过的工具曾被渲染成 `unavailable calls`，而**同一份**
+    durable 事件的服务端投影给的是 `remaining = 2`（`BudgetConsumed.calls_for` 的口径：
+    表存在 ⇒ 缺名就是 0）——同一事实两个互相矛盾的读数，正是 `11 §6.1` 要消灭的不一致。
+    判据因此是"**表**在不在"（键存在），不是"**名字**在不在"。
+    """
+    known = render_pause_block({
+        **_PAUSE_DATA,
+        "trigger_dimension": "run.tool_call_limits.glob",
+        "consumed": {
+            "agent_turns": 2, "tool_calls": 0, "tool_attempts": 0,
+            "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
+        },
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": None, "tool_call_limits": {"glob": 2}},
+        },
+    })
+    assert "tool glob: consumed 0 calls / 0 attempts / limit 2 (remaining 2)" in known
+    # 逐条钉：per-tool 行不得出现 unavailable（`turns` 行出现它是对的——那维没配 ceiling）
+    assert "tool glob: consumed unavailable" not in known
+
+    # 表**缺席**（`#314` 之前的老事件）⇒ 仍必须说 unavailable：不可得 ≠ 0，这一半不能修丢
+    absent = render_pause_block({
+        **_PAUSE_DATA,
+        "trigger_dimension": "run.tool_call_limits.glob",
+        "consumed": {"agent_turns": 2},
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": None, "tool_call_limits": {"glob": 2}},
+        },
+    })
+    assert "tool glob: consumed unavailable calls / unavailable attempts" in absent
+    assert "remaining unavailable" in absent
 
 
 # ── 真链路：run 暂停 → resume 接上同一个 run ──────────────────────────────
@@ -448,3 +561,143 @@ async def test_cli_stops_and_resumes_on_a_non_turn_dimension(monkeypatch, tmp_pa
     assert types.count(RUN_STARTED) == 1 and types.count(RUN_RESUMED) == 1
     assert types.count(RUN_COMPLETED) == 1
     assert {e.run_id for e in events if e.run_id} == {paused_run_id}
+
+
+# ── `#314` 真链路：per-tool 配额用尽 → 暂停 → 抬高 → 同一个 run 完成 ─────────
+
+
+def _two_glob_calls() -> AIMessage:
+    """一轮里对同一个**真实**工具发两条调用（一次多调用批次的最小形状）。"""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "call_glob_a", "name": "glob", "args": {"pattern": "**/*.py"}},
+            {"id": "call_glob_b", "name": "glob", "args": {"pattern": "**/*.md"}},
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_tool_quota_blocks_extra_call_and_resume_raises_it(monkeypatch, tmp_path):
+    """`run --run-tool-limit glob=1` → 同批第二条被拒 → 暂停 → `resume` 抬高后完成。
+
+    这条用例走的是**真工具链**（`glob` 是装配层注册的真工具，不是替身）：配额在
+    接纳点计数（同一批的第一条执行了、第二条根本没执行），用尽后复用暂停生命周期，
+    恢复时给一个**更高**的绝对配额（不是增量）就接着跑完——与四维维度同一条链。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(
+            responses=[_two_glob_calls(), _continuation_json()],
+        ),
+    )
+
+    printed: list[str] = []
+    outcome = await cli.run(
+        "先看看仓库里有哪些文件", run_tool_limits={"glob": 1}, write=printed.append,
+    )
+
+    assert outcome.paused is True
+    text = "".join(printed)
+    assert "dimension=run.tool_call_limits.glob" in text
+    # 一条被接纳（执行了）+ 一条被拒（没执行）：两个 counter 与 limit 各自成行
+    assert "tool glob: consumed 1 calls / 1 attempts / limit 1 (remaining 0)" in text
+    assert "--run-tool-limit glob=N" in text, "恢复指令给的是被命中那一维的开关"
+
+    session_id = _only_session_id(settings)
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    events = store.read_events(session_id)
+    results = [e for e in events if e.type == "tool/result"]
+    assert len(results) == 2, "两条 tool/call 各有结果（保序配对）"
+    payloads = [json.loads(e.data["content"]) for e in results]
+    assert [p["ok"] for p in payloads] == [True, False]
+    assert payloads[1]["error_code"] == "BUDGET_EXHAUSTED"
+    assert [e.data["budget_delta"]["tool_calls"] for e in results] == [1, 0]
+    paused_run_id = next(e.run_id for e in events if e.type == RUN_PAUSED)
+
+    # 抬高**绝对**配额（1 → 3）⇒ 同一工具再次可用，同一个 run 跑完
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(
+            responses=[
+                AIMessage(content="", tool_calls=[
+                    {"id": "call_glob_c", "name": "glob", "args": {"pattern": "**/*.txt"}},
+                ]),
+                AIMessage(content="看完了"),
+            ],
+        ),
+    )
+    printed_again: list[str] = []
+    resumed = await resume_command(
+        session_id, run_tool_limits={"glob": 3}, expected_version=1,
+        write=printed_again.append,
+    )
+
+    assert resumed.paused is False, "".join(printed_again)
+    assert resumed.final_text == "看完了"
+    assert "tool glob: carried consumed 1 calls / 1 attempts / limit 3 (remaining 2)" in (
+        "".join(printed_again)
+    )
+
+    final_events = store.read_events(session_id)
+    types = [e.type for e in final_events]
+    assert types.count(RUN_PAUSED) == 1, "抬高之后不再暂停（计数是累计的：1 + 1 < 3）"
+    assert types.count(RUN_RESUMED) == 1 and types.count(RUN_COMPLETED) == 1
+    assert {e.run_id for e in final_events if e.run_id} == {paused_run_id}
+
+
+@pytest.mark.asyncio
+async def test_quota_rejections_do_not_trip_the_repeated_failure_guard(monkeypatch, tmp_path):
+    """`#314`：配额拒绝不喂同错熔断护栏，run 仍以**可恢复**的 `run/paused` 收口。
+
+    反例（两轴审查 Correctness 面发现）：`BUDGET_EXHAUSTED` 是 `ok=False`，与真实工具失败
+    同一条路 ⇒ 单条 assistant 消息里 ≥7 条**同参数**调用（第 1 条被接纳，其余 6+ 条在准入
+    前被拒）会在护栏那里攒到 SOFT（注入一条声称"连续失败 3 次"的纠正消息）再到 HARD
+    （`end_run(failed)`）。而护栏在工具批次末尾、暂停判定在循环顶 ⇒ **终态**
+    `run/failed` 抢先，`04 §9.1` 的"耗尽 ⇒ 暂停 / 可恢复"当场落空
+    （`run/failed` 之后 `validate_resume` / `latest_paused_run` 都不认它）。
+
+    配额拒绝既不是工具失败（那条调用根本没执行），也不是模型在死循环——预算是照着设计
+    到顶的，所以它不喂护栏；**其余**准入前拒绝（参数非法 / 未注册工具）仍照喂，
+    ADR-0014 决策 2-6 的 #69 语义不变（见 `tests/agent/test_repeated_tool_failure*.py`）。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    # 8 条**同参数**调用 = 同一指纹（护栏按指纹计数）；配额 1 ⇒ 第 1 条被接纳、7 条被拒
+    same_args = {"pattern": "**/*.txt"}
+    batched = AIMessage(content="", tool_calls=[
+        {"id": f"call_glob_{index}", "name": "glob", "args": same_args}
+        for index in range(8)
+    ])
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(responses=[batched, _continuation_json()]),
+    )
+
+    printed: list[str] = []
+    outcome = await cli.run(
+        "把文件列一遍", run_tool_limits={"glob": 1}, write=printed.append,
+    )
+
+    assert outcome.paused is True, "配额耗尽必须停在可恢复的暂停上，不是终态失败"
+    text = "".join(printed)
+    assert "dimension=run.tool_call_limits.glob" in text
+    assert "tool glob: consumed 1 calls / 1 attempts / limit 1 (remaining 0)" in text
+
+    events = JsonlSessionStore(root=_sessions_root(settings)).read_events(
+        _only_session_id(settings)
+    )
+    types = [e.type for e in events]
+    assert types.count(TOOL_FAILURE_GUARD) == 0, "拒绝不是失败：护栏一次都不该触发"
+    assert types.count(RUN_PAUSED) == 1 and RUN_FAILED not in types
+    # 纠正消息是护栏 SOFT 的产物（`injected_by=tool_failure_guard`）⇒ 一条都不该有
+    assert [e.data.get("injected_by") for e in events if e.type == USER_MESSAGE] == [None]
+
+    results = [e for e in events if e.type == "tool/result"]
+    payloads = [json.loads(e.data["content"]) for e in results]
+    assert [p["ok"] for p in payloads] == [True] + [False] * 7
+    assert {p.get("error_code") for p in payloads[1:]} == {"BUDGET_EXHAUSTED"}
+    # 账仍然只加 1：被拒的 7 条各带显式 0（`04 §9.1` 的可审计零）
+    assert [e.data["budget_delta"]["tool_calls"] for e in results] == [1] + [0] * 7

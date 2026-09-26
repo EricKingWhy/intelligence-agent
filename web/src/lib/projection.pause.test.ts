@@ -152,6 +152,131 @@ describe('run/paused — 非终态暂停的投影（#312）', () => {
   });
 });
 
+/** `#314`：被某个工具配额卡住的暂停（真实载荷形状：
+ *  `consumed.tool_calls_by_tool` × `limits.run.tool_call_limits`）。 */
+function toolQuotaPausedEvent(seq = 9): AgentEvent {
+  return ev({
+    type: EventType.RUN_PAUSED,
+    seq,
+    step_id: 2,
+    data: {
+      reason: 'budget_exhausted',
+      trigger_dimension: 'run.tool_call_limits.glob',
+      budget_version: 1,
+      consumed: {
+        agent_turns: 2,
+        model_requests: 3,
+        total_tokens: 40,
+        cost_usd: null,
+        tool_calls: 1,
+        tool_attempts: 3,
+        tool_calls_by_tool: { glob: 1 },
+        tool_attempts_by_tool: { glob: 3 },
+      },
+      limits: {
+        local: { max_agent_turns: 500, source: 'deployment' },
+        run: {
+          max_agent_turns_total: 8,
+          tool_call_limits: { glob: 1 },
+        },
+      },
+      continuation: {
+        completed: ['本逻辑 run 已消耗 1 次 glob 调用'],
+        remaining: ['暂停发生在下一轮模型决策之前'],
+        blockers: ['run.tool_call_limits.glob 到顶：consumed=1, ceiling=1'],
+        next_safe_action: '提高该工具的绝对配额后以同一 run_id 恢复',
+      },
+      closeout_source: 'model',
+      resume_requirements: [],
+      trace_id: 'trace-tool',
+    },
+  });
+}
+
+describe('run/paused 的 per-tool 事实（`#314` T6）', () => {
+  it('两个 counter 与两张表逐字解析（calls ≠ attempts，各自独立）', () => {
+    const s = projectHistory('s', [toolQuotaPausedEvent()]);
+    const paused = s.run_paused;
+    expect(paused?.trigger_dimension).toBe('run.tool_call_limits.glob');
+    expect(paused?.consumed_dimensions?.tool_calls).toBe(1);
+    expect(paused?.consumed_dimensions?.tool_attempts).toBe(3);
+    expect(paused?.consumed_dimensions?.tool_calls_by_tool).toEqual({ glob: 1 });
+    expect(paused?.consumed_dimensions?.tool_attempts_by_tool).toEqual({ glob: 3 });
+    expect(paused?.run_limits?.tool_call_limits).toEqual({ glob: 1 });
+    // turns 维照旧（它是同一份快照里的另一维，不是"上一维"）。
+    expect(paused?.consumed_dimensions?.agent_turns).toBe(2);
+  });
+
+  it('"表缺席"与"表为空"可分辨：前者 null（未知），后者 {}（一个都没调/没配）', () => {
+    const missing = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_PAUSED,
+      seq: 3,
+      data: { consumed: { agent_turns: 1 }, limits: { run: { max_agent_turns_total: 2 } } },
+    }));
+    expect(missing.run_paused?.consumed_dimensions?.tool_calls_by_tool).toBeNull();
+    expect(missing.run_paused?.run_limits?.tool_call_limits).toBeNull();
+
+    const empty = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_PAUSED,
+      seq: 3,
+      data: {
+        consumed: { agent_turns: 1, tool_calls_by_tool: {} },
+        limits: { run: { max_agent_turns_total: 2, tool_call_limits: {} } },
+      },
+    }));
+    expect(empty.run_paused?.consumed_dimensions?.tool_calls_by_tool).toEqual({});
+    expect(empty.run_paused?.run_limits?.tool_call_limits).toEqual({});
+  });
+
+  it('非整数 / 负数条目整条丢掉（编不出来的计数不冒充 0）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_PAUSED,
+      seq: 3,
+      data: {
+        consumed: { tool_calls_by_tool: { glob: 2, broken: 'x', neg: -1, frac: 1.5 } },
+        limits: { run: { tool_call_limits: { glob: 3 } } },
+      },
+    }));
+    expect(s.run_paused?.consumed_dimensions?.tool_calls_by_tool).toEqual({ glob: 2 });
+  });
+
+  it('ceiling 表的下限是 1（计数表是 0）：`0` / 负数 / 小数都不收', () => {
+    // 两张表用**不同**下限：计数表放行 0（"调了 0 次"是事实），ceiling 表要求 ≥ 1
+    // （后端 `parse_tool_call_limits` 只收正整数 ⇒ `{"glob": 0}` 那个入口必然 422）。
+    // 共用一个下限会让前端收下一个后端永远不可能落盘的 ceiling，面板于是显示一个
+    // 不存在于任何事件里的读数（两轴审查 Standards 面发现）。
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_PAUSED,
+      seq: 3,
+      data: {
+        consumed: { tool_calls_by_tool: { zero: 0, glob: 2 } },
+        limits: {
+          run: { tool_call_limits: { glob: 3, zero: 0, neg: -1, frac: 2.5 } },
+        },
+      },
+    }));
+    expect(s.run_paused?.run_limits?.tool_call_limits).toEqual({ glob: 3 });
+    // 同一份载荷里的**计数**表照旧保留 0——两处分界各自成立，不是一刀切。
+    expect(s.run_paused?.consumed_dimensions?.tool_calls_by_tool).toEqual({ zero: 0, glob: 2 });
+  });
+
+  it('重放幂等：逐帧应用与 projectHistory 重建同一投影（刷新/重连后一致）', () => {
+    const events = [
+      ev({ type: EventType.RUN_STARTED, seq: 1, data: { turn_index: 1 } }),
+      toolQuotaPausedEvent(9),
+    ];
+    let stepped = initConversation('s');
+    for (const e of events) stepped = applyEvent(stepped, e);
+    expect(projectHistory('s', events).run_paused).toEqual(stepped.run_paused);
+  });
+
+  it('Timeline 摘要报**那个工具**的调用数与它的 ceiling（不是 turns 的那一对）', () => {
+    expect(summarizeEvent(toolQuotaPausedEvent())).toBe(
+      'run.tool_call_limits.glob · 1 次调用/上限 1',
+    );
+  });
+});
+
 describe('run/resumed — 同 run 恢复的投影（#312）', () => {
   it('收起暂停事实并把状态放回 running；consumed 不变（恢复不重置）', () => {
     const paused = projectHistory('s', upToPause());

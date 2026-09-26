@@ -380,12 +380,17 @@ def test_paused_projection_carries_identity_version_limits_remaining_and_continu
     assert projection["limits"] == {
         "max_agent_turns_total": 3, "max_model_requests": None,
         "max_total_tokens": None, "max_cost_usd": None,
+        # `#314`：per-tool 配额是同一个 `limits` 投影里的一维（没配 = `{}`，不是缺键）。
+        "tool_call_limits": {},
     }
     assert projection["consumed"] == {
         "agent_turns": 2, "model_requests": 0, "total_tokens": 0, "cost_usd": "0",
+        "tool_calls": 0, "tool_attempts": 0,
+        "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
     }
     assert projection["remaining"] == {
         "agent_turns": 1, "model_requests": None, "total_tokens": None, "cost_usd": None,
+        "tool_call_limits": {},
     }
     assert projection["local_fuse"] == {"max_agent_turns": 500, "source": "deployment"}
     assert set(projection["continuation"]) >= {
@@ -1049,11 +1054,21 @@ def _pause_event_with_usage() -> SessionEvent:
 
 
 def test_run_started_budget_key_is_omitted_without_a_ceiling() -> None:
-    """不落键 = "本次 run 没有 run 作用域 ceiling"（缺省请求的事件序列逐字不变）。"""
+    """不落键 = "本次 run 没有 run 作用域 ceiling"（缺省请求的事件序列逐字不变）。
+
+    `#314` 起 per-tool 配额也是"一维"：只配工具配额的 run 同样要落快照（下面第二条），
+    否则重启后 `run/paused.limits` 重建不出客户端配的那张表。
+    """
     assert as_run_started_budget(RunLimits()) is None
     assert as_run_started_budget(RunLimits(max_agent_turns_total=7)) == {
         "run": {"max_agent_turns_total": 7, "max_model_requests": None,
-                "max_total_tokens": None, "max_cost_usd": None},
+                "max_total_tokens": None, "max_cost_usd": None,
+                "tool_call_limits": {}},
+    }
+    assert as_run_started_budget(RunLimits(tool_call_limits={"bash": 2})) == {
+        "run": {"max_agent_turns_total": None, "max_model_requests": None,
+                "max_total_tokens": None, "max_cost_usd": None,
+                "tool_call_limits": {"bash": 2}},
     }
 
 
@@ -1063,7 +1078,8 @@ def test_run_started_budget_key_is_written_when_only_a_new_dimension_is_set() ->
     budget = as_run_started_budget(RunLimits(max_model_requests=9))
 
     assert budget == {"run": {"max_agent_turns_total": None, "max_model_requests": 9,
-                              "max_total_tokens": None, "max_cost_usd": None}}
+                              "max_total_tokens": None, "max_cost_usd": None,
+                              "tool_call_limits": {}}}
 
 
 def test_launch_context_defaults_to_a_new_run() -> None:

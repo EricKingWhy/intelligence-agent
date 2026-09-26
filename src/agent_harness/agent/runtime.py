@@ -120,7 +120,8 @@ from agent_harness.storage import (
     OperationContext,
     SessionMeta,
 )
-from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
+from agent_harness.tooling import ErrorCode, ToolCall, ToolExecutor, ToolRegistry
+from agent_harness.tooling.quota import ToolQuotaWindow
 
 if TYPE_CHECKING:
     # #298 T7b：只借类型，不借实现。`memory.v2.runner` 会连带拉起 jobs / executor /
@@ -1215,11 +1216,14 @@ class AgentRuntime:
                 # 本次执行以一条非终态 `run/paused` 收口（预留的那次 closeout 除外）。
                 # 两个作用域在同一次判定里比（run 累计 ceiling / local fuse），命中
                 # 哪个维度由 `pause_trigger` 如实回传——不合并成一个计数器（`02 §5.1`）。
+                # 这一次读的账本同时是下面工具批次的 per-tool 配额**基数**（同一个
+                # 读数两处用）：两次读会各自扫描事件，除了更贵还会让"判定用的数"与
+                # "闸门用的数"有机会说两套话。
+                consumed_so_far = self._execution_consumed(
+                    launch_budget, session, arms.memory_event_start,
+                )
                 trigger_dimension = self._pause_trigger(
-                    launch_budget, steps=steps,
-                    consumed=self._execution_consumed(
-                        launch_budget, session, arms.memory_event_start,
-                    ),
+                    launch_budget, steps=steps, consumed=consumed_so_far,
                 )
                 if trigger_dimension is not None:
                     self._log("agent_decision", "回合预算到顶，run 暂停（非终态）",
@@ -1512,6 +1516,22 @@ class AgentRuntime:
                     )
                     yield to_agent_event(call_event)
                 tool_event_start = session.mark()
+                # per-tool 配额窗口（`#314` T6）：**一批一个**实例，基数是循环顶部那次
+                # 事件派生的 run 账（`consumed_so_far.tool_calls_by_tool`）——本批内
+                # 并发调用靠窗口里的同步预留不互相超发，批次之后由下一次循环顶部的
+                # 暂停判定读**账本**（ToolExecutor 落的 `budget_delta`）决定是否暂停。
+                # 基数不可得（resume 时账本无法重建）⇒ **不建窗口**：把"未知"当成 0
+                # 会多放行 ceiling 条调用，宁可不启用这道闸门（那种状态其实到不了这里：
+                # 暂停判定对未知基数是 fail-closed 的，见 `agent/run_budget.py`）。
+                admitted_calls = consumed_so_far.tool_calls_by_tool
+                tool_quota = (
+                    ToolQuotaWindow(
+                        limits=launch_budget.limits.tool_call_limits,
+                        consumed=admitted_calls,
+                    )
+                    if launch_budget.limits.tool_call_limits and admitted_calls is not None
+                    else None
+                )
                 tool_error = None
                 try:
                     executions = await self.executor.execute_batch(
@@ -1526,6 +1546,7 @@ class AgentRuntime:
                             agent_id=self._agent_id,
                         ),
                         step_id=step_base + steps,
+                        tool_quota=tool_quota,
                     )
                 except Exception as error:  # noqa: BLE001
                     tool_error = error
@@ -1564,6 +1585,9 @@ class AgentRuntime:
                     yield to_agent_event(self.executor.emit_result_event(
                         session, tool_call_id=execution.tool_call_id,
                         content=content, run_id=run_id, step_id=step_base + steps,
+                        # 预算增量由执行域算好（唯一计数点），这里只原样落盘：
+                        # 0 增量（准入前被拒 / 未执行）同样如实落，账本据此求和。
+                        budget_delta=execution.budget_delta,
                     ))
 
                     self._log("tool_operation", f"工具回复 {outcome}",
@@ -1594,6 +1618,17 @@ class AgentRuntime:
                             persisted.consecutive_failures,
                         )
                     else:
+                        # 配额拒绝**不喂**护栏（`#314`）：它既不是工具失败（那条调用根本
+                        # 没执行），也不是模型在死循环里撞墙——预算是照着设计到顶的，自然
+                        # 归宿是循环顶那次 `run/paused`（可恢复）。喂进去会让"单条 assistant
+                        # 消息给出 ≥7 条同参数调用"的场景在 HARD 熔断处收成 `run/failed`
+                        # **终态**、绕过那次暂停，与 `04 §9.1` 的"耗尽 ⇒ 暂停 / 可恢复"
+                        # 直接冲突（两轴审查 Correctness 面发现；触发还要求批前
+                        # `used < ceiling`，即窗口至少还放得进一条）。
+                        # **只**放过这一种 error_code：参数非法 / 未注册工具等准入前拒绝
+                        # 仍是 #69 要抓的重复失败（ADR-0014 决策 2-6 语义不变）。
+                        if execution.result.error_code == ErrorCode.BUDGET_EXHAUSTED:
+                            continue
                         sig = guard.observe(call.name, call.args, execution.result.ok)
                     if sig.level != GuardLevel.NONE and (
                         worst_signal is None or sig.level > worst_signal.level

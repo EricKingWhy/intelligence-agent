@@ -9,6 +9,7 @@
 import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { isCancelledRunFailure } from './runCancel';
+import { toolDimensionName } from './runBudget';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 
@@ -687,8 +688,30 @@ function dimensionDecimalText(raw: Record<string, unknown>, key: string): string
   return num === undefined ? null : String(num);
 }
 
-/** `data.consumed` → 四维读数（`#313`）。整组缺失 ⇒ null（老暂停载荷没有这组键，
- *  不是"四维都是 0"）。 */
+/** 分维计数表（`#314`：工具名 → 计数）：**整键缺席 ⇒ null**（未知），空对象 ⇒ `{}`
+ *  （已知，一个都没有）——两者的区别与 `cost_usd` 的"缺失 ≠ 0"同源。
+ *
+ *  `minimum` 由调用方给：**计数**表放行 0（"调了 0 次"是事实），**ceiling** 表要求
+ *  ≥ 1（后端 `parse_tool_call_limits` 只收正整数，`0` 的形状在那边必然 422）——
+ *  用同一个下限会让 `{"glob": 0}` 在前端被当成合法 ceiling 收下。表里不合形状的
+ *  条目**整条丢掉**（宁少不多：一个编不出来的计数不该冒充 0）。 */
+function countsByKey(
+  raw: Record<string, unknown>,
+  key: string,
+  minimum: 0 | 1,
+): Record<string, number> | null {
+  const value = raw[key];
+  if (!isRecord(value)) return null;
+  const out: Record<string, number> = {};
+  for (const [name, count] of Object.entries(value)) {
+    const num = numberOf(count);
+    if (num !== undefined && Number.isInteger(num) && num >= minimum) out[name] = num;
+  }
+  return out;
+}
+
+/** `data.consumed` → 四维读数 + 两张分维工具计数表（`#313` / `#314`）。整组缺失
+ *  ⇒ null（老暂停载荷没有这组键，不是"四维都是 0"）。 */
 function parseConsumedFacts(raw: unknown): RunBudgetDimensionFacts | null {
   if (!isRecord(raw)) return null;
   return {
@@ -696,11 +719,18 @@ function parseConsumedFacts(raw: unknown): RunBudgetDimensionFacts | null {
     model_requests: dimensionNumber(raw, 'model_requests'),
     total_tokens: dimensionNumber(raw, 'total_tokens'),
     cost_usd: dimensionDecimalText(raw, 'cost_usd'),
+    // `#314`：两个 counter 各自独立读（`tool_calls` 是逻辑调用，`tool_attempts`
+    // 含 retry）——它们不是别名，缺一个不等于另一个也可得。
+    tool_calls: dimensionNumber(raw, 'tool_calls'),
+    tool_attempts: dimensionNumber(raw, 'tool_attempts'),
+    tool_calls_by_tool: countsByKey(raw, 'tool_calls_by_tool', 0),
+    tool_attempts_by_tool: countsByKey(raw, 'tool_attempts_by_tool', 0),
   };
 }
 
-/** `data.limits.run` → 四维 ceiling（`#313`）。键名是载荷自己的 `max_*` 形态
- *  （与恢复请求 `budget.run` 的键同一套名字）；`null` = 该维没配（unlimited）。 */
+/** `data.limits.run` → 四维 ceiling + per-tool 配额表（`#313` / `#314`）。键名是载荷
+ *  自己的 `max_*` 形态（与恢复请求 `budget.run` 的键同一套名字）；`null` = 该维没配
+ *  （unlimited）。 */
 function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
   if (!isRecord(raw)) return null;
   return {
@@ -708,6 +738,10 @@ function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
     max_model_requests: dimensionNumber(raw, 'max_model_requests'),
     max_total_tokens: dimensionNumber(raw, 'max_total_tokens'),
     max_cost_usd: dimensionDecimalText(raw, 'max_cost_usd'),
+    // `#314`：`tool_call_limits` 是**绝对** ceiling 表（不是 remaining），
+    // 未配置的工具名不出现在表里（表缺席 = 没配任何工具配额）。下限是 1：
+    // 后端只收正整数 ceiling（`parse_tool_call_limits`），`0` 必然在那个入口 422。
+    tool_call_limits: countsByKey(raw, 'tool_call_limits', 1),
   };
 }
 
@@ -1196,11 +1230,27 @@ function summarizeRunInterrupted(event: AgentEvent): string {
 }
 
 /** `#312`：`run/paused` 行摘要 = 命中的维度 + consumed/ceiling 两个数。
- *  数字缺失就不写那一段（不编 0）——暂停行的价值正是"卡在哪、烧了多少"。 */
+ *  数字缺失就不写那一段（不编 0）——暂停行的价值正是"卡在哪、烧了多少"。
+ *
+ *  `#314`：命中 per-tool 配额时读的是**那个工具**的调用数与它的 ceiling（不是 turns
+ *  的那一对）——工具配额卡住时显示"消耗 3 轮 / 上限 4 轮"是在陈述另一件事。 */
 function summarizeRunPaused(event: AgentEvent): string {
   const info = parsePausedInfo(event);
+  const dimension = info.trigger_dimension || '预算到顶';
+  const tool = toolDimensionName(info.trigger_dimension);
+  if (tool !== null) {
+    // 读数判据是"**表**在不在"（`BudgetConsumed.calls_for` 同一口径）：表在而缺名 ⇒ 0；
+    // 表缺席（老载荷）才是"未知"。按"键在不在"读会把配了 ceiling 却没调用过的工具
+    // 报成未知，而同一份事件的服务端投影给的是 `remaining = ceiling`。
+    const table = info.consumed_dimensions?.tool_calls_by_tool;
+    const calls = table === null || table === undefined ? undefined : (table[tool] ?? 0);
+    const ceiling = info.run_limits?.tool_call_limits?.[tool];
+    return `${dimension} · ${calls === undefined ? '未知' : calls} 次调用/${
+      ceiling === undefined ? '无 ceiling' : `上限 ${ceiling}`
+    }`;
+  }
   const ceiling = info.run_limit === null ? '无 ceiling' : String(info.run_limit);
-  return `${info.trigger_dimension || '预算到顶'} · ${info.consumed_agent_turns}/${ceiling}`;
+  return `${dimension} · ${info.consumed_agent_turns}/${ceiling}`;
 }
 
 /** `#312`：`run/resumed` 行摘要 = 版本跃迁（CAS 的可见证据）。 */

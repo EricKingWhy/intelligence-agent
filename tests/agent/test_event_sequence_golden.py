@@ -951,10 +951,14 @@ async def test_pause_payload_key_set_is_pinned(tmp_path: Any) -> None:
     # （`#313` 起它进 `model_requests`：`02 §5.1` 把 closeout 与 primary/fallback
     # 并列为一次**实际** Provider 请求）。本场景 3 次请求 = 2 轮 primary + 1 次
     # closeout，两条计数点各自独立——这正是"turns ≠ requests"的最小证据。
+    # `#314` 起还有工具维：2 轮各一条被接纳的 echo 调用、各一次真实尝试
+    # （`tool_calls` 与 `tool_attempts` 是两个 counter，不是彼此的别名）。
     assert data["consumed"] == {
         "agent_turns": 2, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+        "tool_calls": 2, "tool_attempts": 2,
+        "tool_calls_by_tool": {"echo": 2}, "tool_attempts_by_tool": {"echo": 2},
     }, (
-        "consumed 四维全在；token / cost 是本场景替身模型**不自报**的维度 ⇒ null"
+        "consumed 各维全在；token / cost 是本场景替身模型**不自报**的维度 ⇒ null"
         "（`11 §6.1`：不可得 ≠ 0），不是 0"
     )
     assert data["limits"] == {
@@ -962,6 +966,9 @@ async def test_pause_payload_key_set_is_pinned(tmp_path: Any) -> None:
         "run": {
             "max_agent_turns_total": None, "max_model_requests": None,
             "max_total_tokens": None, "max_cost_usd": None,
+            # `#314`：per-tool 配额是 run 档的**动态**维度（未配置 ⇒ 空表，
+            # 不是缺键——缺键会让客户端分不清"没这一维"与"这一维是空的"）。
+            "tool_call_limits": {},
         },
     }, "limits 按作用域各还原生投影（`11 §6.1`）；run 档四维全在，没配的是 null"
     assert data["closeout_source"] == CLOSEOUT_DETERMINISTIC
