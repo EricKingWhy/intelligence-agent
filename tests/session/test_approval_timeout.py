@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -202,6 +203,43 @@ class TestCancelPairsTheDurableFact:
 
         with pytest.raises(KeyError):
             queue.resolve(approval_id, ApprovalResponse(approved=True))
+
+    def test_cancel_survives_a_failing_resolution_write(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """结清写入自己失败时，上抛的仍必须是取消：存储故障不许顶掉 `CancelledError`。
+
+        runtime 靠异常类型分臂（`02 §17` 要求取消与失败分开）——若这里被存储异常换掉，
+        同一个 run 会被记成 `run/failed`。代价是这条请求在 durable 面仍不成对，所以
+        失败必须留 ERROR 记录（不静默；ADR-0047 §4 残余 5）。
+        """
+        queue = PendingApprovalQueue()
+        holder = _InteractiveCallbackHolder(queue=queue, timeout_seconds=0)
+        session = _mock_session()
+        session.append.side_effect = [None, OSError("disk full")]
+        holder.bind_session(session)
+
+        async def _drive() -> None:
+            task = asyncio.create_task(holder(_request()))
+            while not queue.pending_ids():
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with caplog.at_level(logging.ERROR, logger="agent_harness.session.approval"):
+            asyncio.run(_drive())
+
+        assert session.append.call_count == 2, "第二次就是那条写失败的结清"
+        assert queue.pending_ids() == [], "裁决已入队（一次性语义不因写失败回退）"
+        approval_id = session.append.call_args_list[0].args[1]["approval_id"]
+        errors = [
+            record for record in caplog.records
+            if record.name == "agent_harness.session.approval"
+            and record.levelno == logging.ERROR
+        ]
+        assert errors, "写失败不得静默"
+        assert approval_id in errors[0].getMessage()
 
 
 class TestQueueExpire:

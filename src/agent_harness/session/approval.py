@@ -132,14 +132,25 @@ class InteractiveCallbackHolder:
                 if self._queue.expire(approval_id, fallback)
                 else self._queue.resolved_response(approval_id) or fallback
             )
-            self._session.append(
-                "permission/resolved",
-                {
-                    "approval_id": approval_id,
-                    "decision": settled.decision.value,
-                    "reason": settled.reason,
-                },
-            )
+            try:
+                self._session.append(
+                    "permission/resolved",
+                    {
+                        "approval_id": approval_id,
+                        "decision": settled.decision.value,
+                        "reason": settled.reason,
+                    },
+                )
+            except Exception:
+                # 结清写入自己失败（存储故障）时**不能**顶掉原异常：这条 except 分支
+                # 在取消 / 退出的栈上，换掉它会让 runtime 的取消臂不匹配、run 被记成
+                # `run/failed`（`02 §17` 要求取消与失败分开）。代价是这条请求在 durable
+                # 面仍不成对——记 ERROR 供排查，不静默（ADR-0047 §4 残余 5）。
+                logger.exception(
+                    "审批中断时的 fail-closed 结清写入失败：approval_id=%s 在事件流里"
+                    "仍不成对，完成闸门谓词 2 会继续阻断本会话",
+                    approval_id,
+                )
             raise
         self._session.append(
             "permission/resolved",

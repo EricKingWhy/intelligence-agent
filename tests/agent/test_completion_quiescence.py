@@ -649,8 +649,9 @@ def test_blocked_closeout_logs_the_blockers_without_values(
 ) -> None:
     """诊断面：`agent_decision` 带 source / reason / 逐条 blocker（只带 id）。
 
-    这一条读**日志记录**（诊断渠道，不变量 #4：Event ≠ Diagnostic Log）——完成闸门不落
-    任何 SessionEvent（D3），所以"为什么没完成"在 durable 面没有专属帧，诊断日志是
+    这一条读**日志记录**（诊断渠道，不变量 #4：Event ≠ Diagnostic Log）——完成闸门
+    **这个臂**不落任何 SessionEvent（D3；本轮的 `model/completed` 在进闸门前已按稳定
+    边界落盘），所以"为什么没完成"在 durable 面没有专属帧，诊断日志是
     它在进程外的唯一观察点。读 `caplog` 而不是 JSONL 文件：JSONL 的键名走
     `_DISPLAY_KEYS` 展示映射，本用例断言的是**字段语义**而不是展示层拼写。
     """

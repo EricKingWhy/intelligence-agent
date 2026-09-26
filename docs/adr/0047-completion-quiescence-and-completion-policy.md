@@ -64,7 +64,7 @@ blocked 状态在 SSE/WS/CLI/Web 上的**渲染**（客户端票）；暂停 / �
 | 2 | 没有未决的 `ApprovalRequest` | `session/approval.unresolved_approval_ids(events)` 非空（`approval_id` 维度配对：requested 减 resolved） | `unresolved_approval` |
 | 3 | 没有活动或待恢复的子 Agent | `agent/delegation-started` 减 `agent/delegation-finished`（`child_session_id` 维度）非空 | `active_child` |
 | 4 | 没有 pending / unknown 的 Ledger 记录 | 账本行 `state ∈ {PENDING, RUNNING, UNKNOWN}`（`RUNNING` 也算：它同样不是"已结清"） | `unsettled_operation` |
-| 5 | 没有 pending 的 reconcile 操作 | 账本行 `state is NEED_RECONCILE` **或** 带"副作用未证"标记（`storage.needs_reconcile`） | `pending_reconcile` |
+| 5 | 没有 pending 的 reconcile 操作 | 账本行 `state is NEED_RECONCILE` **或** 带"副作用未证"标记（`storage.has_unproven_side_effect`） | `pending_reconcile` |
 | 6 | 最新被接纳的模型决策不再请求新工具调用 | 调用方传入的 `new_tool_calls` 为真 | `new_tool_calls` |
 
 **作用域是 session，不是 run。** 谓词 1–5 的对象（事件与账本行）都是会话级 durable 事实：
@@ -114,9 +114,11 @@ blocked 状态在 SSE/WS/CLI/Web 上的**渲染**（客户端票）；暂停 / �
 这就是它准确的表示。
 
 写清边界（两轴审查订正）：走到闸门之前，本轮**已经**按既有的稳定边界落了这一步的
-`model/completed` 与 `MODEL_COMPLETED` checkpoint（关掉 `defer_model_event` 的那一支恰好就是
-"模型不再请求工具"这一步）。"零写入"说的是**闸门这个臂**——它不追加终态、不推 reconcile、
-不改账本、不写 Checkpoint、不做记忆形成；不是"这次执行在 durable 面上没有痕迹"。
+`model/completed`，并按同一稳定边界**调用** checkpoint 保存（`OnStableBoundary`；
+未接 `checkpoint_store` 或策略是 `NoCheckpoint` 时那次调用是空操作）。关掉
+`defer_model_event` 的那一支恰好就是"模型不再请求工具"这一步。"零写入"说的是
+**闸门这个臂**——它不追加终态、不推 reconcile、不改账本、不写 Checkpoint、不做记忆形成；
+不是"这次执行在 durable 面上没有痕迹"。
 
 可观察面三处：
 
@@ -188,7 +190,8 @@ class CompletionDecision:
   1. 静止 ⇒ 收口（并断言 `run/completed` 之前该次调用的 `tool/result` 已 durable、账本行已终态）；
   2. 真实执行域产出一条未结清 owner（生产 `BashTool` 跑一个先落副作用、再睡过工具超时的脚本
      ⇒ `UNKNOWN` + 未证标记；脚本**追加**写哨兵 ⇒ "副作用只发生一次"是可数的，不是形状判据），
-     该腿**不落任何** `tool/call` / `tool/result` / `tool/output_delta`（逐条核，不靠注释自证），
+     该腿在事件流里**零痕迹**（无任何事件带它的 call id），且整场景不产生任何
+     `tool/output_delta`（两条各自成断言、逐条核，不靠注释自证），
      同会话下一次真实执行被拒收口，且 owner 行逐字段不变；
   3. 按 classify（`UNKNOWN`→`NEED_RECONCILE`）→ adjudicate（→`SUCCEEDED`，裁决内容覆盖未证
      标记）两步结清 ⇒ 重入通过。
@@ -226,13 +229,20 @@ class CompletionDecision:
      变成 resolved（`/approve` 对不存在的 id 404，后端行为符合冻结契约）。⇒ 需要恢复层
      （启动扫描，`03 §5` 里 `run/interrupted` 的同一责任域）决定"陈旧请求按 fail-closed 落决议"
      还是别的语义词。**不在本票范围**：改它要动恢复契约，属恢复票。
+   - **结清写入本身失败**（存储故障，`Session.append` 抛错）：上面那条 fail-closed 补齐在
+     取消 / 退出的栈上，所以它**吞掉**自己的写入异常并记 ERROR，只为不顶掉栈上的原异常
+     （换掉它会让 run 被记成 `failed` 而不是 `cancelled`，`02 §17`）；
+     代价是这条请求的配对仍然缺失——与重启同病，同样等恢复票。
+     `test_cancel_survives_a_failing_resolution_write` 钉住"上抛的仍是取消 + 留 ERROR 记录"。
 6. **委派树里 blocked 子 run 映射成 `failed`**：`multiagent/provider.py` 只区分
    `completed` / 其余 → 父看到的是子代理失败，而不是"子会话有未结清工作"。语义上没说错
    （子确实没完成），但它改变了域流程的父可见行为，而委派侧的正式语义归 `#318`。
 7. **blocked run 在同一进程里不可续跑**：续跑的前提是 `run/paused`（`session/service.py`
    的 409 判据），而本票刻意不落暂停 ⇒ 同 run 只能等重启扫描补 `run/interrupted`（逻辑上
    仍在途的 run 被标成崩溃恢复态，是"不落暂停"的代价）。客户端目前只能靠"没有终态"推断。
-8. **deadline 过期与闸门同轮相遇时，闸门赢**：deadline 只在循环顶判（`runtime.py`），若模型
+8. **deadline 过期与闸门同轮相遇时，闸门赢**：deadline 除循环顶判定外还卡工具准入
+   （`tooling/executor.py` 的阶段 2.35：到点的调用**不被接纳**）与 closeout 容量
+   （`runtime.py` 的 `closeout_capacity`），但"这一轮要不要收口"只在循环里的闸门那一步判。若模型
    恰好在这一轮不再请求工具且账本有欠账，收口是 `quiescence_blocked` 而不是
    `run/paused(deadline)` + `operation/reconcile-required`。两条路都 fail-closed，但**优先级
    没有被任何规格写明**；先按"闸门在完成边界上、deadline 在循环顶上"实现，写在这里备查

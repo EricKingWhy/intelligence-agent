@@ -1509,7 +1509,9 @@ class AgentRuntime:
 
                 # 第 5 步：先判停止信号——若模型选择最终答复，进**完成闸门**（`#316`）。
                 # 顺序是契约（`02 §5.4`）：先证六条 quiescence，静止才轮到 policy；
-                # 两道任一不过都不落 `run/completed`，且本次执行不写任何事件。
+                # 两道任一不过都不落 `run/completed`，而**闸门这个臂自身零写入**：
+                # 本轮 `model/completed` 在进闸门前就按稳定边界落盘了（它恰好落在
+                # "模型不再请求工具"这一支，见 `_terminal_quiescence_blocked` 的契约）。
                 if not tool_calls:
                     final = _extract_text(ai.content)
                     report = await self._quiescence_report(arms)

@@ -280,7 +280,8 @@ async def _produce_unquiescent_owner(ctx: ScenarioContext, *, ledger: Any, sessi
     不是结构保证）。本调用在 durable 面上是**账本事实**：`ToolExecutor.execute` 自己不写
     `tool/call` / `tool/result`（生产链路里那两个事件由 Runtime 在它外侧写），而这条命令
     在 sleep 之前不说话 ⇒ 也不会触发 executor 的 `tool/output_delta` 流式落盘。
-    这一点由 `owner_leg_leaves_no_tool_call_events` 逐条核，不靠注释自证——否则
+    这一点由 `owner_leg_leaves_no_owner_attributed_events` 与
+    `no_tool_output_deltas_in_session` 两条断言分别逐条核，不靠注释自证——否则
     "owner 只是一行账本事实"这句话会随脚本改动悄悄失效（悬空谓词会凭空多出一条
     活过结清的 blocker，第 3 条腿就永远回不来了）。
     """
@@ -640,22 +641,28 @@ class CompletionQuiescenceGateScenario:
                 ),
             ),
             AssertionResult(
-                name="owner_leg_leaves_no_tool_call_events",
-                ok=(
-                    not [
-                        event for event in events
-                        if str(event.data.get("tool_call_id") or "") == OWNER_CALL_ID
-                    ]
-                    and not [event for event in events if event.type == TOOL_OUTPUT_DELTA]
-                ),
+                name="owner_leg_leaves_no_owner_attributed_events",
+                ok=not [
+                    event for event in events
+                    if str(event.data.get("tool_call_id") or "") == OWNER_CALL_ID
+                ],
                 detail=(
                     "owner 调用在事件流里留下的条数="
                     f"{len([e for e in events if str(e.data.get('tool_call_id') or '') == OWNER_CALL_ID])}"
                     "（`ToolExecutor.execute` 不写 `tool/call` / `tool/result`；"
-                    "一旦它留下了，悬空谓词就会多出一条活过结清的 blocker，第 3 条腿必然失败）；"
-                    f"`tool/output_delta` 总数={len([e for e in events if e.type == TOOL_OUTPUT_DELTA])}"
+                    "一旦它留下了，悬空谓词就会多出一条活过结清的 blocker，第 3 条腿必然失败）"
+                ),
+            ),
+            AssertionResult(
+                name="no_tool_output_deltas_in_session",
+                ok=not [event for event in events if event.type == TOOL_OUTPUT_DELTA],
+                detail=(
+                    "`tool/output_delta` 总数="
+                    f"{len([event for event in events if event.type == TOOL_OUTPUT_DELTA])}"
                     "（executor 在带 session 执行时会挂输出流，命令一说话就落盘 —— "
-                    "本场景的脚本在 sleep 之前不说话，所以 owner 是**账本事实**）"
+                    "本场景的脚本在 sleep 之前不说话，所以 owner 是**账本事实**。"
+                    "按**会话**计：带 call id 的 delta 已被上一条按 id 抓到，这里额外钉住"
+                    "整场景无流式输出，含 id 缺失的边角）"
                 ),
             ),
             # ── 第 2 条腿：未静止 ⇒ 拒绝收口，且拒绝零副作用 ─────────────────
