@@ -127,22 +127,18 @@ Recall@6=1.0、`chain_verified=true`、命中并注入 1 条 Collection 记忆�
 未达到 0.5 阈值；样例只有一个召回候选，因此尚不能证明额外重排会改善答案质量。报告为
 `docs/evidence/memory-v2-public-smoke-longmemeval-11db90a5.json`，清理与内容脱敏检查通过。
 
-### D8 — 可选 BGE cross-encoder 重排
+### D8 — BGE reranker 试验未证明收益，不纳入运行时
 
-用户于 2026-09-26 明确批准迭代 Memory V2 的既有“不调用在线 reranker”约束，并要求只有实测效果更好时
-才把 rerank 作为质量改进保留。PRD §5.5 与 §7.2 已相应修订：允许非生成式 cross-encoder，不消费生成文本。
-首个适配器复用已安装的 `httpx`，使用 SiliconFlow `BAAI/bge-reranker-v2-m3`；只有完整配置
-`RERANK_MODEL` / `RERANK_URL` / `RERANK_API_KEY` 时启用，未配置时保持原 deterministic hybrid 排序。
+用户于 2026-09-26 批准评估 SiliconFlow `BAAI/bge-reranker-v2-m3`，前提是实际质量有改善。LoCoMo rerank 与
+确定性排序控制组使用同一选例 hash，且两条 Memory V2 端到端链路均验证成功。Rerank run 在同一批 14 个授权
+候选上的 Recall@6 与 deterministic hybrid 都为 1.0，增量为 0。生成答案 F1 分别为 0.1 与 0.2；两次形成的
+活动记录数为 19 与 15，故不能把答案差异归因于 rerank。两者均未达到 0.5 的 smoke 答案门槛。
 
-调用发生在 Milvus 与 SQLite hybrid 候选已通过 SQLite tenant/user/status/scope 复核之后，最多发送 20 条候选；
-请求只含 query 与候选 content，不含 memory ID、用户/租户/项目标识或路由字段。响应只接受完整且唯一的候选索引
-与有限数值分数，不使用 provider 返回的文本。超时、非 200、无效 schema 或 adapter 异常只记录错误类型并回退
-到既有 hybrid 顺序，不让可选服务故障影响 Recall。未通过 authorization-filtered candidates 的文本不得离开进程。
-
-AC10 及测试冻结上述边界。真实 smoke 会记录实际是否应用 rerank、reranked hit 数，并对同一批候选分别计算
-deterministic hybrid 与 reranked Recall@6，避免形成差异干扰排序对照。只有 Recall@6 或独立 answer F1 有可复现的
-改善，才把 rerank 描述为质量收益。当前 LongMemEval 基线只有一个候选，reranker 对该结果无可排序空间，
-故此样例单独不能证明改进。
+本次样例没有显示检索收益，也没有证明答案质量改善，因此不把 reranker provider、配置或运行时接线纳入交付；
+PRD 保留原 deterministic hybrid 与“不调用在线 LLM reranker”约束。两份脱敏 smoke 报告留作实验记录：
+`docs/evidence/memory-v2-public-smoke-locomo-41b256f4.json` 与
+`docs/evidence/memory-v2-public-smoke-locomo-control-79ab6ce8.json`。后续若重新评估，需固定形成后语料，
+对同一候选记录做排序和答案 A/B 对照，并达到既有答案质量门槛后再提议修改规格。
 
 ## 3. Consequences and open verification
 

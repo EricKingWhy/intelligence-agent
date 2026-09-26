@@ -56,7 +56,6 @@ from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import MemoryJobExecutor
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
-from agent_harness.memory.v2.reranker import create_memory_v2_reranker
 from agent_harness.memory.v2.roles import (
     MEMORY_PRIMARY_ALIAS,
     MEMORY_PRIMARY_PROVIDER,
@@ -89,9 +88,7 @@ async def build_memory_v2_service(
 
         index = MilvusMemoryV2Index(vector_store)
     relay = MemoryV2IndexRelay(store, index)
-    return MemoryV2Service(
-        store, index, relay=relay, reranker=create_memory_v2_reranker(settings),
-    )
+    return MemoryV2Service(store, index, relay=relay)
 
 
 async def build_memory_formation(

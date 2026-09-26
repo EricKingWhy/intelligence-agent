@@ -222,12 +222,8 @@ class MemoryV2ContextProvider:
                 )
             run_id = run_context_var.get()
             if run_id is not None and (selected_profile or selected_collection):
-                ranking_version = (
-                    str(selected_collection[0].explanation.get("ranking_version", RANKING_VERSION))
-                    if selected_collection else RANKING_VERSION
-                )
                 session.append(MEMORY_RECALLED, {
-                    "ranking_version": ranking_version,
+                    "ranking_version": RANKING_VERSION,
                     "memories": [
                         *(recall_event_item(hit, MemoryTier.PROFILE) for hit in selected_profile),
                         *(recall_event_item(hit, MemoryTier.COLLECTION) for hit in selected_collection),

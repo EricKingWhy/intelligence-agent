@@ -39,7 +39,6 @@ from agent_harness.memory.v2.executor import DegradedReason, MemoryJobExecutor
 from agent_harness.memory.v2.formation import ModelOutputFailureKind, ModelSkipReason
 from agent_harness.memory.v2.jobs import MemoryJobOutcome, SqliteMemoryV2JobStore
 from agent_harness.memory.v2.recall import MemoryV2ContextProvider
-from agent_harness.memory.v2.reranker import RERANKING_VERSION
 from agent_harness.memory.v2.roles import resolve_memory_roles
 from agent_harness.memory.v2.runner import ChatModelInvoker, MemoryJobRunner
 from agent_harness.memory.v2.types import MemoryScope, TrustedMemoryIdentity
@@ -213,20 +212,6 @@ def _relevant_injected_hit_ids(
         and hit.record.id in active_ids
         and local_to_source.get(hit.record.source_session_id or "") in relevant
     }
-
-
-def _source_sessions_for_top_k(
-    hits: Sequence[Any], local_to_source: Mapping[str, str], *, limit: int = 6,
-) -> tuple[list[str], int]:
-    source_sessions: list[str] = []
-    pollution = 0
-    for hit in hits[:limit]:
-        source = local_to_source.get(hit.record.source_session_id or "")
-        if source is None:
-            pollution += 1
-        elif source not in source_sessions:
-            source_sessions.append(source)
-    return source_sessions, pollution
 
 
 class _RecordingRecall:
@@ -443,25 +428,16 @@ async def run_smoke(
             memory_injected_ids_var.reset(injected_ids_token)
             run_context_var.reset(recall_token)
 
-        retrieved_session_ids, pollution_count = _source_sessions_for_top_k(
-            recorder.hits, local_to_source,
-        )
-        deterministic_hits = sorted(
-            recorder.hits,
-            key=lambda hit: (-float(hit.explanation["score"]), hit.record.id),
-        )
-        deterministic_session_ids, _ = _source_sessions_for_top_k(
-            deterministic_hits, local_to_source,
-        )
+        retrieved_session_ids: list[str] = []
+        pollution_count = 0
+        for hit in recorder.hits[:6]:
+            source_id = hit.record.source_session_id
+            public_session_id = local_to_source.get(source_id or "")
+            if public_session_id is None:
+                pollution_count += 1
+            elif public_session_id not in retrieved_session_ids:
+                retrieved_session_ids.append(public_session_id)
         relevant_sessions = set(case.relevant_session_ids)
-        deterministic_recall_at_6 = (
-            len(relevant_sessions.intersection(deterministic_session_ids)) / len(relevant_sessions)
-            if relevant_sessions else None
-        )
-        selected_recall_at_6 = (
-            len(relevant_sessions.intersection(retrieved_session_ids)) / len(relevant_sessions)
-            if relevant_sessions else None
-        )
 
         active_ids = {record.id for record in active}
         active_tier_counts = Counter(record.tier.value for record in active)
@@ -474,10 +450,6 @@ async def run_smoke(
             recorder.hits, injected_ids=injected_ids, active_ids=active_ids,
             local_to_source=local_to_source,
             relevant_session_ids=case.relevant_session_ids,
-        )
-        reranked_hit_count = sum(
-            hit.explanation.get("ranking_version") == RERANKING_VERSION
-            for hit in recorder.hits
         )
         chain_verified = bool(
             committed_jobs and active and recorder.hits and memory_messages
@@ -563,20 +535,6 @@ async def run_smoke(
             "active_record_kind_counts": dict(sorted(active_kind_counts.items())),
             "active_records_with_relevant_source_session": active_relevant_source_count,
             "recall_hit_count": len(recorder.hits),
-            "reranker_applied": reranked_hit_count > 0,
-            "reranked_hit_count": reranked_hit_count,
-            "deterministic_recall_at_6": (
-                round(deterministic_recall_at_6, 6)
-                if deterministic_recall_at_6 is not None else None
-            ),
-            "selected_recall_at_6": (
-                round(selected_recall_at_6, 6) if selected_recall_at_6 is not None else None
-            ),
-            "reranker_recall_at_6_delta": (
-                round(selected_recall_at_6 - deterministic_recall_at_6, 6)
-                if reranked_hit_count and deterministic_recall_at_6 is not None
-                and selected_recall_at_6 is not None else None
-            ),
             "injected_message_count": len(memory_messages),
             "attributable_injected_hit_count": len(attributable_injected_hits),
             "chain_verified": chain_verified,
@@ -596,7 +554,7 @@ async def run_smoke(
                 "formation": "memory.primary",
                 "answer": "memory.primary",
                 "index": "milvus",
-                "retrieval": RERANKING_VERSION if reranked_hit_count else "hybrid-v1",
+                "retrieval": "hybrid-v1",
             },
             report_path=temporary_report,
             freeze_path=None,
@@ -609,7 +567,6 @@ async def run_smoke(
             "storage": "SqliteMemoryV2Store",
             "index": "MilvusMemoryV2Index",
             "recall_injection": "MemoryV2ContextProvider",
-            "reranking": "siliconflow_bge_cross_encoder" if reranked_hit_count else "deterministic_hybrid",
             "answer_generation": "configured_model_provider",
             "langfuse": "disabled_for_public_benchmark_content",
         }

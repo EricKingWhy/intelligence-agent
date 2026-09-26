@@ -28,7 +28,6 @@ from agent_harness.memory.v2.recall import (
     MemoryV2ContextProvider,
     MemoryV2RecallCapability,
 )
-from agent_harness.memory.v2.reranker import RERANKING_VERSION
 from agent_harness.memory.v2.search_tool import RetrieveMemoryV2Tool
 from agent_harness.memory.v2.store import MemoryOperationV2, SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
@@ -105,124 +104,6 @@ async def test_hybrid_search_keeps_keyword_only_and_dense_only_matches(recall) -
     assert by_id[semantic.id].explanation["dense"] == 0.97
     assert by_id[semantic.id].explanation["keyword"] == 0
     assert all(hit.explanation["ranking_version"] == RANKING_VERSION for hit in hits)
-
-
-@pytest.mark.asyncio
-async def test_reranker_receives_only_active_authorized_candidate_text(recall) -> None:
-    _original, store, index, relay = recall
-    visible = await store.create(make_draft(content="Project migration uses PostgreSQL."), USER)
-    hidden = await store.create(
-        make_draft(content="Project migration secret for another user."),
-        TrustedMemoryIdentity("tenant-a", "user-b"),
-    )
-    await relay.flush()
-    index.hits = [(visible.id, 0.8), (hidden.id, 0.99)]
-
-    class CapturingReranker:
-        def __init__(self) -> None:
-            self.query = ""
-            self.documents: list[str] = []
-
-        async def rerank(self, query, documents):
-            self.query = query
-            self.documents = list(documents)
-            return [(0, 0.9)]
-
-    reranker = CapturingReranker()
-    service = MemoryV2Service(store, index, reranker=reranker)
-
-    hits = await service.hybrid_search(
-        "Project migration", USER, scopes=[MemoryScope.USER_GLOBAL], limit=10,
-    )
-
-    assert [hit.record.id for hit in hits] == [visible.id]
-    assert reranker.query == "Project migration"
-    assert reranker.documents == [visible.content]
-    assert hidden.content not in reranker.documents
-    assert hits[0].explanation["ranking_version"] == RERANKING_VERSION
-    assert hits[0].explanation["reranker_rank"] == 1
-
-
-@pytest.mark.asyncio
-async def test_reranker_failure_preserves_deterministic_hybrid_order(recall, caplog) -> None:
-    _original, store, index, _relay = recall
-    first = await store.create(make_draft(content="project recall first"), USER)
-    second = await store.create(make_draft(content="project recall second"), USER)
-    index.hits = [(first.id, 0.2), (second.id, 0.95)]
-
-    class FailingReranker:
-        async def rerank(self, _query, _documents):
-            raise RuntimeError("must not be logged")
-
-    deterministic = MemoryV2Service(store, index)
-    with_reranker = MemoryV2Service(store, index, reranker=FailingReranker())
-    expected = await deterministic.hybrid_search(
-        "project recall", USER, scopes=[MemoryScope.USER_GLOBAL], limit=10,
-    )
-    actual = await with_reranker.hybrid_search(
-        "project recall", USER, scopes=[MemoryScope.USER_GLOBAL], limit=10,
-    )
-
-    assert [hit.record.id for hit in actual] == [hit.record.id for hit in expected]
-    assert "must not be logged" not in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_reranker_rejects_boolean_indices_and_preserves_hybrid_order(recall) -> None:
-    _original, store, index, _relay = recall
-    first = await store.create(make_draft(content="project recall first"), USER)
-    second = await store.create(make_draft(content="project recall second"), USER)
-    index.hits = [(first.id, 0.2), (second.id, 0.95)]
-
-    class BooleanIndexReranker:
-        async def rerank(self, _query, _documents):
-            return [(True, 0.99), (False, 0.01)]
-
-    deterministic = await MemoryV2Service(store, index).hybrid_search(
-        "project recall", USER, scopes=[MemoryScope.USER_GLOBAL], limit=10,
-    )
-    actual = await MemoryV2Service(
-        store, index, reranker=BooleanIndexReranker(),
-    ).hybrid_search(
-        "project recall", USER, scopes=[MemoryScope.USER_GLOBAL], limit=10,
-    )
-
-    assert [hit.record.id for hit in actual] == [hit.record.id for hit in deterministic]
-    assert all("reranker_rank" not in hit.explanation for hit in actual)
-
-
-@pytest.mark.asyncio
-async def test_recalled_event_records_reranker_version(tmp_path) -> None:
-    store = SqliteMemoryV2Store(tmp_path / "memory-v2.db")
-    await store.initialize()
-    index = _SearchIndex()
-    relay = MemoryV2IndexRelay(store, index)
-    record = await store.create(make_draft(content="The migration target is PostgreSQL."), USER)
-    await relay.flush()
-    index.hits = [(record.id, 0.9)]
-
-    class FixedReranker:
-        async def rerank(self, _query, _documents):
-            return [(0, 0.91)]
-
-    service = MemoryV2Service(store, index, relay=relay, reranker=FixedReranker())
-    session = Session.start(
-        JsonlSessionStore(root=tmp_path / "sessions"), session_id="session-reranked",
-    )
-    session.append(USER_MESSAGE, {"content": "What is the migration target?"})
-    run_id, _ = session.begin_run()
-    identity_token = set_identity_context(IdentityContext("tenant-a", "user-a", ["user"]))
-    run_token = run_context_var.set(run_id)
-    try:
-        provider = MemoryV2ContextProvider(service)
-        assert await provider.select(session, 2000)
-    finally:
-        run_context_var.reset(run_token)
-        identity_context_var.reset(identity_token)
-
-    recalled = next(event for event in session.events if event.type == MEMORY_RECALLED)
-    assert recalled.data["ranking_version"] == RERANKING_VERSION
-    assert recalled.data["memories"][0]["ranking"]["reranker_score"] == 0.91
 
 
 @pytest.mark.asyncio
