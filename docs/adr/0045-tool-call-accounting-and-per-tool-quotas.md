@@ -213,8 +213,16 @@ Web 侧一处刻意的**逐字镜像**：配了配额但从未调用过的工具
   `tests/test_cli_run_pause_resume.py`（真工具 `glob` 的端到端：暂停 → `--run-tool-limit` → 完成）。
 - 前端：`web/src/lib/runBudget.test.ts`、`web/src/lib/projection.pause.test.ts`、
   `web/src/components/PausedPanel.test.tsx`、`web/src/lib/api.test.ts`。
-- Live Gate：`tests/live_gate/test_pause_resume_scenario.py` 的真实模型 + **真实生产工具**
-  三连跑（同 SHA/树）证据见 tracker 的 T6 段。
+- Live Gate：`evaluation/live_gate/scenarios/long_task.py`（v3 起把实现身份 + 两套计数 +
+  显式 ceiling 纳入断言面）在**真实模型 + 生产工具**上三连跑（同 SHA/树）。
+  真实 3/3 证据：`docs/live_gate/20260926T012418-317cf2cb02c9-long-task-past-legacy-turn-limit/`
+  ——绑定 sha `317cf2cb` / tree `2b906371`，3 次尝试 `steps=16/16/16`（均越过旧上限 10）、
+  `tool_calls=16/16/16`、`tool_attempts=16/16/16`、per-tool 表 `bash=12/14/12`、
+  请求的 ceiling `{'bash': 24}` 与 `run/started` 落盘快照一致；`validate` 复核 24/24 条
+  自洽（含工作树偏离、沙箱销毁、凭证扫描）。
+  ⚠ 本 ADR 写于证据首次产出之前，当时的指针**指错文件**（写成
+  `tests/live_gate/test_pause_resume_scenario.py`，那是 T4 的场景测试）且**提前宣告
+  证据存在**——两轴审查的 Standards 面按 P1 拒收，此处于证据入库时按实测订正。
 
 ---
 
