@@ -5733,8 +5733,8 @@ ceiling 24 = 结构下限的两倍），撞线会让 `run_completed` 判红、�
 | 14 | `c6d9cd6` | 修复 | **定向两轴审查处置**：CLI 补 deadline 时刻行（P2：票面 Must Do 在 CLI 上名存实亡）、投影读严、Timeline 报时刻（+127 −23） |
 | 15 | `cf1879d` | 测试 | **修后重审 8 条 P3 收尾**（恢复块断言 + 判定分叉登记订正；无生产行为变更，+54 −14） |
 | 16 | `1444e2e` | 证据 | Live Gate **最终重跑**证据入库（`20260926T171722-cf1879d3cf32-…`，绑定 `cf1879d3` / tree `99a8b465`） |
-| 17 | 本记录笔 | docs | 台账 331–334 + 归档小节 + `PHASE_STATUS` 索引 + ADR-0046 §5 读数 |
-| 18 | Gate-0 读数笔 | docs | `docs/gate/<sha>.json` 落盘 + 本段门禁读数行 |
+| 17 | `28995ce` | docs | 本记录笔：台账 331–334 + 归档小节 + `PHASE_STATUS` 索引 + ADR-0046 §5 读数 |
+| 18 | 本读数笔 | docs | `docs/gate/<sha>.json` 落盘 + 门禁读数行（tip `28995ce` 的裸全量） |
 | 19 | 本集成落账笔 | docs | 集成落账（PR / merge）+ §14.9 回补通知 + 本笔 Gate-0 读数落盘 |
 
 **两轴独立审查（发现阶段，各一独立只读子代理，冻结 sha `03c1830`，读范围 = `f13ed0d..03c1830`）**：
@@ -5891,6 +5891,14 @@ TS2741** —— `#315` 给 `RunLimitsFacts` 加了必需键 `deadline_at`，而�
   chrome-devtools-mcp 浏览器），而 `playwright.config.ts` 按 `#209` 的设计**拒绝复用**别的 clone 的 dev server、
   也不肯让出端口 ⇒ 本次用**替用配置**（端口 5183，projects / workers=2 / trace / `reuseExistingServer: false` /
   `--strictPort` / 配置加载期守卫全部逐字同源）跑完即删（跑后 `git status --short` 只有 `?? .zcodeignore`）。
+
+**门禁（Gate-0 裸全量，tip `28995ce` / tree `215e16e2f244`）**：**6/6 PASS**，墙钟 **41.05s**
+（diff-check 0.04 / ruff 0.87 / oxlint 0.62 / tsc 33.64 / guards 4.25 / coverage 1.62），读数落盘
+`docs/gate/28995ce96dcf4da87054f1bc605e1023e205a6c3.json`（`tracked_matches_head=true`、未跟踪清单只
+`.zcodeignore`）；bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，另跑 `git diff --check f13ed0d..HEAD`
+**exit 0** 补上「已提交未推送」那 17 笔的范围；覆盖闸门在**同一 tip** 上 **exit 0**（台账 331–334 四行新行，
+`089524a~1..HEAD` 每条 commit 均有归属）。该 json 由**本读数笔**入库（`.json` 在 docs-only 白名单里 ⇒
+**无需**新台账行）。
 
 **审查轮次分类（§8.3）**：发现阶段两轴（`f13ed0d..03c1830`）→ 处置 `aa003b4` + `24a1acc` → **修后重审**两轴
 （冻结 `24a1acc`）→ **发现阶段补审**（§8.3 第 8 条，本票一次，已用尽）→ 处置 `98d56d6` → 权威车道抓回前端缺陷 `71f19f8`

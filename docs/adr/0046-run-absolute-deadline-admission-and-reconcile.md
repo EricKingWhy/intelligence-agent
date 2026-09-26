@@ -357,8 +357,11 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
 
 ### 5.3 门禁读数
 
-- Gate-0 六条机械车道：读数落盘 `docs/gate/<sha>.json`（**docs 记录笔的 tip** 上那次裸全量；文件名与该次
-  车道读数由同一批的**读数笔**补记——§14.10 禁止手抄读数，本文不预写数字）。
+- Gate-0 六条机械车道：读数落盘 `docs/gate/28995ce96dcf4da87054f1bc605e1023e205a6c3.json` ——
+  **6/6 PASS**，墙钟 **41.05s**（diff-check 0.04 / ruff 0.87 / oxlint 0.62 / tsc 33.64 / guards 4.25 /
+  coverage 1.62），tip `28995ce` / tree `215e16e2f244`、`tracked_matches_head=true`、未跟踪清单只
+  `.zcodeignore`。bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，另跑 `git diff --check f13ed0d..HEAD`
+  **exit 0** 补上「已提交未推送」那 17 笔的范围（§14.10 不手抄读数：以上数字全部取自该 json）。
 - 审查覆盖闸门：`scripts/check_review_coverage.py` **exit 0**（本票台账行 327–334；集成前的**前置条件**）。
 - 重车道（全量 pytest / vitest / oxlint / vite build / playwright e2e）的读数同样来自**可复跑的命令 + 写进
   集成记录**（`docs/SDD_TICKET_TRACKER.md` 的 `## T7` 段），不在本文内手抄。
