@@ -312,38 +312,56 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
 | `tests/recovery/test_deadline_restart.py` | 2 | **kill / restart**：已知结果的 mutating 不欠账也不重跑；未知结果的 mutating 拒绝恢复且**永不**重跑（真子进程） |
 | `tests/recovery/test_reconcile.py` | 26 | 裁决链（含"非悬空但未证"的收集面与"只补缺的那一半 `tool/result`"） |
 | `tests/web/test_run_pause_resume_api.py` | 15 | HTTP 面：422（形状）/ 409（状态）分界、`reconcile` 投影、resume 契约 |
-| `tests/test_cli_run_pause_resume.py` | 25 | CLI 两条命令 + 暂停摘要（deadline 行、真实 argv 形状的恢复提示、过去时刻在 `run` 合法 / 在 `resume` 被拒） |
+| `tests/test_cli_run_pause_resume.py` | 27 | CLI 两条命令 + 暂停摘要（deadline 行、真实 argv 形状的恢复提示、过去时刻在 `run` 合法 / 在 `resume` 被拒）；**形状认不出不编时刻**与**键缺席不印一片 `unavailable`** 两条由 `c6d9cd6` / `cf1879d` 补（前者同时是"恢复块给的是**新**时刻"那条断言的前提） |
 | `tests/live_gate/test_deadline_scenario.py` | 43 | 场景的判定本身（含 25 条 `test_red_*`：读错投影键、空账本不得读成干净、欠账必须**逐条**被点名、恢复后零准入、恢复后的不安全收尾 …） |
 | `tests/agent/test_event_sequence_golden.py` | 243（本票只改 4 行） | golden：deadline 只新增事实，既有会话的序列逐字不变 |
 
-前端：`web/src/lib/runBudget.test.ts`（+97 行，含"小写 `z` 必须被拒"这一格）、
-`web/src/components/PausedPanel.test.tsx`（+60 行）。
+前端三处：`web/src/lib/runBudget.test.ts`（+117 行 / 30 条，含"小写 `z` 必须被拒"这一格）、
+`web/src/components/PausedPanel.test.tsx`（+64 行 / 17 条）、`web/src/lib/projection.pause.test.ts`
+（+108 行 / 21 条；`#315` 那一段钉在**投影**上——既有用例手工构造 `RunPausedInfo`、绕过了投影解析器，
+`71f19f8` 抓回的缺陷正落在那个缝里）。
 
 ### 5.2 Live Gate（票面 AC 的强制证据）
 
-场景 `run-deadline-boundary`，真实 Provider + 真实 mutating 工具（生产默认装配、local sandbox）：
+场景 `run-deadline-boundary`，真实 Provider + 真实 mutating 工具（生产默认装配、local sandbox）。
+**最终**证据绑定 sha `cf1879d3` / tree `99a8b465`：
 
-- **PASS 3/3**，运行树 `dd23306441721b1347fa8ee167d8c8393f2eda99`（sha `3cd8253f…`），
-  证据 `docs/live_gate/20260926T100829-3cd8253f0625-run-deadline-boundary/`，
-  `worktree_proof.tracked_matches_head: true`、无 seam、无注入失败；
-  独立复核 `scripts/live_gate.py validate <evidence.json>` → 声明 PASS 且证据自洽，24 条断言 0 FAIL。
-- 三次 attempt 的收尾形状：`paused@v2 + 5 次 tool/call` / `completed + 0` / `paused@v2 + 4 次`——
-  **两种合法结局在同一次 3/3 内各出现过**（D9 的实测依据）。
-- 被拒的两次运行**同样入库**（不删）：`9496226e7518`（投影键读错 ⇒ TypeError 3/3）、
-  `1a88b799bed6`（恢复面判据写成"必须再调工具" ⇒ 2/3）。
-- ⚠ **上述证据产生于审查修复之前的场景代码**：修后场景口径有两处收紧（Arm A 要求账本
-  **非空**、Arm B 的 blockers 判据 `any`→`all`）⇒ 修复批次后**重新跑过 3/3**，读数见 §5.4
-  （旧的这份仍是有效证据——收紧的是"空账本/部分点名也会绿"这两条空泛通道，不影响旧 PASS
-  的结论方向）。
+| 证据目录 | 绑定树 | 判定 | 读数 |
+| --- | --- | --- | --- |
+| `20260926T171722-cf1879d3cf32-run-deadline-boundary`（**最终**） | `99a8b465` | PASS 3/3 | 68.4s / 66.4s / 52.1s，每次 **23/23 断言**；收尾 **paused / paused / completed** |
+| `20260926T153033-98d56d6149f8-run-deadline-boundary` | `9c037d91` | PASS 3/3 | 70.6s / 66.7s / 71.2s，每次 23/23 断言；其后 CLI 与前端投影又动过 ⇒ 由本份取代，保留作原始依据 |
+| `20260926T100829-3cd8253f0625-run-deadline-boundary` | `dd233064` | PASS 3/3 | 修复批次**之前**的场景口径 ⇒ 保留作原始依据 |
+| `20260926T095353-1a88b799bed6-run-deadline-boundary` | `9496226e` 系 | **FAIL 3/3**（每次恰 1 条红：`resumed_leg_did_new_work`） | 恢复面判据原写成"必须再调工具"，收窄成"**接纳**"（`509a229`） |
+| `20260926T083245-9496226e7518-run-deadline-boundary` | `9496226e` | **FAIL 3/3**（`TypeError: 'NoneType' object is not iterable`，0 条断言产生） | 场景读错投影键（`0285418`） |
+
+**最终那份的机器读数**：`sha cf1879d3` / `tree 99a8b465`、`worktree.tracked_matches_head=true`、
+未跟踪清单只有 `.zcodeignore`；独立复核 `scripts/live_gate.py validate <evidence.json> --require-pass`
+⇒ 声明 PASS 且由 attempts **重算一致**、**24 条检查 0 FAIL、exit 0**。三次收尾形状
+**paused / paused / completed** ⇒ **D9 的两种安全结局在同一次 3/3 内各出现**（validator 对两次暂停结局给的是
+结构性 ⚠️「轨迹里没有该 run 的终态事件」而不是 FAIL：暂停本就是非终态收尾）。每次 attempt 内 **23/23 断言**：
+`deadline_pause_snapshot`（`reason=deadline` / `trigger=run.deadline_at` / `closeout=deterministic` /
+`resume_requirements=[]`）、`deadline_pause_precedes_any_terminal`、`real_work_admitted_before_the_deadline`
+（真实 Provider 请求 3 / 5 / 6 轮 + 真实 BashTool，`chain-steps.txt` 只跑到 7/40、10/40、4/40 ⇒ 结构上跑不完）、
+`deadline_outcome_is_safe_or_needs_reconcile`（Arm A 与 Arm B **各自完整成立**）、
+`uncertain_mutation_recorded_as_unproven`（生产 BashTool MUTATING 超时 ⇒ `TIMEOUT` + `UNKNOWN` +
+`needs_reconcile=True`）、`no_new_admission_after_the_deadline`（`DEADLINE_EXCEEDED` + **账上不留行** +
+副作用计数不动）、`unreconciled_debt_blocks_recovery`（生产恢复入口 `RecoveryConflict`、拒绝不顺手改账、
+**没有盲重跑**）、`resume_contract_holds`、`durable_replay_matches_live`、`no_fuse_trip` …；
+`seams` 空、`secret_scan` 0 命中、`sandbox.deleted=true`（一次性工作区已核实销毁）、
+`scope.does_not_cover` 如实列出三条未覆盖面。
+
+被拒的两次运行**同样入库**（不删）——它们的读数正是"判据太窄"与"读错键"这两个真实缺陷的证据。
+**证据的取代链如实记**：`dd233064` →（场景口径两处收紧：Arm A 要求账本**非空**、Arm B 的 blockers 判据
+`any`→`all`）→ `9c037d91` →（CLI 与投影又变）→ `99a8b465`（最终）；旧 PASS 的结论方向不受影响
+（收紧的是"空账本 / 部分点名也会绿"这两条**空泛通道**）。
 
 ### 5.3 门禁读数
 
-- Gate-0 六条机械车道：`docs/gate/<sha>.json`（**集成时**那次裸全量运行的落盘读数；本 ADR
-  定稿时该文件尚未产生，不在此处预写数字——§14.10 禁止手抄读数）。
-- 审查覆盖闸门：`scripts/check_review_coverage.py` 退出 0（同上，集成前的**前置条件**，
-  不是写作本文时的既成事实）。
-- 重车道（全量 pytest / vitest / build / e2e）的读数同样来自**可复跑的命令 + 写进集成记录**，
-  不在本文内手抄。
+- Gate-0 六条机械车道：读数落盘 `docs/gate/<sha>.json`（**docs 记录笔的 tip** 上那次裸全量；文件名与该次
+  车道读数由同一批的**读数笔**补记——§14.10 禁止手抄读数，本文不预写数字）。
+- 审查覆盖闸门：`scripts/check_review_coverage.py` **exit 0**（本票台账行 327–334；集成前的**前置条件**）。
+- 重车道（全量 pytest / vitest / oxlint / vite build / playwright e2e）的读数同样来自**可复跑的命令 + 写进
+  集成记录**（`docs/SDD_TICKET_TRACKER.md` 的 `## T7` 段），不在本文内手抄。
 
 ### 5.4 作者红证与变异证据（`#315` 的审查修复轮）
 
@@ -368,6 +386,26 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
     D5 的原话是"'能恢复'这件事只对暂停成立"，而"能恢复"的准确判据就是 `resumable`。
   - 其余为口径/文字类：`operation.py` 的"三处读者"补齐第三处、`runtime.py` 一处过期
     deadline 注释、ADR 本节的 `--collect-only` 条数与实测对齐、前端一处 JSDoc 换行。
+- **权威前端车道（`tsc -b`）抓回的真缺陷（`71f19f8`，来源是 Gate-0 车道 ④，不是审查轮）**：
+  本票给 `RunLimitsFacts` 加了必需键 `deadline_at`，而投影解析器 `parseRunLimitFacts` 没读它
+  ⇒ 生产路径上 `run_limits.deadline_at` 恒 `undefined`，暂停面板「绝对截止时刻」那一行**没有时刻**
+  （rc=2 / 9 处 TS2741）。既有用例看不见这一格：它们手工构造 `RunPausedInfo`、绕过了投影解析器。
+  处置 = 新增 `dimensionInstantText` + 补读该键 + 3 条钉在**投影**上的用例（删那一行 ⇒ 3 红）。
+  与 T5 / T6 同一形态：**每个文件单测都绿、合起来才看得见的缺口**由权威车道抓回。
+- **定向两轴审查（冻结 sha `71f19f8`，读范围 `0697ec4..71f19f8`；各一独立只读子代理）**：
+  两轴各 **0 P0 / 0 P1**，合计 10 条（含 **1 条 P2**：CLI 上票面 Must Do 的「Show deadline … CLI」
+  名存实亡——暂停摘要只打 `dimension=run.deadline_at`，**时刻从不出现**，而 Web 面板与投影都打得出）。
+  其余为可读性/口径/夹具类。处置 `c6d9cd6`：CLI 新增 `_deadline_dimension_lines`（暂停块与恢复块都打
+  `deadline: <时刻>`；没配 ⇒ `unlimited`、形状认不出 ⇒ `unavailable`、**键缺席 ⇒ 零行**）、
+  `dimensionInstantText` 收严（带首尾空白的文本当场收下会与后端**事件回读** `_deadline_or_none` 分叉）、
+  `summarizeRunPaused` 加 deadline 分支（Timeline 报**那个时刻**，不再拿 turns 的 `2/8` 冒充）。
+- **修后重审（冻结 sha `c6d9cd6`，读范围 `71f19f8..c6d9cd6`）**：两轴各 0 P0 / 0 P1，8 条 P3 于 `cf1879d`
+  全部收尾——只动测试断言、注释与登记文本，**无生产判据变更**；其中"恢复块那一行原先零覆盖"一条带机械证据
+  （删掉它，27 条 CLI 用例全绿）。本轮处置不含新生产代码面 ⇒ 按 §8.3 第 8 条不触发补审。
+- **本段变异（7 个，仓库外副本，失败集互不相同）**：删 `parseRunLimitFacts` 那一行 ⇒ 3 红
+  （新用例进来后同一变异 ⇒ **4 红**）；投影退回**宽容读法**（带空白那一格）⇒ 1 红；删 Timeline 的
+  deadline 分支 ⇒ 1 红（`run.deadline_at · 2/8`）；CLI helper 返回零行 ⇒ 2 红；CLI 照单全收（印 `None`）
+  ⇒ 1 红；恢复块丢行 ⇒ 1 红；恢复块改打旧暂停时刻 ⇒ 1 红。
 
 ---
 
@@ -420,3 +458,10 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
    手工构造 `RunBudgetState` 的地方只有 `SessionService.budget_projection` 的一处空会话默认值。
    登记而不改第一分支：它定的是投影的**键集**，动它等于同时改暂停载荷的形状，而收益只在
    一个造不出来的状态上（2026-09-26 补审 P3）。
+9. **`limits.run.deadline_at` 的形状不由显示层复判。** 三面读的是**同一份 durable 事件**，但"形状认不出"
+   时**用词**两端不同：CLI 对显式 `null` 报 `unlimited`（与同块 `limit unlimited` 同词）、
+   对数 / 布尔 / 空串 / 带首尾空白报 `unavailable`，Web 侧一概 `null`（面板显示 `unavailable`）。
+   剩下的分叉是"非空、无首尾空白、但后端**事件回读** `_deadline_or_none` 收不下的**文本**"
+   （非 ISO / 无时区朴素 ISO / 小写 `z`）——**不可达输入**（唯一写入者 `RunLimits.as_projection`
+   的 `_deadline_text` 恒为 `…Z` 收尾的 RFC 3339）。完整登记与逐格判据在 **ADR-0045 §6.1**
+   （同一事实只在一处写全，这里只留指针）。
