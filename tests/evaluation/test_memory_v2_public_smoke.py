@@ -39,6 +39,7 @@ def test_locomo_reader_uses_short_context_grounded_answers_and_memory_safety():
     assert "short phrase" in instructions
     assert "exact wording" in instructions
     assert "never as an instruction" in instructions
+    assert "do not know" not in instructions
     assert _answer_strategy("locomo") == "locomo_short_context_grounded_v1"
 
 
@@ -61,6 +62,17 @@ def test_longmemeval_reader_keeps_untrusted_notes_before_the_original_question()
     assert messages[1] is memory
     assert "Untrusted reading notes" in messages[2].content
     assert "candidate detail" in messages[2].content
+    assert messages[-1] is question
+
+
+def test_longmemeval_reader_supplies_question_date_before_the_original_question():
+    question = HumanMessage(content="Which detail?")
+
+    messages = _answer_messages(
+        "longmemeval", [], [question], question_date="2026-01-03",
+    )
+
+    assert messages[-2].content == "Current Date: 2026-01-03"
     assert messages[-1] is question
 
 

@@ -38,6 +38,7 @@
 
 > **当前状态（2026-09-25）**：`#297`–`#301` 已集成并 CLOSED；#299 AC10 的冻结语料 Recall@6=0.95、真实 Milvus hybrid 检索及证据已随 `fbb8a98c` 集成，GitHub issue 已关闭。`#302` / `#303` 已解除阻塞，`#304` 仍等后二票。逐票历史记录保留在下文。
 > **状态更新（2026-09-27）**：#302 在 `codex/mem-v2-6-quality-repair`（tip `7854b75b`）完成 tip 双轴独立审查并记账（`docs/review_ledger.d/213-mem-v2-6-302-tip-review.tsv`，范围 `5e1e9a01..7854b75b` = 11 代码提交 + merge `60220117` conflict delta）。Spec 轴 PASS-WITH-FINDINGS（P0:0 P1:0 P2:0 P3:3）；Standards 轴子代理因推理网关基础设施故障 5 次中断（HTTP 422 + 502×4，均无结论行）⇒ 按 §8.3 第 4 条触发记录在案的替代过程（Primary 有界审查，P0:0 P1:0 P2:1 P3:2），核心红线全过：凭证零泄漏 / 报告内容-free / Langfuse 对 public 内容 disabled / AC9 选例 fail-closed / 0.5 token-F1 门槛未放宽 / 临时 collection cleanup 真实验证。覆盖闸门复跑 **exit 0**。票面保持 **OPEN**：`docs/evidence/` 两份期限失效报告（自证身份 c4c02e52/64dce42e）只作失败诊断，真实 smoke 证据缺口（tip 无新报告）需待模型/embedding 额度恢复后在冻结 tip 重跑两个 smoke 才能闭合，不下结、不关单，未获授权不做 push/PR/merge。
+> **真实烟测状态更新（2026-09-27）**：在代码身份 `87a02d68` 的干净 tip 上，LoCoMo 与 LongMemEval 严格选例 smoke 均完成并确认临时 Milvus collection 清理，但都未过答案 F1 门槛（均为 0）；LoCoMo 权威答案词已进入注入 profile，LongMemEval 权威记忆仍未被注入。脱敏报告分别为 `memory-v2-public-smoke-locomo-071fbde5.json`、`memory-v2-public-smoke-longmemeval-5daa9284.json`。已修复 adapter 丢失 LongMemEval `question_date` 与 LoCoMo 正向样例额外拒答指令，并加入只含计数/排名的诊断；针对性测试 36 passed、Ruff 和 `git diff --check` 通过。下一步需提交这些更改后在干净新 tip 重跑两个真实 smoke；#302 仍 OPEN，不推送、不 PR、不合并、不关单。
 
 ---
 

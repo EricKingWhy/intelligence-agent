@@ -115,6 +115,7 @@ def test_longmemeval_loader_preserves_evidence_sessions_and_turns(tmp_path):
     assert cases[0].relevant_session_ids == ("s1",)
     assert cases[0].relevant_turn_ids == ("s1:0",)
     assert cases[0].sessions[1].turns[0].role == "assistant"
+    assert cases[0].question_date == "2026-01-03"
 
 
 def test_longmemeval_loader_marks_abs_questions_as_abstention(tmp_path):

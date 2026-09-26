@@ -187,6 +187,22 @@ profile 注入与前六条 hybrid hit 分开计数。原始记忆和模型输出
 
 ## 3. Consequences and open verification
 
+### D11 — Preserve official question dates and expose content-free retrieval diagnostics
+
+2026-09-27 的真实 smoke 仍未达回答门槛：LoCoMo hybrid Recall@6=0、答案 F1=0、`chain_verified=true`；
+相关答案词已保留在并注入的 profile（相关 profile=1、注入答案词覆盖率=1.0），但最终回答没有答案 token。
+LongMemEval Recall@6=0、答案 F1=0、`chain_verified=false`；权威来源记忆保留了答案词，但没有进入注入上下文。
+两份 content-free 报告均确认临时 Milvus collection 已清理：
+`docs/evidence/memory-v2-public-smoke-locomo-071fbde5.json` 与
+`docs/evidence/memory-v2-public-smoke-longmemeval-5daa9284.json`。因此现有证据分别指向 LoCoMo reader
+输出与 LongMemEval 检索/上下文选择，不能把它们合并归因于 formation。
+
+复核官方 reader 实现后发现 LongMemEval adapter 丢弃了 `question_date`，而官方 CoN 和最终回答都使用该日期；
+LoCoMo 已筛选为带权威用户证据的正向样例，但 reader 仍额外指示证据不足时拒答。适配器现保留并传入
+LongMemEval 日期，LoCoMo 正向问答改为上游短语式回答指令；真实 smoke 需在干净提交树上重跑确认。
+报告新增相关 hybrid 候选排名、profile 候选/注入计数和答案 token 数，不包含记忆、问题、标准答案或模型输出；
+这些诊断只用于区分候选召回、上下文选择和最终回答，不改变生产检索排序或 #302 质量阈值。
+
 - 全局 trace 内容配置不再能覆盖 Memory V2 的隐私边界；旧版非 V2 tracing 保持原状。
 - 如果 SDK 未提供真实 token / 费用，报告保留估算标记或 `null`，不得把估算伪装成 provider 计量。
 - 数据集文件由运行者在本地保管；LoCoMo 结果仅用于已批准的非商业内部评测。

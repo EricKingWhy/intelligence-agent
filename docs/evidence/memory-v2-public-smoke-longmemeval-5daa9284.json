@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "run_id": "5daa9284-04d1-4e79-af7b-39691c5a7b0d",
+  "repeat_of": null,
+  "ran_at": "2026-09-26T17:41:11+00:00",
+  "status": "failed",
+  "blocking": false,
+  "benchmark": "LongMemEval",
+  "adapter_version": 1,
+  "source": "https://github.com/xiaowu0162/LongMemEval",
+  "license": "MIT",
+  "non_commercial_only": false,
+  "dataset": {
+    "filename": "longmemeval_s_cleaned.json",
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "case_count": 1
+  },
+  "tool": {
+    "name": "agent-harness-memory-v2",
+    "code_sha": "87a02d689c10eeb464820ced1c5c29e95fd89e31",
+    "tree_sha": "0ec73095b126c0473ba399198de2425f428a85f9",
+    "config_aliases": {
+      "formation": "memory.primary",
+      "answer": "memory.primary",
+      "index": "milvus",
+      "retrieval": "hybrid-v1"
+    }
+  },
+  "case_counts": {
+    "total": 1,
+    "executed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "unawaited": 0
+  },
+  "metrics": {
+    "answer_quality": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "session_recall_at_6": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "stored_record_count": 32,
+    "pollution_rate": 0.0,
+    "pollution_count": 0,
+    "injected_tokens": 873,
+    "latency_ms_total": 376863,
+    "input_tokens": 192804,
+    "output_tokens": 22843,
+    "cost_usd": null
+  },
+  "failures": [
+    "memory_v2_chain_not_observed",
+    "answer_quality_below_smoke_threshold"
+  ],
+  "worktree_clean": true,
+  "baseline_frozen": false,
+  "run_mode": "smoke",
+  "pipeline": {
+    "formation": "MemoryJobRunner",
+    "storage": "SqliteMemoryV2Store",
+    "index": "MilvusMemoryV2Index",
+    "recall_injection": "MemoryV2ContextProvider",
+    "answer_generation": "configured_model_provider",
+    "langfuse": "disabled_for_public_benchmark_content"
+  },
+  "smoke": {
+    "selection_strategy": "smallest_single_session_user_case_with_exact_user_answer_span",
+    "selected_case_id_sha256": "9c8064fb6aace953a0927db8c5816bb56e1f7aa65ee0bb983a2fb7e3e94c9d48",
+    "sample_category": "single-session-user",
+    "answer_strategy": "longmemeval_con_reading_notes_v1",
+    "answer_temperature": 0.0,
+    "answer_model_calls": 2,
+    "answer_scorer": "normalized_token_f1",
+    "answer_f1_threshold": 0.5,
+    "answer_f1": 0.0,
+    "formation_model_calls": 74,
+    "formation_jobs": {
+      "completed": 43,
+      "degraded": 4
+    },
+    "formation_job_reasons": {
+      "invalid_model_output": 4,
+      "no_durable_value": 5,
+      "none": 25,
+      "transient_only": 13
+    },
+    "formation_output_failure_kinds": {
+      "contract_violation": 4
+    },
+    "source_session_count": 47,
+    "answer_latency_ms": 1825,
+    "token_usage_source": {
+      "formation_input": "local_estimate",
+      "formation_output": "local_estimate",
+      "answer_input": "provider",
+      "answer_output": "provider"
+    },
+    "committed_formation_jobs": 25,
+    "formation_job_outcomes": {
+      "committed": 25,
+      "no_write": 18
+    },
+    "relevant_source_job_stages": {
+      "completed": 1
+    },
+    "relevant_source_job_outcomes": {
+      "committed": 1
+    },
+    "formation_drain_timeout_seconds": 1200,
+    "active_record_tier_counts": {
+      "collection": 15,
+      "profile": 17
+    },
+    "active_record_kind_counts": {
+      "semantic": 32
+    },
+    "active_records_with_relevant_source_session": 1,
+    "active_relevant_answer_token_recall": 1.0,
+    "active_answer_token_recall": 1.0,
+    "injected_relevant_answer_token_recall": 0.0,
+    "injected_answer_token_recall": 1.0,
+    "recall_hit_count": 15,
+    "injected_message_count": 2,
+    "attributable_injected_hit_count": 0,
+    "attributable_injected_profile_count": 0,
+    "attributable_injected_memory_count": 0,
+    "chain_verified": false,
+    "speaker_mapping": "dataset_roles_preserved",
+    "milvus_collection_created": true,
+    "milvus_collection_name": "memv2pub_a2e9ed383baa",
+    "passed": false
+  },
+  "cleanup": {
+    "temporary_milvus_collection": "confirmed_absent"
+  }
+}

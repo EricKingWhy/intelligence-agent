@@ -70,6 +70,7 @@ class PublicBenchmarkCase:
     relevant_session_ids: tuple[str, ...]
     relevant_turn_ids: tuple[str, ...] = ()
     expected_abstention: bool = False
+    question_date: str | None = None
 
 
 def load_locomo(
@@ -190,6 +191,7 @@ def load_longmemeval(
                 if turn.get("has_answer") is True
             ),
             expected_abstention=expected_abstention,
+            question_date=str(item.get("question_date") or "") or None,
         ))
     return _unique_cases(result)
 
