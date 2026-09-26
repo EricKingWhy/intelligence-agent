@@ -105,6 +105,7 @@ LoCoMo 仍只用于非商业内部评测。
 烟测选例只接受达到上述证据 F1 门槛的可回答样例；assistant-only 证据样例不作为烟测目标，
 因为 Memory V2 应对它们拒绝形成持久用户记忆。用户于 2026-09-26 批准了 user evidence 来源限制。
 烟测通过还要求至少一个非空且带标注用户证据的 session 形成已提交记忆，并由 Milvus 命中后实际注入回答上下文。
+烟测的 Recall Provider 使用与生产 wiring 相同的 `memory_search_timeout_seconds` 配置。
 同日的真实模型探针发现形成提示词没有写明 discriminated payload 必须含 `payload.kind`；已批准在
 #298 运行时提示词中补全三个 payload 的精确键集合，同时保留严格解析与 fail-closed 行为。
 

@@ -93,6 +93,7 @@ parallelizable: with #301 and #303 after dependencies are integrated
 - Real configured model/Milvus evaluation dry run without exposing values.
 - Public benchmark adapter smoke and license/attribution review.
 - Selection tests cover the user-evidence F1 threshold, role mapping for both public datasets, smallest-eligible selection, and fail-closed behavior.
+- Real public smoke uses the same configurable recall timeout as production wiring.
 - Mutation tests proving the gate detects below-threshold, duplicate, and unawaited/all-failed conditions.
 
 ## Definition of Done

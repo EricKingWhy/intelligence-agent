@@ -397,7 +397,9 @@ async def run_smoke(
         query_session.append(USER_MESSAGE, {"content": case.question})
         query_run_id, _ = query_session.begin_run()
         recorder = _RecordingRecall(service)
-        provider = MemoryV2ContextProvider(recorder)
+        provider = MemoryV2ContextProvider(
+            recorder, timeout_seconds=settings.memory_search_timeout_seconds,
+        )
         recall_token = run_context_var.set(query_run_id)
         injected_ids_token = memory_injected_ids_var.set(frozenset())
         try:
