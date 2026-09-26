@@ -148,6 +148,7 @@ from agent_harness.session.store import (
 )
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.local_artifact import discard_local_artifacts
+from agent_harness.storage.operation import needs_reconcile
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -242,6 +243,7 @@ def _run_limits(
     max_model_requests: int | None,
     max_total_tokens: int | None,
     max_cost_usd: Decimal | str | float | None,
+    deadline_at: Any = None,
     tool_call_limits: Mapping[str, Any] | None = None,
 ) -> RunLimits:
     """run 作用域 ceiling → `RunLimits`（形态校验 + 可执行性判定）。
@@ -254,12 +256,19 @@ def _run_limits(
     （`parse_tool_call_limits`，非法即 422）；「名字已注册」判不了——注册表是
     `build_runtime` 的产物，那条判定在装配层（`validate_tool_call_limits_registered`），
     同样在首个 Provider 请求之前。
+
+    `deadline_at`（`#315`）：绝对截止时刻（RFC 3339 UTC 文本或 `datetime`；`None` = 不设）。
+    只判**形状**（`parse_deadline_at`，非法即 422）；"已经过去了"不是形状错误——开工给一个
+    已到点的 deadline 等于立刻到点（即时暂停），恢复给一个已过去的时刻由
+    `validate_resume` / `resume_headroom_ok` 按 409 拒绝。deadline **不**受"可执行性"
+    约束：它由 Runtime 在接纳点判，不依赖 Provider 链的能力（`run_limits_from_request`）。
     """
     return run_limits_from_request(
         max_agent_turns_total=max_agent_turns_total,
         max_model_requests=max_model_requests,
         max_total_tokens=max_total_tokens,
         max_cost_usd=max_cost_usd,
+        deadline_at=deadline_at,
         tool_call_limits=tool_call_limits,
         accounting=HARNESS_MODEL_ACCOUNTING,
     )
@@ -597,6 +606,12 @@ class SessionService:
         `local_fuse` 只在两处可得：暂停快照里（历史的生效值）与**在途** run 的
         runtime 上（当前的生效值）。都没有时**缺席**——它是"生效配置"，从事件流
         重建不出来（`run/started` 只记了 run 作用域的 ceiling），缺席比编一个数诚实。
+
+        `reconcile_pending`（`#315`）是这里**唯一**读 Operation Ledger 的一处：账本欠账
+        不在事件流里（`run/paused` 只说"停了"，`operation/reconcile-required` 只说"要点
+        名"，两者都不给出"现在还没结清"这个**当前态**）。判据与恢复闸门同一把尺子
+        （`_unreconciled_tool_calls`）——投影说"要 reconcile"、恢复却放行，或者反过来，
+        都是同一份事实的两套口径。
         """
         events = await self.get_events(session_id)
         run_id = latest_run_id(events)
@@ -617,8 +632,38 @@ class SessionService:
                     source=runtime.local_fuse_source,
                 )
         return project_budget(
-            state, accounting=HARNESS_MODEL_ACCOUNTING, local_fuse=local_fuse,
+            state,
+            accounting=HARNESS_MODEL_ACCOUNTING,
+            local_fuse=local_fuse,
+            reconcile_pending=await self._unreconciled_tool_calls(session_id),
         )
+
+    async def _unreconciled_tool_calls(self, session_id: str) -> list[str]:
+        """账本上**仍欠对账**的 tool_call_id（`#315`；只读）。
+
+        判据是 `storage.needs_reconcile`——RUNNING / UNKNOWN / NEED_RECONCILE 三态，
+        外加"已判成功但带未证标记"的行（那种行的语义是"结果写了、副作用仍无法证明"，
+        同样要点名）。PENDING **不**算：`07 §6` 说得很直白——PENDING 可证明"没开始"，
+        重跑它不越过安全边界。
+
+        与事件侧的 `detect_dangling` 是**互补**的两把尺子，不是重复实现：悬空看"有没有
+        tool/result 事件"，这里看"账本怎么说"。deadline 到点收尾的在途调用同时是
+        "已有 result 事件"+"账本 UNKNOWN"，只有这把尺子量得到。
+
+        `_ensure_stores()` 与 `recover()` / `scan_interrupted()` 同一条纪律：账本表要先
+        建出来（惰性、幂等），否则首次请求读到的是"表不存在"而不是"没有欠账"。
+        """
+        await self._ensure_stores()
+        operations = await self._operation_ledger.list_for_session(session_id)
+        return [
+            operation.tool_call_id
+            for operation in operations
+            if needs_reconcile(operation)
+        ]
+
+    async def _has_unreconciled_operations(self, session_id: str) -> bool:
+        """恢复前置判据（`#315`）：账本上是否还有未结清的副作用。"""
+        return bool(await self._unreconciled_tool_calls(session_id))
 
     async def has_session(self, session_id: str) -> bool:
         """检查 session 是否存在（用于 cancel/approve 等 404 前置校验）。"""
@@ -648,6 +693,7 @@ class SessionService:
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
         run_max_cost_usd: Decimal | str | float | None = None,
+        run_deadline_at: Any = None,
         run_tool_call_limits: Mapping[str, Any] | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
@@ -671,10 +717,11 @@ class SessionService:
         `agent.budget.resolve_local_fuse` 与 Deployment ceiling 合成生效值
         （不等 / 越权 ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。
 
-        run 作用域（`#312` 建账本 / `#313` 扩到四维）：四个 `run_max_*` 是本 run 的
-        **绝对** ceiling（`budget.run.*`），落 `run/started.data.budget`——重启后投影要能
-        重建同一个 ceiling（`03 §3.4`）。None = 该维度无 run 作用域 ceiling（**不是** 0）。
-        形态非法或本链强制执行不了的维度（见 `_run_limits`）在此 422，零副作用。
+        run 作用域（`#312` 建账本 / `#313` 扩到四维 / `#315` 加 deadline）：四个
+        `run_max_*` 与 `run_deadline_at` 是本 run 的**绝对** ceiling（`budget.run.*`），
+        落 `run/started.data.budget`——重启后投影要能重建同一个 ceiling（`03 §3.4`）。
+        None = 该维度无 run 作用域 ceiling（**不是** 0）。形态非法或本链强制执行不了的
+        维度（见 `_run_limits`）在此 422，零副作用。
 
         `workspace_name` 与 `cwd` 二选一（ADR-0027）：
         - `workspace_name`（旧契约，逐字节不变）：单个目录名，目录在
@@ -702,6 +749,7 @@ class SessionService:
             max_model_requests=run_max_model_requests,
             max_total_tokens=run_max_total_tokens,
             max_cost_usd=run_max_cost_usd,
+            deadline_at=run_deadline_at,
             tool_call_limits=run_tool_call_limits,
         )
 
@@ -863,6 +911,7 @@ class SessionService:
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
         run_max_cost_usd: Decimal | str | float | None = None,
+        run_deadline_at: Any = None,
         run_tool_call_limits: Mapping[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> LaunchResult:
@@ -888,11 +937,18 @@ class SessionService:
           状态对不上（版本过期 / run_id 不是暂停的那个 / 没有暂停 run / 在途冲突 /
           ceiling 没真提高）⇒ 409，且**零副作用**。
 
-        ``run_max_*``（`#313` 起四维齐备；`budget.run.*`）在两种形态下都合法：
-        新任务 ⇒ 新 run 的初始绝对 ceiling；同 run 续跑 ⇒ 抬高后的绝对 ceiling
-        （**不是**增量）。四维各自判定（`resume_headroom_ok`）：任一维"放不下一次新
-        准入"就整个请求 409——接受它等于让客户端拿到"恢复成功但立刻再次暂停"的假象。
+        ``run_max_*`` / ``run_deadline_at``（`#313` 起四维齐备，`#315` 加 deadline；
+        `budget.run.*`）在两种形态下都合法：新任务 ⇒ 新 run 的初始绝对 ceiling；同 run
+        续跑 ⇒ 抬高后的绝对 ceiling（**不是**增量）。各维分别判定
+        （`resume_headroom_ok`）：任一维"放不下一次新准入"就整个请求 409——接受它等于让
+        客户端拿到"恢复成功但立刻再次暂停"的假象。deadline 维度的判据是**严格在未来**：
+        沿用一个已过去的时刻（含"没点名、沿用暂停快照里那个已过时刻"）同样在这里被拒。
         ``budget.session`` 属 `#318`，本层没有它的参数。
+
+        对账闸门（`#315`）：账本上还有未结清的副作用（`RUNNING` / `UNKNOWN` /
+        `NEED_RECONCILE`，或带"未证"标记的行）时，本入口先走 `recover()`——对账优先于
+        恢复（`03 §5`）。没有 ReconcileCallback 时那条路径**安全拒绝**（409「存在未
+        reconcile 的副作用」），不伪造结果、不盲目重跑（不变量 #13/#14）。
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
@@ -915,6 +971,7 @@ class SessionService:
             max_model_requests=run_max_model_requests,
             max_total_tokens=run_max_total_tokens,
             max_cost_usd=run_max_cost_usd,
+            deadline_at=run_deadline_at,
             tool_call_limits=run_tool_call_limits,
         )
         # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
@@ -978,12 +1035,24 @@ class SessionService:
         # （不变量 #13/#14）。recover() 是唯一恢复入口：UNKNOWN 无 callback
         # 时安全拒绝（→ 409），确定性项精确回填后再 load 继续跑。
         #
+        # `#315`：触发条件加了第三类——**非悬空**但账本上未结清的行。deadline 到点时
+        # 在途的 MUTATING 调用会以 `UNKNOWN` 落账（不是悬空：它的 tool/result 事件
+        # 已经写了，缺的是"副作用到底发生了没有"），旧判据（只看事件）放行它，于是
+        # "对账优先于恢复"（`03 §5`）在这条路径上无从成立。判据从事件扩到账本：
+        # 任一操作仍在 RUNNING / UNKNOWN / NEED_RECONCILE（或带"未证"标记）⇒ 先
+        # reconcile。没有 ReconcileCallback 时 recover() 安全拒绝（→ 409），
+        # 这正是"不盲目重跑高风险副作用"（不变量 #14）要的结果。
+        #
         # 不在这里 catch ValueError → SessionNotFound（BUG-011 移除）：会话存在性
         # 已在上方 `if not existing` 判定过，此后的异常都不是「不存在」。旧映射把
         # `Session.load` 的 seq 冲突（数据完整性）一律谎报成 404，客户端只能显示
         # `Send failed: 404`。现在 load/resume 抛类型化领域异常（SeqConflict /
         # SessionNotFound），由端点各自的 except 元组精确翻译。
-        if detect_dangling(existing) or detect_unterminated_runs(existing):
+        if (
+            detect_dangling(existing)
+            or detect_unterminated_runs(existing)
+            or await self._has_unreconciled_operations(session_id)
+        ):
             await self.recover(session_id)
             session = Session.load(
                 self._store,
@@ -1317,6 +1386,7 @@ class SessionService:
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
         run_max_cost_usd: Decimal | str | float | None = None,
+        run_deadline_at: Any = None,
         run_tool_call_limits: Mapping[str, Any] | None = None,
     ) -> SendMessageResult:
         """续聊消息入口（统一 CLI / Web 续聊路径）。
@@ -1353,8 +1423,9 @@ class SessionService:
         （`11 §6.1` 把 budget 挂在"idle 会话消息启动"上）；在途 run 的 queued 消息与
         steer 只跑**判定**、丢弃生效值（为什么判定照跑见下方解析点的注释）。
 
-        run 作用域（`#312` 建账本 / `#313` 扩到四维）：四个 `run_max_*` 同一条纪律——
-        只有 idle → launched 才消费（它们是**新 run** 的初始 ceiling）。注意本入口
+        run 作用域（`#312` 建账本 / `#313` 扩到四维 / `#315` 加 deadline）：四个
+        `run_max_*` 与 `run_deadline_at` 同一条纪律——只有 idle → launched 才消费
+        （它们是**新 run** 的初始 ceiling）。注意本入口
         **不**做同 run 续跑：一条用户消息就是一段新任务（同 run 续跑走 `/resume`
         且**不带** task）。"排队输入不被自动接力"由 RunManager 的暂停抑制保证（R4）
         ——暂停后不会因为这里排了队就自己开新 run。
@@ -1427,6 +1498,7 @@ class SessionService:
                 run_max_model_requests=run_max_model_requests,
                 run_max_total_tokens=run_max_total_tokens,
                 run_max_cost_usd=run_max_cost_usd,
+                run_deadline_at=run_deadline_at,
                 run_tool_call_limits=run_tool_call_limits,
             )
             result = SendMessageResult(

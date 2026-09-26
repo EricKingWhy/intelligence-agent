@@ -23,7 +23,11 @@ local fuse **没有**这条预留（EB-2 的"500 步到顶"就是到顶），这
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -37,7 +41,9 @@ from agent_harness.agent.run_budget import (
     CLOSEOUT_MODEL,
     CONTINUATION_ACTION_KEY,
     REASON_BUDGET_EXHAUSTED,
+    REASON_DEADLINE,
     TRIGGER_LOCAL_TURNS,
+    TRIGGER_RUN_DEADLINE,
     TRIGGER_RUN_TURNS,
     BudgetConsumed,
     LaunchRunBudget,
@@ -49,6 +55,7 @@ from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
+    OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_PAUSED,
@@ -60,16 +67,25 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.store import JsonlSessionStore
-from agent_harness.storage import SqliteOperationLedger
+from agent_harness.storage import (
+    OperationState,
+    SqliteOperationLedger,
+    has_unproven_side_effect,
+)
+from agent_harness.storage import (
+    needs_reconcile as needs_reconcile_state,
+)
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
     ToolExecutor,
     ToolRegistry,
     ToolResult,
+    ToolSideEffect,
 )
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
+from tests.tooling.test_deadline_admission import _SlowMutatingTool
 
 TOOL_ID = "call_t4"
 
@@ -100,15 +116,21 @@ def _runtime(
     version: int = 1, local_fuse: int = 500,
     operation_ledger: SqliteOperationLedger | None = None,
     tool_call_limits: dict[str, int] | None = None,
+    tools: Sequence[Tool] = (),
+    deadline_at: datetime | None = None,
 ) -> AgentRuntime:
     """一个执行实例：`local_fuse` 是本实例的保险丝，`run_budget` 是启动时的 run 账本。
 
     `operation_ledger` 给了就按**生产接线**挂上（`tracks_operations=True`）——那会让
     `model/completed` 走到延迟落盘分支，是另一条时序（不是配置口味）。
     `tool_call_limits`（`#314`）是 run 档的 per-tool 绝对配额（未配 ⇒ 该工具不限）。
+    `tools`（`#315`）是额外注册的工具（默认只有 echo）。
+    `deadline_at`（`#315`）是本 run 的绝对截止时刻（判据只看它和"现在"，见 `_now`）。
     """
     registry = ToolRegistry()
     registry.register(_EchoTool())
+    for tool in tools:
+        registry.register(tool)
     return AgentRuntime(
         model=model, registry=registry,
         executor=ToolExecutor(registry, operation_ledger=operation_ledger),
@@ -118,10 +140,27 @@ def _runtime(
             limits=RunLimits(
                 max_agent_turns_total=ceiling,
                 tool_call_limits=tool_call_limits or {},
+                deadline_at=deadline_at,
             ),
             consumed=BudgetConsumed(agent_turns=consumed), run_id=run_id,
         ),
     )
+
+
+def _clock(runtime: AgentRuntime, *times: datetime) -> None:
+    """把本执行的"现在"钉在给定的时刻序列上（`#315`；最后一个值粘住）。
+
+    `AgentRuntime._now` 是本执行读挂钟的唯一入口（收成一处的理由就是让用例能这样
+    驱动"到点了吗"，不必 sleep 或改系统时钟）。用例给几个值就按调用次序推进——
+    deadline 判定与 closeout 容量判定读的都是它，所以"第一步还没到点、第二步到点"
+    这种时序在测试里是可复现的，而不是靠掐秒表。
+    """
+    remaining = list(times)
+
+    def _now() -> datetime:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    runtime._now = _now  # type: ignore[method-assign]
 
 
 def _tool_round(idx: int) -> AIMessage:
@@ -605,3 +644,323 @@ async def test_per_tool_quota_blocks_the_extra_call_and_pauses_the_run(tmp_path)
     assert state.consumed_turns == 3, (
         "恢复不重置任何 counter（`#314` 沿用 T4 的账）：暂停前 1 轮 + 续跑 2 轮"
     )
+
+
+# ── `#315` T7：deadline 到点时的对账闸门 ────────────────────────────────
+
+
+class _SlowReadOnlyTool(_SlowMutatingTool):
+    """与超时的写工具同一形状，只把副作用类别改成只读（反例用）。"""
+
+    @property
+    def name(self) -> str:
+        return "slow_read"
+
+    @property
+    def side_effect(self) -> ToolSideEffect:
+        return ToolSideEffect.READ_ONLY
+
+
+def _write_round(idx: int, tool_name: str = "slow_write") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"id": f"{TOOL_ID}_{idx}", "name": tool_name, "args": {}}],
+    )
+
+
+def _deadline_window(ahead_seconds: int = 30) -> tuple[datetime, datetime, datetime]:
+    """（deadline，第一步的"现在"，第二步的"现在"）——三者都相对**真实**挂钟。
+
+    为什么要锚在真实挂钟：执行域的 deadline 闸门读的是**它自己的**挂钟（生产接线的
+    `utc_now()`，没有注入口），而 runtime 的暂停判定读的是本执行唯一入口 `_now`
+    （`_clock` 可以钉住）。两者若不同源，用例会得到自相矛盾的现场：runtime 认为
+    "还没到点"而执行域已经拒收工具调用。所以时间线这样排：
+
+    - `deadline` 在真实现在之后 ⇒ 第一步的工具调用**被接纳并真的执行**（超时）；
+    - 第二步的"现在"（由 `_clock` 钉住）在 `deadline` 之后 ⇒ 收口判到点。
+
+    这不是"把时间调快"，而是把**同一瞬时**的两个判据放在各自能读到的位置上。
+    """
+    now = datetime.now(UTC)
+    return now + timedelta(seconds=ahead_seconds), now, now + timedelta(
+        seconds=ahead_seconds + 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_deadline_boundary_promotes_the_unproven_mutation(tmp_path) -> None:
+    """到点时在途的 MUTATING 调用 ⇒ 暂停 + 该操作升 NEED_RECONCILE + continuation 点名。
+
+    这是 `#315` 的主场景，一条时间线上要同时成立四件事：
+
+    1. 工具**真的超时**（`timeout_seconds` 到点被掐断）⇒ 执行域把它留成 `UNKNOWN`
+       并打上"副作用未证"标记（`07 §7`：write/edit 不确定 ⇒ NEED_RECONCILE）；
+    2. 下一步正要开始模型决策时**已经到点** ⇒ 不再接纳任何新工作，按 deadline 暂停
+       （`04 §9.1`：过了 deadline 不启动新的 Provider 请求 / ToolCall / 子 Agent）；
+    3. 暂停收口时把那条未证的操作**提升到 NEED_RECONCILE** 并落
+       `operation/reconcile-required`——到点之后世界状态可能已经变了，"不知道"
+       必须落成 durable 事实（ADR-0044 D4：不得落一个暗示可安全续跑的暂停）；
+    4. continuation 里**不能**再写"抬高 ceiling 后恢复"：那条路会被开工前的
+       409「存在未 reconcile 的副作用」拒掉（`03 §5`：对账优先于恢复）。
+
+    时刻按 `_deadline_window` 排：`deadline` 在真实现在之后（工具才会被接纳并真的
+    超时），而收口那次判定的"现在"（`_clock` 钉住）已在其后——不是掐秒表。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    deadline, step_one, step_two = _deadline_window()
+    scripted = ScriptedModel([_write_round(1), AIMessage(content="不该走到这里")])
+    runtime = _runtime(
+        scripted, ceiling=8, operation_ledger=ledger,
+        tools=[_SlowMutatingTool()], deadline_at=deadline,
+    )
+    _clock(runtime, step_one, step_two)
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "把配置改掉")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["reason"] == REASON_DEADLINE
+    assert paused.data["trigger_dimension"] == TRIGGER_RUN_DEADLINE
+    assert paused.data["resume_requirements"] == [], (
+        "预算 / deadline 暂停没有额外前置条件（`03 §3.4`）——欠账由账本与事件表达"
+    )
+    assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC, (
+        "到点后连 closeout 都不发（它是真实 Provider 请求）⇒ 只能走确定性组装"
+    )
+    assert len(scripted.snapshots) == 1, "第二步一个模型请求都没有发"
+
+    # 1 + 3：那条超时调用确实"未证"，并且在暂停收口时被提升
+    operation = await ledger.get(session.session_id, f"{TOOL_ID}_1")
+    assert operation is not None
+    assert has_unproven_side_effect(operation) is True
+    assert operation.state is OperationState.NEED_RECONCILE, (
+        "RUNNING → UNKNOWN → NEED_RECONCILE 两步链由状态机强制（`07 §4`）"
+    )
+
+    reconcile_events = [
+        e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED
+    ]
+    assert len(reconcile_events) == 1
+    assert reconcile_events[0].data == {
+        "tool_call_id": f"{TOOL_ID}_1",
+        "tool_name": "slow_write",
+        "args_identity": operation.args_identity,
+        "state": OperationState.NEED_RECONCILE.value,
+    }, "形状与 RecoveryCoordinator 落的**同一份**（客户端只认一种形状）"
+    assert reconcile_events[0].run_id == paused.run_id
+    # 顺序：先"某操作进入 NEED_RECONCILE"，再"本次执行在 deadline 上暂停"
+    types = [e.type for e in session.events]
+    assert types.index(OPERATION_RECONCILE_REQUIRED) < types.index(RUN_PAUSED)
+
+    # 4：continuation 如实写出阻塞项，并换掉"抬高 ceiling 后恢复"那句动作
+    continuation = paused.data["continuation"]
+    assert len(continuation["blockers"]) == 2, (
+        "一条写 deadline 到点，一条写未 reconcile 的副作用"
+    )
+    blocker = continuation["blockers"][1]
+    assert "slow_write" in blocker and f"{TOOL_ID}_1" in blocker
+    assert "NEED_RECONCILE" in blocker
+    action = continuation[CONTINUATION_ACTION_KEY]
+    assert "先 reconcile" in action
+    assert "提高绝对 ceiling" not in action, (
+        "在 reconcile 解除前恢复会被 409 拒——不能指一条走不通的路"
+    )
+
+    # 暂停仍是"可恢复的暂停"这一档（`#317` 的 stuck 面不变），但恢复会被账本闸门拦住
+    assert [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)] == []
+    assert latest_paused_run(session.events) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_timeout_at_the_deadline_does_not_claim_reconcile(tmp_path) -> None:
+    """反例：到点时超时的是**只读**调用 ⇒ 不喊对账，也不升 NEED_RECONCILE。
+
+    "副作用未证"只说 write/edit 这一类（`07 §7`）：只读调用超时没有"世界状态未知"
+    的问题，执行域照常落 `FAILED`。若这里也升对账，`#315` 就会把每一次读操作超时
+    都变成人工关卡——那是把闸门用坏，不是用严。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    deadline, step_one, step_two = _deadline_window()
+    scripted = ScriptedModel(
+        [_write_round(1, "slow_read"), AIMessage(content="不该走到这里")]
+    )
+    runtime = _runtime(
+        scripted, ceiling=8, operation_ledger=ledger,
+        tools=[_SlowReadOnlyTool()], deadline_at=deadline,
+    )
+    _clock(runtime, step_one, step_two)
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "读一次慢配置")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["reason"] == REASON_DEADLINE
+    blockers = paused.data["continuation"]["blockers"]
+    assert len(blockers) == 1 and blockers[0].startswith(
+        f"{TRIGGER_RUN_DEADLINE} 已到点：deadline="
+    ), "只有到点这一条阻塞项，没有凭空多出一条对账要求"
+    operation = await ledger.get(session.session_id, f"{TOOL_ID}_1")
+    assert operation is not None and operation.state is OperationState.FAILED
+    assert has_unproven_side_effect(operation) is False
+    assert [e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED] == []
+
+
+@pytest.mark.asyncio
+async def test_a_second_execution_does_not_duplicate_the_reconcile_event(tmp_path) -> None:
+    """同一 run 再收口一次：`operation/reconcile-required` 只留一条（`#30` 的老规矩）。
+
+    重复触发是正常时序（客户端重放、多次收口尝试），不是异常路径——账本行已在
+    `NEED_RECONCILE` 就不再推进，事件已存在就不再追加，但 continuation 仍然如实
+    写出阻塞项（"现在仍欠着"是每次收口都要说的话）。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    deadline, step_one, step_two = _deadline_window()
+    first = _runtime(
+        ScriptedModel([_write_round(1), AIMessage(content="不该走到这里")]),
+        ceiling=8, operation_ledger=ledger, tools=[_SlowMutatingTool()],
+        deadline_at=deadline,
+    )
+    _clock(first, step_one, step_two)
+    session = make_session(tmp_path)
+    await first.run(session, "把配置改掉")
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    reconcile_event = next(
+        e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED
+    )
+
+    second = _runtime(
+        ScriptedModel([AIMessage(content="不该走到这里")]), ceiling=8,
+        consumed=paused.data["consumed"]["agent_turns"], run_id=paused.run_id,
+        version=paused.data["budget_version"] + 1, operation_ledger=ledger,
+        tools=[_SlowMutatingTool()],
+        # 第二次执行一个工具都不会碰（第一步就判到点），所以 deadline 给一个
+        # "相对第一次的现在也已过去"的时刻即可——判定只比它和 `_clock` 的现在
+        deadline_at=step_two,
+    )
+    _clock(second, step_two)
+    result = await second.run(session, None)
+
+    assert result.status == STATUS_PAUSED
+    events = [e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED]
+    assert len(events) == 1, "已存在的事件不重复落（与 RecoveryCoordinator 同一条判据）"
+    assert events[0].seq == reconcile_event.seq
+    operation = await ledger.get(session.session_id, f"{TOOL_ID}_1")
+    assert operation is not None and operation.state is OperationState.NEED_RECONCILE
+    pauses = [e for e in session.events if e.type == RUN_PAUSED]
+    assert len(pauses) == 2, "收口了两次就有两条 run/paused（各自一次执行）"
+    assert "先 reconcile" in pauses[1].data["continuation"][CONTINUATION_ACTION_KEY]
+
+
+class _FastWriteTool(_SlowMutatingTool):
+    """MUTATING 但**很快完成**（timeout 给得足够宽）：到点时它的结果已知。"""
+
+    @property
+    def name(self) -> str:
+        return "quick_write"
+
+    @property
+    def timeout_seconds(self) -> float:
+        return 5.0
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        self.call_count += 1
+        return ToolResult.success("写完了")
+
+
+@pytest.mark.asyncio
+async def test_a_known_in_flight_tool_is_recorded_before_the_deadline_pause(tmp_path) -> None:
+    """在途的工具**完成**了（结果已知）⇒ 先落它的记录，再落暂停（AC 顺序要求）。
+
+    "到点"不改变已经发生的事：那次调用被接纳过、执行过、有结论——它的 `tool/result`
+    与 Ledger 终态必须在 `run/paused` **之前**落盘，否则暂停的收口快照会说"有个调用
+    还悬着"，而真相是它已经完成（`07 §3` 的 Checkpoint 边界同理：先记事实，再收口）。
+    已知结果的调用**不**产生对账债（`07 §7`：不确定才是 NEED_RECONCILE 的来源）。
+    """
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    deadline, step_one, step_two = _deadline_window()
+    scripted = ScriptedModel(
+        [_write_round(1, "quick_write"), AIMessage(content="不该走到这里")]
+    )
+    runtime = _runtime(
+        scripted, ceiling=8, operation_ledger=ledger,
+        tools=[_FastWriteTool()], deadline_at=deadline,
+    )
+    _clock(runtime, step_one, step_two)
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "快速写一次然后在到点处收口")
+
+    assert result.status == STATUS_PAUSED
+    types = [e.type for e in session.events]
+    assert types.index(TOOL_RESULT) < types.index(RUN_PAUSED), (
+        "已知结果先落盘，暂停后收口——顺序倒过来会得到一份自相矛盾的快照"
+    )
+    operation = await ledger.get(session.session_id, f"{TOOL_ID}_1")
+    assert operation is not None and operation.state is OperationState.SUCCEEDED
+    assert needs_reconcile_state(operation) is False
+    assert OPERATION_RECONCILE_REQUIRED not in types, "已知结果不产生对账债"
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["reason"] == REASON_DEADLINE
+    assert len(paused.data["continuation"]["blockers"]) == 1, "只有到点这一条"
+    assert "提高绝对 ceiling" not in paused.data["continuation"][CONTINUATION_ACTION_KEY], (
+        "没有对账债时动作仍是'给一个新的未来时刻'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_cancel_stays_terminal_and_is_not_rewritten_into_a_pause(
+    tmp_path,
+) -> None:
+    """显式取消**不**被改写成 deadline 暂停（`03 §5` 明文，AC 要求可区分）。
+
+    现场刻意选在"本执行的时钟已经到点"这一刻取消（`_clock` 的第二个值就是过去）：
+    如果取消臂被 deadline 判定抢走，这里会出现 `run/paused(reason=deadline)` 且没有
+    终结事件；实际契约相反——取消是**立即**的终态（`run/failed`，
+    reason=cancelled），与暂停的"非终态收口"是两件事。
+
+    取消的机制面（GeneratorExit / 断连的真实窗口）由
+    `tests/agent/test_stream_disconnect_recovery.py` 覆盖；本用例只补"与 deadline
+    暂停的区分"这一条。
+    """
+    deadline, step_one, step_two = _deadline_window()
+    scripted = ScriptedModel(
+        [AIMessage(content="", tool_calls=[
+            {"id": f"{TOOL_ID}_1", "name": "quick_write", "args": {}},
+        ])]
+    )
+    runtime = _runtime(
+        scripted, ceiling=8, tools=[_FastWriteTool()], deadline_at=deadline,
+    )
+    _clock(runtime, step_one, step_two, step_two)
+    session = make_session(tmp_path)
+
+    agen = runtime.run_stream(session, "写一半就被取消")
+    tool_call_seen = asyncio.Event()
+
+    async def consume() -> None:
+        async for frame in agen:
+            if frame.type == TOOL_CALL:
+                tool_call_seen.set()
+                await asyncio.Event().wait()  # 挂住消费者：断连钉在这一帧之后
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(tool_call_seen.wait(), timeout=5.0)
+    consumer.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await consumer
+    await agen.aclose()  # 消费者消失 = producer generator 被关闭
+    await asyncio.sleep(0)
+
+    types = [e.type for e in session.events]
+    assert RUN_PAUSED not in types, "取消是立即终态，绝不被改写成暂停"
+    terminal = [e for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)]
+    assert [e.type for e in terminal] == [RUN_FAILED]
+    assert terminal[-1].data.get("reason") == "cancelled"
+    assert [e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED] == []
+    assert latest_paused_run(session.events) is None

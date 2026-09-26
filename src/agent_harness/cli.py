@@ -36,6 +36,7 @@ from agent_harness.agent.budget import (
 from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.agent.run_budget import (
     RESUME_BASIS_BUDGET_INCREASE,
+    TRIGGER_RUN_DEADLINE,
     LaunchRunBudget,
     latest_paused_run,
     run_limits_from_request,
@@ -417,7 +418,13 @@ _RESUME_FLAGS: dict[str, str] = {
     "run.max_model_requests": "--run-model-requests",
     "run.max_total_tokens": "--run-total-tokens",
     "run.max_cost_usd": "--run-cost-usd",
+    TRIGGER_RUN_DEADLINE: "--run-deadline",
 }
+
+#: deadline 维的开关值**不是数字**：提示里给 `N` 会得到一句抄了跑不起来的假指令
+#: （`--run-deadline N` 会被形状校验按"不是 RFC 3339 时刻"拒掉）。示例值与前端
+#: `runBudget.ts::DEADLINE_EXAMPLE` 逐字一致——同一份提示在两个入口说同一件事。
+_DEADLINE_PLACEHOLDER = "2026-09-26T04:30:00Z"
 
 
 def parse_run_tool_limits(raw: list[str] | None) -> dict[str, int]:
@@ -460,6 +467,10 @@ def _resume_command_tail(dimension: str) -> str:
     tool_name = tool_name_of_dimension(dimension)
     if tool_name is not None:
         return f"--run-tool-limit {tool_name}=N"
+    if dimension == TRIGGER_RUN_DEADLINE:
+        # 值在"同一个 argv 里"这一点与 per-tool 维同因：`--run-deadline N` 的 `N`
+        # 会被读成一个整数（或直接被拒），照抄的人拿到的是一条跑不通的命令。
+        return f"{_RESUME_FLAGS[TRIGGER_RUN_DEADLINE]} {_DEADLINE_PLACEHOLDER}"
     return f"{_RESUME_FLAGS.get(dimension, '--run-turns-total')} N"
 
 
@@ -476,6 +487,13 @@ def _resume_ceiling_rule(dimension: str) -> str:
         return (
             "N 是**绝对** ceiling，必须严格大于已接纳的调用数（该维不预留 closeout）；"
             "不是增量"
+        )
+    if dimension == TRIGGER_RUN_DEADLINE:
+        # deadline 没有"抬高"这回事：要的是**另一个未来时刻**。写"必须高于 consumed"
+        # 会让 operator 去比一个与停止原因无关的数（`02 §5.1`：三层控制互不替代）。
+        return (
+            "给的是**新的未来时刻**（RFC 3339 UTC 绝对时刻，不是数字）；"
+            "沿用一个已到点的时刻会被拒（409）"
         )
     return "N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮；不是增量"
 
@@ -542,6 +560,7 @@ async def run(
     run_model_requests: int | None = None,
     run_total_tokens: int | None = None,
     run_cost_usd: str | None = None,
+    run_deadline_at: str | None = None,
     run_tool_limits: dict[str, int] | None = None,
     write: Callable[[str], None] | None = None,
 ) -> RunOutcome:
@@ -571,6 +590,10 @@ async def run(
     `#314`：`run_tool_limits` 是 per-tool 绝对配额（工具名 → 正整数），域名/形状与
     Web 的 `budget.run.tool_call_limits` 同源；"名字已注册"由装配层在首个 Provider
     请求之前判（同一条 422 通道）。
+
+    `#315`：`run_deadline_at` 是本 run 的**绝对截止时刻**（RFC 3339 UTC 文本，与 Web
+    的 `budget.run.deadline_at` 同源、同一份形状判定）。给了已过去的时刻是合法的——
+    等于立刻到点（即时 `run/paused reason=deadline`）。
     """
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -616,6 +639,7 @@ async def run(
                     max_model_requests=run_model_requests,
                     max_total_tokens=run_total_tokens,
                     max_cost_usd=run_cost_usd,
+                    deadline_at=run_deadline_at,
                     tool_call_limits=run_tool_limits,
                     accounting=HARNESS_MODEL_ACCOUNTING,
                 ),
@@ -719,6 +743,13 @@ def _main_dispatch() -> None:
              "只统计 Provider 自报的归属成本——不臆造费率表，报告不了的链上恒 422）",
     )
     parser.add_argument(
+        "--run-deadline", default=None, metavar="RFC3339",
+        help="本次 run 的**绝对**截止时刻（budget.run.deadline_at，RFC 3339 UTC，"
+             "如 2026-09-26T04:30:00Z）。到点后不再接纳新的 Provider 请求 / 工具调用 / "
+             "子 Agent，run 按 reason=deadline 暂停；恢复要**换一个新的未来时刻**"
+             "（`agent-harness resume --run-deadline …`）。给了已过去的时刻等于立刻到点。",
+    )
+    parser.add_argument(
         "--run-tool-limit", action="append", default=None, metavar="NAME=N",
         help="本次 run 对某个已注册工具的**绝对**调用次数上限"
              "（budget.run.tool_call_limits；可重复，如 --run-tool-limit bash=3）。"
@@ -737,6 +768,7 @@ def _main_dispatch() -> None:
             run_model_requests=args.run_model_requests,
             run_total_tokens=args.run_total_tokens,
             run_cost_usd=args.run_cost_usd,
+            run_deadline_at=args.run_deadline,
             run_tool_limits=tool_limits,
         )
     )
@@ -1022,6 +1054,7 @@ async def resume_command(
     run_model_requests: int | None = None,
     run_total_tokens: int | None = None,
     run_cost_usd: str | None = None,
+    run_deadline_at: str | None = None,
     run_tool_limits: dict[str, int] | None = None,
     expected_version: int,
     run_id: str | None = None,
@@ -1045,6 +1078,11 @@ async def resume_command(
     被拒时（形状 422 / 冲突 409）异常向上抛：`_main_resume` 打印后 exit 1，
     且**零副作用**（判定在任何落盘之前——见 `agent/run_budget.validate_resume`）。
     ceiling **绝不**在 CLI 侧做加法（绝对量 vs 增量是两种语义，PRD §3 明文）。
+
+    `#315`：`run_deadline_at` 是**新的绝对截止时刻**（`--run-deadline`）。deadline
+    暂停的恢复依据就是它：没点名时沿用暂停快照里那个已过去的时刻，
+    `resume_headroom_ok` 会以"恢复后立刻再停"拒绝（409）——这是规格要的诚实行为，
+    不是 CLI 的可用性问题（所以本层不预先拦，判定只有一处）。
     """
     settings = Settings()
     if workspace_dir is not None:
@@ -1072,6 +1110,7 @@ async def resume_command(
         run_max_model_requests=run_model_requests,
         run_max_total_tokens=run_total_tokens,
         run_max_cost_usd=run_cost_usd,
+        run_deadline_at=run_deadline_at,
         run_tool_call_limits=run_tool_limits,
         expected_version=expected_version,
     )
@@ -1130,6 +1169,11 @@ def _main_resume(argv: list[str]) -> None:
              "可重复，如 --run-tool-limit bash=10）。未点名的工具沿用暂停时的配额。",
     )
     parser.add_argument(
+        "--run-deadline", default=None, metavar="RFC3339",
+        help="恢复后的**新**绝对截止时刻（budget.run.deadline_at，RFC 3339 UTC）。"
+             "deadline 暂停的恢复依据就是它：沿用一个已过去的时刻会被拒（409）。",
+    )
+    parser.add_argument(
         "--expected-version", type=int, required=True,
         help="客户端看到的预算版本（CAS；版本过期 ⇒ 409，不启动任何工作）",
     )
@@ -1145,13 +1189,13 @@ def _main_resume(argv: list[str]) -> None:
     if (
         args.run_turns_total is None and args.run_model_requests is None
         and args.run_total_tokens is None and args.run_cost_usd is None
-        and not args.run_tool_limit
+        and args.run_deadline is None and not args.run_tool_limit
     ):
         # 一个都不给 = 去掉全部 run ceiling，而不是"抬高"：那是另一件事（普通续聊也能做到），
         # 不在 `resume` 的语义里。CLI 层拒绝，不给用户一个看不出差别的成功。
         parser.error(
             "至少给一个绝对 ceiling（--run-turns-total / --run-model-requests / "
-            "--run-total-tokens / --run-cost-usd / --run-tool-limit）"
+            "--run-total-tokens / --run-cost-usd / --run-deadline / --run-tool-limit）"
         )
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -1166,6 +1210,7 @@ def _main_resume(argv: list[str]) -> None:
             run_model_requests=args.run_model_requests,
             run_total_tokens=args.run_total_tokens,
             run_cost_usd=args.run_cost_usd,
+            run_deadline_at=args.run_deadline,
             run_tool_limits=tool_limits,
             expected_version=args.expected_version,
             run_id=args.run_id,

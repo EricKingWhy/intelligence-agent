@@ -55,6 +55,7 @@ from agent_harness.storage import (
     OperationContext,
     OperationLedger,
     OperationState,
+    unproven_meta,
 )
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -261,6 +262,7 @@ class ToolExecutor:
         step_id: int | None = None,
         tracer: Tracer = _NULL_TRACER,
         tool_quota: ToolQuotaWindow | None = None,
+        run_deadline: datetime | None = None,
     ) -> ToolExecution:
         """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
 
@@ -278,6 +280,11 @@ class ToolExecutor:
         阶段 [3]（Task 3）外包 Timeout 边界 + retryable 驱动的重试循环：
         为什么只包阶段3：查字典、跑 Pydantic 都是本地瞬时操作，真正会慢、会挂
         （HTTP/文件/DB）的只有 execute 这一步。
+
+        `run_deadline`（`#315` T7 / `04 §9.1`）：本 run 的**绝对** deadline（UTC，
+        aware）。到点后本条调用**不**被接纳（与配额拒绝同族：准入前被拒、`budget_delta`
+        记 0），已在途的调用不受它影响——它们在自己的 timeout / cancel / Ledger
+        语义下收尾（ADR-0039 的责任域不变）。`None` = 本 run 没配 deadline。
         """
         call = ToolCall.normalize(tool_call)
         tool_call_id = call.id
@@ -329,6 +336,29 @@ class ToolExecutor:
         if (session is not None and operation_context is not None
                 and session.session_id != operation_context.session_id):
             raise ValueError("session and operation_context must identify the same session")
+
+        # -- 阶段 2.35：绝对 deadline 闸门（`#315` T7 / `04 §9.1`）--
+        # 位置与配额闸门同族、同样在 approval **之前**：到点的调用注定不会被接纳，
+        # 不该先弹一次人工审批（审批可能要等一个回合，而 deadline 已经过去了）。
+        # 与配额闸门一样**不**占槽位（本分支在 `take()` 之前），所以没有配对的
+        # release 义务；`budget_delta` 记 0（准入前被拒，`04 §9.1`）。
+        # 读挂钟在这里是不可免的：deadline 是**绝对时刻**，判定就是"现在到点了吗"。
+        if run_deadline is not None and datetime.now(UTC) >= run_deadline:
+            return ToolExecution(
+                tool_call_id=tool_call_id,
+                result=ToolResult.failure(
+                    message=(
+                        f"本 run 的绝对 deadline 已到，工具 '{name}' 的本次调用未被接纳"
+                        "（04 §9.1 的 deadline 接纳边界）。run 会在下一个稳定边界按"
+                        "reason=deadline 暂停；已在途的调用按各自的 timeout / Ledger "
+                        "语义收尾。不要重复提交本调用——deadline 不是靠重试解开的"
+                        "（恢复要点名一个未来的时刻）。"
+                    ),
+                    error_code=ErrorCode.DEADLINE_EXCEEDED,
+                    retryable=False,  # 时刻不会因为再试一次就变到未来
+                ),
+                budget_delta=_rejected_delta(name),
+            )
 
         # -- 阶段 2.4：per-tool 配额闸门（`#314` T6 / `04 §9.1`）--
         # 位置在 approval **之前**：一个注定被配额拒的调用不该先弹一次人工审批
@@ -477,14 +507,13 @@ class ToolExecutor:
                 )
 
             if self._operation_ledger is not None:
-                terminal_state = (
-                    OperationState.SUCCEEDED if result.ok else OperationState.FAILED
-                )
+                terminal_state, reconcile_meta = self._settle_state(tool, result)
                 await self._operation_ledger.update_state(
                     session_id, tool_call_id,
                     terminal_state,
                     result_json=result.model_dump_json(),
                     artifact_ref=result.artifact_ref,
+                    reconcile_meta=reconcile_meta,
                 )
                 self._maybe_kill("terminal", tool_call_id)
         except asyncio.CancelledError:
@@ -506,6 +535,42 @@ class ToolExecutor:
         return ToolExecution(tool_call_id=tool_call_id, result=result,
                              pending_events=pending,
                              budget_delta=self._admitted_delta(name, result))
+
+    @staticmethod
+    def _settle_state(
+        tool: Tool, result: ToolResult,
+    ) -> tuple[OperationState, str | None]:
+        """收尾时写进 Ledger 的状态 + 可选的 reconcile 标记（`#315` / `07 §4`、`07 §7`）。
+
+        三种情形，判据只用 `result` 的确定性字段（不解析错误字符串）：
+
+        - 成功 ⇒ `SUCCEEDED`（不含标记）；
+        - 确定性失败 ⇒ `FAILED`（既有语义**逐字不变**）；
+        - **MUTATING + TIMEOUT** ⇒ `UNKNOWN` + "副作用未证"标记。这条路径在
+          `_ToolFailure.from_timeout` 里已经写明"命令可能仍在运行，或已部分生效"，
+          即这次尝试**给不出**"没落地"的证据。落 `FAILED` 等于替工具断言它没生效
+          ——那正是 `07 §7` 禁止的（write/edit 不确定 ⇒ NEED_RECONCILE），也是本票
+          Must-NOT 里"不得把未证副作用标成 failed"的落点。
+          为什么是 `UNKNOWN` 而不是直接 `NEED_RECONCILE`：状态机只允许
+          `RUNNING → UNKNOWN → NEED_RECONCILE` 两步链（`storage/sqlite.py`
+          的迁移表，`07 §4`），"要不要现在就对账"是**稳定边界**（deadline）或
+          崩溃恢复的决定，不是执行域能替上层拍的板。
+
+        `retryable` 不参与本判定：它说的是"要不要在 run 内再试一次"（由重试循环
+        消费），与本行"世界状态是否已知"是两件事。
+        """
+        if result.ok:
+            return OperationState.SUCCEEDED, None
+        if (tool.side_effect is ToolSideEffect.MUTATING
+                and result.error_code is ErrorCode.TIMEOUT):
+            return (
+                OperationState.UNKNOWN,
+                unproven_meta(
+                    error_code=ErrorCode.TIMEOUT.value,
+                    note="MUTATING 工具超时：这次尝试无法证明副作用已完成或未开始",
+                ),
+            )
+        return OperationState.FAILED, None
 
     @staticmethod
     def _admitted_delta(name: str, result: ToolResult) -> dict[str, Any]:
@@ -544,6 +609,7 @@ class ToolExecutor:
         step_id: int | None = None,
         tracer: Tracer = _NULL_TRACER,
         tool_quota: ToolQuotaWindow | None = None,
+        run_deadline: datetime | None = None,
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
@@ -575,6 +641,14 @@ class ToolExecutor:
         `tool_quota`（`#314` T6）：**一批一个**准入窗口，原样转交给本批每条
         `execute()` ——窗口正是为"同一批里的并发调用互相看不见计数"而存在的
         （见 `tooling/quota.py`），所以批次层只透传、不做判定，也不换实例。
+
+        `run_deadline`（`#315` T7）：同样只**透传**给每条 `execute()`。批次层不
+        自己判定到点与否——判定点是唯一的（执行域的接纳闸门），批次层多一个判定
+        点就会与它漂移；而且"到点之后本批剩下的调用怎么办"的答案是统一的：
+        它们各自以 `DEADLINE_EXCEEDED`（准入前被拒、不消耗配额）返回。
+        紧耦合的事实：本批一旦有任一调用到点被拒，串行分支会**停在那里**并把
+        剩余调用标 `CANCELLED`（既有的永久失败传播规则），下一次循环顶部的暂停
+        判定再按 `reason=deadline` 收口。
         """
         if not tool_calls:
             return []
@@ -587,7 +661,7 @@ class ToolExecutor:
                 *(
                     self.execute(tc, operation_context=operation_context,
                             session=session, step_id=step_id, tracer=tracer,
-                            tool_quota=tool_quota)
+                            tool_quota=tool_quota, run_deadline=run_deadline)
                     for tc in tool_calls
                 ),
                 return_exceptions=True,
@@ -617,7 +691,7 @@ class ToolExecutor:
                 execution = await self.execute(
                     tool_call, operation_context=operation_context,
                     session=session, step_id=step_id, tracer=tracer,
-                    tool_quota=tool_quota,
+                    tool_quota=tool_quota, run_deadline=run_deadline,
                 )
                 executions.append(execution)
                 if execution.result.ok:

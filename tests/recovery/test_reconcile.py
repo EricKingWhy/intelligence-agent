@@ -32,11 +32,13 @@ from agent_harness.session import (
     USER_MESSAGE,
     JsonlSessionStore,
     Session,
+    detect_dangling,
 )
 from agent_harness.storage import (
     Operation,
     OperationState,
     SqliteOperationLedger,
+    unproven_meta,
 )
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
 from agent_harness.tools import WriteTool
@@ -48,6 +50,8 @@ OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
 # ── 测试夹具 ──
 
 _SEED_CHAIN: dict[OperationState, list[OperationState]] = {
+    # PENDING 是"刚开单、还没被接纳"的起点本身：链为空（状态机不认 PENDING→PENDING）
+    OperationState.PENDING: [],
     OperationState.RUNNING: [OperationState.RUNNING],
     OperationState.UNKNOWN: [OperationState.RUNNING, OperationState.UNKNOWN],
     OperationState.NEED_RECONCILE: [
@@ -95,6 +99,7 @@ async def _seed_operation(
     *,
     tool_name: str = "bash",
     result_json: str | None = None,
+    reconcile_meta: str | None = None,
 ) -> None:
     await ledger.create(
         Operation(
@@ -115,6 +120,7 @@ async def _seed_operation(
             tool_call_id,
             step,
             result_json=result_json if step is chain[-1] else None,
+            reconcile_meta=reconcile_meta if step is chain[-1] else None,
         )
 
 
@@ -834,3 +840,163 @@ async def test_reconcile_verdict_recorded_in_jsonl_diagnostic_line(
     assert getattr(line, "tool_call_id", None) == "call-1"
     assert getattr(line, "component", None) == "recovery"
     assert getattr(line, "ledger_state", None) == "SUCCEEDED"
+
+
+# ── `#315` T7：**非悬空**的"副作用未证"行 ───────────────────────────────
+
+
+def _make_timeout_session(
+    store: JsonlSessionStore,
+    call_id: str = "call-1",
+    tool_name: str = "write_file",
+) -> Session:
+    """MUTATING 工具**超时**的现场：tool/call 与 tool/result **都齐**。
+
+    与 `_make_crashed_session` 的区别就是这一条：悬空调用的 tool/result 缺席，
+    而这里执行域已经如实落了一条"这次尝试超时、副作用状态未证"的结果。所以
+    "只看悬空调用"的旧收集面永远看不到它——`#315` 要补的正是这个洞
+    （`03 §5`：对账优先于恢复）。
+    """
+    session = Session.start(store)
+    session.append(USER_MESSAGE, {"content": "把配置改掉"})
+    session.append(
+        MODEL_COMPLETED,
+        {
+            "content": "",
+            "tool_calls": [{"id": call_id, "name": tool_name, "args": {}}],
+        },
+        run_id="run-1",
+        step_id=1,
+    )
+    session.append(
+        TOOL_CALL,
+        {"tool_call_id": call_id, "tool_name": tool_name, "args": {}},
+        run_id="run-1",
+        step_id=1,
+    )
+    session.append(
+        TOOL_RESULT,
+        {
+            "tool_call_id": call_id,
+            "content": ToolResult.failure(
+                "执行超时", error_code=ErrorCode.TIMEOUT, retryable=False,
+            ).model_dump_json(),
+        },
+        run_id="run-1",
+        step_id=1,
+    )
+    return session
+
+
+def _results_for(session: Session, tool_call_id: str) -> list:
+    return [
+        event
+        for event in session.events
+        if event.type == TOOL_RESULT and event.data.get("tool_call_id") == tool_call_id
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_dangling_unproven_operation_requires_a_callback(
+    tmp_path: Path,
+) -> None:
+    """非悬空 + 未证 + 无 callback ⇒ 安全拒绝，且一个字节都不写。
+
+    这是 resume 闸门（`#315`：`service.resume_and_launch` 发现账本欠账就调
+    `recover()`）在生产上的实际结局：没有 ReconcileCallback 就落 409。此处证明
+    它**先于任何写入**发生——拒绝路径不推进 Ledger、不补事件。
+    """
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_timeout_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger, session.session_id, "call-1", OperationState.UNKNOWN,
+        tool_name="write_file",
+        reconcile_meta=unproven_meta(
+            error_code=ErrorCode.TIMEOUT.value, note="MUTATING 超时：副作用未证"
+        ),
+    )
+    events_before = store.read_events(session.session_id)
+    # 前提：这条调用**不是**悬空的（旧判据看不见它，正是本票要补的洞）
+    assert detect_dangling(events_before) == []
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    with pytest.raises(RecoveryError, match="UNKNOWN"):
+        await coordinator.recover(session.session_id)
+
+    operation = await ledger.get(session.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.UNKNOWN
+    assert store.read_events(session.session_id) == events_before, "安全拒绝 = 零写入"
+
+
+@pytest.mark.asyncio
+async def test_non_dangling_unproven_operation_is_reconciled_without_a_second_result(
+    tmp_path: Path,
+) -> None:
+    """有 callback ⇒ 裁决只落一次，且**不**补第二条 `tool/result`。
+
+    非悬空的行已经有一条如实的结果（"超时、状态未证"）——再补一条会破坏
+    `derive_messages` 依赖的 1:1 配对（`07 §8`）。所以裁决的 durable 落点是
+    **Ledger 行本身**：状态进终态、`reconcile_meta` 记下裁决。事件流里多出来的
+    只有 `operation/reconcile-required`（必填人工关卡）与收尾的 `session/resumed`。
+    """
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_timeout_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger, session.session_id, "call-1", OperationState.UNKNOWN,
+        tool_name="write_file",
+        reconcile_meta=unproven_meta(
+            error_code=ErrorCode.TIMEOUT.value, note="MUTATING 超时：副作用未证"
+        ),
+    )
+    original_content = _result_events(session)["call-1"]
+    callback = _ScriptedCallback(ReconcileVerdict.CONFIRM_SUCCESS)
+
+    recovered = await _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback
+    ).recover(session.session_id)
+
+    assert len(callback.calls) == 1
+    assert len(_reconcile_required_events(recovered)) == 1
+    results = _results_for(recovered, "call-1")
+    assert len(results) == 1, "同一 tool_call_id 只能有一条 tool/result（07 §8 的配对）"
+    assert results[0].data["content"] == original_content, "原来那条如实的结果不被改写"
+    operation = await ledger.get(session.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.SUCCEEDED
+    assert operation.reconcile_meta is not None
+    assert (
+        json.loads(operation.reconcile_meta)["verdict"]
+        == ReconcileVerdict.CONFIRM_SUCCESS.value
+    ), "裁决内容覆盖那一格标记：疑问已解除，不需要第二个清除标记"
+
+
+@pytest.mark.asyncio
+async def test_non_dangling_pending_operation_is_not_a_reconcile_case(
+    tmp_path: Path,
+) -> None:
+    """反例：**非终态**不等于"欠对账"——`PENDING` 明文可以按策略重执行（`07 §6`）。
+
+    这条行同样是"非悬空 + 非终态"，但 `needs_reconcile` 刻意把它排除在外：
+    "能证明尚未启动"就没有世界状态未知的问题。缺 callback 也必须照常恢复——
+    否则闸门会宽到把每次"刚开单还没跑"的调用都变成人工关卡。
+    """
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_timeout_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger, session.session_id, "call-1", OperationState.PENDING,
+        tool_name="write_file",
+    )
+
+    recovered = await _make_coordinator(store, ledger, tmp_path / "state.db").recover(
+        session.session_id
+    )
+
+    assert _reconcile_required_events(recovered) == []
+    assert recovered.events[-1].type == SESSION_RESUMED
+    operation = await ledger.get(session.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.PENDING

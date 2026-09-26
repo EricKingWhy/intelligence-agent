@@ -37,10 +37,19 @@
 写在 `_dimension_reached` / `_dimension_headroom` 的 docstring 里，本模块不复述第二遍
 （准入与 closeout 容量是**两个**谓词，合并会让暂停点上的收口恒被拒）。
 
-**本模块不实现**（别误以为漏了）：deadline（`#315`）、stuck（`#317`）、SessionBudget
-（`#318`）、以及 `budget.run.max_tool_calls`（工具调用**总数**的上限：`04 §9.1` 只冻结
-了"按名字给的显式配额"，总数只观测不设限）。所以 `run/paused.data.reason` 目前只会是
-`budget_exhausted`——它是"预算到顶"这一类，**具体哪个维度看 `trigger_dimension`**。
+**deadline（`#315`）不是"第五维计数"**：它是**绝对时刻**（RFC 3339 UTC），判据是
+"现在到点了没有"，不是"消耗比 ceiling"。因此它不进 `TRIGGER_ORDER` / `RUN_DIMENSIONS`
+（那两张表描述的是"consumed 与 ceiling 比较"的维度，`closeout_capacity` 与
+`resume_headroom_ok` 的逐维扫描也从它们派生），而在 `pause_trigger` 里单独判、**最先判**：
+到点后任何新工作都不许开始（`04 §9.1` 的接纳边界），而"抬高一个数字"治不了它——
+恢复要给的是**一个新的未来时刻**（判据见 `resume_headroom_ok`）。投影只给绝对时刻
+（`limits.deadline_at`），**不给剩余秒数**：倒计时是客户端从绝对时刻自己算的派生量，
+服务端投影保持与"当前时刻"无关（本模块反复强调的可逐字节比对性质）。
+
+**本模块不实现**（别误以为漏了）：stuck（`#317`）、SessionBudget（`#318`）、以及
+`budget.run.max_tool_calls`（工具调用**总数**的上限：`04 §9.1` 只冻结了"按名字给的显式
+配额"，总数只观测不设限）。所以 `run/paused.data.reason` 目前只会是 `budget_exhausted`
+或 `deadline`——**具体哪个维度看 `trigger_dimension`**（前者是"预算到顶"这一类）。
 
 per-tool 配额（`#314`）在这张表上是**动态维度**：每个已配置的工具名各占一个
 `run.tool_call_limits.<tool_name>`，因此它不在 `TRIGGER_ORDER` 这个定长元组里，
@@ -49,8 +58,9 @@ per-tool 配额（`#314`）在这张表上是**动态维度**：每个已配置�
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -76,6 +86,18 @@ from agent_harness.session.event import (
 #: `run/paused.data.reason`：本票唯一会出现的暂停原因（其余两类由 `#315`/`#317` 接）。
 REASON_BUDGET_EXHAUSTED = "budget_exhausted"
 
+#: `run/paused.data.reason`：绝对 deadline 到点（`#315`；`03 §3.4` 三值里的第二个）。
+#: 与 `budget_exhausted` 的分工：后者的处置是"抬高某个 ceiling"，前者是"给一个新的
+#: 未来时刻"——两个不同的客户端动作，所以必须是两个取值（`02 §5.1` 三层控制不可合并的
+#: 同一方向）。`#317` 的 stuck 是第三个，本票不产。
+REASON_DEADLINE = "deadline"
+
+#: `03 §5` 冻结的 run 状态词表里**唯一**由对账（而非暂停 / 终态）给出的那一个（`#315` 起可产）。
+#: 它在投影里**覆盖** `paused`：`03 §5` 明写「`needs_reconcile` 同样 MUST 先 reconcile 才
+#: 允许恢复」，所以一条"暂停 + 欠着未对账副作用"的 run，其状态词是这一个——暂停原因
+#: （`reason` / `continuation`）照旧可读，只是不再冒充"可直接恢复的暂停"。
+STATE_NEEDS_RECONCILE = "needs_reconcile"
+
 #: `run/paused.data.trigger_dimension`：命中的是哪一个 ceiling。
 #: 各作用域 / 各维度**不可互相替代**（`02 §5.1`），所以投影上必须能分辨是谁到顶。
 #: 取值就是**配置字段的路径名**（客户端据此知道该抬高哪一个 ceil）——不发明别名。
@@ -90,6 +112,25 @@ TRIGGER_LOCAL_TURNS = "local.max_agent_turns"
 #: 映射里的哪一个键。为什么是动态维度而不是固定常量：工具名由请求给、数量不定，
 #: 塞不进 `TRIGGER_ORDER` 这种定长元组。
 TRIGGER_RUN_TOOL_PREFIX = "run.tool_call_limits."
+
+#: deadline 的维度名（`#315`）：同样是配置字段的路径名。它**不在** `TRIGGER_ORDER` /
+#: `RUN_DIMENSIONS` 里——那两张表是"consumed 与 ceiling 比较"的维度清单，而 deadline
+#: 判的是"当前时刻与截止时刻比较"。`trigger_dimension` 仍然按同一规则给路径名，
+#: 客户端据此知道该换哪一个字段。
+TRIGGER_RUN_DEADLINE = "run.deadline_at"
+
+
+def utc_now() -> datetime:
+    """本模块的时间源（**唯一一处**读挂钟）。
+
+    为什么要有这个函数而不是各处 `datetime.now(UTC)`：deadline 判定必须能在测试里
+    被钉死在确定时刻上（`#315` 的用例要造"刚好到点""差一秒"这类边界），monkeypatch
+    一个函数比给每个调用点加 clock 参数更好——调用点（runtime / service / CLI）不必
+    各自记得传时间，也不会出现"两处各读一次挂钟"导致同一次判定里时间不一致。
+    返回**带时区的 UTC** 时刻；朴素时间在本模块一律不接受（`11 §6.1`：所有 deadline
+    都是 UTC 瞬时，客户端时钟不是权威）。
+    """
+    return datetime.now(UTC)
 
 #: 准入判定的顺序（命中即返回，**只报一个**维度）。turns 在最前：它是
 #: `#308` 起就存在的维度、也是客户端最先配的那个；同一时刻多维度同时到顶时，
@@ -134,6 +175,17 @@ def tool_dimensions(limits: RunLimits) -> tuple[str, ...]:
     可 replay 重建同样的状态）。
     """
     return tuple(tool_trigger_dimension(name) for name in sorted(limits.tool_call_limits))
+
+
+def reason_for_dimension(dimension: str) -> str:
+    """命中的维度 → `run/paused.data.reason`（`03 §3.4` 的三值词表）。
+
+    只有 `run.deadline_at` 落在 deadline 上；其余（四维计数 / local fuse / per-tool
+    配额）都是预算类——它们的共同点是"把绝对值抬高就能继续"。`stuck` **不由维度
+    产生**（它是 guard 的判定，`#317`），所以这里没有它的入口：映射表里不预置一个
+    当下产不出的值，就不必在别处解释它为什么恒不出现。
+    """
+    return REASON_DEADLINE if dimension == TRIGGER_RUN_DEADLINE else REASON_BUDGET_EXHAUSTED
 
 
 #: `run/paused.data.closeout_source`（`03 §3.4` 的两值）。
@@ -198,6 +250,37 @@ def _decimal_text(value: Decimal | None) -> str | None:
     return None if value is None else format(value, "f")
 
 
+def _deadline_text(value: datetime | None) -> str | None:
+    """`datetime` → wire 上的 UTC ISO 8601 文本（`None` 原样）。
+
+    一律用 `Z` 收尾的 UTC 形式（`11 §6.1`：`deadline_at` 是 RFC 3339 UTC）：
+    `+00:00` 与 `Z` 描述同一瞬时，但**字节不同**，而本模块的投影要能跨执行逐字节
+    比对（事件落盘 / 证据复核都依赖它），所以出口只允许一种写法。
+    """
+    if value is None:
+        return None
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _deadline_or_none(raw: Any) -> datetime | None:
+    """读回事件里的 `deadline_at`（**宽容**：读不出来就当没配，不连坐其余维度）。
+
+    投影读回与请求校验**故意不同**：请求里的畸形值要响亮拒绝（`parse_deadline_at`
+    抛 422），因为那是"客户端以为设了"的假象来源；而事件里的畸形值只可能是历史
+    数据或人工篡改，重建账本时按"没配这一维"处理才能让其余维度照常可用
+    （与 `_int_map` 的逐项宽容同一条纪律）。
+    """
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
 def _decimal_or_none(raw: Any) -> Decimal | None:
     """读回十进制成本：**同一条规则**在 `model/accounting.decimal_or_none`（唯一实现）。
 
@@ -217,7 +300,13 @@ class RunLimits:
     四个维度都可能有值、也可能都没有（= 本 run 没配 run 作用域预算）。`#313` 起
     它同时是 `run/started.data.budget`、`run/paused` / `run/resumed` 的 `limits`
     快照的形状——快照的六个维度里**每工具配额**这一席由 `#314` 接入
-    （`tool_call_limits`，只收**已注册**工具名），deadline（`#315`）仍在路上。
+    （`tool_call_limits`，只收**已注册**工具名），**deadline** 这一席由 `#315` 接入
+    （`deadline_at`，RFC 3339 UTC 绝对时刻或 `null`）。
+
+    `deadline_at`（`#315`）：**绝对时刻**，不是"还剩多久"。`null` = 本 run 不设 deadline
+    （只观测不限制，`11 §6.1` 的缺省）。落进事件与投影时一律是 UTC 的 ISO 8601 文本
+    （`Z` 收尾），因此同一份 ceiling 跨执行逐字节可比；**没有"剩余秒数"键**——那是
+    客户端从绝对时刻自己算的派生量，服务端投影不与当前时刻挂钩。
 
     `tool_call_limits`（`#314`）：工具名 → 正整数**绝对**上限。空映射 = 本 run 没有
     任何 per-tool 配额（**不是**"所有工具上限为 0"）。它与其他四维的区别是"一维变多维"：
@@ -228,6 +317,8 @@ class RunLimits:
     max_model_requests: int | None = None
     max_total_tokens: int | None = None
     max_cost_usd: Decimal | None = None
+    #: 绝对截止时刻（UTC，aware）。`None` = 不限。
+    deadline_at: datetime | None = None
     #: 工具名 → 绝对 ceiling。只读（冻结实例不阻止改内容，故一律经 `tool_call_limits()`
     #: 之外的构造入口赋值，且投影/读回都**复制**出去，不把内部字典交到调用方手上）。
     tool_call_limits: Mapping[str, int] = field(default_factory=dict)
@@ -242,6 +333,7 @@ class RunLimits:
                 self.max_model_requests,
                 self.max_total_tokens,
                 self.max_cost_usd,
+                self.deadline_at,
             )
         ) or bool(self.tool_call_limits)
 
@@ -255,10 +347,11 @@ class RunLimits:
             TRIGGER_RUN_REQUESTS: self.max_model_requests,
             TRIGGER_RUN_TOKENS: self.max_total_tokens,
             TRIGGER_RUN_COST: self.max_cost_usd,
+            TRIGGER_RUN_DEADLINE: self.deadline_at,
         }.get(dimension)
 
     def as_projection(self) -> dict[str, Any]:
-        """客户端可读投影：**四维全在**，没配的那一维是 `null`。
+        """客户端可读投影：**各维全在**，没配的那一维是 `null`。
 
         与 `as_run_started_budget` 的"一维都没配就不落键"不矛盾：那里是"这次 run
         没有 run 预算事实"（落一个全 null 的对象是占位噪声），这里是"客户端问
@@ -266,12 +359,14 @@ class RunLimits:
 
         `tool_call_limits` **按名字排序**输出（同一份事实的字节稳定形式：事件落盘与
         投影要能跨执行逐字节比对）；没配工具配额时是 `{}`，与请求侧的缺省形状一致。
+        `deadline_at` 是 UTC 的 ISO 文本或 `null`——**没有**"剩余秒数"键（见类 docstring）。
         """
         return {
             "max_agent_turns_total": self.max_agent_turns_total,
             "max_model_requests": self.max_model_requests,
             "max_total_tokens": self.max_total_tokens,
             "max_cost_usd": _decimal_text(self.max_cost_usd),
+            "deadline_at": _deadline_text(self.deadline_at),
             "tool_call_limits": {
                 name: self.tool_call_limits[name] for name in sorted(self.tool_call_limits)
             },
@@ -548,6 +643,7 @@ def _limits_from_projection(raw: Any) -> RunLimits:
             tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
         ),
         max_cost_usd=_decimal_or_none(scope.get("max_cost_usd")),
+        deadline_at=_deadline_or_none(scope.get("deadline_at")),
         tool_call_limits=_int_map(scope.get("tool_call_limits")),
     )
 
@@ -859,6 +955,7 @@ def pause_trigger(
     run_limits: RunLimits,
     execution_steps: int,
     local_fuse_turns: int,
+    now: datetime | None = None,
 ) -> str | None:
     """这次执行还能不能继续（不能继续时返回命中的维度名）。
 
@@ -879,7 +976,19 @@ def pause_trigger(
     **per-tool 配额**（`#314`）紧随四维之后、local fuse 之前——它同样是 run 作用域
     （`02 §5.1`：RunBudget 的"每工具配额"与 local fuse 是两层不同的控制），按工具名
     排序逐名判（`tool_dimensions`）。
+
+    **deadline（`#315`）先判、且判据不同**：它比的是**当前时刻**（`now` 缺省取
+    `utc_now()`）与绝对截止时刻，`now >= deadline_at` 即到点（到点那一刻就停，不留
+    半格余量——"时刻"没有"下一次"可言）。为什么排在最前：其余维度的处置都是"抬高一
+    个数字"，而 deadline 的处置是"给一个新的未来时刻"，一个数字治不了它；同一次判定里
+    同时命中时先报 deadline，客户端才不会被引去抬一个无关的 ceiling。deadline **不进**
+    `TRIGGER_ORDER` / `closeout_capacity` / `resume_headroom_ok` 的逐维扫描（那些表描述
+    "consumed vs ceiling"），它的恢复判据另行实现（见 `resume_headroom_ok`）。
     """
+    if run_limits.deadline_at is not None:
+        moment = now if now is not None else utc_now()
+        if moment >= run_limits.deadline_at:
+            return TRIGGER_RUN_DEADLINE
     for dimension in RUN_DIMENSIONS:
         if _dimension_reached(dimension, consumed=consumed, limits=run_limits):
             return dimension
@@ -984,7 +1093,9 @@ def _dimension_headroom(
     return True
 
 
-def closeout_capacity(*, consumed: BudgetConsumed, run_limits: RunLimits) -> bool:
+def closeout_capacity(
+    *, consumed: BudgetConsumed, run_limits: RunLimits, now: datetime | None = None,
+) -> bool:
     """暂停时还剩不剩 closeout 的容量（剩 ⇒ 允许一次有界模型 closeout）。
 
     没有容量 ⇒ 只落**确定性** continuation（`02 §5.2`：模型 closeout 不可用时不得
@@ -999,14 +1110,25 @@ def closeout_capacity(*, consumed: BudgetConsumed, run_limits: RunLimits) -> boo
     扫的是**四维**（`RUN_DIMENSIONS`）：per-tool 配额（`#314`）不参与——closeout 是一次
     模型请求、不调用任何工具，工具配额约束不到它。把工具维度算进来会让"工具配额的暂停"
     在配额恰好用满时永久降级成确定性 continuation。
+
+    **deadline（`#315`）不是"余量"而是"时刻"**：到点后连这一次请求也不发（返回
+    False ⇒ 走确定性 continuation）。理由不是省预算，而是 `04 §9.1` / ADR-0044 D4
+    把"到点后不启动任何新工作"写死了，而 closeout 就是一次真实的 Provider 请求
+    （它会在事件里落一条 `model/request`）。确定性 continuation 只用已持久化事实、
+    不发请求，所以它在到点后仍然可用——这正是"暂停必须永远收得了口"的保证。
     """
+    moment = now if now is not None else utc_now()
+    if run_limits.deadline_at is not None and moment >= run_limits.deadline_at:
+        return False
     return all(
         _dimension_headroom(dimension, consumed=consumed, limits=run_limits)
         for dimension in RUN_DIMENSIONS
     )
 
 
-def resume_headroom_ok(*, consumed: BudgetConsumed, limits: RunLimits) -> bool:
+def resume_headroom_ok(
+    *, consumed: BudgetConsumed, limits: RunLimits, now: datetime | None = None,
+) -> bool:
     """恢复的绝对 ceiling 是否"真的能继续"（`11 §6.1` 的 409 判据之一）。
 
     判据是**能继续干活**，不是"数字变大"：对**每一维**配了 ceiling 的维度，都要求
@@ -1017,19 +1139,28 @@ def resume_headroom_ok(*, consumed: BudgetConsumed, limits: RunLimits) -> bool:
 
     账目**未知**而该维度配了 ceiling ⇒ 判定为"不能继续"（无法证明在预算内）。
 
+    **deadline（`#315`）的判据是"严格在未来"**（`limits.deadline_at > now`）：等于
+    当前时刻或已过去 ⇒ 恢复后下一次准入立刻再停一次，与上面那条"不许接受立刻再暂停的
+    恢复"是**同一条**判据在时间维度上的形式。它**不**参与 `_dimension_reached` 的扫描
+    （deadline 不是 consumed 与 ceiling 的比较），所以单独判在这一处、只判一次。
+
     **没配任何一维时这里返回 True**（没有可检查的维度）——"恢复必须至少给一个
     ceiling"是 `validate_resume` 的判定（那里才区分"没给"与"给了但不够"），
     本函数只管"给了的那些够不够"。
 
     这是本实现对冻结清单的**收紧**读法（`11 §6.1` 只点名「ceiling 降到已消耗之下 ⇒
     409」）：比该条更严一格，因此不会放过任何冻结文本要求拒绝的请求，只是额外拒绝
-    "恢复了但一轮都跑不了"的请求。收紧的边界如实登记在 tracker（T4 段与 T5 段各一条），
-    若产品要放开，改这里一处即可（前端只做展示提示，不做判定）。
+    "恢复了但一轮都跑不了"的请求。收紧的边界如实登记在 tracker（T4 段与 T5 段各一条，
+    T7 段补 deadline 那一条），若产品要放开，改这里一处即可（前端只做展示提示，不做判定）。
     """
+    if limits.deadline_at is not None:
+        moment = now if now is not None else utc_now()
+        if limits.deadline_at <= moment:
+            return False
     return not any(
         _dimension_reached(dimension, consumed=consumed, limits=limits)
         # local fuse 不是"绝对 ceiling"，恢复不改它；per-tool 维度**要**检
-        # （恢复请求可以点名抬高某个工具的配额，那就是拿它当依据继续跑）。
+        # （恢复请求可以点名抬高某个工具的配额，那就是拿它作为依据继续跑）。
         for dimension in (*RUN_DIMENSIONS, *tool_dimensions(limits))
     )
 
@@ -1120,6 +1251,54 @@ def parse_tool_call_limits(raw: Any) -> dict[str, int]:
     return parsed
 
 
+def parse_deadline_at(raw: Any) -> datetime | None:
+    """`budget.run.deadline_at` 的形态校验（**422**；`#315` / `11 §6.1`）。
+
+    形状（冻结）：RFC 3339 **UTC** 绝对时刻，或 `null`（= 不设 deadline，只观测）。
+    接受的写法：带 `Z` 或带 `+00:00` 的 ISO 8601；带其他偏移（如 `+08:00`）也**收**，
+    但**归一化到 UTC** 存储——瞬时不变、字节稳定，客户端不必为"同一时刻两种写法"辩护。
+    **朴素时间**（无时区）一律拒绝：`naive` 的语义取决于读它的机器，而本项目的
+    deadline 是绝对瞬时（`11 §6.1`：所有 deadline 都是 UTC 瞬时，客户端时钟不是权威）；
+    收下它会得到"同一份请求在不同机器上到点时刻不同"的假实现。
+
+    非法值**拒绝整个请求**（不静默当成没配）：与 `parse_cost_ceiling` 同一条纪律
+    （ADR-0044 D1/D8：不给客户端"配了但没生效"的假象）。本函数只管**形状**；
+    "这个 deadline 已经过去了"是**状态**问题，按 `11 §6.1` 归 409 面
+    （见 `pause_trigger` 的即时暂停与 `resume_headroom_ok` 的恢复判据）——
+    开工前给一个已过期的 deadline 是合法的（等于立刻到点），不是形状错误。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise BudgetRejection("budget.run.deadline_at 必须是 RFC 3339 UTC 文本，不是布尔")
+    if isinstance(raw, datetime):
+        parsed = raw
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            raise BudgetRejection(
+                "budget.run.deadline_at 不能是空字符串（不设 deadline 请给 null）"
+            )
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as error:
+            raise BudgetRejection(
+                f"budget.run.deadline_at 不是合法的 RFC 3339 时刻：{raw!r}"
+                "（例：2026-09-26T04:30:00Z）"
+            ) from error
+    else:
+        raise BudgetRejection(
+            f"budget.run.deadline_at 必须是 RFC 3339 UTC 文本或 null，"
+            f"收到 {type(raw).__name__}"
+        )
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise BudgetRejection(
+            f"budget.run.deadline_at 必须带时区（RFC 3339 UTC）：{raw!r} 是朴素时间，"
+            "它在不同机器上代表不同瞬时，不能作为绝对截止时刻"
+        )
+    return parsed.astimezone(UTC)
+
+
 def validate_tool_call_limits_registered(
     limits: RunLimits, *, registered: Iterable[str],
 ) -> None:
@@ -1154,24 +1333,28 @@ def run_limits_from_request(
     max_model_requests: int | None = None,
     max_total_tokens: int | None = None,
     max_cost_usd: Any = None,
+    deadline_at: Any = None,
     tool_call_limits: Any = None,
     accounting: ProviderAccounting,
 ) -> RunLimits:
     """请求里的 run 作用域 ceiling → `RunLimits`（**开工前**校验，422）。
 
-    形态非法（见 `parse_cost_ceiling` / `parse_tool_call_limits`）与**本链强制不了**的
-    维度（`validate_ceiling_enforceability`）都在这里拒绝：调用方保证它在第一位副作用
-    之前被调用（`11 §6.1`「无副作用」）。三个入口（Web / SessionService / CLI）共用
-    这一份规则——422 的口径只有一处，不各自解释一遍。
+    形态非法（见 `parse_cost_ceiling` / `parse_deadline_at` / `parse_tool_call_limits`）
+    与**本链强制不了**的维度（`validate_ceiling_enforceability`）都在这里拒绝：调用方
+    保证它在第一位副作用之前被调用（`11 §6.1`「无副作用」）。三个入口（Web /
+    SessionService / CLI）共用这一份规则——422 的口径只有一处，不各自解释一遍。
 
     「已注册工具名」这条不在本函数里判（它要注册表，这里还没有）：调用方在装配层用
-    `validate_tool_call_limits_registered` 补上，见那里的 docstring。
+    `validate_tool_call_limits_registered` 补上，见那里的 docstring。deadline **不**
+    受"可执行性"约束（它由 Runtime 自己在接纳点判，不依赖 Provider 链的能力），
+    所以只过 `parse_deadline_at` 的形状判定。
     """
     limits = RunLimits(
         max_agent_turns_total=max_agent_turns_total,
         max_model_requests=max_model_requests,
         max_total_tokens=max_total_tokens,
         max_cost_usd=parse_cost_ceiling(max_cost_usd),
+        deadline_at=parse_deadline_at(deadline_at),
         tool_call_limits=parse_tool_call_limits(tool_call_limits),
     )
     validate_ceiling_enforceability(limits, accounting)
@@ -1207,6 +1390,11 @@ def resume_limits(paused: RunLimits, *, request: RunLimits) -> RunLimits:
     留下（整表替换会静默撤掉它，正是上面那条"一次恢复顺手删 ceiling"）。于是恢复能给
     某个工具**新增**一个配额（收窄，允许）或抬高已有的（点名的本意），但删不掉。
 
+    deadline（`#315`）沿同一条规则：点名的取请求值，没点名的沿用暂停时的时刻。于是
+    "上次的 deadline 已过去"的恢复**必须点名一个新的未来时刻**，否则 `validate_resume`
+    的 headroom 判定会以"恢复后会立刻再停"拒绝它（409）——沿用不是"删掉"，也不是
+    "顺手延长"。
+
     于是恢复请求的语义是"在这些维度上给出新的绝对 ceiling"，而不是"这就是新的全集"；
     点名了却放不下一次新准入的维度由 `validate_resume` 的 headroom 判定拒绝（409），
     未点名但已经到线的维度同样会因此被拒——那个 run 本来也继续不了，必须把真正卡住它
@@ -1219,6 +1407,7 @@ def resume_limits(paused: RunLimits, *, request: RunLimits) -> RunLimits:
         max_model_requests=_pick(request.max_model_requests, paused.max_model_requests),
         max_total_tokens=_pick(request.max_total_tokens, paused.max_total_tokens),
         max_cost_usd=_pick(request.max_cost_usd, paused.max_cost_usd),
+        deadline_at=_pick(request.deadline_at, paused.deadline_at),
         tool_call_limits={**paused.tool_call_limits, **request.tool_call_limits},
     )
 
@@ -1235,6 +1424,7 @@ def validate_resume(
     expected_version: int | None,
     limits: RunLimits,
     resume_basis: str | None,
+    now: datetime | None = None,
 ) -> RunLimits:
     """恢复请求的**开工前**校验（拒绝 ⇒ 抛领域异常，调用方零副作用）。
 
@@ -1251,11 +1441,17 @@ def validate_resume(
     "恢复成功但立刻再次暂停"的假象。**一个维度都不点名**同样 409：`03 §5` 要求恢复
     请求给出绝对 ceiling，"一个都不给"不是抬高。
 
-    本票的暂停只可能由预算产生，所以"变更依据"只有一条真实路径：
+    本票的暂停只可能由预算或 deadline 产生，所以"变更依据"只有一条真实路径：
     `resume_basis=budget_increase` 且新 ceilings 真的能继续（见 `resume_headroom_ok`）。
     另外三值的**证据判定**（相关 steer / 比快照更新的环境或策略版本）属 `#317`，
-    现在接受它们等于假装校验过证据 ⇒ 409 明说"不接受"
-    （`#315` 的 deadline 暂停同样在这里被拒：它的恢复前置条件是不同的证据）。
+    现在接受它们等于假装校验过证据 ⇒ 409 明说"不接受"。
+
+    **deadline 暂停（`#315`）走同一条 `budget_increase` 路径**，理由：deadline 本身就是
+    `budget.run` 作用域的一维（`11 §6.1` 的公开形状里它就在 `run` 对象内），恢复它给的
+    是"新的绝对时刻"——与给新 ceiling 是同一个动作类别（`03 §3.4`：恢复只接受绝对值、
+    不重置 counter），不需要 `#317` 那三类"变更依据"的证据。真正的判据是
+    `resume_headroom_ok` 里的"deadline 严格在未来"：沿用一个已过去的时刻会被拒（409），
+    而这不是形状错误（形状在 `parse_deadline_at` 判过）。`stuck`（`#317`）仍是 409。
     """
     if not run_id:
         raise BudgetRejection(
@@ -1280,26 +1476,37 @@ def validate_resume(
         )
     if resume_basis not in RESUME_BASIS_VALUES:
         raise BudgetRejection(f"未知 resume_basis：{resume_basis!r}")
-    if paused.reason != REASON_BUDGET_EXHAUSTED:
+    if paused.reason not in (REASON_BUDGET_EXHAUSTED, REASON_DEADLINE):
         raise BudgetConflict(
             f"暂停原因 reason={paused.reason} 的恢复前置条件本票未实现"
-            f"（#315 deadline / #317 stuck 各自负责），拒绝启动工作"
+            f"（#317 stuck 负责），拒绝启动工作"
         )
     if resume_basis != RESUME_BASIS_BUDGET_INCREASE:
         raise BudgetConflict(
-            f"预算暂停只接受 resume_basis={RESUME_BASIS_BUDGET_INCREASE}："
+            f"预算 / deadline 暂停只接受 resume_basis={RESUME_BASIS_BUDGET_INCREASE}："
             f"{resume_basis} 的有效性需要变更证据（属 #317 的责任域），"
             f"本票不假装校验过它"
         )
     if not limits.configured:
-        # `03 §5`：恢复请求 MUST 给出**绝对** ceiling（不是"可以不给"）。四维里点
+        # `03 §5`：恢复请求 MUST 给出**绝对** ceiling（不是"可以不给"）。各维里点
         # 哪一维由客户端决定（暂停可能落在任一维上），但一个都不点 = 客户端没有抬高
         # 任何东西，那个 run 只会在同一个维度上立刻再停一次。
         raise BudgetConflict(
-            "恢复必须至少给出一个绝对 ceiling（budget.run.* 四维任一）；"
+            "恢复必须至少给出一个绝对 ceiling（budget.run.* 任一维，含 deadline_at）；"
             "一个都不给不是抬高——本请求未启动任何工作"
         )
     effective = resume_limits(paused.limits, request=limits)
+    if paused.reason == REASON_DEADLINE and effective.deadline_at is None:
+        # deadline 暂停的**恢复依据**就是"换一个新的未来时刻"：连时刻都没有（请求没点名，
+        # 暂停快照里也没有）时，这次恢复没有任何依据让这个 run 继续跑下去——它只会在
+        # 下一次准入上因为别的原因再停一次。这一条与 headroom 是**两个**判据：headroom
+        # 管"给了但不够（已过去）"，这里管"根本没给"。缺了它，一个 reason=deadline
+        # 但快照里没带 deadline 的行会被自由放行（`#315` 用例 `test_..._deadline...` 盯着）。
+        raise BudgetConflict(
+            "暂停原因是 deadline，但生效的 ceiling 里没有 deadline_at："
+            "恢复必须点名一个**未来**的 deadline（budget.run.deadline_at）——"
+            "沿用一个没有时刻的暂停等于假装它还能继续跑"
+        )
     unknown = _unknown_base_dimensions(paused, effective)
     if unknown:
         raise BudgetConflict(
@@ -1307,11 +1514,12 @@ def validate_resume(
             f"通常是 T5 之前落的暂停）——基数未知就无法证明'到线即停'成立，"
             f"本请求未启动任何工作；请去掉这些 ceiling 后重试"
         )
-    if not resume_headroom_ok(consumed=paused.consumed, limits=effective):
+    if not resume_headroom_ok(consumed=paused.consumed, limits=effective, now=now):
         raise BudgetConflict(
             f"恢复必须把绝对 ceiling 提高到能继续（consumed="
             f"{paused.consumed.as_projection()}）；仍放不下一次新准入的维度见 "
-            f"limits={effective.as_projection()}"
+            f"limits={effective.as_projection()}（deadline 维度的判据是"
+            f"「严格在未来」，沿用一个已过去的时刻同样在这里被拒）"
         )
     return effective
 
@@ -1390,6 +1598,7 @@ def project_budget(
     state: RunBudgetState, *,
     accounting: ProviderAccounting,
     local_fuse: LocalFuse | None = None,
+    reconcile_pending: Sequence[str] = (),
 ) -> dict[str, Any]:
     """run 账本的客户端投影（`11 §6.1`）：identity / version / 绝对 ceilings /
     consumed / remaining / **可执行性** / 暂停原因 + continuation。
@@ -1412,21 +1621,44 @@ def project_budget(
     唯一的例外是 `none`：会话里**一个 run 都没有**时不存在 run 状态可言，冻结词表不为
     这种情形留词；本投影用 `none` 表示"无可投影的 run"，并把这一条登记在此（它与
     `active` 的区别是测试与客户端都要认得的）。
+
+    `reconcile_pending`（`#315`）：本 run 在 Operation Ledger 上**仍欠着对账**的
+    tool_call_id 列表。由调用方查账本得出——本函数是纯派生投影，不碰存储（同
+    `local_fuse` 的分工）。非空时的两条读法：
+
+      * run **未终态** ⇒ `state` 报 `needs_reconcile`（`03 §5`），并附 `reconcile`
+        子对象。这是**覆盖**而非替换：`reason` / `trigger_dimension` / `continuation`
+        照旧在——"为什么停"与"停了之后欠了什么"是两件事，都要能看见。覆盖的理由是
+        客户端只看 `state` 就会把这条 run 当普通暂停，给出一个点了必然 409 的恢复
+        入口（`03 §5`：对账优先于恢复），状态词是唯一的那个刹车灯。
+      * run **已终态** ⇒ `state` 保持终态名（`completed` 是既成事实，不能因为账本上
+        另有一笔欠账就把它报成没跑完），`reconcile` 子对象照旧出现，让"这个会话还欠
+        一笔对账"有地方可读。
+
+    空列表**不落键**（同本函数对"缺席 vs 空值"的一贯口径：没有欠账与欠账为空不是
+    同一件事，用一个恒为 null 的键表达会让后者看起来像前者）。
     """
     if state.paused is not None:
         projection: dict[str, Any] = dict(state.paused.as_projection())
-        projection["enforcement"] = accounting.as_projection()
-        return projection
-    return {
-        "run_id": state.run_id,
-        "version": state.version,
-        "state": state.terminal_type or ("active" if state.run_id else "none"),
-        "limits": state.limits.as_projection(),
-        "consumed": state.consumed.as_projection(),
-        "remaining": state.consumed.remaining(state.limits),
-        "enforcement": accounting.as_projection(),
-        "local_fuse": local_fuse.as_projection() if local_fuse else None,
-    }
+    else:
+        projection = {
+            "run_id": state.run_id,
+            "version": state.version,
+            "state": state.terminal_type or ("active" if state.run_id else "none"),
+            "limits": state.limits.as_projection(),
+            "consumed": state.consumed.as_projection(),
+            "remaining": state.consumed.remaining(state.limits),
+            "local_fuse": local_fuse.as_projection() if local_fuse else None,
+        }
+    if reconcile_pending:
+        projection["reconcile"] = {
+            "state": STATE_NEEDS_RECONCILE,
+            "tool_call_ids": sorted(reconcile_pending),
+        }
+        if state.terminal_type is None:
+            projection["state"] = STATE_NEEDS_RECONCILE
+    projection["enforcement"] = accounting.as_projection()
+    return projection
 
 
 def as_run_started_budget(run_limits: RunLimits) -> dict[str, Any] | None:
@@ -1484,6 +1716,7 @@ def deterministic_continuation(
     trigger_dimension: str,
     limits: RunLimits,
     consumed: BudgetConsumed,
+    blocked_by: Sequence[str] = (),
 ) -> dict[str, Any]:
     """确定性 continuation：**只**用已持久化事实组装（`02 §5.2`）。
 
@@ -1494,16 +1727,32 @@ def deterministic_continuation(
 
     账目**未知**的维度在文案里写"未知"而不是 0（`11 §6.1`：不可得 ≠ 0；这里的一句
     "已花 0 元"会直接骗到正在决定要不要继续的人）。
+
+    `blocked_by`（`#315`）：**暂停收口时已经确证**的额外阻塞项，由调用方给出
+    （今天唯一的生产者是"存在未 reconcile 的副作用"，见 AgentRuntime 的 deadline
+    边界）。它们进 `blockers` 并且会改写 `next_safe_action`——一个"先对账"的动作
+    **不能**与"抬高 ceiling 后恢复"并列出现：后者会把运行者直接引到一条被 409
+    拒绝的路上（`03 §5`：对账优先于恢复）。
     """
     items = [event for event in events if event.run_id == run_id]
     tool_results = sum(1 for event in items if event.type == TOOL_RESULT)
     ceiling = limits.ceiling_of(trigger_dimension)
-    action = (
-        f"提高绝对 ceiling（{trigger_dimension}）后以同一 run_id 恢复："
-        f"当前 consumed={_dimension_text(consumed, trigger_dimension)}，"
-        f"ceiling={_value_text(ceiling)}；"
-        f"恢复请求需带 expected_version 与 resume_basis={RESUME_BASIS_BUDGET_INCREASE}"
-    )
+    if trigger_dimension == TRIGGER_RUN_DEADLINE:
+        # deadline 的"下一步安全动作"与预算维度**不是**同一个动作：这里要的是一个新的
+        # 未来时刻，不是把一个数字抬高。照抄预算那句会让 operator 去抬一个与停止原因
+        # 无关的 ceiling（`02 §5.1`：三层控制互不替代的同一方向）。
+        action = (
+            f"给出新的未来 {trigger_dimension}（RFC 3339 UTC 绝对时刻）后以同一 run_id 恢复："
+            f"本次 deadline={_value_text(ceiling)} 已到点（{_dimension_text(consumed, trigger_dimension)}）；"
+            f"恢复请求需带 expected_version 与 resume_basis={RESUME_BASIS_BUDGET_INCREASE}"
+        )
+    else:
+        action = (
+            f"提高绝对 ceiling（{trigger_dimension}）后以同一 run_id 恢复："
+            f"当前 consumed={_dimension_text(consumed, trigger_dimension)}，"
+            f"ceiling={_value_text(ceiling)}；"
+            f"恢复请求需带 expected_version 与 resume_basis={RESUME_BASIS_BUDGET_INCREASE}"
+        )
     return {
         "completed": [
             (
@@ -1533,10 +1782,31 @@ def deterministic_continuation(
                 f"{trigger_dimension} 到顶："
                 f"consumed={_dimension_text(consumed, trigger_dimension)}, "
                 f"ceiling={_value_text(ceiling)}"
+                if trigger_dimension != TRIGGER_RUN_DEADLINE
+                else f"{trigger_dimension} 已到点：deadline={_value_text(ceiling)}"
             ),
+            *blocked_by,
         ],
-        CONTINUATION_ACTION_KEY: action,
+        CONTINUATION_ACTION_KEY: (
+            _reconcile_first_action(blocked_by) if blocked_by else action
+        ),
     }
+
+
+def _reconcile_first_action(blocked_by: Sequence[str]) -> str:
+    """有未 reconcile 副作用时的"下一步安全动作"（`#315`）。
+
+    它**替换**掉"抬高 ceiling 后恢复"那句：在 reconcile 解除之前，恢复请求会被
+    开工前拒绝（`11 §6.1` 的 409「存在未 reconcile 的副作用」），照抄预算动作
+    等于指一条走不通的路。这里也不写出"重跑那个工具"——不变量 #14：未知高风险
+    工具不盲重跑，重跑与否是**人**看完账本后的裁决。
+    """
+    count = len(blocked_by)
+    return (
+        f"先 reconcile 未结清的副作用（{count} 项）：确认它到底有没有落盘，"
+        "再由 ReconcileCallback 给出裁决——裁决落地前本 run 不可恢复"
+        "（03 §5：对账优先于恢复），也不要重跑那条调用（不变量 #14）"
+    )
 
 
 def _dimension_text(consumed: BudgetConsumed, dimension: str) -> str:
@@ -1544,6 +1814,11 @@ def _dimension_text(consumed: BudgetConsumed, dimension: str) -> str:
     tool_name = tool_name_of_dimension(dimension)
     if tool_name is not None:
         return _value_text(consumed.calls_for(tool_name))
+    if dimension == TRIGGER_RUN_DEADLINE:
+        # deadline 没有"已消耗"这个量（它不计数，只比时刻）。这里给的是**状态**，
+        # 不是编造一个 0 或"未知"——0 会被读成"花了 0 时间"，"未知"会被读成"没数"，
+        # 两者都是假话（`11 §6.1` 的 unavailable 纪律同一方向）。
+        return "已到点"
     return {
         TRIGGER_RUN_TURNS: str(consumed.agent_turns),
         TRIGGER_RUN_REQUESTS: _value_text(consumed.model_requests),
@@ -1557,4 +1832,8 @@ def _value_text(value: Any) -> str:
         return "未知"
     if isinstance(value, Decimal):
         return format(value, "f")
+    if isinstance(value, datetime):
+        # deadline 的 ceiling 是时刻：一律按 wire 的 UTC 写法展示（operator 抄进
+        # 恢复请求时要能直接用，`+00:00` 与 `Z` 两种写法对人是两回事、对机器是一回事）。
+        return _deadline_text(value) or "未知"
     return str(value)

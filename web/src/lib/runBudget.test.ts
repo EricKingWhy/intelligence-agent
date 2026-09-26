@@ -12,6 +12,7 @@ import { deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun 
 import {
   ceilingDraftError,
   ceilingDraftValue,
+  deadlineDraftError,
   defaultResumeDraft,
   dimensionLabel,
   dimensionRemaining,
@@ -395,5 +396,101 @@ describe('per-tool 配额（`#314` T6）—— 动态维度、两个 counter、�
     expect(minToolQuotaValue(facts.trippedTool!)).toBeNull();
     expect(defaultResumeDraft(pausedUnknown)).toBeNull();
     expect(ceilingDraftError(pausedUnknown, '2')).toContain('账目未知');
+  });
+});
+
+
+describe('deadline 暂停（`#315` T7）—— 判的是时刻，不是"consumed 与 ceiling 比大小"', () => {
+  /** 真实载荷形状：到点那一刻落下的 `run/paused`。 */
+  function deadlinePaused(overrides: Partial<RunPausedInfo> = {}): RunPausedInfo {
+    return pausedInfo({
+      reason: 'deadline',
+      trigger_dimension: 'run.deadline_at',
+      consumed_dimensions: {
+        agent_turns: 2, model_requests: 3, total_tokens: 40, cost_usd: null,
+        tool_calls: 1, tool_attempts: 1,
+        tool_calls_by_tool: { glob: 1 }, tool_attempts_by_tool: { glob: 1 },
+      },
+      run_limits: {
+        max_agent_turns_total: 8,
+        max_model_requests: null,
+        max_total_tokens: null,
+        max_cost_usd: null,
+        deadline_at: '2026-09-26T04:10:00Z',
+        tool_call_limits: {},
+      },
+      ...overrides,
+    });
+  }
+
+  it('恢复目标指 deadline 那一维，且读数行里没有"某一维到顶"可报', () => {
+    const facts = pauseFacts(deadlinePaused());
+    expect(facts.deadlinePause).toBe(true);
+    expect(facts.deadline).toBe('2026-09-26T04:10:00Z');
+    expect(facts.resumeTarget.kind).toBe('deadline');
+    // 到点不是"某一维的 consumed 撞到 ceiling"——拿 turns 冒充会给出一个假读数行。
+    expect(facts.tripped).toBeNull();
+    // 四维清单照旧完整（turns 等仍是事实，只是都不是卡住的那一维）。
+    expect(facts.dimensions.map((row) => row.spec.dimension)).toContain(
+      'run.max_agent_turns_total',
+    );
+  });
+
+  it('原因与维度的标签各自成句：deadline 不是 budget_exhausted 的另一种写法', () => {
+    const facts = pauseFacts(deadlinePaused());
+    expect(facts.reasonLabel).toContain('deadline');
+    expect(facts.dimensionLabel).toContain('run.deadline_at');
+    // 恢复提示点名"换一个未来时刻"，且给出的是 CLI 的**真实 argv**（开关 + 时刻）。
+    const hint = resumeInputHint(facts);
+    expect(hint).toContain('未来');
+    expect(hint).toContain('2026-09-26T04:10:00Z');
+    expect(hint).toContain('--run-deadline 2026-09-26T04:30:00Z');
+    expect(resumeTargetCliFlag(facts.resumeTarget)).toBe('--run-deadline 2026-09-26T04:30:00Z');
+  });
+
+  it('草稿默认值给 null：本模块**不编**"现在 + N 分钟"这种策略', () => {
+    expect(defaultResumeDraft(deadlinePaused())).toBeNull();
+  });
+
+  it('草稿校验：空 / 朴素时间 / 已过去 / 非法形状各自被拒，未来时刻放行', () => {
+    const paused = deadlinePaused();
+    expect(ceilingDraftError(paused, '')).toContain('未来时刻');
+    // 朴素时间：后端 422（`parse_deadline_at` 拒无时区）——前端不该放它过去。
+    expect(ceilingDraftError(paused, '2099-01-01T00:00:00')).toContain('时区');
+    expect(ceilingDraftError(paused, '不是时刻')).toContain('时区');
+    // 已过去（含"沿用本次那个时刻"）：后端 409（`resume_headroom_ok` 要严格未来）。
+    expect(ceilingDraftError(paused, '2026-01-01T00:00:00Z')).toContain('未来');
+    expect(ceilingDraftError(paused, '2026-09-26T04:10:00Z')).toContain('未来');
+    expect(ceilingDraftError(paused, '2099-01-01T00:00:00Z')).toBeNull();
+    // 带偏移的写法也收（后端归一化到 UTC 存），瞬时在未来即可。
+    expect(ceilingDraftError(paused, '2099-01-01T08:00:00+08:00')).toBeNull();
+    // 合法值原样提交（时刻是**文本**，不经过数字通道）。
+    expect(ceilingDraftValue(paused, '2099-01-01T00:00:00Z')).toBe('2099-01-01T00:00:00Z');
+    expect(ceilingDraftValue(paused, '2099-01-01T00:00:00')).toBeNull();
+  });
+
+  it('恢复请求目标给的是字段名 deadline_at（不是某个 ceiling 字段）', () => {
+    expect(resumeRequestTarget(deadlinePaused())).toEqual({
+      kind: 'deadline', field: 'deadline_at',
+    });
+  });
+
+  it('快照里没带时刻：如实说"没有时刻"，不编一个', () => {
+    const bumped = deadlinePaused({
+      run_limits: {
+        max_agent_turns_total: 8,
+        max_model_requests: null,
+        max_total_tokens: null,
+        max_cost_usd: null,
+        deadline_at: null,
+        tool_call_limits: {},
+      },
+    });
+    const facts = pauseFacts(bumped);
+    expect(facts.deadline).toBeNull();
+    // 原因仍是 deadline（它是**暂停原因**，与"快照里有没有时刻"是两件事）。
+    expect(facts.deadlinePause).toBe(true);
+    expect(resumeInputHint(facts)).toContain('没有时刻');
+    expect(deadlineDraftError(bumped, '2026-01-01T00:00:00Z')).toContain('未来');
   });
 });

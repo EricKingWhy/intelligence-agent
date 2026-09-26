@@ -26,6 +26,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -44,7 +45,7 @@ from agent_harness.agent.guards import (
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
-    REASON_BUDGET_EXHAUSTED,
+    REASON_DEADLINE,
     BudgetConsumed,
     LaunchRunBudget,
     RunLimits,
@@ -57,6 +58,8 @@ from agent_harness.agent.run_budget import (
     deterministic_continuation,
     normalize_continuation,
     pause_trigger,
+    reason_for_dimension,
+    utc_now,
 )
 from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
@@ -101,6 +104,7 @@ from agent_harness.session import (
     MODEL_FALLBACK,
     MODEL_REQUEST,
     MODEL_STARTED,
+    OPERATION_RECONCILE_REQUIRED,
     RUN_FAILED,
     RUN_PAUSED,
     RUN_STARTED,
@@ -118,7 +122,9 @@ from agent_harness.storage import (
     CheckpointPolicy,
     OnStableBoundary,
     OperationContext,
+    OperationState,
     SessionMeta,
+    needs_reconcile,
 )
 from agent_harness.tooling import ErrorCode, ToolCall, ToolExecutor, ToolRegistry
 from agent_harness.tooling.quota import ToolQuotaWindow
@@ -1547,6 +1553,9 @@ class AgentRuntime:
                         ),
                         step_id=step_base + steps,
                         tool_quota=tool_quota,
+                        # 本 run 的绝对 deadline（`#315`）：批次层只透传，判定在
+                        # ToolExecutor 的接纳闸门（唯一判定点，`04 §9.1`）。
+                        run_deadline=launch_budget.limits.deadline_at,
                     )
                 except Exception as error:  # noqa: BLE001
                     tool_error = error
@@ -1625,9 +1634,17 @@ class AgentRuntime:
                         # **终态**、绕过那次暂停，与 `04 §9.1` 的"耗尽 ⇒ 暂停 / 可恢复"
                         # 直接冲突（两轴审查 Correctness 面发现；触发还要求批前
                         # `used < ceiling`，即窗口至少还放得进一条）。
-                        # **只**放过这一种 error_code：参数非法 / 未注册工具等准入前拒绝
-                        # 仍是 #69 要抓的重复失败（ADR-0014 决策 2-6 语义不变）。
-                        if execution.result.error_code == ErrorCode.BUDGET_EXHAUSTED:
+                        # **只**放过这两种 error_code（准入前被拒的同族）：参数非法 /
+                        # 未注册工具等准入前拒绝仍是 #69 要抓的重复失败（ADR-0014
+                        # 决策 2-6 语义不变）。`#315` 的 DEADLINE_EXCEEDED 与配额耗尽
+                        # 同理：到点后的每一条调用都会被拒，喂进护栏会把"到点"收成
+                        # HARD 熔断的 `run/failed` **终态**，绕过 `run/paused(reason=
+                        # deadline)`（`03 §3.4`：暂停是非终态），与 `04 §9.1` 的
+                        # "到点后不接纳新调用、在稳定边界暂停"直接冲突。
+                        if execution.result.error_code in (
+                            ErrorCode.BUDGET_EXHAUSTED,
+                            ErrorCode.DEADLINE_EXCEEDED,
+                        ):
                             continue
                         sig = guard.observe(call.name, call.args, execution.result.ok)
                     if sig.level != GuardLevel.NONE and (
@@ -1819,6 +1836,16 @@ class AgentRuntime:
             data["cost_usd"] = format(cost, "f")
         return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
 
+    def _now(self) -> datetime:
+        """本执行读挂钟的**唯一**入口（`#315`）。
+
+        为什么收成一个方法：deadline 是唯一"要跟当前时刻比"的判定，而时刻是**不可
+        注入的外部输入**——散点 `datetime.now()` 会让"到点了吗"在测试里只能靠 sleep
+        或改系统时钟来驱动。收成一处之后，用例 monkeypatch 这一个方法就能把"现在"
+        钉在任意时刻，生产路径仍是裸挂钟（与 `run_budget.utc_now` 同一取舍）。
+        """
+        return utc_now()
+
     def _execution_consumed(
         self, launch: LaunchRunBudget, session: Session, start: int,
     ) -> BudgetConsumed:
@@ -1850,6 +1877,9 @@ class AgentRuntime:
             run_limits=launch.limits,
             execution_steps=steps,
             local_fuse_turns=self.max_agent_turns,
+            # deadline 的判定要比"现在"；时刻从本执行的唯一入口读（`_now`），
+            # 判定规则本身仍在 `run_budget.pause_trigger` 一处。
+            now=self._now(),
         )
 
     async def _terminal_paused(
@@ -1860,12 +1890,17 @@ class AgentRuntime:
 
         顺序（每一条都是契约事实，不是实现口味）：
 
-        1. **closeout**：先看还剩不剩容量（`closeout_capacity`）——剩则用**一次**
+        1. **对账闸门**（`#315`，只在 `reason=deadline` 时）：本 run 里"副作用未证"的
+           Operation 先提升到 `NEED_RECONCILE` 并落 `operation/reconcile-required`
+           （见 `_raise_deadline_reconcile`）。到点后世界状态可能已经变了，而本次执行
+           正要停下——此时"不知道"必须**落成 durable 事实**，不能只留在进程内存里。
+        2. **closeout**：先看还剩不剩容量（`closeout_capacity`）——剩则用**一次**
            有界模型调用产出 continuation（`closeout_source=model`）；没容量、调用失败
            或产出不合契约 ⇒ 落**确定性** continuation（只用已持久化事实，不伪造进展/
-           成功/工具结果）。
-        2. 落**恰好一条** `run/paused`（durable、**非终态**）并镜像给流消费者。
-        3. 本次执行到此收口：**不**落 `run/completed` / `run/failed`（`02 §5.2` 明文），
+           成功/工具结果）。deadline 到点后容量判定恒为"没有"（到点不发 Provider
+           请求，`04 §9.1`），所以这条暂停路径是确定性的。
+        3. 落**恰好一条** `run/paused`（durable、**非终态**）并镜像给流消费者。
+        4. 本次执行到此收口：**不**落 `run/completed` / `run/failed`（`02 §5.2` 明文），
            **不**做记忆形成（run 没结束，此刻抽取过早——`memory/v2/eligibility.py`
            的白名单里没有 paused），也不新增 Checkpoint 边界（`07 §3` 只有四个）。
 
@@ -1880,13 +1915,32 @@ class AgentRuntime:
         """
         session = arms.session
         envelope_step = arms.envelope_step(steps)
+        reason = reason_for_dimension(trigger_dimension)
+        # deadline 边界上的对账闸门（`#315` / ADR-0044 D4）：位置在 continuation
+        # **之前**——"存在未 reconcile 的副作用"是 continuation 必须如实写出的事实
+        # （它要进 blockers 并改写 next_safe_action），不能等 continuation 定稿后
+        # 再补一句。返回的是**已提升到 NEED_RECONCILE 的**那些调用（含事件已落盘）。
+        blocked_by: tuple[str, ...] = ()
+        reconcile_events: list[SessionEvent] = []
+        if reason == REASON_DEADLINE:
+            reconcile_events, blocked_by = await self._raise_deadline_reconcile(
+                arms, run_id=arms.run_id, step_id=envelope_step,
+            )
         consumed_before = self._execution_consumed(
             launch, session, arms.memory_event_start,
         )
         continuation, closeout_source, closeout_events = await self._closeout_continuation(
             arms, trigger_dimension=trigger_dimension,
             consumed=consumed_before, limits=launch.limits, step_id=envelope_step,
+            blocked_by=blocked_by,
         )
+        # 先镜像对账事件、再镜像 closeout：三条都是 durable，顺序与落盘顺序一致
+        # （流帧必须是落盘日志的前缀，见 golden）。顺序本身也有语义：客户端先读到
+        # "某个操作进入 NEED_RECONCILE"，再读到"本次执行在 deadline 上暂停"——
+        # 与 `03 §5`「对账优先于恢复」同向，投影据此把状态报成 needs_reconcile
+        # 而不是 paused。
+        for reconcile_event in reconcile_events:
+            yield to_agent_event(reconcile_event)
         # closeout 的 `model/request` 先镜像再落 `run/paused`：两条都是 durable，
         # 顺序与落盘顺序一致（流帧必须是落盘日志的前缀，见 golden）。
         for closeout_event in closeout_events:
@@ -1903,14 +1957,17 @@ class AgentRuntime:
         paused = arms.session.append(
             RUN_PAUSED,
             build_pause_data(
-                reason=REASON_BUDGET_EXHAUSTED,
+                reason=reason,
                 trigger_dimension=trigger_dimension,
                 version=launch.version,
                 consumed=consumed,
                 limits=limits,
                 continuation=continuation,
                 closeout_source=closeout_source,
-                # 预算暂停没有额外前置条件（`03 §3.4`：非空只出现在 stuck 暂停）。
+                # 预算 / deadline 暂停没有额外前置条件（`03 §3.4`：非空只出现在
+                # stuck 暂停）。"存在未 reconcile 的副作用"**不**写在这一格：它由
+                # `operation/reconcile-required` 事件 + Ledger 行自己表达，恢复闸门
+                # 也读那一份（`03 §5`：对账优先于恢复是**状态**规则，不是暂停字段）。
                 resume_requirements=(),
                 # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，
                 # 用户从事件就能找到那一段 trace。run 未终结 ⇒ 这不是 run 的 trace；
@@ -1928,9 +1985,78 @@ class AgentRuntime:
             AgentRunResult(status=STATUS_PAUSED, final_text="", steps=steps),
         )
 
+    async def _raise_deadline_reconcile(
+        self, arms: _TerminalArms, *, run_id: str | None, step_id: int,
+    ) -> tuple[list[SessionEvent], tuple[str, ...]]:
+        """deadline 边界上把"副作用未证"的 Operation 提升到 NEED_RECONCILE（`#315`）。
+
+        判据只在 `storage.needs_reconcile` 一处（非终态，或带"副作用未证"标记）——
+        典型来源是 MUTATING 工具超时：执行域在收尾那一刻就把行留成 `UNKNOWN` 并打上
+        标记（`ToolExecutor._settle_state`），因为那次尝试**给不出**"没落地"的证据。
+
+        为什么在**本方法**做、而不在执行域顺手做完：执行域只如实记录"我不知道"；
+        "要不要因此不再续跑"是稳定边界的决定（`03 §5`：对账优先于恢复；ADR-0044
+        D4：到点后不得落一个暗示可安全续跑的暂停）。放在这里让整条链只有一个决定点：
+        `到点 ⇒ 暂停 ⇒ 有未证副作用则同时升 NEED_RECONCILE`。
+
+        三件事，顺序固定（Ledger 先于事件——durable 状态先于对它的公告）：
+        1. Ledger 推进到 `NEED_RECONCILE`（`RUNNING → UNKNOWN → NEED_RECONCILE`
+           两步链由状态机强制，`07 §4`；已在 NEED_RECONCILE 的行不动）；
+        2. 落 `operation/reconcile-required`（形状与 `RecoveryCoordinator._prepare_
+           reconcile` 的**同一份**——客户端/CLI 只认一种形状；已存在则跳过，重复
+           触发不重复落）；
+        3. 返回（本次新增的事件，blockers 文案）：事件由调用方镜像、blockers 进
+           continuation。
+
+        Ledger 缺席（没注入 OperationLedger 的部署，或纯对话 session 没有账本行）⇒
+        返回空：没有账本就没有"未证的副作用"这件事——**不**伪造一个对账要求。
+        """
+        ledger = self.executor.operation_ledger
+        if ledger is None or run_id is None:
+            return [], ()
+        session = arms.session
+        appended: list[SessionEvent] = []
+        blockers: list[str] = []
+        for operation in await ledger.list_for_session(session.session_id):
+            if operation.run_id != run_id or not needs_reconcile(operation):
+                continue
+            if operation.state is not OperationState.NEED_RECONCILE:
+                if operation.state is OperationState.RUNNING:
+                    # 两步链：状态机不允许 RUNNING 直达 NEED_RECONCILE（07 §4），
+                    # 也不允许跳过"不知道"这一档——那正是这次提升要说的事实。
+                    await ledger.update_state(
+                        session.session_id, operation.tool_call_id,
+                        OperationState.UNKNOWN,
+                    )
+                await ledger.update_state(
+                    session.session_id, operation.tool_call_id,
+                    OperationState.NEED_RECONCILE,
+                )
+            blockers.append(
+                f"工具 '{operation.tool_name}'（tool_call_id={operation.tool_call_id}）"
+                "的副作用状态未证：已进入 NEED_RECONCILE，对账解除前本 run 不可恢复"
+            )
+            if not any(
+                event.type == OPERATION_RECONCILE_REQUIRED
+                and event.data.get("tool_call_id") == operation.tool_call_id
+                for event in session.events
+            ):
+                appended.append(session.append(
+                    OPERATION_RECONCILE_REQUIRED,
+                    {
+                        "tool_call_id": operation.tool_call_id,
+                        "tool_name": operation.tool_name,
+                        "args_identity": operation.args_identity,
+                        "state": OperationState.NEED_RECONCILE.value,
+                    },
+                    run_id=run_id, step_id=step_id,
+                ))
+        return appended, tuple(blockers)
+
     async def _closeout_continuation(
         self, arms: _TerminalArms, *, trigger_dimension: str,
         consumed: BudgetConsumed, limits: RunLimits, step_id: int,
+        blocked_by: tuple[str, ...] = (),
     ) -> tuple[dict[str, Any], str, list[SessionEvent]]:
         """产出 continuation、它的来源（`model` / `deterministic`）与本次落盘的事件。
 
@@ -1945,8 +2071,14 @@ class AgentRuntime:
         fallback = deterministic_continuation(
             events=arms.session.since(0), run_id=arms.run_id or "",
             trigger_dimension=trigger_dimension, limits=limits, consumed=consumed,
+            blocked_by=blocked_by,
         )
-        if not closeout_capacity(consumed=consumed, run_limits=limits):
+        # 到点后**连 closeout 也不发**：它是真实 Provider 请求，`04 §9.1` /
+        # ADR-0044 D4 把"deadline 过后不启动任何新工作"写死（`closeout_capacity`
+        # 里那一句是判据本身，这里只是把"现在"传进去）。
+        if not closeout_capacity(
+            consumed=consumed, run_limits=limits, now=self._now(),
+        ):
             return fallback, CLOSEOUT_DETERMINISTIC, []
         try:
             messages = await self._context_builder.build(arms.session)

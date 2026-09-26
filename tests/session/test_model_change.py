@@ -38,6 +38,7 @@ from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from agent_harness.web.app import session_service
+from tests.session.ledger_doubles import idle_operation_ledger
 
 #: 两个 catalog 条目，provider 必须命中预设（deepseek / mimo）。
 _CATALOG = (
@@ -67,6 +68,7 @@ def _state(tmp_path) -> MagicMock:
         return_value=(MagicMock(), MagicMock())
     )
     state.get_wiring = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    state.operation_ledger = idle_operation_ledger()
     state.ensure_stores = AsyncMock()
     state.stores = MagicMock()
     return state
