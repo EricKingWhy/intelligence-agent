@@ -265,6 +265,11 @@ def _tool_dimension_lines(data: dict, *, carried: bool = False) -> list[str]:
     配了 ceiling 却从未调用过的工具（`{"bash": 3}` + `{}`）曾被渲染成 `unavailable calls`，
     而**同一份** durable 事件的服务端投影给的是 `remaining 3`——同一事实两个互相矛盾的读数，
     正是 `11 §6.1` 要消灭的那种不一致。
+
+    表在而**那一格的值**形状不合（非整数 / 负数 / 布尔）⇒ 仍报 `unavailable`，**不**印那个
+    值、也不当 0：认不出的读数不可得（与 `_dimension_remaining` 同一条收窄纪律）。这不是
+    可达输入——唯一的写入者是接纳点的 `budget_delta`（恒为非负整数）——而是"不编数字"的
+    兜底；前端在同一格上会显示 0（它的解析器把畸形条目整条丢掉），差异登记在 ADR-0045 §6。
     """
     limits = ((data.get("limits") or {}).get("run") or {}).get("tool_call_limits") or {}
     consumed = data.get("consumed") or {}
@@ -277,8 +282,8 @@ def _tool_dimension_lines(data: dict, *, carried: bool = False) -> list[str]:
     lines: list[str] = []
     for name in sorted(names):
         ceiling = limits.get(name)
-        used = None if calls is None else calls.get(name, 0)
-        tried = None if attempts is None else attempts.get(name, 0)
+        used = _per_tool_count(calls, name)
+        tried = _per_tool_count(attempts, name)
         lines.append(
             f"  tool {name}: {'carried ' if carried else ''}consumed "
             f"{'unavailable' if used is None else used} calls"
@@ -299,6 +304,20 @@ def _per_tool_table(consumed: dict, key: str) -> dict | None:
     """
     table = consumed.get(key)
     return table if isinstance(table, dict) else None
+
+
+def _per_tool_count(table: dict | None, name: str) -> object:
+    """per-tool 表里某工具的读数：表未知 ⇒ None（unavailable），缺名 ⇒ 0，值畸形 ⇒ None。
+
+    `None` 与 0 是两件事（`11 §6.1`：不可得 ≠ 0），所以**只**在"表在、这个名字也在、
+    值是非负整数"三者同时成立时才给出数字。
+    """
+    if table is None:
+        return None
+    value = table.get(name, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def _dimension_remaining(consumed: object, ceiling: object) -> str:

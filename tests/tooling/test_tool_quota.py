@@ -313,6 +313,41 @@ async def test_approval_denial_releases_the_reserved_slot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_error_does_not_leak_a_reserved_slot(tmp_path) -> None:
+    """配置错误（session 与 operation_context 不同一）⇒ 抛异常且**不占槽位**。
+
+    `take()` 一旦成功就欠一次 `release()` 或一次真实接纳（`tooling/quota.py` 的成对
+    约束）。两条配置 `ValueError` 曾夹在 `take()` 与接纳点之间 ⇒ 抛出的那一刻槽位已经
+    被占、又没人在 catch 里归还：同批的兄弟调用随后会看到一个**不存在于任何账本上的**
+    占位而被误判成 `BUDGET_EXHAUSTED`（配额明明还有余）。修法是让配置校验排在配额闸门
+    之前（配置错误本来也该在任何真实副作用之前拒绝）——本用例钉住那个顺序。
+    """
+    from agent_harness.storage.operation import OperationContext
+
+    tool = _CountingTool()
+    executor = ToolExecutor(_registry(tool))
+    window = _window({"count": 1})
+    session = make_session(tmp_path)
+    other = make_session(tmp_path / "other")
+
+    with pytest.raises(ValueError, match="must identify the same session"):
+        await executor.execute(
+            _call("c1", value=1),  # 参数必须**合法**：非法会在配置校验之前就早退
+            session=session,
+            operation_context=OperationContext(session_id=other.session_id, run_id="run-1"),
+            tool_quota=window,
+        )
+
+    # 槽位未泄漏：配额仍完整可用，随后的正常调用照旧被接纳
+    assert window.used("count") == 0
+    assert tool.call_count == 0
+    admitted = await executor.execute(
+        _call("c2", value=2), session=session, tool_quota=window,
+    )
+    assert admitted.result.ok is True
+
+
+@pytest.mark.asyncio
 async def test_serial_cascade_cancel_does_not_consume_quota() -> None:
     """串行熔断后"未执行"的兄弟：没被接纳 ⇒ 0 增量（否则一次永久失败烧掉整批配额）。
 

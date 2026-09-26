@@ -104,7 +104,7 @@
 
 | 票 | 主题 | 主要落点 |
 | --- | --- | --- |
-| T6（`#314`，已完成） | 工具配额（`tool_calls` / `tool_attempts` + `tool_call_limits` 动态维度） | 实现落点：`tooling/executor.py`（接纳点 + `budget_delta`）、`tooling/quota.py`（批次窗口）、`run_budget.py`（维度/求和/恢复合并）、`tooling/result.py`（`BUDGET_EXHAUSTED`）、`agent/runtime.py`（每批窗口）、`assembly.py`（注册名校验）、`web/app.py` + `session/service.py`（透传）、`cli.py`（`--run-tool-limit` 与每工具摘要行）、`web/src/lib/{runBudget,api,projection}.ts` + `components/PausedPanel.tsx`；证据落点：`evaluation/live_gate/scenarios/long_task.py`（v3 起记实现身份 + 两套计数 + 显式 ceiling）；决策见 ADR-0045 |
+| T6（`#314`） | 工具配额（`tool_calls` / `tool_attempts` + `tool_call_limits` 动态维度） | 实现落点：`tooling/executor.py`（接纳点 + `budget_delta`）、`tooling/quota.py`（批次窗口）、`run_budget.py`（维度/求和/恢复合并）、`tooling/result.py`（`BUDGET_EXHAUSTED`）、`agent/runtime.py`（每批窗口 + 配额拒绝不喂护栏）、`assembly.py`（注册名校验）、`web/app.py` + `session/service.py`（透传）、`cli.py`（`--run-tool-limit` 与每工具摘要行）、`web/src/lib/{runBudget,api,projection}.ts` + `components/PausedPanel.tsx`；证据落点：`evaluation/live_gate/scenarios/long_task.py`（v3 起记实现身份 + 两套计数 + 显式 ceiling）；决策与已知边界见 ADR-0045。**状态以 tracker 为准**（本表只记落点，不宣告完成） |
 | T7（`#315`） | deadline + 副作用 reconcile | `run_budget.py`（`deadline_at` 判定位置 = 每次接纳新工作之前）、`tooling/reconcile.py`、`web/app.py`（409 条件「未结清副作用」） |
 | T8（`#316`） | quiescence + `CompletionPolicy`（依赖只有 `#308`，**可与 T5 并行**） | `agent/runtime.py` 的 `run/completed` 之前六条件、`agent/guards.py` |
 | T9（`#317`） | stuck 检测（一次 replan、归一化指纹） | `agent/guards.py` + `run_budget.py`（`REASON_STUCK` 与 continuation） |
