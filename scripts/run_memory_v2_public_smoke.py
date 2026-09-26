@@ -269,28 +269,32 @@ def finalize_smoke_report(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
-def _relevant_injected_hit_ids(
-    hits: Sequence[Any], *, injected_ids: set[str], active_ids: set[str],
+def _relevant_injected_memory_ids(
+    hits: Sequence[Any], *, profile_records: Sequence[Any] = (),
+    injected_ids: set[str], active_ids: set[str],
     local_to_source: Mapping[str, str], relevant_session_ids: Sequence[str],
 ) -> set[str]:
     relevant = set(relevant_session_ids)
+    records = [hit.record for hit in hits[:6]] + list(profile_records)
     return {
-        hit.record.id for hit in hits[:6]
-        if hit.record.id in injected_ids
-        and hit.record.id in active_ids
-        and local_to_source.get(hit.record.source_session_id or "") in relevant
+        record.id for record in records
+        if record.id in injected_ids
+        and record.id in active_ids
+        and local_to_source.get(record.source_session_id or "") in relevant
     }
 
 
 class _RecordingRecall:
-    """Observe the production provider's search result without issuing a second query."""
+    """Observe provider records without issuing a second query."""
 
     def __init__(self, service: Any) -> None:
         self._service = service
         self.hits = []
+        self.profile_records = []
 
     async def list_profiles(self, trusted: TrustedMemoryIdentity, *, limit: int = 256):
-        return await self._service.list_profiles(trusted, limit=limit)
+        self.profile_records = await self._service.list_profiles(trusted, limit=limit)
+        return self.profile_records
 
     async def hybrid_search(self, query, trusted, *, scopes, limit):
         self.hits = await self._service.hybrid_search(
@@ -522,14 +526,15 @@ async def run_smoke(
             local_to_source.get(record.source_session_id or "") in relevant_sessions
             for record in active
         )
-        attributable_injected_hits = _relevant_injected_hit_ids(
-            recorder.hits, injected_ids=injected_ids, active_ids=active_ids,
+        attributable_injected_memory_ids = _relevant_injected_memory_ids(
+            recorder.hits, profile_records=recorder.profile_records,
+            injected_ids=injected_ids, active_ids=active_ids,
             local_to_source=local_to_source,
             relevant_session_ids=case.relevant_session_ids,
         )
         chain_verified = bool(
             committed_jobs and active and recorder.hits and memory_messages
-            and attributable_injected_hits
+            and attributable_injected_memory_ids
         )
 
         answer_config = copy.copy(roles.primary)
@@ -634,14 +639,27 @@ async def run_smoke(
                          local_to_source.get(record.source_session_id or "") in relevant_sessions),
                 case.expected_answer or "",
             ), 6),
+            "active_answer_token_recall": round(_answer_token_recall(
+                " ".join(record.content for record in active), case.expected_answer or "",
+            ), 6),
             "injected_relevant_answer_token_recall": round(_answer_token_recall(
-                " ".join(hit.record.content for hit in recorder.hits if
-                         hit.record.id in attributable_injected_hits),
+                " ".join(record.content for record in active if
+                         record.id in attributable_injected_memory_ids),
+                case.expected_answer or "",
+            ), 6),
+            "injected_answer_token_recall": round(_answer_token_recall(
+                " ".join(record.content for record in active if record.id in injected_ids),
                 case.expected_answer or "",
             ), 6),
             "recall_hit_count": len(recorder.hits),
             "injected_message_count": len(memory_messages),
-            "attributable_injected_hit_count": len(attributable_injected_hits),
+            "attributable_injected_hit_count": sum(
+                hit.record.id in attributable_injected_memory_ids for hit in recorder.hits[:6]
+            ),
+            "attributable_injected_profile_count": sum(
+                record.id in attributable_injected_memory_ids for record in recorder.profile_records
+            ),
+            "attributable_injected_memory_count": len(attributable_injected_memory_ids),
             "chain_verified": chain_verified,
             "speaker_mapping": (
                 "first_dialogue_speaker=user; other_speakers=assistant_non_authoritative"

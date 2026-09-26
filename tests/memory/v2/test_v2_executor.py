@@ -21,6 +21,7 @@ import pytest_asyncio
 from agent_harness.memory.v2.budget import MemoryBudgetLimits
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import (
+    _FORMATION_PROMPT,
     DegradedReason,
     MemoryJobExecutor,
     MemoryModelCall,
@@ -49,6 +50,12 @@ USER_A = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-a")
 PROJECT_X = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-a", project_id="project-x")
 
 T0 = datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
+
+
+def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
+    assert "preserve explicitly stated names, values, quantities, dates, and qualifiers" \
+        in _FORMATION_PROMPT
+    assert "every detail must remain supported by cited evidence" in _FORMATION_PROMPT
 
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"

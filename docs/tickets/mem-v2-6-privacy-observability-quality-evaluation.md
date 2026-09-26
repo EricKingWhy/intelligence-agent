@@ -98,7 +98,7 @@ parallelizable: with #301 and #303 after dependencies are integrated
 - An adapted-reader retry with working embedding/Milvus services still failed: LoCoMo Recall@6=1.0, chain verified, answer F1=0; LongMemEval Recall@6=0, chain unverified, answer F1=0.45. Both reports confirm temporary collection cleanup. The LongMemEval selected `single-session-assistant` case's matching user turn repeats the question rather than providing its answer; this exposes a false positive in the previous token-F1 evidence selector. See `docs/evidence/memory-v2-public-smoke-locomo-711d4b5c.json` and `docs/evidence/memory-v2-public-smoke-longmemeval-511bd604.json`. Neither satisfies AC9. The user then approved the stricter exact-span and `single-session-user` source rule now stated in AC9; it needs a new real run.
 - A retry with another authorized local embedding configuration failed the Milvus initialization probe with `embedding_unavailable` before formation and produced no report. Independent Milvus verification again found zero temporary smoke collections; the real-chain gate remains open pending a stable embedding service.
 - Real public smoke uses the same configurable recall timeout as production wiring.
-- Equal-size eligible cases prefer stronger user evidence; smoke reports content-free active memory tier/kind counts and uses a bounded 1,200-second formation drain.
+- Eligible cases sort by total turn text length, then turn count, session count, and stable case ID; ties do not prefer stronger user evidence. Smoke reports content-free active memory tier/kind counts and uses a bounded 1,200-second formation drain.
 - Mutation tests proving the gate detects below-threshold, duplicate, and unawaited/all-failed conditions.
 
 ## Definition of Done

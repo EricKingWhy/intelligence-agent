@@ -117,7 +117,7 @@ formation job 因 `embedding_unavailable` 降级、没有提交记忆，Recall@6
 LoCoMo 仍只用于非商业内部评测。
 为适配 harness 的 user/assistant 来源权威，LoCoMo 将对话中首位参与者映射为评测 user persona，
 其余参与者映射为非权威 assistant evidence；LongMemEval 保留数据集提供的角色。报告记录这一映射，
-烟测选例只接受达到上述证据 F1 门槛的可回答样例；assistant-only 证据样例不作为烟测目标，
+烟测选例只接受预期答案规范化词序列连续出现在权威 user turn 中的可回答样例；assistant-only 证据样例不作为烟测目标，
 因为 Memory V2 应对它们拒绝形成持久用户记忆。用户于 2026-09-26 批准了 user evidence 来源限制。
 烟测通过还要求至少一个非空且带标注用户证据的 session 形成已提交记忆，并由 Milvus 命中后实际注入回答上下文。
 烟测的 Recall Provider 使用与生产 wiring 相同的 `memory_search_timeout_seconds` 配置。
@@ -169,6 +169,21 @@ Recall@6=0、链路未通过、答案 F1=0.45。两份报告均确认临时 Milv
 之后，与上游顺序相反，现改为 notes 在前、原问题最后；答案阶段温度固定为 0，与两个上游评测器一致，
 并添加只含数值的相关来源作业结果和答案 token 覆盖率，定位形成或注入丢失。上述修正还需重新跑真实
 烟测，不能用旧报告宣称质量通过。
+
+### D10 — 保留明确事实值，并分别验证形成、召回和注入
+
+严格 user-evidence 选例后的真实 LoCoMo smoke 已确认相关来源会话的形成作业提交成功，但唯一相关活动记忆
+没有保留标准答案词，答案 F1=0。直接用同一用户证据答题的模型探针 F1=0.667，说明当前失败点在记忆形成的信息保留，
+而不是 rerank 或放宽评分门槛。报告：`docs/evidence/memory-v2-public-smoke-locomo-8d08dfab.json`。
+
+采用最小 prompt 约束：持久化用户事实与偏好要在记忆正文和类型化 payload 中保留证据明确给出的名称、值、数量、日期
+及限定词；每项仍须由有效证据引用支持。此处借鉴 LangMem 对独立、清楚表达的记忆单元的设计，未复制其实现或引入依赖：
+<https://github.com/langchain-ai/langmem/blob/main/src/langmem/knowledge/extraction.py>。
+
+烟测分别记录相关来源的活动记忆、该记忆答案 token 覆盖率，以及真正被上下文提供器选中注入的相关记忆覆盖率。
+注入判定通过实际 `list_profiles` / `hybrid_search` 返回项与运行时注入 ID 求交，只把确实进入 prompt 的活动记录计入；
+profile 注入与前六条 hybrid hit 分开计数。原始记忆和模型输出不写进报告。F1 ≥0.5 与 Recall@6 仍独立保留为质量门槛。
+若来源记忆形成成功但答案词在活动记忆中丢失，应归因于形成；若活动记忆保留答案词但注入覆盖率为 0，应归因于检索或上下文选择。
 
 ## 3. Consequences and open verification
 

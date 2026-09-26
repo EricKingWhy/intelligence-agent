@@ -17,7 +17,7 @@ from scripts.run_memory_v2_public_smoke import (
     _case_id_sha256,
     _case_speakers,
     _combined_usage_source,
-    _relevant_injected_hit_ids,
+    _relevant_injected_memory_ids,
     _safe_job_reason_code,
     _safe_model_output_failure_kind,
     _turn_event_type,
@@ -291,7 +291,7 @@ def test_smoke_chain_counts_only_injected_hits_from_annotated_sessions():
         id="unrelated-memory", source_session_id="local-unrelated",
     ))
 
-    assert _relevant_injected_hit_ids(
+    assert _relevant_injected_memory_ids(
         [relevant, unrelated],
         injected_ids={"relevant-memory", "unrelated-memory"},
         active_ids={"relevant-memory", "unrelated-memory"},
@@ -301,6 +301,16 @@ def test_smoke_chain_counts_only_injected_hits_from_annotated_sessions():
         },
         relevant_session_ids=("annotated-session",),
     ) == {"relevant-memory"}
+
+
+def test_smoke_chain_counts_injected_profiles_without_calling_them_hybrid_hits():
+    profile = SimpleNamespace(id="profile", source_session_id="local-relevant")
+
+    assert _relevant_injected_memory_ids(
+        [], profile_records=[profile], injected_ids={"profile"}, active_ids={"profile"},
+        local_to_source={"local-relevant": "annotated-session"},
+        relevant_session_ids=("annotated-session",),
+    ) == {"profile"}
 
 
 def test_locomo_speaker_persona_stays_consistent_across_sessions():
