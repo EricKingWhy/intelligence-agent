@@ -172,9 +172,20 @@ class CompletionDecision:
   确定性、空真（无账本）分支。
 - **既有契约不回退**：`tests/agent/test_event_sequence_golden.py`（冻结的顺序与 append 次数）、
   finalizer / 取消 / 异常臂用例、`tests/recovery/test_reconcile.py`。
-- **Live Gate**（`scripts/live_gate.py` 的 `completion` 场景）：真实 Provider + 生产工具跑一轮
-  真实工具调用，断言 `run/completed` 之前该次调用的 `tool/result` 已 durable、账本行已终态。
-  3/3 通过才算证据（票面 AC）。
+- **Live Gate**（`scripts/live_gate.py` 的 `completion-quiescence-gate` v1）：真模型 + 生产工具
+  + 生产账本，**同一会话三条腿**——
+  1. 静止 ⇒ 收口（并断言 `run/completed` 之前该次调用的 `tool/result` 已 durable、账本行已终态）；
+  2. 真实执行域产出一条未结清 owner（生产 `BashTool` 跑一个先落副作用、再睡过工具超时的脚本
+     ⇒ `UNKNOWN` + 未证标记），同会话下一次真实执行被拒收口，且 owner 行逐字段不变；
+  3. 按 classify（`UNKNOWN`→`NEED_RECONCILE`）→ adjudicate（→`SUCCEEDED`，裁决内容覆盖未证
+     标记）两步结清 ⇒ 重入通过。
+  断言面另外要求**独立重算**（不经过 Runtime 的纯函数对同一份 durable 事实复读）与"摘掉账本
+  后仅事件可见的 kinds 为空"（归因干净，不是"账本缺席所以谓词空真"）。3/3 通过才算证据（票面 AC）。
+
+  负控的设计理由：让**真实模型**恰好发一条会超时的命令不是结构保证，所以第 2 条腿的 owner 由
+  执行域直接产出（真实执行 + 真超时 + 真副作用落地，且只留账本行不留 `tool/call` 事件 ⇒ 也不会
+  伪造出一个活过结清的悬空调用）。离线端到端用例（`tests/live_gate/test_completion_scenario.py`）
+  只允许替换**模型客户端**这一个 seam，因此它的运行**永远不是** Live Gate 证据（`seams` 保持为空）。
 
 ## 4. 边界与残余（诚实清单）
 
