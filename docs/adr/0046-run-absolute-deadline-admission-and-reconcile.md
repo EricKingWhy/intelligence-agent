@@ -366,6 +366,11 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
   与本票改动面只在 `docs/SDD_TICKET_TRACKER.md` 相交、无冲突）：tip `72541ee` / tree `9a834ae55551` 上
   **6/6 PASS**，墙钟 **22.66s**，读数落盘 `docs/gate/72541eed2909c54c1be2e15571be9bde690786ca.json`。
   重车道**未**重跑（合并对 pytest / vitest / e2e 的输入面零改动）⇒ 重车道读数以**代码冻结树 `cf1879d`** 为准。
+- **集成落地**（PR **#333** → 服务端 `gate0` **pass 26s** → merge **`5ea64103cffe`**，2026-09-26T18:19:39Z）：
+  本地 `main` 对齐 `origin/main`，`main^{tree}` = `e858c6231a7cdfb7a33d84616da33de650605ca0` = 分支 tip `91eb76f` 的树
+  （先回后正 ⇒ 集成本身不引入新内容，按覆盖闸门「零新增内容」判据（B-47）自动归属）；`#315` **CLOSED**
+  （2026-09-26T18:21:49Z）。**landed 树上的复跑读数**：tip `91eb76f` / tree `e858c6231a7c` 裸全量 **6/6 PASS**、墙钟 **16.85s**，落盘
+  `docs/gate/91eb76f824b8b6cf2871fbee81df59cff0d907ef.json`（数字取自落盘文件本身，§14.10 不手抄）；集成落账见 tracker `## T7` 段与 `docs/phase_status/2026-09.md` L1885-L1909。
 - 审查覆盖闸门：`scripts/check_review_coverage.py` **exit 0**（本票台账行 327–334；集成前的**前置条件**）。
 - 重车道（全量 pytest / vitest / oxlint / vite build / playwright e2e）的读数同样来自**可复跑的命令 + 写进
   集成记录**（`docs/SDD_TICKET_TRACKER.md` 的 `## T7` 段），不在本文内手抄。
