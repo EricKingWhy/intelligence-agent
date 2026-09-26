@@ -94,6 +94,7 @@ parallelizable: with #301 and #303 after dependencies are integrated
 - Public benchmark adapter smoke and license/attribution review.
 - Selection tests cover the user-evidence F1 threshold, role mapping for both public datasets, smallest-eligible selection, and fail-closed behavior.
 - Real public smoke uses the same configurable recall timeout as production wiring.
+- Equal-size eligible cases prefer stronger user evidence; smoke reports content-free active memory tier/kind counts and uses a bounded 1,200-second formation drain.
 - Mutation tests proving the gate detects below-threshold, duplicate, and unawaited/all-failed conditions.
 
 ## Definition of Done

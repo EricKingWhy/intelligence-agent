@@ -97,7 +97,7 @@ Hugging Face 数据集卡标注 **MIT**。实现没有复制 Mem0 / LoCoMo / Lon
 `freeze_path`，不代表正式基准分数。smoke 回答质量使用归一化 token F1 ≥ 0.5 的本地判别器，
 证据中同时记录 F1 与阈值；它不是上游正式 scorer。选例时，每条 gold answer evidence 中由
 user persona 提供的证据单独与预期答案计算同一 token F1，至少一条达到 ≥ 0.5 才合格；在合格样例中
-选择最小者，无合格样例则失败关闭。选例证据 F1 门槛与真实回答的 F1 验收相互独立，前者不能替代
+选择最小者；大小相同时优先选择 user evidence F1 更高者，再以 case ID 稳定打破平局；无合格样例则失败关闭。选例证据 F1 门槛与真实回答的 F1 验收相互独立，前者不能替代
 后者。用户于 2026-09-26 批准该门槛调整：此前两个样例的 user evidence F1 均为 0，故必须按新规则重跑。
 LoCoMo 仍只用于非商业内部评测。
 为适配 harness 的 user/assistant 来源权威，LoCoMo 将对话中首位参与者映射为评测 user persona，
@@ -106,6 +106,7 @@ LoCoMo 仍只用于非商业内部评测。
 因为 Memory V2 应对它们拒绝形成持久用户记忆。用户于 2026-09-26 批准了 user evidence 来源限制。
 烟测通过还要求至少一个非空且带标注用户证据的 session 形成已提交记忆，并由 Milvus 命中后实际注入回答上下文。
 烟测的 Recall Provider 使用与生产 wiring 相同的 `memory_search_timeout_seconds` 配置。
+形成作业最多排空 1,200 秒；报告记录该预算、active memory 的 tier/kind 计数及相关来源会话计数，不记录记忆文本。
 同日的真实模型探针发现形成提示词没有写明 discriminated payload 必须含 `payload.kind`；已批准在
 #298 运行时提示词中补全三个 payload 的精确键集合，同时保留严格解析与 fail-closed 行为。
 

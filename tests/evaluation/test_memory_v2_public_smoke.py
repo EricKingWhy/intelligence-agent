@@ -112,11 +112,20 @@ def test_smoke_selection_requires_user_evidence_f1_and_keeps_smallest_qualifying
     cases = [
         _case("below-threshold", size=1, evidence_text="unrelated"),
         _case("at-threshold", size=5, evidence_text="a unrelated"),
-        _case("larger-qualifying", size=10),
+        _case("larger-qualifying", size=20),
     ]
 
     assert token_f1("a unrelated", "a fact") == 0.5
     assert select_smoke_case(cases).case_id == "at-threshold"
+
+
+def test_smoke_selection_prefers_stronger_user_evidence_when_case_size_ties():
+    cases = [
+        _case("a-threshold", size=5, evidence_text="a unrelated"),
+        _case("z-stronger", size=5, evidence_text="a fact"),
+    ]
+
+    assert select_smoke_case(cases).case_id == "z-stronger"
 
 
 def test_locomo_selection_applies_user_evidence_f1_threshold():

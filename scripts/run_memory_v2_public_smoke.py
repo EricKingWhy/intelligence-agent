@@ -63,6 +63,7 @@ _SAFE_JOB_REASON_CODES = frozenset(
 )
 _SAFE_MODEL_OUTPUT_FAILURE_KINDS = frozenset(kind.value for kind in ModelOutputFailureKind)
 _MINIMUM_USER_EVIDENCE_F1 = 0.5
+_FORMATION_DRAIN_TIMEOUT_SECONDS = 1200
 
 
 def _safe_job_reason_code(reason: str | None) -> str:
@@ -147,7 +148,14 @@ def select_smoke_case(cases: Sequence[PublicBenchmarkCase]) -> PublicBenchmarkCa
         raise ValueError(
             "benchmark has no answerable case with annotated user evidence at token F1 >= 0.5"
         )
-    return min(eligible, key=_case_size)
+    return min(
+        eligible,
+        key=lambda case: (
+            *_case_size(case)[:3],
+            -_user_evidence_f1(case),
+            case.case_id,
+        ),
+    )
 
 
 def token_f1(prediction: str, expected: str) -> float:
@@ -370,7 +378,7 @@ async def run_smoke(
         if not job_ids:
             raise RuntimeError("selected benchmark case produced no formation jobs")
 
-        await runner.drain(timeout_seconds=600)
+        await runner.drain(timeout_seconds=_FORMATION_DRAIN_TIMEOUT_SECONDS)
         jobs_by_stage: Counter[str] = Counter()
         outcomes: Counter[str] = Counter()
         reasons: Counter[str] = Counter()
@@ -420,6 +428,13 @@ async def run_smoke(
                 retrieved_session_ids.append(public_session_id)
 
         active_ids = {record.id for record in active}
+        relevant_sessions = set(case.relevant_session_ids)
+        active_tier_counts = Counter(record.tier.value for record in active)
+        active_kind_counts = Counter(record.kind.value for record in active)
+        active_relevant_source_count = sum(
+            local_to_source.get(record.source_session_id or "") in relevant_sessions
+            for record in active
+        )
         attributable_injected_hits = _relevant_injected_hit_ids(
             recorder.hits, injected_ids=injected_ids, active_ids=active_ids,
             local_to_source=local_to_source,
@@ -502,6 +517,10 @@ async def run_smoke(
             },
             "committed_formation_jobs": committed_jobs,
             "formation_job_outcomes": dict(sorted(outcomes.items())),
+            "formation_drain_timeout_seconds": _FORMATION_DRAIN_TIMEOUT_SECONDS,
+            "active_record_tier_counts": dict(sorted(active_tier_counts.items())),
+            "active_record_kind_counts": dict(sorted(active_kind_counts.items())),
+            "active_records_with_relevant_source_session": active_relevant_source_count,
             "recall_hit_count": len(recorder.hits),
             "injected_message_count": len(memory_messages),
             "attributable_injected_hit_count": len(attributable_injected_hits),
@@ -543,7 +562,7 @@ async def run_smoke(
     finally:
         try:
             if runner is not None:
-                await runner.aclose(timeout_seconds=600)
+                await runner.aclose(timeout_seconds=_FORMATION_DRAIN_TIMEOUT_SECONDS)
         finally:
             try:
                 if service is not None:
