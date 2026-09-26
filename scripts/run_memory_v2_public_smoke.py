@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -80,6 +81,10 @@ def _case_size(case: PublicBenchmarkCase) -> tuple[int, int, int, str]:
         len(case.sessions),
         case.case_id,
     )
+
+
+def _case_id_sha256(case_id: str) -> str:
+    return hashlib.sha256(case_id.encode("utf-8")).hexdigest()
 
 
 def _has_user_authoritative_evidence(case: PublicBenchmarkCase) -> bool:
@@ -452,6 +457,7 @@ async def run_smoke(
         }
         evaluation_details = {
             "selection_strategy": "smallest_answerable_case_with_annotated_user_evidence",
+            "selected_case_id_sha256": _case_id_sha256(case.case_id),
             "sample_category": case.category,
             "answer_scorer": "normalized_token_f1",
             "answer_f1_threshold": 0.5,

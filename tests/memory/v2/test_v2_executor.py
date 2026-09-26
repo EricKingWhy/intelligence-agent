@@ -913,12 +913,16 @@ async def test_the_formation_call_carries_the_safe_projection(env: Env) -> None:
     assert "u:1" not in json.dumps(call.payload, ensure_ascii=False)
     assert "all listed keys are required" in call.system_prompt
     assert "`payload.kind` is required" in call.system_prompt
+    assert "top-level only and never a candidate field" in call.system_prompt
+    assert "Do not add candidate fields beyond those listed above" in call.system_prompt
     assert "Semantic payload keys are `kind`=`semantic`, `subject`, `fact`, and `category`" \
         in call.system_prompt
     assert "Episodic payload keys are `kind`=`episodic`, `situation`, `action`, `outcome`, " \
         "and `lesson`" in call.system_prompt
     assert "Procedural payload keys are `kind`=`procedural`, `trigger`, `procedure`, and " \
         "`success_condition`" in call.system_prompt
+    assert "Keep payload nested under its candidate" in call.system_prompt
+    assert '"payload":{"kind":"semantic"' in call.system_prompt
     assert call.max_output_tokens == 4000
     assert call.timeout_seconds > 0
 

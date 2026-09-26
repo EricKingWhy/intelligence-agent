@@ -8,6 +8,7 @@ from evaluation.memory_v2_public_benchmarks import (
     PublicTurn,
 )
 from scripts.run_memory_v2_public_smoke import (
+    _case_id_sha256,
     _case_speakers,
     _relevant_injected_hit_ids,
     _safe_job_reason_code,
@@ -17,6 +18,12 @@ from scripts.run_memory_v2_public_smoke import (
     select_smoke_case,
     token_f1,
 )
+
+
+def test_smoke_case_id_is_reported_as_sha256():
+    assert _case_id_sha256("sample-1") == (
+        "0899cd856fba9b131050135138cd87c5e5222f0a0657b94730901988d5cabdbb"
+    )
 
 
 def _case(case_id: str, *, size: int, abstention: bool = False, evidence: bool = True):
