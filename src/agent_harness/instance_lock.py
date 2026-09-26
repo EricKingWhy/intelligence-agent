@@ -21,7 +21,10 @@
 例外：不触碰该根的命令（`--help` / `-h`）不取锁。
 
 逃生门 `ALLOW_SHARED_ROOT` **默认关闭**；显式设为真值时降级为警告放行，且日志
-显著留痕（宁可吵，不要静默降级）。
+显著留痕（宁可吵，不要静默降级）。绕锁进程还会在 workspace root 持有独立 OS
+租约；cutover 发布 fence 后扫描租约并拒绝与存量绕锁 writer 并发。进程退出由 OS
+释放租约，留下的文件可由后续 cutover 确认为 stale 后清理。应用启动在注册租约后
+再次检查 fence，避免启动和 cutover fence 发布竞态。
 
 进程内幂等**且线程安全**：同一路径重复 `acquire()` 返回同一把锁并计数，最后一个
 `release()` 才真正放锁——避免"同一进程重复装配 = 自锁"。
@@ -33,6 +36,7 @@ import logging
 import os
 import sys
 import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,7 +50,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: 逃生门环境变量：设真值 → 占用时降级为警告放行。默认安全（未设 = 取锁）。
+#: 逃生门环境变量：设真值 → 占用时降级为警告放行并注册 OS 锁定的 writer 租约。
+#: 默认安全（未设 = 取锁）。
 ALLOW_SHARED_ROOT_ENV = "ALLOW_SHARED_ROOT"
 
 #: 锁文件名（位于 workspace root 下）。
@@ -61,6 +66,8 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 #: 锁在远超载荷的偏移上（允许锁 EOF 之后），载荷区保持可读。POSIX 用 flock，
 #: 整文件 advisory，无此问题。
 _WIN_LOCK_OFFSET = 1 << 20
+_SHARED_ROOT_LEASE_PREFIX = ".instance-shared-root-"
+_SHARED_ROOT_LEASE_SUFFIX = ".lease"
 
 #: 进程内注册表：key = 锁文件的规范化真实路径。同进程重复装配返回同一把锁。
 _lock_by_path: dict[str, InstanceLock] = {}
@@ -130,7 +137,88 @@ class InstanceLock:
         self._key = _key_for(self._path)
         self._allow_cutover = allow_cutover
         self._fd: int | None = None
+        self._shared_lease_path: Path | None = None
+        self._shared_lease_fd: int | None = None
         self._holders = 0
+
+    def _create_shared_root_lease(self) -> tuple[Path, int]:
+        path = self._root / f"{_SHARED_ROOT_LEASE_PREFIX}{uuid.uuid4().hex}{_SHARED_ROOT_LEASE_SUFFIX}"
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        locked = False
+        try:
+            _take_os_lock(fd)
+            locked = True
+            payload = f"pid={os.getpid()}\nstarted_at={datetime.now(UTC).isoformat()}\n"
+            os.write(fd, payload.encode("utf-8"))
+            return path, fd
+        except BaseException:
+            if locked:
+                try:
+                    _release_os_lock(fd)
+                except OSError:
+                    pass
+            os.close(fd)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _release_shared_root_lease(self) -> None:
+        fd, self._shared_lease_fd = self._shared_lease_fd, None
+        path, self._shared_lease_path = self._shared_lease_path, None
+        if fd is not None:
+            try:
+                _release_os_lock(fd)
+            except OSError:
+                logger.warning("释放 shared-root 租约失败（OS 会在进程退出时兜底）")
+            finally:
+                os.close(fd)
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("清理 shared-root 租约文件失败：%s", path)
+
+    def assert_no_shared_root_writers(self) -> None:
+        """Refuse cutover while another process holds an escape-hatch lease."""
+        pattern = f"{_SHARED_ROOT_LEASE_PREFIX}*{_SHARED_ROOT_LEASE_SUFFIX}"
+        for path in sorted(self._root.glob(pattern)):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise InstanceLockError(
+                    "A shared-root writer lease cannot be inspected; refusing cutover."
+                ) from error
+            if not path.is_file() or path.is_symlink() or info.st_nlink != 1:
+                raise InstanceLockError("A shared-root writer lease is invalid; refusing cutover.")
+            try:
+                fd = os.open(path, os.O_RDWR)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise InstanceLockError(
+                    "A shared-root writer lease cannot be inspected; refusing cutover."
+                ) from error
+            try:
+                try:
+                    _take_os_lock(fd)
+                except OSError as error:
+                    raise InstanceLockError(
+                        "A shared-root workspace writer is active; stop it before cutover."
+                    ) from error
+            finally:
+                os.close(fd)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise InstanceLockError(
+                    "A stale shared-root writer lease cannot be removed; refusing cutover."
+                ) from error
 
     def acquire(self) -> InstanceLock:
         """取锁；成功返回锁对象（同进程同路径幂等）。失败抛 `InstanceLockError`。
@@ -165,8 +253,24 @@ class InstanceLock:
                     raise InstanceLockError(
                         self._locked_message(self._read_holder())
                     ) from error
+                try:
+                    self._shared_lease_path, self._shared_lease_fd = (
+                        self._create_shared_root_lease()
+                    )
+                except OSError as lease_error:
+                    raise InstanceLockError(
+                        "The shared-root escape hatch could not register this writer; startup refused."
+                    ) from lease_error
+                if (
+                    not self._allow_cutover
+                    and (self._root / CUTOVER_FENCE_FILENAME).exists()
+                ):
+                    self._release_shared_root_lease()
+                    raise InstanceLockError(
+                        "Memory clean-slate reset is in progress; startup is refused."
+                    )
                 # 逃生门：显式开启才降级。消息里带字面 "WARNING" 前缀，便于
-                # grep 与人工审计（默认安全，这一条必须显眼）。
+                # grep 与人工审计；OS 锁定的租约让 cutover 能发现仍运行的进程。
                 logger.warning(
                     "WARNING: %s 已被其他进程占用，但 %s=%s 已显式设置 → "
                     "降级放行（跨进程并发写可能造成会话 JSONL 重复 seq / 交错写）。占用者：%s",
@@ -204,6 +308,7 @@ class InstanceLock:
                     logger.warning("释放实例锁失败（OS 会在进程退出时兜底）：%s", self._path)
                 finally:
                     os.close(fd)
+            self._release_shared_root_lease()
             _lock_by_path.pop(self._key, None)
 
     def _write_holder(self) -> None:

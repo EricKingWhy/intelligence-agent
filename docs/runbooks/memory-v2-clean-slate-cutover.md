@@ -14,7 +14,7 @@ SessionEvent、`harness.db` 中的 session metadata/checkpoint、workspace 文�
 
 ## 执行
 
-在已集成 #303 代码的仓库根目录运行。不要启动多个应用实例；cutover 会尝试获取 workspace `InstanceLock`，遇到活动 writer 时拒绝执行。`ALLOW_SHARED_ROOT` escape hatch 必须关闭。
+在已集成 #303 代码的仓库根目录运行。执行前先重启/停止所有旧版本应用进程，确保没有仍在运行但不登记 shared-root lease 的实例。cutover 会取得 workspace `InstanceLock`、原子发布 startup fence，并检查活动 shared-root writer lease；若发现活动 writer，会在数据变更前拒绝执行。`ALLOW_SHARED_ROOT` escape hatch 必须在 cutover 进程中关闭。
 
 先做只读计划：
 
@@ -23,6 +23,8 @@ uv run --locked python -m agent_harness.memory.v2.cutover --dry-run
 ```
 
 执行前人工确认计划中的数据库/table allowlist、行数、Memory collection 身份指纹/Schema/行数、Knowledge count/schema 和 preservation 指纹均符合预期，且 `backup_created` 为 `false`。Milvus endpoint 与认证凭证共同绑定到目标 hash，输出不包含其原值；请在本机私下核对 workspace 与 collection 配置确实指向批准的目标，不要把凭证或环境文件内容贴入日志/聊天。新 cutover 若目标 collection 不存在会拒绝执行；仅带有效 fence 的中断恢复可接受 collection 暂缺。
+
+如果执行因活动 shared-root writer lease 被拒，先正常停止该应用实例，再重新运行 dry-run 并用新 plan hash 执行；不要手动删 lease 或 fence。旧版本进程必须先退出，因为它们不会登记 lease。
 
 用**同一份 dry-run** 输出中的 `plan_sha256` 执行，报告路径必须在 workspace root 外且不存在：
 

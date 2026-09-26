@@ -636,20 +636,26 @@ async def apply_plan(
     except InstanceLockError as error:
         raise CutoverRefused("workspace_writer_is_active") from error
     fence = None
+    mutation_started = False
     try:
+        if fence_record is None and (root / CUTOVER_FENCE_FILENAME).exists():
+            raise CutoverRefused("cutover_fence_appeared_while_acquiring_writer_lock")
         # Publish the startup fence before the first await while holding the instance lock.
         fence = _write_fence(root, plan)
+        try:
+            lock.assert_no_shared_root_writers()
+        except InstanceLockError as error:
+            raise CutoverRefused("shared_root_workspace_writer_is_active") from error
         # Recompute under the process lock; no writer may change the target after this point.
         locked_plan = await build_plan(
             settings, allow_missing_memory_collection=fence_record is not None,
         )
         if fence_record is None:
             if locked_plan["plan_sha256"] != expected_plan_sha256:
-                fence.unlink()
-                fence = None
                 raise CutoverRefused("plan_changed_while_acquiring_writer_fence")
         elif not _resume_matches(locked_plan, fence_record):
             raise CutoverRefused("interrupted_cutover_target_or_preserved_state_changed")
+        mutation_started = True
         results = [
             _clear_sqlite_database(_sqlite_target(root, name))
             for name in _DATABASE_TABLES
@@ -721,6 +727,14 @@ async def apply_plan(
         fence.unlink()
         fence = None
         return report
+    except BaseException:
+        if fence_record is None and fence is not None and not mutation_started:
+            try:
+                fence.unlink(missing_ok=True)
+                fence = None
+            except OSError as cleanup_error:
+                raise CutoverRefused("cutover_fence_cleanup_failed") from cleanup_error
+        raise
     finally:
         lock.release()
 

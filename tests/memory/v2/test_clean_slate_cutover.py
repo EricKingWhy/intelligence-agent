@@ -378,6 +378,32 @@ async def test_cutover_publishes_startup_fence_before_locked_inventory_await(tmp
 
 
 @pytest.mark.asyncio
+async def test_cutover_refuses_shared_root_writer_before_mutation(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    await _seed_databases(settings)
+    fake = FakeMilvus(settings)
+    _install_fake(monkeypatch, fake)
+    plan = await cutover.build_plan(settings)
+    before = _sqlite_bytes(settings)
+
+    def active_shared_writer(_lock):
+        raise InstanceLockError("A shared-root workspace writer is active")
+
+    monkeypatch.setattr(InstanceLock, "assert_no_shared_root_writers", active_shared_writer)
+
+    with pytest.raises(cutover.CutoverRefused, match="shared_root_workspace_writer_is_active"):
+        await cutover.apply_plan(
+            settings,
+            expected_plan_sha256=plan["plan_sha256"],
+            report_path=tmp_path / "refused-report.json",
+        )
+
+    assert _sqlite_bytes(settings) == before
+    assert fake.dropped == []
+    assert not (Path(settings.workspace_dir) / CUTOVER_FENCE_FILENAME).exists()
+
+
+@pytest.mark.asyncio
 async def test_cutover_refuses_unknown_sqlite_tables_without_mutation(tmp_path, monkeypatch):
     import sqlite3
     from pathlib import Path

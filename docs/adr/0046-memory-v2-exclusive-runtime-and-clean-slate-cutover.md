@@ -40,7 +40,7 @@ MEM-V2-1 到 MEM-V2-6 已交付 V2 生命周期、持久化、形成、召回与
 
 ### D4 — workspace lock 与持久 fence 阻止新写入
 
-执行前必须取得和 web/CLI 一致的 `InstanceLock`。`ALLOW_SHARED_ROOT` escape hatch 开启时拒绝执行。操作先将 `.memory-cutover-in-progress` 写入同目录临时文件并 fsync，再原子替换为 fence；正常 web/CLI 启动在 fence 存在时失败关闭。只有 `--resume` 可在目标及 preservation baseline 仍匹配时继续。完成报告落盘后才删除 fence。
+执行前必须取得和 web/CLI 一致的 `InstanceLock`。`ALLOW_SHARED_ROOT` escape hatch 开启时拒绝执行。操作先将 `.memory-cutover-in-progress` 写入同目录临时文件并 fsync，再原子替换为 fence；正常 web/CLI 启动在 fence 存在时失败关闭。逃生门启动会持有每进程 OS 锁定的 writer lease，并在注册后复查 fence；cutover 在首次异步盘点前扫描 lease，有活动 lease 就在任何数据变更前拒绝。异常退出由 OS 释放 lease，后续检查可清理 stale lease。切换前必须先重启旧版本应用进程，使其具备 lease 注册行为。只有 `--resume` 可在目标及 preservation baseline 仍匹配时继续。完成报告落盘后才删除 fence。
 
 ### D5 — SQLite 旧页与派生索引同时清除
 
