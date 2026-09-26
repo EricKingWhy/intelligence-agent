@@ -23,7 +23,10 @@ from typing import Any
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
-from agent_harness.agent.run_budget import LaunchRunBudget
+from agent_harness.agent.run_budget import (
+    LaunchRunBudget,
+    validate_tool_call_limits_registered,
+)
 
 logger = logging.getLogger(__name__)
 from agent_harness.capability.base import CapabilityRegistry
@@ -346,6 +349,15 @@ async def build_runtime(
         pre_filter_names = {tool.name for tool in registry.list()}
         registry = registry.filtered(profile_spec.tool_scope)
         dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
+
+    # per-tool 配额的**注册名**校验（`#314` / `04 §9.1`）：判定点是这里，因为注册表
+    # 到上一行为止才定型（内置 + artifact 读回 + capability，并按 profile 收窄）。
+    # 位置仍然满足 `11 §6.1` 的"无副作用"：在任何 model / tool / child 工作之前，
+    # 也不落任何消耗预算的事件。子 runtime（delegate）不带 run_budget ⇒ 自然跳过。
+    if run_budget is not None:
+        validate_tool_call_limits_registered(
+            run_budget.limits, registered=[tool.name for tool in registry.list()],
+        )
 
     # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
     # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。

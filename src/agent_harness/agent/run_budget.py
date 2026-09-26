@@ -27,20 +27,30 @@
 - `total_tokens` / `cost_usd` ← 同一条事件的 `usage` / `cost_usd` 键，**只统计 Provider
   自报的值**。任何一个请求没自报 ⇒ 该维度的累计是"未知"（`None`），不是 0
   （`11 §6.1`：不可得 = unavailable，MUST NOT 记为 0；只有"一个请求都没有"的空和才是 0）。
+- `tool_calls` / `tool_attempts` ← `tool/result` 的 `budget_delta` 键（`#314` 起）。唯一的
+  写入者是 `ToolExecutor` 的**接纳点**：一次规范化逻辑调用记 `tool_calls: 1`，该调用
+  真实 `tool.execute` 的每一次尝试（含 retry）记一格 `tool_attempts`。**retry 不产生
+  新的逻辑调用**；准入前被拒的调用记 `0`（拒绝理由在同一条结果的 `error_code` 里，
+  可审计）。接纳边界的完整读法在 ADR-0045——本模块只做"按 delta 求和"。
 
 **四维的临界点语义分两类**（可数维度预留 closeout、计量维度到线即停）：判据与理由
 写在 `_dimension_reached` / `_dimension_headroom` 的 docstring 里，本模块不复述第二遍
 （准入与 closeout 容量是**两个**谓词，合并会让暂停点上的收口恒被拒）。
 
-**本模块不实现**（别误以为漏了）：deadline（`#315`）、tool quota（`#314`）、stuck
-（`#317`）、SessionBudget（`#318`）。所以 `run/paused.data.reason` 目前只会是
+**本模块不实现**（别误以为漏了）：deadline（`#315`）、stuck（`#317`）、SessionBudget
+（`#318`）、以及 `budget.run.max_tool_calls`（工具调用**总数**的上限：`04 §9.1` 只冻结
+了"按名字给的显式配额"，总数只观测不设限）。所以 `run/paused.data.reason` 目前只会是
 `budget_exhausted`——它是"预算到顶"这一类，**具体哪个维度看 `trigger_dimension`**。
+
+per-tool 配额（`#314`）在这张表上是**动态维度**：每个已配置的工具名各占一个
+`run.tool_call_limits.<tool_name>`，因此它不在 `TRIGGER_ORDER` 这个定长元组里，
+而由 `tool_dimensions()` 按名字排序给出（顺序必须**确定**，不能依赖 dict 插入序）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -59,6 +69,7 @@ from agent_harness.session.event import (
     RUN_PAUSED,
     RUN_RESUMED,
     RUN_STARTED,
+    TOOL_RESULT,
     SessionEvent,
 )
 
@@ -74,10 +85,17 @@ TRIGGER_RUN_TOKENS = "run.max_total_tokens"
 TRIGGER_RUN_COST = "run.max_cost_usd"
 TRIGGER_LOCAL_TURNS = "local.max_agent_turns"
 
+#: per-tool 配额的维度名 = **前缀 + 工具名**（`#314`）：它仍然是"配置字段的路径名"
+#: 这一条规则的延伸（`budget.run.tool_call_limits.<name>`），客户端据此知道该抬高
+#: 映射里的哪一个键。为什么是动态维度而不是固定常量：工具名由请求给、数量不定，
+#: 塞不进 `TRIGGER_ORDER` 这种定长元组。
+TRIGGER_RUN_TOOL_PREFIX = "run.tool_call_limits."
+
 #: 准入判定的顺序（命中即返回，**只报一个**维度）。turns 在最前：它是
 #: `#308` 起就存在的维度、也是客户端最先配的那个；同一时刻多维度同时到顶时，
 #: 报哪一个不影响客户端的动作（抬高全部到顶的 ceiling 才能继续），所以顺序
 #: 只需**确定**、不需要"最紧优先"这种需要全局比较的聪明规则。
+#: per-tool 维度紧随四维之后、local fuse 之前（都是 run 作用域，见 `pause_trigger`）。
 TRIGGER_ORDER: tuple[str, ...] = (
     TRIGGER_RUN_TURNS,
     TRIGGER_RUN_REQUESTS,
@@ -86,9 +104,37 @@ TRIGGER_ORDER: tuple[str, ...] = (
     TRIGGER_LOCAL_TURNS,
 )
 
-#: run 作用域的四个维度（= `TRIGGER_ORDER` 去掉 local fuse 的**同一份事实**，
-#: 不是第二张清单：恢复判定与 closeout 容量都只看这四维）。
-RUN_DIMENSIONS: tuple[str, ...] = TRIGGER_ORDER[:4]
+#: run 作用域的四维（= `TRIGGER_ORDER` 去掉 local fuse 的**同一份事实**，
+#: 不是第二张清单：恢复判定与 closeout 容量都只看这四维）。写成推导而不是 `[:4]`
+#: 切片：切片会把"前四个恰好是 run 维度"这条巧合变成隐式约束，日后调 `TRIGGER_ORDER`
+#: 的顺序就会静默改变这里的集合。
+RUN_DIMENSIONS: tuple[str, ...] = tuple(
+    dimension for dimension in TRIGGER_ORDER if dimension != TRIGGER_LOCAL_TURNS
+)
+
+
+def tool_trigger_dimension(tool_name: str) -> str:
+    """工具名 → 该工具的配额维度名（配置字段路径）。"""
+    return f"{TRIGGER_RUN_TOOL_PREFIX}{tool_name}"
+
+
+def tool_name_of_dimension(dimension: str) -> str | None:
+    """配额维度名 → 工具名；不是 per-tool 维度时 `None`。"""
+    if not dimension.startswith(TRIGGER_RUN_TOOL_PREFIX):
+        return None
+    name = dimension[len(TRIGGER_RUN_TOOL_PREFIX):]
+    return name or None
+
+
+def tool_dimensions(limits: RunLimits) -> tuple[str, ...]:
+    """该 ceiling 集合里的 per-tool 维度（**按工具名排序**，顺序确定）。
+
+    排序而不是插入序：请求里的映射顺序是客户端的书写顺序，不是事实；把它当判定顺序
+    会让"同时到顶报哪一个"随 JSON 键序漂移，暂停载荷也就不可复现（`03 §3.4` 要求
+    可 replay 重建同样的状态）。
+    """
+    return tuple(tool_trigger_dimension(name) for name in sorted(limits.tool_call_limits))
+
 
 #: `run/paused.data.closeout_source`（`03 §3.4` 的两值）。
 CLOSEOUT_MODEL = "model"
@@ -170,14 +216,21 @@ class RunLimits:
 
     四个维度都可能有值、也可能都没有（= 本 run 没配 run 作用域预算）。`#313` 起
     它同时是 `run/started.data.budget`、`run/paused` / `run/resumed` 的 `limits`
-    快照的形状——**快照的六个维度里** ToolRetry / deadline / tool quota 三席分别
-    由 `#314` / `#315` 与 tool quota 票接入（它们加键，不改本类的读法）。
+    快照的形状——快照的六个维度里**每工具配额**这一席由 `#314` 接入
+    （`tool_call_limits`，只收**已注册**工具名），deadline（`#315`）仍在路上。
+
+    `tool_call_limits`（`#314`）：工具名 → 正整数**绝对**上限。空映射 = 本 run 没有
+    任何 per-tool 配额（**不是**"所有工具上限为 0"）。它与其他四维的区别是"一维变多维"：
+    它一次携带整张表，而准入判定按 `run.tool_call_limits.<name>` 逐名进行。
     """
 
     max_agent_turns_total: int | None = None
     max_model_requests: int | None = None
     max_total_tokens: int | None = None
     max_cost_usd: Decimal | None = None
+    #: 工具名 → 绝对 ceiling。只读（冻结实例不阻止改内容，故一律经 `tool_call_limits()`
+    #: 之外的构造入口赋值，且投影/读回都**复制**出去，不把内部字典交到调用方手上）。
+    tool_call_limits: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def configured(self) -> bool:
@@ -190,10 +243,13 @@ class RunLimits:
                 self.max_total_tokens,
                 self.max_cost_usd,
             )
-        )
+        ) or bool(self.tool_call_limits)
 
     def ceiling_of(self, dimension: str) -> Any:
         """按 `trigger_dimension` 取值（准入判定与 continuation 文案共用一份映射）。"""
+        tool_name = tool_name_of_dimension(dimension)
+        if tool_name is not None:
+            return self.tool_call_limits.get(tool_name)
         return {
             TRIGGER_RUN_TURNS: self.max_agent_turns_total,
             TRIGGER_RUN_REQUESTS: self.max_model_requests,
@@ -207,12 +263,18 @@ class RunLimits:
         与 `as_run_started_budget` 的"一维都没配就不落键"不矛盾：那里是"这次 run
         没有 run 预算事实"（落一个全 null 的对象是占位噪声），这里是"客户端问
         ceiling 是什么"——缺键会让客户端分不清"没配"与"这个维度不存在"。
+
+        `tool_call_limits` **按名字排序**输出（同一份事实的字节稳定形式：事件落盘与
+        投影要能跨执行逐字节比对）；没配工具配额时是 `{}`，与请求侧的缺省形状一致。
         """
         return {
             "max_agent_turns_total": self.max_agent_turns_total,
             "max_model_requests": self.max_model_requests,
             "max_total_tokens": self.max_total_tokens,
             "max_cost_usd": _decimal_text(self.max_cost_usd),
+            "tool_call_limits": {
+                name: self.tool_call_limits[name] for name in sorted(self.tool_call_limits)
+            },
         }
 
 
@@ -231,6 +293,29 @@ class BudgetConsumed:
     model_requests: int | None = 0
     total_tokens: int | None = 0
     cost_usd: Decimal | None = Decimal(0)
+    #: 工具名 → 已接纳的逻辑调用数（`#314`）。`None` = 未知（T6 之前的暂停快照里
+    #: 没有这个键）；`{}` = 已知且一个都没调用。**总数与每工具数只有一份真相**：
+    #: 总数是这张表的和（见 `tool_calls`），不另立字段——两个字段就能不一致。
+    tool_calls_by_tool: Mapping[str, int] | None = field(default_factory=dict)
+    #: 工具名 → 实际尝试次数（含 retry），与上一张表同构、各占一维
+    #: （`02 §5.1`：`tool_attempts` MUST NOT 被当成 `tool_calls` 的别名）。
+    tool_attempts_by_tool: Mapping[str, int] | None = field(default_factory=dict)
+
+    @property
+    def tool_calls(self) -> int | None:
+        """被接纳的**规范化逻辑工具调用**总数（`None` = 未知）。"""
+        return _map_total(self.tool_calls_by_tool)
+
+    @property
+    def tool_attempts(self) -> int | None:
+        """工具执行域的实际尝试总数（含 retry，`None` = 未知）。"""
+        return _map_total(self.tool_attempts_by_tool)
+
+    def calls_for(self, tool_name: str) -> int | None:
+        """某工具已接纳的逻辑调用数（表未知时 `None`，没出现过时 0）。"""
+        if self.tool_calls_by_tool is None:
+            return None
+        return self.tool_calls_by_tool.get(tool_name, 0)
 
     def as_projection(self) -> dict[str, Any]:
         return {
@@ -238,10 +323,21 @@ class BudgetConsumed:
             "model_requests": self.model_requests,
             "total_tokens": self.total_tokens,
             "cost_usd": _decimal_text(self.cost_usd),
+            # 总数与两张表都写：总数是 `02 §5.1` 的 counter 名（客户端按它读"花了多少
+            # 工具调用"），两张表是 per-tool 配额与可观测性要的分维；三者的关系是
+            # "总数 = 表和"，所以这里不引入第二份真相，只是把同一份账按两种粒度给出。
+            "tool_calls": self.tool_calls,
+            "tool_attempts": self.tool_attempts,
+            "tool_calls_by_tool": _map_text(self.tool_calls_by_tool),
+            "tool_attempts_by_tool": _map_text(self.tool_attempts_by_tool),
         }
 
     def remaining(self, limits: RunLimits) -> dict[str, Any]:
-        """各维度的剩余量（`11 §6.1` 要求投影里既有 ceiling 也有 remaining）。"""
+        """各维度的剩余量（`11 §6.1` 要求投影里既有 ceiling 也有 remaining）。
+
+        只给**配了 ceiling 的维度**（`11 §6.1` 的原话就是"有 ceiling 时的 remaining"）：
+        工具调用**总数**没有 ceiling 故不出现在这里，per-tool 配额按配置名逐名给。
+        """
         return {
             "agent_turns": _remaining(limits.max_agent_turns_total, self.agent_turns),
             "model_requests": _remaining(limits.max_model_requests, self.model_requests),
@@ -251,6 +347,10 @@ class BudgetConsumed:
                 if limits.max_cost_usd is None or self.cost_usd is None
                 else max(limits.max_cost_usd - self.cost_usd, Decimal(0))
             ),
+            "tool_call_limits": {
+                name: _remaining(ceiling, self.calls_for(name))
+                for name, ceiling in sorted(limits.tool_call_limits.items())
+            },
         }
 
     def with_usage(self, *, usage: dict[str, int] | None, cost: Decimal | None) -> BudgetConsumed:
@@ -276,6 +376,10 @@ class BudgetConsumed:
             model_requests=requests,
             total_tokens=tokens,
             cost_usd=total_cost,
+            # 工具账与"一次 Provider 请求"无关，原样带过去（漏了这两行就是把工具账
+            # 在聚合点清零——那是"第二份真相"最容易长出来的地方）。
+            tool_calls_by_tool=self.tool_calls_by_tool,
+            tool_attempts_by_tool=self.tool_attempts_by_tool,
         )
 
 
@@ -394,6 +498,34 @@ def _remaining(ceiling: int | None, consumed: int | None) -> int | None:
     return max(ceiling - consumed, 0)
 
 
+def _map_total(counts: Mapping[str, int] | None) -> int | None:
+    """分维计数表的总数（表未知 ⇒ 总数未知；空表 ⇒ 0，是"确实一次都没调用"）。"""
+    return None if counts is None else sum(counts.values())
+
+
+def _map_text(counts: Mapping[str, int] | None) -> dict[str, int] | None:
+    """分维计数表的 wire 形式：**排序**输出，未知保持 `None`（不写成 `{}`）。
+
+    `None` 与 `{}` 在投影里必须可区分：前者是"不知道调了多少次"，后者是"一次都没调"。
+    排序的理由同 `RunLimits.as_projection`（事件与投影要跨执行逐字节可比）。
+    """
+    if counts is None:
+        return None
+    return {name: counts[name] for name in sorted(counts)}
+
+
+def _add_maps(
+    base: Mapping[str, int] | None, delta: Mapping[str, int] | None,
+) -> dict[str, int] | None:
+    """两张分维表相加（任一未知 ⇒ 和未知，`None` 粘性同其余维度）。"""
+    if base is None or delta is None:
+        return None
+    total = dict(base)
+    for name, value in delta.items():
+        total[name] = total.get(name, 0) + value
+    return total
+
+
 def _limits_from_projection(raw: Any) -> RunLimits:
     """从事件里的 `limits` 快照还原 run 作用域 ceiling（宽容读：缺键 = 该维无 ceiling）。
 
@@ -416,7 +548,28 @@ def _limits_from_projection(raw: Any) -> RunLimits:
             tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
         ),
         max_cost_usd=_decimal_or_none(scope.get("max_cost_usd")),
+        tool_call_limits=_int_map(scope.get("tool_call_limits")),
     )
+
+
+def _int_map(raw: Any, *, minimum: int = 1) -> dict[str, int]:
+    """读回"名字 → 正整数"的表（**逐项**宽容：畸形项丢掉，不连坐其余项）。
+
+    判据与请求侧 `parse_tool_call_limits` 对齐（键非空字符串、值 ≥ `minimum` 的整数）；
+    但读回事件时**不抛**——读已落盘的事实崩掉会让整个 run 打不开，报文侧的 422 才是
+    拒绝入口。`bool` 必须显式排除：`True` 在 Python 里是 `int` 的实例，收下它等于
+    把 `true` 读成 1。
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    parsed: dict[str, int] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            continue
+        parsed[name] = value
+    return parsed
 
 
 def _local_fuse_from_projection(raw: Any) -> LocalFuse | None:
@@ -472,7 +625,42 @@ def add_consumed(base: BudgetConsumed, delta: BudgetConsumed) -> BudgetConsumed:
             None if base.cost_usd is None or delta.cost_usd is None
             else base.cost_usd + delta.cost_usd
         ),
+        tool_calls_by_tool=_add_maps(base.tool_calls_by_tool, delta.tool_calls_by_tool),
+        tool_attempts_by_tool=_add_maps(
+            base.tool_attempts_by_tool, delta.tool_attempts_by_tool,
+        ),
     )
+
+
+def _add_tool_delta(
+    calls: dict[str, int] | None,
+    attempts: dict[str, int] | None,
+    raw: Any,
+) -> tuple[dict[str, int] | None, dict[str, int] | None]:
+    """把一条 `tool/result.data.budget_delta` 累加进两张工具表（原位改，返回入参）。
+
+    三条读法：
+
+    - **表未知**（`None`，T6 之前的暂停快照）⇒ 保持未知：一张读不出来的表上加任何数
+      仍然是"不知道"，把未知当 0 会让配额从 0 起算（那是假账）。
+    - **没有 delta 键 / delta 读不懂** ⇒ 这条结果不来自 `ToolExecutor` 的接纳点
+      （recovery 与 dangling 修复写的是合成结果），贡献 0。**不**把一条读不懂的记录
+      升级成"整维未知"：那会让一个 run 因为一格读不懂就再也续不了，而它其实只是
+      少记了一格。谁会写坏这个键？只有本仓自己的 Executor——它不是外部输入。
+    - **贡献为 0 的工具名不落进表**（准入前被拒的调用写 `tool_calls: 0`）：表是"消耗了
+      多少"，不是"出现过哪些工具名"；留下 0 行只会让投影里多出一堆没花过配额的名字。
+    """
+    if calls is None or attempts is None or not isinstance(raw, Mapping):
+        return calls, attempts
+    name = raw.get("tool_name")
+    if not isinstance(name, str) or not name:
+        return calls, attempts
+    for key, table in (("tool_calls", calls), ("tool_attempts", attempts)):
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            continue
+        table[name] = table.get(name, 0) + value
+    return calls, attempts
 
 
 def consumed_from_events(events: Iterable[SessionEvent]) -> BudgetConsumed:
@@ -487,6 +675,8 @@ def consumed_from_events(events: Iterable[SessionEvent]) -> BudgetConsumed:
     requests = 0
     tokens: int | None = 0
     cost: Decimal | None = Decimal(0)
+    calls: dict[str, int] | None = {}
+    attempts: dict[str, int] | None = {}
     for event in events:
         if event.type == MODEL_COMPLETED:
             turns += 1
@@ -502,9 +692,14 @@ def consumed_from_events(events: Iterable[SessionEvent]) -> BudgetConsumed:
             if cost is not None:
                 reported_cost = _decimal_or_none(event.data.get("cost_usd"))
                 cost = None if reported_cost is None else cost + reported_cost
+        elif event.type == TOOL_RESULT:
+            calls, attempts = _add_tool_delta(
+                calls, attempts, event.data.get("budget_delta"),
+            )
     return BudgetConsumed(
         agent_turns=turns, model_requests=requests,
         total_tokens=tokens, cost_usd=cost,
+        tool_calls_by_tool=calls, tool_attempts_by_tool=attempts,
     )
 
 
@@ -618,10 +813,13 @@ def _consumed_from_projection(raw: Any, *, fallback_turns: int) -> BudgetConsume
         return BudgetConsumed(
             agent_turns=fallback_turns, model_requests=None,
             total_tokens=None, cost_usd=None,
+            tool_calls_by_tool=None, tool_attempts_by_tool=None,
         )
     turns = raw.get("agent_turns")
     requests = raw.get("model_requests")
     tokens = raw.get("total_tokens")
+    calls = raw.get("tool_calls_by_tool")
+    attempts = raw.get("tool_attempts_by_tool")
     return BudgetConsumed(
         agent_turns=(
             turns if isinstance(turns, int) and not isinstance(turns, bool)
@@ -636,6 +834,13 @@ def _consumed_from_projection(raw: Any, *, fallback_turns: int) -> BudgetConsume
             else None
         ),
         cost_usd=_decimal_or_none(raw.get("cost_usd")) if "cost_usd" in raw else None,
+        # 工具两表同样**不回落重算**：T6 之前的 run 真的调用过工具，重算得到的 0 是
+        # 假话（与 requests / tokens / cost 同一条理由，见上面的 docstring）。表存在
+        # 但形状不对 ⇒ 也是未知，不把"读不懂"当"没花过"。
+        tool_calls_by_tool=(_int_map(calls, minimum=0) if isinstance(calls, Mapping) else None),
+        tool_attempts_by_tool=(
+            _int_map(attempts, minimum=0) if isinstance(attempts, Mapping) else None
+        ),
     )
 
 
@@ -670,9 +875,15 @@ def pause_trigger(
       这正是 EB-2 的临界点，也是 T3 冻结的单一判定结果（T4 只改去向，不改临界点）。
 
     账目**未知**（`None`）而该维度又配了 ceiling ⇒ 停：无法证明自己在预算之内时继续
-    发起请求，就是"有意越线"。顺序由 `TRIGGER_ORDER` 固定（turns 最先），命中即返回。
+    发起请求，就是"有意越线"。顺序由 `TRIGGER_ORDER` 固定（turns 最先），命中即返回；
+    **per-tool 配额**（`#314`）紧随四维之后、local fuse 之前——它同样是 run 作用域
+    （`02 §5.1`：RunBudget 的"每工具配额"与 local fuse 是两层不同的控制），按工具名
+    排序逐名判（`tool_dimensions`）。
     """
-    for dimension in TRIGGER_ORDER:
+    for dimension in RUN_DIMENSIONS:
+        if _dimension_reached(dimension, consumed=consumed, limits=run_limits):
+            return dimension
+    for dimension in tool_dimensions(run_limits):
         if _dimension_reached(dimension, consumed=consumed, limits=run_limits):
             return dimension
     if execution_steps >= local_fuse_turns:
@@ -690,7 +901,23 @@ def _dimension_reached(
     `_dimension_headroom`）。把两个问题合成一个谓词会让暂停点上的模型 closeout 恒被
     拒（`#313` 实现期实测踩到：`test_closeout_capacity_*` 与 pause/resume 的
     `closeout_source=model` 同时红）——那正是 T4 把这个函数单独留下的原因。
+
+    三类临界点（`04 §9.1` 只钉了前两类，第三类是 `#314` 的直接延伸）：
+
+    - **可数且会被 closeout 用到**（turns / requests）：`consumed + 预留 >= ceiling`。
+    - **计量、下一轮大小不可预知**（tokens / cost）：`consumed >= ceiling`。
+    - **per-tool 配额**（可数，但 closeout **不**调用工具 ⇒ 不预留）：`consumed >= ceiling`。
+      预留的语义是"保证暂停时还收得了口"（`02 §5.2`），而 closeout 是一次模型请求、
+      不产生任何工具调用，所以工具配额根本不约束它——给它留一格等于凭空虚设一个
+      永远用不上的余量，那会让"配额 = 3"实际允许 4 次调用。
     """
+    tool_name = tool_name_of_dimension(dimension)
+    if tool_name is not None:
+        ceiling = limits.tool_call_limits.get(tool_name)
+        if ceiling is None:
+            return False
+        used = consumed.calls_for(tool_name)
+        return used is None or used >= ceiling
     if dimension == TRIGGER_RUN_TURNS:
         ceiling = limits.max_agent_turns_total
         return ceiling is not None and consumed.agent_turns + RESERVED_CLOSEOUT_TURNS >= ceiling
@@ -724,7 +951,18 @@ def _dimension_headroom(
     等价；计量维度（tokens / cost）下一轮多大不可预知，`consumed < ceiling` 就是能保证的
     全部。没配 ceiling ⇒ 该维不设限 ⇒ 有余量。账目**未知** ⇒ **没有**余量：在不知道已花
     多少的前提下声称"还能再花一点仍在预算内"是一句无法兑现的话。
+
+    per-tool 维度与 `_dimension_reached` 成对地一并实现（同一个 switch 要穷尽）：它今天
+    不会从 `closeout_capacity` 走到这里（那里只扫四维，closeout 不调用工具），但两个
+    谓词的语义必须互为补集，否则谁多传一维就会得到静默矛盾的答案。
     """
+    tool_name = tool_name_of_dimension(dimension)
+    if tool_name is not None:
+        ceiling = limits.tool_call_limits.get(tool_name)
+        if ceiling is None:
+            return True
+        used = consumed.calls_for(tool_name)
+        return used is not None and used < ceiling
     if dimension == TRIGGER_RUN_TURNS:
         ceiling = limits.max_agent_turns_total
         return ceiling is None or consumed.agent_turns < ceiling
@@ -757,6 +995,10 @@ def closeout_capacity(*, consumed: BudgetConsumed, run_limits: RunLimits) -> boo
     的分工见 `_dimension_reached` 的 docstring——T4 时这个判据在暂停点上恒为真，
     `#313` 起不再恒真（token / cost 的暂停可能恰好落在已到线的那一轮，或账目未知），
     这正是它当初被保留下来的理由。
+
+    扫的是**四维**（`RUN_DIMENSIONS`）：per-tool 配额（`#314`）不参与——closeout 是一次
+    模型请求、不调用任何工具，工具配额约束不到它。把工具维度算进来会让"工具配额的暂停"
+    在配额恰好用满时永久降级成确定性 continuation。
     """
     return all(
         _dimension_headroom(dimension, consumed=consumed, limits=run_limits)
@@ -764,14 +1006,14 @@ def closeout_capacity(*, consumed: BudgetConsumed, run_limits: RunLimits) -> boo
     )
 
 
-
 def resume_headroom_ok(*, consumed: BudgetConsumed, limits: RunLimits) -> bool:
     """恢复的绝对 ceiling 是否"真的能继续"（`11 §6.1` 的 409 判据之一）。
 
     判据是**能继续干活**，不是"数字变大"：对**每一维**配了 ceiling 的维度，都要求
     它至少放得下"一次新的准入"——turns / requests 要留出「一次决策 + 一次 closeout
-    预留」，tokens / cost 只要严格大于已消耗。恰好等于 consumed 的 ceiling 会在下次
-    准入立刻再次暂停，接受它等于让客户端拿到一个"恢复成功但什么都没发生"的假象。
+    预留」，tokens / cost / **per-tool 配额**（`#314`）只要严格大于已消耗。恰好等于
+    consumed 的 ceiling 会在下次准入立刻再次暂停，接受它等于让客户端拿到一个"恢复成功
+    但什么都没发生"的假象。
 
     账目**未知**而该维度配了 ceiling ⇒ 判定为"不能继续"（无法证明在预算内）。
 
@@ -786,7 +1028,9 @@ def resume_headroom_ok(*, consumed: BudgetConsumed, limits: RunLimits) -> bool:
     """
     return not any(
         _dimension_reached(dimension, consumed=consumed, limits=limits)
-        for dimension in RUN_DIMENSIONS  # local fuse 不是"绝对 ceiling"，恢复不改它
+        # local fuse 不是"绝对 ceiling"，恢复不改它；per-tool 维度**要**检
+        # （恢复请求可以点名抬高某个工具的配额，那就是拿它当依据继续跑）。
+        for dimension in (*RUN_DIMENSIONS, *tool_dimensions(limits))
     )
 
 
@@ -841,26 +1085,94 @@ def parse_cost_ceiling(raw: Any) -> Decimal | None:
     return value
 
 
+def parse_tool_call_limits(raw: Any) -> dict[str, int]:
+    """`budget.run.tool_call_limits` 的形态校验（**422**；`04 §9.1` / `11 §6.1`）。
+
+    形状：工具名 → 正整数**绝对** ceiling。这里只判"形状 + 正整数"（键是非空且无首尾空白的
+    字符串、值是 ≥ 1 的整数、显式拒绝布尔）；**"已注册"这一条判不了**——注册表是装配层的
+    产物（capability wiring / artifact store / profile 收窄都发生在那里），判据落在
+    `validate_tool_call_limits_registered`。`None` 与 `{}` 都是"没配 per-tool 配额"。
+
+    任何一项不合形状都**拒绝整个请求**（不静默丢弃那一项）：丢一项等于给客户端一个
+    "配了但没生效"的假象（ADR-0044 D1/D8，与 `parse_cost_ceiling` 同一条纪律）。
+    名字**不做 strip 归一化**：`" bash "` 不是 `"bash"`，静默改写标识符会让"配的是哪个
+    工具"变成实现口味；名字可疑就响亮拒绝（`validate_*` 那条会给出明确的未注册名）。
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise BudgetRejection(
+            "budget.run.tool_call_limits 必须是 工具名→正整数 的映射，"
+            f"收到 {type(raw).__name__}"
+        )
+    parsed: dict[str, int] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str) or not name or name.strip() != name:
+            raise BudgetRejection(
+                f"budget.run.tool_call_limits 的工具名必须是非空、无首尾空白的字符串：{name!r}"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise BudgetRejection(
+                f"budget.run.tool_call_limits[{name!r}] 必须是正整数绝对 ceiling"
+                f"（0 / 负数 / 布尔 / 非整数都不是）：{value!r}"
+            )
+        parsed[name] = value
+    return parsed
+
+
+def validate_tool_call_limits_registered(
+    limits: RunLimits, *, registered: Iterable[str],
+) -> None:
+    """`budget.run.tool_call_limits` 里的名字必须在**本 runtime 的注册表**里（**422**）。
+
+    判据是"已注册"（`04 §9.1` 明文）：配额的意义是"该工具被真实使用的次数到顶"，给一个
+    根本调不到的名字配配额是**请求本身**有问题（客户端以为它在限制什么），不是运行期
+    再忽略——所以拒绝整个请求，与"不静默截断"同一条纪律（ADR-0044 D1/D8）。
+
+    **判定落点为什么在装配层**：注册表是 `build_runtime` 的产物（内置工具 + artifact store
+    选出的读回工具 + capability tools，最后按 agent_profile 的 tool_scope 收窄），在那之前
+    "哪些工具已注册"根本没有事实可言。该落点仍然满足 `11 §6.1` 的"无副作用"：它在任何
+    model / tool / child 工作之前，也不写任何消耗预算的事件。判据用**收窄之后**的注册表：
+    被 profile 剔除的工具本次 run 调不到，给它配 ceiling 等于配一个永远不触发的上限
+    （理由同 `validate_ceiling_enforceability`）。
+    """
+    if not limits.tool_call_limits:
+        return
+    known = set(registered)
+    unknown = sorted(name for name in limits.tool_call_limits if name not in known)
+    if unknown:
+        raise BudgetRejection(
+            f"budget.run.tool_call_limits 含未注册的工具名 {unknown}；"
+            f"本 run 已注册的工具名是 {sorted(known)}。"
+            f"（04 §9.1：显式配额只接受已注册工具名）"
+        )
+
+
 def run_limits_from_request(
     *,
     max_agent_turns_total: int | None = None,
     max_model_requests: int | None = None,
     max_total_tokens: int | None = None,
     max_cost_usd: Any = None,
+    tool_call_limits: Any = None,
     accounting: ProviderAccounting,
 ) -> RunLimits:
-    """请求里的四个 run 作用域 ceiling → `RunLimits`（**开工前**校验，422）。
+    """请求里的 run 作用域 ceiling → `RunLimits`（**开工前**校验，422）。
 
-    形态非法（见 `parse_cost_ceiling`）与**本链强制不了**的维度
-    （`validate_ceiling_enforceability`）都在这里拒绝：调用方保证它在第一位副作用
+    形态非法（见 `parse_cost_ceiling` / `parse_tool_call_limits`）与**本链强制不了**的
+    维度（`validate_ceiling_enforceability`）都在这里拒绝：调用方保证它在第一位副作用
     之前被调用（`11 §6.1`「无副作用」）。三个入口（Web / SessionService / CLI）共用
     这一份规则——422 的口径只有一处，不各自解释一遍。
+
+    「已注册工具名」这条不在本函数里判（它要注册表，这里还没有）：调用方在装配层用
+    `validate_tool_call_limits_registered` 补上，见那里的 docstring。
     """
     limits = RunLimits(
         max_agent_turns_total=max_agent_turns_total,
         max_model_requests=max_model_requests,
         max_total_tokens=max_total_tokens,
         max_cost_usd=parse_cost_ceiling(max_cost_usd),
+        tool_call_limits=parse_tool_call_limits(tool_call_limits),
     )
     validate_ceiling_enforceability(limits, accounting)
     return limits
@@ -877,6 +1189,8 @@ def _unknown_base_dimensions(
         unknown.append(TRIGGER_RUN_TOKENS)
     if limits.max_cost_usd is not None and paused.consumed.cost_usd is None:
         unknown.append(TRIGGER_RUN_COST)
+    if limits.tool_call_limits and paused.consumed.tool_calls_by_tool is None:
+        unknown.extend(tool_dimensions(limits))
     return unknown
 
 
@@ -887,6 +1201,11 @@ def resume_limits(paused: RunLimits, *, request: RunLimits) -> RunLimits:
     ceiling 撤掉——那是**放大**授权（ADR-0044 D1「配置只能收窄」；D3 同时定了「恢复绝不
     重置任何 counter」，同一方向），一次"抬高 token"的恢复不该顺手删掉 turn ceiling。
     想删 ceiling 是另一个动作，本票没有那条路径。
+
+    per-tool 配额（`#314`）是**逐键**合并而不是整表替换：映射是"一维变多维"的那个维度，
+    「点名」的单位是键——请求只写 `{"bash": 9}` 时，暂停时配的 `{"read_file": 3}` 必须
+    留下（整表替换会静默撤掉它，正是上面那条"一次恢复顺手删 ceiling"）。于是恢复能给
+    某个工具**新增**一个配额（收窄，允许）或抬高已有的（点名的本意），但删不掉。
 
     于是恢复请求的语义是"在这些维度上给出新的绝对 ceiling"，而不是"这就是新的全集"；
     点名了却放不下一次新准入的维度由 `validate_resume` 的 headroom 判定拒绝（409），
@@ -900,6 +1219,7 @@ def resume_limits(paused: RunLimits, *, request: RunLimits) -> RunLimits:
         max_model_requests=_pick(request.max_model_requests, paused.max_model_requests),
         max_total_tokens=_pick(request.max_total_tokens, paused.max_total_tokens),
         max_cost_usd=_pick(request.max_cost_usd, paused.max_cost_usd),
+        tool_call_limits={**paused.tool_call_limits, **request.tool_call_limits},
     )
 
 
@@ -1176,8 +1496,7 @@ def deterministic_continuation(
     "已花 0 元"会直接骗到正在决定要不要继续的人）。
     """
     items = [event for event in events if event.run_id == run_id]
-    tool_calls = sum(1 for event in items if event.type == "tool/call")
-    tool_results = sum(1 for event in items if event.type == "tool/result")
+    tool_results = sum(1 for event in items if event.type == TOOL_RESULT)
     ceiling = limits.ceiling_of(trigger_dimension)
     action = (
         f"提高绝对 ceiling（{trigger_dimension}）后以同一 run_id 恢复："
@@ -1195,7 +1514,16 @@ def deterministic_continuation(
                 f"累计 token：{_value_text(consumed.total_tokens)}；"
                 f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}"
             ),
-            f"已接纳 {tool_calls} 个工具调用（其中 {tool_results} 个已落工具结果）",
+            # 工具两个 counter 取 `consumed`（= `02 §5.1` 的计数点：**已接纳**的逻辑调用
+            # 与**实际**尝试），不在这里重数 `tool/call` 事件：后者含准入前被拒的调用，
+            # 拿它当"已接纳"会把被拒的调用说成已接纳（`#314` 之前这里就是这么数的）。
+            # 工具结果条数是另一件事（含被拒调用的结果），所以照旧从事件数，并如实
+            # 用"已落 N 条结果"而不是"其中 N 个"——两者不再是子集关系。
+            (
+                f"已接纳 {_value_text(consumed.tool_calls)} 个工具调用"
+                f"（{_value_text(consumed.tool_attempts)} 次实际尝试）；"
+                f"已落 {tool_results} 条工具结果"
+            ),
         ],
         "remaining": [
             "暂停发生在下一轮模型决策之前：恢复后由模型从会话历史继续",
@@ -1213,6 +1541,9 @@ def deterministic_continuation(
 
 def _dimension_text(consumed: BudgetConsumed, dimension: str) -> str:
     """某一维度的已消耗文案（未知如实说未知）。"""
+    tool_name = tool_name_of_dimension(dimension)
+    if tool_name is not None:
+        return _value_text(consumed.calls_for(tool_name))
     return {
         TRIGGER_RUN_TURNS: str(consumed.agent_turns),
         TRIGGER_RUN_REQUESTS: _value_text(consumed.model_requests),

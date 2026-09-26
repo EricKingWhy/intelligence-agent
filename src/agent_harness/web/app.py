@@ -159,18 +159,24 @@ class LocalBudgetRequest(BaseModel):
 
 
 class RunBudgetRequest(BaseModel):
-    """`budget.run` 子对象（`#312` 建 / `#313` 扩到四维，`11 §6.1`）：逻辑 run 的**绝对** ceiling。
+    """`budget.run` 子对象（`#312` 建 / `#313` 扩到四维 / `#314` 加 per-tool，`11 §6.1`）。
 
-    `#313` 起四维可用：turns / model_requests / total_tokens / cost_usd。**可执行性**
-    不在这一层判（pydantic 只管形状）：本链强制不了某个维度时由
+    `#313` 起四维可用：turns / model_requests / total_tokens / cost_usd；
+    `#314` 起 `tool_call_limits` 也可用（工具名 → 正整数绝对 ceiling）。**可执行性**
+    不在这一层判（pydantic 只管 JSON 形状）：本链强制不了某个维度时由
     `agent/run_budget.validate_ceiling_enforceability` 在**首个 Provider 请求之前**
     给 422——web 层不重述那条判定（`budget_claims` 只摊平）。
 
-    剩余三维（`max_tool_calls` / `deadline_at` / `tool_call_limits`）**照样声明**，理由是
-    PRD §3 把公开形状冻结成"全形 + 可空"：只设 run 的 PRD 全形请求体是**合法形状**，
-    用 `extra="forbid"` 把 `max_tool_calls: null` 打成 422 会把合法客户端拒之门外。
-    反过来，给它们赋**非空值**才是 "客户端以为设了、运行时没实现" —— 那必须 422 而不是
-    静默忽略（ADR-0044 D1/D8），所以下面用 `model_validator` 逐个挡下。
+    剩余两维（`max_tool_calls` / `deadline_at`）**照样声明**，理由是 PRD §3 把公开形状
+    冻结成"全形 + 可空"：只设 run 的 PRD 全形请求体是**合法形状**，用 `extra="forbid"`
+    把 `max_tool_calls: null` 打成 422 会把合法客户端拒之门外。反过来，给它们赋**非空值**
+    才是 "客户端以为设了、运行时没实现" —— 那必须 422 而不是静默忽略（ADR-0044 D1/D8），
+    所以下面用 `model_validator` 逐个挡下。
+
+    `tool_call_limits` 的**形态**（正整数、工具名非空且无首尾空白）由领域层的
+    `parse_tool_call_limits` 判（web 层不写第二份规则）；「工具名已注册」要到装配层
+    （`build_runtime` 的注册表）才判得了，两处都在首个 Provider 请求之前 ⇒ 不违反
+    `11 §6.1` 的"无副作用"。
     """
 
     model_config = {"extra": "forbid"}
@@ -182,24 +188,25 @@ class RunBudgetRequest(BaseModel):
     #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
     #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
-    # 以下三维：`null` / `{}`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
+    #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`）。`{}` = 没配。
+    tool_call_limits: dict[str, int] | None = None
+    # 以下两维：`null`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
     max_tool_calls: int | None = None
     deadline_at: str | None = None
-    tool_call_limits: dict[str, int] | None = None
 
     @model_validator(mode="after")
     def _reject_unimplemented_dimensions(self) -> RunBudgetRequest:
         for name in (
             "max_tool_calls",
             "deadline_at",
-            "tool_call_limits",
         ):
             value = getattr(self, name)
-            if value is None or value == {}:
+            if value is None:
                 continue
             raise ValueError(
                 f"budget.run.{name} 尚未实现（#313 实现了 turns / model_requests / "
-                f"total_tokens / cost_usd；tool 配额与 deadline 见后续票）；"
+                f"total_tokens / cost_usd；#314 实现了 tool_call_limits；"
+                f"总量 tool 配额与 deadline 见后续票）；"
                 f"收到 {name} 不静默忽略，请去掉它"
             )
         return self
@@ -259,6 +266,10 @@ def budget_claims(
         ),
         "run_max_total_tokens": run.max_total_tokens if run is not None else None,
         "run_max_cost_usd": run.max_cost_usd if run is not None else None,
+        # `#314`：per-tool 绝对配额（工具名 → 正整数）。形态由领域层
+        # `parse_tool_call_limits` 判（本层只摊平），"名字已注册"由装配层判
+        # （`validate_tool_call_limits_registered`）——两处都在首个 Provider 请求之前。
+        "run_tool_call_limits": run.tool_call_limits if run is not None else None,
     }
     expected = budget.expected_version if budget is not None else None
     if expected is not None:

@@ -331,8 +331,11 @@ class TestAgentLoopLocalFusePause:
         assert data["budget_version"] == 1
         # 计数点是"被接纳的普通轮"：closeout 那一次是 model_requests，不进 agent_turns
         # （那次请求没报 usage / cost ⇒ 那两个维度记未知，不记 0——`11 §6.1`）
+        # `#314` 起快照还带工具维：3 轮各一条被接纳的 add 调用、各一次真实尝试。
         assert data["consumed"] == {
             "agent_turns": 3, "model_requests": 4, "total_tokens": None, "cost_usd": None,
+            "tool_calls": 3, "tool_attempts": 3,
+            "tool_calls_by_tool": {"add": 3}, "tool_attempts_by_tool": {"add": 3},
         }
         # 两个作用域各自的原生投影（命中哪个维度由 trigger_dimension 指明）
         assert data["limits"]["local"]["max_agent_turns"] == 3
@@ -395,8 +398,11 @@ class TestAgentLoopLocalFusePause:
         assert TRIGGER_RUN_TURNS in closeout_request.content
         paused = next(e for e in session.events if e.type == RUN_PAUSED)
         assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
+        # `#314`：两条被接纳的 add 调用（本执行 2 轮，各一次尝试）
         assert paused.data["consumed"] == {
             "agent_turns": 2, "model_requests": 3, "total_tokens": None, "cost_usd": None,
+            "tool_calls": 2, "tool_attempts": 2,
+            "tool_calls_by_tool": {"add": 2}, "tool_attempts_by_tool": {"add": 2},
         }
         assert paused.data["limits"]["run"]["max_agent_turns_total"] == 3
         # run/started 就把 ceiling 落盘了（重启后 limits 能重建成同一个值，`03 §3.4`）

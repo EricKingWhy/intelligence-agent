@@ -37,6 +37,10 @@ class ErrorCode(str, Enum):
     PERMISSION_DENIED = "PERMISSION_DENIED"  # 权限拒绝 → 不重试
     TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"  # 工具内部异常 → 默认不重试
     CANCELLED = "CANCELLED"  # 批次前序失败或外部取消 → 不重试
+    # #314：本 run 对该工具的配额已用尽 → 不重试（重试是该工具的又一次调用，
+    # 同样会被拒）。这条码是"准入**前**被拒"的可审计理由（04 §9.1），
+    # 因此它对应的结果不消耗配额（`tool/result.data.budget_delta` 记 0）。
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
 
 
 class ToolRuntimeSignal(BaseModel):
