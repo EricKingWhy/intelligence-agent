@@ -16,6 +16,7 @@ import pytest
 
 from agent_harness.instance_lock import (
     ALLOW_SHARED_ROOT_ENV,
+    CUTOVER_FENCE_FILENAME,
     DEFAULT_LOCK_FILENAME,
     InstanceLock,
     InstanceLockError,
@@ -151,6 +152,34 @@ def test_creates_missing_root_directory(tmp_path: Path) -> None:
         assert (nested / DEFAULT_LOCK_FILENAME).exists()
     finally:
         lock.release()
+
+
+def test_cutover_fence_blocks_application_but_allows_maintenance_resume(tmp_path: Path) -> None:
+    (tmp_path / CUTOVER_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+
+    with pytest.raises(InstanceLockError, match="reset is incomplete"):
+        InstanceLock(tmp_path).acquire()
+
+    maintenance = InstanceLock(tmp_path, allow_cutover=True).acquire()
+    maintenance.release()
+
+
+def test_cutover_and_application_cannot_reuse_each_others_same_process_lock(
+    tmp_path: Path,
+) -> None:
+    application = InstanceLock(tmp_path).acquire()
+    try:
+        with pytest.raises(InstanceLockError, match="different operation"):
+            InstanceLock(tmp_path, allow_cutover=True).acquire()
+    finally:
+        application.release()
+
+    maintenance = InstanceLock(tmp_path, allow_cutover=True).acquire()
+    try:
+        with pytest.raises(InstanceLockError, match="different operation"):
+            InstanceLock(tmp_path).acquire()
+    finally:
+        maintenance.release()
 
 
 def test_escape_hatch_downgrades_to_warning(tmp_path: Path) -> None:

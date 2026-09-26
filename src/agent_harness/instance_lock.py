@@ -38,6 +38,7 @@ from pathlib import Path
 
 __all__ = [
     "ALLOW_SHARED_ROOT_ENV",
+    "CUTOVER_FENCE_FILENAME",
     "DEFAULT_LOCK_FILENAME",
     "InstanceLock",
     "InstanceLockError",
@@ -50,6 +51,7 @@ ALLOW_SHARED_ROOT_ENV = "ALLOW_SHARED_ROOT"
 
 #: 锁文件名（位于 workspace root 下）。
 DEFAULT_LOCK_FILENAME = ".instance.lock"
+CUTOVER_FENCE_FILENAME = ".memory-cutover-in-progress"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -117,13 +119,16 @@ class InstanceLock:
     `release()` 幂等；持有者是同一进程时按引用计数，最后一次才真正放锁。
     """
 
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self, root: str | os.PathLike[str], *, allow_cutover: bool = False,
+    ) -> None:
         # 展示路径用 abspath（不 resolve）：只做规范化，不动 symlink / Windows
         # 短名——错误信息里出现的路径必须和调用方给的一致，否则用户认不出自己
         # 的目录。文件身份另用 realpath（见 `_key_for`）。
         self._root = Path(os.path.abspath(os.fspath(root)))
         self._path = self._root / DEFAULT_LOCK_FILENAME
         self._key = _key_for(self._path)
+        self._allow_cutover = allow_cutover
         self._fd: int | None = None
         self._holders = 0
 
@@ -134,8 +139,19 @@ class InstanceLock:
         包装——那是与"被占用"不同类的故障，混成一个错误会误导排查。
         """
         with _registry_lock:
+            if (
+                not self._allow_cutover
+                and (self._root / CUTOVER_FENCE_FILENAME).exists()
+            ):
+                raise InstanceLockError(
+                    "Memory clean-slate reset is incomplete; resume the cutover before startup."
+                )
             existing = _lock_by_path.get(self._key)
             if existing is not None:
+                if existing._allow_cutover != self._allow_cutover:
+                    raise InstanceLockError(
+                        "Workspace lock is already held for a different operation."
+                    )
                 existing._holders += 1
                 return existing
 

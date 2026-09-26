@@ -1,9 +1,9 @@
-"""用户侧记忆入口：V1 列表/遗忘与 V2 脱敏召回解释。
+"""用户侧 V2 记忆入口：管理操作与脱敏召回解释。
 
 边界：
 
-- V1 列表/遗忘入口不接受 namespace 参数；tenant/user 来自 `AuthSeamMiddleware`，归属校验
-  仍由领域能力执行。V1 审计写结构化日志，不写 `SessionEvent`。
+- 管理入口只读取 V2 SQLite 权威状态；tenant/user 来自 `AuthSeamMiddleware`，归属校验
+  仍由领域能力执行。审计写结构化日志，不写 `SessionEvent`。
 - V2 why-recalled 入口只从当前身份与 WorkspaceIndex 解析可信项目，再按每个 memory ID
   调用 SQLite 权威读取；响应不含正文或证据。
 
@@ -30,9 +30,7 @@ from agent_harness.memory.audit import (
     record_forget,
     record_memory_change,
 )
-from agent_harness.memory.capability import MemoryCapability
 from agent_harness.memory.errors import MemoryNotFound
-from agent_harness.memory.types import MemoryEntry, MemoryScope, public_metadata
 from agent_harness.memory.v2.capability import (
     InvalidMemoryPayload,
     MemoryIndexDeletePending,
@@ -201,11 +199,6 @@ class SessionMemoryRecall(BaseModel):
     memories: list[MemoryRecallExplanation]
 
 
-def _summary(entry: MemoryEntry) -> MemorySummary:
-    return MemorySummary(id=entry.id, content=entry.content, scope=entry.scope.value,
-                         metadata=public_metadata(entry.metadata), created_at=entry.created_at)
-
-
 def _v2_summary(record: MemoryRecordV2) -> MemorySummary:
     return MemorySummary(
         id=record.id, content=record.content, scope=record.scope.value,
@@ -231,30 +224,15 @@ def _v2_tombstone_summary(tombstone: MemoryTombstoneV2) -> MemoryTombstoneSummar
 def register_memory_routes(app: FastAPI) -> None:
     """把记忆路由挂到既有 app（`create_app` 里一行调用的接入面）。"""
 
-    async def _capability() -> MemoryCapability:
+    async def _v2_service():
         _, wiring = await app.state.agent.get_wiring()
-        components = wiring.memory
-        if components is None:
-            # 能力缺席 → 503（比 404 诚实："能力没启用"不是"这个资源不存在"）。
-            # 但"为什么缺席"必须分得开（#225）：`wiring.degradations` 里记着装配期
-            # 的分类原因，**缺省 = 不在 CAPABILITIES 里**（见该字段的说明）。
-            # `detail` 是 `{code, message}`：code 给机器（前端据它决定"未启用"还是
-            # "故障 + 重试"），message 给人。判别走码，不走中文。
-            recorded = wiring.degradations.get("memory")
+        service = wiring.memory_v2
+        if service is None:
+            recorded = wiring.degradations.get("memory") or wiring.degradations.get("memory_v2")
             reason = DegradeReason.NOT_CONFIGURED if recorded is None else DegradeReason(recorded)
             raise HTTPException(
                 status_code=503,
                 detail={"code": reason.value, "message": _DEGRADED_MESSAGE[reason]},
-            )
-        return components.capability
-
-    async def _v2_service(*, required: bool = True):
-        _, wiring = await app.state.agent.get_wiring()
-        service = wiring.memory_v2
-        if service is None and required:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "memory_v2_unavailable", "message": "V2 记忆服务尚未装配。"},
             )
         return service
 
@@ -288,68 +266,30 @@ def register_memory_routes(app: FastAPI) -> None:
         project_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(require_trusted_origin),
     ) -> list[MemorySummary | MemoryTombstoneSummary]:
-        """列出 V1 与当前身份可见的 V2 记忆，并支持 V2 typed filters.
-
-        Management reads use authoritative stores, never vector search. Existing unfiltered
-        clients retain their array response and V1 summary fields; V2 fields are additive.
-        """
-        capability = await _capability()
-        service = await _v2_service(required=False)
-        v2_filter = any(value is not None for value in (kind, status, scope, project_id))
-        if v2_filter and service is None:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "memory_v2_unavailable", "message": "V2 记忆筛选尚未装配。"},
-            )
-        trusted = await _trusted_v2(project_id) if service is not None else None
+        """List only V2 records visible to the current identity from the authoritative store."""
+        service = await _v2_service()
+        trusted = await _trusted_v2(project_id)
         try:
             page_count = limit + offset
-            entries: list[MemoryEntry] = []
-            if not v2_filter:
-                if q:
-                    folded = q.casefold()
-                    # Search the authoritative list in pages until enough matches are
-                    # available for this response. Filtering only the first page silently
-                    # omitted older matches whenever recent records did not match `q`.
-                    scan_offset = 0
-                    chunk_size = _MAX_LIMIT
-                    while len(entries) < page_count:
-                        batch = await capability.list_entries(
-                            MemoryScope.USER, chunk_size, scan_offset,
-                        )
-                        if not batch:
-                            break
-                        scan_offset += len(batch)
-                        entries.extend(entry for entry in batch if (
-                            folded in entry.content.casefold()
-                            or folded in str(public_metadata(entry.metadata)).casefold()
-                        ))
-                        if len(batch) < chunk_size:
-                            break
-                else:
-                    entries = await capability.list_entries(MemoryScope.USER, page_count, 0)
-            v2_records = []
             tombstones = []
-            if service is not None:
-                if status is MemoryStatusV2.DELETED:
-                    if kind is None:
-                        tombstones = await service.list_tombstones(
-                            trusted, query=q, scope=scope, project_id=project_id,
-                            limit=page_count, offset=0,
-                        )
-                else:
-                    v2_records = await service.list_records(
-                        trusted, query=q, kind=kind, status=status, scope=scope,
-                        project_id=project_id, limit=page_count, offset=0,
+            if status is MemoryStatusV2.DELETED:
+                if kind is None:
+                    tombstones = await service.list_tombstones(
+                        trusted, query=q, scope=scope, project_id=project_id,
+                        limit=page_count, offset=0,
                     )
+                v2_records = []
+            else:
+                v2_records = await service.list_records(
+                    trusted, query=q, kind=kind, status=status, scope=scope,
+                    project_id=project_id, limit=page_count, offset=0,
+                )
         except PermissionError as error:
             # 认证通过但身份没有 "user" scope（`MemoryNamespace.of` 的授权校验）。不翻译就会
             # 以未登记领域异常的形状冒成 500——AC6 要的是明确状态码；同一身份的 DELETE 也是
             # 403，两个入口必须给同一个答案。
             raise memory_http_error(error) from error
-        summaries: list[MemorySummary | MemoryTombstoneSummary] = [
-            _summary(entry) for entry in entries
-        ]
+        summaries: list[MemorySummary | MemoryTombstoneSummary] = []
         summaries.extend(_v2_summary(record) for record in v2_records)
         summaries.extend(_v2_tombstone_summary(item) for item in tombstones)
         summaries.sort(key=lambda item: (
@@ -364,60 +304,45 @@ def register_memory_routes(app: FastAPI) -> None:
         project_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(require_trusted_origin),
     ) -> MemoryDeleted:
-        """Delete V2 authoritatively, falling back to the compatible V1 endpoint."""
-        service = await _v2_service(required=False)
-        if service is not None:
-            trusted = await _trusted_v2(project_id)
-            try:
-                receipt = await service.delete(memory_id, trusted)
-            except KeyError:
-                pass
-            except PermissionError as error:
-                raise memory_http_error(error) from error
-            except MemoryIndexDeletePending as error:
-                # SQLite deletion is committed before derived-index deletion. The durable
-                # outbox remains for retry; report that pending state without leaking details.
-                record_forget(
-                    entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_FORGOTTEN,
-                )
-                record_memory_change(
-                    entry_point=ENTRY_API, action="delete_index_pending",
-                    memory_ids=error.memory_ids, affected_count=error.affected_count,
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "code": "memory_index_delete_pending",
-                        "message": "V2 记忆已从权威记录删除，派生索引删除待重试。",
-                    },
-                ) from None
-            else:
-                record_forget(
-                    entry_point=ENTRY_API, memory_id=memory_id,
-                    outcome=OUTCOME_FORGOTTEN if receipt.deleted else OUTCOME_ABSENT,
-                )
-                if receipt.deleted:
-                    record_memory_change(
-                        entry_point=ENTRY_API, action="delete",
-                        memory_ids=[item.memory_id for item in receipt.memories],
-                        affected_count=len(receipt.memories),
-                    )
-                return MemoryDeleted(id=memory_id, deleted=receipt.deleted)
-
-        capability = await _capability()
+        """Delete V2 authoritatively; no legacy store is consulted."""
+        service = await _v2_service()
+        trusted = await _trusted_v2(project_id)
         try:
-            forgotten = await capability.forget(memory_id)
+            receipt = await service.delete(memory_id, trusted)
+        except KeyError as error:
+            record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_ABSENT)
+            raise memory_http_error(MemoryNotFound(memory_id)) from error
         except PermissionError as error:
             record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_DENIED)
             raise memory_http_error(error) from error
-
-        if not forgotten:
-            record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_ABSENT)
-            error = MemoryNotFound(memory_id)
-            raise memory_http_error(error) from error
-
-        record_forget(entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_FORGOTTEN)
-        return MemoryDeleted(id=memory_id, deleted=True)
+        except MemoryIndexDeletePending as error:
+            # SQLite deletion is committed before derived-index deletion. The durable
+            # outbox remains for retry; report that pending state without leaking details.
+            record_forget(
+                entry_point=ENTRY_API, memory_id=memory_id, outcome=OUTCOME_FORGOTTEN,
+            )
+            record_memory_change(
+                entry_point=ENTRY_API, action="delete_index_pending",
+                memory_ids=error.memory_ids, affected_count=error.affected_count,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "memory_index_delete_pending",
+                    "message": "V2 记忆已从权威记录删除，派生索引删除待重试。",
+                },
+            ) from None
+        record_forget(
+            entry_point=ENTRY_API, memory_id=memory_id,
+            outcome=OUTCOME_FORGOTTEN if receipt.deleted else OUTCOME_ABSENT,
+        )
+        if receipt.deleted:
+            record_memory_change(
+                entry_point=ENTRY_API, action="delete",
+                memory_ids=[item.memory_id for item in receipt.memories],
+                affected_count=len(receipt.memories),
+            )
+        return MemoryDeleted(id=memory_id, deleted=receipt.deleted)
 
     @app.get("/api/memories/{memory_id}")
     async def get_memory(

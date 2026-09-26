@@ -464,11 +464,10 @@ async def build_runtime(
             # 契约），而是走独立通道，由 builder 按 meta_user 语义插到当前用户消息前。
             runtime_context_provider=_render_runtime_context,
         ),
-        memory_writer=wiring.memory_writer,
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
         # 因此这里传引用，绝不在这里新建（每轮新建 = 每轮起一条服务循环）。
-        # 未装配时是 None：终结臂走"没有宿主"的旧路径，V1 行为逐字不变。
+        # 未装配时是 None：终结臂只跳过记忆形成。
         memory_formation=wiring.memory_formation,
         fallback_model=fallback_model,
         stream_idle_timeout=settings.model_stream_idle_timeout,

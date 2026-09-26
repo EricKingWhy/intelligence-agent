@@ -22,7 +22,6 @@ import pytest
 from agent_harness.capability.base import (
     CapabilityError,
     CapabilityRegistry,
-    Degradation,
 )
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.factories import (
@@ -214,93 +213,35 @@ class TestDispatchBehavior:
         assert "mem0" in str(err.value)
 
 
-class TestFakeProviderFullDispatch:
-    """AC5：Fake provider 走**完整分派**（配置 → 装配 → 注册表 → 可用 capability）。"""
+class TestProductionV2Wiring:
+    """The production Memory capability now always uses V2; V1 factories stay standalone."""
 
     @pytest.mark.asyncio
-    async def test_descriptor_cannot_lie_about_the_provider(self, tmp_path, monkeypatch):
-        components = _FakeMemoryComponents()
-        monkeypatch.setitem(_MEMORY_PROVIDER_FACTORIES, "fake", lambda settings: components)
+    async def test_builtin_config_uses_v2_without_invoking_legacy_factory(self, tmp_path, monkeypatch):
+        from agent_harness.capability import factories
+        from tests.memory.v2._vector import FakeMemoryVectorClient
 
+        settings = _settings(tmp_path)
+        vectors = FakeMemoryVectorClient(settings)
+        monkeypatch.setattr(factories, "build_memory_vector_client", lambda _settings: vectors)
+        monkeypatch.setattr(
+            factories, "build_memory_components",
+            lambda *_args, **_kwargs: pytest.fail("production wiring invoked the V1 provider"),
+        )
         registry = CapabilityRegistry()
+
         wiring = await wire_capabilities(
-            registry,
-            parse_capabilities_config('{"memory": {"provider": "fake"}}'),
-            settings=_settings(tmp_path),
+            registry, parse_capabilities_config('{"memory": {"provider": "builtin"}}'),
+            settings=settings,
         )
 
-        descriptor = registry.descriptor("memory")
-        assert descriptor.provider_name == "fake"
-        assert descriptor.degradation is Degradation.OPTIONAL_RUNTIME
-        # 身份相等：描述符声称的 provider 就是真正被构造出来的那一个（不是"同名"）。
-        assert registry.get("memory") is components.capability
-        assert wiring.memory is components
-        assert wiring.memory_writer is components.writeback
-        # The V1 capability remains available, but automatic recall is disabled without
-        # the session ledger needed to resolve trusted V2 identity.
-        assert wiring.context_providers == []
-
-    @pytest.mark.asyncio
-    async def test_dispatched_capability_is_actually_usable(self, tmp_path, monkeypatch):
-        monkeypatch.setitem(_MEMORY_PROVIDER_FACTORIES, "fake", _build_fake)
-        registry = CapabilityRegistry()
-        await wire_capabilities(
-            registry,
-            parse_capabilities_config('{"memory": {"provider": "fake"}}'),
-            settings=_settings(tmp_path),
-        )
-        capability = registry.get("memory")
-        memory_id = await capability.store(MemoryScope.USER, "我喜欢黑咖啡", {"importance": 0.8})
-        assert memory_id
-        hits = await capability.search(MemoryScope.USER, "黑咖啡", limit=5)
-        assert [entry.content for entry in hits] == ["我喜欢黑咖啡"]
-        assert await capability.recall(MemoryScope.USER, "", limit=5)
-
-    @pytest.mark.asyncio
-    async def test_lifecycle_is_owned_by_provider(self, tmp_path, monkeypatch):
-        """AC6：装配方只调 initialize()/close()，不碰 provider 内部组件。
-
-        `_FakeMemoryComponents` 只有 capability / writeback / 生命周期，`records` /
-        `vectors` 都是 None，也**没有** `relay`。装配能跑通并成功注册，就证明装配方
-        没替 provider 做内部初始化——谁把 `records.initialize()` / `relay.start()`
-        之类的调用搬回 `_wire_memory`，这里就会 AttributeError → OPTIONAL 降级 →
-        注册表里没有 memory（下面那条 registry 断言因此是必需的，不只是装饰）。
-        """
-        components = _FakeMemoryComponents()
-        monkeypatch.setitem(_MEMORY_PROVIDER_FACTORIES, "fake", lambda settings: components)
-        registry = CapabilityRegistry()
-        await wire_capabilities(
-            registry,
-            parse_capabilities_config('{"memory": {"provider": "fake"}}'),
-            settings=_settings(tmp_path),
-        )
-        assert registry.optional("memory") is components.capability
-        assert components.initialized and not components.closed
-
-    @pytest.mark.asyncio
-    async def test_half_initialized_provider_is_closed_by_its_own_contract(self, tmp_path, monkeypatch):
-        """AC6 失败路径：initialize() 抛错 → 装配方按 provider 的 close() 收尾。
-
-        契约归 provider 的含义是**连清理也只走 provider 的入口**——装配方不知道
-        内部有哪些东西要关，只负责在失败时调用同一个 close()。
-        """
-
-        class _HalfBroken(_FakeMemoryComponents):
-            async def initialize(self) -> None:
-                raise RuntimeError("simulated provider outage")
-
-        components = _HalfBroken()
-        monkeypatch.setitem(_MEMORY_PROVIDER_FACTORIES, "fake", lambda settings: components)
-        registry = CapabilityRegistry()
-        wiring = await wire_capabilities(
-            registry,
-            parse_capabilities_config('{"memory": {"provider": "fake"}}'),
-            settings=_settings(tmp_path),
-        )
-        assert components.closed is True
-        assert registry.available() == []  # OPTIONAL_RUNTIME 降级
-        assert wiring.memory is None
-        assert wiring.memory_writer is None
+        assert registry.descriptor("memory").provider_name == "builtin-v2"
+        assert registry.get("memory") is wiring.memory_v2
+        assert wiring.memory_vectors is vectors
+        assert vectors.initialized and not vectors.closed
+        assert wiring.memory_formation is None
+        await wiring.aclose()
+        assert vectors.closed
 
 
 def _settings_for_default() -> Settings:

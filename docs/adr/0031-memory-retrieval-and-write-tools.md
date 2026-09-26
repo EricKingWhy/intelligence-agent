@@ -335,3 +335,12 @@ and does not itself perform retrieval or emit those events.
   client-supplied project selectors do not establish authorization.
 - These decisions do not retire the V1 store or its fallback. Cross-version clean-slate cutover
   and legacy-path retirement remain owned by #303 / MEM-V2-7.
+
+## 12. Addendum — #303 production cutover
+
+ADR-0046 supersedes the final bullet in the #300 addendum: after MEM-V2-7, production memory
+assembly uses V2 as its only reachable store, context provider, tool backend, and API path. V1
+provider/library code may remain importable for standalone compatibility, but the app does not
+wire its legacy read, SESSION write, heuristic fallback, or retrieval paths. The one-time data
+reset and its preservation boundary are defined by ADR-0046 and the
+[operator runbook](../runbooks/memory-v2-clean-slate-cutover.md).
