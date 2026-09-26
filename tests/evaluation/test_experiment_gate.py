@@ -180,6 +180,12 @@ async def test_case_without_operation_ledger_does_not_report_duplicate_metric_as
 
 @pytest.mark.asyncio
 async def test_failed_agent_runtime_status_cannot_pass_a_case(tmp_path) -> None:
+    """非 completed 的运行状态不得让用例通过（`#312` T4 起触发态是 `paused`）。
+
+    原先用 `max_agent_turns=1` 撞出 `max_steps_exceeded`；预算到顶现在走**非终态**
+    `run/paused`，于是本用例钉的是"暂停同样不算通过"——`paused` 与 `failed` 一样
+    不是评测意义下的成功。
+    """
     from langchain_core.messages import AIMessage
 
     from agent_harness.storage import SqliteOperationLedger
@@ -204,14 +210,14 @@ async def test_failed_agent_runtime_status_cannot_pass_a_case(tmp_path) -> None:
             )]),
             registry,
             ToolExecutor(registry, operation_ledger=ledger),
-            max_steps=1,
+            max_agent_turns=1,
         )
 
     result, _events = await run_case_async(
         case, session_root=session_root, runtime_factory=failing_runtime,
     )
 
-    assert result.metrics["status"] == "max_steps_exceeded"
+    assert result.metrics["status"] == "paused"
     assert result.metrics["duplicate_confirmed_side_effects"] == 0
     assert result.ok is False
 

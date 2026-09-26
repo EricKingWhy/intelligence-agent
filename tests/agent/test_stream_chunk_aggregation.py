@@ -64,7 +64,7 @@ def _build_runtime(model: Any) -> AgentRuntime:
         model=model,
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=5,
+        max_agent_turns=5,
     )
 
 
@@ -261,16 +261,19 @@ async def test_empty_stream_is_reported_as_empty_response(tmp_path):
     """AC1-3：0 chunk ⇒ 聚合退化成空 content，随后被「空响应不是成功」按既有语义拦下。
 
     聚合块自己的 `else` 分支只在**下游**可见（R6-2 空响应判定），所以这里断言端到端
-    可观测的后果：`model/started → model/failed → run/failed` 且**没有** model/completed
-    （失败原因是未分类 RuntimeError，即 R6-2 那条；具体文案不进事件、只进日志）。
-    另外用「一个空 content chunk」对照：两者失败形状相同 ⇒ 拦的是空内容，不是"没有 chunk"。
+    可观测的后果：`model/started → model/request → model/failed → run/failed` 且**没有**
+    model/completed（失败原因是未分类 RuntimeError，即 R6-2 那条；具体文案不进事件、
+    只进日志）。`model/request` 是 `#313` 起的请求账目：这一轮**真的发出去过**，失败
+    不等于没发生。另外用「一个空 content chunk」对照：两者失败形状相同 ⇒ 拦的是空内容，
+    不是"没有 chunk"。
     """
     session = make_session(tmp_path)
     runtime = _build_runtime(_ChunkScriptModel([[]]))
     events = [e async for e in runtime.run_stream(session, "hi")]
 
     assert [e.type for e in events] == [
-        "user/message", "run/started", "model/started", "model/failed", "run/failed"
+        "user/message", "run/started", "model/started", "model/request",
+        "model/failed", "run/failed",
     ]
     assert all(e.type != MODEL_COMPLETED for e in session.events)
 
@@ -279,7 +282,8 @@ async def test_empty_stream_is_reported_as_empty_response(tmp_path):
     runtime_b = _build_runtime(_ChunkScriptModel([[AIMessageChunk(content="")]]))
     events_b = [e async for e in runtime_b.run_stream(session_b, "hi")]
     assert [e.type for e in events_b] == [
-        "user/message", "run/started", "model/started", "model/failed", "run/failed"
+        "user/message", "run/started", "model/started", "model/request",
+        "model/failed", "run/failed",
     ]
 
 

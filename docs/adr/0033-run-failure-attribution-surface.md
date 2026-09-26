@@ -70,7 +70,7 @@
 
 | 载荷 | 来源路径 | 呈现 |
 | --- | --- | --- |
-| `reason` + 固定中文 `message` | 已分类的供应商故障（2.1）；未分类异常（#222：`UNCLASSIFIED_FAILURE_MESSAGE`）；`max_steps_exceeded` | 文案 + reason 码 |
+| `reason` + 固定中文 `message` | 已分类的供应商故障（2.1）；未分类异常（#222：`UNCLASSIFIED_FAILURE_MESSAGE`） | 文案 + reason 码 |
 | `reason`，无 `message` | 工具连续失败保险丝（`identical_tool_failure_loop`）；**#222 之前**写下的历史 `run/failed` | 退到显示 reason 码——比空白更能说明这行为什么红 |
 | 两者都无 | 只剩历史会话与直接调 `session.end_run` 的消费者（运行期已不可达，§2.4） | 字段为 `null`，界面就是「失败」（诚实的不显示，而不是编一句） |
 
@@ -98,6 +98,7 @@
 | --- | --- | --- |
 | 上下文超限（`ContextWindowExceededError`，直接 append） | `context_window_exceeded` | `str(error)`（内部英文串，见 §2.3 的警告） |
 | `max_steps` 保险丝 | `max_steps_exceeded` | 与 `agent_decision` 日志同一句（「连续 N 轮仍在请求工具，触发保险丝」） |
+| （`#312` 起）`max_steps` / 预算到顶 | **不再是失败终态** | 改落**非终态** `run/paused`（`reason=budget_exhausted` + `trigger_dimension`），本表该行只对历史载荷成立，见下方边界 4 |
 | 同错熔断硬保险丝 | `identical_tool_failure_loop` | 无（码即信息） |
 | 异常臂（模型在途 / 工具 / 执行器 / **投影阶段**） | 分类常量，未分类则 `type(error).__name__` | 分类固定文案，未分类则 `UNCLASSIFIED_FAILURE_MESSAGE` 模板 |
 | 取消臂 / 孤儿回收 | `cancelled` / `orphaned` | 无 |
@@ -107,6 +108,7 @@
 1. **兜底文案只代入类名，不代入 `str(error)`**。类名是类名，正文是正文——正文可能含 provider 回显（OBS-008 红线）。用例带反向断言（异常正文不得出现在任何持久化事件里）。
 2. **`model/failed.message` 不跟着变**：它未分类时仍是 `model call failed: {error_type}`。两个面各有读者，`run/failed` 是给人看的终态，`model/failed` 是逐步归因（前端不投影，§3）。写代码时用一个中间变量显式分开，别把同一句喂给两边。
 3. **`max_steps` 改走 `failure_terminal`**。这条路径原先自己拼 `session.end_run`，绕过了终态字段的唯一 owner —— 这正是它"一个键都没有"而长期没人发现的机制原因（字段集中供给被绕过，下次加字段还会漏它）。
+4. **（`#312` 追加）预算到顶不是失败，故它离开了本表**。撞 `local.max_agent_turns` / `run.max_agent_turns_total` 时该次执行落**非终态** `run/paused`（`reason=budget_exhausted` + `trigger_dimension`），既不写 `run/failed` 也不写 `run/completed`；`max_steps_exceeded` 这个受控失败终态随之**在运行期不可达并删除**（`memory/v2/eligibility.py` 的白名单同步移除它）。本表上一条只对 `#312` 之前的历史载荷成立 ⇒ 读到旧载荷要照旧渲染成失败，但**不得**把它当作今天还可能出现的归因面。前端契约的对应处已同步（`docs/BACKEND_CONTRACT_STREAMING_UI.md` §4）。
 
 **未覆盖（有据，非本票引入）**：失败发生在 `begin_run` **之前**（`USER_ACCEPTED` checkpoint / 写 user 消息阶段）时 `run_id` 为 `None`，此时**没有任何终态事件可写**（`failure_terminal` 返回 `None`），durable 历史停在 `run/started` 之前。这是"没有 run 可终结"的正当语义，不是本票要改的形状；真要覆盖得先定义"无 run 的失败"往哪写。
 

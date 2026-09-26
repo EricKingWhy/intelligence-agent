@@ -61,7 +61,7 @@ async def _build_runtime(tmp_path: Path, agent_profile: str | None, **settings_o
             workspace_registry=workspace_registry,
             session_id="sess-profile",
             workspace=tmp_path / "workspaces" / "sess-profile",
-            max_steps=10,
+            max_agent_turns=10,
             agent_profile=agent_profile,
         )
     return runtime

@@ -82,7 +82,7 @@ async def test_build_runtime_activates_provider(tmp_path):
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path),
             session_id="sess-ma", workspace=tmp_path / "w",
-            max_steps=5, auto_approve=True, session_store=store,
+            max_agent_turns=5, auto_approve=True, session_store=store,
         )
 
     assert "delegate" in [t.name for t in runtime.registry.list()]
@@ -131,13 +131,13 @@ async def test_build_runtime_isolates_provider_state_between_sessions(tmp_path):
         runtime_a = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspaces, session_id=session_a.session_id,
-            workspace=tmp_path / "project-a", max_steps=5, auto_approve=True,
+            workspace=tmp_path / "project-a", max_agent_turns=5, auto_approve=True,
             session_store=store,
         )
         runtime_b = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspaces, session_id=session_b.session_id,
-            workspace=tmp_path / "project-b", max_steps=5, auto_approve=True,
+            workspace=tmp_path / "project-b", max_agent_turns=5, auto_approve=True,
             session_store=store,
         )
 
@@ -183,7 +183,7 @@ async def test_build_runtime_without_session_store_degrades_delegate(tmp_path, c
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=WorkspaceRegistry(root=tmp_path),
             session_id="s", workspace=tmp_path / "w",
-            max_steps=5, auto_approve=True, session_store=None,
+            max_agent_turns=5, auto_approve=True, session_store=None,
         )
 
     assert "delegate" not in [t.name for t in runtime.registry.list()]

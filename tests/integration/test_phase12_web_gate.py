@@ -103,7 +103,7 @@ async def test_gate2_model_fallback_real_switch(settings, tmp_path):
     registry = ToolRegistry()
     runtime = AgentRuntime(
         model=primary, registry=registry, executor=ToolExecutor(registry),
-        max_steps=5,
+        max_agent_turns=5,
         fallback_model=fallback,
         primary_model_name=primary_config.model_name,
         fallback_model_name=fallback_config.model_name,
@@ -181,7 +181,7 @@ async def test_gate3_repeated_tool_failure_guard_real_trigger(settings, tmp_path
         registry.register(_AlwaysFailTool())
         runtime = AgentRuntime(
             model=model, registry=registry, executor=ToolExecutor(registry),
-            max_steps=20,
+            max_agent_turns=20,
             primary_model_name=config.model_name,
         )
         session = make_session(tmp_path / f"attempt-{attempt}")

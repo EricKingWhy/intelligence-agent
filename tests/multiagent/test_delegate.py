@@ -276,7 +276,7 @@ class TestRepeatedDelegationBreaker:
         supervisor = ScriptedModel(supervisor_calls)
         runtime = AgentRuntime(
             model=supervisor, registry=registry, executor=_TE(registry),
-            max_steps=20,
+            max_agent_turns=20,
         )
         session = make_session(tmp_path)
 
@@ -408,7 +408,7 @@ class TestCancelAndResume:
             }]),
         ])
         runtime = AgentRuntime(model=supervisor, registry=registry,
-                               executor=ToolExecutor(registry), max_steps=5)
+                               executor=ToolExecutor(registry), max_agent_turns=5)
         parent_store = JsonlSessionStore(tmp_path / "parent")
         parent_session = Session.start(parent_store)
 

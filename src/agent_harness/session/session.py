@@ -16,6 +16,7 @@ import logging
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -395,7 +396,8 @@ class Session:
 
     def begin_run(self, *, agent_id: str = "default",
                   agent_profile: str = "main",
-                  model: str | None = None) -> tuple[str, int]:
+                  model: str | None = None,
+                  budget: dict[str, Any] | None = None) -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
         ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
@@ -412,12 +414,19 @@ class Session:
         总传真值）。取值口径、与 ``model/completed`` 回显侧的对照、以及为什么
         不能放在 ``model/started``（流式专属、永不持久化），见
         ``docs/adr/0034-request-side-model-identity.md``。
+
+        ``budget``（`#312` T4）：本逻辑 run 的 **run 作用域** 预算快照（ceiling 等）。
+        `None` **不落键**——"没有配 ceiling"是"没有这条事实"，不是"ceiling=0"
+        （`11 §6.1`：不可得 ≠ 0）。`run/paused` 的 limits 快照由它重建，
+        所以配了 ceiling 时必须落（否则重启后投影不出配置值）。
         """
         run_id = str(uuid4())
         turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
         data: dict[str, Any] = {"turn_index": turn_index, "agent_profile": agent_profile}
         if model is not None:
             data["model"] = model
+        if budget is not None:
+            data["budget"] = budget
         self.append(RUN_STARTED, data, run_id=run_id, agent_id=agent_id)
         return run_id, turn_index
 
@@ -428,7 +437,7 @@ class Session:
         status: str,
         final_text: str = "",
         usage_total: dict | None = None,
-        cost_usd: float | None = None,
+        cost_usd: Decimal | str | None = None,
         trace_id: str | None = None,
         trace_url: str | None = None,
         reason: str | None = None,
@@ -455,7 +464,13 @@ class Session:
         if usage_total:
             data["usage_total"] = usage_total
         if status == "completed":
-            data["cost_usd"] = cost_usd
+            # 成本以十进制**字符串**入事件（`#313`）：`Decimal` 进 `json.dumps`
+            # （`session/store.py` 的裸 dumps）会炸，而 `float()` 会引入与 wire
+            # 不等价的二进制近似（`11 §6.1`：二进制浮点相等不是契约）。`None`
+            # 原样落（不可得 ≠ 0：客户端据此显示"未跟踪"，不是"零成本"）。
+            data["cost_usd"] = (
+                format(cost_usd, "f") if isinstance(cost_usd, Decimal) else cost_usd
+            )
         data["trace_id"] = trace_id
         data["trace_url"] = trace_url
         if status != "completed" and reason:

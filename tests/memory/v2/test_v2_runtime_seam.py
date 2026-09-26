@@ -27,7 +27,6 @@ from agent_harness.agent.runtime import (
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
     AgentRunResult,
 )
 from agent_harness.memory.v2.roles import MemoryModelRoles
@@ -252,12 +251,16 @@ async def test_the_terminal_event_is_already_durable_when_we_notify(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reason", [STATUS_MAX_STEPS_EXCEEDED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP],
+    "reason", [STATUS_IDENTICAL_TOOL_FAILURE_LOOP, "unclassified_failure"],
 )
 async def test_failed_run_arm_hands_over_its_own_reason(
     seeded: _Seeded, reason: str,
 ) -> None:
-    """两张获批的受控失败各把自己的 `reason` 交出去——AC1 的"每张各建一个 job"。
+    """受控失败臂把自己的 `reason` 原样交出去——AC1 的"每张各建一个 job"。
+
+    `#312` T4 起生产上只剩同错熔断一条受控失败路径（预算到顶改走非终态暂停），
+    另取一个未获批的失败码配成第二组：本行只证"送到的终态是臂收到的那一个"，
+    "该不该建"由 `eligibility` 判（未获批的会被它挡在同一入口）。
 
     这里只证"送到的终态是对的"；"该不该建"由 `eligibility` 判（未获批的失败终态在
     同一入口被它挡掉），所以本行不是重复判定。

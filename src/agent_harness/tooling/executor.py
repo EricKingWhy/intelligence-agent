@@ -72,10 +72,25 @@ from agent_harness.tooling.contract import (
 from agent_harness.tooling.deadline import tool_execution_deadline_var
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
+from agent_harness.tooling.quota import ToolQuotaWindow
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
 logger = logging.getLogger("agent_harness.tooling.executor")
+
+
+def _rejected_delta(tool_name: str) -> dict[str, Any]:
+    """准入前被拒 / 未执行结果所带的预算增量：**显式记 0**。
+
+    `04 §9.1`：在接纳点**之前**被拒的调用不消耗配额，且拒绝理由必须可审计
+    （理由在同一条结果的 `error_code` / `message` 里）。为什么不是"干脆不带这个键"：
+    显式 0 让"这条调用没有消耗配额"成为**记录里的字面事实**；缺键要靠"没有别的
+    写入者"这条带外知识才读得对，而未来任何合成结果的写入者（恢复、悬空修复）
+    都会把缺键的含义搅浑。`agent/run_budget._add_tool_delta` 对 0 是 no-op，
+    两种写法在账上等价，这里取可读的那一种。
+    """
+    return {"tool_name": tool_name, "tool_calls": 0, "tool_attempts": 0}
+
 
 #: 一次 tool_call 在执行域内最多尝试几次（含第一次）。
 #: 为什么是模块级常量而不是可配置项：重试上限必须收敛在【唯一 Retry Layer】
@@ -196,6 +211,10 @@ class ToolExecution(BaseModel):
     # OverflowHandler 产出的延迟会话事件 (event_type, data)：Runtime 在
     # tool/call 落盘之后追加（R6-7，消除 artifact/created 前向引用）。
     pending_events: list[tuple[str, dict[str, Any]]] = []
+    # 本次调用对 run 预算的增量（`#314` T6）：`tool_calls` / `tool_attempts` 两个
+    # counter 的**唯一写入者**就在本执行域（接纳点）。Runtime 只把它原样搬进
+    # `tool/result.data.budget_delta` ——不解释、不重算（`02 §5.1` 的计数点唯一）。
+    budget_delta: dict[str, Any] = {}
 
 
 class ToolExecutor:
@@ -241,6 +260,7 @@ class ToolExecutor:
         session: Session | None = None,
         step_id: int | None = None,
         tracer: Tracer = _NULL_TRACER,
+        tool_quota: ToolQuotaWindow | None = None,
     ) -> ToolExecution:
         """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
 
@@ -276,6 +296,7 @@ class ToolExecutor:
                     error_code=ErrorCode.TOOL_NOT_FOUND,
                     retryable=False,
                 ),
+                budget_delta=_rejected_delta(name),
             )
 
         # -- 阶段 2：validation -- Validation-first 的核心位置。
@@ -297,6 +318,37 @@ class ToolExecutor:
                     error_code=ErrorCode.INVALID_ARGUMENT,
                     retryable=False,  # 参数错是确定性的，重试也是同样的错
                 ),
+                budget_delta=_rejected_delta(name),
+            )
+
+        # 配置错误必须在任何真实副作用之前拒绝。位置在配额闸门**之前**：`take()` 一旦
+        # 成功就欠一次 `release()` 或一次真实接纳（`tooling/quota.py` 的成对约束），
+        # 而夹在中间抛异常会让本批的兄弟调用被一个不存在于任何账本上的占位挤掉。
+        if self._overflow_handler is not None and session is None:
+            raise ValueError("session is required when OverflowHandler is configured")
+        if (session is not None and operation_context is not None
+                and session.session_id != operation_context.session_id):
+            raise ValueError("session and operation_context must identify the same session")
+
+        # -- 阶段 2.4：per-tool 配额闸门（`#314` T6 / `04 §9.1`）--
+        # 位置在 approval **之前**：一个注定被配额拒的调用不该先弹一次人工审批
+        # （审批可能要等人一个回合）。槽位在这里**预留**（本批内并发只读调用靠
+        # "同步检查+预留"不互相超发，见 `tooling/quota.py`）；approval 拒了由下面
+        # 的 release 归还——否则同批后面那条本该收下的调用会被误挡。
+        if tool_quota is not None and not tool_quota.take(name):
+            return ToolExecution(
+                tool_call_id=tool_call_id,
+                result=ToolResult.failure(
+                    message=(
+                        f"工具 '{name}' 的本 run 配额已用尽"
+                        f"（{tool_quota.used(name)}/{tool_quota.ceiling(name)}），"
+                        "本次调用未被接纳。run 将按预算暂停；恢复时由新的绝对配额决定"
+                        "是否继续，不要重复提交同一调用。"
+                    ),
+                    error_code=ErrorCode.BUDGET_EXHAUSTED,
+                    retryable=False,  # 配额没变宽之前，重试是同一条被拒路径
+                ),
+                budget_delta=_rejected_delta(name),
             )
 
         # -- 阶段 2.5：approval gate -- 05_SANDBOX_CODING_TOOLS.md §6 的 REQUIRE_APPROVAL。
@@ -304,14 +356,19 @@ class ToolExecutor:
         # per-call scoping 由设计保证：每次 execute 独立检查，不存储"已批准"状态。
         denied = await self._check_approval(tool_call_id, name, tool, raw_args)
         if denied is not None:
+            # 占了配额槽位却没被接纳 ⇒ 归还：账本此刻仍是 0 消耗，"被拒"与
+            # "配额已尽"必须对得上（暂停判定读的是账本，不是这个窗口）。
+            if tool_quota is not None:
+                tool_quota.release(name)
             return denied
 
-        # 配置错误必须在任何真实副作用之前拒绝。
-        if self._overflow_handler is not None and session is None:
-            raise ValueError("session is required when OverflowHandler is configured")
-        if (session is not None and operation_context is not None
-                and session.session_id != operation_context.session_id):
-            raise ValueError("session and operation_context must identify the same session")
+        # -- **接纳点**（`04 §9.1` 的"唯一接纳点"，`#314` 的唯一计数点）--
+        # 到这里为止的拒绝闸门全部通过（registry / args / 配额 / approval / 配置），
+        # 再往下就是**为这条规范化逻辑调用做真实工作**（Ledger → 观测 → retry loop）。
+        # 所以 `tool_calls` 只在这里记一次——它的携带方式是结果收口时的
+        # `budget_delta`（见本文件 `_admitted_delta`），而不是某个内存计数器：
+        # 计数器会与落盘事实漂移，事件派生值不会。
+        # 四条 return 分支都**不**在这里，它们各自带 0 增量（准入前被拒不消耗配额）。
 
         if self._operation_ledger is not None:
             assert operation_context is not None
@@ -447,7 +504,26 @@ class ToolExecutor:
             extra={"artifact_ref": result.artifact_ref} if result.artifact_ref else None,
         )
         return ToolExecution(tool_call_id=tool_call_id, result=result,
-                             pending_events=pending)
+                             pending_events=pending,
+                             budget_delta=self._admitted_delta(name, result))
+
+    @staticmethod
+    def _admitted_delta(name: str, result: ToolResult) -> dict[str, Any]:
+        """**被接纳**的一次逻辑调用计入 run 预算的增量（`04 §9.1` 的两个 counter）。
+
+        `tool_calls` 恒为 1 —— 它就是"接纳点恰好记一次"这件事本身（含调用失败与
+        被取消：它们**已经**被接纳，跑过真实工作）。`tool_attempts` 取**实际尝试次数**，
+        来源是重试循环回填进 metadata 的 `attempt`（那一格是"第几次尝试"，循环从 1
+        连续递增 ⇒ 它同时就是尝试总数）。不另设计数器：多一个计数器就多一处能与
+        事实漂移的地方，而 `attempt` 已经在 ToolResult 里了（`02 §5.1` 要求
+        `tool_attempts` 不是 `tool_calls` 的别名，两者正是这样分开的）。
+
+        能取到 `attempt` 才算得出来：取不到（metadata 被上游替换过）记 0 ——
+        与"上界"相比宁可少记一次尝试，也不猜。
+        """
+        attempt = result.metadata.get("attempt")
+        attempts = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else 0
+        return {"tool_name": name, "tool_calls": 1, "tool_attempts": attempts}
 
     def _maybe_kill(self, stage: str, tool_call_id: str) -> None:
         """精确故障注入点（#32 Kill 集成测试专用；生产 kill_hook=None 行为不变）。
@@ -467,6 +543,7 @@ class ToolExecutor:
         session: Session | None = None,
         step_id: int | None = None,
         tracer: Tracer = _NULL_TRACER,
+        tool_quota: ToolQuotaWindow | None = None,
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
@@ -494,6 +571,10 @@ class ToolExecutor:
           - 某工具名查不到（将 TOOL_NOT_FOUND）→ 按 READ_ONLY 算，不影响并发决策、让其走正常 execute 报错；
           - 全部 READ_ONLY → "parallel"；
           - 任一 MUTATING → "serial"。
+
+        `tool_quota`（`#314` T6）：**一批一个**准入窗口，原样转交给本批每条
+        `execute()` ——窗口正是为"同一批里的并发调用互相看不见计数"而存在的
+        （见 `tooling/quota.py`），所以批次层只透传、不做判定，也不换实例。
         """
         if not tool_calls:
             return []
@@ -505,7 +586,8 @@ class ToolExecutor:
             results = await asyncio.gather(
                 *(
                     self.execute(tc, operation_context=operation_context,
-                            session=session, step_id=step_id, tracer=tracer)
+                            session=session, step_id=step_id, tracer=tracer,
+                            tool_quota=tool_quota)
                     for tc in tool_calls
                 ),
                 return_exceptions=True,
@@ -535,6 +617,7 @@ class ToolExecutor:
                 execution = await self.execute(
                     tool_call, operation_context=operation_context,
                     session=session, step_id=step_id, tracer=tracer,
+                    tool_quota=tool_quota,
                 )
                 executions.append(execution)
                 if execution.result.ok:
@@ -601,11 +684,21 @@ class ToolExecutor:
         content: str,
         run_id: str | None,
         step_id: int | None,
+        budget_delta: dict[str, Any] | None = None,
     ) -> SessionEvent:
-        """持久化 TOOL_RESULT（content = ToolResult JSON，与旧契约一致）。"""
+        """持久化 TOOL_RESULT（content = ToolResult JSON，与旧契约一致）。
+
+        `budget_delta`（`#314`）：本执行域算好的 run 预算增量，作为 data 的**兄弟键**
+        落盘（与 `model/request` 的 usage/cost_usd 同一种做法），run 账本按它求和。
+        缺省 None = 不落这个键——恢复/悬空修复合成的结果不是接纳点产物，它们对
+        `tool_calls` 的贡献是 0（见 ADR-0045 的"计数与上界"一节）。
+        """
+        data: dict[str, Any] = {"tool_call_id": tool_call_id, "content": content}
+        if budget_delta is not None:
+            data["budget_delta"] = budget_delta
         return session.append(
             TOOL_RESULT,
-            {"tool_call_id": tool_call_id, "content": content},
+            data,
             run_id=run_id, step_id=step_id,
         )
 
@@ -717,7 +810,11 @@ class ToolExecutor:
         *,
         operation_context: OperationContext | None,
     ) -> ToolExecution:
-        """Represent a serially cascaded call without invoking its Tool."""
+        """Represent a serially cascaded call without invoking its Tool.
+
+        「未执行」在预算上就是**没被接纳**：这条调用没有真实工作，也不该占配额
+        （`#314`；否则一次永久失败会连带烧掉整批的 per-tool 配额），所以增量记 0。
+        """
         call = ToolCall.normalize(tool_call)
         tool_call_id = call.id
         name = call.name
@@ -744,7 +841,8 @@ class ToolExecutor:
                 result_json=result.model_dump_json(),
             )
 
-        return ToolExecution(tool_call_id=tool_call_id, result=result)
+        return ToolExecution(tool_call_id=tool_call_id, result=result,
+                             budget_delta=_rejected_delta(name))
 
     def _decide_mode(self, tool_calls: list[ToolCall | dict[str, Any]]) -> str:
         """扫描批次，决定并发还是串行。
@@ -808,6 +906,7 @@ class ToolExecutor:
                     error_code=ErrorCode.PERMISSION_DENIED,
                     retryable=False,
                 ),
+                budget_delta=_rejected_delta(name),
             )
 
         response: ApprovalResponse = await self._approval_callback(request)
@@ -822,6 +921,7 @@ class ToolExecutor:
                 error_code=ErrorCode.PERMISSION_DENIED,
                 retryable=False,
             ),
+            budget_delta=_rejected_delta(name),
         )
 
     async def _execute_with_retry(

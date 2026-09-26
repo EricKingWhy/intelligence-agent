@@ -70,7 +70,7 @@ def _client(tmp_path: Path, **overrides) -> TestClient:
 
 def _create_session(client: TestClient, **payload: object) -> str:
     """建会话（真 runtime + 替身模型），返回 session_id。"""
-    base: dict[str, object] = {"task": _SECRET_TASK, "max_steps": 1}
+    base: dict[str, object] = {"task": _SECRET_TASK, "budget": {"local": {"max_agent_turns": 1}}}
     base.update(payload)
     with patch(
         "agent_harness.assembly.create_chat_model",

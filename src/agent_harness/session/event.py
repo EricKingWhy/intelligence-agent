@@ -26,6 +26,14 @@ RUN_FAILED = "run/failed"
 # 信封带 run_id / step_id；data 只放 interrupted_seq + reason="process_restart"
 # （前端按 run 归组、显示"上次运行在第 N 步中断"）。
 RUN_INTERRUPTED = "run/interrupted"
+# `#312` T4：长任务暂停/恢复（**持久化、非终态**）。语义与字段权威是 `03 §3.4`
+# （契约冻结于 ADR-0044 D3）；枚举条目由本文件生成（scripts/gen_event_vocabulary.py）。
+#   * run/paused  ：命中预算/deadline/stuck 时落**一条**；停止活动执行，但**不**关闭
+#                   逻辑 run_id——所以它**不在** RUN_TERMINAL_TYPES 里。
+#   * run/resumed ：以**同一 run_id** 接回（absolute ceiling + expected_version，CAS），
+#                   不重置任何 counter。
+RUN_PAUSED = "run/paused"
+RUN_RESUMED = "run/resumed"
 
 #: run 终态词汇（出现任一即该 run 已收口）——单一事实源，fork 边界校验、
 #: 中断检测、replay 等所有「这个 run 结束了吗」的判断都引用它，避免各写一份。
@@ -37,6 +45,12 @@ MODEL_STARTED = "model/started"
 MODEL_DELTA = "model/delta"
 MODEL_COMPLETED = "model/completed"
 MODEL_FAILED = "model/failed"
+# `#313` T5：**每一次实际 Provider 请求**恰一条的账目记录（`02 §5.1` 的唯一计数点）。
+# 与 model/completed 的分工：后者是「被接纳进 loop 的模型决策」的 durable 记录
+# （agent_turns 的计数点），本事件是「真的发出去过的请求」（model_requests 的计数点）
+# ——primary / fallback / closeout 各记一条，被拒绝或传输失败的请求也**在**其中
+# （它们不增 agent_turns，但确实发生过）。usage / cost_usd 只在该次响应自报时落键。
+MODEL_REQUEST = "model/request"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
@@ -134,9 +148,14 @@ EVENT_TYPES: frozenset[str] = frozenset(
         RUN_COMPLETED,
         RUN_FAILED,
         RUN_INTERRUPTED,
+        # #312 T4：暂停/恢复生命周期（durable 非终态；RUN_TERMINAL_TYPES 不含它们）
+        RUN_PAUSED,
+        RUN_RESUMED,
         USER_MESSAGE,
         MODEL_COMPLETED,
         MODEL_FAILED,
+        # #313 T5：每次实际 Provider 请求的账目记录（model_requests 的唯一计数点）
+        MODEL_REQUEST,
         TOOL_CALL,
         TOOL_RESULT,
         TOOL_OUTPUT_DELTA,

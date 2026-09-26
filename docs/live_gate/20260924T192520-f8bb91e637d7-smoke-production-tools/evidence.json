@@ -1,0 +1,251 @@
+{
+  "schema_version": 1,
+  "scenario_id": "smoke-production-tools",
+  "scenario_version": 1,
+  "verdict": "FAIL",
+  "reason": "注入了受控失败（attempt:2）——注入运行不得计入 Live Gate；attempt 2: injected-failure: attempt 2（验证专用注入）",
+  "missing_preconditions": [],
+  "created_at": "2026-09-24T19:25:51.581+00:00",
+  "sha": "f8bb91e637d73ef8fb6405e9fcd526ab2de68cef",
+  "tree": "7700e975f7c7464d5c5692a6c364aac25adbddc2",
+  "worktree": {
+    "head_sha": "f8bb91e637d73ef8fb6405e9fcd526ab2de68cef",
+    "tree": "7700e975f7c7464d5c5692a6c364aac25adbddc2",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove(RuntimeError)",
+    "workspace_ids": [
+      "bd6c72539e272742",
+      "94e86973fc283742"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-24T19:25:20.774+00:00",
+      "ended_at": "2026-09-24T19:25:29.438+00:00",
+      "status": "PASS",
+      "duration_ms": 8663,
+      "session_id": "smoke-production-tools-a1-09b41ca5",
+      "run_id": "3419fabd-3884-4b6d-917e-ce98192f2936",
+      "run_status": "completed",
+      "steps": 3,
+      "event_count": 14,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260924T192520-f8bb91e637d7-smoke-production-tools/attempt-1.jsonl",
+      "events_sha256": "b0b295d6485670abceef70b4a134e4a813b708ddb3a5e356f77c5b8cc096de67",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我创建了 notes.txt（内容为 live-gate-ok），确认了 git 仓库（最新提交为 `7b7c118 seed`），并查看到仓库状态为 `?? notes.txt`（新文件未跟踪）。",
+      "workspace_id": "bd6c72539e272742",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-24T19:25:29.438+00:00",
+      "ended_at": "2026-09-24T19:25:29.438+00:00",
+      "status": "FAIL",
+      "duration_ms": 0,
+      "session_id": "",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 0,
+      "tool_calls": [],
+      "events_ref": "",
+      "events_sha256": "",
+      "assertions": [],
+      "error": "injected-failure: attempt 2（验证专用注入）",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "",
+      "redactions": []
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-24T19:25:29.438+00:00",
+      "ended_at": "2026-09-24T19:25:51.420+00:00",
+      "status": "PASS",
+      "duration_ms": 21981,
+      "session_id": "smoke-production-tools-a3-73c3c35c",
+      "run_id": "cd676b66-2547-4f1e-b050-45336d2551db",
+      "run_status": "completed",
+      "steps": 3,
+      "event_count": 14,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260924T192520-f8bb91e637d7-smoke-production-tools/attempt-3.jsonl",
+      "events_sha256": "d094c63887debde789ea01e786afa2c6dd6e3519a4b2f71796608aabae657971",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我创建了 notes.txt（内容 live-gate-ok），用 git log 确认这是 git 仓库（最新提交 7205a62 seed），并用 git_status 查到新文件 notes.txt 处于未跟踪状态。",
+      "workspace_id": "94e86973fc283742",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "attempt:2",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260924T192520-f8bb91e637d7-smoke-production-tools/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260924T192520-f8bb91e637d7-smoke-production-tools/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "smoke-production-tools",
+      "--inject-failure",
+      "attempt:2"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "预算 / 暂停恢复 / 卡死 / deadline / 委派树五类场景（后续票的场景，本票只给注册入口）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

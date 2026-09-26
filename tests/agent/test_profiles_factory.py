@@ -100,7 +100,10 @@ class TestBuiltinProfiles:
     def test_main_is_supervisor_with_union_scope(self):
         main = BUILTIN_PROFILES["main"]
         assert "delegate" in main.tool_scope
-        assert main.max_steps == 20
+        # #308：出厂设定**不写死数字**（None = 继承 Deployment 默认 500）——
+        # 档位只在需要收窄时显式声明；写死会让 operator 下调 deployment ceiling
+        # 时撞上"档位声明越权"这种必然失败的组合（ADR-0044 D1）。
+        assert main.max_agent_turns is None
         assert main.max_delegations == 8
         # 注：main 的 scope 由 `_MAIN_TOOLS = _CODING_TOOLS | _RESEARCH_TOOLS | {...}`
         # 定义，所以"其余档位 ⊆ main"是**结构上**成立的（不是可被断言推翻的性质）；
@@ -110,22 +113,22 @@ class TestBuiltinProfiles:
         coding = BUILTIN_PROFILES["coding"]
         assert "web_search" not in coding.tool_scope
         assert "delegate" not in coding.tool_scope  # depth=1：child 无 delegate
-        assert coding.max_steps == 10
+        assert coding.max_agent_turns is None
 
     def test_research_review_is_read_only(self):
         research = BUILTIN_PROFILES["research_review"]
         assert not (research.tool_scope & {"write", "edit", "bash",
                                            "apply_patch", "remember_this",
                                            "forget_memory"})
-        assert research.max_steps == 10
+        assert research.max_agent_turns is None
 
     def test_spec_rejects_invalid_shape(self):
         with pytest.raises(ValueError, match="name"):
             AgentSpec(name="", description="d", system_prompt="s",
                       tool_scope=frozenset({"read"}))
-        with pytest.raises(ValueError, match="max_steps"):
+        with pytest.raises(ValueError, match="max_agent_turns"):
             AgentSpec(name="x", description="d", system_prompt="s",
-                      tool_scope=frozenset({"read"}), max_steps=0)
+                      tool_scope=frozenset({"read"}), max_agent_turns=0)
 
 
 class TestAgentFactoryFiltering:
@@ -195,7 +198,7 @@ class TestAgentFactoryInheritance:
             stream_idle_timeout=30.0, stream_total_timeout=120.0,
         )
         spec = AgentSpec(name="child", description="d", system_prompt="s",
-                         tool_scope=frozenset({"read"}), max_steps=7)
+                         tool_scope=frozenset({"read"}), max_agent_turns=7)
 
         source = _full_registry(tmp_path)
         runtime = factory.create(spec, source_registry=source,
@@ -203,7 +206,7 @@ class TestAgentFactoryInheritance:
 
         assert runtime.model is model
         assert runtime._fallback_model is fallback
-        assert runtime.max_steps == 7
+        assert runtime.max_agent_turns == 7
         assert runtime._stream_idle_timeout == 30.0
         assert runtime._stream_total_timeout == 120.0
         assert runtime._primary_model_name == "main-model"
@@ -236,7 +239,7 @@ class TestGateFourthAgent:
             name="analyst", description="数据分析临时角色",
             system_prompt="你是数据分析专家。",
             tool_scope=frozenset({"read", "grep"}),
-            max_steps=5,
+            max_agent_turns=5,
         )
         factory = AgentFactory(model=ScriptedModel([]),
                                primary_model_name="main-model")
@@ -245,4 +248,4 @@ class TestGateFourthAgent:
                                  grantable=_grant_all(source))
 
         assert {x.name for x in runtime.registry.list()} == {"read", "grep"}
-        assert runtime.max_steps == 5
+        assert runtime.max_agent_turns == 5

@@ -1,0 +1,560 @@
+{
+  "schema_version": 1,
+  "scenario_id": "budget-pause-resume-same-run",
+  "scenario_version": 2,
+  "verdict": "PASS",
+  "reason": "",
+  "missing_preconditions": [],
+  "created_at": "2026-09-25T20:01:09.431+00:00",
+  "sha": "66046b816356da297a515c0b3e7a7458ffceef90",
+  "tree": "a155b73a6ca6b83cec4d608a01888719782eace9",
+  "worktree": {
+    "head_sha": "66046b816356da297a515c0b3e7a7458ffceef90",
+    "tree": "a155b73a6ca6b83cec4d608a01888719782eace9",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "fc6904769fa25610",
+      "6ee5544da9b93d23",
+      "30cc38e90893ab20"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-25T19:54:30.644+00:00",
+      "ended_at": "2026-09-25T19:56:16.682+00:00",
+      "status": "PASS",
+      "duration_ms": 106037,
+      "session_id": "budget-pause-resume-same-run-a1-6b6bdaa6",
+      "run_id": "5abb2a25-7aed-4db6-a100-630678b178f4",
+      "run_status": "completed",
+      "steps": 8,
+      "event_count": 90,
+      "tool_calls": [
+        "read",
+        "read",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "read",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260925T195430-66046b816356-budget-pause-resume-same-run/attempt-1.jsonl",
+      "events_sha256": "adea1e9e2489870697a124ffaa96079fff7a30f2e81f5b0d54381466ffdb386b",
+      "assertions": [
+        {
+          "name": "pause_exactly_once",
+          "ok": true,
+          "detail": "run/paused=1（恰好一条 = 低预算处暂停一次，且续跑**没有**再次撞线）"
+        },
+        {
+          "name": "pause_reason_and_dimension",
+          "ok": true,
+          "detail": "reason='budget_exhausted' trigger_dimension='run.max_agent_turns_total'"
+        },
+        {
+          "name": "pause_budget_snapshot",
+          "ok": true,
+          "detail": "version=1 run.limits=2（期望 2） local=有 ceiling+source trace_id键=有 resume_requirements=[]"
+        },
+        {
+          "name": "pause_consumed_accounting",
+          "ok": true,
+          "detail": "consumed=1 closeout_source='model'（期望 1 = 1 个产出轮；closeout 是 model_requests，不进 agent_turns）"
+        },
+        {
+          "name": "pause.request_count",
+          "ok": true,
+          "detail": "payload model_requests=2 agent_turns=1；轨迹重算：agent_turns=1 model_requests=2（角色 closeout:1,primary:1，失败 0） total_tokens=4666（自报 2/2 格） cost_usd=未知（自报 0/2 格）"
+        },
+        {
+          "name": "pause.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=4666；轨迹 4666（自报 2/2 格；不可得不得记 0）"
+        },
+        {
+          "name": "pause.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/2 格；不臆造费率）"
+        },
+        {
+          "name": "pause_continuation_contract",
+          "ok": true,
+          "detail": "continuation 四键形状（next_safe_action 非空）：齐"
+        },
+        {
+          "name": "pause_is_not_terminal",
+          "ok": true,
+          "detail": "暂停之前无终态事件；run/started=1（暂停是本次执行收口，逻辑 run 仍开着）"
+        },
+        {
+          "name": "resume_same_run_snapshot",
+          "ok": true,
+          "detail": "run/resumed=1 from_pause_seq=14（暂停 seq=14） version=1→2 basis='budget_increase' run.limits=12（期望 12）"
+        },
+        {
+          "name": "resume_does_not_reset_consumed",
+          "ok": true,
+          "detail": "run/resumed.consumed=1 == 暂停快照 1（恢复不重置、也不预支）"
+        },
+        {
+          "name": "run_identity_single",
+          "ok": true,
+          "detail": "run_id=5abb2a25-7aed-4db6-a100-630678b178f4 事件里的 run_id 集合=['5abb2a25-7aed-4db6-a100-630678b178f4'] run/started=1 user/message=1 run/completed=1"
+        },
+        {
+          "name": "resumed_execution_did_work",
+          "ok": true,
+          "detail": "暂停之后仍有 6 次 tool/call（信息屏障保证剩余链步只能发生在恢复之后）"
+        },
+        {
+          "name": "chain_completed_after_resume",
+          "ok": true,
+          "detail": "chain-steps.txt=4（期望 4）；done.txt 与 chain.txt 比对（缺失或不等即不通过）"
+        },
+        {
+          "name": "final_budget_state",
+          "ok": true,
+          "detail": "派生账本 version=2 ceiling=12 consumed=8（暂停快照 1 + 恢复后的产出轮） paused=False terminal=True"
+        },
+        {
+          "name": "api_projection.request_count",
+          "ok": true,
+          "detail": "payload model_requests=9 agent_turns=8；轨迹重算：agent_turns=8 model_requests=9（角色 closeout:1,primary:8，失败 0） total_tokens=34432（自报 9/9 格） cost_usd=未知（自报 0/9 格）"
+        },
+        {
+          "name": "api_projection.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=34432；轨迹 34432（自报 9/9 格；不可得不得记 0）"
+        },
+        {
+          "name": "api_projection.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/9 格；不臆造费率）"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 90 条事件与内存态逐条同序；派生账本（version / limits / consumed / paused / terminal）一致"
+        },
+        {
+          "name": "stream_mirrors_pause_and_completion",
+          "ok": true,
+          "detail": "低预算执行的 live 流里 run/paused=1；续跑执行的 live 流里 run/completed=1（`run/resumed` 在 launch 之前落盘、不在 live 窗口内，与既有 `session/resumed` 同形）"
+        },
+        {
+          "name": "no_fuse_trip",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 tool_calls=8"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "4 步链式执行完成，最终串 bf8aa04e 已写入 done.txt。",
+      "workspace_id": "fc6904769fa25610",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-25T19:56:16.682+00:00",
+      "ended_at": "2026-09-25T19:58:39.893+00:00",
+      "status": "PASS",
+      "duration_ms": 143211,
+      "session_id": "budget-pause-resume-same-run-a2-4615b93b",
+      "run_id": "3e048008-f783-4a3d-821d-daf95776e4ad",
+      "run_status": "completed",
+      "steps": 8,
+      "event_count": 97,
+      "tool_calls": [
+        "read",
+        "read",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "read",
+        "read",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260925T195430-66046b816356-budget-pause-resume-same-run/attempt-2.jsonl",
+      "events_sha256": "79e2b5940610ad8367faee123cd82f40463552ed4669dc77efc9713a3387adb4",
+      "assertions": [
+        {
+          "name": "pause_exactly_once",
+          "ok": true,
+          "detail": "run/paused=1（恰好一条 = 低预算处暂停一次，且续跑**没有**再次撞线）"
+        },
+        {
+          "name": "pause_reason_and_dimension",
+          "ok": true,
+          "detail": "reason='budget_exhausted' trigger_dimension='run.max_agent_turns_total'"
+        },
+        {
+          "name": "pause_budget_snapshot",
+          "ok": true,
+          "detail": "version=1 run.limits=2（期望 2） local=有 ceiling+source trace_id键=有 resume_requirements=[]"
+        },
+        {
+          "name": "pause_consumed_accounting",
+          "ok": true,
+          "detail": "consumed=1 closeout_source='model'（期望 1 = 1 个产出轮；closeout 是 model_requests，不进 agent_turns）"
+        },
+        {
+          "name": "pause.request_count",
+          "ok": true,
+          "detail": "payload model_requests=2 agent_turns=1；轨迹重算：agent_turns=1 model_requests=2（角色 closeout:1,primary:1，失败 0） total_tokens=6182（自报 2/2 格） cost_usd=未知（自报 0/2 格）"
+        },
+        {
+          "name": "pause.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=6182；轨迹 6182（自报 2/2 格；不可得不得记 0）"
+        },
+        {
+          "name": "pause.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/2 格；不臆造费率）"
+        },
+        {
+          "name": "pause_continuation_contract",
+          "ok": true,
+          "detail": "continuation 四键形状（next_safe_action 非空）：齐"
+        },
+        {
+          "name": "pause_is_not_terminal",
+          "ok": true,
+          "detail": "暂停之前无终态事件；run/started=1（暂停是本次执行收口，逻辑 run 仍开着）"
+        },
+        {
+          "name": "resume_same_run_snapshot",
+          "ok": true,
+          "detail": "run/resumed=1 from_pause_seq=15（暂停 seq=15） version=1→2 basis='budget_increase' run.limits=12（期望 12）"
+        },
+        {
+          "name": "resume_does_not_reset_consumed",
+          "ok": true,
+          "detail": "run/resumed.consumed=1 == 暂停快照 1（恢复不重置、也不预支）"
+        },
+        {
+          "name": "run_identity_single",
+          "ok": true,
+          "detail": "run_id=3e048008-f783-4a3d-821d-daf95776e4ad 事件里的 run_id 集合=['3e048008-f783-4a3d-821d-daf95776e4ad'] run/started=1 user/message=1 run/completed=1"
+        },
+        {
+          "name": "resumed_execution_did_work",
+          "ok": true,
+          "detail": "暂停之后仍有 7 次 tool/call（信息屏障保证剩余链步只能发生在恢复之后）"
+        },
+        {
+          "name": "chain_completed_after_resume",
+          "ok": true,
+          "detail": "chain-steps.txt=4（期望 4）；done.txt 与 chain.txt 比对（缺失或不等即不通过）"
+        },
+        {
+          "name": "final_budget_state",
+          "ok": true,
+          "detail": "派生账本 version=2 ceiling=12 consumed=8（暂停快照 1 + 恢复后的产出轮） paused=False terminal=True"
+        },
+        {
+          "name": "api_projection.request_count",
+          "ok": true,
+          "detail": "payload model_requests=9 agent_turns=8；轨迹重算：agent_turns=8 model_requests=9（角色 closeout:1,primary:8，失败 0） total_tokens=46899（自报 9/9 格） cost_usd=未知（自报 0/9 格）"
+        },
+        {
+          "name": "api_projection.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=46899；轨迹 46899（自报 9/9 格；不可得不得记 0）"
+        },
+        {
+          "name": "api_projection.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/9 格；不臆造费率）"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 97 条事件与内存态逐条同序；派生账本（version / limits / consumed / paused / terminal）一致"
+        },
+        {
+          "name": "stream_mirrors_pause_and_completion",
+          "ok": true,
+          "detail": "低预算执行的 live 流里 run/paused=1；续跑执行的 live 流里 run/completed=1（`run/resumed` 在 launch 之前落盘、不在 live 窗口内，与既有 `session/resumed` 同形）"
+        },
+        {
+          "name": "no_fuse_trip",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 tool_calls=9"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "4 步链式运行全部完成（seed0 → 30894754 → d46b1b2d → 0147089a → a159fd36），已将最终串 a159fd36 写入 done.txt。",
+      "workspace_id": "6ee5544da9b93d23",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-25T19:58:39.894+00:00",
+      "ended_at": "2026-09-25T20:01:09.186+00:00",
+      "status": "PASS",
+      "duration_ms": 149292,
+      "session_id": "budget-pause-resume-same-run-a3-e69933b4",
+      "run_id": "6511ec44-4e19-479e-90d1-8c4a9ca99dd9",
+      "run_status": "completed",
+      "steps": 8,
+      "event_count": 97,
+      "tool_calls": [
+        "read",
+        "read",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "read",
+        "read",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260925T195430-66046b816356-budget-pause-resume-same-run/attempt-3.jsonl",
+      "events_sha256": "ae5ce1f18c1fb729fe78e70dfcf5f414ed6faece59fdd72eff2760cb166fac4e",
+      "assertions": [
+        {
+          "name": "pause_exactly_once",
+          "ok": true,
+          "detail": "run/paused=1（恰好一条 = 低预算处暂停一次，且续跑**没有**再次撞线）"
+        },
+        {
+          "name": "pause_reason_and_dimension",
+          "ok": true,
+          "detail": "reason='budget_exhausted' trigger_dimension='run.max_agent_turns_total'"
+        },
+        {
+          "name": "pause_budget_snapshot",
+          "ok": true,
+          "detail": "version=1 run.limits=2（期望 2） local=有 ceiling+source trace_id键=有 resume_requirements=[]"
+        },
+        {
+          "name": "pause_consumed_accounting",
+          "ok": true,
+          "detail": "consumed=1 closeout_source='model'（期望 1 = 1 个产出轮；closeout 是 model_requests，不进 agent_turns）"
+        },
+        {
+          "name": "pause.request_count",
+          "ok": true,
+          "detail": "payload model_requests=2 agent_turns=1；轨迹重算：agent_turns=1 model_requests=2（角色 closeout:1,primary:1，失败 0） total_tokens=6139（自报 2/2 格） cost_usd=未知（自报 0/2 格）"
+        },
+        {
+          "name": "pause.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=6139；轨迹 6139（自报 2/2 格；不可得不得记 0）"
+        },
+        {
+          "name": "pause.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/2 格；不臆造费率）"
+        },
+        {
+          "name": "pause_continuation_contract",
+          "ok": true,
+          "detail": "continuation 四键形状（next_safe_action 非空）：齐"
+        },
+        {
+          "name": "pause_is_not_terminal",
+          "ok": true,
+          "detail": "暂停之前无终态事件；run/started=1（暂停是本次执行收口，逻辑 run 仍开着）"
+        },
+        {
+          "name": "resume_same_run_snapshot",
+          "ok": true,
+          "detail": "run/resumed=1 from_pause_seq=16（暂停 seq=16） version=1→2 basis='budget_increase' run.limits=12（期望 12）"
+        },
+        {
+          "name": "resume_does_not_reset_consumed",
+          "ok": true,
+          "detail": "run/resumed.consumed=1 == 暂停快照 1（恢复不重置、也不预支）"
+        },
+        {
+          "name": "run_identity_single",
+          "ok": true,
+          "detail": "run_id=6511ec44-4e19-479e-90d1-8c4a9ca99dd9 事件里的 run_id 集合=['6511ec44-4e19-479e-90d1-8c4a9ca99dd9'] run/started=1 user/message=1 run/completed=1"
+        },
+        {
+          "name": "resumed_execution_did_work",
+          "ok": true,
+          "detail": "暂停之后仍有 7 次 tool/call（信息屏障保证剩余链步只能发生在恢复之后）"
+        },
+        {
+          "name": "chain_completed_after_resume",
+          "ok": true,
+          "detail": "chain-steps.txt=4（期望 4）；done.txt 与 chain.txt 比对（缺失或不等即不通过）"
+        },
+        {
+          "name": "final_budget_state",
+          "ok": true,
+          "detail": "派生账本 version=2 ceiling=12 consumed=8（暂停快照 1 + 恢复后的产出轮） paused=False terminal=True"
+        },
+        {
+          "name": "api_projection.request_count",
+          "ok": true,
+          "detail": "payload model_requests=9 agent_turns=8；轨迹重算：agent_turns=8 model_requests=9（角色 closeout:1,primary:8，失败 0） total_tokens=46916（自报 9/9 格） cost_usd=未知（自报 0/9 格）"
+        },
+        {
+          "name": "api_projection.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=46916；轨迹 46916（自报 9/9 格；不可得不得记 0）"
+        },
+        {
+          "name": "api_projection.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/9 格；不臆造费率）"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 97 条事件与内存态逐条同序；派生账本（version / limits / consumed / paused / terminal）一致"
+        },
+        {
+          "name": "stream_mirrors_pause_and_completion",
+          "ok": true,
+          "detail": "低预算执行的 live 流里 run/paused=1；续跑执行的 live 流里 run/completed=1（`run/resumed` 在 launch 之前落盘、不在 live 窗口内，与既有 `session/resumed` 同形）"
+        },
+        {
+          "name": "no_fuse_trip",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 tool_calls=9"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "4 步链式执行完成（seed0 → b43a3945 → 70a04f3c → 3bf0c01d → d047fe43），已将最终串 d047fe43 写入 done.txt。",
+      "workspace_id": "30cc38e90893ab20",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260925T195430-66046b816356-budget-pause-resume-same-run/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260925T195430-66046b816356-budget-pause-resume-same-run/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260925T195430-66046b816356-budget-pause-resume-same-run/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "budget-pause-resume-same-run"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "预算 / 暂停恢复 / 卡死 / deadline / 委派树五类场景（后续票的场景，本票只给注册入口）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

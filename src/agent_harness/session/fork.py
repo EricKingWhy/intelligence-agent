@@ -35,6 +35,8 @@ from agent_harness.session.event import (
     MODEL_COMPLETED,
     PERMISSION_CHANGED,
     RUN_FAILED,
+    RUN_PAUSED,
+    RUN_RESUMED,
     RUN_STARTED,
     RUN_TERMINAL_TYPES,
     SESSION_FORKED,
@@ -114,21 +116,35 @@ class ForkBoundaryError(ValueError):
     """非法 fork 边界：锚点不存在 / 不是用户消息 / 前缀含未终态 run。"""
 
 
+def _run_open_delta(event: SessionEvent) -> int:
+    """事件对「未收口 run 计数」的增量（`#312`）。
+
+    暂停计一次收口（`03 §3.4`：暂停态非终态，但该时点没有在途工具调用、也没有
+    悬空 run），`run/resumed` 把同一个逻辑 run 重新计入未收口——fork 要的是
+    「前缀里没有悬空的执行」，不是「没有暂停过」。
+    """
+    if event.type == RUN_STARTED or event.type == RUN_RESUMED:
+        return 1
+    if event.type in RUN_TERMINAL_TYPES or event.type == RUN_PAUSED:
+        return -1
+    return 0
+
+
 def find_fork_boundaries(events: list[SessionEvent]) -> list[int]:
     """列出合法 fork 锚点（用户消息 seq，锚点语义：seed = [0, seq)）。
 
     规则：锚点处的 seed 前缀必须 run 完整——逐事件跟踪 run/started 与
-    run 终态（`RUN_TERMINAL_TYPES`：completed / failed / interrupted）的
-    开合计数，计数为 0 时遇到的用户消息才是合法切点。
+    run 收口事件（`RUN_TERMINAL_TYPES`：completed / failed / interrupted，
+    以及 `#312` 起的非终态 `run/paused`）的开合计数，计数为 0 时遇到的用户
+    消息才是合法切点。暂停计一次收口：暂停中的执行没有在途工具调用、
+    也没有悬空 run（`03 §3.4`），child 以它作前缀是完整的；该 run 若被
+    `run/resumed` 接回则重新计入未收口（`_run_open`）。
     """
     boundaries: list[int] = []
     open_runs = 0
     for event in events:
-        if event.type == RUN_STARTED:
-            open_runs += 1
-        elif event.type in RUN_TERMINAL_TYPES:
-            open_runs -= 1
-        elif event.type == USER_MESSAGE and open_runs == 0:
+        open_runs += _run_open_delta(event)
+        if event.type == USER_MESSAGE and open_runs == 0:
             boundaries.append(event.seq)
     return boundaries
 
@@ -274,10 +290,7 @@ def _validate_run_complete(
 ) -> None:
     open_runs = 0
     for event in seed:
-        if event.type == RUN_STARTED:
-            open_runs += 1
-        elif event.type in RUN_TERMINAL_TYPES:
-            open_runs -= 1
+        open_runs += _run_open_delta(event)
         if open_runs < 0:
             raise ForkBoundaryError(
                 f"父会话 '{parent_session_id}' 前缀 run 事件序非法（负计数）"

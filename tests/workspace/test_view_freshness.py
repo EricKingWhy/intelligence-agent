@@ -39,7 +39,7 @@ def _launch(state: AppState, **kwargs) -> str:
     ) as build:
         build.return_value = MagicMock()
         result = asyncio.run(
-            session_service(state).create_and_launch(task="hello", max_steps=1, **kwargs)
+            session_service(state).create_and_launch(task="hello", local_max_agent_turns=1, **kwargs)
         )
     return result.session.session_id  # type: ignore[attr-defined]
 

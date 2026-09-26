@@ -84,7 +84,7 @@ def _create_session(client: TestClient) -> str:
         "agent_harness.assembly.create_chat_model",
         return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
     ):
-        resp = client.post("/api/sessions", json={"task": "hi", "max_steps": 1})
+        resp = client.post("/api/sessions", json={"task": "hi", "budget": {"local": {"max_agent_turns": 1}}})
     assert resp.status_code == 200, resp.text
     frames = [
         json.loads(line[len(_DATA_PREFIX):].strip())

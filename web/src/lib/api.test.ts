@@ -34,6 +34,8 @@ import {
   postApproval,
   renameProject,
   reorderProjectSession,
+  resumeRunLimitsBody,
+  resumeSession,
   sendMessage,
   startSession,
   createEmptySession,
@@ -244,7 +246,6 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
     const cap = captureFetch();
     await sendMessage('s1', {
       content: '继续',
-      max_steps: 10,
       model: 'glm-4.5',
       agent_profile: 'coding',
       reasoning_effort: 'deep',
@@ -255,7 +256,6 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
     expect(cap.calls[0].body).toEqual({
       content: '继续',
       mode: 'queue',
-      max_steps: 10,
       model: 'glm-4.5',
       agent_profile: 'coding',
       reasoning_effort: 'deep',
@@ -267,8 +267,17 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
     const cap = captureFetch();
     await sendMessage('s1', { content: '继续' });
     const body = cap.calls[0].body;
-    expect(body).toEqual({ content: '继续', mode: 'queue', max_steps: 10 });
-    for (const key of ['model', 'agent_profile', 'reasoning_effort', 'context_providers']) {
+    expect(body).toEqual({ content: '继续', mode: 'queue' });
+    // #308 AC：产品调用方不再主动发送 max_steps（缺省由后端解析 local fuse），
+    // 也不替用户预设 budget。
+    for (const key of [
+      'model',
+      'agent_profile',
+      'reasoning_effort',
+      'context_providers',
+      'budget',
+      'max_steps',
+    ]) {
       expect(body).not.toHaveProperty(key);
     }
   });
@@ -289,10 +298,16 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
     expect(body).not.toHaveProperty('context_providers');
   });
 
-  it('显式 mode / max_steps 覆盖缺省值', async () => {
+  it('显式 mode / budget 覆盖缺省值（新字段透传；旧 max_steps 不再由前端发送）', async () => {
     const cap = captureFetch();
-    await sendMessage('s1', { content: '继续', mode: 'steer', max_steps: 3 });
-    expect(cap.calls[0].body).toMatchObject({ mode: 'steer', max_steps: 3 });
+    await sendMessage('s1', {
+      content: '继续',
+      mode: 'steer',
+      budget: { local: { max_agent_turns: 3 } },
+    });
+    const body = cap.calls[0].body;
+    expect(body).toMatchObject({ mode: 'steer', budget: { local: { max_agent_turns: 3 } } });
+    expect(body).not.toHaveProperty('max_steps');
   });
 });
 
@@ -346,11 +361,12 @@ describe('listSessions — SessionSummary 契约（ARCH-4b：trace_url / WS-3 #1
   });
 });
 
-describe('startSession — create 路径的有值才带（归一化单一执行点）', () => {  it('全空控制字段 → payload 只有 task + 显式传入的 max_steps/auto_approve', async () => {
+describe('startSession — create 路径的有值才带（归一化单一执行点）', () => {
+  it('全空控制字段 → payload 只有 task + 显式传入的 auto_approve', async () => {
     const cap = captureFetch();
-    await startSession({ task: '干活', max_steps: 10, auto_approve: true });
+    await startSession({ task: '干活', auto_approve: true });
     expect(cap.calls[0].url).toBe('/api/sessions');
-    expect(cap.calls[0].body).toEqual({ task: '干活', max_steps: 10, auto_approve: true });
+    expect(cap.calls[0].body).toEqual({ task: '干活', auto_approve: true });
     for (const key of [
       'workspace',
       'model',
@@ -358,9 +374,21 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
       'agent_profile',
       'reasoning_effort',
       'context_providers',
+      'budget',
+      'max_steps',
     ]) {
       expect(cap.calls[0].body).not.toHaveProperty(key);
     }
+  });
+
+  it('显式 budget → 带键（#308：新字段可传，缺省不发数字）', async () => {
+    const cap = captureFetch();
+    await startSession({ task: '干活', budget: { local: { max_agent_turns: 42 } } });
+    expect(cap.calls[0].body).toEqual({
+      task: '干活',
+      budget: { local: { max_agent_turns: 42 } },
+    });
+    expect(cap.calls[0].body).not.toHaveProperty('max_steps');
   });
 
   it('context_providers 空数组 → 不发键（空 = 后端默认全集，不是显式零）', async () => {
@@ -405,11 +433,10 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
     // 都要人工批）。默认档必须靠"不发键"表达，否则这条路径会退化成"每步弹卡"。
     // 这条断言红了要改的是调用方（不要为了"显式"把默认档塞进 payload），不是这里。
     const cap = captureFetch();
-    await startSession({ task: '读一下 README', cwd: 'D:/repos/alpha', max_steps: 10 });
+    await startSession({ task: '读一下 README', cwd: 'D:/repos/alpha' });
     expect(cap.calls[0].body).toEqual({
       task: '读一下 README',
       cwd: 'D:/repos/alpha',
-      max_steps: 10,
     });
     expect(cap.calls[0].body).not.toHaveProperty('permission_mode');
   });
@@ -1193,11 +1220,10 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     });
     const created = await createEmptySession({
       cwd: 'D:/repos/alpha',
-      max_steps: 10,
       auto_approve: true,
     });
     expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
-    expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', max_steps: 10, auto_approve: true });
+    expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', auto_approve: true });
     expect(cap.calls[0].body).not.toHaveProperty('task');
     expect(created).toEqual({ sessionId: 'sid-1' });
   });
@@ -1209,13 +1235,11 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     });
     await createEmptySession({
       cwd: 'D:/repos/alpha',
-      max_steps: 10,
       auto_approve: true,
       permission_mode: 'read-only',
     });
     expect(cap.calls[0].body).toEqual({
       cwd: 'D:/repos/alpha',
-      max_steps: 10,
       auto_approve: true,
       permission_mode: 'read-only',
     });
@@ -1223,7 +1247,7 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
 
   it('响应缺 permission_mode → 照常成功（#236：该键已无消费者，缺席不该是错误）', async () => {
     captureFetchWithHeaders(200, { session_id: 'sid-3' });
-    await expect(createEmptySession({ cwd: 'D:/x', max_steps: 10, auto_approve: true }))
+    await expect(createEmptySession({ cwd: 'D:/x', auto_approve: true }))
       .resolves.toEqual({ sessionId: 'sid-3' });
   });
 
@@ -1235,7 +1259,47 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
           new Response(JSON.stringify({ detail: 'task 与 launch=false 互斥' }), { status: 422 }),
       ),
     );
-    await expect(createEmptySession({ cwd: 'D:/x', max_steps: 10, auto_approve: true }))
+    await expect(createEmptySession({ cwd: 'D:/x', auto_approve: true }))
       .rejects.toThrow('task 与 launch=false 互斥');
+  });
+});
+
+describe('resumeSession — 同 run 恢复的 ceiling 形状（`#313` / `#314`）', () => {
+  it('run 维：点名字段 + 绝对值；cost 维传十进制字符串（键是字段名本身）', async () => {
+    const cap = captureFetch();
+    await resumeSession('s1', {
+      run_id: 'run-1',
+      resume_basis: 'budget_increase',
+      budget: {
+        expected_version: 3,
+        run: resumeRunLimitsBody({ kind: 'run', field: 'max_cost_usd', value: '0.30' }),
+      },
+    });
+    expect(cap.calls).toHaveLength(1);
+    expect(cap.calls[0].url).toBe('/api/sessions/s1/resume');
+    expect(cap.calls[0].body).toEqual({
+      run_id: 'run-1',
+      resume_basis: 'budget_increase',
+      budget: { expected_version: 3, run: { max_cost_usd: '0.30' } },
+    });
+  });
+
+  it('工具配额维：写进 `tool_call_limits.<工具名>`，且**不带**任何 `max_*` 键', async () => {
+    const cap = captureFetch();
+    await resumeSession('s1', {
+      run_id: 'run-1',
+      resume_basis: 'budget_increase',
+      budget: {
+        expected_version: 3,
+        run: resumeRunLimitsBody({ kind: 'tool', tool: 'glob', value: 5 }),
+      },
+    });
+    const body = cap.calls[0].body as {
+      budget: { run: Record<string, unknown> };
+    };
+    // per-tool 的关键是**逐键合并**的语义（后端 `run_budget.resume_limits`）：点名哪个
+    // 工具就抬哪个，未点名的保留——所以这里只带那一个键，剩下的由后端沿用。
+    expect(body.budget.run).toEqual({ tool_call_limits: { glob: 5 } });
+    expect(body.budget.run).not.toHaveProperty('max_agent_turns_total');
   });
 });

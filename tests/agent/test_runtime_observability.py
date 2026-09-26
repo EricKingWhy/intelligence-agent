@@ -190,37 +190,38 @@ async def test_completed_run_backfills_trace_url(tmp_path):
     assert completed.data["trace_url"] == expected_url
 
 
+class _ExplodingModel:
+    """provider 中断：run 走异常臂 → run/failed（真实失败路径）。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        self.calls += 1
+        raise RuntimeError("模拟 provider 中断")
+
+    async def astream(self, messages: list, **kwargs):
+        self.calls += 1
+        raise RuntimeError("模拟 provider 中断")
+        yield AIMessage(content="")  # 不可达：仅为声明 async generator
+
+
 @pytest.mark.asyncio
 async def test_failed_run_backfills_trace_id_and_trace_url_symmetrically(tmp_path):
     """run/failed 对称下发 trace_id + trace_url（失败 run 在 Langfuse 也有可见 trace）。
 
     同时回归：end_run 失败路径此前丢失 trace_id（只 completed 写）——本测固化修复。
-    触发方式：模型每轮都请求工具不收敛 → max_steps_exceeded → run/failed。
+    触发方式：模型调用抛错 → 异常臂 → run/failed（`#312` T4 之前这里用的是
+    max_steps 兜底；那条路现在走**非终态** `run/paused`，另有专门用例）。
     """
     from agent_harness.session import RUN_FAILED
 
     recorder = _FakeRecorder()
-    # 模型每轮都请求 add 工具——永不收敛，撞 max_steps 兜底 → run/failed。
-    rounds = [
-        AIMessage(
-            content="",
-            tool_calls=[{
-                "name": "add",
-                "args": {"first_number": i, "second_number": i},
-                "id": f"call_loop_{i}",
-                "type": "tool_call",
-            }],
-        )
-        for i in range(2)
-    ]
-    scripted = ScriptedModel(rounds)
+    registry = _registry_with_add()
     session = make_session(tmp_path)
     runtime = AgentRuntime(
-        scripted,
-        _registry_with_add(),
-        ToolExecutor(_registry_with_add()),
+        _ExplodingModel(), registry, ToolExecutor(registry),
         observability_sink=_sink(recorder),
-        max_steps=2,
     )
     await runtime.run(session, "force fail")
 
@@ -229,6 +230,44 @@ async def test_failed_run_backfills_trace_id_and_trace_url_symmetrically(tmp_pat
     assert failed.data.get("trace_id") == "tr-fake-001"
     expected_url = recorder.trace_url_template.format(trace_id="tr-fake-001")
     assert failed.data.get("trace_url") == expected_url
+
+
+@pytest.mark.asyncio
+async def test_paused_run_carries_its_execution_trace_id(tmp_path):
+    """`run/paused` 带上这次暂停执行的 trace_id（`#312` T4）。
+
+    与各终结臂同源（ADR-0033 的归因面）：暂停也是"本次执行收口"，用户看暂停原因时
+    最想找的就是那一段 trace。run **未**终结 ⇒ 它描述的是这段执行的 trace。
+
+    **刻意没有 `trace_url`**：URL 由 tracer 在终态回调里经 SDK 合成，暂停不调任何
+    终态回调 ⇒ 此刻无法给出真值（落一个恒 None 的 URL 是假信息）。
+    """
+    from agent_harness.session import RUN_PAUSED
+
+    recorder = _FakeRecorder()
+    registry = _registry_with_add()
+    rounds = [
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "add",
+                "args": {"first_number": i, "second_number": i},
+                "id": f"call_pause_{i}",
+                "type": "tool_call",
+            }],
+        )
+        for i in range(2)
+    ]
+    session = make_session(tmp_path)
+    runtime = AgentRuntime(
+        ScriptedModel(rounds), registry, ToolExecutor(registry),
+        observability_sink=_sink(recorder), max_agent_turns=2,
+    )
+    await runtime.run(session, "撞保险丝")
+
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["trace_id"] == "tr-fake-001"
+    assert "trace_url" not in paused.data
 
 
 def _registry_with_add() -> ToolRegistry:

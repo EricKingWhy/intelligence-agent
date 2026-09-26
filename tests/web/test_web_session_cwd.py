@@ -53,7 +53,7 @@ def _create_session(client: TestClient, **payload: object) -> str:
     SSE 流里必须有带 session_id 的帧——这是"创建真的成功、且流接上了"的最小证据；
     之后所有事实断言一律读**落盘事件**（`_started_cwd`），不依赖流里的到达顺序。
     """
-    base: dict[str, object] = {"task": "hi", "max_steps": 1}
+    base: dict[str, object] = {"task": "hi", "budget": {"local": {"max_agent_turns": 1}}}
     base.update(payload)
     with patch(
         "agent_harness.assembly.create_chat_model",

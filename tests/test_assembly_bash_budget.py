@@ -55,7 +55,7 @@ async def _bash_budget_after_assembly(tmp_path: Path, **overrides) -> float:
             workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
             session_id="sess-bash-budget",
             workspace=tmp_path / "workspaces" / "sess-bash-budget",
-            max_steps=10,
+            max_agent_turns=10,
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         )
     tools = {tool.name: tool for tool in runtime.registry.list()}

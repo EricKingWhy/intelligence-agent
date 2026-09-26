@@ -239,7 +239,7 @@ def _build_gate_env(tmp_path, *, live_model: bool):
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
             session_id=session_id, workspace=workspace,
-            max_steps=15, auto_approve=True, session_store=store,
+            max_agent_turns=15, auto_approve=True, session_store=store,
         )
         return runtime, store, workspace_registry, workspace, session_id
 
@@ -333,7 +333,7 @@ class TestGate3DynamicFourthAgent:
             name="analyst", description="Gate 专用临时分析角色",
             system_prompt="你是数据分析 agent：把收到的数字列表求和，一句话回答总和。",
             tool_scope=frozenset(),  # 纯推理，无工具
-            max_steps=3,
+            max_agent_turns=3,
         )
         factory = AgentFactory(
             model=runtime.model, primary_model_name="gate-analyst",
@@ -617,7 +617,7 @@ class TestGate8CapabilityOff:
                 settings=settings, wiring=wiring, stores=stores,
                 workspace_registry=workspace_registry,
                 session_id="gate-single", workspace=tmp_path / "workspaces" / "gate-single",
-                max_steps=5, auto_approve=True, session_store=store,
+                max_agent_turns=5, auto_approve=True, session_store=store,
             )
 
         single_runtime = await _build()

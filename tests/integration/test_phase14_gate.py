@@ -76,7 +76,7 @@ async def _new_runtime(gate_env, session_id: str):
         workspace_registry=registry,
         session_id=session_id,
         workspace=tmp_path / "workspaces" / session_id,
-        max_steps=10, auto_approve=True, session_store=store,
+        max_agent_turns=10, auto_approve=True, session_store=store,
     )
 
 

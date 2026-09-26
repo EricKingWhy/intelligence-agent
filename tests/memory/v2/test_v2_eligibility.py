@@ -17,7 +17,7 @@ from agent_harness.agent.types import (
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_FAILED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-    STATUS_MAX_STEPS_EXCEEDED,
+    STATUS_PAUSED,
 )
 from agent_harness.memory.v2.eligibility import (
     ELIGIBLE_TERMINAL_STATUSES,
@@ -62,24 +62,24 @@ def _decide(status: str, events=None, *, extraction_enabled: bool = True) -> Run
 
 
 # --------------------------------------------------------------------------------------
-# 合格的三条终态（AC1 前半）
+# 合格的两条终态（AC1 前半；#312 T4 起预算暂停不在其中）
 # --------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "status",
-    [STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP],
+    "status", [STATUS_COMPLETED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP],
 )
-def test_the_three_approved_terminal_shapes_are_eligible(status: str) -> None:
+def test_the_two_approved_terminal_shapes_are_eligible(status: str) -> None:
     verdict = _decide(status)
 
     assert verdict.eligible is True
     assert verdict.skip_reason is None
 
 
-def test_the_eligible_vocabulary_is_exactly_the_approved_three() -> None:
+def test_the_eligible_vocabulary_is_exactly_the_approved_two() -> None:
+    """`#312` T4 起只剩"正常完成 + 同错熔断"两条（预算到顶改走非终态暂停）。"""
     assert ELIGIBLE_TERMINAL_STATUSES == frozenset({
-        STATUS_COMPLETED, STATUS_MAX_STEPS_EXCEEDED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP})
+        STATUS_COMPLETED, STATUS_IDENTICAL_TOOL_FAILURE_LOOP})
 
 
 # --------------------------------------------------------------------------------------
@@ -96,10 +96,15 @@ def test_a_cancelled_or_orphaned_run_is_excluded(status: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "status", [STATUS_CONTEXT_WINDOW_EXCEEDED, STATUS_FAILED, "some_future_status"],
+    "status",
+    [STATUS_CONTEXT_WINDOW_EXCEEDED, STATUS_FAILED, STATUS_PAUSED, "some_future_status"],
 )
 def test_every_other_terminal_status_fails_closed(status: str) -> None:
-    """未获批的终态一律不合格——包括将来新加的 status（否则它会静默获得自动写记忆的资格）。"""
+    """未获批的终态一律不合格——包括将来新加的 status（否则它会静默获得自动写记忆的资格）。
+
+    `STATUS_PAUSED` 是 `#312` 新增的**执行出口**状态：暂停意味着 run 还没结束
+    （同 run 由 `run/resumed` 接回），此刻抽记忆是过早的 ⇒ 必须落在白名单外。
+    """
     verdict = _decide(status)
 
     assert verdict.eligible is False

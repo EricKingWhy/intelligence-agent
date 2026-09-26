@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import Any
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.budget import SOURCE_DEPLOYMENT
+from agent_harness.agent.run_budget import (
+    LaunchRunBudget,
+    validate_tool_call_limits_registered,
+)
 
 logger = logging.getLogger(__name__)
 from agent_harness.capability.base import CapabilityRegistry
@@ -182,7 +187,7 @@ async def build_runtime(
     workspace_registry: WorkspaceRegistry,
     session_id: str,
     workspace: Path,
-    max_steps: int,
+    max_agent_turns: int,
     permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
     auto_approve: bool | None = None,
     approval_callback: ApprovalCallback | None = None,
@@ -192,6 +197,8 @@ async def build_runtime(
     agent_profile: str | None = None,
     context_providers: list[str] | None = None,
     steer_source: Any | None = None,
+    run_budget: LaunchRunBudget | None = None,
+    local_fuse_source: str = SOURCE_DEPLOYMENT,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -206,6 +213,15 @@ async def build_runtime(
     式审批 callback（见 web 层 PendingApprovalQueue）。
     steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
     MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
+
+    `max_agent_turns`（#308）：**已解析的** local fuse 生效值，本函数只消费结果。刻意
+    **不**在这里解析：装配点只有一个输入，而不是"再判一次策略"（解析点见
+    `agent.budget.resolve_local_fuse`）。
+
+    `run_budget` / `local_fuse_source`（`#312`）：run 作用域账本上下文与 local fuse 的
+    **来源标识**，两者都只是**透传**给 AgentRuntime（判定与解析都在服务层与
+    `agent/run_budget.py`）。默认 None / deployment ⇒ 既有调用方（CLI、单测、
+    delegate 子 runtime）逐字不变：新 run、无 run ceiling、fuse 来源记 deployment。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
@@ -334,6 +350,15 @@ async def build_runtime(
         registry = registry.filtered(profile_spec.tool_scope)
         dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
 
+    # per-tool 配额的**注册名**校验（`#314` / `04 §9.1`）：判定点是这里，因为注册表
+    # 到上一行为止才定型（内置 + artifact 读回 + capability，并按 profile 收窄）。
+    # 位置仍然满足 `11 §6.1` 的"无副作用"：在任何 model / tool / child 工作之前，
+    # 也不落任何消耗预算的事件。子 runtime（delegate）不带 run_budget ⇒ 自然跳过。
+    if run_budget is not None:
+        validate_tool_call_limits_registered(
+            run_budget.limits, registered=[tool.name for tool in registry.list()],
+        )
+
     # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
     # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。
     # 内容边界由这个 registry 决定——coding 收窄后没有 delegate，所以它的 prompt
@@ -371,6 +396,9 @@ async def build_runtime(
                 # Factory 默认 False：B2 契约（child.system_prompt == spec.system_prompt）
                 # 的成立必须与"工具恰好没有 guidance"无关。
                 include_tool_guidance=True,
+                # child 的 local fuse 上限（#308）：档位声明（内置三档位是 None=继承）
+                # 只能收窄到 Deployment ceiling 之下，越界在 Factory.create 里被拒。
+                local_max_agent_turns=settings.local_max_agent_turns,
             ),
             source_registry=registry,
             session_store=session_store,
@@ -410,7 +438,7 @@ async def build_runtime(
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
                               overflow_handler=overflow_handler,
                               operation_ledger=stores.operation_ledger),
-        max_steps=max_steps,
+        max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,
         context_builder=ContextBuilder(
@@ -451,6 +479,9 @@ async def build_runtime(
                              else "fallback"),
         observability_sink=get_observability_sink(settings),
         steer_source=steer_source,
+        # `#312`：run 作用域账本（暂停/恢复）+ 生效 fuse 的来源标识。装配点只透传。
+        run_budget=run_budget,
+        local_fuse_source=local_fuse_source,
         # #198：生效档位（未指定 = "main"）与被 tool_scope 剔除的工具名——
         # run_config 结构化日志与 run/started 事件的数据源。
         agent_profile=(agent_profile if agent_profile is not None else "main"),

@@ -66,7 +66,7 @@ def _make_runtime(workspace: Path) -> AgentRuntime:
         model=model,
         registry=registry,
         executor=ToolExecutor(registry),
-        max_steps=10,
+        max_agent_turns=10,
     )
 
 

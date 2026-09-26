@@ -29,7 +29,7 @@ export interface ComposerControls {
  *  `context_providers` 参数与后端契约一字未动，程序化调用仍可显式传值。 */
 export function toAmendFields(
   c: ComposerControls,
-): Omit<SendMessagePayload, 'content' | 'mode' | 'max_steps'> {
+): Omit<SendMessagePayload, 'content' | 'mode' | 'budget'> {
   return {
     model: c.model ?? undefined,
     agent_profile: c.agentProfile ?? undefined,

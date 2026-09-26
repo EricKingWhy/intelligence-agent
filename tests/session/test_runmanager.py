@@ -28,7 +28,7 @@ def _make_session(tmp_path: Path) -> Session:
 def _runtime(model) -> AgentRuntime:
     return AgentRuntime(
         model=model, registry=ToolRegistry(),
-        executor=ToolExecutor(ToolRegistry()), max_steps=5,
+        executor=ToolExecutor(ToolRegistry()), max_agent_turns=5,
     )
 
 

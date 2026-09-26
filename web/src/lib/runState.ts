@@ -10,7 +10,7 @@
  * that themselves come from events — no fabrication (zero-fake-metrics rule).
  */
 
-import { Activity, CircleDashed, CircleSlash, Loader2, SquareCheckBig, SquareX } from 'lucide-react';
+import { Activity, CircleDashed, CircleSlash, Loader2, PauseCircle, SquareCheckBig, SquareX } from 'lucide-react';
 import { EventType, type AgentEvent, type ConversationState } from '../types';
 import { formatDuration } from './format';
 
@@ -22,6 +22,11 @@ import { formatDuration } from './format';
  * `isRecoverableRun` / `StepDetail` 的 run 时长 / `useSession` 的终态检测
  * 三处各自枚举，全都漏了它，于是崩溃会话经后端恢复后「恢复会话」按钮永不
  * 消失、点它又是一次 no-op（用户实测症状：「点了什么反应也没有」）。
+ *
+ * ⚠ `#312` 明确**不**把 `run/paused` 加进来：暂停是非终态（后端 `03 §5`
+ * 的六值状态集合里它与终态并列），加进来会让"暂停"被当作"跑完了"——
+ * 终端帧判定、时长结算、恢复入口全都会据此走错分支。它的**执行区间**收口语义
+ * 单独由 `scanRuns` 处理（见那里：暂停也算"这一轮不再是未收口的悬空 run"）。
  */
 export const RUN_TERMINAL_TYPES: ReadonlySet<string> = new Set<string>([
   EventType.RUN_COMPLETED,
@@ -36,6 +41,7 @@ export type RunPulseState =
   | 'completed'
   | 'interrupted' // 最近一个 run 被进程重启打断（run/interrupted）——终态但非完成
   | 'cancelled' // run/failed.data.reason === 'cancelled'（客户端断连，中断 ≠ 错误）
+  | 'paused' // #312：预算到顶的**非终态**暂停，等抬高绝对 ceiling 后同 run 恢复
   | 'failed';
 
 export interface RunPulseDescriptor {
@@ -63,6 +69,9 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   interrupted: { label: '已中断', className: 'pulse-interrupted', Icon: CircleSlash },
   // 已取消：客户端断连（run/failed.reason=cancelled，da394a9）——中性色，非红色报错
   cancelled: { label: '已取消', className: 'pulse-cancelled', Icon: SquareX },
+  // 已暂停（#312）：预算到顶，**等着被恢复**——中性色 + 暂停图标。不能用
+  // 「已完成」的绿对勾（那是"这场跑完了"），也不能用失败的红叉（没有失败）。
+  paused: { label: '已暂停', className: 'pulse-paused', Icon: PauseCircle },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
 };
 
@@ -99,6 +108,13 @@ export function deriveRunPulse(
     case 'completed': {
       const r = PULSE_TABLE.completed;
       return { state: 'completed', label: r.label, className: r.className, Icon: r.Icon };
+    }
+    case 'paused': {
+      // #312：预算到顶的暂停**不是**这三种结局里的任何一种——单列一档。
+      // 分支放在 run_status 上（而不是像 interrupted 那样"优先于 run_status"）：
+      // 暂停就是 run_status 自己的值，投影里没有第二处要争的真相。
+      const r = PULSE_TABLE.paused;
+      return { state: 'paused', label: r.label, className: r.className, Icon: r.Icon };
     }
     case 'failed': {
       // 取消 ≠ 失败：断连导致的 run/failed 走中性「已取消」通道（da394a9 语义）
@@ -186,6 +202,11 @@ function coarsenPulseState(state: RunPulseState): string {
       return '运行中';
     case 'completed':
       return '已完成';
+    case 'paused':
+      // #312：Inspector 与顶栏同口径——暂停是一个**独立**的结局档，不许被
+      // 粗化成「运行中」（那会让 Inspector 说"还在跑"而顶栏说"已暂停"）
+      // 也不许并进「已完成」（它会诱发"任务完成了"的误读）。
+      return '已暂停';
     case 'interrupted':
       return '已中断';
     case 'cancelled':
@@ -279,7 +300,14 @@ export function hasUnterminatedRun(events: AgentEvent[]): boolean {
   return scanRuns(events).unterminated;
 }
 
-/** 一并取出「有没有 run」与「最后一个 run 是否收口」——两个消费者的共同扫描。 */
+/** 一并取出「有没有 run」与「最后一个 run 是否收口」——两个消费者的共同扫描。
+ *
+ *  `#312`：`run/paused` 也算**收口**（这一轮不再是悬空 run），`run/resumed` 重新
+ *  打开它——两侧与后端 `session/interrupt.py::detect_unterminated_runs` 逐字对齐
+ *  （暂停的 run 由后续 `run/resumed` 重新打开，因此健康暂停的会话不该被报成
+ *  "缺 run 终态"）。不这样对齐的后果很具体：暂停会话会亮出「恢复会话」按钮，
+ *  而后端对它的答复是"已收口、无可修复项"——用户点一个必然 no-op 的按钮，
+ *  正是 T8 #138 修过的那类假承诺。 */
 function scanRuns(events: AgentEvent[]): { hasRun: boolean; unterminated: boolean } {
   let hasRun = false;
   let lastRunTerminated = false;
@@ -287,8 +315,11 @@ function scanRuns(events: AgentEvent[]): { hasRun: boolean; unterminated: boolea
     if (e.type === EventType.RUN_STARTED) {
       hasRun = true;
       lastRunTerminated = false;
-    } else if (RUN_TERMINAL_TYPES.has(e.type)) {
+    } else if (RUN_TERMINAL_TYPES.has(e.type) || e.type === EventType.RUN_PAUSED) {
       lastRunTerminated = true;
+    } else if (e.type === EventType.RUN_RESUMED) {
+      // 恢复把同一个逻辑 run 重新打开：暂停期间"已收口"的判断随之作废。
+      lastRunTerminated = false;
     }
   }
   return { hasRun, unterminated: hasRun && !lastRunTerminated };

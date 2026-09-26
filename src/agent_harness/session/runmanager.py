@@ -33,7 +33,13 @@ from dataclasses import dataclass, field
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.memory.types import memory_session_var
-from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_STARTED, Session
+from agent_harness.session import (
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_PAUSED,
+    RUN_STARTED,
+    Session,
+)
 
 logger = logging.getLogger("agent_harness.session.runmanager")
 
@@ -61,6 +67,11 @@ class ManagedRun:
         self._next_subscriber_id = 0
         self._last_enqueued_seq = -1
         self.terminal = False
+        # #312（R4）：本执行以 `run/paused` 收口——非终态，但**同样不再调度新工作**
+        # （`_drive` 的收口处解释为什么不接力）。与 terminal 分开记：terminal 描述
+        # "这个 run task 结束了"（决定 get_active 是否把它算在途），paused 描述
+        # "逻辑 run 还没完，只是让位给 ceiling"（决定要不要接力投递下一条排队输入）。
+        self.paused = False
         self.reap_requested = False
         self._orphan_handle: asyncio.TimerHandle | None = None
         # run/started 落盘后填上（ADR-0030 §4.7）：服务层要用它写
@@ -215,6 +226,10 @@ class ManagedRun:
         if event.type in (RUN_COMPLETED, RUN_FAILED) and not self.terminal:
             self.terminal = True
             self._cancel_orphan_timer()
+        # #312：暂停（非终态）——不置 terminal（逻辑 run 未终结，get_active 的
+        # 语义见其 docstring），只置 paused 供 `_drive` 抑制接力投递。
+        if event.type == RUN_PAUSED:
+            self.paused = True
 
 
 class RunManager:
@@ -237,19 +252,44 @@ class RunManager:
         # = 不缓存（CLI 等调用方不消费看板）；Web 层在正确的时刻叫它。
         self._on_context_snapshot = on_context_snapshot
         self._runs: dict[str, ManagedRun] = {}
+        # `#312`：同会话恢复的 CAS 临界区锁（每会话一把，终身保留——与 `_runs`
+        # 同一条"每会话一条、不回收"的口径）。
+        #
+        # 为什么锁挂在**这里**而不是 `SessionService`：Web 传输层每个请求都新建一个
+        # 服务实例（`session_service(app.state.agent)` 在处理器里），锁挂在实例上等于
+        # 没有互斥——两个并发 resume 会各自读到同一个 version 然后都启动。RunManager
+        # 才是每会话状态的常驻 owner（本字典与 `_runs` 同寿命），所以它同时是这把锁
+        # 的正确归属（AC-8：并发恢复只允许一个赢家）。
+        self._session_locks: dict[str, asyncio.Lock] = {}
         # 关停中：`aclose()` 取消在途 run 会走 `_drive` 的 finally，而那条路径默认
         # 会触发接力投递——关机时又拉起新 run 显然是错的（进程马上没了，新 run
         # 只会被半个生命周期地拖死）。置位后终态回调直接跳过。
         self._closing = False
 
+    def session_lock(self, session_id: str) -> asyncio.Lock:
+        """取得该会话的串行化锁（同会话的 CAS 临界区，`#312`）。
+
+        调用方约定：**只在临界区持有**（读 version → 写 `run/resumed`），不要跨
+        整个 run 生命周期持有——不同临界区之间（launch 之后）的串行化由
+        `get_active` 的 409 负责。
+        """
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
+
     def launch(
-        self, session: Session, runtime: AgentRuntime, user_input: str,
+        self, session: Session, runtime: AgentRuntime, user_input: str | None,
     ) -> tuple[ManagedRun, Subscriber]:
         """启动 detached run 并返回（run, 首个订阅者）。
 
         task 先建、后启动订阅（launch 返回后由调用方订阅）——事件不会丢：
         run 的首批 yield 发生在首个 await 点之后，而订阅者队列在 task 首次
         被调度前就已挂上（同一事件循环内无插队窗口）。
+
+        ``user_input=None``（`#312` 同 run 续跑，无新任务文本）原样透传：
+        由 runtime 决定"不落 user/message"——本层不替它编文案。
         """
         run = ManagedRun(session, self)
         # #200：runtime 引用存到 ManagedRun——context-usage 端点从在途 run 的
@@ -265,7 +305,7 @@ class RunManager:
         return run, subscriber
 
     async def _drive(self, run: ManagedRun, runtime: AgentRuntime,
-                     user_input: str) -> None:
+                     user_input: str | None) -> None:
         """run task 本体：驱动 run_stream，终结时广播哨兵。"""
         token = memory_session_var.set(run.session.session_id)
         run.session.add_listener(run._on_session_event)
@@ -289,7 +329,12 @@ class RunManager:
             # 留着 runtime 就等于把模型客户端 / registry / sandbox 句柄一起钉住
             # （终端 run 的 runtime 再无读者——端点只读在途 run 的）。
             run.runtime = None
-            await self._notify_run_terminal(run.session.session_id)
+            # R4（#312）：暂停不是"这轮干完了"——接力投递会在暂停之上直接开一个
+            # **新的 run_id**，而 ceiling 是按逻辑 run 记账的，那等于绕开刚生效的
+            # 上限。暂停后的会话只由显式 resume（带 expected_version 的 CAS）唤醒，
+            # 未投递输入继续留在队列里。
+            if not run.paused:
+                await self._notify_run_terminal(run.session.session_id)
 
     def _capture_context_snapshot(self, run: ManagedRun, runtime: AgentRuntime) -> None:
         """run 收口时缓存 context-usage 快照（#200）。快照在 run 收尾时计算
@@ -386,3 +431,6 @@ class RunManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*tasks, return_exceptions=True)
         self._runs.clear()
+        # 锁与 `_runs` 同寿命（构造注释里的口径）：`aclose` 清一张表就清两张，
+        # 免得"同一条口径"这句话在关停之后只剩一半是真的。
+        self._session_locks.clear()

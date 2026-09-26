@@ -147,7 +147,7 @@ async def _build(tmp_path, agent_profile: str | None,
             workspace_registry=workspace_registry,
             session_id="sess-198",
             workspace=tmp_path / "workspaces" / "sess-198",
-            max_steps=10,
+            max_agent_turns=10,
             agent_profile=agent_profile,
         )
 
