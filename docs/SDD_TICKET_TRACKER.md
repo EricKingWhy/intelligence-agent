@@ -5979,7 +5979,7 @@ sha `6d0b2548b502` / tree `18c783bb`**。**已集成**（PR **#335** → merge *
 | 8 | `568231c` | docs | `docs/gate/e71dff5f8ea82f8115f44e53363c851b659c9653.json` 落盘（Gate-0 裸全量 **6/6 PASS**，11.03s）（1 文件 / +133） |
 | 9 | `b7a83a9` | docs | **进度落点笔**：tracker `## T8` 段（追加在 EOF）+ 归档 T8 小节（追加在 EOF）+ `PHASE_STATUS` 索引与「按日定位」表（3 文件 / +234 −2） |
 | 10 | `16f992a` | docs | 覆盖闸门读数改为**绑定 sha** 的形态（844 / 576 / 268 @ `b7a83a9`），替换落行前的旧读数（3 文件 / +6 −4） |
-| 11 | 本集成落账笔 | docs | **集成落账**（PR #335 / merge `76cc9c46`，服务端 `gate0` pass 24s）+ `#316` 关单 + §14.9 回补通知 + `PHASE_STATUS` 索引与按日表同步（见本段末「集成」小节） |
+| 11 | 本集成落账笔 | docs | **集成落账**（PR #335 / merge `76cc9c46`，服务端 `gate0` pass 24s）+ `#316` 关单 + §14.9 回补通知 + `PHASE_STATUS` 索引与按日表同步 + **本记录分支 tip `5fd6973` 的 Gate-0 读数落盘**（见本段末「集成」小节） |
 
 **已集成**（PR **#335** → merge **`76cc9c46`**，服务端 `gate0` **pass 24s**，`#316` 已 CLOSED；集成读数、
 读数传递与 §14.9 回补见本段末「集成」小节）。
@@ -6097,3 +6097,10 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   §8.1 判据 ①② 在施工分支上当场复核通过（`e71dff5..HEAD` 只 `A`/`M` 且全命中 `DOC_PATTERN`；
   `git status --short` 只 `?? .zcodeignore`）。
 - `#316` 已按 §14.12 CLOSED；残余 ⑪ 的两条待裁决项**不随集成消解**，仍挂在本段末与归档集成落账小节。
+- **本记录分支自身的读数**（分支 `zcode/T316-integration-record`，基点 = merge `76cc9c46`；记录笔
+  `5fd6973`）：Gate-0 裸全量 **6/6 PASS**，墙钟 **67.22s**（tsc 车道 37.36s ⇒ 超 60s **预算目标**只告警、
+  不改判定），读数落盘 `docs/gate/5fd6973cfbeb2f29fc9067b7677b0acc97d19e37.json`（tree
+  `9e546b348f03`，`tracked_matches_head=true`，未跟踪清单只 `.zcodeignore`）；同 tip 覆盖闸门 **exit 0**
+  （覆盖区间 `09ca47a..HEAD` / 提交总数 **847** / 已审查 **576** / 待判定 **271**）；本节 §8.1 判据 ①
+  （`git diff --name-status --no-renames 76cc9c46 HEAD` = 3 文件全 `M` 且全命中 `DOC_PATTERN`）与判据 ②
+  （`git status --short` 只 `?? .zcodeignore`）、`git diff --check 76cc9c46..HEAD` exit 0 均在记录笔上当场复核。
