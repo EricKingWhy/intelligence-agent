@@ -362,6 +362,10 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
   coverage 1.62），tip `28995ce` / tree `215e16e2f244`、`tracked_matches_head=true`、未跟踪清单只
   `.zcodeignore`。bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，另跑 `git diff --check f13ed0d..HEAD`
   **exit 0** 补上「已提交未推送」那 17 笔的范围（§14.10 不手抄读数：以上数字全部取自该 json）。
+- **集成候选树的复跑**（先回后正把 `origin/main` 合并进来之后；合并内容为 docs 与 `docs/gate/**`，
+  与本票改动面只在 `docs/SDD_TICKET_TRACKER.md` 相交、无冲突）：tip `72541ee` / tree `9a834ae55551` 上
+  **6/6 PASS**，墙钟 **22.66s**，读数落盘 `docs/gate/72541eed2909c54c1be2e15571be9bde690786ca.json`。
+  重车道**未**重跑（合并对 pytest / vitest / e2e 的输入面零改动）⇒ 重车道读数以**代码冻结树 `cf1879d`** 为准。
 - 审查覆盖闸门：`scripts/check_review_coverage.py` **exit 0**（本票台账行 327–334；集成前的**前置条件**）。
 - 重车道（全量 pytest / vitest / oxlint / vite build / playwright e2e）的读数同样来自**可复跑的命令 + 写进
   集成记录**（`docs/SDD_TICKET_TRACKER.md` 的 `## T7` 段），不在本文内手抄。

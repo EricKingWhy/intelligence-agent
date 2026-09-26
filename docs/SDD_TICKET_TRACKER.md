@@ -5900,6 +5900,17 @@ TS2741** —— `#315` 给 `RunLimitsFacts` 加了必需键 `deadline_at`，而�
 `089524a~1..HEAD` 每条 commit 均有归属）。该 json 由**本读数笔**入库（`.json` 在 docs-only 白名单里 ⇒
 **无需**新台账行）。
 
+**集成前复跑（先回后正之后的树）**：`main` 在本票期间前进了 3 笔（`9b8bde42` CLAUDE.md 对齐 + tracker 残余④、
+`5f640259` 其 Gate-0 读数、`063487a7` 合并 PR #332），全部是 docs / `docs/gate/**` ⇒ 与本票改动面只有
+`docs/SDD_TICKET_TRACKER.md` 相交（对方改在 L3925 附近、本票在 EOF 追加）⇒ **`git merge origin/main` 无冲突**
+（merge `72541ee`；`git diff --stat cf1879d..HEAD -- src tests evaluation web scripts .github` 仍为空
+⇒ **代码冻结树不变**）。合并后在**集成候选 tip `72541ee` / tree `9a834ae55551`** 上重跑裸全量：
+**6/6 PASS**，墙钟 **22.66s**（diff-check 0.06 / ruff 0.08 / oxlint 0.26 / tsc 11.67 / guards 9.29 /
+coverage 1.29），读数落盘 `docs/gate/72541eed2909c54c1be2e15571be9bde690786ca.json`
+（`tracked_matches_head=true`、未跟踪清单只 `.zcodeignore`）；`git diff --check f13ed0d..HEAD` 亦 exit 0。
+**没有重跑重车道**：合并带来的只有文档与 `docs/gate/**`（对 pytest / vitest / e2e 的输入面零改动），
+重车道读数仍以代码冻结树 `cf1879d` 为准 —— 这一点在集成记录里如实写明。
+
 **审查轮次分类（§8.3）**：发现阶段两轴（`f13ed0d..03c1830`）→ 处置 `aa003b4` + `24a1acc` → **修后重审**两轴
 （冻结 `24a1acc`）→ **发现阶段补审**（§8.3 第 8 条，本票一次，已用尽）→ 处置 `98d56d6` → 权威车道抓回前端缺陷 `71f19f8`
 → **定向两轴审查**（内容又变过，冻结 `71f19f8`）→ 处置 `c6d9cd6` → **修后重审**（冻结 `c6d9cd6`）→ 8 条 P3 收尾 `cf1879d`
