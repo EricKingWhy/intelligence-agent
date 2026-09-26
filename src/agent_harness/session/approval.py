@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from agent_harness.session.event import (
     PERMISSION_CHANGED,
+    PERMISSION_RESOLVED,
     SESSION_STARTED,
     TOOL_APPROVAL_REQUESTED,
     SessionEvent,
@@ -272,6 +273,32 @@ def effective_auto_approve(events: list[SessionEvent]) -> bool | None:
     return declared_auto_approve(events)
 
 
+def unresolved_approval_ids(events: list[SessionEvent]) -> list[str]:
+    """会话里**已请求但没有裁决**的 ``approval_id``（`02 §5.4` 第 2 条的判据，T8 #316）。
+
+    配对键是 ``approval_id``（两个写入者都在这个键上落事件）：``tool/approval-requested``
+    由交互式 callback 在**等待决策之前**落盘，``permission/resolved`` 在决策（或
+    fail-closed 超时）之后落盘——所以"有 requested 无 resolved"恰好是"这次审批还没
+    结论"，与 `PendingApprovalQueue` 的进程内视图同源同义（队列本身不进 SessionEvent，
+    不变量 #4）。
+
+    按事件出现顺序返回（可复现），同一 id 多条 requested 只算一次；缺 ``approval_id``
+    的事件跳过（腐烂数据只让这一项失去判据，不抛错——与 `declared_permission_mode`
+    同一条纪律）。
+    """
+    requested: dict[str, None] = {}
+    resolved: set[str] = set()
+    for event in events:
+        approval_id = event.data.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            continue
+        if event.type == TOOL_APPROVAL_REQUESTED:
+            requested.setdefault(approval_id, None)
+        elif event.type == PERMISSION_RESOLVED:
+            resolved.add(approval_id)
+    return [approval_id for approval_id in requested if approval_id not in resolved]
+
+
 def append_permission_change(session: Session, change: PermissionChange) -> PermissionChange:
     """追加 ``permission/changed``——PERMISSION_CHANGED 的**唯一**写入口（F18-A #282）。
 
@@ -299,4 +326,5 @@ __all__ = [
     "declared_permission_mode",
     "effective_auto_approve",
     "effective_permission_mode",
+    "unresolved_approval_ids",
 ]
