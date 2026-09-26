@@ -130,6 +130,15 @@ class AdjudicationReasonCode(str, Enum):
 # --------------------------------------------------------------------------------------
 
 
+class ModelOutputFailureKind(str, Enum):
+    """Stable, content-free classification for rejected model responses."""
+
+    INVALID_RESPONSE_TYPE = "invalid_response_type"
+    EMPTY_OUTPUT = "empty_output"
+    INVALID_JSON = "invalid_json"
+    CONTRACT_VIOLATION = "contract_violation"
+
+
 class ModelOutputError(ValueError):
     """模型输出不是一份合法契约。
 
@@ -137,6 +146,13 @@ class ModelOutputError(ValueError):
     而**不是** abstention——把"模型没按契约说话"当成"模型说没有可记的"，会用一次
     格式错误换掉一轮真正的尝试。
     """
+
+    def __init__(
+        self, message: str, *,
+        failure_kind: ModelOutputFailureKind = ModelOutputFailureKind.CONTRACT_VIOLATION,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 class _ContractModel(_BaseModel):
@@ -311,21 +327,32 @@ def _validate(raw: str | Mapping[str, Any], model: type[_ContractModel]):
         return model.model_validate(payload)
     except ValidationError as error:
         # 只带前若干条错误：整份 pydantic 报告会很长，而这段文字会进日志与事件。
-        raise ModelOutputError(f"{model.__name__}: {_summarize(error)}") from None
+        raise ModelOutputError(
+            f"{model.__name__}: {_summarize(error)}",
+            failure_kind=ModelOutputFailureKind.CONTRACT_VIOLATION,
+        ) from None
 
 
 def _loads(raw: str | Mapping[str, Any]) -> Any:
     if isinstance(raw, Mapping):
         return raw
     if not isinstance(raw, str):
-        raise ModelOutputError(f"expected a JSON object, got {type(raw).__name__}")
+        raise ModelOutputError(
+            f"expected a JSON object, got {type(raw).__name__}",
+            failure_kind=ModelOutputFailureKind.INVALID_RESPONSE_TYPE,
+        )
     text = raw.strip()
     if not text:
-        raise ModelOutputError("empty model output")
+        raise ModelOutputError(
+            "empty model output", failure_kind=ModelOutputFailureKind.EMPTY_OUTPUT,
+        )
     try:
         return json.loads(_JSON_FENCE_RE.sub("", text).strip())
     except json.JSONDecodeError as error:
-        raise ModelOutputError(f"model output is not JSON: {error}") from None
+        raise ModelOutputError(
+            f"model output is not JSON: {error}",
+            failure_kind=ModelOutputFailureKind.INVALID_JSON,
+        ) from None
 
 
 def _summarize(error: ValidationError, *, limit: int = 3) -> str:

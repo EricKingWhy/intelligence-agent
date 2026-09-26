@@ -43,7 +43,7 @@ _MEMORY_METADATA_FIELDS = frozenset({
     "input_tokens_estimated",
     "kind", "scope", "source_authority", "memory_id", "memory_ids",
     "recall_target", "recall_hits", "retry_count", "attempt_count",
-    "schema_valid", "safety_outcome", "compacted_turn_count",
+    "schema_valid", "output_failure_kind", "safety_outcome", "compacted_turn_count",
     "input_sha256", "output_sha256", "content_sha256", "evidence_sha256",
     "output_tokens_estimated",
 })

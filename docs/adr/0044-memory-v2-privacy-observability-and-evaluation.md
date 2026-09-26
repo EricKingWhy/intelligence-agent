@@ -33,7 +33,7 @@ SQLite 与派生索引仍是业务数据所有者。
 ### D2 — 内容只在进程内计算哈希；发送字段走 allowlist
 
 Memory V2 observation 只发送稳定的标识、阶段、模型别名、动作、kind、scope、计数、reason code、
-attempt/fallback、schema/safety 结果、延迟、token 数、成本及 SHA-256 哈希。输入、输出、候选内容、
+attempt/fallback、schema/safety 结果、输出失败类别、延迟、token 数、成本及 SHA-256 哈希。输入、输出、候选内容、
 证据、provider response、秘密凭证和自由文本错误不发送。官方 SDK 会自动把项目 `public_key`
 附在 OTel `scope.attributes.public_key`；实际 trace API 回读将该 instrumentation scope 投影为
 `metadata.scope.attributes.public_key`（trace 与 observation 都可能出现）。按用户批准，它是非秘密
@@ -65,7 +65,9 @@ contradiction 标签。项目自己的冻结语料是 release gate；公开基�
 ### D5 — 报告只保存聚合指标与可复现身份
 
 报告保存 corpus 版本 / digest、code SHA / tree SHA、配置别名（不含配置值）、case 计数、阻塞指标、
-累计 latency / token / cost、run ID 和重复运行的 `repeat_of`。报告不保存题面、答案、会话、模型响应或
+安全 job reason 与输出失败类别的直方图、累计 latency / token / cost、run ID 和重复运行的 `repeat_of`。
+输出失败类别仅为 `invalid_response_type` / `empty_output` / `invalid_json` / `contract_violation`；
+未知值折叠为 `other`。报告不保存题面、答案、会话、模型响应或
 记忆正文。身份来自运行前固定的已提交 HEAD/tree；Gate-0 的工作树检查同时拒绝追踪文件偏离、隐藏索引位和
 未跟踪车道输入，运行后再次验证 HEAD/tree 与工作树，变化或无法验证时报告失败。相同 report path 以独占创建
 拒绝覆盖；重复的 case / trace 身份会失败，明确的重复实验用新 run ID 并记录 `repeat_of`。

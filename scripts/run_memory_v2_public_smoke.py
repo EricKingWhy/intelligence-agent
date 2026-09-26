@@ -35,7 +35,7 @@ from agent_harness.memory.embeddings import create_embeddings
 from agent_harness.memory.milvus_vector_store import MilvusVectorStore
 from agent_harness.memory.v2.assembly import build_memory_v2_service
 from agent_harness.memory.v2.executor import DegradedReason, MemoryJobExecutor
-from agent_harness.memory.v2.formation import ModelSkipReason
+from agent_harness.memory.v2.formation import ModelOutputFailureKind, ModelSkipReason
 from agent_harness.memory.v2.jobs import MemoryJobOutcome, SqliteMemoryV2JobStore
 from agent_harness.memory.v2.recall import MemoryV2ContextProvider
 from agent_harness.memory.v2.roles import resolve_memory_roles
@@ -60,12 +60,17 @@ from evaluation.memory_v2_public_benchmarks import (
 _SAFE_JOB_REASON_CODES = frozenset(
     reason.value for reason in (*DegradedReason, *ModelSkipReason)
 )
+_SAFE_MODEL_OUTPUT_FAILURE_KINDS = frozenset(kind.value for kind in ModelOutputFailureKind)
 
 
 def _safe_job_reason_code(reason: str | None) -> str:
     if reason is None:
         return "none"
     return reason if reason in _SAFE_JOB_REASON_CODES else "other"
+
+
+def _safe_model_output_failure_kind(kind: Any) -> str:
+    return kind if isinstance(kind, str) and kind in _SAFE_MODEL_OUTPUT_FAILURE_KINDS else "other"
 
 
 def _case_size(case: PublicBenchmarkCase) -> tuple[int, int, int, str]:
@@ -238,6 +243,7 @@ async def run_smoke(
     session_store = JsonlSessionStore(root=root / "sessions")
     job_session_case: dict[str, dict[str, int]] = {}
     case_usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
+    output_failure_kinds: Counter[str] = Counter()
     evaluation_details: dict[str, Any] = {}
     try:
         collections = await vectors.connect()
@@ -253,6 +259,12 @@ async def run_smoke(
         await jobs.initialize()
 
         def observe(stage: str, metadata: dict[str, Any]) -> None:
+            if stage == "schema":
+                if metadata.get("schema_valid") is False:
+                    output_failure_kinds[
+                        _safe_model_output_failure_kind(metadata.get("output_failure_kind"))
+                    ] += 1
+                return
             if stage != "model":
                 return
             usage = job_session_case.get(str(metadata.get("session_id", "")))
@@ -423,6 +435,7 @@ async def run_smoke(
             "formation_model_calls": case_usage["model_calls"],
             "formation_jobs": dict(sorted(jobs_by_stage.items())),
             "formation_job_reasons": dict(sorted(reasons.items())),
+            "formation_output_failure_kinds": dict(sorted(output_failure_kinds.items())),
             "source_session_count": len(local_to_source),
             "answer_latency_ms": answer_latency_ms,
             "token_usage_source": {

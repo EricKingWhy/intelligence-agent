@@ -290,6 +290,7 @@ def test_memory_observation_captures_only_allowlisted_metadata():
         metadata={
             "job_id": "job-1", "stage": "forming", "kind": "semantic",
             "scope": "user_global", "input_tokens": 42,
+            "output_failure_kind": "contract_violation",
             "counts": {"accepted": 1, "secret": "private evidence"},
             "kind_counts": {"semantic": 1},
             "source_authority": ["user", "private evidence"],
@@ -303,6 +304,7 @@ def test_memory_observation_captures_only_allowlisted_metadata():
     assert observation.kwargs["metadata"] == {
         "job_id": "job-1", "stage": "forming", "observation": "formation",
         "kind": "semantic", "scope": "user_global", "input_tokens": 42,
+        "output_failure_kind": "contract_violation",
         "counts": {"accepted": 1},
         "kind_counts": {"semantic": 1},
         "source_authority": ["user"],

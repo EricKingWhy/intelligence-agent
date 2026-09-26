@@ -660,13 +660,20 @@ async def test_a_non_transient_failure_is_neither_retried_nor_switched(env: Env)
 async def test_a_schema_failure_is_a_failed_attempt_that_stops(env: Env) -> None:
     """R3 + R9：解析失败是**失败尝试**（不是 abstention），且不重试。"""
     invoker = FakeInvoker(formation=["这不是 JSON", _formation_no_memory()], adjudication=[])
-    _job, result, _sink = await _run(env, invoker, _fallback=True)
+    observations: list[tuple[str, dict]] = []
+    _job, result, _sink = await _run(
+        env, invoker, _fallback=True,
+        observer=lambda name, metadata: observations.append((name, metadata)),
+    )
 
     assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1)]
     assert result is not None
     assert result.stage is MemoryJobStage.DEGRADED
     assert result.reason == DegradedReason.INVALID_MODEL_OUTPUT.value
     assert result.outcome is None
+    schema = next(metadata for name, metadata in observations if name == "schema")
+    assert schema["output_failure_kind"] == "invalid_json"
+    assert "这不是 JSON" not in repr(observations)
 
 
 @pytest.mark.asyncio

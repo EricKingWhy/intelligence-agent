@@ -533,11 +533,12 @@ class MemoryJobExecutor:
                 "schema_valid": True,
             })
             return result, formation_input.refs
-        except ModelOutputError:
+        except ModelOutputError as error:
             # R3：解析失败是一次**失败尝试**（`begin_call` 已经记过账），但不重试（R9）。
             self._observe("schema", {
                 "job_id": job.job_id, "model_stage": MemoryModelStage.FORMATION.value,
                 "schema_valid": False, "reason_code": "invalid_model_output",
+                "output_failure_kind": error.failure_kind.value,
             })
             raise _Degraded(DegradedReason.INVALID_MODEL_OUTPUT) from None
 
@@ -557,10 +558,11 @@ class MemoryJobExecutor:
                                  progress=progress)
         try:
             verdicts = parse_adjudication_results(raw)
-        except ModelOutputError:
+        except ModelOutputError as error:
             self._observe("schema", {
                 "job_id": job.job_id, "model_stage": MemoryModelStage.ADJUDICATION.value,
                 "schema_valid": False, "reason_code": "invalid_model_output",
+                "output_failure_kind": error.failure_kind.value,
             })
             raise _Degraded(DegradedReason.INVALID_MODEL_OUTPUT) from None
         if len(verdicts) != len(candidates):
