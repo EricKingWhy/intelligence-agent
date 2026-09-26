@@ -31,7 +31,34 @@ def _case(case_id: str, *, size: int, abstention: bool = False, evidence: bool =
         question="Which fact?",
         expected_answer=None if abstention else "a fact",
         relevant_session_ids=(f"session-{case_id}",) if evidence else (),
+        relevant_turn_ids=(f"session-{case_id}:0",) if evidence else (),
         expected_abstention=abstention,
+    )
+
+
+def _locomo_case(case_id: str, *, evidence_role: str, size: int):
+    user_turn = PublicTurn(
+        role="speaker-a", content="x" * size if evidence_role == "speaker-a" else "",
+        turn_id=f"{case_id}-user",
+    )
+    assistant_turn = PublicTurn(
+        role="speaker-b", content="x" * size if evidence_role == "speaker-b" else "",
+        turn_id=f"{case_id}-assistant",
+    )
+    return PublicBenchmarkCase(
+        benchmark="locomo",
+        case_id=case_id,
+        category="1",
+        sessions=(PublicSession(
+            session_id=f"session-{case_id}", timestamp=None,
+            turns=(user_turn, assistant_turn),
+        ),),
+        question="Which fact?",
+        expected_answer="a fact",
+        relevant_session_ids=(f"session-{case_id}",),
+        relevant_turn_ids=(
+            f"{case_id}-user" if evidence_role == "speaker-a" else f"{case_id}-assistant",
+        ),
     )
 
 
@@ -44,6 +71,47 @@ def test_public_smoke_selects_smallest_answerable_case_with_evidence():
     ]
 
     assert select_smoke_case(cases).case_id == "small"
+
+
+def test_longmemeval_smoke_selection_requires_annotated_user_evidence():
+    assistant_only = _case("assistant-only", size=1)
+    assistant_only = replace(assistant_only, sessions=(PublicSession(
+        session_id="session-assistant-only", timestamp=None,
+        turns=(PublicTurn(role="assistant", content="x"),),
+    ),))
+
+    assert select_smoke_case([assistant_only, _case("user-evidence", size=5)]).case_id == (
+        "user-evidence"
+    )
+
+
+def test_locomo_smoke_selection_requires_first_speaker_evidence():
+    cases = [
+        _locomo_case("assistant-only", evidence_role="speaker-b", size=1),
+        _locomo_case("user-evidence", evidence_role="speaker-a", size=5),
+    ]
+
+    assert select_smoke_case(cases).case_id == "user-evidence"
+
+
+def test_smoke_selection_fails_closed_when_only_assistant_evidence_exists():
+    longmemeval = _case("assistant-only", size=1)
+    longmemeval = replace(longmemeval, sessions=(PublicSession(
+        session_id="session-assistant-only", timestamp=None,
+        turns=(PublicTurn(role="assistant", content="x"),),
+    ),))
+    cases = [
+        longmemeval,
+        _locomo_case("locomo-assistant-only", evidence_role="speaker-b", size=1),
+    ]
+
+    for case in cases:
+        try:
+            select_smoke_case([case])
+        except ValueError as error:
+            assert "annotated user evidence" in str(error)
+        else:
+            raise AssertionError("assistant-only evidence was selected for durable memory smoke")
 
 
 def test_public_smoke_selection_fails_when_no_answerable_evidence_exists():

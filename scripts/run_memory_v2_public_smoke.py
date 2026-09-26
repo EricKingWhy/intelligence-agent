@@ -82,20 +82,44 @@ def _case_size(case: PublicBenchmarkCase) -> tuple[int, int, int, str]:
     )
 
 
+def _has_user_authoritative_evidence(case: PublicBenchmarkCase) -> bool:
+    relevant_sessions = set(case.relevant_session_ids)
+    relevant_turns = set(case.relevant_turn_ids)
+    if case.benchmark == "locomo":
+        speakers = _case_speakers(case)
+        if not speakers:
+            return False
+        user_role = speakers[0]
+        return any(
+            turn.turn_id in relevant_turns and turn.role == user_role
+            for session in case.sessions if session.session_id in relevant_sessions
+            for turn in session.turns
+        )
+    if case.benchmark == "longmemeval":
+        return any(
+            f"{session.session_id}:{index}" in relevant_turns
+            and turn.role.casefold() == "user"
+            for session in case.sessions if session.session_id in relevant_sessions
+            for index, turn in enumerate(session.turns)
+        )
+    return False
+
+
 def select_smoke_case(cases: Sequence[PublicBenchmarkCase]) -> PublicBenchmarkCase:
-    """Choose the smallest answerable sample with annotated session evidence."""
+    """Choose the smallest answerable sample with annotated user-message evidence."""
     eligible = [
         case for case in cases
         if not case.expected_abstention
         and case.expected_answer
         and case.relevant_session_ids
+        and _has_user_authoritative_evidence(case)
         and any(
             session.turns and session.session_id in case.relevant_session_ids
             for session in case.sessions
         )
     ]
     if not eligible:
-        raise ValueError("benchmark has no answerable case with relevant session evidence")
+        raise ValueError("benchmark has no answerable case with annotated user evidence")
     return min(eligible, key=_case_size)
 
 
@@ -427,7 +451,7 @@ async def run_smoke(
             "cost_usd": None,
         }
         evaluation_details = {
-            "selection_strategy": "smallest_answerable_case_with_annotated_evidence",
+            "selection_strategy": "smallest_answerable_case_with_annotated_user_evidence",
             "sample_category": case.category,
             "answer_scorer": "normalized_token_f1",
             "answer_f1_threshold": 0.5,

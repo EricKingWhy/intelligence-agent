@@ -98,7 +98,11 @@ Hugging Face 数据集卡标注 **MIT**。实现没有复制 Mem0 / LoCoMo / Lon
 证据中同时记录 F1 与阈值；它不是上游正式 scorer。LoCoMo 仍只用于非商业内部评测。
 为适配 harness 的 user/assistant 来源权威，LoCoMo 将对话中首位参与者映射为评测 user persona，
 其余参与者映射为非权威 assistant evidence；LongMemEval 保留数据集提供的角色。报告记录这一映射，
-烟测通过还要求至少一个非空且带标注证据的 session 形成已提交记忆，并由 Milvus 命中后实际注入回答上下文。
+烟测选例只接受 gold answer evidence 中含有至少一条用户发言的可回答样例；assistant-only 证据样例
+不作为烟测目标，因为 Memory V2 应对它们拒绝形成持久用户记忆。用户于 2026-09-26 批准了此规则。
+烟测通过还要求至少一个非空且带标注用户证据的 session 形成已提交记忆，并由 Milvus 命中后实际注入回答上下文。
+同日的真实模型探针发现形成提示词没有写明 discriminated payload 必须含 `payload.kind`；已批准在
+#298 运行时提示词中补全三个 payload 的精确键集合，同时保留严格解析与 fail-closed 行为。
 
 ## 3. Consequences and open verification
 
