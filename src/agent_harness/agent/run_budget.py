@@ -1634,15 +1634,15 @@ def project_budget(
     `paused`，非暂停态给 `active`，终态给**那一个**终态事件的名字
     （`completed` / `failed` / `interrupted`）——不合并成一个 `terminal`：客户端要据此
     分辨"跑完了"与"炸了"，用一个笼统词就得自己再去翻事件。词表里的 `needs_reconcile`
-    只有一个来源：下面的 `reconcile_pending` 覆盖（`#315`），且只覆盖**暂停态**。
+    只有一个来源：下面的 `reconcile_pending` 覆盖（`#315`），且只覆盖**可恢复的暂停**。
     唯一的例外是 `none`：会话里**一个 run 都没有**时不存在 run 状态可言，冻结词表不为
     这种情形留词；本投影用 `none` 表示"无可投影的 run"，并把这一条登记在此（它与
     `active` 的区别是测试与客户端都要认得的）。
 
     `reconcile_pending`（`#315`）：本 run 在 Operation Ledger 上**仍欠着对账**的
     tool_call_id 列表。由调用方查账本得出——本函数是纯派生投影，不碰存储（同
-    `local_fuse` 的分工）。非空时一律附 `reconcile` 子对象，而 `state` 只在**暂停态**
-    被它覆盖成 `needs_reconcile`（`03 §5`）：
+    `local_fuse` 的分工）。非空时一律附 `reconcile` 子对象，而 `state` 只在**可恢复的
+    暂停**（`resumable`：暂停且非终态）被它覆盖成 `needs_reconcile`（`03 §5`）：
 
       * run **暂停** ⇒ `state` 报 `needs_reconcile`。这是**覆盖**而非替换：
         `reason` / `trigger_dimension` / `continuation` 照旧在——"为什么停"与"停了
@@ -1675,12 +1675,14 @@ def project_budget(
             "state": STATE_NEEDS_RECONCILE,
             "tool_call_ids": sorted(reconcile_pending),
         }
-        # **只有暂停态**才覆盖 `state`：那个理由（"客户端只看 state 就会给出一个点了
-        # 必然 409 的恢复入口"）只对暂停成立。在途 run 报 `active` 才是事实——它确实
-        # 还在跑（一条 MUTATING 超时留下的未证行不改变这一点）；已终态的 run 报它自己
-        # 那个终态名（`completed` 是既成事实）。两种情形下 `reconcile` 子对象照旧出现，
-        # 欠账照样看得见。
-        if state.paused is not None:
+        # **只有可恢复的暂停**才覆盖 `state`：那个理由（"客户端只看 state 就会给出一个
+        # 点了必然 409 的恢复入口"）只对能恢复的暂停成立——ADR-0046 §2 D5 的原话是
+        # "'能恢复'这件事只对暂停成立"，而"能恢复"的准确判据是 `resumable`
+        # （暂停 **且** 非终态），不是"有暂停记录"。在途 run 报 `active` 才是事实——它
+        # 确实还在跑（一条 MUTATING 超时留下的未证行不改变这一点）；已终态的 run 报它
+        # 自己那个终态名（`completed` 是既成事实）。两种情形下 `reconcile` 子对象照旧
+        # 出现，欠账照样看得见。
+        if state.resumable:
             projection["state"] = STATE_NEEDS_RECONCILE
     projection["enforcement"] = accounting.as_projection()
     return projection

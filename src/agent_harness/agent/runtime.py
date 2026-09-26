@@ -1941,9 +1941,9 @@ class AgentRuntime:
         )
         # 先镜像对账事件、再镜像 closeout：三条都是 durable，顺序与落盘顺序一致
         # （流帧必须是落盘日志的前缀，见 golden）。顺序本身也有语义：客户端先读到
-        # "某个操作进入 NEED_RECONCILE"，再读到"本次执行在 deadline 上暂停"——
-        # 与 `03 §5`「对账优先于恢复」同向，投影据此把状态报成 needs_reconcile
-        # 而不是 paused。
+        # "某个操作进入 NEED_RECONCILE"，再读到"本次执行暂停"——与 `03 §5`
+        # 「对账优先于恢复」同向，投影据此把状态报成 needs_reconcile 而不是 paused
+        # （暂停原因不参与这条闸门的判据，见 `_raise_reconcile_required`）。
         for reconcile_event in reconcile_events:
             yield to_agent_event(reconcile_event)
         # closeout 的 `model/request` 先镜像再落 `run/paused`：两条都是 durable，

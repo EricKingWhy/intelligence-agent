@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
+import agent_harness.tooling.executor as executor_module
 from agent_harness.storage import (
     OperationContext,
     OperationState,
@@ -264,6 +265,33 @@ async def test_a_future_deadline_does_not_change_anything() -> None:
     assert with_deadline.result.ok is True and without.result.ok is True
     assert tool.call_count == 2
     assert with_deadline.budget_delta == without.budget_delta
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_instant_itself_is_already_too_late(monkeypatch) -> None:
+    """`now == deadline_at` **就**算到点（`>=` 不是 `>`）——"不留'正好等于还有一次机会'的缝"。
+
+    `04 §9.1` / ADR-0046 §2 D2 明文把"到点那一刻"写进契约，但这条闸门原先裸读
+    `datetime.now(UTC)`：`>=` 与 `>` 只在**相等那一点**上结论相反，靠真实挂钟碰不到
+    ——实测把闸门写成 `>` 时 68 条 deadline 用例全绿，等于这一格没有任何鉴别力
+    （2026-09-26 补审的 P2）。现在时刻从本域唯一入口 `utc_now` 读，用例把"现在"钉死。
+
+    同一条用例里带反例（差一微秒）：证明上面那次红不是"闸门恒拒"。
+    """
+    tool = _CountingTool()
+    executor = ToolExecutor(_registry(tool))
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
+
+    monkeypatch.setattr(
+        executor_module, "utc_now", lambda: deadline - timedelta(microseconds=1),
+    )
+    just_before = await executor.execute(_call("c1", "count"), run_deadline=deadline)
+    assert just_before.result.ok is True, "还差一微秒 ⇒ 照常接纳"
+
+    monkeypatch.setattr(executor_module, "utc_now", lambda: deadline)
+    exactly_at = await executor.execute(_call("c2", "count"), run_deadline=deadline)
+    assert exactly_at.result.error_code is ErrorCode.DEADLINE_EXCEEDED
+    assert tool.call_count == 1, "正好到点的那一条没有被执行"
 
 
 @pytest.mark.asyncio

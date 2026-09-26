@@ -195,7 +195,8 @@ NEED_RECONCILE`），"要不要现在就对账"是**稳定边界**（暂停收�
   这件事），欠账由 `reconcile` 子对象表达；run **已终态** ⇒ `state` 保持终态名（`completed`
   是既成事实，不能因为账本上另有一笔欠账就报成没跑完），`reconcile` 子对象照旧出现。
   ⚠ 覆盖条件写成"非终态"曾把在途 run 误报成 `needs_reconcile`（两轴审查的 P3）——"能恢复"
-  这件事只对**暂停**成立，所以覆盖也只对暂停成立。
+  这件事只对**暂停**成立，所以覆盖也只对暂停成立；补审后判据收紧到 `resumable`
+  （暂停**且**非终态），与这句理由逐字对齐（"有暂停记录但已终态"这一形状不可派生，见 §6.1）。
 
 投影的 `reconcile_pending` 由**调用方**查账本得出（`SessionService.budget_projection` 是唯一
 读 Ledger 的一处）——`project_budget` 是纯派生函数，不碰存储（与 `local_fuse` 同一分工）。
@@ -305,14 +306,14 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
 
 | 用例文件 | 条数 | 钉住的事实 |
 | --- | ---: | --- |
-| `tests/tooling/test_deadline_admission.py` | 10 | 到点在 approval / 配额 `take()` / Ledger **之前**被拒（含"到点时审批回调根本不被调用"与"未到点时它照常被调用"的正反两条）；不烧 per-tool 配额；未来 deadline 不改变任何行为；批次层同一条闸门；`_settle_state` 对 MUTATING+超时打"未证"标记、对确定性失败与只读超时不打 |
+| `tests/tooling/test_deadline_admission.py` | 11 | 到点在 approval / 配额 `take()` / Ledger **之前**被拒（含"到点时审批回调根本不被调用"与"未到点时它照常被调用"的正反两条）；**`now == deadline_at` 那一刻就算到点**（把"现在"钉死，带"差一微秒照常接纳"的反例）；不烧 per-tool 配额；未来 deadline 不改变任何行为；批次层同一条闸门；`_settle_state` 对 MUTATING+超时打"未证"标记、对确定性失败与只读超时不打 |
 | `tests/agent/test_run_budget.py` | 80 | `parse_deadline_at` 的形状（归一化 / 朴素时间 / 畸形值）；deadline 先判且映射到自己的 reason；**同一瞬**不停（`now >= deadline_at` 才停）；到点后 `closeout_capacity` 恒 false；恢复要求严格未来；未点名 ⇒ 沿用旧时刻被拒；continuation 点名新时刻与边界；`blocked_by` 把 reconcile 顶到预算动作之前；投影的 `reconcile` 键（暂停态覆盖 / 在途态不覆盖 / 空不落键） |
-| `tests/agent/test_run_pause_resume.py` | 18 | 稳定边界收口顺序、版本 1→2、快照含 closeout、非终态；deadline 与**预算**两条暂停各自把未证行升到 `NEED_RECONCILE` 并改写 continuation（后者走 `CLOSEOUT_MODEL` 分支） |
+| `tests/agent/test_run_pause_resume.py` | 19 | 稳定边界收口顺序、版本 1→2、快照含 closeout、非终态；deadline 与**预算**两条暂停各自把未证行升到 `NEED_RECONCILE` 并改写 continuation（后者走 `CLOSEOUT_MODEL` 分支） |
 | `tests/recovery/test_deadline_restart.py` | 2 | **kill / restart**：已知结果的 mutating 不欠账也不重跑；未知结果的 mutating 拒绝恢复且**永不**重跑（真子进程） |
 | `tests/recovery/test_reconcile.py` | 26 | 裁决链（含"非悬空但未证"的收集面与"只补缺的那一半 `tool/result`"） |
 | `tests/web/test_run_pause_resume_api.py` | 15 | HTTP 面：422（形状）/ 409（状态）分界、`reconcile` 投影、resume 契约 |
 | `tests/test_cli_run_pause_resume.py` | 25 | CLI 两条命令 + 暂停摘要（deadline 行、真实 argv 形状的恢复提示、过去时刻在 `run` 合法 / 在 `resume` 被拒） |
-| `tests/live_gate/test_deadline_scenario.py` | 41 | 场景的判定本身（含三条**判红**用例：读错投影键、恢复后零准入、恢复后的不安全收尾） |
+| `tests/live_gate/test_deadline_scenario.py` | 43 | 场景的判定本身（含 25 条 `test_red_*`：读错投影键、空账本不得读成干净、欠账必须**逐条**被点名、恢复后零准入、恢复后的不安全收尾 …） |
 | `tests/agent/test_event_sequence_golden.py` | 243（本票只改 4 行） | golden：deadline 只新增事实，既有会话的序列逐字不变 |
 
 前端：`web/src/lib/runBudget.test.ts`（+97 行，含"小写 `z` 必须被拒"这一格）、
@@ -353,7 +354,20 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
   （位置契约 / 标记判据 / 恢复严格未来 / 投影覆盖 / 前端草稿校验 / 预算暂停的闸门条件），
   其中 M1a 的失败集是 M1b 的真子集（位置契约由"少了就有一格被烧配额"这一条单点钉住），
   如实登记而不是当成两组独立证据。
-- **修后补审**：两个轴在同一冻结 sha/tree 上复审（互不可替换），每条发现都有对应的改动或用例。
+- **修后补审**：两个轴在同一冻结 sha/tree（`24a1acc` / `7371656`）上复审修复批次本身
+  （互不可替换），结论各为 **PASS-WITH-FINDINGS、0 P0 / 0 P1**（Standards 1×P2 + 5×P3；
+  Correctness 1×P2 + 2×P3）。两轴各自独立复核了上面那两条 P1 的两半都已闭合，并各自跑出
+  **互不相同**的变异失败集。处置见 §6.1 与台账；其中三条值得单独记：
+  - **两条 P2 都是"证据面松"而不是"行为错"**：① 执行域的 `>=` / `>` 等值边界**零鉴别力**
+    ——把闸门写成 `>` 时 68 条 deadline 用例全绿（根因是闸门内联 `datetime.now(UTC)`，
+    时刻不可注入）。处置：执行域收出自己的 `utc_now()` 单点（跨层例外见 D2），
+    新增"`now == deadline_at` 就算到点 + 差一微秒照常接纳"的正反用例，修后同一变异转红；
+    ② 场景 Arm B 的点名判据原先接受"**工具名**命中"，而名字不唯一、`apply_blocked_by`
+    又只追加不校验 ⇒ 收紧成**只认 id**（文案里 id 一定在，名字那一支纯是松的一格）。
+  - **投影 `state` 的覆盖条件**由"有暂停记录"收紧为 `resumable`（暂停**且**非终态）——
+    D5 的原话是"'能恢复'这件事只对暂停成立"，而"能恢复"的准确判据就是 `resumable`。
+  - 其余为口径/文字类：`operation.py` 的"三处读者"补齐第三处、`runtime.py` 一处过期
+    deadline 注释、ADR 本节的 `--collect-only` 条数与实测对齐、前端一处 JSDoc 换行。
 
 ---
 
@@ -389,3 +403,20 @@ attempt-2 是 (b)），这正是"两种都接受"这条设计被验证的方式�
 6. **模型 closeout 的 `blockers` 只被追加，不被校验。** `apply_blocked_by` 保证"已确证的
    阻塞项一定在列表里"，但模型仍可能写别的（或写空）——产品侧不替它判断"这条算不算阻塞"
    （`02 §5.2`：不许伪造进展，也不许替模型编它的自述）。
+7. **对账闸门的作用域：暂停收口是 run 级，另两个读者是 session 级。** D4 说"三个读者读
+   同一份落盘事实"，指的是**判据**（`storage.needs_reconcile`）同源，**不**指作用域相同：
+   `AgentRuntime._raise_reconcile_required` 过滤 `operation.run_id == run_id`（它产出的是
+   **本 run** 暂停载荷的 blockers，点名别的 run 的欠账没有意义），而
+   `SessionService._unreconciled_tool_calls`（恢复闸门 + 投影）与 `RecoveryCoordinator.recover`
+   是 session 级（它们问的是"这个会话还欠不欠"）。这个分叉**今天不可达**：会话里只要有一条
+   未结清的行，任何新 run 的开工就进不来（`resume_and_launch` 的
+   `_has_unreconciled_operations` 分支 → `recover()` 无 `ReconcileCallback` ⇒ **409**），
+   ⇒ "本 run 带着**别的 run** 的欠账暂停"这个形状造不出来。**不改**：去掉 run 过滤会让本
+   run 的暂停点名别人的账，语义更差。口径以本条为准（2026-09-26 补审两轴各报一次）。
+8. **投影的第一个分支不看终态。** `project_budget` 按"有暂停记录 ⇒ 用暂停那支投影
+   （键集是超集）"分流；`state` 的 `needs_reconcile` 覆盖已按 `resumable`（暂停**且**非终态）
+   收紧——但"暂停 **且** 终态"同时成立时它仍走暂停那一支。该形状**不可由事件派生**：
+   `derive_run_budget` 在终态事件处清 `paused`（同函数注释：终态压过暂停），
+   手工构造 `RunBudgetState` 的地方只有 `SessionService.budget_projection` 的一处空会话默认值。
+   登记而不改第一分支：它定的是投影的**键集**，动它等于同时改暂停载荷的形状，而收益只在
+   一个造不出来的状态上（2026-09-26 补审 P3）。

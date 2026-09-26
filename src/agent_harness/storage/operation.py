@@ -50,8 +50,11 @@ class Operation(BaseModel):
 
 #: `reconcile_meta` 里"副作用状态未证"的标记键（`#315`）。
 #: 写入者是 ToolExecutor（收尾那一刻它就**知道**这次尝试有没有证明力），读取者是
-#: 所有要在"能不能安全继续"上做判断的地方：AgentRuntime 的**暂停收口**与 Resume 的
-#: **开工前闸门**。三处读**同一份**落盘事实，谁都不另存一个内存标记。
+#: 所有要在"能不能安全继续"上做判断的地方（三处，ADR-0046 §2 D4 逐个点名）：
+#: `AgentRuntime._raise_reconcile_required` 的**暂停收口**（run 级：只点名本 run 的欠账）、
+#: `SessionService._unreconciled_tool_calls` 的 **Resume 开工前闸门 + 预算投影**、
+#: `RecoveryCoordinator.recover` 的**裁决收集面**。三处读**同一份**落盘事实，谁都不另存
+#: 一个内存标记。
 #: 机制与判据的完整叙述见 ADR-0046 §2 D4 / §2 D5。
 UNPROVEN_SIDE_EFFECT_KEY = "unproven_side_effect"
 

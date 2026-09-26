@@ -788,10 +788,12 @@ class RunDeadlineBoundaryScenario:
                 # `工具 '<name>'（tool_call_id=<id>）…` 组装），不是 id 的集合 ⇒ 判据是
                 # **子串**，不是列表成员（`in` 对字符串列表做的是相等比较，写错这一处
                 # 会让本判据恒红而不报错）。
+                # **只认 id**（2026-09-26 补审的 P3）：工具名不唯一，而 `apply_blocked_by`
+                # 只追加不校验（ADR-0046 §6.1 #6）⇒ 一段无关文案里偶然出现同名工具就能
+                # 把"这条欠账被点名了"凑出来。文案里 id 一定在，所以名字这一支纯是松的一格。
                 and all(
                     any(
                         operation.tool_call_id in str(blocker)
-                        or operation.tool_name in str(blocker)
                         for blocker in blocked_by
                     )
                     for operation in debt

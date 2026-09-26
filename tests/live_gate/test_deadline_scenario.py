@@ -643,14 +643,13 @@ def test_red_every_debt_row_must_be_named_not_just_one_of_them(tmp_path):
     恢复时却同样会被 409 挡住）。造法：轨迹里的 blockers 只点名 `CALL_TWO`（生产形状），
     但账本上两条都是 `NEED_RECONCILE`。
 
-    ⚠ 第二条欠账必须换一个**工具名**：判据（与生产文案一致）接受"id 命中**或**工具名
-    命中"，两条同名工具会让它们互相"顶替"对方的点名，`all` 与 `any` 就没有区别了
-    —— 这条测试曾经因为这个构造错误而空转（实测：改对了才红）。
+    判据**只认 id**（2026-09-26 补审把工具名那一支删掉了：名字不唯一、`apply_blocked_by`
+    又只追加不校验，一段无关文案里偶然出现同名工具就能凑出"被点名"）⇒ 两条欠账即使
+    同名也互不顶替，本用例不必再靠换工具名来制造区分度。
     """
     events = _events(arm="needs_reconcile")
     operations = _ops(debt=True)
     operations[0].state = OperationState.NEED_RECONCILE
-    operations[0].tool_name = "another_tool"
 
     assertions = _assertions(tmp_path, events, operations=operations)
 

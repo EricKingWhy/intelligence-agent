@@ -80,6 +80,23 @@ from agent_harness.tooling.result import ErrorCode, ToolResult
 logger = logging.getLogger("agent_harness.tooling.executor")
 
 
+def utc_now() -> datetime:
+    """本执行域 **deadline 判定**读挂钟的唯一入口（`#315`；观测记录的 `started_at`
+    不走它——那是"什么时候开始跑的"，不参与任何准入判定）。
+
+    为什么收成一个函数而不是在闸门里裸写 `datetime.now(UTC)`：deadline 是"要跟当前
+    时刻比"的判定，而时刻是**不可注入的外部输入**——判据里的 `>=` 与 `>` 只在
+    `now == deadline_at` **那一点**上结论相反，散点读挂钟会让这个边界只能靠"跑得够巧"
+    来碰（实测：把闸门写成 `>` 时 68 条 deadline 用例全绿，等于这一格没有鉴别力）。
+    收成一处之后，用例 monkeypatch 它就能把"现在"钉在任意时刻。
+
+    跨层说明（ADR-0046 §2 D2 登记的例外）：`tooling/**` 不 import `agent/**`，所以这里
+    不复用 `agent.run_budget.utc_now`，而是照它的**设计**在本域放一个同形状的单点。
+    生产路径仍是裸挂钟。
+    """
+    return datetime.now(UTC)
+
+
 def _rejected_delta(tool_name: str) -> dict[str, Any]:
     """准入前被拒 / 未执行结果所带的预算增量：**显式记 0**。
 
@@ -344,7 +361,8 @@ class ToolExecutor:
         # 与配额闸门一样**不**占槽位（本分支在 `take()` 之前），所以没有配对的
         # release 义务；`budget_delta` 记 0（准入前被拒，`04 §9.1`）。
         # 读挂钟在这里是不可免的：deadline 是**绝对时刻**，判定就是"现在到点了吗"。
-        if run_deadline is not None and datetime.now(UTC) >= run_deadline:
+        # 时刻从本域的唯一入口读（`utc_now`）——"刚好到点"那一格的用例靠它把"现在"钉住。
+        if run_deadline is not None and utc_now() >= run_deadline:
             return ToolExecution(
                 tool_call_id=tool_call_id,
                 result=ToolResult.failure(

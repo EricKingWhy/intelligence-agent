@@ -181,7 +181,9 @@ export function deadlineInstant(paused: RunPausedInfo): string | null {
  *
  *  `Z` 只认**大写**（`#315` 的审查发现）：后端走 `datetime.fromisoformat`，它收 `Z`
  *  与 `+00:00`、对小写 `z` 抛 `ValueError` ⇒ 422。`Date.parse` 那边反而收小写
- *  （JS 的实现比 ES 规范宽），所以"交给 Date.parse 判"会正好漏掉这一格。 */function parseInstant(raw: string | null | undefined): number | null {
+ *  （JS 的实现比 ES 规范宽），所以"交给 Date.parse 判"会正好漏掉这一格。
+ */
+function parseInstant(raw: string | null | undefined): number | null {
   if (raw === null || raw === undefined) return null;
   const text = raw.trim();
   if (!text) return null;
