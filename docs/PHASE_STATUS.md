@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 `#302` 两项真实公开 smoke 已通过（Recall@6=1.0；答案 F1=0.666667 / 0.5）；短分支 `codex/mem-v2-6-quality-repair` 已合回当前 `origin/main`（merge `0c835353`）。合并后 pytest 4368 passed / 2 skipped / 51 deselected，Vitest 73 files / 1157 passed，`pnpm build` 通过；Gate-0 6/6 PASS（记录 tip `2606d9b8`），review coverage exit 0。Playwright E2E 待补：保护性 preflight 拒绝复用被 integration clone 服务占用的 5173 端口；`#302` 保持 OPEN，分支尚未 push / PR，未关单。旧 Memory 数据未清理，未修改 `.env` 或凭证。
+**当前焦点：Memory V2 `#302` 两项真实公开 smoke 已通过（Recall@6=1.0；答案 F1=0.666667 / 0.5）；短分支 `codex/mem-v2-6-quality-repair` 已合回当前 `origin/main`（merge `0c835353`）。合并后 pytest 4368 passed / 2 skipped / 51 deselected，Vitest 73 files / 1157 passed，`pnpm build` 通过；Gate-0 6/6 PASS（记录 tip `2606d9b8`），review coverage exit 0。Playwright `pnpm exec playwright test --workers=2` 全量执行 11.4m：458 passed / 2 failed；两条都是既有 #201 `control-row.spec.ts:251` 字面量陈旧（预期 13/18、实际 12/17），与已在 `f13ed0d` 基线复现的结果相同，非 #302 回归。`#302` 保持 OPEN，分支尚未 push / PR，未关单。旧 Memory 数据未清理，未修改 `.env` 或凭证。
 
 **Memory V2 当前状态（2026-09-25）**：`#297`–`#301` 已 CLOSED 并集成；`#299` AC10 Recall@6=0.95 且真实 Milvus hybrid 证据已归档，GitHub issue 已 CLOSED；`#302` / `#303` 已解除阻塞，`#304` 等待后二票。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。旧记忆数据仍保留；clean-slate 只在 `#303` 依赖完成并核验目标和保留项后执行。
 
