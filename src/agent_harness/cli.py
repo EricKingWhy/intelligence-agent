@@ -259,16 +259,26 @@ def _tool_dimension_lines(data: dict, *, carried: bool = False) -> list[str]:
 
     `tool_calls`（逻辑调用）与 `tool_attempts`（真实尝试，含 retry）**分别**打出来：
     `02 §5.1` 明文不许把它们混同，挤进一格会让人以为它们是同一个计数器。
+
+    读数的判据是"**表在不在**"，不是"键在不在"（`agent/run_budget.BudgetConsumed.calls_for`
+    的同一口径：`{}` = 已知且一个都没调用，`None` = 未知）。反例（两轴审查共同发现）：
+    配了 ceiling 却从未调用过的工具（`{"bash": 3}` + `{}`）曾被渲染成 `unavailable calls`，
+    而**同一份** durable 事件的服务端投影给的是 `remaining 3`——同一事实两个互相矛盾的读数，
+    正是 `11 §6.1` 要消灭的那种不一致。
     """
     limits = ((data.get("limits") or {}).get("run") or {}).get("tool_call_limits") or {}
     consumed = data.get("consumed") or {}
-    calls = consumed.get("tool_calls_by_tool") or {}
-    attempts = consumed.get("tool_attempts_by_tool") or {}
+    calls = _per_tool_table(consumed, "tool_calls_by_tool")
+    attempts = _per_tool_table(consumed, "tool_attempts_by_tool")
+    names = set(limits)
+    for table in (calls, attempts):
+        if table is not None:
+            names |= set(table)
     lines: list[str] = []
-    for name in sorted({*limits, *calls}):
+    for name in sorted(names):
         ceiling = limits.get(name)
-        used = calls.get(name)
-        tried = attempts.get(name)
+        used = None if calls is None else calls.get(name, 0)
+        tried = None if attempts is None else attempts.get(name, 0)
         lines.append(
             f"  tool {name}: {'carried ' if carried else ''}consumed "
             f"{'unavailable' if used is None else used} calls"
@@ -277,6 +287,18 @@ def _tool_dimension_lines(data: dict, *, carried: bool = False) -> list[str]:
             f" (remaining {_dimension_remaining(used, ceiling)})\n"
         )
     return lines
+
+
+def _per_tool_table(consumed: dict, key: str) -> dict | None:
+    """从 durable `consumed` 里取一张 per-tool 表：**认不出形状一律 None（未知）**。
+
+    三种情况各不相同，`or {}` 会把前两种合成一种：
+      * 键缺席（`#314` 之前的老事件）⇒ 未知；
+      * 值是 `None`（显式未知）⇒ 未知；
+      * 值是 `{}` ⇒ **已知**且一个都没调用。
+    """
+    table = consumed.get(key)
+    return table if isinstance(table, dict) else None
 
 
 def _dimension_remaining(consumed: object, ceiling: object) -> str:
@@ -422,23 +444,41 @@ def _resume_command_tail(dimension: str) -> str:
     return f"{_RESUME_FLAGS.get(dimension, '--run-turns-total')} N"
 
 
+def _resume_ceiling_rule(dimension: str) -> str:
+    """尾句里"N 该比什么大"的判据：**per-tool 维与四维不是同一条**。
+
+    四维（turns / requests）的 ceiling 判定含一次 closeout 预留（`02 §5.2`：保证暂停时
+    还收得了口），所以"N 必须高于 consumed + 预留 closeout 轮"成立。per-tool 维**不**预留
+    ——closeout 是一次模型请求、不产生任何工具调用，给它留一格会让"配额 = 3"实际允许 4 次
+    调用（`agent/run_budget._dimension_reached` 的第三类临界点，ADR-0045 D4）⇒ 那条尾句在
+    工具维上是一句与实现相反的话（前端同级提示给的是"至少 calls+1"）。
+    """
+    if tool_name_of_dimension(dimension) is not None:
+        return (
+            "N 是**绝对** ceiling，必须严格大于已接纳的调用数（该维不预留 closeout）；"
+            "不是增量"
+        )
+    return "N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮；不是增量"
+
+
 def resume_hint(session_id: str, *, data: dict) -> str:
     """暂停之后"接下来怎么做"的一行指令（`#312` 建 / `#313` 按维度点名开关）。
 
     ceiling 用占位符 `N`：抬高多少是用户/运维的决定，CLI **不替它猜**一个数字
     （猜出来的"建议值"会被当成策略，且绝对 ceiling 与增量是两种语义）。
 
-    开关按 `trigger_dimension` 取（不是写死 turns）：暂停可能落在 requests / token /
-    cost / **per-tool 配额**（`#314`）维度上，提示里给一个抬不动它的开关是**假指令**
-    （PRD §11：CLI 显示的就是 durable 事实本身）。未知维度（本票之外的暂停原因）
-    回落到 turns 开关——那是 `#308` 起一直存在的维度，也是唯一一个任何 run 都读得懂的。
+    开关与**判据**都按 `trigger_dimension` 取（不是写死 turns）：暂停可能落在
+    requests / token / cost / **per-tool 配额**（`#314`）维度上，提示里给一个抬不动它的
+    开关、或给一条与该维相反的判据，都是**假指令**（PRD §11：CLI 显示的就是 durable
+    事实本身）。未知维度（本票之外的暂停原因）回落到 turns 开关——那是 `#308` 起一直
+    存在的维度，也是唯一一个任何 run 都读得懂的。
     """
     dimension = str(data.get("trigger_dimension", ""))
     return (
         f"  resume: agent-harness resume {session_id}"
         f" {_resume_command_tail(dimension)}"
         f" --expected-version {data.get('budget_version', '')}"
-        "  (N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮；不是增量)\n"
+        f"  ({_resume_ceiling_rule(dimension)})\n"
     )
 
 

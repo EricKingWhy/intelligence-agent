@@ -321,6 +321,15 @@ class ToolExecutor:
                 budget_delta=_rejected_delta(name),
             )
 
+        # 配置错误必须在任何真实副作用之前拒绝。位置在配额闸门**之前**：`take()` 一旦
+        # 成功就欠一次 `release()` 或一次真实接纳（`tooling/quota.py` 的成对约束），
+        # 而夹在中间抛异常会让本批的兄弟调用被一个不存在于任何账本上的占位挤掉。
+        if self._overflow_handler is not None and session is None:
+            raise ValueError("session is required when OverflowHandler is configured")
+        if (session is not None and operation_context is not None
+                and session.session_id != operation_context.session_id):
+            raise ValueError("session and operation_context must identify the same session")
+
         # -- 阶段 2.4：per-tool 配额闸门（`#314` T6 / `04 §9.1`）--
         # 位置在 approval **之前**：一个注定被配额拒的调用不该先弹一次人工审批
         # （审批可能要等人一个回合）。槽位在这里**预留**（本批内并发只读调用靠
@@ -352,13 +361,6 @@ class ToolExecutor:
             if tool_quota is not None:
                 tool_quota.release(name)
             return denied
-
-        # 配置错误必须在任何真实副作用之前拒绝。
-        if self._overflow_handler is not None and session is None:
-            raise ValueError("session is required when OverflowHandler is configured")
-        if (session is not None and operation_context is not None
-                and session.session_id != operation_context.session_id):
-            raise ValueError("session and operation_context must identify the same session")
 
         # -- **接纳点**（`04 §9.1` 的"唯一接纳点"，`#314` 的唯一计数点）--
         # 到这里为止的拒绝闸门全部通过（registry / args / 配额 / approval / 配置），

@@ -296,12 +296,14 @@ describe('per-tool 配额（`#314` T6）—— 动态维度、两个 counter、�
     const quotas = toolQuotaFacts(toolPaused());
     expect(quotas.map((quota) => quota.name)).toEqual(['bash', 'glob']);
     const [bash, glob] = quotas;
-    // 配了却一次没调：calls 表里没有这个键 ⇒ unavailable（**不是** 0）。
-    // 这是与 CLI `_tool_dimension_lines` 逐字一致的口径（那边也是 `calls.get(name)`
-    // 后判 None）——两个客户端显示同一份事实，是票面 AC 的原话。
-    expect(bash.callsText).toBe('unavailable');
+    // 配了却一次没调：表**已知**（这里它只含 `glob`）⇒ 缺名就是 0，不是 unavailable。
+    // 口径与后端 `BudgetConsumed.calls_for` 逐字同源（表在 ⇒ 缺名 = 0），也与 CLI
+    // `_tool_dimension_lines` 同源——两轴审查发现过这一格曾两边一致地读错：配了 ceiling
+    // 却从未调用过的工具被报成 unavailable，而同一份事件的服务端投影给的是 remaining=5。
+    expect(bash.callsText).toBe('0');
+    expect(bash.attemptsText).toBe('0');
     expect(bash.ceilingText).toBe('5');
-    expect(bash.remainingText).toBe('unavailable');
+    expect(bash.remainingText).toBe('5');
     expect(bash.tripped).toBe(false);
     // 命中那一维：逻辑调用 1、尝试 3（含 retry）、ceiling 1、剩余 0。
     expect(glob.callsText).toBe('1');

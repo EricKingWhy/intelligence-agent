@@ -240,6 +240,26 @@ describe('run/paused 的 per-tool 事实（`#314` T6）', () => {
     expect(s.run_paused?.consumed_dimensions?.tool_calls_by_tool).toEqual({ glob: 2 });
   });
 
+  it('ceiling 表的下限是 1（计数表是 0）：`0` / 负数 / 小数都不收', () => {
+    // 两张表用**不同**下限：计数表放行 0（"调了 0 次"是事实），ceiling 表要求 ≥ 1
+    // （后端 `parse_tool_call_limits` 只收正整数 ⇒ `{"glob": 0}` 那个入口必然 422）。
+    // 共用一个下限会让前端收下一个后端永远不可能落盘的 ceiling，面板于是显示一个
+    // 不存在于任何事件里的读数（两轴审查 Standards 面发现）。
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_PAUSED,
+      seq: 3,
+      data: {
+        consumed: { tool_calls_by_tool: { zero: 0, glob: 2 } },
+        limits: {
+          run: { tool_call_limits: { glob: 3, zero: 0, neg: -1, frac: 2.5 } },
+        },
+      },
+    }));
+    expect(s.run_paused?.run_limits?.tool_call_limits).toEqual({ glob: 3 });
+    // 同一份载荷里的**计数**表照旧保留 0——两处分界各自成立，不是一刀切。
+    expect(s.run_paused?.consumed_dimensions?.tool_calls_by_tool).toEqual({ zero: 0, glob: 2 });
+  });
+
   it('重放幂等：逐帧应用与 projectHistory 重建同一投影（刷新/重连后一致）', () => {
     const events = [
       ev({ type: EventType.RUN_STARTED, seq: 1, data: { turn_index: 1 } }),

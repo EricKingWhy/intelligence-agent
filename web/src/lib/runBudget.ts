@@ -170,10 +170,25 @@ export interface ToolQuotaFact {
   tripped: boolean;
 }
 
+/** per-tool 表里某工具的读数：**表在不在**决定 0 还是 null（未知），不是"键在不在"。
+ *
+ *  表是对象 ⇒ 缺名就是 0（后端 `agent/run_budget.BudgetConsumed.calls_for` 的同一口径：
+ *  `{}` = 已知且一个都没调用；表缺席 / 为 null = 未知）。反例（两轴审查共同发现）：
+ *  配了 ceiling 却从未调用过的工具（`{"bash": 3}` + `{}`）曾被渲染成 `unavailable`
+ *  而同一份 durable 事件的服务端投影给的是 `remaining 3`——同一事实两个互相矛盾的
+ *  读数，正是 `11 §6.1` 要消灭的那种不一致。 */
+function perToolReading(
+  table: Record<string, number> | null | undefined,
+  name: string,
+): number | null {
+  if (table === null || table === undefined) return null;
+  return table[name] ?? 0;
+}
+
 /** 单个工具的配额读数：两个 counter 各取各的键、ceiling 取配置表里的那一条。 */
 function toolQuotaFact(name: string, paused: RunPausedInfo): ToolQuotaFact {
-  const calls = paused.consumed_dimensions?.tool_calls_by_tool?.[name] ?? null;
-  const attempts = paused.consumed_dimensions?.tool_attempts_by_tool?.[name] ?? null;
+  const calls = perToolReading(paused.consumed_dimensions?.tool_calls_by_tool, name);
+  const attempts = perToolReading(paused.consumed_dimensions?.tool_attempts_by_tool, name);
   const ceiling = paused.run_limits?.tool_call_limits?.[name] ?? null;
   const dimension = toolQuotaDimension(name);
   // 复用四维那一份"剩余"的算法（十进制分支在这里取不到，收窄成整数读数；工具配额
@@ -204,7 +219,8 @@ function toolQuotaFact(name: string, paused: RunPausedInfo): ToolQuotaFact {
  *  两者都空 ⇒ 空表（不渲染这一节，同 CLI 不为空表打印表头）。
  *
  *  `calls` 表未知（null）时**不是**当 0 处理：那时只列配置了的工具名，它们的读数是
- *  null ⇒ 渲染成 unavailable（`11 §6.1`：不可得 ≠ 0）。 */
+ *  null ⇒ 渲染成 unavailable（`11 §6.1`：不可得 ≠ 0）。表**已知**而某个名字不在表里
+ *  则是 0（见 `perToolReading`）——"未知"与"零"是两件事。 */
 export function toolQuotaFacts(paused: RunPausedInfo): ToolQuotaFact[] {
   const limits = paused.run_limits?.tool_call_limits ?? null;
   const calls = paused.consumed_dimensions?.tool_calls_by_tool ?? null;

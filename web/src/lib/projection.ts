@@ -689,15 +689,23 @@ function dimensionDecimalText(raw: Record<string, unknown>, key: string): string
 }
 
 /** 分维计数表（`#314`：工具名 → 计数）：**整键缺席 ⇒ null**（未知），空对象 ⇒ `{}`
- *  （已知，一个都没有）——两者的区别与 `cost_usd` 的"缺失 ≠ 0"同源。表里非整数 /
- *  非正数的条目**整条丢掉**（宁少不多：一个编不出来的计数不该冒充 0）。 */
-function countsByKey(raw: Record<string, unknown>, key: string): Record<string, number> | null {
+ *  （已知，一个都没有）——两者的区别与 `cost_usd` 的"缺失 ≠ 0"同源。
+ *
+ *  `minimum` 由调用方给：**计数**表放行 0（"调了 0 次"是事实），**ceiling** 表要求
+ *  ≥ 1（后端 `parse_tool_call_limits` 只收正整数，`0` 的形状在那边必然 422）——
+ *  用同一个下限会让 `{"glob": 0}` 在前端被当成合法 ceiling 收下。表里不合形状的
+ *  条目**整条丢掉**（宁少不多：一个编不出来的计数不该冒充 0）。 */
+function countsByKey(
+  raw: Record<string, unknown>,
+  key: string,
+  minimum: 0 | 1,
+): Record<string, number> | null {
   const value = raw[key];
   if (!isRecord(value)) return null;
   const out: Record<string, number> = {};
   for (const [name, count] of Object.entries(value)) {
     const num = numberOf(count);
-    if (num !== undefined && Number.isInteger(num) && num >= 0) out[name] = num;
+    if (num !== undefined && Number.isInteger(num) && num >= minimum) out[name] = num;
   }
   return out;
 }
@@ -715,8 +723,8 @@ function parseConsumedFacts(raw: unknown): RunBudgetDimensionFacts | null {
     // 含 retry）——它们不是别名，缺一个不等于另一个也可得。
     tool_calls: dimensionNumber(raw, 'tool_calls'),
     tool_attempts: dimensionNumber(raw, 'tool_attempts'),
-    tool_calls_by_tool: countsByKey(raw, 'tool_calls_by_tool'),
-    tool_attempts_by_tool: countsByKey(raw, 'tool_attempts_by_tool'),
+    tool_calls_by_tool: countsByKey(raw, 'tool_calls_by_tool', 0),
+    tool_attempts_by_tool: countsByKey(raw, 'tool_attempts_by_tool', 0),
   };
 }
 
@@ -731,8 +739,9 @@ function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
     max_total_tokens: dimensionNumber(raw, 'max_total_tokens'),
     max_cost_usd: dimensionDecimalText(raw, 'max_cost_usd'),
     // `#314`：`tool_call_limits` 是**绝对** ceiling 表（不是 remaining），
-    // 未配置的工具名不出现在表里（表缺席 = 没配任何工具配额）。
-    tool_call_limits: countsByKey(raw, 'tool_call_limits'),
+    // 未配置的工具名不出现在表里（表缺席 = 没配任何工具配额）。下限是 1：
+    // 后端只收正整数 ceiling（`parse_tool_call_limits`），`0` 必然在那个入口 422。
+    tool_call_limits: countsByKey(raw, 'tool_call_limits', 1),
   };
 }
 
@@ -1230,7 +1239,11 @@ function summarizeRunPaused(event: AgentEvent): string {
   const dimension = info.trigger_dimension || '预算到顶';
   const tool = toolDimensionName(info.trigger_dimension);
   if (tool !== null) {
-    const calls = info.consumed_dimensions?.tool_calls_by_tool?.[tool];
+    // 读数判据是"**表**在不在"（`BudgetConsumed.calls_for` 同一口径）：表在而缺名 ⇒ 0；
+    // 表缺席（老载荷）才是"未知"。按"键在不在"读会把配了 ceiling 却没调用过的工具
+    // 报成未知，而同一份事件的服务端投影给的是 `remaining = ceiling`。
+    const table = info.consumed_dimensions?.tool_calls_by_tool;
+    const calls = table === null || table === undefined ? undefined : (table[tool] ?? 0);
     const ceiling = info.run_limits?.tool_call_limits?.[tool];
     return `${dimension} · ${calls === undefined ? '未知' : calls} 次调用/${
       ceiling === undefined ? '无 ceiling' : `上限 ${ceiling}`

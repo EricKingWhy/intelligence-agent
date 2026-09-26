@@ -207,9 +207,10 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     expect(html).toContain('已消耗 1 次调用（3 次尝试）');
     expect(html).toContain('绝对 ceiling 1');
     expect(html).toContain('剩余 0');
-    // 清单逐工具一行，两个 counter 分开写；配了没调过的工具也在（读数如实 unavailable）。
+    // 清单逐工具一行，两个 counter 分开写；配了没调过的工具也在——表已知时读数就是
+    // **0 / 剩余 = ceiling**（后端 `BudgetConsumed.calls_for` 的口径：表在 ⇒ 缺名 = 0）。
     expect(html).toContain('tool glob: consumed 1 calls / 3 attempts / limit 1（剩余 0） · 到顶');
-    expect(html).toContain('tool bash: consumed unavailable calls / unavailable attempts / limit 5');
+    expect(html).toContain('tool bash: consumed 0 calls / 0 attempts / limit 5（剩余 5）');
     // 恢复输入抬的是工具配额（键路径 + 真实 argv 形状的 CLI 开关）。
     expect(html).toContain('绝对 ceiling（tool_call_limits.glob）');
     expect(html).toContain('抬的是 tool_call_limits.glob');

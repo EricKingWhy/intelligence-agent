@@ -120,7 +120,7 @@ from agent_harness.storage import (
     OperationContext,
     SessionMeta,
 )
-from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
+from agent_harness.tooling import ErrorCode, ToolCall, ToolExecutor, ToolRegistry
 from agent_harness.tooling.quota import ToolQuotaWindow
 
 if TYPE_CHECKING:
@@ -1618,6 +1618,17 @@ class AgentRuntime:
                             persisted.consecutive_failures,
                         )
                     else:
+                        # 配额拒绝**不喂**护栏（`#314`）：它既不是工具失败（那条调用根本
+                        # 没执行），也不是模型在死循环里撞墙——预算是照着设计到顶的，自然
+                        # 归宿是循环顶那次 `run/paused`（可恢复）。喂进去会让"单条 assistant
+                        # 消息给出 ≥7 条同参数调用"的场景在 HARD 熔断处收成 `run/failed`
+                        # **终态**、绕过那次暂停，与 `04 §9.1` 的"耗尽 ⇒ 暂停 / 可恢复"
+                        # 直接冲突（两轴审查 Correctness 面发现；触发还要求批前
+                        # `used < ceiling`，即窗口至少还放得进一条）。
+                        # **只**放过这一种 error_code：参数非法 / 未注册工具等准入前拒绝
+                        # 仍是 #69 要抓的重复失败（ADR-0014 决策 2-6 语义不变）。
+                        if execution.result.error_code == ErrorCode.BUDGET_EXHAUSTED:
+                            continue
                         sig = guard.observe(call.name, call.args, execution.result.ok)
                     if sig.level != GuardLevel.NONE and (
                         worst_signal is None or sig.level > worst_signal.level
