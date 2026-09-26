@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import json
 import re
-import subprocess
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -15,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
+
+from evaluation.memory_v2_provenance import capture_code_identity
 
 DEFAULT_GOLD_PATH = Path(__file__).with_name("datasets") / "memory_v2_project_gold_v1.json"
 _ACTIONS = {"ADD", "UPDATE", "INVALIDATE", "NOOP"}
@@ -383,6 +384,7 @@ async def run_memory_gold_gate(
     repeat_of: str | None = None,
 ) -> dict[str, Any]:
     """Run every case exactly once, await async work, and write a non-overwriting report."""
+    code_identity = capture_code_identity()
     corpus, cases = load_memory_gold(dataset_path)
     results: list[dict[str, Any]] = []
     for case in cases:
@@ -412,17 +414,21 @@ async def run_memory_gold_gate(
             }
         results.append(result)
 
-    code_sha = _git_value("rev-parse", "HEAD")
-    tree_sha = _git_value("rev-parse", "HEAD^{tree}")
+    try:
+        identity_unchanged = capture_code_identity() == code_identity
+    except Exception:  # noqa: BLE001 — unverifiable post-run identity must fail the evidence.
+        identity_unchanged = False
     report = evaluate_memory_gold(
-        corpus, cases, results, code_sha=code_sha, tree_sha=tree_sha,
+        corpus, cases, results,
+        code_sha=code_identity["code_sha"], tree_sha=code_identity["tree_sha"],
         config_aliases=config_aliases, repeat_of=repeat_of,
     )
-    clean = _git_value("status", "--porcelain") == ""
-    report["worktree_clean"] = clean
-    if not clean:
+    report["worktree_clean"] = identity_unchanged
+    if not identity_unchanged:
         report["status"] = "failed"
-        report["failures"] = sorted({*report["failures"], "dirty_worktree"})
+        report["failures"] = sorted({
+            *report["failures"], "worktree_identity_changed_or_unverified",
+        })
     if report_path is not None:
         destination = Path(report_path)
         await asyncio.to_thread(_write_exclusive_report, destination, report)
@@ -444,14 +450,3 @@ def _validate_aliases(aliases: Mapping[str, str]) -> dict[str, str]:
     ):
         raise ValueError("reports accept configuration aliases only, never endpoint or secret values")
     return dict(aliases)
-
-
-def _git_value(*args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", *args], capture_output=True, text=True, timeout=3,
-            cwd=Path(__file__).resolve().parent.parent, check=False,
-        )
-    except Exception:  # noqa: BLE001 - an unversioned run stays explicitly unbound
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None

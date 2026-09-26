@@ -5,11 +5,19 @@ from dataclasses import replace
 
 import pytest
 
+from evaluation import memory_v2_public_benchmarks
 from evaluation.memory_v2_public_benchmarks import (
     load_locomo,
     load_longmemeval,
     run_public_baseline,
 )
+
+
+@pytest.fixture(autouse=True)
+def _committed_test_tree(monkeypatch):
+    monkeypatch.setattr(memory_v2_public_benchmarks, "capture_code_identity", lambda: {
+        "code_sha": "a" * 40, "tree_sha": "b" * 40,
+    })
 
 
 def _locomo_file(tmp_path):
@@ -81,6 +89,25 @@ def test_locomo_loader_joins_evidence_to_session_ids(tmp_path):
     assert cases[0].sessions[0].turns[0].role == "speaker_a"
 
 
+def test_locomo_loader_marks_category_five_as_abstention(tmp_path):
+    path = _locomo_file(tmp_path)
+    content = json.loads(path.read_text(encoding="utf-8"))
+    content[0]["qa"].append({
+        "question": "Synthetic adversarial question",
+        "adversarial_answer": "unsupported answer",
+        "category": 5,
+        "evidence": [],
+    })
+    path.write_text(json.dumps(content), encoding="utf-8")
+
+    case = load_locomo(path)[1]
+
+    assert case.category == "5"
+    assert case.expected_abstention is True
+    assert case.expected_answer is None
+    assert case.relevant_session_ids == ()
+
+
 def test_longmemeval_loader_preserves_evidence_sessions_and_turns(tmp_path):
     cases = load_longmemeval(_longmemeval_file(tmp_path))
 
@@ -88,6 +115,19 @@ def test_longmemeval_loader_preserves_evidence_sessions_and_turns(tmp_path):
     assert cases[0].relevant_session_ids == ("s1",)
     assert cases[0].relevant_turn_ids == ("s1:0",)
     assert cases[0].sessions[1].turns[0].role == "assistant"
+
+
+def test_longmemeval_loader_marks_abs_questions_as_abstention(tmp_path):
+    path = _longmemeval_file(tmp_path)
+    content = json.loads(path.read_text(encoding="utf-8"))
+    content[0]["question_id"] = "synthetic-q1_abs"
+    content[0]["answer"] = "should not become an expected answer"
+    path.write_text(json.dumps(content), encoding="utf-8")
+
+    case = load_longmemeval(path)[0]
+
+    assert case.expected_abstention is True
+    assert case.expected_answer is None
 
 
 @pytest.mark.asyncio
@@ -106,12 +146,15 @@ async def test_public_baseline_is_content_free_nonblocking_and_freezes_first_run
         "locomo", cases, execute, dataset_path=path,
         config_aliases={"primary": "memory.primary"},
         report_path=first_path, freeze_path=baseline_path,
+        code_identity={"code_sha": "a" * 40, "tree_sha": "b" * 40},
     )
 
     assert awaited == [cases[0].case_id]
     assert first["status"] == "completed"
     assert first["blocking"] is False
     assert first["non_commercial_only"] is True
+    assert first["tool"]["code_sha"] == "a" * 40
+    assert first["tool"]["tree_sha"] == "b" * 40
     assert first["baseline_frozen"] is True
     assert first["metrics"]["answer_quality"]["value"] == 1
     assert first["metrics"]["session_recall_at_6"]["value"] == 1
@@ -125,6 +168,7 @@ async def test_public_baseline_is_content_free_nonblocking_and_freezes_first_run
         config_aliases={"primary": "memory.primary"},
         report_path=tmp_path / "reports" / "repeat.json",
         freeze_path=baseline_path, repeat_of=first["run_id"],
+        code_identity={"code_sha": "a" * 40, "tree_sha": "b" * 40},
     )
     assert second["baseline_frozen"] is False
     assert second["repeat_of"] == first["run_id"]
@@ -181,6 +225,34 @@ async def test_public_baseline_without_answer_quality_cannot_freeze(tmp_path):
     assert not baseline_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_public_baseline_fails_if_worktree_identity_changes(tmp_path, monkeypatch):
+    path = _locomo_file(tmp_path)
+    identities = iter((
+        {"code_sha": "a" * 40, "tree_sha": "b" * 40},
+        {"code_sha": "c" * 40, "tree_sha": "d" * 40},
+    ))
+    monkeypatch.setattr(
+        memory_v2_public_benchmarks,
+        "capture_code_identity",
+        lambda: next(identities),
+    )
+
+    report = await run_public_baseline(
+        "locomo", load_locomo(path),
+        lambda case: {"observed": _measurement(case)},
+        dataset_path=path,
+        config_aliases={"reader": "memory.primary"},
+        report_path=tmp_path / "changed-tree.json",
+    )
+
+    assert report["status"] == "failed"
+    assert report["tool"]["code_sha"] == "a" * 40
+    assert report["tool"]["tree_sha"] == "b" * 40
+    assert report["worktree_clean"] is False
+    assert "worktree_identity_changed_or_unverified" in report["failures"]
+
+
 def test_public_benchmark_loader_rejects_duplicate_question_ids(tmp_path):
     path = _longmemeval_file(tmp_path)
     content = json.loads(path.read_text(encoding="utf-8"))
@@ -189,3 +261,29 @@ def test_public_benchmark_loader_rejects_duplicate_question_ids(tmp_path):
 
     with pytest.raises(ValueError, match="unique"):
         load_longmemeval(path)
+
+
+@pytest.mark.asyncio
+async def test_public_baseline_dataset_sha_is_line_ending_independent(tmp_path):
+    source = _locomo_file(tmp_path)
+    canonical = source.read_bytes().replace(b"\r\n", b"\n")
+    line_feed = tmp_path / "locomo-lf.json"
+    crlf = tmp_path / "locomo-crlf.json"
+    line_feed.write_bytes(canonical)
+    crlf.write_bytes(canonical.replace(b"\n", b"\r\n"))
+
+    reports = []
+    for name, path in (("lf", line_feed), ("crlf", crlf)):
+        report = await run_public_baseline(
+            "locomo", load_locomo(path),
+            lambda case: {
+                "observed": _measurement(case), "trace_id": f"trace-{case.case_id}",
+            },
+            dataset_path=path,
+            config_aliases={"primary": "memory.primary"},
+            report_path=tmp_path / f"{name}.json",
+        )
+        assert report["status"] == "completed"
+        reports.append(report)
+
+    assert reports[0]["dataset"]["sha256"] == reports[1]["dataset"]["sha256"]

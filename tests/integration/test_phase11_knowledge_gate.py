@@ -57,6 +57,7 @@ NOISE_DOC = "\n\n".join(
 
 
 @pytest.mark.asyncio
+@pytest.mark.live_services
 async def test_real_knowledge_gate(gate_settings, tmp_path):
     service = KnowledgeService(
         store=MilvusKnowledgeVectorStore(gate_settings, _embeddings(gate_settings)),
@@ -67,6 +68,7 @@ async def test_real_knowledge_gate(gate_settings, tmp_path):
     alice = IdentityContext("kb_gate_" + uuid4().hex, "alice", ["user"])
     scores_seen: list[float] = []
     active_store = service._store  # restart 后切换到新实例；清理始终用活跃实例
+    collection_created_by_gate = service._store.created_collection
     try:
         # 1. ingest 两个 source
         created = await service.ingest(
@@ -132,15 +134,55 @@ async def test_real_knowledge_gate(gate_settings, tmp_path):
         scores_seen.extend(hit.score for hit in after_rebuild.hits)
     finally:
         # 清理：逐 source 删除 + drop 本实例创建的 collection（用活跃 store 实例）
+        collection_dropped = False
         try:
-            for source in await service._registry.list(alice.tenant_id):
-                await active_store.delete_source(source.source_id, alice)
+            sources = await service._registry.list(alice.tenant_id)
+            rows_before = await active_store._call(
+                "query",
+                collection_name=gate_settings.knowledge_collection,
+                filter="tenant_id == {tenant}",
+                filter_params={"tenant": alice.tenant_id},
+                output_fields=["source_id"],
+                consistency_level="Strong",
+            )
+            source_ids = {source.source_id for source in sources}
+            source_ids.update(row["source_id"] for row in rows_before)
+            for source in sources:
                 await service._registry.delete(source.source_id, alice.tenant_id)
+            for source_id in source_ids:
+                await active_store.delete_source(source_id, alice)
+            assert await service._registry.list(alice.tenant_id) == []
+
+            remaining = await active_store._call(
+                "query",
+                collection_name=gate_settings.knowledge_collection,
+                filter="tenant_id == {tenant}",
+                filter_params={"tenant": alice.tenant_id},
+                output_fields=["source_id"],
+                consistency_level="Strong",
+            )
+            assert remaining == []
+            print(
+                f"[knowledge cleanup] sources_deleted={len(source_ids)} "
+                f"records_remaining={len(remaining)}"
+            )
         finally:
-            created = active_store.created_collection
-            if created:
-                await active_store.drop_created_collection()
-            await active_store.close()
+            try:
+                if collection_created_by_gate:
+                    await active_store._call(
+                        "drop_collection",
+                        collection_name=gate_settings.knowledge_collection,
+                    )
+                    assert gate_settings.knowledge_collection not in await active_store._call(
+                        "list_collections"
+                    )
+                    collection_dropped = True
+            finally:
+                await active_store.close()
+        print(
+            f"[knowledge cleanup] collection_created={collection_created_by_gate} "
+            f"collection_dropped={collection_dropped}"
+        )
 
     # 真实分数分布证据（阈值 0.6 合理性验证，写入 gate 文档）
     print("\n[knowledge gate] 真实分数分布：",

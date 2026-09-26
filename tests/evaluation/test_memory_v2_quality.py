@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from evaluation import memory_v2_quality
 from evaluation.memory_v2_quality import (
     evaluate_memory_gold,
     load_memory_gold,
@@ -141,9 +142,14 @@ def test_failed_skipped_unawaited_zero_and_duplicate_runs_never_pass():
 
 
 @pytest.mark.asyncio
-async def test_runner_awaits_every_case_and_never_reports_skips_as_green(tmp_path):
+async def test_runner_awaits_every_case_and_never_reports_skips_as_green(
+    tmp_path, monkeypatch,
+):
     _corpus, cases = load_memory_gold()
     awaited: list[str] = []
+    monkeypatch.setattr(memory_v2_quality, "capture_code_identity", lambda: {
+        "code_sha": "a" * 40, "tree_sha": "b" * 40,
+    })
 
     async def execute(case):
         awaited.append(case.case_id)
@@ -159,8 +165,32 @@ async def test_runner_awaits_every_case_and_never_reports_skips_as_green(tmp_pat
     assert report["status"] == "failed"
     saved = json.loads(report_path.read_text(encoding="utf-8"))
     assert saved["status"] == "failed"
+    assert saved["worktree_clean"] is True
     assert saved["config_aliases"] == {"primary": "memory.primary"}
     assert "synthetic_input" not in report_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_runner_fails_if_worktree_identity_changes_during_run(tmp_path, monkeypatch):
+    _corpus, _cases = load_memory_gold()
+    identities = iter((
+        {"code_sha": "a" * 40, "tree_sha": "b" * 40},
+        {"code_sha": "c" * 40, "tree_sha": "d" * 40},
+    ))
+    monkeypatch.setattr(
+        memory_v2_quality, "capture_code_identity", lambda: next(identities),
+    )
+
+    report = await run_memory_gold_gate(
+        lambda case: {"status": "skipped", "observed": None},
+        report_path=tmp_path / "changed-tree.json",
+    )
+
+    assert report["code_sha"] == "a" * 40
+    assert report["tree_sha"] == "b" * 40
+    assert report["worktree_clean"] is False
+    assert "worktree_identity_changed_or_unverified" in report["failures"]
+    assert report["status"] == "failed"
 
 
 def test_gold_rejects_duplicate_ids_and_non_synthetic_data(tmp_path):

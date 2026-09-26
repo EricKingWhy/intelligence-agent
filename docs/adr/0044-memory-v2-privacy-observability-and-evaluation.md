@@ -1,6 +1,6 @@
 # ADR-0044 — Memory V2 隐私观测与质量评测
 
-- **Status**: Proposed（实现与离线判别测试已完成；公开基准正式基线和真实服务 Gate 待运行）
+- **Status**: Proposed（实现与离线判别测试已完成；真实公开基准 smoke 与服务 Gate 仍需留证）
 - **Date**: 2026-09-26
 - **Deciders**: 用户（#302 范围、真实服务授权、LoCoMo 非商业内部评测边界）+ 本 Agent（实现方案）
 - **Related**:
@@ -34,11 +34,15 @@ SQLite 与派生索引仍是业务数据所有者。
 
 Memory V2 observation 只发送稳定的标识、阶段、模型别名、动作、kind、scope、计数、reason code、
 attempt/fallback、schema/safety 结果、延迟、token 数、成本及 SHA-256 哈希。输入、输出、候选内容、
-证据、provider response、凭证和自由文本错误不发送。哈希在进程内由规范化内容计算后，只将摘要交给
-Langfuse；结构化字段通过 sink allowlist 和有限 token 格式过滤。
+证据、provider response、秘密凭证和自由文本错误不发送。官方 SDK 可能自动把项目 `public_key`
+附在 OTel `scope.attributes.public_key`；按用户批准，它是非秘密路由标识，只允许出现在该
+instrumentation scope 字段，不视为应用内容或秘密凭证。`secret_key` 及 public key 在其他字段中的
+出现仍由真实 trace Gate 拦截。哈希在进程内由规范化内容计算后，只将摘要交给 Langfuse；结构化字段
+通过 sink allowlist 和有限 token 格式过滤。
 
 模型调用的输入 token 是本地估算值，并标注 `input_tokens_estimated`；输出 token 如可估算也标注来源。
-当前 invoker 不提供定价来源，所以 `cost_usd` 如实为 `null`，不伪造费用。
+当前 invoker 不提供定价来源，所以按用户批准将 `cost_usd` 如实记为 `null`，不伪造费用；只有可信费率
+或 provider 实际计费数据可用时才记录金额。
 
 ### D3 — 观测故障不能改写 Core 结果
 
@@ -61,8 +65,9 @@ contradiction 标签。项目自己的冻结语料是 release gate；公开基�
 
 报告保存 corpus 版本 / digest、code SHA / tree SHA、配置别名（不含配置值）、case 计数、阻塞指标、
 累计 latency / token / cost、run ID 和重复运行的 `repeat_of`。报告不保存题面、答案、会话、模型响应或
-记忆正文。相同 report path 以独占创建拒绝覆盖；重复的 case / trace 身份会失败，明确的重复实验用
-新 run ID 并记录 `repeat_of`。
+记忆正文。身份来自运行前固定的已提交 HEAD/tree；Gate-0 的工作树检查同时拒绝追踪文件偏离、隐藏索引位和
+未跟踪车道输入，运行后再次验证 HEAD/tree 与工作树，变化或无法验证时报告失败。相同 report path 以独占创建
+拒绝覆盖；重复的 case / trace 身份会失败，明确的重复实验用新 run ID 并记录 `repeat_of`。
 
 ### D6 — LoCoMo / LongMemEval 适配器不 vendoring 数据或上游实现
 
@@ -82,13 +87,24 @@ Hugging Face 数据集卡标注 **MIT**。实现没有复制 Mem0 / LoCoMo / Lon
 首个完整且有效的公开基准运行可以独占写入冻结 baseline；后续报告不能覆盖它。公开基准报告永久
 标记 `blocking: false`，不影响 PRD §8.2 项目门禁。
 
+### D7 — 首次公开数据运行可以是单样本 smoke，不冻结正式 baseline
+
+用户批准 LoCoMo 与 LongMemEval 各执行一个真实样本，用实际 Memory V2 formation、Milvus recall
+与模型回答链验证接线。该 smoke 只写非阻塞内容脱敏证据，标记 `run_mode: smoke`，不传
+`freeze_path`，不代表正式基准分数。smoke 回答质量使用归一化 token F1 ≥ 0.5 的本地判别器，
+证据中同时记录 F1 与阈值；它不是上游正式 scorer。LoCoMo 仍只用于非商业内部评测。
+为适配 harness 的 user/assistant 来源权威，LoCoMo 将对话中首位参与者映射为评测 user persona，
+其余参与者映射为非权威 assistant evidence；LongMemEval 保留数据集提供的角色。报告记录这一映射，
+烟测通过还要求至少一个非空且带标注证据的 session 形成已提交记忆，并由 Milvus 命中后实际注入回答上下文。
+
 ## 3. Consequences and open verification
 
 - 全局 trace 内容配置不再能覆盖 Memory V2 的隐私边界；旧版非 V2 tracing 保持原状。
 - 如果 SDK 未提供真实 token / 费用，报告保留估算标记或 `null`，不得把估算伪装成 provider 计量。
 - 数据集文件由运行者在本地保管；LoCoMo 结果仅用于已批准的非商业内部评测。
-- 自动化已验证门禁计算、变异失败、内容脱敏与适配器 schema。首个真实 LoCoMo / LongMemEval baseline、
-  real Milvus / Langfuse run 及 Milvus / Knowledge / Qiniu 清理证明仍须在可复现的干净树上完成。
+- 自动化已验证门禁计算、变异失败、内容脱敏与适配器 schema。每种公开数据各一条真实 smoke
+  不会冻结正式 baseline；完整 LoCoMo / LongMemEval 正式基线仍待单独运行。真实 Milvus / Langfuse
+  run 及 Milvus / Knowledge / Qiniu 清理证明须在可复现的干净树上完成。
 
 ## 4. Verification contract
 

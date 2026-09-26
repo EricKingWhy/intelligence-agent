@@ -13,7 +13,6 @@ import hashlib
 import inspect
 import json
 import re
-import subprocess
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -21,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from evaluation.memory_v2_provenance import capture_code_identity
 
 _BENCHMARKS = {
     "locomo": {
@@ -65,9 +66,10 @@ class PublicBenchmarkCase:
     category: str
     sessions: tuple[PublicSession, ...]
     question: str
-    expected_answer: str
+    expected_answer: str | None
     relevant_session_ids: tuple[str, ...]
     relevant_turn_ids: tuple[str, ...] = ()
+    expected_abstention: bool = False
 
 
 def load_locomo(
@@ -89,6 +91,8 @@ def load_locomo(
             raise TypeError("LoCoMo sample is missing annotated qa items")
         sample_id = str(sample.get("sample_id", "sample"))
         for index, qa in enumerate(qa_items):
+            category = str(qa.get("category", "unknown"))
+            expected_abstention = category == "5"
             evidence = tuple(str(value) for value in qa.get("evidence", []) if value)
             relevant_sessions = tuple(sorted({
                 turn_to_session[turn_id] for turn_id in evidence
@@ -97,12 +101,13 @@ def load_locomo(
             result.append(PublicBenchmarkCase(
                 benchmark="locomo",
                 case_id=f"{sample_id}-qa-{index:04d}",
-                category=str(qa.get("category", "unknown")),
+                category=category,
                 sessions=sessions,
                 question=str(qa["question"]),
-                expected_answer=str(qa["answer"]),
+                expected_answer=(None if expected_abstention else str(qa["answer"])),
                 relevant_session_ids=relevant_sessions,
                 relevant_turn_ids=evidence,
+                expected_abstention=expected_abstention,
             ))
             if limit is not None and len(result) >= limit:
                 return _unique_cases(result)
@@ -153,6 +158,7 @@ def load_longmemeval(
         raise TypeError("LongMemEval input must be a list of question instances")
     result: list[PublicBenchmarkCase] = []
     for item in raw[:limit] if limit is not None else raw:
+        expected_abstention = str(item["question_id"]).endswith("_abs")
         ids = item.get("haystack_session_ids")
         dates = item.get("haystack_dates")
         raw_sessions = item.get("haystack_sessions")
@@ -173,7 +179,7 @@ def load_longmemeval(
             category=str(item["question_type"]),
             sessions=tuple(sessions),
             question=str(item["question"]),
-            expected_answer=str(item["answer"]),
+            expected_answer=(None if expected_abstention else str(item["answer"])),
             relevant_session_ids=tuple(str(value) for value in item.get(
                 "answer_session_ids", [],
             )),
@@ -183,6 +189,7 @@ def load_longmemeval(
                 for index, turn in enumerate(turns)
                 if turn.get("has_answer") is True
             ),
+            expected_abstention=expected_abstention,
         ))
     return _unique_cases(result)
 
@@ -203,8 +210,12 @@ async def run_public_baseline(
     report_path: str | Path,
     freeze_path: str | Path | None = None,
     repeat_of: str | None = None,
+    code_identity: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run a public set and atomically keep only non-blocking aggregate evidence."""
+    run_identity = capture_code_identity()
+    if code_identity is not None and dict(code_identity) != run_identity:
+        raise RuntimeError("public benchmark code identity changed before execution")
     if benchmark not in _BENCHMARKS:
         raise ValueError(f"unsupported public benchmark: {benchmark}")
     if not cases:
@@ -250,7 +261,18 @@ async def run_public_baseline(
     report = _aggregate_public_run(
         benchmark, cases, results, dataset_path=Path(dataset_path),
         config_aliases=config_aliases, run_id=run_id, repeat_of=repeat_of,
+        code_identity=run_identity,
     )
+    try:
+        identity_unchanged = capture_code_identity() == run_identity
+    except Exception:  # noqa: BLE001 — unverifiable post-run identity must fail the evidence.
+        identity_unchanged = False
+    report["worktree_clean"] = identity_unchanged
+    if not identity_unchanged:
+        report["status"] = "failed"
+        report["failures"] = sorted({
+            *report["failures"], "worktree_identity_changed_or_unverified",
+        })
     destination = Path(report_path)
     await asyncio.to_thread(_write_report_exclusive, destination, report)
     if report["status"] == "completed" and freeze_path is not None:
@@ -269,7 +291,7 @@ async def run_public_baseline(
 def _aggregate_public_run(
     benchmark: str, cases: Sequence[PublicBenchmarkCase], results: Sequence[Mapping[str, Any]],
     *, dataset_path: Path, config_aliases: Mapping[str, str], run_id: str,
-    repeat_of: str | None,
+    repeat_of: str | None, code_identity: Mapping[str, str],
 ) -> dict[str, Any]:
     reasons: list[str] = []
     expected_ids = [case.case_id for case in cases]
@@ -336,7 +358,7 @@ def _aggregate_public_run(
         if isinstance(value := observations.get(case.case_id, {}).get("cost_usd"), (int, float))
         and not isinstance(value, bool)
     ]
-    data = dataset_path.read_bytes()
+    data = dataset_path.read_bytes().replace(b"\r\n", b"\n")
     info = _BENCHMARKS[benchmark]
     report = {
         "schema_version": 1,
@@ -357,8 +379,8 @@ def _aggregate_public_run(
         },
         "tool": {
             "name": "agent-harness-memory-v2",
-            "code_sha": _git_value("rev-parse", "HEAD"),
-            "tree_sha": _git_value("rev-parse", "HEAD^{tree}"),
+            "code_sha": code_identity["code_sha"],
+            "tree_sha": code_identity["tree_sha"],
             "config_aliases": dict(config_aliases),
         },
         "case_counts": {
@@ -411,14 +433,3 @@ def _write_report_exclusive(path: Path, report: Mapping[str, Any]) -> None:
     with path.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(report, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
-
-
-def _git_value(*args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", *args], capture_output=True, text=True, timeout=3,
-            cwd=Path(__file__).resolve().parent.parent, check=False,
-        )
-    except Exception:  # noqa: BLE001 - unversioned baseline remains explicit
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
