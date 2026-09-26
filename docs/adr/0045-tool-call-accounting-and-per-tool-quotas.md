@@ -215,11 +215,13 @@ Web 侧一处刻意的**逐字镜像**：配了配额但从未调用过的工具
   `web/src/components/PausedPanel.test.tsx`、`web/src/lib/api.test.ts`。
 - Live Gate：`evaluation/live_gate/scenarios/long_task.py`（v3 起把实现身份 + 两套计数 +
   显式 ceiling 纳入断言面）在**真实模型 + 生产工具**上三连跑（同 SHA/树）。
-  真实 3/3 证据：`docs/live_gate/20260926T012418-317cf2cb02c9-long-task-past-legacy-turn-limit/`
-  ——绑定 sha `317cf2cb` / tree `2b906371`，3 次尝试 `steps=16/16/16`（均越过旧上限 10）、
-  `tool_calls=16/16/16`、`tool_attempts=16/16/16`、per-tool 表 `bash=12/14/12`、
-  请求的 ceiling `{'bash': 24}` 与 `run/started` 落盘快照一致；`validate` 复核 24/24 条
-  自洽（含工作树偏离、沙箱销毁、凭证扫描）。
+  真实 3/3 证据（**最终**）：`docs/live_gate/20260926T020152-462c5bd31cb8-long-task-past-legacy-turn-limit/`
+  ——绑定 sha `462c5bd3` / tree `ddaa252c`（`tracked_matches_head=True`），3 次尝试 `steps=15/16/16`
+  （均越过旧上限 10）、逻辑调用 `15/17/16`（第 2 次是 16 个决策对 17 条调用：一条消息带两条 `read`）、
+  `tool_calls == tool_attempts`（本 run 无 retry）、per-tool 表 `bash=12/12/12`、请求的 ceiling
+  `{'bash': 24}` 与 `run/started` 落盘快照一致；`validate --require-pass` 复核 24/24 条 0 FAIL（exit 0）。
+  ⚠ 首版证据（sha `317cf2cb` / tree `2b906371`，目录 `…20260926T012418-…`）在 `RUF023` 处置动了
+  `src/**` 之后**不再覆盖本树** ⇒ 按 T5 同例**保留入库作原始依据**，并由本行替换其指针。
   ⚠ 本 ADR 写于证据首次产出之前，当时的指针**指错文件**（写成
   `tests/live_gate/test_pause_resume_scenario.py`，那是 T4 的场景测试）且**提前宣告
   证据存在**——两轴审查的 Standards 面按 P1 拒收，此处于证据入库时按实测订正。

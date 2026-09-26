@@ -5602,8 +5602,8 @@ docs/review_ledger.d/` 的最大序号是 **210**，T1 的 `300-d0e2dcb-ec006c7`
 ## T6（`#314`，B 链第六票）：工具调用账（`tool_calls` / `tool_attempts`）与按名字的绝对配额（2026-09-26 · 实现 + 审查 + 真实证据闭合，待集成）
 
 **状态**：✅ 交付、两轴审查 / 修后定向重审、真实 Live Gate 证据与覆盖闸门闭合；分支 `zcode/T314-tool-quotas`，
-出发基点 `718ab562`（= T5 记录笔之后的 `origin/main`）。**代码冻结树 = `317cf2cb` / tree `2b906371`**
-（其后只有证据 / 台账 / 记录三类 docs-only 提交）。**待集成**（PR → `gate0` → merge，§14.4 通道），未关单。
+出发基点 `718ab562`（= T5 记录笔之后的 `origin/main`）。**代码冻结树 = `baf763bc`**（`RUF023` 处置后的 `src/**`；其后只有证据 / docs 提交，且 ruff 那一笔只有**一行**元组换序），
+**最终 Live Gate 证据绑定 sha `462c5bd3` / tree `ddaa252c`**。**待集成**（PR → `gate0` → merge，§14.4 通道），未关单。
 
 **票面**：GitHub `#314`（父票 `#305`；`blocked_by: #313` 已完成）。`04 §9.1` + `02 §5.1` + `11 §6.1`：
 一次被**接纳**的规范化逻辑 `ToolCall` 只计一次 `tool_calls`；每次**真实尝试**（含 retry）计一次
@@ -5611,7 +5611,7 @@ docs/review_ledger.d/` 的最大序号是 **210**，T1 的 `300-d0e2dcb-ec006c7`
 `budget.run.tool_call_limits` 按**已注册**工具名给正整数**绝对**上限，缺省 = 不限（但仍计数）；
 用尽 ⇒ 复用 T4 的暂停生命周期（**可恢复**，不是终态）。
 
-**交付序列**（6 笔代码 / 证据 / 台账 + 记录笔；父链逐笔显式指定）：
+**交付序列**（9 笔：实现 4 + 处置 2 + 证据 2 + 修复 1；父链逐笔显式指定）：
 
 | # | commit | 规模 | 内容 |
 | --- | --- | --- | --- |
@@ -5621,6 +5621,9 @@ docs/review_ledger.d/` 的最大序号是 **210**，T1 的 `300-d0e2dcb-ec006c7`
 | 4 | `69a6092` | 证据面 | Live Gate 场景 **v3**（实现身份 + 两套计数 + 显式 ceiling 纳入断言）+ 干跑接线用例 26 passed |
 | 5 | `b9f9bbd` | 处置 | **两轴审查处置**（含真缺陷：配额拒绝会走成不可恢复的 `run/failed`） |
 | 6 | `317cf2cb` | 处置 | **修后定向重审的 4 条 P3 处置**（畸形条目不印假值 / `take` 顺序用例 / ADR §6.1 边界登记 / docstring 订正） |
+| 7 | `25186e11` | 证据 | Live Gate **首版证据入库**（`docs/live_gate/20260926T012418-317cf2cb02c9-…`，绑定 `317cf2cb` / tree `2b906371`；ruff 处置后**不再覆盖本树** ⇒ 按 T5 同例保留作原始依据） |
+| 8 | `baf763bc` | 修复 | **权威 ruff 车道抓回的 `RUF023`**：`ToolQuotaWindow.__slots__` 按自然序（一行换序） |
+| 9 | `02b72220` | 证据 | Live Gate **重跑证据入库**（`docs/live_gate/20260926T020152-462c5bd31cb8-…`，绑定 `462c5bd3` / tree `ddaa252c`） |
 
 **两轴独立审查（各一独立只读子代理，读范围即 `718ab562..69a6092` 的 34 文件差）**：
 
@@ -5655,16 +5658,27 @@ attempts 写死 1（等于当 calls 别名）⇒ 2 红（两条 retry 用例）�
 ⇒ 7 红（含串行"用满 ceiling"用例，与前两者的集合都不同）；M4 `_dimension_reached` 的 per-tool 分支恒 False
 ⇒ 2 红（暂停路径两条，与 M2 的集合**完全不相交**）。第五个检查点来自修复笔自身：3 条新用例在修前树上全红。
 
-**真实 Live Gate（真模型 + 生产工具，同一 SHA `317cf2cb` / tree `2b906371`）**：
+**真实 Live Gate（真模型 + 生产工具）** —— **最终**证据绑定 sha `462c5bd3` / tree `ddaa252c`
+（干净的 `tracked_matches_head=True` 工作树；`RUF023` 处置动了 `src/**` 之后重跑）：
 
 | 场景 | 判定 | 读数 |
 | --- | --- | --- |
-| `long-task-past-legacy-turn-limit`（v3） | PASS 3/3 | 3 次尝试 `steps=16/16/16`（均越过旧上限 10）、工具 16/16/16、32.8s / 33.8s / 34.6s；`tool_calls_counted_once`：逻辑调用=16 ×3（`tool/call`−准入前被拒=0），per-tool 表 `bash=12/14/12` + `read=3/1/3` + `write=1/1/1`；`tool_attempts_counted_separately`：`tool_calls=16 = tool_attempts=16`（本 run 无 retry ⇒ 相等，判据明写"retry 只会让 attempts 更大"）；`tool_quota_explicit_and_scoped`：请求的 `{'bash': 24}` == `run/started` 落盘快照，bash 已接纳 12/14/12（剩余 12/10/12，**未撞线**）、`write` 未配 ceiling 但已接纳=1（未配 ≠ 不计数）；`production_tools_used`：`bash→agent_harness.tools.bash.BashTool` 等三条实现路径全落在 `agent_harness.*`，带接纳点增量的 `tool/result` = 16/16（畸形 0、名字不一致 0）；`tool_accounting_replay_stable`：复读账本 == 首读账本（含两张表与 ceiling） |
+| `long-task-past-legacy-turn-limit`（v3） | PASS 3/3 | 3 次尝试 `steps=15/16/16`（均越过旧上限 10）、逻辑调用 **15/17/16**（第 2 次是 **16 个决策对 17 条调用**：一条 assistant 消息带两条 `read`，正是「按调用计、不按回合计」要区分的形状）、47.5s / 63.3s / 66.6s、每次 **19/19 断言**；`tool_calls_counted_once`：逻辑调用 = `tool/call` − 准入前被拒 = 0，per-tool 表 `bash=12/12/12` + `read=2/4/2` + `write=1/1/1`（第 3 次多一条 `glob`）；`tool_attempts_counted_separately`：`tool_calls == tool_attempts`（本 run 无 retry ⇒ 相等，判据明写「retry 只会让 attempts 更大」）；`tool_quota_explicit_and_scoped`：请求的 `{'bash': 24}` == `run/started` 落盘快照，bash 已接纳 12（剩余 12，**未撞线**）、`write` 未配 ceiling 但已接纳 = 1（未配 ≠ 不计数）；`production_tools_used`：`bash→agent_harness.tools.bash.BashTool` 等实现路径全落在 `agent_harness.*`，带接纳点增量的 `tool/result` 与逻辑调用逐次相等（畸形 0、名字不一致 0）；`tool_accounting_replay_stable`：复读账本 == 首读账本（含两张表与 ceiling） |
 
-证据目录 `docs/live_gate/20260926T012418-317cf2cb02c9-long-task-past-legacy-turn-limit/`（`validate` 复核
-**24/24 条自洽**，含工作树偏离、沙箱销毁、凭证扫描 0 命中）。⚠ 该场景**不证明撞线与恢复**——判据里
-`bash 已接纳 < ceiling` 明写"未撞线"，撞线 → 暂停 → 恢复那条链由 `budget-pause-resume-same-run`
+证据目录 `docs/live_gate/20260926T020152-462c5bd31cb8-long-task-past-legacy-turn-limit/`：
+`validate --require-pass` 复核 **24/24 条 0 FAIL、exit 0**（工作树偏离三条判据、沙箱销毁、凭证扫描 0 命中）。
+**首版证据**（`…20260926T012418-317cf2cb02c9-…`，绑定 `317cf2cb` / tree `2b906371`；当时 `steps=16/16/16`、
+per-tool `bash=12/14/12`）在 `RUF023` 处置后**不再覆盖本树** ⇒ 保留入库作**原始依据**（T5 同例）。
+⚠ **如实登记一次作废**：重跑的第一轮（`20260926T015838-…`）被 validator **正确拒收**
+（`❌ worktree_clean: tracked_matches_head=False` —— 落账初稿当时还留在工作树未提交），该轮**未入库**（已删）；
+随后先落「落账初稿」笔把工作树清干净、再重跑得上面这份证据。
+⚠ 该场景**不证明撞线与恢复**——判据里 `bash 已接纳 < ceiling` 明写「未撞线」；撞线 → 暂停 → 恢复那条链由 `budget-pause-resume-same-run`
 （T4/T5 场景）与 CLI 端到端用例覆盖（票面 AC 的分工，ADR-0045 §5 已写明）。
+
+**权威 ruff 车道（`ruff check .`）抓回 1 条 —— 本票「被门禁抓回来」**：各审查轮只在改动过的文件上跑 ruff，而 `scripts/gate0.py` 的车道 ② 跑**全仓** ⇒
+新文件 `src/agent_harness/tooling/quota.py:42` 的 `RUF023 __slots__ is not sorted` 一直没被这条权威车道看见（与 T5 的 27 条同一形态）。
+处置 = `__slots__` 两项**换序**（纯元组顺序，无逻辑 / 无默认值 / 无 wire 形状变更；**不是**关掉这条 lint）于 `baf763bc`。**代价如实记**：
+`src/**` 一变 ⇒ Live Gate 首版证据与新树无关、**场景重跑**（上表即重跑读数），全量 pytest 同样重跑。该笔**无独立审查轮覆盖**（一行 lint 修复，如实登记）。
 
 **残余（登记，不阻断）**：① HARD 熔断优先于配额暂停的重叠区（ADR §6.1，刻意，若产品要改变优先级是另一票）；
 ② 畸形计数条目两端显示不同（不可达输入）；③ `take()` 之后的抛点（当前调用链窗口随批次消失）；
