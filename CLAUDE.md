@@ -1,9 +1,10 @@
 # CLAUDE.md
 
 > **本项目的全局规则在 `AGENTS.md` —— 进入本仓库前先完整读它。**
-> 本文件只保留两部分：(1) Claude 使用上的差异；(2) 不知道就会出事的红线。
-> 重复内容一律不复制：两份文件历史上已经在 skill 清单等处给出过互相矛盾的答案，
-> 而重复是漂移的唯一来源。
+> 本文件只保留三类内容：(1) Claude 使用上的差异；(2) 不知道就会出事的红线；
+> (3) `AGENTS.md` 未收录的少数通用规则（§2 的收录原则、§5 Issue / Domain Docs、
+> §6 Ticket 完成条件）。这三类之外一律不复制、不复述：两份文件历史上已经在 skill 清单
+> 等处给出过互相矛盾的答案，而重复是漂移的唯一来源。
 >
 > **角色说明**：Primary **不绑定工具名**——谁当前在干活谁就是主开发（见 `AGENTS.md` 文件头）。
 > 本文件不宣称 Claude 是主开发。
@@ -28,39 +29,12 @@ Specification。那里的 `README.md` 只是本陷阱的说明文件——`00_PR
 
 # 2. 开发方式：Engineering Spec + Matt SDD
 
-Engineering Specification 负责：
+流程与各阶段口径的权威在 `AGENTS.md` §5（工程规划边界）与 `docs/SDD_WORKFLOW_PROTOCOL.md`
+（**版本号以协议文件头为准，本文件不复制**；相关条目：§1 Ticket 与实施、§3 完成与集成、
+§7 第 2 条——用当前环境实际可用的 Skill，不伪造不存在的命令）。Skill 口径另见 `AGENTS.md` §10。
+本文件不复述流程。
 
-`项目长期产品需求 / 架构边界 / MUST / MUST NOT / Acceptance Criteria`
-
-Matt SDD 负责：
-
-`当前模块如何澄清、规格化、拆分和施工`
-
-推荐流程（**阶段固定，Skill 名不固定**——按当前环境实际可用的能力选，不要伪造不存在的命令；
-口径见 `AGENTS.md` §10 与 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 2 条）：
-
-```text
-需求仍有重大歧义或需要补足领域术语
-→ 先澄清（用当前环境提供的能力，例如领域建模 / 规格整理类 Skill）
-
-需要把当前对话整理为功能规格
-→ Engineering Specification
-
-需要拆分为可独立交付、带依赖关系的 Ticket
-→ GitHub Issue / Ticket 拆分
-
-用户授权当前 Ticket
-→ 按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3.1-lite 实施；使用当前环境可用的 Skill，适用时测试先行
-
-完成
-→ focused Test / lint / type check
-→ 按风险选择 review 时点；集成前每个代码 commit 必须有真实 review coverage
-→ Acceptance Criteria + 完整集成门禁
-→ 更新 Tracker / phase status
-→ Git（授权分类见 AGENTS.md §14.4）
-```
-
-原则：
+收录原则（`AGENTS.md` 无对应条目，仅本文件一份）：
 
 - 一个 ticket 是一个 tracer bullet；
 - 一次只施工一个 ticket；
@@ -94,7 +68,8 @@ Matt SDD 负责：
    无显式 `depends_on`、无数据依赖、无资源冲突、Permission 允许、Tool Contract 允许。
    依赖来源优先 `depends_on` / `resource_keys` / Tool metadata / 同文件冲突。
    V1 不使用 LLM 自由文本猜 DAG。
-7. **危险 Git 默认禁止**：`reset --hard` / `rebase` / `push --force` / `push --force-with-lease` / `branch -D`。
+7. **危险 Git 默认禁止**：`reset --hard` / `rebase` / `push --force` /
+   `push --force-with-lease` / `branch -D`。
    `merge` / `push` 的授权分类见 `AGENTS.md` §14.4。⚠ **`push origin main` 自 2026-09-26 起
    已不是常设授权**——main 开了服务端分支保护（必需检查 `gate0`、`enforce_admins` 为真），
    直推被拒（`GH006`）；集成改走「推集成分支 → 开 PR → `gate0` 绿 → 合并 PR」，
@@ -111,7 +86,7 @@ Matt SDD 负责：
 **施工许可**：只读分析可直接做；正式实现以当前用户授权 / ticket 为边界；
 高风险、不可逆、缺外部账号或 API Key 时再请求用户。
 
-**疑难 Bug**：`复现 → SessionEvent / Trace / JSONL → 假设 → 验证 → Root Cause → 最小修复 → 回归`。
+**疑难 Bug**：`复现 → Trace / JSONL / SessionEvent → 假设 → 验证 → Root Cause → 最小修复 → 回归`。
 Crash / Recovery 类问题必须检查 Operation Ledger，而不是只看异常栈。
 
 **Tests**：测试跟随功能一起交付，按模块选择 Unit / Integration / Failure / Recovery / E2E。
@@ -124,7 +99,8 @@ Crash / Recovery 类问题必须检查 Operation Ledger，而不是只看异常�
 Git 是收尾动作，不代替测试。
 
 **Reuse First**（`REUSE / ADAPT / PORT DESIGN / BUILD / DEFER`）见 `AGENTS.md` §6；
-**编码行为准则**（含懒惰阶梯、工程八荣八耻）见 `AGENTS.md` §9；**Skill 清单**见 `AGENTS.md` §10。
+**编码行为准则**（含懒惰阶梯、工程八荣八耻）见 `AGENTS.md` §9；
+**Skill 口径**（不维护静态清单，以当前环境实际枚举为准）见 `AGENTS.md` §10。
 
 ---
 
