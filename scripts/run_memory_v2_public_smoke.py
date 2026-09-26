@@ -102,6 +102,17 @@ def _user_authoritative_evidence_turns(case: PublicBenchmarkCase) -> list[str]:
     else:
         return []
 
+    if case.benchmark == "longmemeval":
+        # LongMemEval gold annotations identify answer-relevant sessions, while
+        # its answer-bearing turns can be assistant-authored. Keep the evidence
+        # source user-authoritative, but allow any user turn in those sessions.
+        return [
+            turn.content
+            for session in case.sessions if session.session_id in relevant_sessions
+            for turn in session.turns
+            if turn.content.strip() and turn.role.casefold() == user_role
+        ]
+
     return [
         turn.content
         for session in case.sessions if session.session_id in relevant_sessions
@@ -146,7 +157,7 @@ def select_smoke_case(cases: Sequence[PublicBenchmarkCase]) -> PublicBenchmarkCa
     ]
     if not eligible:
         raise ValueError(
-            "benchmark has no answerable case with annotated user evidence at token F1 >= 0.5"
+            "benchmark has no answerable case with user evidence at token F1 >= 0.5"
         )
     return min(
         eligible,
@@ -496,7 +507,9 @@ async def run_smoke(
         }
         evaluation_details = {
             "selection_strategy": (
-                "smallest_answerable_case_with_user_evidence_token_f1_at_least_0.5"
+                "smallest_answer_relevant_session_case_with_user_turn_token_f1_at_least_0.5"
+                if benchmark == "longmemeval"
+                else "smallest_answerable_case_with_annotated_user_turn_token_f1_at_least_0.5"
             ),
             "selected_case_id_sha256": _case_id_sha256(case.case_id),
             "sample_category": case.category,

@@ -87,16 +87,27 @@ def test_public_smoke_selects_smallest_answerable_case_with_evidence():
     assert select_smoke_case(cases).case_id == "small"
 
 
-def test_longmemeval_smoke_selection_requires_annotated_user_evidence():
+def test_longmemeval_smoke_accepts_user_evidence_in_answer_relevant_session():
+    user_evidence = _case("user-evidence", size=5)
+    session_id = "session-user-evidence"
+    user_evidence = replace(
+        user_evidence,
+        sessions=(PublicSession(
+            session_id=session_id, timestamp=None,
+            turns=(
+                PublicTurn(role="user", content="a fact"),
+                PublicTurn(role="assistant", content="a fact"),
+            ),
+        ),),
+        relevant_turn_ids=(f"{session_id}:1",),
+    )
     assistant_only = _case("assistant-only", size=1)
     assistant_only = replace(assistant_only, sessions=(PublicSession(
         session_id="session-assistant-only", timestamp=None,
-        turns=(PublicTurn(role="assistant", content="x"),),
+        turns=(PublicTurn(role="assistant", content="a fact"),),
     ),))
 
-    assert select_smoke_case([assistant_only, _case("user-evidence", size=5)]).case_id == (
-        "user-evidence"
-    )
+    assert select_smoke_case([assistant_only, user_evidence]).case_id == "user-evidence"
 
 
 def test_locomo_smoke_selection_requires_first_speaker_evidence():
@@ -158,7 +169,7 @@ def test_smoke_selection_fails_closed_when_only_assistant_evidence_exists():
         try:
             select_smoke_case([case])
         except ValueError as error:
-            assert "annotated user evidence" in str(error)
+            assert "user evidence" in str(error)
         else:
             raise AssertionError("assistant-only evidence was selected for durable memory smoke")
 

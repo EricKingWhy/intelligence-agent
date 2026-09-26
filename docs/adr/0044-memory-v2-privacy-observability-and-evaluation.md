@@ -95,10 +95,14 @@ Hugging Face 数据集卡标注 **MIT**。实现没有复制 Mem0 / LoCoMo / Lon
 用户批准 LoCoMo 与 LongMemEval 各执行一个真实样本，用实际 Memory V2 formation、Milvus recall
 与模型回答链验证接线。该 smoke 只写非阻塞内容脱敏证据，标记 `run_mode: smoke`，不传
 `freeze_path`，不代表正式基准分数。smoke 回答质量使用归一化 token F1 ≥ 0.5 的本地判别器，
-证据中同时记录 F1 与阈值；它不是上游正式 scorer。选例时，每条 gold answer evidence 中由
-user persona 提供的证据单独与预期答案计算同一 token F1，至少一条达到 ≥ 0.5 才合格；在合格样例中
-选择最小者；大小相同时优先选择 user evidence F1 更高者，再以 case ID 稳定打破平局；无合格样例则失败关闭。选例证据 F1 门槛与真实回答的 F1 验收相互独立，前者不能替代
-后者。用户于 2026-09-26 批准该门槛调整：此前两个样例的 user evidence F1 均为 0，故必须按新规则重跑。
+证据中同时记录 F1 与阈值；它不是上游正式 scorer。选例时，LoCoMo 只接受标注相关 turn 中由
+user persona 提供的证据；LongMemEval 接受 gold `answer_session_ids` 中的任一 `user` turn，
+以适配其答案相关 turn 可能由 assistant 撰写的标注。候选 user turn 单独与预期答案计算同一
+token F1，至少一条达到 ≥ 0.5 才合格；在合格样例中选择最小者；大小相同时优先选择 user
+evidence F1 更高者，再以 case ID 稳定打破平局；无合格样例则失败关闭。用户于 2026-09-26
+批准将 LongMemEval 的证据范围从逐 turn 标注扩展至答案相关 session 中的 user turns：此前唯一
+合格样例只形成 Profile，未产生 Milvus 命中；扩展规则让另一个具备合格 user evidence 的样例可供
+真实链路验证。选例证据 F1 门槛与真实回答的 F1 验收相互独立，前者不能替代后者。
 LoCoMo 仍只用于非商业内部评测。
 为适配 harness 的 user/assistant 来源权威，LoCoMo 将对话中首位参与者映射为评测 user persona，
 其余参与者映射为非权威 assistant evidence；LongMemEval 保留数据集提供的角色。报告记录这一映射，

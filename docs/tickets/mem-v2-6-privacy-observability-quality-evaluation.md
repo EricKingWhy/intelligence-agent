@@ -75,7 +75,7 @@ The agent may choose dataset file formats, report layout, evaluation runner deco
 - **AC6:** Replay cases produce zero duplicate active logical memories and the report catches a deliberate duplicate mutation.
 - **AC7:** LoCoMo and LongMemEval compatible runs produce non-blocking baseline artifacts with version, SHA, metrics, tokens, latency, and cost.
 - **AC8:** Real-gate cleanup verification reports zero temporary Milvus/Knowledge/Qiniu records while retaining the approved Langfuse dataset/experiment/trace evidence.
-- **AC9:** Each public smoke selects the smallest answerable sample with at least one annotated user-authoritative evidence turn whose normalized token F1 against the expected answer is ≥0.5. Selection fails closed if no case qualifies; this selection criterion does not replace the separate ≥0.5 threshold for the real generated answer.
+- **AC9:** Each public smoke selects the smallest answerable sample with at least one user-authoritative turn whose normalized token F1 against the expected answer is ≥0.5. LoCoMo evidence must be an annotated relevant user turn; LongMemEval evidence may be any `user`-role turn in a gold `answer_session_ids` session, because its answer-relevant turn annotations can identify assistant-authored turns. Selection fails closed if no case qualifies; this selection criterion does not replace the separate ≥0.5 threshold for the real generated answer.
 
 ## Dependencies
 
@@ -92,7 +92,7 @@ parallelizable: with #301 and #303 after dependencies are integrated
 - Project gold-set run with deterministic fake providers.
 - Real configured model/Milvus evaluation dry run without exposing values.
 - Public benchmark adapter smoke and license/attribution review.
-- Selection tests cover the user-evidence F1 threshold, role mapping for both public datasets, smallest-eligible selection, and fail-closed behavior.
+- Selection tests cover the user-evidence F1 threshold, dataset-specific evidence scope and role mapping, smallest-eligible selection, and fail-closed behavior.
 - Real public smoke uses the same configurable recall timeout as production wiring.
 - Equal-size eligible cases prefer stronger user evidence; smoke reports content-free active memory tier/kind counts and uses a bounded 1,200-second formation drain.
 - Mutation tests proving the gate detects below-threshold, duplicate, and unawaited/all-failed conditions.
