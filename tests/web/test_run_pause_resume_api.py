@@ -23,6 +23,7 @@ AC 的 "refresh/replay reconstruction"。
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Self
 from unittest.mock import patch
@@ -58,13 +59,18 @@ class _ScriptedProbe:
     def __init__(self, *scripts: list[AIMessage]) -> None:
         self._scripts = list(scripts)
         self.calls: list[Any] = []
+        #: 每次执行装配出来的模型实例。`calls` 只证明"装配发生过"（构造不是请求），
+        #: 这里的 `snapshots` 才证明"请求发过没有"——`#315` 要判的正是这条边界。
+        self.models: list[ScriptedModel] = []
         self._patcher: Any = None
 
     def __enter__(self) -> Self:
         def _factory(config: Any, **kwargs: Any) -> ScriptedModel:
             self.calls.append(config)
             responses = self._scripts.pop(0) if self._scripts else [AIMessage(content="ok")]
-            return ScriptedModel(responses=responses)
+            model = ScriptedModel(responses=responses)
+            self.models.append(model)
+            return model
 
         self._patcher = patch(
             "agent_harness.assembly.create_chat_model", side_effect=_factory,
@@ -157,6 +163,7 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
                 "local": {"max_agent_turns": 500, "source": "deployment"},
                 "run": {"max_agent_turns_total": 1, "max_model_requests": None,
                         "max_total_tokens": None, "max_cost_usd": None,
+                        "deadline_at": None,
                         "tool_call_limits": {}},
             },
             "continuation": {
@@ -215,6 +222,7 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
             "local": {"max_agent_turns": 500, "source": "deployment"},
             "run": {"max_agent_turns_total": 4, "max_model_requests": None,
                     "max_total_tokens": None, "max_cost_usd": None,
+                    "deadline_at": None,
                     "tool_call_limits": {}},
         },
         "resume_basis": "budget_increase",
@@ -383,10 +391,14 @@ def test_error_mapping_splits_shape_from_state(tmp_path):
 
 @pytest.mark.parametrize("reason", ["stuck", "deadline"])
 def test_non_budget_pause_reason_is_rejected(tmp_path, reason):
-    """暂停原因不是预算 ⇒ 409 且不给假成功（`#315`/`#317` 的责任域，本票不假装支持）。
+    """暂停原因不是预算、请求又没给对应的恢复依据 ⇒ 409 且不给假成功。
+
+    `stuck` 是 `#317` 的责任域（本票不假装支持）；`deadline`（`#315`）**已支持**，
+    但恢复依据是"点名一个新的未来 deadline"，本用例给的是"只抬 turns、连 deadline 都
+    没有的快照" ⇒ 同样 409（缺依据与给了但已过去是两个判据，见 `validate_resume`）。
 
     构造：直接手工落一条 `run/started` + `run/paused`（reason 非预算）——服务只读事件流，
-    不关心它是谁写的，所以这条用例精确命中"原因闸门"这一条判定。
+    不关心它是谁写的，所以这条用例精确命中"原因 / 依据闸门"这一条判定。
     """
     from agent_harness.session import Session
     from agent_harness.session.event import RUN_PAUSED, RUN_STARTED
@@ -490,12 +502,14 @@ def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
         assert paused["data"]["limits"]["run"] == {
             "max_agent_turns_total": None, "max_model_requests": 1,
             "max_total_tokens": 500, "max_cost_usd": None,
+            "deadline_at": None,
             "tool_call_limits": {},
         }
         started = _one(events, "run/started")
         assert started["data"]["budget"]["run"] == {
             "max_agent_turns_total": None, "max_model_requests": 1,
             "max_total_tokens": 500, "max_cost_usd": None,
+            "deadline_at": None,
             "tool_call_limits": {},
         }, "启动快照落盘 ⇒ 重启后能重建客户端配的 ceiling"
 
@@ -527,6 +541,7 @@ def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
         "max_model_requests": 3,          # 请求点名
         "max_total_tokens": 500,          # 未点名 ⇒ 沿用暂停时的 ceiling（不是被清空）
         "max_cost_usd": None,
+        "deadline_at": None,              # `#315`：没配过 deadline ⇒ 沿用"没配"
         # `#314`：per-tool 配额同样"未点名就沿用"（暂停时是空的 ⇒ 恢复后仍是空的）
         "tool_call_limits": {},
     }
@@ -605,6 +620,7 @@ def test_enforceable_token_ceiling_is_accepted_and_snapshotted(tmp_path):
         "max_model_requests": 3,
         "max_total_tokens": 500,
         "max_cost_usd": None,
+        "deadline_at": None,
         "tool_call_limits": {},
     }, "配置的 ceiling 必须落进 run/started（重启后从这里重建）"
 
@@ -756,3 +772,155 @@ async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
             await serve_task
         except asyncio.CancelledError:
             pass
+
+
+# ── `#315` T7：deadline 与"未对账的副作用" ──────────────────────────────
+
+
+def _seed_unreconciled_operation(app, session_id: str, tool_call_id: str = "call-1") -> None:
+    """在会话账本里放一条"副作用未证"的行（`#315`）。
+
+    为什么可以直接种：恢复闸门（`service.resume_and_launch` → `recover()`）读的就是
+    **账本**，不读事件（`_unreconciled_tool_calls`）。种一条与"上次某个写操作超时后
+    收尾成 UNKNOWN"逐字同形的行，就能精确命中那条判定——不必真去让一个写工具超时
+    （那是执行域的用例，见 `tests/tooling/test_deadline_admission.py`）。
+    """
+    from agent_harness.storage import Operation, OperationState, unproven_meta
+
+    ledger = app.state.agent.operation_ledger
+
+    async def _seed() -> None:
+        await ledger.initialize()
+        await ledger.create(Operation(
+            tool_call_id=tool_call_id, session_id=session_id, run_id="run-old",
+            agent_id="main", tool_name="write_file",
+            args_identity='{"path": "a.txt"}', state=OperationState.PENDING,
+            started_at="2026-09-26T04:00:00Z",
+        ))
+        await ledger.update_state(session_id, tool_call_id, OperationState.RUNNING)
+        await ledger.update_state(
+            session_id, tool_call_id, OperationState.UNKNOWN,
+            reconcile_meta=unproven_meta(
+                error_code="TIMEOUT", note="MUTATING 超时：副作用未证",
+            ),
+        )
+
+    asyncio.run(_seed())
+
+
+def test_deadline_in_the_past_pauses_immediately(tmp_path):
+    """开工就给一个**已经到点**的 deadline ⇒ 当场收口，且一次 Provider 请求都不发。
+
+    `04 §9.1` 把 deadline 定成一条**接纳**边界：过了它不启动新的 Provider 请求 /
+    ToolCall / 子 Agent。所以"给过去的时刻"不是形状错误（`parse_deadline_at` 只管
+    形状），而是状态上的"立刻到点"——暂停理由 `deadline`、触发维 `run.deadline_at`、
+    `resume_requirements` 为空（`03 §3.4`：非空只出现在 stuck），下一步动作是**点名
+    一个新的未来时刻**（不是抬 ceiling）。
+
+    证据分两层：`run/paused` 事件（durable 事实）与"模型被装配了但一次没被调用"
+    （构造 ≠ 请求；`snapshots` 为空才是"没发请求"）。
+    """
+    _, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ScriptedProbe()
+
+    with probe:
+        resp = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "做完这件事",
+                "budget": {"run": {"deadline_at": "2026-01-01T00:00:00Z"}},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = _events(client, session_id)
+        paused = _one(events, "run/paused")
+        assert paused["data"]["reason"] == "deadline"
+        assert paused["data"]["trigger_dimension"] == "run.deadline_at"
+        assert paused["data"]["resume_requirements"] == []
+        assert paused["data"]["closeout_source"] == "deterministic", (
+            "到点后连 closeout 都不发（它是真实 Provider 请求）⇒ 只能确定性组装"
+        )
+        assert paused["data"]["limits"]["run"]["deadline_at"] == "2026-01-01T00:00:00Z"
+        action = paused["data"]["continuation"]["next_safe_action"]
+        assert "run.deadline_at" in action and "RFC 3339" in action
+        assert "提高绝对 ceiling" not in action, "deadline 的下一步不是抬数字"
+
+        assert _types(events).count("run/started") == 1
+        assert "tool/call" not in _types(events), "到点后不再接纳任何 ToolCall"
+        assert all(not m.snapshots for m in probe.models), (
+            "装配过模型（构造不产生请求），但一次请求都没发"
+        )
+
+        # 投影与事件同源：客户端读 /budget 得到的就是这条暂停
+        projection = client.get(f"/api/sessions/{session_id}/budget").json()
+        assert projection["state"] == "paused"
+        assert projection["reason"] == "deadline"
+        assert projection["trigger_dimension"] == "run.deadline_at"
+
+
+def test_resume_is_blocked_while_an_unreconciled_side_effect_remains(tmp_path):
+    """账本上还有未对账的副作用 ⇒ 恢复被 409 拒绝，且不启动任何工作（`03 §5`）。
+
+    这是"对账优先于恢复"的执行层：客户端拿着合法的新 ceiling 来恢复，闸门在**开工
+    前**（`recover()` → 无 ReconcileCallback 时安全拒绝）拦下——不落 `run/resumed`、
+    不构造模型、不伪造那条未知调用的结果（不变量 #14：未知高风险工具不盲重跑）。
+    """
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+
+    with _ScriptedProbe([_continuation_json()]) as probe:
+        paused = _pause_the_run(client, session_id, ceiling=1)
+        run_id = paused[RUN_ID_KEY]
+        # 上一次 run 留下一条"副作用未证"的行（典型来源：写工具超时）
+        _seed_unreconciled_operation(app, session_id)
+        before = _events(client, session_id)
+        calls_before = len(probe.calls)
+
+        resp = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                RUN_ID_KEY: run_id, "resume_basis": "budget_increase",
+                "budget": {"run": {"max_agent_turns_total": 4}, "expected_version": 1},
+            },
+        )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert "write_file" in detail and "call-1" in detail, (
+        "拒绝理由必须点名那条调用（人要知道该对账的是哪一个副作用）"
+    )
+    assert "ReconcileCallback" in detail
+    assert len(probe.calls) == calls_before, "被拒的恢复没有装配第二次执行"
+    _assert_no_new_work(client, session_id, before)
+
+
+def test_budget_projection_reports_needs_reconcile_over_the_pause(tmp_path):
+    """投影把"暂停 + 欠着未对账副作用"报成 `needs_reconcile`，欠账内容点名可读。
+
+    `03 §5` 的 run 状态词表里 `needs_reconcile` 与 `paused` 是**两个**词，且前者
+    「MUST 先 reconcile 才允许恢复」——所以客户端最该看到的不是"可以恢复的暂停"，
+    而是这一个。暂停原因与 continuation 照旧可读（信息不丢，只是不再冒充"可直接
+    恢复"），`reconcile.tool_call_ids` 给出要点名的调用。
+    """
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+
+    with _ScriptedProbe([_continuation_json()]):
+        _pause_the_run(client, session_id, ceiling=1)
+
+    before = client.get(f"/api/sessions/{session_id}/budget").json()
+    assert before["state"] == "paused", "没有欠账时就是普通的可恢复暂停"
+    assert "reconcile" not in before, "缺席 vs 空值：没有欠账就没有这个键"
+
+    _seed_unreconciled_operation(app, session_id)
+
+    after = client.get(f"/api/sessions/{session_id}/budget").json()
+    assert after["state"] == "needs_reconcile"
+    assert after["reconcile"] == {
+        "state": "needs_reconcile", "tool_call_ids": ["call-1"],
+    }
+    assert after["reason"] == before["reason"], "暂停原因照旧可读（只是不再冒充可恢复）"
+    assert after["continuation"] == before["continuation"]
+    assert after["pause_seq"] == before["pause_seq"], "投影是只读的：不写事件、不改暂停"

@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "scenario_id": "run-deadline-boundary",
+  "scenario_version": 1,
+  "verdict": "FAIL",
+  "reason": "attempt 1: TypeError: 'NoneType' object is not iterable；attempt 2: TypeError: 'NoneType' object is not iterable；attempt 3: TypeError: 'NoneType' object is not iterable",
+  "missing_preconditions": [],
+  "created_at": "2026-09-26T08:36:07.972+00:00",
+  "sha": "9496226e75187f5b8ebf7564777274b85eef6d44",
+  "tree": "21b8e84cb46dbd0420e6caeec3fae3d6e39ddbdb",
+  "worktree": {
+    "head_sha": "9496226e75187f5b8ebf7564777274b85eef6d44",
+    "tree": "21b8e84cb46dbd0420e6caeec3fae3d6e39ddbdb",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "bad1668e9091a250",
+      "3fefeec6e8c115ac",
+      "55c27f82df7d23f9"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-26T08:32:45.032+00:00",
+      "ended_at": "2026-09-26T08:34:05.246+00:00",
+      "status": "FAIL",
+      "duration_ms": 80213,
+      "session_id": "run-deadline-boundary-a1-ab50c9a9",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 108,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260926T083245-9496226e7518-run-deadline-boundary/attempt-1.jsonl",
+      "events_sha256": "7a5a31b08f2e0944493d2a0028fac27260f8497b77e9aaecad9d72e4ed3270bb",
+      "assertions": [],
+      "error": "TypeError: 'NoneType' object is not iterable",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "bad1668e9091a250",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-26T08:34:05.246+00:00",
+      "ended_at": "2026-09-26T08:35:02.236+00:00",
+      "status": "FAIL",
+      "duration_ms": 56989,
+      "session_id": "run-deadline-boundary-a2-3819c065",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 70,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260926T083245-9496226e7518-run-deadline-boundary/attempt-2.jsonl",
+      "events_sha256": "38a193a91c58418566ef8b049be134eaeb890653abaaa4205f0562ad5de37943",
+      "assertions": [],
+      "error": "TypeError: 'NoneType' object is not iterable",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "3fefeec6e8c115ac",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-26T08:35:02.236+00:00",
+      "ended_at": "2026-09-26T08:36:07.813+00:00",
+      "status": "FAIL",
+      "duration_ms": 65577,
+      "session_id": "run-deadline-boundary-a3-af62c129",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 74,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260926T083245-9496226e7518-run-deadline-boundary/attempt-3.jsonl",
+      "events_sha256": "cab17f337f380798340583099df0fd6a6a9f296224213e7a554760f1d1db1eb4",
+      "assertions": [],
+      "error": "TypeError: 'NoneType' object is not iterable",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "55c27f82df7d23f9",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260926T083245-9496226e7518-run-deadline-boundary/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260926T083245-9496226e7518-run-deadline-boundary/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260926T083245-9496226e7518-run-deadline-boundary/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "run-deadline-boundary"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "预算 / 暂停恢复 / 卡死 / deadline / 委派树五类场景（后续票的场景，本票只给注册入口）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

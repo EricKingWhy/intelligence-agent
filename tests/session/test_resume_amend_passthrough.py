@@ -26,6 +26,7 @@ from agent_harness.session.service import AmendOptions, SessionService
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.web.app import session_service
+from tests.session.ledger_doubles import idle_operation_ledger
 from tests.workspace_fixtures import rewrite_workspace_mapping
 
 
@@ -48,6 +49,7 @@ def _make_state(tmp_path):
     state.workspace_registry = MagicMock()
     state.workspaces_root = tmp_path
     state.get_wiring = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    state.operation_ledger = idle_operation_ledger()
     state.ensure_stores = AsyncMock()
     state.stores = MagicMock()
     return state

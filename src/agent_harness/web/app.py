@@ -167,11 +167,16 @@ class RunBudgetRequest(BaseModel):
     `agent/run_budget.validate_ceiling_enforceability` 在**首个 Provider 请求之前**
     给 422——web 层不重述那条判定（`budget_claims` 只摊平）。
 
-    剩余两维（`max_tool_calls` / `deadline_at`）**照样声明**，理由是 PRD §3 把公开形状
-    冻结成"全形 + 可空"：只设 run 的 PRD 全形请求体是**合法形状**，用 `extra="forbid"`
-    把 `max_tool_calls: null` 打成 422 会把合法客户端拒之门外。反过来，给它们赋**非空值**
+    `deadline_at`（`#315`）：RFC 3339 UTC 绝对时刻（`11 §6.1`）或 `null`。**形状**由领域层
+    `parse_deadline_at` 判（本层只声明为字符串，不写第二份规则）：朴素时间 / 非字符串 /
+    空串一律 422。一个**已经过去**的时刻不是形状错误——开工给过去时刻等于立刻到点
+    （即时暂停），恢复给过去时刻由 `validate_resume` 按 409 拒。
+
+    剩余一维（`max_tool_calls`）**照样声明**，理由是 PRD §3 把公开形状冻结成"全形 + 可空"：
+    只设 run 的 PRD 全形请求体是**合法形状**，用 `extra="forbid"` 把
+    `max_tool_calls: null` 打成 422 会把合法客户端拒之门外。反过来，给它赋**非空值**
     才是 "客户端以为设了、运行时没实现" —— 那必须 422 而不是静默忽略（ADR-0044 D1/D8），
-    所以下面用 `model_validator` 逐个挡下。
+    所以下面用 `model_validator` 挡下。
 
     `tool_call_limits` 的**形态**（正整数、工具名非空且无首尾空白）由领域层的
     `parse_tool_call_limits` 判（web 层不写第二份规则）；「工具名已注册」要到装配层
@@ -190,24 +195,21 @@ class RunBudgetRequest(BaseModel):
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
     #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`）。`{}` = 没配。
     tool_call_limits: dict[str, int] | None = None
-    # 以下两维：`null`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
-    max_tool_calls: int | None = None
+    #: 绝对截止时刻（`#315` / `11 §6.1`）：RFC 3339 UTC 文本或 `null`（= 不设）。
+    #: 声明为 `str`：wire 上的时刻是文本，解析与归一化到 UTC 由领域层
+    #: `parse_deadline_at` 一处完成（朴素时间 / 空串 / 非字符串在那里 422）。
     deadline_at: str | None = None
+    # `max_tool_calls`：`null`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
+    max_tool_calls: int | None = None
 
     @model_validator(mode="after")
     def _reject_unimplemented_dimensions(self) -> RunBudgetRequest:
-        for name in (
-            "max_tool_calls",
-            "deadline_at",
-        ):
-            value = getattr(self, name)
-            if value is None:
-                continue
+        if self.max_tool_calls is not None:
             raise ValueError(
-                f"budget.run.{name} 尚未实现（#313 实现了 turns / model_requests / "
-                f"total_tokens / cost_usd；#314 实现了 tool_call_limits；"
-                f"总量 tool 配额与 deadline 见后续票）；"
-                f"收到 {name} 不静默忽略，请去掉它"
+                "budget.run.max_tool_calls 尚未实现（#313 实现了 turns / model_requests / "
+                "total_tokens / cost_usd；#314 实现了 tool_call_limits；"
+                "#315 实现了 deadline_at；总量 tool 配额见后续票）；"
+                "收到 max_tool_calls 不静默忽略，请去掉它"
             )
         return self
 
@@ -266,6 +268,10 @@ def budget_claims(
         ),
         "run_max_total_tokens": run.max_total_tokens if run is not None else None,
         "run_max_cost_usd": run.max_cost_usd if run is not None else None,
+        # `#315`：绝对截止时刻（RFC 3339 UTC 文本）。形态由领域层 `parse_deadline_at`
+        # 判（本层只摊平）；"已过去"不是 422——开工给过去时刻= 立刻到点，恢复给过去
+        # 时刻由 `validate_resume` 按 409 拒（`11 §6.1` 的 422/409 分界）。
+        "run_deadline_at": run.deadline_at if run is not None else None,
         # `#314`：per-tool 绝对配额（工具名 → 正整数）。形态由领域层
         # `parse_tool_call_limits` 判（本层只摊平），"名字已注册"由装配层判
         # （`validate_tool_call_limits_registered`）——两处都在首个 Provider 请求之前。

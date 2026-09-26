@@ -16,6 +16,12 @@
  *  这里**不做**任何会话状态判断——输入就是投影出来的暂停事实，输出是要渲染的文本
  *  片段与数字。渲染组件（`components/PausedPanel.tsx`）只负责排版。
  *
+ *  `#315` 起暂停多了一个**非预算**原因：`reason=deadline`（绝对截止时刻到点）。它
+ *  与预算暂停共用同一份事件形状与同一条恢复路径（CAS + 绝对量），但**恢复动作**不同
+ *  ——预算抬某个 ceiling，deadline 换一个新的未来时刻（`03 §3.4`）。所以本模块为它
+ *  单列一组常量 + 一个 `ResumeTarget` 分支：把时刻当成"第五个数字 ceiling"来渲染
+ *  会得到"已消耗不适用 / 无上限"这种自相矛盾的读数（deadline 没有 consumed 可言）。
+ *
  *  `#314` 起有一维是**动态**的：per-tool 配额（`run.tool_call_limits.<工具名>`）。
  *  它不在 `RUN_DIMENSIONS` 这张定长表里，而由 `toolQuotaFacts` 按工具名排序给出
  *  （顺序确定才可复现，与后端 `run_budget.tool_dimensions` 同一取舍）。两个 counter
@@ -128,6 +134,85 @@ export const RUN_DIMENSIONS: readonly RunDimensionSpec[] = [
     decimal: true,
   },
 ];
+
+/** `run/paused.data.reason` 的两个取值（后端 `run_budget.REASON_*` 的镜像）。
+ *  `stuck` 属 `#317`，本模块不认它。 */
+export const PAUSE_REASON_BUDGET_EXHAUSTED = 'budget_exhausted';
+export const PAUSE_REASON_DEADLINE = 'deadline';
+
+/** deadline 维（`#315`）：`trigger_dimension` 的取值（后端 `run_budget.TRIGGER_RUN_DEADLINE`）。
+ *
+ *  它**不在** `RUN_DIMENSIONS` 里，且这不是遗漏：那张表的每一项都同时给得出
+ *  `consumedKey` / `ceilingKey` / `reserved`（"consumed 与 ceiling 比大小"的维度），
+ *  而 deadline 判的是"当前时刻与截止时刻比先后"——没有 consumed 读数。硬塞进去会让
+ *  `dimensionFact` 编出一个 `unavailable / unlimited` 的读数行。 */
+export const DEADLINE_DIMENSION = 'run.deadline_at';
+
+/** deadline 维在恢复请求里的字段名（后端 `budget.run.deadline_at`）。 */
+export const DEADLINE_RESUME_FIELD = 'deadline_at';
+
+/** 抬高 deadline 的 CLI 开关（后端 `cli._RESUME_FLAGS` 的镜像）。 */
+export const DEADLINE_RESUME_FLAG = '--run-deadline';
+
+/** 填入框里的时刻示例——形状提示，不是默认值（本模块不编"现在 + N 分钟"这种策略）。 */
+export const DEADLINE_EXAMPLE = '2026-09-26T04:30:00Z';
+
+/** 是不是 deadline 暂停（原因与触发维度任一命中即算：`reason` 是恢复动作的依据，
+ *  `trigger_dimension` 是"卡在哪一维"——两者在合法载荷里同进同出，取或只是不依赖
+ *  某一条恰好非空）。 */
+export function isDeadlinePause(paused: RunPausedInfo): boolean {
+  return (
+    paused.reason === PAUSE_REASON_DEADLINE ||
+    paused.trigger_dimension === DEADLINE_DIMENSION
+  );
+}
+
+/** 暂停那一刻的 deadline 时刻（RFC 3339 UTC 文本）；没配 / 载荷没带 ⇒ null（不编值）。 */
+export function deadlineInstant(paused: RunPausedInfo): string | null {
+  return paused.run_limits?.deadline_at ?? null;
+}
+
+/** 时刻文本 → epoch 毫秒；**必须带时区**且可解析，否则 null。
+ *
+ *  为什么自己判时区而不是直接 `Date.parse`：后端 `parse_deadline_at` 对**朴素时间**
+ *  （无时区）一律 422——同一份请求在不同机器上代表不同瞬时。`Date.parse` 会把
+ *  `2026-09-26T04:30:00` 当本地时间收下，于是前端放行、后端拒——一次必然 422 的往返，
+ *  且提示词还是错的（说好的格式其实不合法）。
+ *
+ *  `Z` 只认**大写**（`#315` 的审查发现）：后端走 `datetime.fromisoformat`，它收 `Z`
+ *  与 `+00:00`、对小写 `z` 抛 `ValueError` ⇒ 422。`Date.parse` 那边反而收小写
+ *  （JS 的实现比 ES 规范宽），所以"交给 Date.parse 判"会正好漏掉这一格。
+ */
+function parseInstant(raw: string | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  const text = raw.trim();
+  if (!text) return null;
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(text)) return null;
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** deadline 草稿的预校验（**只为省一次必然拒绝的往返**，不是规则来源）。
+ *
+ *  判据与后端一致：形状是带时区的 RFC 3339（`parse_deadline_at`，422），且必须**严格
+ *  在未来**（`resume_headroom_ok`，409）——沿用一个已到点的时刻等于恢复后立刻再停。 */
+export function deadlineDraftError(paused: RunPausedInfo, draft: string): string | null {
+  const text = draft.trim();
+  if (!text) {
+    return `请填一个未来时刻（RFC 3339 UTC，例：${DEADLINE_EXAMPLE}）`;
+  }
+  const ms = parseInstant(text);
+  if (ms === null) {
+    return `deadline 必须是带时区的 RFC 3339 时刻（例：${DEADLINE_EXAMPLE}）；朴素时间在后端会被拒（422）`;
+  }
+  if (ms <= Date.now()) {
+    const was = deadlineInstant(paused);
+    return `deadline 必须是**未来**的时刻，否则恢复后立刻再次暂停${
+      was ? `（本次 ${was} 已到点）` : ''
+    }`;
+  }
+  return null;
+}
 
 /** per-tool 配额维度的名字前缀（后端 `run_budget.TRIGGER_RUN_TOOL_PREFIX` 的镜像）。
  *  工具配额是**动态维度**：每个配了配额的工具名各占一维
@@ -362,10 +447,31 @@ function compareDimension(
 export function dimensionLabel(dimension: string): string {
   const spec = RUN_DIMENSIONS.find((row) => row.dimension === dimension);
   if (spec) return spec.label;
+  if (dimension === DEADLINE_DIMENSION) {
+    return '绝对截止时刻已到（run.deadline_at）';
+  }
   if (dimension === 'local.max_agent_turns') {
     return '单次执行保险丝到顶（local.max_agent_turns）';
   }
   return dimension || '预算维度未声明';
+}
+
+/** 暂停原因的人话标签（与 `dimensionLabel` 同一取舍：未知值原样回显，不编名字）。
+ *
+ *  两类原因**不能**合并成一句"预算问题"：`budget_exhausted` 的处置是"抬高某个
+ *  ceiling"，`deadline` 的处置是"换一个新的未来时刻"——面板上的恢复输入框形状都不同
+ *  （数字 vs RFC 3339 时刻），文案合并会让用户填错东西。 */
+export function pauseReasonLabel(paused: RunPausedInfo): string {
+  if (paused.reason === PAUSE_REASON_DEADLINE) {
+    return '绝对截止时刻到点（deadline：不再接纳新的 Provider 请求 / 工具调用 / 子 Agent）';
+  }
+  if (paused.reason === PAUSE_REASON_BUDGET_EXHAUSTED) {
+    return '预算到顶（budget_exhausted：某一维的绝对 ceiling 用尽）';
+  }
+  if (paused.reason === 'stuck') {
+    return '疑似卡住（stuck：需要变更依据才能恢复，属 #317）';
+  }
+  return paused.reason || '暂停原因未声明';
 }
 
 /** 一个维度的读数。turns 维兼容 `#313` 之前的暂停载荷：那时只有 `consumed_agent_turns`
@@ -410,23 +516,27 @@ function dimensionFact(spec: RunDimensionSpec, paused: RunPausedInfo): Dimension
  *  口径一致——抬 run ceiling 是唯一一个任何 run 都读得懂的维度）。 */
 export type ResumeTarget =
   | { kind: 'run'; spec: RunDimensionSpec }
-  | { kind: 'tool'; quota: ToolQuotaFact };
+  | { kind: 'tool'; quota: ToolQuotaFact }
+  /** `#315`：deadline 暂停——恢复给的是**新的绝对时刻**，不是任何 ceiling 的数字。
+   *  它与 run 维是同一类动作（给绝对值、不重置 counter），但值域不同（时刻文本），
+   *  所以在这里分开：草稿校验、提示文案、请求体的键都由这个 kind 决定。 */
+  | { kind: 'deadline' };
 
 /** 恢复输入框那一行显示的目标名：与恢复请求的键路径同一形态
  *  （`max_model_requests` / `tool_call_limits.glob`）。 */
 export function resumeTargetLabel(target: ResumeTarget): string {
-  return target.kind === 'run'
-    ? target.spec.resumeField
-    : `tool_call_limits.${target.quota.name}`;
+  if (target.kind === 'run') return target.spec.resumeField;
+  if (target.kind === 'tool') return `tool_call_limits.${target.quota.name}`;
+  return DEADLINE_RESUME_FIELD;
 }
 
 /** 抬高这一维的 CLI 开关（提示文案用；后端 `cli._RESUME_FLAGS` / `_resume_command_tail`
  *  的镜像）。工具配额给的是**真实 argv 形状**（`NAME=N` 在同一个参数里），与 CLI 的
  *  `resume_hint` 逐字一致——提示必须是一条能照抄执行的命令，不是示意。 */
 export function resumeTargetCliFlag(target: ResumeTarget): string {
-  return target.kind === 'run'
-    ? `${target.spec.resumeFlag} N`
-    : `--run-tool-limit ${target.quota.name}=N`;
+  if (target.kind === 'run') return `${target.spec.resumeFlag} N`;
+  if (target.kind === 'tool') return `--run-tool-limit ${target.quota.name}=N`;
+  return `${DEADLINE_RESUME_FLAG} ${DEADLINE_EXAMPLE}`;
 }
 
 export interface PauseFacts {
@@ -442,6 +552,14 @@ export interface PauseFacts {
   version: number;
   /** 命中维度的人话标签（未知维度原样回显，不编名字）。 */
   dimensionLabel: string;
+  /** 暂停原因的原值（`budget_exhausted` / `deadline`）。 */
+  reason: string;
+  /** 暂停原因的人话标签（两类原因对应**不同**的恢复动作，面板据此换文案）。 */
+  reasonLabel: string;
+  /** `#315`：本 run 配的绝对截止时刻（RFC 3339 UTC 文本）；没配 ⇒ null。 */
+  deadline: string | null;
+  /** `#315`：本次暂停是 deadline 到点（`ResumeTarget.deadline` 的判据）。 */
+  deadlinePause: boolean;
   /** 恢复所需的最小绝对 turn ceiling（turns 维；见 `minResumeCeiling`）。 */
   minResumeCeiling: number;
   /** 四维读数（turns 恒在，其余三维**只列有事实可说的**——与 CLI
@@ -494,6 +612,14 @@ export function minResumeValue(
  *  可数的，且最小值就是"已接纳调用数 + 1"（不留 closeout 预留）。 */
 export function resumeInputHint(facts: PauseFacts): string {
   const target = facts.resumeTarget;
+  if (target.kind === 'deadline') {
+    // deadline 维的判据是**严格在未来**（`resume_headroom_ok`）：给不出"至少到多少"，
+    // 只能点名"必须晚于现在"以及原来那个已到点的时刻（好让用户看出这是**换时刻**，
+    // 不是"把同一个时刻调大"）。
+    return `换一个**未来**的绝对截止时刻（CLI: ${resumeTargetCliFlag(target)}，RFC 3339 UTC）；${
+      facts.deadline === null ? '本次暂停快照里没有时刻' : `本次 ${facts.deadline} 已到点`
+    }——沿用会被拒（409）。已消耗不重置，恢复沿用同一 run_id`;
+  }
   if (target.kind === 'tool') {
     return `抬的是 ${resumeTargetLabel(target)}（CLI: ${resumeTargetCliFlag(target)}，至少 ${String(
       minToolQuotaValue(target.quota),
@@ -520,8 +646,10 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
   const trippedTool = toolQuotas.find((quota) => quota.tripped) ?? null;
   // 恢复目标：命中的**工具配额**优先（它是动态维度，抬 turns 解不了它的暂停）；否则
   // 按命中的 run 维取；local fuse / 未知维度回落到 turns（`ResumeTarget` 的理由）。
-  const resumeTarget: ResumeTarget =
-    trippedTool !== null
+  const deadlinePause = isDeadlinePause(paused);
+  const resumeTarget: ResumeTarget = deadlinePause
+    ? { kind: 'deadline' }
+    : trippedTool !== null
       ? { kind: 'tool', quota: trippedTool }
       : {
           kind: 'run',
@@ -538,6 +666,10 @@ export function pauseFacts(paused: RunPausedInfo): PauseFacts {
     closeoutSource: paused.closeout_source,
     version: paused.version,
     dimensionLabel: dimensionLabel(paused.trigger_dimension),
+    reason: paused.reason,
+    reasonLabel: pauseReasonLabel(paused),
+    deadline: deadlineInstant(paused),
+    deadlinePause,
     minResumeCeiling: minResumeCeiling(paused.consumed_agent_turns),
     dimensions,
     tripped: facts.find((fact) => fact.tripped) ?? null,
@@ -572,13 +704,15 @@ function toolDraftError(quota: ToolQuotaFact, draft: string): string | null {
  *  `budget.run` 用的键）。 */
 export type ResumeRequestTarget =
   | { kind: 'run'; field: RunLimitField }
-  | { kind: 'tool'; tool: string };
+  | { kind: 'tool'; tool: string }
+  /** `#315`：deadline 暂停——请求体里点名的是 `budget.run.deadline_at`（时刻文本）。 */
+  | { kind: 'deadline'; field: typeof DEADLINE_RESUME_FIELD };
 
 export function resumeRequestTarget(paused: RunPausedInfo): ResumeRequestTarget {
   const target = pauseFacts(paused).resumeTarget;
-  return target.kind === 'run'
-    ? { kind: 'run', field: target.spec.resumeField }
-    : { kind: 'tool', tool: target.quota.name };
+  if (target.kind === 'run') return { kind: 'run', field: target.spec.resumeField };
+  if (target.kind === 'tool') return { kind: 'tool', tool: target.quota.name };
+  return { kind: 'deadline', field: DEADLINE_RESUME_FIELD };
 }
 
 /** 输入框草稿的默认值：卡住的那一维**恰好合法**的最小值（零点击可提交）——它只是
@@ -586,6 +720,11 @@ export function resumeRequestTarget(paused: RunPausedInfo): ResumeRequestTarget 
 export function defaultResumeDraft(paused: RunPausedInfo): string | null {
   const facts = pauseFacts(paused);
   const target = facts.resumeTarget;
+  if (target.kind === 'deadline') {
+    // **不**编一个"现在 + N 分钟"：那是策略（跑多久算合适），不是本地能算出来的事实。
+    // 后端要的是"客户端点名的未来时刻"，替用户填一个数字会让这次恢复看起来是系统的决定。
+    return null;
+  }
   if (target.kind === 'tool') {
     const minimum = minToolQuotaValue(target.quota);
     return minimum === null ? null : String(minimum);
@@ -599,6 +738,10 @@ export function defaultResumeDraft(paused: RunPausedInfo): string | null {
 
 /** 绝对 ceiling 输入框的预校验（**只为省一次必然 409 的往返**，不是规则来源）。
  *
+ *  `#315`：deadline 暂停的目标不是一个 ceiling 数字而是**一个未来时刻**，所以那一支
+ *  分派到 `deadlineDraftError`（形状是带时区的 RFC 3339 + 严格在未来）——它与"够不够
+ *  大"的判据没有共同点，硬塞进下面这条数字通道会让时刻被当成非法数字而误拒。
+ *
  *  返回 null = 可以提交；返回字符串 = 就地提示的原因。
  *  判据与后端 `resume_headroom_ok`（走 `_dimension_reached`）一致，且只看**本次要改的
  *  那一维**——未点名的维度沿用暂停时的 ceiling，它们够不够由后端判（前端多一条自己的
@@ -607,6 +750,9 @@ export function defaultResumeDraft(paused: RunPausedInfo): string | null {
 export function ceilingDraftError(paused: RunPausedInfo, draft: string): string | null {
   const facts = pauseFacts(paused);
   const target = facts.resumeTarget;
+  // `#315`：deadline 的目标是**时刻**（文本），与任何 ceiling 的"够不够"判据都不同，
+  // 分派到它自己的那一份校验（形状 + 严格在未来）。
+  if (target.kind === 'deadline') return deadlineDraftError(paused, draft);
   // `#314`：工具配额的判据与 run 维不同（严格大于已接纳调用数，且 wire 形状是整数），
   // 所以分派到它自己的那一份校验里。
   if (target.kind === 'tool') return toolDraftError(target.quota, draft);
@@ -658,6 +804,9 @@ export function ceilingDraftValue(
   if (ceilingDraftError(paused, draft) !== null) return null;
   const target = pauseFacts(paused).resumeTarget;
   const text = draft.trim();
+  // deadline 维在 wire 上就是**文本**（后端 `parse_deadline_at` 只收带时区的时刻），
+  // 不做任何数值化——`Number('2026-09-26T04:30:00Z')` 是 NaN。
+  if (target.kind === 'deadline') return text;
   if (target.kind === 'tool') return Number(text);
   return target.spec.decimal ? text : Number(text);
 }

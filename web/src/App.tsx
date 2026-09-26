@@ -818,7 +818,11 @@ export default function App() {
       expectedVersion: paused.version,
       ...(target.kind === 'run'
         ? { kind: 'run' as const, field: target.field, value }
-        : { kind: 'tool' as const, tool: target.tool, value: value as number }),
+        : target.kind === 'tool'
+          ? { kind: 'tool' as const, tool: target.tool, value: value as number }
+          : // `#315`：deadline 暂停抬的是**新的绝对时刻**（RFC 3339 UTC 文本）——
+            // 与 run 维的数值 ceiling 不同形，所以由 `resumeRunLimitsBody` 按 kind 拼键。
+            { kind: 'deadline' as const, field: target.field, value: value as string }),
     }).finally(() => setResumingRunId(null));
   }, [paused, selectedId, pauseCeilingDraft, resumePausedRun]);
 

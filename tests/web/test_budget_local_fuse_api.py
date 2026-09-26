@@ -344,11 +344,11 @@ def test_unknown_key_in_budget_rejected_not_silently_ignored(tmp_path):
 
 def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
     """尚未实现的作用域 / 维度一律 422（T4 开 turns、T5 `#313` 再开 requests / tokens、
-    T6 `#314` 再开 per-tool 配额）。
+    T6 `#314` 再开 per-tool 配额、T7 `#315` 再开 deadline）。
 
     "先看起来接受、其实不生效"是最坏的一种兼容：用户会以为预算在管。宁可
     显式拒绝——本用例钉住**仍未实现**的两类（`budget.session` 属 T10 / `#318`；
-    PRD §3 冻结形状里 run 的 `max_tool_calls` 与 `deadline_at` 属后续票）加上
+    PRD §3 冻结形状里 run 的 `max_tool_calls` 属后续票）加上
     `expected_version` 在**创建**入口的形状规则：
 
       * `budget.run` 里仍未实现的维给了**非空值** ⇒ 422（给了 `null` / `{}` 则合法，
@@ -363,6 +363,11 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
 
     `tool_call_limits` 自 `#314` 起**已实现**，所以从本名单移出——它的形状与"名字已
     注册"两条判定各有自己的用例（后者见下一个用例，那里同时钉住它的副作用边界）。
+
+    `deadline_at` 自 `#315` 起**已实现**，同样移出：它的形状判定在
+    `tests/agent/test_run_budget.py`（朴素时间 / 空串 / 非字符串 ⇒ 422），接收面的
+    行为（**已过去的时刻合法且立刻到点** ⇒ 200 + 即时 `run/paused`）见
+    `tests/web/test_run_pause_resume_api.py::test_deadline_in_the_past_pauses_immediately`。
     """
     app, client = _web(tmp_path)
     probe = _ModelProbe()
@@ -371,7 +376,6 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
             {"budget": {"session": {"max_agent_turns_total": 5}}},
             {"budget": {"run": {"max_tool_calls": 5}}},
             {"budget": {"run": {"max_cost_usd": "0.01"}}},
-            {"budget": {"run": {"deadline_at": "2026-09-25T00:00:00Z"}}},
             {"budget": {"expected_version": 3}},
         ):
             resp = client.post("/api/sessions", json={"task": "hi", **payload})

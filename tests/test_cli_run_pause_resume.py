@@ -701,3 +701,194 @@ async def test_quota_rejections_do_not_trip_the_repeated_failure_guard(monkeypat
     assert {p.get("error_code") for p in payloads[1:]} == {"BUDGET_EXHAUSTED"}
     # 账仍然只加 1：被拒的 7 条各带显式 0（`04 §9.1` 的可审计零）
     assert [e.data["budget_delta"]["tool_calls"] for e in results] == [1] + [0] * 7
+
+
+# ── `#315` T7：deadline 维的 CLI 面 ─────────────────────────────────────
+
+
+def test_resume_hint_gives_a_real_instant_for_the_deadline_dimension():
+    """deadline 的提示必须是一条**能照抄**的命令：值给时刻，判据给"未来"。
+
+    为什么 deadline 要单开一条分支：通用拼装会给出
+    `--run-deadline N（N 是**绝对** ceiling，必须高于 consumed + 预留 closeout 轮）`
+    ——值不是数字（是 RFC 3339 时刻），判据也不是"比消耗大"（是"必须是一个未来时刻"）。
+    per-tool 维当初就是因为同类问题（`--run-tool-limit bash N` 跑不起来）单开一条分支。
+    """
+    hint = resume_hint("sess-42", data={
+        **_PAUSE_DATA,
+        "reason": "deadline",
+        "trigger_dimension": "run.deadline_at",
+    })
+
+    assert "--run-deadline 2026-09-26T04:30:00Z" in hint, "值的位置给的是时刻，不是 N"
+    assert "新的未来时刻" in hint
+    assert "必须高于 consumed" not in hint
+    assert "--expected-version 1" in hint, "恢复请求仍要带版本（CAS 的比较对象）"
+
+
+def test_pause_block_renders_the_deadline_line():
+    """暂停摘要里 deadline 那一行报的是**时刻本身**（读数来自 durable 快照，不读进程内状态）。
+
+    这一格最初只断言了 `reason=` / `dimension=`：维度名在、**时刻从不出现**，于是票面
+    Must Do 的"CLI 也显示 deadline"一直是空的通道（`#315` 的两轴审查抓回）。
+    """
+    text = render_pause_block({
+        **_PAUSE_DATA,
+        "reason": "deadline",
+        "trigger_dimension": "run.deadline_at",
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": None, "deadline_at": "2026-09-26T04:10:00Z"},
+        },
+    })
+
+    assert "reason=deadline" in text
+    assert "dimension=run.deadline_at" in text
+    assert "  deadline: 2026-09-26T04:10:00Z" in text, "要点出是哪个时刻到了"
+
+
+def test_pause_block_deadline_line_never_invents_an_instant():
+    """没配 ⇒ `unlimited`；形状认不出 ⇒ `unavailable`——**不**印那个形状、也不编时刻。
+
+    带首尾空白的文本是这一格的边缘：后端事件回读（`_deadline_or_none`）不 strip ⇒
+    同一份事件在那边读作"没配"，CLI 也就不能就地把它当成一个时刻印出来。
+    """
+    base = {
+        **_PAUSE_DATA,
+        "reason": "deadline",
+        "trigger_dimension": "run.deadline_at",
+    }
+    no_deadline = {**base, "limits": {"local": {}, "run": {"deadline_at": None}}}
+    assert "  deadline: unlimited" in render_pause_block(no_deadline)
+    for bad in (0, "  ", " 2026-09-26T04:10:00Z "):
+        malformed = {**base, "limits": {"local": {}, "run": {"deadline_at": bad}}}
+        assert "  deadline: unavailable" in render_pause_block(malformed), repr(bad)
+
+
+def test_pause_block_has_no_deadline_line_for_events_without_that_key():
+    """老事件（`#315` 之前）没有这个键 ⇒ 零行：不拿一片 `unavailable` 当信息。"""
+    text = render_pause_block({
+        **_PAUSE_DATA,
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 8},
+        },
+    })
+
+    assert "deadline" not in text
+    assert "turns: consumed 3 / limit 8" in text
+
+
+def test_main_run_accepts_a_past_deadline_as_a_ceiling(monkeypatch, tmp_path):
+    """`--run-deadline` 也算"给了 ceiling"：不给它则连"至少一个"的闸门都过不了。
+
+    闸门本身（`--run-turns-total` 那种）由 `test_main_resume_requires_at_least_one_absolute_ceiling`
+    钉住；这里证明 deadline 被算进那一族——否则"只给 deadline 的恢复"会被当作
+    "去掉全部 ceiling"，而那正是 deadline 暂停唯一需要的依据。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    seen: dict = {}
+
+    async def _resume(session_id, **kwargs):
+        seen.update(kwargs)
+        from agent_harness.cli import RunOutcome
+
+        return RunOutcome(final_text="ok")
+
+    monkeypatch.setattr(cli, "resume_command", _resume)
+    _main_resume([
+        "sess-1", "--run-deadline", "2026-09-26T04:30:00Z", "--expected-version", "1",
+    ])
+
+    assert seen["run_deadline_at"] == "2026-09-26T04:30:00Z", "开关值原样透传到领域层"
+
+
+@pytest.mark.asyncio
+async def test_cli_immediate_deadline_pauses_and_resume_uses_a_new_instant(
+    monkeypatch, tmp_path,
+):
+    """真链路：`run --run-deadline <已过去>` 当场暂停 → 换一个未来时刻恢复。
+
+    两段账都从磁盘事件读回（`run/paused` 的 `limits.run.deadline_at` 是快照事实），
+    且第一次执行**一次 Provider 请求都没发**（到点后连 closeout 都不发）。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    models: list[ScriptedModel] = []
+
+    def _factory(config, **kw):
+        model = ScriptedModel(responses=[AIMessage(content="做完了")])
+        models.append(model)
+        return model
+
+    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _factory)
+
+    printed: list[str] = []
+    outcome = await cli.run(
+        "做完这件事", run_deadline_at="2026-01-01T00:00:00Z", write=printed.append,
+    )
+
+    assert outcome.paused is True
+    text = "".join(printed)
+    assert "reason=deadline" in text
+    assert "dimension=run.deadline_at" in text
+    assert "--run-deadline 2026-09-26T04:30:00Z" in text, "下一步给的是新时刻的示例"
+    assert all(model.snapshots == [] for model in models), "到点后一次请求都没发"
+
+    session_id = _only_session_id(settings)
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    paused = next(e for e in store.read_events(session_id) if e.type == RUN_PAUSED)
+    assert paused.data["limits"]["run"]["deadline_at"] == "2026-01-01T00:00:00Z"
+    paused_run_id = paused.run_id
+
+    printed_again: list[str] = []
+    resumed = await resume_command(
+        session_id, run_deadline_at="2999-01-01T00:00:00Z", expected_version=1,
+        write=printed_again.append,
+    )
+
+    assert resumed.paused is False and resumed.final_text == "做完了"
+    text_again = "".join(printed_again)
+    assert "[run resumed]" in text_again
+    # 恢复块那一行报的是**新**时刻——它是"换了哪个新时刻"的唯一 CLI 出口，删掉它、或改读
+    # 旧暂停快照，都不会被别的用例发现（两轴审查都点到过）。旧时刻在同一段输出里**先**
+    # 出现过：`resume_command` 会先回顾一次暂停块（它该在那儿），所以否定断言只圈恢复块内。
+    resume_block = text_again.split("[run resumed]", 1)[1]
+    assert "  deadline: 2999-01-01T00:00:00Z" in resume_block
+    assert "2026-01-01T00:00:00Z" not in resume_block, "恢复块不能拿旧快照的时刻冒充新 ceiling"
+    events = store.read_events(session_id)
+    assert [e.type for e in events].count(RUN_STARTED) == 1, "同 run 续跑不新建 run"
+    assert {e.run_id for e in events if e.run_id} == {paused_run_id}
+    resumed_event = next(e for e in events if e.type == RUN_RESUMED)
+    assert resumed_event.data["limits"]["run"]["deadline_at"] == "2999-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_cli_resume_with_the_same_spent_deadline_is_rejected(monkeypatch, tmp_path):
+    """沿用那个**已到点**的时刻 ⇒ 领域层拒绝（409 面），事件流一字不改。
+
+    `03 §3.4` 的恢复规则是"给出**绝对** ceiling，且不得把 ceiling 降到已消耗之下"；
+    deadline 的对应条款是"必须是一个未来时刻"（`resume_headroom_ok`）。沿用旧时刻
+    会让恢复后立刻再次暂停——那不是恢复，是一次立刻重新到点。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(responses=[AIMessage(content="做完了")]),
+    )
+    await cli.run("做完这件事", run_deadline_at="2026-01-01T00:00:00Z", write=lambda _t: None)
+
+    session_id = _only_session_id(settings)
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    before = [e.to_dict() for e in store.read_events(session_id)]
+
+    with pytest.raises(BudgetConflict, match="严格在未来"):
+        await resume_command(
+            session_id, run_deadline_at="2026-01-01T00:00:00Z", expected_version=1,
+            write=lambda _t: None,
+        )
+
+    assert [e.to_dict() for e in store.read_events(session_id)] == before
