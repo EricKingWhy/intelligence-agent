@@ -34,7 +34,8 @@ from agent_harness.identity import IdentityContext, identity_context_var
 from agent_harness.memory.embeddings import create_embeddings
 from agent_harness.memory.milvus_vector_store import MilvusVectorStore
 from agent_harness.memory.v2.assembly import build_memory_v2_service
-from agent_harness.memory.v2.executor import MemoryJobExecutor
+from agent_harness.memory.v2.executor import DegradedReason, MemoryJobExecutor
+from agent_harness.memory.v2.formation import ModelSkipReason
 from agent_harness.memory.v2.jobs import MemoryJobOutcome, SqliteMemoryV2JobStore
 from agent_harness.memory.v2.recall import MemoryV2ContextProvider
 from agent_harness.memory.v2.roles import resolve_memory_roles
@@ -55,6 +56,16 @@ from evaluation.memory_v2_public_benchmarks import (
     load_longmemeval,
     run_public_baseline,
 )
+
+_SAFE_JOB_REASON_CODES = frozenset(
+    reason.value for reason in (*DegradedReason, *ModelSkipReason)
+)
+
+
+def _safe_job_reason_code(reason: str | None) -> str:
+    if reason is None:
+        return "none"
+    return reason if reason in _SAFE_JOB_REASON_CODES else "other"
 
 
 def _case_size(case: PublicBenchmarkCase) -> tuple[int, int, int, str]:
@@ -299,12 +310,14 @@ async def run_smoke(
         await runner.drain(timeout_seconds=600)
         jobs_by_stage: Counter[str] = Counter()
         outcomes: Counter[str] = Counter()
+        reasons: Counter[str] = Counter()
         committed_jobs = 0
         for job_id in job_ids:
             job = await jobs.get(job_id)
             if not job.stage.is_terminal:
                 raise RuntimeError("a benchmark memory job did not reach a terminal stage")
             jobs_by_stage[job.stage.value] += 1
+            reasons[_safe_job_reason_code(job.reason)] += 1
             if job.outcome is not None:
                 outcomes[job.outcome.value] += 1
             if job.outcome is MemoryJobOutcome.COMMITTED:
@@ -409,6 +422,7 @@ async def run_smoke(
             "answer_f1": round(score, 6),
             "formation_model_calls": case_usage["model_calls"],
             "formation_jobs": dict(sorted(jobs_by_stage.items())),
+            "formation_job_reasons": dict(sorted(reasons.items())),
             "source_session_count": len(local_to_source),
             "answer_latency_ms": answer_latency_ms,
             "token_usage_source": {

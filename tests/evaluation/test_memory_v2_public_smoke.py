@@ -10,6 +10,7 @@ from evaluation.memory_v2_public_benchmarks import (
 from scripts.run_memory_v2_public_smoke import (
     _case_speakers,
     _relevant_injected_hit_ids,
+    _safe_job_reason_code,
     _turn_event_type,
     finalize_smoke_report,
     select_smoke_case,
@@ -61,6 +62,12 @@ def test_public_smoke_selection_requires_a_nonempty_relevant_session():
     populated = _case("populated", size=5)
 
     assert select_smoke_case([empty, populated]).case_id == "populated"
+
+
+def test_public_smoke_reason_aggregation_keeps_only_stable_codes():
+    assert _safe_job_reason_code("invalid_model_output") == "invalid_model_output"
+    assert _safe_job_reason_code(None) == "none"
+    assert _safe_job_reason_code("model response content") == "other"
 
 
 def test_smoke_chain_counts_only_injected_hits_from_annotated_sessions():
