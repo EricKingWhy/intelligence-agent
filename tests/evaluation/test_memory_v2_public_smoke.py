@@ -26,14 +26,17 @@ def test_smoke_case_id_is_reported_as_sha256():
     )
 
 
-def _case(case_id: str, *, size: int, abstention: bool = False, evidence: bool = True):
+def _case(
+    case_id: str, *, size: int, abstention: bool = False, evidence: bool = True,
+    evidence_text: str = "a fact",
+):
     return PublicBenchmarkCase(
         benchmark="longmemeval",
         case_id=case_id,
         category="single-session",
         sessions=(PublicSession(
             session_id=f"session-{case_id}", timestamp=None,
-            turns=(PublicTurn(role="user", content="x" * size),),
+            turns=(PublicTurn(role="user", content=evidence_text + " " * size),),
         ),),
         question="Which fact?",
         expected_answer=None if abstention else "a fact",
@@ -43,13 +46,17 @@ def _case(case_id: str, *, size: int, abstention: bool = False, evidence: bool =
     )
 
 
-def _locomo_case(case_id: str, *, evidence_role: str, size: int):
+def _locomo_case(
+    case_id: str, *, evidence_role: str, size: int, evidence_text: str = "a fact",
+):
     user_turn = PublicTurn(
-        role="speaker-a", content="x" * size if evidence_role == "speaker-a" else "",
+        role="speaker-a",
+        content=evidence_text + " " * size if evidence_role == "speaker-a" else "",
         turn_id=f"{case_id}-user",
     )
     assistant_turn = PublicTurn(
-        role="speaker-b", content="x" * size if evidence_role == "speaker-b" else "",
+        role="speaker-b",
+        content=evidence_text + " " * size if evidence_role == "speaker-b" else "",
         turn_id=f"{case_id}-assistant",
     )
     return PublicBenchmarkCase(
@@ -101,6 +108,32 @@ def test_locomo_smoke_selection_requires_first_speaker_evidence():
     assert select_smoke_case(cases).case_id == "user-evidence"
 
 
+def test_smoke_selection_requires_user_evidence_f1_and_keeps_smallest_qualifying_case():
+    cases = [
+        _case("below-threshold", size=1, evidence_text="unrelated"),
+        _case("at-threshold", size=5, evidence_text="a unrelated"),
+        _case("larger-qualifying", size=10),
+    ]
+
+    assert token_f1("a unrelated", "a fact") == 0.5
+    assert select_smoke_case(cases).case_id == "at-threshold"
+
+
+def test_locomo_selection_applies_user_evidence_f1_threshold():
+    cases = [
+        _locomo_case(
+            "below-threshold", evidence_role="speaker-a", size=1,
+            evidence_text="unrelated",
+        ),
+        _locomo_case(
+            "at-threshold", evidence_role="speaker-a", size=5,
+            evidence_text="a unrelated",
+        ),
+    ]
+
+    assert select_smoke_case(cases).case_id == "at-threshold"
+
+
 def test_smoke_selection_fails_closed_when_only_assistant_evidence_exists():
     longmemeval = _case("assistant-only", size=1)
     longmemeval = replace(longmemeval, sessions=(PublicSession(
@@ -128,6 +161,22 @@ def test_public_smoke_selection_fails_when_no_answerable_evidence_exists():
         assert "no answerable case" in str(error)
     else:
         raise AssertionError("selection accepted a benchmark with no eligible case")
+
+
+def test_public_smoke_selection_fails_when_user_evidence_is_below_f1_threshold():
+    for case in (
+        _case("weak-longmemeval", size=1, evidence_text="unrelated"),
+        _locomo_case(
+            "weak-locomo", evidence_role="speaker-a", size=1,
+            evidence_text="unrelated",
+        ),
+    ):
+        try:
+            select_smoke_case([case])
+        except ValueError as error:
+            assert "token F1" in str(error)
+        else:
+            raise AssertionError("selection accepted weak user evidence")
 
 
 def test_public_smoke_selection_requires_a_nonempty_relevant_session():

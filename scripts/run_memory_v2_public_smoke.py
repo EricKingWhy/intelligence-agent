@@ -62,6 +62,7 @@ _SAFE_JOB_REASON_CODES = frozenset(
     reason.value for reason in (*DegradedReason, *ModelSkipReason)
 )
 _SAFE_MODEL_OUTPUT_FAILURE_KINDS = frozenset(kind.value for kind in ModelOutputFailureKind)
+_MINIMUM_USER_EVIDENCE_F1 = 0.5
 
 
 def _safe_job_reason_code(reason: str | None) -> str:
@@ -87,44 +88,65 @@ def _case_id_sha256(case_id: str) -> str:
     return hashlib.sha256(case_id.encode("utf-8")).hexdigest()
 
 
-def _has_user_authoritative_evidence(case: PublicBenchmarkCase) -> bool:
+def _user_authoritative_evidence_turns(case: PublicBenchmarkCase) -> list[str]:
     relevant_sessions = set(case.relevant_session_ids)
     relevant_turns = set(case.relevant_turn_ids)
     if case.benchmark == "locomo":
         speakers = _case_speakers(case)
         if not speakers:
-            return False
+            return []
         user_role = speakers[0]
-        return any(
-            turn.turn_id in relevant_turns and turn.role == user_role
-            for session in case.sessions if session.session_id in relevant_sessions
-            for turn in session.turns
+    elif case.benchmark == "longmemeval":
+        user_role = "user"
+    else:
+        return []
+
+    return [
+        turn.content
+        for session in case.sessions if session.session_id in relevant_sessions
+        for index, turn in enumerate(session.turns)
+        if (
+            turn.content.strip()
+            and (
+                turn.turn_id in relevant_turns
+                if case.benchmark == "locomo"
+                else f"{session.session_id}:{index}" in relevant_turns
+            )
+            and (
+                turn.role == user_role
+                if case.benchmark == "locomo"
+                else turn.role.casefold() == user_role
+            )
         )
-    if case.benchmark == "longmemeval":
-        return any(
-            f"{session.session_id}:{index}" in relevant_turns
-            and turn.role.casefold() == "user"
-            for session in case.sessions if session.session_id in relevant_sessions
-            for index, turn in enumerate(session.turns)
-        )
-    return False
+    ]
+
+
+def _user_evidence_f1(case: PublicBenchmarkCase) -> float:
+    if not case.expected_answer:
+        return 0.0
+    return max(
+        (token_f1(turn, case.expected_answer) for turn in _user_authoritative_evidence_turns(case)),
+        default=0.0,
+    )
 
 
 def select_smoke_case(cases: Sequence[PublicBenchmarkCase]) -> PublicBenchmarkCase:
-    """Choose the smallest answerable sample with annotated user-message evidence."""
+    """Choose the smallest answerable sample with user evidence that supports its answer."""
     eligible = [
         case for case in cases
         if not case.expected_abstention
         and case.expected_answer
         and case.relevant_session_ids
-        and _has_user_authoritative_evidence(case)
+        and _user_evidence_f1(case) >= _MINIMUM_USER_EVIDENCE_F1
         and any(
             session.turns and session.session_id in case.relevant_session_ids
             for session in case.sessions
         )
     ]
     if not eligible:
-        raise ValueError("benchmark has no answerable case with annotated user evidence")
+        raise ValueError(
+            "benchmark has no answerable case with annotated user evidence at token F1 >= 0.5"
+        )
     return min(eligible, key=_case_size)
 
 
@@ -456,7 +478,9 @@ async def run_smoke(
             "cost_usd": None,
         }
         evaluation_details = {
-            "selection_strategy": "smallest_answerable_case_with_annotated_user_evidence",
+            "selection_strategy": (
+                "smallest_answerable_case_with_user_evidence_token_f1_at_least_0.5"
+            ),
             "selected_case_id_sha256": _case_id_sha256(case.case_id),
             "sample_category": case.category,
             "answer_scorer": "normalized_token_f1",

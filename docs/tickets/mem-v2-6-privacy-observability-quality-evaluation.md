@@ -75,6 +75,7 @@ The agent may choose dataset file formats, report layout, evaluation runner deco
 - **AC6:** Replay cases produce zero duplicate active logical memories and the report catches a deliberate duplicate mutation.
 - **AC7:** LoCoMo and LongMemEval compatible runs produce non-blocking baseline artifacts with version, SHA, metrics, tokens, latency, and cost.
 - **AC8:** Real-gate cleanup verification reports zero temporary Milvus/Knowledge/Qiniu records while retaining the approved Langfuse dataset/experiment/trace evidence.
+- **AC9:** Each public smoke selects the smallest answerable sample with at least one annotated user-authoritative evidence turn whose normalized token F1 against the expected answer is ≥0.5. Selection fails closed if no case qualifies; this selection criterion does not replace the separate ≥0.5 threshold for the real generated answer.
 
 ## Dependencies
 
@@ -91,6 +92,7 @@ parallelizable: with #301 and #303 after dependencies are integrated
 - Project gold-set run with deterministic fake providers.
 - Real configured model/Milvus evaluation dry run without exposing values.
 - Public benchmark adapter smoke and license/attribution review.
+- Selection tests cover the user-evidence F1 threshold, role mapping for both public datasets, smallest-eligible selection, and fail-closed behavior.
 - Mutation tests proving the gate detects below-threshold, duplicate, and unawaited/all-failed conditions.
 
 ## Definition of Done
