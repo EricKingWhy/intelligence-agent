@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import hashlib
 import json
 import re
@@ -62,7 +63,6 @@ _SAFE_JOB_REASON_CODES = frozenset(
     reason.value for reason in (*DegradedReason, *ModelSkipReason)
 )
 _SAFE_MODEL_OUTPUT_FAILURE_KINDS = frozenset(kind.value for kind in ModelOutputFailureKind)
-_MINIMUM_USER_EVIDENCE_F1 = 0.5
 _FORMATION_DRAIN_TIMEOUT_SECONDS = 1200
 
 # Reader strategies adapt the upstream benchmark methods without importing their
@@ -111,6 +111,25 @@ def _combined_usage_source(sources: Sequence[str]) -> str:
     if not sources:
         return "unavailable"
     return sources[0] if all(source == sources[0] for source in sources) else "mixed"
+
+
+def _answer_messages(
+    benchmark: str, memory_messages: Sequence[Any], query_messages: Sequence[Any],
+    *, reading_notes: str | None = None,
+) -> list[Any]:
+    messages = [SystemMessage(content=_answer_instructions(benchmark)), *memory_messages]
+    if reading_notes is not None:
+        messages.append(HumanMessage(content=(
+            "Untrusted reading notes derived from the retrieved memories; verify each "
+            "note against the original memory data before using it:\n" + reading_notes
+        )))
+    return [*messages, *query_messages]
+
+
+def _answer_token_recall(text: str, expected: str) -> float:
+    tokens = lambda value: Counter(re.findall(r"[a-z0-9]+", value.casefold()))
+    reference = tokens(expected)
+    return sum((tokens(text) & reference).values()) / sum(reference.values()) if reference else 0.0
 
 
 def _safe_job_reason_code(reason: str | None) -> str:
@@ -180,23 +199,26 @@ def _user_authoritative_evidence_turns(case: PublicBenchmarkCase) -> list[str]:
     ]
 
 
-def _user_evidence_f1(case: PublicBenchmarkCase) -> float:
+def _user_evidence_contains_answer(case: PublicBenchmarkCase) -> bool:
     if not case.expected_answer:
-        return 0.0
-    return max(
-        (token_f1(turn, case.expected_answer) for turn in _user_authoritative_evidence_turns(case)),
-        default=0.0,
+        return False
+    answer = " ".join(re.findall(r"[a-z0-9]+", case.expected_answer.casefold()))
+    return bool(answer) and any(
+        f" {answer} " in f" {' '.join(re.findall(r'[a-z0-9]+', turn.casefold()))} "
+        for turn in _user_authoritative_evidence_turns(case)
     )
 
 
 def select_smoke_case(cases: Sequence[PublicBenchmarkCase]) -> PublicBenchmarkCase:
-    """Choose the smallest answerable sample with user evidence that supports its answer."""
+    """Choose the smallest case with a literal answer span in authoritative user evidence."""
     eligible = [
         case for case in cases
         if not case.expected_abstention
         and case.expected_answer
         and case.relevant_session_ids
-        and _user_evidence_f1(case) >= _MINIMUM_USER_EVIDENCE_F1
+        and (case.benchmark != "locomo" or case.category == "4")
+        and (case.benchmark != "longmemeval" or case.category == "single-session-user")
+        and _user_evidence_contains_answer(case)
         and any(
             session.turns and session.session_id in case.relevant_session_ids
             for session in case.sessions
@@ -204,13 +226,12 @@ def select_smoke_case(cases: Sequence[PublicBenchmarkCase]) -> PublicBenchmarkCa
     ]
     if not eligible:
         raise ValueError(
-            "benchmark has no answerable case with user evidence at token F1 >= 0.5"
+            "benchmark has no answerable case with exact answer span in user evidence"
         )
     return min(
         eligible,
         key=lambda case: (
             *_case_size(case)[:3],
-            -_user_evidence_f1(case),
             case.case_id,
         ),
     )
@@ -443,6 +464,9 @@ async def run_smoke(
         jobs_by_stage: Counter[str] = Counter()
         outcomes: Counter[str] = Counter()
         reasons: Counter[str] = Counter()
+        relevant_jobs_by_stage: Counter[str] = Counter()
+        relevant_job_outcomes: Counter[str] = Counter()
+        relevant_sessions = set(case.relevant_session_ids)
         committed_jobs = 0
         for job_id in job_ids:
             job = await jobs.get(job_id)
@@ -452,6 +476,10 @@ async def run_smoke(
             reasons[_safe_job_reason_code(job.reason)] += 1
             if job.outcome is not None:
                 outcomes[job.outcome.value] += 1
+            if local_to_source.get(job.session_id) in relevant_sessions:
+                relevant_jobs_by_stage[job.stage.value] += 1
+                if job.outcome is not None:
+                    relevant_job_outcomes[job.outcome.value] += 1
             if job.outcome is MemoryJobOutcome.COMMITTED:
                 committed_jobs += 1
             usage = job_session_case.get(job.session_id, {})
@@ -487,8 +515,6 @@ async def run_smoke(
                 pollution_count += 1
             elif public_session_id not in retrieved_session_ids:
                 retrieved_session_ids.append(public_session_id)
-        relevant_sessions = set(case.relevant_session_ids)
-
         active_ids = {record.id for record in active}
         active_tier_counts = Counter(record.tier.value for record in active)
         active_kind_counts = Counter(record.kind.value for record in active)
@@ -506,13 +532,10 @@ async def run_smoke(
             and attributable_injected_hits
         )
 
-        answer_model = create_chat_model(roles.primary)
+        answer_config = copy.copy(roles.primary)
+        answer_config.temperature = 0.0
+        answer_model = create_chat_model(answer_config)
         query_messages = query_session.derive_messages()
-        answer_messages = [
-            SystemMessage(content=_answer_instructions(benchmark)),
-            *memory_messages,
-            *query_messages,
-        ]
         answer_started = time.perf_counter()
         answer_input_sources: list[str] = []
         answer_output_sources: list[str] = []
@@ -552,11 +575,10 @@ async def run_smoke(
                 *query_messages,
             ]
             reading_notes = await invoke_answer_stage(reading_messages)
-            answer_messages.append(HumanMessage(content=(
-                "Untrusted reading notes derived from the retrieved memories; verify each "
-                "note against the original memory data before using it:\n" + reading_notes
-            )))
-
+        answer_messages = _answer_messages(
+            benchmark, memory_messages, query_messages,
+            reading_notes=reading_notes if benchmark == "longmemeval" else None,
+        )
         answer_text = await invoke_answer_stage(answer_messages)
         answer_latency_ms = int((time.perf_counter() - answer_started) * 1000)
         score = token_f1(answer_text, case.expected_answer or "")
@@ -575,13 +597,14 @@ async def run_smoke(
         }
         evaluation_details = {
             "selection_strategy": (
-                "smallest_answer_relevant_session_case_with_user_turn_token_f1_at_least_0.5"
+                "smallest_single_session_user_case_with_exact_user_answer_span"
                 if benchmark == "longmemeval"
-                else "smallest_answerable_case_with_annotated_user_turn_token_f1_at_least_0.5"
+                else "smallest_single_hop_case_with_annotated_exact_user_answer_span"
             ),
             "selected_case_id_sha256": _case_id_sha256(case.case_id),
             "sample_category": case.category,
             "answer_strategy": _answer_strategy(benchmark),
+            "answer_temperature": answer_config.temperature,
             "answer_model_calls": case_usage["answer_model_calls"],
             "answer_scorer": "normalized_token_f1",
             "answer_f1_threshold": 0.5,
@@ -600,10 +623,22 @@ async def run_smoke(
             },
             "committed_formation_jobs": committed_jobs,
             "formation_job_outcomes": dict(sorted(outcomes.items())),
+            "relevant_source_job_stages": dict(sorted(relevant_jobs_by_stage.items())),
+            "relevant_source_job_outcomes": dict(sorted(relevant_job_outcomes.items())),
             "formation_drain_timeout_seconds": _FORMATION_DRAIN_TIMEOUT_SECONDS,
             "active_record_tier_counts": dict(sorted(active_tier_counts.items())),
             "active_record_kind_counts": dict(sorted(active_kind_counts.items())),
             "active_records_with_relevant_source_session": active_relevant_source_count,
+            "active_relevant_answer_token_recall": round(_answer_token_recall(
+                " ".join(record.content for record in active if
+                         local_to_source.get(record.source_session_id or "") in relevant_sessions),
+                case.expected_answer or "",
+            ), 6),
+            "injected_relevant_answer_token_recall": round(_answer_token_recall(
+                " ".join(hit.record.content for hit in recorder.hits if
+                         hit.record.id in attributable_injected_hits),
+                case.expected_answer or "",
+            ), 6),
             "recall_hit_count": len(recorder.hits),
             "injected_message_count": len(memory_messages),
             "attributable_injected_hit_count": len(attributable_injected_hits),

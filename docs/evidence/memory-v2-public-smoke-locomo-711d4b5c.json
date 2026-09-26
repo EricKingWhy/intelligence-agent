@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "run_id": "711d4b5c-9f6d-47f1-a0ab-ba3ba2e4fedc",
+  "repeat_of": null,
+  "ran_at": "2026-09-26T13:29:26+00:00",
+  "status": "failed",
+  "blocking": false,
+  "benchmark": "LoCoMo",
+  "adapter_version": 1,
+  "source": "https://github.com/snap-research/locomo",
+  "license": "CC BY-NC 4.0",
+  "non_commercial_only": true,
+  "dataset": {
+    "filename": "locomo10.json",
+    "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "case_count": 1
+  },
+  "tool": {
+    "name": "agent-harness-memory-v2",
+    "code_sha": "2126f62cdcd936e357acc3638ecfd686608d3d56",
+    "tree_sha": "38756e10f530c556aeb6bdd1e20e698269c72636",
+    "config_aliases": {
+      "formation": "memory.primary",
+      "answer": "memory.primary",
+      "index": "milvus",
+      "retrieval": "hybrid-v1"
+    }
+  },
+  "case_counts": {
+    "total": 1,
+    "executed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "unawaited": 0
+  },
+  "metrics": {
+    "answer_quality": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "session_recall_at_6": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "stored_record_count": 18,
+    "pollution_rate": 0.0,
+    "pollution_count": 0,
+    "injected_tokens": 595,
+    "latency_ms_total": 413502,
+    "input_tokens": 57902,
+    "output_tokens": 10938,
+    "cost_usd": null
+  },
+  "failures": [
+    "answer_quality_below_smoke_threshold"
+  ],
+  "worktree_clean": true,
+  "baseline_frozen": false,
+  "run_mode": "smoke",
+  "pipeline": {
+    "formation": "MemoryJobRunner",
+    "storage": "SqliteMemoryV2Store",
+    "index": "MilvusMemoryV2Index",
+    "recall_injection": "MemoryV2ContextProvider",
+    "answer_generation": "configured_model_provider",
+    "langfuse": "disabled_for_public_benchmark_content"
+  },
+  "smoke": {
+    "selection_strategy": "smallest_answerable_case_with_annotated_user_turn_token_f1_at_least_0.5",
+    "selected_case_id_sha256": "31e3064279e56a104f629a351138f51095ce5bacc6b11c733990aa32563ed6e9",
+    "sample_category": "4",
+    "answer_strategy": "locomo_short_context_grounded_v1",
+    "answer_model_calls": 1,
+    "answer_scorer": "normalized_token_f1",
+    "answer_f1_threshold": 0.5,
+    "answer_f1": 0.0,
+    "formation_model_calls": 33,
+    "formation_jobs": {
+      "completed": 19
+    },
+    "formation_job_reasons": {
+      "none": 18,
+      "transient_only": 1
+    },
+    "formation_output_failure_kinds": {},
+    "source_session_count": 19,
+    "answer_latency_ms": 790,
+    "token_usage_source": {
+      "formation_input": "local_estimate",
+      "formation_output": "local_estimate",
+      "answer_input": "provider",
+      "answer_output": "provider"
+    },
+    "committed_formation_jobs": 14,
+    "formation_job_outcomes": {
+      "committed": 14,
+      "no_write": 5
+    },
+    "formation_drain_timeout_seconds": 1200,
+    "active_record_tier_counts": {
+      "collection": 14,
+      "profile": 4
+    },
+    "active_record_kind_counts": {
+      "semantic": 18
+    },
+    "active_records_with_relevant_source_session": 1,
+    "recall_hit_count": 14,
+    "injected_message_count": 2,
+    "attributable_injected_hit_count": 1,
+    "chain_verified": true,
+    "speaker_mapping": "first_dialogue_speaker=user; other_speakers=assistant_non_authoritative",
+    "milvus_collection_created": true,
+    "milvus_collection_name": "memv2pub_2ebb0be37213",
+    "passed": false
+  },
+  "cleanup": {
+    "temporary_milvus_collection": "confirmed_absent"
+  }
+}

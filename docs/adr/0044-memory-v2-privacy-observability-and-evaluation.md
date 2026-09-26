@@ -95,14 +95,17 @@ Hugging Face 数据集卡标注 **MIT**。适配器没有 vendoring 数据、完
 用户批准 LoCoMo 与 LongMemEval 各执行一个真实样本，用实际 Memory V2 formation、Milvus recall
 与模型回答链验证接线。该 smoke 只写非阻塞内容脱敏证据，标记 `run_mode: smoke`，不传
 `freeze_path`，不代表正式基准分数。smoke 回答质量使用归一化 token F1 ≥ 0.5 的本地判别器，
-证据中同时记录 F1 与阈值；它不是上游正式 scorer。选例时，LoCoMo 只接受标注相关 turn 中由
-user persona 提供的证据；LongMemEval 接受 gold `answer_session_ids` 中的任一 `user` turn，
-以适配其答案相关 turn 可能由 assistant 撰写的标注。候选 user turn 单独与预期答案计算同一
-token F1，至少一条达到 ≥ 0.5 才合格；在合格样例中选择最小者；大小相同时优先选择 user
-evidence F1 更高者，再以 case ID 稳定打破平局；无合格样例则失败关闭。用户于 2026-09-26
-批准将 LongMemEval 的证据范围从逐 turn 标注扩展至答案相关 session 中的 user turns：此前唯一
-合格样例只形成 Profile，未产生 Milvus 命中；扩展规则让另一个具备合格 user evidence 的样例可供
-真实链路验证。选例证据 F1 门槛与真实回答的 F1 验收相互独立，前者不能替代后者。
+证据中同时记录 F1 与阈值；它不是上游正式 scorer。当前选例规则：LoCoMo 只接受标注相关 turn
+中由 user persona 提供的证据；LongMemEval 只选 `single-session-user` 类，并要求 gold
+`answer_session_ids` 中的 user turn 提供证据。预期答案的规范化词序列必须连续出现在该 user
+turn；满足条件后按样例大小、再按 case ID 稳定选最小者，无合格样例则失败关闭。选例用 gold
+只判断来源是否真正提供答案，不进入形成、检索排序或回答提示；真实回答仍须独立达到 F1 ≥0.5。
+LoCoMo 单样本 smoke 进一步限于上游数据 category `4` 的单跳事实题：此前不设类别时最小合格题
+落在多跳类，答案还需要非权威 assistant 的经历，超出了本项目从 user 形成记忆的权限边界。
+用户同日批准此单样本限制，正式全量基准仍保留所有类别；上游评测器把 category `1` 按多跳题
+单独计分（<https://github.com/snap-research/locomo/blob/main/task_eval/evaluation.py>）。
+此前用户批准过 user-turn F1≥0.5 的选例规则，但其选中 `single-session-assistant` 样例，user
+turn 只是重复问题，根本未给出答案。2026-09-26 用户批准以当前更严格规则替换该规则。
 扩展后的真实 LongMemEval smoke 选中 user-evidence F1=0.631579 的样例，但本次未通过：一个
 formation job 因 `embedding_unavailable` 降级、没有提交记忆，Recall@6=0、注入数为 0、回答 F1 为
 0.421053，`chain_verified=false`。runner 报告及随后独立 Milvus 查询都确认临时 collection 已清理；
@@ -158,6 +161,14 @@ F1 仍低于 0.5。rerank 没有召回增益，因此先改读题与答题方式
   都计入报告，报告不保存问题、记忆、notes 或模型回答。
 
 此处只借用公开基准的 reader 方法；不改变 Memory V2 生产运行时、持久记忆契约或确定性检索排序。
+
+首次 reader 适配的真实烟测未达门槛：LoCoMo Recall@6=1.0、链路通过、答案 F1=0；LongMemEval
+Recall@6=0、链路未通过、答案 F1=0.45。两份报告均确认临时 Milvus collection 已清理：
+`docs/evidence/memory-v2-public-smoke-locomo-711d4b5c.json` 与
+`docs/evidence/memory-v2-public-smoke-longmemeval-511bd604.json`。审查发现 CoN notes 被放在最终问题
+之后，与上游顺序相反，现改为 notes 在前、原问题最后；答案阶段温度固定为 0，与两个上游评测器一致，
+并添加只含数值的相关来源作业结果和答案 token 覆盖率，定位形成或注入丢失。上述修正还需重新跑真实
+烟测，不能用旧报告宣称质量通过。
 
 ## 3. Consequences and open verification
 

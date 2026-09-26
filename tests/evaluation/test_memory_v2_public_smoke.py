@@ -1,6 +1,8 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
+from langchain_core.messages import HumanMessage
+
 from agent_harness.session import MODEL_COMPLETED, USER_MESSAGE
 from evaluation.memory_v2_public_benchmarks import (
     PublicBenchmarkCase,
@@ -9,7 +11,9 @@ from evaluation.memory_v2_public_benchmarks import (
 )
 from scripts.run_memory_v2_public_smoke import (
     _answer_instructions,
+    _answer_messages,
     _answer_strategy,
+    _answer_token_recall,
     _case_id_sha256,
     _case_speakers,
     _combined_usage_source,
@@ -46,6 +50,25 @@ def test_longmemeval_reader_requires_notes_to_be_checked_against_source_memories
     assert _answer_strategy("longmemeval") == "longmemeval_con_reading_notes_v1"
 
 
+def test_longmemeval_reader_keeps_untrusted_notes_before_the_original_question():
+    memory = HumanMessage(content="Untrusted memory data")
+    question = HumanMessage(content="Which detail?")
+
+    messages = _answer_messages(
+        "longmemeval", [memory], [question], reading_notes="candidate detail",
+    )
+
+    assert messages[1] is memory
+    assert "Untrusted reading notes" in messages[2].content
+    assert "candidate detail" in messages[2].content
+    assert messages[-1] is question
+
+
+def test_answer_token_recall_is_content_free_and_counts_reference_tokens():
+    assert _answer_token_recall("blue sky and blue ocean", "blue blue car") == 2 / 3
+    assert _answer_token_recall("unrelated", "blue blue car") == 0.0
+
+
 def test_combined_answer_usage_source_reports_mixed_provider_estimates():
     assert _combined_usage_source(["provider", "provider"]) == "provider"
     assert _combined_usage_source(["provider", "local_estimate"]) == "mixed"
@@ -58,7 +81,7 @@ def _case(
     return PublicBenchmarkCase(
         benchmark="longmemeval",
         case_id=case_id,
-        category="single-session",
+        category="single-session-user",
         sessions=(PublicSession(
             session_id=f"session-{case_id}", timestamp=None,
             turns=(PublicTurn(role="user", content=evidence_text + " " * size),),
@@ -87,7 +110,7 @@ def _locomo_case(
     return PublicBenchmarkCase(
         benchmark="locomo",
         case_id=case_id,
-        category="1",
+        category="4",
         sessions=(PublicSession(
             session_id=f"session-{case_id}", timestamp=None,
             turns=(user_turn, assistant_turn),
@@ -144,39 +167,57 @@ def test_locomo_smoke_selection_requires_first_speaker_evidence():
     assert select_smoke_case(cases).case_id == "user-evidence"
 
 
-def test_smoke_selection_requires_user_evidence_f1_and_keeps_smallest_qualifying_case():
+def test_locomo_selection_excludes_multi_hop_case():
+    multi_hop = replace(
+        _locomo_case("multi-hop", evidence_role="speaker-a", size=1), category="1",
+    )
+    single_hop = _locomo_case("single-hop", evidence_role="speaker-a", size=5)
+
+    assert select_smoke_case([multi_hop, single_hop]).case_id == "single-hop"
+
+
+def test_smoke_selection_requires_exact_user_answer_span_and_keeps_smallest_case():
     cases = [
-        _case("below-threshold", size=1, evidence_text="unrelated"),
-        _case("at-threshold", size=5, evidence_text="a unrelated"),
+        _case("missing-answer", size=1, evidence_text="a unrelated"),
+        _case("exact-answer", size=5, evidence_text="the answer is a fact!"),
         _case("larger-qualifying", size=20),
     ]
 
-    assert token_f1("a unrelated", "a fact") == 0.5
-    assert select_smoke_case(cases).case_id == "at-threshold"
+    assert token_f1("a unrelated", "a fact") == 0.5  # old rule's false positive
+    assert select_smoke_case(cases).case_id == "exact-answer"
 
 
-def test_smoke_selection_prefers_stronger_user_evidence_when_case_size_ties():
+def test_smoke_selection_uses_case_id_to_break_size_ties():
     cases = [
-        _case("a-threshold", size=5, evidence_text="a unrelated"),
-        _case("z-stronger", size=5, evidence_text="a fact"),
+        _case("z-last", size=5, evidence_text="a fact"),
+        _case("a-first", size=5, evidence_text="a fact"),
     ]
 
-    assert select_smoke_case(cases).case_id == "z-stronger"
+    assert select_smoke_case(cases).case_id == "a-first"
 
 
-def test_locomo_selection_applies_user_evidence_f1_threshold():
+def test_locomo_selection_requires_exact_answer_span_in_annotated_user_turn():
     cases = [
         _locomo_case(
-            "below-threshold", evidence_role="speaker-a", size=1,
-            evidence_text="unrelated",
-        ),
-        _locomo_case(
-            "at-threshold", evidence_role="speaker-a", size=5,
+            "missing-answer", evidence_role="speaker-a", size=1,
             evidence_text="a unrelated",
         ),
+        _locomo_case(
+            "exact-answer", evidence_role="speaker-a", size=5,
+            evidence_text="the answer is a fact!",
+        ),
     ]
 
-    assert select_smoke_case(cases).case_id == "at-threshold"
+    assert select_smoke_case(cases).case_id == "exact-answer"
+
+
+def test_longmemeval_selection_excludes_assistant_answer_category():
+    assistant_category = replace(
+        _case("assistant-category", size=1), category="single-session-assistant",
+    )
+    user_category = _case("user-category", size=5)
+
+    assert select_smoke_case([assistant_category, user_category]).case_id == "user-category"
 
 
 def test_smoke_selection_fails_closed_when_only_assistant_evidence_exists():
@@ -208,18 +249,18 @@ def test_public_smoke_selection_fails_when_no_answerable_evidence_exists():
         raise AssertionError("selection accepted a benchmark with no eligible case")
 
 
-def test_public_smoke_selection_fails_when_user_evidence_is_below_f1_threshold():
+def test_public_smoke_selection_fails_without_exact_user_answer_span():
     for case in (
-        _case("weak-longmemeval", size=1, evidence_text="unrelated"),
+        _case("weak-longmemeval", size=1, evidence_text="a unrelated"),
         _locomo_case(
             "weak-locomo", evidence_role="speaker-a", size=1,
-            evidence_text="unrelated",
+            evidence_text="a unrelated",
         ),
     ):
         try:
             select_smoke_case([case])
         except ValueError as error:
-            assert "token F1" in str(error)
+            assert "exact answer span" in str(error)
         else:
             raise AssertionError("selection accepted weak user evidence")
 
