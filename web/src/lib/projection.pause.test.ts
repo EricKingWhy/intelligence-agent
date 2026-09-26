@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { EventType } from '../types';
 import type { AgentEvent } from '../types';
 import { applyEvent, initConversation, projectHistory, summarizeEvent } from './projection';
-import { deadlineInstant } from './runBudget';
+import { deadlineInstant, isDeadlinePause } from './runBudget';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   // 恒带 `time`：真实事件都带（durable log 的 SessionEvent.time）。夹具省掉它会让
@@ -282,14 +282,15 @@ describe('run/paused 的 per-tool 事实（`#314` T6）', () => {
  *  **文本**，与四个 `max_*` 同住一张表）。 */
 function deadlinePausedEvent(
   run: Record<string, unknown> = { max_agent_turns_total: 8, deadline_at: '2026-09-26T04:10:00Z' },
+  pause: { reason?: string; trigger_dimension?: string } = {},
 ): AgentEvent {
   return ev({
     type: EventType.RUN_PAUSED,
     seq: 9,
     step_id: 2,
     data: {
-      reason: 'deadline',
-      trigger_dimension: 'run.deadline_at',
+      reason: pause.reason ?? 'deadline',
+      trigger_dimension: pause.trigger_dimension ?? 'run.deadline_at',
       budget_version: 1,
       consumed: {
         agent_turns: 2,
@@ -362,6 +363,24 @@ describe('run/paused 的 deadline 事实（`#315` T7）', () => {
     );
     expect(summarizeEvent(deadlinePausedEvent({ max_agent_turns_total: 8 }))).toBe(
       'run.deadline_at · 截止 unavailable',
+    );
+  });
+
+  it('`isDeadlinePause` 的两个析取支各自成立：只有 reason / 只有维度都算 deadline 暂停', () => {
+    // 生产写入者让两条同进同出（`run_budget` 里 reason=deadline ⟺ 维度=run.deadline_at），
+    // 于是既有夹具从没单独覆盖过任一支——把 `||` 改成 `&&` 全绿（`#315` 修后重审实测）。
+    // 这里分开钉：这一行是"卡在哪一维"的出口，不能因为另一条恰好非空就哑掉。
+    const reasonOnlyEvent = deadlinePausedEvent(undefined, { trigger_dimension: '' });
+    const reasonOnly = projectHistory('s', [reasonOnlyEvent]);
+    expect(isDeadlinePause(reasonOnly.run_paused!)).toBe(true);
+    // 维度缺失时标签回落（不可达载荷，标签本身不钉），但**时刻仍要点出来**。
+    expect(summarizeEvent(reasonOnlyEvent)).toContain('截止 2026-09-26T04:10:00Z');
+
+    const dimensionOnlyEvent = deadlinePausedEvent(undefined, { reason: 'budget_exhausted' });
+    const dimensionOnly = projectHistory('s', [dimensionOnlyEvent]);
+    expect(isDeadlinePause(dimensionOnly.run_paused!)).toBe(true);
+    expect(summarizeEvent(dimensionOnlyEvent)).toBe(
+      'run.deadline_at · 截止 2026-09-26T04:10:00Z',
     );
   });
 });

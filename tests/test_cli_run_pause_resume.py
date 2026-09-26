@@ -852,6 +852,12 @@ async def test_cli_immediate_deadline_pauses_and_resume_uses_a_new_instant(
     assert resumed.paused is False and resumed.final_text == "做完了"
     text_again = "".join(printed_again)
     assert "[run resumed]" in text_again
+    # 恢复块那一行报的是**新**时刻——它是"换了哪个新时刻"的唯一 CLI 出口，删掉它、或改读
+    # 旧暂停快照，都不会被别的用例发现（两轴审查都点到过）。旧时刻在同一段输出里**先**
+    # 出现过：`resume_command` 会先回顾一次暂停块（它该在那儿），所以否定断言只圈恢复块内。
+    resume_block = text_again.split("[run resumed]", 1)[1]
+    assert "  deadline: 2999-01-01T00:00:00Z" in resume_block
+    assert "2026-01-01T00:00:00Z" not in resume_block, "恢复块不能拿旧快照的时刻冒充新 ceiling"
     events = store.read_events(session_id)
     assert [e.type for e in events].count(RUN_STARTED) == 1, "同 run 续跑不新建 run"
     assert {e.run_id for e in events if e.run_id} == {paused_run_id}

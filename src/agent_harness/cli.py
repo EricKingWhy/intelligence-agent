@@ -379,8 +379,10 @@ def _deadline_dimension_lines(data: dict) -> list[str]:
 
     这一维进不了 `_EXTRA_RUN_DIMENSIONS` 那张 `(consumed键, ceiling键)` 表——判的是
     时刻先后，没有 consumed 与 ceiling 可比——但它有**一个**事实要说，而且是暂停摘要里
-    唯一能说明"到的是哪个点"的读数。Web 的 `PausedPanel` 打同一份事实；恢复块也打它
-    （那里的时刻是**新**的：deadline 暂停的恢复必须点名一个新的未来时刻）。
+    唯一能说明"到的是哪个点"的读数。Web 的 `PausedPanel` 打同一份**值**（同格的**词**
+    两端不同：这里 `None` 报 `unlimited`，面板报 `unavailable`，登记在 ADR-0045 §6.1）。
+    恢复块也打这一行：deadline 暂停的恢复点上它是**新**时刻（恢复必须点名一个未来时刻），
+    其余恢复（如 turns 维）给的是**沿用**值——两种情形都读 `run/resumed` 的同一份快照。
 
     判据与 `_extra_dimension_lines` 同源：**键在不在**。键缺席（`#315` 之前的老事件）
     ⇒ 零行（不拿一片 unavailable 当信息）；`None` ⇒ `unlimited`（这一维没配，与同块

@@ -1259,7 +1259,11 @@ function summarizeRunInterrupted(event: AgentEvent): string {
  *
  *  `#315`：deadline 到点同样没有"某一维的读数"可报（判的是时刻先后），回落到 turns
  *  那一对会把另一维的数字摆在 `run.deadline_at` 后面、却漏掉这一行唯一想说的时刻
- *  ——与 `pauseFacts().tripped === null` 同一条纪律（不拿 turns 冒充）。 */
+ *  ——与 `pauseFacts().tripped === null` 同一条纪律（不拿 turns 冒充）。分支次序是
+ *  per-tool → deadline，与 `pauseFacts` 的 deadline 优先**相反**：两者会分叉的载荷
+ *  （`reason=deadline` + 工具维度）由写入者保证不可达（`run_budget` 里 reason 与维度
+ *  同进同出）；真出现第二种非预算 reason（如 T9 的 stuck）时，回落的 `'预算到顶'`
+ *  标签要改成按 `reason` 取。 */
 function summarizeRunPaused(event: AgentEvent): string {
   const info = parsePausedInfo(event);
   const dimension = info.trigger_dimension || '预算到顶';
