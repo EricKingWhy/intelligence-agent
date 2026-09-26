@@ -23,7 +23,7 @@
 | MEM-V2-4 | #300 | CLOSED / integrated | Explicit commands and governance API | #297 |
 | MEM-V2-5 | #301 | CLOSED / integrated | Memory management Web UI | #300 |
 | MEM-V2-6 | #302 | OPEN / unblocked | Privacy observability and quality evaluation | #298, #299, #300 |
-| MEM-V2-7 | #303 | OPEN / unblocked | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
+| MEM-V2-7 | #303 | OPEN / local implementation reviewed; live cutover pending | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
 | MEM-V2-8 | #304 | OPEN / waits for #302 and #303 | Final real Gate and release evidence | #301, #302, #303 |
 
 **事实源与边界（截至 2026-09-25）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。GitHub `#297`–`#301` 均 CLOSED 且代码已集成到 `main`；`#299` 的 AC10 已以冻结语料和真实 Milvus hybrid 检索证据通过。`#302` / `#303` 已解除 `#299` 依赖并可推进；`#304` 仍等待 `#302` / `#303`。旧 SQLite/Milvus Memory 数据仍在；仅 `#303` 获准在依赖集成并完成精确目标与保留项核验后执行 clean-slate 删除。
@@ -37,6 +37,8 @@
 > 「MEM-V2-2（`#298`）T1–T6b 施工记录」段。
 
 > **当前状态（2026-09-25）**：`#297`–`#301` 已集成并 CLOSED；#299 AC10 的冻结语料 Recall@6=0.95、真实 Milvus hybrid 检索及证据已随 `fbb8a98c` 集成，GitHub issue 已关闭。`#302` / `#303` 已解除阻塞，`#304` 仍等后二票。逐票历史记录保留在下文。
+
+> **#303 本地施工状态（2026-09-26）**：短分支 `codex/mem-v2-7-clean-slate-cutover` 的代码固定点 `fce4e57a` 已完成两轴审查与竞态修复复核，无残留 P0–P2；审查范围与证据见 `docs/review_ledger.d/211-mem-v2-7-fce4e57.tsv`。focused 40 passed、Ruff 和 diff-check 通过。完整门禁、integration 目标的真实 cutover/保留证明、PR 集成与关单仍待完成；旧记忆未删除。
 
 ---
 
