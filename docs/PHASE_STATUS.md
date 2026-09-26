@@ -40,9 +40,11 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 的 `#297`–`#301` 均已集成并 CLOSED。#299 AC10 已由冻结语料 Recall@6=0.95 与真实 Milvus hybrid 检索证据满足，集成 tip `fbb8a98c`；`#302` / `#303` 已解锁，`#304` 等待后二票。#299 验证、review 与证据见 `docs/phase_status/2026-09.md` L1258；#301 的已知 Vitest 超时见 L1257。旧 Memory 数据未清理，未修改 `.env` 或凭证。
+**当前焦点：Memory V2 的 `#297`–`#301` 均已集成并 CLOSED。#299 AC10 已由冻结语料 Recall@6=0.95 与真实 Milvus hybrid 检索证据满足，集成 tip `fbb8a98c`；`#302` 仍 OPEN，`#303` 本地实现、审查及离线门禁已通过，等待受保护 main 的 PR 集成与 integration 真实 cutover；`#304` 等待后二票。#299 验证见 `docs/phase_status/2026-09.md` L1258；#303 本地证据见 L1656–L1660。旧 Memory 数据未清理，未修改 `.env` 或凭证。
 
 **Memory V2 当前状态（2026-09-25）**：`#297`–`#301` 已 CLOSED 并集成；`#299` AC10 Recall@6=0.95 且真实 Milvus hybrid 证据已归档，GitHub issue 已 CLOSED；`#302` / `#303` 已解除阻塞，`#304` 等待后二票。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。旧记忆数据仍保留；clean-slate 只在 `#303` 依赖完成并核验目标和保留项后执行。
+
+**#303 本地状态（2026-09-26）**：代码固定点 `fce4e57a` 两轴复核无 P0–P2；Gate-0 6/6、完整 pytest 4211 passed，integration 候选目标只读盘点完成。PR、最终 dry-run、真实清除及保留证明仍待完成，issue 保持 OPEN；细节见月度归档 L1656–L1660。
 
 **`#297`（MEM-V2-1）Typed Memory lifecycle：已集成到 `main`，GitHub issue CLOSED。实现、review 与测试历史保留在 `docs/SDD_TICKET_TRACKER.md`。
 
@@ -67,6 +69,7 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+- 2026-09-26（MEM-V2-7 `#303` 本地固定点与只读预检）：分支 `codex/mem-v2-7-clean-slate-cutover`，代码 `fce4e57a`；两轴复核无 P0–P2、focused 40 passed、Gate-0 6/6 PASS（机器报告 `docs/gate/45171154964e2b267330c0fe60423b4c67ecaf22.json`）、完整 pytest 4211 passed / 14 skipped / 50 deselected。integration 候选 V1 27 条、Milvus Memory 3 条、Knowledge 0 条；旧数据未清除，最终 apply 须从已集成代码重新 dry-run。审查台账见 `docs/review_ledger.d/211-mem-v2-7-fce4e57.tsv`，细节见归档 L1656–L1660。#303 OPEN。
 - 2026-09-26（T6 / `#314` 工具调用账与按名字的绝对配额 —— **接纳点唯一计数 + 逻辑调用/尝试两套账**，B 链第六票，分支 `zcode/T314-tool-quotas`，基点 `718ab562`，十二笔 `12ade5c` → `1314904`（含集成落账前两笔记录笔），**代码冻结树 `baf763bc`**、**最终 Live Gate 证据绑定 sha `462c5bd3` / tree `ddaa252c`**；**已集成**（PR **#330** → merge **`5e1236e9`**，服务端 `gate0` **pass 35s**；`#314` CLOSED））：一次被**接纳**的规范化调用记一次 `tool_calls`、每次**真实尝试**（含 retry）记一次 `tool_attempts`，准入点**之前**被拒的调用**显式记 0**（可审计）；`budget.run.tool_call_limits` 按**已注册**工具名给正整数**绝对**上限（缺省 = 不限但照计数），未注册 / 非法值在任何工作之前 422；用尽**复用 T4 的 `run/paused`**（可恢复，不是终态）。**两轴审查**：Standards **FAIL**（P1 = ADR §5 证据指针指错文件并提前宣告证据；P2 = 配了 ceiling 却从未调用的工具两端读数不一致）/ Correctness **PASS-WITH-FINDINGS**（含**真缺陷**：配额拒绝与真实失败同路喂进同错熔断护栏 ⇒ 单条消息 ≥7 条同参数调用会收成不可恢复的 `run/failed`，与「耗尽 ⇒ 暂停」冲突）⇒ 处置 `b9f9bbd`（只放过 `BUDGET_EXHAUSTED`；三处读数改「表在不在」；配置校验移到 `take()` 之前），3 条新用例**修前全红**；**修后定向重审** PASS-WITH-FINDINGS（4×P3）⇒ `317cf2cb`，按 §8.3 第 4 条末段**不开第三轮**。**作者变异** 4 条 / 4 个**不同**失败集合（8 / 2 / 7 / 2 红）。**真实 Live Gate**（同 SHA / tree）：`long-task-past-legacy-turn-limit` v3 **3/3 PASS**，`steps=15/16/16`（越过旧上限 10）、逻辑调用 **15/17/16**（第 2 次 = 16 个决策对 17 条调用：一条消息带两条 `read`）、per-tool `bash=12/12/12`、`ceiling={bash:24}` == durable 快照、实现路径全在 `agent_harness.*`，`validate --require-pass` **24/24 条 0 FAIL**；**首版证据**（`317cf2cb`）被权威全仓 ruff 车道抓回的 **`RUF023`**（处置 `baf763bc`，一行换序）取代后保留作原始依据，场景与全量 pytest 均**重跑**；重跑首轮因工作树不干净被 validator **正确拒收**（未入库，如实登记）。**门禁**：Gate-0 裸全量 **6/6 PASS**（tip `9ec35dea` / tree `658b90b0ad04`，墙钟 24.96s，读数落盘
 `docs/gate/9ec35deaa8338e4618c66a540623780fecef9387.json`），另补 `git diff --check 718ab562..HEAD` exit 0（bare 运行车道 ① 只查工作树）；覆盖闸门 exit 0（台账 180 行）。**集成**：本地 `main` 快进到 `1314904`（树逐字节相等）→ PR **#330** → 服务端 `gate0` **pass 35s** → merge **`5e1236e9`**；`#314` 已 CLOSED；集成落账与 §14.9 回补见归档 L1620-L1653。明细见 tracker `## T6（#314，B 链第六票）` 段与 `docs/phase_status/2026-09.md` L1511-L1618。
 
