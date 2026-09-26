@@ -308,7 +308,7 @@ function deadlinePausedEvent(
       continuation: {
         completed: ['到点前已完成的工作'],
         remaining: ['暂停发生在回合之间的稳定边界'],
-        blockers: ['run.deadline_at 到点：2026-09-26T04:10:00Z'],
+        blockers: ['run.deadline_at 已到点：deadline=2026-09-26T04:10:00Z'],
         next_safe_action: '换一个未来时刻后以同一 run_id 恢复',
       },
       closeout_source: 'deterministic',
@@ -329,21 +329,40 @@ describe('run/paused 的 deadline 事实（`#315` T7）', () => {
     expect(deadlineInstant(s.run_paused!)).toBe('2026-09-26T04:10:00Z');
   });
 
-  it('整键缺席 ⇒ null（没配 deadline），不是空串、也不是编出来的时刻', () => {
-    const s = projectHistory('s', [deadlinePausedEvent({ max_agent_turns_total: 8 })]);
-    expect(s.run_paused?.run_limits?.deadline_at).toBeNull();
-    expect(s.run_paused?.run_limits?.max_agent_turns_total).toBe(8);
+  it('整键缺席与显式 null **都**是 null（没配 deadline），不是空串、也不是编出来的时刻', () => {
+    // 只钉"键缺席"会漏掉最容易写错的一格：canonical 的 `as_projection` **恒发**这个键
+    // （没配时值是 JSON null），而 `String(null)` 恰好是 `'null'`——一个 `String(value)`
+    // 式实现会在这里凭空造出一个时刻。
+    const absent = projectHistory('s', [deadlinePausedEvent({ max_agent_turns_total: 8 })]);
+    expect(absent.run_paused?.run_limits?.deadline_at).toBeNull();
+    expect(absent.run_paused?.run_limits?.max_agent_turns_total).toBe(8);
+    const explicit = projectHistory('s', [
+      deadlinePausedEvent({ max_agent_turns_total: 8, deadline_at: null }),
+    ]);
+    expect(explicit.run_paused?.run_limits?.deadline_at).toBeNull();
   });
 
-  it('数 / 空串 **不**当时刻收下（后端 `parse_deadline_at` 收不了它们）', () => {
+  it('非文本 / 空串 / 带首尾空白 **不**当时刻收下（后端收不了它们）', () => {
     // cost 维的读法（数也当读数）在 deadline 维是错的：`0` 是 epoch 秒还是毫秒？
     // 后端只认带时区的文本 ⇒ 前端把它收成时刻等于编一个任何事件里都不存在的读数。
-    const asNumber = projectHistory('s', [deadlinePausedEvent({ deadline_at: 0 })]);
-    expect(asNumber.run_paused?.run_limits?.deadline_at).toBeNull();
-    const blank = projectHistory('s', [deadlinePausedEvent({ deadline_at: '  ' })]);
-    expect(blank.run_paused?.run_limits?.deadline_at).toBeNull();
-    const trimmed = projectHistory('s', [deadlinePausedEvent({ deadline_at: ' 2026-09-26T04:10:00Z ' })]);
-    expect(trimmed.run_paused?.run_limits?.deadline_at).toBe('2026-09-26T04:10:00Z');
+    // 带空白的文本更微妙：后端**事件回读**（`_deadline_or_none`，不 strip）抛
+    // ValueError ⇒ 那一侧读作"没配"，前端就地收下（或 trim 后收下）都会让同一份
+    // durable 事件两端给出互相矛盾的读数。
+    for (const bad of [0, true, [], {}, '  ', ' 2026-09-26T04:10:00Z ']) {
+      const s = projectHistory('s', [deadlinePausedEvent({ deadline_at: bad })]);
+      expect(s.run_paused?.run_limits?.deadline_at, JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it('Timeline 摘要报**那个时刻**（不是 turns 的 2/8），没有时刻就写 unavailable', () => {
+    // 回落成 turns 那一对会把另一维的数字摆在 `run.deadline_at` 名字后面，而这一行
+    // 唯一想说的"哪个时刻到了"反而不见了——与面板标题报时刻是同一口径。
+    expect(summarizeEvent(deadlinePausedEvent())).toBe(
+      'run.deadline_at · 截止 2026-09-26T04:10:00Z',
+    );
+    expect(summarizeEvent(deadlinePausedEvent({ max_agent_turns_total: 8 }))).toBe(
+      'run.deadline_at · 截止 unavailable',
+    );
   });
 });
 

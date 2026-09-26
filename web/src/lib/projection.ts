@@ -9,7 +9,7 @@
 import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { isCancelledRunFailure } from './runCancel';
-import { toolDimensionName } from './runBudget';
+import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 
@@ -689,17 +689,21 @@ function dimensionDecimalText(raw: Record<string, unknown>, key: string): string
 }
 
 /** 某个键的**时刻文本**（deadline 维，`#315`）：wire 上是 RFC 3339 UTC 的**文本**
- *  （后端 `build_pause_data` 把 `deadline_at` 摊平成 `limits.run` 的一个键）。
+ *  （`RunLimits.as_projection` 在 `limits.run` 里放的那个键；形状冻结在 ADR-0046 §D7）。
  *
  *  与 `dimensionDecimalText` 分开的理由是形状判据不同：数在 cost 维是合法读数
  *  （`0.3` 与 `"0.3"` 同义），在 deadline 维**不是**——`0` / epoch 毫秒都进不了后端
  *  `parse_deadline_at`，前端把它收成时刻等于编出一个任何事件里都不存在的读数。
- *  所以这里只认非空字符串；形状本身（带时区 / 严格未来）仍由 `runBudget.parseInstant`
- *  与恢复草稿校验负责，本层不写第二份规则。 */
+ *
+ *  只认**非空、无首尾空白**的文本：后端的**事件回读**（`_deadline_or_none`）不 strip
+ *  （`fromisoformat(" 2026-…Z ")` 抛 ValueError ⇒ 那一侧读作"没配"），这里就地收下
+ *  等于同一份 durable 事件两端给出互相矛盾的读数。更深的形状判据（带时区 / 严格未来）
+ *  属**恢复草稿**那一关（`runBudget.deadlineDraftError` → `parseInstant`），显示链按
+ *  契约原样呈现；非 ISO 文本的差异登记在 ADR-0045 §6.1。 */
 function dimensionInstantText(raw: Record<string, unknown>, key: string): string | null {
   const value = raw[key];
-  if (typeof value !== 'string') return null;
-  return value.trim() === '' ? null : value.trim();
+  if (typeof value !== 'string' || value === '') return null;
+  return value.trim() === value ? value : null;
 }
 
 /** 分维计数表（`#314`：工具名 → 计数）：**整键缺席 ⇒ null**（未知），空对象 ⇒ `{}`
@@ -742,9 +746,10 @@ function parseConsumedFacts(raw: unknown): RunBudgetDimensionFacts | null {
   };
 }
 
-/** `data.limits.run` → 四维 ceiling + per-tool 配额表（`#313` / `#314`）。键名是载荷
- *  自己的 `max_*` 形态（与恢复请求 `budget.run` 的键同一套名字）；`null` = 该维没配
- *  （unlimited）。 */
+/** `data.limits.run` → 四维 `max_*` ceiling + deadline 时刻 + per-tool 配额表
+ *  （`#313` / `#314` / `#315`）。四个 `max_*` 的键名是载荷自己的形态（与恢复请求
+ *  `budget.run` 的键同一套名字）；`null` = 该维没配（unlimited）。`deadline_at`
+ *  不是第五个 `max_*`：它判的是时刻先后，没有 consumed/ceiling 可比。 */
 function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
   if (!isRecord(raw)) return null;
   return {
@@ -1250,7 +1255,11 @@ function summarizeRunInterrupted(event: AgentEvent): string {
  *  数字缺失就不写那一段（不编 0）——暂停行的价值正是"卡在哪、烧了多少"。
  *
  *  `#314`：命中 per-tool 配额时读的是**那个工具**的调用数与它的 ceiling（不是 turns
- *  的那一对）——工具配额卡住时显示"消耗 3 轮 / 上限 4 轮"是在陈述另一件事。 */
+ *  的那一对）——工具配额卡住时显示"消耗 3 轮 / 上限 4 轮"是在陈述另一件事。
+ *
+ *  `#315`：deadline 到点同样没有"某一维的读数"可报（判的是时刻先后），回落到 turns
+ *  那一对会把另一维的数字摆在 `run.deadline_at` 后面、却漏掉这一行唯一想说的时刻
+ *  ——与 `pauseFacts().tripped === null` 同一条纪律（不拿 turns 冒充）。 */
 function summarizeRunPaused(event: AgentEvent): string {
   const info = parsePausedInfo(event);
   const dimension = info.trigger_dimension || '预算到顶';
@@ -1265,6 +1274,10 @@ function summarizeRunPaused(event: AgentEvent): string {
     return `${dimension} · ${calls === undefined ? '未知' : calls} 次调用/${
       ceiling === undefined ? '无 ceiling' : `上限 ${ceiling}`
     }`;
+  }
+  if (isDeadlinePause(info)) {
+    const instant = deadlineInstant(info);
+    return `${dimension} · 截止 ${instant ?? 'unavailable'}`;
   }
   const ceiling = info.run_limit === null ? '无 ceiling' : String(info.run_limit);
   return `${dimension} · ${info.consumed_agent_turns}/${ceiling}`;

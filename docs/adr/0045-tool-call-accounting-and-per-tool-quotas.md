@@ -259,3 +259,11 @@ Web 侧一处刻意的**逐字镜像**：配了配额但从未调用过的工具
   不带 `budget_delta` ⇒ 崩溃前已接纳、且已写下 PENDING/RUNNING 的那次调用在账上记 0
   （少记，方向=放宽）。它属 `#315` 的副作用 reconcile 面，本票不改；影响仅限终态 run 的
   投影（那个 run 已不可恢复，丢失的计数进不了任何后续准入判定）。
+- **`limits.run.deadline_at` 的形状不由显示层复判（`#315` 增补）**：值若不是"非空且无
+  首尾空白"的文本（数 / 布尔 / 空串 / 带首尾空白）⇒ CLI 与 Web **都**读作"这一维没有
+  时刻"（`unlimited` / `null`），与后端事件回读 `agent/run_budget._deadline_or_none`
+  的同名判据一致。**唯一的分叉**是"非 ISO 的**文本**"（如 `garbage`）：两端照契约原样
+  显示成时刻，而 `_deadline_or_none` 对同一份事件判"没配"。**不可达输入**——唯一写入者
+  是 `RunLimits.as_projection` 的 `_deadline_text`（恒为 `…Z` 收尾的 RFC 3339 文本）
+  ——故只登记，不在显示层写第二份 RFC 3339 解析（带时区 / 严格未来的形状判据属恢复草稿
+  那一关：`deadlineDraftError` → `parseInstant`，与后端 `parse_deadline_at` 同口径）。

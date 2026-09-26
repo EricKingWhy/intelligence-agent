@@ -727,7 +727,11 @@ def test_resume_hint_gives_a_real_instant_for_the_deadline_dimension():
 
 
 def test_pause_block_renders_the_deadline_line():
-    """暂停摘要里 deadline 那一行的读数来自 durable 快照（不读进程内状态）。"""
+    """暂停摘要里 deadline 那一行报的是**时刻本身**（读数来自 durable 快照，不读进程内状态）。
+
+    这一格最初只断言了 `reason=` / `dimension=`：维度名在、**时刻从不出现**，于是票面
+    Must Do 的"CLI 也显示 deadline"一直是空的通道（`#315` 的两轴审查抓回）。
+    """
     text = render_pause_block({
         **_PAUSE_DATA,
         "reason": "deadline",
@@ -740,6 +744,39 @@ def test_pause_block_renders_the_deadline_line():
 
     assert "reason=deadline" in text
     assert "dimension=run.deadline_at" in text
+    assert "  deadline: 2026-09-26T04:10:00Z" in text, "要点出是哪个时刻到了"
+
+
+def test_pause_block_deadline_line_never_invents_an_instant():
+    """没配 ⇒ `unlimited`；形状认不出 ⇒ `unavailable`——**不**印那个形状、也不编时刻。
+
+    带首尾空白的文本是这一格的边缘：后端事件回读（`_deadline_or_none`）不 strip ⇒
+    同一份事件在那边读作"没配"，CLI 也就不能就地把它当成一个时刻印出来。
+    """
+    base = {
+        **_PAUSE_DATA,
+        "reason": "deadline",
+        "trigger_dimension": "run.deadline_at",
+    }
+    no_deadline = {**base, "limits": {"local": {}, "run": {"deadline_at": None}}}
+    assert "  deadline: unlimited" in render_pause_block(no_deadline)
+    for bad in (0, "  ", " 2026-09-26T04:10:00Z "):
+        malformed = {**base, "limits": {"local": {}, "run": {"deadline_at": bad}}}
+        assert "  deadline: unavailable" in render_pause_block(malformed), repr(bad)
+
+
+def test_pause_block_has_no_deadline_line_for_events_without_that_key():
+    """老事件（`#315` 之前）没有这个键 ⇒ 零行：不拿一片 `unavailable` 当信息。"""
+    text = render_pause_block({
+        **_PAUSE_DATA,
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 8},
+        },
+    })
+
+    assert "deadline" not in text
+    assert "turns: consumed 3 / limit 8" in text
 
 
 def test_main_run_accepts_a_past_deadline_as_a_ceiling(monkeypatch, tmp_path):

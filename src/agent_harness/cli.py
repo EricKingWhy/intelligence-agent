@@ -374,6 +374,31 @@ def _extra_dimension_lines(data: dict, *, carried: bool = False) -> list[str]:
     return lines
 
 
+def _deadline_dimension_lines(data: dict) -> list[str]:
+    """deadline 维的摘要行（`#315`）：**只**在快照带了这一维时渲染。
+
+    这一维进不了 `_EXTRA_RUN_DIMENSIONS` 那张 `(consumed键, ceiling键)` 表——判的是
+    时刻先后，没有 consumed 与 ceiling 可比——但它有**一个**事实要说，而且是暂停摘要里
+    唯一能说明"到的是哪个点"的读数。Web 的 `PausedPanel` 打同一份事实；恢复块也打它
+    （那里的时刻是**新**的：deadline 暂停的恢复必须点名一个新的未来时刻）。
+
+    判据与 `_extra_dimension_lines` 同源：**键在不在**。键缺席（`#315` 之前的老事件）
+    ⇒ 零行（不拿一片 unavailable 当信息）；`None` ⇒ `unlimited`（这一维没配，与同块
+    `limit unlimited` 同一个词）；形状认不出（数 / 空串 / 带首尾空白）⇒ `unavailable`
+    ——`agent/run_budget._deadline_or_none` 对同一份事件读作"没配"（它不 strip），
+    这里跟着它读：不印那个形状，也不编一个时刻。
+    """
+    limits = ((data.get("limits") or {}).get("run") or {})
+    if "deadline_at" not in limits:
+        return []
+    value = limits.get("deadline_at")
+    if value is None:
+        return ["  deadline: unlimited\n"]
+    if isinstance(value, str) and value and value.strip() == value:
+        return [f"  deadline: {value}\n"]
+    return ["  deadline: unavailable\n"]
+
+
 def render_pause_block(data: dict) -> str:
     """`run/paused` 的 data → 多行暂停摘要（`#312` / PRD §11）。
 
@@ -399,6 +424,7 @@ def render_pause_block(data: dict) -> str:
         ),
     ]
     lines.extend(_extra_dimension_lines(data))
+    lines.extend(_deadline_dimension_lines(data))
     lines.extend(_tool_dimension_lines(data))
     continuation = data.get("continuation")
     if isinstance(continuation, dict) and continuation:
@@ -535,6 +561,7 @@ def render_resume_block(data: dict) -> str:
         ),
     ]
     lines.extend(_extra_dimension_lines(data, carried=True))
+    lines.extend(_deadline_dimension_lines(data))
     lines.extend(_tool_dimension_lines(data, carried=True))
     return "".join(lines)
 
