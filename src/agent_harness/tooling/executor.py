@@ -352,7 +352,9 @@ class ToolExecutor:
                         "（04 §9.1 的 deadline 接纳边界）。run 会在下一个稳定边界按"
                         "reason=deadline 暂停；已在途的调用按各自的 timeout / Ledger "
                         "语义收尾。不要重复提交本调用——deadline 不是靠重试解开的"
-                        "（恢复要点名一个未来的时刻）。"
+                        "（恢复要点名一个未来的时刻）。若本 run 随后以一个新的未来时刻"
+                        "恢复（同一 run_id），暂停前的进度都在事件流里，从那里继续"
+                        "原任务——到点暂停不是任务结束。"
                     ),
                     error_code=ErrorCode.DEADLINE_EXCEEDED,
                     retryable=False,  # 时刻不会因为再试一次就变到未来

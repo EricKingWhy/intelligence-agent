@@ -147,6 +147,13 @@ async def test_deadline_in_the_past_rejects_before_any_work(tmp_path: Path) -> N
     assert execution.result.error_code is ErrorCode.DEADLINE_EXCEEDED
     assert execution.result.retryable is False, "时刻不会因为重试而变到未来"
     assert "deadline" in execution.result.message.lower()
+    # 文案必须**对模型**说清恢复后怎么办：只写"不要重复提交"会让模型把它读成
+    # "本 run 到此为止"。实测（Live Gate 真实运行）：模型的原话就是
+    # "The error says deadline not solved by retry. I should report status briefly."，
+    # 恢复后的那一轮零工具调用 ⇒ 同 run 续跑在模型眼里成了走过场。
+    assert "恢复" in execution.result.message and "继续" in execution.result.message, (
+        "到点拒绝必须说明「以新的未来时刻恢复后从暂停前进度继续」"
+    )
     assert tool.call_count == 0, "被拒的调用没有真实执行"
     assert execution.budget_delta == {
         "tool_name": "count", "tool_calls": 0, "tool_attempts": 0,

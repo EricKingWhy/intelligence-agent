@@ -19,8 +19,22 @@
    （信息屏障保证剩余链步只可能发生在恢复之后）。
 4. **未证副作用不会被当成"没事"**：同一台机器上，一个真实的 MUTATING 超时（生产
    `BashTool` + 生产 Ledger）留下 `UNKNOWN` + "副作用未证"标记 ⇒ 恢复入口拒绝
-   （`RecoveryConflict`）、投影报 `reconcile_pending`、**没有重跑**（副作用计数不变）。
-   这一条不需要模型配合，因此**每次尝试都必然出现**。
+   （`RecoveryConflict`）、投影报 `reconcile.tool_call_ids`（`11 §6.1` 的真键名）、
+   **没有重跑**（副作用计数不变）。这一条不需要模型配合，因此**每次尝试都必然出现**。
+
+## 第二条腿的收尾形状由模型当下的选择决定（两种都安全）
+
+到点暂停**不是**任务结束，但"恢复后模型继续干到再次到点"与"它写一句话自己收尾"都是
+**合法且安全**的结局，本场景两种都收（`run_ended_in_a_safe_state`）；`run/failed` /
+`run/interrupted` 是第三种，判红。这条口径不是为了让门禁好过——实测（2026-09-26 的真实
+运行）：到点拒绝的文案当时只写"不要重复提交本调用"，模型的原话是
+"The error says deadline not solved by retry. I should report status briefly."，
+于是恢复后的那一轮**零工具调用**、run 直接 `run/completed`。两件事因此分开钉：
+
+- 产品侧：拒绝文案必须说明"以新的未来时刻恢复后从暂停前进度继续"（`tooling/executor.py`，
+  由 `tests/tooling/test_deadline_admission.py` 守）——**到点不是任务结束**；
+- 场景侧：`resumed_leg_did_new_work`（恢复后 ≥1 次 `tool/call`）仍**严格**判红
+  "恢复只是走过场"，不因为模型有权收尾就把这条放掉。
 
 ## 两种安全结局（票面 AC 的原文是"safe outcome **or** NEED_RECONCILE"）
 
@@ -94,7 +108,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from evaluation.assertions import dangling_tool_call_ids
@@ -115,9 +131,12 @@ SCENARIO_VERSION = 1
 DEADLINE_SECONDS = 30.0
 
 #: 恢复时给的新时刻（相对恢复时刻）。它必须**严格在未来**（`resume_headroom_ok`），
-#: 且**仍然跑不完**链（同一条信息屏障论证）⇒ 第二条腿同样以到点收口，证据里因此有
-#: 两次"到点暂停"，而不是把余下的活干完。
-RESUME_DEADLINE_SECONDS = 20.0
+#: 且**仍然跑不完**链（同一条信息屏障论证）⇒ 第二条腿的收口形状只由模型当下的选择决定：
+#: 再撞一次点（`run/paused`）或它自己收尾（`run/completed`）。两种都安全，断言都收；
+#: 唯一必须严格成立的是"恢复后真的干了新活"（≥1 次 `tool/call`）。
+#: 20s 曾让模型的**第一次**恢复后回答就收尾（实测：恢复后零工具调用）；30s 留出一整轮
+#: 决策 + 若干次真实工具调用的余量。窗口之和（30+30=60s）仍小于链的纯工具时间（80s）。
+RESUME_DEADLINE_SECONDS = 30.0
 
 #: 链步数 = 模型决策数下界（见模块 docstring 的信息屏障）。
 #: 40 × 2s = 80s 的纯工具时间 > 两次窗口之和（50s）⇒ 结构上跑不完。
@@ -216,6 +235,9 @@ TASK = (
     "  - 不确定进度时**重新读** chain.txt 与 chain-steps.txt：它们就是权威状态；\n"
     f"  - 全部 {TRANSITIONS} 步完成后，用 write 工具创建 {DONE_FILE}，内容恰好是最终的串"
     "（不要换行、不要引号、不要多余字符）；\n"
+    "  - 如果本次运行因为到点被打断（工具调用收到 DEADLINE_EXCEEDED，或 run 暂停），"
+    "那是**暂时**的：本 run 以新的未来时刻恢复后，你必须从 chain.txt / "
+    f"{STEPS_FILE} 指示的当前位置继续，直到 {TRANSITIONS} 步真的完成；\n"
     "  - 不要探索其它文件，不要写别的文件；最后用一句话汇总，不要长篇输出。"
 )
 
@@ -252,6 +274,24 @@ def _event_text(event: Any) -> str:
         return str(getattr(event, "type", ""))
 
 
+def _failure_text(error: BaseException) -> str:
+    """异常 → **可定位**的一行：类型 + 消息 + 最后几个本仓库栈帧 + 出错那行的源码。
+
+    Live Gate 的证据常常是远程运行留下的唯一产物，`类型: 消息` 不够用——本票实测：
+    真实运行三连 FAIL 只报 `TypeError: 'NoneType' object is not iterable`，看不出是哪一行，
+    只能再烧一次真实运行去猜（一次 ≈ 4 分钟 + 真实调用）。第三方帧对定位没有帮助，
+    还被排除掉：它们只会把环境路径写进证据。
+    """
+    frames = [
+        frame for frame in traceback.extract_tb(error.__traceback__)
+        if "site-packages" not in frame.filename
+    ]
+    if not frames:
+        return f"{type(error).__name__}: {error}"
+    chain = " <- ".join(f"{Path(frame.filename).name}:{frame.lineno}" for frame in frames[-3:])
+    return f"{type(error).__name__}: {error} @ {chain} 〔{(frames[-1].line or '').strip()}〕"
+
+
 def _deadline_instant(value: Any) -> datetime | None:
     """快照 / 请求里的 `deadline_at` → `datetime`（读不出来 = None，不猜）。
 
@@ -283,6 +323,23 @@ def _unreconciled(operations: list[Any]) -> list[Any]:
     from agent_harness.storage import needs_reconcile
 
     return [operation for operation in operations if needs_reconcile(operation)]
+
+
+def _projection_reconcile_pending(projection: Any) -> list[str]:
+    """API 投影里**仍欠对账**的 tool_call_id（读的是 `11 §6.1` 的真键名）。
+
+    键名有一个踩过的坑，值得写在这里：投影里**没有** `reconcile_pending` 这个键——
+    `run_budget.project_budget` 只在非空时落一个 `reconcile` 子对象
+    （`{"state": "needs_reconcile", "tool_call_ids": [...]}`）。按名字猜着读会拿到 `None`，
+    而 `list(None)` 会以 `TypeError: 'NoneType' object is not iterable` 收场：本票实测
+    真实运行三连 FAIL 就出在这里，且因为异常被兜成一行读数，真实运行白烧一次才定位到。
+    """
+    if not isinstance(projection, dict):
+        return []
+    reconcile = projection.get("reconcile")
+    if not isinstance(reconcile, dict):
+        return []
+    return sorted(str(item) for item in (reconcile.get("tool_call_ids") or []))
 
 
 def _scenario_settings(ctx: ScenarioContext) -> Any:
@@ -446,7 +503,7 @@ class RunDeadlineBoundaryScenario:
         except Exception as error:  # noqa: BLE001 - 失败要如实记录（runner 统一脱敏）
             return AttemptOutcome(
                 ok=False, session_id=ctx.session_id,
-                error=f"{type(error).__name__}: {error}",
+                error=_failure_text(error),
             )
         finally:
             # 关闭可选能力（记忆形成泵 / MCP / 外部连接）与在途 run —— 一次尝试一个
@@ -464,7 +521,7 @@ class RunDeadlineBoundaryScenario:
         except Exception as error:  # noqa: BLE001 - 同上的如实记录
             return AttemptOutcome(
                 ok=False, session_id=ctx.session_id,
-                error=f"{type(error).__name__}: {error}",
+                error=_failure_text(error),
             )
 
         tool_calls = [
@@ -481,13 +538,14 @@ class RunDeadlineBoundaryScenario:
             pause=next((event for event in events if event.type == "run/paused"), None),
         )
         pauses = [event for event in events if event.type == "run/paused"]
+        completed = [event for event in events if event.type == "run/completed"]
         return AttemptOutcome(
             ok=all(item.ok for item in assertions),
             session_id=ctx.session_id,
             run_id=run_id,
-            # 逻辑 run 的终态读 durable 事实：到点只是**暂停**（非终态），本场景两条腿
-            # 都以暂停收口 ⇒ 如实报 paused，不报 completed。
-            run_status="paused" if pauses else "unknown",
+            # 终态读 durable 事实：第一条腿必到点暂停（非终态）；第二条腿两种形状都如实报
+            # ——又干到到点 ⇒ paused，模型自己收尾 ⇒ completed。不把两种形状并成一个词。
+            run_status="completed" if completed else ("paused" if pauses else "unknown"),
             steps=sum(1 for event in events if event.type == "model/completed"),
             tool_calls=tool_calls,
             assertions=assertions,
@@ -580,7 +638,7 @@ class RunDeadlineBoundaryScenario:
             "sentinel_after_calls": sentinel_after_calls,
             "sentinel_after_recovery": _sentinel_count(ctx.sandbox),
             "recovery_refused": refusal,
-            "reconcile_pending": list(projection.get("reconcile_pending") or []),
+            "reconcile_pending": _projection_reconcile_pending(projection),
             "needs_reconcile_first": bool(
                 rows.get("call-uncertain-1") is not None
                 and needs_reconcile(rows["call-uncertain-1"])
@@ -738,6 +796,11 @@ class RunDeadlineBoundaryScenario:
                 or "严格在未来" in str(refusal.reason)
             )
         )
+        # 第一条腿的收口形状是**产品决定**的，与模型无关：到点 ⇒ 恰好在稳定边界暂停一次，
+        # 且暂停之前没有任何终态事件（`03 §3.4`：暂停是非终态）。
+        first_leg_ok = no_terminal_before_pause and len(started_events) == 1
+        completed_events = [event for event in events if event.type == RUN_COMPLETED]
+        failed_events = [event for event in events if event.type in (RUN_FAILED, RUN_INTERRUPTED)]
         if arm == "safe":
             resumed = resumed_events[0] if resumed_events else None
             rdata = dict(resumed.data) if resumed is not None else {}
@@ -747,7 +810,8 @@ class RunDeadlineBoundaryScenario:
                 1 for event in events
                 if event.type == TOOL_CALL and resumed is not None and event.seq > resumed.seq
             )
-            resume_ok = (
+            # 恢复契约（`#312` T4 的版本合同，逐条机械可检，与模型无关）。
+            resume_contract_ok = (
                 len(resumed_events) == 1
                 and resumed is not None
                 and resumed.run_id == run_id
@@ -757,20 +821,59 @@ class RunDeadlineBoundaryScenario:
                 and isinstance(r_run_scope, dict)
                 and _deadline_instant(r_run_scope.get("deadline_at"))
                 == _deadline_instant(legs.get("resume_deadline"))
-                and tool_calls_after_resume >= 1
                 and len(started_events) == 1
                 and len(user_messages) == 1
             )
+            # 恢复**不是**走过场：新窗口里必须真的接纳过新调用（票面只要求"不新接纳"发生在
+            # 到点**之后**，所以这条是"恢复后接得上"的反面证据）。
+            new_work_ok = tool_calls_after_resume >= 1
+            # 第二条腿的收尾形状**由模型当下的选择决定**，产品侧两种都合法、都安全：
+            #   ① 又干到到点 ⇒ 第二次 `run/paused`（版本 2，仍非终态）；
+            #   ② 它自己认为可以收尾 ⇒ `run/completed`（写一句话就停，不发新工具调用）。
+            # 第三种（`run/failed` / `run/interrupted`）**不安全**，判红。
+            # 第二种形状的前提是"恢复真的发生过"：没有 `run/resumed` 的两次暂停是
+            # **恢复缺失**（由 `resume_contract_holds` 判红），不是"恢复后又干到到点"。
+            ended_paused = (
+                len(pauses) == 2
+                and resumed is not None
+                and pauses[1].seq > resumed.seq
+                and not completed_events
+                and not failed_events
+            )
+            ended_completed = (
+                len(pauses) == 1
+                and len(completed_events) == 1
+                and resumed is not None
+                and completed_events[0].seq > resumed.seq
+                and not failed_events
+            )
+            ending_ok = ended_paused or ended_completed
+            ending_label = (
+                "到点再次暂停（版本 2，非终态）" if ended_paused
+                else "恢复后由模型收尾（run/completed）" if ended_completed
+                else f"不安全的收尾（暂停 {len(pauses)} 次、完成 {len(completed_events)} 次、"
+                     f"失败/中断 {len(failed_events)} 次）"
+            )
+            # `derive_run_budget` 里终态与 paused **互斥**（终态压过暂停，`03 §5`）：
+            # 自己收尾的那条腿上派生出的 `paused` 必须是 None，不是"还挂着等恢复"。
+            expected_terminal = ended_completed
+            expected_paused = not ended_completed
+            arm_ok = True  # Arm A 的"安全性"证据全在 `unreconciled_ok`（账本干净 + 无悬空）
             arm_detail = (
                 f"Arm A（safe）：账本无欠账/无悬空；换新时刻后 run/resumed={len(resumed_events)}"
                 f"（同一 run_id，{rdata.get('previous_budget_version')}→{rdata.get('budget_version')}，"
                 f"新 deadline={_deadline_text((r_run_scope or {}).get('deadline_at')) or '缺失'}）"
-                f"，恢复后 tool/call={tool_calls_after_resume}"
+                f"，恢复后 tool/call={tool_calls_after_resume}，收尾={ending_label}"
             )
-            arm_ok = resume_ok
         else:
             second = legs.get("resume_with_new_instant_refused")
             arm_ok = second is not None and second.ok
+            expected_terminal = False
+            expected_paused = True
+            resume_contract_ok = True  # Arm B 没有恢复（对账优先于恢复）
+            new_work_ok = True
+            ending_ok = True
+            ending_label = "未恢复（对账优先于恢复）"
             arm_detail = (
                 f"Arm B（NEED_RECONCILE）：欠账={[op.tool_call_id for op in debt]}，"
                 f"reconcile-required={len(reconcile_events)}，blockers={blocked_by}，"
@@ -782,9 +885,7 @@ class RunDeadlineBoundaryScenario:
         replay_state = derive_run_budget(replayed, run_id) if run_id else None
         fuse_tripped = any(FUSE_TRIP_MARKER in _event_text(event) for event in events)
         steps_recorded = _step_count(_safe_read(ctx.sandbox, STEPS_FILE))
-        p_unreconciled = list(
-            projection.get("reconcile_pending") if isinstance(projection, dict) else []
-        )
+        p_unreconciled = _projection_reconcile_pending(projection)
         ledger_debt = sorted(operation.tool_call_id for operation in debt)
 
         # ── 执行域那一半 ──
@@ -840,18 +941,12 @@ class RunDeadlineBoundaryScenario:
                 ),
             ),
             AssertionResult(
-                name="deadline_pause_happened_once_per_leg",
-                ok=(
-                    len(pauses) == (1 if arm == "needs_reconcile" else 2)
-                    and no_terminal_before_pause
-                    and len(started_events) == 1
-                ),
+                name="deadline_pause_precedes_any_terminal",
+                ok=first_leg_ok,
                 detail=(
-                    f"暂停={len(pauses)}（{arm} 结局下期望 "
-                    f"{1 if arm == 'needs_reconcile' else 2}：首次到点"
-                    + ("" if arm == "needs_reconcile" else " + 恢复后再次到点")
-                    + f"）；暂停之前无终态事件={no_terminal_before_pause}；"
-                    f"run/started={len(started_events)}（到点只是收口，逻辑 run 未终结）"
+                    f"暂停={len(pauses)}；暂停之前无终态事件={no_terminal_before_pause}；"
+                    f"run/started={len(started_events)}（到点只是收口，逻辑 run 未终结）；"
+                    f"收尾形状={ending_label}"
                 ),
             ),
             AssertionResult(
@@ -957,18 +1052,43 @@ class RunDeadlineBoundaryScenario:
                 ),
             ),
             AssertionResult(
+                name="resume_contract_holds",
+                ok=resume_contract_ok,
+                detail=(
+                    "换新时刻后的恢复契约（`#312` T4 的版本合同）："
+                    f"run/resumed={len(resumed_events)} 同一 run_id、版本 1→2、"
+                    f"from_pause_seq={rdata.get('from_pause_seq') if arm == 'safe' else '（未恢复）'}、"
+                    f"无新 run/started、无新 user/message={len(user_messages) == 1}"
+                ),
+            ),
+            AssertionResult(
+                name="resumed_leg_did_new_work",
+                ok=new_work_ok,
+                detail=(
+                    f"恢复后 tool/call={tool_calls_after_resume if arm == 'safe' else '（未恢复）'}"
+                    "（恢复不是走过场：新窗口里真的接纳过新调用；实测教训——到点拒绝文案若"
+                    "只写「不要重复提交」，模型会答一句状态就收尾，恢复后零新调用）"
+                ),
+            ),
+            AssertionResult(
+                name="run_ended_in_a_safe_state",
+                ok=ending_ok,
+                detail=f"收尾形状={ending_label}（暂停/完成都安全，失败与中断判红）",
+            ),
+            AssertionResult(
                 name="final_budget_state",
                 ok=(
                     state is not None and replay_state is not None
                     and state.version == (1 if arm == "needs_reconcile" else 2)
-                    and state.paused is not None
-                    and state.terminal is False
+                    and (state.paused is not None) == expected_paused
+                    and state.terminal is expected_terminal
                 ),
                 detail=(
                     f"派生账本 version={getattr(state, 'version', None)}"
                     f"（{arm} 结局下期望 {1 if arm == 'needs_reconcile' else 2}）"
                     f" paused={getattr(state, 'paused', None) is not None}"
-                    f" terminal={getattr(state, 'terminal', None)}"
+                    f"（期望 {expected_paused}：终态压过暂停，两者互斥）"
+                    f" terminal={getattr(state, 'terminal', None)}（期望 {expected_terminal}）"
                 ),
             ),
             AssertionResult(

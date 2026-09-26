@@ -34,6 +34,7 @@ from agent_harness.agent.budget import BudgetConflict
 from agent_harness.agent.run_budget import (
     REASON_DEADLINE,
     RESUME_BASIS_BUDGET_INCREASE,
+    STATE_NEEDS_RECONCILE,
     TRIGGER_RUN_DEADLINE,
     BudgetConsumed,
     PausedRun,
@@ -64,7 +65,9 @@ from evaluation.live_gate.registry import ScenarioContext
 from evaluation.live_gate.scenarios.accounting import request_accounting
 from evaluation.live_gate.scenarios.deadline import (
     CHAIN_SCRIPT,
+    DEADLINE_SECONDS,
     DONE_FILE,
+    RESUME_DEADLINE_SECONDS,
     SCENARIO,
     SEED_TOKEN,
     STEP_SLEEP_SECONDS,
@@ -78,6 +81,8 @@ from evaluation.live_gate.scenarios.deadline import (
     UNCERTAIN_SLEEP_SECONDS,
     UNCERTAIN_TOOL_TIMEOUT_SECONDS,
     _deadline_text,
+    _failure_text,
+    _projection_reconcile_pending,
     _Refusal,
     _scenario_settings,
 )
@@ -101,7 +106,7 @@ PRIMARY_TOKENS = 13
 #: 断言名清单（多一条 / 少一条都要被发现：断言集变了就是判据变了）。
 EXPECTED_ASSERTIONS = {
     "deadline_pause_snapshot",
-    "deadline_pause_happened_once_per_leg",
+    "deadline_pause_precedes_any_terminal",
     "deadline_pause_continuation_contract",
     "real_work_admitted_before_the_deadline",
     "deadline_pause.request_count",
@@ -109,6 +114,9 @@ EXPECTED_ASSERTIONS = {
     "deadline_pause.cost",
     "expired_deadline_resume_refused",
     "deadline_outcome_is_safe_or_needs_reconcile",
+    "resume_contract_holds",
+    "resumed_leg_did_new_work",
+    "run_ended_in_a_safe_state",
     "uncertain_mutation_recorded_as_unproven",
     "no_new_admission_after_the_deadline",
     "unreconciled_debt_blocks_recovery",
@@ -219,8 +227,10 @@ def _resume_payload(*, consumed: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _events(*, arm: str = "safe") -> list[Any]:
-    """自洽的轨迹：到点（腿 1）⇒ 换新时刻恢复（仅 Arm A）⇒ 再次到点（仅 Arm A）。
+def _events(
+    *, arm: str = "safe", ending: str = "paused", work_after_resume: bool = True,
+) -> list[Any]:
+    """自洽的轨迹：到点（腿 1）⇒ 换新时刻恢复（仅 Arm A）⇒ 按 `ending` 收尾。
 
     每次实际请求都落一格 `model/request`（`02 §5.1` 的计数点）；deadline 暂停**没有**
     closeout 请求（到点后不发 Provider 请求）—— 这条正是 `deadline_pause.request_count`
@@ -230,6 +240,11 @@ def _events(*, arm: str = "safe") -> list[Any]:
     `arm="needs_reconcile"` 时按生产顺序组装 Arm B 该有的三件套：对账事件 →
     （带 blockers 的）`run/paused`，文案与 `runtime._raise_deadline_reconcile` /
     `run_budget._reconcile_first_action` 逐字同形。
+
+    第二条腿的收尾形状由模型当下的选择决定（真实运行两种都出现过）：`ending="paused"`
+    是又干到到点，`ending="completed"` 是它自己写一句话收尾，`ending="failed"` 是
+    **不安全**的第三种（只用于反例）。`work_after_resume=False` 造出"恢复后零新调用"
+    的走过场形状（同样只用于反例）。
     """
     events: list[Any] = []
     seq = 0
@@ -300,10 +315,16 @@ def _events(*, arm: str = "safe") -> list[Any]:
     ))
     add("run/resumed", {**_resume_payload(consumed=facts_until(pause_seq)),
                         "from_pause_seq": pause_seq})
-    turn(CALL_AFTER_RESUME)
-    add("run/paused", _pause_payload(
-        deadline=DEADLINE_2, consumed=facts_until(seq), version=2,
-    ))
+    if work_after_resume:
+        turn(CALL_AFTER_RESUME)
+    if ending == "completed":
+        add("run/completed", {"final_text": "已达截止时间，报告当前进度"})
+    elif ending == "failed":
+        add("run/failed", {"error": "恢复后崩了（反例）"})
+    else:
+        add("run/paused", _pause_payload(
+            deadline=DEADLINE_2, consumed=facts_until(seq), version=2,
+        ))
     return events
 
 
@@ -486,12 +507,17 @@ def _assertions(
     if operations is None:
         operations = _ops(debt=not resumed)
     if projection is None:
-        projection = {
-            "reconcile_pending": sorted(
-                operation.tool_call_id for operation in operations
-                if needs_reconcile(operation)
-            ),
-        }
+        debt_ids = sorted(
+            operation.tool_call_id for operation in operations if needs_reconcile(operation)
+        )
+        # **生产形状**（`run_budget.project_budget`）：空欠账**不落键**，非空落
+        # `reconcile` 子对象。替身必须照抄这个形状——替身自己编一个键名（本文件曾是
+        # `{"reconcile_pending": [...]}`）会让"读错键名"这种 bug 在离线全绿
+        # （实测：真实运行三连 FAIL 才暴露）。
+        projection = (
+            {"reconcile": {"state": STATE_NEEDS_RECONCILE, "tool_call_ids": debt_ids}}
+            if debt_ids else {}
+        )
     ctx = _context(
         tmp_path, sandbox=sandbox if sandbox is not None else _StubSandbox({}),
     )
@@ -570,11 +596,18 @@ def test_red_debt_without_naming_it_is_neither_arm(tmp_path):
 
 
 def test_red_clean_ledger_cannot_be_read_as_reconcile(tmp_path):
-    """账本干净却按 Arm B 收口（只有一条暂停、恢复被拒）⇒ 判红（该续跑没续跑）。"""
+    """账本干净却按 Arm B 收口（只有一条暂停、恢复被拒）⇒ 判红（该续跑没续跑）。
+
+    红的落点是**恢复面**那三条，不是"结局分类"：分类只看账本有没有欠账，账本干净
+    时它本来就该报 Arm A —— 错的是"该续跑却没续跑"（`resume_contract_holds` /
+    `resumed_leg_did_new_work` / `run_ended_in_a_safe_state`）。
+    """
     events = _events(arm="needs_reconcile")
     assertions = _assertions(tmp_path, events, operations=_ops(debt=False))
     failed = _failed(assertions)
-    assert "deadline_outcome_is_safe_or_needs_reconcile" in failed
+    assert "resume_contract_holds" in failed
+    assert "resumed_leg_did_new_work" in failed
+    assert "run_ended_in_a_safe_state" in failed
     assert "final_budget_state" in failed, "没有恢复事件 ⇒ 派生版本仍是 1"
 
 
@@ -701,7 +734,7 @@ def test_red_arm_a_resume_must_carry_a_new_future_instant(tmp_path):
     }
     for label, payload in mutations.items():
         assertions = _assertions(tmp_path, _with_resumed_payload(events, payload))
-        assert "deadline_outcome_is_safe_or_needs_reconcile" in _failed(assertions), label
+        assert "resume_contract_holds" in _failed(assertions), label
 
 
 def test_red_resume_that_starts_no_new_work(tmp_path):
@@ -713,7 +746,7 @@ def test_red_resume_that_starts_no_new_work(tmp_path):
         if not (event.type in ("tool/call", "tool/result") and event.seq > resumed.seq)
     ]
     assertions = _assertions(tmp_path, trimmed)
-    assert "deadline_outcome_is_safe_or_needs_reconcile" in _failed(assertions)
+    assert "resumed_leg_did_new_work" in _failed(assertions)
 
 
 def test_red_resume_that_starts_a_second_execution_of_the_same_run(tmp_path):
@@ -725,8 +758,8 @@ def test_red_resume_that_starts_a_second_execution_of_the_same_run(tmp_path):
         run_id=RUN_ID, step_id=None,
     )]
     failed = _failed(_assertions(tmp_path, extra_started))
-    assert "deadline_outcome_is_safe_or_needs_reconcile" in failed
-    assert "deadline_pause_happened_once_per_leg" in failed
+    assert "resume_contract_holds" in failed
+    assert "deadline_pause_precedes_any_terminal" in failed
 
     extra_user = [*events, SimpleNamespace(
         seq=tail, type="user/message", data={"content": "接着干"},
@@ -734,20 +767,18 @@ def test_red_resume_that_starts_a_second_execution_of_the_same_run(tmp_path):
     )]
     failed = _failed(_assertions(tmp_path, extra_user))
     assert "run_identity_and_task_shape" in failed
-    assert "deadline_outcome_is_safe_or_needs_reconcile" in failed
+    assert "resume_contract_holds" in failed
 
 
 def test_red_more_than_one_pause_per_leg(tmp_path):
-    """一次执行只允许一条 `run/paused`（两条 ⇒ "到点了两次"这种形状）。"""
+    """一次执行只允许一条 `run/paused`（多出一条 ⇒ 收尾形状既不是暂停也不是完成）。"""
     events = _events(arm="safe")
     first_pause = next(event for event in events if event.type == "run/paused")
     duplicated = [*events, SimpleNamespace(
         seq=max(event.seq for event in events) + 1, type="run/paused",
         data=first_pause.data, run_id=RUN_ID, step_id=None,
     )]
-    assert "deadline_pause_happened_once_per_leg" in _failed(
-        _assertions(tmp_path, duplicated)
-    )
+    assert "run_ended_in_a_safe_state" in _failed(_assertions(tmp_path, duplicated))
 
 
 def test_red_terminal_event_before_the_pause(tmp_path):
@@ -763,7 +794,7 @@ def test_red_terminal_event_before_the_pause(tmp_path):
                         run_id=RUN_ID, step_id=None),
         *shifted,
     ]
-    assert "deadline_pause_happened_once_per_leg" in _failed(_assertions(tmp_path, inserted))
+    assert "deadline_pause_precedes_any_terminal" in _failed(_assertions(tmp_path, inserted))
 
 
 def test_red_continuation_must_be_complete(tmp_path):
@@ -797,18 +828,47 @@ def test_red_missing_pause_or_resume(tmp_path):
         tmp_path, without_resume,
         operations=_ops(debt=False), legs=_default_legs(resumed=True),
     ))
-    assert "deadline_outcome_is_safe_or_needs_reconcile" in failed
+    assert "resume_contract_holds" in failed
+    assert "resumed_leg_did_new_work" in failed
+    assert "run_ended_in_a_safe_state" in failed
     assert "final_budget_state" in failed
 
 
 def test_red_projection_must_match_the_ledger(tmp_path):
-    """投影 `reconcile_pending` 与账本欠账不一致（少报 / 多报）⇒ 判红。"""
+    """投影 `reconcile.tool_call_ids` 与账本欠账不一致（少报 / 多报）⇒ 判红。"""
     events = _events(arm="needs_reconcile")
     for label, pending in {"少报": [], "多报": ["call-ghost"]}.items():
-        assertions = _assertions(
-            tmp_path, events, projection={"reconcile_pending": pending},
+        projection = (
+            {"reconcile": {"state": STATE_NEEDS_RECONCILE, "tool_call_ids": pending}}
+            if pending else {}
         )
+        assertions = _assertions(tmp_path, events, projection=projection)
         assert "projection_matches_ledger_debt" in _failed(assertions), label
+
+
+def test_projection_without_the_debt_key_is_red_not_a_crash(tmp_path):
+    """读不到欠账键时**判红**，不得崩：`list(None)` 的那种崩法会让整次真实运行白跑。
+
+    反例刻意用**错键名**（`reconcile_pending`）——它正是本票实证踩过的那个坑：
+    替身照抄错键名时离线全绿，真实运行却在断言面抛
+    `TypeError: 'NoneType' object is not iterable`（三连 FAIL，每次 ≈ 4 分钟真实调用）。
+    """
+    events = _events(arm="needs_reconcile")
+    assertions = _assertions(
+        tmp_path, events, projection={"reconcile_pending": [CALL_TWO]},
+    )
+    assert "projection_matches_ledger_debt" in _failed(assertions)
+
+
+def test_projection_read_admits_shapes_the_product_really_emits(tmp_path):
+    """三种真实形状：缺键（无欠账）/ 非字典 / 正常子对象 —— 只有一种读出欠账。"""
+    assert _projection_reconcile_pending({}) == []
+    assert _projection_reconcile_pending({"state": "paused"}) == []
+    assert _projection_reconcile_pending(None) == []
+    assert _projection_reconcile_pending({"reconcile": None}) == []
+    assert _projection_reconcile_pending(
+        {"reconcile": {"state": STATE_NEEDS_RECONCILE, "tool_call_ids": [CALL_TWO, CALL_ONE]}}
+    ) == [CALL_ONE, CALL_TWO], "排序后返回（同一份欠账的不同快照要能直接比）"
 
 
 def test_red_ledger_debt_must_block_both_paths(tmp_path):
@@ -938,6 +998,33 @@ def test_red_run_identity_must_be_single(tmp_path):
 # ── 真沙箱：脚本的结构性质与执行域的机制 ──────────────────────────────────
 
 
+def test_safe_arm_accepts_the_completed_ending(tmp_path):
+    """恢复后模型自己收尾（`run/completed`）是**第二种合法安全形状**（真实运行见过）。
+
+    实测：模型在恢复后答一句状态就收尾 —— 那不是失败，也不是产品回归（到点暂停不是
+    任务结束，但"模型自己决定收尾"是它的自由，本场景的断言面明说不评模型表现）。
+    断言两种都收，3/3 才不是抛硬币；同时 `final_budget_state` 必须跟着换成
+    "终态与 paused 互斥"（`derive_run_budget`：终态压过暂停）——否则这一条会因为
+    派生账本里 `paused=None` 而误红。
+    """
+    assertions = _assertions(tmp_path, _events(ending="completed"))
+    assert _failed(assertions) == set(), _failed(assertions)
+
+
+def test_red_resume_without_new_work(tmp_path):
+    """恢复后一个新调用都没接纳 ⇒ 判红（"恢复"不是走过场）。"""
+    assertions = _assertions(tmp_path, _events(work_after_resume=False))
+    assert "resumed_leg_did_new_work" in _failed(assertions)
+
+
+def test_red_unsafe_ending_after_resume(tmp_path):
+    """恢复后以 `run/failed` 收尾（第三种形状）⇒ 判红，且不认成两种安全形状里的任何一种。"""
+    assertions = _assertions(tmp_path, _events(ending="failed"))
+    failed = _failed(assertions)
+    assert "run_ended_in_a_safe_state" in failed
+    assert "final_budget_state" in failed, "终态是 failed ⇒ 派生账本与'两种安全形状'不符"
+
+
 def test_prepare_reports_missing_python_as_unmet_precondition(tmp_path):
     """沙箱里没有 python ⇒ 前置不成立（BLOCKED 面），不是 FAIL，也不 seed 任何文件。"""
 
@@ -1001,8 +1088,10 @@ def test_chain_script_advances_only_with_the_current_token(tmp_path):
     again = sandbox.exec(f"python {CHAIN_SCRIPT} {SEED_TOKEN}")
     assert again.exit_code != 0
     assert sandbox.read_text(STEPS_FILE).strip() == "1"
-    # 信息屏障的量化版本：两条 deadline 窗口（30s + 20s）之和也跑不完链
-    assert TRANSITIONS * STEP_SLEEP_SECONDS > 50, "链必须在两条窗口里都跑不完"
+    # 信息屏障的量化版本：两条 deadline 窗口之和也跑不完链（常数改一个就得重算）
+    assert TRANSITIONS * STEP_SLEEP_SECONDS > DEADLINE_SECONDS + RESUME_DEADLINE_SECONDS, (
+        "链必须在两条窗口里都跑不完"
+    )
 
 
 def test_uncertain_script_lands_its_side_effect_before_hanging(tmp_path):
@@ -1091,6 +1180,79 @@ def test_executor_records_an_unproven_timeout_and_refuses_after_the_deadline(tmp
     assert second.result.retryable is False
     assert UNCERTAIN_CALL_TWO not in by_id, "准入前被拒不得在账上留行"
     assert ctx.sandbox.read_text(UNCERTAIN_SENTINEL).count(UNCERTAIN_SENTINEL_LINE) == 1
+
+
+# ── 执行域那一半：场景**方法本身**（不是它的复刻）────────────────────────
+
+
+def test_uncertain_mutation_leg_runs_on_the_production_composition(tmp_path):
+    """`deadline._uncertain_mutation` 在一次性 Sandbox 里跑通：生产装配 + 生产恢复入口。
+
+    与 `test_executor_records_an_unproven_timeout_...` 的分工：那条复刻的是**机制**
+    （BashTool + ToolExecutor + Ledger），这条走的是**场景自己的方法**，也就是真实运行
+    会走的那段代码——差额恰好在复刻之外：`AppState` 的惰性 store 初始化、
+    `SessionService.recover` 的恢复闸门、`SessionService.budget_projection` 的投影。
+    实测教训：三连真实 FAIL（`TypeError: 'NoneType' object is not iterable`）时机制层的
+    单测全绿，说明红在没人离线跑过的那一段；把这段也钉住，红就不再需要真实调用才发现。
+    """
+    workspace = tmp_path / "workspace"
+    sandbox = LocalSubprocessSandbox(workspace_root=workspace)
+    ctx = _context(
+        tmp_path, sandbox=sandbox,
+        settings=_settings(
+            workspace_dir=str(tmp_path), artifact_dir=str(tmp_path / "artifacts"),
+        ),
+    )
+    assert asyncio.run(SCENARIO.prepare(ctx)) == []
+
+    async def _leg() -> dict[str, Any]:
+        from agent_harness.web.app import AppState, session_service
+
+        state = AppState(ctx.settings)
+        try:
+            await state.ensure_stores()  # 与 `run()` 同一前置（生产装配是惰性的）
+            return await SCENARIO._uncertain_mutation(
+                ctx=ctx, state=state, service=session_service(state),
+                store=JsonlSessionStore(root=ctx.session_root),
+            )
+        finally:
+            await state.shutdown()
+
+    result = asyncio.run(_leg())
+
+    rows = result["rows"]
+    assert result["first"].result.error_code is ErrorCode.TIMEOUT
+    assert rows[UNCERTAIN_CALL].state is OperationState.UNKNOWN
+    assert result["needs_reconcile_first"] is True
+    assert result["sentinel_after_calls"] == 1, "副作用已落地 ⇒ 结论真的证不出来"
+    assert result["second"].result.error_code is ErrorCode.DEADLINE_EXCEEDED
+    assert UNCERTAIN_CALL_TWO not in rows, "准入前被拒不得在账上留行"
+    assert type(result["recovery_refused"]).__name__ == "RecoveryConflict"
+    assert result["sentinel_after_recovery"] == 1, "恢复被拒 ⇒ 没有盲重跑"
+    assert result["reconcile_pending"] == [UNCERTAIN_CALL], "投影把欠账如实报给客户端"
+
+
+# ── 失败可定位（真实运行的取证纪律）──────────────────────────────────────
+
+
+def test_failure_text_names_the_failing_line():
+    """失败读数必须**指得出哪一行**，不只是异常类型（真实运行只有这一次机会）。"""
+
+    def _inner() -> None:
+        payload: list[str] | None = None
+        for _ in payload:
+            pass
+
+    try:
+        _inner()
+    except TypeError as error:
+        text = _failure_text(error)
+    else:  # pragma: no cover - 上面必然抛 TypeError
+        raise AssertionError("预期 TypeError")
+
+    assert text.startswith("TypeError: 'NoneType' object is not iterable")
+    assert "test_deadline_scenario.py" in text, text
+    assert "for _ in payload" in text, text
 
 
 # ── 运行时目录重定向（取证卫生）──────────────────────────────────────────
