@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 的 `#297`–`#301` 均已集成并 CLOSED。#299 AC10 已由冻结语料 Recall@6=0.95 与真实 Milvus hybrid 检索证据满足，集成 tip `fbb8a98c`；`#302` / `#303` 已解锁，`#304` 等待后二票。#299 验证、review 与证据见 `docs/phase_status/2026-09.md` L1258；#301 的已知 Vitest 超时见 L1257。旧 Memory 数据未清理，未修改 `.env` 或凭证。
+**当前焦点：Memory V2 的 `#297`–`#301` 均已集成并 CLOSED。#302 两项真实公开 smoke 已在 `codex/mem-v2-6-quality-repair` / `aff3e46f` 通过（Recall@6=1.0；答案 F1=0.666667 / 0.5），待完整项目门禁、最终审查与集成；`#303` 可继续，`#304` 等待后二票。证据与过程见 `docs/phase_status/2026-09.md` 的 #302 收口记录。旧 Memory 数据未清理，未修改 `.env` 或凭证。
 
 **Memory V2 当前状态（2026-09-25）**：`#297`–`#301` 已 CLOSED 并集成；`#299` AC10 Recall@6=0.95 且真实 Milvus hybrid 证据已归档，GitHub issue 已 CLOSED；`#302` / `#303` 已解除阻塞，`#304` 等待后二票。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。旧记忆数据仍保留；clean-slate 只在 `#303` 依赖完成并核验目标和保留项后执行。
 

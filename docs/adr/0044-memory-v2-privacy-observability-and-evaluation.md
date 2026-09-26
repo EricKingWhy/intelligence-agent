@@ -1,6 +1,6 @@
 # ADR-0044 — Memory V2 隐私观测与质量评测
 
-- **Status**: Proposed（实现与离线判别测试已完成；真实公开基准 smoke 与服务 Gate 仍需留证）
+- **Status**: Proposed（实现、离线判别测试与两项真实公开 smoke 已完成；完整项目门禁与集成仍待执行）
 - **Date**: 2026-09-26
 - **Deciders**: 用户（#302 范围、真实服务授权、LoCoMo 非商业内部评测边界）+ 本 Agent（实现方案）
 - **Related**:
@@ -129,6 +129,16 @@ LoCoMo 仍只用于非商业内部评测。
 Recall@6=1.0、`chain_verified=true`、命中并注入 1 条 Collection 记忆。真实答案 token F1=0.222222，
 未达到 0.5 阈值；样例只有一个召回候选，因此尚不能证明额外重排会改善答案质量。报告为
 `docs/evidence/memory-v2-public-smoke-longmemeval-11db90a5.json`，清理与内容脱敏检查通过。
+
+2026-09-27 在已提交、干净代码树 `aff3e46f438d0d11ec6e4439f1e85f739f26bda7`（tree
+`045b396cab5feaaef1e4dce26f2a5cf109f25a76`）上分别运行两个获批样例。LoCoMo category 4 与
+LongMemEval `single-session-user` 均选择到权威 user turn，答案 token F1 分别为 **0.666667** 与
+**0.5**（门槛均为 0.5）；两者 Recall@6 均为 **1.0**，相关 hit rank 为 1，形成记忆被实际注入，
+`chain_verified=true`，runner 均确认临时 Milvus collection 已不存在。报告为
+`docs/evidence/memory-v2-public-smoke-locomo-f22ae031.json` 与
+`docs/evidence/memory-v2-public-smoke-longmemeval-6374b2d9.json`，只含脱敏指标和哈希，不含问题、答案、
+记忆正文或凭证；`cost_usd=null` 符合无可信费率来源时的既定口径。两份均为非阻塞单样本 smoke，
+不冻结正式 baseline。完整项目门禁与集成尚未完成。
 
 ### D8 — BGE reranker 试验未证明收益，不纳入运行时
 
