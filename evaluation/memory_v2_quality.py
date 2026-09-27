@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import math
 import re
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -22,14 +23,14 @@ _ACTIONS = {"ADD", "UPDATE", "INVALIDATE", "NOOP"}
 _KINDS = {"semantic", "episodic", "procedural", "none"}
 _SCOPES = {"user_global", "project", "none"}
 _AUTHORITIES = {"user", "assistant", "tool", "system", "none"}
-_STATUSES = {"executed", "failed", "skipped", "unawaited"}
+_STATUSES = {"executed", "degraded", "failed", "skipped", "unawaited"}
 _WRITE_ACTIONS = {"ADD", "UPDATE"}
 _REQUIRED_OBSERVATION_FIELDS = {
     "eligibility", "action", "kind", "scope", "source_authority",
     "recall_ids_top6", "prohibited_outcomes", "secret_write_count",
     "unauthorized_recall_count", "unauthorized_mutation_count",
     "ineligible_trigger_write_count", "written_count", "fallback_used",
-    "degraded_without_write", "old_version_superseded",
+    "fallback_success", "degraded_without_write", "old_version_superseded",
     "duplicate_active_logical_memories", "latency_ms", "input_tokens",
     "output_tokens", "cost_usd",
 }
@@ -127,12 +128,14 @@ def evaluate_memory_gold(
     statuses = Counter(str(result.get("status", "failed")) for result in results)
     executed = [
         case for case in cases
-        if by_id.get(case.case_id, {}).get("status") == "executed"
+        if by_id.get(case.case_id, {}).get("status") in {"executed", "degraded"}
     ]
     if not executed:
         reasons.append("zero_executed_cases")
-    if any(status != "executed" for status in statuses):
+    if any(status not in {"executed", "degraded"} for status in statuses):
         reasons.append("non_executed_cases")
+    if statuses["degraded"]:
+        reasons.append("degraded_cases")
     if len(executed) != len(cases):
         reasons.append("incomplete_execution")
 
@@ -175,12 +178,18 @@ def evaluate_memory_gold(
             reasons.append(f"invalid_metric:{case.case_id}:prohibited_outcomes")
         if type(raw.get("eligibility")) is not bool:
             reasons.append(f"invalid_metric:{case.case_id}:eligibility")
-        for field in ("fallback_used", "degraded_without_write", "old_version_superseded"):
+        for field in (
+            "fallback_used", "fallback_success", "degraded_without_write",
+            "old_version_superseded",
+        ):
             if type(raw.get(field)) is not bool:
                 reasons.append(f"invalid_metric:{case.case_id}:{field}")
+        if raw.get("fallback_success") is True and raw.get("fallback_used") is not True:
+            reasons.append(f"inconsistent_fallback_metrics:{case.case_id}")
         cost = raw.get("cost_usd")
         if cost is not None and (
-            not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0
+            not isinstance(cost, (int, float)) or isinstance(cost, bool)
+            or (isinstance(cost, float) and not math.isfinite(cost)) or cost < 0
         ):
             reasons.append(f"invalid_metric:{case.case_id}:cost_usd")
         observations[case.case_id] = raw
@@ -245,12 +254,17 @@ def evaluate_memory_gold(
             continue
         recall_hits += len(targets.intersection(top_six[:6]))
         recall_relevant += len(targets)
-    fallback_success = sum(
-        obs(case).get("fallback_used") is True
+    fallback_safe = sum(
+        obs(case).get("fallback_success") is True
         or (
             obs(case).get("degraded_without_write") is True
             and obs(case).get("written_count") == 0
         )
+        for case in fallback_cases
+    )
+    fallback_model_success = sum(
+        obs(case).get("fallback_used") is True
+        and obs(case).get("fallback_success") is True
         for case in fallback_cases
     )
 
@@ -294,7 +308,10 @@ def evaluate_memory_gold(
             recall_hits, recall_relevant, 0.85, comparator="minimum",
         ),
         "transient_primary_fallback": _metric(
-            fallback_success, len(fallback_cases), 1.0, comparator="minimum",
+            fallback_safe, len(fallback_cases), 1.0, comparator="minimum",
+        ),
+        "fallback_model_success": _metric(
+            fallback_model_success, len(fallback_cases), 1.0, comparator="minimum",
         ),
         "replay_duplicate_active_memories": _metric(
             count("duplicate_active_logical_memories", replay_cases),
@@ -339,12 +356,38 @@ def evaluate_memory_gold(
         obs(case).get("cost_usd") for case in executed
         if isinstance(obs(case).get("cost_usd"), (int, float))
         and not isinstance(obs(case).get("cost_usd"), bool)
+        and (
+            not isinstance(obs(case).get("cost_usd"), float)
+            or math.isfinite(obs(case).get("cost_usd"))
+        )
     ]
     report_pass = not reasons and all(item["pass"] for item in metrics.values())
     if not all(item["pass"] for item in metrics.values()):
         reasons.append("blocking_threshold_failed")
+    case_results = []
+    for case in cases:
+        result = by_id.get(case.case_id)
+        status = result.get("status") if result is not None else None
+        item: dict[str, Any] = {
+            "case_id": case.case_id,
+            "status": status if status in _STATUSES else (
+                "missing" if result is None else "failed"
+            ),
+        }
+        if result is not None:
+            error_type = result.get("error_type")
+            if _safe_class_name(error_type):
+                item["error_type"] = error_type
+            observed = result.get("observed")
+            if isinstance(observed, Mapping):
+                item["observed"] = _safe_observation(observed, case)
+            attempts = _safe_model_attempts(result.get("model_attempts"))
+            if attempts:
+                item["model_attempts"] = attempts
+        case_results.append(item)
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id or str(uuid4()),
         "ran_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "repeat_of": repeat_of,
@@ -361,11 +404,13 @@ def evaluate_memory_gold(
         "config_aliases": safe_aliases,
         "case_counts": {
             "total": len(cases), "executed": len(executed),
-            "failed": statuses["failed"], "skipped": statuses["skipped"],
+            "failed": statuses["failed"] + statuses["degraded"],
+            "degraded": statuses["degraded"], "skipped": statuses["skipped"],
             "unawaited": statuses["unawaited"],
             "missing": len(missing), "unexpected": len(unexpected),
         },
         "metrics": metrics,
+        "case_results": case_results,
         "usage": {
             "latency_ms_total": latency_ms,
             "input_tokens": input_tokens,
@@ -398,6 +443,8 @@ async def run_memory_gold_gate(
                     "status": outcome["status"],
                     "observed": outcome.get("observed"),
                     "trace_id": outcome.get("trace_id"),
+                    "error_type": outcome.get("error_type"),
+                    "model_attempts": outcome.get("model_attempts"),
                 }
             else:
                 result = {
@@ -406,11 +453,14 @@ async def run_memory_gold_gate(
                     if isinstance(outcome, Mapping) else outcome,
                     "trace_id": outcome.get("trace_id")
                     if isinstance(outcome, Mapping) else None,
+                    "model_attempts": outcome.get("model_attempts")
+                    if isinstance(outcome, Mapping) else None,
                 }
         except Exception as error:  # noqa: BLE001 — one failed case cannot look like a green run
             result = {
                 "case_id": case.case_id, "status": "failed",
                 "error_type": type(error).__name__,
+                "model_attempts": [],
             }
         results.append(result)
 
@@ -431,14 +481,19 @@ async def run_memory_gold_gate(
         })
     if report_path is not None:
         destination = Path(report_path)
-        await asyncio.to_thread(_write_exclusive_report, destination, report)
+        await asyncio.to_thread(write_memory_gold_report, destination, report)
     return report
+
+
+def write_memory_gold_report(destination: str | Path, report: Mapping[str, Any]) -> None:
+    """Create one machine-readable report without replacing prior evidence."""
+    _write_exclusive_report(Path(destination), report)
 
 
 def _write_exclusive_report(destination: Path, report: Mapping[str, Any]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("x", encoding="utf-8", newline="\n") as stream:
-        json.dump(report, stream, ensure_ascii=False, indent=2)
+        json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
         stream.write("\n")
 
 
@@ -450,3 +505,99 @@ def _validate_aliases(aliases: Mapping[str, str]) -> dict[str, str]:
     ):
         raise ValueError("reports accept configuration aliases only, never endpoint or secret values")
     return dict(aliases)
+
+
+def _safe_class_name(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) <= 128
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value) is not None
+    )
+
+
+def _safe_model_attempts(value: Any) -> list[dict[str, str | int]]:
+    """Keep only fixed provider aliases and content-free call classifications."""
+    if not isinstance(value, list):
+        return []
+    safe: list[dict[str, str | int]] = []
+    for attempt in value:
+        if not isinstance(attempt, Mapping):
+            continue
+        alias = attempt.get("alias")
+        role = attempt.get("role")
+        stage = attempt.get("stage")
+        outcome = attempt.get("outcome")
+        number = attempt.get("attempt")
+        if (
+            not all(isinstance(item, str) for item in (alias, role, stage, outcome))
+            or alias not in {"memory.primary", "memory.fallback"}
+            or role not in {"primary", "fallback"}
+            or stage not in {"formation", "adjudication"}
+            or outcome not in {
+                "success", "injected_transient_failure", "transient_provider_error",
+                "provider_error", "invalid_model_output", "other",
+            }
+            or type(number) is not int or number < 1
+        ):
+            continue
+        item: dict[str, str | int] = {
+            "alias": alias, "role": role, "stage": stage,
+            "attempt": number, "outcome": outcome,
+        }
+        error_type = attempt.get("error_type")
+        if _safe_class_name(error_type):
+            item["error_type"] = error_type
+        safe.append(item)
+    return safe
+
+
+def _safe_observation(value: Mapping[str, Any], case: GoldCase) -> dict[str, Any]:
+    """Whitelist the case-level metrics; never carry model content into evidence."""
+    safe: dict[str, Any] = {}
+    for field in (
+        "eligibility", "action", "kind", "scope", "fallback_used",
+        "fallback_success", "degraded_without_write", "old_version_superseded",
+    ):
+        item = value.get(field)
+        allowed = {
+            "action": _ACTIONS, "kind": _KINDS, "scope": _SCOPES,
+        }.get(field)
+        if (
+            allowed is None and type(item) is bool
+            or allowed is not None and isinstance(item, str) and item in allowed
+        ):
+            safe[field] = item
+    for field in (
+        "secret_write_count", "unauthorized_recall_count",
+        "unauthorized_mutation_count", "ineligible_trigger_write_count",
+        "written_count", "duplicate_active_logical_memories", "latency_ms",
+        "input_tokens", "output_tokens",
+    ):
+        item = value.get(field)
+        if type(item) is int and item >= 0:
+            safe[field] = item
+    cost = value.get("cost_usd")
+    if cost is None or (
+        isinstance(cost, (int, float)) and not isinstance(cost, bool)
+        and (not isinstance(cost, float) or math.isfinite(cost)) and cost >= 0
+    ):
+        safe["cost_usd"] = cost
+    authorities = value.get("source_authority")
+    if isinstance(authorities, list) and all(
+        isinstance(item, str) and item in _AUTHORITIES for item in authorities
+    ):
+        safe["source_authority"] = authorities
+    recalls = value.get("recall_ids_top6")
+    expected_recalls = set(case.expected["recall_target"])
+    if isinstance(recalls, list) and all(
+        isinstance(item, str) and item in expected_recalls for item in recalls
+    ):
+        safe["recall_ids_top6"] = recalls[:6]
+    prohibited = value.get("prohibited_outcomes")
+    if isinstance(prohibited, list) and all(
+        isinstance(item, str) and item in {
+            "secret_write", "unauthorized_recall", "unauthorized_mutation",
+            "ineligible_write", "sensitive_write",
+        } for item in prohibited
+    ):
+        safe["prohibited_outcomes"] = prohibited
+    return safe

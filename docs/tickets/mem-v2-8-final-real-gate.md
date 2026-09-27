@@ -31,6 +31,9 @@ One frozen integrated tree passes static/full regression gates, project memory q
 - Freeze and record code SHA/tree before Gate execution.
 - Run backend and frontend full repository gates required by project protocol.
 - Run the complete project memory gold set and blocking thresholds.
+- Keep run-end trigger eligibility separate from candidate-policy rejection; a selection rejection must not rewrite whether the run was eligible.
+- Count memory.fallback as successful only after a successful fallback model call and completed job; an attempted call alone does not satisfy AC4.
+- Provide a reproducible real-model gold runner with per-case diagnostics, retry-budget evidence, isolated temporary Milvus routing, and verified cleanup.
 - Use real configured primary and fallback memory models without logging values.
 - Exercise real SQLite, dedicated Milvus Memory collection, optional Knowledge context used by the scenario, Langfuse, and Qiniu/artifact lane where configured.
 - Exercise automatic Formation, NO_MEMORY, ADD/UPDATE/INVALIDATE/NOOP, cross-session recall, explicit remember/forget, user edit authority, settings, deletion, and Web UI.
@@ -81,6 +84,8 @@ The agent may choose execution order, test data wording, uniquely generated reso
 - **AC8:** Final service queries show zero temporary Milvus Memory records/collection residue as required, zero Knowledge test records, and zero Qiniu test objects/prefixes.
 - **AC9:** Missing/unavailable external lanes are explicitly marked not executed and prevent a claim of full real-Gate success.
 - **AC10:** Final report states verdict, SHA/tree, every lane result, residual risks, retained evidence identifiers, cleanup results, and any environment limitations.
+- **AC11:** The evaluator reports trigger eligibility independently of candidate-policy rejection and reports PRD fallback safety separately from strict AC4 fallback-model success.
+- **AC12:** scripts/run_memory_v2_real_gold_gate.py can rerun the versioned project gold set against real configured models and a dedicated Milvus collection; its report records safe per-case diagnostics and call budgets, and cleanup verifies the temporary collection is absent.
 
 ## Dependencies
 
@@ -95,6 +100,7 @@ parallelizable: no; run only on the fully integrated frozen tree
 - Repository Gate-0 machine artifact and replay check.
 - Full backend/frontend gates and review coverage.
 - Project gold-set blocking evaluation plus public baseline adapters.
+- Reproducible real lane: uv run python scripts/run_memory_v2_real_gold_gate.py --env-file <local-ignored-env-file> --output-dir docs/evidence.
 - Real model/Milvus/Langfuse/Knowledge/Qiniu scenarios with unique test identifiers.
 - Browser user journey at both viewports.
 - External cleanup read-back queries and clean tracked-tree check.

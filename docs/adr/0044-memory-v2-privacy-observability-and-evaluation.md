@@ -56,19 +56,25 @@ Recall 和 AgentRuntime 事件事实不依赖 Langfuse。
 版本化金集 `evaluation/datasets/memory_v2_project_gold_v1.json` 标注为 `synthetic: true`，每项声明
 eligibility、action、kind、scope、source authority、recall target、禁止结果及适用的 fallback、replay、
 contradiction 标签。项目自己的冻结语料是 release gate；公开基准只提供非阻塞外部参照。
+语料 v1.2.0 更正了三项把“run-end 触发资格”与“候选策略拒绝”混在一起的期望值：assistant 来源、secret、
+未获同意的敏感候选仍属于可入队的合格 run，是否写入由后续候选策略与动作准确率检查。质量阈值保持不变。
 
 机器报告计算 PRD §8.2 全部阈值：secret write、越权 recall/mutation、ineligible write 和 replay duplicate
 为零；NOOP、write precision、kind、contradiction、Recall@6 与 transient-primary fallback 达到各自阈值。
+fallback safety 按 PRD 接受“成功切换”或“降级且零写入”；#304 另要求 fallback 模型调用成功，单独用
+`fallback_model_success` 阻塞指标证明。尝试 fallback 不等于调用成功。
 每项带 numerator / denominator / threshold / verdict。缺观测、缺分母、错误类型、漏跑、失败、跳过、
 未 await、重复 case 或 trace 都不能形成绿色 Gate。
 
 ### D5 — 报告只保存聚合指标与可复现身份
 
-报告保存 corpus 版本 / digest、code SHA / tree SHA、配置别名（不含配置值）、case 计数、阻塞指标、
+报告 schema v2 保存 corpus 版本 / digest、code SHA / tree SHA、配置别名（不含配置值）、case 计数、阻塞指标、
 安全 job reason 与输出失败类别的直方图、累计 latency / token / cost、run ID 和重复运行的 `repeat_of`。
 输出失败类别仅为 `invalid_response_type` / `empty_output` / `invalid_json` / `contract_violation`；
 未知值折叠为 `other`。报告不保存题面、答案、会话、模型响应或
-记忆正文。身份来自运行前固定的已提交 HEAD/tree；Gate-0 的工作树检查同时拒绝追踪文件偏离、隐藏索引位和
+记忆正文。每 case 结果只保留固定 case ID、状态、白名单内的评估字段、模型别名与调用阶段、错误类型名；不会保留
+自由文本异常、题面、提示词、模型响应或记忆正文。fallback“已尝试”与“调用成功”分别计量，只有成功的 fallback
+调用且作业正常终结才满足 `fallback_model_success`。身份来自运行前固定的已提交 HEAD/tree；Gate-0 的工作树检查同时拒绝追踪文件偏离、隐藏索引位和
 未跟踪车道输入，运行后再次验证 HEAD/tree 与工作树，变化或无法验证时报告失败。相同 report path 以独占创建
 拒绝覆盖；重复的 case / trace 身份会失败，明确的重复实验用新 run ID 并记录 `repeat_of`。
 

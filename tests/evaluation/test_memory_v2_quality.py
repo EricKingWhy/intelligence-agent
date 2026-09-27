@@ -43,6 +43,11 @@ from evaluation.memory_v2_quality import (
     load_memory_gold,
     run_memory_gold_gate,
 )
+from scripts.run_memory_v2_real_gold_gate import (
+    _foreign_project_identity,
+    _model_execution_summary,
+    _trusted_identity,
+)
 from tests.memory.v2._records import make_draft, payload_for
 from tests.memory.v2.test_v2_executor import (
     FakeInvoker,
@@ -147,6 +152,7 @@ def _observed(case):
         "ineligible_trigger_write_count": 0,
         "written_count": int(action in {"ADD", "UPDATE"}),
         "fallback_used": expected.get("requires_fallback", False),
+        "fallback_success": expected.get("requires_fallback", False),
         "degraded_without_write": False,
         "old_version_superseded": expected.get("supersedes_old_version", False),
         "duplicate_active_logical_memories": 0,
@@ -387,10 +393,7 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         else:
             unauthorized_mutation_count = 1
 
-    selection = next(
-        (metadata for name, metadata in observer_rows if name == "selection"), {},
-    )
-    eligibility_value = eligibility.eligible and selection.get("rejected_count", 0) == 0
+    eligibility_value = eligibility.eligible
     action = "UPDATE" if superseded else "ADD" if written else "NOOP"
     kind = written[0].kind.value if written else "none"
     scope = written[0].scope.value if written else (
@@ -433,8 +436,16 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         "ineligible_trigger_write_count": int(not eligibility.eligible and bool(written)),
         "written_count": len(written),
         "fallback_used": bool(result and result.fallback_used),
+        "fallback_success": bool(
+            result and result.stage.value == "completed"
+            and any(
+                name == "model" and metadata.get("model_role") == "fallback"
+                and metadata.get("outcome") == "success"
+                for name, metadata in observer_rows
+            )
+        ),
         "degraded_without_write": bool(
-            result and result.outcome and result.outcome.value == "degraded" and not written
+            result and result.stage.value == "degraded" and not written
         ),
         "old_version_superseded": bool(superseded),
         "duplicate_active_logical_memories": duplicate_count,
@@ -449,7 +460,7 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
     corpus, cases = load_memory_gold()
 
     assert corpus["synthetic"] is True
-    assert corpus["version"] == "1.1.0"
+    assert corpus["version"] == "1.2.0"
     assert len(cases) >= 15
     for case in cases:
         assert {
@@ -538,6 +549,25 @@ async def test_frozen_gold_executes_all_cases_through_memory_v2_with_fake_provid
 
 
 @pytest.mark.parametrize(
+    "case_id",
+    ["unsupported_assistant_claim", "secret_probe", "sensitive_without_consent"],
+)
+@pytest.mark.asyncio
+async def test_candidate_policy_rejection_does_not_change_trigger_eligibility(
+    tmp_path, case_id,
+):
+    _corpus, cases = load_memory_gold()
+    case = next(item for item in cases if item.case_id == case_id)
+
+    observed = await _execute_gold_case_with_memory_v2(
+        case, tmp_path / f"{case_id}.db",
+    )
+
+    assert observed["eligibility"] is True
+    assert observed["action"] == "NOOP"
+
+
+@pytest.mark.parametrize(
     ("case_id", "field", "value", "gate"),
     [
         ("secret_probe", "secret_write_count", 1, "secret_writes"),
@@ -551,7 +581,7 @@ async def test_frozen_gold_executes_all_cases_through_memory_v2_with_fake_provid
         ("contradiction_supersession", "old_version_superseded", False,
          "contradiction_handling"),
         ("cross_session_recall_one", "recall_ids_top6", [], "cross_session_recall_at_6"),
-        ("primary_transient_fallback", "fallback_used", False,
+        ("primary_transient_fallback", "fallback_success", False,
          "transient_primary_fallback"),
         ("replay_committed_job", "duplicate_active_logical_memories", 1,
          "replay_duplicate_active_memories"),
@@ -596,6 +626,137 @@ def test_failed_skipped_unawaited_zero_and_duplicate_runs_never_pass():
     unawaited = _results(cases)
     unawaited[0]["status"] = "unawaited"
     assert evaluate_memory_gold(corpus, cases, unawaited)["status"] == "failed"
+
+
+def test_attempted_but_failed_fallback_does_not_count_as_success():
+    corpus, cases = load_memory_gold()
+    results = _results(cases)
+    fallback = next(
+        item for item in results
+        if item["case_id"] == "primary_transient_fallback"
+    )
+    fallback["status"] = "degraded"
+    fallback["observed"].update({
+        "action": "NOOP",
+        "kind": "none",
+        "fallback_used": True,
+        "fallback_success": False,
+        "degraded_without_write": True,
+        "written_count": 0,
+    })
+
+    report = evaluate_memory_gold(corpus, cases, results)
+
+    assert report["case_counts"]["failed"] == 1
+    assert report["case_counts"]["degraded"] == 1
+    assert "degraded_cases" in report["failures"]
+    assert report["metrics"]["transient_primary_fallback"] == {
+        "numerator": 1, "denominator": 1, "value": 1.0,
+        "threshold": 1.0, "pass": True,
+    }
+    assert report["metrics"]["fallback_model_success"] == {
+        "numerator": 0, "denominator": 1, "value": 0.0,
+        "threshold": 1.0, "pass": False,
+    }
+
+
+@pytest.mark.parametrize("cost", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_cost_fails_and_report_remains_strict_json(cost):
+    corpus, cases = load_memory_gold()
+    results = _results(cases)
+    results[0]["observed"]["cost_usd"] = cost
+
+    report = evaluate_memory_gold(corpus, cases, results)
+
+    assert report["status"] == "failed"
+    assert f"invalid_metric:{cases[0].case_id}:cost_usd" in report["failures"]
+    json.dumps(report, allow_nan=False)
+
+
+def test_real_runner_keeps_cases_isolated_in_shared_collection():
+    first = _trusted_identity("case-one")
+    second = _trusted_identity("case-two")
+    foreign = _foreign_project_identity(first)
+
+    assert first != second
+    assert foreign.tenant_id == first.tenant_id
+    assert foreign.user_id == first.user_id
+    assert foreign.project_id != first.project_id
+
+
+def test_real_runner_reports_primary_success_and_injected_fallback_budget():
+    primary_success = {
+        "alias": "memory.primary", "role": "primary", "stage": "formation",
+        "attempt": 1, "outcome": "success",
+    }
+    fallback_attempts = [
+        {
+            "alias": "memory.primary", "role": "primary", "stage": "formation",
+            "attempt": number, "outcome": "injected_transient_failure",
+            "error_type": "TimeoutError",
+        }
+        for number in (1, 2, 3)
+    ] + [{
+        "alias": "memory.fallback", "role": "fallback", "stage": "formation",
+        "attempt": 1, "outcome": "provider_error",
+        "error_type": "PermissionDeniedError",
+    }]
+    summary = _model_execution_summary({"case_results": [
+        {"case_id": "primary-success", "status": "executed",
+         "model_attempts": [primary_success]},
+        {"case_id": "primary_transient_fallback", "status": "degraded",
+         "observed": {"fallback_success": False}, "model_attempts": fallback_attempts},
+    ]})
+
+    assert summary["primary"]["successful_cases"] == 1
+    assert summary["fallback"]["attempts"] == 1
+    assert summary["injected_failure_case"] == {
+        "case_id": "primary_transient_fallback",
+        "primary_transient_attempts": 3,
+        "fallback_attempts": 1,
+        "total_model_calls": 4,
+        "fallback_success": False,
+    }
+    assert summary["budgets"]["observed_within_budget"] is True
+
+
+@pytest.mark.asyncio
+async def test_case_diagnostics_are_safe_and_keep_provider_error_type(tmp_path, monkeypatch):
+    _corpus, cases = load_memory_gold()
+    monkeypatch.setattr(memory_v2_quality, "capture_code_identity", lambda: {
+        "code_sha": "a" * 40, "tree_sha": "b" * 40,
+    })
+
+    async def execute(case):
+        if case.case_id == "primary_transient_fallback":
+            return {
+                "status": "failed", "error_type": "PermissionDeniedError",
+                "model_attempts": [{
+                    "alias": "memory.fallback", "role": "fallback",
+                    "stage": "formation", "attempt": 1,
+                    "outcome": "provider_error",
+                    "error_type": "PermissionDeniedError",
+                    "response": "private model response must not be retained",
+                }],
+            }
+        return {"status": "skipped"}
+
+    report_path = tmp_path / "safe-report.json"
+    report = await run_memory_gold_gate(execute, report_path=report_path)
+    saved = report_path.read_text(encoding="utf-8")
+    fallback = next(
+        item for item in report["case_results"]
+        if item["case_id"] == "primary_transient_fallback"
+    )
+
+    assert fallback["error_type"] == "PermissionDeniedError"
+    assert fallback["model_attempts"] == [{
+        "alias": "memory.fallback", "role": "fallback", "stage": "formation",
+        "attempt": 1, "outcome": "provider_error",
+        "error_type": "PermissionDeniedError",
+    }]
+    assert "private model response" not in saved
+    assert all(case.synthetic_input not in saved for case in cases)
 
 
 @pytest.mark.asyncio
