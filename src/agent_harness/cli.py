@@ -34,8 +34,10 @@ from agent_harness.agent.budget import (
     resolve_local_fuse,
 )
 from agent_harness.agent.profiles import declared_turn_ceiling
+from agent_harness.agent.resume_evidence import evidence_port
 from agent_harness.agent.run_budget import (
     RESUME_BASIS_BUDGET_INCREASE,
+    STUCK_RESUME_REQUIREMENTS,
     TRIGGER_RUN_DEADLINE,
     LaunchRunBudget,
     latest_paused_run,
@@ -93,6 +95,7 @@ from agent_harness.session.lineage import (
     render_lineage_tree,
 )
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
+from agent_harness.tooling.contract import PermissionPolicy
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 3
@@ -660,6 +663,11 @@ async def run(
             session_id=session_id, workspace=workspace,
             max_agent_turns=fuse.max_agent_turns,
             local_fuse_source=fuse.source,
+            # 档位显式化：**与下面证据端口的摘要输入同源**。运行时实际生效的档位就是
+            # 这一档（此前靠 `build_runtime` 的默认参数），若两处各写一次，暂停快照
+            # 会按"另一套策略输入"算，而恢复侧重算时对不上——那是一次假的
+            # `policy_change`（`#317` / ADR-0048 D8）。
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             # `#312`：run 作用域的绝对 ceiling（`--run-turns-total`）。None = 本 run
             # 不设 run 档 ceiling——**不是** 0（0 会把第一条 model 决策就挡下）。
             run_budget=LaunchRunBudget(
@@ -675,6 +683,13 @@ async def run(
             ),
             auto_approve=True,
             session_store=store,
+            # `#317`：`run` 是"创建 + 第一条消息"入口，第一次开跑就可能卡循环 ⇒ 它建的
+            # 会话也必须带证据端口，否则 CLI 上跑出的 stuck 暂停在载荷里没有环境 /
+            # 策略快照，恢复时那两条依据一律 409（只剩 steer 一条可用）。走**唯一**构造点
+            # （`resume_evidence.evidence_port`），与 Web 创建 / 续聊、CLI 恢复同一份算法。
+            stuck_evidence=evidence_port(
+                workspace=workspace, permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+            ),
         )
         session = Session.start(store, session_id=session_id, cwd=workspace)
         # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
@@ -1102,7 +1117,9 @@ async def resume_command(
     `#313`：四个 run 维度各自可抬（与 Web 的 `budget.run.*` 同一套名字与同一份判定）。
     四个都缺省 = 恢复后的 run 没有 run 档 ceiling——它**合法**（`resume_headroom_ok`
     对未配置的维度不作要求），但那是"去掉 ceiling"，不是"抬高 ceiling"；
-    `_main_resume` 因此在命令行层要求至少给一个（CLI 的可用性判断，不是领域判定）。
+    `_main_resume` 因此在命令行层要求至少给一个（CLI 的可用性判断，不是领域判定）
+    ——**例外是 stuck 的三类依据**（`#317`）：抬高 ceiling 不是 stuck 的依据，
+    所以那三个 basis 不带 ceiling 也放行，判定仍旧只有领域层一处。
 
     被拒时（形状 422 / 冲突 409）异常向上抛：`_main_resume` 打印后 exit 1，
     且**零副作用**（判定在任何落盘之前——见 `agent/run_budget.validate_resume`）。
@@ -1212,13 +1229,19 @@ def _main_resume(argv: list[str]) -> None:
     )
     parser.add_argument(
         "--basis", default=RESUME_BASIS_BUDGET_INCREASE,
-        help=f"resume_basis（本票只实现 {RESUME_BASIS_BUDGET_INCREASE}）",
+        help=f"resume_basis。预算 / deadline 暂停用 {RESUME_BASIS_BUDGET_INCREASE}"
+             f"（配一个抬高的绝对 ceiling）；stuck 暂停用 "
+             f"{' / '.join(STUCK_RESUME_REQUIREMENTS)}，且依据必须是**被观测到的**事实"
+             "（新 steer / 工作区变过 / 策略变过），不是用户声明",
     )
     args = parser.parse_args(argv)
     if (
         args.run_turns_total is None and args.run_model_requests is None
         and args.run_total_tokens is None and args.run_cost_usd is None
         and args.run_deadline is None and not args.run_tool_limit
+        # stuck 暂停的恢复**不**以 ceiling 为依据（`02 §5.3`：抬高预算不是它的依据），
+        # 所以三类 stuck 依据不要求给 ceiling——领域层那边同样不要求。
+        and args.basis not in STUCK_RESUME_REQUIREMENTS
     ):
         # 一个都不给 = 去掉全部 run ceiling，而不是"抬高"：那是另一件事（普通续聊也能做到），
         # 不在 `resume` 的语义里。CLI 层拒绝，不给用户一个看不出差别的成功。

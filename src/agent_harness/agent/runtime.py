@@ -24,7 +24,7 @@ import functools
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -47,13 +47,20 @@ from agent_harness.agent.completion import (
     policy_rejection_reason,
 )
 from agent_harness.agent.guards import (
-    GuardLevel,
-    GuardSignal,
+    STUCK_LEVEL_PAUSED,
+    STUCK_PATTERN_TOOL_FAILURE,
     RepeatedToolFailureGuard,
+    StuckDetector,
+    StuckSignal,
+    external_failure_signal,
+    worst_stuck_signal,
 )
+from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
+    REASON_STUCK,
+    STUCK_RESUME_REQUIREMENTS,
     BudgetConsumed,
     LaunchRunBudget,
     RunLimits,
@@ -75,7 +82,6 @@ from agent_harness.agent.types import (
     STATUS_COMPLETED,
     STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_FAILED,
-    STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
     STATUS_PAUSED,
     STATUS_QUIESCENCE_BLOCKED,
     AgentEvent,
@@ -109,6 +115,7 @@ from agent_harness.observability.tracer import RunTracer
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import (
     CONTEXT_COMPACTED,
+    GUARD_STUCK,
     MODEL_COMPLETED,
     MODEL_FAILED,
     MODEL_FALLBACK,
@@ -136,7 +143,7 @@ from agent_harness.storage import (
     SessionMeta,
     needs_reconcile,
 )
-from agent_harness.tooling import ErrorCode, ToolCall, ToolExecutor, ToolRegistry
+from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 from agent_harness.tooling.quota import ToolQuotaWindow
 
 if TYPE_CHECKING:
@@ -219,8 +226,9 @@ def _extract_text(content: Any) -> str:
 
 def _closeout_instruction(
     *, trigger_dimension: str, consumed: BudgetConsumed, limits: RunLimits,
+    reason: str | None = None, stuck: Mapping[str, Any] | None = None,
 ) -> str:
-    """预算暂停前那一次有界 closeout 的指令（`#312`，`#313` 扩到四维）。
+    """暂停前那一次有界 closeout 的指令（`#312`，`#313` 扩到四维，`#317` 加 stuck）。
 
     指令本身**不**进事件流：持久化的只有它的产出（`run/paused.continuation`）——
     continuation 是"这次暂停的续跑说明书"，不是对话内容，不该被
@@ -228,7 +236,30 @@ def _closeout_instruction(
 
     账目**未知**的维度如实写"未知"：让模型看见"不知道花了多少 token"比让它看见一个
     假的 0 更安全（它会据此写"剩下的不多了"这类判断）。
+
+    `reason=stuck` 换一段事实描述（ADR-0048 D6）：这次暂停**不是**预算到顶，所以指令里
+    不能出现"抬 ceiling"的暗示（模型会照抄进 continuation，而那次恢复必被 409 挡死）。
     """
+    if reason == REASON_STUCK:
+        payload = dict(stuck or {})
+        return (
+            "运行即将因**同一个模式反复出现且没有进展**而暂停，"
+            "现在需要一份供恢复使用的续跑说明。\n"
+            f"重复模式：{payload.get('pattern')}（已到第 "
+            f"{_budget_value_text(payload.get('count'))} 次，阈值 "
+            f"{_budget_value_text(payload.get('threshold'))}）；"
+            f"本逻辑 run 已消耗 {consumed.agent_turns} 轮 / "
+            f"{_budget_value_text(consumed.model_requests)} 次请求 / "
+            f"{_budget_value_text(consumed.total_tokens)} token / "
+            f"${_budget_value_text(consumed.cost_usd)}。\n"
+            "这次暂停**不是**预算问题：不要把恢复写成提高额度或延长时间——它缺的是"
+            "外部输入的变化（新的指令、变化后的工作区，或改变后的策略）。\n"
+            "只依据上面的会话历史作答，**不要**调用工具、不要推测还没发生的事。\n"
+            "只输出一个 JSON 对象（不要代码块、不要多余文字），键固定为：\n"
+            '{"completed": ["已确实完成的事"], "remaining": ["还没做完的事"], '
+            '"blockers": ["阻塞点"], "next_safe_action": "恢复后第一步该做什么"}\n'
+            "四个键都必填；completed/remaining/blockers 是字符串数组（可为空数组）。"
+        )
     return (
         "运行即将因回合预算到顶而暂停，现在需要一份供恢复使用的续跑说明。\n"
         f"触发维度：{trigger_dimension}（ceiling="
@@ -862,6 +893,7 @@ class AgentRuntime:
         run_budget: LaunchRunBudget | None = None,
         local_fuse_source: str = SOURCE_DEPLOYMENT,
         completion_policy: CompletionPolicy | None = None,
+        stuck_evidence: StuckEvidencePort | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -870,7 +902,13 @@ class AgentRuntime:
         self._steer_source = steer_source
         # 同错熔断护栏（ADR-0014 #69）：可选注入；默认每 run 一个新实例
         # （计数不跨 run 累积——每个 run 的循环各自干净起步）。
+        # `#317` 起它**只是** ①（同动作同错误）那一档的引擎，状态由 `StuckDetector`
+        # 重放事件重建（见那里的 docstring）：注入它的意义从"带状态"变成"换阈值"。
         self._failure_guard = failure_guard
+        # stuck 暂停的恢复依据端口（`#317`；ADR-0048 D8）：只在**暂停那一刻**读一次
+        # （`current()`），None = 观测不到 ⇒ 环境 / 策略两条依据不可用（fail-closed，
+        # `stuck_resume_evidence` 会按 409 拒），相关 steer 那条不受影响。
+        self._stuck_evidence = stuck_evidence
         # Model Fallback（ADR-0014 决策 14-16）：两级 + FallbackPolicy seam。
         # 切换决策在 policy（瞬时性判断）；本类只编排调用序列并持久化
         # model/fallback 事件。切换状态按 run 独立（见 _drive）。
@@ -1118,9 +1156,12 @@ class AgentRuntime:
         # 终态簿记 owner（批次 B 候选 2）：model 在途标记 + 单终态不变量 +
         # usage 记账收拢一处，取消臂/异常臂只做调用。
         terminal = _RunFinalizer(session, usage_total)
-        # 同错熔断护栏：每 run 一个新实例（注入或新建）；计数不跨 run 累积。
-        guard = self._failure_guard or RepeatedToolFailureGuard()
-        guard.reset()
+        # 同错熔断护栏（ADR-0014 #69）与多模式 stuck 检测（`#317` / ADR-0048）：
+        # **一个**责任域、**一个**判定点（`02 §5.3`）。实例在 run_id 定下来之后建
+        # （见下）：检测状态全部由该逻辑 run 的事件重放重建，所以本执行不需要从
+        # 上一次执行继承任何内存状态（重启 / 同 run 恢复天然一致）——注入的
+        # `failure_guard` 只贡献 ① 的**阈值**，不再贡献状态（`StuckDetector` 构造时
+        # 把它 reset 掉再重放）。
         # run 归因 token：嵌套运行（delegate→child 在同一父任务里跑）共享父
         # 上下文——child 的 set 会覆盖父值且不会随 child 完成消失，必须显式
         # 恢复，否则父后续的 Ledger/事件归因错挂到 child 的 run_id（#87 实锤）。
@@ -1189,6 +1230,15 @@ class AgentRuntime:
                     budget=as_run_started_budget(launch_budget.limits),
                 )
             terminal.begin_run(run_id)
+            # 多模式 stuck 检测器（`#317` / ADR-0048 D1）：**每次执行新建**，状态由本
+            # 逻辑 run 的事件重放重建——重启 / 同 run 恢复因此得到同样的计数与指纹，
+            # 不需要任何额外存储（`03 §3.4` 的不变量）。位置必须在 run_id 定下来
+            # 之后：重放按 run_id 过滤，新 run 才不会把上一个逻辑 run 的计数带进来。
+            # 重放期间产生的信号被丢弃（那些动作当时已经落过盘），随后由
+            # `advance(session.events)` 只吃新事件（游标在检测器内部）。
+            detector = StuckDetector.from_events(
+                session.events, run_id, failure_guard=self._failure_guard,
+            )
             # Langfuse 旁路 trace 根（ADR-0018 D5）：trace=run、session 聚合。
             # 观测端口（#249）恒为对象——缺席实现是 NullTracer，选定与保护见
             # _new_tracer；此处是它的唯一写点（#265 起由 _Telemetry 持有）。
@@ -1515,33 +1565,56 @@ class AgentRuntime:
                 if not tool_calls:
                     final = _extract_text(ai.content)
                     report = await self._quiescence_report(arms)
-                    if not report.quiescent:
-                        await self._terminal_quiescence_blocked(
-                            arms, steps=steps, report=report,
-                            source=BLOCK_SOURCE_QUIESCENCE,
-                            reason=report.refusal_reason(),
+                    blocked_source = BLOCK_SOURCE_QUIESCENCE
+                    blocked_reason = report.refusal_reason()
+                    if report.quiescent:
+                        decision = await self._completion_policy.decide(
+                            report=report, final_text=final, run_id=arms.run_id or "",
                         )
-                        return
-                    decision = await self._completion_policy.decide(
-                        report=report, final_text=final, run_id=arms.run_id or "",
+                        if decision.accepted:
+                            self._log("agent_decision", "模型给出最终回答，Agent Loop 完成",
+                                      span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                                      decision="finish", remaining_steps=0,
+                                      reason="本轮无 tool_calls，模型选择直接答复", outcome="success")
+                            self._log("task_completed", "Agent Loop 正常结束", span_id=run_span,
+                                      step=steps, outcome="success")
+                            async for streamed in self._terminal_completed(
+                                arms, steps=steps, final=final,
+                            ):
+                                yield streamed
+                            return
+                        blocked_source = BLOCK_SOURCE_POLICY
+                        blocked_reason = policy_rejection_reason(
+                            self._completion_policy, decision,
+                        )
+                    # ── 走到这里说明这一轮**无法完成**（quiescence 或 policy 拒了）──
+                    # 只有到这一刻才轮到 stuck 判定（ADR-0048 D5：护栏**不得越过完成
+                    # 闸门**，否则"模型已经给出合格最终答复"会被一个计数推翻）。③
+                    # （无工具独白）与"无工具调用形态的 ④/⑤"的可达面就在这里：模型
+                    # 自己停下了、这个 run 又完不成，护栏才有话说。
+                    signal = worst_stuck_signal(detector.advance(session.events))
+                    if signal is not None:
+                        if signal.level == STUCK_LEVEL_PAUSED:
+                            async for streamed in self._stuck_pause_arm(
+                                arms, signal=signal, launch=launch_budget, steps=steps,
+                                run_span=run_span,
+                            ):
+                                yield streamed
+                            return
+                        for replan_event in self._stuck_replan_arm(
+                            arms, signal=signal, run_span=run_span,
+                            step_id=step_base + steps, steps=steps,
+                        ):
+                            yield to_agent_event(replan_event)
+                        # 纠正消息已 durable（它在事件流里 ⇒ 下一轮 ContextBuilder
+                        # 必然看见它）⇒ 回循环顶部重问一次。有界：每个模式**恰好一次**
+                        # （检测器里的 `*_replanned` 闩），且循环顶部的预算准入照常先判
+                        # ——暂停边界上不会多出一次模型调用。
+                        continue
+                    await self._terminal_quiescence_blocked(
+                        arms, steps=steps, report=report,
+                        source=blocked_source, reason=blocked_reason,
                     )
-                    if not decision.accepted:
-                        reason = policy_rejection_reason(self._completion_policy, decision)
-                        await self._terminal_quiescence_blocked(
-                            arms, steps=steps, report=report,
-                            source=BLOCK_SOURCE_POLICY, reason=reason,
-                        )
-                        return
-                    self._log("agent_decision", "模型给出最终回答，Agent Loop 完成",
-                              span_id=new_span_id(), parent_span_id=run_span, step=steps,
-                              decision="finish", remaining_steps=0,
-                              reason="本轮无 tool_calls，模型选择直接答复", outcome="success")
-                    self._log("task_completed", "Agent Loop 正常结束", span_id=run_span,
-                              step=steps, outcome="success")
-                    async for streamed in self._terminal_completed(
-                        arms, steps=steps, final=final,
-                    ):
-                        yield streamed
                     return
 
                 # 第 6 步：模型仍在请求工具。预算是否到顶**不在这里判**——那件事统一
@@ -1651,106 +1724,64 @@ class AgentRuntime:
                     session, CheckpointBoundary.TOOL_BATCH_COMPLETED
                 )
 
-                # ── 同错熔断护栏（ADR-0014 #69）──
-                # 工具回填后、下一轮模型调用前观察本轮工具结果；取最严重信号。
-                worst_signal = None
-                for call, execution in zip(calls, executions):
+                # ── 循环护栏（ADR-0014 的 #69 扩展为五模式：`#317` / ADR-0048）──
+                # 工具回填后、下一轮模型调用前：把新事件喂给**唯一**的检测器，取严重
+                # 程度最高的**一个**动作（同一次触发最多动作一次，暂停优先）。
+                #
+                # 两个来源合成这一个动作（与 ADR-0014 的"每条调用要么读信号、要么喂护栏"
+                # 同一条规矩，`#317` 保持它）：
+                #
+                # * **带 `runtime_signal` 的调用**（今天只有 `delegate`：委派树的持久
+                #   护栏）后面站着一个**自己的 durable 账本**——计数跨后代、跨进程，
+                #   不在本 run 的事件流里（子会话的失败落在子会话的 JSONL）。它的
+                #   SOFT / HARD 经 `external_failure_signal` 翻译成本 run 的同一种信号；
+                #   同时把这几条 `tool_call_id` 报给检测器**别在 ① 上重数**——同一批
+                #   失败记两遍会让阈值提前到顶（`StuckDetector.advance` 的口径）。
+                # * **其余调用**由事件派生的检测器计数（五模式全在它手里，ADR-0048 D1）。
+                #   配额拒绝 / 到点被拒（`#314`/`#315`）不喂护栏这条语义也在它里面
+                #   （`GUARD_EXEMPT_ERROR_CODES`，判据只剩一处）。
+                externally_counted: set[str] = set()
+                external_signals: list[StuckSignal] = []
+                for execution in executions:
                     persisted = execution.result.runtime_signal
-                    if persisted is not None:
-                        sig = GuardSignal(
-                            GuardLevel[persisted.level.upper()],
-                            persisted.tool_name,
-                            persisted.fingerprint,
-                            persisted.consecutive_failures,
-                        )
-                    else:
-                        # 配额拒绝**不喂**护栏（`#314`）：它既不是工具失败（那条调用根本
-                        # 没执行），也不是模型在死循环里撞墙——预算是照着设计到顶的，自然
-                        # 归宿是循环顶那次 `run/paused`（可恢复）。喂进去会让"单条 assistant
-                        # 消息给出 ≥7 条同参数调用"的场景在 HARD 熔断处收成 `run/failed`
-                        # **终态**、绕过那次暂停，与 `04 §9.1` 的"耗尽 ⇒ 暂停 / 可恢复"
-                        # 直接冲突（两轴审查 Correctness 面发现；触发还要求批前
-                        # `used < ceiling`，即窗口至少还放得进一条）。
-                        # **只**放过这两种 error_code（准入前被拒的同族）：参数非法 /
-                        # 未注册工具等准入前拒绝仍是 #69 要抓的重复失败（ADR-0014
-                        # 决策 2-6 语义不变）。`#315` 的 DEADLINE_EXCEEDED 与配额耗尽
-                        # 同理：到点后的每一条调用都会被拒，喂进护栏会把"到点"收成
-                        # HARD 熔断的 `run/failed` **终态**，绕过 `run/paused(reason=
-                        # deadline)`（`03 §3.4`：暂停是非终态），与 `04 §9.1` 的
-                        # "到点后不接纳新调用、在稳定边界暂停"直接冲突。
-                        if execution.result.error_code in (
-                            ErrorCode.BUDGET_EXHAUSTED,
-                            ErrorCode.DEADLINE_EXCEEDED,
-                        ):
-                            continue
-                        sig = guard.observe(call.name, call.args, execution.result.ok)
-                    if sig.level != GuardLevel.NONE and (
-                        worst_signal is None or sig.level > worst_signal.level
-                    ):
-                        worst_signal = sig
-                if worst_signal is not None:
-                    guard_span = new_span_id()
-                    if worst_signal.level == GuardLevel.SOFT:
-                        # 软熔断：注入 user 角色纠正消息——护栏是 runtime 行为
-                        # 不污染固定 system prompt（ADR-0014 决策 4）。
-                        soft_event = session.append(
-                            TOOL_FAILURE_GUARD,
-                            {"level": "soft",
-                             "tool_name": worst_signal.tool_name,
-                             "fingerprint": worst_signal.fingerprint,
-                             "consecutive_failures": worst_signal.consecutive_failures},
-                            run_id=run_id, step_id=step_base + steps,
-                        )
-                        yield to_agent_event(soft_event)
-                        corrective = session.append(
-                            USER_MESSAGE,
-                            {"content": DEFAULT_REGISTRY.assemble(
-                                "corrective:tool_failure_guard",
-                                {
-                                    "tool_name": worst_signal.tool_name,
-                                    "consecutive_failures": str(
-                                        worst_signal.consecutive_failures
-                                    ),
-                                },
-                            ).fragment_text,
-                             # runtime 注入的纠正消息不是真实用户发言——标记来源
-                             # 供前端投影/审计区分（不变量 #22 边缘），**并供记忆
-                             # 抽取剔除**（memory/extractor.py 按此标记单点过滤：
-                             # 注入消息一旦被当成真实用户发言，工具输出里的注入指令
-                             # 就能被洗成跨会话 USER 记忆）。
-                             "injected_by": "tool_failure_guard"},
-                            run_id=run_id, step_id=step_base + steps,
-                        )
-                        yield to_agent_event(corrective)
-                        self._log("agent_decision", "同错熔断软触发",
-                                  span_id=guard_span, parent_span_id=run_span, step=steps,
-                                  decision="tool_failure_guard_soft",
-                                  tool_name=worst_signal.tool_name,
-                                  consecutive_failures=worst_signal.consecutive_failures)
-                    elif worst_signal.level == GuardLevel.HARD:
-                        # 硬熔断：强制 end_run(failed)，绝不伪造最终回答。
-                        hard_event = session.append(
-                            TOOL_FAILURE_GUARD,
-                            {"level": "hard",
-                             "tool_name": worst_signal.tool_name,
-                             "fingerprint": worst_signal.fingerprint,
-                             "consecutive_failures": worst_signal.consecutive_failures},
-                            run_id=run_id, step_id=step_base + steps,
-                        )
-                        yield to_agent_event(hard_event)
-                        self._log("agent_decision", "同错熔断硬触发，强制终止 run",
-                                  span_id=guard_span, parent_span_id=run_span, step=steps,
-                                  decision="tool_failure_guard_hard",
-                                  tool_name=worst_signal.tool_name,
-                                  consecutive_failures=worst_signal.consecutive_failures,
-                                  outcome="failed")
-                        # 与异常臂同一收尾语义（_RunFinalizer 单终态 owner），
-                        # reason 落 run/failed data 供消费者区分失败原因。
-                        async for streamed in self._terminal_failed_run(
-                            arms, steps=steps, reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+                    if persisted is None:
+                        continue
+                    foreign = external_failure_signal(
+                        level=persisted.level, tool_name=persisted.tool_name,
+                        fingerprint=persisted.fingerprint,
+                        count=persisted.consecutive_failures,
+                    )
+                    if foreign is None:
+                        # level=none（树计数照常推进但没到线）等：不动作，也**不**免
+                        # 掉本检测器的 ①——那个账本此刻并没有给出结论。
+                        continue
+                    external_signals.append(foreign)
+                    externally_counted.add(execution.tool_call_id)
+                signal = worst_stuck_signal(
+                    [
+                        *detector.advance(
+                            session.events,
+                            externally_counted_call_ids=frozenset(externally_counted),
+                        ),
+                        *external_signals,
+                    ]
+                )
+                if signal is not None:
+                    if signal.level == STUCK_LEVEL_PAUSED:
+                        async for streamed in self._stuck_pause_arm(
+                            arms, signal=signal, launch=launch_budget, steps=steps,
+                            run_span=run_span,
                         ):
                             yield streamed
                         return
+                    for replan_event in self._stuck_replan_arm(
+                        arms, signal=signal, run_span=run_span,
+                        step_id=step_base + steps, steps=steps,
+                    ):
+                        yield to_agent_event(replan_event)
+                    # 纠正消息已 durable ⇒ 继续循环（下一轮 ContextBuilder 必然看见
+                    # 它）。有界：每个模式**恰好**一次纠正（检测器里的 `*_replanned`
+                    # 闩），且循环顶部的预算准入照常先判。
         except (asyncio.CancelledError, GeneratorExit):
             # 取消臂：客户端断连（SSE 生成器被取消/关闭）走这里——GeneratorExit /
             # CancelledError 是 BaseException，顶层 except Exception 兜不到，
@@ -1919,11 +1950,104 @@ class AgentRuntime:
             now=self._now(),
         )
 
+    def _stuck_replan_arm(
+        self, arms: _TerminalArms, *, signal: StuckSignal, run_span: str,
+        step_id: int, steps: int,
+    ) -> list[SessionEvent]:
+        """恰好一次纠正性 replan 的落盘侧（`#317`；ADR-0048 D5）。
+
+        ① 沿用 ADR-0014 的**既有形状**（`tool/failure-guard(level=soft)` + 既有纠正
+        文案，逐字不变，`injected_by=tool_failure_guard`）——那个形状已经冻结在契约与
+        前端投影里，换事件等于让同一条语义有两个历史形状；②–⑤ 是新语义（此前没有任何
+        事件能表达它们），落新的结构化 `guard/stuck(level=replan)` + 新片段
+        `corrective:stuck_pattern`（`injected_by=stuck_guard`）。
+
+        "恰好一次"由检测器的闩保证（计数 `== T` 时给一次 replan 信号，此后该模式不再
+        给），本函数只负责如实落盘与注入。
+
+        **返回值必须由调用方按序镜像**给流消费者：durable 与流帧的顺序要一致。
+        """
+        session = arms.session
+        if signal.pattern == STUCK_PATTERN_TOOL_FAILURE:
+            event = session.append(
+                TOOL_FAILURE_GUARD,
+                {"level": "soft",
+                 "tool_name": signal.tool_name,
+                 "fingerprint": signal.fingerprint,
+                 "consecutive_failures": signal.count},
+                run_id=arms.run_id, step_id=step_id,
+            )
+            content = DEFAULT_REGISTRY.assemble(
+                "corrective:tool_failure_guard",
+                {"tool_name": signal.tool_name or "", "consecutive_failures": str(signal.count)},
+            ).fragment_text
+            injected_by = "tool_failure_guard"
+            decision = "tool_failure_guard_soft"
+        else:
+            event = session.append(
+                GUARD_STUCK, signal.as_event_data(),
+                run_id=arms.run_id, step_id=step_id,
+            )
+            content = DEFAULT_REGISTRY.assemble(
+                "corrective:stuck_pattern",
+                {"pattern_label": signal.label, "pattern_count": str(signal.count)},
+            ).fragment_text
+            injected_by = "stuck_guard"
+            decision = "stuck_replan"
+        corrective = session.append(
+            USER_MESSAGE,
+            # runtime 注入的纠正消息不是真实用户发言——标记来源供前端投影 / 审计区分
+            # （不变量 #22 边缘），**并供记忆抽取剔除**（memory/extractor.py 按此标记
+            # 单点过滤：注入消息一旦被当成真实用户发言，工具输出里的注入指令就能被
+            # 洗成跨会话 USER 记忆）。
+            {"content": content, "injected_by": injected_by},
+            run_id=arms.run_id, step_id=step_id,
+        )
+        self._log("agent_decision", "护栏触发纠正性 replan",
+                  span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                  decision=decision, pattern=signal.pattern, count=signal.count,
+                  tool_name=signal.tool_name, outcome="success")
+        return [event, corrective]
+
+    async def _stuck_pause_arm(
+        self, arms: _TerminalArms, *, signal: StuckSignal,
+        launch: LaunchRunBudget, steps: int, run_span: str,
+    ) -> AsyncIterator[AgentEvent]:
+        """任何模式**再**达阈值 ⇒ stuck 暂停（`#317`；ADR-0048 D5）。
+
+        先落结构化 `guard/stuck(level=paused)`（"为什么停"的可审计事实，含计数与
+        指纹），再走既有暂停臂收口（对账闸门 → closeout → 恰好一条 `run/paused` →
+        单终态簿记）。**不落 `run/failed`**：stuck 是可恢复的暂停，不是终态
+        （`02 §5.2`；`STATUS_IDENTICAL_TOOL_FAILURE_LOOP` 因此从生产路径消失，
+        常量保留——历史会话仍能读）。
+
+        `trigger_dimension` 用**模式名**（ADR-0048 D5）：它不是配置字段路径，因为
+        stuck 没有"该抬高哪一个 ceiling"可言——恢复要的是外部输入的变化。
+        """
+        event = arms.session.append(
+            GUARD_STUCK, signal.as_event_data(),
+            run_id=arms.run_id, step_id=arms.envelope_step(steps),
+        )
+        self._log("agent_decision", "stuck 模式再达阈值，run 暂停（非终态）",
+                  span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                  decision="stuck_paused", pattern=signal.pattern, count=signal.count,
+                  tool_name=signal.tool_name, outcome="success")
+        yield to_agent_event(event)
+        async for streamed in self._terminal_paused(
+            arms, launch=launch, steps=steps,
+            trigger_dimension=signal.pattern, stuck=signal,
+        ):
+            yield streamed
+
     async def _terminal_paused(
         self, arms: _TerminalArms, *, launch: LaunchRunBudget, steps: int,
-        trigger_dimension: str,
+        trigger_dimension: str, stuck: StuckSignal | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        """预算暂停臂（`#312` T4；`02 §5.2` / `03 §3.4` / ADR-0044 D3）。
+        """暂停臂（`#312` T4；`02 §5.2` / `03 §3.4` / ADR-0044 D3）。
+
+        `#317` 起它同时承载 stuck 暂停（`stuck` 参数非空 ⇒ `reason=stuck`）：收口顺序
+        与对账闸门**完全共用**，区别只在三格载荷（`reason` / `resume_requirements` /
+        `stuck`）与 continuation 的文案——"本次执行如何收口"没有第二套实现。
 
         顺序（每一条都是契约事实，不是实现口味）：
 
@@ -1954,7 +2078,24 @@ class AgentRuntime:
         """
         session = arms.session
         envelope_step = arms.envelope_step(steps)
-        reason = reason_for_dimension(trigger_dimension)
+        # `reason` / `resume_requirements` / `stuck` 三格是**同一条判据的三个投影**
+        # （`stuck is None` 即预算 / deadline 路径，逐字与 `#315` 之前相同）：
+        # 先由维度算出原因是"抬 ceiling"还是"换时刻"，stuck 则直接是第三个原因，
+        # 并带上它的检测事实与"缺哪三类依据"的清单（`03 §3.4`）。
+        reason = REASON_STUCK if stuck is not None else reason_for_dimension(trigger_dimension)
+        # 恢复依据的**暂停侧快照**（`#317`；ADR-0048 D7/D8）：只在 stuck 暂停读一次
+        # 证据端口。读不到（无端口 / 目录不存在）⇒ 两个值为 None —— 那是 fail-closed
+        # 的一侧（恢复侧会按"无快照可比"拒绝那两条依据），而不是编一个值出来。
+        stuck_payload: dict[str, Any] | None = None
+        if stuck is not None:
+            evidence = self._stuck_evidence.current() if self._stuck_evidence else None
+            stuck_payload = {
+                **stuck.as_pause_payload(),
+                "environment_revision": (
+                    evidence.environment_revision if evidence else None
+                ),
+                "policy_version": evidence.policy_version if evidence else None,
+            }
         # 暂停收尾前的对账闸门（`#315` / ADR-0046 §2 D4）：位置在 continuation
         # **之前**——"存在未 reconcile 的副作用"是 continuation 必须如实写出的事实
         # （它要进 blockers 并改写 next_safe_action），不能等 continuation 定稿后
@@ -1974,7 +2115,7 @@ class AgentRuntime:
         continuation, closeout_source, closeout_events = await self._closeout_continuation(
             arms, trigger_dimension=trigger_dimension,
             consumed=consumed_before, limits=launch.limits, step_id=envelope_step,
-            blocked_by=blocked_by,
+            blocked_by=blocked_by, reason=reason, stuck=stuck_payload,
         )
         # 先镜像对账事件、再镜像 closeout：三条都是 durable，顺序与落盘顺序一致
         # （流帧必须是落盘日志的前缀，见 golden）。顺序本身也有语义：客户端先读到
@@ -2006,11 +2147,15 @@ class AgentRuntime:
                 limits=limits,
                 continuation=continuation,
                 closeout_source=closeout_source,
-                # 预算 / deadline 暂停没有额外前置条件（`03 §3.4`：非空只出现在
-                # stuck 暂停）。"存在未 reconcile 的副作用"**不**写在这一格：它由
-                # `operation/reconcile-required` 事件 + Ledger 行自己表达，恢复闸门
-                # 也读那一份（`03 §5`：对账优先于恢复是**状态**规则，不是暂停字段）。
-                resume_requirements=(),
+                # stuck 暂停的前置条件就是那三条依据（`03 §3.4`：非空只出现在它）；
+                # 预算 / deadline 暂停没有额外前置条件。"存在未 reconcile 的副作用"
+                # **不**写在这一格：它由 `operation/reconcile-required` 事件 + Ledger 行
+                # 自己表达，恢复闸门也读那一份（`03 §5`：对账优先于恢复是**状态**规则，
+                # 不是暂停字段）。
+                resume_requirements=(
+                    STUCK_RESUME_REQUIREMENTS if stuck is not None else ()
+                ),
+                stuck=stuck_payload,
                 # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，
                 # 用户从事件就能找到那一段 trace。run 未终结 ⇒ 这不是 run 的 trace；
                 # trace_url 此刻还不存在（只在终态回调里合成，见 build_pause_data）。
@@ -2099,6 +2244,7 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, trigger_dimension: str,
         consumed: BudgetConsumed, limits: RunLimits, step_id: int,
         blocked_by: tuple[str, ...] = (),
+        reason: str | None = None, stuck: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str, list[SessionEvent]]:
         """产出 continuation、它的来源（`model` / `deterministic`）与本次落盘的事件。
 
@@ -2109,11 +2255,15 @@ class AgentRuntime:
         **有界**的含义是双重的：预算上最多一次调用（且必须还有容量），形状上只接受
         契约里的四个键（见 `normalize_continuation`）。任何一步不合契约都**回落到**
         确定性组装——这条路必须永远可用（它是暂停能够成立的前提）。
+
+        `reason` / `stuck`（`#317`）：stuck 暂停的确定性兜底与 closeout 指令都要换文案
+        （它缺的不是额度，见 `_stuck_continuation` / `_closeout_instruction`）；
+        模型给的产出仍过同一份 `normalize_continuation` + `apply_blocked_by`。
         """
         fallback = deterministic_continuation(
             events=arms.session.since(0), run_id=arms.run_id or "",
             trigger_dimension=trigger_dimension, limits=limits, consumed=consumed,
-            blocked_by=blocked_by,
+            blocked_by=blocked_by, reason=reason, stuck=stuck,
         )
         # 到点后**连 closeout 也不发**：它是真实 Provider 请求，`04 §9.1` /
         # ADR-0044 D4 把"deadline 过后不启动任何新工作"写死（`closeout_capacity`
@@ -2134,6 +2284,7 @@ class AgentRuntime:
             response = await self._raw_model.ainvoke(
                 [*messages, HumanMessage(content=_closeout_instruction(
                     trigger_dimension=trigger_dimension, consumed=consumed, limits=limits,
+                    reason=reason, stuck=stuck,
                 ))],
             )
         except Exception as error:  # noqa: BLE001 - 同上：模型 closeout 不可用不是失败

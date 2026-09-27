@@ -1,0 +1,271 @@
+# ADR-0048 — Stuck 检测：五模式、恰好一次 replan、无依据不恢复
+
+- **Status**: Accepted（实现随 T9/#317 落地）
+- **Date**: 2026-09-27
+- **Deciders**: 用户（#305 的产品与架构裁决，2026-09-23 冻结）+ 本 Agent（票面实现口径）
+- **Related**:
+  - 父 PRD **#305**、本票 **#317**（T9/12：「Detect stuck loops and require evidence to resume」）、
+    前置 **#312**（T4：非终态 `run/paused`）、**#316**（T8：quiescence 完成闸门）、
+    上游 **#313**（T5：四维 run ceiling）、**#315**（T7：绝对 deadline 与对账耦合）
+  - **本 ADR 展开的正式规格**：`02_AGENT_RUNTIME.md` **§5.3**（五模式阈值表与五条规则——阈值的
+    唯一权威，本 ADR **不复制**其数字）、`02 §6`（Repeated Tool Guard = 同一责任域）、
+    `02 §5.2`（暂停是 durable 非终态、恢复不重置 counter 与 stuck 指纹）、
+    `03_SESSION_EVENT_MODEL.md` **§3.4**（`run/paused` / `run/resumed` 字段与不变量）、
+    **§5**（run 状态集合；「stuck 暂停缺少所需的变更依据 ⇒ 拒绝，且不启动任何 model / tool / child 工作」）
+  - **ADR-0044 D5**（stuck 的规则与理由：唯一责任域 / 一次 replan / 指纹规范化脱敏 / 三类恢复前置 /
+    只复位受影响模式）、**D9/D10**（409 在开工前判定；Live Gate 场景③）、**ADR-0014**（同错熔断护栏：
+    本票**扩展**它）、**ADR-0047**（完成闸门：stuck 判定不得越过它）
+  - 代码落点：`agent/guards.py`（扩展）、`agent/resume_evidence.py`（新）、`agent/run_budget.py`、
+    `agent/runtime.py`、`session/event.py`、`session/service.py`、`prompt/builtin.py`、
+    `prompt/section.py`、`assembly.py`
+
+---
+
+## 1. Context
+
+### 1.1 票面要解决的问题
+
+ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失败**（3 次软 → 注入纠正消息；6 次硬 →
+`run/failed(reason=identical_tool_failure_loop)` **终态**）。§5.3 把它扩成五个模式，并改掉两件事：
+
+1. **硬熔断的收口不是失败，是暂停**——`02 §5.2` 明文：命中预算 / deadline / **stuck** 时 MUST 落
+   `run/paused`（非终态），MUST NOT 落 `run/completed` / `run/failed` 顶替它。今天的硬臂落的正是
+   `run/failed`，与冻结契约直接冲突；
+2. **恢复要有依据**——stuck 不是一个"再试一次"就能解开的暂停。缺依据的 plain continue 与无关变更
+   MUST 被 409 挡在开工前（`03 §5`、ADR-0044 D5/D9），否则"暂停"退化成"无依据一键重试"。
+
+### 1.2 现状实测（本 ADR 写作时的读数）
+
+| 事实 | 证据 |
+| --- | --- |
+| 护栏责任域只有一个，且已在 loop 内单点接入 | `agent/guards.py::RepeatedToolFailureGuard`；`runtime.py` 的护栏臂（工具回填后、下一轮模型调用前） |
+| 硬臂今天落终态 | `runtime.py`：`_terminal_failed_run(..., reason=STATUS_IDENTICAL_TOOL_FAILURE_LOOP)`；`_terminal_failed_run` 的 docstring 自陈「`#312` 起只剩同错熔断硬触发一条路径」 |
+| 暂停 / 恢复的账本、字段与 CAS 已齐备 | `agent/run_budget.py`（`PausedRun` / `build_pause_data` / `build_resume_data` / `validate_resume`）、`session/service.py`（`_plan_paused_resume` / `_commit_paused_resume`，两阶段同锁） |
+| `run/paused` 已有 `resume_requirements` 字段，且**只有 stuck 用** | `build_pause_data(resume_requirements=...)`；`_terminal_paused` 恒传 `()`（`03 §3.4`：预算与 deadline 暂停为空） |
+| `validate_resume` 今天**主动拒绝** stuck | `run_budget.py`：「暂停原因 reason=… 的恢复前置条件本票未实现（#317 stuck 负责），拒绝启动工作」 |
+| 四类 `resume_basis` 常量已冻结，但只有 `budget_increase` 有证据判定 | `RESUME_BASIS_*`；`validate_resume` 对另外三值直接 409「本票不假装校验过它」 |
+| 仓库里**没有**任何"环境 revision / policy 版本"概念 | `workspace_revision` / `env_revision` / `policy_version` 全仓无命中；`AgentSpec` 无 version 字段 |
+| 决策级状态可纯派生 | `model/completed` 带 `content` / `tool_calls`；`tool/call` 带 `name`/`args`；`tool/result` 带 `{tool_call_id, content(ToolResult JSON), budget_delta}` —— 五个模式的输入全在事件里（T6 的 `consumed_from_events` 是同一做法的先例） |
+| 一个 turn 的事件顺序固定 | `model/completed`（延迟落盘时）先于 `tool/result`，`tool/call` 预持久化在最前 |
+
+### 1.3 本 ADR 的范围
+
+**在**：五模式的判定与阈值读数；指纹的规范化与脱敏；进展证据的定义；replan 与暂停的**动作面**
+（事件 + 注入消息 + `run/paused` 载荷）；三类恢复依据的观测口径与 409；重启 / 同 run 恢复的状态重建。
+
+**不在**：SessionBudget 与委派树共享额度（`#318`）；`needs_reconcile` 与暂停的耦合（`#315` 已落地，
+本票只复用）；客户端对 `resume_requirements` 的渲染（客户端票）；`max_steps` alias 的删除（`#320`）。
+
+---
+
+## 2. Decision
+
+### D1 — 责任域唯一：扩展 `agent/guards.py`，检测状态**全部**由事件派生
+
+- 五个模式同住一个检测器（`agent/guards.py`），loop 内**仍然只有一个接入点**。① 直接用既有的
+  `RepeatedToolFailureGuard` 作引擎（其类名、`observe()` 形状与 `GuardLevel.SOFT` 语义不变），
+  ②–⑤ 是同一检测器的其余四个子状态机。**不**新增第二个 loop guard、**不**新增存储。
+- 检测器状态（各模式的连续计数、决策序列、进展水位）由 **SessionEvent 纯函数重放**得到：
+  `StuckDetector.from_events(events, run_id)` 在每次执行开始时重建，随后 `advance(window)`
+  只吃"本执行新落盘的那些事件"。⇒ 重启 / 同 run 恢复**天然**得到同样的指纹与计数
+  （`03 §3.4` 不变量：恢复 MUST NOT 重置 stuck 指纹），无需任何"把内存态写进磁盘再读回来"的路径。
+  重放时**丢弃**信号（当时那次 replan / 暂停已经落过盘），只有 `advance` 的新事件才产生动作。
+- **唯一例外：委派树的持久护栏**（`10` / `#88`）。它的计数跨**后代会话**、跨**进程**，账本
+  （`SqliteDelegationTreeLedger`）自己就是 durable 的——本 run 的事件流里只有"这一条 delegate
+  失败了"，看不到子孙的失败。所以那一个来源不由重放重建，而是**照旧**由调用方在读 `runtime_signal`
+  时翻译成本 run 的同一种信号（`guards.external_failure_signal`），并把它点名的 `tool_call_id`
+  报给检测器**别在 ① 上重数**（`advance(externally_counted_call_ids=…)`）——同一批失败记两遍会让
+  阈值提前到顶。**这不是"回到读进程内信号"**：那个信号后面站着一个真账本，重启后仍在（这正是
+  persistent 的含义，killer 用例 `test_process_kill_and_recovery_…` 钉着它）；本 run 自己的
+  `tool/failure-guard` / `guard/stuck` 事件仍由检测器按事件重放给出。
+
+### D2 — 五模式与"第二次达到阈值"
+
+`02 §5.3` 的表固定**首达**阈值 T。本 ADR 固定**暂停点**的读法：
+
+| 模式（事件源的连续量） | 首达 T ⇒ replan | 再达 T（累计 2T）且无相关进展 ⇒ 暂停 |
+| --- | --- | --- |
+| ① 同动作 + 同错误/结果失败（**连续**同 (name,args) 的失败，中间不夹别的指纹） | 3 | 6 |
+| ② 同动作 + 同观察（**仅成功结果**；失败被 ① 更严格地覆盖） | 4 | 8 |
+| ③ 无进展独白（**无工具调用**的模型决策，连续同一决策签名） | 3 | 6 |
+| ④ 两模式交替（连续 6 个决策在**恰好两个**决策签名间严格交替） | 6 | 12 |
+| ⑤ 项目级无进展窗口（连续 N 个决策内**没有任何**进展证据） | 4 | 8 |
+
+**为什么"再达 T"而不是"T+1"**（这是本 ADR 唯一的读数选择，另一种读法同样能引用 §5.3）：
+
+1. §5.3 的规则句是「阈值首达 ⇒ 恰好一次 replan；replan 后同一模式仍持续且无进展证据 ⇒ 暂停」。
+   "仍持续"没有独立数字，只能从阈值语言里取——**再次达到同一个阈值**是最小假设；
+2. ②–⑤ 的"持续"若按 T+1 实现，等价于把表里的阈值当成"一次容忍"而不是"一个门槛"，模型在
+   replan 后只要重复一次就被停住，纠正性 replan 事实上没有执行余地；
+3. ① 因此与 ADR-0014 既有的软/硬两级（3 / 3+3）**逐字对齐**：软级就是 replan，硬级从
+   `run/failed` 改成 `run/paused(reason=stuck)`——这正是 `02 §5.3`「扩展既有护栏」的字面执行。
+
+### D3 — 指纹规范化与脱敏
+
+- **动作指纹** `action_fp = digest(tool_name, canonical(args))`；`canonical(args)` = key 排序的 JSON，
+  字符串值 trim 两端空白、`\r\n`→`\n`、整数值浮点归一（`1.0`→`1`）。⇒ call id、key 顺序、
+  等价参数抖动不构成新指纹。
+- **错误指纹** = `error_code` + （规范化后的）失败 message。
+- **观察指纹** = 规范化后的成功结果：`message` + `data`（**排除 `metadata`**——`duration_ms` /
+  `attempt` 这类每次必变的字段一旦进指纹，"同观察"永远不成立，"等价观察"成了假命题）。
+  规范化含空白折叠、ANSI 转义剥离、**文本若是 JSON 则重排为紧凑形式**（pretty / compact 同一指纹）。
+- **脱敏**：任何要指纹化的文本先过 `transport/contract.py` 的 secret 正则（新增公开函数
+  `redact_secret_values()`，只做凭证替换、**不做**路径 scoping——路径要保留，它是参数语义的一部分），
+  再取**截断摘要**。落到事件与持久化里的只有摘要，明文（含凭证的原文）永不进指纹、永不进事件。
+- 摘要只用于**相等比较**，不承担可读性：这是"凭证零泄漏"与"规范化"的同一条边界。
+
+### D4 — 进展证据，以及"只复位受影响的那一个模式"
+
+两个不同的量，不共用：
+
+- **相关进展（按动作，复位 ①/②）**：同一动作出现**与本次模式记录不同的观察**（即状态真的变了——
+  `02 §6` 的"edit 后再次 read"）。① 的实现在此**收窄 ADR-0014 的 Q12(b)**：同指纹的成功若带来
+  **不同**观察，复位计数并清 `soft_triggered`；同指纹、同观察的成功仍**不**复位（防"振荡洗计数"的
+  原意保留在等价观察这一侧）。§5.3 的"只有出现相关进展时才复位受影响的那一个模式"由此成立：
+  别的动作成功不碰这条模式（①/② 的模式键里带着动作指纹，天然隔离）。
+- **项目进展（按决策，复位 ⑤）**：本决策内出现**新的成功观察**（`ok=True` 且其观察指纹在本逻辑
+  run 从未出现过）。失败**不算**进展（"又学到一个错误"不是项目往前走）。⑤ 的窗口计数只被它复位；
+  ③ 的签名序列只被"签名变化"打断。
+  **"是不是 MUTATING 调用"不进判据**（与本文早期草稿相反，以本节为准）：判 MUTATING 需要一条
+  事件之外的事实——工具的能力声明（`Capability.side_effect` 之类），而那会让检测器不再 100%
+  由事件派生（D1），重启后重放同一段事件就可能算出不同的计数。代价是"成功的只读调用也算进展"：
+  一个反复 `read` 同一个文件、每次都能读到内容的 run 不会触发 ⑤——它触发的是 ①/②（同动作同观察），
+  那一族本来就更贴切。取舍与残余 7 同源。
+
+### D5 — 动作面：一次 replan、一条暂停
+
+- **replan**：① 沿用既有的 `tool/failure-guard(level=soft)` 事件与既有纠正消息（`injected_by`
+  仍为 `tool_failure_guard`），逐字不变；②–⑤ 落新的**结构化 guard 事件** `guard/stuck`
+  （`level=replan`）+ 注入新的纠正片段 `corrective:stuck_pattern`（`injected_by="stuck_guard"`）。
+  "恰好一次"由构造保证：计数 `== T` 才 replan，`> T` 只能走暂停分支，且没有任何路径能把计数
+  在 replan 之后倒回 T（复位是清零，不是减一）。
+- **暂停**：**任何**模式越过 2T 时落 `guard/stuck(level=paused)`，随后走既有的
+  `_terminal_paused`（对账闸门 → closeout → 恰好一条 `run/paused` → `mark_terminal_written`）。
+  `reason=stuck`、`trigger_dimension=<模式名>`、`resume_requirements` = 三类依据（D7）。
+  **不再**落 `run/failed`：`STATUS_IDENTICAL_TOOL_FAILURE_LOOP` 这个终态从生产路径消失
+  （常量保留，历史会话仍能读）。
+- **暂停不得越过完成闸门**（ADR-0047）：模型的决策若通过 quiescence + policy，run 就是
+  `run/completed`——stuck 判定**只**在"这一轮无法完成"时才决定后续（replan 继续循环 / 暂停）。
+  Must Not Do 的"不得仅因首达阈值就完成或失败一个 run"由此同时落在两侧。
+
+### D6 — 暂停载荷与 closeout
+
+- `run/paused.data.stuck`（仅 `reason=stuck` 出现，缺席即旧形状不变）：
+  `{pattern, threshold, count, replan_count, fingerprint, environment_revision, policy_version}`。
+  `resume_requirements` 非空（三类依据），这是客户端唯一的"不能一键重试"刹车灯。
+- **确定性 continuation** 与**模型 closeout 指令**都要有 stuck 分支：不许出现"提高 ceiling 后恢复"
+  这类暗示（stuck 不接受 `budget_increase`）。模型 closeout 仍按 `02 §5.2` 预留容量尝试一次，
+  失败/不合契约回落确定性组装。
+
+### D7 — 三类恢复依据：观测，而非声明
+
+`validate_resume` 对 `reason=stuck` 只接受 `relevant_steer` / `environment_change` / `policy_change`，
+且**每一条都要在现场被观测到**（用户声明不算证据）：
+
+| basis | 观测口径 | 缺依据时 |
+| --- | --- | --- |
+| `relevant_steer` | 事件流里存在 `seq > pause_seq` 的 `steer/requested`，且它**可作用于**这个 run（`run_id` 相同或为 `None` 的会话级 steer），内容非空 | 409 |
+| `environment_change` | 用**同一个** `workspace_revision(root)` 重算比暂停快照里记录的值不同 | 409 |
+| `policy_change` | 用**同一个** `policy_version_of(...)` 从本次恢复解析出的生效策略重算，比快照里的值不同 | 409 |
+
+- `budget_increase` 对 stuck 暂停 ⇒ **409**（"抬高 ceiling"不是依据，`03 §3.4` 的暂停理由不是预算）。
+- 摘要没有全序，"更新"的机械口径只能是**不等于快照**；两侧都由服务端计算，客户端无从伪造。
+  快照缺该值（无端口 / 字段缺失）⇒ 该依据不可用（fail-closed，409 明说"无快照可比"）。
+- **不要求**请求给出绝对 ceiling（那是预算暂停的恢复契约）：未点名即沿用暂停快照，但仍过
+  `resume_headroom_ok`——一次"恢复了却立刻再停"的 409 比一次假恢复诚实。
+- 被采纳的依据写进 `run/resumed.resume_evidence`（`{basis, ...}`，仅 stuck 恢复出现）：
+  "哪一条证据放行了这次恢复"是必须可对账的事实。预算恢复的 `run/resumed` 逐字不变。
+
+### D8 — 证据端口：注入而非内建
+
+`agent/resume_evidence.py` 提供 `environment_revision(root)`（工作区树清单摘要：相对路径 +
+尺寸 + mtime_ns，按路径排序后摘要）与 `policy_version_of(...)`（生效策略摘要），以及把两者打包的
+端口对象。端口在装配点（`assembly.build_runtime`）注入 runtime，runtime 只在**暂停那一刻**读一次；
+恢复侧由 `session/service.py` 用**同一份函数**在现场重算。工具不内建、不缓存、不跨进程传递。
+
+**摘要输入集**（`policy_version_of` 的实参，两侧同源）：权限档、模型、agent profile、
+reasoning effort、context providers（排序后）。两个**刻意排除**项，都是 fail-open 的防线：
+
+- `auto_approve` —— 它是审批路由的声明，不是运行时行为面；且创建路径只拿得到请求值、恢复路径只
+  拿得到事件派生值，未显式声明时两者不同名 ⇒ 会算出一个**假**的 `policy_change`（其实没变却放行）。
+- **ceiling 类**（local fuse 的值与来源、run 作用域四维）—— 它们是**预算**而不是策略（D7 已把
+  `budget_increase` 判 409）。把 fuse 算进摘要，恢复请求只要顺手抬一格 `local_max_agent_turns`
+  就能自己造出 `policy_change`，等于同一个漏洞换一扇侧门。fuse 仍照常参与 `limits` 快照与
+  `resume_headroom_ok`，只是不构成"策略变了"。
+
+排除项的代价是"只改了被排除项 ⇒ 恢复被拒"：用户此时仍可用 steer（`relevant_steer`，也是 continuation
+推荐的那条路）或真实的策略变更恢复，不构成死锁。
+
+### D9 — 与既有不变量和契约的关系
+
+- 仍然只有一条 Tool 执行路径、一个 retry 责任域（ToolExecutor）、**一个** loop guard 责任域；
+- Model fallback 与 Tool retry 继续分离；本特性不改变 Provider 选择策略；
+- 单终态不变量不变：stuck 暂停落的是**非终态** `run/paused`，`run/resumed` 以同一 `run_id` 接回；
+- replay **不**执行模型 / 工具、**不**消耗预算、**不**产生新的 guard 动作（重放只重建状态）；
+- optional capability 故障不能拖垮 Core 的规则不变：检测器与证据端口故障均不得把 run 变成
+  异常失败（证据端口读不到 ⇒ 该值为 `None`，对应依据不可用，而不是抛异常）。
+
+### D10 — Live Gate 场景③（ADR-0044 D10 的 3 次连跑）
+
+真实配置的模型 + 生产 ToolRuntime 反复调用一个**确定性失败**的真实工具 ⇒ 恰好一次 replan ⇒
+同模式持续 ⇒ `run/paused(reason=stuck)`。同一 sha/tree 连跑 **3/3**；失败尝试全部保留；
+缺凭据 ⇒ BLOCKED / SKIPPED，**永不 PASS**（ADR-0044 D10 的证据字段与凭证零泄漏条款逐条适用）。
+
+---
+
+## 3. 落地映射
+
+| 决策 | 落点 |
+| --- | --- |
+| D1 责任域 / 事件派生 | `agent/guards.py`（`StuckDetector` 等）、`agent/runtime.py` 的接入点 |
+| D2 五模式与暂停点 | `agent/guards.py` 的阈值表 + 各子状态机；`02 §5.3` 是阈值权威 |
+| D3 规范化 / 脱敏 | `agent/guards.py`（规范化）、`transport/contract.py`（`redact_secret_values`） |
+| D4 进展证据 | `agent/guards.py`（两种进展量分别实现） |
+| D5 动作面 | `agent/runtime.py`（replan 臂 / 暂停臂）、`session/event.py`（`guard/stuck` 常量 + 生成物）、`prompt/builtin.py` + `prompt/section.py`（`corrective:stuck_pattern`） |
+| D6 载荷 / closeout | `agent/run_budget.py`（`build_pause_data(stuck=...)`、`deterministic_continuation(reason=...)`）、`agent/runtime.py`（`_closeout_instruction(reason=...)`） |
+| D7 恢复依据 | `agent/run_budget.py`（`validate_resume` 的 stuck 分支、`build_resume_data(resume_evidence=...)`）、`session/service.py`（现场重算 + 传递） |
+| D8 证据端口 | `agent/resume_evidence.py`（新）、`assembly.py`（注入）、`session/service.py`（恢复侧重算） |
+| D10 Live Gate | `evaluation/live_gate/scenarios/`（场景③）+ 证据文件入 `docs/live_gate/` |
+
+---
+
+## 4. 残余与已知边界（登记，不阻断）
+
+1. **摘要不是全序**："更新"只能判"变过"（D7）。若将来要判"更新"，需要一个单调的 policy / 环境
+   版本计数器——今天没有这样的数字源，本 ADR 选择 fail-closed 的近似（不等于快照）。
+2. **环境 revision 的代价与精度**：工作区树清单是一次全树 walk，只在暂停 / 恢复各付一次；为避免
+   超大目录拖住暂停，超过条目上限后**停止采集**并把"已截断"折进摘要——截断只会让"变过"更难被
+   观测到（fail-closed：证据不足 ⇒ 409），不会伪造出假依据。
+   **mtime 的粒度是这条观测的下限**（T9 实测，Windows）：同一路径在同一个时间片内被等长改写
+   （`st_size` 不变、`st_mtime_ns` 相同）算"没变"——即"改过但观测不到"。方向同样是 fail-closed
+   （证据不足 ⇒ 409，不放行），代价是用户可能得再动一下工作区；用例因此用显式
+   `os.utime(ns=...)` 造两次可区分的写，而不是靠"写两次就一定有新 mtime"。
+   **空目录与不可读目录两头都不许有歧义**：空目录有确定摘要（空输入哈希），读不到（不存在 /
+   中途 I/O 错）一律 `None` ⇒ 该依据不可用。
+3. **`metadata` 不进观察指纹**：工具若把语义信息放进 `metadata`，"观察是否变化"会看不见它。
+   这是"每次必变字段（口径 / 时长）不能进指纹"与"语义完整"之间的取舍，登记在此。
+4. **③ 的可达面窄**：本架构里"无工具调用的决策"要么完成、要么被 quiescence 闸门收口，所以
+   ③ 的计数通常跨"同 run 的多次执行"累积（重启 / 恢复后重放）。这是架构事实，不是缺陷；
+   用例按"同 run 多次执行 + 重放"覆盖它。
+5. **`STATUS_IDENTICAL_TOOL_FAILURE_LOOP` 从生产路径消失**：常量与历史事件读法保留，
+   `_terminal_failed_run` 的受控失败路径在没有其他调用方后只剩异常 / 取消臂使用它。
+6. **CLI 的三类依据**：CLI 必须能表达 stuck 恢复的依据（新开关或明确拒绝），否则"暂停了但命令行
+   无法有依据地恢复"。本票按 CLI 现有入口形态落地，不新增交互式承诺。落地形态：`resume --basis`
+   四个取值齐备（其中 `budget_increase` 对 stuck 一律 409），`run` / `resume` 两条链路的证据端口
+   都走 `resume_evidence.evidence_port`（**唯一**构造点）。**已知边界**：CLI 的 `run` 建会话时
+   不声明档位 / 模型（走默认档与默认模型链），`resume` 也没有改模型 / profile 的开关 ⇒ 纯 CLI
+   的 `policy_change` 实际上要另一次 amend 才可能成立（Web 有）；`relevant_steer` 与
+   `environment_change` 两条在 CLI 上完全可用。补 CLI 的模型开关是另一个票的事，本票不扩范围。
+7. **`replan_count` 是契约值，不是账**：`run/paused.stuck.replan_count` 恒为 `1`（"恰好一次 replan"
+   的下界已由上一枚 `guard/stuck(level=replan)` 事件证明）。若在"计数达到 T"与"落 guard 事件"之间
+   崩溃，恢复后重放会把计数算回 T 并**再** replan 一次——那一刻的账上会出现两次纠正、而 `replan_count`
+   仍写 1。要闭合这一格需要一个"已 replan"的持久标记，本票不加（代价：一次多余的纠正消息，
+   不是安全边界；判据见 `_monologue_replanned` 一族的进程内闩）。
+8. **`ToolResult.runtime_signal` 只服务委派树账本，且只在当场那一轮**：它是 `exclude=True`
+   （**不落盘**）的进程内信号，重放事件看不到它。本 run 的五模式判定不依赖它；它唯一的用途是把
+   **树账本**（有自己 durable 家园的那本）的 ① 结论翻译成本 run 的信号（D1 的例外）。因此**同一段
+   历史在崩溃前 / 崩溃后**的差别只有一格：崩溃前那一轮，失败的 delegate 调用由树账本计数；
+   崩溃后重放时检测器会照事件把同一批失败数进 ①。两者的**阈值线相同**（都是 3/6），差别只在
+   计数口径（树 = 跨后代累计，事件 = 本 run 逐条），所以恢复后的判定可能**更早**到线而不是更晚
+   ——方向是 fail-closed 的一侧（更早暂停，不会漏停）。要彻底闭合需要一个"这次调用归谁数"的
+   durable 标记，那会把子会话的事实写进父会话事件流，本票不做（代价登记于此）。

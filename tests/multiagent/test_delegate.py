@@ -244,15 +244,16 @@ class TestDelegationBudget:
 
 class TestRepeatedDelegationBreaker:
     """#88：repeated-delegation 熔断复用同错熔断机制——delegate 是普通工具，
-    同指纹 (delegate, {target, task}) 连续失败 3 次 → 软熔断，6 次 → 硬熔断。
-    无需新机制：验证既有护栏对 delegate 工具的真实覆盖。"""
+    同指纹 (delegate, {target, task}) 连续失败 3 次 → 一次纠正，6 次 → **非终态**
+    `run/paused(reason=stuck)`（`#317` T9：旧硬熔断终结臂已从生产路径移除，
+    ADR-0048 D5；计数权威仍是委派树账本，见 `guards.external_failure_signal`）。"""
 
     @pytest.mark.asyncio
     async def test_repeated_failing_delegation_trips_guard(self, tmp_path):
         from langchain_core.messages import AIMessage as _AIM
 
         from agent_harness.agent.runtime import AgentRuntime
-        from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        from agent_harness.agent.types import STATUS_PAUSED
         from agent_harness.tooling import ToolExecutor as _TE
 
         failing_child = ScriptedModel([])  # 空剧本：child run 必失败
@@ -282,11 +283,19 @@ class TestRepeatedDelegationBreaker:
 
         result = await runtime.run(session, "反复委派同一任务")
 
-        assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        assert result.status == STATUS_PAUSED
         guard_events = [e for e in session._events if e.type == "tool/failure-guard"]
-        levels = [e.data["level"] for e in guard_events]
-        assert "soft" in levels and "hard" in levels
-        assert guard_events[-1].data["consecutive_failures"] == 6
+        assert [e.data["level"] for e in guard_events] == ["soft"]
+        assert guard_events[0].data["consecutive_failures"] == 3
+        # 再达阈值（2T=6）收口：结构化暂停事件 + 非终态 run/paused，**不是** run/failed
+        stuck = [e.data for e in session._events if e.type == "guard/stuck"]
+        assert [e["level"] for e in stuck] == ["paused"]
+        assert stuck[0]["pattern"] == "stuck.tool_failure_loop"
+        assert stuck[0]["count"] == 6 and stuck[0]["threshold"] == 3
+        assert [e.data["reason"] for e in session._events if e.type == "run/paused"] == [
+            "stuck"
+        ]
+        assert [e for e in session._events if e.type == "run/failed"] == []
 
 
 class _SlowChildModel(ScriptedModel):

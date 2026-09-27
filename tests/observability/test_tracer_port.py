@@ -22,7 +22,6 @@ from agent_harness.agent import AgentRuntime
 from agent_harness.agent.run_budget import TRIGGER_LOCAL_TURNS
 from agent_harness.agent.types import (
     STATUS_CONTEXT_WINDOW_EXCEEDED,
-    STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
     STATUS_PAUSED,
 )
 from agent_harness.context.builder import ContextWindowExceededError
@@ -462,11 +461,13 @@ async def test_context_window_exceeded_then_disconnect_collects_the_span_once(
 
 
 @pytest.mark.asyncio
-async def test_hard_guard_run_drives_terminal_port_lifecycle(tmp_path, monkeypatch):
-    """硬熔断臂：run_failed 必须到达端口（该臂的端口调用在 failure_terminal 之前）。
+async def test_stuck_pause_does_not_drive_a_terminal_port_call(tmp_path, monkeypatch):
+    """同错熔断臂（`#317` T9 起收口是**非终态** `run/paused`）：端口不得收到终态。
 
-    只钉尾部（终态必须是 run_failed、且没有 run_completed）——逐轮展开 tool span
-    调用序列等于把实现抄一遍，改实现时会无意义地红。
+    旧契约下这条链路在 `end_run(failed)` 处收口，端口会拿到 `run_failed`；T9 把它换成
+    暂停（ADR-0048 D5）⇒ 端口**一条终态调用都不该有**（`NullTracer` 今天也没有暂停钩子：
+    暂停不是 run 的结局）。这条钉的正是"暂停别被当成失败报给可观测性"——若哪天有人把
+    暂停接回 `run_failed`，本用例会红。
     """
     calls = _record_null_tracer_calls(monkeypatch)
     session = make_session(tmp_path)
@@ -479,8 +480,8 @@ async def test_hard_guard_run_drives_terminal_port_lifecycle(tmp_path, monkeypat
 
     result = await runtime.run(session, "反复试同一个失败命令")
 
-    assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
-    assert calls[-1] == "run_failed"
+    assert result.status == STATUS_PAUSED
+    assert "run_failed" not in calls
     assert "run_completed" not in calls
 
 

@@ -16,22 +16,10 @@ from typing import Protocol
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from agent_harness.redaction import redact_secret_values
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
 
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9._:-]+")
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(--?(?:token|password|passwd|secret|api[-_]?key|authorization)|"
-    r"(?:token|password|passwd|secret|api[-_]?key|authorization))\s*(?:=|:)\s*([^\s]+)"
-)
-_GIT_HEADER_SECRET = re.compile(
-    r"(?i)(-c\s+http\.[^=\s]*extraheader\s*=\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s]+(?:\s+[^\s]+)*)"
-)
-_GIT_CONFIG_SECRET = re.compile(
-    r"(?i)(-c\s+(?:credential\.[^=\s]+|http\.[^=\s]+|url\.[^=\s]+))="
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s]+)"
-)
-_GIT_URL_USERINFO = re.compile(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@")
 _LEGACY_SESSION_ID = "legacy-transport"
 _PATH_ASSIGNMENT = re.compile(r"(?i)(--?(?:path|file|cwd|workdir)|(?:path|file|cwd|workdir))\s*(?:=|:)\s*([^\s]+)")
 _QUOTED_PATH = re.compile(r"(?:\"[^\"]+\"|'[^']+')")
@@ -328,16 +316,13 @@ def redact_command_summary(command: str, *, scope: str) -> str:
         raise ValueError("command must be non-empty")
     if not isinstance(scope, str) or not scope.strip():
         raise ValueError("scope must be non-empty")
-    redacted = _SECRET_ASSIGNMENT.sub(r"\1=<redacted>", command)
-    redacted = _GIT_HEADER_SECRET.sub(r"\1<redacted>", redacted)
-    redacted = _GIT_CONFIG_SECRET.sub(r"\1=<redacted>", redacted)
-    redacted = _GIT_URL_USERINFO.sub(r"\1<redacted>@", redacted)
+    redacted = redact_secret_values(command)
     redacted = _PATH_ASSIGNMENT.sub(r"\1=<scoped>", redacted)
     redacted = _QUOTED_PATH.sub("<scoped>", redacted)
     redacted = _ABSOLUTE_PATH.sub("<scoped>", redacted)
     redacted = _PATHSPEC_TAIL.sub(r"\1<scoped>", redacted)
-    redacted = re.sub(r"(?i)(Bearer\s+)[^\s]+", r"\1<redacted>", redacted)
     return redacted[:500]
+
 
 
 def new_transport_entry(
