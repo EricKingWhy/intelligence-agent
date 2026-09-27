@@ -83,6 +83,15 @@ async def _send_json_offloaded(
         logger.debug("WS send 失败（客户端可能已断开）", exc_info=True)
 
 
+async def _enqueue_relay_error(out_q: asyncio.Queue, session_id: str) -> None:
+    """把 relay 的终止错误写入有界出站队列，不静默丢弃满队列时的错误。"""
+    await out_q.put({
+        "type": "error",
+        "session_id": session_id,
+        "message": "stream relay failed",
+    })
+
+
 async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     """WebSocket 主入口：接受连接 → 多路复用 session 事件流。
 
@@ -108,10 +117,25 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
 
     # 每 WS 连接的订阅追踪：session_id → (ManagedRun, Subscriber)
     subscriptions: dict[str, tuple[Any, Any]] = {}
+    # #341：relay task 追踪——断连/重订阅时旧 relay 必须被显式取消，
+    # 否则它永远阻塞在 subscriber.queue.get() 上（任务泄漏）。
+    relay_tasks: set[asyncio.Task] = set()
+    relay_tasks_by_session: dict[str, asyncio.Task] = {}
     # 读循环和写循环之间的事件桥
     outbound_queue: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
     run_manager: RunManager = state.run_manager
+
+    async def _detach_subscription(session_id: str) -> None:
+        """替换某会话的订阅，不遗留旧 relay（#341）。"""
+        existing = subscriptions.pop(session_id, None)
+        relay_task = relay_tasks_by_session.pop(session_id, None)
+        if existing is not None:
+            existing[0].unsubscribe(existing[1])
+        if relay_task is not None and relay_task is not asyncio.current_task():
+            relay_tasks.discard(relay_task)
+            relay_task.cancel()
+            await asyncio.gather(relay_task, return_exceptions=True)
 
     # 死对端检测游标：任何上行消息都会刷新（PONG 是应用层帧，能到达
     # receive_text()——控制帧 PONG 不行，见 _heartbeat_loop 注释）。
@@ -156,6 +180,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             await _send_json({"type": "error", "message": "snapshot failed"})
             return
 
+        # #341：重复 subscribe = 替换该会话的旧 relay。瞬时读错误不应拆散一条
+        # 仍在正常工作的订阅；如果新快照被截断，则仍要摘掉旧订阅。
         active_run = run_manager.get_active(session_id)
         # 阈值判据取**持久化最大 seq**——与 SSE 同一个量（`app.py:1336` 的
         # `handle.latest_seq`）。不能用 run 的入队游标：两者稳态相等（落盘先于
@@ -177,6 +203,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         from agent_harness.web.app import STREAM_REPLAY_MAX_EVENTS
 
         if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
+            await _detach_subscription(session_id)
             await _send_json({
                 "type": "snapshot",
                 "session_id": session_id,
@@ -192,6 +219,16 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             return
 
         subscriber = active_run.subscribe() if active_run is not None else None
+        # 先把新 subscriber 接入同一 run，再摘旧 subscriber。否则取消旧 relay
+        # 时会短暂变成零订阅者并启动孤儿宽限计时，极短宽限期可误杀仍在用的 run。
+        try:
+            await _detach_subscription(session_id)
+        except asyncio.CancelledError:
+            if subscriber is not None and active_run is not None:
+                active_run.unsubscribe(subscriber)
+            raise
+        if subscriber is not None:
+            subscriptions[session_id] = (active_run, subscriber)
         # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与
         # 客户端游标可能因一次丢帧而错开，双保险比互相信任便宜）。
         window = [e for e in events if after_seq < e.seq <= replay_upto]
@@ -204,14 +241,17 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         )
 
         if subscriber is not None:
-            subscriptions[session_id] = (active_run, subscriber)
             # 启动事件转发 task
-            asyncio.create_task(
-                _relay_events(session_id, subscriber, outbound_queue, run_manager)
+            relay_task = asyncio.create_task(
+                _relay_events(session_id, active_run, subscriber, outbound_queue, run_manager)
             )
+            relay_tasks.add(relay_task)
+            relay_tasks_by_session[session_id] = relay_task
+            relay_task.add_done_callback(relay_tasks.discard)
 
     async def _relay_events(
         session_id: str,
+        run: Any,
         subscriber: Any,
         out_q: asyncio.Queue,
         rm: RunManager,
@@ -230,12 +270,22 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                 })
         except asyncio.CancelledError:
             pass
+        except Exception:
+            # #341：relay 失败既要记日志也要在公共 WS 通道回声——task 与读循环
+            # 是刻意脱钩的，异常留在 task 上只会变成 unhandled-task 警告。
+            logger.exception("WS relay failed (session=%s)", session_id)
+            await _enqueue_relay_error(out_q, session_id)
         finally:
-            # 订阅清理
-            run = rm.get_active(session_id)
-            if run is not None:
-                run.unsubscribe(subscriber)
-            subscriptions.pop(session_id, None)
+            # 订阅清理：使用创建 relay 时绑定的 run，不能从 get_active() 重查——
+            # 终态 run 已不再 active，但仍持有 subscriber（#341：重查拿到 None
+            # 会让 unsubscribe 泄漏，孤儿计时也永远不会启动）。重复订阅时只删除
+            # 仍指向本 relay 的映射，不能误删更新后的 subscriber。
+            run.unsubscribe(subscriber)
+            if subscriptions.get(session_id) == (run, subscriber):
+                subscriptions.pop(session_id, None)
+            current_relay = relay_tasks_by_session.get(session_id)
+            if current_relay is asyncio.current_task():
+                relay_tasks_by_session.pop(session_id, None)
 
     # ── 主读写循环 ──
 
@@ -314,12 +364,16 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         await _send_json({"type": "error", "message": str(e)})
                         continue
                     if result.status == "launched":
-                        # 新 run 启动 → 自动订阅
+                        # 新 run 启动 → 自动订阅（先摘旧订阅：#341，不遗留旧 relay）
                         run, sub = result.run, result.subscriber
+                        await _detach_subscription(sid)
                         subscriptions[sid] = (run, sub)
-                        asyncio.create_task(
-                            _relay_events(sid, sub, outbound_queue, run_manager)
+                        relay_task = asyncio.create_task(
+                            _relay_events(sid, run, sub, outbound_queue, run_manager)
                         )
+                        relay_tasks.add(relay_task)
+                        relay_tasks_by_session[sid] = relay_task
+                        relay_task.add_done_callback(relay_tasks.discard)
                         await _send_json({
                             "type": "launched",
                             "session_id": sid,
@@ -409,7 +463,15 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     finally:
         heartbeat_task.cancel()
         write_task.cancel()
-        # 清理所有订阅
+        # #341：先取消在途 relay（它们阻塞在 subscriber.queue.get() 上，
+        # 不取消就是任务泄漏）；relay 的 finally 会自己做绑定式 unsubscribe。
+        pending_relays = tuple(relay_tasks)
+        for task in pending_relays:
+            task.cancel()
+        if pending_relays:
+            await asyncio.gather(*pending_relays, return_exceptions=True)
+        # 清理所有订阅（relay 已清过的条目不会重复——subscriptions 里只剩
+        # relay 未及收尾或从未起 relay 的映射）
         for sid, (run, sub) in list(subscriptions.items()):
             if run is not None:
                 run.unsubscribe(sub)

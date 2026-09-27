@@ -11,3 +11,15 @@ def test_openai_compatible_embedding_settings():
     assert embeddings.check_embedding_ctx_length is False
     assert embeddings.dimensions == 1024
     assert "test-only" not in repr(settings.embedding_api_key)
+
+
+def test_bge_m3_uses_provider_default_embedding_dimensions():
+    for model in ("BAAI/bge-m3", "Pro/BAAI/bge-m3"):
+        settings = Settings(
+            _env_file=None,
+            embedding_model=model,
+            embedding_base_url="https://api.siliconflow.cn/v1",
+            embedding_api_key="test-only",
+        )
+
+        assert create_embeddings(settings).dimensions is None

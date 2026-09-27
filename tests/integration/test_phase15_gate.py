@@ -132,6 +132,7 @@ def test_gate4_cloud_ops_degrade_gracefully(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+@pytest.mark.live_services
 @pytest.mark.skipif(not _has_langfuse_keys(), reason="LANGFUSE keys 未配置（.env）")
 @pytest.mark.asyncio
 async def test_gate2_real_cloud_trace_upload_fetch_audit(tmp_path):
@@ -217,6 +218,7 @@ async def test_gate2_real_cloud_trace_upload_fetch_audit(tmp_path):
 
 
 @pytest.mark.integration
+@pytest.mark.live_services
 @pytest.mark.skipif(not _has_langfuse_keys(), reason="LANGFUSE keys 未配置（.env）")
 def test_gate5_real_seed_idempotent_and_experiment(tmp_path):
     from dotenv import load_dotenv
@@ -291,3 +293,13 @@ def test_gate5_real_seed_idempotent_and_experiment(tmp_path):
 
     item_ids_after = sorted(item.id for item in client.get_dataset("p0_core").items)
     assert item_ids_after == item_ids_before, "experiments must not duplicate dataset items"
+    print(
+        f"[phase15 gate5] dataset=p0_core items={len(item_ids_before)} "
+        f"duplicate_item_ids=0 repeat_seed_created={second['created']} "
+        f"repeat_seed_skipped={second['skipped']} "
+        f"pass_run_id={experiment['dataset_run_id']} "
+        f"pass={experiment['passed']}/{experiment['total']} "
+        f"failure_run_id={control['dataset_run_id']} "
+        f"failure_control={control['failed']}/{control['total']} "
+        "dataset_unchanged=true"
+    )

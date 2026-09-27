@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "run_id": "511bd604-95bc-4645-997d-c99ba24a981b",
+  "repeat_of": null,
+  "ran_at": "2026-09-26T13:39:57+00:00",
+  "status": "failed",
+  "blocking": false,
+  "benchmark": "LongMemEval",
+  "adapter_version": 1,
+  "source": "https://github.com/xiaowu0162/LongMemEval",
+  "license": "MIT",
+  "non_commercial_only": false,
+  "dataset": {
+    "filename": "longmemeval_s_cleaned.json",
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "case_count": 1
+  },
+  "tool": {
+    "name": "agent-harness-memory-v2",
+    "code_sha": "2126f62cdcd936e357acc3638ecfd686608d3d56",
+    "tree_sha": "38756e10f530c556aeb6bdd1e20e698269c72636",
+    "config_aliases": {
+      "formation": "memory.primary",
+      "answer": "memory.primary",
+      "index": "milvus",
+      "retrieval": "hybrid-v1"
+    }
+  },
+  "case_counts": {
+    "total": 1,
+    "executed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "unawaited": 0
+  },
+  "metrics": {
+    "answer_quality": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "session_recall_at_6": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "stored_record_count": 34,
+    "pollution_rate": 0.0,
+    "pollution_count": 0,
+    "injected_tokens": 792,
+    "latency_ms_total": 605927,
+    "input_tokens": 193448,
+    "output_tokens": 20903,
+    "cost_usd": null
+  },
+  "failures": [
+    "memory_v2_chain_not_observed",
+    "answer_quality_below_smoke_threshold"
+  ],
+  "worktree_clean": true,
+  "baseline_frozen": false,
+  "run_mode": "smoke",
+  "pipeline": {
+    "formation": "MemoryJobRunner",
+    "storage": "SqliteMemoryV2Store",
+    "index": "MilvusMemoryV2Index",
+    "recall_injection": "MemoryV2ContextProvider",
+    "answer_generation": "configured_model_provider",
+    "langfuse": "disabled_for_public_benchmark_content"
+  },
+  "smoke": {
+    "selection_strategy": "smallest_answer_relevant_session_case_with_user_turn_token_f1_at_least_0.5",
+    "selected_case_id_sha256": "b3ea5f6a3cdf59e04806fd206ae3a3d77343555aed13f1b15e7e43e60fe96ca1",
+    "sample_category": "single-session-assistant",
+    "answer_strategy": "longmemeval_con_reading_notes_v1",
+    "answer_model_calls": 2,
+    "answer_scorer": "normalized_token_f1",
+    "answer_f1_threshold": 0.5,
+    "answer_f1": 0.45,
+    "formation_model_calls": 80,
+    "formation_jobs": {
+      "completed": 48,
+      "degraded": 1
+    },
+    "formation_job_reasons": {
+      "invalid_model_output": 1,
+      "no_durable_value": 6,
+      "none": 32,
+      "transient_only": 10
+    },
+    "formation_output_failure_kinds": {
+      "contract_violation": 1
+    },
+    "source_session_count": 49,
+    "answer_latency_ms": 3103,
+    "token_usage_source": {
+      "formation_input": "local_estimate",
+      "formation_output": "local_estimate",
+      "answer_input": "provider",
+      "answer_output": "provider"
+    },
+    "committed_formation_jobs": 30,
+    "formation_job_outcomes": {
+      "committed": 30,
+      "no_write": 18
+    },
+    "formation_drain_timeout_seconds": 1200,
+    "active_record_tier_counts": {
+      "collection": 21,
+      "profile": 13
+    },
+    "active_record_kind_counts": {
+      "semantic": 34
+    },
+    "active_records_with_relevant_source_session": 0,
+    "recall_hit_count": 21,
+    "injected_message_count": 2,
+    "attributable_injected_hit_count": 0,
+    "chain_verified": false,
+    "speaker_mapping": "dataset_roles_preserved",
+    "milvus_collection_created": true,
+    "milvus_collection_name": "memv2pub_96351911d80f",
+    "passed": false
+  },
+  "cleanup": {
+    "temporary_milvus_collection": "confirmed_absent"
+  }
+}

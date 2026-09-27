@@ -2612,6 +2612,7 @@ class AgentRuntime:
             agent_id=self._agent_id,
             user_input=user_input or "",
             turn_index=turn_index,
+            metadata_only=self._memory_formation is not None,
         ))
 
     def _write_memories(self, session: Session, start: int) -> None:

@@ -1,0 +1,23 @@
+{
+  "ticket": "#302 / MEM-V2-6",
+  "gate": "real_configured_embeddings_and_milvus_dry_run",
+  "code_commit": "0e940085f01ac6a7ac4a10c4389a684d77357de5",
+  "code_tree": "b9da5c2bd9fca7e9287f3add31f282a593a27d16",
+  "dataset": "memory-v2-project-cross-session-v1",
+  "dataset_sha256": "8b33b9da3cf9cfeca894c3080d9358e4bfc3eca6cee3f8c817f7b772619813c8",
+  "ranking_version": "hybrid-v1",
+  "query_count": 20,
+  "k": 6,
+  "hits": 19,
+  "relevant": 20,
+  "recall_at_k": 0.95,
+  "minimum_recall": 0.85,
+  "dense_target_hits": 19,
+  "lexical_target_hits": 2,
+  "temporary_milvus_collection_created": true,
+  "temporary_milvus_collections_remaining": 0,
+  "cleanup": "confirmed_absent",
+  "input_tokens": null,
+  "cost_usd": null,
+  "cost_status": "not_reported_by_current_embedding_adapter"
+}

@@ -129,6 +129,7 @@ from agent_harness.session.event import (
     QUEUE_CONSUMED,
     RUN_RESUMED,
     SESSION_FORKED,
+    SESSION_RESUMED,
     STEER_APPLIED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
@@ -936,9 +937,9 @@ class SessionService:
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
 
-        这是「续跑」而非精确恢复中断 run：Session.resume 重建 append-only
-        历史与 dangling 修复，RunManager.launch 驱动一轮新 Agent Loop。
-        在途 session 拒绝（ActiveRunConflict），避免并发。
+        这是「续跑」而非精确恢复中断 run：新任务路径由 Session.resume 重建
+        append-only 历史与 dangling 修复；同 run 路径在会话锁内重验 CAS、按需 Recovery、
+        运行时装配并提交恢复事件，最后由 RunManager.launch 驱动新一轮。在途 session 拒绝。
 
         staged amend 字段（amend）透传给 build_runtime，与
         create_and_launch 对齐。默认 None = 当前行为不变。
@@ -952,7 +953,7 @@ class SessionService:
         - ``task=None``：**同 run 续跑**（票面「Ordinary budget resume needs no
           new task text」）——不落 user/message，接上被暂停的那个逻辑 run：锁内
           CAS 校验（run_id + expected_version + resume_basis + 绝对 ceiling）通过后
-          落 `run/resumed`，再以同一 run_id 启动一次新执行。缺声明 ⇒ 422；
+          落 `session/resumed` 与 `run/resumed`，再以同一 run_id 启动一次新执行。缺声明 ⇒ 422；
           状态对不上（版本过期 / run_id 不是暂停的那个 / 没有暂停 run / 在途冲突 /
           ceiling 没真提高）⇒ 409，且**零副作用**。
 
@@ -1102,26 +1103,33 @@ class SessionService:
         # `Session.load` 的 seq 冲突（数据完整性）一律谎报成 404，客户端只能显示
         # `Send failed: 404`。现在 load/resume 抛类型化领域异常（SeqConflict /
         # SessionNotFound），由端点各自的 except 元组精确翻译。
-        if (
-            detect_dangling(existing)
-            or detect_unterminated_runs(existing)
-            or await self._has_unreconciled_operations(session_id)
-        ):
-            await self.recover(session_id)
+        if same_run_resume:
+            # 同 run 的 Recovery 判定与写入都延迟到锁内 CAS 胜者路径；recover()
+            # 会追加 session/resumed，输家不能在锁外执行它。
             session = Session.load(
                 self._store,
                 session_id,
                 workspace_registry=self._workspace_registry,
             )
         else:
-            session = Session.resume(
-                self._store,
-                session_id,
-                workspace_registry=self._workspace_registry,
+            needs_recovery = (
+                detect_dangling(existing)
+                or detect_unterminated_runs(existing)
+                or await self._has_unreconciled_operations(session_id)
             )
-
-        _, wiring = await self._get_wiring()
-        await self._ensure_stores()
+            if needs_recovery:
+                await self.recover(session_id)
+                session = Session.load(
+                    self._store,
+                    session_id,
+                    workspace_registry=self._workspace_registry,
+                )
+            else:
+                session = Session.resume(
+                    self._store,
+                    session_id,
+                    workspace_registry=self._workspace_registry,
+                )
 
         # F15 #234 + F18-A #282：权限决策（档位 + 是否自动批准）从事件流派生——创建时
         # 显式声明**或**会话内改过档（permission/changed，最后一次胜）都作数。续聊路径
@@ -1132,71 +1140,80 @@ class SessionService:
         # （build_runtime 对 None 的语义 = 安全默认 auto-approve）。
         effective_mode = _effective_permission_mode(existing)
         effective_auto = _effective_auto_approve(existing)
-        interactive = False
-        approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder
-        if effective_mode is None:
-            permission_mode = PermissionPolicy.WORKSPACE_WRITE
-            if effective_auto is False:
-                # deny 路由（创建时声明了"不自动批准"且未选档位）也只能从事件流复原：
-                # 它同样不落盘的话，第二条消息起会变成全自动批准——与该路由的承诺相反。
+
+        async def build_resume_runtime(
+            budget: LaunchRunBudget,
+        ) -> tuple[Any, bool, ApprovalCallback | None | _InteractiveCallbackHolder]:
+            _, wiring = await self._get_wiring()
+            await self._ensure_stores()
+            interactive = False
+            approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder
+            if effective_mode is None:
+                permission_mode = PermissionPolicy.WORKSPACE_WRITE
+                if effective_auto is False:
+                    # deny 路由（创建时声明了"不自动批准"且未选档位）也只能从事件流复原：
+                    # 它同样不落盘的话，第二条消息起会变成全自动批准——与该路由的承诺相反。
+                    approval_callback = await self._build_approval_callback(
+                        interactive=False,
+                        auto_approve_explicit=True,
+                        permission_mode_explicit=False,
+                        auto_approve=False,
+                        session_id=session_id,
+                    )
+                else:
+                    approval_callback = None
+            else:
+                permission_mode = effective_mode
+                # danger-full-access 是"无需审批"档，与创建路径同判据（那边的 interactive
+                # 同样排除它），不要在这里发明第二套判定。
+                interactive = effective_mode is not PermissionPolicy.DANGER_FULL_ACCESS
                 approval_callback = await self._build_approval_callback(
-                    interactive=False,
-                    auto_approve_explicit=True,
-                    permission_mode_explicit=False,
+                    interactive=interactive,
+                    # 续聊请求体不承载这两个创建期标志；interactive 分支在前，二者不参与
+                    # 判定（非 interactive 时 permission_mode_explicit=True 会让 deny 分支
+                    # 也不成立 → None，即 danger 档的正确结果）。
+                    auto_approve_explicit=False,
+                    permission_mode_explicit=True,
                     auto_approve=False,
                     session_id=session_id,
                 )
-            else:
-                approval_callback = None
-        else:
-            permission_mode = effective_mode
-            # danger-full-access 是"无需审批"档，与创建路径同判据（那边的 interactive
-            # 同样排除它），不要在这里发明第二套判定。
-            interactive = effective_mode is not PermissionPolicy.DANGER_FULL_ACCESS
-            approval_callback = await self._build_approval_callback(
-                interactive=interactive,
-                # 续聊请求体不承载这两个创建期标志；interactive 分支在前，二者不参与
-                # 判定（非 interactive 时 permission_mode_explicit=True 会让 deny 分支
-                # 也不成立 → None，即 danger 档的正确结果）。
-                auto_approve_explicit=False,
-                permission_mode_explicit=True,
-                auto_approve=False,
-                session_id=session_id,
-            )
 
-        runtime = await build_runtime(
-            settings=self._settings,
-            wiring=wiring,
-            stores=self._stores,
-            workspace_registry=self._workspace_registry,
-            session_id=session_id,
-            workspace=workspace,
-            max_agent_turns=fuse.max_agent_turns,
-            permission_mode=permission_mode,
-            approval_callback=approval_callback,
-            session_store=self._store,
-            steer_source=self._message_queues,
-            # `#312`：run 作用域账本（新 run 的初始 ceiling / 同 run 续跑的
-            # 同一 run_id + 新版本 + 已消耗快照）。装配点只消费，判定在
-            # `agent/run_budget.py` 与 `_paused_resume_state`。
-            run_budget=launch_budget,
-            # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
-            # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
-            local_fuse_source=fuse.source,
-            # `#317`：既有会话的新 run 也要在暂停时记下环境 / 策略快照——必须是**同一个**
-            # `stuck_evidence` 实例（上面阶段一 / 阶段二现算恢复依据用的那个），否则
-            # environment / policy 两条依据在恢复侧一律"无快照可比"（ADR-0048 D7）。
-            stuck_evidence=stuck_evidence,
-            **amend_kwargs(amend),
-        )
+            runtime = await build_runtime(
+                settings=self._settings,
+                wiring=wiring,
+                stores=self._stores,
+                workspace_registry=self._workspace_registry,
+                session_id=session_id,
+                workspace=workspace,
+                max_agent_turns=fuse.max_agent_turns,
+                permission_mode=permission_mode,
+                approval_callback=approval_callback,
+                session_store=self._store,
+                steer_source=self._message_queues,
+                # `#312`：run 作用域账本（新 run 的初始 ceiling / 同 run 续跑的
+                # 同一 run_id + 新版本 + 已消耗快照）。装配点只消费，判定在
+                # `agent/run_budget.py` 与 `_paused_resume_state`。
+                run_budget=budget,
+                # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
+                # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
+                local_fuse_source=fuse.source,
+                # `#317`：既有会话的新 run 也要在暂停时记下环境 / 策略快照——必须是**同一个**
+                # `stuck_evidence` 实例（上面阶段一 / 阶段二现算恢复依据用的那个），否则
+                # environment / policy 两条依据在恢复侧一律"无快照可比"（ADR-0048 D7）。
+                stuck_evidence=stuck_evidence,
+                **amend_kwargs(amend),
+            )
+            return runtime, interactive, approval_callback
         # 交互式审批：session 已存在，直接绑定（创建路径是"先 holder 后 Session.start"，
         # 这里顺序反过来，但注入点相同）。同 run 续跑会换一枚聚合（见 `_commit_paused_resume`），
         # 所以绑定必须在提交**之后**，否则绑到的是不再被驱动的那一枚。
         if same_run_resume:
-            # 阶段二（锁内 CAS 写侧）：**所有能失败的开工前步骤都过了**（工作目录、
-            # 恢复/reconcile、runtime 装配）才落 `run/resumed`——反过来的顺序会在
-            # 装配失败时留下"已恢复但没人跑"的账，客户端重试还会因版本已变被拒。
-            launch_budget, session = await self._commit_paused_resume(
+            # 锁覆盖 CAS、必要 Recovery 与运行时装配；失败的恢复/装配不会留下
+            # run/resumed，迟到输家也不会先写 recovery/session 事件或构造模型。
+            (
+                launch_budget, session, runtime,
+                interactive, approval_callback,
+            ) = await self._commit_paused_resume(
                 session_id=session_id, run_id=claim_run_id,
                 expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis, fuse=fuse,
@@ -1204,7 +1221,10 @@ class SessionService:
                 # 带上端口（缺了它本次观测全为 None，环境 / 策略两条依据一律判"无快照
                 # 可比"而来不到这里）。两阶段共用同一枚端口 ⇒ 同一份输入。
                 port=stuck_evidence,
+                runtime_builder=build_resume_runtime,
             )
+        else:
+            runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
         run, subscriber = self._run_manager.launch(session, runtime, task)
@@ -1356,20 +1376,26 @@ class SessionService:
         self, *, session_id: str, run_id: str, expected_version: int,
         limits: RunLimits, resume_basis: str, fuse: LocalFuse,
         port: StuckEvidencePort | None = None,
-    ) -> tuple[LaunchRunBudget, Session]:
-        """阶段二（锁内 CAS 写侧）：重校验 + 落 `run/resumed`，返回续跑上下文。
+        runtime_builder: Callable[
+            [LaunchRunBudget],
+            Awaitable[tuple[Any, bool, ApprovalCallback | None | _InteractiveCallbackHolder]],
+        ],
+    ) -> tuple[
+        LaunchRunBudget, Session, Any, bool,
+        ApprovalCallback | None | _InteractiveCallbackHolder,
+    ]:
+        """阶段二：锁内重校验、必要 Recovery、Runtime 装配与恢复事件提交。
 
-        重校验不是冗余：阶段一与这里之间隔着工作目录对账、reconcile 与 runtime
-        装配（都 await）。同一把锁内"读 version → 写 run/resumed"之间没有别的
-        写者 ⇒ 同一版本至多一个成功者（AC-8 的进程内半边；跨进程由单写者部署
-        保证，见 tracker 残余项）。
+        阶段一与这里隔着工作目录对账和其他 await，因此必须重校验。锁内先重验 CAS，
+        再执行可能追加事件的 Recovery 与 Runtime 装配，最后提交恢复事件；输家在拒绝前
+        不会留下恢复副作用，也不会构造模型。同一把锁内没有其他恢复写者 ⇒ 同一版本至多
+        一个成功者（AC-8 的进程内半边；跨进程由单写者部署保证，见 tracker 残余项）。
 
         **为什么在锁内重新加载聚合、并把这一枚交回调用方去 launch**：seq 计数器
-        属于聚合实例（`Session._next_seq`），旁路追加（本方法要落的 `run/resumed`）
-        用的是另一枚聚合的计数器——若 launch 沿用"提交之前构造的那一枚"，它的
-        计数器会**落后一条**，runtime 的第一次 append 就会写出重复 seq（
-        `_live_session` 的注释记录过这个形状：重复 seq 让会话不可 resume）。
-        所以：锁内重读 → 用刚读过盘的聚合追加 → 把同一枚聚合交给 runtime。
+        属于聚合实例（`Session._next_seq`），旁路追加和 runtime 必须使用刚重读的聚合；
+        否则计数器可能落后，后续 append 会写出重复 seq（`_live_session` 的注释记录过
+        这个形状：重复 seq 让会话不可 resume）。所以锁内重读 → 装配 → 追加恢复事实 →
+        把同一枚聚合交给 runtime。
         """
         async with self._resume_lock(session_id):
             events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
@@ -1378,10 +1404,35 @@ class SessionService:
                 events, run_id=run_id, expected_version=expected_version,
                 limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
             )
+            needs_recovery = (
+                detect_dangling(events)
+                or detect_unterminated_runs(events)
+                or await self._has_unreconciled_operations(session_id)
+            )
+            if needs_recovery:
+                # RecoveryCoordinator 会追加 session/resumed。只在本请求已通过锁内
+                # CAS 后执行，避免迟到输家占用 runtime 的下一个事件序号。
+                await self.recover(session_id)
+                events = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id,
+                )
+                # 重读之后**暂停事实与现场观测一起重算**：`#317` 的两条依据判的是
+                # 「停下的那一刻 vs 请求这一刻」，只重算一边会让它们各自对着不同的
+                # 事件流比（ADR-0048 D7）。
+                evidence = self._resume_evidence(events, run_id=run_id, port=port)
+                paused, effective, evidence = self._paused_resume_state(
+                    events, run_id=run_id, expected_version=expected_version,
+                    limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
+                )
             session = Session.load(
                 self._store, session_id,
                 workspace_registry=self._workspace_registry,
             )
+            launch_budget = self._launch_budget_from(paused, limits=effective)
+            runtime, interactive, approval_callback = await runtime_builder(launch_budget)
+            # Recovery 已写 SESSION_RESUMED；否则只让 CAS 胜者写这条恢复事实。
+            if not needs_recovery:
+                session.append(SESSION_RESUMED, {})
             session.append(
                 RUN_RESUMED,
                 build_resume_data(
@@ -1406,7 +1457,7 @@ class SessionService:
                 # 步号空间（下一次 model/* 自己按 step_base 续号）。
                 run_id=paused.run_id,
             )
-            return self._launch_budget_from(paused, limits=effective), session
+            return launch_budget, session, runtime, interactive, approval_callback
 
     # ── 重连续传 ─────────────────────────────────────────────────────
 

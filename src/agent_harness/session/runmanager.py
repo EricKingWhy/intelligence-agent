@@ -252,6 +252,11 @@ class RunManager:
         # = 不缓存（CLI 等调用方不消费看板）；Web 层在正确的时刻叫它。
         self._on_context_snapshot = on_context_snapshot
         self._runs: dict[str, ManagedRun] = {}
+        # #341：在途 run task 的独立集合——`_runs` 按 session_id 记账，同会话
+        # resume 再 launch 会**覆盖**旧条目，而旧 task 的收尾（finalizer 落盘）
+        # 可能还在跑；没有这张表，`aclose()` 会漏取消它（256 分支遗留加固，
+        # 未随 #248 重构迁移）。
+        self._tasks: set[asyncio.Task] = set()
         # `#312`：同会话恢复的 CAS 临界区锁（每会话一把，终身保留——与 `_runs`
         # 同一条"每会话一条、不回收"的口径）。
         #
@@ -267,10 +272,11 @@ class RunManager:
         self._closing = False
 
     def session_lock(self, session_id: str) -> asyncio.Lock:
-        """取得该会话的串行化锁（同会话的 CAS 临界区，`#312`）。
+        """取得该会话的串行化锁（同会话恢复临界区，`#312` / `#342`）。
 
-        调用方约定：**只在临界区持有**（读 version → 写 `run/resumed`），不要跨
-        整个 run 生命周期持有——不同临界区之间（launch 之后）的串行化由
+        调用方可在恢复计划校验与最终提交期间持有它；最终提交会覆盖 CAS 重验、
+        必要的恢复/对账、运行时装配及恢复事件写入，确保 CAS 输家不会先留下恢复事件
+        或构造模型。不要跨 `RunManager.launch` 或整个 run 生命周期持有——提交后的并发启动由
         `get_active` 的 409 负责。
         """
         lock = self._session_locks.get(session_id)
@@ -291,6 +297,10 @@ class RunManager:
         ``user_input=None``（`#312` 同 run 续跑，无新任务文本）原样透传：
         由 runtime 决定"不落 user/message"——本层不替它编文案。
         """
+        # #341：关停窗口内拒绝开新 run——进程马上没了，新 run 只会被半个
+        # 生命周期地拖死（与 `_notify_run_terminal` 的 `_closing` 跳同一口径）。
+        if self._closing:
+            raise RuntimeError("RunManager is shutting down")
         run = ManagedRun(session, self)
         # #200：runtime 引用存到 ManagedRun——context-usage 端点从在途 run 的
         # builder 读最近一次 build 快照（launch 时刻 builder 还没 build 过，
@@ -301,6 +311,9 @@ class RunManager:
             self._drive(run, runtime, user_input),
             name=f"agent-run-{session.session_id}",
         )
+        # #341：task 进独立集合——`aclose()` 靠它兜住被 `_runs` 覆盖掉的旧 task。
+        self._tasks.add(run.task)
+        run.task.add_done_callback(self._tasks.discard)
         subscriber = run.subscribe()
         return run, subscriber
 
@@ -420,11 +433,11 @@ class RunManager:
     async def aclose(self) -> None:
         """应用关停：取消全部在途 run 并等待收尾（幂等）。"""
         self._closing = True  # 先置位：取消引发的终态回调不得再接力开新 run
-        for run in list(self._runs.values()):
-            if run.task is not None and not run.task.done():
-                run.task.cancel()
-        tasks = [run.task for run in self._runs.values()
-                 if run.task is not None and not run.task.done()]
+        # #341：按 `_tasks` 集合取消而非只遍历 `_runs`——同会话 resume 覆盖
+        # `_runs` 条目后，旧 task 的收尾仍在跑，只有这张表还引用着它。
+        tasks = tuple(task for task in self._tasks if not task.done())
+        for task in tasks:
+            task.cancel()
         for run in self._runs.values():
             run.finish()
         if tasks:

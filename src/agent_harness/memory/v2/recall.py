@@ -219,7 +219,7 @@ class MemoryV2ContextProvider:
                 ) if query.strip() else []
                 messages, selected_profile, selected_collection = self._fit(
                     profiles, collections, token_budget,
-            )
+                )
             run_id = run_context_var.get()
             if run_id is not None and (selected_profile or selected_collection):
                 session.append(MEMORY_RECALLED, {

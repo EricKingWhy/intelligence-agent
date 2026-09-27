@@ -174,6 +174,155 @@ async def test_runtime_without_sink_drives_the_null_tracer_port(tmp_path, monkey
     ]
 
 
+def test_memory_v2_run_omits_all_trace_content_even_when_global_mode_is_full(tmp_path):
+    """Memory V2 traces retain approved metadata while excluding user/model/tool payloads."""
+    from types import SimpleNamespace
+
+    recorder = FakeRecorder()
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk", trace_content="full",
+        client_factory=lambda **_kwargs: recorder.client(),
+    )
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([]), registry, ToolExecutor(registry),
+        memory_formation=object(), observability_sink=sink,
+    )
+    tracer = runtime._new_tracer(
+        make_session(tmp_path), "run-1", "private user prompt", 1,
+    )
+
+    tracer.run_started()
+    generation = tracer.model_call_started(
+        step=1, messages=[{"content": "private prompt and evidence"}], model="memory-primary",
+    )
+    tracer.model_call_completed(
+        generation,
+        output_text="private memory response",
+        usage={"total_tokens": 7},
+        duration_ms=12,
+        fallback_transitions=[SimpleNamespace(
+            from_model="memory-primary", to_model="memory-fallback",
+            reason="private provider response with credential=secret-value",
+        )],
+    )
+    tool_span = tracer.tool_span_started(
+        tool_name="memory_search", tool_call_id="call-1",
+        args={"query": "private memory content"}, is_delegate=False,
+    )
+    tracer.tool_span_completed(
+        tool_span, outcome="success", message="private tool output",
+        attempts=[{"attempt": 1, "error_message": "credential=secret-value"}],
+        session_id="session-1", extra={"unapproved": "private evidence"},
+    )
+    tracer.run_completed("private final response", usage_total={"total_tokens": 7})
+    tracer.run_failed("credential=secret-value")
+
+    captured = repr(recorder.spans)
+    for forbidden in (
+        "private user prompt", "private prompt and evidence", "private memory response",
+        "private memory content", "private tool output", "private final response",
+        "secret-value", "private evidence",
+    ):
+        assert forbidden not in captured
+    root = recorder.spans[0]
+    assert "input" not in root.kwargs
+    assert root.kwargs["metadata"]["run_id"] == "run-1"
+    assert len(root.kwargs["metadata"]["input_sha256"]) == 64
+    generation_span = root.children[0]
+    assert "input" not in generation_span.kwargs
+    assert len(generation_span.kwargs["metadata"]["input_sha256"]) == 64
+    assert generation_span.updates[-1]["usage_details"]["total"] == 7
+    assert "output" not in generation_span.updates[-1]
+    assert "fallback_reason" not in generation_span.updates[-1].get("metadata", {})
+    assert generation_span.updates[-1]["metadata"]["fallback_from"] == "memory-primary"
+    assert generation_span.updates[-1]["metadata"]["duration_ms"] == 12
+    assert len(generation_span.updates[-1]["metadata"]["output_sha256"]) == 64
+    tool = root.children[1]
+    assert "input" not in tool.kwargs
+    assert len(tool.kwargs["metadata"]["input_sha256"]) == 64
+    assert "output" not in tool.updates[-1]
+    assert tool.updates[-1]["metadata"]["outcome"] == "success"
+    assert tool.updates[-1]["metadata"]["attempt_count"] == 1
+    assert len(tool.updates[-1]["metadata"]["output_sha256"]) == 64
+    assert "unapproved" not in tool.updates[-1]["metadata"]
+    assert root.updates[-2]["metadata"]["usage_total"] == {"total_tokens": 7}
+
+
+def test_memory_observation_uses_bounded_metadata_and_redacts_sdk_errors(caplog):
+    class _BrokenObservation:
+        def end(self):
+            raise RuntimeError("api_key=never-log-this")
+
+    class _Client:
+        def start_observation(self, **_kwargs):
+            return _BrokenObservation()
+
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk", breaker_threshold=1,
+        client_factory=lambda **_kwargs: _Client(),
+    )
+
+    sink.memory_observation(
+        stage="formation",
+        metadata={
+            "job_id": "job-1", "kind": "semantic", "scope": "user_global",
+            "reason_code": "provider_error", "input_tokens": 42,
+            "prompt": "must not be recorded",
+        },
+    )
+
+    assert "never-log-this" not in caplog.text
+    assert any(
+        "Langfuse error details redacted" in repr(record.__dict__)
+        for record in caplog.records
+    )
+
+
+def test_memory_observation_captures_only_allowlisted_metadata():
+    recorder = FakeRecorder()
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk",
+        client_factory=lambda **_kwargs: recorder.client(),
+    )
+
+    sink.memory_observation(
+        stage="formation",
+        metadata={
+            "job_id": "job-1", "stage": "forming", "kind": "semantic",
+            "scope": "user_global", "input_tokens": 42,
+            "output_failure_kind": "contract_violation",
+            "counts": {"accepted": 1, "secret": "private evidence"},
+            "kind_counts": {"semantic": 1},
+            "source_authority": ["user", "private evidence"],
+            "prompt": "must not be recorded",
+        },
+    )
+
+    observation = recorder.spans[0]
+    assert observation.name == "memory-formation"
+    assert observation.ended is True
+    assert observation.kwargs["metadata"] == {
+        "job_id": "job-1", "stage": "forming", "observation": "formation",
+        "kind": "semantic", "scope": "user_global", "input_tokens": 42,
+        "output_failure_kind": "contract_violation",
+        "counts": {"accepted": 1},
+        "kind_counts": {"semantic": 1},
+        "source_authority": ["user"],
+    }
+
+
+def test_memory_metadata_hashes_are_accepted_but_raw_evidence_is_removed():
+    from agent_harness.observability.sink import sanitize_memory_metadata
+
+    digest = "a" * 64
+    assert sanitize_memory_metadata({
+        "input_sha256": digest,
+        "evidence_sha256": digest,
+        "evidence": "private content",
+    }) == {"input_sha256": digest, "evidence_sha256": digest}
+
+
 @pytest.mark.asyncio
 async def test_exploding_sink_leaves_run_events_identical_to_no_sink(tmp_path):
     """sink 每个方法都抛：事件流（含工具重试链与 ToolResult）与"没有 sink"逐字段一致。"""
@@ -269,6 +418,36 @@ async def test_failing_run_drives_terminal_port_lifecycle(tmp_path, monkeypatch)
         "run_started", "context_build_started", "context_build_completed",
         "model_call_started", "model_call_failed", "run_failed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_memory_v2_langfuse_outage_does_not_fail_agent_runtime(tmp_path, caplog):
+    class _BrokenClient:
+        def start_observation(self, **_kwargs):
+            raise RuntimeError("api_key=private-value")
+
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk",
+        client_factory=lambda **_kwargs: _BrokenClient(),
+    )
+
+    class _MemoryFormation:
+        async def notify_run_finished(self, **_kwargs):
+            return None
+
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        ScriptedModel([AIMessage(content="safe answer")]), registry,
+        ToolExecutor(registry), memory_formation=_MemoryFormation(), observability_sink=sink,
+    )
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "private user prompt")
+
+    assert result.status == "completed"
+    assert result.final_text == "safe answer"
+    assert session.events[-1].type == RUN_COMPLETED
+    assert "private-value" not in caplog.text
 
 
 @pytest.mark.asyncio
