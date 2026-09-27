@@ -815,14 +815,9 @@ def with_level(signal: StuckSignal, level: str) -> StuckSignal:
 def worst_stuck_signal(signals: Sequence[StuckSignal]) -> StuckSignal | None:
     """一次 `advance` 里最多执行一个动作：暂停优先，其次按 `02 §5.3` 的表序。
 
-    **同一批里刚发出 replan 的那个模式，这一批不暂停**（`#317` T9 审查 P1）。
-    `02 §5.3` 写的是"首达阈值 ⇒ 恰好一次 replan；**replan 后**同一模式仍持续 ⇒ 暂停"
-    ——"之后"要求至少一次**后续**观测。一批 6 条相同失败会让 ① 的 T 与 2T 在同一个
-    `advance` 里同时到线（`RepeatedToolFailureGuard` 在计数 3 发 SOFT、6 发 HARD），
-    那时候该执行的是那条 replan（纠正消息落盘、模型看得见），暂停留给下一次仍然重复
-    的观测。原实现"暂停优先"会把同批的 replan 直接压掉：模型一条纠正都没收到，而
-    `guard/stuck` / `run/paused.stuck` 的 `replan_count` 照样写 1——一条对不上账的
-    "已用掉"。暂停本身没丢：下一次再重复就只发暂停（同批没有 replan 信号了）。
+    例外（操作约束）：**同一批里刚发出 replan 的那个模式，这一批不暂停**——`02 §5.3`
+    的"replan **后**同一模式仍持续 ⇒ 暂停"要求至少一次后续观测，而一批事件里 T 与 2T
+    可能同时到线。抑制是**按模式**的（跨模式同批仍会挑出暂停，ADR-0048 D5 / 残余 12）。
     """
     if not signals:
         return None

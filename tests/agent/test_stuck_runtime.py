@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.guards import (
     STUCK_LEVEL_PAUSED,
     STUCK_LEVEL_REPLAN,
@@ -31,13 +32,19 @@ from agent_harness.agent.guards import (
     StuckDetector,
     worst_stuck_signal,
 )
+from agent_harness.agent.profiles import AgentSpec
+from agent_harness.agent.resume_evidence import ResumeEvidence, evidence_port
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CONTINUATION_ACTION_KEY,
     REASON_STUCK,
+    RESUME_BASIS_ENVIRONMENT_CHANGE,
+    RESUME_BASIS_POLICY_CHANGE,
+    RESUME_BASIS_RELEVANT_STEER,
     STUCK_RESUME_REQUIREMENTS,
     derive_run_budget,
     latest_paused_run,
+    stuck_resume_evidence,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -88,11 +95,11 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def _runtime(model, *, max_agent_turns: int = 30) -> AgentRuntime:
+def _runtime(model, *, max_agent_turns: int = 30, stuck_evidence=None) -> AgentRuntime:
     registry = _registry()
     return AgentRuntime(
         model=model, registry=registry, executor=ToolExecutor(registry),
-        max_agent_turns=max_agent_turns,
+        max_agent_turns=max_agent_turns, stuck_evidence=stuck_evidence,
     )
 
 
@@ -125,8 +132,59 @@ def _run_id_of(session: Session) -> str:
     )
 
 
-# ── ① 的接线：一条纠正 + 一次暂停 ─────────────────────────────────────────
+# ── 委派子 run：环境那一半在、策略那一半不在（#317 T9 二轮审查 P2 / 残余 15）──
 
+
+class TestDelegatedChildEvidence:
+    """子会话的 stuck 暂停必须**可恢复**，或至少不假装可恢复。
+
+    子会话是 durable 的（在会话列表里可见）、`run/paused` 是**非终态**，所以"恢复入口
+    必然 409"这件事在载荷层面就不许成立：环境 revision 记下来（child workspace = 父的
+    同一棵树），策略那一格如实 `None`（Factory 收不到 child 的生效策略面，照抄父级那份
+    等于记一个 child 没跑过的面 ⇒ 假 `policy_change`），依据清单只列可用的那两条。
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_child_pause_is_resumable_by_an_environment_change(self, tmp_path) -> None:
+        spec = AgentSpec(
+            name="child", description="d", system_prompt="s",
+            tool_scope=frozenset({"fail"}),
+        )
+        port = evidence_port(workspace=tmp_path, permission_mode="workspace-write")
+        factory = AgentFactory(
+            model=ScriptedModel([_round(index) for index in range(6)]),
+            stuck_evidence=port,
+        )
+        child = factory.create(
+            spec, source_registry=_registry(), grantable=frozenset({"fail"}),
+        )
+        session = make_session(tmp_path)
+
+        result = await child.run(session, "反复试同一个失败命令")
+
+        assert result.status == STATUS_PAUSED
+        pause_event = _events(session, RUN_PAUSED)[0]
+        stuck = pause_event.data["stuck"]
+        assert stuck["environment_revision"] is not None      # 真观测到了
+        assert stuck["policy_version"] is None                # 没观测过就不假装观测过
+        assert stuck["policy_inputs"] is None
+        assert pause_event.data["resume_requirements"] == [
+            RESUME_BASIS_RELEVANT_STEER, RESUME_BASIS_ENVIRONMENT_CHANGE,
+        ]
+        action = pause_event.data["continuation"][CONTINUATION_ACTION_KEY]
+        assert RESUME_BASIS_POLICY_CHANGE not in action       # 不指一条必被 409 挡死的路
+
+        # 列出来的依据**真能用**：换一个环境 revision 的恢复被采纳（判据不抛冲突）。
+        paused = latest_paused_run(session.events)
+        assert paused is not None
+        admitted = stuck_resume_evidence(
+            paused, resume_basis=RESUME_BASIS_ENVIRONMENT_CHANGE,
+            evidence=ResumeEvidence(environment_revision="sha256:env-after"),
+        )
+        assert admitted is not None and admitted["basis"] == RESUME_BASIS_ENVIRONMENT_CHANGE
+
+
+# ── ① 的接线：一条纠正 + 一次暂停 ─────────────────────────────────────────
 
 class TestFailureLoopBecomesAPause:
     @pytest.mark.asyncio
@@ -170,7 +228,10 @@ class TestFailureLoopBecomesAPause:
         paused = latest_paused_run(session.events)
         assert paused is not None and paused.reason == REASON_STUCK
         assert paused.trigger_dimension == STUCK_PATTERN_TOOL_FAILURE
-        assert paused.resume_requirements == STUCK_RESUME_REQUIREMENTS
+        # 没注入证据端口 ⇒ 快照两格缺席 ⇒ 清单只列**还算数**的那条
+        # （`stuck_resume_requirements`：列一条永远 409 的依据就是 `03 §5` 禁止的
+        # "暗示可安全续跑"，T9 二轮审查 P2）。
+        assert paused.resume_requirements == (RESUME_BASIS_RELEVANT_STEER,)
 
     @pytest.mark.asyncio
     async def test_the_pause_payload_carries_the_evidence_snapshot(self, tmp_path) -> None:
@@ -196,7 +257,35 @@ class TestFailureLoopBecomesAPause:
         assert stuck["environment_revision"] is None
         assert stuck["policy_version"] is None
         assert stuck["policy_inputs"] is None
+        assert pause_event.data["resume_requirements"] == [RESUME_BASIS_RELEVANT_STEER]
+
+    @pytest.mark.asyncio
+    async def test_a_portful_runtime_advertises_the_three_bases(self, tmp_path) -> None:
+        """注入证据端口 ⇒ 快照三格齐全 ⇒ 清单是三条、确定性文案也逐条列出来。
+
+        与上一条合起来钉的是**同一份判据的两个方向**：格在就列、格缺就不列
+        （`stuck_resume_requirements` 与 `stuck_resume_evidence` 同源）。
+        剧本不给 closeout 产出 ⇒ 走确定性组装，文案因此由本仓库负责。
+        """
+        scripted = ScriptedModel([_round(index) for index in range(6)])
+        session = make_session(tmp_path)
+        port = evidence_port(workspace=tmp_path, permission_mode="workspace-write")
+
+        await _runtime(scripted, stuck_evidence=port).run(session, "反复试同一个失败命令")
+
+        pause_event = _events(session, RUN_PAUSED)[0]
+        stuck = pause_event.data["stuck"]
+        # 环境 revision 是**暂停那一刻**当场 walk 出来的（此后工作区还会变，所以只断言
+        # "真的观测到了"），策略那一对在装配时算好、逐字可比。
+        assert stuck["environment_revision"] is not None
+        assert stuck["environment_revision"].startswith("sha256:")
+        assert stuck["policy_version"] == port.policy_version
+        assert stuck["policy_inputs"] == port.policy_inputs
         assert pause_event.data["resume_requirements"] == list(STUCK_RESUME_REQUIREMENTS)
+        assert pause_event.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
+        action = pause_event.data["continuation"][CONTINUATION_ACTION_KEY]
+        for basis in STUCK_RESUME_REQUIREMENTS:
+            assert basis in action
 
     @pytest.mark.asyncio
     async def test_the_continuation_never_hints_at_raising_a_ceiling(self, tmp_path) -> None:
@@ -213,10 +302,12 @@ class TestFailureLoopBecomesAPause:
         text = json.dumps(continuation, ensure_ascii=False)
         assert "ceiling" not in text
         assert "预算" not in text
-        # 确定性 continuation 给的动作与三类依据逐条对应
+        # 确定性 continuation 只列**可用**的依据：没端口时环境 / 策略两条在快照里
+        # 缺席，文案里就不许出现（出现 = 指一条必被 409 挡死的路）。
         action = continuation[CONTINUATION_ACTION_KEY]
-        for basis in STUCK_RESUME_REQUIREMENTS:
-            assert basis in action
+        assert RESUME_BASIS_RELEVANT_STEER in action
+        assert RESUME_BASIS_ENVIRONMENT_CHANGE not in action
+        assert RESUME_BASIS_POLICY_CHANGE not in action
 
     @pytest.mark.asyncio
     async def test_a_model_closeout_that_claims_a_budget_fix_is_still_not_trusted(

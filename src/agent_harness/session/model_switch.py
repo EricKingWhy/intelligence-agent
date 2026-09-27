@@ -77,26 +77,20 @@ def restore_policy_inputs(
     recorded: Mapping[str, Any] | None,
     events: list[SessionEvent],
 ) -> AmendOptions | None:
-    """同 run 恢复：请求没点名的策略面沿用**暂停时生效**的值（`#317` T9 审查 P1）。
-
-    为什么必须有这一条：暂停快照记的是"那次执行生效的策略面"（档位 / effort /
-    providers / 模型），恢复侧却只拿得到**本次请求声明的** amend。两次请求的字段集合
-    一不同（CLI 的 resume 一个策略字段都不声明），算出来的策略摘要就不同，于是
-    `policy_change` 在"其实什么都没变"的恢复上成立——依据成了**漏声明**本身
-    （fail-open：无依据也放行）。还原之后，"没变"恒等于"摘要相同" ⇒ 409。
+    """同 run 恢复：请求没点名的策略面沿用**暂停时生效**的值（ADR-0048 D6/D8）。
 
     优先级：**请求显式声明 > 会话切换过的模型 > 暂停快照**。模型这一维要单独小心：
     `amend_with_session_model` 只在 `amend.model is None` 时才补会话模型，所以只有会话里
     **没有**切换记录时这里才补快照里的模型——否则会把用户暂停之后的切换盖掉，而那一跳
     恰恰是一条合法的策略依据（调用点因此在 `amend_with_session_model` **之前**还原）。
 
-    **快照模型不做 catalog 回落**（与 `amend_with_session_model` 的 `#137` 口径不同，
-    理由在此）：回落会静默换掉策略面，而换掉之后的摘要必然与快照不同 ⇒ `policy_change`
-    会假成立——那正是本条要堵的 fail-open 的另一种走法。快照里的模型真的不可用了（配置
-    变更），装配层会响亮失败，客户端显式声明 `model` 即可恢复。
+    **快照模型不做 catalog 回落**（与 `amend_with_session_model` 的 `#137` 口径不同）：
+    回落会静默换掉策略面、把"没变"算成"变了"。快照里的模型真的不可用了（配置变更），
+    装配层会响亮失败，客户端显式声明 `model` 即可恢复。
 
-    `recorded` 为 `None`（非 stuck 暂停 / 载荷里没有逐维值）⇒ 原样返回，行为不变；
-    逐维值全为 `None`（那次执行就是默认策略）⇒ 也原样返回，不凭空造出一个 amend。
+    `recorded` 为 `None`（非 stuck 暂停 / 载荷里没有逐维值 / 逐维值与摘要对不上）⇒ 原样
+    返回，行为不变；逐维值全为 `None`（那次执行就是默认策略）⇒ 也原样返回，不凭空造一个
+    amend 出来。
     """
     if not recorded:
         return amend

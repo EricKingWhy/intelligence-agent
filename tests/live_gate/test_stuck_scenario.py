@@ -664,8 +664,15 @@ def test_resumed_leg_may_end_in_a_pause_without_a_crash(tmp_path):
 
     这一条钉的是一个真实踩过的缺陷：判据里引用了未定义的局部名，只有在"完成了"那一
     侧才被短路掩盖（`or` 的右侧不求值）——所以两条路都要有用例。
+
+    恢复腿的这条暂停走**预算**（只多一条 `run/paused`，不添第二条
+    `guard/stuck(level=paused)`）：即使没有 `run/completed`，`resumed_leg_ended_safely`
+    也认"恢复腿自己的最后一条终态 ∈ {completed, paused}"。暂停**之前**那一次 stuck 不算
+    数——那正是 `#317` T9 二轮审查 S8 钉住的恒真（旧判据的 `or bool(pauses)`）。
     """
-    events, legs = _trajectory(terminal=False)
+    events, legs = _trajectory(
+        terminal=False, extra_events=[("run/paused", {"reason": "budget"})]
+    )
     assertions = _assertions(tmp_path, events, _legs(legs))
     assert _failed(assertions) == set()
 
@@ -723,6 +730,6 @@ def test_malformed_pause_payload_is_red_not_crash(tmp_path):
 def test_scenario_identity_and_description():
     assert isinstance(SCENARIO, StuckToolFailurePauseScenario)
     assert SCENARIO.id == "stuck-tool-failure-pause"
-    assert SCENARIO.version == 4
+    assert SCENARIO.version == 5
     assert "stuck" in SCENARIO.description and "409" in SCENARIO.description
     assert "environment_change" in SCENARIO.description

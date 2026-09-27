@@ -147,12 +147,13 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
   暂停"，所以一批事件里若同一个模式既到 T 又到 2T，这一批只执行那条 replan（纠正消息落盘、
   模型看得见），暂停留给下一次仍然重复的观测。原实现按"暂停优先"挑动作（`worst_stuck_signal`
   的级别序），会把同批的 replan 直接压掉——模型一条纠正都没收到，而 `replan_count` 照样写 1。
-- **暂停**：任何模式在**本批没有发出它自己的 replan** 的前提下越过 2T 时落
+- **暂停**：**同一个模式**在本批没有发出它自己的 replan 的前提下越过 2T 时落
   `guard/stuck(level=paused)`，随后走既有的 `_terminal_paused`（对账闸门 → closeout →
   恰好一条 `run/paused` → `mark_terminal_written`）。
-  口径是**按模式**的（`worst_stuck_signal` 只把"同批也发了 replan 的那个模式"的 paused
-  级信号从挑选里去掉）：跨模式同批（例如 ② 首达 T、① 同批越过 2T）仍按级别序挑出暂停，
-  那条 ② 的 replan 这一批不执行——登记为残余 12，本票不改成"批级优先"。
+  "同一模式"是**逐字照规格**（`02 §5.3`：replan 后**同一模式**仍持续 ⇒ 暂停）：抑制是
+  **按模式**的（`worst_stuck_signal` 只把"本批也发了 replan 的那个模式"的 paused 级信号
+  从挑选里去掉）。跨模式同批（例如 ② 首达 T、① 同批越过 2T）**不构成抑制**——仍按级别序
+  挑出暂停，那条 ② 的 replan 这一批不执行，登记为残余 12，本票不改成"批级优先"。
   `reason=stuck`、`trigger_dimension=<模式名>`、`resume_requirements` = 三类依据（D7）。
   **不再**落 `run/failed`：`STATUS_IDENTICAL_TOOL_FAILURE_LOOP` 这个终态从生产路径消失
   （常量保留，历史会话仍能读）。
@@ -165,7 +166,12 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
 - `run/paused.data.stuck`（仅 `reason=stuck` 出现，缺席即旧形状不变）：
   `{pattern, threshold, count, replan_count, fingerprint, environment_revision, policy_inputs,
   policy_version}`。
-  `resume_requirements` 非空（三类依据），这是客户端唯一的"不能一键重试"刹车灯。
+  `resume_requirements` 非空，这是客户端唯一的"不能一键重试"刹车灯；它列的是**这条暂停
+  当前真能接受**的依据（`run_budget.stuck_resume_requirements`：`relevant_steer` 常在，
+  环境 / 策略两条看快照里那一格在不在），不是固定三条——列一条永远 409 的依据就是 `03 §5`
+  / ADR-0044 D4 禁止的"暗示可安全续跑"（T9 二轮审查 P2：委派子 run 没有证据端口时快照两格
+  `None`，而旧实现照样列三条）。确定性 continuation 与 closeout 指令都渲染**同一份**可用
+  集合（`describe_resume_requirements`）。
 - **`policy_inputs` 与 `policy_version` 是同一次计算的两种投影**（`#317` T9 审查 P1）：逐维值
   （权限档 / 模型 / profile / reasoning effort / context providers）必须一起落盘，恢复侧才能把它们
   还原回自己的 amend、再用**同一个** `policy_version_of` 重算。只记摘要时，恢复侧拿"本次请求声明
@@ -173,6 +179,11 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
   `policy_change` 成了可伪造的依据（fail-open）。有了逐维值，两侧摘要**按构造**对称：省略
   不是变化。（恢复侧还原的优先级：本次请求声明 > 会话级模型切换 > 暂停快照；快照里的 model
   逐字还原、**不做**目录回落——回落会悄悄换掉策略面，把"没变"算成"变了"。）
+  **模型这一维有一个例外**：会话在暂停之前就切换过模型（`model/changed`）时，那一跳优先于
+  快照 ⇒ 不带声明的恢复会用会话当前模型现算，摘要与快照不同 ⇒ `policy_change` 被采纳。这不是
+  fail-open：恢复后**生效的**模型面确实与暂停时不同（"变了"是事实）；只是"普通恢复恒等于
+  暂停时那一套"这句话对模型这一维不成立——判断"切换发生在暂停前还是暂停后"需要一条事件之外
+  的时间线，与残余 1"只能判变过、判不了更新"同类（T9 二轮审查 P3-4，行为不改、登记于此）。
   `context_providers` 记**原值**：`None`（未声明 ⇒ 装配全部 wired）与 `[]`（显式零 provider）
   是两种策略面，归一化会让"从全量改成零"看上去没变，而把 `None` 还原成 `[]` 会把恢复腿的
   provider 丢光（T9 审查 P2）。
@@ -198,10 +209,13 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
 
 | basis | 观测口径 | 缺依据时 |
 | --- | --- | --- |
-| `relevant_steer` | 事件流里存在 `seq > pause_seq` 的 `steer/requested`，且它的 `run_id` 与这个 run **逐字相同**，内容非空 | 409 |
+| `relevant_steer` | 事件流里存在 `seq > pause_seq` 的 `steer/requested`，且它的 `run_id` 与这个 run **逐字相同** | 409 |
 | `environment_change` | 用**同一个** `workspace_revision(root)` 重算比暂停快照里记录的值不同 | 409 |
 | `policy_change` | 用**同一个** `policy_version_of(...)` 从本次恢复解析出的生效策略重算，比快照里的值不同 | 409 |
 
+- `relevant_steer` 只判**存在性**（seq 在暂停之后 + `run_id` 逐字相同）：steer 的**内容非空**
+  是入口层约束（Web 的请求模型 `Field(min_length=1)`；CLI 没有 steer 入口），**不是**恢复判据
+  ——`SessionService.send_message` 本身不校验内容（T9 二轮审查 S4）。
 - `budget_increase` 对 stuck 暂停 ⇒ **409**（"抬高 ceiling"不是依据，`03 §3.4` 的暂停理由不是预算）。
 - 摘要没有全序，"更新"的机械口径只能是**不等于快照**；两侧都由服务端计算，客户端无从伪造。
   快照缺该值（无端口 / 字段缺失）⇒ 该依据不可用（fail-closed，409 明说"无快照可比"）。
@@ -217,6 +231,14 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
 端口对象。端口在装配点（`assembly.build_runtime`）注入 runtime，runtime 只在**暂停那一刻**读一次；
 恢复侧由 `session/service.py` 用**同一份函数**在现场重算。工具不内建、不缓存、不跨进程传递。
 
+**子 run 只拿环境那一半**（T9 二轮审查 P2）：`AgentFactory` 收到的端口在构造 child
+runtime 时剥掉策略两格（`policy_version` / `policy_inputs` 记成 `None`）——child 的生效
+策略面（profile / effort / context providers / 模型名）Factory 根本收不到，照抄父级那份等于
+给 child 记一个它没跑过的面，恢复侧就会拿"跨进 child 的假变更"放行（fail-open）。环境那一半
+是真的：child workspace 就是父的同一棵树（`multiagent/provider.py` 的 alias），
+`environment_revision` 两边算的确实是同一个量。于是子会话的 stuck 暂停**可经环境变更恢复**，
+策略那条如实不可用（残余 15）。
+
 **摘要输入集**（`policy_version_of` 的实参，两侧同源）：权限档、模型、agent profile、
 reasoning effort、context providers（排序后）。两个**刻意排除**项，都是 fail-open 的防线：
 
@@ -230,12 +252,9 @@ reasoning effort、context providers（排序后）。两个**刻意排除**项�
 排除项的代价是"只改了被排除项 ⇒ 恢复被拒"：用户此时仍可用 steer（`relevant_steer`，也是 continuation
 推荐的那条路）或真实的策略变更恢复，不构成死锁。
 
-**同一组输入必须两侧都在手**（`#317` T9 审查 P1）：暂停那一刻不仅算摘要，还把**逐维输入**一起
-写进 `run/paused.data.stuck.policy_inputs`（D6）；恢复侧先把它们**还原**进本次 amend，再算摘要。
-于是"这次恢复有没有改策略"比的是**同一组输入算出的两个摘要**，而不是"暂停时的那一套"与
-"本次请求声明的那一套"——后者在未声明的维度上两侧不同名，会把"没变"算成"变了"（fail-open）。
-还原的落点在 `session/model_switch.py`（`restore_policy_inputs`，由 `session/service.py` 在
-解析 fuse 与吃会话级模型切换**之前**调用），优先级与理由见 D6。
+D8 这一侧只多两条操作事实：还原的落点是 `session/model_switch.py` 的 `restore_policy_inputs`，
+它由 `session/service.py` 在解析 fuse 与吃会话级模型切换**之前**调用（档位同时是 turn ceiling
+的输入，两处必须同一个值）。
 
 ### D9 — 与既有不变量和契约的关系
 
@@ -354,29 +373,36 @@ reasoning effort、context providers（排序后）。两个**刻意排除**项�
    重启可重放性。今天兜住这类 run 的是 ①/②（同动作同观察）与预算；登记于此，不在本票扩范围。
 11. **本票之前写入的存量 stuck 暂停：`policy_change` 一律 409（fail-closed）**：那些载荷只记了
    `policy_version` 摘要、没有逐维 `policy_inputs`（D6 的"两格同源"判据因此不成立），而摘要
-   本身还原不回来 ⇒ 无法证明"策略真的变了"，`stuck_resume_evidence` 直接拒（二轮审查探针 C
-   的 L2 实测：改前 `ACCEPTED ⇒ fail-open`，改后 `BudgetConflict`）。**代价是存量会话
+   本身还原不回来 ⇒ 无法证明"策略真的变了"，`stuck_resume_evidence` 直接拒（实测：改前
+   `ACCEPTED ⇒ fail-open`，改后 `BudgetConflict`）。**代价是存量会话
    的 `policy_change` 不可用**（`relevant_steer` / `environment_change` 不受影响：它们不依赖
    策略面，也不需要还原）。方向选 fail-closed 而不是"照旧现算"：照旧现算就是 T9 审查 P1 的原始
    fail-open（省略被算成变更）。要闭合它需要一次数据迁移（按当时的策略面回填逐维值）——没有
    这样的信息（摘要不可逆），所以只能等这些会话自己走完。同一条判据也把**畸形快照**（逐维值
-   形状非法）拒在这里：探针 C 的 M1（`agent_profile` 被写成 list）在改前是 `TypeError:
+   形状非法）拒在这里：`agent_profile` 被写成 list 的那份快照在改前是 `TypeError:
    unhashable type: 'list'`（`agent/profiles.py` 取档位时炸，恢复路径以 500 收场），改后是
-   同一个 409。
+   同一个 409（回归用例 `test_a_malformed_snapshot_is_a_conflict_not_a_crash`）。
 12. **跨模式同批时，首达 T 那条 replan 仍可能被同批的暂停压掉**（二轮审查探针 D 的 D4）：
    `worst_stuck_signal` 的"replan 优先"是**按模式**的（D5）——一批里 ② 首达 T、① 同批越过 2T
    时，挑出的是暂停，② 的纠正这一批不执行（它的首达闩已被消费）。探针 D 实测：同批同模式
-   （① 首达 T + ① 越过 2T）会先出 replan（`guard/stuck=[('replan',3)] → paused@7`），跨模式
-   的选择结果与修复前逐字相同（`paused/stuck.tool_failure_loop` 对 `paused/stuck.tool_failure_loop`）。
-   两个模式的计数在多数真实循环里同源（同动作同失败的重复同时喂 ① 与 ②），可构造的是"计数被
-   不同观察打断后错位"的形状。改成批级优先（"一批里有任何 replan 就不暂停"）在本架构下也不会
+   （① 首达 T + ① 越过 2T）**先执行的是那条 replan**——它落的是**既有形状**
+   `tool/failure-guard(level=soft, consecutive_failures=3)`（D5），该 run 的 `guard/stuck`
+   里因此只有 `('paused', 'stuck.tool_failure_loop', 7)` 一行（`count=7`、`replan_count=1`、
+   恰好一次暂停，D1/D2）；变异掉"replan 先执行"则停在 `count=6` 且 `tool/failure-guard`
+   为空（D3）。跨模式的选择结果与修复前逐字相同
+   （`paused/stuck.tool_failure_loop` 对 `paused/stuck.tool_failure_loop`，D4）。
+   两个模式的计数**不同源**：① 数的是同动作同**失败**的重复，② 只在观察**成功且相同**时
+   连续（失败打断它）；与 ① 同一段历史里累加的通常是无进展那一族（同动作的失败不产生"新的
+   成功观察"⇒ ⑤ 也在涨）。所以"跨模式同批"要的形状（一个模式首达 T、另一个同批越过 2T）比
+   这里读起来更窄——**结论不变**：仍可能压掉那条 replan。改成批级优先（"一批里有任何 replan
+   就不暂停"）在本架构下也不会
    无限推迟暂停（每个模式的首达 replan 一个 episode 只可能发生一次 ⇒ 暂停最多推迟一批），但那
    超出 `02 §5.3` 的字面（它只承诺"**同一模式** replan 后仍持续 ⇒ 暂停"）；本票按字面收窄，
    形状登记于此。
 13. **装配期失败留下的孤儿 `session/resumed`**（二轮审查探针 F 的 F2）：快照里的模型若在恢复前
    被移出 catalog，`build_runtime` 处会报 `ConfigError`（响亮失败，D6 的不做回落所期望的），
    而失败发生在 `Session.resume` **之后** ⇒ 事件流里留下一条 `session/resumed` 与随后的零 run
-   事实。取证（两路，`t9_probe_orphan_resumed.py`）：
+   事实。取证（两路**一次性探针**，脚本留在仓库外的临时目录，读数如下）：
    - 恢复请求**显式声明**一个不在 catalog 的模型（不涉及任何快照还原）留下的形状**逐字相同**
      ⇒ "事件先落、启动在后"是既有顺序缺口，不是本票引入；
    - 会话**已有**当前模型（`model/changed`）而它从 catalog 消失时，还原侧按既定优先级让开这一维
@@ -384,3 +410,24 @@ reasoning effort、context providers（排序后）。两个**刻意排除**项�
      失败。这一支属 `#137` 的既有口径，本票不改，登记于此以免把两种子情况混为一谈。
    要闭合第 1 支需要把"模型可解析"提前到 `Session.resume` 之前（或把装配失败回滚成一条显式
    事实），属另一笔。
+14. **快照里的档位名不存在时是裸 `KeyError`（响亮，但不是设计过的错误形状）**（Correctness 二轮
+   复验的发现 2）：`recorded_policy_inputs` 只验**形状 + 摘要自洽**，不验值域；一份摘要自洽而
+   `agent_profile` 指向已改名 / 已删除档位的快照（手改 JSONL，或部署换过档位表）在
+   `session/service.py` 的 `_profile_turn_ceiling(amend)` 处抛 `KeyError`
+   （`agent/profiles.py` 的 `BUILTIN_PROFILES[...]`），恢复以未捕获异常收场而不是 409。与残余 13
+   同一族（快照里的配置值在恢复前失效 ⇒ 逐字还原、不做回落 ⇒ 响亮失败），差别只在错误形状：
+   模型那一支是**设计过**的 `ConfigError`，档位这一支是既有路径的裸 `KeyError`。取证
+   （`t9_probe_profile_domain.py`）：请求**显式声明**未知档位同样 `KeyError`（本票之前就如此，
+   `profiles.py` 的 docstring 明写为响亮失败）⇒ 属既有口径，本票新增的只是"无需请求声明也能走到
+   它"；两条腿都是**零副作用**（域校验发生在 `Session.resume` 之前 ⇒ 连残余 13 那条孤儿
+   `session/resumed` 都不留，实测事件数 32→32）。逃生门与模型那一支相同：请求显式声明
+   `agent_profile` 即恢复（声明优先于快照）。要闭合成 409 需要给四维定一份值域政策并与 D8 的
+   "不做回落、响亮失败"对齐，属另一笔。
+15. **委派子 run 的策略面在 T9 里没有定义**（T9 二轮审查 P2 的剩余部分）：本票给
+   `AgentFactory` 接了证据端口，但只接**环境那一半**（理由见 D8）；子会话的 `policy_version` /
+   `policy_inputs` 恒为 `None`，`policy_change` 因此对子 run 不可用——它的 stuck 暂停只能靠
+   相关 steer 或环境变更解开。这一条不是疏漏而是取舍：child 的生效策略面要定义清楚，得先回答
+   "子 agent 的 profile / effort / context providers 分别继承什么"（今天 Factory 一个都不接收），
+   而那超出本票。记在这里的两件事：① 子 run 的暂停载荷**不再假装**策略可依据（旧实现列三条 ⇒
+   恢复入口必然 409）；② 若将来要让子 run 支持 `policy_change`，落点是"给 child runtime 定义并
+   传入它自己的策略面"，不是"父的面照抄一份"。

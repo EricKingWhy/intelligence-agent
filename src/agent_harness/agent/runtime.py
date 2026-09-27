@@ -60,7 +60,6 @@ from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
     REASON_STUCK,
-    STUCK_RESUME_REQUIREMENTS,
     BudgetConsumed,
     LaunchRunBudget,
     RunLimits,
@@ -71,10 +70,12 @@ from agent_harness.agent.run_budget import (
     build_pause_data,
     closeout_capacity,
     consumed_from_events,
+    describe_resume_requirements,
     deterministic_continuation,
     normalize_continuation,
     pause_trigger,
     reason_for_dimension,
+    stuck_resume_requirements,
     utc_now,
 )
 from agent_harness.agent.streaming import BlockStreamer
@@ -252,8 +253,9 @@ def _closeout_instruction(
             f"{_budget_value_text(consumed.model_requests)} 次请求 / "
             f"{_budget_value_text(consumed.total_tokens)} token / "
             f"${_budget_value_text(consumed.cost_usd)}。\n"
-            "这次暂停**不是**预算问题：不要把恢复写成提高额度或延长时间——它缺的是"
-            "外部输入的变化（新的指令、变化后的工作区，或改变后的策略）。\n"
+            "这次暂停**不是**预算问题：不要把恢复写成提高额度或延长时间——能解开它的"
+            f"只有这些依据：{describe_resume_requirements(payload)}；"
+            "写成其余依据的那次恢复会被 409 挡死。\n"
             "只依据上面的会话历史作答，**不要**调用工具、不要推测还没发生的事。\n"
             "只输出一个 JSON 对象（不要代码块、不要多余文字），键固定为：\n"
             '{"completed": ["已确实完成的事"], "remaining": ["还没做完的事"], '
@@ -2100,11 +2102,8 @@ class AgentRuntime:
                     evidence.environment_revision if evidence else None
                 ),
                 "policy_version": evidence.policy_version if evidence else None,
-                # `#317`（T9 审查 P1）：策略面**逐维值**与上面的摘要同生共死。恢复侧要
-                # 拿它把"暂停时生效的那一套"还原回自己的 amend，否则两侧的输入集合不同
-                # （CLI 的 resume 一个策略字段都不声明）⇒ 摘要必不同 ⇒ `policy_change`
-                # 在"其实什么都没变"的恢复上成立（fail-open）。摘要只能比较、还原不了，
-                # 所以两个都要落。
+                # 逐维值与上面的摘要同生共死：摘要只能比较、还原不回来，恢复侧要靠它把
+                # "暂停时生效的那一套"还原回自己的 amend（ADR-0048 D6/D8）。
                 "policy_inputs": evidence.policy_inputs if evidence else None,
             }
         # 暂停收尾前的对账闸门（`#315` / ADR-0046 §2 D4）：位置在 continuation
@@ -2158,13 +2157,14 @@ class AgentRuntime:
                 limits=limits,
                 continuation=continuation,
                 closeout_source=closeout_source,
-                # stuck 暂停的前置条件就是那三条依据（`03 §3.4`：非空只出现在它）；
+                # stuck 暂停的前置条件就是那三条依据里**当前可用**的那些（`03 §3.4`：
+                # 非空只出现在它；可用子集由快照两格决定，见 `stuck_resume_requirements`）；
                 # 预算 / deadline 暂停没有额外前置条件。"存在未 reconcile 的副作用"
                 # **不**写在这一格：它由 `operation/reconcile-required` 事件 + Ledger 行
                 # 自己表达，恢复闸门也读那一份（`03 §5`：对账优先于恢复是**状态**规则，
                 # 不是暂停字段）。
                 resume_requirements=(
-                    STUCK_RESUME_REQUIREMENTS if stuck is not None else ()
+                    stuck_resume_requirements(stuck_payload) if stuck is not None else ()
                 ),
                 stuck=stuck_payload,
                 # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，

@@ -97,7 +97,11 @@ SCENARIO_ID = "stuck-tool-failure-pause"
 #: v4 = `#317` T9 两轴审查的处置：首跑声明非默认档位（`policy_change` 拒绝腿因此有鉴别力）、
 #: 暂停断言要求逐维策略输入能重算出记下的摘要、失败面判据进谓词（`FAILURE_MARKER`）、
 #: 删掉一条恒真断言（`ok=True` 的"无关变更没被当成进展"——事实由拒绝腿承载）。
-SCENARIO_VERSION = 4
+#: v5 = `#317` T9 二/三轮审查的处置：拒绝腿的**条数**进判据（`EXPECTED_REFUSAL_LEGS`）、
+#: `resumed_leg_ended_safely` 要求**恢复腿自己**的最后一条终态（旧的 `or bool(pauses)` 会被
+#: 恢复**之前**那次暂停满足）、重放判据从"能读回"改成 seq+type **逐条同序**（且恒加入结果）、
+#: 本地 fuse 的**投影面**进谓词（原来只写 detail）。
+SCENARIO_VERSION = 5
 
 #: 上游依赖**还没**产出的那份产物：read 工具对它必然失败（`文件 '...' 不存在。`）。
 #: 名字在任务文本里逐字点名——模型不需要猜，也不会去探索。
@@ -117,6 +121,16 @@ FAILURE_MARKER = "不存在"
 ROUND_SIZE = 3
 ROUNDS = 2
 IDENTICAL_FAILURES = ROUND_SIZE * ROUNDS
+
+#: 事实 4 必须**逐条**验过的拒绝腿（`#317` T9 二轮审查 S8）：只要求"现有的腿都拒绝"时，
+#: 删掉一条腿（少验一种依据）仍然绿——腿的条数本身就是判据。
+EXPECTED_REFUSAL_LEGS = (
+    "budget_increase",
+    "relevant_steer_without_a_steer",
+    "environment_change_unchanged",
+    "policy_change_unchanged",
+    "environment_change_outside_the_workspace",
+)
 
 #: 单次执行的收口上限（秒）。runner 的 `ATTEMPT_TIMEOUT` 是 900s；本场景两条腿都是步级的，
 #: 远低于它；超时判 FAIL（不是"跳过"）。
@@ -696,14 +710,19 @@ class StuckToolFailurePauseScenario:
 
         # ── 事实 4：四种无依据恢复 + 一条无关变更全部 409、零副作用 ──────────
         refusals = legs.get("refusals", {})
-        refused_ok = bool(refusals) and all(item.ok for item in refusals.values())
+        missing_legs = [name for name in EXPECTED_REFUSAL_LEGS if name not in refusals]
+        refused_ok = not missing_legs and all(
+            refusals[name].ok for name in EXPECTED_REFUSAL_LEGS
+        )
         results.append(AssertionResult(
             name="every_resume_without_evidence_is_a_409_with_zero_side_effects",
             ok=refused_ok,
-            detail="；".join(
-                f"{name}: {'拒绝' if item.ok else '未达判据'} — {item.reason[:160]}"
-                for name, item in refusals.items()
-            ) or "没有任何拒绝读数",
+            detail=(
+                "；".join(
+                    f"{name}: {'拒绝' if item.ok else '未达判据'} — {item.reason[:160]}"
+                    for name, item in refusals.items()
+                ) or "没有任何拒绝读数"
+            ) + (f"；缺失的腿={missing_legs}" if missing_legs else ""),
         ))
 
         # ── 事实 5：有依据的恢复放行、记账、真的继续干活 ────────────────────
@@ -754,16 +773,27 @@ class StuckToolFailurePauseScenario:
         # 有没有被投进模型上下文"，而生产没有这条投递路径（`send_message(mode="steer")` 要求
         # 有在途 run；运行时只排空内存队列）——把"模型该知道上游就绪"写成断言等于把一条
         # 不存在的产品承诺算进证据。边界、实测两条读数与残余见 ADR-0048 §4 残余 4。
+        resumed_leg = [
+            event for event in events
+            if resumed_seq is not None and (event.seq or 0) > resumed_seq
+        ]
+        leg_end = [
+            event.type for event in resumed_leg
+            if event.type in (RUN_COMPLETED, RUN_PAUSED, RUN_FAILED, RUN_INTERRUPTED)
+        ]
         results.append(AssertionResult(
             name="resumed_leg_ended_safely",
             ok=(
                 not [event for event in events if event.type == RUN_INTERRUPTED]
                 and not [event for event in events if event.type == RUN_FAILED]
-                and (RUN_COMPLETED in [event.type for event in events] or bool(pauses))
+                # 收尾必须是**恢复腿自己**的终态（原来的 `or bool(pauses)` 会被恢复**之前**
+                # 那次 stuck 暂停满足 ⇒ 恒真）；合法收尾 = completed / 再次 paused。
+                and bool(leg_end) and leg_end[-1] in (RUN_COMPLETED, RUN_PAUSED)
             ),
             detail=(
-                f"终态={[event.type for event in terminal]}；"
-                f"恢复那条腿的事件={[event.type for event in events if resumed_seq is not None and (event.seq or 0) > resumed_seq]}"
+                f"恢复腿的终态序列={leg_end}（合法收尾 = {RUN_COMPLETED} / {RUN_PAUSED}）；"
+                f"全流终态={[event.type for event in terminal]}；"
+                f"恢复腿事件={[event.type for event in resumed_leg]}"
             ),
         ))
 
@@ -784,20 +814,37 @@ class StuckToolFailurePauseScenario:
             ))
         results.append(AssertionResult(
             name="no_local_fuse_terminal",
-            ok="max_steps_exceeded" not in [
-                str(event.data.get("reason")) for event in terminal
-            ],
+            ok=(
+                "max_steps_exceeded" not in [
+                    str(event.data.get("reason")) for event in terminal
+                ]
+                # 投影面**也是**判据：终态读数的唯一消费者是它，事实只写进 detail 等于没判。
+                and projection.get("reason") != "max_steps_exceeded"
+            ),
             detail=(
                 f"terminal reason={[event.data.get('reason') for event in terminal]}；"
                 f"projection.reason={projection.get('reason')!r}"
             ),
         ))
-        if replayed and events:
-            results.append(AssertionResult(
-                name="durable_trajectory_is_replayable",
-                ok=len(replayed) <= len(events),
-                detail=f"store 读回 {len(replayed)} 条 / 服务读 {len(events)} 条",
-            ))
+        replayed_shape = [(event.seq, event.type) for event in replayed]
+        adjudicated_shape = [(event.seq, event.type) for event in events]
+        divergence = next(
+            (
+                index
+                for index, pair in enumerate(zip(replayed_shape, adjudicated_shape))
+                if pair[0] != pair[1]
+            ),
+            None,
+        )
+        results.append(AssertionResult(
+            name="durable_trajectory_is_replayable",
+            ok=bool(adjudicated_shape) and replayed_shape == adjudicated_shape,
+            detail=(
+                f"store 读回 {len(replayed)} 条 / 服务读 {len(events)} 条；"
+                f"条数{'相同' if len(replayed_shape) == len(adjudicated_shape) else '不同'}、"
+                f"首处逐条分叉={divergence}（判据是 seq + type 逐条同序，不是「能读回」）"
+            ),
+        ))
         _ = operations
         return results
 

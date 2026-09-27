@@ -59,10 +59,9 @@ def policy_inputs(
     """生效策略面的**规范化输入**（摘要与"逐维还原"共用这一份口径）。
 
     五维各归一化一次（权限档取枚举值、providers 排序），返回的 dict 就是
-    `run/paused.data.stuck.policy_inputs` 的内容；摘要 = 它的哈希。两者同源意味着
-    "拿快照里的 `policy_inputs` 重算摘要"必然得到快照里记着的那个 `policy_version`
-    ——恢复侧因此能把暂停时那一套策略**还原**回自己的 amend，而不是靠"这一次请求
-    声明了什么"去猜（`#317` T9 审查 P1：猜错就是一次 fail-open 的 `policy_change`）。
+    `run/paused.data.stuck.policy_inputs` 的内容；摘要 = 它的哈希。两者同源 ⇒ 拿快照里的
+    `policy_inputs` 必能重算出快照里记着的那个 `policy_version`，恢复侧据此还原
+    （ADR-0048 D6/D8）。
     """
     return {
         "permission_mode": (
@@ -101,10 +100,8 @@ def recorded_policy_inputs(stuck: Mapping[str, Any] | None) -> dict[str, Any] | 
       依据"）；
     - 同源：`digest_policy_inputs(值) == policy_version`。
 
-    第二条把"摘要与逐维值是**一次计算的两个投影**"从一句注释变成机械判据，挡两类快照：
-    ① **只记了摘要**的旧载荷（本票之前写进 JSONL 的那些）——它还原不回来，而恢复侧若照旧
-    现算，就会拿"本次声明了什么"去比 ⇒ 没变也判成变了（T9 审查 P1 在**存量会话**上复活）；
-    ② 逐维值与摘要不同源的载荷（手改 / 跨算法版本漂移）——同样还原不回来。
+    第二条挡两类快照：只记了摘要的旧载荷，与逐维值 / 摘要对不上的载荷——两类都还原不回来
+    （机制、代价与残余见 ADR-0048 D6 / 残余 11）。
 
     判据只有这一份：`run_budget.stuck_resume_evidence` 拿它判"能不能用"，恢复侧拿它决定
     "能不能还原"。两边各写一遍就是下一个漂移点。
@@ -302,11 +299,9 @@ def evidence_port(
     （`assembly.build_runtime` 的默认参数），恢复侧也从同一常量出发重算
     （`session/service.py._stuck_evidence_port` 的调用点）。
 
-    **"两侧同源"靠"记下来 + 还原"，不靠"记得传全"**（`#317` T9 审查 P1）：构造点唯一
-    并不等于两侧喂进来的**字段集合**相同——CLI 的 resume 一个策略字段都不声明，于是
-    "漏声明"被算成了"策略变了"，任何一次不带 amend 的恢复都能凭空拿到 `policy_change`
-    依据（fail-open）。现在暂停侧把这份输入逐维写进快照（`policy_inputs`），恢复侧先
-    还原再算（`model_switch.restore_policy_inputs`）：摘要相同 ⇔ 策略真没变。
+    构造点唯一**不等于**两侧喂进来的字段集合相同（CLI 的 resume 一个策略字段都不声明），
+    所以"两侧同源"靠的是**记下来 + 还原**：暂停侧把这份输入逐维写进快照，恢复侧先还原再算
+    （`model_switch.restore_policy_inputs`）。机制与理由见 ADR-0048 D6/D8。
     """
     inputs = policy_inputs(
         permission_mode=permission_mode,
@@ -344,12 +339,9 @@ def paused_policy_inputs(
     """取回那个暂停 run 记下的**逐维策略面**（`run/paused.data.stuck.policy_inputs`）。
 
     返回的是**值**而不是摘要：恢复侧要拿它重建 amend（摘要只能比较，还原不回来）。
-    只认同 run 的 `run/paused`——它是 run 作用域事实，取错 run 等于拿别人的策略当
-    自己的基线。**取最后一条**（与 `run_budget.latest_paused_run` 给判据的基线同一条）：
-    同一个 run 可以暂停多次（例如以 `policy_change` 恢复过一次后又暂停），此时"还原谁的
-    策略面"只有一个正确答案——**基线那一条**。取第一条会让两侧比的是两个不同的快照：
-    "什么都没改"照样能靠两个快照的差拿到依据（fail-open），而且恢复腿会跑回**第一次**
-    暂停的那套档位（T9 审查 P1）。
+    只认同 run 的 `run/paused`，且**取最后一条**——与 `run_budget.latest_paused_run` 给
+    判据的基线必须是同一条（同一个 run 可以暂停多次；取错了就是拿两个不同快照相减，
+    ADR-0048 D6）。
 
     不可用（非 stuck 暂停 / 只记了摘要的旧快照 / 逐维值与摘要对不上）⇒ `None`：
     恢复侧没有可还原的东西；判据侧也按同一口径拒绝 `policy_change`

@@ -257,11 +257,66 @@ STUCK_KEYS: tuple[str, ...] = (
 
 #: stuck 暂停的 `resume_requirements`（`03 §3.4` 的字段；ADR-0048 D5/D7）：
 #: 三类依据的名字与 `RESUME_BASIS_*` 同名——客户端据此知道"要哪一条"，不发明第二套词。
+#: **三格齐全**（证据端口在、快照两格都读到了）时列满三条；缺格时列的是
+#: `stuck_resume_requirements` 算出的**可用子集**——列一条永远 409 的依据就是
+#: `03 §5` / ADR-0044 D4 禁止的"暗示可安全续跑"。
 STUCK_RESUME_REQUIREMENTS: tuple[str, ...] = (
     RESUME_BASIS_RELEVANT_STEER,
     RESUME_BASIS_ENVIRONMENT_CHANGE,
     RESUME_BASIS_POLICY_CHANGE,
 )
+
+#: 依据名 → 一句人话（continuation 文案用；名字与 `RESUME_BASIS_*` 逐字相同）。
+_BASIS_GLOSS: dict[str, str] = {
+    RESUME_BASIS_RELEVANT_STEER: "暂停之后的新指令",
+    RESUME_BASIS_ENVIRONMENT_CHANGE: "工作区 / 环境已变",
+    RESUME_BASIS_POLICY_CHANGE: "策略 / 档位 / 模型 / profile 已变",
+}
+
+
+def stuck_resume_requirements(
+    stuck: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """这条 stuck 暂停**当前**还接受哪几条依据（`03 §3.4` 三条里可用的那些）。
+
+    与 `stuck_resume_evidence` 的各条"缺席即 409"检查**同源**——被列出来的依据必须真的
+    有可能被接受；列一条永远 409 的依据就落进 `03 §5` / ADR-0044 D4 禁止的"暗示可安全
+    续跑"（`#317` T9 二轮审查 P2 钉住的形状：委派子 run 没有证据端口时快照两格 `None`，
+    而旧实现照样把三条都列出去）。
+
+    可用性逐条对应判据里的那一段：
+
+    - `relevant_steer`：比的是事件顺序（暂停之后有没有可作用于该 run 的 steer），**不看
+      快照** ⇒ 常在；
+    - `environment_change`：快照里要有 `environment_revision`；
+    - `policy_change`：快照里要有 `policy_version` **且**逐维值能重算出它
+      （`recorded_policy_inputs`——只记了摘要的存量快照不算，那是残余 11）。
+
+    `stuck is None`（预算 / deadline 暂停）⇒ 空元组：那两类暂停没有前置依据。
+    """
+    if not stuck:
+        return ()
+    available = [RESUME_BASIS_RELEVANT_STEER]
+    if stuck.get("environment_revision") is not None:
+        available.append(RESUME_BASIS_ENVIRONMENT_CHANGE)
+    if (
+        stuck.get("policy_version") is not None
+        and recorded_policy_inputs(stuck) is not None
+    ):
+        available.append(RESUME_BASIS_POLICY_CHANGE)
+    return tuple(available)
+
+
+def describe_resume_requirements(stuck: Mapping[str, Any] | None) -> str:
+    """可用依据的**人话**清单（确定性 continuation 与 closeout 指令共用这一份渲染）。
+
+    两处都**只**许列可用依据：指令里写死三条，模型会照抄进 continuation，而其中一条
+    在快照缺席时必被 409 挡死（`03 §5` / ADR-0044 D4）。
+    """
+    available = stuck_resume_requirements(stuck)
+    if not available:
+        return "本次暂停没有可用的恢复依据（快照两格都缺席）"
+    return " / ".join(f"{name}（{_BASIS_GLOSS[name]}）" for name in available)
 
 #: 暂停前为 closeout **预留**的 turn 容量（`02 §5.2`「在适用预算内预留容量」，
 #: ticket R2「closeout work accounted inside the configured ceiling」）。
@@ -2041,6 +2096,19 @@ def _stuck_continuation(
     pattern = str(payload.get("pattern") or "未知模式")
     count = _value_text(payload.get("count"))
     threshold = _value_text(payload.get("threshold"))
+    # 只报**这条暂停真能接受**的依据（`stuck_resume_requirements`）：写死"三选一"会在
+    # 快照缺格（委派子 run 没有证据端口）时指两条必被 409 挡死的路——本函数存在的理由
+    # 就是不许出现这种文案（见 docstring）。
+    available = stuck_resume_requirements(payload)
+    if available:
+        action = (
+            f"先给出恢复依据，再以同一 run_id 恢复"
+            f"（resume_basis={describe_resume_requirements(payload)}）"
+        )
+        if len(available) < len(STUCK_RESUME_REQUIREMENTS):
+            action += "；本次暂停快照只有这些依据可用（其余几条在快照里缺席）"
+    else:
+        action = "本次暂停没有可用的恢复依据（快照两格都缺席）"
     return {
         "completed": [
             (
@@ -2062,10 +2130,7 @@ def _stuck_continuation(
             f"{pattern} 已连续到第 {count} 次（阈值 {threshold}）：没有出现相关进展",
         ],
         CONTINUATION_ACTION_KEY: (
-            "先给出恢复依据，再以同一 run_id 恢复（resume_basis 三选一）："
-            f"{RESUME_BASIS_RELEVANT_STEER}（暂停之后的新指令）/ "
-            f"{RESUME_BASIS_ENVIRONMENT_CHANGE}（工作区 / 环境已变）/ "
-            f"{RESUME_BASIS_POLICY_CHANGE}（策略 / 档位 / 模型 / profile 已变）；"
+            f"{action}；"
             "或者改变做法本身——同一个动作不会因为再试一次而得到不同的结果"
         ),
     }

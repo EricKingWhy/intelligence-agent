@@ -44,7 +44,9 @@ from agent_harness.agent.run_budget import (
     BudgetConsumed,
     PausedRun,
     RunLimits,
+    describe_resume_requirements,
     stuck_resume_evidence,
+    stuck_resume_requirements,
     validate_resume,
 )
 from agent_harness.session.event import (
@@ -573,17 +575,117 @@ class TestStuckResumeEvidence:
         `TypeError: unhashable type: 'list'`——恢复路径以异常收场，而不是以冲突收场。
         """
         malformed = _stuck_payload(policy_inputs={"agent_profile": ["not-a-string"]})
-        with pytest.raises(BudgetConflict, match="还原不回来") as caught:
+        # "不是 500"这条由 `pytest.raises` 自己承重：换任何别的异常类型本用例都红。
+        with pytest.raises(BudgetConflict, match="还原不回来"):
             stuck_resume_evidence(
                 _paused(stuck=malformed),
                 resume_basis=RESUME_BASIS_POLICY_CHANGE,
                 evidence=ResumeEvidence(policy_version="sha256:pol-new"),
             )
-        assert isinstance(caught.value, BudgetConflict)
+
+
+# ── 依据可用性：清单必须与判据同源（`#317` T9 二轮审查 P2）────────────────
+
+
+def _favorable_evidence() -> ResumeEvidence:
+    """把三条依据都喂到嘴边的观测：只要快照那一格在，判据就该接受它。"""
+    newer = {**DEFAULT_POLICY_INPUTS, "model": "other-model"}
+    return ResumeEvidence(
+        relevant_steer_seq=99,
+        environment_revision="sha256:env-new",
+        policy_version=digest_policy_inputs(newer),
+        policy_inputs=newer,
+    )
+
+
+def _admitted(stuck: dict, basis: str, evidence: ResumeEvidence) -> bool:
+    try:
+        stuck_resume_evidence(_paused(stuck=stuck), resume_basis=basis, evidence=evidence)
+    except BudgetConflict:
+        return False
+    return True
+
+
+ALL_BASES = (
+    RESUME_BASIS_RELEVANT_STEER,
+    RESUME_BASIS_ENVIRONMENT_CHANGE,
+    RESUME_BASIS_POLICY_CHANGE,
+)
+
+
+class TestAvailableResumeRequirements:
+    """`resume_requirements` 列的是**这条暂停真能接受**的依据。
+
+    这一族钉的是"列一条永远 409 的依据"这个形状（`03 §5` / ADR-0044 D4 禁止的
+    "暗示可安全续跑"）：委派子 run 在 T9 之前没有证据端口，快照两格 `None`，而旧实现
+    照样把三条都列出去（T9 二轮审查 P2）。
+    """
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda stuck: None, id="full_snapshot"),
+            pytest.param(
+                lambda stuck: stuck.pop("environment_revision"), id="no_env_cell",
+            ),
+            pytest.param(
+                lambda stuck: stuck.update(policy_version=None, policy_inputs=None),
+                id="no_policy_cells",
+            ),
+            pytest.param(
+                lambda stuck: stuck.pop("policy_inputs"), id="legacy_no_inputs",
+            ),
+        ],
+    )
+    def test_the_advertised_bases_are_exactly_the_acceptable_ones(self, mutate) -> None:
+        """列出来的每条都要**真被接受**，没列的一条都要**真被拒**（清单 = 判据的可用子集）。
+
+        两侧跑的是同一份快照与同一组"喂到嘴边"的观测，所以这条等价关系是机械可判的；
+        任何一侧单独改动（判据收紧而清单没跟、或清单多列一条）都会让本用例红。
+        """
+        stuck = _stuck_payload()
+        mutate(stuck)
+        advertised = stuck_resume_requirements(stuck)
+        for basis in ALL_BASES:
+            assert _admitted(stuck, basis, _favorable_evidence()) == (
+                basis in advertised
+            ), f"basis={basis}、清单={advertised}、快照={stuck}"
+
+    def test_a_full_snapshot_offers_all_three(self) -> None:
+        assert stuck_resume_requirements(_stuck_payload()) == ALL_BASES
+
+    def test_a_legacy_snapshot_drops_only_the_policy_basis(self) -> None:
+        """只记了摘要的存量快照（ADR-0048 残余 11）：环境那条照常可用。"""
+        legacy = _stuck_payload()
+        legacy.pop("policy_inputs")
+        assert stuck_resume_requirements(legacy) == (
+            RESUME_BASIS_RELEVANT_STEER,
+            RESUME_BASIS_ENVIRONMENT_CHANGE,
+        )
+
+    def test_a_non_stuck_pause_has_no_requirements(self) -> None:
+        """预算 / deadline 暂停没有前置依据（`03 §3.4`：非空只出现在 stuck）。"""
+        assert stuck_resume_requirements(None) == ()
+        assert stuck_resume_requirements({}) == ()
+
+    def test_the_human_readable_list_is_rendered_from_the_same_set(self) -> None:
+        """确定性 continuation 与 closeout 指令共用这一份渲染（`describe_resume_requirements`）。
+
+        指令里写死三条，模型会照抄进 continuation；渲染自同一份可用集合，两处就不可能
+        各说一套。
+        """
+        full = describe_resume_requirements(_stuck_payload())
+        for basis in ALL_BASES:
+            assert basis in full
+        legacy = _stuck_payload()
+        legacy.pop("policy_inputs")
+        partial = describe_resume_requirements(legacy)
+        assert RESUME_BASIS_ENVIRONMENT_CHANGE in partial
+        assert RESUME_BASIS_POLICY_CHANGE not in partial
+        assert "缺席" in describe_resume_requirements(None)
 
 
 # ── 判定：`validate_resume` 的 stuck 分支 ────────────────────────────────
-
 
 class TestValidateResume:
     def test_stuck_resume_does_not_require_an_absolute_ceiling(self) -> None:

@@ -975,12 +975,10 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
-        # `#317`（T9 审查 P1）：同 run 恢复先把暂停快照里记下的**逐维策略面**还原回本次
-        # amend——否则"本请求没声明"会被算成"策略变了"，任何一次漏声明的恢复都能凭空拿到
-        # `policy_change` 依据（fail-open）。位置在 fuse **之前**：档位同时是 ceiling 的
-        # 输入（`_profile_turn_ceiling`），两处必须同一个值；也在
-        # `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的策略
-        # 变更，优先级高于快照（还原函数内部为此让开了模型这一维）。
+        # 同 run 恢复先把暂停快照里的逐维策略面还原回本次 amend（ADR-0048 D6/D8）。位置在
+        # fuse **之前**：档位同时是 ceiling 的输入（`_profile_turn_ceiling`），两处必须同一个
+        # 值；也在 `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的
+        # 策略变更，优先级高于快照（还原函数内部为此让开了模型这一维）。
         if task is None and resume_run_id is not None:
             amend = _restore_policy_inputs(
                 amend,
