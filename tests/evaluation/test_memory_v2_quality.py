@@ -32,6 +32,7 @@ from agent_harness.memory.v2.types import (
 from agent_harness.memory.vector_store import VectorStoreError
 from agent_harness.session import (
     MODEL_COMPLETED,
+    TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
@@ -45,7 +46,9 @@ from evaluation.memory_v2_quality import (
     run_memory_gold_gate,
 )
 from scripts.run_memory_v2_real_gold_gate import (
+    _events_for_case,
     _foreign_project_identity,
+    _initialize_owned_collection,
     _model_execution_summary,
     _trusted_identity,
 )
@@ -220,15 +223,26 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         ),
     ]
     if provider_output is not None and provider_output[0] == "procedural":
-        events.extend([
-            SessionEvent(
-                event_id=f"gold-tool-{index}", seq=index + 1, type=TOOL_RESULT,
-                session_id="gold-session", run_id="gold-run",
-                data={"tool_call_id": f"gold-call-{index}",
-                      "content": ToolResult.success("done").model_dump_json()},
-            )
-            for index in (2, 3)
-        ])
+        for offset, (index, tool_name) in enumerate((
+            (2, "run_integration_tests"),
+            (3, "deploy_to_staging"),
+        )):
+            tool_call_id = f"gold-call-{index}"
+            events.extend((
+                SessionEvent(
+                    event_id=f"gold-tool-call-{index}", seq=3 + offset * 2,
+                    type=TOOL_CALL, session_id="gold-session", run_id="gold-run",
+                    data={"tool_call_id": tool_call_id, "tool_name": tool_name, "args": {}},
+                ),
+                SessionEvent(
+                    event_id=f"gold-tool-result-{index}", seq=4 + offset * 2,
+                    type=TOOL_RESULT, session_id="gold-session", run_id="gold-run",
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "content": ToolResult.success("done").model_dump_json(),
+                    },
+                ),
+            ))
 
     async def seed(content: str, identity: TrustedMemoryIdentity):
         draft = make_draft(
@@ -472,6 +486,49 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
             "eligibility", "action", "kind", "scope", "source_authority",
             "recall_target", "prohibited_outcomes",
         } <= case.expected.keys()
+
+
+def test_real_procedure_gold_events_pair_each_tool_call_with_its_result():
+    _corpus, cases = load_memory_gold()
+    case = next(item for item in cases if item.case_id == "positive_procedure")
+    events = _events_for_case(case, "gold-session", "gold-run")
+    calls = {
+        event.data["tool_call_id"]: event
+        for event in events if event.type == TOOL_CALL
+    }
+    results = {
+        event.data["tool_call_id"]: event
+        for event in events if event.type == TOOL_RESULT
+    }
+
+    assert calls.keys() == results.keys()
+    assert len(calls) == 2
+    assert all(calls[key].seq < results[key].seq for key in calls)
+
+
+@pytest.mark.asyncio
+async def test_collection_race_does_not_grant_cleanup_ownership():
+    class RacingVectors:
+        created_collection = False
+
+        def __init__(self):
+            self.connect_calls = 0
+
+        async def connect(self):
+            self.connect_calls += 1
+            return [] if self.connect_calls == 1 else ["temporary_gold"]
+
+        async def initialize(self):
+            assert "temporary_gold" in await self.connect()
+            self.created_collection = False
+
+    vectors = RacingVectors()
+    collection_owned = await _initialize_owned_collection(
+        vectors, collection_name="temporary_gold",
+    )
+
+    assert collection_owned is False
+    assert vectors.connect_calls == 2
 
 
 def test_frozen_gold_passes_all_blocking_metrics_with_complete_measurements():

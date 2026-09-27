@@ -76,6 +76,7 @@ from agent_harness.memory.v2.types import MemoryRecordV2
 from agent_harness.model.fallback import is_transient_model_error
 from agent_harness.session import (
     MODEL_COMPLETED,
+    TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
@@ -173,17 +174,26 @@ def _events_for_case(case: GoldCase, session_id: str, run_id: str) -> list[Sessi
         ),
     ]
     if case.case_id == "positive_procedure":
-        events.extend(
-            SessionEvent(
-                event_id=f"{case.case_id}-tool-{number}", seq=number + 1,
-                type=TOOL_RESULT, session_id=session_id, run_id=run_id,
-                data={
-                    "tool_call_id": f"{case.case_id}-call-{number}",
-                    "content": ToolResult.success("done").model_dump_json(),
-                },
-            )
-            for number in (2, 3)
-        )
+        for offset, (number, tool_name) in enumerate((
+            (2, "run_integration_tests"),
+            (3, "deploy_to_staging"),
+        )):
+            tool_call_id = f"{case.case_id}-call-{number}"
+            events.extend((
+                SessionEvent(
+                    event_id=f"{case.case_id}-tool-call-{number}", seq=3 + offset * 2,
+                    type=TOOL_CALL, session_id=session_id, run_id=run_id,
+                    data={"tool_call_id": tool_call_id, "tool_name": tool_name, "args": {}},
+                ),
+                SessionEvent(
+                    event_id=f"{case.case_id}-tool-result-{number}", seq=4 + offset * 2,
+                    type=TOOL_RESULT, session_id=session_id, run_id=run_id,
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "content": ToolResult.success("done").model_dump_json(),
+                    },
+                ),
+            ))
     return events
 
 
@@ -663,6 +673,15 @@ async def _drop_owned_collection(
     raise RuntimeError("temporary Milvus collection remained after cleanup")
 
 
+async def _initialize_owned_collection(
+    vectors: MilvusVectorStore, *, collection_name: str,
+) -> bool:
+    if collection_name in await vectors.connect():
+        raise RuntimeError("generated temporary collection name already exists")
+    await vectors.initialize()
+    return vectors.created_collection
+
+
 async def _run(args: argparse.Namespace) -> int:
     load_dotenv(args.env_file, override=True)
     settings = Settings()
@@ -701,11 +720,10 @@ async def _run(args: argparse.Namespace) -> int:
             )):
                 raise RuntimeError("Milvus or embedding configuration is incomplete")
             vectors = MilvusVectorStore(live_settings, create_embeddings(live_settings))
-            if collection_name in await vectors.connect():
-                raise RuntimeError("generated temporary collection name already exists")
-            collection_owned = True
-            await vectors.initialize()
-            if not vectors.created_collection:
+            collection_owned = await _initialize_owned_collection(
+                vectors, collection_name=collection_name,
+            )
+            if not collection_owned:
                 raise RuntimeError("runner did not create its isolated Milvus collection")
         except Exception as error:  # noqa: BLE001 — retain a safe failed preflight report.
             setup_error_type = type(error).__name__
