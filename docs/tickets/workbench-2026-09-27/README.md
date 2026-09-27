@@ -39,7 +39,7 @@
 | W-29 | Backend | 清单↔压缩锚点集成（重注入落地） | W-26、W-04 增量 | [W-29](W-29-plan-compaction-anchor.md) |
 | W-30 | Spec + Backend | W-21 真实模型 Gate 增补判据（压缩接班·清单·失败方案） | W-29、W-21 | [W-30](W-30-gate-plan-compaction-evidence.md) |
 
-> **2026-09-27 修订批**（来源：`docs/PRD_LONG_TASK_CONTEXT_MANAGEMENT.md`，三轮 grill-me 确认）：W-25~W-30 新票 6 张；W-01/W-02/W-03/W-04 票面增量（摘要 8 节契约与校验闸门、失败方案 fact、切点规则、混合式摘要、接近护栏 warning、用户消息逐字），各票正文有 ⚠️ 修订标记与 [增量] 标注。issue 同步：W-25~W-30 待开；#345~#348 body 待同步至修订后票面。
+> **2026-09-27 修订批**（来源：`docs/PRD_LONG_TASK_CONTEXT_MANAGEMENT.md`，三轮 grill-me 确认）：W-25~W-30 新票 6 张（issue #379~#384，已挂 #344 子票）；W-01/W-02/W-03/W-04 票面增量（摘要 8 节契约与校验闸门、失败方案 fact、切点规则、混合式摘要、接近护栏 warning、用户消息逐字），各票正文有 ⚠️ 修订标记与 [增量] 标注，#345~#348 body 已同步至修订后票面。
 
 **并行边界**：W-03 与 W-05 可在 W-02 契约定稿后分线；W-09 与 W-10 仅共享 W-07 API 契约；W-15 与 W-17 共享 W-11 连接协议，不各自启动 Python Core。W-16 不能在 W-17 未可独立运行时宣称安装包完成。W-21 失败时保留失败事实，修复后重新取得两次完整通过。
 
@@ -55,5 +55,7 @@
 | W-16 | [#361](https://github.com/EricKingWhy/intelligence-agent/issues/361) | W-17 | [#360](https://github.com/EricKingWhy/intelligence-agent/issues/360) | W-18 | [#362](https://github.com/EricKingWhy/intelligence-agent/issues/362) |
 | W-19 | [#363](https://github.com/EricKingWhy/intelligence-agent/issues/363) | W-20 | [#364](https://github.com/EricKingWhy/intelligence-agent/issues/364) | W-21 | [#365](https://github.com/EricKingWhy/intelligence-agent/issues/365) |
 | W-22 | [#366](https://github.com/EricKingWhy/intelligence-agent/issues/366) | W-23 | [#367](https://github.com/EricKingWhy/intelligence-agent/issues/367) | W-24 | [#368](https://github.com/EricKingWhy/intelligence-agent/issues/368) |
+| W-25 | [#379](https://github.com/EricKingWhy/intelligence-agent/issues/379) | W-26 | [#380](https://github.com/EricKingWhy/intelligence-agent/issues/380) | W-27 | [#381](https://github.com/EricKingWhy/intelligence-agent/issues/381) |
+| W-28 | [#382](https://github.com/EricKingWhy/intelligence-agent/issues/382) | W-29 | [#383](https://github.com/EricKingWhy/intelligence-agent/issues/383) | W-30 | [#384](https://github.com/EricKingWhy/intelligence-agent/issues/384) |
 
 **已占范围**：[当前去重审计](../../research/2026-09-27-product-scope-collision-audit.md)。#305/#317/#318/#320 负责 Runtime 预算、stuck、alias；#319 负责五个原 Live Gate；#337 负责重启陈旧审批；#341 负责 relay cleanup；#342 负责并发 resume CAS；#296/#303/#304/#338 属 Memory V2。W-20/W-21 只补本产品链路，不能关闭或替代它们。
