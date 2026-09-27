@@ -90,9 +90,11 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ⚠ **已不再与 `.sh:51` 逐字符相同**（2026-09-27 起，差异只有一处，见下）。`.sh` 按脚本头部
-# 「方案 C 的判据只进本文件、不改 `.sh`」的约定冻结在**拆分前布局**上；本文件才是权威
-# （协议 §7 第 8 条：集成前必须本文件 exit 0）。别读成"两处仍然一致"。
+# ⚠ **已不再与 `.sh:51` 逐字符相同**（2026-09-27 起，差异只有一处，见下）。`.sh` 按**本文件
+# 模块 docstring 记的**约定（「方案 C … 只进本文件、不改 `.sh`」那一句）冻结在**拆分前布局**
+# 上；本文件才是权威（协议 §7 第 8 条：集成前必须本文件 exit 0）。别读成"两处仍然一致"。
+# （出处订正 2026-09-27：原注释写成「`.sh` 脚本头部」，实测 `.sh` 头部 1-51 行无此句 ——
+#   `grep -n "方案 C" scripts/check_review_coverage.sh` 零命中，见该票两轴审查 P3。）
 # 语义：白名单 commit 的改动必须**全部**命中这里（根级名带 `$` 锚，docs/ 下只认文档扩展名）。
 DOC_PATTERN = r'^(docs/.*\.(md|txt|rst|tsv|json|jsonl|ya?ml)$|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md)$'
 
