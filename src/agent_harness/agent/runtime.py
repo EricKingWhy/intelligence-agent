@@ -55,7 +55,7 @@ from agent_harness.agent.guards import (
     external_failure_signal,
     worst_stuck_signal,
 )
-from agent_harness.agent.resume_evidence import StuckEvidencePort
+from agent_harness.agent.resume_evidence import StuckEvidencePort, steer_applies_to_run
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
@@ -1057,10 +1057,15 @@ class AgentRuntime:
     def _applicable_steers(
         drained: list[SteerRequest], run_id: str,
     ) -> list[SteerRequest]:
-        """筛掉陈旧 steer（顺序保持队列内 FIFO）。"""
+        """筛掉陈旧 steer（顺序保持队列内 FIFO）。
+
+        "可作用于本 run"的判据与 stuck 恢复判定共用 `steer_applies_to_run`
+        （`#317`）：两处各写一遍的代价是漂移——恢复侧曾把 `run_id=None` 的会话级
+        steer 算成依据，而这里从来不认它。
+        """
         applicable: list[SteerRequest] = []
         for steer in drained:
-            if steer.run_id == run_id:
+            if steer_applies_to_run(steer.run_id, run_id):
                 applicable.append(steer)
             else:
                 logger.warning(
@@ -2095,6 +2100,12 @@ class AgentRuntime:
                     evidence.environment_revision if evidence else None
                 ),
                 "policy_version": evidence.policy_version if evidence else None,
+                # `#317`（T9 审查 P1）：策略面**逐维值**与上面的摘要同生共死。恢复侧要
+                # 拿它把"暂停时生效的那一套"还原回自己的 amend，否则两侧的输入集合不同
+                # （CLI 的 resume 一个策略字段都不声明）⇒ 摘要必不同 ⇒ `policy_change`
+                # 在"其实什么都没变"的恢复上成立（fail-open）。摘要只能比较、还原不了，
+                # 所以两个都要落。
+                "policy_inputs": evidence.policy_inputs if evidence else None,
             }
         # 暂停收尾前的对账闸门（`#315` / ADR-0046 §2 D4）：位置在 continuation
         # **之前**——"存在未 reconcile 的副作用"是 continuation 必须如实写出的事实

@@ -65,6 +65,7 @@ from agent_harness.session import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
     CONTEXT_COMPACTED,
+    GUARD_STUCK,
     MODEL_COMPLETED,
     MODEL_FAILED,
     MODEL_FALLBACK,
@@ -685,8 +686,10 @@ async def run(
             session_store=store,
             # `#317`：`run` 是"创建 + 第一条消息"入口，第一次开跑就可能卡循环 ⇒ 它建的
             # 会话也必须带证据端口，否则 CLI 上跑出的 stuck 暂停在载荷里没有环境 /
-            # 策略快照，恢复时那两条依据一律 409（只剩 steer 一条可用）。走**唯一**构造点
-            # （`resume_evidence.evidence_port`），与 Web 创建 / 续聊、CLI 恢复同一份算法。
+            # 策略快照，恢复时那两条依据一律 409；剩下的一条 `relevant_steer` 在 CLI 上
+            # 没有入口（没有 steer 子命令），所以少了这个端口 = **三条都不可恢复**。
+            # 走**唯一**构造点（`resume_evidence.evidence_port`），与 Web 创建 / 续聊、
+            # CLI 恢复同一份算法。
             stuck_evidence=evidence_port(
                 workspace=workspace, permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             ),
@@ -989,6 +992,12 @@ def render_replay_event(event: SessionEvent) -> str | None:
     if event.type == TOOL_FAILURE_GUARD:
         return (f"[熔断] level={data.get('level', '')}"
                 f" consecutive_failures={data.get('consecutive_failures', '')}")
+    if event.type == GUARD_STUCK:
+        # `#317`：stuck 护栏的两种动作都如实呈现（`replan` 是"已纠正过一次"的 durable
+        # 依据，`paused` 是暂停前的最后一步）——只渲染 run/paused 会让回放看起来
+        # "没发生过纠正"，与 `run/paused.stuck.replan_count` 对不上账。
+        return (f"[stuck] level={data.get('level', '')} pattern={data.get('pattern', '')}"
+                f" count={data.get('count', '')} threshold={data.get('threshold', '')}")
     if event.type == MODEL_FALLBACK:
         return (f"[fallback] {data.get('from_model', '')}→"
                 f"{data.get('to_model', '')} ({data.get('reason', '')})")

@@ -159,6 +159,52 @@ class TestPatternToolFailure:
             (6, STUCK_LEVEL_PAUSED, STUCK_PATTERN_TOOL_FAILURE),
         ]
 
+    def test_one_turn_of_six_identical_failures_gets_the_replan_first(self) -> None:
+        """一个模型回合并列 6 条相同失败：T 与 2T 同批到线，**先执行 replan**（T9 审查 P1）。
+
+        生产形状：一次 `model/completed` 同时请求同一个动作 6 次（Live Gate 场景每轮 3 次
+        是它的缩小版）。`RepeatedToolFailureGuard` 在计数 3 发 SOFT、6 发 HARD，两条信号
+        落在同一个 `advance` 里。原实现"暂停优先"会把同批的 replan 直接压掉：模型一条
+        纠正都没收到，而载荷写着 `replan_count=1`（对不上账的"已用掉"）。
+
+        正确顺序来自 `02 §5.3` 的"**replan 后**同一模式仍持续 ⇒ 暂停"——"之后"要求至少
+        一次后续观测。所以这一批执行 replan，暂停留给下一次仍然重复的失败。
+        """
+        clock = _Seq()
+        args = {"command": "ls"}
+        call_ids = tuple(f"same-{index}" for index in range(6))
+        events: list[SessionEvent] = [
+            _completed(
+                clock.take(),
+                calls=tuple(("bash", args) for _ in call_ids),
+                call_ids=call_ids,
+            ),
+        ]
+        for call_id in call_ids:
+            events.append(_call(clock.take(), call_id=call_id, name="bash", args=args))
+        for call_id in call_ids:
+            events.append(_result(
+                clock.take(), call_id=call_id, ok=False, message="boom",
+                error_code="TOOL_EXECUTION_ERROR",
+            ))
+
+        detector = StuckDetector(run_id=RUN_ID)
+        first = _advance(detector, events)
+        assert first is not None
+        assert (first.level, first.pattern, first.count) == (
+            STUCK_LEVEL_REPLAN, STUCK_PATTERN_TOOL_FAILURE, 3,
+        )
+        # 暂停没丢：第 7 条同样的失败 ⇒ 只发暂停，计数是 7（不是被折叠掉的 6）。
+        events += _tool_round(
+            clock, index=9, name="bash", args=args, ok=False, message="boom",
+            error_code="TOOL_EXECUTION_ERROR",
+        )
+        second = _advance(detector, events)
+        assert second is not None
+        assert (second.level, second.pattern, second.count) == (
+            STUCK_LEVEL_PAUSED, STUCK_PATTERN_TOOL_FAILURE, 7,
+        )
+
     def test_a_different_error_code_restarts_the_count(self) -> None:
         """① 的判据是"同动作 + 同错误"：换了错误种类就是另一个模式（`02 §5.3`）。"""
         clock, detector = _Seq(), StuckDetector(run_id=RUN_ID)

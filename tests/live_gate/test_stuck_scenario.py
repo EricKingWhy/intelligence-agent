@@ -26,6 +26,7 @@ from typing import Any
 
 from agent_harness.agent.budget import BudgetConflict
 from agent_harness.agent.guards import STUCK_PATTERN_TOOL_FAILURE
+from agent_harness.agent.resume_evidence import digest_policy_inputs
 from agent_harness.agent.run_budget import STUCK_RESUME_REQUIREMENTS
 from agent_harness.config import Settings
 from evaluation.live_gate.registry import ScenarioContext
@@ -54,7 +55,17 @@ COST_PER_REQUEST = "0.01"
 ENVIRONMENT_REVISION = "sha256:0f1e2d3c4b5a6978"
 #: 有据恢复那一刻**现算**出来的环境 revision（上游产物落进工作区之后）——必须与暂停快照不同。
 ENVIRONMENT_REVISION_AFTER = "sha256:5a4b3c2d1e0f9988"
-POLICY_VERSION = "sha256:8899aabbccddeeff"
+#: 暂停那一刻生效的**策略面逐维值**（`#317` T9 审查 P1）。摘要由它算出来——两者同生共死，
+#: 场景因此断言 `digest_policy_inputs(policy_inputs) == policy_version`（改动其中一格
+#: 而不同步算摘要 ⇒ 红灯）。
+POLICY_INPUTS: dict[str, Any] = {
+    "permission_mode": "workspace-write",
+    "model": None,
+    "agent_profile": "coding",
+    "reasoning_effort": None,
+    "context_providers": [],
+}
+POLICY_VERSION = digest_policy_inputs(POLICY_INPUTS)
 
 
 # ── 替身沙箱 / 上下文 ────────────────────────────────────────────────────
@@ -102,12 +113,12 @@ def _context(tmp_path: Path, *, sandbox: Any | None = None) -> ScenarioContext:
 # ── 合成轨迹（与真实落盘形状同形）────────────────────────────────────────
 
 
-def _failure_content() -> str:
+def _failure_content(message: str | None = None) -> str:
     """失败 `tool/result.content`：生产 ReadTool 对不存在的文件的原文形状。"""
     return json.dumps({
         "ok": False,
         "error_code": TOOL_ERROR_CODE,
-        "message": f"文件 '{AWAITED_FILE}' 不存在。",
+        "message": message if message is not None else f"文件 '{AWAITED_FILE}' 不存在。",
         "data": None,
     })
 
@@ -152,6 +163,7 @@ def _trajectory(
     second_corrective: bool = False,
     consumed_overrides: dict[str, Any] | None = None,
     stuck_overrides: dict[str, Any] | None = None,
+    failure_message: str | None = None,
     resumed: bool = True,
     resume_evidence_overrides: dict[str, Any] | None = None,
     bad_refusal: str | None = None,
@@ -202,7 +214,7 @@ def _trajectory(
             "tool_call_id": call_id, "tool_name": FAILED_TOOL,
             "args": {"path": AWAITED_FILE},
         })
-        add("tool/result", {"tool_call_id": call_id, "content": _failure_content()})
+        add("tool/result", {"tool_call_id": call_id, "content": _failure_content(failure_message)})
         if index == 3 and soft_guard:
             add("tool/failure-guard", {
                 "level": "soft", "pattern": STUCK_PATTERN_TOOL_FAILURE, "count": 3,
@@ -234,6 +246,7 @@ def _trajectory(
         "fingerprint": "sha256:deadbeefcafe0001",
         "environment_revision": ENVIRONMENT_REVISION,
         "policy_version": POLICY_VERSION,
+        "policy_inputs": dict(POLICY_INPUTS),
     }
     stuck.update(stuck_overrides or {})
     add("guard/stuck", {"level": "paused", **stuck, "tool_name": FAILED_TOOL})
@@ -505,6 +518,27 @@ def test_missing_environment_snapshot_is_red(tmp_path):
     assert "stuck_pause_is_recorded_with_the_evidence_snapshot" in failed
 
 
+def test_missing_the_per_dimension_policy_inputs_is_red(tmp_path):
+    """只记摘要、不记逐维输入 = 恢复侧还原不回来（`#317` T9 审查 P1）⇒ 判红。"""
+    events, legs = _trajectory(stuck_overrides={"policy_inputs": None})
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert "stuck_pause_is_recorded_with_the_evidence_snapshot" in failed
+
+
+def test_a_digest_that_does_not_match_the_per_dimension_inputs_is_red(tmp_path):
+    """两格不同源（摘要与逐维值对不上）⇒ 判红：它俩必须是一份输入的两个投影。"""
+    events, legs = _trajectory(stuck_overrides={"policy_version": "sha256:0000000000000000"})
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert "stuck_pause_is_recorded_with_the_evidence_snapshot" in failed
+
+
+def test_a_single_failure_that_is_not_the_expected_one_is_red(tmp_path):
+    """"组合数 = 1"不够：那一格还必须是**本场景点名的那一种**失败（判据子串在谓词里）。"""
+    events, legs = _trajectory(failure_message="permission denied")
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert "every_repeat_failed_the_same_deterministic_way" in failed
+
+
 def test_old_hard_terminal_shape_is_red(tmp_path):
     """旧 HARD 臂（`run/failed(identical_tool_failure_loop)`）已从生产路径移除。"""
     events, legs = _trajectory(
@@ -689,6 +723,6 @@ def test_malformed_pause_payload_is_red_not_crash(tmp_path):
 def test_scenario_identity_and_description():
     assert isinstance(SCENARIO, StuckToolFailurePauseScenario)
     assert SCENARIO.id == "stuck-tool-failure-pause"
-    assert SCENARIO.version == 3
+    assert SCENARIO.version == 4
     assert "stuck" in SCENARIO.description and "409" in SCENARIO.description
     assert "environment_change" in SCENARIO.description

@@ -463,6 +463,7 @@ class TestResumePathStuckEvidence:
 
 
 class TestSendMessageIdlePassthrough:
+    """``send_message`` idle 分支把 amend 透传给 ``resume_and_launch``。"""
 
     def test_send_message_idle_forwards_amend(self, tmp_path):
         """idle（无在途 run）→ resume_and_launch 收到完整 amend 对象。"""

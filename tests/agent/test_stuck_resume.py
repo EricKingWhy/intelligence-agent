@@ -25,7 +25,11 @@ from agent_harness.agent.resume_evidence import (
     MAX_REVISION_ENTRIES,
     ResumeEvidence,
     StuckEvidencePort,
+    digest_policy_inputs,
     environment_revision,
+    evidence_port,
+    paused_policy_inputs,
+    policy_inputs,
     policy_version_of,
     relevant_steer_seq,
 )
@@ -42,7 +46,12 @@ from agent_harness.agent.run_budget import (
     stuck_resume_evidence,
     validate_resume,
 )
-from agent_harness.session.event import STEER_REQUESTED, SessionEvent
+from agent_harness.session.event import (
+    MODEL_CHANGED,
+    RUN_PAUSED,
+    STEER_REQUESTED,
+    SessionEvent,
+)
 
 RUN_ID = "run-stuck"
 
@@ -192,9 +201,25 @@ class TestRelevantSteer:
         events = [_steer(3), _steer(9), _steer(11)]
         assert relevant_steer_seq(events, run_id=RUN_ID, pause_seq=7) == 11
 
-    def test_a_session_level_steer_counts(self) -> None:
-        """`run_id=None` 是会话级 steer（运行时按 `_applicable_steers` 的既有口径认它）。"""
-        assert relevant_steer_seq([_steer(8, run_id=None)], run_id=RUN_ID, pause_seq=7) == 8
+    def test_a_session_level_steer_does_not_count(self) -> None:
+        """`run_id=None` 的"会话级" steer **不算**依据（T9 审查 P2 的口径订正）。
+
+        运行时 `_applicable_steers` 把它当陈旧 steer 丢弃（只认 run_id 相同），它只在
+        run 走进**终态**时被当普通输入投递——stuck 暂停不是终态，所以那种 steer 这一次
+        根本到不了模型：算成依据等于"没有新输入也放行"。两处现在共用
+        `steer_applies_to_run`，所以这里与运行时同判。
+        """
+        from agent_harness.agent.resume_evidence import steer_applies_to_run
+
+        assert relevant_steer_seq(
+            [_steer(8, run_id=None)], run_id=RUN_ID, pause_seq=7,
+        ) is None
+        assert steer_applies_to_run(None, RUN_ID) is False
+        assert steer_applies_to_run(RUN_ID, RUN_ID) is True
+        assert steer_applies_to_run("run-other", RUN_ID) is False
+        # 运行时的 run_id 恒非 None（`_drive` 里由 run/started 给）：两侧同判意味着
+        # "谁也别想用一个没主儿的 steer 把恢复放行"。
+        assert steer_applies_to_run(None, None) is False
 
     def test_another_runs_steer_does_not_count(self) -> None:
         assert relevant_steer_seq(
@@ -220,6 +245,127 @@ class TestEvidencePort:
         evidence = port.current()
         assert evidence.environment_revision is None
         assert evidence.policy_version == "sha256:x"
+
+
+class TestPolicyInputsAreRecordedAndRestored:
+    """`#317` T9 审查 P1：逐维值与摘要**同源**，恢复侧据此还原暂停时那一套策略。
+
+    病灶：暂停侧记的是"那次执行生效的策略面"，恢复侧却只拿本次请求声明的 amend 重算
+    ——两次请求的字段集合不同（CLI 的 resume 一个策略字段都不声明），摘要必不同，于是
+    `policy_change` 在"其实什么都没变"的恢复上成立（fail-open）。修法是把逐维值也记进
+    快照，恢复侧先还原再算。
+    """
+
+    def test_the_recorded_inputs_reproduce_the_recorded_digest(self) -> None:
+        """`digest_policy_inputs(policy_inputs(...)) == policy_version_of(...)`。"""
+        inputs = policy_inputs(
+            permission_mode="danger-full-access", model="m", agent_profile="coding",
+            reasoning_effort="deep", context_providers=["web", "memory"],
+        )
+        assert digest_policy_inputs(inputs) == policy_version_of(
+            permission_mode="danger-full-access", model="m", agent_profile="coding",
+            reasoning_effort="deep", context_providers=["memory", "web"],
+        )
+        port = evidence_port(
+            workspace=None, permission_mode="workspace-write",
+            model="m", agent_profile="coding",
+        )
+        evidence = port.current()
+        assert evidence.policy_inputs is not None
+        assert digest_policy_inputs(evidence.policy_inputs) == evidence.policy_version
+
+    def test_the_pause_snapshot_is_read_back_as_values(self) -> None:
+        """`paused_policy_inputs` 只认同 run 的 `run/paused`，返回的是**值**不是摘要。"""
+        events = [
+            SessionEvent(
+                seq=9, type=RUN_PAUSED, session_id="s1", run_id=RUN_ID,
+                data={
+                    "reason": REASON_STUCK,
+                    "stuck": _stuck_payload(
+                        policy_inputs={"model": "m", "agent_profile": "coding"},
+                    ),
+                },
+            ),
+            SessionEvent(
+                seq=10, type=RUN_PAUSED, session_id="s1", run_id="run-other",
+                data={
+                    "reason": REASON_STUCK,
+                    "stuck": _stuck_payload(policy_inputs={"agent_profile": "main"}),
+                },
+            ),
+        ]
+        assert paused_policy_inputs(events, run_id=RUN_ID) == {
+            "permission_mode": None, "model": "m", "agent_profile": "coding",
+            "reasoning_effort": None, "context_providers": None,
+        }
+        assert paused_policy_inputs(events, run_id="run-nope") is None
+
+    def test_a_budget_pause_has_no_policy_inputs_to_read_back(self) -> None:
+        """非 stuck 暂停的载荷里没有这一格 ⇒ `None`（恢复侧没有可还原的东西）。"""
+        events = [
+            SessionEvent(
+                seq=4, type=RUN_PAUSED, session_id="s1", run_id=RUN_ID,
+                data={"reason": REASON_BUDGET_EXHAUSTED},
+            ),
+        ]
+        assert paused_policy_inputs(events, run_id=RUN_ID) is None
+
+    def test_a_request_that_declares_nothing_keeps_the_paused_policy(self) -> None:
+        """空 amend ⇒ 还原成暂停时那一套 ⇒ 摘要相等 ⇒ `policy_change` 不成立。"""
+        from agent_harness.session.amend import AmendOptions
+        from agent_harness.session.model_switch import restore_policy_inputs
+
+        recorded = {
+            "permission_mode": "workspace-write", "model": "m",
+            "agent_profile": "coding", "reasoning_effort": "deep",
+            "context_providers": [],
+        }
+        restored = restore_policy_inputs(None, recorded, [])
+        assert restored == AmendOptions(
+            model="m", agent_profile="coding", reasoning_effort="deep",
+            context_providers=[],
+        )
+        assert policy_version_of(
+            permission_mode="workspace-write", model=restored.model,
+            agent_profile=restored.agent_profile,
+            reasoning_effort=restored.reasoning_effort,
+            context_providers=restored.context_providers,
+        ) == policy_version_of(
+            permission_mode="workspace-write", model="m", agent_profile="coding",
+            reasoning_effort="deep", context_providers=[],
+        )
+
+    def test_a_declared_input_wins_over_the_snapshot(self) -> None:
+        """请求显式声明的维度优先——那才是用户真实的策略变更。"""
+        from agent_harness.session.amend import AmendOptions
+        from agent_harness.session.model_switch import restore_policy_inputs
+
+        restored = restore_policy_inputs(
+            AmendOptions(agent_profile="main"),
+            {"model": "m", "agent_profile": "coding", "reasoning_effort": "deep"},
+            [],
+        )
+        assert restored.agent_profile == "main"  # 声明优先
+        assert restored.model == "m"  # 没声明的沿用快照
+        assert restored.reasoning_effort == "deep"
+
+    def test_a_session_model_switch_wins_over_the_snapshot(self) -> None:
+        """暂停之后切过模型 ⇒ 快照里的模型不许盖掉它（那一跳正是合法的策略依据）。"""
+        from agent_harness.session.amend import AmendOptions
+        from agent_harness.session.model_switch import restore_policy_inputs
+
+        switched = [
+            SessionEvent(
+                seq=12, type=MODEL_CHANGED, session_id="s1",
+                data={"to_provider": "deepseek", "to_model_id": "m-new"},
+            ),
+        ]
+        restored = restore_policy_inputs(
+            AmendOptions(), {"model": "m-old", "agent_profile": "coding"}, switched,
+        )
+        # model 留在 None：让 `amend_with_session_model` 用会话派生的 m-new 补上。
+        assert restored.model is None
+        assert restored.agent_profile == "coding"
 
 
 # ── 判据：`stuck_resume_evidence` ────────────────────────────────────────

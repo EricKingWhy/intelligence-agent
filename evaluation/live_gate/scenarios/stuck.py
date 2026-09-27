@@ -74,6 +74,7 @@ from __future__ import annotations
 import asyncio
 import json
 import traceback
+from collections.abc import Mapping
 from typing import Any
 
 from evaluation.assertions import dangling_tool_call_ids
@@ -92,7 +93,10 @@ SCENARIO_ID = "stuck-tool-failure-pause"
 #: v3 = 有据恢复那条腿改用 `environment_change`（"上游真的就绪了"这条世界事实），并去掉
 #: "恢复后读到了那份文件"这条断言：v2 实测暴露生产**没有**把恢复依据的正文投进模型上下文
 #: 的路径（两条读数见 `docs/live_gate/20260927T051359-048e2246a362-…`、边界见 ADR-0048 §4）。
-SCENARIO_VERSION = 3
+#: v4 = `#317` T9 两轴审查的处置：首跑声明非默认档位（`policy_change` 拒绝腿因此有鉴别力）、
+#: 暂停断言要求逐维策略输入能重算出记下的摘要、失败面判据进谓词（`FAILURE_MARKER`）、
+#: 删掉一条恒真断言（`ok=True` 的"无关变更没被当成进展"——事实由拒绝腿承载）。
+SCENARIO_VERSION = 4
 
 #: 上游依赖**还没**产出的那份产物：read 工具对它必然失败（`文件 '...' 不存在。`）。
 #: 名字在任务文本里逐字点名——模型不需要猜，也不会去探索。
@@ -249,6 +253,27 @@ def _identical_failure_streak(
     return best, best_label
 
 
+def _inputs_match_the_digest(stuck: Mapping[str, Any]) -> bool:
+    """暂停载荷里的逐维策略输入能**重算出**记下来的那个 `policy_version` 吗。
+
+    只判"两格同源"：恢复侧还原策略靠的正是这组逐维值，只留摘要就还原不回来
+    （`#317` T9 审查 P1）。值本身的合法域由产品侧负责，场景不重复校验。
+    """
+    if not isinstance(stuck, Mapping):
+        return False
+    inputs = stuck.get("policy_inputs")
+    digest = stuck.get("policy_version")
+    if not isinstance(inputs, Mapping) or not isinstance(digest, str):
+        return False
+    # 与模块其余部分同形：`agent_harness` 只在方法体内惰性引入。
+    from agent_harness.agent.resume_evidence import digest_policy_inputs
+
+    try:
+        return digest_policy_inputs(inputs) == digest
+    except (TypeError, ValueError):
+        return False
+
+
 class _Refusal:
     """一次"恢复必须被拒"的实测结论（不抛给调用方，转成一等事实）。
 
@@ -334,7 +359,16 @@ class StuckToolFailurePauseScenario:
             )
             Session.start(store, session_id=ctx.session_id, cwd=ctx.sandbox.workspace_root)
 
-            first = await service.resume_and_launch(session_id=ctx.session_id, task=TASK)
+            # 起跑时就声明一个**非默认档位**（`#317` T9 审查 P1）：暂停快照里的策略面因此
+            # 非默认，下面那条 `policy_change` 拒绝腿才有鉴别力——恢复侧若只拿"本次请求
+            # 声明了什么"去重算，摘要必然不同，"没变"会被判成"变了"而放行（fail-open）。
+            # `coding` 在 `BUILTIN_PROFILES` 里有 `read` 且在声明面不收窄 turn ceiling。
+            from agent_harness.session.amend import AmendOptions
+
+            first = await service.resume_and_launch(
+                session_id=ctx.session_id, task=TASK,
+                amend=AmendOptions(agent_profile="coding"),
+            )
             legs["first_stream"] = await _drain(first, service=service, phase="stuck 首次执行")
             events = await service.get_events(ctx.session_id)
             paused = latest_paused_run(events)
@@ -552,9 +586,12 @@ class StuckToolFailurePauseScenario:
                 f"，其中失败结果={failed_results}"
             ),
         ))
+        # 判据子串也进谓词（不只是写进 detail）：只数"组合数 = 1"的话，换成任何一个
+        # **别的**单一失败（工具异常、权限拒绝）照样绿。
+        only_payload = next(iter(failure_payloads)) if len(failure_payloads) == 1 else ""
         results.append(AssertionResult(
             name="every_repeat_failed_the_same_deterministic_way",
-            ok=bool(failure_payloads) and len(failure_payloads) == 1,
+            ok=bool(only_payload) and FAILURE_MARKER in only_payload,
             detail=(
                 f"失败结果里出现过的 (error_code,message) 组合数={len(failure_payloads)}"
                 f"（要求恰好 1 个，且含 {FAILURE_MARKER!r}）；"
@@ -610,6 +647,10 @@ class StuckToolFailurePauseScenario:
             and str(stuck.get("environment_revision")).startswith("sha256:")
             and isinstance(stuck.get("policy_version"), str)
             and str(stuck.get("policy_version")).startswith("sha256:")
+            # 逐维值能重算出记下来的那个摘要（`#317` T9 审查 P1 的机械口径）：恢复侧正是
+            # 拿它把暂停时那一套策略还原回自己的 amend。两格不同源（只记摘要、还原不回来）
+            # 就会退化成"靠本次请求声明了什么去猜"——那正是被审查判 P1 的 fail-open。
+            and _inputs_match_the_digest(stuck)
             and isinstance(pdata.get("continuation"), dict)
             and bool(str(pdata["continuation"].get("next_safe_action") or "").strip())
         )
@@ -662,15 +703,6 @@ class StuckToolFailurePauseScenario:
                 f"{name}: {'拒绝' if item.ok else '未达判据'} — {item.reason[:160]}"
                 for name, item in refusals.items()
             ) or "没有任何拒绝读数",
-        ))
-        results.append(AssertionResult(
-            name="ignore_work_did_not_look_like_progress",
-            ok=True,
-            detail=(
-                "无关变更写在会话工作区之外（一次性根目录内）："
-                f"{(ctx.session_root.parent / 'outside-the-workspace.txt').name}"
-                "，环境依据照旧不成立（见上一条的 environment_change_outside_the_workspace）"
-            ),
         ))
 
         # ── 事实 5：有依据的恢复放行、记账、真的继续干活 ────────────────────

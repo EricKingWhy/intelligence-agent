@@ -174,7 +174,7 @@ class TestFailureLoopBecomesAPause:
 
     @pytest.mark.asyncio
     async def test_the_pause_payload_carries_the_evidence_snapshot(self, tmp_path) -> None:
-        """`run/paused.stuck` 七格齐全（`03 §3.4`；ADR-0048 D6）。"""
+        """`run/paused.stuck` 八格齐全（`03 §3.4`；ADR-0048 D6）。"""
         scripted = ScriptedModel([_round(index) for index in range(6)] + [_continuation_json()])
         session = make_session(tmp_path)
 
@@ -184,15 +184,18 @@ class TestFailureLoopBecomesAPause:
         stuck = pause_event.data["stuck"]
         assert set(stuck) == {
             "pattern", "threshold", "count", "replan_count", "fingerprint",
-            "environment_revision", "policy_version",
+            "environment_revision", "policy_version", "policy_inputs",
         }
         assert stuck["pattern"] == STUCK_PATTERN_TOOL_FAILURE
         assert stuck["threshold"] == 3 and stuck["count"] == 6
         assert stuck["fingerprint"].startswith("sha256:")
-        # 未注入证据端口 ⇒ 快照两格为 None（fail-closed：恢复侧那两条依据届时按
+        # 未注入证据端口 ⇒ 快照三格为 None（fail-closed：恢复侧那两条依据届时按
         # "无快照可比"拒绝，而不是放行）——这里如实断言"没端口就没快照"。
+        # `policy_inputs` 与 `policy_version` **同生共死**（`#317` T9 审查 P1：
+        # 恢复侧要靠逐维值还原暂停时那一套策略，摘要只能比较、还原不了）。
         assert stuck["environment_revision"] is None
         assert stuck["policy_version"] is None
+        assert stuck["policy_inputs"] is None
         assert pause_event.data["resume_requirements"] == list(STUCK_RESUME_REQUIREMENTS)
 
     @pytest.mark.asyncio

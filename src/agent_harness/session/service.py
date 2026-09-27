@@ -49,6 +49,7 @@ from agent_harness.agent.resume_evidence import (
     ResumeEvidence,
     StuckEvidencePort,
     evidence_port,
+    paused_policy_inputs,
     relevant_steer_seq,
 )
 from agent_harness.agent.run_budget import (
@@ -146,6 +147,7 @@ from agent_harness.session.model_switch import (
 )
 from agent_harness.session.model_switch import (
     amend_with_session_model as _amend_with_session_model,
+    restore_policy_inputs as _restore_policy_inputs,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
@@ -971,6 +973,18 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # `#317`（T9 审查 P1）：同 run 恢复先把暂停快照里记下的**逐维策略面**还原回本次
+        # amend——否则"本请求没声明"会被算成"策略变了"，任何一次漏声明的恢复都能凭空拿到
+        # `policy_change` 依据（fail-open）。位置在 fuse **之前**：档位同时是 ceiling 的
+        # 输入（`_profile_turn_ceiling`），两处必须同一个值；也在
+        # `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的策略
+        # 变更，优先级高于快照（还原函数内部为此让开了模型这一维）。
+        if task is None and resume_run_id is not None:
+            amend = _restore_policy_inputs(
+                amend,
+                paused_policy_inputs(existing, run_id=resume_run_id),
+                existing,
+            )
         # local fuse（#308）：位置在只读前置检查之后、`Session.resume` 追加事件之前——
         # 被拒请求不写 session/resumed、不建目录。
         fuse = resolve_local_fuse(

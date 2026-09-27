@@ -106,19 +106,24 @@ async def _run_to_stuck_pause(monkeypatch, tmp_path: Path):
 
 
 def _append_steer(settings: Settings, session_id: str, *, content: str = "换一条路试试") -> None:
-    """补一条**会话级** steer（`run_id=None`）：恢复依据是"事件流里存在它"。
+    """补一条**指向被暂停那个 run** 的 steer（恢复依据是"事件流里存在它"）。
 
-    这里直接落事件而不是走 Web 的队列：判据只看事件流（`relevant_steer_seq`），
-    投递路径不属于本用例要证明的东西。
+    `run_id` 必须落在本 run 上（`#317` T9 审查 P2）：运行时的 `_applicable_steers` 只认
+    run_id 相同，会话级（`run_id=None`）的会被当陈旧 steer 丢弃——那种 steer 连模型都
+    到不了，不能算"新输入"的依据。这里直接落事件而不是走 Web 的队列：判据只看事件流
+    （`relevant_steer_seq`），投递路径不属于本用例要证明的东西（投递边界见 ADR-0048
+    残余 9/10）。
     """
     from agent_harness.session import Session
 
-    session = Session.load(
-        JsonlSessionStore(root=_sessions_root(settings)), session_id,
-    )
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    paused = latest_paused_run(store.read_events(session_id))
+    assert paused is not None and paused.run_id is not None
+    session = Session.load(store, session_id)
     event = session.append(
         "steer/requested",
         {"steer_id": "steer-test", "content": content, "created_at": "2026-09-27T00:00:00Z"},
+        run_id=paused.run_id,
     )
     assert event.type == "steer/requested"
 
@@ -201,6 +206,108 @@ async def test_resume_with_a_relevant_steer_is_accepted_and_recorded(monkeypatch
     assert isinstance(evidence["steer_seq"], int)
     # 同一个逻辑 run：只有一个 run/started
     assert len([event for event in after if event.type == "run/started"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_session_level_steer_does_not_authorize_a_resume(monkeypatch, tmp_path):
+    """`run_id=None` 的"会话级" steer 到不了模型 ⇒ 不算依据（`#317` T9 审查 P2）。
+
+    运行时把它当陈旧 steer 丢弃（只认 run_id 相同），它只在 run 走进**终态**时被当普通
+    输入投递；stuck 暂停不是终态 ⇒ 这一次它不会进任何模型上下文。把它当依据等于
+    "没有新输入也放行"。两处谓词现在同一个函数（`steer_applies_to_run`）。
+    """
+    settings, session_id, events = await _run_to_stuck_pause(monkeypatch, tmp_path)
+    paused = latest_paused_run(events)
+    assert paused is not None
+    from agent_harness.session import Session
+
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    session = Session.load(store, session_id)
+    session.append(
+        "steer/requested",
+        {"steer_id": "steer-session", "content": "换个做法",
+         "created_at": "2026-09-27T00:00:00Z"},
+    )
+    before = store.read_events(session_id)
+
+    with pytest.raises(BudgetConflict, match="没有"):
+        await resume_command(
+            session_id, expected_version=paused.version,
+            basis=RESUME_BASIS_RELEVANT_STEER, write=lambda _text: None,
+        )
+    after = store.read_events(session_id)
+    assert len(after) == len(before)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_without_a_policy_declaration_cannot_forge_a_policy_change(
+    monkeypatch, tmp_path,
+):
+    """本请求不声明任何策略面 ⇒ 恢复侧**还原**暂停时那一套再比 ⇒ 409「相同」。
+
+    `#317` T9 审查 P1 的回归：暂停快照记的是"那次执行生效的策略面"，恢复侧过去只拿本次
+    请求声明的 amend 重算——两次请求的字段集合不同（CLI 的 resume 一个都不声明），摘要
+    必不同，于是 `policy_change` 在"其实什么都没变"的恢复上成立（fail-open：无依据放行）。
+
+    两件事一起断言：
+    1. 空 amend + `policy_change` ⇒ 409「相同」，零副作用；
+    2. 换一条依据（steer）恢复时，恢复腿**真的**按暂停时那一档跑——第二次 stuck 暂停的
+       快照里 profile / effort 仍是暂停侧声明过的值（不是悄悄回落默认）。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(
+            responses=[_failing_round(index) for index in range(6)]
+            + [_continuation_json()],
+        ),
+    )
+    from agent_harness.session.amend import AmendOptions
+
+    service = await cli._cli_session_service(settings)
+    created = await service.create_and_launch(
+        task="反复用同一个工具",
+        amend=AmendOptions(agent_profile="coding", reasoning_effort="deep"),
+    )
+    await created.run.task
+    session_id = created.session.session_id
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    events = store.read_events(session_id)
+    paused = latest_paused_run(events)
+    assert paused is not None and paused.reason == REASON_STUCK
+    recorded = (paused.stuck or {})["policy_inputs"]
+    assert recorded["agent_profile"] == "coding"
+    assert recorded["reasoning_effort"] == "deep"
+
+    with pytest.raises(BudgetConflict, match="相同"):
+        await service.resume_and_launch(
+            session_id=session_id, task=None, resume_run_id=paused.run_id,
+            resume_basis=RESUME_BASIS_POLICY_CHANGE, expected_version=paused.version,
+        )
+    assert [event.type for event in store.read_events(session_id)] == [
+        event.type for event in events
+    ]
+
+    _append_steer(settings, session_id)
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(
+            responses=[_failing_round(index) for index in range(6, 8)]
+            + [_continuation_json()],
+        ),
+    )
+    resumed = await service.resume_and_launch(
+        session_id=session_id, task=None, resume_run_id=paused.run_id,
+        resume_basis=RESUME_BASIS_RELEVANT_STEER, expected_version=paused.version,
+    )
+    await resumed.run.task
+    after = store.read_events(session_id)
+    pauses = [event for event in after if event.type == RUN_PAUSED]
+    assert len(pauses) == 2, "恢复腿应当再次撞上同一个循环（计数跨执行累积）"
+    second_inputs = pauses[1].data["stuck"]["policy_inputs"]
+    assert second_inputs["agent_profile"] == "coding"
+    assert second_inputs["reasoning_effort"] == "deep"
 
 
 @pytest.mark.asyncio

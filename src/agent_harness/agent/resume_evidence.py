@@ -27,14 +27,61 @@ import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from agent_harness.session.event import STEER_REQUESTED, SessionEvent
+from agent_harness.session.event import RUN_PAUSED, STEER_REQUESTED, SessionEvent
 
 #: 单次 walk 采集的最大条目数（防超大目录把暂停拖住；见模块 docstring 的口径 3）。
 MAX_REVISION_ENTRIES = 20000
 _DIGEST_CHARS = 16
 _FIELD = "\x1f"
+
+#: 策略面五维（`policy_version_of` 的输入集）。暂停快照**逐维**记下它们，恢复侧据此
+#: 还原——摘要与逐维值必须同生共死，否则"两侧算的是同一套输入"只是句口号（`#317`
+#: T9 审查 P1）。
+POLICY_INPUT_FIELDS: tuple[str, ...] = (
+    "permission_mode",
+    "model",
+    "agent_profile",
+    "reasoning_effort",
+    "context_providers",
+)
+
+
+def policy_inputs(
+    *,
+    permission_mode: str | None = None,
+    model: str | None = None,
+    agent_profile: str | None = None,
+    reasoning_effort: str | None = None,
+    context_providers: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """生效策略面的**规范化输入**（摘要与"逐维还原"共用这一份口径）。
+
+    五维各归一化一次（权限档取枚举值、providers 排序），返回的 dict 就是
+    `run/paused.data.stuck.policy_inputs` 的内容；摘要 = 它的哈希。两者同源意味着
+    "拿快照里的 `policy_inputs` 重算摘要"必然得到快照里记着的那个 `policy_version`
+    ——恢复侧因此能把暂停时那一套策略**还原**回自己的 amend，而不是靠"这一次请求
+    声明了什么"去猜（`#317` T9 审查 P1：猜错就是一次 fail-open 的 `policy_change`）。
+    """
+    return {
+        "permission_mode": (
+            None if permission_mode is None
+            else getattr(permission_mode, "value", permission_mode)
+        ),
+        "model": model,
+        "agent_profile": agent_profile,
+        "reasoning_effort": reasoning_effort,
+        "context_providers": sorted(context_providers or ()),
+    }
+
+
+def digest_policy_inputs(inputs: Mapping[str, Any]) -> str:
+    """策略面输入 ⇒ 摘要（本模块是唯一算法；口径见 `policy_version_of`）。"""
+    payload = json.dumps(
+        dict(inputs), sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]
 
 
 @dataclass(frozen=True)
@@ -45,12 +92,16 @@ class ResumeEvidence:
     relevant_steer_seq: int | None = None
     environment_revision: str | None = None
     policy_version: str | None = None
+    #: 本次观测的生效策略面**逐维值**（`policy_version` 的输入）。恢复侧把它交给
+    #: `model_switch.restore_policy_inputs` 还原暂停时那一套（`#317` T9 审查 P1）。
+    policy_inputs: Mapping[str, Any] | None = None
 
     def as_projection(self) -> dict[str, Any]:
         return {
             "relevant_steer_seq": self.relevant_steer_seq,
             "environment_revision": self.environment_revision,
             "policy_version": self.policy_version,
+            "policy_inputs": dict(self.policy_inputs) if self.policy_inputs else None,
         }
 
 
@@ -64,11 +115,14 @@ class StuckEvidencePort:
 
     workspace: Path | None = None
     policy_version: str | None = None
+    #: `policy_version` 的输入（同一次计算的两个投影，见 `evidence_port`）。
+    policy_inputs: Mapping[str, Any] | None = None
 
     def current(self) -> ResumeEvidence:
         return ResumeEvidence(
             environment_revision=environment_revision(self.workspace),
             policy_version=self.policy_version,
+            policy_inputs=self.policy_inputs,
         )
 
 
@@ -149,18 +203,21 @@ def policy_version_of(
 
     **版本不是计数器**（ADR-0048 残余 1）：这里没有"第几版"这样的单调量，只有"是不是
     同一套策略"。所以"更新"只能判"不等于"，且两侧都必须由服务端计算。
+
+    **摘要与逐维值同生共死**：暂停侧写进快照的不止这个摘要，还有 `policy_inputs`
+    （同一份 `policy_inputs` 的哈希就是这里的返回值）。恢复侧先把快照里的逐维值还原成
+    自己这副 amend（`session/model_switch.restore_policy_inputs`）再算摘要——"同一套
+    输入"于是有了机械保证，而不是靠两侧各自"记得传全字段"。
     """
-    payload = json.dumps(
-        {
-            "permission_mode": permission_mode,
-            "model": model,
-            "agent_profile": agent_profile,
-            "reasoning_effort": reasoning_effort,
-            "context_providers": sorted(context_providers or ()),
-        },
-        sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    return digest_policy_inputs(
+        policy_inputs(
+            permission_mode=permission_mode,
+            model=model,
+            agent_profile=agent_profile,
+            reasoning_effort=reasoning_effort,
+            context_providers=context_providers,
+        )
     )
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]
 
 
 def evidence_port(
@@ -183,20 +240,66 @@ def evidence_port(
     档位取**生效值**而不是"声明值"：运行时未声明时按 `WORKSPACE_WRITE` 跑
     （`assembly.build_runtime` 的默认参数），恢复侧也从同一常量出发重算
     （`session/service.py._stuck_evidence_port` 的调用点）。
+
+    **"两侧同源"靠"记下来 + 还原"，不靠"记得传全"**（`#317` T9 审查 P1）：构造点唯一
+    并不等于两侧喂进来的**字段集合**相同——CLI 的 resume 一个策略字段都不声明，于是
+    "漏声明"被算成了"策略变了"，任何一次不带 amend 的恢复都能凭空拿到 `policy_change`
+    依据（fail-open）。现在暂停侧把这份输入逐维写进快照（`policy_inputs`），恢复侧先
+    还原再算（`model_switch.restore_policy_inputs`）：摘要相同 ⇔ 策略真没变。
     """
+    inputs = policy_inputs(
+        permission_mode=permission_mode,
+        model=model,
+        agent_profile=agent_profile,
+        reasoning_effort=reasoning_effort,
+        context_providers=context_providers,
+    )
     return StuckEvidencePort(
         workspace=workspace,
-        policy_version=policy_version_of(
-            permission_mode=(
-                None if permission_mode is None
-                else getattr(permission_mode, "value", permission_mode)
-            ),
-            model=model,
-            agent_profile=agent_profile,
-            reasoning_effort=reasoning_effort,
-            context_providers=context_providers,
-        ),
+        policy_version=digest_policy_inputs(inputs),
+        policy_inputs=inputs,
     )
+
+
+def steer_applies_to_run(steer_run_id: str | None, run_id: str | None) -> bool:
+    """这条 steer 是否**可作用于**这个 run（`#317`：运行时与恢复判定共用的唯一口径）。
+
+    口径就是运行时的 `_applicable_steers`：**只认 run_id 相同**。`run_id=None`
+    （"会话级"）不是"任一 run 都算"——运行时把它当陈旧 steer 丢弃（落 warning），
+    它只会在 run 走到**终态**时被当普通输入投递；而 stuck 暂停不是终态（`03 §3.4`），
+    所以那种 steer 在这一次恢复里永远到不了模型 ⇒ 不能算恢复依据（fail-closed：
+    依据必须是"确实会被这次执行采用的新输入"）。
+
+    抽出来是因为**两侧各写一遍口径已经漂过一次**：恢复判定曾接受 `run_id=None`
+    （ADR-0048 D7 的旧措辞还写着"运行时按同一口径认它"），而运行时从来不认——
+    于是"没有新输入"的恢复被放行（T9 审查 P2）。现在两处都调这个函数。
+    """
+    return run_id is not None and steer_run_id == run_id
+
+
+def paused_policy_inputs(
+    events: Iterable[SessionEvent], *, run_id: str | None,
+) -> dict[str, Any] | None:
+    """取回那个暂停 run 记下的**逐维策略面**（`run/paused.data.stuck.policy_inputs`）。
+
+    返回的是**值**而不是摘要：恢复侧要拿它重建 amend（摘要只能比较，还原不回来）。
+    只认同 run 的 `run/paused` —— 它是 run 作用域事实，取错 run 等于拿别人的策略当
+    自己的基线。没有它（非 stuck 暂停 / 还没记逐维值）⇒ `None`：恢复侧没有可还原的
+    东西，而那个快照里也不会有 `policy_version`（两者同生共死，见 `evidence_port`），
+    于是判据照旧走"无快照可比"的 fail-closed 一侧。
+    """
+    for event in events:
+        if event.type != RUN_PAUSED:
+            continue
+        if run_id is not None and event.run_id != run_id:
+            continue
+        stuck = (event.data or {}).get("stuck")
+        if not isinstance(stuck, Mapping):
+            continue
+        recorded = stuck.get("policy_inputs")
+        if isinstance(recorded, Mapping):
+            return {field: recorded.get(field) for field in POLICY_INPUT_FIELDS}
+    return None
 
 
 def relevant_steer_seq(
@@ -207,15 +310,16 @@ def relevant_steer_seq(
 ) -> int | None:
     """暂停之后**可作用于该 run** 的 steer 请求的 seq（最晚一条）。
 
-    "相关"的机械口径（ADR-0048 D7）：`steer/requested` 的 `seq > pause_seq`，且它的
-    `run_id` 相同或为 `None`（会话级 steer，运行时按 `_applicable_steers` 的既有口径
-    认它）。内容非空与否**不**在这里判——steer 的正文属于用户输入，不是本函数的判据。
+    "相关"的机械口径（ADR-0048 D7）：`steer/requested` 的 `seq > pause_seq`，且
+    `steer_applies_to_run` 认它（**run_id 相同**，与运行时 `_applicable_steers`
+    同一口径、同一函数）。内容非空与否**不**在这里判——steer 的正文属于用户输入，
+    不是本函数的判据。
     """
     latest: int | None = None
     for event in events:
         if event.type != STEER_REQUESTED or event.seq <= pause_seq:
             continue
-        if event.run_id is not None and event.run_id != run_id:
+        if not steer_applies_to_run(event.run_id, run_id):
             continue
         if latest is None or event.seq > latest:
             latest = event.seq

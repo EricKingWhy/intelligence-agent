@@ -239,7 +239,7 @@ RESUME_BASIS_VALUES: frozenset[str] = frozenset(
 
 #: `run/paused.data.stuck` 的键（`#317`；ADR-0048 D6）。**只有 `reason=stuck` 才出现**
 #: ——旧形状（预算 / deadline 暂停）逐字不变。前四个键是"哪个模式、到了第几次"，
-#: 后两个是暂停那一刻的**观测快照**：恢复侧拿同一份函数重算再比较（D7）。
+#: 后三个是暂停那一刻的**观测快照**：恢复侧拿同一份函数重算再比较（D7）。
 STUCK_KEYS: tuple[str, ...] = (
     "pattern",
     "threshold",
@@ -248,6 +248,10 @@ STUCK_KEYS: tuple[str, ...] = (
     "fingerprint",
     "environment_revision",
     "policy_version",
+    # `#317`（T9 审查 P1）：策略面的**逐维值**（与 `policy_version` 同生共死）。投影要
+    # 跟着载荷走——恢复侧靠它把暂停时那一套策略还原回自己的 amend；把它留在投影外
+    # 等于"载荷记了、读回没有"，下一个照投影写恢复侧的人会再踩回同一个 fail-open。
+    "policy_inputs",
 )
 
 #: stuck 暂停的 `resume_requirements`（`03 §3.4` 的字段；ADR-0048 D5/D7）：
