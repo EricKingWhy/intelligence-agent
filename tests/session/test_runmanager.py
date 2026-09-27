@@ -147,3 +147,39 @@ class TestRunManager:
                 await asyncio.wait_for(run.task, timeout=5)
         finally:
             await manager.aclose()
+
+    @pytest.mark.asyncio
+    async def test_launch_rejected_when_closing(self, tmp_path):
+        """#341：关停置位后 launch 拒绝开新 run（不起半个生命周期的 run）。"""
+        manager = RunManager()
+        await manager.aclose()
+        session = _make_session(tmp_path)
+        runtime = _runtime(ScriptedModel([AIMessage(content="done")]))
+        with pytest.raises(RuntimeError, match="shutting down"):
+            manager.launch(session, runtime, "hi")
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancels_task_dropped_from_runs(self, tmp_path):
+        """#341：`_runs` 条目被覆盖/丢失后，aclose 仍凭 `_tasks` 取消在途 task。
+
+        同会话 resume 再 launch 会覆盖 `_runs[session_id]`，旧 task 的收尾
+        可能还在跑——没有 `_tasks` 集合时 aclose 会漏取消它。"""
+        from langchain_core.messages import AIMessageChunk
+
+        class SlowModel:
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+            async def astream(self, messages, **kwargs):
+                await asyncio.sleep(60)
+                yield AIMessageChunk(content="never")
+
+        session = _make_session(tmp_path)
+        runtime = _runtime(SlowModel())
+        manager = RunManager()
+        run, _subscriber = manager.launch(session, runtime, "hi")
+        await asyncio.sleep(0.05)
+        manager._runs.clear()  # 旧条目不再可达（模拟 resume 覆盖）
+        await manager.aclose()
+        assert run.task is not None and run.task.done()
+        assert run.task.cancelled()

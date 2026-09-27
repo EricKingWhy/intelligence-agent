@@ -1,0 +1,1 @@
+2026-09-27	#341 / PR #343 relay shutdown and cleanup hardening; Spec + Standards dual review of the final branch tip found no blocking findings after repairing cancellation cleanup, the resubscription gap, and full-queue error delivery.	44de8e21..eebed7cb
