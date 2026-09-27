@@ -6221,7 +6221,8 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   故 e2e 的既有用例面对它零区分度；生成物同步守卫（Gate-0 车道⑤）与 `tsc` / `oxlint` / `vitest` / `build`
   四车道已全绿。**这不是"全绿"**：e2e 车道本票**没有读数**。
 
-**合并后重车道读数（"先回后正"后的新树重采；命令同上，全部落在 `c998b222` / tree `a62b3f5f`）**：
+**合并后重车道读数 · 第一轮（"先回后正"后的合并树 `c998b222` / tree `a62b3f5f`；命令同上。⚠ 本轮读数按 §8.1
+**不传递** —— 其后追加的 Live Gate 证据 `.jsonl` 不命中 `DOC_PATTERN` ⇒ 只作 flake 采样，**正式读数见第二轮**）**：
 
 - **后端全量第 1 遍**：**1 failed / 4575 passed / 14 skipped / 51 deselected in 684.40s**（exit 1）——唯一红为
   **新签名间歇红** `tests/web/test_memory_api.py::test_v2_bulk_confirmation_settings_and_session_recall_redaction`
@@ -6248,6 +6249,34 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   ⇒ 四条均为**时序/负载敏感间歇红**（全部押真实时钟：`LATE_MS=1600`、~450ms 快按/按住阈值、5s 超时；红的那遍慢 6 分钟），
   非确定性，且**与本票改动无因果面**（`web/**` 相对 `origin/main` 只多 2 行 `guard/stuck` **no-op 登记**，
   `web/e2e/**` 与其**逐字节相同**）⇒ `#378`。
+
+**合并后重车道读数 · 第二轮（**正式读数**：绑 `6c84d544` / tree `33ec6172` = **含证据的读数树**；命令同上）**：
+
+- **后端全量**：**4588 passed / 2 skipped / 51 deselected / 0 failed in 944.88s (15:44)**，exit 0。⚠ 与第一轮的
+  **测试集不同**：`skipped` 由 14 → 2、`passed` +13（收集总数两轮同为 **4641**、`deselected` 同为 **51**）——
+  差的是**环境**不是树：一个**无关项目**的 docker 栈（`industry_minio` / `industry_milvus` / `industry_postgres` /
+  `industry_redis` / `industry_backend`）在 **21:05（本地）**起来（`docker inspect .State.StartedAt` = `13:05:19Z`），
+  正落在第一轮（20:40 / 20:55 收尾）与第二轮（22:45 收尾）之间 ⇒ 12 条依赖外部服务的用例由 skip 变真跑并通过。
+  ⇒ 第一轮那两条间歇红（`#376` 写锁 / `#377` FORMING-vs-QUEUED）**落在服务缺席的那一侧**，本轮（服务在场）**0 红**；
+  这是**相关性观察，不是因果结论**（未做"刻意关服务再跑"的对照；已同步两条 issue，并附定向探针：那两个文件
+  连跑 3 轮 **35 passed × 3**、26.9 / 24.7 / 23.9s）。
+- **前端 `vitest`**：**1 failed | 72 passed（73 files）**，红 = `src/components/StepDetail.window.test.tsx` 的
+  `F5 尾窗…DIFFS / ARTIFACTS`（6117ms）—— **T7 期起已登记的既有超时 flaky**（tracker L5530 / L5566），
+  本次非新缺陷：**隔离单跑 6 passed**，同一条用例 4202ms 而上限 5000ms ⇒ 押超时的负载敏感红（`web/**` 相对
+  `origin/main` 只多 2 行 `guard/stuck` no-op 登记，与本用例无关）。
+- **前端 `build`**：`pnpm build`（= `tsc -b && vite build`）**exit 0**。
+- **`e2e`**：`pnpm exec playwright test --workers=2` → **460 passed / 14.4m / exit 0（零红）**，日志里
+  `flaky`/`retry`/`✘` 标记数 **0**（不是靠重试转绿）；第一轮那四条时序敏感红（`#378`）本轮全绿。
+- **真实 Live Gate v5（重采）**：**3/3 PASS**、每次 **16/16** 断言、**0 FAIL**（116429 / 197495 / 95116 ms），
+  证据 `docs/live_gate/20260927T141942-f75bc9300542-stuck-tool-failure-pause/`（绑 `f75bc930` / tree `2739e8ae`
+  = 读数树的代码面）；台账行 349（第一轮证据）/ 350（本轮证据）。
+
+**§8.1 读数传递（第二轮）**：正式读数绑 `6c84d544`（含全部证据），其后只追加 `.tsv` / `.md` / `.json`（台账行 350、
+本节记录笔、gate json）⇒ 判据 ①（`--name-status --no-renames` 只 `A`/`M` 且全命中 `DOC_PATTERN`）与判据 ②
+（`git status --short` 只 `?? .zcodeignore`）在本段末笔当场复核。**第一轮为什么不传递**（本票的一处自纠，如实登记）：
+逐字复核协议 §8.1 第 3 条后确认 `.jsonl` 不在 `DOC_PATTERN`（`docs/**` 只认 .md/.txt/.rst/.tsv/.json/.yaml），
+而证据是**在**第一轮读数树之后追加的 ⇒ 「跑过门禁的树 = 被集成的代码面」字面不成立；处置 = 把证据先并入、
+再以含证据的树当读数树把四条重车道重跑一遍（本块），**而不是**用"看起来只是证据文件"去豁免判据。
 
 **门禁（Gate-0 裸全量，合并后）**：首次落盘（证据笔 `7bfa8218`）**5/6** —— 红车道 = coverage：证据笔含
 `.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属；补台账行 349 归属后 `--only coverage` **PASS**。**最终读数**
