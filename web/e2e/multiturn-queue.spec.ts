@@ -579,6 +579,14 @@ test('T12j：steer 撞上**无关**的 409（人工裁决）→ 原样显示后�
 
 /** 延迟到窗外才落定（> EARLY_RESPONSE_WINDOW_MS）。 */
 const LATE_MS = 1600;
+function gate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
 const answerLate = async (route: Route, status: number, body: unknown) => {
   await new Promise((r) => setTimeout(r, LATE_MS));
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
@@ -734,6 +742,11 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
 
 test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐流、不重订阅）', async ({ page }) => {
   const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  const postStarted = gate();
+  const releasePostResponse = gate();
+  const postResponded = gate();
+  const wsSubscribed = gate();
+  const releaseWsFrame = gate();
   const DELTA: FrameSpec = {
     type: 'model/delta', data: { delta: '延迟启动的回答' }, seq: 4,
     session_id: 'mt-live-1', run_id: 'mt-run-live', step_id: 1, time: '2026-09-16T00:00:01Z',
@@ -745,15 +758,17 @@ test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐
     onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
     // 响应头晚于窗口才到（交付层攒包的真实形态）：这是事件流，不是失败
     onMessagesPost: async (route) => {
-      await new Promise((r) => setTimeout(r, LATE_MS));
+      postStarted.release();
+      await releasePostResponse.promise;
       await fulfillSse(route, [DELTA]);
+      postResponded.release();
     },
-    // 帧**必须晚于迟到的响应头**才到：否则"文本已上屏"这件事在 cancel 之前就发生了，
-    // 断言对「掐流」这个变异毫无判别力（实测踩过——第一版 delayMs 没设，变异照样绿）。
-    onWs: () => ({
-      events: LIVE_FRAMES, frames: [DELTA], hasActiveRun: true, ending: 'keep',
-      delayMs: LATE_MS + 1000,
-    }),
+    // 收到 subscribe 是早期响应窗口已过的明确证据；保持帧待发，直到迟到响应回包。
+    onWs: async () => {
+      wsSubscribed.release();
+      await releaseWsFrame.promise;
+      return { events: LIVE_FRAMES, frames: [DELTA], hasActiveRun: true, ending: 'keep' };
+    },
   });
 
   await page.goto('/');
@@ -763,6 +778,13 @@ test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐
   const box = page.getByLabel('Agent 任务');
   await box.fill('慢链路下追问');
   await box.press('Enter');
+
+  await postStarted.promise;
+  await wsSubscribed.promise;
+  expect(subs).toHaveLength(1);
+  releasePostResponse.release();
+  await postResponded.promise;
+  releaseWsFrame.release();
 
   await expect(page.locator('.model-output').last()).toContainText('延迟启动的回答', { timeout: 12_000 });
   await expect(page.locator('.app-error')).toHaveCount(0);
@@ -833,6 +855,8 @@ test('T12q：纠正后回退重投仍失败（409 人工裁决）→ 必须把�
  * 它一次都不发，那段文本永远不上屏（红证明：超时失败）。 */
 test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应用后续帧', async ({ page }) => {
   const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  const wsSubscribed = gate();
+  const releaseWsFrame = gate();
   // 序号接在 LIVE_FRAMES 的 max seq（3）之后：游标对齐后不构成 seq gap
   const AFTER_QUEUE: FrameSpec = {
     type: 'model/delta', data: { delta: '排队之后仍在写' }, seq: 4,
@@ -858,9 +882,11 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
     // 帧挂在**唯一那次**订阅上：接流本身就是要考的事，不另设第二次订阅
     // （设 `call >= 2` 会把脚本挂在一次不存在的调用上——那正是本用例第一版
     // 的错，基线 WS 其实来自 ack 分支，于是"永远等不到帧"）。
-    onWs: () => ({
-      events: LIVE_FRAMES, frames: [AFTER_QUEUE], hasActiveRun: true, ending: 'keep',
-    }),
+    onWs: async () => {
+      wsSubscribed.release();
+      await releaseWsFrame.promise;
+      return { events: LIVE_FRAMES, frames: [AFTER_QUEUE], hasActiveRun: true, ending: 'keep' };
+    },
   });
 
   await page.goto('/');
@@ -870,6 +896,10 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
   const box = page.getByLabel('Agent 任务');
   await box.fill('排队的一句');
   await box.press('Enter');
+
+  await wsSubscribed.promise;
+  expect(subs).toHaveLength(1);
+  releaseWsFrame.release();
 
   // 关键断言：排队之后 run 的输出仍然上屏
   await expect(page.locator('.model-output').last()).toContainText('排队之后仍在写', { timeout: 8000 });

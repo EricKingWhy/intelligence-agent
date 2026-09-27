@@ -20,6 +20,14 @@ import { RUN, SID, T, fulfillSse, routeApi, type FrameSpec } from './fixtures';
 
 const KEY = 'ahi.selectedSession';
 
+function gate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
 const ROW = {
   session_id: SID,
   event_count: 4,
@@ -47,20 +55,32 @@ async function openStoredSession(page: Page): Promise<void> {
 
 test('WS 被拒（零服务帧）→ 自动降级 GET /stream，接流照样建立（不静默卡住）', async ({ page }) => {
   let sseCalls = 0;
+  const wsSubscribed = gate();
+  const releaseWsClose = gate();
+  const sseDelivered = gate();
   await routeApi(page, {
     sessions: [ROW],
     events: IN_FLIGHT,
-    onWs: () => ({ closeNow: true }), // 代理拒掉 Upgrade：一个服务帧都没有
-    onStreamGet: (route) => {
+    onWs: async () => {
+      wsSubscribed.release();
+      await releaseWsClose.promise;
+      return { closeNow: true }; // 代理拒掉 Upgrade：一个服务帧都没有
+    },
+    onStreamGet: async (route) => {
       sseCalls += 1;
-      return fulfillSse(route, [
+      await fulfillSse(route, [
         { type: 'text/delta', data: { delta: '降级通道补进来的。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
         { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
       ]);
+      sseDelivered.release();
     },
   });
 
   await openStoredSession(page);
+  // 先确认客户端已订阅，再拒绝 Upgrade；随后等 SSE fixture 确认回包，避免靠并行负载猜时序。
+  await wsSubscribed.promise;
+  releaseWsClose.release();
+  await sseDelivered.promise;
 
   // 降级真的接上了：这一帧只可能来自 GET /stream
   await expect(page.locator('.model-output').last()).toContainText('降级通道补进来的。');

@@ -100,6 +100,7 @@ test('AC2：Esc 关预览但面板与清单都还在（关闭不卸载）', asyn
 });
 
 test('AC2：Space 快按=保持打开，按住=松手关闭（Linear peek 语义）', async ({ page }) => {
+  await page.clock.install();
   await routeApi(page, { sessions: [session(SID, '看看这个')], events: EVENTS });
   await page.goto('/');
   const rows = await openSession(page);
@@ -113,9 +114,9 @@ test('AC2：Space 快按=保持打开，按住=松手关闭（Linear peek 语义
   await page.keyboard.press('Space');
   await expect(peek).toBeVisible();
 
-  // 按住 ~450ms（阈值 250ms）再松手：临时预览，松手即关
+  // 虚拟时钟推进到 250ms 阈值之外再松手：临时预览，松手即关
   await page.keyboard.down('Space');
-  await page.waitForTimeout(450);
+  await page.clock.fastForward(251);
   await page.keyboard.up('Space');
   await expect(peek).toBeHidden();
 
