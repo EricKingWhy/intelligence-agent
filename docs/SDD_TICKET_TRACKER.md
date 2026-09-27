@@ -6459,7 +6459,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 五条验收与"不能只改一行"的理由）。`#337` / `#338` 状态不变（用户已裁决暂不修）；**合并后新签名的三条 `#376` / `#377` / `#378` 同样只登记不修**
 （用户既定口径：新发现的、超出本票范围的缺陷 ⇒ 登记 + 开票，不当场修）。
 
-**集成**：待执行（走「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准，`main` 受服务端保护）；第四次「先回后正」后的读数已在 `88294f25` / tree `769b0af17bf7` 重采（见第五轮块）。
+**集成（2026-09-28 已执行）**：用户单独批准「推分支 + 开 PR」与「合并 PR」两步 ⇒ 集成分支 push → **PR #388** → 服务端 `gate0` 绿 → 合并（merge commit **`2cda77f8`**，`origin/main` 前进至 `2cda77f8`）；**`#317` 已按 §14.12 关单**（关单 comment 附验证证据 + **§14.9 通知**：另一条线下次开工前先 `git merge-base --is-ancestor main HEAD` 自检并合回 `main`）。此前 `88294f25` / tree `769b0af17bf7` 的第五轮读数即集成读数。
 
 **2026-09-28 追加（第四次「先回后正」+ 第五轮读数 · 现行正式）**：用户指令「先同步流程基线再开工」⇒ `git fetch origin main && git merge origin/main`：`origin/main` = `f4c64f85`（PR #387 线，落后 **13** 笔），merge **`5502acd5`**（父一 `c86a58f9` + 父二 `f4c64f85`，base `510a2203`）**零冲突**：`git merge-tree` 预演树 = 实际合并树 `78b65ef1`、`git show --cc --name-only` 空表、逐 blob **10/10** 等于父二（我方自 base 起 3 笔全 docs）；机械归属 = 台账行 **354**（`b4a1b744`；文件面 10 条 = 6 A + 4 M，非 docs 文件面 = `scripts/check_exec_bit.py`(A) / `scripts/gate0.py`(M) / `tests/test_exec_bit_matches_shebang.py`(A)）。**派单前 Gate-0（新协议 §8.2 第 4 条的首次执行）**：tip `5502acd5` **5/6** —— 唯一红 = coverage，❌ 集合恰 = {本合并}（该条文的预期形状），读数落盘 `docs/gate/5502acd5ca38a62ed0f1027f2a4d3fae261ee126.json`；落行 354 后覆盖闸门 **exit 0**（lint 52 = 基线，新行 0 命中）。**§8.1：本 merge 带进 `scripts/**` 与 `tests/**` ⇒ 绑 `f0dd38d1` 的第四轮读数一律失效**；第五轮以含证据的树 **`88294f25`** / tree `769b0af17bf799331dd96123b09a4f6468e7aee0` 为正式读数树（证据笔在前、重车道在后）。
 
@@ -6485,3 +6485,29 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 绑 `88294f25` 的第五轮四条重车道读数与 Live Gate 证据**对判据① 的末笔有效**；本笔（记录笔六）只改
 `docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-09.md` / `docs/PHASE_STATUS.md` 三个 `.md`
 （全部命中 `DOC_PATTERN`），故按 §8.1 第 3 条的合成，读数**对最终 tip 同样有效**。
+
+## T10（`#318`，B 链第十票）：SessionBudget 跨 run / fork 持久账 —— durable 真源、树级委派配额、CAS 恢复面（2026-09-28 · 实现 + 两轴审查 + 真实证据闭合，**待集成**）
+
+**票面与验收**（`02 §5.1` 第三层 / `03 §3.4`·`§5`·`§7` / `10 §5.1`·`§13` / `11 §6.1`）：共享 SessionBudget 跨 run / fork 持久（复用 #287 树账本所在的同一 SQLite，**无平行账本**——`10 §5.1` 唯一 owner）；durable 身份 / 版本 / 绝对 ceilings / 七维计数；`max_delegations=8` **树级**在子执行前强制；兄弟准入原子；CAS 抬高拒绝过期 / 低于已消耗 / 放不下新准入（409 零副作用）；计数跨 resume / 重启存续；fork = 新 SessionBudget 身份 + 父快照谱系、父零写入；replay 零消耗；投影进 API / SSE / WS / CLI；真实 parent/child 委派 Live Gate 场景；#287 既有验收不回退。
+
+**实现（tip `11648043`，单笔代码提交，24 文件 +3627/−86）**：
+
+- **durable 真源**（`storage/delegation_tree.py`）：`session_budgets` 表（计数器 `DEFAULT 0`；tokens / cost `NULL` = 粘性未知）+ append-only `session_budget_events` 审计（触发器挡 UPDATE/DELETE）。操作：`ensure_session_budget`（首用钉死 + 之后**收窄-only**，不 bump version——CAS 版本只属恢复路径显式更新）、`admit_session_step`（判 + 预留同一 BEGIN IMMEDIATE：turns / requests 各一格，兄弟竞争最后一格至多一个被接纳）、`refund_session_turn` / `refund_session_step`、`record_session_model_requests`（usage 缺席 ⇒ NULL 粘性）、`record_session_tools`、`update_session_limits`（**CAS + 低于已消耗 + headroom 同一事务** ⇒ 409 零副作用）、`consume_session_delegation` / `refund_session_delegation`（session 维委派账，先于树 reserve、树拒绝时退回）。InMemory 孪生共享同一判定函数与序列化助手（口径一处）。
+- **数据面 + 纯判定**（`agent/run_budget.py` session 区）：`SessionLimits` / `SessionConsumed`（含 `delegations`；turns / requests 含**在途预留**）/ `session_pause_trigger`（deadline → 四维 → per-tool 排序）/ `session_closeout_capacity` / `session_resume_headroom_ok` / `session_limits_from_request`（422 单点，含 `max_delegations` 正整数域）/ `session_budget_key`（账键 = 树根会话 id）/ `SessionBudgetPort` Protocol / `SessionBudgetSnapshot.as_projection()`。
+- **runtime 接点**（`agent/runtime.py`）：准入在 run 判定**之后**；session 维命中 ⇒ `run/paused`（trigger = `session.*` 配置字段路径）。requests 计数点 = `len(request_events) - 1`（准入已预付一格；fallback 追加超额部分），usage / cost 随产出响应落、count=0 仍落；closeout **全额**记录（它没有准入预留）。失败 / 取消臂退 turns（请求已实际发出 ⇒ requests 预留 fail-closed）；context 超限臂退整步（模型本轮从未被调用）。
+- **service / web / cli**：`budget.session.*` 七维声明（422 零副作用，Web / CLI / run 三入口同一解析器）；投影 `session` 段（`project_budget` / `build_limits_snapshot`；行不存在 ⇒ 键缺席）；恢复 = 对 durable 行的 CAS 更新（**行存在才必带** `session_expected_version`；行不存在 = 首次钉死，带了也忽略）；**anti-tighten-back**（handle 声明 = 账行现值，绝不拿本次请求的空声明收紧回去）；`session_ceiling_raised` 豁免贯通两阶段恢复（`validate_resume` 只豁免"必须点名 run 维"，run headroom 照判）；CLI `resume_hint` session 维给**行版本**；create 入口拒 session `expected_version`（422）；WS 帧带 session 版本 = 错误帧。
+- **fork**（`session/fork.py`）：`budget_ledger` 只读父账行 ⇒ `session/forked.data.budget_session`（`parent_budget_key` + `snapshot`；父行不存在 ⇒ `snapshot: null`）；**父零写入**（不迁移消耗 / 不 bump version）；child = 新账身份（首个 run 惰性建行）。
+- **multiagent**：child runtime 经 `session_budget_port()` 接到**同一行**（根 / 子 / 孙一个 owner）；`DelegateTool` 配额拒绝**不进树守卫**（#88 熔断器数的是"子代理执行了且失败"；拒绝消息带 used/limit）。
+- **replay 零消耗**：`replay_command` 只读 JSONL store，无任何账写点。
+
+**本票审查中当场发现并修复的 2 个缺陷**（均由测试设计暴露）：① service 的 CAS 顺序 bug（version 检查先于行存在检查 ⇒ 首次钉死会被 422，与 docstring 矛盾）⇒ 修为行存在分支内检查；② runtime 的 requests 双计（准入预付 + 请求点重复 ⇒ 读数 3≠2）⇒ 修为减一 + usage 恒落。
+
+**测试闭环**：账本层 24 条（`tests/multiagent/test_session_budget_ledger.py`：schema / 收窄 / 原子预留 / 退回 / NULL 粘性 / CAS / 低于已消耗五维 / headroom / 委派接纳与退回 / InMemory 孪生）；HTTP 6 条（`tests/web/test_session_budget_api.py`：session ceiling=1 暂停 → 只抬 session 维 + 行 CAS 完成同 run / 422+409 零副作用 / create 拒版本、收声明 / 跨 run 聚合 / fork 谱系父零写入 / replay 零消耗）；runtime 2 条（准入先于模型调用、context 超限退整步）；`test_budget_resets_per_run` 按 #318 语义改写为 `test_delegation_counter_aggregates_across_runs`（树账不因换 run 回血）；既有形状用例 7 处更新（fork/AMEND 直构补账行 mock、`budget.session` 正控、`run/paused` 快照 session 段逐字节断言）。
+
+**真实 Live Gate（场景 `delegation-budget-tree-wide` v1，真模型 + 生产工具 + 生产账本）**：**3/3 PASS**、每次 **12/12** 断言（25271 / 15375 / 15353 ms），证据 `docs/live_gate/20260927T215308-116480435eed-delegation-budget-tree-wide/`（绑 `11648043`）。12 断言：结构性暂停恰好一次（run ceiling=2）→ 续跑不点名 session 维（账行现值沿用）→ 同一 run 完成；9 次 delegate 尝试 ⇒ **恰好 8 次被接纳**（去重 child_session_id=8，跨 run 聚合）、**1 次在子执行前被拒**（回填带「预算耗尽 8/8」，尝试 9 − 接纳 8 = 1 次未产生任何子会话）；8 个 child 真实完成；投影 `session.consumed.delegations=8` / `limits.max_delegations=8` / version=1 与事件面互证；流镜像 / durable 重放逐条同序 / 无悬空 call / session 身份在场。
+
+**门禁**：后端全量 pytest（`PYTHONUTF8=1 ./.venv/Scripts/python.exe -m pytest -q -p no:randomly`）＝**4661 passed / 2 skipped / 51 deselected / 0 failed in 825.88s（13:45），exit 0**（读数树 = 冻结代码树 `11648043`；+32 = 本票新增用例 24+6+2；`#376` / `#377` / `#378` / `#338` 本轮均未出现）；Gate-0 裸全量 ＝**【GATE0】**；覆盖闸门 ＝**【COVERAGE】**（台账行 355 = 本票两轴审查行，绑 `2cda77f8..11648043`）。web/ 零改动 ⇒ vitest / build / e2e 重车道不适用（同 #302 后端票先例；`tsc` / `oxlint` 由 Gate-0 车道覆盖）。
+
+**残余（登记，不阻断）**：① session 维触发的暂停里 closeout 受 session ceiling 约束（tokens/cost 已到线 ⇒ 只落确定性 continuation）——这是设计语义不是缺陷，但客户端可读的"为什么没有摘要"没有专门字段；② 子会话恢复仍不可用（`#372` 既有边界，session 账不改变它——child 的账行由父级委派与自身 run 计数，恢复入口照旧 409）；③ `session/paused` 的 `session` 段只有 version + consumed，limits 在 `limits.session` 里分两处读（投影形状沿用 `11 §6.1` 按作用域拆分的既有口径）。
+
+**集成**：待执行（推集成分支 → 开 PR → 服务端 gate0 绿 → 合并 PR；两步各需用户单独批准）。
