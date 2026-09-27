@@ -45,7 +45,15 @@ from agent_harness.agent.budget import (
     resolve_local_fuse,
 )
 from agent_harness.agent.profiles import declared_turn_ceiling
+from agent_harness.agent.resume_evidence import (
+    ResumeEvidence,
+    StuckEvidencePort,
+    evidence_port,
+    paused_policy_inputs,
+    relevant_steer_seq,
+)
 from agent_harness.agent.run_budget import (
+    REASON_STUCK,
     BudgetConsumed,
     LaunchRunBudget,
     PausedRun,
@@ -58,6 +66,7 @@ from agent_harness.agent.run_budget import (
     latest_run_id,
     project_budget,
     run_limits_from_request,
+    stuck_resume_evidence,
     validate_resume,
 )
 from agent_harness.assembly import build_runtime
@@ -139,6 +148,9 @@ from agent_harness.session.model_switch import (
 )
 from agent_harness.session.model_switch import (
     amend_with_session_model as _amend_with_session_model,
+)
+from agent_harness.session.model_switch import (
+    restore_policy_inputs as _restore_policy_inputs,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
@@ -842,6 +854,13 @@ class SessionService:
             run_budget=launch_budget,
             local_fuse_source=fuse.source,
             **amend_kwargs(amend),
+            # `#317`：stuck 暂停要在 `run/paused` 里记下**停下那一刻**的环境 revision
+            # 与策略版本（ADR-0048 D7/D8）——创建路径也没有例外：新建会话第一次开跑
+            # 就可能卡循环（这是最常见的形状）。
+            stuck_evidence=self._stuck_evidence_port(
+                workspace=workspace, permission_mode=permission_mode,
+                amend=amend,
+            ),
         )
         session = Session.start(
             self._store, session_id=session_id,
@@ -957,6 +976,16 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # 同 run 恢复先把暂停快照里的逐维策略面还原回本次 amend（ADR-0048 D6/D8）。位置在
+        # fuse **之前**：档位同时是 ceiling 的输入（`_profile_turn_ceiling`），两处必须同一个
+        # 值；也在 `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的
+        # 策略变更，优先级高于快照（还原函数内部为此让开了模型这一维）。
+        if task is None and resume_run_id is not None:
+            amend = _restore_policy_inputs(
+                amend,
+                paused_policy_inputs(existing, run_id=resume_run_id),
+                existing,
+            )
         # local fuse（#308）：位置在只读前置检查之后、`Session.resume` 追加事件之前——
         # 被拒请求不写 session/resumed、不建目录。
         fuse = resolve_local_fuse(
@@ -979,6 +1008,28 @@ class SessionService:
         amend = _amend_with_session_model(amend, existing, self._settings)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
+        # 工作目录路径（**只读**：`session_cwd` 是纯事件读，不建目录、不写映射表）——
+        # 位置提前是为了让阶段一的 stuck 恢复依据能观测工作区（`#317`）；真正的
+        # 归属对账 / mkdir / is_dir 仍在下面（那里的顺序契约不变）。
+        persisted_cwd = session_cwd(existing)
+        evidence_workspace = (
+            Path(persisted_cwd) if persisted_cwd is not None
+            else self._workspaces_root / session_id
+        )
+        # 会话级权限档（事件派生；未声明 = 默认档）——同样提前：它既是下面装配点的
+        # 入参，也是 stuck 证据端口里"策略版本"的一维（两处必须同一个值）。
+        effective_mode = _effective_permission_mode(existing)
+        # `#317`：stuck 暂停的证据端口（环境 revision + 策略版本）。**唯一**构造点，
+        # 三处消费（阶段一 / 阶段二的恢复依据现算，以及下面 build_runtime 的暂停快照）
+        # ——同一份输入 ⇒ 暂停侧与恢复侧必然算同一个值（ADR-0048 D7/D8）。
+        stuck_evidence = self._stuck_evidence_port(
+            workspace=evidence_workspace,
+            permission_mode=(
+                effective_mode if effective_mode is not None
+                else PermissionPolicy.WORKSPACE_WRITE
+            ),
+            amend=amend,
+        )
         # `#312`：同 run 续跑 vs 新任务续聊二选一（判定见方法 docstring）。全部
         # 只读——放在 workspace 对账/mkdir 之前，被拒请求既不建目录也不落任何事件。
         same_run_resume = task is None
@@ -1003,6 +1054,9 @@ class SessionService:
                 session_id=session_id, run_id=claim_run_id,
                 expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis,
+                # `#317`：stuck 暂停的"环境变了没有"要现算——阶段一就该挡住无依据的
+                # 恢复（阶段二再算一次是同一条规则、同一份输入；见 ADR-0048 D7）。
+                port=stuck_evidence,
             )
         else:
             if resume_run_id is not None or expected_version is not None or resume_basis is not None:
@@ -1143,6 +1197,10 @@ class SessionService:
                 # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
                 # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
                 local_fuse_source=fuse.source,
+                # `#317`：既有会话的新 run 也要在暂停时记下环境 / 策略快照——必须是**同一个**
+                # `stuck_evidence` 实例（上面阶段一 / 阶段二现算恢复依据用的那个），否则
+                # environment / policy 两条依据在恢复侧一律"无快照可比"（ADR-0048 D7）。
+                stuck_evidence=stuck_evidence,
                 **amend_kwargs(amend),
             )
             return runtime, interactive, approval_callback
@@ -1159,6 +1217,10 @@ class SessionService:
                 session_id=session_id, run_id=claim_run_id,
                 expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis, fuse=fuse,
+                # `#317`：阶段二要把依据落进 `run/resumed.resume_evidence`——**必须**
+                # 带上端口（缺了它本次观测全为 None，环境 / 策略两条依据一律判"无快照
+                # 可比"而来不到这里）。两阶段共用同一枚端口 ⇒ 同一份输入。
+                port=stuck_evidence,
                 runtime_builder=build_resume_runtime,
             )
         else:
@@ -1185,6 +1247,60 @@ class SessionService:
         """
         return self._run_manager.session_lock(session_id)
 
+    def _stuck_evidence_port(
+        self, *, workspace: Path, permission_mode: PermissionPolicy | None,
+        amend: AmendOptions | None,
+    ) -> StuckEvidencePort:
+        """stuck 暂停的观测端口（`#317`；ADR-0048 D8）——**唯一**构造点。
+
+        三个调用点（创建 / 续聊 / 恢复依据现算）都走它，输入取自同一组语义：交给
+        `build_runtime` 的档位与生效 amend（模型 / profile / reasoning / providers）。
+        若三个点各写一份摘要输入，暂停快照与恢复侧的重算就会各算一套值——那正是
+        fail-open 的来源（其实没变，却被算成"变了"，于是无依据也放行）。
+
+        **ceiling 类不入摘要**（local fuse 的值与来源）：它们不是策略面，而且恢复请求
+        可以自己改——算进去就等于给了一条"抬一格 fuse 换一次放行"的侧门。算法侧的
+        理由与残余见 `resume_evidence.policy_version_of`。
+
+        `workspace` 只记路径：环境 revision 在 `current()` 那一刻现算——暂停侧要的是
+        "停下的那一刻"，恢复侧要的是"请求这一刻"，两者本来就该是各自的最新事实。
+
+        组装本身在 `resume_evidence.evidence_port`（**唯一**构造点，CLI 的创建路径也走
+        它）：这里只负责把"本次生效策略"从服务层手里取出来——那是本层才有的输入。
+        """
+        return evidence_port(
+            workspace=workspace,
+            permission_mode=permission_mode,
+            model=amend.model if amend is not None else None,
+            agent_profile=amend.agent_profile if amend is not None else None,
+            reasoning_effort=amend.reasoning_effort if amend is not None else None,
+            context_providers=amend.context_providers if amend is not None else None,
+        )
+
+    def _resume_evidence(
+        self, events: list, *, run_id: str | None, port: StuckEvidencePort | None,
+    ) -> ResumeEvidence | None:
+        """恢复请求这一刻的**现场观测**（`#317`；ADR-0048 D7）。
+
+        只对 **stuck 暂停**算：其余暂停的恢复与这三类依据无关（预算 / deadline 的依据
+        就是请求里的新绝对值），为它们跑一次工作区全树 walk 是白付代价。
+
+        "相关 steer"只读事件流（不需要端口）；环境 / 策略两条来自端口，端口缺席 ⇒ 那两个
+        值为 `None`（fail-closed：`stuck_resume_evidence` 会按"无快照可比"拒掉它们，
+        而不是放行）。
+        """
+        paused = latest_paused_run(events)
+        if paused is None or paused.run_id != run_id or paused.reason != REASON_STUCK:
+            return None
+        observed = port.current() if port is not None else None
+        return ResumeEvidence(
+            relevant_steer_seq=relevant_steer_seq(
+                events, run_id=paused.run_id, pause_seq=paused.pause_seq,
+            ),
+            environment_revision=(observed.environment_revision if observed else None),
+            policy_version=(observed.policy_version if observed else None),
+        )
+
     def _paused_resume_state(
         self,
         events: list,
@@ -1193,16 +1309,21 @@ class SessionService:
         expected_version: int | None,
         limits: RunLimits,
         resume_basis: str | None,
-    ) -> tuple[PausedRun, RunLimits]:
+        resume_evidence: ResumeEvidence | None = None,
+    ) -> tuple[PausedRun, RunLimits, ResumeEvidence | None]:
         """恢复声明的唯一权威判定（纯函数；锁由调用方持有）。
 
         没有暂停 run ⇒ 409（不是 422）：客户端拿着一个**曾经**存在的暂停版本
         来恢复，对不上的是状态而不是形状——与"版本过期"同一族（`11 §6.1`），
         且同样不启动任何 model / tool / child 工作。
 
-        返回 `(暂停事实, 生效 ceiling 集合)`：后者由 `validate_resume` 算出（请求
-        点名的维度取请求值、未点名的沿用暂停时的值），**两个阶段都用它**——阶段一
-        算出的 launch 上下文与阶段二落的 `run/resumed.limits` 必须是同一份集合。
+        返回 `(暂停事实, 生效 ceiling 集合, 现场观测)`：第二个由 `validate_resume` 算出
+        （请求点名的维度取请求值、未点名的沿用暂停时的值），**两个阶段都用它**——阶段一
+        算出的 launch 上下文与阶段二落的 `run/resumed.limits` 必须是同一份集合；第三个是
+        stuck 恢复的观测（非 stuck 为 `None`），阶段二拿它写 `run/resumed.resume_evidence`
+        ——同一次读数两处消费，不再重算（重算会多跑一次工作区 walk，还可能读到不同的现场）。
+        **唯一例外**：`_commit_paused_resume` 里 Recovery **之后**的重读——那一处必须连同暂停
+        事实一起再算一次（否则两条依据各自对着不同的事件流比；ADR-0048 D7）。
         """
         paused = latest_paused_run(events)
         if paused is None:
@@ -1213,8 +1334,12 @@ class SessionService:
         effective = validate_resume(
             paused, run_id=run_id, expected_version=expected_version,
             limits=limits, resume_basis=resume_basis,
+            # `#317`：stuck 的三类依据由调用方现算后传进来（本函数是纯函数，不做
+            # 任何观测）。**不转发 = 判据永远看不到现场证据**——那会把每一条依据都
+            # 变成"无快照可比"的 409（fail-closed 到用不了），所以这一格必须传。
+            resume_evidence=resume_evidence,
         )
-        return paused, effective
+        return paused, effective, resume_evidence
 
     def _launch_budget_from(self, paused, *, limits: RunLimits) -> LaunchRunBudget:
         """暂停事实 → 续跑执行的账本上下文（version 已 +1、consumed 沿用快照）。
@@ -1233,13 +1358,15 @@ class SessionService:
     async def _plan_paused_resume(
         self, *, session_id: str, run_id: str, expected_version: int,
         limits: RunLimits, resume_basis: str,
+        port: StuckEvidencePort | None = None,
     ) -> LaunchRunBudget:
         """阶段一（锁内只读）：校验恢复声明并算出续跑账本，**不写任何东西**。"""
         async with self._resume_lock(session_id):
             events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
-            paused, effective = self._paused_resume_state(
+            evidence = self._resume_evidence(events, run_id=run_id, port=port)
+            paused, effective, _ = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
-                limits=limits, resume_basis=resume_basis,
+                limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
             )
             if self._run_manager.get_active(session_id) is not None:
                 # 暂停后"当前执行"已收口（task done），所以这里命中的是**并发**：
@@ -1250,6 +1377,7 @@ class SessionService:
     async def _commit_paused_resume(
         self, *, session_id: str, run_id: str, expected_version: int,
         limits: RunLimits, resume_basis: str, fuse: LocalFuse,
+        port: StuckEvidencePort | None = None,
         runtime_builder: Callable[
             [LaunchRunBudget],
             Awaitable[tuple[Any, bool, ApprovalCallback | None | _InteractiveCallbackHolder]],
@@ -1273,9 +1401,10 @@ class SessionService:
         """
         async with self._resume_lock(session_id):
             events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
-            paused, effective = self._paused_resume_state(
+            evidence = self._resume_evidence(events, run_id=run_id, port=port)
+            paused, effective, evidence = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
-                limits=limits, resume_basis=resume_basis,
+                limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
             )
             needs_recovery = (
                 detect_dangling(events)
@@ -1289,9 +1418,13 @@ class SessionService:
                 events = await anyio.to_thread.run_sync(
                     self._store.read_events, session_id,
                 )
-                paused, effective = self._paused_resume_state(
+                # 重读之后**暂停事实与现场观测一起重算**：`#317` 的两条依据判的是
+                # 「停下的那一刻 vs 请求这一刻」，只重算一边会让它们各自对着不同的
+                # 事件流比（ADR-0048 D7）。
+                evidence = self._resume_evidence(events, run_id=run_id, port=port)
+                paused, effective, evidence = self._paused_resume_state(
                     events, run_id=run_id, expected_version=expected_version,
-                    limits=limits, resume_basis=resume_basis,
+                    limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
                 )
             session = Session.load(
                 self._store, session_id,
@@ -1314,6 +1447,12 @@ class SessionService:
                     ),
                     consumed=paused.consumed,
                     resume_basis=resume_basis,
+                    # `#317`：stuck 恢复必须记下"哪一条依据放行了它"（ADR-0048 D7）。
+                    # 判据与校验是同一份（`stuck_resume_evidence`）——这里只是把它的
+                    # 结论落盘；非 stuck 暂停返回 None ⇒ 载荷与旧形状逐字相同。
+                    resume_evidence=stuck_resume_evidence(
+                        paused, resume_basis=resume_basis, evidence=evidence,
+                    ),
                 ),
                 # 同一 run_id（`03 §3.4` 不变量：恢复沿用同一逻辑 run）。
                 # 不给 step_id：暂停/恢复是生命周期刻度，沿用的仍是原 run 的

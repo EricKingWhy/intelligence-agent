@@ -69,6 +69,11 @@ from agent_harness.agent.budget import (
     BudgetRejection,
     LocalFuse,
 )
+from agent_harness.agent.resume_evidence import (
+    ResumeEvidence,
+    recorded_environment_revision,
+    recorded_policy_inputs,
+)
 from agent_harness.model.accounting import ProviderAccounting, decimal_or_none
 from agent_harness.session.event import (
     MODEL_COMPLETED,
@@ -83,14 +88,22 @@ from agent_harness.session.event import (
     SessionEvent,
 )
 
-#: `run/paused.data.reason`：本票唯一会出现的暂停原因（其余两类由 `#315`/`#317` 接）。
+#: `run/paused.data.reason`：某个 ceiling 到顶（`03 §3.4` 三值里的第一个）。
 REASON_BUDGET_EXHAUSTED = "budget_exhausted"
 
 #: `run/paused.data.reason`：绝对 deadline 到点（`#315`；`03 §3.4` 三值里的第二个）。
 #: 与 `budget_exhausted` 的分工：后者的处置是"抬高某个 ceiling"，前者是"给一个新的
 #: 未来时刻"——两个不同的客户端动作，所以必须是两个取值（`02 §5.1` 三层控制不可合并的
-#: 同一方向）。`#317` 的 stuck 是第三个，本票不产。
+#: 同一方向）。
 REASON_DEADLINE = "deadline"
+
+#: `run/paused.data.reason`：同一模式重复到"再达阈值"且无相关进展（`#317`；三值里的第三个）。
+#: 与前两个的分工：它**没有**可以抬高的 ceiling，也**没有**可以换的截止时刻——它缺的是
+#: "外部输入变了"这件事本身，所以恢复依据是三类**观测到的变更**（`02 §5.3` / ADR-0048 D7），
+#: `resume_basis=budget_increase` 对它一律 409。
+#: **判定不在本模块**：`reason=stuck` 由 `agent/guards.py` 的检测器在 runtime 的稳定边界
+#: 上给出，本模块只承载它（暂停载荷 / 恢复前置 / continuation）。
+REASON_STUCK = "stuck"
 
 #: `03 §5` 冻结的 run 状态词表里**唯一**由对账（而非暂停 / 终态）给出的那一个（`#315` 起可产）。
 #: 它在投影里**覆盖** `paused`：`03 §5` 明写「`needs_reconcile` 同样 MUST 先 reconcile 才
@@ -211,9 +224,10 @@ def reason_for_dimension(dimension: str) -> str:
 CLOSEOUT_MODEL = "model"
 CLOSEOUT_DETERMINISTIC = "deterministic"
 
-#: `run/resumed.data.resume_basis`（`03 §3.4` 的四值）。本票只接受 `budget_increase`：
-#: 另外三值（相关 steer / 环境变更 / 策略变更）的**证据判定**属 stuck 暂停（`#317`），
-#: 现在收下它们等于假装校验过证据。
+#: `run/resumed.data.resume_basis`（`03 §3.4` 的四值）。本模块只把它当**声明**收下；
+#: 哪一种暂停接受哪一条由 `validate_resume` 决定：预算 / deadline 只接受
+#: `budget_increase`，stuck 只接受后三者并且每一条都要**现场观测到**（`#317`；
+#: 证据算法在 `agent/resume_evidence.py`，判定在 `stuck_resume_evidence`）。
 RESUME_BASIS_BUDGET_INCREASE = "budget_increase"
 RESUME_BASIS_RELEVANT_STEER = "relevant_steer"
 RESUME_BASIS_ENVIRONMENT_CHANGE = "environment_change"
@@ -226,6 +240,80 @@ RESUME_BASIS_VALUES: frozenset[str] = frozenset(
         RESUME_BASIS_POLICY_CHANGE,
     }
 )
+
+#: `run/paused.data.stuck` 的键（`#317`；ADR-0048 D6）。**只有 `reason=stuck` 才出现**
+#: ——旧形状（预算 / deadline 暂停）逐字不变。前四个键是"哪个模式、到了第几次"，
+#: 后四个是暂停那一刻的**观测快照**：恢复侧拿同一份函数重算再比较（D7），
+#: `policy_inputs` 同时是"还原策略面"的来源（与 `policy_version` 同生共死）。
+STUCK_KEYS: tuple[str, ...] = (
+    "pattern",
+    "threshold",
+    "count",
+    "replan_count",
+    "fingerprint",
+    "environment_revision",
+    "policy_version",
+    # `#317`（T9 审查 P1）：策略面的**逐维值**（与 `policy_version` 同生共死）。投影要
+    # 跟着载荷走——恢复侧靠它把暂停时那一套策略还原回自己的 amend；把它留在投影外
+    # 等于"载荷记了、读回没有"，下一个照投影写恢复侧的人会再踩回同一个 fail-open。
+    "policy_inputs",
+)
+
+#: stuck 暂停的 `resume_requirements`（`03 §3.4` 的字段；ADR-0048 D5/D7）：
+#: 三类依据的名字与 `RESUME_BASIS_*` 同名——客户端据此知道"要哪一条"，不发明第二套词。
+#: **三格齐全**（证据端口在、快照两格都读到了）时列满三条；缺格时列的是
+#: `stuck_resume_requirements` 算出的**可用子集**——列一条永远 409 的依据就是
+#: `03 §5` / ADR-0044 D4 禁止的"暗示可安全续跑"。
+STUCK_RESUME_REQUIREMENTS: tuple[str, ...] = (
+    RESUME_BASIS_RELEVANT_STEER,
+    RESUME_BASIS_ENVIRONMENT_CHANGE,
+    RESUME_BASIS_POLICY_CHANGE,
+)
+
+#: 依据名 → 一句人话（continuation 文案用；名字与 `RESUME_BASIS_*` 逐字相同）。
+_BASIS_GLOSS: dict[str, str] = {
+    RESUME_BASIS_RELEVANT_STEER: "暂停之后的新指令",
+    RESUME_BASIS_ENVIRONMENT_CHANGE: "工作区 / 环境已变",
+    RESUME_BASIS_POLICY_CHANGE: "策略 / 档位 / 模型 / profile 已变",
+}
+
+
+def stuck_resume_requirements(
+    stuck: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """这条 stuck 暂停**当前**还接受哪几条依据（`03 §3.4` 三条里判据不会恒拒的那些）。
+
+    与 `stuck_resume_evidence` 的各条"缺席即 409"检查**同源**——两侧调同一组形状 / 还原
+    谓词（`recorded_environment_revision` / `recorded_policy_inputs`）。列一条判据根本不
+    会接受的依据，就落进 `03 §5` / ADR-0044 D4 禁止的"暗示可安全续跑"（ADR-0048 D6）。
+
+    `stuck is None`（预算 / deadline 暂停）⇒ 空元组：那两类暂停没有前置依据。
+    """
+    if not stuck:
+        return ()
+    available = [RESUME_BASIS_RELEVANT_STEER]
+    if recorded_environment_revision(stuck) is not None:
+        available.append(RESUME_BASIS_ENVIRONMENT_CHANGE)
+    if (
+        stuck.get("policy_version") is not None
+        and recorded_policy_inputs(stuck) is not None
+    ):
+        available.append(RESUME_BASIS_POLICY_CHANGE)
+    return tuple(available)
+
+
+def describe_resume_requirements(stuck: Mapping[str, Any] | None) -> str:
+    """可用依据的**人话**清单（确定性 continuation 与 closeout 指令共用这一份渲染）。
+
+    两处都**只**许列可用依据：指令里写死三条，模型会照抄进 continuation，而其中一条
+    在快照缺席时必被 409 挡死（`03 §5` / ADR-0044 D4）。
+    """
+    available = stuck_resume_requirements(stuck)
+    if not available:
+        # 只有 `stuck is None` / 空载荷会落这里（本代码产出的 stuck 暂停至少列一条）：
+        # 非 stuck 暂停，或不带快照的外来载荷。
+        return "本次载荷里没有可用的恢复依据（没有快照）"
+    return " / ".join(f"{name}（{_BASIS_GLOSS[name]}）" for name in available)
 
 #: 暂停前为 closeout **预留**的 turn 容量（`02 §5.2`「在适用预算内预留容量」，
 #: ticket R2「closeout work accounted inside the configured ceiling」）。
@@ -513,6 +601,10 @@ class PausedRun:
     continuation: dict[str, Any]
     closeout_source: str
     resume_requirements: tuple[str, ...]
+    #: `#317`：`reason=stuck` 时的检测事实（`STUCK_KEYS` 的投影，含暂停那一刻的环境 /
+    #: 策略快照）；预算 / deadline 暂停恒为 `None`。存下来是为了让恢复侧**有据可比**
+    #: （ADR-0048 D7 的"不等于快照"），而不是重新解释一遍暂停原因。
+    stuck: dict[str, Any] | None = None
     #: 原 run 在会话里的序号（`run/started.turn_index`）——续跑执行的 Langfuse
     #: 归因沿用同一个序号（不跳号、也不谎报成第 1 轮）。不是暂停事实本身，
     #: 所以**不**进 `as_projection()`（客户端投影不需要它）。
@@ -529,8 +621,11 @@ class PausedRun:
 
         `consumed` 与 `remaining` 都是**四维全在**的对象：某维度不可耗时是 `null`
         （"不知道"），不是 0——前者让客户端能区分"没花"与"没数"，后者会变成假话。
+
+        `stuck`（`#317`）**只在 stuck 暂停出现**（键缺席，不是 `null`）：预算 / deadline
+        暂停没有"模式与快照"可言，落一个恒为 null 的键会让它看起来像"检测过但没检测到"。
         """
-        return {
+        projection = {
             "run_id": self.run_id,
             "version": self.version,
             "state": "paused",
@@ -545,6 +640,9 @@ class PausedRun:
             "resume_requirements": list(self.resume_requirements),
             "pause_seq": self.pause_seq,
         }
+        if self.stuck:
+            projection["stuck"] = dict(self.stuck)
+        return projection
 
 
 @dataclass(frozen=True)
@@ -858,6 +956,7 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
                 continuation=normalize_continuation(event.data.get("continuation")) or {},
                 closeout_source=closeout if isinstance(closeout, str) else CLOSEOUT_DETERMINISTIC,
                 resume_requirements=_strings(event.data.get("resume_requirements")),
+                stuck=_stuck_projection(event.data.get("stuck"), reason=event.data.get("reason")),
                 turn_index=turn_index,
             )
         elif event.type == RUN_RESUMED:
@@ -963,6 +1062,25 @@ def _strings(raw: Any) -> tuple[str, ...]:
     if not isinstance(raw, (list, tuple)):
         return ()
     return tuple(item for item in raw if isinstance(item, str))
+
+
+def _stuck_projection(raw: Any, *, reason: Any) -> dict[str, Any] | None:
+    """`run/paused.data.stuck` 的读回（`#317`，`STUCK_KEYS` 的投影）。
+
+    只在 `reason=stuck` 且**形状可读**时给出；否则 `None`（**不抛**）。理由：投影与恢复
+    判定都不能被一条畸形载荷炸掉，而"没有快照"恰好是 fail-closed 的那一侧——环境 /
+    策略两条依据届时按"无快照可比"被 409 拒（ADR-0048 D7），相关 steer 那条不受影响
+    （它只依赖事件流，不依赖快照）。
+    """
+    if reason != REASON_STUCK or not isinstance(raw, Mapping):
+        return None
+    if not isinstance(raw.get("pattern"), str) or not raw["pattern"]:
+        return None
+    for key in ("count", "threshold"):
+        value = raw.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+    return {key: raw.get(key) for key in STUCK_KEYS}
 
 
 # ── 准入判定（runtime 的**单一**判定点调用） ──────────────────────────────
@@ -1435,6 +1553,106 @@ def _pick(requested: Any, previous: Any) -> Any:
     return previous if requested is None else requested
 
 
+def stuck_resume_evidence(
+    paused: PausedRun,
+    *,
+    resume_basis: str,
+    evidence: ResumeEvidence | None,
+) -> dict[str, Any] | None:
+    """stuck 暂停"采纳了哪一条依据"——三类恢复依据的**唯一**判据（ADR-0048 D7）。
+
+    与预算路径同一分工：`validate_resume` 负责判（调用本函数，依据不成立即 409）、
+    `build_resume_data` 负责装（把返回值写进 `run/resumed.data.resume_evidence`），
+    判据只有这一份实现，两侧不会各解释一遍。
+
+    返回写进 `resume_evidence` 的对象；**不是 stuck 暂停 ⇒ `None`**（预算 / deadline
+    暂停没有"依据"这个概念——它们的依据就是请求里的新绝对值本身）；依据不成立 ⇒ 抛
+    `BudgetConflict`。
+
+    三类依据都是**观测**，不是声明：`evidence` 由恢复侧用 `agent/resume_evidence.py`
+    在"请求这一刻"现算（事件流 + 注入的证据端口），请求体里没有任何位置能塞进一个
+    依据值（`#317` Must Not Do：用户说"我改了环境"不构成证据）。
+
+      * `relevant_steer`：事件流里存在 `seq > pause_seq` 且可作用于本 run 的 steer 请求。
+        这一条**不**需要暂停快照——它比的是事件顺序。
+      * `environment_change` / `policy_change`：现算值必须与暂停快照里的**不同**。任一
+        缺席（没有端口 / 暂停时读不到 / 快照没记）⇒ 409 明说"无快照可比"，**不**放行
+        （fail-closed：宁可让 operator 去看一眼真正发生了什么，也不假装"变了"）。
+
+    `budget_increase` 一律 409：stuck 缺的不是额度（`03 §3.4` 的暂停理由不是预算），
+    抬高 ceiling 也解不开"同一个动作重复"。
+    """
+    if paused.reason != REASON_STUCK:
+        return None
+    if resume_basis == RESUME_BASIS_BUDGET_INCREASE:
+        raise BudgetConflict(
+            "stuck 暂停不接受 resume_basis=budget_increase：它缺的不是额度"
+            "（02 §5.3 的三条依据是相关 steer / 环境变更 / 策略变更），"
+            "抬高 ceiling 不改变同一个动作的重复——本请求未启动任何工作"
+        )
+    if evidence is None:
+        raise BudgetConflict(
+            f"stuck 暂停的 resume_basis={resume_basis} 需要现场证据，但恢复侧没有可用的"
+            f"观测（未注入证据端口 / 读不到事件流）——拒绝启动工作"
+        )
+    stuck = paused.stuck or {}
+    if resume_basis == RESUME_BASIS_RELEVANT_STEER:
+        if evidence.relevant_steer_seq is None:
+            raise BudgetConflict(
+                f"stuck 暂停只接受'暂停之后出现的相关 steer'，但事件流里没有 "
+                f"seq > {paused.pause_seq} 且可作用于 run_id={paused.run_id} 的 "
+                f"steer/requested——本次恢复没有依据，未启动任何工作"
+            )
+        return {
+            "basis": resume_basis,
+            "steer_seq": evidence.relevant_steer_seq,
+            "pause_seq": paused.pause_seq,
+        }
+    if resume_basis == RESUME_BASIS_ENVIRONMENT_CHANGE:
+        field = "environment_revision"
+    elif resume_basis == RESUME_BASIS_POLICY_CHANGE:
+        field = "policy_version"
+    else:
+        # 其余取值在 `validate_resume` 里已按 422 拒（`RESUME_BASIS_VALUES`）；
+        # 这里不是"兜底分支"，只是不让将来多出来的取值静默走错那一条比较。
+        raise BudgetConflict(f"stuck 暂停不支持 resume_basis={resume_basis}")
+    recorded = (
+        recorded_environment_revision(stuck)
+        if resume_basis == RESUME_BASIS_ENVIRONMENT_CHANGE
+        else stuck.get(field)
+    )
+    current = getattr(evidence, field)
+    if recorded is None or current is None:
+        side = (
+            "暂停快照里缺席或形状不合法" if recorded is None else "本次观测里缺席"
+        )
+        raise BudgetConflict(
+            f"stuck 暂停的 resume_basis={resume_basis} 需要与暂停快照比较，但 {field} 在"
+            f"{side}（暂停时读不到它）——无快照可比，拒绝启动工作"
+        )
+    if (
+        resume_basis == RESUME_BASIS_POLICY_CHANGE
+        and recorded_policy_inputs(stuck) is None
+    ):
+        # 摘要还在，但**逐维值不在 / 与摘要对不上** ⇒ 这份快照还原不回来。放行它等于
+        # 拿"本次请求声明了什么"当基线：CLI 一类不声明策略的恢复会把"省略"算成"变了"
+        # （`#317` T9 审查 P1 在**存量会话**上的形状——快照由本票之前的版本写入时没有
+        # 逐维值）。判据只有这一份实现，所以卡在这里；`environment_change` 不受影响
+        # （那条依据从来不依赖策略面，恢复侧也不需要还原）。
+        raise BudgetConflict(
+            f"stuck 暂停的 resume_basis={resume_basis} 需要暂停快照里的逐维策略面，但"
+            f"这份快照只记了 {field} 摘要、记不下逐维值（或两者对不上）——它还原不回来，"
+            f"无法证明'策略真的变了'，拒绝启动工作"
+        )
+    if current == recorded:
+        raise BudgetConflict(
+            f"stuck 暂停的 resume_basis={resume_basis} 不成立：现算的 {field}={current} "
+            f"与暂停快照（seq={paused.pause_seq}）相同——没有观测到变更，"
+            f"本请求未启动任何工作"
+        )
+    return {"basis": resume_basis, field: current, "recorded": recorded}
+
+
 def validate_resume(
     paused: PausedRun,
     *,
@@ -1443,6 +1661,7 @@ def validate_resume(
     limits: RunLimits,
     resume_basis: str | None,
     now: datetime | None = None,
+    resume_evidence: ResumeEvidence | None = None,
 ) -> RunLimits:
     """恢复请求的**开工前**校验（拒绝 ⇒ 抛领域异常，调用方零副作用）。
 
@@ -1456,20 +1675,26 @@ def validate_resume(
     ceiling 从账本上消失。
 
     四维各自判定，任一维"放不下一次新准入"就拒绝整个请求——接受它等于让客户端拿到
-    "恢复成功但立刻再次暂停"的假象。**一个维度都不点名**同样 409：`03 §5` 要求恢复
-    请求给出绝对 ceiling，"一个都不给"不是抬高。
+    "恢复成功但立刻再次暂停"的假象。**预算暂停**"一个维度都不点名"同样 409：`03 §5`
+    要求恢复请求给出绝对 ceiling，"一个都不给"不是抬高。
 
-    本票的暂停只可能由预算或 deadline 产生，所以"变更依据"只有一条真实路径：
-    `resume_basis=budget_increase` 且新 ceilings 真的能继续（见 `resume_headroom_ok`）。
-    另外三值的**证据判定**（相关 steer / 比快照更新的环境或策略版本）属 `#317`，
-    现在接受它们等于假装校验过证据 ⇒ 409 明说"不接受"。
+    哪种暂停接受哪条依据（`#317` 起三类暂停各有各的）：
 
-    **deadline 暂停（`#315`）走同一条 `budget_increase` 路径**，理由：deadline 本身就是
+    - **预算 / deadline**：只有 `budget_increase` 一条真实路径——预算靠抬高某个
+      ceiling、deadline 靠给一个新的未来时刻（见下）。另外三值的**证据判定**属 stuck
+      的地盘，用在这里等于假装校验过证据 ⇒ 409 明说"不接受"。
+    - **stuck**：只接受 `relevant_steer` / `environment_change` / `policy_change`，
+      且每一条都要在**请求这一刻**被观测到（`stuck_resume_evidence` 是唯一判据；
+      观测值由 `agent/resume_evidence.py` 现算，`resume_evidence` 参数就是它）。
+      `budget_increase` ⇒ 409；**不要求**点出绝对 ceiling（那不是它缺的东西），
+      但"恢复了却立刻再停"照样在 `resume_headroom_ok` 被拒。
+
+    **deadline 暂停（`#315`）走 `budget_increase` 同一路径**，理由：deadline 本身就是
     `budget.run` 作用域的一维（`11 §6.1` 的公开形状里它就在 `run` 对象内），恢复它给的
     是"新的绝对时刻"——与给新 ceiling 是同一个动作类别（`03 §3.4`：恢复只接受绝对值、
     不重置 counter），不需要 `#317` 那三类"变更依据"的证据。真正的判据是
     `resume_headroom_ok` 里的"deadline 严格在未来"：沿用一个已过去的时刻会被拒（409），
-    而这不是形状错误（形状在 `parse_deadline_at` 判过）。`stuck`（`#317`）仍是 409。
+    而这不是形状错误（形状在 `parse_deadline_at` 判过）。
     """
     if not run_id:
         raise BudgetRejection(
@@ -1494,16 +1719,23 @@ def validate_resume(
         )
     if resume_basis not in RESUME_BASIS_VALUES:
         raise BudgetRejection(f"未知 resume_basis：{resume_basis!r}")
+    if paused.reason == REASON_STUCK:
+        # 依据先判（stuck 恢复缺的正是它），再判"能不能真继续"。
+        stuck_resume_evidence(
+            paused, resume_basis=resume_basis, evidence=resume_evidence,
+        )
+        return _validated_resume_limits(paused, limits=limits, now=now)
     if paused.reason not in (REASON_BUDGET_EXHAUSTED, REASON_DEADLINE):
         raise BudgetConflict(
-            f"暂停原因 reason={paused.reason} 的恢复前置条件本票未实现"
-            f"（#317 stuck 负责），拒绝启动工作"
+            f"未知暂停原因 reason={paused.reason}：本实现只认 "
+            f"{sorted((REASON_BUDGET_EXHAUSTED, REASON_DEADLINE, REASON_STUCK))}，"
+            f"拒绝启动工作"
         )
     if resume_basis != RESUME_BASIS_BUDGET_INCREASE:
         raise BudgetConflict(
             f"预算 / deadline 暂停只接受 resume_basis={RESUME_BASIS_BUDGET_INCREASE}："
-            f"{resume_basis} 的有效性需要变更证据（属 #317 的责任域），"
-            f"本票不假装校验过它"
+            f"{resume_basis} 的有效性需要变更证据（属 stuck 暂停的责任域，"
+            f"`stuck_resume_evidence`），本路径不假装校验过它"
         )
     if not limits.configured:
         # `03 §5`：恢复请求 MUST 给出**绝对** ceiling（不是"可以不给"）。各维里点
@@ -1513,6 +1745,17 @@ def validate_resume(
             "恢复必须至少给出一个绝对 ceiling（budget.run.* 任一维，含 deadline_at）；"
             "一个都不给不是抬高——本请求未启动任何工作"
         )
+    return _validated_resume_limits(paused, limits=limits, now=now)
+
+
+def _validated_resume_limits(
+    paused: PausedRun, *, limits: RunLimits, now: datetime | None,
+) -> RunLimits:
+    """生效 ceiling + "放得下一次新准入"的判定（预算 / deadline 与 stuck 共用）。
+
+    共用的是**判据**，不是"要不要给 ceiling"那条前置（那是两条路径唯一的分叉：
+    预算暂停必须点名新绝对值，stuck 暂停不要求——见 `validate_resume`）。
+    """
     effective = resume_limits(paused.limits, request=limits)
     if paused.reason == REASON_DEADLINE and effective.deadline_at is None:
         # deadline 暂停的**恢复依据**就是"换一个新的未来时刻"：连时刻都没有（请求没点名，
@@ -1563,6 +1806,7 @@ def build_pause_data(
     closeout_source: str,
     resume_requirements: Iterable[str] = (),
     trace_id: str | None = None,
+    stuck: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """`run/paused` 的 data（`03 §3.4`：reason / trigger_dimension / version /
     consumed / limits / continuation / closeout_source / resume_requirements）。
@@ -1573,8 +1817,11 @@ def build_pause_data(
     _finalize_trace_url`），而暂停不调任何终态回调 ⇒ 此刻只能是 None，落一个恒为
     None 的键是假信息；要不要给暂停加一个观测端口回调属 observability 票（残余已
     登记在 tracker）。值恒为 key、可为 None（缺席实现不伪造，`11 §6.1`）。
+
+    `stuck`（`#317`）只在 `reason=stuck` 时给出（调用方保证），**缺席**而不是 `null`
+    ——旧形状（预算 / deadline 暂停）的载荷逐字不变（ADR-0048 D6）。
     """
-    return {
+    data = {
         "reason": reason,
         "trigger_dimension": trigger_dimension,
         "budget_version": version,
@@ -1585,6 +1832,9 @@ def build_pause_data(
         "resume_requirements": list(resume_requirements),
         "trace_id": trace_id,
     }
+    if stuck is not None:
+        data["stuck"] = dict(stuck)
+    return data
 
 
 def build_resume_data(
@@ -1595,14 +1845,19 @@ def build_resume_data(
     limits: dict[str, Any],
     consumed: BudgetConsumed,
     resume_basis: str,
+    resume_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """`run/resumed` 的 data（`03 §3.4`）。
 
     `consumed` **等于**暂停快照（恢复不重置、也不预支）：它是"恢复这一刻的账"，
     新工作产生的消耗由后续 `model/request` / `model/completed` 继续累加。
     四维都写（未知的是 `null`）——恢复请求的四维 ceiling 正是拿它做基数判定的。
+
+    `resume_evidence`（`#317`）：stuck 恢复**采纳了哪一条依据**（`basis` + 观测值）。
+    只有 stuck 恢复带它（非 stuck ⇒ `None`，旧形状逐字不变）：预算 / deadline 恢复的
+    依据就是请求里的新 ceiling 本身，不需要另一个证据对象自我证明（ADR-0048 D7）。
     """
-    return {
+    data = {
         "from_pause_seq": from_pause_seq,
         "previous_budget_version": previous_version,
         "budget_version": version,
@@ -1610,6 +1865,9 @@ def build_resume_data(
         "consumed": consumed.as_projection(),
         "resume_basis": resume_basis,
     }
+    if resume_evidence is not None:
+        data["resume_evidence"] = dict(resume_evidence)
+    return data
 
 
 def project_budget(
@@ -1744,6 +2002,8 @@ def deterministic_continuation(
     limits: RunLimits,
     consumed: BudgetConsumed,
     blocked_by: Sequence[str] = (),
+    reason: str | None = None,
+    stuck: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """确定性 continuation：**只**用已持久化事实组装（`02 §5.2`）。
 
@@ -1755,10 +2015,17 @@ def deterministic_continuation(
     账目**未知**的维度在文案里写"未知"而不是 0（`11 §6.1`：不可得 ≠ 0；这里的一句
     "已花 0 元"会直接骗到正在决定要不要继续的人）。
 
+    `reason=stuck`（`#317`）走另一支（`_stuck_continuation`）：stuck 没有"到顶的
+    ceiling"可抬，照抄预算那句会指一条必被 409 挡死的路（ADR-0048 D6）。
+
     `blocked_by`（`#315`）交给 `apply_blocked_by` 统一改写——**模型给的 continuation
     走的是同一个改写**（见那里的理由）："已确证的阻塞项"是事实，不是某种 continuation
     来源的装饰。
     """
+    if reason == REASON_STUCK:
+        return apply_blocked_by(
+            _stuck_continuation(stuck=stuck, consumed=consumed), blocked_by,
+        )
     items = [event for event in events if event.run_id == run_id]
     tool_results = sum(1 for event in items if event.type == TOOL_RESULT)
     ceiling = limits.ceiling_of(trigger_dimension)
@@ -1813,6 +2080,63 @@ def deterministic_continuation(
         ],
         CONTINUATION_ACTION_KEY: action,
     }, blocked_by)
+
+
+def _stuck_continuation(
+    *, stuck: Mapping[str, Any] | None, consumed: BudgetConsumed,
+) -> dict[str, Any]:
+    """stuck 暂停的确定性 continuation（`#317`；ADR-0048 D6）。
+
+    与预算 / deadline 那两支的区别就是本函数存在的理由：stuck 缺的**不是额度也不是
+    时刻**，所以文案里不能出现"提高 ceiling 后恢复"（那次恢复必被 `stuck_resume_evidence`
+    409 挡死，`03 §5` / ADR-0044 D4 禁止"暗示可安全续跑"）。这里给的动作与三类判据
+    逐条对应：补一条**观测到的**变更依据，或者换个做法。
+
+    `completed` 只写已确证的事实（消耗计数 + "恰好一次 replan 已用掉"这条契约事实，
+    见 `StuckSignal.as_event_data` 对 `replan_count` 的说明）。
+    """
+    payload = dict(stuck or {})
+    pattern = str(payload.get("pattern") or "未知模式")
+    count = _value_text(payload.get("count"))
+    threshold = _value_text(payload.get("threshold"))
+    # 只报**判据不会恒拒**的依据（`stuck_resume_requirements`）：写死"三选一"会在快照缺格
+    # （子 run 不注入端口、或旧载荷）时指两条必被 409 挡死的路——本函数存在的理由就是不许
+    # 出现这种文案（见 docstring）。
+    available = stuck_resume_requirements(payload)
+    if available:
+        action = (
+            f"先给出恢复依据，再以同一 run_id 恢复"
+            f"（resume_basis={describe_resume_requirements(payload)}）"
+        )
+        if len(available) < len(STUCK_RESUME_REQUIREMENTS):
+            action += "；本次暂停快照只有这些依据可用（其余几条在快照里缺席）"
+    else:
+        action = "本次暂停没有可用的恢复依据（快照两格都缺席）"
+    return {
+        "completed": [
+            (
+                f"本逻辑 run 已消耗 {consumed.agent_turns} 个 agent turn、"
+                f"{_value_text(consumed.model_requests)} 次 Provider 请求"
+            ),
+            (
+                f"模式 {pattern} 首达阈值（{threshold}）时已用掉**恰好一次**纠正性 replan；"
+                f"其后计数没有复位"
+            ),
+        ],
+        "remaining": [
+            (
+                "暂停发生在同一个模式再次达到阈值之后：需要**外部输入的变化**，"
+                "继续重复同一个动作不会产生新结果"
+            ),
+        ],
+        "blockers": [
+            f"{pattern} 已连续到第 {count} 次（阈值 {threshold}）：没有出现相关进展",
+        ],
+        CONTINUATION_ACTION_KEY: (
+            f"{action}；"
+            "或者改变做法本身——同一个动作不会因为再试一次而得到不同的结果"
+        ),
+    }
 
 
 def apply_blocked_by(

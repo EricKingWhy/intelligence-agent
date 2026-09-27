@@ -394,6 +394,74 @@ class TestResumeAndLaunchPassthrough:
         assert call_kwargs["context_providers"] is None
 
 
+class TestResumePathStuckEvidence:
+    """既有会话的新 run 必须拿到证据端口（`#317`；ADR-0048 D7/D8）。
+
+    缺陷形状（Live Gate v2 真实读数）：这条 `build_runtime` 漏传 `stuck_evidence` ⇒
+    `run/paused.stuck.environment_revision` / `policy_version` 双双为 `None` ⇒ 恢复侧
+    环境 / 策略两条依据恒"无快照可比"（创建路径与 CLI 路径都有，只差这一个 kwarg）。
+    这里钉两件事：端口真的到了装配点（且工作区与装配点同一个），以及它的策略输入
+    是**生效**的那一套（与判定侧同一组输入 —— 少一项就会算出假 policy_change）。
+    """
+
+    @staticmethod
+    def _state_with_existing_session(tmp_path):
+        state = _make_state(tmp_path)
+        from agent_harness.session.event import SESSION_STARTED, SessionEvent
+
+        state.store.read_events = MagicMock(return_value=[
+            SessionEvent(seq=0, type=SESSION_STARTED, session_id="test-sid", data={}),
+        ])
+        state.run_manager.get_active = MagicMock(return_value=None)
+        from agent_harness.sandbox.base import Sandbox
+
+        state.workspace_registry.get = MagicMock(return_value=MagicMock(spec=Sandbox))
+        return state
+
+    @staticmethod
+    def _launch(state, **kwargs):
+        with (
+            patch("agent_harness.session.service.build_runtime", new_callable=AsyncMock) as build,
+            patch("agent_harness.session.service.Session") as session_cls,
+        ):
+            session = MagicMock()
+            session.session_id = "test-sid"
+            session_cls.resume = MagicMock(return_value=session)
+            asyncio.run(session_service(state).resume_and_launch(
+                session_id="test-sid", task="hello", local_max_agent_turns=5, **kwargs,
+            ))
+        return build.call_args.kwargs
+
+    def test_the_run_gets_a_port_anchored_on_its_own_workspace(self, tmp_path):
+        from agent_harness.agent.resume_evidence import StuckEvidencePort
+
+        call_kwargs = self._launch(self._state_with_existing_session(tmp_path))
+        port = call_kwargs["stuck_evidence"]
+        assert isinstance(port, StuckEvidencePort)
+        # 环境快照比的是"这次运行真正工作的那棵树"：端口的工作区必须就是装配点那个。
+        assert port.workspace == call_kwargs["workspace"]
+
+    def test_the_port_carries_the_effective_policy_inputs(self, tmp_path):
+        from agent_harness.agent.resume_evidence import policy_version_of
+        from agent_harness.tooling.contract import PermissionPolicy
+
+        call_kwargs = self._launch(
+            self._state_with_existing_session(tmp_path),
+            amend=AmendOptions(model="gpt-4o", agent_profile="coding"),
+        )
+        # 未声明档位 ⇒ 生效值 WORKSPACE_WRITE（与装配点的默认参数同源）。
+        expected = policy_version_of(
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+            model="gpt-4o",
+            agent_profile="coding",
+        )
+        assert call_kwargs["stuck_evidence"].policy_version == expected
+        # 少一项输入就会算出另一个值（"同一组输入"这件事本身要可判红）。
+        assert expected != policy_version_of(
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE, model="gpt-4o",
+        )
+
+
 class TestSendMessageIdlePassthrough:
     """``send_message`` idle 分支把 amend 透传给 ``resume_and_launch``。"""
 

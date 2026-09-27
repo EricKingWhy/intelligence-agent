@@ -23,6 +23,7 @@ from typing import Any
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
+from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
     validate_tool_call_limits_registered,
@@ -199,6 +200,7 @@ async def build_runtime(
     steer_source: Any | None = None,
     run_budget: LaunchRunBudget | None = None,
     local_fuse_source: str = SOURCE_DEPLOYMENT,
+    stuck_evidence: StuckEvidencePort | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -222,6 +224,12 @@ async def build_runtime(
     **来源标识**，两者都只是**透传**给 AgentRuntime（判定与解析都在服务层与
     `agent/run_budget.py`）。默认 None / deployment ⇒ 既有调用方（CLI、单测、
     delegate 子 runtime）逐字不变：新 run、无 run ceiling、fuse 来源记 deployment。
+
+    `stuck_evidence`（`#317`）：stuck 暂停的三类恢复依据里"环境 / 策略"两条的
+    **观测端口**，同样只是透传（`AgentRuntime` 只在暂停那一刻读一次）。构造方是
+    服务层——它才掌握"本次生效策略"的全部输入，且恢复侧要用**同一份函数**现算再
+    比较（ADR-0048 D8）。默认 None ⇒ 不观测（那两条依据届时按"无快照可比"409，
+    "相关 steer"那条不受影响），CLI / 单测的既有路径逐字不变。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
@@ -485,4 +493,8 @@ async def build_runtime(
         # run_config 结构化日志与 run/started 事件的数据源。
         agent_profile=(agent_profile if agent_profile is not None else "main"),
         dropped_tools=dropped_tools,
+        # `#317`：stuck 暂停的证据端口（环境 revision + 策略版本）。装配点只透传——
+        # 构造方是服务层（它才有一份"本次生效策略"的完整输入，恢复侧也用同一份函数
+        # 现算再比较；ADR-0048 D8）。None = 不观测（CLI / 单测的既有路径逐字不变）。
+        stuck_evidence=stuck_evidence,
     )

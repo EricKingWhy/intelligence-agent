@@ -73,6 +73,11 @@ _DECLARED_VARIABLES: tuple[tuple[str, str], ...] = (
     # `_CORRECTIVE_TOOL_FAILURE_GUARD` 的说明）。
     ("tool_name", "工具名（用于纠偏消息与恢复跳过文案）"),
     ("consecutive_failures", "连续失败次数（用作十进制字符串）"),
+    # `#317` stuck 检测（②–⑤）的纠正性 replan 文案：模式的人类可读名 + 已连续次数。
+    # 模式**名**与计数都由 guard 给出（`STUCK_PATTERN_LABELS` 是唯一词表）——
+    # section 不自己判断"像不像打转"，只负责排版（同 §10.8 的分工）。
+    ("pattern_label", "stuck 模式的人类可读名（用于纠正消息）"),
+    ("pattern_count", "该模式已连续的次数（用作十进制字符串）"),
 )
 
 #: 会话压缩器的六段式摘要指令（迁移前在 `context/compactor.py::_SIX_SECTION_PROMPT`）。
@@ -208,6 +213,16 @@ _CORRECTIVE_TOOL_FAILURE_GUARD = (
     "以相同方式重试。"
 )
 
+#: `#317` stuck 检测（②–⑤ 与 ① 的暂停）的纠正性 replan 文案。
+#: 与 `_CORRECTIVE_TOOL_FAILURE_GUARD` 的分工：那一条说的是"同一调用连续失败"，
+#: 这一条覆盖"失败以外的四种打转"（同观察 / 无工具独白 / 两动作交替 / 项目级无进展），
+#: 所以它不提具体工具，而是提**模式**（`pattern_label`）与次数。
+_CORRECTIVE_STUCK_PATTERN = (
+    "检测到循环：{{pattern_label}}（已连续 {{pattern_count}} 次）。同一个动作不会"
+    "因为再试一次而得到不同的结果。请先用一句话说明你从最近的输出里看到了什么，"
+    "再换一条路：改参数、换工具、缩小目标，或者直接向用户说明卡在哪里。"
+)
+
 #: 恢复期"未启动即跳过"的合成 ToolResult 文案（迁移前内联在
 #: `recovery/coordinator.py::SkipPendingPolicy.result_for`）。
 _FRAME_RECOVERY_SKIPPED = (
@@ -247,6 +262,14 @@ _FRAME_SECTIONS: tuple[PromptSection, ...] = (
         target=Target.FRAGMENT,
         text=_CORRECTIVE_TOOL_FAILURE_GUARD,
         description="同错熔断的纠偏消息（含 tool_name / consecutive_failures）",
+    ),
+    PromptSection(
+        name="corrective:stuck_pattern",
+        order=SECTION_ORDERS["corrective:stuck_pattern"],
+        scopes=frozenset({"corrective:stuck_pattern"}),
+        target=Target.FRAGMENT,
+        text=_CORRECTIVE_STUCK_PATTERN,
+        description="stuck 检测的纠偏消息（含 pattern_label / pattern_count）",
     ),
     PromptSection(
         name="frame:recovery_skipped",

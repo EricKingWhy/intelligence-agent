@@ -70,6 +70,14 @@ MEMORY_UPDATED = "memory/updated"
 MEMORY_RECALLED = "memory/recalled"
 # ── + Phase 12 Reliability 信号（同错熔断 + 模型 fallback，ADR-0014） ──
 TOOL_FAILURE_GUARD = "tool/failure-guard"
+# `#317` T9：多模式 stuck 检测的结构化 guard 事件（`02 §5.3`「阈值首达 ⇒ 发一条结构化
+# guard 事件」；语义与规则权威是 ADR-0048 D2/D5）。
+#   * level="replan"：②–⑤ 模式首达阈值 ⇒ 恰好一次纠正性 replan（① 沿用 tool/failure-guard
+#     的 soft 事件，那是 ADR-0014 冻结的形状）；
+#   * level="paused"：任何模式再达阈值（2T）且无相关进展 ⇒ 这一次落 run/paused(reason=stuck)。
+# data：level / pattern / count / threshold / replan_count（+ 可选的 tool_name / fingerprint）。
+# **指纹只存截断摘要**（ADR-0048 D3）：凭证值不进指纹、不进持久化。
+GUARD_STUCK = "guard/stuck"
 MODEL_FALLBACK = "model/fallback"
 # ── + Phase 13 Multi-Agent（delegation 白盒事件，ADR-0015 决策 8） ──
 AGENT_DELEGATION_STARTED = "agent/delegation-started"
@@ -168,6 +176,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MEMORY_UPDATED,
         MEMORY_RECALLED,
         TOOL_FAILURE_GUARD,
+        # #317 T9：多模式 stuck 检测的 replan / paused 结构化 guard 事件
+        GUARD_STUCK,
         MODEL_FALLBACK,
         AGENT_DELEGATION_STARTED,
         AGENT_DELEGATION_FINISHED,

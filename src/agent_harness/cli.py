@@ -34,8 +34,12 @@ from agent_harness.agent.budget import (
     resolve_local_fuse,
 )
 from agent_harness.agent.profiles import declared_turn_ceiling
+from agent_harness.agent.resume_evidence import evidence_port
 from agent_harness.agent.run_budget import (
+    REASON_STUCK,
     RESUME_BASIS_BUDGET_INCREASE,
+    RESUME_BASIS_RELEVANT_STEER,
+    STUCK_RESUME_REQUIREMENTS,
     TRIGGER_RUN_DEADLINE,
     LaunchRunBudget,
     latest_paused_run,
@@ -63,6 +67,7 @@ from agent_harness.session import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
     CONTEXT_COMPACTED,
+    GUARD_STUCK,
     MODEL_COMPLETED,
     MODEL_FAILED,
     MODEL_FALLBACK,
@@ -93,6 +98,7 @@ from agent_harness.session.lineage import (
     render_lineage_tree,
 )
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
+from agent_harness.tooling.contract import PermissionPolicy
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 3
@@ -537,13 +543,59 @@ def resume_hint(session_id: str, *, data: dict) -> str:
     开关、或给一条与该维相反的判据，都是**假指令**（PRD §11：CLI 显示的就是 durable
     事实本身）。未知维度（本票之外的暂停原因）回落到 turns 开关——那是 `#308` 起一直
     存在的维度，也是唯一一个任何 run 都读得懂的。
+
+    **stuck 暂停走另一条**：它的 `trigger_dimension` 是模式名，按维度回落就会给出
+    `--run-turns-total N`——一条恒被 409 挡死的假指令（stuck 不接受 `budget_increase`，
+    ADR-0048 D7）。所以那一类按事件自己列的可用依据给 `--basis`。
     """
+    if data.get("reason") == REASON_STUCK:
+        return _stuck_resume_hint(session_id, data)
     dimension = str(data.get("trigger_dimension", ""))
     return (
         f"  resume: agent-harness resume {session_id}"
         f" {_resume_command_tail(dimension)}"
         f" --expected-version {data.get('budget_version', '')}"
         f"  ({_resume_ceiling_rule(dimension)})\n"
+    )
+
+
+def _stuck_resume_hint(session_id: str, data: dict) -> str:
+    """stuck 暂停的恢复指令：依据是**变更**，不是 ceiling（`02 §5.3` / ADR-0048 D7）。
+
+    可用依据逐条读事件自己的 `resume_requirements`，不在这里重算：CLI 再算一份就等于
+    给"CLI 以为的可用集"与判据之间留一个漂移点（`#317` 三轮审查钉的正是这个形状）。
+    依据可以是多条 ⇒ 命令行里放一条**今天真能走通**的，判据行里把全部可用的都点名。
+
+    `relevant_steer` 要**跳过**：它是唯一不看快照的依据（所以常在），但暂停之后登记 steer
+    的入口今天不存在（`steer/requested` 只在有在途 run 时可投，残余 6 / 9）——把它印成
+    命令行就是一条照抄必被 409 挡死的假指令（`#317` 四轮审查 P3）。
+    """
+    available = [str(item) for item in (data.get("resume_requirements") or ())]
+    version = data.get("budget_version", "")
+    if not available:
+        # 本代码产出的 stuck 暂停至少列 `relevant_steer`（`stuck_resume_requirements` 对非空
+        # 快照无条件带上它）⇒ 走到这里的是外来 / 手改过的载荷（那一格缺失或为空）：宁可说
+        # "没有列出任何依据"，也不打印一条必然 409 的 `--basis`。
+        return (
+            f"  resume: 这次暂停的载荷里没有列出任何可用依据"
+            f"（`resume_requirements` 缺失或为空）· expected-version {version}\n"
+        )
+    actionable = [basis for basis in available if basis != RESUME_BASIS_RELEVANT_STEER]
+    if not actionable:
+        # 只剩 `relevant_steer`（子 run 的形状，或快照两格缺席）：它不是在判据上被恒拒，
+        # 是入口层取不到 ⇒ 如实说"现在没有可执行的依据"，而不是给一条走不通的命令。
+        return (
+            f"  resume: 现在没有可执行的恢复依据（本次列出的只有 "
+            f"{', '.join(available)}）——那条需要暂停之后登记一条 steer，"
+            f"而那个入口今天不存在（残余 6 / 9；子会话见 #372）· "
+            f"expected-version {version}\n"
+        )
+    return (
+        f"  resume: agent-harness resume {session_id}"
+        f" --basis {actionable[0]}"
+        f" --expected-version {version}"
+        f"  (stuck 暂停不以 ceiling 为依据，可以不给 --run-* 开关；可用的依据只有："
+        f"{', '.join(available)}——每条都必须是**被观测到的**变更，声明不算)\n"
     )
 
 
@@ -660,6 +712,11 @@ async def run(
             session_id=session_id, workspace=workspace,
             max_agent_turns=fuse.max_agent_turns,
             local_fuse_source=fuse.source,
+            # 档位显式化：**与下面证据端口的摘要输入同源**。运行时实际生效的档位就是
+            # 这一档（此前靠 `build_runtime` 的默认参数），若两处各写一次，暂停快照
+            # 会按"另一套策略输入"算，而恢复侧重算时对不上——那是一次假的
+            # `policy_change`（`#317` / ADR-0048 D8）。
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
             # `#312`：run 作用域的绝对 ceiling（`--run-turns-total`）。None = 本 run
             # 不设 run 档 ceiling——**不是** 0（0 会把第一条 model 决策就挡下）。
             run_budget=LaunchRunBudget(
@@ -675,6 +732,15 @@ async def run(
             ),
             auto_approve=True,
             session_store=store,
+            # `#317`：`run` 是"创建 + 第一条消息"入口，第一次开跑就可能卡循环 ⇒ 它建的
+            # 会话也必须带证据端口，否则 CLI 上跑出的 stuck 暂停在载荷里没有环境 /
+            # 策略快照，恢复时那两条依据一律 409；剩下的一条 `relevant_steer` 在 CLI 上
+            # 没有入口（没有 steer 子命令），所以少了这个端口 = **三条都不可恢复**。
+            # 走**唯一**构造点（`resume_evidence.evidence_port`），与 Web 创建 / 续聊、
+            # CLI 恢复同一份算法。
+            stuck_evidence=evidence_port(
+                workspace=workspace, permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+            ),
         )
         session = Session.start(store, session_id=session_id, cwd=workspace)
         # 与 web event_generator 同一契约：SESSION-scope 记忆 / 会话级工具
@@ -974,6 +1040,12 @@ def render_replay_event(event: SessionEvent) -> str | None:
     if event.type == TOOL_FAILURE_GUARD:
         return (f"[熔断] level={data.get('level', '')}"
                 f" consecutive_failures={data.get('consecutive_failures', '')}")
+    if event.type == GUARD_STUCK:
+        # `#317`：stuck 护栏的两种动作都如实呈现（`replan` 是"已纠正过一次"的 durable
+        # 依据，`paused` 是暂停前的最后一步）——只渲染 run/paused 会让回放看起来
+        # "没发生过纠正"，与 `run/paused.stuck.replan_count` 对不上账。
+        return (f"[stuck] level={data.get('level', '')} pattern={data.get('pattern', '')}"
+                f" count={data.get('count', '')} threshold={data.get('threshold', '')}")
     if event.type == MODEL_FALLBACK:
         return (f"[fallback] {data.get('from_model', '')}→"
                 f"{data.get('to_model', '')} ({data.get('reason', '')})")
@@ -1102,7 +1174,9 @@ async def resume_command(
     `#313`：四个 run 维度各自可抬（与 Web 的 `budget.run.*` 同一套名字与同一份判定）。
     四个都缺省 = 恢复后的 run 没有 run 档 ceiling——它**合法**（`resume_headroom_ok`
     对未配置的维度不作要求），但那是"去掉 ceiling"，不是"抬高 ceiling"；
-    `_main_resume` 因此在命令行层要求至少给一个（CLI 的可用性判断，不是领域判定）。
+    `_main_resume` 因此在命令行层要求至少给一个（CLI 的可用性判断，不是领域判定）
+    ——**例外是 stuck 的三类依据**（`#317`）：抬高 ceiling 不是 stuck 的依据，
+    所以那三个 basis 不带 ceiling 也放行，判定仍旧只有领域层一处。
 
     被拒时（形状 422 / 冲突 409）异常向上抛：`_main_resume` 打印后 exit 1，
     且**零副作用**（判定在任何落盘之前——见 `agent/run_budget.validate_resume`）。
@@ -1212,13 +1286,19 @@ def _main_resume(argv: list[str]) -> None:
     )
     parser.add_argument(
         "--basis", default=RESUME_BASIS_BUDGET_INCREASE,
-        help=f"resume_basis（本票只实现 {RESUME_BASIS_BUDGET_INCREASE}）",
+        help=f"resume_basis。预算 / deadline 暂停用 {RESUME_BASIS_BUDGET_INCREASE}"
+             f"（配一个抬高的绝对 ceiling）；stuck 暂停用 "
+             f"{' / '.join(STUCK_RESUME_REQUIREMENTS)}，且依据必须是**被观测到的**事实"
+             "（新 steer / 工作区变过 / 策略变过），不是用户声明",
     )
     args = parser.parse_args(argv)
     if (
         args.run_turns_total is None and args.run_model_requests is None
         and args.run_total_tokens is None and args.run_cost_usd is None
         and args.run_deadline is None and not args.run_tool_limit
+        # stuck 暂停的恢复**不**以 ceiling 为依据（`02 §5.3`：抬高预算不是它的依据），
+        # 所以三类 stuck 依据不要求给 ceiling——领域层那边同样不要求。
+        and args.basis not in STUCK_RESUME_REQUIREMENTS
     ):
         # 一个都不给 = 去掉全部 run ceiling，而不是"抬高"：那是另一件事（普通续聊也能做到），
         # 不在 `resume` 的语义里。CLI 层拒绝，不给用户一个看不出差别的成功。

@@ -1,8 +1,11 @@
-"""同错熔断在真实 AgentRuntime 循环中的集成测试（T1, #76, ADR-0014）。
+"""同错熔断在真实 AgentRuntime 循环中的集成测试（T1, #76, ADR-0014；T9 #317 改契约）。
 
 用 ScriptedModel + 总是失败的 FailureTool 构造模型反复同错调用，
-验证：软熔断（3 次）→ 注入 user 纠正消息 → 再 3 次 → 硬熔断 → end_run(failed)。
-不同工具交替 / 同工具不同 args 不误伤。
+验证：首达阈值（默认 3 次）→ 注入 user 纠正消息（**恰好一次**）→ 再达阈值（2T）
+→ **非终态** `run/paused(reason=stuck)`。不同工具交替 / 同工具不同 args 不误伤。
+
+`#317` T9 起旧的"再 3 次 → 硬熔断 → end_run(failed, identical_tool_failure_loop)"
+不再存在：同一族暂停统一走 `run/paused`（ADR-0048 D5，常量只为老会话保留）。
 """
 
 from __future__ import annotations
@@ -12,8 +15,11 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.runtime import AgentRuntime
-from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
-from agent_harness.session import TOOL_FAILURE_GUARD, USER_MESSAGE
+from agent_harness.agent.types import (
+    STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
+    STATUS_PAUSED,
+)
+from agent_harness.session import GUARD_STUCK, TOOL_FAILURE_GUARD, USER_MESSAGE
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -102,8 +108,8 @@ class TestRepeatedToolFailureGuardInLoop:
     """通过 Runtime 全循环验证两级熔断行为。"""
 
     @pytest.mark.asyncio
-    async def test_soft_then_hard_triggers_on_repeated_identical_failure(self, tmp_path):
-        """连续 6 次同指纹 fail 调用 → 第 3 次软熔断 + 第 6 次硬熔断。"""
+    async def test_soft_then_paused_on_repeated_identical_failure(self, tmp_path):
+        """连续 6 次同指纹 fail 调用 → 第 3 次注入纠正 + 第 6 次（2T）非终态暂停。"""
         # 6 轮，每轮模型提议同一个 fail 调用（同 args）。
         scripted = ScriptedModel([
             _tool_call("fail", {"command": "ls"}, i) for i in range(6)
@@ -113,16 +119,15 @@ class TestRepeatedToolFailureGuardInLoop:
 
         result = await runtime.run(session, "反复试同一个失败命令")
 
-        # 硬熔断：status = identical_tool_failure_loop
-        assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
-        assert result.steps == 6  # 第 6 轮触发 HARD
+        # 2T 暂停（`02 §5.2`：暂停不是终态，也不是失败）
+        assert result.status == STATUS_PAUSED
+        assert result.steps == 6  # 第 6 轮触发暂停
 
-        # 事件历史里应有 soft + hard 两条 tool_failure_guard
+        # 事件历史里只有 soft 一条 tool_failure-guard（硬熔断臂已移除）
         guard_events = [e for e in session._events if e.type == TOOL_FAILURE_GUARD]
-        assert len(guard_events) == 2
-        levels = [e.data["level"] for e in guard_events]
-        assert levels == ["soft", "hard"]
-        # 软熔断后注入了 user 角色纠正消息
+        assert [e.data["level"] for e in guard_events] == ["soft"]
+        assert guard_events[0].data["consecutive_failures"] == 3
+        # 首达阈值时注入了 user 角色纠正消息，**恰好一次**
         corrective = [
             e for e in session._events
             if e.type == USER_MESSAGE and "改变策略" in e.data.get("content", "")
@@ -130,10 +135,16 @@ class TestRepeatedToolFailureGuardInLoop:
         assert len(corrective) == 1
         # 注入消息带来源标记（runtime 行为 ≠ 真实用户发言，前端投影可区分）
         assert corrective[0].data.get("injected_by") == "tool_failure_guard"
-        # 持久化的 run/failed 带 reason（消费者区分失败原因，#76 契约）
-        run_failed = [e for e in session._events if e.type == "run/failed"]
-        assert len(run_failed) == 1
-        assert run_failed[0].data.get("reason") == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        # 再达阈值走结构化 stuck 事件 + 非终态 run/paused（`03 §3.4`）
+        stuck_guard = [e for e in session._events if e.type == GUARD_STUCK]
+        assert [e.data["level"] for e in stuck_guard] == ["paused"]
+        assert stuck_guard[0].data["pattern"] == "stuck.tool_failure_loop"
+        run_paused = [e for e in session._events if e.type == "run/paused"]
+        assert len(run_paused) == 1
+        assert run_paused[0].data["reason"] == "stuck"
+        # 旧的终结路径彻底不出现：既不失败，也没有终态
+        assert [e for e in session._events if e.type == "run/failed"] == []
+        assert [e for e in session._events if e.type == "run/completed"] == []
 
     @pytest.mark.asyncio
     async def test_different_args_does_not_trigger(self, tmp_path):
