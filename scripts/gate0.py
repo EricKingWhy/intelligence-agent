@@ -85,15 +85,21 @@ LANE_TIMEOUT = 300.0
 #: 原因：把「超预算」等于「失败」会把环境负载导致的慢误判成代码问题，与本项目「不做假绿灯」同理。
 GATE0_BUDGET = 60.0
 
-#: 生成物同步守卫：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
-#: ↔ `docs/EVENT_VOCABULARY.md`。共 2 文件 6 例。
-#: 另加**验证映射守卫** `tests/test_verification_map.py`（issue #292）：断言
-#: `docs/agents/verification.map.tsv` 覆盖**全部被跟踪文件**、车道 id 合法、focused 路径存在，
-#: 且**每一行都承重**（删掉任一行都会有文件的受影响集合发生变化）⇒ map 不能悄悄腐烂。
+#: `guards` 车道的用例清单。三条机械守卫，各自守一个**跨面**的不变量：
+#:   ① 生成物同步：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
+#:      ↔ `docs/EVENT_VOCABULARY.md`。共 2 文件 6 例。
+#:   ② 验证映射守卫 `tests/test_verification_map.py`（issue #292）：断言
+#:      `docs/agents/verification.map.tsv` 覆盖**全部被跟踪文件**、车道 id 合法、focused 路径存在，
+#:      且**每一行都承重**（删掉任一行都会有文件的受影响集合发生变化）⇒ map 不能悄悄腐烂。
+#:   ③ 索引可执行位 ⇔ shebang（P0-2）：`ruff` 的 `EXE001` 只在 Unix 生效，本机
+#:      `core.filemode=false` ⇒ 本地永远看不见它（`99a744fe` / `2d3761c` 两次「本地绿 → CI 红」
+#:      都是这条）。守卫 `tests/test_exec_bit_matches_shebang.py` 读**索引模式 + blob 头两字节**
+#:      把它机械地补回本地 —— 不依赖工作树权限、也不依赖 `core.autocrlf`。
 GUARD_TESTS = (
     "tests/test_event_types_generated.py",
     "tests/test_event_vocabulary_generated.py",
     "tests/test_verification_map.py",
+    "tests/test_exec_bit_matches_shebang.py",
 )
 
 #: 代码面 ↔ 必跑车道的机械映射（issue #292）。`--affected` 读它；`tests/test_verification_map.py` 守它。
@@ -379,11 +385,13 @@ def build_lanes(since: str) -> list[Lane]:
                       [node, tsc_js, "-b"] if (node and have_js) else None, WEB_DIR,
                       blocked=blocker or "找不到 node"))
 
-    # ⑤ 生成物同步守卫：跨 `src/` 与 `web/` 的漂移只有这一条能抓，所以**与改动面无关**、恒定跑。
+    # ⑤ 机械守卫（生成物同步 / 验证映射 / 索引可执行位）：三类都是**跨面**不变量，各自在别处
+    #    没有第二条能抓（跨 `src`↔`web` 的漂移、map 的腐烂、Unix-only 的 `EXE001`）⇒
+    #    **与改动面无关**、恒定跑。清单与理由见 `GUARD_TESTS`。
     py = venv_python()
     guard_env = dict(os.environ, PYTHONUTF8="1", PYTHONPATH="")
     lanes.append(Lane(
-        "guards", "pytest 生成物同步守卫 + 验证映射守卫（3 文件）",
+        "guards", "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
         [py, "-m", "pytest", *GUARD_TESTS, "-q", "-p", "no:randomly", "-p", "no:cacheprovider"]
         if py else None,
         REPO_ROOT, env=guard_env,
