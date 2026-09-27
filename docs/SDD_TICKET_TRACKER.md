@@ -6121,7 +6121,9 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 ## T9（`#317`，B 链第九票）：重复失败与无进展的 stuck 检测 —— 五模式 + 单次纠正 + 2T 暂停 + 三类可证依据恢复（2026-09-27 · 实现 + 五轮两轴审查 + 真实证据闭合，**待集成**）
 
 **状态**：✅ 交付、两轴独立审查五轮闭合（发现 → 四轮定向复核，末轮两轴 PASS）、真实 Live Gate **两份证据**
-（首份因 `src/**` 与断言集变更作废，保留作原始依据）、重车道全量读数、Gate-0 与覆盖闸门闭合。分支
+（首份因 `src/**` 与断言集变更作废、保留作原始依据；其后每次 `origin/main` 前进都在新树重跑一份）、
+重车道读数**三轮**（**第三轮 = 正式读数**，绑 `8f7f9854`；前两轮按 §8.1 对合并后的树**失效**）、
+Gate-0 与覆盖闸门闭合。分支
 `zcode/T317-stuck-detection`，基点 `6aff823f`（= 当时的 `origin/main`），14 笔。
 **代码冻结树 = `b5f5eb19` / tree `97f36cb6`**（**该框的 `..HEAD` 形态只对「本票自己的笔」成立**：
 至 `a69df7b9` 为止 `git diff --stat b5f5eb19..HEAD -- src tests evaluation web scripts .github` **为空**；
@@ -6137,6 +6139,26 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 均 PASS、无新 P0/P1）⇒ 处置笔 `efd8f7b8`、台账行 348。**合并后全部重车道在新树重采**（`c998b222` / tree `a62b3f5f`），
 **真实 Live Gate 也在新树重跑**并入库（`7bfa8218`：`docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/`，
 场景 v5 **3/3 PASS**、每次 **16/16** 断言、73868 / 72629 / 60864 ms），台账行 349。
+
+**2026-09-27 追加（第二次「先回后正」）**：第一次合并之后 `origin/main` 又前进 **18 笔**（`b0b543ac` = 当时 tip，
+memory-v2 clean-slate cutover / `#303` → PR #374、#375），**含 `src/**`**（`assembly.py`、`capability/factories.py`、
+`capability/wiring.py`、`instance_lock.py`、`memory/milvus_vector_store.py`、新增 `memory/v2/cutover.py`、`web/memory.py`）
+⇒ §14.6 再合一次（服务端 `gate0` 的 strict=true 要求分支与 `main` 同步才可开 PR）。新合并 = **`44285e90`**（父 `2827ee51` + `b0b543ac`）。
+2 文件冲突按 §14.7 逐文件语义分析（次序与第一次合并同构 = 上游新增内容在前、本票小节仍在尾）：
+(a) `docs/phase_status/2026-09.md` 双方都在 EOF 追加 ⇒ 解析为「上游 MEM-V2-7（09-27）小节 + 空行 + T9 小节」，
+T9 小节 **L2059-L2147 → L2075-L2163**；
+(b) `docs/PHASE_STATUS.md` 两处 ⇒ 「最近条目」两条 09-27 条目并集（本票 T9 条目在上）、「按日定位」两行并集 +
+行号按**合并后实测**重算（09-27 行：5 条条目 L2059-L2062 + 2 个小节 T9 L2075-L2163 / MEM-V2-7 L2065-L2071；
+09-26 行：小节 8 → 9，补 MEM-V2-7 09-26 小节 L2053-L2057）。
+净自动合并 2 文件：`docs/SDD_TICKET_TRACKER.md`（上游改动在头部规划段，与本票 T9 段零交集）、
+`src/agent_harness/assembly.py`（上游删 V1 `memory_writer` 注入、本票加 `stuck_evidence` 透传 ⇒ 两处 hunk 不相邻；
+复核 `capability/wiring.py` 已无 `memory_writer` ⇒ 取上游删除是语义必需）。**解析面两轴独立审查**：Correctness **PASS**
+（双向 diff 逐行核对：两侧正文零丢失、索引数字/条目数 `^- 2026-` 325 全部实测复核、无第 5 个静默改写点）；
+Standards **FAIL**（P1×2 + P2×2 + P3×5）⇒ **P1-1 = 旧读数失效（见下）**、P1-2（本 merge 无归属行、覆盖闸门 exit 1）
+= 台账行 **351**、P3-0（合并笔丢了归档文件末尾换行）= `b1963bb0` 补回（末字节 0x82 → 0x0a）。
+**P2/P3 中不修的一律登记**：索引口径（09-26 行 `L1269-L1282` 按该行自述口径应为 `L1269-L1280`，`L1282` 是 `---`；
+BASE 与两方全有 ⇒ 既有项）、「追加在 EOF」措辞（T6/T7/T8 落成小节当时为真，历史陈述不改写）、
+上游 4 份 gate 报告只入库、无消文指针（同属既有项）。
 
 **票面**：GitHub `#317`（父票 `#305`；`blocked_by` 的 `#313` / `#314` / `#315` / `#316` 均已完成）。
 规格落点 `02 §5.3`（五模式与阈值、T 首达一次 replan、2T 暂停）与 `03 §5`（非终态 `run/paused`、
@@ -6280,14 +6302,36 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 `docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-09.md` / `docs/review_ledger.d/350-f75bc93-6c84d54.tsv` /
 `docs/gate/6c84d544….json`），全部命中 `DOC_PATTERN`；判据 ② = 写本笔前的 `git status --short` → `M` 上述两处 .md +
 `?? docs/gate/468ea568….json`（`.json` 命中 `DOC_PATTERN`）+ `?? .zcodeignore`（唯一例外）⇒ 判据 ① 在
-`6c84d544..本段末笔` 上成立，绑 `6c84d544` 的四条重车道读数对最终 tip 有效。**第一轮为什么不传递**（本票的一处自纠，如实登记）：
+`6c84d544..本段末笔` 上成立，绑 `6c84d544` 的四条重车道读数对**该段末笔**有效 —— **该结论已被第二次「先回后正」作废**
+（`b0b543ac` 带进 `src/**`，§8.1 第 3 条判据① ⇒ 必须在新树重跑，见第三轮块）。**第一轮为什么不传递**（本票的一处自纠，如实登记）：
 逐字复核协议 §8.1 第 3 条后确认 `.jsonl` 不在 `DOC_PATTERN`（`docs/**` 只认 .md/.txt/.rst/.tsv/.json/.yaml），
 而证据是**在**第一轮读数树之后追加的 ⇒ 「跑过门禁的树 = 被集成的代码面」字面不成立；处置 = 把证据先并入、
 再以含证据的树当读数树把四条重车道重跑一遍（本块），**而不是**用"看起来只是证据文件"去豁免判据。
 
+**合并后重车道读数 · 第三轮（**正式读数**：绑 `8f7f9854` / tree `ff714fb9` = 第二次「先回后正」后**含证据**的树；命令同第二轮）**：
+
+- **后端全量**：**4614 passed / 2 skipped / 51 deselected / 0 failed in 1068.13s (17:48)**，exit 0。收集总数 **4667**
+  （第二轮 4641，+26 = 并入的 upstream 18 笔带来的用例），`skipped` 与第二轮同为 **2**（外部 docker 栈仍在场）⇒
+  第一轮那两条服务缺席侧的间歇红（`#376`/`#377`）本轮**未出现**；`#338` 同样未出现。
+- **前端 `vitest`**：**1 failed | 1156 passed（73 files / 1157 用例）**，红 = 同一条既有超时 flaky
+  （`src/components/StepDetail.window.test.tsx` 的 `F5 尾窗…DIFFS / ARTIFACTS`，`Error: Test timed out in 5000ms`，
+  15195ms）⇒ **隔离单跑 6 passed / exit 0 / 20.12s** ⇒ 负载敏感、非本票引入（`web/**` 相对 `origin/main` 仍只多 2 行 no-op 登记）。
+- **前端 `build`**：`pnpm build`（= `tsc -b && vite build`）**exit 0**（26.23s）。
+- **`e2e`**：`pnpm exec playwright test --workers=2` → **460 passed / 17.2m / exit 0**，日志里 `flaky`/`retry`/`✘` 标记数 **0**
+  （不是靠重试转绿）。
+- **真实 Live Gate v5（第二次合并后重采）**：**3/3 PASS**、每次 **16/16** 断言、**0 FAIL**（58731 / 31640 / 22351 ms），
+  证据 `docs/live_gate/20260927T161931-b1963bb06980-stuck-tool-failure-pause/`（绑 `b1963bb0` / tree `d4d807dc`
+  = 读数树的代码面；三次各 6 次 `read` 全为 `TOOL_EXECUTION_ERROR` 且无其他工具调用），证据笔 `8f7f9854`。
+
+**§8.1 读数传递（第三次判定）**：第二次合并把含 `src/**` 的 18 笔并入本票树 ⇒ 绑 `6c84d544` 的四条重车道读数
+与绑 `468ea568` 的 Gate-0 读数**对合并后的树一律失效**（§8.1 第 3 条判据①：出现非 docs 路径 ⇒ 必须在新树重跑，
+不许用「看起来只是小改」豁免）；第三轮以**含证据的树** `8f7f9854` 为正式读数树（证据笔在前、重车道在后，
+避开第一轮踩过的 `.jsonl` 不在 `DOC_PATTERN` 的坑）。判据 ① / ② 的末笔实测见本段末门禁块。
+
 **门禁（Gate-0 裸全量，合并后）**：首次落盘（证据笔 `7bfa8218`）**5/6** —— 红车道 = coverage：证据笔含
 `.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属；补台账行 349 归属后 `--only coverage` **PASS**。**读数树重采后的
-最终读数**（tip `468ea568` / tree `4d84c0a7d199`，= 读数树 `6c84d544` + 本票记录笔一笔）：**6/6 PASS**，墙钟
+该轮最终读数**（tip `468ea568` / tree `4d84c0a7d199`，= 读数树 `6c84d544` + 本票记录笔一笔；
+**该读数已被第二次「先回后正」作废**，新树的最终读数见本段末门禁块）：**6/6 PASS**，墙钟
 **25.7s**（diff-check 0.06 / ruff 0.13 / oxlint 0.67 / tsc 18.42 / guards 4.99 / coverage 1.48），落盘
 `docs/gate/468ea5683f40097d06408c73fd8a3b8e777e3503.json`（`tracked_matches_head=true` / `untracked=['.zcodeignore']`）；
 覆盖闸门在同一 tip **exit 0**（覆盖区间 `09ca47a1..HEAD` / 提交总数 **940** / 已审查 **708** / 待判定 **232**；
