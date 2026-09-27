@@ -144,10 +144,15 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）+
   `12 passed`（索引可执行位守卫）= **`38 passed`（4 文件）**。
 - 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
-  该文件的主要成本。三个口径都记下，**引用某个数时请连同它的来源一起给**：
+  该文件的主要成本（`--durations` 实测：`test_cli_refuses_an_unmerged_index` 要真造一次
+  三方冲突 ⇒ **9.98s**，是本车道最大单项；次之 `test_cli_flags_the_incident_shape_in_a_real_repo`
+  5.03s；该文件 4 文件合计 23.97s）。三个口径都记下，**引用某个数时请连同它的来源一起给**：
   `--only guards` 同树两点 **17.8s / 25.0s**；冻结树裸全量落盘的
   `docs/gate/781a3477ecad49561e961eb1df88967e08973cbe.json` 记 **`guards` = 12.97s**
   （同笔 `wall` 35.44s、`tsc` 16.86s）。差异来自机器负载与冷/热缓存，**不是判定**。
+  同机全量扫描（63 份 `docs/gate/*.json`）：`guards` 中位 **4.20s**、`tsc` 中位 **11.68s**；
+  高负载下本批实测到 `guards` **53.34s** / `tsc` **84.16s**（同代码 `--only tsc` 三次
+  **30.66 / 42.99 / 84.16s**）⇒ 引用耗时务必连带来源与负载。
 - 漂移时先跑生成器：`uv run python scripts/gen_event_types.py` / `... gen_event_vocabulary.py`。
 
 ### ⑧ 审查覆盖闸门
