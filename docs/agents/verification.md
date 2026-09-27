@@ -33,7 +33,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | --- | --- | --- |
 | 任何文件 | ⑨ `git diff --check` + ⑧ 覆盖闸门 | Gate-0（自动） |
 | `src/**` 的 `.py` | ① ruff + ② 后端全量 pytest | Gate-0 跑①；②在冻结树 |
-| `session/event.py` 或任一生成物 | ⑦ 生成物同步守卫（**必跑**，跨 `src`↔`web` 的有唯一一条） | Gate-0（自动） |
+| `session/event.py` 或任一生成物 | ⑦ 的生成物同步守卫（**必跑**；跨 `src`↔`web` 的只有这一条） | Gate-0（自动） |
 | `web/**` | ④ tsc + ⑤ vitest + ⑥ oxlint | Gate-0 跑④⑥；⑤按需 |
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
 | 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
@@ -94,17 +94,33 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 期望证据：退出 0；配置在 `web/.oxlintrc.json`（`react` / `typescript` / `oxc` 插件）。
 - 实测：冷 4.4s / 热 0.6s。
 
-### ⑦ 生成物同步守卫 + 验证映射守卫（跨 `src` ↔ `web`，只有这一条能抓）
+### ⑦ 机械守卫（生成物同步 + 验证映射 + 索引可执行位）
 
 - 命令：`PYTHONUTF8=1 PYTHONPATH= .venv/Scripts/python.exe -m pytest
   tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py
-  tests/test_verification_map.py -q -p no:randomly -p no:cacheprovider`
-- 守卫对象：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
-  `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）与
-  `docs/EVENT_VOCABULARY.md`（`scripts/gen_event_vocabulary.py`）。
-- 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）= **`26 passed`（3 文件）**。
-- 实测：3 文件 26 例 —— pytest 自身热 **0.8s**（`26 passed in 0.84s`）；Gate-0 `guards` 车道口径 **5.4s**
-  （含解释器启动；`a5bbf03` 树实测，`python scripts/gate0.py --only guards` → PASS / 墙钟 5.4s）。
+  tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py
+  -q -p no:randomly -p no:cacheprovider`
+- 守卫对象（三类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**，车道描述里的「（4 文件）」
+  由 `tests/test_exec_bit_matches_shebang.py` 钉死 ⇒ 改一处忘另一处会红）：
+  1. **生成物同步**：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
+     `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）与
+     `docs/EVENT_VOCABULARY.md`（`scripts/gen_event_vocabulary.py`）。
+  2. **验证映射**：见 §2 ⑭。
+  3. **索引可执行位 ⇔ shebang**（P0-2）：判据 `scripts/check_exec_bit.py`。**它补的是 `ruff` 的
+     `EXE001`** —— 那条规则只在 Unix 生效，而本仓 `core.filemode=false` ⇒ 本地 `ruff check .`
+     **永远看不见**「带 shebang 但索引模式不是 `100755`」。两次「本地绿 → CI 红」的事故都出自它
+     （`99a744fe` 补 7 个脚本的可执行位；`2d3761c` 改 `scripts/live_gate.py`）。
+     判据读**索引模式**（`git ls-files -s`）+ **blob 头两字节**（`git cat-file --batch`）——两者都
+     不受工作树权限 / `core.autocrlf` / 本地未提交编辑影响；范围只到 `*.py` / `*.pyi`（`ruff` 的
+     lint 面）——`.sh` / `.ps1` / `.mjs` 带 shebang 而 `100644` 是本仓**现状且无害**（一律经解释器
+     调用），纳入会立刻产生 11 条误报。blob 读不到 ⇒ **fail-closed 判违例**（不是跳过）。
+     修法：`git update-index --chmod=+x <path>` —— 改**索引**，不是关掉 CI 那条 ruff 规则。
+- 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）+
+  `11 passed`（索引可执行位守卫）= **`37 passed`（4 文件）**。
+- 实测：4 文件 37 例 —— 原 3 文件 `26 passed in 5.13s`；加索引可执行位守卫后 **`37 passed`** /
+  **约 12–14s**（⚠ 负载敏感：该文件含一次**真子进程**跑 CLI + 三处 git 走查；本机同树两点读数
+  `12.35s` / `14.35s`）。Gate-0 `guards` 车道口径 **≈18s**（`python scripts/gate0.py --only guards`
+  同树两次：**17.8s** / 25.0s —— 差异来自机器负载，不是判定）。
 - 漂移时先跑生成器：`uv run python scripts/gen_event_types.py` / `... gen_event_vocabulary.py`。
 
 ### ⑧ 审查覆盖闸门
