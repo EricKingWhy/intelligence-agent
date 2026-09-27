@@ -8,9 +8,12 @@ from evaluation.live_gate.scenarios.deadline import SCENARIO as _DEADLINE
 from evaluation.live_gate.scenarios.long_task import SCENARIO as _LONG_TASK
 from evaluation.live_gate.scenarios.pause_resume import SCENARIO as _PAUSE_RESUME
 from evaluation.live_gate.scenarios.smoke import SCENARIO as _SMOKE
+from evaluation.live_gate.scenarios.stuck import SCENARIO as _STUCK
 
 #: 内置场景清单。后续票（`#313`–`#318`）把自己的场景加到这里即可被 `--list` / `run` 看见。
-BUILTIN_SCENARIOS = (_SMOKE, _LONG_TASK, _PAUSE_RESUME, _DEADLINE, _COMPLETION)
+BUILTIN_SCENARIOS = (
+    _SMOKE, _LONG_TASK, _PAUSE_RESUME, _DEADLINE, _COMPLETION, _STUCK,
+)
 
 
 def register_builtin_scenarios() -> tuple[str, ...]:
