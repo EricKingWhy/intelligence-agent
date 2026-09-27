@@ -6110,3 +6110,8 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   （覆盖区间 `09ca47a..HEAD` / 提交总数 **847** / 已审查 **576** / 待判定 **271**）；本节 §8.1 判据 ①
   （`git diff --name-status --no-renames 76cc9c46 HEAD` = 3 文件全 `M` 且全命中 `DOC_PATTERN`）与判据 ②
   （`git status --short` 只 `?? .zcodeignore`）、`git diff --check 76cc9c46..HEAD` exit 0 均在记录笔上当场复核。
+
+## 2026-09-27：#342 / #341 集成回执（PR #369 / #343）
+
+- **#342 并发 resume SeqConflict**：根因 9496226e75187f5b8ebf7564777274b85eef6d44（T315）；迟到请求在会话锁外进入 Recovery 并占用事件序号。修复 8ffd487536e335b72c7d5cbd5631565039c01acb 将最终 CAS、Recovery、Runtime 装配和恢复事件写入纳入同一锁。PR #369 merge 1774f4fbcb746f6a02c73d53bfe4206172794b88，issue CLOSED。目标用例 normal / forced-recovery 连跑 10 轮共 20/20；受影响测试 41 passed，Gate-0 6/6 PASS，证据 docs/gate/bdf003952265e7f4859bdb981dc7c7fc064787d3.json。
+- **#341 relay cleanup / detached-run**：迁移缺口来源 124c53f0、fe8033bb、b5406a55、8bd105d5；移植修复 24e51e4c、a819dedc。复审修复 5eff5f79、eebed7cb 收口重订阅零订阅窗口、满队列错误帧、断连 relay 退出及取消时 subscriber 泄漏。PR #343 merge d4d65fffd399c19145df6715400b1889f22ed016，issue #341 CLOSED；四个指定测试模块 36 passed，Ruff 通过，Gate-0 本地与 GitHub 均通过（本地读数 docs/gate/047fdac31e90433e3447f9d8eebb0560e87a386a.json）。
