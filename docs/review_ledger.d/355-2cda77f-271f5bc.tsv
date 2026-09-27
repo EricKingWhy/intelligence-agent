@@ -1,0 +1,1 @@
+2026-09-28	#378 Playwright E2E flakes：Spec/Standards 双轴复审通过，P0/P1/P2=0；最终树三次 pnpm exec playwright test --workers=2 均 460/460，T12p/T12r 重复 10 轮 40/40；证据：本任务复审与运行记录。	2cda77f819883210caaf5e462d4342b892595fc4..271f5bcf024d82efc21b8af0d1f2efaa9bc1484b
