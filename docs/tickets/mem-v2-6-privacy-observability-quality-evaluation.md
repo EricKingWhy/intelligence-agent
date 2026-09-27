@@ -103,6 +103,9 @@ parallelizable: with #301 and #303 after dependencies are integrated
 - Real public smoke uses the same configurable recall timeout as production wiring.
 - Eligible cases sort by total turn text length, then turn count, session count, and stable case ID; ties do not prefer stronger user evidence. Smoke reports content-free active memory tier/kind counts and uses a bounded 1,200-second formation drain.
 - Mutation tests proving the gate detects below-threshold, duplicate, and unawaited/all-failed conditions.
+- On current clean code tip `12966e9fb3e53433be51808a9480a2ca332dba60` / tree `757e6bc4b7e8a3037526b9bfec2b48e22ab4c541`, the strict LoCoMo category-4 smoke passed with answer F1=1.0, Recall@6=1.0, `chain_verified=true`, and confirmed collection cleanup (`docs/evidence/memory-v2-public-smoke-locomo-64bd21ec.json`). Two LongMemEval attempts on the same tip reached the reading-notes answer call after formation/recall but received provider HTTP 500 before scoring/report emission. Both runner cleanups completed; a subsequent independent Milvus query found zero `memv2pub_` collections. No answer score is claimed for those attempts.
+- AC9 remains evidenced by the earlier completed LongMemEval smoke on the full official cleaned dataset (`docs/evidence/memory-v2-public-smoke-longmemeval-6374b2d9.json`): strict `single-session-user` exact user-evidence selection, selected case SHA `9c8064fb6aace953a0927db8c5816bb56e1f7aa65ee0bb983a2fb7e3e94c9d48`, answer F1=0.5, Recall@6=1.0, and chain verified. The latest provider failures are recorded as operational rerun failures; neither the selector nor the 0.5 threshold was relaxed.
+- Current real cleanup gates: 6 passed across Langfuse, Knowledge, Qiniu, and Phase 15; tenant/test records and temporary objects were verified absent, and approved synthetic Langfuse evidence was retained. Sanitized counts and run IDs are in `docs/evidence/memory-v2-real-gate-cleanup-20260927.json`.
 
 ## Definition of Done
 

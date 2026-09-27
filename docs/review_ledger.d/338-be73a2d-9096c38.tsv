@@ -1,0 +1,1 @@
+2026-09-27	#302/origin-main integration merge; Standards + Spec reviewed both parent edges at fixed point 12966e9f. Spec found no P0–P4. Standards found one P2: PHASE_STATUS falsely said #302 was integrated; corrected by 12966e9f, no unresolved findings. Approved union of T8/T7 and date indexes retained.	be73a2d0..9096c38c

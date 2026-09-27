@@ -222,6 +222,27 @@ LongMemEval 日期，LoCoMo 正向问答改为上游短语式回答指令；真�
   不会冻结正式 baseline；完整 LoCoMo / LongMemEval 正式基线仍待单独运行。真实 Milvus / Langfuse
   run 及 Milvus / Knowledge / Qiniu 清理证明须在可复现的干净树上完成。
 
+### D11 — Latest-tip smoke and real-service cleanup evidence
+
+On clean tip `12966e9fb3e53433be51808a9480a2ca332dba60` / tree
+`757e6bc4b7e8a3037526b9bfec2b48e22ab4c541`, the stricter LoCoMo category-4 smoke
+passed (answer F1=1.0, Recall@6=1.0, verified relevant memory in top-six and final
+injection, temporary collection absent). Two current-tip LongMemEval reruns reached the
+reading-notes answer call after formation and recall, then received provider HTTP 500
+before scoring or report emission. Runner cleanup completed after both attempts, and an
+independent Milvus query confirmed zero `memv2pub_` collections. The prior completed
+LongMemEval report on the full official cleaned dataset remains the AC9 score evidence
+(strict `single-session-user` selection, F1=0.5, Recall@6=1.0); current rerun failures
+are recorded without assigning a score or changing the selector/threshold. Evidence:
+`docs/evidence/memory-v2-public-smoke-locomo-64bd21ec.json`,
+`docs/evidence/memory-v2-public-smoke-longmemeval-6374b2d9.json`, and
+`docs/evidence/memory-v2-real-gate-cleanup-20260927.json`.
+
+The latest real cleanup gates passed 6/6. Milvus smoke collections, Knowledge tenant
+records, and Qiniu test objects were verified absent; the dedicated Knowledge collection
+pre-existed and was neither created nor dropped by the gate. Synthetic Langfuse trace,
+dataset, and experiment evidence was retained with content fields omitted.
+
 ## 4. Verification contract
 
 落实证据位于 `tests/observability/test_tracer_port.py`、`tests/memory/v2/test_v2_executor.py`、
