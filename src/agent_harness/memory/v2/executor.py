@@ -152,6 +152,12 @@ _FORMATION_PROMPT = (
     "You form long-term memory for a coding assistant. Read the supplied JSON payload "
     "(the current run, at most eight earlier messages, tool calls, and similar existing "
     "memories) and decide whether anything durable and reusable is worth remembering.\n"
+    "Durability means future usefulness, not repetition: a one-time consequential decision "
+    "or event with a lasting implication can be episodic memory. A temporary activity, "
+    "one-off request to run a job, replay instruction, or injected test failure is not "
+    "memory content. If a message contains both a transient event and a separate durable "
+    "fact, evaluate the fact on its own. A procedural memory must include reusable steps "
+    "and a success condition; approval without the actual procedure is not enough.\n"
     "Return ONLY one JSON object: "
     '{"decision": "CANDIDATES" | "NO_MEMORY", "candidates": [...], "skip_reason": ...}.\n'
     "`NO_MEMORY` requires an empty candidate list and one skip_reason from "
@@ -200,6 +206,12 @@ _ADJUDICATION_PROMPT = (
     "ADD | UPDATE | INVALIDATE | NOOP. ADD requires no target and a complete result; "
     "UPDATE requires an active target and a complete result; INVALIDATE requires an active "
     "target and no result; NOOP writes nothing and carries neither.\n"
+    "For UPDATE or INVALIDATE, copy `target_memory_id` exactly from the matching entry in "
+    "`relevant_memories[].memory_id`; never invent or alter an ID. When a current explicit "
+    "user fact corrects a directly conflicting active fact, update that existing memory "
+    "with the user's value and use reason_code `user_authority_wins`. If no exact active "
+    "target is supplied, do not guess: choose ADD only for genuinely new durable content, "
+    "otherwise NOOP.\n"
     "reason_code is one of durable_new, enrich_existing, contradicts_existing, "
     "user_authority_wins, duplicate, insufficient_evidence, procedural_threshold_not_met, "
     "policy_rejected.\n"
@@ -475,6 +487,7 @@ class MemoryJobExecutor:
                 "job_id": job_id, "session_id": job.session_id, "run_id": run_id,
                 "stage": MemoryJobStage.FORMING.value,
                 "outcome": formation.decision.value,
+                "skip_reason": _skip_reason(formation),
                 "candidates": state.candidates, "scope": scope,
                 "latency_ms": int((self._clock() - formation_started) * 1000),
             })

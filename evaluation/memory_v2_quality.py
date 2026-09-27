@@ -25,6 +25,18 @@ _SCOPES = {"user_global", "project", "none"}
 _AUTHORITIES = {"user", "assistant", "tool", "system", "none"}
 _STATUSES = {"executed", "degraded", "failed", "skipped", "unawaited"}
 _WRITE_ACTIONS = {"ADD", "UPDATE"}
+_FORMATION_DECISIONS = {"CANDIDATES", "NO_MEMORY"}
+_MODEL_SKIP_REASONS = {
+    "no_durable_value", "transient_only", "unsupported_evidence", "explicit_opt_out",
+    "no_user_input", "sensitive_without_consent", "secret_detected",
+}
+_POLICY_REJECTIONS = {
+    "secret", "sensitive_without_consent", "procedural_threshold_not_met",
+    "user_fact_without_user_evidence", "over_cap", "unsupported_source",
+}
+_DISCARD_REASONS = {
+    "evidence_unresolved", "target_unauthorized", "target_unresolved", "target_conflict",
+}
 _REQUIRED_OBSERVATION_FIELDS = {
     "eligibility", "action", "kind", "scope", "source_authority",
     "recall_ids_top6", "prohibited_outcomes", "secret_write_count",
@@ -600,4 +612,37 @@ def _safe_observation(value: Mapping[str, Any], case: GoldCase) -> dict[str, Any
         } for item in prohibited
     ):
         safe["prohibited_outcomes"] = prohibited
+    raw_diagnostics = value.get("decision_diagnostics")
+    if isinstance(raw_diagnostics, Mapping):
+        diagnostics: dict[str, Any] = {}
+        decision = raw_diagnostics.get("formation_decision")
+        if isinstance(decision, str) and decision in _FORMATION_DECISIONS:
+            diagnostics["formation_decision"] = decision
+        skip_reason = raw_diagnostics.get("formation_skip_reason")
+        if (
+            "formation_decision" in diagnostics
+            and (
+                skip_reason is None
+                or isinstance(skip_reason, str) and skip_reason in _MODEL_SKIP_REASONS
+            )
+        ):
+            diagnostics["formation_skip_reason"] = skip_reason
+        for field in ("formation_candidate_count", "selection_accepted_count"):
+            item = raw_diagnostics.get(field)
+            if type(item) is int and item >= 0:
+                diagnostics[field] = item
+        for field, allowed_keys in (
+            ("selection_rejected_counts", _POLICY_REJECTIONS),
+            ("adjudication_action_counts", _ACTIONS),
+            ("discarded_action_counts", _DISCARD_REASONS),
+        ):
+            counts = raw_diagnostics.get(field)
+            if isinstance(counts, Mapping) and all(
+                isinstance(key, str) and key in allowed_keys
+                and type(count) is int and count >= 0
+                for key, count in counts.items()
+            ):
+                diagnostics[field] = dict(counts)
+        if diagnostics:
+            safe["decision_diagnostics"] = diagnostics
     return safe

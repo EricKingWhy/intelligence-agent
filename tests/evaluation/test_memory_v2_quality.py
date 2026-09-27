@@ -277,6 +277,8 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         case.synthetic_input.removeprefix("Remember that ").rstrip(".")
         if case.category == "explicit_command" else case.synthetic_input
     )
+    if case.case_id == "contradiction_user_wins":
+        candidate_content = "The synthetic project codename is Cedar Lantern."
     if eligibility.eligible:
         if provider_output is None:
             formation = _formation_no_memory()
@@ -460,7 +462,7 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
     corpus, cases = load_memory_gold()
 
     assert corpus["synthetic"] is True
-    assert corpus["version"] == "1.2.0"
+    assert corpus["version"] == "1.3.0"
     assert len(cases) >= 15
     for case in cases:
         assert {
@@ -731,6 +733,18 @@ async def test_case_diagnostics_are_safe_and_keep_provider_error_type(tmp_path, 
         if case.case_id == "primary_transient_fallback":
             return {
                 "status": "failed", "error_type": "PermissionDeniedError",
+                "observed": {
+                    "decision_diagnostics": {
+                        "formation_decision": "CANDIDATES",
+                        "formation_skip_reason": None,
+                        "formation_candidate_count": 1,
+                        "selection_accepted_count": 1,
+                        "selection_rejected_counts": {"over_cap": 0},
+                        "adjudication_action_counts": {"UPDATE": 1},
+                        "discarded_action_counts": {"target_unresolved": 1},
+                        "raw_model_output": "must never be included in reports",
+                    },
+                },
                 "model_attempts": [{
                     "alias": "memory.fallback", "role": "fallback",
                     "stage": "formation", "attempt": 1,
@@ -755,7 +769,17 @@ async def test_case_diagnostics_are_safe_and_keep_provider_error_type(tmp_path, 
         "attempt": 1, "outcome": "provider_error",
         "error_type": "PermissionDeniedError",
     }]
+    assert fallback["observed"]["decision_diagnostics"] == {
+        "formation_decision": "CANDIDATES",
+        "formation_skip_reason": None,
+        "formation_candidate_count": 1,
+        "selection_accepted_count": 1,
+        "selection_rejected_counts": {"over_cap": 0},
+        "adjudication_action_counts": {"UPDATE": 1},
+        "discarded_action_counts": {"target_unresolved": 1},
+    }
     assert "private model response" not in saved
+    assert "must never be included in reports" not in saved
     assert all(case.synthetic_input not in saved for case in cases)
 
 

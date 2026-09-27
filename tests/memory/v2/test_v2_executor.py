@@ -21,6 +21,7 @@ import pytest_asyncio
 from agent_harness.memory.v2.budget import MemoryBudgetLimits
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import (
+    _ADJUDICATION_PROMPT,
     _FORMATION_PROMPT,
     DegradedReason,
     MemoryJobExecutor,
@@ -56,6 +57,17 @@ def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
     assert "preserve explicitly stated names, values, quantities, dates, and qualifiers" \
         in _FORMATION_PROMPT
     assert "every detail must remain supported by cited evidence" in _FORMATION_PROMPT
+    assert "a one-time consequential decision or event with a lasting implication can be episodic" \
+        in _FORMATION_PROMPT
+    assert "A procedural memory must include reusable steps and a success condition" \
+        in _FORMATION_PROMPT
+    assert "injected test failure is not memory content" in _FORMATION_PROMPT
+
+
+def test_adjudication_prompt_requires_exact_existing_target_ids():
+    assert "copy `target_memory_id` exactly from the matching entry" in _ADJUDICATION_PROMPT
+    assert "never invent or alter an ID" in _ADJUDICATION_PROMPT
+    assert "use reason_code `user_authority_wins`" in _ADJUDICATION_PROMPT
 
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"

@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -235,6 +235,35 @@ async def _seed_memory(
     return record
 
 
+def _decision_diagnostics(
+    observer_rows: Sequence[tuple[str, Mapping[str, Any]]],
+    job_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return stage decisions and enum counters without candidate content."""
+    diagnostics: dict[str, Any] = {}
+    formation = next((metadata for name, metadata in reversed(observer_rows)
+                      if name == "formation"), None)
+    if formation is not None:
+        diagnostics.update({
+            "formation_decision": formation.get("outcome"),
+            "formation_skip_reason": formation.get("skip_reason"),
+            "formation_candidate_count": formation.get("candidates"),
+        })
+    selection = next((metadata for name, metadata in reversed(observer_rows)
+                      if name == "selection"), None)
+    if selection is not None:
+        diagnostics.update({
+            "selection_accepted_count": selection.get("accepted"),
+            "selection_rejected_counts": selection.get("counts"),
+        })
+    adjudication = next((metadata for name, metadata in reversed(observer_rows)
+                         if name == "adjudication"), None)
+    if adjudication is not None:
+        diagnostics["adjudication_action_counts"] = adjudication.get("actions")
+    diagnostics["discarded_action_counts"] = job_state.get("discarded", {})
+    return diagnostics
+
+
 async def _execute_case(
     case: GoldCase, *, database_path: Path, roles: MemoryModelRoles,
     vector_store: MilvusVectorStore,
@@ -254,6 +283,7 @@ async def _execute_case(
     index = MilvusMemoryV2Index(vector_store)
     service = MemoryV2Service(store, index, relay=MemoryV2IndexRelay(store, index))
     observer_rows: list[tuple[str, dict[str, Any]]] = []
+    job_state: Mapping[str, Any] = {}
     recalled_labels: dict[str, str] = {}
     invoker = _RecordingInvoker(
         inject_primary_transient=case.case_id == "primary_transient_fallback",
@@ -332,6 +362,7 @@ async def _execute_case(
                     "status": "failed", "error_type": "MemoryJobOwnershipLost",
                     "model_attempts": invoker.attempts,
                 }
+            job_state = (await jobs.get(claimed.job_id)).state
             written = result.written
             if case.expected.get("replay") is True:
                 replay = await executor.run(
@@ -460,6 +491,7 @@ async def _execute_case(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cost_usd": None,
+            "decision_diagnostics": _decision_diagnostics(observer_rows, job_state),
         }
         status = (
             "degraded" if result and result.stage is MemoryJobStage.DEGRADED
