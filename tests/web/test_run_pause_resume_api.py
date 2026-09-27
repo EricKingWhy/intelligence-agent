@@ -165,6 +165,23 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
                         "max_total_tokens": None, "max_cost_usd": None,
                         "deadline_at": None,
                         "tool_call_limits": {}},
+                # `#318`：session 账恒接线 ⇒ 快照必带 session 段（本用例没配任何
+                # session ceiling ⇒ 全 null；delegations 未发生 ⇒ 也是 null）
+                "session": {"max_agent_turns_total": None, "max_model_requests": None,
+                            "max_total_tokens": None, "max_cost_usd": None,
+                            "deadline_at": None, "tool_call_limits": {},
+                            "max_delegations": None},
+            },
+            # `#318`：session **账行**的 CAS 版本 + consumed（closeout 之后的最新读数
+            # ——closeout 那一次真实请求记进了 session 行；本剧本不带 usage ⇒ None 粘性）。
+            # session 触发的暂停，客户端靠这两格组"抬哪个维 + expected_version"。
+            "session": {
+                "version": 1,
+                "consumed": {"agent_turns": 0, "model_requests": 1,
+                             "total_tokens": None, "cost_usd": None,
+                             "tool_calls": 0, "tool_attempts": 0,
+                             "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
+                             "delegations": 0},
             },
             "continuation": {
                 "completed": ["已读完配置"],

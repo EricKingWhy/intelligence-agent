@@ -60,6 +60,10 @@ def _state(tmp_path) -> MagicMock:
     state.operation_ledger = idle_operation_ledger()
     state.ensure_stores = AsyncMock()
     state.stores = MagicMock()
+    # `#318`：fork 谱系会 await 账行读数；AsyncMock(None) = "父没有账行"。
+    state.stores.delegation_tree_ledger.get_session_budget = AsyncMock(
+        return_value=None
+    )
     # 审批队列字典必须是真 dict：交互路径会 __setitem__ 后断言成员关系。
     state.approval_queues = {}
     state.message_queues = MagicMock()
