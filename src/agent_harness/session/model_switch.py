@@ -14,8 +14,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Mapping
+from typing import Any
 
 from agent_harness.config import Settings
 from agent_harness.session.amend import AmendOptions

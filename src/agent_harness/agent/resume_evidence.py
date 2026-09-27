@@ -24,10 +24,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from agent_harness.session.event import RUN_PAUSED, STEER_REQUESTED, SessionEvent
 
@@ -72,7 +72,14 @@ def policy_inputs(
         "model": model,
         "agent_profile": agent_profile,
         "reasoning_effort": reasoning_effort,
-        "context_providers": sorted(context_providers or ()),
+        # `None` 与 `[]` 是**两种不同的策略面**：前者是"没声明 ⇒ 装配全部 wired provider"
+        # （`assembly` 的口径），后者是"显式零 provider"。归一化成一个值会让"从全量改成
+        # 零 provider"这种真实变更看上去没变（fail-closed 的死角），而恢复侧把 `[]` 还原
+        # 回去还会把暂停腿的 provider 全部丢光（T9 审查 P2：`None` 被还原成 `[]` ⇒ 恢复腿
+        # 零 provider）。所以这里记**原值**，摘要按原值算（`null` 与 `[]` 天然不同）。
+        "context_providers": (
+            None if context_providers is None else sorted(context_providers)
+        ),
     }
 
 
@@ -82,6 +89,55 @@ def digest_policy_inputs(inputs: Mapping[str, Any]) -> str:
         dict(inputs), sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]
+
+
+def recorded_policy_inputs(stuck: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """暂停载荷里的逐维策略面——**可用**才返回，否则 `None`（该依据 fail-closed）。
+
+    可用 = 形状合法 **且** 逐维值能重算出同一份载荷里记着的 `policy_version`：
+
+    - 形状：五个维度都在，前四维 `str | None`，`context_providers` 为 `list[str] | None`
+      （畸形 JSONL 里的 list / dict / bool 一律算不可用——不是 500，是"这份快照不能用作
+      依据"）；
+    - 同源：`digest_policy_inputs(值) == policy_version`。
+
+    第二条把"摘要与逐维值是**一次计算的两个投影**"从一句注释变成机械判据，挡两类快照：
+    ① **只记了摘要**的旧载荷（本票之前写进 JSONL 的那些）——它还原不回来，而恢复侧若照旧
+    现算，就会拿"本次声明了什么"去比 ⇒ 没变也判成变了（T9 审查 P1 在**存量会话**上复活）；
+    ② 逐维值与摘要不同源的载荷（手改 / 跨算法版本漂移）——同样还原不回来。
+
+    判据只有这一份：`run_budget.stuck_resume_evidence` 拿它判"能不能用"，恢复侧拿它决定
+    "能不能还原"。两边各写一遍就是下一个漂移点。
+    """
+    if not isinstance(stuck, Mapping):
+        return None
+    digest = stuck.get("policy_version")
+    if not isinstance(digest, str) or not digest:
+        return None
+    recorded = stuck.get("policy_inputs")
+    if not isinstance(recorded, Mapping):
+        return None
+    inputs: dict[str, Any] = {}
+    for field in POLICY_INPUT_FIELDS:
+        if field not in recorded:
+            return None
+        value = recorded[field]
+        if field == "context_providers":
+            if value is None:
+                inputs[field] = None
+            elif isinstance(value, (list, tuple)) and all(
+                isinstance(item, str) for item in value
+            ):
+                inputs[field] = list(value)
+            else:
+                return None
+        elif value is not None and not isinstance(value, str):
+            return None
+        else:
+            inputs[field] = value
+    if digest_policy_inputs(inputs) != digest:
+        return None
+    return inputs
 
 
 @dataclass(frozen=True)
@@ -97,11 +153,16 @@ class ResumeEvidence:
     policy_inputs: Mapping[str, Any] | None = None
 
     def as_projection(self) -> dict[str, Any]:
+        """客户端 / durable 投影：**不含** `policy_inputs`。
+
+        逐维策略面是内部的"还原来源"，它已经在 `run/paused.data.stuck` 里（runtime 从
+        `StuckEvidencePort.policy_inputs` 直接写进去）。再往别的投影里复制一份就是同一个
+        事实的第二条读取路径——`#317` T9 审查 P2 点过这个形状（投影与原始载荷两处读）。
+        """
         return {
             "relevant_steer_seq": self.relevant_steer_seq,
             "environment_revision": self.environment_revision,
             "policy_version": self.policy_version,
-            "policy_inputs": dict(self.policy_inputs) if self.policy_inputs else None,
         }
 
 
@@ -283,23 +344,28 @@ def paused_policy_inputs(
     """取回那个暂停 run 记下的**逐维策略面**（`run/paused.data.stuck.policy_inputs`）。
 
     返回的是**值**而不是摘要：恢复侧要拿它重建 amend（摘要只能比较，还原不回来）。
-    只认同 run 的 `run/paused` —— 它是 run 作用域事实，取错 run 等于拿别人的策略当
-    自己的基线。没有它（非 stuck 暂停 / 还没记逐维值）⇒ `None`：恢复侧没有可还原的
-    东西，而那个快照里也不会有 `policy_version`（两者同生共死，见 `evidence_port`），
-    于是判据照旧走"无快照可比"的 fail-closed 一侧。
+    只认同 run 的 `run/paused`——它是 run 作用域事实，取错 run 等于拿别人的策略当
+    自己的基线。**取最后一条**（与 `run_budget.latest_paused_run` 给判据的基线同一条）：
+    同一个 run 可以暂停多次（例如以 `policy_change` 恢复过一次后又暂停），此时"还原谁的
+    策略面"只有一个正确答案——**基线那一条**。取第一条会让两侧比的是两个不同的快照：
+    "什么都没改"照样能靠两个快照的差拿到依据（fail-open），而且恢复腿会跑回**第一次**
+    暂停的那套档位（T9 审查 P1）。
+
+    不可用（非 stuck 暂停 / 只记了摘要的旧快照 / 逐维值与摘要对不上）⇒ `None`：
+    恢复侧没有可还原的东西；判据侧也按同一口径拒绝 `policy_change`
+    （`stuck_resume_evidence` 的 fail-closed 一侧），两侧不会一个放行一个不还原。
     """
+    latest: SessionEvent | None = None
     for event in events:
         if event.type != RUN_PAUSED:
             continue
         if run_id is not None and event.run_id != run_id:
             continue
-        stuck = (event.data or {}).get("stuck")
-        if not isinstance(stuck, Mapping):
-            continue
-        recorded = stuck.get("policy_inputs")
-        if isinstance(recorded, Mapping):
-            return {field: recorded.get(field) for field in POLICY_INPUT_FIELDS}
-    return None
+        latest = event
+    if latest is None:
+        return None
+    stuck = (latest.data or {}).get("stuck")
+    return recorded_policy_inputs(stuck if isinstance(stuck, Mapping) else None)
 
 
 def relevant_steer_seq(

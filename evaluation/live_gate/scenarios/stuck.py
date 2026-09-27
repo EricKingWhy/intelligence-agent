@@ -14,7 +14,8 @@
    + 一条 `injected_by=tool_failure_guard` 的 `user/message`（① 复用既有护栏形状，
    ADR-0048 D2）；`guard/stuck(level=replan)` 在本 run 里必须**为空**。整场只有这一条纠正。
 3. **暂停是非终态、且带着可比的快照**：同模式再达阈值 ⇒ `guard/stuck(level=paused)` +
-   `run/paused(reason=stuck)`，`data.stuck` 七键齐（`STUCK_KEYS`），其中
+   `run/paused(reason=stuck)`，`data.stuck` 八键齐（`STUCK_KEYS`，含逐维 `policy_inputs`——
+   它必须能重算出同一格里的 `policy_version`，否则恢复侧还原不回来），其中
    `threshold=3`、`count == 轨迹里那串同动作失败的真实条数`、`replan_count=1`、
    `environment_revision` / `policy_version` 非空；`resume_requirements` = 三类依据。
    整场**没有** `run/completed` / `run/failed` / `run/interrupted`，也没有旧 HARD 形状

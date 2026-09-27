@@ -147,9 +147,12 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
   暂停"，所以一批事件里若同一个模式既到 T 又到 2T，这一批只执行那条 replan（纠正消息落盘、
   模型看得见），暂停留给下一次仍然重复的观测。原实现按"暂停优先"挑动作（`worst_stuck_signal`
   的级别序），会把同批的 replan 直接压掉——模型一条纠正都没收到，而 `replan_count` 照样写 1。
-- **暂停**：任何模式在**没有同批 replan** 的前提下越过 2T 时落 `guard/stuck(level=paused)`，
-  随后走既有的 `_terminal_paused`（对账闸门 → closeout → 恰好一条 `run/paused` →
-  `mark_terminal_written`）。
+- **暂停**：任何模式在**本批没有发出它自己的 replan** 的前提下越过 2T 时落
+  `guard/stuck(level=paused)`，随后走既有的 `_terminal_paused`（对账闸门 → closeout →
+  恰好一条 `run/paused` → `mark_terminal_written`）。
+  口径是**按模式**的（`worst_stuck_signal` 只把"同批也发了 replan 的那个模式"的 paused
+  级信号从挑选里去掉）：跨模式同批（例如 ② 首达 T、① 同批越过 2T）仍按级别序挑出暂停，
+  那条 ② 的 replan 这一批不执行——登记为残余 12，本票不改成"批级优先"。
   `reason=stuck`、`trigger_dimension=<模式名>`、`resume_requirements` = 三类依据（D7）。
   **不再**落 `run/failed`：`STATUS_IDENTICAL_TOOL_FAILURE_LOOP` 这个终态从生产路径消失
   （常量保留，历史会话仍能读）。
@@ -170,6 +173,20 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
   `policy_change` 成了可伪造的依据（fail-open）。有了逐维值，两侧摘要**按构造**对称：省略
   不是变化。（恢复侧还原的优先级：本次请求声明 > 会话级模型切换 > 暂停快照；快照里的 model
   逐字还原、**不做**目录回落——回落会悄悄换掉策略面，把"没变"算成"变了"。）
+  `context_providers` 记**原值**：`None`（未声明 ⇒ 装配全部 wired）与 `[]`（显式零 provider）
+  是两种策略面，归一化会让"从全量改成零"看上去没变，而把 `None` 还原成 `[]` 会把恢复腿的
+  provider 丢光（T9 审查 P2）。
+- **"两格同源"是机械判据，不是注释**（`#317` T9 二轮审查 P1）：`resume_evidence.
+  recorded_policy_inputs` 是唯一的读取口——它要求五维**形状合法**且
+  `digest_policy_inputs(逐维值) == policy_version`，否则返回 `None`。判据侧
+  （`run_budget.stuck_resume_evidence` 的 `policy_change` 臂）拿 `None` 当"快照还原不回来"
+  直接 409，恢复侧拿 `None` 当"没有可还原的东西"——两侧同一个函数，不会一个放行一个不还原。
+  这条同时挡住两类快照：**只记了摘要的存量载荷**（本票之前写入的 JSONL）与逐维值/摘要
+  **对不上**的载荷（手改、跨算法漂移）。
+- **还原源必须是判据的基线那一条**（同前）：`paused_policy_inputs` 取该 run **最后一条**
+  `run/paused`（与 `latest_paused_run` 给 `validate_resume` 的那条相同）。同一个 run 可以
+  暂停多次（一次合法的 `policy_change` 恢复之后再暂停），取第一条会让两侧比两个不同的快照
+  ——"什么都没改"照样能靠两个快照之差拿到依据，而且恢复腿会跑回**第一次**暂停的档位。
 - **确定性 continuation** 与**模型 closeout 指令**都要有 stuck 分支：不许出现"提高 ceiling 后恢复"
   这类暗示（stuck 不接受 `budget_increase`）。模型 closeout 仍按 `02 §5.2` 预留容量尝试一次，
   失败/不合契约回落确定性组装。
@@ -335,3 +352,35 @@ reasoning effort、context providers（排序后）。两个**刻意排除**项�
    零进展。这是 D4 那条取舍（"不查 MUTATING、判据必须 100% 事件派生"）的直接代价：要闭合它
    需要一条事件之外的事实（工具的能力声明，或一个真正的"项目版本"信号源），而那会破坏 D1 的
    重启可重放性。今天兜住这类 run 的是 ①/②（同动作同观察）与预算；登记于此，不在本票扩范围。
+11. **本票之前写入的存量 stuck 暂停：`policy_change` 一律 409（fail-closed）**：那些载荷只记了
+   `policy_version` 摘要、没有逐维 `policy_inputs`（D6 的"两格同源"判据因此不成立），而摘要
+   本身还原不回来 ⇒ 无法证明"策略真的变了"，`stuck_resume_evidence` 直接拒（二轮审查探针 C
+   的 L2 实测：改前 `ACCEPTED ⇒ fail-open`，改后 `BudgetConflict`）。**代价是存量会话
+   的 `policy_change` 不可用**（`relevant_steer` / `environment_change` 不受影响：它们不依赖
+   策略面，也不需要还原）。方向选 fail-closed 而不是"照旧现算"：照旧现算就是 T9 审查 P1 的原始
+   fail-open（省略被算成变更）。要闭合它需要一次数据迁移（按当时的策略面回填逐维值）——没有
+   这样的信息（摘要不可逆），所以只能等这些会话自己走完。同一条判据也把**畸形快照**（逐维值
+   形状非法）拒在这里：探针 C 的 M1（`agent_profile` 被写成 list）在改前是 `TypeError:
+   unhashable type: 'list'`（`agent/profiles.py` 取档位时炸，恢复路径以 500 收场），改后是
+   同一个 409。
+12. **跨模式同批时，首达 T 那条 replan 仍可能被同批的暂停压掉**（二轮审查探针 D 的 D4）：
+   `worst_stuck_signal` 的"replan 优先"是**按模式**的（D5）——一批里 ② 首达 T、① 同批越过 2T
+   时，挑出的是暂停，② 的纠正这一批不执行（它的首达闩已被消费）。探针 D 实测：同批同模式
+   （① 首达 T + ① 越过 2T）会先出 replan（`guard/stuck=[('replan',3)] → paused@7`），跨模式
+   的选择结果与修复前逐字相同（`paused/stuck.tool_failure_loop` 对 `paused/stuck.tool_failure_loop`）。
+   两个模式的计数在多数真实循环里同源（同动作同失败的重复同时喂 ① 与 ②），可构造的是"计数被
+   不同观察打断后错位"的形状。改成批级优先（"一批里有任何 replan 就不暂停"）在本架构下也不会
+   无限推迟暂停（每个模式的首达 replan 一个 episode 只可能发生一次 ⇒ 暂停最多推迟一批），但那
+   超出 `02 §5.3` 的字面（它只承诺"**同一模式** replan 后仍持续 ⇒ 暂停"）；本票按字面收窄，
+   形状登记于此。
+13. **装配期失败留下的孤儿 `session/resumed`**（二轮审查探针 F 的 F2）：快照里的模型若在恢复前
+   被移出 catalog，`build_runtime` 处会报 `ConfigError`（响亮失败，D6 的不做回落所期望的），
+   而失败发生在 `Session.resume` **之后** ⇒ 事件流里留下一条 `session/resumed` 与随后的零 run
+   事实。取证（两路，`t9_probe_orphan_resumed.py`）：
+   - 恢复请求**显式声明**一个不在 catalog 的模型（不涉及任何快照还原）留下的形状**逐字相同**
+     ⇒ "事件先落、启动在后"是既有顺序缺口，不是本票引入；
+   - 会话**已有**当前模型（`model/changed`）而它从 catalog 消失时，还原侧按既定优先级让开这一维
+     （D6），`amend_with_session_model` 走 `#137` 的 warn + 回落默认链 ⇒ 既无孤儿事件也无响亮
+     失败。这一支属 `#137` 的既有口径，本票不改，登记于此以免把两种子情况混为一谈。
+   要闭合第 1 支需要把"模型可解析"提前到 `Session.resume` 之前（或把装配失败回滚成一条显式
+   事实），属另一笔。

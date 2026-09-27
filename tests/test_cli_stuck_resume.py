@@ -311,6 +311,137 @@ async def test_a_resume_without_a_policy_declaration_cannot_forge_a_policy_chang
 
 
 @pytest.mark.asyncio
+async def test_the_second_pause_is_the_restore_source_for_the_next_resume(
+    monkeypatch, tmp_path,
+):
+    """同一个 run 暂停两次、两次策略面不同 ⇒ 第二次的基线与还原源是**第二份快照**。
+
+    `#317` T9 二轮审查 P1 的端到端回归：还原源取"第一条带逐维值的暂停"时，两侧比的是两
+    份不同的快照（① coding / ② main）——一次**不声明任何策略**的 `policy_change` 恢复因此
+    摘要必不同 ⇒ 被放行（fail-open），而且恢复腿会跑回**第一次**暂停的档位（coding）。
+    判据侧的基线是 `latest_paused_run`（最新那条），所以还原源也必须是最新那条。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(
+            responses=[_failing_round(index) for index in range(6)]
+            + [_continuation_json()],
+        ),
+    )
+    from agent_harness.session.amend import AmendOptions
+
+    service = await cli._cli_session_service(settings)
+    created = await service.create_and_launch(
+        task="反复用同一个工具", amend=AmendOptions(agent_profile="coding"),
+    )
+    await created.run.task
+    session_id = created.session.session_id
+    store = JsonlSessionStore(root=_sessions_root(settings))
+    first = latest_paused_run(store.read_events(session_id))
+    assert first is not None and first.reason == REASON_STUCK
+    assert (first.stuck or {})["policy_inputs"]["agent_profile"] == "coding"
+
+    # 一次**真实**的策略变更：声明 main ⇒ 依据成立、恢复腿跑 main，随后又撞上同一个循环。
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(
+            responses=[_failing_round(index) for index in range(6, 8)]
+            + [_continuation_json()],
+        ),
+    )
+    changed = await service.resume_and_launch(
+        session_id=session_id, task=None, resume_run_id=first.run_id,
+        resume_basis=RESUME_BASIS_POLICY_CHANGE, expected_version=first.version,
+        amend=AmendOptions(agent_profile="main"),
+    )
+    await changed.run.task
+    after = store.read_events(session_id)
+    pauses = [event for event in after if event.type == RUN_PAUSED]
+    assert len(pauses) == 2, "恢复腿应当再次撞上同一个循环"
+    second_inputs = pauses[1].data["stuck"]["policy_inputs"]
+    assert second_inputs["agent_profile"] == "main", "恢复腿必须跑在本次声明的档位上"
+
+    # 现在基线 + 还原源都必须是第二份快照（main）：不声明的 policy_change ⇒ 409「相同」。
+    second = latest_paused_run(after)
+    assert second is not None and second.version > first.version
+    with pytest.raises(BudgetConflict, match="相同"):
+        await service.resume_and_launch(
+            session_id=session_id, task=None, resume_run_id=first.run_id,
+            resume_basis=RESUME_BASIS_POLICY_CHANGE, expected_version=second.version,
+        )
+    assert [event.type for event in store.read_events(session_id)] == [
+        event.type for event in after
+    ]
+
+
+def _rewrite_pause_stuck(
+    settings: Settings, session_id: str, mutate,
+) -> None:
+    """直接重写 JSONL 里那条 `run/paused` 的 `stuck` 载荷（伪造一份老/畸形快照）。"""
+    path = _sessions_root(settings) / session_id / "events.jsonl"
+    lines = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        payload = json.loads(line)
+        if payload.get("type") == RUN_PAUSED and isinstance(payload.get("data"), dict):
+            stuck = payload["data"].get("stuck")
+            if isinstance(stuck, dict):
+                mutate(stuck)
+        lines.append(json.dumps(payload, ensure_ascii=False))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _drop_policy_inputs(stuck: dict) -> None:
+    stuck.pop("policy_inputs", None)
+
+
+def _malform_agent_profile(stuck: dict) -> None:
+    """把 profile 写成 list，**并让摘要跟着它走**：这样拒它的只剩形状那一关。"""
+    from agent_harness.agent.resume_evidence import digest_policy_inputs
+
+    stuck["policy_inputs"]["agent_profile"] = ["not-a-string"]
+    stuck["policy_version"] = digest_policy_inputs(stuck["policy_inputs"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutate", [_drop_policy_inputs, _malform_agent_profile],
+    ids=["legacy_no_inputs", "malformed_profile"],
+)
+async def test_a_snapshot_that_cannot_be_restored_cannot_resume_by_policy(
+    monkeypatch, tmp_path, mutate,
+):
+    """还原不回来的快照 ⇒ `policy_change` 一律 409，且**不是** 500。
+
+    两种形状（`#317` T9 二轮审查 P1/P2 的端到端回归）：
+
+    - **存量快照**：本票之前写进 JSONL 的那种，只记摘要、没有逐维值。它还原不回来，
+      "现算再比"就是把"本次请求声明了什么"当基线 ⇒ 没变也判成变了（fail-open 在存量
+      会话上复活）。
+    - **畸形快照**：逐维值形状非法（`agent_profile` 被写成 list）。旧写法把它直接塞进
+      amend 再算摘要，恢复路径以 `TypeError: unhashable type: 'list'` 收场（500），
+      而不是以冲突收场。
+
+    同一份判据（`recorded_policy_inputs`）管这两件事，所以这里也一次验两条：都是
+    `BudgetConflict`「还原不回来」，都零副作用。环境那条依据不受影响。
+    """
+    settings, session_id, events = await _run_to_stuck_pause(monkeypatch, tmp_path)
+    paused = latest_paused_run(events)
+    assert paused is not None and paused.run_id is not None
+
+    _rewrite_pause_stuck(settings, session_id, mutate)
+
+    with pytest.raises(BudgetConflict, match="还原不回来"):
+        await resume_command(
+            session_id, expected_version=paused.version,
+            basis=RESUME_BASIS_POLICY_CHANGE, write=lambda _text: None,
+        )
+    after = JsonlSessionStore(root=_sessions_root(settings)).read_events(session_id)
+    assert len(after) == len(events)
+
+
+@pytest.mark.asyncio
 async def test_resume_without_a_steer_is_rejected_without_side_effects(monkeypatch, tmp_path):
     """没有那一条 steer ⇒ 409，且**什么都不写**（判定在任何落盘之前）。"""
     settings, session_id, events = await _run_to_stuck_pause(monkeypatch, tmp_path)

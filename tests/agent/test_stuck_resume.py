@@ -31,6 +31,7 @@ from agent_harness.agent.resume_evidence import (
     paused_policy_inputs,
     policy_inputs,
     policy_version_of,
+    recorded_policy_inputs,
     relevant_steer_seq,
 )
 from agent_harness.agent.run_budget import (
@@ -70,11 +71,25 @@ def _paused(
     )
 
 
+#: 快照里那一套策略面。`policy_version` 由它算出——**两格同源是载荷合法的前提**
+#: （`recorded_policy_inputs`：逐维值必须能重算出同一格的摘要），所以夹具不手抄摘要。
+DEFAULT_POLICY_INPUTS: dict = {
+    "permission_mode": "workspace-write", "model": None,
+    "agent_profile": "coding", "reasoning_effort": None, "context_providers": None,
+}
+
+
 def _stuck_payload(**overrides) -> dict:
+    inputs = overrides.pop("policy_inputs", None)
+    recorded = dict(DEFAULT_POLICY_INPUTS)
+    if inputs is not None:
+        recorded.update(inputs)
     payload = {
         "pattern": "stuck.tool_failure_loop", "threshold": 3, "count": 6,
         "replan_count": 1, "fingerprint": "sha256:abc",
-        "environment_revision": "sha256:env-old", "policy_version": "sha256:pol-old",
+        "environment_revision": "sha256:env-old",
+        "policy_version": digest_policy_inputs(recorded),
+        "policy_inputs": recorded,
     }
     payload.update(overrides)
     return payload
@@ -282,7 +297,7 @@ class TestPolicyInputsAreRecordedAndRestored:
                 data={
                     "reason": REASON_STUCK,
                     "stuck": _stuck_payload(
-                        policy_inputs={"model": "m", "agent_profile": "coding"},
+                        policy_inputs={"agent_profile": "coding"},
                     ),
                 },
             ),
@@ -295,10 +310,69 @@ class TestPolicyInputsAreRecordedAndRestored:
             ),
         ]
         assert paused_policy_inputs(events, run_id=RUN_ID) == {
-            "permission_mode": None, "model": "m", "agent_profile": "coding",
+            "permission_mode": "workspace-write", "model": None, "agent_profile": "coding",
             "reasoning_effort": None, "context_providers": None,
         }
         assert paused_policy_inputs(events, run_id="run-nope") is None
+
+    def test_a_second_pause_is_the_restore_source(self) -> None:
+        """同一个 run 暂停两次 ⇒ 还原源是**最后一条**（与判据的基线同一条）。
+
+        `#317` T9 二轮审查 P1：取第一条会让两侧比两个不同的快照——"什么都没改"照样能靠
+        两个快照之差拿到依据（fail-open），而恢复腿会跑回**第一次**暂停的那套档位。
+        """
+        events = [
+            SessionEvent(
+                seq=9, type=RUN_PAUSED, session_id="s1", run_id=RUN_ID,
+                data={"reason": REASON_STUCK,
+                      "stuck": _stuck_payload(policy_inputs={"agent_profile": "coding"})},
+            ),
+            SessionEvent(
+                seq=20, type=RUN_PAUSED, session_id="s1", run_id=RUN_ID,
+                data={"reason": REASON_STUCK,
+                      "stuck": _stuck_payload(policy_inputs={"agent_profile": "main"})},
+            ),
+        ]
+        recorded = paused_policy_inputs(events, run_id=RUN_ID)
+        assert recorded is not None and recorded["agent_profile"] == "main"
+
+    def test_the_snapshot_must_reproduce_its_own_digest(self) -> None:
+        """`recorded_policy_inputs`：形状合法 **且** 逐维值能重算出同一格的摘要。"""
+        good = _stuck_payload()
+        assert recorded_policy_inputs(good) == DEFAULT_POLICY_INPUTS
+        # 摘要缺席 / 逐维值缺席 / 两格对不上 / 形状非法（list 当 profile）⇒ 都不可用
+        assert recorded_policy_inputs(_stuck_payload(policy_version=None)) is None
+        assert recorded_policy_inputs({"policy_version": "sha256:x"}) is None
+        assert recorded_policy_inputs(
+            _stuck_payload(policy_version="sha256:other"),
+        ) is None
+        assert recorded_policy_inputs(
+            _stuck_payload(policy_inputs={"agent_profile": ["coding"]}),
+        ) is None
+        assert recorded_policy_inputs(None) is None
+
+    def test_none_and_an_empty_provider_list_are_different_policy_faces(self) -> None:
+        """`None`（未声明 ⇒ 装配全部 wired）与 `[]`（显式零 provider）是两种策略面。
+
+        T9 二轮审查 P2：归一化成同一个值会让"从全量改成零"看上去没变，而把 `None` 还原成
+        `[]` 会把恢复腿的 provider 丢光（暂停腿 3 个 wired ⇒ 恢复腿 0 个）。
+        """
+        default = policy_inputs(permission_mode="workspace-write")
+        explicit = policy_inputs(permission_mode="workspace-write", context_providers=[])
+        assert default["context_providers"] is None
+        assert explicit["context_providers"] == []
+        assert digest_policy_inputs(default) != digest_policy_inputs(explicit)
+
+        from agent_harness.session.amend import AmendOptions
+        from agent_harness.session.model_switch import restore_policy_inputs
+
+        # 请求没声明 providers ⇒ 沿用快照：`None` 仍是 `None`（**不是** `[]`）。
+        assert restore_policy_inputs(
+            AmendOptions(), default, [],
+        ).context_providers is None
+        assert restore_policy_inputs(
+            AmendOptions(), explicit, [],
+        ).context_providers == []
 
     def test_a_budget_pause_has_no_policy_inputs_to_read_back(self) -> None:
         """非 stuck 暂停的载荷里没有这一格 ⇒ `None`（恢复侧没有可还原的东西）。"""
@@ -450,11 +524,12 @@ class TestStuckResumeEvidence:
             )
 
     def test_an_unchanged_policy_is_rejected(self) -> None:
+        stuck = _stuck_payload()
         with pytest.raises(BudgetConflict, match="相同"):
             stuck_resume_evidence(
-                _paused(stuck=_stuck_payload()),
+                _paused(stuck=stuck),
                 resume_basis=RESUME_BASIS_POLICY_CHANGE,
-                evidence=ResumeEvidence(policy_version="sha256:pol-old"),
+                evidence=ResumeEvidence(policy_version=stuck["policy_version"]),
             )
 
     def test_a_changed_policy_is_accepted(self) -> None:
@@ -465,6 +540,46 @@ class TestStuckResumeEvidence:
         )
         assert recorded["basis"] == RESUME_BASIS_POLICY_CHANGE
         assert recorded["policy_version"] == "sha256:pol-new"
+
+    def test_a_snapshot_without_per_dimension_inputs_is_rejected(self) -> None:
+        """存量快照（本票之前写入的 JSONL：只记了摘要）⇒ 还原不回来 ⇒ fail-closed。
+
+        `#317` T9 二轮审查 P1 的回归。照旧"现算再比"就是拿本次请求声明了什么当基线：
+        CLI 一类不声明策略的恢复会把"省略"算成"变了"（原始 fail-open 在存量会话上复活）。
+        """
+        legacy = _stuck_payload(policy_inputs=None, policy_version="sha256:pol-legacy")
+        legacy.pop("policy_inputs")
+        assert legacy["policy_version"] == "sha256:pol-legacy"  # 摘要还在
+        with pytest.raises(BudgetConflict, match="还原不回来"):
+            stuck_resume_evidence(
+                _paused(stuck=legacy),
+                resume_basis=RESUME_BASIS_POLICY_CHANGE,
+                evidence=ResumeEvidence(policy_version="sha256:pol-new"),
+            )
+
+    def test_a_snapshot_whose_inputs_do_not_reproduce_the_digest_is_rejected(self) -> None:
+        """逐维值与摘要不同源（手改 / 跨算法漂移）⇒ 同样"还原不回来"。"""
+        with pytest.raises(BudgetConflict, match="还原不回来"):
+            stuck_resume_evidence(
+                _paused(stuck=_stuck_payload(policy_version="sha256:pol-other")),
+                resume_basis=RESUME_BASIS_POLICY_CHANGE,
+                evidence=ResumeEvidence(policy_version="sha256:pol-new"),
+            )
+
+    def test_a_malformed_snapshot_is_a_conflict_not_a_crash(self) -> None:
+        """逐维值形状非法（profile 被写成 list）⇒ 409，**不是** 500（T9 二轮审查 P2）。
+
+        旧写法把快照值直接塞进 amend 再算摘要，`agent_profile=["not-a-string"]` 一路撞到
+        `TypeError: unhashable type: 'list'`——恢复路径以异常收场，而不是以冲突收场。
+        """
+        malformed = _stuck_payload(policy_inputs={"agent_profile": ["not-a-string"]})
+        with pytest.raises(BudgetConflict, match="还原不回来") as caught:
+            stuck_resume_evidence(
+                _paused(stuck=malformed),
+                resume_basis=RESUME_BASIS_POLICY_CHANGE,
+                evidence=ResumeEvidence(policy_version="sha256:pol-new"),
+            )
+        assert isinstance(caught.value, BudgetConflict)
 
 
 # ── 判定：`validate_resume` 的 stuck 分支 ────────────────────────────────

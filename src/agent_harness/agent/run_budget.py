@@ -69,7 +69,7 @@ from agent_harness.agent.budget import (
     BudgetRejection,
     LocalFuse,
 )
-from agent_harness.agent.resume_evidence import ResumeEvidence
+from agent_harness.agent.resume_evidence import ResumeEvidence, recorded_policy_inputs
 from agent_harness.model.accounting import ProviderAccounting, decimal_or_none
 from agent_harness.session.event import (
     MODEL_COMPLETED,
@@ -239,7 +239,8 @@ RESUME_BASIS_VALUES: frozenset[str] = frozenset(
 
 #: `run/paused.data.stuck` 的键（`#317`；ADR-0048 D6）。**只有 `reason=stuck` 才出现**
 #: ——旧形状（预算 / deadline 暂停）逐字不变。前四个键是"哪个模式、到了第几次"，
-#: 后三个是暂停那一刻的**观测快照**：恢复侧拿同一份函数重算再比较（D7）。
+#: 后四个是暂停那一刻的**观测快照**：恢复侧拿同一份函数重算再比较（D7），
+#: `policy_inputs` 同时是"还原策略面"的来源（与 `policy_version` 同生共死）。
 STUCK_KEYS: tuple[str, ...] = (
     "pattern",
     "threshold",
@@ -1570,6 +1571,20 @@ def stuck_resume_evidence(
             f"stuck 暂停的 resume_basis={resume_basis} 需要与暂停快照比较，但 {field} "
             f"在{'暂停快照' if recorded is None else '本次观测'}里缺席（暂停时读不到它）"
             f"——无快照可比，拒绝启动工作"
+        )
+    if (
+        resume_basis == RESUME_BASIS_POLICY_CHANGE
+        and recorded_policy_inputs(stuck) is None
+    ):
+        # 摘要还在，但**逐维值不在 / 与摘要对不上** ⇒ 这份快照还原不回来。放行它等于
+        # 拿"本次请求声明了什么"当基线：CLI 一类不声明策略的恢复会把"省略"算成"变了"
+        # （`#317` T9 审查 P1 在**存量会话**上的形状——快照由本票之前的版本写入时没有
+        # 逐维值）。判据只有这一份实现，所以卡在这里；`environment_change` 不受影响
+        # （那条依据从来不依赖策略面，恢复侧也不需要还原）。
+        raise BudgetConflict(
+            f"stuck 暂停的 resume_basis={resume_basis} 需要暂停快照里的逐维策略面，但"
+            f"这份快照只记了 {field} 摘要、记不下逐维值（或两者对不上）——它还原不回来，"
+            f"无法证明'策略真的变了'，拒绝启动工作"
         )
     if current == recorded:
         raise BudgetConflict(

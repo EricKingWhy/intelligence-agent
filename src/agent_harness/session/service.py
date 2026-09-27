@@ -147,6 +147,8 @@ from agent_harness.session.model_switch import (
 )
 from agent_harness.session.model_switch import (
     amend_with_session_model as _amend_with_session_model,
+)
+from agent_harness.session.model_switch import (
     restore_policy_inputs as _restore_policy_inputs,
 )
 from agent_harness.session.queue import QueuedMessage, SteerRequest
