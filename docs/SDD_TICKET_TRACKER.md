@@ -6121,8 +6121,12 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 **状态**：✅ 交付、两轴独立审查五轮闭合（发现 → 四轮定向复核，末轮两轴 PASS）、真实 Live Gate **两份证据**
 （首份因 `src/**` 与断言集变更作废，保留作原始依据）、重车道全量读数、Gate-0 与覆盖闸门闭合。分支
 `zcode/T317-stuck-detection`，基点 `6aff823f`（= 当时的 `origin/main`），14 笔。
-**代码冻结树 = `b5f5eb19` / tree `97f36cb6`**（其后零代码改动：`git diff --stat b5f5eb19..HEAD --
-src tests evaluation web scripts .github` **为空**）；**读数绑定树 = `27de3af0` / tree `7fc64b30`**
+**代码冻结树 = `b5f5eb19` / tree `97f36cb6`**（**该框的 `..HEAD` 形态只对「本票自己的笔」成立**：
+至 `a69df7b9` 为止 `git diff --stat b5f5eb19..HEAD -- src tests evaluation web scripts .github` **为空**；
+**先回后正并入 `origin/main`（merge `b0443fa6`，base `6aff823f`）之后不再为空** —— upstream 那 62 笔
+带来 **38 files / +5124**，其中有 `src/**`（`session/service.py` 的恢复装配重构、`agent/runtime.py`、
+`session/runmanager.py` 等）⇒ **读数传递对合并树不成立，重车道必须在新树重跑**，本段下方的全量读数
+（绑 `27de3af0`）与 Live Gate 证据（绑 `b5f5eb19`）只对**合并前**那棵树成立）；**读数绑定树 = `27de3af0` / tree `7fc64b30`**
 （全量 pytest 跑的正是这棵树）。**最终 Live Gate 证据绑定 sha `b5f5eb19` / tree `97f36cb6`**
 （= 同一代码面；场景 **v5**，真模型 `mimo-v2.6-flash` + 生产工具 + 生产账本）。
 
@@ -6186,7 +6190,7 @@ src tests evaluation web scripts .github` **为空**）；**读数绑定树 = `2
   `describe_resume_requirements` 兜底措辞订正、ADR 残余 12 的引用改类限定节点 id 且两处读数分开写、
   ADR D8 收尾句删掉已不可达的 steer 出路。**作者变异**：`actionable = list(available)` ⇒ 两条 CLI 用例转红。
   **本笔之后未开第六轮**：§8.3 第 4 条的修后重审预算（1 轮/轴）已用满，且末轮两轴均 PASS、五条全 P3、
-  无新引入的 P0/P1 ⇒ 按"停止修复 + 如实登记"收口（登记于本段末与台账第 `340` 行）。
+  无新引入的 P0/P1 ⇒ 按"停止修复 + 如实登记"收口（登记于本段末与台账第 `346` 行）。
 
 **重车道读数（命令与树写死）**：
 
@@ -6241,6 +6245,14 @@ src tests evaluation web scripts .github` **为空**）；**读数绑定树 = `2
 载荷**不再宣称**环境 / 策略依据，只列 `relevant_steer`（判据对它不恒拒：它比事件顺序、不看快照）。
 **入口本票不修**：`build_runtime` 给的是全集内置工具，而子 run 的工具面是 `AgentSpec.tool_scope` 收窄过的
 —— 放开入口而不按子会话自己的 spec 重建 runtime 等于**放大它的工具面**，比"不可恢复"更坏（理由与五条验收在 `#372`）。
+
+**合并审查（先回后正）两轴新出的残余（不属 ADR-0048 §4 的 16 条）**：
+⑰ 证据**端口**（环境 revision / 策略面）取自**锁前**那次读，而暂停事实与 steer 观测在 Recovery 之后
+重读 ⇒ 两次读数各自成对；今天**不可达**（`run/paused` 全仓只有 `agent/runtime.py` 一个写入点，Recovery 只追加
+`session/resumed`，不移动那三格），但若将来 Recovery 会改写暂停面，`policy_change` 就会拿两份不同读数相比
+（fail-open 方向）。⑱ 与本条同形：入库用例 `test_a_stuck_resume_that_triggers_recovery_recomputes_the_evidence`
+对「重算 vs 沿用锁前观测」**无区分度**（对照变异实测为绿）——它承重的是「重读块解包元数」与「证据必须交给
+判据」两条；要测出重算的必要性，需要一个 Recovery 会改动 steer / 环境 / 策略三格之一的构造。
 
 **已另开票（本票不修）**：`#370` 委派子 run 的策略面未定义（残余 ⑮，正文已按四轮结论重写——旧正文里
 "实测可经 `environment_change` 恢复"已被推翻）；`#372` 委派子会话不可恢复（残余 ⑯，含复现、影响面、

@@ -1322,6 +1322,8 @@ class SessionService:
         算出的 launch 上下文与阶段二落的 `run/resumed.limits` 必须是同一份集合；第三个是
         stuck 恢复的观测（非 stuck 为 `None`），阶段二拿它写 `run/resumed.resume_evidence`
         ——同一次读数两处消费，不再重算（重算会多跑一次工作区 walk，还可能读到不同的现场）。
+        **唯一例外**：`_commit_paused_resume` 里 Recovery **之后**的重读——那一处必须连同暂停
+        事实一起再算一次（否则两条依据各自对着不同的事件流比；ADR-0048 D7）。
         """
         paused = latest_paused_run(events)
         if paused is None:

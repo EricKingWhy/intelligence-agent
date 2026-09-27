@@ -40,6 +40,7 @@ from agent_harness.session import (
     RUN_FAILED,
     RUN_PAUSED,
     RUN_RESUMED,
+    SESSION_RESUMED,
     TOOL_FAILURE_GUARD,
     USER_MESSAGE,
 )
@@ -205,6 +206,72 @@ async def test_resume_with_a_relevant_steer_is_accepted_and_recorded(monkeypatch
     assert evidence["pause_seq"] == paused.pause_seq
     assert isinstance(evidence["steer_seq"], int)
     # 同一个逻辑 run：只有一个 run/started
+    assert len([event for event in after if event.type == "run/started"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_resume_that_triggers_recovery_recomputes_the_evidence(
+    monkeypatch, tmp_path,
+):
+    """stuck 暂停的恢复**穿过 Recovery** 时，暂停事实与现场观测一起重算（`#317` × `#342`）。
+
+    这条路径是合并 `origin/main` 时暴露的**未被 git 标记**的语义冲突所在：upstream 新增的
+    「Recovery 后重读」块按二元解包读 `_paused_resume_state`，而本票已把它改成三元返回
+    （多一格现场观测）⇒ 真跑该组合先是 `ValueError: too many values to unpack`（500）。
+    变异实测（本用例承重的那两条）：① 重读处退回二元解包 ⇒ **红**（ValueError）；
+    ② 保留三元、但不把重读后的证据交给判据（`resume_evidence` 不传 ⇒ 判据收到 `None`）
+    ⇒ **红**（409「没有可用的观测」）。
+    ⚠ **如实登记的边界**：把重读后的 `_resume_evidence(...)` 整行删掉、沿用锁前那一份观测，
+    本用例**测不出来**（变异实测为绿）——因为 Recovery 只追加 `session/resumed`，不会移动
+    steer / 环境 / 策略三格的事实，两次读数的结论相同。要区分「重算 vs 沿用」需要一个
+    Recovery 会改动这三格之一的构造，属残余（见 tracker T9 残余项：证据端口取自锁前读）。
+    为什么必须专门补：`test_concurrent_resume_with_the_same_version_has_exactly_one_winner`
+    的 `[recovery]` 臂跑的是**预算**暂停（`reason != stuck` ⇒ 证据那格恒为 `None`），它进重读块
+    却用不到这一格 ⇒ 上述两条变异它都照样全绿（ADR-0048 D7）。
+    """
+    settings, session_id, events = await _run_to_stuck_pause(monkeypatch, tmp_path)
+    paused = latest_paused_run(events)
+    assert paused is not None
+    _append_steer(settings, session_id)
+
+    from agent_harness.session.service import SessionService
+
+    recovery_calls = 0
+    original_recover = SessionService.recover
+
+    async def count_recovery(service, sid):
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return await original_recover(service, sid)
+
+    async def force_recovery(service, sid):
+        return True
+
+    monkeypatch.setattr(SessionService, "_has_unreconciled_operations", force_recovery)
+    monkeypatch.setattr(SessionService, "recover", count_recovery)
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(responses=[AIMessage(content="这次换了个做法")]),
+    )
+    printed: list[str] = []
+    outcome = await resume_command(
+        session_id, expected_version=paused.version,
+        basis=RESUME_BASIS_RELEVANT_STEER, write=printed.append,
+    )
+
+    assert recovery_calls == 1, "本用例要证明的正是「恢复事件穿过 Recovery」那条路径"
+    assert outcome.paused is False
+    assert outcome.final_text == "这次换了个做法"
+    after = JsonlSessionStore(root=_sessions_root(settings)).read_events(session_id)
+    resumed = [event for event in after if event.type == RUN_RESUMED]
+    assert len(resumed) == 1
+    evidence = resumed[0].data["resume_evidence"]
+    assert evidence["basis"] == RESUME_BASIS_RELEVANT_STEER
+    assert evidence["pause_seq"] == paused.pause_seq
+    assert isinstance(evidence["steer_seq"], int)
+    # Recovery 已写过一条 session/resumed；CAS 胜者不得再写第二条（upstream 的
+    # `if not needs_recovery`）——两条恢复事实并存 = 同一逻辑 run 被"恢复两次"。
+    assert len([event for event in after if event.type == SESSION_RESUMED]) == 1
     assert len([event for event in after if event.type == "run/started"]) == 1
 
 
