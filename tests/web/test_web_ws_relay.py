@@ -432,6 +432,50 @@ async def test_ws_disconnect_cleans_subscriber(tmp_path, monkeypatch):
         await _shutdown(server, serve_task)
 
 
+@pytest.mark.asyncio
+async def test_ws_relay_unbinds_terminal_run_subscriber(tmp_path, monkeypatch):
+    """#341：relay 收尾必须按**创建时绑定的 run** 解绑。
+
+    run 终态后 `get_active()` 返回 None——若收尾时重查而不是用绑定的
+    run，`unsubscribe` 会泄漏（subscribers 永远非空，孤儿计时也不启动）。
+    用约 1s 的慢流模型保证 subscribe 时 run 在途、done 帧时已终态。"""
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=10, interval=0.1),
+    )
+    try:
+        import httpx2
+
+        session_id = await _start_run_get_session_id(port, "短任务")
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "done" for f in fs),
+                timeout=15.0)
+            assert any(f.get("type") == "done" for f in frames)
+
+        # done 帧意味着 relay 已收到哨兵并收尾：终态 run 的 subscribers 必须归零
+        run_manager = app.state.agent.run_manager
+        run = run_manager._runs.get(session_id)
+        assert run is not None and run.terminal, "run 应已终态"
+
+        async def _terminal_subscribers_empty() -> bool:
+            for _ in range(50):
+                if not run.subscribers:
+                    return True
+                await asyncio.sleep(0.05)
+            return False
+
+        assert await _terminal_subscribers_empty(), \
+            "终态 run 的 subscribers 应归零（relay 按绑定的 run 解绑）"
+    finally:
+        await _shutdown(server, serve_task)
+
+
 # ── #208：WS 快照的 backlog 保护（与 SSE 同一判据）─────────────────────
 
 
