@@ -204,7 +204,11 @@ class ChatModelInvoker:
             HumanMessage(content=json.dumps(call.payload, ensure_ascii=False)),
         ]
         async with asyncio.timeout(call.timeout_seconds):
-            response = await model.ainvoke(messages, max_tokens=call.max_output_tokens)
+            response = await model.ainvoke(
+                messages,
+                max_tokens=call.max_output_tokens,
+                response_format={"type": "json_object"},
+            )
         content = getattr(response, "content", None)
         if not isinstance(content, str):
             # 非文本形状（多模态块列表等）不是"内容不合格"而是"provider 没按契约回话"：

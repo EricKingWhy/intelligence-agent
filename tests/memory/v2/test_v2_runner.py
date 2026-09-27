@@ -795,7 +795,10 @@ async def test_the_invoker_passes_max_tokens_and_the_two_messages() -> None:
     assert await invoker(_call(max_output_tokens=123)) == "{}"
 
     messages, kwargs = model.calls[0]
-    assert kwargs == {"max_tokens": 123}
+    assert kwargs == {
+        "max_tokens": 123,
+        "response_format": {"type": "json_object"},
+    }
     assert [message.content for message in messages] == ["SYSTEM", '{"a": 1}']
     assert len(built) == 1
 
