@@ -2,15 +2,10 @@
 
 ## 它守什么
 
-Gate-0 的服务端跑在 Unix，`ruff` 的 `EXE001`（**Shebang is present but file is not executable**）
-只在那里生效；本机 Windows 上 `core.filemode=false` ⇒ **工作树权限的改动 git 根本不记录**，
-于是本地 `ruff check .` **永远看不见**这一条。两次真实事故都是它的产物（「本地绿 → CI 红」往返）：
-
-- `99a744fe` —— 在 `main` 上补 7 个脚本的可执行位；
-- `2d3761c` —— `scripts/live_gate.py` 索引 `100644` → `100755`（该笔另复跑了一次 Gate-0）。
-
-`check_exec_bit.py` 把那条上游规则搬到**本地可跑**的形态上：读**索引模式**与**blob 头两字节**，
-两者都不受 `core.filemode` / `core.autocrlf` / 本地未提交编辑影响。本文件守它自己不跑偏。
+`check_exec_bit.py` 把 `ruff` 的 `EXE001`（只在 Unix 生效）搬到**本地可跑**的形态上：读**索引
+模式**与 **blob 头部**，两者都不受 `core.filemode` / `core.autocrlf` / 本地未提交编辑影响。
+**判据、操作约束与两次事故（`99a744fe` / `2d3761c`）见该脚本的模块 docstring，此处不复述**
+（`AGENTS.md` §16.1）。本文件只管一件事：证明那条判据本身**不跑偏**。
 
 ## 三层控制样本（缺一层就有假绿的缝）
 
@@ -27,9 +22,10 @@ Gate-0 的服务端跑在 Unix，`ruff` 的 `EXE001`（**Shebang is present but 
 
 ## 它**不**守什么
 
-- **反方向**（`100755` 而无 shebang）：本仓 0 例、上游口径未核对 ⇒ 刻意不纳入（见脚本 docstring）。
-- **`.sh` / `.ps1` / `.mjs`**：`ruff` 不 lint 它们，纳入会立刻产生 11 条本仓现状无害的误报
-  （`dev.sh`、`docs/integration/verify-before-merge.sh` 等）⇒ 刻意排除（见脚本 docstring）。
+- **反方向**（`100755` 而无 shebang，本仓 0 例）与 **`.sh` / `.ps1` / `.mjs`**（`ruff` 不 lint
+  它们）：都是脚本 docstring 里写明的刻意边界。
+- **BOM 开头的 `#!`**：位置口径之外，由本地 `ruff` 的 `EXE005` 兜住（见
+  `test_scope_is_python_only` 最后一条）。
 """
 
 from __future__ import annotations
@@ -37,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import re
 import subprocess
 import sys
@@ -50,7 +47,7 @@ GATE0_PATH = REPO / "scripts" / "gate0.py"
 
 #: 控制样本用的 sha（`read_blob_heads` 的键）。值本身无意义，只需要是**稳定且互不相同**的字符串，
 #: 因为纯函数只按 `heads[sha]` 取头两字节。
-SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
+SHA_A, SHA_B, SHA_C, SHA_D = "a" * 40, "b" * 40, "c" * 40, "d" * 40
 
 SHEBANG = b"#!"
 NO_SHEBANG = b"im"      # `import x` 的头两字节
@@ -86,13 +83,17 @@ def test_positive_control_shebang_without_exec_bit_is_flagged(mod):
 
 
 def test_negative_controls_report_nothing(mod):
-    """**反控**：三种正常形态一条都不许报 —— 恒报的假实现过不了这一条。"""
+    """**反控**：四种正常形态一条都不许报 —— 恒报的假实现过不了这一条。
+
+    最后一条是**短头**：长度 < 2 的 blob 只会回更短的头，它不可能等于 `#!` ⇒ 不得因为
+    「头不足两字节」就判违例（那是把读取口径的实现细节泄漏成判定）。"""
     entries = [
-        ("exec.py", "100755", SHA_A),            # 带 shebang 且已可执行
-        ("plain.py", "100644", SHA_B),           # 普通模块（无 shebang、不可执行）
+        ("exec.py", "100755", SHA_A),             # 带 shebang 且已可执行
+        ("plain.py", "100644", SHA_B),            # 普通模块（无 shebang、不可执行）
         ("exec_no_shebang.py", "100755", SHA_C),  # 可执行但无 shebang（反方向，刻意不判）
+        ("empty.py", "100644", SHA_D),            # 0 字节文件：头为空 ⇒ 更不得报
     ]
-    heads = {SHA_A: SHEBANG, SHA_B: NO_SHEBANG, SHA_C: NO_SHEBANG}
+    heads = {SHA_A: SHEBANG, SHA_B: NO_SHEBANG, SHA_C: NO_SHEBANG, SHA_D: b""}
     assert mod.find_violations(entries, heads) == []
 
 
@@ -114,7 +115,8 @@ def test_scope_is_python_only(mod):
     """**越界控**：判据只覆盖 `ruff` 会 lint 的 `*.py` / `*.pyi`。
 
     `.sh` / `.ps1` / `.mjs` 带 shebang 而模式 `100644` 是本仓**现状且无害**的形状
-    （它们一律经解释器调用）⇒ 纳入会立刻产生 11 条误报，把真命中一起训练成噪音。
+    （它们一律经解释器调用）⇒ 纳入会立刻产生误报，把真命中一起训练成噪音
+    （实测清单见 `docs/agents/verification.md` §2 ⑦）。
     """
     entries = [
         ("dev.sh", "100644", SHA_A),
@@ -126,7 +128,9 @@ def test_scope_is_python_only(mod):
     # 但 `*.pyi` 在口径内（它同样是 ruff 的输入面）。
     assert mod.find_violations([("stubs/x.pyi", "100644", SHA_A)], {SHA_A: SHEBANG}), \
         "*.pyi 属 ruff 输入面，带 shebang 而不执行同样要报"
-    # 边界：`#!` 必须**在字节 0**。头两字节不是 `#!` 的一律不算（比如 UTF-8 BOM 开头的文件）。
+    # 边界（**已核实的刻意边界，不是盲区**）：判据是位置口径 —— `#!` 必须在**字节 0**。
+    # BOM 开头的 `#!` 刻意不报：本地 `ruff` 的 `EXE005`（默认规则集启用、无平台门控）在
+    # 有 BOM 时就已必红，而 `chmod +x` 修不掉 EXE005 ⇒ 报出来只会给误导性修法。
     assert mod.find_violations([("bom.py", "100644", SHA_A)], {SHA_A: b"\xef\xbb"}) == []
 
 
@@ -200,12 +204,18 @@ def test_read_blob_heads_marks_a_missing_object_as_unreadable(mod, index_snapsho
 
     这一条是 A 组那个纯函数缺读控**证明不了**的部分 —— 它吃的是 git 的真实输出流：
     缺失对象回的是 `<sha> missing`（两个字段、没有 size），若实现按 size 步进就会整体错位。
+    ⇒ 缺失对象必须排在**前面**（`[missing, real]`）：排在末尾时它后面没有可对账的 blob，
+    实现就算在它之后错位也无从暴露 —— 顺序本身是这条控制样本的承重部分。
+    ⚠ **探测面是「跳行级」错位**：`pos` 的小幅偏移会在下一轮开头的 `pos = newline + 1` 处被
+    自动纠正（实测 2026-09-27：在 missing 分支插 `pos += 1` 是**无效果的变异**，本用例照样绿）
+    ⇒ 只有「多吃 / 少吃一整行」这一类才可观测。设计变异时必须落在这一面上，否则会得出
+    「该控制样本没承重」的假结论。
     """
     entries, heads = index_snapshot
     assert entries, "本仓索引里应有 Python 文件"
     real_sha = entries[0][2]
     missing_sha = "deadbeef" * 5      # 40 位 hex，但本仓必然不存在
-    mixed = mod.read_blob_heads([real_sha, missing_sha], str(REPO))
+    mixed = mod.read_blob_heads([missing_sha, real_sha], str(REPO))
     assert mixed[missing_sha] is None, f"缺失对象必须记 None，实得 {mixed[missing_sha]!r}"
     assert mixed[real_sha] == heads[real_sha], (
         "missing 行后面那个 blob 的头读串位了 —— 两次独立读取必须给出同一个头")
@@ -219,16 +229,28 @@ def _git(cwd: Path, *args: str) -> str:
     return proc.stdout
 
 
-def test_cli_flags_the_incident_shape_in_a_real_repo(tmp_path):
+def _git_allow_fail(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """与 `_git` 同形，但**不**要求 rc=0 —— 造冲突必须用它（`git merge` 冲突时必然非 0）。"""
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                          encoding="utf-8", check=False)
+
+
+def test_cli_flags_the_incident_shape_in_a_real_repo(tmp_path, mod):
     """**端到端控制样本**：在真仓库里造出 `99a744fe` / `2d3761c` 的形状 ⇒ CLI 只抓坏的那个。
 
-    四种文件同场竞争（这才是"有鉴别力"的形状）：
+    五种文件同场竞争（这才是"有鉴别力"的形状）：
       · `bad.py`   —— 带 shebang + `100644` ⇒ **必须被报**（事故原样）；
       · `good.py`  —— 带 shebang + `100755` ⇒ 不得报；
       · `plain.py` —— 无 shebang + `100644` ⇒ 不得报；
+      · `empty.py` —— 0 字节 + `100644` ⇒ 不得报（并钉 `--batch` 的短头截断与字节对齐）；
       · `tool.sh`  —— 带 shebang + `100644`，但在**.sh 越界面** ⇒ 不得报。
 
     所以本测试的判据是"报的集合**恰好等于** `{bad.py}`"，而不是"rc 非零"。
+
+    子进程刻意带 `PYTHONIOENCODING=gbk`：本机是中文 Windows，控制台默认编码不是 UTF-8，
+    而 `main()` 开头会 `reconfigure(encoding="utf-8")`。不这么设，`_utf8_stdio()` 即使被删掉，
+    本测试照样绿（管道下 Python 常已用 UTF-8）；设了它，输出里那些 `✅` / `·` 才真的**只有**
+    `_utf8_stdio()` 在兜（GBK 编不出它们，会以 UnicodeEncodeError 崩掉）。
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -237,27 +259,80 @@ def test_cli_flags_the_incident_shape_in_a_real_repo(tmp_path):
     (repo / "good.py").write_text("#!/usr/bin/env python3\nprint(2)\n", encoding="utf-8")
     (repo / "plain.py").write_text("x = 1\n", encoding="utf-8")
     (repo / "tool.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    (repo / "empty.py").write_text("", encoding="utf-8")   # 0 字节：钉短头截断与字节对齐
     _git(repo, "add", "-A")
     _git(repo, "update-index", "--chmod=+x", "good.py")
-    # ⚠ 前置探针（一次 `ls-files -s` 同时钉两件事，省一次进程）：
-    #   ① `bad.py` 仍是 `100644` —— 证明"事故形状"确实是 `git add` 的**默认**产物（本机就能复现），
-    #      而不是需要什么特殊环境才凑得出来的东西；
+    # ⚠ 前置探针（一次 `ls-files -s` 同时钉三件事，省一次进程）：
+    #   ① `bad.py` 仍是 `100644` —— 证明"事故形状"确实是 `git add` 的**默认**产物（本机就能
+    #      复现），而不是需要什么特殊环境才凑得出来的东西；
     #   ② `good.py` 已被 `update-index --chmod=+x` 写成 `100755` —— 若这一步在本机不生效，
-    #      它也会被判违例，本控制样本就退化成"两个都该报"（没有鉴别力）。
-    modes = {l.split("\t")[1]: l.split()[0]
+    #      它也会被判违例，本控制样本就退化成"两个都该报"（没有鉴别力）；
+    #   ③ 顺手取各文件的 blob sha，供下面钉 `read_blob_heads` 的实现细节。
+    index = {l.split("\t")[1]: l.split()[0:2]
              for l in _git(repo, "ls-files", "-s").splitlines() if l}
+    modes = {path: cell[0] for path, cell in index.items()}
     assert modes["bad.py"] == "100644", f"`git add` 未给出 100644：{modes}"
     assert modes["good.py"] == "100755", (
         f"`update-index --chmod=+x` 没生效 ⇒ 本控制样本的前提不成立：{modes}")
+    assert modes["empty.py"] == "100644", modes
+
+    # **短头截断 + 字节对齐**：`empty.py` 是 0 字节且排在中段（`ls-files` 升序：bad / empty /
+    # good / plain）⇒ 它那条 `--batch` 响应只有头 + 换行。不按 `size` 截断，就会把**下一条
+    # 响应头**的首字节读进来（头变成 `\n` + 别的字节），后面每个 blob 的头也跟着错位。
+    bad_sha, empty_sha = index["bad.py"][1], index["empty.py"][1]
+    good_sha, plain_sha = index["good.py"][1], index["plain.py"][1]
+    heads = mod.read_blob_heads([bad_sha, empty_sha, good_sha, plain_sha], str(repo))
+    assert heads[empty_sha] == b"", (
+        f"0 字节 blob 的头必须是空，实得 {heads[empty_sha]!r} —— 未按 size 截断")
+    assert heads[bad_sha] == b"#!"
+    assert heads[good_sha] == b"#!", "空 blob 之后那个 blob 的头错位了"
+    assert heads[plain_sha] == b"x ", f"末位 blob 头错位：{heads[plain_sha]!r}"
 
     proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--repo", str(repo)],
-                          capture_output=True, text=True, encoding="utf-8", check=False)
+                          capture_output=True, text=True, encoding="utf-8", check=False,
+                          env={**os.environ, "PYTHONIOENCODING": "gbk"})
     assert proc.returncode == 1, f"事故形状必须判违例：\n{proc.stdout}\n{proc.stderr}"
     assert "bad.py" in proc.stdout, proc.stdout
     for ok in ("good.py", "plain.py", "tool.sh"):
         assert ok not in proc.stdout, f"{ok} 不该被报（误报）：\n{proc.stdout}"
-    # 计数只算 Python（3 个）—— `.sh` 不进口径，否则 11 条误报会从这里长出来。
-    assert "3 个 Python 文件" in proc.stdout, proc.stdout
+    # 计数只算 Python（4 个）—— `.sh` 不进口径，否则 11 条误报会从这里长出来。
+    assert "4 个 Python 文件" in proc.stdout, proc.stdout
+
+
+def test_cli_refuses_an_unmerged_index(tmp_path):
+    """**fail-closed 控（索引侧）**：索引里有未合并条目（stage ≠ 0）⇒ CLI 必须**拒绝**，不照读。
+
+    造法是**真实的三方冲突**（不是手工塞 stage 行）：冲突路径在 `ls-files -s` 里回 stage 1/2/3
+    三行。若不拦，判据会把同一个文件当三条独立条目各判一次 —— 输出看起来正常（模式合法、也
+    可能恰好无 shebang），而那份索引根本不代表将要提交的内容。
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", ".")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "user.email", "t@t")
+    trunk = _git(repo, "symbolic-ref", "--short", "HEAD").strip()
+    (repo / "shared.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "checkout", "-q", "-b", "side")
+    (repo / "shared.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "side")
+    _git(repo, "checkout", "-q", trunk)
+    (repo / "shared.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "trunk")
+
+    merge = _git_allow_fail(repo, "merge", "side")
+    assert merge.returncode != 0, f"前提不成立：这次 merge 竟然没冲突\n{merge.stdout}"
+    rows = [line for line in _git(repo, "ls-files", "-s").splitlines() if line]
+    conflict = [line for line in rows if line.split("\t")[-1] == "shared.py"]
+    assert len(conflict) == 3, f"前提不成立：冲突路径应有 stage 1/2/3 三行，实得 {rows}"
+
+    proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--repo", str(repo)],
+                          capture_output=True, text=True, encoding="utf-8", check=False)
+    assert proc.returncode == 1, (
+        f"未合并的索引必须让 CLI 拒绝（rc=1），实得 {proc.returncode}：\n{proc.stdout}")
+    assert "未合并" in proc.stderr, f"拒绝理由没说清是未合并索引：\n{proc.stderr}"
 
 
 # =========================================================================== #
@@ -278,10 +353,11 @@ def test_gate0_guards_lane_runs_this_guard():
 
 
 def test_guards_lane_desc_count_matches_the_real_list():
-    """车道描述里的「（N 文件）」必须等于 `GUARD_TESTS` 的**真实**长度 —— 防文档与实现漂移。
+    """「（N 文件）」这个计数有**两处**文字（车道描述 + `docs/agents/verification.md` §2 ⑦），
+    都必须等于 `GUARD_TESTS` 的**真实**长度 —— 防文档与实现漂移。
 
-    这个计数在 `docs/agents/verification.md` §2 ⑦ 里也有一份（人工同步），所以它一旦能悄悄写错，
-    人读到的那份就跟着错。这里把**代码侧**那一份钉死。
+    两侧都钉的理由：文档那一份是给人读的**期望证据**，它一旦悄悄写错，读者拿着它核对时核不出
+    该数是几（「（4 文件）」写成「（5 文件）」不会有任何东西报错）。
     """
     g0 = _maybe_gate0()
     guards = next(lane for lane in g0.build_lanes("") if lane.name == "guards")
@@ -289,3 +365,7 @@ def test_guards_lane_desc_count_matches_the_real_list():
     assert match, f"guards 车道描述里应写明「（N 文件）」：{guards.desc!r}"
     assert int(match.group(1)) == len(g0.GUARD_TESTS), (
         f"描述写「{match.group(1)} 文件」但 GUARD_TESTS 有 {len(g0.GUARD_TESTS)} 个：{guards.desc!r}")
+    doc = (REPO / "docs" / "agents" / "verification.md").read_text(encoding="utf-8")
+    assert f"（{len(g0.GUARD_TESTS)} 文件）" in doc, (
+        f"docs/agents/verification.md 里没有「（{len(g0.GUARD_TESTS)} 文件）」"
+        " —— 文档侧的计数已与 GUARD_TESTS 脱节")

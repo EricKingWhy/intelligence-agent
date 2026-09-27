@@ -85,16 +85,18 @@ LANE_TIMEOUT = 300.0
 #: 原因：把「超预算」等于「失败」会把环境负载导致的慢误判成代码问题，与本项目「不做假绿灯」同理。
 GATE0_BUDGET = 60.0
 
-#: `guards` 车道的用例清单。三条机械守卫，各自守一个**跨面**的不变量：
+#: `guards` 车道的用例清单。三条机械守卫，各自守一个**跨面**的不变量。**本清单是唯一真值**；
+#: 逐条的判据 / 证据 / 实测读数见 `docs/agents/verification.md` §2 ⑦（此处只写「守什么」，
+#: 不复述机制 —— `AGENTS.md` §16.1）：
 #:   ① 生成物同步：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
-#:      ↔ `docs/EVENT_VOCABULARY.md`。共 2 文件 6 例。
-#:   ② 验证映射守卫 `tests/test_verification_map.py`（issue #292）：断言
-#:      `docs/agents/verification.map.tsv` 覆盖**全部被跟踪文件**、车道 id 合法、focused 路径存在，
-#:      且**每一行都承重**（删掉任一行都会有文件的受影响集合发生变化）⇒ map 不能悄悄腐烂。
-#:   ③ 索引可执行位 ⇔ shebang（P0-2）：`ruff` 的 `EXE001` 只在 Unix 生效，本机
-#:      `core.filemode=false` ⇒ 本地永远看不见它（`99a744fe` / `2d3761c` 两次「本地绿 → CI 红」
-#:      都是这条）。守卫 `tests/test_exec_bit_matches_shebang.py` 读**索引模式 + blob 头两字节**
-#:      把它机械地补回本地 —— 不依赖工作树权限、也不依赖 `core.autocrlf`。
+#:      ↔ `docs/EVENT_VOCABULARY.md`。
+#:   ② 验证映射：`docs/agents/verification.map.tsv` 必须覆盖**全部被跟踪文件**、车道 id 合法、
+#:      focused 路径存在，且**每一行都承重**（删掉任一行都会有文件的受影响集合变化）⇒ map
+#:      不能悄悄腐烂。
+#:   ③ 索引可执行位 ⇔ shebang（P0-2）：把 `ruff` 的 `EXE001`（只在 Unix 生效）机械地补回本地
+#:      —— 读索引模式与 blob 头部，不依赖工作树权限、也不依赖 `core.autocrlf`。
+#: 车道描述里的「（N 文件）」由 `tests/test_exec_bit_matches_shebang.py` 与
+#: `docs/agents/verification.md` §2 ⑦ 两侧对账（改一处忘另一处会红）。
 GUARD_TESTS = (
     "tests/test_event_types_generated.py",
     "tests/test_event_vocabulary_generated.py",

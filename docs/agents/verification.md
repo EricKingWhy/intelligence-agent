@@ -100,27 +100,54 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py
   tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py
   -q -p no:randomly -p no:cacheprovider`
-- 守卫对象（三类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**，车道描述里的「（4 文件）」
-  由 `tests/test_exec_bit_matches_shebang.py` 钉死 ⇒ 改一处忘另一处会红）：
+- 守卫对象（三类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**；「（N 文件）」这个计数
+  在车道描述与本文两侧都有，由 `tests/test_exec_bit_matches_shebang.py` 一处断言对账 ⇒ 改一处
+  忘另一处会红）：
   1. **生成物同步**：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
      `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）与
      `docs/EVENT_VOCABULARY.md`（`scripts/gen_event_vocabulary.py`）。
   2. **验证映射**：见 §2 ⑭。
-  3. **索引可执行位 ⇔ shebang**（P0-2）：判据 `scripts/check_exec_bit.py`。**它补的是 `ruff` 的
-     `EXE001`** —— 那条规则只在 Unix 生效，而本仓 `core.filemode=false` ⇒ 本地 `ruff check .`
-     **永远看不见**「带 shebang 但索引模式不是 `100755`」。两次「本地绿 → CI 红」的事故都出自它
-     （`99a744fe` 补 7 个脚本的可执行位；`2d3761c` 改 `scripts/live_gate.py`）。
-     判据读**索引模式**（`git ls-files -s`）+ **blob 头两字节**（`git cat-file --batch`）——两者都
-     不受工作树权限 / `core.autocrlf` / 本地未提交编辑影响；范围只到 `*.py` / `*.pyi`（`ruff` 的
-     lint 面）——`.sh` / `.ps1` / `.mjs` 带 shebang 而 `100644` 是本仓**现状且无害**（一律经解释器
-     调用），纳入会立刻产生 11 条误报。blob 读不到 ⇒ **fail-closed 判违例**（不是跳过）。
-     修法：`git update-index --chmod=+x <path>` —— 改**索引**，不是关掉 CI 那条 ruff 规则。
+  3. **索引可执行位 ⇔ shebang**（P0-2）—— **本条是这四文件里机制叙述的权威处**，判据
+     `scripts/check_exec_bit.py`（判据脚本与用例只写操作约束 + 指回本处）：
+     - **它补的是 `ruff` 的 `EXE001`**（`Shebang is present but file is not executable`）：那条
+       规则只在 Unix 生效，而本仓 `core.filemode=false` ⇒ 本地 `ruff check .` **看不见**
+       「带 shebang 但索引模式不是 `100755`」。两次「本地绿 → CI 红」的事故都出自它：
+       `99a744fe`（在 `main` 上补 7 个脚本的可执行位）、`2d3761c`（`scripts/live_gate.py` 索引
+       `100644` → `100755`）。
+     - 判据 = 被跟踪的 `*.py` / `*.pyi` 里，凡 **blob 以 `#!` 开头**（位置口径：字节 0）者，
+       索引模式必须是 `100755`。读**索引模式**（`git ls-files -s`）+ **blob 头部**
+       （`git cat-file --batch`）⇒ 不受工作树权限 / `core.autocrlf` / 本地未提交编辑影响。
+     - **范围只到 `*.py` / `*.pyi`**（`ruff` 的 lint 面）。`.sh` / `.ps1` / `.mjs` 带 shebang 而
+       `100644` 是本仓**现状且无害**（一律经解释器调用），纳入会立刻产生 **11 条误报**
+       （2026-09-27 实测：`.specify/scripts/powershell/*.ps1` ×6、`dev.sh`、
+       `docs/integration/verify-before-merge.sh`、`scripts/check_review_coverage.sh`、
+       `scripts/run_tests_clean.sh`、`web/scripts/preflight-port.mjs`）；反方向（`100755` 而无
+       shebang）本仓 0 例、上游口径未核对 ⇒ 同样不纳入。
+     - **BOM 开头的 `#!`（`EF BB BF` + `#!`）刻意不报**：判据是位置口径。该形状**不是**盲区
+       —— 本地 `ruff` 的 `EXE005`（`shebang-not-first-line`；默认规则集启用、**无平台门控**）
+       在有 BOM 时就已必红，而 `chmod +x` **修不掉** EXE005 ⇒ 并进来只会给出误导性修法。
+       2026-09-27 实测（ruff 0.16.3 = `uv.lock` 钉的版本）：`#!` 在字节 0 ⇒ 本地全绿（＝本守卫
+       要补的那条缝）；BOM + `#!` / 空行 + `#!` / 第 2 行的 `#!` ⇒ 本地一律 `EXE005` 红。
+       ⇒ **「本守卫 ∪ 本地 ruff」覆盖 `EXE001` 的文件集**：`#!` 不在字节 0 时，`EXE004`/`EXE005`
+       必有其一起（二者是互补的），而在字节 0 时本守卫自己看得见。
+     - **fail-closed 两处**：blob 读不到 ⇒ 判**违例**（不是跳过，与 `check_review_coverage.py`
+       同口径）；索引含**未合并条目**（stage ≠ 0）⇒ 直接报错退出，不按 stage 0 的语义读。
+     - 修法：`git update-index --chmod=+x <path>` —— 改**索引**，不是关掉 CI 那条 ruff 规则。
+     - **已知边界（登记，不修）**：本守卫的输入面是**整份索引**，而 `--affected` 按改动面选车道 ⇒
+       给 `scripts/` 之外的 py 文件新加 shebang 时，`--affected` **不会**跑本守卫。2026-09-27 实测：
+       全仓 **9 个带 shebang 的 py 全在 `scripts/`**，而 `scripts/` 行含 `guards`
+       ⇒ **现实面全覆盖**，缺口只在理论面。**不承重**：`--affected` 依设计只做**失败后的增量
+       重跑**，推送前与集成前两处真门禁恒跑全量 6 条（§4「`--affected <rev>` 的边界」）。
+       **解除条件**：要把 `guards` 升进「每行必列」集合（现为 `diff-check` + `coverage`，见
+       `verification.map.tsv` 表头）需一并改 72 行映射表 + `tests/test_verification_map.py`
+       的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
 - 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）+
-  `11 passed`（索引可执行位守卫）= **`37 passed`（4 文件）**。
-- 实测：4 文件 37 例 —— 原 3 文件 `26 passed in 5.13s`；加索引可执行位守卫后 **`37 passed`** /
-  **约 12–14s**（⚠ 负载敏感：该文件含一次**真子进程**跑 CLI + 三处 git 走查；本机同树两点读数
-  `12.35s` / `14.35s`）。Gate-0 `guards` 车道口径 **≈18s**（`python scripts/gate0.py --only guards`
-  同树两次：**17.8s** / 25.0s —— 差异来自机器负载，不是判定）。
+  `12 passed`（索引可执行位守卫）= **`38 passed`（4 文件）**。
+- 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
+  该文件的主要成本。三个口径都记下，**引用某个数时请连同它的来源一起给**：
+  `--only guards` 同树两点 **17.8s / 25.0s**；冻结树裸全量落盘的
+  `docs/gate/781a3477ecad49561e961eb1df88967e08973cbe.json` 记 **`guards` = 12.97s**
+  （同笔 `wall` 35.44s、`tsc` 16.86s）。差异来自机器负载与冷/热缓存，**不是判定**。
 - 漂移时先跑生成器：`uv run python scripts/gen_event_types.py` / `... gen_event_vocabulary.py`。
 
 ### ⑧ 审查覆盖闸门
