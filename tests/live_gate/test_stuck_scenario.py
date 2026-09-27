@@ -4,12 +4,11 @@
 产出并落进 `docs/live_gate/**`；本文件只钉**场景自身**的可机检事实，避免"跑了才知道
 场景是不是恒 PASS / 恒 FAIL"：
 
-1. **确定性失败步骤真的确定性**：`step.py` 逐字落盘（同一行输出 + 同一退出码）⇒
-   "同模式持续"不是靠模型配合，而是那一步**只能**那样失败；缺 python ⇒ BLOCKED（返回
-   未满足前置），不是 FAIL；
-2. **断言集是诚实的**：串长不够 / 载荷计数与轨迹对不上 / 出现旧 HARD 终态形状 /
-   发了两条纠正 / 无依据恢复没被拒或改了事件流 / 恢复没记账 / 重放判不出同样的 paused
-   信号 —— 每一种都要判不通过；并且在一个自洽终态上全部通过；
+1. **失败面真的成立**：read 工具对着一个**还不存在**的路径必然失败（`ok=false`），
+   `prepare` 的反向前置（"上游产物此刻不能已经存在"）也要判 BLOCKED；
+2. **断言集是诚实的**：串长不够 / 载荷计数与轨迹对不上 / 环境快照缺失 / 出现旧 HARD 终态
+   形状 / 发了两条纠正 / 无依据恢复没被拒或改了事件流 / 恢复没记账 / 恢复腿没读到产物 /
+   重放判不出同样的 paused 信号 —— 每一种都要判不通过；并且在一个自洽终态上全部通过；
 3. **重放走的是生产 API**：`StuckDetector.from_events` + `advance` 重建后尾部只能产出
    一个 paused 信号（无 replan 残留、再喂一次为空）——AC 的 "restart and replay" 面。
 
@@ -32,26 +31,22 @@ from agent_harness.config import Settings
 from evaluation.live_gate.registry import ScenarioContext
 from evaluation.live_gate.scenarios.accounting import request_accounting
 from evaluation.live_gate.scenarios.stuck import (
-    _STEP_SCRIPT_SOURCE,
-    FAILURE_EXIT_CODE,
-    FAILURE_LINE,
+    AWAITED_CONTENT,
+    AWAITED_FILE,
+    FAILED_TOOL,
+    FAILURE_MARKER,
     IDENTICAL_FAILURES,
-    READY_CONTENT,
-    READY_FILE,
     SCENARIO,
     STEER_TEXT,
-    STEP_COMMAND,
-    STEP_SCRIPT,
     TASK,
     StuckToolFailurePauseScenario,
+    _identical_failure_streak,
     _Refusal,
     _scenario_settings,
 )
 
 RUN_ID = "run-stuck-1"
 SESSION_ID = "live-gate-stuck-a1"
-TOOL_CALL = "bash"
-WRITE_TOOL = "write"
 TOOL_ERROR_CODE = "TOOL_EXECUTION_ERROR"
 #: 每格请求自报的账（数字本身无关紧要：断言比的是"与轨迹重算相同"）。
 TOKENS_PER_REQUEST = 7
@@ -67,20 +62,14 @@ POLICY_VERSION = "sha256:8899aabbccddeeff"
 class _StubSandbox:
     """`prepare` 与断言面的替身：只实现本场景真正用到的那几格。
 
-    真沙箱在 Live Gate 运行里由 runner 提供；这里用到的是 `exec`（前置自查）、
-    `write_text`（seed 步骤脚本）、`read_text`（断言读 `ready.txt`）。
+    真沙箱在 Live Gate 运行里由 runner 提供；这里用到的是 `read_text`（前置自查 +
+    断言读产物）、`write_text`（"上游就绪"那一次写入）、`workspace_root`。
     """
 
-    def __init__(self, files: dict[str, str] | None = None, *, python_rc: int = 0) -> None:
+    def __init__(self, files: dict[str, str] | None = None) -> None:
         self._files = dict(files or {})
-        self._python_rc = python_rc
         self.written: dict[str, str] = {}
-        self.commands: list[str] = []
         self.workspace_root = "/workspace"
-
-    def exec(self, command: str) -> Any:
-        self.commands.append(command)
-        return SimpleNamespace(exit_code=self._python_rc, stdout="", stderr="")
 
     def write_text(self, name: str, content: str) -> None:
         self.written[name] = content
@@ -113,15 +102,26 @@ def _context(tmp_path: Path, *, sandbox: Any | None = None) -> ScenarioContext:
 
 
 def _failure_content() -> str:
-    """`tool/result.content`（形状权威 = `tooling/result.py::ToolResult` 的 JSON）。"""
+    """失败 `tool/result.content`：生产 ReadTool 对不存在的文件的原文形状。"""
     return json.dumps({
-        "ok": False, "error_code": TOOL_ERROR_CODE, "message": FAILURE_LINE, "data": None,
+        "ok": False,
+        "error_code": TOOL_ERROR_CODE,
+        "message": f"文件 '{AWAITED_FILE}' 不存在。",
+        "data": None,
     })
 
 
-def _ok_content() -> str:
+def _read_success_content() -> str:
+    """成功 `tool/result.content`：`data.content` 里带着产物的正文。"""
     return json.dumps({
-        "ok": True, "error_code": None, "message": f"wrote {READY_FILE}", "data": None,
+        "ok": True,
+        "error_code": None,
+        "message": f"已读取 '{AWAITED_FILE}'（{len(AWAITED_CONTENT.splitlines())} 行）。",
+        "data": {
+            "path": AWAITED_FILE,
+            "content": AWAITED_CONTENT,
+            "total_lines": len(AWAITED_CONTENT.splitlines()),
+        },
     })
 
 
@@ -152,6 +152,7 @@ def _trajectory(
     consumed_overrides: dict[str, Any] | None = None,
     stuck_overrides: dict[str, Any] | None = None,
     resumed: bool = True,
+    resume_read_ok: bool = True,
     resume_evidence_overrides: dict[str, Any] | None = None,
     bad_refusal: str | None = None,
     terminal: bool = True,
@@ -162,7 +163,7 @@ def _trajectory(
     结构逐格对齐生产落盘：`run/started` → `user/message` → 每轮
     `model/request` + `model/completed` + `tool/call` + `tool/result` → 暂停前
     `guard/stuck(level=paused)` → `run/paused` → `steer/requested` → `run/resumed`
-    → 恢复那条腿 `write` 成功 → `run/completed`。seq 由计数器顺序分配。
+    → 恢复那条腿 read 成功 → `run/completed`。seq 由计数器顺序分配。
 
     反例用例只改"某一处不对"的那一格（见各参数）；`consumed` 与 `stuck` 的默认值由
     轨迹重算 / 常量拼出，所以"自洽"那一侧不靠手抄数字。
@@ -187,8 +188,8 @@ def _trajectory(
     def decide(round_index: int, *, args: dict[str, Any], tool_call_id: str) -> None:
         request()
         add("model/completed", {
-            "content": f"第 {round_index} 轮：执行 {STEP_COMMAND}",
-            "tool_calls": [{"id": tool_call_id, "name": TOOL_CALL, "args": args}],
+            "content": f"第 {round_index} 轮：读取 {AWAITED_FILE}",
+            "tool_calls": [{"id": tool_call_id, "name": FAILED_TOOL, "args": args}],
         })
 
     add("session/started")
@@ -196,18 +197,20 @@ def _trajectory(
     add("user/message", {"content": TASK})
     for index in range(1, failures + 1):
         call_id = f"call-{index}"
-        decide(index, args={"command": STEP_COMMAND}, tool_call_id=call_id)
+        decide(index, args={"path": AWAITED_FILE}, tool_call_id=call_id)
         add("tool/call", {
-            "tool_call_id": call_id, "tool_name": TOOL_CALL, "args": {"command": STEP_COMMAND},
+            "tool_call_id": call_id, "tool_name": FAILED_TOOL,
+            "args": {"path": AWAITED_FILE},
         })
         add("tool/result", {"tool_call_id": call_id, "content": _failure_content()})
         if index == 3 and soft_guard:
             add("tool/failure-guard", {
                 "level": "soft", "pattern": STUCK_PATTERN_TOOL_FAILURE, "count": 3,
-                "threshold": 3, "tool_name": TOOL_CALL,
+                "threshold": 3, "tool_name": FAILED_TOOL,
             })
             add("user/message", {
-                "content": "不要再以相同方式重试同一条命令。", "injected_by": "tool_failure_guard",
+                "content": "不要再以相同方式重试同一个工具调用。",
+                "injected_by": "tool_failure_guard",
             })
     if second_corrective:
         # 第二个模式在同一次检测里也要一条纠正：契约只允许一条（ADR-0048 D5）。
@@ -221,7 +224,7 @@ def _trajectory(
     if hard_guard:
         add("tool/failure-guard", {
             "level": "hard", "pattern": STUCK_PATTERN_TOOL_FAILURE, "count": failures,
-            "threshold": 3, "tool_name": TOOL_CALL,
+            "threshold": 3, "tool_name": FAILED_TOOL,
         })
     stuck = {
         "pattern": STUCK_PATTERN_TOOL_FAILURE,
@@ -233,7 +236,7 @@ def _trajectory(
         "policy_version": POLICY_VERSION,
     }
     stuck.update(stuck_overrides or {})
-    add("guard/stuck", {"level": "paused", **stuck, "tool_name": TOOL_CALL})
+    add("guard/stuck", {"level": "paused", **stuck, "tool_name": FAILED_TOOL})
     pause_index = len(events)
     add("run/paused", {})  # 占位：`consumed` 要用暂停**之前**的轨迹重算，见下
 
@@ -256,14 +259,17 @@ def _trajectory(
             "run_id": RUN_ID, "from_pause_seq": pause_index, "version": 2,
             "resume_basis": "relevant_steer", "resume_evidence": evidence,
         })
-        decide(7, args={"path": READY_FILE, "content": READY_CONTENT}, tool_call_id="call-7")
+        decide(7, args={"path": AWAITED_FILE}, tool_call_id="call-7")
         add("tool/call", {
-            "tool_call_id": "call-7", "tool_name": WRITE_TOOL,
-            "args": {"path": READY_FILE, "content": READY_CONTENT},
+            "tool_call_id": "call-7", "tool_name": FAILED_TOOL,
+            "args": {"path": AWAITED_FILE},
         })
-        add("tool/result", {"tool_call_id": "call-7", "content": _ok_content()})
+        add("tool/result", {
+            "tool_call_id": "call-7",
+            "content": _read_success_content() if resume_read_ok else _failure_content(),
+        })
         request()
-        add("model/completed", {"content": f"{READY_FILE} 写好了", "tool_calls": []})
+        add("model/completed", {"content": f"读到 {AWAITED_CONTENT!r}", "tool_calls": []})
     for event_type, data in extra_events or []:
         add(event_type, data)
     if terminal and not any(event.type == "run/completed" for event in events):
@@ -279,7 +285,7 @@ def _trajectory(
             "consumed": _consumed(facts, **(consumed_overrides or {})),
             "limits": {"run": {"max_agent_turns_total": 500}},
             "continuation": {
-                "completed": ["6 次重试"], "remaining": ["上游就绪后写 ready.txt"],
+                "completed": ["6 次重试"], "remaining": ["上游就绪后读上游产物"],
                 "blockers": [], "next_safe_action": "上游就绪后带相关 steer 以同一 run_id 恢复",
             },
             "closeout_source": "model",
@@ -320,49 +326,52 @@ def _assertions(
     *,
     replayed: list[Any] | None = None,
     projection: dict[str, Any] | None = None,
-    ready: str = READY_CONTENT,
+    sandbox: Any | None = None,
 ) -> list[Any]:
-    sandbox = _StubSandbox({READY_FILE: ready})
+    ctx = _context(
+        tmp_path,
+        sandbox=sandbox if sandbox is not None else _StubSandbox({AWAITED_FILE: AWAITED_CONTENT}),
+    )
     return SCENARIO._assertions(
-        ctx=_context(tmp_path, sandbox=sandbox),
+        ctx=ctx,
         events=events,
         replayed=list(events) if replayed is None else replayed,
-        tool_calls=[TOOL_CALL] * len(events),
+        tool_calls=[FAILED_TOOL] * len(events),
         projection={"reason": None} if projection is None else projection,
         operations=[],
         legs=legs if legs is not None else {},
     )
 
 
-def _legs(events: list[Any], legs: dict[str, Any]) -> dict[str, Any]:
-    """断言面读的 `legs`（真实运行由 `run()` 填；这里只放断言真正消费的两格）。"""
-    return {"refusals": legs["refusals"], "steer_seq": legs["steer_seq"]}
+def _legs(legs: dict[str, Any]) -> dict[str, Any]:
+    """断言面读的 `legs`（真实运行由 `run()` 填；这里只放断言真正消费的几格）。"""
+    return {
+        "refusals": legs["refusals"],
+        "steer_seq": legs["steer_seq"],
+        "awaited_file_written": AWAITED_CONTENT,
+    }
 
 
 def _failed(assertions: list[Any]) -> set[str]:
     return {item.name for item in assertions if not item.ok}
 
 
-# ── prepare：确定性失败步骤 ──────────────────────────────────────────────
+# ── prepare：失败面的前提 ───────────────────────────────────────────────
 
 
-def test_prepare_seeds_the_identical_failure_step(tmp_path):
+def test_prepare_passes_when_the_awaited_file_is_absent(tmp_path):
+    """上游产物此刻不存在 = 本场景的前提成立（第一次 read 必然失败）。"""
     sandbox = _StubSandbox()
     unmet = asyncio.run(SCENARIO.prepare(_context(tmp_path, sandbox=sandbox)))
     assert unmet == []
-    assert sandbox.commands == ["python --version"]
-    seeded = sandbox.written[STEP_SCRIPT]
-    assert seeded == _STEP_SCRIPT_SOURCE
-    # 逐字确定性：同一行输出 + 同一个退出码，没有计数器 / 时间戳 / 随机量。
-    assert FAILURE_LINE in seeded
-    assert f"sys.exit({FAILURE_EXIT_CODE})" in seeded
+    assert sandbox.written == {}
 
 
-def test_prepare_reports_missing_python_as_unmet_precondition(tmp_path):
-    unmet = asyncio.run(
-        SCENARIO.prepare(_context(tmp_path, sandbox=_StubSandbox(python_rc=1)))
-    )
-    assert len(unmet) == 1 and "python" in unmet[0]
+def test_prepare_reports_an_already_present_awaited_file(tmp_path):
+    """产物已经在了 ⇒ 第一次 read 就会成功、① 永远数不到 ⇒ BLOCKED（不是 FAIL）。"""
+    sandbox = _StubSandbox({AWAITED_FILE: AWAITED_CONTENT})
+    unmet = asyncio.run(SCENARIO.prepare(_context(tmp_path, sandbox=sandbox)))
+    assert len(unmet) == 1 and AWAITED_FILE in unmet[0]
 
 
 def test_runtime_dirs_are_redirected_into_the_attempt_root(tmp_path):
@@ -386,30 +395,80 @@ def test_runtime_dirs_are_redirected_into_the_attempt_root(tmp_path):
     assert original.workspace_dir == Settings(_env_file=None).workspace_dir
 
 
+# ── 任务文本与独立重算的小工具 ──────────────────────────────────────────
+
+
+def test_task_text_names_the_action_and_the_repeat_count(tmp_path):
+    """任务文本必须把"哪个工具、哪个路径、读几次、别换招"写全——这是场景的**前提**。"""
+    assert IDENTICAL_FAILURES == 6
+    assert FAILED_TOOL in TASK and AWAITED_FILE in TASK
+    assert f"读 {IDENTICAL_FAILURES} 次" in TASK
+    assert "bash" in TASK and "不要换别的工具" in TASK
+    assert AWAITED_FILE in STEER_TEXT and FAILED_TOOL in STEER_TEXT
+
+
+def test_failure_marker_matches_the_production_read_tool_message():
+    """判据子串必须出现在生产读工具对缺失文件的原文里（形状不是场景自己编的）。
+
+    真源：`tools/read.py` 的 `FileNotFoundError` 分支
+    （`ToolResult.failure(message=f"文件 '{path}' 不存在。", TOOL_EXECUTION_ERROR)`）。
+    """
+    from agent_harness.tools.read import ReadTool
+
+    class _Missing:
+        def read_text(self, name: str) -> str:
+            raise FileNotFoundError(name)
+
+    args = ReadTool(_Missing()).args_schema(path=AWAITED_FILE)
+    result = asyncio.run(ReadTool(_Missing()).execute(args))
+    assert result.ok is False
+    assert result.error_code == "TOOL_EXECUTION_ERROR"
+    assert FAILURE_MARKER in (result.message or "")
+
+
+def test_streak_helper_keys_on_the_tool_and_the_args():
+    """场景侧的独立重算：换了参数就算另一条动作（与产品的 action_fingerprint 同口径）。"""
+    events: list[Any] = []
+    seq = 0
+
+    def add(event_type: str, **data: Any) -> None:
+        nonlocal seq
+        events.append(SimpleNamespace(seq=seq, type=event_type, data=data, run_id=RUN_ID))
+        seq += 1
+
+    def call_and_fail(call_id: str, path: str) -> None:
+        add("tool/call", tool_call_id=call_id, tool_name=FAILED_TOOL, args={"path": path})
+        add("tool/result", tool_call_id=call_id, content=_failure_content())
+
+    call_and_fail("c1", AWAITED_FILE)
+    call_and_fail("c2", AWAITED_FILE)
+    call_and_fail("c3", AWAITED_FILE)
+    call_and_fail("c4", "other.txt")  # 换路径 ⇒ 断开这条串
+    call_and_fail("c5", "other.txt")
+    streak, label = _identical_failure_streak(events, cutoff_seq=None)
+    assert streak == 3
+    assert AWAITED_FILE in label
+
+
 # ── 断言集：自洽终态全绿 ────────────────────────────────────────────────
 
 
 def test_assertions_pass_on_a_self_consistent_trajectory(tmp_path):
     events, legs = _trajectory()
-    assertions = _assertions(tmp_path, events, _legs(events, legs))
+    assertions = _assertions(tmp_path, events, _legs(legs))
     assert _failed(assertions) == set()
     names = {item.name for item in assertions}
     assert {
         "the_model_really_repeated_one_identical_action",
+        "every_repeat_failed_the_same_deterministic_way",
         "exactly_one_corrective_replan",
         "stuck_pause_is_recorded_with_the_evidence_snapshot",
         "pause_is_not_a_terminal_event",
         "replay_reconstructs_the_same_verdict",
         "resume_records_the_accepted_basis",
+        "resumed_leg_read_the_awaited_artifact",
         "stuck 暂停快照.request_count",
     } <= names
-
-
-def test_rounds_of_three_are_enough_to_reach_the_pause(tmp_path):
-    """场景常量自身：2 轮 × 3 次 = 2T（① 的暂停点 6），与 TASK 里写的次数一致。"""
-    assert IDENTICAL_FAILURES == 6
-    assert f"{IDENTICAL_FAILURES} 次" in TASK
-    assert f"`{STEP_COMMAND}`" in TASK
 
 
 def test_replay_verdict_is_green_on_the_self_consistent_trajectory(tmp_path):
@@ -424,7 +483,7 @@ def test_replay_verdict_is_green_on_the_self_consistent_trajectory(tmp_path):
     assert "paused 信号=[('stuck.tool_failure_loop', 6, 3)]" in result.detail
 
 
-def test_bailout_of_the_replay_when_the_run_id_differs(tmp_path):
+def test_replay_is_filtered_by_run_id(tmp_path):
     """重放必须按 run_id 过滤：换了 id 就重建不出判定（否则"重建"是空话）。"""
     events, legs = _trajectory()
     pause = legs["pause"]
@@ -441,19 +500,19 @@ def test_bailout_of_the_replay_when_the_run_id_differs(tmp_path):
 
 def test_fewer_repeats_than_two_thresholds_is_red(tmp_path):
     events, legs = _trajectory(failures=5)
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "the_model_really_repeated_one_identical_action" in failed
 
 
 def test_count_mismatching_the_trajectory_is_red(tmp_path):
     events, legs = _trajectory(stuck_overrides={"count": 7})
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "stuck_pause_is_recorded_with_the_evidence_snapshot" in failed
 
 
 def test_missing_environment_snapshot_is_red(tmp_path):
     events, legs = _trajectory(stuck_overrides={"environment_revision": None})
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "stuck_pause_is_recorded_with_the_evidence_snapshot" in failed
 
 
@@ -462,37 +521,37 @@ def test_old_hard_terminal_shape_is_red(tmp_path):
     events, legs = _trajectory(
         extra_events=[("run/failed", {"reason": "identical_tool_failure_loop"})],
     )
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "pause_is_not_a_terminal_event" in failed
 
 
 def test_two_correctives_are_red(tmp_path):
     events, legs = _trajectory(second_corrective=True)
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "exactly_one_corrective_replan" in failed
 
 
 def test_hard_guard_event_is_red(tmp_path):
     events, legs = _trajectory(hard_guard=True)
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "exactly_one_corrective_replan" in failed
 
 
 def test_consumed_snapshot_off_by_one_is_red(tmp_path):
     events, legs = _trajectory(consumed_overrides={"model_requests": 99})
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "stuck 暂停快照.request_count" in failed
 
 
 def test_a_refusal_that_did_not_raise_is_red(tmp_path):
     events, legs = _trajectory(bad_refusal="unraised")
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "every_resume_without_evidence_is_a_409_with_zero_side_effects" in failed
 
 
 def test_a_refusal_that_wrote_events_is_red(tmp_path):
     events, legs = _trajectory(bad_refusal="changed")
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "every_resume_without_evidence_is_a_409_with_zero_side_effects" in failed
 
 
@@ -504,13 +563,13 @@ def test_missing_refusals_are_red(tmp_path):
 
 def test_resume_without_a_resumed_event_is_red(tmp_path):
     events, legs = _trajectory(resumed=False)
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "resume_records_the_accepted_basis" in failed
 
 
 def test_resume_basis_mismatch_is_red(tmp_path):
     events, legs = _trajectory(resume_evidence_overrides={"basis": "budget_increase"})
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "resume_records_the_accepted_basis" in failed
 
 
@@ -519,30 +578,15 @@ def test_steer_before_the_pause_is_red(tmp_path):
     events, legs = _trajectory()
     legs = dict(legs)
     legs["steer_seq"] = 0
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "resume_records_the_accepted_basis" in failed
 
 
-def test_resumed_leg_may_end_in_a_pause_without_a_crash(tmp_path):
-    """恢复那条腿若又走成暂停（没有 `run/completed`），判定照旧给结论、不抛异常。
-
-    这一条钉的是一个真实踩过的缺陷：判据里引用了未定义的局部名，只有在"完成了"那一
-    侧才被短路掩盖（`or` 的右侧不求值）——所以两条路都要有用例。
-    """
-    events, legs = _trajectory(terminal=False)
-    assertions = _assertions(tmp_path, events, _legs(events, legs))
-    assert _failed(assertions) == set()
-
-
-def test_missing_terminal_event_is_red_when_there_is_no_pause(tmp_path):
-    """连暂停都没有（既没完成也没暂停）⇒ 不能算"安全收口"。"""
-    events, legs = _trajectory(terminal=False)
-    events = [
-        event for event in events
-        if event.type not in ("run/paused", "guard/stuck")
-    ]
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
-    assert "resumed_leg_ended_safely" in failed
+def test_resumed_leg_that_never_read_the_artifact_is_red(tmp_path):
+    """恢复那条腿"多打了一次请求"不算进展：产物内容真的读到才算（AC 的"继续干活"）。"""
+    events, legs = _trajectory(resume_read_ok=False)
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert failed == {"resumed_leg_read_the_awaited_artifact"}
 
 
 def test_local_fuse_terminal_is_red(tmp_path):
@@ -554,7 +598,7 @@ def test_local_fuse_terminal_is_red(tmp_path):
         ) if event.type == "run/completed" else event
         for event in events
     ]
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "no_local_fuse_terminal" in failed
 
 
@@ -564,11 +608,33 @@ def test_dangling_tool_call_at_the_pause_is_red(tmp_path):
     at = legs["pause_seq"]
     events.insert(at, SimpleNamespace(
         seq=at, type="tool/call", run_id=RUN_ID, step_id=None,
-        data={"tool_call_id": "call-dangling", "tool_name": TOOL_CALL,
-              "args": {"command": STEP_COMMAND}},
+        data={"tool_call_id": "call-dangling", "tool_name": FAILED_TOOL,
+              "args": {"path": AWAITED_FILE}},
     ))
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert failed == {"no_dangling_tool_call_at_the_pause"}
+
+
+def test_resumed_leg_may_end_in_a_pause_without_a_crash(tmp_path):
+    """恢复那条腿若又走成暂停（没有 `run/completed`），判定照旧给结论、不抛异常。
+
+    这一条钉的是一个真实踩过的缺陷：判据里引用了未定义的局部名，只有在"完成了"那一
+    侧才被短路掩盖（`or` 的右侧不求值）——所以两条路都要有用例。
+    """
+    events, legs = _trajectory(terminal=False)
+    assertions = _assertions(tmp_path, events, _legs(legs))
+    assert _failed(assertions) == set()
+
+
+def test_missing_terminal_event_is_red_when_there_is_no_pause(tmp_path):
+    """连暂停都没有（既没完成也没暂停）⇒ 不能算"安全收口"。"""
+    events, legs = _trajectory(terminal=False)
+    events = [
+        event for event in events
+        if event.type not in ("run/paused", "guard/stuck")
+    ]
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert "resumed_leg_ended_safely" in failed
 
 
 def test_replay_rejects_a_verdict_that_does_not_match_the_payload(tmp_path):
@@ -600,7 +666,7 @@ def test_malformed_pause_payload_is_red_not_crash(tmp_path):
         ) if event.type == "run/paused" else event
         for event in events
     ]
-    failed = _failed(_assertions(tmp_path, events, _legs(events, legs)))
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert {
         "stuck_pause_is_recorded_with_the_evidence_snapshot",
         "stuck 暂停快照.request_count",
@@ -613,5 +679,5 @@ def test_malformed_pause_payload_is_red_not_crash(tmp_path):
 def test_scenario_identity_and_description():
     assert isinstance(SCENARIO, StuckToolFailurePauseScenario)
     assert SCENARIO.id == "stuck-tool-failure-pause"
-    assert SCENARIO.version == 1
+    assert SCENARIO.version == 2
     assert "stuck" in SCENARIO.description and "409" in SCENARIO.description

@@ -2,10 +2,14 @@
 
 ## 它证明什么（六条结构事实）
 
-1. **失败是确定性的、重复是真的**：工作区里放一个 `step.py`，每次调用都以**逐字相同**的
-   方式失败（同一行 stdout、同一个非零退出码 3，没有计数器 / 时间戳 / 随机量），任务要求
-   模型**原样重试同一条命令** 6 次（3 + 3 两轮）。事件流里因此有一串**同动作同错误**的
-   `tool/call` + `tool/result` —— ① 的计数对象，不是断言自己编出来的。
+1. **失败是确定性的、重复是真的**：工作区里**故意没有** `upstream_ready.txt`（上游依赖还没
+   产出它），任务要求模型用 **read 工具**（不是 bash）对着**同一个路径**原样重试 6 次
+   （3 + 3 两轮）。生产 `ReadTool` 对不存在的文件返回
+   `ToolResult.failure(error_code=TOOL_EXECUTION_ERROR)` ⇒ 事件流里因此有一串**同动作同错误**
+   的 `tool/call` + `tool/result` —— ① 的计数对象，不是断言自己编出来的。
+   ⚠ 为什么不是 bash：**非零退出码不是工具失败**——生产 `BashTool` 对 `exit_code=3` 返回
+   `ok=true`（命令确实执行了，退出码是交给模型看的**结果**）。用 bash 演"确定性失败"会
+   让 ① 一次都数不到（实测：3/3 跑到 `run/completed`）。失败必须是 `ok=false` 的那一侧。
 2. **恰好一次纠正**：第 3 次同错命中 ① 的首达阈值 ⇒ 一条 `tool/failure-guard(level=soft)`
    + 一条 `injected_by=tool_failure_guard` 的 `user/message`（① 复用既有护栏形状，
    ADR-0048 D2）；`guard/stuck(level=replan)` 在本 run 里必须**为空**。整场只有这一条纠正。
@@ -21,9 +25,10 @@
    没有 steer 的 `relevant_steer`、工作区没变的 `environment_change`、策略没变的
    `policy_change`；外加一条**无关变更**：改动落在**会话工作区之外** ⇒ 环境依据照旧不成立
    （"我改过了"是声明，不是证据）。
-5. **有依据的恢复放行并记账**：暂停之后落一条 `steer/requested` ⇒ `run/resumed` 以**同一
-   `run_id`** 接回，`resume_evidence.basis=relevant_steer`、`steer_seq > pause_seq`，
-   且恢复后**真的干了新活**（≥1 次接纳），收口在安全状态。
+5. **有依据的恢复放行并记账**：暂停之后**上游真的就绪了**（场景把 `upstream_ready.txt` 写进
+   工作区）+ 一条 `steer/requested` ⇒ `run/resumed` 以**同一 `run_id`** 接回，
+   `resume_evidence.basis=relevant_steer`、`steer_seq > pause_seq`，恢复后**真的读到了**
+   那份文件（成功结果里带它的内容）、并且 ≥1 次接纳。
 6. **重放能重建同样的判定**（AC「Restart and replay reconstruct the exact fingerprint/replan
    state」）：暂停之后用**生产检测器** `StuckDetector.from_events` 把"暂停前那一段"重放成
    状态，再喂那段历史的**尾部**：得到的信号必须与落盘载荷**同模式、同计数、同阈值**，且
@@ -36,7 +41,7 @@
 （`prompt/builtin.py::_CORRECTIVE_TOOL_FAILURE_GUARD`）。两者同时在场时，模型服从哪一边
 是**它的选择**。本场景把任务写成"上游依赖预热期间的等待型任务"——真实世界里存在的一类
 任务：正确做法就是**原样重试**，而且用户指令显式说明"通用的换路提示不适用于本任务"。
-**若模型改路**（撞上 ① 之后就停手、或开始探索别的命令），本场景判红而不是判绿：那说明
+**若模型改路**（撞上 ① 之后就停手、或开始探索别的工具），本场景判红而不是判绿：那说明
 这次运行没有走到"同一模式持续"这一步，票面 AC 没有被证明。这不是"模型表现"的判据，
 是"这次运行有没有构成证据载体"的判据。
 
@@ -45,9 +50,9 @@
 - **run / 暂停 / 恢复面**：`AppState(settings)` + `session_service(state)` —— 与 Web 应用、
   CLI `resume` 命令**同一个组合根**；
 - **模型 / 工具 / 沙箱**：与 smoke / long_task / pause_resume 同源 —— `build_runtime`
-  装配的生产工具集（真正的 `BashTool` 实例）、生产 Sandbox、真实 provider 客户端；
+  装配的生产工具集（真正的 `ReadTool` 实例）、生产 Sandbox、真实 provider 客户端；
 - **检测器**：第 6 条用的是产品里**同一个** `StuckDetector`（不是场景自己写一份重放）；
-- **凭证零泄漏**：证据只留事件流与断言读数，工具的入参（命令串）本来就是任务的一部分。
+- **凭证零泄漏**：证据只留事件流与断言读数；本场景的工录入参只有一个工作区相对路径。
 
 ## 一次性边界
 
@@ -77,19 +82,23 @@ from evaluation.live_gate.scenarios.accounting import (
 from evaluation.live_gate.schema import AssertionResult
 
 SCENARIO_ID = "stuck-tool-failure-pause"
-SCENARIO_VERSION = 1
+#: v2 = 失败面换成"read 读一个还不存在的上游产物"。v1（bash 非零退出码）实测**跑不出**
+#: ①：生产 BashTool 对 `exit_code=3` 返回 `ok=true`（非零退出码是给模型看的**结果**，
+#: 不是工具失败），3/3 都跑到 `run/completed`。那次的失败读数留在
+#: `docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/`。
+SCENARIO_VERSION = 2
 
-#: 工作区里的"上游未就绪"步骤。名字与命令都在任务文本里逐字点名——模型不需要猜。
-STEP_SCRIPT = "step.py"
-STEP_COMMAND = "python step.py"
+#: 上游依赖**还没**产出的那份产物：read 工具对它必然失败（`文件 '...' 不存在。`）。
+#: 名字在任务文本里逐字点名——模型不需要猜，也不会去探索。
+AWAITED_FILE = "upstream_ready.txt"
+#: 上游就绪之后这份文件的内容（恢复那条腿的成功结果里必须出现它——证明"真的读到了"）。
+AWAITED_CONTENT = "upstream: ready"
 
-#: 确定性失败面：同一行输出 + 同一个非零退出码。**没有**计数器 / 时间戳 / 随机量——
-#: ① 的判定键里含错误指纹，失败面一变就不是"同一模式持续"了。
-FAILURE_LINE = (
-    "STEP_NOT_READY: upstream dependency is still warming up; "
-    "retry the exact same command."
-)
-FAILURE_EXIT_CODE = 3
+#: 失败面用的工具名（`02 §5.3` 的"同动作"= 同工具 + 同参数）。**不能**用 bash：
+#: 非零退出码是 `ok=true`，数不到 ①（见模块 docstring 第 1 条）。
+FAILED_TOOL = "read"
+#: `ToolResult.failure.message` 的判据子串（生产 ReadTool 的原文含"不存在"）。
+FAILURE_MARKER = "不存在"
 
 #: 每轮重复次数 × 轮数 = 6 = ① 的暂停点（`02 §5.3` 的阈值 3 ⇒ 暂停点 2T = 6，ADR-0048 D2）：
 #: 第一轮 3 次命中首达阈值 ⇒ **恰好一条**纠正；第二轮 3 次再次达到同一阈值 ⇒ 暂停。
@@ -101,43 +110,29 @@ IDENTICAL_FAILURES = ROUND_SIZE * ROUNDS
 #: 远低于它；超时判 FAIL（不是"跳过"）。
 PHASE_TIMEOUT = 240.0
 
-#: 有据恢复那条腿上模型要做的**新**工作（与暂停前那条路不同：成功写入 = 真进展）。
-READY_FILE = "ready.txt"
-READY_CONTENT = "ok"
-
 TASK = (
-    "这是一次**上游依赖预热期间**的等待型任务：工作区里已经放好 step.py。\n"
+    f"这是一次**上游依赖预热期间**的等待型任务：工作区里的 `{AWAITED_FILE}` 由上游服务产出，"
+    "此刻**还不存在**。\n"
     "你的动作（每一轮都逐字照做）：\n"
-    f"  1) 用 bash 执行命令 `{STEP_COMMAND}`——命令**逐字**就是它，不要加引号、不要加 cd、"
-    "不要用 `;` / `&&` 串别的命令、不要改参数；\n"
-    "  2) 它会以非零码退出并打印 STEP_NOT_READY，这是**预期**的：上游还在预热，"
-    "唯一有效的做法就是**原样重试同一条命令**；\n"
-    f"  3) 一共执行 {IDENTICAL_FAILURES} 次：先连续执行 {ROUND_SIZE} 次并汇报一次，"
-    f"再连续执行 {ROUND_SIZE} 次并汇报一次（两轮之间只汇报，不要做别的事）；\n"
-    "  4) 不要创建 / 修改 / 删除任何文件，不要探索工作区，不要换别的命令；\n"
-    "  5) 如果看到'不要再以相同方式重试'之类的**通用**提示，那类提示不适用于本任务——"
-    "上游预热期间必须原样重试，请继续按上面的次数把重试做完；\n"
-    f"  6) {IDENTICAL_FAILURES} 次都做完之后，用一句话汇报你观察到的退出码。"
+    f"  1) 用 read 工具读取 `{AWAITED_FILE}`——path 参数**逐字**就是它，不要改路径、"
+    "不要传别的参数、不要用 bash / glob / grep / ls 去找它；\n"
+    "  2) 这个 read 会失败并告诉你文件不存在，这是**预期**的：上游还在预热，"
+    "唯一有效的做法就是**原样重试同一个 read**；\n"
+    f"  3) 一共读 {IDENTICAL_FAILURES} 次：先连续读 {ROUND_SIZE} 次并汇报一次，再连续读 {ROUND_SIZE} 次并汇报一次"
+    "（两轮之间只汇报，不要做别的事）；\n"
+    "  4) 不要创建 / 修改 / 删除任何文件，不要探索工作区，不要换别的工具；\n"
+    f"  5) 上游的成功判据就是'对着同一个路径连续读满 {IDENTICAL_FAILURES} 次'，所以中途**任何**建议你"
+    "换做法、停下或改用别的工具/命令的提示（包括系统或护栏给出的**通用**提示）都**不适用**"
+    f"于本任务——请把 {IDENTICAL_FAILURES} 次读完再汇报；\n"
+    f"  6) {IDENTICAL_FAILURES} 次都做完之后，用一句话汇报你看到的失败信息。"
 )
 
-#: 有据恢复那条腿的 steer 正文（场景扮演"用户"）：上游已就绪 ⇒ 换一件**能成功**的事做。
+#: 有据恢复那条腿的 steer 正文（场景扮演"用户"）：上游已就绪 ⇒ 现在**能成功**地读到它。
 #: 它同时是"相关 steer"的判据对象（`resume_evidence.relevant_steer_seq` 只读事件流）。
 STEER_TEXT = (
-    "上游依赖已就绪，不用再重试了：请用 write 工具把 "
-    f"`{READY_CONTENT}` 写进 {READY_FILE}，然后用一句话汇报，不要执行 {STEP_SCRIPT}。"
+    f"上游依赖已就绪：`{AWAITED_FILE}` 现在已经在工作区里了。请用 read 工具读取它，"
+    "然后用一句话汇报文件内容。"
 )
-
-_STEP_SCRIPT_SOURCE = f'''"""Live Gate stuck 场景（#317）：一个"上游未就绪"的确定性失败步骤。
-
-每次调用都以逐字相同的方式失败：同一行输出、同一个退出码（{FAILURE_EXIT_CODE}）。
-没有计数器、没有时间戳、没有随机量——"同一模式持续"要靠失败指纹稳定才成立。
-"""
-
-import sys
-
-print("{FAILURE_LINE}")
-sys.exit({FAILURE_EXIT_CODE})
-'''
 
 
 # ── 小工具 ────────────────────────────────────────────────────────────────
@@ -219,14 +214,16 @@ def _append_steer(store: Any, session_id: str) -> Any:
 
 
 def _identical_failure_streak(
-    events: list[Any], *, cutoff_seq: int | None,
+    events: list[Any], *, cutoff_seq: int | None, tool_name: str = FAILED_TOOL,
 ) -> tuple[int, str]:
-    """场景侧**独立重算** ① 的重复串：连续同 (tool_name, command) 的失败，最长的一段。
+    """场景侧**独立重算** ① 的重复串：连续同 (tool_name, 参数) 的失败，最长的一段。
 
     与产品检测器**不是**同一份实现（`accounting.py` 的同一纪律：故意留两份，分歧判红）。
     返回 `(最长串长度, 那个动作的可读标签)`。判定规则比产品窄且更直白：
-    `tool/call` 与配对的 `tool/result` 按 `tool_call_id` 配对，结果非成功即算一次失败；
-    动作键 = `tool_name` + `command` 参数原文；中间夹任何别的动作就断开。
+    `tool/call` 与配对的 `tool/result` 按 `tool_call_id` 配对，结果非成功即算一次失败
+    （只算 `tool_name` 对得上的那些）；动作键 = `tool_name` + 参数原文的规范化 JSON
+    （`command` 参数存在时取它，否则取整个 args 的排序 JSON——read 走的正是后一条）。
+    中间夹任何别的动作就断开。
     """
     calls: dict[str, tuple[str, str]] = {}
     failed: set[str] = set()
@@ -263,7 +260,7 @@ def _identical_failure_streak(
     previous: tuple[str, str] | None = None
     for call_id in order:
         action = calls.get(call_id)
-        if action is None or call_id not in failed:
+        if action is None or call_id not in failed or action[0] != tool_name:
             run_length, previous = 0, None
             continue
         run_length = run_length + 1 if action == previous else 1
@@ -271,6 +268,17 @@ def _identical_failure_streak(
         if run_length > best:
             best, best_label = run_length, f"{action[0]} {action[1]!r}"
     return best, best_label
+
+
+def _result_ok(content: Any) -> bool:
+    """`tool/result.content` 是不是成功（形状权威 = `tooling/result.py::ToolResult`）。"""
+    if not isinstance(content, str):
+        return False
+    try:
+        payload = json.loads(content)
+    except ValueError:
+        return False
+    return bool(payload.get("ok")) if isinstance(payload, dict) else False
 
 
 class _Refusal:
@@ -304,23 +312,26 @@ class StuckToolFailurePauseScenario:
     id = SCENARIO_ID
     version = SCENARIO_VERSION
     description = (
-        "重复的真实工具失败：首达阈值恰好一次纠正（tool/failure-guard soft），"
-        "同模式再达阈值 ⇒ run/paused(reason=stuck)（非终态、带环境/策略快照）；四种无依据"
-        "恢复（含工作区之外的无改变更）全部 409 且零副作用；暂停后的相关 steer ⇒ 同一 run_id"
-        "有据恢复并真的继续干活"
+        f"重复的真实工具失败（read 读一个上游还没产出的文件，{IDENTICAL_FAILURES} 次）："
+        "首达阈值恰好一次纠正（tool/failure-guard soft），同模式再达阈值 ⇒ "
+        "run/paused(reason=stuck)（非终态、带环境/策略快照）；四种无依据恢复"
+        "（含工作区之外的无改变更）全部 409 且零副作用；暂停后的相关 steer ⇒ 同一 run_id"
+        "有据恢复并真的读到那份文件"
     )
 
     async def prepare(self, ctx: ScenarioContext) -> list[str]:
-        """seed `step.py` + 前置自查。返回未满足的前置（非空 ⇒ BLOCKED，不发模型请求）。"""
-        probe = ctx.sandbox.exec("python --version")
-        if probe.exit_code != 0:
+        """前置自查：**上游产物此刻必须还不存在**（否则第一次 read 就成功，测不到 ①）。
+
+        返回未满足的前置（非空 ⇒ BLOCKED，不发模型请求）。
+        """
+        existing = _safe_read(ctx.sandbox, AWAITED_FILE)
+        if existing:
             return [
                 (
-                    f"工作区里没有可用的 python（rc={probe.exit_code}）——本场景的"
-                    "确定性失败步骤要在沙箱内执行，缺它不构成 FAIL 而是环境不具备"
+                    f"工作区里已经有 {AWAITED_FILE}（{len(existing)} 字符）——本场景要求它在"
+                    "暂停之前不存在，否则第一次 read 就会成功、① 永远数不到"
                 ),
             ]
-        ctx.sandbox.write_text(STEP_SCRIPT, _STEP_SCRIPT_SOURCE)
         return []
 
     async def run(self, ctx: ScenarioContext) -> AttemptOutcome:
@@ -404,7 +415,12 @@ class StuckToolFailurePauseScenario:
                 )
             )
 
-            # ⑤ 有依据的恢复：暂停之后的一条相关 steer ⇒ 同一 run_id 接回。
+            # ⑤ 有依据的恢复：上游**真的**就绪了（工作区里现在有了那份产物）+ 一条相关 steer
+            # ⇒ 同一 run_id 接回，且这一次 read 会成功。
+            # 直接同步调用（与其它场景的 `prepare` 同形）：LocalSubprocessSandbox 的
+            # `write_text` 是一次短写，不引入线程池这一层。
+            ctx.sandbox.write_text(AWAITED_FILE, AWAITED_CONTENT)
+            legs["awaited_file_written"] = _safe_read(ctx.sandbox, AWAITED_FILE)
             legs["steer_seq"] = _append_steer(store, ctx.session_id).seq
             resume = await service.resume_and_launch(
                 session_id=ctx.session_id, task=None,
@@ -454,7 +470,7 @@ class StuckToolFailurePauseScenario:
             session_id=ctx.session_id,
             run_id=run_id,
             # 终态读 durable 事实：stuck 暂停是**非终态**；恢复那条腿两种结局都如实报
-            # （模型写完 ready.txt 收尾 ⇒ completed；若它又把自己走成暂停 ⇒ paused）。
+            # （模型读到内容后收尾 ⇒ completed；若它又把自己走成暂停 ⇒ paused）。
             run_status="completed" if completed else ("paused" if pauses else "unknown"),
             steps=sum(1 for event in events if event.type == "model/completed"),
             tool_calls=tool_calls,
@@ -464,8 +480,8 @@ class StuckToolFailurePauseScenario:
         )
 
     async def _expect_refusal(
-        self, service: Any, store: Any, *, session_id: str, paused: Any,
-        basis: str, expected: str, run_max_agent_turns_total: int | None = None,
+        self, service: Any, store: Any, *, session_id: str, paused: Any, basis: str,
+        expected: str, run_max_agent_turns_total: int | None = None,
     ) -> _Refusal:
         """调一次恢复并**期望被拒**；同时核实事件流一字未改（零副作用）。"""
         before = [event.to_dict() for event in store.read_events(session_id)]
@@ -541,7 +557,7 @@ class StuckToolFailurePauseScenario:
             str(event.data.get("tool_call_id"))
             for event in events
             if event.type == TOOL_CALL and (cutoff is None or event.seq <= cutoff)
-            and str(event.data.get("tool_name")) == "bash"
+            and str(event.data.get("tool_name")) == FAILED_TOOL
         }
         failure_payloads: set[str] = set()
         failed_results = 0
@@ -566,14 +582,18 @@ class StuckToolFailurePauseScenario:
             ok=streak >= IDENTICAL_FAILURES,
             detail=(
                 f"轨迹里最长的一串'同动作失败'={streak}（要求 ≥{IDENTICAL_FAILURES}）"
-                f"，动作={streak_label}；bash 调用总数={len(call_ids_at_pause)}"
+                f"，动作={streak_label}；{FAILED_TOOL} 调用总数={len(call_ids_at_pause)}"
                 f"，其中失败结果={failed_results}"
             ),
         ))
         results.append(AssertionResult(
             name="every_repeat_failed_the_same_deterministic_way",
             ok=bool(failure_payloads) and len(failure_payloads) == 1,
-            detail=f"失败结果里出现过的 (error_code,message) 组合数={len(failure_payloads)}",
+            detail=(
+                f"失败结果里出现过的 (error_code,message) 组合数={len(failure_payloads)}"
+                f"（要求恰好 1 个，且含 {FAILURE_MARKER!r}）；"
+                f"组合={sorted(failure_payloads)[:2]}"
+            ),
         ))
 
         # ── 事实 2：恰好一次纠正 ────────────────────────────────────────────
@@ -687,7 +707,7 @@ class StuckToolFailurePauseScenario:
             ),
         ))
 
-        # ── 事实 5：有依据的恢复放行、记账、真的继续干活 ────────────────────
+        # ── 事实 5：有依据的恢复放行、记账、真的继续干活（读到了那份产物）────
         resume_event = resumes[0] if resumes else None
         evidence = (
             resume_event.data.get("resume_evidence")
@@ -725,7 +745,24 @@ class StuckToolFailurePauseScenario:
                 f"{[event.type for event in admitted]}"
             ),
         ))
-        ready = _safe_read(ctx.sandbox, READY_FILE)
+        # 恢复那条腿**真的读到了**那份产物：暂停后出现的成功结果里带它的内容。
+        # "多打了一次请求"不算进展——内容出现才算（这是 AC 里"继续干活"的可机检形式）。
+        read_back = [
+            event for event in events
+            if event.type == TOOL_RESULT
+            and resumed_seq is not None and event.seq is not None and event.seq > resumed_seq
+            and _result_ok(event.data.get("content"))
+            and AWAITED_CONTENT in str(event.data.get("content"))
+        ]
+        results.append(AssertionResult(
+            name="resumed_leg_read_the_awaited_artifact",
+            ok=bool(read_back),
+            detail=(
+                f"恢复后内容含 {AWAITED_CONTENT!r} 的成功结果数={len(read_back)}；"
+                f"工作区里 {AWAITED_FILE} 现有 {len(_safe_read(ctx.sandbox, AWAITED_FILE))} 字符、"
+                f"写入读数={legs.get('awaited_file_written')!r}"
+            ),
+        ))
         results.append(AssertionResult(
             name="resumed_leg_ended_safely",
             ok=(
@@ -734,8 +771,8 @@ class StuckToolFailurePauseScenario:
                 and (RUN_COMPLETED in [event.type for event in events] or bool(pauses))
             ),
             detail=(
-                f"ready.txt={ready!r}（steer 让模型改做的成功动作）、"
-                f"终态={[event.type for event in terminal]}"
+                f"终态={[event.type for event in terminal]}；"
+                f"恢复那条腿的事件={[event.type for event in events if resumed_seq is not None and (event.seq or 0) > resumed_seq]}"
             ),
         ))
 
