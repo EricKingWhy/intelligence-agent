@@ -2,6 +2,8 @@
 
 本操作会不可逆删除 Memory V1/V2 记录与指定 Milvus Memory collection。它不保留旧记忆内容备份。代码回滚不会恢复已删数据。
 
+**一次性执行记录（2026-09-27）**：integration clean-slate 已按批准计划执行并完成，AC8 真实 V2 formation / Milvus retrieval smoke 也已完成；证据见 [`memory-v2-clean-slate-cutover-report-2026-09-27.json`](../evidence/memory-v2-clean-slate-cutover-report-2026-09-27.json)、[`memory-v2-clean-slate-post-reset-plan-2026-09-27.json`](../evidence/memory-v2-clean-slate-post-reset-plan-2026-09-27.json) 与 [`memory-v2-cutover-ac8-live-smoke-2026-09-27.json`](../evidence/memory-v2-cutover-ac8-live-smoke-2026-09-27.json)。不要重放本次 `--apply` 或旧 fence 的 `--resume`；本手册的步骤只适用于经批准的新环境/新目标。
+
 ## 范围
 
 仅允许清理：

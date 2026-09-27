@@ -1,0 +1,31 @@
+{
+  "cleanup": {
+    "active_v2_records_after_delete": 0,
+    "content_backup_created": false,
+    "deleted_record_count": 1,
+    "milvus_count_after_delete": 0,
+    "raw_milvus_hits_after_delete": 0,
+    "temporary_data_removed": true
+  },
+  "credential_probes": {
+    "backend_primary_probe": "success",
+    "integration_fallback_http_status": 403,
+    "integration_primary_http_status": 401
+  },
+  "date": "2026-09-27",
+  "formation": {
+    "active_v2_record_count": 1,
+    "job_outcome": "committed",
+    "job_stage": "completed",
+    "source_event_count": 1
+  },
+  "milvus_count_note": "One non-authoritative get_collection_stats sample returned 1 after a diagnostic delete; the final strong cutover count(*) dry-run returned 0, and no row was returned by the subsequent query. The smoke acceptance relies on the direct Milvus hit before delete and zero hits after delete.",
+  "model_configuration": "The backend AGENT_MODELS catalog was loaded in-process for the smoke only; no credential values were printed, copied, or persisted.",
+  "retrieval": {
+    "memory_v2_service_hit": true,
+    "raw_milvus_index_hit": true
+  },
+  "scope": "Synthetic identity; temporary SQLite and JSONL; integration Memory Milvus collection and configured embedding provider.",
+  "status": "passed",
+  "ticket": 303
+}
