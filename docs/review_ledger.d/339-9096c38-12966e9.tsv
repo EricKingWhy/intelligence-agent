@@ -1,0 +1,1 @@
+2026-09-27	#302 measured-quality and cleanup changes; Standards + Spec dual review fixed at 12966e9f found no P0–P4. Review covered same-record top-six plus injection verification, quality fixtures, content-free reports, and prefix-scoped Qiniu cleanup.	9096c38c..12966e9f

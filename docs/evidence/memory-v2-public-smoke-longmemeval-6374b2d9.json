@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "run_id": "6374b2d9-59b5-4d05-80e4-0eeb4d15a17d",
+  "repeat_of": null,
+  "ran_at": "2026-09-26T18:29:03+00:00",
+  "status": "completed",
+  "blocking": false,
+  "benchmark": "LongMemEval",
+  "adapter_version": 1,
+  "source": "https://github.com/xiaowu0162/LongMemEval",
+  "license": "MIT",
+  "non_commercial_only": false,
+  "dataset": {
+    "filename": "longmemeval_s_cleaned.json",
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "case_count": 1
+  },
+  "tool": {
+    "name": "agent-harness-memory-v2",
+    "code_sha": "aff3e46f438d0d11ec6e4439f1e85f739f26bda7",
+    "tree_sha": "045b396cab5feaaef1e4dce26f2a5cf109f25a76",
+    "config_aliases": {
+      "formation": "memory.primary",
+      "answer": "memory.primary",
+      "index": "milvus",
+      "retrieval": "hybrid-v1"
+    }
+  },
+  "case_counts": {
+    "total": 1,
+    "executed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "unawaited": 0
+  },
+  "metrics": {
+    "answer_quality": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "session_recall_at_6": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "stored_record_count": 40,
+    "pollution_rate": 0.0,
+    "pollution_count": 0,
+    "injected_tokens": 937,
+    "latency_ms_total": 425349,
+    "input_tokens": 192317,
+    "output_tokens": 26003,
+    "cost_usd": null
+  },
+  "failures": [],
+  "worktree_clean": true,
+  "baseline_frozen": false,
+  "run_mode": "smoke",
+  "pipeline": {
+    "formation": "MemoryJobRunner",
+    "storage": "SqliteMemoryV2Store",
+    "index": "MilvusMemoryV2Index",
+    "recall_injection": "MemoryV2ContextProvider",
+    "answer_generation": "configured_model_provider",
+    "langfuse": "disabled_for_public_benchmark_content"
+  },
+  "smoke": {
+    "selection_strategy": "smallest_single_session_user_case_with_exact_user_answer_span",
+    "selected_case_id_sha256": "9c8064fb6aace953a0927db8c5816bb56e1f7aa65ee0bb983a2fb7e3e94c9d48",
+    "sample_category": "single-session-user",
+    "answer_strategy": "longmemeval_con_reading_notes_v1",
+    "answer_temperature": 0.0,
+    "answer_model_calls": 2,
+    "answer_scorer": "normalized_token_f1",
+    "answer_f1_threshold": 0.5,
+    "answer_f1": 0.5,
+    "answer_nonempty": true,
+    "answer_token_count": 6,
+    "formation_model_calls": 77,
+    "formation_jobs": {
+      "completed": 45,
+      "degraded": 2
+    },
+    "formation_job_reasons": {
+      "invalid_model_output": 2,
+      "no_durable_value": 2,
+      "none": 28,
+      "transient_only": 15
+    },
+    "formation_output_failure_kinds": {
+      "contract_violation": 2
+    },
+    "source_session_count": 47,
+    "answer_latency_ms": 2466,
+    "token_usage_source": {
+      "formation_input": "local_estimate",
+      "formation_output": "local_estimate",
+      "answer_input": "provider",
+      "answer_output": "provider"
+    },
+    "committed_formation_jobs": 28,
+    "formation_job_outcomes": {
+      "committed": 28,
+      "no_write": 17
+    },
+    "relevant_source_job_stages": {
+      "completed": 1
+    },
+    "relevant_source_job_outcomes": {
+      "committed": 1
+    },
+    "formation_drain_timeout_seconds": 1200,
+    "active_record_tier_counts": {
+      "collection": 25,
+      "profile": 15
+    },
+    "active_record_kind_counts": {
+      "episodic": 1,
+      "semantic": 39
+    },
+    "active_records_with_relevant_source_session": 2,
+    "active_relevant_answer_token_recall": 1.0,
+    "active_answer_token_recall": 1.0,
+    "injected_relevant_answer_token_recall": 1.0,
+    "injected_answer_token_recall": 1.0,
+    "recall_hit_count": 25,
+    "injected_message_count": 2,
+    "attributable_injected_hit_count": 1,
+    "attributable_injected_profile_count": 1,
+    "attributable_injected_memory_count": 2,
+    "relevant_hybrid_hit_rank": 1,
+    "relevant_profile_candidate_count": 1,
+    "relevant_profile_injected_count": 1,
+    "chain_verified": true,
+    "speaker_mapping": "dataset_roles_preserved",
+    "milvus_collection_created": true,
+    "milvus_collection_name": "memv2pub_64d5afb9eee0",
+    "passed": true
+  },
+  "cleanup": {
+    "temporary_milvus_collection": "confirmed_absent"
+  }
+}

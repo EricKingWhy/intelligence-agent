@@ -13,6 +13,61 @@ from agent_harness.config import Settings
 from agent_harness.session import JsonlSessionStore, Session
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--require-live-services",
+        action="store_true",
+        default=False,
+        help="fail when a selected live_services/qiniu test is skipped or not executed",
+    )
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    if not session.config.getoption("--require-live-services"):
+        return
+    session.config._required_live_nodes = {
+        item.nodeid for item in session.items
+        if "live_services" in item.keywords or "qiniu" in item.keywords
+    }
+    session.config._skipped_live_nodes = set()
+    session.config._executed_live_nodes = set()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[object],
+) -> Iterator[None]:
+    outcome = yield
+    if not item.config.getoption("--require-live-services"):
+        return
+    report = outcome.get_result()
+    if item.nodeid not in item.config._required_live_nodes:
+        return
+    if report.skipped:
+        item.config._skipped_live_nodes.add(item.nodeid)
+    elif report.when == "call" and report.passed:
+        item.config._executed_live_nodes.add(item.nodeid)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    if not session.config.getoption("--require-live-services"):
+        return
+    required = session.config._required_live_nodes
+    skipped = session.config._skipped_live_nodes
+    executed = session.config._executed_live_nodes
+    not_executed = required - skipped - executed
+    if required and not skipped and not not_executed:
+        return
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    print(
+        "[live services gate] failed: "
+        f"required={len(required)} executed={len(executed)} "
+        f"skipped={len(skipped)} not_executed={len(not_executed)}"
+    )
+    for node_id in sorted(skipped | not_executed):
+        print(f"[live services gate] not executed: {node_id}")
+
+
 def make_session(tmp_path: str | Path) -> Session:
     """构造 ephemeral Session（用 tmp_path 做 SessionStore 根目录）。
 

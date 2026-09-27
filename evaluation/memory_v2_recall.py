@@ -30,7 +30,10 @@ def load_dataset(path: Path = DATASET_PATH) -> dict:
 
 
 def dataset_sha256(path: Path = DATASET_PATH) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Git checkouts can differ only in CRLF vs LF. Hash canonical UTF-8 line
+    # endings so the frozen corpus keeps one identity across the three clones.
+    data = path.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
 
 
 def recall_at_k(

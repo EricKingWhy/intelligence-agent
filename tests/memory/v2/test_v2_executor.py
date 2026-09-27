@@ -21,6 +21,7 @@ import pytest_asyncio
 from agent_harness.memory.v2.budget import MemoryBudgetLimits
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import (
+    _FORMATION_PROMPT,
     DegradedReason,
     MemoryJobExecutor,
     MemoryModelCall,
@@ -49,6 +50,12 @@ USER_A = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-a")
 PROJECT_X = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-a", project_id="project-x")
 
 T0 = datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
+
+
+def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
+    assert "preserve explicitly stated names, values, quantities, dates, and qualifiers" \
+        in _FORMATION_PROMPT
+    assert "every detail must remain supported by cited evidence" in _FORMATION_PROMPT
 
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"
@@ -232,7 +239,7 @@ async def _claimed(
 
 def _executor(
     env: Env, invoker, *, writer=None, limits: MemoryBudgetLimits | None = None,
-    clock=None,
+    clock=None, observer=None,
 ) -> MemoryJobExecutor:
     values: dict = {
         "jobs": env.jobs,
@@ -244,6 +251,8 @@ def _executor(
         values["limits"] = limits
     if clock is not None:
         values["clock"] = clock
+    if observer is not None:
+        values["observer"] = observer
     return MemoryJobExecutor(**values)
 
 
@@ -289,6 +298,107 @@ async def test_no_memory_completes_quietly(env: Env) -> None:
     assert stored.stage is MemoryJobStage.COMPLETED
     assert stored.outcome is MemoryJobOutcome.NO_WRITE
     assert [c.stage for c in invoker.calls] == [MemoryModelStage.FORMATION]
+
+
+@pytest.mark.asyncio
+async def test_job_observations_include_metadata_without_projected_content(env: Env) -> None:
+    observations: list[tuple[str, dict]] = []
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+
+    _job, result, _sink = await _run(
+        env, invoker,
+        observer=lambda name, metadata: observations.append((name, metadata)),
+    )
+
+    assert result is not None and result.outcome is MemoryJobOutcome.NO_WRITE
+    assert {name for name, _ in observations} >= {"job", "model", "schema", "formation"}
+    captured = repr(observations)
+    assert "请用 pnpm" not in captured
+    assert "evidence" not in captured
+    model = next(metadata for name, metadata in observations if name == "model")
+    assert model["model_alias"] == "memory.primary"
+    assert model["input_tokens_estimated"] is True
+    assert model["cost_usd"] is None
+    assert model["outcome"] == "success"
+    assert len(model["input_sha256"]) == 64
+    assert len(model["output_sha256"]) == 64
+    assert len(model["content_sha256"]) == 64
+    assert isinstance(model["output_tokens"], int)
+    assert model["output_tokens_estimated"] is True
+    assert "payload" not in model
+    assert "system_prompt" not in model
+
+
+@pytest.mark.asyncio
+async def test_langfuse_observer_receives_memory_job_observations(env: Env) -> None:
+    from agent_harness.observability.sink import LangfuseSink
+
+    class _Observation:
+        def __init__(self, metadata):
+            self.metadata = metadata
+            self.ended = False
+
+        def end(self):
+            self.ended = True
+
+    class _Client:
+        def __init__(self):
+            self.observations = []
+
+        def start_observation(self, **kwargs):
+            observation = _Observation(kwargs["metadata"])
+            self.observations.append((kwargs["name"], observation))
+            return observation
+
+    client = _Client()
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk", client_factory=lambda **_kwargs: client,
+    )
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+
+    _job, result, _events = await _run(env, invoker, observer=sink.memory_observation)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.NO_WRITE
+    assert {name for name, _observation in client.observations} >= {
+        "memory-job", "memory-model", "memory-schema", "memory-formation",
+    }
+    assert all(observation.ended for _name, observation in client.observations)
+    model = next(
+        observation.metadata for name, observation in client.observations
+        if name == "memory-model"
+    )
+    assert model["model_alias"] == "memory.primary"
+    assert "input_sha256" in model
+    assert "system_prompt" not in model
+
+
+@pytest.mark.asyncio
+async def test_observer_failure_does_not_change_a_committed_memory_job(env: Env) -> None:
+    def unavailable_observer(_name: str, _metadata: dict) -> None:
+        raise RuntimeError("Langfuse credential=private")
+
+    searchable = await env.service.create(
+        make_draft(content="Synthetic recall remains searchable after observer failure"), USER_A,
+    )
+    await env.index.upsert(searchable)
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())],
+    )
+
+    _job, result, _sink = await _run(env, invoker, observer=unavailable_observer)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
+    assert [call.stage for call in invoker.calls] == [
+        MemoryModelStage.FORMATION, MemoryModelStage.ADJUDICATION,
+    ]
+    records = await _active(env)
+    assert len(records) == 2
+    recalled = await env.service.search(
+        "Synthetic recall remains searchable", USER_A,
+        scope=MemoryScope.USER_GLOBAL, limit=5,
+    )
+    assert [record.id for record in recalled] == [searchable.id]
 
 
 @pytest.mark.asyncio
@@ -557,13 +667,20 @@ async def test_a_non_transient_failure_is_neither_retried_nor_switched(env: Env)
 async def test_a_schema_failure_is_a_failed_attempt_that_stops(env: Env) -> None:
     """R3 + R9：解析失败是**失败尝试**（不是 abstention），且不重试。"""
     invoker = FakeInvoker(formation=["这不是 JSON", _formation_no_memory()], adjudication=[])
-    _job, result, _sink = await _run(env, invoker, _fallback=True)
+    observations: list[tuple[str, dict]] = []
+    _job, result, _sink = await _run(
+        env, invoker, _fallback=True,
+        observer=lambda name, metadata: observations.append((name, metadata)),
+    )
 
     assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1)]
     assert result is not None
     assert result.stage is MemoryJobStage.DEGRADED
     assert result.reason == DegradedReason.INVALID_MODEL_OUTPUT.value
     assert result.outcome is None
+    schema = next(metadata for name, metadata in observations if name == "schema")
+    assert schema["output_failure_kind"] == "invalid_json"
+    assert "这不是 JSON" not in repr(observations)
 
 
 @pytest.mark.asyncio
@@ -801,6 +918,18 @@ async def test_the_formation_call_carries_the_safe_projection(env: Env) -> None:
     ]
     # AC9 的另一半：真实事件 id 不进模型输入——模型只能引投影发给它的别名。
     assert "u:1" not in json.dumps(call.payload, ensure_ascii=False)
+    assert "all listed keys are required" in call.system_prompt
+    assert "`payload.kind` is required" in call.system_prompt
+    assert "top-level only and never a candidate field" in call.system_prompt
+    assert "Do not add candidate fields beyond those listed above" in call.system_prompt
+    assert "Semantic payload keys are `kind`=`semantic`, `subject`, `fact`, and `category`" \
+        in call.system_prompt
+    assert "Episodic payload keys are `kind`=`episodic`, `situation`, `action`, `outcome`, " \
+        "and `lesson`" in call.system_prompt
+    assert "Procedural payload keys are `kind`=`procedural`, `trigger`, `procedure`, and " \
+        "`success_condition`" in call.system_prompt
+    assert "Keep payload nested under its candidate" in call.system_prompt
+    assert '"payload":{"kind":"semantic"' in call.system_prompt
     assert call.max_output_tokens == 4000
     assert call.timeout_seconds > 0
 
