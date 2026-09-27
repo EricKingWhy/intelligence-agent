@@ -83,6 +83,15 @@ async def _send_json_offloaded(
         logger.debug("WS send 失败（客户端可能已断开）", exc_info=True)
 
 
+async def _enqueue_relay_error(out_q: asyncio.Queue, session_id: str) -> None:
+    """把 relay 的终止错误写入有界出站队列，不静默丢弃满队列时的错误。"""
+    await out_q.put({
+        "type": "error",
+        "session_id": session_id,
+        "message": "stream relay failed",
+    })
+
+
 async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
     """WebSocket 主入口：接受连接 → 多路复用 session 事件流。
 
@@ -171,9 +180,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             await _send_json({"type": "error", "message": "snapshot failed"})
             return
 
-        # #341：重复 subscribe = 替换该会话的旧 relay。必须放在快照读取成功
-        # 之后——瞬时读错误不应拆散一条仍在正常工作的订阅。
-        await _detach_subscription(session_id)
+        # #341：重复 subscribe = 替换该会话的旧 relay。瞬时读错误不应拆散一条
+        # 仍在正常工作的订阅；如果新快照被截断，则仍要摘掉旧订阅。
         active_run = run_manager.get_active(session_id)
         # 阈值判据取**持久化最大 seq**——与 SSE 同一个量（`app.py:1336` 的
         # `handle.latest_seq`）。不能用 run 的入队游标：两者稳态相等（落盘先于
@@ -195,6 +203,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         from agent_harness.web.app import STREAM_REPLAY_MAX_EVENTS
 
         if latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS:
+            await _detach_subscription(session_id)
             await _send_json({
                 "type": "snapshot",
                 "session_id": session_id,
@@ -210,6 +219,11 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             return
 
         subscriber = active_run.subscribe() if active_run is not None else None
+        # 先把新 subscriber 接入同一 run，再摘旧 subscriber。否则取消旧 relay
+        # 时会短暂变成零订阅者并启动孤儿宽限计时，极短宽限期可误杀仍在用的 run。
+        await _detach_subscription(session_id)
+        if subscriber is not None:
+            subscriptions[session_id] = (active_run, subscriber)
         # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与
         # 客户端游标可能因一次丢帧而错开，双保险比互相信任便宜）。
         window = [e for e in events if after_seq < e.seq <= replay_upto]
@@ -222,7 +236,6 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         )
 
         if subscriber is not None:
-            subscriptions[session_id] = (active_run, subscriber)
             # 启动事件转发 task
             relay_task = asyncio.create_task(
                 _relay_events(session_id, active_run, subscriber, outbound_queue, run_manager)
@@ -256,12 +269,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             # #341：relay 失败既要记日志也要在公共 WS 通道回声——task 与读循环
             # 是刻意脱钩的，异常留在 task 上只会变成 unhandled-task 警告。
             logger.exception("WS relay failed (session=%s)", session_id)
-            with contextlib.suppress(asyncio.QueueFull):
-                out_q.put_nowait({
-                    "type": "error",
-                    "session_id": session_id,
-                    "message": "stream relay failed",
-                })
+            await _enqueue_relay_error(out_q, session_id)
         finally:
             # 订阅清理：使用创建 relay 时绑定的 run，不能从 get_active() 重查——
             # 终态 run 已不再 active，但仍持有 subscriber（#341：重查拿到 None

@@ -417,7 +417,28 @@ async def test_ws_disconnect_cleans_subscriber(tmp_path, monkeypatch):
                     "subscribe active run 后应有订阅者"
                 assert len(run.subscribers) >= 1
 
+                async def _relay_waiting_for_events() -> asyncio.Task | None:
+                    for _ in range(50):
+                        for task in asyncio.all_tasks():
+                            code = getattr(task.get_coro(), "cr_code", None)
+                            if code is not None and code.co_name == "_relay_events":
+                                awaited = getattr(task.get_coro(), "cr_await", None)
+                                while awaited is not None:
+                                    awaited_code = getattr(awaited, "cr_code", None)
+                                    if awaited_code is not None and awaited_code.co_name == "get":
+                                        return task
+                                    awaited = getattr(awaited, "cr_await", None)
+                        await asyncio.sleep(0.01)
+                    return None
+
+                relay_task = await _relay_waiting_for_events()
+                assert relay_task is not None and not relay_task.done(), \
+                    "验收前应确认 relay 正阻塞等待订阅事件"
+
             # WS 已断开：服务端 finally 清理订阅 → subscribers 归零
+            await asyncio.wait_for(relay_task, timeout=5)
+            assert relay_task.done(), "WS 断开后 relay task 必须结束，不能泄漏"
+
             async def _subscribers_empty() -> bool:
                 for _ in range(50):
                     run = app.state.agent.run_manager.get_active(session_id)
@@ -430,6 +451,89 @@ async def test_ws_disconnect_cleans_subscriber(tmp_path, monkeypatch):
                 "WS 断开后 ManagedRun.subscribers 应归零"
     finally:
         await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_resubscribe_keeps_run_attached_before_old_relay_cleanup(
+    tmp_path, monkeypatch,
+):
+    """替换同一活动 run 的订阅时，新 subscriber 必须先接上，避免孤儿宽限窗。"""
+    from agent_harness.session.runmanager import ManagedRun
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=40, interval=0.1),
+    )
+    run_manager = app.state.agent.run_manager
+    run_manager.disconnect_grace_seconds = 0.5
+    replacing = False
+    subscriber_counts: list[int] = []
+    original_unsubscribe = ManagedRun.unsubscribe
+
+    def observe_unsubscribe(run, subscriber):
+        original_unsubscribe(run, subscriber)
+        if replacing and not run.terminal:
+            subscriber_counts.append(len(run.subscribers))
+
+    monkeypatch.setattr(ManagedRun, "unsubscribe", observe_unsubscribe)
+    try:
+        import httpx2
+
+        session_id = await _start_run_get_session_id(port, "重订阅任务")
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            subscribe = {"type": "subscribe", "session_id": session_id}
+            await ws.send_text(json.dumps(subscribe))
+            first = await _recv_until(
+                ws, lambda frames: any(f.get("type") == "snapshot" for f in frames),
+            )
+            assert any(f.get("type") == "snapshot" for f in first)
+            run = run_manager.get_active(session_id)
+            assert run is not None and len(run.subscribers) == 1
+
+            run_manager.disconnect_grace_seconds = 0.01
+            replacing = True
+            await ws.send_text(json.dumps(subscribe))
+            second = await _recv_until(
+                ws, lambda frames: any(f.get("type") == "snapshot" for f in frames),
+            )
+            replacing = False
+
+            assert any(f.get("type") == "snapshot" for f in second)
+            assert subscriber_counts and min(subscriber_counts) >= 1, (
+                "替换期间旧 subscriber 离开前必须已有新 subscriber；"
+                f"观察到订阅者数量 {subscriber_counts}"
+            )
+            assert run_manager.get_active(session_id) is run
+            assert len(run.subscribers) == 1
+            await asyncio.sleep(0.05)
+            assert run.task is not None and not run.task.cancelled(), \
+                "重订阅不能触发 RunManager 的孤儿回收"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_relay_error_waits_for_outbound_queue_capacity():
+    """有界 WS 队列满时 relay 错误必须等待发送，不能静默丢弃。"""
+    from agent_harness.web.websocket import _enqueue_relay_error
+
+    out_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+    prior_frame = {"type": "event", "session_id": "sid"}
+    out_q.put_nowait(prior_frame)
+    task = asyncio.create_task(_enqueue_relay_error(out_q, "sid"))
+
+    await asyncio.sleep(0)
+    assert not task.done(), "满队列时错误帧应等待容量，而不是被丢弃"
+    assert out_q.get_nowait() == prior_frame
+    error = await asyncio.wait_for(out_q.get(), timeout=1)
+    await asyncio.wait_for(task, timeout=1)
+    assert error == {
+        "type": "error",
+        "session_id": "sid",
+        "message": "stream relay failed",
+    }
 
 
 @pytest.mark.asyncio
