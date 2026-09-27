@@ -32,6 +32,14 @@
 | W-22 | Backend | `client_absent` 持久暂停/恢复契约 | #305 既有 pause 基础、#342；W-12 前置 | [W-22](W-22-client-absence-pause-contract.md) |
 | W-23 | Backend + Frontend | Task 创建、验收项和排队操作入口 | W-07、W-10、W-14、W-19 | [W-23](W-23-task-creation-ui.md) |
 | W-24 | Backend + Frontend | 证据占用空间、保留及显式清理预览 | W-08、W-09 | [W-24](W-24-evidence-retention-cleanup.md) |
+| W-25 | Backend | 压缩阈值对齐规格（0.80/0.90 → 0.70/0.85） | 无 | [W-25](W-25-compaction-threshold-align.md) |
+| W-26 | Backend | 进度清单服务端契约（schema·整表覆盖·硬校验） | W-02 | [W-26](W-26-plan-list-server-contract.md) |
+| W-27 | Frontend | 清单 Web+桌面渲染（四件套，同一 React 组件） | W-26 | [W-27](W-27-plan-list-web-render.md) |
+| W-28 | Frontend | 清单 TUI 渲染（Pi 独立 TUI 包复用） | W-26、W-17 | [W-28](W-28-plan-list-tui-render.md) |
+| W-29 | Backend | 清单↔压缩锚点集成（重注入落地） | W-26、W-04 增量 | [W-29](W-29-plan-compaction-anchor.md) |
+| W-30 | Spec + Backend | W-21 真实模型 Gate 增补判据（压缩接班·清单·失败方案） | W-29、W-21 | [W-30](W-30-gate-plan-compaction-evidence.md) |
+
+> **2026-09-27 修订批**（来源：`docs/PRD_LONG_TASK_CONTEXT_MANAGEMENT.md`，三轮 grill-me 确认）：W-25~W-30 新票 6 张；W-01/W-02/W-03/W-04 票面增量（摘要 8 节契约与校验闸门、失败方案 fact、切点规则、混合式摘要、接近护栏 warning、用户消息逐字），各票正文有 ⚠️ 修订标记与 [增量] 标注。issue 同步：W-25~W-30 待开；#345~#348 body 待同步至修订后票面。
 
 **并行边界**：W-03 与 W-05 可在 W-02 契约定稿后分线；W-09 与 W-10 仅共享 W-07 API 契约；W-15 与 W-17 共享 W-11 连接协议，不各自启动 Python Core。W-16 不能在 W-17 未可独立运行时宣称安装包完成。W-21 失败时保留失败事实，修复后重新取得两次完整通过。
 

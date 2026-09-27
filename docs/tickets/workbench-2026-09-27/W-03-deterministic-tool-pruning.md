@@ -3,10 +3,12 @@
 
 **类型/优先级**：P1 Context。**依赖**：W-01；可与 W-05 并行。**范围**：`context/builder.py`、`tooling/overflow.py`、既有 ArtifactStore/inspect 工具与 context/tool 测试。原始 SessionEvent 和 Artifact 不得因裁剪删除。
 
+> ⚠️ **2026-09-27 修订**（来源：`docs/PRD_LONG_TASK_CONTEXT_MANAGEMENT.md` §4.2）：新增切点规则与骨架行定名，见正文 [增量] 标注。
+
 ## 工作指令
 
-1. 在 LLM 摘要前，对已被新结果取代、重复检索或超长旧 Tool Result 做**确定性**裁剪。仅当原文已经经既有 ArtifactStore 保存、ref 校验且可读回时执行。保留同一 `tool_call_id` 的 call/result 逻辑配对、状态码/错误原因、必要结论、精确 ID、原 Event seq 与 artifact ref。
-2. 定义可判定的 supersession：例如同一文件同一版本的重复读取或同一查询相同结果 hash；无法证明同源/可替代时不剪。只改 Runtime Context 投影，不改 durable 事件。
+1. 在 LLM 摘要前，对已被新结果取代、重复检索或超长旧 Tool Result 做**确定性**裁剪。仅当原文已经经既有 ArtifactStore 保存、ref 校验且可读回时执行。保留同一 `tool_call_id` 的 call/result 逻辑配对、状态码/错误原因、必要结论、精确 ID、原 Event seq 与 artifact ref。[增量] 该残留形态定名**骨架行**（= 语义骨架：结论 + 精确 ID + ref），不引 dsh「头 4096 + 尾 1024」头尾截断——那是 dsh 无统一 ArtifactStore 时的次优解。[增量] **切点规则**：裁剪边界永不在 tool result 处切断，call/result 同裁同留（PORT DESIGN 自 Pi，调研 R R11）。
+2. 定义可判定的 supersession：例如同一文件同一版本的重复读取或同一查询相同结果 hash；无法证明同源/可替代时不剪。只改 Runtime Context 投影，不改 durable 事件。[增量] **豁免**：被 W-02 保护事实引用的结果永不裁（授权记录、精确标识来源）；不设按工具名的静态豁免（静态名单会腐化，动态引用判定才是确定性的）。
 3. 裁剪后重新估算 token；若无法读回或存储失败，保持原结果并把压力交给 W-04 硬护栏，不能制造假引用。
 
 **验收**：测试重复旧输出、不同版本文件、失败 ToolResult、call/result pair、ArtifactStore 写成功读失败、超大 Unicode 输出；裁剪前后可通过 inspect_artifact 找回原始内容；重启后裁剪决策可重建/解释；不出现新的 Tool retry。focused context/artifact/tool 测试与至少一组真实大输出测量，记录裁剪前后 token 估值和原件 ref。**不做**：替换 ArtifactStore、删除历史、把 TS pruner 引入 Core。
