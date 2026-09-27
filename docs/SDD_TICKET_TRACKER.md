@@ -6104,3 +6104,136 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   （覆盖区间 `09ca47a..HEAD` / 提交总数 **847** / 已审查 **576** / 待判定 **271**）；本节 §8.1 判据 ①
   （`git diff --name-status --no-renames 76cc9c46 HEAD` = 3 文件全 `M` 且全命中 `DOC_PATTERN`）与判据 ②
   （`git status --short` 只 `?? .zcodeignore`）、`git diff --check 76cc9c46..HEAD` exit 0 均在记录笔上当场复核。
+---
+
+## T9（`#317`，B 链第九票）：重复失败与无进展的 stuck 检测 —— 五模式 + 单次纠正 + 2T 暂停 + 三类可证依据恢复（2026-09-27 · 实现 + 五轮两轴审查 + 真实证据闭合，**待集成**）
+
+**状态**：✅ 交付、两轴独立审查五轮闭合（发现 → 四轮定向复核，末轮两轴 PASS）、真实 Live Gate **两份证据**
+（首份因 `src/**` 与断言集变更作废，保留作原始依据）、重车道全量读数、Gate-0 与覆盖闸门闭合。分支
+`zcode/T317-stuck-detection`，基点 `6aff823f`（= 当时的 `origin/main`），14 笔。
+**代码冻结树 = `b5f5eb19` / tree `97f36cb6`**（其后零代码改动：`git diff --stat b5f5eb19..HEAD --
+src tests evaluation web scripts .github` **为空**）；**读数绑定树 = `27de3af0` / tree `7fc64b30`**
+（全量 pytest 跑的正是这棵树）。**最终 Live Gate 证据绑定 sha `b5f5eb19` / tree `97f36cb6`**
+（= 同一代码面；场景 **v5**，真模型 `mimo-v2.6-flash` + 生产工具 + 生产账本）。
+
+**票面**：GitHub `#317`（父票 `#305`；`blocked_by` 的 `#313` / `#314` / `#315` / `#316` 均已完成）。
+规格落点 `02 §5.3`（五模式与阈值、T 首达一次 replan、2T 暂停）与 `03 §5`（非终态 `run/paused`、
+恢复依据必须是**被观测到的**变更，不得暗示可安全续跑）。实现：`agent/guards.py` 扩 `StuckDetector`
+（五模式全部由事件派生 + 指纹规范化 / 脱敏 + 只复位受影响的那一个模式）、`agent/run_budget.py` 的
+暂停载荷与恢复判据、`agent/resume_evidence.py` 的 `StuckEvidencePort`（注入而非内建）、
+`session/service.py` + `assembly.py` 的接线、`cli.py` 的恢复指令。决策全文 = ADR-0048（D1–D10 + §4 残余 16 条）。
+
+**交付序列**（14 笔；父链逐笔线性）：
+
+| # | commit | 内容 | 规模 |
+| --- | --- | --- | --- |
+| 1 | `285db95d` | 实现：五模式检测器 + 单次纠正 + 2T 暂停 + 三类可证依据恢复 + 测试面 | 29 文件 / +4134 −300 |
+| 2 | `9bd87a9b` | Gate-0 三条红：新模块补映射行 / 前端登记 `guard/stuck` / 契约空行 | 3 文件 / +9 −3 |
+| 3 | `533d3173` | Live Gate 场景 `stuck-tool-failure-pause` v1 + 确定性用例 | 4 文件 / +1632 −1 |
+| 4 | `048e2246` | 场景 v2：失败面换成 `read`（bash 非零退出码不是工具失败） | 6 文件 / +795 −189 |
+| 5 | `c080d69d` | 既有会话的 run 补 stuck 证据端口 + 场景 v3 换环境依据 | 9 文件 / +897 −110 |
+| 6 | `9f4df93d` | 恢复依据断言对齐生产载荷形状（`environment_change` 臂不写 `pause_seq`） | 2 文件 / +3 −2 |
+| 7 | `38b57eac` | docs：Live Gate scope 的两句事实陈述跟上（已落地六条） | 1 文件 / +7 −6 |
+| 8 | `ffb41d9a` | **证据**：首份 Live Gate 3/3 PASS 入库（树 `38b57ea`）+ 两次失败读数一并保留 | 12 文件 / +2248 |
+| 9 | `38d109d2` | **修复**：两轴发现阶段处置 —— P1×2 + 非阻塞批（见下） | 16 文件 / +740 −99 |
+| 10 | `5874ba3b` | **修复**：二轮复验处置 F1–F8 | 8 文件 / +407 −27 |
+| 11 | `aa7d0b1a` | **修复**：三轮复验处置 P2-1 + P3×4（可用性由同一份判据派生） | 13 文件 / +474 −111 |
+| 12 | `e3736da0` | **修复**：四轮复验处置 —— 三轮前提被推翻，子证据注入整条撤回 + `#372` | 11 文件 / +250 −122 |
+| 13 | `b5f5eb19` | **修复**：五轮复验处置（4×P3 + 1×P3）；本笔为代码冻结树 | 5 文件 / +55 −22 |
+| 14 | `27de3af0` | **证据**：五轮处置后 Live Gate v5 **3/3 PASS** 入库（树 `97f36cb6`） | 4 文件 / +790 |
+
+**前端面**：本票 `web/**` 改 **2 文件 / +8** —— `web/src/generated/event-types.ts` +1（生成物：
+新事件 `guard/stuck`）与 `web/src/lib/projection.ts` +7（按 `MODEL_REQUEST` / `MEMORY_UPDATED` 同形
+登记为 **no-op** ⇒ 已知类型、**不进 `unknown_events`**；护栏卡面的展示面归后续票，本行只负责
+`Record` 的穷尽性）。
+
+**两轴独立审查（五轮，每轮各一独立只读子代理）**：
+
+- **发现阶段**（冻结 `ffb41d9a`，读范围 `6aff823f..ffb41d9a`）：两轴各 **1×P1**，均由作者独立复核后处置（`38d109d2`）——
+  ① **P1-A**（Correctness）**恢复侧可伪造 `policy_change`**：暂停快照只记 `policy_version`（一个摘要），
+  恢复请求又只带得到"本次声明了什么"（CLI 的 `resume_and_launch` 不 amend ⇒ `_amend_with_session_model`
+  只填 `model`，其余维度以 `None` 进摘要）⇒ 两侧在未声明维度上必然不同名 ⇒ 一次"什么都没改"的恢复被判成
+  "策略变了"而放行（fail-open，实测两个读数 `sha256:f4d5bb13…` vs `sha256:d9f40eb3…`）。修：载荷新增逐维策略输入
+  `run/paused.data.stuck.policy_inputs`，恢复侧先经 `session/model_switch.restore_policy_inputs` **还原**再重算摘要
+  （落在解析 fuse 与会话级模型切换**之前**）；优先级 = 本次请求声明 > 会话级模型切换 > 暂停快照，"省略"永不等于"变化"。
+  ② **P1-B**（Standards）**同批跨过 T 与 2T 时纠正性 replan 从不执行**：`RepeatedToolFailureGuard` 一批里可同时给
+  `soft(T)` 与 `hard(2T)`，`worst_stuck_signal` 按级别序优先挑 `paused` ⇒ 模型一条纠正都没收到，而
+  `guard/stuck` / `replan_count` 照样写 1（对不上账的"已用掉"）。修：同一批中已发 replan 的模式其 paused 级本轮不参与挑选。
+- **二轮复验**（读 `38d109d2`）：Correctness 判 **FAIL** ⇒ 处置 F1–F8（`5874ba3b`）：F1 还原源改取同 run **最后一条**
+  `run/paused`（取第一条会拿两份不同快照比出 `policy_change`）；F2 新增**唯一**可用性判据 `recorded_policy_inputs`
+  （形状合法 + 逐维值能重算出同一格摘要），判据侧与还原侧共用，存量 / 畸形载荷一律 409；F3 `ruff check .` 转绿；
+  F4 providers 改记**原值**（`None`=未声明⇒装配全部 wired 与 `[]`=显式零 provider 是两种策略面）；F7 畸形逐维值由 500 改 409；
+  F5 跨模式同批压 replan 按 `02 §5.3` 字面收窄并登记残余 12；F8 孤儿 `session/resumed` 取证为既有缺口 ⇒ 残余 13。
+- **三轮复验**（读 `5874ba3b`）：Correctness PASS、Standards **FAIL（P2-1 + P3×4）** ⇒ 处置 `aa7d0b1a`。**P2-1**
+  （`03 §5`：暂停载荷不得暗示可安全续跑）：子 run 拿不到证据端口却照样列全三条恢复依据（恢复侧三条全 409）；
+  处置 = 子 runtime 只注入环境那一半、策略那一半如实记 `None`，并把**对外宣称的依据改为从可用性派生**
+  （新增 `run_budget.stuck_resume_requirements` / `describe_resume_requirements`，与判官 `stuck_resume_evidence`
+  共用同一组谓词 —— 宣称集 ⇔ 判据接受集，两个方向都由**一处**定义）。
+- **四轮复验**（读 `aa7d0b1a`）：Standards PASS、Correctness **FAIL（2×P2）**，两条都指向**既有**缺陷：三轮那条
+  "子会话注入环境证据"的**前提被推翻** ⇒ `e3736da0` 把注入**整条撤回**、登记残余 16 并另开 `#372`（详见残余段）。
+- **五轮复验**（读 `e3736da0`）：**两轴 PASS**（4×P3 Standards + 1×P3 Correctness）⇒ `b5f5eb19` 全数处置：
+  CLI `_stuck_resume_hint` 只印**今天走得通**的依据（旧稿会印一条必被 409 挡死的 `--basis relevant_steer`）、
+  `describe_resume_requirements` 兜底措辞订正、ADR 残余 12 的引用改类限定节点 id 且两处读数分开写、
+  ADR D8 收尾句删掉已不可达的 steer 出路。**作者变异**：`actionable = list(available)` ⇒ 两条 CLI 用例转红。
+  **本笔之后未开第六轮**：§8.3 第 4 条的修后重审预算（1 轮/轴）已用满，且末轮两轴均 PASS、五条全 P3、
+  无新引入的 P0/P1 ⇒ 按"停止修复 + 如实登记"收口（登记于本段末与台账第 `340` 行）。
+
+**重车道读数（命令与树写死）**：
+
+- **后端全量**（读 `27de3af0`；`PYTEST_EXTRA_ARGS="-q --no-header -p no:cacheprovider -p no:randomly"
+  bash scripts/run_tests_clean.sh`，脚本内自带 `PYTHONPATH=`）**第 1 遍：1 failed / 4484 passed /
+  14 skipped / 50 deselected in 758.46s (0:12:38)**（收集总数 **4549**，exit 1）。**唯一红 = 已登记环境项**
+  `tests/memory/test_memory_v2_recall_dataset.py::test_frozen_project_recall_corpus_is_versioned_and_cross_session`
+  —— `dataset_sha256()` 哈希 `path.read_bytes()`，本 clone `core.autocrlf=true` ⇒ 工作树 CRLF 而同 blob 是 LF；
+  本次按 §14.13(b) 当场机械复核（`git ls-files --eol` = `i/lf w/crlf`、234 处 CRLF、裸 LF 0）：
+  工作树 `6c834bb8353f…` ↔ 测试钉住的字面量 `8b33b9da3cf9…`，**把 CR 剥掉后哈希逐字节等于那个字面量** ⇒
+  同一份内容两个读数，与 T5 / T6 / T7 / T8 登记的是**同一条**；本票对 `tests/memory/**` 与
+  `evaluation/memory_v2_recall.py` 零改动。
+- **`#338` 那条无签名间歇红**（`tests/web/test_memory_api.py::test_v2_list_filters_detail_versions_edit_stale_version_and_identity`）
+  **在本次读数里未出现**。如实登记：本票更早一次**探路**全量（在 `b5f5eb19` 之前的树上、非门禁读数）里出现过一次，
+  随后隔离单跑 `1 passed`；本次冻结树读数里**未出现** ⇒ 与 `#338` 记录的形态一致（约 2/5 出现率、从无失败签名），
+  按该票的升级规则（"再次出现**并留下签名**才停线"）**不停线**，且**不报"全绿"**。
+- **前端 `vitest`**（读 `27de3af0` 的 `web/**`，`npm test` = `vitest run`）：**73 files / 1157 passed /
+  50.63s / exit 0**（含 T7 那条 flake 过的 `StepDetail.window.test.tsx` **6 passed**）。
+- **前端 `build`**：`npm run build`（= `tsc -b && vite build`）**exit 0**（构建 11.8s）。
+- **`e2e`（playwright）本次未跑 —— 如实登记，理由**：本票 `web/**` 的改动是"新枚举成员 + 已知类型的
+  **no-op** 投影登记"，没有任何既有流程会发出 `guard/stuck`（新增事件只由本票的后端路径产生），
+  故 e2e 的既有用例面对它零区分度；生成物同步守卫（Gate-0 车道⑤）与 `tsc` / `oxlint` / `vitest` / `build`
+  四车道已全绿。**这不是"全绿"**：e2e 车道本票**没有读数**。
+
+**门禁（Gate-0 裸全量，tip `98bfc6d0` / tree `6b0ffa43`）**：**6/6 PASS**，墙钟 **24.2s**
+（diff-check 0.03 / ruff 0.70 / oxlint 0.30 / tsc 12.28 / guards 9.73 / coverage 1.19），读数落盘
+`docs/gate/98bfc6d011f34a3c3d26c3a6103bf68d158c1e9b.json`；bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，
+另跑 `git diff --check 6aff823f..HEAD` **exit 0** 补上已提交 15 笔的范围。覆盖闸门在 `98bfc6d0` 上
+**exit 0**（覆盖区间 `09ca47a1..98bfc6d0` / 提交总数 **864** / 已审查 **590** / 待判定 **274**；写行前为
+576 / 287 ⇒ 增量 14 = 本票 14 笔；台账描述字段 lint 的 52 条命中**全部来自存量行**，本票新写的 6 行 0 命中；
+此后追加的 docs 记录笔会让「待判定」同步 +1，属该闸门的正常记账行为）。**§8.1 读数传递**：全量读数之后
+只追加 docs / 台账笔，按判据 ①（`--name-status` 只 `A`/`M` 且全命中 `DOC_PATTERN`）与判据 ②
+（`git status --short` 只 docs + `?? .zcodeignore`）在本段末笔当场复核。
+
+**残余（登记，不阻断；与 ADR-0048 §4 的 1–16 条一一对应；此处只列操作性结论 + 指针）**：
+① 摘要不是全序（"更新"只能判"变过"）；② 环境 revision 的代价与精度（每次现算）；
+③ `metadata` 不进观察指纹；④ 模式 ③（无进展独白）的可达面窄；⑤ `STATUS_IDENTICAL_TOOL_FAILURE_LOOP`
+从生产路径消失（改由 `guard/stuck` 承载）；⑥ CLI 的三类依据（`relevant_steer` 今天没有登记入口）；
+⑦ `replan_count` 是契约值不是账，"纠正消息"与"它的事件"之间有窗口；⑧ `ToolResult.runtime_signal`
+只服务委派树账本且只在当场那一轮；⑨ 恢复依据的正文不进模型上下文；⑩ 模式 ⑤ 可被"新颖观察"无限推迟；
+⑪ **本票之前写入的存量 stuck 暂停**：`policy_change` 一律 409（fail-closed，缺逐维值就还原不回来）；
+⑫ **跨模式同批**时首达 T 那条 replan 仍可能被同批的暂停压掉（同批同模式那一支由两条入库用例承重）；
+⑬ 装配期失败留下的孤儿 `session/resumed`（既有顺序缺口）；⑭ 快照里的档位名不存在时是裸 `KeyError`
+（响亮但不是设计过的形状，已有入库用例承重）；⑮ **委派子 run 的策略面在 T9 里没有定义**（→ `#370`）；
+⑯ **委派子会话今天无法恢复，所以子 run 的 stuck 暂停没有任何可用依据**（→ `#372`）。
+
+**⑯ 的形状（四轮审查的两条 P2，作者已独立复核）**：`resume_and_launch` → `build_runtime` **无条件**调
+`workspace_registry.create(session_id, …)`（`assembly.py`），而子会话的映射是父级 **alias**（`multiagent/provider.py`
+的 `bind_alias`，`#288` 之后），`create()` 对 alias 抛 `WorkspaceBindingError`（`sandbox/registry.py`，该行为由
+`tests/sandbox/test_workspace_registry.py` 钉住）⇒ **任何**子会话恢复（含预算暂停）都以未映射的 500 收场，
+并在 `Session.resume` 已落的 `session/resumed` 上留下孤儿事件。⇒ `03 §5`「不得暗示可安全续跑」⇒ 子 run 的
+载荷**不再宣称**环境 / 策略依据，只列 `relevant_steer`（判据对它不恒拒：它比事件顺序、不看快照）。
+**入口本票不修**：`build_runtime` 给的是全集内置工具，而子 run 的工具面是 `AgentSpec.tool_scope` 收窄过的
+—— 放开入口而不按子会话自己的 spec 重建 runtime 等于**放大它的工具面**，比"不可恢复"更坏（理由与五条验收在 `#372`）。
+
+**已另开票（本票不修）**：`#370` 委派子 run 的策略面未定义（残余 ⑮，正文已按四轮结论重写——旧正文里
+"实测可经 `environment_change` 恢复"已被推翻）；`#372` 委派子会话不可恢复（残余 ⑯，含复现、影响面、
+五条验收与"不能只改一行"的理由）。`#337` / `#338` 状态不变（用户已裁决暂不修）。
+
+**集成**：待执行（走「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准，`main` 受服务端保护）。
