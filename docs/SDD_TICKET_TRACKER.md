@@ -6118,7 +6118,7 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 
 ---
 
-## T9（`#317`，B 链第九票）：重复失败与无进展的 stuck 检测 —— 五模式 + 单次纠正 + 2T 暂停 + 三类可证依据恢复（2026-09-27 · 实现 + 五轮两轴审查 + 真实证据闭合，**待集成**）
+## T9（`#317`，B 链第九票）：重复失败与无进展的 stuck 检测 —— 五模式 + 单次纠正 + 2T 暂停 + 三类可证依据恢复（2026-09-27 · 实现 + 五轮两轴审查 + 真实证据闭合；2026-09-28 第四次「先回后正」+ 第五轮重采，**待集成**）
 
 **状态**：✅ 交付、两轴独立审查五轮闭合（发现 → 四轮定向复核，末轮两轴 PASS）、真实 Live Gate **两份证据**
 （首份因 `src/**` 与断言集变更作废、保留作原始依据；其后每次 `origin/main` 前进都在新树重跑一份）、
@@ -6358,7 +6358,7 @@ PR #371 工作台线：新增 `docs/adr/0046-client-presence-safe-pause.md`、`W
 `?? .zcodeignore`（唯一例外）+ `docs/gate/` 下两份未跟踪 `.json`（命中 `DOC_PATTERN`）⇒ 绑 `8f7f9854` 的
 第三轮四条重车道读数与 Live Gate 证据**对最终 tip 有效**（第二次合并作废的 `6c84d544` / `468ea568` 那批由此被取代）。**该结论已被第三次「先回后正」作废**（`510a2203` 带进 `scripts/**` 与 `tests/**`）——取代它的是下方的第四轮块。
 
-**合并后重车道读数 · 第四轮（**正式读数**：绑 `f0dd38d1` / tree `6b5e2a33` = 第三次「先回后正」后**含证据**的树；命令同第二轮）**：
+**合并后重车道读数 · 第四轮（**正式读数**：绑 `f0dd38d1` / tree `6b5e2a33` = 第三次「先回后正」后**含证据**的树；命令同第二轮；**该读数已被第四次「先回后正」作废，现行正式读数见本段末第五轮块**）**：
 
 - **后端全量**：**4617 passed / 2 skipped / 51 deselected / 0 failed in 1021.55s (17:01)**，exit 0。收集总数 **4670**
   （第三轮 4667，+3 = 并入的 upstream 13 笔带来的用例），`skipped` 与第二 / 三轮同为 **2**（外部 docker 栈仍在场）
@@ -6379,7 +6379,7 @@ PR #371 工作台线：新增 `docs/adr/0046-client-presence-safe-pause.md`、`W
 的 Gate-0 读数**对合并后的树一律失效**（判据①：出现非 docs 路径 ⇒ 必须在新树重跑）；第四轮以**含证据的树**
 `f0dd38d1` 为正式读数树（证据笔在前、重车道在后，沿用第二 / 三轮的次序）。
 
-**门禁（Gate-0 裸全量，第三次合并后的最终读数）**：tip `f0dd38d1` / tree `6b5e2a33e4063320`，**6/6 PASS**，
+**门禁（Gate-0 裸全量，第三次合并后的最终读数；**该读数已被第四次「先回后正」作废**，新树最终读数见本段末第五轮门禁块）**：tip `f0dd38d1` / tree `6b5e2a33e4063320`，**6/6 PASS**，
 墙钟 **29.83s**（diff-check 0.05 / ruff 1.11 / oxlint 1.45 / tsc 10.25 / guards 11.38 / coverage 5.60），
 落盘 `docs/gate/f0dd38d1aadc3281f4e44c450ab67b4decfb9c21.json`（`tracked_matches_head=true` /
 `untracked=['.zcodeignore']`）；覆盖闸门同 tip **exit 0**（覆盖区间 `09ca47a1..HEAD` / 提交总数 **981** /
@@ -6389,7 +6389,7 @@ PR #371 工作台线：新增 `docs/adr/0046-client-presence-safe-pause.md`、`W
 判据 ② = 写本笔前的 `git status --short` → `?? .zcodeignore`（唯一例外，`tracked_matches_head=true`）⇒
 绑 `f0dd38d1` 的第四轮四条重车道读数与 Live Gate 证据**对判据① 的末笔有效**；本笔（记录笔五）只改
 `docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-09.md` / `docs/PHASE_STATUS.md` 三个 `.md`
-（全部命中 `DOC_PATTERN`），故按 §8.1 第 3 条的合成，读数**对最终 tip 同样有效**。
+（全部命中 `DOC_PATTERN`），故按 §8.1 第 3 条的合成，读数**对最终 tip 同样有效**。**该结论已被第四次「先回后正」作废**（`5502acd5` 带进 `scripts/**` 与 `tests/**`）——取代它的是下方的第五轮块。
 
 
 **门禁（Gate-0 裸全量，合并后）**：首次落盘（证据笔 `7bfa8218`）**5/6** —— 红车道 = coverage：证据笔含
@@ -6459,4 +6459,29 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 五条验收与"不能只改一行"的理由）。`#337` / `#338` 状态不变（用户已裁决暂不修）；**合并后新签名的三条 `#376` / `#377` / `#378` 同样只登记不修**
 （用户既定口径：新发现的、超出本票范围的缺陷 ⇒ 登记 + 开票，不当场修）。
 
-**集成**：待执行（走「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准，`main` 受服务端保护）；第三次「先回后正」后的读数已在 `f0dd38d1` / tree `6b5e2a33` 重采（见第四轮块）。
+**集成**：待执行（走「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准，`main` 受服务端保护）；第四次「先回后正」后的读数已在 `88294f25` / tree `769b0af17bf7` 重采（见第五轮块）。
+
+**2026-09-28 追加（第四次「先回后正」+ 第五轮读数 · 现行正式）**：用户指令「先同步流程基线再开工」⇒ `git fetch origin main && git merge origin/main`：`origin/main` = `f4c64f85`（PR #387 线，落后 **13** 笔），merge **`5502acd5`**（父一 `c86a58f9` + 父二 `f4c64f85`，base `510a2203`）**零冲突**：`git merge-tree` 预演树 = 实际合并树 `78b65ef1`、`git show --cc --name-only` 空表、逐 blob **10/10** 等于父二（我方自 base 起 3 笔全 docs）；机械归属 = 台账行 **354**（`b4a1b744`；文件面 10 条 = 6 A + 4 M，非 docs 文件面 = `scripts/check_exec_bit.py`(A) / `scripts/gate0.py`(M) / `tests/test_exec_bit_matches_shebang.py`(A)）。**派单前 Gate-0（新协议 §8.2 第 4 条的首次执行）**：tip `5502acd5` **5/6** —— 唯一红 = coverage，❌ 集合恰 = {本合并}（该条文的预期形状），读数落盘 `docs/gate/5502acd5ca38a62ed0f1027f2a4d3fae261ee126.json`；落行 354 后覆盖闸门 **exit 0**（lint 52 = 基线，新行 0 命中）。**§8.1：本 merge 带进 `scripts/**` 与 `tests/**` ⇒ 绑 `f0dd38d1` 的第四轮读数一律失效**；第五轮以含证据的树 **`88294f25`** / tree `769b0af17bf799331dd96123b09a4f6468e7aee0` 为正式读数树（证据笔在前、重车道在后）。
+
+**合并后重车道读数 · 第五轮（**现行正式读数**：绑 `88294f25` / tree `769b0af17bf7`；命令同第四轮）**：
+
+- **真实 Live Gate v5（第四次合并后重采）**：**3/3 PASS**、每次 **16/16** 断言、0 FAIL（77506 / 116621 / 101795 ms），证据 `docs/live_gate/20260927T182607-b4a1b744861e-stuck-tool-failure-pause/`（绑 `b4a1b744` / tree `e29edb29` = 读数树的代码面），证据笔 `88294f25`（`.jsonl` 已命中 `DOC_PATTERN` ⇒ 按路径自动归属，无需台账行）。
+- **后端全量**：**4629 passed / 2 skipped / 51 deselected / 0 failed in 1128.50s（18:48）**，exit 0。收集增量 = upstream `tests/test_exec_bit_matches_shebang.py` 带入的 **12** 例（4617 → 4629），`skipped=2`（外部 docker 栈在场，同前几轮口径）；`#376` / `#377` / `#338` 本轮均未出现。
+- **前端 `vitest`**：**73 files / 1157 passed / 89.84s / exit 0**（零红 —— 既有超时 flaky 本轮未出现）。
+- **前端 `build`**：`pnpm build`（= `tsc -b && vite build`）**exit 0**。
+- **`e2e`**：`pnpm exec playwright test --workers=2` → **460 passed / 0 failed / 9.9m（exit 0）** —— `#378` 已登记的四条具名时序敏感红本轮**一条未现**（同第三轮的全绿形状）。
+
+**门禁（Gate-0 裸全量，第四次合并后的最终读数）**：tip `88294f25` / tree `769b0af17bf799331dd96123b09a4f6468e7aee0`，**6/6 PASS**，
+墙钟 **35.8s**（diff-check 0.03 / ruff 1.01 / oxlint 1.54 / tsc 14.72 / guards 13.63 / coverage 4.82），
+落盘 `docs/gate/88294f250618841c5d6ff70de686c891b844d9bf.json`（`tracked_matches_head=true` /
+`untracked=['.zcodeignore']`）；覆盖闸门同 tip **exit 0**（覆盖区间 `09ca47a1..HEAD` / 提交总数 **999** /
+已审查 **756** / 待判定 **243**；台账目录分片 **221** 个、描述字段 lint **52** 命中 = 与基线持平，本票新增行 0 命中）。
+**§8.1 读数传递（第五次判定）**：第四次合并把 `scripts/check_exec_bit.py` / `scripts/gate0.py` /
+`tests/test_exec_bit_matches_shebang.py` 并入本票树 ⇒ 绑 `f0dd38d1` 的第四轮四条重车道读数与 Gate-0 读数
+**对合并后的树一律失效**（判据①：非 docs 路径 ⇒ 必须在新树重跑）；第五轮以**含证据的树** `88294f25` 为正式读数树
+（证据笔在前、重车道在后，沿用第二 / 三 / 四轮的次序）。判据 ① = `git diff --name-status --no-renames 88294f25 7911e6e5` →
+**1 条，状态 `A`**（`docs/gate/88294f250618841c5d6ff70de686c891b844d9bf.json`），命中 `DOC_PATTERN`；
+判据 ② = 写本笔前的 `git status --short` → `?? .zcodeignore`（唯一例外，`tracked_matches_head=true`）⇒
+绑 `88294f25` 的第五轮四条重车道读数与 Live Gate 证据**对判据① 的末笔有效**；本笔（记录笔六）只改
+`docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-09.md` / `docs/PHASE_STATUS.md` 三个 `.md`
+（全部命中 `DOC_PATTERN`），故按 §8.1 第 3 条的合成，读数**对最终 tip 同样有效**。
