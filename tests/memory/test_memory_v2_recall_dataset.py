@@ -34,6 +34,7 @@ def test_dataset_hash_is_stable_across_windows_line_endings(tmp_path) -> None:
     assert dataset_sha256(lf_path) == expected
     assert dataset_sha256(crlf_path) == expected
 
+
 def test_recall_corpus_digest_is_independent_of_checkout_line_endings(tmp_path: Path) -> None:
     line_feed = tmp_path / "lf.json"
     crlf = tmp_path / "crlf.json"
