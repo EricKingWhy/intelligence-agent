@@ -6328,6 +6328,20 @@ BASE 与两方全有 ⇒ 既有项）、「追加在 EOF」措辞（T6/T7/T8 落
 不许用「看起来只是小改」豁免）；第三轮以**含证据的树** `8f7f9854` 为正式读数树（证据笔在前、重车道在后，
 避开第一轮踩过的 `.jsonl` 不在 `DOC_PATTERN` 的坑）。判据 ① / ② 的末笔实测见本段末门禁块。
 
+**门禁（Gate-0 裸全量，第二次合并后的最终读数）**：tip `d6a54050` / tree `066992db898682ad0c9e5473a4847ab587b90544`，
+**6/6 PASS**，墙钟 **14.5s**（diff-check 0.03 / ruff 0.07 / oxlint 0.18 / tsc 11.27 / guards 2.08 / coverage 0.85），
+落盘 `docs/gate/d6a540508b64e3284bab145474f3f6e831878d03.json`（`tracked_matches_head=true` /
+`untracked=['.zcodeignore','docs/gate/a1849373….json']`）；覆盖闸门同 tip **exit 0**（覆盖区间 `09ca47a1..HEAD` /
+提交总数 **964** / 已审查 **728** / 待判定 **236**；台账 **216** 行、描述字段 lint **52** 命中 = 与基线持平，
+本票新增行 0 命中）。**中间态读数一并入库不删**：`docs/gate/a184937384253069486d8951a79be44e702be43d.json`
+（笔三的树）**5/6** —— 红车道 = coverage，根因 = 证据笔 `8f7f9854` 的 `.jsonl` 不在 docs-only 白名单、
+无归属行（与第一轮 349 / 第二轮 350 同一形状）⇒ 台账行 **352** 归属后同树 `--only coverage` **PASS**。
+**§8.1 读数传递（第三次判定的末笔实测）**：判据 ① = `git diff --name-status --no-renames 8f7f9854 d6a54050` →
+**4 条，状态只 `M`/`A`**（`docs/PHASE_STATUS.md` / `docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-09.md` /
+`docs/review_ledger.d/352-b1963bb-8f7f985.tsv`），全部命中 `DOC_PATTERN`；判据 ② = 写本笔前的 `git status --short` →
+`?? .zcodeignore`（唯一例外）+ `docs/gate/` 下两份未跟踪 `.json`（命中 `DOC_PATTERN`）⇒ 绑 `8f7f9854` 的
+第三轮四条重车道读数与 Live Gate 证据**对最终 tip 有效**（第二次合并作废的 `6c84d544` / `468ea568` 那批由此被取代）。
+
 **门禁（Gate-0 裸全量，合并后）**：首次落盘（证据笔 `7bfa8218`）**5/6** —— 红车道 = coverage：证据笔含
 `.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属；补台账行 349 归属后 `--only coverage` **PASS**。**读数树重采后的
 该轮最终读数**（tip `468ea568` / tree `4d84c0a7d199`，= 读数树 `6c84d544` + 本票记录笔一笔；
