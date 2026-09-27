@@ -1,6 +1,6 @@
 # ADR-0044 — Memory V2 隐私观测与质量评测
 
-- **Status**: Proposed（实现、离线判别测试与两项真实公开 smoke 已完成；完整项目门禁与集成仍待执行）
+- **Status**: Accepted（实现、验证与真实证据已随 PR #339 集成；GitHub issue #302 已关闭）
 - **Date**: 2026-09-26
 - **Deciders**: 用户（#302 范围、真实服务授权、LoCoMo 非商业内部评测边界）+ 本 Agent（实现方案）
 - **Related**:
