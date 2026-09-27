@@ -68,6 +68,22 @@ _Avoid_: orphan call, broken chain, missing result
 一次 `AgentRuntime.run()` 调用的生命周期单元，绑定 `run_id`。同一 Session 可有多次 Run；Run 边界由 `run/started` 与 `run/completed` / `run/failed` / `run/interrupted` 事件标记，是 Phase 14 Fork 的切分依据。
 _Avoid_: turn, iteration, loop, attempt
 
+**产品任务（Task）**:
+用户委托的一个可续做目标，身份对应一个 Session；同一任务可跨多个 Run，Fork 派生带来源关系的新任务。
+_Avoid_: Run, process, context window
+
+**产品交付状态（Delivery Status）**:
+用户查看任务成果时的审阅与接受状态；与 Runtime 的 Run 终态、验证是否通过分别记录，不能由 `run/completed` 单独推定。
+_Avoid_: run/completed, test result, user acceptance
+
+**工作目录写入租约（Workspace Write Lease）**:
+一个具有写入意图的产品任务对其选定工作目录的排他占用关系；暂停或待审阅时仍由该任务占用，直到用户接受、归档或明确释放。
+_Avoid_: ToolExecutor 单次资源锁, Git worktree, SessionBudget
+
+**任务进度文件（Progress File）**:
+供用户与接班 Agent 阅读的单任务交接材料，记录目标、约束、当前进展、证据结论和下一步；它有可核对的会话事实来源。
+_Avoid_: SessionEvent, diagnostic log, long-term memory
+
 **run/interrupted**:
 进程重启扫描时，对「开了没关」的 run 补记的中断事实（信封带 `run_id` / `step_id`，data 带 `interrupted_seq` / `reason`）。它只声明 run 被打断，**不判定工具副作用是否发生**——那仍由 Ledger reconcile 决定（不变量 #12/#14）。标记后强制 reconcile；UNKNOWN 工具调用需人工裁决，不盲重跑。
 _Avoid_: crash log, aborted run, failed run（失败 run 是 `run/failed`，语义不同）

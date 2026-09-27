@@ -114,18 +114,21 @@ src/agent_harness/session/event.py                  ← 唯一事实源
 ### 3.4 暂停 / 恢复生命周期事件（**持久化、非终态**）
 
 长任务的执行边界由两类**持久化**事件表达：**`run/paused`** 与 **`run/resumed`**（#305 §5 冻结的名字）。
-本节是这两个名字的**语义与字段权威**（契约冻结于 ADR-0044）；机器可读的**枚举**副本由
+本节是这两个名字的**语义与字段权威**（#305 基线契约冻结于 ADR-0044；个人工作台客户端在场扩展见 ADR-0046）；机器可读的**枚举**副本由
 `docs/EVENT_VOCABULARY.md` 承载，而该文件是从 `src/agent_harness/session/event.py` **生成**的：
 本契约尚未落地为常量，故两个名字的枚举条目会在实现票把常量加入 `event.py` 并重新生成后出现
 （先写规格再写代码）。在枚举条目出现之前，本节就是它们的权威定义。
 
-- **`run/paused`**：`reason ∈ {budget_exhausted, deadline, stuck}`、`trigger_dimension`（触发维度或
-  stuck 模式）、预算 `version`、consumed / limits 快照、`continuation`（已完成 / 剩余 / 阻塞 /
+- **`run/paused`**：#305 基线 `reason ∈ {budget_exhausted, deadline, stuck}`；个人工作台后续扩展
+  `client_absent`（仅受客户端在场协议管理的 Run）。`trigger_dimension`（触发维度、stuck 模式或
+  `client_presence`）、预算 `version`、consumed / limits 快照、`continuation`（已完成 / 剩余 / 阻塞 /
   下一步安全动作）、`closeout_source ∈ {model, deterministic}`、`resume_requirements`（预算与
-  deadline 暂停为空）。**非终态**：停止活动执行，但**不**关闭逻辑 `run_id`。
+  deadline 暂停为空）。`client_absent` 的 `closeout_source` MUST 为 `deterministic`，不得额外发起模型请求。
+  **非终态**：停止活动执行，但**不**关闭逻辑 `run_id`。
 - **`run/resumed`**：`from_pause_seq`、`previous_budget_version`、新的 `budget_version`、更新后的 limits、
   consumed（**等于**暂停快照，直到产生新工作）、
-  `resume_basis ∈ {budget_increase, relevant_steer, environment_change, policy_change}`。
+  `resume_basis ∈ {budget_increase, relevant_steer, environment_change, policy_change}`；个人工作台
+  后续扩展 `client_return` 仅用于显式继续 `client_absent`，重新连接本身不得自动产生 `run/resumed`。
 
 不变量：
 
@@ -173,11 +176,11 @@ Resume MUST NOT 默认重放所有 Tool。
 
 - `interrupted` 是**崩溃恢复态**：持有会话的进程被杀后，启动扫描补记 `run/interrupted`，未结清时
   **对账优先于恢复**；`needs_reconcile` 同样 MUST 先 reconcile 才允许恢复；
-- **显式取消与孤儿回收**保持既有**立即 / 回收**语义，MUST NOT 被改写成 `paused`：用户 `cancel`
-  与零订阅者超时后的孤儿回收仍落 `run/failed` 的既有面（`reason ∈ {cancelled, orphaned}`）；
-  单纯的客户端断连既不是取消也不是 `interrupted`（只停止订阅，久无订阅者才由回收路径收尾）。
+- **显式取消与旧入口孤儿回收**保持既有**立即 / 回收**语义，MUST NOT 被改写成 `paused`：用户 `cancel`
+  与**未接入产品客户端在场协议**的零订阅者超时孤儿回收仍落 `run/failed` 的既有面（`reason ∈ {cancelled, orphaned}`）；
+  对旧入口，单纯的客户端断连既不是取消也不是 `interrupted`（只停止订阅，久无订阅者才由回收路径收尾）。
   故 `02 §2` 的 loop 出口词表里的 `cancelled` 是**出口原因**，不是状态名；`paused` 只由
-  预算 / deadline / stuck 三类原因产生。
+  #305 的预算 / deadline / stuck 三类原因，以及个人工作台后续阶段的 `client_absent` 产生。
 
 **Crash durability**（真实子进程 kill 后重启，无刷新）：MUST 从已持久化事件重建出**同样的**
 limits、consumed、`budget_version`、continuation 判定与 stuck 指纹（§3.4 不变量），

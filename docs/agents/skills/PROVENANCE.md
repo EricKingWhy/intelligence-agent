@@ -173,7 +173,7 @@ credential password secret token api_key rm -rf chmod 777 sudo
 - **未搬运的可执行文件**：`show-me-your-work/scripts/log.sh`。它**本身无风险**（纯本地 TSV 追加器，
   唯一的"安全相关"行为是防御性的：把 `=` `+` `-` `@` 开头的单元格前缀单引号，防表格公式注入）。
   不搬的真实理由是两条：① 本仓不需要（台账由 Python 落盘）；② `docs/**` 下的 `.sh` **不命中覆盖闸门的
-  `DOC_PATTERN`**（只认 `.md/.txt/.rst/.tsv/.json/.yaml`），搬进来会让该提交无法走 docs-only 白名单
+  `DOC_PATTERN`**（只认 `.md/.txt/.rst/.tsv/.json/.jsonl/.yaml`），搬进来会让该提交无法走 docs-only 白名单
   —— 正是协议 §7 第 8 条记的那类陷阱。⇒ 该 skill 正文提到的 `scripts/log.sh` 在本仓**是悬空引用**；
   **另有 4 类悬空 / 宿主专属引用**（未搬的 `how`/`why`/`arena`/`unslop`/`build-the-lever`、
   `.cursor/skills/verify-*`、`agent-transcripts/`），逐条清单见 §4.2。
