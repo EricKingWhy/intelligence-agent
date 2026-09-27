@@ -359,16 +359,16 @@ async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypat
     close_calls: list[str] = []
 
     class _StubMemory:
-        async def close(self) -> None:
+        async def aclose(self) -> None:
             close_calls.append("closed")
 
     from agent_harness.capability.wiring import CapabilityWiring
 
     class _StubWiring(CapabilityWiring):
-        """真 dataclass 子类：aclose 契约（memory + lifecycle 隔离关闭）生效。"""
+        """真 dataclass 子类：aclose 关闭登记的 V2 memory 生命周期资源。"""
 
         def __init__(self, memory):
-            super().__init__(memory=memory, lifecycle=[])
+            super().__init__(memory_v2=memory, lifecycle=[memory])
 
     wire_started = asyncio.Event()
     release_wire = asyncio.Event()

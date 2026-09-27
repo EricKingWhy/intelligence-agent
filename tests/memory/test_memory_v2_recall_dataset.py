@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 from evaluation.memory_v2_recall import (
@@ -19,6 +20,19 @@ def test_frozen_project_recall_corpus_is_versioned_and_cross_session() -> None:
     assert len(dataset["memories"]) >= 20
     assert len(dataset["queries"]) >= 20
     assert all(memory["source"].startswith(("SPEC_ROOT/", "docs/")) for memory in dataset["memories"])
+
+
+def test_dataset_hash_is_stable_across_windows_line_endings(tmp_path) -> None:
+    content_lf = b'{"version": 1}\n{"scope": "project"}\n'
+    content_crlf = content_lf.replace(b"\n", b"\r\n")
+    lf_path = tmp_path / "dataset-lf.json"
+    crlf_path = tmp_path / "dataset-crlf.json"
+    lf_path.write_bytes(content_lf)
+    crlf_path.write_bytes(content_crlf)
+
+    expected = hashlib.sha256(content_lf).hexdigest()
+    assert dataset_sha256(lf_path) == expected
+    assert dataset_sha256(crlf_path) == expected
 
 
 def test_recall_corpus_digest_is_independent_of_checkout_line_endings(tmp_path: Path) -> None:

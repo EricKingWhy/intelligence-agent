@@ -14,8 +14,10 @@ from pathlib import Path
 
 import pytest
 
+import agent_harness.instance_lock as instance_lock_module
 from agent_harness.instance_lock import (
     ALLOW_SHARED_ROOT_ENV,
+    CUTOVER_FENCE_FILENAME,
     DEFAULT_LOCK_FILENAME,
     InstanceLock,
     InstanceLockError,
@@ -31,7 +33,7 @@ from agent_harness.instance_lock import InstanceLock, InstanceLockError
 
 root, ready, hold = {root!r}, {ready!r}, {hold!r}
 try:
-    InstanceLock(root).acquire()
+    lock = InstanceLock(root).acquire()
 except InstanceLockError as error:
     print("LOCKED:" + str(error), flush=True)
     sys.exit(3)
@@ -39,6 +41,7 @@ if ready:
     open(ready, "w", encoding="utf-8").write("ok")
 print("ACQUIRED", flush=True)
 time.sleep(hold)
+lock.release()
 """
 
 
@@ -153,6 +156,34 @@ def test_creates_missing_root_directory(tmp_path: Path) -> None:
         lock.release()
 
 
+def test_cutover_fence_blocks_application_but_allows_maintenance_resume(tmp_path: Path) -> None:
+    (tmp_path / CUTOVER_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+
+    with pytest.raises(InstanceLockError, match="reset is incomplete"):
+        InstanceLock(tmp_path).acquire()
+
+    maintenance = InstanceLock(tmp_path, allow_cutover=True).acquire()
+    maintenance.release()
+
+
+def test_cutover_and_application_cannot_reuse_each_others_same_process_lock(
+    tmp_path: Path,
+) -> None:
+    application = InstanceLock(tmp_path).acquire()
+    try:
+        with pytest.raises(InstanceLockError, match="different operation"):
+            InstanceLock(tmp_path, allow_cutover=True).acquire()
+    finally:
+        application.release()
+
+    maintenance = InstanceLock(tmp_path, allow_cutover=True).acquire()
+    try:
+        with pytest.raises(InstanceLockError, match="different operation"):
+            InstanceLock(tmp_path).acquire()
+    finally:
+        maintenance.release()
+
+
 def test_escape_hatch_downgrades_to_warning(tmp_path: Path) -> None:
     """逃生门：显式设 ALLOW_SHARED_ROOT 时降级为警告（默认安全，必须显式开启）。"""
     holder = InstanceLock(tmp_path).acquire()
@@ -160,8 +191,163 @@ def test_escape_hatch_downgrades_to_warning(tmp_path: Path) -> None:
         child = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: "1"})
         assert child.returncode == 0, f"设了逃生门就该放行，实际 rc={child.returncode}\n{child.stdout}"
         assert "WARNING" in child.stderr or "WARNING" in child.stdout
+        assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
     finally:
         holder.release()
+
+
+def test_escape_hatch_lease_blocks_cutover_until_writer_exits(tmp_path: Path) -> None:
+    holder = InstanceLock(tmp_path).acquire()
+    ready = tmp_path / "shared-root-ready"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+    )
+    try:
+        _wait_for_ready(ready)
+        assert len(list(tmp_path.glob(".instance-shared-root-*.lease"))) == 1
+        with pytest.raises(InstanceLockError, match="workspace writer is active"):
+            InstanceLock(tmp_path).assert_no_shared_root_writers()
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+        holder.release()
+
+    InstanceLock(tmp_path).assert_no_shared_root_writers()
+    assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
+
+
+def test_normal_startup_refuses_active_shared_root_lease_after_primary_releases(
+    tmp_path: Path,
+) -> None:
+    holder = InstanceLock(tmp_path).acquire()
+    ready = tmp_path / "shared-root-ready"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+    )
+    try:
+        _wait_for_ready(ready)
+        assert len(list(tmp_path.glob(".instance-shared-root-*.lease"))) == 1
+        holder.release()
+
+        normal_startup = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+        assert normal_startup.returncode == 3
+        assert "workspace writer is active" in normal_startup.stdout
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+        holder.release()
+
+    next_startup = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+    assert next_startup.returncode == 0, f"{next_startup.stdout}\n{next_startup.stderr}"
+    assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
+
+
+def test_lease_scan_cannot_remove_a_writer_still_registering(tmp_path: Path) -> None:
+    holder = InstanceLock(tmp_path).acquire()
+    ready = tmp_path / "lease-created"
+    proceed = tmp_path / "allow-lease-lock"
+    registered = tmp_path / "lease-registered"
+    finish = tmp_path / "finish-writer"
+    script = f"""
+import time
+from pathlib import Path
+import agent_harness.instance_lock as locks
+
+root = Path({str(tmp_path)!r})
+ready = Path({str(ready)!r})
+proceed = Path({str(proceed)!r})
+registered = Path({str(registered)!r})
+finish = Path({str(finish)!r})
+real_take_os_lock = locks._take_os_lock
+
+def pause_before_lease_lock(fd):
+    if list(root.glob(".instance-shared-root-*.lease")) and not ready.exists():
+        ready.write_text("ready", encoding="utf-8")
+        while not proceed.exists():
+            time.sleep(0.01)
+    real_take_os_lock(fd)
+
+locks._take_os_lock = pause_before_lease_lock
+holder = locks.InstanceLock(root).acquire()
+registered.write_text("registered", encoding="utf-8")
+while not finish.exists():
+    time.sleep(0.01)
+holder.release()
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+    )
+    try:
+        _wait_for_ready(ready)
+        holder.release()
+
+        during_registration = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+        assert during_registration.returncode == 3
+        assert "lease registry is busy" in during_registration.stdout
+        assert len(list(tmp_path.glob(".instance-shared-root-*.lease"))) == 1
+
+        proceed.touch()
+        _wait_for_ready(registered)
+        after_registration = _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""})
+        assert after_registration.returncode == 3
+        assert "workspace writer is active" in after_registration.stdout
+    finally:
+        proceed.touch()
+        finish.touch()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
+        holder.release()
+
+    assert proc.returncode == 0, proc.stderr.read() if proc.stderr else ""
+    assert _run_child(tmp_path, env={ALLOW_SHARED_ROOT_ENV: ""}).returncode == 0
+
+
+def test_escape_hatch_rechecks_fence_after_registering_lease(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(ALLOW_SHARED_ROOT_ENV, "1")
+    real_take_lock = instance_lock_module._take_os_lock
+    first_attempt = True
+
+    def simulate_contention_once(fd: int) -> None:
+        nonlocal first_attempt
+        if first_attempt:
+            first_attempt = False
+            raise OSError("simulated existing lock holder")
+        real_take_lock(fd)
+
+    real_create_lease = InstanceLock._create_shared_root_lease
+
+    def create_lease_then_publish_fence(lock: InstanceLock) -> tuple[Path, int]:
+        lease = real_create_lease(lock)
+        (tmp_path / CUTOVER_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+        return lease
+
+    monkeypatch.setattr(instance_lock_module, "_take_os_lock", simulate_contention_once)
+    monkeypatch.setattr(
+        InstanceLock, "_create_shared_root_lease", create_lease_then_publish_fence,
+    )
+
+    with pytest.raises(InstanceLockError, match="reset is in progress"):
+        InstanceLock(tmp_path).acquire()
+
+    assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
 
 
 def test_release_is_idempotent(tmp_path: Path) -> None:

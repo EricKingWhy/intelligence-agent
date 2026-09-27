@@ -107,6 +107,14 @@ def build_builtin_memory_components(settings: Settings) -> MemoryComponents | No
     )
 
 
+def build_memory_vector_client(settings: Settings):
+    """Build only the shared embedding/Milvus adapter used by Memory V2."""
+    from agent_harness.memory.embeddings import create_embeddings
+    from agent_harness.memory.milvus_vector_store import MilvusVectorStore
+
+    return MilvusVectorStore(settings, create_embeddings(settings))
+
+
 #: Memory 的 per-provider 分派表（ADR-0024，形状照抄 wiring 的 `_BUILTIN_WIRING`）。
 #: 新增一个记忆产品 = **在这里加一行 + 写一个 builder**，装配侧零改动。
 #: 这张表同时是装配期 provider 白名单的唯一事实源（见 `memory_provider_names()`）——
