@@ -264,8 +264,9 @@ reasoning effort、context providers（排序后）。两个**刻意排除**项�
   就能自己造出 `policy_change`，等于同一个漏洞换一扇侧门。fuse 仍照常参与 `limits` 快照与
   `resume_headroom_ok`，只是不构成"策略变了"。
 
-排除项的代价是"只改了被排除项 ⇒ 恢复被拒"：用户此时仍可用 steer（`relevant_steer`，也是 continuation
-推荐的那条路）或真实的策略变更恢复，不构成死锁。
+排除项的代价是"只改了被排除项 ⇒ 恢复被拒"：用户此时仍可用真实的策略 / 环境变更恢复，
+不构成死锁（`relevant_steer` 是判据上的第三条路，但它的**入口**今天取不到，见 D6 与残余 6 / 9
+——所以这里不把它算作可行的逃生路）。
 
 D8 这一侧只多两条操作事实：还原的落点是 `session/model_switch.py` 的 `restore_policy_inputs`，
 它由 `session/service.py` 在解析 fuse 与吃会话级模型切换**之前**调用（档位同时是 turn ceiling
@@ -399,13 +400,14 @@ D8 这一侧只多两条操作事实：还原的落点是 `session/model_switch.
    同一个 409（回归用例 `test_a_malformed_snapshot_is_a_conflict_not_a_crash`）。
 12. **跨模式同批时，首达 T 那条 replan 仍可能被同批的暂停压掉**：`worst_stuck_signal` 的
    "replan 优先"是**按模式**的（D5）——一批里 ② 首达 T、① 同批越过 2T 时，挑出的是暂停，② 的
-   纠正这一批不执行（它的首达闩已被消费）。**同批同模式**那一支由两条入库用例承重：判据层
-   `tests/agent/test_stuck_detection.py::test_one_turn_of_six_identical_failures_gets_the_replan_first`
-   （一个回合 6 条相同失败 ⇒ 先 `(3, replan, ①)` 再 `(6, paused, ①)`；第 7 条才发暂停、计数
-   **7** 而不是被折叠的 6）与接线层
-   `tests/agent/test_stuck_runtime.py::test_failure_loop_gets_one_correction_then_pauses`
-   （`tool/failure-guard` 恰一行 `("soft", 3)`、`guard/stuck` 恰一行
-   `(paused, ①, 6, replan_count=1)`、纠正消息恰一条）。**跨模式**那一支没有入库用例承重，
+   纠正这一批不执行（它的首达闩已被消费）。**同批同模式**那一支只有一条入库用例承重：判据层
+   `tests/agent/test_stuck_detection.py::TestPatternToolFailure::test_one_turn_of_six_identical_failures_gets_the_replan_first`
+   ——一个回合 6 条相同失败 ⇒ 同批首达 T 只给 `(3, replan, ①)`、**同批不暂停**，第 7 条才
+   `(7, paused, ①)`（"之后"要求至少一次后续观测）。接线层
+   `tests/agent/test_stuck_runtime.py::TestFailureLoopBecomesAPause::test_failure_loop_gets_one_correction_then_pauses`
+   是**逐轮**（每回合一次工具调用）的变体，钉的是 `tool/failure-guard` 恰一行 `("soft", 3)`、
+   `guard/stuck` 恰一行 `(paused, ①, 6, replan_count=1)`、纠正消息恰一条——两个计数
+   （同批 7 / 逐轮 6）不矛盾，是两种批次形状。**跨模式**那一支没有入库用例承重，
    只有三轮审查时两路**一次性探针**的读数（脚本留在仓库外，结论是选择结果与修复前逐字相同）。
    两个模式的计数**不同源**：① 数的是同动作同**失败**的重复，② 只在观察**成功且相同**时
    连续（失败打断它）；与 ① 同一段历史里累加的通常是无进展那一族（同动作的失败不产生"新的

@@ -38,6 +38,7 @@ from agent_harness.agent.resume_evidence import evidence_port
 from agent_harness.agent.run_budget import (
     REASON_STUCK,
     RESUME_BASIS_BUDGET_INCREASE,
+    RESUME_BASIS_RELEVANT_STEER,
     STUCK_RESUME_REQUIREMENTS,
     TRIGGER_RUN_DEADLINE,
     LaunchRunBudget,
@@ -563,21 +564,35 @@ def _stuck_resume_hint(session_id: str, data: dict) -> str:
 
     可用依据逐条读事件自己的 `resume_requirements`，不在这里重算：CLI 再算一份就等于
     给"CLI 以为的可用集"与判据之间留一个漂移点（`#317` 三轮审查钉的正是这个形状）。
-    依据可以是多条 ⇒ 命令行里放第一条（照抄能跑），判据行里把全部可用的都点名。
+    依据可以是多条 ⇒ 命令行里放一条**今天真能走通**的，判据行里把全部可用的都点名。
+
+    `relevant_steer` 要**跳过**：它是唯一不看快照的依据（所以常在），但暂停之后登记 steer
+    的入口今天不存在（`steer/requested` 只在有在途 run 时可投，残余 6 / 9）——把它印成
+    命令行就是一条照抄必被 409 挡死的假指令（`#317` 四轮审查 P3）。
     """
     available = [str(item) for item in (data.get("resume_requirements") or ())]
     version = data.get("budget_version", "")
     if not available:
-        # 快照两格都缺席的 stuck 暂停（判据对三条依据全拒）：宁可说"没有可用依据"，
-        # 也不给一条必然 409 的 `--basis`。
+        # 本代码产出的 stuck 暂停至少列 `relevant_steer`（`stuck_resume_requirements` 对非空
+        # 快照无条件带上它）⇒ 走到这里的是外来 / 手改过的载荷（那一格缺失或为空）：宁可说
+        # "没有列出任何依据"，也不打印一条必然 409 的 `--basis`。
         return (
-            f"  resume: 本次 stuck 暂停没有可用的恢复依据"
-            f"（快照与 steer 都不足以证明任何一条变更，判据会逐条拒）· "
+            f"  resume: 这次暂停的载荷里没有列出任何可用依据"
+            f"（`resume_requirements` 缺失或为空）· expected-version {version}\n"
+        )
+    actionable = [basis for basis in available if basis != RESUME_BASIS_RELEVANT_STEER]
+    if not actionable:
+        # 只剩 `relevant_steer`（子 run 的形状，或快照两格缺席）：它不是在判据上被恒拒，
+        # 是入口层取不到 ⇒ 如实说"现在没有可执行的依据"，而不是给一条走不通的命令。
+        return (
+            f"  resume: 现在没有可执行的恢复依据（本次列出的只有 "
+            f"{', '.join(available)}）——那条需要暂停之后登记一条 steer，"
+            f"而那个入口今天不存在（残余 6 / 9；子会话见 #372）· "
             f"expected-version {version}\n"
         )
     return (
         f"  resume: agent-harness resume {session_id}"
-        f" --basis {available[0]}"
+        f" --basis {actionable[0]}"
         f" --expected-version {version}"
         f"  (stuck 暂停不以 ceiling 为依据，可以不给 --run-* 开关；可用的依据只有："
         f"{', '.join(available)}——每条都必须是**被观测到的**变更，声明不算)\n"

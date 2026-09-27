@@ -710,7 +710,7 @@ class TestAvailableResumeRequirements:
         partial = describe_resume_requirements(legacy)
         assert RESUME_BASIS_ENVIRONMENT_CHANGE in partial
         assert RESUME_BASIS_POLICY_CHANGE not in partial
-        assert "缺席" in describe_resume_requirements(None)
+        assert "没有快照" in describe_resume_requirements(None)
 
 
 # ── 判定：`validate_resume` 的 stuck 分支 ────────────────────────────────

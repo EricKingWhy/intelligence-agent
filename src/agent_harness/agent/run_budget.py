@@ -310,7 +310,9 @@ def describe_resume_requirements(stuck: Mapping[str, Any] | None) -> str:
     """
     available = stuck_resume_requirements(stuck)
     if not available:
-        return "本次暂停没有可用的恢复依据（快照两格都缺席）"
+        # 只有 `stuck is None` / 空载荷会落这里（本代码产出的 stuck 暂停至少列一条）：
+        # 非 stuck 暂停，或不带快照的外来载荷。
+        return "本次载荷里没有可用的恢复依据（没有快照）"
     return " / ".join(f"{name}（{_BASIS_GLOSS[name]}）" for name in available)
 
 #: 暂停前为 closeout **预留**的 turn 容量（`02 §5.2`「在适用预算内预留容量」，
