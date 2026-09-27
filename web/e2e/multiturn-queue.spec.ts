@@ -741,12 +741,16 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
  * "判对了别动它"。 */
 
 test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐流、不重订阅）', async ({ page }) => {
+  await page.clock.install();
   const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
   const postStarted = gate();
   const releasePostResponse = gate();
   const postResponded = gate();
   const wsSubscribed = gate();
   const releaseWsFrame = gate();
+  let followUpStarted = false;
+  const prematureSubscriptions: number[] = [];
+  const followUpSubscriptions: number[] = [];
   const DELTA: FrameSpec = {
     type: 'model/delta', data: { delta: '延迟启动的回答' }, seq: 4,
     session_id: 'mt-live-1', run_id: 'mt-run-live', step_id: 1, time: '2026-09-16T00:00:01Z',
@@ -758,13 +762,20 @@ test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐
     onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
     // 响应头晚于窗口才到（交付层攒包的真实形态）：这是事件流，不是失败
     onMessagesPost: async (route) => {
+      followUpStarted = true;
       postStarted.release();
       await releasePostResponse.promise;
       await fulfillSse(route, [DELTA]);
       postResponded.release();
     },
-    // 收到 subscribe 是早期响应窗口已过的明确证据；保持帧待发，直到迟到响应回包。
-    onWs: async () => {
+    // 时钟冻结会阻止初始有限 SSE 的重连计时器抢先触发；只有 follow-up 请求
+    // 越过 1200ms 判别窗后发出的 subscribe 才能拿到这条帧。
+    onWs: async ({ call }) => {
+      if (!followUpStarted) {
+        prematureSubscriptions.push(call);
+        return { events: LIVE_FRAMES, hasActiveRun: true, ending: 'keep' };
+      }
+      followUpSubscriptions.push(call);
       wsSubscribed.release();
       await releaseWsFrame.promise;
       return { events: LIVE_FRAMES, frames: [DELTA], hasActiveRun: true, ending: 'keep' };
@@ -780,7 +791,12 @@ test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐
   await box.press('Enter');
 
   await postStarted.promise;
+  await page.clock.fastForward(1199);
+  expect(subs).toHaveLength(0);
+  await page.clock.fastForward(1);
   await wsSubscribed.promise;
+  expect(prematureSubscriptions).toEqual([]);
+  expect(followUpSubscriptions).toHaveLength(1);
   expect(subs).toHaveLength(1);
   releasePostResponse.release();
   await postResponded.promise;
@@ -854,9 +870,13 @@ test('T12q：纠正后回退重投仍失败（409 人工裁决）→ 必须把�
  * 走窗内 SSE（不产生 WS），于是**唯一那次 WS 订阅只可能由 ack 分支发出**——修复前
  * 它一次都不发，那段文本永远不上屏（红证明：超时失败）。 */
 test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应用后续帧', async ({ page }) => {
+  await page.clock.install();
   const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
   const wsSubscribed = gate();
   const releaseWsFrame = gate();
+  let queueAckResponseReleased = false;
+  const prematureSubscriptions: number[] = [];
+  const ackSubscriptions: number[] = [];
   // 序号接在 LIVE_FRAMES 的 max seq（3）之后：游标对齐后不构成 seq gap
   const AFTER_QUEUE: FrameSpec = {
     type: 'model/delta', data: { delta: '排队之后仍在写' }, seq: 4,
@@ -873,16 +893,23 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
     events: [],
     wsSubscribes: subs,
     onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
-    onMessagesPost: (route) =>
-      route.fulfill({
+    onMessagesPost: async (route) => {
+      queueAckResponseReleased = true;
+      await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({ status: 'queued', mode: 'queue' }),
-      }),
+      });
+    },
     // 帧挂在**唯一那次**订阅上：接流本身就是要考的事，不另设第二次订阅
     // （设 `call >= 2` 会把脚本挂在一次不存在的调用上——那正是本用例第一版
     // 的错，基线 WS 其实来自 ack 分支，于是"永远等不到帧"）。
-    onWs: async () => {
+    onWs: async ({ call }) => {
+      if (!queueAckResponseReleased) {
+        prematureSubscriptions.push(call);
+        return { events: LIVE_FRAMES, hasActiveRun: true, ending: 'keep' };
+      }
+      ackSubscriptions.push(call);
       wsSubscribed.release();
       await releaseWsFrame.promise;
       return { events: LIVE_FRAMES, frames: [AFTER_QUEUE], hasActiveRun: true, ending: 'keep' };
@@ -898,6 +925,8 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
   await box.press('Enter');
 
   await wsSubscribed.promise;
+  expect(prematureSubscriptions).toEqual([]);
+  expect(ackSubscriptions).toHaveLength(1);
   expect(subs).toHaveLength(1);
   releaseWsFrame.release();
 
