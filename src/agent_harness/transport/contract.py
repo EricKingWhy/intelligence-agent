@@ -324,7 +324,6 @@ def redact_command_summary(command: str, *, scope: str) -> str:
     return redacted[:500]
 
 
-
 def new_transport_entry(
     *,
     request_id: str,
