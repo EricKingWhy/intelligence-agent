@@ -239,6 +239,36 @@ def test_docs_only_commit_is_auto_attributed_by_path(gate):
     assert gate.is_docs_only(files), f"全 docs 的改动必须判 True：{files}"
 
 
+def test_docs_only_accepts_jsonl_under_docs_tree(gate):
+    """**正控（2026-09-27 补）**：`docs/` 下的 `.jsonl` 属文档扩展名 ⇒ 自动归属。
+
+    来源：`docs/live_gate/**` 的 gate 证据就是 `.jsonl`，而 `docs/gate/*.json` **早已被收** ——
+    枚举漏了这一项，导致**产一次 live gate 证据就多欠一行台账归属**（`2e99580b` 实测挂掉
+    coverage 车道）。这是**补枚举漏项**（`.json` 与 `.jsonl` 同族），不是放宽判据。
+    """
+    files = ["docs/live_gate/20260927T093030-abc-smoke/attempt-1.jsonl",
+             "docs/live_gate/20260927T093030-abc-smoke/evidence.json"]
+    assert gate.is_docs_only(files), f"docs/ 下的 .jsonl 必须判 True：{files}"
+
+
+def test_docs_only_rejects_jsonl_outside_docs_tree(gate):
+    """**反控（`.jsonl` 补收的边界锁）**：`docs/` **之外**的 `.jsonl` 与 `goal/**` 一律不放行。
+
+    这是「补枚举漏项」与「放宽判据」的分界线。三组都必须 fail-closed：
+      · 根级 `*.jsonl` —— 根级分支只认 `.md`（仓库根没有 `.jsonl`，不开口子）；
+      · `logs/**` / `evaluation/**` / `_demo_sessions/**` —— 都不在 `docs/` 文档树内；
+      · `goal/**/*.md` —— **非 `docs/` 树不收**。口径见 `scripts/check_review_coverage.sh:50`
+        就 `web/PRODUCT.md` 定下的先例（"不是根级、也不在 docs/ 下，要改就走正常审查"）。
+    """
+    for bad in ["attempt-1.jsonl",
+                "logs/run.jsonl",
+                "evaluation/out.jsonl",
+                "_demo_sessions/s.jsonl",
+                "goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/02_AGENT_RUNTIME.md"]:
+        assert not gate.is_docs_only(["docs/PHASE_STATUS.md", bad]), (
+            f"{bad} 不在 docs/ 文档树内，不得被自动归属连坐放行")
+
+
 def test_docs_only_rejects_any_non_doc_path(gate):
     """**反控（不放松的核心）**：夹带**任何一个**非文档路径 ⇒ 不得自动归属。
 
@@ -267,7 +297,8 @@ def test_auto_attribution_uses_the_same_doc_pattern_as_whitelist(gate):
     这是「两条判据不是两套真相」的锁：自动归属若自带一个更松的模式（比如顺手认了 `*.py`），
     闸门就在**看不见的地方**被放松了。这里逐例对账两者的一致性。
     """
-    probes = ["docs/a.md", "docs/a.py", "docs/x/y.json", "README.md", "AGENTS.md", "CLAUDE.md",
+    probes = ["docs/a.md", "docs/a.py", "docs/x/y.json", "docs/x/y.jsonl", "logs/x.jsonl",
+              "README.md", "AGENTS.md", "CLAUDE.md",
               "CONTEXT.md", "scripts/a.py", "docs/review_ledger.d/001-a-b.tsv", "notmd", "a.txt"]
     for p in probes:
         assert gate.is_docs_only([p]) == bool(gate.DOC_RE.match(p)), (

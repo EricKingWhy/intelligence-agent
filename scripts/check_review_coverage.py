@@ -90,9 +90,21 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ⚠ 与 `.sh:51` **逐字符相同**。协议按行号引用该模式，别在这里"顺手优化"。
+# ⚠ **已不再与 `.sh:51` 逐字符相同**（2026-09-27 起，差异只有一处，见下）。`.sh` 按脚本头部
+# 「方案 C 的判据只进本文件、不改 `.sh`」的约定冻结在**拆分前布局**上；本文件才是权威
+# （协议 §7 第 8 条：集成前必须本文件 exit 0）。别读成"两处仍然一致"。
 # 语义：白名单 commit 的改动必须**全部**命中这里（根级名带 `$` 锚，docs/ 下只认文档扩展名）。
-DOC_PATTERN = r'^(docs/.*\.(md|txt|rst|tsv|json|ya?ml)$|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md)$'
+DOC_PATTERN = r'^(docs/.*\.(md|txt|rst|tsv|json|jsonl|ya?ml)$|AGENTS\.md|CLAUDE\.md|CONTEXT\.md|[^/]*\.md)$'
+
+#: 2026-09-27：`docs/` 下补收 `jsonl`（原集合只有 `json`）。**这不是放宽**，是补枚举漏项：
+#:   · `docs/` 下现成 91 个 `.jsonl`，全部是 `docs/live_gate/**` 的 gate 证据，与**已收**的
+#:     `docs/gate/*.json` 是同一族（`.json` 早在集合内）；
+#:   · 此前它们只因扩展名枚举漏了一项而被判「非文档文件」⇒ 产一次 live gate 证据就得多写一行
+#:     台账归属，属纯记账噪音（2026-09-27 实测：`2e99580b` 就这样挂掉 coverage 车道）。
+#: 刻意**不动**的两处（别顺手扩）：
+#:   · 根级只认 `.md`（仓库根无 `.jsonl`，无需开口子）；
+#:   · `goal/**`、`web/**` 等非 `docs/` 树**不收** —— `.sh:50` 已就 `web/PRODUCT.md` 定过口径
+#:     （"它不是根级、也不在 docs/ 下，要改就走正常审查"）。要改这条口径属**另案**。
 DOC_RE = re.compile(DOC_PATTERN)
 
 LEDGER_PATH = "docs/review_ledger.tsv"
