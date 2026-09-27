@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0.0",
+  "date": "2026-09-27",
+  "source": {
+    "commit": "12966e9fb3e53433be51808a9480a2ca332dba60",
+    "tree": "757e6bc4b7e8a3037526b9bfec2b48e22ab4c541"
+  },
+  "blocking": false,
+  "real_service_gates": [
+    {
+      "invocation": "pytest.main -q -s -m 'integration or qiniu or live_services' with the five node IDs listed below",
+      "node_ids": [
+        "tests/integration/test_memory_v2_langfuse_gate.py::test_memory_v2_real_langfuse_trace_omits_content",
+        "tests/integration/test_phase11_knowledge_gate.py::test_real_knowledge_gate",
+        "tests/integration/test_phase5_qiniu.py::test_phase5_real_qiniu_gate",
+        "tests/integration/test_qiniu_artifact.py::test_qiniu_save_load_inspect",
+        "tests/integration/test_phase15_gate.py::test_gate2_real_cloud_trace_upload_fetch_audit"
+      ],
+      "result": "passed",
+      "passed": 5,
+      "duration_seconds": 69.01
+    },
+    {
+      "invocation": "pytest.main -q -s -m 'integration or qiniu or live_services' with tests/integration/test_phase15_gate.py::test_gate5_real_seed_idempotent_and_experiment",
+      "result": "passed",
+      "passed": 1,
+      "duration_seconds": 11.71
+    }
+  ],
+  "cleanup": {
+    "milvus_public_smoke": {
+      "independent_query": "passed",
+      "total_collections": 4,
+      "temporary_prefix": "memv2pub_",
+      "temporary_collections_remaining": 0,
+      "checked_after_latest_longmemeval_attempt": true
+    },
+    "knowledge": {
+      "tenant_sources_deleted": 2,
+      "tenant_records_remaining": 0,
+      "dedicated_collection_preexisted": true,
+      "collection_created_by_gate": false,
+      "collection_dropped_by_gate": false
+    },
+    "qiniu_phase5": {
+      "verified": true,
+      "records_remaining": 0
+    },
+    "qiniu_artifact_save_load": {
+      "verified": true,
+      "records_remaining": 0
+    }
+  },
+  "langfuse": {
+    "synthetic_data_only": true,
+    "memory_trace_gate": {
+      "result": "passed",
+      "trace_count": 10,
+      "observation_count": 12,
+      "memory_observation_count": 9,
+      "content_fields": "omitted"
+    },
+    "phase15_gate2": "passed",
+    "phase15_gate5": {
+      "result": "passed",
+      "dataset": "p0_core",
+      "dataset_item_count": 3,
+      "duplicate_item_ids": 0,
+      "repeat_seed_created": 0,
+      "repeat_seed_skipped": 3,
+      "pass_run_id": "fc034826-ea49-45d7-aebe-9ac0f5cf6244",
+      "pass_count": "3/3",
+      "failure_run_id": "b6743b25-730a-4083-94ea-93c54e58f566",
+      "failure_control_count": "3/3",
+      "dataset_unchanged": true
+    }
+  },
+  "latest_public_smokes": {
+    "locomo": {
+      "report": "docs/evidence/memory-v2-public-smoke-locomo-64bd21ec.json",
+      "answer_f1": 1.0,
+      "recall_at_6": 1.0,
+      "chain_verified": true,
+      "temporary_collection_cleanup": "confirmed"
+    },
+    "longmemeval": {
+      "result": "incomplete_due_to_provider_error",
+      "attempts": 2,
+      "failure_stage": "reading_notes_answer_call",
+      "provider_status": 500,
+      "response_body_recorded": false,
+      "answer_score_emitted": false,
+      "runner_cleanup": "completed",
+      "independent_temporary_collection_count": 0
+    }
+  },
+  "secrets_or_user_content": "omitted"
+}

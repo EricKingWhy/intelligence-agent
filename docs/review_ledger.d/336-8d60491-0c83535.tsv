@@ -1,0 +1,1 @@
+2026-09-27	#302/#315 integration merge 双轴复审（merge 0c835353；核对四个重叠路径，git show --cc 无冲突内容块）。Standards 无发现；Spec 确认 Memory V2 tracing/privacy 与 #315 deadline/reconcile 语义并存，未发现功能冲突。P3：#302 插入后 PHASE_STATUS 归档行号和 dated-entry count 过期；已更正 9/27 索引、321 条计数及 9/26 归档区间，并由 Spec reviewer 复核与归档现行行号一致，无残余问题。	8d604910..0c835353

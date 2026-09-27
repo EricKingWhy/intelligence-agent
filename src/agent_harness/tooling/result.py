@@ -41,6 +41,13 @@ class ErrorCode(str, Enum):
     # 同样会被拒）。这条码是"准入**前**被拒"的可审计理由（04 §9.1），
     # 因此它对应的结果不消耗配额（`tool/result.data.budget_delta` 记 0）。
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    # `#315`：本 run 的绝对 deadline 已到 → 不重试（重试落在同一条到点的路径上）。
+    # 与 BUDGET_EXHAUSTED 同族：也是"准入**前**被拒"的可审计理由（`04 §9.1` 的
+    # deadline 接纳边界），因此同样不消耗配额（`budget_delta` 记 0）。区别是它
+    # **不**靠抬高 ceiling 解开——deadline 是绝对时刻，run 在下一个稳定边界按
+    # `reason=deadline` 暂停，恢复要点名一个**未来**的时刻。
+    # 已在途的调用**不**产生这条码：它们按各自的 timeout / cancel / Ledger 语义收尾。
+    DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
 
 
 class ToolRuntimeSignal(BaseModel):

@@ -64,6 +64,7 @@ from agent_harness.memory.v2.roles import (
 )
 from agent_harness.memory.v2.runner import ChatModelInvoker, MemoryJobRunner
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
+from agent_harness.observability import get_observability_sink
 from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger(__name__)
@@ -122,8 +123,10 @@ async def build_memory_formation(
     # 组合实现同时满足两个执行器端口（写者 `create_in/update_in/invalidate_in`、
     # 检索者 `search`）——一个对象，所以"写进去的"与"检索到的"不可能是两套可见性规则。
     service = memory_v2 or await build_memory_v2_service(settings, vector_store=vector_store)
+    observability = get_observability_sink(settings)
     executor = MemoryJobExecutor(
         jobs=jobs, writer=service, searcher=service, invoker=ChatModelInvoker(),
+        observer=(observability.memory_observation if observability.enabled else None),
     )
     # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每次终结通知时从
     # SQLite 读取可信用户的 extraction_enabled；设置由 #300 的治理 API 持久化。

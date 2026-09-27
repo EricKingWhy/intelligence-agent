@@ -99,6 +99,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
           max_model_requests: 4,
           max_total_tokens: null,
           max_cost_usd: null,
+          deadline_at: null,
           tool_call_limits: {},
         },
       }),
@@ -129,6 +130,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
           max_model_requests: null,
           max_total_tokens: null,
           max_cost_usd: '1.25',
+          deadline_at: null,
           tool_call_limits: {},
         },
       }),
@@ -197,6 +199,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
           max_model_requests: null,
           max_total_tokens: null,
           max_cost_usd: null,
+          deadline_at: null,
           tool_call_limits: { glob: 1, bash: 5 },
         },
       }),
@@ -232,6 +235,7 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
           max_model_requests: null,
           max_total_tokens: null,
           max_cost_usd: null,
+          deadline_at: null,
           tool_call_limits: {},
         },
       }),
@@ -247,5 +251,65 @@ describe('PausedPanel — 暂停事实的完整呈现（#312）', () => {
     const html = render(paused());
     expect(html).not.toContain('tool ');
     expect(html).not.toContain('tool_call_limits');
+  });
+});
+
+
+describe('PausedPanel — deadline 暂停（`#315` T7）', () => {
+  function deadlinePaused(overrides: Partial<RunPausedInfo> = {}): RunPausedInfo {
+    return paused({
+      reason: 'deadline',
+      trigger_dimension: 'run.deadline_at',
+      consumed_dimensions: {
+        agent_turns: 2, model_requests: 3, total_tokens: 40, cost_usd: null,
+        tool_calls: 1, tool_attempts: 1,
+        tool_calls_by_tool: { glob: 1 }, tool_attempts_by_tool: { glob: 1 },
+      },
+      run_limits: {
+        max_agent_turns_total: 8,
+        max_model_requests: null,
+        max_total_tokens: null,
+        max_cost_usd: null,
+        deadline_at: '2026-09-26T04:10:00Z',
+        tool_call_limits: {},
+      },
+      ...overrides,
+    });
+  }
+
+  it('标题报的是**时刻**与到点后的准入边界（不是某一维的读数）', () => {
+    const html = render(deadlinePaused());
+    expect(html).toContain('已在绝对截止时刻处暂停');
+    expect(html).toContain('绝对截止时刻 2026-09-26T04:10:00Z 已到');
+    expect(html).toContain('到点后不再接纳新的 Provider');
+    expect(html).toContain('run.deadline_at');
+    expect(html).toContain('原因 deadline');
+    // 不是"预算到顶"那句（两种原因对应不同的恢复动作）。
+    expect(html).not.toContain('已在预算到顶处暂停');
+  });
+
+  it('恢复输入换成"新的绝对截止时刻"：文本输入 + 时刻示例 + 时刻形状的校验', () => {
+    const html = render(deadlinePaused(), { draft: '2099-01-01T00:00:00Z' });
+    expect(html).toContain('新的绝对截止时刻');
+    expect(html).toContain('RFC 3339 UTC');
+    // SSR 输出的是 `inputMode`（HTML 属性名大小写不敏感，浏览器按 `inputmode` 解析；
+    // 这条断言锁的是"输入模式换成了文本"，不是某一种大小写写法）。
+    expect(html).toContain('inputMode="text"');
+    expect(html).toContain('placeholder="2026-09-26T04:30:00Z"');
+    expect(html).toContain('换一个');
+    // 合法草稿 ⇒ 可提交（按钮不带 disabled 属性）。
+    expect(html).not.toContain('pause-resume-btn" disabled');
+  });
+
+  it('草稿是已过去的时刻：就地说明原因并禁用按钮（省掉一次必然 409 的往返）', () => {
+    const html = render(deadlinePaused(), { draft: '2026-01-01T00:00:00Z' });
+    expect(html).toContain('未来');
+    expect(html).toContain('disabled');
+  });
+
+  it('输入框默认空着（草稿 null）：面板不替用户编一个"现在 + N 分钟"', () => {
+    const html = render(deadlinePaused(), { draft: '' });
+    expect(html).toContain('请填一个未来时刻');
+    expect(html).toContain('disabled');
   });
 });

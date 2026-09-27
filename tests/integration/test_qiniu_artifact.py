@@ -31,13 +31,23 @@ async def test_qiniu_save_load_inspect():
             {"line_number": 2, "text": "needle"},
         ]
     finally:
-        if artifact_id is not None:
-            async with sdk.Session().client(
-                "s3", endpoint_url=settings.artifact_store_endpoint,
-                region_name=settings.artifact_store_region,
-                aws_access_key_id=settings.artifact_store_access_key.get_secret_value(),
-                aws_secret_access_key=settings.artifact_store_secret_key.get_secret_value(),
-            ) as client:
+        async with sdk.Session().client(
+            "s3", endpoint_url=settings.artifact_store_endpoint,
+            region_name=settings.artifact_store_region,
+            aws_access_key_id=settings.artifact_store_access_key.get_secret_value(),
+            aws_secret_access_key=settings.artifact_store_secret_key.get_secret_value(),
+        ) as client:
+            prefix = f"{session_id}/"
+            existing = await client.list_objects_v2(
+                Bucket=settings.artifact_store_bucket, Prefix=prefix,
+            )
+            assert not existing.get("IsTruncated", False)
+            for item in existing.get("Contents", []):
                 await client.delete_object(
-                    Bucket=settings.artifact_store_bucket, Key=f"{session_id}/{artifact_id}",
+                    Bucket=settings.artifact_store_bucket, Key=item["Key"],
                 )
+            remaining = await client.list_objects_v2(
+                Bucket=settings.artifact_store_bucket, Prefix=prefix,
+            )
+            assert not remaining.get("Contents", [])
+            print("[qiniu cleanup] verified=true records_remaining=0")

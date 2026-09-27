@@ -90,6 +90,7 @@ def _run_started_budget(quota: dict[str, int] | None = None) -> dict[str, Any]:
             "max_model_requests": None,
             "max_total_tokens": None,
             "max_cost_usd": None,
+            "deadline_at": None,
             "tool_call_limits": dict(_fixture_quota() if quota is None else quota),
         }
     }

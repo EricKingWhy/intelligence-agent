@@ -1,0 +1,1 @@
+2026-09-27	#302 / MEM-V2-6 tip 双轴复审（fixed point aff3e46f；仅审 reader/诊断修复）。Standards 未确认规范违例；1×P3 为诊断 token count 复用现有正则规则的局部重复，接受保留以避免不必要抽象。Spec 首轮关于缺少成功烟测证据与 GitHub 验收未同步的 P2，已由两份通过的 content-free 真实 smoke 报告及 #302 AC9 同步闭合；无剩余 finding。LoCoMo / LongMemEval F1=0.666667 / 0.5，Recall@6 均 1.0，chain_verified=true、相关 hit rank=1，临时 Milvus collection 确认清理。	87a02d6..aff3e46f

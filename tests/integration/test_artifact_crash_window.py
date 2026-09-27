@@ -296,6 +296,9 @@ async def test_qiniu_artifact_crash_window_recovers_and_cleans_random_prefix(
             assert session_store.read_events(session_id)
         finally:
             await _delete_owned_prefix(client, bucket, prefix)
+            remaining = await _list_prefix(client, bucket, prefix)
+            assert remaining == []
+            print("[qiniu cleanup] owned_prefix_empty=true object_count=0")
 
 
 @pytest.mark.asyncio

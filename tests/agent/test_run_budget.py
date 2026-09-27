@@ -20,11 +20,17 @@ ADR-0044 D2/D3/D4/D9。
 - `validate_resume` 的 422/409 分界（含"消耗基数未知 ⇒ 409"与"一个 ceiling 都不给 ⇒ 409"）；
 - `project_budget`：四维投影与可执行性；
 - continuation：模型产出只做规范化不补齐；确定性兜底只用持久化事实（不许把
-  "工具调用已发出"说成"工具已成功"，也不许把"未知"写成 0）。
+  "工具调用已发出"说成"工具已成功"，也不许把"未知"写成 0）；
+- `#315` deadline 维：形态（朴素时间 / 空串 / 非字符串 ⇒ 422，非 UTC 偏移归一化到
+  UTC）、准入边界（到点即停且**先于**预算维报出）、closeout 容量（到点后连一次
+  请求都不发）、恢复判据（**严格在未来**）、`reason_for_dimension` 的映射、
+  `blocked_by` 对 continuation 的改写，以及投影在有未对账副作用时报
+  `needs_reconcile`（含"终态不被覆盖"这一条边界）。
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -35,12 +41,15 @@ from agent_harness.agent.run_budget import (
     CLOSEOUT_MODEL,
     CONTINUATION_ACTION_KEY,
     REASON_BUDGET_EXHAUSTED,
+    REASON_DEADLINE,
     RESERVED_CLOSEOUT_REQUESTS,
     RESERVED_CLOSEOUT_TURNS,
     RESUME_BASIS_BUDGET_INCREASE,
     RESUME_BASIS_RELEVANT_STEER,
+    STATE_NEEDS_RECONCILE,
     TRIGGER_LOCAL_TURNS,
     TRIGGER_RUN_COST,
+    TRIGGER_RUN_DEADLINE,
     TRIGGER_RUN_REQUESTS,
     TRIGGER_RUN_TOKENS,
     TRIGGER_RUN_TURNS,
@@ -61,9 +70,12 @@ from agent_harness.agent.run_budget import (
     latest_run_id,
     normalize_continuation,
     parse_cost_ceiling,
+    parse_deadline_at,
     pause_trigger,
     project_budget,
+    reason_for_dimension,
     resume_headroom_ok,
+    resume_limits,
     run_limits_from_request,
     validate_ceiling_enforceability,
     validate_resume,
@@ -380,6 +392,8 @@ def test_paused_projection_carries_identity_version_limits_remaining_and_continu
     assert projection["limits"] == {
         "max_agent_turns_total": 3, "max_model_requests": None,
         "max_total_tokens": None, "max_cost_usd": None,
+        # `#315`：deadline 是同一个 `limits` 投影里的一维（没配 = `null`，不是缺键）。
+        "deadline_at": None,
         # `#314`：per-tool 配额是同一个 `limits` 投影里的一维（没配 = `{}`，不是缺键）。
         "tool_call_limits": {},
     }
@@ -1062,12 +1076,12 @@ def test_run_started_budget_key_is_omitted_without_a_ceiling() -> None:
     assert as_run_started_budget(RunLimits()) is None
     assert as_run_started_budget(RunLimits(max_agent_turns_total=7)) == {
         "run": {"max_agent_turns_total": 7, "max_model_requests": None,
-                "max_total_tokens": None, "max_cost_usd": None,
+                "max_total_tokens": None, "max_cost_usd": None, "deadline_at": None,
                 "tool_call_limits": {}},
     }
     assert as_run_started_budget(RunLimits(tool_call_limits={"bash": 2})) == {
         "run": {"max_agent_turns_total": None, "max_model_requests": None,
-                "max_total_tokens": None, "max_cost_usd": None,
+                "max_total_tokens": None, "max_cost_usd": None, "deadline_at": None,
                 "tool_call_limits": {"bash": 2}},
     }
 
@@ -1079,7 +1093,7 @@ def test_run_started_budget_key_is_written_when_only_a_new_dimension_is_set() ->
 
     assert budget == {"run": {"max_agent_turns_total": None, "max_model_requests": 9,
                               "max_total_tokens": None, "max_cost_usd": None,
-                              "tool_call_limits": {}}}
+                              "deadline_at": None, "tool_call_limits": {}}}
 
 
 def test_launch_context_defaults_to_a_new_run() -> None:
@@ -1095,3 +1109,306 @@ def test_launch_context_defaults_to_a_new_run() -> None:
     assert (resuming.run_id, resuming.version, resuming.consumed_turns) == (RUN_ID, 2, 3)
     assert resuming.consumed.model_requests == 4
     assert resuming.turn_index == 4
+
+
+# ── `#315` deadline 维：判的是"时刻先后"，不是"consumed vs ceiling" ──────
+
+#: 用例里的基准时刻：**固定**值，不读挂钟（读挂钟的用例会在跨秒/跨时区上飘）。
+NOW = datetime(2026, 9, 26, 4, 0, 0, tzinfo=UTC)
+
+
+def _at(seconds: int) -> datetime:
+    return NOW + timedelta(seconds=seconds)
+
+
+def _deadline_limits(deadline: datetime, *, turns: int | None = None) -> RunLimits:
+    return RunLimits(max_agent_turns_total=turns, deadline_at=deadline)
+
+
+def _deadline_paused(
+    seq: int, *, deadline: datetime, consumed: int = 0, version: int = 1,
+    blocked_by: tuple[str, ...] = (),
+) -> SessionEvent:
+    """一条 `run/paused reason=deadline`（形状与 runtime 落盘的那一条同源）。"""
+    limits = _deadline_limits(deadline)
+    snapshot = BudgetConsumed(agent_turns=consumed)
+    return _ev(
+        seq, RUN_PAUSED, run_id=RUN_ID,
+        **build_pause_data(
+            reason=REASON_DEADLINE,
+            trigger_dimension=TRIGGER_RUN_DEADLINE,
+            version=version,
+            consumed=snapshot,
+            limits=build_limits_snapshot(run_limits=limits, local_fuse=FUSE),
+            continuation=deterministic_continuation(
+                events=[], run_id=RUN_ID, trigger_dimension=TRIGGER_RUN_DEADLINE,
+                limits=limits, consumed=snapshot, blocked_by=blocked_by,
+            ),
+            closeout_source=CLOSEOUT_DETERMINISTIC,
+        ),
+    )
+
+
+def test_parse_deadline_accepts_rfc3339_and_normalizes_to_utc() -> None:
+    """三种合法写法归一化到**同一瞬时、同一字节**（`11 §6.1`：客户端时钟不是权威）。"""
+    for raw in ("2026-09-26T04:30:00Z", "2026-09-26T04:30:00+00:00",
+                "2026-09-26T12:30:00+08:00"):
+        parsed = parse_deadline_at(raw)
+        assert parsed == datetime(2026, 9, 26, 4, 30, tzinfo=UTC), raw
+        assert parsed is not None and parsed.tzinfo is not None, "必须带时区"
+    assert parse_deadline_at(None) is None, "null = 不设 deadline（不是 0，也不是错误）"
+
+
+def test_parse_deadline_rejects_naive_and_malformed_values() -> None:
+    """形状非法 ⇒ 422（**拒绝整个请求**，不静默当成"没配"）。"""
+    for raw in ("2026-09-26T04:30:00", "2026-09-26T04:30:00.000000", "  ",
+                "not-a-time", 5, 1.5, True):
+        with pytest.raises(BudgetRejection):
+            parse_deadline_at(raw)
+
+
+def test_deadline_is_checked_first_and_maps_to_its_own_reason() -> None:
+    """到点即停，且**先于**预算维报出：一个数字治不了它（要给的是新的未来时刻）。"""
+    limits = RunLimits(
+        max_agent_turns_total=1, deadline_at=_at(-1),  # turns 也到线了
+    )
+    assert pause_trigger(
+        consumed=BudgetConsumed(agent_turns=1), run_limits=limits,
+        execution_steps=0, local_fuse_turns=500, now=NOW,
+    ) == TRIGGER_RUN_DEADLINE, "同时命中时先报 deadline（客户端才不会被引去抬 ceiling）"
+    assert reason_for_dimension(TRIGGER_RUN_DEADLINE) == REASON_DEADLINE
+    for other in (TRIGGER_RUN_TURNS, TRIGGER_RUN_COST, TRIGGER_LOCAL_TURNS,
+                  "run.tool_call_limits.bash"):
+        assert reason_for_dimension(other) == REASON_BUDGET_EXHAUSTED, other
+
+
+def test_no_pause_before_the_deadline_even_at_the_same_instant() -> None:
+    """到点那一刻就停（`>=`），且到点前**不**因为 deadline 停。"""
+    future = RunLimits(deadline_at=_at(1))
+    assert pause_trigger(
+        consumed=BudgetConsumed(agent_turns=0), run_limits=future,
+        execution_steps=0, local_fuse_turns=500, now=NOW,
+    ) is None
+    boundary = RunLimits(deadline_at=NOW)
+    assert pause_trigger(
+        consumed=BudgetConsumed(agent_turns=0), run_limits=boundary,
+        execution_steps=0, local_fuse_turns=500, now=NOW,
+    ) == TRIGGER_RUN_DEADLINE, "等于截止时刻」也算到点（不留半格余量）"
+
+
+def test_closeout_capacity_is_false_once_the_deadline_has_passed() -> None:
+    """到点后连 closeout 那一次请求也不发（`04 §9.1`：到点后不启动任何新工作）。
+
+    容量为 False ⇒ 走确定性 continuation——只用已持久化事实、不发请求，
+    所以"暂停永远收得了口"这条保证在到点后仍然成立。
+    """
+    assert closeout_capacity(
+        consumed=BudgetConsumed(agent_turns=1), run_limits=RunLimits(deadline_at=_at(1)),
+        now=NOW,
+    ) is True, "未到点 ⇒ 容量照旧由四维余量决定"
+    assert closeout_capacity(
+        consumed=BudgetConsumed(agent_turns=0), run_limits=RunLimits(deadline_at=NOW),
+        now=NOW,
+    ) is False, "恰好到点 ⇒ 不发"
+    assert closeout_capacity(
+        consumed=BudgetConsumed(agent_turns=0), run_limits=RunLimits(deadline_at=_at(-1)),
+        now=NOW,
+    ) is False
+
+
+def test_resume_requires_a_strictly_future_deadline() -> None:
+    """恢复判据是"**严格在未来**"：沿用已到点的时刻 = 恢复后立刻再停（假恢复）。"""
+    consumed = BudgetConsumed(agent_turns=0)
+    assert resume_headroom_ok(
+        consumed=consumed, limits=RunLimits(deadline_at=_at(1)), now=NOW,
+    ) is True
+    assert resume_headroom_ok(
+        consumed=consumed, limits=RunLimits(deadline_at=NOW), now=NOW,
+    ) is False, "等于当前时刻 ⇒ 拒绝"
+    assert resume_headroom_ok(
+        consumed=consumed, limits=RunLimits(deadline_at=_at(-1)), now=NOW,
+    ) is False
+
+
+def test_deadline_pause_must_name_a_future_instant_on_resume() -> None:
+    """`validate_resume`：deadline 暂停的恢复**必须点出新时刻**（409 的三种形状）。"""
+    events = [_started(1, ceiling=None), _deadline_paused(2, deadline=_at(-30))]
+    paused = latest_paused_run(events)
+    assert paused is not None and paused.reason == REASON_DEADLINE
+
+    # 只抬 turns、不点 deadline ⇒ 生效集合沿用那个已过去的时刻 ⇒ 409（同一份判据）
+    with pytest.raises(BudgetConflict):
+        validate_resume(
+            paused, run_id=RUN_ID, expected_version=1,
+            limits=RunLimits(max_agent_turns_total=5),
+            resume_basis=RESUME_BASIS_BUDGET_INCREASE, now=NOW,
+        )
+    # 点名一个**已过去**的时刻 ⇒ 同样 409
+    with pytest.raises(BudgetConflict):
+        validate_resume(
+            paused, run_id=RUN_ID, expected_version=1,
+            limits=RunLimits(deadline_at=_at(-1)),
+            resume_basis=RESUME_BASIS_BUDGET_INCREASE, now=NOW,
+        )
+    # 点名一个未来时刻 ⇒ 通过，生效集合就是它
+    effective = validate_resume(
+        paused, run_id=RUN_ID, expected_version=1,
+        limits=RunLimits(deadline_at=_at(600)),
+        resume_basis=RESUME_BASIS_BUDGET_INCREASE, now=NOW,
+    )
+    assert effective.deadline_at == _at(600)
+
+
+def test_deadline_pause_without_any_stored_instant_is_refused() -> None:
+    """暂停快照里没有时刻（老行 / 畸形载荷）+ 请求也不点名 ⇒ 409，不被自由放行。"""
+    event = _ev(
+        2, RUN_PAUSED, run_id=RUN_ID,
+        reason=REASON_DEADLINE, trigger_dimension=TRIGGER_RUN_DEADLINE,
+        budget_version=1, consumed={"agent_turns": 0},
+        limits={"local": FUSE.as_projection(),
+                "run": {"max_agent_turns_total": None, "deadline_at": None}},
+        continuation={"completed": [], "remaining": [], "blockers": [],
+                      "next_safe_action": "给一个新的未来时刻"},
+        closeout_source=CLOSEOUT_DETERMINISTIC, resume_requirements=[],
+    )
+    paused = latest_paused_run([_started(1, ceiling=None), event])
+    assert paused is not None and paused.limits.deadline_at is None
+    with pytest.raises(BudgetConflict) as excinfo:
+        validate_resume(
+            paused, run_id=RUN_ID, expected_version=1,
+            limits=RunLimits(max_agent_turns_total=5),
+            resume_basis=RESUME_BASIS_BUDGET_INCREASE, now=NOW,
+        )
+    assert "deadline_at" in str(excinfo.value)
+
+
+def test_resume_limits_carries_the_deadline_over_when_not_named() -> None:
+    """未点名的维度沿用暂停时的值——deadline 也不例外（沿用不是删除、也不是延长）。"""
+    paused_limits = RunLimits(deadline_at=_at(-30), tool_call_limits={"bash": 2})
+    carried = resume_limits(paused_limits, request=RunLimits(max_agent_turns_total=5))
+    assert carried.deadline_at == _at(-30), "沿用那个（已过去的）时刻"
+    named = resume_limits(
+        paused_limits, request=RunLimits(deadline_at=_at(600)),
+    )
+    assert named.deadline_at == _at(600)
+    assert named.tool_call_limits == {"bash": 2}, "其余维度逐键保留"
+
+
+def test_deadline_continuation_names_the_new_instant_and_the_boundary() -> None:
+    """"接下来怎么做"必须说清"换一个新的未来时刻"，且不许假装还能继续跑。"""
+    continuation = deterministic_continuation(
+        events=[], run_id=RUN_ID, trigger_dimension=TRIGGER_RUN_DEADLINE,
+        limits=_deadline_limits(_at(-30)), consumed=BudgetConsumed(agent_turns=1),
+    )
+    action = continuation[CONTINUATION_ACTION_KEY]
+    assert "deadline" in action
+    assert "未来" in action
+    assert "已到点" in "；".join(continuation["blockers"])
+
+
+def test_blocked_by_moves_reconcile_ahead_of_the_budget_action() -> None:
+    """`blocked_by` 非空时，下一步动作必须是"先对账"——抬 ceiling / 换时刻都排在它后面。
+
+    理由（不变量 #14 / ADR-0044 D4）：存在未证副作用的 run 不可恢复，此时给一个
+    "去抬高预算"的动作等于暗示"抬了就能继续"。
+    """
+    plain = deterministic_continuation(
+        events=[], run_id=RUN_ID, trigger_dimension=TRIGGER_RUN_DEADLINE,
+        limits=_deadline_limits(_at(-30)), consumed=BudgetConsumed(agent_turns=0),
+    )
+    blocked = deterministic_continuation(
+        events=[], run_id=RUN_ID, trigger_dimension=TRIGGER_RUN_DEADLINE,
+        limits=_deadline_limits(_at(-30)), consumed=BudgetConsumed(agent_turns=0),
+        blocked_by=("工具 'write_file'（tool_call_id=c1）的副作用状态未证",),
+    )
+    assert "先 reconcile" in blocked[CONTINUATION_ACTION_KEY]
+    assert blocked[CONTINUATION_ACTION_KEY] != plain[CONTINUATION_ACTION_KEY]
+    assert any("未证" in line for line in blocked["blockers"])
+
+
+# ── `#315` 投影：账本欠账 ⇒ `needs_reconcile`（`03 §5` 的第六个状态） ─────
+
+
+def test_projection_reports_needs_reconcile_over_a_pause() -> None:
+    """未终态 + 有欠账 ⇒ 状态词是 `needs_reconcile`，但暂停原因照旧可读。
+
+    这是**覆盖**：客户端若只看 `state` 就会把这条 run 当普通暂停，给出一个点了必然
+    409 的恢复入口（`03 §5`：对账优先于恢复）。
+    """
+    state = derive_run_budget(
+        [_started(1, ceiling=None), _deadline_paused(2, deadline=_at(-30))], RUN_ID,
+    )
+    projection = project_budget(
+        state, accounting=USAGE_ONLY, reconcile_pending=["c-2", "c-1"],
+    )
+    assert projection["state"] == STATE_NEEDS_RECONCILE
+    assert projection["reconcile"] == {
+        "state": STATE_NEEDS_RECONCILE, "tool_call_ids": ["c-1", "c-2"],
+    }, "欠账清单按 id 排序（同一份事实的两种顺序 = 两个读数）"
+    assert projection["reason"] == REASON_DEADLINE, "为什么停照样看得见"
+    assert projection["continuation"]["blockers"], "续跑指引照旧在"
+
+
+def test_projection_keeps_terminal_state_but_still_reports_the_debt() -> None:
+    """已终态不被覆盖：`completed` 是既成事实，欠账另报一处（不谎报没跑完）。"""
+    state = derive_run_budget(
+        [_started(1, ceiling=None), _ev(2, RUN_COMPLETED)], RUN_ID,
+    )
+    projection = project_budget(state, accounting=USAGE_ONLY, reconcile_pending=["c-1"])
+    assert projection["state"] == "completed"
+    assert projection["reconcile"]["tool_call_ids"] == ["c-1"]
+
+
+def test_projection_keeps_active_for_an_in_flight_run_with_debt() -> None:
+    """在途 run 带着欠账 ⇒ `state` 仍是 `active`，欠账由 `reconcile` 子对象表达。
+
+    这条与上一条的分界是**事实**，不是口味：`active` 说的是"这个 run 现在还在跑"，
+    它是真的（一条 MUTATING 超时留下的未证行不改变这件事——后续轮次照旧在接纳工作）；
+    `needs_reconcile` 覆盖 `state` 的理由是"客户端只看 state 就会给一个点了必然 409 的
+    恢复入口"，而**能恢复**这件事只对暂停成立。2026-09-26 两轴审查的 P3（来源 =
+    Correctness 轴）指出：覆盖条件原本写成"非终态"⇒ 在途 run 会被误报成
+    `needs_reconcile`，客户端据此把一条正在跑的 run 显示成"要人工对账"。
+    """
+    state = derive_run_budget([_started(1, ceiling=None)], RUN_ID)
+
+    projection = project_budget(state, accounting=USAGE_ONLY, reconcile_pending=["c-1"])
+
+    assert projection["state"] == "active", "还在跑就是还在跑"
+    assert projection["reconcile"] == {
+        "state": STATE_NEEDS_RECONCILE, "tool_call_ids": ["c-1"],
+    }, "欠账照样报出来——只是不冒充 run 的状态"
+    assert "reason" not in projection, "在途 run 没有暂停原因可读（与其它非暂停态同形状）"
+
+
+def test_projection_omits_the_reconcile_key_when_nothing_is_owed() -> None:
+    """空列表**不落键**：没有欠账与欠账为空不是同一件事。"""
+    state = derive_run_budget([_started(1, ceiling=None), _ev(2, RUN_COMPLETED)], RUN_ID)
+    assert "reconcile" not in project_budget(state, accounting=USAGE_ONLY)
+    paused = derive_run_budget([_started(1), _paused(2)], RUN_ID)
+    plain = project_budget(paused, accounting=USAGE_ONLY)
+    assert plain["state"] == "paused", "没有欠账时状态词不变（默认行为逐字不变）"
+    assert "reconcile" not in plain
+
+
+def test_deadline_alone_writes_the_budget_snapshot_on_run_started() -> None:
+    """只配 deadline 的 run 照样落 `run/started.data.budget`（重启后要能重建它）。
+
+    落盘文本一律 `Z` 收尾的 UTC 形式（`+00:00` 与 `Z` 同瞬时不同字节，而投影要能
+    跨执行逐字节比对）——所以这里钉**字节**而不只是"能解析回同一时刻"。
+    """
+    assert as_run_started_budget(RunLimits(deadline_at=_at(600))) == {
+        "run": {"max_agent_turns_total": None, "max_model_requests": None,
+                "max_total_tokens": None, "max_cost_usd": None,
+                "deadline_at": "2026-09-26T04:10:00Z", "tool_call_limits": {}},
+    }
+
+
+def test_run_limits_from_request_parses_deadline_and_keeps_it_optional() -> None:
+    """请求面：给了就解析（含 +08:00 归一化）、不给就是 None（**不是** 0 也不是报错）。"""
+    assert run_limits_from_request(
+        deadline_at="2026-09-26T12:30:00+08:00", accounting=USAGE_ONLY,
+    ).deadline_at == _at(1800)
+    assert run_limits_from_request(accounting=USAGE_ONLY).deadline_at is None
+    assert run_limits_from_request(
+        deadline_at=None, accounting=USAGE_ONLY,
+    ).configured is False, "只给 none 不算配了 ceiling"

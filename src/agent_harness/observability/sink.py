@@ -19,6 +19,8 @@ flush/shutdown 用普通 try/except。
 from __future__ import annotations
 
 import logging
+import math
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -29,6 +31,48 @@ from typing import Any
 from agent_harness.logging import log_event
 
 _LOGGER = logging.getLogger("agent_harness.observability")
+_MEMORY_METADATA_FIELDS = frozenset({
+    "session_id", "run_id", "agent_id", "agent_profile", "git_commit",
+    "turn_index", "step", "duration_ms", "latency_ms", "finish_reason",
+    "provider_request_id", "response_model", "model_alias", "model_role",
+    "fallback_from", "fallback_to", "fallback_used", "usage_total",
+    "input_tokens", "output_tokens", "total_tokens", "cost_usd",
+    "job_id", "tool_call_id", "operation_id", "outcome", "stage", "action",
+    "reason_code", "observation", "count", "counts", "actions", "kind_counts",
+    "candidates", "accepted", "rejected", "rejected_count", "model_stage",
+    "input_tokens_estimated",
+    "kind", "scope", "source_authority", "memory_id", "memory_ids",
+    "recall_target", "recall_hits", "retry_count", "attempt_count",
+    "schema_valid", "output_failure_kind", "safety_outcome", "compacted_turn_count",
+    "input_sha256", "output_sha256", "content_sha256", "evidence_sha256",
+    "output_tokens_estimated",
+})
+_SAFE_METADATA_TOKEN = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
+
+
+def sanitize_memory_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Keep only bounded, machine-shaped metadata for Memory V2 observations."""
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key not in _MEMORY_METADATA_FIELDS:
+            continue
+        if isinstance(value, bool) or value is None or isinstance(value, int) or isinstance(value, float) and math.isfinite(value) or isinstance(value, str) and _SAFE_METADATA_TOKEN.fullmatch(value):
+            safe[key] = value
+        elif key in {"memory_ids", "source_authority"} and isinstance(value, (list, tuple)):
+            safe[key] = [
+                item for item in value
+                if isinstance(item, str) and _SAFE_METADATA_TOKEN.fullmatch(item)
+            ]
+        elif key in {"counts", "usage_total", "actions", "kind_counts"} and isinstance(value, dict):
+            safe[key] = {
+                name: count for name, count in value.items()
+                if isinstance(name, str)
+                and _SAFE_METADATA_TOKEN.fullmatch(name)
+                and isinstance(count, (int, float))
+                and not isinstance(count, bool)
+                and (not isinstance(count, float) or math.isfinite(count))
+            }
+    return safe
 
 
 def _default_client_factory(
@@ -105,7 +149,7 @@ class LangfuseSink:
                 component="langfuse_sink",
                 outcome="init_failed_permanently_disabled",
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message="Langfuse error details redacted",
             )
 
     @property
@@ -149,6 +193,22 @@ class LangfuseSink:
         except Exception as exc:  # noqa: BLE001 - D3 异常边界
             self._register_failure("start_observation", exc)
             return None
+
+    def memory_observation(self, stage: str, metadata: dict[str, Any]) -> None:
+        """Send one metadata-only Memory V2 observation through the optional SDK sink."""
+        if not _SAFE_METADATA_TOKEN.fullmatch(stage):
+            return
+        observation = self.start_observation(
+            name=f"memory-{stage}", as_type="span",
+            metadata=sanitize_memory_metadata({**metadata, "observation": stage}),
+        )
+        if observation is None:
+            return
+        try:
+            observation.end()
+            self._consecutive_failures = 0
+        except Exception as exc:  # noqa: BLE001 - memory observation is always bypass-only
+            self._register_failure("memory_observation_end", exc)
 
     def trace_attributes(self, **kwargs: Any) -> Any:
         """trace 级属性传播（session_id / tags / trace_name 等，ADR-0018 D5）。
@@ -253,7 +313,7 @@ class LangfuseSink:
                 consecutive_failures=self._consecutive_failures,
                 cooldown_seconds=self._breaker_cooldown,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message="Langfuse error details redacted",
             )
         else:
             log_event(
@@ -266,7 +326,7 @@ class LangfuseSink:
                 operation=operation,
                 consecutive_failures=self._consecutive_failures,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message="Langfuse error details redacted",
             )
 
     def _call_with_deadline(self, fn: Callable[[], None], timeout: float | None) -> None:

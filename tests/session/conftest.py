@@ -11,6 +11,7 @@ from agent_harness.config import Settings
 from agent_harness.session import Session
 from agent_harness.session.service import SessionService
 from agent_harness.web.app import AppState
+from tests.session.ledger_doubles import idle_operation_ledger
 
 
 @pytest.fixture
@@ -54,7 +55,7 @@ def make_session_service(tmp_path: Path):
         "approval_queues": {},
         "workspaces_root": tmp_path / "workspaces",
         "workspace_index": None,
-        "operation_ledger": MagicMock(),
+        "operation_ledger": idle_operation_ledger(),
         "transport_ledger": MagicMock(),
         "checkpoint_store": MagicMock(),
         "harness_db": tmp_path / "harness.db",

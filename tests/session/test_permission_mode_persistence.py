@@ -33,6 +33,7 @@ from agent_harness.session.approval import (
 from agent_harness.session.service import SessionService
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.web.app import session_service
+from tests.session.ledger_doubles import idle_operation_ledger
 
 
 def _state(tmp_path) -> MagicMock:
@@ -56,6 +57,7 @@ def _state(tmp_path) -> MagicMock:
     state.run_manager.get_active = MagicMock(return_value=None)
     state.run_manager.launch = MagicMock(return_value=(MagicMock(), MagicMock()))
     state.get_wiring = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    state.operation_ledger = idle_operation_ledger()
     state.ensure_stores = AsyncMock()
     state.stores = MagicMock()
     # 审批队列字典必须是真 dict：交互路径会 __setitem__ 后断言成员关系。

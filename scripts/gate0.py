@@ -649,12 +649,18 @@ def worktree_divergence() -> dict:
     藏匿面；不能裸 `--others`（本仓实测会多出 5.5 万条 node_modules 噪音灌进读数）。方向
     fail-closed（本地藏不住、噪音不暴涨）；`risky` 只按 `LANE_INPUT_SUFFIXES` 过滤。
     """
+    def probe(*args: str) -> str:
+        result = git(*args)
+        if result.returncode != 0:
+            raise RuntimeError("cannot verify worktree divergence")
+        return result.stdout
+
     tracked: list[str] = []
     untracked: list[str] = []
     # `-c core.quotepath=false`：让 `git status` 以**原始字节**输出非 ASCII 路径，而不是 C-quote
     # （`?? "ZZ_\344\270\255..."`）。否则 `endswith(LANE_INPUT_SUFFIXES)` 对带引号/八进制转义的
     # 路径恒为假 ⇒ 非 ASCII 的未跟踪车道输入被守卫**放行**（R2 P1-b 实测复现）。
-    stat = git("-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all").stdout
+    stat = probe("-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all")
     for line in stat.splitlines():
         if not line.strip():
             continue
@@ -664,12 +670,12 @@ def worktree_divergence() -> dict:
     # 同一判据。同样带 `-c core.quotepath=false`（P1-b 同族：`ls-files` 对非 ASCII 路径默认
     # 也 C-quote）。去重键与下方 `risky` 过滤的切片口径一致。
     seen = {u[3:].strip() for u in untracked}
-    for p in git("-c", "core.quotepath=false", "ls-files", "--others",
-                 "--exclude-per-directory=.gitignore").stdout.splitlines():
+    for p in probe("-c", "core.quotepath=false", "ls-files", "--others",
+                    "--exclude-per-directory=.gitignore").splitlines():
         if p and p not in seen:
             untracked.append("?? " + p)
     # 除 `H`（正常缓存）以外的任何位都算偏离：`S` = skip-worktree、小写 = assume-unchanged。
-    hidden = [ln for ln in git("ls-files", "-v").stdout.splitlines() if ln[:1] and ln[:1] != "H"]
+    hidden = [ln for ln in probe("ls-files", "-v").splitlines() if ln[:1] and ln[:1] != "H"]
     risky = [
         u for u in untracked
         if u[3:].strip().lower().endswith(LANE_INPUT_SUFFIXES)

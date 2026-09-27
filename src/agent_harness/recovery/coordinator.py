@@ -63,7 +63,12 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import DANGLING_TOOL_CONTENT, collect_dangling
-from agent_harness.storage import Operation, OperationLedger, OperationState
+from agent_harness.storage import (
+    Operation,
+    OperationLedger,
+    OperationState,
+    needs_reconcile,
+)
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
 
 logger = logging.getLogger("agent_harness.recovery")
@@ -265,6 +270,18 @@ class RecoveryCoordinator:
                 )
                 if synthesis is not None:
                     plan.append(synthesis)
+
+            # `#315`：**非悬空**但"副作用未证"的行同样进人工裁决。它们的 tool/call 与
+            # tool/result 都齐（典型来源：MUTATING 工具超时——执行域在收尾那一刻就把行
+            # 留成 UNKNOWN 并打了"副作用未证"标记，见 `ToolExecutor._settle_state`），
+            # 所以"只看悬空调用"的旧收集面永远看不到它们；而 resume 闸门读的正是**这一份**
+            # 裁决要求（`03 §5`：对账优先于恢复；`07 §7`：write/edit 不确定 ⇒
+            # NEED_RECONCILE）。判据只在 `storage.needs_reconcile` 一处（`PENDING`
+            # 不在其中：`07 §6` 明文"能证明尚未启动 ⇒ 可按策略重执行"）。
+            for tool_call_id, operation in sorted(operations_by_call_id.items()):
+                if tool_call_id in dangling_ids or not needs_reconcile(operation):
+                    continue
+                reconcile_required.append((tool_call_id, operation))
 
             if reconcile_required and callback is None:
                 detail = ", ".join(
@@ -652,12 +669,22 @@ class RecoveryCoordinator:
                 run_id=operation.run_id,
                 agent_id=operation.agent_id,
             )
-        session.append(
-            TOOL_RESULT,
-            {"tool_call_id": operation.tool_call_id, "content": content},
-            run_id=operation.run_id,
-            agent_id=operation.agent_id,
-        )
+        # `#315`：**只补缺的那一半**。非悬空的未证行（工具已经落过一条如实的结果，
+        # 只是那次结果说"状态未知"）不该再补第二条 `tool/result`——同一 tool_call_id
+        # 两条结果会破坏 `derive_messages` 依赖的 1:1 配对（`07 §8` 的不变量）。
+        # 那种情况下裁决的 durable 落点是 **Ledger 行本身**：状态进终态、
+        # `reconcile_meta` 记下裁决（上面那次 update_state）。
+        if not any(
+            event.type == TOOL_RESULT
+            and event.data.get("tool_call_id") == operation.tool_call_id
+            for event in session.events
+        ):
+            session.append(
+                TOOL_RESULT,
+                {"tool_call_id": operation.tool_call_id, "content": content},
+                run_id=operation.run_id,
+                agent_id=operation.agent_id,
+            )
 
     @staticmethod
     def _verdict_outcome(

@@ -24,6 +24,7 @@ from agent_harness.memory.v2.formation import (
     FormationDecision,
     FormationResult,
     ModelOutputError,
+    ModelOutputFailureKind,
     ModelSkipReason,
     Sensitivity,
     parse_adjudication_result,
@@ -121,6 +122,23 @@ def test_the_error_summary_names_the_offending_field() -> None:
 def test_a_non_string_non_mapping_input_is_rejected() -> None:
     with pytest.raises(ModelOutputError):
         parse_formation_result(123)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_kind"),
+    [
+        ("   ", ModelOutputFailureKind.EMPTY_OUTPUT),
+        ("private marker is not JSON", ModelOutputFailureKind.INVALID_JSON),
+        ("[]", ModelOutputFailureKind.CONTRACT_VIOLATION),
+        (123, ModelOutputFailureKind.INVALID_RESPONSE_TYPE),
+    ],
+)
+def test_output_failure_kind_is_stable_and_excludes_raw_content(raw, expected_kind) -> None:
+    with pytest.raises(ModelOutputError) as raised:
+        parse_formation_result(raw)
+
+    assert raised.value.failure_kind is expected_kind
+    assert "private marker" not in str(raised.value)
 
 
 # --------------------------------------------------------------------------------------

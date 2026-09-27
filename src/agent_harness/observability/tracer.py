@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -24,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_harness.observability.sink import LangfuseSink
+from agent_harness.observability.sink import LangfuseSink, sanitize_memory_metadata
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _REDACTED_TEXT_LIMIT = 500
@@ -83,6 +85,20 @@ def _redact(value: Any) -> Any:
     return value
 
 
+def _content_sha256(value: Any) -> str:
+    """Hash content locally for metadata-only traces; never return the source value."""
+    def serialize(item: Any) -> Any:
+        if hasattr(item, "model_dump"):
+            return item.model_dump(mode="json")
+        return str(item)
+
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=serialize,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class RunTracer:
     """一次 run 的 Langfuse 映射。sink 缺席（未配置）时全部方法安全 no-op。"""
 
@@ -95,6 +111,7 @@ class RunTracer:
         agent_id: str,
         user_input: str,
         turn_index: int | None = None,
+        metadata_only: bool = False,
     ) -> None:
         self._sink = sink
         self._session_id = session_id
@@ -102,6 +119,7 @@ class RunTracer:
         self._agent_id = agent_id
         self._user_input = user_input
         self._turn_index = turn_index
+        self._metadata_only = metadata_only
         self.trace_id: str | None = None
         #: trace_url 与 trace_id 并列（trace_url 契约，ADR-0018 D7 延伸）：
         #: 同一 trace 的可点击 URL，由官方 SDK 合成（不手拼）；终态时构造。
@@ -110,10 +128,17 @@ class RunTracer:
         self._root: Any = None
         self._owns_root = True
 
-    def _content(self, value: Any) -> Any:
+    def _content_fields(self, field: str, value: Any) -> dict[str, Any]:
+        if self._metadata_only:
+            return {}
         if getattr(self._sink, "trace_content", "full") == "redacted":
-            return _redact(value)
-        return value
+            return {field: _redact(value)}
+        return {field: value}
+
+    def _metadata(self, values: dict[str, Any]) -> dict[str, Any]:
+        if not self._metadata_only:
+            return values
+        return sanitize_memory_metadata(values)
 
     def _quiet(self, operation: str, fn: Callable[[], Any]) -> Any:
         try:
@@ -146,11 +171,13 @@ class RunTracer:
             root = self._sink.start_observation(
                 name="agent-run",
                 as_type="span",
-                input=self._content(self._user_input),
-                metadata={
+                **self._content_fields("input", self._user_input),
+                metadata=self._metadata({
                     "session_id": self._session_id,
                     **trace_meta,
-                },
+                    **({"input_sha256": _content_sha256(self._user_input)}
+                       if self._metadata_only else {}),
+                }),
             )
         if root is None:
             return
@@ -168,9 +195,13 @@ class RunTracer:
             lambda: self._root.start_observation(
                 name="model-call",
                 as_type="generation",
-                input=self._content(messages),
+                **self._content_fields("input", messages),
                 model=model,
-                metadata={"step": step},
+                metadata=self._metadata({
+                    "step": step,
+                    **({"input_sha256": _content_sha256(messages)}
+                       if self._metadata_only else {}),
+                }),
             ),
         )
 
@@ -204,15 +235,17 @@ class RunTracer:
             metadata["provider_request_id"] = provider_request_id
         if response_model:
             metadata["response_model"] = response_model
+        if self._metadata_only:
+            metadata["output_sha256"] = _content_sha256(effective_output)
         if fallback_transitions:
             first = fallback_transitions[0]
             metadata["fallback_from"] = first.from_model
             metadata["fallback_to"] = first.to_model
             metadata["fallback_reason"] = first.reason
         self._quiet("model_call_completed", lambda: generation.update(
-            output=self._content(effective_output),
+            **self._content_fields("output", effective_output),
             **({"usage_details": _usage_details(usage)} if usage else {}),
-            **({"metadata": metadata} if metadata else {}),
+            **({"metadata": self._metadata(metadata)} if metadata else {}),
         ))
         self._quiet("model_call_end", generation.end)
 
@@ -220,7 +253,9 @@ class RunTracer:
         if generation is None:
             return
         self._quiet("model_call_failed", lambda: generation.update(
-            level="ERROR", status_message=f"model call failed: {error_type}",
+            level="ERROR",
+            status_message=("model call failed" if self._metadata_only
+                            else f"model call failed: {error_type}"),
         ))
         self._quiet("model_call_end", generation.end)
 
@@ -228,8 +263,12 @@ class RunTracer:
         if self._root is None:
             return
         self._quiet("run_completed", lambda: self._root.update(
-            output=self._content(final_text),
-            **({"metadata": {"usage_total": usage_total}} if usage_total else {}),
+            **self._content_fields("output", final_text),
+            **({"metadata": self._metadata({
+                **({"usage_total": usage_total} if usage_total else {}),
+                **({"output_sha256": _content_sha256(final_text)}
+                   if self._metadata_only else {}),
+            })} if usage_total or self._metadata_only else {}),
         ))
         if self._owns_root:
             self._quiet("run_end", self._root.end)
@@ -239,7 +278,8 @@ class RunTracer:
         if self._root is None:
             return
         self._quiet("run_failed", lambda: self._root.update(
-            level="ERROR", status_message=reason,
+            level="ERROR",
+            status_message="agent run failed" if self._metadata_only else reason,
         ))
         if self._owns_root:
             self._quiet("run_end", self._root.end)
@@ -272,8 +312,12 @@ class RunTracer:
             lambda: self._root.start_observation(
                 name=tool_name,
                 as_type="agent" if is_delegate else "tool",
-                input=self._content(args),
-                metadata={"tool_call_id": tool_call_id},
+                **self._content_fields("input", args),
+                metadata=self._metadata({
+                    "tool_call_id": tool_call_id,
+                    **({"input_sha256": _content_sha256(args)}
+                       if self._metadata_only else {}),
+                }),
             ),
         )
 
@@ -287,14 +331,19 @@ class RunTracer:
             return
         metadata: dict[str, Any] = {"outcome": outcome}
         if attempts:
-            metadata["attempts"] = attempts
+            if self._metadata_only:
+                metadata["attempt_count"] = len(attempts)
+            else:
+                metadata["attempts"] = attempts
         if session_id:
             metadata["session_id"] = session_id  # Operation Ledger 对账键
         if extra:
             metadata.update(extra)
+        if self._metadata_only and message is not None:
+            metadata["output_sha256"] = _content_sha256(message)
         self._quiet("tool_span_completed", lambda: span.update(
-            output=self._content(message) if message is not None else None,
-            metadata=metadata,
+            **(self._content_fields("output", message) if message is not None else {}),
+            metadata=self._metadata(metadata),
             level=("DEFAULT" if outcome == "success" else "ERROR"),
         ))
         self._quiet("tool_span_end", span.end)
@@ -307,7 +356,8 @@ class RunTracer:
         return self._quiet(
             "context_build_started",
             lambda: self._root.start_observation(
-                name="context-build", as_type="span", metadata={"step": step},
+                name="context-build", as_type="span",
+                metadata=self._metadata({"step": step}),
             ),
         )
 
@@ -318,7 +368,7 @@ class RunTracer:
         if compacted_turn_count is not None:
             metadata["compacted_turn_count"] = compacted_turn_count
         self._quiet("context_build_completed", lambda: span.update(
-            **({"metadata": metadata} if metadata else {}),
+            **({"metadata": self._metadata(metadata)} if metadata else {}),
         ))
         self._quiet("context_build_end", span.end)
 
