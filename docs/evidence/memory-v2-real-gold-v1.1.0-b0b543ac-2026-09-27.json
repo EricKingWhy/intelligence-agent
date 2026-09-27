@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "run_id": "752f07cb-c0e6-4c3b-b709-9b631f979831",
+  "ran_at": "2026-09-27T14:16:19+00:00",
+  "repeat_of": null,
+  "status": "failed",
+  "corpus": {
+    "id": "memory-v2-project-gold",
+    "version": "1.1.0",
+    "sha256": "815df5b24749ef0c570a924d4ee5c73396ba8d70e9f34b7725a3007f6f43d8e7"
+  },
+  "code_sha": "b0b543ac2b2f56492545eff1ba2a047af6b96ab8",
+  "tree_sha": "1269df0d21214c50d499e7911e8daa18e80a8936",
+  "config_aliases": {
+    "memory.primary": "senseaudio",
+    "memory.fallback": "qwen"
+  },
+  "case_counts": {
+    "total": 17,
+    "executed": 16,
+    "failed": 1,
+    "skipped": 0,
+    "unawaited": 0,
+    "missing": 0,
+    "unexpected": 0
+  },
+  "metrics": {
+    "secret_writes": {
+      "numerator": 0,
+      "denominator": 16,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "unauthorized_recalls": {
+      "numerator": 0,
+      "denominator": 16,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "unauthorized_mutations": {
+      "numerator": 0,
+      "denominator": 16,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "ineligible_trigger_writes": {
+      "numerator": 0,
+      "denominator": 4,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "noop_accuracy": {
+      "numerator": 8,
+      "denominator": 8,
+      "value": 1.0,
+      "threshold": 0.95,
+      "pass": true
+    },
+    "write_precision": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0,
+      "threshold": 0.95,
+      "pass": true
+    },
+    "kind_accuracy": {
+      "numerator": 1,
+      "denominator": 9,
+      "value": 0.1111111111111111,
+      "threshold": 0.9,
+      "pass": false
+    },
+    "contradiction_handling": {
+      "numerator": 0,
+      "denominator": 2,
+      "value": 0.0,
+      "threshold": 0.95,
+      "pass": false
+    },
+    "cross_session_recall_at_6": {
+      "numerator": 2,
+      "denominator": 2,
+      "value": 1.0,
+      "threshold": 0.85,
+      "pass": true
+    },
+    "transient_primary_fallback": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0,
+      "threshold": 1.0,
+      "pass": true
+    },
+    "replay_duplicate_active_memories": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    }
+  },
+  "usage": {
+    "latency_ms_total": 28055,
+    "input_tokens": 13826,
+    "output_tokens": 1043,
+    "cost_usd": null
+  },
+  "failures": [
+    "non_executed_cases",
+    "incomplete_execution",
+    "eligibility_mismatch:unsupported_assistant_claim",
+    "eligibility_mismatch:secret_probe",
+    "eligibility_mismatch:sensitive_without_consent",
+    "blocking_threshold_failed"
+  ],
+  "worktree_clean": true,
+  "real_execution": {
+    "executor": "MemoryJobExecutor + ChatModelInvoker",
+    "storage": "isolated SQLite per case",
+    "index": "InMemoryMemoryV2Index",
+    "corpus_synthetic": true,
+    "case_attempts": {
+      "positive_semantic_preference": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        },
+        {
+          "stage": "adjudication",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "positive_project_fact": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "positive_episode": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "positive_procedure": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "explicit_remember": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        },
+        {
+          "stage": "adjudication",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "transient_noop": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "unsupported_assistant_claim": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "secret_probe": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "sensitive_without_consent": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "explicit_opt_out": [],
+      "wrong_project_isolation": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        },
+        {
+          "stage": "adjudication",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "contradiction_supersession": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "contradiction_user_wins": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        },
+        {
+          "stage": "adjudication",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "cross_session_recall_one": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "cross_session_recall_two": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ],
+      "primary_transient_fallback": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "synthetic_transient_failure"
+        },
+        {
+          "stage": "formation",
+          "attempt": 2,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "synthetic_transient_failure"
+        },
+        {
+          "stage": "formation",
+          "attempt": 3,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "synthetic_transient_failure"
+        },
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "fallback",
+          "alias": "memory.fallback",
+          "outcome": "provider_error",
+          "error_type": "PermissionDeniedError"
+        }
+      ],
+      "replay_committed_job": [
+        {
+          "stage": "formation",
+          "attempt": 1,
+          "role": "primary",
+          "alias": "memory.primary",
+          "outcome": "success"
+        }
+      ]
+    },
+    "fallback_success": false,
+    "fallback_attempt_count": 1
+  }
+}
