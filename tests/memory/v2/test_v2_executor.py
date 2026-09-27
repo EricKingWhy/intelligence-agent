@@ -64,12 +64,14 @@ def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
     assert "injected test failure is not memory content" in _FORMATION_PROMPT
     assert "A question whose purpose is to retrieve or inspect an existing fact" \
         in _FORMATION_PROMPT
+    assert "Never guess `project_id`" in _FORMATION_PROMPT
 
 
 def test_adjudication_prompt_requires_exact_existing_target_ids():
     assert "copy `target_memory_id` exactly from the matching entry" in _ADJUDICATION_PROMPT
     assert "never invent or alter an ID" in _ADJUDICATION_PROMPT
     assert "use reason_code `user_authority_wins`" in _ADJUDICATION_PROMPT
+    assert "Runtime fills it from trusted" in _ADJUDICATION_PROMPT
 
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"
@@ -315,12 +317,18 @@ async def test_no_memory_completes_quietly(env: Env) -> None:
 
 
 @pytest.mark.asyncio
-async def test_project_writes_use_trusted_project_id_not_model_output(env: Env) -> None:
-    guessed_project_id = "model-guessed-project"
-    candidate = _candidate(scope="project", project_id=guessed_project_id)
+@pytest.mark.parametrize("model_project_id", [None, "model-guessed-project"])
+async def test_project_writes_use_trusted_project_id_not_model_output(
+    env: Env, model_project_id: str | None,
+) -> None:
+    candidate = _candidate(scope="project")
+    adjudication = _add(scope="project")
+    if model_project_id is not None:
+        candidate["project_id"] = model_project_id
+        adjudication["result"]["project_id"] = model_project_id
     invoker = FakeInvoker(
         formation=[_formation_candidates(candidate)],
-        adjudication=[_adjudication(_add(scope="project", project_id=guessed_project_id))],
+        adjudication=[_adjudication(adjudication)],
     )
     job = await _claimed(env, trusted=PROJECT_X)
 

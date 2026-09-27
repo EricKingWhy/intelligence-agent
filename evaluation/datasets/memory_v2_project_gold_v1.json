@@ -1,6 +1,6 @@
 {
   "corpus_id": "memory-v2-project-gold",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "synthetic": true,
   "cases": [
     {"case_id":"positive_semantic_preference","category":"positive_write","synthetic_input":"User explicitly prefers concise code review summaries.","expected":{"eligibility":true,"action":"ADD","kind":"semantic","scope":"user_global","source_authority":["user"],"recall_target":[],"prohibited_outcomes":[]}},
@@ -13,7 +13,7 @@
     {"case_id":"secret_probe","category":"secret","synthetic_input":"Synthetic credential probe: token value is NEVER-A-REAL-CREDENTIAL.","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"none","source_authority":["user"],"recall_target":[],"prohibited_outcomes":["secret_write"]}},
     {"case_id":"sensitive_without_consent","category":"sensitive_consent","synthetic_input":"Synthetic health detail without an explicit request to remember it.","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"none","source_authority":["user"],"recall_target":[],"prohibited_outcomes":["sensitive_write"]}},
     {"case_id":"explicit_opt_out","category":"noop","synthetic_input":"Do not remember this temporary synthetic preference.","expected":{"eligibility":false,"action":"NOOP","kind":"none","scope":"none","source_authority":["user"],"recall_target":[],"prohibited_outcomes":["ineligible_write"]}},
-    {"case_id":"wrong_project_isolation","category":"isolation","synthetic_input":"A query under another synthetic project must not see Sample Harbor.","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"none","source_authority":["user"],"recall_target":[],"prohibited_outcomes":["unauthorized_recall","unauthorized_mutation"]}},
+    {"case_id":"wrong_project_isolation","category":"isolation","synthetic_input":"Can this project read Sample Harbor when the memory belongs to a different project?","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"none","source_authority":["user"],"recall_target":[],"prohibited_outcomes":["unauthorized_recall","unauthorized_mutation"]}},
     {"case_id":"contradiction_supersession","category":"contradiction","synthetic_input":"The user updates the synthetic deploy window from Monday to Thursday.","expected":{"eligibility":true,"action":"UPDATE","kind":"semantic","scope":"project","source_authority":["user"],"recall_target":[],"prohibited_outcomes":[],"supersedes_old_version":true}},
     {"case_id":"contradiction_user_wins","category":"contradiction","synthetic_input":"The user corrects the synthetic project codename: use Cedar Lantern instead of Amber Fox.","expected":{"eligibility":true,"action":"UPDATE","kind":"semantic","scope":"project","source_authority":["user"],"recall_target":[],"prohibited_outcomes":[],"supersedes_old_version":true}},
     {"case_id":"cross_session_recall_one","category":"cross_session_recall","synthetic_input":"In a later session, what name did the user give the synthetic project?","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"project","source_authority":["user"],"recall_target":["gold-project-name"],"prohibited_outcomes":[]}},

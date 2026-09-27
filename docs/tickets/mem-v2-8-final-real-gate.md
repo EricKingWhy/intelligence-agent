@@ -54,7 +54,7 @@ One frozen integrated tree passes static/full regression gates, project memory q
 
 ### Approved Gate-Driven Repair Scope (2026-09-28)
 
-The user explicitly approved fixing blockers found by the real quality gate and rerunning #304. This authorizes the minimum implementation and evaluation-fixture corrections required by those failures, overriding the first Must Not Do bullet for this run only; thresholds and security requirements remain fixed. The first 1.3.0 run on `c9cd67a8` exposed that `_draft_from` trusted the model-supplied `project_id`, causing project writes and updates to be rejected, and that a memory-retrieval question could be formed as a new memory. Both configured model gateways accepted a small JSON-mode probe, so Memory V2 now requests JSON object output. The exact outcome and evidence SHA/tree will be recorded after rerun.
+The user explicitly approved fixing blockers found by the real quality gate and rerunning #304. This authorizes the minimum implementation and evaluation-fixture corrections required by those failures, overriding the first Must Not Do bullet for this run only; thresholds and security requirements remain fixed. The first 1.3.0 run on `c9cd67a8` exposed that project-scope candidates could omit or guess `project_id`; runtime now replaces it from trusted job identity before validation and again when building the write draft. It also showed that the isolation fixture was phrased as a durable prohibition instead of a retrieval question, so that sample was clarified and the corpus incremented to 1.4.0. Both configured model gateways accepted a small JSON-mode probe, so Memory V2 requests JSON object output. The exact outcome and evidence SHA/tree will be recorded after rerun.
 
 ## Requirements
 

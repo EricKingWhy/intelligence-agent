@@ -462,7 +462,7 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
     corpus, cases = load_memory_gold()
 
     assert corpus["synthetic"] is True
-    assert corpus["version"] == "1.3.0"
+    assert corpus["version"] == "1.4.0"
     assert len(cases) >= 15
     for case in cases:
         assert {
