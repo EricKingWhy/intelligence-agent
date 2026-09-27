@@ -6249,9 +6249,15 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   非确定性，且**与本票改动无因果面**（`web/**` 相对 `origin/main` 只多 2 行 `guard/stuck` **no-op 登记**，
   `web/e2e/**` 与其**逐字节相同**）⇒ `#378`。
 
-**门禁（Gate-0 裸全量，合并后 tip `7bfa8218`）**：首次落盘即 **5/6**（红车道 = coverage：证据笔 `7bfa8218` 含
-`.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属）⇒ 补台账行 349 归属后 `--only coverage` **PASS**。最终 tip 的
-裸全量读数见下方"合并后"块。
+**门禁（Gate-0 裸全量，合并后）**：首次落盘（证据笔 `7bfa8218`）**5/6** —— 红车道 = coverage：证据笔含
+`.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属；补台账行 349 归属后 `--only coverage` **PASS**。**最终读数**
+（tip `bdf2ac73` / tree `d1effe8856d3`）：**6/6 PASS**，墙钟 **41.1s**（diff-check 0.08 / ruff 0.34 / oxlint 1.13 /
+tsc 29.81 / guards 7.56 / coverage 2.17），读数落盘 `docs/gate/bdf2ac73fc60c2f42a96fb5fe77a87e670d03d0e.json`
+（`tracked_matches_head=true` / `untracked=['.zcodeignore']`）；中间态那份（`docs/gate/7bfa8218….json`，**5/6**）
+一并入库不删 —— 它记的是"`.jsonl` 证据笔需要一条归属行"这条机械事实。覆盖闸门在 `e1b346e0` 上 **exit 0**
+（`089524a~1..HEAD` 每条均有归属；台账描述字段 lint **52 行命中 = 与合并前基线持平**）。
+**另如实登记一处自纠**：新写的两条台账行初版超 §8.5 第 1 条的 **800 字符硬上限**（348 = 3278 / 349 = 1450，
+lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，细节留本段、行只保判定与指针）。
 
 **门禁（Gate-0 裸全量，合并前 tip `98bfc6d0` / tree `6b0ffa43`）**：**6/6 PASS**，墙钟 **24.2s**
 （diff-check 0.03 / ruff 0.70 / oxlint 0.30 / tsc 12.28 / guards 9.73 / coverage 1.19），读数落盘
