@@ -1,6 +1,6 @@
 # ADR-0046 — Memory V2 独占运行时与 clean-slate cutover
 
-- **Status**: Accepted（#303 施工中；真实环境 cutover 及其证据仍待执行）
+- **Status**: Accepted（#303 代码已集成；integration clean-slate cutover 与 AC8 真实链路验证已完成）
 - **Date**: 2026-09-26
 - **Deciders**: 用户（批准 Memory V2 独占运行时与限定范围的 clean-slate reset）+ 本 Agent（机制设计）
 - **Related**: Issue #303 / MEM-V2-7；ADR-0024、ADR-0031、ADR-0042；`docs/tickets/mem-v2-7-clean-slate-cutover.md`
@@ -71,4 +71,6 @@ Writer lease 从创建到取得 OS 锁期间，与扫描、清理 stale lease �
 
 ## Implementation evidence
 
-施工证据、最终 dry-run plan hash、真实 cutover report、回归门禁与 review coverage 将在 #303 完成后登记于 `docs/phase_status/2026-09.md` 与 `docs/evidence/`。当前仅测试隔离环境，不代表真实数据已清除。
+`#303` 代码通过 PR #374 合入，merge `9c7181ce82d33a52f517be6b273101711652f981`；分支 Gate-0 与 PR 必需的服务端 `gate0` 均通过。integration clean-slate 使用用户确认的 plan hash `137aeaa1059c4933a73f4ab7738941593a3c8639ad8112d80b2ffe6a30ca0810` 完成，原始报告见 [`memory-v2-clean-slate-cutover-report-2026-09-27.json`](../evidence/memory-v2-clean-slate-cutover-report-2026-09-27.json)，SHA-256 `6f79b0c16dde7c85387914aca461d18ae664d7fa73c8970b28ab1682dc03f6bf`。完成后及后续只读复核均确认 V1/V2 SQLite allowlist、Milvus Memory 与 Knowledge 计数为零；保留域指纹与报告一致；startup fence 已移除；没有创建旧记忆内容备份。复核 plan hash 为 `dc0883a1281c2cb55bd3ff166e959f1b039fd2719b140a4f70b5b4253205f221`。
+
+AC8 使用真实 memory formation 模型、embedding 与 integration Milvus，在隔离 SQLite/JSONL 和随机身份下完成：job `completed/committed`、形成 1 条带事件来源的 V2 记录、生产 service 与原始 Milvus 检索均命中；经 service 删除后无 active 记录且 Milvus 检索无命中。完整 pytest 为 4435 passed / 14 skipped / 51 deselected；合并后 cutover/runner 定向回归 60 passed。脱敏 smoke 结果、最终 dry-run 计划、覆盖闸门与 Gate-0 证据索引见 `docs/phase_status/2026-09.md`。
