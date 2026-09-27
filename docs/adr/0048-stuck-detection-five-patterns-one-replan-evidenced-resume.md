@@ -269,3 +269,21 @@ reasoning effort、context providers（排序后）。两个**刻意排除**项�
    计数口径（树 = 跨后代累计，事件 = 本 run 逐条），所以恢复后的判定可能**更早**到线而不是更晚
    ——方向是 fail-closed 的一侧（更早暂停，不会漏停）。要彻底闭合需要一个"这次调用归谁数"的
    durable 标记，那会把子会话的事实写进父会话事件流，本票不做（代价登记于此）。
+9. **恢复依据的"正文"不进模型上下文（T9 实测边界，登记不阻断）**：三类依据里
+   `environment_change` / `policy_change` 是**观测**（两侧各算一次摘要再比），本身没有"正文"；
+   `relevant_steer` 有正文，但暂停期间生产**没有**把它投进恢复那条腿上下文的路径——Web 的
+   `send_message(mode="steer")` 要求会话有**在途 run**（暂停态调用得到 `SteerTargetNotFound`
+   409），而运行时只排空内存里的 `steer_source` 队列（`runtime._drain_steers` +
+   `_applicable_steers`），队列的生命周期随 run 结束收口。
+   **实测读数**（`docs/live_gate/20260927T051359-048e2246a362-…` 第 3 次尝试）：恢复腿在
+   `run/resumed` 之后没有任何工具调用，只把暂停前那份报告又念了一遍——依据被采纳、账记得
+   对，但模型不知道用户说了什么。
+   **后果与口径**：`relevant_steer` 仍只按事件流判"有没有相关 steer"（D7 不变），**不**承诺
+   模型知道正文；Live Gate 场景的有据恢复因此改用 `environment_change`（世界真的变了）取证，
+   且**不**断言恢复腿读到了上游产物（场景 v3 的"这里没有这条断言"注释指回本条）。要闭合这一格
+   需要一个产品决定（恢复请求携带正文 / 暂停期间的 steer 排队到恢复后投递），属于另一个票。
+   同一次 v2 运行还暴露了一个**已修**的接线缺陷：既有会话的 `build_runtime` 漏传
+   `stuck_evidence` ⇒ 暂停快照两格为 `None`、环境 / 策略两条依据恒"无快照可比"（修复与
+   回归用例：`session/service.py` 的那个 kwarg + `tests/session/test_resume_amend_passthrough.py`
+   的 `TestResumePathStuckEvidence`）。登记在这里是因为它说明**暂停侧快照与恢复侧现算必须
+   共用同一个端口实例**这条纪律只有实测才能钉住（单测当时全绿）。

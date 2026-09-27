@@ -1169,6 +1169,10 @@ class SessionService:
             # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
             # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
             local_fuse_source=fuse.source,
+            # `#317`：既有会话的新 run 也要在暂停时记下环境 / 策略快照——必须是**同一个**
+            # `stuck_evidence` 实例（上面阶段一 / 阶段二现算恢复依据用的那个），否则
+            # environment / policy 两条依据在恢复侧一律"无快照可比"（ADR-0048 D7）。
+            stuck_evidence=stuck_evidence,
             **amend_kwargs(amend),
         )
         # 交互式审批：session 已存在，直接绑定（创建路径是"先 holder 后 Session.start"，

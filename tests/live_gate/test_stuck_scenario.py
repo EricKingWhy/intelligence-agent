@@ -37,7 +37,6 @@ from evaluation.live_gate.scenarios.stuck import (
     FAILURE_MARKER,
     IDENTICAL_FAILURES,
     SCENARIO,
-    STEER_TEXT,
     TASK,
     StuckToolFailurePauseScenario,
     _identical_failure_streak,
@@ -53,6 +52,8 @@ TOKENS_PER_REQUEST = 7
 COST_PER_REQUEST = "0.01"
 #: 合成轨迹里的两个快照（形状与生产同源：`sha256:` 前缀 + 十六进制）。
 ENVIRONMENT_REVISION = "sha256:0f1e2d3c4b5a6978"
+#: 有据恢复那一刻**现算**出来的环境 revision（上游产物落进工作区之后）——必须与暂停快照不同。
+ENVIRONMENT_REVISION_AFTER = "sha256:5a4b3c2d1e0f9988"
 POLICY_VERSION = "sha256:8899aabbccddeeff"
 
 
@@ -152,18 +153,17 @@ def _trajectory(
     consumed_overrides: dict[str, Any] | None = None,
     stuck_overrides: dict[str, Any] | None = None,
     resumed: bool = True,
-    resume_read_ok: bool = True,
     resume_evidence_overrides: dict[str, Any] | None = None,
     bad_refusal: str | None = None,
     terminal: bool = True,
     extra_events: list[tuple[str, dict[str, Any]]] | None = None,
 ) -> tuple[list[Any], dict[str, Any]]:
-    """自洽的事件序列：6 次同动作同失败（第 3 次一条纠正）→ stuck 暂停 → 相关 steer → 同 run 恢复。
+    """自洽的事件序列：6 次同动作同失败（第 3 次一条纠正）→ stuck 暂停 → 上游就绪 → 同 run 恢复。
 
     结构逐格对齐生产落盘：`run/started` → `user/message` → 每轮
     `model/request` + `model/completed` + `tool/call` + `tool/result` → 暂停前
-    `guard/stuck(level=paused)` → `run/paused` → `steer/requested` → `run/resumed`
-    → 恢复那条腿 read 成功 → `run/completed`。seq 由计数器顺序分配。
+    `guard/stuck(level=paused)` → `run/paused` → `run/resumed`（basis=environment_change，
+    现算 revision 与快照不同）→ 恢复那条腿 read 成功 → `run/completed`。seq 由计数器顺序分配。
 
     反例用例只改"某一处不对"的那一格（见各参数）；`consumed` 与 `stuck` 的默认值由
     轨迹重算 / 常量拼出，所以"自洽"那一侧不靠手抄数字。
@@ -240,24 +240,17 @@ def _trajectory(
     pause_index = len(events)
     add("run/paused", {})  # 占位：`consumed` 要用暂停**之前**的轨迹重算，见下
 
-    steer_seq: int | None = None
     if resumed:
-        add("steer/requested", {
-            "steer_id": "steer-live-gate", "content": STEER_TEXT,
-            "created_at": "2026-09-27T00:00:00Z",
-        })
-        steer_seq = events[-1].seq
         evidence: dict[str, Any] = {
-            "basis": "relevant_steer",
-            "steer_seq": steer_seq,
+            "basis": "environment_change",
+            "environment_revision": ENVIRONMENT_REVISION_AFTER,
+            "recorded": ENVIRONMENT_REVISION,
             "pause_seq": pause_index,
-            "environment_revision": ENVIRONMENT_REVISION,
-            "policy_version": POLICY_VERSION,
         }
         evidence.update(resume_evidence_overrides or {})
         add("run/resumed", {
             "run_id": RUN_ID, "from_pause_seq": pause_index, "version": 2,
-            "resume_basis": "relevant_steer", "resume_evidence": evidence,
+            "resume_basis": "environment_change", "resume_evidence": evidence,
         })
         decide(7, args={"path": AWAITED_FILE}, tool_call_id="call-7")
         add("tool/call", {
@@ -265,8 +258,7 @@ def _trajectory(
             "args": {"path": AWAITED_FILE},
         })
         add("tool/result", {
-            "tool_call_id": "call-7",
-            "content": _read_success_content() if resume_read_ok else _failure_content(),
+            "tool_call_id": "call-7", "content": _read_success_content(),
         })
         request()
         add("model/completed", {"content": f"读到 {AWAITED_CONTENT!r}", "tool_calls": []})
@@ -303,7 +295,6 @@ def _trajectory(
     return events, {
         "pause": events[pause_index],
         "pause_seq": pause_index,
-        "steer_seq": steer_seq,
         "refusals": {
             "budget_increase": _refusal(
                 raised=BudgetConflict("stuck 暂停不接受 resume_basis=budget_increase"),
@@ -347,7 +338,6 @@ def _legs(legs: dict[str, Any]) -> dict[str, Any]:
     """断言面读的 `legs`（真实运行由 `run()` 填；这里只放断言真正消费的几格）。"""
     return {
         "refusals": legs["refusals"],
-        "steer_seq": legs["steer_seq"],
         "awaited_file_written": AWAITED_CONTENT,
     }
 
@@ -404,7 +394,6 @@ def test_task_text_names_the_action_and_the_repeat_count(tmp_path):
     assert FAILED_TOOL in TASK and AWAITED_FILE in TASK
     assert f"读 {IDENTICAL_FAILURES} 次" in TASK
     assert "bash" in TASK and "不要换别的工具" in TASK
-    assert AWAITED_FILE in STEER_TEXT and FAILED_TOOL in STEER_TEXT
 
 
 def test_failure_marker_matches_the_production_read_tool_message():
@@ -466,7 +455,8 @@ def test_assertions_pass_on_a_self_consistent_trajectory(tmp_path):
         "pause_is_not_a_terminal_event",
         "replay_reconstructs_the_same_verdict",
         "resume_records_the_accepted_basis",
-        "resumed_leg_read_the_awaited_artifact",
+        "resumed_leg_admitted_new_work",
+        "resumed_leg_ended_safely",
         "stuck 暂停快照.request_count",
     } <= names
 
@@ -557,7 +547,7 @@ def test_a_refusal_that_wrote_events_is_red(tmp_path):
 
 def test_missing_refusals_are_red(tmp_path):
     events, _ = _trajectory()
-    failed = _failed(_assertions(tmp_path, events, {"refusals": {}, "steer_seq": None}))
+    failed = _failed(_assertions(tmp_path, events, {"refusals": {}}))
     assert "every_resume_without_evidence_is_a_409_with_zero_side_effects" in failed
 
 
@@ -573,20 +563,41 @@ def test_resume_basis_mismatch_is_red(tmp_path):
     assert "resume_records_the_accepted_basis" in failed
 
 
-def test_steer_before_the_pause_is_red(tmp_path):
-    """相关 = 暂停之后的 steer：seq 不晚于暂停点的 steer 不算依据。"""
-    events, legs = _trajectory()
-    legs = dict(legs)
-    legs["steer_seq"] = 0
+def test_a_stale_environment_revision_is_red(tmp_path):
+    """现算 revision 与暂停快照相同 ⇒ 环境没变，这条依据不成立（等于无依据放行）。"""
+    events, legs = _trajectory(
+        resume_evidence_overrides={"environment_revision": ENVIRONMENT_REVISION},
+    )
     failed = _failed(_assertions(tmp_path, events, _legs(legs)))
     assert "resume_records_the_accepted_basis" in failed
 
 
-def test_resumed_leg_that_never_read_the_artifact_is_red(tmp_path):
-    """恢复那条腿"多打了一次请求"不算进展：产物内容真的读到才算（AC 的"继续干活"）。"""
-    events, legs = _trajectory(resume_read_ok=False)
+def test_a_recorded_snapshot_that_is_not_the_pause_snapshot_is_red(tmp_path):
+    """`recorded` 必须逐字等于暂停快照里的那个值——否则"与快照比"是空话。"""
+    events, legs = _trajectory(
+        resume_evidence_overrides={"recorded": "sha256:0000000000000000"},
+    )
     failed = _failed(_assertions(tmp_path, events, _legs(legs)))
-    assert failed == {"resumed_leg_read_the_awaited_artifact"}
+    assert "resume_records_the_accepted_basis" in failed
+
+
+def test_a_missing_observed_environment_revision_is_red(tmp_path):
+    """观测不到 env revision（端口缺席 / 读不到）⇒ 不是"收到了依据"（fail-closed）。"""
+    events, legs = _trajectory(resume_evidence_overrides={"environment_revision": None})
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert "resume_records_the_accepted_basis" in failed
+
+
+def test_resumed_leg_without_an_admission_is_red(tmp_path):
+    """`run/resumed` 落了、之后模型一动没动 ⇒ 不算"接回并继续干活"。"""
+    events, legs = _trajectory()
+    resumed_seq = next(event.seq for event in events if event.type == "run/resumed")
+    events = [
+        event for event in events
+        if event.seq <= resumed_seq or event.type == "run/completed"
+    ]
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert "resumed_leg_admitted_new_work" in failed
 
 
 def test_local_fuse_terminal_is_red(tmp_path):
@@ -679,5 +690,6 @@ def test_malformed_pause_payload_is_red_not_crash(tmp_path):
 def test_scenario_identity_and_description():
     assert isinstance(SCENARIO, StuckToolFailurePauseScenario)
     assert SCENARIO.id == "stuck-tool-failure-pause"
-    assert SCENARIO.version == 2
+    assert SCENARIO.version == 3
     assert "stuck" in SCENARIO.description and "409" in SCENARIO.description
+    assert "environment_change" in SCENARIO.description

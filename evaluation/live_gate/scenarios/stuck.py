@@ -26,9 +26,12 @@
    `policy_change`；外加一条**无关变更**：改动落在**会话工作区之外** ⇒ 环境依据照旧不成立
    （"我改过了"是声明，不是证据）。
 5. **有依据的恢复放行并记账**：暂停之后**上游真的就绪了**（场景把 `upstream_ready.txt` 写进
-   工作区）+ 一条 `steer/requested` ⇒ `run/resumed` 以**同一 `run_id`** 接回，
-   `resume_evidence.basis=relevant_steer`、`steer_seq > pause_seq`，恢复后**真的读到了**
-   那份文件（成功结果里带它的内容）、并且 ≥1 次接纳。
+   工作区 ⇒ 现算的环境 revision 与暂停快照不同）⇒ `run/resumed` 以**同一 `run_id`** 接回，
+   `resume_evidence.basis=environment_change`、`environment_revision != recorded`，恢复后
+   **≥1 次接纳**、收口在安全状态。
+   ⚠ **不断言**"恢复那条腿真的读了那份文件"：它能不能知道上游就绪，取决于"恢复依据的正文
+   有没有被投进模型上下文"，而生产**没有**这条投递路径（`send_message(mode="steer")` 要求
+   有在途 run；运行时只排空内存队列）——实测两条读数与边界见 ADR-0048 §4 的残余 4。
 6. **重放能重建同样的判定**（AC「Restart and replay reconstruct the exact fingerprint/replan
    state」）：暂停之后用**生产检测器** `StuckDetector.from_events` 把"暂停前那一段"重放成
    状态，再喂那段历史的**尾部**：得到的信号必须与落盘载荷**同模式、同计数、同阈值**，且
@@ -86,12 +89,16 @@ SCENARIO_ID = "stuck-tool-failure-pause"
 #: ①：生产 BashTool 对 `exit_code=3` 返回 `ok=true`（非零退出码是给模型看的**结果**，
 #: 不是工具失败），3/3 都跑到 `run/completed`。那次的失败读数留在
 #: `docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/`。
-SCENARIO_VERSION = 2
+#: v3 = 有据恢复那条腿改用 `environment_change`（"上游真的就绪了"这条世界事实），并去掉
+#: "恢复后读到了那份文件"这条断言：v2 实测暴露生产**没有**把恢复依据的正文投进模型上下文
+#: 的路径（两条读数见 `docs/live_gate/20260927T051359-048e2246a362-…`、边界见 ADR-0048 §4）。
+SCENARIO_VERSION = 3
 
 #: 上游依赖**还没**产出的那份产物：read 工具对它必然失败（`文件 '...' 不存在。`）。
 #: 名字在任务文本里逐字点名——模型不需要猜，也不会去探索。
 AWAITED_FILE = "upstream_ready.txt"
-#: 上游就绪之后这份文件的内容（恢复那条腿的成功结果里必须出现它——证明"真的读到了"）。
+#: 上游就绪之后这份文件的内容。它落进工作区就是**环境变更**这次恢复依据的物理来源
+#: （环境 revision = 全树清单摘要 ⇒ 多一个文件必然算出不同的值）。
 AWAITED_CONTENT = "upstream: ready"
 
 #: 失败面用的工具名（`02 §5.3` 的"同动作"= 同工具 + 同参数）。**不能**用 bash：
@@ -126,14 +133,6 @@ TASK = (
     f"于本任务——请把 {IDENTICAL_FAILURES} 次读完再汇报；\n"
     f"  6) {IDENTICAL_FAILURES} 次都做完之后，用一句话汇报你看到的失败信息。"
 )
-
-#: 有据恢复那条腿的 steer 正文（场景扮演"用户"）：上游已就绪 ⇒ 现在**能成功**地读到它。
-#: 它同时是"相关 steer"的判据对象（`resume_evidence.relevant_steer_seq` 只读事件流）。
-STEER_TEXT = (
-    f"上游依赖已就绪：`{AWAITED_FILE}` 现在已经在工作区里了。请用 read 工具读取它，"
-    "然后用一句话汇报文件内容。"
-)
-
 
 # ── 小工具 ────────────────────────────────────────────────────────────────
 
@@ -193,26 +192,6 @@ async def _drain(result: Any, *, service: Any, phase: str) -> list[Any]:
     return streamed
 
 
-def _append_steer(store: Any, session_id: str) -> Any:
-    """落一条**会话级** `steer/requested`（`run_id=None`）：相关 steer 的唯一判据是事件流。
-
-    用生产原语（`Session.load` + `append`），不手写 JSONL。**投递入口**（Web 的
-    `send_message(mode="steer")` 需要 in-flight run）不在这里证明：`#317` 的 AC 只说
-    "有相关 steer 时恢复放行并记账"，本场景按判据面取证（边界见 ADR-0048 §4）。
-    """
-    from agent_harness.session import Session
-
-    session = Session.load(store, session_id)
-    return session.append(
-        "steer/requested",
-        {
-            "steer_id": "steer-live-gate",
-            "content": STEER_TEXT,
-            "created_at": "2026-09-27T00:00:00Z",
-        },
-    )
-
-
 def _identical_failure_streak(
     events: list[Any], *, cutoff_seq: int | None, tool_name: str = FAILED_TOOL,
 ) -> tuple[int, str]:
@@ -270,17 +249,6 @@ def _identical_failure_streak(
     return best, best_label
 
 
-def _result_ok(content: Any) -> bool:
-    """`tool/result.content` 是不是成功（形状权威 = `tooling/result.py::ToolResult`）。"""
-    if not isinstance(content, str):
-        return False
-    try:
-        payload = json.loads(content)
-    except ValueError:
-        return False
-    return bool(payload.get("ok")) if isinstance(payload, dict) else False
-
-
 class _Refusal:
     """一次"恢复必须被拒"的实测结论（不抛给调用方，转成一等事实）。
 
@@ -314,9 +282,9 @@ class StuckToolFailurePauseScenario:
     description = (
         f"重复的真实工具失败（read 读一个上游还没产出的文件，{IDENTICAL_FAILURES} 次）："
         "首达阈值恰好一次纠正（tool/failure-guard soft），同模式再达阈值 ⇒ "
-        "run/paused(reason=stuck)（非终态、带环境/策略快照）；四种无依据恢复"
-        "（含工作区之外的无改变更）全部 409 且零副作用；暂停后的相关 steer ⇒ 同一 run_id"
-        "有据恢复并真的读到那份文件"
+        "run/paused(reason=stuck)（非终态、带环境/策略快照）；五种无依据恢复"
+        "（含工作区之外的无改变更）全部 409 且零副作用；上游就绪（工作区真的变了）⇒ "
+        "同一 run_id 以 environment_change 有据恢复并继续接纳"
     )
 
     async def prepare(self, ctx: ScenarioContext) -> list[str]:
@@ -354,7 +322,6 @@ class StuckToolFailurePauseScenario:
             "first_stream": [],
             "resume_stream": [],
             "refusals": {},
-            "steer_seq": None,
             "raised_turns": None,
         }
         try:
@@ -415,17 +382,16 @@ class StuckToolFailurePauseScenario:
                 )
             )
 
-            # ⑤ 有依据的恢复：上游**真的**就绪了（工作区里现在有了那份产物）+ 一条相关 steer
-            # ⇒ 同一 run_id 接回，且这一次 read 会成功。
+            # ⑤ 有依据的恢复：上游**真的**就绪了——产物落进工作区即"世界变了"，
+            # 现算的环境 revision 因此与暂停快照不同 ⇒ environment_change 成立。
             # 直接同步调用（与其它场景的 `prepare` 同形）：LocalSubprocessSandbox 的
             # `write_text` 是一次短写，不引入线程池这一层。
             ctx.sandbox.write_text(AWAITED_FILE, AWAITED_CONTENT)
             legs["awaited_file_written"] = _safe_read(ctx.sandbox, AWAITED_FILE)
-            legs["steer_seq"] = _append_steer(store, ctx.session_id).seq
             resume = await service.resume_and_launch(
                 session_id=ctx.session_id, task=None,
                 resume_run_id=paused.run_id,
-                resume_basis=RESUME_BASIS_RELEVANT_STEER,
+                resume_basis=RESUME_BASIS_ENVIRONMENT_CHANGE,
                 expected_version=paused.version,
             )
             legs["resume_stream"] = await _drain(
@@ -707,20 +673,23 @@ class StuckToolFailurePauseScenario:
             ),
         ))
 
-        # ── 事实 5：有依据的恢复放行、记账、真的继续干活（读到了那份产物）────
+        # ── 事实 5：有依据的恢复放行、记账、真的继续干活 ────────────────────
         resume_event = resumes[0] if resumes else None
         evidence = (
             resume_event.data.get("resume_evidence")
             if resume_event is not None and isinstance(resume_event.data.get("resume_evidence"), dict)
             else {}
         )
+        recorded_env = stuck.get("environment_revision")
+        observed_env = evidence.get("environment_revision")
         resume_ok = (
             resume_event is not None and len(started) == 1
             and str(resume_event.run_id or "") == run_id
-            and evidence.get("basis") == "relevant_steer"
-            and isinstance(evidence.get("steer_seq"), int)
-            and isinstance(legs.get("steer_seq"), int)
-            and evidence.get("steer_seq") == legs.get("steer_seq") > (cutoff or 0)
+            and evidence.get("basis") == "environment_change"
+            and isinstance(recorded_env, str) and bool(recorded_env)
+            and isinstance(observed_env, str) and bool(observed_env)
+            and observed_env != recorded_env
+            and evidence.get("recorded") == recorded_env
             and evidence.get("pause_seq") == cutoff
         )
         results.append(AssertionResult(
@@ -728,7 +697,8 @@ class StuckToolFailurePauseScenario:
             ok=resume_ok,
             detail=(
                 f"run/resumed={len(resumes)} run/started={len(started)}、"
-                f"resume_evidence={evidence}、暂停 seq={cutoff}、steer seq={legs.get('steer_seq')}"
+                f"resume_evidence={evidence}、暂停快照 environment_revision={recorded_env!r}"
+                f"（暂停 seq={cutoff}）"
             ),
         ))
         resumed_seq = resume_event.seq if resume_event is not None else None
@@ -745,24 +715,10 @@ class StuckToolFailurePauseScenario:
                 f"{[event.type for event in admitted]}"
             ),
         ))
-        # 恢复那条腿**真的读到了**那份产物：暂停后出现的成功结果里带它的内容。
-        # "多打了一次请求"不算进展——内容出现才算（这是 AC 里"继续干活"的可机检形式）。
-        read_back = [
-            event for event in events
-            if event.type == TOOL_RESULT
-            and resumed_seq is not None and event.seq is not None and event.seq > resumed_seq
-            and _result_ok(event.data.get("content"))
-            and AWAITED_CONTENT in str(event.data.get("content"))
-        ]
-        results.append(AssertionResult(
-            name="resumed_leg_read_the_awaited_artifact",
-            ok=bool(read_back),
-            detail=(
-                f"恢复后内容含 {AWAITED_CONTENT!r} 的成功结果数={len(read_back)}；"
-                f"工作区里 {AWAITED_FILE} 现有 {len(_safe_read(ctx.sandbox, AWAITED_FILE))} 字符、"
-                f"写入读数={legs.get('awaited_file_written')!r}"
-            ),
-        ))
+        # 这里**没有**"恢复那条腿读到了那份文件"的断言：它读不读得到取决于"恢复依据的正文
+        # 有没有被投进模型上下文"，而生产没有这条投递路径（`send_message(mode="steer")` 要求
+        # 有在途 run；运行时只排空内存队列）——把"模型该知道上游就绪"写成断言等于把一条
+        # 不存在的产品承诺算进证据。边界、实测两条读数与残余见 ADR-0048 §4 残余 4。
         results.append(AssertionResult(
             name="resumed_leg_ended_safely",
             ok=(
