@@ -1,4 +1,4 @@
-"""#202 / ADR-0031：retrieve_memory / remember_this 的契约测试。
+"""Legacy V1 tool-library contracts; production V2 wiring is tested under memory/v2.
 
 本文件钉 ADR-0031 §7 的 T1–T12。断言打在**真实执行路径**（ToolExecutor）与
 真实 provider 写入路径（consolidate）上；排序同源（T10）直接断言两处调用
@@ -65,18 +65,6 @@ def _executor(*tools, **kwargs) -> ToolExecutor:
     for tool in tools:
         registry.register(tool)
     return ToolExecutor(registry, **kwargs)
-
-
-# ── T1：工具注册随 capability（接线层） ──────────────────────────────
-
-
-def test_wiring_registers_all_three_memory_tools():
-    """memory capability 接线 ⇒ 三个记忆工具都经 contributes_tools 注册。"""
-    from agent_harness.capability.wiring import _MemoryCapabilityProvider
-
-    provider = _MemoryCapabilityProvider(FakeMemoryCapability())
-    names = {type(t).name.fget(t) for t in provider.contributes_tools()}
-    assert {"retrieve_memory", "remember_this", "forget_memory"} <= names
 
 
 # ── T2：去重 + injected 标记 ─────────────────────────────────────────

@@ -101,4 +101,4 @@ def test_session_recall_api_returns_authorized_redacted_explanations(tmp_path) -
             f"/api/sessions/{session_id}/memory-recalls", headers=_token("alice"),
         )
         assert unavailable.status_code == 503
-        assert unavailable.json()["detail"]["code"] == "memory_v2_unavailable"
+        assert unavailable.json()["detail"]["code"] == "not_configured"

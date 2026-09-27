@@ -12,7 +12,7 @@
 
 ---
 
-## 当前规划：Memory V2（截至 2026-09-25）
+## 当前规划：Memory V2（截至 2026-09-27）
 
 | ID | GitHub | 状态 | 目标 | blocked_by |
 | --- | --- | --- | --- | --- |
@@ -23,12 +23,12 @@
 | MEM-V2-4 | #300 | CLOSED / integrated | Explicit commands and governance API | #297 |
 | MEM-V2-5 | #301 | CLOSED / integrated | Memory management Web UI | #300 |
 | MEM-V2-6 | #302 | CLOSED / integrated (PR #339) | Privacy observability and quality evaluation | #298, #299, #300 |
-| MEM-V2-7 | #303 | OPEN / unblocked | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
-| MEM-V2-8 | #304 | OPEN / waits for #303 | Final real Gate and release evidence | #301, #302, #303 |
+| MEM-V2-7 | #303 | COMPLETED / integrated (PR #374); cutover and AC8 verified | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
+| MEM-V2-8 | #304 | OPEN / unblocked | Final real Gate and release evidence | #301, #302, #303 |
 
-**事实源与边界（截至 2026-09-25）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。GitHub `#297`–`#301` 均 CLOSED 且代码已集成到 `main`；`#299` 的 AC10 已以冻结语料和真实 Milvus hybrid 检索证据通过。`#302` / `#303` 已解除 `#299` 依赖并可推进；`#304` 仍等待 `#302` / `#303`。旧 SQLite/Milvus Memory 数据仍在；仅 `#303` 获准在依赖集成并完成精确目标与保留项核验后执行 clean-slate 删除。
+**事实源与边界（截至 2026-09-27）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。`#297`–`#303` 的实现均已集成；`#303` 的真实 cutover、保留证明与 AC8 smoke 已完成，最终证据见 `docs/evidence/memory-v2-*2026-09-27.json`。`#304` 已解除依赖并可开始。
 
-**施工顺序**：`#297`–`#302` 已完成并集成；`#303` 当前已解锁，是下一票；其完成后执行 `#304` 的最终真实 Gate。每票仍独立执行 review、门禁和关单。
+**施工顺序**：`#297`–`#303` 已完成并集成；下一票 `#304` 现已解锁。每票仍独立执行 review、门禁和关单。
 
 > **状态更新（2026-09-24）**：上表「OPEN / `ready-for-agent`」与上一段的「当前没有任何票进入实现」**均已过期**，
 > 按「历史片段不改写、新状态追加」的惯例在此更正：`#297`（`T297-mem-v2-1-typed-lifecycle`，tip `32ef89b`）
@@ -41,6 +41,8 @@
 > **历史复审记录（截至 tip 7854b75b；已由上方最新状态取代）**：#302 在 `codex/mem-v2-6-quality-repair`（tip `7854b75b`）完成 tip 双轴独立审查并记账（`docs/review_ledger.d/213-mem-v2-6-302-tip-review.tsv`，范围 `5e1e9a01..7854b75b` = 11 代码提交 + merge `60220117` conflict delta）。Spec 轴 PASS-WITH-FINDINGS（P0:0 P1:0 P2:0 P3:3）；Standards 轴子代理因推理网关基础设施故障 5 次中断（HTTP 422 + 502×4，均无结论行）⇒ 按 §8.3 第 4 条触发记录在案的替代过程（Primary 有界审查，P0:0 P1:0 P2:1 P3:2），核心红线全过：凭证零泄漏 / 报告内容-free / Langfuse 对 public 内容 disabled / AC9 选例 fail-closed / 0.5 token-F1 门槛未放宽 / 临时 collection cleanup 真实验证。覆盖闸门复跑 **exit 0**。票面保持 **OPEN**：`docs/evidence/` 两份期限失效报告（自证身份 c4c02e52/64dce42e）只作失败诊断，真实 smoke 证据缺口（tip 无新报告）需待模型/embedding 额度恢复后在冻结 tip 重跑两个 smoke 才能闭合，不下结、不关单，未获授权不做 push/PR/merge。
 > **历史烟测记录（代码身份 87a02d68；已由上方最新状态取代）**：在代码身份 `87a02d68` 的干净 tip 上，LoCoMo 与 LongMemEval 严格选例 smoke 均完成并确认临时 Milvus collection 清理，但都未过答案 F1 门槛（均为 0）；LoCoMo 权威答案词已进入注入 profile，LongMemEval 权威记忆仍未被注入。脱敏报告分别为 `memory-v2-public-smoke-locomo-071fbde5.json`、`memory-v2-public-smoke-longmemeval-5daa9284.json`。已修复 adapter 丢失 LongMemEval `question_date` 与 LoCoMo 正向样例额外拒答指令，并加入只含计数/排名的诊断；针对性测试 36 passed、Ruff 和 `git diff --check` 通过。下一步需提交这些更改后在干净新 tip 重跑两个真实 smoke；#302 仍 OPEN，不推送、不 PR、不合并、不关单。
 > **门禁更新（2026-09-27）**：#302 reader 修复和两份真实 smoke 均通过；`origin/main` `cdea68f` 已合入分支 `codex/mem-v2-6-quality-repair`（merge `0c835353`，无冲突）。合并后 full pytest **4368 passed / 2 skipped / 51 deselected**（608.17s），Vitest **73 files / 1157 tests passed**（串行），`pnpm build` 通过；Gate-0 **6/6 PASS**（`2606d9b8` / tree `d72930dd8075`，记录 `docs/gate/2606d9b89d220b96668526940ad2dfbb60ab8e9a.json`），review coverage exit 0。Playwright `pnpm exec playwright test --workers=2` 全量执行 11.4m：458 passed / 2 failed；两条都是既有 #201 `control-row.spec.ts:251` 字面量陈旧（预期 13/18、实际 12/17），与已在 `f13ed0d` 基线复现的结果相同，非 #302 回归。#302 保持 OPEN；分支未 push / PR，未关单。
+
+> **MEM-V2-7 / #303 完成状态（2026-09-27）**：代码 PR #374 已合入 `main`（merge `9c7181ce82d33a52f517be6b273101711652f981`），分支 full pytest 4435 passed / 14 skipped / 51 deselected，PR 必需服务端 `gate0` 通过，review coverage exit 0。用户确认的 cutover plan `137aeaa1059c4933a73f4ab7738941593a3c8639ad8112d80b2ffe6a30ca0810` 已完成；V1/V2 SQLite allowlist、Milvus Memory 与 Knowledge 均为零，preservation hashes 匹配，未创建旧内容备份。AC8 真实 runner smoke 完成 1 条形成、生产 service 与原始 Milvus 命中、删除后零 active/零检索命中；完整脱敏证据见 ADR-0046、runbook 与 `docs/evidence/`。旧代码审查记录见 `docs/review_ledger.d/211-mem-v2-7-fce4e57.tsv`。
 
 ---
 

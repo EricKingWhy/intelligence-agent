@@ -24,6 +24,7 @@ from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 from tests.conftest import make_session
+from tests.memory.v2._vector import FakeMemoryVectorClient
 from tests.scripted_model import ScriptedModel
 
 TICK_CALL_ID = "call_ticker_0001"
@@ -39,6 +40,20 @@ def _settings(tmp_path: Path) -> Settings:
         _env_file=None,
         workspace_dir=str(tmp_path),
         skill_global_dir=str(tmp_path / "no-such-global"),
+    )
+
+
+def _memory_ready_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(tmp_path / "no-such-global"),
+        milvus_uri="https://memory.example.test",
+        milvus_token="test-only",
+        milvus_collection="memory_test",
+        embedding_model="test-model",
+        embedding_base_url="https://embedding.example.test",
+        embedding_api_key="test-only",
     )
 
 
@@ -149,37 +164,32 @@ class TestTickerCapabilityDemo:
 class TestWebWiringCoexistence:
     @pytest.mark.asyncio
     async def test_memory_skills_ticker_coexist(self, tmp_path, monkeypatch):
-        """Web 装配场景：三能力共存——memory（fake）+ skills + ticker 一套 config 装配。"""
-
-        class _FakeMemory:
-            async def initialize(self): pass
-            async def close(self): pass
-            capability = object()
-            writeback = object()
-
+        """Web wiring composes the V2 memory service with skills and ticker."""
+        settings = _memory_ready_settings(tmp_path)
+        vectors = FakeMemoryVectorClient(settings)
         monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_components",
-            lambda settings, *, provider="builtin": _FakeMemory(),
+            "agent_harness.capability.factories.build_memory_vector_client",
+            lambda _settings: vectors,
         )
         _make_skill(tmp_path)
 
         config = parse_capabilities_config(
-            '{"memory": {"provider": "langmem"}, "skills": {}, "ticker": {}}'
+            '{"memory": {}, "skills": {}, "ticker": {}}'
         )
         registry = CapabilityRegistry()
-        wiring = await wire_capabilities(registry, config, settings=_settings(tmp_path))
+        wiring = await wire_capabilities(registry, config, settings=settings)
 
-        assert [d.name for d in registry.available()] == ["memory", "skills", "ticker"]
-        assert wiring.memory_writer is not None
-        # V1 automatic recall is disabled without the session ledger; skills remain injected.
+        assert sorted(d.name for d in registry.available()) == ["memory", "skills", "ticker"]
+        assert registry.descriptor("memory").provider_name == "builtin-v2"
+        assert wiring.memory_v2 is registry.get("memory")
+        assert wiring.memory_formation is None
+        # Without a session ledger, user-scoped recall/tools stay uninstalled; skills still work.
         assert len(wiring.context_providers) == 1  # SkillCatalogContextProvider
-        # #159 起 memory 经契约贡献遗忘工具（收集循环的第二来源）——这个共存网关必须看见它，
-        # 否则"记忆工具真的接进了统一 ToolRegistry"就没有证据。断言**集合**而不是顺序：收集
-        # 顺序是实现细节，不是这个网关要守的行为。#202 / ADR-0031：retrieve_memory /
-        # remember_this 随 capability 一起经同一条收集循环注册（D5）。
         assert {tool.name for tool in wiring.tools} == {
-            "load_skill", "tick", "forget_memory", "retrieve_memory", "remember_this",
+            "load_skill", "tick",
         }
+        await wiring.aclose()
+        assert vectors.closed
 
 
 class TestGate2SkillsProgressiveDisclosure:
@@ -248,19 +258,21 @@ class TestDegradation:
     async def test_factory_failure_degrades_and_base_agent_still_runs(self, tmp_path, monkeypatch):
         """OPTIONAL provider 构造失败 → 装配跳过（optional() None）→ 基础 Agent 照常运行。"""
 
-        def _boom(settings, *, provider="builtin"):
+        def _boom(_settings):
             raise RuntimeError("simulated milvus outage")
 
         monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_components", _boom,
+            "agent_harness.capability.factories.build_memory_vector_client", _boom,
         )
         registry = CapabilityRegistry()
         wiring = await wire_capabilities(
-            registry, parse_capabilities_config('{"memory": {}}'), settings=_settings(tmp_path),
+            registry, parse_capabilities_config('{"memory": {}}'),
+            settings=_memory_ready_settings(tmp_path),
         )
         assert registry.available() == []  # 未注册 → registry.optional("memory") is None
         assert registry.optional("memory") is None
-        assert wiring.memory_writer is None and wiring.memory is None
+        assert wiring.memory_v2 is None and wiring.memory_vectors is None
+        assert wiring.memory_formation is None
         assert wiring.context_providers == []
         # #225：降级**原因**要结构化留在 wiring 上——否则路由层只能对用户说
         # "未启用"，把"配了但装配失败"说成"没配"（真机症状）。
@@ -294,7 +306,7 @@ class TestDegradation:
             settings=_settings(tmp_path),
         )
         assert _degrade_codes(wiring) == {"memory": DegradeReason.DISABLED.value}
-        assert wiring.memory is None
+        assert wiring.memory_v2 is None
 
         # ③ 配了、启用了，但 provider 自己的前置配置不齐（真 factory：milvus/embedding
         # 都没配 → 返回 None）。这条走的是**真** `build_builtin_memory_components`，
@@ -305,7 +317,7 @@ class TestDegradation:
             settings=_settings(tmp_path),
         )
         assert _degrade_codes(wiring) == {"memory": DegradeReason.MISSING_SETTINGS.value}
-        assert wiring.memory is None
+        assert wiring.memory_v2 is None
 
         # ④ 另外两个"缺前置配置"的登记点（knowledge 的 collection、websearch 的 key）：
         # 删掉它们不会让别的用例变红，所以在这里点名——"某些 capability 的缺席原因

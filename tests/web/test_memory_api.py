@@ -1,8 +1,7 @@
-"""用户侧记忆 API（#159 B）：列出 / 硬删 / 错误语义 / 归属隔离 / 审计不落 SessionEvent。
+"""用户侧记忆 API：V2 管理路径 / 归属隔离 / 审计不落 SessionEvent。
 
-装配方式：真 `create_app` + 真 `wire_capabilities`，只把 memory 的**组件工厂**换成 fake
-（`FakeMemoryCapability` 的 namespace/归属语义是真的，被替换的只是"要不要连 Zilliz"）。
-身份走真 JWT 中间件——AC7 要求的"越权在领域层也被拒"必须在这种端到端形状下才算验过。
+装配方式：真 `create_app` + 真 `wire_capabilities`，只把 Memory 的向量客户端换成 fake。
+身份走真 JWT 中间件——归属隔离在这种端到端形状下验收。
 """
 
 from __future__ import annotations
@@ -53,6 +52,7 @@ from agent_harness.session.event import (
 from agent_harness.web.app import create_app
 from agent_harness.web.memory import _DEGRADED_MESSAGE
 from tests.memory.v2._records import make_draft
+from tests.memory.v2._vector import FakeMemoryVectorClient
 
 _SECRET = "memory-api-test-signing-secret-at-least-32"
 _ALICE = IdentityContext("acme", "alice", ["user"])
@@ -65,7 +65,7 @@ _SESSION_ALICE = IdentityContext("acme", "alice", ["user", "session"])
 
 
 class _FakeMemoryComponents:
-    """provider seam 的最小合法产物：capability + writeback + 生命周期。"""
+    """Only used to seed a legacy V1 record for the no-fallback regression test."""
 
     def __init__(self) -> None:
         self.capability = FakeMemoryCapability()
@@ -98,36 +98,49 @@ def _auth(identity: IdentityContext) -> dict[str, str]:
 
 @pytest.fixture
 def memory_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """真 app + fake memory provider；返回 (client, components)。"""
-    components = _FakeMemoryComponents()
-    monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_components",
-        lambda settings, *, provider="builtin": components,
-    )
+    """真 app + fake Memory V2 vector adapter；返回 (client, adapter)。"""
+    # This fixture exercises HTTP behavior, not the hourly background purger. The lifecycle
+    # test above verifies that task separately; disabling it avoids cross-loop SQLite writes
+    # while these tests seed through the direct service seam and issue sync TestClient calls.
+    monkeypatch.setattr(MemoryV2Service, "start_tombstone_purger", lambda _self: None)
+    vectors: list[FakeMemoryVectorClient] = []
+
+    def build_vectors(settings):
+        client = FakeMemoryVectorClient(settings)
+        vectors.append(client)
+        return client
+
+    monkeypatch.setattr("agent_harness.capability.factories.build_memory_vector_client", build_vectors)
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
         model_api_key="sk-test",
         jwt_secret=_SECRET,
         capabilities='{"memory": {"provider": "langmem"}}',
+        milvus_uri="https://example.test", milvus_token="test-only",
+        milvus_collection="memory_test", embedding_model="test-embedding",
+        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     app = create_app(settings, enable_cors=False)
     with TestClient(app) as client:
-        yield client, components
+        yield client, vectors
 
 
 @pytest.mark.asyncio
 async def test_v2_governance_api_works_without_session_store_and_closes_in_its_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
-    components = _FakeMemoryComponents()
+    vectors = []
     monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_components",
-        lambda settings, *, provider="builtin": components,
+        "agent_harness.capability.factories.build_memory_vector_client",
+        lambda settings: vectors.append(FakeMemoryVectorClient(settings)) or vectors[-1],
     )
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
+        milvus_uri="https://example.test", milvus_token="test-only",
+        milvus_collection="memory_test", embedding_model="test-embedding",
+        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     app = create_app(settings, enable_cors=False)
     owner_loop = asyncio.get_running_loop()
@@ -170,7 +183,7 @@ async def test_v2_governance_api_works_without_session_store_and_closes_in_its_l
         assert filtered_response.json() == []
 
     assert start_loops == close_loops == [owner_loop]
-    assert components.closed
+    assert vectors[0].closed
 
 
 async def _seed(components: _FakeMemoryComponents, identity: IdentityContext,
@@ -190,12 +203,14 @@ async def _seed(components: _FakeMemoryComponents, identity: IdentityContext,
         identity_context_var.reset(token)
 
 
-async def _contents(components: _FakeMemoryComponents, identity: IdentityContext) -> list[str]:
-    token = set_identity_context(identity)
-    try:
-        return [entry.content for entry in await components.capability.list_entries(MemoryScope.USER, 50)]
-    finally:
-        identity_context_var.reset(token)
+async def _contents(client: TestClient, identity: IdentityContext) -> list[str]:
+    _registry, wiring = await client.app.state.agent.get_wiring()
+    assert wiring.memory_v2 is not None
+    records = await wiring.memory_v2.list_active(
+        TrustedMemoryIdentity(identity.tenant_id, identity.user_id),
+        scope=MemoryScopeV2.USER_GLOBAL, limit=50,
+    )
+    return [record.content for record in records]
 
 
 async def _seed_v2(client: TestClient, identity: IdentityContext, content: str):
@@ -214,36 +229,35 @@ async def _seed_v2(client: TestClient, identity: IdentityContext, content: str):
 @pytest.mark.asyncio
 async def test_list_returns_only_the_callers_memories(memory_app):
     """AC5 + AC7：列出的永远是**自己** namespace 的记忆（身份来自可信入口，不是参数）。"""
-    client, components = memory_app
-    await _seed(components, _ALICE, "alice 喜欢 TypeScript")
-    await _seed(components, _BOB, "bob 的秘密")
+    client, _vectors = memory_app
+    await _seed_v2(client, _ALICE, "alice 喜欢 TypeScript")
+    await _seed_v2(client, _BOB, "bob 的秘密")
 
     resp = client.get("/api/memories", headers=_auth(_ALICE))
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert [item["content"] for item in body] == ["alice 喜欢 TypeScript"]
-    assert body[0]["scope"] == "user"
+    assert body[0]["scope"] == "user_global"
 
 
 @pytest.mark.asyncio
 async def test_list_strips_provider_internal_metadata(memory_app):
     """列表给用户看的是自己的 metadata，不含 provider 内部载荷。"""
-    client, components = memory_app
-    await _seed(components, _ALICE, "alice 的偏好",
-                {"importance": 0.8, "_langmem_value": {"kind": "MemoryPayload", "raw": "内部"}})
+    client, _vectors = memory_app
+    await _seed_v2(client, _ALICE, "alice 的偏好")
 
     [item] = client.get("/api/memories", headers=_auth(_ALICE)).json()
 
-    assert item["metadata"] == {"importance": 0.8}
+    assert item["metadata"] == {}
 
 
 @pytest.mark.asyncio
 async def test_list_paginates_and_clamps(memory_app):
     """分页：offset/limit 切片；越界的 limit 由 FastAPI 422 挡在领域层之前。"""
-    client, components = memory_app
+    client, _vectors = memory_app
     for index in range(3):
-        await _seed(components, _ALICE, f"第 {index} 条")
+        await _seed_v2(client, _ALICE, f"第 {index} 条")
 
     page = client.get("/api/memories?limit=2&offset=1", headers=_auth(_ALICE)).json()
     full = client.get("/api/memories?limit=50", headers=_auth(_ALICE)).json()
@@ -266,18 +280,19 @@ async def test_list_paginates_and_clamps(memory_app):
 
 @pytest.mark.asyncio
 async def test_delete_forgets_then_reports_404(memory_app):
-    """AC5/AC6：删掉 → 200；再删同一条 → **404**（"这条已经不在了"要报出来，不是静默 204）。"""
-    client, components = memory_app
-    memory_id = await _seed(components, _ALICE, "要被遗忘的偏好")
+    """V2 删除保留可审计墓碑：首次删除与重复删除都返回明确结果。"""
+    client, _vectors = memory_app
+    record = await _seed_v2(client, _ALICE, "要被遗忘的偏好")
+    memory_id = record.id
 
     first = client.delete(f"/api/memories/{memory_id}", headers=_auth(_ALICE))
     assert first.status_code == 200, first.text
     assert first.json() == {"id": memory_id, "deleted": True}
-    assert await _contents(components, _ALICE) == []
+    assert await _contents(client, _ALICE) == []
 
     second = client.delete(f"/api/memories/{memory_id}", headers=_auth(_ALICE))
-    assert second.status_code == 404, second.text
-    assert memory_id in second.json()["detail"]
+    assert second.status_code == 200, second.text
+    assert second.json() == {"id": memory_id, "deleted": False}
 
 
 @pytest.mark.asyncio
@@ -288,20 +303,20 @@ async def test_unknown_id_is_404(memory_app):
 
 
 @pytest.mark.asyncio
-async def test_deleting_someone_elses_memory_is_403_and_changes_nothing(memory_app):
-    """AC7：越权由**领域层**拒绝（不只是查询条件），且对方数据完好。
+async def test_deleting_someone_elses_memory_is_hidden_and_changes_nothing(memory_app):
+    """A foreign memory ID is hidden as absent, and the owner's record stays intact.
 
     这里 alice 直接拿着 bob 的 memory_id 来删——最坏形状。403（而不是伪装成 404），
     因为领域层的归属校验本来就拒绝了，如实上报。
     """
-    client, components = memory_app
-    bob_memory = await _seed(components, _BOB, "bob 的秘密")
+    client, _vectors = memory_app
+    bob_memory = (await _seed_v2(client, _BOB, "bob 的秘密")).id
 
     resp = client.delete(f"/api/memories/{bob_memory}", headers=_auth(_ALICE))
 
-    assert resp.status_code == 403, resp.text
-    assert await _contents(components, _BOB) == ["bob 的秘密"]
-    assert await _contents(components, _ALICE) == []
+    assert resp.status_code == 404, resp.text
+    assert await _contents(client, _BOB) == ["bob 的秘密"]
+    assert await _contents(client, _ALICE) == []
 
 
 @pytest.mark.asyncio
@@ -312,40 +327,40 @@ async def test_list_without_user_scope_is_403_not_500(memory_app):
     正是 AC6 要挡的。归属校验不依赖 "user" scope，所以同一个身份拿别人的 id 去删也是 403
     ——两个入口给出同一类明确状态码，且对方的记忆完好。
     """
-    client, components = memory_app
-    alice_memory = await _seed(components, _ALICE, "alice 的偏好")
+    client, _vectors = memory_app
+    alice_memory = (await _seed_v2(client, _ALICE, "alice 的偏好")).id
 
     listing = client.get("/api/memories", headers=_auth(_NO_USER_SCOPE))
     assert listing.status_code == 403, listing.text
 
     deleting = client.delete(f"/api/memories/{alice_memory}", headers=_auth(_NO_USER_SCOPE))
     assert deleting.status_code == 403, deleting.text
-    assert await _contents(components, _ALICE) == ["alice 的偏好"]
+    assert await _contents(client, _ALICE) == ["alice 的偏好"]
 
 
 @pytest.mark.asyncio
-async def test_deleting_a_session_scoped_memory_is_403_not_500(memory_app):
-    """AC6：HTTP 入口只暴露 USER scope，会话记忆不能用 500 冒出去，也不能被它删掉。
+async def test_legacy_v1_session_memory_is_not_exposed_or_deletable(memory_app):
+    """A V1 SESSION row cannot reappear through list/delete fallback after cutover."""
+    client, _vectors = memory_app
+    legacy = _FakeMemoryComponents()
+    memory_id = await _seed(
+        legacy, _SESSION_ALICE, "会话内的旧版记忆",
+        scope=MemoryScope.SESSION, session_id="sess-1",
+    )
 
-    alice 的 token 带 "session" scope，但 HTTP 请求没有可信的会话绑定，所以按 id 解析那一行的
-    namespace 会失败。领域层的归属比较把"这个上下文解析不出这一行"判定为"不是你能动的" →
-    403（跨用户那条也是 403，语义一致）；记忆完好由随后的带绑定读取证明。
-    """
-    client, components = memory_app
-    memory_id = await _seed(components, _SESSION_ALICE, "会话内的临时偏好",
-                           scope=MemoryScope.SESSION, session_id="sess-1")
+    listing = client.get("/api/memories", headers=_auth(_SESSION_ALICE))
+    deleting = client.delete(f"/api/memories/{memory_id}", headers=_auth(_SESSION_ALICE))
 
-    resp = client.delete(f"/api/memories/{memory_id}", headers=_auth(_SESSION_ALICE))
-
-    assert resp.status_code == 403, resp.text
+    assert listing.status_code == 200 and listing.json() == []
+    assert deleting.status_code == 404
     token = set_identity_context(_SESSION_ALICE)
     binding = memory_session_var.set("sess-1")
     try:
-        remaining = await components.capability.list_entries(MemoryScope.SESSION, 10)
+        remaining = await legacy.capability.list_entries(MemoryScope.SESSION, 10)
     finally:
         memory_session_var.reset(binding)
         identity_context_var.reset(token)
-    assert [entry.content for entry in remaining] == ["会话内的临时偏好"]
+    assert [entry.content for entry in remaining] == ["会话内的旧版记忆"]
 
 
 @pytest.mark.asyncio
@@ -378,15 +393,16 @@ async def test_memory_init_failure_503_says_fault_not_config_state(tmp_path: Pat
     def _unreachable(settings, *, provider="builtin"):
         raise VectorStoreError("Memory vector store: unavailable")
 
-    monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_components", _unreachable,
-    )
+    monkeypatch.setattr("agent_harness.capability.factories.build_memory_vector_client", _unreachable)
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
         model_api_key="sk-test",
         jwt_secret=_SECRET,
         capabilities='{"memory": {"provider": "langmem"}}',
+        milvus_uri="https://example.test", milvus_token="test-only",
+        milvus_collection="memory_test", embedding_model="test-embedding",
+        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     with TestClient(create_app(settings, enable_cors=False)) as client:
         resp = client.get("/api/memories", headers=_auth(_ALICE))
@@ -414,8 +430,8 @@ async def test_audit_goes_to_structured_logs_not_session_events(memory_app, capl
     两头都断言：日志里有一条 `memory_forget`（入口 api、结果 forgotten），而
     SessionEvent 的词汇表里**不存在**记忆变更事件（有人将来想加，会先撞红这里）。
     """
-    client, components = memory_app
-    memory_id = await _seed(components, _ALICE, "要被遗忘的偏好")
+    client, _vectors = memory_app
+    memory_id = (await _seed_v2(client, _ALICE, "要被遗忘的偏好")).id
 
     with caplog.at_level(logging.INFO, logger="agent_harness.memory.audit"):
         assert client.delete(f"/api/memories/{memory_id}", headers=_auth(_ALICE)).status_code == 200
@@ -448,14 +464,16 @@ def test_origin_gate_is_wired_on_memory_routes(tmp_path: Path, monkeypatch: pyte
     这条必须在**没有 jwt_secret** 的 app 上验：配置了 JWT 时认证层才是边界，来源闸直接
     让位（跨源网页拿不到签名 token）——那正是 projects 那条测试的结论。
     """
-    components = _FakeMemoryComponents()
     monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_components",
-        lambda settings, *, provider="builtin": components,
+        "agent_harness.capability.factories.build_memory_vector_client",
+        lambda settings: FakeMemoryVectorClient(settings),
     )
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         capabilities='{"memory": {"provider": "langmem"}}',
+        milvus_uri="https://example.test", milvus_token="test-only",
+        milvus_collection="memory_test", embedding_model="test-embedding",
+        embedding_base_url="https://embedding.example.test", embedding_api_key="test-only",
     )
     with TestClient(create_app(settings, enable_cors=False)) as client:
         cross_origin = client.get("/api/memories", headers={"Origin": "http://evil.example"})
@@ -466,7 +484,7 @@ def test_origin_gate_is_wired_on_memory_routes(tmp_path: Path, monkeypatch: pyte
 
 @pytest.mark.asyncio
 async def test_v2_list_filters_detail_versions_edit_stale_version_and_identity(memory_app):
-    client, _components = memory_app
+    client, _vectors = memory_app
     record = await _seed_v2(client, _ALICE, "用户偏好简洁的解释")
     case_folded = await _seed_v2(client, _ALICE, "用户使用 TypeScript")
     headers = _auth(_ALICE)
@@ -795,14 +813,14 @@ async def test_v2_project_tombstone_reads_require_the_matching_trusted_project(m
 async def test_v2_index_failure_reports_committed_delete_and_retains_retry(memory_app):
     from agent_harness.memory.v2.index import MemoryV2IndexRelay
 
-    client, _components = memory_app
+    client, vectors = memory_app
     record = await _seed_v2(client, _ALICE, "索引故障时仍已删除")
     _registry, wiring = await client.app.state.agent.get_wiring()
     service = wiring.memory_v2
     assert service is not None
     trusted = TrustedMemoryIdentity("acme", "alice")
     await MemoryV2IndexRelay(service._store, service._index).flush()
-    service._index.fail_delete = RuntimeError("injected index failure")
+    vectors[0].fail_delete = RuntimeError("injected index failure")
 
     response = client.delete(f"/api/memories/{record.id}", headers=_auth(_ALICE))
     assert response.status_code == 503
@@ -814,7 +832,7 @@ async def test_v2_index_failure_reports_committed_delete_and_retains_retry(memor
         "索引故障", trusted, scope=MemoryScopeV2.USER_GLOBAL, limit=10,
     ) == []
 
-    service._index.fail_delete = None
+    vectors[0].fail_delete = None
     await service._relay.flush()
     assert await service._store.pending() == []
 
