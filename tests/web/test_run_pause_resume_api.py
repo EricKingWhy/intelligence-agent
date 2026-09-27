@@ -668,26 +668,27 @@ def test_budget_endpoint_projects_the_ledger_and_enforcement(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("force_recovery", [False, True], ids=["normal", "recovery"])
 async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, force_recovery,
 ):
-    """两个同 `expected_version` 的 resume 并发 ⇒ 恰好一个 200、一个 409、一条 `run/resumed`（AC-8）。
+    """同版本 resume 的迟到输家不能让赢家终态追加撞上 SeqConflict（#342 / AC-8）。
 
-    为什么必须是**真并发**而不是"先后发两次"：`expected_version` 是 CAS 的比较对象
-    （`03 §3.4`），它只在"读 version → 写 `run/resumed`"之间不被别人插进来时才成立。
-    顺序发两次永远不会同时读到同一个 version，也就测不到那把锁——上面
-    `test_stale_expected_version_is_rejected_without_any_work` 只证明"陈旧值被拒"，
-    证明不了"同一版本至多一个成功者"。所以这里起真 uvicorn（真并发连接）并对齐发令。
-
-    `TestClient` 换成真服务器是必要的：它的同步请求模型让"两个请求同时在锁上排队"
-    这个窗口不可构造。
+    真 uvicorn 请求中，先让两个请求都通过只读 CAS 预检，再暂停输家。赢家完成 CAS、
+    启动 Runtime 并写下 model/completed 后，再放行输家进入恢复/加载路径。这样稳定构造
+    出“赢家已加载终态 Session，输家仍可能写 session/resumed”的时序。
     """
     import asyncio
 
     import httpx2
     import uvicorn
 
+    from agent_harness.agent.budget import BudgetConflict
+    from agent_harness.agent.runtime import AgentRuntime
     from agent_harness.config import Settings
+    from agent_harness.session.event import SESSION_RESUMED
+    from agent_harness.session.service import SessionService
+    from agent_harness.session.session import Session
     from agent_harness.web.app import create_app
 
     def _factory(config: Any, **kwargs: Any) -> ScriptedModel:
@@ -700,10 +701,91 @@ async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     ))
+
+    winner_plan_ready = asyncio.Event()
+    loser_plan_ready = asyncio.Event()
+    release_winner_after_plan = asyncio.Event()
+    release_loser_after_plan = asyncio.Event()
+    winner_at_terminal = asyncio.Event()
+    release_winner_completion = asyncio.Event()
+    loser_rejected = asyncio.Event()
+    plan_calls = 0
+    recovery_calls = 0
+    commit_calls = 0
+    resumed_events_during_resume = 0
+    resume_launches = 0
+    force_recovery_during_resume = False
+
+    original_plan = SessionService._plan_paused_resume
+
+    async def gate_after_resume_plan(service, **kwargs):
+        nonlocal plan_calls
+        result = await original_plan(service, **kwargs)
+        plan_calls += 1
+        if plan_calls == 1:
+            winner_plan_ready.set()
+            await release_winner_after_plan.wait()
+        elif plan_calls == 2:
+            loser_plan_ready.set()
+            await release_loser_after_plan.wait()
+        return result
+
+    original_unreconciled = SessionService._has_unreconciled_operations
+
+    async def force_recovery_when_requested(service, sid):
+        if force_recovery_during_resume:
+            return True
+        return await original_unreconciled(service, sid)
+
+    original_recover = SessionService.recover
+
+    async def gate_late_recovery(service, sid):
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return await original_recover(service, sid)
+
+    original_commit = SessionService._commit_paused_resume
+
+    async def observe_resume_commit(service, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        try:
+            return await original_commit(service, **kwargs)
+        except BudgetConflict:
+            if commit_calls == 2:
+                loser_rejected.set()
+            raise
+
+    original_terminal_completed = AgentRuntime._terminal_completed
+
+    async def hold_winner_before_terminal(runtime, arms, **kwargs):
+        winner_at_terminal.set()
+        await release_winner_completion.wait()
+        async for event in original_terminal_completed(runtime, arms, **kwargs):
+            yield event
+
+    original_append = Session.append
+
+    def count_session_resumes(session, event_type, data, *args, **kwargs):
+        nonlocal resumed_events_during_resume
+        if event_type == SESSION_RESUMED:
+            resumed_events_during_resume += 1
+        return original_append(session, event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(SessionService, "_plan_paused_resume", gate_after_resume_plan)
+    monkeypatch.setattr(
+        SessionService, "_has_unreconciled_operations", force_recovery_when_requested,
+    )
+    monkeypatch.setattr(SessionService, "recover", gate_late_recovery)
+    monkeypatch.setattr(SessionService, "_commit_paused_resume", observe_resume_commit)
+    monkeypatch.setattr(AgentRuntime, "_terminal_completed", hold_winner_before_terminal)
+    monkeypatch.setattr(Session, "append", count_session_resumes)
+
     server = uvicorn.Server(uvicorn.Config(
         app, host="127.0.0.1", port=0, log_level="error", lifespan="on",
     ))
     serve_task = asyncio.create_task(server.serve())
+    request_tasks: list[asyncio.Task[Any]] = []
     try:
         for _ in range(100):
             if server.started:
@@ -734,16 +816,43 @@ async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
                 for line in launched.text.splitlines() if line.startswith("data:")
             ]
             paused = next(f for f in pause_body if f.get("type") == "run/paused")
+            before_resume_events = app.state.agent.store.read_events(session_id)
+            resumed_events_during_resume = 0
+            run_manager = app.state.agent.run_manager
+            original_launch = run_manager.launch
+
+            def count_resume_launch(session, runtime, task):
+                nonlocal resume_launches
+                resume_launches += 1
+                return original_launch(session, runtime, task)
+
+            monkeypatch.setattr(run_manager, "launch", count_resume_launch)
             payload = {
                 RUN_ID_KEY: paused["run_id"],
                 "resume_basis": "budget_increase",
                 "budget": {"run": {"max_agent_turns_total": 4}, "expected_version": 1},
             }
-            # 对齐发令：两个请求同时进入服务（同一 run_id / 同一版本 / 同一 ceiling）
-            first, second = await asyncio.gather(
-                client.post(f"{base}/api/sessions/{session_id}/resume", json=payload),
+            # The initial message request has no same-run plan; reset counters for this pair.
+            plan_calls = 0
+            recovery_calls = 0
+            force_recovery_during_resume = force_recovery
+            # 两个请求都先通过只读 CAS 预检；输家在预检后等赢家走到终态窗口。
+            first_task = asyncio.create_task(
                 client.post(f"{base}/api/sessions/{session_id}/resume", json=payload),
             )
+            request_tasks.append(first_task)
+            await asyncio.wait_for(winner_plan_ready.wait(), timeout=10)
+            second_task = asyncio.create_task(
+                client.post(f"{base}/api/sessions/{session_id}/resume", json=payload),
+            )
+            request_tasks.append(second_task)
+            await asyncio.wait_for(loser_plan_ready.wait(), timeout=10)
+            release_winner_after_plan.set()
+            await asyncio.wait_for(winner_at_terminal.wait(), timeout=10)
+            release_loser_after_plan.set()
+            await asyncio.wait_for(loser_rejected.wait(), timeout=10)
+            release_winner_completion.set()
+            first, second = await asyncio.gather(first_task, second_task)
             statuses = sorted([first.status_code, second.status_code])
 
         assert statuses == [200, 409], (
@@ -762,10 +871,30 @@ async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
         assert types.count("run/paused") == 1
         assert types.count("run/started") == 1
         assert types.count("run/completed") == 1
+        assert resume_launches == 1, "CAS 输家不得启动第二个 AgentRuntime"
+        assert recovery_calls == (1 if force_recovery else 0), (
+            "CAS 输家不得先于拒绝执行 Recovery"
+        )
+        assert resumed_events_during_resume == 1, (
+            "同版本并发恢复只允许胜者追加 session/resumed；"
+            f"实际追加 {resumed_events_during_resume} 条"
+        )
+        assert types.count("session/resumed") == (
+            sum(event.type == "session/resumed" for event in before_resume_events) + 1
+        )
         # 只跑了一次产出轮（暂停那次执行 0 轮：ceiling=1 连一轮都不放行；赢家 1 轮）。
         # 若有第二个执行被启动，这里会出现第二条 model/completed。
         assert types.count("model/completed") == 1, types
     finally:
+        release_winner_after_plan.set()
+        release_loser_after_plan.set()
+        winner_at_terminal.set()
+        release_winner_completion.set()
+        for request_task in request_tasks:
+            if not request_task.done():
+                request_task.cancel()
+        if request_tasks:
+            await asyncio.gather(*request_tasks, return_exceptions=True)
         server.should_exit = True
         serve_task.cancel()
         try:
