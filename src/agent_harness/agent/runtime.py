@@ -37,6 +37,15 @@ from agent_harness.agent.budget import (
     SOURCE_DEPLOYMENT,
     LocalFuse,
 )
+from agent_harness.agent.completion import (
+    BLOCK_SOURCE_POLICY,
+    BLOCK_SOURCE_QUIESCENCE,
+    CompletionPolicy,
+    DefaultCompletionPolicy,
+    QuiescenceReport,
+    collect_quiescence_report,
+    policy_rejection_reason,
+)
 from agent_harness.agent.guards import (
     GuardLevel,
     GuardSignal,
@@ -68,6 +77,7 @@ from agent_harness.agent.types import (
     STATUS_FAILED,
     STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
     STATUS_PAUSED,
+    STATUS_QUIESCENCE_BLOCKED,
     AgentEvent,
     AgentRunResult,
     to_agent_event,
@@ -851,6 +861,7 @@ class AgentRuntime:
         dropped_tools: tuple[str, ...] = (),
         run_budget: LaunchRunBudget | None = None,
         local_fuse_source: str = SOURCE_DEPLOYMENT,
+        completion_policy: CompletionPolicy | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -897,6 +908,10 @@ class AgentRuntime:
         # RunBudget 上下文（`#312`）：本次执行的账本起点（version / ceiling / 已消耗）。
         # `None` = 没有 run 作用域预算信息（沿用既有行为：无 ceiling、账本从 0 起）。
         self._run_budget = run_budget or LaunchRunBudget()
+        # 完成闸门的策略 seam（`#316` / `02 §5.4`）：Core 只提供一个默认实现（静止后
+        # 接受最终响应），域策略由嵌入方注入。**不是**配置项：完成规则不该由部署方
+        # 之外的第三处（config / API）替它决定（`02 §9`）。
+        self._completion_policy = completion_policy or DefaultCompletionPolicy()
         # Checkpoint seam（ADR-0004 Round 2）：默认策略 OnStableBoundary，
         # 但只有注入了 CheckpointStore 才真正落盘——Core 不被存储强制依赖。
         self._checkpoint_policy = checkpoint_policy or OnStableBoundary(None)
@@ -1492,9 +1507,31 @@ class AgentRuntime:
                 # 第 4 步：这一轮算一步（数模型轮数，不是工具个数）
                 steps += 1
 
-                # 第 5 步：先判停止信号——若模型选择最终答复则立即返回。
+                # 第 5 步：先判停止信号——若模型选择最终答复，进**完成闸门**（`#316`）。
+                # 顺序是契约（`02 §5.4`）：先证六条 quiescence，静止才轮到 policy；
+                # 两道任一不过都不落 `run/completed`，而**闸门这个臂自身零写入**：
+                # 本轮 `model/completed` 在进闸门前就按稳定边界落盘了（它恰好落在
+                # "模型不再请求工具"这一支，见 `_terminal_quiescence_blocked` 的契约）。
                 if not tool_calls:
                     final = _extract_text(ai.content)
+                    report = await self._quiescence_report(arms)
+                    if not report.quiescent:
+                        await self._terminal_quiescence_blocked(
+                            arms, steps=steps, report=report,
+                            source=BLOCK_SOURCE_QUIESCENCE,
+                            reason=report.refusal_reason(),
+                        )
+                        return
+                    decision = await self._completion_policy.decide(
+                        report=report, final_text=final, run_id=arms.run_id or "",
+                    )
+                    if not decision.accepted:
+                        reason = policy_rejection_reason(self._completion_policy, decision)
+                        await self._terminal_quiescence_blocked(
+                            arms, steps=steps, report=report,
+                            source=BLOCK_SOURCE_POLICY, reason=reason,
+                        )
+                        return
                     self._log("agent_decision", "模型给出最终回答，Agent Loop 完成",
                               span_id=new_span_id(), parent_span_id=run_span, step=steps,
                               decision="finish", remaining_steps=0,
@@ -2197,6 +2234,58 @@ class AgentRuntime:
         await self._save_checkpoint(arms.session, CheckpointBoundary.FINAL_COMPLETED)
         arms.result_holder.append(
             AgentRunResult(status=STATUS_COMPLETED, final_text=final, steps=steps),
+        )
+
+    async def _quiescence_report(self, arms: _TerminalArms) -> QuiescenceReport:
+        """完成闸门的输入聚合（`#316` / `02 §5.4`）：事件 + 账本行 + "本轮没请求工具"。
+
+        本方法是 Runtime 与纯函数 `collect_quiescence_report` 之间**唯一**的适配层
+        （存储读取只在这里发生）。账本只读一次 `list_for_session`；没有 Ledger 的
+        部署（`executor.operation_ledger is None`）传空序列——那是"账本里没有欠账"的
+        空真，不是豁免（ADR-0047 D1）。
+
+        `new_tool_calls=False` 是**结构性**的：本闸门只在第 5 步 `if not tool_calls`
+        那一支里被调用，"最新模型决策不再请求工具"由那个分支位置证成，不靠再查一遍。
+        """
+        ledger = self.executor.operation_ledger
+        operations = (
+            await ledger.list_for_session(arms.session.session_id)
+            if ledger is not None
+            else ()
+        )
+        return collect_quiescence_report(
+            events=arms.session.events, operations=operations, new_tool_calls=False,
+        )
+
+    async def _terminal_quiescence_blocked(
+        self, arms: _TerminalArms, *, steps: int, report: QuiescenceReport,
+        source: str, reason: str | None,
+    ) -> None:
+        """完成闸门未通过臂（`#316` / `02 §5.4` / ADR-0047 D3）：**本臂零写入**。
+
+        契约（都在票面 AC 上，代码本身看不出来）：
+        - 不 append 任何 SessionEvent、不落终态、不推 reconcile、不改 Ledger、不写
+          Checkpoint、不做记忆形成——拒绝的同时改状态会让"重入即重试"变成非幂等；
+        - 观测在途句柄（`_Telemetry`）**不**在这里收口：逻辑 run 还没结束，同一 run_id
+          的后续执行会接着写这一段 trace；
+        - 走本臂之前，本轮已按既有稳定边界落了 `model/completed` 与对应 Checkpoint
+          （那一支恰好就是"模型不再请求工具"这一步）——"零写入"说的是本臂。
+
+        为什么不落终态 / 不落 `run/paused`、为什么选"保持未解 owner 活动"这条出口：
+        ADR-0047 D3。状态与理由进 `AgentRunResult`，另落一条 `agent_decision` 诊断行
+        （`blockers` 只含 kind 与 id，不含任何凭证或参数值）。
+        """
+        self._log(
+            "agent_decision", "完成闸门未通过：未解工作仍然活动，本次执行不落终态",
+            span_id=new_span_id(), step=steps,
+            decision="blocked", outcome="blocked",
+            source=source, reason=reason, quiescence=report.as_projection(),
+        )
+        arms.result_holder.append(
+            AgentRunResult(
+                status=STATUS_QUIESCENCE_BLOCKED, final_text="", steps=steps,
+                reason=reason,
+            ),
         )
 
     async def _terminal_failed_run(
