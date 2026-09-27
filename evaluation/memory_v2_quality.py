@@ -25,6 +25,12 @@ _SCOPES = {"user_global", "project", "none"}
 _AUTHORITIES = {"user", "assistant", "tool", "system", "none"}
 _STATUSES = {"executed", "degraded", "failed", "skipped", "unawaited"}
 _WRITE_ACTIONS = {"ADD", "UPDATE"}
+_VECTOR_STORE_ERROR_CODES = {
+    "configuration", "connection", "not_connected", "authentication",
+    "permission_denied", "collection_not_found", "invalid_request", "unavailable",
+    "install_intelligence_agent_memory_extra", "embedding_not_configured",
+    "embedding_unavailable", "embedding_dimension_or_value", "schema_mismatch",
+}
 _FORMATION_DECISIONS = {"CANDIDATES", "NO_MEMORY"}
 _MODEL_STAGES = {"formation", "adjudication"}
 _SCHEMA_FAILURE_KINDS = {
@@ -394,6 +400,11 @@ def evaluate_memory_gold(
             error_type = result.get("error_type")
             if _safe_class_name(error_type):
                 item["error_type"] = error_type
+            error_code = _safe_vector_store_error_code(
+                error_type, result.get("error_code"),
+            )
+            if error_code is not None:
+                item["error_code"] = error_code
             observed = result.get("observed")
             if isinstance(observed, Mapping):
                 item["observed"] = _safe_observation(observed, case)
@@ -403,7 +414,7 @@ def evaluate_memory_gold(
         case_results.append(item)
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": run_id or str(uuid4()),
         "ran_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "repeat_of": repeat_of,
@@ -462,6 +473,11 @@ async def run_memory_gold_gate(
                     "error_type": outcome.get("error_type"),
                     "model_attempts": outcome.get("model_attempts"),
                 }
+                error_code = _safe_vector_store_error_code(
+                    outcome.get("error_type"), outcome.get("error_code"),
+                )
+                if error_code is not None:
+                    result["error_code"] = error_code
             else:
                 result = {
                     "case_id": case.case_id, "status": "executed",
@@ -478,6 +494,11 @@ async def run_memory_gold_gate(
                 "error_type": type(error).__name__,
                 "model_attempts": [],
             }
+            error_code = _safe_vector_store_error_code(
+                type(error).__name__, getattr(error, "code", None),
+            )
+            if error_code is not None:
+                result["error_code"] = error_code
         results.append(result)
 
     try:
@@ -528,6 +549,16 @@ def _safe_class_name(value: Any) -> bool:
         isinstance(value, str) and len(value) <= 128
         and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value) is not None
     )
+
+
+def _safe_vector_store_error_code(error_type: Any, error_code: Any) -> str | None:
+    if (
+        error_type == "VectorStoreError"
+        and isinstance(error_code, str)
+        and error_code in _VECTOR_STORE_ERROR_CODES
+    ):
+        return error_code
+    return None
 
 
 def _safe_model_attempts(value: Any) -> list[dict[str, str | int]]:

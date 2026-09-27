@@ -66,9 +66,11 @@ fallback safety 按 PRD 接受“成功切换”或“降级且零写入”；#3
 每项带 numerator / denominator / threshold / verdict。缺观测、缺分母、错误类型、漏跑、失败、跳过、
 未 await、重复 case 或 trace 都不能形成绿色 Gate。
 
+The 2026-09-28 #304 Gate identified one fixture expectation that contradicted PRD §4.3: the synthetic episodic memory about a release postponed due to failing integration tests is project-scoped. The expected scope was corrected from user_global to project and the corpus advanced to 1.5.0; blocking thresholds remain unchanged. Per-case diagnostics retain only allowlisted vector-store error categories, never provider exception text.
+
 ### D5 — 报告只保存聚合指标与可复现身份
 
-报告 schema v2 保存 corpus 版本 / digest、code SHA / tree SHA、配置别名（不含配置值）、case 计数、阻塞指标、
+报告 schema v3 保存 corpus 版本 / digest、code SHA / tree SHA、配置别名（不含配置值）、case 计数、阻塞指标、
 安全 job reason 与输出失败类别的直方图、累计 latency / token / cost、run ID 和重复运行的 `repeat_of`。
 输出失败类别仅为 `invalid_response_type` / `empty_output` / `invalid_json` / `contract_violation`；
 未知值折叠为 `other`。报告不保存题面、答案、会话、模型响应或

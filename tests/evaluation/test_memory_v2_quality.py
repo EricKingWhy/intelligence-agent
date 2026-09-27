@@ -29,6 +29,7 @@ from agent_harness.memory.v2.types import (
     SourceType,
     TrustedMemoryIdentity,
 )
+from agent_harness.memory.vector_store import VectorStoreError
 from agent_harness.session import (
     MODEL_COMPLETED,
     TOOL_RESULT,
@@ -63,7 +64,7 @@ from tests.memory.v2.test_v2_executor import (
 _GOLD_MODEL_OUTPUTS = {
     "positive_semantic_preference": ("semantic", "user_global", "ADD", "preference"),
     "positive_project_fact": ("semantic", "project", "ADD", "project_fact"),
-    "positive_episode": ("episodic", "user_global", "ADD", "project_fact"),
+    "positive_episode": ("episodic", "project", "ADD", "project_fact"),
     "positive_procedure": ("procedural", "project", "ADD", "project_fact"),
     "explicit_remember": ("semantic", "project", "ADD", "project_fact"),
     "transient_noop": None,
@@ -462,8 +463,10 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
     corpus, cases = load_memory_gold()
 
     assert corpus["synthetic"] is True
-    assert corpus["version"] == "1.4.0"
+    assert corpus["version"] == "1.5.0"
     assert len(cases) >= 15
+    episode = next(case for case in cases if case.case_id == "positive_episode")
+    assert episode.expected["scope"] == "project"
     for case in cases:
         assert {
             "eligibility", "action", "kind", "scope", "source_authority",
@@ -785,6 +788,32 @@ async def test_case_diagnostics_are_safe_and_keep_provider_error_type(tmp_path, 
     assert "private model response" not in saved
     assert "must never be included in reports" not in saved
     assert all(case.synthetic_input not in saved for case in cases)
+
+
+@pytest.mark.asyncio
+async def test_vector_store_error_report_keeps_only_allowlisted_category(tmp_path, monkeypatch):
+    identity = {"code_sha": "a" * 40, "tree_sha": "b" * 40}
+    monkeypatch.setattr(memory_v2_quality, "capture_code_identity", lambda: identity)
+    selected = {
+        "positive_semantic_preference": "unavailable",
+        "positive_project_fact": "private-value",
+    }
+
+    async def execute(case):
+        if case.case_id in selected:
+            raise VectorStoreError(selected[case.case_id])
+        return {"status": "skipped"}
+
+    report_path = tmp_path / "safe-vector-report.json"
+    report = await run_memory_gold_gate(execute, report_path=report_path)
+    saved = report_path.read_text(encoding="utf-8")
+    results = {item["case_id"]: item for item in report["case_results"]}
+
+    assert report["schema_version"] == 3
+    assert results["positive_semantic_preference"]["error_code"] == "unavailable"
+    assert "error_code" not in results["positive_project_fact"]
+    assert "private-value" not in saved
+    assert "Memory vector store" not in saved
 
 
 @pytest.mark.asyncio
