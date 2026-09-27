@@ -14,8 +14,10 @@ from scripts.run_memory_v2_public_smoke import (
     _answer_messages,
     _answer_strategy,
     _answer_token_recall,
+    _attributable_injected_hit_ids,
     _case_id_sha256,
     _case_speakers,
+    _chain_verified,
     _combined_usage_source,
     _relevant_injected_memory_ids,
     _safe_job_reason_code,
@@ -323,6 +325,61 @@ def test_smoke_chain_counts_injected_profiles_without_calling_them_hybrid_hits()
         local_to_source={"local-relevant": "annotated-session"},
         relevant_session_ids=("annotated-session",),
     ) == {"profile"}
+
+
+def test_smoke_chain_requires_a_relevant_injected_milvus_hit():
+    unrelated_hit = SimpleNamespace(record=SimpleNamespace(
+        id="unrelated-hit", source_session_id="local-unrelated",
+    ))
+    relevant_profile = SimpleNamespace(
+        id="relevant-profile", source_session_id="local-relevant",
+    )
+    relevant_injected_ids = _relevant_injected_memory_ids(
+        [unrelated_hit], profile_records=[relevant_profile],
+        injected_ids={"unrelated-hit", "relevant-profile"},
+        active_ids={"unrelated-hit", "relevant-profile"},
+        local_to_source={
+            "local-relevant": "annotated-session",
+            "local-unrelated": "other-session",
+        },
+        relevant_session_ids=("annotated-session",),
+    )
+
+    assert relevant_injected_ids == {"relevant-profile"}
+    attributable_hit_ids = _attributable_injected_hit_ids(
+        [unrelated_hit], relevant_injected_ids,
+    )
+    assert attributable_hit_ids == set()
+    assert not _chain_verified(
+        committed_jobs=[object()], active_records=[object()], hits=[unrelated_hit],
+        memory_messages=[object()], attributable_injected_hit_ids=attributable_hit_ids,
+    )
+
+
+def test_smoke_chain_verifies_when_the_relevant_top_six_hit_was_injected():
+    relevant_hit = SimpleNamespace(record=SimpleNamespace(
+        id="relevant-hit", source_session_id="local-relevant",
+    ))
+    relevant_profile = SimpleNamespace(
+        id="relevant-profile", source_session_id="local-relevant",
+    )
+    relevant_injected_ids = _relevant_injected_memory_ids(
+        [relevant_hit], profile_records=[relevant_profile],
+        injected_ids={"relevant-hit", "relevant-profile"},
+        active_ids={"relevant-hit", "relevant-profile"},
+        local_to_source={"local-relevant": "annotated-session"},
+        relevant_session_ids=("annotated-session",),
+    )
+    assert relevant_injected_ids == {"relevant-hit", "relevant-profile"}
+    attributable_hit_ids = _attributable_injected_hit_ids(
+        [relevant_hit], relevant_injected_ids,
+    )
+    assert attributable_hit_ids == {"relevant-hit"}
+    assert _chain_verified(
+        committed_jobs=[object()], active_records=[object()], hits=[relevant_hit],
+        memory_messages=[object()],
+        attributable_injected_hit_ids=attributable_hit_ids,
+    )
 
 
 def test_locomo_speaker_persona_stays_consistent_across_sessions():

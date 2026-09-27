@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 `#302` 两项真实公开 smoke 已通过（Recall@6=1.0；答案 F1=0.666667 / 0.5）；短分支 `codex/mem-v2-6-quality-repair` 已合回当前 `origin/main`（merge `0c835353`）。合并后 pytest 4368 passed / 2 skipped / 51 deselected，Vitest 73 files / 1157 passed，`pnpm build` 通过；Gate-0 6/6 PASS（记录 tip `2606d9b8`），review coverage exit 0。Playwright `pnpm exec playwright test --workers=2` 全量执行 11.4m：458 passed / 2 failed；两条都是既有 #201 `control-row.spec.ts:251` 字面量陈旧（预期 13/18、实际 12/17），与已在 `f13ed0d` 基线复现的结果相同，非 #302 回归。`#302` 保持 OPEN，分支尚未 push / PR，未关单。旧 Memory 数据未清理，未修改 `.env` 或凭证。
+**当前焦点：Memory V2 `#302` 已完成上一轮真实 smoke；短分支 `codex/mem-v2-6-quality-repair` 已同步 `origin/main`，最新同步点为 merge `9096c38c`（该提交把 `origin/main` 合回短分支，#302 代码仍未集成）。本轮修正链路归因、冻结黄金集 v1.1.0 与 Qiniu 清理；全量 pytest 4402 passed / 14 skipped / 51 deselected，Ruff 通过，Playwright control-row 24 passed。仍待干净提交树上的真实 smoke、真实服务清理汇总、review coverage、Gate-0 与 PR 集成；#302 保持 OPEN。**
 
 **Memory V2 当前状态（2026-09-25）**：`#297`–`#301` 已 CLOSED 并集成；`#299` AC10 Recall@6=0.95 且真实 Milvus hybrid 证据已归档，GitHub issue 已 CLOSED；`#302` / `#303` 已解除阻塞，`#304` 等待后二票。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。旧记忆数据仍保留；clean-slate 只在 `#303` 依赖完成并核验目标和保留项后执行。
 

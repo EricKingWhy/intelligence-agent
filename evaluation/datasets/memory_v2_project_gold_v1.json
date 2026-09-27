@@ -1,6 +1,6 @@
 {
   "corpus_id": "memory-v2-project-gold",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "synthetic": true,
   "cases": [
     {"case_id":"positive_semantic_preference","category":"positive_write","synthetic_input":"User explicitly prefers concise code review summaries.","expected":{"eligibility":true,"action":"ADD","kind":"semantic","scope":"user_global","source_authority":["user"],"recall_target":[],"prohibited_outcomes":[]}},
@@ -16,8 +16,8 @@
     {"case_id":"wrong_project_isolation","category":"isolation","synthetic_input":"A query under another synthetic project must not see Sample Harbor.","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"none","source_authority":["user"],"recall_target":[],"prohibited_outcomes":["unauthorized_recall","unauthorized_mutation"]}},
     {"case_id":"contradiction_supersession","category":"contradiction","synthetic_input":"The user updates the synthetic deploy window from Monday to Thursday.","expected":{"eligibility":true,"action":"UPDATE","kind":"semantic","scope":"project","source_authority":["user"],"recall_target":[],"prohibited_outcomes":[],"supersedes_old_version":true}},
     {"case_id":"contradiction_user_wins","category":"contradiction","synthetic_input":"The user corrects the synthetic project codename to Cedar Lantern.","expected":{"eligibility":true,"action":"UPDATE","kind":"semantic","scope":"project","source_authority":["user"],"recall_target":[],"prohibited_outcomes":[],"supersedes_old_version":true}},
-    {"case_id":"cross_session_recall_one","category":"cross_session_recall","synthetic_input":"In a later synthetic session, recall the Sample Harbor project name.","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"project","source_authority":["user"],"recall_target":["gold-project-name"],"prohibited_outcomes":[]}},
-    {"case_id":"cross_session_recall_two","category":"cross_session_recall","synthetic_input":"In a later synthetic session, retrieve the cursor pagination decision.","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"project","source_authority":["user"],"recall_target":["gold-pagination"],"prohibited_outcomes":[]}},
+    {"case_id":"cross_session_recall_one","category":"cross_session_recall","synthetic_input":"In a later session, what name did the user give the synthetic project?","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"project","source_authority":["user"],"recall_target":["gold-project-name"],"prohibited_outcomes":[]}},
+    {"case_id":"cross_session_recall_two","category":"cross_session_recall","synthetic_input":"Which pagination strategy did the project choose for API listings?","expected":{"eligibility":true,"action":"NOOP","kind":"none","scope":"project","source_authority":["user"],"recall_target":["gold-pagination"],"prohibited_outcomes":[]}},
     {"case_id":"primary_transient_fallback","category":"fallback","synthetic_input":"A synthetic memory call sees one transient primary failure.","expected":{"eligibility":true,"action":"ADD","kind":"semantic","scope":"project","source_authority":["user"],"recall_target":[],"prohibited_outcomes":[],"requires_fallback":true}},
     {"case_id":"replay_committed_job","category":"replay","synthetic_input":"Replay the same committed synthetic memory job twice.","expected":{"eligibility":true,"action":"ADD","kind":"semantic","scope":"project","source_authority":["user"],"recall_target":[],"prohibited_outcomes":["duplicate_active_memory"],"replay":true}}
   ]

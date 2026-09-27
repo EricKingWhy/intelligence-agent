@@ -286,6 +286,23 @@ def _relevant_injected_memory_ids(
     }
 
 
+def _attributable_injected_hit_ids(
+    hits: Sequence[Any], relevant_injected_memory_ids: set[str],
+) -> set[str]:
+    relevant = set(relevant_injected_memory_ids)
+    return {hit.record.id for hit in hits[:6] if hit.record.id in relevant}
+
+
+def _chain_verified(
+    *, committed_jobs: Sequence[Any], active_records: Sequence[Any], hits: Sequence[Any],
+    memory_messages: Sequence[Any], attributable_injected_hit_ids: set[str],
+) -> bool:
+    return bool(
+        committed_jobs and active_records and hits and memory_messages
+        and attributable_injected_hit_ids
+    )
+
+
 class _RecordingRecall:
     """Observe provider records without issuing a second query."""
 
@@ -534,9 +551,13 @@ async def run_smoke(
             local_to_source=local_to_source,
             relevant_session_ids=case.relevant_session_ids,
         )
-        chain_verified = bool(
-            committed_jobs and active and recorder.hits and memory_messages
-            and attributable_injected_memory_ids
+        attributable_injected_hit_ids = _attributable_injected_hit_ids(
+            recorder.hits, attributable_injected_memory_ids,
+        )
+        chain_verified = _chain_verified(
+            committed_jobs=committed_jobs, active_records=active,
+            hits=recorder.hits, memory_messages=memory_messages,
+            attributable_injected_hit_ids=attributable_injected_hit_ids,
         )
         relevant_hit_ranks = [
             rank for rank, hit in enumerate(recorder.hits, start=1)
@@ -670,9 +691,7 @@ async def run_smoke(
             ), 6),
             "recall_hit_count": len(recorder.hits),
             "injected_message_count": len(memory_messages),
-            "attributable_injected_hit_count": sum(
-                hit.record.id in attributable_injected_memory_ids for hit in recorder.hits[:6]
-            ),
+            "attributable_injected_hit_count": len(attributable_injected_hit_ids),
             "attributable_injected_profile_count": sum(
                 record.id in attributable_injected_memory_ids for record in recorder.profile_records
             ),

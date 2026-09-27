@@ -199,6 +199,8 @@ profile 注入与前六条 hybrid hit 分开计数。原始记忆和模型输出
 
 ### D11 — Preserve official question dates and expose content-free retrieval diagnostics
 
+后续代码审查发现，旧 `chain_verified` 只分别要求存在 Milvus 命中和相关已注入记忆，却没有要求二者是同一条记忆；相关 profile 注入配合无关命中也可能误报成功。判定现要求相关且活动中的记忆同时出现在 top-6 Milvus 命中和最终注入中。Profile 指标仍单独报告，不能单独满足链路验收。
+
 2026-09-27 的真实 smoke 仍未达回答门槛：LoCoMo hybrid Recall@6=0、答案 F1=0、`chain_verified=true`；
 相关答案词已保留在并注入的 profile（相关 profile=1、注入答案词覆盖率=1.0），但最终回答没有答案 token。
 LongMemEval Recall@6=0、答案 F1=0、`chain_verified=false`；权威来源记忆保留了答案词，但没有进入注入上下文。

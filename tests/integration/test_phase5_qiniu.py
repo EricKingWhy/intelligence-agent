@@ -34,5 +34,18 @@ async def test_phase5_real_qiniu_gate(tmp_path):
             aws_access_key_id=settings.artifact_store_access_key.get_secret_value(),
             aws_secret_access_key=settings.artifact_store_secret_key.get_secret_value(),
         ) as client:
-            await client.delete_object(Bucket=settings.artifact_store_bucket,
-                                       Key=f"{session.session_id}/{ARTIFACT_ID}")
+            prefix = f"{session.session_id}/"
+            remaining = await client.list_objects_v2(
+                Bucket=settings.artifact_store_bucket,
+                Prefix=prefix,
+            )
+            assert not remaining.get("IsTruncated", False)
+            for item in remaining.get("Contents", []):
+                await client.delete_object(
+                    Bucket=settings.artifact_store_bucket, Key=item["Key"],
+                )
+            remaining = await client.list_objects_v2(
+                Bucket=settings.artifact_store_bucket, Prefix=prefix,
+            )
+            assert not remaining.get("Contents", [])
+            print("[qiniu cleanup] verified=true records_remaining=0")
