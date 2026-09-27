@@ -1,0 +1,355 @@
+{
+  "schema_version": 1,
+  "scenario_id": "smoke-production-tools",
+  "scenario_version": 2,
+  "verdict": "PASS",
+  "reason": "",
+  "missing_preconditions": [],
+  "created_at": "2026-09-27T09:31:01.754+00:00",
+  "sha": "13e3f95873346e90b8efffd7b9ee565e8f1e9906",
+  "tree": "00216b4ed4b6bacad39d89a22a55b34b5e726def",
+  "worktree": {
+    "head_sha": "13e3f95873346e90b8efffd7b9ee565e8f1e9906",
+    "tree": "00216b4ed4b6bacad39d89a22a55b34b5e726def",
+    "tracked_matches_head": true,
+    "untracked": [
+      "GUI_TEST_FINDINGS_2026-09-27.md",
+      "gui-test-screenshots/t01_first_load_dark_popup.png",
+      "gui-test-screenshots/t01_reload_light_no_popup.png",
+      "gui-test-screenshots/t03_send_failed_no_error.png",
+      "gui-test-screenshots/t04_permission_dialog.png",
+      "gui-test-screenshots/t04_running_auto_approved_bash.png",
+      "gui-test-screenshots/t05_auto_restored_session.png",
+      "gui-test-screenshots/t13_memory_dialog.png"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove(RuntimeError)",
+    "workspace_ids": [
+      "f15f91e30238a55f",
+      "d327931defd14d3a",
+      "c8c4692359f56bdb"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-27T09:30:30.263+00:00",
+      "ended_at": "2026-09-27T09:30:39.251+00:00",
+      "status": "PASS",
+      "duration_ms": 8988,
+      "session_id": "smoke-production-tools-a1-0d329555",
+      "run_id": "19952fc4-9623-46dd-80af-7d5d66e62951",
+      "run_status": "completed",
+      "steps": 2,
+      "event_count": 15,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260927T093030-13e3f9587334-smoke-production-tools/attempt-1.jsonl",
+      "events_sha256": "5fcd9ed12b4aac5784b12f399243baca125a9420ab40555db7044aba04afdcff",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "budget.one_request_per_decision",
+          "ok": true,
+          "detail": "轨迹重算：agent_turns=2 model_requests=2（角色 primary:2，失败 0） total_tokens=4872（自报 2/2 格） cost_usd=未知（自报 0/2 格）（直路：requests == turns 且无失败请求）"
+        },
+        {
+          "name": "budget.terminal_tokens",
+          "ok": true,
+          "detail": "run/completed.usage_total.total_tokens=4872；轨迹 4872（Provider 自报累加，不可得不得记 0）"
+        },
+        {
+          "name": "budget.terminal_cost",
+          "ok": true,
+          "detail": "run/completed.cost_usd=未知；轨迹 未知（只认 Provider 归属的读数）"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）15 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "已创建内容为 live-gate-ok 的 notes.txt，确认这是 git 仓库（最新提交为 `73401ed seed`），状态显示新文件 `notes.txt` 未被跟踪。",
+      "workspace_id": "f15f91e30238a55f",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-27T09:30:39.251+00:00",
+      "ended_at": "2026-09-27T09:30:54.173+00:00",
+      "status": "PASS",
+      "duration_ms": 14921,
+      "session_id": "smoke-production-tools-a2-8cc11813",
+      "run_id": "395855b8-0470-40c4-aab7-2c291b5f0d3f",
+      "run_status": "completed",
+      "steps": 3,
+      "event_count": 17,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260927T093030-13e3f9587334-smoke-production-tools/attempt-2.jsonl",
+      "events_sha256": "7fd810efa856f1719cb9f2979898e1da3c82c34ee263519e6be9061bb2a2c83a",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "budget.one_request_per_decision",
+          "ok": true,
+          "detail": "轨迹重算：agent_turns=3 model_requests=3（角色 primary:3，失败 0） total_tokens=7450（自报 3/3 格） cost_usd=未知（自报 0/3 格）（直路：requests == turns 且无失败请求）"
+        },
+        {
+          "name": "budget.terminal_tokens",
+          "ok": true,
+          "detail": "run/completed.usage_total.total_tokens=7450；轨迹 7450（Provider 自报累加，不可得不得记 0）"
+        },
+        {
+          "name": "budget.terminal_cost",
+          "ok": true,
+          "detail": "run/completed.cost_usd=未知；轨迹 未知（只认 Provider 归属的读数）"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）17 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我创建了 notes.txt（内容为 live-gate-ok），确认这是 git 仓库（最新提交为 feb7ee0 seed），并查看到状态为未跟踪文件 notes.txt。",
+      "workspace_id": "d327931defd14d3a",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-27T09:30:54.173+00:00",
+      "ended_at": "2026-09-27T09:31:01.408+00:00",
+      "status": "PASS",
+      "duration_ms": 7235,
+      "session_id": "smoke-production-tools-a3-a2a9a85e",
+      "run_id": "b0fa9b25-04e4-4871-a20a-b06f187d55e7",
+      "run_status": "completed",
+      "steps": 2,
+      "event_count": 15,
+      "tool_calls": [
+        "write",
+        "bash",
+        "git_status"
+      ],
+      "events_ref": "docs/live_gate/20260927T093030-13e3f9587334-smoke-production-tools/attempt-3.jsonl",
+      "events_sha256": "2efb47e9fda822869e2422615217361ca66049af869196fc2db4402fe4a78785",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "budget.one_request_per_decision",
+          "ok": true,
+          "detail": "轨迹重算：agent_turns=2 model_requests=2（角色 primary:2，失败 0） total_tokens=4861（自报 2/2 格） cost_usd=未知（自报 0/2 格）（直路：requests == turns 且无失败请求）"
+        },
+        {
+          "name": "budget.terminal_tokens",
+          "ok": true,
+          "detail": "run/completed.usage_total.total_tokens=4861；轨迹 4861（Provider 自报累加，不可得不得记 0）"
+        },
+        {
+          "name": "budget.terminal_cost",
+          "ok": true,
+          "detail": "run/completed.cost_usd=未知；轨迹 未知（只认 Provider 归属的读数）"
+        },
+        {
+          "name": "artifact_content",
+          "ok": true,
+          "detail": "notes.txt 内容比对（len=12）"
+        },
+        {
+          "name": "write_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "command_or_git_tool_used",
+          "ok": true,
+          "detail": "工具序列=['write', 'bash', 'git_status']"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）15 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我创建了内容为 live-gate-ok 的 notes.txt，执行 `git log --oneline -1`（输出 `6e7d9a7 seed`，确认是 git 仓库），并用 git_status 查到新文件 `?? notes.txt`。",
+      "workspace_id": "c8c4692359f56bdb",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260927T093030-13e3f9587334-smoke-production-tools/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260927T093030-13e3f9587334-smoke-production-tools/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260927T093030-13e3f9587334-smoke-production-tools/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "smoke-production-tools"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的五条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`、完成闸门 `#316`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

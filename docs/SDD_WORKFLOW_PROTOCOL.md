@@ -169,8 +169,13 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
    `docs/review_ledger.tsv` + `docs/review_ledger.d/*.tsv` 双读；`.sh` 冻结为语义参考，只对拆分前布局成立）。它机械地对账「`<最早台账 base>..HEAD` 的每条 commit 是否有
    台账归属」，**例外三类**：
    - **docs-only** commit（脚本自己校验：改动文件全部命中文档扩展名；
-     `docs/` 下只认 .md/.txt/.rst/.tsv/.json/.yaml —— 仓库里就有 `docs/integration/*.sh`，
+     `docs/` 下只认 .md/.txt/.rst/.tsv/.json/.jsonl/.yaml —— 仓库里就有 `docs/integration/*.sh`，
      按 `docs/` 前缀放行会把可执行脚本当散文，2026-09-17 两轴审查 P1 实测复现）。
+     **2026-09-27 补收 `.jsonl`**：`docs/` 下现成 91 个 `.jsonl` 全是 `docs/live_gate/**`
+     的 gate 证据，与**已收**的 `docs/gate/*.json` 同族 —— 此前只因扩展名枚举漏了一项
+     被判「非文档文件」⇒ 产一次 live gate 证据就多欠一行台账归属（`2e99580b` 实测挂掉
+     coverage 车道）。属**补枚举漏项**，不是放宽判据；`goal/**`、`web/**` 等非 `docs/`
+     树仍不收（口径见 `scripts/check_review_coverage.sh:50`）。
      **自 2026-09-23 起连白名单行都不需要**：命中 `DOC_PATTERN` 的提交由脚本按路径**机械自动
      归属**并逐条打印（方案 C，issue #295 / 缺陷 5）。⚠ **顺带发现（2026-09-26 两轴审查的 Standards
      轴提出、作者逐条复核过源码）**：这条落地之后 `[whitelist]` 段**已放行不了任何提交** —— 能走到
@@ -263,8 +268,8 @@ FE-T7/T8/T9 三张票，该阶段早已结束，而清单留在这里一直被�
    用 **两条**判据证明"跑过门禁的树 = 被集成的代码面"：
    ① `git diff --name-status --no-renames <冻结sha> HEAD`：**状态列只允许 `A` / `M`**
    （出现 `D` / `R` / `C` / `T` ⇒ 一律重跑——删除与重命名会让"代码面未变"这个 claim 不成立），
-   **且每条的路径都命中 docs-only 模式**（`DOC_PATTERN`，与 `scripts/check_review_coverage.sh:51` 同一个模式：
-   `docs/**` 下只认 .md/.txt/.rst/.tsv/.json/.yaml，加根级 `AGENTS.md`/`CLAUDE.md`/`CONTEXT.md`/*.md）。
+   **且每条的路径都命中 docs-only 模式**（`DOC_PATTERN`，权威实现 = `scripts/check_review_coverage.py`（`.sh:51` 是**冻结的语义参考**，自 2026-09-27 起与 `.py` 仅差「`docs/` 下多收一个 `.jsonl`」）：
+   `docs/**` 下只认 .md/.txt/.rst/.tsv/.json/.jsonl/.yaml，加根级 `AGENTS.md`/`CLAUDE.md`/`CONTEXT.md`/*.md）。
    ⚠ **必须用 `--name-status` 而不是 `--name-only`**：后者不带状态列，**删除与修改同形**
    （实测 2026-09-21：`git diff --name-only --no-renames a3afd18^ a3afd18` 把一个**删除**
    `docs/INTEGRATION_PROMPT_REVIEW_STRUCTURAL_FRONTEND.md` 显示成普通文件名，`grep -Evc` 得 **0** ⇒ 放行；
