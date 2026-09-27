@@ -682,6 +682,9 @@ class StuckToolFailurePauseScenario:
         )
         recorded_env = stuck.get("environment_revision")
         observed_env = evidence.get("environment_revision")
+        # 依据成立的机械口径（`run_budget.stuck_resume_evidence` 的 environment_change 臂）：
+        # 现算值 ≠ 快照值，且 `recorded` 逐字等于暂停快照那一格——这三项就是"与快照比过"
+        # 的全部证据（那条臂**不**写 `pause_seq`，它只在 relevant_steer 臂里有）。
         resume_ok = (
             resume_event is not None and len(started) == 1
             and str(resume_event.run_id or "") == run_id
@@ -690,7 +693,6 @@ class StuckToolFailurePauseScenario:
             and isinstance(observed_env, str) and bool(observed_env)
             and observed_env != recorded_env
             and evidence.get("recorded") == recorded_env
-            and evidence.get("pause_seq") == cutoff
         )
         results.append(AssertionResult(
             name="resume_records_the_accepted_basis",

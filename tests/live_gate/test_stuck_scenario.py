@@ -245,7 +245,6 @@ def _trajectory(
             "basis": "environment_change",
             "environment_revision": ENVIRONMENT_REVISION_AFTER,
             "recorded": ENVIRONMENT_REVISION,
-            "pause_seq": pause_index,
         }
         evidence.update(resume_evidence_overrides or {})
         add("run/resumed", {
