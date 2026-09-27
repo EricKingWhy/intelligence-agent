@@ -272,10 +272,11 @@ class RunManager:
         self._closing = False
 
     def session_lock(self, session_id: str) -> asyncio.Lock:
-        """取得该会话的串行化锁（同会话的 CAS 临界区，`#312`）。
+        """取得该会话的串行化锁（同会话恢复临界区，`#312` / `#342`）。
 
-        调用方约定：**只在临界区持有**（读 version → 写 `run/resumed`），不要跨
-        整个 run 生命周期持有——不同临界区之间（launch 之后）的串行化由
+        调用方可在恢复计划校验与最终提交期间持有它；最终提交会覆盖 CAS 重验、
+        必要的恢复/对账、运行时装配及恢复事件写入，确保 CAS 输家不会先留下恢复事件
+        或构造模型。不要跨 `RunManager.launch` 或整个 run 生命周期持有——提交后的并发启动由
         `get_active` 的 409 负责。
         """
         lock = self._session_locks.get(session_id)
