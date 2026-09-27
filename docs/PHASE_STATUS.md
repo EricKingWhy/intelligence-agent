@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 `#302` 在短分支 `codex/mem-v2-6-quality-repair`，代码验证锚点 `12966e9f` 已同步 `origin/main`（merge `9096c38c`）；实现仍待 PR 集成。全量 pytest 4402 passed / 14 skipped / 51 deselected，Ruff 通过，Playwright control-row 24 passed；严格选例的最新 LoCoMo smoke F1=1.0、Recall@6=1.0、chain verified。LongMemEval 当前 tip 两次重跑在 reading-notes 答题调用遇到 provider HTTP 500，未产生分数；同一官方完整数据集的先前有效 smoke F1=0.5、Recall@6=1.0，选例与阈值未放宽。真实服务清理门禁 6/6 通过，Milvus 临时集合、Knowledge 测试记录和 Qiniu 测试对象均为 0；review coverage exit 0。待最终 Gate-0、PR CI 与集成；#302 仍 OPEN。**
+**当前焦点：Memory V2 `#302` 在短分支 `codex/mem-v2-6-quality-repair`，代码验证锚点 `12966e9f` 已同步 `origin/main`（merge `9096c38c`）；实现仍待 PR 集成。全量 pytest 4402 passed / 14 skipped / 51 deselected，Ruff 通过，Playwright control-row 24 passed；严格选例的最新 LoCoMo smoke F1=1.0、Recall@6=1.0、chain verified。LongMemEval 当前 tip 两次重跑在 reading-notes 答题调用遇到 provider HTTP 500，未产生分数；同一官方完整数据集的先前有效 smoke F1=0.5、Recall@6=1.0，选例与阈值未放宽。真实服务清理门禁 6/6 通过，Milvus 临时集合、Knowledge 测试记录和 Qiniu 测试对象均为 0；review coverage exit 0。裸全量 Gate-0 的机器读数见 `docs/gate/bb5b4828f842cae46eebc90e427066cde1ff803a.json`；待 PR CI 与集成，#302 仍 OPEN。**
 
 **Memory V2 当前状态（2026-09-25）**：`#297`–`#301` 已 CLOSED 并集成；`#299` AC10 Recall@6=0.95 且真实 Milvus hybrid 证据已归档，GitHub issue 已 CLOSED；`#302` / `#303` 已解除阻塞，`#304` 等待后二票。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。旧记忆数据仍保留；clean-slate 只在 `#303` 依赖完成并核验目标和保留项后执行。
 
