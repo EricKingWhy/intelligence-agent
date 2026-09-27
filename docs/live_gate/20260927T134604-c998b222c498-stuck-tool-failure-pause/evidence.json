@@ -1,0 +1,447 @@
+{
+  "schema_version": 1,
+  "scenario_id": "stuck-tool-failure-pause",
+  "scenario_version": 5,
+  "verdict": "PASS",
+  "reason": "",
+  "missing_preconditions": [],
+  "created_at": "2026-09-27T13:49:32.330+00:00",
+  "sha": "c998b222c4987c68a2daae2882e4588ab08df704",
+  "tree": "a62b3f5fabca67db875ac7b3653b4f259d00eb78",
+  "worktree": {
+    "head_sha": "c998b222c4987c68a2daae2882e4588ab08df704",
+    "tree": "a62b3f5fabca67db875ac7b3653b4f259d00eb78",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "1d32cb2364a07b1d",
+      "516ba25359e27452",
+      "5fb50a6570f46e75"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-27T13:46:04.623+00:00",
+      "ended_at": "2026-09-27T13:47:18.491+00:00",
+      "status": "PASS",
+      "duration_ms": 73868,
+      "session_id": "stuck-tool-failure-pause-a1-4d1784f5",
+      "run_id": "7f6766c8-b240-44b6-9857-01db620d0685",
+      "run_status": "completed",
+      "steps": 7,
+      "event_count": 127,
+      "tool_calls": [
+        "read",
+        "read",
+        "read",
+        "read",
+        "read",
+        "read"
+      ],
+      "events_ref": "docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/attempt-1.jsonl",
+      "events_sha256": "c20f706a57c6cc2f2bfc0302a3902cf8df9e44278436ec9952f3b45419d6d1c7",
+      "assertions": [
+        {
+          "name": "the_model_really_repeated_one_identical_action",
+          "ok": true,
+          "detail": "轨迹里最长的一串'同动作失败'=6（要求 ≥6），动作=read '{\"path\": \"upstream_ready.txt\"}'；read 调用总数=6，其中失败结果=6"
+        },
+        {
+          "name": "every_repeat_failed_the_same_deterministic_way",
+          "ok": true,
+          "detail": "失败结果里出现过的 (error_code,message) 组合数=1（要求恰好 1 个，且含 '不存在'）；组合=['{\"code\": \"TOOL_EXECUTION_ERROR\", \"message\": \"文件 \\'upstream_ready.txt\\' 不存在。\"}']"
+        },
+        {
+          "name": "exactly_one_corrective_replan",
+          "ok": true,
+          "detail": "tool/failure-guard(soft)=1、guard/stuck(replan)=0、注入纠正消息=1（injected_by=['tool_failure_guard']）、tool/failure-guard(hard)=0（旧 HARD 形状必须为 0）"
+        },
+        {
+          "name": "stuck_pause_is_recorded_with_the_evidence_snapshot",
+          "ok": true,
+          "detail": "reason='stuck' trigger_dimension='stuck.tool_failure_loop' pattern='stuck.tool_failure_loop' threshold=3 count=6（轨迹重算串长 6）replan_count=1 env='sha256:e3b0c4429' policy='sha256:42e3c9e8a' resume_requirements=['relevant_steer', 'environment_change', 'policy_change']"
+        },
+        {
+          "name": "pause_is_not_a_terminal_event",
+          "ok": true,
+          "detail": "run/paused=1、guard/stuck(paused)=1、终态事件=[('run/completed', None)]"
+        },
+        {
+          "name": "no_dangling_tool_call_at_the_pause",
+          "ok": true,
+          "detail": "暂停点上的悬空 tool/call=[]"
+        },
+        {
+          "name": "every_resume_without_evidence_is_a_409_with_zero_side_effects",
+          "ok": true,
+          "detail": "budget_increase: 拒绝 — BudgetConflict: stuck 暂停不接受 resume_basis=budget_increase：它缺的不是额度（02 §5.3 的三条依据是相关 steer / 环境变更 / 策略变更），抬高 ceiling 不改变同一个动作的重复——本请求未启动任何工作；relevant_steer_without_a_steer: 拒绝 — BudgetConflict: stuck 暂停只接受'暂停之后出现的相关 steer'，但事件流里没有 seq > 109 且可作用于 run_id=7f6766c8-b240-44b6-9857-01db620d0685 的 steer/requested——本次恢复没有依据，未启动任何工作；environment_change_unchanged: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=environment_change 不成立：现算的 environment_revision=sha256:e3b0c44298fc1c14 与暂停快照（seq=109）相同——没有观测到变更，本请求未启动任何工作；policy_change_unchanged: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=policy_change 不成立：现算的 policy_version=sha256:42e3c9e8a782b0e4 与暂停快照（seq=109）相同——没有观测到变更，本请求未启动任何工作；environment_change_outside_the_workspace: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=environment_change 不成立：现算的 environment_revision=sha256:e3b0c44298fc1c14 与暂停快照（seq=109）相同——没有观测到变更，本请求未启动任何工作"
+        },
+        {
+          "name": "resume_records_the_accepted_basis",
+          "ok": true,
+          "detail": "run/resumed=1 run/started=1、resume_evidence={'basis': 'environment_change', 'environment_revision': 'sha256:113bb2481f614b8d', 'recorded': 'sha256:e3b0c44298fc1c14'}、暂停快照 environment_revision='sha256:e3b0c44298fc1c14'（暂停 seq=109）"
+        },
+        {
+          "name": "resumed_leg_admitted_new_work",
+          "ok": true,
+          "detail": "恢复后的接纳（model/request + tool/call）=['model/request']"
+        },
+        {
+          "name": "resumed_leg_ended_safely",
+          "ok": true,
+          "detail": "恢复腿的终态序列=['run/completed']（合法收尾 = run/completed / run/paused）；全流终态=['run/completed']；恢复腿事件=['reasoning/started', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']"
+        },
+        {
+          "name": "replay_reconstructs_the_same_verdict",
+          "ok": true,
+          "detail": "重放尾部得到 paused 信号=[('stuck.tool_failure_loop', 6, 3)]、replan 信号=0（必须为 0）、再次喂同一份事件=0 条（必须为 0）；载荷 pattern='stuck.tool_failure_loop' count=6 threshold=3"
+        },
+        {
+          "name": "stuck 暂停快照.request_count",
+          "ok": true,
+          "detail": "payload model_requests=7 agent_turns=6；轨迹重算：agent_turns=6 model_requests=7（角色 closeout:1,primary:6，失败 0） total_tokens=28691（自报 7/7 格） cost_usd=未知（自报 0/7 格）"
+        },
+        {
+          "name": "stuck 暂停快照.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=28691；轨迹 28691（自报 7/7 格；不可得不得记 0）"
+        },
+        {
+          "name": "stuck 暂停快照.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/7 格；不臆造费率）"
+        },
+        {
+          "name": "no_local_fuse_terminal",
+          "ok": true,
+          "detail": "terminal reason=[None]；projection.reason=None"
+        },
+        {
+          "name": "durable_trajectory_is_replayable",
+          "ok": true,
+          "detail": "store 读回 127 条 / 服务读 127 条；条数相同、首处逐条分叉=None（判据是 seq + type 逐条同序，不是「能读回」）"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "{\"completed\": [\"已对同一路径 upstream_ready.txt 连续执行 read 共 6 次（前 3 次汇报一次，后 3 次汇报一次）\", \"每次 read 均返回预期的失败信息：文件 'upstream_ready.txt' 不存在\", \"未创建、修改或删除任何文件，未使用其他工具探索工作区\"], \"remaining\": [\"等待上游服务产出 upstream_ready.txt 后重新读取其内容（本次运行中该文件始终不存在）\"], \"blockers\": [\"upstream_ready.txt 尚未由上游服务生成，read 持续返回文件不存在\", \"运行被标记为 stuck.tool_failure_loop 并暂停，需依据 relevant_steer / environment_change / policy_change 才能恢复\"], \"next_sa",
+      "workspace_id": "1d32cb2364a07b1d",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-27T13:47:18.492+00:00",
+      "ended_at": "2026-09-27T13:48:31.121+00:00",
+      "status": "PASS",
+      "duration_ms": 72629,
+      "session_id": "stuck-tool-failure-pause-a2-e09c4008",
+      "run_id": "f5e3f336-c81d-4b61-90a7-e9f76734a613",
+      "run_status": "completed",
+      "steps": 7,
+      "event_count": 103,
+      "tool_calls": [
+        "read",
+        "read",
+        "read",
+        "read",
+        "read",
+        "read"
+      ],
+      "events_ref": "docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/attempt-2.jsonl",
+      "events_sha256": "ab3b64560ffd9bf6c44688acfa80b80185cfd50b54f131defc08ba1457df3011",
+      "assertions": [
+        {
+          "name": "the_model_really_repeated_one_identical_action",
+          "ok": true,
+          "detail": "轨迹里最长的一串'同动作失败'=6（要求 ≥6），动作=read '{\"path\": \"upstream_ready.txt\"}'；read 调用总数=6，其中失败结果=6"
+        },
+        {
+          "name": "every_repeat_failed_the_same_deterministic_way",
+          "ok": true,
+          "detail": "失败结果里出现过的 (error_code,message) 组合数=1（要求恰好 1 个，且含 '不存在'）；组合=['{\"code\": \"TOOL_EXECUTION_ERROR\", \"message\": \"文件 \\'upstream_ready.txt\\' 不存在。\"}']"
+        },
+        {
+          "name": "exactly_one_corrective_replan",
+          "ok": true,
+          "detail": "tool/failure-guard(soft)=1、guard/stuck(replan)=0、注入纠正消息=1（injected_by=['tool_failure_guard']）、tool/failure-guard(hard)=0（旧 HARD 形状必须为 0）"
+        },
+        {
+          "name": "stuck_pause_is_recorded_with_the_evidence_snapshot",
+          "ok": true,
+          "detail": "reason='stuck' trigger_dimension='stuck.tool_failure_loop' pattern='stuck.tool_failure_loop' threshold=3 count=6（轨迹重算串长 6）replan_count=1 env='sha256:e3b0c4429' policy='sha256:42e3c9e8a' resume_requirements=['relevant_steer', 'environment_change', 'policy_change']"
+        },
+        {
+          "name": "pause_is_not_a_terminal_event",
+          "ok": true,
+          "detail": "run/paused=1、guard/stuck(paused)=1、终态事件=[('run/completed', None)]"
+        },
+        {
+          "name": "no_dangling_tool_call_at_the_pause",
+          "ok": true,
+          "detail": "暂停点上的悬空 tool/call=[]"
+        },
+        {
+          "name": "every_resume_without_evidence_is_a_409_with_zero_side_effects",
+          "ok": true,
+          "detail": "budget_increase: 拒绝 — BudgetConflict: stuck 暂停不接受 resume_basis=budget_increase：它缺的不是额度（02 §5.3 的三条依据是相关 steer / 环境变更 / 策略变更），抬高 ceiling 不改变同一个动作的重复——本请求未启动任何工作；relevant_steer_without_a_steer: 拒绝 — BudgetConflict: stuck 暂停只接受'暂停之后出现的相关 steer'，但事件流里没有 seq > 87 且可作用于 run_id=f5e3f336-c81d-4b61-90a7-e9f76734a613 的 steer/requested——本次恢复没有依据，未启动任何工作；environment_change_unchanged: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=environment_change 不成立：现算的 environment_revision=sha256:e3b0c44298fc1c14 与暂停快照（seq=87）相同——没有观测到变更，本请求未启动任何工作；policy_change_unchanged: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=policy_change 不成立：现算的 policy_version=sha256:42e3c9e8a782b0e4 与暂停快照（seq=87）相同——没有观测到变更，本请求未启动任何工作；environment_change_outside_the_workspace: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=environment_change 不成立：现算的 environment_revision=sha256:e3b0c44298fc1c14 与暂停快照（seq=87）相同——没有观测到变更，本请求未启动任何工作"
+        },
+        {
+          "name": "resume_records_the_accepted_basis",
+          "ok": true,
+          "detail": "run/resumed=1 run/started=1、resume_evidence={'basis': 'environment_change', 'environment_revision': 'sha256:41105c9138db6e63', 'recorded': 'sha256:e3b0c44298fc1c14'}、暂停快照 environment_revision='sha256:e3b0c44298fc1c14'（暂停 seq=87）"
+        },
+        {
+          "name": "resumed_leg_admitted_new_work",
+          "ok": true,
+          "detail": "恢复后的接纳（model/request + tool/call）=['model/request']"
+        },
+        {
+          "name": "resumed_leg_ended_safely",
+          "ok": true,
+          "detail": "恢复腿的终态序列=['run/completed']（合法收尾 = run/completed / run/paused）；全流终态=['run/completed']；恢复腿事件=['reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']"
+        },
+        {
+          "name": "replay_reconstructs_the_same_verdict",
+          "ok": true,
+          "detail": "重放尾部得到 paused 信号=[('stuck.tool_failure_loop', 6, 3)]、replan 信号=0（必须为 0）、再次喂同一份事件=0 条（必须为 0）；载荷 pattern='stuck.tool_failure_loop' count=6 threshold=3"
+        },
+        {
+          "name": "stuck 暂停快照.request_count",
+          "ok": true,
+          "detail": "payload model_requests=7 agent_turns=6；轨迹重算：agent_turns=6 model_requests=7（角色 closeout:1,primary:6，失败 0） total_tokens=28543（自报 7/7 格） cost_usd=未知（自报 0/7 格）"
+        },
+        {
+          "name": "stuck 暂停快照.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=28543；轨迹 28543（自报 7/7 格；不可得不得记 0）"
+        },
+        {
+          "name": "stuck 暂停快照.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/7 格；不臆造费率）"
+        },
+        {
+          "name": "no_local_fuse_terminal",
+          "ok": true,
+          "detail": "terminal reason=[None]；projection.reason=None"
+        },
+        {
+          "name": "durable_trajectory_is_replayable",
+          "ok": true,
+          "detail": "store 读回 103 条 / 服务读 103 条；条数相同、首处逐条分叉=None（判据是 seq + type 逐条同序，不是「能读回」）"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "{\"completed\": [\"对 upstream_ready.txt 用 read 工具逐字连续读取了 6 次（前 3 次、后 3 次各汇报一次），每次均返回文件不存在的失败信息，符合上游预热期间的预期\"], \"remaining\": [], \"blockers\": [\"upstream_ready.txt 尚未由上游服务产出，read 始终返回'文件 不存在'\"], \"next_safe_action\": \"等待 relevant_steer 或 environment_change（上游产出 upstream_ready.txt）后，再次用 read 逐字读取 upstream_ready.txt\"}",
+      "workspace_id": "516ba25359e27452",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-27T13:48:31.121+00:00",
+      "ended_at": "2026-09-27T13:49:31.985+00:00",
+      "status": "PASS",
+      "duration_ms": 60864,
+      "session_id": "stuck-tool-failure-pause-a3-535b5c63",
+      "run_id": "ffd27d68-d97b-4561-a66f-f029645a7ea6",
+      "run_status": "completed",
+      "steps": 7,
+      "event_count": 161,
+      "tool_calls": [
+        "read",
+        "read",
+        "read",
+        "read",
+        "read",
+        "read"
+      ],
+      "events_ref": "docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/attempt-3.jsonl",
+      "events_sha256": "5aa5994e0124ff4784005194c43531e1f0094a95f3effa078d94d9c80bb78a22",
+      "assertions": [
+        {
+          "name": "the_model_really_repeated_one_identical_action",
+          "ok": true,
+          "detail": "轨迹里最长的一串'同动作失败'=6（要求 ≥6），动作=read '{\"path\": \"upstream_ready.txt\"}'；read 调用总数=6，其中失败结果=6"
+        },
+        {
+          "name": "every_repeat_failed_the_same_deterministic_way",
+          "ok": true,
+          "detail": "失败结果里出现过的 (error_code,message) 组合数=1（要求恰好 1 个，且含 '不存在'）；组合=['{\"code\": \"TOOL_EXECUTION_ERROR\", \"message\": \"文件 \\'upstream_ready.txt\\' 不存在。\"}']"
+        },
+        {
+          "name": "exactly_one_corrective_replan",
+          "ok": true,
+          "detail": "tool/failure-guard(soft)=1、guard/stuck(replan)=0、注入纠正消息=1（injected_by=['tool_failure_guard']）、tool/failure-guard(hard)=0（旧 HARD 形状必须为 0）"
+        },
+        {
+          "name": "stuck_pause_is_recorded_with_the_evidence_snapshot",
+          "ok": true,
+          "detail": "reason='stuck' trigger_dimension='stuck.tool_failure_loop' pattern='stuck.tool_failure_loop' threshold=3 count=6（轨迹重算串长 6）replan_count=1 env='sha256:e3b0c4429' policy='sha256:42e3c9e8a' resume_requirements=['relevant_steer', 'environment_change', 'policy_change']"
+        },
+        {
+          "name": "pause_is_not_a_terminal_event",
+          "ok": true,
+          "detail": "run/paused=1、guard/stuck(paused)=1、终态事件=[('run/completed', None)]"
+        },
+        {
+          "name": "no_dangling_tool_call_at_the_pause",
+          "ok": true,
+          "detail": "暂停点上的悬空 tool/call=[]"
+        },
+        {
+          "name": "every_resume_without_evidence_is_a_409_with_zero_side_effects",
+          "ok": true,
+          "detail": "budget_increase: 拒绝 — BudgetConflict: stuck 暂停不接受 resume_basis=budget_increase：它缺的不是额度（02 §5.3 的三条依据是相关 steer / 环境变更 / 策略变更），抬高 ceiling 不改变同一个动作的重复——本请求未启动任何工作；relevant_steer_without_a_steer: 拒绝 — BudgetConflict: stuck 暂停只接受'暂停之后出现的相关 steer'，但事件流里没有 seq > 143 且可作用于 run_id=ffd27d68-d97b-4561-a66f-f029645a7ea6 的 steer/requested——本次恢复没有依据，未启动任何工作；environment_change_unchanged: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=environment_change 不成立：现算的 environment_revision=sha256:e3b0c44298fc1c14 与暂停快照（seq=143）相同——没有观测到变更，本请求未启动任何工作；policy_change_unchanged: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=policy_change 不成立：现算的 policy_version=sha256:42e3c9e8a782b0e4 与暂停快照（seq=143）相同——没有观测到变更，本请求未启动任何工作；environment_change_outside_the_workspace: 拒绝 — BudgetConflict: stuck 暂停的 resume_basis=environment_change 不成立：现算的 environment_revision=sha256:e3b0c44298fc1c14 与暂停快照（seq=143）相同——没有观测到变更，本请求未启动任何工作"
+        },
+        {
+          "name": "resume_records_the_accepted_basis",
+          "ok": true,
+          "detail": "run/resumed=1 run/started=1、resume_evidence={'basis': 'environment_change', 'environment_revision': 'sha256:2aa213a10be71ecc', 'recorded': 'sha256:e3b0c44298fc1c14'}、暂停快照 environment_revision='sha256:e3b0c44298fc1c14'（暂停 seq=143）"
+        },
+        {
+          "name": "resumed_leg_admitted_new_work",
+          "ok": true,
+          "detail": "恢复后的接纳（model/request + tool/call）=['model/request']"
+        },
+        {
+          "name": "resumed_leg_ended_safely",
+          "ok": true,
+          "detail": "恢复腿的终态序列=['run/completed']（合法收尾 = run/completed / run/paused）；全流终态=['run/completed']；恢复腿事件=['reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']"
+        },
+        {
+          "name": "replay_reconstructs_the_same_verdict",
+          "ok": true,
+          "detail": "重放尾部得到 paused 信号=[('stuck.tool_failure_loop', 6, 3)]、replan 信号=0（必须为 0）、再次喂同一份事件=0 条（必须为 0）；载荷 pattern='stuck.tool_failure_loop' count=6 threshold=3"
+        },
+        {
+          "name": "stuck 暂停快照.request_count",
+          "ok": true,
+          "detail": "payload model_requests=7 agent_turns=6；轨迹重算：agent_turns=6 model_requests=7（角色 closeout:1,primary:6，失败 0） total_tokens=30312（自报 7/7 格） cost_usd=未知（自报 0/7 格）"
+        },
+        {
+          "name": "stuck 暂停快照.tokens",
+          "ok": true,
+          "detail": "payload total_tokens=30312；轨迹 30312（自报 7/7 格；不可得不得记 0）"
+        },
+        {
+          "name": "stuck 暂停快照.cost",
+          "ok": true,
+          "detail": "payload cost_usd=未知；轨迹 未知（自报 0/7 格；不臆造费率）"
+        },
+        {
+          "name": "no_local_fuse_terminal",
+          "ok": true,
+          "detail": "terminal reason=[None]；projection.reason=None"
+        },
+        {
+          "name": "durable_trajectory_is_replayable",
+          "ok": true,
+          "detail": "store 读回 161 条 / 服务读 161 条；条数相同、首处逐条分叉=None（判据是 seq + type 逐条同序，不是「能读回」）"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "{\"completed\": [\"对 upstream_ready.txt 连续执行了 6 次 read，前 3 次后已汇报一次，后 3 次也已完成\"], \"remaining\": [\"用一句话汇报 6 次读取所见的失败信息（本轮暂停说明要求只输出 JSON，故该汇报在恢复后补上）\"], \"blockers\": [\"upstream_ready.txt 仍不存在，read 均返回 TOOL_EXECUTION_ERROR: 文件 'upstream_ready.txt' 不存在\", \"运行侧判定 stuck.tool_failure_loop 已达阈值，需 relevant_steer / environment_change / policy_change 之一方可恢复\"], \"next_safe_action\": \"恢复后直接用一句话汇报 6 次 read 的失败信息：每次均返回 '文件",
+      "workspace_id": "5fb50a6570f46e75",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "stuck-tool-failure-pause"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的六条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`、完成闸门 `#316`、重复工具失败 ⇒ stuck 暂停 `#317`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}
