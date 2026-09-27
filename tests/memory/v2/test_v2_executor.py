@@ -62,6 +62,8 @@ def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
     assert "A procedural memory must include reusable steps and a success condition" \
         in _FORMATION_PROMPT
     assert "injected test failure is not memory content" in _FORMATION_PROMPT
+    assert "A question whose purpose is to retrieve or inspect an existing fact" \
+        in _FORMATION_PROMPT
 
 
 def test_adjudication_prompt_requires_exact_existing_target_ids():
@@ -310,6 +312,23 @@ async def test_no_memory_completes_quietly(env: Env) -> None:
     assert stored.stage is MemoryJobStage.COMPLETED
     assert stored.outcome is MemoryJobOutcome.NO_WRITE
     assert [c.stage for c in invoker.calls] == [MemoryModelStage.FORMATION]
+
+
+@pytest.mark.asyncio
+async def test_project_writes_use_trusted_project_id_not_model_output(env: Env) -> None:
+    guessed_project_id = "model-guessed-project"
+    candidate = _candidate(scope="project", project_id=guessed_project_id)
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(candidate)],
+        adjudication=[_adjudication(_add(scope="project", project_id=guessed_project_id))],
+    )
+    job = await _claimed(env, trusted=PROJECT_X)
+
+    _job, result, _sink = await _run(env, invoker, job=job)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
+    assert len(result.written) == 1
+    assert result.written[0].project_id == PROJECT_X.project_id
 
 
 @pytest.mark.asyncio

@@ -157,7 +157,10 @@ _FORMATION_PROMPT = (
     "one-off request to run a job, replay instruction, or injected test failure is not "
     "memory content. If a message contains both a transient event and a separate durable "
     "fact, evaluate the fact on its own. A procedural memory must include reusable steps "
-    "and a success condition; approval without the actual procedure is not enough.\n"
+    "and a success condition; when the user approves a complete procedure, form a procedural "
+    "candidate when policy permits. Approval without the actual procedure is not enough. "
+    "A question whose purpose is to retrieve or inspect an existing fact is not itself a "
+    "memory or answer and must not be stored.\n"
     "Return ONLY one JSON object: "
     '{"decision": "CANDIDATES" | "NO_MEMORY", "candidates": [...], "skip_reason": ...}.\n'
     "`NO_MEMORY` requires an empty candidate list and one skip_reason from "
@@ -935,6 +938,7 @@ def _draft_from(
 ) -> MemoryDraftV2:
     """把模型给的**内容字段**变成写入意图：身份与 provenance 由运行时补齐。
 
+    - `project_id` 由 job 的可信项目身份决定，永不采用模型输出中的身份字段。
     - `source_type` 恒 `automatic`：这条路径只有自动形成（显式命令走 MEM-V2-4 的另一条）。
     - `source_session_id` 取 job 上那个**可信**会话 id，不取模型输出里的任何东西。
     - `source_event_ids` 由 `refs` 把模型引的**别名**翻回真实 id 后去重保序（§6.1）。
@@ -951,7 +955,8 @@ def _draft_from(
         raise _UnresolvedEvidence
     return MemoryDraftV2(
         kind=content.kind, tier=content.tier, scope=content.scope,
-        project_id=content.project_id, content=content.content, payload=content.payload,
+        project_id=(job.trusted.project_id if content.scope is MemoryScope.PROJECT else None),
+        content=content.content, payload=content.payload,
         importance=content.importance, strength=content.strength,
         source_type=SourceType.AUTOMATIC, source_session_id=job.session_id,
         source_event_ids=source_event_ids,

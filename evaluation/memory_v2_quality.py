@@ -26,6 +26,10 @@ _AUTHORITIES = {"user", "assistant", "tool", "system", "none"}
 _STATUSES = {"executed", "degraded", "failed", "skipped", "unawaited"}
 _WRITE_ACTIONS = {"ADD", "UPDATE"}
 _FORMATION_DECISIONS = {"CANDIDATES", "NO_MEMORY"}
+_MODEL_STAGES = {"formation", "adjudication"}
+_SCHEMA_FAILURE_KINDS = {
+    "invalid_response_type", "empty_output", "invalid_json", "contract_violation",
+}
 _MODEL_SKIP_REASONS = {
     "no_durable_value", "transient_only", "unsupported_evidence", "explicit_opt_out",
     "no_user_input", "sensitive_without_consent", "secret_detected",
@@ -631,6 +635,12 @@ def _safe_observation(value: Mapping[str, Any], case: GoldCase) -> dict[str, Any
             item = raw_diagnostics.get(field)
             if type(item) is int and item >= 0:
                 diagnostics[field] = item
+        schema_stage = raw_diagnostics.get("schema_failure_stage")
+        schema_kind = raw_diagnostics.get("schema_failure_kind")
+        if isinstance(schema_stage, str) and schema_stage in _MODEL_STAGES:
+            diagnostics["schema_failure_stage"] = schema_stage
+            if isinstance(schema_kind, str) and schema_kind in _SCHEMA_FAILURE_KINDS:
+                diagnostics["schema_failure_kind"] = schema_kind
         for field, allowed_keys in (
             ("selection_rejected_counts", _POLICY_REJECTIONS),
             ("adjudication_action_counts", _ACTIONS),

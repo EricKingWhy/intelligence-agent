@@ -260,6 +260,11 @@ def _decision_diagnostics(
                          if name == "adjudication"), None)
     if adjudication is not None:
         diagnostics["adjudication_action_counts"] = adjudication.get("actions")
+    schema_failure = next((metadata for name, metadata in reversed(observer_rows)
+                           if name == "schema" and metadata.get("schema_valid") is False), None)
+    if schema_failure is not None:
+        diagnostics["schema_failure_stage"] = schema_failure.get("model_stage")
+        diagnostics["schema_failure_kind"] = schema_failure.get("output_failure_kind")
     diagnostics["discarded_action_counts"] = job_state.get("discarded", {})
     return diagnostics
 
