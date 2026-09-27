@@ -216,8 +216,8 @@ async def test_assemble_wiring_empty_config_is_inert(tmp_path):
     assert wiring.tools == []
     assert wiring.context_providers == []
     assert wiring.lifecycle == []
-    assert wiring.memory is None
-    assert wiring.memory_writer is None
+    assert wiring.memory_vectors is None
+    assert wiring.memory_v2 is None
 
 
 @pytest.mark.asyncio

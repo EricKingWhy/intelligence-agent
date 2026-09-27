@@ -1,6 +1,6 @@
 # ADR-0042 — Memory V2：类型化信封、版本化生命周期与派生索引
 
-- **Status**: Proposed（契约已实现并实测通过；#300 增加 V2 治理与墓碑；V1/V2 cutover 仍归 MEM-V2-7）
+- **Status**: Accepted（V2 lifecycle 契约继续有效；生产 cutover 与 V1 退役状态见 ADR-0046）
 - **Date**: 2026-09-23
 - **Deciders**: 用户（PRD 契约逐条冻结，2026-09-22）+ 本 Agent（机制设计）
 - **Related**:
@@ -14,6 +14,7 @@
 - **Supersedes**: **无整体取代**。V1 的存储、数据与未迁移治理契约在 MEM-V2-7 前继续保留；
   #299/#300 明确登记的自动召回与显式命令切换属于本 ADR 的窄范围例外。
 - **将于 MEM-V2-7 supersede 的旧决策**：§D10 逐条列出（这是 AC8 要求的显式登记）。
+- **2026-09-26 状态更新**：MEM-V2-7 已批准生产 V2 独占接线；本分支已实现 cutover 工具，真实数据 reset 仍待执行。本 ADR 中关于 V1/V2 共存和 cutover 待办的描述是历史决策快照，当前决策由 [ADR-0046](0046-memory-v2-exclusive-runtime-and-clean-slate-cutover.md) 取代。
 - **Refines**: ADR-0008 子决策 1（"scope 只实现 USER + SESSION"）——V2 新开
   `user_global` / `project` 两档，不改 V1 的 `USER` / `SESSION` 存储与授权语义。
 

@@ -1,0 +1,207 @@
+{
+  "completed_at": "2026-09-27T11:51:05.343153+00:00",
+  "content_backup_created": false,
+  "knowledge_collection_after": {
+    "exists": true,
+    "identity_sha256": "ea91b3bee06e19d39f6a99e24621e1ad315166d674fdecb7f03e89915d1c4818",
+    "row_count": 0,
+    "schema_sha256": "6a7d7a5334e36c1ebf6ba3119a88dc480354c2bce62df0dd9c7df8cbe34119aa"
+  },
+  "knowledge_collection_before": {
+    "exists": true,
+    "identity_sha256": "ea91b3bee06e19d39f6a99e24621e1ad315166d674fdecb7f03e89915d1c4818",
+    "row_count": 0,
+    "schema_sha256": "6a7d7a5334e36c1ebf6ba3119a88dc480354c2bce62df0dd9c7df8cbe34119aa"
+  },
+  "knowledge_unchanged": true,
+  "milvus_memory_collection": {
+    "drop_requested": true,
+    "exists": true,
+    "identity_sha256": "7c407eec02c1a5e4cb17003f34bb9db5b3a278321ab80e1c220d6c5a3b3a701b",
+    "recreated": true,
+    "row_count": 0,
+    "schema_sha256": "7af11097ee5a4c6ad7b85dfbdce5cff0213cd1de9c869ce50605b0f4882c2305"
+  },
+  "milvus_target_identity_sha256": "74a43e4195975b16a30bfc7eb6e836e679d3dc34de0c915f590196d8f23b81a1",
+  "plan_sha256": "137aeaa1059c4933a73f4ab7738941593a3c8639ad8112d80b2ffe6a30ca0810",
+  "preserved_domains_after": {
+    "credentials_and_langfuse": {
+      "credential_sources_modified": false,
+      "credential_values_emitted": false,
+      "embedding_key_configuration_checked": true,
+      "langfuse_accessed": false,
+      "milvus_authentication_used": true,
+      "mutations": 0
+    },
+    "evaluation_data": {
+      "exists": true,
+      "file_count": 35,
+      "root_identity_sha256": "0da8133edee9fec6c3757e58735a339b0bc85c94b7103c8599925086f2af903b",
+      "sha256": "0032a33744600c3bc96a14fc21dfaf3b4561e4978118d0948cb7067b051888d5",
+      "total_bytes": 421215
+    },
+    "external_stores": {
+      "accessed": false,
+      "artifact_object_store_configured": true,
+      "minio_configured": false,
+      "mutations": 0
+    },
+    "local_artifacts": {
+      "exists": true,
+      "file_count": 8,
+      "root_identity_sha256": "ae18f3fde6781d36374400035cdd351481cfe32a4b9b26f9465333cd1e7de08d",
+      "sha256": "576f4cade05de9a572c3499fb1482eb510854507dcb41ac936ff4c7ba8e872bd",
+      "total_bytes": 62949
+    },
+    "session_events_and_chats": {
+      "exists": true,
+      "file_count": 94,
+      "root_identity_sha256": "6cc9e61f66f38253ed41c47d0635ff4ea17cd79cb04c235c0317ba04d8df3076",
+      "sha256": "80ac01470587ac02b33ca894a6804e94a692ba1414ed29770be6c3095b6d4c77",
+      "total_bytes": 8171975
+    },
+    "workspace_files": {
+      "exists": true,
+      "file_count": 94,
+      "root_identity_sha256": "88d3809ffc9d46975e8bab3947814db44d63b17658a55bc97f254194e110e651",
+      "sha256": "f016114bac072da8749eb43404a01f95e0682e51fa6c1a74b7c165dae59132a1",
+      "total_bytes": 57077
+    },
+    "workspace_metadata_and_checkpoints": {
+      "exists": true,
+      "file_count": 1,
+      "sha256": "9f4377ec77f9c1e8d8cde4d85116b31d167e3440a0978311a34632f5f176d35e",
+      "total_bytes": 880640
+    }
+  },
+  "preserved_domains_before": {
+    "credentials_and_langfuse": {
+      "credential_sources_modified": false,
+      "credential_values_emitted": false,
+      "embedding_key_configuration_checked": true,
+      "langfuse_accessed": false,
+      "milvus_authentication_used": true,
+      "mutations": 0
+    },
+    "evaluation_data": {
+      "exists": true,
+      "file_count": 35,
+      "root_identity_sha256": "0da8133edee9fec6c3757e58735a339b0bc85c94b7103c8599925086f2af903b",
+      "sha256": "0032a33744600c3bc96a14fc21dfaf3b4561e4978118d0948cb7067b051888d5",
+      "total_bytes": 421215
+    },
+    "external_stores": {
+      "accessed": false,
+      "artifact_object_store_configured": true,
+      "minio_configured": false,
+      "mutations": 0
+    },
+    "local_artifacts": {
+      "exists": true,
+      "file_count": 8,
+      "root_identity_sha256": "ae18f3fde6781d36374400035cdd351481cfe32a4b9b26f9465333cd1e7de08d",
+      "sha256": "576f4cade05de9a572c3499fb1482eb510854507dcb41ac936ff4c7ba8e872bd",
+      "total_bytes": 62949
+    },
+    "session_events_and_chats": {
+      "exists": true,
+      "file_count": 94,
+      "root_identity_sha256": "6cc9e61f66f38253ed41c47d0635ff4ea17cd79cb04c235c0317ba04d8df3076",
+      "sha256": "80ac01470587ac02b33ca894a6804e94a692ba1414ed29770be6c3095b6d4c77",
+      "total_bytes": 8171975
+    },
+    "workspace_files": {
+      "exists": true,
+      "file_count": 94,
+      "root_identity_sha256": "88d3809ffc9d46975e8bab3947814db44d63b17658a55bc97f254194e110e651",
+      "sha256": "f016114bac072da8749eb43404a01f95e0682e51fa6c1a74b7c165dae59132a1",
+      "total_bytes": 57077
+    },
+    "workspace_metadata_and_checkpoints": {
+      "exists": true,
+      "file_count": 1,
+      "sha256": "9f4377ec77f9c1e8d8cde4d85116b31d167e3440a0978311a34632f5f176d35e",
+      "total_bytes": 880640
+    }
+  },
+  "preserved_domains_unchanged": true,
+  "sqlite_results": [
+    {
+      "after": {
+        "memory_outbox": 0,
+        "memory_records": 0
+      },
+      "baseline_row_counts": {
+        "memory_outbox": 0,
+        "memory_records": 54
+      },
+      "before": {
+        "memory_outbox": 0,
+        "memory_records": 0
+      },
+      "content_backup_created": false,
+      "exists": true,
+      "file": "memory.db",
+      "freelist_pages": 0,
+      "identity_sha256": "4e35a014aa5af11d04d567aacaab3f488607abe732067fa026b0855ebdce6a4d",
+      "sidecars_after": {
+        "-journal": {
+          "exists": false,
+          "size_bytes": 0
+        },
+        "-shm": {
+          "exists": false,
+          "size_bytes": 0
+        },
+        "-wal": {
+          "exists": false,
+          "size_bytes": 0
+        }
+      }
+    },
+    {
+      "after": {
+        "memory_v2_jobs": 0,
+        "memory_v2_outbox": 0,
+        "memory_v2_records": 0,
+        "memory_v2_settings": 0,
+        "memory_v2_tombstones": 0
+      },
+      "baseline_row_counts": {
+        "memory_v2_jobs": 20,
+        "memory_v2_outbox": 0,
+        "memory_v2_records": 0,
+        "memory_v2_settings": 1,
+        "memory_v2_tombstones": 0
+      },
+      "before": {
+        "memory_v2_jobs": 0,
+        "memory_v2_outbox": 0,
+        "memory_v2_records": 0,
+        "memory_v2_settings": 0,
+        "memory_v2_tombstones": 0
+      },
+      "content_backup_created": false,
+      "exists": true,
+      "file": "memory-v2.db",
+      "freelist_pages": 0,
+      "identity_sha256": "4eea98631d8147048447642694ce8bd602fc4fdf82903703cbc5f4275302f08f",
+      "sidecars_after": {
+        "-journal": {
+          "exists": false,
+          "size_bytes": 0
+        },
+        "-shm": {
+          "exists": false,
+          "size_bytes": 0
+        },
+        "-wal": {
+          "exists": false,
+          "size_bytes": 0
+        }
+      }
+    }
+  ],
+  "status": "completed",
+  "ticket": 303
+}

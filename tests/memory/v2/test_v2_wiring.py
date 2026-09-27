@@ -5,7 +5,7 @@
 
 1. 什么时候装配（缺模型角色 / 记忆被关掉 / 调用方没给会话日志 ⇒ 不装配）；
 2. 装配出来连到哪（作业库与记录库同一个文件、并发上限取自配置、挂上 lifecycle 与 runtime 接缝）；
-3. 装配失败时**不**拖垮整个应用（按 OPTIONAL 降级；V1 capability 与显式工具仍可用）。
+3. 装配失败时**不**拖垮整个应用（按 OPTIONAL 降级；不能回退到 V1）。
 
 最后一条用例是本票唯一的端到端：真 SQLite + 真会话日志 + 真 runner（只有模型是替身），
 它证 AC10——**慢记忆模型不挡可见答复**。放在这一层而不是 seam 那一层的原因：seam 用
@@ -30,7 +30,6 @@ from agent_harness.capability.base import (
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
-from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.v2 import assembly as v2_assembly
 from agent_harness.memory.v2.assembly import (
     MEMORY_V2_DATABASE_NAME,
@@ -45,6 +44,7 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
+from tests.memory.v2._vector import FakeMemoryVectorClient
 
 RUN_ID = "run-wiring"
 
@@ -59,7 +59,7 @@ def _settings(tmp_path, **overrides) -> Settings:
 
     `MODEL_PROVIDER=senseaudio` 是让 `resolve_memory_roles` 走"默认链恰好就是该 provider"
     那一支（PRD §5.3.3 固定 `memory.primary` → `senseaudio`）。milvus / embedding 那几项
-    是 V1 记忆组件的既有就绪条件——本文件多数用例把组件换成替身，但保留它们让设置形状与
+    是 V2 记忆组件的就绪条件——本文件多数用例把向量客户端换成替身，但保留设置形状与
     生产一致（否则"就绪"这件事在用例里是另一套判据）。
     """
     values: dict = {
@@ -75,28 +75,18 @@ def _settings(tmp_path, **overrides) -> Settings:
     return Settings(**values)
 
 
-class _FakeMemoryComponents:
-    """provider seam 的 Fake（与 `tests/capability/test_wiring.py` 同形）：契约只需
-    `capability` / `writeback` / 生命周期——装配方不伸进内部组件（ADR-0024 D6）。"""
+def _patch_vectors(monkeypatch) -> list[FakeMemoryVectorClient]:
+    fakes: list[FakeMemoryVectorClient] = []
 
-    def __init__(self) -> None:
-        self.initialized = False
-        self.closed = False
-        self.capability = FakeMemoryCapability()
-        self.writeback = object()
+    def build(settings):
+        fake = FakeMemoryVectorClient(settings)
+        fakes.append(fake)
+        return fake
 
-    async def initialize(self) -> None: self.initialized = True
-
-    async def close(self) -> None: self.closed = True
-
-
-def _patch_components(monkeypatch) -> _FakeMemoryComponents:
-    fake = _FakeMemoryComponents()
     monkeypatch.setattr(
-        "agent_harness.capability.factories.build_memory_components",
-        lambda settings, *, provider="builtin": fake,
+        "agent_harness.capability.factories.build_memory_vector_client", build,
     )
-    return fake
+    return fakes
 
 
 def _sessions(tmp_path) -> JsonlSessionStore:
@@ -133,7 +123,7 @@ async def test_without_a_resolvable_primary_role_there_is_no_pipeline(tmp_path) 
 
 @pytest.mark.asyncio
 async def test_recall_is_wired_even_without_a_formation_model_role(tmp_path, monkeypatch) -> None:
-    _patch_components(monkeypatch)
+    _patch_vectors(monkeypatch)
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
         settings=_settings(tmp_path, model_provider="deepseek"),
@@ -213,7 +203,7 @@ async def test_the_pipeline_hangs_on_the_wiring_and_its_lifecycle(tmp_path, monk
     `lifecycle` 是进程退出时唯一会调 `aclose()` 的地方——只挂前者的话，进程退出时服务
     循环与在飞 job 没人收（`aclose` 的语义是"先停泵、再有界排空"）。
     """
-    _patch_components(monkeypatch)
+    _patch_vectors(monkeypatch)
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
         settings=_settings(tmp_path), sessions=_sessions(tmp_path),
@@ -231,15 +221,15 @@ async def test_the_pipeline_hangs_on_the_wiring_and_its_lifecycle(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_without_a_session_store_governance_and_v1_tools_remain_but_auto_context_is_disabled(
+async def test_without_a_session_store_governance_remains_but_auto_context_and_tools_are_disabled(
     tmp_path, monkeypatch,
 ) -> None:
-    """调用方不传会话日志 ⇒ 治理 service 与 V1 工具保留，不走特权自动注入。
+    """调用方不传会话日志 ⇒ 治理 service 保留，不走自动注入或显式会话工具。
 
     `sessions=None` 时没有可安全解析可信项目身份的 V2 recall 上下文；因此自动 recall 为空，
-    但治理 service、V1 capability、写入器和显式工具仍可用。
+    治理 API 仍可用，任何旧版工具都不回退启用。
     """
-    fake = _patch_components(monkeypatch)
+    fakes = _patch_vectors(monkeypatch)
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
         settings=_settings(tmp_path),
@@ -248,20 +238,18 @@ async def test_without_a_session_store_governance_and_v1_tools_remain_but_auto_c
     assert wiring.memory_v2 is not None, "治理 API 不依赖 session store"
     assert wiring.memory_v2 in wiring.lifecycle
     assert wiring.memory_formation is None
-    assert wiring.memory is fake and wiring.memory_writer is fake.writeback
+    assert wiring.memory_vectors is fakes[0] and wiring.memory_vectors in wiring.lifecycle
     assert wiring.context_providers == []
-    assert {tool.name for tool in wiring.tools} >= {
-        "retrieve_memory", "remember_this", "forget_memory",
-    }
+    assert wiring.tools == []
     await wiring.aclose()
-    assert "memory" not in wiring.degradations, "V1 记忆没有降级，别登记成降级"
+    assert fakes[0].closed
 
 
 @pytest.mark.asyncio
 async def test_memory_disabled_means_no_pipeline(tmp_path) -> None:
     """PRD §5.6.4「关闭记忆 = 同时关掉自动抽取与自动召回」的落点。
 
-    闸门取**装配结果**（`wiring.memory is not None`）而不是新增一个开关，所以关闭形态
+    闸门取**装配结果**（`wiring.memory_v2 is not None`）而不是新增一个开关，所以关闭形态
     天然覆盖。刻意再添一个 `memory_v2_enabled` 只会多一处要与 V1 记忆保持一致的地方——
     而它一旦漂移，症状是"关了记忆还在形成"。
     """
@@ -270,16 +258,16 @@ async def test_memory_disabled_means_no_pipeline(tmp_path) -> None:
         settings=_settings(tmp_path), sessions=_sessions(tmp_path),
     )
 
-    assert wiring.memory is None and wiring.memory_formation is None
+    assert wiring.memory_vectors is None and wiring.memory_v2 is None
+    assert wiring.memory_formation is None
     assert wiring.degradations["memory"] == DegradeReason.DISABLED.value
 
 
 @pytest.mark.asyncio
 async def test_memory_components_missing_means_no_pipeline(tmp_path) -> None:
-    """V1 记忆因**配置不齐**而降级时，V2 管线同样缺席（不 patch 工厂，走真实判据）。
+    """V2 记忆因**配置不齐**而降级时保持缺席（不 patch 工厂，走真实判据）。
 
-    两者共用同一个闸门，所以这条钉的是"闸门取的是装配结果而不是配置项"：设置里
-    `memory` 是开着的（没有 `enabled: false`），缺席是**组件构造出来是 None**造成的。
+    设置里 `memory` 是开着的（没有 `enabled: false`），缺席由配置完整性判定。
     """
     wiring = await wire_capabilities(
         CapabilityRegistry(), parse_capabilities_config('{"memory": {}}'),
@@ -287,20 +275,20 @@ async def test_memory_components_missing_means_no_pipeline(tmp_path) -> None:
         sessions=_sessions(tmp_path),
     )
 
-    assert wiring.memory is None and wiring.memory_formation is None
+    assert wiring.memory_vectors is None and wiring.memory_v2 is None
+    assert wiring.memory_formation is None
     assert wiring.degradations["memory"] == DegradeReason.MISSING_SETTINGS.value
 
 
 @pytest.mark.asyncio
 async def test_a_broken_pipeline_degrades_without_failing_the_wiring(tmp_path, monkeypatch) -> None:
-    """V2 管线起不来 ⇒ OPTIONAL 降级；V1 capability 保留但不自动注入特权记忆。
+    """V2 管线起不来 ⇒ OPTIONAL 降级，不能回退到 V1 capability 或工具。
 
     反向行为（让异常穿出去）会把"V2 记忆的一个装配故障"升级成**整个应用起不来**——
-    而 V1 capability、写入器与显式检索工具仍可用。自动回退到 V1 的 SystemMessage 注入会
-    违反 recalled-text 的非特权要求。降级原因写进 `degradations`，路由层才分得清"没配"
+    自动回退到 V1 会违反 cutover 的独占要求。降级原因写进 `degradations`，路由层才分得清"没配"
     与"配了但坏了"（#225 的同一诉求）。
     """
-    fake = _patch_components(monkeypatch)
+    fakes = _patch_vectors(monkeypatch)
 
     async def _boom(*args, **kwargs):
         raise RuntimeError("memory-v2 assembly is broken")
@@ -312,10 +300,12 @@ async def test_a_broken_pipeline_degrades_without_failing_the_wiring(tmp_path, m
     )
 
     assert wiring.memory_formation is None
-    assert wiring.memory is fake and wiring.memory_writer is fake.writeback
+    assert wiring.memory_v2 is None and wiring.memory_vectors is None
+    assert fakes[0].closed
     assert wiring.context_providers == []
-    assert {tool.name for tool in wiring.tools} >= {"retrieve_memory"}
+    assert wiring.tools == []
     assert wiring.degradations["memory_v2"] == DegradeReason.INIT_FAILED.value
+    assert wiring.degradations["memory"] == DegradeReason.INIT_FAILED.value
 
 
 @pytest.mark.asyncio
@@ -324,7 +314,7 @@ async def test_optional_v2_import_failure_degrades_after_disabling_privileged_v1
 ) -> None:
     import sys
 
-    _patch_components(monkeypatch)
+    _patch_vectors(monkeypatch)
     monkeypatch.setitem(sys.modules, "agent_harness.memory.v2.assembly", None)
 
     wiring = await wire_capabilities(
@@ -334,7 +324,7 @@ async def test_optional_v2_import_failure_degrades_after_disabling_privileged_v1
 
     assert wiring.context_providers == []
     assert wiring.degradations["memory_v2"] == DegradeReason.INIT_FAILED.value
-    assert "retrieve_memory" in {tool.name for tool in wiring.tools}
+    assert wiring.tools == []
 
 
 # --------------------------------------------------------------------------------------
@@ -371,7 +361,7 @@ async def test_the_visible_answer_does_not_wait_for_a_slow_memory_model(
 
     判据是**因果**而不是时延：模型卡在闸门上（`release` 未置位），因此
 
-    - 通知返回后 job 仍在非终态（`QUEUED`）——它没有等形成；
+    - 通知返回后 job 仍未完成（`QUEUED` 或 `FORMING`）——它没有等形成；
     - 松闸 + `drain()` 之后同一行变成 `COMPLETED`，且模型确实被调用过一次
       （`order[0] == "model"`）——证明"没等"不是"根本没跑"。
 
@@ -404,7 +394,7 @@ async def test_the_visible_answer_does_not_wait_for_a_slow_memory_model(
         assert job is not None, "合格的一轮必须建出一个 job（AC1）"
 
         pending = await jobs.get(job.job_id)
-        assert pending.stage is MemoryJobStage.QUEUED, \
+        assert pending.stage in {MemoryJobStage.QUEUED, MemoryJobStage.FORMING}, \
             "通知返回时这一轮的形成还没跑完——它没有等模型"
         assert invoker.completed is False, "正控：模型确实还卡在闸门上"
 
@@ -440,7 +430,7 @@ async def test_a_broken_model_catalog_fails_loudly_instead_of_degrading(
     判别性：把 `except ConfigError: raise` 那一支删掉，本用例转红（拿到 `degradations`
     而不是异常）。
     """
-    _patch_components(monkeypatch)
+    _patch_vectors(monkeypatch)
     settings = _settings(tmp_path, agent_models="{这不是合法 JSON")
     with pytest.raises(CapabilityError) as caught:
         await wire_capabilities(
