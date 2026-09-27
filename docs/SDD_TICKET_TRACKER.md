@@ -6129,6 +6129,12 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 （绑 `27de3af0`）与 Live Gate 证据（绑 `b5f5eb19`）只对**合并前**那棵树成立）；**读数绑定树 = `27de3af0` / tree `7fc64b30`**
 （全量 pytest 跑的正是这棵树）。**最终 Live Gate 证据绑定 sha `b5f5eb19` / tree `97f36cb6`**
 （= 同一代码面；场景 **v5**，真模型 `mimo-v2.6-flash` + 生产工具 + 生产账本）。
+**2026-09-27 追加（先回后正）**：本票已并入 `origin/main`（merge `b0443fa6`，base `6aff823f`，upstream 62 笔 /
+38 files / +5124），4 文件冲突按 §14.7 逐文件语义并集 + 一处**未标记**语义冲突当场修掉（upstream 的 Recovery 后重读块
+仍按 2 元解包，而本票把 `_paused_resume_state` 改成返回 3 元）；解析面经**两轴独立审查**（Correctness / Standards
+均 PASS、无新 P0/P1）⇒ 处置笔 `efd8f7b8`、台账行 348。**合并后全部重车道在新树重采**（`c998b222` / tree `a62b3f5f`），
+**真实 Live Gate 也在新树重跑**并入库（`7bfa8218`：`docs/live_gate/20260927T134604-c998b222c498-stuck-tool-failure-pause/`，
+场景 v5 **3/3 PASS**、每次 **16/16** 断言、73868 / 72629 / 60864 ms），台账行 349。
 
 **票面**：GitHub `#317`（父票 `#305`；`blocked_by` 的 `#313` / `#314` / `#315` / `#316` 均已完成）。
 规格落点 `02 §5.3`（五模式与阈值、T 首达一次 replan、2T 暂停）与 `03 §5`（非终态 `run/paused`、
@@ -6192,7 +6198,7 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   **本笔之后未开第六轮**：§8.3 第 4 条的修后重审预算（1 轮/轴）已用满，且末轮两轴均 PASS、五条全 P3、
   无新引入的 P0/P1 ⇒ 按"停止修复 + 如实登记"收口（登记于本段末与台账第 `346` 行）。
 
-**重车道读数（命令与树写死）**：
+**重车道读数（合并前，绑树 `27de3af0`；命令与树写死。合并后的重采见下一块）**：
 
 - **后端全量**（读 `27de3af0`；`PYTEST_EXTRA_ARGS="-q --no-header -p no:cacheprovider -p no:randomly"
   bash scripts/run_tests_clean.sh`，脚本内自带 `PYTHONPATH=`）**第 1 遍：1 failed / 4484 passed /
@@ -6215,7 +6221,39 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
   故 e2e 的既有用例面对它零区分度；生成物同步守卫（Gate-0 车道⑤）与 `tsc` / `oxlint` / `vitest` / `build`
   四车道已全绿。**这不是"全绿"**：e2e 车道本票**没有读数**。
 
-**门禁（Gate-0 裸全量，tip `98bfc6d0` / tree `6b0ffa43`）**：**6/6 PASS**，墙钟 **24.2s**
+**合并后重车道读数（"先回后正"后的新树重采；命令同上，全部落在 `c998b222` / tree `a62b3f5f`）**：
+
+- **后端全量第 1 遍**：**1 failed / 4575 passed / 14 skipped / 51 deselected in 684.40s**（exit 1）——唯一红为
+  **新签名间歇红** `tests/web/test_memory_api.py::test_v2_bulk_confirmation_settings_and_session_recall_redaction`
+  （`sqlite3.OperationalError: database is locked` @ `memory/v2/store.py:632`；隔离单跑 `1 passed in 3.71s`）⇒ `#376`。
+- **后端全量第 2 遍**：**1 failed / 4575 passed / 14 skipped / 51 deselected in 734.25s**（exit 1）——红的是**另一条**
+  `tests/memory/v2/test_v2_wiring.py::test_the_visible_answer_does_not_wait_for_a_slow_memory_model`
+  （`assert <MemoryJobStage.FORMING> is <MemoryJobStage.QUEUED>` @ 用例 `:407`；隔离单跑 `1 passed in 4.18s`）⇒ `#377`。
+  两遍**红集不同**、隔离均绿 ⇒ 负载敏感间歇红，**不报"全绿"**。两条都落在 upstream 刚重构过的 memory-v2 面
+  （`memory/v2/executor.py` +225 / `formation.py` +35）；本票对 `src/agent_harness/memory/**`、`tests/memory/**`、
+  `tests/web/**` **零改动**（`git diff --stat 6aff823f a69df7b9` 在这三处为空）。
+  **合并前的两处既有红已被 upstream 修掉（基线前进，不是"本树零红"）**：CRLF 环境项由 `dataset_sha256` 改成
+  **与行尾无关**并新增钉住用例（`tests/memory/test_memory_v2_recall_dataset.py` +19/−1）；`#201` 那对 e2e 由
+  `be73a2d0 test(#201): sync profile scope counts with fixture` 修掉。`#338` 那条无签名间歇红**两遍都未出现**。
+- **前端 `vitest`**：**73 files / 1157 passed / 143.32s / exit 0**。用例数与合并前同为 1157 —— upstream 那 62 笔对
+  `web/**` **只改了一个文件**（`web/e2e/control-row.spec.ts` 3+/3−，即 `#201` 的 fixture 同步），未增删用例。
+- **前端 `build`**：`pnpm build`（= `tsc -b && vite build`）**exit 0**。
+- **`e2e`（新树补跑，两次全量）**：第 1 遍 `pnpm exec playwright test --workers=2` → **4 failed / 456 passed / 17.5m**（exit 1），
+  四条红 = `stream-fallback.spec.ts:48`（降级通道那一帧 5s 未到，`.model-output` 仍只含刷新前文本）/
+  `multiturn-queue.spec.ts:735`（T12p：`subs` 实得 2 条、两条同 `after_seq=3`）/
+  `multiturn-queue.spec.ts:834`（T12r：`after_seq=3/4` 两条）/ `y-inspector-peek.spec.ts:102`（AC2：`.detail-peek`
+  始终 `hidden` + `data-peek="off"`）；**`#201` 那对本次通过**（见上）。第 1 遍后对这四条隔离复跑（`--workers=1`）
+  **7 passed / 1 failed**（T12p 这次落在另一个项目上），T12p 单跑 `--repeat-each=4` × 2 项目 **8/8 绿**。
+  **第 2 遍同树同命令**：**460 passed / 11.3m / exit 0（零红，日志里 `flaky`/`retry`/`skipped`/`✘` 标记数 = 0，不是靠重试转绿）**。
+  ⇒ 四条均为**时序/负载敏感间歇红**（全部押真实时钟：`LATE_MS=1600`、~450ms 快按/按住阈值、5s 超时；红的那遍慢 6 分钟），
+  非确定性，且**与本票改动无因果面**（`web/**` 相对 `origin/main` 只多 2 行 `guard/stuck` **no-op 登记**，
+  `web/e2e/**` 与其**逐字节相同**）⇒ `#378`。
+
+**门禁（Gate-0 裸全量，合并后 tip `7bfa8218`）**：首次落盘即 **5/6**（红车道 = coverage：证据笔 `7bfa8218` 含
+`.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属）⇒ 补台账行 349 归属后 `--only coverage` **PASS**。最终 tip 的
+裸全量读数见下方"合并后"块。
+
+**门禁（Gate-0 裸全量，合并前 tip `98bfc6d0` / tree `6b0ffa43`）**：**6/6 PASS**，墙钟 **24.2s**
 （diff-check 0.03 / ruff 0.70 / oxlint 0.30 / tsc 12.28 / guards 9.73 / coverage 1.19），读数落盘
 `docs/gate/98bfc6d011f34a3c3d26c3a6103bf68d158c1e9b.json`；bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，
 另跑 `git diff --check 6aff823f..HEAD` **exit 0** 补上已提交 15 笔的范围。覆盖闸门在 `98bfc6d0` 上
@@ -6237,6 +6275,12 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 （响亮但不是设计过的形状，已有入库用例承重）；⑮ **委派子 run 的策略面在 T9 里没有定义**（→ `#370`）；
 ⑯ **委派子会话今天无法恢复，所以子 run 的 stuck 暂停没有任何可用依据**（→ `#372`）。
 
+**合并后新签名的间歇红（本票不修，已另开票）**：⑲ `#376` memory-v2 写锁——`database is locked` @ `store.py:632`
+而 `BUSY_TIMEOUT_MS = 10_000` **已设** ⇒ 读数是"某连接**持写锁 >10s**"，不是缺超时（`BEGIN IMMEDIATE` + 同进程另一连接
+持锁是该形状的唯一解释）；⑳ `#377` formation job 阶段断言竞态（`FORMING` vs `QUEUED`，用例假定"尚未开始跑"而实际已进队列）；
+㉑ `#378` e2e 四条时序敏感间歇红（含 T12p/T12r 的"重复订阅"签名 `subs.length=2`，同一棵树一遍 4 红、再一遍 460/460 全绿）。
+三条都**不是本票引入**（T9 对 `memory/**`、`tests/memory/**`、`tests/web/**` 零改动已实测），如实登记而非停线。
+
 **⑯ 的形状（四轮审查的两条 P2，作者已独立复核）**：`resume_and_launch` → `build_runtime` **无条件**调
 `workspace_registry.create(session_id, …)`（`assembly.py`），而子会话的映射是父级 **alias**（`multiagent/provider.py`
 的 `bind_alias`，`#288` 之后），`create()` 对 alias 抛 `WorkspaceBindingError`（`sandbox/registry.py`，该行为由
@@ -6256,6 +6300,7 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 
 **已另开票（本票不修）**：`#370` 委派子 run 的策略面未定义（残余 ⑮，正文已按四轮结论重写——旧正文里
 "实测可经 `environment_change` 恢复"已被推翻）；`#372` 委派子会话不可恢复（残余 ⑯，含复现、影响面、
-五条验收与"不能只改一行"的理由）。`#337` / `#338` 状态不变（用户已裁决暂不修）。
+五条验收与"不能只改一行"的理由）。`#337` / `#338` 状态不变（用户已裁决暂不修）；**合并后新签名的三条 `#376` / `#377` / `#378` 同样只登记不修**
+（用户既定口径：新发现的、超出本票范围的缺陷 ⇒ 登记 + 开票，不当场修）。
 
 **集成**：待执行（走「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准，`main` 受服务端保护）。
