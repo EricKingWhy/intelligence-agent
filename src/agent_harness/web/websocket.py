@@ -221,7 +221,12 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
         subscriber = active_run.subscribe() if active_run is not None else None
         # 先把新 subscriber 接入同一 run，再摘旧 subscriber。否则取消旧 relay
         # 时会短暂变成零订阅者并启动孤儿宽限计时，极短宽限期可误杀仍在用的 run。
-        await _detach_subscription(session_id)
+        try:
+            await _detach_subscription(session_id)
+        except asyncio.CancelledError:
+            if subscriber is not None and active_run is not None:
+                active_run.unsubscribe(subscriber)
+            raise
         if subscriber is not None:
             subscriptions[session_id] = (active_run, subscriber)
         # 推快照：窗口内的 durable 事件（客户端仍按 seq 去重——服务端窗口与

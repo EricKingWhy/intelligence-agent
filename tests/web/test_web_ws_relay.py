@@ -515,6 +515,77 @@ async def test_ws_resubscribe_keeps_run_attached_before_old_relay_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_ws_cancel_during_resubscribe_unsubscribes_new_subscriber(
+    tmp_path, monkeypatch,
+):
+    """取消发生在旧 relay 收尾等待中时，新 subscriber 也必须被摘除。"""
+    from agent_harness.web import websocket as websocket_module
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=40, interval=0.1),
+    )
+    original_gather = asyncio.gather
+    relay_cleanup_started = asyncio.Event()
+    release_relay_cleanup = asyncio.Event()
+    gate_relay_cleanup = False
+
+    def is_relay_task(awaitable) -> bool:
+        get_coro = getattr(awaitable, "get_coro", None)
+        coro = get_coro() if get_coro is not None else awaitable
+        code = getattr(coro, "cr_code", None)
+        return code is not None and code.co_name == "_relay_events"
+
+    def gated_gather(*awaitables, **kwargs):
+        if gate_relay_cleanup and any(map(is_relay_task, awaitables)):
+            relay_cleanup_started.set()
+
+            async def wait_then_gather():
+                await release_relay_cleanup.wait()
+                return await original_gather(*awaitables, **kwargs)
+
+            return wait_then_gather()
+        return original_gather(*awaitables, **kwargs)
+
+    monkeypatch.setattr(websocket_module.asyncio, "gather", gated_gather)
+    try:
+        import httpx2
+
+        session_id = await _start_run_get_session_id(port, "取消重订阅任务")
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            subscribe = {"type": "subscribe", "session_id": session_id}
+            await ws.send_text(json.dumps(subscribe))
+            first = await _recv_until(
+                ws, lambda frames: any(f.get("type") == "snapshot" for f in frames),
+            )
+            assert any(f.get("type") == "snapshot" for f in first)
+            run = app.state.agent.run_manager.get_active(session_id)
+            assert run is not None and len(run.subscribers) == 1
+
+            gate_relay_cleanup = True
+            await ws.send_text(json.dumps(subscribe))
+            await asyncio.wait_for(relay_cleanup_started.wait(), timeout=5)
+            read_task = next(
+                task for task in asyncio.all_tasks()
+                if getattr(getattr(task.get_coro(), "cr_code", None), "co_name", None)
+                == "_read_loop"
+            )
+            read_task.cancel()
+            gate_relay_cleanup = False
+            await asyncio.sleep(0.05)
+
+            assert not run.subscribers, (
+                "取消的重订阅处理器必须清除已创建但尚未登记的 subscriber"
+            )
+    finally:
+        gate_relay_cleanup = False
+        release_relay_cleanup.set()
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
 async def test_relay_error_waits_for_outbound_queue_capacity():
     """有界 WS 队列满时 relay 错误必须等待发送，不能静默丢弃。"""
     from agent_harness.web.websocket import _enqueue_relay_error
