@@ -36,6 +36,7 @@ from agent_harness.agent.budget import (
 from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.agent.resume_evidence import evidence_port
 from agent_harness.agent.run_budget import (
+    REASON_STUCK,
     RESUME_BASIS_BUDGET_INCREASE,
     STUCK_RESUME_REQUIREMENTS,
     TRIGGER_RUN_DEADLINE,
@@ -541,13 +542,45 @@ def resume_hint(session_id: str, *, data: dict) -> str:
     开关、或给一条与该维相反的判据，都是**假指令**（PRD §11：CLI 显示的就是 durable
     事实本身）。未知维度（本票之外的暂停原因）回落到 turns 开关——那是 `#308` 起一直
     存在的维度，也是唯一一个任何 run 都读得懂的。
+
+    **stuck 暂停走另一条**：它的 `trigger_dimension` 是模式名，按维度回落就会给出
+    `--run-turns-total N`——一条恒被 409 挡死的假指令（stuck 不接受 `budget_increase`，
+    ADR-0048 D7）。所以那一类按事件自己列的可用依据给 `--basis`。
     """
+    if data.get("reason") == REASON_STUCK:
+        return _stuck_resume_hint(session_id, data)
     dimension = str(data.get("trigger_dimension", ""))
     return (
         f"  resume: agent-harness resume {session_id}"
         f" {_resume_command_tail(dimension)}"
         f" --expected-version {data.get('budget_version', '')}"
         f"  ({_resume_ceiling_rule(dimension)})\n"
+    )
+
+
+def _stuck_resume_hint(session_id: str, data: dict) -> str:
+    """stuck 暂停的恢复指令：依据是**变更**，不是 ceiling（`02 §5.3` / ADR-0048 D7）。
+
+    可用依据逐条读事件自己的 `resume_requirements`，不在这里重算：CLI 再算一份就等于
+    给"CLI 以为的可用集"与判据之间留一个漂移点（`#317` 三轮审查钉的正是这个形状）。
+    依据可以是多条 ⇒ 命令行里放第一条（照抄能跑），判据行里把全部可用的都点名。
+    """
+    available = [str(item) for item in (data.get("resume_requirements") or ())]
+    version = data.get("budget_version", "")
+    if not available:
+        # 快照两格都缺席的 stuck 暂停（判据对三条依据全拒）：宁可说"没有可用依据"，
+        # 也不给一条必然 409 的 `--basis`。
+        return (
+            f"  resume: 本次 stuck 暂停没有可用的恢复依据"
+            f"（快照与 steer 都不足以证明任何一条变更，判据会逐条拒）· "
+            f"expected-version {version}\n"
+        )
+    return (
+        f"  resume: agent-harness resume {session_id}"
+        f" --basis {available[0]}"
+        f" --expected-version {version}"
+        f"  (stuck 暂停不以 ceiling 为依据，可以不给 --run-* 开关；可用的依据只有："
+        f"{', '.join(available)}——每条都必须是**被观测到的**变更，声明不算)\n"
     )
 
 

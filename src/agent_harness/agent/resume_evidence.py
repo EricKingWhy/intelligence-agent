@@ -137,6 +137,21 @@ def recorded_policy_inputs(stuck: Mapping[str, Any] | None) -> dict[str, Any] | 
     return inputs
 
 
+def recorded_environment_revision(stuck: Mapping[str, Any] | None) -> str | None:
+    """暂停载荷里的环境修订——**可用**才返回，否则 `None`（该依据 fail-closed）。
+
+    可用 = 非空字符串。畸形 JSONL 里的 list / dict / 数字一律算"这份快照没有这一格"：
+    与 `recorded_policy_inputs` 的形状规则同因（不可用的快照不是 500，是"不能用作依据"），
+    而"存在即已变"会让任何畸形值都无条件放行 `environment_change`（`#317` 三轮审查 P3）。
+
+    与 `recorded_policy_inputs` 一样只有这一份：`run_budget` 的判据与依据清单都调它。
+    """
+    if not isinstance(stuck, Mapping):
+        return None
+    value = stuck.get("environment_revision")
+    return value if isinstance(value, str) and value else None
+
+
 @dataclass(frozen=True)
 class ResumeEvidence:
     """恢复请求这一刻**观测到**的三类依据（`None` = 观测不到 ⇒ 该依据不可用）。"""

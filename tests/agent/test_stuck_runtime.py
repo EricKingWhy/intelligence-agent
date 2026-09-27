@@ -33,7 +33,7 @@ from agent_harness.agent.guards import (
     worst_stuck_signal,
 )
 from agent_harness.agent.profiles import AgentSpec
-from agent_harness.agent.resume_evidence import ResumeEvidence, evidence_port
+from agent_harness.agent.resume_evidence import evidence_port
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CONTINUATION_ACTION_KEY,
@@ -44,7 +44,6 @@ from agent_harness.agent.run_budget import (
     STUCK_RESUME_REQUIREMENTS,
     derive_run_budget,
     latest_paused_run,
-    stuck_resume_evidence,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -132,28 +131,29 @@ def _run_id_of(session: Session) -> str:
     )
 
 
-# ── 委派子 run：环境那一半在、策略那一半不在（#317 T9 二轮审查 P2 / 残余 15）──
+# ── 委派子 run：不假装观测过它拿不到的东西（#317 三轮审查 P2 / 残余 15、16）──
 
 
 class TestDelegatedChildEvidence:
-    """子会话的 stuck 暂停必须**可恢复**，或至少不假装可恢复。
+    """子会话的 stuck 暂停：**不注入证据端口**，依据清单只列判据不会恒拒的那条。
 
-    子会话是 durable 的（在会话列表里可见）、`run/paused` 是**非终态**，所以"恢复入口
-    必然 409"这件事在载荷层面就不许成立：环境 revision 记下来（child workspace = 父的
-    同一棵树），策略那一格如实 `None`（Factory 收不到 child 的生效策略面，照抄父级那份
-    等于记一个 child 没跑过的面 ⇒ 假 `policy_change`），依据清单只列可用的那两条。
+    子会话是 durable 且列得出来的、`run/paused` 是非终态，所以载荷层面不许出现"列出来的
+    依据必然 409"（`03 §5` / ADR-0044 D4）。而子会话今天连恢复入口都走不通：
+    `resume_and_launch` 在 `build_runtime` 里按 `create()` 重写工作区映射，而子会话的映射
+    是父级 alias，注册表拒绝改写（`WorkspaceBindingError`，`#288` 的既有行为，见 ADR-0048
+    残余 16 与它指向的 follow-up 票）。因此这里钉的是**诚实面**：不假装观测过（两格
+    `None`）、只列 `relevant_steer`（快照缺席时唯一不会被判据恒拒的一条）；恢复入口修好
+    之后再按 D8 给环境那一半。
     """
 
     @pytest.mark.asyncio
-    async def test_a_child_pause_is_resumable_by_an_environment_change(self, tmp_path) -> None:
+    async def test_a_child_pause_claims_no_evidence_it_does_not_have(self, tmp_path) -> None:
         spec = AgentSpec(
             name="child", description="d", system_prompt="s",
             tool_scope=frozenset({"fail"}),
         )
-        port = evidence_port(workspace=tmp_path, permission_mode="workspace-write")
         factory = AgentFactory(
             model=ScriptedModel([_round(index) for index in range(6)]),
-            stuck_evidence=port,
         )
         child = factory.create(
             spec, source_registry=_registry(), grantable=frozenset({"fail"}),
@@ -165,23 +165,15 @@ class TestDelegatedChildEvidence:
         assert result.status == STATUS_PAUSED
         pause_event = _events(session, RUN_PAUSED)[0]
         stuck = pause_event.data["stuck"]
-        assert stuck["environment_revision"] is not None      # 真观测到了
-        assert stuck["policy_version"] is None                # 没观测过就不假装观测过
+        assert stuck["environment_revision"] is None      # 没观测过就不假装观测过
+        assert stuck["policy_version"] is None
         assert stuck["policy_inputs"] is None
-        assert pause_event.data["resume_requirements"] == [
-            RESUME_BASIS_RELEVANT_STEER, RESUME_BASIS_ENVIRONMENT_CHANGE,
-        ]
+        # 快照无关的那条之外一条都不列：另外两条的判据都要比快照
+        # （`recorded_environment_revision` / `recorded_policy_inputs`），列出去就是恒 409。
+        assert pause_event.data["resume_requirements"] == [RESUME_BASIS_RELEVANT_STEER]
         action = pause_event.data["continuation"][CONTINUATION_ACTION_KEY]
-        assert RESUME_BASIS_POLICY_CHANGE not in action       # 不指一条必被 409 挡死的路
-
-        # 列出来的依据**真能用**：换一个环境 revision 的恢复被采纳（判据不抛冲突）。
-        paused = latest_paused_run(session.events)
-        assert paused is not None
-        admitted = stuck_resume_evidence(
-            paused, resume_basis=RESUME_BASIS_ENVIRONMENT_CHANGE,
-            evidence=ResumeEvidence(environment_revision="sha256:env-after"),
-        )
-        assert admitted is not None and admitted["basis"] == RESUME_BASIS_ENVIRONMENT_CHANGE
+        assert RESUME_BASIS_ENVIRONMENT_CHANGE not in action
+        assert RESUME_BASIS_POLICY_CHANGE not in action
 
 
 # ── ① 的接线：一条纠正 + 一次暂停 ─────────────────────────────────────────

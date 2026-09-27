@@ -19,12 +19,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Any
 
 from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS, resolve_local_fuse
 from agent_harness.agent.profiles import AgentSpec
-from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.prompt import PersonaConfig, compose_agent_prompt, join_guidance
 from agent_harness.tooling import ToolExecutor, ToolRegistry
@@ -50,14 +48,9 @@ class AgentFactory:
         persona: PersonaConfig | None = None,
         include_tool_guidance: bool = False,
         local_max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS,
-        stuck_evidence: StuckEvidencePort | None = None,
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
-        # stuck 证据端口（`#317`；ADR-0048 D8 / 残余 15）：child 用父的**环境那一半**
-        # （child workspace 就是父的同一棵树 ⇒ 环境 revision 是真观测），策略那一半在
-        # `create` 里剥掉——原因见那里的注释。
-        self._stuck_evidence = stuck_evidence
         # Deployment ceiling（#308）：child 的 local fuse = 档位声明收窄到本 ceiling
         # 之下。**子 Agent 不会继承一个更大的上限**——父级额度更大不构成放行理由
         # （ADR-0044 D1：local fuse 不跨兄弟池化）。
@@ -128,17 +121,6 @@ class AgentFactory:
         # 否则 child 会看到它无权使用的工具的操作说明（越权信息泄漏）。
         guidance_text = (join_guidance(child_registry.list())
                          if self._include_tool_guidance else None)
-        # stuck 证据端口（`#317` T9 二轮审查 P2）：child 拿**环境那一半**——它的 workspace
-        # 就是父的同一棵树（provider 的 alias），`environment_revision` 因此是 child 真能
-        # 观测、恢复侧也真能重算的值。策略那一半**剥掉**（记成"没观测到"）：child 的生效
-        # 策略面（profile / effort / context providers / 模型名）Factory 根本收不到，照抄
-        # 父级那份等于给 child 记一个它没跑过的面——恢复侧就会拿"跨进 child 的假变更"放行
-        # （fail-open，与 `evidence_port` 那条同源）。因此 child 的 stuck 暂停只列可用的
-        # 依据（`run_budget.stuck_resume_requirements`），而不是永远 409 的三条。
-        child_evidence = (
-            None if self._stuck_evidence is None
-            else replace(self._stuck_evidence, policy_version=None, policy_inputs=None)
-        )
         return AgentRuntime(
             model=self._model,
             registry=child_registry,
@@ -160,6 +142,4 @@ class AgentFactory:
             system_prompt=compose_agent_prompt(
                 spec.system_prompt, self._persona, guidance_text,
             ),
-            # 见上面 `child_evidence`：环境那一半进 child，策略那一半不进。
-            stuck_evidence=child_evidence,
         )

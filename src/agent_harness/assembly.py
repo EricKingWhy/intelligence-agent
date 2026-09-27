@@ -407,11 +407,6 @@ async def build_runtime(
                 # child 的 local fuse 上限（#308）：档位声明（内置三档位是 None=继承）
                 # 只能收窄到 Deployment ceiling 之下，越界在 Factory.create 里被拒。
                 local_max_agent_turns=settings.local_max_agent_turns,
-                # `#317`：child 的 stuck 证据端口（**环境那一半**——策略那一半由 Factory
-                # 剥掉，理由在 `agent/factory.py` 的 `child_evidence` 处）。不接的话子会话
-                # 的 stuck 暂停会落成一个"列出来的依据必然 409"的 durable 非终态
-                # （`#317` T9 二轮审查 P2 / ADR-0048 残余 15）。
-                stuck_evidence=stuck_evidence,
             ),
             source_registry=registry,
             session_store=session_store,

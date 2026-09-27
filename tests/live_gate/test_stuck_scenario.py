@@ -584,6 +584,19 @@ def test_missing_refusals_are_red(tmp_path):
     assert "every_resume_without_evidence_is_a_409_with_zero_side_effects" in failed
 
 
+def test_an_extra_refusal_leg_that_did_not_pass_is_red(tmp_path):
+    """driver 多出一条拒答腿而它没通过 ⇒ 这一行必须红（`#317` 三轮审查 P3）。
+
+    只查"期望的腿都在"会漏掉这一条：集合相等两个方向都要，否则将来加腿就是开一个假绿窗口。
+    """
+    events, legs = _trajectory()
+    legs["refusals"]["a_sixth_leg_that_did_not_hold"] = _refusal(
+        raised=None, expected="应当被拒",
+    )
+    failed = _failed(_assertions(tmp_path, events, _legs(legs)))
+    assert "every_resume_without_evidence_is_a_409_with_zero_side_effects" in failed
+
+
 def test_resume_without_a_resumed_event_is_red(tmp_path):
     events, legs = _trajectory(resumed=False)
     failed = _failed(_assertions(tmp_path, events, _legs(legs)))

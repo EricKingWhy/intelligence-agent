@@ -69,7 +69,11 @@ from agent_harness.agent.budget import (
     BudgetRejection,
     LocalFuse,
 )
-from agent_harness.agent.resume_evidence import ResumeEvidence, recorded_policy_inputs
+from agent_harness.agent.resume_evidence import (
+    ResumeEvidence,
+    recorded_environment_revision,
+    recorded_policy_inputs,
+)
 from agent_harness.model.accounting import ProviderAccounting, decimal_or_none
 from agent_harness.session.event import (
     MODEL_COMPLETED,
@@ -277,27 +281,18 @@ _BASIS_GLOSS: dict[str, str] = {
 def stuck_resume_requirements(
     stuck: Mapping[str, Any] | None,
 ) -> tuple[str, ...]:
-    """这条 stuck 暂停**当前**还接受哪几条依据（`03 §3.4` 三条里可用的那些）。
+    """这条 stuck 暂停**当前**还接受哪几条依据（`03 §3.4` 三条里判据不会恒拒的那些）。
 
-    与 `stuck_resume_evidence` 的各条"缺席即 409"检查**同源**——被列出来的依据必须真的
-    有可能被接受；列一条永远 409 的依据就落进 `03 §5` / ADR-0044 D4 禁止的"暗示可安全
-    续跑"（`#317` T9 二轮审查 P2 钉住的形状：委派子 run 没有证据端口时快照两格 `None`，
-    而旧实现照样把三条都列出去）。
-
-    可用性逐条对应判据里的那一段：
-
-    - `relevant_steer`：比的是事件顺序（暂停之后有没有可作用于该 run 的 steer），**不看
-      快照** ⇒ 常在；
-    - `environment_change`：快照里要有 `environment_revision`；
-    - `policy_change`：快照里要有 `policy_version` **且**逐维值能重算出它
-      （`recorded_policy_inputs`——只记了摘要的存量快照不算，那是残余 11）。
+    与 `stuck_resume_evidence` 的各条"缺席即 409"检查**同源**——两侧调同一组形状 / 还原
+    谓词（`recorded_environment_revision` / `recorded_policy_inputs`）。列一条判据根本不
+    会接受的依据，就落进 `03 §5` / ADR-0044 D4 禁止的"暗示可安全续跑"（ADR-0048 D6）。
 
     `stuck is None`（预算 / deadline 暂停）⇒ 空元组：那两类暂停没有前置依据。
     """
     if not stuck:
         return ()
     available = [RESUME_BASIS_RELEVANT_STEER]
-    if stuck.get("environment_revision") is not None:
+    if recorded_environment_revision(stuck) is not None:
         available.append(RESUME_BASIS_ENVIRONMENT_CHANGE)
     if (
         stuck.get("policy_version") is not None
@@ -1619,13 +1614,19 @@ def stuck_resume_evidence(
         # 其余取值在 `validate_resume` 里已按 422 拒（`RESUME_BASIS_VALUES`）；
         # 这里不是"兜底分支"，只是不让将来多出来的取值静默走错那一条比较。
         raise BudgetConflict(f"stuck 暂停不支持 resume_basis={resume_basis}")
-    recorded = stuck.get(field)
+    recorded = (
+        recorded_environment_revision(stuck)
+        if resume_basis == RESUME_BASIS_ENVIRONMENT_CHANGE
+        else stuck.get(field)
+    )
     current = getattr(evidence, field)
     if recorded is None or current is None:
+        side = (
+            "暂停快照里缺席或形状不合法" if recorded is None else "本次观测里缺席"
+        )
         raise BudgetConflict(
-            f"stuck 暂停的 resume_basis={resume_basis} 需要与暂停快照比较，但 {field} "
-            f"在{'暂停快照' if recorded is None else '本次观测'}里缺席（暂停时读不到它）"
-            f"——无快照可比，拒绝启动工作"
+            f"stuck 暂停的 resume_basis={resume_basis} 需要与暂停快照比较，但 {field} 在"
+            f"{side}（暂停时读不到它）——无快照可比，拒绝启动工作"
         )
     if (
         resume_basis == RESUME_BASIS_POLICY_CHANGE
@@ -2096,9 +2097,9 @@ def _stuck_continuation(
     pattern = str(payload.get("pattern") or "未知模式")
     count = _value_text(payload.get("count"))
     threshold = _value_text(payload.get("threshold"))
-    # 只报**这条暂停真能接受**的依据（`stuck_resume_requirements`）：写死"三选一"会在
-    # 快照缺格（委派子 run 没有证据端口）时指两条必被 409 挡死的路——本函数存在的理由
-    # 就是不许出现这种文案（见 docstring）。
+    # 只报**判据不会恒拒**的依据（`stuck_resume_requirements`）：写死"三选一"会在快照缺格
+    # （子 run 不注入端口、或旧载荷）时指两条必被 409 挡死的路——本函数存在的理由就是不许
+    # 出现这种文案（见 docstring）。
     available = stuck_resume_requirements(payload)
     if available:
         action = (

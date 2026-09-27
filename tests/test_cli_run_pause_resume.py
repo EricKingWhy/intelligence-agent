@@ -133,6 +133,40 @@ def test_resume_hint_gives_absolute_ceiling_placeholder():
     assert "绝对" in text and "不是增量" in text
 
 
+#: `run/paused(reason=stuck)` 的形状（`reason` / `stuck` / `resume_requirements` 三格
+#: 同源，见 `agent/runtime.py` 的暂停臂）。
+_STUCK_PAUSE_DATA: dict = {
+    **_PAUSE_DATA,
+    "reason": "stuck",
+    "trigger_dimension": "stuck.tool_failure_loop",
+    "resume_requirements": ["relevant_steer", "environment_change"],
+}
+
+
+def test_resume_hint_for_a_stuck_pause_does_not_offer_a_ceiling():
+    """stuck 暂停的提示给 `--basis`，**不给** ceiling 开关（`#317` 三轮审查 P3）。
+
+    `trigger_dimension` 是模式名，按维度回落就会给出 `--run-turns-total N`——一条恒被 409
+    挡死的假指令（stuck 不接受 `budget_increase`），而且与同一屏上的 `resume requirements`
+    行自相矛盾。依据取事件自己列的那几条，CLI 不再算第二份。
+    """
+    text = resume_hint("sess-42", data=_STUCK_PAUSE_DATA)
+    assert "--basis relevant_steer" in text
+    assert "--expected-version 1" in text
+    assert "--run-turns-total" not in text, "stuck 暂停抬不动 ceiling"
+    assert "environment_change" in text, "可用依据要全列出来"
+    assert "不是增量" not in text
+
+
+def test_resume_hint_for_a_stuck_pause_without_any_basis_says_so():
+    """一条可用依据都没有（快照两格缺席）⇒ 不给 `--basis`，直接说没有（不猜一条恒 409 的）。"""
+    text = resume_hint(
+        "sess-42", data={**_STUCK_PAUSE_DATA, "resume_requirements": []},
+    )
+    assert "--basis" not in text
+    assert "没有可用的恢复依据" in text
+
+
 def test_resume_block_reports_version_step_and_carried_consumed():
     text = render_resume_block({
         "resume_basis": "budget_increase",

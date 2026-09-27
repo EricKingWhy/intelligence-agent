@@ -583,6 +583,24 @@ class TestStuckResumeEvidence:
                 evidence=ResumeEvidence(policy_version="sha256:pol-new"),
             )
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [["sha256:env-old"], {"revision": "sha256:env-old"}, 7, "", 0],
+        ids=["list", "dict", "int", "empty", "zero"],
+    )
+    def test_a_malformed_environment_cell_is_not_evidence(self, malformed) -> None:
+        """环境格形状非法 ⇒ **不算依据**，清单也不许列它（`#317` 三轮审查 P3）。
+
+        旧写法只判 `is not None`，所以"存在即已变"：一份被手改过的 JSONL 只要把那一格写成
+        任何非空值（哪怕是 `["sha256:env-old"]`），`environment_change` 就无条件放行——
+        恢复侧什么都没观测到，却被判成"环境变了"（fail-open），比 409 更坏。
+        """
+        stuck = _stuck_payload(environment_revision=malformed)
+        assert RESUME_BASIS_ENVIRONMENT_CHANGE not in stuck_resume_requirements(stuck)
+        assert not _admitted(
+            stuck, RESUME_BASIS_ENVIRONMENT_CHANGE, _favorable_evidence(),
+        )
+
 
 # ── 依据可用性：清单必须与判据同源（`#317` T9 二轮审查 P2）────────────────
 
@@ -614,11 +632,11 @@ ALL_BASES = (
 
 
 class TestAvailableResumeRequirements:
-    """`resume_requirements` 列的是**这条暂停真能接受**的依据。
+    """`resume_requirements` 列的是**判据不会恒拒**的依据。
 
     这一族钉的是"列一条永远 409 的依据"这个形状（`03 §5` / ADR-0044 D4 禁止的
-    "暗示可安全续跑"）：委派子 run 在 T9 之前没有证据端口，快照两格 `None`，而旧实现
-    照样把三条都列出去（T9 二轮审查 P2）。
+    "暗示可安全续跑"；ADR-0048 D6）。**两个方向**都要成立：列了的真被接受，没列的真被拒
+    ——只查一个方向，判据收紧而清单没跟（或反之）就看不见。
     """
 
     @pytest.mark.parametrize(
@@ -634,6 +652,16 @@ class TestAvailableResumeRequirements:
             ),
             pytest.param(
                 lambda stuck: stuck.pop("policy_inputs"), id="legacy_no_inputs",
+            ),
+            # 畸形快照（`#317` 三轮审查 P3）：`"存在即已变"` 会让任何非字符串值无条件放行，
+            # 所以形状规则与 `recorded_policy_inputs` 同源——两侧都当"这一格没有"。
+            pytest.param(
+                lambda stuck: stuck.update(environment_revision=["sha256:env-old"]),
+                id="malformed_env_cell",
+            ),
+            pytest.param(
+                lambda stuck: stuck.update(environment_revision=""),
+                id="empty_env_cell",
             ),
         ],
     )

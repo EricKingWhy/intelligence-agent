@@ -711,8 +711,12 @@ class StuckToolFailurePauseScenario:
         # ── 事实 4：四种无依据恢复 + 一条无关变更全部 409、零副作用 ──────────
         refusals = legs.get("refusals", {})
         missing_legs = [name for name in EXPECTED_REFUSAL_LEGS if name not in refusals]
-        refused_ok = not missing_legs and all(
-            refusals[name].ok for name in EXPECTED_REFUSAL_LEGS
+        # 集合相等**两个方向都要**：只查"期望的都在"会漏掉"多出来且没通过"的那条腿——
+        # 将来 driver 加第六条拒答腿而它不再被拒时，这一行仍会绿（假绿窗口）。
+        extra_legs = [name for name in refusals if name not in EXPECTED_REFUSAL_LEGS]
+        refused_ok = (
+            not missing_legs and not extra_legs
+            and all(item.ok for item in refusals.values())
         )
         results.append(AssertionResult(
             name="every_resume_without_evidence_is_a_409_with_zero_side_effects",
@@ -722,7 +726,8 @@ class StuckToolFailurePauseScenario:
                     f"{name}: {'拒绝' if item.ok else '未达判据'} — {item.reason[:160]}"
                     for name, item in refusals.items()
                 ) or "没有任何拒绝读数"
-            ) + (f"；缺失的腿={missing_legs}" if missing_legs else ""),
+            ) + (f"；缺失的腿={missing_legs}" if missing_legs else "")
+            + (f"；多出来的腿={extra_legs}" if extra_legs else ""),
         ))
 
         # ── 事实 5：有依据的恢复放行、记账、真的继续干活 ────────────────────
