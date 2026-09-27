@@ -6273,18 +6273,29 @@ CLI 打印空结果（§4.2，客户端票）；③ 同一会话里上一次执�
 
 **§8.1 读数传递（第二轮）**：正式读数绑 `6c84d544`（含全部证据），其后只追加 `.tsv` / `.md` / `.json`（台账行 350、
 本节记录笔、gate json）⇒ 判据 ①（`--name-status --no-renames` 只 `A`/`M` 且全命中 `DOC_PATTERN`）与判据 ②
-（`git status --short` 只 `?? .zcodeignore`）在本段末笔当场复核。**第一轮为什么不传递**（本票的一处自纠，如实登记）：
+（`git status --short` 只 `?? .zcodeignore`）在本段末笔当场复核。**实测（本段末笔口径）**：判据 ① =
+`git diff --name-status --no-renames 6c84d544 468ea568` → **5 条，状态只 `M`/`A`**（`docs/PHASE_STATUS.md` /
+`docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-09.md` / `docs/review_ledger.d/350-f75bc93-6c84d54.tsv` /
+`docs/gate/6c84d544….json`），全部命中 `DOC_PATTERN`；判据 ② = 写本笔前的 `git status --short` → `M` 上述两处 .md +
+`?? docs/gate/468ea568….json`（`.json` 命中 `DOC_PATTERN`）+ `?? .zcodeignore`（唯一例外）⇒ 判据 ① 在
+`6c84d544..本段末笔` 上成立，绑 `6c84d544` 的四条重车道读数对最终 tip 有效。**第一轮为什么不传递**（本票的一处自纠，如实登记）：
 逐字复核协议 §8.1 第 3 条后确认 `.jsonl` 不在 `DOC_PATTERN`（`docs/**` 只认 .md/.txt/.rst/.tsv/.json/.yaml），
 而证据是**在**第一轮读数树之后追加的 ⇒ 「跑过门禁的树 = 被集成的代码面」字面不成立；处置 = 把证据先并入、
 再以含证据的树当读数树把四条重车道重跑一遍（本块），**而不是**用"看起来只是证据文件"去豁免判据。
 
 **门禁（Gate-0 裸全量，合并后）**：首次落盘（证据笔 `7bfa8218`）**5/6** —— 红车道 = coverage：证据笔含
-`.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属；补台账行 349 归属后 `--only coverage` **PASS**。**最终读数**
-（tip `bdf2ac73` / tree `d1effe8856d3`）：**6/6 PASS**，墙钟 **41.1s**（diff-check 0.08 / ruff 0.34 / oxlint 1.13 /
+`.jsonl`，不在 docs-only 白名单 ⇒ 无法机械归属；补台账行 349 归属后 `--only coverage` **PASS**。**读数树重采后的
+最终读数**（tip `468ea568` / tree `4d84c0a7d199`，= 读数树 `6c84d544` + 本票记录笔一笔）：**6/6 PASS**，墙钟
+**25.7s**（diff-check 0.06 / ruff 0.13 / oxlint 0.67 / tsc 18.42 / guards 4.99 / coverage 1.48），落盘
+`docs/gate/468ea5683f40097d06408c73fd8a3b8e777e3503.json`（`tracked_matches_head=true` / `untracked=['.zcodeignore']`）；
+覆盖闸门在同一 tip **exit 0**（覆盖区间 `09ca47a1..HEAD` / 提交总数 **940** / 已审查 **708** / 待判定 **232**；
+增量 +76 笔 = 并入的 upstream 62 笔 + 合并后本票各笔；台账 lint 仍 **52** 行 = 与合并前基线持平），
+`git diff --check 6aff823f..HEAD` **exit 0**（bare 运行不带 `--since` ⇒ 车道 ① 只查工作树，这一条补上已提交范围）。
+**前一份读数（已被本轮取代）**（tip `bdf2ac73` / tree `d1effe8856d3`）：**6/6 PASS**，墙钟 **41.1s**（diff-check 0.08 / ruff 0.34 / oxlint 1.13 /
 tsc 29.81 / guards 7.56 / coverage 2.17），读数落盘 `docs/gate/bdf2ac73fc60c2f42a96fb5fe77a87e670d03d0e.json`
-（`tracked_matches_head=true` / `untracked=['.zcodeignore']`）；中间态那份（`docs/gate/7bfa8218….json`，**5/6**）
-一并入库不删 —— 它记的是"`.jsonl` 证据笔需要一条归属行"这条机械事实。覆盖闸门在 `e1b346e0` 上 **exit 0**
-（`089524a~1..HEAD` 每条均有归属；台账描述字段 lint **52 行命中 = 与合并前基线持平**）。
+（`tracked_matches_head=true` / `untracked=['.zcodeignore']`）。**两份中间态 5/6 读数一并入库不删**（`docs/gate/7bfa8218….json`
+与 `docs/gate/6c84d544….json`）—— 它们记的是"`.jsonl` 证据笔需要一条归属行"这条机械事实；分别补台账行 349 / 350 以
+`--only coverage` 复跑 **PASS**。覆盖闸门在 `e1b346e0` 上 **exit 0**（`089524a~1..HEAD` 每条均有归属）。
 **另如实登记一处自纠**：新写的两条台账行初版超 §8.5 第 1 条的 **800 字符硬上限**（348 = 3278 / 349 = 1450，
 lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，细节留本段、行只保判定与指针）。
 
