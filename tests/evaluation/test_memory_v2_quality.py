@@ -11,7 +11,6 @@ from agent_harness.agent.types import STATUS_COMPLETED
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.commands import explicit_remember_matches
 from agent_harness.memory.v2.eligibility import (
-    MEMORY_OPT_OUT_FIELD,
     decide_run_end_eligibility,
 )
 from agent_harness.memory.v2.executor import MemoryJobExecutor
@@ -36,8 +35,8 @@ from agent_harness.session import (
     TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
+    derive_messages,
 )
-from agent_harness.tooling.result import ToolResult
 from evaluation import memory_v2_quality
 from evaluation.memory_v2_quality import (
     GoldCase,
@@ -204,45 +203,7 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
     service = MemoryV2Service(store, index)
     trusted = TrustedMemoryIdentity("gold-tenant", "gold-user", "gold-project")
     provider_output = _GOLD_MODEL_OUTPUTS[case.case_id]
-    assistant_text = case.synthetic_input if case.case_id == "unsupported_assistant_claim" else "Acknowledged."
-    events = [
-        SessionEvent(
-            event_id="gold-user-event", seq=1, type=USER_MESSAGE, session_id="gold-session",
-            run_id=None, data={
-                "content": (
-                    "What should be retained from this synthetic conversation?"
-                    if case.case_id == "unsupported_assistant_claim"
-                    else case.synthetic_input
-                ),
-                               **({MEMORY_OPT_OUT_FIELD: True}
-                                  if case.case_id == "explicit_opt_out" else {})},
-        ),
-        SessionEvent(
-            event_id="gold-assistant-event", seq=2, type=MODEL_COMPLETED,
-            session_id="gold-session", run_id="gold-run", data={"content": assistant_text},
-        ),
-    ]
-    if provider_output is not None and provider_output[0] == "procedural":
-        for offset, (index, tool_name) in enumerate((
-            (2, "run_integration_tests"),
-            (3, "deploy_to_staging"),
-        )):
-            tool_call_id = f"gold-call-{index}"
-            events.extend((
-                SessionEvent(
-                    event_id=f"gold-tool-call-{index}", seq=3 + offset * 2,
-                    type=TOOL_CALL, session_id="gold-session", run_id="gold-run",
-                    data={"tool_call_id": tool_call_id, "tool_name": tool_name, "args": {}},
-                ),
-                SessionEvent(
-                    event_id=f"gold-tool-result-{index}", seq=4 + offset * 2,
-                    type=TOOL_RESULT, session_id="gold-session", run_id="gold-run",
-                    data={
-                        "tool_call_id": tool_call_id,
-                        "content": ToolResult.success("done").model_dump_json(),
-                    },
-                ),
-            ))
+    events = _events_for_case(case, "gold-session", "gold-run")
 
     async def seed(content: str, identity: TrustedMemoryIdentity):
         draft = make_draft(
@@ -488,10 +449,11 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
         } <= case.expected.keys()
 
 
-def test_real_procedure_gold_events_pair_each_tool_call_with_its_result():
+def test_real_procedure_gold_events_replay_complete_tool_call_batch():
     _corpus, cases = load_memory_gold()
     case = next(item for item in cases if item.case_id == "positive_procedure")
     events = _events_for_case(case, "gold-session", "gold-run")
+    completion = next(event for event in events if event.type == MODEL_COMPLETED)
     calls = {
         event.data["tool_call_id"]: event
         for event in events if event.type == TOOL_CALL
@@ -504,6 +466,15 @@ def test_real_procedure_gold_events_pair_each_tool_call_with_its_result():
     assert calls.keys() == results.keys()
     assert len(calls) == 2
     assert all(calls[key].seq < results[key].seq for key in calls)
+    assert [event.type for event in events if event.type in {TOOL_CALL, TOOL_RESULT}] == [
+        TOOL_CALL, TOOL_CALL, TOOL_RESULT, TOOL_RESULT,
+    ]
+    assert [call["id"] for call in completion.data["tool_calls"]] == list(calls)
+
+    messages = derive_messages(events)
+    assistant = next(message for message in messages if getattr(message, "tool_calls", None))
+    assert [call["id"] for call in assistant.tool_calls] == list(calls)
+    assert [message.tool_call_id for message in messages if hasattr(message, "tool_call_id")] == list(results)
 
 
 @pytest.mark.asyncio

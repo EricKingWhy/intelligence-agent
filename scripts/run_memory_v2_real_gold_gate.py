@@ -157,6 +157,13 @@ def _events_for_case(case: GoldCase, session_id: str, run_id: str) -> list[Sessi
     else:
         user_content = case.synthetic_input
         assistant_content = "Acknowledged."
+    tool_calls = [
+        {"id": f"{case.case_id}-call-{number}", "name": tool_name, "args": {}}
+        for number, tool_name in (
+            (2, "run_integration_tests"),
+            (3, "deploy_to_staging"),
+        )
+    ] if case.case_id == "positive_procedure" else []
     events = [
         SessionEvent(
             event_id=f"{case.case_id}-user", seq=1, type=USER_MESSAGE,
@@ -170,30 +177,32 @@ def _events_for_case(case: GoldCase, session_id: str, run_id: str) -> list[Sessi
         SessionEvent(
             event_id=f"{case.case_id}-assistant", seq=2, type=MODEL_COMPLETED,
             session_id=session_id, run_id=run_id,
-            data={"content": assistant_content},
+            data={
+                "content": assistant_content,
+                **({"tool_calls": tool_calls} if tool_calls else {}),
+            },
         ),
     ]
-    if case.case_id == "positive_procedure":
-        for offset, (number, tool_name) in enumerate((
-            (2, "run_integration_tests"),
-            (3, "deploy_to_staging"),
-        )):
-            tool_call_id = f"{case.case_id}-call-{number}"
-            events.extend((
-                SessionEvent(
-                    event_id=f"{case.case_id}-tool-call-{number}", seq=3 + offset * 2,
-                    type=TOOL_CALL, session_id=session_id, run_id=run_id,
-                    data={"tool_call_id": tool_call_id, "tool_name": tool_name, "args": {}},
-                ),
-                SessionEvent(
-                    event_id=f"{case.case_id}-tool-result-{number}", seq=4 + offset * 2,
-                    type=TOOL_RESULT, session_id=session_id, run_id=run_id,
-                    data={
-                        "tool_call_id": tool_call_id,
-                        "content": ToolResult.success("done").model_dump_json(),
-                    },
-                ),
-            ))
+    for offset, tool_call in enumerate(tool_calls):
+        events.append(SessionEvent(
+            event_id=f"{case.case_id}-tool-call-{offset + 1}", seq=3 + offset,
+            type=TOOL_CALL, session_id=session_id, run_id=run_id,
+            data={
+                "tool_call_id": tool_call["id"],
+                "tool_name": tool_call["name"],
+                "args": tool_call["args"],
+            },
+        ))
+    for offset, tool_call in enumerate(tool_calls):
+        events.append(SessionEvent(
+            event_id=f"{case.case_id}-tool-result-{offset + 1}",
+            seq=3 + len(tool_calls) + offset,
+            type=TOOL_RESULT, session_id=session_id, run_id=run_id,
+            data={
+                "tool_call_id": tool_call["id"],
+                "content": ToolResult.success("done").model_dump_json(),
+            },
+        ))
     return events
 
 
