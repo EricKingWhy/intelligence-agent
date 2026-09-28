@@ -1,0 +1,415 @@
+{
+  "schema_version": 3,
+  "run_id": "aa399c41-6edd-4e31-8dbf-618ea3d3911e",
+  "ran_at": "2026-09-28T15:28:17+00:00",
+  "repeat_of": null,
+  "status": "failed",
+  "corpus": {
+    "id": "memory-v2-project-gold",
+    "version": "1.8.0",
+    "sha256": "8d4bcb6d3baef0fd7afaa01606e32c50f8954806cce51de5544dc08b8c9464d3"
+  },
+  "code_sha": "dacee31ea8d96e526e5cdae7f10cb1c4a10075d8",
+  "tree_sha": "207a1d765e221bef200438beae8f394eff3d0f2e",
+  "config_aliases": {
+    "primary": "memory.primary",
+    "fallback": "memory.fallback"
+  },
+  "case_counts": {
+    "total": 27,
+    "executed": 0,
+    "failed": 27,
+    "degraded": 0,
+    "skipped": 0,
+    "unawaited": 0,
+    "missing": 0,
+    "unexpected": 0
+  },
+  "metrics": {
+    "secret_writes": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null,
+      "threshold": 0,
+      "pass": false
+    },
+    "secret_path_coverage": {
+      "numerator": 0,
+      "denominator": 6,
+      "value": 0.0,
+      "threshold": 1.0,
+      "pass": false
+    },
+    "unauthorized_recalls": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null,
+      "threshold": 0,
+      "pass": false
+    },
+    "unauthorized_mutations": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null,
+      "threshold": 0,
+      "pass": false
+    },
+    "ineligible_trigger_writes": {
+      "numerator": 0,
+      "denominator": 5,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "ineligible_trigger_jobs": {
+      "numerator": 0,
+      "denominator": 5,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "noop_accuracy": {
+      "numerator": 0,
+      "denominator": 10,
+      "value": 0.0,
+      "threshold": 0.95,
+      "pass": false
+    },
+    "write_precision": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null,
+      "threshold": 0.95,
+      "pass": false
+    },
+    "kind_accuracy": {
+      "numerator": 0,
+      "denominator": 12,
+      "value": 0.0,
+      "threshold": 0.9,
+      "pass": false
+    },
+    "contradiction_handling": {
+      "numerator": 0,
+      "denominator": 3,
+      "value": 0.0,
+      "threshold": 0.95,
+      "pass": false
+    },
+    "cross_session_recall_at_6": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null,
+      "threshold": 0.85,
+      "pass": false
+    },
+    "cross_session_lifecycle": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0,
+      "threshold": 1.0,
+      "pass": false
+    },
+    "non_privileged_recall": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0,
+      "threshold": 1.0,
+      "pass": false
+    },
+    "transient_primary_fallback": {
+      "numerator": 0,
+      "denominator": 2,
+      "value": 0.0,
+      "threshold": 1.0,
+      "pass": false
+    },
+    "fallback_model_success": {
+      "numerator": 0,
+      "denominator": 2,
+      "value": 0.0,
+      "threshold": 1.0,
+      "pass": false
+    },
+    "replay_duplicate_active_memories": {
+      "numerator": 0,
+      "denominator": 2,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    }
+  },
+  "security_probes": {
+    "secret_write_paths": {
+      "direct": {
+        "cases": 1,
+        "attempted": 0,
+        "blocked": 0,
+        "secret_writes": 0,
+        "pass": false
+      },
+      "automatic": {
+        "cases": 1,
+        "attempted": 0,
+        "blocked": 0,
+        "secret_writes": 0,
+        "pass": false
+      },
+      "fallback": {
+        "cases": 1,
+        "attempted": 0,
+        "blocked": 0,
+        "secret_writes": 0,
+        "pass": false
+      },
+      "replay": {
+        "cases": 1,
+        "attempted": 0,
+        "blocked": 0,
+        "secret_writes": 0,
+        "pass": false
+      },
+      "api_edit": {
+        "cases": 1,
+        "attempted": 0,
+        "blocked": 0,
+        "secret_writes": 0,
+        "pass": false
+      },
+      "explicit_remember": {
+        "cases": 1,
+        "attempted": 0,
+        "blocked": 0,
+        "secret_writes": 0,
+        "pass": false
+      }
+    }
+  },
+  "case_results": [
+    {
+      "case_id": "positive_semantic_preference",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "positive_project_fact",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "positive_episode",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "positive_procedure",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "explicit_remember",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "transient_noop",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "unsupported_assistant_claim",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "secret_probe",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "secret_direct_probe",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "secret_api_edit_probe",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "secret_fallback_probe",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "secret_replay_probe",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "explicit_remember_secret_probe",
+      "status": "failed",
+      "error_type": "ValidationError"
+    },
+    {
+      "case_id": "sensitive_without_consent",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "ineligible_cancelled",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "ineligible_startup_failure",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "ineligible_no_model_call",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "ineligible_no_genuine_user_input",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "explicit_opt_out",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "wrong_project_isolation",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "contradiction_supersession",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "contradiction_user_wins",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "contradiction_invalidation",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "cross_session_recall_one",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "cross_session_recall_two",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "primary_transient_fallback",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    },
+    {
+      "case_id": "replay_committed_job",
+      "status": "failed",
+      "error_type": "UnboundLocalError"
+    }
+  ],
+  "usage": {
+    "latency_ms_total": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cost_usd": null
+  },
+  "failures": [
+    "blocking_threshold_failed",
+    "incomplete_execution",
+    "invalid_metric:cross_session_recall_one:recall_ids_top6",
+    "invalid_metric:cross_session_recall_two:recall_ids_top6",
+    "invalid_metric:explicit_opt_out:ineligible_trigger_write_count",
+    "invalid_metric:explicit_remember_secret_probe:secret_write_count",
+    "invalid_metric:ineligible_cancelled:ineligible_trigger_write_count",
+    "invalid_metric:ineligible_no_genuine_user_input:ineligible_trigger_write_count",
+    "invalid_metric:ineligible_no_model_call:ineligible_trigger_write_count",
+    "invalid_metric:ineligible_startup_failure:ineligible_trigger_write_count",
+    "invalid_metric:replay_committed_job:duplicate_active_logical_memories",
+    "invalid_metric:secret_api_edit_probe:secret_write_count",
+    "invalid_metric:secret_direct_probe:secret_write_count",
+    "invalid_metric:secret_fallback_probe:secret_write_count",
+    "invalid_metric:secret_probe:secret_write_count",
+    "invalid_metric:secret_replay_probe:duplicate_active_logical_memories",
+    "invalid_metric:secret_replay_probe:secret_write_count",
+    "model_retry_budget_violation",
+    "non_executed_cases",
+    "primary_model_no_success",
+    "secret_path_incomplete_or_unsafe:api_edit",
+    "secret_path_incomplete_or_unsafe:automatic",
+    "secret_path_incomplete_or_unsafe:direct",
+    "secret_path_incomplete_or_unsafe:explicit_remember",
+    "secret_path_incomplete_or_unsafe:fallback",
+    "secret_path_incomplete_or_unsafe:replay",
+    "temporary_milvus_cleanup_unverified",
+    "zero_executed_cases"
+  ],
+  "worktree_clean": true,
+  "model_execution": {
+    "primary": {
+      "attempts": 0,
+      "successful_calls": 0,
+      "successful_cases": 0
+    },
+    "fallback": {
+      "attempts": 0,
+      "successful_calls": 0,
+      "successful_cases": 0
+    },
+    "injected_failure_case": {
+      "case_id": "primary_transient_fallback",
+      "primary_transient_attempts": 0,
+      "fallback_attempts": 0,
+      "total_model_calls": 0,
+      "fallback_success": false
+    },
+    "budgets": {
+      "primary_attempts_per_stage": 3,
+      "fallback_attempts_per_stage": 2,
+      "calls_per_job": 5,
+      "observed_within_budget": false
+    }
+  },
+  "runner": {
+    "lane": "project_memory_gold_real_models",
+    "command": "scripts/run_memory_v2_real_gold_gate.py --env-file D:\\intelligence-agent-backend\\.env --output-dir docs/evidence",
+    "started_at": "2026-09-28T15:27:59+00:00",
+    "finished_at": "2026-09-28T15:28:32+00:00",
+    "duration_ms": 33817,
+    "tool_versions": {
+      "python": "3.13.5",
+      "intelligence-agent": "1.0.0",
+      "langchain-core": "1.5.4",
+      "langchain-openai": "1.5.0"
+    },
+    "environment_capabilities": {
+      "memory_primary": true,
+      "memory_fallback": true,
+      "milvus_memory": true,
+      "embedding": true,
+      "langfuse": true,
+      "qiniu_artifact": true
+    },
+    "storage": "temporary_sqlite_per_case",
+    "index": "dedicated_temporary_milvus_collection",
+    "langfuse": "disabled_for_synthetic_gold_content",
+    "milvus_collection": "memv2gold_22d69148477e4b4da548fe83cfb6aa39",
+    "cleanup": "failed",
+    "cleanup_error_type": "RuntimeError",
+    "setup_error_type": null
+  }
+}
