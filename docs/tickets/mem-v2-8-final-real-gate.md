@@ -119,3 +119,11 @@ parallelizable: no; run only on the fully integrated frozen tree
 - Required Langfuse evidence remains available and all other temporary external data is verified clean.
 - No credential value appears in logs, issues, documents, traces, screenshots, or terminal output.
 - Tracker and PHASE_STATUS point to the frozen SHA, machine evidence, and final verdict.
+
+## 2026-09-29 Mimo-primary real-gate result
+
+- Frozen source identity: commit `55aec704befab808d16a01404f33758693ab0c01`, tree `e82fc8bc7d22ae907586cdc83242dc89a878eb3c`. Gate-0 artifact: `docs/gate/55aec704befab808d16a01404f33758693ab0c01.json` (6/6 PASS).
+- Real gate run `7d3a3645-b7aa-4ea1-bd66-be6c4545c76c`, repeated from `d25667d2-5ed8-4818-a023-b838eece9631`, executed 27/27 cases and failed 3; report: `docs/evidence/memory-v2-real-gold-v1.8.0-55aec704befa-7d3a3645.json`.
+- Mimo primary recorded 25 successful calls across 15 cases (32 attempts). Three cases degraded: `positive_episode` (`ModelOutputError`); `secret_fallback_probe` and `primary_transient_fallback` (Qwen fallback `TypeError` after primary timeouts). Fallback completed 0/2 cases; AC4 is not met.
+- Blocking metrics: write precision 8/10 = 0.80 (<0.95), kind accuracy 10/12 = 0.833 (<0.90), contradiction handling 2/3 = 0.667 (<0.95), and fallback model success 0/2 (<1.0). Recall@6 was 2/2 = 1.0; secret writes and unauthorized operations were 0.
+- Temporary Milvus cleanup was verified absent; report credential-pattern scan was clean. This run is a failed gate, not release evidence for completion. Keep #304 open and preserve all thresholds.
