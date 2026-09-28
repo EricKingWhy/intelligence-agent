@@ -57,14 +57,23 @@ def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
     assert "preserve explicitly stated names, values, quantities, dates, and qualifiers" \
         in _FORMATION_PROMPT
     assert "every detail must remain supported by cited evidence" in _FORMATION_PROMPT
-    assert "a one-time consequential decision or event with a lasting implication can be episodic" \
-        in _FORMATION_PROMPT
     assert "A procedural memory must include reusable steps and a success condition" \
         in _FORMATION_PROMPT
     assert "injected test failure is not memory content" in _FORMATION_PROMPT
     assert "A question whose purpose is to retrieve or inspect an existing fact" \
         in _FORMATION_PROMPT
     assert "Never guess `project_id`" in _FORMATION_PROMPT
+
+
+def test_formation_prompt_distinguishes_episodic_decisions_from_semantic_facts():
+    assert "Semantic memories represent stable facts, preferences, profiles, project facts, " \
+        "constraints, or accepted corrections" in _FORMATION_PROMPT
+    assert "Episodic memories are reusable accounts of a specific situation, action or " \
+        "decision, outcome, and lesson" in _FORMATION_PROMPT
+    assert "For a consequential decision with a stated situation and rationale, use " \
+        "episodic when future planning needs to remember what happened and why" \
+        in _FORMATION_PROMPT
+    assert "Do not infer missing events or lessons" in _FORMATION_PROMPT
 
 
 def test_adjudication_prompt_requires_exact_existing_target_ids():
