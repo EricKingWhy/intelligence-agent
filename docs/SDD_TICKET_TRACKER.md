@@ -6511,3 +6511,19 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 **残余（登记，不阻断）**：① session 维触发的暂停里 closeout 受 session ceiling 约束（tokens/cost 已到线 ⇒ 只落确定性 continuation）——这是设计语义不是缺陷，但客户端可读的"为什么没有摘要"没有专门字段；② 子会话恢复仍不可用（`#372` 既有边界，session 账不改变它——child 的账行由父级委派与自身 run 计数，恢复入口照旧 409）；③ `session/paused` 的 `session` 段只有 version + consumed，limits 在 `limits.session` 里分两处读（投影形状沿用 `11 §6.1` 按作用域拆分的既有口径）。
 
 **集成（2026-09-28 已执行）**：用户批准「推分支 + 开 PR」与「合并 PR」两步 ⇒ 推 `zcode/T318-session-budget` → **PR #389**（gate0 绿，32s）→ 合并（merge **`c5cf4f9b`**，`origin/main` = `c5cf4f9b`）；`#318` 已按 §14.12 关单（证据 comment `issues/318#issuecomment-5862260654` + **§14.9 通知**：另一条线先 `merge-base --is-ancestor main HEAD` 自检并回补 `main`）。
+
+## T11（`#319`，B 链第十一票）：集成闸门 —— 五个真实 Live Gate 场景在同一 SHA/tree 上 3/3（2026-09-28 · 证据闭合 + 两轴审查 + 全量门禁，**待集成**）
+
+**票面与验收**：五个真实场景（① `long-task-past-legacy-turn-limit` 跨旧 turn 上限长任务 ② `budget-pause-resume-same-run` 预算暂停后同 run 续跑 ③ `stuck-tool-failure-pause` stuck 检测暂停 ④ `run-deadline-boundary` 运行 deadline 边界 ⑤ `delegation-budget-tree-wide` 委派预算树级账）在**同一最终 SHA/tree** 上各 **3/3**；失败尝试必须保留（BLOCKED / SKIPPED ≠ PASS）；凭据零泄漏审计；**不改产品行为只为过闸**（修复只能落在测量面）。
+
+**场景 4 根因与修复（`b6273a17`，7 行 / 单文件 `evaluation/live_gate/scenarios/deadline.py`）**：`resume_and_launch` 惰性执行 `wire_capabilities` —— Milvus 连接（15s 超时）+ embedding 维度探针（15s×2 重试）最多吃掉 ~60s，而 `DEADLINE_SECONDS=30` 的窗口从场景启动量起 ⇒ 装配落在窗口内、到点在第一次准入边界之前被读到。旧树（`56543f88` / tree `8cdc57b5`）实测 **9 次尝试 6 红**（`025309`=1 + `025822`=2 + `031021`=3，全部 `real_work_admitted_before_the_deadline`、到点前 turns=0 / primary=0 / tool=0），失败证据全保留。修复 = 起窗口前 `await state.get_wiring()` 装配备热（公开方法、`_wiring_lock` once 缓存 ⇒ 与 run 内惰性装配**同一对象**；Milvus 故障照旧走 `OPTIONAL_RUNTIME` 降级，失败形状不变；`AppState.shutdown` 照旧收尾）。**修正登记**：修复注释与提交信息写的「9 次尝试 4 红」与证据不符（实为 6 红）——B 轴 P1，方向保守（问题比写的更严重）、不构成动机问题；一行注释修正顺带进 `#320` 批（本票改注释即失效矩阵，§8.1 纯注释例外仅覆盖 `src/**`，提交信息不可追改 ⇒ 正确读数以本段与证据目录为准）。
+
+**两轴独立审查（台账行 356，绑 `56543f88..b6273a17`）**：轴一（正确性）逐点核验机理成立——once 缓存 / 同对象 / 降级不抛 / 零 src 改动 / 证据完整（attempt JSONL 非空 + sha256 在档 / 旧树失败逐一可读），P2×1（预热在场景 try 外 ⇒ `CapabilityError` 走 runner 兜底、丢 traceback 装饰，仅证据质量）+ P3×1（降级时机措辞），登记不阻断；轴二（Spec/契约）五条契约逐条成立（同树 3/3 / 失败保留 / 无 BLOCKED-SKIPPED / 测量面非产品面 / 凭据零泄漏——对 `.env` 全部值精确扫描 0 命中、`sk-` 类命中全为场景 id 字面量 `sk-past`），P1×1（红数 4→6 如上）、P3×2（证据未入库——本笔解决；冷启动窗口不再被场景 4 测量——残余如实登记）。两轴 **PASS**、P0=0。
+
+**真实 Live Gate（真模型 + 生产工具 + 生产账本，绑 `b6273a17` / tree `7afc9cf9`，五场景同一树）**：① long-task **3/3、19/19 断言**×3；② budget-pause-resume **3/3、23/23**×3；③ stuck-tool-failure **3/3、16/16**×3；④ run-deadline **3/3、23/23**×3（118.7 / 116.8 / 115.2s，到点前 turns=8/10/10、primary=8/10/10、tool/call=9/11/11——真实产出落在窗口内，修复后零红）；⑤ delegation-budget **3/3、12/12**×3。证据 `docs/live_gate/20260928T031723-b6273a17a866-run-deadline-boundary/` 等 5 目录（各 attempt-1/2/3.jsonl + evidence.json）；另保留旧树失败与首跑证据 6 目录（`20260928T02*-56543f88d362-*`，含 3 次绿的 023615/024006/024419 与 6 红的 025309/025822/031021）。全部 `tracked_matches_head=true`、untracked 仅 `.zcodeignore`、secret scan 空。
+
+**门禁**：后端全量 pytest（`PYTHONUTF8=1 ./.venv/Scripts/python.exe -m pytest -p no:randomly`，读数树 = 冻结代码树 `b6273a17`）＝ **4661 passed / 2 skipped / 51 deselected / 0 failed in 1134.83s（18:54），exit 0**（与 T10 树读数同数、+0 新用例——修复只动场景文件；首跑环境事件如实登记：一次全量在 11:48 启动后 >100min 零 CPU 推进（进程内自连 socket 对 + 3 条 CLOSE_WAIT、无对外连接），判环境卡死杀掉，同树复跑 19 分钟干净完成——非测试缺陷、非本票回归）；Gate-0 裸全量 ＝**【GATE0】**；覆盖闸门 ＝**【COVERAGE】**（台账行 356 = 本票两轴审查行）。web/ 零改动 ⇒ vitest / build / e2e 重车道不适用（同 #302 / #318 后端票先例；`tsc` / `oxlint` 由 Gate-0 车道覆盖）。
+
+**残余（登记，不阻断）**：① 场景 4 预热后不再测量「进程首请求含惰性装配」的冷启动窗口（本场景测的是 warm 进程的 run 准入契约；产品冷启动行为未改，该特性仍存在于生产首请求）；② `deadline.py` 注释红数「4 红」修正为「6 红」归属 `#320` 批顺带执行；③ 预热行在场景 try 外 ⇒ `CapabilityError`（配置错类）走 runner 兜底、无 `_failure_text` 装饰（仅证据质量；Milvus 故障类不走此路径）。
+
+**集成**：待执行（「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准）。
