@@ -73,8 +73,8 @@ class CompactionResult:
 
 class ContextCompactor:
     def __init__(self, model_provider: Any, *, max_context_tokens: int = 200_000,
-                 auto_compact_threshold: float = 0.80,
-                 hard_guard_threshold: float = 0.90,
+                 auto_compact_threshold: float = 0.70,
+                 hard_guard_threshold: float = 0.85,
                  keep_recent_tokens: int = 20_000,
                  summary_timeout_seconds: float = 30.0) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:

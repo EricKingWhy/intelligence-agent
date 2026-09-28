@@ -33,8 +33,8 @@ async def run_phase5_scenario(tmp_path, session, artifact_store, *, stream=True)
     sandbox.write_text("output.py", "for i in range(5000):\n    print(f'output {i:04d}')\n")
     command = (subprocess.list2cmdline([sys.executable, "output.py"]) if os.name == "nt"
                else shlex.join([sys.executable, "output.py"]))
-    # T4 (#134)：auto_compact_threshold 默认升到 0.80，需要更大的历史响应
-    # 才能触发压缩（8000 * 0.80 = 6400；"old " * 6500 ≈ 6500 > 6400）。
+    # #379：库层缺省已对齐 Spec 06（0.70/0.85），本场景按调参边界显式注入 0.80/0.90。
+    # 需要足够大的历史响应才触发压缩（8000 * 0.80 = 6400；"old " * 6500 ≈ 6500 > 6400）。
     # 不能用太大的 N：summary request (prompt + transcript) 必须小于
     # hard_guard (8000 * 0.90 = 7200)，否则 compactor 走 fallback，
     # 不调 model.ainvoke，ScriptedModel 剧本错位。
@@ -71,7 +71,9 @@ async def run_phase5_scenario(tmp_path, session, artifact_store, *, stream=True)
     runtime = AgentRuntime(model, registry, ToolExecutor(
         registry, policy=PermissionPolicy.DANGER_FULL_ACCESS, operation_ledger=ledger,
         overflow_handler=ArtifactOverflowHandler(artifact_store),
-    ), context_builder=ContextBuilder(model, max_context_tokens=8000))
+    ), context_builder=ContextBuilder(model, max_context_tokens=8000,
+                                      auto_compact_threshold=0.80,
+                                      hard_guard_threshold=0.90))
     if stream:
         emitted = [event async for event in runtime.run_stream(session, "produce then inspect output")]
         assert [(e.type, e.seq, e.data) for e in emitted if e.is_durable] == [

@@ -300,7 +300,11 @@ async def test_single_turn_between_auto_and_hard_guard_does_not_fake_compaction(
     count = estimate_message_tokens(session.derive_messages())
     model = ScriptedModel([])
     before = session.events
-    messages = await ContextBuilder(model, max_context_tokens=int(count / 0.8)).build(session)
+    # #379：库层缺省改为 0.70/0.85 后，本用例锁定的「auto 与 hard guard 之间不假装压缩」
+    # 边界按原 0.80/0.90 显式注入，不随缺省漂移。
+    messages = await ContextBuilder(model, max_context_tokens=int(count / 0.8),
+                                    auto_compact_threshold=0.8,
+                                    hard_guard_threshold=0.9).build(session)
     assert messages == session.derive_messages()
     assert session.events == before
     assert model.snapshots == []
