@@ -311,7 +311,13 @@ class LongTaskPastLegacyTurnLimitScenario:
                 # 新 run（`run_id=None`）：version=1、账本从 0 起，与生产首次启动同形。
                 run_budget=LaunchRunBudget(limits=limits),
             )
-            result = await runtime.run(session, TASK)
+            # 流式驱动（`run_stream` + result_holder 回传与 `run()` 同一终态结果）：
+            # 本场景断言不依赖流/非流式之别，但某些 OpenAI 兼容网关对带工具的
+            # 非流式请求返回 choices=null 的畸形响应（cline 实测，2026-09-28）。
+            holder: list[Any] = []
+            async for _ in runtime.run_stream(session, TASK, result_holder=holder):
+                pass
+            result = holder[-1]
         except Exception as error:  # noqa: BLE001 - 失败要如实记录（runner 统一脱敏）
             return AttemptOutcome(
                 ok=False, session_id=ctx.session_id,

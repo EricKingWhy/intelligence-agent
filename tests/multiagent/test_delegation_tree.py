@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import AgentSpec
@@ -318,6 +318,16 @@ async def test_runtime_provider_clones_share_process_child_limit(tmp_path):
             try:
                 await asyncio.sleep(0.03)
                 return AIMessage(content="child complete")
+            finally:
+                self.active -= 1
+
+        async def astream(self, messages, **kwargs):
+            # child 走 run_stream（astream）：并发计数必须也挂在流式路径上。
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0.03)
+                yield AIMessageChunk(content="child complete")
             finally:
                 self.active -= 1
 

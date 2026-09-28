@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.factory import AgentFactory
@@ -393,6 +393,11 @@ class TestCancelAndResume:
             async def ainvoke(self, messages, **kwargs):
                 await asyncio.sleep(30)
                 return AIMessage(content="never")
+
+            async def astream(self, messages, **kwargs):
+                # child 走 run_stream（astream）：流式路径同样阻塞，取消语义才可测。
+                await asyncio.sleep(30)
+                yield AIMessageChunk(content="never")
 
         provider = InProcessSubagentProvider()
         delegate = DelegateTool(provider)
