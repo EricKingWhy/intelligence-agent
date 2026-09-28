@@ -747,6 +747,8 @@ async def _execute_case(
     unauthorized_recall_count = 0
     unauthorized_mutation_count = 0
     untrusted_recall_evidence: dict[str, bool] | None = None
+    lifecycle_verified = False
+    lifecycle_evidence: dict[str, bool] = {}
     try:
         if case.category == "contradiction":
             previous_fact = (
@@ -781,19 +783,16 @@ async def _execute_case(
                 session_id=session_id, run_id=run_id, data={},
             ))
 
-            class _GoldWorkspaceIndex:
-                @staticmethod
-                def workspace_of_session(_session_id: str):
-                    return SimpleNamespace(id=trusted.project_id)
-
             tool = RememberMemoryV2Tool(
-                service, sessions, workspace_index=_GoldWorkspaceIndex(),
+                service, sessions, workspace_index=_GoldWorkspaceIndex(
+                    trusted.project_id or "", [session_id],
+                ),
             )
             tool_args = _RememberV2Args(
                 content=candidate_content, kind=MemoryKind.SEMANTIC,
                 payload=SemanticPayload(
                     subject=(
-                        "synthetic api_key" if secret_path == "explicit_remember"
+                        "api_key" if secret_path == "explicit_remember"
                         else "demo project"
                     ),
                     fact=candidate_content,
@@ -958,7 +957,6 @@ async def _execute_case(
                 automatic_recall_selected |= any(
                     selected.content in str(message.content) for message in injected
                 )
-            lifecycle_verified = False
             if case.expected.get("lifecycle_required") is True and selected_target_ids:
                 selected_record = selected_records[next(iter(selected_target_ids))]
                 lifecycle_evidence = await _verify_cross_session_lifecycle(

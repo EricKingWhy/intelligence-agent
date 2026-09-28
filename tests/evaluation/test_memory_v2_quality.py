@@ -50,6 +50,7 @@ from scripts.run_memory_v2_real_gold_gate import (
     _drop_owned_collection,
     _eligibility_for_case,
     _events_for_case,
+    _execute_case,
     _foreign_project_identity,
     _GoldWorkspaceIndex,
     _has_gold_collection_schema,
@@ -64,6 +65,7 @@ from scripts.run_memory_v2_real_gold_gate import (
     _verify_untrusted_recall_stays_data,
 )
 from tests.memory.v2._records import make_draft, payload_for
+from tests.memory.v2._vector import FakeMemoryVectorClient
 from tests.memory.v2.test_v2_executor import (
     FakeInvoker,
     _add,
@@ -1467,3 +1469,57 @@ def test_quality_report_rejects_configuration_values():
             corpus, cases, _results(cases),
             config_aliases={"primary": "https://provider.invalid/v1?token=private"},
         )
+
+
+@pytest.mark.asyncio
+async def test_automatic_gold_case_reaches_stubbed_invoker(tmp_path, monkeypatch):
+    _corpus, cases = load_memory_gold()
+    case = next(case for case in cases if case.case_id == "positive_semantic_preference")
+    settings = Settings(milvus_collection="fake-gold")
+    invoker_calls = []
+
+    class StubbedInvoker:
+        def __init__(self, *, inject_primary_transient):
+            self.attempts = []
+
+        async def __call__(self, call):
+            invoker_calls.append(call)
+            self.attempts.append({
+                "alias": "memory.primary" if call.role.value == "primary" else "memory.fallback",
+                "role": call.role.value,
+                "stage": call.stage.value,
+                "attempt": call.attempt,
+                "outcome": "transient_provider_error",
+                "error_type": "TimeoutError",
+            })
+            raise TimeoutError("provider call is intentionally stubbed")
+
+    monkeypatch.setattr(
+        "scripts.run_memory_v2_real_gold_gate._RecordingInvoker", StubbedInvoker,
+    )
+
+    outcome = await _execute_case(
+        case, database_path=tmp_path / "memory.db", roles=_roles(fallback=True),
+        vector_store=FakeMemoryVectorClient(settings),
+    )
+
+    assert invoker_calls
+    assert outcome["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_explicit_remember_secret_gold_case_is_blocked_without_write(tmp_path):
+    _corpus, cases = load_memory_gold()
+    case = next(case for case in cases if case.case_id == "explicit_remember_secret_probe")
+    settings = Settings(milvus_collection="fake-gold")
+
+    outcome = await _execute_case(
+        case, database_path=tmp_path / "memory.db", roles=_roles(fallback=True),
+        vector_store=FakeMemoryVectorClient(settings),
+    )
+
+    assert outcome["status"] == "executed"
+    assert outcome["observed"]["secret_probe_attempted"] is True
+    assert outcome["observed"]["secret_probe_blocked"] is True
+    assert outcome["observed"]["secret_write_count"] == 0
+    assert outcome["observed"]["action"] == "NOOP"
