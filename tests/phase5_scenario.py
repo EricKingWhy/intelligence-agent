@@ -33,19 +33,25 @@ async def run_phase5_scenario(tmp_path, session, artifact_store, *, stream=True)
     sandbox.write_text("output.py", "for i in range(5000):\n    print(f'output {i:04d}')\n")
     command = (subprocess.list2cmdline([sys.executable, "output.py"]) if os.name == "nt"
                else shlex.join([sys.executable, "output.py"]))
-    # T4 (#134)：auto_compact_threshold 默认升到 0.80，需要更大的初始消息
+    # T4 (#134)：auto_compact_threshold 默认升到 0.80，需要更大的历史响应
     # 才能触发压缩（8000 * 0.80 = 6400；"old " * 6500 ≈ 6500 > 6400）。
     # 不能用太大的 N：summary request (prompt + transcript) 必须小于
     # hard_guard (8000 * 0.90 = 7200)，否则 compactor 走 fallback，
     # 不调 model.ainvoke，ScriptedModel 剧本错位。
-    session.append(USER_MESSAGE, {"content": "old " * 6500})
-    session.append(MODEL_COMPLETED, {"content": "previous turn complete"})
+    session.append(USER_MESSAGE, {"content": "Keep the original constraints."})
+    session.append(MODEL_COMPLETED, {"content": "old " * 6500})
     before = session.events
-    summary = AIMessage(content=json.dumps({
-        "facts": ["previous turn complete"], "decisions": [], "constraints": [],
-        "failed_attempts": [], "unresolved": [], "artifact_refs": [],
-        "citations": [], "tool_outcomes": [],
-    }))
+    summary = AIMessage(content="""## 已完成工作与关键决策
+已完成上一轮。
+
+## 失败方案
+(none)
+
+## 当前进行中状态
+准备执行并检查工具结果。
+
+## Next Step
+完成当前请求。""")
     # T4 (#134)：bracket 行下压缩只在首次 build 触发一次（derive_messages
     # 跳过 shadowed 事件），后续 build 的 token estimate 远低于 auto threshold。
     # 因此 ScriptedModel 只需 1 条 summary（compactor 消费）+ 3 条 runtime 响应。

@@ -1,7 +1,6 @@
 """Runtime 消费 ContextBuilder 并镜像压缩事实。"""
 
 import asyncio
-import json
 from unittest.mock import Mock
 
 import pytest
@@ -52,12 +51,21 @@ async def test_runtime_stops_before_model_request_when_context_exceeds_guard(tmp
 @pytest.mark.asyncio
 async def test_compaction_event_stream_matches_persistence_and_model_sees_summary(tmp_path):
     session = make_session(tmp_path)
-    session.append(USER_MESSAGE, {"content": "old " * 8000})
-    session.append(MODEL_COMPLETED, {"content": "done"})
+    session.append(USER_MESSAGE, {"content": "Keep the original constraints."})
+    session.append(MODEL_COMPLETED, {"content": "old " * 8000})
     before = session.events
-    summary = {key: [] for key in ("facts", "decisions", "constraints", "failed_attempts",
-                                   "unresolved", "artifact_refs", "citations", "tool_outcomes")}
-    model = ScriptedModel([AIMessage(content=json.dumps(summary)), AIMessage(content="answer")])
+    summary = """## 已完成工作与关键决策
+历史分析已完成。
+
+## 失败方案
+(none)
+
+## 当前进行中状态
+等待当前请求。
+
+## Next Step
+回答当前请求。"""
+    model = ScriptedModel([AIMessage(content=summary), AIMessage(content="answer")])
     registry = ToolRegistry()
     runtime = AgentRuntime(model, registry, ToolExecutor(registry),
                            context_builder=ContextBuilder(model, max_context_tokens=10000))

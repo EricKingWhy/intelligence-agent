@@ -80,30 +80,25 @@ _DECLARED_VARIABLES: tuple[tuple[str, str], ...] = (
     ("pattern_count", "该模式已连续的次数（用作十进制字符串）"),
 )
 
-#: 会话压缩器的六段式摘要指令（迁移前在 `context/compactor.py::_SIX_SECTION_PROMPT`）。
+#: 会话压缩器的模型撰写部分；其余四节由 harness 从事件投影中精确生成。
 #: **结尾保留一个 `\n`**，段落之间是空行——组装不做 strip，逐字节等价由
 #: `tests/prompt/test_aux_prompts.py` 的 trailing-newline 断言锁死。
 _AUX_COMPACTION_TEXT = """\
-你是会话压缩器。把下面的历史对话压缩成六段式结构化 Markdown 摘要，
-替代被压缩的原始事件。严格按以下格式输出，不要输出任何其他内容：
+你是会话压缩器。把下面的历史对话压缩成四段 Markdown 摘要，
+供 harness 与原始目标、保护事实、精确标识和文件清单组成八节摘要。
+只输出以下四节，不得重写或补充其他节；每个空节明确写 (none)：
 
-## 目标
-用户在本轮对话中想要达成的目标（1-3 句）。
+## 已完成工作与关键决策
+列出已由事件确认的完成事项与决策，并简述决策理由；无则写 (none)。
 
-## 约束
-用户明确或隐含提出的约束条件（每条一行）。
+## 失败方案
+列出已经证伪的路径、证伪依据和对应事件标识；无则写 (none)。
 
-## 进展
-已完成的关键步骤和中间结果（每条一行）。
+## 当前进行中状态
+列出尚未完成的工作及其当前状态；无则写 (none)。
 
-## 决策
-做出的重要技术或设计决策（每条一行）。
-
-## 下一步
-尚未完成、正在等待或需要继续的工作（每条一行）。
-
-## 关键上下文
-对理解当前状态至关重要的其他信息（每条一行）。
+## Next Step
+列出下一个动作及解除条件；无则写 (none)。
 
 历史对话如下：
 """
@@ -139,7 +134,7 @@ _AUX_SECTIONS: tuple[PromptSection, ...] = (
         scopes=frozenset({"aux:compaction"}),
         target=Target.SYSTEM,
         text=_AUX_COMPACTION_TEXT,
-        description="会话压缩器的六段式摘要指令",
+        description="会话压缩器的四节摘要补充指令",
     ),
     PromptSection(
         name="aux:memory_extraction",

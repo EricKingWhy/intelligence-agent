@@ -133,6 +133,10 @@ class ContextBuilder:
             hard_guard_threshold=self.hard_guard_threshold,
         ).compact(messages, token_estimate, events=session.events)
         if result.compacted_turn_count:
+            if not result.summary or not result.bracket_id:
+                raise ContextWindowExceededError(
+                    "Refusing to persist an unvalidated compaction summary"
+                )
             # T4 (#134)：写 4-event bracket 替代单个 CONTEXT_COMPACTED。
             # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
             bracket_id = result.bracket_id or ""
@@ -142,8 +146,8 @@ class ContextBuilder:
                 "source_seq_end": result.source_seq_end or 0,
             })
             session.append(CONTEXT_COMPACTED, {
-                "schema": "six_section",
-                "summary": result.summary or "",
+                "schema": "eight_section",
+                "summary": result.summary,
                 "source_seq_start": result.source_seq_start or 0,
                 "source_seq_end": result.source_seq_end or 0,
                 "compacted_turn_count": result.compacted_turn_count,
