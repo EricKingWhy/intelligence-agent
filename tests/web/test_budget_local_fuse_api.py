@@ -347,19 +347,24 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
     T6 `#314` 再开 per-tool 配额、T7 `#315` 再开 deadline）。
 
     "先看起来接受、其实不生效"是最坏的一种兼容：用户会以为预算在管。宁可
-    显式拒绝——本用例钉住**仍未实现**的两类（`budget.session` 属 T10 / `#318`；
-    PRD §3 冻结形状里 run 的 `max_tool_calls` 属后续票）加上
-    `expected_version` 在**创建**入口的形状规则：
+    显式拒绝——本用例钉住**仍未实现**的维度（PRD §3 冻结形状里 run 的
+    `max_tool_calls` 属后续票）加上 CAS 版本的**入口形状规则**：
 
       * `budget.run` 里仍未实现的维给了**非空值** ⇒ 422（给了 `null` / `{}` 则合法，
         见 `tests/web/test_run_pause_resume_api.py` 的 PRD 全形用例）；
-      * `budget.session` 任何形态 ⇒ 422（`extra="forbid"`）；
-      * `budget.expected_version` 在创建入口 ⇒ 422（创建会启动新 run，没有版本可比）。
+      * `budget.expected_version` 在创建入口 ⇒ 422（创建会启动新 run，没有版本可比）；
+      * `budget.session.expected_version` 在创建入口 ⇒ 422（`#318`：session 账行随
+        首个 run 才建出，新建会话没有可比较的行版本）。
 
-    `max_cost_usd` 留在拒绝名单里的理由与上面三类**不同**（`#313` 已声明它的形状）：
+    `budget.session` 的**各维**自 `#318` 起已实现（正控在下面）：它不再出现在拒绝
+    名单里；它的 CAS 规则与 run 账不同——账行跨 run 存续，所以 /resume、/messages
+    等面向已存在会话的入口带版本合法（领域判定见 service / 账本，409 零副作用）。
+
+    `max_cost_usd` 留在拒绝名单里的理由与上面几类**不同**（`#313` 已声明它的形状）：
     本链的 Provider 集成不自报归属成本 ⇒ 这条 ceiling 现在无法强制执行 ⇒ 按
     `11 §6.1` 在首个请求前 422（判定见 `agent/run_budget.validate_ceiling_enforceability`），
-    而不是收下一个永远不会触发的数字。
+    而不是收下一个永远不会触发的数字。session 作用域的 `max_cost_usd` 同判
+    （同一份账目能力声明），正控里给的是 turns 维度。
 
     `tool_call_limits` 自 `#314` 起**已实现**，所以从本名单移出——它的形状与"名字已
     注册"两条判定各有自己的用例（后者见下一个用例，那里同时钉住它的副作用边界）。
@@ -373,14 +378,26 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
     probe = _ModelProbe()
     with probe:
         for payload in (
-            {"budget": {"session": {"max_agent_turns_total": 5}}},
             {"budget": {"run": {"max_tool_calls": 5}}},
             {"budget": {"run": {"max_cost_usd": "0.01"}}},
             {"budget": {"expected_version": 3}},
+            {"budget": {"session": {"expected_version": 3}}},
         ):
             resp = client.post("/api/sessions", json={"task": "hi", **payload})
             assert resp.status_code == 422, f"{payload} 应被拒：{resp.text}"
     _assert_rejected_without_side_effects(app, probe)
+    with probe:
+        # 正控（`#318`）：`budget.session` 各维已实现——显式声明被接受（launch=false
+        # 只建会话，不启动 run，账行自然还没建出；这里只钉"请求形状不再被拒"）。
+        ok = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi", "launch": False,
+                "budget": {"session": {"max_agent_turns_total": 5,
+                                       "max_delegations": 3}},
+            },
+        )
+    assert ok.status_code == 200, ok.text
 
 
 def test_tool_call_limits_requires_registered_names(tmp_path):

@@ -125,12 +125,15 @@ class DelegateTool(Tool):
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
         if not reservation.accepted:
-            result = ToolResult.failure(
+            # 预算拒绝**不**进树守卫：熔断器（#88）数的是"子代理执行了且失败"；
+            # 配额拒绝里子代理从未启动（`#318` 起 session 级拒绝还可能先于本 run
+            # 的树行存在——observe 一个不存在的树只会拿到 KeyError）。拒绝消息
+            # 自己带 used/limit，模型据此收尾；反复空转由 turns 预算兜底。
+            return ToolResult.failure(
                 message=(f"delegation 预算耗尽（已用 {reservation.used}/{reservation.limit}）。"
                          "请综合已有结果直接收尾，或改变策略，不要再委派。"),
                 error_code=ErrorCode.INVALID_ARGUMENT,
             )
-            return await self._with_tree_guard(result, tree_id, fingerprint)
         try:
             result = await self._provider.run(
                 target=args.target, task=args.task, constraints=args.constraints,

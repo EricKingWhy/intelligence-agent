@@ -26,6 +26,7 @@ from agent_harness.agent.budget import SOURCE_DEPLOYMENT
 from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
+    SessionBudgetPort,
     validate_tool_call_limits_registered,
 )
 
@@ -201,6 +202,7 @@ async def build_runtime(
     run_budget: LaunchRunBudget | None = None,
     local_fuse_source: str = SOURCE_DEPLOYMENT,
     stuck_evidence: StuckEvidencePort | None = None,
+    session_budget: SessionBudgetPort | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -497,4 +499,7 @@ async def build_runtime(
         # 构造方是服务层（它才有一份"本次生效策略"的完整输入，恢复侧也用同一份函数
         # 现算再比较；ADR-0048 D8）。None = 不观测（CLI / 单测的既有路径逐字不变）。
         stuck_evidence=stuck_evidence,
+        # `#318`：session 树账端口（跨 run / 跨会话共享）。装配点只透传；构造方是
+        # 服务层（它才知道预算 key 与请求声明）。None = 不接 session 账（旧行为）。
+        session_budget=session_budget,
     )
