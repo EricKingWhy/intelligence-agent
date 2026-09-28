@@ -1,0 +1,1 @@
+2026-09-29	#304 Knowledge embedding harness Spec review: PASS; reuses the production provider-aware embedding factory, with no contract or runtime scope change.	530c6487ffafdf5eaf8675d10a9c57be1eb4a386..b31c3e53f58e04250e076f3dfdbccce14af1b230
