@@ -6512,7 +6512,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 **集成（2026-09-28 已执行）**：用户批准「推分支 + 开 PR」与「合并 PR」两步 ⇒ 推 `zcode/T318-session-budget` → **PR #389**（gate0 绿，32s）→ 合并（merge **`c5cf4f9b`**，`origin/main` = `c5cf4f9b`）；`#318` 已按 §14.12 关单（证据 comment `issues/318#issuecomment-5862260654` + **§14.9 通知**：另一条线先 `merge-base --is-ancestor main HEAD` 自检并回补 `main`）。
 
-## T11（`#319`，B 链第十一票）：集成闸门 —— 五个真实 Live Gate 场景在同一 SHA/tree 上 3/3（2026-09-28 · 证据闭合 + 两轴审查 + 全量门禁，**待集成**）
+## T11（`#319`，B 链第十一票）：集成闸门 —— 五个真实 Live Gate 场景在同一 SHA/tree 上 3/3（2026-09-28 · 证据闭合 + 两轴审查 + 全量门禁 + **已集成**）
 
 **票面与验收**：五个真实场景（① `long-task-past-legacy-turn-limit` 跨旧 turn 上限长任务 ② `budget-pause-resume-same-run` 预算暂停后同 run 续跑 ③ `stuck-tool-failure-pause` stuck 检测暂停 ④ `run-deadline-boundary` 运行 deadline 边界 ⑤ `delegation-budget-tree-wide` 委派预算树级账）在**同一最终 SHA/tree** 上各 **3/3**；失败尝试必须保留（BLOCKED / SKIPPED ≠ PASS）；凭据零泄漏审计；**不改产品行为只为过闸**（修复只能落在测量面）。
 
@@ -6534,4 +6534,4 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 **残余（登记，不阻断）**：① 场景 4 预热后不再测量「进程首请求含惰性装配」的冷启动窗口（本场景测的是 warm 进程的 run 准入契约；产品冷启动行为未改，该特性仍存在于生产首请求）；② `deadline.py` 注释红数「4 红」修正为「6 红」归属 `#320` 批顺带执行；③ 预热行在场景 try 外 ⇒ `CapabilityError`（配置错类）走 runner 兜底、无 `_failure_text` 装饰（仅证据质量；Milvus 故障类不走此路径）。
 
-**集成**：待执行（「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准）。
+**集成（2026-09-28 已执行，两步均获用户单独批准）**：推 `zcode/T319-integration`（pre-push 钩子首拦 = `.pth` alien 态下 guards 红——事故段的又一实证，临时修复后 33s 过）→ **PR #391**（服务端 `gate0` 绿 33s）→ 合并（**merge `313aade6`**，`origin/main` = `313aade6`）；`0f6c1496^{tree}` = `313aade6^{tree}` = `a29e547e` ⇒ 读数对 `origin/main` 逐字节成立；`#319` 已关（PR 合并自动关 + 证据 comment 5866257919 补录 AC 映射）；**§14.9 通知已写入关单 comment**。本段落账与 T12 施工同分支（T11 短分支已合并完结）。
