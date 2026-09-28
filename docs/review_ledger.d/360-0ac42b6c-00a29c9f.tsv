@@ -1,0 +1,1 @@
+2026-09-28	#346 门禁修复增量双轴复审：Spec PASS；Standards PASS，无阻断。确认 operation/reconciled 是保留原始事件的 no-op，source link 语义不变；Python 改动只清理 lint 问题。同期 Gate-0 失败读数作为 docs-only 证据保留，不作当前通过证据。	0ac42b6ccc03ce5c35ac1fc81bfe9b1ffef4a647..00a29c9f5ebe625b73206ea4ec10de5bd5aedcce
