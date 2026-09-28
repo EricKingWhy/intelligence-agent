@@ -18,6 +18,7 @@ from langchain_core.messages import (
 
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
+from agent_harness.session.derive import ProtectedFact
 from agent_harness.session.event import SessionEvent
 
 logger = logging.getLogger("agent_harness.context.compactor")
@@ -97,7 +98,11 @@ class ContextCompactor:
         token_estimate: int,
         *,
         events: list[SessionEvent] | None = None,
+        protected_facts: list[ProtectedFact] | None = None,
+        reserved_tokens: int = 0,
     ) -> CompactionResult:
+        if reserved_tokens < 0:
+            raise ValueError("reserved_tokens must be non-negative")
         _validate_tool_blocks(messages)
         prefix_end = 0
         while (prefix_end < len(messages)
@@ -110,8 +115,11 @@ class ContextCompactor:
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)
-            if count > self._hard_limit:
-                raise ContextWindowExceededError("No complete early turn can be compacted")
+            if count + reserved_tokens > self._hard_limit:
+                raise ContextWindowExceededError(
+                    "Protected facts and context exceed the hard guard; "
+                    "no complete early turn can be compacted"
+                )
             return CompactionResult(list(messages), 0, count, False)
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
@@ -133,8 +141,8 @@ class ContextCompactor:
             model_sections = _parse_summary_sections(
                 response.content, _MODEL_SUMMARY_HEADINGS,
             )
-            summary_text = _assemble_summary(early, model_sections)
-            _validate_summary(summary_text, early)
+            summary_text = _assemble_summary(early, model_sections, protected_facts)
+            _validate_summary(summary_text, early, protected_facts)
             early_tokens = estimate_message_tokens(early)
             summary_tokens = estimate_message_tokens([SystemMessage(content=summary_text)])
             if summary_tokens >= early_tokens:
@@ -143,8 +151,13 @@ class ContextCompactor:
                     f"compressed segment ({early_tokens} tokens)"
                 )
             compacted = [*prefix, SystemMessage(content=summary_text), *recent]
-            if estimate_message_tokens(compacted) >= self._auto_limit:
-                raise ContextWindowExceededError("LLM summary does not reach compaction target")
+            if (
+                estimate_message_tokens(compacted) + reserved_tokens
+                >= self._auto_limit
+            ):
+                raise ContextWindowExceededError(
+                    "LLM summary does not reach compaction target"
+                )
         except Exception as exc:  # noqa: BLE001
             # 摘要失败时不能只在当前轮使用 fallback、却把空摘要写入事件流。
             # 保留原投影；超出硬护栏时安全停止，CancelledError 仍向调用方传播。
@@ -158,9 +171,10 @@ class ContextCompactor:
                 ) from None
             return CompactionResult(list(messages), 0, token_estimate, False)
         count = estimate_message_tokens(compacted)
-        if count > self._hard_limit:
+        if count + reserved_tokens > self._hard_limit:
             raise ContextWindowExceededError(
-                f"Compaction cannot fit context: {token_estimate} -> {count} tokens; "
+                f"Compaction cannot fit context: {token_estimate} -> "
+                f"{count + reserved_tokens} tokens; "
                 f"hard guard {self._hard_limit:g}"
             )
         # T4 (#134)：从投影映射计算 source_seq 区间。旧摘要带有原 bracket 的
@@ -192,7 +206,8 @@ class ContextCompactor:
         return CompactionResult(
             compacted,
             sum(isinstance(message, HumanMessage) for message in early),
-            count, False,
+            count,
+            False,
             source_seq_start=source_seq_start,
             source_seq_end=source_seq_end,
             bracket_id=str(uuid4()),
@@ -221,10 +236,14 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     return contents
 
 
-def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]:
+def _programmatic_summary_sections(
+    messages: list[AnyMessage],
+    protected_facts: list[ProtectedFact] | None = None,
+) -> dict[str, str]:
     user_messages: list[str] = []
     identifiers: list[str] = []
     file_paths: list[str] = []
+    protected_facts_body = "(none)"
 
     def add_once(target: list[str], value: str) -> None:
         if value and value not in target:
@@ -279,6 +298,8 @@ def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]
                 and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")):
             previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
             previous_users = decode_summary_values(previous[0])
+            if protected_facts is None:
+                protected_facts_body = previous[1]
             previous_identifiers = decode_summary_values(previous[6])
             previous_paths = decode_summary_values(previous[7])
             user_messages.extend(previous_users)
@@ -292,8 +313,17 @@ def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]
     return {
         _SUMMARY_HEADINGS[0]: json.dumps(user_messages, ensure_ascii=False)
         if user_messages else "(none)",
-        # #346 adds the durable protected-fact registry; until then its exact value is empty.
-        _SUMMARY_HEADINGS[1]: "(none)",
+        _SUMMARY_HEADINGS[1]: (
+            json.dumps(
+                [fact.to_dict() for fact in protected_facts],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if protected_facts
+            else "(none)"
+            if protected_facts is not None
+            else protected_facts_body
+        ),
         _SUMMARY_HEADINGS[6]: json.dumps(identifiers, ensure_ascii=False)
         if identifiers else "(none)",
         _SUMMARY_HEADINGS[7]: json.dumps(file_paths, ensure_ascii=False)
@@ -308,8 +338,9 @@ def _is_compaction_summary(message: SystemMessage) -> bool:
 
 def _assemble_summary(
     messages: list[AnyMessage], model_sections: list[str],
+    protected_facts: list[ProtectedFact] | None = None,
 ) -> str:
-    programmatic = _programmatic_summary_sections(messages)
+    programmatic = _programmatic_summary_sections(messages, protected_facts)
     bodies = [programmatic.get(heading, "") for heading in _SUMMARY_HEADINGS]
     for index, body in enumerate(model_sections, start=2):
         bodies[index] = body
@@ -318,9 +349,12 @@ def _assemble_summary(
     )
 
 
-def _validate_summary(summary: str, messages: list[AnyMessage]) -> None:
+def _validate_summary(
+    summary: str, messages: list[AnyMessage],
+    protected_facts: list[ProtectedFact] | None = None,
+) -> None:
     sections = _parse_summary_sections(summary, _SUMMARY_HEADINGS)
-    expected = _programmatic_summary_sections(messages)
+    expected = _programmatic_summary_sections(messages, protected_facts)
     for index in _PROGRAMMATIC_SUMMARY_HEADINGS:
         if sections[index] != expected[_SUMMARY_HEADINGS[index]]:
             raise ValueError("Programmatic summary section failed exact comparison")

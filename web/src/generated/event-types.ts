@@ -25,6 +25,7 @@ export const EventType = {
   ARTIFACT_CREATED: 'artifact/created',
   ARTIFACT_EXTERNALIZED: 'artifact/externalized',
   CONTEXT_COMPACTED: 'context/compacted',
+  TASK_PROTECTED_FACT: 'task/protected_fact',
   MEMORY_DEGRADED: 'memory/degraded',
   MEMORY_UPDATED: 'memory/updated',
   MEMORY_RECALLED: 'memory/recalled',

@@ -61,6 +61,8 @@ ARTIFACT_CREATED = "artifact/created"
 # 模型可凭 artifact_ref 用 read_artifact 工具按需读取局部内容。
 ARTIFACT_EXTERNALIZED = "artifact/externalized"
 CONTEXT_COMPACTED = "context/compacted"
+# W-02 (#346): a typed, append-only registration that points back to its source event.
+TASK_PROTECTED_FACT = "task/protected_fact"
 MEMORY_DEGRADED = "memory/degraded"
 # #298 / MEM-V2-2（PRD §6.5）：一次**已提交**的记忆变更。只带计数、memory id、
 # action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
@@ -172,6 +174,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         ARTIFACT_CREATED,
         ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,
+        TASK_PROTECTED_FACT,
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,

@@ -3,6 +3,7 @@
 import logging
 
 import pytest
+from langchain_core.messages import SystemMessage
 
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.session import MODEL_COMPLETED, TOOL_RESULT, USER_MESSAGE
@@ -26,7 +27,9 @@ async def test_build_preserves_tool_pairs_and_persistent_history(tmp_path, caplo
     with caplog.at_level(logging.DEBUG, logger="agent_harness.context"):
         messages = await builder.build(session)
 
-    assert messages == session.derive_messages()
+    assert isinstance(messages[0], SystemMessage)
+    assert messages[0].content.startswith("## Protected task facts\n")
+    assert messages[1:] == session.derive_messages()
     assert session.events == before
     assert model.snapshots == []
     assert any(getattr(record, "token_estimate", 0) > 0 for record in caplog.records)

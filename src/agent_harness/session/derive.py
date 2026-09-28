@@ -18,8 +18,13 @@ runtime / recovery / service 复用，避免各调用点各写一遍扫描逻辑
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from dataclasses import dataclass
+from bisect import bisect_right
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from typing import Any
 
 from langchain_core.messages import (
     AIMessage,
@@ -30,16 +35,25 @@ from langchain_core.messages import (
 )
 
 from agent_harness.session.event import (
+    ARTIFACT_CREATED,
+    ARTIFACT_EXTERNALIZED,
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
     MODEL_COMPLETED,
+    OPERATION_RECONCILE_REQUIRED,
+    PERMISSION_CHANGED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_INTERRUPTED,
+    RUN_PAUSED,
     STEER_APPLIED,
     STEER_REQUESTED,
+    TASK_PROTECTED_FACT,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -50,6 +64,601 @@ logger = logging.getLogger("agent_harness.session.derive")
 
 #: 合成 dangling ToolMessage 的固定内容（模型可见，引导自主决策）
 DANGLING_TOOL_CONTENT = "工具执行被中断，结果未知"
+
+_USER_FACT_TYPES = frozenset(
+    {
+        "user_instruction",
+        "user_goal",
+        "constraint",
+        "authorization",
+        "authorization_revocation",
+        "acceptance_criterion",
+        "exact_identifier",
+        "confirmed_decision",
+    }
+)
+_USER_SOURCE_TYPES = frozenset({USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED})
+_RUN_BOUNDARY_TYPES = frozenset(
+    {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED, RUN_PAUSED}
+)
+_ARTIFACT_FACT_FIELDS = (
+    "artifact_id",
+    "artifact_ref",
+    "source_tool",
+    "tool_call_id",
+    "size",
+    "mime_type",
+    "sha256",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedFact:
+    """A lossless task fact projected from its immutable source event."""
+
+    fact_id: str
+    type: str
+    value: Any
+    source_event_id: str
+    source_seq: int
+    status: str
+    session_id: str
+    evidence_event_id: str | None = None
+    evidence_seq: int | None = None
+    superseded_by_fact_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", deepcopy(self.value))
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "fact_id": self.fact_id,
+            "type": self.type,
+            "value": deepcopy(self.value),
+            "source_event_id": self.source_event_id,
+            "source_seq": self.source_seq,
+            "status": self.status,
+            "session_id": self.session_id,
+        }
+        if self.evidence_event_id is not None:
+            result["evidence_event_id"] = self.evidence_event_id
+            result["evidence_seq"] = self.evidence_seq
+        if self.superseded_by_fact_id is not None:
+            result["superseded_by_fact_id"] = self.superseded_by_fact_id
+        return result
+
+
+def _system_fact_value(source: SessionEvent, fact_type: str) -> Any:
+    if fact_type == "authorization" and source.type == PERMISSION_CHANGED:
+        return dict(source.data)
+    if fact_type == "work_boundary" and source.type in _RUN_BOUNDARY_TYPES:
+        return {
+            "state": source.type,
+            "run_id": source.run_id,
+            **({"reason": source.data["reason"]} if "reason" in source.data else {}),
+        }
+    if (
+        fact_type == "unresolved_operation"
+        and source.type == OPERATION_RECONCILE_REQUIRED
+    ):
+        return {
+            key: source.data[key]
+            for key in ("tool_call_id", "tool_name", "state")
+            if key in source.data
+        }
+    if fact_type == "evidence_ref" and source.type in {
+        ARTIFACT_CREATED,
+        ARTIFACT_EXTERNALIZED,
+    }:
+        return {
+            key: source.data[key] for key in _ARTIFACT_FACT_FIELDS if key in source.data
+        }
+    raise ValueError("source event is not a confirmed system fact for this type")
+
+
+def _user_value_matches(value: Any, source: SessionEvent) -> bool:
+    content = source.data.get("content")
+    if not isinstance(content, str):
+        return False
+    if isinstance(value, str):
+        return bool(value) and value in content
+    try:
+        return json.loads(content) == value
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def _failed_tool_result(evidence: SessionEvent) -> dict[str, Any] | None:
+    if evidence.type != TOOL_RESULT:
+        return None
+    content = evidence.data.get("content")
+    if not isinstance(content, str):
+        return None
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if (
+        not isinstance(result, dict)
+        or result.get("ok") is not False
+        or not isinstance(result.get("error_code"), str)
+        or not result["error_code"]
+    ):
+        return None
+    return result
+
+
+def _tool_attempt_value(source: SessionEvent) -> dict[str, Any] | None:
+    if source.type != TOOL_CALL:
+        return None
+    call_id = source.data.get("tool_call_id")
+    tool_name = source.data.get("tool_name")
+    args = source.data.get("args")
+    if (
+        not isinstance(call_id, str)
+        or not call_id
+        or not isinstance(tool_name, str)
+        or not isinstance(args, dict)
+    ):
+        return None
+    return {"tool_call_id": call_id, "tool_name": tool_name, "args": args}
+
+
+def _is_refuting_event(source: SessionEvent, evidence: SessionEvent) -> bool:
+    if evidence.seq <= source.seq or evidence.session_id != source.session_id:
+        return False
+    if evidence.type in _USER_SOURCE_TYPES:
+        return (
+            isinstance(evidence.data.get("content"), str)
+            and not evidence.data.get("injected_by")
+            and evidence.data.get("refutes_event_id") == source.event_id
+        )
+    if source.type != TOOL_CALL:
+        return False
+    return (
+        source.data.get("tool_call_id") == evidence.data.get("tool_call_id")
+        and _failed_tool_result(evidence) is not None
+    )
+
+
+def _expected_fact_id(data: dict[str, Any]) -> str:
+    identity = {
+        key: data.get(key)
+        for key in (
+            "fact_type",
+            "value",
+            "source_event_id",
+            "supersedes_fact_id",
+            "evidence_event_id",
+        )
+    }
+    encoded = json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return "pf-" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def validate_protected_fact_data(
+    events: list[SessionEvent],
+    data: dict[str, Any],
+    *,
+    session_id: str,
+    event_index: dict[str, SessionEvent] | None = None,
+    fact_index: dict[str, tuple[int, str]] | None = None,
+    latest_tool_result_seq: dict[str, int] | None = None,
+) -> tuple[SessionEvent, SessionEvent | None]:
+    """Validate a registration against earlier, same-session source events."""
+    fact_type = data.get("fact_type")
+    if not isinstance(fact_type, str):
+        raise TypeError("protected fact type must be a string")
+    source_id = data.get("source_event_id")
+    if not isinstance(source_id, str) or not source_id:
+        raise ValueError("protected fact source event is required")
+    if event_index is None:
+        event_index = {event.event_id: event for event in events}
+    source = event_index.get(source_id)
+    if source is None or source.session_id != session_id:
+        raise ValueError("protected fact source event must exist in this session")
+    source_seq = data.get("source_event_seq")
+    if (
+        not isinstance(source_seq, int)
+        or isinstance(source_seq, bool)
+        or source_seq != source.seq
+    ):
+        raise ValueError("protected fact source sequence does not match its event")
+
+    value = data.get("value")
+    if fact_type in _USER_FACT_TYPES or fact_type in {"authorization", "work_boundary"}:
+        allowed_user = source.type in _USER_SOURCE_TYPES and not source.data.get(
+            "injected_by"
+        )
+        if allowed_user and _user_value_matches(value, source):
+            pass
+        elif (
+            fact_type == "authorization"
+            and source.type == PERMISSION_CHANGED
+            or fact_type == "work_boundary"
+            and source.type in _RUN_BOUNDARY_TYPES
+        ):
+            if value != _system_fact_value(source, fact_type):
+                raise ValueError(
+                    "protected fact value must match the confirmed system source"
+                )
+        else:
+            raise ValueError(
+                "protected fact source is not a direct user event or confirmed fact"
+            )
+    elif fact_type in {"unresolved_operation", "evidence_ref"}:
+        expected_source_types = (
+            {OPERATION_RECONCILE_REQUIRED}
+            if fact_type == "unresolved_operation"
+            else {ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED}
+        )
+        if source.type not in expected_source_types or value != _system_fact_value(
+            source, fact_type
+        ):
+            raise ValueError("protected fact source is not a confirmed system fact")
+        if fact_type == "unresolved_operation":
+            if (
+                not isinstance(source.data.get("tool_call_id"), str)
+                or not source.data["tool_call_id"]
+                or source.data.get("state") != "NEED_RECONCILE"
+            ):
+                raise ValueError("unresolved operation source is missing its identity or state")
+            if latest_tool_result_seq is None:
+                latest_tool_result_seq = {
+                    event.data["tool_call_id"]: event.seq
+                    for event in events
+                    if event.type == TOOL_RESULT
+                    and isinstance(event.data.get("tool_call_id"), str)
+                }
+            result_seq = latest_tool_result_seq.get(
+                source.data.get("tool_call_id", ""), -1
+            )
+            if result_seq > source.seq:
+                raise ValueError("operation has a later result and is already reconciled")
+    elif fact_type == "failed_approach":
+        if source.type not in _USER_SOURCE_TYPES | {TOOL_CALL}:
+            raise ValueError(
+                "failed approach source must describe a user or tool attempt"
+            )
+        if source.type in _USER_SOURCE_TYPES and source.data.get("injected_by"):
+            raise ValueError("failed approach source must be a direct user event")
+        expected_value = (
+            _tool_attempt_value(source)
+            if source.type == TOOL_CALL
+            else source.data.get("content")
+        )
+        if value != expected_value:
+            raise ValueError(
+                "failed approach value must preserve its source attempt verbatim"
+            )
+    else:
+        raise ValueError("unsupported protected fact type")
+
+    evidence_id = data.get("evidence_event_id")
+    evidence: SessionEvent | None = None
+    if fact_type == "failed_approach":
+        if not isinstance(evidence_id, str) or not evidence_id:
+            raise ValueError("failed approach evidence event is required")
+        evidence = event_index.get(evidence_id)
+        if (
+            evidence is None
+            or evidence.session_id != session_id
+            or not _is_refuting_event(source, evidence)
+        ):
+            raise ValueError("failed approach evidence must be a later refuting event")
+        evidence_seq = data.get("evidence_event_seq")
+        if (
+            not isinstance(evidence_seq, int)
+            or isinstance(evidence_seq, bool)
+            or evidence_seq != evidence.seq
+        ):
+            raise ValueError(
+                "failed approach evidence sequence does not match its event"
+            )
+    elif evidence_id is not None or data.get("evidence_event_seq") is not None:
+        raise ValueError("only failed approaches carry a separate evidence event")
+
+    supersedes_id = data.get("supersedes_fact_id")
+    if fact_type == "authorization_revocation" and not supersedes_id:
+        raise ValueError(
+            "authorization revocation must name the superseded authorization"
+        )
+    if supersedes_id is not None:
+        if (
+            source.type not in _USER_SOURCE_TYPES
+            or source.data.get("injected_by")
+            or not isinstance(supersedes_id, str)
+        ):
+            raise ValueError("only a later user event can supersede a protected fact")
+        if fact_index is None:
+            fact_index = {
+                fact.fact_id: (fact.source_seq, fact.type)
+                for fact in derive_protected_facts(events)
+            }
+        prior = fact_index.get(supersedes_id)
+        if prior is None or source.seq <= prior[0]:
+            raise ValueError("superseded fact must exist before the later user event")
+        if (
+            fact_type == "authorization_revocation"
+            and prior[1] != "authorization"
+        ):
+            raise ValueError(
+                "authorization revocation must supersede an authorization fact"
+            )
+
+    fact_id = data.get("fact_id")
+    if not isinstance(fact_id, str) or fact_id != _expected_fact_id(data):
+        raise ValueError("protected fact id is invalid")
+    return source, evidence
+
+
+def build_protected_fact_data(
+    events: list[SessionEvent],
+    *,
+    session_id: str,
+    fact_type: str,
+    value: Any,
+    source_event_id: str | None,
+    supersedes_fact_id: str | None = None,
+    evidence_event_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic event payload and reject untraceable registrations."""
+    if not isinstance(source_event_id, str) or not source_event_id:
+        raise ValueError("protected fact source event is required")
+    try:
+        copied_value = json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("protected fact value must be JSON-compatible") from exc
+    source = next(
+        (event for event in events if event.event_id == source_event_id), None
+    )
+    if source is None:
+        raise ValueError("protected fact source event must exist in this session")
+    evidence = None
+    if evidence_event_id is not None:
+        evidence = next(
+            (event for event in events if event.event_id == evidence_event_id), None
+        )
+    data: dict[str, Any] = {
+        "fact_type": fact_type,
+        "value": copied_value,
+        "source_event_id": source_event_id,
+        "source_event_seq": source.seq,
+    }
+    if supersedes_fact_id is not None:
+        data["supersedes_fact_id"] = supersedes_fact_id
+    if evidence_event_id is not None:
+        data["evidence_event_id"] = evidence_event_id
+        if evidence is not None:
+            data["evidence_event_seq"] = evidence.seq
+    data["fact_id"] = _expected_fact_id(data)
+    validate_protected_fact_data(events, data, session_id=session_id)
+    return data
+
+
+def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
+    """Rebuild protected task facts from the immutable event prefix."""
+    event_by_seq = {event.seq: event for event in events}
+    superseded_sources = {
+        source.event_id
+        for event in events
+        if event.type == MESSAGE_SUPERSEDED
+        and isinstance(event.data.get("superseded_seq"), int)
+        and not isinstance(event.data.get("superseded_seq"), bool)
+        and (source := event_by_seq.get(event.data["superseded_seq"])) is not None
+        and event.seq > source.seq
+        and source.session_id == event.session_id
+        and source.type in _USER_SOURCE_TYPES
+        and not source.data.get("injected_by")
+    }
+    latest_tool_result_seq = {
+        event.data["tool_call_id"]: event.seq
+        for event in events
+        if event.type == TOOL_RESULT
+        and isinstance(event.data.get("tool_call_id"), str)
+    }
+    facts: list[ProtectedFact] = []
+    registered_by_id: dict[str, int] = {}
+    fact_ids: set[str] = set()
+    prior_event_by_id: dict[str, SessionEvent] = {}
+    prior_fact_by_id: dict[str, tuple[int, str]] = {}
+    superseded_by: dict[str, str] = {}
+    first_user_source = next(
+        (
+            event
+            for event in events
+            if event.type == USER_MESSAGE
+            and isinstance(event.data.get("content"), str)
+            and bool(event.data["content"].strip())
+            and not event.data.get("injected_by")
+            and not event.data.get("replace")
+        ),
+        None,
+    )
+    user_goal_sources = {first_user_source.event_id} if first_user_source else set()
+    direct_user_events = [
+        event
+        for event in events
+        if event.type == USER_MESSAGE
+        and isinstance(event.data.get("content"), str)
+        and event.data["content"].strip()
+        and not event.data.get("injected_by")
+        and not event.data.get("replace")
+    ]
+    direct_user_seqs = [event.seq for event in direct_user_events]
+    for event in events:
+        target_seq = event.data.get("superseded_seq")
+        if (
+            event.type != MESSAGE_SUPERSEDED
+            or not isinstance(target_seq, int)
+            or isinstance(target_seq, bool)
+        ):
+            continue
+        target = event_by_seq.get(target_seq)
+        if (
+            target is None
+            or target.type != USER_MESSAGE
+            or target.data.get("injected_by")
+            or event.seq <= target.seq
+            or event.session_id != target.session_id
+        ):
+            continue
+        replacement_index = bisect_right(direct_user_seqs, target.seq)
+        if (
+            replacement_index < len(direct_user_events)
+            and direct_user_seqs[replacement_index] < event.seq
+        ):
+            user_goal_sources.add(
+                direct_user_events[replacement_index].event_id
+            )
+    tool_results_by_call: dict[str, list[SessionEvent]] = {}
+    for event in events:
+        call_id = event.data.get("tool_call_id")
+        if event.type == TOOL_RESULT and isinstance(call_id, str):
+            tool_results_by_call.setdefault(call_id, []).append(event)
+
+    def add_fact(fact: ProtectedFact) -> None:
+        if fact.fact_id in fact_ids:
+            return
+        fact_ids.add(fact.fact_id)
+        prior_fact_by_id[fact.fact_id] = (fact.source_seq, fact.type)
+        facts.append(fact)
+
+    for event in events:
+        data = event.data
+        if event.event_id in user_goal_sources:
+            fact_data = {
+                "fact_type": "user_goal",
+                "value": data["content"],
+                "source_event_id": event.event_id,
+            }
+            add_fact(
+                ProtectedFact(
+                    fact_id=_expected_fact_id(fact_data),
+                    type="user_goal",
+                    value=data["content"],
+                    source_event_id=event.event_id,
+                    source_seq=event.seq,
+                    status="active",
+                    session_id=event.session_id,
+                )
+            )
+        if event.type == PERMISSION_CHANGED:
+            add_fact(_fact_from_system_event(event, "authorization", dict(data)))
+        elif event.type in _RUN_BOUNDARY_TYPES:
+            add_fact(
+                _fact_from_system_event(
+                    event, "work_boundary", _system_fact_value(event, "work_boundary")
+                )
+            )
+        elif event.type == OPERATION_RECONCILE_REQUIRED:
+            if latest_tool_result_seq.get(
+                data.get("tool_call_id", ""), -1
+            ) <= event.seq:
+                add_fact(
+                    _fact_from_system_event(
+                        event,
+                        "unresolved_operation",
+                        _system_fact_value(event, "unresolved_operation"),
+                    )
+                )
+        elif event.type in {ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED}:
+            add_fact(
+                _fact_from_system_event(
+                    event, "evidence_ref", _system_fact_value(event, "evidence_ref")
+                )
+            )
+        elif event.type == TOOL_CALL:
+            attempt = _tool_attempt_value(event)
+            if attempt is not None:
+                for evidence in tool_results_by_call.get(
+                    attempt["tool_call_id"], []
+                ):
+                    if not _is_refuting_event(event, evidence):
+                        continue
+                    fact_data = {
+                        "fact_type": "failed_approach",
+                        "value": attempt,
+                        "source_event_id": event.event_id,
+                        "evidence_event_id": evidence.event_id,
+                    }
+                    add_fact(
+                        ProtectedFact(
+                            fact_id=_expected_fact_id(fact_data),
+                            type="failed_approach",
+                            value=attempt,
+                            source_event_id=event.event_id,
+                            source_seq=event.seq,
+                            status="active",
+                            session_id=event.session_id,
+                            evidence_event_id=evidence.event_id,
+                            evidence_seq=evidence.seq,
+                        )
+                    )
+        elif event.type == TASK_PROTECTED_FACT:
+            try:
+                source, evidence = validate_protected_fact_data(
+                    events,
+                    data,
+                    session_id=event.session_id,
+                    event_index=prior_event_by_id,
+                    fact_index=prior_fact_by_id,
+                    latest_tool_result_seq=latest_tool_result_seq,
+                )
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Ignoring invalid protected fact event %s", event.event_id
+                )
+                continue
+            fact_id = data["fact_id"]
+            if fact_id in registered_by_id:
+                continue
+            registered_by_id[fact_id] = len(facts)
+            add_fact(
+                ProtectedFact(
+                    fact_id=fact_id,
+                    type=data["fact_type"],
+                    value=data["value"],
+                    source_event_id=source.event_id,
+                    source_seq=source.seq,
+                    status="active",
+                    session_id=event.session_id,
+                    evidence_event_id=evidence.event_id if evidence else None,
+                    evidence_seq=evidence.seq if evidence else None,
+                )
+            )
+            prior_fact_id = data.get("supersedes_fact_id")
+            if prior_fact_id:
+                superseded_by[prior_fact_id] = fact_id
+
+        prior_event_by_id[event.event_id] = event
+
+    for index, fact in enumerate(facts):
+        successor_id = superseded_by.get(fact.fact_id)
+        if fact.source_event_id in superseded_sources or successor_id is not None:
+            facts[index] = replace(
+                fact,
+                status="superseded",
+                superseded_by_fact_id=successor_id or fact.superseded_by_fact_id,
+            )
+    return facts
+
+
+def _fact_from_system_event(
+    event: SessionEvent, fact_type: str, value: Any
+) -> ProtectedFact:
+    return ProtectedFact(
+        fact_id=f"{fact_type}:{event.event_id}",
+        type=fact_type,
+        value=value,
+        source_event_id=event.event_id,
+        source_seq=event.seq,
+        status="active",
+        session_id=event.session_id,
+    )
+
 
 #: bracket 元数据事件——不投影成消息，仅标记 shadowed 区间。
 _BRACKET_META_TYPES = frozenset({

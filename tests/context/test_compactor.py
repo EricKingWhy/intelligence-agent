@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -19,6 +20,7 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
+from agent_harness.session.derive import derive_protected_facts
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -54,9 +56,11 @@ async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_pa
         model, max_context_tokens=10000, auto_compact_threshold=0.3,
     ).build(session)
     assert isinstance(messages[0], SystemMessage)
-    assert "## 原始目标与用户约束" in messages[0].content
-    assert "读取旧记录并继续。" in messages[0].content
-    assert messages[1:] == [HumanMessage(content="current request")]
+    assert messages[0].content.startswith("## Protected task facts\n")
+    assert isinstance(messages[1], SystemMessage)
+    assert "## 原始目标与用户约束" in messages[1].content
+    assert "读取旧记录并继续。" in messages[1].content
+    assert messages[2:] == [HumanMessage(content="current request")]
     assert estimate_message_tokens(messages) < 5600
     assert session.events[:-3] == before  # 3 new events: START, COMPACTED, END
     # Verify all 3 bracket events were written
@@ -298,10 +302,17 @@ async def test_single_turn_between_auto_and_hard_guard_does_not_fake_compaction(
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "single " * 300})
     count = estimate_message_tokens(session.derive_messages())
+    facts_message = ContextBuilder._protected_facts_message(
+        derive_protected_facts(session.events),
+    )
+    count += estimate_message_tokens([facts_message])
     model = ScriptedModel([])
     before = session.events
-    messages = await ContextBuilder(model, max_context_tokens=int(count / 0.8)).build(session)
-    assert messages == session.derive_messages()
+    messages = await ContextBuilder(
+        model, max_context_tokens=math.ceil(count / 0.8),
+    ).build(session)
+    assert messages[0].content.startswith("## Protected task facts\n")
+    assert messages[1:] == session.derive_messages()
     assert session.events == before
     assert model.snapshots == []
 

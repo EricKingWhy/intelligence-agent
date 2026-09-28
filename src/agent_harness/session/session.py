@@ -32,8 +32,10 @@ if TYPE_CHECKING:
 from agent_harness.session.cwd import cwd_event_data
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
+    build_protected_fact_data,
     derive_messages,
     detect_dangling,
+    validate_protected_fact_data,
 )
 from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
@@ -44,6 +46,7 @@ from agent_harness.session.event import (
     SESSION_RESUMED,
     SESSION_STARTED,
     STREAM_ONLY_TYPES,
+    TASK_PROTECTED_FACT,
     TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
@@ -303,6 +306,16 @@ class Session:
             )
         if event_type not in EVENT_TYPES:
             raise ValueError(f"未知事件类型 '{event_type}'：不在 EVENT_TYPES 词汇表中")
+        if event_type == TASK_PROTECTED_FACT:
+            validate_protected_fact_data(self._events, data, session_id=self.session_id)
+            refs = [data["source_event_id"]]
+            if data.get("evidence_event_id") is not None:
+                refs.append(data["evidence_event_id"])
+            if source_event_ids is not None and source_event_ids != refs:
+                raise ValueError(
+                    "protected fact event references do not match its payload"
+                )
+            source_event_ids = refs
         seq = self._next_seq
         event = SessionEvent(
             seq=seq,
@@ -317,6 +330,40 @@ class Session:
         )
         self._persist_event(event, notify=True)
         return event
+
+    def register_protected_fact(
+        self,
+        *,
+        fact_type: str,
+        value: Any,
+        source_event_id: str | None,
+        supersedes_fact_id: str | None = None,
+        evidence_event_id: str | None = None,
+    ) -> SessionEvent:
+        """Append a fact registration after validating its original event sources."""
+        data = build_protected_fact_data(
+            self._events,
+            session_id=self.session_id,
+            fact_type=fact_type,
+            value=value,
+            source_event_id=source_event_id,
+            supersedes_fact_id=supersedes_fact_id,
+            evidence_event_id=evidence_event_id,
+        )
+        existing = next(
+            (
+                event
+                for event in self._events
+                if event.type == TASK_PROTECTED_FACT
+                and event.data.get("fact_id") == data["fact_id"]
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.data != data:
+                raise ValueError("protected fact id already exists with different data")
+            return existing
+        return self.append(TASK_PROTECTED_FACT, data)
 
     def _persist_event(self, event: SessionEvent, *, notify: bool) -> None:
         """提交一条已构造事件，并在需要时通知实时观察者。
@@ -356,7 +403,30 @@ class Session:
                 )
             if event.type not in EVENT_TYPES:
                 raise ValueError(f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中")
-            moved = replace(event, seq=self._next_seq, session_id=self.session_id)
+            moved_data = event.data
+            if event.type == TASK_PROTECTED_FACT:
+                moved_data = dict(event.data)
+                for id_key, seq_key in (
+                    ("source_event_id", "source_event_seq"),
+                    ("evidence_event_id", "evidence_event_seq"),
+                ):
+                    ref_id = moved_data.get(id_key)
+                    if ref_id is None:
+                        continue
+                    referenced = next(
+                        (prior for prior in adopted if prior.event_id == ref_id), None
+                    )
+                    if referenced is None:
+                        raise ValueError(
+                            "forked protected fact is missing its source event"
+                        )
+                    moved_data[seq_key] = referenced.seq
+            moved = replace(
+                event,
+                seq=self._next_seq,
+                session_id=self.session_id,
+                data=moved_data,
+            )
             self._persist_event(moved, notify=False)
             adopted.append(moved)
         return adopted
