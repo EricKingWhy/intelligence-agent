@@ -104,6 +104,9 @@ test('刷新后不残留：提示不在，会话内容仍在（本地状态不�
 
   await page.goto('/');
   await submitTask(page, '慢慢回答');
+  await expect(page.locator('.run-pulse')).toContainText('思考中');
+  await expect(page.locator('.stream-caret')).toBeVisible();
+  await expect(page.locator('.wait-hint')).toHaveCount(0);
   await page.clock.fastForward(31_000);
   // 前置条件：本次会话刷新前确实出现过提示（否则「刷新后没有」毫无信息量）
   await expect(page.locator('.wait-hint')).toBeVisible();
