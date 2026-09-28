@@ -118,6 +118,7 @@ from agent_harness.session.errors import (
     InvalidForkBoundary,
     InvalidSessionId,
     PendingApprovalConflict,
+    ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
@@ -171,6 +172,7 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 消息 / 已被取代 / 不是最新一条）。会话是存在的，是这次编辑按当前状态不允许
     # ——所以不谎报 404（那会让前端以为会话没了），用 409。
     SupersedeTargetInvalid: 409,
+    ProtectedFactReferenceInvalid: 409,
     # F18-A / #282：会话有未裁决的审批时拒绝改权限档（理由见 ADR-0041 §4.1）。
     PendingApprovalConflict: 409,
     # #172 / ADR-0029：会话是 fork 父——删它会连带处置用户没选中的子会话（级联），

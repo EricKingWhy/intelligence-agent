@@ -54,6 +54,7 @@ MODEL_REQUEST = "model/request"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
+OPERATION_RECONCILED = "operation/reconciled"
 ARTIFACT_CREATED = "artifact/created"
 # Phase Multiturn T5 (#135)：大产物外置对象存储事件。
 # 当 tool result 超过阈值时，原始内容外置到 MinIO（或 S3 兼容存储），
@@ -171,6 +172,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TOOL_OUTPUT_DELTA,
         TEXT_DELTA,
         OPERATION_RECONCILE_REQUIRED,
+        OPERATION_RECONCILED,
         ARTIFACT_CREATED,
         ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,

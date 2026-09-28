@@ -101,6 +101,7 @@ from agent_harness.session.derive import (
     UndeliveredInput,
     detect_dangling,
     undelivered_inputs,
+    validate_user_fact_links,
 )
 from agent_harness.session.errors import (
     ActiveRunConflict,
@@ -111,6 +112,7 @@ from agent_harness.session.errors import (
     InvalidForkBoundary,
     InvalidSessionId,
     PendingApprovalConflict,
+    ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
@@ -1006,6 +1008,7 @@ class SessionService:
         *,
         session_id: str,
         task: str | None = None,
+        user_input_metadata: dict[str, str] | None = None,
         local_max_agent_turns: int | None = None,
         max_steps: int | None = None,
         amend: AmendOptions | None = None,
@@ -1391,7 +1394,9 @@ class SessionService:
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
-        run, subscriber = self._run_manager.launch(session, runtime, task)
+        run, subscriber = self._run_manager.launch(
+            session, runtime, task, user_input_metadata=user_input_metadata
+        )
         # run 终结时 GC approval_queue（与创建路径同一条防泄漏路径）。
         if interactive:
             self._attach_approval_queue_gc(run, session_id)
@@ -1741,6 +1746,8 @@ class SessionService:
         amend: AmendOptions | None = None,
         supersedes_seq: int | None = None,
         queue_id: str | None = None,
+        revoke_fact_id: str | None = None,
+        refutes_event_id: str | None = None,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -1805,6 +1812,26 @@ class SessionService:
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
 
+        user_input_metadata = {
+            key: value
+            for key, value in (
+                ("revoke_fact_id", revoke_fact_id),
+                ("refutes_event_id", refutes_event_id),
+            )
+            if value is not None
+        }
+        if user_input_metadata:
+            events = await anyio.to_thread.run_sync(
+                self._store.read_events, session_id
+            )
+            try:
+                validate_user_fact_links(
+                    events, user_input_metadata, session_id=session_id,
+                    require_active_revocation=True,
+                )
+            except ValueError as error:
+                raise ProtectedFactReferenceInvalid(str(error)) from error
+
         # 第 1 步：**纯读/纯函数**校验全部先于任何落盘（本方法的顺序纪律）。
         # 取代校验是纯读，预算判定是纯函数；`cancel_queue` 会写 queue/cancelled，所以
         # 两者都必须在它之前——否则一个被拒请求会先毁掉用户的排队项（"旧项被取消 +
@@ -1846,18 +1873,22 @@ class SessionService:
                 content=content,
                 run_id=await active_run.wait_run_id(),
                 created_at=_utc_now_iso(),
+                revoke_fact_id=revoke_fact_id,
+                refutes_event_id=refutes_event_id,
             )
             self._append_session_event(
                 session_id, STEER_REQUESTED,
                 steer_id=steer_req.steer_id,
                 content=content,
                 run_id=steer_req.run_id,
+                **user_input_metadata,
             )
             result = SendMessageResult(status="steered", steer_request=steer_req)
         elif active_run is None:
             # idle → 直接拉起新 run（同 resume 路径）。
             launched = await self.resume_and_launch(
                 session_id=session_id, task=content,
+                user_input_metadata=user_input_metadata or None,
                 local_max_agent_turns=local_max_agent_turns,
                 max_steps=max_steps,
                 amend=amend,
@@ -1889,12 +1920,15 @@ class SessionService:
         else:
             # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
             queued = await self._message_queues.enqueue(
-                session_id=session_id, content=content, created_at=_utc_now_iso()
+                session_id=session_id, content=content, created_at=_utc_now_iso(),
+                revoke_fact_id=revoke_fact_id,
+                refutes_event_id=refutes_event_id,
             )
             self._append_session_event(
                 session_id, MESSAGE_QUEUED,
                 queue_id=queued.queue_id,
                 content=content,
+                **user_input_metadata,
             )
             result = SendMessageResult(status="queued", queued_message=queued)
 
@@ -2019,8 +2053,17 @@ class SessionService:
         if not pending:
             return None
         nxt = pending[0]
+        user_input_metadata = {
+            key: value
+            for key, value in (
+                ("revoke_fact_id", nxt.revoke_fact_id),
+                ("refutes_event_id", nxt.refutes_event_id),
+            )
+            if value is not None
+        }
         launched = await self.resume_and_launch(
             session_id=session_id, task=nxt.content, amend=amend,
+            user_input_metadata=user_input_metadata or None,
         )
         # run_id 拿不到（超时）不阻塞投递：消费判据是 input_id，run_id 只是归因。
         run_id = await launched.run.wait_run_id()
@@ -2450,6 +2493,8 @@ class SessionService:
                     content=item.content,
                     session_id=session_id,
                     created_at=item.created_at,
+                    revoke_fact_id=item.revoke_fact_id,
+                    refutes_event_id=item.refutes_event_id,
                 )
                 for item in pending
                 if item.kind == KIND_QUEUE
@@ -2461,6 +2506,8 @@ class SessionService:
                     session_id=session_id,
                     run_id=item.run_id,
                     created_at=item.created_at,
+                    revoke_fact_id=item.revoke_fact_id,
+                    refutes_event_id=item.refutes_event_id,
                 )
                 for item in pending
                 if item.kind != KIND_QUEUE

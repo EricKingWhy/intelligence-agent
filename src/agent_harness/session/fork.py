@@ -211,10 +211,9 @@ async def fork_session(
     # 对话历史——从 seed 里剔除（child 用 `started_data` 重新声明自己的档）。若不剔除，
     # child 的「最后一次 changed 胜」会取到 seed 里**更早**的那条（锚点之前），覆盖掉
     # 下面从父派生的**当下** effective 档，造成「父 fork 后又改过档、child 却继承旧档」。
+    boundary_events = [event for event in parent_events if event.seq < anchor.seq]
     seed = [
-        e
-        for e in parent_events
-        if e.seq < anchor.seq and e.type not in (SESSION_STARTED, PERMISSION_CHANGED)
+        event for event in boundary_events if event.type != SESSION_STARTED
     ]
     _validate_run_complete(seed, parent_session_id)
 
@@ -226,10 +225,10 @@ async def fork_session(
     # "未声明"的话，续聊会落到 workspace-write + 全自动批准（复制了父的 workspace 文件，
     # 却对写操作免审批）。继承的是父**当下生效**档（ADR-0041 §2 D7），父未声明 → 不写键。
     inherited: dict[str, object] = {}
-    parent_mode = effective_permission_mode(parent_events)
+    parent_mode = effective_permission_mode(boundary_events)
     if parent_mode is not None:
         inherited[SESSION_PERMISSION_MODE_KEY] = parent_mode.value
-    parent_auto = effective_auto_approve(parent_events)
+    parent_auto = effective_auto_approve(boundary_events)
     if parent_auto is not None:
         inherited[SESSION_AUTO_APPROVE_KEY] = parent_auto
 

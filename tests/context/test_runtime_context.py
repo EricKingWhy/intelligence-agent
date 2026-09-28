@@ -23,6 +23,8 @@ from agent_harness.session import (
     MODEL_COMPLETED,
     TOOL_RESULT,
     USER_MESSAGE,
+    JsonlSessionStore,
+    Session,
 )
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -271,7 +273,7 @@ async def test_runtime_context_not_duplicated_across_builds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_context_compaction_path_includes_cost(tmp_path, monkeypatch):
+async def test_runtime_context_compaction_path_includes_cost(tmp_path):
     """压缩路径也必须把快照的 token 成本计入 provider 预算。
 
     断言方式：比对 provider 实际拿到的 `remaining_tokens`——有快照时应恰好少
@@ -288,29 +290,29 @@ async def test_runtime_context_compaction_path_includes_cost(tmp_path, monkeypat
             auto_compact_threshold=0.30, hard_guard_threshold=0.85, **kwargs,
         )
 
-    session = make_session(tmp_path)
+    with_store = JsonlSessionStore(root=tmp_path / "with-snapshot")
+    session = Session.start(with_store)
     fill(session)
-    compaction_events = []
-    append = session.append
+    without_store = JsonlSessionStore(root=tmp_path / "without-snapshot")
+    session_without_snapshot = Session(session.session_id, without_store)
+    session_without_snapshot.adopt_history(session.events)
 
-    def record_compaction_without_persisting(event_type, data=None, **kwargs):
-        if event_type in {COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END}:
-            compaction_events.append(event_type)
-            return None
-        return append(event_type, data, **kwargs)
-
-    monkeypatch.setattr(session, "append", record_compaction_without_persisting)
     provider_a = _RecordingProvider()
     builder_a = builder_with(
         context_providers=[provider_a], runtime_context_provider=lambda: SNAPSHOT,
     )
     await builder_a.build(session)
-    assert COMPACTION_START in compaction_events
 
     provider_b = _RecordingProvider()
     builder_b = builder_with(context_providers=[provider_b])
-    await builder_b.build(session)
-    assert compaction_events.count(COMPACTION_START) == 2
+    await builder_b.build(session_without_snapshot)
+
+    expected_compaction_events = {
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    }
+    for store in (with_store, without_store):
+        persisted_types = {event.type for event in store.read_events(session.session_id)}
+        assert expected_compaction_events <= persisted_types
 
     assert provider_a.remaining and provider_b.remaining
     assert len(provider_a.remaining) == 1, "压缩路径 provider 也只应被调用一次"

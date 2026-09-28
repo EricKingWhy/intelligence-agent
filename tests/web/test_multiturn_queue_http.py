@@ -159,6 +159,73 @@ async def _wait_idle(port: int, session_id: str, *, timeout: float = 10.0) -> No
         await asyncio.sleep(0.05)
 
 
+@pytest.mark.asyncio
+async def test_messages_accept_explicit_authorization_revocation_and_veto_links(
+    tmp_path, monkeypatch,
+):
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        sid = await _empty_session(port)
+        from agent_harness.session import TOOL_CALL, USER_MESSAGE, Session
+        from agent_harness.session.derive import derive_protected_facts
+        from agent_harness.session.store import JsonlSessionStore
+
+        store = JsonlSessionStore(root=tmp_path / "sessions")
+        session = Session(sid, store, store.read_events(sid))
+        grant_source = session.append(
+            USER_MESSAGE, {"content": "允许执行写入工具。"}
+        )
+        authorization = session.register_protected_fact(
+            fact_type="authorization",
+            value="允许执行写入工具。",
+            source_event_id=grant_source.event_id,
+        )
+        attempt = session.append(
+            TOOL_CALL,
+            {
+                "tool_call_id": "call-veto",
+                "tool_name": "write_file",
+                "args": {"path": "result.txt"},
+            },
+        )
+
+        frames = await _collect_stream(
+            port,
+            "POST",
+            f"/api/sessions/{sid}/messages",
+            {
+                "content": "撤销写入授权，并否决该尝试。",
+                "revoke_fact_id": authorization.data["fact_id"],
+                "refutes_event_id": attempt.event_id,
+            },
+        )
+        assert frames and frames[-1]["type"] == "run/completed"
+
+        events = store.read_events(sid)
+        user_event = next(
+            event for event in events
+            if event.type == USER_MESSAGE
+            and event.data.get("revoke_fact_id") == authorization.data["fact_id"]
+        )
+        facts = derive_protected_facts(events)
+        assert user_event.data["refutes_event_id"] == attempt.event_id
+        assert user_event.source_event_ids == [grant_source.event_id, attempt.event_id]
+        assert next(f for f in facts if f.fact_id == authorization.data["fact_id"]).status == "superseded"
+        assert any(
+            fact.type == "authorization_revocation"
+            and fact.source_event_id == user_event.event_id
+            for fact in facts
+        )
+        assert any(
+            fact.type == "failed_approach"
+            and fact.source_event_id == attempt.event_id
+            and fact.evidence_event_id == user_event.event_id
+            for fact in facts
+        )
+    finally:
+        await _shutdown(server, serve_task)
+
+
 # ── T5：supersede 只允许最新一条 / injected 拒绝 ──────────────────────
 
 
@@ -391,13 +458,24 @@ async def test_get_queue_and_flush_roundtrip(tmp_path, monkeypatch):
 
         import pathlib
 
-        from agent_harness.session.event import MESSAGE_QUEUED
+        from agent_harness.session.event import MESSAGE_QUEUED, USER_MESSAGE
         from agent_harness.session.store import JsonlSessionStore
         store = JsonlSessionStore(root=pathlib.Path(tmp_path) / "sessions")
         from agent_harness.session import Session
         # append_event 只落盘不 resume（与崩溃窗口等价）
-        Session.append_event(store, sid, MESSAGE_QUEUED,
-                             {"queue_id": "q-flush", "content": "重启前的消息"})
+        source = Session.append_event(
+            store, sid, USER_MESSAGE, {"content": "此前的方案尝试"}
+        )
+        Session.append_event(
+            store,
+            sid,
+            MESSAGE_QUEUED,
+            {
+                "queue_id": "q-flush",
+                "content": "重启前的消息",
+                "refutes_event_id": source.event_id,
+            },
+        )
 
         code, payload = await _get(port, f"/api/sessions/{sid}/queue")
         assert code == 200
@@ -415,6 +493,20 @@ async def test_get_queue_and_flush_roundtrip(tmp_path, monkeypatch):
             f["data"].get("content") for f in frames if f["type"] == "user/message"
         ]
         assert "重启前的消息" in user_contents
+
+        events = store.read_events(sid)
+        delivered = next(
+            event for event in events
+            if event.type == "user/message"
+            and event.data.get("refutes_event_id") == source.event_id
+        )
+        from agent_harness.session.derive import derive_protected_facts
+        assert any(
+            fact.type == "failed_approach"
+            and fact.source_event_id == source.event_id
+            and fact.evidence_event_id == delivered.event_id
+            for fact in derive_protected_facts(events)
+        )
 
         # 投递后队列清空 → idle
         code, payload = await _get(port, f"/api/sessions/{sid}/queue")

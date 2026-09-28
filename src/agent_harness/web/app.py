@@ -57,6 +57,7 @@ from agent_harness.session.service import (
     InvalidDecision,
     InvalidSessionId,
     PendingApprovalConflict,
+    ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
@@ -535,6 +536,8 @@ class SendMessageRequest(_AmendValueValidators):
     max_steps: int | None = Field(default=None, ge=1)
     supersedes_seq: int | None = Field(default=None, ge=0)
     queue_id: str | None = None
+    revoke_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
+    refutes_event_id: str | None = Field(default=None, min_length=1, max_length=200)
     # staged amend 字段（可选，None = 默认行为）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
@@ -1937,6 +1940,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 amend=amend,
                 supersedes_seq=req.supersedes_seq,
                 queue_id=req.queue_id,
+                revoke_fact_id=req.revoke_fact_id,
+                refutes_event_id=req.refutes_event_id,
             )
         except (
             InvalidSessionId,
@@ -1945,6 +1950,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             RecoveryConflict,
             QueueItemNotFound,
             SteerTargetNotFound,
+            ProtectedFactReferenceInvalid,
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,

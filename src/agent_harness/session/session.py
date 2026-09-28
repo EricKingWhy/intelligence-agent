@@ -36,6 +36,7 @@ from agent_harness.session.derive import (
     derive_messages,
     detect_dangling,
     validate_protected_fact_data,
+    validate_user_fact_links,
 )
 from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
@@ -306,7 +307,15 @@ class Session:
             )
         if event_type not in EVENT_TYPES:
             raise ValueError(f"未知事件类型 '{event_type}'：不在 EVENT_TYPES 词汇表中")
-        if event_type == TASK_PROTECTED_FACT:
+        if event_type == USER_MESSAGE:
+            refs = validate_user_fact_links(
+                self._events, data, session_id=self.session_id
+            )
+            if refs:
+                if source_event_ids is not None and source_event_ids != refs:
+                    raise ValueError("user fact links do not match source_event_ids")
+                source_event_ids = refs
+        elif event_type == TASK_PROTECTED_FACT:
             validate_protected_fact_data(self._events, data, session_id=self.session_id)
             refs = [data["source_event_id"]]
             if data.get("evidence_event_id") is not None:
@@ -396,6 +405,7 @@ class Session:
         session_id 改写为本会话。类型必须在 EVENT_TYPES 词表内（流式专属拒绝）。
         """
         adopted: list[SessionEvent] = []
+        adopted_by_id: dict[str, SessionEvent] = {}
         for event in events:
             if event.type in STREAM_ONLY_TYPES:
                 raise ValueError(
@@ -413,9 +423,7 @@ class Session:
                     ref_id = moved_data.get(id_key)
                     if ref_id is None:
                         continue
-                    referenced = next(
-                        (prior for prior in adopted if prior.event_id == ref_id), None
-                    )
+                    referenced = adopted_by_id.get(ref_id)
                     if referenced is None:
                         raise ValueError(
                             "forked protected fact is missing its source event"
@@ -429,6 +437,7 @@ class Session:
             )
             self._persist_event(moved, notify=False)
             adopted.append(moved)
+            adopted_by_id[moved.event_id] = moved
         return adopted
 
     def derive_messages(self) -> list[AnyMessage]:

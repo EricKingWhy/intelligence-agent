@@ -44,6 +44,7 @@ from agent_harness.session.event import (
     MESSAGE_SUPERSEDED,
     MODEL_COMPLETED,
     OPERATION_RECONCILE_REQUIRED,
+    OPERATION_RECONCILED,
     PERMISSION_CHANGED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
@@ -126,6 +127,14 @@ class ProtectedFact:
         if self.superseded_by_fact_id is not None:
             result["superseded_by_fact_id"] = self.superseded_by_fact_id
         return result
+
+
+def serialize_protected_facts(facts: list[ProtectedFact]) -> str:
+    return json.dumps(
+        [fact.to_dict() for fact in facts],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _system_fact_value(source: SessionEvent, fact_type: str) -> Any:
@@ -221,6 +230,59 @@ def _is_refuting_event(source: SessionEvent, evidence: SessionEvent) -> bool:
     )
 
 
+def validate_user_fact_links(
+    events: list[SessionEvent],
+    data: dict[str, Any],
+    *,
+    session_id: str,
+    require_active_revocation: bool = False,
+) -> list[str]:
+    """Validate explicit user links to earlier protected facts or attempted events."""
+    refs: list[str] = []
+    revoke_id = data.get("revoke_fact_id")
+    refutes_id = data.get("refutes_event_id")
+    if data.get("injected_by") and (revoke_id is not None or refutes_id is not None):
+        raise ValueError("only direct user input can link protected facts")
+
+    if revoke_id is not None:
+        if not isinstance(revoke_id, str) or not revoke_id:
+            raise ValueError("revoke_fact_id must be a non-empty string")
+        facts = {
+            fact.fact_id: fact
+            for fact in derive_protected_facts(events)
+            if fact.session_id == session_id
+        }
+        fact = facts.get(revoke_id)
+        if fact is None or fact.type != "authorization":
+            raise ValueError("revoke_fact_id must reference an authorization fact")
+        if require_active_revocation and fact.status != "active":
+            raise ValueError("revoke_fact_id must reference an active authorization")
+        refs.append(fact.source_event_id)
+
+    if refutes_id is not None:
+        if not isinstance(refutes_id, str) or not refutes_id:
+            raise ValueError("refutes_event_id must be a non-empty string")
+        source = next(
+            (
+                event for event in events
+                if event.event_id == refutes_id
+                and event.session_id == session_id
+            ),
+            None,
+        )
+        if source is None or source.type not in _USER_SOURCE_TYPES | {TOOL_CALL}:
+            raise ValueError("refutes_event_id must reference a user or tool attempt")
+        if source.type in _USER_SOURCE_TYPES:
+            if not isinstance(source.data.get("content"), str) or source.data.get(
+                "injected_by"
+            ):
+                raise ValueError("refutes_event_id must reference a direct user input")
+        elif _tool_attempt_value(source) is None:
+            raise ValueError("refutes_event_id must reference a valid tool attempt")
+        refs.append(refutes_id)
+    return refs
+
+
 def _expected_fact_id(data: dict[str, Any]) -> str:
     identity = {
         key: data.get(key)
@@ -246,6 +308,7 @@ def validate_protected_fact_data(
     event_index: dict[str, SessionEvent] | None = None,
     fact_index: dict[str, tuple[int, str]] | None = None,
     latest_tool_result_seq: dict[str, int] | None = None,
+    latest_reconciled_seq: dict[str, int] | None = None,
 ) -> tuple[SessionEvent, SessionEvent | None]:
     """Validate a registration against earlier, same-session source events."""
     fact_type = data.get("fact_type")
@@ -315,7 +378,19 @@ def validate_protected_fact_data(
             result_seq = latest_tool_result_seq.get(
                 source.data.get("tool_call_id", ""), -1
             )
-            if result_seq > source.seq:
+            if latest_reconciled_seq is None:
+                latest_reconciled_seq = {
+                    event.data["tool_call_id"]: event.seq
+                    for event in events
+                    if event.type == OPERATION_RECONCILED
+                    and isinstance(event.data.get("tool_call_id"), str)
+                }
+            if (
+                result_seq > source.seq
+                or latest_reconciled_seq.get(
+                    source.data.get("tool_call_id", ""), -1
+                ) > source.seq
+            ):
                 raise ValueError("operation has a later result and is already reconciled")
     elif fact_type == "failed_approach":
         if source.type not in _USER_SOURCE_TYPES | {TOOL_CALL}:
@@ -459,12 +534,18 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         if event.type == TOOL_RESULT
         and isinstance(event.data.get("tool_call_id"), str)
     }
+    latest_reconciled_seq = {
+        event.data["tool_call_id"]: event.seq
+        for event in events
+        if event.type == OPERATION_RECONCILED
+        and isinstance(event.data.get("tool_call_id"), str)
+    }
     facts: list[ProtectedFact] = []
-    registered_by_id: dict[str, int] = {}
     fact_ids: set[str] = set()
     prior_event_by_id: dict[str, SessionEvent] = {}
     prior_fact_by_id: dict[str, tuple[int, str]] = {}
     superseded_by: dict[str, str] = {}
+    latest_permission_fact_id: str | None = None
     first_user_source = next(
         (
             event
@@ -519,12 +600,13 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         if event.type == TOOL_RESULT and isinstance(call_id, str):
             tool_results_by_call.setdefault(call_id, []).append(event)
 
-    def add_fact(fact: ProtectedFact) -> None:
+    def add_fact(fact: ProtectedFact) -> bool:
         if fact.fact_id in fact_ids:
-            return
+            return False
         fact_ids.add(fact.fact_id)
         prior_fact_by_id[fact.fact_id] = (fact.source_seq, fact.type)
         facts.append(fact)
+        return True
 
     for event in events:
         data = event.data
@@ -546,7 +628,11 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 )
             )
         if event.type == PERMISSION_CHANGED:
-            add_fact(_fact_from_system_event(event, "authorization", dict(data)))
+            fact = _fact_from_system_event(event, "authorization", dict(data))
+            if latest_permission_fact_id is not None:
+                superseded_by[latest_permission_fact_id] = fact.fact_id
+            latest_permission_fact_id = fact.fact_id
+            add_fact(fact)
         elif event.type in _RUN_BOUNDARY_TYPES:
             add_fact(
                 _fact_from_system_event(
@@ -554,14 +640,74 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 )
             )
         elif event.type == OPERATION_RECONCILE_REQUIRED:
-            if latest_tool_result_seq.get(
-                data.get("tool_call_id", ""), -1
-            ) <= event.seq:
+            tool_call_id = data.get("tool_call_id", "")
+            if (
+                latest_tool_result_seq.get(tool_call_id, -1) <= event.seq
+                and latest_reconciled_seq.get(tool_call_id, -1) <= event.seq
+            ):
                 add_fact(
                     _fact_from_system_event(
                         event,
                         "unresolved_operation",
                         _system_fact_value(event, "unresolved_operation"),
+                    )
+                )
+        elif event.type == USER_MESSAGE:
+            revoke_id = data.get("revoke_fact_id")
+            if (
+                not data.get("injected_by")
+                and isinstance(revoke_id, str)
+                and prior_fact_by_id.get(revoke_id, (0, ""))[1] == "authorization"
+            ):
+                fact_data = {
+                    "fact_type": "authorization_revocation",
+                    "value": data.get("content", ""),
+                    "source_event_id": event.event_id,
+                    "supersedes_fact_id": revoke_id,
+                }
+                fact_id = _expected_fact_id(fact_data)
+                if add_fact(
+                    ProtectedFact(
+                        fact_id=fact_id,
+                        type="authorization_revocation",
+                        value=fact_data["value"],
+                        source_event_id=event.event_id,
+                        source_seq=event.seq,
+                        status="active",
+                        session_id=event.session_id,
+                    )
+                ):
+                    superseded_by[revoke_id] = fact_id
+
+            refutes_id = data.get("refutes_event_id")
+            source = (
+                prior_event_by_id.get(refutes_id)
+                if isinstance(refutes_id, str)
+                else None
+            )
+            if source is not None and _is_refuting_event(source, event):
+                value = (
+                    _tool_attempt_value(source)
+                    if source.type == TOOL_CALL
+                    else source.data.get("content")
+                )
+                fact_data = {
+                    "fact_type": "failed_approach",
+                    "value": value,
+                    "source_event_id": source.event_id,
+                    "evidence_event_id": event.event_id,
+                }
+                add_fact(
+                    ProtectedFact(
+                        fact_id=_expected_fact_id(fact_data),
+                        type="failed_approach",
+                        value=value,
+                        source_event_id=source.event_id,
+                        source_seq=source.seq,
+                        status="active",
+                        session_id=event.session_id,
+                        evidence_event_id=event.event_id,
+                        evidence_seq=event.seq,
                     )
                 )
         elif event.type in {ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED}:
@@ -606,6 +752,7 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                     event_index=prior_event_by_id,
                     fact_index=prior_fact_by_id,
                     latest_tool_result_seq=latest_tool_result_seq,
+                    latest_reconciled_seq=latest_reconciled_seq,
                 )
             except (TypeError, ValueError):
                 logger.warning(
@@ -613,10 +760,7 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 )
                 continue
             fact_id = data["fact_id"]
-            if fact_id in registered_by_id:
-                continue
-            registered_by_id[fact_id] = len(facts)
-            add_fact(
+            if not add_fact(
                 ProtectedFact(
                     fact_id=fact_id,
                     type=data["fact_type"],
@@ -628,7 +772,8 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                     evidence_event_id=evidence.event_id if evidence else None,
                     evidence_seq=evidence.seq if evidence else None,
                 )
-            )
+            ):
+                continue
             prior_fact_id = data.get("supersedes_fact_id")
             if prior_fact_id:
                 superseded_by[prior_fact_id] = fact_id
@@ -1029,6 +1174,8 @@ class UndeliveredInput:
     created_at: str
     #: steer 的注入目标 run（重建内存注册表时还原）。queue 恒 None。
     run_id: str | None = None
+    revoke_fact_id: str | None = None
+    refutes_event_id: str | None = None
 
 
 def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
@@ -1072,6 +1219,8 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     content=str(event.data.get("content", "")),
                     seq=event.seq,
                     created_at=event.time,
+                    revoke_fact_id=event.data.get("revoke_fact_id"),
+                    refutes_event_id=event.data.get("refutes_event_id"),
                 )
             )
         elif event.type == STEER_REQUESTED:
@@ -1089,6 +1238,8 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     seq=event.seq,
                     created_at=event.time,
                     run_id=run_id if isinstance(run_id, str) else None,
+                    revoke_fact_id=event.data.get("revoke_fact_id"),
+                    refutes_event_id=event.data.get("refutes_event_id"),
                 )
             )
     items.sort(key=lambda item: item.seq)

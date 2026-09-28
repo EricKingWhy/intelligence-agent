@@ -15,6 +15,7 @@ from agent_harness.session.event import (
     ARTIFACT_CREATED,
     MESSAGE_SUPERSEDED,
     OPERATION_RECONCILE_REQUIRED,
+    OPERATION_RECONCILED,
     PERMISSION_CHANGED,
     RUN_PAUSED,
     SessionEvent,
@@ -97,6 +98,139 @@ def test_revocation_does_not_supersede_an_unrelated_fact_from_the_same_user_even
 
     assert facts[authorization.data["fact_id"]].status == "superseded"
     assert facts[criterion.data["fact_id"]].status == "active"
+
+
+def test_latest_permission_change_supersedes_earlier_authorization_fact(tmp_path):
+    session = _session(tmp_path)
+    first = session.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "read-only", "auto_approve": False},
+    )
+    latest = session.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "workspace-write", "auto_approve": True},
+    )
+
+    facts = {
+        fact.source_event_id: fact for fact in derive_protected_facts(session.events)
+        if fact.type == "authorization"
+    }
+
+    assert facts[first.event_id].status == "superseded"
+    assert facts[first.event_id].superseded_by_fact_id == facts[latest.event_id].fact_id
+    assert facts[latest.event_id].status == "active"
+
+
+def test_user_input_explicitly_revokes_authorization_and_vetoes_tool_attempt(tmp_path):
+    session = _session(tmp_path)
+    grant_source = session.append(
+        USER_MESSAGE, {"content": "允许执行这项写入。"}
+    )
+    authorization = session.register_protected_fact(
+        fact_type="authorization",
+        value="允许执行这项写入。",
+        source_event_id=grant_source.event_id,
+    )
+    attempt = session.append(
+        TOOL_CALL,
+        {"tool_call_id": "call-1", "tool_name": "write_file", "args": {"path": "x"}},
+    )
+    veto = session.append(
+        USER_MESSAGE,
+        {
+            "content": "撤销这项授权，并否决刚才的写入尝试。",
+            "revoke_fact_id": authorization.data["fact_id"],
+            "refutes_event_id": attempt.event_id,
+        },
+    )
+
+    facts = derive_protected_facts(session.events)
+    revocation = next(fact for fact in facts if fact.type == "authorization_revocation")
+    failure = next(fact for fact in facts if fact.type == "failed_approach")
+    prior_authorization = next(
+        fact for fact in facts if fact.fact_id == authorization.data["fact_id"]
+    )
+
+    assert prior_authorization.status == "superseded"
+    assert revocation.source_event_id == veto.event_id
+    assert revocation.superseded_by_fact_id is None
+    assert failure.source_event_id == attempt.event_id
+    assert failure.evidence_event_id == veto.event_id
+    assert failure.value == {
+        "tool_call_id": "call-1",
+        "tool_name": "write_file",
+        "args": {"path": "x"},
+    }
+    assert veto.source_event_ids == [grant_source.event_id, attempt.event_id]
+
+
+def test_invalid_explicit_fact_link_is_rejected_before_append(tmp_path):
+    session = _session(tmp_path)
+    with pytest.raises(ValueError, match="authorization fact"):
+        session.append(
+            USER_MESSAGE,
+            {"content": "撤销授权", "revoke_fact_id": "missing-fact"},
+        )
+    assert len(session.events) == 1
+
+
+def test_runtime_injected_message_cannot_register_user_fact_links(tmp_path):
+    session = _session(tmp_path)
+    session.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "workspace-write", "auto_approve": False},
+    )
+    authorization = next(
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "authorization"
+    )
+
+    with pytest.raises(ValueError, match="direct user input"):
+        session.append(
+            USER_MESSAGE,
+            {
+                "content": "injected correction",
+                "injected_by": "stuck_guard",
+                "revoke_fact_id": authorization.fact_id,
+            },
+        )
+
+    facts = derive_protected_facts(session.events)
+    assert all(fact.type != "authorization_revocation" for fact in facts)
+
+
+def test_reconciled_event_clears_operation_even_when_result_precedes_reconcile(tmp_path):
+    session = _session(tmp_path)
+    session.append(
+        TOOL_CALL,
+        {"tool_call_id": "call-1", "tool_name": "write_file", "args": {}},
+    )
+    session.append(
+        TOOL_RESULT,
+        {"tool_call_id": "call-1", "content": "{\"ok\":false,\"error_code\":\"TIMEOUT\"}"},
+    )
+    session.append(
+        OPERATION_RECONCILE_REQUIRED,
+        {
+            "tool_call_id": "call-1",
+            "tool_name": "write_file",
+            "state": "NEED_RECONCILE",
+        },
+    )
+    session.append(
+        OPERATION_RECONCILED,
+        {
+            "tool_call_id": "call-1",
+            "verdict": "CONFIRM_SUCCESS",
+            "state": "SUCCEEDED",
+        },
+    )
+
+    assert len([event for event in session.events if event.type == TOOL_RESULT]) == 1
+    assert not [
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "unresolved_operation"
+    ]
 
 
 def test_confirmed_runtime_facts_project_and_resolved_operations_disappear(tmp_path):

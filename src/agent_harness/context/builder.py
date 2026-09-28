@@ -1,6 +1,5 @@
 """Session 事件投影到 Runtime Context 的单一入口。"""
 
-import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -11,7 +10,9 @@ from agent_harness.context.compactor import ContextCompactor, ContextWindowExcee
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.session import Session
-from agent_harness.session.derive import ProtectedFact, derive_protected_facts
+from agent_harness.session.derive import (
+    ProtectedFact, derive_protected_facts, serialize_protected_facts,
+)
 from agent_harness.session.event import (
     COMPACTION_END,
     COMPACTION_START,
@@ -205,11 +206,7 @@ class ContextBuilder:
     def _protected_facts_message(facts: list[ProtectedFact]) -> SystemMessage | None:
         if not facts:
             return None
-        records = json.dumps(
-            [fact.to_dict() for fact in facts],
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        records = serialize_protected_facts(facts)
         return SystemMessage(
             content=(
                 "## Protected task facts\n"

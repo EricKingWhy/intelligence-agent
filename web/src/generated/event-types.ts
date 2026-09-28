@@ -22,6 +22,7 @@ export const EventType = {
   TOOL_CALL: 'tool/call',
   TOOL_RESULT: 'tool/result',
   OPERATION_RECONCILE_REQUIRED: 'operation/reconcile-required',
+  OPERATION_RECONCILED: 'operation/reconciled',
   ARTIFACT_CREATED: 'artifact/created',
   ARTIFACT_EXTERNALIZED: 'artifact/externalized',
   CONTEXT_COMPACTED: 'context/compacted',

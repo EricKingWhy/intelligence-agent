@@ -328,6 +328,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     from agent_harness.agent.budget import BudgetRejection
                     from agent_harness.session.service import (
                         InvalidSessionId,
+                        ProtectedFactReferenceInvalid,
                         SessionNotFound,
                         WorkspaceBindingConflict,
                     )
@@ -350,6 +351,8 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     try:
                         result = await service.send_message(
                             session_id=sid, content=content, mode=mode, **claims,
+                            revoke_fact_id=msg.get("revoke_fact_id"),
+                            refutes_event_id=msg.get("refutes_event_id"),
                         )
                     # WorkspaceBindingConflict（#266）：WS 是 HTTP 三个端点之外的第四个
                     # 续聊入口——不在这里收编，它会逃到外层的 `except Exception`（只
@@ -358,6 +361,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     except (
                         InvalidSessionId,
                         SessionNotFound,
+                        ProtectedFactReferenceInvalid,
                         WorkspaceBindingConflict,
                         BudgetRejection,
                     ) as e:

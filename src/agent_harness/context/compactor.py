@@ -18,7 +18,7 @@ from langchain_core.messages import (
 
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
-from agent_harness.session.derive import ProtectedFact
+from agent_harness.session.derive import ProtectedFact, serialize_protected_facts
 from agent_harness.session.event import SessionEvent
 
 logger = logging.getLogger("agent_harness.context.compactor")
@@ -314,11 +314,7 @@ def _programmatic_summary_sections(
         _SUMMARY_HEADINGS[0]: json.dumps(user_messages, ensure_ascii=False)
         if user_messages else "(none)",
         _SUMMARY_HEADINGS[1]: (
-            json.dumps(
-                [fact.to_dict() for fact in protected_facts],
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+            serialize_protected_facts(protected_facts)
             if protected_facts
             else "(none)"
             if protected_facts is not None

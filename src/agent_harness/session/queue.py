@@ -34,6 +34,8 @@ class QueuedMessage:
     session_id: str
     created_at: str
     cancelled: bool = False
+    revoke_fact_id: str | None = None
+    refutes_event_id: str | None = None
 
 
 @dataclass
@@ -48,6 +50,8 @@ class SteerRequest:
     #: （ADR-0030 §4.3），该请求随后由终态驱动当普通输入投递，不会静默丢失。
     run_id: str | None
     created_at: str
+    revoke_fact_id: str | None = None
+    refutes_event_id: str | None = None
 
 
 class SteerSource(Protocol):
@@ -89,7 +93,8 @@ class MessageQueueManager:
         self._lock = asyncio.Lock()
 
     async def enqueue(
-        self, *, session_id: str, content: str, created_at: str
+        self, *, session_id: str, content: str, created_at: str,
+        revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
     ) -> QueuedMessage:
         """把消息放入 session 的队列，返回 QueuedMessage。"""
         queue_id = str(uuid4())
@@ -98,6 +103,8 @@ class MessageQueueManager:
             content=content,
             session_id=session_id,
             created_at=created_at,
+            revoke_fact_id=revoke_fact_id,
+            refutes_event_id=refutes_event_id,
         )
         async with self._lock:
             self._queues.setdefault(session_id, []).append(msg)
@@ -147,7 +154,8 @@ class MessageQueueManager:
             return [m for m in queue if not m.cancelled]
 
     async def register_steer(
-        self, *, session_id: str, content: str, run_id: str | None, created_at: str
+        self, *, session_id: str, content: str, run_id: str | None, created_at: str,
+        revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
     ) -> SteerRequest:
         """注册一个 steer 请求。runtime 在下一步前检查并注入。"""
         steer_id = str(uuid4())
@@ -157,6 +165,8 @@ class MessageQueueManager:
             session_id=session_id,
             run_id=run_id,
             created_at=created_at,
+            revoke_fact_id=revoke_fact_id,
+            refutes_event_id=refutes_event_id,
         )
         async with self._lock:
             self._steers.setdefault(session_id, []).append(req)
