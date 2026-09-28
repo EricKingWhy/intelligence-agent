@@ -300,7 +300,7 @@ ownership from a matching name or schema; cleanup refuses to drop such a collect
 and reports unverifiable cleanup instead. This avoids deleting a same-name collection
 created by another actor during the create race.
 
-### D16 — #304 promotes Mimo to the gate-local primary
+### D16 — #304 temporarily promotes Mimo to the gate-local primary (superseded by D17)
 
 On 2026-09-29, after the qwen primary produced zero successful calls across 23 attempts,
 the user approved promoting the configured `mimo` / `mimo-v2.6-flash` model to the #304
@@ -312,6 +312,12 @@ live calls; `.env` is not rewritten. This decision supersedes D12 and D14 only f
 #304 evidence gate. Frozen PRD §5.3 role defaults, runtime wiring, quality thresholds,
 and credential handling remain unchanged. The failed source run is preserved at
 `docs/evidence/memory-v2-real-gold-v1.8.0-1d8d3cd3d9b4-d25667d2.json`.
+
+### D17 — #304 uses the configured Cline gateway primary and Mimo fallback
+
+On 2026-09-29, after the D16 Mimo-primary run failed blocking quality thresholds and its Qwen fallback did not complete, the user approved replacing both #304 gate models. The configured Cline gateway model `cline-pass/deepseek-v4.1-flash` is the gate-local `memory.primary`; `mimo` / `mimo-v2.6-flash` is `memory.fallback`.
+
+Cline is not a production provider preset. The real-gate runner therefore maps the configured `cline` provider id to the existing generic OpenAI-compatible adapter slot only while constructing the gate model. It preserves the configured model name, Cline base URL, and credential. A live probe found Cline's non-streaming response wraps the Chat Completion under `{\"success\": true, \"data\": ...}`; the documented streaming response uses standard OpenAI SSE. The runner enables streaming only for this Cline primary. This gate-local mapping reuses the existing transport without adding a production provider preset or changing PRD §5.3 aliases, runtime defaults, or quality thresholds. The observed non-streaming mismatch is tracked in [Cline issue #12647](https://github.com/cline/cline/issues/12647). The runner validates both role/model identities before live calls. D17 supersedes D16 for subsequent #304 evidence runs.
 
 ## 4. Verification contract
 

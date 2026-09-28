@@ -16,9 +16,9 @@ The user requires the final real Gate only after all implementation tickets are 
 
 Credentials exist only in ignored local configuration. This ticket may check whether required keys are configured but must never print values.
 
-## Approved gate-local model amendment (2026-09-29)
+## Approved gate-local model amendment (2026-09-29; supersedes D16)
 
-After the configured qwen primary produced zero successful calls across 23 attempts, the user approved promoting `mimo/mimo-v2.6-flash` to this ticket's `memory.primary`. The former configured qwen model (`qwen/cline-pass/glm-5.3-flash`) remains `memory.fallback`, preserving AC4's successful-fallback requirement. The runner maps the configured chain only for #304 and validates both provider/model pairs before live calls. No PRD threshold, production role default, or credential value changes.
+After the Mimo-primary run missed the blocking quality thresholds and Qwen fallback failed, the user approved replacing both gate models: Cline `cline-pass/deepseek-v4.1-flash` is the #304 `memory.primary`, and Mimo `mimo-v2.6-flash` is `memory.fallback`. The configured Cline gateway uses an OpenAI-compatible endpoint but is not a production provider preset. For this runner only, its provider id maps to the existing generic OpenAI-compatible adapter while preserving the configured model name, base URL, and credential. A live probe found that Cline's non-streaming response wraps the completion in a `{\"success\": true, \"data\": ...}` envelope; the streaming response follows standard OpenAI SSE. The runner enables streaming only for this Cline primary. The observed gateway response mismatch is tracked in [Cline issue #12647](https://github.com/cline/cline/issues/12647). This gate-local mapping does not change production aliases, PRD thresholds, or credentials.
 
 ## Current Behavior
 
@@ -120,7 +120,7 @@ parallelizable: no; run only on the fully integrated frozen tree
 - No credential value appears in logs, issues, documents, traces, screenshots, or terminal output.
 - Tracker and PHASE_STATUS point to the frozen SHA, machine evidence, and final verdict.
 
-## 2026-09-29 Mimo-primary real-gate result
+## 2026-09-29 Mimo-primary real-gate result (superseded attempt)
 
 - Frozen source identity: commit `55aec704befab808d16a01404f33758693ab0c01`, tree `e82fc8bc7d22ae907586cdc83242dc89a878eb3c`. Gate-0 artifact: `docs/gate/55aec704befab808d16a01404f33758693ab0c01.json` (6/6 PASS).
 - Real gate run `7d3a3645-b7aa-4ea1-bd66-be6c4545c76c`, repeated from `d25667d2-5ed8-4818-a023-b838eece9631`, executed 27/27 cases and failed 3; report: `docs/evidence/memory-v2-real-gold-v1.8.0-55aec704befa-7d3a3645.json`.

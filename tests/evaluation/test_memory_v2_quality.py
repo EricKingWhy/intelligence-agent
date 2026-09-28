@@ -47,6 +47,7 @@ from evaluation.memory_v2_quality import (
     run_memory_gold_gate,
 )
 from scripts.run_memory_v2_real_gold_gate import (
+    _create_gate_chat_model,
     _drop_owned_collection,
     _eligibility_for_case,
     _events_for_case,
@@ -617,29 +618,68 @@ def test_gate_rejects_an_unapproved_fallback_model():
     with pytest.raises(RuntimeError, match="fallback model does not match"):
         _require_approved_gate_roles(SimpleNamespace(
             primary=SimpleNamespace(
-                provider="mimo", model_name="mimo-v2.6-flash",
+                provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
             ), fallback=SimpleNamespace(
-                provider="qwen", model_name="another-model",
+                provider="mimo", model_name="another-model",
             ),
         ))
 
 
-def test_gate_promotes_configured_mimo_fallback_and_keeps_qwen_as_fallback():
+def test_gate_uses_cline_gateway_primary_and_mimo_fallback():
     settings = Settings(
-        _env_file=None, model_provider="qwen",
-        model_name="cline-pass/glm-5.3-flash", model_api_key="primary-test-key",
+        _env_file=None, model_provider="Cline",
+        model_name="cline-pass/deepseek-v4.1-flash", model_api_key="primary-test-key",
+        model_base_url="https://api.cline.bot/api/v1",
         fallback_model_provider="mimo", fallback_model_name="mimo-v2.6-flash",
         fallback_model_api_key="fallback-test-key",
+        fallback_model_base_url="https://api.xiaomimimo.com/v1",
     )
 
     roles = _resolve_approved_gate_roles(settings)
 
-    assert roles.primary.provider == "mimo"
-    assert roles.primary.model_name == "mimo-v2.6-flash"
+    assert roles.primary.provider == "deepseek"
+    assert roles.primary.model_name == "cline-pass/deepseek-v4.1-flash"
+    assert roles.primary.base_url == "https://api.cline.bot/api/v1"
+    assert roles.primary.get_secret_value() == "primary-test-key"
     assert roles.primary.fallback is None
-    assert roles.fallback.provider == "qwen"
-    assert roles.fallback.model_name == "cline-pass/glm-5.3-flash"
+    assert roles.fallback.provider == "mimo"
+    assert roles.fallback.model_name == "mimo-v2.6-flash"
+    assert roles.fallback.base_url == "https://api.xiaomimimo.com/v1"
+    assert roles.fallback.get_secret_value() == "fallback-test-key"
     assert roles.fallback.fallback is None
+
+
+def test_gate_streams_only_cline_primary_to_avoid_nonstandard_nonstream_envelope(monkeypatch):
+    created = []
+
+    class FakeModel:
+        def __init__(self, streaming=False):
+            self.streaming = streaming
+
+        def model_copy(self, *, update):
+            return FakeModel(streaming=update["streaming"])
+
+    def fake_create_chat_model(config, *, reasoning_effort=None):
+        created.append((config.provider, config.model_name, reasoning_effort))
+        return FakeModel()
+
+    monkeypatch.setattr(
+        "scripts.run_memory_v2_real_gold_gate.create_chat_model", fake_create_chat_model,
+    )
+
+    primary = _create_gate_chat_model(SimpleNamespace(
+        provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
+    ), reasoning_effort="deep")
+    fallback = _create_gate_chat_model(SimpleNamespace(
+        provider="mimo", model_name="mimo-v2.6-flash",
+    ), reasoning_effort="deep")
+
+    assert primary.streaming is True
+    assert fallback.streaming is False
+    assert created == [
+        ("deepseek", "cline-pass/deepseek-v4.1-flash", "deep"),
+        ("mimo", "mimo-v2.6-flash", "deep"),
+    ]
 
 
 def test_recall_target_label_requires_its_gold_fact_to_be_in_formed_memory():

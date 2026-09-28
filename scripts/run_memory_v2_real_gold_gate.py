@@ -89,6 +89,7 @@ from agent_harness.memory.v2.tools import RememberMemoryV2Tool, _RememberV2Args
 from agent_harness.memory.v2.types import MemoryRecordV2
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.fallback import is_transient_model_error
+from agent_harness.model.provider import create_chat_model
 from agent_harness.session import (
     MEMORY_RECALLED,
     MODEL_COMPLETED,
@@ -134,18 +135,34 @@ _RECALL_DISTRACTORS = (
     "Service authentication uses signed tokens.",
 )
 _SECRET_SENTINEL = "NEVER-A-REAL-CREDENTIAL"
-_GATE_PRIMARY_PROVIDER = "mimo"  # User-approved #304 primary contract amendment.
-_GATE_PRIMARY_MODEL = "mimo-v2.6-flash"
-_GATE_FALLBACK_PROVIDER = "qwen"  # Former primary retained for AC4 fallback coverage.
-_GATE_FALLBACK_MODEL = "cline-pass/glm-5.3-flash"
+_GATE_CONFIGURED_PRIMARY_PROVIDER = "cline"
+_GATE_PRIMARY_PROVIDER = "deepseek"  # Existing preset slot for the generic OpenAI-compatible adapter.
+_GATE_PRIMARY_MODEL = "cline-pass/deepseek-v4.1-flash"
+_GATE_FALLBACK_PROVIDER = "mimo"
+_GATE_FALLBACK_MODEL = "mimo-v2.6-flash"
 _GATE_JWT_SECRET = "memory-v2-gold-local-signing-key-not-a-credential"
+
+
+def _create_gate_chat_model(
+    config: ModelConfig, *, reasoning_effort: str | None = None,
+) -> Any:
+    """Use Cline's standards-shaped SSE path for this gate's primary model."""
+    model = create_chat_model(config, reasoning_effort=reasoning_effort)
+    if (
+        config.provider == _GATE_PRIMARY_PROVIDER
+        and config.model_name == _GATE_PRIMARY_MODEL
+    ):
+        # Cline's non-streaming endpoint currently wraps the completion under
+        # {"success": true, "data": ...}; streaming returns standard OpenAI SSE.
+        return model.model_copy(update={"streaming": True})
+    return model
 
 
 class _RecordingInvoker:
     """Use the configured invoker and retain only safe per-call facts."""
 
     def __init__(self, *, inject_primary_transient: bool) -> None:
-        self._inner = ChatModelInvoker()
+        self._inner = ChatModelInvoker(factory=_create_gate_chat_model)
         self._inject_primary_transient = inject_primary_transient
         self.attempts: list[dict[str, Any]] = []
 
@@ -283,14 +300,20 @@ def _matches_recall_target(record: MemoryRecordV2, case: GoldCase) -> bool:
 
 
 def _resolve_approved_gate_roles(settings: Settings) -> MemoryModelRoles:
-    """Promote configured Mimo to #304 primary without changing production defaults."""
-    configured_chain = ModelConfig.from_settings(settings)
-    primary = configured_chain.fallback
-    if primary is None:
-        raise RuntimeError("approved Memory V2 gate Mimo primary is not configured")
-    configured_chain.fallback = None
-    fallback = configured_chain
+    """Use the approved Cline/Mimo chain only for #304 without changing production defaults."""
+    if settings.model_provider.casefold() != _GATE_CONFIGURED_PRIMARY_PROVIDER:
+        raise RuntimeError("approved Memory V2 gate Cline primary is not configured")
+
+    # Cline exposes an OpenAI-compatible endpoint but is not a production provider preset.
+    # The preset selects the generic OpenAI-compatible adapter; retain the configured Cline
+    # model name, base URL, and key. This normalization is local to this evidence runner.
+    gate_settings = settings.model_copy(update={"model_provider": _GATE_PRIMARY_PROVIDER})
+    primary = ModelConfig.from_settings(gate_settings)
+    fallback = primary.fallback
+    if fallback is None:
+        raise RuntimeError("approved Memory V2 gate Mimo fallback is not configured")
     primary.fallback = None
+    fallback.fallback = None
     roles = MemoryModelRoles(primary=primary, fallback=fallback)
     _require_approved_gate_roles(roles)
     return roles
