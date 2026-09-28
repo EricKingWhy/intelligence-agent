@@ -8,8 +8,10 @@ from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 
 from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
 from agent_harness.context.provider import ContextProvider
+from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.session import Session
+from agent_harness.session.derive import derive_messages_with_source_ranges
 from agent_harness.session.event import (
     COMPACTION_END,
     COMPACTION_START,
@@ -37,11 +39,13 @@ class ContextBuilder:
         model_provider: Any,
         *,
         max_context_tokens: int = 200_000,
-        auto_compact_threshold: float = 0.80,
-        hard_guard_threshold: float = 0.90,
+        auto_compact_threshold: float = 0.70,
+        hard_guard_threshold: float = 0.85,
         context_providers: list[ContextProvider] | None = None,
         system_prompt: str | None = None,
         runtime_context_provider: Callable[[], str] | None = None,
+        artifact_store: Any | None = None,
+        artifact_read_tool_name: str | None = None,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
@@ -80,10 +84,36 @@ class ContextBuilder:
         self._last_provider_tokens_by_name: dict[str, int] = {}
         # 最近一次 build 的运行时快照成本（非持久化注入，见 _inject_runtime_context）。
         self._last_runtime_context_tokens: int = 0
+        # W-03 (#347)：可回读 Artifact 前提下的旧 Tool Result 投影裁剪。
+        # artifact_store 为 None（默认）→ pruner 整体缺席，行为与 W-03 之前一致；
+        # 装配时 read_tool_name 必须显式给出——骨架行的回读提示点名**装配期真实
+        # 读回工具**（#186 教训：名字不得写死、不得静默缺省）。
+        if artifact_store is None:
+            if artifact_read_tool_name is not None:
+                raise ValueError("artifact_read_tool_name requires artifact_store")
+            self._pruner: ToolResultPruner | None = None
+        else:
+            if not artifact_read_tool_name:
+                raise ValueError("artifact_store requires artifact_read_tool_name")
+            self._pruner = ToolResultPruner(artifact_store, artifact_read_tool_name)
+        # 最近一次 build 的裁剪决策：session_id → {seq → 骨架行}。**整体替换**
+        # （不增量合并）：重放路径（usage_snapshot）必须逐字节等于最近一次 build
+        # 的投影，决策回退 / 事件 shadow 时旧条目不得残留。
+        self._prune_decisions: dict[str, dict[int, str]] = {}
+        # 最近一次 build 的裁剪账目（测试观察口，生产路径不消费）。
+        self._last_prune_report: PruneReport | None = None
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
-        messages = session.derive_messages()
+        # W-03 (#347)：pruner 在 derive 之后、估算之前接入。裁剪是原位替换
+        # （消息数 / 顺序 / tool_call_id / source seq 不变），估算、provider 注入
+        # 与压缩消费同一份投影——不存在第二视图。
+        source_ranges: list[tuple[int, int] | None] | None = None
+        if self._pruner is None:
+            messages = session.derive_messages()
+        else:
+            pairs = derive_messages_with_source_ranges(session.events)
+            messages, source_ranges = await self._prune_projection(session, pairs)
         token_estimate = self._estimate_tokens_cached(session, messages)
         # 运行时上下文快照（T7）：provider 每次 build **只调一次**——token 估算与
         # 注入必须用同一份文本，否则预算与内容可能不一致（且 callable 的调用
@@ -131,7 +161,8 @@ class ContextBuilder:
             self.model_provider, max_context_tokens=self.max_context_tokens,
             auto_compact_threshold=self.auto_compact_threshold,
             hard_guard_threshold=self.hard_guard_threshold,
-        ).compact(messages, token_estimate, events=session.events)
+        ).compact(messages, token_estimate, events=session.events,
+                  source_ranges=source_ranges)
         if result.compacted_turn_count:
             if not result.summary or not result.bracket_id:
                 raise ContextWindowExceededError(
@@ -167,6 +198,36 @@ class ContextBuilder:
         built = await self._with_providers(session, result.messages, provider_estimate)
         built = self._inject_runtime_context(built, runtime_context)
         return self._prepend_system_prompt(built)
+
+    async def _prune_projection(
+        self, session: Session,
+        pairs: list[tuple[AnyMessage, tuple[int, int] | None]],
+    ) -> tuple[list[AnyMessage], list[tuple[int, int] | None]]:
+        """W-03 (#347)：对 derive 产物做投影级裁剪，返回 (messages, source_ranges)。
+
+        裁剪只替换被裁 seq 的 ToolMessage.content，消息数与顺序不变，因此
+        source_ranges 与返回的 messages 位置一一对应（压缩器 ranges 覆盖入参
+        就按这个对应关系取值）。
+        """
+        messages, report = await self._pruner.prune(pairs, session.events)
+        sid = session.session_id
+        pruned = report.pruned_seqs
+        if pruned or sid in self._prune_decisions:
+            # memo 失效（地雷 1）：memo 以 (session_id, seq) 为 key，前提是投影
+            # 内容终身不变——裁剪破坏该前提。失效「本次被裁 ∪ 上次被裁」：
+            # 失效不彻底 = 高估（安全方向）；失效错条目 = 低估（危险方向）。
+            # 后一个集合防「决策回退」（上次裁了这次没裁，理论上被校验粘滞
+            # 挡住，这里双保险）时 memo 残留骨架成本造成低估。
+            stale = pruned | self._prune_decisions.get(sid, {}).keys()
+            self._token_memo = {
+                key: cost for key, cost in self._token_memo.items()
+                if not (key[0] == sid and key[1] in stale)
+            }
+        self._prune_decisions[sid] = {
+            record.seq: record.skeleton for record in report.pruned
+        }
+        self._last_prune_report = report
+        return messages, [source_range for _message, source_range in pairs]
 
     def _inject_runtime_context(
         self, messages: list[AnyMessage], runtime_context: str | None,
@@ -289,8 +350,22 @@ class ContextBuilder:
         注入成本才是同一份真相（上次审查正是这里出过"live 与缓存两个视图不一致"）。
 
         工具两组由端点层持有 registry 单独估算后合并（T4 求和不变式在端点层闭合）。
+
+        W-03 (#347)：pruner 装配时，messages 桶走与 build 同一条裁剪路径
+        （地雷 2，#200 双视图教训）。本方法是同步读口而 store 校验是 async，
+        因此重放**最近一次 build 落下的决策**（seq → 骨架行）——同一 builder
+        实例上与 build 产物逐字节一致；build 之后新到达的结果尚未裁，
+        估值偏高（安全方向），下一次 build 收敛。在途 run 的看板读的正是
+        刚 build 过的同一个 builder 实例，常态下两者一致。
         """
-        messages_tokens = estimate_message_tokens(session.derive_messages())
+        if self._pruner is None:
+            messages_tokens = estimate_message_tokens(session.derive_messages())
+        else:
+            pairs = derive_messages_with_source_ranges(session.events)
+            messages = self._pruner.apply(
+                pairs, self._prune_decisions.get(session.session_id, {}),
+            )
+            messages_tokens = estimate_message_tokens(messages)
         system_prompt_tokens = self._system_prompt_tokens or 0
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)

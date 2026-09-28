@@ -302,6 +302,8 @@ async def build_runtime(
     # （`web/artifacts.py`）用同一个函数——两处各写一遍 if 级联就等于给漂移留门
     # （#192 批 1 审查发现）。
     overflow_handler = None
+    context_artifact_store = None
+    context_read_tool_name: str | None = None
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
         read_tool = selection.read_tool(selection.store)
@@ -314,6 +316,11 @@ async def build_runtime(
             settings.artifact_overflow_chars,
             read_tool_name=read_tool.name,
         )
+        # W-03 (#347)：ContextBuilder 的旧 Tool Result 裁剪与 overflow 共用同一个
+        # store 与同一个真实读回工具名——骨架行的回读提示必须指向**确实配对**的
+        # 工具（名字不得写死）。store 未选中（None）→ builder 裁剪整体关闭。
+        context_artifact_store = selection.store
+        context_read_tool_name = read_tool.name
 
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
@@ -473,6 +480,9 @@ async def build_runtime(
             # T7：快照**不**拼进 system_prompt（那会破坏 T5/T6 与 C4/C5/C7 的逐字节
             # 契约），而是走独立通道，由 builder 按 meta_user 语义插到当前用户消息前。
             runtime_context_provider=_render_runtime_context,
+            # W-03 (#347)：store 未装配时传 None（裁剪整体关闭，行为不变）。
+            artifact_store=context_artifact_store,
+            artifact_read_tool_name=context_read_tool_name,
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——

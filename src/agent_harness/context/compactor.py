@@ -73,8 +73,8 @@ class CompactionResult:
 
 class ContextCompactor:
     def __init__(self, model_provider: Any, *, max_context_tokens: int = 200_000,
-                 auto_compact_threshold: float = 0.80,
-                 hard_guard_threshold: float = 0.90,
+                 auto_compact_threshold: float = 0.70,
+                 hard_guard_threshold: float = 0.85,
                  keep_recent_tokens: int = 20_000,
                  summary_timeout_seconds: float = 30.0) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
@@ -97,6 +97,7 @@ class ContextCompactor:
         token_estimate: int,
         *,
         events: list[SessionEvent] | None = None,
+        source_ranges: list[tuple[int, int] | None] | None = None,
     ) -> CompactionResult:
         _validate_tool_blocks(messages)
         prefix_end = 0
@@ -168,18 +169,32 @@ class ContextCompactor:
         source_seq_start: int | None = None
         source_seq_end: int | None = None
         if events is not None:
-            from agent_harness.session.derive import derive_messages_with_source_ranges
+            if source_ranges is not None:
+                # W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
+                # （ToolMessage.content 原位替换），但消息数与顺序不变——调用方
+                # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
+                # 长度不符视同区间不可用（走既有拒绝路径），不做静默截断。
+                early_ranges = (
+                    list(source_ranges[prefix_end:cut])
+                    if len(source_ranges) == len(messages) else None
+                )
+            else:
+                from agent_harness.session.derive import (
+                    derive_messages_with_source_ranges,
+                )
 
-            mapped = derive_messages_with_source_ranges(events)
-            aligned = len(mapped) == len(messages) and all(
-                projected == supplied
-                for (projected, _source_range), supplied in zip(mapped, messages)
-            )
-            if aligned:
-                early_ranges = [source_range for _message, source_range in mapped[prefix_end:cut]]
-                if early_ranges and all(source_range is not None for source_range in early_ranges):
-                    source_seq_start = min(source_range[0] for source_range in early_ranges)
-                    source_seq_end = max(source_range[1] for source_range in early_ranges)
+                mapped = derive_messages_with_source_ranges(events)
+                aligned = len(mapped) == len(messages) and all(
+                    projected == supplied
+                    for (projected, _source_range), supplied in zip(mapped, messages)
+                )
+                early_ranges = (
+                    [source_range for _message, source_range in mapped[prefix_end:cut]]
+                    if aligned else None
+                )
+            if early_ranges and all(source_range is not None for source_range in early_ranges):
+                source_seq_start = min(source_range[0] for source_range in early_ranges)
+                source_seq_end = max(source_range[1] for source_range in early_ranges)
         if events is not None and (source_seq_start is None or source_seq_end is None):
             logger.warning(
                 "Context compaction rejected; source event range is unavailable",
