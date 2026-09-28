@@ -210,11 +210,15 @@ class ChatModelInvoker:
                 response_format={"type": "json_object"},
             )
         content = getattr(response, "content", None)
+        if isinstance(content, list) and content and all(
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            for block in content
+        ):
+            content = "".join(block["text"] for block in content)
         if not isinstance(content, str):
-            # 非文本形状（多模态块列表等）不是"内容不合格"而是"provider 没按契约回话"：
-            # 归 `provider_error` 而不是 `invalid_model_output`——后者是**解析**失败，
-            # 而这里连可以解析的文本都没拿到。两者处置相同（都终态降级、零写入），
-            # 但归因分开才看得出是哪一层坏了。
+            # 仅接受纯文本或纯文本块；混入图像等非文本内容时仍按 provider 错误 fail closed。
             raise TypeError(
                 f"memory model returned non-text content: {type(content).__name__}"
             )

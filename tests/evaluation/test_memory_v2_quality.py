@@ -830,10 +830,58 @@ async def test_collection_cleanup_refuses_a_mismatched_schema(monkeypatch):
         lambda *_args: vectors,
     )
 
-    with pytest.raises(RuntimeError, match="cleanup could not be verified"):
+    with pytest.raises(RuntimeError, match="schema could not be verified"):
         await _drop_owned_collection(vectors, collection_name="temporary_gold")
 
     assert vectors.drop_called is False
+
+
+@pytest.mark.asyncio
+async def test_collection_cleanup_retries_transient_readback_after_drop():
+    class TransientReadbackVectors:
+        _settings = object()
+        _embeddings = object()
+        created_collection = True
+        dimension = 3
+
+        def __init__(self):
+            self.connect_calls = 0
+            self.drop_calls = 0
+            self.close_calls = 0
+
+        async def connect(self):
+            self.connect_calls += 1
+            if self.connect_calls == 1:
+                return ["temporary_gold"]
+            if self.connect_calls == 2:
+                raise RuntimeError("transient readback failure")
+            return []
+
+        async def _call(self, operation, **_kwargs):
+            if operation == "drop_collection":
+                self.drop_calls += 1
+                return None
+            assert operation == "describe_collection"
+            return {"fields": [
+                {"name": name,
+                 **({"params": {"dim": 3}} if name == "vector" else {}),
+                 **({"is_partition_key": True} if name == "tenant_id" else {})}
+                for name in (
+                    "id", "memory_id", "tenant_id", "user_id", "scope", "session_id",
+                    "content", "metadata", "vector",
+                )
+            ]}
+
+        async def close(self):
+            self.close_calls += 1
+
+    vectors = TransientReadbackVectors()
+
+    await _drop_owned_collection(vectors, collection_name="temporary_gold")
+
+    assert vectors.connect_calls == 3
+    assert vectors.drop_calls == 1
+    assert vectors.close_calls == 1
 
 
 @pytest.mark.asyncio

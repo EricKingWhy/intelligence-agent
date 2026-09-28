@@ -1284,18 +1284,32 @@ async def _drop_owned_collection(
     if not vectors.created_collection:
         await vectors.close()
         raise RuntimeError("temporary Milvus collection ownership could not be verified")
-    try:
-        if collection_name in await vectors.connect():
-            if not await _has_gold_collection_schema(vectors, collection_name):
-                raise RuntimeError("temporary Milvus collection schema could not be verified")
-            await vectors._call("drop_collection", collection_name=collection_name)
-        if collection_name not in await vectors.connect():
+    for attempt in range(3):
+        try:
+            present = collection_name in await vectors.connect()
+        except Exception:  # noqa: BLE001 — retry only the read; never infer deletion.
+            present = True
+        if not present:
             return vectors
-    except Exception:  # noqa: BLE001 — ambiguous cleanup fails closed.
+        try:
+            schema_matches = await _has_gold_collection_schema(vectors, collection_name)
+        except Exception:  # noqa: BLE001 — schema read failure is inconclusive.
+            schema_matches = None
+        if schema_matches is False:
+            await vectors.close()
+            raise RuntimeError("temporary Milvus collection schema could not be verified")
+        if schema_matches:
+            try:
+                await vectors._call("drop_collection", collection_name=collection_name)
+                present = collection_name in await vectors.connect()
+            except Exception:  # noqa: BLE001 — verify again on a fresh connection.
+                present = True
+            if not present:
+                return vectors
         await vectors.close()
-        raise RuntimeError("temporary Milvus collection cleanup could not be verified") from None
-    await vectors.close()
-    raise RuntimeError("temporary Milvus collection remained after cleanup")
+        if attempt < 2:
+            await asyncio.sleep(0.5 * (attempt + 1))
+    raise RuntimeError("temporary Milvus collection cleanup could not be verified")
 
 
 async def _has_gold_collection_schema(
