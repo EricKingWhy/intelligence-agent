@@ -174,3 +174,48 @@ workspace = (
 - **可插拔**：规格早就要求了，代码只差一张分派表；真正要先定的是"换记忆产品"还是"换向量库"两个不同的 seam。不需要整套 SDD，一页决策 + 一张票。
 - **项目 → 多会话**：后端**已经能**（同名 `workspace` = 同目录），你看到的"只有会话"是因为**列表契约不返回 workspace**、前端没有分组 UI、也没有导入项目的端点。参考 **DSH** 的 Workspace 实体 + 有序 sessionIds。
 - **多进程 / 独占锁**：多进程场景对你的本地单用户需求**没有帮助、也非必选**；ZCode 甚至不靠文件锁（用 SQLite WAL），DSH 才是单写者 + 租约。建议现在只加**启动期单实例锁**，全套等真有需求。
+
+---
+
+## 6 决策落定（2026-09-11，用户拍板）
+
+本节是 §0-§5 的结论固化；上面的分析保留为决策依据，不作废。
+
+| 议题 | 决策 | 票 |
+| --- | --- | --- |
+| 记忆可插拔 seam | **A：provider 边界 = 整个 `MemoryComponents` 包**。现有 sqlite+milvus+outbox+langmem 成为 `builtin` 默认 provider。**不做运行时热插拔**（`initialize()/close()` 是启动期生命周期）；**不做 C（分层双生命周期）** | **#149** ARCH-6 |
+| 启动期单实例锁 | **做**。锁 `Settings.workspace_dir`；必须是 **OS 级 advisory lock**（POSIX `flock` / Windows `msvcrt.locking`），**不用裸 pidfile**——崩溃时由 OS 自动释放，不引入"残留锁永久起不来"这条额外出错路径。第二个进程**响亮失败** | **#150** ARCH-7 |
+| 项目指向什么目录 | **任意已存在目录（DSH 模型）**，`realpath` 规范化，唯一性 = 规范路径相等。→ **「上传项目」不再需要**（选自己的目录即可）；安全模型需重做并写 ADR | **#152** WS-2 |
+| 会话↔项目成员资格真源 | **写进会话日志 `session/started` 的规范化 `cwd`**（durable、不可变、加法式；历史会话读出 `None` = 未分组） | **#151** WS-1 |
+| 删除项目语义 | **DSH 软删除**：只移除注册记录 + 顺序条目 + 会话账本；目录 / 用户文件 / 实时会话 / 已落盘日志**一概不动**，会话变 Ungrouped。**不做硬删除**（与 append-only 可审计立场相反） | **#152** / **#154** |
+| 存量会话迁移 | **首次启动 bootstrap 自动归组**：只凭已持久化 header（`id`/`cwd`/`createdAt`，不读事件正文）按目录分组，最新在前；「已初始化」标记最后写 → 中断可安全续跑；**只跑一次**，无 cwd 的留 Ungrouped | **#152** WS-2 |
+
+### 6.1 seam A 的选型依据（上游一手证据）
+
+| Provider | 存储归属 | 证据 |
+| --- | --- | --- |
+| LangMem | 跑在调用方给的 `BaseStore` 上 | README「functional primitives you can use with any storage system」 |
+| Mem0 | **自带存储层** | `mem0/configs/base.py` 有 `vector_store` 默认 + `history_db_path`；`mem0/configs/vector_stores/` **25 个后端，含 `milvus.py`** |
+| Zep / Graphiti | **硬依赖图数据库** | `pyproject.toml` 依赖 `neo4j>=5.26.0`（可选 FalkorDB / Neptune） |
+| Letta | server 形态，自带状态 | README 自述 App Server + SDK + Cloud + desktop/web 应用 |
+
+结论：想做"记忆产品"的几乎都自带存储，**LangMem 是唯一刻意不碰存储的**。在 seam B（只换 `MemoryCapability`）之下，Mem0 这类会被迫套进我们的 `SqliteMilvusBaseStore`，等于把供应商塞进别人的存储模型。
+
+### 6.2 票的依赖图
+
+```text
+#149 ARCH-6 记忆 provider seam         （独立）
+#150 ARCH-7 启动期单实例锁              （独立）
+#151 WS-1 会话 cwd 进 session/started  （无前置）
+   └─▶ #152 WS-2 Workspace 实体+注册表
+          ├─▶ #153 WS-3 列表契约补 workspace + 按项目列会话
+          └─▶ #154 WS-4 项目 CRUD API
+                 └─▶ （#153 + #154）─▶ #155 WS-5 前端分组 UI（跨端，只有前端）
+```
+
+### 6.3 有意不做（附理由）
+
+- **运行时热插拔记忆 provider**：在途状态（outbox / 写回任务池 / Milvus 连接 / namespace）要 drain + 迁移或双写；且 BUG-011 的教训是"测不到的抽象层最后被证明是死代码"。
+- **每次 append 加文件锁**：慢，且治不了重复执行副作用——那是 run 归属问题，不是 IO 问题。
+- **项目硬删除 / 上传导入 / 目录浏览器**：见 §2.2 与 #155 非目标；目录浏览器若要做需新的宿主侧端点，单独立项。
+- **`additionalDirectories` 式多项目归属**：DSH 里一个会话结构上至多属于一个 workspace，本需求不需要多归属。

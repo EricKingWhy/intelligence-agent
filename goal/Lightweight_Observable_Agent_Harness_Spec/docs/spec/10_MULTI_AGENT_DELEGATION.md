@@ -25,7 +25,7 @@ skill_scope
 context_policy
 sandbox_policy
 memory_policy
-budget（含 `local.max_agent_turns`；`max_steps` 仅迁移期 alias，口径见 `02 §5.1`）
+budget（含 `local.max_agent_turns`；`max_steps` 已退役为未知字段 422，口径见 `02 §5.1`）
 permissions
 ```
 
@@ -188,7 +188,7 @@ V1 可先实现 in-process/fork，并保留 Provider interface。
 ## 12. Termination
 
 必须同时有：
-- Agent 本地保险丝与分层预算（`02 §5.1`；`max_steps` 见迁移序列）
+- Agent 本地保险丝与分层预算（`02 §5.1`；`max_steps` 已退役，见 `02 §5.1` 收尾段）
 - Supervisor `max_delegations`（默认 8，树级共享，见 §5.1）
 - max child depth
 - repeated delegation guard
