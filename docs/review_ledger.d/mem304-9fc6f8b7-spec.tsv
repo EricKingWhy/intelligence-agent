@@ -1,0 +1,1 @@
+2026-09-29	#304 Cline SSE 适配 Spec 独立审查：PASS；P0=0/P1=0/P2=0/P3=0；确认 gate-local 适配不改生产别名、fallback、重试预算或 PRD 阈值；真实 SSE 解析仍待 live gate	395384d396ec42a4e218f148c4c6916e539c9571..9fc6f8b7c43b75d70e34b1a150a431e6b523360e
