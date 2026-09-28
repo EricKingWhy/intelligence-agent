@@ -63,6 +63,10 @@ from agent_harness.agent.run_budget import (
     BudgetConsumed,
     LaunchRunBudget,
     RunLimits,
+    SessionAdmission,
+    SessionBudgetPort,
+    SessionBudgetSnapshot,
+    _decimal_or_none,
     add_consumed,
     apply_blocked_by,
     as_run_started_budget,
@@ -75,6 +79,7 @@ from agent_harness.agent.run_budget import (
     normalize_continuation,
     pause_trigger,
     reason_for_dimension,
+    session_closeout_capacity,
     stuck_resume_requirements,
     utc_now,
 )
@@ -133,7 +138,7 @@ from agent_harness.session import (
     memory_injected_ids_var,
     run_context_var,
 )
-from agent_harness.session.event import STEER_APPLIED
+from agent_harness.session.event import STEER_APPLIED, TOOL_RESULT
 from agent_harness.session.queue import SteerRequest, SteerSource
 from agent_harness.storage import (
     CheckpointBoundary,
@@ -896,6 +901,7 @@ class AgentRuntime:
         local_fuse_source: str = SOURCE_DEPLOYMENT,
         completion_policy: CompletionPolicy | None = None,
         stuck_evidence: StuckEvidencePort | None = None,
+        session_budget: SessionBudgetPort | None = None,
     ) -> None:
         self.registry = registry
         self.executor = executor
@@ -948,6 +954,10 @@ class AgentRuntime:
         # RunBudget 上下文（`#312`）：本次执行的账本起点（version / ceiling / 已消耗）。
         # `None` = 没有 run 作用域预算信息（沿用既有行为：无 ceiling、账本从 0 起）。
         self._run_budget = run_budget or LaunchRunBudget()
+        # SessionBudget 端口（`#318`）：跨 run / 跨会话共享的树账（`02 §5.1` 第三层）。
+        # `None` = 本执行没接 session 账（行为与 `#317` 收口时逐字相同——绝大多数
+        # 单测与 CLI 直连路径）。准入 / 退回 / 记账的语义见 run_budget 的 Protocol。
+        self._session_budget = session_budget
         # 完成闸门的策略 seam（`#316` / `02 §5.4`）：Core 只提供一个默认实现（静止后
         # 接受最终响应），域策略由嵌入方注入。**不是**配置项：完成规则不该由部署方
         # 之外的第三处（config / API）替它决定（`02 §9`）。
@@ -1177,6 +1187,10 @@ class AgentRuntime:
         # 初始化点——异常发生在两个 set 之间时 finally 引用未绑定变量会掩盖
         # 原异常（全量回归实证：UnboundLocalError 掩盖 queue 竞态）。
         memory_injected_token = None
+        # session 树账的预留状态（`#318`）：True = 当前步已原子预留（turns/requests
+        # 各一格）而决策尚未被接纳——取消臂 / 异常臂 / context 超限臂据此退回。
+        # 初始化在 try 之前（与两个 token 同一条 UnboundLocalError 纪律）。
+        session_step_reserved = False
         # Model Fallback + 卡流看门狗 + 并发闸：每 run 一个新 coordinator
         # （切换状态不跨 run 共享）。统一调用路径——未配 fallback 时 coordinator
         # 退化为透传（异常原样上抛），但看门狗/并发闸对所有 run 生效。
@@ -1316,6 +1330,31 @@ class AgentRuntime:
                         yield streamed
                     return
 
+                # session 作用域准入（`#318`）：run 判定通过**之后**。存储层在单事务里
+                # 完成"判 + 预留"（turns / requests 各一格），并发兄弟竞争最后一格时至多
+                # 一个被接纳（`10 §13`）；被拒 ⇒ 本次执行以 session 维度的 `run/paused`
+                # 收口（trigger_dimension = `session.*` 配置字段路径）。
+                session_admission: SessionAdmission | None = None
+                if self._session_budget is not None:
+                    session_admission = await self._session_budget.admit_step()
+                    if not session_admission.accepted:
+                        self._log(
+                            "agent_decision", "session 预算到顶，run 暂停（非终态）",
+                            span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                            decision="budget_paused", remaining_steps=0,
+                            reason=f"命中 {session_admission.trigger_dimension}，"
+                                   "本次执行以 run/paused 收口",
+                            outcome="success",
+                        )
+                        async for streamed in self._terminal_paused(
+                            arms, launch=launch_budget, steps=steps,
+                            trigger_dimension=session_admission.trigger_dimension,
+                            session_admission=session_admission,
+                        ):
+                            yield streamed
+                        return
+                    session_step_reserved = True
+
                 # 第 0 步（ADR-0030 D2）：steer 注入。位置固定在 ContextBuilder
                 # 之前——那是模型可见投影的唯一入口，注入必须发生在投影之前才
                 # 会被本轮模型调用看到；轮次边界（而不是"边答边改"）是物理约束：
@@ -1332,6 +1371,11 @@ class AgentRuntime:
                 try:
                     messages = await self._context_builder.build(session)
                 except ContextWindowExceededError as error:
+                    # session 预留整步退回（`#318`）：context 超限臂的契约是"模型在
+                    # 本轮从未被调用"——turns / requests 的预留都没变成真账。
+                    if session_step_reserved:
+                        session_step_reserved = False
+                        await self._session_budget.refund_step()
                     async for streamed in self._terminal_context_exceeded(
                         arms, steps=steps, error=error,
                     ):
@@ -1442,11 +1486,23 @@ class AgentRuntime:
                 # 的计数点，`02 §5.1`），并按 append 顺序镜像：流帧必须是落盘日志的
                 # 前缀（golden 判据）。位置在 `model/fallback` / `model/completed` 之前
                 # ——请求是先发生的事实，决策与切换是对它的解释。
-                for request_event in self._record_model_requests(
+                request_events = self._record_model_requests(
                     session, model_coord, run_id=run_id, step=step_base + steps + 1,
                     usage=usage, cost=model_cost, model=model_name,
-                ):
+                )
+                for request_event in request_events:
                     yield to_agent_event(request_event)
+                # session 树账的 requests / tokens / cost 计数点（`#318`）：与本步的
+                # `model/request` 事件一一对应——**减一**：本步准入已在 `admit_session_step`
+                # 里预付了一格 requests（并发兄弟竞争的原子预留），预付那格对应的正是
+                # 本步第一次实际请求，这里只补**超出一格**的部分（fallback 追加的尝试）；
+                # usage / cost 仍随产出响应的那一次给，count=0 也要落——tokens / cost
+                # 的树级计数点只有这里（缺席 = 该维转未知，`None` 粘性）。
+                if self._session_budget is not None and request_events:
+                    await self._session_budget.record_model_requests(
+                        count=max(len(request_events) - 1, 0), usage=usage,
+                        cost=model_cost,
+                    )
                 # R6-2（用户拍板）：空响应不是成功——content 与 tool_calls 双空
                 # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
                 # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），
@@ -1563,6 +1619,9 @@ class AgentRuntime:
                     await self._save_checkpoint(session, CheckpointBoundary.MODEL_COMPLETED)
                 # 第 4 步：这一轮算一步（数模型轮数，不是工具个数）
                 steps += 1
+                # 决策已接纳（model/completed 已落或按稳定边界延迟落）⇒ 本步的
+                # session 预留成为真账，取消 / 异常臂不再退回（`#318`）。
+                session_step_reserved = False
 
                 # 第 5 步：先判停止信号——若模型选择最终答复，进**完成闸门**（`#316`）。
                 # 顺序是契约（`02 §5.4`）：先证六条 quiescence，静止才轮到 policy；
@@ -1680,6 +1739,11 @@ class AgentRuntime:
                 # web 订阅者经 session listener 实时收到（seq 幂等合并不重复）。
                 for event in session.since(tool_event_start):
                     yield to_agent_event(event)
+                # session 树账的工具计数点（`#318`）：从本批 `tool/result` 的
+                # `budget_delta` 提取增量（接纳点的唯一写入者 = ToolExecutor，与
+                # run 作用域同一份事实、另一作用域的账）。
+                if self._session_budget is not None:
+                    await self._record_session_tool_deltas(session.since(tool_event_start))
                 if tool_error is not None:
                     raise tool_error
                 if defer_model_event:
@@ -1797,6 +1861,17 @@ class AgentRuntime:
             # 禁止再产出（RuntimeError），取消中的 task 再 yield 也会被立即再取消。
             # 收尾后继续向上传播取消——吞掉取消会让 task 无法正确结束。
             try:
+                # session 树账退回预留的 turns（`#318`）：本步决策未接纳；请求是否
+                # 发出过由失败收尾的 drain 落账（失败/在途请求照样占 model_requests
+                # 一席），所以只退 turns 一格。shield：收尾期间再取消也不能让账目
+                # 退回失败打断收尾（退回失败只进日志，不改变取消语义）。
+                if self._session_budget is not None and session_step_reserved:
+                    session_step_reserved = False
+                    try:
+                        await asyncio.shield(self._session_budget.refund_turn())
+                    except Exception:  # noqa: BLE001 - 存储故障不打断取消收尾
+                        self._log("task_failed", "session 预算退回失败（存储故障？）",
+                                  span_id=run_span, outcome="error")
                 # 收尾事件一律丢弃不 yield（生成器关闭中禁止产出）——这正是本臂
                 # 与异常臂的唯一差异，由 _terminal_cancelled 单点执行。
                 self._terminal_cancelled(arms, steps=steps)
@@ -1817,6 +1892,16 @@ class AgentRuntime:
             self._log("task_failed", "Agent Loop 异常终止", span_id=run_span,
                       outcome="error", error=str(error),
                       error_type=type(error).__name__, exc_info=True)
+            # session 树账退回预留的 turns（`#318`）：失败臂的 drain 已把发出的请求
+            # 落账（model/request failed），决策未接纳 ⇒ 只退 turns 一格。退回失败
+            # 不改变失败收尾（账目偏差方向是收紧，审计事件缺一条而已）。
+            if self._session_budget is not None and session_step_reserved:
+                session_step_reserved = False
+                try:
+                    await self._session_budget.refund_turn()
+                except Exception:  # noqa: BLE001 - 收尾优先
+                    self._log("task_failed", "session 预算退回失败（存储故障？）",
+                              span_id=run_span, outcome="error")
             # 终结事件写入自身也可能失败（例如存储故障）：逐段防护，保证
             # result_holder 一定拿到终态结果——"run() 必返回失败结果"的契约
             # 不因二次故障被破坏。二次失败进日志，不再向上抛。
@@ -1910,6 +1995,31 @@ class AgentRuntime:
         if cost is not None:
             data["cost_usd"] = format(cost, "f")
         return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
+
+    async def _record_session_tool_deltas(self, events: list[SessionEvent]) -> None:
+        """把一批事件里的 `budget_delta` 并进 session 树账（`#318`）。
+
+        读法与 `run_budget._add_tool_delta` 同一条（同一次接纳的两本账）：贡献为 0
+        的名字不落表；读不懂的 delta 贡献 0（recovery / dangling 修复的合成结果
+        不来自 Executor 的接纳点）。
+        """
+        calls: dict[str, int] = {}
+        attempts: dict[str, int] = {}
+        for event in events:
+            if event.type != TOOL_RESULT:
+                continue
+            delta = event.data.get("budget_delta")
+            if not isinstance(delta, dict):
+                continue
+            name = delta.get("tool_name")
+            if not isinstance(name, str) or not name:
+                continue
+            for key, table in (("tool_calls", calls), ("tool_attempts", attempts)):
+                value = delta.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    table[name] = table.get(name, 0) + value
+        if calls or attempts:
+            await self._session_budget.record_tools(calls=calls, attempts=attempts)
 
     def _now(self) -> datetime:
         """本执行读挂钟的**唯一**入口（`#315`）。
@@ -2049,6 +2159,7 @@ class AgentRuntime:
     async def _terminal_paused(
         self, arms: _TerminalArms, *, launch: LaunchRunBudget, steps: int,
         trigger_dimension: str, stuck: StuckSignal | None = None,
+        session_admission: SessionAdmission | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """暂停臂（`#312` T4；`02 §5.2` / `03 §3.4` / ADR-0044 D3）。
 
@@ -2122,11 +2233,41 @@ class AgentRuntime:
         consumed_before = self._execution_consumed(
             launch, session, arms.memory_event_start,
         )
+        # session 作用域的 closeout 容量（`#318`）：session 维度命中的暂停（或本执行
+        # 接了 session 账的任何暂停）里，closeout 也受 session ceiling 约束——它是一次
+        # 真实请求、花树的钱。`session_admission.snapshot` 是**准入那一刻**的读数；
+        # closeout 之前的请求落账发生在工具批后（本臂之前），差一格的读数用账本现读
+        # 修正——port 缺席（未接 session 账）时保持 None，旧形状逐字不变。
+        session_snapshot: SessionBudgetSnapshot | None = None
+        if self._session_budget is not None:
+            if session_admission is not None:
+                session_snapshot = session_admission.snapshot
+            else:
+                session_snapshot = await self._session_budget.snapshot()
         continuation, closeout_source, closeout_events = await self._closeout_continuation(
             arms, trigger_dimension=trigger_dimension,
             consumed=consumed_before, limits=launch.limits, step_id=envelope_step,
             blocked_by=blocked_by, reason=reason, stuck=stuck_payload,
+            session_snapshot=session_snapshot,
         )
+        # closeout 的请求落进 session 树账（`#318`）：它也是一次真实请求
+        # （`02 §5.1` 把 closeout 与 primary / fallback 并列）；usage / cost 从
+        # 产出响应的那格事件取（缺席 = 该维转未知，None 粘性）。
+        if self._session_budget is not None and closeout_events:
+            closeout_requests = [
+                event for event in closeout_events if event.type == MODEL_REQUEST
+            ]
+            if closeout_requests:
+                completed = closeout_requests[-1]
+                closeout_usage = completed.data.get("usage")
+                closeout_usage = (
+                    closeout_usage if isinstance(closeout_usage, dict) else None
+                )
+                await self._session_budget.record_model_requests(
+                    count=len(closeout_requests),
+                    usage=closeout_usage,
+                    cost=_decimal_or_none(completed.data.get("cost_usd")),
+                )
         # 先镜像对账事件、再镜像 closeout：三条都是 durable，顺序与落盘顺序一致
         # （流帧必须是落盘日志的前缀，见 golden）。顺序本身也有语义：客户端先读到
         # "某个操作进入 NEED_RECONCILE"，再读到"本次执行暂停"——与 `03 §5`
@@ -2141,37 +2282,56 @@ class AgentRuntime:
         # closeout 那次请求已经落账（`_closeout_continuation` 里 append）⇒ 重新算一次
         # 快照，让它包含进去。两次都从事件读，所以这是"再读一次真相"，不是累加。
         consumed = self._execution_consumed(launch, session, arms.memory_event_start)
+        # `#318`：session 账行的 CAS 版本与 consumed（**closeout 之后的最新读数**）。
+        # session 维触发的暂停，恢复要靠它们点名"抬哪个维 + expected_version"——
+        # 缺了这一格，客户端必须再来一轮投影请求才能组出合法的恢复体。port 缺席
+        # （未接 session 账 / 旧路径）⇒ 键缺席，旧形状逐字不变。
+        session_payload: dict[str, Any] | None = None
+        if self._session_budget is not None:
+            session_current = await self._session_budget.snapshot()
+            session_payload = {
+                "version": session_current.version,
+                "consumed": session_current.consumed.as_projection(),
+            }
         limits = build_limits_snapshot(
             run_limits=launch.limits,
             local_fuse=LocalFuse(
                 max_agent_turns=self.max_agent_turns, source=self.local_fuse_source,
             ),
+            session_limits=(
+                session_snapshot.limits if session_snapshot is not None else None
+            ),
         )
+        pause_data = build_pause_data(
+            reason=reason,
+            trigger_dimension=trigger_dimension,
+            version=launch.version,
+            consumed=consumed,
+            limits=limits,
+            continuation=continuation,
+            closeout_source=closeout_source,
+            # stuck 暂停的前置条件就是那三条依据里**当前可用**的那些（`03 §3.4`：
+            # 非空只出现在它；可用子集由快照两格决定，见 `stuck_resume_requirements`）；
+            # 预算 / deadline 暂停没有额外前置条件。"存在未 reconcile 的副作用"
+            # **不**写在这一格：它由 `operation/reconcile-required` 事件 + Ledger 行
+            # 自己表达，恢复闸门也读那一份（`03 §5`：对账优先于恢复是**状态**规则，
+            # 不是暂停字段）。
+            resume_requirements=(
+                stuck_resume_requirements(stuck_payload) if stuck is not None else ()
+            ),
+            stuck=stuck_payload,
+            # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，
+            # 用户从事件就能找到那一段 trace。run 未终结 ⇒ 这不是 run 的 trace；
+            # trace_url 此刻还不存在（只在终态回调里合成，见 build_pause_data）。
+            trace_id=arms.telemetry.trace_id,
+        )
+        if session_payload is not None:
+            # `#318`：`session` 键在 `run/paused.data` 顶层（limits 里已有 session 的
+            # **ceiling**，这里补的是**账行 identity + consumed**）。缺席 = 没接 session 账。
+            pause_data["session"] = session_payload
         paused = arms.session.append(
             RUN_PAUSED,
-            build_pause_data(
-                reason=reason,
-                trigger_dimension=trigger_dimension,
-                version=launch.version,
-                consumed=consumed,
-                limits=limits,
-                continuation=continuation,
-                closeout_source=closeout_source,
-                # stuck 暂停的前置条件就是那三条依据里**当前可用**的那些（`03 §3.4`：
-                # 非空只出现在它；可用子集由快照两格决定，见 `stuck_resume_requirements`）；
-                # 预算 / deadline 暂停没有额外前置条件。"存在未 reconcile 的副作用"
-                # **不**写在这一格：它由 `operation/reconcile-required` 事件 + Ledger 行
-                # 自己表达，恢复闸门也读那一份（`03 §5`：对账优先于恢复是**状态**规则，
-                # 不是暂停字段）。
-                resume_requirements=(
-                    stuck_resume_requirements(stuck_payload) if stuck is not None else ()
-                ),
-                stuck=stuck_payload,
-                # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，
-                # 用户从事件就能找到那一段 trace。run 未终结 ⇒ 这不是 run 的 trace；
-                # trace_url 此刻还不存在（只在终态回调里合成，见 build_pause_data）。
-                trace_id=arms.telemetry.trace_id,
-            ),
+            pause_data,
             run_id=arms.run_id, step_id=envelope_step,
         )
         # 本次执行的**收口事实**已落盘：后续任何臂都不得再补一条终态（单终态不变量的
@@ -2256,6 +2416,7 @@ class AgentRuntime:
         consumed: BudgetConsumed, limits: RunLimits, step_id: int,
         blocked_by: tuple[str, ...] = (),
         reason: str | None = None, stuck: Mapping[str, Any] | None = None,
+        session_snapshot: SessionBudgetSnapshot | None = None,
     ) -> tuple[dict[str, Any], str, list[SessionEvent]]:
         """产出 continuation、它的来源（`model` / `deterministic`）与本次落盘的事件。
 
@@ -2281,6 +2442,14 @@ class AgentRuntime:
         # 里那一句是判据本身，这里只是把"现在"传进去）。
         if not closeout_capacity(
             consumed=consumed, run_limits=limits, now=self._now(),
+        ):
+            return fallback, CLOSEOUT_DETERMINISTIC, []
+        # session 作用域的容量（`#318`）：session ceiling 里任何一维已到线 / 账目
+        # 未知 / deadline 到点，closeout 同样不发（它花的是树的钱；判据与 run 作用域
+        # 同构，见 `session_closeout_capacity`）。`None` = 未接 session 账，不设限。
+        if session_snapshot is not None and not session_closeout_capacity(
+            consumed=session_snapshot.consumed,
+            session_limits=session_snapshot.limits, now=self._now(),
         ):
             return fallback, CLOSEOUT_DETERMINISTIC, []
         try:
