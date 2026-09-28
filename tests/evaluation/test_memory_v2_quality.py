@@ -617,14 +617,14 @@ def test_gate_rejects_an_unapproved_fallback_model():
     with pytest.raises(RuntimeError, match="fallback model does not match"):
         _require_approved_gate_roles(SimpleNamespace(
             primary=SimpleNamespace(
-                provider="qwen", model_name="cline-pass/glm-5.3-flash",
+                provider="mimo", model_name="mimo-v2.6-flash",
             ), fallback=SimpleNamespace(
-                provider="mimo", model_name="another-model",
+                provider="qwen", model_name="another-model",
             ),
         ))
 
 
-def test_gate_uses_the_approved_current_primary_and_mimo_fallback():
+def test_gate_promotes_configured_mimo_fallback_and_keeps_qwen_as_fallback():
     settings = Settings(
         _env_file=None, model_provider="qwen",
         model_name="cline-pass/glm-5.3-flash", model_api_key="primary-test-key",
@@ -634,11 +634,12 @@ def test_gate_uses_the_approved_current_primary_and_mimo_fallback():
 
     roles = _resolve_approved_gate_roles(settings)
 
-    assert roles.primary.provider == "qwen"
-    assert roles.primary.model_name == "cline-pass/glm-5.3-flash"
+    assert roles.primary.provider == "mimo"
+    assert roles.primary.model_name == "mimo-v2.6-flash"
     assert roles.primary.fallback is None
-    assert roles.fallback.provider == "mimo"
-    assert roles.fallback.model_name == "mimo-v2.6-flash"
+    assert roles.fallback.provider == "qwen"
+    assert roles.fallback.model_name == "cline-pass/glm-5.3-flash"
+    assert roles.fallback.fallback is None
 
 
 def test_recall_target_label_requires_its_gold_fact_to_be_in_formed_memory():

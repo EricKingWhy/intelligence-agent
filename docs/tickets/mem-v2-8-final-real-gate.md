@@ -12,9 +12,13 @@ Prove the fully integrated V2 memory product works with real configured models a
 
 ## Context
 
-The user requires the final real Gate only after all implementation tickets are integrated. Local memory model aliases are `memory.primary → senseaudio` and `memory.fallback → qwen`. Real Milvus uses a dedicated temporary Memory collection. Langfuse test dataset/experiment/trace evidence is retained and checked for accidental duplicates. Milvus, Knowledge, and Qiniu temporary test data must be cleaned and verified at zero.
+The user requires the final real Gate only after all implementation tickets are integrated. Frozen production aliases remain `memory.primary → senseaudio` and `memory.fallback → qwen`. The #304 real-gate override is recorded under the approved model amendments below and does not change those runtime defaults. Real Milvus uses a dedicated temporary Memory collection. Langfuse test dataset/experiment/trace evidence is retained and checked for accidental duplicates. Milvus, Knowledge, and Qiniu temporary test data must be cleaned and verified at zero.
 
 Credentials exist only in ignored local configuration. This ticket may check whether required keys are configured but must never print values.
+
+## Approved gate-local model amendment (2026-09-29)
+
+After the configured qwen primary produced zero successful calls across 23 attempts, the user approved promoting `mimo/mimo-v2.6-flash` to this ticket's `memory.primary`. The former configured qwen model (`qwen/cline-pass/glm-5.3-flash`) remains `memory.fallback`, preserving AC4's successful-fallback requirement. The runner maps the configured chain only for #304 and validates both provider/model pairs before live calls. No PRD threshold, production role default, or credential value changes.
 
 ## Current Behavior
 

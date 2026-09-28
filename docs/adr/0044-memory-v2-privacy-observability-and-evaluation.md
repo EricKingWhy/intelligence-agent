@@ -300,6 +300,19 @@ ownership from a matching name or schema; cleanup refuses to drop such a collect
 and reports unverifiable cleanup instead. This avoids deleting a same-name collection
 created by another actor during the create race.
 
+### D16 — #304 promotes Mimo to the gate-local primary
+
+On 2026-09-29, after the qwen primary produced zero successful calls across 23 attempts,
+the user approved promoting the configured `mimo` / `mimo-v2.6-flash` model to the #304
+real-gate `memory.primary`. The former configured qwen model
+(`qwen` / `cline-pass/glm-5.3-flash`) becomes the gate-local `memory.fallback`, so AC4
+continues to require a successful fallback call and completed job. The runner swaps the
+two already configured `ModelConfig` roles in memory and validates both identities before
+live calls; `.env` is not rewritten. This decision supersedes D12 and D14 only for the
+#304 evidence gate. Frozen PRD §5.3 role defaults, runtime wiring, quality thresholds,
+and credential handling remain unchanged. The failed source run is preserved at
+`docs/evidence/memory-v2-real-gold-v1.8.0-1d8d3cd3d9b4-d25667d2.json`.
+
 ## 4. Verification contract
 
 落实证据位于 `tests/observability/test_tracer_port.py`、`tests/memory/v2/test_v2_executor.py`、

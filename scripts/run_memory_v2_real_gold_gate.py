@@ -134,10 +134,10 @@ _RECALL_DISTRACTORS = (
     "Service authentication uses signed tokens.",
 )
 _SECRET_SENTINEL = "NEVER-A-REAL-CREDENTIAL"
-_GATE_PRIMARY_PROVIDER = "qwen"  # User-approved #304 primary contract amendment.
-_GATE_PRIMARY_MODEL = "cline-pass/glm-5.3-flash"
-_GATE_FALLBACK_PROVIDER = "mimo"  # User-approved #304 real-gate contract amendment.
-_GATE_FALLBACK_MODEL = "mimo-v2.6-flash"
+_GATE_PRIMARY_PROVIDER = "mimo"  # User-approved #304 primary contract amendment.
+_GATE_PRIMARY_MODEL = "mimo-v2.6-flash"
+_GATE_FALLBACK_PROVIDER = "qwen"  # Former primary retained for AC4 fallback coverage.
+_GATE_FALLBACK_MODEL = "cline-pass/glm-5.3-flash"
 _GATE_JWT_SECRET = "memory-v2-gold-local-signing-key-not-a-credential"
 
 
@@ -283,9 +283,13 @@ def _matches_recall_target(record: MemoryRecordV2, case: GoldCase) -> bool:
 
 
 def _resolve_approved_gate_roles(settings: Settings) -> MemoryModelRoles:
-    """Use #304's approved live primary chain without changing production role defaults."""
-    primary = ModelConfig.from_settings(settings)
-    fallback = primary.fallback
+    """Promote configured Mimo to #304 primary without changing production defaults."""
+    configured_chain = ModelConfig.from_settings(settings)
+    primary = configured_chain.fallback
+    if primary is None:
+        raise RuntimeError("approved Memory V2 gate Mimo primary is not configured")
+    configured_chain.fallback = None
+    fallback = configured_chain
     primary.fallback = None
     roles = MemoryModelRoles(primary=primary, fallback=fallback)
     _require_approved_gate_roles(roles)
