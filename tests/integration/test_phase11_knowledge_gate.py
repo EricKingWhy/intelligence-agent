@@ -17,6 +17,7 @@ from agent_harness.identity import IdentityContext
 from agent_harness.knowledge.milvus_store import MilvusKnowledgeVectorStore
 from agent_harness.knowledge.registry import SqliteKnowledgeSourceRegistry
 from agent_harness.knowledge.service import KnowledgeService
+from agent_harness.memory.embeddings import create_embeddings
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -34,14 +35,8 @@ def gate_settings():
 
 
 def _embeddings(settings):
-    """Gate 专用嵌入客户端：验证记忆语义而非嵌入重试策略（与 Phase 6 同款）。"""
-    from langchain_openai import OpenAIEmbeddings
-
-    return OpenAIEmbeddings(
-        model=settings.embedding_model, base_url=settings.embedding_base_url,
-        api_key=settings.embedding_api_key, check_embedding_ctx_length=False,
-        dimensions=settings.embedding_dimensions, request_timeout=30, max_retries=3,
-    )
+    """Reuse the application's provider-compatible embedding configuration."""
+    return create_embeddings(settings)
 
 
 PYTHON_DOC = "\n\n".join(
