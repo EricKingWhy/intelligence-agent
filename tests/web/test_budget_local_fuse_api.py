@@ -1,19 +1,19 @@
 """T3（#308）：`budget.local.max_agent_turns` 的 HTTP 语义 + "被拒请求零副作用"。
 
-车票 AC 里属于 HTTP 边界的那几条（`#308` Acceptance Criteria）：
+车票 AC 里属于 HTTP 边界的那几条（`#308` AC + `#320` contract 收口）：
 
-- legacy-only / 新字段-only / 相等双字段 / 冲突双字段 / 越权配置**都有测试**；
-- 冲突与越权必须在 model / tool / session run **启动前**失败（`R4`：拒绝，不静默截断）；
-- legacy-only 要有 deprecation signal（`R5`）；
+- 新字段 / 越权配置 / 已退役 alias **都有测试**；
+- 越权与退役字段必须在 model / tool / session run **启动前**失败（`R4`：拒绝，不静默截断）；
+- 旧客户端发 `max_steps` ⇒ **未知字段 422**（`extra="forbid"`），不再有 deprecation 通道；
 - effective local fuse 要有**只读投影**（Must Do：供客户端显示，`11 §6.1`）。
 
 判定规则本身住在 `agent_harness.agent.budget.resolve_local_fuse`（单一规则来源），
 其穷举单测在 `tests/agent/test_local_budget_resolution.py`。本文件**不重测规则**，
 只锁 HTTP 层三件事：
 
-1. 422 的映射（`web/domain_errors.py` 里 `BudgetRejection` 家族 → 422）；
-2. 投影通道（响应头 `X-Local-Max-Agent-Turns` / `X-Local-Fuse-Source` +
-   `Deprecation` / `Warning: 299`）；
+1. 422 的映射（`web/domain_errors.py` 里 `BudgetRejection` 家族 → 422）+ 退役字段
+   的未知键 422（pydantic `extra="forbid"`）；
+2. 投影通道（响应头 `X-Local-Max-Agent-Turns` / `X-Local-Fuse-Source`）；
 3. **零副作用**：被拒请求不建 workspace、不落 session JSONL、不构造模型
    （"启动 run 前失败"的可观测定义——三样都动不了，run 自然没启动）。
 
@@ -85,7 +85,7 @@ def _assert_rejected_without_side_effects(app: Any, probe: _ModelProbe) -> None:
     assert list(app.state.agent.sessions_root.iterdir()) == [], "不得落盘 session"
 
 
-# ── 接受路径：投影 + deprecation signal ──
+# ── 接受路径：投影 ──
 
 
 def test_default_request_resolves_to_deployment_ceiling(tmp_path):
@@ -117,24 +117,20 @@ def test_new_field_only_accepted_without_deprecation_signal(tmp_path):
     assert "warning" not in resp.headers
 
 
-def test_legacy_alias_only_accepted_with_deprecation_signal(tmp_path):
-    """legacy-only（R5）：行为可预测（同一 effective 值）+ 废弃信号可见。"""
-    _, client = _web(tmp_path)
+def test_retired_alias_rejected_as_unknown_field(tmp_path):
+    """#320 contract：旧字段单独出现 ⇒ 未知字段 422（不是静默解释、也不是 deprecation）。"""
+    app, client = _web(tmp_path)
     probe = _ModelProbe()
     with probe:
         resp = client.post("/api/sessions", json={"task": "hi", "max_steps": 7})
-    assert resp.status_code == 200, resp.text
-    assert resp.headers["x-local-max-agent-turns"] == "7"
-    assert resp.headers["x-local-fuse-source"] == "max_steps_alias"
-    # R5 的 deprecation signal：老客户端不改代码也能看到自己踩了废弃字段。
-    assert resp.headers["deprecation"] == "true"
-    assert resp.headers["warning"].startswith("299")
-    assert "budget.local.max_agent_turns" in resp.headers["warning"]
+    assert resp.status_code == 422, resp.text
+    assert "max_steps" in resp.text, "错误要指名被拒的字段"
+    _assert_rejected_without_side_effects(app, probe)
 
 
-def test_equal_double_fields_accepted_and_deprecation_still_visible(tmp_path):
-    """相等双字段：接受（不因"两个都传"就拒绝），且废弃信号仍在。"""
-    _, client = _web(tmp_path)
+def test_retired_alias_next_to_new_field_still_rejected(tmp_path):
+    """双字段同发（无论相等与否）⇒ 422：未知键在形状层就被拒，没有"恰好相等"的豁免。"""
+    app, client = _web(tmp_path)
     probe = _ModelProbe()
     with probe:
         resp = client.post(
@@ -145,10 +141,8 @@ def test_equal_double_fields_accepted_and_deprecation_still_visible(tmp_path):
                 "budget": {"local": {"max_agent_turns": 8}},
             },
         )
-    assert resp.status_code == 200, resp.text
-    assert resp.headers["x-local-max-agent-turns"] == "8"
-    assert resp.headers["x-local-fuse-source"] == "max_steps_alias"
-    assert resp.headers["deprecation"] == "true"
+    assert resp.status_code == 422, resp.text
+    _assert_rejected_without_side_effects(app, probe)
 
 
 def test_request_equal_to_deployment_ceiling_accepted(tmp_path):
@@ -167,8 +161,8 @@ def test_request_equal_to_deployment_ceiling_accepted(tmp_path):
 # ── 拒绝路径：422 + 零副作用 ──
 
 
-def test_conflicting_double_fields_rejected_before_any_work(tmp_path):
-    """冲突双字段 → 422，且发生在任何工作开始之前（R4 / AC）。"""
+def test_alias_and_unequal_budget_rejected_before_any_work(tmp_path):
+    """不等双字段 → 422（未知键判据，先于一切语义合并），且发生在任何工作开始之前。"""
     app, client = _web(tmp_path)
     probe = _ModelProbe()
     with probe:
@@ -181,8 +175,7 @@ def test_conflicting_double_fields_rejected_before_any_work(tmp_path):
             },
         )
     assert resp.status_code == 422, resp.text
-    detail = resp.json()["detail"]
-    assert "8" in detail and "9" in detail, f"错误文案要指出冲突的两个值：{detail}"
+    assert "max_steps" in resp.text, f"错误要指名退役字段：{resp.text}"
     _assert_rejected_without_side_effects(app, probe)
 
 
@@ -200,13 +193,14 @@ def test_request_over_deployment_ceiling_rejected_before_any_work(tmp_path):
     _assert_rejected_without_side_effects(app, probe)
 
 
-def test_alias_over_deployment_ceiling_rejected_before_any_work(tmp_path):
-    """越权走旧字段同样拒绝：alias 是同一语义，不是绕过 ceiling 的后门。"""
+def test_alias_never_reaches_the_ceiling_rule_anymore(tmp_path):
+    """退役字段连 ceiling 判据都到不了：形状层 422（不再有"同一语义"的迁移期通道）。"""
     app, client = _web(tmp_path, ceiling=5)
     probe = _ModelProbe()
     with probe:
         resp = client.post("/api/sessions", json={"task": "hi", "max_steps": 6})
     assert resp.status_code == 422, resp.text
+    assert "ceiling" not in resp.text, "拒绝理由是未知字段，不是越权"
     _assert_rejected_without_side_effects(app, probe)
 
 
@@ -270,7 +264,7 @@ def test_steer_judges_the_budget_body_before_the_target_check(tmp_path):
     session_id = _create_idle_session(client)
     before = [e.type for e in app.state.agent.store.read_events(session_id)]
 
-    conflict = client.post(
+    retired = client.post(
         f"/api/sessions/{session_id}/messages",
         json={
             "content": "you are confused",
@@ -279,8 +273,8 @@ def test_steer_judges_the_budget_body_before_the_target_check(tmp_path):
             "budget": {"local": {"max_agent_turns": 9}},
         },
     )
-    assert conflict.status_code == 422, conflict.text
-    assert "8" in conflict.json()["detail"] and "9" in conflict.json()["detail"]
+    assert retired.status_code == 422, retired.text
+    assert "max_steps" in retired.text, f"错误要指名退役字段：{retired.text}"
 
     over_ceiling = client.post(
         f"/api/sessions/{session_id}/messages",
@@ -303,7 +297,11 @@ def test_steer_judges_the_budget_body_before_the_target_check(tmp_path):
     # 也没把"没在途 run"这件事实改写成别的状态码。
     legal = client.post(
         f"/api/sessions/{session_id}/messages",
-        json={"content": "you are confused", "mode": "steer", "max_steps": 9},
+        json={
+            "content": "you are confused",
+            "mode": "steer",
+            "budget": {"local": {"max_agent_turns": 9}},
+        },
     )
     assert legal.status_code == 409, legal.text
 
@@ -387,15 +385,18 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
             assert resp.status_code == 422, f"{payload} 应被拒：{resp.text}"
     _assert_rejected_without_side_effects(app, probe)
     with probe:
-        # 正控（`#318`）：`budget.session` 各维已实现——显式声明被接受（launch=false
-        # 只建会话，不启动 run，账行自然还没建出；这里只钉"请求形状不再被拒"）。
+        # 正控（`#318`）：`budget.session` 各维已实现——显式声明被接受。`launch=false`
+        # 走 **query 参数**（与 `_create_idle_session` 同一条通道；#320 的 `extra="forbid"`
+        # 顺带揪出本用例曾把 `launch` 放进 body——那个键从未被模型声明、一直被静默
+        # 忽略，"只建会话"的注释声称与实际行为不符）。launch=false 只建会话不启动
+        # run，账行自然还没建出；这里只钉"请求形状不再被拒"。
         ok = client.post(
             "/api/sessions",
             json={
-                "task": "hi", "launch": False,
                 "budget": {"session": {"max_agent_turns_total": 5,
                                        "max_delegations": 3}},
             },
+            params={"launch": "false"},
         )
     assert ok.status_code == 200, ok.text
 
@@ -491,12 +492,8 @@ def test_resume_honors_budget_and_projects_fuse(tmp_path):
     assert resp.headers["x-local-fuse-source"] == "budget.local.max_agent_turns"
 
 
-def test_resume_accepts_legacy_alias_with_deprecation_signal(tmp_path):
-    """alias 规则是全局的（`02 §5.1` / D8）：恢复端点也认 `max_steps` 并给废弃信号。
-
-    本端点此前没有该字段，但 alias 合并点若缺席，`{"max_steps": 8, "budget": {…9}}`
-    会静默通过冲突校验——同一请求体在创建端点 422、在恢复端点静默生效。
-    """
+def test_resume_rejects_retired_alias_too(tmp_path):
+    """退役规则是全局的（`02 §5.1` D8 的收口面）：恢复端点同样 422，不留静默通道。"""
     _, client = _web(tmp_path)
     session_id = _create_idle_session(client)
     probe = _ModelProbe()
@@ -504,10 +501,9 @@ def test_resume_accepts_legacy_alias_with_deprecation_signal(tmp_path):
         resp = client.post(
             f"/api/sessions/{session_id}/resume", json={"task": "继续", "max_steps": 9},
         )
-    assert resp.status_code == 200, resp.text
-    assert resp.headers["x-local-max-agent-turns"] == "9"
-    assert resp.headers["x-local-fuse-source"] == "max_steps_alias"
-    assert resp.headers["deprecation"] == "true"
+    assert resp.status_code == 422, resp.text
+    assert "max_steps" in resp.text
+    assert probe.calls == []
 
 
 def test_rejected_resume_appends_nothing(tmp_path):
@@ -572,8 +568,8 @@ def test_ws_budget_shape_error_returns_error_frame(tmp_path):
         assert json.loads(ws.receive_text())["type"] == "pong"
 
 
-def test_ws_semantic_rejection_returns_error_frame(tmp_path):
-    """WS 上的 alias 冲突同样有回声（第四个入口不能绕过 422 语义）。"""
+def test_ws_retired_alias_returns_error_frame(tmp_path):
+    """WS 上的退役字段同样有回声（第四个入口不能绕过未知键拒绝）。"""
     import json
 
     _, client = _web(tmp_path)
@@ -591,7 +587,7 @@ def test_ws_semantic_rejection_returns_error_frame(tmp_path):
         }))
         payload = json.loads(ws.receive_text())
     assert payload["type"] == "error", payload
-    assert "8" in payload["message"] and "9" in payload["message"]
+    assert "max_steps" in payload["message"], payload
     after = [e["type"] for e in client.get(f"/api/sessions/{session_id}/events").json()]
     assert after == before, "被拒帧不得改动会话历史"
     assert probe.calls == []
