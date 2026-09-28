@@ -1,0 +1,1 @@
+2026-09-29	#304 Standards review: PASS; assertions are scoped to deterministic stream readiness and are not blocking on duplication; no product or runtime behavior changed.	f724229448685b1ec16f5bca33dd09b70244cf24..1e76bc6ae2b5272fc1a85f8457ed71de6a135066

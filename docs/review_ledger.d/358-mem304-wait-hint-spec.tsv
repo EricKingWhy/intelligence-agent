@@ -1,0 +1,1 @@
+2026-09-29	#304 Spec review: PASS; refresh-hint Playwright case now waits for the active run/stream preconditions before virtual-time advancement; behavior and acceptance scope remain unchanged.	f724229448685b1ec16f5bca33dd09b70244cf24..1e76bc6ae2b5272fc1a85f8457ed71de6a135066
