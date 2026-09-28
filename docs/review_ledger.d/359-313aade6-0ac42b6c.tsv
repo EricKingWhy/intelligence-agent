@@ -1,0 +1,1 @@
+2026-09-28	#346 最终双轴审查：Spec PASS；Standards PASS-WITH-FINDINGS（无阻断项，保留一个 P3 输入关系字段 data-clump 判断）。覆盖授权与撤销来源、事件重建和 Fork 边界、排队取消与目标重锚、损坏 queue_id 防护、reconcile 幂等，以及不可信 metadata 不得覆盖用户内容。	313aade65e556b10ce99fed562c102d9089eb39c..0ac42b6ccc03ce5c35ac1fc81bfe9b1ffef4a647
