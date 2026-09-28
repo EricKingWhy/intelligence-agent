@@ -1228,7 +1228,15 @@ class AgentRuntime:
             step_base = max(session.max_step_id, session.user_turn_count)
             arms.step_base = step_base
             if user_input is not None:
-                message_data = {"content": user_input, **(user_input_metadata or {})}
+                message_data = {"content": user_input}
+                message_data.update(
+                    {
+                        key: user_input_metadata[key]
+                        for key in ("revoke_fact_id", "refutes_event_id")
+                        if user_input_metadata is not None
+                        and key in user_input_metadata
+                    }
+                )
                 user_event = session.append(USER_MESSAGE, message_data)
                 yield to_agent_event(user_event)
                 # USER_ACCEPTED 稳定边界：user/message 已持久化。

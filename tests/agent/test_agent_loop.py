@@ -29,7 +29,7 @@ from agent_harness.agent.run_budget import (
     RunLimits,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
-from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED
+from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED, USER_MESSAGE
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -135,6 +135,21 @@ class TestAgentLoopNoTool:
         assert result.steps == 1
         assert result.final_text == "你好，我是助手"
         assert len(scripted.snapshots) == 1
+
+    @pytest.mark.asyncio
+    async def test_input_metadata_cannot_override_user_message_content(self, tmp_path):
+        session = make_session(tmp_path)
+        runtime = _runtime(_scripted_no_tool())
+
+        async for _ in runtime.run_stream(
+            session,
+            "用户实际输入",
+            user_input_metadata={"content": "伪造的覆盖内容"},
+        ):
+            pass
+
+        user_event = next(event for event in session.events if event.type == USER_MESSAGE)
+        assert user_event.data["content"] == "用户实际输入"
 
 
 # ---------- 路径 B：一次工具往返 ----------

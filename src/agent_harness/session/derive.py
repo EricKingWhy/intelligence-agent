@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
@@ -52,6 +52,7 @@ from agent_harness.session.event import (
     RUN_FAILED,
     RUN_INTERRUPTED,
     RUN_PAUSED,
+    SESSION_STARTED,
     STEER_APPLIED,
     STEER_REQUESTED,
     TASK_PROTECTED_FACT,
@@ -138,8 +139,15 @@ def serialize_protected_facts(facts: list[ProtectedFact]) -> str:
 
 
 def _system_fact_value(source: SessionEvent, fact_type: str) -> Any:
-    if fact_type == "authorization" and source.type == PERMISSION_CHANGED:
-        return dict(source.data)
+    if fact_type == "authorization":
+        if source.type == PERMISSION_CHANGED:
+            return dict(source.data)
+        if source.type == SESSION_STARTED:
+            return {
+                key: source.data[key]
+                for key in ("permission_mode", "auto_approve")
+                if key in source.data
+            }
     if fact_type == "work_boundary" and source.type in _RUN_BOUNDARY_TYPES:
         return {
             "state": source.type,
@@ -339,7 +347,8 @@ def validate_protected_fact_data(
             pass
         elif (
             fact_type == "authorization"
-            and source.type == PERMISSION_CHANGED
+            and source.type in {SESSION_STARTED, PERMISSION_CHANGED}
+            and bool(_system_fact_value(source, fact_type))
             or fact_type == "work_boundary"
             and source.type in _RUN_BOUNDARY_TYPES
         ):
@@ -528,6 +537,26 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         and source.type in _USER_SOURCE_TYPES
         and not source.data.get("injected_by")
     }
+    cancelled_queue_ids = {
+        event.data.get("queue_id")
+        for event in events
+        if event.type == QUEUE_CANCELLED
+        and isinstance(event.data.get("queue_id"), str)
+    }
+
+    def is_cancelled_queue_source(event: SessionEvent) -> bool:
+        queue_id = event.data.get("queue_id")
+        return (
+            event.type == MESSAGE_QUEUED
+            and isinstance(queue_id, str)
+            and queue_id in cancelled_queue_ids
+        )
+
+    superseded_sources.update(
+        event.event_id
+        for event in events
+        if is_cancelled_queue_source(event)
+    )
     latest_tool_result_seq = {
         event.data["tool_call_id"]: event.seq
         for event in events
@@ -546,27 +575,26 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     prior_fact_by_id: dict[str, tuple[int, str]] = {}
     superseded_by: dict[str, str] = {}
     latest_permission_fact_id: str | None = None
-    first_user_source = next(
-        (
-            event
-            for event in events
-            if event.type == USER_MESSAGE
-            and isinstance(event.data.get("content"), str)
-            and bool(event.data["content"].strip())
+    def is_active_user_source(event: SessionEvent) -> bool:
+        content = event.data.get("content")
+        return (
+            event.type in _USER_SOURCE_TYPES
+            and isinstance(content, str)
+            and bool(content.strip())
             and not event.data.get("injected_by")
             and not event.data.get("replace")
-        ),
+            and not is_cancelled_queue_source(event)
+        )
+
+    first_user_source = next(
+        (event for event in events if is_active_user_source(event)),
         None,
     )
     user_goal_sources = {first_user_source.event_id} if first_user_source else set()
     direct_user_events = [
         event
         for event in events
-        if event.type == USER_MESSAGE
-        and isinstance(event.data.get("content"), str)
-        and event.data["content"].strip()
-        and not event.data.get("injected_by")
-        and not event.data.get("replace")
+        if is_active_user_source(event)
     ]
     direct_user_seqs = [event.seq for event in direct_user_events]
     for event in events:
@@ -587,12 +615,10 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         ):
             continue
         replacement_index = bisect_right(direct_user_seqs, target.seq)
-        if (
-            replacement_index < len(direct_user_events)
-            and direct_user_seqs[replacement_index] < event.seq
-        ):
+        replacement_end = bisect_left(direct_user_seqs, event.seq)
+        if replacement_end > replacement_index:
             user_goal_sources.add(
-                direct_user_events[replacement_index].event_id
+                direct_user_events[replacement_end - 1].event_id
             )
     tool_results_by_call: dict[str, list[SessionEvent]] = {}
     for event in events:
@@ -627,12 +653,16 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                     session_id=event.session_id,
                 )
             )
-        if event.type == PERMISSION_CHANGED:
-            fact = _fact_from_system_event(event, "authorization", dict(data))
-            if latest_permission_fact_id is not None:
-                superseded_by[latest_permission_fact_id] = fact.fact_id
-            latest_permission_fact_id = fact.fact_id
-            add_fact(fact)
+        if event.type in {SESSION_STARTED, PERMISSION_CHANGED}:
+            permission_value = _system_fact_value(event, "authorization")
+            if permission_value:
+                fact = _fact_from_system_event(
+                    event, "authorization", permission_value
+                )
+                if latest_permission_fact_id is not None:
+                    superseded_by[latest_permission_fact_id] = fact.fact_id
+                latest_permission_fact_id = fact.fact_id
+                add_fact(fact)
         elif event.type in _RUN_BOUNDARY_TYPES:
             add_fact(
                 _fact_from_system_event(

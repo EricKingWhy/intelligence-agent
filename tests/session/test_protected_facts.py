@@ -13,11 +13,15 @@ from agent_harness.session.derive import (
 )
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
+    MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
     OPERATION_RECONCILE_REQUIRED,
     OPERATION_RECONCILED,
     PERMISSION_CHANGED,
+    QUEUE_CANCELLED,
+    RUN_COMPLETED,
     RUN_PAUSED,
+    RUN_STARTED,
     SessionEvent,
 )
 from agent_harness.session.fork import fork_session
@@ -119,6 +123,26 @@ def test_latest_permission_change_supersedes_earlier_authorization_fact(tmp_path
     assert facts[first.event_id].status == "superseded"
     assert facts[first.event_id].superseded_by_fact_id == facts[latest.event_id].fact_id
     assert facts[latest.event_id].status == "active"
+
+
+def test_initial_permission_is_a_source_linked_authorization_fact(tmp_path):
+    session = Session.start(
+        JsonlSessionStore(tmp_path),
+        session_id="task",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+
+    authorization = next(
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "authorization"
+    )
+
+    assert authorization.value == {
+        "permission_mode": "read-only",
+        "auto_approve": False,
+    }
+    assert authorization.source_event_id == session.events[0].event_id
+    assert authorization.source_seq == session.events[0].seq
 
 
 def test_user_input_explicitly_revokes_authorization_and_vetoes_tool_attempt(tmp_path):
@@ -283,13 +307,85 @@ def test_superseding_the_initial_user_message_reanchors_the_projected_goal(tmp_p
     replacement = session.append(USER_MESSAGE, {"content": "新目标 ORD-200。"})
     session.append(MESSAGE_SUPERSEDED, {"superseded_seq": original.seq})
 
-    goals = [fact for fact in derive_protected_facts(session.events) if fact.type == "user_goal"]
+    goals = [
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "user_goal"
+    ]
 
     assert len(goals) == 2
     assert next(fact for fact in goals if fact.source_event_id == original.event_id).status == "superseded"
     active = next(fact for fact in goals if fact.source_event_id == replacement.event_id)
     assert active.status == "active"
     assert active.value == "新目标 ORD-200。"
+
+
+def test_queued_replacement_keeps_an_active_projected_goal(tmp_path):
+    session = _session(tmp_path)
+    original = session.append(USER_MESSAGE, {"content": "旧任务 ORD-100。"})
+    queued = session.append(
+        MESSAGE_QUEUED,
+        {"queue_id": "queued-1", "content": "新任务 ORD-200。"},
+    )
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": original.seq})
+
+    goals = [fact for fact in derive_protected_facts(session.events) if fact.type == "user_goal"]
+
+    original_goal = next(fact for fact in goals if fact.source_event_id == original.event_id)
+    replacement_goal = next(fact for fact in goals if fact.source_event_id == queued.event_id)
+    assert original_goal.status == "superseded"
+    assert replacement_goal.status == "active"
+    assert replacement_goal.value == "新任务 ORD-200。"
+
+
+def test_cancelled_queued_replacement_is_not_projected_as_goal(tmp_path):
+    session = _session(tmp_path)
+    original = session.append(USER_MESSAGE, {"content": "旧任务 ORD-100。"})
+    queued = session.append(
+        MESSAGE_QUEUED,
+        {"queue_id": "queued-1", "content": "新任务 ORD-200。"},
+    )
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": original.seq})
+    session.append(QUEUE_CANCELLED, {"queue_id": "queued-1"})
+
+    goals = [fact for fact in derive_protected_facts(session.events) if fact.type == "user_goal"]
+
+    assert all(fact.source_event_id != queued.event_id for fact in goals)
+
+
+def test_malformed_queue_id_does_not_break_protected_fact_projection(tmp_path):
+    session = _session(tmp_path)
+    original = session.append(USER_MESSAGE, {"content": "用户任务 ORD-100。"})
+    session.append(
+        MESSAGE_QUEUED,
+        {"queue_id": ["invalid"], "content": "损坏的队列事件"},
+    )
+
+    goals = [fact for fact in derive_protected_facts(session.events) if fact.type == "user_goal"]
+
+    active_goal = next(fact for fact in goals if fact.status == "active")
+    assert active_goal.source_event_id == original.event_id
+
+
+def test_latest_non_cancelled_queued_replacement_is_projected(tmp_path):
+    session = _session(tmp_path)
+    original = session.append(USER_MESSAGE, {"content": "旧任务 ORD-100。"})
+    cancelled = session.append(
+        MESSAGE_QUEUED,
+        {"queue_id": "queued-1", "content": "中间任务 ORD-200。"},
+    )
+    latest = session.append(
+        MESSAGE_QUEUED,
+        {"queue_id": "queued-2", "content": "当前任务 ORD-300。"},
+    )
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": original.seq})
+    session.append(QUEUE_CANCELLED, {"queue_id": "queued-1"})
+
+    goals = [fact for fact in derive_protected_facts(session.events) if fact.type == "user_goal"]
+
+    assert all(fact.source_event_id != cancelled.event_id for fact in goals)
+    current_goal = next(fact for fact in goals if fact.source_event_id == latest.event_id)
+    assert current_goal.status == "active"
+    assert current_goal.value == "当前任务 ORD-300。"
 
 
 def test_repository_tool_output_cannot_register_authorization(tmp_path):
@@ -587,3 +683,37 @@ async def test_facts_rebuild_after_restart_and_fork_only_inherits_valid_prefix(
     assert child_goal.source_event_id == goal_event.event_id
     assert child_goal.session_id == "child"
     assert all("W-03" not in str(fact.value) for fact in child_facts)
+
+
+@pytest.mark.asyncio
+async def test_fork_projects_permission_inherited_at_its_boundary(tmp_path):
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta = SqliteSessionMetaStore(tmp_path / "meta.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="parent",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    anchor = parent.append(USER_MESSAGE, {"content": "继续这个工作"})
+    parent.append(RUN_STARTED, {})
+    parent.append(RUN_COMPLETED, {})
+
+    child = await fork_session(
+        store,
+        meta,
+        parent.session_id,
+        boundary_user_message_seq=anchor.seq,
+        child_session_id="child",
+    )
+
+    authorization = next(
+        fact for fact in derive_protected_facts(child.events)
+        if fact.type == "authorization"
+    )
+    assert authorization.value == {
+        "permission_mode": "read-only",
+        "auto_approve": False,
+    }
+    assert authorization.source_event_id == child.events[0].event_id
+    assert authorization.session_id == child.session_id
