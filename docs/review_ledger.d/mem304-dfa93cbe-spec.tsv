@@ -1,0 +1,1 @@
+2026-09-29	#304 runner 修复 Spec 轴独立审查：无规格缺口或范围扩张；生命周期证据缺失保持 fail-closed；secret probe 经生产 ToolExecutor / RememberMemoryV2Tool / memory service 且断言零写入	060d247b4e6f1d5ebf1d12b4bf910f72011fd433..dfa93cbe60fbe6d8e13d6a3103c05c0852e0f5f2

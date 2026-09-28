@@ -1,0 +1,1 @@
+2026-09-29	#304 runner 修复 Standards 轴独立审查：无硬性违规；复用现有 gold workspace fixture 与 fake vector client；P3 建议两条新增测试可共享 setup helper，判断不值得加抽象，不阻断	060d247b4e6f1d5ebf1d12b4bf910f72011fd433..dfa93cbe60fbe6d8e13d6a3103c05c0852e0f5f2
