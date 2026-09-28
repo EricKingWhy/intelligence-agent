@@ -1,0 +1,1 @@
+2026-09-28	#304 Standards 最终冻结提交审查：P0/P1/P2=0；Milvus 临时 collection 仅在本次客户端明确确认创建后清理，丢失 create ACK 时 fail closed；AC6 E2E 对异步能力加载使用响应屏障和断言轮询	a444ca3a8d07fa70e9a1e5355ff61c646e375640..91696611e0620aa7cc92aed5829c35e68f2f0954

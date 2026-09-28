@@ -1,0 +1,1 @@
+2026-09-28	#304 Spec 最终冻结提交审查：P0/P1/P2=0；AC5 hostile recall 仅注入固定 untrusted HumanMessage，特权调用由生产 ToolExecutor 拒绝；最终 AC6 E2E 等待真实 capabilities 响应并验证路由切换	a444ca3a8d07fa70e9a1e5355ff61c646e375640..91696611e0620aa7cc92aed5829c35e68f2f0954
