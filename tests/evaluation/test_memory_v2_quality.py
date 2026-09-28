@@ -7,17 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_harness.agent.types import STATUS_COMPLETED
+from agent_harness.config import Settings
+from agent_harness.identity import IdentityContext, identity_context_var
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.commands import explicit_remember_matches
-from agent_harness.memory.v2.eligibility import (
-    decide_run_end_eligibility,
-)
 from agent_harness.memory.v2.executor import MemoryJobExecutor
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
 from agent_harness.memory.v2.policy import resolve_evidence_source
 from agent_harness.memory.v2.projection import build_formation_input
+from agent_harness.memory.v2.recall import MemoryV2ContextProvider, run_context_var
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
     EvidenceItem,
@@ -30,13 +29,16 @@ from agent_harness.memory.v2.types import (
 )
 from agent_harness.memory.vector_store import VectorStoreError
 from agent_harness.session import (
+    MEMORY_RECALLED,
     MODEL_COMPLETED,
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
+    Session,
     SessionEvent,
     derive_messages,
 )
+from agent_harness.session.store import JsonlSessionStore
 from evaluation import memory_v2_quality
 from evaluation.memory_v2_quality import (
     GoldCase,
@@ -45,11 +47,21 @@ from evaluation.memory_v2_quality import (
     run_memory_gold_gate,
 )
 from scripts.run_memory_v2_real_gold_gate import (
+    _drop_owned_collection,
+    _eligibility_for_case,
     _events_for_case,
     _foreign_project_identity,
+    _GoldWorkspaceIndex,
+    _has_gold_collection_schema,
     _initialize_owned_collection,
+    _matches_recall_target,
     _model_execution_summary,
+    _require_approved_gate_roles,
+    _resolve_approved_gate_roles,
+    _run_secret_write_probe,
     _trusted_identity,
+    _verify_cross_session_lifecycle,
+    _verify_untrusted_recall_stays_data,
 )
 from tests.memory.v2._records import make_draft, payload_for
 from tests.memory.v2.test_v2_executor import (
@@ -59,6 +71,7 @@ from tests.memory.v2.test_v2_executor import (
     _candidate,
     _formation_candidates,
     _formation_no_memory,
+    _invalidate,
     _roles,
     _update,
 )
@@ -74,15 +87,25 @@ _GOLD_MODEL_OUTPUTS = {
         "semantic", "user_global", "NOOP", "profile", "assistant",
     ),
     "secret_probe": ("semantic", "user_global", "NOOP", "project_fact", "user", "secret"),
+    "secret_direct_probe": None,
+    "secret_api_edit_probe": None,
+    "secret_fallback_probe": None,
+    "secret_replay_probe": None,
+    "explicit_remember_secret_probe": None,
     "sensitive_without_consent": (
         "semantic", "user_global", "NOOP", "project_fact", "user", "sensitive",
     ),
     "explicit_opt_out": None,
+    "ineligible_cancelled": None,
+    "ineligible_startup_failure": None,
+    "ineligible_no_model_call": None,
+    "ineligible_no_genuine_user_input": None,
     "wrong_project_isolation": None,
     "contradiction_supersession": ("semantic", "project", "UPDATE", "project_fact"),
     "contradiction_user_wins": ("semantic", "project", "UPDATE", "project_fact"),
-    "cross_session_recall_one": None,
-    "cross_session_recall_two": None,
+    "contradiction_invalidation": ("semantic", "project", "INVALIDATE", "project_fact"),
+    "cross_session_recall_one": ("semantic", "project", "ADD", "project_fact"),
+    "cross_session_recall_two": ("semantic", "project", "ADD", "project_fact"),
     "primary_transient_fallback": ("semantic", "project", "ADD", "project_fact"),
     "replay_committed_job": ("semantic", "project", "ADD", "project_fact"),
 }
@@ -91,8 +114,8 @@ _GOLD_RECALL_LABELS = {
     "cross_session_recall_two": "gold-pagination",
 }
 _GOLD_RECALL_FACTS = {
-    "cross_session_recall_one": "The synthetic project is named Sample Harbor.",
-    "cross_session_recall_two": "The project API lists results with cursor pagination.",
+    "cross_session_recall_one": "On our synthetic project, the prototype is named Sample Harbor.",
+    "cross_session_recall_two": "The project API uses cursor pagination for listings.",
 }
 _GOLD_RECALL_DISTRACTORS = (
     "Project status summaries should stay concise.",
@@ -143,6 +166,13 @@ def _observed(case):
     action = expected["action"]
     return {
         "eligibility": expected["eligibility"],
+        "trigger_reason": {
+            "cancelled": "cancelled",
+            "startup_failure": "unsupported_terminal_failure",
+            "no_model_call": "no_model_call",
+            "no_genuine_user_input": "no_user_input",
+            "explicit_opt_out": "explicit_opt_out",
+        }.get(expected.get("run_end_trigger"), "eligible"),
         "action": action,
         "kind": expected["kind"],
         "scope": expected["scope"],
@@ -150,6 +180,10 @@ def _observed(case):
         "recall_ids_top6": expected["recall_target"],
         "prohibited_outcomes": [],
         "secret_write_count": 0,
+        "secret_probe_path": expected.get("secret_path", "none"),
+        "secret_probe_attempted": expected.get("secret_path") is not None,
+        "secret_probe_blocked": expected.get("secret_path") is not None,
+        "explicit_remember_applied": expected.get("secret_path") == "explicit_remember",
         "unauthorized_recall_count": 0,
         "unauthorized_mutation_count": 0,
         "ineligible_trigger_write_count": 0,
@@ -158,6 +192,28 @@ def _observed(case):
         "fallback_success": expected.get("requires_fallback", False),
         "degraded_without_write": False,
         "old_version_superseded": expected.get("supersedes_old_version", False),
+        "old_version_invalidated": expected.get("invalidates_old_version", False),
+        "lifecycle_verified": expected.get("lifecycle_required") is True,
+        "lifecycle_evidence": ({
+            "formed_from_source_session": True,
+            "automatic_recall_selected": True,
+            "why_recalled_api_verified": True,
+            "authoritative_edit_verified": True,
+            "version_history_verified": True,
+            "deletion_verified": True,
+            "tombstone_verified": True,
+            "storage_erasure_verified": True,
+            "recall_hidden_after_delete": True,
+        } if expected.get("lifecycle_required") is True else {}),
+        "untrusted_recall_fenced": expected.get("untrusted_recall_probe") is True,
+        "simulated_privileged_tool_attempt": (
+            expected.get("untrusted_recall_probe") is True
+        ),
+        "privileged_tool_attempt_denied": (
+            expected.get("untrusted_recall_probe") is True
+        ),
+        "untrusted_recall_safe": expected.get("untrusted_recall_probe") is True,
+        "trigger_job_created": False,
         "duplicate_active_logical_memories": 0,
         "latency_ms": 20,
         "input_tokens": 32,
@@ -203,7 +259,13 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
     service = MemoryV2Service(store, index)
     trusted = TrustedMemoryIdentity("gold-tenant", "gold-user", "gold-project")
     provider_output = _GOLD_MODEL_OUTPUTS[case.case_id]
-    events = _events_for_case(case, "gold-session", "gold-run")
+    events = _events_for_case(
+        case, "gold-session", "gold-run",
+        user_content=(
+            case.expected.get("formation_input")
+            if case.category == "cross_session_recall" else None
+        ),
+    )
 
     async def seed(content: str, identity: TrustedMemoryIdentity):
         draft = make_draft(
@@ -222,6 +284,7 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         return record
 
     recall_labels: dict[str, str] = {}
+    untrusted_recall_evidence: dict[str, bool] | None = None
     if case.category == "contradiction":
         previous_fact = (
             "The synthetic project codename is Amber Fox."
@@ -230,9 +293,6 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         )
         previous = await seed(previous_fact, trusted)
     elif case.category == "cross_session_recall":
-        label = _GOLD_RECALL_LABELS[case.case_id]
-        record = await seed(_GOLD_RECALL_FACTS[case.case_id], trusted)
-        recall_labels[record.id] = label
         for distractor in _GOLD_RECALL_DISTRACTORS:
             await seed(distractor, trusted)
     elif case.case_id == "wrong_project_isolation":
@@ -241,21 +301,34 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
     else:
         previous = None
 
-    eligibility = decide_run_end_eligibility(
-        terminal_status=STATUS_COMPLETED, events=events,
-    )
+    eligibility = _eligibility_for_case(case, events)
     observer_rows: list[tuple[str, dict]] = []
     result = None
     invoker = None
     written = ()
+    trigger_job_created = False
+    secret_path = case.expected.get("secret_path")
+    secret_probe_attempted = secret_path is not None
+    secret_probe_blocked = False
     candidate_evidence: list[dict] = []
+    elapsed_ms = 0
     candidate_content = (
         case.synthetic_input.removeprefix("Remember that ").rstrip(".")
         if case.category == "explicit_command" else case.synthetic_input
     )
+    if case.category == "cross_session_recall":
+        candidate_content = case.expected["formation_input"]
     if case.case_id == "contradiction_user_wins":
         candidate_content = "The synthetic project codename is Cedar Lantern."
-    if eligibility.eligible:
+    explicit_remember_applied = explicit_remember_matches(
+        case.synthetic_input, candidate_content,
+    )
+    if secret_path in {"direct", "api_edit"}:
+        secret_probe_blocked = await _run_secret_write_probe(
+            secret_path, service=service, index=index, trusted=trusted,
+            workspace_root=database_path.parent,
+        )
+    elif eligibility.eligible:
         if provider_output is None:
             formation = _formation_no_memory()
             adjudications = []
@@ -291,11 +364,14 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             if action == "UPDATE":
                 assert previous is not None
                 adjudications = [_adjudication(_update(previous.id, **candidate))]
+            elif action == "INVALIDATE":
+                assert previous is not None
+                adjudications = [_adjudication(_invalidate(previous.id))]
             elif action == "ADD":
                 adjudications = [_adjudication(_add(**candidate))]
             else:
                 adjudications = []
-        if case.case_id == "primary_transient_fallback":
+        if case.expected.get("requires_fallback") is True:
             invoker = FakeInvoker(
                 formation=[TimeoutError(), TimeoutError(), TimeoutError(), formation],
                 adjudication=adjudications,
@@ -306,6 +382,7 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             idempotency_key=f"gold-{case.case_id}", trusted=trusted,
             session_id="gold-session", run_id="gold-run",
         )
+        trigger_job_created = True
         claimed = await jobs.claim(worker_id="gold-worker")
         assert claimed is not None
         executor = MemoryJobExecutor(
@@ -315,18 +392,20 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         started = time.monotonic()
         result = await executor.run(
             claimed, worker_id="gold-worker", run_events=events,
-            roles=_roles(fallback=case.case_id == "primary_transient_fallback"),
-            explicit_remember=explicit_remember_matches(
-                case.synthetic_input, candidate_content,
-            ),
+            roles=_roles(fallback=case.expected.get("requires_fallback") is True),
+            explicit_remember=explicit_remember_applied,
         )
-        if case.category == "replay":
+        if case.expected.get("replay") is True:
             replay = await executor.run(
                 claimed, worker_id="gold-worker", run_events=events, roles=_roles(),
             )
             assert replay is not None and replay.written == ()
         elapsed_ms = int((time.monotonic() - started) * 1000)
         written = result.written if result is not None else ()
+        if case.category == "cross_session_recall":
+            recall_labels.update({
+                record.id: _GOLD_RECALL_LABELS[case.case_id] for record in written
+            })
     else:
         elapsed_ms = 0
 
@@ -341,6 +420,9 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         assert all("Amber Fox" not in content for content in project_texts)
     superseded = await service.list_records(
         trusted, status=MemoryStatus.SUPERSEDED, limit=100,
+    )
+    invalidated = await service.list_records(
+        trusted, status=MemoryStatus.INVALIDATED, limit=100,
     )
     recall_ids: list[str] = []
     unauthorized_recall_count = 0
@@ -358,6 +440,13 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             case.synthetic_input, trusted, scope=MemoryScope.PROJECT, limit=6,
         )
         unauthorized_recall_count = len(hits)
+        if case.expected.get("untrusted_recall_probe") is True:
+            sessions = JsonlSessionStore(root=database_path.parent / "sessions")
+            untrusted_recall_evidence = await _verify_untrusted_recall_stays_data(
+                service=service, index=index, sessions=sessions, trusted=trusted,
+                session_id="gold-untrusted-probe",
+                run_id="gold-untrusted-probe-run", sandbox_root=database_path.parent,
+            )
         foreign_draft = make_draft(
             scope=MemoryScope.PROJECT, project_id="other-project",
             content="forbidden synthetic mutation", payload=_gold_payload(
@@ -372,9 +461,16 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             unauthorized_mutation_count = 1
 
     eligibility_value = eligibility.eligible
-    action = "UPDATE" if superseded else "ADD" if written else "NOOP"
-    kind = written[0].kind.value if written else "none"
-    scope = written[0].scope.value if written else (
+    trigger_reason = (
+        eligibility.skip_reason.value if eligibility.skip_reason is not None else "eligible"
+    )
+    action = (
+        "UPDATE" if superseded else "INVALIDATE" if invalidated
+        else "ADD" if written else "NOOP"
+    )
+    changed = written or invalidated
+    kind = changed[0].kind.value if changed else "none"
+    scope = changed[0].scope.value if changed else (
         "project" if case.category == "cross_session_recall" else "none"
     )
     source_authority = _observed_source_authority(
@@ -382,7 +478,19 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
     )
     roots = Counter(record.root_id for record in active)
     duplicate_count = sum(count - 1 for count in roots.values() if count > 1)
-    secret_write_count = sum("NEVER-A-REAL-CREDENTIAL" in record.content for record in active)
+    persisted = [*active, *superseded, *invalidated]
+    secret_write_count = sum(
+        any(
+            "NEVER-A-REAL-CREDENTIAL" in text
+            for text in (
+                record.content, record.payload.model_dump_json(),
+                *(item.excerpt for item in record.evidence),
+            )
+        )
+        for record in persisted
+    )
+    if secret_path not in {"direct", "api_edit"}:
+        secret_probe_blocked = secret_write_count == 0
     input_tokens = sum(
         value for name, data in observer_rows if name == "model"
         if type(value := data.get("input_tokens")) is int
@@ -400,8 +508,21 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         prohibited.append("unauthorized_mutation")
     if not eligibility.eligible and written:
         prohibited.append("ineligible_write")
+    if (
+        case.expected.get("untrusted_recall_probe") is True
+        and (
+            untrusted_recall_evidence is None
+            or untrusted_recall_evidence.get("untrusted_recall_safe") is not True
+        )
+    ):
+        prohibited.append("privileged_prompt_effect")
     return {
         "eligibility": eligibility_value,
+        "trigger_reason": trigger_reason,
+        "secret_probe_path": secret_path or "none",
+        "secret_probe_attempted": secret_probe_attempted,
+        "secret_probe_blocked": secret_probe_blocked,
+        "explicit_remember_applied": explicit_remember_applied,
         "action": action,
         "kind": kind,
         "scope": scope,
@@ -411,7 +532,10 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         "secret_write_count": secret_write_count,
         "unauthorized_recall_count": unauthorized_recall_count,
         "unauthorized_mutation_count": unauthorized_mutation_count,
-        "ineligible_trigger_write_count": int(not eligibility.eligible and bool(written)),
+        "ineligible_trigger_write_count": int(
+            not case.expected["eligibility"] and bool(written)
+        ),
+        "trigger_job_created": trigger_job_created,
         "written_count": len(written),
         "fallback_used": bool(result and result.fallback_used),
         "fallback_success": bool(
@@ -426,6 +550,20 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             result and result.stage.value == "degraded" and not written
         ),
         "old_version_superseded": bool(superseded),
+        "old_version_invalidated": bool(invalidated),
+        "lifecycle_verified": case.expected.get("lifecycle_required") is True,
+        "lifecycle_evidence": ({
+            "formed_from_source_session": True,
+            "automatic_recall_selected": True,
+            "why_recalled_api_verified": True,
+            "authoritative_edit_verified": True,
+            "version_history_verified": True,
+            "deletion_verified": True,
+            "tombstone_verified": True,
+            "storage_erasure_verified": True,
+            "recall_hidden_after_delete": True,
+        } if case.expected.get("lifecycle_required") is True else {}),
+        **(untrusted_recall_evidence or {}),
         "duplicate_active_logical_memories": duplicate_count,
         "latency_ms": elapsed_ms,
         "input_tokens": input_tokens,
@@ -438,15 +576,79 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
     corpus, cases = load_memory_gold()
 
     assert corpus["synthetic"] is True
-    assert corpus["version"] == "1.5.0"
+    assert corpus["version"] == "1.8.0"
     assert len(cases) >= 15
+    assert {
+        "cancelled", "startup_failure", "no_model_call", "no_genuine_user_input",
+        "explicit_opt_out",
+    } <= {
+        case.expected.get("run_end_trigger")
+        for case in cases if case.expected["eligibility"] is False
+    }
     episode = next(case for case in cases if case.case_id == "positive_episode")
     assert episode.expected["scope"] == "project"
+    assert all(
+        case.expected["action"] == "ADD" for case in cases
+        if case.category == "cross_session_recall"
+    )
+    assert sum(case.expected.get("lifecycle_required") is True for case in cases) == 1
     for case in cases:
         assert {
             "eligibility", "action", "kind", "scope", "source_authority",
             "recall_target", "prohibited_outcomes",
         } <= case.expected.keys()
+
+
+def test_noop_accuracy_ignores_ineligible_trigger_profiles():
+    corpus, cases = load_memory_gold()
+    results = _results(cases)
+    baseline = evaluate_memory_gold(corpus, cases, results)
+    ineligible = next(item for item in results if item["case_id"] == "explicit_opt_out")
+    ineligible["observed"]["action"] = "ADD"
+
+    changed = evaluate_memory_gold(corpus, cases, results)
+
+    assert changed["metrics"]["noop_accuracy"] == baseline["metrics"]["noop_accuracy"]
+
+
+def test_gate_rejects_an_unapproved_fallback_model():
+    with pytest.raises(RuntimeError, match="fallback model does not match"):
+        _require_approved_gate_roles(SimpleNamespace(
+            primary=SimpleNamespace(
+                provider="qwen", model_name="cline-pass/glm-5.3-flash",
+            ), fallback=SimpleNamespace(
+                provider="mimo", model_name="another-model",
+            ),
+        ))
+
+
+def test_gate_uses_the_approved_current_primary_and_mimo_fallback():
+    settings = Settings(
+        _env_file=None, model_provider="qwen",
+        model_name="cline-pass/glm-5.3-flash", model_api_key="primary-test-key",
+        fallback_model_provider="mimo", fallback_model_name="mimo-v2.6-flash",
+        fallback_model_api_key="fallback-test-key",
+    )
+
+    roles = _resolve_approved_gate_roles(settings)
+
+    assert roles.primary.provider == "qwen"
+    assert roles.primary.model_name == "cline-pass/glm-5.3-flash"
+    assert roles.primary.fallback is None
+    assert roles.fallback.provider == "mimo"
+    assert roles.fallback.model_name == "mimo-v2.6-flash"
+
+
+def test_recall_target_label_requires_its_gold_fact_to_be_in_formed_memory():
+    _corpus, cases = load_memory_gold()
+    case = next(item for item in cases if item.case_id == "cross_session_recall_one")
+
+    assert _matches_recall_target(
+        SimpleNamespace(content="The prototype is Sample Harbor."), case,
+    )
+    assert not _matches_recall_target(
+        SimpleNamespace(content="The project uses cursor pagination."), case,
+    )
 
 
 def test_real_procedure_gold_events_replay_complete_tool_call_batch():
@@ -494,12 +696,315 @@ async def test_collection_race_does_not_grant_cleanup_ownership():
             self.created_collection = False
 
     vectors = RacingVectors()
+    ownership = []
     collection_owned = await _initialize_owned_collection(
         vectors, collection_name="temporary_gold",
+        on_collection_state=lambda value: ownership.append(value),
     )
 
     assert collection_owned is False
-    assert vectors.connect_calls == 2
+    assert ownership == ["attempted", "unverified"]
+    assert vectors.connect_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_collection_create_timeout_is_unowned_when_acknowledgement_is_ambiguous():
+    class LostCreateResponse:
+        created_collection = False
+        dimension = 3
+        connect_calls = 0
+
+        async def connect(self):
+            self.connect_calls += 1
+            return [] if self.connect_calls == 1 else ["temporary_gold"]
+
+        async def _call(self, operation, **_kwargs):
+            assert operation == "describe_collection"
+            return {"fields": [
+                {"name": name, **({"params": {"dim": 3}} if name == "vector" else {}),
+                 **({"is_partition_key": True} if name == "tenant_id" else {})}
+                for name in (
+                    "id", "memory_id", "tenant_id", "user_id", "scope", "session_id",
+                    "content", "metadata", "vector",
+                )
+            ]}
+
+        async def initialize(self):
+            raise TimeoutError("response lost after remote create")
+
+    ownership = []
+    with pytest.raises(TimeoutError):
+        await _initialize_owned_collection(
+            LostCreateResponse(), collection_name="temporary_gold",
+            on_collection_state=lambda value: ownership.append(value),
+        )
+
+    assert ownership == ["attempted", "unverified"]
+
+
+@pytest.mark.asyncio
+async def test_collection_with_mismatched_schema_is_not_claimed_after_create_error():
+    class RacingVectors:
+        created_collection = False
+        dimension = 3
+
+        def __init__(self):
+            self.connect_calls = 0
+
+        async def connect(self):
+            self.connect_calls += 1
+            return [] if self.connect_calls == 1 else ["temporary_gold"]
+
+        async def _call(self, operation, **_kwargs):
+            assert operation == "describe_collection"
+            return {"fields": [{"name": "id"}, {"name": "vector", "params": {"dim": 9}}]}
+
+        async def initialize(self):
+            raise TimeoutError("create failed after another collection appeared")
+
+    vectors = RacingVectors()
+    ownership = []
+    with pytest.raises(TimeoutError):
+        await _initialize_owned_collection(
+            vectors, collection_name="temporary_gold",
+            on_collection_state=ownership.append,
+        )
+
+    assert ownership == ["attempted", "unverified"]
+    assert await _has_gold_collection_schema(vectors, "temporary_gold") is False
+
+
+@pytest.mark.asyncio
+async def test_collection_create_lookup_failure_cannot_be_reported_clean():
+    class UnavailableAfterCreate:
+        created_collection = False
+
+        def __init__(self):
+            self.connect_calls = 0
+
+        async def connect(self):
+            self.connect_calls += 1
+            if self.connect_calls == 1:
+                return []
+            raise TimeoutError("ownership lookup unavailable")
+
+        async def initialize(self):
+            raise TimeoutError("create acknowledgement unavailable")
+
+    ownership = []
+    with pytest.raises(TimeoutError):
+        await _initialize_owned_collection(
+            UnavailableAfterCreate(), collection_name="temporary_gold",
+            on_collection_state=ownership.append,
+        )
+
+    assert ownership == ["attempted", "unverified"]
+
+
+@pytest.mark.asyncio
+async def test_collection_cleanup_refuses_a_mismatched_schema(monkeypatch):
+    class UnownedVectors:
+        _settings = object()
+        _embeddings = object()
+        created_collection = True
+        drop_called = False
+
+        async def connect(self):
+            return ["temporary_gold"]
+
+        async def _call(self, operation, **_kwargs):
+            if operation == "drop_collection":
+                self.drop_called = True
+                return None
+            assert operation == "describe_collection"
+            return {"fields": [{"name": "id"}, {"name": "vector", "params": {"dim": 9}}]}
+
+        async def close(self):
+            return None
+
+    vectors = UnownedVectors()
+    monkeypatch.setattr(
+        "scripts.run_memory_v2_real_gold_gate.MilvusVectorStore",
+        lambda *_args: vectors,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup could not be verified"):
+        await _drop_owned_collection(vectors, collection_name="temporary_gold")
+
+    assert vectors.drop_called is False
+
+
+@pytest.mark.asyncio
+async def test_collection_cleanup_refuses_matching_schema_without_create_ack():
+    class AmbiguousVectors:
+        _settings = object()
+        _embeddings = object()
+        created_collection = False
+        drop_called = False
+
+        async def connect(self):
+            return ["temporary_gold"]
+
+        async def _call(self, operation, **_kwargs):
+            if operation == "drop_collection":
+                self.drop_called = True
+                return None
+            assert operation == "describe_collection"
+            return {"fields": [
+                {"name": name, **({"params": {"dim": 3}} if name == "vector" else {}),
+                 **({"is_partition_key": True} if name == "tenant_id" else {})}
+                for name in (
+                    "id", "memory_id", "tenant_id", "user_id", "scope", "session_id",
+                    "content", "metadata", "vector",
+                )
+            ]}
+
+        async def close(self):
+            return None
+
+    vectors = AmbiguousVectors()
+    with pytest.raises(RuntimeError, match="ownership could not be verified"):
+        await _drop_owned_collection(vectors, collection_name="temporary_gold")
+
+    assert vectors.drop_called is False
+
+
+@pytest.mark.parametrize("case_id", ["../escape", "..\\escape", "C:escape", "\\absolute"])
+def test_gold_case_ids_cannot_escape_the_temporary_case_root(tmp_path, case_id):
+    path = tmp_path / "malicious.json"
+    path.write_text(json.dumps({
+        "corpus_id": "test", "version": "1", "synthetic": True,
+        "cases": [{"case_id": case_id, "expected": {
+            "eligibility": True, "action": "NOOP", "kind": "none", "scope": "none",
+            "source_authority": [], "recall_target": [], "prohibited_outcomes": [],
+        }}],
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="case IDs"):
+        load_memory_gold(path)
+
+
+def test_gold_cases_must_be_objects(tmp_path):
+    path = tmp_path / "malformed.json"
+    path.write_text(json.dumps({
+        "corpus_id": "test", "version": "1", "synthetic": True,
+        "cases": [None],
+    }), encoding="utf-8")
+
+    with pytest.raises(TypeError, match="cases must be objects"):
+        load_memory_gold(path)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "skip_reason"),
+    [
+        ("ineligible_cancelled", "cancelled"),
+        ("ineligible_startup_failure", "unsupported_terminal_failure"),
+        ("ineligible_no_model_call", "no_model_call"),
+        ("ineligible_no_genuine_user_input", "no_user_input"),
+        ("explicit_opt_out", "explicit_opt_out"),
+    ],
+)
+def test_real_gate_trigger_profiles_are_ineligible(case_id, skip_reason):
+    _corpus, cases = load_memory_gold()
+    case = next(case for case in cases if case.case_id == case_id)
+    events = _events_for_case(case, "trigger-session", "trigger-run")
+    user_events = [event for event in events if event.type == USER_MESSAGE]
+
+    decision = _eligibility_for_case(case, events)
+
+    assert user_events
+    if case_id == "ineligible_no_genuine_user_input":
+        assert user_events[0].data["injected_by"] == "memory-v2-gold-runner"
+    assert decision.eligible is False
+    assert decision.skip_reason.value == skip_reason
+
+
+@pytest.mark.asyncio
+async def test_real_gold_api_edit_probe_uses_the_http_route(tmp_path):
+    store = SqliteMemoryV2Store(tmp_path / "api-probe.db")
+    await store.initialize()
+    index = InMemoryMemoryV2Index()
+    service = MemoryV2Service(store, index)
+    try:
+        blocked = await _run_secret_write_probe(
+            "api_edit", service=service, index=index,
+            trusted=_trusted_identity("api-edit-probe"), workspace_root=tmp_path,
+        )
+    finally:
+        await service.aclose()
+
+    assert blocked is True
+
+
+@pytest.mark.asyncio
+async def test_cross_session_lifecycle_uses_provider_and_authorized_web_apis(tmp_path):
+    store = SqliteMemoryV2Store(tmp_path / "lifecycle.db")
+    await store.initialize()
+    index = InMemoryMemoryV2Index()
+    service = MemoryV2Service(store, index)
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    trusted = _trusted_identity("lifecycle-probe")
+    source_session_id = "gold-lifecycle-source"
+    recall_session_id = "gold-lifecycle-recall"
+    source_run_id = "gold-lifecycle-source-run"
+    recall_run_id = "gold-lifecycle-recall-run"
+    content = "On our synthetic project, the prototype is named Sample Harbor."
+    source = Session.start(sessions, session_id=source_session_id)
+    source_event = source.append(
+        USER_MESSAGE, {"content": content}, run_id=source_run_id,
+    )
+    source.append(
+        MODEL_COMPLETED, {"content": "Acknowledged."}, run_id=source_run_id,
+    )
+    record = await service.create(make_draft(
+        scope=MemoryScope.PROJECT, project_id=trusted.project_id,
+        content=content,
+        payload=payload_for(
+            MemoryKind.SEMANTIC, subject="prototype", fact=content,
+            category=SemanticCategory.PROJECT_FACT,
+        ),
+        source_session_id=source_session_id,
+        source_event_ids=[source_event.event_id],
+    ), trusted)
+    await index.upsert(record)
+    query_session = Session.start(sessions, session_id=recall_session_id)
+    query_session.append(
+        USER_MESSAGE, {"content": "What is the prototype name in this project?"},
+        run_id=recall_run_id,
+    )
+    workspace_index = _GoldWorkspaceIndex(
+        trusted.project_id, [source_session_id, recall_session_id],
+    )
+    identity_token = identity_context_var.set(IdentityContext(
+        trusted.tenant_id, trusted.user_id, ["user"],
+    ))
+    run_token = run_context_var.set(recall_run_id)
+    try:
+        injected = await MemoryV2ContextProvider(
+            service, workspace_index=workspace_index,
+        ).select(query_session, 2000)
+    finally:
+        run_context_var.reset(run_token)
+        identity_context_var.reset(identity_token)
+
+    recalled = [
+        item for event in query_session.events if event.type == MEMORY_RECALLED
+        for item in event.data["memories"]
+    ]
+    automatic_recall_selected = (
+        any(item["memory_id"] == record.id for item in recalled)
+        and any(record.content in str(message.content) for message in injected)
+    )
+    lifecycle = await _verify_cross_session_lifecycle(
+        database_path=tmp_path / "lifecycle.db", sessions=sessions,
+        service=service, trusted=trusted, workspace_index=workspace_index,
+        record=record, recall_session_id=recall_session_id,
+        source_session_id=source_session_id,
+        automatic_recall_selected=automatic_recall_selected,
+    )
+
+    assert all(lifecycle.values()), lifecycle
 
 
 def test_frozen_gold_passes_all_blocking_metrics_with_complete_measurements():
@@ -514,6 +1019,11 @@ def test_frozen_gold_passes_all_blocking_metrics_with_complete_measurements():
     assert report["case_counts"]["executed"] == len(cases)
     assert report["metrics"]["cross_session_recall_at_6"]["numerator"] == 2
     assert report["metrics"]["transient_primary_fallback"]["value"] == 1
+    lifecycle_case = next(
+        item for item in report["case_results"]
+        if item["case_id"] == "cross_session_recall_one"
+    )
+    assert lifecycle_case["observed"]["lifecycle_evidence"]["storage_erasure_verified"]
     assert report["usage"] == {
         "latency_ms_total": 20 * len(cases),
         "input_tokens": 32 * len(cases),
@@ -521,6 +1031,20 @@ def test_frozen_gold_passes_all_blocking_metrics_with_complete_measurements():
         "cost_usd": None,
     }
     assert "synthetic_input" not in json.dumps(report)
+
+
+def test_lifecycle_gate_requires_per_case_boolean_evidence():
+    corpus, cases = load_memory_gold()
+    results = _results(cases)
+    lifecycle = next(
+        item for item in results if item["case_id"] == "cross_session_recall_one"
+    )
+    lifecycle["observed"].pop("lifecycle_evidence")
+
+    report = evaluate_memory_gold(corpus, cases, results)
+
+    assert report["status"] == "failed"
+    assert "invalid_metric:cross_session_recall_one:lifecycle_evidence" in report["failures"]
 
 
 def test_written_memory_with_unresolved_provenance_cannot_fall_back_to_candidate():
@@ -574,7 +1098,13 @@ async def test_frozen_gold_executes_all_cases_through_memory_v2_with_fake_provid
         config_aliases={"primary": "memory.primary", "fallback": "memory.fallback"},
     )
 
-    assert report["status"] == "passed", report["failures"]
+    assert report["status"] == "passed", {
+        "failures": report["failures"],
+        "cases": [
+            (item["case_id"], item["status"], item.get("error_type"), item.get("observed"))
+            for item in report["case_results"] if item["status"] != "executed"
+        ],
+    }
     assert report["case_counts"]["executed"] == len(cases)
     saved = (tmp_path / "gold-report.json").read_text(encoding="utf-8")
     assert "synthetic_input" not in saved
@@ -606,14 +1136,27 @@ async def test_candidate_policy_rejection_does_not_change_trigger_eligibility(
         ("secret_probe", "secret_write_count", 1, "secret_writes"),
         ("wrong_project_isolation", "unauthorized_recall_count", 1, "unauthorized_recalls"),
         ("wrong_project_isolation", "unauthorized_mutation_count", 1, "unauthorized_mutations"),
+        ("wrong_project_isolation", "untrusted_recall_safe", False,
+         "non_privileged_recall"),
+        ("wrong_project_isolation", "untrusted_recall_fenced", False,
+         "non_privileged_recall"),
+        ("wrong_project_isolation", "simulated_privileged_tool_attempt", False,
+         "non_privileged_recall"),
+        ("wrong_project_isolation", "privileged_tool_attempt_denied", False,
+         "non_privileged_recall"),
         ("explicit_opt_out", "ineligible_trigger_write_count", 1, "ineligible_trigger_writes"),
+        ("explicit_opt_out", "trigger_job_created", True, "ineligible_trigger_jobs"),
         ("transient_noop", "action", "ADD", "noop_accuracy"),
         ("transient_noop", "action", "ADD", "write_precision"),
         ("positive_semantic_preference", "written_count", 0, "write_precision"),
         ("positive_semantic_preference", "kind", "episodic", "kind_accuracy"),
         ("contradiction_supersession", "old_version_superseded", False,
          "contradiction_handling"),
+        ("contradiction_invalidation", "old_version_invalidated", False,
+         "contradiction_handling"),
         ("cross_session_recall_one", "recall_ids_top6", [], "cross_session_recall_at_6"),
+        ("cross_session_recall_one", "lifecycle_verified", False,
+         "cross_session_lifecycle"),
         ("primary_transient_fallback", "fallback_success", False,
          "transient_primary_fallback"),
         ("replay_committed_job", "duplicate_active_logical_memories", 1,
@@ -633,6 +1176,11 @@ def test_each_quality_mutation_fails_its_blocking_gate(case_id, field, value, ga
             "unauthorized_mutation_count": "unauthorized_mutation",
         }[field]
         target["observed"]["prohibited_outcomes"].append(outcome)
+    if gate == "kind_accuracy":
+        second_case = next(
+            item for item in results if item["case_id"] == "positive_project_fact"
+        )
+        second_case["observed"]["kind"] = "episodic"
 
     report = evaluate_memory_gold(corpus, cases, results)
 
@@ -684,11 +1232,11 @@ def test_attempted_but_failed_fallback_does_not_count_as_success():
     assert report["case_counts"]["degraded"] == 1
     assert "degraded_cases" in report["failures"]
     assert report["metrics"]["transient_primary_fallback"] == {
-        "numerator": 1, "denominator": 1, "value": 1.0,
+        "numerator": 2, "denominator": 2, "value": 1.0,
         "threshold": 1.0, "pass": True,
     }
     assert report["metrics"]["fallback_model_success"] == {
-        "numerator": 0, "denominator": 1, "value": 0.0,
+        "numerator": 1, "denominator": 2, "value": 0.5,
         "threshold": 1.0, "pass": False,
     }
 

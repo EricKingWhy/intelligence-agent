@@ -251,6 +251,55 @@ records, and Qiniu test objects were verified absent; the dedicated Knowledge co
 pre-existed and was neither created nor dropped by the gate. Synthetic Langfuse trace,
 dataset, and experiment evidence was retained with content fields omitted.
 
+### D12 — #304 uses an approved gate-local Mimo fallback
+
+On 2026-09-28 the user approved changing only #304's real-gate fallback from the
+original Qwen choice to the locally configured `mimo` provider (`mimo-v2.6-flash`).
+The primary remains the locally configured SenseAudio model. The gate resolves the
+existing `memory.fallback` alias to Mimo for this release run; the frozen PRD §5.3 and
+the default Memory V2 role mapping remain unchanged. Evidence records aliases and
+safe attempt metadata, never endpoint credentials or key values.
+
+### D13 — #304 recall evidence follows a real two-session lifecycle
+
+The project gold corpus v1.8 keeps each recall query separate from the source user
+statement. The real Gate forms the source in conversation A through the production
+run-end notifier and job executor, then selects and injects it in conversation B
+through `MemoryV2ContextProvider`. The required lifecycle case also reads the
+authorized why-recalled API, edits through the public memory API and verifies version
+history, deletes through that API, verifies the tombstone, and confirms the old recall
+explanation is no longer returned. Recall@6 credits only records containing their
+gold fact anchor. NOOP accuracy includes only eligible candidate decisions; ineligible
+trigger behavior stays measured by its dedicated gates. The lifecycle evidence also
+verifies that SQLite no longer contains the logical record chain and Milvus no longer
+contains any version vector after deletion.
+
+### D14 — #304 binds to the approved current primary model
+
+On 2026-09-28 the user approved changing #304's primary model contract to the current
+local primary: provider `qwen`, model `cline-pass/glm-5.3-flash`. The real-gate runner
+resolves the configured primary chain for this ticket and pins the approved provider
+and model before any live calls; its configured Mimo fallback remains pinned to
+`mimo-v2.6-flash`. This is a #304-only evidence-gate override. The frozen PRD §5.3 and
+the default production Memory V2 role mapping remain unchanged. Endpoint and credential
+values are neither recorded nor emitted.
+
+### D15 — #304 records the untrusted-recall permission boundary and collection ownership
+
+The gold gate's adversarial recall probe verifies two independent runtime properties:
+the malicious synthetic memory is recalled only inside the fixed, untrusted `HumanMessage`
+data envelope, and a simulated privileged `bash` request is denied by the production
+`ToolExecutor` under `WORKSPACE_WRITE` without an approval callback. The report labels
+the request as simulated; it does not claim that a live model independently chose to
+issue it. The blocking `non_privileged_recall` gate requires the complete evidence tuple
+and fails closed if a component is missing, inconsistent, or false.
+
+The temporary Milvus collection is considered owned only when the client confirms that
+this run created it. A lost or ambiguous create acknowledgement does not establish
+ownership from a matching name or schema; cleanup refuses to drop such a collection
+and reports unverifiable cleanup instead. This avoids deleting a same-name collection
+created by another actor during the create race.
+
 ## 4. Verification contract
 
 落实证据位于 `tests/observability/test_tracer_port.py`、`tests/memory/v2/test_v2_executor.py`、

@@ -104,7 +104,13 @@ test('AC6：tab 集恰好等于"声明为真 **且有实现**"的面（逐面独
   await routeApi(page, {
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: false, terminal: false })],
   });
+  const declaredFalseResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET' && url.pathname === '/api/capabilities';
+  });
   await page.goto('/');
+  expect((await declaredFalseResponse).status()).toBe(200);
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat']);
   const declaredFalse = await tabLabels(page);
 
   await page.unroute('**/api/**');
@@ -112,6 +118,7 @@ test('AC6：tab 集恰好等于"声明为真 **且有实现**"的面（逐面独
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: false, terminal: true })],
   });
   await page.goto('/');
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat', '输出']);
   const declaredTrue = await tabLabels(page);
 
   await page.unroute('**/api/**');
@@ -119,6 +126,7 @@ test('AC6：tab 集恰好等于"声明为真 **且有实现**"的面（逐面独
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: true, terminal: false })],
   });
   await page.goto('/');
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat', '文件/改动']);
   const changesOnly = await tabLabels(page);
 
   expect(declaredFalse).toEqual(['Chat']);

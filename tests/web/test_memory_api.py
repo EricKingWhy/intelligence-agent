@@ -530,6 +530,26 @@ async def test_v2_list_filters_detail_versions_edit_stale_version_and_identity(m
     assert edited.status_code == 200, edited.text
     assert edited.json()["version"] == 2 and edited.json()["source_type"] == "user_edit"
     edited_id = edited.json()["id"]
+    secret_edit = {
+        **edit_body,
+        "expected_version": 2,
+        "content": "api_key=NEVER-A-REAL-CREDENTIAL",
+        "payload": {
+            "kind": "semantic", "subject": "synthetic project",
+            "fact": "api_key=NEVER-A-REAL-CREDENTIAL", "category": "project_fact",
+        },
+    }
+    blocked_secret_edit = client.patch(
+        f"/api/memories/{edited_id}", headers=headers, json=secret_edit,
+    )
+    assert blocked_secret_edit.status_code == 403, blocked_secret_edit.text
+    assert "NEVER-A-REAL-CREDENTIAL" not in blocked_secret_edit.text
+    versions_after_secret_edit = client.get(
+        f"/api/memories/{record.id}/versions", headers=headers,
+    )
+    assert versions_after_secret_edit.status_code == 200
+    assert len(versions_after_secret_edit.json()) == 2
+    assert "NEVER-A-REAL-CREDENTIAL" not in versions_after_secret_edit.text
     mismatched = {
         **edit_body,
         "expected_version": 2,
