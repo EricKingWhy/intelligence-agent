@@ -6528,6 +6528,8 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 **§8.1 读数传递（本票末笔）**：绑 `e83d5987` 的读数（全量 pytest 绑冻结代码树 `b6273a17`；Gate-0 绑 tip `e83d5987` / tree `3ed683c5`）之后只追加本笔回填（gate json + tracker 两处）——判据 ① = `git diff --name-status --no-renames e83d5987 <本笔>` → 2 条全 `M`/`A` 且全命中 `DOC_PATTERN`（tracker `.md` + `docs/gate/…json`）；判据 ② = 写本笔前 `git status --short` → `?? .zcodeignore` + `?? docs/gate/e83d5987…json`（落盘文件自身 + 常设例外，`tracked_matches_head=true`）⇒ 读数对最终 tip 同样有效。
 
+**先回后正合并（2026-09-28，本分支第二次）**：`origin/main` 前进到 `f73d968c`（PR #390 = #345/#346 线合入）⇒ `git merge-tree` 干跑零冲突（预演树 = 实际合并树 `053b8986`）后执行 merge ⇒ **`6a3f7742`**（父一 `b8efc697` / 父二 `f73d968c` / base `c5cf4f9b`；我方 50 条 46A+4M、上游 17 条 4A+13M、两侧交集 0；逐 blob 归属 50/50 + 17/17 全等于各自来源父；机械归属 = 台账行 357，绑 `b8efc697..6a3f7742`）。**§8.1 判定刷新**：本 merge 带进 `src/**` 5 文件（builder / compactor / builtin / derive / event）与 `tests/**` 8 文件 ⇒ 上段「读数传递」对 pytest 不再成立——绑 `b6273a17` 的全量 pytest 读数失效，全量重采在新树（合并树）上进行（环境注记：venv `.pth` 仍处 #346 线写入的 alien 状态，pytest 以 `PYTHONPATH=src` 覆盖保证导入解析到本仓库 src，读数如实注明该覆盖）；Gate-0 / 覆盖闸门在新 tip 重跑（读数见下）。台账行号碰撞说明：main 侧 #345 线同样用了行号 356（`356-c5cf4f9b-00748746.tsv`），与本票 `356-56543f88-b6273a17.tsv` 同号不同文件、range 各自独立；合并 tip 覆盖闸门实测双行并存解析正常（唯一 ❌ = merge 本身，由行 357 归属）。
+
 **残余（登记，不阻断）**：① 场景 4 预热后不再测量「进程首请求含惰性装配」的冷启动窗口（本场景测的是 warm 进程的 run 准入契约；产品冷启动行为未改，该特性仍存在于生产首请求）；② `deadline.py` 注释红数「4 红」修正为「6 红」归属 `#320` 批顺带执行；③ 预热行在场景 try 外 ⇒ `CapabilityError`（配置错类）走 runner 兜底、无 `_failure_text` 装饰（仅证据质量；Milvus 故障类不走此路径）。
 
 **集成**：待执行（「推集成分支 → 开 PR → 服务端 `gate0` 绿 → 合并 PR」，两步各需用户单独批准）。
