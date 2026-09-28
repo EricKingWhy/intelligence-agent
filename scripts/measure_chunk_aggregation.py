@@ -197,7 +197,7 @@ async def end_to_end(n: int, width: int, repeats: int = 3) -> float:
         tmp = pathlib.Path(tempfile.mkdtemp(prefix=f"iab-b281-e2e-{i}-"))
         registry = ToolRegistry()
         runtime = AgentRuntime(model=_Scripted(text_chunks(n, width)), registry=registry,
-                               executor=ToolExecutor(registry), max_steps=5)
+                               executor=ToolExecutor(registry), max_agent_turns=5)
         session = make_session(tmp)
         t0 = time.perf_counter()
         async for _ in runtime.run_stream(session, "hi"):

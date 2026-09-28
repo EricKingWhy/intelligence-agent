@@ -1108,6 +1108,7 @@ class AgentRuntime:
     async def run_stream(
         self, session: Session, user_input: str | None,
         cancel_reason_supplier: Callable[[], str] | None = None,
+        result_holder: list[AgentRunResult] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """流式驱动 Agent Loop，逐条 yield AgentEvent。
 
@@ -1121,10 +1122,15 @@ class AgentRuntime:
         run/failed 的 reason（"cancelled" / "orphaned"），让 run 的宿主
         （`RunManager`）区分取消来源；None = 默认 "cancelled"。
 
+        result_holder：需要 AgentRunResult（status/steps/final_text）的非流式
+        消费者传入 list（约定同 run()：终结路径统一写入，失败兜底也保证写入）；
+        None（默认）= 丢弃——SSE endpoint 只消费事件流，不读结果。
+
         SSE endpoint 直接消费这个 iterator；前端据此实时渲染。
         """
         drive = self._drive(
             session, user_input, stream=True,
+            result_holder=result_holder,
             cancel_reason_supplier=cancel_reason_supplier,
         )
         try:
