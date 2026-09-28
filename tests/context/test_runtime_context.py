@@ -25,6 +25,18 @@ from agent_harness.session import (
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
+MODEL_SECTIONS = """## 已完成工作与关键决策
+历史回复已保存。
+
+## 失败方案
+(none)
+
+## 当前进行中状态
+当前会话继续处理中。
+
+## Next Step
+继续当前请求。"""
+
 SNAPSHOT = "RUNTIME_SNAPSHOT_TEXT_9f3a"
 
 
@@ -259,12 +271,12 @@ async def test_runtime_context_compaction_path_includes_cost(tmp_path):
     def fill(session):
         for i in range(5):
             session.append(USER_MESSAGE, {"content": f"这是第 {i} 条用户消息，内容稍长以触发压缩。"})
-            session.append(MODEL_COMPLETED, {"content": f"这是第 {i} 条模型回复，同样稍长一些。"})
+            session.append(MODEL_COMPLETED, {"content": f"这是第 {i} 条模型回复。" + "历史内容 " * 100})
 
     def builder_with(**kwargs) -> ContextBuilder:
         return ContextBuilder(
-            ScriptedModel([]), max_context_tokens=500,
-            auto_compact_threshold=0.70, hard_guard_threshold=0.85, **kwargs,
+            ScriptedModel([AIMessage(content=MODEL_SECTIONS)]), max_context_tokens=5000,
+            auto_compact_threshold=0.20, hard_guard_threshold=0.85, **kwargs,
         )
 
     session_a = make_session(tmp_path / "a")
