@@ -98,10 +98,20 @@ def _normalize_tool_calls_for_projection(
 
 
 def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
+    """从事件序列投影出 messages 列表。"""
+    return [message for message, _source_range in derive_messages_with_source_ranges(events)]
+
+
+def derive_messages_with_source_ranges(
+    events: list[SessionEvent],
+) -> list[tuple[AnyMessage, tuple[int, int] | None]]:
     """从事件序列投影出 messages 列表。
 
     纯函数：不修改输入 events，不产生副作用。
     dangling tool_call（有 tool/call 无匹配 tool/result）会注入合成 ToolMessage。
+
+    每条事件消息带有对应 seq 范围；摘要消息带被替代的完整范围；合成的 dangling
+    ToolMessage 没有来源范围。压缩器用它为滚动摘要计算下一个 bracket 区间。
 
     T4 (#134)：识别 4-event compaction bracket。bracket 标记的 source_seq 区间
     内的原始投影事件被 shadowed（跳过），CONTEXT_COMPACTED 的 summary 投影成
@@ -153,8 +163,7 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
             else:
                 ends[bracket_id] = position
 
-    shadowed_ranges: list[tuple[int, int]] = []
-    bracket_summaries: list[str] = []
+    valid_brackets: list[tuple[int, int, str, int]] = []
     for bracket_id in start_order:
         start = starts[bracket_id]
         summary = summaries.get(bracket_id)
@@ -163,8 +172,42 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
                 or not start[2] < summary[3] < end_position
                 or (start[0], start[1]) != (summary[1], summary[2])):
             continue
-        shadowed_ranges.append((start[0], start[1]))
-        bracket_summaries.append(summary[0])
+        valid_brackets.append((start[0], start[1], summary[0], summary[3]))
+
+    # Later compactions normally cover the full range of an earlier summary and
+    # extend it. Keep only that later summary for nested ranges. A crossing range,
+    # or a later range nested inside an older one, is not produced by the compactor;
+    # ignore both brackets so replay exposes the original events instead of choosing
+    # an ambiguous summary.
+    invalid_brackets: set[int] = set()
+    for left_index, left in enumerate(valid_brackets):
+        for right_index in range(left_index + 1, len(valid_brackets)):
+            right = valid_brackets[right_index]
+            if left[1] < right[0] or right[1] < left[0]:
+                continue
+            if left[:2] == right[:2]:
+                older = left_index if left[3] < right[3] else right_index
+                invalid_brackets.add(older)
+                continue
+            left_contains = left[0] <= right[0] and left[1] >= right[1]
+            right_contains = right[0] <= left[0] and right[1] >= left[1]
+            if left_contains != right_contains:
+                outer = left_index if left_contains else right_index
+                inner = right_index if left_contains else left_index
+                if valid_brackets[outer][3] > valid_brackets[inner][3]:
+                    invalid_brackets.add(inner)
+                else:
+                    invalid_brackets.update((outer, inner))
+            else:
+                invalid_brackets.update((left_index, right_index))
+
+    retained_brackets = sorted(
+        (bracket for index, bracket in enumerate(valid_brackets)
+         if index not in invalid_brackets),
+        key=lambda bracket: (bracket[0], bracket[3]),
+    )
+    shadowed_ranges = [(start, end) for start, end, _summary, _position in retained_brackets]
+    bracket_summaries = [summary for _start, _end, summary, _position in retained_brackets]
 
     # ADR-0030 §4.2（#196）：supersede 区间——被取代的那个问句**连同它的整轮**
     # （答、tool_call、tool_result、delta）都不进模型可见投影。
@@ -217,7 +260,7 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
     # context build 阶段触发，此时 user/message 已经 append），如果按
     # CONTEXT_COMPACTED 的位置投影 summary，summary 会落到当前用户消息
     # 之后，破坏"摘要在前、当前请求在后"的语义。
-    messages: list[AnyMessage] = []
+    messages: list[tuple[AnyMessage, tuple[int, int] | None]] = []
     summary_emitted = [False] * len(bracket_summaries)
 
     for event in events:
@@ -227,7 +270,8 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
                 if bi < len(bracket_summaries):
                     summary = bracket_summaries[bi]
                     if summary:
-                        messages.append(SystemMessage(content=summary))
+                        start, end = shadowed_ranges[bi]
+                        messages.append((SystemMessage(content=summary), (start, end)))
                 summary_emitted[bi] = True
                 break
 
@@ -241,7 +285,7 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
 
         if event.type == USER_MESSAGE:
             content = event.data.get("content", "")
-            messages.append(HumanMessage(content=content))
+            messages.append((HumanMessage(content=content), (event.seq, event.seq)))
 
         elif event.type == MODEL_COMPLETED:
             content = event.data.get("content", "")
@@ -249,32 +293,38 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
                 event.data.get("tool_calls", [])
             )
             if tool_calls:
-                messages.append(AIMessage(content=content, tool_calls=tool_calls))
+                messages.append((
+                    AIMessage(content=content, tool_calls=tool_calls),
+                    (event.seq, event.seq),
+                ))
             else:
-                messages.append(AIMessage(content=content))
+                messages.append((AIMessage(content=content), (event.seq, event.seq)))
 
         elif event.type == TOOL_RESULT:
             tool_call_id = event.data.get("tool_call_id", "")
             content = event.data.get("content", "")
-            messages.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+            messages.append((
+                ToolMessage(content=content, tool_call_id=tool_call_id),
+                (event.seq, event.seq),
+            ))
 
     # 第二遍：为 dangling tool_call 注入合成 ToolMessage。
     # 只在 AIMessage 的某个 tool_call 在紧跟的 ToolMessage 块中没有对应结果时注入。
     # 合成消息插入在该 AIMessage 后紧跟的 ToolMessage 块的末尾。
-    result: list[AnyMessage] = []
+    result: list[tuple[AnyMessage, tuple[int, int] | None]] = []
     i = 0
     while i < len(messages):
-        msg = messages[i]
-        result.append(msg)
+        msg, source_range = messages[i]
+        result.append((msg, source_range))
 
         if isinstance(msg, AIMessage) and msg.tool_calls:
             # 收集这条 AIMessage 之后紧跟的连续 ToolMessage 块
             block_ids: set[str] = set()
             block_end = i + 1
             while block_end < len(messages) and isinstance(
-                messages[block_end], ToolMessage
+                messages[block_end][0], ToolMessage
             ):
-                block_ids.add(messages[block_end].tool_call_id)
+                block_ids.add(messages[block_end][0].tool_call_id)
                 result.append(messages[block_end])
                 block_end += 1
 
@@ -287,9 +337,10 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
                         "注入合成 ToolMessage",
                         tc_id,
                     )
-                    result.append(
-                        ToolMessage(content=DANGLING_TOOL_CONTENT, tool_call_id=tc_id)
-                    )
+                    result.append((
+                        ToolMessage(content=DANGLING_TOOL_CONTENT, tool_call_id=tc_id),
+                        None,
+                    ))
             i = block_end
         else:
             i += 1

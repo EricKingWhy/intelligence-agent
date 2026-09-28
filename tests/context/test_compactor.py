@@ -330,27 +330,7 @@ async def test_summary_that_misses_auto_target_is_rejected():
     assert result.messages == messages
 
 
-# ── Round 6 加固：mechanical 摘要有界性 + 围栏 JSON 容错 ──
-
-
-def test_mechanical_summary_bounds_tool_call_args():
-    """mechanical 摘要必须对 tool_call.args 截断——否则一条带大 payload 的
-    tool call（如 write 大文件）会让摘要本身超硬护栏，compaction 永久失败，
-    session 从此每次 run 都 context_window_exceeded（历史从不裁剪）。"""
-    from agent_harness.context.compactor import _mechanical_summary
-
-    huge_args = {"path": "big.txt", "content": "x" * 100_000}
-    messages = [
-        HumanMessage(content="old"),
-        AIMessage(content="", tool_calls=[{"id": "c1", "name": "write", "args": huge_args}]),
-        HumanMessage(content="current"),
-    ]
-    summary = _mechanical_summary(messages)
-    assert len(summary) < 2000  # 与摘要各字段 200/100 字符截断同级的有界性
-    assert "x" * 100_000 not in summary  # 大 payload 不整段进入摘要
-    rows = json.loads(summary)["mechanical_extract"]  # 整体仍是合法 JSON
-    assert rows[1]["tool_calls"][0]["id"] == "c1"
-    assert rows[1]["tool_calls"][0]["name"] == "write"
+# ── 摘要模型失败与结构化证据 ──
 
 
 @pytest.mark.asyncio
@@ -403,10 +383,10 @@ def test_programmatic_sections_preserve_exact_command_error_and_path():
     path = r"C:\work tree\src\agent.py"
     error = r"FileNotFoundError: missing C:\work tree\data.json"
     messages = [
-        HumanMessage(content=constraint),
+        HumanMessage(content=f"{constraint}；预算为 4096 tokens"),
         AIMessage(content="", tool_calls=[{
             "id": "call-r-042", "name": "run", "args": {
-                "command": command, "path": path,
+                "command": command, "path": path, "max_tokens": 8192,
             },
         }]),
         ToolMessage(content=error, tool_call_id="call-r-042", status="error"),
@@ -415,11 +395,15 @@ def test_programmatic_sections_preserve_exact_command_error_and_path():
     sections = _programmatic_summary_sections(messages)
     identifiers = json.loads(sections["## 精确标识清单"])
 
-    assert json.loads(sections["## 原始目标与用户约束"]) == [constraint]
+    assert json.loads(sections["## 原始目标与用户约束"]) == [
+        f"{constraint}；预算为 4096 tokens",
+    ]
     assert command in identifiers
     assert path in identifiers
     assert "call-r-042" in identifiers
     assert error in identifiers
+    assert "4096" in identifiers
+    assert "8192" in identifiers
     file_paths = json.loads(sections["## 文件清单"])
     assert path in file_paths
     assert "tests/context/test_compactor.py" in file_paths

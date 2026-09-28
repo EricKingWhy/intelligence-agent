@@ -43,6 +43,9 @@ _FILE_PATH_PATTERN = re.compile(
     r"(?<![\w])(?:[A-Za-z]:[\\/]|/)?"
     r"[\w.@+-]+(?:[\\/][\w.@+-]+)*\.[A-Za-z0-9]{1,12}(?![\w])"
 )
+_NUMBER_PATTERN = re.compile(
+    r"(?<![\w.-])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?%?(?![\w.-])"
+)
 _PATH_FIELDS = {"path", "file", "filename", "filepath", "file_path", "source_file"}
 _EXACT_FIELDS = {"command", "cmd", "shell", "error", "error_message"}
 
@@ -97,7 +100,9 @@ class ContextCompactor:
     ) -> CompactionResult:
         _validate_tool_blocks(messages)
         prefix_end = 0
-        while prefix_end < len(messages) and isinstance(messages[prefix_end], SystemMessage):
+        while (prefix_end < len(messages)
+               and isinstance(messages[prefix_end], SystemMessage)
+               and not _is_compaction_summary(messages[prefix_end])):
             prefix_end += 1
         prefix = messages[:prefix_end]
         cut = max((i for i, message in enumerate(messages)
@@ -158,27 +163,23 @@ class ContextCompactor:
                 f"Compaction cannot fit context: {token_estimate} -> {count} tokens; "
                 f"hard guard {self._hard_limit:g}"
             )
-        # T4 (#134)：从 events 计算 source_seq 区间。
-        # projecting events 一一对应 messages（derive_messages 的投影集合），
-        # 但 prefix（开头的 SystemMessages）不是由投影事件产生的——
-        # 所以产生 early 消息的事件是 projecting[prefix_end:cut]。
+        # T4 (#134)：从投影映射计算 source_seq 区间。旧摘要带有原 bracket 的
+        # 完整来源范围，因此下一次压缩可以覆盖并替代之前的摘要。
         source_seq_start: int | None = None
         source_seq_end: int | None = None
         if events is not None:
-            from agent_harness.session.event import (
-                MODEL_COMPLETED,
-                TOOL_RESULT,
-                USER_MESSAGE,
+            from agent_harness.session.derive import derive_messages_with_source_ranges
+
+            mapped = derive_messages_with_source_ranges(events)
+            aligned = len(mapped) == len(messages) and all(
+                projected == supplied
+                for (projected, _source_range), supplied in zip(mapped, messages)
             )
-            projecting = [e for e in events if e.type in {
-                USER_MESSAGE, MODEL_COMPLETED, TOOL_RESULT,
-            }]
-            # 如果 dangling 合成注入导致计数失配，放弃 source_seq 计算
-            if len(projecting) == len(messages):
-                early_events = projecting[prefix_end:cut]
-                if early_events:
-                    source_seq_start = early_events[0].seq
-                    source_seq_end = early_events[-1].seq
+            if aligned:
+                early_ranges = [source_range for _message, source_range in mapped[prefix_end:cut]]
+                if early_ranges and all(source_range is not None for source_range in early_ranges):
+                    source_seq_start = min(source_range[0] for source_range in early_ranges)
+                    source_seq_end = max(source_range[1] for source_range in early_ranges)
         if events is not None and (source_seq_start is None or source_seq_end is None):
             logger.warning(
                 "Context compaction rejected; source event range is unavailable",
@@ -221,14 +222,21 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
 
 
 def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]:
-    user_messages = [message.content for message in messages
-                     if isinstance(message, HumanMessage)]
+    user_messages: list[str] = []
     identifiers: list[str] = []
     file_paths: list[str] = []
 
     def add_once(target: list[str], value: str) -> None:
         if value and value not in target:
             target.append(value)
+
+    def decode_summary_values(value: str) -> list[str]:
+        if value == "(none)":
+            return []
+        parsed = json.loads(value)
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError("Previous summary programmatic section is not a string list")
+        return parsed
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -242,6 +250,10 @@ def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]
                     if (normalized in _EXACT_FIELDS or normalized == "id"
                             or normalized.endswith("_id")):
                         add_once(identifiers, child)
+                    for match in _NUMBER_PATTERN.finditer(child):
+                        add_once(identifiers, match.group())
+                elif isinstance(child, (int, float)) and not isinstance(child, bool):
+                    add_once(identifiers, str(child))
                 visit(child)
             error_content = value.get("content")
             if is_error and isinstance(error_content, str):
@@ -249,14 +261,32 @@ def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]
         elif isinstance(value, list):
             for child in value:
                 visit(child)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            add_once(identifiers, str(value))
         elif isinstance(value, str):
             for match in _IDENTIFIER_PATTERN.finditer(value):
+                add_once(identifiers, match.group())
+            for match in _NUMBER_PATTERN.finditer(value):
                 add_once(identifiers, match.group())
             for match in _FILE_PATH_PATTERN.finditer(value):
                 add_once(file_paths, match.group())
                 add_once(identifiers, match.group())
 
     for message in messages:
+        if isinstance(message, HumanMessage):
+            user_messages.append(message.content)
+        if (isinstance(message, SystemMessage)
+                and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")):
+            previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
+            previous_users = decode_summary_values(previous[0])
+            previous_identifiers = decode_summary_values(previous[6])
+            previous_paths = decode_summary_values(previous[7])
+            user_messages.extend(previous_users)
+            for value in previous_identifiers:
+                add_once(identifiers, value)
+            for value in previous_paths:
+                add_once(file_paths, value)
+            continue
         visit(message.model_dump(mode="json"))
 
     return {
@@ -269,6 +299,11 @@ def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]
         _SUMMARY_HEADINGS[7]: json.dumps(file_paths, ensure_ascii=False)
         if file_paths else "(none)",
     }
+
+
+def _is_compaction_summary(message: SystemMessage) -> bool:
+    """识别新旧持久化摘要，避免把旧摘要当不可压缩系统前缀。"""
+    return message.content.startswith((f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n"))
 
 
 def _assemble_summary(
@@ -291,43 +326,6 @@ def _validate_summary(summary: str, messages: list[AnyMessage]) -> None:
             raise ValueError("Programmatic summary section failed exact comparison")
     if not summary.strip():
         raise ValueError("Summary must not be empty")
-
-
-#: mechanical 摘要单字段截断预算（与 human/tool content 的 200/100 同级）。
-_MECHANICAL_CAP = 200
-
-
-def _mechanical_summary(messages: list[AnyMessage]) -> str:
-    rows = []
-    for message in messages:
-        if isinstance(message, HumanMessage):
-            rows.append({"type": "human", "content": message.text[:200]})
-        elif isinstance(message, AIMessage):
-            # tool_call.args 必须截断：args 是模型自由生成的（write 大文件等），
-            # 原样嵌入会让摘要本身超硬护栏——历史从不裁剪 + 投影每轮重建，
-            # 该 session 从此每次 run 都 context_window_exceeded，永久 brick。
-            rows.append({"type": "ai", "tool_calls": [
-                {"id": call.get("id"), "name": call.get("name"),
-                 "args": _cap_text(json.dumps(call.get("args", {}), ensure_ascii=False))}
-                for call in message.tool_calls
-            ]})
-        elif isinstance(message, ToolMessage):
-            rows.append({"type": "tool", "tool_call_id": message.tool_call_id,
-                         "content": message.text[:100]})
-        elif isinstance(message, SystemMessage):
-            rows.append({"type": "system", "content": message.text[:_MECHANICAL_CAP]})
-        else:
-            # 不丢弃系统约束或未知类型的消息；dump 整体截断成字符串，保证摘要有界。
-            rows.append(_cap_text(
-                json.dumps(message.model_dump(mode="json"), ensure_ascii=False), 300,
-            ))
-    return json.dumps({"mechanical_extract": rows}, ensure_ascii=False)
-
-
-def _cap_text(text: str, cap: int = _MECHANICAL_CAP) -> str:
-    if len(text) <= cap:
-        return text
-    return text[:cap] + "…[truncated]"
 
 
 def _validate_tool_blocks(messages: list[AnyMessage]) -> None:

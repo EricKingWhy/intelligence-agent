@@ -11,11 +11,17 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agent_harness.context.builder import ContextBuilder
-from agent_harness.context.compactor import ContextCompactor
+from agent_harness.context.compactor import (
+    _SUMMARY_HEADINGS,
+    ContextCompactor,
+    _parse_summary_sections,
+)
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.session import (
     COMPACTION_END,
@@ -23,6 +29,8 @@ from agent_harness.session import (
     CONTEXT_COMPACTED,
     MODEL_COMPLETED,
     USER_MESSAGE,
+    JsonlSessionStore,
+    Session,
     SessionEvent,
 )
 from agent_harness.session.derive import derive_messages
@@ -167,6 +175,40 @@ class TestDeriveMessagesBracket:
         assert isinstance(messages[0], SystemMessage)
         assert isinstance(messages[1], SystemMessage)
         assert isinstance(messages[2], HumanMessage)
+
+    def test_newer_covering_bracket_replaces_older_summary(self):
+        events = [
+            SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1",
+                         data={"content": "first old"}),
+            SessionEvent(seq=2, type=MODEL_COMPLETED, session_id="s1",
+                         data={"content": "first reply"}),
+            SessionEvent(seq=3, type=COMPACTION_START, session_id="s1",
+                         data={"bracket_id": "b1", "source_seq_start": 1,
+                               "source_seq_end": 2}),
+            SessionEvent(seq=4, type=CONTEXT_COMPACTED, session_id="s1",
+                         data={"bracket_id": "b1", "summary": "old summary",
+                               "source_seq_start": 1, "source_seq_end": 2}),
+            SessionEvent(seq=5, type=COMPACTION_END, session_id="s1",
+                         data={"bracket_id": "b1"}),
+            SessionEvent(seq=6, type=USER_MESSAGE, session_id="s1",
+                         data={"content": "second old"}),
+            SessionEvent(seq=7, type=MODEL_COMPLETED, session_id="s1",
+                         data={"content": "second reply"}),
+            SessionEvent(seq=8, type=COMPACTION_START, session_id="s1",
+                         data={"bracket_id": "b2", "source_seq_start": 1,
+                               "source_seq_end": 7}),
+            SessionEvent(seq=9, type=CONTEXT_COMPACTED, session_id="s1",
+                         data={"bracket_id": "b2", "summary": "new summary",
+                               "source_seq_start": 1, "source_seq_end": 7}),
+            SessionEvent(seq=10, type=COMPACTION_END, session_id="s1",
+                         data={"bracket_id": "b2"}),
+            SessionEvent(seq=11, type=USER_MESSAGE, session_id="s1",
+                         data={"content": "current"}),
+        ]
+
+        messages = derive_messages(events)
+
+        assert [message.content for message in messages] == ["new summary", "current"]
 
 
 # ── ContextCompactor 产生 bracket 元数据 ────────────────────────────
@@ -352,6 +394,54 @@ class TestBuilderWritesBracket:
         old_messages = [m for m in messages if isinstance(m, HumanMessage)
                         and "old" in (m.content or "")]
         assert len(old_messages) == 0, "shadowed 段未被跳过"
+
+    @pytest.mark.asyncio
+    async def test_second_compaction_merges_previous_summary_after_reload(self, tmp_path):
+        session = make_session(tmp_path)
+        original_user = "不得删除 old_rows；保留 R-042 与 4096 tokens。"
+        session.append(USER_MESSAGE, {"content": original_user})
+        session.append(MODEL_COMPLETED, {"content": "first analysis " * 1800})
+        session.append(USER_MESSAGE, {"content": "first current request"})
+        original_events = session.events
+        model = ScriptedModel([
+            AIMessage(content=MODEL_SECTIONS),
+            AIMessage(content=MODEL_SECTIONS),
+        ])
+        builder = ContextBuilder(
+            model, max_context_tokens=10000, auto_compact_threshold=0.3,
+        )
+
+        await builder.build(session)
+        first_bracket = next(
+            event for event in session.events if event.type == CONTEXT_COMPACTED
+        )
+        session.append(MODEL_COMPLETED, {"content": "follow-up analysis " * 1800})
+        session.append(USER_MESSAGE, {"content": "second current request"})
+        await builder.build(session)
+
+        reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
+        messages = reloaded.derive_messages()
+        summaries = [message for message in messages if isinstance(message, SystemMessage)]
+        latest = next(
+            event for event in reversed(reloaded.events)
+            if event.type == CONTEXT_COMPACTED
+        )
+        sections = dict(zip(
+            _SUMMARY_HEADINGS,
+            _parse_summary_sections(latest.data["summary"], _SUMMARY_HEADINGS),
+        ))
+
+        assert len(summaries) == 1
+        assert messages[-1].content == "second current request"
+        assert json.loads(sections["## 原始目标与用户约束"]) == [
+            original_user, "first current request",
+        ]
+        exact_identifiers = json.loads(sections["## 精确标识清单"])
+        assert "R-042" in exact_identifiers
+        assert "4096" in exact_identifiers
+        assert latest.data["source_seq_start"] <= first_bracket.data["source_seq_start"]
+        assert latest.data["source_seq_end"] >= first_bracket.data["source_seq_end"]
+        assert reloaded.events[:len(original_events)] == original_events
 
 
 # ── 参数融合 ────────────────────────────────────────────────────────
