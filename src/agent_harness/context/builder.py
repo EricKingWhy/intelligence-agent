@@ -11,7 +11,9 @@ from agent_harness.context.provider import ContextProvider
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.session import Session
 from agent_harness.session.derive import (
-    ProtectedFact, derive_protected_facts, serialize_protected_facts,
+    ProtectedFact,
+    derive_protected_facts,
+    serialize_protected_facts,
 )
 from agent_harness.session.event import (
     COMPACTION_END,

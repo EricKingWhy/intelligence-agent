@@ -34,7 +34,6 @@ from agent_harness.session.cwd import session_cwd
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
-    PERMISSION_CHANGED,
     RUN_FAILED,
     RUN_PAUSED,
     RUN_RESUMED,

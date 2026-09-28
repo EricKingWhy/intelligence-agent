@@ -1346,6 +1346,8 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectOperationReconcileRequired,
     summarize: summarizeOperationReconcileRequired,
   },
+  // #346：reconciliation confirmation is durable source evidence, not a timeline item.
+  [EventType.OPERATION_RECONCILED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.ARTIFACT_CREATED]: {
     apply: projectArtifactCreated,
     summarize: summarizeArtifactCreated,
