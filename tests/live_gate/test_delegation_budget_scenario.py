@@ -232,7 +232,7 @@ def _pause_payload(*, version: int = 1) -> dict[str, Any]:
             "run": {"max_agent_turns_total": LOW_CEILING},
         },
         "continuation": {
-            "completed": [f"子任务 1 已完成"],
+            "completed": ["子任务 1 已完成"],
             "remaining": [f"子任务 2-{SUBTASKS} 待逐个委派"],
             "blockers": [],
             "next_safe_action": "抬高 run ceiling 后以同一 run_id 恢复",
@@ -453,7 +453,7 @@ def test_red_dangling_delegate_call(tmp_path):
     抽的是**受纳**那次的结果：抽拒绝那次会连拒绝回填一起抽掉，红就没有分辨力。
     """
     events = _events()
-    dangling_id = str([e for e in events if e.type == "tool/call"][0]
+    dangling_id = str(next(e for e in events if e.type == "tool/call")
                       .data.get("tool_call_id"))
     trimmed = [
         e for e in events
@@ -500,7 +500,7 @@ class _DelegatingModel:
         self.bound_tools: list | None = None
         self.snapshots: list[list[Any]] = []
 
-    def bind_tools(self, tools: list, **kwargs: Any) -> "_DelegatingModel":
+    def bind_tools(self, tools: list, **kwargs: Any) -> _DelegatingModel:
         self.bound_tools = tools
         return self
 
