@@ -4,8 +4,9 @@
 1. Tavily 真实联网：web_search 工具真实查询返回带 citation 的命中
 2. Model Fallback 真实切换：primary 死端点（连接失败=瞬时）→ 切真实
    fallback provider 完成回答，model/fallback 事件落 JSONL
-3. 同错熔断真实触发：真实模型反复同参数调用失败工具 → 软熔断（user
-   纠正消息）→ 硬熔断 end_run(failed)
+3. 同错熔断真实触发：真实模型反复同参数调用失败工具 → 首达阈值软熔断
+   （user 纠正消息，恰好一次）→ 再达阈值（2T）非终态 run/paused(reason=stuck)
+   （`#317` T9 起硬熔断终结臂已从生产路径移除，ADR-0048 D5）
 
 凭证零泄漏：key 只从 Settings（.env）读取，绝不打印/断言明文。
 手动跑：uv run pytest tests/integration/test_phase12_web_gate.py -m integration -v
@@ -17,11 +18,17 @@ import pytest
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.runtime import AgentRuntime
-from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+from agent_harness.agent.types import STATUS_PAUSED
 from agent_harness.config import Settings
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
-from agent_harness.session import MODEL_FALLBACK, TOOL_FAILURE_GUARD, USER_MESSAGE
+from agent_harness.session import (
+    GUARD_STUCK,
+    MODEL_FALLBACK,
+    RUN_PAUSED,
+    TOOL_FAILURE_GUARD,
+    USER_MESSAGE,
+)
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from agent_harness.websearch.tavily import TavilyWebSearchProvider
 from agent_harness.websearch.tools import WebSearchTool
@@ -194,21 +201,31 @@ async def test_gate3_repeated_tool_failure_guard_real_trigger(settings, tmp_path
     levels = [e.data["level"] for e in guard_events]
     assert levels, "3 次尝试内熔断都未触发（真实模型未产生同指纹连续失败）"
 
-    # 单批并行同指纹失败 → 观察循环塌缩到最严重信号：硬触发时只发 hard 事件
-    # （终结中的 run 不注入纠正消息）；跨轮次 soft→hard 顺序双事件由 T1 的
-    # ScriptedModel 测试钉死。
-    if "hard" in levels:
-        hard = next(e for e in guard_events if e.data["level"] == "hard")
-        assert hard.data["consecutive_failures"] == 6
-        assert hard.data["tool_name"] == "fail_probe"
-        # 硬熔断强制 end_run(failed)，绝不伪造最终回答。
-        assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
-    else:
-        soft = next(e for e in guard_events if e.data["level"] == "soft")
-        assert soft.data["consecutive_failures"] == 3
-        assert soft.data["tool_name"] == "fail_probe"
-        corrective = [
-            e for e in session._events
-            if e.type == USER_MESSAGE and "改变策略" in e.data.get("content", "")
-        ]
-        assert len(corrective) == 1
+    # 单批并行同指纹失败：首达阈值（3）发 soft 并注入纠正语，**恰好一次**；到 2T（6）
+    # 收口成非终态 `run/paused(reason=stuck)`。旧硬熔断终结臂已移除（`#317` T9 /
+    # ADR-0048 D5），"soft → hard 两级"不再是本 Gate 的判据；两级顺序与"恰好一次"
+    # 由 T9 的 ScriptedModel 用例钉死（`tests/agent/test_stuck_runtime.py`）。
+    assert levels == ["soft"], f"同错熔断只剩 soft 一级，实际 {levels}"
+    soft = guard_events[0]
+    assert soft.data["consecutive_failures"] == 3
+    assert soft.data["tool_name"] == "fail_probe"
+    corrective = [
+        e for e in session._events
+        if e.type == USER_MESSAGE and "改变策略" in e.data.get("content", "")
+    ]
+    assert len(corrective) == 1
+    # 再达阈值才收口：真实模型给不给够 6 次同参调用是概率性的，**不当前提**
+    #（本 Gate 只证明真实模型行为能驱动真实熔断）。
+    stuck_paused = [
+        e for e in session._events
+        if e.type == GUARD_STUCK and e.data["level"] == "paused"
+    ]
+    if stuck_paused:
+        assert stuck_paused[0].data["pattern"] == "stuck.tool_failure_loop"
+        assert result.status == STATUS_PAUSED
+        assert [e for e in session._events if e.type == RUN_PAUSED], (
+            "stuck 暂停必须落 run/paused（非终态；`02 §5.2`）"
+        )
+        assert [e for e in session._events if e.type == "run/failed"] == [], (
+            "暂停不是失败：`02 §5.2` 禁止把 stuck 写成 run/failed"
+        )

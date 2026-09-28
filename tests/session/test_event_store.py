@@ -100,6 +100,10 @@ class TestSessionEventDTO:
             # `model_requests` / `total_tokens` / `cost_usd` 三个 counter 的**唯一**
             # 计数点——`model/completed` 只数被接纳进 loop 的决策（= agent_turns）。
             "model/request",
+            # #317 T9：五模式 stuck 检测的结构化信号（level=replan 恰一次 /
+            # level=paused 收口）。① 的 replan 复用既有 tool/failure-guard 形状，
+            # 所以这一条只在 ②–⑤ 与所有暂停上出现（ADR-0048 D2/D5）。
+            "guard/stuck",
         }
         assert EVENT_TYPES == expected
 

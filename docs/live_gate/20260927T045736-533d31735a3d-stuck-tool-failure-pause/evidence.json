@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "scenario_id": "stuck-tool-failure-pause",
+  "scenario_version": 1,
+  "verdict": "FAIL",
+  "reason": "attempt 1: RuntimeError: 首次执行没有留下 stuck 暂停（run/paused reason=stuck）——本次运行不构成证据载体；事件类型=['session/started', 'session/resumed', 'user/message', 'run/started', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']；attempt 2: RuntimeError: 首次执行没有留下 stuck 暂停（run/paused reason=stuck）——本次运行不构成证据载体；事件类型=['session/started', 'session/resumed', 'user/message', 'run/started', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'memory/degraded', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'memory/degraded', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']；attempt 3: RuntimeError: 首次执行没有留下 stuck 暂停（run/paused reason=stuck）——本次运行不构成证据载体；事件类型=['session/started', 'session/resumed', 'user/message', 'run/started', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']",
+  "missing_preconditions": [],
+  "created_at": "2026-09-27T05:01:16.302+00:00",
+  "sha": "533d31735a3db19ed9be7ab7bc06bacf121c8621",
+  "tree": "7b982f2ea42c79836b62ffe604b773d6ff69f60e",
+  "worktree": {
+    "head_sha": "533d31735a3db19ed9be7ab7bc06bacf121c8621",
+    "tree": "7b982f2ea42c79836b62ffe604b773d6ff69f60e",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "927f6ae378a0f94c",
+      "4678f88302815cba",
+      "0fb93ce7585a66ca"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-27T04:57:36.731+00:00",
+      "ended_at": "2026-09-27T04:58:52.478+00:00",
+      "status": "FAIL",
+      "duration_ms": 75746,
+      "session_id": "stuck-tool-failure-pause-a1-f19d8fdb",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 111,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/attempt-1.jsonl",
+      "events_sha256": "51039d2d62734ff53d87fa21fb02b26e40d97f29af326a3db3dbc8aeeae8cad9",
+      "assertions": [],
+      "error": "RuntimeError: 首次执行没有留下 stuck 暂停（run/paused reason=stuck）——本次运行不构成证据载体；事件类型=['session/started', 'session/resumed', 'user/message', 'run/started', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "927f6ae378a0f94c",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-27T04:58:52.478+00:00",
+      "ended_at": "2026-09-27T05:00:06.347+00:00",
+      "status": "FAIL",
+      "duration_ms": 73868,
+      "session_id": "stuck-tool-failure-pause-a2-9fa935a9",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 82,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/attempt-2.jsonl",
+      "events_sha256": "43ba40782a265726e251f5ab03164d4ef4d8e21593f3ee3bcfd993e31fb9769c",
+      "assertions": [],
+      "error": "RuntimeError: 首次执行没有留下 stuck 暂停（run/paused reason=stuck）——本次运行不构成证据载体；事件类型=['session/started', 'session/resumed', 'user/message', 'run/started', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'memory/degraded', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'memory/degraded', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "4678f88302815cba",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-27T05:00:06.347+00:00",
+      "ended_at": "2026-09-27T05:01:16.172+00:00",
+      "status": "FAIL",
+      "duration_ms": 69825,
+      "session_id": "stuck-tool-failure-pause-a3-8ec980e0",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 127,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/attempt-3.jsonl",
+      "events_sha256": "92c7672d52cf70cd988d2f7ff4071b1e2cb3dc7b76cb5beba1066039040a3480",
+      "assertions": [],
+      "error": "RuntimeError: 首次执行没有留下 stuck 暂停（run/paused reason=stuck）——本次运行不构成证据载体；事件类型=['session/started', 'session/resumed', 'user/message', 'run/started', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'model/request', 'tool/call', 'tool/output_delta', 'model/completed', 'tool/result', 'reasoning/started', 'reasoning/delta', 'reasoning/delta', 'reasoning/completed', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'text/delta', 'model/request', 'model/completed', 'run/completed']",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "0fb93ce7585a66ca",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260927T045736-533d31735a3d-stuck-tool-failure-pause/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "stuck-tool-failure-pause"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的五条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`、完成闸门 `#316`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

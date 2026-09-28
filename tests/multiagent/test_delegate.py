@@ -211,10 +211,13 @@ class TestDelegationBudget:
         assert "2/2" in r3.message, "失败消息必须带已用/上限（模型可决策收尾）"
 
     @pytest.mark.asyncio
-    async def test_budget_resets_per_run(self, tmp_path, caplog):
-        """计数按 run_id 隔离：不同 run 各自独立预算。"""
-        import logging
+    async def test_delegation_counter_aggregates_across_runs(self, tmp_path):
+        """`#318`：delegations 计数器在 durable session 账行上**跨 run 聚合**。
 
+        旧 #287 语义是"计数按 run_id 隔离、新 run 预算重置"；#318 把这一维挪进
+        session 账行（budget_key = 树根会话 id，`02 §5.1` 的树级真相），run-b 的
+        第一次委派也看得到 run-a 的消耗——树账不因换 run 而回血。
+        """
         from agent_harness.session import run_context_var
 
         child_model = ScriptedModel([
@@ -229,30 +232,30 @@ class TestDelegationBudget:
         finally:
             run_context_var.reset(t1)
         assert r1.ok and not over.ok
+        assert "1/1" in over.message
 
         t2 = run_context_var.set("run-b")
         try:
-            with caplog.at_level(logging.DEBUG, logger="agent_harness.agent"):
-                r2 = await tool.execute(_args("coding", "b"))
+            r2 = await tool.execute(_args("coding", "b"))
         finally:
             run_context_var.reset(t2)
-        for rec in caplog.records:
-            if "异常终止" in rec.getMessage():
-                print("DEBUG-ERR:", rec.error, "|", rec.error_type)
-        assert r2.ok, "新 run 预算必须重置"
+        assert not r2.ok, "新 run 不重置树级账：session 行的 delegations 已到线"
+        assert "预算耗尽" in r2.message
+        assert "1/1" in r2.message, "拒绝消息带的是**跨 run 聚合**的已用/上限"
 
 
 class TestRepeatedDelegationBreaker:
     """#88：repeated-delegation 熔断复用同错熔断机制——delegate 是普通工具，
-    同指纹 (delegate, {target, task}) 连续失败 3 次 → 软熔断，6 次 → 硬熔断。
-    无需新机制：验证既有护栏对 delegate 工具的真实覆盖。"""
+    同指纹 (delegate, {target, task}) 连续失败 3 次 → 一次纠正，6 次 → **非终态**
+    `run/paused(reason=stuck)`（`#317` T9：旧硬熔断终结臂已从生产路径移除，
+    ADR-0048 D5；计数权威仍是委派树账本，见 `guards.external_failure_signal`）。"""
 
     @pytest.mark.asyncio
     async def test_repeated_failing_delegation_trips_guard(self, tmp_path):
         from langchain_core.messages import AIMessage as _AIM
 
         from agent_harness.agent.runtime import AgentRuntime
-        from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        from agent_harness.agent.types import STATUS_PAUSED
         from agent_harness.tooling import ToolExecutor as _TE
 
         failing_child = ScriptedModel([])  # 空剧本：child run 必失败
@@ -282,11 +285,19 @@ class TestRepeatedDelegationBreaker:
 
         result = await runtime.run(session, "反复委派同一任务")
 
-        assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        assert result.status == STATUS_PAUSED
         guard_events = [e for e in session._events if e.type == "tool/failure-guard"]
-        levels = [e.data["level"] for e in guard_events]
-        assert "soft" in levels and "hard" in levels
-        assert guard_events[-1].data["consecutive_failures"] == 6
+        assert [e.data["level"] for e in guard_events] == ["soft"]
+        assert guard_events[0].data["consecutive_failures"] == 3
+        # 再达阈值（2T=6）收口：结构化暂停事件 + 非终态 run/paused，**不是** run/failed
+        stuck = [e.data for e in session._events if e.type == "guard/stuck"]
+        assert [e["level"] for e in stuck] == ["paused"]
+        assert stuck[0]["pattern"] == "stuck.tool_failure_loop"
+        assert stuck[0]["count"] == 6 and stuck[0]["threshold"] == 3
+        assert [e.data["reason"] for e in session._events if e.type == "run/paused"] == [
+            "stuck"
+        ]
+        assert [e for e in session._events if e.type == "run/failed"] == []
 
 
 class _SlowChildModel(ScriptedModel):
