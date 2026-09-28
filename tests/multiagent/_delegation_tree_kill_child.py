@@ -27,8 +27,10 @@ class _FailingModel:
     def bind_tools(self, tools, **kwargs):
         return self
 
-    async def ainvoke(self, messages, **kwargs):
+    async def astream(self, messages, **kwargs):
+        # child 走 run_stream（astream）：剧本失败必须在流式路径上抛出（审查 P2）。
         raise RuntimeError("scripted child failure")
+        yield  # pragma: no cover - 使本函数成为异步生成器
 
 
 class _KillOnThirdRootCall:
