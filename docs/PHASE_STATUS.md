@@ -40,11 +40,11 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 `#302` 已随 PR #339 集成并 CLOSED（merge `3394d46925d86ab5b631f007fd5dc4cbb44ab8ae`）。`#303` 已由 PR #374 集成（merge `9c7181ce82d33a52f517be6b273101711652f981`），integration clean-slate、保留证明和 AC8 真实形成/召回/删除验证均完成；证据与最终验证见 2026-09 归档和 `docs/evidence/`。`#304` 已解除 `#303` 阻塞并可开始。
+**当前焦点：Memory V2 `#302` 已随 PR #339 集成并 CLOSED（merge `3394d46925d86ab5b631f007fd5dc4cbb44ab8ae`）。`#303` 已由 PR #374 集成（merge `9c7181ce82d33a52f517be6b273101711652f981`），integration clean-slate、保留证明和 AC8 真实形成/召回/删除验证均完成。`#304` 正在重跑最终真实质量门禁：Cline 网关响应适配和批准 endpoint fail-closed 校验已完成；全量 pytest 4720 passed / 2 skipped / 51 deselected，修后双轴复审通过。待在最新文档树重跑 Gate-0，再执行 27-case 真实 gold gate；在质量阈值和清理证据全部达标前保持 OPEN。明细见 Tracker 与 2026-09 归档。
 
 **最近集成（2026-09-27）**：#342 并发 resume SeqConflict 已由 PR #369 修复并关闭（根因 9496226e，修复 8ffd4875，merge 1774f4fb）；#341 relay cleanup 遗留已由 PR #343 合入并关闭（merge d4d65fff）。明细与门禁证据见 2026-09 归档。
 
-**Memory V2 当前状态（2026-09-27）**：`#297`–`#303` 实现已集成；`#299` AC10、`#302` 质量 smoke 与 `#303` clean-slate/AC8 证据均已归档。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。`#304` 已 unblocked。
+**Memory V2 当前状态（2026-09-29）**：`#297`–`#303` 实现已集成；`#299` AC10、`#302` 质量 smoke 与 `#303` clean-slate/AC8 证据均已归档。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。`#304` 已 unblocked 并进入最终真实门禁重跑，仍 OPEN。
 
 **#303 完成状态（2026-09-27）**：代码 PR #374 已集成；用户批准的 plan hash `137aeaa1…` 已执行，V1/V2 SQLite、Milvus Memory、Knowledge 归零，保留域哈希未变且未留旧内容备份。真实 formation runner 写入 1 条、生产 service 与 Milvus 均可召回、删除后回到零。证据与残余诊断见月度归档及 `docs/evidence/`。
 

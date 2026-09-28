@@ -26,6 +26,8 @@
 | MEM-V2-7 | #303 | COMPLETED / integrated (PR #374); cutover and AC8 verified | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
 | MEM-V2-8 | #304 | OPEN / unblocked | Final real Gate and release evidence | #301, #302, #303 |
 
+> **#304 当前状态（2026-09-29）**：Cline SSE 适配已在 `9fc6f8b7` 完成；首轮 Standards 发现 endpoint 未锁定的 P2，已由 `3ee3426a` 加入批准地址 fail-closed 校验并补拒绝用例。修后 Spec/Standards 双轴均 PASS、P0–P3 均为 0；复审范围 `9fc6f8b7..3ee3426a`。聚焦测试 72 passed，全量 pytest 4720 passed / 2 skipped / 51 deselected。复审前 Gate-0 快照 `docs/gate/f17e77cd798734364a8c89d83665360edd400402.json` 为 5/6（唯一红项 coverage，未归属集合仅 `3ee3426a`）；本次补入审查台账后须在新文档树重跑 Gate-0，之后再重跑真实 27-case gold gate。#304 保持 OPEN，直到阻塞质量指标和外部数据清理验收全部通过。
+
 **事实源与边界（截至 2026-09-27）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。`#297`–`#303` 的实现均已集成；`#303` 的真实 cutover、保留证明与 AC8 smoke 已完成，最终证据见 `docs/evidence/memory-v2-*2026-09-27.json`。`#304` 已解除依赖并可开始。
 
 **施工顺序**：`#297`–`#303` 已完成并集成；下一票 `#304` 现已解锁。每票仍独立执行 review、门禁和关单。

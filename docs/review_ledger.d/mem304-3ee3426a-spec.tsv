@@ -1,0 +1,1 @@
+2026-09-29	#304 endpoint fix Spec 修后复审：PASS；P0=0/P1=0/P2=0/P3=0；确认 Cline/Mimo 端点 allowlist 与 ticket/ADR 约定一致，生产映射与质量阈值未变	9fc6f8b7c43b75d70e34b1a150a431e6b523360e..3ee3426a958112131fd3bde7362635b26609a3aa

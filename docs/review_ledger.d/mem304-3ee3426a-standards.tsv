@@ -1,0 +1,1 @@
+2026-09-29	#304 endpoint fix Standards 修后复审：PASS；P0=0/P1=0/P2=0/P3=0；关闭上一轮 P2；确认 userinfo/query/相似主机/其他路径均 fail-closed 且错误不回显 URL	9fc6f8b7c43b75d70e34b1a150a431e6b523360e..3ee3426a958112131fd3bde7362635b26609a3aa
