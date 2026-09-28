@@ -6510,4 +6510,4 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 **残余（登记，不阻断）**：① session 维触发的暂停里 closeout 受 session ceiling 约束（tokens/cost 已到线 ⇒ 只落确定性 continuation）——这是设计语义不是缺陷，但客户端可读的"为什么没有摘要"没有专门字段；② 子会话恢复仍不可用（`#372` 既有边界，session 账不改变它——child 的账行由父级委派与自身 run 计数，恢复入口照旧 409）；③ `session/paused` 的 `session` 段只有 version + consumed，limits 在 `limits.session` 里分两处读（投影形状沿用 `11 §6.1` 按作用域拆分的既有口径）。
 
-**集成**：待执行（推集成分支 → 开 PR → 服务端 gate0 绿 → 合并 PR；两步各需用户单独批准）。
+**集成（2026-09-28 已执行）**：用户批准「推分支 + 开 PR」与「合并 PR」两步 ⇒ 推 `zcode/T318-session-budget` → **PR #389**（gate0 绿，32s）→ 合并（merge **`c5cf4f9b`**，`origin/main` = `c5cf4f9b`）；`#318` 已按 §14.12 关单（证据 comment `issues/318#issuecomment-5862260654` + **§14.9 通知**：另一条线先 `merge-base --is-ancestor main HEAD` 自检并回补 `main`）。
