@@ -73,6 +73,14 @@ def test_adjudication_prompt_requires_exact_existing_target_ids():
     assert "use reason_code `user_authority_wins`" in _ADJUDICATION_PROMPT
     assert "Runtime fills it from trusted" in _ADJUDICATION_PROMPT
 
+
+def test_adjudication_prompt_distinguishes_withdrawal_from_replacement():
+    assert "user evidence withdraws an active fact and provides no replacement" in _ADJUDICATION_PROMPT
+    assert "choose INVALIDATE for that exact target and no result" in _ADJUDICATION_PROMPT
+    assert "user evidence supplies a replacement value" in _ADJUDICATION_PROMPT
+    assert "choose UPDATE with only that supplied value" in _ADJUDICATION_PROMPT
+    assert "unclear, choose NOOP" in _ADJUDICATION_PROMPT
+
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"
 
