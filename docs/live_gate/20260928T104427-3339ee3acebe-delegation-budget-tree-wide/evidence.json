@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "scenario_id": "delegation-budget-tree-wide",
+  "scenario_version": 1,
+  "verdict": "FAIL",
+  "reason": "attempt 1: TimeoutError: 低预算执行：300s 内未收口；attempt 2: TimeoutError: 低预算执行：300s 内未收口；attempt 3: TimeoutError: 低预算执行：300s 内未收口",
+  "missing_preconditions": [],
+  "created_at": "2026-09-28T10:59:49.660+00:00",
+  "sha": "3339ee3acebefca52a9d8a1f3bde789b46e0b70c",
+  "tree": "bfb05569c4dbb1e1441f22e773f31d2e01001ad1",
+  "worktree": {
+    "head_sha": "3339ee3acebefca52a9d8a1f3bde789b46e0b70c",
+    "tree": "bfb05569c4dbb1e1441f22e773f31d2e01001ad1",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "senseaudio",
+    "model_name": "glm-5.3-flash",
+    "base_url_host": "api.senseaudio.cn",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "mimo",
+    "fallback_model_name": "mimo-v2.6-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "abb4b052a2106b35",
+      "9aa9a06f56567b2a",
+      "02f30e40ba209ae9"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": false,
+        "reason": "provider_timeout",
+        "error_type": "APITimeoutError",
+        "message": "provider_timeout：端点无响应（超时）（APITimeoutError）"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-28T10:44:27.716+00:00",
+      "ended_at": "2026-09-28T10:49:43.215+00:00",
+      "status": "FAIL",
+      "duration_ms": 315498,
+      "session_id": "delegation-budget-tree-wide-a1-67ffc472",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 52,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260928T104427-3339ee3acebe-delegation-budget-tree-wide/attempt-1.jsonl",
+      "events_sha256": "40b7a0a7eddfda92c76ee5a49863f82708f141c9ff226df40e7d4e229356c3c4",
+      "assertions": [],
+      "error": "TimeoutError: 低预算执行：300s 内未收口",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "abb4b052a2106b35",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-28T10:49:43.216+00:00",
+      "ended_at": "2026-09-28T10:54:47.035+00:00",
+      "status": "FAIL",
+      "duration_ms": 303818,
+      "session_id": "delegation-budget-tree-wide-a2-803f0749",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 50,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260928T104427-3339ee3acebe-delegation-budget-tree-wide/attempt-2.jsonl",
+      "events_sha256": "532988732add6efc40a80b5cc6f3604441fab9049f075eef0712ea034e972833",
+      "assertions": [],
+      "error": "TimeoutError: 低预算执行：300s 内未收口",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "9aa9a06f56567b2a",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-28T10:54:47.035+00:00",
+      "ended_at": "2026-09-28T10:59:49.452+00:00",
+      "status": "FAIL",
+      "duration_ms": 302416,
+      "session_id": "delegation-budget-tree-wide-a3-468c8583",
+      "run_id": "",
+      "run_status": "",
+      "steps": 0,
+      "event_count": 60,
+      "tool_calls": [],
+      "events_ref": "docs/live_gate/20260928T104427-3339ee3acebe-delegation-budget-tree-wide/attempt-3.jsonl",
+      "events_sha256": "7c08627c967232aaac7fecf1776518501ccdbe35d0309e52200ac380ba0ec113",
+      "assertions": [],
+      "error": "TimeoutError: 低预算执行：300s 内未收口",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "02f30e40ba209ae9",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260928T104427-3339ee3acebe-delegation-budget-tree-wide/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260928T104427-3339ee3acebe-delegation-budget-tree-wide/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260928T104427-3339ee3acebe-delegation-budget-tree-wide/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "delegation-budget-tree-wide"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的六条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`、完成闸门 `#316`、重复工具失败 ⇒ stuck 暂停 `#317`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

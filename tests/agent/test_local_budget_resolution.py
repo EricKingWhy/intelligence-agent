@@ -1,30 +1,26 @@
-"""`#308` T3：local turn fuse 的解析规则（默认 500 / alias / 只能收窄）。
+"""`#308` T3 + `#320` contract 收口：local turn fuse 的解析规则（默认 500 / 只能收窄）。
 
 判据来源：ADR-0044 D1/D8 与 `02 §5.1`——权威表在规格，本文件只钉实现是否照抄：
 
 - 缺省 → 500（Deployment 默认）；
-- `max_steps` 单独出现 ⇒ 解释为 local fuse（deprecated alias，来源可见）；
-- 新字段单独出现 ⇒ 生效；
-- 相等双字段 ⇒ 接受（且 alias 的存在仍然可见）；
-- 不等双字段 ⇒ 422 类的领域拒绝；
-- 越过生效上层 ceiling（Deployment / AgentProfile）⇒ 拒绝，不静默截断。
+- 新字段 `budget.local.max_agent_turns` ⇒ 生效；
+- 越过生效上层 ceiling（Deployment / AgentProfile）⇒ 拒绝，不静默截断；
+- 迁移期 alias `max_steps` **已移除**（#320）：它不再是解析器的输入——重加它
+  必须先改本判据（显式，而不是静默兼容）。旧客户端发 `max_steps` 由请求模型的
+  `extra="forbid"` 按未知字段 422 拒绝（wire 层判据见 `test_budget_local_fuse_api.py`）。
 
 解析是**纯函数**：只回答"生效几轮、谁定的"，不持有计数器（计数点在 Agent Loop）。
 """
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 
 from agent_harness.agent.budget import (
     DEFAULT_MAX_AGENT_TURNS,
-    SOURCE_ALIAS,
     SOURCE_DEPLOYMENT,
     SOURCE_PROFILE,
     SOURCE_REQUEST,
-    BudgetAliasConflict,
     BudgetCeilingExceeded,
     BudgetRejection,
     LocalFuse,
@@ -38,7 +34,6 @@ def test_default_is_the_contractual_500() -> None:
     fuse = resolve_local_fuse()
     assert fuse.max_agent_turns == DEFAULT_MAX_AGENT_TURNS == 500
     assert fuse.source == SOURCE_DEPLOYMENT
-    assert fuse.used_legacy_alias is False
 
 
 def test_deployment_can_lower_the_default() -> None:
@@ -48,47 +43,20 @@ def test_deployment_can_lower_the_default() -> None:
     assert fuse.source == SOURCE_DEPLOYMENT
 
 
-def test_legacy_only_is_the_root_local_fuse() -> None:
-    """只发 `max_steps` 的旧客户端 ⇒ 解释为根 AgentRuntime 的 local fuse。"""
-    fuse = resolve_local_fuse(alias=7)
-    assert fuse.max_agent_turns == 7
-    assert fuse.source == SOURCE_ALIAS
-    assert fuse.used_legacy_alias is True
-    assert fuse.as_projection()["deprecation"] == {
-        "field": "max_steps", "replacement": "budget.local.max_agent_turns",
-    }
+def test_resolver_takes_no_alias_anymore() -> None:
+    """#320 contract：alias 不再是解析器输入——重加它必须先改本判据（显式拒绝）。"""
+    with pytest.raises(TypeError):
+        resolve_local_fuse(alias=7)  # type: ignore[call-arg]
 
 
 def test_new_field_only_wins_over_deployment_default() -> None:
     fuse = resolve_local_fuse(request=250)
     assert fuse.max_agent_turns == 250
     assert fuse.source == SOURCE_REQUEST
-    assert fuse.used_legacy_alias is False
     assert "deprecation" not in fuse.as_projection()
 
 
-def test_equal_double_fields_are_accepted_and_alias_stays_visible() -> None:
-    """相等双字段接受；但"客户端还在发 deprecated 字段"这件事不许消失。"""
-    fuse = resolve_local_fuse(request=30, alias=30)
-    assert fuse.max_agent_turns == 30
-    assert fuse.source == SOURCE_ALIAS
-    assert fuse.used_legacy_alias is True
-
-
-def test_conflicting_double_fields_are_rejected() -> None:
-    with pytest.raises(BudgetAliasConflict) as excinfo:
-        resolve_local_fuse(request=30, alias=20)
-    message = str(excinfo.value)
-    assert "max_steps=20" in message and "max_agent_turns=30" in message
-
-
-def test_conflict_is_caught_before_the_ceiling_rule() -> None:
-    """两个 422 判据同时成立时先报冲突（请求形状自身矛盾，与策略无关）。"""
-    with pytest.raises(BudgetAliasConflict):
-        resolve_local_fuse(deployment=10, request=30, alias=20)
-
-
-@pytest.mark.parametrize("field", ["request", "alias"])
+@pytest.mark.parametrize("field", ["request"])
 def test_request_above_deployment_ceiling_is_rejected(field: str) -> None:
     """R4：越过生效上层 ceiling ⇒ 拒绝（不是静默截断到 100）。"""
     with pytest.raises(BudgetCeilingExceeded) as excinfo:
@@ -132,7 +100,6 @@ def test_profile_none_means_inherit() -> None:
     [
         ({"deployment": 0}, "deployment"),
         ({"request": -1}, "budget.local.max_agent_turns"),
-        ({"alias": 0}, "max_steps"),
         ({"profile": -3}, "agent_profile"),
     ],
 )
@@ -149,19 +116,8 @@ def test_bool_is_not_an_int_ceiling() -> None:
         resolve_local_fuse(request=True)  # type: ignore[arg-type]
 
 
-def test_alias_use_is_logged_as_a_deprecation_signal(caplog) -> None:
-    """R5：旧客户端仅发 `max_steps` 时行为可预测**且**有 deprecation signal。"""
-    with caplog.at_level(logging.WARNING, logger="agent_harness.agent.budget"):
-        resolve_local_fuse(alias=5)
-    assert any(
-        "budget_local_fuse_alias_deprecated" in record.message
-        for record in caplog.records
-    )
-
-
 def test_rejections_are_domain_errors_for_the_http_map() -> None:
-    """两种拒绝都必须是 `SessionServiceError` 子类：422 映射走单一映射源。"""
-    assert issubclass(BudgetAliasConflict, SessionServiceError)
+    """拒绝都必须是 `SessionServiceError` 子类：422 映射走单一映射源。"""
     assert issubclass(BudgetCeilingExceeded, SessionServiceError)
     assert issubclass(BudgetRejection, SessionServiceError)
 

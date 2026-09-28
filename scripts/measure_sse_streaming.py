@@ -219,7 +219,7 @@ def main() -> int:
         ) as client:
             if args.mode == "create":
                 context = client.stream("POST", f"{base}/api/sessions",
-                                        json={"task": args.task, "max_steps": 1})
+                                        json={"task": args.task, "budget": {"local": {"max_agent_turns": 1}}})
             else:
                 context = client.stream(
                     "GET", f"{base}/api/sessions/{args.session_id}/stream",
