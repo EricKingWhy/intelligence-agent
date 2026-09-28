@@ -1,0 +1,1 @@
+2026-09-29	PR #394（feat/FixBUG，docs-only：RESEARCH_PROJECT §6 决策落定 45 行留档，#149-#155 全 CLOSED）update-branch 产生的先回后正 merge 4cea0bcd（父一 4492eb6a + 父二 a2763bd5，GitHub 侧执行）机械归属本行：merge-tree 预演零冲突、合并零新增内容（git show --cc 空表核对不了 ⇒ 按协议「空 --cc 合并提交」条款归属）；分支独有内容仅 4492eb6a 一笔 docs（服务端 gate0 首跑该 merge无归属而 coverage 红，补本行后重跑）。	4492eb6a..4cea0bcd
