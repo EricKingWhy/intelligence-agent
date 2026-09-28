@@ -112,18 +112,59 @@ def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
     上下文里表现为"旧问句那一轮整段消失、只剩新问句"。dangling 合成发生在 shadow
     之后，被取代轮里的 tool_call 不会被补一条合成 ToolMessage。
     """
-    # 第一遍：收集所有 bracket 的 shadowed seq 区间 + 对应 summary。
-    # 每个 bracket 由 COMPACTION_START(source_seq_start..source_seq_end) 标记，
-    # CONTEXT_COMPACTED 携带 summary，COMPACTION_END 关闭 bracket。
+    # 第一遍：只接受持久化完整的 compaction bracket。写入中途失败时，
+    # append-only 日志可能留下 START 或 SUMMARY；不完整 bracket 不能遮蔽原事件。
+    starts: dict[str, tuple[int, int, int]] = {}
+    summaries: dict[str, tuple[str, int, int, int]] = {}
+    ends: dict[str, int] = {}
+    duplicate_ids: set[str] = set()
+    start_order: list[str] = []
+    for position, event in enumerate(events):
+        bracket_id = event.data.get("bracket_id")
+        if not isinstance(bracket_id, str) or not bracket_id:
+            continue
+        if event.type == COMPACTION_START:
+            start = event.data.get("source_seq_start")
+            end = event.data.get("source_seq_end")
+            if (not isinstance(start, int) or isinstance(start, bool)
+                    or not isinstance(end, int) or isinstance(end, bool)
+                    or start < 0 or end < start):
+                continue
+            if bracket_id in starts:
+                duplicate_ids.add(bracket_id)
+            else:
+                starts[bracket_id] = (start, end, position)
+                start_order.append(bracket_id)
+        elif event.type == CONTEXT_COMPACTED:
+            summary = event.data.get("summary")
+            start = event.data.get("source_seq_start")
+            end = event.data.get("source_seq_end")
+            if (not isinstance(summary, str) or not summary.strip()
+                    or not isinstance(start, int) or isinstance(start, bool)
+                    or not isinstance(end, int) or isinstance(end, bool)):
+                continue
+            if bracket_id in summaries:
+                duplicate_ids.add(bracket_id)
+            else:
+                summaries[bracket_id] = (summary, start, end, position)
+        elif event.type == COMPACTION_END:
+            if bracket_id in ends:
+                duplicate_ids.add(bracket_id)
+            else:
+                ends[bracket_id] = position
+
     shadowed_ranges: list[tuple[int, int]] = []
     bracket_summaries: list[str] = []
-    for event in events:
-        if event.type == COMPACTION_START:
-            start = event.data.get("source_seq_start", 0)
-            end = event.data.get("source_seq_end", 0)
-            shadowed_ranges.append((start, end))
-        elif event.type == CONTEXT_COMPACTED:
-            bracket_summaries.append(event.data.get("summary", ""))
+    for bracket_id in start_order:
+        start = starts[bracket_id]
+        summary = summaries.get(bracket_id)
+        end_position = ends.get(bracket_id)
+        if (bracket_id in duplicate_ids or summary is None or end_position is None
+                or not start[2] < summary[3] < end_position
+                or (start[0], start[1]) != (summary[1], summary[2])):
+            continue
+        shadowed_ranges.append((start[0], start[1]))
+        bracket_summaries.append(summary[0])
 
     # ADR-0030 §4.2（#196）：supersede 区间——被取代的那个问句**连同它的整轮**
     # （答、tool_call、tool_result、delta）都不进模型可见投影。

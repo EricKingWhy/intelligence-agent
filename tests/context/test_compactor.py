@@ -9,7 +9,16 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
 from agent_harness.context.tokens import estimate_message_tokens
-from agent_harness.session import MODEL_COMPLETED, USER_MESSAGE
+from agent_harness.session import (
+    COMPACTION_END,
+    COMPACTION_START,
+    CONTEXT_COMPACTED,
+    MODEL_COMPLETED,
+    TOOL_RESULT,
+    USER_MESSAGE,
+    JsonlSessionStore,
+    Session,
+)
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -19,39 +28,34 @@ SUMMARY = {
     "citations": [], "tool_outcomes": ["call-1 succeeded"],
 }
 
-#: T4 (#134)：六段式摘要 fixture（Pi 风格结构化 Markdown）。
-SIX_SECTION_SUMMARY = """## 目标
-用户要求读取文件并总结内容。
+#: 模型撰写的四节；其余四节由 compactor 从消息投影生成。
+MODEL_SECTIONS = """## 已完成工作与关键决策
+已完成读取历史记录，并选择直接展示内容。
 
-## 约束
-- 必须保持中文回答
-- 文件路径必须在 workspace 内
+## 失败方案
+(none)
 
-## 进展
-已成功读取 old.txt 文件，内容为历史记录。
+## 当前进行中状态
+摘要覆盖的历史工作已完成。
 
-## 决策
-决定直接展示文件内容而非重新生成。
-
-## 下一步
-等待用户的新请求。
-
-## 关键上下文
-- 历史文件包含 6000 字的旧数据
-- 用户已确认收到文件内容"""
+## Next Step
+等待当前请求继续。"""
 
 
 @pytest.mark.asyncio
 async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_path):
     session = make_session(tmp_path)
-    session.append(USER_MESSAGE, {"content": "old " * 8000})
-    session.append(MODEL_COMPLETED, {"content": "finished"})
+    session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
     session.append(USER_MESSAGE, {"content": "current request"})
     before = session.events
-    model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
-    messages = await ContextBuilder(model, max_context_tokens=10000).build(session)
+    model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+    messages = await ContextBuilder(
+        model, max_context_tokens=10000, auto_compact_threshold=0.3,
+    ).build(session)
     assert isinstance(messages[0], SystemMessage)
-    assert "## 目标" in messages[0].content or "目标" in messages[0].content
+    assert "## 原始目标与用户约束" in messages[0].content
+    assert "读取旧记录并继续。" in messages[0].content
     assert messages[1:] == [HumanMessage(content="current request")]
     assert estimate_message_tokens(messages) < 5600
     assert session.events[:-3] == before  # 3 new events: START, COMPACTED, END
@@ -65,16 +69,70 @@ async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["error", "timeout", "tool_call"])
-async def test_summary_failure_falls_back_with_atomic_tool_block(failure):
+async def test_summary_failure_keeps_constraints_and_tool_pair_after_store_reload(tmp_path):
+    class FailingModel:
+        calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            raise TimeoutError("summary timed out")
+
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    exact_constraint = "不得删除 old_rows；精确 ID 是 R-042"
+    large_result = "历史工具输出 " * 8000
+    session.append(USER_MESSAGE, {"content": exact_constraint})
+    session.append(MODEL_COMPLETED, {
+        "content": "正在读取指定记录。",
+        "tool_calls": [{
+            "id": "call-r-042", "name": "read_rows", "args": {"id": "R-042"},
+        }],
+    })
+    session.append(TOOL_RESULT, {
+        "tool_call_id": "call-r-042", "content": large_result,
+    })
+    session.append(MODEL_COMPLETED, {"content": "已读取记录 R-042。"})
+    session.append(USER_MESSAGE, {"content": "继续处理。"})
+    original_events = list(session.events)
+    model = FailingModel()
+
+    await ContextBuilder(
+        model, max_context_tokens=100_000, auto_compact_threshold=0.05,
+    ).build(session)
+
+    reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
+    rebuilt = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=100_000,
+    ).build(reloaded)
+
+    assert model.calls == 1
+    assert any(isinstance(message, HumanMessage)
+               and message.content == exact_constraint for message in rebuilt)
+    tool_call = next(message for message in rebuilt
+                     if isinstance(message, AIMessage) and message.tool_calls)
+    assert tool_call.tool_calls[0]["id"] == "call-r-042"
+    tool_result = next(message for message in rebuilt if isinstance(message, ToolMessage))
+    assert tool_result.tool_call_id == "call-r-042"
+    assert tool_result.content == large_result
+    assert store.read_events(session.session_id) == original_events
+    assert not any(event.type in {
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    } for event in store.read_events(session.session_id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "timeout", "empty", "tool_call"])
+async def test_summary_failure_keeps_original_projection(failure):
     class Model:
         async def ainvoke(self, messages):
-            if failure == "error":
+            if failure == "exception":
                 raise ConnectionError("offline")
             if failure == "timeout":
                 await asyncio.Event().wait()
+            if failure == "empty":
+                return AIMessage(content="")
             if failure == "tool_call":
-                return AIMessage(content=SIX_SECTION_SUMMARY, tool_calls=[
+                return AIMessage(content=MODEL_SECTIONS, tool_calls=[
                     {"id": "unwanted", "name": "bash", "args": {}},
                 ])
             return AIMessage(content="not a summary")
@@ -91,14 +149,64 @@ async def test_summary_failure_falls_back_with_atomic_tool_block(failure):
                                     summary_timeout_seconds=0.01).compact(
         messages, estimate_message_tokens(messages),
     )
-    assert result.fallback_used
-    assert result.messages[1:] == messages[3:]
-    rows = json.loads(result.messages[0].content)["mechanical_extract"]
-    assert rows[0]["content"] == messages[0].content[:200]
-    # args 截断为有界字符串（Round 6 加固）：id/name 保留，args 序列化封顶。
-    assert rows[1]["tool_calls"] == [{"id": "c1", "name": "read", "args": "{}"}]
-    assert rows[2]["tool_call_id"] == "c1"
-    assert rows[2]["content"] == messages[2].content[:100]
+    assert not result.fallback_used
+    assert result.compacted_turn_count == 0
+    assert result.summary is None
+    assert result.messages == messages
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    constraint = "不得删除 old_rows；精确 ID 是 R-042"
+    large_result = "历史工具输出 " * 8000
+    session.append(USER_MESSAGE, {"content": constraint})
+    session.append(MODEL_COMPLETED, {
+        "content": "正在读取指定记录。",
+        "tool_calls": [{
+            "id": "call-r-042", "name": "read_rows", "args": {"id": "R-042"},
+        }],
+    })
+    session.append(TOOL_RESULT, {
+        "tool_call_id": "call-r-042", "content": large_result,
+    })
+    session.append(MODEL_COMPLETED, {"content": "已读取记录 R-042。"})
+    session.append(USER_MESSAGE, {"content": "继续处理。"})
+    original_events = list(session.events)
+    append_event = session._store.append_event
+
+    def fail_before_end(session_id, event):
+        if event.type == COMPACTION_END:
+            raise OSError("injected append failure")
+        append_event(session_id, event)
+
+    monkeypatch.setattr(session._store, "append_event", fail_before_end)
+    builder = ContextBuilder(
+        ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
+        max_context_tokens=100_000, auto_compact_threshold=0.05,
+    )
+    with pytest.raises(OSError, match="injected append failure"):
+        await builder.build(session)
+
+    reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
+    rebuilt = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=100_000,
+    ).build(reloaded)
+
+    assert next(message.content for message in rebuilt
+                if isinstance(message, HumanMessage)) == constraint
+    call = next(message for message in rebuilt
+                if isinstance(message, AIMessage) and message.tool_calls)
+    assert call.tool_calls[0]["id"] == "call-r-042"
+    result = next(message for message in rebuilt if isinstance(message, ToolMessage))
+    assert result.tool_call_id == "call-r-042"
+    assert result.content == large_result
+    stored = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
+    assert stored[:len(original_events)] == original_events
+    assert not any(
+        event.type == COMPACTION_END and event.data.get("bracket_id")
+        for event in stored[len(original_events):]
+    )
 
 
 @pytest.mark.asyncio
@@ -114,7 +222,7 @@ async def test_hard_guard_rejects_when_recent_turn_cannot_fit(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_oversized_summary_falls_back_and_system_constraints_survive():
+async def test_invalid_summary_is_rejected_and_system_constraints_survive():
     huge = {**SUMMARY, "facts": ["huge " * 4000]}
     model = ScriptedModel([AIMessage(content=json.dumps(huge))])
     messages = [SystemMessage(content="Never modify protected files"),
@@ -123,27 +231,23 @@ async def test_oversized_summary_falls_back_and_system_constraints_survive():
     result = await ContextCompactor(model, max_context_tokens=1000).compact(
         messages, estimate_message_tokens(messages),
     )
-    assert result.fallback_used
-    assert result.messages[0] == messages[0]
-    assert result.messages[-1] == messages[-1]
-    assert result.token_estimate <= 850
+    assert not result.fallback_used
+    assert result.compacted_turn_count == 0
+    assert result.messages == messages
 
 
 @pytest.mark.asyncio
-async def test_summary_request_over_budget_skips_model_and_records_fallback(tmp_path):
+async def test_summary_request_over_budget_keeps_projection_without_events(tmp_path):
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "large " * 10000})
     session.append(MODEL_COMPLETED, {"content": "done"})
     session.append(USER_MESSAGE, {"content": "current"})
     model = ScriptedModel([])
-    messages = await ContextBuilder(model, max_context_tokens=1000).build(session)
+    before = list(session.events)
+    with pytest.raises(ContextWindowExceededError):
+        await ContextBuilder(model, max_context_tokens=1000).build(session)
     assert model.snapshots == []
-    # T4 (#134): fallback 标记在 CONTEXT_COMPACTED 事件里
-    compacted_event = next(
-        e for e in session.events if e.type == "context/compacted"
-    )
-    assert compacted_event.data["fallback_used"] is True
-    assert estimate_message_tokens(messages) <= 850
+    assert session.events == before
 
 
 @pytest.mark.asyncio
@@ -172,6 +276,24 @@ async def test_invalid_tool_blocks_rejected_before_model_call(results):
 
 
 @pytest.mark.asyncio
+async def test_tool_pair_split_by_user_boundary_is_rejected_before_summary():
+    model = ScriptedModel([])
+    messages = [
+        HumanMessage(content="old request"),
+        AIMessage(content="", tool_calls=[
+            {"id": "call-1", "name": "read", "args": {}},
+        ]),
+        HumanMessage(content="current request"),
+        ToolMessage(content="late result", tool_call_id="call-1"),
+    ]
+
+    with pytest.raises(ContextWindowExceededError, match="tool call/result"):
+        await ContextCompactor(model).compact(messages, 100)
+
+    assert model.snapshots == []
+
+
+@pytest.mark.asyncio
 async def test_single_turn_between_auto_and_hard_guard_does_not_fake_compaction(tmp_path):
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "single " * 300})
@@ -194,7 +316,7 @@ def test_invalid_context_budget_is_rejected(kwargs):
 
 
 @pytest.mark.asyncio
-async def test_valid_summary_above_auto_target_uses_smaller_fallback():
+async def test_summary_that_misses_auto_target_is_rejected():
     verbose = {**SUMMARY, "facts": ["fact " * 500]}
     response = AIMessage(content=json.dumps(verbose))
     model = ScriptedModel([response])
@@ -203,8 +325,9 @@ async def test_valid_summary_above_auto_target_uses_smaller_fallback():
     result = await ContextCompactor(
         model, max_context_tokens=1500, auto_compact_threshold=0.3,
     ).compact(messages, estimate_message_tokens(messages))
-    assert result.fallback_used
-    assert result.token_estimate < 450
+    assert not result.fallback_used
+    assert result.compacted_turn_count == 0
+    assert result.messages == messages
 
 
 # ── Round 6 加固：mechanical 摘要有界性 + 围栏 JSON 容错 ──
@@ -231,11 +354,8 @@ def test_mechanical_summary_bounds_tool_call_args():
 
 
 @pytest.mark.asyncio
-async def test_huge_tool_call_args_fall_back_without_bricking():
-    """大 args + 摘要模型故障 → mechanical 兜底成功，而非永久 ContextWindowExceeded。
-
-    该场景此前一旦发生，历史从不裁剪、投影每轮重建，session 从此无法恢复。
-    """
+async def test_huge_tool_call_args_and_summary_failure_hit_hard_guard():
+    """不安全摘要不能替代原始工具上下文；原文超护栏时必须停止。"""
     class FailingModel:
         async def ainvoke(self, messages):
             raise ConnectionError("offline")
@@ -247,25 +367,88 @@ async def test_huge_tool_call_args_fall_back_without_bricking():
         ToolMessage(content="written", tool_call_id="c1"),
         HumanMessage(content="current"),
     ]
-    result = await ContextCompactor(FailingModel(), max_context_tokens=8000).compact(
-        messages, estimate_message_tokens(messages),
-    )
-    assert result.fallback_used
-    assert result.token_estimate < 8000 * 0.85
+    with pytest.raises(ContextWindowExceededError):
+        await ContextCompactor(FailingModel(), max_context_tokens=8000).compact(
+            messages, estimate_message_tokens(messages),
+        )
 
 
 @pytest.mark.asyncio
-async def test_six_section_summary_passes_shrink_validation():
-    """六段式摘要通过 shrink 校验（严格小于被压缩段）。"""
-    model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
+async def test_eight_section_summary_passes_shrink_validation():
+    """harness 生成四个确定性节后，完整八节摘要通过精确与 shrink 校验。"""
+    model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
     messages = [
-        HumanMessage(content="old " * 6000),
-        AIMessage(content="done"),
+        HumanMessage(content="不得删除 old_rows；精确 ID 是 R-042"),
+        AIMessage(content="old analysis " * 600),
         HumanMessage(content="current"),
     ]
     result = await ContextCompactor(
         model, max_context_tokens=8000,
     ).compact(messages, estimate_message_tokens(messages))
     assert not result.fallback_used
-    assert result.summary == SIX_SECTION_SUMMARY
+    assert result.compacted_turn_count == 1
+    assert result.summary is not None
+    assert result.summary.startswith("## 原始目标与用户约束\n")
+    assert "不得删除 old_rows；精确 ID 是 R-042" in result.summary
+    assert "R-042" in result.summary
+    assert "## 文件清单\n(none)" in result.summary
     assert result.bracket_id is not None
+
+
+def test_programmatic_sections_preserve_exact_command_error_and_path():
+    from agent_harness.context.compactor import _programmatic_summary_sections
+
+    constraint = "不得删除 old_rows"
+    command = "python -m pytest tests/context/test_compactor.py"
+    path = r"C:\work tree\src\agent.py"
+    error = r"FileNotFoundError: missing C:\work tree\data.json"
+    messages = [
+        HumanMessage(content=constraint),
+        AIMessage(content="", tool_calls=[{
+            "id": "call-r-042", "name": "run", "args": {
+                "command": command, "path": path,
+            },
+        }]),
+        ToolMessage(content=error, tool_call_id="call-r-042", status="error"),
+    ]
+
+    sections = _programmatic_summary_sections(messages)
+    identifiers = json.loads(sections["## 精确标识清单"])
+
+    assert json.loads(sections["## 原始目标与用户约束"]) == [constraint]
+    assert command in identifiers
+    assert path in identifiers
+    assert "call-r-042" in identifiers
+    assert error in identifiers
+    file_paths = json.loads(sections["## 文件清单"])
+    assert path in file_paths
+    assert "tests/context/test_compactor.py" in file_paths
+
+
+def test_summary_validator_rejects_tampered_programmatic_sections():
+    from agent_harness.context.compactor import (
+        _MODEL_SUMMARY_HEADINGS,
+        _SUMMARY_HEADINGS,
+        _assemble_summary,
+        _parse_summary_sections,
+        _validate_summary,
+    )
+
+    messages = [
+        HumanMessage(content="不得删除 old_rows；精确 ID 是 R-042"),
+        AIMessage(content="old analysis"),
+    ]
+    summary = _assemble_summary(
+        messages, _parse_summary_sections(MODEL_SECTIONS, _MODEL_SUMMARY_HEADINGS),
+    )
+
+    sections = _parse_summary_sections(summary, _SUMMARY_HEADINGS)
+    for index in (0, 6):
+        tampered_sections = list(sections)
+        tampered_sections[index] = f"rewritten\n{tampered_sections[index]}"
+        tampered = "\n\n".join(
+            f"{heading}\n{body}"
+            for heading, body in zip(_SUMMARY_HEADINGS, tampered_sections)
+        )
+        with pytest.raises(ValueError, match="Programmatic summary section"):
+            _validate_summary(tampered, messages)

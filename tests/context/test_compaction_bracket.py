@@ -2,7 +2,7 @@
 
 验证压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
   COMPACTION_START (source_seq_start, source_seq_end)
-  → CONTEXT_COMPACTED (six_section summary + source 区间)
+  → CONTEXT_COMPACTED (eight_section summary + source 区间)
   → USER_MESSAGE(replace) — 摘要替代被压缩段
   → COMPACTION_END (bracket_id)
 
@@ -29,9 +29,9 @@ from agent_harness.session.derive import derive_messages
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
-# ── 六段式摘要 fixture ──────────────────────────────────────────────
+# ── 摘要 fixtures ──────────────────────────────────────────────────
 
-SIX_SECTION_SUMMARY = """## 目标
+LEGACY_SUMMARY = """## 目标
 用户要求读取文件并总结内容。
 
 ## 约束
@@ -52,6 +52,18 @@ SIX_SECTION_SUMMARY = """## 目标
 - 用户已确认收到文件内容
 - 当前工作目录为 /workspace"""
 
+MODEL_SECTIONS = """## 已完成工作与关键决策
+已完成读取历史记录，并选择直接展示内容。
+
+## 失败方案
+(none)
+
+## 当前进行中状态
+摘要覆盖的历史工作已完成。
+
+## Next Step
+等待当前请求继续。"""
+
 
 # ── derive_messages 识别 bracket 边界 ───────────────────────────────
 
@@ -67,9 +79,10 @@ class TestDeriveMessagesBracket:
                          data={"content": "old reply"}),
             # bracket 开始：shadow seq 1-2
             SessionEvent(seq=3, type=COMPACTION_START, session_id="s1",
-                         data={"source_seq_start": 1, "source_seq_end": 2}),
+                         data={"bracket_id": "b1",
+                               "source_seq_start": 1, "source_seq_end": 2}),
             SessionEvent(seq=4, type=CONTEXT_COMPACTED, session_id="s1",
-                         data={"summary": SIX_SECTION_SUMMARY,
+                         data={"bracket_id": "b1", "summary": LEGACY_SUMMARY,
                                "schema": "six_section",
                                "source_seq_start": 1, "source_seq_end": 2}),
             SessionEvent(seq=5, type=COMPACTION_END, session_id="s1",
@@ -82,7 +95,7 @@ class TestDeriveMessagesBracket:
         # shadowed 的 seq 1-2 不应出现；只有 summary + current request
         assert len(messages) == 2
         assert isinstance(messages[0], SystemMessage)
-        assert SIX_SECTION_SUMMARY in messages[0].content
+        assert LEGACY_SUMMARY in messages[0].content
         assert isinstance(messages[1], HumanMessage)
         assert messages[1].content == "current request"
 
@@ -97,6 +110,25 @@ class TestDeriveMessagesBracket:
         messages = derive_messages(events)
         assert len(messages) == 2
 
+    def test_incomplete_bracket_does_not_shadow_original_events(self):
+        """持久化中断留下的 START/SUMMARY 不能遮蔽原始消息。"""
+        events = [
+            SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1",
+                         data={"content": "不得删除 old_rows；R-042"}),
+            SessionEvent(seq=2, type=MODEL_COMPLETED, session_id="s1",
+                         data={"content": "old result"}),
+            SessionEvent(seq=3, type=COMPACTION_START, session_id="s1",
+                         data={"bracket_id": "partial",
+                               "source_seq_start": 1, "source_seq_end": 2}),
+            SessionEvent(seq=4, type=CONTEXT_COMPACTED, session_id="s1",
+                         data={"bracket_id": "partial", "summary": "new summary",
+                               "source_seq_start": 1, "source_seq_end": 2}),
+        ]
+        messages = derive_messages(events)
+        assert [message.content for message in messages] == [
+            "不得删除 old_rows；R-042", "old result",
+        ]
+
     def test_multiple_brackets(self):
         """多个不重叠的 bracket 都被正确跳过。"""
         events = [
@@ -104,9 +136,10 @@ class TestDeriveMessagesBracket:
                          data={"content": "first old"}),
             # 第一个 bracket
             SessionEvent(seq=2, type=COMPACTION_START, session_id="s1",
-                         data={"source_seq_start": 1, "source_seq_end": 1}),
+                         data={"bracket_id": "b1",
+                               "source_seq_start": 1, "source_seq_end": 1}),
             SessionEvent(seq=3, type=CONTEXT_COMPACTED, session_id="s1",
-                         data={"summary": "first summary",
+                         data={"bracket_id": "b1", "summary": "first summary",
                                "schema": "six_section",
                                "source_seq_start": 1, "source_seq_end": 1}),
             SessionEvent(seq=4, type=COMPACTION_END, session_id="s1",
@@ -116,9 +149,10 @@ class TestDeriveMessagesBracket:
                          data={"content": "second old"}),
             # 第二个 bracket
             SessionEvent(seq=6, type=COMPACTION_START, session_id="s1",
-                         data={"source_seq_start": 5, "source_seq_end": 5}),
+                         data={"bracket_id": "b2",
+                               "source_seq_start": 5, "source_seq_end": 5}),
             SessionEvent(seq=7, type=CONTEXT_COMPACTED, session_id="s1",
-                         data={"summary": "second summary",
+                         data={"bracket_id": "b2", "summary": "second summary",
                                "schema": "six_section",
                                "source_seq_start": 5, "source_seq_end": 5}),
             SessionEvent(seq=8, type=COMPACTION_END, session_id="s1",
@@ -143,34 +177,41 @@ class TestCompactorBracketMetadata:
     @pytest.mark.asyncio
     async def test_compact_returns_bracket_id_and_summary(self):
         """compact 返回 bracket_id 和 summary。"""
-        model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
+        model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
         messages = [
-            HumanMessage(content="old " * 6000),
-            AIMessage(content="done"),
+            HumanMessage(content="读取 old.txt 后继续。"),
+            AIMessage(content="old analysis " * 600),
             HumanMessage(content="current"),
         ]
         result = await ContextCompactor(
             model, max_context_tokens=8000,
         ).compact(messages, estimate_message_tokens(messages))
         assert result.bracket_id is not None
-        assert result.summary == SIX_SECTION_SUMMARY
+        assert result.summary is not None
+        assert result.summary.startswith("## 原始目标与用户约束\n")
+        assert "读取 old.txt 后继续。" in result.summary
 
     @pytest.mark.asyncio
-    async def test_compact_summary_is_six_section(self):
-        """摘要采用六段式结构。"""
-        model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
+    async def test_compact_summary_is_eight_section(self):
+        """摘要采用八节结构，且程序化节位于固定位置。"""
+        model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
         messages = [
-            HumanMessage(content="old " * 6000),
-            AIMessage(content="done"),
+            HumanMessage(content="读取 old.txt 后继续。"),
+            AIMessage(content="old analysis " * 600),
             HumanMessage(content="current"),
         ]
         result = await ContextCompactor(
             model, max_context_tokens=8000,
         ).compact(messages, estimate_message_tokens(messages))
-        # 摘要消息应该是 SystemMessage，内容包含六段式标记
+        # 摘要消息应该是 SystemMessage，内容按八节顺序组成
         assert isinstance(result.messages[0], SystemMessage)
-        content = result.messages[0].content
-        assert "## 目标" in content or "目标" in content
+        assert result.summary is not None
+        assert [line for line in result.summary.splitlines() if line.startswith("## ")] == [
+            "## 原始目标与用户约束", "## 保护事实表",
+            "## 已完成工作与关键决策", "## 失败方案",
+            "## 当前进行中状态", "## Next Step",
+            "## 精确标识清单", "## 文件清单",
+        ]
 
     @pytest.mark.asyncio
     async def test_shrink_validation_rejects_larger_summary(self):
@@ -186,8 +227,10 @@ class TestCompactorBracketMetadata:
         result = await ContextCompactor(
             model, max_context_tokens=8000,
         ).compact(messages, estimate_message_tokens(messages))
-        # 应该走 fallback（mechanical summary）
-        assert result.fallback_used
+        # 不符合八节契约时，拒绝压缩并保留旧投影。
+        assert result.compacted_turn_count == 0
+        assert result.summary is None
+        assert result.messages == messages
 
 
 # ── ContextBuilder 写 4-event bracket ───────────────────────────────
@@ -199,13 +242,15 @@ class TestBuilderWritesBracket:
     async def test_build_writes_four_event_bracket(self, tmp_path):
         """压缩触发后，session 里应有 COMPACTION_START → CONTEXT_COMPACTED → COMPACTION_END。"""
         session = make_session(tmp_path)
-        session.append(USER_MESSAGE, {"content": "old " * 8000})
-        session.append(MODEL_COMPLETED, {"content": "done"})
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
         session.append(USER_MESSAGE, {"content": "current request"})
         before_count = len(session.events)
 
-        model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
-        builder = ContextBuilder(model, max_context_tokens=10000)
+        model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+        builder = ContextBuilder(
+            model, max_context_tokens=10000, auto_compact_threshold=0.3,
+        )
         await builder.build(session)
 
         new_events = session.events[before_count:]
@@ -226,13 +271,15 @@ class TestBuilderWritesBracket:
     async def test_build_bracket_source_seq_matches(self, tmp_path):
         """bracket 的 source_seq_start/end 指向被压缩的原始事件。"""
         session = make_session(tmp_path)
-        session.append(USER_MESSAGE, {"content": "old " * 8000})
-        session.append(MODEL_COMPLETED, {"content": "done"})
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
         session.append(USER_MESSAGE, {"content": "current request"})
         before_count = len(session.events)
 
-        model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
-        builder = ContextBuilder(model, max_context_tokens=10000)
+        model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+        builder = ContextBuilder(
+            model, max_context_tokens=10000, auto_compact_threshold=0.3,
+        )
         await builder.build(session)
 
         new_events = session.events[before_count:]
@@ -249,13 +296,15 @@ class TestBuilderWritesBracket:
     async def test_build_bracket_has_bracket_id(self, tmp_path):
         """COMPACTION_END 包含 bracket_id。"""
         session = make_session(tmp_path)
-        session.append(USER_MESSAGE, {"content": "old " * 8000})
-        session.append(MODEL_COMPLETED, {"content": "done"})
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
         session.append(USER_MESSAGE, {"content": "current request"})
         before_count = len(session.events)
 
-        model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
-        builder = ContextBuilder(model, max_context_tokens=10000)
+        model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+        builder = ContextBuilder(
+            model, max_context_tokens=10000, auto_compact_threshold=0.3,
+        )
         await builder.build(session)
 
         new_events = session.events[before_count:]
@@ -264,33 +313,37 @@ class TestBuilderWritesBracket:
         assert end_event.data["bracket_id"]  # non-empty
 
     @pytest.mark.asyncio
-    async def test_build_bracket_context_compacted_has_six_section_schema(self, tmp_path):
-        """CONTEXT_COMPACTED 事件包含 schema='six_section' 和 summary。"""
+    async def test_build_bracket_context_compacted_has_eight_section_schema(self, tmp_path):
+        """CONTEXT_COMPACTED 事件包含经过校验的八节摘要。"""
         session = make_session(tmp_path)
-        session.append(USER_MESSAGE, {"content": "old " * 8000})
-        session.append(MODEL_COMPLETED, {"content": "done"})
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
         session.append(USER_MESSAGE, {"content": "current request"})
         before_count = len(session.events)
 
-        model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
-        builder = ContextBuilder(model, max_context_tokens=10000)
+        model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+        builder = ContextBuilder(
+            model, max_context_tokens=10000, auto_compact_threshold=0.3,
+        )
         await builder.build(session)
 
         new_events = session.events[before_count:]
         compacted_event = next(e for e in new_events if e.type == CONTEXT_COMPACTED)
-        assert compacted_event.data["schema"] == "six_section"
+        assert compacted_event.data["schema"] == "eight_section"
         assert "summary" in compacted_event.data
 
     @pytest.mark.asyncio
     async def test_second_build_after_bracket_skips_shadowed(self, tmp_path):
         """第一次压缩写 bracket 后，第二次 build 的 derive_messages 跳过 shadowed 段。"""
         session = make_session(tmp_path)
-        session.append(USER_MESSAGE, {"content": "old " * 8000})
-        session.append(MODEL_COMPLETED, {"content": "done"})
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
         session.append(USER_MESSAGE, {"content": "current request"})
 
-        model = ScriptedModel([AIMessage(content=SIX_SECTION_SUMMARY)])
-        builder = ContextBuilder(model, max_context_tokens=10000)
+        model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+        builder = ContextBuilder(
+            model, max_context_tokens=10000, auto_compact_threshold=0.3,
+        )
         await builder.build(session)
 
         # 第二次 build：应该看到 bracket，跳过 shadowed 的 old 消息

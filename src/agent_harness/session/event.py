@@ -102,7 +102,7 @@ TEXT_DELTA = "text/delta"
 # ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
 # 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
 #   COMPACTION_START (source_seq_start, source_seq_end)
-#   → CONTEXT_COMPACTED (six_section summary + source 区间)
+#   → CONTEXT_COMPACTED (validated summary + source 区间)
 #   → USER_MESSAGE(replace) — 摘要替代被压缩段
 #   → COMPACTION_END (bracket_id)
 # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
