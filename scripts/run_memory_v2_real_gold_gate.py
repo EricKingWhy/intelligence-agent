@@ -138,8 +138,10 @@ _SECRET_SENTINEL = "NEVER-A-REAL-CREDENTIAL"
 _GATE_CONFIGURED_PRIMARY_PROVIDER = "cline"
 _GATE_PRIMARY_PROVIDER = "deepseek"  # Existing preset slot for the generic OpenAI-compatible adapter.
 _GATE_PRIMARY_MODEL = "cline-pass/deepseek-v4.1-flash"
+_GATE_PRIMARY_BASE_URL = "https://api.cline.bot/api/v1"
 _GATE_FALLBACK_PROVIDER = "mimo"
 _GATE_FALLBACK_MODEL = "mimo-v2.6-flash"
+_GATE_FALLBACK_BASE_URL = "https://api.xiaomimimo.com/v1"
 _GATE_JWT_SECRET = "memory-v2-gold-local-signing-key-not-a-credential"
 
 
@@ -284,10 +286,23 @@ def _require_approved_gate_roles(roles: MemoryModelRoles) -> None:
         raise RuntimeError("approved Memory V2 gate primary provider does not match")
     if roles.primary.model_name != _GATE_PRIMARY_MODEL:
         raise RuntimeError("approved Memory V2 gate primary model does not match")
+    if not _matches_approved_gate_endpoint(
+        roles.primary.base_url, _GATE_PRIMARY_BASE_URL,
+    ):
+        raise RuntimeError("approved Memory V2 gate primary endpoint does not match")
     if roles.fallback.provider != _GATE_FALLBACK_PROVIDER:
         raise RuntimeError("approved Memory V2 gate fallback provider does not match")
     if roles.fallback.model_name != _GATE_FALLBACK_MODEL:
         raise RuntimeError("approved Memory V2 gate fallback model does not match")
+    if not _matches_approved_gate_endpoint(
+        roles.fallback.base_url, _GATE_FALLBACK_BASE_URL,
+    ):
+        raise RuntimeError("approved Memory V2 gate fallback endpoint does not match")
+
+
+def _matches_approved_gate_endpoint(actual: str | None, approved: str) -> bool:
+    """Keep live gate credentials confined to the endpoints approved for #304."""
+    return isinstance(actual, str) and actual in {approved, f"{approved}/"}
 
 
 def _matches_recall_target(record: MemoryRecordV2, case: GoldCase) -> bool:

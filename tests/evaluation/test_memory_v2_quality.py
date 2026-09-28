@@ -619,10 +619,59 @@ def test_gate_rejects_an_unapproved_fallback_model():
         _require_approved_gate_roles(SimpleNamespace(
             primary=SimpleNamespace(
                 provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
+                base_url="https://api.cline.bot/api/v1",
             ), fallback=SimpleNamespace(
                 provider="mimo", model_name="another-model",
+                base_url="https://api.xiaomimimo.com/v1",
             ),
         ))
+
+
+@pytest.mark.parametrize(
+    ("role", "base_url"),
+    [
+        ("primary", "https://unapproved.example/v1"),
+        ("fallback", "https://unapproved.example/v1"),
+    ],
+)
+def test_gate_rejects_unapproved_model_endpoints(role, base_url):
+    roles = SimpleNamespace(
+        primary=SimpleNamespace(
+            provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
+            base_url="https://api.cline.bot/api/v1",
+        ),
+        fallback=SimpleNamespace(
+            provider="mimo", model_name="mimo-v2.6-flash",
+            base_url="https://api.xiaomimimo.com/v1",
+        ),
+    )
+    getattr(roles, role).base_url = base_url
+
+    with pytest.raises(RuntimeError, match=f"approved Memory V2 gate {role} endpoint does not match"):
+        _require_approved_gate_roles(roles)
+
+
+@pytest.mark.parametrize(
+    ("role", "base_url"),
+    [
+        ("primary", "https://api.cline.bot/api/v1/"),
+        ("fallback", "https://api.xiaomimimo.com/v1/"),
+    ],
+)
+def test_gate_accepts_approved_model_endpoint_with_one_trailing_slash(role, base_url):
+    roles = SimpleNamespace(
+        primary=SimpleNamespace(
+            provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
+            base_url="https://api.cline.bot/api/v1",
+        ),
+        fallback=SimpleNamespace(
+            provider="mimo", model_name="mimo-v2.6-flash",
+            base_url="https://api.xiaomimimo.com/v1",
+        ),
+    )
+    getattr(roles, role).base_url = base_url
+
+    _require_approved_gate_roles(roles)
 
 
 def test_gate_uses_cline_gateway_primary_and_mimo_fallback():
