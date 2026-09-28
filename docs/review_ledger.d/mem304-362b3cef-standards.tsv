@@ -1,0 +1,1 @@
+2026-09-29	#304 runner 修复 Standards 轴独立复审：无 P0-P3；变更仅限 invoker、真实门禁清理及直接回归测试；复用现有 client/test seam，无新增依赖或无关格式改动。	9ca15e137718058ab277ccfb54ac6556cc633caf..362b3cefd2fa71e1b82f3bc2801106625cf3bfdb

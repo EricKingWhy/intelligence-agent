@@ -1,0 +1,1 @@
+2026-09-29	#304 runner 修复 Spec 轴独立复审：纯文本 provider block 按顺序拼接；混合多模态内容仍 fail-closed；Milvus 清理仅对本次创建且 schema 匹配的 collection 有界重试，规格语义无缺口。	9ca15e137718058ab277ccfb54ac6556cc633caf..362b3cefd2fa71e1b82f3bc2801106625cf3bfdb
