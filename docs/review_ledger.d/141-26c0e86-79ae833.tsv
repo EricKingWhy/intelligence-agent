@@ -1,0 +1,1 @@
+2026-09-22	#293（B-42）批 3 修后重审两轴（三条 P1 修复的复审）——两轴均 PASS-WITH-FINDINGS、0×P0/P1/P2（Standards P3×1+P4×1 / Spec P4×1）；三条 P1 均独立复现并修复验证（--replay 不再抛 TypeError / 非 ASCII 命中 risky / exclude 伪造行不再进入判定集）；P3/P4 处置（仓库外 LEDGER_DIR 回退 os.listdir）为对 findings 的机械处置、恢复既有语义、登记不修	26c0e86..79ae833

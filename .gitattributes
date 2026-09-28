@@ -12,3 +12,6 @@
 
 *.sh text eol=lf
 *.ps1 text eol=crlf
+# Git hook（`.githooks/pre-push`）**没有扩展名**，上面的 `*.sh` 覆盖不到它；它同样是 shell
+# 脚本，被检出成 CRLF 后 `exit 1` / shebang 都会坏。2026-09-22 加。
+/.githooks/* text eol=lf

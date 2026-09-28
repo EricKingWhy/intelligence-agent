@@ -5,7 +5,7 @@
 > 只能断言终态，无法验证流式中间态（caret / reasoning 呼吸图标 / 工具输出
 > 跟随浮标 / stdout-stderr 分色 / 重连断线条时序）。
 >
-> 这份文档不实现，只设计。实现是后续 ticket 的活，按完整 /implement 流程走。
+> 这份文档不实现，只设计。实现是后续 ticket 的活，按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行：逐票跑 focused checks，按风险安排 review，集成前通过完整门禁和 review coverage。
 > 关联：`docs/E2E_SCENARIO_MAP.md` 骨架车道已知边界 §1；ADR-0016 流式契约。
 
 ## 1. 为什么需要本地 SSE Fixture Server

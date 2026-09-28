@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_FAILED
+from agent_harness.model.failure import UNCLASSIFIED_FAILURE_MESSAGE
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_FAILED,
@@ -77,6 +78,17 @@ class ListContentModel:
     async def astream(self, messages: list, **kwargs):
         yield AIMessageChunk(content=[{"type": "text", "text": "你好"}])
         yield AIMessageChunk(content=[{"type": "text", "text": "世界"}])
+
+
+class _ExplodingContextBuilder:
+    """ContextBuilder 替身：投影阶段抛错（模型调用之前）。
+
+    真实形状（#222 现场）：tiktoken 取词表时网络不可达 → `ContextBuilder.build`
+    先炸，`model_call_open` 从未置位。此时既没有 model/failed，也没有任何模型
+    事件——run/failed 是界面上唯一的信息来源。"""
+
+    async def build(self, session: Any) -> list:
+        raise RuntimeError("context build failed: <urlopen error 代理不可达>")
 
 
 def _runtime(model: Any, registry: ToolRegistry | None = None) -> AgentRuntime:
@@ -246,7 +258,319 @@ async def test_model_failed_event_redacts_exception_message(tmp_path):
     assert "sk-secret-123" not in str(model_failed.data)
 
 
-# ---- Round 7：客户端断连 / 任务取消不得留下悬空 run/started ----
+# ---- provider 内容审查拒绝（data_inspection_failed）→ 可读失败消息 ----
+
+
+#: 2026-09-11 真实案例：阿里云百炼专有端点对含检索网页文本的二次调用返回
+#: 400，错误码只出现在响应体文本里（openai SDK 对 SSE 形状错误解析不出结构
+#: 化 body）。原样保留形状作分类器输入。
+ALIYUN_INSPECTION_PAYLOAD = (
+    'data: {"error":{"code":"data_inspection_failed","param":null,'
+    '"message":"Input text data may contain inappropriate content.",'
+    '"type":"data_inspection_failed"},"id":"chatcmpl-88bc0696"}'
+)
+
+
+class ModerationRejectModel:
+    """ainvoke / astream 抛携带 data_inspection_failed 载荷的错误。"""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        raise RuntimeError(ALIYUN_INSPECTION_PAYLOAD)
+
+    async def astream(self, messages, **kwargs):
+        raise RuntimeError(ALIYUN_INSPECTION_PAYLOAD)
+        yield AIMessageChunk(content="")  # 不可达：声明 async generator 用
+
+
+READABLE = "provider 内容审查拒绝输入（可能因检索到的网页文本）"
+
+
+class TestProviderContentModerationClassification:
+    """错误文本含 data_inspection_failed → 失败事件升级为已分类可读消息。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_stream", [True, False])
+    async def test_moderation_rejection_upgrades_terminal_events(
+        self,
+        tmp_path,
+        use_stream,
+    ):
+        """model/failed.message 是固定可读文案；run/failed 落
+        reason=provider_content_moderation + 同文案 message（与上下文超限
+        路径的 reason+message 形状一致）。run()/run_stream() 两条路径同享。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ModerationRejectModel())
+
+        if use_stream:
+            frames = [f async for f in runtime.run_stream(session, "写论文")]
+            assert any(f.type == MODEL_FAILED for f in frames), (
+                "流路径 model/failed 也必须镜像给 SSE 消费者"
+            )
+        else:
+            result = await runtime.run(session, "写论文")
+            assert result.status == STATUS_FAILED
+
+        # 两条路径都以持久化事件为准断言（SSE 帧来自持久化事件镜像）
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        assert model_failed.data["message"] == READABLE
+        failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert failed.data["reason"] == "provider_content_moderation"
+        assert failed.data["message"] == READABLE
+
+    @pytest.mark.asyncio
+    async def test_moderation_rejection_model_failed_message_readable(self, tmp_path):
+        """model/failed 的 message 用固定可读文案，且绝不携带 provider 回显
+        原文（脱敏不变量——载荷文本可能含敏感内容，只进结构化日志）。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ModerationRejectModel())
+
+        await runtime.run(session, "写论文")
+
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        assert model_failed.data["message"] == READABLE
+        for event in session.events:
+            assert "inappropriate" not in str(event.data), (
+                "provider 回显原文不得进任何持久化事件"
+            )
+            assert "chatcmpl-88bc0696" not in str(event.data)
+
+    @pytest.mark.asyncio
+    async def test_unclassified_failure_terminal_carries_error_type(self, tmp_path):
+        """未分类错误的终态归因（#222）：reason 退到**错误类型名**、message 退到
+        固定可读兜底——界面据此能说出失败原因，而不是一个字都没有。
+
+        兜底文案里只代入类型名（项目自己拼的），不代入 ``str(error)``：下一段
+        断言的就是这条脱敏边界。"""
+        session = make_session(tmp_path)
+        runtime = _runtime(ExplodingModel())
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        assert model_failed.data["message"] == "model call failed: RuntimeError"
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert run_failed.data["reason"] == "RuntimeError"
+        assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+            error_type="RuntimeError",
+        )
+        # 脱敏不变量（OBS-008）：异常**正文**不进任何持久化事件，只进结构化日志。
+        # ExplodingModel 抛的是 "模拟 API 中断"；它不得出现在事件流里。
+        for event in session.events:
+            assert "模拟 API 中断" not in str(event.data), (
+                f"异常正文不得进持久化事件（{event.type}）"
+            )
+
+    @pytest.mark.asyncio
+    async def test_tool_phase_error_with_marker_not_misclassified(self, tmp_path):
+        """分类只在模型调用在途时进行：工具/执行器阶段异常的错误文本即使恰好
+        含 data_inspection_failed（如抓取到引用该错误码的文档），也不得误标——
+        model_call_open 在模型完整返回后已复位（runtime.py「调用完整返回，
+        后续异常不再归因 model」）。未分类 ≠ 无归因：reason 落类型名。"""
+        session = make_session(tmp_path)
+        model = ToolCallThenExplodeModel({
+            "name": "multiply",
+            "args": {"first_number": 3, "second_number": 4},
+            "id": TOOL_CALL_ID,
+            "type": "tool_call",
+        })
+        # 篡改：tool/call 写盘时抛含错误码的异常（模拟工具阶段异常抵达顶层兜底）
+        original_append = session.append
+        marker_error = RuntimeError('data: {"error":{"code":"data_inspection_failed"}}')
+
+        def sabotaged_append(event_type, data, **kwargs):
+            if event_type == TOOL_CALL:
+                raise marker_error
+            return original_append(event_type, data, **kwargs)
+
+        session.append = sabotaged_append
+        runtime = _runtime(model)
+
+        result = await runtime.run(session, "计算 3 乘 4")
+
+        assert result.status == STATUS_FAILED
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert run_failed.data["reason"] == "RuntimeError", (
+            "工具阶段异常不得误标内容审查；无分类可归时落类型名"
+        )
+        assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+            error_type="RuntimeError",
+        ), "未命中分类表 ⇒ 走未分类兜底文案，而不是内容审查那句"
+        # 模型已完整返回（归因窗口已关）：不补 model/failed
+        assert not [e for e in session.events if e.type == MODEL_FAILED]
+
+    @pytest.mark.asyncio
+    async def test_failure_before_model_window_names_cause_in_terminal(self, tmp_path):
+        """#222 形状（与真机那条**等价**，非同一异常类型：真机是 tiktoken 取词表
+        时 `ProxyError`，这里用替身抛 `RuntimeError`）：投影阶段就失败 ⇒ 归因窗口
+        从未打开 ⇒ 没有 model/failed。界面上唯一的信息来源是 run/failed，而它此前
+        连 reason 都没有键——用户看到的失败原因是空的。"""
+        session = make_session(tmp_path)
+        reg = ToolRegistry()
+        runtime = AgentRuntime(
+            model=ListContentModel(), registry=reg, executor=ToolExecutor(reg),
+            context_builder=_ExplodingContextBuilder(),
+        )
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        assert run_failed.data["reason"] == "RuntimeError"
+        assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+            error_type="RuntimeError",
+        )
+        # 归因窗口没开：不得凭空补一条 model/failed 把锅甩给模型
+        assert not [e for e in session.events if e.type == MODEL_FAILED]
+        # 模型替身本会成功：仍在 failed 说明错误确实来自投影阶段
+        assert not [e for e in session.events if e.type == RUN_COMPLETED]
+        # 脱敏：替身抛的正文（含"代理不可达"字样）不得落进任何事件
+        for event in session.events:
+            assert "代理不可达" not in str(event.data), (
+                f"异常正文不得进持久化事件（{event.type}）"
+            )
+
+
+# ---- #218：供应商账户 / 鉴权 / 模型不存在 → 固定可读文案 ----
+
+
+class ProviderErrorBodyModel:
+    """ainvoke / astream 抛带给定 provider 错误体的错误（形状同 openai SDK）。"""
+
+    def __init__(self, payload: str) -> None:
+        self._payload = payload
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        raise RuntimeError(self._payload)
+
+    async def astream(self, messages, **kwargs):
+        raise RuntimeError(self._payload)
+        yield AIMessageChunk(content="")  # 不可达：仅为把函数声明成 async generator
+
+
+#: 各分类的载荷 + 期望结果。``payload`` 取自真实错误体形状（account 一条是
+#: 2026-09-17 真机实测原文，见 docs/LIVE_BROWSER_TEST_20260917.md §2.1），
+#: 不是编造的措辞：分类表按错误码匹配，编造的载荷证明不了真实载荷能命中。
+#:
+#: ``expected`` 是 **(分类 reason, 固定可读文案) 字面量**，不用模块常量断言——
+#: 文案本身就是对外契约，拿常量断言会在有人误改常量时一起变绿（同现有内容审查
+#: 用例的纪律）。``None`` = 不该被分类（保持"只带类型名"原行为）。
+#: ``absent`` 是**必须不出现在任何持久化事件里**的载荷特征串（脱敏不变量）。
+PROVIDER_FAILURE_CASES: dict[str, dict[str, Any]] = {
+    "account_billing_frozen": {
+        "payload": (
+            "Error code: 400 - {'code': 'billing', 'message': '计费账户已被冻结', "
+            "'ref_code': 400901, 'ref_scope': 'common'}"
+        ),
+        "expected": (
+            "provider_account_unavailable",
+            (
+                "模型供应商账户不可用（欠费 / 配额耗尽 / 账户被冻结），"
+                "请到供应商控制台检查计费与配额"
+            ),
+        ),
+        "absent": ["计费账户已被冻结", "400901"],
+    },
+    "account_quota_exhausted": {
+        "payload": (
+            "Error code: 429 - {'code': 'insufficient_quota', 'message': "
+            "'You exceeded your current quota, please check your plan and billing "
+            "details.'}"
+        ),
+        "expected": (
+            "provider_account_unavailable",
+            (
+                "模型供应商账户不可用（欠费 / 配额耗尽 / 账户被冻结），"
+                "请到供应商控制台检查计费与配额"
+            ),
+        ),
+        # 这条载荷本身含 "billing" 字样：命中 account 是**故意**的——配额耗尽
+        # 是账户级硬阻塞，不是可重试的限流（顺序后果见 ADR-0033 §2.1）。
+        "absent": ["exceeded your current quota"],
+    },
+    "auth_invalid_key": {
+        "payload": (
+            "Error code: 401 - {'code': 'invalid_api_key', 'message': "
+            "'Incorrect API key provided: sk-abc***'}"
+        ),
+        "expected": (
+            "provider_auth_failed",
+            "模型供应商鉴权失败（API Key 无效或无权限），请检查供应商凭证配置",
+        ),
+        "absent": ["invalid_api_key", "sk-abc"],
+    },
+    "model_not_found": {
+        "payload": (
+            "Error code: 404 - {'code': 'model_not_found', 'message': "
+            "\"The model 'gpt-nope' does not exist\"}"
+        ),
+        "expected": (
+            "provider_model_not_found",
+            "模型不存在，或当前账户无权访问该模型，请检查模型名与开通状态",
+        ),
+        # 只放**载荷独有**的特征串：错误码 `model_not_found` 不能当反面 token——
+        # 我们自己的分类 reason 就叫 `provider_model_not_found`，断言它等于断言
+        # 分类名本身（实测撞到过，红在了合法词汇上，不是泄露）。
+        "absent": ["does not exist", "gpt-nope"],
+    },
+    "rate_limit_transient": {
+        # #218 范围外：限流是临时态、属模型 fallback 责任域，不做可读文案分类
+        # （错误码 rate_limit_exceeded 不在分类表里）。
+        "payload": (
+            "Error code: 429 - {'code': 'rate_limit_exceeded', 'message': "
+            "'Rate limit reached for gpt-4o in organization org-x on tokens per min.'}"
+        ),
+        "expected": None,
+        "absent": [],
+    },
+}
+
+
+class TestProviderFailureClassification:
+    """#218：账户/配额/鉴权/模型不存在不再只回显 ``BadRequestError``。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", list(PROVIDER_FAILURE_CASES))
+    async def test_payload_upgrades_to_fixed_message(self, tmp_path, case):
+        """命中分类表的载荷：model/failed 与 run/failed 都带固定可读文案，
+        且**任何**持久化事件都不含载荷原文；未命中的载荷退到类型名归因（#222：
+        reason 总有值，message 仍只落固定文案）。"""
+        spec = PROVIDER_FAILURE_CASES[case]
+        session = make_session(tmp_path)
+        runtime = _runtime(ProviderErrorBodyModel(spec["payload"]))
+
+        result = await runtime.run(session, "你好")
+
+        assert result.status == STATUS_FAILED
+        model_failed = next(e for e in session.events if e.type == MODEL_FAILED)
+        run_failed = next(e for e in session.events if e.type == RUN_FAILED)
+        if spec["expected"] is None:
+            assert model_failed.data["message"] == "model call failed: RuntimeError"
+            assert run_failed.data["reason"] == "RuntimeError", (
+                "未命中分类表：终态归因退到错误类型名，不是留空"
+            )
+            assert run_failed.data["message"] == UNCLASSIFIED_FAILURE_MESSAGE.format(
+                error_type="RuntimeError",
+            )
+        else:
+            reason, message = spec["expected"]
+            assert run_failed.data["reason"] == reason
+            assert model_failed.data["message"] == message
+            assert run_failed.data["message"] == message
+            # 仪器自检：下面的反面扫描必须真的在看事件数据（扫空集合永远绿）。
+            # 固定文案本身**应当**扫得到——扫不到说明扫描的样本是空的。
+            assert any(message in str(e.data) for e in session.events)
+        for event in session.events:
+            for token in spec["absent"]:
+                assert token not in str(event.data), (
+                    f"provider 回显原文不得进任何持久化事件（{case}: {token}）"
+                )
 
 
 @pytest.mark.asyncio

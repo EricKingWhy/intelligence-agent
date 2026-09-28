@@ -1,0 +1,167 @@
+# 审查台账（review ledger）—— `scripts/check_review_coverage.sh` 的机械输入
+#
+# 机制叙述（两个实测失效案例、两类例外、**信任边界**）单点在 `docs/SDD_WORKFLOW_PROTOCOL.md` §7 第 8 条。
+# 本文件只保留**改这个文件必须知道的格式契约**：
+#
+# 审查行：  <日期>\t<范围描述>\t<base>..<tip>
+#   base = fixed point（累计 diff 的起点，**不含**该 commit）；tip = 审查实际读到的末条 commit。
+#   描述必须与自己的 range 相符（实测踩过一次：描述写"不含 X"而 range 含 X）。
+#   脚本校验：base/tip 存在、base 是 tip 的祖先、tip 是 HEAD 的祖先。
+#
+# [whitelist] 段：  <sha>\t<原因>    （7 位缩写或 40 位全长都认）
+#   只收 docs-only——脚本逐条校验改动文件是否全部命中**文档扩展名**（`docs/` 下只认
+#   .md/.txt/.rst/.tsv/.json/.yaml，因为仓库里就有 `docs/integration/*.sh`）。
+#   已被审查行覆盖的条目是死条目，脚本会告警，应删除。
+#
+# **恰好只改**一个**台账文件（本文件或 `docs/review_ledger.d/*.tsv`）**的提交由脚本自动放行，无需声明（机械可验、藏不了代码）。
+# 新增审查后按落点分工更新人读台账；V3-lite 不设固定批次，不再要求往
+# `docs/SDD_TICKET_TRACKER.md` 的「批次台账」追加（那一节已是历史记录）。
+#
+#
+#
+# ⚠ **2026-09-22（issue #293）起：审查行「一文件一条」拆到 `docs/review_ledger.d/`**，
+#   本文件只留**契约头部 + `[whitelist]` 段**。覆盖闸门**双读**（新目录 + 本文件求并集），
+#   过渡期两者都认 —— `read_ledger()` 逐文件独立解析，两个来源的行被并起来判，**判定逻辑一行没改**。
+#
+# 审查行（现在在 `docs/review_ledger.d/<seq>-<base>-<tip>.tsv`，一行一个文件）：
+#   内容仍是  <日期>\t<范围描述>\t<base>..<tip>（格式契约同上）。
+#   文件名 `<seq>-<base>-<tip>.tsv`：`<seq>` = 迁移前在本文件里的行号（保序 + **保证唯一**）。
+#   ⚠ 为什么不按票面写的 `<sha>.tsv`：实测 tip 有 **4 组重复**、`base..tip` 组合也重复 **1 组**
+#   （`6f81c6e..fdb9ce3` 出现过两次）⇒ 只写 `<sha>` 做不到「一文件一条」。文件名只是**标签**，
+#   判定不看它（重命名实验实测：判定逐项不变）。
+#
+# [whitelist] 段**没有**跟着拆（有意的遗留，不是漏做）：白名单行只在 `[whitelist]` 标记之后
+#   才被认作白名单（否则会被当成审查行），拆成一文件一条就得给每个文件塞一个标记行；
+#   而白名单是**低频**写入（审查行才是每批都加的那一类）⇒ 收益小于搬迁成本。
+[whitelist]
+84d4097	仅提交 Gate-0 6/6 PASS 机器读数 JSON（`docs/gate/475640e3c67d5642285854f6f36601fe86e731cd.json`），不含代码或测试变更，docs-only
+59192b9	保留首次 Gate-0 机器读数（对应合并提交 1887bfa，唯一失败为当时尚未登记的 coverage 白名单）；本提交只新增该 Gate JSON 与本台账 docs-only 声明，无代码或测试变更
+1887bfa	合并最新 origin/main（B-44 关闭与 B-43 最新状态）及 Memory V2 规划后的冲突并集；相对第一父提交仅修改 PHASE_STATUS、SDD_TICKET_TRACKER、SDD_WORKFLOW_PROTOCOL、月度归档和 review ledger 五份文档（.md/.tsv），无代码或测试变更，docs-only
+c1fbef6	Memory V2 规划落点：新增 PRD、成熟产品调研与 8 张可独立施工 ticket，并同步 README / PHASE_STATUS / tracker / 月度归档；全部为文档扩展名，docs-only
+e97a382	同步 origin/main 后的纯文档合并：完整保留远端 B-40–B-43 记录与本地 Memory V2 规划，B-43 保持当前施工、Memory V2 标记待施工，并重算 PHASE_STATUS 索引；相对 origin/main 仅文档变更，docs-only
+d26450b	补真独立复核结果（审计包 §10.8.1 末尾：逐字节副本 12/12、目录 13 项、未动 Matt skill 三项全 PASS）——只改 docs/agents/SDD_ACCELERATION_AUDIT.md 一个 .md，docs-only
+a5f4698	更正 PROVENANCE §7 对需求方指令的误抄（Matt skill 不动、只改 pstack；去两处误述）——只改 docs/agents/skills/PROVENANCE.md 一个 .md，docs-only
+337a858	批 2 收口状态如实化（审计包头部过期状态更正 + PHASE_STATUS 登记提速批 1/批 2）——只改 `docs/PHASE_STATUS.md` + `docs/agents/SDD_ACCELERATION_AUDIT.md` 两个 .md，全落在文档扩展名内，docs-only 走白名单
+5c7db24	批 1 协议 §8.3 机制修订（删「例外（不算超预算）」改「无第二轮」+ 新增第 7 条工具豁免附件前提条款）——只改 docs/SDD_WORKFLOW_PROTOCOL.md，全落在文档扩展名内，docs-only 走白名单
+45a367f	B-29 初稿（协议 §8 六条 + tracker B-29 + AGENTS.md §16 + PHASE_STATUS 索引，4 文件纯文档）——批次边界提交落在审查行 base 左侧，按 45744d3 先例走白名单
+1b01d17	B-28（#264）集成/关单状态如实化（tracker B-28 集成与关单节 + 月度归档集成与关单/F 轴故障登记 + PHASE_STATUS 焦点/索引/按日定位；docs-only）
+489541f	B-28（#264）落点（tracker B-28 段 + 月度归档 B-28 逐条明细 + PHASE_STATUS 焦点/索引/按日定位；docs-only）
+6deb9bd	B-27（#263）落点（tracker B-27 段 + 月度归档 B-27 逐条明细 + PHASE_STATUS 焦点/索引/按日定位；docs-only）
+5390981	B-26 集成状态落盘（tracker B-26 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档 + §14.9 通知与冲突面预告；docs-only）
+0114741	B-25 集成状态落盘（tracker 集成与关单节 + PHASE_STATUS 索引/焦点 + 月度归档，docs-only）
+3205238	B-25 登记（tracker B-25 节 + PHASE_STATUS 索引/焦点 + 月度归档 B-25 段）+ 两条复核者逐字给定的 ADR-0039 措辞修正（docs-only）
+e26f785	B-20 coverage result + tracker/phase current-state update（docs-only）
+428b8f1	#260-#262 tracker + phase archive + current focus + review ledger closure（docs-only）
+c1b4a0e	#256 中间集成落点记录（Tracker + PHASE_STATUS + 月度归档 + review ledger，docs-only）
+a0567eb	#256 review coverage gate 结果落点（Tracker + 月度归档，docs-only）
+db81e5e	B-16 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引 + 本台账审查行/修复行 + 删 2 条死白名单，docs-only）
+b53465e	B-10 集成/关单状态（tracker + PHASE_STATUS + 归档，docs-only）
+133ef5a	B-10 落点记录（tracker + 归档 + PHASE_STATUS + 本台账审查行，docs-only）
+a7ce879	DSH 审计集成/推送状态（docs-only）
+75253d7	DSH 审计收尾：现场抽查 + 开票 #226/#227（docs-only）
+d291a0f	DSH 审计明细入归档（docs-only）
+01c07d6	DSH 设计对照审计（12 条可借模式逐条实测 + 2 条真实差异只登记 T1/T2，docs-only）
+c443190	真机巡检收尾复核记录（刷新一致性 + #225 两条 503 分支真机复核，docs-only）
+9f1f77c	B-9 集成/关单状态如实化（tracker + PHASE_STATUS + 归档，docs-only）
+c625300	B-9 落点记录（tracker 批次行 B-9 + PHASE_STATUS 索引 + 归档明细 + 台账审查行 7e174e7..80b41b9，docs-only）
+d748546	本批门禁数字落点（tracker + 归档，docs-only）
+07faef5	#220 落点记录（tracker 批次行 + PHASE_STATUS 索引 + 归档明细，docs-only）
+59c62a8	#221 落点记录（tracker 批次行 B-7 + PHASE_STATUS 索引 + 归档明细 + 审查行 dfb3d74..fb85790，docs-only）
+3674079	#221 集成/关单状态如实化（tracker + 归档，docs-only）
+017c981	真机巡检 round 2 记录（LIVE_BROWSER_TEST §6 + 工单 #222-#225，docs-only）
+114fbfa	#221 push 补记（tracker + 归档 + 本行，docs-only）
+41ea4b8	真机巡检记录 2026-09-17 + tracker/PHASE_STATUS/归档落点（docs-only）
+ba5dff1	台账真实化 + 协议 §3 指针（docs-only）
+16f61b9	本流程批落点记录（tracker + PHASE_STATUS + 归档，docs-only）
+55321bc	#222 落点记录（tracker 批次行 B-8 + PHASE_STATUS 索引 + 归档明细 + 审查行 1a4c2fb..864fb15 + 巡检 F5 状态，docs-only）
+51d0c8e	#222 集成/关单状态如实化（tracker + PHASE_STATUS + 归档，docs-only）
+a63dc46	B-11 落点记录（tracker 批次行 B-11 + 归档明细 + PHASE_STATUS 索引 + 本台账审查行，docs-only；上一批漏声明，本批补）
+757ccea	B-12 落点记录（tracker 批次行 B-12 + 归档明细 + PHASE_STATUS 索引 + 本台账审查行 + a63dc46 白名单，docs-only）
+a893d80	B-12 集成/关单状态如实化（tracker + 归档，docs-only）
+fc01d28	B-12 集成 push 补记（tracker + 归档，docs-only）
+8930701	B-13 落点记录（tracker + 归档明细 + PHASE_STATUS 索引 + 本台账审查行，docs-only）
+9444f65	B-13 集成/关单状态如实化（tracker + 归档，docs-only）
+3dff24f	B-13 落点记录推送补记（tracker + 归档，docs-only）
+c497d6f	B-15 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引 + 本台账审查行/修复行，docs-only）
+d9c2f51	B-14 收批落点记录（tracker 批次明细 + 归档 + PHASE_STATUS 索引，docs-only）
+1545f6d	#239 落点记录（tracker 明细 + 归档 + PHASE_STATUS 索引，docs-only）
+45744d3	P1-B1 批次基线（#267：新建 docs/PERF_BASELINE.md + 本批执行索引 §0–§0.6，docs-only）——两轴审查行的 fixed point，自身落在审查范围外，故按台账惯例走白名单
+4fc7e21	P1-B2 落点记录（tracker P1-B2 审查记录节 + F2 AC8 缺口闭合 + F1/N2 未闭合理由更正 + PERF_BASELINE F2 e2e 节与 F1 G4 理由更正 + 归档索引，docs-only）
+f1984e8	docs-only（PERF_BASELINE F2 节表头如实化：脚本 report 行数 3→4，前 3 行累计 + 第 4 行为扣加载段的派生行）
+40c0795	F4/#273 落点记录（tracker F4 验收证据节 + PERF_BASELINE F4 节 + phase_status 归档索引，docs-only）
+e22bdc1	B7/#275 落点记录（phase_status 归档索引行，docs-only）
+169204f	P1-B3 审查记录 + 台账按 findings 校正（tracker B7 节审查表 + phase_status 归档索引，docs-only）
+5029821	F3/#276 落点记录（tracker F3 验收证据节 + PERF_BASELINE F3 节 + phase_status 归档索引，docs-only）
+5d68843	F6/#277 落点记录（tracker F6 验收证据节 + phase_status 归档索引，docs-only）
+f9ba501c9c403d22dcd03bfe63b291b2c5a6a969	F7/#278 落点记录（tracker F7 验收证据节 + PERF_BASELINE F7 节 + phase_status 归档索引，docs-only）
+87aa3ebb430fc2eeaa73caa0e6b191d3486b32c8	F5/#279 落点记录（tracker F5 验收证据节 + PERF_BASELINE F5 节 + phase_status 归档索引，docs-only）
+1a626d7357ea751732609ceed9c6e082bbdcac30	F8/#280 落点记录（tracker F8 验收证据节 + PERF_BASELINE F8 节 + phase_status 归档索引，docs-only）
+be7db83	P1-B4 审查记录（tracker P1-B4 节 + phase_status 归档索引 + 本台账审查行，docs-only）
+3976e02	性能线并入 main 的落点记录（PHASE_STATUS 索引 + 月度归档明细，docs-only）
+83dcfb73932f10d95afd21a7734fbc92dd45d610	集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
+4f41ba7	B-23 集成/关单状态如实化（tracker 集成与关单节 + PHASE_STATUS 当前焦点 + 月度归档，docs-only）
+b7108c7	B-30 闭合复验 2 条处置（tracker B-30 状态行与处置项③ + 月度归档修后复扫条、新增闭合复验条；docs-only）
+5658d86	B-30 A 轴闭合复验 1 条 P3 处置（协议 §8.1 第 4 条过度声明按实测改写 + 归档闭合复验按轴归属；docs-only）
+1c1bf42	B-30 集成/关单状态如实化（tracker 集成与关单节 + §14.9 通知 + 残余⑥ + 月度归档集成条 + PHASE_STATUS 索引；docs-only）
+0571b01	B-31 闭合复验 findings 处置（flake 行「无残留」被证伪后的改写 + 行号/路径口径 + 残余⑥⑦；docs-only）
+cedb30c	B-31 集成段落盘（tracker B-31 集成与关单段 + 归档 B-31 集成/§14.9 通知两条子项 + PHASE_STATUS 索引与按日表；docs-only）
+e3fa930	B-31 集成 push 结构补记（两次快进 push 分开记：代码面 6 笔 + docs/台账收尾 4 笔；docs-only）
+92242ae57e1a79414b6ee387b1c190bf86188b54	B-31 收尾记账如实化（push 三次 / ② 收尾 6 笔 / tracker 指针「两条」→「三条」子项；docs-only）
+0af6f21	B6/#274 落点记录（PERF_BASELINE B6 节：G3 前置基线 + 改造后对照 + 复现性三轮；tracker 文末追加「批 P1-B6」节；docs-only）
+62f5d73314170a847287aa7951144c9253e57ce7	B6/#274 集成与关单落点（tracker 集成段 + 归档条目 + PHASE_STATUS 索引与条目数真值修正；docs-only）
+ecbf00b289ffd3045ec66730193556bf09fc159d	B6/#274 集成 push 结构补记（两轮快进范围 + 落地踩坑；tracker + 归档 + PHASE_STATUS；docs-only）
+a861379e7a8d364d7d66f77844e188a2886aab8d	B6/#274 push 结构补记如实化（轮次口径 ①/② + 记账递归收敛；tracker + 归档 + PHASE_STATUS；docs-only）
+0676084	B-32（#265）落点记录——tracker B-32 段 + 月度归档 B-32 段 + PHASE_STATUS 焦点/索引/按日定位（docs-only）
+425800d	B-32（#265）记账精度修订——第 1 轮 verdict 改为可验证的 findings/严重度 + 归档补门禁子项（docs-only）
+b2bc1de	B-32（#265）记账笔多出的文件末尾空行——消除 git diff --check 的 new blank line at EOF（docs-only）
+90fc169	B-32（#265）窄复验第二轮的记账更正——B 轴 P3 归属补全 + 残余⑦ 成本句改为仓库已有夹具（docs-only）
+f356384	#236 落点记录（tracker 批次行 + 归档明细 + PHASE_STATUS 索引 + 本台账审查行，docs-only）
+e8e8ce0	B-32（#265）集成落点记账——归档追加 5 条子项（闭合复核 / 集成 / 合并的独立审查 / 门禁读数 / push 与关单）+ tracker 状态与落点行 + PHASE_STATUS 焦点与最近条目，按日定位 2026-09-21 依合并后归档**实测重算**（docs-only）
+f1b65e4	B-33/B-34 落点（tracker 两段 + 月度归档 2 条 + PHASE_STATUS 焦点/最近条目/索引重算；docs-only）
+f838a92	B-33/B-34 集成与关单落点（tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
+4cd66ef	docs(B-33) `-m integration` 读数环境归因更正（tracker 读数段 + 归档门禁子项 + PHASE_STATUS 焦点/最近条目；docs-only）
+fd55e70	B-33/B-34 落点行补最终 tip（bafbd12 → a080912 的 4 笔 docs-only；tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
+f08f630	B-33/B-34 tip 锚点自维护口径（tracker 落点/状态 + 归档两处 + PHASE_STATUS 焦点/最近条目；docs-only）
+66cb2ae	B-35 三轮（窄复验）findings 与最终读数的文档落点（tracker B-35 段 + 月度归档 + PHASE_STATUS 焦点/索引；docs-only）
+5944617	B-35 四/五轮 findings 与处置的文档落点（tracker B-35 段 + 月度归档 + PHASE_STATUS 焦点/索引；docs-only）
+ffd0857	B-35 集成与关单状态如实化（tracker B-35 段「集成与关单」子段/状态行/落点行/父票段 + 月度归档 L660 段 + PHASE_STATUS 焦点与日志行；docs-only，src/tests 零改动）
+0ad98ef	B-35 收尾 tip 锚点改自维护口径 + 三方对齐读数更新（tracker 集成与关单段/落点行 + 月度归档 L660 段 + PHASE_STATUS 两行；docs-only）
+2f145af	B-36（#281）文档落点（`PERF_BASELINE.md` B8 节数字面 + AC4 声明 + tracker `## B-36` 段 + 月度归档 L669 + `PHASE_STATUS.md` 焦点/最近条目/按日索引；docs-only，`src`/`tests`/`scripts` 零改动）
+941277e66b2afe3a24e194ec9115f531bdb9b9a8	#282 落点记录（tracker F18-A 段 + 归档 2026-09-22 条 + PHASE_STATUS 焦点/索引/按日定位 + ADR-0041 Status 转 Accepted；docs-only）
+b44b9ef5fd8a8ceef54e3f1c7d0b3d3a8ce5014c	B-36（#281）集成与关单落点（tracker `## B-36` 段「集成与关单（2026-09-22，事实登记）」+ 第 3640 行「#274/#281 未开工」加 2026-09-22 更新注 + 月度归档 B-36 条 4 条子项：集成与关单 / 两条如实披露 / G3 自纠 / 两处持有；docs-only，`src`/`tests`/`web`/`scripts` 零改动）。**两处持有如实登记**：① 本 clone 的 `main` 未 push（领先 `origin/main` 4 笔并行线 docs-only + 其一套未提交的 F18-A 回退状态）；② `PHASE_STATUS.md` 按日索引行待 F18-A 处置定稿后重算（该行随 F18-A 是否落地而变）
+47d8f2d	B-37（#286–#290）全仓 review findings 开票落点（tracker 批次 + PHASE_STATUS 当前焦点；docs-only，未实现代码）
+d5ce8fe	B-37 真实 Gate 配置预检读数落点（tracker 配置预检一行；docs-only）
+fd0a33b	B-37 合并 origin/main（#282 F18-A + B-37 票面登记）；4 份记账面冲突按用户批准保留双方语义，5 个变更文件均为 docs-only
+e8b2707	F18-B（#283）docs-only 落点记录（tracker `## F18-B` 段 + 月度归档 2026-09-22 条 + `PHASE_STATUS` 焦点/最近条目/归档索引/按日定位 + F18-A 残余①标注解除；3 文件全为 `.md`）
+b429f1a	B-38（`#244` AC5）记账落点（tracker `## B-38` 段 + 月度归档 2026-09-22 B-38 条 + `PHASE_STATUS` 焦点状态句改写/B-38 子句/最近条目/归档索引 301→302/按日定位 6→7 条重算；docs-only，`src` / `tests` / `web` / `scripts` 零改动）
+3179a6d	#248 R1/R2 闭合批次记账落点（tracker B-26 段：状态转收口 + 裁决段 + 闭合批次段 + 集成占位 / 月度归档 B-39 条 / `PHASE_STATUS` 焦点·主线·裁决句·归档索引 301→303·按日定位 8 条·最近条目 / `CONTEXT.md` RunManager 路径改 `session/runmanager.py` / ADR-0030·0040 第三轮文档口径订正；docs-only，`src`/`tests`/`web`/`scripts` 零改动）
+c19d1f38432f7ff54b7df7036c4112adfbc78567	F18-B（#283）第三手补记：两轴独立审查（两轴均 P0/P1 = 0）+ 作者红证（改造前树 8 failed / 239 passed）+ B-29 flake 登记（StepDetail.window.test.tsx:132）+ 台账审查行按 §8.5.1 压缩；3 文件全为 .md
+e489dc9	#248 R1/R2 闭合批次「集成与关单」落点（tracker B-26 集成段 + 月度归档 B-39 集成子项 + `PHASE_STATUS` B-39 最近条目补集成事实 / 按日定位子项数口径统一；docs-only，`src`/`tests`/`web`/`scripts` 零改动）
+6cab69b	#248 R1/R2 闭合批次收尾记账（tracker B-26 集成段 + 归档 B-39 集成子项 + `PHASE_STATUS` B-39 最近条目：补「实记笔/台账笔推送 + 三方 clone 复补」的对齐事实与自终止式表述；docs-only，`src`/`tests`/`web`/`scripts` 零改动）
+1bb0a81	真机审计第十五轮 §6 收口登记（更正一处 gitignore 说法 + 记清理动作与证据落点）——只改 `docs/FRONTEND_ISSUES_LOG.md` 一个 .md，docs-only
+4f0df6e	真机审计第十五轮 §10 门禁读数（含三条红的 flake 归属）+ 1bb0a81 白名单行——改动两个文件（`docs/FRONTEND_ISSUES_LOG.md` + `docs/review_ledger.tsv`）全在 `docs/` 下 .md/.tsv，docs-only
+2a266cc	真机审计第十五轮「集成与推送」登记（前端六笔 ff 进集成 clone + push origin；后端 clone 落后与台账并集冲突待裁）——只改 `docs/FRONTEND_ISSUES_LOG.md` 一个 .md，docs-only
+1d72485aa6b99490fd1240529208f7cf3aa027ad	#291（B-40）末轮处置笔——消掉 §8.8.8 与 §8.8.3 的自相矛盾 + 5 条 P2；**该笔按本票决定未再开审查轮**（本票第 3 轮已超出 §8.3「修后重审每轴 1 轮」预算，已在 tracker / 月度归档 / 台账审查行三处明文登记待用户裁决），6 处改动全部是收窄或事实更正、不引入任何新的放松；只改 docs/SDD_WORKFLOW_PROTOCOL.md 一个 .md，docs-only 走白名单
+85b798f87a85ada7dd06936522d328385885ec3a	#291（B-40）落点记录——台账 3 条审查行 + PHASE_STATUS 最近条目 + tracker B-40 段 + 月度归档 B-40 块；只改 docs/review_ledger.tsv / docs/PHASE_STATUS.md / docs/SDD_TICKET_TRACKER.md / docs/phase_status/2026-09.md 四个 .md/.tsv，全落在文档扩展名内，docs-only 走白名单
+074871ced6b4a4651e70a7a4ed101f5b538482fc	#291（B-40）集成/关单状态如实化（落点笔 `85b798f` 写的「未推送」按实测改为已推送并关单：push `e378273..446db82` + 覆盖闸门 498/353/145/❌0 + `#291` 关单 + 自查出的 R3 范围反引号缺陷登记）——只改 docs/PHASE_STATUS.md / docs/SDD_TICKET_TRACKER.md / docs/phase_status/2026-09.md 三个 .md，全落在文档扩展名内，docs-only 走白名单
+e62005e	#292（B-41）⑭ 读数整块重写为**最终树**读数 + 补两条新边界（空面 fail-closed / `--since` 统一）——只改 `docs/agents/verification.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` 两个 .md，docs-only
+7b3ba0db223b42a1d63d6eae28b722d0ff391b95	docs(#292): B-41 落点四件套（PHASE_STATUS 焦点/条目 + 月度归档 B-41 条 + tracker B-41 段 + 台账 2 条审查行 + 1 条白名单）——只改 docs/ 下 4 个文件（`docs/PHASE_STATUS.md` / `docs/phase_status/2026-09.md` / `docs/SDD_TICKET_TRACKER.md` / `docs/review_ledger.tsv`），docs-only；覆盖闸门实测 `09ca47a..e62005e` 提交总数 511 / 已审查 363 / 待判定 148 / ❌ 0 ⇒ exit 0
+8c119dd4a702a69ae3bcb085d45ffe2081f81377	docs(#292): B-41 状态如实化——已推送（ff `784df9e..c9ef006`，13 笔）+ `#292` 关单 + 索引外扩 1 条子项——只改 `docs/PHASE_STATUS.md` / `docs/phase_status/2026-09.md` / `docs/SDD_TICKET_TRACKER.md` 三个 .md，docs-only
+f04eceb	#293（B-42）落点笔 f04eceb4 —— 审查行 139/140/141（.tsv）+ PHASE_STATUS/tracker/月度归档（.md），docs-only
+c89fc62	#293（B-42）门禁读数绿 JSON 笔 c89fc62b（docs/gate/96baf4f….json，.json 属文档扩展名，docs-only）
+18de51b	#293（B-42）集成/关单状态如实化笔 18de51b4（PHASE_STATUS/tracker/月度归档三个 .md，docs-only）
+2627286270b006b1345578b13820a1028e2e58f7	docs(acceleration): 审计包头部状态块同步（SDD_ACCELERATION_AUDIT.md，.md 属文档扩展名，docs-only）
+326099f08e2484476f8337b97ca91b3914dfc6d7	docs(workflow): 文档瘦身与失真修复（AGENTS.md + 协议，根级 .md 与 docs/ 下 .md 均属文档扩展名，docs-only；指针化 3 处 + 失真/悬空引用更正 8 处，判据一字未删）
+79ee8abca1e25beafc3251bd3dfe863a5b904748	docs(workflow): 协议三处失真修复 + §7 第 8 条③登记守卫新枚举源（SDD_WORKFLOW_PROTOCOL.md，docs/ 下 .md 属文档扩展名，docs-only）
+890ea2e1edfa022edea99352f5e47e05d1f31c2c	#286（B-43）落点四件套 —— PHASE_STATUS 焦点/条目 + 月度归档 B-43 条 + tracker B-43 段（含交付面 / 冻结语义 7 条与 AC 6 条对账 / 红证与变异读数 / 门禁读数 / 两轴审查结论 / 残余 4 条）；只改 docs/ 下三个 .md（`docs/PHASE_STATUS.md` / `docs/phase_status/2026-09.md` / `docs/SDD_TICKET_TRACKER.md`），docs-only
+e15f51c1f7d8bf5b31691dacd2b7f9fe23b83189	#286（B-43）门禁读数 + 验证报告笔 —— `docs/gate/64d2c78979b8c263ba9d90e2dd500b735bcb5bcd.json`（Gate-0 6/6 PASS / passed 6 / total 6 / failed 空，机器落盘） + `docs/agents/SDD_V31_LIVE_VALIDATION_286.md`（V3.1 实测验证报告：8 条改进点 + 10 条可判定证明 + 7 条体系缺陷）；只改 docs/ 下 .json 与 .md，docs-only
+0e909f84c8060dc0f879358be087e02c47234737	#286（B-43）验证报告「缺陷 7」补笔 —— 台账白名单行描述字段零校验（bash 反引号命令替换静默吞掉文件名 + 把真实 .md 当脚本执行、在仓库根创建 6 个 0 字节垃圾文件，已删除并复核）；只改 `docs/agents/SDD_V31_LIVE_VALIDATION_286.md` 一个 .md，docs-only
+61eb27061b535e7bcffde2d49e1087e316799f84	#286（B-43）推送后补记笔 —— 生成方式同上（plumb）；内容 = tracker B-43 段「集成（待执行）」→「集成（已完成）」（含 `6e281c7..e800ecb` ff / PUSH_EXIT=0 / pre-push Gate-0 6/6 / 推后远端=本地=e800ecb3）+ 新增「§8.1 第 3 条两条判据输出原文」（判据① 七条路径全命中 DOC_PATTERN；判据② 仅稳态未跟踪项）+ L4657 读数指针改指已落盘段 + PHASE_STATUS 焦点段与「最近条目」及 `phase_status/2026-09.md` 同名条「待推送」→「已推送（6e281c7..e800ecb ff）」；只改 docs/ 下 3 个 .md，docs-only
+ef286944da06a8522abf9627813aaf60368a3c1d	#286（B-43）验证报告读数订正笔 —— 内容 = `docs/agents/SDD_V31_LIVE_VALIDATION_286.md` §2 第 10 条把不可复现的「区间 09ca47a / 三元组 538-373-165」改为实测末行原文（089524a~1..HEAD）+ 推送 tip 上的逐条计数（白名单 81 + 台账自动放行 93 = 174，❌ 0）并标注为时点读数；§2 第 9 条判据② 补记并行线未跟踪项（`docs/research/2026-09-23-agent-tool-loop-termination-benchmark.md`）；只改 docs/ 下 1 个 .md，docs-only
+379fa3314eb930e2ad0e17bd88f9fa8bb39e9c6b	docs-only 落点笔：#286（B-43）收尾 —— 关单登记 + 体系缺陷开票 #294 / #295 + 两项裁决回填（3 文件全部命中 DOC_PATTERN）
+17169c30dde42b091691968bb638841ceffd021f	docs-only 收尾读数笔：tracker B-43 段追加「收尾落点笔 379fa33 + 台账笔 a2b3971」的门禁读数（diff-check rc=0 / 覆盖闸门 exit 0 末行原文 / 83+95=178 条归属判定）+ 两项如实登记（33 条冗余白名单行非失败；台账 148/149 行既存裸 LF）——单文件 docs/SDD_TICKET_TRACKER.md，文档扩展名，docs-only
+b074740edef03fae068b83d3d14db22602ed0672	docs-only 落点笔：#294（B-44）协议口径修订 —— tracker B-44 段 + PHASE_STATUS 焦点/最近条目 + 月度归档 B-44 条（3 文件全部命中 DOC_PATTERN）
+f1625345f4053f911da8430e54a08912ff51080a	docs-only 交付笔：#294（B-44）协议 §8 口径修订 —— 缺陷 1/2/3/4/6 五条一次落（只改 docs/SDD_WORKFLOW_PROTOCOL.md）
+3bd2529c317a832c637f861c57337f4764131a21	docs-only 交付笔：#294（B-44）缺陷 1 判据实施边界如实化 —— 口径在本票、实现与三个控制样本归 #295（只改 docs/SDD_WORKFLOW_PROTOCOL.md）
+c39f46281cd4c678c28a4f5bbe8180671c85291a	docs-only 修复笔：#294（B-44）tracker 尾部多余空行 —— Gate-0 diff-check 拦下 new blank line at EOF 后修掉（只改 docs/SDD_TICKET_TRACKER.md）
+f15b51e1e2589fbb5da0a4193b64ab0fa256766e	docs-only 状态笔：#294（B-44）已推送（607dee4..b1c9dac ff）+ #294 关单如实化 —— tracker / PHASE_STATUS / 月度归档 三文件（均命中 DOC_PATTERN）

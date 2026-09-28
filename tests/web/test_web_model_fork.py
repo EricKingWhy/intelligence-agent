@@ -21,7 +21,7 @@ from agent_harness.web.app import create_app
 
 _CATALOG_JSON = (
     '[{"name": "gpt-4o", "provider": "deepseek", "model_name": "gpt-4o-mini"},'
-    ' {"name": "glm-4.5", "provider": "zhipu", "model_name": "glm-4.5"}]'
+    ' {"name": "mimo-flash", "provider": "mimo", "model_name": "mimo-v2.6-flash"}]'
 )
 
 
@@ -64,14 +64,14 @@ class TestModelEndpoint:
         _seed(client)
 
         resp = client.post(
-            "/api/sessions/sid-1/model", json={"provider": "zhipu", "model_id": "glm-4.5"}
+            "/api/sessions/sid-1/model", json={"provider": "mimo", "model_id": "mimo-flash"}
         )
 
         assert resp.status_code == 200
         assert resp.json() == {
             "status": "changed",
-            "provider": "zhipu",
-            "model_id": "glm-4.5",
+            "provider": "mimo",
+            "model_id": "mimo-flash",
         }
         events = client.app.state.agent.store.read_events("sid-1")
         assert events[-1].type == MODEL_CHANGED
@@ -80,14 +80,14 @@ class TestModelEndpoint:
         _seed(client)
 
         resp = client.post(
-            "/api/sessions/sid-1/model", json={"provider": "zhipu", "model_id": "nope"}
+            "/api/sessions/sid-1/model", json={"provider": "mimo", "model_id": "nope"}
         )
 
         assert resp.status_code == 422
 
     def test_missing_session_404(self, client):
         resp = client.post(
-            "/api/sessions/nope/model", json={"provider": "zhipu", "model_id": "glm-4.5"}
+            "/api/sessions/nope/model", json={"provider": "mimo", "model_id": "mimo-flash"}
         )
 
         assert resp.status_code == 404
@@ -96,7 +96,7 @@ class TestModelEndpoint:
         _seed(client)
 
         resp = client.post(
-            "/api/sessions/sid-1/model", json={"provider": "zhipu", "model_id": ""}
+            "/api/sessions/sid-1/model", json={"provider": "mimo", "model_id": ""}
         )
 
         assert resp.status_code == 422

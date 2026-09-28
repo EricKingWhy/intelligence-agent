@@ -1,0 +1,406 @@
+# 验证车道表（改了什么 → 跑哪条 → 期望证据）
+
+> **这份文件的用途**：把"这次该跑什么"从**记忆**变成**查表**。
+> 起因：SDD 的完整门禁一次是分钟到十几分钟级，而"改一个简单小功能也要等一小时"里，
+> 大量时间花在与本次改动无关的检查上；同时反向的事故也在发生——**该跑的没跑**
+> （例如 `scripts/check_review_coverage.sh` 长期依赖 coreutils、在本机从未真的执行过）。
+>
+> 权威来源：`AGENTS.md` §14.10（集成前门禁清单）、`docs/SDD_WORKFLOW_PROTOCOL.md` §7
+> （逐票验证与集成门禁）。本文只做**映射**，不新增门禁。
+
+---
+
+## 0. 一句话
+
+```bash
+# 推送前（≤60s，机械项）
+python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
+
+# 集成前（完整门禁，分钟级；一个冻结树只跑一次）
+```
+完整门禁 = §2 的**全部机械车道 ①–⑪**（`AGENTS.md` §14.10 清单 + 协议 §7 第 6 条点名的工具）；
+其中**长耗时**的那几条（②③⑤⑩⑪）命令见对应小节（④ `tsc -b` / ⑦ 生成物守卫是秒级、且已在 Gate-0 里；⑤⑩ 本文件未在本批实测耗时）。**Gate-0 ≠ 完整门禁**（见 §4）。
+
+**服务端同一套闸门（2026-09-26 起）**：`.github/workflows/gate0.yml` 在 PR 上跑**同一份**
+`scripts/gate0.py`，是 `main` 的**必需状态检查** `gate0`。它挡的是「忘了跑」与「本地
+`--no-verify`」；**本地绿推不出 CI 绿**（平台差异，见 §4），它是**门禁而非可选**。
+
+---
+
+## 1. 决策表
+
+| 改了什么 | 至少跑 | 谁跑 |
+| --- | --- | --- |
+| 任何文件 | ⑨ `git diff --check` + ⑧ 覆盖闸门 | Gate-0（自动） |
+| `src/**` 的 `.py` | ① ruff + ② 后端全量 pytest | Gate-0 跑①；②在冻结树 |
+| `session/event.py` 或任一生成物 | ⑦ 的生成物同步守卫（**必跑**；跨 `src`↔`web` 的只有这一条） | Gate-0（自动） |
+| `web/**` | ④ tsc + ⑤ vitest + ⑥ oxlint | Gate-0 跑④⑥；⑤按需 |
+| `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
+| 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
+| `evaluation/live_gate/**` 或票面要求"真模型 + 生产工具"的证据 | ⑮ Live Gate（**需真凭证**；`validate` 复核入库证据） | 人工，冻结树（不进推送前 60s 快车道） |
+| 只想重跑失败的那一条 | `python scripts/gate0.py --only <lane>` | 人工 |
+| 一次改动只重跑受影响的那些 | `python scripts/gate0.py --affected <rev>`（见 §2 ⑭；<rev> 亦可为 `A..B`；**只内联 pytest 子集**） | 人工 |
+
+---
+
+## 2. 车道清单
+
+实测耗时 = 2026-09-22 在本仓（tip `22aa291`、win32、`.venv` 就绪）当次读数；
+**热缓存**指 `.ruff_cache` / `tsconfig.tsbuildinfo` 已存在。未实测的一律标注，不填数字。
+
+### ① 后端静态检查 — `ruff check .`
+
+- 命令：`.venv/Scripts/ruff.exe check .`（仓库根）
+- 期望证据：`All checks passed!`，退出 0。
+- 实测：冷 3.3s / 热 0.5s。
+- 注意：**仓库没有任何 ruff 配置文件**（`ruff.toml` / `.ruff.toml` / `[tool.ruff]` 全无）；
+  生效的是 ruff **上游默认规则集**，而 0.16.3 的默认集已经很宽（实测 `--isolated` 下
+  一个 4 行探针即触发 `UP009`；`S110` / `BLE001` / `PLW1510` / `FURB188` / `PIE810` 也在默认集内）。
+  ⇒ "牙齿"够用，但**强度随 ruff 版本漂移**（`ruff>=0.16.3` 无上界）；升级 ruff 时若本车道突然变红，
+  那是规则集变了，不是代码变差了。
+
+### ② 后端全量测试（冻结树，只跑一次）
+
+- 命令（用户 2026-09-21 指令，协议 §7 第 6 条）：
+  `PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly`
+- 期望证据：`N passed / M skipped / 0 failed / 0 errors` **连同**跑它的 sha 与 `git rev-parse <sha>^{tree}`。
+- 耗时：分钟级（历史读数见 `docs/phase_status/2026-09.md`，本批未重跑）。
+
+### ③ 后端全量（本机沙箱绕行）
+
+- 命令：`./scripts/run_tests_clean.sh [target]`
+- 为什么：本机 WorkBuddy 沙箱经 `PYTHONPATH` 注入 `sitecustomize.py`，拦截 `Path.unlink()`
+  并维护**跨测试累积**的删除配额；全量 pytest 后期配额耗尽 ⇒ 若干 `tests/evaluation/*`
+  "随机"失败（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`）。该脚本把 `PYTHONPATH` 清空。
+- 期望证据：同 ②。
+
+### ④ 前端类型检查 — `tsc -b`
+
+- 命令（`web/`）：`node node_modules/typescript/bin/tsc -b`
+- 期望证据：**无输出**、退出 0（`tsc` 只在出错时说话）。
+- 实测：冷 22.7s / 热 10.8–14.7s。**不写进工作树**（`tsbuildinfo` 不产生未跟踪文件，已实测）。
+- 注意：这是**类型检查**，不含打包。⑩ `vite build` 是另一条。
+
+### ⑤ 前端单测 — `vitest run`
+
+- 命令（`web/`）：`node node_modules/vitest/vitest.mjs run`
+- 期望证据：`Test Files … / Tests N passed`。
+- 耗时：未在本批实测（按 spec 数规模判断为十秒级，不要在这里写死数字）。
+- 性能专用配置：`node node_modules/vitest/vitest.mjs run -c vitest.perf.config.ts`。
+
+### ⑥ 前端 lint — `oxlint`
+
+- 命令（`web/`）：`node node_modules/oxlint/bin/oxlint`
+- 期望证据：退出 0；配置在 `web/.oxlintrc.json`（`react` / `typescript` / `oxc` 插件）。
+- 实测：冷 4.4s / 热 0.6s。
+
+### ⑦ 机械守卫（生成物同步 + 验证映射 + 索引可执行位）
+
+- 命令：`PYTHONUTF8=1 PYTHONPATH= .venv/Scripts/python.exe -m pytest
+  tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py
+  tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py
+  -q -p no:randomly -p no:cacheprovider`
+- 守卫对象（三类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**；「（N 文件）」这个计数
+  在车道描述与本文两侧都有，由 `tests/test_exec_bit_matches_shebang.py` 一处断言对账 ⇒ 改一处
+  忘另一处会红）：
+  1. **生成物同步**：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
+     `web/src/generated/event-types.ts`（`scripts/gen_event_types.py`）与
+     `docs/EVENT_VOCABULARY.md`（`scripts/gen_event_vocabulary.py`）。
+  2. **验证映射**：见 §2 ⑭。
+  3. **索引可执行位 ⇔ shebang**（P0-2）—— **本条是这四文件里机制叙述的权威处**，判据
+     `scripts/check_exec_bit.py`（判据脚本与用例只写操作约束 + 指回本处）：
+     - **它补的是 `ruff` 的 `EXE001`**（`Shebang is present but file is not executable`）：那条
+       规则只在 Unix 生效，而本仓 `core.filemode=false` ⇒ 本地 `ruff check .` **看不见**
+       「带 shebang 但索引模式不是 `100755`」。两次「本地绿 → CI 红」的事故都出自它：
+       `99a744fe`（在 `main` 上补 7 个脚本的可执行位）、`2d3761c`（`scripts/live_gate.py` 索引
+       `100644` → `100755`）。
+     - 判据 = 被跟踪的 `*.py` / `*.pyi` 里，凡 **blob 以 `#!` 开头**（位置口径：字节 0）者，
+       索引模式必须是 `100755`。读**索引模式**（`git ls-files -s`）+ **blob 头部**
+       （`git cat-file --batch`）⇒ 不受工作树权限 / `core.autocrlf` / 本地未提交编辑影响。
+     - **范围只到 `*.py` / `*.pyi`**（`ruff` 的 lint 面）。`.sh` / `.ps1` / `.mjs` 带 shebang 而
+       `100644` 是本仓**现状且无害**（一律经解释器调用），纳入会立刻产生 **11 条误报**
+       （2026-09-27 实测：`.specify/scripts/powershell/*.ps1` ×6、`dev.sh`、
+       `docs/integration/verify-before-merge.sh`、`scripts/check_review_coverage.sh`、
+       `scripts/run_tests_clean.sh`、`web/scripts/preflight-port.mjs`）；反方向（`100755` 而无
+       shebang）本仓 0 例、上游口径未核对 ⇒ 同样不纳入。
+     - **BOM 开头的 `#!`（`EF BB BF` + `#!`）刻意不报**：判据是位置口径。该形状**不是**盲区
+       —— 本地 `ruff` 的 `EXE005`（`shebang-not-first-line`；默认规则集启用、**无平台门控**）
+       在有 BOM 时就已必红，而 `chmod +x` **修不掉** EXE005 ⇒ 并进来只会给出误导性修法。
+       2026-09-27 实测（ruff 0.16.3 = `uv.lock` 钉的版本）：`#!` 在字节 0 ⇒ 本地全绿（＝本守卫
+       要补的那条缝）；BOM + `#!` / 空行 + `#!` / 第 2 行的 `#!` ⇒ 本地一律 `EXE005` 红。
+       ⇒ **「本守卫 ∪ 本地 ruff」覆盖 `EXE001` 的文件集**：`#!` 不在字节 0 时，`EXE004`/`EXE005`
+       必有其一起（二者是互补的），而在字节 0 时本守卫自己看得见。
+     - **fail-closed 两处**：blob 读不到 ⇒ 判**违例**（不是跳过，与 `check_review_coverage.py`
+       同口径）；索引含**未合并条目**（stage ≠ 0）⇒ 直接报错退出，不按 stage 0 的语义读。
+     - 修法：`git update-index --chmod=+x <path>` —— 改**索引**，不是关掉 CI 那条 ruff 规则。
+     - **已知边界（登记，不修）**：本守卫的输入面是**整份索引**，而 `--affected` 按改动面选车道 ⇒
+       给 `scripts/` 之外的 py 文件新加 shebang 时，`--affected` **不会**跑本守卫。2026-09-27 实测：
+       全仓 **9 个带 shebang 的 py 全在 `scripts/`**，而 `scripts/` 行含 `guards`
+       ⇒ **现实面全覆盖**，缺口只在理论面。**不承重**：`--affected` 依设计只做**失败后的增量
+       重跑**，推送前与集成前两处真门禁恒跑全量 6 条（§4「`--affected <rev>` 的边界」）。
+       **解除条件**：要把 `guards` 升进「每行必列」集合（现为 `diff-check` + `coverage`，见
+       `verification.map.tsv` 表头）需一并改 72 行映射表 + `tests/test_verification_map.py`
+       的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
+- 期望证据：`6 passed`（生成物 2 文件）+ `20 passed`（验证映射守卫，见 §2 ⑭）+
+  `12 passed`（索引可执行位守卫）= **`38 passed`（4 文件）**。
+- 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
+  该文件的主要成本（`--durations` 实测：`test_cli_refuses_an_unmerged_index` 要真造一次
+  三方冲突 ⇒ **9.98s**，是本车道最大单项；次之 `test_cli_flags_the_incident_shape_in_a_real_repo`
+  5.03s；该文件 4 文件合计 23.97s）。三个口径都记下，**引用某个数时请连同它的来源一起给**：
+  `--only guards` 同树两点 **17.8s / 25.0s**；冻结树裸全量落盘的
+  `docs/gate/781a3477ecad49561e961eb1df88967e08973cbe.json` 记 **`guards` = 12.97s**
+  （同笔 `wall` 35.44s、`tsc` 16.86s）。差异来自机器负载与冷/热缓存，**不是判定**。
+  同机全量扫描（63 份 `docs/gate/*.json`）：`guards` 中位 **4.20s**、`tsc` 中位 **11.68s**；
+  高负载下本批实测到 `guards` **53.34s** / `tsc` **84.16s**（同代码 `--only tsc` 三次
+  **30.66 / 42.99 / 84.16s**）⇒ 引用耗时务必连带来源与负载。
+- 漂移时先跑生成器：`uv run python scripts/gen_event_types.py` / `... gen_event_vocabulary.py`。
+
+### ⑧ 审查覆盖闸门
+
+- 命令：`.venv/Scripts/python.exe scripts/check_review_coverage.py`
+  （`--list` 只打印三元组、有缺口退 2；`LEDGER=<path>` 可换台账）
+- 期望证据：`提交总数 X / 已审查 Y / 待判定 Z`，且每条待判定 commit 都有归属
+  （审查行 / `[whitelist]` 的 docs-only / 恰好只改台账），最后打印
+  `✅ 台账覆盖闸门通过：<base>..HEAD …`，退出 0。
+- 实测：**3.6–7.1s**。
+- ⚠ 台账从**工作树**读（不读 HEAD 版）⇒ 必须在**干净检出**上跑。
+- ⚠ 它是**声明式**闸门：只证明"每条 commit 都有归属"，**不证明审查真实发生过**——那由人对账
+  （协议 §7 第 8 条的信任边界）。
+- 参考实现：`scripts/check_review_coverage.sh`（**语义参考、冻结**——协议按行号引用它的
+  `DOC_PATTERN` 与 fail-closed 形状；但它依赖 coreutils，在缺 coreutils 的 sh 下跑不动）。
+
+### ⑨ 空白 / 冲突标记
+
+- 命令：`git diff --check`（工作树）；查提交范围用 `git diff --check <base>..HEAD`。
+- 期望证据：无输出、退出 0。实测：<1s。
+
+### ⑩ 前端构建 — `vite build`
+
+- 命令（`web/`）：`node node_modules/vite/bin/vite.js build`
+- 期望证据：构建成功、产物在 `web/dist`。耗时：未在本批实测（秒到十秒级）。
+
+### ⑪ 前端 e2e — playwright
+
+- 命令（`web/`）：`node node_modules/@playwright/test/cli.js test --workers=2`
+- ⚠ 端口纪律：`web/playwright.config.ts` 写死 `:5173` 且 `reuseExistingServer: false` +
+  `vite --strictPort` + `scripts/preflight-port.mjs` 预检。**若验收用的 dev server 占着 5173，
+  本车道会拒绝启动**（这是有意的：#209 实测复用了别人的 server ⇒ 18 failed 假红）。
+- ⚠ 真机验收车道的前提（`:8000` 上是哪个 clone、`/api/capabilities` 期望）见
+  `docs/ACCEPTANCE_LANE_ENV.md`；对着错的后端跑会得到**假阴性**。
+
+### ⑫ 真机验收（浏览器证据）
+
+- 需要"看得见的证据"（控件可达性、渲染条件）时走 `docs/ACCEPTANCE_LANE_ENV.md` 的车道。
+- 判据不是"页面能打开"，而是该文件 §2 的 `/api/capabilities` 期望与
+  `docs/ACCEPTANCE_CONTROL_INVENTORY.md` 的控件清单对账。
+
+### ⑬ Gate-0（聚合入口，**不新增门禁**）
+
+- 命令：`.venv/Scripts/python.exe scripts/gate0.py`
+  （`--since <rev>` 额外查该范围的空白/冲突标记并报告改动面；`--only <lane>` 单条重跑；`--list` 列车道）
+- 内容：⑨ + ① + ⑥ + ④ + ⑦ + ⑧，共 6 条。
+- 期望证据：`Gate-0 PASS：6/6 通过，墙钟 <秒数>` + 首行 `tip=<sha> tree=<tree>`。
+- 实测：**热 20–22s、冷 ≈40s**（预算 60s）。
+- 由 `.githooks/pre-push` 在推送前调用（启用：`git config core.hooksPath .githooks`）。
+
+### ⑭ 验证映射与 `--affected`（受影响面的机器化；issue #292）
+
+- **产物**：`docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的**机械映射**
+  （**25 行 × 8 列**）。feature 四要素由其中**五列**承载（`Driving it with <harness>` 拆成 `lanes` +
+  `focused`），逐一对齐 `docs/agents/skills/create-verification-skill` §3
+  （`Sub-features` → `sub_features`；`How to get to it (user POV)` → `how_to_get_to_it`；
+  `Driving it with <harness>` → `lanes` + `focused`；`Gotchas` → `gotchas`），另加三个**机械列**：
+  `surface`（`--affected` 的匹配键：只允许**路径前缀**或**精确路径**，禁通配、禁 catch-all）、
+  `layer`、`neg_tier`（`blast-radius` 确定性阶梯）。`how_to_get_to_it` 是**散文**、`--affected`
+  **不消费它**——它服务的是「人工逐行复核」（只给路径的映射，人复核不出"这个面用户摸不摸得到"）。
+- **守卫**：`tests/test_verification_map.py`（**20 例**；跑在 Gate-0 的 `guards` 车道里。编号与协议
+  §8.8.9 **同源**，改一处必须两处同改）：① `git ls-files` 里**每个**被跟踪文件都被映射；
+  ② 结构合法（**8 列** / layer 唯一 / 车道 id 在词表内 / focused 路径存在 / `neg_tier ∈ 1..5`）；
+  ③ **每一行都承重**（删掉任一行 ⇒ 至少一个文件的受影响集合变化）；④ `focused` 必须**真跑得动**——
+  pytest 目标要对盘核到 `test_*.py`（`pytest <空目录>` 会以 exit 5 收场，与 vitest 的
+  `No test files found` 是同一形状的**假 FAIL**），且"哪些 focused 按设计不内联"必须在
+  `test_focused_only_inlines_pytest_subsets` 里**逐个登记**；⑤ **每一行都必须列无条件车道**
+  `diff-check` + `coverage`（§1 决策表第 1 行「任何文件」）——漏列会让 `--affected` 在那个面上把它们
+  **静默跳过**，那不是增量而是放松；⑥ `how_to_get_to_it` 的形状**可机械判定**（要么写明「无用户入口」，
+  要么引一个真实存在的仓库路径）；⑦ 自带**独立**匹配器与**独立**求值器，对**每个**文件与 `gate0.py`
+  的求值**逐项相同**（map 与 `--affected` 不是两套真相）。⇒ 映射腐烂、或把非 pytest 面接上内联车道
+  = **推送前就红**。
+- **命令**：`.venv/Scripts/python.exe scripts/gate0.py --affected <rev>`（`<rev>` 亦可为范围 `A..B`）。
+  只跑受影响车道 + 受影响 focused 用例；**默认行为不变**（不带它恒跑全部 6 车道）。
+- **⚠ `focused` 的内联范围（2026-09-22 定，两条血证）**：**只有 pytest 子集内联**（`tests/**` 或 `*.py`）。
+  前端 / 浏览器类（`vitest` / `e2e` / `live`）与整个 `tests/`（= `pytest-full` **本身**，子集才便宜）
+  **一律只登记、不内联**，输出里逐条注明原因。血证 ①（坐标系混用）：`focused` 路径一律**相对仓库根**，
+  而 vitest 的 cwd 是 `web/` ⇒ 把 `web/src` 原样当 filter 会 `No test files found, exiting with code 1`
+  ——**假 FAIL**，而那次改动根本没碰 `web/`。血证 ②（潮水线以下的红）：修好过滤器后测出，**同一类干净树**
+  上 `vitest run src` 的两次读数**结果不同**——一次 67 文件 1067 例中 1 例超时
+  （`web/src/components/StepDetail.window.test.tsx`，6224ms，即 B-29 已知 flake），一次 **67 文件
+  1067 例全绿** ⇒ 该红是**非确定性**的，前端红**结构上无法归因**到本次改动。
+- **期望证据**：`受影响面（--affected …）` 块 + `Gate-0 PASS/FAIL`；`neg_tier < 4` 的层会被标 **unproven**。
+- **实测（2026-09-22，最终树 `HEAD=65f8d1f0a455 / tree=3cbc12dd63f2`；`git status --porcelain` 的**已跟踪**
+  部分为空，仅剩一个**非本批**的未跟踪 `.zcodeignore`）**：
+
+  | 状态 | 改动面 | 选中车道 | 内联跑的 | 只登记不跑的 | 墙钟（Gate-0 自报） |
+  | --- | --- | --- | --- | --- | --- |
+  | A 后端 session | 1 文件（`session/approval.py`） | `coverage/diff-check/guards/pytest-full/ruff` | `diff-check`/`ruff`/`guards`/`coverage` + `tests/session` | `pytest-full` | **88.9s**（其中 `tests/session` 82.21s） |
+  | B 前端 src | 1 文件（`web/src/**`） | `build/coverage/diff-check/oxlint/tsc/vitest` | `diff-check`/`oxlint`/`tsc`/`coverage` | `web/src`（vitest）、`build` | **12.7s** |
+  | C 纯 docs | 1 文件（`review_ledger.tsv`） | `coverage/diff-check` | `diff-check`/`coverage` | — | **3.7s** |
+
+  ⚠ **四条读数的 `coverage` 车道都是红的**，这是闸门**正确工作**的形状：它从**工作树**读台账，而本批
+  自己的 10 笔提交（`d79fcba..65f8d1f`）**当时还没写进台账**（本批含代码面 ⇒ 必须走**真实审查行**、
+  不能走白名单）。⇒ **本块不含任何 `coverage` PASS 的结论**（它当时就是红的）；
+  落台账后**必须复跑一次**并把读数写进落点记录（判据：`python scripts/check_review_coverage.py` 退出 0）。
+
+  ⚠ **同一台机器在本轮整体比上一轮慢**（全量 `pytest tests` 427.75s → 560.29s；A 的内联子集
+  58.29s → 82.21s；`vitest` 18.88s → 28.33s）⇒ 上表是**最终树**上**同一轮**的读数，跨轮的绝对秒数
+  **不可混用**；「倍数」只在同轮内可比（见下）。
+
+  同树**全量** Gate-0 作对照：仅 `coverage` 红、其余 5 条 PASS，**17.5s**。
+  ⚠ A 行比全量 Gate-0 **更慢**，这是**正确**的——全量 Gate-0 **一条测试都不跑**，而 A 真的跑了
+  82.21s 的受影响子集。`--affected` 的价值**不在**"比快车道快"，而在 ① 告诉你**哪些重车道**
+  受影响（A 点名 `pytest-full`，B 点名 `vitest` + `build`）② 用**受影响子集**替掉整套
+  `pytest-full` / `vitest`。
+
+- **空改动面必须 fail-closed（2026-09-22 修后重审补的牙）**：`--affected HEAD`（此时
+  `git diff --name-only HEAD..HEAD` 恰为空）**修复前**会打印 `Gate-0 PASS：0/0 通过`——一个与真 PASS
+  **不可区分**的绿，而这是该参数的**自然用法**。现在空面**不收敛**：打印
+  「⚠ 改动面为空（该范围没有任何改动文件）⇒ **fail-closed：跑全部车道**」并**实跑 6/6**
+  （同树实测 `Gate-0 FAIL：5/6 通过，墙钟 16.8s`，仅 `coverage` 红）。
+
+- **三元组对账（票面 comment 新增的 AC「map 与 `--affected` 对同一批改动给出同一组车道」）**：
+  对上述三个改动面，**三路求值逐项相同**——① map 侧（`tests/test_verification_map.py::_mine_eval`，
+  **刻意独立的第二实现**）② summary 侧（`gate0.affected_summary()`，`--affected` 内部真正用的那个）
+  ③ CLI 侧（真跑 `python scripts/gate0.py --affected <range>` 后解析它打印的车道集合）。
+  三态 `map == summary` 与 `map == CLI` **全为 `true`**（车道集合与 focused 集合都比过）；
+  `unmapped` 三态**全为 `[]`**（没有路径落空 ⇒ 没有触发 fail-closed 退回）。
+
+- **"整条重来"的对照基线（同轮、同树；口径 = 各工具**自报**耗时，不混用进程墙钟）**：全量 Gate-0
+  **17.5s** + 全量 `pytest tests` **560.29s** + 全量 `vitest run src` **28.33s** ≈ **606.1s**
+  （还不含 ⑩ 构建 / ⑪ e2e）。⇒ A 状态用 `--affected` 只花 **88.9s**，**约 6.8× 便宜**，
+  并且它点名了唯一必须补跑的重车道（`pytest-full`）。
+  全量 `pytest tests` 的权威读数用 `PYTHONPATH=` 跑（绕开 safe-delete shim——否则跑到后期会被
+  `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 截断、**拿不到结论行**，2026-09-22 实测踩过一次）+ `--junitxml`：
+  `3103 passed, 13 skipped, 42 deselected, 13 warnings in 560.29s`，rc=0；junit 聚合
+  `tests=3116 / failures=0 / errors=0 / skipped=13`。
+  全量 `vitest run src`：`Test Files 67 passed (67)` / `Tests 1067 passed (1067)`，`Duration 28.33s`，rc=0
+  （同类干净树上此前另有过一次 1 例超时的读数 ⇒ 见本节血证 ②，「非确定性」的结论不变）。
+- **变异证明（隔离克隆 `%TEMP%\wbi_292_mut3` 里真删真改；正控 20 例全绿；每条都记「守卫 rc」+
+  「直接调 `gate0.parse_map()` 的结果」）**：删 `web/src/` 整行 ⇒ **覆盖面**红（2 例）；
+  加一条重复行（`docs-dup`）⇒ **承重**红（`test_every_row_is_load_bearing`）；
+  把 `focused_runner` 复原成血证 ① 的写法（给 `web/**` 挑 vitest）⇒ **内联策略锁**红；
+  `neg_tier` 改 9 ⇒ **阶梯值域**红。**外加本批新补的那条牙**：摘掉某行的 `coverage` ⇒
+  **`parse_map` 解析期**当场 `ValueError`（`verification.map.tsv:67 缺无条件车道：['coverage']`），
+  不必等 `--affected` 命中该面 ⇒ 守卫红（3 例）。克隆内逐字节还原后复跑 **20 passed**。
+- ⚠ **边界**（与协议 §8.8.9 **同源**，改一处必须两处同改）：只用于**失败后的增量重跑**；
+  未映射路径 ⇒ **fail-closed 退回全量**；**改动面为空 ⇒ 同样 fail-closed（不收敛成 0 条）**；
+  同时给了 `--since` 与 `--affected` ⇒ **一律以 `--affected` 的范围为准**（并先印说明）；
+  不得替代推送前全量 Gate-0，也不得替代集成前完整门禁（§4）。
+
+---
+
+### ⑮ Live Gate — 真实模型 + 生产工具的一次性工作区证据（`#307`，T2）
+
+- **命令**：`.venv/Scripts/python.exe scripts/live_gate.py run [--scenario <id>] [--inject-failure attempt:<n>] [--skip <理由>]`
+  复核：`… live_gate.py validate docs/live_gate/<目录>/evidence.json`；只探能力面：`… live_gate.py capabilities`。
+- **判据是四态，不是两态**（`decide_verdict` 是纯函数，PASS 只有一条路径）：
+
+  | 判定 | 何时 | CLI 退出码 |
+  | --- | --- | --- |
+  | `PASS` | **3/3 真实尝试全过**，且无注入、无替身 | 0（**只有它**） |
+  | `FAIL` | 任一次不过 / 尝试数不足 / 有注入或替身（含**非内置场景**）/ 凭证扫描命中 / 工作区没被真删掉 | 1 |
+  | `BLOCKED` | 缺凭证、端点全不可用、第 1 次尝试的 prepare 就不成立（含 prepare 自己抛异常）—— **不发 run** | 1 |
+  | `SKIPPED` | 操作者显式 `--skip <理由>`（不得产出 PASS） | 1 |
+
+- **证据落点**：`docs/live_gate/<UTC stamp>-<sha12>-<场景>/evidence.json` + 每次尝试的事件轨迹
+  `attempt-<n>.jsonl`（**入库**：#319 与集成前重车道引用它，所以不能只留在临时目录里）。
+  一次性工作区在系统临时目录（仓库**之外**），跑完销毁并**核实**（`sandbox.delete()` 之后仍存在
+  就清只读位强删，`deleted` 是核实结论而非"调用过删除"）。
+- **实测读数（2026-09-25，树 `HEAD=45505e6a75ae… / tree=02002825d310`）**：
+
+  | 运行 | 判定 | 读数 |
+  | --- | --- | --- |
+  | 正常 | `PASS` | 3/3 PASS（13.0s / 16.0s / 12.0s），每次 6 条断言全绿：`write`/`bash`/`git_status` 真调用、`notes.txt` 内容比对一致、无悬空 `tool/call`。`validate` **24 条 0 FAIL**（`--require-pass` 退出 0） |
+  | `--inject-failure attempt:2` | `FAIL` | 第 2 次受控失败、**第 1/3 次照跑**（R2：失败样本全留），原因写明"注入运行不得计入 Live Gate"。`validate` **19 条 0 FAIL** |
+  | 清空 `MODEL_API_KEY` / `FALLBACK_MODEL_API_KEY` | `BLOCKED` | **零 run、零尝试、无轨迹**（配置链建不起来），前置清单点名缺哪个 key。`validate` **6 条 0 FAIL** |
+
+  三次读数的 `sha`/`tree` 都指 `45505e6`（`evidence.json.sha` 与 `worktree.tracked_matches_head` 同源），
+  即"跑过门禁的树 = 证据指向的树"。**首轮读数（`f8bb91e`）仍留在库里**（三份，`validate` 也逐条过）：
+  它们是修复前那棵树的如实记录；判定语义与反篡改判据在 `45505e6` 被加严，故本票的**权威读数**是上表。
+
+- ⚠ **与 Gate-0 的次序（实测踩过）**：证据是**未跟踪的 `*.json`**，而 `docs/gate/` 之外任何未跟踪的
+  `.json` 都是 Gate-0 `worktree_divergence()` 的 `risky`（`LANE_INPUT_SUFFIXES` 含 `.json`）⇒
+  **Live Gate 跑完但证据未提交时，Gate-0 会拒绝落盘读数**（拒绝是对的：那份读数会指到一棵被
+  "未跟踪的车道输入"影响的树）。正确次序：跑 Live Gate → `git add docs/live_gate/…` 提交 → 再跑 Gate-0。
+  （Live Gate 自己的 `worktree_proof()` **排除**自己的输出目录，所以"证据已在盘上"不会让本次运行自证不干净。）
+- **落盘边界**：轨迹与 attempt 文本**落盘前**过两层处理 —— ① 凭证扫描（进程内 `SecretStr` 精确值 +
+  形状层；命中就**不落盘**并判 FAIL）② 宿主绝对路径替成 `<workspace>`（`attempts[].redactions` 记形状）。
+  ⚠ 轨迹是 JSONL，`cwd` 里的反斜杠是**转义形态**（`C:\\Users\\…`），逐字比对替换不到——两种形态都要替换，
+  且候选**跨根按长度倒序**替换（否则短根先吃掉前缀，落盘成 `<workspace>\workspace`）。这两条都是实测踩出来的。
+- **行尾说明（含一处刻意不改的边界，审查登记项）**：证据 JSONL 入库后，在 `core.autocrlf=true` 的
+  clone 上检出行尾是 CRLF，但复核用的 `read_text()` 走 Python 通用换行（CRLF→LF）⇒ `events_sha256`
+  比对**跨 clone 稳定**。⚠ 但**逐字节**审计（`sha256sum attempt-1.jsonl`、跨 clone 比工作树）在 CRLF
+  clone 上**对不上**记录值 —— 那是 `AGENTS.md` §13.1(b) 的测量陷阱，不是篡改。脚本化审计请用
+  `validate`（它按 LF 口径重算）；必须比字节时先剥 CR（`diff --strip-trailing-cr` / `tr -d '\r'`）。
+  **处置：不加 `docs/live_gate/** text eol=lf`** —— 仓库行尾策略刻意保持"只钉 `*.sh` / `*.ps1` / git hook"
+  （§3；历史上 `.gitattributes` 的扩大改动本身被判过范围越界），而复核链路已经跨行尾稳定，钉它只是
+  让"裸字节审计"这一步也成立，收益小于改公共配置的成本。若将来有人按裸 `sha256sum` 对账并对不上，
+  以本条为据（**登记项**，非新增欠账）。
+- **边界**：① 需要真实 Provider 凭证与网络 ⇒ **不是**每次推送都能跑的车道，属**集成前 / 票面验收**的重车道；
+  ② 不得用替身或 Fake 结果充当 Live Gate 读数（`#305` 明文）——机制用例的替身只落 `tmp_path`、只测判定语义；
+  ③ 它**不替代**集成前完整门禁（§4）：本车道回答"真模型 + 生产工具这条链真的通"，不回答 lint / 类型 / 前端 / e2e；
+  ④ 后续场景（#319 的五类）只需 `register_scenario` 注册，runner 与 validator 直接复用。
+
+---
+
+## 3. 本机环境（WorkBuddy 沙箱）的跑法差异
+
+| 现象 | 原因 | 正解 |
+| --- | --- | --- |
+| `npm` / `npx` 秒退，退出码非 0，日志十几字节乱码（GBK 读出来是"拒绝访问。"） | 沙箱把 `cmd.exe` 拉黑，任何 `.cmd` / `.bat` 入口都起不来 | 直接调包的 `.js` 入口：`node node_modules/<pkg>/…`（见 §2 各条） |
+| 脚本里 `dirname` / `wc` / `comm` / `grep` / `sort` / `mktemp` 全 `command not found` | bash shim 的 **PATH 里没有** coreutils（**不是不存在**） | 用 python 或 `git` 子命令。跑 `.sh` 时：把 `<PortableGit>/usr/bin` 加进 PATH，并**用全路径 bash**（`"…/PortableGit/…/bin/bash.exe" scripts/x.sh`）——直接写 `bash` 在部分调用上下文里会落到被安全策略拦下的 WSL 通道（实测 `PROGRAM BLOCKED … wsl.exe`），与脚本本身无关 |
+| 全量 pytest 后期若干 `tests/evaluation/*` "随机"失败 | safe-delete shim 的跨测试删除配额 | `./scripts/run_tests_clean.sh`（清空 `PYTHONPATH`） |
+| `os.symlink` 静默 no-op（不抛异常、不创建） | 沙箱文件保护 | 相关用例先探针再归因，别当成自己改出来的 bug |
+| 分钟级脚本被 SIGTERM、且重定向文件是空的 | 前台跑长任务 + stdout 块缓冲 | 长跑放后台跑（`run_in_background`），或先落盘再读 |
+
+`.gitattributes` 钉住 `*.sh` 的 `eol=lf` 与 `*.ps1` 的 `eol=crlf`（**不是**都 `lf`——2026-09-22 两轴审查指出此处笔误）；**无扩展名的 git hook**（`.githooks/pre-push`）
+2026-09-22 已单独加规则——否则 `core.autocrlf=true` 会把它检出成 CRLF，`exit 1\r` 这种行直接坏掉。
+
+---
+
+## 4. Gate-0 与完整门禁的边界（别把前者当后者）
+
+- Gate-0 **只覆盖机械可判项**（§2 的 ⑨①⑥④⑦⑧）。它**不覆盖**：② 后端全量测试、
+  ⑤ vitest 全量、⑩ 构建、⑪ e2e、以及**任何语义 / 规格 / 边界 / 权限**问题。
+- Gate-0 **推送前不做按路径跳过**：全量 6 车道 ≈20–40s，已满足预算；"按改动路径跳过某条车道"属于
+  放松（跨层影响难以穷举），机制上没有必要。改动面只作信息展示。
+- ⚠ **上面那条的适用范围被收紧（2026-09-22，issue #291）**：它**只**对**本节这 6 条机械车道**
+  （`diff-check` / `ruff` / `oxlint` / `tsc` / `guards` / `coverage`）成立——理由是它们耗时已被实测
+  （20–22s 热 / 36–45s 冷）、且判定是机械的。**不得**据此认为"完整门禁与 e2e 也可以按路径跳过"：
+  **不在 Gate-0 里的那几条（②③⑤⑩⑪）**是长耗时的那批（② 后端全量 pytest 是分钟级；③⑪ 本文件无耗时读数；⑤ 标注十秒级、⑩ 标注秒到十秒级，两者均未在本批实测；⑫ 真机验收属人工车道，无耗时读数），且它们的受影响面**不由人当场划集合**（那正是放松的入口），只能来自机械可复核的
+  映射（协议 **§8.8.2 INV-1 / §8.8.3 边界表 / §8.8.9**；映射**已机器化**，见 §2 ⑭）。
+- **`--affected <rev>` 的边界（issue #292 **已落地**，见 §2 ⑭）**：它**只**用于**失败后的增量重跑**，既不得替代
+  **推送前全量 Gate-0**（推送前恒跑全部 6 条），也不得替代**集成前完整门禁**（协议 §8.8.4 第 1 行）。改动面里出现**未映射路径** ⇒ **fail-closed 退回全量**；**改动面为空**（如 `--affected HEAD`）
+  ⇒ **同样 fail-closed、不收敛成 0 条**（`0/0 通过` 与真 PASS 不可区分）；同时给 `--since` 与
+  `--affected` ⇒ **一律以 `--affected` 的范围为准**（并先印说明）；`neg_tier < 4` 的层会被标 **unproven**，**依据 unproven 主张跳过任一条车道必须在台账 / 落点记录里写明**。
+- `pre-push` hook **是本地便利，不是安全边界**：`git push --no-verify` 可绕过；
+  `core.hooksPath` 是**本地配置**、不随仓库分发 ⇒ **别的 clone 没启用就等于没有**。
+  所以它取消不了两轴独立审查。**服务端 CI 自 2026-09-26 起已存在**：`.github/workflows/gate0.yml`
+  在 PR 上跑**同一份** `scripts/gate0.py`，并把 `gate0` 挂成 `main` 的**必需状态检查**
+  （`enforce_admins` 为真、无旁路主体）⇒「忘了跑」与「本地 `--no-verify`」两条路径已封死，
+  直推 `main` 会被服务端拒绝（`GH006`）。**但它仍取消不了两轴独立审查**，也**挡不住闸门自己的
+  输入**（改该工作流 / `scripts/gate0.py` / `scripts/check_review_coverage.py` / 台账的 PR，
+  其改动会被执行、且仍报出一个叫 `gate0` 的绿检查）。完整边界见该工作流头部注释。
+- **fail-closed**：任何车道"工具缺失 / 超时 / 无法执行"一律算**失败**，不算"跳过"、不算通过
+  （沿用覆盖闸门"核对不了就不放行"的口径）。
+
+---
+
+## 5. 读数纪律（协议 §7 / §8 的机械要求）
+
+1. **任何门禁读数必须能指到它跑在哪棵树上**：记 sha **与** `git rev-parse <sha>^{tree}`。
+   Gate-0 首行就打印这两项。
+2. **不跨批沿用读数**；不传递来源树不明的读数（协议 §8.7）。
+3. 例外通道：集成前先比 `HEAD^{tree}`——两 clone tree 相同即证明"跑过门禁的树 = 被集成的树"，
+   不必重复跑全量（协议 §7 第 8 条）。
+4. 失败时**只重跑失败的那条**（`--only`），不整条流水线重跑；整票级的受影响重跑用 `--affected <rev>`
+   （见 §2 ⑭），但**它标出的 `unproven` 必须一并写进读数**。
+5. 不要用"失败总数"归因：沙箱负载下非确定性，只看**失败集合差集**。

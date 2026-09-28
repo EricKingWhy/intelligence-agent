@@ -1,0 +1,1 @@
+2026-09-24	#289 初始双轴审查（Standards + Spec 独立审查者；fixed point ae65e00）：覆盖 crash-window Gate、恢复后的 UI Artifact 引用及 Unicode workspace seam。Standards 发现 1 个 P2：恢复事件契约未在 ADR-0019 固化；Spec 0 findings。后续 b01bc109 补 ADR 与幂等/顺序断言。	ae65e00..d6055cd

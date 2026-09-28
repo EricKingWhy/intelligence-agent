@@ -9,7 +9,7 @@
        - 终态 3 种 → Ledger result_json 精确合成（#29）
        - PENDING → PendingPolicy 决策（默认 skip，#29）
        - RUNNING/UNKNOWN/NEED_RECONCILE → 状态推进至 NEED_RECONCILE 后
-         交独立 ReconcileCallback 人工裁决（#30）；无 callback 安全拒绝
+         交独立 ReconcileCallback 人工裁决；无 callback 安全拒绝
     6. restore tool result / message consistency → append 合成事件
     7. rebuild Runtime Context（derive_messages 从恢复后事件重新投影）
     8. return Session，交给 AgentRuntime 继续
@@ -18,9 +18,8 @@
 - Ledger-first 顺序保证 Ledger 永远比 SessionEvent 更完整：崩溃时 Ledger 有终态但
   SessionEvent 缺配对 → 本协调器用原 tool_call_id 合成 Recovery ToolResult。
 - 先决策后写结果：确定性 reconcile 决策（读 Ledger + 投影）全部完成后再 append 事件；
-  人工裁决（ReconcileCallback）本质是交互式决策，无法预先完成——它发生在写入段内，
-  裁决失败时已写的 reconcile-required 事件只是"需要人工"这一事实的诚实记录，
-  重试恢复会重新裁决（幂等收敛，不产生伪造结果）。
+  人工裁决的锁边界、token 复核与 stale verdict 处理遵循已冻结的 T06/#242 决策，
+  详见 `docs/tickets/architecture-audit-remediation-2026-09-18.md` §0.1。
 - 并发恢复串行化：SQLite 无行级锁——用 BEGIN EXCLUSIVE 事务在【数据库级】悲观串行化，
   第二个恢复方阻塞直到第一个完成或 busy_timeout 超时。WAL 模式下读者不被阻塞，
   恢复期间经 OperationLedger 的只读查询正常进行。
@@ -47,9 +46,15 @@ import aiosqlite
 from pydantic import ValidationError
 
 from agent_harness.logging import log_event
-from agent_harness.recovery.reconcile import ReconcileCallback, ReconcileVerdict
+from agent_harness.prompt import DEFAULT_REGISTRY
+from agent_harness.recovery.reconcile import (
+    ReconcileCallback,
+    ReconcileVerdict,
+    RecoveryAdjudicationToken,
+)
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import (
+    ARTIFACT_EXTERNALIZED,
     OPERATION_RECONCILE_REQUIRED,
     SESSION_RESUMED,
     TOOL_CALL,
@@ -58,7 +63,12 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import DANGLING_TOOL_CONTENT, collect_dangling
-from agent_harness.storage import Operation, OperationLedger, OperationState
+from agent_harness.storage import (
+    Operation,
+    OperationLedger,
+    OperationState,
+    needs_reconcile,
+)
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
 
 logger = logging.getLogger("agent_harness.recovery")
@@ -145,10 +155,9 @@ class SkipPendingPolicy(PendingPolicy):
 
     def result_for(self, operation: Operation) -> ToolResult:
         return ToolResult.failure(
-            message=(
-                f"操作 '{operation.tool_name}' 在进程崩溃前尚未启动，"
-                "恢复时按策略跳过，未自动重新执行。"
-            ),
+            message=DEFAULT_REGISTRY.assemble(
+                "frame:recovery_skipped", {"tool_name": operation.tool_name},
+            ).fragment_text,
             error_code=ErrorCode.CANCELLED,
             retryable=False,
         )
@@ -173,6 +182,14 @@ class _Synthesis:
     def call_event_args(self) -> dict:
         """tool/call 事件的 args 字段：有 args 用 args，否则空字典（不变量保持）。"""
         return self.args if self.args is not None else {}
+
+
+@dataclass(frozen=True)
+class _ReconcileRequest:
+    """锁内准备、锁外等待 callback 所需的最小快照。"""
+
+    operation: Operation
+    token: RecoveryAdjudicationToken
 
 
 class RecoveryCoordinator:
@@ -214,6 +231,11 @@ class RecoveryCoordinator:
 
     async def recover(self, session_id: str) -> Session:
         """恢复一个 Session：8 步顺序执行，返回可直接交给 AgentRuntime 的 Session。"""
+        callback = self._reconcile_callback
+        reconcile_requests: list[_ReconcileRequest] = []
+
+        # 只把 durable load / deterministic synthesis / reconcile 准备放在恢复锁内。
+        # 人工 callback 是外部交互，绝不能占用跨进程恢复锁（#254）。
         async with self._recovery_lock():
             # 步骤 1：load SessionEvent（原始事件；dangling 占位留到步骤 6，
             # 避免 Phase 1 占位抢在 Ledger reconcile 之前）。
@@ -223,28 +245,19 @@ class RecoveryCoordinator:
 
             # 步骤 2-3：load Session-Sandbox mapping + ensure Sandbox started。
             # 无映射记录（纯对话 session）优雅降级为 None，不让恢复失败。
-            sandbox = None
-            if self._workspace_registry is not None and self._workspace_registry.exists(
-                session_id
-            ):
-                sandbox = self._workspace_registry.get(session_id)
-
-            session = Session(
-                session_id, self._session_store, list(events), sandbox=sandbox
-            )
+            session = self._session_from_events(session_id, events)
 
             # 步骤 4：load Operation Ledger。
             operations = await self._operation_ledger.list_for_session(session_id)
             operations_by_call_id = {op.tool_call_id: op for op in operations}
 
-            # 步骤 5（决策阶段）：对每个 dangling tool_call 决定恢复结果。
+            # 步骤 5（决策阶段）：对每个 dangling tool_call 做确定性恢复决策。
             # 确定性决策（终态 / PENDING / 占位）全部完成前不写任何事件
             # （先决策后写结果）；需人工裁决的先收集——没有 ReconcileCallback
             # 时在这里整体安全拒绝，什么都不写（#30）。
             dangling_ids, call_event_ids = collect_dangling(session.events)
             plan: list[_Synthesis] = []
             reconcile_required: list[tuple[str, Operation]] = []
-            callback = self._reconcile_callback
             for tool_call_id in sorted(dangling_ids):
                 operation = operations_by_call_id.get(tool_call_id)
                 if operation is not None and operation.state in _RECONCILE_STATES:
@@ -257,6 +270,18 @@ class RecoveryCoordinator:
                 )
                 if synthesis is not None:
                     plan.append(synthesis)
+
+            # `#315`：**非悬空**但"副作用未证"的行同样进人工裁决。它们的 tool/call 与
+            # tool/result 都齐（典型来源：MUTATING 工具超时——执行域在收尾那一刻就把行
+            # 留成 UNKNOWN 并打了"副作用未证"标记，见 `ToolExecutor._settle_state`），
+            # 所以"只看悬空调用"的旧收集面永远看不到它们；而 resume 闸门读的正是**这一份**
+            # 裁决要求（`03 §5`：对账优先于恢复；`07 §7`：write/edit 不确定 ⇒
+            # NEED_RECONCILE）。判据只在 `storage.needs_reconcile` 一处（`PENDING`
+            # 不在其中：`07 §6` 明文"能证明尚未启动 ⇒ 可按策略重执行"）。
+            for tool_call_id, operation in sorted(operations_by_call_id.items()):
+                if tool_call_id in dangling_ids or not needs_reconcile(operation):
+                    continue
+                reconcile_required.append((tool_call_id, operation))
 
             if reconcile_required and callback is None:
                 detail = ", ".join(
@@ -282,6 +307,44 @@ class RecoveryCoordinator:
                         run_id=item.run_id,
                         agent_id=item.agent_id,
                     )
+                operation = operations_by_call_id.get(item.tool_call_id)
+                recovered_result = (
+                    _try_parse_result_json(item.content, item.tool_name)
+                    if operation is not None
+                    and operation.state is OperationState.SUCCEEDED
+                    else None
+                )
+                artifact_ref = (
+                    recovered_result.artifact_ref
+                    if recovered_result is not None
+                    and recovered_result.ok
+                    else None
+                )
+                if artifact_ref and operation is not None:
+                    if operation.artifact_ref and operation.artifact_ref != artifact_ref:
+                        raise RecoveryError(
+                            "Operation Ledger artifact_ref does not match recovered ToolResult"
+                        )
+                    if not any(
+                        event.type == ARTIFACT_EXTERNALIZED
+                        and event.data.get("tool_call_id") == item.tool_call_id
+                        for event in session.events
+                    ):
+                        # Restore the artifact UI reference before tool/result per ADR-0019 D4.
+                        # The Ledger has no size/MIME fields, so do not invent them.
+                        session.append(
+                            ARTIFACT_EXTERNALIZED,
+                            {
+                                "artifact_id": artifact_ref,
+                                "session_id": session_id,
+                                "source_tool": item.tool_name,
+                                "tool_call_id": item.tool_call_id,
+                                "size": None,
+                                "mime_type": None,
+                            },
+                            run_id=item.run_id,
+                            agent_id=item.agent_id,
+                        )
                 session.append(
                     TOOL_RESULT,
                     {"tool_call_id": item.tool_call_id, "content": item.content},
@@ -291,7 +354,6 @@ class RecoveryCoordinator:
                 # PENDING 决策落地后同步推进 Ledger：session 已合成 CANCELLED
                 # 语义的 tool/result，Ledger 行却永远停在 PENDING——两边对同一
                 # tool_call 永久不一致（可观测性 + 后续 reconcile 重复触发）。
-                operation = operations_by_call_id.get(item.tool_call_id)
                 if (operation is not None
                         and operation.state is OperationState.PENDING
                         and self._operation_ledger is not None):
@@ -300,29 +362,68 @@ class RecoveryCoordinator:
                         OperationState.CANCELLED,
                         result_json=item.content,
                     )
-            # 人工裁决项（#30）：状态推进 → reconcile-required 事件 → 用户裁决 →
-            # Ledger 终态 + 合成 tool/result。裁决是交互式决策，发生在写入段内；
-            # 中途失败留下的 reconcile-required 事件是"需要人工"的诚实记录，
-            # 重试恢复会重新裁决（幂等收敛）。
+
+            # 人工裁决只推进到 NEED_RECONCILE 并记录事实；callback 在锁外等待。
             for tool_call_id, operation in reconcile_required:
-                await self._reconcile_one(
-                    session,
-                    tool_call_id,
-                    operation,
-                    needs_call_event=tool_call_id not in call_event_ids,
-                    callback=callback,
+                prepared = await self._prepare_reconcile(
+                    session, tool_call_id, operation
                 )
-            # 与 Session.resume 的事件契约对齐：恢复完成标记 session/resumed。
+                reconcile_requests.append(
+                    _ReconcileRequest(
+                        operation=prepared,
+                        token=RecoveryAdjudicationToken.from_operation(prepared),
+                    )
+                )
+
+            if not reconcile_requests:
+                # 无人工等待时，锁内完成最后的 session/resumed，保持原有单段语义。
+                session.append(SESSION_RESUMED, {})
+                session.derive_messages()
+                return session
+
+        # callback.resolve() 明确位于恢复锁外；超时、取消、异常直接传播，
+        # 不写虚假终态或 tool/result。每项裁决完成后单独重锁复核，避免把多项
+        # 人工等待重新包回一把长锁。
+        assert callback is not None
+        for request in reconcile_requests:
+            verdict = await callback.resolve(
+                request.operation, self._hint_for(request.operation.tool_name)
+            )
+            async with self._recovery_lock():
+                current = await self._operation_ledger.get(
+                    session_id, request.operation.tool_call_id
+                )
+                if current is None or not request.token.matches(current):
+                    raise RecoveryError(
+                        "stale reconcile verdict rejected: Operation changed while"
+                        f" awaiting callback (tool_call_id={request.operation.tool_call_id})"
+                    )
+                current_events = self._session_store.read_events(session_id)
+                current_session = self._session_from_events(session_id, current_events)
+                await self._commit_reconcile(
+                    current_session, current, verdict
+                )
+
+        # 重锁后重新加载 Session：另一个恢复方可能在 callback 等待期间追加了
+        # 事件；绝不拿旧内存投影继续 append，避免覆盖/重复 durable 事实。
+        async with self._recovery_lock():
+            events = self._session_store.read_events(session_id)
+            session = self._session_from_events(session_id, events)
             session.append(SESSION_RESUMED, {})
-
-            # 步骤 7：rebuild Runtime Context——从恢复后的持久事件重新投影。
-            # derive_messages 是纯函数；此处调用一次验证投影一致（不留 dangling 警告）。
             session.derive_messages()
-
-            # 步骤 8：返回 Session，交给 AgentRuntime 继续。
             return session
 
+
     # ── 内部实现 ──
+
+    def _session_from_events(self, session_id: str, events: list) -> Session:
+        """从刚读出的 durable 事件构造恢复投影（不触发任何写入）。"""
+        sandbox = None
+        if self._workspace_registry is not None and self._workspace_registry.exists(
+            session_id
+        ):
+            sandbox = self._workspace_registry.get(session_id)
+        return Session(session_id, self._session_store, list(events), sandbox=sandbox)
 
     @asynccontextmanager
     async def _recovery_lock(self) -> AsyncIterator[None]:
@@ -373,7 +474,7 @@ class RecoveryCoordinator:
         - PENDING → PendingPolicy 决策（默认 skip）；
         - Ledger 无记录 → Phase 1 占位（不留 dangling call）。
         RUNNING/UNKNOWN/NEED_RECONCILE 不进本方法——recover() 已把它们
-        分流到人工裁决路径（_reconcile_one，#30）。
+        分流到人工裁决路径（_prepare_reconcile，#30/#254）。
         """
         run_id = operation.run_id if operation else None
         agent_id = operation.agent_id if operation else None
@@ -424,13 +525,26 @@ class RecoveryCoordinator:
         if operation.result_json:
             parsed = _try_parse_result_json(operation.result_json, operation.tool_name)
             if parsed is not None:
+                if (operation.state is OperationState.SUCCEEDED and parsed.ok
+                        and operation.artifact_ref):
+                    if parsed.artifact_ref and parsed.artifact_ref != operation.artifact_ref:
+                        raise RecoveryError(
+                            "Operation Ledger artifact_ref does not match result_json"
+                        )
+                    if parsed.artifact_ref is None:
+                        parsed = parsed.model_copy(
+                            update={"artifact_ref": operation.artifact_ref},
+                        )
                 return parsed.model_dump_json()
             # 腐烂 result_json：视为"结果详情缺失"，落入下面的降级合成。
         if operation.state is OperationState.SUCCEEDED:
-            return ToolResult.success(
+            result = ToolResult.success(
                 f"操作 '{operation.tool_name}' 已确认成功（Ledger 记录），"
                 "但结果详情缺失。"
-            ).model_dump_json()
+            )
+            if operation.artifact_ref:
+                result = result.model_copy(update={"artifact_ref": operation.artifact_ref})
+            return result.model_dump_json()
         return ToolResult.failure(
             message=(
                 f"操作 '{operation.tool_name}' 终态为 {operation.state.value}"
@@ -456,54 +570,61 @@ class RecoveryCoordinator:
             return ReconcileHint()
         return tool.reconcile_hint
 
-    async def _reconcile_one(
+    async def _prepare_reconcile(
         self,
         session: Session,
         tool_call_id: str,
         operation: Operation,
-        *,
-        needs_call_event: bool,
-        callback: ReconcileCallback,
-    ) -> None:
-        """把一个需人工裁决的 Operation 推进到终态并补齐事件。
-
-        顺序（07 §4/§6 + #30 AC）：
-        1. 状态机两步推进：RUNNING → UNKNOWN → NEED_RECONCILE（Ledger 强制）；
-        2. append operation/reconcile-required（"需要人工裁决"可观察、可持久）；
-        3. ReconcileCallback 显式裁决（hint 仅建议；无 callback 不可能到达这里）；
-        4. 应用裁决：Ledger 终态 + reconcile_meta + 合成 tool/result。
-        """
+    ) -> Operation:
+        """推进到 NEED_RECONCILE 并记录人工关卡，但不等待外部 callback。"""
         if operation.state is OperationState.RUNNING:
             await self._operation_ledger.update_state(
                 operation.session_id, tool_call_id, OperationState.UNKNOWN
             )
-            await self._operation_ledger.update_state(
+            operation = await self._operation_ledger.update_state(
                 operation.session_id, tool_call_id, OperationState.NEED_RECONCILE
             )
         elif operation.state is OperationState.UNKNOWN:
-            await self._operation_ledger.update_state(
+            operation = await self._operation_ledger.update_state(
                 operation.session_id, tool_call_id, OperationState.NEED_RECONCILE
             )
+        else:
+            current = await self._operation_ledger.get(
+                operation.session_id, tool_call_id
+            )
+            if current is None:
+                raise RecoveryError(f"Operation '{tool_call_id}' does not exist")
+            operation = current
 
-        session.append(
-            OPERATION_RECONCILE_REQUIRED,
-            {
-                "tool_call_id": tool_call_id,
-                "tool_name": operation.tool_name,
-                "args_identity": operation.args_identity,
-                "state": OperationState.NEED_RECONCILE.value,
-            },
-            run_id=operation.run_id,
-            agent_id=operation.agent_id,
-        )
+        if not any(
+            event.type == OPERATION_RECONCILE_REQUIRED
+            and event.data.get("tool_call_id") == tool_call_id
+            for event in session.events
+        ):
+            session.append(
+                OPERATION_RECONCILE_REQUIRED,
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": operation.tool_name,
+                    "args_identity": operation.args_identity,
+                    "state": OperationState.NEED_RECONCILE.value,
+                },
+                run_id=operation.run_id,
+                agent_id=operation.agent_id,
+            )
+        return operation
 
-        hint = self._hint_for(operation.tool_name)
-        verdict = await callback.resolve(operation, hint)
-
+    async def _commit_reconcile(
+        self,
+        session: Session,
+        operation: Operation,
+        verdict: ReconcileVerdict,
+    ) -> None:
+        """在重获恢复锁并通过 token 校验后提交人工裁决。"""
         result, ledger_state = self._verdict_outcome(operation, verdict)
         content = result.model_dump_json()
         await self._operation_ledger.update_state(
-            operation.session_id, tool_call_id,
+            operation.session_id, operation.tool_call_id,
             ledger_state,
             result_json=content,
             reconcile_meta=json.dumps(
@@ -523,33 +644,47 @@ class RecoveryCoordinator:
         log_event(
             logging.getLogger("agent_harness.recovery"),
             "system_log",
-            f"Operation {tool_call_id} reconcile 裁决完成",
+            f"Operation {operation.tool_call_id} reconcile 裁决完成",
             component="recovery",
             outcome="reconciled",
             reconcile_verdict=verdict.value,
-            tool_call_id=tool_call_id,
+            tool_call_id=operation.tool_call_id,
             tool_name=operation.tool_name,
             session_id=operation.session_id,
             ledger_state=ledger_state.value,
         )
 
-        if needs_call_event:
+        if not any(
+            event.type == TOOL_CALL
+            and event.data.get("tool_call_id") == operation.tool_call_id
+            for event in session.events
+        ):
             session.append(
                 TOOL_CALL,
                 {
-                    "tool_call_id": tool_call_id,
+                    "tool_call_id": operation.tool_call_id,
                     "tool_name": operation.tool_name,
                     "args": _args_from_identity(operation.args_identity) or {},
                 },
                 run_id=operation.run_id,
                 agent_id=operation.agent_id,
             )
-        session.append(
-            TOOL_RESULT,
-            {"tool_call_id": tool_call_id, "content": content},
-            run_id=operation.run_id,
-            agent_id=operation.agent_id,
-        )
+        # `#315`：**只补缺的那一半**。非悬空的未证行（工具已经落过一条如实的结果，
+        # 只是那次结果说"状态未知"）不该再补第二条 `tool/result`——同一 tool_call_id
+        # 两条结果会破坏 `derive_messages` 依赖的 1:1 配对（`07 §8` 的不变量）。
+        # 那种情况下裁决的 durable 落点是 **Ledger 行本身**：状态进终态、
+        # `reconcile_meta` 记下裁决（上面那次 update_state）。
+        if not any(
+            event.type == TOOL_RESULT
+            and event.data.get("tool_call_id") == operation.tool_call_id
+            for event in session.events
+        ):
+            session.append(
+                TOOL_RESULT,
+                {"tool_call_id": operation.tool_call_id, "content": content},
+                run_id=operation.run_id,
+                agent_id=operation.agent_id,
+            )
 
     @staticmethod
     def _verdict_outcome(

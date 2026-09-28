@@ -72,7 +72,7 @@ cd web && npm run dev
 
 ## 3.1 后端 df4f7d8 硬化批前端同步（✅ 已完成消费，2026-09-05）
 
-feat/frontend 已消费 [`HANDOFF_FRONTEND_SYNC.md`](后端仓库 docs/) 全部三项：auth fail-closed 接缝（lib/auth.ts token 设置项 + apiFetch 统一注入 + 401 横幅引导）、recover 入口（三态 + projectHistory 重建）、工具结果新形状（read 续读/截断、bash cancelled、grep truncated、model/failed、memory/degraded）。前端对**旧后端完全兼容**（无 token 头时不注入、旧形状工具结果走 GenericBlock 回退）。集成验证注意：recover 幂等但每次调用会在事件流尾部追加 `session/resumed`（后端语义）；恢复合成的 tool/result 无 step_id 且 content 为纯文本（投影按 tool_call_id 配对、非 JSON content 显示为失败——真实语义"结果未知"）。409 人工裁决路径需真实高风险 UNKNOWN 操作才能触发，本地未实测 UI 呈现。
+feat/frontend 已消费 [`docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md`](后端仓库 docs/) 全部三项：auth fail-closed 接缝（lib/auth.ts token 设置项 + apiFetch 统一注入 + 401 横幅引导）、recover 入口（三态 + projectHistory 重建）、工具结果新形状（read 续读/截断、bash cancelled、grep truncated、model/failed、memory/degraded）。前端对**旧后端完全兼容**（无 token 头时不注入、旧形状工具结果走 GenericBlock 回退）。集成验证注意：recover 幂等但每次调用会在事件流尾部追加 `session/resumed`（后端语义）；恢复合成的 tool/result 无 step_id 且 content 为纯文本（投影按 tool_call_id 配对、非 JSON content 显示为失败——真实语义"结果未知"）。409 人工裁决路径需真实高风险 UNKNOWN 操作才能触发，本地未实测 UI 呈现。
 
 ## 4.1 安全响应头与认证（2026-09-05 移交记录——src/agent_harness/web/app.py 内注释引用本节）
 

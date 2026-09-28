@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -131,6 +132,7 @@ def test_gate4_cloud_ops_degrade_gracefully(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+@pytest.mark.live_services
 @pytest.mark.skipif(not _has_langfuse_keys(), reason="LANGFUSE keys 未配置（.env）")
 @pytest.mark.asyncio
 async def test_gate2_real_cloud_trace_upload_fetch_audit(tmp_path):
@@ -216,6 +218,7 @@ async def test_gate2_real_cloud_trace_upload_fetch_audit(tmp_path):
 
 
 @pytest.mark.integration
+@pytest.mark.live_services
 @pytest.mark.skipif(not _has_langfuse_keys(), reason="LANGFUSE keys 未配置（.env）")
 def test_gate5_real_seed_idempotent_and_experiment(tmp_path):
     from dotenv import load_dotenv
@@ -239,14 +242,64 @@ def test_gate5_real_seed_idempotent_and_experiment(tmp_path):
     assert second["created"] == 0, "重复 seed 不得建重复 item（幂等）"
     assert second["skipped"] >= 3
 
+    from langfuse import Langfuse
+
+    client = Langfuse(
+        public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
+        secret_key=os.environ["LANGFUSE_SECRET_KEY"],
+        base_url=os.environ.get("LANGFUSE_BASE_URL", ""),
+    )
+    item_ids_before = sorted(item.id for item in client.get_dataset("p0_core").items)
+    assert len(item_ids_before) == len(set(item_ids_before))
+
     from evaluation.experiment import run_langfuse_experiment
 
+    pass_run_name = f"phase15-gate-{uuid4().hex}"
     experiment = run_langfuse_experiment(
         "p0_core",
         public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
         base_url=os.environ.get("LANGFUSE_BASE_URL", ""),
         experiment_name="phase15-gate",
+        run_name=pass_run_name,
         session_root=tmp_path / "exp",
     )
     assert experiment["status"] == "ok"
+    assert experiment["passed"] == experiment["total"] == len(item_ids_before)
+    assert experiment["dataset_run_id"]
+
+    # Real-cloud red control: all items still traverse AgentRuntime, but the
+    # deliberately exhausted ScriptedModel makes each deterministic case fail.
+    from agent_harness.model.scripted import ScriptedModel as RuntimeScriptedModel
+
+    def failing_runtime_factory(_case):
+        registry = ToolRegistry()
+        return AgentRuntime(RuntimeScriptedModel([]), registry, ToolExecutor(registry))
+
+    control = run_langfuse_experiment(
+        "p0_core",
+        public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
+        secret_key=os.environ["LANGFUSE_SECRET_KEY"],
+        base_url=os.environ.get("LANGFUSE_BASE_URL", ""),
+        experiment_name="phase15-gate-fail-control",
+        run_name=f"phase15-gate-fail-control-{uuid4().hex}",
+        runtime_factory=failing_runtime_factory,
+        session_root=tmp_path / "exp-fail-control",
+    )
+    assert control["status"] == "failed"
+    assert control["total"] == control["failed"] == len(item_ids_before)
+    assert control["dataset_run_id"]
+    assert control["dataset_run_id"] != experiment["dataset_run_id"]
+
+    item_ids_after = sorted(item.id for item in client.get_dataset("p0_core").items)
+    assert item_ids_after == item_ids_before, "experiments must not duplicate dataset items"
+    print(
+        f"[phase15 gate5] dataset=p0_core items={len(item_ids_before)} "
+        f"duplicate_item_ids=0 repeat_seed_created={second['created']} "
+        f"repeat_seed_skipped={second['skipped']} "
+        f"pass_run_id={experiment['dataset_run_id']} "
+        f"pass={experiment['passed']}/{experiment['total']} "
+        f"failure_run_id={control['dataset_run_id']} "
+        f"failure_control={control['failed']}/{control['total']} "
+        "dataset_unchanged=true"
+    )

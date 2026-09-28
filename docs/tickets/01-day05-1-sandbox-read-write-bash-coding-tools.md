@@ -75,6 +75,7 @@ Agent 目前只能调用 `add` / `boom` 这类演示工具，无法在隔离工�
 
 ### bash 非零 exit_code 的语义（ADR-0002）
 - bash 工具的 `ToolResult.ok` 永远 `True`（除非 Sandbox 崩溃）。
+  > ⚠ **2026-09-21 更正**：**执行预算到期**（`ExecResult.timed_out`）现在返回 `ok=False / TIMEOUT`——见 `docs/adr/0002-bash-nonzero-exit-is-tool-success.md` 的「修订」节与 `docs/adr/0039-tool-executor-owns-absolute-deadline.md`。
 - 非零 exit_code 不是 Tool Runtime 异常，不进 `ErrorCode`，不触发 `ToolExecutor` 重试。
 - `exit_code / stdout / stderr / duration_ms` 在 `ToolResult.data` 里供模型读取。
 

@@ -80,6 +80,7 @@ class ReasoningChatOpenAI(ChatOpenAI):
 
 def create_chat_model(
     config: ModelConfig, *, reasoning_effort: str | None = None,
+    request_timeout: float = 300.0,
 ) -> ReasoningChatOpenAI:
     """根据配置创建 OpenAI 兼容的 ChatModel（DeepSeek/Qwen/OpenAI 通吃）。
 
@@ -89,6 +90,8 @@ def create_chat_model(
       与 memory/embeddings.py 同一原则。
     - request_timeout=300：chat 生成 legitimately 比 embedding 慢（长输出可到
       分钟级），300s 覆盖正常长生成、又把挂死调用的最坏代价从 30min 压到 5min。
+      #203：连接测试传更短的专用超时（settings.model_test_timeout_seconds，
+      默认 15s）——测试不该等 300s。
 
     reasoning_effort（RUNTIME 子批次）：会话级思考深度控制。传入的是 harness
     语义档位（`REASONING_EFFORT_WIRE` 的 key），此处翻译成 provider 线格式枚举
@@ -105,7 +108,7 @@ def create_chat_model(
         "api_key": config.get_secret_value(),
         "base_url": config.base_url,
         "temperature": config.temperature,
-        "request_timeout": 300,
+        "request_timeout": request_timeout,
         "max_retries": 0,
     }
     if reasoning_effort is not None:

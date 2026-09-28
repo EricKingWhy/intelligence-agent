@@ -221,7 +221,7 @@ class TestRuntimeToolSequence:
             AIMessage(content="finished"),
         ])
         runtime = AgentRuntime(
-            model=model, registry=registry, executor=executor, max_steps=5,
+            model=model, registry=registry, executor=executor, max_agent_turns=5,
         )
 
         frames = [e async for e in runtime.run_stream(session, "run tool")]

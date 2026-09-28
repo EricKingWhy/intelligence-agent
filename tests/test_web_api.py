@@ -202,7 +202,7 @@ def test_create_session_streams_sse(client):
                return_value=ScriptedModel(responses=[AIMessage(content="hello from stub")])):
         resp = client.post(
             "/api/sessions",
-            json={"task": "say hi", "max_steps": 2},
+            json={"task": "say hi", "budget": {"local": {"max_agent_turns": 2}}},
         )
     assert resp.status_code == 200
     assert "text/event-stream" in resp.headers.get("content-type", "")
@@ -295,7 +295,12 @@ def test_create_session_rejects_nested_workspace_name(app):
 
 
 def test_create_session_rejects_empty_task(tmp_path):
-    """task="" → 422，且不留任何 session JSONL / workspace 目录。"""
+    """task="" → 422，且不留任何 session JSONL / workspace 目录。
+
+    #204 注：task 字段本身从"必填"放宽为"可选"（空会话入口需要"只建会话
+    不启动 run"），但**空串/空白语义不变**——显式传了 task 就必须给出内容，
+    `min_length=1` 校验保留；launch=true（默认）时缺 task 也在 handler 层 422
+    （tests/session/test_launch_false.py 锁新契约）。"""
     settings = Settings(workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
@@ -304,14 +309,38 @@ def test_create_session_rejects_empty_task(tmp_path):
     _assert_rejection_left_no_trace(app)
 
 
-def test_create_session_rejects_invalid_max_steps(tmp_path):
-    """max_steps=0（非正数）和 1000（超上限 200）→ 422，且不留任何落盘痕迹。"""
+def test_create_session_rejects_missing_task_on_launch(tmp_path):
+    """#204：launch=true（默认）时缺 task → 422（既有"task 必填"契约不变，
+    只是校验点从 pydantic min_length 移到 handler 的互斥分支），不留落盘痕迹。"""
     settings = Settings(workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
-    for max_steps in (0, 1000):
-        resp = client.post("/api/sessions", json={"task": "hi", "max_steps": max_steps})
-        assert resp.status_code == 422, f"max_steps={max_steps} 应被 422 拒绝"
+    resp = client.post("/api/sessions", json={})
+    assert resp.status_code == 422
+    _assert_rejection_left_no_trace(app)
+
+
+def test_create_session_rejects_invalid_local_fuse(tmp_path):
+    """local fuse 非法值 → 422，且不留任何落盘痕迹（两道闸门各挡一类）。
+
+    - `0`：非正数——pydantic `ge=1` 挡在形状层（领域层还有一层 `_positive`）；
+    - `1000`：越过 Deployment ceiling（默认 500，`Settings.local_max_agent_turns`）——
+      领域层 `resolve_local_fuse` 挡下（#308 / ADR-0044 D1：下层只能收窄）。
+
+    旧行为是 pydantic `le=200` 挡住 1000；那个与策略无关的硬数字已删（它既让"200 以内
+    随便传"看起来合法，又会挡住策略允许的 500）。逐类语义与投影见
+    `tests/web/test_budget_local_fuse_api.py`；退役 alias `max_steps` 的未知字段
+    422 也在那个文件（#320：`extra="forbid"`）。
+    """
+    settings = Settings(workspace_dir=str(tmp_path))
+    app = create_app(settings, enable_cors=False)
+    client = TestClient(app)
+    for turns in (0, 1000):
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"local": {"max_agent_turns": turns}}},
+        )
+        assert resp.status_code == 422, f"local fuse={turns} 应被 422 拒绝"
     _assert_rejection_left_no_trace(app)
 
 
@@ -334,21 +363,24 @@ async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypat
     close_calls: list[str] = []
 
     class _StubMemory:
-        async def close(self) -> None:
+        async def aclose(self) -> None:
             close_calls.append("closed")
 
     from agent_harness.capability.wiring import CapabilityWiring
 
     class _StubWiring(CapabilityWiring):
-        """真 dataclass 子类：aclose 契约（memory + lifecycle 隔离关闭）生效。"""
+        """真 dataclass 子类：aclose 关闭登记的 V2 memory 生命周期资源。"""
 
         def __init__(self, memory):
-            super().__init__(memory=memory, lifecycle=[])
+            super().__init__(memory_v2=memory, lifecycle=[memory])
 
     wire_started = asyncio.Event()
     release_wire = asyncio.Event()
 
-    async def slow_wire(registry, config, settings=None):
+    async def slow_wire(
+        registry, config, *, settings=None, sessions=None, workspace_index=None,
+    ):
+        assert workspace_index is state.workspace_index
         wire_started.set()
         await release_wire.wait()  # 模拟慢装配（真实场景是连 Milvus / embedding）
         return _StubWiring(_StubMemory())
@@ -451,7 +483,7 @@ def test_create_session_sse_emits_run_failed_on_model_error(client):
     # 空剧本 → 首次模型调用即抛 RuntimeError
     with patch("agent_harness.assembly.create_chat_model",
                return_value=ScriptedModel(responses=[])):
-        resp = client.post("/api/sessions", json={"task": "boom", "max_steps": 2})
+        resp = client.post("/api/sessions", json={"task": "boom", "budget": {"local": {"max_agent_turns": 2}}})
     assert resp.status_code == 200
     assert "text/event-stream" in resp.headers.get("content-type", "")
     frames = [line[len("data:"):].strip() for line in resp.text.splitlines() if line.startswith("data:")]
@@ -495,8 +527,9 @@ class _DisconnectingASGI:
     receive/send 参数按 ASGI 签名保留但弃用——替身内部自产自销这两个通道。
     """
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, budget_s: float = 5.0) -> None:
         self._app = app
+        self._budget_s = budget_s
 
     async def __call__(self, scope: dict) -> None:
         request_sent = asyncio.Event()
@@ -520,14 +553,23 @@ class _DisconnectingASGI:
 
         app_task = asyncio.create_task(self._app(scope, downstream_receive, upstream_send))
         try:
-            await asyncio.wait_for(app_task, timeout=5.0)
+            await asyncio.wait_for(app_task, timeout=self._budget_s)
         except TimeoutError:
             app_task.cancel()
             with contextlib.suppress(BaseException):
                 await app_task
             raise AssertionError(
-                "app 未在 5s 内响应 disconnect——EventSourceResponse 没有正确取消 producer"
+                f"app 未在 {self._budget_s:g}s 内响应 disconnect——"
+                "EventSourceResponse 没有正确取消 producer"
             )
+
+
+class _ImmediateRuntime:
+    """预热用替身：立刻结束，只为把进程一次性冷启动成本在测量窗外付掉。"""
+
+    async def run_stream(self, session: Any, task: str,
+                         cancel_reason_supplier=None) -> AsyncIterator[AgentEvent]:
+        yield AgentEvent(type=RUN_STARTED)
 
 
 @pytest.mark.asyncio
@@ -559,16 +601,24 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
 
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/sessions",
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
+        "query_string": b"",
+    }
+
+    # 预热线：下面 5s 预算衡量的是「断连后 app 多快返回」，不该把**进程一次性
+    # 冷启动**算进去——能力装配是惰性的，首个请求才 import 记忆能力（langmem 等）
+    # 并建 wiring。实测冷 6.2s / 同进程第二次 0.009s，于是同一 commit 会随机器
+    # 磁盘缓存冷热时绿时红。这里用宽预算把一次性成本付掉，测量请求才谈得上 5s 锐度。
+    with patch("agent_harness.session.service.build_runtime", return_value=_ImmediateRuntime()):
+        await _DisconnectingASGI(app, budget_s=60.0)(scope)
+
     hanging = HangingRuntime()
     with patch("agent_harness.session.service.build_runtime", return_value=hanging):
         transport = _DisconnectingASGI(app)
-        scope = {
-            "type": "http",
-            "method": "POST",
-            "path": "/api/sessions",
-            "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
-            "query_string": b"",
-        }
         await transport(scope)
 
     # 断言 1（D-A 反转核心）：断连后 run task 仍在途——SSE generator 被取消，
@@ -658,7 +708,7 @@ def test_build_runtime_wires_recovery_stores(tmp_path):
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=state.workspace_registry,
             session_id="sess-wiring", workspace=workspace,
-            max_steps=10, auto_approve=True,
+            max_agent_turns=10, auto_approve=True,
         ))
     # 映射持久化：恢复时可还原 sandbox（web session 不再是无映射孤儿）
     assert state.workspace_registry.exists("sess-wiring")

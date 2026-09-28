@@ -26,6 +26,14 @@ RUN_FAILED = "run/failed"
 # 信封带 run_id / step_id；data 只放 interrupted_seq + reason="process_restart"
 # （前端按 run 归组、显示"上次运行在第 N 步中断"）。
 RUN_INTERRUPTED = "run/interrupted"
+# `#312` T4：长任务暂停/恢复（**持久化、非终态**）。语义与字段权威是 `03 §3.4`
+# （契约冻结于 ADR-0044 D3）；枚举条目由本文件生成（scripts/gen_event_vocabulary.py）。
+#   * run/paused  ：命中预算/deadline/stuck 时落**一条**；停止活动执行，但**不**关闭
+#                   逻辑 run_id——所以它**不在** RUN_TERMINAL_TYPES 里。
+#   * run/resumed ：以**同一 run_id** 接回（absolute ceiling + expected_version，CAS），
+#                   不重置任何 counter。
+RUN_PAUSED = "run/paused"
+RUN_RESUMED = "run/resumed"
 
 #: run 终态词汇（出现任一即该 run 已收口）——单一事实源，fork 边界校验、
 #: 中断检测、replay 等所有「这个 run 结束了吗」的判断都引用它，避免各写一份。
@@ -37,6 +45,12 @@ MODEL_STARTED = "model/started"
 MODEL_DELTA = "model/delta"
 MODEL_COMPLETED = "model/completed"
 MODEL_FAILED = "model/failed"
+# `#313` T5：**每一次实际 Provider 请求**恰一条的账目记录（`02 §5.1` 的唯一计数点）。
+# 与 model/completed 的分工：后者是「被接纳进 loop 的模型决策」的 durable 记录
+# （agent_turns 的计数点），本事件是「真的发出去过的请求」（model_requests 的计数点）
+# ——primary / fallback / closeout 各记一条，被拒绝或传输失败的请求也**在**其中
+# （它们不增 agent_turns，但确实发生过）。usage / cost_usd 只在该次响应自报时落键。
+MODEL_REQUEST = "model/request"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
@@ -48,8 +62,22 @@ ARTIFACT_CREATED = "artifact/created"
 ARTIFACT_EXTERNALIZED = "artifact/externalized"
 CONTEXT_COMPACTED = "context/compacted"
 MEMORY_DEGRADED = "memory/degraded"
+# #298 / MEM-V2-2（PRD §6.5）：一次**已提交**的记忆变更。只带计数、memory id、
+# action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
+# （不变量 #22）。NO_MEMORY 与"全部 NOOP"不发这个事件：安静成功不能装成"写过了"（AC2）。
+MEMORY_UPDATED = "memory/updated"
+# MEM-V2-3 recall explanation carries redacted IDs and ranking metadata, never content or evidence.
+MEMORY_RECALLED = "memory/recalled"
 # ── + Phase 12 Reliability 信号（同错熔断 + 模型 fallback，ADR-0014） ──
 TOOL_FAILURE_GUARD = "tool/failure-guard"
+# `#317` T9：多模式 stuck 检测的结构化 guard 事件（`02 §5.3`「阈值首达 ⇒ 发一条结构化
+# guard 事件」；语义与规则权威是 ADR-0048 D2/D5）。
+#   * level="replan"：②–⑤ 模式首达阈值 ⇒ 恰好一次纠正性 replan（① 沿用 tool/failure-guard
+#     的 soft 事件，那是 ADR-0014 冻结的形状）；
+#   * level="paused"：任何模式再达阈值（2T）且无相关进展 ⇒ 这一次落 run/paused(reason=stuck)。
+# data：level / pattern / count / threshold / replan_count（+ 可选的 tool_name / fingerprint）。
+# **指纹只存截断摘要**（ADR-0048 D3）：凭证值不进指纹、不进持久化。
+GUARD_STUCK = "guard/stuck"
 MODEL_FALLBACK = "model/fallback"
 # ── + Phase 13 Multi-Agent（delegation 白盒事件，ADR-0015 决策 8） ──
 AGENT_DELEGATION_STARTED = "agent/delegation-started"
@@ -74,7 +102,7 @@ TEXT_DELTA = "text/delta"
 # ── Phase Multiturn T4（#134）：dsh 4-event compaction bracket ──────────
 # 压缩从单个 CONTEXT_COMPACTED 升级为 replay 确定性 bracket：
 #   COMPACTION_START (source_seq_start, source_seq_end)
-#   → CONTEXT_COMPACTED (six_section summary + source 区间)
+#   → CONTEXT_COMPACTED (validated summary + source 区间)
 #   → USER_MESSAGE(replace) — 摘要替代被压缩段
 #   → COMPACTION_END (bracket_id)
 # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
@@ -90,10 +118,27 @@ QUEUE_CANCELLED = "queue/cancelled"
 STEER_REQUESTED = "steer/requested"
 STEER_APPLIED = "steer/applied"
 
+# ── ADR-0030（#196）：在途 run 输入通道的**消费侧**事件 ────────────────────
+# 上面四个事件描述"请求已登记"，下面两个描述"请求已被处理/已被取代"——补齐消费侧
+# 的可对账事实（不变量 #4：事件是运行事实，不是诊断日志）：
+#   * queue/consumed    : {queue_id, run_id} 某排队项已被消费成一次 run。
+#     重启重建时需要它区分"还没投递"与"早就投过了"（只有 message/queued 是分不清的）。
+#   * message/superseded: {superseded_seq, carrier} seq 为 superseded_seq 的
+#     user/message 及其**整轮**被取代（编辑语义）。只影响投影派生（不变量 #7：
+#     完整保存 ≠ 完整注入），从不改写历史事件（不变量 #3：append-only）。
+QUEUE_CONSUMED = "queue/consumed"
+MESSAGE_SUPERSEDED = "message/superseded"
+
 # ── Phase Multiturn T7（#137）：同 session 内模型切换 ────────────────────
 # 切换是会话事实（durable）：后续 run 从事件流派生"当前模型"，不依赖创建时
 # 锁定的值。data: from_provider / from_model_id / to_provider / to_model_id。
 MODEL_CHANGED = "model/changed"
+
+# ── F18-A（#282）：同 session 内改权限档 ──────────────────────────────────
+# 权限档与 auto_approve 从「创建时定、之后不可变」改为**会话内可变**：改档同样是
+# 会话事实（durable），下一轮 run 从事件流派生"当下生效的档"，不依赖创建时的值。
+# data: permission_mode / auto_approve（与 session/started 的同名键同义）。
+PERMISSION_CHANGED = "permission/changed"
 
 # Durable event vocabulary — these are the ONLY types that may appear in the
 # append-only SessionEvent log (via Session.append). Anything in STREAM_ONLY_TYPES
@@ -111,9 +156,14 @@ EVENT_TYPES: frozenset[str] = frozenset(
         RUN_COMPLETED,
         RUN_FAILED,
         RUN_INTERRUPTED,
+        # #312 T4：暂停/恢复生命周期（durable 非终态；RUN_TERMINAL_TYPES 不含它们）
+        RUN_PAUSED,
+        RUN_RESUMED,
         USER_MESSAGE,
         MODEL_COMPLETED,
         MODEL_FAILED,
+        # #313 T5：每次实际 Provider 请求的账目记录（model_requests 的唯一计数点）
+        MODEL_REQUEST,
         TOOL_CALL,
         TOOL_RESULT,
         TOOL_OUTPUT_DELTA,
@@ -123,7 +173,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,
         MEMORY_DEGRADED,
+        MEMORY_UPDATED,
+        MEMORY_RECALLED,
         TOOL_FAILURE_GUARD,
+        # #317 T9：多模式 stuck 检测的 replan / paused 结构化 guard 事件
+        GUARD_STUCK,
         MODEL_FALLBACK,
         AGENT_DELEGATION_STARTED,
         AGENT_DELEGATION_FINISHED,
@@ -138,11 +192,16 @@ EVENT_TYPES: frozenset[str] = frozenset(
         QUEUE_CANCELLED,
         STEER_REQUESTED,
         STEER_APPLIED,
+        # ADR-0030 (#196)：输入通道消费侧——已消费 / 已被取代
+        QUEUE_CONSUMED,
+        MESSAGE_SUPERSEDED,
         # Phase Multiturn T4 (#134)：dsh 4-event compaction bracket
         COMPACTION_START,
         COMPACTION_END,
         # Phase Multiturn T7 (#137)：同 session 内模型切换
         MODEL_CHANGED,
+        # F18-A (#282)：同 session 内改权限档（permission_mode + auto_approve）
+        PERMISSION_CHANGED,
     }
 )
 

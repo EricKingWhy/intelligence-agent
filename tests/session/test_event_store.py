@@ -49,6 +49,9 @@ class TestSessionEventDTO:
             "run/completed",
             "run/failed",
             "run/interrupted",
+            # #312 T4：暂停/恢复是 durable 生命周期事实（非终态暂停 + 同一 run 接回）
+            "run/paused",
+            "run/resumed",
             "user/message",
             "text/delta",
             "model/completed",
@@ -81,6 +84,26 @@ class TestSessionEventDTO:
             "compaction/end",
             # Phase Multiturn T7 (#137)：同 session 内模型切换
             "model/changed",
+            # ADR-0030 (#196)：在途输入通道的消费侧——已消费 / 已被取代
+            "queue/consumed",
+            "message/superseded",
+            # F18-A (#282)：同 session 内改权限档
+            "permission/changed",
+            # MEM-V2-2 (#298)：一次**已提交**的记忆变更。只带计数与 id、
+            # 不带内容（事件流不是第二份记忆真相，不变量 #22）；与
+            # memory/degraded 并列但语义不同——那条是降级信号，这条是成功写入。
+            "memory/updated",
+            # MEM-V2-3 (#299)：redacted explanation of each automatic recall.
+            "memory/recalled",
+            # #313 T5：**每一次实际 Provider 请求**恰一条（primary / fallback /
+            # closeout；被拒绝或传输失败的请求也在计数内）。它是 `02 §5.1` 里
+            # `model_requests` / `total_tokens` / `cost_usd` 三个 counter 的**唯一**
+            # 计数点——`model/completed` 只数被接纳进 loop 的决策（= agent_turns）。
+            "model/request",
+            # #317 T9：五模式 stuck 检测的结构化信号（level=replan 恰一次 /
+            # level=paused 收口）。① 的 replan 复用既有 tool/failure-guard 形状，
+            # 所以这一条只在 ②–⑤ 与所有暂停上出现（ADR-0048 D2/D5）。
+            "guard/stuck",
         }
         assert EVENT_TYPES == expected
 

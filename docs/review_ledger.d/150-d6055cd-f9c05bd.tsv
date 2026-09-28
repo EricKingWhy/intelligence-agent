@@ -1,0 +1,1 @@
+2026-09-24	#290 初始双轴审查（Standards + Spec 独立审查者；fixed point d6055cd）：Standards 0 findings；Spec 发现 1 个 P2，重复副作用指标只统计事件，未证明 D8 所需的持久 Ledger 终态证据。后续修复以 Ledger 与恢复事件共同计量并 fail closed。	d6055cd..f9c05bd

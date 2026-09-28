@@ -10,7 +10,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   AGENT_PROFILES,
-  CONTEXT_PROVIDERS,
   MODELS,
   REASONING_EFFORTS,
   fulfillSse,
@@ -43,7 +42,7 @@ test('续聊：第二条消息走 /messages 端点而非新建会话', async ({ 
   let firstPostHit = false;
   let messagesPostHit = false;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => {
@@ -71,14 +70,13 @@ test('续聊：第二条消息走 /messages 端点而非新建会话', async ({ 
 test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 /messages payload', async ({ page }) => {
   let messagesBody: string | null = null;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     models: MODELS,
     agentProfiles: AGENT_PROFILES,
     reasoningEfforts: REASONING_EFFORTS,
-    // 目录非空但用户不选 → 断言 context_providers 不发键（有值才带）
-    contextProviders: CONTEXT_PROVIDERS,
+    // #201：UI 已无 context_providers 选择入口（多选控件删除）→ 断言该键不发
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
     onMessagesPost: (route) => {
       messagesBody = route.request().postData() ?? '';
@@ -91,9 +89,10 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
 
   // 选模型：目录第一行（catalog 里 default: true 的项）
   await pickFirstModel(page);
-  // Agent Profile → coding（第二项）；Reasoning Effort → deep（第三项）
-  await pickControl(page, 'Agent Profile', 1, 'Coding');
-  await pickControl(page, 'Reasoning Effort', 2, 'Deep');
+  // Agent 档位 → coding（第二项；下压 2 次，首项是「默认（未选）」）
+  // 推理深度 → deep（第三项；下压 3 次）
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
 
   // 续聊发第二条
   await submitTask(page, '第二条消息');
@@ -104,53 +103,21 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
   expect(body.model).toBe(MODELS[0].name);
   expect(body.agent_profile).toBe('coding');
   expect(body.reasoning_effort).toBe('deep');
-  // 未选 context_providers → 不发键（有值才带，与 create 分支同模式）
+  // #201：UI 已无该键的入口 → 必然不发（后端默认全集）；契约面由 web/src/lib/api.test.ts 锁
   expect(body.context_providers).toBeUndefined();
   // /messages 的 amend 契约不含 permission_mode
   expect(body.permission_mode).toBeUndefined();
 });
 
-test('续聊 amend 透传：所选 context_providers 进 /messages payload', async ({ page }) => {
-  let messagesBody: string | null = null;
-
-  routeApi(page, {
-    sessions: [],
-    events: [],
-    contextProviders: CONTEXT_PROVIDERS,
-    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
-    onMessagesPost: (route) => {
-      messagesBody = route.request().postData() ?? '';
-      return fulfillSse(route, SECOND_FRAMES);
-    },
-  });
-
-  await page.goto('/');
-  await openIdleSession(page);
-
-  // 多选控件：Enter 勾选第一项（memory）——浮层不关闭，Esc 收起
-  const ctxTrigger = page.locator('.composer-control[aria-label="Context Providers"]');
-  await ctxTrigger.focus();
-  await page.keyboard.press('Enter');
-  // 浮层已开用 listbox 判定（2 条短目录 → 搜索框隐藏 → combobox 不可见，F-DEFER-1）
-  const listbox = page.locator('[role="listbox"]:visible').last();
-  await expect(listbox).toBeVisible();
-  // 焦点必须显式落到 listbox——打开后 activeElement 是 popover 容器，Enter 不会选中
-  await listbox.focus();
-  await page.keyboard.press('Enter');
-  await expect(ctxTrigger).toContainText('Context · 1');
-  await page.keyboard.press('Escape');
-
-  await submitTask(page, '第二条消息');
-  await expect.poll(() => messagesBody).not.toBeNull();
-
-  // 选中的 provider 确实经 App → useSession → api 到达请求体（string[] 形状）
-  expect(JSON.parse(messagesBody!).context_providers).toEqual(['memory']);
-});
+/* #201 删除：「所选 context_providers 进 /messages payload」这条 e2e 随多选控件一并下线。
+ * 它唯一独有的覆盖是「UI 勾选 → App → useSession → api」这条链路，而该入口已不存在；
+ * 契约面（`context_providers: string[]` 发键 / 空数组不发键）仍由 web/src/lib/api.test.ts
+ * 的五条用例锁住，程序化调用路径未削弱。 */
 
 test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend 照发', async ({ page }) => {
   let messagesBody: string | null = null;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     models: MODELS,
@@ -181,7 +148,7 @@ test('续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend �
 });
 
 test('续聊 422：提示「续聊参数无效」而非「未知模型」（handoff §5 P2）', async ({ page }) => {
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
@@ -202,4 +169,32 @@ test('续聊 422：提示「续聊参数无效」而非「未知模型」（hand
   const err = page.locator('.app-error');
   await expect(err).toContainText('续聊参数无效');
   await expect(err).not.toContainText('模型不可用');
+});
+
+test('续聊 404：会话已被删除 → 中文说明并指向另选会话，不泄露 HTTP 状态码', async ({ page }) => {
+  /* 独立复审 P2-1：会话在别处被删（另一个标签页 / CLI / 硬删）时，追问会落到
+   * `/messages` 的 404 分支。修复前用户看到的是 `续聊失败：Send failed: 404`
+   * ——英文 + 裸状态码，既没说他能做什么，也不像产品文案。
+   * 这里锁的是**文案是给人看的**：说明会话没了、给出下一步，且不出现状态码。 */
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'session not found' }),
+      }),
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+  await submitTask(page, '第二条消息');
+
+  const err = page.locator('.app-error');
+  await expect(err).toContainText('续聊失败');
+  await expect(err).toContainText('会话已不存在');
+  await expect(err).not.toContainText('Send failed');
+  await expect(err).not.toContainText('404');
 });

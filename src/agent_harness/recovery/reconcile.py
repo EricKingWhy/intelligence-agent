@@ -11,11 +11,50 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 
-from agent_harness.storage import Operation
+from agent_harness.storage import Operation, OperationState
 from agent_harness.tooling import ReconcileHint
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryAdjudicationToken:
+    """不可变的人工裁决快照：复合操作身份 + 状态指纹。
+
+    token 只携带重锁复核所需的最小事实；args/result 等可能含敏感或大 payload
+    的字段不进入 token。匹配依赖 Ledger 当前单调状态机，不是持久化 revision；
+    #254 在锁外等待后使用 ``matches`` 拒绝 stale verdict。
+    """
+
+    session_id: str
+    operation_id: str
+    state: OperationState
+    state_fingerprint: str
+
+    @classmethod
+    def from_operation(cls, operation: Operation) -> RecoveryAdjudicationToken:
+        """从当前 Operation 快照构造确定性的裁决 token。"""
+        return cls(
+            session_id=operation.session_id,
+            operation_id=operation.operation_id,
+            state=operation.state,
+            state_fingerprint=cls._fingerprint(operation.state),
+        )
+
+    def matches(self, operation: Operation) -> bool:
+        """判断 Operation 是否仍是生成本 token 时的同一状态快照。"""
+        return self == type(self).from_operation(operation)
+
+    @staticmethod
+    def _fingerprint(state: OperationState) -> str:
+        canonical_state = json.dumps(
+            state.value, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(canonical_state).hexdigest()
 
 
 class ReconcileVerdict(str, Enum):

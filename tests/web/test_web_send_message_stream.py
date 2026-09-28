@@ -114,7 +114,7 @@ async def test_send_message_launched_sse_serializes_without_crash(tmp_path, monk
         # 第二轮：续聊 → launched → SSE 直驱新 run → 必须能消费完整流
         follow = await _collect_stream(
             port, "POST", f"/api/sessions/{session_id}/messages",
-            {"content": "继续", "mode": "queue", "max_steps": 10},
+            {"content": "继续", "mode": "queue", "budget": {"local": {"max_agent_turns": 10}}},
             stop_types={"run/completed", "run/failed"})
         assert follow, "续聊 launched 必须收到 SSE 帧（修复前空流/崩溃=红灯）"
         # 每帧都必须能解析为 {type, data, session_id} 形状 → 序列化成功

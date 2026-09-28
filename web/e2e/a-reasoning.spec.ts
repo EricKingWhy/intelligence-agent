@@ -17,7 +17,7 @@ test('reasoning 流：思考块聚合、完成后展开可见、最终文本呈�
     { type: 'run/completed', data: {}, seq: 9, session_id: SID, run_id: RUN, time: T },
   ];
   // events fixture：终态后 viewing 迁移重读历史（#22 对账），fixture 提供同一真相
-  routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
+  await routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
 
   await page.goto('/');
   await submitTask(page, '思考一下 1+1');

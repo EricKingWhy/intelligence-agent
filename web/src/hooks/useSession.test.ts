@@ -10,7 +10,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, SessionMode } from '../types';
-import { createCommitCoalescer, decideCancel, decideStreamEnd, isSeqGap, isUnknownModelError, MAX_RECONNECT_ATTEMPTS, parseTruncated, reconnectDelayMs, shouldApplyRecoverResult, shouldApplyStreamFrame, UNKNOWN_MODEL_ERROR_TEXT } from './useSession';
+import { CONTINUE_PARAMS_ERROR_TEXT, createCommitCoalescer, decideCancel, decideFollowUpOutcome, decideStreamEnd, EARLY_RESPONSE_WINDOW_MS, isSeqGap, isUnknownModelError, MAX_RECONNECT_ATTEMPTS, parseTruncated, QUEUE_ITEM_GONE_ERROR_TEXT, raceEarlyResponse, reconnectDelayMs, SESSION_GONE_ERROR_TEXT, shouldApplyRecoverResult, shouldApplyStreamFrame, UNKNOWN_MODEL_ERROR_TEXT } from './useSession';
 
 const ev = (type: string, session_id: string | null): AgentEvent => ({
   type,
@@ -146,10 +146,17 @@ describe('shouldShowHistoryLoading — 迁移到 viewing 时是否显示加载�
   const conv = (session_id: string) => ({
     session_id, turns: [], active_step_id: null, run_status: 'completed' as const,
     run_cancelled: false, compactions: [], reconcile_queue: [], pending_approvals: [],
+    approval_decisions: [], permission_policy: null, session_permission_mode: null,
     events: [], unknown_events: [], model: null, usage_total: null, cost_usd: null,
+    // N2（#271）：新增必填字段（本夹具是 ConversationState 的字面量构造点，编译器指出的）。
+    eventsVersion: 0,
     trace_id: null, trace_url: null, model_fallback: null, run_id: null,
-    run_interrupted: null, turn_index: null,
+    run_interrupted: null, run_failure: null, turn_index: null,
+    run_paused: null,
+    requested_model: null,
+    model_run_id: null,
     seenSeqs: new Set<number>(),
+    undelivered: [],
   });
 
   it('同一会话（live 流刚产出完整真相）：后台静默重读，不显示占位符', () => {
@@ -290,5 +297,80 @@ describe('isUnknownModelError — 422 具名判定（#103，消魔法子串）',
     expect(isUnknownModelError('加载会话列表失败：422')).toBe(false);
     expect(isUnknownModelError(null)).toBe(false);
     expect(isUnknownModelError(undefined)).toBe(false);
+  });
+});
+
+describe('raceEarlyResponse — 攒包判别（交付层攒响应时区分「立即失败」与「正常流式」）', () => {
+  it('窗口内落定 → 返回该响应（422 / 短 JSON 确认走老语义）', async () => {
+    const res = new Response('{}', { status: 422 });
+    expect(await raceEarlyResponse(Promise.resolve(res), 50)).toBe(res);
+  });
+
+  it('窗外仍未落定 → null（判定为正常流式，调用方改走 WS）', async () => {
+    const never = new Promise<Response>(() => {});
+    expect(await raceEarlyResponse(never, 20)).toBeNull();
+  });
+
+  it('默认窗口即 EARLY_RESPONSE_WINDOW_MS 常量（不散落魔法数）', () => {
+    expect(EARLY_RESPONSE_WINDOW_MS).toBe(1200);
+  });
+
+  it('窗口内 reject → 原样抛出，不被吞成 null（否则真实失败会被当成功）', async () => {
+    const rejected = Promise.reject(new Error('401'));
+    await expect(raceEarlyResponse(rejected, 50)).rejects.toThrow('401');
+  });
+});
+
+describe('decideFollowUpOutcome — /messages 结局的单一分派表（#221）', () => {
+  const base = {
+    status: 200, hasBody: true, contentType: 'application/json',
+    mode: 'queue', detail: '', hasQueueId: false,
+  } as const;
+
+  it('2xx + 事件流 → 接流；2xx + JSON → 收据（queued/steered 不接流）', () => {
+    expect(decideFollowUpOutcome({ ...base, contentType: 'text/event-stream' })).toEqual({ kind: 'stream' });
+    expect(decideFollowUpOutcome(base)).toEqual({ kind: 'ack' });
+  });
+
+  it('2xx 但没有 body → 不是可消费的回执', () => {
+    expect(decideFollowUpOutcome({ ...base, hasBody: false })).toEqual({ kind: 'fail', text: 'Send failed: 200' });
+  });
+
+  it('409 + steer 打空标记 → 改投 queue（两处判别共用同一个契约串）', () => {
+    expect(decideFollowUpOutcome({
+      ...base, status: 409, mode: 'steer',
+      detail: "steer requires an active run; use mode='queue' to enqueue",
+    })).toEqual({ kind: 'retry-queue' });
+  });
+
+  it('409 却没有该标记 → 人工裁决支：原样转述后端 detail（不代后端编话）', () => {
+    expect(decideFollowUpOutcome({
+      ...base, status: 409, mode: 'steer', detail: '存在需人工裁决的高风险操作：tool=bash call_id=c1',
+    })).toEqual({ kind: 'fail', text: '存在需人工裁决的高风险操作：tool=bash call_id=c1' });
+    // detail 缺失时才退回泛化文案
+    expect(decideFollowUpOutcome({ ...base, status: 409 })).toEqual({
+      kind: 'fail', text: '存在需要人工裁决的高风险操作',
+    });
+  });
+
+  it('queue 模式的 409 永不回退（回退只属于 steer 打空那一支）', () => {
+    expect(decideFollowUpOutcome({
+      ...base, status: 409, mode: 'queue',
+      detail: "steer requires an active run; use mode='queue' to enqueue",
+    })).toMatchObject({ kind: 'fail' });
+  });
+
+  it('404 分两个来源：带 queue_id = 排队项没了，否则 = 会话没了', () => {
+    expect(decideFollowUpOutcome({ ...base, status: 404 }))
+      .toEqual({ kind: 'fail', text: SESSION_GONE_ERROR_TEXT });
+    expect(decideFollowUpOutcome({ ...base, status: 404, hasQueueId: true }))
+      .toEqual({ kind: 'fail', text: QUEUE_ITEM_GONE_ERROR_TEXT });
+  });
+
+  it('422 与其余非 2xx 各有稳定文案（窗内窗外同一条）', () => {
+    expect(decideFollowUpOutcome({ ...base, status: 422 }))
+      .toEqual({ kind: 'fail', text: CONTINUE_PARAMS_ERROR_TEXT });
+    expect(decideFollowUpOutcome({ ...base, status: 500 }))
+      .toEqual({ kind: 'fail', text: 'Send failed: 500' });
   });
 });

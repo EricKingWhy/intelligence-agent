@@ -16,7 +16,8 @@ import logging
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from langchain_core.messages import AnyMessage
@@ -24,8 +25,11 @@ from langchain_core.messages import AnyMessage
 from agent_harness.sandbox.base import Sandbox
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agent_harness.sandbox.registry import WorkspaceRegistry
 
+from agent_harness.session.cwd import cwd_event_data
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
     derive_messages,
@@ -144,6 +148,7 @@ class Session:
         session_id: str | None = None,
         workspace_registry: WorkspaceRegistry | None = None,
         started_data: dict | None = None,
+        cwd: str | Path | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
@@ -154,17 +159,29 @@ class Session:
         started_data（T7 #137，加法字段）：会话级初始配置写进 session/started——
         目前用于记录创建时选定的模型（provider / model_id），使"当前模型"可从
         事件流派生。
+        cwd（WS-1 #151，加法字段）：会话侧工作目录锚，**由创建者赋予**（不由
+        WorkspaceRegistry 反向灌给会话）。经 `canonical_workspace_path` 规范化后
+        写进 session/started，此后不可变；None = 不写该字段（历史遗留语义）。
+        `started_data` 里若夹带 `cwd` 键会被丢弃并记一条 warning——写侧只认本参数，
+        否则那条路径会绕过 AC5 的"唯一一套规范化"。
         """
         session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
             sandbox = workspace_registry.create(session_id)
         session = cls(session_id, store, sandbox=sandbox)
-        session.append(
-            SESSION_STARTED,
-            dict(started_data) if started_data else {},
-            agent_id=agent_id,
-        )
+        data = dict(started_data) if started_data else {}
+        # cwd 只认显式参数：started_data 里夹带的同名键会**绕过**唯一一套规范化
+        # （AC5），静默写出一个未规范化/相对的 cwd。删掉它，再按参数写入。
+        if "cwd" in data:
+            logger.warning(
+                "Session.start 忽略了 started_data['cwd']=%r：cwd 只由 cwd 参数"
+                "赋予（WS-1 #151），否则会绕过规范化",
+                data["cwd"],
+            )
+        data.pop("cwd", None)
+        data.update(cwd_event_data(cwd))
+        session.append(SESSION_STARTED, data, agent_id=agent_id)
         return session
 
     @classmethod
@@ -298,10 +315,22 @@ class Session:
             data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
         )
+        self._persist_event(event, notify=True)
+        return event
+
+    def _persist_event(self, event: SessionEvent, *, notify: bool) -> None:
+        """提交一条已构造事件，并在需要时通知实时观察者。
+
+        Store 是 durable 写入 owner，Session 仍拥有内存投影与 seq 计数器。
+        顺序不可交换：store 成功后才更新内存/seq，避免失败留下空洞；history
+        adoption 通过 ``notify=False`` 保持离线 seed 语义。
+        """
         self._store.append_event(self.session_id, event)
         self._events.append(event)
         # 写盘成功后才推进计数器——失败不消耗 seq
         self._next_seq += 1
+        if not notify:
+            return
         # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
         for listener in self._listeners:
             try:
@@ -311,7 +340,6 @@ class Session:
                     "session listener 回调失败（session=%s, event=%s）",
                     self.session_id, event.type,
                 )
-        return event
 
     def adopt_history(self, events: list[SessionEvent]) -> list[SessionEvent]:
         """移植既有事件（fork seed 的唯一 owner，ADR-0017 决策 3）。
@@ -329,9 +357,7 @@ class Session:
             if event.type not in EVENT_TYPES:
                 raise ValueError(f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中")
             moved = replace(event, seq=self._next_seq, session_id=self.session_id)
-            self._store.append_event(self.session_id, moved)
-            self._events.append(moved)
-            self._next_seq += 1
+            self._persist_event(moved, notify=False)
             adopted.append(moved)
         return adopted
 
@@ -368,16 +394,40 @@ class Session:
 
     # ── Run 生命周期 ──
 
-    def begin_run(self, *, agent_id: str = "default") -> tuple[str, int]:
+    def begin_run(self, *, agent_id: str = "default",
+                  agent_profile: str = "main",
+                  model: str | None = None,
+                  budget: dict[str, Any] | None = None) -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
         ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
         trace metadata 标记「这是第 N 轮」（T9 #139）。
+
+        ``agent_profile``（#198）：生效档位**总是**写进 run/started.data——
+        未指定时为 "main"。"缺字段"正是此前不可回溯的根因（真机会话里 13 个
+        run 全部查不到档位，只能靠工具集形状反推）；旧数据无该字段时前端按
+        「档位未知」降级，不报错。
+
+        ``model``（#226）：本轮**请求侧**的模型标识（= 真正发往 provider 的
+        ``model`` 字段，装配层给的就是 `ModelConfig.model_name`）。`None` 时
+        **不落该键**（本方法只写调用方给的事实，不替它编默认值；Runtime 路径
+        总传真值）。取值口径、与 ``model/completed`` 回显侧的对照、以及为什么
+        不能放在 ``model/started``（流式专属、永不持久化），见
+        ``docs/adr/0034-request-side-model-identity.md``。
+
+        ``budget``（`#312` T4）：本逻辑 run 的 **run 作用域** 预算快照（ceiling 等）。
+        `None` **不落键**——"没有配 ceiling"是"没有这条事实"，不是"ceiling=0"
+        （`11 §6.1`：不可得 ≠ 0）。`run/paused` 的 limits 快照由它重建，
+        所以配了 ceiling 时必须落（否则重启后投影不出配置值）。
         """
         run_id = str(uuid4())
         turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
-        self.append(RUN_STARTED, {"turn_index": turn_index},
-                    run_id=run_id, agent_id=agent_id)
+        data: dict[str, Any] = {"turn_index": turn_index, "agent_profile": agent_profile}
+        if model is not None:
+            data["model"] = model
+        if budget is not None:
+            data["budget"] = budget
+        self.append(RUN_STARTED, data, run_id=run_id, agent_id=agent_id)
         return run_id, turn_index
 
     def end_run(
@@ -387,10 +437,11 @@ class Session:
         status: str,
         final_text: str = "",
         usage_total: dict | None = None,
-        cost_usd: float | None = None,
+        cost_usd: Decimal | str | None = None,
         trace_id: str | None = None,
         trace_url: str | None = None,
         reason: str | None = None,
+        message: str | None = None,
     ) -> SessionEvent:
         """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
 
@@ -402,18 +453,30 @@ class Session:
         对称终态：completed 与 failed 都下发 trace_id / trace_url——失败 run 在
         Langfuse 也有可见 trace，跳转有排查价值。reason 仅 failed 语义使用
         （如 identical_tool_failure_loop），落事件 data——消费者可区分失败原因
-        （取消路径的 reason=cancelled 同款先例）。
+        （取消路径的 reason=cancelled 同款先例）。message 同仅 failed：固定可读文案
+        （已分类故障如内容审查拒绝；未分类异常由运行时侧拼一句带类型名的兜底），
+        与上下文超限路径直接 append 的 reason+message 形状一致；只接受调用方
+        **自己拼**的常量/模板，绝不透传 provider 回显原文
+        （口径见 docs/adr/0033-run-failure-attribution-surface.md §2.1）。
         """
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED
         data: dict = {"final_text": final_text} if final_text else {}
         if usage_total:
             data["usage_total"] = usage_total
         if status == "completed":
-            data["cost_usd"] = cost_usd
+            # 成本以十进制**字符串**入事件（`#313`）：`Decimal` 进 `json.dumps`
+            # （`session/store.py` 的裸 dumps）会炸，而 `float()` 会引入与 wire
+            # 不等价的二进制近似（`11 §6.1`：二进制浮点相等不是契约）。`None`
+            # 原样落（不可得 ≠ 0：客户端据此显示"未跟踪"，不是"零成本"）。
+            data["cost_usd"] = (
+                format(cost_usd, "f") if isinstance(cost_usd, Decimal) else cost_usd
+            )
         data["trace_id"] = trace_id
         data["trace_url"] = trace_url
         if status != "completed" and reason:
             data["reason"] = reason
+        if status != "completed" and message:
+            data["message"] = message
         return self.append(
             event_type,
             data,

@@ -10,7 +10,7 @@
  * that themselves come from events — no fabrication (zero-fake-metrics rule).
  */
 
-import { Activity, CircleDashed, CircleSlash, Loader2, SquareCheckBig, SquareX } from 'lucide-react';
+import { Activity, CircleDashed, CircleSlash, Loader2, PauseCircle, SquareCheckBig, SquareX } from 'lucide-react';
 import { EventType, type AgentEvent, type ConversationState } from '../types';
 import { formatDuration } from './format';
 
@@ -22,6 +22,11 @@ import { formatDuration } from './format';
  * `isRecoverableRun` / `StepDetail` 的 run 时长 / `useSession` 的终态检测
  * 三处各自枚举，全都漏了它，于是崩溃会话经后端恢复后「恢复会话」按钮永不
  * 消失、点它又是一次 no-op（用户实测症状：「点了什么反应也没有」）。
+ *
+ * ⚠ `#312` 明确**不**把 `run/paused` 加进来：暂停是非终态（后端 `03 §5`
+ * 的六值状态集合里它与终态并列），加进来会让"暂停"被当作"跑完了"——
+ * 终端帧判定、时长结算、恢复入口全都会据此走错分支。它的**执行区间**收口语义
+ * 单独由 `scanRuns` 处理（见那里：暂停也算"这一轮不再是未收口的悬空 run"）。
  */
 export const RUN_TERMINAL_TYPES: ReadonlySet<string> = new Set<string>([
   EventType.RUN_COMPLETED,
@@ -36,6 +41,7 @@ export type RunPulseState =
   | 'completed'
   | 'interrupted' // 最近一个 run 被进程重启打断（run/interrupted）——终态但非完成
   | 'cancelled' // run/failed.data.reason === 'cancelled'（客户端断连，中断 ≠ 错误）
+  | 'paused' // #312：预算到顶的**非终态**暂停，等抬高绝对 ceiling 后同 run 恢复
   | 'failed';
 
 export interface RunPulseDescriptor {
@@ -63,6 +69,9 @@ const PULSE_TABLE: Record<RunPulseState, RunPulseRow> = {
   interrupted: { label: '已中断', className: 'pulse-interrupted', Icon: CircleSlash },
   // 已取消：客户端断连（run/failed.reason=cancelled，da394a9）——中性色，非红色报错
   cancelled: { label: '已取消', className: 'pulse-cancelled', Icon: SquareX },
+  // 已暂停（#312）：预算到顶，**等着被恢复**——中性色 + 暂停图标。不能用
+  // 「已完成」的绿对勾（那是"这场跑完了"），也不能用失败的红叉（没有失败）。
+  paused: { label: '已暂停', className: 'pulse-paused', Icon: PauseCircle },
   failed: { label: '失败', className: 'pulse-failed', Icon: SquareX },
 };
 
@@ -99,6 +108,13 @@ export function deriveRunPulse(
     case 'completed': {
       const r = PULSE_TABLE.completed;
       return { state: 'completed', label: r.label, className: r.className, Icon: r.Icon };
+    }
+    case 'paused': {
+      // #312：预算到顶的暂停**不是**这三种结局里的任何一种——单列一档。
+      // 分支放在 run_status 上（而不是像 interrupted 那样"优先于 run_status"）：
+      // 暂停就是 run_status 自己的值，投影里没有第二处要争的真相。
+      const r = PULSE_TABLE.paused;
+      return { state: 'paused', label: r.label, className: r.className, Icon: r.Icon };
     }
     case 'failed': {
       // 取消 ≠ 失败：断连导致的 run/failed 走中性「已取消」通道（da394a9 语义）
@@ -140,6 +156,39 @@ export function deriveRunPulse(
   }
 }
 
+// ── FE-01（#148）：停顿等待提示——展示层观察，不是会话事实 ──
+
+/** 停顿提示阈值（秒）。口径是**空闲**：距上一次收到新事件的时间。 */
+export const WAIT_HINT_IDLE_SEC = 30;
+
+/** 该不该出现等待提示：模型正在思考 **且** 流仍挂着。
+ *
+ *  两个条件缺一不可，各自挡掉一种失真的提示：
+ *  - 脉冲不是 thinking（工具执行 / 审批等待 → 'tool'）挡掉自相矛盾——顶栏不能一边
+ *    写「执行工具」一边写「仍在等待模型」；终态同理（没有停顿可言）。
+ *  - 流已脱离挡掉「我们根本没在听」——重连额度耗尽或会话已收口时，那句「仍在等待」
+ *    是断线条 / 恢复入口的语义地盘，不是这句旁注的。 */
+export function shouldShowWaitHint(pulseState: RunPulseState, streaming: boolean): boolean {
+  return pulseState === 'thinking' && streaming;
+}
+
+/** 空闲 idleSec 秒后的等待说明；未到阈值返回 null（渲染零变化）。
+ *
+ *  为什么锚「空闲」而不是「流开了多久」：健康的长时间生成里流龄一路增长，用它
+ *  当阈值会把正常慢任务报成停顿。文案只陈述已观测到的事实（多久没有新进展），
+ *  不含进度/ETA/回退预测——后端此刻并没有发出任何「正在回退」的事实，等待态是
+ *  展示层状态（不变量 #4：Event ≠ Diagnostic Log；#22：Web UI 不造第二套真相）。
+ *
+ *  阈值依据：本仓 `docs/FRONTEND_ISSUES_LOG.md`「停顿提示阈值」小节（可复现的实测方法
+ *  与分布，n=13：p50 4.6s / max 61.0s，>30s 占 2/13）；参照实现的 idle 看门狗对照见
+ *  后端仓 `docs/RESEARCH_STREAM_STALL_HANDLING.md`。本提示是**展示层旁注、不中止任何
+ *  东西**，所以刻意比三方的看门狗（本项目 60s / dsh 300s / ZCode 600s）都早出现。
+ *  非有限值不产文案（畸形计时不得被渲染成句子）。 */
+export function waitingHintText(idleSec: number): string | null {
+  if (!Number.isFinite(idleSec) || idleSec < WAIT_HINT_IDLE_SEC) return null;
+  return `已 ${Math.floor(idleSec)}s 没有新进展，仍在等待模型`;
+}
+
 // ── Inspector Overview 的 Run 摘要（状态 + 时长） ──
 
 /** 把脉冲的细粒度状态粗化成 Inspector 想显示的那一档。
@@ -153,6 +202,11 @@ function coarsenPulseState(state: RunPulseState): string {
       return '运行中';
     case 'completed':
       return '已完成';
+    case 'paused':
+      // #312：Inspector 与顶栏同口径——暂停是一个**独立**的结局档，不许被
+      // 粗化成「运行中」（那会让 Inspector 说"还在跑"而顶栏说"已暂停"）
+      // 也不许并进「已完成」（它会诱发"任务完成了"的误读）。
+      return '已暂停';
     case 'interrupted':
       return '已中断';
     case 'cancelled':
@@ -192,6 +246,26 @@ export function deriveRunSummary(conversation: ConversationState): {
   return { label, startedAt: start, duration: formatDuration(start, end) };
 }
 
+// ── #198：生效档位（Inspector 头标） ──
+
+/**
+ * 最后一个 `run/started` 携带的 agent_profile——纯事件真值，无状态。
+ *
+ * 后端 #198 起 run/started.data **总是**带 `agent_profile`（未指定 = "main"）；
+ * 旧数据（字段缺失）返回 null，调用方显示「档位未知」——不伪造 "main"（那是
+ * 编造运行条件，正是本票要修的不可回溯根因）。多 run 会话取**最后一个**：
+ * 与"当前这轮的运行条件"同口径。
+ */
+export function deriveAgentProfile(events: AgentEvent[]): string | null {
+  let profile: string | null = null;
+  for (const e of events) {
+    if (e.type !== EventType.RUN_STARTED) continue;
+    const value = (e.data as Record<string, unknown> | undefined)?.agent_profile;
+    if (typeof value === 'string' && value.length > 0) profile = value;
+  }
+  return profile;
+}
+
 // ── 会话健康度：恢复入口可见性（da394a9 §二.2 建议语义） ──
 
 /**
@@ -226,7 +300,14 @@ export function hasUnterminatedRun(events: AgentEvent[]): boolean {
   return scanRuns(events).unterminated;
 }
 
-/** 一并取出「有没有 run」与「最后一个 run 是否收口」——两个消费者的共同扫描。 */
+/** 一并取出「有没有 run」与「最后一个 run 是否收口」——两个消费者的共同扫描。
+ *
+ *  `#312`：`run/paused` 也算**收口**（这一轮不再是悬空 run），`run/resumed` 重新
+ *  打开它——两侧与后端 `session/interrupt.py::detect_unterminated_runs` 逐字对齐
+ *  （暂停的 run 由后续 `run/resumed` 重新打开，因此健康暂停的会话不该被报成
+ *  "缺 run 终态"）。不这样对齐的后果很具体：暂停会话会亮出「恢复会话」按钮，
+ *  而后端对它的答复是"已收口、无可修复项"——用户点一个必然 no-op 的按钮，
+ *  正是 T8 #138 修过的那类假承诺。 */
 function scanRuns(events: AgentEvent[]): { hasRun: boolean; unterminated: boolean } {
   let hasRun = false;
   let lastRunTerminated = false;
@@ -234,8 +315,11 @@ function scanRuns(events: AgentEvent[]): { hasRun: boolean; unterminated: boolea
     if (e.type === EventType.RUN_STARTED) {
       hasRun = true;
       lastRunTerminated = false;
-    } else if (RUN_TERMINAL_TYPES.has(e.type)) {
+    } else if (RUN_TERMINAL_TYPES.has(e.type) || e.type === EventType.RUN_PAUSED) {
       lastRunTerminated = true;
+    } else if (e.type === EventType.RUN_RESUMED) {
+      // 恢复把同一个逻辑 run 重新打开：暂停期间"已收口"的判断随之作废。
+      lastRunTerminated = false;
     }
   }
   return { hasRun, unterminated: hasRun && !lastRunTerminated };

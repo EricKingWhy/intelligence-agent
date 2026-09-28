@@ -1,0 +1,1349 @@
+"""Durable, process-safe accounting for a single multi-agent delegation tree.
+
+`#318` 起同一账本同时承载 **SessionBudget**（`02 §5.1` 第三层）的 durable 真相：
+`session_budgets` 表 + append-only `session_budget_events` 审计。预算 key = 树根
+会话 id（根 = 自身 session_id；子 = `delegation_root_session_id`），fork 的新会话
+天然得到新身份（`03 §7`）。为什么住在这里而不是新模块：`10 §5.1` 把"树内已消耗
+多少"的唯一 owner 钉在 #287 的树账本上、明文禁止第二棵树账本——委派计数（树表
+`used_delegations`）与 session 计数（本表）同库同事务域，才是同一份事实。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Protocol
+from uuid import uuid4
+
+import aiosqlite
+
+from agent_harness.agent.guards import GuardLevel, GuardSignal
+from agent_harness.agent.run_budget import (
+    BudgetConflict,
+    SessionAdmission,
+    SessionBudgetSnapshot,
+    SessionConsumed,
+    SessionLimits,
+    _deadline_or_none,
+    _deadline_text,
+    _decimal_or_none,
+    _decimal_text,
+    session_pause_trigger,
+    session_resume_headroom_ok,
+    utc_now,
+)
+
+
+@dataclass(frozen=True)
+class DelegationReservation:
+    accepted: bool
+    used: int
+    limit: int
+
+
+@dataclass(frozen=True)
+class DelegationTreeState:
+    tree_id: str
+    root_session_id: str
+    max_delegations: int
+    used_delegations: int
+    max_depth: int
+    fingerprint: str | None
+    consecutive_failures: int
+    soft_triggered: bool
+
+
+class DelegationTreeLedger(Protocol):
+    async def reserve(
+        self, tree_id: str, *, root_session_id: str,
+        max_delegations: int, max_depth: int,
+    ) -> DelegationReservation: ...
+
+    async def observe_result(
+        self, tree_id: str, fingerprint: str, *, ok: bool,
+        soft_threshold: int = 3, hard_threshold: int = 3,
+    ) -> GuardSignal: ...
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS delegation_trees (
+    tree_id TEXT PRIMARY KEY,
+    root_session_id TEXT NOT NULL,
+    max_delegations INTEGER NOT NULL CHECK (max_delegations >= 0),
+    used_delegations INTEGER NOT NULL DEFAULT 0 CHECK (used_delegations >= 0),
+    max_depth INTEGER NOT NULL CHECK (max_depth >= 0),
+    fingerprint TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+    soft_triggered INTEGER NOT NULL DEFAULT 0 CHECK (soft_triggered IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS delegation_tree_events (
+    event_id TEXT PRIMARY KEY,
+    tree_id TEXT NOT NULL REFERENCES delegation_trees(tree_id),
+    kind TEXT NOT NULL,
+    fingerprint TEXT,
+    used_delegations INTEGER NOT NULL,
+    max_delegations INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_delegation_tree_events_tree
+    ON delegation_tree_events(tree_id, created_at);
+CREATE TRIGGER IF NOT EXISTS delegation_tree_events_no_update
+BEFORE UPDATE ON delegation_tree_events
+BEGIN
+    SELECT RAISE(ABORT, 'delegation tree audit events are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS delegation_tree_events_no_delete
+BEFORE DELETE ON delegation_tree_events
+BEGIN
+    SELECT RAISE(ABORT, 'delegation tree audit events are append-only');
+END;
+CREATE TABLE IF NOT EXISTS session_budgets (
+    budget_key TEXT PRIMARY KEY,
+    root_session_id TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    max_agent_turns_total INTEGER,
+    max_model_requests INTEGER,
+    max_total_tokens INTEGER,
+    max_cost_usd TEXT,
+    deadline_at TEXT,
+    max_delegations INTEGER,
+    tool_call_limits TEXT NOT NULL DEFAULT '{}',
+    agent_turns INTEGER NOT NULL DEFAULT 0 CHECK (agent_turns >= 0),
+    model_requests INTEGER NOT NULL DEFAULT 0 CHECK (model_requests >= 0),
+    -- `NULL` = 未知（有请求没自报账目之后的粘性）；初始 0 = "空和"（`11 §6.1`：
+    -- 只有"一个请求都没有"的空和才是 0）。
+    total_tokens INTEGER DEFAULT 0,
+    cost_usd TEXT DEFAULT '0',
+    tool_calls_by_tool TEXT NOT NULL DEFAULT '{}',
+    tool_attempts_by_tool TEXT NOT NULL DEFAULT '{}',
+    delegations INTEGER NOT NULL DEFAULT 0 CHECK (delegations >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_session_budgets_root
+    ON session_budgets(root_session_id);
+CREATE TABLE IF NOT EXISTS session_budget_events (
+    event_id TEXT PRIMARY KEY,
+    budget_key TEXT NOT NULL REFERENCES session_budgets(budget_key),
+    kind TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    detail TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_session_budget_events_key
+    ON session_budget_events(budget_key, created_at);
+CREATE TRIGGER IF NOT EXISTS session_budget_events_no_update
+BEFORE UPDATE ON session_budget_events
+BEGIN
+    SELECT RAISE(ABORT, 'session budget audit events are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS session_budget_events_no_delete
+BEFORE DELETE ON session_budget_events
+BEGIN
+    SELECT RAISE(ABORT, 'session budget audit events are append-only');
+END;
+"""
+
+
+def _tool_map_json(raw: Any) -> str:
+    """per-tool 表 → JSON 文本（键排序：字节稳定，跨执行可比）。"""
+    mapping = raw if isinstance(raw, Mapping) else {}
+    return json.dumps({name: int(mapping[name]) for name in sorted(mapping)})
+
+
+def _tool_map_from_json(raw: Any) -> dict[str, int] | None:
+    """JSON 文本 → per-tool 表；`None` = 未知（粘性，与 `BudgetConsumed` 同纪律）。"""
+    if raw is None:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    result: dict[str, int] = {}
+    for name, value in decoded.items():
+        if isinstance(name, str) and isinstance(value, int) and not isinstance(value, bool):
+            result[name] = value
+    return result
+
+
+def _row_session_limits(row: aiosqlite.Row | dict[str, Any]) -> SessionLimits:
+    """`session_budgets` 行 → `SessionLimits`（`None` 列 = 无 ceiling，不是 0）。"""
+    return SessionLimits(
+        max_agent_turns_total=row["max_agent_turns_total"],
+        max_model_requests=row["max_model_requests"],
+        max_total_tokens=row["max_total_tokens"],
+        max_cost_usd=_decimal_or_none(row["max_cost_usd"]),
+        deadline_at=_deadline_or_none(row["deadline_at"]),
+        tool_call_limits=_tool_map_from_json(row["tool_call_limits"]) or {},
+        max_delegations=row["max_delegations"],
+    )
+
+
+def _row_session_consumed(row: aiosqlite.Row | dict[str, Any]) -> SessionConsumed:
+    """`session_budgets` 行 → `SessionConsumed`（token/cost `NULL` = 未知）。"""
+    return SessionConsumed(
+        agent_turns=int(row["agent_turns"]),
+        model_requests=int(row["model_requests"]),
+        total_tokens=row["total_tokens"],
+        cost_usd=_decimal_or_none(row["cost_usd"]),
+        tool_calls_by_tool=_tool_map_from_json(row["tool_calls_by_tool"]),
+        tool_attempts_by_tool=_tool_map_from_json(row["tool_attempts_by_tool"]),
+        delegations=int(row["delegations"]),
+    )
+
+
+def _tighten_ceiling(current: Any, requested: Any) -> Any:
+    """ensure 的收窄合并：`None` ceiling 遇到声明值 = 加上限（收紧，允许）。"""
+    if requested is None:
+        return current
+    if current is None:
+        return requested
+    return min(current, requested)
+
+
+class SqliteDelegationTreeLedger:
+    """SQLite ledger with serialized budget reservations and append-only audit rows.
+
+    A tree's configured limits are pinned on first use. A later activation can only
+    tighten those limits; recreating a Runtime or Store cannot replenish the budget.
+    """
+
+    def __init__(self, database_path: str | Path) -> None:
+        self.database_path = Path(database_path)
+
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = await aiosqlite.connect(self.database_path, timeout=10)
+        connection.row_factory = aiosqlite.Row
+        try:
+            await connection.execute("PRAGMA busy_timeout = 10000")
+            yield connection
+        finally:
+            await connection.close()
+
+    async def initialize(self) -> None:
+        async with self._connect() as connection:
+            await connection.executescript(_SCHEMA)
+            await connection.commit()
+
+    async def reserve(
+        self, tree_id: str, *, root_session_id: str,
+        max_delegations: int, max_depth: int,
+    ) -> DelegationReservation:
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = await self._ensure_tree(
+                    connection, tree_id, root_session_id,
+                    max_delegations=max_delegations, max_depth=max_depth,
+                )
+                used, limit = int(row["used_delegations"]), int(row["max_delegations"])
+                accepted = used < limit
+                if accepted:
+                    used += 1
+                    await connection.execute(
+                        "UPDATE delegation_trees SET used_delegations = ? WHERE tree_id = ?",
+                        (used, tree_id),
+                    )
+                await self._append_event(
+                    connection, tree_id, "attempt_reserved" if accepted else "attempt_rejected",
+                    fingerprint=None, used=used, limit=limit,
+                )
+                await connection.commit()
+                return DelegationReservation(accepted, used, limit)
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def observe_result(
+        self, tree_id: str, fingerprint: str, *, ok: bool,
+        soft_threshold: int = 3, hard_threshold: int = 3,
+    ) -> GuardSignal:
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = await connection.execute_fetchall(
+                    "SELECT * FROM delegation_trees WHERE tree_id = ?", (tree_id,),
+                )
+                if not row:
+                    raise KeyError(f"unknown delegation tree: {tree_id}")
+                state = row[0]
+                previous = state["fingerprint"]
+                failures = int(state["consecutive_failures"])
+                soft_triggered = bool(state["soft_triggered"])
+                if fingerprint != previous:
+                    failures, soft_triggered = 0, False
+                level = GuardLevel.NONE
+                if not ok:
+                    failures += 1
+                    if not soft_triggered and failures >= soft_threshold:
+                        soft_triggered = True
+                        level = GuardLevel.SOFT
+                    elif soft_triggered and failures >= soft_threshold + hard_threshold:
+                        level = GuardLevel.HARD
+                await connection.execute(
+                    """UPDATE delegation_trees
+                       SET fingerprint = ?, consecutive_failures = ?, soft_triggered = ?
+                       WHERE tree_id = ?""",
+                    (fingerprint, failures, int(soft_triggered), tree_id),
+                )
+                used, limit = int(state["used_delegations"]), int(state["max_delegations"])
+                await self._append_event(
+                    connection, tree_id, "result_ok" if ok else "result_failed",
+                    fingerprint=fingerprint, used=used, limit=limit,
+                )
+                if level != GuardLevel.NONE:
+                    await self._append_event(
+                        connection, tree_id,
+                        "guard_soft" if level == GuardLevel.SOFT else "guard_hard",
+                        fingerprint=fingerprint, used=used, limit=limit,
+                    )
+                await connection.commit()
+                return GuardSignal(level, "delegate", fingerprint, failures)
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def get_state(self, tree_id: str) -> DelegationTreeState:
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM delegation_trees WHERE tree_id = ?", (tree_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(f"unknown delegation tree: {tree_id}")
+        return DelegationTreeState(
+            tree_id=row["tree_id"], root_session_id=row["root_session_id"],
+            max_delegations=row["max_delegations"],
+            used_delegations=row["used_delegations"], max_depth=row["max_depth"],
+            fingerprint=row["fingerprint"],
+            consecutive_failures=row["consecutive_failures"],
+            soft_triggered=bool(row["soft_triggered"]),
+        )
+
+    async def event_kinds(self, tree_id: str) -> list[str]:
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT kind FROM delegation_tree_events WHERE tree_id = "
+                "? ORDER BY rowid", (tree_id,),
+            )
+            rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
+    # ── SessionBudget（#318；`02 §5.1` / `10 §5.1`）──────────────────────
+    #
+    # 所有操作都在单个 BEGIN IMMEDIATE 事务里完成"判定 + 计数"：并发兄弟（同进程
+    # 的 asyncio 任务或崩溃恢复后的新进程）竞争最后一格时，SQLite 的写事务串行化
+    # 保证至多一个被接纳（`10 §13`）。账面持久化在本表 = 崩溃恢复**读回**同一份
+    # consumed / limits / version（`03 §5` Crash durability），不靠进程内存。
+
+    @staticmethod
+    async def _append_session_event(
+        connection: aiosqlite.Connection, budget_key: str, kind: str,
+        *, version: int, detail: dict[str, Any] | None = None,
+    ) -> None:
+        await connection.execute(
+            """INSERT INTO session_budget_events
+               (event_id, budget_key, kind, version, detail)
+               VALUES (?, ?, ?, ?, ?)""",
+            (str(uuid4()), budget_key, kind, version,
+             json.dumps(detail, sort_keys=True) if detail else None),
+        )
+
+    async def _session_snapshot(
+        self, connection: aiosqlite.Connection, budget_key: str,
+    ) -> SessionBudgetSnapshot:
+        cursor = await connection.execute(
+            "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(f"unknown session budget: {budget_key}")
+        return SessionBudgetSnapshot(
+            limits=_row_session_limits(row),
+            consumed=_row_session_consumed(row),
+            version=int(row["version"]),
+        )
+
+    async def ensure_session_budget(
+        self, budget_key: str, *, root_session_id: str, limits: SessionLimits,
+    ) -> SessionBudgetSnapshot:
+        """首用钉死 + 之后只收窄（与 `_ensure_tree` 同一条纪律，`10 §5.1`）。
+
+        请求没点名的席不落 ceiling（`NULL` = 无上限，不是 0）；已有时取更小者。
+        不动 `version`——CAS 版本只属于恢复路径的显式更新
+        （`update_session_limits`），装配路径的静默收窄不制造"版本过期"假象。
+        """
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await connection.execute(
+                    """INSERT OR IGNORE INTO session_budgets
+                       (budget_key, root_session_id, max_agent_turns_total,
+                        max_model_requests, max_total_tokens, max_cost_usd,
+                        deadline_at, max_delegations, tool_call_limits)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (budget_key, root_session_id, limits.max_agent_turns_total,
+                     limits.max_model_requests, limits.max_total_tokens,
+                     _decimal_text(limits.max_cost_usd),
+                     _deadline_text(limits.deadline_at),
+                     limits.max_delegations, _tool_map_json(limits.tool_call_limits)),
+                )
+                cursor = await connection.execute(
+                    "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row["root_session_id"] != root_session_id:
+                    raise ValueError("session budget root identity mismatch")
+                current_tools = _tool_map_from_json(row["tool_call_limits"]) or {}
+                requested_tools = dict(limits.tool_call_limits)
+                merged_tools = dict(current_tools)
+                for name, ceiling in requested_tools.items():
+                    merged_tools[name] = (
+                        ceiling if name not in current_tools
+                        else min(int(current_tools[name]), int(ceiling))
+                    )
+                current_deadline = _deadline_or_none(row["deadline_at"])
+                requested_deadline = limits.deadline_at
+                if current_deadline is not None and requested_deadline is not None:
+                    tightened_deadline = min(current_deadline, requested_deadline)
+                else:
+                    tightened_deadline = current_deadline or requested_deadline
+                current_cost = _decimal_or_none(row["max_cost_usd"])
+                requested_cost = limits.max_cost_usd
+                if current_cost is not None and requested_cost is not None:
+                    tightened_cost = min(current_cost, requested_cost)
+                else:
+                    tightened_cost = current_cost if requested_cost is None else requested_cost
+                effective = {
+                    "max_agent_turns_total": _tighten_ceiling(
+                        row["max_agent_turns_total"], limits.max_agent_turns_total),
+                    "max_model_requests": _tighten_ceiling(
+                        row["max_model_requests"], limits.max_model_requests),
+                    "max_total_tokens": _tighten_ceiling(
+                        row["max_total_tokens"], limits.max_total_tokens),
+                    "max_cost_usd": _decimal_text(tightened_cost),
+                    "deadline_at": _deadline_text(tightened_deadline),
+                    "max_delegations": _tighten_ceiling(
+                        row["max_delegations"], limits.max_delegations),
+                    "tool_call_limits": _tool_map_json(merged_tools),
+                }
+                changed = any(
+                    effective[column] != row[column] for column in effective
+                )
+                if changed:
+                    await connection.execute(
+                        """UPDATE session_budgets
+                           SET max_agent_turns_total = ?, max_model_requests = ?,
+                               max_total_tokens = ?, max_cost_usd = ?, deadline_at = ?,
+                               max_delegations = ?, tool_call_limits = ?
+                           WHERE budget_key = ?""",
+                        (effective["max_agent_turns_total"],
+                         effective["max_model_requests"],
+                         effective["max_total_tokens"], effective["max_cost_usd"],
+                         effective["deadline_at"], effective["max_delegations"],
+                         effective["tool_call_limits"], budget_key),
+                    )
+                    await self._append_session_event(
+                        connection, budget_key, "limits_tightened",
+                        version=int(row["version"]),
+                        detail={column: effective[column] for column in sorted(effective)},
+                    )
+                await connection.commit()
+                return await self._session_snapshot(connection, budget_key)
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def admit_session_step(self, budget_key: str) -> SessionAdmission:
+        """原子准入：判到顶就拒绝（账不变），否则**预留** turns / requests 各一格。
+
+        预留语义（保持 `02 §5.1` 的计数定义）：这一格 turns 在决策被**接纳进 loop**
+        后成为真账；决策被拒 / 传输失败 / 取消时由 `refund_session_turn` 退回。
+        requests 的预留不退——本步至少会实际发出一次请求并落 `model/request`。
+        """
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                snapshot = await self._session_snapshot(connection, budget_key)
+                trigger = session_pause_trigger(
+                    consumed=snapshot.consumed, session_limits=snapshot.limits,
+                    now=utc_now(),
+                )
+                if trigger is not None:
+                    await connection.commit()
+                    return SessionAdmission(False, trigger, snapshot)
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET agent_turns = agent_turns + 1,
+                           model_requests = model_requests + 1
+                       WHERE budget_key = ?""",
+                    (budget_key,),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "step_admitted",
+                    version=snapshot.version,
+                    detail={"turns": snapshot.consumed.agent_turns + 1},
+                )
+                await connection.commit()
+                return SessionAdmission(
+                    True, None, await self._session_snapshot(connection, budget_key),
+                )
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def refund_session_turn(self, budget_key: str) -> None:
+        """退回预留的 turns 一格（决策未被接纳；下限 0，不为负）。"""
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT version FROM session_budgets WHERE budget_key = ?",
+                    (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET agent_turns = MAX(agent_turns - 1, 0) WHERE budget_key = ?""",
+                    (budget_key,),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "turn_refunded", version=int(row["version"]),
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def refund_session_step(self, budget_key: str) -> None:
+        """退回预留的两格 turns / requests（整步未发生：模型在本轮从未被调用）。"""
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT version FROM session_budgets WHERE budget_key = ?",
+                    (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET agent_turns = MAX(agent_turns - 1, 0),
+                           model_requests = MAX(model_requests - 1, 0)
+                       WHERE budget_key = ?""",
+                    (budget_key,),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "step_refunded", version=int(row["version"]),
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def record_session_model_requests(
+        self, budget_key: str, *, count: int, usage: dict[str, int] | None,
+        cost: Decimal | None,
+    ) -> None:
+        """把实际发生的请求落账（`model_requests` 的树级计数点）。
+
+        `count` = 本批 `model/request` 事件数（primary / fallback / closeout 逐条
+        对应）。usage / cost 只随**产出响应**的那一次给（缺席实现不伪造）；任一维
+        从已知转未知用 `NULL` 粘住——与 run 作用域 `BudgetConsumed.with_usage` 的
+        `None` 粘性同一纪律（`11 §6.1`：不可得 ≠ 0）。
+        """
+        if count < 0:
+            raise ValueError(f"request count 不能为负：{count}")
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                tokens = row["total_tokens"]
+                if tokens is not None:
+                    if usage is None or "total_tokens" not in usage:
+                        tokens = None
+                    else:
+                        tokens = int(tokens) + int(usage["total_tokens"])
+                current_cost = _decimal_or_none(row["cost_usd"])
+                if current_cost is None or cost is None:
+                    new_cost = None
+                else:
+                    new_cost = current_cost + cost
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET model_requests = model_requests + ?, total_tokens = ?,
+                           cost_usd = ?
+                       WHERE budget_key = ?""",
+                    (count, tokens, _decimal_text(new_cost), budget_key),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "requests_recorded",
+                    version=int(row["version"]),
+                    detail={"count": count, "tokens": tokens,
+                            "cost_usd": _decimal_text(new_cost)},
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def record_session_tools(
+        self, budget_key: str, *, calls: Mapping[str, int], attempts: Mapping[str, int],
+    ) -> None:
+        """把 `tool/result.budget_delta` 的增量并入两张 per-tool 表。"""
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                calls_table = _tool_map_from_json(row["tool_calls_by_tool"]) or {}
+                attempts_table = _tool_map_from_json(row["tool_attempts_by_tool"]) or {}
+                for name, value in calls.items():
+                    if value > 0:
+                        calls_table[name] = calls_table.get(name, 0) + value
+                for name, value in attempts.items():
+                    if value > 0:
+                        attempts_table[name] = attempts_table.get(name, 0) + value
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET tool_calls_by_tool = ?, tool_attempts_by_tool = ?
+                       WHERE budget_key = ?""",
+                    (_tool_map_json(calls_table), _tool_map_json(attempts_table),
+                     budget_key),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "tools_recorded", version=int(row["version"]),
+                    detail={"calls": _tool_map_json(dict(calls)),
+                            "attempts": _tool_map_json(dict(attempts))},
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def update_session_limits(
+        self, budget_key: str, *, expected_version: int, limits: SessionLimits,
+    ) -> SessionBudgetSnapshot:
+        """恢复路径的 CAS 更新（`03 §3.4`：绝对 ceiling；`11 §6.1`：409 判据）。
+
+        点名的席取请求值（**绝对**语义，可以抬高），未点名的沿用当前值；
+        `version` 不符 ⇒ 409（`BudgetConflict`）；任何点名 ceiling 低于已消耗
+        （或消耗未知）⇒ 409——存储层兜底的不变量：**绝不**持久化一个低于已消耗
+        的 ceiling。**"放得下一次新准入"（headroom）也在本方法内判**（见事务内
+        `session_resume_headroom_ok`）：409 必须零副作用，拆到调用方就会先改账
+        再拒绝（`03 §3.4` / `11 §6.1`）。
+        """
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                if expected_version != int(row["version"]):
+                    raise BudgetConflict(
+                        f"session budget version 过期：expected_version={expected_version}，"
+                        f"当前 version={row['version']}（CAS 比较失败，未启动任何工作）"
+                    )
+                effective_tools = _tool_map_from_json(row["tool_call_limits"]) or {}
+                for name, ceiling in limits.tool_call_limits.items():
+                    effective_tools[name] = ceiling
+                effective = {
+                    "max_agent_turns_total": (
+                        limits.max_agent_turns_total
+                        if limits.max_agent_turns_total is not None
+                        else row["max_agent_turns_total"]
+                    ),
+                    "max_model_requests": (
+                        limits.max_model_requests
+                        if limits.max_model_requests is not None
+                        else row["max_model_requests"]
+                    ),
+                    "max_total_tokens": (
+                        limits.max_total_tokens
+                        if limits.max_total_tokens is not None
+                        else row["max_total_tokens"]
+                    ),
+                    "max_cost_usd": _decimal_text(
+                        limits.max_cost_usd
+                        if limits.max_cost_usd is not None
+                        else _decimal_or_none(row["max_cost_usd"])
+                    ),
+                    "deadline_at": _deadline_text(
+                        limits.deadline_at
+                        if limits.deadline_at is not None
+                        else _deadline_or_none(row["deadline_at"])
+                    ),
+                    "max_delegations": (
+                        limits.max_delegations
+                        if limits.max_delegations is not None
+                        else row["max_delegations"]
+                    ),
+                    "tool_call_limits": _tool_map_json(effective_tools),
+                }
+                if effective["max_agent_turns_total"] is not None \
+                        and effective["max_agent_turns_total"] < int(row["agent_turns"]):
+                    raise BudgetConflict(
+                        f"max_agent_turns_total={effective['max_agent_turns_total']} "
+                        f"低于已消耗 {row['agent_turns']}（11 §6.1：ceiling 低于已消耗 "
+                        f"⇒ 409，未启动任何工作）"
+                    )
+                if effective["max_total_tokens"] is not None:
+                    if row["total_tokens"] is None:
+                        raise BudgetConflict(
+                            "token 消耗基数未知（有请求未自报 usage）而恢复点名了 "
+                            "max_total_tokens：无法证明到线即停 ⇒ 409，未启动任何工作"
+                        )
+                    if effective["max_total_tokens"] < int(row["total_tokens"]):
+                        raise BudgetConflict(
+                            f"max_total_tokens={effective['max_total_tokens']} 低于已消耗 "
+                            f"{row['total_tokens']}（11 §6.1 ⇒ 409，未启动任何工作）"
+                        )
+                if effective["max_cost_usd"] is not None:
+                    consumed_cost = _decimal_or_none(row["cost_usd"])
+                    if consumed_cost is None:
+                        raise BudgetConflict(
+                            "cost 消耗基数未知而恢复点名了 max_cost_usd ⇒ 409，"
+                            "未启动任何工作"
+                        )
+                    if Decimal(effective["max_cost_usd"]) < consumed_cost:
+                        raise BudgetConflict(
+                            f"max_cost_usd={effective['max_cost_usd']} 低于已消耗 "
+                            f"{consumed_cost}（11 §6.1 ⇒ 409，未启动任何工作）"
+                        )
+                for name, ceiling in effective_tools.items():
+                    calls_table = _tool_map_from_json(row["tool_calls_by_tool"]) or {}
+                    if ceiling < calls_table.get(name, 0):
+                        raise BudgetConflict(
+                            f"tool_call_limits[{name}]={ceiling} 低于已消耗 "
+                            f"{calls_table.get(name, 0)}（11 §6.1 ⇒ 409，未启动任何工作）"
+                        )
+                if effective["max_delegations"] is not None \
+                        and effective["max_delegations"] < int(row["delegations"]):
+                    raise BudgetConflict(
+                        f"max_delegations={effective['max_delegations']} 低于已消耗 "
+                        f"{row['delegations']}（11 §6.1 ⇒ 409，未启动任何工作）"
+                    )
+                # "放得下一次新准入"的收紧判定（headroom）与 CAS / 低于已消耗同在
+                # **这一个事务**里：409 必须零副作用（11 §6.1），拆到调用方就会先改账
+                # 再拒绝。账未知 + 点了 ceiling ⇒ 判"放不下"（同一事务内已按未知拒绝，
+                # 这里拿到的 effective 若带未知消耗同样过不了 headroom）。
+                effective_limits = SessionLimits(
+                    max_agent_turns_total=effective["max_agent_turns_total"],
+                    max_model_requests=effective["max_model_requests"],
+                    max_total_tokens=effective["max_total_tokens"],
+                    max_cost_usd=_decimal_or_none(effective["max_cost_usd"]),
+                    deadline_at=_deadline_or_none(effective["deadline_at"]),
+                    tool_call_limits=_tool_map_from_json(effective["tool_call_limits"]) or {},
+                    max_delegations=effective["max_delegations"],
+                )
+                effective_consumed = SessionConsumed(
+                    agent_turns=int(row["agent_turns"]),
+                    model_requests=int(row["model_requests"]),
+                    total_tokens=row["total_tokens"],
+                    cost_usd=_decimal_or_none(row["cost_usd"]),
+                    tool_calls_by_tool=_tool_map_from_json(row["tool_calls_by_tool"]),
+                    tool_attempts_by_tool=_tool_map_from_json(row["tool_attempts_by_tool"]),
+                    delegations=int(row["delegations"]),
+                )
+                if not session_resume_headroom_ok(
+                    consumed=effective_consumed, limits=effective_limits, now=utc_now(),
+                ):
+                    raise BudgetConflict(
+                        "恢复后的生效 ceiling 放不下一次新准入（session 作用域；"
+                        "consumed=" f"{effective_consumed.as_projection()}，limits="
+                        f"{effective_limits.as_projection()}）——仍到线的维度必须一起抬高"
+                        "（11 §6.1 ⇒ 409，未启动任何工作）"
+                    )
+                new_version = int(row["version"]) + 1
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET version = ?, max_agent_turns_total = ?, max_model_requests = ?,
+                           max_total_tokens = ?, max_cost_usd = ?, deadline_at = ?,
+                           max_delegations = ?, tool_call_limits = ?
+                       WHERE budget_key = ?""",
+                    (new_version, effective["max_agent_turns_total"],
+                     effective["max_model_requests"], effective["max_total_tokens"],
+                     effective["max_cost_usd"], effective["deadline_at"],
+                     effective["max_delegations"], effective["tool_call_limits"],
+                     budget_key),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "limits_updated", version=new_version,
+                    detail={column: effective[column] for column in sorted(effective)},
+                )
+                await connection.commit()
+                return await self._session_snapshot(connection, budget_key)
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def get_session_budget(self, budget_key: str) -> SessionBudgetSnapshot | None:
+        """只读读数（投影用）；行不存在（会话还没消费过 / 没配置过）⇒ `None`。"""
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return SessionBudgetSnapshot(
+                limits=_row_session_limits(row),
+                consumed=_row_session_consumed(row),
+                version=int(row["version"]),
+            )
+
+    async def consume_session_delegation(
+        self, budget_key: str, *, root_session_id: str, max_delegations: int,
+    ) -> DelegationReservation:
+        """session 作用域的委派接纳（跨 run 聚合的那一格；树 reserve 之前调用）。
+
+        与 #287 树 reserve 的分工：树表计数的是**单棵 delegating run 的树**
+        （深度 / 指纹 / guard 的机制域），本表计数的是**整棵会话树跨 run 累计**
+        的 `delegations`（`02 §5.1`：SessionBudget 的委派账）。行不存在时用本次
+        声明的上限建行（首用钉死，之后收窄-only）——`10 §5.1`：SessionBudget
+        默认 `max_delegations=8`，与请求是否显式配置无关。
+        """
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await connection.execute(
+                    """INSERT OR IGNORE INTO session_budgets
+                       (budget_key, root_session_id, max_delegations)
+                       VALUES (?, ?, ?)""",
+                    (budget_key, root_session_id, max_delegations),
+                )
+                cursor = await connection.execute(
+                    "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row["root_session_id"] != root_session_id:
+                    raise ValueError("session budget root identity mismatch")
+                limit = (
+                    min(int(row["max_delegations"]), max_delegations)
+                    if row["max_delegations"] is not None else max_delegations
+                )
+                if limit != row["max_delegations"]:
+                    await connection.execute(
+                        "UPDATE session_budgets SET max_delegations = ? WHERE budget_key = ?",
+                        (limit, budget_key),
+                    )
+                used = int(row["delegations"])
+                accepted = used < limit
+                if accepted:
+                    used += 1
+                    await connection.execute(
+                        "UPDATE session_budgets SET delegations = ? WHERE budget_key = ?",
+                        (used, budget_key),
+                    )
+                await self._append_session_event(
+                    connection, budget_key,
+                    "delegation_consumed" if accepted else "delegation_rejected",
+                    version=int(row["version"]), detail={"used": used, "limit": limit},
+                )
+                await connection.commit()
+                return DelegationReservation(accepted, used, limit)
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def refund_session_delegation(self, budget_key: str) -> None:
+        """退回 session 委派预留（树 reserve 被拒时的配对退回；下限 0）。"""
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT version FROM session_budgets WHERE budget_key = ?",
+                    (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET delegations = MAX(delegations - 1, 0) WHERE budget_key = ?""",
+                    (budget_key,),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "delegation_refunded",
+                    version=int(row["version"]),
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def session_event_kinds(self, budget_key: str) -> list[str]:
+        """审计事件序（测试与对账用；append-only 触发器在 schema 上）。"""
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                "SELECT kind FROM session_budget_events WHERE budget_key = ? "
+                "ORDER BY rowid", (budget_key,),
+            )
+            rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
+    async def _ensure_tree(
+        self, connection: aiosqlite.Connection, tree_id: str, root_session_id: str,
+        *, max_delegations: int, max_depth: int,
+    ):
+        await connection.execute(
+            """INSERT OR IGNORE INTO delegation_trees
+               (tree_id, root_session_id, max_delegations, max_depth)
+               VALUES (?, ?, ?, ?)""",
+            (tree_id, root_session_id, max_delegations, max_depth),
+        )
+        cursor = await connection.execute(
+            "SELECT * FROM delegation_trees WHERE tree_id = ?", (tree_id,),
+        )
+        row = await cursor.fetchone()
+        if row["root_session_id"] != root_session_id:
+            raise ValueError("delegation tree root identity mismatch")
+        # Configuration drift during resume is fail-closed: an existing tree may
+        # tighten its ceiling, never raise it or change its root identity.
+        limit = min(int(row["max_delegations"]), max_delegations)
+        depth = min(int(row["max_depth"]), max_depth)
+        if limit != row["max_delegations"] or depth != row["max_depth"]:
+            await connection.execute(
+                "UPDATE delegation_trees SET max_delegations = ?, max_depth = ? "
+                "WHERE tree_id = ?", (limit, depth, tree_id),
+            )
+            row = dict(row)
+            row["max_delegations"] = limit
+            row["max_depth"] = depth
+        return row
+
+    @staticmethod
+    async def _append_event(
+        connection: aiosqlite.Connection, tree_id: str, kind: str,
+        *, fingerprint: str | None, used: int, limit: int,
+    ) -> None:
+        await connection.execute(
+            """INSERT INTO delegation_tree_events
+               (event_id, tree_id, kind, fingerprint, used_delegations, max_delegations)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), tree_id, kind, fingerprint, used, limit),
+        )
+
+
+class InMemoryDelegationTreeLedger:
+    """Process-local fallback for isolated Runtime constructions without app stores."""
+
+    def __init__(self) -> None:
+        self._trees: dict[str, dict[str, object]] = {}
+        self._events: dict[str, list[str]] = {}
+        self._budgets: dict[str, dict[str, object]] = {}
+        self._lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        return None
+
+    async def reserve(
+        self, tree_id: str, *, root_session_id: str,
+        max_delegations: int, max_depth: int,
+    ) -> DelegationReservation:
+        async with self._lock:
+            state = self._ensure(tree_id, root_session_id, max_delegations, max_depth)
+            state["max_delegations"] = min(int(state["max_delegations"]), max_delegations)
+            state["max_depth"] = min(int(state["max_depth"]), max_depth)
+            used, limit = int(state["used_delegations"]), int(state["max_delegations"])
+            accepted = used < limit
+            if accepted:
+                used += 1
+                state["used_delegations"] = used
+            self._events[tree_id].append("attempt_reserved" if accepted else "attempt_rejected")
+            return DelegationReservation(accepted, used, limit)
+
+    async def observe_result(
+        self, tree_id: str, fingerprint: str, *, ok: bool,
+        soft_threshold: int = 3, hard_threshold: int = 3,
+    ) -> GuardSignal:
+        async with self._lock:
+            state = self._trees[tree_id]
+            if fingerprint != state["fingerprint"]:
+                state["fingerprint"] = fingerprint
+                state["consecutive_failures"] = 0
+                state["soft_triggered"] = False
+            failures = int(state["consecutive_failures"])
+            soft = bool(state["soft_triggered"])
+            level = GuardLevel.NONE
+            if not ok:
+                failures += 1
+                if not soft and failures >= soft_threshold:
+                    soft, level = True, GuardLevel.SOFT
+                elif soft and failures >= soft_threshold + hard_threshold:
+                    level = GuardLevel.HARD
+            state["consecutive_failures"] = failures
+            state["soft_triggered"] = soft
+            self._events[tree_id].append("result_ok" if ok else "result_failed")
+            if level != GuardLevel.NONE:
+                self._events[tree_id].append(
+                    "guard_soft" if level == GuardLevel.SOFT else "guard_hard",
+                )
+            return GuardSignal(level, "delegate", fingerprint, failures)
+
+    async def get_state(self, tree_id: str) -> DelegationTreeState:
+        async with self._lock:
+            state = self._trees[tree_id]
+            return DelegationTreeState(
+                tree_id=tree_id,
+                root_session_id=str(state["root_session_id"]),
+                max_delegations=int(state["max_delegations"]),
+                used_delegations=int(state["used_delegations"]),
+                max_depth=int(state["max_depth"]),
+                fingerprint=state["fingerprint"],
+                consecutive_failures=int(state["consecutive_failures"]),
+                soft_triggered=bool(state["soft_triggered"]),
+            )
+
+    async def event_kinds(self, tree_id: str) -> list[str]:
+        async with self._lock:
+            return list(self._events[tree_id])
+
+    # ── SessionBudget（#318）：进程内孪生（与 Sqlite 版共享判定与序列化助手，
+    # 判定都在 `run_budget.session_pause_trigger` 一处；状态形状与表行一致——
+    # cost/deadline 存文本、per-tool 表存 JSON 文本——序列化路径只有一份）。 ──
+
+    def _budget(self, budget_key: str, root_session_id: str) -> dict[str, object]:
+        state = self._budgets.get(budget_key)
+        if state is None:
+            state = {
+                "root_session_id": root_session_id, "version": 1,
+                "max_agent_turns_total": None, "max_model_requests": None,
+                "max_total_tokens": None, "max_cost_usd": None,
+                "deadline_at": None, "max_delegations": None,
+                "tool_call_limits": "{}",
+                "agent_turns": 0, "model_requests": 0,
+                "total_tokens": 0, "cost_usd": "0",
+                "tool_calls_by_tool": "{}", "tool_attempts_by_tool": "{}",
+                "delegations": 0,
+            }
+            self._budgets[budget_key] = state
+        elif state["root_session_id"] != root_session_id:
+            raise ValueError("session budget root identity mismatch")
+        return state
+
+    def _budget_snapshot(self, budget_key: str) -> SessionBudgetSnapshot:
+        state = self._budgets[budget_key]
+        return SessionBudgetSnapshot(
+            limits=_row_session_limits(state),
+            consumed=_row_session_consumed(state),
+            version=int(state["version"]),
+        )
+
+    async def ensure_session_budget(
+        self, budget_key: str, *, root_session_id: str, limits: SessionLimits,
+    ) -> SessionBudgetSnapshot:
+        async with self._lock:
+            state = self._budget(budget_key, root_session_id)
+            state["max_agent_turns_total"] = _tighten_ceiling(
+                state["max_agent_turns_total"], limits.max_agent_turns_total)
+            state["max_model_requests"] = _tighten_ceiling(
+                state["max_model_requests"], limits.max_model_requests)
+            state["max_total_tokens"] = _tighten_ceiling(
+                state["max_total_tokens"], limits.max_total_tokens)
+            current_cost = _decimal_or_none(state["max_cost_usd"])
+            if current_cost is not None and limits.max_cost_usd is not None:
+                state["max_cost_usd"] = _decimal_text(min(current_cost, limits.max_cost_usd))
+            elif limits.max_cost_usd is not None:
+                state["max_cost_usd"] = _decimal_text(limits.max_cost_usd)
+            current_deadline = _deadline_or_none(state["deadline_at"])
+            if current_deadline is not None and limits.deadline_at is not None:
+                state["deadline_at"] = _deadline_text(min(current_deadline, limits.deadline_at))
+            elif limits.deadline_at is not None:
+                state["deadline_at"] = _deadline_text(limits.deadline_at)
+            state["max_delegations"] = _tighten_ceiling(
+                state["max_delegations"], limits.max_delegations)
+            current_tools = _tool_map_from_json(state["tool_call_limits"]) or {}
+            for name, ceiling in limits.tool_call_limits.items():
+                current_tools[name] = (
+                    ceiling if name not in current_tools
+                    else min(int(current_tools[name]), int(ceiling))
+                )
+            state["tool_call_limits"] = _tool_map_json(current_tools)
+            return self._budget_snapshot(budget_key)
+
+    async def admit_session_step(self, budget_key: str) -> SessionAdmission:
+        async with self._lock:
+            snapshot = self._budget_snapshot(budget_key)
+            trigger = session_pause_trigger(
+                consumed=snapshot.consumed, session_limits=snapshot.limits,
+                now=utc_now(),
+            )
+            if trigger is not None:
+                return SessionAdmission(False, trigger, snapshot)
+            state = self._budgets[budget_key]
+            state["agent_turns"] = int(state["agent_turns"]) + 1
+            state["model_requests"] = int(state["model_requests"]) + 1
+            return SessionAdmission(True, None, self._budget_snapshot(budget_key))
+
+    async def refund_session_turn(self, budget_key: str) -> None:
+        async with self._lock:
+            state = self._budgets[budget_key]
+            state["agent_turns"] = max(int(state["agent_turns"]) - 1, 0)
+
+    async def refund_session_step(self, budget_key: str) -> None:
+        async with self._lock:
+            state = self._budgets[budget_key]
+            state["agent_turns"] = max(int(state["agent_turns"]) - 1, 0)
+            state["model_requests"] = max(int(state["model_requests"]) - 1, 0)
+
+    async def record_session_model_requests(
+        self, budget_key: str, *, count: int, usage: dict[str, int] | None,
+        cost: Decimal | None,
+    ) -> None:
+        async with self._lock:
+            state = self._budgets[budget_key]
+            state["model_requests"] = int(state["model_requests"]) + count
+            tokens = state["total_tokens"]
+            if tokens is not None:
+                if usage is None or "total_tokens" not in usage:
+                    tokens = None
+                else:
+                    tokens = int(tokens) + int(usage["total_tokens"])
+            state["total_tokens"] = tokens
+            current_cost = _decimal_or_none(state["cost_usd"])
+            if current_cost is None:
+                pass
+            elif cost is None:
+                state["cost_usd"] = None
+            else:
+                state["cost_usd"] = _decimal_text(current_cost + cost)
+
+    async def record_session_tools(
+        self, budget_key: str, *, calls: Mapping[str, int], attempts: Mapping[str, int],
+    ) -> None:
+        async with self._lock:
+            state = self._budgets[budget_key]
+            calls_table = _tool_map_from_json(state["tool_calls_by_tool"]) or {}
+            attempts_table = _tool_map_from_json(state["tool_attempts_by_tool"]) or {}
+            for name, value in calls.items():
+                if value > 0:
+                    calls_table[name] = calls_table.get(name, 0) + value
+            for name, value in attempts.items():
+                if value > 0:
+                    attempts_table[name] = attempts_table.get(name, 0) + value
+            state["tool_calls_by_tool"] = _tool_map_json(calls_table)
+            state["tool_attempts_by_tool"] = _tool_map_json(attempts_table)
+
+    async def update_session_limits(
+        self, budget_key: str, *, expected_version: int, limits: SessionLimits,
+    ) -> SessionBudgetSnapshot:
+        async with self._lock:
+            state = self._budgets[budget_key]
+            if expected_version != int(state["version"]):
+                raise BudgetConflict(
+                    f"session budget version 过期：expected_version={expected_version}，"
+                    f"当前 version={state['version']}（CAS 比较失败，未启动任何工作）"
+                )
+            effective_tools = _tool_map_from_json(state["tool_call_limits"]) or {}
+            for name, ceiling in limits.tool_call_limits.items():
+                effective_tools[name] = ceiling
+            effective: dict[str, Any] = {
+                "max_agent_turns_total": (
+                    limits.max_agent_turns_total
+                    if limits.max_agent_turns_total is not None
+                    else state["max_agent_turns_total"]
+                ),
+                "max_model_requests": (
+                    limits.max_model_requests
+                    if limits.max_model_requests is not None
+                    else state["max_model_requests"]
+                ),
+                "max_total_tokens": (
+                    limits.max_total_tokens
+                    if limits.max_total_tokens is not None
+                    else state["max_total_tokens"]
+                ),
+                "max_cost_usd": _decimal_text(
+                    limits.max_cost_usd
+                    if limits.max_cost_usd is not None
+                    else _decimal_or_none(state["max_cost_usd"])
+                ),
+                "deadline_at": _deadline_text(
+                    limits.deadline_at
+                    if limits.deadline_at is not None
+                    else _deadline_or_none(state["deadline_at"])
+                ),
+                "max_delegations": (
+                    limits.max_delegations
+                    if limits.max_delegations is not None
+                    else state["max_delegations"]
+                ),
+                "tool_call_limits": _tool_map_json(effective_tools),
+            }
+            if effective["max_agent_turns_total"] is not None \
+                    and effective["max_agent_turns_total"] < int(state["agent_turns"]):
+                raise BudgetConflict("ceiling 低于已消耗（agent_turns）⇒ 409")
+            if effective["max_total_tokens"] is not None:
+                if state["total_tokens"] is None:
+                    raise BudgetConflict("token 基数未知 ⇒ 409")
+                if effective["max_total_tokens"] < int(state["total_tokens"]):
+                    raise BudgetConflict("ceiling 低于已消耗（total_tokens）⇒ 409")
+            if effective["max_cost_usd"] is not None:
+                consumed_cost = _decimal_or_none(state["cost_usd"])
+                if consumed_cost is None:
+                    raise BudgetConflict("cost 基数未知 ⇒ 409")
+                if Decimal(effective["max_cost_usd"]) < consumed_cost:
+                    raise BudgetConflict("ceiling 低于已消耗（cost_usd）⇒ 409")
+            calls_table = _tool_map_from_json(state["tool_calls_by_tool"]) or {}
+            for name, ceiling in effective_tools.items():
+                if ceiling < calls_table.get(name, 0):
+                    raise BudgetConflict(f"tool_call_limits[{name}] 低于已消耗 ⇒ 409")
+            if effective["max_delegations"] is not None \
+                    and effective["max_delegations"] < int(state["delegations"]):
+                raise BudgetConflict("ceiling 低于已消耗（delegations）⇒ 409")
+            # headroom（"放得下一次新准入"）与 CAS / 低于已消耗同在**这一个锁**里：
+            # 409 零副作用（11 §6.1），state 尚未被 update。账未知 + 点了 ceiling ⇒
+            # session_resume_headroom_ok 判"放不下"（与 Sqlite 版同一函数，口径一处）。
+            effective_limits = SessionLimits(
+                max_agent_turns_total=effective["max_agent_turns_total"],
+                max_model_requests=effective["max_model_requests"],
+                max_total_tokens=effective["max_total_tokens"],
+                max_cost_usd=_decimal_or_none(effective["max_cost_usd"]),
+                deadline_at=_deadline_or_none(effective["deadline_at"]),
+                tool_call_limits=_tool_map_from_json(effective["tool_call_limits"]) or {},
+                max_delegations=effective["max_delegations"],
+            )
+            effective_consumed = SessionConsumed(
+                agent_turns=int(state["agent_turns"]),
+                model_requests=int(state["model_requests"]),
+                total_tokens=state["total_tokens"],
+                cost_usd=_decimal_or_none(state["cost_usd"]),
+                tool_calls_by_tool=_tool_map_from_json(state["tool_calls_by_tool"]),
+                tool_attempts_by_tool=_tool_map_from_json(state["tool_attempts_by_tool"]),
+                delegations=int(state["delegations"]),
+            )
+            if not session_resume_headroom_ok(
+                consumed=effective_consumed, limits=effective_limits, now=utc_now(),
+            ):
+                raise BudgetConflict(
+                    "恢复后的生效 ceiling 放不下一次新准入（session 作用域）⇒ 409"
+                )
+            state.update(effective)
+            state["version"] = int(state["version"]) + 1
+            return self._budget_snapshot(budget_key)
+
+    async def get_session_budget(self, budget_key: str) -> SessionBudgetSnapshot | None:
+        async with self._lock:
+            if budget_key not in self._budgets:
+                return None
+            return self._budget_snapshot(budget_key)
+
+    async def consume_session_delegation(
+        self, budget_key: str, *, root_session_id: str, max_delegations: int,
+    ) -> DelegationReservation:
+        async with self._lock:
+            state = self._budget(budget_key, root_session_id)
+            limit = (
+                min(int(state["max_delegations"]), max_delegations)
+                if state["max_delegations"] is not None else max_delegations
+            )
+            state["max_delegations"] = limit
+            used = int(state["delegations"])
+            accepted = used < limit
+            if accepted:
+                used += 1
+                state["delegations"] = used
+            return DelegationReservation(accepted, used, limit)
+
+    async def refund_session_delegation(self, budget_key: str) -> None:
+        async with self._lock:
+            state = self._budgets[budget_key]
+            state["delegations"] = max(int(state["delegations"]) - 1, 0)
+
+    async def session_event_kinds(self, budget_key: str) -> list[str]:
+        return []
+
+    def _ensure(
+        self, tree_id: str, root_session_id: str,
+        max_delegations: int, max_depth: int,
+    ) -> dict[str, object]:
+        if tree_id not in self._trees:
+            self._trees[tree_id] = {
+                "root_session_id": root_session_id,
+                "max_delegations": max_delegations,
+                "used_delegations": 0,
+                "max_depth": max_depth,
+                "fingerprint": None,
+                "consecutive_failures": 0,
+                "soft_triggered": False,
+            }
+            self._events[tree_id] = []
+        elif self._trees[tree_id]["root_session_id"] != root_session_id:
+            raise ValueError("delegation tree root identity mismatch")
+        return self._trees[tree_id]
+
+
+@dataclass(frozen=True)
+class SessionBudgetHandle:
+    """`SessionBudgetPort` 的实现（`agent/run_budget.py` 的 Protocol；装配层注入）。
+
+    一个 handle 绑定一个预算 key + 一份**请求侧**声明。`admit_step` 前先 ensure：
+    行不存在（会话首跑）用声明建行，已存在走收窄-only——重启后 runtime 拿同一份
+    声明（来自 `session/started`）重新 ensure，账与 ceiling 都从持久层读回
+    （`03 §5` Crash durability：不靠进程内存）。`None` limits = 纯默认形状
+    （全部无 ceiling；`max_delegations` 的钉死由 `consume_session_delegation`
+    在首用委派时按 profile 声明完成）。
+    """
+
+    ledger: SqliteDelegationTreeLedger | InMemoryDelegationTreeLedger
+    budget_key: str
+    root_session_id: str
+    limits: SessionLimits = field(default_factory=SessionLimits)
+
+    async def snapshot(self) -> SessionBudgetSnapshot:
+        snapshot = await self.ledger.get_session_budget(self.budget_key)
+        if snapshot is None:
+            return await self.ledger.ensure_session_budget(
+                self.budget_key, root_session_id=self.root_session_id,
+                limits=self.limits,
+            )
+        return snapshot
+
+    async def admit_step(self) -> SessionAdmission:
+        await self.ledger.ensure_session_budget(
+            self.budget_key, root_session_id=self.root_session_id, limits=self.limits,
+        )
+        return await self.ledger.admit_session_step(self.budget_key)
+
+    async def refund_turn(self) -> None:
+        await self.ledger.refund_session_turn(self.budget_key)
+
+    async def refund_step(self) -> None:
+        await self.ledger.refund_session_step(self.budget_key)
+
+    async def record_model_requests(
+        self, *, count: int, usage: dict[str, int] | None, cost: Decimal | None,
+    ) -> None:
+        await self.ledger.record_session_model_requests(
+            self.budget_key, count=count, usage=usage, cost=cost,
+        )
+
+    async def record_tools(
+        self, *, calls: Mapping[str, int], attempts: Mapping[str, int],
+    ) -> None:
+        await self.ledger.record_session_tools(
+            self.budget_key, calls=calls, attempts=attempts,
+        )

@@ -20,6 +20,20 @@ class Degradation(str, Enum):
     OPTIONAL_OBSERVABILITY = "OPTIONAL_OBSERVABILITY"  # 缺失不得影响业务执行
 
 
+class DegradeReason(str, Enum):
+    """capability **缺席**的原因分类（`CapabilityWiring.degradations` 的值词汇表）。
+
+    前三码是"配置状态"（改配置能解决），最后一码是"装配时出错"（改配置解决不了）。
+    **不能塌成一个"未启用"**：那会让界面把故障说成配置状态，用户去改一个本来就配好的
+    CAPABILITIES 而永远修不好（#225 的真机症状）。
+    """
+
+    NOT_CONFIGURED = "not_configured"  # CAPABILITIES 里没有这一项
+    DISABLED = "disabled"  # 配了但 enabled=false
+    MISSING_SETTINGS = "missing_settings"  # capability 自己的前置配置（settings）不齐
+    INIT_FAILED = "init_failed"  # factory 抛异常（外部依赖故障等），已按档降级
+
+
 class CapabilityError(RuntimeError):
     """Capability 域显式错误词汇表（08 §2）。降级只能走 optional() 的 None 路径。"""
 
@@ -32,9 +46,13 @@ class CapabilityDescriptor(BaseModel):
     """能力自描述元数据——字段清单为 spec 08 §5 原文 + 本项目两个必需位。
 
     Phase 2 加法（SDD 03 §17 CapabilityManifest）：display_name / surfaces / actions
-    全 Optional，用于 GET /api/capabilities 端点投影 manifest。本轮无 capability
-    填这些字段——只搭骨架；具体 surfaces/actions 声明是 Phase 6 capability-aware
-    surfaces 的工作。
+    全 Optional，用于 GET /api/capabilities 端点投影 manifest。
+
+    **插件仍可以不填**（未声明 surfaces → 端点按保守默认投影：chat/timeline=true、余 false；
+    未声明 actions → 全 false），因为"没说"与"说了没有"该被区分开。
+    但**面的可见性不只由插件决定**：`changes`（文件/改动）与 `terminal`（输出）由
+    **内置工具**产出，它们不由任何插件产出，所以由恒在的 core 条目声明——
+    见 `capability/manifest.py`（#193）。条目形状也只在那边定义一次。
     """
 
     name: str = Field(min_length=1)

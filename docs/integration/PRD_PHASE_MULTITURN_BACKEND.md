@@ -259,5 +259,4 @@
 #139 T9 Langfuse+DoD     ← P3，最终验证，依赖 #138
 ```
 
-每个 ticket 按 to-tickets → /implement → code-review 流程执行。
-完成后通知集成 AI 合并到 `main`。
+如重新启用这些 Ticket，按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 实施：逐票运行 focused checks，review 按风险安排；集成前通过完整门禁和 review coverage。集成由当前主开发按 `AGENTS.md` §13–14 执行。

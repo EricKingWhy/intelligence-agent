@@ -8,7 +8,7 @@
  * override 随 session 切换清空（hook 壳 effect），不跨会话记忆。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TraceDensity } from './density';
 import type { ReasoningStatus } from './reasoningCursor';
 
@@ -74,11 +74,30 @@ export interface Disclosure {
   setLevel: (key: string, level: DisclosureLevel) => void;
 }
 
+/* ── F1（#270）：返回值跨渲染引用稳定 ─────────────────────────────────────────────
+ *
+ * ⚠ **操作约束（改下面两个 hook 前必读）**：返回对象被 `Conversation.tsx` 一路当 prop 透传
+ * 到 `memo(TurnView)` / `memo(ToolCard)` / `memo(ReasoningBlockView)`。每次渲染返回新对象 ⇒
+ * 三处 memo **恒 miss** ⇒ 流式期间每个可见 model 段被反复重跑全量 markdown 解析（「长回答
+ * 越写越卡」）。**加字段就要同步补依赖**，漏一个就是陈旧读取。
+ *
+ * ⚠ 但**不能**因此把返回对象做成"身份永不改变"（票面的 A 方案）：`levelFor` 是在 `TurnView`
+ * 自己的渲染体里被调用来算工具卡 `level` 的，memo 恒 bail out ⇒ 点击档位循环静默无效。
+ * 为什么取 B 方案（整体 `useMemo` + 依赖补全）、否决 A，以及两个 hook 的捕获面逐项核对，
+ * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.2。
+ */
+
 /** 逐会话的手动展开状态（hook 壳：sessionKey 变化即清空）。 */
 export function useDisclosure(sessionKey: string | null): Disclosure {
   const [overrides, setOverrides] = useState<ReadonlyMap<string, DisclosureLevel>>(() => new Map());
 
+  /* 清空 override 只应发生在 **sessionKey 真的变了** 的时候。⚠ 挂载那一次必须跳过：
+   * 否则会写进一张内容相同的新空 Map——白渲染一次，并捅出一个「无内容变化的新引用」。
+   * 为什么这不是"放宽断言"，见 ADR-0037 D5.2。 */
+  const lastSessionKey = useRef(sessionKey);
   useEffect(() => {
+    if (lastSessionKey.current === sessionKey) return;
+    lastSessionKey.current = sessionKey;
     setOverrides(new Map());
   }, [sessionKey]);
 
@@ -86,12 +105,13 @@ export function useDisclosure(sessionKey: string | null): Disclosure {
     setOverrides((prev) => applyOverride(prev, key, level));
   }, []);
 
-  const levelFor = useCallback(
-    (key: string, density: TraceDensity): DisclosureLevel => resolveLevel(overrides, key, density),
-    [overrides],
-  );
-
-  return { levelFor, setLevel };
+  /* 捕获面核对：`levelFor` 只捕获 `overrides`（density 是调用方的参数，不进闭包）；
+   * `setLevel` 只捕获 useCallback 出来的 `setLevel`（空依赖，本身稳定）
+   * ⇒ 依赖集合 `[overrides, setLevel]` 完整。 */
+  return useMemo<Disclosure>(() => ({
+    levelFor: (key, density) => resolveLevel(overrides, key, density),
+    setLevel,
+  }), [overrides, setLevel]);
 }
 
 // ── T2（#95）reasoning 自动开合（S6/S7，规格 03 §7.5 DisclosureState）──
@@ -126,19 +146,25 @@ export function setReasoningOpen(
 export function useReasoningDisclosure(sessionKey: string | null, density: TraceDensity) {
   const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(() => new Map());
 
+  // sessionKey 变化清空；挂载期跳过（理由同 useDisclosure）。
+  const lastSessionKey = useRef(sessionKey);
   useEffect(() => {
+    if (lastSessionKey.current === sessionKey) return;
+    lastSessionKey.current = sessionKey;
     setOverrides(new Map());
   }, [sessionKey]);
-
-  const isOpen = useCallback(
-    (blockId: string, status: ReasoningStatus) =>
-      reasoningIsOpen(overrides, blockId, status, density),
-    [overrides, density],
-  );
 
   const toggle = useCallback((blockId: string, currentOpen: boolean) => {
     setOverrides((prev) => setReasoningOpen(prev, blockId, !currentOpen));
   }, []);
 
-  return { isOpen, toggle };
+  /* F1（#270）：与 `useDisclosure` 同一条契约（ADR-0037 D5.2）。捕获面核对：`isOpen`
+   * 捕获 `overrides` + `density`（**prop，必须进依赖**：切 density 后自动开合规则要按新档
+   * 重新求值且结果会变，memo 必须重算）；`toggle` 捕获空依赖 useCallback
+   * ⇒ `[overrides, density, toggle]` 完整。 */
+  return useMemo(() => ({
+    isOpen: (blockId: string, status: ReasoningStatus) =>
+      reasoningIsOpen(overrides, blockId, status, density),
+    toggle: (blockId: string, currentOpen: boolean) => toggle(blockId, currentOpen),
+  }), [overrides, density, toggle]);
 }

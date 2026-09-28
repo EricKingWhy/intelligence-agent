@@ -141,6 +141,53 @@ class TestStreamDecoderUnit:
         assert text == "中文"
 
 
+class TestStreamingEmission:
+    """未判定期间的放行规则（F16 #235）：判定无关的前导 ASCII 立即流出，
+    非 ASCII 段落必须扣住——**且不得越过已扣住的字节抢先输出**（否则乱序）。
+
+    红证面：只有 ``test_leading_ascii_streams_before_decision`` 在旧实现（一切缓冲到
+    ``flush``）下会红。其余三条锁的是**新设计内部的正确性不变量**（不越位、前缀可与
+    后续拼接、长 ASCII 流仍判定 UTF-8 以免后续中文变乱码），它们在旧实现下输出逐字
+    相同——别把四条都当成 F16 的红证。
+    """
+
+    def test_leading_ascii_streams_before_decision(self):
+        decoder = StreamDecoder(fallback_encoding="cp936")
+
+        assert decoder.feed(b"line-1\r\n") == "line-1\n"
+        assert not decoder.decided  # 还没判定，但输出已经出去了
+
+    def test_held_non_ascii_is_not_overtaken_by_later_ascii(self):
+        """先扣住的 `é` 绝不能被后一段 ASCII 抢到前面去（乱序比缓冲更糟）。"""
+        decoder = StreamDecoder(fallback_encoding="cp936")
+        assert decoder.feed("é".encode()) == ""  # 合法 UTF-8 非 ASCII：进缓冲等判定
+        assert decoder.feed(b"abc") == ""       # 不得抢先吐出 "abc"
+
+        assert decoder.flush() == "éabc"
+
+    def test_ascii_prefix_does_not_block_fallback(self):
+        """放行过的 ASCII 前缀在判定为兜底编码后仍要与后续中文正确拼接。"""
+        decoder = StreamDecoder(fallback_encoding="cp936")
+        text = decoder.feed(b"error: ")
+        text += decoder.feed(CMD_ERROR_TEXT.encode("gbk"))
+        text += decoder.flush()
+
+        assert text == "error: " + CMD_ERROR_TEXT
+        assert decoder.encoding == "cp936"
+
+    def test_long_ascii_stream_commits_utf8_so_later_utf8_is_not_mojibake(self):
+        """放行的 ASCII 也要计入判定预算：否则纯 ASCII 长流永不判定，后面一个坏字节
+        会把整条流拽去兜底编码，紧随其后的**合法 UTF-8 中文就被解成乱码**。
+        """
+        decoder = StreamDecoder(fallback_encoding="cp936")
+        assert decoder.feed(b"A" * _PROBE_LIMIT) == "A" * _PROBE_LIMIT
+        assert decoder.decided and decoder.encoding == "utf-8"
+
+        text = decoder.feed(b"\xff") + decoder.feed("中文".encode()) + decoder.flush()
+
+        assert text == "\ufffd中文"
+
+
 class TestLateInvalidBytes:
     """已判定 UTF-8 之后才出现的坏字节：只能替换，**绝不能抛**（抛=静默丢流）。
 
@@ -169,11 +216,16 @@ class TestLateInvalidBytes:
         assert decoder.flush() == "\ufffd"
 
     def test_flush_finalizes_fallback_pending_bytes(self):
-        """回退路径上 flush 也要收尾：挂在末尾的不完整字节不能被无声丢掉。"""
-        decoder = StreamDecoder(fallback_encoding="cp936")
-        assert decoder.feed(b"abc\xe4") == ""  # 尚未判定，继续缓冲
+        """回退路径上 flush 也要收尾：挂在末尾的不完整字节不能被无声丢掉。
 
-        assert decoder.flush() == "abc\ufffd"
+        前导 ASCII 会立即放行（判定无关，见 `StreamDecoder.feed`），但那个不完整的
+        多字节序列必须留在缓冲里——放行它就会按 UTF-8 解成替换字符并固化进 JSONL。
+        """
+        decoder = StreamDecoder(fallback_encoding="cp936")
+        streamed = decoder.feed(b"abc\xe4")  # ASCII 放行，`\xe4` 继续缓冲
+        assert streamed == "abc"
+
+        assert streamed + decoder.flush() == "abc\ufffd"  # 一个字节都没丢
 
     def test_multibyte_char_split_exactly_at_commit_boundary(self):
         """多字节字符正好跨在「判定 UTF-8」的分界上：一个字都不能丢或变形。

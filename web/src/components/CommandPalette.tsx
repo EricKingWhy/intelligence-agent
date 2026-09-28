@@ -15,9 +15,20 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   items: CommandItem[];
+  /** 关闭**之后**执行一次的动作（当前只有「聚焦输入框」用）；**返回 `true` = 已接管落点**。
+   *
+   *  为什么需要这个缝：命令是在浮层**还开着**的时候跑 `run()` 的，而 Radix 关闭时会把焦点
+   *  还给"打开前的元素"——于是命令里那句 `composer-input.focus()` 当场被这次焦点恢复打断，
+   *  用户看到的是"点了没反应 + 打的字进不去"。同一个坑在 `App.tsx` 的 `createEmptySession`
+   *  已经踩过一次并写明"放在浮层关闭之后……否则会被浮层的关闭焦点打断"，这里是**同一机制的
+   *  第二处入口**。所以把动作挂在 `onCloseAutoFocus`（Radix 唯一的关闭焦点钩子）上。
+   *
+   *  **只有真的登记了落点才接管**：普通 Esc / Ctrl+K 关闭时默认恢复（还给打开前的元素，
+   *  通常正是 composer）必须保留，否则焦点会掉到 body。 */
+  onAfterClose?: () => boolean | void;
 }
 
-export function CommandPalette({ open, onOpenChange, items }: Props) {
+export function CommandPalette({ open, onOpenChange, items, onAfterClose }: Props) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -63,6 +74,12 @@ export function CommandPalette({ open, onOpenChange, items }: Props) {
           className="palette-content"
           aria-label="命令面板"
           onKeyDown={onKeyDown}
+          onCloseAutoFocus={(e) => {
+            // 默认行为 = 把焦点还给"打开前的元素"（Ctrl+K 时通常正是 composer）。
+            // 只有命令登记了落点时（返回 true）才拦下默认恢复；普通关闭不拦，
+            // 免得焦点掉到 body。见 Props。
+            if (onAfterClose?.() === true) e.preventDefault();
+          }}
         >
           <Dialog.Title className="palette-title">命令面板</Dialog.Title>
           <div className="palette-input-row">

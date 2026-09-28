@@ -25,7 +25,7 @@ uv run python demo/live_agent.py
 uv run python demo/live_agent.py --task "在 workspace 建个 hello.py 跑一下"
 
 # 指定 workspace / session 存放目录 / 最大轮数
-uv run python demo/live_agent.py --workspace ./_demo_workspace --store ./_demo_sessions --max-steps 10
+uv run python demo/live_agent.py --workspace ./_demo_workspace --store ./_demo_sessions --max-agent-turns 10
 ```
 
 ## 审批模式（默认安全 vs 放手干）

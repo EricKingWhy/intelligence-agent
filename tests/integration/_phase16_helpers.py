@@ -242,7 +242,7 @@ def permission_violation_script() -> ScriptedModel:
 # ─── T3 #128：coding / edit / test-failure / mutating-tool 分段断言 ──────────
 
 
-def _auto_approve(_req) -> ApprovalResponse:
+async def _auto_approve(_req) -> ApprovalResponse:
     """测试用统一自动审批回调（BashTool DANGER 必须有 callback 才能执行）。"""
     return ApprovalResponse(approved=True, reason="phase16-t3-auto-approve")
 

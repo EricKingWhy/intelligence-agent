@@ -1,0 +1,1 @@
+2026-09-25	#300 validation unblock: prewarm Docker sandbox before the 1s timeout assertion. Independent Spec and Standards reviews of 4e96ed5 both PASS with no findings; exact test passed 3/3 after the fix.	f0ec88f61b0dc68d8c6068e98d39183c1e0af68f..4e96ed558f1e9529b8530540157bc29983e9b7df

@@ -104,7 +104,7 @@ ac73da9a0608b484d8916e6b251e71ccf442b673      # 只有 tree 哈希，无冲突�
 
 | 侧 | 改动文件 |
 | --- | --- |
-| `main`（`c00f742..ebb2d68`） | `CONTEXT.md` + `docs/INTEGRATION_PROMPT_ARCH_DEEPENING_C1_C3.md` + `docs/PHASE_STATUS.md` + `src/agent_harness/**`（6 个后端文件） |
+| `main`（`c00f742..ebb2d68`） | `CONTEXT.md` + `docs/archive/integration-prompts/INTEGRATION_PROMPT_ARCH_DEEPENING_C1_C3.md` + `docs/PHASE_STATUS.md` + `src/agent_harness/**`（6 个后端文件） |
 | `feat/frontend`（`c00f742..b354896`） | `web/**` + 前端 `docs/**`（共 19 个） |
 
 `AGENTS.md` 的 §16 冲突**已在上一批解决**（`9964adc` 之后 `main` 侧只有 `PHASE_STATUS.md` 一处），
@@ -429,7 +429,7 @@ git -C D:/intelligence-agent rev-parse main             # 应 = ls-remote 的 ma
 3. **e2e 断言用 `[role="listbox"]` 判「浮层已开」是刻意的**（§4.5）——不要改回 `combobox`。
    picker 键盘 helper 也**不要**再对搜索框调 `fill()`（短目录下会挂起 30s）。
 4. **推送前先实测远端 sha**（本文件哈希会随修订变化）：`git ls-remote origin main feat/frontend`。
-5. **工作区清洁度**：`test-results/` 与 `docs/HANDOFF_WORKBUDDY_FRONTEND.md` 等为过程产物，
+5. **工作区清洁度**：`test-results/` 与 `docs/archive/handoffs/HANDOFF_WORKBUDDY_FRONTEND.md` 等为过程产物，
    提交时不要纳入（`test-results/` 应在 `.gitignore`）。
 6. **合并方向**：`feat/frontend` ahead 8 / behind 6，合并不是 fast-forward——`main` 侧那 6 个
    commit 只碰 `src/agent_harness/**` + `CONTEXT.md` + `docs/` 下 2 个文件，与本分支**零重叠**，

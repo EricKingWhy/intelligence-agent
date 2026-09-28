@@ -33,10 +33,29 @@ class Settings(BaseSettings):
     # 进程级模型调用并发闸（#89）：parent+child 共享上限，防 TPM/QPM 限流与
     # 机器过载。≤0 = 关闭。TPM 令牌桶限流器 DEFER（ADR-0015）。
     model_max_concurrency: int = 3
+    # Deployment hard ceiling：单个 AgentRuntime 实例的 local turn fuse（#308 / ADR-0044
+    # D1，权威表在 `02 §5.1`）。operator 的政策旋钮——**下调**它是本特性的意图，上调也是
+    # 部署者的显式选择（本层就是最高层，"越权"只在它之下成立）。请求覆盖只能收窄到这个
+    # 值之下，越过即 422（判定见 `agent/budget.py`）。
+    #
+    # 字面量刻意与 `agent.budget.DEFAULT_MAX_AGENT_TURNS` 分列两处而**不 import**：
+    # config 是依赖图最底层，反向 import `agent_harness.agent`（包 `__init__` 会拉
+    # runtime → model.config → 回到本模块）会踩部分初始化循环。两者相等由
+    # `tests/agent/test_local_budget_resolution.py::test_settings_default_matches_contract`
+    # 机械钉住——漏了那条就是"规格说 500、部署默认另一个数"。
+    local_max_agent_turns: int = Field(default=500, ge=1)
     # 交互式审批等待上限（秒）：无人决策 = fail-closed 默认拒绝（PRD T6 §2.2 C）。
     # ≤0 = 无限等待（关闭 fail-closed，保留旧行为）。默认 300s：足够人类走开再回来，
     # 又不让一个没人管的危险工具无限期挂住 run。
     approval_timeout_seconds: float = 300.0
+    # Bash 工具的执行预算（秒）。ADR-0039（含 2026-09-22 附录）：#244 冻结
+    # 「ToolExecutor 是唯一 deadline owner、Local/Docker 默认有效预算同为 60 秒」，
+    # 本字段只提供 Executor 消费的预算输入，不与它争 owner。
+    # 非法值（≤0 / nan / ±inf）在 **Settings 构造期**响亮失败——构造期即启动期，
+    # 所以"没有预算"或"无穷预算"不会被静默带进运行时（#244 AC5）。
+    # 消费点只有装配层（assembly 的 BUILTIN_LOCAL_TOOLS 循环）；接不上就成死键，
+    # 由 tests/test_assembly_bash_budget.py 钉住。
+    bash_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     # Model Fallback 两级链（ADR-0014 决策 14）：FALLBACK_MODEL_PROVIDER 为空 =
     # 单级（无 fallback）。fallback key 同 SecretStr 脱敏待遇（活密钥）。
     fallback_model_provider: str = ""
@@ -61,6 +80,15 @@ class Settings(BaseSettings):
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")
     embedding_dimensions: int = Field(default=1024, gt=0)
+    # BUG-014：记忆检索外层超时（此前 context provider 写死 5s，比 embedding SDK
+    # 的 15s 还紧——代理转发场景必超时）。Settings 注入式，与既有超时字段同风格。
+    memory_search_timeout_seconds: float = Field(default=10.0, gt=0)
+    # R11（#298）：「Jobs are serialized per user. Global formation concurrency defaults
+    # to four and is configurable.」——**按用户串行**在数据库里（`jobs.claim` 的自占用
+    # 子查询，跨重启有效），这一项是**本进程在飞记忆作业数**的上限。
+    # `gt=0` 不是形式约束：0 会让服务循环派不出任何 job，表现为"记忆永远不形成"——
+    # 配错必须响亮失败。消费点唯一：`memory/v2/assembly.build_memory_formation`。
+    memory_v2_max_concurrency: int = Field(default=4, gt=0)
 
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
@@ -84,11 +112,25 @@ class Settings(BaseSettings):
     # Capability / Plugin 显式配置（spec 08 §6 V1）：JSON 字符串，
     # 形状 {"<name>": {"provider": "...", "enabled": bool, "options": {...}}}。
     capabilities: str = ""
+    # Persona（ADR-0023 D10）：env JSON，形如 {"prefix":"…","suffix":"…"}；
+    # 空 = 无 persona = 零行为变化。与 capabilities 同形制（原始 str，
+    # 解析器负责校验并显式失败）。
+    agent_persona: str = ""
     # Skills 全局目录（spec 09 §2）；项目目录是 <workspace>/skills/。
     skill_global_dir: str = ""
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"
+    # artifact 本地落盘根目录（spec 06 §3 的默认 Provider：Local filesystem，
+    # "开发/小型部署"）。落盘形态是 `<artifact_dir>/<session_id>/<artifact_id>`——
+    # 与对象存储的 key 约定 `{session_id}/{artifact_id}` 逐段同构，三个 Provider
+    # 因此同形，读取接口保持 Provider 无关。
+    #
+    # 为什么**独立于** workspace_dir（而不是派生）：ADR-0027 之后 workspace 可能指向
+    # **用户的真实仓库**，artifact 绝不能落进去——那条路径既要能被会话硬删清理
+    # （ADR-0029 D2：只删 harness 自己拼出来的路径），又不能碰用户目录。
+    # 默认值落在 `.agent/` 下与 workspace 同族（.gitignore 已整目录忽略运行时产物）。
+    artifact_dir: str = ".agent/artifacts"
     # detached-run 孤儿回收宽限期（秒，ADR-0016 §2.1）：零订阅者连续超过
     # 该时长 → run 被取消收尾（run/failed(reason=orphaned)）。有订阅者期间
     # 不计时；≤0 = 不回收（不推荐：无人观看的 run 会烧到自然终态）。
@@ -99,6 +141,14 @@ class Settings(BaseSettings):
     # 空 = 无可选模型（GET /api/models 只列默认链，model 参数一律 422）。
     # SecretStr：JSON 里可带条目级 api_key（活密钥），dump()/repr() 一律脱敏。
     agent_models: SecretStr = SecretStr("")
+
+    # #203 / ADR-0032：自定义供应商存储。非密配置落**用户级全局** JSON
+    # （作用域 = 全局，用户裁定；**不得**放进 workspace——那是 per-session 的；
+    # 相对路径依赖 CWD 的教训与 .env 同源，默认锚用户主目录）；
+    # 密钥只进凭据管理器（keyring），该文件不含任何密钥字段。
+    provider_store_path: str = str(Path.home() / ".agent-harness" / "model-providers.json")
+    # 连接测试超时（秒，§6.2）：固定参数之一，默认 15s——测试不该等 300s。
+    model_test_timeout_seconds: float = 15.0
 
     # Langfuse 旁路观测（ADR-0018 D2/D6，首个 OPTIONAL_OBSERVABILITY 实现）：
     # key 空 = 旁路完全缺席（懒加载，零 import 开销）。key 同 SecretStr 脱敏待遇。

@@ -81,6 +81,35 @@ async def test_session_meta_origin_is_closed_vocabulary(tmp_path: Path) -> None:
     assert loaded.origin == "delegation"
 
 
+async def test_clear_delegation_parent_unlinks_only_delegation_rows(
+    tmp_path: Path,
+) -> None:
+    """硬删父会话时的补偿（#172 / ADR-0029 D5）：清委派子行的父链接，别的一律不动。
+
+    不清的话子行会指着一个已删的会话——`build_lineage_tree` 渲染成
+    `(parent missing)`，而那条边随父日志消失后**永远无法自愈**。
+    """
+    store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await store.initialize()
+    await store.upsert(_meta(session_id="p"))
+    await store.upsert(_meta(session_id="d1", parent_session_id="p", origin="delegation"))
+    await store.upsert(_meta(session_id="d2", parent_session_id="p", origin="delegation"))
+    # 反向样本：不是委派的、以及父不是 p 的，都不该被这次清理碰到
+    await store.upsert(_meta(session_id="other", parent_session_id="p", origin="fork"))
+    await store.upsert(_meta(session_id="d3", parent_session_id="q", origin="delegation"))
+
+    assert await store.clear_delegation_parent("p") == 2
+    assert await store.clear_delegation_parent("p") == 0  # 幂等：重跑没有可修的行
+
+    for sid in ("d1", "d2"):
+        row = await store.get(sid)
+        assert row is not None and (row.parent_session_id, row.origin) == (None, None)
+    keeper = await store.get("other")
+    assert keeper is not None and keeper.parent_session_id == "p"  # fork 行不归它管
+    untouched = await store.get("d3")
+    assert untouched is not None and untouched.parent_session_id == "q"
+
+
 async def test_upsert_conflict_refreshes_lineage_fields(tmp_path: Path) -> None:
     """完整 upsert 的 ON CONFLICT 分支必须刷新 lineage 三列（可修正归属）。"""
     store = SqliteSessionMetaStore(tmp_path / "harness.db")

@@ -61,6 +61,7 @@ def test_agent_factory_create_passes_system_prompt(tmp_path):
         tool_scope=frozenset({"read"}),
     )
 
-    child = factory.create(spec, source_registry=source)
+    child = factory.create(spec, source_registry=source,
+                            grantable=frozenset({"read"}))
 
     assert child._context_builder.system_prompt == spec.system_prompt

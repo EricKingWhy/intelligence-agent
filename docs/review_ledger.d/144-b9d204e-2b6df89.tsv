@@ -1,0 +1,1 @@
+2026-09-23	Primary self-review, Standards + Spec: one test-only commit exercises Unicode workspace-root roundtrip through WorkspaceRegistry.create(); persisted contract is explicit UTF-8, with no production-code changes; findings P0-P3 = 0.	b9d204e..2b6df89

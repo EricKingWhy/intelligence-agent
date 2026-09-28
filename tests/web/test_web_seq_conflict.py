@@ -23,7 +23,7 @@ from agent_harness.web.app import create_app
 
 _CATALOG_JSON = (
     '[{"name": "gpt-4o", "provider": "deepseek", "model_name": "gpt-4o-mini"},'
-    ' {"name": "glm-4.5", "provider": "zhipu", "model_name": "glm-4.5"}]'
+    ' {"name": "mimo-flash", "provider": "mimo", "model_name": "mimo-v2.6-flash"}]'
 )
 
 
@@ -68,7 +68,7 @@ class TestCorruptLogHttpSemantics:
 
         res = client.post(
             "/api/sessions/sid-1/messages",
-            json={"content": "再问一次", "mode": "queue", "max_steps": 5},
+            json={"content": "再问一次", "mode": "queue", "budget": {"local": {"max_agent_turns": 5}}},
         )
 
         assert res.status_code == 409, res.text
@@ -104,7 +104,7 @@ class TestCorruptLogHttpSemantics:
 
         res = client.post(
             "/api/sessions/sid-1/model",
-            json={"provider": "zhipu", "model_id": "glm-4.5"},
+            json={"provider": "mimo", "model_id": "mimo-flash"},
         )
 
         assert res.status_code == 200, res.text

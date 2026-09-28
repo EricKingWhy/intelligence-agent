@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.factory import AgentFactory
@@ -130,7 +130,11 @@ class TestDelegateTool:
     @pytest.mark.asyncio
     async def test_child_failure_yields_failed_tool_result(self, tmp_path):
         child_model = ScriptedModel([AIMessage(content="")])  # 空响应 → run 失败
-        tool, _, _, _ = _activated_tool(tmp_path, child_model=child_model)
+        tool, workspace_registry, parent_session_id, provider = _activated_tool(
+            tmp_path, child_model=child_model,
+        )
+        parent_sandbox = workspace_registry.get(parent_session_id)
+        parent_sandbox.write_text("owner-marker.txt", "parent-owned")
 
         result = await tool.execute(_args("coding", "必失败任务"))
 
@@ -138,6 +142,9 @@ class TestDelegateTool:
         payload = json.loads(result.metadata["output"])
         assert payload["status"] == "failed"
         assert result.retryable is False  # 决策归 supervisor，不自动重试
+        child = provider.last_child_sessions[-1]
+        assert workspace_registry.get(child.session_id) is parent_sandbox
+        assert parent_sandbox.read_text("owner-marker.txt") == "parent-owned"
 
     @pytest.mark.asyncio
     async def test_child_shares_parent_sandbox(self, tmp_path):
@@ -148,6 +155,12 @@ class TestDelegateTool:
         assert provider.last_child_sessions, "child session 可观测（hub/lineage 挂点）"
         child = provider.last_child_sessions[-1]
         assert child.sandbox is workspace_registry.get(parent_session_id)
+        assert workspace_registry.get(child.session_id) is child.sandbox
+        child.sandbox.write_text("owner-marker.txt", "parent-owned")
+        workspace_registry.delete(child.session_id)
+        assert workspace_registry.get(parent_session_id).read_text(
+            "owner-marker.txt"
+        ) == "parent-owned"
 
     @pytest.mark.asyncio
     async def test_unactivated_provider_fails_explicitly(self, tmp_path):
@@ -198,10 +211,13 @@ class TestDelegationBudget:
         assert "2/2" in r3.message, "失败消息必须带已用/上限（模型可决策收尾）"
 
     @pytest.mark.asyncio
-    async def test_budget_resets_per_run(self, tmp_path, caplog):
-        """计数按 run_id 隔离：不同 run 各自独立预算。"""
-        import logging
+    async def test_delegation_counter_aggregates_across_runs(self, tmp_path):
+        """`#318`：delegations 计数器在 durable session 账行上**跨 run 聚合**。
 
+        旧 #287 语义是"计数按 run_id 隔离、新 run 预算重置"；#318 把这一维挪进
+        session 账行（budget_key = 树根会话 id，`02 §5.1` 的树级真相），run-b 的
+        第一次委派也看得到 run-a 的消耗——树账不因换 run 而回血。
+        """
         from agent_harness.session import run_context_var
 
         child_model = ScriptedModel([
@@ -216,30 +232,30 @@ class TestDelegationBudget:
         finally:
             run_context_var.reset(t1)
         assert r1.ok and not over.ok
+        assert "1/1" in over.message
 
         t2 = run_context_var.set("run-b")
         try:
-            with caplog.at_level(logging.DEBUG, logger="agent_harness.agent"):
-                r2 = await tool.execute(_args("coding", "b"))
+            r2 = await tool.execute(_args("coding", "b"))
         finally:
             run_context_var.reset(t2)
-        for rec in caplog.records:
-            if "异常终止" in rec.getMessage():
-                print("DEBUG-ERR:", rec.error, "|", rec.error_type)
-        assert r2.ok, "新 run 预算必须重置"
+        assert not r2.ok, "新 run 不重置树级账：session 行的 delegations 已到线"
+        assert "预算耗尽" in r2.message
+        assert "1/1" in r2.message, "拒绝消息带的是**跨 run 聚合**的已用/上限"
 
 
 class TestRepeatedDelegationBreaker:
     """#88：repeated-delegation 熔断复用同错熔断机制——delegate 是普通工具，
-    同指纹 (delegate, {target, task}) 连续失败 3 次 → 软熔断，6 次 → 硬熔断。
-    无需新机制：验证既有护栏对 delegate 工具的真实覆盖。"""
+    同指纹 (delegate, {target, task}) 连续失败 3 次 → 一次纠正，6 次 → **非终态**
+    `run/paused(reason=stuck)`（`#317` T9：旧硬熔断终结臂已从生产路径移除，
+    ADR-0048 D5；计数权威仍是委派树账本，见 `guards.external_failure_signal`）。"""
 
     @pytest.mark.asyncio
     async def test_repeated_failing_delegation_trips_guard(self, tmp_path):
         from langchain_core.messages import AIMessage as _AIM
 
         from agent_harness.agent.runtime import AgentRuntime
-        from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        from agent_harness.agent.types import STATUS_PAUSED
         from agent_harness.tooling import ToolExecutor as _TE
 
         failing_child = ScriptedModel([])  # 空剧本：child run 必失败
@@ -263,21 +279,29 @@ class TestRepeatedDelegationBreaker:
         supervisor = ScriptedModel(supervisor_calls)
         runtime = AgentRuntime(
             model=supervisor, registry=registry, executor=_TE(registry),
-            max_steps=20,
+            max_agent_turns=20,
         )
         session = make_session(tmp_path)
 
         result = await runtime.run(session, "反复委派同一任务")
 
-        assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        assert result.status == STATUS_PAUSED
         guard_events = [e for e in session._events if e.type == "tool/failure-guard"]
-        levels = [e.data["level"] for e in guard_events]
-        assert "soft" in levels and "hard" in levels
-        assert guard_events[-1].data["consecutive_failures"] == 6
+        assert [e.data["level"] for e in guard_events] == ["soft"]
+        assert guard_events[0].data["consecutive_failures"] == 3
+        # 再达阈值（2T=6）收口：结构化暂停事件 + 非终态 run/paused，**不是** run/failed
+        stuck = [e.data for e in session._events if e.type == "guard/stuck"]
+        assert [e["level"] for e in stuck] == ["paused"]
+        assert stuck[0]["pattern"] == "stuck.tool_failure_loop"
+        assert stuck[0]["count"] == 6 and stuck[0]["threshold"] == 3
+        assert [e.data["reason"] for e in session._events if e.type == "run/paused"] == [
+            "stuck"
+        ]
+        assert [e for e in session._events if e.type == "run/failed"] == []
 
 
 class _SlowChildModel(ScriptedModel):
-    """ainvoke 睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
+    """流式睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
 
     def __init__(self, delay: float, responses_count: int = 12) -> None:
         super().__init__([AIMessage(content="child 完成") for _ in range(responses_count)])
@@ -285,14 +309,17 @@ class _SlowChildModel(ScriptedModel):
         self.in_flight = 0
         self.peak = 0
 
-    async def ainvoke(self, messages, **kwargs):
+    async def astream(self, messages, **kwargs):
+        # child 走 run_stream（astream）：延迟与在飞计数必须挂在流式路径上，
+        # 否则并发闸的测量 instrument 失效（独立审查 8ebc9841 的 P1）。
         import asyncio
 
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
         try:
             await asyncio.sleep(self._delay)
-            return await super().ainvoke(messages, **kwargs)
+            async for chunk in super().astream(messages, **kwargs):
+                yield chunk
         finally:
             self.in_flight -= 1
 
@@ -366,9 +393,10 @@ class TestCancelAndResume:
         from agent_harness.session import Session as _Session
 
         class _BlockingChildModel(ScriptedModel):
-            async def ainvoke(self, messages, **kwargs):
+            async def astream(self, messages, **kwargs):
+                # child 走 run_stream（astream）：流式路径同样阻塞，取消语义才可测。
                 await asyncio.sleep(30)
-                return AIMessage(content="never")
+                yield AIMessageChunk(content="never")
 
         provider = InProcessSubagentProvider()
         delegate = DelegateTool(provider)
@@ -376,7 +404,10 @@ class TestCancelAndResume:
         registry.register(delegate)
         store = JsonlSessionStore(tmp_path / "sessions")
         workspace_registry = WorkspaceRegistry(root=tmp_path / "w")
-        workspace_registry.create("parent-1", workspace_root=tmp_path / "ws")
+        parent_sandbox = workspace_registry.create(
+            "parent-1", workspace_root=tmp_path / "ws",
+        )
+        parent_sandbox.write_text("owner-marker.txt", "parent-owned")
         provider.activate(
             factory=AgentFactory(model=_BlockingChildModel([AIMessage(content="x")]),
                                  primary_model_name="m"),
@@ -392,7 +423,7 @@ class TestCancelAndResume:
             }]),
         ])
         runtime = AgentRuntime(model=supervisor, registry=registry,
-                               executor=ToolExecutor(registry), max_steps=5)
+                               executor=ToolExecutor(registry), max_agent_turns=5)
         parent_store = JsonlSessionStore(tmp_path / "parent")
         parent_session = Session.start(parent_store)
 
@@ -411,6 +442,12 @@ class TestCancelAndResume:
         child_types = [e.type for e in child._events]
         assert "model/failed" in child_types
         assert "run/failed" in child_types
+        assert workspace_registry.get(child.session_id) is parent_sandbox
+        assert parent_sandbox.read_text("owner-marker.txt") == "parent-owned"
+        workspace_registry.delete(child.session_id)
+        assert workspace_registry.get("parent-1").read_text(
+            "owner-marker.txt"
+        ) == "parent-owned"
 
         # 父 session：委派尝试已可见（model/completed 携带 tool_calls，无 Ledger
         # 时立即持久化），但委派未完成 → 无 tool/result。

@@ -6,8 +6,10 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, ReasoningBlock, ToolCall, ToolOutputChunk, Turn, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
+import { isCancelledRunFailure } from './runCancel';
+import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 
@@ -17,6 +19,137 @@ import { quarantineRecord, validateEvent } from './eventValidate';
 
 /** 输出 chunk 数上限：交替通道流的有界收缩触发线（spec 03 §9.4 bounded DOM）。 */
 const MAX_OUTPUT_CHUNKS = 512;
+
+// ── ADR-0030（#196）§4.2 / §5.4：supersede 区间（与后端 derive.py 同构）─────
+//
+// 被取代 seq 为 s。区间 = `[s, n)`，n = s 之后第一条**未被取代**的 user/message
+// 的 seq；没有就一直到底。判据只看 seq 与"该 seq 是否也被取代"，与事件到达顺序
+// 无关（纯函数性质）。前端与后端**同一区间定义、同一命名**——漂移由两端的
+// 测试各锁一条（后端单测 + 前端 e2e）。
+//
+// 被取代的整轮（问 + 答 + 工具）从**视图**移除；events 日志照旧保留（不变量
+// #3 append-only），只影响渲染。用户裁定（§4.5.1）：旧回答段直接删掉不显示，
+// 不加"已改写"标记。
+
+/** supersede 区间的端点：返回每个被取代 seq 的区间 `[start, end)`（end 独占）。
+ *  与后端 `derive.py` 的区间计算同构（同一判据、同一"到下一条未被取代的
+ *  user 消息"边界）。 */
+function supersedeRanges(events: readonly AgentEvent[]): Array<[number, number]> {
+  const supersededSeqs = new Set<number>();
+  for (const event of events) {
+    if (event.type !== EventType.MESSAGE_SUPERSEDED) continue;
+    const raw = event.data.superseded_seq;
+    // 一行坏数据只损失该行（与后端 derive 同款容错）：非有限数就忽略。
+    if (typeof raw === 'number' && Number.isFinite(raw)) supersededSeqs.add(raw);
+  }
+  if (supersededSeqs.size === 0) return [];
+  const userSeqs = events
+    .filter((e) => e.type === EventType.USER_MESSAGE && e.seq !== null)
+    .map((e) => e.seq as number);
+  // reduce 而非 Math.max(...spread)（审查 P2）：超长会话（数万事件）下
+  // spread 会把整个数组当函数参数展开 → RangeError，历史装载直接崩。
+  const lastSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+  const ranges: Array<[number, number]> = [];
+  for (const seq of [...supersededSeqs].sort((a, b) => a - b)) {
+    const following = userSeqs.find((u) => u > seq && !supersededSeqs.has(u));
+    const end = following !== undefined ? following : lastSeq + 1;
+    if (end > seq) ranges.push([seq, end]);
+  }
+  return ranges;
+}
+
+/** 把 supersede 区间应用到已渲染的 turns：区间内的轮整段置 `superseded`。
+ *  整体 reassign（与 pending_approvals 同款契约）；不删除 turns 数组元素——
+ *  渲染层按标记过滤，重放确定性更好（重复应用幂等）。 */
+function applySupersedeShadow(state: ConversationState): void {
+  const ranges = supersedeRanges(state.events);
+  if (ranges.length === 0) return;
+  const shadowed = (seq: number | null): boolean =>
+    seq !== null && ranges.some(([start, end]) => start <= seq && seq < end);
+  state.turns = state.turns.map((turn) =>
+    shadowed(turn.user_message_seq) && !turn.superseded
+      ? { ...turn, superseded: true }
+      : turn,
+  );
+}
+
+/** 未投递输入的逐事件折叠（ADR-0030 §5.2：事件流是唯一事实）。
+ *  `message/queued` / `queue/cancelled` / `steer/requested` 增量；`queue/consumed`
+ *  / `steer/applied` 摘除（消费事实）。与后端 `undelivered_inputs` 同一判据。 */
+function projectUndelivered(state: ConversationState, event: AgentEvent): void {
+  const { type } = event;
+  const data = event.data;
+  if (type === EventType.MESSAGE_QUEUED) {
+    const id = data.queue_id;
+    if (typeof id !== 'string' || !id) return;
+    state.undelivered = [
+      ...state.undelivered,
+      {
+        kind: 'queue',
+        id,
+        content: String(data.content ?? ''),
+        seq: event.seq ?? 0,
+        created_at: event.time ?? '',
+      },
+    ];
+    return;
+  }
+  if (type === EventType.STEER_REQUESTED) {
+    const id = data.steer_id;
+    if (typeof id !== 'string' || !id) return;
+    state.undelivered = [
+      ...state.undelivered,
+      {
+        kind: 'steer',
+        id,
+        content: String(data.content ?? ''),
+        seq: event.seq ?? 0,
+        created_at: event.time ?? '',
+      },
+    ];
+    return;
+  }
+  if (type === EventType.QUEUE_CANCELLED) {
+    const id = data.queue_id;
+    if (typeof id !== 'string') return;
+    state.undelivered = state.undelivered.filter((u) => u.id !== id);
+    return;
+  }
+  if (type === EventType.QUEUE_CONSUMED || type === EventType.STEER_APPLIED) {
+    const id =
+      type === EventType.QUEUE_CONSUMED
+        ? data.queue_id
+        : data.steer_id;
+    if (typeof id !== 'string') return;
+    state.undelivered = state.undelivered.filter((u) => u.id !== id);
+  }
+}
+
+/** 首屏/重连补齐：用 `GET /queue` 的响应**替换**未投递列表（§5.2 状态源优先级：
+ *  事件流是唯一事实，本端点只做补齐）。替换而非合并——重复执行幂等。
+ *  由 useSession 在历史装载 / 重连时调用。 */
+export function restoreUndeliveredFromQueue(
+  state: ConversationState,
+  queue: { items: Array<{ queue_id: string; content: string; created_at: string }>; steers: Array<{ steer_id: string; content: string; created_at: string }> },
+): void {
+  const items: UndeliveredInput[] = [
+    ...queue.items.map((i) => ({
+      kind: 'queue' as const,
+      id: i.queue_id,
+      content: i.content,
+      seq: Number.MAX_SAFE_INTEGER,
+      created_at: i.created_at,
+    })),
+    ...queue.steers.map((s) => ({
+      kind: 'steer' as const,
+      id: s.steer_id,
+      content: s.content,
+      seq: Number.MAX_SAFE_INTEGER,
+      created_at: s.created_at,
+    })),
+  ];
+  state.undelivered = items;
+}
 
 export function initConversation(session_id: string): ConversationState {
   return {
@@ -28,7 +161,12 @@ export function initConversation(session_id: string): ConversationState {
     compactions: [],
     reconcile_queue: [],
     pending_approvals: [],
+    approval_decisions: [],
+    permission_policy: null,
+    session_permission_mode: null,
     events: [],
+    // ADR-0037 D2：append 计数初值 0（与 projectHistory 的空历史产物一致）。
+    eventsVersion: 0,
     unknown_events: [],
     model: null,
     usage_total: null,
@@ -38,8 +176,13 @@ export function initConversation(session_id: string): ConversationState {
     run_id: null,
     model_fallback: null,
     run_interrupted: null,
+    run_paused: null,
+    run_failure: null,
     turn_index: null,
+    requested_model: null,
+    model_run_id: null,
     seenSeqs: new Set(),
+    undelivered: [],
   };
 }
 
@@ -179,15 +322,57 @@ function emptySummary(): string {
   return '';
 }
 
-/** 前端未定义语义的事件摘要（未知类型 / 词汇表内未接线的类型）。 */
-function unknownSummary(event: AgentEvent): string {
-  return `未知事件 · ${JSON.stringify(event.data).slice(0, 40)}`;
+/** 前端未定义语义的事件摘要（未知类型 / 词汇表内未接线的类型）。
+ *  UI-04 信任裂缝：不再把 payload JSON 切片甩给用户（行标签已是 type，
+ *  原始 payload 在事件详情/UnknownSurface 兜底里 verbatim 可查）。 */
+function unknownSummary(_event: AgentEvent): string {
+  return '未接线的类型（payload 已保留，点行看详情）';
+}
+
+/** UI-04：forked / 审批族的单行语义（此前落「未知事件」）。 */
+function summarizeForked(_event: AgentEvent): string {
+  return '已分叉';
+}
+
+function summarizeApprovalRequested(event: AgentEvent): string {
+  const name = event.data.tool_name;
+  return typeof name === 'string' && name ? `等待审批 · ${name}` : '等待审批';
+}
+
+function summarizePermissionResolved(event: AgentEvent): string {
+  const decision = event.data.decision;
+  return typeof decision === 'string' && decision ? `审批已决（${decision}）` : '审批已决';
 }
 
 /** 增量类事件共用摘要（model/delta、text/delta、tool/output_delta、
  *  reasoning/delta 同一惯例：Timeline 行仍 verbatim 在场，摘要只记增量）。 */
 function summarizeDeltaChars(event: AgentEvent): string {
   return `+${String(event.data.delta ?? '').length} 字符`;
+}
+
+// ── ADR-0030（#196）：在途输入通道的 Timeline 摘要 ──
+
+/** 术语表 §2：queue（排队）= 等当前 run 结束后接力成下一个 run。 */
+function summarizeMessageQueued(event: AgentEvent): string {
+  const content = String(event.data.content ?? '').trim();
+  return content ? `已排队 · ${truncateQueueSummary(content)}` : '已排队';
+}
+
+/** 术语表 §2：steer（引导）= 注入当前 run 的下一个模型调用前。 */
+function summarizeSteerRequested(event: AgentEvent): string {
+  const content = String(event.data.content ?? '').trim();
+  return content ? `引导中 · ${truncateQueueSummary(content)}` : '引导中';
+}
+
+/** §4.5.1：被取代的那一轮整段从界面消失——Timeline 摘要只描述事实。 */
+function summarizeSuperseded(event: AgentEvent): string {
+  const seq = event.data.superseded_seq;
+  return typeof seq === 'number' ? `第 ${seq} 条输入已被新内容取代` : '输入已被取代';
+}
+
+/** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
+function truncateQueueSummary(content: string, max = 40): string {
+  return content.length > max ? `${content.slice(0, max)}…` : content;
 }
 
 // ── applyEvent 的 per-type 投影 ──
@@ -217,6 +402,16 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   // 「已完成」）同屏打架。清空后 `run_interrupted` 的语义收窄为「**最近一个** run
   // 以中断收口」，deriveRunPulse 也就据此给出中性的「已中断」而不是「已完成」。
   state.run_interrupted = null;
+  // #220：失败归因同属「**最近一个** run」的事实，新 run 开始即过期（同 run_interrupted）。
+  state.run_failure = null;
+  // #226：本轮请求侧模型标识（run/started 持久携带）——每 run 各自一个值，故是
+  // 「**最近一个** run」的镜像（与 run_failure / run_interrupted 同一失效规则）：
+  // 新 run 开始即重置，本 run 没带该键就归 null（**不**保留上一轮的值）。必须放在
+  // 下面 turn_index 的提前 return 之前：那个 return 只跳过 turn 回填。
+  // 失效规则与「与 model 的归属对照」口径见 ADR-0034 §2.3。
+  const requested = event.data.model;
+  state.requested_model =
+    typeof requested === 'string' && requested ? requested : null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -284,7 +479,12 @@ function projectModelCompleted(state: ConversationState, event: AgentEvent): voi
     ensureModelActivity(turn);
   });
   // Run-level observability（后端 Gap 1）：可选字段，缺失/畸形不伪造。
-  if (typeof data.model === 'string' && data.model) state.model = data.model;
+  // 同时记下这个回显属于哪个 run：`model` 不随新 run 失效，而 `requested_model` 是每
+  // run 重置的——没有归属就无法判断两个值能否并排比较（ADR-0034 §2.3）。
+  if (typeof data.model === 'string' && data.model) {
+    state.model = data.model;
+    state.model_run_id = event.run_id ?? null;
+  }
   const usage = parseUsage(data.usage);
   if (usage) {
     // run/completed 权威聚合到达前，累计各次推理 usage 作为运行中视图。
@@ -348,21 +548,24 @@ function projectToolResult(state: ConversationState, event: AgentEvent): void {
     tool.result = parsedData ?? parsed?.message ?? data.content;
     // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
     // directly into ToolResult.data — not nested under data.diff. Detect them here.
-    // da394a9 批：>2000 字符的 before/after 变为截断摘要并内嵌
-    // "use inspect_artifact(<id>)" marker——diff 已归档，视图渲染占位态而非
-    // 把 marker 当 diff 内容。
+    // >2000 字符的 before/after 变为截断摘要并内嵌 "use <读回工具>(<id>)" marker
+    // ——diff 已归档，视图渲染占位态而非把 marker 当 diff 内容。工具名两个都认
+    // （S3 → inspect_artifact，MinIO / Local → read_artifact），并**原样带下去**：
+    // 面板要按这个部署真实可调的那个名字回显与复制（#186 AC4）。
     if (
       parsedData &&
       typeof parsedData.before === 'string' &&
       typeof parsedData.after === 'string'
     ) {
-      const artifactId =
+      const marker =
         parseArtifactMarker(parsedData.before) ?? parseArtifactMarker(parsedData.after);
       tool.diff = {
         before: parsedData.before,
         after: parsedData.after,
         truncated: parsedData.truncated === true,
-        ...(artifactId !== null ? { archived: true as const, artifactId } : {}),
+        ...(marker !== null
+          ? { archived: true as const, artifactId: marker.artifactId, artifactTool: marker.toolName }
+          : {}),
       };
     }
     tool.completed_at = event.time ?? new Date().toISOString();
@@ -421,6 +624,8 @@ function projectToolOutputDelta(state: ConversationState, event: AgentEvent): vo
 function projectRunCompleted(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
   state.run_cancelled = false;
+  // #220：失败归因是「最近一个 run 的结局」，更晚的终态一到它就过期（同 run_cancelled 复位）。
+  state.run_failure = null;
   state.usage_total = parseUsage(data.usage_total) ?? state.usage_total;
   state.cost_usd =
     typeof data.cost_usd === 'number' && Number.isFinite(data.cost_usd) ? data.cost_usd : null;
@@ -429,16 +634,26 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
   finalizeRun(state, 'completed', event.time);
 }
 
-/** 终态 reason 三值（契约回执 §4，detached-run）：'cancelled' = 显式
+/** 终态 reason（契约回执 §4，detached-run）：'cancelled' = 显式
  *  POST /cancel（用户意图中断，≠ 错误）→ Run Pulse「已取消」；
  *  'orphaned' = 孤儿回收（零订阅 300s，非用户意图，按失败展示）；
- *  缺省 = 模型/执行器异常。断连永远不出现在终态原因里（订阅者离开只
+ *  其余（#222 起）**总有值**：已分类故障给 `provider_*`，未分类给异常类型名
+ *  （如 `RateLimitError`）——reason 是开集，只对上面两个字面量做等值判断，
+ *  别把它当枚举/白名单用（取值域与呈现见 ADR-0033 §2.1/§2.3）。缺省只会出现在
+ *  #222 之前写下的历史会话里。断连永远不出现在终态原因里（订阅者离开只
  *  unsubscribe）。turn/tool 仍按失败终态 settle。
  *  trace_id / trace_url 对称抽取（契约 2d7f87a——失败 run 在 Langfuse 也有
  *  可见 trace，跳转有排查价值；此前 failed 分支漏抽 trace_id 是 pre-existing bug）。 */
 function projectRunFailed(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
-  state.run_cancelled = data.reason === 'cancelled';
+  state.run_cancelled = isCancelledRunFailure(data);
+  // #220：折叠失败归因。要点三条（载荷形状与呈现口径见 ADR-0033 §2.2/2.3）：
+  // 取消那支不记（取消 ≠ 错误，da394a9）；两个键互相独立、都可缺；都没给就整体 null
+  // ——不是 `{reason:null,message:null}`，那会让 `if (run_failure)` 为真却无内容。
+  const reason = typeof data.reason === 'string' && data.reason ? data.reason : null;
+  const message = typeof data.message === 'string' && data.message ? data.message : null;
+  state.run_failure =
+    state.run_cancelled || (reason === null && message === null) ? null : { reason, message };
   state.trace_id = typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null;
   state.trace_url = typeof data.trace_url === 'string' && data.trace_url ? data.trace_url : null;
   finalizeRun(state, 'failed', event.time);
@@ -454,28 +669,214 @@ function projectRunInterrupted(state: ConversationState, event: AgentEvent): voi
     interrupted_seq: typeof data.interrupted_seq === 'number' ? data.interrupted_seq : null,
     reason: typeof data.reason === 'string' ? data.reason : 'process_restart',
   };
+  state.run_failure = null; // #220：中断是这轮 run 的**结局**终态，过期归因同 run/completed 清掉
   finalizeRun(state, 'completed', event.time);
 }
 
-/** Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
- *  Attach the ref to the producing tool call so the Inspector can fetch it. */
-function projectArtifactCreated(state: ConversationState, event: AgentEvent): void {
+/** 某个键的**整数读数**：只在真为有限数时采用，否则 null（= 该维缺席，不是 0）。 */
+function dimensionNumber(raw: Record<string, unknown>, key: string): number | null {
+  return numberOf(raw[key]) ?? null;
+}
+
+/** 某个键的**十进制读数**（cost 维）：wire 上是十进制**字符串**（也可能是数），
+ *  原样保留字符串形态，不在前端转 float（`11 §6.1`：二进制浮点相等不是契约）；
+ *  空串 / 形状不合 ⇒ null（unavailable，不是 0）。 */
+function dimensionDecimalText(raw: Record<string, unknown>, key: string): string | null {
+  const value = raw[key];
+  if (typeof value === 'string') return value.trim() === '' ? null : value.trim();
+  const num = numberOf(value);
+  return num === undefined ? null : String(num);
+}
+
+/** 某个键的**时刻文本**（deadline 维，`#315`）：wire 上是 RFC 3339 UTC 的**文本**
+ *  （`RunLimits.as_projection` 在 `limits.run` 里放的那个键；形状冻结在 ADR-0046 §D7）。
+ *
+ *  与 `dimensionDecimalText` 分开的理由是形状判据不同：数在 cost 维是合法读数
+ *  （`0.3` 与 `"0.3"` 同义），在 deadline 维**不是**——`0` / epoch 毫秒都进不了后端
+ *  `parse_deadline_at`，前端把它收成时刻等于编出一个任何事件里都不存在的读数。
+ *
+ *  只认**非空、无首尾空白**的文本：后端的**事件回读**（`_deadline_or_none`）不 strip
+ *  （`fromisoformat(" 2026-…Z ")` 抛 ValueError ⇒ 那一侧读作"没配"），这里就地收下
+ *  等于同一份 durable 事件两端给出互相矛盾的读数。更深的形状判据（带时区 / 严格未来）
+ *  属**恢复草稿**那一关（`runBudget.deadlineDraftError` → `parseInstant`），显示链按
+ *  契约原样呈现；非 ISO 文本的差异登记在 ADR-0045 §6.1。 */
+function dimensionInstantText(raw: Record<string, unknown>, key: string): string | null {
+  const value = raw[key];
+  if (typeof value !== 'string' || value === '') return null;
+  return value.trim() === value ? value : null;
+}
+
+/** 分维计数表（`#314`：工具名 → 计数）：**整键缺席 ⇒ null**（未知），空对象 ⇒ `{}`
+ *  （已知，一个都没有）——两者的区别与 `cost_usd` 的"缺失 ≠ 0"同源。
+ *
+ *  `minimum` 由调用方给：**计数**表放行 0（"调了 0 次"是事实），**ceiling** 表要求
+ *  ≥ 1（后端 `parse_tool_call_limits` 只收正整数，`0` 的形状在那边必然 422）——
+ *  用同一个下限会让 `{"glob": 0}` 在前端被当成合法 ceiling 收下。表里不合形状的
+ *  条目**整条丢掉**（宁少不多：一个编不出来的计数不该冒充 0）。 */
+function countsByKey(
+  raw: Record<string, unknown>,
+  key: string,
+  minimum: 0 | 1,
+): Record<string, number> | null {
+  const value = raw[key];
+  if (!isRecord(value)) return null;
+  const out: Record<string, number> = {};
+  for (const [name, count] of Object.entries(value)) {
+    const num = numberOf(count);
+    if (num !== undefined && Number.isInteger(num) && num >= minimum) out[name] = num;
+  }
+  return out;
+}
+
+/** `data.consumed` → 四维读数 + 两张分维工具计数表（`#313` / `#314`）。整组缺失
+ *  ⇒ null（老暂停载荷没有这组键，不是"四维都是 0"）。 */
+function parseConsumedFacts(raw: unknown): RunBudgetDimensionFacts | null {
+  if (!isRecord(raw)) return null;
+  return {
+    agent_turns: dimensionNumber(raw, 'agent_turns'),
+    model_requests: dimensionNumber(raw, 'model_requests'),
+    total_tokens: dimensionNumber(raw, 'total_tokens'),
+    cost_usd: dimensionDecimalText(raw, 'cost_usd'),
+    // `#314`：两个 counter 各自独立读（`tool_calls` 是逻辑调用，`tool_attempts`
+    // 含 retry）——它们不是别名，缺一个不等于另一个也可得。
+    tool_calls: dimensionNumber(raw, 'tool_calls'),
+    tool_attempts: dimensionNumber(raw, 'tool_attempts'),
+    tool_calls_by_tool: countsByKey(raw, 'tool_calls_by_tool', 0),
+    tool_attempts_by_tool: countsByKey(raw, 'tool_attempts_by_tool', 0),
+  };
+}
+
+/** `data.limits.run` → 四维 `max_*` ceiling + deadline 时刻 + per-tool 配额表
+ *  （`#313` / `#314` / `#315`）。四个 `max_*` 的键名是载荷自己的形态（与恢复请求
+ *  `budget.run` 的键同一套名字）；`null` = 该维没配（unlimited）。`deadline_at`
+ *  不是第五个 `max_*`：它判的是时刻先后，没有 consumed/ceiling 可比。 */
+function parseRunLimitFacts(raw: unknown): RunLimitsFacts | null {
+  if (!isRecord(raw)) return null;
+  return {
+    max_agent_turns_total: dimensionNumber(raw, 'max_agent_turns_total'),
+    max_model_requests: dimensionNumber(raw, 'max_model_requests'),
+    max_total_tokens: dimensionNumber(raw, 'max_total_tokens'),
+    max_cost_usd: dimensionDecimalText(raw, 'max_cost_usd'),
+    // `#315`：deadline 维（与四个 `max_*` 同住 `limits.run`，但判的是时刻先后）。
+    // 缺席 / 不是文本 ⇒ null（没配 deadline）——**不是**"值缺失 ⇒ 编一个"。
+    deadline_at: dimensionInstantText(raw, 'deadline_at'),
+    // `#314`：`tool_call_limits` 是**绝对** ceiling 表（不是 remaining），
+    // 未配置的工具名不出现在表里（表缺席 = 没配任何工具配额）。下限是 1：
+    // 后端只收正整数 ceiling（`parse_tool_call_limits`），`0` 必然在那个入口 422。
+    tool_call_limits: countsByKey(raw, 'tool_call_limits', 1),
+  };
+}
+
+/** `run/paused` 载荷 → `RunPausedInfo`（投影与 Timeline 摘要**共用同一解析**：
+ *  两处各读一遍字段就会各有一套兜底默认值，改一处忘一处就是两条真相）。
+ *
+ *  读取一律"缺失即缺席"（零伪造）：`run_id` 取事件自身归属（`event.run_id` 是权威，
+ *  载荷里没有同名键）；数字键仅在真为有限数时采用。 */
+function parsePausedInfo(event: AgentEvent): RunPausedInfo {
   const data = event.data;
+  const limits = isRecord(data.limits) ? data.limits : null;
+  const runScope = limits && isRecord(limits.run) ? limits.run : null;
+  const localScope = limits && isRecord(limits.local) ? limits.local : null;
+  const consumed = isRecord(data.consumed) ? data.consumed : null;
+  const localTurns = localScope ? numberOf(localScope.max_agent_turns) : undefined;
+  return {
+    run_id: typeof event.run_id === 'string' ? event.run_id : '',
+    version: numberOf(data.budget_version) ?? 1,
+    pause_seq: event.seq,
+    reason: typeof data.reason === 'string' && data.reason ? data.reason : 'budget_exhausted',
+    trigger_dimension:
+      typeof data.trigger_dimension === 'string' ? data.trigger_dimension : '',
+    consumed_agent_turns: numberOf(consumed?.agent_turns) ?? 0,
+    run_limit: runScope ? (numberOf(runScope.max_agent_turns_total) ?? null) : null,
+    consumed_dimensions: parseConsumedFacts(consumed),
+    run_limits: parseRunLimitFacts(runScope),
+    local_fuse:
+      localTurns === undefined
+        ? null
+        : {
+            max_agent_turns: localTurns,
+            source:
+              localScope && typeof localScope.source === 'string' ? localScope.source : '',
+          },
+    continuation: parseContinuation(data.continuation),
+    closeout_source:
+      typeof data.closeout_source === 'string' ? data.closeout_source : 'deterministic',
+    resume_requirements: stringList(data.resume_requirements),
+    trace_id: typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null,
+  };
+}
+
+/** `#312` T4：预算到顶的**非终态**暂停。
+ *
+ *  与三个终态投影的关键差别：`run_status` 收成 `'paused'`（不是 completed/failed/
+ *  interrupted），并且**不**落 `run_failure` —— 暂停没有失败归因可言。已经跑过的
+ *  这一轮按 `finalizeRun` 的共用清扫 settle（caret 停、running 工具标 stopped），
+ *  因为它所属的执行区间确实结束了；恢复会从 `step_base+1` 起新的一轮执行
+ *  （后端 runtime 的 `step_base = max(session.max_step_id, session.user_turn_count)`），
+ *  所以历史轮次照旧可读、新工作进新轮。 */
+function projectRunPaused(state: ConversationState, event: AgentEvent): void {
+  state.run_paused = parsePausedInfo(event);
+  // 暂停不是失败：归因面必须清空（否则同屏出现"已暂停"与上一轮的失败原因）。
+  state.run_failure = null;
+  finalizeRun(state, 'paused', event.time);
+}
+
+/** `#312` T4：同 run 恢复——服务层 CAS 通过后落 `run/resumed`，随后才启动执行。
+ *
+ *  它**不是**新的 `run/started`（后端不变量：同一逻辑 run 里只有一条），所以这里
+ *  只做两件事：收起暂停事实、把 run 状态放回 running。turn 级状态不动——新执行的
+ *  事件会自己建新轮（`step_base+1`），`finalizeRun('paused')` 已经 settle 过旧轮。 */
+function projectRunResumed(state: ConversationState, _event: AgentEvent): void {
+  state.run_paused = null;
+  state.run_status = 'running';
+}
+
+/** Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
+ *  Attach the ref to the producing tool call so the Inspector can fetch it.
+ *
+ *  `artifact/created` 与 `artifact/externalized` **共用**这段：两者的 payload 同构
+ *  （artifact_id / tool_call_id / size / mime_type / source_tool），只是历史上一个是
+ *  规格里的名字、一个是运行时真正发的名字（详见 #173）。返回 false = 找不到宿主
+ *  tool_call，由调用方决定兜底。 */
+function attachArtifactToTool(state: ConversationState, data: Record<string, unknown>): boolean {
   const toolCallId = String(data.tool_call_id ?? '');
   const turnIdx = state.turns.findIndex((t) => t.tools.some((tc) => tc.tool_call_id === toolCallId));
-  if (turnIdx === -1) return;
+  if (turnIdx === -1) return false;
   const prevTurn = state.turns[turnIdx];
   const toolIdx = prevTurn.tools.findIndex((tc) => tc.tool_call_id === toolCallId);
   const tool = cloneTool(prevTurn.tools[toolIdx]);
+  /* 元数据缺了就留 `null`（#186 AC5 / #185 AC4）：MinIO 不持久化 `source_tool`，
+     一个编出来的 `''`/`0`/`'application/octet-stream'` 会变成界面上一个假的字节数与
+     假的类型。`artifact_id` 是必有的（没它就没有这个产物，找不到宿主时上面已早退）。 */
   tool.artifact = {
     artifact_id: String(data.artifact_id ?? ''),
-    size: Number(data.size ?? 0),
-    mime_type: String(data.mime_type ?? 'application/octet-stream'),
-    source_tool: String(data.source_tool ?? ''),
+    size: typeof data.size === 'number' ? data.size : null,
+    mime_type: typeof data.mime_type === 'string' ? data.mime_type : null,
+    source_tool: typeof data.source_tool === 'string' ? data.source_tool : null,
   };
   const turn = cloneTurn(prevTurn);
   turn.tools[toolIdx] = tool; // cloneTurn 已给出新 tools 数组，原位替换即可
   replaceTurnAt(state, turnIdx, turn);
+  return true;
+}
+
+/** 历史行为不变：找不到宿主就静默（该类型此前的语义就是如此）。 */
+function projectArtifactCreated(state: ConversationState, event: AgentEvent): void {
+  attachArtifactToTool(state, event.data);
+}
+
+/** 运行时**真正**发出的外置事件（`artifact/externalized`，见 `tooling/overflow.py`）。
+ *
+ *  此前它被登记为「词汇表内但前端尚未接线」→ 落 `unknown_events`，导致有产物的会话里
+ *  Artifacts 页签恒空、页面还写「本次会话未产生 Artifact。」（第十一轮真机验收 ART-01）。
+ *
+ *  与 `artifact/created` 的**唯一**差别：找不到宿主 tool_call 时**不静默**——externalized
+ *  自带 artifact_id，是"这里确实有一个外置产物"的独立事实，静默丢弃会让用户既看不到产物、
+ *  TRACE 里也不再有任何痕迹。 */
+function projectArtifactExternalized(state: ConversationState, event: AgentEvent): void {
+  if (!attachArtifactToTool(state, event.data)) {
+    unhandledProjection(state, event);
+  }
 }
 
 /** Context window exceeded → older turns summarized (Phase 5, spec 06).
@@ -510,12 +911,64 @@ function projectOperationReconcileRequired(state: ConversationState, event: Agen
   ];
 }
 
+/** `session/started`（会话第一条事件）：`started_data` 是会话级初始配置的**加法槽**
+ *  （T7 #137）。今天这里只取 F15 #234 落进来的权限档（`permission_mode`）。
+ *
+ *  **只认第一个带值的 `session/started`**：started 只声明**创建时**那一档，会话内改档走
+ *  `permission/changed`（F18-B #283 起，那边「最后一条胜」）——所以重放 /
+ *  迟到重复投递都不得让后来的值改写先到的（与后端 `approval.py::declared_permission_mode`
+ *  同一规矩——那边也是在第一条 started 上取键，缺键即 None）。实现按"已非 null 即早退"
+ *  达成这一点（"没带键"读作"没声明"，所以脏日志里**后**一条仍可声明：比后端"只在第一条
+ *  上取键"宽一格，为这个不可达分支不再多存一个 seen 标志——判据由下方单测钉住）；
+ *  今天每会话恰好一条 started（`session.py` 的 `Session.start` 只 append 一次），
+ *  分叉 child 也是自带继承值而非复用父的 started。值不是非空字符串（老日志没有这个
+ *  键、或日志被手改）→ 保持 null = "未声明"，不编默认档。
+ *
+ *  注意它**不是** `permission_policy`：后者是审批请求到达时 ToolExecutor 实际用的阈值，
+ *  两者可以合法地不同（#236）。 */
+function projectSessionStarted(state: ConversationState, event: AgentEvent): void {
+  if (state.session_permission_mode !== null) return;
+  const mode = event.data.permission_mode;
+  if (typeof mode === 'string' && mode) state.session_permission_mode = mode;
+}
+
+/** F18-B（#283）：`permission/changed` —— 会话内改档的 durable 事实（ADR-0041 D2）。
+ *
+ *  **最后一条胜**（ADR-0041 D3），与 `model/changed`（`projectModelChanged`）同形。这里
+ *  **刻意不**复用 `projectSessionStarted` 的「已非 null 即早退」——那条规矩的存在理由正是
+ *  「档位是会话属性、创建后不可变」，而本票的前提就是推翻它。
+ *
+ *  **坏值读作「未声明」⇒ 写 null**：后端 `effective_permission_mode`
+ *  （`session/approval.py`）命中最后一条 `permission/changed` 后**不再往下找**，值不可
+ *  解析时按未声明返回 None、**不回落** `session/started` 的声明值。前端逐字照抄这个
+ *  优先级：两边对「当下生效的是哪一档」必须同口径，否则会重现 #236 的 P2——UI 说只读、
+ *  后端按更松的档自动放行写操作。
+ *
+ *  **只动 `session_permission_mode`**：事件里还带 `auto_approve`，但前端今天没有它的
+ *  消费者（没有「批准策略」控件）——三概念分离见 ADR-0041 D6，`permission_policy`
+ *  （审批观测阈值）在这条路径上**一律不碰**。 */
+function projectPermissionChanged(state: ConversationState, event: AgentEvent): void {
+  const mode = event.data.permission_mode;
+  state.session_permission_mode = typeof mode === 'string' && mode ? mode : null;
+}
+
+/** `permission/changed` 在时间线里的一行（对齐 `summarizeModelChanged`）：改档是用户自己
+ *  发起的会话级变更，留一行真值比留一行空白更如实——与 `model/changed` 同待遇。 */
+function summarizePermissionChanged(event: AgentEvent): string {
+  const mode = event.data.permission_mode;
+  return typeof mode === 'string' && mode ? `权限档 → ${mode}` : '权限档已变更';
+}
+
 /** #37 交互式审批（PRD §2.2）：ToolExecutor._check_approval 暂停 run，
  *  发 tool/approval-requested 事件；前端 ApprovalCard 内联渲染。 */
 function projectToolApprovalRequested(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
   const approvalId = String(data.approval_id ?? '');
   if (!approvalId) return; // 契约必有 approval_id
+  // 生效阈值逐事件折叠（最后一条胜）——放在幂等早退**之前**：重放时它仍是同一个值，
+  // 但这样就不依赖"请求只到达一次"这个假设。
+  const policy = String(data.policy ?? '');
+  if (policy) state.permission_policy = policy;
   // 幂等：重放已存在的 approval_id 不重复入队
   if (state.pending_approvals.some((a) => a.approval_id === approvalId)) return;
   state.pending_approvals = [
@@ -539,13 +992,34 @@ function projectToolApprovalRequested(state: ConversationState, event: AgentEven
   ];
 }
 
-/** #37 审批已决——从 pending_approvals 移除。 */
+/** #37 审批已决——从 pending_approvals 移出队列，**同时留痕到 `approval_decisions`**
+ *  （#184 Inspector PERMISSION 段要回答"裁决结果"，而队列语义是"决议即消失"）。
+ *
+ *  `tool_name` 在移除**之前**从同 id 的请求上取——队列是这条信息的唯一来源，先删就
+ *  取不到了。配不上对（事件窗口从中间开始 / 未知 id）时留空，由渲染层显示 `—`；
+ *  不编造工具名，也不为了"看起来完整"去 pending 之外再猜一次。 */
 function projectPermissionResolved(state: ConversationState, event: AgentEvent): void {
   const approvalId = String(event.data.approval_id ?? '');
-  if (approvalId) {
-    state.pending_approvals = state.pending_approvals.filter((a) => a.approval_id !== approvalId);
-  }
+  if (!approvalId) return; // 契约必有 approval_id
+  const request = state.pending_approvals.find((a) => a.approval_id === approvalId);
+  state.pending_approvals = state.pending_approvals.filter((a) => a.approval_id !== approvalId);
+  // 幂等：重放同一 approval_id 的决议不重复留痕（JSONL 回放会重放全部事件）。
+  if (state.approval_decisions.some((d) => d.approval_id === approvalId)) return;
+  state.approval_decisions = [
+    ...state.approval_decisions,
+    {
+      approval_id: approvalId,
+      decision: String(event.data.decision ?? ''),
+      reason: String(event.data.reason ?? ''),
+      tool_name: request?.tool_name,
+      time: event.time,
+    },
+  ];
 }
+
+/** Inspector PERMISSION 段（#184）的三个真相在投影状态上，由 `lib/permission.ts` 的
+ *  `permissionView` 组装成渲染视图——这里**不再加一层纯透传**（review 删掉了那层：
+ *  它只是把三个字段抄一遍，多一层就多一处要同步的地方）。 */
 
 /** Phase 12 白盒透明（ADR-0014 #69）：#69 RepeatedToolFailureGuard——连续同错
  *  工具调用熔断。soft 已由后端注入 user-role 纠正消息（injected_by 标记，见
@@ -579,6 +1053,7 @@ function projectModelFallback(state: ConversationState, event: AgentEvent): void
   if (from && to) {
     state.model_fallback = { from_model: from, to_model: to, reason };
     state.model = to;
+    state.model_run_id = event.run_id ?? null; // 同 echo：记归属（切换是 run 内的事实）
   }
 }
 
@@ -586,7 +1061,11 @@ function projectModelFallback(state: ConversationState, event: AgentEvent): void
  *  切换不打断在途 run，下一轮 run 从事件流派生当前模型生效。 */
 function projectModelChanged(state: ConversationState, event: AgentEvent): void {
   const toModel = typeof event.data.to_model_id === 'string' ? event.data.to_model_id : null;
-  if (toModel) state.model = toModel;
+  if (toModel) {
+    state.model = toModel;
+    // 会话级切换不带 run_id ⇒ 归属归 null（读作"不是任何本轮的事实"）
+    state.model_run_id = event.run_id ?? null;
+  }
 }
 
 /** Phase 13 Multi-Agent（ADR-0015）：父流白盒委派事件。child 完整历史在
@@ -772,6 +1251,63 @@ function summarizeRunInterrupted(event: AgentEvent): string {
   return step !== null && step !== undefined ? `第 ${step} 步中断` : '运行中断';
 }
 
+/** `#312`：`run/paused` 行摘要 = 命中的维度 + consumed/ceiling 两个数。
+ *  数字缺失就不写那一段（不编 0）——暂停行的价值正是"卡在哪、烧了多少"。
+ *
+ *  `#314`：命中 per-tool 配额时读的是**那个工具**的调用数与它的 ceiling（不是 turns
+ *  的那一对）——工具配额卡住时显示"消耗 3 轮 / 上限 4 轮"是在陈述另一件事。
+ *
+ *  `#315`：deadline 到点同样没有"某一维的读数"可报（判的是时刻先后），回落到 turns
+ *  那一对会把另一维的数字摆在 `run.deadline_at` 后面、却漏掉这一行唯一想说的时刻
+ *  ——与 `pauseFacts().tripped === null` 同一条纪律（不拿 turns 冒充）。分支次序是
+ *  per-tool → deadline，与 `pauseFacts` 的 deadline 优先**相反**：两者会分叉的载荷
+ *  （`reason=deadline` + 工具维度）由写入者保证不可达（`run_budget` 里 reason 与维度
+ *  同进同出）；真出现第二种非预算 reason（如 T9 的 stuck）时，回落的 `'预算到顶'`
+ *  标签要改成按 `reason` 取。 */
+function summarizeRunPaused(event: AgentEvent): string {
+  const info = parsePausedInfo(event);
+  const dimension = info.trigger_dimension || '预算到顶';
+  const tool = toolDimensionName(info.trigger_dimension);
+  if (tool !== null) {
+    // 读数判据是"**表**在不在"（`BudgetConsumed.calls_for` 同一口径）：表在而缺名 ⇒ 0；
+    // 表缺席（老载荷）才是"未知"。按"键在不在"读会把配了 ceiling 却没调用过的工具
+    // 报成未知，而同一份事件的服务端投影给的是 `remaining = ceiling`。
+    const table = info.consumed_dimensions?.tool_calls_by_tool;
+    const calls = table === null || table === undefined ? undefined : (table[tool] ?? 0);
+    const ceiling = info.run_limits?.tool_call_limits?.[tool];
+    return `${dimension} · ${calls === undefined ? '未知' : calls} 次调用/${
+      ceiling === undefined ? '无 ceiling' : `上限 ${ceiling}`
+    }`;
+  }
+  if (isDeadlinePause(info)) {
+    const instant = deadlineInstant(info);
+    return `${dimension} · 截止 ${instant ?? 'unavailable'}`;
+  }
+  const ceiling = info.run_limit === null ? '无 ceiling' : String(info.run_limit);
+  return `${dimension} · ${info.consumed_agent_turns}/${ceiling}`;
+}
+
+/** `#312`：`run/resumed` 行摘要 = 版本跃迁（CAS 的可见证据）。 */
+function summarizeRunResumed(event: AgentEvent): string {
+  const previous = numberOf(event.data.previous_budget_version);
+  const current = numberOf(event.data.budget_version);
+  if (previous === undefined || current === undefined) return '已恢复';
+  return `已恢复 · 预算版本 ${previous} → ${current}`;
+}
+
+/** #220：`run/failed` 行摘要 = 随事件的失败归因文案，缺 message 时退到 reason 码
+ *  （「identical_tool_failure_loop」比空白更能说明这行为什么红）。
+ *  两处与相邻 summary 不同，都是刻意的：取消那支返回空串（它是 run/failed 但语义是取消，
+ *  机器码 `cancelled` 不该上时间线，状态行另有「已取消」）；不做 slice(0,40)——文案是
+ *  完整句子，截断正好切掉可操作尾巴，两个消费面都已有 CSS 省略（ADR-0033 §2.3）。 */
+function summarizeRunFailed(event: AgentEvent): string {
+  const message = event.data.message;
+  if (typeof message === 'string' && message) return message;
+  const reason = event.data.reason;
+  if (typeof reason !== 'string' || reason === 'cancelled') return '';
+  return reason;
+}
+
 function summarizeModelChanged(event: AgentEvent): string {
   const to = event.data.to_model_id;
   return typeof to === 'string' && to ? `模型 → ${to}` : '模型已切换';
@@ -780,21 +1316,30 @@ function summarizeModelChanged(event: AgentEvent): string {
 // ── 注册表（穷尽 EventTypeValue：生成物新增类型时 tsc 失败直到登记）──
 
 const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
-  [EventType.SESSION_STARTED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.SESSION_STARTED]: { apply: projectSessionStarted, summarize: emptySummary },
   [EventType.SESSION_RESUMED]: { apply: noopProjection, summarize: emptySummary },
-  // session/forked 是已知生命周期事件——但摘要目前落进「未知事件」文案
-  // （pre-existing：summarizeEvent 的已知无摘要名单里没有它）。本批只做
-  // 等价迁移，不改文案；已作为发现登记，待确认后再定它的单行语义。
-  [EventType.SESSION_FORKED]: { apply: noopProjection, summarize: unknownSummary },
+  // session/forked：单行语义 = 已分叉（UI-04 定案；child 指针进详情，不做截断 id）。
+  [EventType.SESSION_FORKED]: { apply: noopProjection, summarize: summarizeForked },
   [EventType.RUN_STARTED]: { apply: projectRunStarted, summarize: emptySummary },
   [EventType.RUN_COMPLETED]: { apply: projectRunCompleted, summarize: summarizeRunCompleted },
-  [EventType.RUN_FAILED]: { apply: projectRunFailed, summarize: emptySummary },
+  [EventType.RUN_FAILED]: { apply: projectRunFailed, summarize: summarizeRunFailed },
   [EventType.RUN_INTERRUPTED]: { apply: projectRunInterrupted, summarize: summarizeRunInterrupted },
+  // #312：暂停（非终态）+ 同 run 恢复。两者都进 EVENT_SEMANTICS 的穷尽表——
+  // generated/event-types.ts 早已含这两个类型，漏登记会被 tsc 直接挡下（防漂移）。
+  [EventType.RUN_PAUSED]: { apply: projectRunPaused, summarize: summarizeRunPaused },
+  [EventType.RUN_RESUMED]: { apply: projectRunResumed, summarize: summarizeRunResumed },
   [EventType.USER_MESSAGE]: { apply: projectUserMessage, summarize: summarizeUserMessage },
   [EventType.MODEL_STARTED]: { apply: projectModelStarted, summarize: emptySummary },
   [EventType.MODEL_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
   [EventType.MODEL_COMPLETED]: { apply: projectModelCompleted, summarize: summarizeModelCompleted },
   [EventType.MODEL_FAILED]: { apply: noopProjection, summarize: emptySummary },
+  // #313（T5）：`model/request` 是**账本**事件（一次实际 Provider 请求一格），不改会话投影
+  // 状态——预算读数由 `run/started` 的 budget 与 `run/paused` / `run/resumed` 承载（11 §6.1）。
+  // 与 `MODEL_FAILED` 同形：登记为 no-op 意味着它**不**进 `unknown_events`（进那本账的是
+  // `unhandledProjection` 那条兜底路径，别把两者混说）；
+  // 不登记则 `Record<EventTypeValue, EventSemantics>` 的穷尽性被破坏，`tsc` 直接红
+  // （`event-types.ts` 是生成物，加类型就必须在这里登记）。
+  [EventType.MODEL_REQUEST]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_CALL]: { apply: projectToolCall, summarize: summarizeToolCall },
   [EventType.TOOL_RESULT]: { apply: projectToolResult, summarize: summarizeToolResult },
   [EventType.OPERATION_RECONCILE_REQUIRED]: {
@@ -805,19 +1350,46 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectArtifactCreated,
     summarize: summarizeArtifactCreated,
   },
+  // 运行时真正发的外置事件（#173 前它是"未接线"）——与 created 同一投影、同一摘要。
+  [EventType.ARTIFACT_EXTERNALIZED]: {
+    apply: projectArtifactExternalized,
+    summarize: summarizeArtifactCreated,
+  },
   // 词汇表内但前端尚未接线——显式登记，保持既有兜底行为（进 unknown_events）。
-  [EventType.ARTIFACT_EXTERNALIZED]: { apply: unhandledProjection, summarize: unknownSummary },
   [EventType.CONTEXT_COMPACTED]: {
     apply: projectContextCompacted,
     summarize: summarizeContextCompacted,
   },
   [EventType.MEMORY_DEGRADED]: { apply: noopProjection, summarize: emptySummary },
+  // #298（T6 引入 `memory/updated`，T8 补登记）：与 MEMORY_DEGRADED 同形——提交型记忆变更，
+  // 载荷只有 count / memory IDs / action counts / job ID，**不带内容**（PRD V2 §6.5）。
+  // 它是 `Record<EventTypeValue, EventSemantics>` 的穷尽性成员：登记为 no-op 才是既有兜底
+  // 行为（进 `unknown_events` 计数、不把帧当未知事件丢弃），不登记则前端 `tsc` 直接红
+  // ——生成物 `event-types.ts` 由 `scripts/gen_event_types.py` 生成，加类型就必须在这里登记。
+  // UI 展示面归 MEM-V2-5（#301），本行只负责穷尽性。
+  [EventType.MEMORY_UPDATED]: { apply: noopProjection, summarize: emptySummary },
+  // The event is durable for the #301 explanation UI, but does not mutate session projection state.
+  [EventType.MEMORY_RECALLED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_FAILURE_GUARD]: {
     apply: projectToolFailureGuard,
     summarize: summarizeToolFailureGuard,
   },
+  // #317（T9）：`guard/stuck` 是循环护栏的第二条事件面，**它自己不带来新的投影状态**——
+  // `level=replan` 的纠正以 `user/message`（`injected_by='stuck_guard'`）落地，渲染层照
+  // `projectUserMessage` 的既有标记显示为系统提示条；`level=paused` 的那一步由紧随其后的
+  // `run/paused(reason=stuck)` 承载（`run/paused.data.stuck` 是它的可读投影）。
+  // 与 `MODEL_REQUEST` / `MEMORY_UPDATED` 同形：登记为 no-op ⇒ 已知类型、不进
+  // `unknown_events`；护栏卡面的展示面归后续票，本行只负责 `Record` 的穷尽性。
+  [EventType.GUARD_STUCK]: { apply: noopProjection, summarize: emptySummary },
   [EventType.MODEL_FALLBACK]: { apply: projectModelFallback, summarize: summarizeModelFallback },
   [EventType.MODEL_CHANGED]: { apply: projectModelChanged, summarize: summarizeModelChanged },
+  // F18-B（#283）：会话内改档落真投影——「最后一条 permission/changed 胜」（ADR-0041 D3）。
+  // F18-A（#282）曾把它登记为 no-op（只为满足 Record 穷尽性、不把帧当未知事件丢弃），
+  // 那行已被本票替换——ADR-0041 §4 的那条未闭合项据此解除。
+  [EventType.PERMISSION_CHANGED]: {
+    apply: projectPermissionChanged,
+    summarize: summarizePermissionChanged,
+  },
   [EventType.AGENT_DELEGATION_STARTED]: {
     apply: projectAgentDelegationStarted,
     summarize: summarizeDelegationStarted,
@@ -838,9 +1410,9 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   },
   [EventType.TOOL_APPROVAL_REQUESTED]: {
     apply: projectToolApprovalRequested,
-    summarize: unknownSummary,
+    summarize: summarizeApprovalRequested,
   },
-  [EventType.PERMISSION_RESOLVED]: { apply: projectPermissionResolved, summarize: unknownSummary },
+  [EventType.PERMISSION_RESOLVED]: { apply: projectPermissionResolved, summarize: summarizePermissionResolved },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,
@@ -848,10 +1420,16 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.TEXT_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
   [EventType.COMPACTION_START]: { apply: unhandledProjection, summarize: unknownSummary },
   [EventType.COMPACTION_END]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.MESSAGE_QUEUED]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.QUEUE_CANCELLED]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.STEER_REQUESTED]: { apply: unhandledProjection, summarize: unknownSummary },
-  [EventType.STEER_APPLIED]: { apply: unhandledProjection, summarize: unknownSummary },
+  // ADR-0030（#196）§5.2：未投递输入逐事件折叠进 state.undelivered（队列条数据源，
+  // 事件流是唯一事实）。摘要给 Timeline 一行语义（不再是「未接线」）。
+  [EventType.MESSAGE_QUEUED]: { apply: projectUndelivered, summarize: summarizeMessageQueued },
+  [EventType.QUEUE_CANCELLED]: { apply: projectUndelivered, summarize: emptySummary },
+  [EventType.STEER_REQUESTED]: { apply: projectUndelivered, summarize: summarizeSteerRequested },
+  [EventType.STEER_APPLIED]: { apply: projectUndelivered, summarize: emptySummary },
+  [EventType.QUEUE_CONSUMED]: { apply: projectUndelivered, summarize: emptySummary },
+  // 编辑语义（§5.4）：投影只读 events 日志（shadow 在 applyEvent 里统一应用），
+  // 不折叠进轮次——被取代轮的移除由 applySupersedeShadow 按 seq 区间驱动。
+  [EventType.MESSAGE_SUPERSEDED]: { apply: noopProjection, summarize: summarizeSuperseded },
 };
 
 /** Apply one event to state, returning new state. Copy-on-write:
@@ -861,9 +1439,15 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
  * events 日志例外（P0-1，HANDOFF_PERF_FRONTEND §4.3/§6 方案 b）：append-only
  * 共享数组，push O(1)、引用跨 state 稳定——消灭 `[...state.events, event]`
  * 每事件整体克隆的 O(N²)（20k 事件 240.9µs/事件 → <10µs）。契约：
- * 既有条目永不改写、顺序不变；旧 state 的 events 视图会随后续追加继续增长，
- * 消费端只持有最新 state（useSession 管线：局部 conv 折叠 + setConversation
- * 提交，无消费者把 events 放进 memo/useEffect 依赖），不受影响。 */
+ * 既有条目永不改写、顺序不变；旧 state 的 events 视图会随后续追加继续增长。
+ *
+ * ⚠ 消费端契约（N2 #271，ADR-0037 D3）——**引用稳定是刻意的，所以键不能用它**：
+ * 需要「events 追加后重算」的 `useMemo` / `useEffect` 依赖 `eventsVersion`
+ * （下面两处 push 各 +1），**不要**依赖 `events`——引用相等 ⇒ 永不重算 ⇒ 陈旧渲染。
+ * 现有消费点见 `components/StepDetail.tsx` 三处（run 列表 / run 分组 / 选中项定位）。
+ * `events.length` 不是替代品：去重短路那帧不 push、quarantine 分支 push，
+ * 长度区分不了「长度不变而内容变」——那等于用巧合代替契约。
+ * （P0-1 当时写的「无消费者把 events 放进依赖」已不属实，由本票改正。） */
 export function applyEvent(state: ConversationState, raw: AgentEvent): ConversationState {
   // T1（#94）第一道闸——帧级形状校验（spec 02 §14）：完全不可辨的帧隔离进
   // unknown_events（UnknownSurface 兜底协议，永不静默丢弃），不投影、不进轮次。
@@ -871,7 +1455,8 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
   if (!checked.ok) {
     const quarantined = quarantineRecord(raw);
     state.events.push(quarantined);
-    const next: ConversationState = { ...state };
+    // ADR-0037 D2 的边界之一：这一路**也 push 了 events**（且确实改变渲染面）⇒ 同样 +1。
+    const next: ConversationState = { ...state, eventsVersion: state.eventsVersion + 1 };
     next.unknown_events = [...next.unknown_events, quarantined];
     return next;
   }
@@ -888,7 +1473,9 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
   // Inspector Timeline 真相源：流经的每个事件原样追加（不含 model/delta 折叠）。
   // 先落地日志再做投影——即使投影分支抛出，事件也不从日志丢失。
   state.events.push(event);
-  const next: ConversationState = { ...state };
+  // ADR-0037 D2：push 成功 ⇒ 版本 +1（与上面那行 push 成对，判定依据是「是否真的 push」，
+  // 不是「是否进入 applyEvent」——所以上面那条去重短路 `return state` 时不递增）。
+  const next: ConversationState = { ...state, eventsVersion: state.eventsVersion + 1 };
 
   const { type } = event;
 
@@ -905,6 +1492,13 @@ export function applyEvent(state: ConversationState, raw: AgentEvent): Conversat
     // UnknownSurfaceNode 兜底协议（冻结决策第 69 行）：未知事件类型不静默丢弃，
     // 记录到 unknown_events 供 Timeline / Inspector 显式渲染为 raw 行。
     next.unknown_events = [...next.unknown_events, event];
+  }
+
+  // ADR-0030 §5.4：`message/superseded` 到达后按同一区间规则把被取代的整轮从
+  // 视图移除。放在语义分派**之后**：区间计算读 events 日志（上面刚 push 过），
+  // 先分派再 shadow 保证新到的 user/message（B）已折叠进轮次。
+  if (type === EventType.MESSAGE_SUPERSEDED) {
+    applySupersedeShadow(next);
   }
 
   // T1（#94）幂等标记在投影成功之后（seen = applied，spec 02 §6.1）：投影分支
@@ -1026,16 +1620,53 @@ function resolveStep(event: AgentEvent, state: ConversationState): number {
   return state.turns.length + 1;
 }
 
+/** 是否还有**真正欠用户决策**的审批。
+ *
+ *  失效审批（`stale`，见 `markPendingApprovalsStale`）不算：它所在 run 已终结，
+ *  没有任何东西在等这个决策。若把它算进去，会话就被**永久锁死**——卡片只读、
+ *  composer 也一直禁用，用户在这个会话里再也发不出一句话（APR-01 真机就是
+ *  这个死局：卡点不动、点也只换来 404、刷新还在）。 */
+export function awaitingApproval(approvals: readonly PendingApproval[]): boolean {
+  return approvals.some((a) => !a.stale);
+}
+
+/** run 终结（completed/failed/interrupted）时仍未配对的审批 = 永久失效。
+ *
+ *  `approval_queues` 是**纯内存**的（`session/service.py:934`），run 结束时即被 GC
+ *  （`service.py:1233-1241`），恢复链路（`recovery/`）完全不复现审批 →
+ *  重启/中断后这条审批**不可能再被 resolve**，而它的 `tool/approval-requested` 事件
+ *  永久留在 JSONL 里，于是刷新多少次都会重新渲染出来（APR-01 真机：点了只有 404）。
+ *  在投影层一次判定，渲染层不必自己拼事件顺序。
+ *
+ *  正常流程不受影响：run 会停在审批上等待决策，只有 run 已经结束还在 pending 的
+ *  才是孤儿（即 `permission/resolved` 事件缺失的那种）。 */
+function markPendingApprovalsStale(state: ConversationState): void {
+  if (!state.pending_approvals.some((a) => !a.stale)) return;
+  state.pending_approvals = state.pending_approvals.map((a) =>
+    a.stale ? a : { ...a, stale: true },
+  );
+}
+
 /** Mark a run as finished and settle every in-flight turn.
  *
  * RUN_COMPLETED and RUN_FAILED share the same sweep — only the terminal
  * turn.status differs ('done' vs 'failed'). Splitting them was the source of
  * a past caret-never-stops bug; the shared helper makes the invariant
  * "run ends → no streaming turn" structural.
+ * `#312` 起多一档 `'paused'`：它同样要 settle（当前执行区间确实结束了，caret 必须
+ * 停、在跑工具标 stopped），但**不是**终态——`run_status` 落 'paused'，让 UI 与
+ * completed / failed / interrupted 分开呈现。turn.status 与 completed 同档取
+ * 'done'：那一轮的内容是完整可读的（不是半截失败的轮），后续工作由恢复执行新建
+ * 的那一轮承载。
  * Copy-on-write：只克隆真正需要变更的 turn/tool，已 settle 的保持引用。 */
-function finalizeRun(state: ConversationState, status: 'completed' | 'failed', time?: string): void {
+function finalizeRun(
+  state: ConversationState,
+  status: 'completed' | 'failed' | 'paused',
+  time?: string,
+): void {
   state.run_status = status;
   state.active_step_id = null;
+  markPendingApprovalsStale(state);
   const turnStatus = status === 'failed' ? 'failed' : 'done';
   let changed = false;
   const turns = [...state.turns];
@@ -1080,6 +1711,15 @@ function touchTurn(turn: Turn, event: AgentEvent): void {
   if (turn.started_at === undefined) {
     turn.started_at = event.time ?? new Date().toISOString();
   }
+}
+
+/** 本会话全部工具调用，按到达顺序（跨 turn 展平）。
+ *
+ *  单一走法：Inspector 的 run 级清单与中心列「输出」面都从这一份取（#190）。各写一遍
+ *  `turns.flatMap((t) => t.tools)` 看着无害，但一旦给"工具调用"加过滤（比如只取已终态的），
+ *  两份就会悄悄分叉。 */
+export function allTools(state: ConversationState): ToolCall[] {
+  return state.turns.flatMap((t) => t.tools);
 }
 
 /** Expand a turn's execution chain into render nodes in true event order
@@ -1146,6 +1786,26 @@ export function emptyChildTurnIndex(turns: Turn[]): number {
   return firstForkableTurnIndex(turns) === 0 ? 0 : -1;
 }
 
+/** 最新一条用户消息的 seq（ADR-0030 D8：只有它可被 supersede/编辑）。
+ *
+ *  只算**非取代**的轮：被 supersede 的轮里那条问句已被新内容取代，它不再是
+ *  "最新"——允许编辑它会让用户编辑一条已消失的消息（写侧 409）。注入轮
+ *  （`injected_by`）不是用户发言，同样不可编辑。 */
+export function latestEditableTurn(turns: Turn[]): Turn | null {
+  let latest: Turn | null = null;
+  let latestSeq = -1;
+  for (const turn of turns) {
+    if (turn.superseded) continue;
+    if (!turn.user_message || turn.injected_by) continue;
+    if (turn.user_message_seq === null) continue;
+    if (turn.user_message_seq > latestSeq) {
+      latest = turn;
+      latestSeq = turn.user_message_seq;
+    }
+  }
+  return latest;
+}
+
 /** Extract a session-title string from a single event if it's a user/message
  *  with non-empty content; '' otherwise. Shared by deriveSessionTitle (history
  *  replay) and the live SSE handler so there's one definition of "title-worthy". */
@@ -1196,6 +1856,45 @@ function parseUsage(value: unknown): UsageStats | null {
     Number.isFinite(completion_tokens) &&
     Number.isFinite(total_tokens);
   return ok ? { prompt_tokens, completion_tokens, total_tokens } : null;
+}
+
+// ── `#312` run/paused 载荷的小工具（放在投影只读路径上，一律"缺失即缺席"）──
+
+/** 载荷对象判定：数组也是 object，这里显式排除（`[]` 不是 `{}`）。 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 有限数字才认（NaN / Infinity / 字符串数字一律 undefined = 缺席，不猜）。 */
+function numberOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** 字符串列表的宽容读：只留字符串项；不是数组就返回空列表（不编内容）。 */
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
+/** `run/paused.data.continuation` 的四键契约（`03 §3.4`）：缺任一键 ⇒ null。
+ *  **不补齐**——补齐会让"模型 closeout 没产出"看起来像"产出了空计划"。 */
+function parseContinuation(value: unknown): RunContinuation | null {
+  if (!isRecord(value)) return null;
+  const action = value.next_safe_action;
+  if (typeof action !== 'string' || !action) return null;
+  const lists = ['completed', 'remaining', 'blockers'] as const;
+  const out: Partial<Record<(typeof lists)[number], string[]>> = {};
+  for (const key of lists) {
+    const raw = value[key];
+    if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string')) return null;
+    out[key] = raw as string[];
+  }
+  return {
+    completed: out.completed ?? [],
+    remaining: out.remaining ?? [],
+    blockers: out.blockers ?? [],
+    next_safe_action: action,
+  };
 }
 
 /**

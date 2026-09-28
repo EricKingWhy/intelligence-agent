@@ -20,11 +20,13 @@ from typing import Any
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
+    ARTIFACT_ID_PATTERN,
+    SESSION_KEY_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
-    _slice_lines,
     compute_artifact_id,
+    slice_artifact,
 )
 
 
@@ -37,6 +39,10 @@ class MinioArtifactStore(ArtifactStore):
     """
 
     def __init__(self, settings: Settings, *, session_id: str) -> None:
+        # 键段形态与 S3/Local 共用一份定义（`storage/artifact.py`）：三个 Provider 的键
+        # 都是 `{session_id}/{artifact_id}`，"同一条规则"不该有一处不校验（#192 批 1 审查）。
+        if not SESSION_KEY_PATTERN.fullmatch(session_id):
+            raise ValueError("session_id must be a single safe key segment")
         access_key = settings.minio_access_key.get_secret_value()
         secret_key = settings.minio_secret_key.get_secret_value()
         if not all(
@@ -101,14 +107,34 @@ class MinioArtifactStore(ArtifactStore):
         return artifact
 
     async def load(self, artifact_id: str) -> Artifact:
+        # 形态校验必须与 S3ArtifactStore 一致（#185 AC3）：此前这里直接拿 id 拼 key
+        # 去请求对象存储，畸形 id 会以 SDK 异常的形状外泄——错误契约不统一。
+        # 与 S3 一致地先判形态，再走网络，统一以 KeyError 表示"不存在/不可读"。
+        if not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            raise KeyError(f"Artifact '{artifact_id}' does not exist")
         async with self._sdk_session.client("s3", **self._client_kwargs) as client:
-            response = await client.get_object(
-                Bucket=self._bucket,
-                Key=f"{self._session_id}/{artifact_id}",
-            )
+            try:
+                response = await client.get_object(
+                    Bucket=self._bucket,
+                    Key=f"{self._session_id}/{artifact_id}",
+                )
+            except self._client_error as error:
+                # 与 S3ArtifactStore 一致：对象不存在是**契约内的 not-found**，统一成
+                # KeyError；否则它会以 SDK 异常的形状漏到 HTTP 层变成 500（#185 审查 P1）。
+                if error.response.get("Error", {}).get("Code") == "NoSuchKey":
+                    raise KeyError(f"Artifact '{artifact_id}' does not exist") from error
+                raise
             async with response["Body"] as stream:
                 body = await stream.read()
-        content = body.decode("utf-8")
+        try:
+            content = body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            # 与 S3 同口径：损坏/截断的对象不得以 UnicodeDecodeError 外泄（会变 500），
+            # 也不得静默当成合法内容——统一 KeyError → 404。
+            raise KeyError(
+                f"Artifact '{artifact_id}' is not valid UTF-8 "
+                "(object modified or corrupted out-of-band)"
+            ) from error
         # Content-addressable verification: artifact_id is sha256(content)[:16].
         if compute_artifact_id(content) != artifact_id:
             raise KeyError(
@@ -120,9 +146,11 @@ class MinioArtifactStore(ArtifactStore):
             session_id=self._session_id,
             size=len(body),
             mime_type=response.get("ContentType", "application/octet-stream"),
-            source_tool="",
-            tool_call_id="",
-            created_at="",
+            # save 未持久化这三项（对象上只有内容和 ContentType），所以 load 无法恢复：
+            # 如实给 None，而不是伪造 ""（#185 AC4）。
+            source_tool=None,
+            tool_call_id=None,
+            created_at=None,
             content=content,
         )
 
@@ -138,25 +166,12 @@ class MinioArtifactStore(ArtifactStore):
     ) -> ArtifactSlice:
         artifact = await self.load(artifact_id)
         assert artifact.content is not None
-        all_lines = artifact.content.splitlines()
-        lines, truncated = _slice_lines(
-            all_lines,
+        return slice_artifact(
+            artifact_id,
+            artifact.content,
             start_line=start_line,
             end_line=end_line,
             keyword=keyword,
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
-        )
-        return ArtifactSlice(
-            artifact_id=artifact_id,
-            lines=lines,
-            total_lines=len(all_lines),
-            returned_lines=len(lines),
-            truncated=truncated,
-            query={
-                "start_line": start_line,
-                "end_line": end_line,
-                "keyword": keyword,
-                "max_lines": max_lines,
-            },
         )

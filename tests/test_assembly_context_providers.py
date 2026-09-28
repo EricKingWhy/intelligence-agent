@@ -63,7 +63,7 @@ async def _build_runtime(tmp_path: Path, wiring: CapabilityWiring, context_provi
             workspace_registry=workspace_registry,
             session_id="sess-cp",
             workspace=tmp_path / "workspaces" / "sess-cp",
-            max_steps=10,
+            max_agent_turns=10,
             context_providers=context_providers,
         )
     return runtime

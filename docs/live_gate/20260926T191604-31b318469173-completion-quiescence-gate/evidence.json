@@ -1,0 +1,453 @@
+{
+  "schema_version": 1,
+  "scenario_id": "completion-quiescence-gate",
+  "scenario_version": 1,
+  "verdict": "PASS",
+  "reason": "",
+  "missing_preconditions": [],
+  "created_at": "2026-09-26T19:17:00.881+00:00",
+  "sha": "31b31846917310077c6e6aac7e0963495e28568b",
+  "tree": "5ea1d5a6239711b7f33dd0288482be1db7a1c28b",
+  "worktree": {
+    "head_sha": "31b31846917310077c6e6aac7e0963495e28568b",
+    "tree": "5ea1d5a6239711b7f33dd0288482be1db7a1c28b",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "mimo",
+    "model_name": "mimo-v2.6-flash",
+    "base_url_host": "api.xiaomimimo.com",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "senseaudio",
+    "fallback_model_name": "glm-5.3-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "74210022b88dd09f",
+      "9fdf9990c2fb92fc",
+      "eabb6e67f3d8710f"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-26T19:16:04.193+00:00",
+      "ended_at": "2026-09-26T19:16:23.172+00:00",
+      "status": "PASS",
+      "duration_ms": 18978,
+      "session_id": "completion-quiescence-gate-a1-70e0c680",
+      "run_id": "6cd03c73-608e-4f14-81a5-8c3b53bd9607",
+      "run_status": "completed",
+      "steps": 6,
+      "event_count": 27,
+      "tool_calls": [
+        "write",
+        "write",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260926T191604-31b318469173-completion-quiescence-gate/attempt-1.jsonl",
+      "events_sha256": "4d418d31d3debc69a5844aa81ef1855ff9577b876388611ee607c81f2a9ce2e2",
+      "assertions": [
+        {
+          "name": "positive_leg_completed_after_durable_tool_result",
+          "ok": true,
+          "detail": "第 1 次执行 status=completed；最后一条 tool/result 的 seq=6 < run/completed 的 seq=9（完成之前那次调用的用户工作已经落盘）；该 run 的终态事件数=1（恰好一条）"
+        },
+        {
+          "name": "positive_leg_artifact_on_disk",
+          "ok": true,
+          "detail": "durable.txt 内容比对（len=35）——完成不是模型的声称：工具的真实副作用在工作区里"
+        },
+        {
+          "name": "ledger_rows_for_every_call",
+          "ok": true,
+          "detail": "事件的 tool/call=3 条，账本里逐条有行=无缺行；每条都不是未结清状态（未结清的那条是下面单列的 owner）—— 这证明执行器真的带着生产账本在跑，不是「账本缺席所以谓词空真」"
+        },
+        {
+          "name": "unquiescent_owner_produced_by_production_execution",
+          "ok": true,
+          "detail": "owner 行产出时 state=OperationState.UNKNOWN 副作用未证=True 欠对账=True；生产 agent_harness.tools.bash.BashTool 的返回 error_code=ErrorCode.TIMEOUT；副作用计数=1（副作用已落地 ⇒ 真的证不出结论，不是「其实没发生」）"
+        },
+        {
+          "name": "refused_leg_blocked_with_stable_reason",
+          "ok": true,
+          "detail": "第 2 次执行 status='quiescence_blocked' reason='quiescence_blocked:pending_reconcile,unsettled_operation'（稳定理由点名账本那条行的两类 blocker）；该 run 的终态事件数=0（必须是 0）；run/paused 出现次数=0（完成闸门不用暂停表达未静止：`03 §5` 的暂停只有预算/deadline/stuck 三类）；operation/reconcile-required 出现次数=0（拒绝不顺手做对账分类）"
+        },
+        {
+          "name": "refusal_left_the_owner_untouched",
+          "ok": true,
+          "detail": "owner 行在**被拒那一刻**的全字段快照与拒绝前逐字段不变=True（拒绝不替它做分类、不改 reconcile_meta）；被拒的是收口不是工作：本场景另外断言同一次执行自己的 write 调用已结清"
+        },
+        {
+          "name": "refused_leg_work_still_settled",
+          "ok": true,
+          "detail": "被挡那次执行仍然落了自己的 tool/result（refused-leg.txt 内容比对=True）—— 模型真的干完了活；只是这次 run 的收口被拒绝"
+        },
+        {
+          "name": "gate_readout_blocked_by_the_ledger_row",
+          "ok": true,
+          "detail": "独立重算（不经过 Runtime）：blocker kinds=['unsettled_operation', 'pending_reconcile']；摘掉账本后仅事件可见的 kinds=[]（必须是空 ⇒ 归因干净）；纯函数给的理由与产品给的理由一致=True"
+        },
+        {
+          "name": "gate_readout_follows_the_reconcile_chain",
+          "ok": true,
+          "detail": "分类（UNKNOWN→NEED_RECONCILE）后 kinds=['pending_reconcile']（只剩谓词 5：行已进对账流程，不再是「未定在途」）；裁决（→SUCCEEDED，裁决内容覆盖未证标记）后 quiescent=True kinds=[]"
+        },
+        {
+          "name": "owner_row_settles_only_via_the_reconcile_chain",
+          "ok": true,
+          "detail": "会话收尾时 owner 行 state=OperationState.SUCCEEDED 副作用未证=False 欠对账=False（它由「产出即未结清」变成结清，只经由 classify→adjudicate 两步；这是第 3 条腿得以通过的前提，也说明裁决内容必须覆盖未证标记 —— `update_state` 对 reconcile_meta 是 COALESCE，传 None 会留下那格旧值）"
+        },
+        {
+          "name": "settled_work_reenters_the_gate_and_completes",
+          "ok": true,
+          "detail": "第 3 次执行 status='completed'；最后一条 tool/result 的 seq=23 < run/completed 的 seq=26；该 run 的终态事件数=1"
+        },
+        {
+          "name": "one_terminal_per_completed_run_no_duplicates",
+          "ok": true,
+          "detail": "run/started=3（三次执行）终态事件=2（['08a85f55-2eba-45b9-a270-558094abe13c', '6cd03c73-608e-4f14-81a5-8c3b53bd9607']）：被挡的那次（run_id=f6c1183c-7bdf-4cd7-b9a5-bed4a7c20658）一条终态也没有 —— 不重复、不矛盾"
+        },
+        {
+          "name": "production_tools_used",
+          "ok": true,
+          "detail": "实现=write→agent_harness.tools.write.WriteTool（判据：类路径落在产品核心 `agent_harness.*`）"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）27 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "owner_side_effect_happened_exactly_once",
+          "ok": true,
+          "detail": "副作用计数=1（整个会话只有那一次真实的 MUTATING 调用落过副作用：没有被重跑）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 三次执行各自的 run_id=齐"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "文件已经写好。",
+      "workspace_id": "74210022b88dd09f",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-26T19:16:23.172+00:00",
+      "ended_at": "2026-09-26T19:16:39.562+00:00",
+      "status": "PASS",
+      "duration_ms": 16389,
+      "session_id": "completion-quiescence-gate-a2-44031fd4",
+      "run_id": "f33e1671-5dd2-4888-8c56-15864be96ea9",
+      "run_status": "completed",
+      "steps": 6,
+      "event_count": 27,
+      "tool_calls": [
+        "write",
+        "write",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260926T191604-31b318469173-completion-quiescence-gate/attempt-2.jsonl",
+      "events_sha256": "e8338caa0d73aa99540a790f915ed41b04cb6caa04ba5e667466cf84e88351db",
+      "assertions": [
+        {
+          "name": "positive_leg_completed_after_durable_tool_result",
+          "ok": true,
+          "detail": "第 1 次执行 status=completed；最后一条 tool/result 的 seq=6 < run/completed 的 seq=9（完成之前那次调用的用户工作已经落盘）；该 run 的终态事件数=1（恰好一条）"
+        },
+        {
+          "name": "positive_leg_artifact_on_disk",
+          "ok": true,
+          "detail": "durable.txt 内容比对（len=35）——完成不是模型的声称：工具的真实副作用在工作区里"
+        },
+        {
+          "name": "ledger_rows_for_every_call",
+          "ok": true,
+          "detail": "事件的 tool/call=3 条，账本里逐条有行=无缺行；每条都不是未结清状态（未结清的那条是下面单列的 owner）—— 这证明执行器真的带着生产账本在跑，不是「账本缺席所以谓词空真」"
+        },
+        {
+          "name": "unquiescent_owner_produced_by_production_execution",
+          "ok": true,
+          "detail": "owner 行产出时 state=OperationState.UNKNOWN 副作用未证=True 欠对账=True；生产 agent_harness.tools.bash.BashTool 的返回 error_code=ErrorCode.TIMEOUT；副作用计数=1（副作用已落地 ⇒ 真的证不出结论，不是「其实没发生」）"
+        },
+        {
+          "name": "refused_leg_blocked_with_stable_reason",
+          "ok": true,
+          "detail": "第 2 次执行 status='quiescence_blocked' reason='quiescence_blocked:pending_reconcile,unsettled_operation'（稳定理由点名账本那条行的两类 blocker）；该 run 的终态事件数=0（必须是 0）；run/paused 出现次数=0（完成闸门不用暂停表达未静止：`03 §5` 的暂停只有预算/deadline/stuck 三类）；operation/reconcile-required 出现次数=0（拒绝不顺手做对账分类）"
+        },
+        {
+          "name": "refusal_left_the_owner_untouched",
+          "ok": true,
+          "detail": "owner 行在**被拒那一刻**的全字段快照与拒绝前逐字段不变=True（拒绝不替它做分类、不改 reconcile_meta）；被拒的是收口不是工作：本场景另外断言同一次执行自己的 write 调用已结清"
+        },
+        {
+          "name": "refused_leg_work_still_settled",
+          "ok": true,
+          "detail": "被挡那次执行仍然落了自己的 tool/result（refused-leg.txt 内容比对=True）—— 模型真的干完了活；只是这次 run 的收口被拒绝"
+        },
+        {
+          "name": "gate_readout_blocked_by_the_ledger_row",
+          "ok": true,
+          "detail": "独立重算（不经过 Runtime）：blocker kinds=['unsettled_operation', 'pending_reconcile']；摘掉账本后仅事件可见的 kinds=[]（必须是空 ⇒ 归因干净）；纯函数给的理由与产品给的理由一致=True"
+        },
+        {
+          "name": "gate_readout_follows_the_reconcile_chain",
+          "ok": true,
+          "detail": "分类（UNKNOWN→NEED_RECONCILE）后 kinds=['pending_reconcile']（只剩谓词 5：行已进对账流程，不再是「未定在途」）；裁决（→SUCCEEDED，裁决内容覆盖未证标记）后 quiescent=True kinds=[]"
+        },
+        {
+          "name": "owner_row_settles_only_via_the_reconcile_chain",
+          "ok": true,
+          "detail": "会话收尾时 owner 行 state=OperationState.SUCCEEDED 副作用未证=False 欠对账=False（它由「产出即未结清」变成结清，只经由 classify→adjudicate 两步；这是第 3 条腿得以通过的前提，也说明裁决内容必须覆盖未证标记 —— `update_state` 对 reconcile_meta 是 COALESCE，传 None 会留下那格旧值）"
+        },
+        {
+          "name": "settled_work_reenters_the_gate_and_completes",
+          "ok": true,
+          "detail": "第 3 次执行 status='completed'；最后一条 tool/result 的 seq=23 < run/completed 的 seq=26；该 run 的终态事件数=1"
+        },
+        {
+          "name": "one_terminal_per_completed_run_no_duplicates",
+          "ok": true,
+          "detail": "run/started=3（三次执行）终态事件=2（['094abe37-a2af-456c-9c88-278071d37bf8', 'f33e1671-5dd2-4888-8c56-15864be96ea9']）：被挡的那次（run_id=964ae16c-7ad8-4da0-bf4d-c95f0ed73b3a）一条终态也没有 —— 不重复、不矛盾"
+        },
+        {
+          "name": "production_tools_used",
+          "ok": true,
+          "detail": "实现=write→agent_harness.tools.write.WriteTool（判据：类路径落在产品核心 `agent_harness.*`）"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）27 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "owner_side_effect_happened_exactly_once",
+          "ok": true,
+          "detail": "副作用计数=1（整个会话只有那一次真实的 MUTATING 调用落过副作用：没有被重跑）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 三次执行各自的 run_id=齐"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "文件已经写好。",
+      "workspace_id": "9fdf9990c2fb92fc",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-26T19:16:39.562+00:00",
+      "ended_at": "2026-09-26T19:17:00.674+00:00",
+      "status": "PASS",
+      "duration_ms": 21112,
+      "session_id": "completion-quiescence-gate-a3-d36e18b7",
+      "run_id": "c1f71765-cafd-491a-9227-7f9e78c0822b",
+      "run_status": "completed",
+      "steps": 6,
+      "event_count": 27,
+      "tool_calls": [
+        "write",
+        "write",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260926T191604-31b318469173-completion-quiescence-gate/attempt-3.jsonl",
+      "events_sha256": "c7864517c33630e80ac2f9b39b18f447a540542637cdcb118ee8928114d3f599",
+      "assertions": [
+        {
+          "name": "positive_leg_completed_after_durable_tool_result",
+          "ok": true,
+          "detail": "第 1 次执行 status=completed；最后一条 tool/result 的 seq=6 < run/completed 的 seq=9（完成之前那次调用的用户工作已经落盘）；该 run 的终态事件数=1（恰好一条）"
+        },
+        {
+          "name": "positive_leg_artifact_on_disk",
+          "ok": true,
+          "detail": "durable.txt 内容比对（len=35）——完成不是模型的声称：工具的真实副作用在工作区里"
+        },
+        {
+          "name": "ledger_rows_for_every_call",
+          "ok": true,
+          "detail": "事件的 tool/call=3 条，账本里逐条有行=无缺行；每条都不是未结清状态（未结清的那条是下面单列的 owner）—— 这证明执行器真的带着生产账本在跑，不是「账本缺席所以谓词空真」"
+        },
+        {
+          "name": "unquiescent_owner_produced_by_production_execution",
+          "ok": true,
+          "detail": "owner 行产出时 state=OperationState.UNKNOWN 副作用未证=True 欠对账=True；生产 agent_harness.tools.bash.BashTool 的返回 error_code=ErrorCode.TIMEOUT；副作用计数=1（副作用已落地 ⇒ 真的证不出结论，不是「其实没发生」）"
+        },
+        {
+          "name": "refused_leg_blocked_with_stable_reason",
+          "ok": true,
+          "detail": "第 2 次执行 status='quiescence_blocked' reason='quiescence_blocked:pending_reconcile,unsettled_operation'（稳定理由点名账本那条行的两类 blocker）；该 run 的终态事件数=0（必须是 0）；run/paused 出现次数=0（完成闸门不用暂停表达未静止：`03 §5` 的暂停只有预算/deadline/stuck 三类）；operation/reconcile-required 出现次数=0（拒绝不顺手做对账分类）"
+        },
+        {
+          "name": "refusal_left_the_owner_untouched",
+          "ok": true,
+          "detail": "owner 行在**被拒那一刻**的全字段快照与拒绝前逐字段不变=True（拒绝不替它做分类、不改 reconcile_meta）；被拒的是收口不是工作：本场景另外断言同一次执行自己的 write 调用已结清"
+        },
+        {
+          "name": "refused_leg_work_still_settled",
+          "ok": true,
+          "detail": "被挡那次执行仍然落了自己的 tool/result（refused-leg.txt 内容比对=True）—— 模型真的干完了活；只是这次 run 的收口被拒绝"
+        },
+        {
+          "name": "gate_readout_blocked_by_the_ledger_row",
+          "ok": true,
+          "detail": "独立重算（不经过 Runtime）：blocker kinds=['unsettled_operation', 'pending_reconcile']；摘掉账本后仅事件可见的 kinds=[]（必须是空 ⇒ 归因干净）；纯函数给的理由与产品给的理由一致=True"
+        },
+        {
+          "name": "gate_readout_follows_the_reconcile_chain",
+          "ok": true,
+          "detail": "分类（UNKNOWN→NEED_RECONCILE）后 kinds=['pending_reconcile']（只剩谓词 5：行已进对账流程，不再是「未定在途」）；裁决（→SUCCEEDED，裁决内容覆盖未证标记）后 quiescent=True kinds=[]"
+        },
+        {
+          "name": "owner_row_settles_only_via_the_reconcile_chain",
+          "ok": true,
+          "detail": "会话收尾时 owner 行 state=OperationState.SUCCEEDED 副作用未证=False 欠对账=False（它由「产出即未结清」变成结清，只经由 classify→adjudicate 两步；这是第 3 条腿得以通过的前提，也说明裁决内容必须覆盖未证标记 —— `update_state` 对 reconcile_meta 是 COALESCE，传 None 会留下那格旧值）"
+        },
+        {
+          "name": "settled_work_reenters_the_gate_and_completes",
+          "ok": true,
+          "detail": "第 3 次执行 status='completed'；最后一条 tool/result 的 seq=23 < run/completed 的 seq=26；该 run 的终态事件数=1"
+        },
+        {
+          "name": "one_terminal_per_completed_run_no_duplicates",
+          "ok": true,
+          "detail": "run/started=3（三次执行）终态事件=2（['f99832f5-6a75-471b-a68d-cc188ffbf696', 'c1f71765-cafd-491a-9227-7f9e78c0822b']）：被挡的那次（run_id=93885a78-b4f3-494f-8553-31109e922bf0）一条终态也没有 —— 不重复、不矛盾"
+        },
+        {
+          "name": "production_tools_used",
+          "ok": true,
+          "detail": "实现=write→agent_harness.tools.write.WriteTool（判据：类路径落在产品核心 `agent_harness.*`）"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）27 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "owner_side_effect_happened_exactly_once",
+          "ok": true,
+          "detail": "副作用计数=1（整个会话只有那一次真实的 MUTATING 调用落过副作用：没有被重跑）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 三次执行各自的 run_id=齐"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "文件已经写好。",
+      "workspace_id": "eabb6e67f3d8710f",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260926T191604-31b318469173-completion-quiescence-gate/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260926T191604-31b318469173-completion-quiescence-gate/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260926T191604-31b318469173-completion-quiescence-gate/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "completion-quiescence-gate"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的五条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`、完成闸门 `#316`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

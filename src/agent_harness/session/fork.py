@@ -22,10 +22,22 @@ from typing import TYPE_CHECKING, Protocol
 
 from langchain_core.messages import HumanMessage
 
+from agent_harness.agent.run_budget import session_budget_key
+from agent_harness.prompt import DEFAULT_REGISTRY
+from agent_harness.session.approval import (
+    SESSION_AUTO_APPROVE_KEY,
+    SESSION_PERMISSION_MODE_KEY,
+    effective_auto_approve,
+    effective_permission_mode,
+)
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
+    PERMISSION_CHANGED,
     RUN_FAILED,
+    RUN_PAUSED,
+    RUN_RESUMED,
     RUN_STARTED,
     RUN_TERMINAL_TYPES,
     SESSION_FORKED,
@@ -41,7 +53,15 @@ from agent_harness.storage.session_meta import SessionMeta
 if TYPE_CHECKING:
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.store import JsonlSessionStore
+    from agent_harness.storage.delegation_tree import (
+        InMemoryDelegationTreeLedger,
+        SqliteDelegationTreeLedger,
+    )
     from agent_harness.storage.session_meta import SessionMetaStore
+
+    #: 只读账行读数所需的接口（`get_session_budget`）；duck-typed，运行期不 import
+    #: storage（fork 在 session 层，两个实现都满足这一条）。
+    SessionBudgetLedger = SqliteDelegationTreeLedger | InMemoryDelegationTreeLedger
 
 logger = logging.getLogger("agent_harness.session.fork")
 
@@ -94,12 +114,9 @@ class TailSummarizer:
 
     async def summarize(self, tail_text: str) -> str:
         tail_text = tail_text[-self._max_tail_chars :]
-        prompt = (
-            "以下是一个 agent 会话在分叉切点之后被放弃的对话片段。请用不超过"
-            "150 字总结这条被放弃的路线尝试了什么、进行到哪一步、得出了什么"
-            "结论，供新分支参考。只输出总结正文，不要寒暄。\n\n"
-            f"{tail_text}"
-        )
+        prompt = DEFAULT_REGISTRY.assemble(
+            "aux:fork_tail", {"tail_text": tail_text}
+        ).meta_user_text
         response = await self._model.ainvoke([HumanMessage(content=prompt)])
         return str(response.content)
 
@@ -108,21 +125,35 @@ class ForkBoundaryError(ValueError):
     """非法 fork 边界：锚点不存在 / 不是用户消息 / 前缀含未终态 run。"""
 
 
+def _run_open_delta(event: SessionEvent) -> int:
+    """事件对「未收口 run 计数」的增量（`#312`）。
+
+    暂停计一次收口（`03 §3.4`：暂停态非终态，但该时点没有在途工具调用、也没有
+    悬空 run），`run/resumed` 把同一个逻辑 run 重新计入未收口——fork 要的是
+    「前缀里没有悬空的执行」，不是「没有暂停过」。
+    """
+    if event.type == RUN_STARTED or event.type == RUN_RESUMED:
+        return 1
+    if event.type in RUN_TERMINAL_TYPES or event.type == RUN_PAUSED:
+        return -1
+    return 0
+
+
 def find_fork_boundaries(events: list[SessionEvent]) -> list[int]:
     """列出合法 fork 锚点（用户消息 seq，锚点语义：seed = [0, seq)）。
 
     规则：锚点处的 seed 前缀必须 run 完整——逐事件跟踪 run/started 与
-    run 终态（`RUN_TERMINAL_TYPES`：completed / failed / interrupted）的
-    开合计数，计数为 0 时遇到的用户消息才是合法切点。
+    run 收口事件（`RUN_TERMINAL_TYPES`：completed / failed / interrupted，
+    以及 `#312` 起的非终态 `run/paused`）的开合计数，计数为 0 时遇到的用户
+    消息才是合法切点。暂停计一次收口：暂停中的执行没有在途工具调用、
+    也没有悬空 run（`03 §3.4`），child 以它作前缀是完整的；该 run 若被
+    `run/resumed` 接回则重新计入未收口（`_run_open`）。
     """
     boundaries: list[int] = []
     open_runs = 0
     for event in events:
-        if event.type == RUN_STARTED:
-            open_runs += 1
-        elif event.type in RUN_TERMINAL_TYPES:
-            open_runs -= 1
-        elif event.type == USER_MESSAGE and open_runs == 0:
+        open_runs += _run_open_delta(event)
+        if event.type == USER_MESSAGE and open_runs == 0:
             boundaries.append(event.seq)
     return boundaries
 
@@ -138,12 +169,21 @@ async def fork_session(
     workspace_registry: WorkspaceRegistry | None = None,
     summarizer: TailSummarizerProtocol | None = None,
     with_tail_summary: bool = True,
+    budget_ledger: SessionBudgetLedger | None = None,
 ) -> Session:
     """从父会话的第 boundary_user_message_seq 条用户消息处 fork 出 child。
 
     锚点消息不进 seed；seed = 锚点之前的全部事件（父的 session/started 除
     外——child 写自己的身份事件）。失败时不留任何 child 侧孤儿（先校验后
     落盘）。
+
+    session 预算谱系（`#318`）：`budget_ledger` 给定时，读**父账行**的当前快照
+    落进 `session/forked.data.budget_session`（谱系可溯），其余一字不动——
+    fork = **新 SessionBudget 身份**（`03 §7`：child 是新 session_id ⇒ 新账行、
+    新计数器，账从零开始；父行零写入：不迁移消耗、不 bump version、不写
+    任何事件）。父行不存在（父会话还没跑过任何 step）⇒ 落 `snapshot: null`，
+    "父没有账"与"父的账是空的"都如实可读。child 行由它自己的首个 run 惰性
+    建出（与创建路径同一条规则）。
     """
     # 父会话只读加载（§7 父不可改：绝不能 Session.resume，那会追加 resumed）
     parent_events = store.read_events(parent_session_id)
@@ -167,18 +207,37 @@ async def fork_session(
             f"（可用边界: {available}）"
         )
 
+    # F18-A #282：`permission/changed` 与 `session/started` 同属**会话级状态**，不是
+    # 对话历史——从 seed 里剔除（child 用 `started_data` 重新声明自己的档）。若不剔除，
+    # child 的「最后一次 changed 胜」会取到 seed 里**更早**的那条（锚点之前），覆盖掉
+    # 下面从父派生的**当下** effective 档，造成「父 fork 后又改过档、child 却继承旧档」。
     seed = [
         e
         for e in parent_events
-        if e.seq < anchor.seq and e.type != SESSION_STARTED
+        if e.seq < anchor.seq and e.type not in (SESSION_STARTED, PERMISSION_CHANGED)
     ]
     _validate_run_complete(seed, parent_session_id)
 
     # 校验全部通过后才落盘：先建 child，再做 workspace 物理复制，再移植
     # seed 与 provenance/索引（copy 失败属基础设施故障，原样上抛）。
+    # WS-1 #151 AC4：child 的 cwd **显式继承自 parent**（不靠"反正目录是复制来的"
+    # 隐式成立）。父无 cwd（历史遗留）→ child 也不写该字段，父子的未分组状态一致。
+    # F15 #234 + F18-A #282：会话级权限决策与 cwd 同级，显式继承——父是只读而 child
+    # "未声明"的话，续聊会落到 workspace-write + 全自动批准（复制了父的 workspace 文件，
+    # 却对写操作免审批）。继承的是父**当下生效**档（ADR-0041 §2 D7），父未声明 → 不写键。
+    inherited: dict[str, object] = {}
+    parent_mode = effective_permission_mode(parent_events)
+    if parent_mode is not None:
+        inherited[SESSION_PERMISSION_MODE_KEY] = parent_mode.value
+    parent_auto = effective_auto_approve(parent_events)
+    if parent_auto is not None:
+        inherited[SESSION_AUTO_APPROVE_KEY] = parent_auto
+
     child = Session.start(
         store, agent_id=agent_id, session_id=child_session_id,
         workspace_registry=workspace_registry,
+        started_data=inherited or None,
+        cwd=session_cwd(parent_events),
     )
     if workspace_registry is not None:
         _copy_workspace(workspace_registry, parent_session_id, child)
@@ -207,6 +266,16 @@ async def fork_session(
     }
     if tail_summary:
         forked_data["tail_summary"] = tail_summary
+    # session 预算谱系（`#318`）：只读父账行 + 落快照引用；父零写入。
+    if budget_ledger is not None:
+        parent_key = session_budget_key(parent_events, session_id=parent_session_id)
+        parent_snapshot = await budget_ledger.get_session_budget(parent_key)
+        forked_data["budget_session"] = {
+            "parent_budget_key": parent_key,
+            "snapshot": (
+                parent_snapshot.as_projection() if parent_snapshot is not None else None
+            ),
+        }
     child.append(SESSION_FORKED, forked_data, agent_id=agent_id)
 
     await meta_store.upsert(
@@ -249,10 +318,7 @@ def _validate_run_complete(
 ) -> None:
     open_runs = 0
     for event in seed:
-        if event.type == RUN_STARTED:
-            open_runs += 1
-        elif event.type in RUN_TERMINAL_TYPES:
-            open_runs -= 1
+        open_runs += _run_open_delta(event)
         if open_runs < 0:
             raise ForkBoundaryError(
                 f"父会话 '{parent_session_id}' 前缀 run 事件序非法（负计数）"

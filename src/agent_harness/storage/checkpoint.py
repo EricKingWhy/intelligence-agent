@@ -72,6 +72,14 @@ class CheckpointStore(ABC):
     async def latest(self, session_id: str) -> Checkpoint | None:
         """返回某 session 最近一条 Checkpoint（最高 event_seq），无则 None。"""
 
+    @abstractmethod
+    async def delete_for_session(self, session_id: str) -> int:
+        """删除某 session 的全部 Checkpoint，返回删除条数。
+
+        会话硬删的一部分（ADR-0029）：Checkpoint 是**恢复辅助**，它描述的那份事件日志
+        被删掉后就没有恢复对象了。幂等：未知 / 已清空 → 0，不抛错。
+        """
+
 
 class CheckpointPolicy(ABC):
     """薄 seam：AgentRuntime 在每个稳定边界调 maybe_save 决定是否落盘。

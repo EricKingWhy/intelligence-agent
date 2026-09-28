@@ -95,14 +95,20 @@ async def _shutdown(server, serve_task) -> None:
         pass
 
 
-async def _create_session(port: int, task: str) -> str:
-    """POST /api/sessions → 消费 SSE 到 run/completed → 返回 session_id。"""
+async def _create_session(port: int, task: str, cwd: str | None = None) -> str:
+    """POST /api/sessions → 消费 SSE 到 run/completed → 返回 session_id。
+
+    `cwd` 非空时按 ADR-0027 的 cwd 契约建会话（会话归属到该目录）。
+    """
     import httpx2
 
     frames: list[dict] = []
+    body: dict = {"task": task}
+    if cwd is not None:
+        body["cwd"] = cwd
     async with httpx2.AsyncClient(timeout=None) as client, client.stream(
         "POST", f"http://127.0.0.1:{port}/api/sessions",
-        json={"task": task},
+        json=body,
     ) as response:
         assert response.status_code == 200, \
                 f"期望 200，实际 {response.status_code}"
@@ -153,6 +159,41 @@ async def _recv_until(ws, predicate, timeout: float = 8.0) -> list[dict]:
     except TimeoutError:
         pass
     return frames
+
+
+@pytest.mark.asyncio
+async def test_ws_send_message_reports_workspace_binding_conflict(tmp_path, monkeypatch):
+    """#266：WS 续聊撞上 cwd 绑定冲突 ⇒ 必须回一条 error 帧，不能静默断连。
+
+    WS 的 `send_message` 是 HTTP 三个端点之外的**第四个**续聊入口。修复前
+    `WorkspaceBindingConflict` 不在该分支的 except 元组里 ⇒ 逃到外层
+    `except Exception`（只 `logger.debug`）⇒ 连接直接死掉，用户看不到任何原因。
+    """
+    from tests.workspace_fixtures import rewrite_workspace_mapping
+
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        project = tmp_path / "project"
+        project.mkdir()
+        sid = await _create_session(port, "任务", cwd=str(project))
+        # 漂移：把映射改指别处（durable cwd 不变）→ 续聊入口应类型化失败
+        rewrite_workspace_mapping(tmp_path / "workspaces", sid, tmp_path / "elsewhere")
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "send_message", "session_id": sid, "content": "继续"}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "error" for f in fs),
+                timeout=5.0)
+            errors = [f for f in frames if f.get("type") == "error"]
+            assert errors, f"应收到 error 帧，实际帧：{frames}"
+            assert "工作目录绑定冲突" in errors[0]["message"]
+    finally:
+        await _shutdown(server, serve_task)
 
 
 @pytest.mark.asyncio
@@ -376,7 +417,28 @@ async def test_ws_disconnect_cleans_subscriber(tmp_path, monkeypatch):
                     "subscribe active run 后应有订阅者"
                 assert len(run.subscribers) >= 1
 
+                async def _relay_waiting_for_events() -> asyncio.Task | None:
+                    for _ in range(50):
+                        for task in asyncio.all_tasks():
+                            code = getattr(task.get_coro(), "cr_code", None)
+                            if code is not None and code.co_name == "_relay_events":
+                                awaited = getattr(task.get_coro(), "cr_await", None)
+                                while awaited is not None:
+                                    awaited_code = getattr(awaited, "cr_code", None)
+                                    if awaited_code is not None and awaited_code.co_name == "get":
+                                        return task
+                                    awaited = getattr(awaited, "cr_await", None)
+                        await asyncio.sleep(0.01)
+                    return None
+
+                relay_task = await _relay_waiting_for_events()
+                assert relay_task is not None and not relay_task.done(), \
+                    "验收前应确认 relay 正阻塞等待订阅事件"
+
             # WS 已断开：服务端 finally 清理订阅 → subscribers 归零
+            await asyncio.wait_for(relay_task, timeout=5)
+            assert relay_task.done(), "WS 断开后 relay task 必须结束，不能泄漏"
+
             async def _subscribers_empty() -> bool:
                 for _ in range(50):
                     run = app.state.agent.run_manager.get_active(session_id)
@@ -387,5 +449,487 @@ async def test_ws_disconnect_cleans_subscriber(tmp_path, monkeypatch):
 
             assert await _subscribers_empty(), \
                 "WS 断开后 ManagedRun.subscribers 应归零"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_resubscribe_keeps_run_attached_before_old_relay_cleanup(
+    tmp_path, monkeypatch,
+):
+    """替换同一活动 run 的订阅时，新 subscriber 必须先接上，避免孤儿宽限窗。"""
+    from agent_harness.session.runmanager import ManagedRun
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=40, interval=0.1),
+    )
+    run_manager = app.state.agent.run_manager
+    run_manager.disconnect_grace_seconds = 0.5
+    replacing = False
+    subscriber_counts: list[int] = []
+    original_unsubscribe = ManagedRun.unsubscribe
+
+    def observe_unsubscribe(run, subscriber):
+        original_unsubscribe(run, subscriber)
+        if replacing and not run.terminal:
+            subscriber_counts.append(len(run.subscribers))
+
+    monkeypatch.setattr(ManagedRun, "unsubscribe", observe_unsubscribe)
+    try:
+        import httpx2
+
+        session_id = await _start_run_get_session_id(port, "重订阅任务")
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            subscribe = {"type": "subscribe", "session_id": session_id}
+            await ws.send_text(json.dumps(subscribe))
+            first = await _recv_until(
+                ws, lambda frames: any(f.get("type") == "snapshot" for f in frames),
+            )
+            assert any(f.get("type") == "snapshot" for f in first)
+            run = run_manager.get_active(session_id)
+            assert run is not None and len(run.subscribers) == 1
+
+            run_manager.disconnect_grace_seconds = 0.01
+            replacing = True
+            await ws.send_text(json.dumps(subscribe))
+            second = await _recv_until(
+                ws, lambda frames: any(f.get("type") == "snapshot" for f in frames),
+            )
+            replacing = False
+
+            assert any(f.get("type") == "snapshot" for f in second)
+            assert subscriber_counts and min(subscriber_counts) >= 1, (
+                "替换期间旧 subscriber 离开前必须已有新 subscriber；"
+                f"观察到订阅者数量 {subscriber_counts}"
+            )
+            assert run_manager.get_active(session_id) is run
+            assert len(run.subscribers) == 1
+            await asyncio.sleep(0.05)
+            assert run.task is not None and not run.task.cancelled(), \
+                "重订阅不能触发 RunManager 的孤儿回收"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_cancel_during_resubscribe_unsubscribes_new_subscriber(
+    tmp_path, monkeypatch,
+):
+    """取消发生在旧 relay 收尾等待中时，新 subscriber 也必须被摘除。"""
+    from agent_harness.web import websocket as websocket_module
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=40, interval=0.1),
+    )
+    original_gather = asyncio.gather
+    relay_cleanup_started = asyncio.Event()
+    release_relay_cleanup = asyncio.Event()
+    gate_relay_cleanup = False
+
+    def is_relay_task(awaitable) -> bool:
+        get_coro = getattr(awaitable, "get_coro", None)
+        coro = get_coro() if get_coro is not None else awaitable
+        code = getattr(coro, "cr_code", None)
+        return code is not None and code.co_name == "_relay_events"
+
+    def gated_gather(*awaitables, **kwargs):
+        if gate_relay_cleanup and any(map(is_relay_task, awaitables)):
+            relay_cleanup_started.set()
+
+            async def wait_then_gather():
+                await release_relay_cleanup.wait()
+                return await original_gather(*awaitables, **kwargs)
+
+            return wait_then_gather()
+        return original_gather(*awaitables, **kwargs)
+
+    monkeypatch.setattr(websocket_module.asyncio, "gather", gated_gather)
+    try:
+        import httpx2
+
+        session_id = await _start_run_get_session_id(port, "取消重订阅任务")
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            subscribe = {"type": "subscribe", "session_id": session_id}
+            await ws.send_text(json.dumps(subscribe))
+            first = await _recv_until(
+                ws, lambda frames: any(f.get("type") == "snapshot" for f in frames),
+            )
+            assert any(f.get("type") == "snapshot" for f in first)
+            run = app.state.agent.run_manager.get_active(session_id)
+            assert run is not None and len(run.subscribers) == 1
+
+            gate_relay_cleanup = True
+            await ws.send_text(json.dumps(subscribe))
+            await asyncio.wait_for(relay_cleanup_started.wait(), timeout=5)
+            read_task = next(
+                task for task in asyncio.all_tasks()
+                if getattr(getattr(task.get_coro(), "cr_code", None), "co_name", None)
+                == "_read_loop"
+            )
+            read_task.cancel()
+            gate_relay_cleanup = False
+            await asyncio.sleep(0.05)
+
+            assert not run.subscribers, (
+                "取消的重订阅处理器必须清除已创建但尚未登记的 subscriber"
+            )
+    finally:
+        gate_relay_cleanup = False
+        release_relay_cleanup.set()
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_relay_error_waits_for_outbound_queue_capacity():
+    """有界 WS 队列满时 relay 错误必须等待发送，不能静默丢弃。"""
+    from agent_harness.web.websocket import _enqueue_relay_error
+
+    out_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+    prior_frame = {"type": "event", "session_id": "sid"}
+    out_q.put_nowait(prior_frame)
+    task = asyncio.create_task(_enqueue_relay_error(out_q, "sid"))
+
+    await asyncio.sleep(0)
+    assert not task.done(), "满队列时错误帧应等待容量，而不是被丢弃"
+    assert out_q.get_nowait() == prior_frame
+    error = await asyncio.wait_for(out_q.get(), timeout=1)
+    await asyncio.wait_for(task, timeout=1)
+    assert error == {
+        "type": "error",
+        "session_id": "sid",
+        "message": "stream relay failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ws_relay_unbinds_terminal_run_subscriber(tmp_path, monkeypatch):
+    """#341：relay 收尾必须按**创建时绑定的 run** 解绑。
+
+    run 终态后 `get_active()` 返回 None——若收尾时重查而不是用绑定的
+    run，`unsubscribe` 会泄漏（subscribers 永远非空，孤儿计时也不启动）。
+    用约 1s 的慢流模型保证 subscribe 时 run 在途、done 帧时已终态。"""
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=10, interval=0.1),
+    )
+    try:
+        import httpx2
+
+        session_id = await _start_run_get_session_id(port, "短任务")
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "done" for f in fs),
+                timeout=15.0)
+            assert any(f.get("type") == "done" for f in frames)
+
+        # done 帧意味着 relay 已收到哨兵并收尾：终态 run 的 subscribers 必须归零
+        run_manager = app.state.agent.run_manager
+        run = run_manager._runs.get(session_id)
+        assert run is not None and run.terminal, "run 应已终态"
+
+        async def _terminal_subscribers_empty() -> bool:
+            for _ in range(50):
+                if not run.subscribers:
+                    return True
+                await asyncio.sleep(0.05)
+            return False
+
+        assert await _terminal_subscribers_empty(), \
+            "终态 run 的 subscribers 应归零（relay 按绑定的 run 解绑）"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+# ── #208：WS 快照的 backlog 保护（与 SSE 同一判据）─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ws_snapshot_backlog_over_threshold_emits_control_frame(
+    tmp_path, monkeypatch,
+):
+    """backlog 超阈值 → 快照里只有一帧 stream/truncated，**不塞整段日志**。
+
+    与 `test_web_stream.test_replay_backlog_threshold_emits_control_frame`
+    同一手法（把阈值调小才可能构造超限），但走 WS 通道：断言两条通道的**判据
+    与帧形状一致**——形状来自 `serialization.build_truncated_control` 这个唯一
+    构建点，所以这里同时锁住了 SSE 侧不会与 WS 漂开。
+    """
+    from agent_harness import web as web_module
+
+    monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 2)
+
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        session_id = await _create_session(port, "一轮")
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client:
+            events = (await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
+            )).json()
+        latest = max(e["seq"] for e in events if e.get("seq") is not None)
+        assert latest > 2, "夹具前提：event 数必须超过（调小后的）阈值"
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            # 从头发（after_seq=-1）⇒ 4 个事件 > 阈值 2 ⇒ 必须截断
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": -1}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            assert len(snap["events"]) == 1, \
+                f"超限快照只应带控制帧，实际 {len(snap['events'])} 条"
+            control = snap["events"][0]
+            assert control["type"] == "stream/truncated"
+            assert control["data"] == {"after_seq": -1, "latest_seq": latest}
+            assert control["seq"] is None, "控制帧不是运行事实，无 seq"
+            assert control["durability"] == "transient"
+            # has_active_run=false ⇒ 客户端据此 settle 后走重建（不会等 done）
+            assert snap["has_active_run"] is False
+
+        # 客户端按重建路径回来：游标在最新处 ⇒ 不再触发，且只补窗口内那一截
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": latest}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            assert all(e["type"] != "stream/truncated" for e in snap["events"])
+            assert snap["events"] == [], "游标已在最新处 ⇒ 没有可补的事件"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_truncation_on_active_run_leaves_no_subscriber(tmp_path, monkeypatch):
+    """超限分支**不订阅、不起 relay**：被导向重建时不得留下孤儿订阅者。
+
+    为什么这条必须单独锁：被截断的订阅者不会有人消费（客户端收到控制帧就断开去
+    重建），若超限分支先 `subscribe()` 再返回，每个重建周期都会在 RunManager 的
+    `subscribers` 里留一个永不清理的队列——重建次数越多泄漏越多，且这个 session
+    的下一轮 fanout 会往这些死队列里写。这里用**真在途 run**（3s 慢流）才能非空洞
+    地验证：跑完再订阅能收到增量，证明断言时 run 确实在途。
+    """
+    from agent_harness import web as web_module
+
+    monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 2)
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=30, interval=0.1),
+    )
+    try:
+        session_id = await _start_run_get_session_id(port, "慢任务")
+
+        # 前置：等这个在途 run 产出**超过**（调小后的）阈值的事件。seq 从 0 起，
+        # 所以"≥阈值+1"才保证 `replay_upto - (-1) > 2` 成立——订阅早于它就会
+        # 走正常分支，本用例变成空洞的绿。
+        run = None
+        for _ in range(200):
+            run = app.state.agent.run_manager.get_active(session_id)
+            if run is not None and run.last_enqueued_seq > 2:
+                break
+            await asyncio.sleep(0.05)
+        assert run is not None and run.last_enqueued_seq > 2, \
+            f"前提：在途 run 必须已产出 >2 个事件（实际 {run and run.last_enqueued_seq}）"
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=15) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            # 从头发 ⇒ 在途 run 的事件数早已超过阈值 2 ⇒ 必须走截断分支
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": -1}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            assert [e["type"] for e in snap["events"]] == ["stream/truncated"]
+
+            run = app.state.agent.run_manager.get_active(session_id)
+            assert run is not None, "前提：此时 run 仍在途（否则本用例空洞）"
+            assert run.subscribers == {}, \
+                "超限分支不得留下订阅者——客户端会断开去重建，没人消费这些队列"
+
+            # 旁证（用户可见后果）：这条连接上不该再有 event 帧——relay 没起。
+            after = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "event" for f in fs),
+                timeout=0.5,
+            )
+            assert not [f for f in after if f.get("type") == "event"], \
+                "截断后不得继续推增量事件（客户端已去重建）"
+
+        # 非空洞对照：带真实游标回来仍能收到增量 ⇒ run 确实是活的
+        async with httpx2.AsyncClient(timeout=15) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            run = app.state.agent.run_manager.get_active(session_id)
+            cursor = run.last_enqueued_seq if run is not None else -1
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": cursor}))
+            frames = await _recv_until(
+                ws,
+                lambda fs: len([f for f in fs if f.get("type") == "event"]) >= 1,
+            )
+            assert [f for f in frames if f.get("type") == "event"], \
+                "带正确游标回来必须能接上 live 增量"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_truncation_criterion_is_persisted_max_not_enqueue_cursor(
+    tmp_path, monkeypatch,
+):
+    """阈值判据取**持久面** `latest_seq`，不取 run 的入队游标（2026-09-17 审查修正）。
+
+    为什么必须单锁：两个量在稳态相等（`runmanager.py:131-137`：落盘先于 listener
+    入队），**只有 listener 落后时**才分叉——而那一刻两条通道会给出相反裁决
+    （SSE 用 `events[-1].seq`、WS 若用 `last_enqueued_seq` 就会截断），契约却写着
+    "同一条判据"。分叉窗口靠真实时序等不到，所以这里**直接构造**：把在途 run 的
+    入队游标推到持久 max 之外（`_last_enqueued_seq` 是 `runmanager.py:62` 的私有
+    计数，测试直接写它），游标取到"持久面刚好不超限"的位置（差值 == 阈值）。
+    旧实现（用入队游标）⇒ 502 > 2 ⇒ 截断（红）；现实现（用持久 max）⇒ 正常快照，
+    窗口恰好两条（绿）。
+    """
+    from agent_harness import web as web_module
+
+    monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 2)
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch,
+        model_factory=lambda config, **kw: _SlowStreamModel(chunks=30, interval=0.1),
+    )
+    try:
+        session_id = await _start_run_get_session_id(port, "慢任务")
+
+        # 前置：持久化事件必须已超过（调小后的）阈值——否则"没截断"是因为事件本来就
+        # 少，本用例变成空洞的绿。
+        run = None
+        for _ in range(200):
+            run = app.state.agent.run_manager.get_active(session_id)
+            if run is not None and run.last_enqueued_seq > 2:
+                break
+            await asyncio.sleep(0.05)
+        assert run is not None and run.last_enqueued_seq > 2, \
+            f"前提：在途 run 必须已产出 >2 个事件（实际 {run and run.last_enqueued_seq}）"
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=15) as client:
+            events = (await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
+            )).json()
+        persisted_max = max(e["seq"] for e in events if e.get("seq") is not None)
+
+        # 构造分叉：入队游标 >> 持久 max。真实的"落盘先于入队"不变量被打破，但判据
+        # 若取持久面，就**不该**受影响。
+        run._last_enqueued_seq = persisted_max + 500
+
+        # 游标取到"持久面刚好不超限"的位置：`latest_seq - after_seq == 阈值`（不是 >）。
+        # 于是两个判据给出相反裁决——持久面 ⇒ 正常快照（2 条）；入队游标 ⇒ 502 > 2
+        # ⇒ 截断。这正是分叉时两条通道会打架的那一刻。
+        after_seq = persisted_max - 2
+
+        async with httpx2.AsyncClient(timeout=15) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": after_seq}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            types = [e["type"] for e in snap["events"]]
+            assert "stream/truncated" not in types, (
+                "判据取的是 run 的入队游标（被推高即误判超限）——应取持久 max "
+                f"`events[-1].seq`（persisted_max={persisted_max}, after_seq={after_seq}）"
+            )
+            # 非空洞：窗口恰好是 (after_seq, replay_upto] 那一截（持久面 2 条）
+            seqs = [e["seq"] for e in snap["events"] if e.get("seq") is not None]
+            assert seqs == [persisted_max - 1, persisted_max], \
+                f"窗口应只补持久面那两条，实际 {seqs}"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_snapshot_window_filters_by_cursor(tmp_path, monkeypatch):
+    """带游标 ⇒ 快照只发 `after_seq < seq ≤ replay_upto` 那一截（#208）。
+
+    阈值保持默认（1000）⇒ 走在窗口这条正常路径上：这是"老客户端拿全量、
+    新客户端只补差额"的分界，也是重建后不重复投影的**服务端**那一半
+    （另一半是客户端的 seq 幂等门）。
+    """
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        session_id = await _create_session(port, "一轮")
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client:
+            events = (await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
+            )).json()
+        seqs = [e["seq"] for e in events if e.get("seq") is not None]
+        assert len(seqs) >= 3, "夹具前提：至少 3 个 durable 事件"
+        mid = sorted(seqs)[1]
+
+        async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+            f"ws://127.0.0.1:{port}/api/ws"
+        ) as ws:
+            await ws.send_text(json.dumps({
+                "type": "subscribe", "session_id": session_id, "after_seq": mid}))
+            frames = await _recv_until(
+                ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+            snap = next(f for f in frames if f.get("type") == "snapshot")
+            got = [e["seq"] for e in snap["events"] if e.get("seq") is not None]
+            assert got == [s for s in sorted(seqs) if s > mid], \
+                f"窗口应为 ({mid}, {max(seqs)}]，实际 {got}"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_ws_snapshot_illegal_cursor_falls_back_to_head(tmp_path, monkeypatch):
+    """非法 `after_seq`（字符串 / 布尔 / 缺失）⇒ 当 -1 从头发，**不报错不断连**。
+
+    这是纯粹的输入校验：把任意 JSON 类型交给 `replay_upto - after_seq` 会抛
+    TypeError，那是**连接级**异常（整条 WS 挂掉），代价远大于"按最保守的
+    从头发"。三条非法输入都必须照常拿到快照。
+    """
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
+    try:
+        session_id = await _create_session(port, "一轮")
+        import httpx2
+
+        for bad in ("9", True, None):
+            payload = {"type": "subscribe", "session_id": session_id}
+            if bad is not None:
+                payload["after_seq"] = bad
+            async with httpx2.AsyncClient(timeout=10) as client, client.websocket(
+                f"ws://127.0.0.1:{port}/api/ws"
+            ) as ws:
+                await ws.send_text(json.dumps(payload))
+                frames = await _recv_until(
+                    ws, lambda fs: any(f.get("type") == "snapshot" for f in fs))
+                snap = next(
+                    (f for f in frames if f.get("type") == "snapshot"), None)
+                assert snap is not None, f"after_seq={bad!r} 未拿到快照"
+                assert snap["events"], "回退到 -1 ⇒ 应重放全部 durable 事件"
+                assert not any(f.get("type") == "error" for f in frames)
     finally:
         await _shutdown(server, serve_task)

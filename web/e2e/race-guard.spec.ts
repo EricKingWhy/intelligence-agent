@@ -28,7 +28,7 @@ test('竞态守卫：旧请求迟到失败不污染新会话', async ({ page }) 
   let postCount = 0;
   let secondPostHit = false;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: async (route) => {

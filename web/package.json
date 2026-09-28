@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:e2e": "node scripts/preflight-port.mjs && vite --strictPort",
     "build": "tsc -b && vite build",
     "gen:event-types": "uv run python ../scripts/gen_event_types.py",
     "lint": "oxlint",
@@ -37,6 +38,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
+    "jsdom": "^30.1.0",
     "oxlint": "^1.79.0",
     "typescript": "~6.0.2",
     "vite": "^8.2.2",

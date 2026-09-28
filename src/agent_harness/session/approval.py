@@ -7,13 +7,29 @@
 
 ``service.py`` 以 ``_InteractiveCallbackHolder = InteractiveCallbackHolder`` 别名
 重新导出，既有的私有名引用与测试导入路径不变。
+
+F18-A（#282）追加：
+
+- ``declared_permission_mode`` / ``declared_auto_approve`` —— 会话**创建时**显式声明
+  的档位与 auto_approve（F15 #234）。
+- ``effective_permission_mode`` / ``effective_auto_approve`` —— 会话**当下生效**的值：
+  最后一次 ``permission/changed`` 胜，否则回落到创建时的声明。
+- ``append_permission_change`` —— ``permission/changed`` 的唯一写入口。
 """
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from agent_harness.session.event import TOOL_APPROVAL_REQUESTED
+from agent_harness.session.event import (
+    PERMISSION_CHANGED,
+    PERMISSION_RESOLVED,
+    SESSION_STARTED,
+    TOOL_APPROVAL_REQUESTED,
+    SessionEvent,
+)
 from agent_harness.tooling.approval import (
     ApprovalCallback,
     ApprovalRequest,
@@ -21,9 +37,18 @@ from agent_harness.tooling.approval import (
     PermissionDecision,
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
     from agent_harness.session.session import Session
+
+logger = logging.getLogger("agent_harness.session.approval")
+
+#: ``session/started`` 里承载会话级权限档的键（F15 #234）。
+SESSION_PERMISSION_MODE_KEY = "permission_mode"
+#: ``session/started`` 里承载会话级「是否自动批准」声明的键（F15 #234）。
+#: 与档位同一个病：创建期决策不落盘，续聊就只能猜（那里 ``None`` = 全自动批准）。
+SESSION_AUTO_APPROVE_KEY = "auto_approve"
 
 
 class InteractiveCallbackHolder:
@@ -89,6 +114,44 @@ class InteractiveCallbackHolder:
                 # 先写入者胜（一次性语义）：采用人类决策，不覆盖。
                 settled = self._queue.resolved_response(approval_id)
                 response = settled if settled is not None else timeout_deny
+        except BaseException:
+            # 等审批的一方再也不会回来了（run 取消 / 进程退出 / 其他异常）：durable 事实
+            # 仍必须**成对**。否则这条 `tool/approval-requested` 永远等不到结清它的写入方，
+            # 而完成闸门谓词 2（`02 §5.4`）读的正是这个配对 —— 一个取消掉的 run 会把整段
+            # 会话锁成永不可完成（`#316` 的离线端到端用例复现过）。
+            # fail-closed：没有批准就是拒绝；`expire` 同时清掉 pending（取消后迟到的 /approve
+            # 拿 409 而不是静默生效）。`expire` 返回 False = 有人先裁决了（与超时分支同一把
+            # 尺子：先写入者胜，绝不覆盖既有决策）。
+            fallback = ApprovalResponse(
+                approved=False,
+                reason="审批等待被中断（run 取消或退出），按 fail-closed 拒绝",
+                decision=PermissionDecision.DENY,
+            )
+            settled = (
+                fallback
+                if self._queue.expire(approval_id, fallback)
+                else self._queue.resolved_response(approval_id) or fallback
+            )
+            try:
+                self._session.append(
+                    "permission/resolved",
+                    {
+                        "approval_id": approval_id,
+                        "decision": settled.decision.value,
+                        "reason": settled.reason,
+                    },
+                )
+            except Exception:
+                # 结清写入自己失败（存储故障）时**不能**顶掉原异常：这条 except 分支
+                # 在取消 / 退出的栈上，换掉它会让 runtime 的取消臂不匹配、run 被记成
+                # `run/failed`（`02 §17` 要求取消与失败分开）。代价是这条请求在 durable
+                # 面仍不成对——记 ERROR 供排查，不静默（ADR-0047 §4 残余 5）。
+                logger.exception(
+                    "审批中断时的 fail-closed 结清写入失败：approval_id=%s 在事件流里"
+                    "仍不成对，完成闸门谓词 2 会继续阻断本会话",
+                    approval_id,
+                )
+            raise
         self._session.append(
             "permission/resolved",
             {
@@ -98,6 +161,60 @@ class InteractiveCallbackHolder:
             },
         )
         return response
+
+
+def declared_permission_mode(events: list[SessionEvent]) -> PermissionPolicy | None:
+    """派生会话创建时**显式声明的**权限档；未声明 → None（F15 #234）。
+
+    权限档是会话的属性：创建时定、之后不可变（与 ``cwd`` 同级），所以只认第一条
+    ``session/started`` 里的 ``permission_mode`` 键。返回 None 表示"这份日志来自
+    未声明档位的会话"（历史会话 / 用户没选），调用方据此保持既有语义
+    （``workspace-write`` + 安全默认回调），而不是替用户猜一个更严或更松的档。
+
+    值不可解析（日志被手改）时记 warning 并按未声明处理——不静默改写成某个具体档位。
+    """
+    for event in events:
+        if event.type != SESSION_STARTED:
+            continue
+        raw = event.data.get(SESSION_PERMISSION_MODE_KEY)
+        if raw is None:
+            return None
+        try:
+            return PermissionPolicy(raw)
+        except ValueError:
+            logger.warning(
+                "session/started 的 %s=%r 不是合法权限档，按未声明处理",
+                SESSION_PERMISSION_MODE_KEY, raw,
+            )
+            return None
+    return None
+
+
+def declared_auto_approve(events: list[SessionEvent]) -> bool | None:
+    """派生会话创建时**显式声明的** ``auto_approve``；未声明 → None（F15 #234）。
+
+    与 :func:`declared_permission_mode` 同一个病、同一把锁：创建期
+    ``auto_approve_explicit=True, auto_approve=False`` 走 deny 路由
+    （``build_approval_callback`` 的第二支），但这条决策此前不落盘 ⇒ 续聊落到
+    "未声明"分支（``None`` = 全自动批准），用户勾的"不自动批准"从第二条消息起失效。
+
+    只认第一条 ``session/started`` 里的 ``auto_approve`` 键。值不是 bool（日志被手改）
+    时记 warning 并按未声明处理——**不猜**一个更松的值。
+    """
+    for event in events:
+        if event.type != SESSION_STARTED:
+            continue
+        raw = event.data.get(SESSION_AUTO_APPROVE_KEY)
+        if raw is None:
+            return None
+        if isinstance(raw, bool):
+            return raw
+        logger.warning(
+            "session/started 的 %s=%r 不是 bool，按未声明处理",
+            SESSION_AUTO_APPROVE_KEY, raw,
+        )
+        return None
+    return None
 
 
 def build_approval_callback(
@@ -138,7 +255,114 @@ def build_approval_callback(
         return None
 
 
+# ── F18-A（#282）：会话内改权限档 ──────────────────────────────────────────
+# 「创建时声明」与「会话内改档」写同一对键，故 ``effective_*`` = ``declared_*`` 之上
+# 叠一层「最后一次 changed 胜」。决策与优先级：ADR-0041 §2 D3。
+
+
+@dataclass(frozen=True)
+class PermissionChange:
+    """一次权限档切换的结果（F18-A #282）。
+
+    ``permission_mode`` / ``auto_approve`` 是**改后当下生效**的值——HTTP 响应回传它，
+    前端按回执对齐（不引入乐观本地状态，见 ``web/src/lib/api.ts``）。
+    """
+
+    permission_mode: PermissionPolicy
+    auto_approve: bool
+
+
+def effective_permission_mode(events: list[SessionEvent]) -> PermissionPolicy | None:
+    """派生会话**当下生效**的权限档（F18-A #282；优先级见 ADR-0041 §2 D3）。
+
+    约束：命中一条 ``permission/changed`` 就**不再往下找**——值不可解析时记 warning 并按
+    未声明返回 None（不回落 declared、不猜更严或更松的档，与 :func:`declared_permission_mode`
+    同一条规矩）。无 ``permission/changed`` 时逐字回落 F15 #234 的既有行为。
+    """
+    for event in reversed(events):
+        if event.type != PERMISSION_CHANGED:
+            continue
+        raw = event.data.get(SESSION_PERMISSION_MODE_KEY)
+        try:
+            return PermissionPolicy(raw)
+        except ValueError:
+            logger.warning(
+                "permission/changed 的 %s=%r 不是合法权限档，按未声明处理",
+                SESSION_PERMISSION_MODE_KEY, raw,
+            )
+            return None
+    return declared_permission_mode(events)
+
+
+def effective_auto_approve(events: list[SessionEvent]) -> bool | None:
+    """派生会话**当下生效**的 ``auto_approve``（F18-A #282）。规则同
+    :func:`effective_permission_mode`；只认 bool，其余按未声明处理。"""
+    for event in reversed(events):
+        if event.type != PERMISSION_CHANGED:
+            continue
+        raw = event.data.get(SESSION_AUTO_APPROVE_KEY)
+        if isinstance(raw, bool):
+            return raw
+        logger.warning(
+            "permission/changed 的 %s=%r 不是 bool，按未声明处理",
+            SESSION_AUTO_APPROVE_KEY, raw,
+        )
+        return None
+    return declared_auto_approve(events)
+
+
+def unresolved_approval_ids(events: list[SessionEvent]) -> list[str]:
+    """会话里**已请求但没有裁决**的 ``approval_id``（`02 §5.4` 第 2 条的判据，T8 #316）。
+
+    配对键是 ``approval_id``（两个写入者都在这个键上落事件）：``tool/approval-requested``
+    由交互式 callback 在**等待决策之前**落盘，``permission/resolved`` 在决策（或
+    fail-closed 超时）之后落盘——所以"有 requested 无 resolved"恰好是"这次审批还没
+    结论"，与 `PendingApprovalQueue` 的进程内视图同源同义（队列本身不进 SessionEvent，
+    不变量 #4）。
+
+    按事件出现顺序返回（可复现），同一 id 多条 requested 只算一次；缺 ``approval_id``
+    的事件跳过（腐烂数据只让这一项失去判据，不抛错——与 `declared_permission_mode`
+    同一条纪律）。
+    """
+    requested: dict[str, None] = {}
+    resolved: set[str] = set()
+    for event in events:
+        approval_id = event.data.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            continue
+        if event.type == TOOL_APPROVAL_REQUESTED:
+            requested.setdefault(approval_id, None)
+        elif event.type == PERMISSION_RESOLVED:
+            resolved.add(approval_id)
+    return [approval_id for approval_id in requested if approval_id not in resolved]
+
+
+def append_permission_change(session: Session, change: PermissionChange) -> PermissionChange:
+    """追加 ``permission/changed``——PERMISSION_CHANGED 的**唯一**写入口（F18-A #282）。
+
+    data 形状（只写改后当前值、无 from/to）见 ADR-0041 §2 D2。走 ``Session.append``
+    ——不产生 resume 副作用（不变量 #7）。
+    """
+    session.append(
+        PERMISSION_CHANGED,
+        {
+            SESSION_PERMISSION_MODE_KEY: change.permission_mode.value,
+            SESSION_AUTO_APPROVE_KEY: change.auto_approve,
+        },
+    )
+    return change
+
+
 __all__ = [
+    "SESSION_AUTO_APPROVE_KEY",
+    "SESSION_PERMISSION_MODE_KEY",
     "InteractiveCallbackHolder",
+    "PermissionChange",
+    "append_permission_change",
     "build_approval_callback",
+    "declared_auto_approve",
+    "declared_permission_mode",
+    "effective_auto_approve",
+    "effective_permission_mode",
+    "unresolved_approval_ids",
 ]

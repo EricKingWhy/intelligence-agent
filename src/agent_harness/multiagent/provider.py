@@ -11,7 +11,8 @@ subprocess/remote(ACP) 未来换实现即可。
 未激活时执行 → 明确失败（绝不静默伪装）。
 
 child 的边界（都在 activate 注入的 factory/registry 里固化）：
-- registry 经 AgentFactory 过滤（depth=1：child 无 delegate）；
+- registry 经 AgentFactory 过滤，收窄到「本层实有工具 ∩ 剩余深度允许的可授予
+  集合」（#286：remaining=0 时 child 拿不到 delegate，且申请即显式拒绝）；
 - sandbox 与父共享同一实例（spec §9：coding 改动 review 可见）；
 - Session 独立 JSONL（lineage 由父流 delegation 事件的 child_session_id 引用）。
 """
@@ -27,10 +28,32 @@ from uuid import uuid4
 
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import BUILTIN_PROFILES, AgentSpec
+from agent_harness.agent.run_budget import SessionBudgetPort, SessionLimits
 from agent_harness.agent.runtime import AgentRunResult
+from agent_harness.multiagent.depth import (
+    SpawnScope,
+    bind_scope,
+    bind_tree_id,
+    child_allowance,
+    current_scope,
+    current_tree_id,
+    grantable_names,
+)
 from agent_harness.sandbox import WorkspaceRegistry
-from agent_harness.session import SESSION_STARTED, Session
+from agent_harness.session import (
+    SESSION_STARTED,
+    Session,
+    cwd_event_data,
+    run_context_var,
+    session_cwd,
+)
+from agent_harness.session.event import RUN_INTERRUPTED, RUN_TERMINAL_TYPES
 from agent_harness.session.store import JsonlSessionStore
+from agent_harness.storage.delegation_tree import (
+    DelegationReservation,
+    InMemoryDelegationTreeLedger,
+    SessionBudgetHandle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +173,16 @@ class InProcessSubagentProvider:
         self._activated = False
         self._factory: AgentFactory | None = None
         self._source_registry = None
+        # 根委派配额（#286）：activate 用根 profile 的 max_depth 覆盖。
+        self._max_depth = 1
+        self._root_max_depth = 1
+        self._max_delegations = 8
+        self._delegation_ledger = InMemoryDelegationTreeLedger()
+        self._session_tree_id: str | None = None
+        self._root_session_id: str | None = None
+        self._resume_tree_id: str | None = None
+        self._resume_bound_run_id: str | None = None
+        self._tree_metadata_error = False
         self._session_store: JsonlSessionStore | None = None
         self._workspace_registry: WorkspaceRegistry | None = None
         self._parent_session_id: str | None = None
@@ -159,10 +192,27 @@ class InProcessSubagentProvider:
         self._summary_limit = 8192
         self._overflow_configured = False
         # 并发 child 封顶（#90, ADR-0015 决策 13）：超出排队不失败。
+        self._active_children_owner: InProcessSubagentProvider = self
         self._active_children: asyncio.Semaphore | None = None
-        self._max_active_children = 0
+        self._max_active_children: int | None = None
         # 子会话观测挂点（未来 Agent Hub / lineage 消费；测试断言共享 sandbox）。
         self.last_child_sessions: list[Session] = []
+        # 父 cwd 缓存（WS-1 #151）：写后不可变 → 同一个父只读一次，不重读父 JSONL。
+        # 用独立的 loaded 标志而不是 `None` 哨兵：`None`（父确实没有 cwd）是合法
+        # 缓存值，读失败则**不缓存**（瞬时 I/O 故障不该把子会话永久钉成未分组）。
+        self._parent_cwd_cache: str | None = None
+        self._parent_cwd_loaded = False
+
+    def new_runtime_instance(self) -> InProcessSubagentProvider:
+        """Create an unactivated provider for one root Runtime.
+
+        Capability wiring is cached process-wide, but session/store/workspace
+        bindings are not: each Runtime must own its own mutable provider state.
+        Descendant Runtimes keep using this instance through the inherited registry.
+        """
+        instance = InProcessSubagentProvider(profiles=self._profiles)
+        instance._active_children_owner = self._active_children_owner
+        return instance
 
     def activate(
         self,
@@ -175,20 +225,141 @@ class InProcessSubagentProvider:
         summary_limit: int = 8192,
         overflow_configured: bool = False,
         max_active_children: int = 4,
+        max_depth: int = 1,
+        max_delegations: int = 8,
+        delegation_ledger=None,
     ) -> None:
-        """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。"""
+        """build_runtime 在模型链与 registry 就绪后调用（幂等：重复激活覆盖）。
+
+        `max_depth` = **根配额**（#286 冻结语义 1）：root depth=0，所以它同时就是
+        「从根还能往下几层」。来源是根 profile 的 `AgentSpec.max_depth`（装配点传），
+        不是 child 的自述——child 抬不动它。默认 1 = V1 出厂语义（ADR-0015 决策 7）：
+        忘了传只会更保守，不会更宽；传 0 会被 `child_allowance` 折成「根自己也派不
+        出去」，同样 fail-closed，不炸。
+        """
         self._factory = factory
         self._source_registry = source_registry
+        self._max_depth = max_depth
+        self._root_max_depth = max_depth
+        self._max_delegations = max_delegations
+        self._delegation_ledger = delegation_ledger or InMemoryDelegationTreeLedger()
         self._session_store = session_store
         self._workspace_registry = workspace_registry
         self._parent_session_id = parent_session_id
+        self._root_session_id = parent_session_id
+        self._session_tree_id = None
+        self._resume_tree_id = None
+        self._resume_bound_run_id = None
+        self._tree_metadata_error = False
+        self._parent_cwd_cache = None
+        self._parent_cwd_loaded = False
+        try:
+            events = session_store.read_events(parent_session_id)
+            self._parent_cwd_cache = session_cwd(events)
+            self._parent_cwd_loaded = True
+            started = next((event for event in events if event.type == SESSION_STARTED), None)
+            if started is not None:
+                tree_id = started.data.get("delegation_tree_id")
+                root_id = started.data.get("delegation_root_session_id")
+                remaining = started.data.get("delegation_remaining_depth")
+                root_max_depth = started.data.get("delegation_root_max_depth")
+                root_max_delegations = started.data.get("delegation_root_max_delegations")
+                if isinstance(tree_id, str) and tree_id:
+                    self._session_tree_id = tree_id
+                if isinstance(root_id, str) and root_id:
+                    self._root_session_id = root_id
+                if isinstance(remaining, int) and not isinstance(remaining, bool):
+                    self._max_depth = min(self._max_depth, remaining)
+                if isinstance(root_max_depth, int) and not isinstance(root_max_depth, bool):
+                    self._root_max_depth = root_max_depth
+                if (isinstance(root_max_delegations, int)
+                        and not isinstance(root_max_delegations, bool)
+                        and root_max_delegations >= 0):
+                    self._max_delegations = root_max_delegations
+                if self._session_tree_id and not (
+                    isinstance(root_id, str) and root_id
+                    and isinstance(remaining, int) and not isinstance(remaining, bool)
+                    and remaining >= 0
+                    and isinstance(root_max_depth, int)
+                    and not isinstance(root_max_depth, bool)
+                    and root_max_depth >= remaining
+                    and isinstance(root_max_delegations, int)
+                    and not isinstance(root_max_delegations, bool)
+                    and root_max_delegations >= 0
+                ):
+                    self._tree_metadata_error = True
+                if (not self._session_tree_id
+                        and started.agent_id not in {None, "default", "main"}):
+                    # A child session without the metadata needed to recover its
+                    # parent tree must not silently receive a fresh depth/budget.
+                    self._tree_metadata_error = True
+            if self._session_tree_id is None:
+                last_terminal = next(
+                    (event for event in reversed(events)
+                     if event.type in RUN_TERMINAL_TYPES and event.run_id),
+                    None,
+                )
+                if last_terminal is not None and last_terminal.type == RUN_INTERRUPTED:
+                    self._resume_tree_id = last_terminal.run_id
+        except Exception:
+            # A read failure must not silently grant a fresh tree budget or depth.
+            self._tree_metadata_error = True
+            logger.warning("读取委派树恢复元数据失败", exc_info=True)
         self._summary_limit = summary_limit
         self._overflow_configured = overflow_configured
-        self._max_active_children = max_active_children
-        self._active_children = (
-            asyncio.Semaphore(max_active_children) if max_active_children > 0 else None
-        )
+        limiter_owner = self._active_children_owner
+        if limiter_owner is self:
+            # A directly used provider has no process-wide prototype; preserve
+            # activate()'s existing replacement semantics for its single Runtime.
+            self._max_active_children = max_active_children
+            self._active_children = (
+                asyncio.Semaphore(max_active_children) if max_active_children > 0 else None
+            )
+        else:
+            if limiter_owner._max_active_children is None:
+                limiter_owner._max_active_children = max_active_children
+                limiter_owner._active_children = (
+                    asyncio.Semaphore(max_active_children)
+                    if max_active_children > 0 else None
+                )
+            elif limiter_owner._max_active_children != max_active_children:
+                raise ValueError(
+                    "All runtimes from one multi-agent provider must use the same "
+                    "process-wide max_active_children limit."
+                )
+            self._max_active_children = limiter_owner._max_active_children
+            self._active_children = limiter_owner._active_children
         self._activated = True
+
+    def _parent_cwd(self) -> str | None:
+        """父会话的会话侧 cwd 锚（WS-1 #151）；读不到 → None（子会话按未分组处理）。
+
+        父的 cwd 写后不可变，所以同一个父只读一次并缓存——一次委派不该为此重读
+        整份父 JSONL。读是**同步**的，与 `session/fork.py` 读父 JSONL 同一形态
+        （本仓 `read_events` 就在事件循环里直接调用）；这里刻意不引第二个挂起点：
+        并发 spawn 的子会话若在拿到第一条模型消息前多一次 `await`，彼此之间的
+        调度顺序就会变——那是"个别 child 失败不影响同批其他 child"这类既有断言的
+        隐含前提。只读，**不** `Session.resume`（那会往父日志追加
+        `session/resumed`）；失败只记 warning，归属元数据缺失不该拖垮委派。
+        """
+        if not self._parent_cwd_loaded:
+            value, failed = self._read_parent_cwd()
+            if not failed:
+                self._parent_cwd_cache = value
+                self._parent_cwd_loaded = True
+            return value
+        return self._parent_cwd_cache
+
+    def _read_parent_cwd(self) -> tuple[str | None, bool]:
+        """→ (cwd, 是否读取失败)。失败不缓存：换一次 spawn 再试，别把子会话钉死。"""
+        if self._session_store is None or self._parent_session_id is None:
+            return None, False
+        try:
+            events = self._session_store.read_events(self._parent_session_id)
+            return session_cwd(events), False
+        except Exception:  # 归属元数据缺失不该拖垮委派
+            logger.warning("读取父会话 cwd 失败，子会话按未分组处理", exc_info=True)
+            return None, True
 
     def profile(self, target: str) -> AgentSpec:
         try:
@@ -197,6 +368,72 @@ class InProcessSubagentProvider:
             raise ValueError(
                 f"未知 profile '{target}'（可选：{sorted(self._profiles)}）"
             ) from None
+
+    def tree_id(self) -> str:
+        """Return the inherited tree identity or establish one from this root run."""
+        inherited = current_tree_id()
+        if inherited:
+            return inherited
+        if self._session_tree_id:
+            return self._session_tree_id
+        run_id = run_context_var.get()
+        if self._resume_tree_id and run_id:
+            if self._resume_bound_run_id is None:
+                self._resume_bound_run_id = run_id
+            if self._resume_bound_run_id == run_id:
+                return self._resume_tree_id
+        return run_id or self._parent_session_id or "__no_run__"
+
+    async def reserve_delegation(
+        self, tree_id: str, *, max_delegations: int,
+    ) -> DelegationReservation:
+        if self._tree_metadata_error:
+            raise RuntimeError("委派树恢复元数据不可用；拒绝启动子代理")
+        # session 树账的委派接纳（`#318`）：**跨 run 聚合**的那一格（`02 §5.1`：
+        # SessionBudget 的 delegations 计整棵会话树被接纳的 delegate 调用，默认 8；
+        # `10 §5.1`：第 9 次在子 Agent 执行前被拒）。原子事务，与兄弟串行化。
+        # 树 reserve 随后被拒（单棵 delegating run 的钉死上限更紧）⇒ 退回这一格，
+        # 两个作用域的账各自准确。
+        budget_key = self._root_session_id or self._parent_session_id or tree_id
+        session_reservation = await self._delegation_ledger.consume_session_delegation(
+            budget_key, root_session_id=budget_key,
+            max_delegations=min(max_delegations, self._max_delegations),
+        )
+        if not session_reservation.accepted:
+            return session_reservation
+        reservation = await self._delegation_ledger.reserve(
+            tree_id, root_session_id=self._root_session_id or self._parent_session_id or tree_id,
+            max_delegations=min(max_delegations, self._max_delegations),
+            max_depth=self._root_max_depth,
+        )
+        if not reservation.accepted:
+            await self._delegation_ledger.refund_session_delegation(budget_key)
+        return reservation
+
+    def session_budget_port(self) -> SessionBudgetPort | None:
+        """共享 session 账的端口（给 child runtime；`10 §5.1` 同一份树账）。
+
+        行不存在时（根还没跑过任何一步就把 provider 拿去 spawn——理论上到不了，
+        DelegateTool 的接纳先于本方法）`ensure` 会以**空声明**建行：全部无 ceiling、
+        `max_delegations` 等首用委派时钉。未激活（单测直构 provider）⇒ `None`，
+        child 回到无 session 账的旧行为。
+        """
+        if not self._activated:
+            return None
+        root = self._root_session_id or self._parent_session_id
+        if not root:
+            return None
+        return SessionBudgetHandle(
+            ledger=self._delegation_ledger, budget_key=root,
+            root_session_id=root, limits=SessionLimits(),
+        )
+
+    async def observe_delegation_result(
+        self, tree_id: str, fingerprint: str, *, ok: bool,
+    ):
+        return await self._delegation_ledger.observe_result(
+            tree_id, fingerprint, ok=ok,
+        )
 
     async def run(self, *, target: str, task: str,
                   constraints: list[str]) -> SubAgentResult:
@@ -210,23 +447,88 @@ class InProcessSubagentProvider:
         if constraints:
             full_task = task + "\n\n约束：\n" + "\n".join(f"- {c}" for c in constraints)
 
+        # 当前层的配额：根（还没有人往下走过）= 装配点的 max_depth；否则 = 本层
+        # 被赋予的剩余额度（#286：child 抬不动它）。
+        tree_id = self.tree_id()
+        scope = current_scope()
+        if scope is None:
+            scope = await self._root_scope(tree_id)
         # 并发 child 封顶（#90）：超出排队等待，不失败不丢弃。
         async with (self._active_children or nullcontext(None)):
-            return await self._run_child(spec, full_task)
+            return await self._run_child(spec, full_task, scope, tree_id)
 
-    async def _run_child(self, spec: AgentSpec, full_task: str) -> SubAgentResult:
-        # child sandbox = 父的同一实例（spec §9：coding 的改动 review 直接可见）
-        parent_sandbox = self._workspace_registry.get(self._parent_session_id)
-        child_session = Session(
-            session_id=str(uuid4()), store=self._session_store,
-            sandbox=parent_sandbox,
+    async def _root_scope(self, tree_id: str) -> SpawnScope:
+        """根 scope 不得超过当前 delegation tree 已持久化的深度上限。"""
+        remaining = self._max_depth
+        try:
+            tree_state = await self._delegation_ledger.get_state(tree_id)
+        except KeyError:
+            # 直接使用 Provider（未由 DelegateTool 预留预算）时还没有持久化 tree。
+            # 正常委派会先 reserve，恢复时因此必须以 ledger 内的上限为准。
+            pass
+        else:
+            remaining = min(remaining, tree_state.max_depth)
+        return SpawnScope(registry=self._source_registry, remaining=remaining)
+
+    async def _run_child(
+        self, spec: AgentSpec, full_task: str, scope: SpawnScope, tree_id: str,
+    ) -> SubAgentResult:
+        # 配额与可授予集合在**开 session 之前**算：越权/超深度的 spawn 要显式
+        # 失败，且不该在 session 列表里留下一个只有 session/started 的幽灵子会话。
+        # #286 把这条路径从「罕见」（只有越权申请才走）变成「模型每次撞深度上限
+        # 都会走」，所以顺序本身现在是可观测性的一部分。
+        allowance = child_allowance(scope, spec)
+        child_runtime = self._factory.create(
+            spec,
+            source_registry=scope.registry,
+            grantable=grantable_names(scope, allowance),
+            # `#318`：child 消费**同一份** session 树账（根 / 子 / 孙一个 owner）；
+            # None（未激活）= 旧行为。
+            session_budget=self.session_budget_port(),
         )
-        child_session.append(SESSION_STARTED, {}, agent_id=spec.name)
+        # child workspace = 父的同一 canonical owner（spec §9：coding 的改动
+        # review 直接可见）；先 durable bind，保证 child Session 一旦落盘，恢复
+        # 就能按 child_session_id 重新解析该 workspace。
+        child_session_id = str(uuid4())
+        child_sandbox = self._workspace_registry.bind_alias(
+            child_session_id, self._parent_session_id,
+        )
+        child_session = Session(
+            session_id=child_session_id, store=self._session_store,
+            sandbox=child_sandbox,
+        )
+        # WS-1 #151：子会话的 cwd 与 fork 同一规则——显式继承父会话的会话侧锚。
+        # 不写的话每个子代理都会作为"未分组"会话出现在会话列表里（它们与父同属
+        # 一个项目）。父无锚（历史遗留 / 父会话日志不在）→ 不写该字段，与父一致。
+        child_session.append(
+            SESSION_STARTED,
+            {
+                **cwd_event_data(self._parent_cwd()),
+                "delegation_tree_id": tree_id,
+                "delegation_root_session_id": self._root_session_id,
+                "delegation_remaining_depth": allowance,
+                "delegation_root_max_depth": self._root_max_depth,
+                "delegation_root_max_delegations": self._max_delegations,
+            },
+            agent_id=spec.name,
+        )
         # spawn 即注册（hub/lineage 语义：子代理在 spawn 时可见，不等完成）
         self.last_child_sessions.append(child_session)
 
-        child_runtime = self._factory.create(spec, source_registry=self._source_registry)
-        run_result: AgentRunResult = await child_runtime.run(child_session, full_task)
+        # 子代理的整段 run 都跑在**它自己**的配额作用域里：它再 spawn 时读到的是
+        # 「我手里有什么工具 + 我还能往下几层」，而不是根的（#286 冻结语义 5）。
+        with bind_tree_id(tree_id), bind_scope(SpawnScope(
+            registry=child_runtime.registry, remaining=allowance,
+        )):
+            # 流式驱动（`run_stream` + result_holder 回传与 `run()` 同一终态结果）：
+            # child 与主 run（RunManager）同走流式——某些 OpenAI 兼容网关对带工具的
+            # 非流式请求返回 choices=null 的畸形响应（cline 实测，2026-09-28）。
+            holder: list[AgentRunResult] = []
+            async for _ in child_runtime.run_stream(
+                child_session, full_task, result_holder=holder,
+            ):
+                pass
+            run_result = holder[-1]
 
         status = ("completed" if run_result.status == "completed" else "failed")
         logger.info(

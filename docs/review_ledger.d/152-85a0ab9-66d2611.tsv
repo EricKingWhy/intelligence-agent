@@ -1,0 +1,1 @@
+2026-09-24	#290 最终修复双轴复核（Standards + Spec 独立审查者；fixed point 85a0ab9）：Ledger 缺失/不匹配/非终态 fail closed；重复终态、tool/result、reconcile-required 均计量；普通 Runtime 非 completed 不得过 Gate。0 个确认 P0-P3 findings。局部 26 passed、Phase 16 Docker 13 passed、相关专项 84 passed；默认全量 3184 passed / 2 skipped / 45 deselected。	85a0ab9..66d2611

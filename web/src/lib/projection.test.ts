@@ -2,8 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../types';
-import { EventType } from '../types';
-import { applyEvent, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, projectHistory, summarizeEvent } from './projection';
+import { EventType, type EventTypeValue } from '../types';
+import { applyEvent, awaitingApproval, deriveChain, deriveSessionTitle, emptyChildTurnIndex, firstForkableTurnIndex, hasSummaryOverflow, initConversation, latestEditableTurn, projectHistory, summarizeEvent } from './projection';
 
 function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
   return { data: {}, seq: null, run_id: null, step_id: null, ...partial };
@@ -14,11 +14,19 @@ describe('initConversation', () => {
     const s = initConversation('abc');
     expect(s).toEqual({
       session_id: 'abc', turns: [], active_step_id: null, run_status: 'idle', run_cancelled: false,
-      compactions: [], reconcile_queue: [], pending_approvals: [], events: [], unknown_events: [],
+      compactions: [], reconcile_queue: [], pending_approvals: [], approval_decisions: [],
+      permission_policy: null, session_permission_mode: null, events: [], unknown_events: [],
+      // N2（#271）：events 的 append 计数初值（ADR-0037 D2）——形状断言要跟着长。
+      eventsVersion: 0,
       model: null, usage_total: null, cost_usd: null, trace_id: null, trace_url: null, run_id: null,
       model_fallback: null,
-      run_interrupted: null, turn_index: null,
+      run_interrupted: null, run_failure: null, turn_index: null,
+      // #312：暂停事实的初值（无暂停）——投影的必填字段，形状断言跟着长。
+      run_paused: null,
+      requested_model: null,
+      model_run_id: null,
       seenSeqs: new Set(),
+      undelivered: [],
     });
   });
 });
@@ -565,6 +573,76 @@ describe('applyEvent — Inspector Timeline 事件日志（Phase 5）', () => {
   });
 });
 
+/* ── N2（#271）：`eventsVersion` —— 「events 又追加了」的唯一精确信号（ADR-0037 D2）──
+ *
+ * 为什么需要它：`events` 的引用被 P0-1 **刻意**固定（append-only 共享数组，`3344e34`），
+ * 而 `React.memo` / `useMemo` 的比较语义是**引用相等** ⇒ 任何依赖 `events` 的派生
+ * 永不重算（陈旧渲染，不是性能问题）。`events.length` 当键语义不封闭——去重短路那帧
+ * 不 push（长度不变但确实没新信息 ✔），quarantine 分支 push 了（长度也变 ✔），
+ * 但长度**无法区分「长度不变而内容变」**，是「用巧合代替契约」。故单设一个只由
+ * 「是否真的 push」唯一决定的计数器。
+ *
+ * 边界写死（不得扩大解释）：去重短路**不**递增；quarantine 分支**递增**；
+ * 只度量 events 数组的 append 次数，**不是**通用脏标记、不度量 turns/tools。
+ * 本文件既有的 COW / 引用稳定用例在本票**零改动**（只新增下面这一节）。 */
+describe('eventsVersion — events 追加的精确信号（ADR-0037 D2）', () => {
+  it('AC1 初值：initConversation() 与 projectHistory(空历史) 的产物都是 0', () => {
+    expect(initConversation('v').eventsVersion).toBe(0);
+    expect(projectHistory('v', []).eventsVersion).toBe(0);
+  });
+
+  it('AC2 正常 push 路径：每落一个事件 +1（与 events 实际增长同步）', () => {
+    let s = initConversation('v');
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }));
+    expect(s.eventsVersion).toBe(1);
+    s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, seq: 2, run_id: 'r' }));
+    expect(s.eventsVersion).toBe(2);
+    expect(s.eventsVersion).toBe(s.events.length);
+  });
+
+  it('AC3 去重短路（重复 seq）：不 push ⇒ 不递增，且原 state 对象原样返回', () => {
+    const e1 = ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' });
+    const s1 = applyEvent(initConversation('v'), e1);
+    const s2 = applyEvent(s1, e1);
+    expect(s2).toBe(s1); // 短路连新 state 都不建
+    expect(s2.eventsVersion).toBe(1); // 没 push ⇒ 不递增
+    expect(s2.events).toHaveLength(1);
+  });
+
+  it('AC4 quarantine 分支（形状不可辨的帧）：它也 push 了 events ⇒ 递增', () => {
+    const junk = { totally: 'unrecognized' } as unknown as AgentEvent;
+    const s = applyEvent(initConversation('v'), junk);
+    expect(s.events).toHaveLength(1); // 兜底协议：永不静默丢弃
+    expect(s.unknown_events).toHaveLength(1);
+    expect(s.eventsVersion).toBe(1);
+  });
+
+  it('AC5 两条路径同构：projectHistory 与逐帧 applyEvent 得到相同的 eventsVersion', () => {
+    const events: AgentEvent[] = [
+      ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi', step: 1 }, seq: 2, run_id: 'r', step_id: 1 }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: 'ok', step: 1 }, seq: 3, run_id: 'r', step_id: 1 }),
+      ev({ type: EventType.RUN_COMPLETED, seq: 4, run_id: 'r' }),
+      ev({ type: EventType.RUN_COMPLETED, seq: 4, run_id: 'r' }), // 重复投递：两条路径同样不计入
+      { totally: 'unrecognized' } as unknown as AgentEvent, // quarantine：两条路径同样计入
+    ];
+    const replayed = events.reduce(applyEvent, initConversation('v'));
+    const history = projectHistory('v', events);
+    expect(history.eventsVersion).toBe(replayed.eventsVersion);
+    expect(history.eventsVersion).toBe(5); // 6 帧中 1 帧被去重短路
+    expect(history.eventsVersion).toBe(history.events.length);
+  });
+
+  it('追加不是「改引用」的替代品：eventsVersion 变化时 events 引用仍必须稳定', () => {
+    // 反例守卫——若有人把 eventsVersion 的实现写成「顺便换 events 引用」，
+    // 等于回退 P0-1（O(N²) 复活）。本断言与上面 AC2 配对。
+    const s1 = applyEvent(initConversation('v'), ev({ type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }));
+    const s2 = applyEvent(s1, ev({ type: EventType.RUN_COMPLETED, seq: 2, run_id: 'r' }));
+    expect(s2.events).toBe(s1.events);
+    expect(s2.eventsVersion).toBeGreaterThan(s1.eventsVersion);
+  });
+});
+
 describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
   it('MODEL_COMPLETED 捕获 model 名与 usage（可选字段）', () => {
     const s = applyEvent(
@@ -917,17 +995,75 @@ describe('applyEvent — df4f7d8 新形状', () => {
 
   it('未接线类型仍进 unknown_events（显式登记，行为与重构前一致）', () => {
     for (const type of [
-      EventType.ARTIFACT_EXTERNALIZED,
       EventType.COMPACTION_START,
       EventType.COMPACTION_END,
-      EventType.MESSAGE_QUEUED,
-      EventType.QUEUE_CANCELLED,
-      EventType.STEER_REQUESTED,
-      EventType.STEER_APPLIED,
     ]) {
       const s = applyEvent(initConversation('s'), ev({ type }));
       expect(s.unknown_events, `${type} 应落 unknown_events`).toHaveLength(1);
     }
+  });
+
+  // #195（ADR-0030 §5.4）：队列/引导五类型已接线——投影进 undelivered 折叠
+  // / 摘除（不再落 unknown_events）；摘除与 latestEditableTurn 判据由本文件
+  // 末尾「projectUndelivered — 摘除与补齐」describe 块的单测锁。
+
+  // ART-01（第十一轮真机验收）：运行时只发 artifact/externalized，此前前端只接了
+  // 规格里的 artifact/created → 有产物的会话里 Artifacts 页签恒空、还写"未产生 Artifact"。
+  it('ARTIFACT_EXTERNALIZED：挂到产出它的 tool 上（与 created 同一投影）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_CALL,
+      data: { tool_call_id: 'tc1', tool_name: 'bash', args: {} },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: {
+        artifact_id: '197e88d95cd917b9',
+        session_id: 's',
+        source_tool: 'bash',
+        tool_call_id: 'tc1',
+        size: 39600,
+        mime_type: 'text/plain',
+      },
+    }));
+
+    const tool = s.turns.flatMap((t) => t.tools).find((t) => t.tool_call_id === 'tc1');
+    expect(tool?.artifact).toEqual({
+      artifact_id: '197e88d95cd917b9',
+      size: 39600,
+      mime_type: 'text/plain',
+      source_tool: 'bash',
+    });
+    expect(s.unknown_events).toHaveLength(0); // 已接线：不再算"未知事件"
+  });
+
+  it('元数据缺失 → null，**不**填默认值（AC5 / #185 AC4：MinIO 不持久化 source_tool）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'x' } }, step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.ARTIFACT_CREATED,
+      // 只给 id：这是 MinIO 那类"元数据不持久化"的 store 的真实形态
+      data: { artifact_id: 'only-id', session_id: 's', tool_call_id: 't1' },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].artifact).toEqual({
+      artifact_id: 'only-id',
+      size: null,
+      mime_type: null,
+      source_tool: null,
+    });
+  });
+
+  it('ARTIFACT_EXTERNALIZED：找不到宿主 tool_call 时不静默（落 unknown_events）', () => {
+    // 与 created 的唯一差别：externalized 自带 artifact_id，是"确实有产物"的独立事实。
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.ARTIFACT_EXTERNALIZED,
+      data: { artifact_id: 'orphan', tool_call_id: 'nope', size: 1, mime_type: 'text/plain' },
+    }));
+
+    expect(s.unknown_events).toHaveLength(1);
   });
 
   it('RUN_INTERRUPTED：终态 + run_interrupted 真值 + Timeline 摘要', () => {
@@ -941,6 +1077,78 @@ describe('applyEvent — df4f7d8 新形状', () => {
     expect(s.run_status).toBe('completed');
     expect(s.run_interrupted).toEqual({ step_id: 3, interrupted_seq: 42, reason: 'process_restart' });
     expect(summarizeEvent(ev({ type: EventType.RUN_INTERRUPTED, data: {}, step_id: 3 }))).toBe('第 3 步中断');
+  });
+
+  // APR-01（第十一轮真机）：`approval_queues` 纯内存、run 终结即 GC，而
+  // `tool/approval-requested` 永留 JSONL → 孤儿审批每次刷新都重演，点了只有 404。
+  // 判据完全来自事件流（运行先于审批结束 ⇒ 这条审批不可能再被 resolve）。
+  describe('APR-01 孤儿审批在 run 终结时标 stale', () => {
+    const requested = (approvalId = 'ap-1') =>
+      ev({
+        type: EventType.TOOL_APPROVAL_REQUESTED,
+        data: {
+          approval_id: approvalId, tool_name: 'bash', tool_call_id: 'tc-1',
+          action_type: 'danger', title: 't', description: 'd', arguments_preview: {},
+          permission: 'p', policy: 'pol', reason: 'r', allowed_decisions: [],
+        },
+        step_id: 2,
+      });
+
+    it('run/interrupted 后仍 pending 的审批 → stale', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      expect(s.pending_approvals[0].stale).toBeUndefined(); // 中断前：正常待决
+
+      s = applyEvent(s, ev({
+        type: EventType.RUN_INTERRUPTED,
+        data: { interrupted_seq: 9, reason: 'process_restart' },
+        step_id: 2,
+      }));
+      expect(s.pending_approvals).toHaveLength(1); // 卡还在（事件不可删）
+      expect(s.pending_approvals[0].stale).toBe(true); // 但已不可提交
+    });
+
+    it('run 还活着时审批保持可提交（不误伤正常流程）', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } })); // 后续事件
+      expect(s.pending_approvals[0].stale).toBeUndefined();
+    });
+
+    it('正常已决的审批不会被后续 run 终结牵连（已从队列移除）', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      s = applyEvent(s, ev({
+        type: EventType.PERMISSION_RESOLVED,
+        data: { approval_id: 'ap-1', decision: 'approve_once', reason: '' },
+      }));
+      s = applyEvent(s, ev({ type: EventType.RUN_COMPLETED, data: {} }));
+      expect(s.pending_approvals).toHaveLength(0);
+    });
+
+    it('run/completed 与 run/failed 同样终结孤儿审批（后端同一处 GC）', () => {
+      for (const type of [EventType.RUN_COMPLETED, EventType.RUN_FAILED]) {
+        let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+        s = applyEvent(s, requested());
+        s = applyEvent(s, ev({ type, data: {} }));
+        expect(s.pending_approvals[0].stale, `${type} 应标 stale`).toBe(true);
+      }
+    });
+
+    /** 死锁回归锁：失效审批若继续算作「欠决策」，会话就永久发不出消息
+     *  （卡片只读 + composer 禁用，两条路都堵死）。 */
+    it('awaitingApproval：失效审批不锁 composer，未失效的才锁', () => {
+      let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } }));
+      s = applyEvent(s, requested());
+      expect(awaitingApproval(s.pending_approvals)).toBe(true); // run 活着 → 真的欠一个决策
+
+      s = applyEvent(s, ev({
+        type: EventType.RUN_INTERRUPTED,
+        data: { interrupted_seq: 9, reason: 'process_restart' },
+      }));
+      expect(awaitingApproval(s.pending_approvals)).toBe(false); // 孤儿 → 不锁死会话
+      expect(awaitingApproval([])).toBe(false);
+    });
   });
 
   it('OBS-007 RUN_STARTED 清空中断标记：提示不跨 run 存活', () => {
@@ -1095,7 +1303,7 @@ describe('applyEvent — da394a9 新语义', () => {
     expect(s.run_cancelled).toBe(false);
   });
 
-  it('diff before 内嵌 inspect_artifact marker → archived=true + artifactId', () => {
+  it('diff before 内嵌 marker → archived=true + artifactId + artifactTool', () => {
     let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
     const summary = '文件过大已归档。use inspect_artifact(abc-123) 查看全文';
     s = applyEvent(s, ev({
@@ -1105,6 +1313,23 @@ describe('applyEvent — da394a9 新语义', () => {
     }));
     expect(s.turns[0].tools[0].diff).toEqual({
       before: '', after: summary, truncated: true, archived: true, artifactId: 'abc-123',
+      artifactTool: 'inspect_artifact',
+    });
+  });
+
+  /* 默认部署（Local / MinIO）发的 marker 用 `read_artifact`。此前正则只认
+     inspect_artifact ⇒ 默认部署上 diff.archived 永远不成立（#186 AC4）。 */
+  it('diff 内嵌 read_artifact marker（默认部署）也认，并原样带下工具名', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'write' }, step_id: 1 }));
+    const summary = '文件过大已归档。use read_artifact(0123456789abcdef) to view]';
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_RESULT,
+      data: { tool_call_id: 't1', content: JSON.stringify({ ok: true, data: { before: summary, after: '', truncated: true } }) },
+      step_id: 1,
+    }));
+    expect(s.turns[0].tools[0].diff).toEqual({
+      before: summary, after: '', truncated: true, archived: true,
+      artifactId: '0123456789abcdef', artifactTool: 'read_artifact',
     });
   });
 
@@ -1830,5 +2055,483 @@ describe('emptyChildTurnIndex — 「child 会话将是空会话」提示只给�
       ev({ type: EventType.USER_MESSAGE, data: { content: '先发', step: 2 }, seq: 3 }),
     ]);
     expect(emptyChildTurnIndex(s.turns)).toBe(-1);
+  });
+});
+
+describe('事件摘要的单行语义（UI-04 信任裂缝）', () => {
+  const T = '2026-09-12T00:00:00Z';
+  const base = { session_id: 's', time: T };
+
+  it('session/forked → 「已分叉」（此前落「未知事件」泄漏原始 JSON，pre-existing 已定案）', () => {
+    const s = applyEvent(initConversation('f'), {
+      ...base, type: EventType.SESSION_FORKED, seq: 1, run_id: 'r',
+      data: { from_seq: 3, child_session_id: 'child-1' },
+    });
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('已分叉');
+  });
+
+  it('tool/approval-requested → 「等待审批 · {tool_name}」', () => {
+    let s = initConversation('a');
+    s = applyEvent(s, {
+      ...base, type: EventType.TOOL_APPROVAL_REQUESTED, seq: 1, run_id: 'r', step_id: 1,
+      data: { approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'workspace-write', title: 't', description: 'd', arguments_preview: {}, permission: 'p', policy: 'pol', reason: 'r', allowed_decisions: [] },
+    });
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('等待审批 · write');
+  });
+
+  it('permission/resolved → 「审批已决（{decision}）」', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, {
+      ...base, type: EventType.TOOL_APPROVAL_REQUESTED, seq: 1, run_id: 'r', step_id: 1,
+      data: { approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'w', title: 't', description: 'd', arguments_preview: {}, permission: 'p', policy: 'pol', reason: 'r', allowed_decisions: [] },
+    });
+    s = applyEvent(s, {
+      ...base, type: EventType.PERMISSION_RESOLVED, seq: 2, run_id: 'r',
+      data: { approval_id: 'ap-1', decision: 'approve_once', reason: '' },
+    });
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('审批已决（approve_once）');
+  });
+
+  it('真正未接线的类型：摘要不含 JSON 片段（无 { 无 引号）', () => {
+    const s = applyEvent(initConversation('u'), {
+      ...base, type: EventType.OPERATION_RECONCILE_REQUIRED, seq: 1, run_id: 'r',
+      data: { ledger_id: 'op-1', reason: 'x' },
+    });
+    const summary = summarizeEvent(s.events[s.events.length - 1]);
+    expect(summary).not.toContain('{');
+    expect(summary).not.toContain('"');
+  });
+});
+
+// ── #184 Inspector PERMISSION 段：审批请求 → 队列，决议 → 留痕 + 权限档派生 ──
+
+describe('审批投影 — 权限档（permission_policy）/ 待审批 / 裁决留痕（#184）', () => {
+  const T = '2026-01-01T00:00:00Z';
+  const base = { session_id: 's', time: T };
+
+  const requested = (approvalId: string, seq: number, policy: string, toolName = 'write') =>
+    ev({
+      ...base, type: EventType.TOOL_APPROVAL_REQUESTED, seq, run_id: 'r', step_id: 1,
+      data: {
+        approval_id: approvalId, tool_name: toolName, tool_call_id: `tc-${approvalId}`,
+        action_type: 'workspace-write', title: 't', description: 'd', arguments_preview: {},
+        permission: 'workspace-write', policy, reason: 'r', allowed_decisions: ['deny', 'approve_once'],
+      },
+    });
+
+  const resolved = (approvalId: string, seq: number, decision: string, reason = '') =>
+    ev({
+      ...base, type: EventType.PERMISSION_RESOLVED, seq, run_id: 'r',
+      data: { approval_id: approvalId, decision, reason },
+    });
+
+  it('无审批事件：权限档 null（渲染层显示 —，不拿 composer 选择冒充会话事实）', () => {
+    const s = applyEvent(initConversation('p'), ev({ ...base, type: EventType.RUN_STARTED, seq: 1, run_id: 'r' }));
+    expect(s.permission_policy).toBeNull();
+    expect(s.pending_approvals).toEqual([]);
+    expect(s.approval_decisions).toEqual([]);
+  });
+
+  it('审批请求在队：权限档 = 该请求的生效阈值', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    expect(s.permission_policy).toBe('read-only');
+    expect(s.pending_approvals).toHaveLength(1);
+    expect(s.approval_decisions).toEqual([]);
+  });
+
+  it('决议 → 出队 + 留痕（含工具名），权限档仍可得（不因出队而丢）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'approve_once', '用户批准'));
+    expect(s.pending_approvals).toEqual([]);
+    expect(s.approval_decisions).toEqual([
+      { approval_id: 'ap-1', decision: 'approve_once', reason: '用户批准', tool_name: 'write', time: T },
+    ]);
+    // 关键：请求已出队，但权限档仍在（折叠在状态上，不是从队列临时读的）
+    expect(s.permission_policy).toBe('read-only');
+  });
+
+  it('多次审批：权限档取**最近一次请求**（事件序，不是队列/裁决表的拼接顺序）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'deny'));
+    s = applyEvent(s, requested('ap-2', 3, 'workspace-write', 'bash'));
+    expect(s.permission_policy).toBe('workspace-write');
+    expect(s.pending_approvals.map((a) => a.approval_id)).toEqual(['ap-2']);
+    expect(s.approval_decisions.map((d) => d.approval_id)).toEqual(['ap-1']);
+  });
+
+  it('决议重放幂等：同一 approval_id 再来一次决议不重复留痕', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, requested('ap-1', 1, 'read-only'));
+    s = applyEvent(s, resolved('ap-1', 2, 'deny'));
+    s = applyEvent(s, resolved('ap-1', 3, 'deny'));
+    expect(s.approval_decisions).toHaveLength(1);
+  });
+
+  it('配不上对的决议（事件窗口从中间开始）：留痕但 tool_name 为空——不猜', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, resolved('ap-orphan', 1, 'deny', '无对应请求'));
+    expect(s.approval_decisions).toEqual([
+      { approval_id: 'ap-orphan', decision: 'deny', reason: '无对应请求', tool_name: undefined, time: T },
+    ]);
+    // 没有请求事件 → 权限档无从得知（不是空串，是 null）
+    expect(s.permission_policy).toBeNull();
+  });
+
+  it('缺 approval_id 的决议事件被忽略（契约必有该字段，不制造空 id 的假记录）', () => {
+    let s = initConversation('p');
+    s = applyEvent(s, ev({
+      ...base, type: EventType.PERMISSION_RESOLVED, seq: 1, run_id: 'r',
+      data: { decision: 'deny', reason: '缺 id' },
+    }));
+    expect(s.approval_decisions).toEqual([]);
+  });
+});
+
+// ── #236：会话级权限档从 `session/started` 投影（F15 #234 的读侧）──
+// 此前前端断言"`permission_mode` 不在任何事件里"，pill 只能靠创建回执的本地状态供值——
+// 那既是第二套真相，也让用户以为会话内改档生效。当时后端**确实只认创建档**，所以
+// 「#236 让读侧改走事件投影」就够了；F18-B #283 起后端支持会话内改档，改档由下面那组
+// （`permission/changed`）负责，**本组只管 started 的创建声明**。
+
+describe('session/started → session_permission_mode（#236）', () => {
+  const T = '2026-09-18T00:00:00Z';
+  const started = (data: Record<string, unknown>, seq = 1) =>
+    ev({ type: EventType.SESSION_STARTED, seq, session_id: 's', run_id: 'r', time: T, data });
+
+  it('事件带 permission_mode → 投影出该档（后端显式改档才写键）', () => {
+    const s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
+  it('未声明（老日志 / 用后端默认档创建）→ null，不编字面值冒充', () => {
+    const s = applyEvent(initConversation('s'), started({ model_id: 'x' }));
+    expect(s.session_permission_mode).toBeNull();
+  });
+
+  it('坏值（非字符串 / 空串）→ null（日志被手改时不制造假档位）', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 7 }));
+    expect(s.session_permission_mode).toBeNull();
+    s = applyEvent(s, started({ permission_mode: '' }, 2));
+    expect(s.session_permission_mode).toBeNull();
+  });
+
+  it('只认第一条：started 只声明创建档，迟到/重放的 started 不改写它', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, started({ permission_mode: 'danger-full-access' }, 2));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
+  it('第一条没带键、后一条带了 → 取后者（"没带键"= 没声明，不是"声明为 null"）', () => {
+    // 钉住实现判据：按"已非 null 即早退"，而不是"只看下标 0"。真机上每会话恰好一条
+    // started，所以这是脏日志分支——但它必须按上面那句话行事，不能靠巧合。
+    let s = applyEvent(initConversation('s'), started({ model_id: 'x' }));
+    expect(s.session_permission_mode).toBeNull();
+    s = applyEvent(s, started({ permission_mode: 'read-only' }, 2));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
+  it('与 permission_policy 是两件事：声明档与审批观测阈值各存各的（可合法不同）', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_APPROVAL_REQUESTED, seq: 2, session_id: 's', run_id: 'r', step_id: 1, time: T,
+      data: {
+        approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'workspace-write',
+        title: 't', description: 'd', arguments_preview: {}, permission: 'workspace-write',
+        policy: 'workspace-write', reason: 'r', allowed_decisions: ['deny'],
+      },
+    }));
+    expect(s.session_permission_mode).toBe('read-only');
+    expect(s.permission_policy).toBe('workspace-write');
+  });
+});
+
+// ── #283（F18-B）：`permission/changed` —— 会话内改档的投影（ADR-0041 D2/D3）──
+// 与上面那组的分工：上面锁「**无** changed 时回退 session/started 的声明档」，这里锁
+// 「有 changed 时它胜」。两条合起来才是 D3 的完整优先级。
+
+describe('permission/changed → session_permission_mode（#283）', () => {
+  const T = '2026-09-22T00:00:00Z';
+  const started = (data: Record<string, unknown>, seq = 1) =>
+    ev({ type: EventType.SESSION_STARTED, seq, session_id: 's', run_id: 'r', time: T, data });
+  const changed = (data: Record<string, unknown>, seq: number) =>
+    ev({ type: EventType.PERMISSION_CHANGED, seq, session_id: 's', time: T, data });
+
+  it('会话内改档 → 覆盖创建时的声明档（端点写的就是这条事件）', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, changed({ permission_mode: 'workspace-write', auto_approve: true }, 2));
+    expect(s.session_permission_mode).toBe('workspace-write');
+  });
+
+  it('**最后一条胜**（与 session/started 的「只认第一条」相反）：连续三条只留最后一条', () => {
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, changed({ permission_mode: 'workspace-write' }, 2));
+    s = applyEvent(s, changed({ permission_mode: 'danger-full-access' }, 3));
+    s = applyEvent(s, changed({ permission_mode: 'read-only' }, 4));
+    expect(s.session_permission_mode).toBe('read-only');
+  });
+
+  it('重放幂等：同一批事件再折一遍得到同一档（JSONL 回放不改变结论）', () => {
+    const events = [
+      started({ permission_mode: 'read-only' }),
+      changed({ permission_mode: 'danger-full-access' }, 2),
+      changed({ permission_mode: 'workspace-write' }, 3),
+    ];
+    const fold = () => events.reduce((acc, e) => applyEvent(acc, e), initConversation('s'));
+    expect(fold().session_permission_mode).toBe('workspace-write');
+    expect(fold().session_permission_mode).toBe(fold().session_permission_mode);
+  });
+
+  it('坏值读作「未声明」→ null，**不**回落 declared：镜像后端 effective_permission_mode', () => {
+    // 后端 `session/approval.py::effective_permission_mode` 命中最后一条 changed 就**不再
+    // 往下找**，值不可解析时按未声明返回 None。前端必须同口径——否则会出现「UI 说只读、
+    // 后端按更松的档自动放行写操作」，正是 #236 收掉的那条 P2。
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, changed({ permission_mode: 7 }, 2));
+    expect(s.session_permission_mode).toBeNull();
+
+    let t = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    t = applyEvent(t, changed({ permission_mode: '' }, 2));
+    expect(t.session_permission_mode).toBeNull();
+  });
+
+  it('只碰 session_permission_mode：permission_policy（审批观测阈值）不被这条事件改写', () => {
+    // 三概念分离是 #236 的边界（ADR-0041 D6），容器级常驻风险 ⇒ 每条新路径都要证一次。
+    let s = applyEvent(initConversation('s'), started({ permission_mode: 'read-only' }));
+    s = applyEvent(s, ev({
+      type: EventType.TOOL_APPROVAL_REQUESTED, seq: 2, session_id: 's', run_id: 'r', step_id: 1, time: T,
+      data: {
+        approval_id: 'ap-1', tool_name: 'write', tool_call_id: 'tc-1', action_type: 'workspace-write',
+        title: 't', description: 'd', arguments_preview: {}, permission: 'workspace-write',
+        policy: 'workspace-write', reason: 'r', allowed_decisions: ['deny'],
+      },
+    }));
+    s = applyEvent(s, changed({ permission_mode: 'danger-full-access', auto_approve: true }, 3));
+    expect(s.session_permission_mode).toBe('danger-full-access');
+    expect(s.permission_policy).toBe('workspace-write');
+  });
+
+  it('时间线摘要是真话而非空白：带档位 → 「权限档 → X」；缺档位 → 「权限档已变更」', () => {
+    // 与 model/changed 同待遇（summarizeModelChanged）：改档是用户自己发起的会话级变更，
+    // 留一行真值比留一行空白更如实。
+    let s = applyEvent(initConversation('s'), changed({ permission_mode: 'workspace-write' }, 1));
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('权限档 → workspace-write');
+    s = applyEvent(s, changed({}, 2));
+    expect(summarizeEvent(s.events[s.events.length - 1])).toBe('权限档已变更');
+  });
+});
+
+// ── #195（ADR-0030 §5.2/§8 T12）：projectUndelivered 摘除与 latestEditableTurn ──
+// Spec 审查 P2：此前「未接线类型」测试只锁了投影进 unknown_events 的兜底，
+// 摘除（取消/消费）与「最新可编辑」判据没有单测锁。这里补齐四条。
+
+describe('projectUndelivered — 摘除与补齐（#195）', () => {
+  const T = '2026-09-15T00:00:00Z';
+  const ev = (type: EventTypeValue, data: Record<string, unknown>, seq: number): AgentEvent =>
+    ({ type, seq, session_id: 's', time: T, data }) as unknown as AgentEvent;
+
+  it('message/queued 增量进 undelivered；queue/cancelled 摘除（T12「取消移除」的投影事实）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.MESSAGE_QUEUED, { queue_id: 'q-1', content: '排队一' }, 1));
+    s = applyEvent(s, ev(EventType.MESSAGE_QUEUED, { queue_id: 'q-2', content: '排队二' }, 2));
+    expect(s.undelivered.map((u) => u.id)).toEqual(['q-1', 'q-2']);
+    s = applyEvent(s, ev(EventType.QUEUE_CANCELLED, { queue_id: 'q-1' }, 3));
+    expect(s.undelivered.map((u) => u.id)).toEqual(['q-2']);
+  });
+
+  it('queue/consumed 摘除（消费事实在投递成功后写——投影只认事件）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.MESSAGE_QUEUED, { queue_id: 'q-1', content: '排队' }, 1));
+    s = applyEvent(s, ev(EventType.QUEUE_CONSUMED, { queue_id: 'q-1' }, 2));
+    expect(s.undelivered).toHaveLength(0);
+  });
+
+  it('steer/requested 进 undelivered；steer/applied 摘除（引导收口）', () => {
+    let s = initConversation('s');
+    s = applyEvent(s, ev(EventType.STEER_REQUESTED, { steer_id: 'st-1', content: '引导' }, 1));
+    expect(s.undelivered).toEqual([
+      { kind: 'steer', id: 'st-1', content: '引导', seq: 1, created_at: T },
+    ]);
+    s = applyEvent(s, ev(EventType.STEER_APPLIED, { steer_id: 'st-1', applied_seq: 2, run_id: 'r' }, 3));
+    expect(s.undelivered).toHaveLength(0);
+  });
+
+  it('latestEditableTurn：只算非取代、非注入、有 seq 的最新用户轮（D8 两端同判据）', () => {
+    // Turn 最小形（model 段由 applyEvent 之外的手工构造补齐）
+    const mkTurn = (seq: number, stepId: number, injectedBy: string | undefined, superseded?: boolean) => ({
+      step_id: stepId, status: 'done' as const, user_message: '问', user_message_seq: seq,
+      injected_by: injectedBy, notices: [], tools: [], segments: [], activities: [],
+      delegations: [], started_at: T, completed_at: T, turn_index: stepId, reasoning: [],
+      model: { text: '', status: 'done' as const },
+      superseded,
+    });
+    const turns = [mkTurn(3, 1, undefined), mkTurn(5, 2, 'failure-guard'), mkTurn(7, 3, undefined)];
+    expect(latestEditableTurn(turns)?.user_message_seq).toBe(7);
+    // 最新轮被取代 → 退回上一条非取代非注入轮（注入轮不算）
+    const superseded = turns.map((t, i) => (i === 2 ? { ...t, superseded: true } : t));
+    expect(latestEditableTurn(superseded)?.user_message_seq).toBe(3);
+  });
+});
+
+// ── #220：失败归因（run/failed 的 reason + message）投影与呈现口径 ──
+// 机制全文见 ADR-0033 §2.2/2.3。这里锁三件事：三态载荷各自落什么值、
+// 「更晚的终态赢」的失效规则、以及 Timeline 摘要的兜底与两种刻意偏离。
+
+describe('#220 run_failure — 失败归因投影（ADR-0033）', () => {
+  const failWith = (data: Record<string, unknown>) =>
+    applyEvent(
+      applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { turn_index: 1 } })),
+      ev({ type: EventType.RUN_FAILED, data }),
+    );
+
+  it('reason + message（已分类供应商故障）→ 两者都进状态', () => {
+    const s = failWith({ reason: 'provider_account_unavailable', message: '模型供应商账户不可用（…）' });
+    expect(s.run_status).toBe('failed');
+    expect(s.run_failure).toEqual({
+      reason: 'provider_account_unavailable',
+      message: '模型供应商账户不可用（…）',
+    });
+  });
+
+  it('只有 reason（工具失败保险丝：后端只给码不给文案）→ 保留码，message 为 null', () => {
+    const s = failWith({ reason: 'identical_tool_failure_loop' });
+    expect(s.run_failure).toEqual({ reason: 'identical_tool_failure_loop', message: null });
+  });
+
+  it('两键都不落（未分类异常）→ 整个字段 null，**不是** {reason:null,message:null}', () => {
+    const s = failWith({});
+    expect(s.run_status).toBe('failed');
+    expect(s.run_failure).toBeNull();
+  });
+
+  it('取消（reason=cancelled）不算失败归因（取消 ≠ 错误，da394a9）', () => {
+    const s = failWith({ reason: 'cancelled' });
+    expect(s.run_cancelled).toBe(true);
+    expect(s.run_failure).toBeNull();
+  });
+
+  it('新 run 开始 → 上一轮归因过期（不挂在正在跑的 run 上）', () => {
+    let s = failWith({ reason: 'provider_auth_failed', message: '…鉴权失败…' });
+    expect(s.run_failure).not.toBeNull();
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    expect(s.run_failure).toBeNull();
+    expect(s.run_status).toBe('running');
+  });
+
+  /* 「更晚的终态赢」：completed / interrupted 都是这轮 run 的结局，过期归因必须一起清掉
+     ——否则状态行说「已完成」而「失败原因」还挂在旁边（同屏打架）。
+     正常日志里这两者前面必有 run/started（所以是纵深防御），但 runState.ts 对
+     run_interrupted 已按同一规则退化处理，这里对齐。 */
+  it('run/completed 与 run/interrupted 也清掉归因（更晚的终态赢）', () => {
+    const completed = applyEvent(
+      failWith({ reason: 'provider_auth_failed', message: '…鉴权失败…' }),
+      ev({ type: EventType.RUN_COMPLETED, data: {} }),
+    );
+    expect(completed.run_failure).toBeNull();
+
+    const interrupted = applyEvent(
+      failWith({ reason: 'provider_auth_failed', message: '…鉴权失败…' }),
+      ev({ type: EventType.RUN_INTERRUPTED, data: { interrupted_seq: 9 } }),
+    );
+    expect(interrupted.run_failure).toBeNull();
+  });
+
+  it('清掉后再次失败 → 重新落值（不是只清一次就哑了）', () => {
+    let s = failWith({ reason: 'provider_auth_failed', message: '第一次' });
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    s = applyEvent(s, ev({ type: EventType.RUN_FAILED, data: { reason: 'provider_model_not_found', message: '第二次' } }));
+    expect(s.run_failure).toEqual({ reason: 'provider_model_not_found', message: '第二次' });
+  });
+
+  describe('Timeline 行摘要', () => {
+    it('有文案 → 用文案（Inspector 默认页签就能看见失败原因）', () => {
+      expect(summarizeEvent(ev({
+        type: EventType.RUN_FAILED,
+        data: { reason: 'provider_account_unavailable', message: '模型供应商账户不可用（…）' },
+      }))).toBe('模型供应商账户不可用（…）');
+    });
+
+    it('只有码 → 退到码（「identical_tool_failure_loop」比空白更能说明这行为什么红）', () => {
+      expect(summarizeEvent(ev({
+        type: EventType.RUN_FAILED,
+        data: { reason: 'identical_tool_failure_loop' },
+      }))).toBe('identical_tool_failure_loop');
+    });
+
+    it('取消那支与两者皆无 → 空摘要（机器码 cancelled 不上时间线；不编文案）', () => {
+      expect(summarizeEvent(ev({ type: EventType.RUN_FAILED, data: { reason: 'cancelled' } }))).toBe('');
+      expect(summarizeEvent(ev({ type: EventType.RUN_FAILED, data: {} }))).toBe('');
+    });
+  });
+});
+
+describe('#226 requested_model — 请求侧模型标识（run/started，ADR-0034）', () => {
+  it('RUN_STARTED 带 model ⇒ 落到 requested_model（与回显的 model 各管一边）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { turn_index: 1, model: 'deepseek-chat' },
+    }));
+    expect(s.requested_model).toBe('deepseek-chat');
+    // 请求侧不冒充回显侧：provider 还没回显时 model 仍是 null。
+    expect(s.model).toBeNull();
+  });
+
+  it('provider 不回显时：请求侧的模型名仍在（刷新/重放后依然在，因为 run/started 是持久事件）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { turn_index: 1, model: 'custom:my-model' },
+    }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: 'hi' } }));
+    expect(s.model).toBeNull(); // 响应里没有 model 字段
+    expect(s.requested_model).toBe('custom:my-model');
+  });
+
+  it('新 run 没带该键 ⇒ 归 null，**不**沿用上一轮（字段缺席读作"未知"）', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { turn_index: 1, model: 'deepseek-chat' },
+    }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { turn_index: 2 } }));
+    expect(s.requested_model).toBeNull();
+  });
+
+  it('turn_index 缺失时该字段照落（不被 turn_index 的提前 return 顺带丢掉）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED,
+      data: { model: 'qwen-plus' },
+    }));
+    expect(s.requested_model).toBe('qwen-plus');
+    expect(s.turn_index).toBeNull();
+  });
+
+  it('空串与**非字符串** ⇒ null（不把脏载荷渲染成模型名）', () => {
+    for (const bad of ['', 123, null, { name: 'x' }]) {
+      const s = applyEvent(initConversation('s'), ev({
+        type: EventType.RUN_STARTED,
+        data: { turn_index: 1, model: bad },
+      }));
+      expect(s.requested_model, `model=${JSON.stringify(bad)}`).toBeNull();
+    }
+  });
+
+  it('回显带回它自己的 run 归属（model_run_id）——两轴共识：不记归属就无法判断能否并排比较', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED, data: { turn_index: 1, model: 'A' }, run_id: 'r1',
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_COMPLETED, data: { content: 'hi', model: 'A' }, run_id: 'r1', step_id: 1,
+    }));
+    expect(s.model).toBe('A');
+    expect(s.model_run_id).toBe('r1');
+    // 新一轮开始：请求侧换 B，而回显仍是**上一轮的** A 且归属没变——
+    // 渲染层据此把「模型 A」标成「非本轮」，避免被读成"请求 B 却回显 A"。
+    s = applyEvent(s, ev({
+      type: EventType.RUN_STARTED, data: { turn_index: 2, model: 'B' }, run_id: 'r2',
+    }));
+    expect(s.requested_model).toBe('B');
+    expect(s.model_run_id).toBe('r1');
+    expect(s.run_id).toBe('r2');
   });
 });

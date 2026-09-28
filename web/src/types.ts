@@ -14,8 +14,20 @@ export interface AgentEvent {
   type: string;
   data: Record<string, unknown>;
   seq: number | null;
-  run_id: string | null;
-  step_id: number | null;
+  /** ⚠ 可能整个键缺失，但**只在历史事件路径**：`GET /api/sessions/<id>/events` 走
+   *  `SessionEvent.to_dict`，它省略值为 None 的字段（实测 59 事件里 2 条无此键：
+   *  session/started、user/message）。**SSE 帧相反**——`web/serialization.py::_envelope`
+   *  恒写这个键，无归属显式下发 `null`（实测 59/59 帧键都在）。两条路径喂同一个
+   *  `AgentEvent`，故类型取超集「可能缺失」；契约与冻结规格一致
+   *  （03_SESSION_EVENT_MODEL.md 的 `run_id?` / 03_RUNTIME_EVENT_CONTRACT.md 的
+   *  `run_id?: string | null`）。判空一律宽松 `!= null`：严格 `!== null` 会把键缺失
+   *  当有值，run_id 直接 `.slice()` 抛 TypeError。 */
+  run_id?: string | null;
+  /** 语义与超集理由同 `run_id`。⚠ 额外陷阱：模板字符串接受 `undefined`，所以
+   *  `if (e.step_id !== null) \`step ${e.step_id}\`` 仍能通过 tsc——**正是 BUG-008
+   *  的写法**（渲染出字面量 "step undefined" 与伪造 key `step:undefined`）。
+   *  本字段必须 `!= null` 判空。 */
+  step_id?: number | null;
   /** Durable-event timestamp (SessionEvent.time, present on GET /events history).
    *  SSE frames don't carry it yet — projection falls back to client clock. */
   time?: string;
@@ -28,6 +40,101 @@ export interface AgentEvent {
    *  序列化位置）。reasoning/started|delta|completed|interrupted 携带；data.block_id
    *  是 legacy 容错位（投影解析顺序：envelope → data → 合成）。 */
   block_id?: string;
+}
+
+/** 项目引用（WS-3 / #153；后端 `src/agent_harness/web/app.py::WorkspaceRef`）。
+ *  `id` 用于请求与重命名，`title` 用于显示——两者都由后端给，前端零推导。 */
+export interface WorkspaceRef {
+  id: string;
+  title: string;
+}
+
+/** 项目目录状态（WS-4 / #154，后端 `web/projects.py::Project.status`）。
+ *  `missing-dir` = 注册时存在、现在被移走/改名——后端**只如实上报，不改记录**，
+ *  所以前端也不能据此隐藏项目（那会把用户注册过的东西变没）。 */
+export type ProjectStatus = 'ok' | 'missing-dir';
+
+/** 项目实体（WS-4 / #154，后端 `web/projects.py::Project`）。
+ *
+ *  `session_ids` 是**账本手工序**（用户拖出来的顺序，后端已过滤成员资格）——
+ *  前端按它渲染项目内顺序，**不按活动时间重排**（WS-3 的契约立场）。 */
+export interface Project {
+  id: string;
+  path: string;
+  title: string;
+  status: ProjectStatus;
+  session_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** DELETE /api/projects/{id} 的响应（软删除结果）。
+ *
+ *  `detail` 是后端写好的中文文案，**必须原样展示**：它明确说「会话与目录都没删」，
+ *  是 AC5 要的那句「不让人误以为会话连坐消失」的唯一权威来源（前端不自己编）。 */
+export interface ProjectDeleted {
+  id: string;
+  deleted: boolean;
+  sessions_detached: number;
+  detail: string;
+}
+
+/** 一个子目录条目（`GET /api/host/dirs`，ADR-0028 D2）。
+ *
+ *  `path` 是宿主侧的**真实绝对路径**——这正是该端点存在的理由：浏览器拿不到真实
+ *  路径（`<input type=file>` 只给 `C:\fakepath\…`，Web 平台没有目录路径 API），
+ *  所以候选路径只能由宿主端列举出来。`name` 与 `path` 都由后端给，前端零拼接。 */
+export interface HostDirEntry {
+  name: string;
+  path: string;
+}
+
+/** 目录列举结果（`GET /api/host/dirs`，ADR-0028 D3/D4）。
+ *
+ *  `path === null` = **根模式**（请求没带 `path`）：`entries` 是盘符/根列表。
+ *  此时"当前目录"并不存在——界面据此禁用「向上」与「选择此目录」，而不是假装
+ *  当前在某个路径上。
+ *  `truncated` = 子目录数超过后端上限（500），`entries` 只含**排序后**的前 500
+ *  条：必须如实提示，否则用户会以为"这个目录里就这么多"。 */
+export interface HostDirsListing {
+  path: string | null;
+  parent: string | null;
+  truncated: boolean;
+  entries: HostDirEntry[];
+}
+
+/** 记忆归属范围（后端 `memory/types.py::MemoryScope`）。
+ *
+ *  `session` 的记忆按**会话**归属；HTTP 用户入口只暴露 `user`（浏览会话记忆需要
+ *  可信的会话绑定，MEM-4 明确不在范围）。类型上保留两者：模型工具侧与未来入口
+ *  都可能出现 session 行，管理面必须能如实渲染而不是把未知值当 user。 */
+export type MemoryScope = 'user' | 'session';
+
+/** 一条记忆（后端 `web/memory.py::MemorySummary`，GET /api/memories 的元素）。
+ *
+ *  `content` 是**权威记录里的正文**（不是向量检索的投影——管理界面要的是"我记住
+ *  了什么"，不是"哪几条最像某个 query"）。`metadata` 已由后端剥掉 provider 内部
+ *  载荷（`public_metadata`），前端只渲染 `content` / `created_at` / `scope`。
+ *  `created_at` 是后端给的 ISO 字符串，前端零解析、零改写（格式化只在展示层）。 */
+export interface MemorySummary {
+  id: string;
+  content: string;
+  scope: MemoryScope;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+/** DELETE /api/memories/{id} 的响应（硬删成功）。
+ *
+ *  **硬删不可恢复**（不是软删/回收站）：后端 `forget` 真的移除记录行与索引。
+ *  失败语义在后端是**显式**的：id 不存在 → 404、不属于当前入口 → 403、
+ *  记忆能力没启用 → 503（前端据此区分"没了"/"不给删"/"未启用"）。
+ *  503 自身还分两种（#225）：`detail.code = not_configured/disabled/missing_settings`
+ *  = 配置状态（面板说"记忆未启用"），`init_failed` = 装配失败（错误条 + 重试）。
+ *  判别走 `code`，不走文案（见 `lib/api.ts` 的 `isMemoryFault`）。 */
+export interface MemoryDeleted {
+  id: string;
+  deleted: boolean;
 }
 
 /** Session summary from GET /api/sessions. */
@@ -47,6 +154,40 @@ export interface SessionSummary {
    *  trace_id 与 trace_url 并列不互替：前者机器可读（Copy 命令），后者人类
    *  可点击（详情面板超链接）。未启用 Langfuse 两者都 null。 */
   trace_url: string | null;
+  /** 会话所属项目（WS-3 / #153，后端 `SessionSummary.workspace`）。
+   *  **未分组 = null**（历史遗留 / 未命名 workspace / 装配里没有项目索引）——
+   *  后端绝不伪造（不变量 #21 同族）。分组 UI 按 `null` = 未分组渲染（#155）。 */
+  workspace: WorkspaceRef | null;
+  /** #171：是否已归档。**非可选**——与 `workspace` 同款理由：后端把它声明为必填
+   *  （`web/app.py::SessionSummary.archived`），前端声明成可选就会让"漏读"变成
+   *  `undefined`，于是已归档的行静默丢掉徽标、也躲过归档开关的过滤。
+   *  这是「已归档」徽标与归档可见性过滤**唯一**的数据源。 */
+  archived: boolean;
+}
+
+/** `POST/DELETE /api/sessions/{id}/archive` 的成功回执（#171）。
+ *  `archived` 是**动作后**的真值（幂等：重复归档仍是 true）。 */
+export interface SessionArchived {
+  id: string;
+  archived: boolean;
+}
+
+/** `DELETE /api/sessions/{id}` 的成功响应（硬删回执，#172 / ADR-0029）。
+ *
+ *  与 `ProjectDeleted`（软删）**刻意不同形**：那个带 `sessions_detached` 与 `detail`
+ *  来解释"会话没被删"，这里走到 200 就是**东西没了**——没有墓碑、没有回收站，
+ *  也没有"半删"状态可表达。后端 schema 用 `Literal[True]` 把这件事钉死
+ *  （`web/app.py::SessionDeleted`），前端类型照抄同一个字面量：调用方因此写不出
+ *  一个无意义的 `if (receipt.deleted)`（那问题在客户端根本不存在）。
+ *
+ *  `events` = 删除前事件日志的条数（**删除前**取——删完只剩文件系统，无从统计）；
+ *  `detached_from_projects` = 本次从几个项目账本里摘掉了它（正常 0/1）。两者是
+ *  确认回执的唯一数据来源：前端不自己数，也不猜。 */
+export interface SessionDeleted {
+  id: string;
+  deleted: true;
+  events: number;
+  detached_from_projects: number;
 }
 
 /**
@@ -92,14 +233,17 @@ export interface ToolCall {
    *  running（进行中）| success（成功）| failed（失败）| stopped（被中断，≠ error）。 */
   status: 'running' | 'success' | 'failed' | 'stopped';
   result?: unknown;
-  /** da394a9 批：before/after 内嵌 "use inspect_artifact(<id>)" marker 时
-   *  archived=true + artifactId——diff 内容已归档到 artifact，视图渲染占位态。 */
+  /** before/after 内嵌 "use <读回工具>(<id>)" marker 时 archived=true + artifactId
+   *  ——diff 内容已归档到 artifact，视图渲染占位态。
+   *  `artifactTool` 是 marker 里**后端实际建议**的读回工具名（S3 → `inspect_artifact`，
+   *  MinIO / Local → `read_artifact`）：回显与复制都用它，不在前端替换（#186 AC4）。 */
   diff?: {
     before: string;
     after: string;
     truncated: boolean;
     archived?: boolean;
     artifactId?: string;
+    artifactTool?: string;
   };
   started_at?: string;
   completed_at?: string;
@@ -127,12 +271,40 @@ export interface ToolOutputChunk {
 }
 
 /** Large tool output offloaded to the ArtifactStore (Phase 5, spec 06 §15).
- *  The model only sees a summary + this ref; the full content lives in storage. */
+ *  The model only sees a summary + this ref; the full content lives in storage.
+ *
+ *  三个元数据字段**可空**（#186 AC5 / #185 AC4）：`size` / `mime_type` /
+ *  `source_tool` 由 `ArtifactStore` 决定是否持久化——MinIO 不持久化
+ *  `source_tool`，S3 持久化。缺了就是 `null`，**不填默认值**：一个编出来的
+ *  `'application/octet-stream'` 或 `0` 会让界面显示一个并不存在的字节数。 */
 export interface ArtifactRef {
   artifact_id: string;
-  size: number;
-  mime_type: string;
-  source_tool: string;
+  size: number | null;
+  mime_type: string | null;
+  source_tool: string | null;
+}
+
+/** #186：`GET /api/sessions/{sid}/artifacts/{aid}` 的一行（后端 `ArtifactSlice.lines`）。
+ *
+ *  `truncated`/`full_length` 只在**该行超长被截断**时出现——原行保留在 artifact 里，
+ *  视图据此如实标记"此行有省略"，不把半截行当完整行。 */
+export interface ArtifactSliceLine {
+  line_number: number;
+  text: string;
+  truncated?: boolean;
+  full_length?: number;
+}
+
+/** #186：外置产物的**局部**读取结果（后端 `ArtifactSlice`，`storage/artifact.py`）。
+ *
+ *  `truncated` 是"返回内容不完整"的并集（行数截断 ∪ 字符截断）——界面必须如实显示，
+ *  否则用户会以为这就是全文。`total_lines` 是全文行数（不是返回行数）。 */
+export interface ArtifactSlice {
+  artifact_id: string;
+  lines: ArtifactSliceLine[];
+  total_lines: number;
+  returned_lines: number;
+  truncated: boolean;
 }
 
 export interface ModelSegment {
@@ -201,6 +373,11 @@ export interface Turn {
    *  此前传 turn.step_id（resolveStep 合成值）→ 422。
    *  null = 该轮没有 user/message 事件（不应该出现，但防御性处理）。 */
   user_message_seq: number | null;
+  /** ADR-0030（#196）§4.5.1：该轮的问句被编辑取代（`message/superseded` 收到后
+   *  投影置位）——渲染层据此把**整轮**从视图中移除（§4.5.1：旧回答段直接删掉
+   *  不显示，不加"已改写"标记；用户裁定）。事件照旧保留在 events 日志（不变量
+   *  #3 append-only），只影响视图。 */
+  superseded?: boolean;
   /** T2（#95）：reasoning 块字典（按 blockId 索引；顺序事实在 activities——
    *  reasoning 与 model/tool 是 S2 兄弟节点）。delta 高频更新走 COW 单块替换。 */
   reasoningById?: Record<string, ReasoningBlock>;
@@ -285,6 +462,140 @@ export interface PendingApproval {
   reason: string;
   allowed_decisions: string[];
   time?: string;
+  /** 该审批所在 run 已终结（completed/failed/interrupted）仍未被 permission/resolved
+   *  配对 → 后端审批队列已随 run GC（session/service.py:1233-1241），决策永不可能
+   *  再提交（POST /approve → 404）。判据全部来自事件流，无需新 API。
+   *  ApprovalCard 据此渲染只读失效态，不再提供必然失败的批准/拒绝按钮。 */
+  stale?: boolean;
+}
+
+/** 已裁决的审批 —— `permission/resolved` 事件（#184，Inspector PERMISSION 段）。
+ *
+ *  为什么需要单独一条：`pending_approvals` 是**队列**（决议即移出），所以"裁决结果"
+ *  在投影里无处可查。Inspector 要如实回答"这个会话批过什么"，就必须把决议留痕。
+ *
+ *  `tool_name` / `policy` 从**同一 approval_id 的请求**带过来（请求必先于决议到达）；
+ *  配不上对（例如事件窗口从中间开始）时留空 → 渲染 `—`，不猜。 */
+export interface ApprovalDecision {
+  approval_id: string;
+  /** deny / approve_once / approve_session / approve_policy（后端 PermissionDecision）。 */
+  decision: string;
+  reason: string;
+  /** 同 approval_id 请求里的工具名；配不上对时 undefined（不猜）。 */
+  tool_name?: string;
+  time?: string;
+}
+
+/** `run/paused.data.continuation`（`03 §3.4`：已完成 / 剩余 / 阻塞 / 下一步安全动作）。
+ *
+ *  只做**形状宽容读**：四个键缺任一 ⇒ 整体 null（不补齐、不用空串占位）——
+ *  确定性 continuation 与模型 closeout 都按同一契约落盘，读到畸形就如实说"没有
+ *  continuation"，而不是编一个空壳让 UI 看起来有内容。 */
+export interface RunContinuation {
+  completed: string[];
+  remaining: string[];
+  blockers: string[];
+  next_safe_action: string;
+}
+
+/** 四维账目里的一维读数（`#313`）：`null` = 载荷没带该维（老暂停 / 字段缺失），
+ *  **不是** 0（`11 §6.1` 的不可得 ≠ 0）。
+ *
+ *  `cost_usd` 在 wire 上是十进制**字符串**（二进制浮点相等不是契约），这里原样保留
+ *  字符串，不做 float 化——要算差值请用 `lib/runBudget.ts` 的十进制减法。 */
+export interface RunBudgetDimensionFacts {
+  agent_turns: number | null;
+  model_requests: number | null;
+  total_tokens: number | null;
+  cost_usd: string | null;
+  /** `#314`：已**接纳**的逻辑工具调用总数（一次多调用批次里的每条各算一格；
+   *  ToolExecutor 的 retry **不**再各算一格）。载荷没带 ⇒ null（T6 之前的暂停
+   *  快照），**不是** 0。 */
+  tool_calls: number | null;
+  /** `#314`：真实执行尝试总数（含 retry，含失败与取消的尝试）。与 `tool_calls`
+   *  是**两个 counter，不是别名**（`02 §5.1`）。 */
+  tool_attempts: number | null;
+  /** `#314`：工具名 → 已接纳逻辑调用数。null = 未知（旧快照），`{}` = 一个都没调
+   *  ——两者必须可分辨（同 `cost_usd` 的"缺失 ≠ 0"口径）。 */
+  tool_calls_by_tool: Record<string, number> | null;
+  /** `#314`：工具名 → 实际尝试次数；与上一张表同构（各占一维）。 */
+  tool_attempts_by_tool: Record<string, number> | null;
+}
+
+/** `data.limits.run` 的**四维** ceiling 视图（`#313`）：键名是载荷自己的 `max_*`
+ *  形态（与 `run_budget.RunLimits` 的字段名逐字相同，也与恢复请求 `budget.run` 的键
+ *  逐字相同——同一个名字在三个地方，别在前端另起同义词）。`null` = 该维**没配**
+ *  ceiling（unlimited，不是 0）。
+ *
+ *  `#314` 的 per-tool 配额**不是第五个 `max_*` 键**：它是"一维变多维"的那一维
+ *  （工具名 → 绝对 ceiling），所以另起一个映射字段；`{}` = 一个工具配额都没配
+ *  （unlimited），null = 载荷没带这张表。 */
+export interface RunLimitsFacts {
+  max_agent_turns_total: number | null;
+  max_model_requests: number | null;
+  max_total_tokens: number | null;
+  max_cost_usd: string | null;
+  /** `#315` 的 deadline 维：RFC 3339 UTC 绝对时刻**文本**；null = 没配 deadline。
+   *  它不是"第五个 `max_*`"（判的是时刻先后，不是 consumed 与 ceiling 比大小），
+   *  但 wire 形状同样是 `limits.run` 的一个键，所以与四维平级地放在这里。 */
+  deadline_at: string | null;
+  /** `#314`：per-tool 绝对配额（工具名 → 正整数）。 */
+  tool_call_limits: Record<string, number> | null;
+}
+
+/** `run/paused` 的折叠结果（`#312` T4）：一个**非终态**的暂停事实。
+ *
+ *  语义边界（`#305` PRD / `03 §5`）：暂停只收口**当前这段执行区间**，逻辑 run 仍在场
+ *  ——所以它不是 completed / failed / interrupted / NEED_RECONCILE 中的任何一个，
+ *  UI 必须能单独认出来（本字段存在 + `run_status === 'paused'`）。
+ *
+ *  字段全部来自事件真值（不变量 #22），名字刻意与后端载荷键对齐，方便逐字段对照
+ *  （`agent_harness.agent.run_budget.build_pause_data`）：
+ *  - `version` ← `data.budget_version`：CAS 的比较对象，恢复请求原样带回
+ *    （陈旧 ⇒ 后端 409，零副作用）。
+ *  - `consumed_agent_turns` ← `data.consumed.agent_turns`：**暂停那一刻的账**（快照，
+ *    不是重算值）——恢复保留它，UI 显示它。
+ *  - `run_limit` ← `data.limits.run.max_agent_turns_total`：绝对 ceiling；
+ *    **null = 无 ceiling**（`11 §6.1`：不可用 ≠ 0，绝不渲染成「还剩 0 轮」）。
+ *  - `consumed_dimensions` / `run_limits` ← `data.consumed` / `data.limits.run` 的
+ *    **四维**视图（`#313`）：暂停可能落在 requests / tokens / cost 上，只读 turn 那一维
+ *    会把"被 requests 卡住"显示成"消耗 0 轮、无上限"。两者为 null 表示载荷没带这组键
+ *    （老暂停），不是"四维都是 0"。
+ *  - `local_fuse` ← `data.limits.local`：单实例保险丝。命中它时**没有** run ceiling
+ *    可抬（要改的是部署/档位预算），故两种暂停原因的恢复动作不同，分开存。
+ *  - `trace_id` 恒有键、可为 null（暂停不合成 trace URL）。 */
+export interface RunPausedInfo {
+  /** 被暂停的逻辑 run——恢复请求必须原样带它（不许换 run_id）。 */
+  run_id: string;
+  /** `data.budget_version`：CAS 版本，恢复时回传为 `expected_version`。 */
+  version: number;
+  /** 暂停事件自己的 seq（`run/paused` 的 durable 位置）——对账/去重用。 */
+  pause_seq: number | null;
+  /** 暂停原因（`03 §3.4` 的取值域）：`budget_exhausted` 或 `deadline`（`#315`）；
+   *  `stuck` 属 `#317`。两条原因对应**不同的恢复动作**：前者抬某个 ceiling，后者换
+   *  一个新的未来时刻——面板据此换文案（`runBudget.pauseReasonLabel`），不合并成一个
+   *  "预算问题"。 */
+  reason: string;
+  /** 命中的维度：四个 run 维之一、`local.max_agent_turns`，或 `run.deadline_at`（`#315`）。 */
+  trigger_dimension: string;
+  consumed_agent_turns: number;
+  /** run 作用域绝对 ceiling；null = 未配（无 ceiling，不是 0）。 */
+  run_limit: number | null;
+  /** `#313`：四维消耗快照（`data.consumed`）；载荷没带 ⇒ null（不是全 0）。 */
+  consumed_dimensions: RunBudgetDimensionFacts | null;
+  /** `#313`：run 作用域四个绝对 ceiling（`data.limits.run`）；载荷没带 ⇒ null。 */
+  run_limits: RunLimitsFacts | null;
+  /** local 作用域保险丝快照；事件没带（旧/畸形载荷）时为 null。 */
+  local_fuse: { max_agent_turns: number; source: string } | null;
+  /** 暂停那一刻的续跑指引；形状不合契约时 null（不伪造进度）。 */
+  continuation: RunContinuation | null;
+  /** `model` = 预算内那次有界 closeout；`deterministic` = 只由持久事实组装。 */
+  closeout_source: string;
+  /** 恢复前置条件（**空数组** = 该暂停不需要额外证据）：`budget_exhausted` 与
+   *  `deadline` 两类暂停都是空的（`03 §3.4`）——deadline 的恢复依据是"点名一个未来
+   *  时刻"，那是恢复请求自己的字段，不是额外证据（`#317` 的 stuck 才会有非空项）。 */
+  resume_requirements: string[];
+  trace_id: string | null;
 }
 
 export interface ConversationState {
@@ -292,7 +603,11 @@ export interface ConversationState {
   turns: Turn[];
   /** The turn currently receiving events, if streaming. */
   active_step_id: number | null;
-  run_status: 'idle' | 'running' | 'completed' | 'failed';
+  /** `paused`（`#312`）= 逻辑 run 在预算到顶处**非终态**收口，等客户端抬高绝对
+   *  ceiling 后以同一 run_id 续跑。它与 completed / failed / interrupted 并列而
+   *  **不可互相替代**：暂停不写 run/completed|failed（后端不变量），前端也不许把
+   *  它显示成三者之一——否则用户会把"等着被恢复"读成"已经结束"。 */
+  run_status: 'idle' | 'running' | 'completed' | 'failed' | 'paused';
   /** run/failed.data.reason === 'cancelled'（客户端断连，df4f7d8→da394a9 批语义）
    *  时为 true——Run Pulse 显示「已取消」（中断 ≠ 错误，同 bash stopped 语义域）。 */
   run_cancelled: boolean;
@@ -303,6 +618,34 @@ export interface ConversationState {
    *  tool/approval-requested adds to this list; permission/resolved removes.
    *  Empty array = no pending approval (auto-approve or already resolved). */
   pending_approvals: PendingApproval[];
+  /** 已裁决的审批（`permission/resolved`，到达顺序）。与 `pending_approvals` 互补：
+   *  两者合计 = 本会话出现过的全部审批。Inspector PERMISSION 段据此显示"裁决结果"
+   *  （#184）。决议事件**不改写**任何 `pending_approvals` 之外的状态。 */
+  approval_decisions: ApprovalDecision[];
+  /** 本会话**观测到的**审批阈值（`tool/approval-requested.data.policy`，逐事件折叠）。
+   *
+   *  为什么折叠而不是渲染时扫事件：扫描要 O(events)（"整个会话没有审批"是**最坏**情况，
+   *  必须扫完），而这段在 Inspector 打开时每次渲染都会跑。折叠成字段后每事件 O(1)——
+   *  与 `model` / `usage_total` 同一路数（投影的职责就是增量折叠）。
+   *
+   *  与 `session_permission_mode` 是**两件事**（#236 更正）：那个是"会话被定为哪一档"
+   *  （F18-B #283 起会话内可改），这个是"审批真的发生那一刻，ToolExecutor 用的是哪一档"。
+   *  观测不到就 null——不拿声明值冒充观测值（反过来也不行，两者可以合法地不同）。 */
+  permission_policy: string | null;
+  /** 本会话**当下生效**的权限档（`session/started.data.permission_mode`，与 `cwd` 同级；
+   *  F18-B #283 起被 `permission/changed` 覆写）。
+   *
+   *  F15 #234 起这条事实有了家：创建会话时用户**显式改档才写键**——续聊 `POST /messages`
+   *  的契约压根不收该键。`session/started` 一侧**只认第一条**（与后端
+   *  `declared_permission_mode` 同一规矩：创建声明是定值，重放不得被后来的值改写）；
+   *  F18-B #283 起后端支持会话内改档，改档以 `permission/changed` 落到这里、**最后一条胜**
+   *  （ADR-0041 D3）——两段合起来才等于后端 `effective_permission_mode` 的优先级。
+   *  创建时未声明、或事件窗口从中间开始 → null = "后端默认档"，不编字面值冒充。
+   *
+   *  消费者是 composer 的权限 pill（#236 / #283）：会话内显示这里的真值，用户改档即向
+   *  后端 POST，成功后**重载该会话事件**让本字段重投影（不做乐观本地态）；新会话时才把
+   *  本地选择当创建意图发出去。 */
+  session_permission_mode: string | null;
   /** Every event that flowed through the projection, in arrival order (verbatim).
    *  Timeline tab truth source — never filtered or reshaped (invariant #22).
    *
@@ -312,6 +655,20 @@ export interface ConversationState {
    *  Never key a `useMemo`/`useEffect` on `events` identity, and never stash it as
    *  a frozen "before": copy it, or derive what you need, before the next append. */
   events: AgentEvent[];
+  /** `events` 数组**被 push 过的次数**——「又追加了」的精确信号（ADR-0037 D2 / N2 #271）。
+   *
+   *  为什么需要它：`events` 的引用被**刻意**固定（见上），而 `React.memo` / `useMemo`
+   *  比较的是**引用相等** ⇒ 依赖 `events` 的派生**永不重算**（陈旧渲染，不是性能问题）。
+   *  需要「events 追加后重算」的 `useMemo` / `useEffect` 依赖**本字段**。
+   *  `events.length` **不是**替代品：去重短路那帧不 push、quarantine 分支 push，
+   *  长度区分不了「长度不变而内容变」——用长度当版本号是「用巧合代替契约」。
+   *
+   *  语义边界（不得扩大解释）：初值 `0`；**每当 `events.push(...)` 真的执行一次就 +1**
+   *  （重复 seq 的去重短路不递增，quarantine 分支递增）。它**只**度量 events 数组的
+   *  append 次数——**不是**通用脏标记，不度量 turns/tools，不替代 `seq` / `run_id` /
+   *  `seenSeqs`。纯渲染层投影实现细节：**不进** SessionEvent、**不进** JSONL、
+   *  不参与 resume / replay / fork 的任何对账。 */
+  eventsVersion: number;
   /** Events whose type didn't match any known case (UnknownSurfaceNode 协议,
    *  冻结决策第 69 行 "unknown 事件渲染为 raw 行兜底，永不静默丢弃")。
    *  Kept separately so Timeline / Inspector can surface them explicitly
@@ -340,12 +697,60 @@ export interface ConversationState {
    *  事件之前就死了（run/started 不带 step，检测器只能沿用后续事件的 step_id）
    *  ——UI 应说「首个步骤开始前中断」，不要渲染成「第 ? 步」。 */
   run_interrupted: { step_id: number | null; interrupted_seq: number | null; reason: string } | null;
+  /** `#312` T4：最近一个 `run/paused` 的折叠结果。null = 无暂停（或已被
+   *  `run/resumed` 收起——恢复那一刻它就该消失，因为该逻辑 run 又跑起来了）。
+   *
+   *  与 `run_interrupted` 是**两个**事实，别合并：中断 = 进程重启打断（终态、
+   *  不可恢复），暂停 = 预算到顶（非终态、可被同 run 恢复）。UI 必须分别呈现。 */
+  run_paused: RunPausedInfo | null;
+  /** #220：`run/failed.data` 的失败归因折叠。两个键**互相独立**（`session.end_run` 各自
+   *  判空）：`reason` 是机器可读码——已分类故障给 `provider_*`，未分类给异常类型名
+   *  （#222 起 reason 在运行期路径上**总有值**），`message` 是随附文案——已分类的供应商
+   *  故障与未分类异常都给固定中文句，但上下文超限路径给的是内部英文串，
+   *  **不可假定它必然是可读中文**。
+   *
+   *  缺失即 null，**绝不伪造文案**；取消不算失败归因（取消 ≠ 错误，da394a9）。
+   *  失效规则与三态的呈现口径见 `docs/adr/0033-run-failure-attribution-surface.md`。 */
+  run_failure: { reason: string | null; message: string | null } | null;
   /** T9 #139：当前 run 的轮次索引（1-based）。来自 RUN_STARTED.data.turn_index。
    *  null = 尚未收到 RUN_STARTED 或字段缺失。UI 可据此显示「第 N 轮」。 */
   turn_index: number | null;
+  /** #226：本轮**请求侧**模型标识（来自 RUN_STARTED.data.model；run/started 是
+   *  持久事件 ⇒ 刷新/重放后仍在）。与 `model` 的分工：`model` 是 provider 在
+   *  响应里**回显**的名字（`model/completed.data.model`，对方不回显就没有），
+   *  本字段是我们**发出去**的那个 `model` 值。仅当"不回显"或"回显 ≠ 请求"时
+   *  本字段才提供额外信息——口径见 `docs/adr/0034-request-side-model-identity.md`。
+   *  null = 尚未收到 RUN_STARTED，或该 run 未携带（旧版后端）。 */
+  requested_model: string | null;
+  /** #226 review（两轴共识 P2）：`model` 这个值的**来源 run**——它的写者有四个
+   *  （`model/completed` 回显、`model/fallback` 切换、`model/changed` 会话级切换、
+   *  重放重建），三者**都不随新 run 失效**，而 `requested_model` 是**每 run 重置**的。
+   *  没有这个归属就无法判断两个值能否并排比较：run 1 的回显与 run 2 的请求并排会被
+   *  读成"请求了 B 却回显 A（provider 无视请求）"，而 A 其实只是上一轮的值。
+   *  null = 该值来自不带 `run_id` 的事件（会话级 `model/changed`）或旧数据。
+   *  取值口径见 `docs/adr/0034-request-side-model-identity.md` §2.3。 */
+  model_run_id: string | null;
   /** T1（#94）幂等簿记：本会话已应用的持久事件 seq 集合（spec 02 §6.1 at-least-once
    *  去重键）。append-only 共享日志纪律（同 events）：只增不改、跨快照共享引用、
    *  绝不整体替换。null-seq 帧不入册——ephemeral 流式信号（model/delta 等）
    *  按契约永不持久化也永不去重。 */
   seenSeqs: Set<number>;
+  /** ADR-0030（#196）§5.2：未投递输入（排队项 + 未生效的 steer），到达顺序。
+   *
+   *  **事件流是唯一事实**（`message/queued` / `queue/cancelled` / `steer/requested`
+   *  / `queue/consumed` / `steer/applied` 逐事件折叠）；`GET /queue` 只做首屏/重连
+   *  补齐（`restoreUndeliveredFromQueue`），不维护第二份真相。
+   *  空数组 = 队列条不渲染（§5.2：不占位不闪烁）。 */
+  undelivered: UndeliveredInput[];
+}
+
+/** ADR-0030 §2 术语表的前端镜像：queue（等下个 run）与 steer（同 run 注入 /
+ *  降级投递）两种载体。`kind` 决定投递边界；id 是 queue_id（queue）或
+ *  steer_id（steer），供「立即 / 取消 / 编辑」动作定位。 */
+export interface UndeliveredInput {
+  kind: 'queue' | 'steer';
+  id: string;
+  content: string;
+  seq: number;
+  created_at: string;
 }

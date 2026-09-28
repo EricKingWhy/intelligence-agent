@@ -120,6 +120,9 @@ Executor MUST NOT 偷偷替模型猜测/修复参数。
 
 底层 SDK 自动 retry SHOULD 关闭或明确纳入总预算，避免 Retry Amplification。
 
+预算配额与暂停 MUST NOT 改变本节的责任边界：`ToolExecutor` 仍是唯一能对 Tool 执行域做 retry 的地方；
+逻辑调用与尝试的计数区别见 §9.1。
+
 ## 7. Dependency-aware Scheduler
 
 冻结新规则：
@@ -176,6 +179,20 @@ Approval 应是单次 Tool Call 授权，不默认永久升级 Session 权限。
 
 READ_ONLY Tool 可采用更轻的 ledger policy，但必须保持可追踪性。
 
+### 9.1 逻辑调用计数、显式配额与 deadline 接纳边界
+
+- **计数**：一次**规范化逻辑工具调用**在它被接纳进 `ToolExecutor`（**唯一接纳点**）时计一个
+  `tool_calls`；每一次**实际尝试**（含 retry）计一个 `tool_attempts`。retry MUST NOT 产生新的逻辑调用。
+  在接纳点**之前**被拒的调用 MUST NOT 消耗配额，且拒绝理由必须可审计。
+- **显式配额**：`budget.run.tool_call_limits` 接受**已注册**工具名到正整数**绝对** ceiling 的映射；
+  未注册工具名或不合法上限 ⇒ 在**任何工作开始前**拒绝。配额耗尽 ⇒ 阻止该工具的新调用，并走
+  `02 §5.2` 的 closeout / 暂停 / 恢复生命周期——**不**改变权限与 retry 语义。
+- **默认**：除 `max_delegations=8`（`10 §5.1`）外，MUST NOT 为 read / edit / bash / web / MCP 等工具
+  引入任意低默认配额。未配置配额 = 不限，但仍计入 `tool_calls` / `tool_attempts`。
+- **deadline 接纳边界**：`deadline_at` 过后 MUST NOT 再接纳新的工具调用；已在途的工具按其**既有**
+  timeout / cancel / Operation Ledger 语义收尾，不确定的 mutating 结果转 `NEED_RECONCILE`
+  （MUST NOT 盲重跑）。`ToolExecutor` 仍是绝对 deadline 的唯一责任域（ADR-0039）。
+
 ## 10. Bash 特殊语义
 
 `bash` Tool Runtime 成功 != 命令业务成功。
@@ -197,4 +214,8 @@ READ_ONLY Tool 可采用更轻的 ledger policy，但必须保持可追踪性。
 - 有依赖 Tool 严格按 DAG 执行；
 - 冲突写操作不并发；
 - Approval 可阻断并恢复；
-- MCP/Knowledge/Coding Tool 均走同一 Executor。
+- MCP/Knowledge/Coding Tool 均走同一 Executor；
+- 一次多调用批次按**逻辑调用**计数（每个规范化调用一次），retry 只增 `tool_attempts`；
+- 接纳点之前被拒的调用不消耗配额；显式 per-tool 配额耗尽后该工具新调用被阻并进入暂停/恢复生命周期；
+- 未配置配额的工具不限，且未引入任何新增默认配额（`max_delegations=8` 除外，见 `10 §5.1`）；
+- deadline 过后不接纳新调用；未知 mutating 结果转 `NEED_RECONCILE` 且不自动重跑。

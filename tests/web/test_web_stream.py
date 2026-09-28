@@ -47,7 +47,7 @@ async def _start_server(tmp_path, monkeypatch, model):
         await asyncio.sleep(0.05)
     assert server.started
     port = server.servers[0].sockets[0].getsockname()[1]
-    return server, serve_task, port
+    return server, serve_task, port, app
 
 
 async def _shutdown(server, serve_task) -> None:
@@ -102,7 +102,7 @@ async def _wait_terminal(store: JsonlSessionStore, session_id: str) -> None:
 
 @pytest.mark.asyncio
 async def test_stream_unknown_session_404(tmp_path, monkeypatch):
-    server, serve_task, port = await _start_server(
+    server, serve_task, port, _app = await _start_server(
         tmp_path, monkeypatch, SlowStreamModel)
     import httpx2
 
@@ -118,7 +118,7 @@ async def test_stream_unknown_session_404(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_reconnect_resumes_without_duplicates_or_gaps(tmp_path, monkeypatch):
     """断连 → run 继续 → after_seq 续传：seq 连续无重复、终态可达。"""
-    server, serve_task, port = await _start_server(
+    server, serve_task, port, _app = await _start_server(
         tmp_path, monkeypatch, SlowStreamModel)
     try:
         # 连接 A：读到第 3 帧即断开
@@ -149,7 +149,7 @@ async def test_reconnect_resumes_without_duplicates_or_gaps(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_reconnect_after_terminal_replays_to_end(tmp_path, monkeypatch):
     """run 已终态的重连：重放（可含 after_seq 之前的跳过）到终态正常收尾。"""
-    server, serve_task, port = await _start_server(
+    server, serve_task, port, _app = await _start_server(
         tmp_path, monkeypatch, SlowStreamModel)
     try:
         frames_a = await _collect(port, "/api/sessions", {"task": "慢任务"},
@@ -177,7 +177,7 @@ async def test_replay_backlog_threshold_emits_control_frame(tmp_path, monkeypatc
 
     monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 5)
 
-    server, serve_task, port = await _start_server(
+    server, serve_task, port, _app = await _start_server(
         tmp_path, monkeypatch, SlowStreamModel)
     try:
         frames_a = await _collect(port, "/api/sessions", {"task": "慢任务"},
@@ -193,5 +193,62 @@ async def test_replay_backlog_threshold_emits_control_frame(tmp_path, monkeypatc
         assert frames_b[0]["type"] == "stream/truncated"
         assert frames_b[0]["data"]["latest_seq"] == latest
         assert frames_b[0].get("seq") is None, "控制帧不是运行事实，无 seq"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_truncated_branch_leaves_no_subscriber(tmp_path, monkeypatch):
+    """超限分支必须退订：不得把没人消费的队列留在 RunManager 里。
+
+    `stream_reconnect` 按协议**先订阅后取游标** ⇒ 走到截断分支时 subscriber 已
+    注册。若那一支直接 return 而不退订，这个队列就永久留在 `run.subscribers`：
+    孤儿计时只在 subscribers **为空**时才武装，所以它不会被回收，run 之后每次
+    fanout 还会往里写。客户端收到控制帧即去全量重建，永远没人来读它。
+
+    需要**真在途 run**（2s 慢流）才非空洞：run 已终态时 `handle.subscriber` 本就是
+    None，断言恒真。
+    """
+    from agent_harness import web as web_module
+
+    monkeypatch.setattr(web_module.app, "STREAM_REPLAY_MAX_EVENTS", 5)
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, SlowStreamModel)
+    try:
+        # 起 run 但立刻断开（detached 仍在途）——与 WS 那条用例同一手法。
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=None) as client, client.stream(
+            "POST", f"http://127.0.0.1:{port}/api/sessions",
+            json={"task": "慢任务"},
+        ) as response:
+            session_id = None
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    session_id = _parse_frame(line)["session_id"]
+                    break
+        assert session_id, "前提：POST 必须回出 session_id"
+
+        run = app.state.agent.run_manager.get_active(session_id)
+        assert run is not None, "前提：连接断开后 run 仍在途（detached）"
+        # 等事件数超过（调小后的）阈值 5，否则截断分支不会被走到。
+        for _ in range(200):
+            run = app.state.agent.run_manager.get_active(session_id)
+            if run is None or run.last_enqueued_seq > 5:
+                break
+            await asyncio.sleep(0.05)
+        assert run is not None and run.last_enqueued_seq > 5, \
+            f"前提：在途 run 必须已产出 >5 个事件（实际 {run and run.last_enqueued_seq}）"
+
+        frames = await _collect(
+            port, f"/api/sessions/{session_id}/stream?after_seq=0",
+            None, max_frames=1)
+        assert [f["type"] for f in frames] == ["stream/truncated"]
+
+        run = app.state.agent.run_manager.get_active(session_id)
+        assert run is not None, "前提：收完控制帧后 run 仍在途"
+        assert run.subscribers == {}, \
+            "截断分支不得留下订阅者——没人消费这些队列，且孤儿计时不会回收它"
     finally:
         await _shutdown(server, serve_task)

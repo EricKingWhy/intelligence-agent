@@ -25,6 +25,7 @@ from agent_harness.tooling import (
     Tool,
     ToolRegistry,
     ToolResult,
+    ToolRuntimeSignal,
     ToolSideEffect,
 )
 from tests.scripted_model import ScriptedModel
@@ -253,6 +254,25 @@ class TestToolResultSuccess:
         """ok=True 时塞 error_code → 构造就抛（语义不可能错）。"""
         with pytest.raises(ValueError, match="error_code"):
             ToolResult(ok=True, message="ok", error_code=ErrorCode.TIMEOUT)
+
+    def test_runtime_signal_is_typed_and_excluded_from_serialization(self):
+        signal = ToolRuntimeSignal(
+            level="soft", tool_name="delegate", fingerprint="fp", consecutive_failures=3,
+        )
+        result = ToolResult(
+            ok=True, message="ok", runtime_signal=signal,
+        )
+
+        assert result.runtime_signal == signal
+        assert "runtime_signal" not in json.loads(result.model_dump_json())
+        with pytest.raises(ValueError):
+            ToolResult(
+                ok=True, message="ok",
+                runtime_signal={
+                    "level": "unexpected", "tool_name": "delegate",
+                    "fingerprint": "fp", "consecutive_failures": 3,
+                },
+            )
 
 
 class TestToolResultFailure:

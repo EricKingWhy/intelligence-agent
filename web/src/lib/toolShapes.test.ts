@@ -1,5 +1,5 @@
 /** toolShapes 纯函数契约——后端 df4f7d8 工具结果标记的解析真值。
- * 标记格式以后端 HANDOFF_FRONTEND_SYNC.md §1.3 为准，零伪造：不匹配即 null。 */
+ * 标记格式以后端 docs/archive/handoffs/HANDOFF_FRONTEND_SYNC.md §1.3 为准，零伪造：不匹配即 null。 */
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -59,7 +59,23 @@ describe('parseReadShape — read 续读标记', () => {
 });
 
 describe('parseReadShape — 单行超长截断标记（不可续读）', () => {
-  it('解析并从正文剥离', () => {
+  // OBS-016：正文措辞改过（后端去掉 POSIX 专有命令 `sed` / `head -c` / `tail -c`），
+  // 但前缀 `[Line {n} truncated at {bytes} bytes` 与结尾 `]` 是解析契约，形状不变。
+  // 旧文案仍躺在历史会话的落盘事件里，两种都必须能解——别删旧用例。
+  it('新文案（OBS-016）：解析并从正文剥离', () => {
+    const s = parseReadShape({
+      content:
+        'data\n[Line 2 truncated at 51200 bytes. This single line alone exceeds the read limit, ' +
+        'so it cannot be returned in full. Use the bash tool to read a further byte range, ' +
+        'or the grep tool to locate the part you need.]',
+      total_lines: 2,
+    });
+    expect(s!.lineTruncated).toEqual({ line: 2, bytes: 51200 });
+    expect(s!.content).toBe('data');
+    expect(s!.continuation).toBeNull();
+  });
+
+  it('旧文案（历史会话已落盘）：同样解析并从正文剥离', () => {
     const s = parseReadShape({
       content: "data\n[Line 2 truncated at 51200 bytes. Use bash with 'sed -n ...']",
       total_lines: 2,
@@ -92,15 +108,42 @@ describe('grep 截断尾巴', () => {
 // ── da394a9 批：diff 归档 marker / MCP 工具名拆解 ──
 
 describe('parseArtifactMarker', () => {
-  it('从截断摘要提取 artifact id', () => {
-    expect(parseArtifactMarker('内容过大已归档。use inspect_artifact(abc-123) 查看全文')).toBe('abc-123');
+  it('从截断摘要提取 artifact id 与读回工具名', () => {
+    expect(parseArtifactMarker('内容过大已归档。use inspect_artifact(abc-123) 查看全文')).toEqual({
+      artifactId: 'abc-123',
+      toolName: 'inspect_artifact',
+    });
   });
+
+  /* #186 AC4：后端按"与本 store 配对的读回工具"决定 marker 里写哪个名字——
+     S3 → inspect_artifact，MinIO / Local → read_artifact，而 Local 是**默认** Provider。
+     此前这里只认 inspect_artifact，于是默认部署的 marker 一个都解析不出来：
+     archived 永远为 false，归档占位与"统计不可得"全成了死路径。 */
+  it('两个工具名都认（read_artifact 是默认部署发的那个）', () => {
+    expect(parseArtifactMarker('use read_artifact(0123456789abcdef) to view]')).toEqual({
+      artifactId: '0123456789abcdef',
+      toolName: 'read_artifact',
+    });
+  });
+
+  it('工具名原样保留，不被前端替换成另一个', () => {
+    expect(parseArtifactMarker('use inspect_artifact(deadbeefdeadbeef)')?.toolName).toBe(
+      'inspect_artifact',
+    );
+  });
+
   it('无 marker → null', () => {
     expect(parseArtifactMarker('普通 diff 内容')).toBeNull();
     expect(parseArtifactMarker('')).toBeNull();
   });
+
   it('marker 空 id → null（零伪造）', () => {
     expect(parseArtifactMarker('use inspect_artifact()')).toBeNull();
+    expect(parseArtifactMarker('use read_artifact()')).toBeNull();
+  });
+
+  it('认不出的工具名 → null（不把别的调用当归档引用）', () => {
+    expect(parseArtifactMarker('use some_other_tool(abc-123)')).toBeNull();
   });
 });
 

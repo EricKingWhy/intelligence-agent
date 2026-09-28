@@ -13,4 +13,4 @@
 
 ---
 
-Phase 6 ticket #6. 详细描述见 docs/HANDOFF_PHASE6.md
+Phase 6 ticket #6. 详细描述见 docs/archive/handoffs/HANDOFF_PHASE6.md

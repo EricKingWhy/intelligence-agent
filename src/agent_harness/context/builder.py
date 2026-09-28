@@ -1,9 +1,10 @@
 """Session 事件投影到 Runtime Context 的单一入口。"""
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
-from langchain_core.messages import AnyMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 
 from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
 from agent_harness.context.provider import ContextProvider
@@ -40,6 +41,7 @@ class ContextBuilder:
         hard_guard_threshold: float = 0.90,
         context_providers: list[ContextProvider] | None = None,
         system_prompt: str | None = None,
+        runtime_context_provider: Callable[[], str] | None = None,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
@@ -53,18 +55,61 @@ class ContextBuilder:
         # 缓存其 token 成本：文本终身不变，复用常量避免每步重估。
         self.system_prompt = system_prompt
         self._system_prompt_tokens: int | None = None
+        # 运行时上下文快照（T7 / ADR-0023 D8）：**非持久化**——运行时组装、
+        # 不 session.append、不进 derive_messages、不进记忆抽取（extractor 的
+        # `has_user_message` 降级保护一旦看到注入消息就会失效，那是本设计的头号红线）。
+        # 用 callable 而非静态字符串：快照含"当前日期"，静态值会在跨午夜会话里过期；
+        # 每次 build 重新渲染顺带保证工具清单与模型名永远是当前事实。
+        # 传 None（默认）→ 行为与 T7 之前完全一致（向后兼容）。
+        self._runtime_context_provider = runtime_context_provider
         # (session_id, seq) → 该事件投影消息的 token 成本。事件落盘后其投影
         # 消息内容终身不变，成本是常量——此前每步对全部历史重新 model_dump_json
         # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
         # memo 终身 = builder 终身 = runtime 终身 = 单会话，无需淘汰。
         self._token_memo: dict[tuple[str, int], int] = {}
         # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
+        # **只含投影 messages**（_estimate_tokens_cached 的返回值）；system_prompt
+        # 与 provider 注入另行记账，见 _last_provider_tokens_by_name /
+        # _system_prompt_tokens。不能把它当"已用总量"（那正是看板漏报的根源）。
         self._token_estimate_total: int = 0
+        # 最近一次 build 里 context provider 实际注入的消息成本，**按 provider 名
+        # 分账**（skills / memory / …）。分账而不是只记一个总数，是因为看板要把
+        # "技能"桶单列（#200 设计稿 §3.2）；而这个名字来自 provider 自己，不是
+        # 调用方按文本重算一遍——重算既复制了 select() 的拼装逻辑、又会漏掉预算
+        # 截断（估高）。这里记的是**真正注入后的**成本，天然准确。
+        self._last_provider_tokens_by_name: dict[str, int] = {}
+        # 最近一次 build 的运行时快照成本（非持久化注入，见 _inject_runtime_context）。
+        self._last_runtime_context_tokens: int = 0
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
         messages = session.derive_messages()
         token_estimate = self._estimate_tokens_cached(session, messages)
+        # 运行时上下文快照（T7）：provider 每次 build **只调一次**——token 估算与
+        # 注入必须用同一份文本，否则预算与内容可能不一致（且 callable 的调用
+        # 次数是对外契约）。**纯空白（含空串）归一为 None**：只挡空串不够——
+        # `"   "` 在 Python 里为真，会让模型收到一条内容只有空白的 user 消息，
+        # 白占预算且语义为零。取原文本（不 strip），只改"要不要插"的判定。
+        raw_runtime_context = (
+            self._runtime_context_provider()
+            if self._runtime_context_provider is not None
+            else None
+        )
+        runtime_context = (
+            raw_runtime_context
+            if raw_runtime_context and raw_runtime_context.strip()
+            else None
+        )
+        runtime_context_tokens = 0
+        if runtime_context:
+            # 快照是 runtime 装配期上下文（非事件），成本单列加总，不进
+            # derive_messages 结果——与 system_prompt 同理，避免触发
+            # _estimate_tokens_cached 的「事件数 ≠ 消息数」计数失配分支。
+            runtime_context_tokens = estimate_message_tokens(
+                [HumanMessage(content=runtime_context)]
+            )
+            token_estimate += runtime_context_tokens
+        self._last_runtime_context_tokens = runtime_context_tokens
         # system_prompt 是 runtime 装配期上下文（非事件），其 token 成本单列加总，
         # 不进入 derive_messages 结果——避免触发 _estimate_tokens_cached 的
         # 「事件数 ≠ 消息数」计数失配分支（builder.py 的整体重估路径）。
@@ -80,6 +125,7 @@ class ContextBuilder:
         )
         if token_estimate <= self.max_context_tokens * self.auto_compact_threshold:
             built = await self._with_providers(session, messages, token_estimate)
+            built = self._inject_runtime_context(built, runtime_context)
             return self._prepend_system_prompt(built)
         result = await ContextCompactor(
             self.model_provider, max_context_tokens=self.max_context_tokens,
@@ -87,6 +133,10 @@ class ContextBuilder:
             hard_guard_threshold=self.hard_guard_threshold,
         ).compact(messages, token_estimate, events=session.events)
         if result.compacted_turn_count:
+            if not result.summary or not result.bracket_id:
+                raise ContextWindowExceededError(
+                    "Refusing to persist an unvalidated compaction summary"
+                )
             # T4 (#134)：写 4-event bracket 替代单个 CONTEXT_COMPACTED。
             # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
             bracket_id = result.bracket_id or ""
@@ -96,8 +146,8 @@ class ContextBuilder:
                 "source_seq_end": result.source_seq_end or 0,
             })
             session.append(CONTEXT_COMPACTED, {
-                "schema": "six_section",
-                "summary": result.summary or "",
+                "schema": "eight_section",
+                "summary": result.summary,
                 "source_seq_start": result.source_seq_start or 0,
                 "source_seq_end": result.source_seq_end or 0,
                 "compacted_turn_count": result.compacted_turn_count,
@@ -108,12 +158,47 @@ class ContextBuilder:
             session.append(COMPACTION_END, {
                 "bracket_id": bracket_id,
             })
-        # 压缩后的 token_estimate 只含 messages，不含 system_prompt——
-        # 补回 system_prompt 的 token 成本，否则 _with_providers 会把
-        # system_prompt 占用的预算当作可用空间分配给 provider 内容。
-        provider_estimate = result.token_estimate + (self._system_prompt_tokens or 0)
+        # 压缩后的 token_estimate 只含 messages，不含 system_prompt / 快照——
+        # 两者都要补回，否则 _with_providers 会把它们占用的预算当作可用空间
+        # 分配给 provider 内容（快照的补回与 system_prompt 同理由）。
+        provider_estimate = (
+            result.token_estimate + (self._system_prompt_tokens or 0) + runtime_context_tokens
+        )
         built = await self._with_providers(session, result.messages, provider_estimate)
+        built = self._inject_runtime_context(built, runtime_context)
         return self._prepend_system_prompt(built)
+
+    def _inject_runtime_context(
+        self, messages: list[AnyMessage], runtime_context: str | None,
+    ) -> list[AnyMessage]:
+        """把运行时快照作为**一条 user-role 消息**插在最后一条 HumanMessage 之前。
+
+        位置理由（ADR-0023 D8）：开头是稳定前缀（system + 早期历史），prefix
+        cache 靠它命中；快照含"当前日期"等易变内容，紧贴最新用户消息只动尾部。
+
+        **绝不 session.append**——本类的契约是"不修改历史"（见 `build` docstring）。
+        快照一旦落成事件，三个污染面立刻复发：JSONL 永久滞留 / derive_messages
+        每轮重放累积 / 记忆抽取的 `has_user_message` 降级保护失效。
+
+        找不到 HumanMessage 时插到末尾——宁可位置退化，不可静默丢弃（有当前
+        用户消息才有本次 build，理论上是不可达分支）。
+
+        【已知位置形态】build 发生在**工具回合中途**时（events =
+        user/message → model/completed(tool_calls) → tool/result），最后一条
+        HumanMessage 是本回合开头那条用户消息，快照因此落在整段历史之前，
+        "只动尾部"的缓存收益在该形态下退化为"在头部插一个稳定块"。这是
+        PRD §279 选定的语义（"最后一条 HumanMessage 之前"）：宁可位置在
+        该形态下不最优，也不把快照塞进 AI(tool_calls)/ToolResult 配对之间。
+        配对不会被切开——两个 ToolMessage 之间不可能存在 HumanMessage。
+        """
+        if not runtime_context:
+            return messages
+        index = len(messages)
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                index = i
+                break
+        return [*messages[:index], HumanMessage(content=runtime_context), *messages[index:]]
 
     def _prepend_system_prompt(self, messages: list[AnyMessage]) -> list[AnyMessage]:
         """把 system_prompt 作为列表首条 SystemMessage 注入（runtime context，非事件）。
@@ -163,6 +248,7 @@ class ContextBuilder:
     ) -> list[AnyMessage]:
         remaining = int(self.max_context_tokens * self.hard_guard_threshold) - token_estimate
         selected: list[AnyMessage] = []
+        injected_by_name: dict[str, int] = {}
         for provider in self.context_providers:
             if remaining <= 0:
                 break
@@ -171,12 +257,54 @@ class ContextBuilder:
             except Exception:  # noqa: BLE001 — optional Provider failure cannot stop the loop.
                 logger.warning("Context provider unavailable; continuing without its contribution")
                 continue
+            provider_tokens = 0
             for message in additions:
                 cost = estimate_message_tokens([message])
                 if cost <= remaining:
                     selected.append(message)
                     remaining -= cost
+                    provider_tokens += cost
+            if provider_tokens:
+                # 分账键取 provider 自称的 name（与 /api/context-providers 同一读法）；
+                # 匿名 provider 归入 "other"，仍进总量、不丢账。
+                name = getattr(provider, "name", None) or "other"
+                injected_by_name[name] = injected_by_name.get(name, 0) + provider_tokens
+        # 真实注入成本记账（#200）：这是"其他"残差桶里 provider 部分**唯一**的真实
+        # 来源——从 build 总估算是倒推不出来的（预算与注入内容逐轮变化）。
+        self._last_provider_tokens_by_name = injected_by_name
         insertion = 0
         while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
             insertion += 1
         return messages[:insertion] + selected + messages[insertion:]
+
+    def usage_snapshot(self, session: Session) -> dict[str, Any]:
+        """builder 侧的分类用量快照（#200，只读——不改 build 行为）。
+
+        每个桶都有**真实来源**，没有倒推：消息（会话投影逐条求和）、系统提示词
+        （`_system_prompt_tokens`）、技能（skills provider 上次**实际注入**的成本）、
+        其他（其余 provider 注入 + 运行期快照）。
+
+        ``skills_tokens`` 不再由调用方传入：调用方按 provider 文本重算会复制
+        `select()` 的拼装逻辑，且必然漏掉预算截断（估高）——provider 自己报的实际
+        注入成本才是同一份真相（上次审查正是这里出过"live 与缓存两个视图不一致"）。
+
+        工具两组由端点层持有 registry 单独估算后合并（T4 求和不变式在端点层闭合）。
+        """
+        messages_tokens = estimate_message_tokens(session.derive_messages())
+        system_prompt_tokens = self._system_prompt_tokens or 0
+        by_name = self._last_provider_tokens_by_name
+        skills_tokens = by_name.get("skills", 0)
+        # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照。这是"其他"
+        # 的定义性内容，不是"总量减各项"的残差——残差写法在总量只含 messages 时
+        # 会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
+        other = (sum(v for k, v in by_name.items() if k != "skills")
+                 + self._last_runtime_context_tokens)
+        return {
+            "messages": messages_tokens,
+            "system_prompt": system_prompt_tokens,
+            "skills": skills_tokens,
+            "other": other,
+            # 总量 = 各桶之和（端点层再加工具两组）。与 _token_estimate_total 的差别
+            # 是刻意的：后者只含投影 messages，不能当作"已用总量"（那是漏报的根源）。
+            "used_tokens": messages_tokens + system_prompt_tokens + skills_tokens + other,
+        }

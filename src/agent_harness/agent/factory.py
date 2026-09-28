@@ -3,7 +3,9 @@
 SubAgent MUST 复用同一 Agent Loop（不变量 #19）——Factory 不造新 Runtime
 类，只做三件事：
 1. 权限校验：spec 申请的 tool_scope 中，「存在于全量 registry 但不在可授予
-   集合」的申请 = 越权提升，拒绝（防 child 自配全量工具的逃逸通道）；
+   集合」的申请 = 越权提升，拒绝（防 child 自配全量工具的逃逸通道）；可授予
+   集合 `grantable` **必填**（#286）——不接受「省略 = 全量」这种隐式兜底，
+   那正是「child 重新拿到 delegate」的逃逸通道本身；
 2. 缺席降级：optional capability 的工具（如 websearch 未配）不在全量
    registry 里 → 降级丢弃 + warning（同 capability 降级缺席语义）；
 3. 构造期收窄：从全量 registry 过滤出【新】ToolRegistry 实例 + 经
@@ -19,8 +21,11 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS, resolve_local_fuse
 from agent_harness.agent.profiles import AgentSpec
+from agent_harness.agent.run_budget import SessionBudgetPort
 from agent_harness.agent.runtime import AgentRuntime
+from agent_harness.prompt import PersonaConfig, compose_agent_prompt, join_guidance
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -41,9 +46,16 @@ class AgentFactory:
         stream_total_timeout: float = 0.0,
         model_call_gate: Any | None = None,
         observability_sink: Any | None = None,
+        persona: PersonaConfig | None = None,
+        include_tool_guidance: bool = False,
+        local_max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS,
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
+        # Deployment ceiling（#308）：child 的 local fuse = 档位声明收窄到本 ceiling
+        # 之下。**子 Agent 不会继承一个更大的上限**——父级额度更大不构成放行理由
+        # （ADR-0044 D1：local fuse 不跨兄弟池化）。
+        self._local_max_agent_turns = local_max_agent_turns
         # executor 组装缝：policy/approval/ledger/overflow 等运行配置由调用方
         # 闭包捕获——Factory 不关心 Executor 怎么配，只保证 child registry 先
         # 过滤再进入组装。
@@ -55,17 +67,35 @@ class AgentFactory:
         # 进程级并发闸（#89）：assembly 传入共享实例，child runtime 同闸。
         self._model_call_gate = model_call_gate
         self._observability_sink = observability_sink
+        # T5：persona 由装配点传入，child 与 parent 同样被前后缀包裹。
+        # 默认 None → `compose_agent_prompt` 逐字节返回原值（B2 契约零变化）。
+        self._persona = persona
+        # T6：child 的工具 guidance 必须**显式开启**（装配点开）。默认 False 是为了让
+        # B2 契约（child.system_prompt == spec.system_prompt）的成立与"工具恰好没有
+        # guidance"脱钩——否则有人给 ReadTool 加 guidance，B2 会莫名变红。
+        self._include_tool_guidance = include_tool_guidance
 
     def create(
         self,
         spec: AgentSpec,
         *,
         source_registry: ToolRegistry,
-        grantable: frozenset[str] | set[str] | None = None,
+        grantable: frozenset[str] | set[str],
+        session_budget: SessionBudgetPort | None = None,
     ) -> AgentRuntime:
-        """按 spec 构造 child runtime（复用同一 Agent Loop，不变量 #19）。"""
+        """按 spec 构造 child runtime（复用同一 Agent Loop，不变量 #19）。
+
+        `grantable` **必填**（#286）：它曾经可选，省略时默认「可授予 = source
+        registry 全量」——child 申请 `delegate` 而调用点忘了收窄，递归委派的
+        逃逸通道就开了。可授予集合是**权限决策**，不是能隐式兜底的默认值：
+        「谁能被授予什么」是每个调用点必须说出口的事。
+
+        `session_budget`（`#318`）：委派提供方把**共享**的树账端口交给 child
+        （`10 §5.1`：根 / 子 / 孙消费同一份 SessionBudget；local fuse 不池化，
+        session 账恰恰要池化——两者互不替代）。
+        """
         source_names = {tool.name for tool in source_registry.list()}
-        grantable_names = set(grantable) if grantable is not None else set(source_names)
+        grantable_names = set(grantable)
 
         # 越权提升：工具真实存在但不在可授予集合 → 拒绝（防逃逸通道）。
         escalated = (spec.tool_scope & source_names) - grantable_names
@@ -84,14 +114,24 @@ class AgentFactory:
             )
         effective = spec.tool_scope & source_names
 
+        # local fuse（#308）：档位声明只能**收窄** Deployment ceiling；越界的档位声明
+        # 在这里被拒（child 执行前，ADR-0044 D7/D1），不静默取小值。
+        child_fuse = resolve_local_fuse(
+            deployment=self._local_max_agent_turns, profile=spec.max_agent_turns,
+        )
+
         child_registry = source_registry.filtered(effective)
         executor = (self._executor_factory(child_registry) if self._executor_factory
                     else ToolExecutor(child_registry))
+        # T6：guidance 取**收窄后**的 child_registry，不是 source_registry——
+        # 否则 child 会看到它无权使用的工具的操作说明（越权信息泄漏）。
+        guidance_text = (join_guidance(child_registry.list())
+                         if self._include_tool_guidance else None)
         return AgentRuntime(
             model=self._model,
             registry=child_registry,
             executor=executor,
-            max_steps=spec.max_steps,
+            max_agent_turns=child_fuse.max_agent_turns,
             fallback_model=self._fallback_model,
             primary_model_name=self._primary_model_name,
             fallback_model_name=self._fallback_model_name,
@@ -102,5 +142,11 @@ class AgentFactory:
             observability_sink=self._observability_sink,
             # ADR-0020a：child 拿它 spec 的 system_prompt（与 parent 路径一致），
             # 经 AgentRuntime 内部的 ContextBuilder 注入为列表首条 SystemMessage。
-            system_prompt=spec.system_prompt,
+            # T5/T6：persona 前后缀与工具 guidance 由装配点传入，child 与 parent
+            # 同样被包裹（未配置/未开启时 `compose_agent_prompt` 逐字节返回 base，
+            # 故 B2 契约零变化）。
+            system_prompt=compose_agent_prompt(
+                spec.system_prompt, self._persona, guidance_text,
+            ),
+            session_budget=session_budget,
         )

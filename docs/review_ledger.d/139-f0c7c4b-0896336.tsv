@@ -1,0 +1,1 @@
+2026-09-22	#293（B-42）批 3 初始两轴独立审查（Standards NEEDS-FIX 1×P1+4×P2+1×P4 / Spec PASS-WITH-FINDINGS 1×P1+2×P2+1×P3，两轴 0×P0；两轴各自独立测出同一 P1 = 落盘守卫只查 git status，既让落盘路径不可达又可被 assume-unchanged / showUntrackedFiles=no 绕过）	f0c7c4b..0896336

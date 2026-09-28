@@ -15,11 +15,20 @@ web 与 CLI 是它的两个 adapter（两个 adapter = 真实 seam）；capabili
 from __future__ import annotations
 
 import logging
+import platform
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.budget import SOURCE_DEPLOYMENT
+from agent_harness.agent.resume_evidence import StuckEvidencePort
+from agent_harness.agent.run_budget import (
+    LaunchRunBudget,
+    SessionBudgetPort,
+    validate_tool_call_limits_registered,
+)
 
 logger = logging.getLogger(__name__)
 from agent_harness.capability.base import CapabilityRegistry
@@ -28,10 +37,18 @@ from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.model.concurrency import ModelCallGate
-from agent_harness.model.config import ModelConfig
+from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
+from agent_harness.prompt import (
+    DEFAULT_REGISTRY,
+    build_registry,
+    compose_agent_prompt,
+    join_guidance,
+    parse_persona_config,
+    tool_guidance_sections,
+)
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
@@ -40,8 +57,9 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
-from agent_harness.storage.s3_artifact import S3ArtifactStore
-from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.storage.artifact_select import select_artifact_store
+from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
@@ -53,9 +71,19 @@ from agent_harness.tools import (
     GitStatusTool,
     GlobTool,
     GrepTool,
-    InspectArtifactTool,
     ReadTool,
     WriteTool,
+)
+from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
+from agent_harness.workspace.index import SessionHeaders
+
+#: `build_runtime` **无条件**注册的本地工具类（顺序 = 注册顺序）。
+#: 提成模块常量是为了让 profile 对账有一个**机械输入**：未归属任何档位、也不在带理由
+#: 白名单里的工具会让 `tests/agent/test_tool_scope_reconciliation.py` 变红——加工具
+#: 时改这里，别在函数里再写一份。
+BUILTIN_LOCAL_TOOLS: tuple[type[Tool], ...] = (
+    ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
+    GlobTool, GrepTool, GitStatusTool, GitDiffTool,
 )
 
 
@@ -63,37 +91,72 @@ from agent_harness.tools import (
 class RecoveryStores:
     """恢复子系统三 Store（同一 SQLite 文件，ADR-0004 布局）。
 
-    AppState 与 CLI 各自构造实例、共享生命周期所有权；factory 只消费。"""
+    AppState 与 CLI 各自构造实例、共享生命周期所有权；factory 只消费。
+
+    `workspace_index` 是 ADR-0025 的 Workspace 实体 + 有序会话账本（WS-2 / #152），
+    同库不同表。它是**可选**成员：它需要会话 header 来源，而大量单测只调
+    `recovery_stores(path)` 不接会话存储——那些场景不需要项目索引，保持 `None`。"""
 
     operation_ledger: SqliteOperationLedger
     checkpoint_store: SqliteCheckpointStore
     session_meta_store: SqliteSessionMetaStore
+    delegation_tree_ledger: SqliteDelegationTreeLedger
+    workspace_index: WorkspaceIndex | None = None
 
 
-def recovery_stores(database_path: str | Path) -> RecoveryStores:
-    """构造恢复三 Store（同一 harness.db；未初始化——initialize_stores 幂等初始化）。"""
+def recovery_stores(
+    database_path: str | Path, *, workspace_headers: SessionHeaders | None = None
+) -> RecoveryStores:
+    """构造恢复 Store 束（同一 harness.db；未初始化——initialize_stores 幂等初始化）。
+
+    `workspace_headers` 给定时才装配 `workspace_index`（见 `RecoveryStores` 说明）。
+    """
     path = Path(database_path)
     return RecoveryStores(
         operation_ledger=SqliteOperationLedger(path),
         checkpoint_store=SqliteCheckpointStore(path),
         session_meta_store=SqliteSessionMetaStore(path),
+        delegation_tree_ledger=SqliteDelegationTreeLedger(path),
+        workspace_index=(
+            WorkspaceIndex(SqliteWorkspaceStore(path), workspace_headers)
+            if workspace_headers is not None
+            else None
+        ),
     )
 
 
 async def initialize_stores(stores: RecoveryStores) -> None:
-    """恢复三 Store 幂等初始化（并发首请求由调用方的 once 语义守护）。"""
+    """Store 束幂等初始化（并发首请求由调用方的 once 语义守护）。
+
+    `workspace_index.initialize()` 顺带完成首次 bootstrap（AC14–16）——那一步需要
+    读会话 header，所以只在装了 index 的进程里发生。
+    """
     await stores.operation_ledger.initialize()
     await stores.checkpoint_store.initialize()
     await stores.session_meta_store.initialize()
+    await stores.delegation_tree_ledger.initialize()
+    if stores.workspace_index is not None:
+        await stores.workspace_index.initialize()
 
 
 async def assemble_wiring(
     settings: Settings,
+    *,
+    sessions: JsonlSessionStore | None = None,
+    workspace_index: WorkspaceIndex | None = None,
 ) -> tuple[CapabilityRegistry, CapabilityWiring]:
-    """CAPABILITIES env → 显式装配（capability 发现/降级归 wire_capabilities）。"""
+    """CAPABILITIES env → 显式装配（capability 发现/降级归 wire_capabilities）。
+
+    `sessions` 透传给 `wire_capabilities`，是**同一个**会话日志存储（#298 T7b）：
+    V2 记忆形成在执行 job 时要按 `(session_id, run_id)` 从它里面切这一轮的事件，
+    而它必须与运行时空正在写的那一份是同一处——所以由调用方注入，不在这里按约定现建。
+    `workspace_index` 给 V2 自动召回与形成作业提供可信的 session → project 绑定。
+    不传 `sessions` = 不装配 V2 记忆（其余能力零改动）。
+    """
     registry = CapabilityRegistry()
     wiring = await wire_capabilities(
-        registry, parse_capabilities_config(settings.capabilities), settings=settings
+        registry, parse_capabilities_config(settings.capabilities),
+        settings=settings, sessions=sessions, workspace_index=workspace_index,
     )
     return registry, wiring
 
@@ -126,7 +189,7 @@ async def build_runtime(
     workspace_registry: WorkspaceRegistry,
     session_id: str,
     workspace: Path,
-    max_steps: int,
+    max_agent_turns: int,
     permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
     auto_approve: bool | None = None,
     approval_callback: ApprovalCallback | None = None,
@@ -135,6 +198,11 @@ async def build_runtime(
     reasoning_effort: str | None = None,
     agent_profile: str | None = None,
     context_providers: list[str] | None = None,
+    steer_source: Any | None = None,
+    run_budget: LaunchRunBudget | None = None,
+    local_fuse_source: str = SOURCE_DEPLOYMENT,
+    stuck_evidence: StuckEvidencePort | None = None,
+    session_budget: SessionBudgetPort | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -147,18 +215,62 @@ async def build_runtime(
     硬墙——policy 决定哪些工具 needs_approval，审批结果仍由 callback 决定）。
     approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
     式审批 callback（见 web 层 PendingApprovalQueue）。
+    steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
+    MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
+
+    `max_agent_turns`（#308）：**已解析的** local fuse 生效值，本函数只消费结果。刻意
+    **不**在这里解析：装配点只有一个输入，而不是"再判一次策略"（解析点见
+    `agent.budget.resolve_local_fuse`）。
+
+    `run_budget` / `local_fuse_source`（`#312`）：run 作用域账本上下文与 local fuse 的
+    **来源标识**，两者都只是**透传**给 AgentRuntime（判定与解析都在服务层与
+    `agent/run_budget.py`）。默认 None / deployment ⇒ 既有调用方（CLI、单测、
+    delegate 子 runtime）逐字不变：新 run、无 run ceiling、fuse 来源记 deployment。
+
+    `stuck_evidence`（`#317`）：stuck 暂停的三类恢复依据里"环境 / 策略"两条的
+    **观测端口**，同样只是透传（`AgentRuntime` 只在暂停那一刻读一次）。构造方是
+    服务层——它才掌握"本次生效策略"的全部输入，且恢复侧要用**同一份函数**现算再
+    比较（ADR-0048 D8）。默认 None ⇒ 不观测（那两条依据届时按"无快照可比"409，
+    "相关 steer"那条不受影响），CLI / 单测的既有路径逐字不变。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
     # coding/research_review 收窄 registry 到 spec.tool_scope + 注入 spec.system_prompt。
     # 未知名字 web 层已 422，这里 KeyError 再响亮失败一次（防御性，不应发生）。
+    # #286：main 也是**根委派配额**的来源——即便 agent_profile=None（= 出厂
+    # main），根 max_depth 也要从这里取，所以 import 提到分支外。
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+
     profile_spec = None
     if agent_profile is not None:
-        from agent_harness.agent.profiles import BUILTIN_PROFILES
         profile_spec = BUILTIN_PROFILES[agent_profile]
+    # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
+    root_max_depth = (profile_spec if profile_spec is not None
+                      else BUILTIN_PROFILES["main"]).max_depth
+    root_max_delegations = (profile_spec if profile_spec is not None
+                            else BUILTIN_PROFILES["main"]).max_delegations
 
-    config = (ModelConfig.from_settings(settings) if model_name is None
-              else ModelConfig.from_catalog(settings, model_name))
+    # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
+    # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
+    # DEFAULT_REGISTRY 不读环境（§4.4），所以这里显式按 settings 构建一次。
+    persona = parse_persona_config(settings.agent_persona)
+
+    # #203 / ADR-0032 D8：模型解析收敛——统一解析点 resolve_selection（catalog
+    # 名优先 + 自定义供应商 `<provider>:<model_id>` 命名空间 fallback）；两者都
+    # 未命中才响亮失败。被删 provider **不静默 fallback**（D9：明确错误含
+    # provider id）。终审 P2 修复：不再裸 model_id 跨 provider 匹配——两个自定义
+    # provider 注册同一 model_id 时此前的循环取文件序第一个（顺序依赖的静默选择）；
+    # 现在 catalog 名精确命中 + composite id（provider:model）精确解析，无歧义。
+    if model_name is None:
+        config = ModelConfig.from_settings(settings)
+    else:
+        try:
+            from agent_harness.model.provider_store import ProviderStore
+
+            store = ProviderStore.for_settings(settings)
+            config = ModelConfig.resolve_selection(settings, model_name, store)
+        except ConfigError as error:
+            raise error from None
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
     # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
@@ -174,30 +286,34 @@ async def build_runtime(
 
     sandbox = workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
-    for tool_cls in (
-        ReadTool, WriteTool, BashTool, EditTool, ApplyPatchTool,
-        GlobTool, GrepTool, GitStatusTool, GitDiffTool,
-    ):
-        registry.register(tool_cls(sandbox))
+    for tool_cls in BUILTIN_LOCAL_TOOLS:
+        # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
+        # Settings，装配层是唯一的接线点；接不上就成死键（tests/test_assembly_bash_budget.py）。
+        kwargs = (
+            {"timeout_seconds": settings.bash_timeout_seconds}
+            if tool_cls is BashTool
+            else {}
+        )
+        registry.register(tool_cls(sandbox, **kwargs))
 
+    # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
+    # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
+    # 选择口径（优先级 + 半配置判定）收敛在 `storage/artifact_select.py`，读路径
+    # （`web/artifacts.py`）用同一个函数——两处各写一遍 if 级联就等于给漂移留门
+    # （#192 批 1 审查发现）。
     overflow_handler = None
-    if any((settings.artifact_store_endpoint, settings.artifact_store_bucket,
-            settings.artifact_store_access_key, settings.artifact_store_secret_key,
-            settings.artifact_store_region)):
-        artifact_store = S3ArtifactStore(settings, session_id=session_id)
-        registry.register(InspectArtifactTool(artifact_store))
-        overflow_handler = ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)
-
-    # Phase Multiturn T5 (#135): MinIO-backed externalization for large tool results.
-    # When minio_* is configured, register ReadArtifactTool so the model can read
-    # back slices of externalized artifacts by ref.
-    if any((settings.minio_endpoint, settings.minio_bucket,
-            settings.minio_access_key.get_secret_value(),
-            settings.minio_secret_key.get_secret_value())):
-        from agent_harness.storage.minio_artifact import MinioArtifactStore
-        from agent_harness.tools.read_artifact import ReadArtifactTool
-        minio_store = MinioArtifactStore(settings, session_id=session_id)
-        registry.register(ReadArtifactTool(minio_store))
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        read_tool = selection.read_tool(selection.store)
+        registry.register(read_tool)
+        # 摘要里的读回提示点名**这个**工具（#186 AC4）：S3 配 `inspect_artifact`，
+        # MinIO / Local 配 `read_artifact`。名字从选择器**实例化出来的那个工具**上取，
+        # 不在这里再填一个字面量——那样等于把"配对关系"这份知识写了第二遍。
+        overflow_handler = ArtifactOverflowHandler(
+            selection.store,
+            settings.artifact_overflow_chars,
+            read_tool_name=read_tool.name,
+        )
 
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
@@ -210,6 +326,13 @@ async def build_runtime(
         async def approval_callback(_req):  # type: ignore[no-redef]
             return ApprovalResponse(approved=True, reason="auto-approve")
 
+    runtime_multiagent_provider = None
+    if wiring.multiagent_provider is not None and session_store is not None:
+        # CapabilityWiring is cached across requests; activation state is not.
+        # Give each root Runtime its own provider and DelegateTool while descendants
+        # inherit that same registry/provider through AgentFactory.
+        runtime_multiagent_provider = wiring.multiagent_provider.new_runtime_instance()
+
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席
         # （不注册 delegate，单代理照常），与 optional capability 语义一致。
@@ -218,6 +341,10 @@ async def build_runtime(
                 "multiagent 已启用但未提供 session_store，delegate 工具降级缺席"
             )
             continue
+        if isinstance(capability_tool, DelegateTool) and runtime_multiagent_provider is not None:
+            capability_tool = DelegateTool(
+                runtime_multiagent_provider, max_delegations=root_max_delegations,
+            )
         registry.register(capability_tool)
 
     # agent_profile tool_scope 收窄（ADR-0020a）：仅在非 main profile 时过滤——
@@ -225,13 +352,35 @@ async def build_runtime(
     # tool_scope 未声明的工具，filter 会隐性收窄它。所以 main/None 走原路径不 filter，
     # 只有 coding/research_review 才收窄。收窄后 registry 流向所有下游：
     # ToolExecutor / AgentRuntime / multiagent activate 的 source_registry。
+    # #198：被剔除的工具名必须在收窄**前**记录（收窄后已无从对比）——这正是
+    # "模型说没有 write/edit/apply_patch"的答案本身，经 run_config 日志可回溯。
+    dropped_tools: tuple[str, ...] = ()
     if profile_spec is not None and agent_profile != "main":
+        pre_filter_names = {tool.name for tool in registry.list()}
         registry = registry.filtered(profile_spec.tool_scope)
+        dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
+
+    # per-tool 配额的**注册名**校验（`#314` / `04 §9.1`）：判定点是这里，因为注册表
+    # 到上一行为止才定型（内置 + artifact 读回 + capability，并按 profile 收窄）。
+    # 位置仍然满足 `11 §6.1` 的"无副作用"：在任何 model / tool / child 工作之前，
+    # 也不落任何消耗预算的事件。子 runtime（delegate）不带 run_budget ⇒ 自然跳过。
+    if run_budget is not None:
+        validate_tool_call_limits_registered(
+            run_budget.limits, registered=[tool.name for tool in registry.list()],
+        )
+
+    # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
+    # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。
+    # 内容边界由这个 registry 决定——coding 收窄后没有 delegate，所以它的 prompt
+    # 拿不到委派说明（工具缺席 → 说明缺席，这是本票的核心性质）。
+    prompt_registry = build_registry(
+        persona, tool_sections=tool_guidance_sections(registry.list()),
+    )
 
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
     # 同一审批面（决策 11 权限传递）。
-    if wiring.multiagent_provider is not None and session_store is not None:
+    if runtime_multiagent_provider is not None:
         from agent_harness.agent.factory import AgentFactory
 
         def _child_executor_factory(child_registry: ToolRegistry) -> ToolExecutor:
@@ -241,7 +390,7 @@ async def build_runtime(
                 operation_ledger=stores.operation_ledger,
             )
 
-        wiring.multiagent_provider.activate(
+        runtime_multiagent_provider.activate(
             factory=AgentFactory(
                 model=model, fallback_model=fallback_model,
                 executor_factory=_child_executor_factory,
@@ -252,12 +401,46 @@ async def build_runtime(
                 stream_total_timeout=settings.model_stream_total_timeout,
                 model_call_gate=model_call_gate,
                 observability_sink=get_observability_sink(settings),
+                persona=persona,
+                # child 的 guidance 来自它自己收窄后的 registry——这里显式开开关。
+                # Factory 默认 False：B2 契约（child.system_prompt == spec.system_prompt）
+                # 的成立必须与"工具恰好没有 guidance"无关。
+                include_tool_guidance=True,
+                # child 的 local fuse 上限（#308）：档位声明（内置三档位是 None=继承）
+                # 只能收窄到 Deployment ceiling 之下，越界在 Factory.create 里被拒。
+                local_max_agent_turns=settings.local_max_agent_turns,
             ),
             source_registry=registry,
             session_store=session_store,
             workspace_registry=workspace_registry,
             parent_session_id=session_id,
+            max_depth=root_max_depth,
+            max_delegations=root_max_delegations,
+            delegation_ledger=stores.delegation_tree_ledger,
         )
+
+    def _render_runtime_context() -> str:
+        """渲染运行时上下文快照（T7 / ADR-0023 D8；BUG-013 瘦身）——每次 build 一次。
+
+        事实来源全部取**当前**值，不缓存：
+        - `cwd`：当前进程工作目录；
+        - `os`：`platform.system()` + `release()`；
+        - `date`：本地日期，只到日（用 `datetime.now()` 会让每次 build 文本都变，
+          既毁 prefix cache 又难断言）。
+
+        BUG-013 瘦身：**不再渲染 `model` / `tools`**——工具清单已在 system prompt
+        的 tool guidance 区（静态能力），模型名运行时可查；快照紧贴最新用户消息，
+        列工具会诱导模型把对话任务误判为工具任务。
+
+        产物落 `meta_user`：快照是 user-role 消息，不是 system-role。
+        """
+        return DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
+            "cwd": str(Path.cwd()),
+            "os": f"{platform.system()} {platform.release()}",
+            # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
+            # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
+            "date": date.today().isoformat(),  # noqa: DTZ011
+        }).meta_user_text
 
     return AgentRuntime(
         model=model,
@@ -265,7 +448,7 @@ async def build_runtime(
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
                               overflow_handler=overflow_handler,
                               operation_ledger=stores.operation_ledger),
-        max_steps=max_steps,
+        max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,
         context_builder=ContextBuilder(
@@ -277,9 +460,25 @@ async def build_runtime(
             context_providers=_select_context_providers(
                 wiring.context_providers, context_providers,
             ),
-            system_prompt=(profile_spec.system_prompt if profile_spec is not None else None),
+            # 有 profile → 走注册表组装：persona（0 / 10200）与工具 guidance（2000）
+            # 的 order 由容器排序，persona 为空且无 guidance 时该 scope 只有一条
+            # section，T2 保证产物逐字节等于原文（C5/C7 因此保持绿）。
+            # 无 profile → 没有可组装的 scope，直接文本包裹（guidance 仍拼进去：
+            # 它是"怎么用工具"的操作信息，与身份无关；两者皆空时返回 None，C4 保持）。
+            system_prompt=(
+                prompt_registry.assemble(f"profile:{agent_profile}").system_text
+                if profile_spec is not None
+                else compose_agent_prompt(None, persona, join_guidance(registry.list()))
+            ),
+            # T7：快照**不**拼进 system_prompt（那会破坏 T5/T6 与 C4/C5/C7 的逐字节
+            # 契约），而是走独立通道，由 builder 按 meta_user 语义插到当前用户消息前。
+            runtime_context_provider=_render_runtime_context,
         ),
-        memory_writer=wiring.memory_writer,
+        # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
+        # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
+        # 因此这里传引用，绝不在这里新建（每轮新建 = 每轮起一条服务循环）。
+        # 未装配时是 None：终结臂只跳过记忆形成。
+        memory_formation=wiring.memory_formation,
         fallback_model=fallback_model,
         stream_idle_timeout=settings.model_stream_idle_timeout,
         stream_total_timeout=settings.model_stream_total_timeout,
@@ -288,4 +487,19 @@ async def build_runtime(
         fallback_model_name=(config.fallback.model_name if config.fallback is not None
                              else "fallback"),
         observability_sink=get_observability_sink(settings),
+        steer_source=steer_source,
+        # `#312`：run 作用域账本（暂停/恢复）+ 生效 fuse 的来源标识。装配点只透传。
+        run_budget=run_budget,
+        local_fuse_source=local_fuse_source,
+        # #198：生效档位（未指定 = "main"）与被 tool_scope 剔除的工具名——
+        # run_config 结构化日志与 run/started 事件的数据源。
+        agent_profile=(agent_profile if agent_profile is not None else "main"),
+        dropped_tools=dropped_tools,
+        # `#317`：stuck 暂停的证据端口（环境 revision + 策略版本）。装配点只透传——
+        # 构造方是服务层（它才有一份"本次生效策略"的完整输入，恢复侧也用同一份函数
+        # 现算再比较；ADR-0048 D8）。None = 不观测（CLI / 单测的既有路径逐字不变）。
+        stuck_evidence=stuck_evidence,
+        # `#318`：session 树账端口（跨 run / 跨会话共享）。装配点只透传；构造方是
+        # 服务层（它才知道预算 key 与请求声明）。None = 不接 session 账（旧行为）。
+        session_budget=session_budget,
     )

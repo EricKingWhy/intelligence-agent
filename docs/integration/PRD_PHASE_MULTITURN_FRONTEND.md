@@ -212,8 +212,7 @@ CSS 原生没有变量组复用机制，修改时必须两处同步。2026-09-04
 #137 前端部分         ← P2，blocked by #137 后端 API 就绪
 ```
 
-每个 ticket 按 to-tickets → /implement → code-review 流程执行。
-完成后通知集成 AI 合并到 `main`。
+如重新启用这些 Ticket，按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 实施：逐票运行 focused checks，review 按风险安排；集成前通过完整门禁和 review coverage。集成由当前主开发按 `AGENTS.md` §13–14 执行。
 
 ---
 

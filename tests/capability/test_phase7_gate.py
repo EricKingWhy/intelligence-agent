@@ -18,12 +18,13 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_COMPLETED
-from agent_harness.capability.base import CapabilityRegistry, Degradation
+from agent_harness.capability.base import CapabilityRegistry, Degradation, DegradeReason
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 from tests.conftest import make_session
+from tests.memory.v2._vector import FakeMemoryVectorClient
 from tests.scripted_model import ScriptedModel
 
 TICK_CALL_ID = "call_ticker_0001"
@@ -39,6 +40,20 @@ def _settings(tmp_path: Path) -> Settings:
         _env_file=None,
         workspace_dir=str(tmp_path),
         skill_global_dir=str(tmp_path / "no-such-global"),
+    )
+
+
+def _memory_ready_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        skill_global_dir=str(tmp_path / "no-such-global"),
+        milvus_uri="https://memory.example.test",
+        milvus_token="test-only",
+        milvus_collection="memory_test",
+        embedding_model="test-model",
+        embedding_base_url="https://embedding.example.test",
+        embedding_api_key="test-only",
     )
 
 
@@ -149,35 +164,32 @@ class TestTickerCapabilityDemo:
 class TestWebWiringCoexistence:
     @pytest.mark.asyncio
     async def test_memory_skills_ticker_coexist(self, tmp_path, monkeypatch):
-        """Web 装配场景：三能力共存——memory（fake）+ skills + ticker 一套 config 装配。"""
-
-        class _FakeMemory:
-            async def initialize(self): pass
-            async def close(self): pass
-            capability = object()
-            writeback = object()
-
-            class _Relay:
-                def start(self): pass
-                async def stop(self): pass
-            relay = _Relay()
-
+        """Web wiring composes the V2 memory service with skills and ticker."""
+        settings = _memory_ready_settings(tmp_path)
+        vectors = FakeMemoryVectorClient(settings)
         monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_components",
-            lambda settings: _FakeMemory(),
+            "agent_harness.capability.factories.build_memory_vector_client",
+            lambda _settings: vectors,
         )
         _make_skill(tmp_path)
 
         config = parse_capabilities_config(
-            '{"memory": {"provider": "langmem"}, "skills": {}, "ticker": {}}'
+            '{"memory": {}, "skills": {}, "ticker": {}}'
         )
         registry = CapabilityRegistry()
-        wiring = await wire_capabilities(registry, config, settings=_settings(tmp_path))
+        wiring = await wire_capabilities(registry, config, settings=settings)
 
-        assert [d.name for d in registry.available()] == ["memory", "skills", "ticker"]
-        assert wiring.memory_writer is not None
-        assert len(wiring.context_providers) == 2  # MemoryContextProvider + SkillCatalogContextProvider
-        assert [tool.name for tool in wiring.tools] == ["load_skill", "tick"]
+        assert sorted(d.name for d in registry.available()) == ["memory", "skills", "ticker"]
+        assert registry.descriptor("memory").provider_name == "builtin-v2"
+        assert wiring.memory_v2 is registry.get("memory")
+        assert wiring.memory_formation is None
+        # Without a session ledger, user-scoped recall/tools stay uninstalled; skills still work.
+        assert len(wiring.context_providers) == 1  # SkillCatalogContextProvider
+        assert {tool.name for tool in wiring.tools} == {
+            "load_skill", "tick",
+        }
+        await wiring.aclose()
+        assert vectors.closed
 
 
 class TestGate2SkillsProgressiveDisclosure:
@@ -232,25 +244,39 @@ class TestGate2SkillsProgressiveDisclosure:
         assert "不是运行时指令" in second_request  # 数据非指令前缀在场（防注入框架）
 
 
+def _degrade_codes(wiring) -> dict[str, str]:
+    """码表快照 + 「存的是码、不是枚举成员」这条一并钉住。
+
+    `f"{reason}"` 对 `str`-Enum 成员写出的是 `DegradeReason.X` 而不是 `missing_settings`，
+    而 API 里给前端的是后者——存成员会让日志/序列化与跨端契约悄悄不一致。"""
+    assert all(not isinstance(value, DegradeReason) for value in wiring.degradations.values())
+    return dict(wiring.degradations)
+
+
 class TestDegradation:
     @pytest.mark.asyncio
     async def test_factory_failure_degrades_and_base_agent_still_runs(self, tmp_path, monkeypatch):
         """OPTIONAL provider 构造失败 → 装配跳过（optional() None）→ 基础 Agent 照常运行。"""
 
-        def _boom(settings):
+        def _boom(_settings):
             raise RuntimeError("simulated milvus outage")
 
         monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_components", _boom,
+            "agent_harness.capability.factories.build_memory_vector_client", _boom,
         )
         registry = CapabilityRegistry()
         wiring = await wire_capabilities(
-            registry, parse_capabilities_config('{"memory": {}}'), settings=_settings(tmp_path),
+            registry, parse_capabilities_config('{"memory": {}}'),
+            settings=_memory_ready_settings(tmp_path),
         )
         assert registry.available() == []  # 未注册 → registry.optional("memory") is None
         assert registry.optional("memory") is None
-        assert wiring.memory_writer is None and wiring.memory is None
+        assert wiring.memory_v2 is None and wiring.memory_vectors is None
+        assert wiring.memory_formation is None
         assert wiring.context_providers == []
+        # #225：降级**原因**要结构化留在 wiring 上——否则路由层只能对用户说
+        # "未启用"，把"配了但装配失败"说成"没配"（真机症状）。
+        assert wiring.degradations == {"memory": DegradeReason.INIT_FAILED.value}
 
         # 降级后基础 Agent 照常运行（08 §7：OPTIONAL_RUNTIME 缺失不影响 Agent 可运行）。
         model = ScriptedModel([AIMessage(content="纯 Runtime 回答")])
@@ -260,3 +286,61 @@ class TestDegradation:
         result = await runtime.run(make_session(tmp_path), "在吗")
         assert result.status == STATUS_COMPLETED
         assert result.final_text == "纯 Runtime 回答"
+
+    @pytest.mark.asyncio
+    async def test_absent_reasons_are_not_collapsed(self, tmp_path):
+        """#225：缺席的**四种**原因各自留码，不塌成一个"未启用"。
+
+        「没配」（缺省，不进表）与「配了但没启用」「配了但前置配置不齐」必须分得开——
+        三种处境给用户的下一步动作完全不同（改 CAPABILITIES / 改 enabled / 改 .env）。
+        """
+        registry = CapabilityRegistry()
+        # ① 没配：不是"降级"，是缺省（CAPABILITIES 是空的 = 一切按零行为变化）。
+        wiring = await wire_capabilities(registry, {}, settings=_settings(tmp_path))
+        assert _degrade_codes(wiring) == {}
+
+        # ② 配了但 enabled=false。
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"memory": {"enabled": false}}'),
+            settings=_settings(tmp_path),
+        )
+        assert _degrade_codes(wiring) == {"memory": DegradeReason.DISABLED.value}
+        assert wiring.memory_v2 is None
+
+        # ③ 配了、启用了，但 provider 自己的前置配置不齐（真 factory：milvus/embedding
+        # 都没配 → 返回 None）。这条走的是**真** `build_builtin_memory_components`，
+        # 不是替身——"分不出来的原因"正是它里面的那个 `return None`。
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"memory": {}}'),
+            settings=_settings(tmp_path),
+        )
+        assert _degrade_codes(wiring) == {"memory": DegradeReason.MISSING_SETTINGS.value}
+        assert wiring.memory_v2 is None
+
+        # ④ 另外两个"缺前置配置"的登记点（knowledge 的 collection、websearch 的 key）：
+        # 删掉它们不会让别的用例变红，所以在这里点名——"某些 capability 的缺席原因
+        # 从表里静默消失"正是这张表最容易退化回去的方式。
+        wiring = await wire_capabilities(
+            registry,
+            parse_capabilities_config('{"knowledge": {}, "websearch": {}}'),
+            settings=_settings(tmp_path),
+        )
+        assert _degrade_codes(wiring) == {
+            "knowledge": DegradeReason.MISSING_SETTINGS.value,
+            "websearch": DegradeReason.MISSING_SETTINGS.value,
+        }
+
+    def test_reason_codes_are_a_closed_set(self):
+        """码是**跨端契约**（前端 `isMemoryFault` 比的就是字符串 `init_failed`）。
+
+        改名不会让任何门禁变红——前后端各自用自己那份字面量自证（`DegradeReason`
+        在后端测试里是符号，前端/e2e 是字面量）。这条把"值集合"钉死：改名先红，
+        逼迫有人去看前端那份字面量要不要跟着改。"""
+        assert {reason.value for reason in DegradeReason} == {
+            "not_configured",
+            "disabled",
+            "missing_settings",
+            "init_failed",
+        }

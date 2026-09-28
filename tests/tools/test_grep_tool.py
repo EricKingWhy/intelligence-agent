@@ -173,7 +173,7 @@ class TestGrepErrors:
         """二进制文件（含不可解码字节）被跳过，不影响其他文件匹配。"""
         # 写一个合法 UTF-8 文件 + 一个纯二进制文件
         sandbox.write_text("good.py", "target_line\n")
-        binary_path = sandbox._resolve_within_workspace("bad.bin")
+        binary_path = sandbox.resolve_within_workspace("bad.bin")
         binary_path.write_bytes(b"\x80\x81\x82\xff\xfe" + b"target_line\n")
 
         result = await executor.execute(

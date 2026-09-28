@@ -6,7 +6,8 @@ SSE 与 WS 两条流式通道此前各自手搓近乎相同的 payload dict
 RuntimeEvent 信封（SDD 03 §3）的单一构建点：
 
 - build_event_payload(event, session_id)：AgentEvent → 信封 dict；
-- build_session_event_payload(event, session_id)：SessionEvent → 信封 dict。
+- build_session_event_payload(event, session_id)：SessionEvent → 信封 dict；
+- build_truncated_control(session_id, ...)：`stream/truncated` 控制帧（非运行事实）。
 
 传输层差异（SSE 包 {"data": json} / WS 直接 dict）留在各自的包装函数里。
 """
@@ -17,6 +18,7 @@ from typing import Any
 
 from agent_harness.agent import AgentEvent
 from agent_harness.session import SessionEvent
+from agent_harness.session.event import RUNTIME_EVENT_SCHEMA_VERSION
 
 
 def _envelope(event: Any, session_id: str, durability: str) -> dict[str, Any]:
@@ -64,3 +66,27 @@ def build_session_event_payload(
     durability 恒 "durable"（SessionEvent 已通过 append 词汇表校验）。
     """
     return _envelope(event, session_id, "durable")
+
+
+def build_truncated_control(
+    session_id: str, *, after_seq: int, latest_seq: int
+) -> dict[str, Any]:
+    """`stream/truncated` 控制帧（ADR-0016 §2.3）的单一构建点。
+
+    两条流式通道都必须发**同形**的这一帧：SSE `GET /stream` 与 WS `subscribe`
+    快照（#208）。各写一遍 dict 字面量正是本模块存在的原因——客户端只按
+    `type` + `data` 分派，形状一漂就静默走错分支（重连决策错 = 用户卡在半路）。
+
+    它**不是运行事实**（不变量 #4 的边界）：`seq` / `run_id` / `step_id` 恒 null、
+    `durability` 为 "transient"，客户端据此不投影它，只做"全量重建"决策。
+    `data.latest_seq` 是服务端视角的**回显**：客户端以本地重建后的真实 max seq
+    为准（见 `useSession.doTruncatedRebuild`），故它不参与游标计算。
+    """
+    return {
+        "type": "stream/truncated",
+        "data": {"after_seq": after_seq, "latest_seq": latest_seq},
+        "seq": None, "run_id": None, "step_id": None,
+        "session_id": session_id,
+        "schema_version": RUNTIME_EVENT_SCHEMA_VERSION,
+        "durability": "transient",
+    }

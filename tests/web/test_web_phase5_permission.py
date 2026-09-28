@@ -39,7 +39,7 @@ def captured_build(monkeypatch, tmp_path):
     monkeypatch.setattr(service_module, "build_runtime", _fake_build)
     # launch 同步函数（不 async）；返回带 unsubscribe 的 fake run + 真实 Subscriber
     # （队列里预先塞入 DONE sentinel，event_generator 拿到就立刻干净收尾）。
-    from agent_harness.web.runmanager import RunManager, Subscriber
+    from agent_harness.session.runmanager import RunManager, Subscriber
 
     def _fake_launch(self, session, runtime, user_input):
         sub = Subscriber()

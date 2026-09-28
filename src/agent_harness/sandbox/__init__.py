@@ -15,7 +15,8 @@ from agent_harness.sandbox.base import (
 )
 from agent_harness.sandbox.docker import DockerSandbox
 from agent_harness.sandbox.local import LocalSubprocessSandbox
-from agent_harness.sandbox.registry import WorkspaceRegistry
+from agent_harness.sandbox.paths import canonical_workspace_path
+from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
 
 __all__ = [
     "DockerSandbox",
@@ -24,5 +25,7 @@ __all__ = [
     "Sandbox",
     "ShellEnvironment",
     "ShellFamily",
+    "WorkspaceBindingError",
     "WorkspaceRegistry",
+    "canonical_workspace_path",
 ]

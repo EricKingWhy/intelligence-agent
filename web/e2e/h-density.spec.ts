@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test';
 import { routeApi } from './fixtures';
 
 test('四档切换：data-density 即时生效，刷新后持久', async ({ page }) => {
-  routeApi(page, {});
+  await routeApi(page, {});
   await page.goto('/');
 
   await page.getByRole('radio', { name: '紧凑' }).click();

@@ -30,6 +30,8 @@ KB（Milvus/Zilliz）、Web（Tavily）、Memory（Zilliz + SiliconFlow）、Lan
 
 复用 Phase 4 `tests/integration/test_kill_resume.py` + `test_bash_reconcile.py` 的真子进程 kill 模式。kill → restart 后断言：(1) SessionStore derive 出完整对话历史；(2) WorkspaceRegistry 映射恢复（sandbox 重绑）；(3) RecoveryCoordinator 跑完后所有 PENDING 操作被裁决（confirmed 或 rolled-back，无 UNKNOWN 残留）；(4) run 从恢复点继续到 terminal。编排进 E2E 链路上下文（前有 coding/edit/test failure，后有 continue/tests pass）。
 
+**Artifact stored/message unwritten（#289）**：若 Artifact 与成功 Ledger 记录已持久化、但 `artifact/externalized` 和 `tool/result` 尚未写入时进程崩溃，RecoveryCoordinator 先补一条唯一的 `artifact/externalized` UI 引用，再补原 `tool_call_id` 的 `tool/result`；Ledger 未保存的 size/MIME 保持 null，不推测元数据。重复恢复不得重复追加这两类事件。会话 UI 依赖外置引用事件挂载 Artifact Viewer。
+
 ### D5 sandbox restore：Docker probe-gated integration 车道
 
 **Docker 沙箱是重要设计环节，不推到手动验收。** 复用现有 `tests/sandbox/test_docker_sandbox.py` 的 `_docker_available() + pytest.mark.skipif` 探测模式：Docker daemon 在 → 真启动容器 → exec 改文件 → kill → restart → 验证容器重建 + WorkspaceRegistry 重绑 + 文件状态；不在 → skip 并登记原因（不算失败）。

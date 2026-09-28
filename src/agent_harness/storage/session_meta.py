@@ -69,6 +69,22 @@ class SessionMetaStore(ABC):
         """刷新 last_checkpoint_seq；不存在抛 KeyError。"""
 
     @abstractmethod
+    async def clear_delegation_parent(self, parent_session_id: str) -> int:
+        """清掉"父已被删"的**委派**子行的父链接，返回修复的行数（#172 / ADR-0029 D5）。
+
+        硬删父会话时必须做这一步：委派子会话**不阻止**父被删（D5），但子行的
+        `parent_session_id` 会继续指着一个已经不存在的会话——`build_lineage_tree`
+        会把它渲染成 `(parent missing)` 的**悬空链接**，而这条边的事实已随父日志一起
+        消失、**永远无法自愈**（`lineage._scan_edges` 只从父日志的 `delegation-started`
+        事件推导边，父日志没了就再也推不出来）。清掉父链接即让它回到"根"这个诚实状态。
+
+        **只动 `origin='delegation'` 的行**：fork 子会话在删除前已被 409 拒绝，不该
+        出现 origin='fork' 的孤儿行；不碰其它 origin 的既有语义。
+
+        幂等：没有匹配行 → 0、不抛错（重跑即自愈，ADR-0029 D3）。
+        """
+
+    @abstractmethod
     async def cleanup(self, session_id: str) -> None:
         """显式删除一条 session metadata 行（不实现自动 TTL）。
 

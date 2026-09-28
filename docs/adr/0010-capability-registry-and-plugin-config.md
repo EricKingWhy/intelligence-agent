@@ -48,3 +48,46 @@ Phase 6 已有一条竖切 Capability seam（`MemoryCapability` Protocol → `La
 ## 补充（T5/#62，2026-09-05）：装配期 factory 失败的降级语义
 
 `_BUILTIN_WIRING` 每项带该能力声明的降级档位：`wire_capabilities` 里 OPTIONAL capability 的 factory 抛错（外部依赖故障等）→ 记 warning 并跳过装配；REQUIRED_CORE → 向上抛。失败的能力不会出现在 Registry，Consumer 走 `optional()` 的 None 降级路径。两层分工：capability 代码内部仍显式抛 `init_failed`（Q5 不变），**装配边界**按 08 §7 决定降级还是失败。实证见 `tests/capability/test_phase7_gate.py::TestDegradation`。
+
+## 补充（#225，2026-09-17）：降级**原因**结构化 + 路由层按原因分流
+
+上面那条补充只解决了"降级后 Agent 还能不能跑"，没解决"**对用户怎么解释**"。装配期把
+原因写进 `logger.warning`，路由层看不到，于是任何缺席都只能给一句话。
+
+**决策**：
+
+1. `CapabilityWiring.degradations: dict[str, str]` 登记 capability 名 → `DegradeReason` 码
+   （`capability/base.py`）。四个码：`not_configured` / `disabled` / `missing_settings` / `init_failed`。
+   **只登记"非缺省"的原因**：不在 CAPABILITIES 里（= `not_configured`）是缺省状态，不进表；
+   查表者把"键不存在"读作 `not_configured`。一个 capability 因自身内容为空而缺席
+   （如 mcp 连上了但没有任何工具）也不进表——那是该能力自己的领域判据，它自己的 `errors` 是落点。
+2. 前三个码是**配置状态**（改配置能解决），`init_failed` 是**装配期出错**（改 CAPABILITIES
+   解决不了——要修的是它指向的东西，或按日志排查）。这个二分是这张表存在的全部理由：
+   把它塌成一个"未启用"，就是让用户去改一个本来就配好的开关。
+3. `/api/memories` 的 503 因此从 `detail: string` 变成 `detail: {code, message}`：
+   `code` 是 `DegradeReason` 的值（给机器），`message` 是**逐原因**写的那句话（给人）。
+   前端据 `code` 分流：「记忆未启用」（配置态，不给重试）vs 错误条 + 重试（`init_failed`）。
+   **判别不走中文匹配**——文案会改，码不会。老后端（`detail` 是纯字符串、无 `code`）按配置状态处理。
+   码是**跨端字面量**（前端 `MEMORY_INIT_FAILED`、e2e fixture 各硬编码一份），所以后端有一条
+   把值集合钉死的用例（`test_reason_codes_are_a_closed_set`）：改名会让它先红，逼人去同步前端。
+4. 前端**不再自己附会**一句"这是配置状态而非故障"：那是它对后端状态的断言，而真实原因它看不到
+   （用户照这句去改 CAPABILITIES 永远修不好）。缺席原因由后端逐原因说清，前端只铺原文。
+
+**边界**：
+
+- 这张表**不覆盖**所有缺席：`knowledge` 的"没配 collection"、`websearch` 的"没配 key"、
+  `mcp` 的"连上了但零工具"里，前两者进表（`missing_settings`），最后一个**刻意不进**
+  （见决策 1）。要判断"某能力为什么不在"，先看这张表，再看该能力自己的 errors。
+- `DegradeReason` 与 `CapabilityError.code` 是两套词汇：前者描述**装配结果**（为什么没装上），
+  后者是**错误分类**（哪个环节错了），两者都可能取到字符串 `init_failed`，不要据此互推。
+  语义其实**基本相反**：`CapabilityError(code="init_failed")` 出现在配置/契约错误处且
+  **响亮失败不降级**（`capability/config.py`、`factories.py`、`wiring.py` 的显式 `raise`），
+  `DegradeReason.INIT_FAILED` 是外部依赖故障**已降级跳过**。
+- 这条取代了 MEM5 时的旧口径「503 = 未装配（降级态）；5xx = 读取失败」——503 内部现在有
+  一个"真故障"子类（`init_failed`）。旧口径的活文档（`docs/integration/FRONTEND_MEM5_INTEGRATION_PROMPT.md`）
+  就地加了一行指针指向本节；历史批次/巡检记录不改写（append-only）。
+
+**实证**：`tests/capability/test_phase7_gate.py::TestDegradation`（四种缺席各留各的码，含真 factory
+的 `missing_settings` 与"存的是码不是枚举成员"）、`tests/web/test_memory_api.py`（两条 503 的码与
+文案都不同 + 文案表**覆盖整个枚举**）、`web/src/lib/api.test.ts` + `web/e2e/s-memories.spec.ts`
+（前端按码分流；`init_failed` 那条真的点一次重试，锁"失败不被吞"）。

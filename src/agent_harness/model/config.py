@@ -41,24 +41,17 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         # DashScope 兼容模式支持 function calling。
         "supports_tools": True,
     },
-    # 腾讯 Coding Plan（OpenAI 兼容）。base_url 不含 /chat/completions，
-    # SDK 会自动拼接；无默认模型，MODEL_NAME 必填。
-    "tencent": {
-        "model_base_url": "https://chatapi.weixin.qq.com/openai/v1",
-        "model_name": "",
+    # Xiaomi MiMo（OpenAI Chat Completions 兼容）；官方列出的默认通用对话模型。
+    "mimo": {
+        "model_base_url": "https://api.xiaomimimo.com/v1",
+        "model_name": "mimo-v2.6-flash",
+        # 官方模型规格明确支持 function tool calling。
+        "supports_tools": True,
     },
     # SenseAudio（OpenAI 兼容）。无默认模型，MODEL_NAME 必填。
     "senseaudio": {
         "model_base_url": "https://api.senseaudio.cn/v1",
         "model_name": "",
-    },
-    # 智谱 BigModel（OpenAI 兼容）。无默认模型，MODEL_NAME 必填
-    # （如 glm-4.5-air；思考模型，流式 reasoning 增量连续，不触发 idle 看门狗）。
-    "zhipu": {
-        "model_base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model_name": "",
-        # GLM-4 系列支持 function calling。
-        "supports_tools": True,
     },
 }
 
@@ -307,6 +300,64 @@ class ModelConfig:
         # fallback 链语义不动（ADR-0014）：catalog 选择只替换 primary。
         resolved.fallback = cls._fallback_from(settings)
         return resolved
+
+    @classmethod
+    def from_custom_provider(cls, settings: "Settings", provider_id: str,
+                             model_id: str, store: Any) -> "ModelConfig":
+        """按自定义供应商解析会话级模型（#203 / ADR-0032 D8）。
+
+        解析入口收敛（D8）：与 from_catalog 同层——`resolve_provider_target`
+        未命中抛 ConfigError（含 provider id，被删 provider **不静默 fallback**，
+        D9/T11）。凭据从凭据管理器取（store.credentials）；**无凭据**也是确定性
+        配置错误（快速失败，不推到首次 ainvoke）。fallback 链语义不动（ADR-0014）。
+        """
+        from agent_harness.model.provider_store import resolve_provider_target
+
+        target = resolve_provider_target(
+            store, settings_provider=provider_id, model_id=model_id,
+        )
+        if target is None:
+            raise ConfigError(
+                f"供应商 {provider_id!r} 已被删除或不包含模型 {model_id!r}，"
+                "请在模型选择器里改选模型"
+            )
+        api_key = store.credentials.get(provider_id)
+        if not api_key:
+            raise ConfigError(f"供应商 {provider_id!r} 未配置 API Key")
+        resolved = cls(
+            provider=provider_id,
+            model_name=model_id,
+            api_key=api_key,
+            base_url=target["base_url"],
+            temperature=settings.temperature,
+        )
+        # fallback 链语义不动（ADR-0014）：自定义供应商只替换 primary。
+        resolved.fallback = cls._fallback_from(settings)
+        return resolved
+
+    @classmethod
+    def resolve_selection(
+        cls, settings: "Settings", name: str, store: Any | None = None,
+    ) -> "ModelConfig":
+        """会话级模型选择的**统一解析点**（catalog 优先 + 自定义供应商 fallback）。
+
+        `name` 带冒号（`<provider>:<model_id>`，/api/models 自定义条目的命名空间，
+        与 catalog 名不重叠）→ 走 from_custom_provider（store 必须在场，无凭据/被删
+        provider 是确定性配置错误）；否则按 catalog 名解析（from_catalog）。
+
+        统一这一个点的理由（终审 P1）：/api/models 广告自定义条目并承诺"选中后经
+        model 字段回传、解析走自定义分支"，而 create/resume/model 三道校验闸此前
+        只认 from_catalog——UI 能选、一提交就 422（feature promise 断裂）。三道闸
+        与 build_runtime 全部引用本函数后，广告的列表与真实可解析的集合同一。
+        """
+        if ":" in name:
+            if store is None:
+                raise ConfigError(
+                    f"自定义供应商模型 {name!r} 需要供应商存储，当前环境不可用"
+                )
+            provider_id, _, model_id = name.partition(":")
+            return cls.from_custom_provider(settings, provider_id, model_id, store)
+        return cls.from_catalog(settings, name)
 
     @classmethod
     def _single_from(

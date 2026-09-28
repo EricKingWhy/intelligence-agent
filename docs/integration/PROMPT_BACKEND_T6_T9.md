@@ -1,5 +1,7 @@
 # 后端会话提示词：Phase Multiturn T6-T9
 
+> **历史任务提示词**：本文件记录已过期的 T6-T9 上下文和旧工具调用方式；若有相关后续工作，当前流程以 `AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 为准。
+
 > 复制以下内容粘贴到 `D:\intelligence-agent-backend` 会话中。
 
 ---

@@ -132,7 +132,7 @@ def test_smoke_builds_runtime_with_fallback_config(tmp_path: Path, monkeypatch):
         "model_api_key": SecretStr("sk-primary"),
         "model_base_url": "https://primary.example.com",
         "temperature": 0.2,
-        "fallback_model_provider": "zhipu", "fallback_model_name": "fallback-model",
+        "fallback_model_provider": "mimo", "fallback_model_name": "fallback-model",
         "fallback_model_api_key": SecretStr("sk-fallback"),
         "fallback_model_base_url": "https://fallback.example.com",
         "langfuse_public_key": SecretStr(""), "langfuse_secret_key": SecretStr(""),

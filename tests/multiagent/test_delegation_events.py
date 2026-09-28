@@ -227,5 +227,5 @@ class TestChildAgentIdAttribution:
         factory = AgentFactory(model=ScriptedModel([AIMessage(content="x")]))
         spec = next(iter(__import__("agent_harness.agent.profiles",
                                     fromlist=["BUILTIN_PROFILES"]).BUILTIN_PROFILES.values()))
-        runtime = factory.create(spec, source_registry=source)
+        runtime = factory.create(spec, source_registry=source, grantable=frozenset())
         assert runtime._agent_id == spec.name

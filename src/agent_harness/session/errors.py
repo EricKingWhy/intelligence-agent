@@ -30,6 +30,14 @@ class ActiveRunConflict(SessionServiceError):
     """session 已有在途 run，不允许并发。"""
 
 
+class SessionHasChildren(SessionServiceError):
+    """会话是别的会话的 fork 父，不能删（ADR-0029 D4）。
+
+    刻意**不级联**：静默删掉用户没选中的子会话不可接受；也刻意**不静默 orphan**：
+    子会话会带着一个悬空来源链接（lineage 显示 "(parent missing)"）。所以拒绝，
+    并把子会话数量写进 detail，由用户先处理子会话。"""
+
+
 class ApprovalQueueMissing(SessionServiceError):
     """session 没有交互式审批队列（permission_mode 非交互，或 run 已结束）。"""
 
@@ -40,6 +48,15 @@ class ApprovalRequestMissing(SessionServiceError):
 
 class ApprovalAlreadyResolved(SessionServiceError):
     """approval_id 已被决策（防重复）。"""
+
+
+class PendingApprovalConflict(SessionServiceError):
+    """会话有**未裁决**的审批，当前动作按此状态不允许（F18-A #282；ADR-0041 §4.1）。
+
+    判据与 ``delete_session`` 的「④ 挂起审批」相同（会话级待审批队列非空）。**刻意不
+    复用 ``ActiveRunConflict``**：那条是「有在途 run 就不许并发操作」；本条只针对「有
+    **待裁决会议**」——在途但无待审批时改档是允许的（下一轮生效，不打断本轮）。
+    """
 
 
 class InvalidDecision(SessionServiceError):
@@ -71,12 +88,71 @@ class WorkspaceNameInvalid(SessionServiceError):
     """workspace 名字不合法（路径逃逸风险）。"""
 
 
+class WorkspacePathInvalid(WorkspaceNameInvalid):
+    """`cwd` 路径不合法（ADR-0027 / #169 AC1）：非绝对路径 / 不存在 / 不是目录。
+
+    继承 `WorkspaceNameInvalid`：HTTP 层同一 422 语义（detail 文案区分），handler 的
+    `except WorkspaceNameInvalid` 天然覆盖。**不能**只靠父类——领域错误表是精确类型
+    索引，子类必须自己登记（`web/domain_errors.py`）。
+    """
+
+
+class WorkspaceNotFound(SessionServiceError):
+    """workspace_id 不存在（项目未注册 / 装配里没有 workspace 索引）。
+
+    WS-3 / #153：按项目列会话时，未注册的项目**不能**伪装成"空列表"——那是在谎报
+    "这个项目没有会话"（不变量 #21 同族：缺席不造假）。由
+    `SessionService.list_sessions` 把 workspace 层的 `UnknownWorkspace` 翻成本异常
+    （同一套"下层异常翻译成本层词汇"的既有做法，见 `ForkBoundaryError` →
+    `InvalidForkBoundary`）。
+    """
+
+
+class WorkspaceBindingConflict(SessionServiceError):
+    """会话的 durable cwd 与 WorkspaceRegistry 登记的目录不一致（#266）。
+
+    两个事实源（`session/started.cwd` 与沙箱映射 / 进程内 cache）对同一会话给出不同
+    目录时**类型化失败**：不自动覆盖映射、不静默选任一侧——ADR-0027 之后
+    `workspace_root` 可能就是用户的真实仓库，选错一侧等于让工具在用户没选过的目录里
+    执行。续聊入口在**任何** Sandbox 实例化之前对账，所以失败时不会 mkdir、不会起 run。
+
+    fork 子会话不在对账范围内（它的 cwd 锚记的是项目归属、映射是 copy-on-fork 的副本
+    目录，按设计就不同，ADR-0017 决策 5）——那是续聊入口的判定，不是本异常的形状。
+    """
+
+
+class WorkspaceMoveInvalid(SessionServiceError):
+    """请求的会话↔项目移动在当前状态下不成立（WS-4 / #154，AC7 的对应物）。
+
+    三种来源，都是**状态冲突**而不是"参数写错"，所以是 409 而非 422：
+
+    1. 会话 header 没有 cwd 锚（历史遗留）——无法判定它属于哪个目录，写进账本会留下
+       "账本有 id 但会话无 cwd"的中间态；
+    2. 会话的 cwd 指向的项目 ≠ 请求里的项目——项目归属由**目录**决定（ADR-0025 D1），
+       不能凭调用方指定；
+    3. 重排的会话或锚点不在该项目的可见成员里——账本序只在项目内定义。
+
+    与 `WorkspaceNameInvalid`（名字形态非法 → 422）刻意分开：那条是"请求本身不合法"，
+    这条是"请求合法但当前状态不允许"。
+    """
+
+
 class QueueItemNotFound(SessionServiceError):
     """排队消息不存在 / 已消费 / 已取消。"""
 
 
 class SteerTargetNotFound(SessionServiceError):
     """steer 目标 run 不存在（无在途 run）。"""
+
+
+class SupersedeTargetInvalid(SessionServiceError):
+    """supersede 目标不合法（ADR-0030 §4.4 第 1 步）。
+
+    五种情形共用一个 409：目标不存在 / 不是 user/message / 是注入消息
+    （``injected_by``，编辑它等于篡改 runtime 文案）/ 已被取代过 / 不是最新一条
+    用户消息。刻意都报 409 而不是把"目标不对"谎报成 404 会话不存在：
+    会话是存在的，是这次编辑按当前状态不允许（D8：只允许最新一条，防误删长历史）。
+    """
 
 
 class UnknownModel(SessionServiceError):

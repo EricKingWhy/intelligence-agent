@@ -48,8 +48,10 @@
 | `reasoning/interrupted` | ✅ | `{}` | 块异常收（显式取消 / 孤儿回收 / 模型失败）；已落盘 delta 保留部分内容（16.4）。 |
 | `tool/output_delta` | ✅ | `{tool_call_id, channel:"stdout"\|"stderr", delta}` | 工具输出增量（合帧、channel 保真）。每 channel 每 tool_call 上限 64KB，超出静默停发——`tool/result` 仍是完整真相（截断/artifact 语义不变），前端对已流式渲染的 tool 可用 result 的元数据（exit_code 等）而不重复铺 stdout/stderr 文本。 |
 | `tool/call` | ✅（时序变更） | 不变 | **现在在执行前落盘**；其后才可能跟 output_delta；执行后 `tool/result` 终态。 |
-| `model/started` | ❌（stream-only） | `{step}` | 活跃信号，seq=null，重放不出现（首个 delta 隐含开始）。 |
+| `tool/result` | ✅（载荷**新增可选键**，`#314`） | `{tool_call_id, content}` + 可选 `budget_delta: {tool_name, tool_calls, tool_attempts}` | run 预算的工具增量来源：`tool_calls` 记被**接纳**的逻辑调用（0 或 1），`tool_attempts` 记这次调用的真实执行尝试数（含 retry）。**准入前被拒**的调用记**显式 0**（拒绝理由在 `content` 的 `error_code` 里，可审计）；由悬空修复合成的结果**不带这个键**（不是接纳点产物）。两个 counter **不是别名**，客户端不得互相顶替；run 账本按这个键**求和**（0 = 无贡献）。完整读法见 `docs/adr/0045-tool-call-accounting-and-per-tool-quotas.md`。 |
+| `model/started` | ❌（stream-only） | `{step}` | 活跃信号，seq=null，重放不出现（首个 delta 隐含开始）。**请求侧模型名不在这里**（stream-only = 刷新后什么都不剩），见下一条 `run/started`。 |
 | `model/delta` | ❌（legacy 不发射） | — | 词汇保留，运行时不再产生。 |
+| `run/started` | ✅ | `{turn_index, agent_profile, model?}` | `model` 是 **#226 的加法**：本轮**请求侧**模型标识（装配自 `ModelConfig.model_name`，即进请求体的那个 `model` 值）。**它是配置侧事实**——本轮若一次模型调用都没发生，它表示"打算用谁"、不代表已发出去（"实际用过谁"只有 `model/completed` 的回显能证明）。**缺键 = 旧版后端或调用方未给**（读作"未知"，不得拿上一轮的值顶替）。它与 `model/completed.data.model`（provider **回显**）是**两个独立事实**，任何一侧缺失都不许用另一侧冒充——口径见 `docs/adr/0034-request-side-model-identity.md`。 |
 
 `source` 语义（02 §7.3/§15）：本轮生产者只有 `source:"model"`（provider 思考）；`"agent"` 词汇预留（agent 进度叙述）。emitted 即 user-visible，`visibility=internal` 的内容在本协议不产生事件（隐私硬边界在发射侧成立）。
 
@@ -71,6 +73,84 @@
   ```
   客户端应走 `GET /events` 全量重建，再带 `after_seq=latest_seq` 重连。
 - 推荐重连时机：连接异常关闭（非用户主动 abort）、seq gap 检测、页面恢复前台。
+
+### GET /api/ws（**实时流主通道**，#205 起）— 多路复用 WebSocket
+
+为什么换主通道：部署交付层（CloudStudio Gateway / EdgeOne）会把**整个 HTTP 响应**
+攒到流结束才下发（实测 `POST /api/sessions` 响应头 44.2s、`GET /stream` 41.6s 才到
+≈ run 全长），SSE 通道上的打字机效果不可能存在。WS 是帧协议，攒不住（同一链路实测
+`text/delta` 1.65s→30.35s 逐帧到达）。前端实现见 `web/src/lib/wsStream.ts`。
+
+上行（JSON）：
+```json
+{"type":"subscribe","session_id":"...","after_seq":N}  // 订阅（游标可选，见下）
+{"type":"pong"}                            // 应答 server_ping（任意上行都算活性）
+{"type":"send_message","session_id":"...","content":"...","mode":"queue"}
+{"type":"steer","session_id":"...","content":"..."}
+{"type":"cancel","session_id":"..."}
+```
+
+下行（JSON）：
+```json
+{"type":"snapshot","session_id":"...","events":[...],"replay_upto":N,"has_active_run":bool}
+{"type":"event","session_id":"...","event":{...}}   // 增量（信封同 REST 事件）
+{"type":"done","session_id":"..."}                  // run 收口：relay task 结束
+{"type":"error","message":"..."}                    // 订阅未能建立（如 session 非法/快照失败）
+{"type":"server_ping"}                              // 应用层心跳，每 2s；30s 无上行则服务端关闭
+{"type":"launched"|"queued"|"steered"|"cancelled"}  // send_message/cancel 的回执
+```
+
+与 SSE 的**语义差异**（前端必须知道的三条）：
+1. **订阅的游标可选但强烈建议带**（`after_seq`，#208）：带上 → 服务端只发
+   `after_seq < seq ≤ replay_upto` 的那一截，backlog 超阈值时改发
+   `stream/truncated`（判据与常量与 SSE `GET /stream` **同一份**）；不带 / 非法
+   → 当 `-1`（从头发），保护照常生效（超大会话会直接被导向全量重建，而不是塞
+   一整段日志进一个帧）。
+   **不带游标的兼容性边界（如实说明）**：会话总事件数 ≤ 阈值时，不带游标拿到的
+   就是全量快照，与 #208 之前**完全一致**；一旦超过阈值，服务端不再送 backlog，
+   只送那一帧 `stream/truncated` —— 此时"从不带游标"的客户端只能每次都被导向
+   全量重建（拿不到增量），若它重建后**仍**不带游标重订阅，就会在
+   重建 → 截断 → 重建之间打转。本仓唯一的 WS 客户端（`web/src/lib/wsStream.ts`）
+   必定带游标，且这条被 `wsStream.test.ts` 与 `stream-fallback.spec.ts` 双侧锁住；
+   外部自建客户端必须实现"订阅带游标 + 重建后带新游标回来"这两步。
+   客户端**仍**按 seq 幂等去重（服务端窗口与客户端游标可能因一次丢帧而错开）。
+2. **`has_active_run: false` ⇒ 这条连接不会再有帧**：后端此时不起 relay task，**永远
+   不会发 `done`**；客户端要自己收流（前端 `wsStream` 读到该字段即 `settle()`）。
+   发 `stream/truncated` 时同样是 `false`（那一帧之后客户端会主动断开重连）。
+   ⚠ 该字段**不**表示"快照是全量"——超限时快照恰恰不是全量（只有一个控制帧）。
+   两个含义在 `false` 上重载是有意的：客户端据此收流，再按控制帧去重建。
+3. **`error` 帧没有状态码**：只有一句 message（`snapshot failed` / id 非法），
+   与 HTTP 的 404/422 不同形。要分辨「会话已不存在」，客户端只能另做存在性判据
+   （前端用 `GET /api/sessions?include_archived=true` 的成员判定）。
+
+backlog 保护（#208，已落地）：两条通道用**同一条**判据
+`latest_seq - after_seq > STREAM_REPLAY_MAX_EVENTS (1000)`，超限时发同一形状的
+控制帧（`serialization.build_truncated_control`，SSE 与 WS 的唯一构建点）。
+`latest_seq` = **持久化**最大 seq（SSE 的 `handle.latest_seq`、WS 的 `events[-1].seq`
+——两条通道同一个量，因此控制帧逐字相同）：
+
+```json
+{"type":"stream/truncated","data":{"after_seq":N,"latest_seq":M},
+ "seq":null,"run_id":null,"step_id":null,"durability":"transient"}
+```
+
+**别把它与 `replay_upto` 当同一个数**：`replay_upto` 是重放窗口的上界 = 在途 run 的
+`last_enqueued_seq`（含已入队未落盘的几条，先补上才不丢）；run 不在途时两条通道都回落
+成 `latest_seq`。即**判据用持久面的 `latest_seq`，窗口用入队面的 `replay_upto`**——
+两者稳态相等，listener 落后时 `replay_upto` 领先（曾因此让两条通道对同一会话给出
+相反裁决，2026-09-17 审查修正）。
+
+WS 通道上这一帧**装在快照信封里**（不是独立帧，照 SSE 的单帧形状写会漏收）：
+
+```json
+{"type":"snapshot","session_id":"...","events":[<上面的控制帧>],
+ "replay_upto":N,"has_active_run":false}
+```
+
+它不是运行事实（无 seq、transient）⇒ 客户端不投影它，只走
+`GET /events` 全量重建 + 以重建后的真实 max seq 重新订阅（前端
+`useSession.doTruncatedRebuild`，`web/e2e/stream-fallback.spec.ts` 锁着）。
+重建后游标已在最新处 ⇒ 不会二次触发。
 
 ### POST /api/sessions/{id}/cancel（新增，C3）
 - 在途 → `200 {"status":"cancelling"}`；随后 `run/failed` `data.reason="cancelled"` 落盘并经流广播；
@@ -97,13 +177,56 @@
 
 注意：前端 prompt 所述 `qwen3.8-max-0902` 在 senseaudio 账户上**不存在**（网关 400「模型未找到」），真实可用清单以上表与 `AGENT_MODELS` 为准。
 
+### GET /api/sessions/{id}/artifacts/{aid}（#185；**#227 起 503 带机读码**）
+
+| 状态 | 含义 |
+|---|---|
+| 422 | `session_id` / `artifact_id` 形态非法，或 `start_line < 1`——客户端 bug，不是冲突 |
+| 404 | 会话不存在，**或**该 artifact 不在这个会话的命名空间里。两者**刻意不区分**（`artifact_id` 是内容哈希、跨会话可重复，区分会让归属变成可探测信息） |
+| 503 | `{"detail": {"code": "artifact_storage_unavailable", "message": "…"}}`——本部署**没有可读的 artifact 存储**（`artifact_dir` 置空 / 对象存储半配置 / 可选依赖缺失 / 路径不可用，四种原因**如实收敛成一句**，不细分） |
+| 200 | 切片（`ArtifactSlice`，见 #185） |
+
+**前端判别规则（#227，与 `/api/memories` 的 #225 同一套）**：**不按 503 猜原因**，只认 `code`——
+
+- `code == "artifact_storage_unavailable"` ⇒「本部署没有可读取的 artifact 存储」（部署配置问题，不是产物丢了）；
+- **无码**（旧版后端）⇒ 同上（那时此端点的 503 只有这一个原因）；
+- **别的码**（后端新增了第二个 503 原因）⇒ **通用失败态**，把码与后端 `message` 一起显示（码渲染在 `.artifact-content-code`）。**猜成"没配存储"是错法**：用户会照着重启/改配置，而真因（例如存储鉴权失败）一点没变；
+- **对象形状却没给合法码**（畸形体）⇒ 同样走通用失败态：**"码缺席"不等于"旧版后端"**。
+
+码的字面量纪律同 #225：**值集合可增，改名必须两侧一起动**——本码有**机械闸门**：`tests/web/test_error_code_contract.py` 直接读 `web/src/lib/api.ts` 的字面量与后端常量 `web/artifacts.py::ARTIFACT_STORAGE_UNAVAILABLE` 对账，单边改名必红（#225 的四个码还没有这道闸门，见 ADR-0035 §4）。机制全文与"哪些状态码推断按据不改"的逐处判定见 `docs/adr/0035-machine-readable-error-codes-for-503-families.md`。
+
 ## 4. run 终态语义（02 §17，不并入 failed）
 
 `run/failed` 的 `data.reason`：
 - `"cancelled"`：显式 POST /cancel（或旧式消费者关闭）；
 - `"orphaned"`：孤儿回收（零订阅者连续 300s，`RUN_DISCONNECT_GRACE_SECONDS` 可调）；
-- 缺省：模型/执行器异常。
+- `"identical_tool_failure_loop"`：同错熔断硬保险丝（ADR-0014）；
+- `"provider_content_moderation"`：provider 内容审查拒绝输入（如阿里云 `data_inspection_failed`，仅模型调用在途时分类）；与 `data.message` 成对出现（固定可读文案），provider 回显原文只进服务端日志；
+- ~~`"max_steps_exceeded"`~~：**运行期已不可达**（`#312` 起本地保险丝撞线不再失败，改落**非终态**
+  `run/paused`，见本节末）；只有 `#312` 之前写下的历史会话载荷里还会出现，读到按"失败"渲染即可；
+- **其余未分类失败**：`reason` = **异常类型名**（`RateLimitError` / `ProxyError` / `ConnectionError` …），`data.message` = 固定兜底句（`运行失败（<类型名>），未分类异常；完整原始信息见后端日志`）。
+
+⚠ **`reason` 是开集，不是枚举**（#222 起）：运行期路径上它**总有值**，只对上面
+`"cancelled"` / `"orphaned"` 两个字面量做等值判断，其余一律当不透明字符串渲染/透传，
+不要写白名单、正则或长度假设。`data.message` 不保证是中文（上下文超限路径给的是项目
+内部英文串）。取值域与三态呈现的完整口径见 `docs/adr/0033-run-failure-attribution-surface.md`。
 `run/completed` 语义不变。**断连永远不会出现在终态原因里**。
+（上下文超限另有独立终态 `reason=context_window_exceeded` + `data.message`，见 02 §17。）
+
+**非终态：`run/paused` / `run/resumed`（`#312`）**：预算到顶时本次执行落一条 `run/paused` 收口——
+它是**非终态**（没有悬空工具调用，逻辑 run 还没结束；`run/resumed` 带 `expected_version` 在**同一个
+`run_id`** 上续跑）。前端**不得**把 `run/paused` 当终态渲染（`RUN_TERMINAL_TYPES` 刻意不含它），
+也不要因此认定 run 死了：暂停态的可见事实（consumed / limits / continuation / version）由
+`run/paused.data` 投影重建，刷新与重放都得到同一份。事件枚举见 `docs/EVENT_VOCABULARY.md`，
+载荷形状与恢复判据见 `03 §3.4` / `11 §6.1`。
+
+**`#314` 起 `trigger_dimension` 可以是 per-tool 配额**：取值形态 `run.tool_call_limits.<工具名>`
+（每个配了配额的工具名各占一维，按名排序判定）。这时 `data.consumed` 带两张分维表
+（`tool_calls_by_tool` / `tool_attempts_by_tool`，另有它们的和 `tool_calls` / `tool_attempts`），
+`data.limits.run` 带 `tool_call_limits`（工具名 → 绝对 ceiling）；**表缺席（`null`）与表为空（`{}`）
+是两件事**（未知 ≠ 0），客户端别把它们渲染成同一个数。恢复请求点名的是**那个工具**
+（`budget.run.tool_call_limits: {"<工具名>": N}`，**逐键**合并：未点名的工具配额沿用、删不掉），
+而不是某个 `max_*` 字段；CLI 侧对应的开关是 `--run-tool-limit NAME=N`。
 
 ## 5. 前端迁移清单（建议 ticket 顺序）
 

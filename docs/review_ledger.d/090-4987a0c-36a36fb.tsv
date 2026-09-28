@@ -1,0 +1,1 @@
+2026-09-21	批 P1-B6 两轴审查 findings 处置（Standards 轴 P3「文件尾多余空行」）：`git diff --check 09bae51..HEAD` 实测 exit 2（`323: new blank line at EOF.`），违反 AGENTS.md §14.10；纯空白修复（1 行删除、不动测试语义，专项 10 passed）。本行为该 fix 提交的归属	4987a0c..36a36fb

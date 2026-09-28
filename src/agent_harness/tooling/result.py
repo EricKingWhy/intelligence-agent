@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -37,6 +37,26 @@ class ErrorCode(str, Enum):
     PERMISSION_DENIED = "PERMISSION_DENIED"  # 权限拒绝 → 不重试
     TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"  # 工具内部异常 → 默认不重试
     CANCELLED = "CANCELLED"  # 批次前序失败或外部取消 → 不重试
+    # #314：本 run 对该工具的配额已用尽 → 不重试（重试是该工具的又一次调用，
+    # 同样会被拒）。这条码是"准入**前**被拒"的可审计理由（04 §9.1），
+    # 因此它对应的结果不消耗配额（`tool/result.data.budget_delta` 记 0）。
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    # `#315`：本 run 的绝对 deadline 已到 → 不重试（重试落在同一条到点的路径上）。
+    # 与 BUDGET_EXHAUSTED 同族：也是"准入**前**被拒"的可审计理由（`04 §9.1` 的
+    # deadline 接纳边界），因此同样不消耗配额（`budget_delta` 记 0）。区别是它
+    # **不**靠抬高 ceiling 解开——deadline 是绝对时刻，run 在下一个稳定边界按
+    # `reason=deadline` 暂停，恢复要点名一个**未来**的时刻。
+    # 已在途的调用**不**产生这条码：它们按各自的 timeout / cancel / Ledger 语义收尾。
+    DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
+
+
+class ToolRuntimeSignal(BaseModel):
+    """Typed control signal consumed by AgentRuntime, never exposed to the model."""
+
+    level: Literal["none", "soft", "hard"]
+    tool_name: str
+    fingerprint: str
+    consecutive_failures: int
 
 
 class ToolResult(BaseModel):
@@ -65,6 +85,9 @@ class ToolResult(BaseModel):
     retryable: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
     artifact_ref: str | None = None
+    # Runtime-only control signal. It is consumed after tool results are collected
+    # and deliberately omitted from model output and Operation Ledger JSON.
+    runtime_signal: ToolRuntimeSignal | None = Field(default=None, exclude=True)
     # 工具产生的延迟会话事件 (event_type, data)：executor 在 tool/call 之后
     # 落盘（delegation 事件同款通道，overflow 是既有生产者）。exclude=True：
     # 这是 durable 事件通道，不是模型可见内容——model_dump_json（回灌给模型

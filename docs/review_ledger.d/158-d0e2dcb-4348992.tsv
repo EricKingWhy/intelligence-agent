@@ -1,0 +1,1 @@
+2026-09-25	#300 MEM-V2-4: independent Spec and Standards reviews of the full branch diff; both PASS with no P0-P2. Reviewed whole-message consent veto, payload source binding and polarity, recall parsing, capability/API wiring, and ADR. Targeted parser/validator checks and static review completed.	d0e2dcb3c45bc56c305732ca7dbbe24dca8fffb7..43489926390fa637346cd76f459da054761963c2

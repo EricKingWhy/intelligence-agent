@@ -28,8 +28,8 @@ def _settings(agent_models: str = "", **kwargs) -> Settings:
 
 _VALID = json.dumps([
     {"name": "qwen-max", "provider": "senseaudio", "model_name": "qwen3.8-max-0902"},
-    {"name": "glm-air", "provider": "zhipu", "model_name": "glm-4.5-air",
-     "api_key": "sk-glm", "temperature": 0.5},
+    {"name": "mimo-flash", "provider": "mimo", "model_name": "mimo-v2.6-flash",
+     "api_key": "sk-mimo", "temperature": 0.5},
 ])
 
 
@@ -39,8 +39,10 @@ class TestParseModelCatalog:
 
     def test_valid_catalog_parsed(self):
         entries = parse_model_catalog(_settings(_VALID))
-        assert [e.name for e in entries] == ["qwen-max", "glm-air"]
+        assert [e.name for e in entries] == ["qwen-max", "mimo-flash"]
         assert entries[0].model_name == "qwen3.8-max-0902"
+        assert entries[1].provider == "mimo"
+        assert entries[1].model_name == "mimo-v2.6-flash"
 
     def test_invalid_json_loud_error(self):
         with pytest.raises(ConfigError, match="AGENT_MODELS"):
@@ -54,6 +56,12 @@ class TestParseModelCatalog:
         with pytest.raises(ConfigError, match="provider"):
             parse_model_catalog(_settings(json.dumps([
                 {"name": "x", "provider": "mystery", "model_name": "m"}])))
+
+    @pytest.mark.parametrize("provider", ["tencent", "zhipu"])
+    def test_replaced_provider_rejected(self, provider):
+        with pytest.raises(ConfigError, match=provider):
+            parse_model_catalog(_settings(json.dumps([
+                {"name": "x", "provider": provider, "model_name": "m"}])))
 
     def test_duplicate_name_rejected(self):
         with pytest.raises(ConfigError, match="重名|duplicate|name"):
@@ -76,10 +84,12 @@ class TestResolveModelConfig:
         assert config.get_secret_value() == "sk-default"
         assert config.temperature == 0.2  # settings 默认
 
-        config2 = ModelConfig.from_catalog(_settings(_VALID), "glm-air")
-        assert config2.get_secret_value() == "sk-glm"
+        config2 = ModelConfig.from_catalog(_settings(_VALID), "mimo-flash")
+        assert config2.get_secret_value() == "sk-mimo"
         assert config2.temperature == 0.5
-        assert config2.base_url == "https://open.bigmodel.cn/api/paas/v4"
+        assert config2.provider == "mimo"
+        assert config2.model_name == "mimo-v2.6-flash"
+        assert config2.base_url == "https://api.xiaomimimo.com/v1"
 
     def test_default_chain_unaffected(self):
         """不选模型 = 默认链，行为与旧版逐字段一致。"""
@@ -96,14 +106,14 @@ class TestFindCatalogEntry:
         assert entry is not None and entry.name == "qwen-max"
 
     def test_match_by_upstream_model_name(self):
-        entry = find_catalog_entry(_settings(_VALID), "zhipu", "glm-4.5-air")
-        assert entry is not None and entry.name == "glm-air"
+        entry = find_catalog_entry(_settings(_VALID), "mimo", "mimo-v2.6-flash")
+        assert entry is not None and entry.name == "mimo-flash"
 
     def test_provider_mismatch_returns_none(self):
         assert find_catalog_entry(_settings(_VALID), "deepseek", "qwen-max") is None
 
     def test_unknown_returns_none(self):
-        assert find_catalog_entry(_settings(_VALID), "zhipu", "nope") is None
+        assert find_catalog_entry(_settings(_VALID), "mimo", "nope") is None
 
     def test_name_match_wins_over_model_name_collision(self):
         """条目 A 的 name 撞上条目 B 的 model_name 时，精确 name 匹配优先。"""

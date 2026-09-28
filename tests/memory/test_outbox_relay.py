@@ -208,6 +208,62 @@ async def test_acknowledge_failure_is_attributed_to_ack_stage(tmp_path, caplog):
 
 
 @pytest.mark.asyncio
+async def test_delete_change_calls_vectors_delete_not_upsert(tmp_path):
+    """AC3 从 relay 面看：`DELETE` 变更必须调 `vectors.delete`，不得被当成 upsert
+    （upsert 会把删掉的内容**写回**索引——语义上"忘不掉"的最坏形态）。"""
+    store = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await store.initialize()
+    alice = IdentityContext("acme", "alice", ["user"])
+    await store.store(MemoryEntry(id="gone", content="secret", scope=MemoryScope.USER,
+                                  created_at="2026-09-04"), alice)
+
+    class Counting(FakeVectorStore):
+        deletes = 0
+
+        async def delete(self, *args):
+            Counting.deletes += 1
+            await super().delete(*args)
+
+    vector = Counting()
+    relay = OutboxRelay(store, vector)
+    assert await relay.flush() == 1
+    await store.delete("gone", alice)
+    assert await relay.flush() == 1
+    assert Counting.deletes == 1
+    assert await vector.search("secret", alice, MemoryScope.USER, 5) == []
+    assert await vector.get("gone", alice, MemoryScope.USER) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_change_restores_session_binding_for_the_index(tmp_path):
+    """SESSION 绑定的删除同样要把 session 上下文还原给向量层——否则真实 adapter
+    的 namespace filter 会拿错 session（删不掉 / 删错 namespace）。"""
+    store = SqliteMemoryRecordStore(tmp_path / "memory.db")
+    await store.initialize()
+    alice = IdentityContext("acme", "alice", ["session"])
+    token = memory_session_var.set("one-session")
+    try:
+        await store.store(MemoryEntry(id="s1", content="local", scope=MemoryScope.SESSION,
+                                      created_at="2026-09-04"), alice)
+        relay = OutboxRelay(store, FakeVectorStore())
+        assert await relay.flush() == 1
+        await store.delete("s1", alice)
+    finally:
+        memory_session_var.reset(token)
+
+    assert memory_session_var.get() is None
+    vector = FakeVectorStore()
+    relay = OutboxRelay(store, vector)
+    assert await relay.flush() == 1
+    assert memory_session_var.get() is None  # relay 用完即复位
+    token = memory_session_var.set("one-session")
+    try:
+        assert await vector.get("s1", alice, MemoryScope.SESSION) is None
+    finally:
+        memory_session_var.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_vector_failure_reason_names_vector_stage(tmp_path, caplog):
     """vector upsert 失败时，失败原因按 vector 阶段归因记录（含异常类型）。"""
     store = SqliteMemoryRecordStore(tmp_path / "memory.db")

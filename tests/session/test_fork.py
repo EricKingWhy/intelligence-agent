@@ -16,6 +16,8 @@ from agent_harness.session.event import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
+    RUN_PAUSED,
+    RUN_RESUMED,
     RUN_STARTED,
     SESSION_FORKED,
     SESSION_STARTED,
@@ -29,12 +31,49 @@ from agent_harness.session.fork import (
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from tests.scripted_model import ScriptedModel
+from tests.session.store_fixtures import FailingFromStore
 
 pytestmark = pytest.mark.asyncio
 
 
 def _store(tmp_path) -> JsonlSessionStore:
     return JsonlSessionStore(tmp_path / "sessions")
+
+
+def _pause_data() -> dict:
+    """`run/paused.data` 的最小合法形状（`03 §3.4`；字段名取自 `build_pause_data`）。"""
+    return {
+        "reason": "budget_exhausted",
+        "trigger_dimension": "run.max_agent_turns_total",
+        "budget_version": 1,
+        "consumed": {"agent_turns": 1},
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 2},
+        },
+        "continuation": {
+            "completed": [], "remaining": ["还有活要干"], "blockers": [],
+            "next_safe_action": "抬高 ceiling 后同 run 恢复",
+        },
+        "closeout_source": "deterministic",
+        "resume_requirements": [],
+        "trace_id": None,
+    }
+
+
+def _resume_data() -> dict:
+    """`run/resumed.data` 的最小合法形状（同 run 续跑：版本 +1、绝对 ceiling）。"""
+    return {
+        "from_pause_seq": 3,
+        "previous_budget_version": 1,
+        "budget_version": 2,
+        "limits": {
+            "local": {"max_agent_turns": 500, "source": "deployment"},
+            "run": {"max_agent_turns_total": 8},
+        },
+        "consumed": {"agent_turns": 1},
+        "resume_basis": "budget_increase",
+    }
 
 
 def _build_parent(store: JsonlSessionStore) -> Session:
@@ -242,6 +281,60 @@ async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 
+async def test_fork_from_paused_run_prefix(tmp_path) -> None:
+    """`#312`：尾部 `run/paused` 的 run 也算「已收口」——它之后的消息是合法 fork 锚点。
+
+    暂停的执行没有在途工具调用、也没有悬空 run（`03 §3.4`），所以 child 以它作前缀是
+    完整的。回归：若把 pause 排除在收口集合之外，暂停过的会话里 fork 会突然不可用——
+    而"暂停后想换个方向重跑"（fork 出 child 另起一条线）恰恰是这个状态下的常见动作。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    s = Session.start(store, session_id="paused")
+    s.append(USER_MESSAGE, {"content": "第一条"})
+    run_id, _ = s.begin_run()
+    s.append(RUN_PAUSED, _pause_data(), run_id=run_id)
+    s.append(USER_MESSAGE, {"content": "换个方向再来"})
+
+    assert find_fork_boundaries(s.events) == [s.events[1].seq, s.events[-1].seq]
+    child = await fork_session(
+        store, meta, "paused",
+        boundary_user_message_seq=s.events[-1].seq,
+        child_session_id="after-pause",
+    )
+
+    assert [e.type for e in child.events].count(RUN_PAUSED) == 1
+    assert [e.type for e in child.events][-1] == SESSION_FORKED
+
+
+async def test_fork_prefix_with_resumed_run_is_rejected(tmp_path) -> None:
+    """`run/resumed` 把 run 重新计入未收口 ⇒ 悬空前缀仍被拒（暂停不是免检通道）。
+
+    成对的负向面：如果"pause 计一次收口"被实现成"这个 run 从此永远算收口"，一个
+    **正在恢复中**的 run 也会被当成完整前缀——child 就可能在一个执行未收口的截面上
+    长出来（`ForkBoundaryError` 的存在意义正是禁止这个）。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    s = Session.start(store, session_id="resumed")
+    s.append(USER_MESSAGE, {"content": "第一条"})
+    run_id, _ = s.begin_run()
+    s.append(RUN_PAUSED, _pause_data(), run_id=run_id)
+    s.append(RUN_RESUMED, _resume_data(), run_id=run_id)
+    s.append(USER_MESSAGE, {"content": "第二条"})
+
+    # 恢复之后的那条用户消息不是锚点（此刻 run 又开着）
+    assert find_fork_boundaries(s.events) == [s.events[1].seq]
+    with pytest.raises(ForkBoundaryError, match="未终态|悬空|open"):
+        await fork_session(
+            store, meta, "resumed",
+            boundary_user_message_seq=s.events[-1].seq,
+            child_session_id="not-created",
+        )
+
+
 # ── T3 copy-on-fork（#109, ADR-0017 决策 5）─────────────────────────────────
 
 
@@ -432,3 +525,108 @@ async def test_tail_summarizer_uses_scripted_model(tmp_path) -> None:
     # 提示词带进了 tail 文本与摘要指令
     prompt = model.snapshots[0].messages[0].content
     assert "方案A" in prompt
+
+
+# ── F15 #234：权限决策是会话属性，fork 必须显式继承 ─────────────────
+
+
+async def test_fork_inherits_parent_permission_decisions(tmp_path) -> None:
+    """父会话显式声明的权限决策（档位 + auto_approve）必须进 child 的 session/started。
+
+    不继承的后果不是"少个字段"：child 续聊会落到"未声明"分支 = workspace-write +
+    全自动批准——它复制了父的 workspace 文件，却对写操作免审批（安全边界反向放宽）。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="parent",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    parent.append(USER_MESSAGE, {"content": "第一条"})
+    parent.append(RUN_STARTED, {})
+    parent.append(MODEL_COMPLETED, {"content": "好的"})
+    parent.append(RUN_COMPLETED, {})
+    anchor = parent.append(USER_MESSAGE, {"content": "第二条"}).seq
+
+    child = await fork_session(
+        store, meta, "parent", boundary_user_message_seq=anchor,
+        child_session_id="child",
+    )
+
+    started = child.events[0]
+    assert started.type == SESSION_STARTED
+    assert started.data["permission_mode"] == "read-only"
+    assert started.data["auto_approve"] is False
+    # 父的 started 不进 seed（原语义不变）
+    assert all(e.type != SESSION_STARTED for e in child.events[1:])
+
+
+async def test_fork_of_undeclared_parent_writes_no_permission_keys(tmp_path) -> None:
+    """父未声明权限决策 → child 也不写键（历史会话 fork 出的子树语义一致）。"""
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _build_parent(store)
+
+    child = await fork_session(
+        store, meta, "parent",
+        boundary_user_message_seq=parent.events[-1].seq,
+        child_session_id="child",
+    )
+
+    started = child.events[0]
+    assert "permission_mode" not in started.data
+    assert "auto_approve" not in started.data
+
+
+async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None:
+    """seed 写盘中途失败：父日志逐字节不变，child 只留下已落盘的前缀。
+
+    这是**当前语义**（`#251` 冻结，父票 #241 的冻结决策②）：不在本阶段实现
+    "临时文件 + 原子替换"，失败清理的责任在 fork 主流程。本用例把两侧的事实都
+    钉住——将来若改成原子替换，这条必须红着改。
+    """
+    root = tmp_path / "sessions"
+    base = JsonlSessionStore(root=root)
+    parent = _build_parent(base)
+    parent_path = base._events_path("parent")
+    parent_bytes_before = parent_path.read_bytes()
+
+    # 第 3 次写 = child 的 seed 第二项（1=session/started, 2=seed[0]）
+    failing = FailingFromStore(root, fail_from=3)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+
+    with pytest.raises(RuntimeError, match="磁盘故障"):
+        await fork_session(
+            failing, meta, "parent",
+            boundary_user_message_seq=parent.events[-1].seq,
+            child_session_id="partial_child",
+        )
+
+    # ① 父日志逐字节不变（§7 父不可改）
+    assert parent_path.read_bytes() == parent_bytes_before
+    # ② child 只留下已落盘的前缀（无 session/forked、无 meta 行）
+    durable = base.read_events("partial_child")
+    assert [e.type for e in durable] == [SESSION_STARTED, USER_MESSAGE]
+    assert await meta.get("partial_child") is None
+
+
+async def test_fork_does_not_touch_parent_log_bytes(tmp_path) -> None:
+    """成功 fork 同样是只读父：父日志逐字节不变（不含 seq / mtime 之外的任何痕迹）。"""
+    store = _store(tmp_path)
+    parent = _build_parent(store)
+    parent_path = store._events_path("parent")
+    before = parent_path.read_bytes()
+
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    await fork_session(
+        store, meta, "parent",
+        boundary_user_message_seq=parent.events[1].seq,
+        child_session_id="child_ok",
+    )
+
+    assert parent_path.read_bytes() == before

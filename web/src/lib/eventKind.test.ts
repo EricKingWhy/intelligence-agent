@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { Bot, Brain, CircleX, Cpu, FilePen, ListChecks, Plug, Search, Sparkles, Terminal, Wrench } from 'lucide-react';
 import { KIND_ICON, KIND_LABEL, hasIconRow, modelKind, toolKind, withError } from './eventKind';
+import { EventType } from '../types';
+import type { AgentEvent } from '../types';
 
 describe('toolKind', () => {
   it('mcp 前缀最先识别（优先于内置语义名）', () => {
@@ -113,6 +115,20 @@ describe('streamKeyFromEvent — Inspector → 中间主区定位 key', () => {
   it('无 tool_call_id 且无 step → null（session 级事件无定位目标）', () => {
     expect(streamKeyFromEvent({}, null)).toBeNull();
     expect(streamKeyFromEvent({ content: 'hi' }, null)).toBeNull();
+  });
+
+  it('信封键缺失（GET 历史事件省略 null 键）→ AgentEvent 允许不带 step_id/run_id（编译期锁），定位仍为 null', () => {
+    // 实测 GET /api/sessions/<id>/events 的 seq 0/1/2 均 'step_id' in e === false：
+    // 无步号事件（session/started 等）的 step_id 是**键缺失**而非 null。类型必须如实
+    // 描述这一点，否则消费点只会去判 null，新增一处就重演 BUG-008（伪造 key
+    // "step:undefined" + 字面量 "step undefined"）。
+    // 编译期锁：下面这个字面量刻意不带 step_id/run_id——类型若改回必填，tsc 在此变红。
+    const event: AgentEvent = {
+      type: EventType.RUN_STARTED, data: {}, seq: 1, session_id: 's', event_id: 'e1',
+    };
+    expect('step_id' in event).toBe(false);
+    expect('run_id' in event).toBe(false);
+    expect(streamKeyFromEvent(event.data, event.step_id)).toBeNull();
   });
 
   it('tool_call_id 非字符串（畸形）→ 按 step 回退', () => {

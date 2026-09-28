@@ -11,8 +11,16 @@ Coding / Knowledge / Research 等能力通过 Capability / Provider / Tool 可�
 _Avoid_: container, executor, environment
 
 **Workspace**:
-Sandbox 内部允许 Coding Tool 读写的唯一目录；越界访问会被 Sandbox 拒绝。
+会话的**操作系统工作目录**——Coding Tool 的起始 cwd 与相对路径的解析基准。默认由 Harness 创建；也可指向**用户指定的已存在目录**（ADR-0027）。注意：权限档（READ_ONLY / WORKSPACE_WRITE / DANGER）是**工具级**授权闸，不做路径校验——目录不是硬围墙。
 _Avoid_: working dir, project folder, bind mount, volume
+
+**Project**:
+用户**注册**的一个已存在目录在产品层的名字（DSH 模型：项目 = 目录）。是会话的分组单位；归属判定 = 会话工作目录与项目目录一致（账本 + cwd 双重校验，ADR-0025）。
+_Avoid_: workspace（本代码库早期把项目实体叫 workspace，现已正名）, folder, repo
+
+**Directory-rooted Session（目录会话）**:
+工作目录指向**用户真实目录**（通常是某个项目）的会话——与默认的「Harness 工作区会话」（`workspaces_root` 下自动创建的 scratch 目录）相对。创建时界面必须明示"Agent 将直接读写该目录"（ADR-0027）。
+_Avoid_: project session（与 Project 撞词）, attached session
 
 **Coding Tool**:
 在 Sandbox 内执行、按 `Tool` 契约暴露给模型的工具（read / write / edit / bash）。
@@ -59,6 +67,22 @@ _Avoid_: orphan call, broken chain, missing result
 **Run**:
 一次 `AgentRuntime.run()` 调用的生命周期单元，绑定 `run_id`。同一 Session 可有多次 Run；Run 边界由 `run/started` 与 `run/completed` / `run/failed` / `run/interrupted` 事件标记，是 Phase 14 Fork 的切分依据。
 _Avoid_: turn, iteration, loop, attempt
+
+**产品任务（Task）**:
+用户委托的一个可续做目标，身份对应一个 Session；同一任务可跨多个 Run，Fork 派生带来源关系的新任务。
+_Avoid_: Run, process, context window
+
+**产品交付状态（Delivery Status）**:
+用户查看任务成果时的审阅与接受状态；与 Runtime 的 Run 终态、验证是否通过分别记录，不能由 `run/completed` 单独推定。
+_Avoid_: run/completed, test result, user acceptance
+
+**工作目录写入租约（Workspace Write Lease）**:
+一个具有写入意图的产品任务对其选定工作目录的排他占用关系；暂停或待审阅时仍由该任务占用，直到用户接受、归档或明确释放。
+_Avoid_: ToolExecutor 单次资源锁, Git worktree, SessionBudget
+
+**任务进度文件（Progress File）**:
+供用户与接班 Agent 阅读的单任务交接材料，记录目标、约束、当前进展、证据结论和下一步；它有可核对的会话事实来源。
+_Avoid_: SessionEvent, diagnostic log, long-term memory
 
 **run/interrupted**:
 进程重启扫描时，对「开了没关」的 run 补记的中断事实（信封带 `run_id` / `step_id`，data 带 `interrupted_seq` / `reason`）。它只声明 run 被打断，**不判定工具副作用是否发生**——那仍由 Ledger reconcile 决定（不变量 #12/#14）。标记后强制 reconcile；UNKNOWN 工具调用需人工裁决，不盲重跑。
@@ -264,6 +288,14 @@ _Avoid_: memory engine, memory service
 Memory 双写一致性机制（transactional outbox pattern）。SQLite 单事务同时写记忆行 + outbox 行（要么都成功要么都回滚），进程内 asyncio 后台 relay 定期 poll outbox 表把未同步的行推到 Milvus 向量索引，成功后标记。relay 崩溃重启自动恢复（outbox 行持久化在 SQLite 里）。幂等性由 consumer 保证（按 memory_id 去重）。
 _Avoid_: memory sync queue, vector indexer
 
+**retrieve_memory**:
+模型可调用的记忆**只读检索**工具（#202 / ADR-0031）。与 provider 自动注入共用同一个 `MemoryCapability.search` 与同一份 `rank_entries` 排序（检索实现唯一、调用点两个）；结果按 id 去重、不带分数，`injected=true` 标出本 run 已自动注入进上下文的条目（读 run 级 `memory_injected_ids_var` 注册表）。只做"自动注入不够用时的精准补充"，不替代自动注入。
+_Avoid_: search_memory（用户裁定名固定为 retrieve_memory）, recall_memory, memory_search
+
+**remember_this**:
+模型可调用的记忆**显式写入**工具（#202 / ADR-0031 D3）。只接受 `content`（一句话一条事实，≤2000 字符），走 `capability.consolidate` 落库（与后台提取共用同一条写入路径，冲突交给 provider 消解）；scope/namespace/metadata 不来自参数。只进 main/coding 的 tool_scope；research 档位只读不开写。
+_Avoid_: save_memory, remember, store_memory
+
 ## Phase 7：Capability / Plugin + Skills
 
 **CapabilityRegistry**:
@@ -417,7 +449,7 @@ run 生命周期与 HTTP 请求生命周期的解耦态：`POST /api/sessions` �
 _Avoid_: background run, fire-and-forget, async detach
 
 **RunManager**:
-web 层的 run 生命周期托管（`web/runmanager.py`）：per-session detached task + 订阅者扇出 + **seq 幂等合并**（session listener 通道与 `_drive` 镜像通道按 durable seq 去重汇流，durable 事实唯一来源是 `Session.append`）+ 有界订阅队列（2000 帧，满时丢最旧保最新——seq gap 让客户端重连自愈）。拥有 `memory_session_var` 的绑定权。
+run 生命周期托管（`session/runmanager.py`——2026-09-22 由 `web/runmanager.py` 迁入，见 ADR-0040 §4 R1）：per-session detached task + 订阅者扇出 + **seq 幂等合并**（session listener 通道与 `_drive` 镜像通道按 durable seq 去重汇流，durable 事实唯一来源是 `Session.append`）+ 有界订阅队列（2000 帧，满时丢最旧保最新——seq gap 让客户端重连自愈）。拥有 `memory_session_var` 的绑定权。
 _Avoid_: run registry, task manager, event bus
 
 **合帧（Coalescing）**:
@@ -528,3 +560,33 @@ _Avoid_: 模糊百分比指标无算法支撑, 只测"没遇到边界"不测"边
 **只量不裁（Measure Don't Gate）**:
 性能基线（E2E wall clock + 各段耗时）记录到 PHASE16_GATE.md 供后续回归对比，但不设硬阈值——ScriptedModel 延迟不代表真实延迟，真性能优化是独立 Phase。
 _Avoid_: CI 硬阈值用 ScriptedModel 延迟（无参考价值）, 性能优化混入 Final E2E
+
+## Prompt 管理层（ADR-0023）
+
+**Prompt Section**:
+prompt 的最小可组装单元：冒号命名空间（`profile:coding:identity` / `tool:bash` / `runtime:context_snapshot`）、集中分配的 order、参与的 scope 集合、注入目标、模板正文，以及从正文自动推导出的变量依赖（`requires`）。
+_Avoid_: 把整段 prompt 当不可拆的黑盒（失去组装能力）, 手写 requires（可从模板扫描推导）
+
+**Prompt Registry**:
+section 的唯一注册与组装入口。扁平结构、重名即抛错（与 CapabilityRegistry 同构）；按 scope **筛选**而非分层覆盖；提供 `available()` 全量视图作为"一处看全貌"的唯一真相。
+_Avoid_: scoped-overrides-global 覆盖层（与 CapabilityRegistry 的"重名即抛错"契约冲突）, 把注册表当成安全边界
+
+**严格模板插值（Strict Interpolation）**:
+只识别 `{{name}}`（`name` = `^[a-z][a-z0-9_]*$`）；未声明、未提供值、语法非法一律**抛错**；替换值不再二次扫描（无递归插值）。引用实现里 pi 与 ZCode 均静默渲染为空，本项目刻意取严格。
+_Avoid_: 未知变量静默渲染为空（故障不可见）, 引入模板执行能力（Jinja2 的属性访问/方法调用是注入面）
+
+**注入目标（Injection Target）**:
+section 的两个去向：`system`（稳定内容，进消息列表首部 SystemMessage 前缀）与 `meta_user`（易变的运行时事实，作为 user-role 段插在当前用户消息之前）。分两段的目的是保住 system 前缀稳定，使 prefix cache 不被易变内容击穿。
+_Avoid_: 把易变内容放进 system 前缀（其后全部内容失去缓存）
+
+**运行时上下文快照（Runtime Context Snapshot）**:
+`meta_user` 段的实现：cwd、日期、模型名、可用工具清单、OS。**运行时组装、永不落盘**——不 `session.append`，故不进 JSONL、不进 `derive_messages()` 投影、不进记忆抽取。与 ADR-0020a 为 system_prompt 立下的纪律一致。
+_Avoid_: 持久化为 `user/message`（会落盘、会回放、且单独一条即令记忆抽取的 USER 候选不被降级为 SESSION）, 从投影里过滤掉它（模型也就看不见了，与注入目的矛盾）
+
+**Persona（前缀/后缀覆盖）**:
+部署期可定制的人格前缀与后缀，经环境变量 JSON（`AGENT_PERSONA`）覆盖内置值，沿用项目既有的"复杂配置 = env 里 JSON 字符串"约定（与 CAPABILITIES / AGENT_MODELS 同构）。
+_Avoid_: 为 persona 单独引入配置文件加载器（项目无此先例）
+
+**Prompt 不变量校验（Prompt Invariants）**:
+R1 名唯一 / R2 scope 合法 / R3 变量名合法（注册期）；R4 变量有值 / R5 每 scope 恰有一条 identity / R7 产物非空（组装期）；R6 排序确定性由 `(order, name)` 稳定排序保证（非校验）；另加**进程启动自检**对全部 scope 跑一次空组装 fail-fast。此项超出全部参考实现（dsh 的 invariant 插件仅覆盖 R1/R3 类）。
+_Avoid_: 把必需 section 清单拍脑袋堆大（只有 identity 是全部 profile 都有的事实）, 只在组装期才发现悬空引用

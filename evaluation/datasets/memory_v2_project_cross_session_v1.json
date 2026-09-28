@@ -1,0 +1,234 @@
+{
+  "dataset_id": "memory-v2-project-cross-session-v1",
+  "version": 1,
+  "project": "Lightweight Observable Agent Harness",
+  "scope": "project",
+  "source_session_id": "gold-source-session-a",
+  "query_session_prefix": "gold-query-session-b",
+  "k": 6,
+  "minimum_recall": 0.85,
+  "memories": [
+    {
+      "id": "runtime-owns-loop",
+      "content": "AgentRuntime owns the model and tool loop; orchestration frameworks may be optional layers but do not replace the core runtime.",
+      "source": "SPEC_ROOT/00_PROJECT_VISION.md; SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md"
+    },
+    {
+      "id": "session-history-events",
+      "content": "Session history is an append-only sequence of typed SessionEvents, with messages derived as a projection.",
+      "source": "SPEC_ROOT/03_SESSION_EVENT_MODEL.md"
+    },
+    {
+      "id": "events-not-diagnostic-logs",
+      "content": "SessionEvents are durable user-facing history and recovery facts; diagnostic logs are separate and cannot replace them.",
+      "source": "SPEC_ROOT/03_SESSION_EVENT_MODEL.md"
+    },
+    {
+      "id": "history-not-context",
+      "content": "Persisting a complete conversation does not mean injecting the complete history into every model request; runtime context is selected and bounded.",
+      "source": "SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md"
+    },
+    {
+      "id": "memory-capability-context-provider",
+      "content": "Long-term memory sits behind the Memory Capability and Context Provider seams rather than a provider-specific branch in AgentRuntime.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §7.1"
+    },
+    {
+      "id": "langmem-replaceable",
+      "content": "LangMem is the default memory provider and remains replaceable; it must not be hard-wired into Core.",
+      "source": "SPEC_ROOT/00_PROJECT_VISION.md; docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §7.1"
+    },
+    {
+      "id": "sqlite-authoritative-milvus-derived",
+      "content": "SQLite is authoritative for memory records, versions, status, and outbox; Milvus is a rebuildable derived search index.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §6.6"
+    },
+    {
+      "id": "global-vs-project-scope",
+      "content": "A user's global Profile can be visible across that user's projects, while project-scoped Collection memories stay within their own project.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §4.2–4.3, §5.3"
+    },
+    {
+      "id": "session-is-provenance",
+      "content": "The originating session ID records memory provenance; it is not a memory scope or an authorization partition for later recall.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §6.1; docs/tickets/mem-v2-3-cross-session-profile-hybrid-recall.md AC2"
+    },
+    {
+      "id": "hybrid-semantic-lexical-retrieval",
+      "content": "V2 collection recall combines dense semantic candidates with SQLite keyword candidates, then deterministically ranks the authorized active records.",
+      "source": "docs/tickets/mem-v2-3-cross-session-profile-hybrid-recall.md AC6; docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §7.2"
+    },
+    {
+      "id": "user-edit-authority",
+      "content": "Automatic evidence cannot supersede or invalidate a memory that the user has explicitly edited; user authority wins.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §5.4, §6.1"
+    },
+    {
+      "id": "optional-recall-isolation",
+      "content": "Memory recall is optional: a provider outage returns no injected memory, records a redacted degradation event, and does not fail the agent run.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §7.1; docs/tickets/mem-v2-3-cross-session-profile-hybrid-recall.md AC9"
+    },
+    {
+      "id": "separate-context-budgets",
+      "content": "Automatic Profile context is capped at 500 model-input tokens; retrieved Collection context has a separate 800-token budget.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §5.3"
+    },
+    {
+      "id": "collection-count-budgets",
+      "content": "Automatic recall injects at most six complete Collection records and no more than three records of any one memory kind.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §5.3"
+    },
+    {
+      "id": "sqlite-authorizes-recall",
+      "content": "Every vector hit is rechecked against authoritative SQLite for existence, active status, trusted identity, and allowed scope before use.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §6.6"
+    },
+    {
+      "id": "memory-is-untrusted-data",
+      "content": "Recalled memory is delimited as untrusted data; text stored in memory cannot grant tools permission or change runtime policy.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §5.3, §7.2"
+    },
+    {
+      "id": "recall-event-redacted",
+      "content": "The memory/recalled event may include memory IDs and redacted ranking factors, but never raw evidence or memory content.",
+      "source": "docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md §6.5"
+    },
+    {
+      "id": "single-tool-executor",
+      "content": "All tools, including MCP tools, use the same ToolExecutor path so permission, approval, retries, and operation tracking stay centralized.",
+      "source": "SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md; SPEC_ROOT/04_TOOL_RUNTIME.md"
+    },
+    {
+      "id": "tool-retry-model-fallback-separate",
+      "content": "Tool retry and model fallback are separate responsibility domains; changing models does not retry a tool and tool retry does not choose a model.",
+      "source": "SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md; SPEC_ROOT/04_TOOL_RUNTIME.md"
+    },
+    {
+      "id": "unknown-side-effect-reconcile",
+      "content": "A high-risk operation with an unknown outcome is reconciled through the operation ledger and is never blindly executed again.",
+      "source": "SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md; SPEC_ROOT/07_STORAGE_PERSISTENCE_RECOVERY.md"
+    },
+    {
+      "id": "artifact-summary-reference",
+      "content": "Large artifacts belong in local or MinIO storage; the model receives a bounded summary and artifact reference, then reads details on demand.",
+      "source": "SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md; SPEC_ROOT/06_CONTEXT_ARTIFACT_MEMORY.md"
+    },
+    {
+      "id": "explicit-tool-dependencies",
+      "content": "Tool concurrency is decided by explicit dependencies and resource conflicts, not only by whether tools are classified as reads or writes.",
+      "source": "SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md; SPEC_ROOT/04_TOOL_RUNTIME.md"
+    },
+    {
+      "id": "capabilities-not-runtime-special-cases",
+      "content": "MCP, Skills, Knowledge, and Web are exposed as capabilities or tools; AgentRuntime does not add a separate special-case loop for each.",
+      "source": "SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md; SPEC_ROOT/09_MCP_SKILLS_KNOWLEDGE_WEB.md"
+    },
+    {
+      "id": "langgraph-optional-only",
+      "content": "LangGraph is an optional orchestration layer and cannot replace the project's Tool Runtime or Operation Ledger.",
+      "source": "SPEC_ROOT/00_PROJECT_VISION.md; SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md"
+    }
+  ],
+  "queries": [
+    {
+      "id": "q-runtime-owner",
+      "text": "哪个组件掌握每轮模型调用与工具执行的推进权？",
+      "relevant_ids": ["runtime-owns-loop"]
+    },
+    {
+      "id": "q-session-history-model",
+      "text": "为了能回放一次交互，历史记录应该怎样追加和表示？",
+      "relevant_ids": ["session-history-events"]
+    },
+    {
+      "id": "q-events-vs-logs",
+      "text": "故障排查用的普通日志能作为会话恢复的依据吗？",
+      "relevant_ids": ["events-not-diagnostic-logs"]
+    },
+    {
+      "id": "q-context-selection",
+      "text": "新一轮回答前要把以前聊天的所有原文都交给模型吗？",
+      "relevant_ids": ["history-not-context"]
+    },
+    {
+      "id": "q-memory-extension-seam",
+      "text": "更换长期记忆存储实现时，运行时应该依赖哪一层接口？",
+      "relevant_ids": ["memory-capability-context-provider"]
+    },
+    {
+      "id": "q-langmem-ownership",
+      "text": "如果不用 LangMem，Agent Harness 的核心能否保持不变？",
+      "relevant_ids": ["langmem-replaceable"]
+    },
+    {
+      "id": "q-rebuild-vector-index",
+      "text": "重建向量搜索服务会不会丢失唯一持久记忆记录？",
+      "relevant_ids": ["sqlite-authoritative-milvus-derived"]
+    },
+    {
+      "id": "q-project-visibility",
+      "text": "跨工作区继续使用时，哪些用户画像可以跟着本人，项目事实又该如何隔离？",
+      "relevant_ids": ["global-vs-project-scope"]
+    },
+    {
+      "id": "q-session-provenance",
+      "text": "一条知识是从旧对话学来的，就只能在那次聊天里找得到吗？",
+      "relevant_ids": ["session-is-provenance"]
+    },
+    {
+      "id": "q-hybrid-recall",
+      "text": "用户不用原来的措辞询问同一项目事实时，检索如何兼顾意思接近和关键词命中？",
+      "relevant_ids": ["hybrid-semantic-lexical-retrieval"]
+    },
+    {
+      "id": "q-user-edit-authority",
+      "text": "助手后来得到相反线索时，能自行覆盖用户手动修正的个人事实吗？",
+      "relevant_ids": ["user-edit-authority"]
+    },
+    {
+      "id": "q-memory-outage",
+      "text": "记忆数据库暂时连不上时，本次任务应该怎样降级？",
+      "relevant_ids": ["optional-recall-isolation"]
+    },
+    {
+      "id": "q-context-token-budgets",
+      "text": "长期画像和项目回忆各自最多占用多少模型输入额度？",
+      "relevant_ids": ["separate-context-budgets"]
+    },
+    {
+      "id": "q-context-record-count",
+      "text": "一次自动召回最多带入几条项目记忆，同一种类别有没有额外限制？",
+      "relevant_ids": ["collection-count-budgets"]
+    },
+    {
+      "id": "q-stale-vector-hit",
+      "text": "索引里还有旧条目，但主数据库说它已作废，这个结果还可以给模型吗？",
+      "relevant_ids": ["sqlite-authorizes-recall"]
+    },
+    {
+      "id": "q-memory-injection-boundary",
+      "text": "保存下来的文字要求开放 shell 权限时，运行时是否应该照做？",
+      "relevant_ids": ["memory-is-untrusted-data"]
+    },
+    {
+      "id": "q-recall-event-privacy",
+      "text": "审计记忆召回时，事件流会不会重复持久化原始摘录和全文？",
+      "relevant_ids": ["recall-event-redacted"]
+    },
+    {
+      "id": "q-mcp-executor",
+      "text": "外部 MCP 提供的动作经过哪条统一的权限和执行链？",
+      "relevant_ids": ["single-tool-executor"]
+    },
+    {
+      "id": "q-retry-domains",
+      "text": "模型供应商切换和工具再次尝试是否属于同一套重试规则？",
+      "relevant_ids": ["tool-retry-model-fallback-separate"]
+    },
+    {
+      "id": "q-unknown-side-effect",
+      "text": "外部写操作超时且结果未知，恢复时怎样避免把副作用做两次？",
+      "relevant_ids": ["unknown-side-effect-reconcile"]
+    }
+  ]
+}

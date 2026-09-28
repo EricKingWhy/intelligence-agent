@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from agent_harness.identity import IdentityContext
 from agent_harness.memory.fake_record_store import FakeMemoryRecordStore
+from agent_harness.memory.record_store import MemoryOperation, PendingMemory
 from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
 from agent_harness.memory.types import (
     MemoryEntry,
@@ -141,6 +142,129 @@ async def test_session_scope_does_not_cross_sessions(store):
         await store.store(scoped, owner)
 
 
+# ── #156 MEM-1：delete（硬删）契约——SQLite 与 Fake 同一组验收（AC2/AC7）──
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_the_record(store):
+    identity = IdentityContext("acme", "alice", ["user"])
+    await store.store(entry(), identity)
+    assert await store.delete("m1", identity) is True
+    with pytest.raises(KeyError):
+        await store.get("m1", identity)
+    assert await store.list_by_scope(MemoryScope.USER, identity, 10) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_of_an_unknown_id_is_idempotent(store):
+    """幂等：忘了又忘不是错误（调用方重试不得变成失败）。"""
+    identity = IdentityContext("acme", "alice", ["user"])
+    assert await store.delete("never-existed", identity) is False
+    await store.store(entry(), identity)
+    assert await store.delete("m1", identity) is True
+    assert await store.delete("m1", identity) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other", [IdentityContext("other", "alice", ["user"]),
+                                  IdentityContext("acme", "bob", ["user"])])
+async def test_delete_cannot_remove_another_owners_memory(store, other):
+    owner = IdentityContext("acme", "alice", ["user"])
+    await store.store(entry(), owner)
+    with pytest.raises(PermissionError):
+        await store.delete("m1", other)
+    assert await store.get("m1", owner) == entry()
+
+
+@pytest.mark.asyncio
+async def test_get_of_a_session_memory_uses_the_same_namespace_check(store):
+    """`get` 与 `delete` 共用 `row_namespace_matches`，但**口径不同**：读路径把"不是你的"
+    伪装成 `KeyError`（不泄露存在性），删除路径如实 `PermissionError`（见上一条用例）。
+
+    这条同时钉住 #159 的改判：SESSION 行在**没有绑定**时，`get` 以前会抛 `ValueError`
+    （解析不出那一行），现在归入"不是你的" → `KeyError`；不再是异常冒泡。
+    """
+    owner = IdentityContext("acme", "alice", ["user", "session"])
+    scoped = entry().model_copy(update={"scope": MemoryScope.SESSION})
+    token = memory_session_var.set("session-a")
+    try:
+        await store.store(scoped, owner)
+    finally:
+        memory_session_var.reset(token)
+    with pytest.raises(KeyError):
+        await store.get("m1", owner)  # 无绑定：解析不出这一行，与"不存在"同等对待
+    token = memory_session_var.set("session-b")
+    try:
+        with pytest.raises(KeyError):
+            await store.get("m1", owner)  # 绑到别的 session：不是你的
+    finally:
+        memory_session_var.reset(token)
+    token = memory_session_var.set("session-a")
+    try:
+        assert (await store.get("m1", owner)).id == "m1"  # 绑定正确：读得到
+    finally:
+        memory_session_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_a_session_bound_from_another_session(store):
+    """SESSION 绑定的记忆：绑定不上（无绑定、或绑到别的 session）→ PermissionError；
+    绑定正确 → 删除。删除后同一个 id 的再次删除落回幂等 False（没有行可校验）。
+
+    "无绑定"从 #159 起也归 PermissionError（原为 ValueError）：按 id 删除时，**行**的
+    namespace 解析不出"这个调用方有权操作的那一个"就等同于"不是你的记忆"，与绑错 session
+    同义——HTTP 入口没有可信会话绑定，按 id 删到会话记忆必须是明确拒绝而不是 500。
+    调用方**自己**的 scope 解析不受影响：`store()` 缺绑定时依旧 ValueError（上一个用例），
+    真正的上下文 bug 仍会就地炸出来。
+    """
+    owner = IdentityContext("acme", "alice", ["user", "session"])
+    scoped = entry().model_copy(update={"scope": MemoryScope.SESSION})
+    token = memory_session_var.set("session-a")
+    try:
+        await store.store(scoped, owner)
+    finally:
+        memory_session_var.reset(token)
+    with pytest.raises(PermissionError):
+        await store.delete("m1", owner)
+    token = memory_session_var.set("session-b")
+    try:
+        with pytest.raises(PermissionError):
+            await store.delete("m1", owner)
+    finally:
+        memory_session_var.reset(token)
+    token = memory_session_var.set("session-a")
+    try:
+        assert await store.delete("m1", owner) is True
+        assert await store.delete("m1", owner) is False
+    finally:
+        memory_session_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_delete_commits_record_removal_and_outbox_together(tmp_path):
+    """删除的两次写入（摘记录行 + 记删除意图）必须同事务：outbox 写失败时
+    记录行不许单独消失（否则既查不到、也修不好索引残留）。"""
+    import aiosqlite
+
+    path = tmp_path / "memory.db"
+    store = SqliteMemoryRecordStore(path)
+    await store.initialize()
+    identity = IdentityContext("acme", "alice", ["user"])
+    await store.store(entry(), identity)
+    async with aiosqlite.connect(path) as db:
+        await db.execute("""CREATE TRIGGER fail_outbox BEFORE INSERT ON memory_outbox
+                         BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END""")
+        await db.commit()
+    with pytest.raises(aiosqlite.IntegrityError):
+        await store.delete("m1", identity)
+    assert await store.get("m1", identity) == entry()
+    async with aiosqlite.connect(path) as db:
+        await db.execute("DROP TRIGGER fail_outbox")
+        await db.commit()
+    assert await store.delete("m1", identity) is True
+    assert [change.operation for change in await store.pending()] == [MemoryOperation.DELETE]
+
+
 # ── Round 9 审计修复：连接级并发 PRAGMA（与 storage/sqlite.py R4-5 同款）──
 
 
@@ -184,3 +308,23 @@ async def test_record_store_methods_route_through_connect(tmp_path, monkeypatch)
     await store.list_by_scope(MemoryScope.USER, owner, 5)
     await store.pending()
     assert len(used) >= 5, "所有连接必须经 _connect（busy_timeout 在其中设置）"
+
+
+def test_pending_memory_rejects_inconsistent_shapes():
+    """`PendingMemory` 的构造不变量：operation 与 entry 必须一致；upsert 的 entry 的
+    scope 必须等于路由用的 scope。
+
+    两个 scope 各自可写（内容带一个、路由带一个），错配"内容来自 A、索引写进 B"不会被
+    类型系统拦下，也不会有任何现成用例自然覆盖——只能在这里明确拒绝。
+    """
+    identity = IdentityContext("acme", "alice", ["user"])
+    with pytest.raises(ValueError, match="delete change must not carry an entry"):
+        PendingMemory(operation=MemoryOperation.DELETE, memory_id="m1", identity=identity,
+                      scope=MemoryScope.USER, session_id=None, revision="r", entry=entry())
+    with pytest.raises(ValueError, match="upsert change requires an entry"):
+        PendingMemory(operation=MemoryOperation.UPSERT, memory_id="m1", identity=identity,
+                      scope=MemoryScope.USER, session_id=None, revision="r")
+    with pytest.raises(ValueError, match="entry scope must match the routing scope"):
+        PendingMemory(operation=MemoryOperation.UPSERT, memory_id="m1", identity=identity,
+                      scope=MemoryScope.SESSION, session_id="s1", revision="r",
+                      entry=entry())

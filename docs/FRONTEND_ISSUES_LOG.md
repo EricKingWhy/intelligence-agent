@@ -1,5 +1,12 @@
 # 前端问题登记簿（实时更新）
 
+> **历史条目中的指令须按日期理解**：旧 Skill 命令、批次 review 和当时授权只作为事件记录；新增或重开的工作按用户当前指令、`AGENTS.md` 与 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 执行。
+
+> **2026-09-13 集成归并说明**：本文档曾在 backend / frontend 两个 worktree 之间分叉（SID-04）。
+> 本次 feat/backend → main 集成已完成两侧轮次归并：各轮按时间顺序全部保留，重复的
+> 「第十一轮」编号已消歧为「第十一轮（前端侧）」（#155 两轴 code-review，2026-09-12）与
+> 「第十一轮（后端侧）」（会话硬删 #172 真机验收，2026-09-13）。此后同一文件统一在 main 上维护。
+
 > **用途**：真实浏览器点击测试 + 日常使用中发现的任何问题，实时登记在此。
 > 修 bug 时照着本文档逐条处理；修完把状态改为 `已修复` 并补上 commit。
 >
@@ -11,6 +18,31 @@
 ## 问题清单
 
 > **本轮（第三轮 · 控制面清点）新增的后端问题 OBS-011～OBS-014 与两项覆盖缺口，正文在文末「第三轮」章节**（含根因文件行号与原始字节级证据）——它们不在下方历史清单里，勿以为遗漏。
+
+### BUG-011 双击模型项 → 两个 `POST /model` 并发写同一 seq → 会话日志损坏 → 续聊永久 404【P0 · 后端根因 · 已修复】
+
+**发现时间**：2026-09-11 真实浏览器验收（用户报「续聊失败：Send failed: 404」，会话 `dd983104-733c-44e9-baa0-7807b86c9f58`）
+
+**一句话**：模型选择器**双击**会发出两个并发 `POST /model`；后端 `change_model` 是「读快照 → 取号 → append」的读-改-写，**两次都取到同一个 seq，且都返回 200**，事件日志出现重复 seq；此后任何构造 `Session` 聚合的路径（含续聊）抛 `ValueError`，被 `service.py:431` 一刀切映射成 **404「会话不存在」**。**根因在后端**（并发写无序列化 + 错误码错配）；前端双击不去重是触发条件。
+
+**完整证据链、复现实验与待决策项：见文末「第八轮」章节。**
+
+**修复（2026-09-11，用户批准后按序实施）**：
+
+| 步 | 侧 | 内容 | commit |
+| --- | --- | --- | --- |
+| ① | 后端 | 每会话写锁 + seq 单调性守卫：`store.append_event` 在任何写者落盘前校验 `seq > 已落盘最大 seq`（`threading.Lock`，因为写者跨线程：事件循环与恢复扫描的工作线程），违反抛 `SeqConflict` | `4b8eee4` |
+| ② | 后端 | 冲突错误语义独立：`SeqConflict → 409`（不再假装 404）；`change_model` 写时冲突有界重试（3 次）后仍冲突才 409；删掉 `except ValueError → SessionNotFound` 的一刀切 | `4b8eee4` |
+| ③ | 前端 | 选档入口 `ModelPicker.commitSelection`：**弹层已关（`!open`）即丢弃选中**——第一次选中后浮层进入 `--dur-out`(150ms) 退出动画，节点仍在 DOM 中可命中，第二次 click 会被这里丢弃 | `71e605b` |
+| ④ | 前端 | 回归锁 `web/e2e/q-model-dedupe.spec.ts`（3 条 × 2 视口）：在途窗口内重复点击 / 已返回后双击同一项 / 换目标照常发 | `71e605b` |
+
+**③ 的实现取舍（有实测依据，非按最初设想照抄）**：最初设想在 `useSession.changeModel` 加「同目标在途复用 Promise」。探针实测该层**永不生效**——`dblclick()`（一次手势两下点击）与 `page.mouse.click` ×2 都是「两次 click 之间 React 已提交 `open=false`」，第二个请求根本到不了 hook；删掉该层前后探针结果完全相同（`dblclick=1` / `mouseclick_x2=1`）。因此只保留入口一层（计划里「或在弹层关闭后立即 `pointer-events:none`」的等价做法），hook 处仅留注释指明真正的 seam，避免后人把守卫加在错误的层。
+
+**④ 反「假绿」**：去掉 `!open` 守卫重跑 → 两例全红，且失败信息就是原始 bug 指纹（`Expected: 1 / Received: 2`；另一例 `Received length: 3`，三个 payload 完全相同）。证明绿不是「第二次点击根本没落到节点上」。
+
+**未决/边界**：跨进程并发写（多进程共享同一 JSONL）仍未加文件锁——`store.py` 文档已如实标注该边界；读时发现的日志损坏（历史遗留）不可自愈，直接 409。
+
+---
 
 ### BUG-007 命令面板 11 条静态命令的 label 全是英文，中文查询零命中（中文 UI 里的本地化缺口）【P2 · 已修复】
 
@@ -350,7 +382,7 @@ run: () => conversation && copyText(conversation.session_id),
 
 ---
 
-### BUG-002 交接手册 `HANDOFF_WORKBUDDY_FRONTEND.md` 关于 T9 的结论已过期 【P2 · 已勘误（2026-09-11）】
+### BUG-002 交接手册 `docs/archive/handoffs/HANDOFF_WORKBUDDY_FRONTEND.md` 关于 T9 的结论已过期 【P2 · 已勘误（2026-09-11）】
 
 **发现时间**：2026-09-10 真实浏览器测试
 
@@ -931,3 +963,1907 @@ wheel:    {deltaY:-120, runActive:true}     → 同步脱离
 **审查方排除的误报**（记录以免后人重复怀疑）：fixture 与后端 `approval.py:56-72` **逐字段一致**（含 `allowed_decisions: ['deny','approve_once']`）；`fixtures.ts` 新分支不影响任何既有 spec（无其它 spec 命中该路径，catch-all 仍在最后）；联调车道不会进主门禁；点击类断言均**非空洞**（三轮变异可证）；`service.py:348` 的引用**准确**。
 
 **审查方另指出（预存在，未改）**：`tsconfig.app.json` 只含 `src`、`tsconfig.node.json` 只含 `vite.config.ts` → **e2e spec 与 Playwright 配置都不被 `tsc -b` 类型检查**，`onApprovePost` 之类的接线错误无编译期兜底（靠 playwright 运行时加载与 oxlint 解析）。属既有结构，登记备查。
+
+---
+
+## 第六轮：全量真实浏览器验收（2026-09-11，真实 dev server 5173 + 真实后端 8000）
+
+> 起因：用户要求「前端的每个功能都要测试一遍，每个按钮都要点一下，遇到任何问题实时写入本文档」。
+> 本轮在**当前 `feat/backend` 后端（源码树启动，非 main worktree 的旧进程）+ `feat/frontend` 前端**上重建验收面：
+> 先复验刷新一致性，再逐个点过此前未覆盖的控件，最后跑真实模型 run。
+
+### 本轮刷新一致性复验（新增证据，结论与 BUG-005 一致）
+
+在会话 `3b35b83d-dcae-476f-8343-9912e40e77d7`（35 事件 · 中断态）上做**同函数**前后对比
+（`document.body.innerText` 的 djb2 `${len}:${hash}` + 按钮指纹 + 滚动位 + tab 选中态）：
+
+| 量 | balanced 档 | detailed 档 |
+| --- | --- | --- |
+| 内容指纹 | `2235:1645848761`（刷新前后**逐字节相同**） | `2309:2105849635`（同） |
+| 按钮指纹（74 键） | `2032:3401835054`（同） | 同 |
+| 滚动位 | `session-items 0/822`、`detail-body 0/860`（同） | 同 |
+| `ahi.selectedSession` | 恢复为该会话 | 同 |
+
+**视图状态（非内容）刷新不保留**：切到 Overview tab、`.detail-body` 滚到 105.5、思考区折叠
+→ 刷新后回到 Timeline / `scrollTop 0` / 展开。**这与「真机验证（2026-09-11 追加）」记录的冻结边界一致**
+（Inspector 是视图状态、DSH 语义、刻意不持久化），**不是缺陷**；本轮为它补了
+「内容一致 + 视图状态不保留」并存的实测证据。`ahi.theme` / `ahi.traceDensity` 两个 localStorage
+键按设计跨刷新保留（density 手动切 detailed 后刷新仍为 detailed）。
+
+### 本轮真机点过并确认正常（新增覆盖）
+
+| 控件 | 结果 |
+| --- | --- |
+| Inspector 运行级 5 个 icon tab | ✓ 每个 21×21，label span `display:none`，名称经 `title`（如 `title="Timeline"`）；点击切换正确 |
+| 事件详情 io-tabs Overview/Input/Output/Raw | ✓ 四段内容各自正确（Input 出 args、Raw 出完整事件 JSON）；`返回 Timeline` 复位 |
+| 事件 Input/Output `复制 JSON`、Raw `复制 Raw` | ✓ 剪贴板实得 165 / 165 / 490 字符，均为 JSON；按钮 `aria-label` 1.6s 内翻 `已复制` |
+| 工具详情 4 tabs（默认 Output） | ✓ `bash echo smoke-ok`：Overview 出 status/duration；Input `复制 JSON`→`{"command":"echo smoke-ok"}`(32)；Output `复制输出`→`{"exit_code":0,"stdout":"smoke-ok\n",…}`(85)；Raw **两个** `复制 Raw`→seq 4(446) / seq 5(685) = tool/call + tool/result |
+| 中断会话的工具详情零伪造 | ✓ `delegate` 无 tool/result 时**不渲染 Output tab**、Raw 只有 1 个复制键（`hasOutput`/`hasRaw` 判定正确） |
+| Timeline 行 hover 浮层 | ✓ 出现 `role=tooltip` 且带完整时间戳（毫秒）——**但文案发现 BUG-008** |
+| 会话切换（rail 行） | ✓ 点 `b46a6029` → 头显示 `已完成 · 5,922 tok`，`ahi.selectedSession` 同步 |
+| `返回 Timeline` | ✓ 事件/工具视图下点击后返回键消失、运行级 tabs 恢复 |
+
+**方法说明（诚实口径）**：Inspector 内的点击用**页面内 `.click()`**（React `onClick` 正常触发）；
+Radix 浮层 / `Esc` 类依赖真实指针与按键事件者，沿用既有的 MCP/CDP 真实序列
+（「合成事件假象清单」不变）。**本轮两处自曝误报已排除**：(1) 我最初用
+`innerText` 匹配 `^复制` 找复制键，得出「事件详情没有复制按钮」的**错误**结论——
+`CopyButton` 是纯图标按钮（`aria-label`/`title` 承载名称、`innerText` 为空），换
+`button.copy-btn` 选择器后三个键全部存在且工作；(2) 曾怀疑「事件 Output 段与 Input 段显示同一份
+JSON」是 bug——读源码 `:807`/`:818` 确认两者都 render `event.data`，**是事件级视图的既定语义**
+（事件没有 call/result 两段，只有 data），非缺陷。
+
+### BUG-008 Timeline 浮层渲染字面量 `step undefined`，事件详情出现空的 `step` 幽灵行【P2 · 已修复（见下方修复条）】
+
+**发现时间**：2026-09-11 第六轮真机 hover。
+
+**现象（两处，同一根因）**：
+1. 悬停 Timeline 第 1 行（seq 0 `session/started`）→ 浮层文字为
+   `2026-09-06 05:57:19.553 step undefined`（**字面量 `undefined`**）。
+2. 点开该行事件详情 → Overview 段多出一行 `step` 但**值为空**。实测 `.detail-row` =
+   `[{seq:"0"},{time:"2026-09-05T21:57:19.553+00:00"},{step:""},{event_id:"034292cf-2c13-41"}]`。
+
+**根因（文件行号）**：
+- 后端序列化**省略值为 null 的字段**——实测 `GET /api/sessions/b46a6029-…/events` 的 seq 0/1/2
+  均为 `'step_id' in e === False`（**键整个不存在**，不是 `step_id: null`）。
+- 前端 `components/StepDetail.tsx:478` 用**严格判等**：
+  ``if (e.step_id !== null) lines.push(`step ${e.step_id}`)`` —— `undefined !== null` 为真
+  → 推出模板串 `step undefined`。
+- 同文件 `:783` ``{event.step_id !== null && (<div className="detail-row">step {event.step_id}</div>)}``
+  同理，且 `<span>{undefined}</span>` 被 React 渲染为空 → **幽灵行**。
+
+**为什么别处没中招（对照，证明是渲染层疏漏而非契约问题）**：
+`lib/projection.ts:1024` 用宽松判断 ``if (event.step_id != null)``；`:453` 对派生字段做
+``event.step_id ?? null``；`App.tsx:679` 读的是已归一的 `conversation.run_interrupted.step_id`，
+故中断横幅文案（「第 N 步」/「首个步骤开始前」）**不受影响**。
+
+> ⚠ **初版结论已订正（对 reviewer 的 Spec 轴自查）**：初版写「只有 `StepDetail.tsx` 这两处」是**错的**。
+> 同一 bug 类**还有第三处**：`lib/eventKind.ts::streamKeyFromEvent` 也是严格 ``stepId !== null``，
+> 入参由 `App.tsx:223` 直接传 `event.step_id`（同样是可能缺失的键）。键缺失时它返回**伪造 key
+> `step:undefined`**——违背它自己文档里写明的「无 step 且非工具/委派域 → 返回 null（无可定位目标）」
+> 契约，并让 `App.tsx:222` 的 `if (key)` 把一个不存在的定位目标当真。**诚实的后果评估**：
+> `Conversation.tsx:126-127` 的兜底 `turns.findIndex(...)` 会得到 `-1` 并 `return`，**当前不产生
+> 任何可见差异**（无 step 的事件本来就无处可跳）；所以这一处的价值是**契约正确性 + 不伪造 key**，
+> 不是修复一个可见症状。三处均已修，且各自有测试锁。
+
+**归因：前端（渲染判空）**。后端「省略 null 字段」是既定序列化约定（Raw 档"完整源事件原样透传"，
+见 `projection.ts:313` 注释），改后端会改动 Raw 真相源形状，不作首选。
+
+**测试缺口**：`StepDetail.test.tsx` 的 5 个 `formatEventTooltip` 用例只覆盖
+`step_id: 9 / 2 / null / null / 0`，**没有「键缺失（undefined）」这一真实线上形状**——所以它一直绿。
+`eventKind.test.ts` 的 `streamKeyFromEvent` 6 个用例同理：只测 `null`，不测 `undefined`
+（第 113-116 行「无 tool_call_id 且无 step → null」用的正是 `null`，所以第三处的伪造 key 也一直是绿的）。
+
+**为什么定 P2 而非 P1**：不影响会话内容、不阻断任何操作；但确实是用户可见的**伪造文本**
+（不变量 #21 精神：缺席不得被渲染成一个看似有值的占位）。
+
+### BUG-008 修复条（2026-09-11）
+
+**思路**：三处都是**渲染/构造层用严格判等读一个线上可能缺失的键**，统一改为宽松判空
+（``!= null``）——与仓库既有口径一致：`projection.ts:1024` 的 `resolveStep` 早就这么写，
+且它的注释记录了**同一 bug 类此前已造成过一次回归**。**明确否决的两个替代方案**：
+① 改后端让 `step_id` 总是出现——会改动 Raw 档「完整源事件原样透传」的形状（`projection.ts:313`），
+且后端省略 null 字段是既定约定；② 在 `lib/eventValidate.ts::validateEvent` 统一归一化——
+它的 docstring 明确把归一化范围限定为缺失的 `data`/`seq`（「只守可辨、不崩」），
+把业务字段塞进去等于扩权该层。两轴 reviewer 独立得出同一结论：修在消费点、保持一致。
+
+**改动（3 文件）**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `web/src/components/StepDetail.tsx` | `:481` `formatEventTooltip` 的 ``e.step_id !== null`` → ``!= null``；`:788` 事件详情 Overview 的 `step` 行同改。docstring 补齐「缺失或 null」语义，行内注释收敛为一句指针（消除两处重复注释的漂移风险） |
+| `web/src/lib/eventKind.ts` | `streamKeyFromEvent` 的 ``stepId !== null`` → ``!= null``（第三处，见上方订正块）；docstring 写明为何必须宽松 |
+| `web/src/components/StepDetail.test.tsx`<br>`web/src/lib/eventKind.test.ts` | 各补「键缺失（undefined）」红灯用例（TDD：先见 ``["step undefined"]`` / ``"step:undefined"`` 再修）；Overview 的相邻语义用例补 `withStep(0)` 并改名（原名把 `null` 说成「缺失」，措辞不准） |
+
+**验证**：
+
+1. **红灯→绿灯**：修复前 `formatEventTooltip` 实收 ``["step undefined"]``、SSR HTML 里确有
+   ``<span class="detail-key">step</span><span class="detail-val num"></span>``、
+   `streamKeyFromEvent` 实收 ``"step:undefined"``；修复后三处全绿（`StepDetail` 16 + `eventKind` 19）。
+2. **真实浏览器复验**（dev 5173，会话 `b46a6029`）：
+   - 无 step 的行 hover → 浮层 `2026-09-06 05:57:19.553`（**无 `undefined`**）；带 step 的 `tool/call` 行 → `…21.816 step 1`（正对照）。
+   - 事件详情 Overview 的 `.detail-row` 由 `[seq, time, step(空), event_id]` 变为 `[seq, time, event_id]`。
+   - 跳转路径正/负对照：点 `session/started`（无 step）`stream-jump-pulse` **0** 个；点 `tool/call`（有 step）**1** 个、pulse 落在工具行——**修复没有破坏跳转**。
+3. **门禁**：`tsc -b` 0 · `vitest run` **507 passed / 0 failed**（28 文件）· `oxlint` **35 warnings / 0 errors**（基线未变）· `playwright test --workers=2` **118 passed** · `vite build` 0。
+
+**过程自查（两条，值得记住）**：
+- 我最初的探针用 `innerText` 匹配 `^复制` 找 Inspector 的复制键，得出「事件详情没有复制按钮」的
+  **错误**结论；`CopyButton` 是纯图标按钮（名称在 `aria-label`/`title`）。**教训：图标按钮必须按
+  `aria-label` 定位，不能按可见文本**。
+- 本轮的第一次全量门禁我把 vitest 输出接了 `| tail`，**管道退出码掩盖了 `1 failed`**，命令链继续
+  跑完并报「成功」。发现后重跑：**连续 5 次全量均只失败我当时故意留的红灯**，那次失败**不可复现**。
+  **教训：门禁链路必须用 `set -o pipefail`（或 `${PIPESTATUS[0]}`），任何 `| tail` 都会吞掉失败。**
+  那次未复现的失败已如实记录在此，不当作已通过。
+
+### OBS-016 委派/子会话整块 UI 在当前后端配置下**不可达**（multiagent capability 未启用）【配置 · 非缺陷 · 验收环境缺口】
+
+**发现时间**：2026-09-11 第六轮真实 run（为验收委派节点而发起）。
+
+**现实现象**：我发起的真实 run（新会话 `a39876d7`，提示词就是「用 delegate 工具把任务委派给
+research_review…」）里，**模型自己说没有这个工具**，并列出它实际可见的工具表：
+`read / write / edit / apply_patch / bash / glob / grep / git_status / git_diff / inspect_artifact / web_search`
+——**有 `inspect_artifact` 但没有 `delegate`**，随后它自行改用 `web_search` 完成任务（自适应行为正确）。
+
+**证据链（三层，互相印证）**：
+1. `GET /api/capabilities` → **只返回 1 个能力 `websearch`**，无 `multiagent`。
+2. 后端启动配置 `CAPABILITIES` = 仅 `websearch`（`"enabled": true`）——`multiagent` 是
+   **ADR-0015 的显式 opt-in capability**，未列即不激活。
+3. 装配层 `assembly.py:211-221`：capability 贡献的 delegate 工具只在 multiagent 启用时进 registry，
+   且 `session_store is None` 时还会「降级缺席」并打 warning——
+   即 **delegate 缺席是设计内的 optional-capability 语义**（不变量 #21：可选能力缺席不得拖垮 Core）。
+
+**归因：既不是前端 bug 也不是后端 bug，是运行配置。**
+- 前端正确：委派 UI（`DelegationNode`、`复制子会话 ID`、`Inspect 子会话`、`打开子会话`、child 视图
+  `Run` 返回）**只由真实事件驱动渲染**，无事件就不渲染——零伪造，符合不变量 #21。
+- 后端正确：`main` profile 的 `tool_scope`（`agent/profiles.py:58`）确实含 `delegate`，
+  但 capacity 未启用时 registry 里根本没有它；`main` profile 不做过滤（`assembly.py:224`），
+  所以不是被 scope 收窄掉的。
+
+**本轮覆盖后果（诚实登记）**：以下 **5 个控件在本轮配置下无法真机点击**，故本轮不宣称覆盖：
+`委派行按钮（委派 → target）`、`复制子会话 ID`、`Inspect 子会话`、`打开子会话`、`child 视图 Run（child-back-btn）`。
+它们**已有上两轮的真机结论**（第二轮第 38/61 项：展开、复制子会话 ID 实测剪贴板、Inspect 子会话、
+打开子会话切到 child `2515a128`；`k-refresh-restore.spec.ts` 还锁了 child 会话刷新），
+**e2e 回归锁也在**（`k-refresh-restore.spec.ts` 的 `.session-item[title^="${CHILD} "]`）。
+本轮追加的语料核查：**当前 11 个会话里只有 `3b35b83d` 出现过 `tool/call delegate`，且它没有任何
+`child_session_id`**（那次的委派在 run 被中断前没跑起来）——所以库里**确实不存在**可钻取的子会话。
+
+**建议（需用户决定，我没有擅自改）**：若要在这条验收车道上真机覆盖委派/子会话，需要在
+`feat/backend` 的 `.env` 里给 `CAPABILITIES` 增加 multiagent 项。这是**改运行配置**（会改变产品
+实际行为，不只是测试开关），按 §9.1 属需要用户确认的范围，故**只登记建议、不改**。
+
+**决定性补充（两个 worktree 的 `.env` 差异——也解释了前几轮为何能点委派）**：
+
+| worktree | `CAPABILITIES` |
+| --- | --- |
+| `D:\intelligence-agent`（main） | `websearch` **+ `multiagent`（enabled）** |
+| `D:\intelligence-agent-backend`（feat/backend） | **仅 `websearch`** |
+
+`.env` 按 §13.1.6 属**不在 worktree 之间同步**的本地文件，所以两个 worktree 的能力集天然可能不同。
+这同时解释了另外两件此前看起来矛盾的事：
+1. **前几轮的委派/子会话真机结论成立**（第二轮第 38/61 项）——当时 :8000 上跑的是 **main 的
+   后端**（multiagent 开），所以 `delegate` 在册；本轮跑的是 **feat/backend 后端**（multiagent 关）。
+2. **第三轮「加载更早 200→410」也是真机点过的**——那需要一个 >200 事件的会话（fork child
+   `1fdac9b9`，410 事件），它属于 main 那次后端的语料库；本轮 feat/backend 语料 11 个会话最大
+   35 事件，**`加载更早 N 条`（阈值 >200）在本轮语料下不可达**，但**并非产品不可达**。
+
+**结论口径修正**：本轮称「不可达」的控件（委派 5 项、`加载更早`、Trace 三件套、四个 picker 搜索框、
+Context picker）**全部是「本轮运行配置/语料下不可达」，不是产品缺陷**；其中委派 5 项、`加载更早`、
+picker 搜索框均**已在其他轮次真机点过并有 e2e/单测回归锁**。真正的产品不可达只有「Trace 三件套」
+（需 Langfuse 启用，本部署未配）。
+
+### 本轮新增真机覆盖（第二批：真实 run 路径）
+
+| 控件 | 结果 |
+| --- | --- |
+| `Escape`（全局，R3） | ✓ **决定性证据**：真实 CDP 按键后 fetch 记录器立刻捕获 `POST /api/sessions/a39876d7-…/cancel`；脉冲 `思考中 · 2s` → **`已取消`（中性通道）**；停止键消失、发送键复位、四个控制选择器恢复、无错误横幅。与 Composer 停止键行为一致 |
+| 流式期的 Composer 状态 | ✓ run 中：`[aria-label="停止"]` 在场、发送键消失、`.composer-control/.composer-model` 四个选择器 `disabled`；结束/取消后全部复位 |
+| 顶栏 Run Pulse（观察项） | ✓ 忠实反映真实阶段：`思考中 · Ns` → `执行工具 · Ns` → `已完成 · N tok` / `已取消`；无伪造进度 |
+| 代码块 `自动换行`/`不换行`（markdown.tsx:61） | ✓ `.md-code` ↔ `.md-code md-code-wrap`，标签 `代码自动换行` ↔ `代码不换行` 往返一致 |
+| 代码块 `复制代码`（markdown.tsx:69） | ✓ 剪贴板实得 22 字符 `print("Hello, World!")`，与 `.md-code code` 的 `textContent` **逐字相等**（非截断版），反馈翻 `已复制` |
+
+**真实 run 的模型行为观察（后端/provider，非缺陷）**：本次「写 hello world 代码块」的 run 在
+`思考中` 停留 **50s+ 且 token 零增长**（默认链 `deepseek-v4-flash-0731` 停顿），随后**模型回退
+按设计生效**（不变量 #9：Model Fallback 与 Tool Retry 分离）——时间线落
+`model/completed glm-4.5-air · 6907 tok`，由 glm-4.5-air 完成，`run/completed 13873 tok`。
+**UI 全程诚实**：期间只显示 `思考中 · Ns` 实时计时、不伪造进度、不报假错误、也不假装卡死；
+用户可随时用停止键/Esc 取消（本轮已实测）。这与 `3b35b83d` 里
+`model/fallback deepseek-v4-flash-0731 → glm-4.5-air · ModelStallError` 是同一现象。
+**建议（供后端参考，不在本轮前端范围）**：停顿检测的阈值约 50s 偏长，且停顿期间 UI 没有任何
+「正在等待模型/即将回退」的中间态提示——可考虑让后端更早发出 fallback 事件，前端已有渲染通道。
+
+### BUG-009 非流式 run 的 Model Fallback 在带并发闸时**必崩**（`AttributeError`）【P1 · 后端 · 已修复】
+
+**发现时间**：2026-09-11 第六轮验收——把 `multiagent` 加进 `feat/backend` 的 `.env` 后跑真实委派，
+**委派子会话 `run/failed`**，而父会话正常完成。这属于用户问的「判断是前端还是后端的问题」的典型：
+**后端**，前端只是把后端的真实失败如实渲染出来。
+
+**症状（真实事件，非推断）**：child `1f2c2af4` 的事件序列
+```
+3 model/fallback {"from_model":"deepseek-v4-flash-0731","to_model":"glm-4.5-air","reason":"InternalServerError"}
+4 model/failed   {"message":"model call failed: AttributeError"}
+5 run/failed     {"trace_id":null,"trace_url":null}
+```
+
+**根因（后端服务端日志 traceback 逐字）**：
+```
+File ".../agent_harness/agent/runtime.py", line 663, in _drive
+File ".../agent_harness/model/fallback.py",  line 176, in ainvoke
+File ".../contextlib.py",                    line 212, in __aenter__
+AttributeError: '_AsyncGeneratorContextManager' object has no attribute 'args'
+```
+
+`fallback.py::ainvoke` 把 `slot = self._gate.slot() if self._gate is not None else nullcontext(None)`
+**只取一次**，然后在「首次尝试」和「回退重试」两处 `async with slot:` **复用同一个 CM**。
+`ModelCallGate.slot()` 带 `@asynccontextmanager`（`concurrency.py:52`），其产物是**一次性**的——
+contextlib 退出时执行 `del self.args, self.kwds, self.func`（CPython 源码注释原话：
+"only needed for recreation, **which is not possible anymore**"），二次进入即抛 `AttributeError`。
+
+**影响面（不变量 #9 被破坏）**：`runtime.py` 的 `if stream:` **else 分支**（`:663`）走 `ainvoke`。
+`run()` 传 `stream=False`（`:432`），`run_stream()` 传 `True`（`:455`）；delegate 派生的子会话走
+`child_runtime.run(...)`（`multiagent/provider.py:229`）→ **非流式**。所以
+**所有非流式 run（含全部 delegate 子会话）在主模型瞬断时永远回退不了**，直接 `model/failed` + `run/failed`。
+生产恒带闸（`model_max_concurrency` 默认 3）故必然触发。
+
+**为什么既有测试长期没抓到（精确的覆盖缺口）**：`tests/test_model_fallback.py::TestCoordinatorAinvoke`
+的用例**全部 `gate=None`**——此时走 `contextlib.nullcontext`，而 `nullcontext` **可以重复进入**，
+所以那条 `async with slot` 第二次进入是合法的。**「闸 + ainvoke 回退重试」这个组合此前零覆盖。**
+
+**修复**：新增 `_slot()` 帮助方法（每次调用取**新** CM），两处尝试各自调用它。
+改 `src/agent_harness/model/fallback.py`，并补回归锁 2 例（含 5xx 形状参数化与「回退也失败」的
+重试一次边界）。**变异验证**：把 `ainvoke` 改回复用同一个 CM → 只有新用例变红（红灯非空洞）。
+
+**真实 A/B 实证（同一触发形状、不同结局）**：
+| | 触发 | 结局 |
+| --- | --- | --- |
+| 修复前 child `1f2c2af4` | `model/fallback … reason: InternalServerError` | `model/failed(AttributeError)` → `run/failed` |
+| 修复后 child `6eed381f` | `model/fallback … reason: InternalServerError`（**同形**） | `model/completed` → `tool/result` → **`run/completed`**，`final_text` = "Python 官网网址是 https://www.python.org" |
+
+父会话 `7cf291d1` 也 `run/completed`，`final_text` = "子代理 `research_review` 已成功完成任务：…"。
+
+**门禁**：`ruff check src/ tests/` 干净 · `pytest -q` 全绿。**登记归因：后端**（前端无需改动）。
+**另记**：`fallback.py::_guarded_stream` 末尾有一处**重复的 `return stream`（死代码，非本次引入）**，
+按 §8 Scope Lock 只报告、不顺手改。
+
+---
+
+## 第七轮（2026-09-11）：停顿提示（FE-01/#148）——阈值依据 + 真机时间线
+
+### 停顿提示阈值：可复现的测量
+
+方法（可重跑）：对 `GET /api/sessions` 前 20 个会话，各取 `GET /api/sessions/<id>/events`，
+找**首个带 `time` 的 `user/message`** 到其后**首个模型活动事件**（`model/started` /
+`text/delta` / `reasoning/started` / `tool/call`）的 `time` 差，作为「首事件延迟」的代理
+（它量的是「提交 → 模型开始动弹」，不是 SSE 首帧的网络延迟）。
+
+实测（本机 `:8000`，脚本见本条记录时的 `/tmp/lat.py`）：**n=13，min 0.8s，p50 4.6s，
+max 61.0s；>15s 占 3/13，>30s 占 2/13**。样本：0.8 / 1.3 / 1.4 / 2.3 / 2.3 / 4.6 / 4.6 /
+11.3 / 12.3 / 13.5 / 23.2 / 60.5（s）。
+
+结论：30s 阈值落在真实分布的长尾上（历史上约 15% 的 run 会触发），而提示文案只陈述
+「已经多久没有新进展」这一已观测事实，所以长尾触发时它说的是真话，不是误报。
+
+### 真机时间线（真实后端 + 真实模型，Reasoning Effort=Deep）
+
+`.wait-hint` 用 250ms 采样器记录（页面内 `window.__obs`）：
+
+| 时刻（自提交） | 脉冲 | 提示 |
+| --- | --- | --- |
+| 0.3–20.3s | `思考中 · 11s` → `思考中 · 31s` | 无 |
+| **20.5s** | `思考中 · 31s` | **`已 30s 没有新进展，仍在等待模型`**（首次出现） |
+| 21.5s–24.5s | `思考中 · 32s` → `35s` | `已 31s…` → `已 34s…`（逐秒递增） |
+| ~65s | `思考中`（无秒数） | 无（**断线横幅接管**：`连接中断（connection stalled）：重试 3 次未成功` → `连接中断，正在重连…`） |
+| ~70s+ | `思考中 · 4s`（重连成功后**流龄重置**） | `已 79s 没有新进展，仍在等待模型`（空闲是**跨重连累计**的） |
+
+**三条结论**：
+1. **AC7「真机出现该说明」成立**——首 token 等了 31s 的真实 run 上，提示在空闲 30s 时
+   出现并逐秒递增；且提示秒数（30）**小于**同屏脉冲秒数（31），正是「锚空闲而非流龄」的
+   现场证明（e2e 里把这条做成了决定性断言）。
+2. **降级路径是对的**：客户端自己 give-up 时 `streaming=false`，提示让位给断线横幅/恢复
+   入口（`思考中` 无秒数 + 横幅），重连成功后提示带着累计空闲秒数回来。三种信号不互相
+   冒充，符合「等待态是展示层状态」的设计。
+3. **观察（未改，§8 Scope Lock）**：脉冲的 `思考中 · Ns` 是**流龄**、重连成功后会重置
+   （上表 `4s`），而提示的秒数是**跨重连累计的空闲**（`79s`）——两个数字可以相差很大，
+   同屏看会以为是矛盾。这是脉冲既有语义（不是本票引入）；若要消除，最小改法是提示可见
+   时隐藏脉冲秒数，但那会改动本票 AC 明确要求保留的既有计时显示，故**只登记不动**，
+   交用户决定。
+   **用户决定（2026-09-11）：保留计时显示，不改。**（观察闭合，不再挂「待决定」。）
+
+### 停顿提示与重连 give-up 的窗口关系（用户已决定：不改）
+
+提示在空闲 30s 出现，而客户端 `RECONNECT_STALL_MS(10s) × MAX_RECONNECT_ATTEMPTS(3)`
+约在 30–40s 走 give-up（`streaming=false` → 提示让位给断线横幅），因此真实停顿里提示的
+可见窗口约 10s，之后由断线横幅 / 恢复入口接管。**用户决定（2026-09-11）：不需要改**——
+保留「旁注 → 断线横幅 → 恢复入口」这个升级顺序。
+
+### 过程自查（值得记住）
+
+- **假绿一次**：给「工具执行中不提示」写的第一版 e2e，用 `route.fulfill` 的**有限响应体**
+  mock 流 → 流立刻结束 → 重连额度（3 次）十几秒内耗尽走 give-up → `streaming` 先变 false
+  → 「有提示」和「无提示」两个变体都不显示，用例**因错误的原因通过**（变异验证时抓到：
+  把相位门改回 `active` 依然全绿）。结论：**这类相位门必须在纯函数层锁**（`shouldShowWaitHint`
+  单测，变异后 2 处变红），不能靠有限体 mock 的 e2e。
+- **真实后端与 mock 的差异**：真机 `/stream` 在途会话是长连接（所以不会连锁 give-up），
+  已收口会话回放完即关（实测 237ms/21831B 正常退出）。mock 的有限体两头都不像，是上一条
+  假绿的根因。
+
+---
+
+## 第八轮（2026-09-11）：续聊 `Send failed: 404` 根因（BUG-011 / 后端·已定位待修）
+
+**触发**：用户报「续聊失败：Send failed: 404」（会话 `dd983104-733c-44e9-baa0-7807b86c9f58`）。
+按 `diagnosing-bugs` 协议执行（先建可复现环 → 再假设）；除方法说明外无任何代码改动。
+
+### 现场证据（全部来自真实进程，未做任何写入于用户会话）
+
+| # | 证据 | 内容 |
+| --- | --- | --- |
+| 1 | 浏览器历史网络记录（page 2，保留请求） | `reqid=966 POST /sessions/dd983104…/model [200]` 与 `reqid=967 POST …/model [200]` **相邻**（中间无任何其它请求），紧接着 `reqid=970 POST …/messages [404]` |
+| 2 | 失败响应体 | `{"detail":"Session 'dd983104-…' 事件 seq 重复: 5"}` |
+| 3 | 事件流（7 行） | seq 0 `session/started`、1 `user/message`、2 `run/started`、3 `model/failed`、4 `run/failed`，然后 **两条 seq=5 的 `model/changed`**（11:21:54.297 / .400） |
+| 4 | 两条 seq=5 的 payload | **完全相同**：`from_provider=null, from_model_id=null, to_provider=qwen, to_model_id=qwen3.8-27b` |
+| 5 | 只读本地复现（`JsonlSessionStore` + `Session.load`） | 存储层 `read_events` 正常返回 7 条（故 `GET /events` 仍 200、UI 仍显示该会话）；**聚合层 `Session.load` 抛 `ValueError: … 事件 seq 重复: 5`** |
+
+**证据 4 是关键**：两条 `from_*` 都是 `null`，说明**两次写入各自基于「变更前」快照**（若第二次读到了第一条，`from_model_id` 必然是 `qwen3.8-27b`，且不会撞号）。即两个聚合各取到 seq 5。`103ms` 只是第一条的同步 `fsync` 阻塞事件循环后第二条才被调度，**不代表两次点击相隔 103ms**。
+
+### 复现实验
+
+**(a) 服务端：并发两次 `POST /model` → 重复 seq（靶 = 健康会话的临时副本，用完即删）**
+
+| 错开量 | 3 次试验中撞号 |
+| --- | --- |
+| 0ms | **3/3**（首轮另一组 2/3） |
+| 20ms | 1/3 |
+| 50 / 100 / 200ms | 0/3 |
+
+单请求耗时 26–46ms（`append` 走整行写 + flush + fsync，**fsync 阻塞事件循环**正是竞态窗口来源）。两次请求均返回 **200**，无任何冲突检测。两请求同时刻提交时，两条 append 时间戳相差 4ms（正常串行时反而 22ms）——反证现场 103ms 是循环被阻塞所致。
+
+**(b) 前端：是「单击」还是「双击」发出两个请求（无头 Chromium 打真实 5173 + 真实 8000，会话指向临时副本）**
+
+| 手势 | `POST /model` 次数 |
+| --- | --- |
+| **单击** | **1** |
+| `dblclick`（两次点击间隔 0ms） | 2（间隔 7ms） |
+| 两次真实点击、间隔 20 / 50 / 80 / 120ms | **均为 2**（弹层视觉已关，但第二次点击在 ~150ms 内仍命中模型项） |
+| 间隔 200ms | 1 |
+
+**结论**：前端**单次点击不会重复发送**（cmdk 的 `CommandItem` 一次点击只触发一次 `onSelect`；`changeModel` 全仓只有 `App.tsx:285` 一个调用点、`api.ts` 无重试、无 effect 重复触发）。重复来自**双击**——一次人类双击（实测 ≤120ms）即可发出两个并发请求。附带发现：**弹层关闭后约 150ms 内模型项仍在 DOM 中可被命中**，这是双击能穿透的直接原因。
+
+### 根因链（三环，缺一不可）
+
+1. **后端并发写不序列化（根因）**：`service.change_model`（`service.py:788-806`）先 `await read_events` 取快照，再 `Session(...)` 取号 `_next_seq = max(seq)+1`（`session.py:66`），最后 append（`:275-290`）。两个请求各自的**读**都早于对方的**写**时，双双取到同一 seq，且**都不检测冲突、都回 200**。任何两个并发写该会话的请求（双击模型项、两个标签页、客户端重试）都能把会话写死。
+2. **错误码错配（放大伤害）**：重复 seq 在聚合层是 `ValueError`（`session.py:206`），而 `service.py:431-432` 把该 try 块内的 `ValueError` **一刀切**转成 `SessionNotFound` → HTTP **404**。于是「日志损坏」被报成「会话不存在」：前端只能显示无从下手的 `Send failed: 404`，运维也无法从状态码判断真因。
+3. **前端双击不去重（触发条件）**：`handleModelChange` 无 in-flight 门（`void changeModel(...)`，失败静默），双击直接产生两个请求。severity 上它是「触发」，不是「根因」——因为第 1 环不修，任何并发写都能损坏日志。
+
+**影响面**：一旦撞号，该会话**永久不可续聊**（`/messages` 恒 404）；`GET /events` 仍 200 故 UI 仍显示会话，用户看到的是「会话在，但一续聊就 404」。是否影响 fork/recover/approve 未逐一实测（它们同样构造聚合，按第 2 环推断同为 404）。
+
+### 未做与待决策（按 §8 Scope Lock 只报告）→ 已于 2026-09-11 全部处置
+
+- **用户决定**：① 删除损坏会话 `dd983104`（删前已逐字节记录：7 条事件 + 工作区注册文件 + 空工作区目录）；② 按上述顺序实施 ①②③④ 四步修复。
+- 四步均已落地（见文件头 BUG-011 的修复表：后端 `4b8eee4`、前端 `71e605b`），前置说明保留在下方，方法备注仍然有效。
+
+### 原「未做与待决策」记录（保留原貌）
+
+- **未改任何代码**：用户此次是提问式报障，交付物是根因判定；修复方案见下，等指令再动。
+- **未改动 `dd983104` 的任何字节**：该会话日志已损坏（重复 seq 5），原样保留（7 行）。它**不会自愈**，续聊会持续 404。
+- **待用户决定（数据处置）**：① 重编号修复（把第二条 seq 5 改成 6，会话复活）；② 隔离/备份后删除；③ 暂不处理（只修后端，避免以后复发）。**我未擅自改写用户数据。**
+- **待用户决定（修复范围，建议按序）**：
+  1. 后端：按会话串行化 append（per-session 锁，或把取号放进 `append_event` 的临界区），使并发写不再撞号；
+  2. 后端：撞号时给出**独立错误语义**（冲突重试或 409），而不是伪装成 404；`ValueError` 的兜底不应再无条件等于 `SessionNotFound`；
+  3. 前端：模型项加 in-flight 去重（或在弹层关闭后立即 `pointer-events:none`），双击不再发出第二个请求；
+  4. 回归锁：服务端并发 `/model` 不得产生重复 seq（pytest，TDD 先红）；前端双击只允许一个 `POST`（e2e 计数）。
+
+### 观察：事件文件在、工作区映射缺失 → 500（**已用真实服务端验证**，Scope 外仅登记）
+
+原记录（合成副本复现时 `POST /messages` 返回 500 而非现场 404）当时**不作为结论**；修完 BUG-011 后用真实
+uvicorn（`WORKSPACE_DIR` 指向临时目录）复测，**已确认并拿到 traceback**：
+
+```text
+File "src/agent_harness/session/session.py", line 242, in resume
+    session = cls.load(store, session_id, workspace_registry=workspace_registry)
+File "src/agent_harness/session/session.py", line 223, in load
+    workspace_registry.get(session_id)
+File "src/agent_harness/sandbox/registry.py", line 73, in get
+    raise KeyError(f"Session '{session_id}' 没有对应的 workspace 映射记录。")
+KeyError: "Session 'bug011-fix' 没有对应的 workspace 映射记录。"
+```
+
+**判读**：这是 `KeyError` 而非领域异常，没有进 `domain_errors.py` 的表 → **500「Internal Server Error」**。
+且它发生在 **seq 校验之前**（`registry.get` 在 `load` 的更早位置），所以这类会话走不到 409。
+**属另一张票**（健康日志 + 缺工作区映射的状态应走受控错误路径，如 404/409 或可恢复提示），本次**未改**（§8 Scope Lock）。
+注意：正常会话不会进入该状态——`Session.start(..., workspace_registry=...)` 会同时写 JSONL 与映射文件；
+只有手工构造 / 半删除（事件文件在、映射文件丢）才会出现。
+
+### 方法备注（代价与边界）
+
+- 所有服务端复现都在**健康会话的临时副本**上做（靶子用完即删，删前核对）；探针 15 条 `model/changed` 全部落在靶子上，用户会话 `dd983104` 始终保持 7 行。
+- 浏览器侧用**独立无头 Chromium**，未干扰用户已打开的页面，也未向其会话写入任何事件。
+- 现场没有服务端访问日志（应用日志只记了 19:02 的孤儿回收），因此「两个请求」由浏览器侧历史网络记录 + `from_* = null` 反证，而非服务端计数。
+
+---
+
+## 第九轮（2026-09-12）：WS-3 #153 会话列表 `workspace` 契约——真机验收 + 一条待 #155 决策的可见行为
+
+**背景**：后端 #152 建了「项目实体 + 有序账本」，#153 把它暴露进列表契约：
+`GET /api/sessions` 每行新增 `workspace: {id, title} | null`（未分组 = `null`），
+`GET /api/sessions?workspace_id=<id>` 返回该项目会话、顺序 = 账本手工序（非活动时间序）。
+
+**真机验收（真 uvicorn 127.0.0.1:8792 + 真 `.env` + 真 SQLite + 真盘上 28 个会话）**
+
+| 检查 | 结果 |
+| --- | --- |
+| 每行都带 `workspace` 键 | ✅ 28/28 |
+| 分组会话的项目值 | ✅ 8 行分别指向真项目 `ws1-e2e` / `ws2-e2e`（id 与 `harness.db` 逐字段一致） |
+| 未分组会话 | ✅ 20 行 `workspace: null`，且**仍在列表里可见**（AC5） |
+| `?workspace_id=<id>` 顺序 | ✅ 与 `workspace_sessions.position` **逐项一致**（ws2-e2e 3/3） |
+| 未注册 id | ✅ **404** `workspace '…' not found`（不是空列表——空列表会谎报「这个项目没有会话」） |
+| `?workspace_id=`（空串） | ✅ 404（不静默退化成"全部会话"） |
+| OpenAPI | ✅ `SessionSummary.required` 含 `workspace`；类型为 `WorkspaceRef \| null`，`WorkspaceRef.required=['id','title']` |
+
+### 观察到的一条可见行为（不是 bug，需 #155 决策）
+
+`ws1-e2e` 的账本有 **6** 条，API 只返回 **5** 条。差额是 `e2dc33b6`——它的
+`session/started.agent_id == "coding"`，即**内部子代理子会话**。#152 的 ADR-0025 D6 显式收窄：
+内部子代理**不算项目成员**（运行期没有任何路径 attach 它们；纳入会让"同一类会话在不在项目里"
+取决于它生于引导标记前后）。**后果**：这类子会话在**默认列表里仍会出现，但 `workspace` 是 `null`**
+——即它与"用户真的没选项目"的会话在契约上**无法区分**。
+
+- 与 #151 源码注释「子会话继承父 cwd 是为了不显示成未分组」**相反**（#152 交接时明确选了"过滤"）；
+- #153 不改这个语义（不是它的 AC），**#155 做分组 UI 时必须决定**：折叠进父项目？
+  按 `agent_id` 另行标注"子代理"？还是彻底不显示？契约层目前只给了 `null`，
+  如果 #155 需要区分，`SessionSummary` 要再加一个字段（例如 `agent_id` 或 `parent_session_id`），
+  那是 #155 的契约变更，不要在前端靠猜。
+
+---
+
+## 第十轮（2026-09-12）：WS-5 #155 项目分组 UI —— 交付 + 真机验收 + 第九轮待决策项的答案
+
+**交付**（前端半；后端半 #153 / #154 已在 feat/backend）：会话侧栏「项目 → 会话」层级 +
+未分组区 + 项目 CRUD（新建 / 重命名 / 加入 / 移出 / 项目内重排 / 软删除）。
+
+| 文件 | 内容 |
+| --- | --- |
+| `src/types.ts` | `Project` / `ProjectStatus` / `ProjectDeleted`（后端 `web/projects.py` 逐字段对齐） |
+| `src/lib/api.ts` | 7 个项目端点 + `ProjectError(status, message)` + `describeProjectError`（后端 detail 优先）+ 窄化解析 |
+| `src/lib/projects.ts` | 纯函数：`buildRailModel`（分组投影）+ `moveAnchor` / `dropAnchor`（重排锚点） |
+| `src/hooks/useProjects.ts` | 项目列表 + 动作；每次写操作后重拉（**不维护前端影子成员名单**，不变量 #22） |
+| `src/components/SessionList.tsx` | 改版：项目块（折叠 / 行内重命名 / ⋯菜单）+ 行（点选 / ⋯菜单 / 拖拽重排）/ 未分组区 |
+| `src/components/ProjectDialogs.tsx` | 新建 / 删除确认（**明示只解除分组**）/ 加入项目 三个 Radix Dialog + 行内重命名 |
+| `e2e/r-project-groups.spec.ts` | 6 用例 × 2 视口（AC1–AC5 + 端点失败降级） |
+| `e2e/fixtures.ts` | 项目端点的**有状态** mock（create/rename/attach/detach/order/软删除都真改状态） |
+
+### 第九轮待决策项的答案（内部子代理子会话怎么显示）
+
+**决定：照契约如实显示在「未分组」区，不折叠进父项目、不隐藏、不前端猜 `agent_id`。**
+理由：#152 的 AC14 收窄明确「内部子代理不算项目成员」，所以后端给它的 `workspace` 就是
+`null`——这是**真值**（它确实不属于任何项目）。前端把它藏起来才是制造第二套真相（不变量
+#22）：同一个会话在"项目视图"里没有、在"列表视图"里也不该凭空消失。若将来要在视觉上
+区分"子代理子会话"与"用户没选项目"，正确做法是**先加契约字段**（`SessionSummary.agent_id`
+或 `parent_session_id`）再改 UI，不在前端从 id/标题猜——已作为后续票候选记录。
+
+### 注册项目为什么不批量回溯 attach 该目录下的历史会话
+
+**做不到，且不猜。** `attach` 的后端校验是「会话的 `session/started.cwd` == 项目规范路径」，
+而 `SessionSummary` **不暴露会话 cwd** —— 前端无法判断"哪些未分组会话属于这个新项目"。
+盲 attach 全部未分组会话只会得到一堆 409（还会把失败原因冲成噪音）。
+**当前做法**：逐行「加入项目…」显式选择；后端 409 的 `detail` 原样显示（说明是 cwd 不一致）。
+**建议**：若要"注册即归拢"，应由后端提供一个按目录匹配的端点（或在 `SessionSummary` 暴露
+`cwd`），属新票。
+
+### 🔴 用户原始诉求的最后一块缺口（不是 #155 的 AC，必须单独立票）
+
+用户的原话是"怎么才能做到一个项目下多个会话"。目前：①项目能注册任意已存在的目录 ✅；
+②分组/管理 UI ✅；③**但没有"在某个项目目录里新建会话"的入口** ❌ ——
+`POST /api/sessions` 的 `workspace` 字段仍然只接受**单段目录名**（
+`SessionService._validate_workspace_name` 拒绝绝对路径），会话的 cwd 永远落在
+`workspaces_root/<name>`；而项目路径来自 bootstrap（`workspaces_root/<name>`，可 attach）
+或用户注册的任意目录（**没有任何路径能产出 cwd 等于它的会话**，fork 除外）。
+**后果**：用户注册 `D:\my-repo` 后，这个项目永远拿不到新会话。修法明确（让 create 接受
+绝对路径并把 cwd 定为该目录，cwd 的写侧唯一规范化已存在于 `sandbox/paths.py`），
+但**属后端契约变更，不在 #155 范围**。
+
+### 真机验收（真 uvicorn 127.0.0.1:8000 + 真 `.env` + 真 SQLite + 真浏览器 5173，无任何 mock）
+
+| 检查 | 结果 |
+| --- | --- |
+| 真实项目渲染顺序 = 注册表序（`ws2-e2e` → `ws1-e2e`） | ✅ 2 个项目 |
+| 项目内会话数 = 账本长度（3 / 5） | ✅ |
+| 未分组区行数 | ✅ 22 条（该次运行共 30 个会话，其中 8 条已分组；截图轮的 24 是因为随后两次真模型用例又新增了会话） |
+| 注册临时目录（`.scratch/ws5-live-project`） | ✅ 标题默认取目录名 → 行内重命名生效 |
+| 软删除（0 会话） | ✅ 确认文案含"不会/会话日志"；成功提示用后端原文（含"可重新注册同一目录"） |
+| 注册真实目录 `workspaces/ws-delete-me` + 真会话 attach | ✅ 会话进入项目（cwd 相等后端放行） |
+| detach → 再 attach → 软删除（1 会话） | ✅ 提示"1 个会话回到未分组"；会话仍在未分组、目录仍在盘上 |
+| 真项目内重排 | ✅ 上移后后端账本序真的变（读 API 验证），下移后**精确还原** |
+| **基线比对** | ✅ 项目（含账本序）与会话归属与开测前**逐字段相等**（30 条会话） |
+
+截图：`web/gui-test-screenshots/ws5/`（01–06 真机流程、10–16 暗/亮/中/窄四态）。
+**本地留存、未入库**：截图是运行时产物（1.3MB），与既有各轮一致不进版本库；跑
+`e2e-live/project-groups-live.spec.ts` 或按上表步骤可复现同一组图。
+
+### 视觉检查（impeccable）逮到并修复的 1 个真 bug
+
+侧栏菜单（`.rail-menu`）最初复用了命令面板的 `palette-in` 关键帧，而那组关键帧带
+`translateX(-50%)`（面板居中才需要）→ **菜单被永久左移自身宽度的一半**。
+Hermetic e2e **全绿**（Playwright 点元素真实位置，位移不影响点击），只有人眼看截图才发现。
+已改为独立的 `rail-menu-in`（只做 opacity + scale，并用 Radix 的
+`--radix-dropdown-menu-content-transform-origin` 作为缩放原点）。
+**教训**：跨组件复用 `@keyframes` 前先看它有没有把定位也写进关键帧里。
+
+detector（`impeccable detect`）对本次改动文件：**0 findings**；`app.css` 里 4 条 `side-tab`
+告警全部落在**既有**组件（行号 1584 / 2091 / 2169 / 3885，非本票插入段），按 Scope Lock 未动。
+
+### 其它观察（都不改，记录在案）
+
+1. **CORS `*`（后端既有）**：跨源 `POST /api/sessions` 实测 200 并真的起 run。项目端点本身
+   已过来源闸（ADR-0025 D1 (b)），但会话端点没有。**建议后端单独立票**。
+2. **56px 折叠轨下侧栏只剩图标按钮**：`.session-item-dot` / `.session-item-body` 的
+   `display:none` 是**既有**规则（本票只往同一个 hide 列表里追加了项目 chrome），
+   所以窄屏"看不见会话行"不是本票引入；要修应是独立票（例如窄屏显示首字母）。
+3. `approval-live.spec.ts`（联调车道、非门禁）的「LIVE 拒绝」用例本轮连续 2 次失败：
+   点拒绝后卡片未在 10s 内翻到「已拒绝」，但后端 `/approve` 日志是 **200**（决策已落库、
+   工具后续如实 failed）。判断为**真实模型在同一 run 里再次请求审批**导致定位到新的 pending
+   卡片（该用例自身的注释就写明"结果非确定，只作真机取证"）。**与本票 diff 无关**：
+   本票未触碰 `ApprovalCard` / `api.postApproval` / 投影管线，门禁内的
+   `e2e/n-approval-card.spec.ts`（真正的回归锁）全绿。
+
+### 门禁（末次实跑，最终 revision）
+
+`npx tsc -b` ✅ · `npx vitest run` **556 passed**（30 文件；本票新增 36 条：18 分组/锚点 + 18 契约）·
+`npx oxlint` **0 errors**（37 warnings，全部既有规则；本票 10 个文件 0 warning）·
+`npx playwright test --workers=2` **142 passed**（本票新增 12 例）· `npx vite build` ✅。
+
+---
+
+## 第十一轮（前端侧）（2026-09-12）：#155 两轴 code-review 的发现与修复（commit `8db0e5f`）
+
+独立 Spec / Standards 两轴 review（只读、不看我的自述）一共给出 2 个 P2 + 若干 P3。
+**两条 P2 都不是"代码不好看"，而是"会在真机或流式下真实发生"**，记在这里。
+
+### P2-1：mock 的语义与真机**相反**——围栏绿灯证明不了契约一致
+
+`e2e/fixtures.ts` 的 attach 把会话 `push` 到账本**队尾**，AC4 也因此断言
+`['s1','s2','s3']`。真实后端写的是：
+
+```python
+# src/agent_harness/workspace/index.py::attach_session
+await self._persist_ledger(record.id, [session_id, *kept])   # 前插
+```
+
+`tests/web/test_projects_api.py` 也用 `assert ids == [second, first]` 锁住"新建项目前插"。
+**后果**：这条用例在真机后端下必然失败（我自己的 live spec 恰好只 attach 了单成员项目，
+顺序不可观测，所以没暴露）。已把 mock 改为 `unshift`、断言改为 `['s3','s1','s2']`，
+并在两处写明"顺序由后端账本决定，mock 必须跟它一致"。
+
+**教训**：hermetic e2e 的绿灯只证明"前端与我的假后端一致"。凡是"顺序/归属/幂等"
+这类由后端定义的语义，mock 必须逐条对着后端源码与后端测试写，否则围栏会**保护**
+一个错误实现。以后写有状态 mock 时，先在后端找到锁住该语义的测试，再决定 mock 怎么写。
+
+### P2-2：内联箭头破掉 memo → 流式期间整片侧栏重渲染
+
+`App.tsx` 的 `onRetryProjects={() => {…}}` 每次渲染新建函数 → `SessionList`（`memo`）
+的 props 每帧都变，流式 delta 期间整片 Session Rail 重渲染。本仓库对同名字段
+（`handleSelect` 一列）有明文规则，这里是纯粹的遗漏。已改 `useCallback`。
+
+### 其他修复（P3）
+
+| 发现 | 处理 |
+| --- | --- |
+| `SessionSummary.workspace` 只在注释里"被消费"（注释声称两个真相源） | 真的消费它：项目不在当前列表里时未分组行带 `staleProject` 注解；注释改写成真实分工 |
+| Pydantic **422 的 detail 是数组**，只认字符串 → "path must be an absolute path" 被降级成"注册项目失败（422）" | `readErrorDetail` 两种形状都认，剥掉 `Value error, ` 前缀；标题输入补 `maxLength`（后端 200 / path 4096） |
+| `useProjects` 可能被乱序响应覆盖（旧列表盖新真相）；挂载 + 会话列表到位两次 GET 重复 | generation 守卫 + in-flight 合并；写操作后的 `refetch` 绕过合并（合并到一个写前发出的请求会让列表停在写前） |
+| 拖拽落点提示在**别的项目**里也亮（跨项目拖动不是重排） | 记来源项目，落点只在来源项目内亮；跨项目 drop 直接忽略 |
+| Enter 提交绕过 `disabled={pending}` → 双发 | 三处提交路径补 `if (pending) return` |
+| `role="list"` 容器里混着非 `listitem` 子节点；`button` 被标成 `listitem` 丢"可按"语义;折叠时 `aria-controls` 悬空;`<p>` 里塞 `<ul>` | 删掉不成立的 list 角色；`aria-controls` 仅在展开时输出；`Dialog.Description asChild` + `div` 包列表 |
+| 空项目提示引导"在该目录下新建会话"——**不可达**（`POST /api/sessions` 只接单段 workspace，建不出项目内会话） | 改文案：指向"加入项目…"并说明前提是会话 cwd 与项目路径一致 |
+| 项目列表请求失败时仍显示"还没有项目"（与错误条自相矛盾） | 只在确实知道为空时才说 |
+| mock 的 order 端点没有自锚点 no-op → "先删后 indexOf 插"会插到倒数第二位，凭空改账本 | 补 no-op（真实后端 `ProjectService.reorder` 显式挡下） |
+| 不可达的 `/api/projects/resolve` mock 分支 + 无人使用的 `onProjectPost` 接缝 | 删掉（不可达的 mock 会让人以为那条路被测过） |
+| AC3 的 404 detail 是我自己编的字符串，证明不了"透传" | mock 改用真实后端的 `[WinError 3] …` 原文，断言打在 `WinError 3` + 路径上 |
+| attach 的 409 路径完全没有覆盖 | 新增 `onAttachPost` 拦截口 + 一条 e2e：后端原因就地显示、归属不变 |
+| 56px 轨会隐藏 `staleProject` 注解（body 的既有 hide 规则） | **不改**：与行标题/事件数同一规则，窄屏只剩点是既有降级 |
+| 软删除成功后的兜底文案丢了"什么都没删" | 补全（AC5 的安全感不能只留在后端文案里） |
+| 因改版而死的 `.session-group*` 样式（4 条规则） | 删掉（本次改动产生的孤儿） |
+
+### 视觉复核（新增的 `staleProject` 注解）
+
+用真浏览器（hermetic mock 复现"项目列表 502"这一唯一会显示注解的状态）截了暗/亮两色：
+注解在 meta 下方、斜体、三级灰、长标题省略号截断（全文在 tooltip 里），亮色下对比度可读；
+未分组的正常行（`workspace=null`）**不带**注解——"孤儿"与"真的没选项目"在视觉上分得开。
+窄屏（420px）注解随 `session-item-body` 一起隐藏，符合既有规则。
+
+### 门禁（末次实跑，最终 revision）
+
+`npx tsc -b` ✅ · `npx vitest run` **561 passed**（30 文件；本轮 +5：3 条 workspace 消费
++ 2 条 422 数组/null 回执）· `npx oxlint` **0 errors**（37 warnings，与改版前同数）·
+`npx playwright test --workers=2` **144 passed**（本轮 +2：409 用例 × 2 视口）·
+`npx vite build` ✅。`impeccable detect` 对本次改动 **0 新增**发现（4 条 `side-tab` 告警
+落在既有规则上，按 Scope Lock 未动）。
+
+顺带把 `--workers=2`（§16.6 硬要求）写进 `playwright.config.ts`：以前只有门禁命令带这个
+参数，裸跑 `npx playwright test` 会默认 4 worker —— 那正是"门禁绿、本地红"这类
+反复消耗排查时间的来源之一。
+
+---
+
+## 第十二轮（2026-09-12）：MEM-5 #160 记忆管理 UI —— 交付 + e2e 逮到的真 bug + 真机验收
+
+**范围**：跨端票 MEM-5 的前端半（后端半 #159 已关单）。前端用户入口从「只有 API」变成
+「看得见 + 删得掉」。契约来源：`src/agent_harness/web/memory.py`（`MemorySummary` /
+`MemoryDeleted` / `GET /api/memories` 分页 / `DELETE` 的 200·404·403·503 语义）。
+
+### 一、e2e 逮到的一个真 bug（本票唯一产品缺陷，已修）
+
+| 项 | 内容 |
+| --- | --- |
+| 症状 | 读取失败（HTTP 500 / 网络断）时，面板**同时**渲染「还没有记忆」与错误条 |
+| 根因 | 状态分支写成 `disabled → loading → visible.length === 0 → 空态 → 列表`，末条**漏了** `loadError === null`。于是"一条都没读到 + 读取失败"落进空态分支 —— 正是 AC4 明令禁止的「把读不到伪装成没有」（不变量 #21 同族） |
+| 证据 | `e2e/s-memories.spec.ts` 的 500 用例断言 `.memory-empty` count 必须为 0 → **首版两视口都红**（也正是这条用例逼出该缺陷，不是事后补的） |
+| 修复 | 空态条件改为 `visible.length === 0 && loadError === null`；「0 行 + 失败」只留错误条 + 重试 |
+| 教训 | 「空 / 错 / 降级」三态是**互斥**的语义，不是"优先级排队"——分支链里任何一个 `&&` 漏写，就会把一种状态说成另一种 |
+
+### 二、真机验收（真 .env / 真模型 / 真 Zilliz / 真 sqlite / 真浏览器 5173+8000）
+
+种子数据走生产同一条装配 + `consolidate()` 契约（脚本 `.scratch/seed_real_memories.py`，
+后端 worktree，不入库）。**实测三条都 `degraded=consolidation_failed: VectorStoreError`**：
+外部向量服务当时不健康 → 按 #158「不丢写」设计降级为无条件 insert（记录行仍落盘，故列表有内容）。
+这是**如实记录的环境事实**，不是本票缺陷。
+
+| 验收项 | 真机结果 |
+| --- | --- |
+| 列表渲染 | 点顶栏 Brain 按钮 → 面板列出 3 条真记忆（content + `用户` chip + 本地化时间；`已全部加载`） |
+| 二次确认文案 | 行内确认条：「这是硬删除，**删除不可恢复**——没有回收站，删掉后模型不会再想起这条。」 |
+| 删除成功 | 确认后行消失 → `curl` 后端只剩 2 行 → 日志 `memory forget via api: forgotten` → **整页刷新**后再开面板该条仍不在（= 后端权威，不是本地隐藏） |
+| 删除失败回滚 | **杀后端**后点确认 → 行**回到列表** + 「删除记忆失败（502）」+ 面板错误条「加载记忆失败（502）」+ 重试；重启后端点重试 → 列表恢复一致 |
+| 真空态 | 经界面删光 → 「还没有记忆」（非降级态、无错误条）；`curl` 复查 0 行 |
+| 503 降级契约 | `CAPABILITIES={}` 的另一实例（:8001）：真 GET/DELETE 都回 503 + `memory capability 未启用：请在 CAPABILITIES 中配置 memory。` —— 与 e2e mock **逐字一致** |
+| 视觉 | 暗/亮两色 + 确认条截图复核；新增样式全部复用既有 token（无 §15 亮色遗漏问题） |
+| 环境还原 | 种子记忆已全部经界面删除（真记忆库不留假事实，避免被模型当真召回）；dev server 已停（含残留 uvicorn 占 `.instance.lock` 的已知坑） |
+
+### 三、门禁（实跑）
+
+`npx tsc -b` ✅ · `npx vitest run` **580 passed**（31 文件）· `npx oxlint` **0 errors**
+（38 warnings：37 既有 + 1 条本票同类）· `npx playwright test --workers=2` **160 passed**
+（本票 +16 = 8 用例 × 2 视口）· `npx vite build` ✅。
+
+### 四、过程自查
+
+- **StrictMode 双跑会把"只失败一次"的 mock 立刻覆盖成成功**：首版 500 用例用 `failures -= 1`
+  计数器，dev 下挂载 effect 跑两遍 → 第二个请求 200 → 错误条从未出现（用例假红）。
+  改为「失败保持到测试显式关掉」。同理 `requested[1] === '?limit=50&offset=50'` 这种
+  **按请求序号断言**在 StrictMode 下不稳（序号里混着重复的首屏请求）→ 改成
+  「翻页前**所有**请求 offset=0；翻页后**存在** offset=50」。
+  （这两个都是 mock 侧的测试写法问题，不是产品缺陷。）
+
+### 五、批次审查（B-1，两轴 subagent）发现并修掉的问题
+
+| 问题 | 性质 | 处置 |
+| --- | --- | --- |
+| 重拉 `limit` 越过后端硬上界（>4 页后 422）→ 回滚重拉与"重试"永久失败 | **真缺陷（AC3 破）** | `MEMORY_MAX_LIMIT` + `refetchLimit()` 夹取 + 3 单测 |
+| 404（别处已删）的删除失败被界面吞掉 | **真缺陷（AC3 破）** | 面板级错误条 + e2e `memoryVanishedIds` + 1 用例 ×2 视口 |
+| e2e 的 403 detail 是编的中文（真后端是 `Memory belongs to a different namespace`） | **测试保真度缺陷** | mock / e2e / 单测统一改用真后端原文 |
+| DELETE 挂死无超时 → 行隐藏 + 按钮永久禁用 | **真缺陷（"点了没反应"）** | `lib/timeout.ts` + `DELETE_TIMEOUT_MS=30s` + 4 单测 |
+| `MemoriesState.rows` 无消费方 | 判断项 | 去掉导出 |
+| `.project-dialog-*` 类名复用 / `describeMemoryError` 与 `describeProjectError` 同形 / v2 与 §16.1 的协议矛盾 / AC4"检索不可用"在后端无独立状态 | 判断项 + 只登记 | 3 条说明理由不改（§8 Scope Lock）；1 条只登记（503=未装配、5xx=读取失败即事实上的"暂不可用"） |
+
+**修复后门禁**：tsc 0 · vitest **587** · oxlint 0 error（38w）· playwright **162** · vite build ✅；
+**修复后真机复验**：3 条 → 界面真删 1 条 → 后端剩 2 条 → 再删 2 条 → 后端 0 条 + 面板「还没有记忆」。
+
+## 第九轮（2026-09-12）：PromptRegistry 迁移期的后端观察（自主 SDD 批次）
+
+本轮在 `feat/backend` 自主推进 #150 + #161–#168 + #149–#160。迁移类票的验收靠
+**逐字节等价**，所以下面的观察全部是"后端 / 文档"性质，无前端问题。
+
+### OBS-9.1 【后端·已修】`--help` 曾被单实例锁挡住（#150）
+
+`cli.main()` 最初无条件取锁，导致服务在跑时 `agent-harness --help` 也会以 rc=2 被拒。
+`--help` 不触碰 session root（argparse 直接打印帮助退出），不该被锁挡住。
+**修复**：`-h/--help` 走豁免路径，但仍守 ADR-0018 D3 的 `flush_process_sink` 契约
+（既有测试 `test_cli_main_flushes_on_normal_exit` 正是这条契约的裁判——修复时它先红，
+证明该测试有效）。**归属：后端**。
+
+### OBS-9.2 【后端·设计约束，非缺陷】Windows 区间锁是 mandatory 的
+
+`msvcrt.locking` 锁住某个字节区间后，**同进程的另一个句柄**读该区间也会被拒
+（`PermissionError`）。若锁 byte 0，锁文件里写的 `pid=` / 诊断信息就再也读不出来，
+第二进程的错误信息会退化成"未知占用者"。
+**处置**：锁区间取在载荷之外的偏移（`1 << 20`），载荷区保持可读。
+**归属：后端**（POSIX `flock` 是 advisory，无此问题）。
+
+### OBS-9.3 【后端·flaky·已确认与本次改动无关】`test_disconnect_leaves_run_running_and_cancel_stops_it`
+
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it`
+（WebSocket 断开 / cancel，5s 超时）在全量跑中**间歇性失败**：
+
+- 2026-09-12 T3 期间全量跑出现 1 次失败 → 同 commit 重跑两轮全绿，单跑绿，整文件跑绿（28 passed）。
+- T4 的独立审查者（只读子代理）在**同一份代码上跑 5 次：2 次失败 / 3 次通过**，
+  并验证 **clean HEAD 归档同样通过**、`test_web_api.py` **不在本批任何 diff 里**。
+- 本 Agent 的 T4 全量跑一次通过（1706 passed / 0 failed）。
+
+**结论**：与本批 PromptRegistry 改动无关，属既有 flaky（n=5 命中率约 40%，样本小）。
+**未定位，本轮不追**（§8 Scope Lock：scope 外问题只报告不顺手修）。
+若后续修：方向是"客户端断开后 run 应继续 + cancel 应停住"的时序竞态
+（websocket 断开与 `RunManager.cancel` 的先后），建议先加确定性同步点再断言，
+**不要靠放宽超时**——那只会把竞态藏得更深。
+**归属：后端（测试稳定性）**。
+
+### OBS-9.4 【文档·已报告未改】PRD §10.7 / §10.2 与实现不一致
+
+- §10.7 的 `AssembledPrompt` 代码块只列 2 字段，§10.4 与交接文档 §4.2 要求 3 段
+  （含 `fragment_text`）；#162 票面自身 step 1 亦为 3 字段。
+- §10.2 导出清单缺 `run_self_check`（T2 引入）与 `DEFAULT_REGISTRY`（T3 引入）。
+- §10.8 把"模板语法"列为自检职责，实际由 `register`（R3a）承担。
+按交接文档 §2「不要自行改两边」，**只报告不改**。
+**归属：文档**。
+
+### OBS-9.5 【后端·本 Agent 自己的错误说法，已修正】T5 与 `DEFAULT_REGISTRY` 的关系
+
+T3 落地时我在 `builtin.py` 注释与两个测试 docstring 里写了"T5 会让 `DEFAULT_REGISTRY`
+带上 persona"——这与交接文档 §4.4（`DEFAULT_REGISTRY = build_registry()` **永不读环境**、
+persona 由装配点 `build_registry(persona=…)` 注入）矛盾。若按我原来的说法实现 T5，
+`_builtin_prompt` 会变成环境相关，`profile:*:identity` 的逐字节断言会在设了
+`AGENT_PERSONA` 的机器上红。
+**已在 T3 内修正注释与 docstring**（无行为变化），并把
+`test_default_registry_equals_build_registry_in_p0` 重述为**该不变量的机器化表达**。
+**归属：后端**。
+
+### OBS-9.6 【后端·潜在顺序隐患，未触发】`harness:identity` 的 order 早于 `persona:prefix`
+
+`SECTION_ORDERS` 里 `harness:identity = -1000`，而 `persona:prefix = 0`。父路径走
+`registry.assemble()`（按 order 排序）时 harness 段本应在 persona 前缀**之前**；
+但 child 路径走 `apply_persona(base, persona)`，它把 persona 前缀硬放在最前。
+
+今天不会出问题：`harness:identity` 是**预留键**，`_BUILTIN_SECTIONS` 里没有这条
+section，所以父/子两条路径一致（`test_apply_persona_matches_registry_order` 绿）。
+
+若将来有人为 profile scope 注册 `harness:identity`，**漂移守卫会立刻变红**——这正是
+那条守卫的主要未来价值（它比较的是活的注册表，不是硬编码期望值）。届时需要决定：
+让 `apply_persona` 也感知 order，或把 harness 段移出 persona 包裹范围。
+**归属：后端（T5 已知边界）**。
+
+### OBS-9.7 【文档·命名漂移】交接文档 §4.5 的 `compose_agent_prompt` 与实现名不一致
+
+`docs/archive/handoffs/HANDOFF_PROMPT_REGISTRY.md` §4.5 写 persona 拼接用
+`compose_agent_prompt(base, persona, guidance_text)`，实际交付的是
+`apply_persona(base, persona)`（#165 票面本身 prescribed 这个名字，票面优先）。
+
+T6 加 tool guidance（order 2000）时**无需改 `apply_persona`**：它包裹的是**已组装完**
+的 profile 文本，guidance 已含在 base 里，顺序天然正确。§4.5 的名称与三参签名已过期。
+**归属：文档**。
+
+## 第十轮（2026-09-12）：Memory 生命周期（#156 MEM-1）期间的后端观察（自主 SDD 批次）
+
+### OBS-10.1 【后端·既有 flaky，负载相关·已确认与本票无关】OBS-9.3 那条用例
+
+`tests/test_web_api.py::test_disconnect_leaves_run_running_and_cancel_stops_it` 本轮先表现为
+"约 40% 命中率的 flaky"，随后出现**本机 3/3 连续失败**（隔离跑、整文件跑都失败；10s 上下），
+再之后又回到**时好时坏**。**2026-09-12 #157 复核（同一份工作区代码连跑 3 次：pass / fail /
+pass；stash 掉全部工作区改动后在 commit `ff57700` 上跑：pass）——所以它既不是确定性失败，
+也不由本票代码决定。** 下面记录的根因与冷路径成本仍然成立，只是"确定性"这个措辞要撤回：
+它是**负载相关的间歇失败**。
+定位到的根因（与 OBS-9.3 的猜测不同，不是断连时序竞态）：
+
+1. 失败断言是 `_DisconnectingASGI` 的 `"app 未在 5s 内响应 disconnect"`；
+2. 抓到的 traceback 停在一个 **TLS 读**上（`anyio/streams/tls.py` → `_ssl_object.read`），
+   而该 await 属于 `POST /api/sessions` 的**端点处理路径**（`starlette/routing.py` 的
+   `dependant.call` 之下），即请求路径里真的有外部 HTTPS 调用；
+3. 该外部调用来自 `.env` 里启用的 capability 装配（本机 `CAPABILITIES` 含 `memory`，
+   provider `builtin`）→ 首次装配会 `MilvusVectorStore.initialize()` 真连 Zilliz；
+4. 实测本机冷启动成本：**Milvus 冷 connect 2.01s**（热 0.29s）＋ **langmem 冷 import 1.32s**，
+   再加会话创建与其余装配，冷路径突破该用例 **5s** 的预算。
+
+**不是本票引入**（用 stash 证明）：把 #156 的全部工作区改动 `git stash` 掉、在**同一个
+commit（f70ebe7）**上复跑，该用例**同样失败**；而该 commit 今天早些时候的全量跑是绿的 —
+即失败随**机器/网络负载**漂移，不由本票代码决定。本票 diff 只在 `memory/` + 测试 + ADR。
+
+**本轮不修**（§8 Scope Lock：scope 外问题只报告）。若后续修，按 OBS-9.3 的原判断**不要
+放宽超时**，正确方向是让计时块不再包含冷装配：在计时块**之前**预热 capability 装配
+（只读探针或显式 `await app.state...initialize()`），或让该用例显式密封 `CAPABILITIES`
+（本仓 `tests/conftest.py` 只清洗 Settings 的**环境变量**，`.env` 文件仍会被 `Settings()`
+读到——这是同一根因的另一条已知路径）。**归属：后端（测试稳定性 / 装配期外部依赖）**。
+
+**2026-09-13 已修（集成期 `feat/backend`）：按上述规定的方向落地——计时块**之前**预热，
+**未放宽 5s 预算**。** `_DisconnectingASGI` 增加 `budget_s` 参数（默认仍 5.0，测量请求沿用它）；
+测试在测量请求前先发一次**预热请求**（`_ImmediateRuntime` + `budget_s=60`），把
+`POST /api/sessions` 的一次性冷装配在测量窗外付掉。选预热**真实请求**而不是
+`await app.state...initialize()` 的理由：被测成本就落在这条端点路径上（`get_wiring` 缓存 +
+能力装配），预热同一条路径最忠实，且对"冷 connect 到 Zilliz"这类外部耗时一并免疫。
+**独立实测（本机 2026-09-13）**：预热请求 **6.546s**（冷）→ 测量请求 **0.005s**；
+Python 层 socket 埋点（`getaddrinfo` / `create_connection`）**零调用**，说明这段冷成本走的是
+C 扩展的 gRPC/TLS 通道，与上面记录的 `anyio/streams/tls.py` TLS 读、Milvus 冷 connect 2.01s 相互印证。
+**验证**：单测在**全新冷进程**连跑 4 次 **4/4 passed**（修复前同条件 4/4 failed）；
+全量 **2135 passed / 0 failed**（修复前 `2134 passed / 1 failed`）。
+
+### OBS-10.2 【后端·真机集成用例的冷 connect 抖动·#157 期间观察】同一个冷路径也在真机集成用例上出现
+
+`tests/integration/test_phase6_memory_e2e.py::test_real_connection_and_missing_collection`
+（#156 期加入）在 #157 的复核里**偶发失败**：整文件跑（5 条，热机）时它挂了，单独重跑
+**3.11s 通过**。同一轮里 `.scratch/run_langmem_actions_gate.py` 也撞到过一次同样的形状——
+`MilvusVectorStore._call` 的 SDK `timeout=15` 被**冷握手**吃掉（实测单次 `list_collections`
+冷启 16.7s），归类成 `VectorStoreError("unavailable")`，与"集合不存在/凭证错误"这些真实故障
+无法从错误类型上区分开。
+
+隔离结论：与 #157 的改动无关（该用例只 `connect()` 与查一个不存在的集合，不碰
+drain/real_count/drain 重构）。**本轮不修**；两条可选的后续方向（都属 #156/#157 之外的稳定性
+工作）：(1) 给真实集成用例的首次 `connect()` 加预热/重试（gate 脚本本次就是这么绕过的）；
+(2) 更根本地把"冷握手超时"与"真实故障"在错误分类上区分开（例如超时单列一个 category），
+否则生产启动期的首连抖动会被误报成 `unavailable`。**归属：后端（memory 真机测试稳定性）**。
+
+---
+
+## UI Polish 批次登记（2026-09-12，U-1 批量审查 defer 项）
+
+来源：U-1 批量两轴 code-review（diff `cd107a2..1ae3bf2` + 修复）。以下三项**有意 defer**（非遗漏）：
+
+1. **UIP-DEFER-1（P3，安全边界）**：ApprovalCard 同帧双 keydown 理论双 POST——`decide` 的 busy 是异步 setState，同一帧内两次独立 keydown 会复用旧 `busy=false` 闭包。人手触发概率极低（需同帧两次独立按键事件）；根治方案 = decide 内加请求在途同步标志（ref）。键盘路径已由「仅 autoFocus 卡挂监听」把暴露面收窄到单卡。
+2. **UIP-DEFER-2（P3，a11y 边界）**：`aria-labelledby/describedby` 直接内插 `approval_id`——id 含空格/引号时引用失效。后端 id 形如 `ap-…` 安全；若后端未来放宽 id 生成规则，需在前端做 id sanitize（或改用 ref + setAttribute）。
+3. **UIP-DEFER-3（P3，测试缺口）**：审批卡 `{old,new}→DiffBlock`、`{command}→approval-cmd` 的**渲染级**断言（浏览器 DOM 级）未补——现有覆盖 = 分类级单测 + path/content 形状的 t-contrast 渲染断言。计划 UI-03 批次动 StepDetail 时顺带补（同一审批 fixture 基建）。
+
+另登记两个**边界项备案**（R1 accent 审计中的两处留用，非交互但语义特殊）：`detail-section-title svg`（面板标识 icon）与 `workspace-scaffold-tag`（Split/Preview 诚实占位标记）——若后续 review 认为违反 One Voice Rule，整改点在此。
+
+---
+
+## 第十一轮（后端侧）（2026-09-13）：会话硬删（#172 / ADR-0029）真机验收 + 全功能点击（后端 AI 独立执行）
+
+**车道**：前端 `D:\intelligence-agent-frontend`（`feat/frontend`，含 #172 前端半 `57dd028`）dev server `:5173`；
+后端 `D:\intelligence-agent-backend`（`feat/backend`，含 #172 后端半 `4109b08`）uvicorn `:8000`；
+浏览器 Chrome DevTools（CDP），视口 **1440×900**。
+
+> ⚠️ **环境前置（不是缺陷，但会让人误判）**：本轮开始时的浏览器视口 **< 820px**，会话行的 kebab
+> 菜单被媒体查询整块 `display:none`，于是「删除会话…」看起来"不存在"。**验收必须在 ≥820px 视口做**，
+> 否则会把响应式隐藏当成功能缺失。已把视口固定为 1440×900 后复测（见 SID-02 的窄视口结论）。
+
+### 已通过（作为证据登记，非问题）
+
+- **`SID-P0` 会话硬删全链路（#172 前端半 + 后端半）真机通过**。步骤与证据：
+  1. 用 UI 新建一个一次性会话（`6d2f6b90-8d6d-4c57-a513-2a0f45fda034`，任务「只回复两个字：OK」，
+     15 事件；`model/fallback deepseek-v4-flash-0731 → glm-4.5-air` 是设计内回退）。
+  2. kebab → 菜单三项（加入项目… / 新建项目… / 删除会话…）→ 「删除会话…」→ 确认弹窗：
+     文案含「**硬删除，不可恢复**」「没有回收站、没有撤销」，并显示标题 + id 片段；确认按钮写
+     「永久删除（不可恢复）」。
+  3. **取消路径零请求**：点「取消」后 `role="dialog"` 消失、行仍在，网络面板无任何 `DELETE`（只有之前的 GET/POST）。
+  4. 确认删除 → `DELETE /api/sessions/6d2f6b90-…` → **200**，响应体与 ADR-0029 契约逐字一致：
+     `{"id":"6d2f6b90-…","deleted":true,"events":17,"detached_from_projects":0}`。
+  5. 前端收敛（实测）：行从 33 → 32 消失；对话区回到「暂无对话」空态；**RUN INSPECTOR 面板整体消失**；
+     `localStorage` 清空（记住的会话 id 已清，刷新不会被拉回死会话）；URL 无死 id；随后自动重拉
+     `GET /api/sessions` + `GET /api/projects`。
+  6. 后端收敛（实测）：`sessions/<sid>/`、`workspaces/<sid>/`、`workspaces/<sid>.json` 三条路径全部不存在；
+     `session_meta` / `operations` / `checkpoints` / `workspace_sessions` 四表该 id 计数全为 0；
+     `GET /api/sessions` 32 条不含它；`GET /api/sessions/<sid>/events` → **404**。
+  7. 审计（实测）：`.agent/logs/agent.jsonl` 恰有 1 条 `session_delete`，字段只有
+     `session_id` / `events=17` / `detached_from_projects=0` / `repaired_delegation_links=0` + 时间戳，
+     **不含任何会话内容**（ADR-0029 D7）。
+- **列表 `事件数` 与删除回执 `events` 可以不一致，且这是对的**：列表行显示 15、回执 17。差值是 run
+  完成**之后**由 memory capability 追加的 2 条事件——列表是拉取时的快照，回执是删除前现取的真值。
+  前端半刻意**不**把列表里的 `event_count` 放进确认弹窗（`DeleteSessionTarget` 不含事件数），
+  正是为了不拿二手值当事实陈述。此处前后端口径一致，非缺陷。
+
+### 问题清单（本轮）
+
+#### SID-01 【前端·P2·设计确认项】≤820px 视口下删除会话入口彻底不可达
+
+- **现象**：视口 < 820px 时，会话行的 kebab（`.rail-menu-btn`）被 `@media (max-width: 820px)` 置为
+  `display: none`，且会话行内部**没有替代入口**（无右键菜单、无长按菜单、无行内删除）。删除会话
+  这个功能在窄窗口/小屏上**物理上无法触达**。
+- **证据**：`getComputedStyle(kebab) → {display: none, opacity: 0, rect: all-zero}`；
+  CSS 规则实测为 `.rail-menu-btn { opacity: 0; width:22px; height:22px }` +
+  `.session-row:hover .rail-menu-btn, .session-row:focus-within .rail-menu-btn, … { opacity: 1 }` +
+  `@media (max-width: 820px) { … .rail-menu-btn { display: none } }`。
+- **注意**：同一媒体查询也隐藏 `项目` 分组头菜单（`.rail-project-head`），所以窄视口下**项目重命名/软删
+  也不可达**——这是既有设计（不是 #172 引入的），但 #172 让"不可达的后果"从"不能整理"升级成"不能删数据"。
+- **建议**：要么把 820px 断点下移/允许横向滚动，要么在窄视口给一个替代入口（行内 `…` 或长按）。
+- **归属**：前端。**修之前先确认产品是否支持窄视口**（当前更像桌面工具，若明确不支持则本项标 `不改（理由）`）。
+
+#### SID-02 【前端·P2】删除确认弹窗的初始焦点落在「关闭(X)」
+
+- **现象**：弹窗打开后焦点在右上角 `关闭` 按钮（`uid=8_2` / `11_2`，`focusable focused`），而不是
+  「取消」。键盘用户回车/空格会直接关闭弹窗（后果无害），但焦点位置与"危险操作默认落在安全项"的
+  通行做法相反；风险点是**键盘用户按 Tab 的落点顺序**（关闭 → 取消 → 永久删除），而不是误删。
+- **建议**：Radix `onOpenAutoFocus` 指到「取消」。
+- **归属**：前端。
+
+#### SID-03 【文档·P2】`docs/ACCEPTANCE_LANE_ENV.md` §2 的"期望能力集"已过期
+
+- **现象**：文档写「期望 count=2: websearch + multiagent」，实测 `GET /api/capabilities` 返回 **3**：
+  `websearch` + `multiagent` + **`memory`**（#159 MEM-4 之后接入的）。
+- **影响**：接手验收的人按文档核对会以为多出来的 `memory` 是异常，或反之漏检。
+- **建议**：§2 期望值改为 3（并说明 memory 提供什么面）。
+- **归属**：文档（后端侧维护）。
+
+#### SID-04 【流程·P2】`docs/FRONTEND_ISSUES_LOG.md` 在两个 worktree 之间已**分叉**
+
+- **现象**：同一路径下两份内容不同——`feat/backend` 工作区 1502 行（末轮=第十轮），
+  `feat/frontend` 工作区 1780 行；**两边都有「第九轮」但内容不同**（后端侧=PromptRegistry 迁移观察，
+  前端侧=WS-3 #153 列表契约）。合并时必然撞车，且"第十一轮"这个编号在两侧会指向不同东西。
+- **本轮的处置**：按 AGENTS.md §13.1.3（不共用一个 worktree）**只写本工作区（feat/backend）这一份**，
+  不动前端工作区那份。
+- **建议**：集成 AI 在合并时把两侧各轮**按时间顺序保留并在冲突处重新编号**（append-only 日志不允许
+  丢任何一轮），此后约定"谁改哪个 worktree 就往哪份写"或统一收敛成一份。
+- **归属**：集成。
+
+### 第十一轮 · 追加（同一轮继续，2026-09-13）
+
+#### 已通过（证据登记）
+
+- **`SID-P0b` 删除成功后的回执态**：确认删除后弹窗**不立即关闭**，而是切成回执：`role="status"`
+  实时区播报「已永久删除 17 条事件记录（不可恢复）；它不在任何项目里。」+「完成」按钮。
+  两个数字都取自后端响应（`events` / `detached_from_projects`），与 ADR-0029 的回执意图一致。
+- **`SID-P0c` 刷新一致性（用户点名项）真机通过，且是逐字节一致**。同一会话 `7cf291d1`（59 事件、
+  含 delegate 委派）刷新前后指纹完全相同：
+  | 指标 | 刷新前 | 刷新后 |
+  | --- | --- | --- |
+  | `body.innerText` 哈希 | `1507534181` | `1507534181` |
+  | 正文字符数 | 4339 | 4339 |
+  | 选中会话（`ahi.selectedSession`） | `7cf291d1-…` | `7cf291d1-…`（同一行仍带 selected） |
+  | Inspector 页签 | `Timeline59 / Overview / Changes0 / Terminal0 / Artifacts0` | 完全一致 |
+  | 委派内容（Tavily/委派行） | 在 | 在 |
+  机制：`lib/sessionRestore.ts`（`ahi.selectedSession` + 恢复游标），源码注释写明它就是为
+  BUG-005「刷新后选中的会话与全部内容消失」修的——本轮实测确认该修复在真机上成立。
+  **附注（非缺陷）**：选中会话**不进 URL**（无路由 / 无 hash），所以不能靠链接直达或分享某个会话；
+  刷新恢复完全依赖 localStorage（清掉 localStorage 或换浏览器即回到空态）。若将来要"可分享链接"，
+  这是要新做的功能，不是当前 bug。
+- **密度四档（紧凑/均衡/详细/Raw）全部有反应**：正文长度 4339 → 4281 / 4339 / 4691 / 6440（Raw 最全），
+  切换即生效且**跨刷新保持**（`ahi.traceDensity`）。
+- **思考块展开 / 运行折叠：有反应**（+3 / −424 字符）。
+- **Run Inspector 五个页签全部有反应**：Overview / Changes / Terminal / Artifacts 均切换出对应面板
+  （Timeline 点第二次无变化属正确——它本来就是选中页签，重复点击是幂等的）。
+- **`Esc` 关闭令牌浮层：有效**。⚠️ 过程记录：用页面内合成 `KeyboardEvent('Escape')` 关不掉它，
+  一度误判为"浮层关不掉"；改用**真实按键**（CDP `press_key`）后立刻关闭。结论：那是合成事件的
+  限制（Radix 只信真实按键），**不是产品缺陷**——记在这里以免下次有人重踩。
+
+#### 方法学备注（写给下一轮验收的人）
+
+1. **视口必须 ≥820px**，否则 `.rail-menu-btn` / `.rail-project-head` 被媒体查询整块隐藏（见 SID-01）。
+2. **页面内合成 `.click()` 对 React `onClick` 有效，对 Radix 触发器无效**（Radix 菜单/弹层要
+   `pointerdown` 序列）。所以：批量撒点可以用合成点击做**初筛**（筛出"没反应"的候选），
+   但每个候选必须再用**真实点击**复验后才能登记成缺陷——否则会把合成事件限制误报成 bug（本轮
+   Escape 与 kebab 都踩过这个坑，两次都由"真机复验"纠正）。
+3. 危险词（删除/清空/永久/重置/移除）与会起 run 的词（发送/新建会话/分叉）**不进自动撒点**，
+   逐个手点并单独验证。
+
+### 第十一轮 · 追加二（2026-09-13，同轮继续）
+
+#### 已通过（证据登记）
+
+- **`SID-P0d` fork 父会话删除 → 409 守卫真机通过，且零副作用**。语料：`7c681c45`（6 事件）
+  是 `40ee6420` 的 fork 父（`GET /api/sessions/7c681c45…/lineage` → `children[0].origin="fork"`）。
+  路径：kebab → `删除会话…` → 弹窗 → 真实点击 `永久删除（不可恢复）`。
+  实测结果：
+  | 断言 | 期望 | 实测 |
+  | --- | --- | --- |
+  | HTTP 状态 | 409 | 409 |
+  | 弹窗内错误文案 | 后端 detail 原文 | `session '7c681c45-…' is the fork parent of 1 session(s): delete the child session(s) first` |
+  | 弹窗状态 | 保持打开（不静默关闭） | 保持打开 |
+  | 会话列表条数 | 不变（32） | 32 |
+  | 父/子目录 | 都在 | 都在（`.agent/workspace/sessions/…`） |
+  | 子的血缘 | 父链不断 | `ancestors=["7c681c45"]` |
+  **⚠️ 安全提示**：这一步是**不可逆操作的真机演练**，执行前必须先把父、子两个会话目录
+  `cp -r` 到临时目录留底（本轮已做），确认守卫生效后再删备份；否则守卫若失效就直接毁掉语料。
+- **`ACT-01` 工具卡 `Inspect` → Step Detail 全链路有反应**（会话 `a39876d7`，280 事件）：
+  点 `Inspect`（`.act-inspect-chip`）后出现 `.step-detail`（头部 `返回 Timeline` + 工具名 + 耗时），
+  子页签 `Input` / `Output` / `Raw` 分别渲染出 `{query, k}` / 原始 `output` 字符串 / 同 Output 的 raw 视图；
+  点 `返回 Timeline` 回到时间线。对话内同时出现 `.act-detail-inline`（INPUT/OUTPUT 内联块，4 个）。
+- **`ACT-02` 对话区 32 个控件全部枚举完毕**（`.conversation` 内可见可点元素）：
+  4× `分叉` + 8× `折叠`/展开 + 6× `思考`头 + 6× `复制回答` + 4× `act-node` + 4× `Inspect` + 2× json 折叠。
+  `分叉` 的 `title` 会按上下文区分：本轮之前无历史时 = `本轮之前没有历史：child 会话将是空会话`，
+  否则 = `从此处分叉新会话`（正确反映 fork 语义差异，不是文案 bug）。
+
+#### 委派 / 分叉 / 审批 控件逐个点击结果（真机）
+
+| 控件 | 语料 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| `展开结果摘要`（`.deleg-row-expandable`） | `7cf291d1` | **通过** | 展开后节点内出现子代理结论「Python 官网网址是 https://www.python.org。」 |
+| `复制子会话 ID`（`.deleg-child-row .copy-btn`） | 同上 | **通过** | `class="copy-btn"` → `"copy-btn copied"`，`aria-label`/`title` 由 `复制子会话 ID` → `已复制`，图标 Copy→Check |
+| `复制回答`（`.copy-btn`） | 同上 | **通过** | 同上（`aria-label=已复制`） |
+| `Inspect 子会话`（`.deleg-open-btn`） | 同上 | **通过** | Inspector 头由 `Run Inspector` → `Run / 子会话 · research_review / 6eed381f`，面板内容切到 child 的 run（`7d845d27`、2 轮、9 事件、`web_search`），**父会话时间线仍在**（与 title 承诺一致） |
+| `打开子会话`（`.deleg-open-btn`） | 同上 | **通过** | `ahi.selectedSession` 由 `7cf291d1…` → `6eed381f…`，主窗切换 |
+| child 视图 `Run` 返回（`.child-back-btn`） | 同上 | **通过** | 头由 `Run / 子会话…` → `Run Inspector / 1 runs · 59 事件`（会话 `7cf291d1`），回到父视图 |
+| `加载更早 N 条`（`.timeline-earlier`，在 **Inspector 的 Timeline 页签**内，不在对话区） | `a39876d7`（280 事件） | **通过** | 提示行 `显示最近 200 / 共 280 条（前段已折叠，真相完整保留）`；点一次 → 行数 `200 → 280`，按钮消失（已全加载） |
+| `分叉`（`.fork-btn`） | `34276f99` | **通过** | 会话数 `32 → 33`，`ahi.selectedSession` 跳到新 child `e82249fc…`，头部 `空闲`，无错误条；child 事件流 = `session/started` + `session/forked`（`parent_session_id=34276f99…`），`/lineage` 确认 `ancestors=[34276f99…]` |
+| 硬删（对**分叉 child** 复用一次） | `e82249fc` | **通过** | 回执「已永久删除 2 条事件记录（不可恢复）；它不在任何项目里。」→ 列表 `33 → 32`，选中态清空（`null`） |
+
+**⚠️ 分叉无二次确认（记录为设计观察，非缺陷）**：`App.tsx:399 handleFork` 点一次**立即**调
+`POST /api/sessions/{id}/fork` 并跳转到 child，没有确认弹窗。判断：这是**创建**语义（非破坏性）、
+且有 tooltip 说明 child 会是什么（`本轮之前没有历史：child 会话将是空会话` / `从此处分叉新会话`），
+连点也有 `forkInFlightRef` 挡住同一 origin 的在途请求。故不登记为缺陷；若产品希望"一键不可撤销创建"
+收敛，再另开票。
+
+**⚠️ ADR-0029 D2（永不删 `workspace_root`）在分叉场景得到真机验证**：fork child 的
+`session/started.cwd` 指向的是**父会话的** workspace 目录
+（`…\workspaces\34276f99-…`）。删掉这个 child 后实测：
+`child 会话目录 = 已消失`、`父会话目录 = 完好`、`父 workspace 目录 = 完好`、会话总数回到 32。
+即删除只按 `<root>/<sid>` 与 `<workspaces>/<sid>*` 两个自有路径动手，**没有**顺着映射去删父目录。
+这条是"删 child 顺手把父的工作区一起删了"这类灾难的最低成本防线，值得保持。
+
+#### 刷新一致性（用户点名项）· 第二轮：富语料 + **运行中刷新**
+
+**A. 视图态刷新前后对照（会话 `a39876d7`，280 事件，`density=detailed`，页签=Changes）**
+
+| 指标 | 刷新前 | 刷新后 | 结论 |
+| --- | --- | --- | --- |
+| `ahi.selectedSession` | `a39876d7…` | `a39876d7…` | ✅ 一致 |
+| `ahi.traceDensity` | `detailed` | `detailed` | ✅ 一致 |
+| 轮次数量 / 工具卡数量 | 4 / 4 | 4 / 4 | ✅ 内容一致 |
+| Inspector 激活页签 | **`Changes1`** | **`Timeline280`** | ⚠️ **丢失**（回默认页签） |
+| Timeline 尾窗 | 280 行（已点过「加载更早」） | 200 行（按钮重新出现） | ⚠️ **丢失**（回默认窗口） |
+
+→ **观察·P2（非阻断）**：Inspector 的**视图态**（当前页签、Timeline 尾窗大小）不跨刷新保留，
+而选中会话/密度/主题是保留的（都在 localStorage）。用户点名的"刷新后会话要和刷新前一致"
+指的是**会话内容**——这一条**成立**；页签/窗口回默认属于"视图态未持久化"，是否要一起持久化
+由产品定，本轮不当作 bug。
+
+**B. 运行中刷新（真正的危险路径）· 会话 `43e7b46e`**
+
+步骤：composer 输入 `只回复：ok` → 点发送 →（`发送` 立刻变 `停止`，5 个 picker 全部
+`disabled`——与清单 §A 第 189 行一致）→ **运行途中真实刷新页面**（reload）。
+
+结果（刷新后 14 秒内三次采样，状态稳定）：
+
+| 断言 | 实测 |
+| --- | --- |
+| 选中会话 | 仍是 `43e7b46e…`（未跳走、未回空态） |
+| 消息是否丢失/重复 | 事件流 `user/message` **= 2**（原有 1 + 新增 1），**无重复**；`run/started`/`run/completed` 各 2 |
+| 后端是否继续把这一轮跑完 | **是**：`run/completed`，`final_text="\nok"`，并伴随 `model/fallback`（`deepseek-v4-flash-0731 → glm-4.5-air`，`reason=InternalServerError`） |
+| 刷新后 UI 是否与事件流一致 | **是**：对话区 `第 1 轮 / 第 2 轮`，两条都是 `ok`，模型徽标 `glm-4.5-air`，第 2 轮有思考块 |
+| 失败/降级是否可见 | **是**：Inspector Overview 的 MODEL 区显示 `已切换 deepseek-v4-flash-0731 → glm-4.5-air · InternalServerError` + `用量 3,400 tok（3,355 + 45）` |
+| 是否卡在"停止"态 | 否，刷新后 `发送` 可用（无悬挂 streaming） |
+
+源码侧机制（与真机一致）：`hooks/useSession.ts:366-379` 加载历史后
+`if (hasUnterminatedRun(events)) resumeLiveStreamRef.current?.(sid, maxEventSeq(events), projected)`
+——即"先渲染历史，再按未收口 run 接回实时流"（注释直指 BUG-006）。另外
+`hooks/useSession.ts:383-388`：记住的选中会话若已不存在（被删/换后端）→ 清 key + 静默回空态，
+不弹无法处理的错误（与"删掉当前选中会话后 `ahi.selectedSession=null`"的实测一致）。
+
+**结论**：刷新一致性在"内容"这一层**真机通过**（含运行中刷新的续跑与对账）；仅"视图态"未持久化。
+
+#### MOD-01 【前端·P1】composer 选「默认链」**不发请求**：界面说「默认链」，会话实际仍跑上一个非默认模型（同屏自相矛盾）
+
+> 来源：Subagent（composer 扫描）静态定位 F3 → **本 Agent 动态复现并确认为真**（subagent 为保护真实数据主动回避了动态验证）。
+
+- **语料**：`fb3619c6-9817-487c-9a10-59bd3716ad1a`（cwd `ws2-e2e`，6 事件，原本无任何 `model/changed`）。
+- **真机步骤与硬证据**（判据是**会话 JSONL 里有没有新的 `model/changed` 事件**，不靠 UI 自述）：
+  1. 选中 `fb3619c6` → composer 模型 picker 显示 `默认链`。选 **`glm-5.3-flash`** →
+     **新增** `seq 6 model/changed {from=None → to=glm-5.3-flash}`（POST 生效）。
+  2. 再选 **`默认链`** → trigger 变回 `默认链`，**但 JSONL 事件总数仍是 7、`model/changed` 仍只有 seq 6**
+     → 会话当前模型**仍是 `glm-5.3-flash`**。
+  3. **同屏自相矛盾**：此时同一页面里，composer 说 `默认链`，而右侧 Inspector 的 MODEL 区说
+     `模型 glm-5.3-flash`。
+  4. **刷新不纠错**：reload 后 picker 仍显示 `默认链`（前端不从会话事件反推 picker，picker 只反映本地 state）。
+     → 用户此后每次发送都会**带着 glm-5.3-flash 跑**，而界面从头到尾告诉他"默认链"。
+- **根因（前后端契约对齐后判定：前端没按契约调用）**：
+  - 后端契约（`session/model_switch.py:97-132`）：`ModelTarget.model_id=None` = 切回默认链，
+    **`effective_model_id` 是 picker 应显示的 id**；而进入这条分支的合法入参是
+    **`GET /api/models` 里 `is_default=true` 那个条目的名字**（`is_default_selection()` 命中即视为"清覆盖"）。
+  - 前端（`components/ModelPicker.tsx:73-79` `commitSelection`）：把 `DEFAULT_VALUE` 映射成
+    **`null`** 再回调 → `App.tsx:297-317 handleModelChange` 的 `if (selectedId && name)` 因 `name===null`
+    **直接跳过 POST**，只 `setSelectedModel(null)`。
+  - `web/src/lib/api.ts:528` 的注释本身就写明"`GET /api/models` 的默认条目（is_default=true）
+    也是合法 POST target = 切回默认链"——即**契约要求传默认条目名**，UI 传了 `null`。
+  - 注意 picker 里**另有一个** `deepseek-v4-flash-0731 默认` 选项：选它**会** POST 并清覆盖。
+    两个看起来都像"用默认"的选项，只有一个真的清覆盖——这正是容易漏掉的原因。
+- **修复可行性（已实测，无需后端改动）**：选 `deepseek-v4-flash-0731 默认` →
+  新增 `seq 7 model/changed {from=glm-5.3-flash → to=None}`，覆盖被清空、会话回到默认链。
+  → 前端最小修复：`DEFAULT_VALUE` 应解析为 `models.find(m => m.is_default)?.name`（有 selectedId 时）
+  再走同一条 POST 路径；若该条目缺失则退化为当前行为并给出可见提示。
+- **数据收尾**：`fb3619c6` 已被显式切回默认链（seq 7 `to=None`），无遗留脏模型。
+
+#### ART-01 【跨端·P1】`artifact/externalized` 前端未接线 → **Artifacts 页签恒空**，且在有产物的会话里给出**错误结论**
+
+- **现象（真机）**：会话 `a39876d7` 有 2 条 `artifact/externalized` 事件：
+  - `artifact_id=87d71b1befad2f76`（`source_tool=web_search`，`size=8578`）
+  - `artifact_id=197e88d95cd917b9`（`source_tool=bash`，`size=39600`）
+  时间线里也能看到模型调过 `inspect_artifact artifact_id="197e88d95cd917b9…"`。
+  但 Run Inspector 的 **Artifacts 页签**显示 `Artifacts0`，面板正文写
+  **「本次会话未产生 Artifact。」**；同时 Overview 的 TRACE 区块出现 **`未知事件 2`**（= 这 2 条）。
+  → 同一份数据在两处给出互相矛盾的结论，且 Artifacts 页签的那句是**事实错误**。
+- **根因（三处对齐后判定）**：
+  1. **后端运行时只发 `artifact/externalized`**：`assembly.py:227`
+     `ArtifactOverflowHandler(artifact_store, settings.artifact_overflow_chars)` 用默认
+     `externalize_event_type=ARTIFACT_EXTERNALIZED`（`tooling/overflow.py:47`）；
+     全仓检索**没有任何运行时发射点**发 `artifact/created`（只有 `cli.py` 的展示判断、
+     `multiagent/provider.py` 的透传、`session/event.py` 的定义）。
+     `tests/tooling/test_overflow.py:46-51,128` 已把 `artifact/externalized` 锁成既定行为。
+  2. **规格事件表只列 `artifact/created`**：`03_SESSION_EVENT_MODEL.md` §3 的事件清单里有
+     `artifact/created`，**没有** `artifact/externalized`（`grep externalized` 在该 spec 目录下 0 命中）。
+     → 这是**规格 ↔ 实现的事件名分歧**，不是前端单方面写错。
+  3. **前端按规格接线**：`lib/projection.ts:820` 把 `ARTIFACT_CREATED` 接到
+     `projectArtifactCreated`（写 `tool.artifact`），而
+     `lib/projection.ts:824` 把 `ARTIFACT_EXTERNALIZED` 登记为 `unhandledProjection`
+     （源码注释：「词汇表内但前端尚未接线——显式登记，保持既有兜底行为（进 unknown_events）」）。
+     Artifacts 页签的数据源是 `tools.filter(t => t.artifact)`（`StepDetail.tsx:171,762`），
+     而 `artifact/externalized` **压根不进这个字段** → 该页签在生产路径上**永不可能有内容**。
+- **字段可用性**（说明前端侧修复成本很低）：`artifact/externalized` 的 payload 已带
+  `artifact_id / session_id / source_tool / tool_call_id / size / mime_type`，
+  与 `projectArtifactCreated` 消费的字段**完全同构**——把 `ARTIFACT_EXTERNALIZED` 指向同一投影即可，
+  无需后端改契约。
+- **归属与建议**：
+  - **前端（最小修复，可自主做）**：`ARTIFACT_EXTERNALIZED` 改为复用 `projectArtifactCreated`
+    （或等价地在该投影入口同时接受两种 type）。副作用是「未知事件」计数同时归零，
+    TRACE 区块不再有假告警。需补 `projection.test.ts` 用例。
+  - **后端 / 规格（只报告，不擅自改，AGENTS.md §8/§9.1）**：事件名分歧要由规格侧定案——
+    要么规格事件表补 `artifact/externalized`（并与 `artifact/created` 的关系写清），
+    要么后端统一到规格名（但会动已落盘 JSONL 与冻结契约，风险更高）。
+    **本轮不动后端、不动 spec**，只登记为待决策项。
+- **为什么不是 P0**：主链路（对话 / 工具卡 / 审批 / 委派 / 删除）全部正常，Artifacts 是边缘页签；
+  但它在**确实存在产物**时会给出错误结论，所以也不止于 P2。
+
+#### APR-01 【前端·P1】进程重启后遗留的未决审批卡**永久残留**，且点了只会拿到 404（无失效态、无忽略路径）
+
+- **语料**：会话 `d51bdf05-4b80-4652-b2d0-a954e1836305`。事件流里 `tool/approval-requested`
+  **2 条**、`permission/resolved` **1 条** → 有 **1 条审批永不配对**（`bash`，`action_type=danger`，
+  `approval_id=9ce3a0b31d8f4d70bc3fa1ae6d3f9bfa`），且该会话最后是
+  `run/interrupted`（原因 `process_restart`）+ `session/resumed`。
+- **真机现象**：
+  1. 对话区仍渲染一张 `approval-card pending`（`需要审批`），工具行 `bash danger read-only`，
+     命令原文 `$ dir live-deny.txt 2>nul & echo --- & type live-deny.txt 2>nul`，
+     按钮 `批准 Ctrl+⏎` / `拒绝 Ctrl+⌫` **可点**；
+  2. 上方同时有提示「上次运行在第 2 步中断（原因：process_restart）」——**与卡片的"等你决策"语义互相矛盾**；
+  3. 点 `拒绝` → `POST /api/sessions/d51bdf05…/approve` → **404** → 卡面出现
+     `审批失败（404）`，卡片回到 `pending`，两个按钮**仍然可点**；再点还是 404。
+- **根因（两端对齐，后端无过）**：
+  - 后端：`approval_queues` 是**纯内存**的（`session/service.py:934`，
+    缺队列 → `ApprovalQueueMissing` → 404；`app.py:1236-1240` 已把
+    "approval_id 不存在 → 404（前端过期事件）"写进契约文档），且 run 终结时
+    `_attach_approval_queue_gc` 直接 `pop`（`service.py:1233-1241`）。
+    **恢复链路（`recovery/`）完全不碰 approval** → 重启后这条审批**永远不可能再被 resolve**。
+    后端行为符合已冻结契约，**不是后端 bug**。
+  - 前端：`ConversationState.pending_approvals` 由事件投影得出（`requested` 未配对 `resolved`），
+    `ApprovalCard` **不看 run 是否已 interrupted**，也不区分 404 与网络失败
+    （`ApprovalCard.tsx:58-69` 只把 409 当幂等成功，其余一律"保留 pending + 显示错误 + 允许重试"）。
+    → 对一条**已死**的审批，"允许重试"这个策略本身就是错的：重试永远不会成功。
+- **为什么算 P1**：`run/interrupted` 是 T8 #138 崩溃恢复**明确支持**的场景，不是异常边角；
+  每次进程重启都会在受影响会话里留下**无法消除**的假交互，且文案在骗用户（"需要审批"）。
+  对用户的实际伤害：被卡在一个不可能完成的操作上，反复点击只得 404。
+- **归属与建议（前端）**：
+  1. **主修**：run 处于中断/终态且该 `approval_id` 无后续 `permission/resolved` 时，
+     把卡片渲染为**只读失效态**（例如标题改「审批已失效」+ 禁用按钮 + 说明"运行已中断，该决策无法再提交"）。
+     判据可以完全来自事件流（`run/interrupted` / `run/completed` / `run/failed` 之后仍 pending 的审批）。
+  2. **辅修**：把 404 从"可重试错误"里分出来，文案改为"该审批已失效（运行已中断或服务已重启）"，
+     不再暗示重试。仍保留 5xx/网络错误时的可重试行为（OBS-015 的原意）。
+  3. 若要"重新发起审批"，那是**新功能**（需要后端在 resume 时重放 approval），不在本票范围。
+
+#### DOC-01 【规格·P2】`03_SESSION_EVENT_MODEL.md` §3 事件表与实现已大面积对不上（与 ART-01 同源）
+
+- **做法**：把 spec §3 事件清单（24 个名字）与前端 `generated/event-types.ts`（37 个，由后端契约生成）
+  做集合差。
+- **结论**：
+  - **spec 有、实现没有（8 个）**：`agent/completed`、`agent/delegated`、`approval/requested`、
+    `approval/resolved`、`checkpoint/saved`、`context/built`、`step/completed`、`step/started`。
+  - **实现有、spec 没有（21 个）**：`agent/delegation-started`/`-finished`、`artifact/externalized`、
+    `compaction/start`/`end`、`memory/degraded`、`message/queued`、`model/changed`、`model/fallback`、
+    `permission/resolved`、`queue/cancelled`、`reasoning/started`/`delta`/`completed`/`interrupted`、
+    `run/interrupted`、`steer/requested`/`applied`、`text/delta`、`tool/approval-requested`、
+    `tool/failure-guard`。
+  - 抽查 7 个实现侧名字（`agent/delegation-started`、`reasoning/started`、`text/delta`、
+    `tool/approval-requested`、`permission/resolved`、`model/fallback`、`run/interrupted`）
+    在整个 `docs/spec/` 目录下 **0 命中** —— 即 spec 里根本没有这些名字的落点。
+- **为什么重要**：ART-01 就是这条分歧的**具体受害者**——前端照 spec 的 `artifact/created` 接线，
+  运行时却只发未收录的 `artifact/externalized`，于是页签恒空。同理 `approval/requested` 对应的是
+  实现里的 `tool/approval-requested`，照 spec 找会找不到。
+- **归属**：规格（Primary Developer 维护）+ 后端契约。**本轮只报告，不改 spec、不改后端**
+  （AGENTS.md §1.1：代码与规格冲突应报 Gap，不得反向覆盖冻结需求；§8 Scope Lock）。
+- **建议**：集成时把 §3 事件表按**实现的实际名字**重写（并标明哪些是持久化、哪些是广播），
+  或明确标注该表是"概念速写、非契约"，把契约指向 `generated/event-types.ts` 的来源。
+- **已升级为正式流程（2026-09-13，用户批准重写并要求先走 issue/ticket）**：
+  母票 **#173**，子票 **#174–#178**（T1 重写实装 37 个 / T2 改名映射 / T3 移出 `checkpoint/saved` /
+  T4 三个未实现名定性 / T5 契约源指向 + 漂移守卫）。补充事实：`generated/event-types.ts` 由
+  `scripts/gen_event_types.py` 从 `session/event.py` 生成，且有守卫测试
+  `tests/test_event_types_generated.py`——**契约源一直存在，只是 spec §3 没被任何检查覆盖**；
+  `checkpoint/saved` 更严重：`agent/runtime.py:1165` 与 `storage/checkpoint.py:4` 明令它
+  **永不进 SessionEvent**（ADR-0004 Round 5），spec 却把它列在事件表里。
+  **状态：已交付（2026-09-13）**。T1–T4 已关单（#174–#177）；T5 由用户 2026-09-13 选定
+  **路线 B** 并落地（#178）：spec §3 的事件表**整体移除**，改为「生成物 + 守卫」——
+  `docs/EVENT_VOCABULARY.md` 由 `scripts/gen_event_vocabulary.py` 从 `session/event.py` 生成，
+  `tests/test_event_vocabulary_generated.py` 与事实源双向比对（缺名 / 多名 / 分节归属错都红）。
+  spec §3 从此只留语义、分层与契约源指向链，MUST NOT 再写死事件名或数量。
+  订正：上文"重写实装 37 个"按票面原数记录；T1 实测为 **38**（票面两处清单都漏了 `tool/output_delta`）。
+  交付落点（`feat/backend`，母票 #173 AC6 要的 commit）：T3 `4a261c2` → T2 `d134c21` →
+  T4 `b43f1b1` → T1 `88fbd46` → T5 `60c8d05`；收口记录 `2e3dd16` / `a73dd88`。
+  守卫现状（2026-09-14 复跑）：`tests/test_event_vocabulary_generated.py` +
+  `tests/test_event_types_generated.py` **6 passed**；生成物头部合计行 = 38 类型
+  （36 持久化 + 2 仅广播）。
+
+### 第十一轮 · Subagent 扫描汇总（2 个 subagent，真机点击，2026-09-13）
+
+> 两个 subagent 各自 `new_page` 独占一页（pageId 2 / 3），与我的 pageId 1 隔离；
+> 全程真实 CDP 点击 + DOM/网络/console/截图判据。原始报告留在验收现场
+> （`docs/.round11_subagent_composer.md`、`docs/.round11_subagent_sidebar.md`，**未提交**，
+> 属现场证据不进版本库）；可执行项已全部落进下面的 finding 表与集成提示词。
+
+#### 通过（证据登记，节选；两个 subagent 合计真实点击 46 个控件，0 个"点了没反应"）
+
+- **Composer / 空态 / 记忆面板 15 个控件全部 reacted**：模型 picker（5 项，当前值带 `sel`+Check）、
+  权限模式（3 项）、Agent Profile（3 项）、Reasoning Effort（3 项）、Context Providers（多选，勾选态
+  `☑/☐` 往返）、发送按钮 gating（纯空格不解禁）、Chat/Split/Preview 三态 `aria-pressed`、
+  记忆管理（`GET /api/memories` 200 + 诚实空态「不是加载失败，是真的没有」）、新建会话（空态 + 3 个
+  example-chip，**不发 `POST /api/sessions`**）、3 个快速提示 chip（只回填 textarea，**不起 run**）。
+- **侧栏 / 项目管理 31/32 项 reacted**：目录浏览器四种情形（200 只列目录 / 404 `目录不存在：` /
+  422 `不是目录：` / 403 `无权限访问：`）UI **逐字**显示后端 detail；注册项目（默认标题取 basename）、
+  重命名（PATCH 200）、软删除（DELETE 200 + 四条承诺 + 回执 `sessions_detached:0`）全程
+  **磁盘零改动**、`GET /api/sessions` 恒 32、未分组恒 24；attach 冲突 409 的 dialog `role=alert`
+  逐字显示、浮层不关闭；拖拽机制（`.dragging` / `.rail-drop-tail` "放到最后" / `.rail-drop-indicator`）
+  正常且 no-op 落点**不发请求**。
+
+#### 新增 finding（subagent 提出，本 Agent 复核归属）
+
+| ID | 归属 | 级别 | 摘要 | 位置（只读定位） |
+| --- | --- | --- | --- | --- |
+| **API-01** | **后端** | P2 | `POST /api/projects` 的 422 detail 是**裸 OSError**：`[Errno 20] 不是目录: 'D:\...\readme.txt'`（反斜杠双重转义可见），与 `GET /api/host/dirs` 同场景的策展文案 `不是目录：<path>` 不一致 | `web/domain_errors.py:170-178 workspace_http_error()` 用 `detail=str(exc)` |
+| **API-02** | **后端** | P2 | 注册项目填相对路径 → 中文界面里冒出英文 `path must be an absolute path`（Pydantic 校验原文） | 前端 `readErrorDetail()` 已正确解析 detail 数组并剥 `Value error, `，问题在文案本身 |
+| **MOD-F1** | 前端 | P2 | 模型/权限/Agent/推理 picker **键盘导航失效**（条目 ≤5 时搜索框 `hidden` → 焦点落在 Radix content，`cmdk-root` 的 `onKeyDown` 收不到事件）；对纯键盘用户是功能不可用 | `components/ModelPicker.tsx:7` 注释宣称"方向键/Enter 由 cmdk 内置"与实测矛盾 |
+| **MOD-F2** | 前端 | P2 | 单选 ControlPicker（权限/Agent/推理）选了之后**没有任何回到"未选（默认）"的入口** | `components/ControlPicker.tsx` 只渲染 `entries` |
+| **MOD-F4** | 前端 | P2 | Context Providers 的勾选态画在 `aria-hidden="true"` 的 span 上，辅助技术读不到；`role=option` 的 `aria-selected` 只表示 cmdk 高亮 | — |
+| **MOD-F5** | 前端 | P2 | Split / Preview **并不真正分栏**，只插一条 `workspace-scaffold` 提示条（UI 自标"未来升级点"） | 若产品本轮就要求副面板，则升级为 P1 |
+| **MOD-F6** | 前端 | P2 | `selectedIds` 未与 `entries` 对账 → entries 变化后可能出现"已选但不可见/不可取消"的幽灵项（静态结论，未动态复现） | `ContextProviderPicker.tsx:47-49` |
+| **PRJ-F3** | 前端 | P3 | 项目重命名输入**纯空白**时静默丢弃（无请求、无提示、编辑态退出），用户易误以为改名成功 | `ProjectDialogs.tsx:434-436` → `SessionList.tsx:270-276` |
+
+**未覆盖 / 环境限制（须记入，避免被误判为缺陷）**：
+
+- **PRJ-F4【方法限制】**"真·重排后顺序改变并刷新保持"、「移出项目」导致 `sessions_detached>0`、
+  项目内会话的写项（上移/下移/移出/删除）**本轮不可达**：唯一创建会话的路径
+  `POST /api/sessions` 总是 `create_and_launch()`（`app.py:1013-1046`）→ 造一条自己的会话必须起一次
+  LLM run（被本轮硬约束禁止），而 attach 真实会话会改用户可见分组。**这三项仍待验**。
+- **PRJ-F5【环境噪声】**`localStorage.ahi.selectedSession` 是**同源单键**：三个页面并发时互相覆盖
+  （subagent 页面顶栏/选中行是 `d51bdf05`，读到的键却是别的 id）。单标签用户无感，
+  **不能**作为前端缺陷判定；但它也解释了"刷新恢复被别的标签页带偏"的现象。
+- **`<后端>\web\` 是旧快照（集成安全警示）**：本工作区 `feat/backend` 的 `web/` 里**没有**
+  前端 `57dd028` 的会话硬删对话框（grep `永久删除` 零命中），即 backend 分支的前端树**落后于**
+  frontend worktree。集成时**不要用 backend 分支的 `web/` 去覆盖 frontend 的 `web/`**；
+  本轮所有前端 finding 均**不在本工作区改**（改了也送不到 frontend worktree，只会再造一份分叉副本，
+  见 SID-04）。前端修复另出提示词交付。
+- **`workspaces/ws-delete-me/` 不是垃圾**：它是会话 `43e7b46e` 的 `cwd`
+  （`session/started.cwd = …\workspaces\ws-delete-me`），来自更早一轮 #172 测试语料；
+  它不在 `GET /api/projects` 里是**正确**的（不是项目，只是会话工作目录）。**不要当成遗留目录清掉**。
+
+### 第十一轮 · 修复收口（2026-09-13，本轮 finding 的落地状态）
+
+> 与上面各 finding 的正文配套读：这里是**每条 finding 现在的状态 + commit**（母票 #173 AC6 要求）。
+> 前端修复全部在 `D:\intelligence-agent-frontend`（`feat/frontend`）落地——本 worktree 的 `web/`
+> 是旧快照（见 SID-04 与文件末尾的"集成安全警示"），在那改送不到前端。spec 修复在 `feat/backend`。
+
+#### P1
+
+| ID | 状态 | commit（分支） | 真机/测试证据 |
+| --- | --- | --- | --- |
+| **ART-01** | **已修复** | `47b2644`（feat/frontend） | `artifact/externalized` 接线到 Artifacts 页签；真机会话有产物时页签有内容、`unknown_events` 为空；门禁 224 e2e 绿 |
+| **MOD-01** | **已修复** | `65c8b7b`（feat/frontend） | 真机 `fb3619c6`：选 `glm-5.3-flash` → JSONL `seq8 {to=glm-5.3-flash}`；再选「默认链」→ `seq9 {from=glm-5.3-flash, to=None}`，覆盖被真的清空（修复前零请求）。新增 `lib/modelSelection.ts`（取默认条目名提交）+ 5 条单测 |
+| **APR-01** | **已修复** | `2c5adbd`（feat/frontend） | 真机 `d51bdf05`（JSONL seq11 审批 + seq12 `run/interrupted`）：卡片 `approval-card pending invalid`、标题「审批已失效」、批准/拒绝均 disabled、**零 `/approve` 请求**；并且 composer 解锁（打字后发送键可用）。修复前是永久死局：卡点不动 + 输入框禁用，这个会话再也发不出消息 |
+
+#### P2（后端侧，早于前端批次，`164fbc2` on feat/backend）
+
+| ID | 状态 | 证据 |
+| --- | --- | --- |
+| **API-01** | 已修复 | `POST /api/projects` 的 422 detail 与 `GET /api/host/dirs` 同款策展文案（新增 `os_error_detail()`）；测试断言两处 detail 逐字一致 |
+| **API-02** | 已修复 | 相对路径/空路径/含 NUL 路径全部中文文案（`path 必须是绝对路径` 等）；全量 pytest 2130 passed |
+| **SID-03** | 已修复 | `docs/ACCEPTANCE_LANE_ENV.md` §2 期望能力集 2 → 3（补 `memory`），与真机 `/api/capabilities` 对齐 |
+| **SID-04** | 已处置 | 登记簿在两侧 worktree 已分叉：集成 AI 在 **main** 侧把第十一轮拆成「（前端侧）/（后端侧）」并加头注；本 worktree 保留**后端侧**副本。后续每轮新章节只在本侧追加，不再假设两侧同名章节同一内容 |
+
+#### P2（前端侧）
+
+| ID（旧 → 本轮编号） | 状态 | commit | 证据 |
+| --- | --- | --- | --- |
+| **SID-01** → FE-R11-09 窄屏删除入口不可达 | **已修复** | `8e8f0ab` | `≤820px` 不再收起 `.rail-menu-btn`；槽位共享（空闲=会话点、hover/聚焦=⋯，⋯ 绝对定位不挤可点面积）。真机 800px 实测：`focusInCmdkRoot`/`dot` 切换正确、`itemW≥24`；e2e 800px 视口跑完删除确认全流程。**同时发现同一条规则误伤 `.session-item-dot`**（注释声称"只留下点"实际把点也藏了 → 行是空条），已一并修正 |
+| **SID-02** → FE-R11-10 危险弹窗初焦 | **已修复** | `8e8f0ab` | 删除确认弹窗初焦从右上「关闭(X)」改为「取消」（回车 = 零请求安全取消）；e2e 断言 `toBeFocused()` + 零 DELETE |
+| **MOD-F1** → FE-R11-04 picker 键盘导航 | **已修复** | `59673ef` | 短目录搜索框隐藏时把初焦交给 listbox（cmdk 的 keydown 承接者在 `[cmdk-root]` 内）；**变异验证**：去掉修复该用例报 `focusInCmdkRoot=false` 失败。真机实证：打开后 `activeElement` 已在 root 内、Enter 直接提交高亮项 |
+| **MOD-F2** → FE-R11-05 单选无"未选"入口 | **已修复** | `59673ef` | 首项「默认（未选）」提交 `null`；真机实键选回后 trigger 回到 placeholder；e2e 锁住往返 |
+| **MOD-F4** → FE-R11-06 勾选态对 AT 不可见 | **已修复** | `59673ef` | cmdk 硬写 `aria-selected`（=高亮），故勾选态改挂 `role="option"` 的 `aria-checked` + listbox `aria-multiselectable`；e2e 断言 true/false 往返 |
+| **MOD-F6** → FE-R11-07 幽灵 selectedIds | **已修复** | `59673ef` | `selectedIds ∩ entries` 后再计数与 toggle；单测两条（含全幽灵 → 回 placeholder） |
+| **PRJ-F3** → FE-R11-08 空白重命名静默丢弃 | **已修复** | `8e8f0ab` | Enter 遇空白就地拦下：可见提示 + 保留编辑态 + `aria-invalid`/`aria-describedby`；补字后正常提交。e2e 三段锁住 |
+| **MOD-F5** → FE-R11-11 Split/Preview 占位 | **未修（待产品决策）** | — | 已开 **#180**：改「未实现」态（disabled + title）还是本轮做真副面板。**没有自行改**——它是产品可见的能力声明，按 §9.1 停下报告 |
+
+#### 本轮新发现（修复过程中冒出来，不是原 finding）
+
+| ID | 归属 | 级别 | 摘要 | 处置 |
+| --- | --- | --- | --- | --- |
+| **MOD-F7** | 前端 | P2 | `≤820px` 时 `.rail-project-head` 整块收起 → **项目级操作**（重命名项目 / 删除项目 / 新建会话）在窄屏没有任何入口（与 SID-01 同源，但作用在项目层；那一块的注释只说"层级信息丢失是刻意降级"，没提"操作不可达"是副作用） | 已开 **#179** 待决策；本轮**未改**（改法涉及窄屏项目行是否保留一个槽位，属产品取舍） |
+| **方法学** | 测试基建 | P2 | `pickControl` 在 Escape 后不等退出动画卸载就再次 open → 选中静默失效（只在连续两次调用时复现） | 已修：helper 末尾等 `[role="listbox"]` 卸载（`59673ef`），并在注释里写明成因 |
+
+#### spec 侧（母票 #173 的 T1–T5）
+
+| 子票 | 状态 | commit | 说明 |
+| --- | --- | --- | --- |
+| **T3**（#176） | **已交付并关单** | `4a261c2` | `checkpoint/saved` 移出事件表 + 新增 §3.1 存储层分层说明 |
+| **T2**（#175） | **已交付并关单** | `d134c21` | 4 个历史名 → 实装名映射表（§3.2）+ 表内行内注记；脚本核对无"裸契约行" |
+| **T4**（#177） | **已交付并关单** | `b43f1b1` | `step/started`/`step/completed`/`context/built` → §3.3「设计草案，勿按此实现」 |
+| **T1**（#174） | **已交付并关单** | `88fbd46` | §3 按实装重写：**38** 个类型（36 持久化 + 2 仅广播），脚本比对与 `event.py` 集合相等 |
+| **T5**（#178） | **未交付（待决策）** | — | 票面自己写明"两条路线需 Primary Developer 选一条，本票不得自行决定"：① spec §3 表允许被机器解析（加守卫测试）② 权威副本生成到代码侧、spec 只引用。**已按票面停下**，等选定后一条 commit 可完成 |
+
+**两处数量订正（按代码为准，已在 #174 评论区说明）**：实装类型是 **38** 不是 37（母票两处清单都漏了
+`tool/output_delta`）；母票 AC1 把 `text/delta`、`reasoning/delta`、`tool/output_delta` 举例为"仅广播"，
+与 `STREAM_ONLY_TYPES` 和 ADR-0016 §3.1 相反——它们都是**持久化**的合帧 chunk。
+
+---
+
+## 第十二轮（后端侧）（2026-09-13）：面板 T4（#185 artifact 只读接口）期间的观察
+
+### OBS-11.1 【后端·全量门禁间歇性·非本票引入·未复现】偶发 22 个 web 用例失败
+
+**现象（2026-09-13）**：`feat/backend` 上**同一份代码**（#185 完成态）连跑 5 次全量 `pytest -q`：
+
+| 轮次 | 结果 | 用时 |
+| --- | --- | --- |
+| 1 | 2152 passed / 0 failed | 317.97s |
+| 2 | **22 failed / 2130 passed** | 326.44s |
+| 3 | 2152 passed / 0 failed | 199.58s |
+| 4 | 2152 passed / 0 failed | 218.05s |
+| 5 | 2152 passed / 0 failed | 289.78s |
+
+失败样本（当轮 tail 里还看得见的两条）：`tests/web/test_web_stream.py::test_replay_backlog_threshold_emits_control_frame`、
+`tests/web/test_web_ws_relay.py::test_ws_multisession_real_snapshots`——都集中在 `tests/web`，
+且都是**真 ASGI / 真 WebSocket 传输**类用例。
+
+**已做的排查**：
+1. 失败那轮的完整输出**没有留存**（只 tail 到 3 行），所以**拿不到 traceback**——这是流程缺陷：
+   本轮之后的全量门禁统一先落 `/tmp/*.log` 再 tail（后 4 次即如此办理）。
+2. 把两个已知失败文件**单独连跑 3 轮**：10 passed / 12-14s，**全绿** → 不是确定性失败。
+3. 排除"与前端 e2e 抢 CPU"：失败轮次当时没有并行前端任务。
+
+**判断：非本票引入**。#185 的 diff 只碰 artifact 读路径（`web/artifacts.py`、`storage/*artifact*.py`、
+`web/app.py` 一条新路由），不触达失败用例的代码路径；且同一份代码多数轮次不可复现。
+
+**未定位的假设（留给下次复现时验证，别当成已排除）**：
+- Windows 上大量 `TestClient` / 真 WS 连接的**临时端口 / TIME_WAIT 压力**（失败集中在传输类用例）；
+- 某个共享外部依赖（Milvus / Langfuse / 模型网关）在那一轮瞬时不可用造成**级联失败**；
+- 失败是否集中在整轮跑的**尾部**（若如此，指向资源累积而不是随机）。
+
+**归属：后端（测试稳定性）**。本轮**不修**（§8 Scope Lock）。下次复现时按上面三条假设取证，
+**不要**用"重跑一次过了"结案。
+
+---
+
+## 用户报障批次（2026-09-14）：composer 停止提示 + 用户消息动作行（**裁决已定，未修**）
+
+用户真机截图报的两点前端 UX 问题。按用户明确要求：**本轮只登记 + 开 issue，不动代码**
+（"你先记下来，不要着急修"）。已开 GitHub issue，编号写在每条的标题里。
+随后用户对形态/语义问题作了裁决，**裁决原文见下方各条 + 对应 issue 评论**；
+等用户发来第二个修复点后一并排期开工。
+
+### UX-01（issue #194）流式期间「Esc 停止」提示压在左下角档位控件上
+
+**现象**：发起 query（run 流式中）时，composer 左下角出现 `<kbd>Esc</kbd> 停止`，
+与最左档位控件（模型选择器）**画在同一位置、互相叠字**；而真正的停止按钮在右下。
+用户原话：「左边为什么会有个 ESC 停止？就算有也应该是在右边的按钮上啊」。
+
+**根因（定位到行）**：`web/src/components/Composer.tsx:173-175` 渲染该提示（仅 `streaming` 时），
+`web/src/styles/app.css:2998-3009` 给它 `position:absolute; left: var(--space-lg); bottom: var(--space-sm)`
+—— 与档位行（模型/权限/Agent/推理/Context）**同一锚点**；停止按钮在 `right/bottom`（`app.css:2959-2962`）。
+即同一动作的两个 affordance 被放在相反两侧，且文字提示那侧正好是档位控件。
+
+**裁决（用户 2026-09-14，issue #194 评论）**：**删掉文字提示，只留右侧圆形停止按钮**。
+用户原话：「干脆去掉文字，只留圆形停止按钮」。
+
+即重叠是**从根上消失**（元素删除），不是挪位置。实现面：删 `Composer.tsx:173-175` 的
+`<span className="composer-esc-hint">` + `app.css:2998-3018` 两条规则（含 `kbd` 子选择器）；
+`.composer-stop`（`Composer.tsx:176-178`）保持右下不动。
+
+**已核：删它不带走任何断言**——`grep -rn composer-esc-hint web/` 只有组件与 CSS 两处，
+`web/e2e/**` 与 `src/**/*.test.tsx` **零引用**。
+
+**验收要点**：流式中左下档位行（模型选择器起）与任何元素**不相交**；右下停止按钮点击仍中断在途 run；
+`Esc` 中断行为不变（全局键绑定在 App，本票不动）；非流式不渲染停止按钮与提示。
+
+**已知代价（记录在案）**：键盘用户失去"Esc 可中断"的可见提示（只剩按钮 `title`，需悬停）。
+若将来要补偿，落点是 `aria-keyshortcuts` / `title` 这类**非布局**信号，而不是再放一个绝对定位浮字。
+
+### UX-02（issue #195）用户消息动作行重设计：复制 / 编辑 / 分叉 三图标（对齐 Codex）
+
+**需求**：query 下方一行图标 —— **复制** / **编辑（铅笔）** / **分叉**；hover 出提示
+（分叉文案「在此次分叉新会话」）；点编辑后 query 变可编辑输入框 + 「取消」「发送」按钮（参考图四）；
+分叉不再用文字胶囊（参考图五）。
+
+**现状（定位到行）**：`Conversation.tsx:450-465` 用户消息 = 气泡 + **文字**按钮「分叉」
+（`.fork-btn`，`app.css:1790-1805`，`title` 为「从此处分叉新会话」/ 首轮空会话提示）；
+助手侧有 hover 复制（`CopyButton.tsx` 经 `Conversation.tsx:643`）；**没有编辑能力**
+（`lib/amend.ts` 与"编辑历史消息"无关，它是 Composer 档位→契约字段的映射）；
+用户消息**没有**时间戳。
+
+**裁决（用户 2026-09-14，issue #195 评论）**：
+
+1. **编辑范围 = 只有最后一条 query**。判据是"其上再没有后继轮次"，不是"第几轮"；中间历史 query 不提供编辑。
+2. **流式中也要能编辑 + 能发送**（用户原话：「即使大模型正在输出也要能编辑可以发送，和 codex、zcode 一样」）。
+   ⇒ `Conversation.tsx:452` 的 `turn.status !== 'streaming'` 守卫**必须放开**（至少对编辑/复制），
+   否则最后一条 query 在流式中根本看不到按钮。
+3. **「发送」语义 = 先停止在途 run，再把改后文本作为一条新的 user message 发出**（用户选 (c) 等价重发）。
+   复用既有正道：在途 run → 走 `Composer.tsx:22` 的 `onCancel`（就是右下圆形按钮的同一个回调）→
+   然后 append 新 user message。**零后端改动、零新契约、零新 ADR**，且 spec 03 要求的
+   SessionEvent 完整历史不被破坏（机器里没有"改掉第 N 条 user message"这种事件）。
+   与参考图四「你在 0 秒后停止了」的观感同形：被替代的那条留在日志里，UI 照现在的停止样式呈现。
+4. **时间戳加在图标行最左侧**（用户原话：「加，放在图标行最左侧」）。
+5. 图标行左→右：**时间戳 / 复制 / 编辑 / 分叉**；`分叉` 的文字 pill 改图标 + `title`（hover 出「在此次分叉新会话」）。
+
+**待用户拍板的一点**：被替代的那条 query 在界面上怎么显示。倾向**原样保留 + 已有停止标记，不隐藏**——
+隐藏它要么前端维持第二份真相（违反不变量 22），要么给 `/messages` 加"被 seq=N 取代"字段（后端契约变更）。
+若用户要求"编辑后旧 query 消失"，那是一个**独立的后端契约票**，不塞进本票。
+
+**待定（实现时按仓里既有先例办，不再回问）**：流式期间分叉按钮是否显示。后端对在途 run 的 fork 会拒
+（`ActiveRunConflict`）；按 #172 定下的纪律"不据前端猜测做禁用态，让后端拒绝并显示它的 detail"，
+倾向照常显示、点了看到后端 409 原文。
+
+**实现要点（裁决 4 引申，别踩坑）**：`Turn` **当前没有** user-message 时间字段——
+`lib/projection.ts:214-226` 的 `projectUserMessage` 只设 `user_message` / `user_message_seq`；
+`touchTurn`（`lib/projection.ts:1183-1187`）只给 `turn.started_at` 赋值。**不能拿 `started_at` 顶替**：
+它是该轮**第一个事件**（通常 `run/started`）的时刻，不是 query 自己的时刻，拿它显示就是伪造（不变量 21）。
+⇒ 需在投影层加 `user_message_time`（`newTurn` + `projectUserMessage`，取 user/message 事件自带的 `time`），
+并同步投影测试。
+
+**影响面（改动时会踩到的断言）**：`Conversation.test.tsx:292-336`（断言 `.fork-btn` 存在与 title 文案）、
+`web/e2e/b-fork.spec.ts:79,108,118-121`（按 `.fork-btn` 定位 + 逐字断言 title `从此处分叉新会话` / `/空会话/`）。
+改图标后 `title` 属性必须保留（hover 仍可读），否则这两处要**重写**而不是删。
+
+**验收草案**：① 最后一条 query 三图标在流式中即可见可用，非最后一条用户消息只有复制/分叉；
+② 编辑态 = 内联替换 + 「取消」「发送」，取消后原文还原；③ 编辑态发送时 e2e 断言
+**先出现停止请求、再出现新的消息发送请求**及结果收敛；④ 只增不改——编辑发送后 `/events` 里旧的
+`user/message` 事件**仍在**（用事件数/seq 断言，不只看界面）；⑤ 时间戳取自 user/message 事件自身 `time`；
+⑥ 图标有 `title`（含「在此次分叉新会话」）；⑦ 门禁五连绿。
+
+**本票不动**：助手侧输出动作（`CopyButton`，`Conversation.tsx:643`）；`lib/amend.ts` 是 Composer 档位
+→ 契约字段映射、**与消息编辑无关**，别被名字误导。
+
+**状态**：两条**均未修**（用户明确「你不要执行」）。等用户发来**第二个修复点**，一并收编排期后开工。
+
+---
+
+## 用户报障批次 2（2026-09-14）：Inspector 拖拽方向 + 「模型说没有写工具」（**仅登记，未修**）
+
+用户第二批真机报障。同样**只登记 + 开 issue，不动代码**。完整证据链在 issue 正文里。
+
+### UX-03（issue #197）Inspector 水平拖拽方向反了
+
+**现象**：向右拖把手，右侧面板反而**变大**（直觉应为变小）。
+**需求**：向右拖 = 面板缩小；向左拖 = 面板放大。仅改拖拽方向，保留原样式与 `↔` 控件，不碰面板业务代码。
+
+**根因（定位到行）**：面板右侧停靠、手柄在**面板左缘**，指针右移 `dx>0` 应减小宽度，代码却**加** `dx`——
+`web/src/components/StepDetail.tsx:279` `clampInspectorWidth(drag.startW + (e.clientX - drag.startX), …)`。
+**同源反转**：键盘通路 `:297` 的 `ArrowRight` 也是加宽（同一 `role="separator"` 上键鼠必须同语义）。
+**会红的既有断言**：`web/e2e/y-inspector-peek.spec.ts` 的 AC6（`:222-234` 向右拖到 480、向左拖到 320、
+向右 `>320`）与 AC7（`:248-251` `ArrowRight → 336`）**逐字锁住反向行为**，必须同步翻转（连用例名一起改，
+commit message 写明"方向翻转 + 断言同步"）。
+**⚠ 易误判点**：`INSPECTOR_MIN_W = 320` 且初始宽度就是 320（e2e `:198-200` 断言 `aria-valuenow/min` 均为 320）
+⇒ 修好后**在默认宽度下向右拖没有任何视觉变化**（已夹在下限），只有向左拖会变大。是否调整初始/下限关系属产品取舍，未定。
+**影响面**：`StepDetail.tsx` 1 行必要 + 1 行待定；`clampInspectorWidth`（`lib/inspectorPanel.ts:40-43`）与 CSS 不动。
+
+### OBS-04（issue #198）「模型说没有 write/edit/apply_patch」无法从日志回溯
+
+**现象**：用户问模型有哪些工具，模型答只有 `read`/`glob`/`grep`/`web_search`，并称没有 `write`/`edit`/`apply_patch`。
+**根因（已定案，非幻觉、非未安装）**：那次会话的 Agent 档位是 **「研究审查」(`research_review`)**，
+按 ADR-0020a 用 `registry.filtered(spec.tool_scope)` 收窄了 registry；`_RESEARCH_TOOLS`（`agent/profiles.py:68-71`）
+**不含任何写工具**；`research_review` 的 system prompt 末句就是「**你没有写权限。**」（`prompt/builtin.py:49`），
+模型是在转述它。内置工具本身在 `assembly.py:212-218` **无条件注册**（唯一收窄途径就是 `agent_profile`）。
+**决定性证据**：会话 `f522d4a9-55dc-42c7-b24d-e20320f5f77b`（`D:\intelligence-agent\.agent\workspace\sessions\`，2145 事件 / 13 轮 / 0 次 tool call）
+—— 模型报的 4 项**精确等于** `_RESEARCH_TOOLS` 减去两个未装配的知识库工具，全量注册表是十几个工具。
+**本票要修的是它暴露的三个缺口（不是上面那条设计）**：
+1. `agent_profile` **不落任何日志**（SessionEvent 0 命中；诊断日志字段里根本没有）；
+2. **每个 run 实际拿到的工具清单不落任何日志**（全仓无 `tools=`/`tool_names`，已 grep 确认）；
+3. UI **不提示档位收窄了工具集**，且前端不持久化档位（`App.tsx:145` 默认 null = 全量），刷新后现象不可复现。
+
+**与 #187 的关系**：BUG-013 当时**移除了 runtime context 里的工具清单**（防模型把写作任务误判为工具任务），
+本现象是同一处改动的另一面代价——模型只能靠 tools 参数自省，自述工具的能力变弱。这条权衡必须在 ADR 里写明。
+**与 #196 的边界**：本票只管"可观测/可解释"，`queue`/`steer` 消费侧死路见 #196，别合并成一个改动。
+
+---
+
+## 用户报障批次 3（2026-09-14）：UI 重设计三件 + 上下文容量看板（**仅登记，未修**）
+
+用户第三批报障，主体是 **UI 重设计**（明确要求：**用 `impeccable` skill 设计，品味要高**）+ 一个新看板。
+仍**只登记 + 开 issue，不动代码**。完整需求/证据/受影响断言在 issue 正文里，本节只留索引与关键结论。
+
+### UX-05（issue #199）模型选择器两级重设计
+
+**现象**：当前弹层难看（行距局促、`系统自动选`/`默认` 与勾选散落、层级不清）。
+**要求**：改成 ZCode 式两级——一级 provider（带 `>` 与当前生效 ✓、顶部显示当前选中项、底部 `管理模型`），
+二级悬停/点击侧向飞出该 provider 的模型列表。
+**关键发现（"难看"的第一根因）**：**分组其实早就实现了**（`ModelPicker.tsx:42-51` `groupByProvider` +
+`:147` 每 provider 一个 `CommandGroup`），但 `app.css:5697-5705` 的 `.model-picker-group-label`
+**全仓从未被任何 tsx 引用**（死 CSS），cmdk 实际渲染的 `[cmdk-group-heading]` **没有任何样式规则**
+⇒ 视觉上退化成"平铺一长条"。**数据面不需要后端改动**（`/api/models` 已含 `provider` 字段）。
+**必须保留**：`默认链`（系统自动选）伪选项、`commitSelection` 的双击去重守卫（`q-model-dedupe.spec.ts` 逐字锁）。
+**待定**：两级 + 搜索并存时的行为（建议搜索态扁平化并带 provider 前缀）。
+**会动到的断言**：`model-picker.spec.ts`（"6 个 option"语义会变）、`q-model-dedupe.spec.ts`（按 `.model-picker-item` 定位）、
+`picker-search-visibility.spec.ts`、`ModelPicker.test.tsx`、`fixtures.ts`（`MODELS`/`longCatalog`/`pickFirstModel`）。
+
+### UX-06（issue #200）新增「上下文容量」看板（**跨端，后端数据面基本缺失**）
+
+**要求**：对齐 ZCode 的图4——`上下文容量` + `18.3万/35万（52.2%）` + 分段条 + 六类占比
+（消息 / MCP 工具 / 系统工具 / 其他 / 系统提示词 / 技能）+ 脚注 `平均缓存命中率 99.6%`。
+**结论先行（必须让用户先知道）**：**这六个数字今天后端基本算不出来**，
+且 `平均缓存命中率` **完全不可用**——`_usage_from_response`（`runtime.py:118-135`）只映射三个键、
+**主动丢弃** `input_token_details`（含 `cache_read`），并且**有测试逐字锁住这个丢弃行为**
+（`tests/test_structured_logging.py:95-133`）。SDD 已声明 `cached_tokens?: number`
+（`03_RUNTIME_EVENT_CONTRACT.md:162`）但**未实现**；PRD 亦承认命中率未实测（`PRD_PROMPT_REGISTRY.md:280`）。
+按不变量 #21（不得伪造事实）**不能先填占位数字**。其余：窗口只有全局 `Settings.max_context_tokens=200_000`
+（`config.py:68`）且 builder **忽略**目录里的每模型 `context_window`（deepseek 宣称 64k、实际按 200k 算，既有不一致）；
+分类明细是 builder 的**私有** int（`_system_prompt_tokens` / `_token_estimate_total`，`builder.py:57,198-228`）未暴露；
+**工具 schema 的 token 全仓零计数**（系统工具 / MCP 工具两行无来源）；
+技能/记忆的 provider 代价在 `_with_providers`（`builder.py:244`）算完即丢。
+**无任何** `/usage`、`/stats`、`/context`、`/cost` 端点，WS 也无 stats 帧；前端今天只渲染 `usage_total.total_tokens`。
+**待拍板**：窗口真相（全局 vs 每模型 vs 新配置）、分类集合（照抄图4 还是落到本仓架构含"记忆"）、
+是否明示"这是估算"、触发入口（建议升级 TopBar 已有 tok 读数；
+⚠ **必须与 composer 现存的 `Context · N` 药丸区分**——那个是 context **providers** 选择器，同名即误解）。
+
+### UX-07（issue #201）权限 / Agent 档位 / 深度 三个下拉统一重设计
+
+**要求**：按图6 范式——每行 = **图标 + 标题 + 一句话描述**，选中态整行 accent + 行尾 ✓，
+面板带一句问句式头部（本仓无对应文档 ⇒ **链接先留空，不许造死链**）。
+**好消息**：图6 那种两行结构**数据早已具备**——三份目录的 `description` 全由后端下发
+（`tooling/contract.py:110-121` / `web/app.py:107-120, 123-136`），前端零硬编码；
+"难看"的根因是现在把 description 塞进 `.model-picker-item-meta` 灰字（`app.css:5727-5731`），
+且选项名用了 `--font-mono` + 11px（`app.css:5718-5726`）偏离 type scale。
+**顺带收债**：三个近乎重复的 picker 实现（`DEFAULT_VALUE` 与 cmdk `includes` 回调逐字复制）、
+触发按钮 CSS 双份（`.composer-model` 5519-5575 vs `.composer-control` 5587-5639，仅 max-width 不同）、
+默认项文案/选中指示/搜索阈值/`align`/可访问名（中英混用）五处不一致、多选无法表达"显式清空"。
+**待授权**：是否把三个 picker 合并为一个共享组件（**结构重构**，非纯视觉——但不合并则上述不一致会被抄成三份新样式）。
+**会动到的断言**：`control-row.spec.ts`、`context-providers.spec.ts`、`picker-search-visibility.spec.ts`、
+`u-project-task.spec.ts`（弹窗复用同一 `ControlPicker`）、`e2e-live/approval-live.spec.ts`、
+`g-visual-qa.spec.ts`（`.composer-control` 计数 = 3）、`fixtures.ts`（三份目录 + `pickControl`）。
+
+### UX-08（issue #198 评论）档位收窄工具集的提示 —— 裁决 = 从简披露
+
+用户要求「UI 可以提示一下，具体怎么设计一定要从简，不能突兀」。
+**主方案**：把"该档位不含什么"写进**选项自己的描述**（后端 `AGENT_PROFILE_DESCRIPTIONS` 补一句工具面摘要），
+零新增视觉元素，信息正好出现在做选择的那一刻；**文案必须后端下发**（写前端常量等于把 `tool_scope` 抄第二遍）。
+**次方案**：触发按钮 `title` 补一句（hover 可见、零占位）。**不做**横幅/toast/红点。
+**关于不持久化**：核对后建议**保持现状**——`agent_profile` 是 per-run amend，未选=后端默认=全量，
+刷新后显示"未选"**是如实的**；加 localStorage 反而会让用户被忘记选过的只读档位困住。
+本仓既有纪律也是"只有视图状态落 localStorage，**会改变运行行为的入参不落**"。
+若用户要"记住档位"属**独立决定**（会改变"未选"的语义），需单独拍板。
+
+---
+
+## 用户报障批次 3 的答复与落实（2026-09-14）：三项裁决 + 一项派生发现（**仍仅登记，未修**）
+
+用户对批次 3 的待定项给出裁决，并追加"能直接拿来用的就直接拿来用，不要手写"的复用要求。
+
+### 裁决已落到 issue
+
+| 出口 | 裁决 |
+| --- | --- |
+| **#199** 模型选择器 | **去掉搜索框**，只做两级（"才几个模型没有必要使用搜索框"）。删搜索相关 tsx/CSS/断言；`默认链` 伪选项与双击去重守卫保留。⚠ `picker-search-visibility.spec.ts` 是**局部删除**（另两个 picker 仍在用搜索）。 |
+| **#201** 三个控制下拉 | **授权合并成一个共享组件**；`aria-label` **不统一为中文**——已核实会碰到 e2e 定位器（`control-row.spec.ts:42-52`、`context-providers.spec.ts:40-94`、`fixtures.ts:889-912`、`e2e-live/approval-live.spec.ts:35`），按用户给的条件维持现状。⚠ 不统一意味着**共享组件不得内置 aria-label 默认值**（否则合并会顺手改名，等于偷偷做了被否掉的事）。图6 头部的「了解更多」本仓无落点 ⇒ 先不放，不造死链。 |
+| **#200** 上下文容量看板 | **必须做，图4 全部元素都要**（含缓存命中率）⇒ 缓存 token 捕获从"可选降级"变成**必做**。**入口替换 composer 的 `Context · N` 药丸**（`ContextProviderPicker` 移除）。 |
+
+### 派生发现（已开 issue #202）：用户对记忆的判断**只成立一半**
+
+用户前提：「记忆不需要点击选择就能注入…模型觉得需要就**可以按需检索**」。
+
+- **成立的一半**：`MemoryContextProvider.select()` 每 run 自动跑（`context/builder.py:230-251`），
+  查询词 = 会话累计用户消息（`memory/context_provider.py:32-34`），注入为 SystemMessage；
+  与 pill 无关。因此"移除 pill"是安全的（缺省即全量注入，`assembly.py:147-148`）。
+- **不成立的一半**：**没有任何模型可调用的记忆检索工具**。memory 只贡献 `forget_memory`（写侧，
+  `memory/tools.py:44-53`）；`search`/`recall` 只是 Protocol 原语（`memory/capability.py:85-86`），
+  `recall` 零调用方。对照：**技能**走的正是用户描述的形态——静态目录注入 + `load_skill` 按需加载
+  （`skills/context_provider.py:19-50` + `skills/tool.py:36-44`）。记忆缺的正是这一半。
+- **派生缺陷**：`forget_memory` 的描述写着"不确定要删哪条时先检索确认"（`memory/tools.py:61`），
+  让模型去用一个**不存在**的工具——与 #187 同类（模型对自身能力认知不可靠）。
+
+### 复用调研结论（Reuse First §6，许可证已核；详见 #200 评论）
+
+- **可直接移植的 MIT/Apache-2.0 代码四段**：dsh `context-occupancy.ts`（百分比 clamp 公式）+
+  `ContextMeter.module.css`（弹层几何与 4px 分段条，含 `min-width:2px`、0% 段不渲染）；
+  opencode `session-context-breakdown.ts`（分类拆解 + **"其他"兜底桶** + **估算超出真实 input 时按比例缩放**的诚实机制）+
+  `session-context-tab.tsx`（bar + swatch 图例版式）；pi 社区扩展（唯一带 Skills 桶的公开实现）；
+  Codex `TokenUsageBreakdown`（cache 感知的字段命名，建议直接对齐）。
+- **分段条不需要任何库**：npm 上"segmented progress bar"只有 RN/控件类，Tremor 只支持单值，
+  Recharts/visx 对一条 4px 的条属杀鸡用牛刀 ⇒ flex div 手写，不引库。
+- **缓存命中率没有现成组件**，只有两种公式口径（dsh 会话平均 vs pi 最近一轮）。
+- ⚠ **dsh 自己的归档笔记是本次最重要的警告**：它明确记录"更细的分类（rules/skills/MCP tools）
+  **Not separable here**，因为 harness 把那些贡献折进了 system text 与 tools list，三分类才是诚实的解"。
+  本仓同样把工具 `prompt_guidance` 折进系统提示词、且**工具 schema 全仓零 token 计数**
+  ⇒ 要拆成图4 的六类，**必须先在后端把桶分开**，否则那几行的数字就是编的（不变量 #21）。
+- 仓库早有记载：`docs/BENCHMARK_SYNTHESIS.md:109-116` 已写明"tokens 消耗量 ❌ 事件 payload 无…
+  要显示真值必须扩后端事件 payload"。
+
+### ⚠ 唯一仍未明确的一项（已在 #200 评论中标为待拍板）
+
+窗口真相。用户原话把三个选项并列抄回（「全局 200k / 接通每模型 context_window（我推荐…）/ 新配置」），
+**未单选**。这不是纯展示改动：接通每模型 `context_window` 后，deepseek 的有效预算从 200k 掉到 64k
+（`model/config.py:35`），**自动压缩会更早触发**（`auto_compact_threshold=0.70`，`config.py:69`），
+即单轮能装下的历史变少——属**运行行为变更**，必须用户口头确认。
+
+---
+
+## 用户答复落实（2026-09-14 第四轮）：记忆工具 / 队列语义 / 供应商管理 / 项目弹窗
+
+用户对上一轮全部问题作答，并追加两项 UI 需求。**仍只登记，未实现**。
+
+### 裁决落点（全部已写进对应 issue 评论）
+
+| 出口 | 裁决 |
+| --- | --- |
+| **#202** 记忆工具 | A1 选方案 (a)：**自动注入完全不动**，`search_memory` 只做精准补充、按 id 去重并标出"哪些已注入"，run 中由模型自行判断是否调用。A2 **做**显式"记住这条"写入工具。用户强调**工具描述与参数必须准确**。 |
+| **#195/#196** steer/编辑 | B1 默认**排队** + 另有「立即」按钮触发 steer。B2 队列**界面可见**（chip 列表，可编辑/可取消，接既有 `queue/{id}/cancel`）。B3 队列**要活过崩溃/重启** ⇒ 从 SessionEvent 日志重建（不做第二份持久化文件）。B4 两种场景分开：**S1 编辑**（A→B，界面只显示 B）；**S2 暂停后另发 B**（A、B 都在，链含两者，最新回答要覆盖两者）。 |
+| **#197** 拖拽 | C1 键盘方向键**一起翻**。C2 初始宽度**调成 340**。 |
+| **#199** 模型菜单 | D1「管理模型」入口**归 #203**（本票只做两级菜单 + 去搜索）。 |
+| **#201** 控制下拉 | D2 合并后**直接删掉** `ContextProviderPicker`。 |
+| **#200** 看板 | 窗口 = 全局 200k（已裁决）；**六类之外是否单列「记忆」行**待确认。 |
+
+### 新增两张 issue
+
+- **#203**（跨端·安全）**自定义模型供应商管理**（仿图1：左列表 + 右详情表单，含 Base URL /
+  API 格式 / API Key 掩码 / 模型列表增删改 / 启用禁用 / 测试连接 / 删除）。
+  核实结论：**这不是 UI 改动而是新功能**——目录只来自 env 的 `AGENT_MODELS` JSON，
+  provider 预设**硬编码**（新增 provider 必须改代码，三处校验/索引耦合：`model/config.py:153,303,317`
+  + `web/app.py:887,906`），无可写配置、无加密落盘、`is_available` 恒 True、
+  **只有一种线协议（OpenAI 兼容）**且图1 的「API 格式」下拉**后端无对应物**、无测试连接端点。
+  安全硬约束：管理端 GET 对密钥**只写不可读**；`/api/models` 的零密钥保证与
+  `tests/web/test_web_models.py:56-58` 的 `sk-` 回归锁必须继续成立。
+- **#204**（跨端）**项目弹窗去掉「任务内容」+ 权限选择器重设计**。
+  阻塞点已查清：`CreateSessionRequest.task` 必填（`web/app.py:204`，空串 422 由
+  `tests/test_web_api.py:297-304` 锁住）且 `POST /api/sessions` **总是** `create_and_launch`
+  ⇒ **HTTP 层不存在"只建会话不跑 run"的路**（domain 层 `Session.start` 支持，
+  `docs/archive/integration-prompts/INTEGRATION_PROMPT_FRONTEND_FIXES_ROUND11.md:121-125` 早已把"空会话创建入口"点名为产品决策）。
+  连带要定的产品问题：空会话在列表里显示什么（标题取自首条 user/message，为空时只剩短 id）；
+  弹窗选的权限在去掉输入框后作用于谁。
+
+### 本轮查证到的、会影响设计的事实（避免后人重复挖）
+
+1. **队列消费与 steer 注入都缺**（#196）：`drain_steers` / `drain_queued_message` **零生产调用方**，
+   `steer/applied` **零写入者**，WS 上行 `{"type":"steer"}` 无分派分支，前端硬编码 `mode:'queue'`。
+   而 run 循环每轮都重建上下文（`runtime.py:592`）⇒ 只要有人 append 一条 `user/message` 就能生效
+   （工具失败熔断的纠正消息已证明这条通路可用）。
+2. **记忆检索每轮重跑**（#202）：`_with_providers` 在每次 `build()` 里执行、无缓存，
+   但查询词恒为"用户消息尾部 4000 字符"⇒ 同一 run 内 N 次调用查同一个 query。
+   "标出哪些已注入"需要一个 **run 级已注入 id 集合**（照 `run_context_var` 的 contextvar 方式），
+   否则该需求做不出来。
+3. **Inspector 初始宽度与下限共用同一常量**（#197）：`App.tsx:260` 写 `width: INSPECTOR_MIN_W`
+   ⇒ 要"初始 340、下限 320"必须新增 `INSPECTOR_DEFAULT_W`，`clampInspectorWidth` 与单测不动。
+4. **`/api/models` 仍在暴露 deepseek `context_window=64000`**（#200）：窗口已裁决用全局 200k
+   ⇒ 该字段不得被当成预算，UI 要么不用、要么标注"模型声明值（非本机预算）"。
+5. **仓库自研能力的边界**（多票共用）：`retrieve_knowledge` 属 **knowledge** capability，
+   与长期记忆（memory）是两回事；技能有 `load_skill` 按需加载，记忆**没有**对应的读侧工具——
+   这正是 #202 要补的差距。
+
+---
+
+## 第十五轮（2026-09-22）：真机逐控件全量点击审计（用户点名：每个控件都要点一遍 + 刷新一致性）
+
+> 用户指令（原话）：「对于前端的每个功能都要测试一遍，对于每个功能按钮你必须都要点击一下……
+> 有没有点击了结果没有反应的，你必须每个都要点一遍」「还要去检查一下比如页面刷新后会话内容还在不在？
+> ……刷新后的会话也要和刷新前的会话是一致的」。本轮的登记按「边测边写」实时进行。
+
+### 0. 环境与方法（决定了本轮证据的边界，先读这一段）
+
+| 项 | 事实 |
+| --- | --- |
+| 真机 | 真后端 `agent_harness.web.app:create_app`（uvicorn :8000）+ 真 vite dev server（:5173）+ 真 Chromium（Playwright 1.63.0）。**只有模型这一跳是本地脚本桩** |
+| 为什么桩模型 | 真供应商 `api.senseaudio.cn` 返回 400 `{'code':'billing','message':'计费账户已被冻结'}` ⇒ **真模型链路整轮不可用**（外部阻塞，见 §5），任何"真模型已验证"的结论本轮都不成立 |
+| 桩的行为 | `.workbuddy/live_audit/stub_llm.py`（gitignore 内的一次性脚本，非仓库代码）：OpenAI 兼容 :8123，按消息里的 `#tag` 决定行为（`#fail`/`#long`/`#reason`/`#write`/`#write-big`/`#bash`/`#bash-long`/`#read`/`#read-big`/`#delegate`/`#slow`），流式含 `reasoning_content` 增量、tool_calls 分片、末帧带 `finish_reason` + `usage`（含 `prompt_tokens_details.cached_tokens`） |
+| 未改动的东西 | `.env` 未改（桩地址经 env 覆盖传入，不落盘）、`.zcodeignore` 未读未碰、未动任何用户数据文件；上游仓库零改动（本轮全程只读源码，唯一的仓库写入是本文档 + 下一步的修复） |
+| 门禁基线 | e2e 主车道全量 **440 passed / 0 failed**（12.7m），树 `22aa291`；三 clone 已对齐到 `22aa291` |
+
+**分工**：两个 subagent 并行（A = R1 TopBar / R2 Session Rail / R3 Workspace / R4 空态 / R8 Palette / 会话管理；
+B = R5 Conversation / R6 Approval / R9 Run Inspector），主控负责 R7 Composer + 5 个 picker + #283 权限档 +
+上下文容量看板 + 刷新一致性三场景。控件基址：`ACCEPTANCE_CONTROL_INVENTORY.md`（110 项，R1–R9）。
+
+### 1. 结论速览
+
+- **点过的控件**：初始页 69 个可见控件 + 选中会话后的动态控件（Inspector 各档、审批卡、委派行、工具流、
+  队列 chip、停止按钮、恢复入口排除项）逐一点击或明确记录"为何未点"（见 §4）。
+- **新发现**：**1 个真缺陷**（M-01，后端 P2，缓存命中率永不采集）+ **1 个待定 P2**（A-02，取消文案两处不一致）
+  + **11 个 P3/观察项** + **16 条清单漂移**。
+- **用户点名的刷新一致性：真机通过**（三场景，见 §2 首行）——静止刷新逐节点一致、长会话一致、
+  流式中途刷新自行续流到终态；唯一差异是侧栏相对时间（「刚刚」→「1 分钟前」），非内容差异。
+- **无 P0/P1**：本轮没有"点了没反应"的功能按钮；仅"停止"按钮在 Playwright 合成点击（`locator.click()`）
+  下不生效，真人节奏点击稳定生效 ⇒ 判为**测试基建假象**而非产品缺陷（§3 M-02，含判别实验）。
+
+### 2. 已验证正常（真机点击 + 请求/事件级证据）
+
+| 组 | 项 | 结论要点 |
+| --- | --- | --- |
+| **刷新一致性（用户点名）** | 长会话刷新（`5affc020`，1416 叶子节点） | 对话区**逐节点一致**（1416→1416，差异 1 处 = 侧栏 `45 事件 · 7 分钟前`→`8 分钟前`） |
+| | 工具链会话刷新（`261bbd55`，794 叶子） | 同上（差异 1 处 = 相对时间） |
+| | **流式中途刷新**（run `0406a04d`，turn 6） | 刷新后**不点任何东西**，+18s 内界面出现该 run 完整正文（前 60 字命中）；控制台零错误、零失败请求 |
+| R1 TopBar | 密度四档（radio） | 4/4 可切，`ahi.traceDensity` 持久化；palette 同功能条目 4 条亦通 |
+| | `API 身份令牌设置`（钥匙） | 开/合/保存/清除全通；写入 `localStorage.ahi.apiToken`、面板关闭（异常分支见 A-04） |
+| | `记忆管理` | 打开 memory-panel 对话框、Esc 关（清单未列，见 D-2） |
+| | Inspector 折叠 / `切换主题` | 收起↔展开；light↔dark 且刷新后保持 |
+| R2 Session Rail | 行选中 | `.selected` + 历史加载 + `GET /events` 按需取 |
+| | 行 `⋯` 菜单：`加入项目…`/`新建项目…`/`归档`/删除… | 全部可点；归档 `200 POST /archive` 行移出侧栏；`取消归档` `200 DELETE /archive` 行恢复 |
+| | `显示已归档会话` | `aria-pressed` 翻转 + `已归档` 徽标重现 + `localStorage.ahi.showArchived=1` 持久化 |
+| | `删除会话…` 二次确认 | 弹窗含会话标题/ID 回显 + 「这是硬删除，不可恢复」+ 后果四条；Esc=取消；`永久删除（不可恢复）` → `200 DELETE` 行消失，后端复核该 id 已 404 |
+| R3 Workspace | 三档 tab `Chat`/`文件/改动`/`输出` | 3/3 可切、`role=tab`/`aria-selected` 独占、`role=tabpanel[hidden]` 对应 |
+| | Composer 发送 / `Ctrl+Enter` | 空输入 `发送=DISABLED`（正确）；输入后可点，`200 POST /messages`，输入框清空；`Ctrl+Enter` 等价 |
+| | 模型选择 picker | 两级菜单：`默认链 系统自动选` / provider 分组（`deepseek`/`senseaudio`/`qwen`）/ `管理模型 …`；选中回写 trigger |
+| | 权限模式 picker | 三档 `只读`/`工作区写入`/`完全访问`；选档 → `200 POST /permission` + `permission/changed` 事件 |
+| | Agent Profile picker | 选「编程」→ 下一轮 `run/started.agent_profile="coding"`（线上可查） |
+| | Reasoning Effort picker | 选「深度」→ `POST /messages` 请求体含 `"reasoning_effort":"deep"`；`run/started` 生效 |
+| | 上下文容量看板 | 数字与后端一致：看板 `9,584 / 200,000（4.8%）` ↔ `/context-usage used_tokens=9584` |
+| | **#283 危险档内联确认** | 升 `完全访问` 必须过内联确认（含后果文案）；`取消` ⇒ 值不变（`工作区写入`）；`升级` ⇒ `200 POST /permission {"permission_mode":"danger-full-access","auto_approve":true}` + `permission/changed`，**刷新后仍在**（`完全访问`） |
+| | 排队 / `立即` 转 steer | 在途再发一条 → 排队可见（chip，带`编辑`/`取消`）；点 `立即` → `queue/cancelled` + `steer/requested` + `POST /messages` 带 `mode:"steer","queue_id":…`，界面显示「引导中」 |
+| R5 Conversation | `分叉` | 真派生 child session 并跳转 |
+| | 轮次折叠 / `复制回答` / `复制代码` | 折叠双向翻转；剪贴板拿到全量文本 / 围栏内全量代码 |
+| | 工具行 `act-node` L0→L1→L2→L0 / `Inspect` chip | 循环正确；chip 切到 Inspector 工具详情 |
+| | 代码块 `自动换行`/`不换行` | 容器类翻转 |
+| | 委派行展开 / `复制子会话 ID` / `Inspect 子会话` / `打开子会话` | 4/4 通过（`aria-expanded` 翻转、剪贴板=child id、Inspector 原位展开 child、主窗切换） |
+| | reasoning header 展开/收起 | 通过 |
+| R6 Approval | `批准` | busy 禁用 → `POST /approve` 200 → 工具真执行 → 卡片消失 |
+| | `拒绝` | `POST /approve {approved:false}` → 工具被拒（`PERMISSION_DENIED`）→ 卡片消失 |
+| R8 Palette | 17 项动作/密度条目 + 事件条目抽样 | 开/关（overlay、Esc）、`↑↓` active、`Enter` 执行、`切换 Run Inspector`、`跳到最新事件`、`复制 Run ID`、`切换主题`、`聚焦输入框`、四档密度、事件条目跳 Inspector——全部通过 |
+| R9 Inspector | 五 tab + Timeline 行定位 + `加载更早 N 条` + hover 浮层 + Terminal 钻取 | 5/5 tab 可点且 `aria-selected` 独占；行点击定位正确；窗口 +500 条语义正确 |
+| | 事件详情 `Overview`/`Input`/`Output`/`Raw` + `复制 JSON`/`复制 Raw` | 全通（剪贴板已逐步核对）；工具详情四档同理 |
+| | child 视图 `Run` 返回 | 通过 |
+
+### 3. 新发现（本轮）
+
+#### M-01 — 缓存命中率**永远采集不到**：读的键名与 langchain 归一化后的键名不一致【P2 · 后端 · 待修】
+
+| 项 | 值 |
+| --- | --- |
+| 归因 | **后端**（`src/agent_harness/agent/runtime.py::_usage_from_response`） |
+| 复现 | 真 provider 栈（`create_chat_model` → OpenAI 兼容线 → 桩 :8123）发一次带缓存明细的调用，读 `usage_metadata` 与 runtime 抽取结果对照（一行命令见下） |
+| 期望 | `model/completed.usage.cached_tokens` 带回缓存读取量 ⇒ #200 看板「平均缓存命中率」有数 |
+| 实测 | langchain 归一化后给的是 **`input_token_details.cache_read`**，runtime 读的是 **`cached_tokens`** ⇒ 永远 `None` ⇒ 看板恒显示「缓存命中率未采集（提供商未返回缓存明细）」。原始证据（本轮重跑）：`usage_metadata = {"input_tokens": 225, "output_tokens": 5, "total_tokens": 230, "input_token_details": {"cache_read": 75}, ...}`；`runtime 读的键 cached_tokens -> None`；`langchain 实际给的键 -> ['cache_read']` |
+| 为什么之前没发现 | 单测**喂的是内部键名**（`tests/web/test_context_usage.py` 多处 mock `"input_token_details": {"cached_tokens": 80}`），于是"测试全绿 + 真链路永远 None"两个事实同时成立；`tests/test_structured_logging.py:99` 喂的恰是**真形状** `{"cache_read": 2}`，但断言"恰好 3 键"并把理由写成"FakeModel 不转发 input_token_details"——**该注释与事实不符**（它确实转发了），实为键名不匹配导致的巧合通过 |
+| 连带 | 设计稿 `docs/design/CONTEXT_CAPACITY_DASHBOARD.md:47` 把数据源写成 `usage.input_token_details.cached_tokens`（也是错的一侧）；契约 `docs/spec/Observable_Agent_Workspace_SDD/03_RUNTIME_EVENT_CONTRACT.md:162` 声明的**事件字段**名 `cached_tokens?` 是对的，不能改（前端/看板/API 都按它读） |
+| 修法（待审） | 抽取侧同时接受两种键名（`cache_read` 优先，`cached_tokens` 兜底兼容非 langchain 路径），事件字段名保持不变；同步把单测的 mock 改成**真形状**，删掉/修正误导注释；设计稿的数据源路径一并订正 |
+
+```bash
+# 复现（需桩在 :8123；脚本是一次性探针，不入库）
+PYTHONUTF8=1 .venv/Scripts/python.exe .workbuddy/live_audit/probe_cache_tokens_long.py
+```
+
+#### A-02 — 用户主动取消后，顶部说「已取消」、同屏 Run 卡片说「失败」【P2 · 前端（展示层）· 已修复 `a21c5d2`】
+
+- **复现**：空态输入 `#slow …` 回车建会话 → 流中（顶栏 `思考中 · 2s`）按 `Escape` → 读顶部 chip 与 Inspector。
+- **实测**：顶部 chip = `已取消`；同屏 Inspector = `Run 1 失败` / `已取消`；事件序列末条是 **`run/failed {reason:"cancelled"}`**（不是 `run/cancelled`）；网络侧只有 `200 POST /sessions/<id>/cancel`。
+- **问题**：同一件事两处措辞不同，用户分不清"我停的"还是"它挂了"。
+- **根因**：读同一件事的两条规则不同源——顶栏/概览走 `projection.run_cancelled`（判 `reason`），
+  而 Inspector 时间线的 **run 分组头**只按**事件类型**判（`run/failed` → `failed`），`reason` 根本没参与。
+- **修法（已实施，(a) 展示层单点）**：`reason === 'cancelled'` 的判据收敛到**一个**叶模块
+  `web/src/lib/runCancel.ts`（`isCancelledRunFailure`），由会话投影与 run 分组共同调用；分组状态新增
+  `cancelled`（徽章「已取消」，与 `interrupted` 同中性色域）。**事件语义一字未动**（后端仍发
+  `run/failed{reason:cancelled}`）——`reason` 已把语义带全，为它增殖一个事件类型要改所有读侧，
+  与 §9.2 最少改动相悖。
+- **若用户偏好 (b)**（后端新增独立终态 `run/cancelled`）：本条的展示层改动仍然正确、不返工，
+  届时只需后端加事件类型 + 各读侧加分支——**该替代路径未被否决，只是未被采纳**。
+- **真机复验（2026-09-22 修复后）**：慢流中点停止 → 顶栏脉冲 `已取消`，Inspector run 分组头徽章
+  `run-badge run-badge-cancelled | 已取消`，后端事件尾仍是 `run/failed {"reason":"cancelled"}`。
+- **回归锁**：`web/src/lib/timelineGroups.test.ts`（cancelled 推导 + 脏数据 `failed↔cancelled` 先到者胜）。
+
+#### P3 / 观察项（按归属）
+
+| 编号 | 结论 | 归属 | 证据要点 |
+| --- | --- | --- | --- |
+| **M-02** | 「停止」按钮在 Playwright `locator.click()` 下 7/7 不触发 `POST /cancel`；**鼠标坐标点击 3/3 生效**、真人节奏（`move→down→120ms→up`）亦生效；时间线：点击 +6413ms → `POST /cancel` +6415ms → `run/failed{reason:"cancelled"}` +6416ms。同页对照实验证明是**合成点击被流式重渲染吞掉**，非产品缺陷 | 测试基建 | `findings-M4/M5/M8/M9/M10.md`；结论：后续自动化用坐标点击或真人节奏，勿据 `locator.click()` 判缺陷 |
+| **A-01** | `+ 新建会话` 不建会话：主区回空态、composer 聚焦、**无 `POST /api/sessions`**、侧栏行数不变、后端 `zero-event rows: []`；源码证实是**有意**的草稿态（`App.tsx` `handleNew` 只 `selectSession(null)`；真建会话发生在空态提交时）。"点了没反应"不成立，风险只在清单措辞 | 前端（语义/清单） | `a-r2r3r4.mjs`；`App.tsx:406-420,646` |
+| **A-03** | 取消流会在网络层留下 `POST /api/sessions :: net::ERR_ABORTED`（SSE 主动断开的正常副作用）；无 console error、UI 无报错条。记此以免下一轮误判为缺陷，但它会污染"零失败请求"类断言 | 前端（预期行为） | `a-r3fix.mjs` `badResponses` |
+| **A-04** | 保存**无 claims 的 token**：localStorage 写入成功、面板关闭，但身份 chip 不出现，且**无任何提示**（清单 R1-09/10 只说"chip 出现"，没说非法时怎么办） | 前端 | `a-r1.mjs`；`TopBar.tsx` `saveToken`/chip 条件 |
+| **A-06** | 空态 chip 点击后**焦点留在 chip 按钮**（三次点击值都注入正确，但 `activeElement=BUTTON`）⇒ 键盘用户按 Enter 是"再点一次 chip"而不是发送，读作"没反应"。**【已修 `a21c5d2`】** 注入后就地 `focus()` 输入框；真机复验 `activeId=composer-input`；回归锁 `Composer.presetFocus.test.tsx`（含"null 时不抢焦点"） | 前端 | `a-r3fix.mjs`；修复轮 `m-fixcheck.mjs` |
+| **A-08** | ~~Palette 密度条目四档文案空格不一致~~ **【核验后：误读，不改】** 修复轮真机复读四个条目 = `["切换到 紧凑","切换到 均衡","切换到 详细","切换到 Raw"]`——**四条同形**（同一模板 `切换到 ${DENSITY_CN[d]}`），源码注释明写这是 UI-06 的 CJK 间距规则（中文与英文/数字间加半角空格），`e2e/i-keyboard.spec.ts` 与 `lib/commands.test.ts` 已双份钉住；应用内检索对带/不带空格两种输入都能命中（`commands.test.ts` 有断言）。A 侧第一次用 `hasText:'切换到紧凑'` 匹配 0 条是 **Playwright 字面子串匹配**的脚本问题，不是产品问题 | 前端（**非缺陷**） | 修复轮 `m-fixcheck.mjs`（原文四条）；`App.tsx:927-935`；`e2e/i-keyboard.spec.ts:94-98` |
+| **B-D7** | Inspector 工具 Raw 的两个 `复制 Raw` 按钮**同 aria-label**，无法按名称区分 `tool/call` 与 `tool/result`（可访问性/可测性缺口）。**【已修 `a21c5d2`】** 拆成 `复制 Raw（tool/call）` / `复制 Raw（tool/result）`；真机复验 Raw 档两钮 aria-label 已可区分；回归锁 `StepDetail.toolRaw.test.tsx`（jsdom 点 Raw 档后断言） | 前端 | `findings-B.md` §R9-22/23；修复轮 `m-fixcheck2.mjs` |
+| **A-05** | 鉴权横幅与 `关闭提示` X **本轮不可达**：本后端未配 `JWT_SECRET` ⇒ 任何 token 都不出 401 ⇒ `authRequired` 恒 false。**不能声称通过，也不判缺陷** | 环境 | `a-r3fix.mjs` `fake_token_banner`（全部 200） |
+| **A-07** | Palette 的 `复制 Trace ID` / `打开 Trace` 两条在本环境**不渲染**（无 `trace_id`/Langfuse 未启用）；另有两条新条目（`整页打开 Inspector`、`管理记忆`）清单未列 | 环境 + 清单 | `a-r8.mjs` `palette_items`（33 条） |
+
+#### M-05 — 上下文容量看板的缓存行少一个右括号（渲染成半角花括号）【P3 · 前端 · 已修复 `2afae0e`】
+
+- **怎么发现的**：修完 M-01 后真机复验看板，读到 `平均缓存命中率 32.6%（1 次调用全部带回明细} · 估算`
+  ——**右括号是半角 `}`**。
+- **根因**：`ContextUsagePanel.tsx` 里写的是 `{'（'}{…}{'}'}`（`'}'` 处应为 `'）'`），
+  闭合位置写成半角花括号；两条分支（partial / ok）共用这一处字面量。
+- **修复**：改成 `{'）'}`；e2e 断言从"中间那段文字"收紧为**整串**
+  （`（1/2 次调用带回明细） · 估算` 与 `（12 次调用全部带回明细） · 估算`，partial 与 ok 两档都锁）。
+- **为什么本轮之前没发现**：`e2e/context-usage.spec.ts` 只断言 `1/2 次调用带回明细`，括号不在断言范围内；
+  真机上的"未采集"空态（M-01 修复前看板恒走 `not_collected` 分支）根本不渲染这一行。
+
+### 4. 清单漂移（`ACCEPTANCE_CONTROL_INVENTORY.md` ≠ 实际 UI，共 16 条）
+
+| # | 清单写的 | 实际（2026-09-22 实测） |
+| --- | --- | --- |
+| D-1 | R3 模式三档 `Chat`/`Split`/`Preview`（`aria-pressed`） | 中心列是 `role=tab` 三档：`Chat`/`文件/改动`/`输出`（`Split`/`Preview` 模式名已在源码中删除） |
+| D-2 | R1 共 11 项 | 多出 `记忆管理`（memory-panel）与 `上下文容量`（仅选中会话时渲染） |
+| D-3 | R2 共 2 项 | 多出 `显示已归档会话`（`aria-pressed`）、`新建项目`、项目区折叠行、行内 `⋯` 菜单 |
+| D-4 | R1「Enter 触发保存」 | 正确，但 **chips 与身份 chip 的触发条件（claims 合法性）清单未写** ⇒ A-04 这类"该出现没出现"无法按清单判定 |
+| D-5 | 清单行号基于 2026-09-11 `feat/frontend` 快照 | 现行 `TopBar.tsx` 行号整体下移（密度 picker `:137-142` vs 清单 `:102` 等）⇒ 行号不可直接跳转 |
+| D-6 | R8「17 项」 | 实际 33 条 = 动作 7 + 密度 4 + 事件 N（本会话 30）；`复制 Trace ID`/`打开 Trace` 只在该会话有 trace 时渲染 |
+| D-7 | 事件条目格式 | 实际 `{type} · {summary} / #{seq}`；基数「最近 100 条倒序」 |
+| D-8 | 未记 `显示已归档会话` 的持久化键 | 实测 `localStorage['ahi.showArchived']='1'` |
+| D1(B) | R5-13 `复制 inspect_artifact 引用`（`ToolCard.tsx:383`） | 代码中不存在；归档入口改为 `ArtifactViewer`「查看完整内容」 |
+| D2(B) | R9-06 `返回 Timeline`（`detail-back-btn`） | 代码中不存在；改为"选中项详情" peek 覆盖层 + `关闭预览（保持选中）` |
+| D3(B) | R5-07/08/09 位置写 `ToolCard.tsx:301/308/323` | 实际在 `ToolOutputStream.tsx:147/149/164`（仅文件/行号漂移） |
+| D4(B) | R5-03 复制按钮"1.6s 显示已复制" | 按钮为纯图标，反馈只改 `aria-label`/`title`（无可见文案） |
+| D5(B) | R6 只有 `批准`/`拒绝` | 实为 `批准 Ctrl+⏎` / `拒绝 Ctrl+⌫`（清单未记快捷键） |
+| D6(B) | R5-14「JSON 折叠开关出现在主区 L2」 | 主区 L2 的 bash/read 专用块**不含** JSON 树；`json-toggle` 只在 Inspector 输入/输出档发生 |
+| D7(B) | R9 两个 `复制 Raw` | 与清单一致，但两按钮**同 aria-label**（=B-D7，可测性缺口） |
+| D8(B) | 未记 | 切到另一个会话时 Inspector **自动收起**（#183 AC4，非缺陷）⇒ 会造成"Inspector 内控件短暂不可达" |
+
+### 5. 未覆盖 / 待补（明确不计通过）
+
+| 项 | 原因 | 怎么补 |
+| --- | --- | --- |
+| **真模型链路（全轮）** | 供应商计费冻结（400 `billing`）⇒ 只能用桩。**桩不可覆盖的部分**：真实模型的 prompt 组装效果、真实 tool_call 参数多样性、真实推理内容 | 用户解除计费冻结后，用同一批脚本（`web/.audit-live/*.mjs`，去桩即可）复跑一轮"真链路抽验" |
+| R3-01 鉴权横幅 `X`（`关闭提示`） | 后端未配 `JWT_SECRET`，横幅无渲染条件 | 用 `JWT_SECRET=<任意>` 起后端重跑 |
+| R8-09/R8-10 `复制 Trace ID`/`打开 Trace` | 无 `trace_id`/`trace_url`（Langfuse 未启用） | 启用 Langfuse 后重跑 `a-r8.mjs` |
+| R3-02 `恢复会话`（`RotateCcw`） | 需 `isRecoverableRun`（缺 run 终态 / dangling tool_call）；造 dangling 需杀进程，会污染并发会话 | 单机时 `#slow` 中强断后端，再看模式条右侧是否出现并点它（应 `POST /recover`） |
+| R5-07/08/09 工具流三件、R5-13 `复制续读 offset`、R5-20 reasoning `↓ 跳到最新`、R5-04 对话 `↓ 最新` | 渲染条件是 `status==='running' \|\| !result`，桩的 bash/read 一次性返回，未抢到窗口；`#write` 参数名错（`file_path` ≠ 后端 `path`）已修但在本轮窗口内没重造素材 | 用修正后的 `#write-big` + `#read-big` 重造 continuation，再在 running 窗口内点 |
+| 项目行 `⋯` 的 `重命名项目`/`删除项目…`/`在此项目中新建任务`、会话行 `上移/下移/移出项目`、记忆 `删除这条记忆` | 均为对**他人数据/项目账本**的写操作，超出本轮范围 | 隔离环境执行（主控/用户确认后） |
+| Inspector 工具 Raw 第二个 `复制 Raw` | 与第一个同 aria-label，只核对了第一个的剪贴板 | 随 B-D7 一并修（拆 label）后复验 |
+
+### 6. 测试足迹与清理（本轮造的数据）
+
+- 桩后端上的**种子会话 5 条**（`long_markdown`/`reasoning`/`tools`/`delegation`/`long_session`）与 A、B 两位
+  agent 的 12 条自造会话 + 主控的 3 条探针会话（含 `#slow`/`#fail` 系列、`0406a04d` run）**全部是本轮产物**，
+  清理清单已随报告落盘（`.workbuddy/live_audit/seed_sessions.json`、`findings-B.md` §测试足迹）。
+  清理方式：`api.delete_session(<id>)`（硬删；只删本轮自造 id，用户原有会话一条不动）。
+- 前端 `localStorage` 残留：`ahi.traceDensity=balanced`、`ahi.theme=light`、`ahi.showArchived` 已关、
+  `ahi.apiToken` 已清除；`ahi.selectedSession` 属正常交互产物。
+- 一次性脚本落点：后端 `.workbuddy/live_audit/`（**在 gitignore 内**）、前端 `web/.audit-live/`
+  （**不在 `web/.gitignore` 内**——本行原写「均在 gitignore 内」，收口时实测 `git status` 把它列成 `??`，
+  是错的，2026-09-22 更正）。
+- **收口清理（2026-09-22 完成）**：锚定 42 条自造会话（今日 + `stub-main` 内容标记，另加两条未走到
+  模型调用的探针会话）硬删，`.agent/workspace/sessions` 余 34 条为审计前既有、一条未动；
+  `web/.audit-live/` 与 `web/shots/` 已删（截图不留），其文字证据（`BRIEF.md`、`findings-*.md`、
+  读数 JSON、一次性 `.mjs`）迁至后端 gitignored 的 `.workbuddy/live_audit/frontend_audit/`
+  （62 文件 / 459 KB），同样不入库；桩 LLM（:8123）与审计后端（:8000）进程已停。
+  本轮唯一的仓库写入是本文档（+ 修复的代码与测试）。
+- **全程未打印任何密钥值**（只列 key 名与我自建的假 token 形状）。
+
+### 7. 处置与修复台账（本轮收口）
+
+| 编号 | 级别 | 处置 | commit / 证据 |
+| --- | --- | --- | --- |
+| **M-01** | P2 后端 | **已修**：`_usage_from_response` 认 langchain 归一化名 `cache_read`（原始名 `cached_tokens` 兜底）；事件字段名不变；单测改喂真形状 + 保留兜底/非法值用例；设计稿 §3.1 数据源与 T1 同步订正 | `29cb508`；真机端到端：`model/completed.usage = {…,"cached_tokens":30}`，`/context-usage.cache = {"state":"ok","reported_calls":1,"total_calls":1,"avg_hit_rate":0.326}`，看板显示 `平均缓存命中率 32.6%`（修复前恒「未采集」） |
+| **A-02** | P2 前端 | **已修**（(a) 展示层单点，事件语义不动）：判据收敛到 `lib/runCancel.ts`，run 分组头新增「已取消」中性徽章 | `a21c5d2`；真机：脉冲 `已取消` + 分组头 `run-badge-cancelled \| 已取消`；回归锁 `timelineGroups.test.ts` |
+| **M-05** | P3 前端 | **已修**：看板缓存行右括号（原半角 `}`） | `2afae0e`；e2e 断言收紧到整串（partial / ok 两档） |
+| **A-06** | P3 前端 | **已修**：chip 注入后聚焦输入框 | `a21c5d2`；真机 `activeId=composer-input`；回归锁 `Composer.presetFocus.test.tsx` |
+| **B-D7** | P3 前端 | **已修**：两个 `复制 Raw` 拆名 | `a21c5d2`；真机两钮 aria-label 可区分；回归锁 `StepDetail.toolRaw.test.tsx` |
+| **A-08** | P3 前端 | **不改**：核验为误读（四条同形，UI-06 CJK 间距规则，e2e+单测双锁）——详见上表该行 | 修复轮真机复读四条文案 |
+| **M-02 / A-03** | 观察项 | 无产品改动（测试基建 / 预期行为），已登记 | 见 §3 |
+| **A-01 / A-04** | P3 前端 | **未改**：属语义与产品口径（`+` 是草稿态还是立即建会话；非法 token 怎么提示）。**需用户裁决**：改行为 or 改清单措辞 | 见 §3 两行 |
+| **A-05 / A-07** | 环境 | 未覆盖（无 JWT_SECRET / 无 trace_id），不计通过 | 见 §5 |
+| **D-1…D-8 / D1…D8（B）** | 清单 | **未改**：`ACCEPTANCE_CONTROL_INVENTORY.md` 与现行 UI 的 16 处漂移，属文档更新，等用户裁决后一次性改 | 见 §4 |
+
+### 8. 两轴独立审查（协议 §8.3：每轴 1 轮）
+
+对本批 5 笔改动（后端 `cd02c61`+`29cb508`；前端 `a21c5d2`+`2afae0e`+修复轮追加笔）跑了两轴：
+
+| 轴 | 结论 | 处置 |
+| --- | --- | --- |
+| **Standards** | 硬违规 **0**；判断项 7：①取消语义被判三处 ②后端注释越出"操作约束+指针" ③A-02 决策未留痕 ④`cached_tokens` 兜底无仓内生产者 ⑤脏数据 `failed↔cancelled` 无用例 ⑥A-06/B-D7 无回归守卫 ⑦`.run-badge-cancelled` 无对比度守卫 | ①②③⑤⑥ **本轮修**（收敛 `runCancel.ts` / 注释改为指向设计稿 / 登记裁决依据 + 用户可推翻路径 / 补脏数据用例 / 补两个 jsdom 回归锁）；④保留（判据：兜底路径正是本次缺陷的成因，删掉会让"不走归一化的集成"重蹈覆辙，属有意为之）；⑦不改并登记（新徽章复用 `interrupted` 既有 token，无新 token；`t-contrast.spec.ts` 本就不含 `interrupted`，单独加 `cancelled` 反而不一致——属既有缺口，§8 Scope Lock 不顺手扩） |
+| **Spec** | (a) 4 / (b) 1 / (c) 2：①A-02 决策未登记 ②A-08 未随批（而 §7 原计划写了）③B-D7 缺修后复验 ④设计稿 T1 mock 形状未同步 ⑤`STATUS_RANK` 重写超出规格 ⑥A-08 登记与源码矛盾 ⑦`M-05` 只出现在 commit 信息里 | ①②③④⑥⑦ **本轮修**（A-08 改成"不改+理由"、M-05 补进本文件、T1 订正、两条 jsdom 锁、决策登记）；⑤保留并说明（为新增 `cancelled` 而不破坏原优先链，等价性由新增用例逐例覆盖，属完成本票所必需） |
+
+**"M-05 只在 commit 信息里"是本轮的真实教训**：先提交后补文档，会出现"文档说自己是唯一叙述落点、
+而事实只活在 git log 里"的窗口。已按 §16.1 补回本文件。
+
+### 9. 遗留（交用户裁决 / 下轮处理）
+
+1. **A-01 / A-04** 的产品口径（见 §7 表）；
+2. **16 条清单漂移**：建议一次性更新 `ACCEPTANCE_CONTROL_INVENTORY.md`（它是验收基线，长期落后会让下一轮审计继续产出"漂移"这种噪声）；
+3. **未覆盖项**（§5）：真模型链路（等计费解冻）、鉴权横幅（需 `JWT_SECRET`）、Trace（需 Langfuse）、
+   `恢复会话` 入口、工具流 running 窗口三件、项目/记忆的写操作；
+4. **M-02** 的自动化纪律：e2e 里点流式期间的按钮要用坐标点击或真人节奏，别用 `locator.click()` 直接判"没反应"。
+
+### 10. 门禁读数（收口轮，2026-09-22）
+
+跑在修复后的树上（前端 `fe72dbb`、后端 `5c22f77`；两个施工 clone 的工作树即门禁树）：
+
+| 车道 | 命令 | 读数 |
+| --- | --- | --- |
+| ① ruff | `.venv/Scripts/ruff.exe check .`（后端） | `All checks passed!`，exit 0 |
+| ② 后端全量 pytest | `scripts/run_tests_clean.sh tests/` + `PYTEST_EXTRA_ARGS="-q -p no:randomly"` | 3082 passed / **1 failed** / 13 skipped，850s |
+| ④ tsc | `node node_modules/typescript/bin/tsc -b`（`web/`） | exit 0 |
+| ⑤ vitest | `node node_modules/vitest/vitest.mjs run`（`web/`） | 1066 passed / **1 failed**，47s |
+| ⑥ oxlint | `node node_modules/oxlint/bin/oxlint`（`web/`） | **0 errors** / 68 warnings，exit 0 |
+| ⑪ e2e | `node node_modules/@playwright/test/cli.js test --workers=2`（`web/`） | 439 passed / **1 failed**，14.2m |
+| ⑨ diff-check | `git diff --check` | 干净（exit 0） |
+| ⑧ 覆盖闸门 | `scripts/check_review_coverage.py` | 前端 exit 0；后端待判定只剩**他线** 1 笔（`877a576`，不在本轮范围） |
+
+三处红**全部**是环境 / 负载 flake，均以「同一棵树单跑」反证，**不是**本轮改动引入：
+
+- 后端 `tests/observability/test_flush_lifecycle.py::test_web_lifespan_flushes_on_shutdown`：
+  根因是**本机审计后端进程（:8000）占着 instance lock**（`InstanceLock.acquire` → `_take_os_lock`
+  取不到 OS 排他锁）⇒ 停进程后单跑 **3 passed**（18.28s）。
+- 前端 vitest `src/components/StepDetail.window.test.tsx` 的「DIFFS / ARTIFACTS：默认先裁…」：
+  全量 67 worker 满载下 6796ms 撞 5s 默认超时 ⇒ **单跑 6 passed**（该例 2876ms）。
+- 前端 e2e `e2e/o-wait-hint.spec.ts:91`（chromium-1920 一档）：假时钟推进 31s 后 `.wait-hint`
+  未及出现 ⇒ **该 spec 单跑 6 passed / 15.9s**（同一条在 chromium-1280 档的全量里是绿的）。
+
+结论：本轮改动**零回归**；三条红按协议「既有红与 flake」口径**登记**（不是修，是记）。
+
+**集成与推送（本线已完成）**：前端六笔 `22aa291..bec12fa`（13 文件，全在 `web/` 与
+`docs/review_ledger.tsv`；`git diff 22aa291..bec12fa -- src tests scripts` 为空）已 ff 进
+`D:\intelligence-agent` 的 `main` —— 集成 tree `d804b761…` 与前端门禁 tree **逐字节相同**
+（§13.4：tree 相等即证「被集成的就是跑过门禁的那棵」），随后 `git push origin main`
+（`22aa291..bec12fa`，快进）。三个 clone 的即时状态：集成 clone 与前端 clone 均为
+`bec12fa`＝`origin/main`（ahead/behind 皆 0）。
+
+**后端 clone 落后 6 笔，且合并 `origin/main` 会冲突**：冲突面只有 `docs/review_ledger.tsv`
+一个文件（两线都把台账行插在 `[whitelist]` 之前同一个锚点；`git merge-tree --write-tree
+main origin/main` 只读实测），语义上唯一正确的解是**并集**（两线的行一条都不能丢）。
+按 §14.7 不在未获批准时自行解决，交用户 / 后端线裁决；本笔登记（本文档 §10）留在后端 clone，
+随后端线集成时才进 `origin`（前端线的 push 不带它）。

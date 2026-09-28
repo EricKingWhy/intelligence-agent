@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +15,9 @@ from agent_harness.capability.base import (
 from agent_harness.capability.config import ProviderConfig, parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
-from agent_harness.tooling import Tool, ToolResult
+from agent_harness.session import JsonlSessionStore
+from agent_harness.tooling import Tool, ToolPermission, ToolResult, ToolSideEffect
+from tests.memory.v2._vector import FakeMemoryVectorClient
 
 
 class TestParseConfig:
@@ -66,24 +67,6 @@ def _memory_settings(tmp_path, *, ready: bool) -> Settings:
     return Settings(_env_file=None, workspace_dir=str(tmp_path))
 
 
-class _FakeMemoryComponents:
-    def __init__(self):
-        self.initialized = False
-        self.relay_started = False
-        self.closed = False
-        self.capability = object()
-        self.writeback = object()
-
-        class _Relay:
-            def start(self): self.owner.relay_started = True  # type: ignore[attr-defined]
-            async def stop(self): pass
-        self.relay = _Relay()
-        self.relay.owner = self
-
-    async def initialize(self): self.initialized = True
-    async def close(self): self.closed = True
-
-
 class _TickerTool(Tool):
     @property
     def name(self) -> str:
@@ -112,7 +95,7 @@ class _ContributesToolsProvider:
 class TestWireCapabilities:
     @pytest.mark.asyncio
     async def test_memory_unready_is_skipped_not_registered(self, tmp_path):
-        """配置不齐 → OPTIONAL_RUNTIME 降级：不注册、不注入、无 writer（Phase 6 行为）。"""
+        """配置不齐 → OPTIONAL_RUNTIME 降级：不注册、不注入 V2。"""
         registry = CapabilityRegistry()
         wiring = await wire_capabilities(
             registry, parse_capabilities_config('{"memory": {}}'),
@@ -120,14 +103,14 @@ class TestWireCapabilities:
         )
         assert registry.available() == []
         assert wiring.context_providers == []
-        assert wiring.memory_writer is None
-        assert wiring.memory is None
+        assert wiring.memory_vectors is None
+        assert wiring.memory_v2 is None
 
     @pytest.mark.asyncio
     async def test_memory_ready_registers_and_wires(self, tmp_path, monkeypatch):
-        fake = _FakeMemoryComponents()
+        fake = FakeMemoryVectorClient(_memory_settings(tmp_path, ready=True))
         monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_components",
+            "agent_harness.capability.factories.build_memory_vector_client",
             lambda settings: fake,
         )
         registry = CapabilityRegistry()
@@ -135,19 +118,53 @@ class TestWireCapabilities:
             registry, parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
             settings=_memory_settings(tmp_path, ready=True),
         )
-        assert registry.descriptor("memory").provider_name == "langmem"
+        assert registry.descriptor("memory").provider_name == "builtin-v2"
         assert registry.descriptor("memory").degradation is Degradation.OPTIONAL_RUNTIME
-        assert registry.get("memory") is fake.capability
-        assert fake.initialized and fake.relay_started
-        assert len(wiring.context_providers) == 1
-        assert wiring.memory_writer is fake.writeback
-        assert wiring.memory is fake
+        assert registry.get("memory") is wiring.memory_v2
+        assert wiring.memory_vectors is fake
+        assert fake.initialized and not fake.closed
+        assert wiring.context_providers == []
+        assert wiring.tools == []
+        await wiring.aclose()
+
+    @pytest.mark.asyncio
+    async def test_memory_contributes_the_forget_tool_via_the_contract(self, tmp_path, monkeypatch):
+        """AC4：遗忘工具走 **ContributesTools 收集循环**，且依赖**契约**而非具体 provider。
+
+        四条一起钉住：
+        1. 工具真的进了 `wiring.tools`（装配侧随后注册进唯一 ToolRegistry，不变量 #7）；
+        2. 它拿到的依赖是注册的那个 capability 对象（provider 可替换：换 fake 也成立）；
+        3. 权限分类是 DANGER + MUTATING（声明面；执行期的审批闸门在
+           `tests/memory/test_forget_tool.py` 用真 Executor 验）；
+        4. 工具贡献**不改变**描述符注册的 provider（仍是 capability 本身，seam 契约不被动摇）。
+        """
+        fake = FakeMemoryVectorClient(_memory_settings(tmp_path, ready=True))
+        monkeypatch.setattr(
+            "agent_harness.capability.factories.build_memory_vector_client",
+            lambda settings: fake,
+        )
+        registry = CapabilityRegistry()
+        wiring = await wire_capabilities(
+            registry, parse_capabilities_config('{"memory": {"provider": "langmem"}}'),
+            settings=_memory_settings(tmp_path, ready=True),
+            sessions=JsonlSessionStore(root=Path(tmp_path) / "sessions"),
+        )
+
+        forget = [tool for tool in wiring.tools if tool.name == "forget_memory"]
+        assert len(forget) == 1
+        assert forget[0].permission is ToolPermission.DANGER
+        assert forget[0].side_effect is ToolSideEffect.MUTATING
+        assert registry.get("memory") is wiring.memory_v2
+        assert {tool.name for tool in wiring.tools} >= {
+            "retrieve_memory", "remember_this", "forget_memory",
+        }
+        await wiring.aclose()
 
     @pytest.mark.asyncio
     async def test_disabled_entry_is_skipped(self, tmp_path, monkeypatch):
         called = []
         monkeypatch.setattr(
-            "agent_harness.capability.factories.build_memory_components",
+            "agent_harness.capability.factories.build_memory_vector_client",
             lambda settings: called.append(1),
         )
         registry = CapabilityRegistry()
@@ -226,12 +243,9 @@ async def test_memory_partial_init_failure_closes_components(caplog):
     """
     from unittest.mock import patch
 
-    class FakeComponents:
+    class FakeVectors:
         def __init__(self):
             self.closed = False
-            self.relay = SimpleNamespace(stop=AsyncMock(return_value=None))
-            self.writeback = SimpleNamespace(close=AsyncMock(return_value=None))
-            self.vectors = SimpleNamespace(close=AsyncMock(return_value=None))
 
         async def initialize(self):
             raise RuntimeError("milvus schema mismatch")
@@ -239,37 +253,30 @@ async def test_memory_partial_init_failure_closes_components(caplog):
         async def close(self):
             self.closed = True
 
-    fake = FakeComponents()
+    fake = FakeVectors()
     settings = Settings(
         milvus_uri="http://localhost:19530", milvus_token="tk",
         milvus_collection="c", embedding_model="e", embedding_base_url="http://x",
         embedding_api_key="k", _env_file=None,
     )
     registry = CapabilityRegistry()
-    with patch("agent_harness.capability.factories.build_memory_components", return_value=fake):
+    with patch("agent_harness.capability.factories.build_memory_vector_client", return_value=fake):
         wiring = await wire_capabilities(
             registry,
             {"memory": ProviderConfig(provider="builtin", enabled=True)},
             settings=settings,
         )
     assert fake.closed, "半初始化的 components 必须被显式 close"
-    assert wiring.memory is None  # 未注册 → 调用方无从关闭 → 必须在接线内关闭
+    assert wiring.memory_vectors is None and wiring.memory_v2 is None
 
 
 # ── 批次 A / 候选 4：CapabilityWiring 是 lifecycle owner ──
 
 
 @pytest.mark.asyncio
-async def test_wiring_aclose_closes_memory_and_lifecycle_with_isolation():
-    """aclose 关闭 memory 组件 + 全部 lifecycle 项；单项失败不阻断其余清理
+async def test_wiring_aclose_closes_lifecycle_with_isolation():
+    """aclose 关闭全部 lifecycle 项；单项失败不阻断其余清理
     （关闭知识从 web 层 AppState 收拢回创建者，web 只管 get/shutdown）。"""
-
-    class FakeMemory:
-        def __init__(self):
-            self.closed = False
-
-        async def close(self):
-            self.closed = True
 
     class FailingClose:
         async def aclose(self):
@@ -282,14 +289,37 @@ async def test_wiring_aclose_closes_memory_and_lifecycle_with_isolation():
         async def aclose(self):
             self.closed = True
 
-    memory = FakeMemory()
     failing = FailingClose()
     lifecycle = FakeLifecycle()
+    wiring = CapabilityWiring(lifecycle=[failing, lifecycle])
+
+    await wiring.aclose()
+
+    assert lifecycle.closed, "failing 项之后其余 lifecycle 仍须被关闭（隔离）"
+
+
+@pytest.mark.asyncio
+async def test_wiring_drains_memory_formation_before_closing_shared_vectors():
+    events = []
+
+    class FakeVectors:
+        async def aclose(self):
+            events.append("vectors")
+
+    class FakeFormation:
+        async def aclose(self):
+            events.append("formation")
+
+    class FakeLifecycle:
+        async def aclose(self):
+            events.append("other")
+
+    formation = FakeFormation()
     wiring = CapabilityWiring(
-        memory=memory, lifecycle=[failing, lifecycle],
+        memory_formation=formation,
+        lifecycle=[FakeVectors(), formation, FakeLifecycle()],
     )
 
     await wiring.aclose()
 
-    assert memory.closed, "memory 组件必须被关闭"
-    assert lifecycle.closed, "failing 项之后其余 lifecycle 仍须被关闭（隔离）"
+    assert events == ["formation", "vectors", "other"]

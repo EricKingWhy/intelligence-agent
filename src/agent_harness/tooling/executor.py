@@ -47,6 +47,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from agent_harness.logging import log_event
+from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.observability.tracer import TraceBinding, current_trace_binding
 from agent_harness.session import TOOL_CALL, TOOL_RESULT, Session, SessionEvent
 from agent_harness.storage import (
@@ -54,6 +55,7 @@ from agent_harness.storage import (
     OperationContext,
     OperationLedger,
     OperationState,
+    unproven_meta,
 )
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -68,17 +70,54 @@ from agent_harness.tooling.contract import (
     ToolCall,
     ToolSideEffect,
 )
+from agent_harness.tooling.deadline import tool_execution_deadline_var
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
+from agent_harness.tooling.quota import ToolQuotaWindow
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
 logger = logging.getLogger("agent_harness.tooling.executor")
 
+
+def utc_now() -> datetime:
+    """本执行域 **deadline 判定**读挂钟的唯一入口（`#315`；观测记录的 `started_at`
+    不走它——那是"什么时候开始跑的"，不参与任何准入判定）。
+
+    为什么收成一个函数而不是在闸门里裸写 `datetime.now(UTC)`：deadline 是"要跟当前
+    时刻比"的判定，而时刻是**不可注入的外部输入**——判据里的 `>=` 与 `>` 只在
+    `now == deadline_at` **那一点**上结论相反，散点读挂钟会让这个边界只能靠"跑得够巧"
+    来碰（实测：把闸门写成 `>` 时 68 条 deadline 用例全绿，等于这一格没有鉴别力）。
+    收成一处之后，用例 monkeypatch 它就能把"现在"钉在任意时刻。
+
+    跨层说明（ADR-0046 §2 D2 登记的例外）：`tooling/**` 不 import `agent/**`，所以这里
+    不复用 `agent.run_budget.utc_now`，而是照它的**设计**在本域放一个同形状的单点。
+    生产路径仍是裸挂钟。
+    """
+    return datetime.now(UTC)
+
+
+def _rejected_delta(tool_name: str) -> dict[str, Any]:
+    """准入前被拒 / 未执行结果所带的预算增量：**显式记 0**。
+
+    `04 §9.1`：在接纳点**之前**被拒的调用不消耗配额，且拒绝理由必须可审计
+    （理由在同一条结果的 `error_code` / `message` 里）。为什么不是"干脆不带这个键"：
+    显式 0 让"这条调用没有消耗配额"成为**记录里的字面事实**；缺键要靠"没有别的
+    写入者"这条带外知识才读得对，而未来任何合成结果的写入者（恢复、悬空修复）
+    都会把缺键的含义搅浑。`agent/run_budget._add_tool_delta` 对 0 是 no-op，
+    两种写法在账上等价，这里取可读的那一种。
+    """
+    return {"tool_name": tool_name, "tool_calls": 0, "tool_attempts": 0}
+
+
 #: 一次 tool_call 在执行域内最多尝试几次（含第一次）。
 #: 为什么是模块级常量而不是可配置项：重试上限必须收敛在【唯一 Retry Layer】
 #: 一处可见可调；一旦可配置，"到底重试几次"会重新散落回各层，铁律二就被架空。
 MAX_ATTEMPTS = 3
+
+#: 观测端口（#250）的缺席实现：`execute*` 的 tracer 参数恒为对象，调用点不判空。
+#: 无状态、可共享；有观测时调用方传入自己的实现（Runtime 传的是带保护层的那一个）。
+_NULL_TRACER = NullTracer()
 
 #: 阶段3 异常分类表：异常类型 -> (error_code, retryable)。
 #: 分类是确定性的【类型判断】，绝不解析错误字符串（字符串会变，类型不会）。
@@ -128,9 +167,10 @@ class _ToolFailure:
         落盘）——不自动重试，交模型决定是否重发（不变量 #14：UNKNOWN 高风险工具
         不盲重跑）。
 
-        注意本路径**不**产生 NEED_RECONCILE：run 内该操作按终态 FAILED 落盘；
-        UNKNOWN / ReconcileCallback 是**崩溃恢复**侧的对应机制
-        （recovery/coordinator.py）——两者同源（未知副作用不盲重跑）不同触发面。
+        注意本路径**是** run 内 `UNKNOWN` + "副作用未证"标记的唯一来源
+        （`_settle_state` 把 MUTATING 超时落成 `UNKNOWN`，见那里的判据）。"要不要因此
+        不再续跑"（`NEED_RECONCILE`）不在执行域决定——那是稳定边界 / 恢复面的判定
+        （ADR-0046 §2 D4）。与崩溃恢复侧同源（未知副作用不盲重跑，不变量 #14）不同触发面。
         """
         retryable = tool.side_effect is not ToolSideEffect.MUTATING
         limit = tool.timeout_seconds
@@ -190,6 +230,10 @@ class ToolExecution(BaseModel):
     # OverflowHandler 产出的延迟会话事件 (event_type, data)：Runtime 在
     # tool/call 落盘之后追加（R6-7，消除 artifact/created 前向引用）。
     pending_events: list[tuple[str, dict[str, Any]]] = []
+    # 本次调用对 run 预算的增量（`#314` T6）：`tool_calls` / `tool_attempts` 两个
+    # counter 的**唯一写入者**就在本执行域（接纳点）。Runtime 只把它原样搬进
+    # `tool/result.data.budget_delta` ——不解释、不重算（`02 §5.1` 的计数点唯一）。
+    budget_delta: dict[str, Any] = {}
 
 
 class ToolExecutor:
@@ -222,6 +266,11 @@ class ToolExecutor:
         """Whether this Executor enforces the durable Operation lifecycle."""
         return self._operation_ledger is not None
 
+    @property
+    def operation_ledger(self) -> OperationLedger | None:
+        """Expose the durable operation evidence to project-owned evaluators."""
+        return self._operation_ledger
+
     async def execute(
         self,
         tool_call: ToolCall | dict[str, Any],
@@ -229,7 +278,9 @@ class ToolExecutor:
         operation_context: OperationContext | None = None,
         session: Session | None = None,
         step_id: int | None = None,
-        tracer: Any = None,
+        tracer: Tracer = _NULL_TRACER,
+        tool_quota: ToolQuotaWindow | None = None,
+        run_deadline: datetime | None = None,
     ) -> ToolExecution:
         """跑完一条 tool_call，将 Tool 域内成功或失败映射为 ToolExecution。
 
@@ -247,6 +298,11 @@ class ToolExecutor:
         阶段 [3]（Task 3）外包 Timeout 边界 + retryable 驱动的重试循环：
         为什么只包阶段3：查字典、跑 Pydantic 都是本地瞬时操作，真正会慢、会挂
         （HTTP/文件/DB）的只有 execute 这一步。
+
+        `run_deadline`（`#315` T7 / `04 §9.1`）：本 run 的**绝对** deadline（UTC，
+        aware）。到点后本条调用**不**被接纳（与配额拒绝同族：准入前被拒、`budget_delta`
+        记 0），已在途的调用不受它影响——它们在自己的 timeout / cancel / Ledger
+        语义下收尾（ADR-0039 的责任域不变）。`None` = 本 run 没配 deadline。
         """
         call = ToolCall.normalize(tool_call)
         tool_call_id = call.id
@@ -265,6 +321,7 @@ class ToolExecutor:
                     error_code=ErrorCode.TOOL_NOT_FOUND,
                     retryable=False,
                 ),
+                budget_delta=_rejected_delta(name),
             )
 
         # -- 阶段 2：validation -- Validation-first 的核心位置。
@@ -286,6 +343,63 @@ class ToolExecutor:
                     error_code=ErrorCode.INVALID_ARGUMENT,
                     retryable=False,  # 参数错是确定性的，重试也是同样的错
                 ),
+                budget_delta=_rejected_delta(name),
+            )
+
+        # 配置错误必须在任何真实副作用之前拒绝。位置在配额闸门**之前**：`take()` 一旦
+        # 成功就欠一次 `release()` 或一次真实接纳（`tooling/quota.py` 的成对约束），
+        # 而夹在中间抛异常会让本批的兄弟调用被一个不存在于任何账本上的占位挤掉。
+        if self._overflow_handler is not None and session is None:
+            raise ValueError("session is required when OverflowHandler is configured")
+        if (session is not None and operation_context is not None
+                and session.session_id != operation_context.session_id):
+            raise ValueError("session and operation_context must identify the same session")
+
+        # -- 阶段 2.35：绝对 deadline 闸门（`#315` T7 / `04 §9.1`）--
+        # 位置与配额闸门同族、同样在 approval **之前**：到点的调用注定不会被接纳，
+        # 不该先弹一次人工审批（审批可能要等一个回合，而 deadline 已经过去了）。
+        # 与配额闸门一样**不**占槽位（本分支在 `take()` 之前），所以没有配对的
+        # release 义务；`budget_delta` 记 0（准入前被拒，`04 §9.1`）。
+        # 读挂钟在这里是不可免的：deadline 是**绝对时刻**，判定就是"现在到点了吗"。
+        # 时刻从本域的唯一入口读（`utc_now`）——"刚好到点"那一格的用例靠它把"现在"钉住。
+        if run_deadline is not None and utc_now() >= run_deadline:
+            return ToolExecution(
+                tool_call_id=tool_call_id,
+                result=ToolResult.failure(
+                    message=(
+                        f"本 run 的绝对 deadline 已到，工具 '{name}' 的本次调用未被接纳"
+                        "（04 §9.1 的 deadline 接纳边界）。run 会在下一个稳定边界按"
+                        "reason=deadline 暂停；已在途的调用按各自的 timeout / Ledger "
+                        "语义收尾。不要重复提交本调用——deadline 不是靠重试解开的"
+                        "（恢复要点名一个未来的时刻）。若本 run 随后以一个新的未来时刻"
+                        "恢复（同一 run_id），暂停前的进度都在事件流里，从那里继续"
+                        "原任务——到点暂停不是任务结束。"
+                    ),
+                    error_code=ErrorCode.DEADLINE_EXCEEDED,
+                    retryable=False,  # 时刻不会因为再试一次就变到未来
+                ),
+                budget_delta=_rejected_delta(name),
+            )
+
+        # -- 阶段 2.4：per-tool 配额闸门（`#314` T6 / `04 §9.1`）--
+        # 位置在 approval **之前**：一个注定被配额拒的调用不该先弹一次人工审批
+        # （审批可能要等人一个回合）。槽位在这里**预留**（本批内并发只读调用靠
+        # "同步检查+预留"不互相超发，见 `tooling/quota.py`）；approval 拒了由下面
+        # 的 release 归还——否则同批后面那条本该收下的调用会被误挡。
+        if tool_quota is not None and not tool_quota.take(name):
+            return ToolExecution(
+                tool_call_id=tool_call_id,
+                result=ToolResult.failure(
+                    message=(
+                        f"工具 '{name}' 的本 run 配额已用尽"
+                        f"（{tool_quota.used(name)}/{tool_quota.ceiling(name)}），"
+                        "本次调用未被接纳。run 将按预算暂停；恢复时由新的绝对配额决定"
+                        "是否继续，不要重复提交同一调用。"
+                    ),
+                    error_code=ErrorCode.BUDGET_EXHAUSTED,
+                    retryable=False,  # 配额没变宽之前，重试是同一条被拒路径
+                ),
+                budget_delta=_rejected_delta(name),
             )
 
         # -- 阶段 2.5：approval gate -- 05_SANDBOX_CODING_TOOLS.md §6 的 REQUIRE_APPROVAL。
@@ -293,14 +407,20 @@ class ToolExecutor:
         # per-call scoping 由设计保证：每次 execute 独立检查，不存储"已批准"状态。
         denied = await self._check_approval(tool_call_id, name, tool, raw_args)
         if denied is not None:
+            # 占了配额槽位却没被接纳 ⇒ 归还：账本此刻仍是 0 消耗，"被拒"与
+            # "配额已尽"必须对得上（暂停判定读的是账本，不是这个窗口）。
+            if tool_quota is not None:
+                tool_quota.release(name)
             return denied
 
-        # 配置错误必须在任何真实副作用之前拒绝。
-        if self._overflow_handler is not None and session is None:
-            raise ValueError("session is required when OverflowHandler is configured")
-        if (session is not None and operation_context is not None
-                and session.session_id != operation_context.session_id):
-            raise ValueError("session and operation_context must identify the same session")
+        # -- **接纳点**（`04 §9.1` 的"唯一接纳点"，`#314` 的唯一计数点）--
+        # 到这里为止的拒绝闸门全部通过（registry / args / deadline / 配额 / approval /
+        # 配置），
+        # 再往下就是**为这条规范化逻辑调用做真实工作**（Ledger → 观测 → retry loop）。
+        # 所以 `tool_calls` 只在这里记一次——它的携带方式是结果收口时的
+        # `budget_delta`（见本文件 `_admitted_delta`），而不是某个内存计数器：
+        # 计数器会与落盘事实漂移，事件派生值不会。
+        # 五条 return 分支都**不**在这里，它们各自带 0 增量（准入前被拒不消耗配额）。
 
         if self._operation_ledger is not None:
             assert operation_context is not None
@@ -321,19 +441,32 @@ class ToolExecutor:
         # -- Langfuse 工具观测（ADR-0018 D7）：与 JSONL tool_operation 同点平行。
         # delegate 工具按官方多 Agent 规则用 agent 型 + 目标命名，并在其存活
         # 期间设置嵌套绑定——child runtime 的 RunTracer 认领该观测为根。
-        obs_span = None
+        # 端口（#250）恒为对象：缺席实现是 NullTracer，这里不判空。
         attempts: list[dict[str, Any]] = []
         is_delegate = getattr(tool, "is_subagent_dispatch", False)
-        if tracer is not None:
-            obs_span = tracer.tool_span_started(
-                tool_name=name, tool_call_id=tool_call_id, args=raw_args,
-                is_delegate=is_delegate,
-            )
+        obs_span: Span | None = tracer.tool_span_started(
+            tool_name=name, tool_call_id=tool_call_id, args=raw_args,
+            is_delegate=is_delegate,
+        )
         binding_token = None
-        if tracer is not None and obs_span is not None and is_delegate and tracer.trace_id:
+        if obs_span is not None and is_delegate and tracer.trace_id:
             binding_token = current_trace_binding.set(
                 TraceBinding(trace_id=tracer.trace_id, observation=obs_span),
             )
+        span_session_id = operation_context.session_id if operation_context else None
+
+        def _close_span(outcome: str, **fields: Any) -> None:
+            """收口本次工具观测（attempt 链与 ledger 关联键逐次带上）。
+
+            收口在异常臂里也会被调用：观测实现违约抛错时绝不顶掉原发异常
+            （端口契约的"实现必须不抛"由 Runtime 的保护层单点强制，但 Executor
+            是公开可构造组件、可被 Runtime 之外的调用方直接使用，此处自兜一层）。
+            """
+            with suppress(BaseException):
+                tracer.tool_span_completed(
+                    obs_span, outcome=outcome, attempts=attempts or None,
+                    session_id=span_session_id, **fields,
+                )
 
         # -- 阶段 2.7：输出流 sink（ADR-0016 §4.2）--
         # 执行期 stdout/stderr 增量：工具（经 contextvar）从 sandbox reader
@@ -355,11 +488,14 @@ class ToolExecutor:
 
         # -- 阶段 3：execute + Timeout 边界 + 唯一 Retry Layer（Task 3）--
         # 三阶段顺序不变；Timeout/Retry 只包住 tool.execute 这一步。
+        # 外层 try 只为观测收口：观测一旦开始，任何逃逸路径（取消 / Ledger
+        # 存储失败 / overflow 处理失败）都必须把它结束掉——否则 Langfuse 上
+        # 永远挂着一个未收口的工具观测。收口只读 attempts 与异常类型，不改
+        # ToolResult / Ledger / 事件语义（异常原样传播）。
         try:
             try:
                 result = await self._execute_with_retry(
-                    tool_call_id, name, tool, validated,
-                    tracer=tracer, attempts=attempts,
+                    tool_call_id, name, tool, validated, attempts=attempts,
                 )
             except asyncio.CancelledError:
                 if self._operation_ledger is not None:
@@ -367,53 +503,110 @@ class ToolExecutor:
                         session_id, tool_call_id, OperationState.CANCELLED
                     )
                 raise
-        finally:
-            if binding_token is not None:
-                current_trace_binding.reset(binding_token)
-            if sink_token is not None:
-                tool_output_sink_var.reset(sink_token)
-            if sink is not None and drain_task is not None:
-                sink.close()
-                try:
-                    await drain_task
-                except asyncio.CancelledError:
-                    # 二次取消到达：放弃最终 flush（增量已周期性落盘），停泵收口。
-                    drain_task.cancel()
-                    with suppress(BaseException):
+            finally:
+                if binding_token is not None:
+                    current_trace_binding.reset(binding_token)
+                if sink_token is not None:
+                    tool_output_sink_var.reset(sink_token)
+                if sink is not None and drain_task is not None:
+                    sink.close()
+                    try:
                         await drain_task
-                    raise
+                    except asyncio.CancelledError:
+                        # 二次取消到达：放弃最终 flush（增量已周期性落盘），停泵收口。
+                        drain_task.cancel()
+                        with suppress(BaseException):
+                            await drain_task
+                        raise
 
-        # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
-        # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
-        deferred_events: list[tuple[str, dict[str, Any]]] = []
-        if self._overflow_handler is not None:
-            assert session is not None
-            result, deferred_events = await self._overflow_handler.maybe_overflow(
-                session, tool_call_id, name, result,
-            )
+            # 存储失败不属于 Tool failure，不能重跑已成功执行的 Tool。
+            # 异常或取消直接传播，Ledger 保留 RUNNING，交 Recovery reconcile。
+            deferred_events: list[tuple[str, dict[str, Any]]] = []
+            if self._overflow_handler is not None:
+                assert session is not None
+                result, deferred_events = await self._overflow_handler.maybe_overflow(
+                    session, tool_call_id, name, result,
+                )
 
-        if self._operation_ledger is not None:
-            terminal_state = (
-                OperationState.SUCCEEDED if result.ok else OperationState.FAILED
-            )
-            await self._operation_ledger.update_state(
-                session_id, tool_call_id,
-                terminal_state,
-                result_json=result.model_dump_json(),
-                artifact_ref=result.artifact_ref,
-            )
-            self._maybe_kill("terminal", tool_call_id)
+            if self._operation_ledger is not None:
+                terminal_state, reconcile_meta = self._settle_state(tool, result)
+                await self._operation_ledger.update_state(
+                    session_id, tool_call_id,
+                    terminal_state,
+                    result_json=result.model_dump_json(),
+                    artifact_ref=result.artifact_ref,
+                    reconcile_meta=reconcile_meta,
+                )
+                self._maybe_kill("terminal", tool_call_id)
+        except asyncio.CancelledError:
+            _close_span("cancelled")
+            raise
+        except BaseException:
+            # BaseException 而不是 Exception：GeneratorExit / KeyboardInterrupt 之类的
+            # 逃逸路径同样收口（收口是同步调用，且异常原样再抛）。
+            # 异常文本不进观测（脱敏不变量 OBS-008 同族）：归因由上层异常臂负责。
+            _close_span("exception")
+            raise
         # 工具自产的延迟事件（如 delegation）在前，overflow 在后。
         pending = [*result.pending_events, *deferred_events]
-        if tracer is not None:
-            tracer.tool_span_completed(
-                obs_span, outcome="success" if result.ok else "failure",
-                message=result.message, attempts=attempts or None,
-                session_id=(operation_context.session_id if operation_context else None),
-                extra={"artifact_ref": result.artifact_ref} if result.artifact_ref else None,
-            )
+        _close_span(
+            "success" if result.ok else "failure",
+            message=result.message,
+            extra={"artifact_ref": result.artifact_ref} if result.artifact_ref else None,
+        )
         return ToolExecution(tool_call_id=tool_call_id, result=result,
-                             pending_events=pending)
+                             pending_events=pending,
+                             budget_delta=self._admitted_delta(name, result))
+
+    @staticmethod
+    def _settle_state(
+        tool: Tool, result: ToolResult,
+    ) -> tuple[OperationState, str | None]:
+        """收尾时写进 Ledger 的状态 + 可选的 reconcile 标记（`#315` / `07 §4`、`07 §7`）。
+
+        判据只用 `result` 的确定性字段（不解析错误字符串）：
+
+        - 成功 ⇒ `SUCCEEDED`（不含标记）；确定性失败 ⇒ `FAILED`（既有语义逐字不变）；
+        - **MUTATING + TIMEOUT** ⇒ `UNKNOWN` + "副作用未证"标记。`_ToolFailure.from_timeout`
+          已经写明这次尝试"给不出没落地的证据"，落 `FAILED` 等于替工具断言它没生效
+          （`07 §7` 禁止）。
+        - **为什么不是直接 `NEED_RECONCILE`**：状态机只允许 `RUNNING → UNKNOWN →
+          NEED_RECONCILE` 两步链（`storage/sqlite.py` 的迁移表），"要不要现在就对账"
+          是稳定边界的决定，不是执行域能替上层拍的板。
+
+        `retryable` 不参与本判定：它说的是"要不要在 run 内再试一次"（由重试循环
+        消费），与本行"世界状态是否已知"是两件事。完整机制叙述见 ADR-0046 §2 D4。
+        """
+        if result.ok:
+            return OperationState.SUCCEEDED, None
+        if (tool.side_effect is ToolSideEffect.MUTATING
+                and result.error_code is ErrorCode.TIMEOUT):
+            return (
+                OperationState.UNKNOWN,
+                unproven_meta(
+                    error_code=ErrorCode.TIMEOUT.value,
+                    note="MUTATING 工具超时：这次尝试无法证明副作用已完成或未开始",
+                ),
+            )
+        return OperationState.FAILED, None
+
+    @staticmethod
+    def _admitted_delta(name: str, result: ToolResult) -> dict[str, Any]:
+        """**被接纳**的一次逻辑调用计入 run 预算的增量（`04 §9.1` 的两个 counter）。
+
+        `tool_calls` 恒为 1 —— 它就是"接纳点恰好记一次"这件事本身（含调用失败与
+        被取消：它们**已经**被接纳，跑过真实工作）。`tool_attempts` 取**实际尝试次数**，
+        来源是重试循环回填进 metadata 的 `attempt`（那一格是"第几次尝试"，循环从 1
+        连续递增 ⇒ 它同时就是尝试总数）。不另设计数器：多一个计数器就多一处能与
+        事实漂移的地方，而 `attempt` 已经在 ToolResult 里了（`02 §5.1` 要求
+        `tool_attempts` 不是 `tool_calls` 的别名，两者正是这样分开的）。
+
+        能取到 `attempt` 才算得出来：取不到（metadata 被上游替换过）记 0 ——
+        与"上界"相比宁可少记一次尝试，也不猜。
+        """
+        attempt = result.metadata.get("attempt")
+        attempts = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else 0
+        return {"tool_name": name, "tool_calls": 1, "tool_attempts": attempts}
 
     def _maybe_kill(self, stage: str, tool_call_id: str) -> None:
         """精确故障注入点（#32 Kill 集成测试专用；生产 kill_hook=None 行为不变）。
@@ -432,7 +625,9 @@ class ToolExecutor:
         operation_context: OperationContext | None = None,
         session: Session | None = None,
         step_id: int | None = None,
-        tracer: Any = None,
+        tracer: Tracer = _NULL_TRACER,
+        tool_quota: ToolQuotaWindow | None = None,
+        run_deadline: datetime | None = None,
     ) -> list[ToolExecution]:
         """执行一批 tool_calls，返回 ToolExecution 列表（顺序 = 输入顺序）。
 
@@ -460,6 +655,18 @@ class ToolExecutor:
           - 某工具名查不到（将 TOOL_NOT_FOUND）→ 按 READ_ONLY 算，不影响并发决策、让其走正常 execute 报错；
           - 全部 READ_ONLY → "parallel"；
           - 任一 MUTATING → "serial"。
+
+        `tool_quota`（`#314` T6）：**一批一个**准入窗口，原样转交给本批每条
+        `execute()` ——窗口正是为"同一批里的并发调用互相看不见计数"而存在的
+        （见 `tooling/quota.py`），所以批次层只透传、不做判定，也不换实例。
+
+        `run_deadline`（`#315` T7）：同样只**透传**给每条 `execute()`。批次层不
+        自己判定到点与否——判定点是唯一的（执行域的接纳闸门），批次层多一个判定
+        点就会与它漂移；而且"到点之后本批剩下的调用怎么办"的答案是统一的：
+        它们各自以 `DEADLINE_EXCEEDED`（准入前被拒、不消耗配额）返回。
+        紧耦合的事实：本批一旦有任一调用到点被拒，串行分支会**停在那里**并把
+        剩余调用标 `CANCELLED`（既有的永久失败传播规则），下一次循环顶部的暂停
+        判定再按 `reason=deadline` 收口。
         """
         if not tool_calls:
             return []
@@ -471,7 +678,8 @@ class ToolExecutor:
             results = await asyncio.gather(
                 *(
                     self.execute(tc, operation_context=operation_context,
-                            session=session, step_id=step_id, tracer=tracer)
+                            session=session, step_id=step_id, tracer=tracer,
+                            tool_quota=tool_quota, run_deadline=run_deadline)
                     for tc in tool_calls
                 ),
                 return_exceptions=True,
@@ -501,6 +709,7 @@ class ToolExecutor:
                 execution = await self.execute(
                     tool_call, operation_context=operation_context,
                     session=session, step_id=step_id, tracer=tracer,
+                    tool_quota=tool_quota, run_deadline=run_deadline,
                 )
                 executions.append(execution)
                 if execution.result.ok:
@@ -567,11 +776,21 @@ class ToolExecutor:
         content: str,
         run_id: str | None,
         step_id: int | None,
+        budget_delta: dict[str, Any] | None = None,
     ) -> SessionEvent:
-        """持久化 TOOL_RESULT（content = ToolResult JSON，与旧契约一致）。"""
+        """持久化 TOOL_RESULT（content = ToolResult JSON，与旧契约一致）。
+
+        `budget_delta`（`#314`）：本执行域算好的 run 预算增量，作为 data 的**兄弟键**
+        落盘（与 `model/request` 的 usage/cost_usd 同一种做法），run 账本按它求和。
+        缺省 None = 不落这个键——恢复/悬空修复合成的结果不是接纳点产物，它们对
+        `tool_calls` 的贡献是 0（见 ADR-0045 的"计数与上界"一节）。
+        """
+        data: dict[str, Any] = {"tool_call_id": tool_call_id, "content": content}
+        if budget_delta is not None:
+            data["budget_delta"] = budget_delta
         return session.append(
             TOOL_RESULT,
-            {"tool_call_id": tool_call_id, "content": content},
+            data,
             run_id=run_id, step_id=step_id,
         )
 
@@ -683,7 +902,11 @@ class ToolExecutor:
         *,
         operation_context: OperationContext | None,
     ) -> ToolExecution:
-        """Represent a serially cascaded call without invoking its Tool."""
+        """Represent a serially cascaded call without invoking its Tool.
+
+        「未执行」在预算上就是**没被接纳**：这条调用没有真实工作，也不该占配额
+        （`#314`；否则一次永久失败会连带烧掉整批的 per-tool 配额），所以增量记 0。
+        """
         call = ToolCall.normalize(tool_call)
         tool_call_id = call.id
         name = call.name
@@ -710,7 +933,8 @@ class ToolExecutor:
                 result_json=result.model_dump_json(),
             )
 
-        return ToolExecution(tool_call_id=tool_call_id, result=result)
+        return ToolExecution(tool_call_id=tool_call_id, result=result,
+                             budget_delta=_rejected_delta(name))
 
     def _decide_mode(self, tool_calls: list[ToolCall | dict[str, Any]]) -> str:
         """扫描批次，决定并发还是串行。
@@ -774,6 +998,7 @@ class ToolExecutor:
                     error_code=ErrorCode.PERMISSION_DENIED,
                     retryable=False,
                 ),
+                budget_delta=_rejected_delta(name),
             )
 
         response: ApprovalResponse = await self._approval_callback(request)
@@ -788,17 +1013,20 @@ class ToolExecutor:
                 error_code=ErrorCode.PERMISSION_DENIED,
                 retryable=False,
             ),
+            budget_delta=_rejected_delta(name),
         )
 
     async def _execute_with_retry(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
-        *, tracer: Any = None, attempts: list[dict[str, Any]] | None = None,
+        *, attempts: list[dict[str, Any]] | None = None,
     ) -> ToolResult:
         """阶段3 主体：每次尝试被 timeout 包住，retryable 位驱动是否再来一轮。
 
         一轮 attempt 的数据流：
           t0 = perf_counter()
-          asyncio.timeout(tool.timeout_seconds) 包住 await tool.execute(validated)
+          deadline = t0 + tool.timeout_seconds（放进 tool_execution_deadline_var，
+                    Tool 把它原样转发给执行后端——唯一 owner，见 ADR-0039）
+          asyncio.timeout(deadline - perf_counter()) 包住 await tool.execute(validated)
             -> 正常返回 ToolResult  -> 透传（尊重工具自己的 ok/retryable 语义）
             -> 抛 TimeoutError      -> 映射 TIMEOUT（READ_ONLY 可重试；MUTATING 不可——
                                       副作用状态未知不盲重跑，见 except TimeoutError 注释）
@@ -811,9 +1039,12 @@ class ToolExecutor:
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             t0 = perf_counter()
+            deadline = t0 + tool.timeout_seconds
+            deadline_token = tool_execution_deadline_var.set(deadline)
             try:
-                # Timeout 边界：只包 execute 这一行；到点未返回即被取消并抛 TimeoutError。
-                async with asyncio.timeout(tool.timeout_seconds):
+                # 本次 attempt 的**唯一**绝对 deadline：本行建立、放进 contextvar
+                # 供 Tool 转发给执行后端，后端不得重新起算。机制见 ADR-0039。
+                async with asyncio.timeout(max(0.0, deadline - perf_counter())):
                     result = await tool.execute(validated)
             except TimeoutError:
                 # asyncio.timeout 到点把 execute 掐断——映射细节（含 retryable 为何
@@ -823,6 +1054,8 @@ class ToolExecutor:
                 # 宽捕获理由同 Task 2：工具是开放世界，无法预知会抛什么。
                 # 分类表查找（isinstance 连子类一起认）在 _ToolFailure.from_exception。
                 result = _ToolFailure.from_exception(e, name).to_result()
+            finally:
+                tool_execution_deadline_var.reset(deadline_token)
 
             duration_ms = round((perf_counter() - t0) * 1000, 1)
             total_ms += duration_ms

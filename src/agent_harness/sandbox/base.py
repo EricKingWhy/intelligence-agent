@@ -63,6 +63,9 @@ class ExecResult:
     # 协作取消（R7-1/C1）：进程因取消信号被整树击杀时置 True——
     # 上层（Tool/Ledger）据此区分"自然结束"与"被取消（副作用未知）"。
     cancelled: bool = field(default=False)
+    # 预算到期（真超时）才置 True：非零 exit_code 不是超时，调用方靠这一位
+    # 区分"命令自己失败了"与"预算用完了"（ADR-0039）。
+    timed_out: bool = field(default=False)
 
 
 class Sandbox(ABC):
@@ -84,11 +87,15 @@ class Sandbox(ABC):
 
     @abstractmethod
     def exec(self, command: str, *, timeout: float | None = None,
+             deadline: float | None = None,
              cancel_event: threading.Event | None = None,
              on_output: Callable[[str, str], None] | None = None) -> ExecResult:
         """执行 shell 命令，返回 ExecResult。
 
-        timeout 为秒；None 表示用后端默认值。超时行为由后端决定。
+        timeout 为秒；None 表示用后端默认值。deadline 是基于
+        time.perf_counter() 的绝对边界；由 ToolExecutor 提供时优先使用，后端不得
+        从收到调用的时刻重新起算相对预算——收到已过期的 deadline 时同样**不得**
+        启动命令/容器（过期后产生新副作用就是 bug）。机制见 ADR-0039。
         cancel_event 是协作取消钩子（C1）：置位后后端必须尽快击杀进程树并返回
         cancelled=True 的结果——asyncio 超时/断连只能取消 await，杀不掉已经
         跑起来的子进程，没有这个钩子，"超时返回"之后命令还会继续改 workspace。
@@ -145,10 +152,15 @@ class Sandbox(ABC):
 
     # —— 路径安全工具（具体方法，子类复用） ——
 
-    def _resolve_within_workspace(self, path: str) -> Path:
+    def resolve_within_workspace(self, path: str) -> Path:
         """把传入路径 resolve 成 workspace 内绝对路径，越界抛 PermissionError。
 
         这是 ADR-0001 路径边界的唯一强制点：所有子类接受路径的方法都先调它。
+
+        **公开**（原 `_resolve_within_workspace`，#191）：Web 层也需要"只校验、不读"这一动作
+        ——`GET .../workspace/git/status|diff` 的 pathspec 要先过边界才能交给 git。
+        与其在 web 层再写一份路径校验（ADR-0001 明确只该有一处），不如把边界本身公开。
+        调用方拿到的是**解析后的绝对路径**；只想校验时忽略返回值即可。
         """
         workspace = self.workspace_root
         resolved = (workspace / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()

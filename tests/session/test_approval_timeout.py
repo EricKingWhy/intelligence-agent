@@ -10,13 +10,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import pytest
 
 from agent_harness.config import Settings
 from agent_harness.session.service import (
-    SessionService,
     _InteractiveCallbackHolder,
 )
 from agent_harness.tooling.approval import (
@@ -151,6 +151,97 @@ class TestFailClosedTimeout:
         assert response.decision is PermissionDecision.APPROVE_ONCE
 
 
+class TestCancelPairsTheDurableFact:
+    """run 取消 / 异常退出也 MUST 成对落 `permission/resolved`（`#316` 谓词 2 的前提）。
+
+    规格链：`02 §5.4` 第 2 条判据是"有 `tool/approval-requested` 无 `permission/resolved`"，
+    而完成闸门是**会话级**的（ADR-0047 D1）。所以只要有一条 requested 永远配不上 resolved，
+    这段会话的每一次后续 run 都会 `quiescence_blocked`——取消掉的 run 不许留下这种事实。
+    """
+
+    def test_cancel_writes_fail_closed_resolution(self):
+        queue = PendingApprovalQueue()
+        holder = _InteractiveCallbackHolder(queue=queue, timeout_seconds=0)
+        session = _mock_session()
+        holder.bind_session(session)
+
+        async def _drive() -> None:
+            task = asyncio.create_task(holder(_request()))
+            while not queue.pending_ids():
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_drive())
+
+        # 两次 append：approval-requested → permission/resolved(deny)
+        assert session.append.call_count == 2
+        resolved_type, resolved_data = session.append.call_args.args
+        assert resolved_type == "permission/resolved"
+        assert resolved_data["decision"] == "deny"
+        assert "fail-closed" in resolved_data["reason"]
+        assert queue.pending_ids() == [], "取消后不得残留 pending（迟到的 /approve 拿 409）"
+
+    def test_late_resolve_after_cancel_is_rejected(self):
+        """一次性语义与超时分支同：取消已裁决 → 迟到 /approve 不覆盖、不静默生效。"""
+        queue = PendingApprovalQueue()
+        holder = _InteractiveCallbackHolder(queue=queue, timeout_seconds=0)
+        session = _mock_session()
+        holder.bind_session(session)
+
+        async def _drive() -> None:
+            task = asyncio.create_task(holder(_request()))
+            while not queue.pending_ids():
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_drive())
+        approval_id = session.append.call_args_list[0].args[1]["approval_id"]
+
+        with pytest.raises(KeyError):
+            queue.resolve(approval_id, ApprovalResponse(approved=True))
+
+    def test_cancel_survives_a_failing_resolution_write(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """结清写入自己失败时，上抛的仍必须是取消：存储故障不许顶掉 `CancelledError`。
+
+        runtime 靠异常类型分臂（`02 §17` 要求取消与失败分开）——若这里被存储异常换掉，
+        同一个 run 会被记成 `run/failed`。代价是这条请求在 durable 面仍不成对，所以
+        失败必须留 ERROR 记录（不静默；ADR-0047 §4 残余 5）。
+        """
+        queue = PendingApprovalQueue()
+        holder = _InteractiveCallbackHolder(queue=queue, timeout_seconds=0)
+        session = _mock_session()
+        session.append.side_effect = [None, OSError("disk full")]
+        holder.bind_session(session)
+
+        async def _drive() -> None:
+            task = asyncio.create_task(holder(_request()))
+            while not queue.pending_ids():
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with caplog.at_level(logging.ERROR, logger="agent_harness.session.approval"):
+            asyncio.run(_drive())
+
+        assert session.append.call_count == 2, "第二次就是那条写失败的结清"
+        assert queue.pending_ids() == [], "裁决已入队（一次性语义不因写失败回退）"
+        approval_id = session.append.call_args_list[0].args[1]["approval_id"]
+        errors = [
+            record for record in caplog.records
+            if record.name == "agent_harness.session.approval"
+            and record.levelno == logging.ERROR
+        ]
+        assert errors, "写失败不得静默"
+        assert approval_id in errors[0].getMessage()
+
+
 class TestQueueExpire:
     """`PendingApprovalQueue.expire`：超时裁决的队列原语。"""
 
@@ -207,16 +298,15 @@ class TestTimeoutConfig:
         settings = Settings(_env_file=None)
         assert settings.approval_timeout_seconds > 0, "默认必须开启 fail-closed"
 
-    def test_build_approval_callback_passes_configured_timeout(self, tmp_path):
-        state = MagicMock()
-        state.settings = Settings(
+    def test_build_approval_callback_passes_configured_timeout(self, tmp_path, make_session_service):
+        settings = Settings(
             _env_file=None,
             workspace_dir=str(tmp_path),
             model_api_key="sk-test",
             approval_timeout_seconds=12.5,
         )
-        state.approval_queues = {}
-        service = SessionService(state)
+        # 只关心 settings / approval_queues：显式 collaborators 构造，不需要容器（#248）。
+        service = make_session_service(settings=settings, approval_queues={})
 
         callback = asyncio.run(
             service._build_approval_callback(

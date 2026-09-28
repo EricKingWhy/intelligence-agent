@@ -84,11 +84,16 @@ class ScriptedModel:
             yield AIMessageChunk(content="", tool_calls=tool_calls)
             return
 
-        # 按 chunk_size 切 content，最后一个 chunk 带 tool_calls（若有）
+        # 按 chunk_size 切 content，最后一个 chunk 带 tool_calls（若有）。
+        # usage_metadata 也随最后一个 chunk 带出（真实 provider 的 usage 在流末尾；
+        # Runtime 聚合后 ai.usage_metadata 才有值——#200 缓存命中率的测试前提）。
         chunks = [content[i:i + self.chunk_size] for i in range(0, len(content), self.chunk_size)]
+        usage_metadata = getattr(response, "usage_metadata", None)
         for idx, piece in enumerate(chunks):
             is_last = idx == len(chunks) - 1
             yield AIMessageChunk(
                 content=piece,
                 tool_calls=tool_calls if is_last else [],
+                **({"usage_metadata": usage_metadata}
+                  if is_last and usage_metadata is not None else {}),
             )

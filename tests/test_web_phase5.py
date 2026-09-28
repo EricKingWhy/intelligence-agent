@@ -19,7 +19,10 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
         configured_sessions.append(session_id)
         return store
 
-    monkeypatch.setattr("agent_harness.assembly.S3ArtifactStore", provider)
+    # 补丁目标从 `assembly.S3ArtifactStore` 移到 provider 模块（#192 批 1）：store 的
+    # 选择已收敛到 `storage/artifact_select.py`，而它在**调用时**从 provider 模块取类，
+    # 所以"把 S3 换成内存替身"要打在类的定义处，而不是某个 import 过它的命名空间。
+    monkeypatch.setattr("agent_harness.storage.s3_artifact.S3ArtifactStore", provider)
     model = ScriptedModel([
         AIMessage(content="", tool_calls=[{"id": "read-1", "name": "read",
                                            "args": {"path": "data.txt"}}]),

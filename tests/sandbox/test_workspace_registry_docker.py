@@ -29,6 +29,7 @@ docker_required = pytest.mark.skipif(
 )
 
 SESSION_ID = "test-registry-docker-session"
+CHILD_SESSION_ID = "test-registry-docker-child"
 
 
 @pytest.fixture
@@ -65,7 +66,7 @@ class TestDockerRegistryDeterministicNaming:
         _sandbox = registry.create(SESSION_ID)
 
         mapping_file = tmp_path / "workspaces" / f"{SESSION_ID}.json"
-        mapping = json.loads(mapping_file.read_text())
+        mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
         assert mapping["container_name"] == f"agent-harness-{SESSION_ID}"
         assert mapping["volume_name"] == f"agent-harness-{SESSION_ID}"
 
@@ -92,3 +93,18 @@ class TestDockerWorkspaceRecovery:
 
         content = sandbox2.read_text("persistent.py")
         assert content == "print('survived restart')"
+
+    def test_child_alias_ownership_preserves_then_cleans_parent_workspace(self, registry):
+        """Deleting a delegated alias is non-owning; deleting its owner removes it."""
+        parent = registry.create(SESSION_ID)
+        parent.write_text("owner-marker.txt", "parent-owned")
+        registry.bind_alias(CHILD_SESSION_ID, SESSION_ID)
+
+        registry.delete(CHILD_SESSION_ID)
+        assert registry.exists(SESSION_ID)
+        assert registry.get(SESSION_ID).read_text("owner-marker.txt") == "parent-owned"
+
+        registry.bind_alias(CHILD_SESSION_ID, SESSION_ID)
+        registry.delete(SESSION_ID)
+        assert not registry.exists(SESSION_ID)
+        assert not registry.exists(CHILD_SESSION_ID)

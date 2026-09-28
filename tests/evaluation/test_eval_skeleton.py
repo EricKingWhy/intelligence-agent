@@ -113,6 +113,7 @@ def test_all_p0_cases_pass_end_to_end(tmp_path: Path):
 
 
 def test_langfuse_experiment_upload_and_graceful_skip(tmp_path: Path):
+    import asyncio
     from types import SimpleNamespace
 
     from evaluation.experiment import run_langfuse_experiment
@@ -152,6 +153,27 @@ def test_langfuse_experiment_upload_and_graceful_skip(tmp_path: Path):
                             task=task, evaluators=evaluators,
                             max_concurrency=max_concurrency)
 
+            async def _run_item():
+                item = data[0]
+                output = await task(item=item)
+                scores = []
+                for evaluator in evaluators:
+                    value = evaluator(
+                        input=item.input, output=output,
+                        expected_output=item.expected_output, metadata=item.metadata,
+                    )
+                    scores.extend(value if isinstance(value, list) else [value])
+                return SimpleNamespace(
+                    item_results=[SimpleNamespace(
+                        item=item, output=output,
+                        evaluations=[SimpleNamespace(**score) for score in scores],
+                    )],
+                    run_evaluations=[], dataset_run_id="run-fake",
+                    dataset_run_url="https://example.invalid/run-fake",
+                )
+
+            return asyncio.run(_run_item())
+
     result = run_langfuse_experiment(
         "p0_core", public_key="pk", secret_key="sk",
         base_url="https://example.invalid",
@@ -176,7 +198,7 @@ def test_langfuse_experiment_upload_and_graceful_skip(tmp_path: Path):
         input={"task": "请计算 1+2 等于多少，使用 add 工具。"},
         expected_output={"tools": ["add"]},
     )
-    output = recorded["task"](fake_item)
+    output = asyncio.run(recorded["task"](fake_item))
     assert output["result"]["ok"] is True
     scores = [ev(input=None, output=output, expected_output=None)
               for ev in recorded["evaluators"]]

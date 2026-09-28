@@ -9,6 +9,10 @@ seq **分配**仍是 Session 聚合根的职责（``_next_seq``）；本层负�
 「读已落盘最大 seq → 判定 → 写」串成临界区，并拒写违反单调性的 seq
 （写者跨线程：事件循环的 ``Session.append`` 与恢复扫描的工作线程都会进来）。
 保证范围是**同一进程内**——跨进程没有文件锁，见 ``__init__`` 的边界说明。
+
+另有一条护栏（ADR-0036）：本进程硬删过的会话 id 不再接受追加——``delete_session``
+与 ``append_event`` 共用一把会话写锁，迟到的旁路写者（run 收尾后的记忆写回任务）
+无法把已删会话的日志重建出来。
 """
 
 from __future__ import annotations
@@ -16,13 +20,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from agent_harness.session.errors import SeqConflict
-from agent_harness.session.event import RUN_TERMINAL_TYPES, USER_MESSAGE, SessionEvent
+from agent_harness.session.errors import SeqConflict, SessionNotFound
+from agent_harness.session.event import (
+    RUN_TERMINAL_TYPES,
+    SESSION_STARTED,
+    USER_MESSAGE,
+    SessionEvent,
+)
+from agent_harness.session.header import StartedHeader
 
 logger = logging.getLogger("agent_harness.session.store")
 
@@ -30,6 +42,19 @@ logger = logging.getLogger("agent_harness.session.store")
 #: 会话最初几条事件里；超过此数仍未找到则放弃（返回 None，前端有
 #: events 扫描降级路径）。只约束"解析几条"，不约束行计数（O(1)/行）。
 _SUMMARY_HEAD_PARSE_LIMIT = 200
+
+
+@dataclass(frozen=True)
+class WorkspaceRef:
+    """会话摘要里的**项目引用**（WS-3 / #153 AC1–AC2）：id 做请求/重命名，title 做显示。
+
+    放在 session 层而不是 `agent_harness.workspace`：依赖方向是 session ← workspace
+    （`workspace/models.py` 本来就 import 本层），反向 import 会成环。本类只是**值对象**
+    ——它就是"会话摘要里那一格"的形状，不含任何项目领域行为（那些在 `WorkspaceIndex`）。
+    """
+
+    id: str
+    title: str
 
 
 @dataclass(frozen=True)
@@ -53,6 +78,17 @@ class SessionSummaryStats:
     #: ARCH-4b：同一终结事件的 `trace_url`（人类可点击的 Langfuse URL，契约 2d7f87a
     #: / ADR-0018 D7）。与 `trace_id` 同源、同一套守卫；未配置可观测性时为 None。
     trace_url: str | None = None
+    #: WS-3 / #153：会话所属项目；**未分组**（历史遗留 / 未命名 workspace / 装配里
+    #: 没有 workspace 索引）时为 None，绝不伪造（不变量 #21 同族）。
+    #: store 层不认识项目，只提供这个带类型的落点；值由 `SessionService.list_sessions`
+    #: 从 `WorkspaceIndex` 回填（AC1 要求三处契约同时有该字段，这是其中之一）。
+    workspace: WorkspaceRef | None = None
+    #: #171：会话是否已归档（列表可见性，不是删除）。与 `workspace` 同款分工——store
+    #: 读的是 JSONL，归档标记在 DB（`session_meta.archived`），值由
+    #: `SessionService.list_sessions` 回填。**`session_meta` 无该会话行 = 未归档**
+    #: （行由 lineage/fork 懒补，不是 1:1 恒成立），所以这里的默认值与"无行"同义，
+    #: 不会撒谎；真值只能由服务层的联接给出（AC3）。
+    archived: bool = False
 
 
 class JsonlSessionStore:
@@ -79,6 +115,11 @@ class JsonlSessionStore:
         # 外部追加。同一进程内（真实缺陷 BUG-011 的现场：一个 server 的两个并发请求）
         # 由 _lock_for + 本检查共同保证严格单调。
         self._last_seq: dict[str, tuple[int, int, int]] = {}
+        # 本进程硬删过的会话 id（ADR-0036）：`append_event` 据此拒写。不清除是有意的——
+        # 生产 id 由 uuid4 生成（没有客户端可控入口），同一 id 再次出现只可能是迟到写者；
+        # 进程重启即归零。它**不落盘、不可恢复**，因此不是 ADR-0029 D1 反对的"墓碑"
+        # （那条反对的是"已删但还在"的半状态）。
+        self._deleted_ids: set[str] = set()
         self._state_guard = threading.Lock()
 
     def _session_dir(self, session_id: str) -> Path:
@@ -132,11 +173,21 @@ class JsonlSessionStore:
         seq 守卫（BUG-011）：seq ≤ 已落盘最大 seq 是**拒写**而不是写入。
         否则并发取号会留下重复 seq，使该会话此后任何构造聚合的路径
         （``Session.load`` / ``resume``）永久失败。
+
+        **硬删之后不得重建**（ADR-0036）：本进程删过的 id 一律拒写（``SessionNotFound``）。
+        否则迟到的旁路写者会在这里把日志凭空重建，静默撤销用户那次不可逆的删除。
+        抛异常而不是静默丢：拒写是事实，写者（如 ``MemoryWriteback``）自带降级兜底。
         """
-        path = self._events_path(session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        path = self._events_path(session_id)
         with self._lock_for(session_id):
+            # 已删集合与建目录都在临界区内（ADR-0036）：迟到的 append 只可能看到
+            # 「还没删」或「已登记」两种状态之一，不会写进一个正在被删的目录里。
+            if session_id in self._deleted_ids:
+                raise SessionNotFound(
+                    f"Session '{session_id}' 已被硬删，拒绝重建事件日志"
+                )
+            path.parent.mkdir(parents=True, exist_ok=True)
             last = self._last_seq_on_disk(session_id)
             if event.seq <= last:
                 raise SeqConflict(
@@ -152,6 +203,24 @@ class JsonlSessionStore:
                 self._last_seq[session_id] = (
                     event.seq, stat.st_size, stat.st_mtime_ns,
                 )
+
+    @staticmethod
+    def _iter_event_lines(
+        path: Path, limit: int | None = None
+    ) -> Iterator[tuple[int, str]]:
+        """Yield physical lines lazily; ``limit`` caps physical lines, not events.
+
+        All Store readers share this one file-open/line-enumeration path. Parsing stays
+        in ``_parse_event_line`` so summary can count the whole file while parsing only
+        its bounded head and final non-empty line.
+        """
+        if limit is not None and limit <= 0:
+            return
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for lineno, raw_line in enumerate(handle, start=1):
+                yield lineno, raw_line
+                if limit is not None and lineno >= limit:
+                    break
 
     @staticmethod
     def _parse_event_line(raw_line: str, path_name: str, lineno: int) -> SessionEvent | None:
@@ -194,12 +263,10 @@ class JsonlSessionStore:
             return []
 
         events: list[SessionEvent] = []
-        # errors="replace"：非法 UTF-8 字节替换为 U+FFFD，让坏行走统一的跳过路径
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for lineno, raw_line in enumerate(fh, start=1):
-                event = self._parse_event_line(raw_line, path.name, lineno)
-                if event is not None:
-                    events.append(event)
+        for lineno, raw_line in self._iter_event_lines(path):
+            event = self._parse_event_line(raw_line, path.name, lineno)
+            if event is not None:
+                events.append(event)
         return events
 
     def read_session_summary(self, session_id: str) -> SessionSummaryStats | None:
@@ -230,30 +297,29 @@ class JsonlSessionStore:
         # （见下方守卫），所以不存在「改用前一行」的分支。
         last_line: tuple[int, str] | None = None
 
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for lineno, raw_line in enumerate(fh, start=1):
-                stripped = raw_line.strip()
-                if not stripped:
-                    continue
-                event_count += 1
-                last_line = (lineno, stripped)
+        for lineno, raw_line in self._iter_event_lines(path):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            event_count += 1
+            last_line = (lineno, stripped)
 
-                if not head_done:
-                    event = self._parse_event_line(raw_line, path.name, lineno)
-                    if event is None:
-                        # 头部存在损坏行：中段完整性不可信 → 全量回退
-                        return self._summary_fallback(session_id)
-                    if first_time is None:
-                        first_time = event.time
-                    if (event.type == USER_MESSAGE
-                            and isinstance(event.data.get("content"), str)
-                            and event.data["content"].strip()):
-                        first_user_message = event.data["content"].strip()[:128]
+            if not head_done:
+                event = self._parse_event_line(raw_line, path.name, lineno)
+                if event is None:
+                    # 头部存在损坏行：中段完整性不可信 → 全量回退
+                    return self._summary_fallback(session_id)
+                if first_time is None:
+                    first_time = event.time
+                if (event.type == USER_MESSAGE
+                        and isinstance(event.data.get("content"), str)
+                        and event.data["content"].strip()):
+                    first_user_message = event.data["content"].strip()[:128]
+                    head_done = True
+                else:
+                    head_parsed += 1
+                    if head_parsed >= _SUMMARY_HEAD_PARSE_LIMIT:
                         head_done = True
-                    else:
-                        head_parsed += 1
-                        if head_parsed >= _SUMMARY_HEAD_PARSE_LIMIT:
-                            head_done = True
 
         # 末行损坏（崩溃半写的常态位置）→ 全量回退，保证精确。
         # 只解析这一次：last_event_time 与 trace_id 同源于本事件，快路径与
@@ -356,3 +422,66 @@ class JsonlSessionStore:
         # 按修改时间倒序（最近在前）
         ids.sort(key=lambda x: x[1], reverse=True)
         return [sid for sid, _ in ids]
+
+    def delete_session(self, session_id: str) -> bool:
+        """删除该会话的事件日志目录（**唯一真相源**）。返回它是否曾经存在。
+
+        硬删（ADR-0029）里"删掉会话"的实质就是这一句：`list_session_ids` 是按目录扫出来的，
+        目录没了会话就从所有列表里消失。
+
+        **安全边界**：只删 `<root>/<session_id>` 这一层——两个成分都是本 store 自己用
+        root 与 session_id 拼的，且调用方必须先过 `validate_session_id`（拒绝分隔符）。
+        本方法**不读任何外部映射**，因此不可能像 `WorkspaceRegistry.delete` 那样
+        `rmtree` 到用户的真实目录（ADR-0029 D2）。
+
+        幂等：目录不存在 → `False`，不抛错（重跑即自愈，ADR-0029 D3）。
+
+        **删除与追加互斥**（ADR-0036）：整个删除与"登记已删 id"都在会话写锁内完成。
+        否则迟到的写者能在 `rmtree` 与登记之间挤进来重建目录，而"谁赢"取决于线程调度。
+        """
+        session_dir = self._session_dir(session_id)
+        if not session_dir.exists():
+            return False
+        with self._lock_for(session_id):
+            shutil.rmtree(session_dir, ignore_errors=True)
+            # 进程内 seq 缓存与锁表要一起清——否则同 id 再次出现时会带着旧的 last_seq。
+            # 先登记已删 id 再摘锁：摘锁后若又有写者取到**新**锁，它在临界区里读到的
+            # 也已经是"已删"（ADR-0036）。
+            with self._state_guard:
+                self._deleted_ids.add(session_id)
+                self._last_seq.pop(session_id, None)
+                self._seq_locks.pop(session_id, None)
+        return True
+
+    def read_started_header(self, session_id: str) -> StartedHeader | None:
+        """只读会话 header（WS-2 / #152 AC14）：第一条 `session/started` 即停。
+
+        **不读事件正文**——workspace 首次引导只允许看 header（id / cwd / createdAt），
+        所以这里流式读、命中即返回，正文多长都不碰。区别于 `read_session_summary`
+        （那个要数到文件尾才知道事件数）。
+
+        形状非法（没有 events.jsonl / 没有 session/started）→ None，不抛错：引导面对
+        的是历史日志，一条坏数据不该拖垮整个启动（与 `read_events` 的容错同款）。
+        """
+        path = self._events_path(session_id)
+        if not path.exists():
+            return None
+        for lineno, raw_line in self._iter_event_lines(path):
+            if not raw_line.strip():
+                continue
+            event = self._parse_event_line(raw_line, path.name, lineno)
+            if event is None:
+                continue
+            if event.type != SESSION_STARTED:
+                # header 正常就是第一条；遇到别的说明日志形状异常，不再往下翻
+                # （继续翻就等于读正文了）。
+                return None
+            data = event.data or {}
+            cwd = data.get("cwd")
+            return StartedHeader(
+                session_id=session_id,
+                cwd=cwd if isinstance(cwd, str) and cwd else None,
+                created_at=event.time,
+                agent_id=event.agent_id,
+            )
+        return None

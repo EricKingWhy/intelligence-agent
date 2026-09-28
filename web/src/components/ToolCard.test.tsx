@@ -131,3 +131,75 @@ describe('T3 — ToolOutputStream 流式尾窗（#96，S14/规格 03 §9.3）', 
     expect(html).not.toContain('tool-out-stream');
   });
 });
+
+// ── #186 AC2：工具卡的「就地展开」判据是投影挂上的 `tool.artifact` ──
+
+describe('ToolCard 外置产物的就地展开（#186 AC2）', () => {
+  const withArtifact: ToolCall = {
+    tool_call_id: 'c2',
+    name: 'bash',
+    args: { command: 'cat big.log' },
+    status: 'success',
+    result: { exit_code: 0, stdout: '... [truncated, 5000 lines total, use read_artifact(0123456789abcdef) to view]' },
+    artifact: {
+      artifact_id: '0123456789abcdef',
+      size: 4096,
+      mime_type: 'text/plain',
+      source_tool: 'bash',
+    },
+    started_at: '2026-09-05T10:00:00Z',
+    completed_at: '2026-09-05T10:00:01Z',
+  };
+
+  /* 显式给 `level: 2`：`detailed` 档的默认级是 **L1**，L2 内容面（`tool-card-body`）
+     在那档根本不渲染——只传 density 的话"不给入口"的两条断言会因为**内容面整块不存在**
+     而通过，那测的是密度而不是这条判据。 */
+  const render = (tool: ToolCall, sessionId?: string) =>
+    renderToString(
+      createElement(ToolCard, {
+        tool,
+        density: 'detailed',
+        level: 2,
+        ...(sessionId ? { sessionId } : {}),
+      }),
+    ).replaceAll('<!-- -->', '');
+
+  it('有产物 + 有会话 → L2 内联给展开入口（与 Artifacts 清单同一渲染器）', () => {
+    const html = render(withArtifact, 'sess-1');
+    // 先确认内容面确实渲染了（否则下面几条都是空断言）
+    expect(html).toContain('tool-card-body');
+    expect(html).toContain('artifact-toggle');
+    expect(html).toContain('查看完整内容');
+  });
+
+  it('没有会话 → 不给入口（不渲染一个点不通的按钮）', () => {
+    const html = render(withArtifact);
+    expect(html).toContain('tool-card-body');
+    expect(html).not.toContain('artifact-toggle');
+  });
+
+  it('没有产物 → 不给入口（普通命令输出不会凭空多一个控件）', () => {
+    const plain: ToolCall = { ...withArtifact, artifact: undefined };
+    const html = render(plain, 'sess-1');
+    expect(html).toContain('tool-card-body');
+    expect(html).not.toContain('artifact-toggle');
+  });
+
+  it('归档 diff **不**重复给第二个入口（同一个 artifact 只该有一个展开按钮）', () => {
+    /* 归档 diff 的 tool.diff 与 tool.artifact 指向**同一个** artifact：DiffBlock 已经
+       渲染了展开入口，通用那一块必须让位。两个同名同效的按钮不是"更多选择"，
+       是让用户怀疑它们有区别。 */
+    const diffTool: ToolCall = {
+      ...withArtifact,
+      name: 'write',
+      args: { path: 'big.txt' },
+      diff: {
+        before: '', after: 'marker', truncated: true, archived: true,
+        artifactId: '0123456789abcdef', artifactTool: 'read_artifact',
+      },
+    };
+    const html = render(diffTool, 'sess-1');
+    expect(html).toContain('diff-archived');
+    expect((html.match(/artifact-toggle/g) ?? []).length).toBe(1);
+  });
+});

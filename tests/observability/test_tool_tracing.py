@@ -8,16 +8,24 @@ ADR-0018 D5/D7：工具调用 = ``tool`` 型观测；delegate 工具 = ``agent``
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 
 import pytest
 from pydantic import BaseModel, Field
 
 from agent_harness.observability import LangfuseSink, RunTracer
+from agent_harness.observability.port import NullTracer, Tracer
 from agent_harness.observability.tracer import current_trace_binding
+from agent_harness.storage import (
+    OperationContext,
+    OperationState,
+    SqliteOperationLedger,
+)
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from agent_harness.tooling.result import ErrorCode
 from tests.observability.test_tracer import FakeRecorder
+from tests.observability.tracer_fixtures import RecordingNullTracer
 
 
 class _Args(BaseModel):
@@ -86,6 +94,55 @@ class _DelegateLikeTool(Tool):
 
     captured_child: RunTracer | None = None
     _sink: LangfuseSink
+
+
+class _BlockingTool(Tool):
+    """永远阻塞直到被取消（取消臂）或撞上 Executor 的 timeout 边界（超时臂）。"""
+
+    def __init__(self, *, timeout_seconds: float = 30.0) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._timeout_seconds
+
+    @property
+    def name(self) -> str:
+        return "blocking"
+
+    @property
+    def description(self) -> str:
+        return "阻塞直到被取消。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _Args
+
+    async def execute(self, args: _Args) -> ToolResult:
+        await asyncio.sleep(self._timeout_seconds)
+        return ToolResult.success(message="不该走到这里")
+
+
+class _FailingTerminalLedger(SqliteOperationLedger):
+    """终态写入抛错的 Ledger：模拟存储故障（执行域外的异常）。"""
+
+    async def update_state(self, session_id, tool_call_id, state, **kwargs):
+        if state in (OperationState.SUCCEEDED, OperationState.FAILED):
+            raise RuntimeError("ledger 挂了")
+        return await super().update_state(session_id, tool_call_id, state, **kwargs)
+
+
+def _sole_tool_span(recorder: FakeRecorder):
+    """本次执行里唯一的 tool 型观测（root 的子观测）。"""
+    root = recorder.spans[0]
+    tool_spans = [c for c in root.children if c.kind == "tool"]
+    assert len(tool_spans) == 1, f"应有且仅有一个 tool 观测：{tool_spans}"
+    return tool_spans[0]
+
+
+def _outcome_updates(span) -> list[dict]:
+    """带 outcome 的 update 调用（= 收口调用）；span.update 的 kwargs 原样在列表里。"""
+    return [u for u in span.updates if "metadata" in u and "outcome" in u["metadata"]]
 
 
 def _sink(recorder: FakeRecorder) -> LangfuseSink:
@@ -165,3 +222,213 @@ async def test_delegate_tool_uses_agent_observation_and_nests_child():
     assert agent_span.ended
     # 绑定已还原：执行结束后 contextvar 回到 None。
     assert current_trace_binding.get() is None
+
+
+# ---- #250：Executor 端口化 + span 生命周期收口（取消 / 异常 / 超时都必须结束） ----
+
+
+def _executor_module_source() -> str:
+    from pathlib import Path
+
+    import agent_harness.tooling.executor as executor_module
+
+    return Path(executor_module.__file__).read_text(encoding="utf-8")
+
+
+def test_executor_tracer_defaults_to_the_null_implementation():
+    """AC1：`execute` / `execute_batch` 的 tracer 默认值是端口对象，不是 None。
+
+    默认值必须是 NullTracer 实例——None 默认值正是"optional tracing 用 None
+    分支表达"的形状，调用点会被迫判空。
+    """
+    import inspect
+
+    for func in (ToolExecutor.execute, ToolExecutor.execute_batch):
+        default = inspect.signature(func).parameters["tracer"].default
+        assert isinstance(default, NullTracer), f"{func.__name__} 的默认值不是 NullTracer"
+        assert isinstance(default, Tracer)
+
+
+def _tracer_truthiness_guards(source: str) -> list[int]:
+    """找出以 `tracer` 作判空 / 判真值的表达式行号（扫 AST，不是匹配字符串）。
+
+    字符串匹配只挡得住一种写法（`tracer is not None`），挡不住 `if tracer:` /
+    `tracer is None` / 多空格等等价形状；扫 AST 才真钉住"映射路径不靠 None
+    分支表达 optional tracing"这条验收标准。
+
+    两类形状都要抓：
+      (a) 与 None 的比较——出现在 Compare / BoolOp（`x and tracer is not None`）
+          里都要算；
+      (b) 裸真值上下文——`if tracer:` / `while tracer:` / `tracer and ...`。
+    注意 `tracer.trace_id` 这类**属性**访问不算：属性取值判空是业务判断，
+    判的是 trace 是否可关联，不是 tracing 是否缺席。
+    """
+    import ast
+
+    tree = ast.parse(source)
+    hits: list[int] = []
+
+    def _is_tracer_name(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == "tracer"
+
+    for node in ast.walk(tree):
+        # (a) 与 None 比较（Compare 及其在 BoolOp 中的组合都被 walk 分别命中）。
+        if isinstance(node, ast.Compare) and any(
+            _is_tracer_name(n) for n in [node.left, *node.comparators]
+        ):
+            if any(
+                isinstance(op, (ast.Is, ast.IsNot))
+                and any(
+                    isinstance(c, ast.Constant) and c.value is None
+                    for c in node.comparators
+                )
+                for op in node.ops
+            ):
+                hits.append(node.lineno)
+        # (b) 裸真值上下文：If / While 的 test，以及 BoolOp 的操作数。
+        elif isinstance(node, (ast.If, ast.While)) and _is_tracer_name(node.test) or isinstance(node, ast.BoolOp) and any(
+            _is_tracer_name(v) for v in node.values
+        ):
+            hits.append(node.lineno)
+    return sorted(hits)
+
+
+def test_executor_source_has_no_none_guard_on_tracer():
+    """AC1（机械闸）：Executor 源码里不再有任何以 `tracer` 判空 / 判真值形状的分支。"""
+    hits = _tracer_truthiness_guards(_executor_module_source())
+    assert hits == [], f"executor 里仍有 tracer 判空分支，行号：{hits}"
+    # 闸门自检：喂各种等价形状必须报得出来，否则这闸门是空转的。
+    sample = (
+        "async def f(tracer=None):\n"
+        "    if tracer is not None:\n"       # 2: 与 None 比较
+        "        pass\n"
+        "    if tracer:\n"                   # 4: 裸真值
+        "        pass\n"
+        "    if tracer is None:\n"           # 6: 反向比较
+        "        pass\n"
+        "    x = tracer and tracer.trace_id\n"  # 8: BoolOp 操作数
+        "    return x\n"
+    )
+    assert _tracer_truthiness_guards(sample) == [2, 4, 6, 8]
+
+
+@pytest.mark.asyncio
+async def test_explicitly_injected_null_tracer_is_driven_through_the_lifecycle():
+    """显式注入缺席实现时端口被完整驱动（start → completed 各一次）。
+
+    默认值本身（`_NULL_TRACER` 是 NullTracer 实例而非 None，且无 None 判空分支）
+    由 `test_executor_tracer_defaults_to_the_null_implementation` 与上面那条
+    AST 闸门钉住——默认值在 def 期就已绑定，无法在此处替身观测，故不在此重复宣称。
+    """
+    calls: list[str] = []
+    recording = RecordingNullTracer(calls)
+
+    registry = ToolRegistry()
+    registry.register(_FlakyTool())
+    executor = ToolExecutor(registry)
+    execution = await executor.execute(
+        {"id": "call_port", "name": "flaky", "args": {"value": 1}}, tracer=recording,
+    )
+
+    assert execution.result.ok
+    assert calls == ["tool_span_started", "tool_span_completed"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tool_execution_closes_the_span_once():
+    """取消臂：工具执行被取消时 span 必须收口（否则观测上永远挂着一个未结束的观测）。"""
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder)
+    registry = ToolRegistry()
+    registry.register(_BlockingTool())
+    executor = ToolExecutor(registry)
+
+    task = asyncio.create_task(executor.execute(
+        {"id": "call_cancel", "name": "blocking", "args": {"value": 1}}, tracer=tracer,
+    ))
+    await asyncio.sleep(0.05)  # 让 span 真正开出来
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    span = _sole_tool_span(recorder)
+    assert span.ended
+    closes = _outcome_updates(span)
+    assert len(closes) == 1, f"span 必须恰好收口一次：{closes}"
+    assert closes[0]["metadata"]["outcome"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_closes_the_span_once():
+    """超时臂：Timeout 边界映射成 ToolResult 后，span 按失败收口且带 attempt 链。"""
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder)
+    registry = ToolRegistry()
+    registry.register(_BlockingTool(timeout_seconds=0.01))
+    executor = ToolExecutor(registry)
+
+    execution = await executor.execute(
+        {"id": "call_timeout", "name": "blocking", "args": {"value": 1}}, tracer=tracer,
+    )
+
+    assert not execution.result.ok
+    assert execution.result.error_code == ErrorCode.TIMEOUT
+    span = _sole_tool_span(recorder)
+    closes = _outcome_updates(span)
+    assert len(closes) == 1, f"span 必须恰好收口一次：{closes}"
+    assert closes[0]["metadata"]["outcome"] == "failure"
+    assert closes[0]["metadata"]["attempts"][0]["error_code"] == "TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_ledger_failure_closes_the_span_once(tmp_path):
+    """异常臂：Ledger 终态写入失败时 span 必须收口，且异常原样传播（不吞不换）。"""
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder)
+    ledger = _FailingTerminalLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    registry = ToolRegistry()
+    registry.register(_FlakyTool())
+    executor = ToolExecutor(registry, operation_ledger=ledger)
+
+    with pytest.raises(RuntimeError, match="ledger 挂了"):
+        await executor.execute(
+            {"id": "call_ledger", "name": "flaky", "args": {"value": 1}},
+            tracer=tracer,
+            operation_context=OperationContext(session_id="sess-1"),
+        )
+
+    span = _sole_tool_span(recorder)
+    assert span.ended
+    closes = _outcome_updates(span)
+    assert len(closes) == 1, f"span 必须恰好收口一次：{closes}"
+    assert closes[0]["metadata"]["outcome"] == "exception"
+    # 异常文本不进观测（脱敏）：metadata 里只有 outcome / attempts / session_id。
+    assert set(closes[0]["metadata"]) == {"outcome", "attempts", "session_id"}
+
+
+@pytest.mark.asyncio
+async def test_raising_tracer_cannot_replace_the_original_exception(tmp_path):
+    """异常隔离（#250 findings）：观测实现违约抛错时，原发异常必须原样传播。
+
+    Executor 是公开可构造组件（assembly / factory 都直接构造它），调用方
+    未必经过 Runtime 的保护层；收口点自兜一层，否则观测异常会顶掉
+    Ledger 存储失败这类真正要诊断的原发异常。
+    """
+
+    class _RaisingCloseTracer(NullTracer):
+        def tool_span_completed(self, span, **_kwargs):  # type: ignore[override]
+            raise RuntimeError("观测实现在收口时违约")
+
+    ledger = _FailingTerminalLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    registry = ToolRegistry()
+    registry.register(_FlakyTool())
+    executor = ToolExecutor(registry, operation_ledger=ledger)
+
+    with pytest.raises(RuntimeError, match="ledger 挂了"):
+        await executor.execute(
+            {"id": "call_ledger", "name": "flaky", "args": {"value": 1}},
+            tracer=_RaisingCloseTracer(),
+            operation_context=OperationContext(session_id="sess-1"),
+        )

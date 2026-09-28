@@ -1,10 +1,16 @@
 /** F1（Phase 2b）Composer control row e2e 交互测试。
  *
  * 验收项：
- *   - 四个控件 trigger 在场（ModelPicker + Permission/Agent/Reasoning）
- *   - 空目录隐藏入口（context-providers 返 [] → 控件不渲染）
+ *   - 三个档位控件 trigger 在场（权限 / Agent Profile / Reasoning Effort，同一个 `OptionPicker`）
+ *   - 目录缺席（端点返空）→ 该控件不渲染（不伪造列表）
  *   - 键盘打开浮层 + 方向键导航 + Enter 选档 → trigger 文本更新
  *   - Esc 关闭浮层（§19）
+ *
+ * #201 之后：三个档位下拉合并为一个共享组件 `OptionPicker`（`ControlPicker` 与多选
+ * `ContextProviderPicker` 均已删除）。**`aria-label` 维持原值不变**——「权限模式」是中文，
+ * 另外两个继续是 `Agent Profile` / `Reasoning Effort`：票面冻结结论 B 明确「会影响到 e2e
+ * 定位器就不统一中文」，所以下面按各自原值定位。（曾试图顺手统一成中文，两轴 code-review
+ * 的 Spec 轴按票面结论判为 P1，已回退。）
  *
  * 车道归属：Playwright e2e（同 model-picker.spec.ts 约定）。 */
 
@@ -13,13 +19,14 @@ import {
   AGENT_PROFILES,
   PERMISSION_MODES,
   REASONING_EFFORTS,
+  T,
   fulfillSse,
   longCatalog,
   pickControl,
   routeApi,
 } from './fixtures';
 
-test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async ({ page }) => {
+test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭', async ({ page }) => {
   const frames = [
     { type: 'session/started', seq: 1, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
     { type: 'run/started', seq: 2, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
@@ -27,7 +34,7 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
     { type: 'run/completed', data: {}, seq: 4, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
   ];
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES,
@@ -38,7 +45,7 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
 
   await page.goto('/');
 
-  // 四个控件 trigger 在场
+  // 三个档位控件 trigger 在场（同一个 OptionPicker，各由调用方传 aria-label）
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
   const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
@@ -46,33 +53,33 @@ test('Composer control row：四控件渲染 + 键盘选档 + Esc 关闭', async
 
   // ModelPicker 目录空时不渲染——这里没 mock models，所以 model-picker 不在场
   await expect(modelTrigger).toHaveCount(0);
-  // 三个 ControlPicker 在场
+  // 三个档位控件在场
   await expect(permTrigger).toBeVisible();
   await expect(agentTrigger).toBeVisible();
   await expect(effortTrigger).toBeVisible();
 
-  // 键盘打开 Permission Mode 浮层
+  // 键盘打开「权限模式」浮层
   await permTrigger.focus();
   await page.keyboard.press('Enter');
   // 浮层已开——listbox 恒可见（combobox 在短目录下会随搜索框隐藏，见 F-DEFER-1）
   await expect(page.locator('[role="listbox"]')).toBeVisible();
-  // option 角色在场——至少 3 个（auto/ask/deny）
-  await expect(page.locator('[role="option"]')).toHaveCount(3);
+  // option 角色在场——默认（未选）+ auto/ask/deny = 4（FE-R11-05 加的回到未选入口）
+  await expect(page.locator('[role="option"]')).toHaveCount(4);
 
   // Esc 关闭浮层（§19）
   await page.keyboard.press('Escape');
   await expect(page.locator('[role="listbox"]')).toBeHidden();
 
-  // 再次打开 + Enter 选第一个 option → trigger 文本更新
-  await pickControl(page, '权限模式', 0, 'Auto Approve');
+  // 再次打开 + Enter 选第一个真实档位（ArrowDown 1 次越过「默认（未选）」）
+  await pickControl(page, '权限模式', 1, '只读');
 });
 
 test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', async ({ page }) => {
   // 权限模式 3 条 ≤ 5 → 搜索框隐藏；要测搜索需换长目录（F-DEFER-1）。
   // 长目录来自 fixtures 公共构造，避免内联后与其它 spec 漂移。
-  const LONG_MODES = longCatalog('mode', 6, { index: 2, label: 'Ask Each Time' });
+  const LONG_MODES = longCatalog('mode', 6, { index: 2, label: '工作区写入' });
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: LONG_MODES,
@@ -88,12 +95,109 @@ test('Composer control row：长目录搜索过滤 + 短目录隐藏搜索框', 
   // 长目录（6 > 5）→ 搜索框可见、可交互
   const combo = page.getByRole('combobox', { name: '权限模式' });
   await expect(combo).toBeVisible();
-  await expect(page.locator('[role="option"]')).toHaveCount(6);
+  // 6 条目录 + 「默认（未选）」= 7
+  await expect(page.locator('[role="option"]')).toHaveCount(7);
 
-  // 搜索过滤：键入「ask」只剩匹配项
-  await page.keyboard.type('ask');
+  // 搜索过滤：键入「工作区」只剩匹配项（「默认（未选）」的 keywords 不含它；
+  // 其余 mode N 行也不含）。夹具与断言同步改成真实文案后，原来那句 `ask`
+  // 已无匹配项——这正是"断言跟着数据走"该有的样子，不是把断言放宽。
+  await page.keyboard.type('工作区');
   await expect(page.locator('[role="option"]')).toHaveCount(1);
-  await expect(page.locator('[role="option"]')).toContainText('Ask Each Time');
+  await expect(page.locator('[role="option"]')).toContainText('工作区写入');
+});
+
+/** FE-R11-05 回归锁：单选控件选了之后必须能回到「未选」。
+ *  此前只能整页 reload——目录里没有任何表达"没选"的条目，触发文本却显示 placeholder。 */
+test('Composer control row：单选档位可以选回「默认（未选）」', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await expect(trigger).toContainText('权限'); // 未选 → placeholder（文案是「权限」）
+
+  // 先选一个真实档位
+  await pickControl(page, '权限模式', 1, '只读');
+  await expect(trigger).toContainText('只读');
+
+  // 再选回「默认（未选）」——首项，Enter 零次下压即命中
+  await pickControl(page, '权限模式', 0, '权限');
+  await expect(trigger).not.toContainText('只读');
+});
+
+/** #201 验收「选中态 = 勾选 + 加重 + 左侧 2px 高亮条」的**可失败**锁。
+ *
+ *  为什么必须在 e2e：弹层是 Radix portal（SSR 里没有），组件单测断不到；而这三条通道
+ *  只活在 CSS 里——两轴 review 的 Spec 轴指出该 AC 当时**没有任何会红的测试**。
+ *  三条一起断：`data-state="checked"`（第二通道的挂钩）、`.picker-item-check` 图标、
+ *  `::before` 实测宽度 = 2px（第三通道；只断属性不断像素的话，把 accent 条删掉照样绿）。 */
+test('Composer control row：选中行的三通道选中态（勾选 + 加重 + 2px 高亮条）', async ({ page }) => {
+  await routeApi(page, { sessions: [], events: [], permissionModes: PERMISSION_MODES });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await trigger.click();
+  // 下压一次到第一个真实档位（只读），Enter 选中
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  await expect(listbox).toBeVisible();
+  await listbox.focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText('只读');
+
+  // 重新打开：选中行的三通道同时在场，且只有它一行是 checked
+  await trigger.click();
+  const checked = page.locator('.picker-item[data-state="checked"]');
+  await expect(checked).toHaveCount(1);
+  await expect(checked).toContainText('只读');
+  await expect(checked.locator('.picker-item-check')).toHaveCount(1);
+  const barWidth = await checked.evaluate(
+    (el) => getComputedStyle(el, '::before').width,
+  );
+  expect(barWidth, '左侧高亮条应为 2px').toBe('2px');
+  // 「默认（未选）」此时是未选中态：同一行**不放勾**（否则"选中"就没有视觉差异）。
+  // 用 hasText 收敛到那一行——未选态本来就有多行（ask / deny 同样 unchecked）。
+  const defaultRow = page.locator('.picker-item[data-state="unchecked"]', { hasText: '默认（未选）' });
+  await expect(defaultRow).toHaveCount(1);
+  await expect(defaultRow.locator('.picker-item-check')).toHaveCount(0);
+});
+
+/** FE-R11-04 回归锁：短目录（搜索框 display:none）下**纯键盘**必须能选档。
+ *
+ *  此前的洞：cmdk 把方向键/Enter 的处理挂在 `[cmdk-root]` 上，只能靠冒泡到达；
+ *  搜索框一藏，root 里没有可聚焦元素 → Radix 把焦点放到 Content（在 root 之外）
+ *  → 方向键无反应、Enter 不提交。鼠标路径正常，所以只有键盘用户会撞上。
+ *  本用例**不手动 focus listbox**（那是旧 helper 的绕行），只依赖打开时的初焦——
+ *  修复前这里必然失败。 */
+test('Composer control row：短目录键盘导航（不手动聚焦 listbox）', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES, // 3 条 ≤ 5 → 搜索框隐藏
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="listbox"]')).toBeVisible();
+
+  // 焦点必须在 cmdk 的 root 内，否则按键根本到不了承接者
+  const focusInCmdkRoot = await page.evaluate(() => {
+    const a = document.activeElement as HTMLElement | null;
+    return !!a?.closest('[cmdk-root]');
+  });
+  expect(focusInCmdkRoot).toBe(true);
+
+  // 零下压 = 首项「默认（未选）」；下压一次 → 第一个真实档位
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(trigger).toContainText('只读');
 });
 
 test('Composer control row：提交 payload 字段名对齐后端契约', async ({ page }) => {
@@ -106,7 +210,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   let capturedBody: string | null = null;
 
-  routeApi(page, {
+  await routeApi(page, {
     sessions: [],
     events: [],
     permissionModes: PERMISSION_MODES,
@@ -121,10 +225,11 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   await page.goto('/');
 
-  // 选 Permission Mode → auto / Agent Profile → coding / Reasoning Effort → deep
-  await pickControl(page, '权限模式', 0, 'Auto Approve');
-  await pickControl(page, 'Agent Profile', 1, 'Coding');
-  await pickControl(page, 'Reasoning Effort', 2, 'Deep');
+  // 选 权限模式 → auto / Agent 档位 → coding / 推理深度 → deep
+  // （每个控件首项都是「默认（未选）」，故下压次数 = 条目下标 + 1）
+  await pickControl(page, '权限模式', 1, '只读');
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
 
   // 提交任务
   await page.getByLabel('Agent 任务').fill('payload 测试');
@@ -135,9 +240,300 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   const body = JSON.parse(capturedBody!);
   // 字段名对齐后端 B1 契约
-  expect(body.permission_mode).toBe('auto');
+  expect(body.permission_mode).toBe('read-only');
   expect(body.agent_profile).toBe('coding');
   expect(body.reasoning_effort).toBe('deep');
-  // 未选 context_providers → 不传该字段
+  // #201：多选 context provider 控件已删除，UI 上没有任何入口能设这个键 →
+  // 断言它不出现在 payload（后端仍接受程序化显式传值，见 web/src/lib/amend.ts）。
   expect(body.context_providers).toBeUndefined();
+});
+
+test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出 N/M', async ({ page }) => {
+  /* 用户裁定（设计稿 §4）：「要提示，但从简，不能突兀」——位置固定在档位弹层的
+     footer（`.picker-foot`），一行次级文字，被收窄掉的名字放 `title`。
+     数字来自后端 `/api/agent-profiles` 的 `tool_scope`（纯函数
+     `lib/agentProfileScope.ts` 组装，单测在 `agentProfileScope.test.ts`）；
+     这条 e2e 锁的是**真实 DOM 接线**——纯函数对但没挂上去，用户一样看不到。 */
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  const foot = page.locator('.picker-foot');
+  const openPicker = async () => {
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  };
+  const closePicker = async () => {
+    await page.keyboard.press('Escape');
+    // 退出动画期间 listbox 仍在 DOM（与 pickControl 的注释同一成因）
+    await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+  };
+
+  // ① 未选档位 = 用后端默认值，运行时落到 main（assembly.py:401）——main 没被收窄
+  //    ⇒ **不许**出现那一行：「共 17 个中开放 17 个」只是噪音。
+  await openPicker();
+  await expect(foot).toHaveCount(0);
+  await closePicker();
+
+  // ② 被收窄的档位（编程 = coding，12/17）⇒ 逐字给出那句话（**声明**口径）
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  await openPicker();
+  await expect(foot).toBeVisible();
+  await expect(foot).toHaveText('该档位声明开放 12 个工具（全部档位声明 17 个）');
+  // hover 提示只列名字、不解释原因（设计稿：「只说事实，不解释原因」）。
+  // `title` 挂在文案 span 上（`.picker-foot` 是容器槽位——调用方可能放别的东西，
+  // 那个槽位本身不该被强行赋予一个 title 语义）。
+  const note = foot.locator('span[title]');
+  await expect(note).toHaveAttribute('title', /^Coding未声明开放：/);
+  await expect(note).toHaveAttribute('title', /delegate/);
+  await expect(note).toHaveAttribute('title', /web_search/);
+  await closePicker();
+
+  // ③ 换回未被收窄的档位（通用 = main）⇒ 提示消失（跟着当前生效档位走，不是一次性的）
+  await pickControl(page, 'Agent Profile', 1, 'Main');
+  await openPicker();
+  await expect(foot).toHaveCount(0);
+  await closePicker();
+});
+
+test('#201 冻结行：每行 20px 图标槽恒在，未知名/缺键留空槽（不编字形）', async ({ page }) => {
+  /* 行结构 = 图标槽（20px 固定宽）+ 标题 + 描述 + 选中标记（设计稿 §4）。
+     本用例只锁**槽**：① 带已知 icon 名的行槽里有字形；② 后端扩展出来的档位
+     （夹具 `mode-0…mode-5`，没有 `icon` 键）槽**留空但仍在**、宽度不变 ⇒ 标题
+     左边界不随图标有无跳动。字形从哪来由下一条用例锁。 */
+  const LONG = longCatalog('mode', 6); // 无 `icon` 键的目录（真要能被选到，故走真实载荷）
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: LONG,
+    agentProfiles: AGENT_PROFILES, // 真实 id + 真实 icon 名：main / coding / research_review
+  });
+  await page.goto('/');
+
+  // ① 带 icon 名的条目：槽里有 svg，且槽宽恒 20
+  await pickControl(page, 'Agent Profile', 2, 'Coding');
+  const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+
+  const slot = page.locator('.picker-item .picker-item-icon');
+  await expect(slot.first()).toBeVisible();
+  const box = await slot.first().boundingBox();
+  expect(Math.round(box!.width)).toBe(20); // 固定宽 = 多行对齐的前提
+  // 「默认（未选）」那一行没有图标（它不是目录条目）⇒ 空槽；真实档位行有 svg
+  await expect(slot.first().locator('svg')).toHaveCount(0);
+  await expect(slot.nth(1).locator('svg')).toHaveCount(1);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+
+  // ② 无 `icon` 键的条目：槽仍在（宽度一样）、里面是空的
+  await pickControl(page, '权限模式', 1, 'mode 0');
+  const permTrigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await permTrigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  const unknownRow = page.locator('.picker-item', { hasText: 'mode 1' }).first();
+  const unknownSlot = unknownRow.locator('.picker-item-icon');
+  await expect(unknownSlot).toBeAttached();
+  await expect(unknownSlot.locator('svg')).toHaveCount(0); // 空槽，不是编出来的字形
+  const unknownBox = await unknownSlot.boundingBox();
+  expect(Math.round(unknownBox!.width)).toBe(20);
+});
+
+test('#214：行首字形由条目声明的 icon 名决定（未知名 / 缺键留空槽，不拿 id 猜）', async ({ page }) => {
+  /* 三种条目在**同一个 picker** 里并排，差异只可能来自声明的名：
+       ① `icon: 'layers'`（后端内置名）→ 槽里有 svg；
+       ② `id: 'read-only'`（**曾经**在"按 id 映射"那张表里的 id）但**缺 `icon` 键**
+          （老载荷 / 部署自定义条目）→ 空槽；
+       ③ `icon: 'sparkles'`（前端还不认识的名）→ 空槽。
+     ② 是判定性证据：同一目录里 `main` 与 `read-only` 两个 id 在旧实现里**都会**命中
+     映射表，现在一个有字形、一个没有 ⇒ 只看键在不在，"不再按 id 猜"这件事才算被锁住。 */
+  const PROFILES = [
+    ...AGENT_PROFILES, // main / coding / research_review，带真实 icon 名
+    { id: 'read-only', display_name: '只读', description: '缺 icon 键（老载荷 / 部署自定义）' },
+    { id: 'deploy-custom', display_name: '部署档位', description: '声明了前端还不认识的名', icon: 'sparkles' },
+  ];
+  await routeApi(page, { sessions: [], events: [], agentProfiles: PROFILES });
+  await page.goto('/');
+
+  await pickControl(page, 'Agent Profile', 1, 'Main');
+  const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  const row = (title: string) => page.locator('.picker-item', { hasText: title }).first();
+  await expect(row('Main').locator('.picker-item-icon svg')).toHaveCount(1); // ① layers
+  await expect(row('只读').locator('.picker-item-icon svg')).toHaveCount(0); // ② 缺键
+  await expect(row('部署档位').locator('.picker-item-icon svg')).toHaveCount(0); // ③ sparkles
+  // 空白槽仍占 20px ⇒ 有没有图标都不影响这一行的左对齐
+  const noKeyBox = await row('只读').locator('.picker-item-icon').boundingBox();
+  expect(Math.round(noKeyBox!.width)).toBe(20);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+});
+
+test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形', async ({ page }) => {
+  /* 纯函数对 ≠ 界面上有图标：三个调用点（`Composer.tsx` 的权限/档位/推理深度）各自
+     传一次 `catalogIcon`，任何一处漏传都会静默退化成空槽——这条按 picker 逐个断言。
+     ⚠ 它覆盖的**不是**完整名集：三个 picker 的代表名是 `lock` / `layers` / `bolt`，
+     `u-project-task` 的 AC10 再加 `pencil` / `unlock`；其余四个（`code` / `search` /
+     `gauge` / `telescope`）没有 e2e 覆盖。名集两侧的一致性由跨端对账用例负责
+     （`tests/web/test_web_phase5_staged_endpoints.py::TestCatalogIcons`），不靠这里。 */
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES, // read-only → lock
+    agentProfiles: AGENT_PROFILES, // main → layers
+    reasoningEfforts: REASONING_EFFORTS, // minimal → bolt
+  });
+  await page.goto('/');
+
+  const cases = [
+    { label: '权限模式', title: '只读' },
+    { label: 'Agent Profile', title: 'Main' },
+    { label: 'Reasoning Effort', title: 'Minimal' },
+  ];
+  for (const { label, title } of cases) {
+    const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+    await expect(
+      page.locator('.picker-item', { hasText: title }).first().locator('.picker-item-icon svg'),
+    ).toHaveCount(1);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+  }
+});
+
+/** #283（F18-B）：会话内权限 pill **可改** —— 与 #236 的「只读」正好相反。
+ *
+ *  为什么必须在 e2e：可编辑性由 App 的 `selectedId` 决定（单测断不到「选中会话」这个
+ *  状态），真值又只从投影来——必须走真实的「列表 → 点行 → 投影」链路，才能同时锁住
+ *  「源换对了」「确实可改」「改档真的发了请求」。
+ *
+ *  被本票替换掉的旧行为（#236）：pill 在会话内 `disabled`，title **逐字**为
+ *  「权限档在会话创建时确定，会话内不可修改」——那句在改档可行之后成了假话，删掉它
+ *  正是本票 AC3 的消解方式（不新开「锁定时给引导」的票）。 */
+const PERM_SID = 'e2e-session-perm';
+const PERM_EVENTS = [
+  // 会话真值在这里——后端「显式改档才写键」（F15 #234）
+  { type: 'session/started', data: { permission_mode: 'read-only' }, seq: 1, session_id: PERM_SID, time: T },
+  { type: 'user/message', data: { content: '历史问题' }, seq: 2, session_id: PERM_SID, time: T },
+  { type: 'run/started', data: { turn_index: 1 }, seq: 3, session_id: PERM_SID, run_id: 'r-1', time: T },
+  { type: 'text/delta', data: { delta: '历史回答。' }, seq: 4, session_id: PERM_SID, step_id: 1, run_id: 'r-1', time: T },
+  { type: 'model/completed', data: { content: '历史回答。' }, seq: 5, session_id: PERM_SID, step_id: 1, run_id: 'r-1', time: T },
+  { type: 'run/completed', data: {}, seq: 6, session_id: PERM_SID, run_id: 'r-1', time: T },
+];
+const permSession = {
+  session_id: PERM_SID, event_count: 6, first_event_time: T, last_event_time: T,
+  first_user_message: '历史问题', trace_id: null, trace_url: null,
+};
+
+test('#283 AC3：会话内权限 pill 可改、读会话真值，旧「不可修改」提示彻底消失', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [permSession],
+    events: PERM_EVENTS,
+    permissionModes: PERMISSION_MODES,
+  });
+  await page.goto('/');
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  // 新会话态：还没定档，pill 可编辑（未选 = 后端默认）
+  await expect(trigger).toBeEnabled();
+  await expect(trigger).toContainText('权限');
+
+  // 打开历史会话 → pill 换成会话真值，但**仍可编辑**（#236 的只读已删除）
+  await page.locator('.session-item').first().click();
+  await expect(trigger).toContainText('只读');
+  await expect(trigger).toBeEnabled();
+  await expect(trigger).not.toHaveAttribute('title', '权限档在会话创建时确定，会话内不可修改');
+
+  // 浮层：会话内**没有**「默认（未选）」那一行（端点只认三个具体档位，`null` 必然 422，
+  // 留着就是死胡同）；底部如实披露生效时机（ADR-0041 D4：不得承诺「立即生效」）。
+  await trigger.click();
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  await expect(page.locator('.picker-foot')).toContainText('改档从下一轮 run 起生效');
+  await expect(page.locator('.picker-item', { hasText: '默认（未选）' })).toHaveCount(0);
+  await expect(page.locator('[role="listbox"]:visible .picker-item')).toHaveCount(PERMISSION_MODES.length);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+});
+
+test('#283 AC1/AC2：平移档直接发请求；升「完全访问」先确认，取消则一个请求都不发', async ({ page }) => {
+  const posts: Array<{ permission_mode?: string; auto_approve?: boolean }> = [];
+  // 事件列表**可变**：改档成功后前端会重读该会话的事件并重投影（AC7：不拿回执写本地
+  // 状态，真值只能来自事件流），所以 mock 必须能在 POST 之后交出新的 permission/changed。
+  const events = [...PERM_EVENTS];
+  await routeApi(page, {
+    sessions: [permSession],
+    events,
+    permissionModes: PERMISSION_MODES,
+    onPermissionPost: (route) => {
+      const body = (route.request().postDataJSON() ?? {}) as { permission_mode?: string; auto_approve?: boolean };
+      posts.push(body);
+      events.push({
+        type: 'permission/changed',
+        data: { permission_mode: body.permission_mode, auto_approve: body.auto_approve },
+        seq: events.length + 1, session_id: PERM_SID, time: T,
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'changed',
+          permission_mode: body.permission_mode ?? '',
+          auto_approve: body.auto_approve ?? false,
+        }),
+      });
+    },
+  });
+  await page.goto('/');
+  await page.locator('.session-item').first().click();
+
+  const trigger = page.locator('.composer-control[aria-label="权限模式"]');
+  await expect(trigger).toContainText('只读');
+
+  // ① 平移档（read-only → workspace-write）：无需确认，直接发 POST。
+  await trigger.click();
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  await expect(listbox).toBeVisible();
+  await listbox.getByRole('option', { name: /工作区写入/ }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  // 请求体逐字：档位是端点唯一入参，auto_approve 必填（ADR-0041 §4）且镜像创建路径的 true。
+  expect(posts[0]).toEqual({ permission_mode: 'workspace-write', auto_approve: true });
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0); // 成功才关浮层
+  // pill 换了值——真值来自重读后的事件流，不是回执（AC7）
+  await expect(trigger).toContainText('工作区写入');
+
+  // ② 升到完全访问：先出确认面（role=alertdialog），**取消不发请求**（AC2）。
+  await trigger.click();
+  await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
+  await page.locator('[role="listbox"]:visible .picker-item', { hasText: '完全访问' }).first().click();
+  const confirm = page.locator('.picker-foot [role="alertdialog"]');
+  await expect(confirm).toBeVisible();
+  await expect(confirm).toHaveAttribute('aria-label', '确认升级到完全访问');
+  // 浮层**没有**被关掉（确认面就在里面，先关掉就没地方确认了）
+  await expect(page.locator('[role="listbox"]:visible')).toHaveCount(1);
+  await confirm.getByRole('button', { name: '取消' }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect.poll(() => posts.length).toBe(1); // 取消 ⇒ 没多发任何请求
+  await expect(trigger).toContainText('工作区写入'); // 档位纹丝不动
+
+  // ③ 再选一次 → 确认 → 才发。
+  await page.locator('[role="listbox"]:visible .picker-item', { hasText: '完全访问' }).first().click();
+  await expect(confirm).toBeVisible();
+  await confirm.getByRole('button', { name: '升级' }).click();
+  await expect.poll(() => posts.length).toBe(2);
+  expect(posts[1]).toEqual({ permission_mode: 'danger-full-access', auto_approve: true });
+  await expect(page.locator('[role="listbox"]')).toHaveCount(0);
+  await expect(trigger).toContainText('完全访问');
 });

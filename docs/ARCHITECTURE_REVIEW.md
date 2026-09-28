@@ -3,6 +3,8 @@
 > 日期：2026-09-10 ｜ 范围：`web/src/` 全部模块
 > 方法：扫描最近 diff（main...HEAD）触及的文件，对照 pi-mono 和 deepseek-harness 的设计模式
 > 目标：企业级——性能、速度、鲁棒性、可用性
+>
+> **历史审计快照**：下方 candidate 顺序和原实施约束记录的是 2026-09-10 的建议。若重新启动任何 candidate，施工、review 时点和集成门禁按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 与 `AGENTS.md` §14 执行；下方逐 candidate review / 每次全量门禁不再是当前流程。
 
 ---
 
@@ -312,9 +314,9 @@ Candidate #1 解决运行时的编排鲁棒性；Candidate #2 解决**契约漂�
 
 ## 实施约束
 
-1. **每个 candidate 都走 SDD 循环**：/implement → /code-review → 修复 → /code-review
+1. **如重启 candidate**：按 `docs/SDD_WORKFLOW_PROTOCOL.md` V3-lite 实施，focused 验证后按风险安排 review；集成前确保 review coverage。
 2. **不改变外部行为**：所有重构必须是行为保持的（例外须在「已披露的行为变化」登记）
-3. **门禁全绿**：tsc + vitest + oxlint + playwright + build
+3. **集成门禁**：集成前运行 tsc + vitest + oxlint + playwright + build；逐 candidate 验证范围按 V3-lite 选择。
 4. **不推送到远程**：本地 commit 可以，push 不行
 5. **参考但不照抄**：pi-mono 和 deepseek-harness 的设计模式是参考，不是模板——我们的上下文不同
 

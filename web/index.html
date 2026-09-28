@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
+    <!-- #224：不声明 icon 时浏览器会自己去要 /favicon.ico ⇒ 每次加载一条 404
+         （巡检时是真噪声，还会盖掉真 404）。图标用的字形与顶栏那个 mark 同源
+         （lucide Activity，见 `src/components/TopBar.tsx` 的 appbar-logo）——
+         不是新品牌资源，是把界面上已经在显示的那个 mark 也挂到标签页上。
+         不复用 `public/icons.svg`：它只含 <symbol>、没有可渲染的根图形，当
+         图标渲染出来是空白（判据锁在 e2e/favicon.spec.ts）。 -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Agent Harness Inspector</title>
   </head>
   <body>

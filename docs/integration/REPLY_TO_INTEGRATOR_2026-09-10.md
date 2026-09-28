@@ -75,7 +75,7 @@ merge: 前端批次（T9 UI per-turn + F-DEFER-1 + code-review 修复 + 交付�
 | `session/amend.py` | ✅ 存在 | ❌ **不存在**（H2 的 `amend.py` 会被整个删掉） |
 
 **若合回 main，会产生"内容倒退"**：把 `amend.py` 删除、把 `approval.py`/`service.py`
-退回重构前状态，并让 `docs/INTEGRATION_PROMPT_ARCH_DEEPENING_C1_C3.md` 等已删文件复活。
+退回重构前状态，并让 `docs/archive/integration-prompts/INTEGRATION_PROMPT_ARCH_DEEPENING_C1_C3.md` 等已删文件复活。
 
 ### 触发它的经过（供你了解，非指责）
 
@@ -96,7 +96,7 @@ merge: 前端批次（T9 UI per-turn + F-DEFER-1 + code-review 修复 + 交付�
 ```text
 docs/integration/MERGE_EXECUTION_ORDER.md       | 271 +++++++   ← 唯一有价值的
 CONTEXT.md                                      |  10 +        ← 实为倒退
-docs/INTEGRATION_PROMPT_ARCH_DEEPENING_C1_C3.md | 137 +++++++  ← 实为倒退（已从 main 删）
+docs/archive/integration-prompts/INTEGRATION_PROMPT_ARCH_DEEPENING_C1_C3.md | 137 +++++++  ← 实为倒退（已从 main 删）
 docs/PHASE_STATUS.md                            |   3 +        ← 重复
 docs/BATCH_DELIVERY_2026-09-10.md               |   4 +-
 docs/integration/FRONTEND_INTEGRATION_PROMPT.md |   3 +

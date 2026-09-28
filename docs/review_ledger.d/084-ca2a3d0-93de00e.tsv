@@ -1,0 +1,1 @@
+2026-09-21	B-30 文档治理清理——接手 delta 两轴独立审查（Standards + Spec 只读子代理；fixed point `ca2a3d0`，范围 `ca2a3d0..93de00e`）：去重后 10 条 = P1×1 + P2×3 + P3×6（P0 = 0）；P1 = 台账未覆盖该 tip ⇒ 覆盖闸门实测 exit 1 而记录写 exit 0（§8.3 第 5 条口径错误）。findings 全数处置于 `20ee173`，修后重审 P0/P1 = 0；明细见 `docs/phase_status/2026-09.md` B-30 段	ca2a3d0..93de00e

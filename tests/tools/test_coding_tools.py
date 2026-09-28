@@ -165,6 +165,12 @@ class TestWriteTool:
 
 
 class TestBashTool:
+    def test_timeout_budget_is_frozen_at_sixty_seconds(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        """#256 contract：Bash 的 Executor 有效预算不是 Tool 默认 10 秒。"""
+        assert BashTool(sandbox).timeout_seconds == 60.0
+
     def test_side_effect_is_mutating(self, sandbox: LocalSubprocessSandbox):
         assert BashTool(sandbox).side_effect == ToolSideEffect.MUTATING
 

@@ -27,6 +27,9 @@ EVENT_TYPES = frozenset(
         "session_start",
         "task_start",
         "agent_start",
+        # 每个 run 的运行条件（#198）：档位 / 主模型 / 生效工具清单 / 被剔除工具
+        # ——"模型为什么说没有 write"必须可从日志回溯。诊断词汇而非会话事件。
+        "run_config",
         "agent_decision",
         "llm_call",
         "tool_operation",
@@ -35,6 +38,23 @@ EVENT_TYPES = frozenset(
         "error",
         "task_completed",
         "task_failed",
+        # 记忆内容变更的审计（#159）：记忆是 Capability，变更痕迹只落结构化日志，
+        # 不进 SessionEvent（ADR-0026 / 不变量 #16、#22）。
+        "memory_forget",
+        # V2 治理 API 与显式命令的脱敏审计，只记录动作、id 和影响数量。
+        "memory_governance",
+        # 冲突消解的额外开销观测（#158）：检索了几次/取回几条/截断几条/决策花了多久。
+        # 同样是诊断词汇而非会话事件（记忆不是会话真相）。
+        "memory_consolidated",
+        # 会话硬删的审计（#172 / ADR-0029）：会话被真正销毁后领域数据里**不留墓碑**
+        # （与 ADR-0026 同款选择），"它曾经存在过"只在结构化日志里可查。只带 id 与
+        # 计数，不带任何会话内容。删除**不进 SessionEvent**——那时已没有会话可挂。
+        "session_delete",
+        # 会话归档 / 取消归档的审计（#171）：归档只改列表可见性（`session_meta.archived`
+        # 一列），事件日志一字不改，所以它**不是会话真相**，痕迹只落结构化日志
+        # （不变量 #16/#22）。同样只带 id 与动作（archived / entry_point）——会话正文
+        # 是用户数据，进日志只是多余的泄露面（`memory/audit.py` 同款）。
+        "session_archive",
         "system_log",
     }
 )

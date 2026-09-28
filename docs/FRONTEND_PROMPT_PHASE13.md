@@ -9,7 +9,7 @@
 
 ## 0. 前置依赖（顺序红线）
 
-本批事件的类型常量在 backend-owned 的 `web/src/generated/event-types.ts` 里（`AGENT_DELEGATION_STARTED` / `AGENT_DELEGATION_FINISHED`），**随 feat/backend → main 的集成 merge 到达**。集成 AI 手册见 `D:\intelligence-agent-backend\docs\INTEGRATION_PROMPT_PHASE13.md`。
+本批事件的类型常量在 backend-owned 的 `web/src/generated/event-types.ts` 里（`AGENT_DELEGATION_STARTED` / `AGENT_DELEGATION_FINISHED`），**随 feat/backend → main 的集成 merge 到达**。集成 AI 手册见 `D:\intelligence-agent-backend\docs\archive\integration-prompts\INTEGRATION_PROMPT_PHASE13.md`。
 
 - 若集成尚未完成：先等集成，或经用户确认后直接从 `origin/main`（或 feat/backend）拿该文件——**不要自己往 generated 文件里加常量**
 - 开工步骤 0（先回后正，§14.6）：`git -C D:\intelligence-agent-frontend fetch origin --prune && git merge origin/main`（冲突预期：`docs/PHASE_STATUS.md` 语义并集；`generated/event-types.ts` 两侧同 blob 应自动收敛）

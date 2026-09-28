@@ -6,8 +6,23 @@
  * thrown as UnauthorizedError so callers surface the guidance path.
  */
 
-import type { AgentEvent, SessionSummary } from '../types';
+import type {
+  AgentEvent,
+  ArtifactSlice,
+  HostDirsListing,
+  MemoryDeleted,
+  MemoryScope,
+  MemorySummary,
+  Project,
+  ProjectDeleted,
+  ProjectStatus,
+  SessionDeleted,
+  SessionArchived,
+  SessionSummary,
+} from '../types';
 import { emitUnauthorized, getToken } from './auth';
+import type { RunLimitField } from './runBudget';
+import { parseCapabilities, type CapabilityDescriptor } from './capabilities';
 
 const BASE = ''; // relative — Vite proxy handles /api → :8000
 
@@ -28,14 +43,69 @@ export class NotFoundError extends Error {}
  *  与网络失败 / 5xx 区分开：那些意味着决策**没有**到达后端，卡片必须保持 pending。 */
 export class AlreadyResolvedError extends Error {}
 
-/** FastAPI 错误体 {detail} 读取：形状不符或 JSON 解析失败返回 ''——
- *  错误处理路径自身不再产生新错误（两处 401/409 消费共享的单一实现）。 */
-async function readErrorDetail(res: Response): Promise<string> {
+/** 404 = 审批队列里没有这个 approval_id：进程重启或 run 终结后队列已被 GC，
+ *  这条审批**永远不可能再被 resolve**（`app.py:1236-1240` 已把它写进契约）。
+ *
+ *  不复用 NotFoundError：与 deleteSession 的 404 是同一取舍（`api.test.ts:804`）——
+ *  「用户想提交的东西本就不在了」与「加载路径拿不到内容」对调用方的含义不同。
+ *  也不是可重试错误：重试多少次都是 404。 */
+export class ApprovalGoneError extends Error {}
+
+/** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
+ *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
+ *
+ *  `detail` 有**三种合法形状**，都要认：
+ *  - `string`：端点自己 `raise HTTPException(detail=…)` —— 后端的可行动中文原因；
+ *  - `Array<{loc, msg, type}>`：Pydantic 请求体校验失败的固定形状（422）。不认它
+ *    就会把"path 必须是绝对路径"降级成"注册项目失败（422）"，把最该看懂的一条
+ *    提示扔在门外。只取 `msg` 并剥掉 Pydantic 自己的 `Value error, ` 前缀——
+ *    用户要看的是规则的结论，不是校验器的转述层。
+ *  - `{code, message}`：**带机读判别字段**的错误（#225 `/api/memories` 的 503：
+ *    "没配"与"配了但装配失败"必须分流，判别走 `code` 而不是匹配中文——文案会改，
+ *    码不会）。`code` 由同一次读取里的 `readErrorBody` 取出（响应体只能读一次），
+ *    这里只认 `message` 那个给人看的串。
+ */
+export async function readErrorDetail(res: Response): Promise<string> {
+  return (await readErrorBody(res)).message;
+}
+
+/**
+ * 一次读取拿到 `{message, code, objectDetail}`（响应体只能读一次，所有消费者必须共用
+ * 这次读取）。
+ *
+ * `objectDetail` = "后端用了 `detail` 是对象的**机读形状**回答"（#227）：用它区分三种
+ * 截然不同的情况——纯字符串 detail（旧版后端）、对象 detail 带码、对象 detail **没有**
+ * 合法码（新版形状却没给码 ⇒ 是后端 bug，不是旧版）。少了这个信号，调用方只能看
+ * "码是不是 null"，于是会把"新版形状却没给码"误读成旧版行为——那正是本批要消灭的
+ * "按缺席猜原因"（错误码只按码判：`docs/adr/0035-machine-readable-error-codes-for-503-families.md`）。
+ */
+async function readErrorBody(
+  res: Response,
+): Promise<{ message: string; code: string | null; objectDetail: boolean }> {
   try {
-    const j = await res.json();
-    return j && typeof j.detail === 'string' ? j.detail : '';
+    const j = (await res.json()) as { detail?: unknown } | null;
+    const detail = j?.detail;
+    if (typeof detail === 'string') return { message: detail, code: null, objectDetail: false };
+    if (Array.isArray(detail)) {
+      const message = detail
+        .flatMap((item) => {
+          const msg = (item as { msg?: unknown } | null)?.msg;
+          return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
+        })
+        .join('；');
+      return { message, code: null, objectDetail: false };
+    }
+    if (typeof detail === 'object' && detail !== null) {
+      const { message, code } = detail as { message?: unknown; code?: unknown };
+      return {
+        message: typeof message === 'string' ? message : '',
+        code: typeof code === 'string' && code ? code : null,
+        objectDetail: true,
+      };
+    }
+    return { message: '', code: null, objectDetail: false };
   } catch {
-    return '';
+    return { message: '', code: null, objectDetail: false };
   }
 }
 
@@ -59,8 +129,26 @@ export async function getHealth(): Promise<{ status: string }> {
   return res.json();
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
-  const res = await apiFetch('/api/sessions');
+/** 列会话摘要。
+ *
+ *  `includeArchived` 默认 `false`——**与后端默认逐字一致**（#171 AC3：不带参数就不返回
+ *  已归档会话）。包装层不偷偷改默认值，否则"调了同一个函数"在不同调用方手里含义不同。
+ *
+ *  界面侧**显式**要 `true`（`useSession.refreshSessions`），理由与后端的默认并不矛盾，
+ *  是分层分工：
+ *  - 后端那条默认值服务**别的客户端**（CLI / 脚本 / 未来的集成），它们只要"能用的会话"；
+ *  - 本界面需要**完整一份**：归档开关要能立刻切换可见性（不重拉、不闪屏），每行要能画
+ *    出「已归档」徽标，而**项目视图尤其不能缺行**——`buildRailModel` 把"账本里有 id、
+ *    列表里没有"如实报成「n 条会话日志缺失」（`lib/projects.ts`），只请求默认列表会把
+ *    已归档的成员说成"日志丢了"，那是假话。
+ *
+ *  于是可见性过滤落在**投影层**（`buildRailModel` 的 `includeArchived`）：一份载荷 +
+ *  一个开关 = 一处真相（不变量 #22）。 */
+export async function listSessions(
+  options: { includeArchived?: boolean } = {},
+): Promise<SessionSummary[]> {
+  const query = options.includeArchived ? '?include_archived=true' : '';
+  const res = await apiFetch(`/api/sessions${query}`);
   if (!res.ok) throw new Error(`list sessions ${res.status}`);
   return res.json();
 }
@@ -72,10 +160,31 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
   return res.json();
 }
 
+export interface BudgetPayload {
+  /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。**本票只开这一层**：
+   *  `run` / `session` 由 T4/T10 落地，在那之前后端对未知键是 422
+   *  （`extra="forbid"`），所以类型里也不预留——预留会让"编译通过、请求 422"
+   *  变成新的漂移源。
+   *
+   *  **缺省不发键**：不传 = 后端按 Deployment/AgentProfile 解析（默认 500）。
+   *  前端刻意没有默认值——硬编码一个数字会变成请求侧覆盖：运维把 deployment
+   *  ceiling 调低时，它反而让请求 422（#308 AC：产品调用方不再主动发送
+   *  `max_steps`）。 */
+  local?: { max_agent_turns?: number };
+}
+
 export interface StartSessionPayload {
   task: string;
   workspace?: string;
-  max_steps?: number;
+  /** 目录根会话（WS-6 / #169，ADR-0027 D2）：会话直接在**这个已存在的绝对路径**
+   *  下运行，它同时成为会话的 workspace root（工具的相对路径都相对它解析），
+   *  并在后端自动注册为项目 + attach（幂等）。
+   *
+   *  与 `workspace`（workspaces_root 下的单段名字，ADR-0025 D8 的旧语义）
+   *  **互斥**：两个都传 → 422 `workspace 与 cwd 只能二选一`。前端入口一次只用一种，
+   *  这条互斥在后端兜底而不是在这里猜（谁先谁后是可观测契约，见 PRD §4.1）。 */
+  cwd?: string;
+  budget?: BudgetPayload;
   auto_approve?: boolean;
   /** 可选模型选择（T10 #103，契约 C6）：GET /api/models 的 name；不传 = 默认
    *  链；未知 → 422（调用方提示重新选择并刷新目录）。 */
@@ -99,6 +208,61 @@ export interface StartSessionPayload {
   context_providers?: string[];
 }
 
+/** createEmptySession 的载荷（#204 裁定 §2）：只建会话、不启动 run。
+ *  `task` **刻意不在这个形状里**——launch=false + task 是矛盾组合（给了任务却
+ *  静默不执行），后端 422；类型上没有它，编译期就挡住调用方传进来。
+ *  `permission_mode` 与 startSession 同词汇（弹窗选的档 = 会话级权限）；省略 =
+ *  后端默认 workspace-write + auto-approve。 */
+export interface CreateEmptySessionPayload {
+  cwd?: string;
+  budget?: BudgetPayload;
+  auto_approve?: boolean;
+  permission_mode?: string;
+  workspace?: string;
+}
+
+/** #204：launch=false 的创建回执。只留前端**真正消费**的 `sessionId`。
+ *
+ *  #236：这里曾经带 `permissionMode`（#204 裁定 §3 用它初始化 composer 权限 pill）。
+ *  那个消费者已随本票下线——pill 现在读会话自己的投影（`session/started` →
+ *  `ConversationState.session_permission_mode`），回执驱动的本地状态正是要消灭的
+ *  第二套真相。**没有消费者的字段与它的硬校验一起删掉**：留着只会让"后端哪天不返回
+ *  这个键"变成一条无人受益的假报错（响应里的该键仍被忽略，不影响解析）。 */
+export interface CreatedEmptySession {
+  sessionId: string;
+}
+
+/** POST /api/sessions?launch=false —— 只建会话，不启动 run、不返回 SSE（#204）。
+ *  响应形状 `{session_id, permission_mode}`；前端只用 `session_id`（见
+ *  `CreatedEmptySession`），`permission_mode` 缺席也不再报错。 */
+export async function createEmptySession(
+  payload: CreateEmptySessionPayload,
+): Promise<CreatedEmptySession> {
+  const res = await apiFetch('/api/sessions?launch=false', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(
+      buildBody(payload, {
+        workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
+        cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
+        budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
+        auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
+        permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
+      }),
+    ),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `create session ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (typeof r.session_id !== 'string' || !r.session_id) {
+    throw new SessionError(res.status, 'create 会话回执缺少 session_id');
+  }
+  return { sessionId: r.session_id };
+}
+
 /** B1 契约通用清单条目——{id, display_name, description}。
  *  四个清单端点（permission-modes / agent-profiles / reasoning-efforts /
  *  context-providers）共用此结构，与 /api/models 富化模式对齐。 */
@@ -106,6 +270,26 @@ export interface CatalogEntry {
   id: string;
   display_name: string;
   description: string;
+  /** #214：行首图标的**语义名**（后端在后端条目上声明；取值集见
+   *  `lib/catalogIcons.ts::CATALOG_ICON_NAMES`）。
+   *  缺键 / `null` / 不认识的名 ⇒ 那一行留空槽——前端不编字形，也**不拿 `id` 去猜**
+   *  （部署自定义档位时 id 千变万化，猜出来的字形是编的）。 */
+  icon?: string | null;
+  /** #201：只有 `/api/agent-profiles` 会带；其余三个清单端点没有这个字段
+   *  （缺省 = 后端没说这个档位的工具面 → 前端不渲染提示，不编）。 */
+  tool_scope?: ToolScope;
+}
+
+/** #201：档位的工具面披露（**只有 `/api/agent-profiles` 会带**）。
+ *  `open` = 该档位开放的工具数，`total` = 全部内置档位声明工具面的并集大小，
+ *  `excluded` = 并集里不在该档位的工具名（升序）。
+ *  ⚠ 这是**声明面**不是运行时注册集（后端 `agent/profiles.py::tool_scope_summary`
+ *  写明口径）：本部署少启用一个 capability 时，只有声明里提到、实际没注册的工具
+ *  会计进 `open`——所以文案只说"该档位开放 N 个（共 M 个）"，不说"你现在能用 N 个"。 */
+export interface ToolScope {
+  open: number;
+  total: number;
+  excluded: string[];
 }
 
 /** GET /api/permission-modes —— 权限模式清单。
@@ -133,7 +317,11 @@ export async function getReasoningEfforts(): Promise<CatalogEntry[]> {
 }
 
 /** GET /api/context-providers —— Context Provider 清单。
- *  当前诚实返空数组（runtime 尚未装配任何 provider）。 */
+ *  当前诚实返空数组（runtime 尚未装配任何 provider）。
+ *
+ *  ⚠ 当前**没有调用方**：`#201` 删掉了多选控件，UI 不再有这个入口。函数保留是因为端点本身
+ *  仍在（`fixtures.ts` 的该端点 mock 也为此保留）——`#200` 看板与 `#203` 供应商管理会再评估
+ *  是否要选 provider；删掉它就得连契约一起忘掉。要清理请连同这个理由一起改。 */
 export async function getContextProviders(): Promise<CatalogEntry[]> {
   const res = await apiFetch('/api/context-providers');
   if (!res.ok) throw new Error(`context-providers ${res.status}`);
@@ -141,7 +329,13 @@ export async function getContextProviders(): Promise<CatalogEntry[]> {
 }
 
 /** 窄化解析清单端点响应——仅 id/display_name/description 非空字符串的条目入选。
- *  顶层 key 用复数短名（modes/profiles/efforts/providers），调用方传入对应 key。 */
+ *  顶层 key 用复数短名（modes/profiles/efforts/providers），调用方传入对应 key。
+ *  `tool_scope`（#201）是**可选**字段：形状不完整就整块丢掉（缺省 = 后端没说，
+ *  前端据此不渲染提示）——半个 tool_scope（有 open 没 total，或 excluded 混进
+ *  非字符串）会被渲染成一句半真的话，比不显示更差。
+ *  `icon`（#214）同样是可选字段，非空字符串才认（缺失 / `null` / 非字符串一律当"没说"）。
+ *  ⚠ **本函数是白名单投影**：契约新增字段必须在这里登记，否则会被静默丢掉——后端照发、
+ *  前端拿不到，是最难查的一类失效（#214 落地时实测撞到过一次：图标配好了却不显示）。 */
 function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
   const raw =
     typeof body === 'object' && body !== null && Array.isArray((body as Record<string, unknown>)[key])
@@ -152,14 +346,37 @@ function parseCatalogEntries(body: unknown, key: string): CatalogEntry[] {
     const r = m as Record<string, unknown>;
     if (typeof r.id !== 'string' || !r.id) return [];
     if (typeof r.display_name !== 'string' || !r.display_name) return [];
+    const scope = parseToolScope(r.tool_scope);
+    const icon = parseIconName(r.icon);
     return [
       {
         id: r.id,
         display_name: r.display_name,
         description: typeof r.description === 'string' ? r.description : '',
+        ...(icon ? { icon } : {}),
+        ...(scope ? { tool_scope: scope } : {}),
       },
     ];
   });
+}
+
+/** `icon`（#214）的窄化：非空字符串才认；缺失 / `null` / 非字符串 ⇒ undefined
+ *  （= 后端没说这个条目该画什么 ⇒ 渲染层留空槽，不编字形）。 */
+function parseIconName(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+}
+
+/** `tool_scope` 的窄化：三个字段全部合法才返回，否则 undefined（整块丢弃）。 */
+function parseToolScope(raw: unknown): ToolScope | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const open = r.open;
+  const total = r.total;
+  if (!Number.isInteger(open) || !Number.isInteger(total)) return undefined;
+  if ((open as number) < 0 || (total as number) < 0) return undefined;
+  if (!Array.isArray(r.excluded)) return undefined;
+  if (!r.excluded.every((n) => typeof n === 'string')) return undefined;
+  return { open: open as number, total: total as number, excluded: r.excluded as string[] };
 }
 
 /** 请求体字段表：字段 → [契约键, 值]，返回 null = **不发键**（= 后端默认）。
@@ -190,7 +407,8 @@ function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<s
 const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
-  max_steps: (p) => (p.max_steps !== undefined ? ['max_steps', p.max_steps] : null),
+  cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
+  budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
   auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
   model: (p) => (p.model ? ['model', p.model] : null),
   permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
@@ -213,6 +431,16 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
   });
 }
 
+/** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
+ *
+ *  单独开这个缝的原因：「在此项目中新建任务」确认面（#169 AC12）要把后端 detail
+ *  **原样**留在浮层里，而 useSession 的失败通道是给用户看的一句话——它还带着
+ *  "422 = 未知模型"的旧语义（App 据那句话刷新模型目录）。两者混在一起会让
+ *  「cwd 目录不存在」被显示成「模型不可用」。由调用方自己读，两条语义各自成立。 */
+export async function startSessionErrorDetail(res: Response): Promise<string> {
+  return readErrorDetail(res);
+}
+
 /** POST /api/sessions/{id}/messages（PRD §5.3 续聊入口）。
  *  后端两种响应：
  *    - launched → SSE 流（与 POST /api/sessions 同形），返回原始 Response 供 consumeSSE 消费；
@@ -223,7 +451,14 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
 export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
-  max_steps?: number;
+  budget?: BudgetPayload;
+  /** 编辑语义（ADR-0030 §4.4，后端 #196 起接受；默认缺省不发键 = 现有行为不变）：
+   *  - supersedes_seq：取代 seq 为它的那条 user/message **及其整轮**（只影响
+   *    模型可见投影与界面，历史事件照旧保留）。目标必须是最新一条非注入用户
+   *    消息，否则 409 `SupersedeTargetInvalid`。与 mode 正交。
+   *  - queue_id：本条内容**替换**某条排队项（旧项被取消，新内容按 mode 投递）。 */
+  supersedes_seq?: number;
+  queue_id?: string;
   /** 续聊 amend 字段（后端 Q2 批次起 /messages 接受，与 create 路径同词汇）：
    *  - model: GET /api/models 的 name；
    *  - agent_profile: GET /api/agent-profiles 的 id；
@@ -243,12 +478,21 @@ export interface SendMessagePayload {
   context_providers?: string[];
 }
 
-/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；mode / max_steps
- *  有后端默认值，故缺省在此补齐（与 create 路径「缺省即不发键」不同）。 */
+/** 续聊路径字段表——amend 四项与 START_SESSION_FIELDS 同词汇；`mode` 有后端默认值，
+ *  故缺省在此补齐（其余键缺省即不发键，与 create 路径同款）。 */
 const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
-  max_steps: (p) => ['max_steps', p.max_steps ?? 10],
+  // budget（#308）：与 create 路径同款「有值才带键」，**没有**前端默认值。
+  // 旧的 `max_steps: p.max_steps ?? 10` 正是产品侧低位默认的来源之一，随本票移除。
+  budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
+  // 编辑语义（ADR-0030）：与 amend 四项同款「有值才带键」，缺省不发键 = 后端
+  // 默认 None = 现有行为逐字不变。
+  supersedes_seq: (p) =>
+    typeof p.supersedes_seq === 'number' && Number.isFinite(p.supersedes_seq)
+      ? ['supersedes_seq', p.supersedes_seq]
+      : null,
+  queue_id: (p) => (p.queue_id ? ['queue_id', p.queue_id] : null),
   model: (p) => (p.model ? ['model', p.model] : null),
   agent_profile: (p) => (p.agent_profile ? ['agent_profile', p.agent_profile] : null),
   reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
@@ -304,6 +548,7 @@ export async function postApproval(
     }),
   });
   if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
+  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（运行已中断或服务已重启）');
   if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }
@@ -311,12 +556,36 @@ export async function postApproval(
 // ── Models（后端契约回执 §3，T10 #103：多模型不写死，grill Q2 拍板）──
 
 /** GET /api/models 目录条目。零密钥字段；name 是 POST /api/sessions 的选择键；
- *  思考能力不进元数据（显示侧由 reasoning 事件族驱动，有则显示无则不显示）。 */
+ *  思考能力不进元数据（显示侧由 reasoning 事件族驱动，有则显示无则不显示）。
+ *
+ *  #199 加法：`isAvailable` / `unavailableReason` / 三个能力位。#203 已把
+ *  `is_available` 做成**真实判定**并给出 `unavailable_reason` 机器码
+ *  （`provider_store.py:237-244`：`credential_unavailable` / `missing_api_key`）；
+ *  能力位只在后端**声明过**时才出现（未声明的键后端不返回，前端记 null = 不猜）。
+ *
+ *  ⚠ `is_available` 的真实性**有边界**：只有**自定义供应商**条目是按凭据真判
+ *  （`app.py:1044-1093`）；内置 preset / catalog 条目恒 `true`。所以"不可用"这一态在
+ *  默认部署（没配任何自定义供应商）里根本不会出现——UI 实现了它，不等于默认部署能看到。
+ */
 export interface ModelCatalogEntry {
   name: string;
   provider: string | null;
   model: string | null;
   default: boolean;
+  /** 已配置语义（有凭据 ⇒ true），不是网络可达（ADR-0032 D5）。
+   *
+   *  ⚠ 类型上**可选**且是**三态**（true / false / 缺失=后端没说），判定必须用
+   *  `modelAvailability.ts::isUnavailable`（= `=== false`）：把"没说"当成"不可用"
+   *  会把整份目录渲染成灰色。`getModels` 解析后**键恒存在**、值可能是 `undefined`
+   *  （后端没给）——这正是三态要区分的那一态，别用 `!== false` 把它压成 `true`。 */
+  isAvailable?: boolean;
+  /** 机器码（`credential_unavailable` / `missing_api_key`）；无 ⇒ null。
+   *  前端只在行尾给一句短文案（映射见 `lib/modelAvailability.ts`）。 */
+  unavailableReason?: string | null;
+  /** 能力位：true / false / 缺失（= 后端没声明，**不猜**）。 */
+  supportsTools?: boolean | null;
+  supportsVision?: boolean | null;
+  supportsReasoningSummary?: boolean | null;
 }
 
 /** GET /api/models。窄化解析（零伪造）：仅 name 非空字符串的条目入选，
@@ -340,9 +609,189 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
         provider: typeof r.provider === 'string' ? r.provider : null,
         model: typeof r.model === 'string' ? r.model : null,
         default: r.default === true,
+        // 三态，与 `supports_*` 同一条纪律：true / false / **缺失=undefined**。
+        // `!== false` 会把"后端没说"和"后端说 true"压成同一个值——那是伪造。
+        // 判定侧唯一入口是 `modelAvailability.ts::isUnavailable`（= `=== false`），
+        // 所以 undefined 落进"可用"那一支的行为不变，但类型不再说谎。
+        isAvailable: typeof r.is_available === 'boolean' ? r.is_available : undefined,
+        unavailableReason:
+          typeof r.unavailable_reason === 'string' && r.unavailable_reason
+            ? r.unavailable_reason
+            : null,
+        // 能力位三态：true / false / null（未声明）。**不**用 `=== true` 归一成
+        // 布尔——那会把"后端说 false"与"后端没说"压成同一个值，徽标就无从判断
+        // 该不该渲染（这正是 `supports_*` 与 `is_available` 语义不同的地方）。
+        supportsTools: typeof r.supports_tools === 'boolean' ? r.supports_tools : null,
+        supportsVision: typeof r.supports_vision === 'boolean' ? r.supports_vision : null,
+        supportsReasoningSummary:
+          typeof r.supports_reasoning_summary === 'boolean'
+            ? r.supports_reasoning_summary
+            : null,
       },
     ];
   });
+}
+
+// ── 自定义模型供应商（#203 / ADR-0032）──
+
+/** GET /api/model-providers 条目。零密钥字段：`has_api_key` 是唯一状态通道
+ *  （不回显任何 key 值/片段）；`kind` = builtin|custom|override（override = 同 id
+ *  覆盖内置 preset）。`last_test` = 上次「测试连接」的结果（非密）。 */
+export interface ModelProviderEntry {
+  id: string;
+  label: string;
+  base_url: string;
+  models: { model_id: string; label?: string }[];
+  kind: 'custom' | 'override';
+  has_api_key: boolean;
+  is_available: boolean;
+  unavailable_reason: string | null;
+  last_test?: { ok: boolean; at: string | null; reason?: string; detail?: string } | null;
+}
+
+/** 后端 4xx/5xx → 可读错误（detail 就是后端那句话，不自己编文案）。 */
+export class ProviderError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function providerFetch(path: string, init?: RequestInit): Promise<unknown> {
+  const res = await apiFetch(path, init);
+  if (!res.ok) {
+    // 复用 `readErrorDetail`（同文件上面的单一实现），**不再自己读一遍 body**：
+    // 原先这里手写的版本只认 `detail` 是**字符串**，于是把 Pydantic 422 的
+    // `Array<{loc,msg}>` 形状整个丢掉 ——「ID 必须是 slug」被降级成
+    // `model-providers 422`（真机证据见 `docs/LIVE_BROWSER_TEST_20260917.md` §9.2）。
+    // 本文件第 53 行的注释早就把三种形状写全了，provider 这条路当时没接上去。
+    const detail = await readErrorDetail(res);
+    throw new ProviderError(res.status, detail || `model-providers ${res.status}`);
+  }
+  return res.json();
+}
+
+/** GET /api/model-providers。providers 数组缺失/形状不符 → 空数组（零伪造）。 */
+export async function getModelProviders(): Promise<ModelProviderEntry[]> {
+  const body = await providerFetch('/api/model-providers');
+  const raw =
+    typeof body === 'object' && body !== null && Array.isArray((body as { providers?: unknown }).providers)
+      ? (body as { providers: unknown[] }).providers
+      : [];
+  return raw.flatMap((p) => {
+    if (typeof p !== 'object' || p === null) return [];
+    const r = p as Record<string, unknown>;
+    if (typeof r.id !== 'string' || !r.id) return [];
+    if (typeof r.base_url !== 'string') return [];
+    const models = Array.isArray(r.models)
+      ? r.models.flatMap((m) => {
+          if (typeof m !== 'object' || m === null) return [];
+          const mr = m as Record<string, unknown>;
+          if (typeof mr.model_id !== 'string' || !mr.model_id) return [];
+          return [{
+            model_id: mr.model_id,
+            label: typeof mr.label === 'string' && mr.label ? mr.label : undefined,
+          }];
+        })
+      : [];
+    const lastTest =
+      typeof r.last_test === 'object' && r.last_test !== null
+        ? (r.last_test as { ok?: unknown; at?: unknown; reason?: unknown; detail?: unknown })
+        : null;
+    return [{
+      id: r.id,
+      label: typeof r.label === 'string' ? r.label : '',
+      base_url: r.base_url,
+      models,
+      kind: r.kind === 'override' ? 'override' as const : 'custom' as const,
+      has_api_key: r.has_api_key === true,
+      is_available: r.is_available === true,
+      unavailable_reason: typeof r.unavailable_reason === 'string' ? r.unavailable_reason : null,
+      last_test: lastTest
+        ? {
+            ok: lastTest.ok === true,
+            at: typeof lastTest.at === 'string' ? lastTest.at : null,
+            reason: typeof lastTest.reason === 'string' ? lastTest.reason : undefined,
+            detail: typeof lastTest.detail === 'string' ? lastTest.detail : undefined,
+          }
+        : null,
+    }];
+  });
+}
+
+/** 创建/更新 payload。`api_key` 省略 = 不改密钥；空串 = 显式清除（ADR-0032 §7.1）。 */
+export interface ProviderUpsert {
+  id: string;
+  label?: string;
+  base_url: string;
+  models: { model_id: string; label?: string }[];
+  api_key?: string;
+}
+
+/** POST /api/model-providers（id 冲突 = 覆盖更新；与内置同名 = 覆盖内置）。 */
+export async function createModelProvider(payload: ProviderUpsert): Promise<void> {
+  await providerFetch('/api/model-providers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+/** PUT /api/model-providers/{id}。api_key 省略 = 不改；空串 = 清除。 */
+export async function updateModelProvider(id: string, patch: Omit<ProviderUpsert, 'id'>): Promise<void> {
+  await providerFetch(`/api/model-providers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+/** DELETE /api/model-providers/{id}。404 = 不存在；500 = 凭据删除失败（配置保留）。 */
+export async function deleteModelProvider(id: string): Promise<void> {
+  await providerFetch(`/api/model-providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** 连接测试结果（失败归类 reason + 截断摘要 detail；零密钥）。 */
+export interface ProviderTestResult {
+  ok: boolean;
+  message: string;
+  reason?: string;
+  detail?: string;
+  duration_ms: number;
+}
+
+/** POST /api/model-providers/{id}/test — 走真实构造路径的最小 chat completion。 */
+export async function testModelProvider(id: string): Promise<ProviderTestResult> {
+  const body = await providerFetch(`/api/model-providers/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+  });
+  const r = body as Record<string, unknown>;
+  return {
+    ok: r.ok === true,
+    message: typeof r.message === 'string' ? r.message : (r.ok === true ? '连接正常' : '测试失败'),
+    reason: typeof r.reason === 'string' ? r.reason : undefined,
+    detail: typeof r.detail === 'string' ? r.detail : undefined,
+    duration_ms: typeof r.duration_ms === 'number' ? r.duration_ms : 0,
+  };
+}
+
+// ── 能力 manifest（#182 / PRD §3.2）──
+
+/** GET /api/capabilities（SDD 03 §17）。
+ *
+ *  契约已存在但前端此前**零消费**（`src/agent_harness/web/app.py::list_capabilities`
+ *  投影，条目形状定义在 `src/agent_harness/capability/manifest.py`）：
+ *  `{"capabilities":[{"id":…,"surfaces":{chat,timeline,changes,terminal,artifacts},…}]}`。
+ *  返回的列表**恒含一条 `core`**（内置工具集的声明，#193）——由后端保证，前端不补。
+ *
+ *  失败 / 端点缺席（老后端 404）时**抛错**，由调用方降级为 PRD 缺省语义——这里不
+ *  静默返回缺省值：那样调用方就分不清"能力都没声明"与"压根没拿到数据"，而 PRD 要求
+ *  两种情况落同一份缺省、**且 Chat 永不消失**（降级是消费方的策略，见 `App.tsx`）。 */
+export async function getCapabilities(): Promise<CapabilityDescriptor[]> {
+  const res = await apiFetch('/api/capabilities');
+  if (!res.ok) throw new Error(`capabilities ${res.status}`);
+  return parseCapabilities(await res.json());
 }
 
 // ── Cancel（后端契约回执 §3，T5 #98：detached-run 显式中断唯一入口）──
@@ -359,6 +808,322 @@ export async function cancelSession(sessionId: string): Promise<{ status: string
   });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
   return res.json();
+}
+
+// ── 在途输入队列（ADR-0030 §4.6 / §5.2，后端 #196）──
+
+/** `GET /api/sessions/{id}/queue` 的条目形状。
+ *  数据源是**事件流**（不是内存队列）：只有它跨崩溃存活、也只有它同时看得见
+ *  queue 与 steer 的到达顺序。前端用它做首屏/重连补齐，实时增量仍由 SSE 事件
+ *  流驱动（不变量 #22：事件流是唯一事实，本端点只做补齐）。 */
+export interface QueueItem {
+  queue_id: string;
+  content: string;
+  created_at: string;
+}
+
+export interface SteerItem {
+  steer_id: string;
+  content: string;
+  created_at: string;
+}
+
+export interface SessionQueue {
+  items: QueueItem[];
+  steers: SteerItem[];
+}
+
+/** GET /api/sessions/{id}/queue —— 待发送输入（ADR-0030 D11）。
+ *  404 = 会话不存在。非 2xx 抛 Error（调用方静默降级：首屏补齐失败不影响
+ *  实时增量通道）。 */
+export async function listSessionQueue(sessionId: string): Promise<SessionQueue> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/queue`);
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`queue ${res.status}`);
+  return res.json();
+}
+
+/** POST /api/sessions/{id}/queue/flush —— 立刻投递队首的待发送输入（ADR-0030 §4.6）。
+ *  空队列 → `{"status":"idle"}`；有 → 与 `/messages` 的 launched 分支同形的 SSE 流
+ *  （返回原始 Response 供 consumeSSE 消费）。
+ *  409 = 在途 run（轮询重试是调用方的职责：flush 的 idle 回执与在途状态不是
+ *  幂等回执——投递会开新 run）。 */
+export async function flushSessionQueue(sessionId: string): Promise<Response> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/queue/flush`, {
+    method: 'POST',
+  });
+}
+
+/** POST /api/sessions/{id}/queue/{queue_id}/cancel —— 取消尚未消费的排队项。
+ *  200 `{"status":"cancelled"}`；404 = 已取消/已消费/不存在 → NotFoundError
+ *  （幂等失败语义，调用方静默）；其余非 2xx 抛 Error（网络/服务端失败必须
+ *  上浮——静默会让用户以为已取消、请求根本没到服务器）。 */
+export async function cancelQueueItem(sessionId: string, queueId: string): Promise<void> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}/cancel`,
+    { method: 'POST' },
+  );
+  if (res.status === 404) throw new NotFoundError('排队项已取消或已消费');
+  if (!res.ok) throw new Error(`queue cancel ${res.status}`);
+}
+
+// ── Artifact 内容读取（#185 路由 / #186 消费）──
+
+/** artifact 内容为什么拿不到——**三态分开**，因为对用户是三句不同的话。
+ *
+ *  - `gone`（404）：这个 id 不在本会话的命名空间里（不存在，或属于别的会话）。
+ *    后端刻意不区分这两者——`artifact_id` 是内容哈希、跨会话可重复，区分"不存在"与
+ *    "存在但不可读"会把归属变成可探测的信息（`web/app.py` 的 404 注释）。
+ *  - `no-storage`（503 + `code=artifact_storage_unavailable`）：本部署**确实没有可读的
+ *    存储**。不能降级成"不存在"——那会让用户以为产物丢了，而其实是这个部署没配存储。
+ *  - `error`：其它失败（5xx / 网络 / 形状不符）。`detail` 是后端原文。
+ *
+ *  `detail` 一律是后端 `{detail}` 原文（读不到时为空串）——界面照原样显示，
+ *  这比前端替它翻译一句更短的错误更有用（同 `describeSessionError` 的既有口径）。 */
+export type ArtifactContentFailure = 'gone' | 'no-storage' | 'error';
+
+/** 后端"本部署没有可读 artifact 存储"的机读码（#227，与
+ *  `src/agent_harness/web/artifacts.py` 的 `ARTIFACT_STORAGE_UNAVAILABLE` 同值）。
+ *  **两侧同值的唯一事实源是跨仓契约**（`docs/BACKEND_CONTRACT_STREAMING_UI.md` §3）；
+ *  改名会让全门禁仍然全绿而界面把故障渲染错类——#225 的教训，故此处与 e2e 一并钉住。 */
+const ARTIFACT_STORAGE_UNAVAILABLE = 'artifact_storage_unavailable';
+
+export class ArtifactContentError extends Error {
+  readonly kind: ArtifactContentFailure;
+  readonly detail: string;
+  readonly status: number;
+  /** 后端给的机读码（无码 = null，旧版后端 / 非码化响应）。判别只读它（#227）。 */
+  readonly code: string | null;
+  constructor(
+    kind: ArtifactContentFailure,
+    detail: string,
+    status: number,
+    code: string | null = null,
+  ) {
+    super(detail || `artifact content ${status}`);
+    this.kind = kind;
+    this.detail = detail;
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** 后端 422：`session_id` / `artifact_id` 形态非法，或 `start_line < 1`。
+ *  属于客户端 bug（不是冲突），单独成一个 kind 便于测试与诊断。 */
+export class ArtifactQueryError extends ArtifactContentError {
+  constructor(detail: string, status: number) {
+    super('error', detail, status);
+  }
+}
+
+export interface ArtifactContentQuery {
+  startLine?: number;
+  endLine?: number;
+  keyword?: string;
+  maxLines?: number;
+}
+
+/** 只解析**后端真的会发的字段**，缺字段就抛错而不是填默认值——形状不符时编一个
+ *  空的切片出来，界面会显示"内容为空"，那是在替后端撒谎（同 `parseCapabilities`
+ *  的口径：解析失败必须让调用方看得见）。 */
+function parseArtifactSlice(raw: unknown): ArtifactSlice {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const artifactId = typeof o.artifact_id === 'string' ? o.artifact_id : '';
+  const lines = Array.isArray(o.lines) ? o.lines : null;
+  /* `total_lines` / `returned_lines` 也**必须在场**：后端 `ArtifactSlice` 是必填模型字段
+     （`storage/artifact.py`），缺失只可能是形状不符。此前静默填 0 → 界面渲染
+     "共 0 行 / 没有可显示的内容"——一个编出来的"空产物"，比报错更坏（同本函数头的
+     口径：不替后端撒谎）。 */
+  const totalLines = typeof o.total_lines === 'number' ? o.total_lines : null;
+  const returnedLines = typeof o.returned_lines === 'number' ? o.returned_lines : null;
+  if (!artifactId || lines === null || totalLines === null || returnedLines === null) {
+    throw new Error('artifact content: 响应形状不符');
+  }
+  return {
+    artifact_id: artifactId,
+    lines: lines.flatMap((item) => {
+      const l = (item ?? {}) as Record<string, unknown>;
+      if (typeof l.line_number !== 'number' || typeof l.text !== 'string') return [];
+      return [
+        {
+          line_number: l.line_number,
+          text: l.text,
+          ...(l.truncated === true ? { truncated: true as const } : {}),
+          ...(typeof l.full_length === 'number' ? { full_length: l.full_length } : {}),
+        },
+      ];
+    }),
+    total_lines: totalLines,
+    returned_lines: returnedLines,
+    truncated: o.truncated === true,
+  };
+}
+
+/** GET /api/sessions/{sid}/artifacts/{aid} —— 外置产物的局部内容（#185）。
+ *
+ *  `session_id` 走 URL 而不是查询串：`artifact_id` 是内容哈希、跨会话可重复，
+ *  归属**只能**由 session 决定（后端据此构造 store 命名空间）。 */
+export async function getArtifactContent(
+  sessionId: string,
+  artifactId: string,
+  query: ArtifactContentQuery = {},
+): Promise<ArtifactSlice> {
+  const params = new URLSearchParams();
+  if (query.startLine !== undefined) params.set('start_line', String(query.startLine));
+  if (query.endLine !== undefined) params.set('end_line', String(query.endLine));
+  if (query.keyword) params.set('keyword', query.keyword);
+  if (query.maxLines !== undefined) params.set('max_lines', String(query.maxLines));
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}` +
+      (qs ? `?${qs}` : ''),
+  );
+  if (!res.ok) {
+    const { message: detail, code, objectDetail } = await readErrorBody(res);
+    if (res.status === 404) throw new ArtifactContentError('gone', detail, 404, code);
+    if (res.status === 503) {
+      // #227：**只按码判**。三种情形分开，别让"这一版的 503 只有一个原因"变成隐藏前提：
+      //  - 码 = 无读存储 ⇒ no-storage（今天的唯一原因）；
+      //  - **纯字符串 detail**（旧版后端，那时这个端点的 503 也只有这一个原因）
+      //    ⇒ 同样的 no-storage；
+      //  - 其余（**别的码**，或对象形状却没给合法码）⇒ 通用失败态。猜成 no-storage 会
+      //    重演 #225：后端加了第二个 503 原因，界面却说是"部署没配存储"，用户照着
+      //    重启/改配置。第二种尤其要小心——"码缺席"不等于"旧版后端"。
+      const kind: ArtifactContentFailure =
+        code === ARTIFACT_STORAGE_UNAVAILABLE || (code === null && !objectDetail)
+          ? 'no-storage'
+          : 'error';
+      throw new ArtifactContentError(kind, detail, 503, code);
+    }
+    if (res.status === 422) throw new ArtifactQueryError(detail, 422);
+    throw new ArtifactContentError('error', detail, res.status, code);
+  }
+  return parseArtifactSlice(await res.json());
+}
+
+// ── Session hard delete（#172 / ADR-0029：用户显式硬删，不可恢复）──
+
+/** 会话删除失败：状态码 + 后端 detail 原文。
+ *
+ *  与 `ProjectError` / `MemoryError` 同构但**分开**（同 describeMemoryError 的理由：
+ *  能力各自演进，共用一个会让一侧的语义渗到另一侧）。这里的 `status` 是调用方真的
+ *  会分支的字段——404（这个会话已经不存在了）与 409（后端拒绝删）导向**不同**的
+ *  界面收敛，见 `deleteSession` 的注释。
+ *
+ *  刻意**不**复用 `NotFoundError`：那个是"加载路径拿不到内容"的信号（历史装载据此
+ *  清掉记住的会话并安静回空态），而删除的 404 是"用户想删的东西本就不在了"——
+ *  两者对界面的含义不同，且这里必须带上状态码。 */
+export class SessionError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 硬删会话（DELETE /api/sessions/{id}，ADR-0029）——**不可恢复**：无墓碑、无回收站。
+ *  调用方必须先拿到用户的显式二次确认：ADR-0029 把"误删不可逆"的全部风险明确压在
+ *  **入口层**，运行时不提供任何技术兜底。
+ *
+ *  状态码语义（后端 `web/app.py::delete_session` 的契约，前端不合并它们）：
+ *    200 `{id, deleted:true, events, detached_from_projects}` —— 真删了；
+ *    404 —— 这个会话不存在（**第二次删除就是这个**：后端刻意不伪装成"又删了一次"，
+ *           所以调用方要按"列表已过期"收敛，而不是当作一次成功的删除）；
+ *    409 —— 三种原因状态码相同、**只能靠 `detail` 区分**：有在途 run / 有挂起审批 /
+ *           是 fork 父会话（detail 里带**真实**子会话数量）。因此这里原样保留 detail、
+ *           绝不自己编文案——编了就会把"有 2 个 fork 子会话"说成一个泛泛的失败；
+ *    422 —— id 形态非法（正常路径不会触发：id 来自行数据，不是用户输入）；
+ *    403 —— 非本机 Origin（宿主侧不可逆操作只接受本机来源，ADR-0025 D1）。
+ *
+ *  跨会话的副作用后端已自洽：被删会话若被**委派**子会话指着，那条父链接会被清掉
+ *  （家谱图不会出现 `(parent missing)`），前端不需要为此做任何兼容。 */
+export async function deleteSession(sessionId: string): Promise<SessionDeleted> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await sessionError(res, '删除会话失败');
+  // 形状防御：非对象（null / 数组 / 字符串）一律当"没给"处理，别让读字段抛
+  // TypeError——那时调用方拿到的是"读属性失败"，而不是"删掉了但回执为空"。
+  // `deleted` 不从 body 读：走到 200 就是真删了（见 SessionDeleted 类型注释），
+  // 后端 schema 也是 `Literal[True]`——这里没有可窄化的第二种取值。
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<SessionDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : sessionId,
+    deleted: true,
+    // 事件数缺失时给 0（与 deleteProject 的 sessions_detached 同一纪律）：这两个
+    // 计数只用于回执文案，编不出真值时宁可少说，也不去猜一个像样的数字——回执那边
+    // 把 events 的 0 当"没给数"处理（见 lib/sessionDelete.ts）。
+    events: typeof body.events === 'number' ? body.events : 0,
+    detached_from_projects:
+      typeof body.detached_from_projects === 'number' ? body.detached_from_projects : 0,
+  };
+}
+
+/** 非 2xx → SessionError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
+async function sessionError(res: Response, fallback: string): Promise<SessionError> {
+  const detail = await readErrorDetail(res);
+  return new SessionError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** 归档一个会话（#171）：把它从默认列表里收起来，**可逆**，不删任何东西。
+ *
+ *  与 `deleteSession`（硬删）刻意是两个函数：归档只写 `session_meta.archived` 一个标记
+ *  ——事件日志、项目账本、checkpoint 全部原样保留，所以界面**不做二次确认**（可逆的动作
+ *  压确认面只会让人麻木；硬删才需要 ADR-0026 那套确认）。
+ *
+ *  错误矩阵（后端 `web/app.py::archive_session`）：
+ *    404 —— 没有这个会话（别处已删/从未存在）；
+ *    409 —— 有在途 run（`detail` 就是给用户看的原因，原样上抛，不自己编）；
+ *    422 / 403 —— id 形态非法 / 非本机来源（正常路径不会触发）。
+ *  走到 200 就是归档态成立，回执的 `archived` 是**动作后**的真值。 */
+export async function archiveSession(sessionId: string): Promise<SessionArchived> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw await sessionError(res, '归档会话失败');
+  return readArchiveReceipt(res, sessionId, true);
+}
+
+/** 取消归档（#171）：把会话放回默认列表。与 `archiveSession` 对称，**没有 409**
+ *  ——把行放回列表不破坏任何人的前提，在途 run 也无所谓。 */
+export async function unarchiveSession(sessionId: string): Promise<SessionArchived> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await sessionError(res, '取消归档失败');
+  return readArchiveReceipt(res, sessionId, false);
+}
+
+/** 归档回执的形状防御（与 deleteSession 同一纪律）：非 2xx 已在上游抛掉，这里只防
+ *  "200 但形状不对"。`archived` 是**布尔语义**——缺失时**不**用请求侧的意图去填
+ *  （那会把"后端没确认"伪装成"确认了"）：直接抛，让调用方看见契约被破坏。
+ *
+ *  `requestedArchived` **只进诊断串、不参与判定**：名字刻意不叫 `expected`——回执
+ *  里的 `archived` 是权威（后端在幂等重放/竞态下可能与请求意图不同，以它为准），
+ *  所以这里**不校验**两者相等，只把它写进异常里帮人定位是哪一次调用出的问题。 */
+async function readArchiveReceipt(
+  res: Response,
+  sessionId: string,
+  requestedArchived: boolean,
+): Promise<SessionArchived> {
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<SessionArchived>;
+  if (typeof body.archived !== 'boolean') {
+    throw new Error(
+      `归档回执缺少 archived 布尔（请求意图 ${String(requestedArchived)}，会话 ${sessionId}）`,
+    );
+  }
+  return { id: typeof body.id === 'string' ? body.id : sessionId, archived: body.archived };
+}
+
+/** 会话删除错误 → 展示文案：SessionError 的 message 就是后端 detail（或兜底前缀），
+ *  其余异常（网络层 TypeError 等）用 message 或 fallback。与 `describeProjectError`
+ *  / `describeMemoryError` 同构但分开——三处各自演进。 */
+export function describeSessionError(error: unknown, fallback: string): string {
+  if (error instanceof SessionError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
 }
 
 // ── Recover（后端新端点，df4f7d8 §1.1）──
@@ -388,6 +1153,104 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
   }
   if (!res.ok) throw new RecoverError(res.status, `恢复失败（${res.status}）`);
   return res.json();
+}
+
+// ── 同 run 恢复（`#312` T4，PRD §3 / `11 §6.1`）──
+
+/** 恢复被预算暂停的逻辑 run 的请求体（**不带 task**）。
+ *
+ *  与「带 task 的续聊恢复」是**两种形态**，后端按 `task` 是否存在区分
+ *  （`web/app.py::ResumeRequest`）：给了 task = 新任务新 run_id（既有语义，逐字不变）；
+ *  不给 task = 同 run 续跑，此时必须带 `run_id` + `resume_basis` +
+ *  `budget.expected_version` + 绝对 ceiling（缺声明 422、状态对不上 409）。
+ *
+ *  `budget.run` 的键是**卡住的那一维**（`#313` / `#314`）：
+ *  - 四个 `max_*` 之一（`max_agent_turns_total` / `max_model_requests` /
+ *    `max_total_tokens` / `max_cost_usd`，与后端 `RunLimitsBody` 的字段名逐字相同）；
+ *  - 或 `tool_call_limits`（`#314`：工具名 → 正整数**绝对** ceiling）——per-tool 配额
+ *    是"一维变多维"的那一维，它的点名单位是**工具名**。
+ *
+ *  值是**绝对值**不是增量：后端要求这一维恢复后至少放得下一次新准入（turns /
+ *  requests 要 `> consumed + 1`，tokens / cost / 工具配额要 `> consumed`），低到不能
+ *  继续的 ceiling 会被 409 拒掉；未点名的维度**沿用**暂停时的 ceiling（不清空、不重置
+ *  counter——ADR-0044 D1/D3），`tool_call_limits` 还是**逐键**合并（点名哪个工具就抬
+ *  哪个，未点名的保留）。cost 维传十进制**字符串**（保住 wire 精度；后端
+ *  `parse_cost_ceiling` 数与串都收），工具配额只收正整数。
+ *  `expected_version` 与 `run` 平级（PRD §3 的冻结形状——它是"这次预算变更"的属性，
+ *  不是某个作用域的 ceiling）。 */
+export interface ResumeRunLimitsBody extends Partial<Record<RunLimitField, number | string>> {
+  /** `#315`：deadline 维（RFC 3339 UTC 文本）。它是 `RunLimitField` 里唯一的**文本**
+   *  维——后端 `parse_deadline_at` 只收带时区的时刻，数不是合法形状。 */
+  deadline_at?: string;
+  /** `#314`：per-tool 绝对配额（工具名 → 正整数）。 */
+  tool_call_limits?: Record<string, number>;
+}
+
+export interface ResumePausedRunPayload {
+  run_id: string;
+  resume_basis: 'budget_increase';
+  budget: {
+    expected_version: number;
+    run: ResumeRunLimitsBody;
+  };
+}
+
+/** 恢复目标（`lib/runBudget.ts` 的 `pauseFacts().resumeTarget` 的 wire 形态）：run 维
+ *  给字段名，工具配额给工具名。两种目标写进 `budget.run` 的键不同，所以由这里**一处**
+ *  决定形状——调用方（useSession）不再自己拼键名，漂移就没有第二个地方可发生。 */
+export type ResumePausedRunTarget =
+  | { kind: 'run'; field: RunLimitField; value: number | string }
+  | { kind: 'tool'; tool: string; value: number }
+  /** `#315`：deadline 暂停的恢复目标是**新的绝对截止时刻**（RFC 3339 UTC 文本）。
+   *  与 run 维分开成一个 kind，是因为值域不同（文本 vs 数）且拒绝理由不同——把时刻
+   *  塞进 `field: 'deadline_at'` 会让"这个值该是数还是时刻"只能靠字段名反推。 */
+  | { kind: 'deadline'; field: 'deadline_at'; value: string };
+
+/** 恢复请求的 `budget.run`：点名的目标 → 新绝对值（`#314` 起两种目标，`#315` 加 deadline）。 */
+export function resumeRunLimitsBody(target: ResumePausedRunTarget): ResumeRunLimitsBody {
+  if (target.kind === 'tool') {
+    return { tool_call_limits: { [target.tool]: target.value } };
+  }
+  return { [target.field]: target.value };
+}
+
+/** 恢复请求被拒（409/422 且**零副作用**：后端判定在任何落盘之前）。
+ *  单独一个错误类型是为了让调用方能按状态分派——409 要重读日志对齐真相，
+ *  422 是请求形状问题（改参数重试即可），两者对用户的下一步动作不同。 */
+export class ResumeRejectionError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** POST /api/sessions/{id}/resume（同 run 续跑）。
+ *
+ *  成功返回**原始 Response**：后端以 SSE 流回（`_run_stream_response`，与
+ *  POST /messages 的 launched 分支同形），调用方交给既有 SSE/WS 消费机器
+ *  （不在这里读 body——攒包时响应头可能被压到 run 结束才下发，读 body 就是卡住）。
+ *  409/422 是**短 JSON**，当场读掉 detail 再抛（否则 detail 丢失，用户只看到一个
+ *  没头没尾的"恢复失败"）。 */
+export async function resumeSession(
+  sessionId: string,
+  payload: ResumePausedRunPayload,
+): Promise<Response> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 409 || res.status === 422) {
+    const detail = await readErrorDetail(res);
+    throw new ResumeRejectionError(
+      res.status,
+      detail || (res.status === 409 ? '恢复被拒绝（状态已变化）' : '恢复请求无效'),
+    );
+  }
+  if (res.status === 404) throw new ResumeRejectionError(404, '会话不存在');
+  if (!res.ok) throw new ResumeRejectionError(res.status, `恢复失败（${res.status}）`);
+  return res;
 }
 
 // ── Session-level model switch（T7 #137，PRD §2.3）──
@@ -422,6 +1285,54 @@ export async function changeSessionModel(
     body: JSON.stringify({ provider, model_id: modelId }),
   });
   if (!res.ok) throw new Error(`change model ${res.status}`);
+  return res.json();
+}
+
+// ── Session-level permission switch（F18-A #282 后端 / F18-B #283 前端，ADR-0041）──
+
+/** POST /api/sessions/{id}/permission 的响应体。
+ *  `permission_mode` / `auto_approve` 是 service 解析出的**改后当下生效值**（不是请求
+ *  回显）——但前端**不拿它当状态**，见 `changeSessionPermission` 的第三条约定。 */
+export interface PermissionChangeResult {
+  status: string;
+  permission_mode: string;
+  auto_approve: boolean;
+}
+
+/** 会话内改权限档 + `auto_approve`（ADR-0041 D1/D2）。
+ *
+ * 三条调用方必须知道的约定：
+ *
+ * 1. **下一轮 run 生效**（D4）：只 append durable 事件、不打断在途 run ⇒ **不得**向用户
+ *    承诺「立即生效」（Composer 的权限浮层底部披露同一句话）。
+ * 2. **`auto_approve` 是必填**：后端刻意不给默认值，漏传即 422——否则一次「只改档位」
+ *    的调用会把批准策略一并翻掉（ADR-0041 §4）。
+ * 3. **不用回执写本地状态**：档位的唯一真相是投影折叠出的
+ *    `ConversationState.session_permission_mode`。「回执驱动的本地状态正是要消灭的第二套
+ *    真相」（同本文件 `CreatedEmptySession` 那条注释）——回执只在调用方做失败判定与
+ *    「什么时候重读事件」的时机用，值本身不进任何前端状态。
+ *
+ * 错误码（`detail` 原样带出，调用方就地回显）：
+ * - 404 = session 不存在
+ * - 422 = 档位不在 `PermissionPolicy`
+ * - 409 = 有未裁决审批（PendingApprovalConflict）或 seq 冲突
+ */
+export async function changeSessionPermission(
+  sessionId: string,
+  permissionMode: string,
+  autoApprove: boolean,
+): Promise<PermissionChangeResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/permission`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ permission_mode: permissionMode, auto_approve: autoApprove }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    // 带 status 的具名错误（同 createEmptySession）：409 与 422 需要被调用方分开讲，
+    // 而 changeSessionModel 那种裸 `Error` 只有一句状态码，用户看不懂。
+    throw new SessionError(res.status, detail || `change permission ${res.status}`);
+  }
   return res.json();
 }
 
@@ -463,3 +1374,381 @@ export async function forkSession(
   return res.json();
 }
 
+// ── Projects（WS-4 / #154 端点，WS-5 / #155 前端消费）──
+
+/** 项目操作失败——带 HTTP 状态码，调用方据此给**具体**原因而不是"操作失败"。
+ *
+ *  状态码语义（后端 `domain_errors.py` 两张表 + `web/projects.py`）：
+ *  - 403：跨源被来源闸拒绝（ADR-0025 D1）——本地信任模式下非本机 Origin；
+ *  - 404：项目 id 不存在 / 注册的路径不存在（create 不会 mkdir）；
+ *  - 409：请求与账本现状冲突——attach 时会话 cwd 与项目路径不一致，
+ *    或重排锚点不在该项目账本里；
+ *  - 422：入参形态非法——非绝对路径 / 该路径不是目录 / 标题空白。
+ *
+ *  `detail` 是后端给的中文原因（可能为空）：调用方优先显示它。 */
+export class ProjectError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 把项目写操作的异常翻成给用户看的一句话（对话框与侧栏错误条共用）。
+ *
+ *  `ProjectError` 优先用**后端 detail**——409 会给出"会话 cwd 与项目路径不一致"
+ *  这类可行动原因，翻译成"操作失败"等于把它扔掉；其余异常用 `message`；都没有才
+ *  用调用方的兜底文案。 */
+export function describeProjectError(error: unknown, fallback: string): string {
+  if (error instanceof ProjectError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
+}
+
+/** 按路径把目录注册为项目（幂等：同规范路径 → 返回既有实体）。
+ *  路径不存在 → ProjectError(404)；非绝对路径 → ProjectError(422)。 */
+export async function createProject(path: string, title?: string | null): Promise<Project> {
+  const res = await apiFetch('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(title ? { path, title } : { path }),
+  });
+  if (!res.ok) throw await projectError(res, '注册项目失败');
+  return requireProject(await res.json());
+}
+
+/** 全部项目（**注册表顺序**，新建项目前插）。空数组 ≠ 出错：调用方据此显示
+ *  「还没有项目」而不是错误横幅。 */
+export async function listProjects(): Promise<Project[]> {
+  const res = await apiFetch('/api/projects');
+  if (!res.ok) throw await projectError(res, '加载项目失败');
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) return [];
+  // 形状不符的单条丢弃（零伪造）——但**不因此丢掉其余项目**。
+  return body.flatMap((raw) => {
+    const p = parseProject(raw);
+    return p ? [p] : [];
+  });
+}
+
+/** 重命名项目（`setTitle`）。 */
+export async function renameProject(projectId: string, title: string): Promise<Project> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw await projectError(res, '重命名失败');
+  return requireProject(await res.json());
+}
+
+/** **软删除**项目：只摘注册记录与账本，目录/用户文件/会话日志一概不动，
+ *  成员会话回到未分组。响应 `detail` 必须原样展示给用户（AC5）。 */
+export async function deleteProject(projectId: string): Promise<ProjectDeleted> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw await projectError(res, '删除项目失败');
+  // 形状防御：非对象（null / 数组 / 字符串）一律当"没给"处理，别让读字段抛
+  // TypeError——那时调用方拿到的是"读属性失败"，而不是"软删除成功了但回执为空"。
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProjectDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : projectId,
+    deleted: body.deleted === true,
+    sessions_detached:
+      typeof body.sessions_detached === 'number' ? body.sessions_detached : 0,
+    detail: typeof body.detail === 'string' ? body.detail : '',
+  };
+}
+
+/** 把会话加入项目（幂等）。会话不存在/无 cwd → 404；cwd 与项目路径不一致 → 409。 */
+export async function attachSessionToProject(
+  projectId: string,
+  sessionId: string,
+): Promise<Project> {
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) throw await projectError(res, '加入项目失败');
+  return requireProject(await res.json());
+}
+
+/** 把会话移出项目（幂等：不在本项目 → 无写操作；会话日志逐字节不动）。 */
+export async function detachSessionFromProject(
+  projectId: string,
+  sessionId: string,
+): Promise<Project> {
+  const res = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE' },
+  );
+  if (!res.ok) throw await projectError(res, '移出项目失败');
+  return requireProject(await res.json());
+}
+
+/** 项目内重排（DOM `insertBefore` 语义：`before=null` → 追加尾部）。
+ *  锚点不在该项目账本里 → ProjectError(409)。 */
+export async function reorderProjectSession(
+  projectId: string,
+  sessionId: string,
+  before: string | null,
+): Promise<Project> {
+  const res = await apiFetch(
+    `/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/order`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ before }),
+    },
+  );
+  if (!res.ok) throw await projectError(res, '调整顺序失败');
+  return requireProject(await res.json());
+}
+
+/** 非 2xx → ProjectError（detail 优先，缺失时用调用方给的兜底前缀 + 状态码）。 */
+async function projectError(res: Response, fallback: string): Promise<ProjectError> {
+  const detail = await readErrorDetail(res);
+  return new ProjectError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+// ── 宿主侧目录列举（WS-7 / #170，ADR-0028）──
+
+/** GET /api/host/dirs —— 宿主侧目录列举：只读、一层、仅目录（ADR-0028 D3–D5）。
+ *
+ *  `path` 省略 = 列**根**（Windows 盘符 / POSIX `/`），响应的 `path` 为 null。
+ *  失败时抛 `ProjectError`（detail 优先）：403 无权限 / 404 不存在 / 422 不是目录
+ *  等全部由后端 detail 说明，界面**原样显示**——PRD §4.4 的错误矩阵就是按"前端不
+ *  翻译"设计的，这里多加一句自己的话就会把矩阵里的措辞盖掉。
+ *
+ *  形状窄化：非法条目丢弃但**不牵连其余**（与 listProjects / listMemories 同一条
+ *  纪律）；`path`/`parent` 只认字符串，其余一律当"没有"（那时界面显示的是"没有当前
+ *  目录"而不是一个编造的路径）。 */
+export async function getHostDirs(path?: string | null): Promise<HostDirsListing> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : '';
+  const res = await apiFetch(`/api/host/dirs${query}`);
+  if (!res.ok) throw await projectError(res, '加载目录失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const entries = Array.isArray(body.entries)
+    ? body.entries.flatMap((raw) => {
+        if (typeof raw !== 'object' || raw === null) return [];
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry.name !== 'string' || !entry.name) return [];
+        if (typeof entry.path !== 'string' || !entry.path) return [];
+        return [{ name: entry.name, path: entry.path }];
+      })
+    : [];
+  return {
+    path: typeof body.path === 'string' && body.path ? body.path : null,
+    parent: typeof body.parent === 'string' && body.parent ? body.parent : null,
+    truncated: body.truncated === true,
+    entries,
+  };
+}
+
+/** 记忆请求失败：状态码 + 后端 detail 原文（detail 优先，是 AC 要展示的那句话）
+ *  + 机读判别码（`detail.code`，老后端没有则为 null）。 */
+export class MemoryError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  constructor(status: number, message: string, code: string | null = null) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** 记忆列表（GET /api/memories，**按创建时间倒序**分页）。
+ *
+ *  `limit` 由后端夹在 1..200（本函数不猜上界，越界由后端 422 说话）；`offset` 是
+ *  「跳过的条数」——"加载更多"传已显示的条数。空数组 ≠ 出错：调用方据此显示
+ *  「还没有记忆」而不是错误横幅（与 `listProjects` 同一条纪律）。
+ *
+ *  形状不符的单条**丢弃但不牵连其余**：一条坏行不能把整页变成"加载失败"。
+ */
+export async function listMemories(limit = 50, offset = 0): Promise<MemorySummary[]> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const res = await apiFetch(`/api/memories?${params.toString()}`);
+  if (!res.ok) throw await memoryError(res, '加载记忆失败');
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) return [];
+  return body.flatMap((raw) => {
+    const memory = parseMemory(raw);
+    return memory ? [memory] : [];
+  });
+}
+
+/** 硬删一条记忆（DELETE /api/memories/{id}）——**不可恢复**，调用方必须先二次确认。
+ *
+ *  状态码语义（后端 `web/memory.py` 的契约，前端不合并它们）：
+ *    200 `{id, deleted:true}` / 404 id 不存在 / 403 不属于当前入口 / 503 记忆未装配。
+ *  404 与 403 都**不**当成功：用户对着具体一条点删除，"已经不在了"与"不给删"是
+ *  两种不同结果，UI 要分别说（这也是前端不维护第二套真相的必然要求——本地删掉
+ *  而后端拒绝会直接违背不变量 #22）。
+ */
+export async function deleteMemory(memoryId: string): Promise<MemoryDeleted> {
+  const res = await apiFetch(`/api/memories/${encodeURIComponent(memoryId)}`, { method: 'DELETE' });
+  if (!res.ok) throw await memoryError(res, '删除记忆失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<MemoryDeleted>;
+  return {
+    id: typeof body.id === 'string' ? body.id : memoryId,
+    deleted: body.deleted === true,
+  };
+}
+
+/** 非 2xx → MemoryError（detail 优先，缺失时用兜底前缀 + 状态码）。 */
+async function memoryError(res: Response, fallback: string): Promise<MemoryError> {
+  const { message, code } = await readErrorBody(res);
+  return new MemoryError(res.status, message || `${fallback}（${res.status}）`, code);
+}
+
+/** 装配期就失败（`DegradeReason.INIT_FAILED`）的机读码。与"没配"共用一个 503 状态码，
+ *  但**是故障不是配置状态**：要报错、要给重试（#225）。 */
+const MEMORY_INIT_FAILED = 'init_failed';
+
+/** 记忆能力**装配失败**（外部依赖故障，503 + `code=init_failed`）：**这是故障**——
+ *  用户改配置没用，要给错误条 + 重试，而不是"记忆未启用"那句配置态文案。
+ *  真机症状（#225）：后端明明返回了"初始化失败"的降级原因，前端却一律按配置状态渲染，
+ *  还自己加了一句"这不是故障"，把用户推去改一个本来就配好的开关。 */
+export function isMemoryFault(error: unknown): boolean {
+  return (
+    error instanceof MemoryError && error.status === 503 && error.code === MEMORY_INIT_FAILED
+  );
+}
+
+/** 记忆能力**未装配**（配置状态，503 且不是装配失败）：UI 要显示「记忆未启用」而不是
+ *  "加载失败/重试"，否则用户会一直点重试去修一个不存在的故障（不变量 #21）。
+ *  **老后端没有 `code`**（detail 是纯字符串）时按配置状态处理——那是这以前的唯一语义。 */
+export function isMemoryDisabled(error: unknown): boolean {
+  return error instanceof MemoryError && error.status === 503 && !isMemoryFault(error);
+}
+
+/** 记忆错误 → 展示文案：MemoryError 的 message 就是后端 detail（或兜底前缀），
+ *  其余异常（网络层 TypeError 等）用 message 或 fallback。与 `describeProjectError`
+ *  同构但**分开**：两个能力各自演进，共用一个会让某一侧的语义渗到另一侧。 */
+export function describeMemoryError(error: unknown, fallback: string): string {
+  if (error instanceof MemoryError) return error.message || fallback;
+  const message = (error as Error | null)?.message;
+  return message || fallback;
+}
+
+/** 窄化解析一条记忆（零伪造）：id/content/created_at 必须是非空字符串、scope 必须是
+ *  已知取值、metadata 必须是对象；任一不符 → null。**不补默认值**：`scope` 猜错会让
+ *  用户以为这条记在别的名下，`created_at` 补空串会让"记于何时"变成谎言。 */
+function parseMemory(raw: unknown): MemorySummary | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  const { id, content, created_at: createdAt, scope, metadata } = row;
+  if (typeof id !== 'string' || !id) return null;
+  if (typeof content !== 'string') return null;
+  if (typeof createdAt !== 'string' || !createdAt) return null;
+  if (scope !== 'user' && scope !== 'session') return null;
+  return {
+    id,
+    content,
+    scope: scope as MemoryScope,
+    metadata: typeof metadata === 'object' && metadata !== null
+      ? (metadata as Record<string, unknown>)
+      : {},
+    created_at: createdAt,
+  };
+}
+
+/** 窄化解析项目（零伪造）：id/path/title/session_ids 形状不符 → null（调用方丢弃该条）。
+ *
+ *  `status` 是**例外**：只有明确等于 `'missing-dir'` 才取该值，其余（含未知字符串、
+ *  缺失）一律 `'ok'`。理由——它是"目录可能不见了"的**告警标志**，不是存在性断言；
+ *  把未知值当告警会让每条项目都亮黄点（假告警），而把项目整条丢掉更糟：项目会从
+ *  UI 消失、它的会话被误判成未分组。未知状态值不值得付出这两个代价。 */
+function parseProject(raw: unknown): Project | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== 'string' || !r.id) return null;
+  if (typeof r.path !== 'string' || !r.path) return null;
+  if (typeof r.title !== 'string') return null;
+  const sessionIds = Array.isArray(r.session_ids)
+    ? r.session_ids.filter((v): v is string => typeof v === 'string' && v.length > 0)
+    : [];
+  return {
+    id: r.id,
+    path: r.path,
+    title: r.title,
+    status: normalizeProjectStatus(r.status),
+    session_ids: sessionIds,
+    created_at: typeof r.created_at === 'string' ? r.created_at : '',
+    updated_at: typeof r.updated_at === 'string' ? r.updated_at : '',
+  };
+}
+
+/** 单实体端点：200 但形状不符 → **响亮失败**而不是返回伪造项目。
+ *  （列表端点相反：丢掉坏条目、保留其余，见 `listProjects`——一条坏数据不该让整
+ *  个侧栏空掉，但一个"注册成功"的假实体更糟：它会让 UI 显示一个后端并不存在的项目。） */
+function requireProject(raw: unknown): Project {
+  const project = parseProject(raw);
+  if (!project) {
+    throw new Error('项目响应形状不符（后端契约可能已变更）');
+  }
+  return project;
+}
+
+function normalizeProjectStatus(raw: unknown): ProjectStatus {
+  return raw === 'missing-dir' ? 'missing-dir' : 'ok';
+}
+
+
+// ── 上下文容量看板（#200）──
+
+/** 六桶分类 + 缓存命中率的端点形状（后端 GET /api/sessions/{id}/context-usage）。 */
+export interface ContextUsage {
+  estimated: boolean;
+  window_tokens: number;
+  used_tokens: number;
+  thresholds: { auto_compact: number; hard_guard: number };
+  breakdown: {
+    messages: number;
+    system_prompt: number;
+    skills: number;
+    other: number;
+    tools: { system: number; mcp: number };
+  };
+  cache: {
+    state: 'ok' | 'partial' | 'not_collected';
+    reported_calls: number;
+    total_calls: number;
+    avg_hit_rate: number | null;
+  };
+  /** `ok` = 有 builder 快照（六桶可分解）；`usage_only` = 快照缺席但事件流有用量
+   *  （#212：`used_tokens` 是**窗口占用下界**，六桶如实为 0，来源见 `usage_source`）；
+   *  `no_data` = 两者都没有。**不得**把 `usage_only` 也说成"没有数据"，
+   *  两者对用户是两句不同的话（"分类缺了" vs "什么都没上报"）。 */
+  state: 'ok' | 'usage_only' | 'no_data';
+  /** 仅 `usage_only` 下发：`used_tokens` 的取数事实（后端算，前端不推算，#22）。 */
+  usage_source?: {
+    /** 取数口径的机器码。已知值 `'last_call_prompt_tokens'` = 最近一次
+     *  `model/completed` 的 `prompt_tokens`（窗口占用下界）。
+     *
+     *  **故意不写成字面量联合**：`getContextUsage` 没做字段窄化（`res.json()` 直出），
+     *  写成 `'last_call_prompt_tokens'` 只会在"后端换口径"时让编译期继续点头——
+     *  而设计稿 §3.4 明说翻案只改一行取值、不动契约形状。所以类型如实写成 string，
+     *  由 `ContextUsagePanel` 按值选措辞、未知码退中性说法（有单测）。 */
+    kind: string;
+    calls_with_usage: number;
+    last_prompt_tokens: number;
+    last_total_tokens: number | null;
+  };
+}
+
+/** GET /api/sessions/{id}/context-usage —— 上下文容量（只读，无副作用）。
+ *  404 = 会话不存在；非 2xx 抛 Error（调用方降级为空态，不影响会话）。 */
+export async function getContextUsage(sessionId: string): Promise<ContextUsage> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/context-usage`,
+  );
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`context-usage ${res.status}`);
+  return res.json();
+}

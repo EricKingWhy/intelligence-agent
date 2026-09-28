@@ -16,7 +16,7 @@ test('工具输出流：running 行 → stdout/stderr 分块 → result 终态',
     { type: 'tool/result', data: { tool_call_id: 'tc-1', content: JSON.stringify({ ok: true, message: 'hello done', data: { exit_code: 0 } }) }, seq: 8, session_id: SID, run_id: RUN, step_id: 1, time: T },
     { type: 'run/completed', data: {}, seq: 9, session_id: SID, run_id: RUN, time: T },
   ];
-  routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
+  await routeApi(page, { onSessionPost: (route) => fulfillSse(route, frames), events: frames });
 
   await page.goto('/');
   await submitTask(page, '跑个命令');

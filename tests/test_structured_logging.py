@@ -81,7 +81,10 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
             return self
 
         async def astream(self, messages, **kwargs):
-            assert messages[0].content == "只回复 ok"
+            # 用户消息是**最后**一条：T7 起 meta_user 运行时快照会插在它之前
+            # （ADR-0023 D8）。断言最后一条既保住"用户输入到达模型"的原意，
+            # 又顺带钉住快照的位置契约。
+            assert messages[-1].content == "只回复 ok"
             yield AIMessageChunk(
                 content="ok",
                 id="lc_run--internal-id",
@@ -107,11 +110,12 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("agent_harness.assembly.create_chat_model",
                       lambda config, **kw: FakeModel())
 
-    result = await cli.run("只回复 ok", write=lambda _text: None)
+    outcome = await cli.run("只回复 ok", write=lambda _text: None)
 
-    assert result == "ok"
+    assert outcome.final_text == "ok"
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [
+        "run_config",
         "agent_start",
         "llm_call",
         "agent_decision",
@@ -120,17 +124,24 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     assert len({entry["trace_id(追踪ID)"] for entry in entries}) == 1
     assert len({entry["task_id(任务ID)"] for entry in entries}) == 1
 
-    llm_entry = entries[1]
+    # #198：run_config 是每个 run 的第一条日志行——llm_call 顺移到 index 2。
+    llm_entry = entries[2]
     assert llm_entry["llm_input(模型输入)"] == "只回复 ok"
     assert llm_entry["llm_output(模型输出)"] == "ok"
+    # #200 缓存明细：FakeModel 的末帧**确实**转发 input_token_details，形状是
+    # langchain 归一化过的 ``cache_read``（真链路同形，见
+    # `docs/FRONTEND_ISSUES_LOG.md` 第十五轮 M-01）⇒ 第 4 键 cached_tokens 必须出现。
+    # 缺失即省略、绝不写 0 的分支由 tests/web/test_context_usage.py 的 T1 用例锁住。
     assert llm_entry["token_usage(Token用量)"] == {
         "prompt_tokens": 4,
         "completion_tokens": 1,
         "total_tokens": 5,
+        "cached_tokens": 2,
     }
     assert llm_entry["outcome(结果)"] == "success"
     assert "duration_ms(耗时毫秒)" in llm_entry
-    assert entries[2]["decision(决策)"] == "finish"
+    # agent_decision 顺移到 index 3（run_config 占了第一条）。
+    assert entries[3]["decision(决策)"] == "finish"
     assert entries[-1]["outcome(结果)"] == "success"
 
 
@@ -163,11 +174,14 @@ async def test_minimal_agent_failure_chain(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("agent_harness.assembly.create_chat_model",
                       lambda config, **kw: FailingModel())
 
-    result = await cli.run("触发失败", write=lambda _text: None)
-    assert result == ""
+    outcome = await cli.run("触发失败", write=lambda _text: None)
+    # `#312`：`run()` 返回 RunOutcome（暂停与失败都拿不到回答，必须可区分）。
+    assert outcome.final_text == ""
+    assert outcome.paused is False
 
     entries = read_jsonl(tmp_path / "logs" / "agent.jsonl")
     assert [entry["event_type(事件类型)"] for entry in entries] == [
+        "run_config",
         "agent_start",
         "task_failed",
     ]

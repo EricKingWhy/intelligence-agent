@@ -12,7 +12,7 @@
 
 ## 1. 任务来源与核实
 
-ZCode 交接手册（`docs/HANDOFF_WORKBUDDY_FRONTEND.md` §2.1）指明 **T9 是唯一剩余工作**。
+ZCode 交接手册（`docs/archive/handoffs/HANDOFF_WORKBUDDY_FRONTEND.md` §2.1）指明 **T9 是唯一剩余工作**。
 
 核实结论（手册正确，Tracker 虚报）：
 
