@@ -191,7 +191,10 @@ _FORMATION_PROMPT = (
     "project_fact | constraint). Episodic payload keys are `kind`=`episodic`, "
     "`situation`, `action`, `outcome`, and `lesson`. Procedural payload keys are "
     "`kind`=`procedural`, `trigger`, `procedure`, and `success_condition`. Include only "
-    "the keys for the selected kind. Keep payload nested under its candidate; never move "
+    "the keys for the selected kind. For procedural payloads, `trigger`, `procedure`, "
+    "and `success_condition` must each be non-empty strings. Encode ordered reusable "
+    "steps as one `procedure` string, never as a list or object. Keep payload nested "
+    "under its candidate; never move "
     "payload fields to the candidate level. One valid CANDIDATES shape is "
     '{"decision":"CANDIDATES","candidates":[{"kind":"semantic",'
     '"tier":"collection","scope":"user_global","content":"...",'

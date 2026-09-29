@@ -65,6 +65,16 @@ def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
     assert "Never guess `project_id`" in _FORMATION_PROMPT
 
 
+def test_formation_prompt_requires_procedure_fields_to_be_strings():
+    assert (
+        "For procedural payloads, `trigger`, `procedure`, and `success_condition` "
+        "must each be non-empty strings"
+    ) in _FORMATION_PROMPT
+    assert (
+        "Encode ordered reusable steps as one `procedure` string, never as a list or object"
+    ) in _FORMATION_PROMPT
+
+
 def test_formation_prompt_distinguishes_episodic_decisions_from_semantic_facts():
     assert "Semantic memories represent stable facts, preferences, profiles, project facts, " \
         "constraints, or accepted corrections" in _FORMATION_PROMPT
