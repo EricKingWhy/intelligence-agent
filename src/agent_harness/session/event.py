@@ -54,6 +54,7 @@ MODEL_REQUEST = "model/request"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
+OPERATION_RECONCILED = "operation/reconciled"
 ARTIFACT_CREATED = "artifact/created"
 # Phase Multiturn T5 (#135)：大产物外置对象存储事件。
 # 当 tool result 超过阈值时，原始内容外置到 MinIO（或 S3 兼容存储），
@@ -61,6 +62,8 @@ ARTIFACT_CREATED = "artifact/created"
 # 模型可凭 artifact_ref 用 read_artifact 工具按需读取局部内容。
 ARTIFACT_EXTERNALIZED = "artifact/externalized"
 CONTEXT_COMPACTED = "context/compacted"
+# W-02 (#346): a typed, append-only registration that points back to its source event.
+TASK_PROTECTED_FACT = "task/protected_fact"
 # ── W-04 (#348)：摘要尝试失败的任务可见状态 ──────────────────────────────
 # 每次"自动压缩的摘要尝试失败"落一条（attempt 有界 ≤2，载荷有界）。失败**不是**
 # 压缩：derive 的投影集合不收它、不 shadow 任何事件——它只是"这次没压成、原投影
@@ -181,9 +184,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TOOL_OUTPUT_DELTA,
         TEXT_DELTA,
         OPERATION_RECONCILE_REQUIRED,
+        OPERATION_RECONCILED,
         ARTIFACT_CREATED,
         ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,
+        TASK_PROTECTED_FACT,
         # W-04 (#348)：摘要尝试失败的任务可见状态（不投影成消息）
         CONTEXT_COMPACTION_FAILED,
         # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息）

@@ -29,6 +29,7 @@ from agent_harness.session import (
     Session,
     derive_messages,
 )
+from agent_harness.session.derive import derive_protected_facts
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
     QUEUE_CANCELLED,
@@ -86,6 +87,8 @@ class _Harness:
         return [
             str(m.content) for m in derive_messages(self.events(session_id))
             if isinstance(m, HumanMessage)
+            and m.name != "context_compaction_summary"
+            and not str(m.content).startswith("## Protected task facts\n")
         ]
 
     async def wait_for(self, predicate, *, timeout: float = 15.0, what: str = "条件"):
@@ -146,6 +149,8 @@ def _human_texts(snapshot: RequestSnapshot) -> list[str]:
     return [
         str(m.content) for m in snapshot.messages
         if isinstance(m, HumanMessage)
+        and m.name != "context_compaction_summary"
+        and not str(m.content).startswith("## Protected task facts\n")
         and not str(m.content).startswith(_RUNTIME_SNAPSHOT_PREFIX)
     ]
 
@@ -238,14 +243,22 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
     )
 
     queued = await harness.service.send_message(
-        session_id=session_id, content="B", mode="queue",
+        session_id=session_id,
+        content="B，精确保留 ORD-84721。",
+        mode="queue",
+        protected_facts=[
+            {"fact_type": "exact_identifier", "value": "ORD-84721"}
+        ],
     )
     assert queued.status == "queued"
     queued_events = harness.of_type(session_id, MESSAGE_QUEUED)
     assert [e.data["queue_id"] for e in queued_events] == [
         queued.queued_message.queue_id
     ]
-    assert queued_events[0].data["content"] == "B"
+    assert queued_events[0].data["content"] == "B，精确保留 ORD-84721。"
+    assert queued_events[0].data["protected_facts"] == [
+        {"fact_type": "exact_identifier", "value": "ORD-84721"}
+    ]
 
     # 放行 run 1 → 终态 → 终态驱动接力（全程无任何客户端动作）
     gate.set()
@@ -266,8 +279,19 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
         what="run 2 完成",
     )
     # 端到端可见：B 确实被第二个 run 的模型看到（A 作为历史仍在链上），也进入投影
-    assert _last_human_texts(harness) == ["A", "B"]
-    assert harness.human_texts(session_id) == ["A", "B"]
+    queued_text = "B，精确保留 ORD-84721。"
+    assert _last_human_texts(harness) == ["A", queued_text]
+    assert harness.human_texts(session_id) == ["A", queued_text]
+    delivered_user = next(
+        event for event in harness.of_type(session_id, USER_MESSAGE)
+        if event.data.get("content") == queued_text
+    )
+    identifier = next(
+        fact for fact in derive_protected_facts(harness.events(session_id))
+        if fact.type == "exact_identifier"
+    )
+    assert identifier.value == "ORD-84721"
+    assert identifier.source_event_id == delivered_user.event_id
 
 
 @pytest.mark.asyncio
@@ -333,12 +357,17 @@ async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):
     run_id_1 = await launched.run.wait_run_id()
     assert run_id_1 is not None
 
+    steer_facts = [{"fact_type": "exact_identifier", "value": "ORD-84721"}]
     steered = await harness.service.send_message(
-        session_id=session_id, content="B", mode="steer",
+        session_id=session_id,
+        content="B，保留 ORD-84721。",
+        mode="steer",
+        protected_facts=steer_facts,
     )
     assert steered.status == "steered"
     steer_event = harness.of_type(session_id, STEER_REQUESTED)[0]
     assert steer_event.data["run_id"] == run_id_1
+    assert steer_event.data["protected_facts"] == steer_facts
 
     gate.set()
     await harness.wait_for(
@@ -354,6 +383,7 @@ async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):
         if e.data.get("steer_id") == steer_event.data["steer_id"]
     ]
     assert len(steer_user) == 1
+    assert steer_user[0].data["protected_facts"] == steer_facts
     assert applied.data["applied_seq"] == steer_user[0].seq
     assert steer_user[0].run_id == run_id_1
     # D6：steer 是**用户自己的话**，绝不带 injected_by——否则记忆抽取会静默丢弃它
@@ -366,8 +396,13 @@ async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):
     # T3：A 未被剔除，B 追加在其后（query = A + B，不是取代）
     second_call_humans = _last_human_texts(harness)
     assert second_call_humans[0] == "A", "A 必须仍在链上（steer ≠ supersede）"
-    assert second_call_humans[-1] == "B"
-    assert harness.human_texts(session_id) == ["A", "B"]
+    assert second_call_humans[-1] == "B，保留 ORD-84721。"
+    assert harness.human_texts(session_id) == ["A", "B，保留 ORD-84721。"]
+    identifier = next(
+        fact for fact in derive_protected_facts(harness.events(session_id))
+        if fact.type == "exact_identifier"
+    )
+    assert identifier.source_event_id == steer_user[0].event_id
 
 
 @pytest.mark.asyncio
@@ -437,7 +472,15 @@ async def test_rebuild_restores_pending_inputs_without_launching(tmp_path, monke
     session = Session.start(harness.state.store, session_id=session_id)
     session.append(RUN_STARTED, {})
     session.append(RUN_COMPLETED, {"status": "completed"})
-    session.append(MESSAGE_QUEUED, {"queue_id": "q-restart", "content": "别忘了我"})
+    queued_facts = [{"fact_type": "exact_identifier", "value": "ORD-84721"}]
+    session.append(
+        MESSAGE_QUEUED,
+        {
+            "queue_id": "q-restart",
+            "content": "别忘了 ORD-84721。",
+            "protected_facts": queued_facts,
+        },
+    )
 
     # 模拟重启：内存镜像是空的
     await harness.state.message_queues.cleanup(session_id)
@@ -447,9 +490,12 @@ async def test_rebuild_restores_pending_inputs_without_launching(tmp_path, monke
     assert rebuilt >= 1
     pending = await harness.service.list_undelivered_inputs(session_id)
     assert [(p.kind, p.input_id, p.content) for p in pending] == [
-        ("queue", "q-restart", "别忘了我"),
+        ("queue", "q-restart", "别忘了 ORD-84721。"),
     ]
-    assert harness.state.message_queues.list_pending(session_id) != [], "镜像已重建"
+    assert pending[0].protected_facts == queued_facts
+    assert await harness.state.message_queues.list_pending(session_id) != [], "镜像已重建"
+    restored = await harness.state.message_queues.list_pending(session_id)
+    assert restored[0].protected_facts == queued_facts
     # 只重建，不自动起 run：刚启动无订阅者（起了会被 orphan 回收），用户也不在场
     assert harness.state.run_manager.get_active(session_id) is None
     assert harness.of_type(session_id, RUN_STARTED)[0].run_id is None
@@ -470,6 +516,28 @@ async def test_rebuild_is_idempotent(tmp_path, monkeypatch):
     pending = await harness.service.list_undelivered_inputs(session_id)
     assert [p.input_id for p in pending] == ["q1", "q2"]
     assert await harness.state.message_queues.pending_count(session_id) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protected_facts", [(), "", 0, False])
+async def test_send_message_rejects_falsey_non_list_protected_facts(
+    tmp_path, monkeypatch, protected_facts
+):
+    from agent_harness.session.errors import ProtectedFactReferenceInvalid
+
+    harness = _build_harness(tmp_path, monkeypatch, [AIMessage(content="x")])
+    session = Session.start(harness.state.store, session_id="sess-bad-protected-facts")
+
+    with pytest.raises(ProtectedFactReferenceInvalid, match="protected_facts must be"):
+        await harness.service.send_message(
+            session_id=session.session_id,
+            content="Preserve ORD-84721.",
+            protected_facts=protected_facts,  # type: ignore[arg-type]
+        )
+
+    assert [event.type for event in harness.events(session.session_id)] == [
+        event.type for event in session.events
+    ]
 
 
 # ── deliver_next_undelivered：一次一条 + 跳过已取消 ───────────────────

@@ -46,7 +46,10 @@ class TestTokenMemoCorrectness:
 
         messages = await builder.build(session)
 
-        assert builder._token_estimate_total == estimate_message_tokens(messages)
+        assert (
+            builder._token_estimate_total + builder._last_protected_fact_tokens
+            == estimate_message_tokens(messages)
+        )
 
     @pytest.mark.asyncio
     async def test_second_build_estimates_only_new_messages(self, tmp_path, monkeypatch):
@@ -96,12 +99,15 @@ class TestTokenMemoFallback:
 
         messages = await builder.build(session)
 
-        # 2 个投影事件 + 1 条合成 ToolMessage = 3 条消息
-        assert len(messages) == 3
+        # 静态保护策略 + Human 角色事实 + 2 个投影事件 + 合成 ToolMessage。
+        assert len(messages) == 5
         assert messages[-1].content == DANGLING_TOOL_CONTENT
         # 计数失配 → 走 fallback：本会话 memo 清空，总量 = 朴素全量估算
         assert not any(key[0] == session.session_id for key in builder._token_memo)
-        assert builder._token_estimate_total == estimate_message_tokens(messages)
+        assert (
+            builder._token_estimate_total + builder._last_protected_fact_tokens
+            == estimate_message_tokens(messages)
+        )
 
     @pytest.mark.asyncio
     async def test_memo_survives_across_builds_after_fallback(self, tmp_path, monkeypatch):

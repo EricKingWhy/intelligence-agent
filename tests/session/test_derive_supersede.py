@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from agent_harness.session import (
     COMPACTION_END,
@@ -192,7 +192,7 @@ class TestSupersedeWithCompaction:
             _superseded(7, "s1", 0),
         ]
         messages = derive_messages(events)
-        assert isinstance(messages[0], SystemMessage)
+        assert isinstance(messages[0], HumanMessage)
         assert messages[0].content == "SUM"
         assert _texts(messages) == ["SUM", "B", "答B"]
 

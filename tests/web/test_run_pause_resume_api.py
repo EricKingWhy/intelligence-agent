@@ -838,10 +838,10 @@ async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
             run_manager = app.state.agent.run_manager
             original_launch = run_manager.launch
 
-            def count_resume_launch(session, runtime, task):
+            def count_resume_launch(session, runtime, task, **kwargs):
                 nonlocal resume_launches
                 resume_launches += 1
-                return original_launch(session, runtime, task)
+                return original_launch(session, runtime, task, **kwargs)
 
             monkeypatch.setattr(run_manager, "launch", count_resume_launch)
             payload = {

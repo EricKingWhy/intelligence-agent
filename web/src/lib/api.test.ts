@@ -263,6 +263,26 @@ describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => 
     });
   });
 
+  it('显式保护事实及其来源关系透传到普通消息 API', async () => {
+    const cap = captureFetch();
+    await sendMessage('s1', {
+      content: '撤销 ORD-84721 的执行授权。',
+      protected_facts: [
+        { fact_type: 'constraint', value: 'ORD-84721' },
+      ],
+      revoke_fact_id: 'authorization:grant-1',
+      refutes_event_id: 'tool-call-1',
+    });
+
+    expect(cap.calls[0].body).toMatchObject({
+      protected_facts: [
+        { fact_type: 'constraint', value: 'ORD-84721' },
+      ],
+      revoke_fact_id: 'authorization:grant-1',
+      refutes_event_id: 'tool-call-1',
+    });
+  });
+
   it('全空 → payload 不含任何 amend 键（缺省不传键，保持干净）', async () => {
     const cap = captureFetch();
     await sendMessage('s1', { content: '继续' });

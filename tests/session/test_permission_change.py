@@ -662,19 +662,21 @@ class TestForkInheritsEffectiveMode:
         parent = _seed_session(
             state, "parent", started_data={SESSION_PERMISSION_MODE_KEY: "read-only"}
         )
-        self._settle(parent)
         append_permission_change(
             parent, PermissionChange(permission_mode=_DANGER, auto_approve=True)
         )
+        anchor = parent.append(USER_MESSAGE, {"content": "first"})
+        parent.append(RUN_STARTED, {})
+        parent.append(RUN_COMPLETED, {})
 
         child_id = asyncio.run(
-            session_service(state).fork(session_id="parent", from_seq=1)
+            session_service(state).fork(session_id="parent", from_seq=anchor.seq)
         )
 
         assert effective_permission_mode(state.store.read_events(child_id)) is _DANGER
 
-    def test_change_after_the_anchor_is_still_inherited(self, tmp_path):
-        """父 fork 点**之后**改的档也要被继承（seed 剔除 permission/changed，否则旧的会胜）。"""
+    def test_change_after_the_anchor_is_not_inherited(self, tmp_path):
+        """父 fork 边界之后的权限变化只影响父会话。"""
         state = self._fork_state(tmp_path)
         parent = _seed_session(
             state, "parent", started_data={SESSION_PERMISSION_MODE_KEY: "read-only"}
@@ -691,11 +693,8 @@ class TestForkInheritsEffectiveMode:
         )
 
         child_events = state.store.read_events(child_id)
-        assert effective_permission_mode(child_events) is _DANGER
-        # seed 里不得残留父的 permission/changed（会话级状态由 child 自己声明）
-        assert all(
-            e.type != PERMISSION_CHANGED for e in child_events
-        )
+        assert effective_permission_mode(child_events) is _READ_ONLY
+        assert all(e.type != PERMISSION_CHANGED for e in child_events)
 
     def test_child_inherits_effective_auto_approve(self, tmp_path):
         state = self._fork_state(tmp_path)
@@ -707,13 +706,15 @@ class TestForkInheritsEffectiveMode:
                 SESSION_AUTO_APPROVE_KEY: True,
             },
         )
-        self._settle(parent)
         append_permission_change(
             parent, PermissionChange(permission_mode=_WRITE, auto_approve=False)
         )
+        anchor = parent.append(USER_MESSAGE, {"content": "first"})
+        parent.append(RUN_STARTED, {})
+        parent.append(RUN_COMPLETED, {})
 
         child_id = asyncio.run(
-            session_service(state).fork(session_id="parent", from_seq=1)
+            session_service(state).fork(session_id="parent", from_seq=anchor.seq)
         )
 
         assert effective_auto_approve(state.store.read_events(child_id)) is False

@@ -1053,9 +1053,14 @@ class AgentRuntime:
             return []
         appended: list[SessionEvent] = []
         for steer in self._applicable_steers(drained, run_id):
+            user_data = {"content": steer.content, "steer_id": steer.steer_id}
+            for key in ("revoke_fact_id", "refutes_event_id", "protected_facts"):
+                value = getattr(steer, key, None)
+                if value is not None:
+                    user_data[key] = value
             user_event = session.append(
                 USER_MESSAGE,
-                {"content": steer.content, "steer_id": steer.steer_id},
+                user_data,
                 run_id=run_id, step_id=step_id,
             )
             applied = session.append(
@@ -1110,6 +1115,7 @@ class AgentRuntime:
         self, session: Session, user_input: str | None,
         cancel_reason_supplier: Callable[[], str] | None = None,
         result_holder: list[AgentRunResult] | None = None,
+        user_input_metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """流式驱动 Agent Loop，逐条 yield AgentEvent。
 
@@ -1133,6 +1139,7 @@ class AgentRuntime:
             session, user_input, stream=True,
             result_holder=result_holder,
             cancel_reason_supplier=cancel_reason_supplier,
+            user_input_metadata=user_input_metadata,
         )
         try:
             async for event in drive:
@@ -1148,6 +1155,7 @@ class AgentRuntime:
         self, session: Session, user_input: str | None, *, stream: bool,
         result_holder: list[AgentRunResult] | None = None,
         cancel_reason_supplier: Callable[[], str] | None = None,
+        user_input_metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """共享的主循环——run 和 run_stream 的唯一实现，消除重复。
 
@@ -1230,7 +1238,20 @@ class AgentRuntime:
             step_base = max(session.max_step_id, session.user_turn_count)
             arms.step_base = step_base
             if user_input is not None:
-                user_event = session.append(USER_MESSAGE, {"content": user_input})
+                message_data = {"content": user_input}
+                message_data.update(
+                    {
+                        key: user_input_metadata[key]
+                        for key in (
+                            "revoke_fact_id",
+                            "refutes_event_id",
+                            "protected_facts",
+                        )
+                        if user_input_metadata is not None
+                        and key in user_input_metadata
+                    }
+                )
+                user_event = session.append(USER_MESSAGE, message_data)
                 yield to_agent_event(user_event)
                 # USER_ACCEPTED 稳定边界：user/message 已持久化。
                 await self._save_checkpoint(session, CheckpointBoundary.USER_ACCEPTED)

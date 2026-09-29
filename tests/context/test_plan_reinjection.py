@@ -128,7 +128,7 @@ async def test_after_compaction_model_input_contains_full_plan_verbatim(tmp_path
     # §4.6 顺序：清单块在压缩摘要之前。
     summary_index = next(
         i for i, m in enumerate(messages)
-        if isinstance(m, SystemMessage) and m.content.startswith("## 原始目标与用户约束")
+        if isinstance(m, HumanMessage) and m.name == "context_compaction_summary"
     )
     assert messages.index(block) < summary_index
 
@@ -173,7 +173,9 @@ async def test_plan_change_next_build_contains_new_version(tmp_path):
     assert block.content == expected
     assert "验证压缩接班" in block.content  # 新版 item 3 在场
     # 尚无压缩摘要：块落在开头系统块区（首个 SystemMessage 位）。
-    assert messages[0] is block
+    first_human = next(i for i, message in enumerate(messages)
+                       if isinstance(message, HumanMessage))
+    assert messages.index(block) < first_human
     assert not any(event.type == COMPACTION_END for event in session.events)
 
 
@@ -397,7 +399,8 @@ async def test_plan_tokens_counted_in_below_auto_budget(tmp_path):
     assert builder._last_plan_tokens > 0
     expected = (int(10000 * 0.85)
                 - estimate_message_tokens(session.derive_messages())
-                - builder._last_plan_tokens)
+                - builder._last_plan_tokens
+                - builder._last_protected_fact_tokens)
     assert provider.captured == expected
 
 
@@ -422,7 +425,8 @@ async def test_plan_tokens_counted_in_post_compaction_provider_budget(tmp_path):
     assert builder._last_plan_tokens > 0
     expected = (int(10000 * 0.85)
                 - estimate_message_tokens(session.derive_messages())
-                - builder._last_plan_tokens)
+                - builder._last_plan_tokens
+                - builder._last_protected_fact_tokens)
     assert provider.captured == expected
 
 
@@ -474,5 +478,6 @@ async def test_safe_continue_provider_budget_not_double_counted(tmp_path):
     assert builder._last_plan_tokens > 0
     expected = (int(10000 * 0.85)
                 - estimate_message_tokens(session.derive_messages())
-                - builder._last_plan_tokens)
+                - builder._last_plan_tokens
+                - builder._last_protected_fact_tokens)
     assert provider.captured == expected

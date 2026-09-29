@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 import pytest
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.context.builder import ContextBuilder
@@ -43,13 +43,20 @@ async def test_select_budget_ranking_and_builder_insertion(tmp_path):
     assert "TypeScript preferred" in selected[0].content and "low " not in selected[0].content
     assert estimate_message_tokens(selected) <= 90
     assert await provider.select(session, 1) == []
-    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=250, context_providers=[provider])
+    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=500, context_providers=[provider])
     history = session.derive_messages()
     messages = await builder.build(session)
     assert isinstance(messages[0], SystemMessage)
+    assert "Protected task facts are source-linked context" in messages[0].content
+    facts_message = next(
+        message for message in messages
+        if isinstance(message, HumanMessage)
+        and message.content.startswith("## Protected task facts\n")
+    )
+    assert facts_message is not None
     assert messages[-1] == history[-1]
     assert session.derive_messages() == history
-    assert estimate_message_tokens(messages) <= 250 * 0.85
+    assert estimate_message_tokens(messages) <= 500 * 0.85
 
 
 @pytest.mark.asyncio
@@ -61,8 +68,15 @@ async def test_builder_clips_provider_that_ignores_budget(tmp_path):
         async def select(self, session, token_budget):
             return [SystemMessage(content="memory " * 1000)]
 
-    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=200, context_providers=[Oversized()])
-    assert await builder.build(session) == session.derive_messages()
+    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=500, context_providers=[Oversized()])
+    messages = await builder.build(session)
+    assert "Protected task facts are source-linked context" in messages[0].content
+    assert any(
+        isinstance(message, HumanMessage)
+        and message.content.startswith("## Protected task facts\n")
+        for message in messages
+    )
+    assert messages[-1:] == session.derive_messages()
 
 
 @pytest.mark.asyncio

@@ -82,13 +82,16 @@ LLM 摘要可能失败（模型超时、格式不对、拒绝生成）。失败�
 >    与 `CompactionResult.failures` 自述契约及 PRD §4.5"每次失败留任务可见
 >    状态"相悖，判据测试暴露后补齐。
 
-**第 1 层 — LLM 摘要**：取早期完整 turns，送给同一个 ModelProvider 的 `ainvoke()`，prompt 要求产出结构化 summary（至少保留 facts / decisions / constraints / failed_attempts / unresolved / artifact_refs / citations / important tool outcomes——spec §5 列举）。产出为一条 `SystemMessage` 注入 messages 头部。
+
+**第 1 层 — LLM 摘要**：取早期完整 turns，送给同一个 ModelProvider 的 `ainvoke()`，prompt 要求产出结构化 summary（至少保留 facts / decisions / constraints / failed_attempts / unresolved / artifact_refs / citations / important tool outcomes——spec §5 列举）。产出为一条 `HumanMessage` 注入 messages 头部。摘要来自历史用户、模型和工具内容，属于不可信上下文，不得提升为系统指令。
 
 **第 2 层 — Deterministic fallback**：不用 LLM。机械提取：
 - HumanMessage → 原文截断保留（前 200 字符）
 - AIMessage → 保留 tool_calls 列表（丢 content）
 - ToolMessage → 保留 `tool_call_id` + content 截断（前 100 字符）
-拼成一条 `SystemMessage` 注入头部。信息损失大但零失败面。
+拼成一条 `HumanMessage` 注入头部。信息损失大但零失败面。
+
+> **2026-09-29 用户批准的修订（#346 信任边界与边界预算）**：压缩摘要以及 ProtectedFact 的值都作为 `HumanMessage` 上下文注入；只有静态运行时策略和授权规则使用 `SystemMessage`。摘要即使经过校验，也不能获得系统指令权限。append-only 事件流仍保留所有系统 run 边界，但模型上下文（包括压缩摘要的事实表）只投影 `source_seq` 最新的一条 `work_boundary`；其余保护事实按 #346 注册表完整投影，避免重复 run 状态累积耗尽独立预算。此处为机制和决议的完整记录；PRD 给出简洁契约，W-02 只保留本 ADR 指针。
 
 **第 3 层 — Hard guard 拒绝**：两层降级后 token 估算仍超 `hard_guard_threshold` → 抛 `ContextWindowExceededError`。Runtime 捕获后终止当前 run（spec §8："必须停止或要求用户处理"）。不继续发送超窗口请求。
 

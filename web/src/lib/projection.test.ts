@@ -1003,6 +1003,19 @@ describe('applyEvent — df4f7d8 新形状', () => {
     }
   });
 
+  it('OPERATION_RECONCILED 保留为已知事件但不进入聊天时间线', () => {
+    const event = ev({
+      type: EventType.OPERATION_RECONCILED,
+      data: { tool_call_id: 'tool-1', verdict: 'succeeded', state: 'succeeded' },
+    });
+    const state = applyEvent(initConversation('s'), event);
+
+    expect(state.events).toHaveLength(1);
+    expect(state.turns).toHaveLength(0);
+    expect(state.unknown_events).toHaveLength(0);
+    expect(summarizeEvent(event)).toBe('');
+  });
+
   // #195（ADR-0030 §5.4）：队列/引导五类型已接线——投影进 undelivered 折叠
   // / 摘除（不再落 unknown_events）；摘除与 latestEditableTurn 判据由本文件
   // 末尾「projectUndelivered — 摘除与补齐」describe 块的单测锁。

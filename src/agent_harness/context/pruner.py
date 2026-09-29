@@ -158,7 +158,7 @@ class ToolResultPruner:
     ) -> list[AnyMessage]:
         """把 seq → 骨架行 映射原位套到 derive 产物上（同步重放路径）。
 
-        仅替换 source_range 已知的 ToolMessage——compaction summary（SystemMessage）
+        仅替换 source_range 已知的 ToolMessage——compaction summary（HumanMessage）
         与 dangling 合成（range=None）天然排除，seq 碰撞（bracket 起点恰为某
         tool/result seq）也不会误伤。
         """

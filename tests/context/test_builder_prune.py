@@ -100,7 +100,11 @@ class TestBuilderPruneIntegration:
         assert builder._token_estimate_total == _expected_pruned_total(session, builder)
         # 每次裁剪的骨架成本已进 memo（同决策再 build 命中缓存，数字不变）
         again = await builder.build(session)
-        assert builder._token_estimate_total == estimate_message_tokens(again)
+        # Protected facts are injected SystemMessages but tracked in usage_snapshot's
+        # separate ``other`` bucket; the cache remains the durable session projection.
+        assert builder._token_estimate_total == (
+            estimate_message_tokens(again) - builder._last_protected_fact_tokens
+        )
 
     @pytest.mark.asyncio
     async def test_memo_invalidated_when_new_duplicate_arrives(self, tmp_path):
@@ -139,7 +143,9 @@ class TestBuilderPruneIntegration:
         builder = _builder(store)
         messages = await builder.build(session)
         snapshot = builder.usage_snapshot(session)
-        assert snapshot["messages"] == estimate_message_tokens(messages)
+        assert snapshot["messages"] == (
+            estimate_message_tokens(messages) - builder._last_protected_fact_tokens
+        )
         assert snapshot["messages"] < estimate_message_tokens(session.derive_messages())
 
     def test_constructor_requires_pairing(self):

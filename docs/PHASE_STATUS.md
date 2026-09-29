@@ -40,11 +40,11 @@
 
 ## 当前工作焦点
 
-**当前焦点（2026-09-29）：上下文管理链（Context/Compaction/Memory 接缝）批次推进——W-03（#347）/ W-04（#348）/ W-26（#380）/ W-29（#383）已全部集成关单（细节见下方索引与 tracker）；W-31 批次执行中：W-31.3（#415 子代理探索外包引导 + 结论 ref 化）代码完成（分支 `zcode/T415-w31-3-subagent-refs`，commit `490d5733`）待推送集成；#346 保护性事实登记已随 PR #411 开出（OPEN，待批准合并）；链上剩余：W-31.4 KV-cache 稳定性（#416，审计报告已成）→ W-31.2 prune 参数（#414，按票面推倒重做）→ W-31.5 modified-paths 清单（#417）→ W-31.1 对账关票（#413，决议 A = 零代码，随 #411 合并关票）；伞票 #412 随五张子票关闭后关闭。Memory V2 线 #304 未开工（非当前焦点）。
+**当前焦点（2026-09-29）：上下文管理链（Context/Compaction/Memory 接缝）批次推进——W-03（#347）/ W-04（#348）/ W-26（#380）/ W-29（#383）已全部集成关单（细节见下方索引与 tracker）；W-31.3（#415 子代理探索外包引导 + 结论 ref 化）已随 PR #418 合并（merge `0bef5de1`）并关单；#346 保护性事实登记代码完成 `39a7ee97`，两轴独立审查通过（0 P0），按用户裁决先回后正集成中（本地 Gate-0 绑定 `cf6f94cd` / tree `f7c4cdb5` 6/6 PASS，机器读数 `docs/gate/cf6f94cdc8947510e8bb21988f5e07625c22d3d3.json`；全量 pytest 4802 passed / 2 skipped；分支已推送，PR #411 OPEN、服务端 `gate0` 通过，合并后以合并树重跑）；链上剩余：W-31.4 KV-cache 稳定性（#416，审计报告已成）→ W-31.2 prune 参数（#414，按票面推倒重做）→ W-31.5 modified-paths 清单（#417）→ W-31.1 对账关票（#413，决议 A = 零代码，随 #411 合并关票）；伞票 #412 随五张子票关闭后关闭。Memory V2 线 #304 未开工（非当前焦点）。
 
 **最近集成（2026-09-27）**：#342 并发 resume SeqConflict 已由 PR #369 修复并关闭（根因 9496226e，修复 8ffd4875，merge 1774f4fb）；#341 relay cleanup 遗留已由 PR #343 合入并关闭（merge d4d65fff）。明细与门禁证据见 2026-09 归档。
 
-**Memory V2 当前状态（2026-09-27）**：`#297`–`#303` 实现已集成；`#299` AC10、`#302` 质量 smoke 与 `#303` clean-slate/AC8 证据均已归档。父规格 `#296` 与 PRD、执行票路径见 `docs/SDD_TICKET_TRACKER.md`。`#304` 已 unblocked。
+**Memory V2 源码审计（2026-09-29）**：#296 仍 OPEN。#297/#300 核心链路源码和测试存在；#298 有 P1（敏感事实防护仍依赖模型分类）；PRD 的 SQLite 权威 / Milvus 可重建要求缺少 collection 丢失后的全量重建路径；#299 Recall@6 报告为 0.95 但绑定旧树；#301 AC8 状态测试有缺口；#302 只有非阻塞 smoke、无冻结正式 baseline；#303 有清理实现及报告；#304 runner 与 27/27 real-gold 报告仅在本地分支 `codex/mem-v2-8-final-gate`（HEAD `64b5de40`，较 `origin/main` 落后 25 / 领先 77），未推送、无 PR。按源码与证据判断，不以 CLOSED 状态代替集成；详见 2026-09 归档。
 
 **#303 完成状态（2026-09-27）**：代码 PR #374 已集成；用户批准的 plan hash `137aeaa1…` 已执行，V1/V2 SQLite、Milvus Memory、Knowledge 归零，保留域哈希未变且未留旧内容备份。真实 formation runner 写入 1 条、生产 service 与 Milvus 均可召回、删除后回到零。证据与残余诊断见月度归档及 `docs/evidence/`。
 
