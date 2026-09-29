@@ -109,6 +109,16 @@ async def _prune(session: Session, pruner: ToolResultPruner):
     return await pruner.prune(pairs, session.events)
 
 
+def _pruner(store, **kwargs) -> ToolResultPruner:
+    """#414 夹具：显式双 0 = 旧 W-03 行为（无最近窗口豁免、无收益门）。"""
+    return ToolResultPruner(
+        store, "read_artifact",
+        keep_recent_tool_results=kwargs.pop("keep_recent_tool_results", 0),
+        clear_at_least_tokens=kwargs.pop("clear_at_least_tokens", 0),
+        **kwargs,
+    )
+
+
 class _BrokenReadStore(FakeArtifactStore):
     """写成功读失败：save 走正常 dict，inspect 一律抛 KeyError。"""
 
@@ -135,7 +145,7 @@ class TestR1Supersession:
             events.append(await _append_overflowed_read(
                 session, store, call_id=f"c{i}", path="a.txt", content=content))
         before = [event.to_dict() for event in session.events]
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
 
         results = _tool_messages(messages)
         assert len(results) == 3
@@ -166,7 +176,7 @@ class TestR1Supersession:
         for i in range(3):
             await _append_overflowed_read(session, store, call_id=f"c{i}",
                                           path="a.txt", content=f"version {i}\n" * 50)
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
         assert report.pruned == () and report.skipped == ()
         assert [m.content for m in _tool_messages(session.derive_messages())] == [
             m.content for m in _tool_messages(messages)
@@ -185,7 +195,7 @@ class TestR1Supersession:
                                      artifact_ref=ref)
         last = await _append_overflowed_read(session, store, call_id="c3",
                                              path="a.txt", content=content)
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
 
         results = _tool_messages(messages)
         assert [r.seq for r in report.pruned] == [first.seq]
@@ -203,7 +213,7 @@ class TestR1Supersession:
         store = FakeArtifactStore()
         for i in range(3):
             _append_small_read(session, call_id=f"c{i}", path="a.txt", output="tiny")
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
         assert report.pruned == ()
         assert [m.content for m in _tool_messages(session.derive_messages())] == [
             m.content for m in _tool_messages(messages)
@@ -234,7 +244,7 @@ class TestBlockIntegrity:
         await _append_overflowed_read(session, store, call_id="c4", path="c.txt",
                                       content="C file\n" * 50)
 
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
         assert [r.seq for r in report.pruned] == [first.seq]
         assert report.pruned[0].superseded_by_seq == third.seq
 
@@ -268,7 +278,7 @@ class TestExemptions:
         await _append_overflowed_read(session, store, call_id="c2", path="a.txt",
                                       content=content)
 
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
         assert report.pruned == ()
         assert [s.seq for s in report.skipped] == [first.seq]
         assert report.skipped[0].reason == SKIP_UNREADABLE_REF
@@ -290,7 +300,7 @@ class TestExemptions:
                                         "actions": {}, "job_id": "j-1"},
                        source_event_ids=[first.event_id])
 
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
         assert report.pruned == ()
         assert [s.seq for s in report.skipped] == [first.seq]
         assert report.skipped[0].reason == SKIP_PROTECTED_REFERENCE
@@ -314,7 +324,7 @@ class TestUnicodeAndReadback:
         ref = compute_artifact_id(content)
         assert first.data["content"].count(ref) >= 1
 
-        messages, report = await _prune(session, ToolResultPruner(store, "read_artifact"))
+        messages, report = await _prune(session, _pruner(store))
         assert len(report.pruned) == 1
         skeleton = json.loads(_tool_messages(messages)[0].content)
         # 骨架行是合法单行 JSON，ref 指回原文（content-hash 指纹）
@@ -334,7 +344,9 @@ class TestUnicodeAndReadback:
         await _append_overflowed_read(session, store, call_id="c2", path="a.txt",
                                       content="x\n" * 150)
         messages, _report = await _prune(
-            session, ToolResultPruner(store, "inspect_artifact"))
+            session, ToolResultPruner(store, "inspect_artifact",
+                                      keep_recent_tool_results=0,
+                                      clear_at_least_tokens=0))
         skeleton = json.loads(_tool_messages(messages)[0].content)
         assert "inspect_artifact(" in skeleton["note"]
 
@@ -355,13 +367,13 @@ class TestRestartAndPurity:
         _append_small_read(session, call_id="c3", path="b.txt", output="tiny")
 
         pairs = derive_messages_with_source_ranges(session.events)
-        _m1, report1 = await ToolResultPruner(store, "read_artifact").prune(
+        _m1, report1 = await _pruner(store).prune(
             pairs, session.events,
         )
         # 重启：事件从 JSONL 重载（event_id 持久化）+ 全新校验缓存
         reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
         pairs2 = derive_messages_with_source_ranges(reloaded.events)
-        _m2, report2 = await ToolResultPruner(store, "read_artifact").prune(
+        _m2, report2 = await _pruner(store).prune(
             pairs2, reloaded.events,
         )
         assert report2 == report1
@@ -377,7 +389,7 @@ class TestRestartAndPurity:
         await _append_overflowed_read(session, store, call_id="c2", path="a.txt",
                                       content="x\n" * 150)
         before = [event.to_dict() for event in session.events]
-        await _prune(session, ToolResultPruner(store, "read_artifact"))
+        await _prune(session, _pruner(store))
         assert [event.to_dict() for event in session.events] == before
         assert list(store._artifacts.keys()) == [compute_artifact_id("x\n" * 150)]
 
@@ -425,6 +437,7 @@ class TestRealLargeOutputMeasurement:
         builder_on = ContextBuilder(
             _SilentModel([]), max_context_tokens=10_000_000,
             artifact_store=store, artifact_read_tool_name="read_artifact",
+            keep_recent_tool_results=0, clear_at_least_tokens=0,
         )
         messages_on = await builder_on.build(session)
 
@@ -449,3 +462,158 @@ class TestRealLargeOutputMeasurement:
         assert on_total < off_total * 0.5
         print(f"\n[measure] off={off_total} on={on_total} "
               f"bytes={len(content.encode('utf-8'))}")
+
+
+# ── W-31.2（#414）裁剪参数化：keep_recent_tool_results / clear_at_least_tokens ──
+#
+# 红先证：本类先于实现落仓——实现前 ToolResultPruner 尚无这两个 kwargs
+# （TypeError）且下述 reason 常量不存在（AttributeError），逐条红；实现后全绿。
+#
+# 窗口口径（票面规则）：window = 全部 tool/result 事件（**含失败结果**）按 seq
+# 的最近 K 条；候选命中窗口 ⇒ recent_window 豁免。对拍梯子用「等价类 + 一条
+# 干扰结果」构造，使 K=4/3/2 三档给出可区分的 skip/prune 组合。
+
+
+class TestPruneGuards:
+    @staticmethod
+    def _reasons(report) -> dict[int, str]:
+        return {skip.seq: skip.reason for skip in report.skipped}
+
+    @staticmethod
+    def _result_seqs(session: Session) -> list[int]:
+        return [event.seq for event in session.events if event.type == TOOL_RESULT]
+
+    @pytest.mark.asyncio
+    async def test_keep_k_window_ladder(self, tmp_path):
+        """T1 对拍梯子：等价类 3 连读 [s1<s2<s3]（survivor=s3，候选=s1/s2）+
+        一条不同 path 的结果 d1 追加在最后 ⇒
+        K=4：窗口含全部 ⇒ s1/s2 都 recent_window；
+        K=3：窗口={s2,s3,d1} ⇒ s2 豁免、s1 被裁；
+        K=2：窗口={s3,d1} ⇒ s1/s2 都被裁（可读 + 门关）。"""
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "line-1\n" * 50
+        for i in range(3):
+            await _append_overflowed_read(
+                session, store, call_id=f"c{i}", path="a.txt", content=content)
+        await _append_overflowed_read(
+            session, store, call_id="d1", path="b.txt", content=content)
+        s1, s2 = self._result_seqs(session)[:2]
+
+        pruner = _pruner(store, keep_recent_tool_results=4, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, pruner)
+        assert report.pruned == ()
+        assert self._reasons(report) == {s1: "recent_window", s2: "recent_window"}
+
+        pruner = _pruner(store, keep_recent_tool_results=3, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, pruner)
+        assert [record.seq for record in report.pruned] == [s1]
+        assert self._reasons(report) == {s2: "recent_window"}
+
+        pruner = _pruner(store, keep_recent_tool_results=2, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, pruner)
+        assert [record.seq for record in report.pruned] == [s1, s2]
+        assert report.skipped == ()
+
+    @pytest.mark.asyncio
+    async def test_keep_k_window_counts_failed_results(self, tmp_path):
+        """T2：失败结果占窗口名额——等价类 2 连读 [s1<s2]（候选=s1）+ 失败结果
+        f1 追加在最后 ⇒ K=1 时窗口={f1}，s1 出窗被裁；K=3 时窗口={s1,s2,f1}，
+        s1 recent_window 豁免。失败结果本身永不进候选（ok=false 前置）。"""
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "line-1\n" * 50
+        await _append_overflowed_read(session, store, call_id="c0", path="a.txt", content=content)
+        await _append_overflowed_read(session, store, call_id="c1", path="a.txt", content=content)
+        _append_failed_read(session, call_id="f0", path="a.txt")
+        s1 = self._result_seqs(session)[0]
+
+        pruner = _pruner(store, keep_recent_tool_results=1, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, pruner)
+        assert [record.seq for record in report.pruned] == [s1]
+
+        pruner = _pruner(store, keep_recent_tool_results=3, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, pruner)
+        assert report.pruned == ()
+        assert self._reasons(report) == {s1: "recent_window"}
+
+    @pytest.mark.asyncio
+    async def test_clear_at_least_gate_boundary(self, tmp_path):
+        """T3 门与边界对拍：先门关（0）跑出计划释放量 P ⇒
+        阈值=P（恰好等于）⇒ 正常裁（严格 < 才拦）；阈值=P+1 ⇒ 本轮 planned
+        全转 below_clear_floor、pruned 空；0 = 门关。"""
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "line-1\n" * 200
+        await _append_overflowed_read(session, store, call_id="c0", path="a.txt", content=content)
+        await _append_overflowed_read(session, store, call_id="c1", path="a.txt", content=content)
+        s1 = self._result_seqs(session)[0]
+
+        off = _pruner(store, keep_recent_tool_results=0, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, off)
+        assert [record.seq for record in report.pruned] == [s1]
+        planned = report.planned_freed_tokens
+        assert planned > 0
+
+        gate_eq = _pruner(store, keep_recent_tool_results=0,
+                          clear_at_least_tokens=planned)
+        _messages, report_eq = await _prune(session, gate_eq)
+        assert [record.seq for record in report_eq.pruned] == [s1], "恰好等于阈值必须正常裁"
+
+        gate_gt = _pruner(store, keep_recent_tool_results=0,
+                          clear_at_least_tokens=planned + 1)
+        _messages, report_gt = await _prune(session, gate_gt)
+        assert report_gt.pruned == ()
+        assert self._reasons(report_gt) == {s1: "below_clear_floor"}
+        assert report_gt.planned_freed_tokens == planned, "门拦下也照记计划释放量"
+
+    @pytest.mark.asyncio
+    async def test_planned_freed_tokens_equals_content_minus_skeleton(self, tmp_path):
+        """T4 观测字段口径：planned_freed_tokens = Σ(原文全文 token − 骨架行
+        token)；「原文全文」= 被替换 ToolMessage 的完整 content（ToolResult
+        JSON），与 memo 对账基准同源（test_builder_prune 的对账口径）。"""
+        from agent_harness.context.tokens import estimate_tokens
+
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "数据行\n" * 300
+        await _append_overflowed_read(session, store, call_id="c0", path="a.txt", content=content)
+        await _append_overflowed_read(session, store, call_id="c1", path="a.txt", content=content)
+        pairs = derive_messages_with_source_ranges(session.events)
+        original_by_seq = {
+            source_range[0]: message.content
+            for message, source_range in pairs
+            if isinstance(message, ToolMessage) and source_range is not None
+        }
+
+        pruner = _pruner(store, keep_recent_tool_results=0, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, pruner)
+        expected = sum(
+            estimate_tokens(original_by_seq[record.seq]) - estimate_tokens(record.skeleton)
+            for record in report.pruned
+        )
+        assert report.planned_freed_tokens == expected > 0
+
+    @pytest.mark.asyncio
+    async def test_recent_window_check_precedes_readability(self, tmp_path):
+        """T5 豁免优先级：候选同时在窗口内且 ref 不可读 ⇒ reason=recent_window
+        （纯事件推导的豁免先于 store I/O；窗口命中不做无谓读回探测）。"""
+        session = make_session(tmp_path)
+        store = _BrokenReadStore()
+        content = "line-1\n" * 50
+        await _append_overflowed_read(session, store, call_id="c0", path="a.txt", content=content)
+        await _append_overflowed_read(session, store, call_id="c1", path="a.txt", content=content)
+        s1 = self._result_seqs(session)[0]
+
+        pruner = _pruner(store, keep_recent_tool_results=2, clear_at_least_tokens=0)
+        _messages, report = await _prune(session, pruner)
+        assert self._reasons(report) == {s1: "recent_window"}
+
+    @pytest.mark.asyncio
+    async def test_negative_guard_values_fail_loudly(self):
+        """T6：负值在 pruner 构造处响亮失败（0 合法 = 关闭该护栏）。"""
+        store = FakeArtifactStore()
+        with pytest.raises(ValueError):
+            _pruner(store, keep_recent_tool_results=-1)
+        with pytest.raises(ValueError):
+            _pruner(store, clear_at_least_tokens=-1)
