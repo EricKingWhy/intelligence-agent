@@ -188,3 +188,59 @@ async def test_build_runtime_without_session_store_degrades_delegate(tmp_path, c
 
     assert "delegate" not in [t.name for t in runtime.registry.list()]
     assert any("session_store" in rec.message for rec in caplog.records)
+
+
+def test_settings_default_summary_overflow_tokens() -> None:
+    """W-31.3（#415）：`subagent_summary_overflow_tokens` 缺省 2000（token）。
+
+    `_env_file=None`：断言对象是**契约默认值**，不读部署机的 `.env`
+    （同 `test_local_budget_resolution` 的规矩）。
+    """
+    from agent_harness.config import Settings
+
+    assert Settings(_env_file=None).subagent_summary_overflow_tokens == 2000
+
+
+def test_settings_rejects_negative_summary_overflow_tokens() -> None:
+    """负值在构造期响亮失败（`ge=0`），不是静默当作 0。"""
+    from pydantic import ValidationError
+
+    from agent_harness.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, subagent_summary_overflow_tokens=-1)
+
+
+@pytest.mark.asyncio
+async def test_build_runtime_passes_store_and_overflow_threshold(tmp_path):
+    """W-31.3（#415）贯通：`Settings.subagent_summary_overflow_tokens` 经
+    assembly 抵达 build_runtime 构造的 DelegateTool；artifact store 注入的是
+    装配层 :311-328 选出的 `context_artifact_store`（默认装配 artifact_dir
+    非空 ⇒ 必然选出 Local），不新建第二个 store。"""
+    from unittest.mock import patch
+
+    from tests.test_assembly import ScriptedModelFactory
+
+    settings = _settings(tmp_path).model_copy(
+        update={"subagent_summary_overflow_tokens": 12345},
+    )
+    stores = recovery_stores(tmp_path / "harness.db")
+    await initialize_stores(stores)
+    wiring = await wire_capabilities(
+        CapabilityRegistry(), parse_capabilities_config(settings.capabilities),
+        settings=settings,
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModelFactory()):
+        runtime = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=WorkspaceRegistry(root=tmp_path),
+            session_id="sess-ref", workspace=tmp_path / "w",
+            max_agent_turns=5, auto_approve=True, session_store=store,
+        )
+
+    delegate = runtime.registry.get("delegate")
+    assert delegate._summary_overflow_tokens == 12345
+    assert delegate._artifact_store is not None

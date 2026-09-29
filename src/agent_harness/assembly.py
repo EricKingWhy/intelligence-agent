@@ -355,8 +355,14 @@ async def build_runtime(
             )
             continue
         if isinstance(capability_tool, DelegateTool) and runtime_multiagent_provider is not None:
+            # 结论 ref 化（W-31.3 / #415）：注入**同一个** context_artifact_store
+            #（:311-328 选出，ContextBuilder 共用）——不得新建第二个 store，否则
+            # 出现"写进 A、从 B 读"的静默错配。未选中 store（None）= fail-open
+            # 不外置，与 W-03 整体关闭语义同口径。
             capability_tool = DelegateTool(
                 runtime_multiagent_provider, max_delegations=root_max_delegations,
+                artifact_store=context_artifact_store,
+                summary_overflow_tokens=settings.subagent_summary_overflow_tokens,
             )
         registry.register(capability_tool)
 
