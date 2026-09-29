@@ -119,6 +119,12 @@ class ContextWindowExceededError(RuntimeError):
 class CompactionResult:
     messages: list[AnyMessage]
     compacted_turn_count: int
+    # 契约（P2-4 双计修正后统一）：**只含返回的 messages 本身**的估算，不含
+    # 调用方（builder）另行记账的 system_prompt / 运行时快照 / 清单锚块——
+    # 压缩成功路径本来就是 messages-only（test_builder_system_prompt 的回归钉），
+    # 三条直通路径（预检放行 / 双失败安全继续 / 源区间不可用）已从
+    # "原样回传调用方入参（含 sys+rt+plan）"统一到本契约，否则 builder 的
+    # 补回项会二次计入，provider 预算被虚扣（方向安全但账目失真）。
     token_estimate: int
     fallback_used: bool
     # T4 (#134)：bracket 元数据——被压缩段的 seq 区间 + 唯一 bracket_id。
@@ -178,7 +184,11 @@ class ContextCompactor:
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)
-            if count > self._hard_limit:
+            # 硬护栏比对用**有效用量**（调用方入参，含 sys+rt+plan），与下方其余
+            # 三处 `token_estimate > self._hard_limit` 同一口径——messages-only
+            # 比对会在 (messages, 有效用量) 落入 (count≤hard<effective) 缝隙时
+            # 放行越窗请求。
+            if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError("No complete early turn can be compacted")
             return CompactionResult(list(messages), 0, count, False)
         prompt = SystemMessage(
@@ -198,7 +208,11 @@ class ContextCompactor:
                 raise ContextWindowExceededError(
                     "Summary validation failed and original context exceeds hard guard"
                 ) from None
-            return CompactionResult(list(messages), 0, token_estimate, False)
+            # P2-4：token_estimate 回传 messages-only（契约见 CompactionResult），
+            # 不原样回传调用方入参（其已含 sys+rt+plan，builder 会再补一次）。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+            )
         # W-04 (#348)：摘要生成至多两次尝试。一次尝试 = ainvoke → 解析 → 程序化组装
         # → 校验闸门 → shrink 全链；预检（上面与 tool 块检查）不计入。每次失败记一条
         # 有界 CompactionFailure，由调用方落成任务可见状态。
@@ -266,8 +280,11 @@ class ContextCompactor:
                     "Summary validation failed and original context exceeds hard guard",
                     failures=failures,
                 ) from None
-            return CompactionResult(list(messages), 0, token_estimate, False,
-                                    failures=failures)
+            # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+                failures=failures,
+            )
         count = estimate_message_tokens(compacted)
         if count > self._hard_limit:
             raise ContextWindowExceededError(
@@ -313,7 +330,10 @@ class ContextCompactor:
                 raise ContextWindowExceededError(
                     "Cannot persist compaction without a source event range"
                 )
-            return CompactionResult(list(messages), 0, token_estimate, False)
+            # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+            )
         return CompactionResult(
             compacted,
             sum(isinstance(message, HumanMessage) for message in early),

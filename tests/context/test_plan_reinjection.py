@@ -14,7 +14,7 @@
 """
 
 import pytest
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from agent_harness.config import Settings
@@ -24,6 +24,7 @@ from agent_harness.context.builder import (
     _render_plan_block,
     _should_inject_plan,
 )
+from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.session import (
     COMPACTION_END,
     COMPACTION_START,
@@ -341,3 +342,137 @@ async def test_plan_block_tokens_accounted_independently(tmp_path):
     # 独立记账的实测值如数进"other"（未归类注入的定义性内容），used_tokens 含它。
     assert snapshot["other"] >= builder._last_plan_tokens
     assert snapshot["used_tokens"] >= builder._last_plan_tokens
+
+
+class _RecordingProvider:
+    """记录 `_with_providers` 实际分配给 provider 的 remaining（预算观察口）。"""
+
+    name = "recorder"
+
+    def __init__(self) -> None:
+        self.captured: int | None = None
+
+    async def select(self, session, remaining):
+        self.captured = remaining
+        return []
+
+
+class _FailingModel:
+    """摘要模型双失败替身（W-04 语义：至多重试一次）。"""
+
+    async def ainvoke(self, messages):
+        raise TimeoutError("summary timed out")
+
+
+#: 压缩夹具大内容：实测 ≈5626（Human 投影）/≈5640（AI 回合）token（幂等确定性；
+#: auto=0.5×10000=5000 ⇒ 必进压缩路径）。
+BIG_CONTENT = "前情占位内容。" * 800
+#: 阈值边缘夹具：实测 ≈4576（Human 投影）/≈4590（AI 回合）token，无清单时 < auto
+#: （5000），加大清单块后 > 5000。
+THRESH_CONTENT = "前情占位内容。" * 650
+
+#: 50 项清单（恰好到达软上限，不超）：49 pending + 1 in_progress（实测清单块 ≈1710 token）。
+PLAN_ITEMS_50 = [
+    {"id": str(i), "content": f"待办事项第{i}号",
+     "activeForm": f"处理第{i}号事项中",
+     "status": ("in_progress" if i == 7 else "pending"), "source": "agent"}
+    for i in range(1, 51)
+]
+
+
+@pytest.mark.asyncio
+async def test_plan_tokens_counted_in_below_auto_budget(tmp_path):
+    """清单 token 计入 token_estimate 后流进 provider remaining（精确算术）。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "开始。"})
+    _apply_plan(session, PLAN_ITEMS_V1)
+    provider = _RecordingProvider()
+    builder = ContextBuilder(
+        ScriptedModel([]), max_context_tokens=10000, context_providers=[provider],
+    )
+
+    await builder.build(session)
+
+    assert provider.captured is not None
+    assert builder._last_plan_tokens > 0
+    expected = (int(10000 * 0.85)
+                - estimate_message_tokens(session.derive_messages())
+                - builder._last_plan_tokens)
+    assert provider.captured == expected
+
+
+@pytest.mark.asyncio
+async def test_plan_tokens_counted_in_post_compaction_provider_budget(tmp_path):
+    """压缩成功路径：remaining = int(hard) −（压缩后投影 + 清单块）。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "开始任务。"})
+    session.append(MODEL_COMPLETED, {"content": BIG_CONTENT})
+    _apply_plan(session, PLAN_ITEMS_V1)  # 清单事件在 M_big 之后 ⇒ stale=1（事件驱动窗）
+    session.append(USER_MESSAGE, {"content": "current request"})
+    model = ScriptedModel([AIMessage(content=_model_sections("正在实现清单重注入。"))])
+    provider = _RecordingProvider()
+    builder = ContextBuilder(
+        model, max_context_tokens=10000, auto_compact_threshold=0.5,
+        context_providers=[provider],
+    )
+
+    await builder.build(session)
+
+    assert any(e.type == COMPACTION_END for e in session.events)  # 压缩确实发生
+    assert builder._last_plan_tokens > 0
+    expected = (int(10000 * 0.85)
+                - estimate_message_tokens(session.derive_messages())
+                - builder._last_plan_tokens)
+    assert provider.captured == expected
+
+
+@pytest.mark.asyncio
+async def test_plan_block_pushes_estimate_over_auto_threshold(tmp_path):
+    """无清单 ≈4576 < auto（5000）不压缩；50 项清单块 ≈1710 ⇒ 6286 > 5000 必须压缩。"""
+    big = estimate_message_tokens([HumanMessage(content=THRESH_CONTENT)])
+    assert 4300 < big < 4900  # 夹具自检：无清单确实在 auto 之下
+
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "开始任务。"})
+    session.append(MODEL_COMPLETED, {"content": THRESH_CONTENT})
+    _apply_plan(session, PLAN_ITEMS_50)
+    session.append(USER_MESSAGE, {"content": "current request"})
+    model = ScriptedModel([AIMessage(content=_model_sections("正在处理待办事项第7号。"))])
+
+    messages = await ContextBuilder(
+        model, max_context_tokens=10000, auto_compact_threshold=0.5,
+    ).build(session)
+
+    assert any(e.type == COMPACTION_END for e in session.events)
+    block = _plan_block(messages)
+    assert block is not None
+    assert "待办事项第7号" in block.content  # 50 项全表在场（压缩锚点）
+
+
+@pytest.mark.asyncio
+async def test_safe_continue_provider_budget_not_double_counted(tmp_path):
+    """CompactionResult.token_estimate 契约统一为 messages-only 后，直通路径
+    不再让 builder 的补回项（sys+rt+plan）二次计入 provider 预算。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "开始任务。"})
+    session.append(MODEL_COMPLETED, {"content": BIG_CONTENT})
+    _apply_plan(session, PLAN_ITEMS_V1)  # stale=1 ⇒ 注入 ⇒ plan_tokens > 0
+    session.append(USER_MESSAGE, {"content": "current request"})
+    provider = _RecordingProvider()
+    builder = ContextBuilder(
+        _FailingModel(), max_context_tokens=10000, auto_compact_threshold=0.5,
+        context_providers=[provider],
+    )
+
+    messages = await builder.build(session)
+
+    # 双失败安全继续：无 bracket、原投影保留、两次失败留痕（W-04 通道）
+    assert not any(e.type == COMPACTION_END for e in session.events)
+    failures = [e for e in session.events if e.type == CONTEXT_COMPACTION_FAILED]
+    assert [e.data["attempt"] for e in failures] == [1, 2]
+    assert _plan_block(messages) is not None  # 清单块照常在场（与压缩成败无关）
+    assert builder._last_plan_tokens > 0
+    expected = (int(10000 * 0.85)
+                - estimate_message_tokens(session.derive_messages())
+                - builder._last_plan_tokens)
+    assert provider.captured == expected
