@@ -468,6 +468,8 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
+            plan_reinject_every_messages=settings.plan_reinject_every_messages,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
             # wiring 自动装配的 provider 子集；None=默认全量，[]=显式零，未知名字 fail-open。
             context_providers=_select_context_providers(
