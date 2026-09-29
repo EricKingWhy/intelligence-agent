@@ -167,6 +167,10 @@ class ContextBuilder:
         system_prompt: str | None = None,
         runtime_context_provider: Callable[[], str] | None = None,
         protected_fact_token_budget: int = 8_192,
+        # W-31.2 (#414)：裁剪的两个确定性护栏（最近 K 条窗口豁免 / 收益下限门），
+        # 原样透传给 ToolResultPruner——校验在 pruner 构造处响亮失败，本层不重复。
+        keep_recent_tool_results: int = 3,
+        clear_at_least_tokens: int = 5000,
         artifact_store: Any | None = None,
         artifact_read_tool_name: str | None = None,
         summary_model: Any | None = None,
@@ -236,7 +240,11 @@ class ContextBuilder:
         else:
             if not artifact_read_tool_name:
                 raise ValueError("artifact_store requires artifact_read_tool_name")
-            self._pruner = ToolResultPruner(artifact_store, artifact_read_tool_name)
+            self._pruner = ToolResultPruner(
+                artifact_store, artifact_read_tool_name,
+                keep_recent_tool_results=keep_recent_tool_results,
+                clear_at_least_tokens=clear_at_least_tokens,
+            )
         self._prune_decisions: dict[str, dict[int, str]] = {}
         self._last_prune_report: PruneReport | None = None
 
