@@ -36,6 +36,7 @@ from agent_harness.memory.v2.types import (
     MemoryTier,
     SemanticPayload,
     SourceType,
+    assert_kind_tier_payload_contract,
 )
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
@@ -94,7 +95,11 @@ class _RememberV2Args(BaseModel):
                 " \t\r\n\"'“”‘’.,!?。！？;；:："
             )
             if not normalized_value or normalized_value not in normalized_content:
-                raise ValueError(f"payload.{field} must be derived from content")
+                raise ValueError(
+                    f"payload.{field} must be derived from content：payload.{field} "
+                    "必须逐字摘自 content（只能原样截取 content 中的连续片段，不得改写、总结或增删字）；"
+                    f"请把 payload.{field} 改成 content 中的一段原文后重试"
+                )
         if _NEGATED_CONTENT.search(self.content) and (
             not isinstance(self.payload, SemanticPayload)
             or normalized_content not in " ".join(self.payload.fact.casefold().split()).strip(
@@ -102,8 +107,19 @@ class _RememberV2Args(BaseModel):
             )
         ):
             raise ValueError(
-                "negated content must remain verbatim in a semantic payload fact"
+                "negated content must remain verbatim in a semantic payload fact："
+                "content 含否定表述时 payload 必须是 semantic，且 payload.fact 必须逐字包含"
+                "整句 content 原文（含主语，不得只摘否定片段或改写）；"
+                "请把 payload.fact 改成与 content 完全一致的整句后重试"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _kind_tier_payload_combination(self) -> _RememberV2Args:
+        # scope/project 由 execute 期按身份决定，模型可控的组合错误只有这两条；
+        # 在参数面提前拦截（权威规则见 types.assert_content_contract），报错经执行器
+        # 带规则文本回模型自纠，而不是走进 execute 后被防泄漏分支吞成通用文案。
+        assert_kind_tier_payload_contract(kind=self.kind, tier=self.tier, payload=self.payload)
         return self
 
 
@@ -122,9 +138,21 @@ class RememberMemoryV2Tool(Tool):
     @property
     def description(self) -> str:
         return (
-            "只在用户本轮明确要求记住且所给内容出现在该用户消息中时，写入一条有类型的 V2 长期记忆。"
-            "同一消息中出现任何拒绝保存的表述时，本次写入一律拒绝。payload 文本必须来自 content；"
-            "密钥、令牌、密码和私钥永不保存。"
+            "只在用户本轮明确要求记住（说了\"记住/记一下\"等）时，把该内容逐字写入一条 V2 长期记忆。"
+            "参数契约（违反即参数校验失败）：content 必须是用户本轮消息里要记住内容的逐字摘录"
+            "（≤500 字符，只允许去掉首尾空白/引号/标点，不得改写）；"
+            "kind 必填：semantic（稳定事实/偏好）| episodic（情境/行动/结果/教训）| procedural（操作规则）；"
+            "payload 必填且结构随 kind：semantic={kind:\"semantic\",subject,fact,category}，"
+            "episodic={kind:\"episodic\",situation,action,outcome,lesson}，"
+            "procedural={kind:\"procedural\",trigger,procedure,success_condition}；"
+            "payload 的每个文本字段都必须逐字摘自 content（只截原文连续片段，不得改写/总结/增删字）。"
+            "content 含否定表述（不/没/无/未/non-/-free 等）时必须用 semantic，"
+            "且 payload.fact 必须与整句 content 完全一致（含主语，不得只摘否定片段）。"
+            "例：用户说\"记住我喜欢喝美式\"→ content=\"我喜欢喝美式\"，kind=\"semantic\"，"
+            "payload={\"kind\":\"semantic\",\"subject\":\"我\",\"fact\":\"喜欢喝美式\",\"category\":\"preference\"}；"
+            "用户说\"记住我不吃香菜\"→ payload.fact 必须写整句\"我不吃香菜\"，不能只写\"不吃香菜\"。"
+            "同一消息里出现任何拒绝保存的表述时本次写入一律拒绝；密钥、令牌、密码和私钥永不保存；"
+            "临时任务状态与本轮中间结果不该写入。"
         )
 
     @property
@@ -231,8 +259,12 @@ class ForgetMemoryV2Tool(Tool):
     @property
     def description(self) -> str:
         return (
-            "删除 V2 长期记忆。先按 query 找唯一 active 记录；若有多个，只返回候选供用户选择，"
-            "不得自行挑选。选择已有候选时，用户必须在新消息中明确给出 memory_id。"
+            "只在用户本轮明确要求遗忘（说了\"忘掉/删除某条记忆\"等）时，删除 V2 长期记忆。"
+            "memory_id 与 query 必须二选一，不能同时给或都不给。"
+            "query：按内容找唯一 active 记录，必须逐字摘自用户本轮消息原文（不得改写或总结），"
+            "多个匹配时只返回候选供用户选择，不得自行挑选；"
+            "memory_id：精确删除一条，通常来自 retrieve_memory 结果；"
+            "选择已有候选时，用户必须在新消息中明确给出 memory_id。"
         )
 
     @property
@@ -266,7 +298,8 @@ class ForgetMemoryV2Tool(Tool):
                 )
             if args.query is not None and not explicit_forget_query_matches(source_text, args.query):
                 return ToolResult.failure(
-                    message="遗忘检索条件必须来自本轮用户消息；没有删除。",
+                    message="遗忘检索条件必须逐字摘自本轮用户消息原文；"
+                            "请把 query 改成用户本轮消息里的原话后重试。没有删除。",
                     error_code=ErrorCode.PERMISSION_DENIED,
                 )
             trusted = trusted_identity_for_session(session_id, self._workspace_index)
