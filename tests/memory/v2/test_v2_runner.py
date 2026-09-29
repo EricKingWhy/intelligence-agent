@@ -804,6 +804,25 @@ async def test_the_invoker_passes_max_tokens_and_the_two_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_memory_calls_do_not_inherit_the_agent_sampling_temperature() -> None:
+    """Memory decisions use deterministic decoding even when chat uses sampling."""
+    model = FakeChatModel()
+    configured = ModelConfig(
+        provider="senseaudio", model_name="senseaudio-model", api_key="unit-test-key",
+        base_url="http://localhost:1", temperature=0.7,
+    )
+    built: list[ModelConfig] = []
+    invoker = ChatModelInvoker(
+        factory=lambda config, **kwargs: (built.append(config), model)[1]
+    )
+
+    assert await invoker(_call(model=configured)) == "{}"
+
+    assert configured.temperature == 0.7
+    assert built[0].temperature == 0.0
+
+
+@pytest.mark.asyncio
 async def test_the_invoker_reuses_one_model_per_config() -> None:
     """一次 job 最多 5 次调用；每次都新建会重建 httpx client（连接池 + TLS 握手）。"""
     model = FakeChatModel()

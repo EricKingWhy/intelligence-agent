@@ -74,6 +74,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Sequence
+from copy import copy
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
@@ -113,6 +114,7 @@ DEFAULT_RECOVERY_LIMIT = 100
 #: 泵空闲但库里还有"等 lease 到期"的 job 时，最短睡多久再回来看一眼（秒）。
 #: 下限存在的理由：`lease_expires_at` 与当前时刻的差可能已经极近，睡 0 秒会变成热循环。
 _MIN_WAKE_SECONDS = 0.05
+_MEMORY_MODEL_TEMPERATURE = 0.0
 
 #: `drain` / `aclose` 等待在途服务循环的上限（秒）。超时即取消——被取消的 job 停在
 #: 非终态，下次恢复扫描重跑（AC6 的四个窗口共用同一条论证）。
@@ -228,7 +230,11 @@ class ChatModelInvoker:
         key = (config.provider, config.model_name, config.base_url)
         cached = self._models.get(key)
         if cached is None:
-            cached = self._factory(config, reasoning_effort=self._reasoning_effort)
+            # Memory formation/adjudication are contract decisions, so keep their
+            # classification stable even when the interactive agent uses sampling.
+            memory_config = copy(config)
+            memory_config.temperature = _MEMORY_MODEL_TEMPERATURE
+            cached = self._factory(memory_config, reasoning_effort=self._reasoning_effort)
             self._models[key] = cached
         return cached
 
