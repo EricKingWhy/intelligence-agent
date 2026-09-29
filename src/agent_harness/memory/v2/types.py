@@ -161,6 +161,26 @@ class EvidenceItem(_PayloadBase):
     hash: str = Field(min_length=1)
 
 
+def assert_kind_tier_payload_contract(
+    *, kind: MemoryKind, tier: MemoryTier, payload: MemoryPayload,
+) -> None:
+    """§4.1/§4.2 里**不依赖 scope/project** 的组合规则子集。
+
+    单独抽出是因为它有**三个**消费者：完整信封与 formation 候选（经
+    `assert_content_contract`），以及显式写入工具的 args 模型——后者在模型
+    参数面 scope 还没定，只能先拦模型可控的组合，让报错经执行器回模型自纠，
+    而不是走进 execute 后被防泄漏分支吞成通用文案。
+
+    每条都以 `ValueError` 结束（pydantic 会包成 ValidationError），并带上足以定位的
+    字段值——这是给"校验失败"留证据，不是给调用方做控制流。
+    """
+    if payload.kind != kind.value:
+        raise ValueError(f"payload kind {payload.kind!r} does not match record kind {kind.value!r}")
+    if tier is MemoryTier.PROFILE and kind is not MemoryKind.SEMANTIC:
+        # §4.2：profile 是"每次可自动注入的紧凑画像"，只有 semantic 能进。
+        raise ValueError(f"profile tier requires semantic kind, got {kind.value!r}")
+
+
 def assert_content_contract(
     *, kind: MemoryKind, tier: MemoryTier, scope: MemoryScope,
     project_id: str | None, payload: MemoryPayload,
@@ -171,19 +191,13 @@ def assert_content_contract(
     #298 的 formation 候选（`formation.FormationCandidate`）。候选是"还没被运行时
     补齐身份与版本的信封"，它必须受同一套组合规则约束——各写一份会让"模型多报一个
     profile 档位的 episode"从一个入口被挡住、从另一个入口放进来。
-
-    每条都以 `ValueError` 结束（pydantic 会包成 ValidationError），并带上足以定位的
-    字段值——这是给"校验失败"留证据，不是给调用方做控制流。
     """
-    if payload.kind != kind.value:
-        raise ValueError(f"payload kind {payload.kind!r} does not match record kind {kind.value!r}")
-    if tier is MemoryTier.PROFILE:
-        # §4.2：profile 是"每次可自动注入的紧凑画像"，只有 user_global 的
-        # active semantic 能进。project 作用域的事实注入到所有会话会越界。
-        if kind is not MemoryKind.SEMANTIC:
-            raise ValueError(f"profile tier requires semantic kind, got {kind.value!r}")
-        if scope is not MemoryScope.USER_GLOBAL:
-            raise ValueError(f"profile tier requires user_global scope, got {scope.value!r}")
+    assert_kind_tier_payload_contract(kind=kind, tier=tier, payload=payload)
+    # §4.2：profile 是"每次可自动注入的紧凑画像"，只有 user_global 的 active
+    # semantic 能进（semantic 前置已由共享子集拦）。project 作用域的事实注入到
+    # 所有会话会越界。
+    if tier is MemoryTier.PROFILE and scope is not MemoryScope.USER_GLOBAL:
+        raise ValueError(f"profile tier requires user_global scope, got {scope.value!r}")
     if scope is MemoryScope.PROJECT:
         if project_id is None:
             raise ValueError("project scope requires project_id")

@@ -36,6 +36,7 @@ from agent_harness.memory.v2.types import (
     MemoryTier,
     SemanticPayload,
     SourceType,
+    assert_kind_tier_payload_contract,
 )
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
@@ -111,6 +112,14 @@ class _RememberV2Args(BaseModel):
                 "整句 content 原文（含主语，不得只摘否定片段或改写）；"
                 "请把 payload.fact 改成与 content 完全一致的整句后重试"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _kind_tier_payload_combination(self) -> _RememberV2Args:
+        # scope/project 由 execute 期按身份决定，模型可控的组合错误只有这两条；
+        # 在参数面提前拦截（权威规则见 types.assert_content_contract），报错经执行器
+        # 带规则文本回模型自纠，而不是走进 execute 后被防泄漏分支吞成通用文案。
+        assert_kind_tier_payload_contract(kind=self.kind, tier=self.tier, payload=self.payload)
         return self
 
 
@@ -250,8 +259,12 @@ class ForgetMemoryV2Tool(Tool):
     @property
     def description(self) -> str:
         return (
-            "删除 V2 长期记忆。先按 query 找唯一 active 记录；若有多个，只返回候选供用户选择，"
-            "不得自行挑选。选择已有候选时，用户必须在新消息中明确给出 memory_id。"
+            "只在用户本轮明确要求遗忘（说了\"忘掉/删除某条记忆\"等）时，删除 V2 长期记忆。"
+            "memory_id 与 query 必须二选一，不能同时给或都不给。"
+            "query：按内容找唯一 active 记录，必须逐字摘自用户本轮消息原文（不得改写或总结），"
+            "多个匹配时只返回候选供用户选择，不得自行挑选；"
+            "memory_id：精确删除一条，通常来自 retrieve_memory 结果；"
+            "选择已有候选时，用户必须在新消息中明确给出 memory_id。"
         )
 
     @property
@@ -285,7 +298,8 @@ class ForgetMemoryV2Tool(Tool):
                 )
             if args.query is not None and not explicit_forget_query_matches(source_text, args.query):
                 return ToolResult.failure(
-                    message="遗忘检索条件必须来自本轮用户消息；没有删除。",
+                    message="遗忘检索条件必须逐字摘自本轮用户消息原文；"
+                            "请把 query 改成用户本轮消息里的原话后重试。没有删除。",
                     error_code=ErrorCode.PERMISSION_DENIED,
                 )
             trusted = trusted_identity_for_session(session_id, self._workspace_index)
