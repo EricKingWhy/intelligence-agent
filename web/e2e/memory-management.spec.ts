@@ -266,6 +266,67 @@ test('AC8: retry after a failed next page fetches that same offset', async ({ pa
   expect(requestedOffsets.filter((offset) => offset === '50')).toHaveLength(2);
 });
 
+test('AC8: pagination stops at the backend offset ceiling with an explicit boundary', async ({ page }) => {
+  test.setTimeout(90_000);
+  const requestedOffsets: number[] = [];
+  const memories = Array.from({ length: 50 }, (_, index) => semantic(`m-boundary-${index}`, `boundary fact ${index}`));
+  await routeApi(page, {
+    memories,
+    onMemoriesGet: async (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      const offset = Number(params.get('offset') ?? '0');
+      requestedOffsets.push(offset);
+      if (offset === 0) return false;
+      // Keep the DOM small while exercising real page-size cursor advancement.
+      // Repeated IDs model offset overlap when records change during pagination.
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(memories) });
+      return true;
+    },
+  });
+  await page.goto('/');
+  await openPanel(page);
+  await expect(panel(page).locator('.memory-row')).toHaveCount(50);
+
+  // Drive the actual button handler in-page to avoid 200 Playwright round trips.
+  // The repeated page fixture keeps rendering bounded at 50 rows.
+  await page.evaluate(async () => {
+    const clickAndWaitForPage = async () => {
+      const button = document.querySelector<HTMLButtonElement>('.memory-more-btn');
+      const container = document.querySelector('.memory-panel');
+      if (!button || !container) throw new Error('pagination button disappeared before reaching the boundary');
+
+      await new Promise<void>((resolve, reject) => {
+        const observer = new MutationObserver(() => {
+          const current = document.querySelector<HTMLButtonElement>('.memory-more-btn');
+          if (!current || !current.disabled) {
+            observer.disconnect();
+            window.clearTimeout(timeout);
+            resolve();
+          }
+        });
+        const timeout = window.setTimeout(() => {
+          observer.disconnect();
+          reject(new Error('pagination request did not settle'));
+        }, 10_000);
+        observer.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
+        button.click();
+      });
+    };
+
+    for (let page = 0; page < 200; page += 1) await clickAndWaitForPage();
+  });
+
+  const pageOffsets = requestedOffsets.filter((offset) => offset > 0);
+  expect(pageOffsets).toHaveLength(200);
+  expect(pageOffsets[0]).toBe(50);
+  expect(pageOffsets.at(-1)).toBe(10_000);
+  await expect(panel(page).locator('.memory-row')).toHaveCount(50);
+  await expect(panel(page).locator('.memory-more-end')).toHaveAttribute('role', 'status');
+  await expect(panel(page).locator('.memory-more-end')).toContainText('已达到查询上限');
+  await expect(panel(page).locator('.memory-more-end')).toContainText('最多 10,050 条');
+  await expect(panel(page).getByRole('button', { name: '加载更多' })).toHaveCount(0);
+});
+
 test('AC4: bulk delete previews an exact server count and sends the confirmation token', async ({ page }) => {
   let bulkBody: unknown;
   page.on('request', (request) => {

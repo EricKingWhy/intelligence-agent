@@ -77,9 +77,10 @@ describe('MemoryPanel pagination boundary', () => {
     });
 
     const footer = document.body.querySelector('.memory-more-end');
+    expect(footer?.getAttribute('role')).toBe('status');
     expect(footer?.textContent).toContain('最多 10,050 条');
+    expect(footer?.textContent).toContain('已达到查询上限');
     expect(footer?.textContent).toContain('缩小筛选范围');
-    expect(footer?.textContent).not.toBe('已全部加载');
     expect(document.body.querySelector('.memory-more-btn')).toBeNull();
   });
 });
