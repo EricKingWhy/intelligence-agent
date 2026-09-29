@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from langchain_core.messages import HumanMessage
 
+from agent_harness.agent.run_budget import session_budget_key
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.approval import (
     SESSION_AUTO_APPROVE_KEY,
@@ -52,7 +53,15 @@ from agent_harness.storage.session_meta import SessionMeta
 if TYPE_CHECKING:
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.store import JsonlSessionStore
+    from agent_harness.storage.delegation_tree import (
+        InMemoryDelegationTreeLedger,
+        SqliteDelegationTreeLedger,
+    )
     from agent_harness.storage.session_meta import SessionMetaStore
+
+    #: 只读账行读数所需的接口（`get_session_budget`）；duck-typed，运行期不 import
+    #: storage（fork 在 session 层，两个实现都满足这一条）。
+    SessionBudgetLedger = SqliteDelegationTreeLedger | InMemoryDelegationTreeLedger
 
 logger = logging.getLogger("agent_harness.session.fork")
 
@@ -160,12 +169,21 @@ async def fork_session(
     workspace_registry: WorkspaceRegistry | None = None,
     summarizer: TailSummarizerProtocol | None = None,
     with_tail_summary: bool = True,
+    budget_ledger: SessionBudgetLedger | None = None,
 ) -> Session:
     """从父会话的第 boundary_user_message_seq 条用户消息处 fork 出 child。
 
     锚点消息不进 seed；seed = 锚点之前的全部事件（父的 session/started 除
     外——child 写自己的身份事件）。失败时不留任何 child 侧孤儿（先校验后
     落盘）。
+
+    session 预算谱系（`#318`）：`budget_ledger` 给定时，读**父账行**的当前快照
+    落进 `session/forked.data.budget_session`（谱系可溯），其余一字不动——
+    fork = **新 SessionBudget 身份**（`03 §7`：child 是新 session_id ⇒ 新账行、
+    新计数器，账从零开始；父行零写入：不迁移消耗、不 bump version、不写
+    任何事件）。父行不存在（父会话还没跑过任何 step）⇒ 落 `snapshot: null`，
+    "父没有账"与"父的账是空的"都如实可读。child 行由它自己的首个 run 惰性
+    建出（与创建路径同一条规则）。
     """
     # 父会话只读加载（§7 父不可改：绝不能 Session.resume，那会追加 resumed）
     parent_events = store.read_events(parent_session_id)
@@ -248,6 +266,16 @@ async def fork_session(
     }
     if tail_summary:
         forked_data["tail_summary"] = tail_summary
+    # session 预算谱系（`#318`）：只读父账行 + 落快照引用；父零写入。
+    if budget_ledger is not None:
+        parent_key = session_budget_key(parent_events, session_id=parent_session_id)
+        parent_snapshot = await budget_ledger.get_session_budget(parent_key)
+        forked_data["budget_session"] = {
+            "parent_budget_key": parent_key,
+            "snapshot": (
+                parent_snapshot.as_projection() if parent_snapshot is not None else None
+            ),
+        }
     child.append(SESSION_FORKED, forked_data, agent_id=agent_id)
 
     await meta_store.upsert(

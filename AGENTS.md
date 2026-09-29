@@ -779,7 +779,10 @@ A 合入 `main` 后，之前针对 B 做的 Conflict 判断**全部视为可能�
 - **服务端 `gate0` 必须绿（2026-09-26 起）**：它是 `main` 的**必需状态检查**——由
   `.github/workflows/gate0.yml` 在 PR 上跑**同一套** 6 条机械车道（不是第二套判据实现）。
   它把「忘了跑」与「本地 `--no-verify`」两条路径封死，但**同一份脚本 ≠ 同一个环境**：
-  本地绿推不出 CI 绿（实测反例：`ruff` 的 EXE001 只在 Unix 生效，Windows 本地永远看不见）。
+  本地绿推不出 CI 绿（实测反例：`ruff` 的 EXE001 只在 Unix 生效、Windows 本地看不见）。
+  ⚠ **该实例已被本地 `guards` 车道补上**（P0-2 的「索引可执行位 ⇔ shebang」，判据
+  `scripts/check_exec_bit.py`，见 `docs/agents/verification.md` §2 ⑦）—— 但那只是把一个**具体形态**
+  搬回本地，**不**改变「同一份脚本 ≠ 同一个环境」这条原理（服务端在 Unix 上仍可能跑出本机不跑的规则）。
   它是**门禁而非可选**：不满就合不进去（§14.4）；
 - **门禁读数来自机器落盘**：`docs/gate/<sha>.json`（`scripts/gate0.py` 每次**裸全量**运行写出：
   `sha` + `^{tree}` + 每车道结论 + 墙钟 + 工具版本 + 该次运行的工作树证据；`--replay <file>`

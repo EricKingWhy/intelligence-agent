@@ -28,6 +28,7 @@ from uuid import uuid4
 
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import BUILTIN_PROFILES, AgentSpec
+from agent_harness.agent.run_budget import SessionBudgetPort, SessionLimits
 from agent_harness.agent.runtime import AgentRunResult
 from agent_harness.multiagent.depth import (
     SpawnScope,
@@ -51,6 +52,7 @@ from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.delegation_tree import (
     DelegationReservation,
     InMemoryDelegationTreeLedger,
+    SessionBudgetHandle,
 )
 
 logger = logging.getLogger(__name__)
@@ -387,10 +389,43 @@ class InProcessSubagentProvider:
     ) -> DelegationReservation:
         if self._tree_metadata_error:
             raise RuntimeError("委派树恢复元数据不可用；拒绝启动子代理")
-        return await self._delegation_ledger.reserve(
+        # session 树账的委派接纳（`#318`）：**跨 run 聚合**的那一格（`02 §5.1`：
+        # SessionBudget 的 delegations 计整棵会话树被接纳的 delegate 调用，默认 8；
+        # `10 §5.1`：第 9 次在子 Agent 执行前被拒）。原子事务，与兄弟串行化。
+        # 树 reserve 随后被拒（单棵 delegating run 的钉死上限更紧）⇒ 退回这一格，
+        # 两个作用域的账各自准确。
+        budget_key = self._root_session_id or self._parent_session_id or tree_id
+        session_reservation = await self._delegation_ledger.consume_session_delegation(
+            budget_key, root_session_id=budget_key,
+            max_delegations=min(max_delegations, self._max_delegations),
+        )
+        if not session_reservation.accepted:
+            return session_reservation
+        reservation = await self._delegation_ledger.reserve(
             tree_id, root_session_id=self._root_session_id or self._parent_session_id or tree_id,
             max_delegations=min(max_delegations, self._max_delegations),
             max_depth=self._root_max_depth,
+        )
+        if not reservation.accepted:
+            await self._delegation_ledger.refund_session_delegation(budget_key)
+        return reservation
+
+    def session_budget_port(self) -> SessionBudgetPort | None:
+        """共享 session 账的端口（给 child runtime；`10 §5.1` 同一份树账）。
+
+        行不存在时（根还没跑过任何一步就把 provider 拿去 spawn——理论上到不了，
+        DelegateTool 的接纳先于本方法）`ensure` 会以**空声明**建行：全部无 ceiling、
+        `max_delegations` 等首用委派时钉。未激活（单测直构 provider）⇒ `None`，
+        child 回到无 session 账的旧行为。
+        """
+        if not self._activated:
+            return None
+        root = self._root_session_id or self._parent_session_id
+        if not root:
+            return None
+        return SessionBudgetHandle(
+            ledger=self._delegation_ledger, budget_key=root,
+            root_session_id=root, limits=SessionLimits(),
         )
 
     async def observe_delegation_result(
@@ -447,6 +482,9 @@ class InProcessSubagentProvider:
             spec,
             source_registry=scope.registry,
             grantable=grantable_names(scope, allowance),
+            # `#318`：child 消费**同一份** session 树账（根 / 子 / 孙一个 owner）；
+            # None（未激活）= 旧行为。
+            session_budget=self.session_budget_port(),
         )
         # child workspace = 父的同一 canonical owner（spec §9：coding 的改动
         # review 直接可见）；先 durable bind，保证 child Session 一旦落盘，恢复
@@ -482,7 +520,15 @@ class InProcessSubagentProvider:
         with bind_tree_id(tree_id), bind_scope(SpawnScope(
             registry=child_runtime.registry, remaining=allowance,
         )):
-            run_result: AgentRunResult = await child_runtime.run(child_session, full_task)
+            # 流式驱动（`run_stream` + result_holder 回传与 `run()` 同一终态结果）：
+            # child 与主 run（RunManager）同走流式——某些 OpenAI 兼容网关对带工具的
+            # 非流式请求返回 choices=null 的畸形响应（cline 实测，2026-09-28）。
+            holder: list[AgentRunResult] = []
+            async for _ in child_runtime.run_stream(
+                child_session, full_task, result_holder=holder,
+            ):
+                pass
+            run_result = holder[-1]
 
         status = ("completed" if run_result.status == "completed" else "failed")
         logger.info(

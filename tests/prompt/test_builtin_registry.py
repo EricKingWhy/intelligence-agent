@@ -66,24 +66,30 @@ def test_default_registry_is_zero_config_baseline() -> None:
 
 
 def test_declared_variables_are_exactly_the_six_used() -> None:
-    """T4 `tail_text`；T7 快照三值（BUG-013 瘦身后 model/tools 已删）；T8 两值。
+    """T4 `tail_text`；T7 快照三值（BUG-013 瘦身后 model/tools 已删）；T8 两值；T9 两值。
 
     断言**精确集合**而不是 `"tail_text" in ...`：多声明一个没人用的变量说明
     `_DECLARED_VARIABLES` 被写脏了，值得红。BUG-013 删除快照的 model/tools 后，
     也不得残留这两个声明（防回归复活）。
     """
     assert build_registry().declared_variables() == frozenset(
-        {"tail_text", "cwd", "os", "date", "tool_name", "consecutive_failures"}
+        {
+            "tail_text", "cwd", "os", "date", "tool_name", "consecutive_failures",
+            # T9 `corrective:stuck_pattern`：说的是"哪个模式、到第几次"（`#317`）
+            "pattern_label", "pattern_count",
+        }
     )
 
 
 def test_declared_scopes_covers_every_non_wildcard_scope() -> None:
-    """自检 scope 集 = 注册表里所有非 `*` 的 scope（T4 `aux:*`，T7 快照，T8 框架/纠偏）。"""
+    """自检 scope 集 = 注册表里所有非 `*` 的 scope（T4 `aux:*`，T7 快照，T8 框架/纠偏，T9 stuck）。"""
     assert _declared_scopes(build_registry()) == [
         "aux:compaction",
         "aux:fork_tail",
         "aux:memory_extraction",
+        "corrective:stuck_pattern",
         "corrective:tool_failure_guard",
+        "frame:context_pressure",
         "frame:recovery_skipped",
         "frame:untrusted_knowledge",
         "frame:untrusted_websearch",

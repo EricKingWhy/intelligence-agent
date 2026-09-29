@@ -63,6 +63,12 @@ class TestSessionEventDTO:
             "artifact/created",
             "artifact/externalized",
             "context/compacted",
+            # W-04 (#348)：摘要尝试失败的任务可见状态（每次尝试一条，载荷有界；
+            # 不投影成消息——derive 的投影集合不收它）。
+            "context/compaction_failed",
+            # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
+            # 硬校验在 session/plan.py）。
+            "task/plan_updated",
             "memory/degraded",
             "tool/failure-guard",
             "model/fallback",
@@ -100,6 +106,10 @@ class TestSessionEventDTO:
             # `model_requests` / `total_tokens` / `cost_usd` 三个 counter 的**唯一**
             # 计数点——`model/completed` 只数被接纳进 loop 的决策（= agent_turns）。
             "model/request",
+            # #317 T9：五模式 stuck 检测的结构化信号（level=replan 恰一次 /
+            # level=paused 收口）。① 的 replan 复用既有 tool/failure-guard 形状，
+            # 所以这一条只在 ②–⑤ 与所有暂停上出现（ADR-0048 D2/D5）。
+            "guard/stuck",
         }
         assert EVENT_TYPES == expected
 

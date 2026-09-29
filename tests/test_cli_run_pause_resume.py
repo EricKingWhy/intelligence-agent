@@ -133,6 +133,54 @@ def test_resume_hint_gives_absolute_ceiling_placeholder():
     assert "绝对" in text and "不是增量" in text
 
 
+#: `run/paused(reason=stuck)` 的形状（`reason` / `stuck` / `resume_requirements` 三格
+#: 同源，见 `agent/runtime.py` 的暂停臂）。
+_STUCK_PAUSE_DATA: dict = {
+    **_PAUSE_DATA,
+    "reason": "stuck",
+    "trigger_dimension": "stuck.tool_failure_loop",
+    "resume_requirements": ["relevant_steer", "environment_change"],
+}
+
+
+def test_resume_hint_for_a_stuck_pause_does_not_offer_a_ceiling():
+    """stuck 暂停的提示给 `--basis`，**不给** ceiling 开关（`#317` 三轮审查 P3）。
+
+    `trigger_dimension` 是模式名，按维度回落就会给出 `--run-turns-total N`——一条恒被 409
+    挡死的假指令（stuck 不接受 `budget_increase`），而且与同一屏上的 `resume requirements`
+    行自相矛盾。依据取事件自己列的那几条，CLI 不再算第二份。
+    """
+    text = resume_hint("sess-42", data=_STUCK_PAUSE_DATA)
+    # 印出来那条要**今天真能走通**：`relevant_steer` 虽是清单里常有的一条，但暂停后登记
+    # steer 的入口不存在（残余 6 / 9）⇒ 不能拿它当命令行里的 `--basis`（四轮审查 P3）。
+    assert "--basis environment_change" in text
+    assert "--basis relevant_steer" not in text
+    assert "--expected-version 1" in text
+    assert "--run-turns-total" not in text, "stuck 暂停抬不动 ceiling"
+    assert "relevant_steer" in text, "可用依据要全列出来（含那条入口取不到的）"
+    assert "不是增量" not in text
+
+
+def test_resume_hint_for_a_stuck_pause_whose_only_basis_is_a_steer_says_so():
+    """只剩 `relevant_steer`（子 run 形状）⇒ 不给 `--basis`，直说入口今天不存在。"""
+    text = resume_hint(
+        "sess-42",
+        data={**_STUCK_PAUSE_DATA, "resume_requirements": ["relevant_steer"]},
+    )
+    assert "--basis" not in text
+    assert "没有可执行的恢复依据" in text
+    assert "6 / 9" in text, "要点名那条入口缺口，而不是含糊说'不可用'"
+
+
+def test_resume_hint_for_a_stuck_pause_without_any_basis_is_honest_about_its_shape():
+    """`resume_requirements` 缺失 / 为空 ⇒ 说清是**载荷没列**（外来或手改过的事件）。"""
+    text = resume_hint(
+        "sess-42", data={**_STUCK_PAUSE_DATA, "resume_requirements": []},
+    )
+    assert "--basis" not in text
+    assert "没有列出任何可用依据" in text
+
+
 def test_resume_block_reports_version_step_and_carried_consumed():
     text = render_resume_block({
         "resume_basis": "budget_increase",

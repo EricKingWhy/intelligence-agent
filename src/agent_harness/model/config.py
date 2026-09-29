@@ -53,6 +53,15 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "model_base_url": "https://api.senseaudio.cn/v1",
         "model_name": "",
     },
+    # Cline Provider（cline.bot 官方 API；OpenAI Chat Completions 兼容，
+    # `POST {base}/chat/completions` 实证于 VS Marketplace BYOK 文档与多家
+    # provider 目录）。无默认模型——模型随 Cline 侧账号选择，MODEL_NAME 必填。
+    # 键名 "Cline" 按该供应商品牌大小写：MODEL_PROVIDER 的匹配是逐字精确
+    # （_single_from 的 `provider not in PROVIDER_PRESETS`），不做大小写归一。
+    "Cline": {
+        "model_base_url": "https://api.cline.bot/api/v1",
+        "model_name": "",
+    },
 }
 
 #: 能力位字段清单（preset 与 catalog 共用）。值类型固定，便于解析校验。

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -69,6 +70,53 @@ def amend_with_session_model(
         )
         return amend
     return replace(amend or AmendOptions(), model=model_id)
+
+
+def restore_policy_inputs(
+    amend: AmendOptions | None,
+    recorded: Mapping[str, Any] | None,
+    events: list[SessionEvent],
+) -> AmendOptions | None:
+    """同 run 恢复：请求没点名的策略面沿用**暂停时生效**的值（ADR-0048 D6/D8）。
+
+    优先级：**请求显式声明 > 会话切换过的模型 > 暂停快照**。模型这一维要单独小心：
+    `amend_with_session_model` 只在 `amend.model is None` 时才补会话模型，所以只有会话里
+    **没有**切换记录时这里才补快照里的模型——否则会把用户暂停之后的切换盖掉，而那一跳
+    恰恰是一条合法的策略依据（调用点因此在 `amend_with_session_model` **之前**还原）。
+
+    **快照模型不做 catalog 回落**（与 `amend_with_session_model` 的 `#137` 口径不同）：
+    回落会静默换掉策略面、把"没变"算成"变了"。快照里的模型真的不可用了（配置变更），
+    装配层会响亮失败，客户端显式声明 `model` 即可恢复。
+
+    `recorded` 为 `None`（非 stuck 暂停 / 载荷里没有逐维值 / 逐维值与摘要对不上）⇒ 原样
+    返回，行为不变；逐维值全为 `None`（那次执行就是默认策略）⇒ 也原样返回，不凭空造一个
+    amend 出来。
+    """
+    if not recorded:
+        return amend
+    base = amend or AmendOptions()
+    model = base.model
+    if model is None and current_model_selection(events)[1] is None:
+        recorded_model = recorded.get("model")
+        if isinstance(recorded_model, str):
+            model = recorded_model
+    restored = replace(
+        base,
+        model=model,
+        agent_profile=(
+            base.agent_profile if base.agent_profile is not None
+            else recorded.get("agent_profile")
+        ),
+        reasoning_effort=(
+            base.reasoning_effort if base.reasoning_effort is not None
+            else recorded.get("reasoning_effort")
+        ),
+        context_providers=(
+            base.context_providers if base.context_providers is not None
+            else recorded.get("context_providers")
+        ),
+    )
+    return restored if restored != base else amend
 
 
 def default_model_id(settings: Settings) -> str:

@@ -1,0 +1,516 @@
+{
+  "schema_version": 1,
+  "scenario_id": "long-task-past-legacy-turn-limit",
+  "scenario_version": 3,
+  "verdict": "PASS",
+  "reason": "",
+  "missing_preconditions": [],
+  "created_at": "2026-09-28T02:37:10.069+00:00",
+  "sha": "56543f88d362b1cc936a0e0a8af0c7ec0a93f418",
+  "tree": "8cdc57b5206cec4fa4a919cb3dde87fec91bf43b",
+  "worktree": {
+    "head_sha": "56543f88d362b1cc936a0e0a8af0c7ec0a93f418",
+    "tree": "8cdc57b5206cec4fa4a919cb3dde87fec91bf43b",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "senseaudio",
+    "model_name": "glm-5.3-flash",
+    "base_url_host": "api.senseaudio.cn",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "mimo",
+    "fallback_model_name": "mimo-v2.6-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "b06eb60bf926880b",
+      "0442b5cbf78249e8",
+      "4d68f26aa4fe9f44"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-28T02:36:15.408+00:00",
+      "ended_at": "2026-09-28T02:36:34.995+00:00",
+      "status": "PASS",
+      "duration_ms": 19586,
+      "session_id": "long-task-past-legacy-turn-limit-a1-39ffb7c6",
+      "run_id": "f0f08fc0-809f-4a7d-afc3-7b07970e97df",
+      "run_status": "completed",
+      "steps": 15,
+      "event_count": 75,
+      "tool_calls": [
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260928T023615-56543f88d362-long-task-past-legacy-turn-limit/attempt-1.jsonl",
+      "events_sha256": "954927b8bfe5e5c471fd7dede712b5eaaa8cc2954344087050a2abebcbf45265",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "legacy_turn_limit_exceeded",
+          "ok": true,
+          "detail": "steps=15（旧上限 10）"
+        },
+        {
+          "name": "legacy_fuse_not_tripped",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "local_fuse_from_deployment",
+          "ok": true,
+          "detail": "max_agent_turns=500 source=deployment"
+        },
+        {
+          "name": "chain_advanced_all_steps",
+          "ok": true,
+          "detail": "chain-steps.txt=12，期望 12"
+        },
+        {
+          "name": "done_token_matches_final",
+          "ok": true,
+          "detail": "done.txt 与 chain.txt 比对（缺失或不等即不通过）"
+        },
+        {
+          "name": "model_decisions_exceeded_legacy_limit",
+          "ok": true,
+          "detail": "model/completed（= agent_turns）=15（旧上限 10）"
+        },
+        {
+          "name": "budget.one_request_per_decision",
+          "ok": true,
+          "detail": "轨迹重算：agent_turns=15 model_requests=15（角色 primary:15，失败 0） total_tokens=44659（自报 15/15 格） cost_usd=未知（自报 0/15 格）（直路：requests == turns 且无失败请求）"
+        },
+        {
+          "name": "budget.terminal_tokens",
+          "ok": true,
+          "detail": "run/completed.usage_total.total_tokens=44659；轨迹 44659（Provider 自报累加，不可得不得记 0）"
+        },
+        {
+          "name": "budget.terminal_cost",
+          "ok": true,
+          "detail": "run/completed.cost_usd=未知；轨迹 未知（只认 Provider 归属的读数）"
+        },
+        {
+          "name": "tool_work_observed",
+          "ok": true,
+          "detail": "bash=13 write=1（共 14 次）"
+        },
+        {
+          "name": "production_tools_used",
+          "ok": true,
+          "detail": "实现=bash→agent_harness.tools.bash.BashTool, write→agent_harness.tools.write.WriteTool（判据：类路径落在产品核心 `agent_harness.*`）；带接纳点增量的 tool/result=14/14（畸形=0 名字不一致=0）"
+        },
+        {
+          "name": "tool_calls_counted_once",
+          "ok": true,
+          "detail": "逻辑调用=14（tool/call=14 − 准入前被拒=0）；per-tool 表={'bash': 13, 'write': 1}（每个被接纳的规范化调用记一次：表 = 轨迹增量的和）"
+        },
+        {
+          "name": "tool_attempts_counted_separately",
+          "ok": true,
+          "detail": "tool_calls=14 tool_attempts=14；per-tool 尝试表={'bash': 13, 'write': 1}（两个独立计数，不是别名：本 run 无 retry ⇒ 相等；retry 只会让 attempts 更大）"
+        },
+        {
+          "name": "tool_quota_explicit_and_scoped",
+          "ok": true,
+          "detail": "请求的 run.limits.tool_call_limits={'bash': 24}；落盘 run/started 的 ceiling={'bash': 24}；bash 已接纳=13（剩余=11，未撞线）；write 未配 ceiling 但已接纳=1（未配 ≠ 不计数、也不给低默认）"
+        },
+        {
+          "name": "tool_accounting_replay_stable",
+          "ok": true,
+          "detail": "复读账本 == 首读账本（含 per-tool 两表与 tool_call_limits）：tool_calls=14 tool_attempts=14（重放不重算配额，也不漂移）"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）75 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "12 步链式执行全部完成，最终串为 d84ece67，已写入 done.txt。",
+      "workspace_id": "b06eb60bf926880b",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-28T02:36:34.995+00:00",
+      "ended_at": "2026-09-28T02:36:54.448+00:00",
+      "status": "PASS",
+      "duration_ms": 19452,
+      "session_id": "long-task-past-legacy-turn-limit-a2-3a4d2f7d",
+      "run_id": "657e0637-938a-4bcb-83cb-18ad4533f67e",
+      "run_status": "completed",
+      "steps": 15,
+      "event_count": 75,
+      "tool_calls": [
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260928T023615-56543f88d362-long-task-past-legacy-turn-limit/attempt-2.jsonl",
+      "events_sha256": "426178c0375e60bac678d4d9100c35ab3a015005ab71955df96e1e98dd1f7cc5",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "legacy_turn_limit_exceeded",
+          "ok": true,
+          "detail": "steps=15（旧上限 10）"
+        },
+        {
+          "name": "legacy_fuse_not_tripped",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "local_fuse_from_deployment",
+          "ok": true,
+          "detail": "max_agent_turns=500 source=deployment"
+        },
+        {
+          "name": "chain_advanced_all_steps",
+          "ok": true,
+          "detail": "chain-steps.txt=12，期望 12"
+        },
+        {
+          "name": "done_token_matches_final",
+          "ok": true,
+          "detail": "done.txt 与 chain.txt 比对（缺失或不等即不通过）"
+        },
+        {
+          "name": "model_decisions_exceeded_legacy_limit",
+          "ok": true,
+          "detail": "model/completed（= agent_turns）=15（旧上限 10）"
+        },
+        {
+          "name": "budget.one_request_per_decision",
+          "ok": true,
+          "detail": "轨迹重算：agent_turns=15 model_requests=15（角色 primary:15，失败 0） total_tokens=44576（自报 15/15 格） cost_usd=未知（自报 0/15 格）（直路：requests == turns 且无失败请求）"
+        },
+        {
+          "name": "budget.terminal_tokens",
+          "ok": true,
+          "detail": "run/completed.usage_total.total_tokens=44576；轨迹 44576（Provider 自报累加，不可得不得记 0）"
+        },
+        {
+          "name": "budget.terminal_cost",
+          "ok": true,
+          "detail": "run/completed.cost_usd=未知；轨迹 未知（只认 Provider 归属的读数）"
+        },
+        {
+          "name": "tool_work_observed",
+          "ok": true,
+          "detail": "bash=13 write=1（共 14 次）"
+        },
+        {
+          "name": "production_tools_used",
+          "ok": true,
+          "detail": "实现=bash→agent_harness.tools.bash.BashTool, write→agent_harness.tools.write.WriteTool（判据：类路径落在产品核心 `agent_harness.*`）；带接纳点增量的 tool/result=14/14（畸形=0 名字不一致=0）"
+        },
+        {
+          "name": "tool_calls_counted_once",
+          "ok": true,
+          "detail": "逻辑调用=14（tool/call=14 − 准入前被拒=0）；per-tool 表={'bash': 13, 'write': 1}（每个被接纳的规范化调用记一次：表 = 轨迹增量的和）"
+        },
+        {
+          "name": "tool_attempts_counted_separately",
+          "ok": true,
+          "detail": "tool_calls=14 tool_attempts=14；per-tool 尝试表={'bash': 13, 'write': 1}（两个独立计数，不是别名：本 run 无 retry ⇒ 相等；retry 只会让 attempts 更大）"
+        },
+        {
+          "name": "tool_quota_explicit_and_scoped",
+          "ok": true,
+          "detail": "请求的 run.limits.tool_call_limits={'bash': 24}；落盘 run/started 的 ceiling={'bash': 24}；bash 已接纳=13（剩余=11，未撞线）；write 未配 ceiling 但已接纳=1（未配 ≠ 不计数、也不给低默认）"
+        },
+        {
+          "name": "tool_accounting_replay_stable",
+          "ok": true,
+          "detail": "复读账本 == 首读账本（含 per-tool 两表与 tool_call_limits）：tool_calls=14 tool_attempts=14（重放不重算配额，也不漂移）"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）75 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "12 步链式执行全部完成，最终串 725574ea 已写入 done.txt。",
+      "workspace_id": "0442b5cbf78249e8",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-28T02:36:54.448+00:00",
+      "ended_at": "2026-09-28T02:37:09.925+00:00",
+      "status": "PASS",
+      "duration_ms": 15476,
+      "session_id": "long-task-past-legacy-turn-limit-a3-e7584a4f",
+      "run_id": "18fdb4fd-ba6c-4382-8f84-c15f645d9a7f",
+      "run_status": "completed",
+      "steps": 15,
+      "event_count": 75,
+      "tool_calls": [
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "write"
+      ],
+      "events_ref": "docs/live_gate/20260928T023615-56543f88d362-long-task-past-legacy-turn-limit/attempt-3.jsonl",
+      "events_sha256": "9d46d96c18819e27d6e8b96bff1635af704111c505cf1c562db769b13020db02",
+      "assertions": [
+        {
+          "name": "run_completed",
+          "ok": true,
+          "detail": "run_status=completed"
+        },
+        {
+          "name": "legacy_turn_limit_exceeded",
+          "ok": true,
+          "detail": "steps=15（旧上限 10）"
+        },
+        {
+          "name": "legacy_fuse_not_tripped",
+          "ok": true,
+          "detail": "轨迹里没有 max_steps_exceeded"
+        },
+        {
+          "name": "local_fuse_from_deployment",
+          "ok": true,
+          "detail": "max_agent_turns=500 source=deployment"
+        },
+        {
+          "name": "chain_advanced_all_steps",
+          "ok": true,
+          "detail": "chain-steps.txt=12，期望 12"
+        },
+        {
+          "name": "done_token_matches_final",
+          "ok": true,
+          "detail": "done.txt 与 chain.txt 比对（缺失或不等即不通过）"
+        },
+        {
+          "name": "model_decisions_exceeded_legacy_limit",
+          "ok": true,
+          "detail": "model/completed（= agent_turns）=15（旧上限 10）"
+        },
+        {
+          "name": "budget.one_request_per_decision",
+          "ok": true,
+          "detail": "轨迹重算：agent_turns=15 model_requests=15（角色 primary:15，失败 0） total_tokens=44672（自报 15/15 格） cost_usd=未知（自报 0/15 格）（直路：requests == turns 且无失败请求）"
+        },
+        {
+          "name": "budget.terminal_tokens",
+          "ok": true,
+          "detail": "run/completed.usage_total.total_tokens=44672；轨迹 44672（Provider 自报累加，不可得不得记 0）"
+        },
+        {
+          "name": "budget.terminal_cost",
+          "ok": true,
+          "detail": "run/completed.cost_usd=未知；轨迹 未知（只认 Provider 归属的读数）"
+        },
+        {
+          "name": "tool_work_observed",
+          "ok": true,
+          "detail": "bash=13 write=1（共 14 次）"
+        },
+        {
+          "name": "production_tools_used",
+          "ok": true,
+          "detail": "实现=bash→agent_harness.tools.bash.BashTool, write→agent_harness.tools.write.WriteTool（判据：类路径落在产品核心 `agent_harness.*`）；带接纳点增量的 tool/result=14/14（畸形=0 名字不一致=0）"
+        },
+        {
+          "name": "tool_calls_counted_once",
+          "ok": true,
+          "detail": "逻辑调用=14（tool/call=14 − 准入前被拒=0）；per-tool 表={'bash': 13, 'write': 1}（每个被接纳的规范化调用记一次：表 = 轨迹增量的和）"
+        },
+        {
+          "name": "tool_attempts_counted_separately",
+          "ok": true,
+          "detail": "tool_calls=14 tool_attempts=14；per-tool 尝试表={'bash': 13, 'write': 1}（两个独立计数，不是别名：本 run 无 retry ⇒ 相等；retry 只会让 attempts 更大）"
+        },
+        {
+          "name": "tool_quota_explicit_and_scoped",
+          "ok": true,
+          "detail": "请求的 run.limits.tool_call_limits={'bash': 24}；落盘 run/started 的 ceiling={'bash': 24}；bash 已接纳=13（剩余=11，未撞线）；write 未配 ceiling 但已接纳=1（未配 ≠ 不计数、也不给低默认）"
+        },
+        {
+          "name": "tool_accounting_replay_stable",
+          "ok": true,
+          "detail": "复读账本 == 首读账本（含 per-tool 两表与 tool_call_limits）：tool_calls=14 tool_attempts=14（重放不重算配额，也不漂移）"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "独立复读（新 store 实例）75 条事件与首读逐条同序；同序 = 轨迹在判定时已静止，证据记的事件数就是 runner 将复制的那份（不同序 ⇒ 读盘后仍被追加，属取证缺陷）"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "12 步链式执行全部完成，最终串 e88465f4 已写入 done.txt。",
+      "workspace_id": "4d68f26aa4fe9f44",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260928T023615-56543f88d362-long-task-past-legacy-turn-limit/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260928T023615-56543f88d362-long-task-past-legacy-turn-limit/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260928T023615-56543f88d362-long-task-past-legacy-turn-limit/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "long-task-past-legacy-turn-limit"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的六条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`、完成闸门 `#316`、重复工具失败 ⇒ stuck 暂停 `#317`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

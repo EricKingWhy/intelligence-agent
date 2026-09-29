@@ -1,7 +1,9 @@
 """#263（#247 子票）— AgentRuntime 的 run/run_stream 事件序列基线（golden）。
 
 **问题**（票面）：`_drive` 的终结分支散在六处（context 超限 / completed /
-local fuse（`#312` 起改走非终态 `run/paused`）/ 同错熔断硬触发 / 取消 / 顶层异常），
+local fuse（`#312` 起改走非终态 `run/paused`）/ 同错熔断硬触发（`#317` T9 起同样
+改走非终态 `run/paused`：硬熔断终结臂已从生产路径移除，ADR-0048 D5）/ 取消 /
+顶层异常），
 每一处只被各自的窄用例零散覆盖
 （断言"这条事件在/不在"），**没有一条"整段序列长什么样、按什么顺序"的可执行基线**。
 #264 要把终结臂从 `_drive` 里提出来，先得有能在提取前后逐字比对的事实。
@@ -56,13 +58,14 @@ local fuse（`#312` 起改走非终态 `run/paused`）/ 同错熔断硬触发 / 
 `model/failed(2)`（异常臂与取消臂的 `_TerminalContext`）、`tool/call(2)`、`run/failed(1)`/`(None)`。
 #264 若"顺手统一"这些形状或搬表达式时漏掉 `step_base`，基线必须变红。
 
-**死参数（#264 必须先懂这条）**：`hard_guard` / `provider_error` 两个臂的
+**死参数（#264 必须先懂这条）**：`provider_error` 臂的
 `failure_terminal(steps=step_base + steps)` 是**死参数**——`_RunFinalizer.failure_terminal`
 （`runtime.py:246-271`）不转发 `steps`，`Session.end_run`（`session.py:424-436`）也没有
-`step_id` 形参 ⇒ 这两臂的终态 `step_id` **恒为 None**，改或删那个实参**不可观测**（本文件的
+`step_id` 形参 ⇒ 该臂的终态 `step_id` **恒为 None**，改或删那个实参**不可观测**（本文件的
 `(run/failed, None)` 对只钉"它就是 None"）。反之若让 `steps` 真的生效（终态带上 step_id），
-那是行为变更，这条基线会红。（`#312` T4 之前这张表里还有 `max_steps` 臂，同属这一族；
-它现在走**非终态**的 `run/paused`，收口事件显式带 `step_base + steps`。）
+那是行为变更，这条基线会红。（`#312` T4 之前这张表里还有 `max_steps` 臂、`#317` T9 之前
+还有 `hard_guard` 臂，同属这一族；两者现在都走**非终态**的 `run/paused`，收口事件显式带
+`step_base + steps`。）
 
 **接线是冻结的**：默认场景用 `ToolExecutor(registry)`，即**无 Ledger** ⇒
 `tracks_operations=False` ⇒ `model/completed` 在工具批次之前立即落盘。生产接线
@@ -108,13 +111,10 @@ from agent_harness.agent.run_budget import (
     REASON_BUDGET_EXHAUSTED,
     TRIGGER_LOCAL_TURNS,
 )
-from agent_harness.agent.types import (
-    STATUS_CONTEXT_WINDOW_EXCEEDED,
-    STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-)
 from agent_harness.context.compactor import ContextWindowExceededError
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
 from agent_harness.session import (
+    GUARD_STUCK,
     MODEL_COMPLETED,
     MODEL_DELTA,
     MODEL_FAILED,
@@ -591,19 +591,20 @@ def _scenarios() -> tuple[Scenario, ...]:
         ),
         Scenario(
             name="context_exceeded",
-            note="投影阶段超限：模型从未被调用，故流里一个 model/* 都没有；"
-                 "该臂在 `_write_memories` 之前 return ⇒ 记忆提交 0 次",
+            note="投影阶段超限（W-04 #348 起改走暂停生命周期）：模型从未被调用，"
+                 "故流里一个 model/* 都没有；closeout 里的二次 build 同样在模型调用"
+                 "之前抛出 ⇒ 无 closeout 请求，确定性 continuation；run 未终结 ⇒ "
+                 "不写记忆（paused 不在形成白名单）",
             build=lambda w: _runtime(_simple_model(),
                                      context_builder=_ExplodingContextBuilder(),
                                      memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, RUN_FAILED),
-            terminal=RUN_FAILED,
-            terminal_payload={"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": PROSE,
-                              "trace_id": None, "trace_url": None},
-            terminal_step_id=0,  # 该臂显式写 step_base + steps（其余臂走 end_run ⇒ None）
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (RUN_FAILED, 1)),
+            durable=(USER_MESSAGE, RUN_STARTED, RUN_PAUSED),
+            emitted=(USER_MESSAGE, RUN_STARTED, RUN_PAUSED),
+            terminal=None,
+            terminal_payload={},
+            terminal_step_id=0,  # 暂停臂显式写 envelope_step（run/paused 不在 RUN_TERMINAL_TYPES）
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (RUN_PAUSED, 1)),
         ),
         Scenario(
             name="provider_error",
@@ -621,8 +622,16 @@ def _scenarios() -> tuple[Scenario, ...]:
                    (MODEL_FAILED, 2), (RUN_FAILED, None)),
         ),
         Scenario(
-            name="hard_guard",
-            note="同指纹连续失败：第 1 次 soft（注入纠正语），第 2 次 hard（强制终结）",
+            name="stuck_pause",
+            note="同指纹连续失败（`#317` T9 起不再有硬熔断终结臂）：第 1 次首达阈值 "
+                 "⇒ 已有的 soft 形状（`tool/failure-guard(level=soft)` + 既有纠正语，"
+                 "ADR-0048 D2 复用冻结形状），第 2 次再达阈值 ⇒ 结构化 "
+                 "`guard/stuck(level=paused)` + **非终态** `run/paused`。"
+                 "压到 soft_threshold=1 就能在一轮里看完"
+                 "「恰好一次纠正 → 暂停」的全序列；`hard_threshold` 已不再被生产路径"
+                 "消费（常量只为老会话保留），这里仍显式传 1 = 那条已死的旋钮不再改变"
+                 "任何可观察事实。收口前那次 `model/request` 是 closeout（剧本那轮不是"
+                 "continuation JSON ⇒ closeout_source=deterministic）",
             build=lambda w: _runtime(
                 ScriptedModel([_tool_call(1, {"text": "same"}), _tool_call(2, {"text": "same"}),
                                AIMessage(content="done")]),
@@ -634,23 +643,21 @@ def _scenarios() -> tuple[Scenario, ...]:
             durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
                      TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE,
                      MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                     TOOL_FAILURE_GUARD, RUN_FAILED),
+                     GUARD_STUCK, MODEL_REQUEST, RUN_PAUSED),
             emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST,
                      MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD,
                      USER_MESSAGE, MODEL_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
-                     TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, RUN_FAILED),
-            terminal=RUN_FAILED,
-            terminal_payload={"reason": STATUS_IDENTICAL_TOOL_FAILURE_LOOP,
-                              "trace_id": None, "trace_url": None},
+                     TOOL_CALL, TOOL_RESULT, GUARD_STUCK, MODEL_REQUEST, RUN_PAUSED),
+            terminal=None,
+            terminal_payload={},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (MODEL_REQUEST, 2),
                    (MODEL_COMPLETED, 2), (TOOL_CALL, 2), (TOOL_RESULT, 2),
                    (TOOL_FAILURE_GUARD, 2), (USER_MESSAGE, 2), (MODEL_REQUEST, 3),
                    (MODEL_COMPLETED, 3), (TOOL_CALL, 3), (TOOL_RESULT, 3),
-                   (TOOL_FAILURE_GUARD, 3), (RUN_FAILED, None)),
-            memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST, MODEL_COMPLETED,
-                             TOOL_CALL, TOOL_RESULT, TOOL_FAILURE_GUARD, USER_MESSAGE,
-                             MODEL_REQUEST, MODEL_COMPLETED, TOOL_CALL, TOOL_RESULT,
-                             TOOL_FAILURE_GUARD, RUN_FAILED),),
+                   (GUARD_STUCK, 3), (MODEL_REQUEST, 3), (RUN_PAUSED, 3)),
+            # 暂停**不是**终态 ⇒ 不触发记忆形成（`memory/v2/eligibility.py` 的白名单里
+            # 没有 paused）；"0 次提交"是事实，不是没测。
+            memory_submits=(),
         ),
         Scenario(
             name="checkpoint_error",
@@ -1122,11 +1129,17 @@ async def test_checkpoint_failure_does_not_change_the_sequence(tmp_path: Any) ->
 
 
 @pytest.mark.asyncio
-async def test_hard_guard_levels_are_soft_then_hard(tmp_path: Any) -> None:
-    """同错熔断的两次触发必须如实标软/硬：软触发注入纠正语，硬触发强制终结。"""
-    _scenario, _emitted, session = await _run("hard_guard", tmp_path)
-    levels = [e.data["level"] for e in session.events if e.type == TOOL_FAILURE_GUARD]
-    assert levels == ["soft", "hard"]
+async def test_stuck_pause_levels_are_soft_then_paused(tmp_path: Any) -> None:
+    """同错熔断的两级如实标：首达阈值 soft（注入纠正语），再达阈值 paused（收口）。
+
+    `#317` T9 起硬熔断终结臂已从生产路径移除（ADR-0048 D5）——两条事件的**类型都
+    不同**（`tool/failure-guard` vs `guard/stuck`），不再是一条序列上的两个 level。
+    """
+    _scenario, _emitted, session = await _run("stuck_pause", tmp_path)
+    soft = [e.data["level"] for e in session.events if e.type == TOOL_FAILURE_GUARD]
+    paused = [e.data["level"] for e in session.events if e.type == GUARD_STUCK]
+    assert soft == ["soft"]
+    assert paused == ["paused"]
 
 
 @pytest.mark.asyncio
@@ -1212,16 +1225,15 @@ async def test_memory_writeback_submits_the_declared_events(name: str, tmp_path:
 # ---------------------------------------------------------------------------
 
 # 只在"已跑完一轮"的 session 上才分岔的臂。
-# 前三条显式写 `step_base + steps` ⇒ 第二轮必须是 1（不是 0）；
+# 前两条显式写 `step_base + steps` ⇒ 第二轮必须是 1（不是 0）；
 # 后两条走 `end_run`，其 `steps=` 是死参数（见文件头"死参数"段）⇒ 恒 None，
 # 这一半钉的是"它**仍然**是 None"：哪天那参数真的生效（= 行为变更），基线必红。
-# `local_fuse_pause` 不在本表：它的收口事件是**非终态**的 `run/paused`（#312 T4），
-# 落在下面 `_TURN2_ENVELOPE_ARMS` 的"全事件信封"覆盖里（含它自己的 step_id）。
+# `local_fuse_pause` / `context_exceeded` 不在本表：它们的收口事件是**非终态**的
+# `run/paused`（#312 T4；#348 起后者也走暂停生命周期），落在下面
+# `_TURN2_ENVELOPE_ARMS` 的"全事件信封"覆盖里（含它自己的 step_id）。
 _TURN2_TERMINAL_ARMS = (
-    ("context_exceeded", 1),
     ("generator_exit_post_run", 1),
     ("cancel_while_blocked", 1),
-    ("hard_guard", None),
     ("provider_error", None),
 )
 

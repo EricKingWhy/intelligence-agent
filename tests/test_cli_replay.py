@@ -16,6 +16,7 @@ from agent_harness.session import Session
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     AGENT_DELEGATION_STARTED,
+    GUARD_STUCK,
     MODEL_COMPLETED,
     MODEL_FAILED,
     RUN_FAILED,
@@ -86,6 +87,26 @@ def test_render_replay_event_delegation_and_failures(tmp_path: Path) -> None:
     assert "[run 失败]" in joined and "identical_tool_failure_loop" in joined
     # session/started 等生命周期事件不渲染
     assert all("session/started" not in (line or "") for line in lines)
+
+
+def test_render_replay_event_stuck_guard(tmp_path: Path) -> None:
+    """`#317`：stuck 护栏的两种动作都要有行——只渲染 run/paused 会让回放看不出"纠正过"。
+
+    `guard/stuck` 不在生命周期噪音里（它是**动作**，不是过程记录）：`replan` 是
+    `run/paused.stuck.replan_count` 那一格的对账依据，`paused` 是暂停前的最后一步。
+    """
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    s = Session.start(store, session_id="st")
+    s.append(GUARD_STUCK, {"level": "replan", "pattern": "stuck.tool_failure_loop",
+                           "count": 3, "threshold": 3, "replan_count": 1})
+    s.append(GUARD_STUCK, {"level": "paused", "pattern": "stuck.tool_failure_loop",
+                           "count": 6, "threshold": 3, "replan_count": 1})
+    events = store.read_events("st")[-2:]
+
+    first, second = (render_replay_event(event) for event in events)
+    assert "[stuck]" in first and "level=replan" in first
+    assert "stuck.tool_failure_loop" in first and "count=3" in first
+    assert "[stuck]" in second and "level=paused" in second and "count=6" in second
 
 
 def test_render_replay_event_session_forked(tmp_path: Path) -> None:

@@ -10,12 +10,12 @@ import sys
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import AgentSpec
 from agent_harness.agent.runtime import AgentRuntime
-from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+from agent_harness.agent.types import STATUS_PAUSED
 from agent_harness.multiagent.provider import InProcessSubagentProvider
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.recovery import RecoveryCoordinator
@@ -23,7 +23,10 @@ from agent_harness.recovery.scan import scan_interrupted_sessions
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import Session
 from agent_harness.session.event import (
+    GUARD_STUCK,
+    RUN_FAILED,
     RUN_INTERRUPTED,
+    RUN_PAUSED,
     TOOL_FAILURE_GUARD,
     TOOL_RESULT,
 )
@@ -66,8 +69,11 @@ class _FailingModel:
     def bind_tools(self, tools, **kwargs):
         return self
 
-    async def ainvoke(self, messages, **kwargs):
+    async def astream(self, messages, **kwargs):
+        # child 走 run_stream（astream）：剧本失败必须在流式路径上抛出，
+        # 否则实测的是「未实现流式接口」的 AttributeError 而非剧本失败（审查 P2）。
         raise RuntimeError("scripted child failure")
+        yield  # pragma: no cover - 使本函数成为异步生成器
 
 
 @pytest.mark.asyncio
@@ -318,6 +324,16 @@ async def test_runtime_provider_clones_share_process_child_limit(tmp_path):
             finally:
                 self.active -= 1
 
+        async def astream(self, messages, **kwargs):
+            # child 走 run_stream（astream）：并发计数必须也挂在流式路径上。
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0.03)
+                yield AIMessageChunk(content="child complete")
+            finally:
+                self.active -= 1
+
     session_store = JsonlSessionStore(tmp_path / "sessions")
     workspace_registry = WorkspaceRegistry(root=tmp_path / "workspaces")
     model = _ConcurrentChildModel()
@@ -396,11 +412,21 @@ async def test_same_failed_delegation_across_descendants_triggers_persistent_gua
 
     result = await root.run(session, "repeat the delegated task")
 
-    assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+    # 树账本的 3/3 两级：首达 3 ⇒ 一次纠正；再达 6 ⇒ 非终态暂停
+    #（`#317` T9：硬熔断终结臂已移除，ADR-0048 D5）。
+    assert result.status == STATUS_PAUSED
     guard_events = [event.data for event in session.events if event.type == TOOL_FAILURE_GUARD]
-    assert [event["level"] for event in guard_events] == ["soft", "hard"]
+    assert [event["level"] for event in guard_events] == ["soft"]
     assert guard_events[0]["consecutive_failures"] == 3
-    assert guard_events[1]["consecutive_failures"] == 6
+    stuck_events = [event.data for event in session.events if event.type == GUARD_STUCK]
+    assert [event["level"] for event in stuck_events] == ["paused"]
+    assert stuck_events[0]["count"] == 6
+    assert stuck_events[0]["threshold"] == 3
+    assert stuck_events[0]["pattern"] == "stuck.tool_failure_loop"
+    assert [
+        event.data["reason"] for event in session.events if event.type == RUN_PAUSED
+    ] == ["stuck"]
+    assert [event for event in session.events if event.type == RUN_FAILED] == []
     persisted_results = [
         json.loads(event.data["content"])
         for event in session.events if event.type == TOOL_RESULT

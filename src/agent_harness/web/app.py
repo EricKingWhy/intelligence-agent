@@ -147,10 +147,9 @@ class _AmendValueValidators(BaseModel):
 class LocalBudgetRequest(BaseModel):
     """`budget.local` 子对象（#308）：local AgentRuntime fuse 的**请求覆盖**。
 
-    只声明**本票已实现**的作用域，且刻意 `extra="forbid"`：`budget.session`
-    （SessionBudget，`#318`）还没实现，客户端提前发它必须**响亮失败**
-    （422 "Extra inputs are not permitted"）而不是被静默忽略——"不静默截断"
-    是 ADR-0044 D1/D8 的明文要求。谁实现那个作用域，谁在这里加字段。
+    刻意 `extra="forbid"`：未知键响亮失败（422 "Extra inputs are not permitted"）
+    而不是被静默忽略——"不静默截断"是 ADR-0044 D1/D8 的明文要求
+    （`budget.session` 由 `#318` 的 `SessionBudgetRequest` 承接）。
     """
 
     model_config = {"extra": "forbid"}
@@ -214,11 +213,40 @@ class RunBudgetRequest(BaseModel):
         return self
 
 
+class SessionBudgetRequest(BaseModel):
+    """`budget.session` 子对象（`#318`）：跨 run 持久的 SessionBudget 声明。
+
+    各维与 `RunBudgetRequest` 同形同判（`11 §6.1` 的 session 作用域）：turns /
+    model_requests / total_tokens / cost_usd / deadline_at / per-tool；`max_delegations`
+    是整棵会话树的委派上限（正整数；未点名沿用域默认 8，`10 §5.1`）。可执行性 /
+    形态细则都由领域层 `session_limits_from_request` 一处判（web 层只摊平）。
+
+    `expected_version` 是**这条 durable 账行**的 CAS 版本（`03 §3.4` 的乐观锁，
+    真源 = `session_budgets.version`）。它与顶层的 `budget.expected_version`（run
+    账的 CAS）是两把锁、两个计数器：session 账跨 run 存续，所以在**新建会话以外的
+    一切入口**都可能合法出现——点名了 `budget.session.*` 的恢复/续聊必须带它
+    （缺失 422），版本不符 / ceiling 低于已消耗 / headroom 不足 409（账本单事务，
+    零副作用）。新建会话的账行必然不存在，这里带版本是矛盾请求 ⇒ 422
+    （`budget_claims` 的 `create_surface` 挡）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_agent_turns_total: int | None = Field(default=None, ge=1)
+    max_model_requests: int | None = Field(default=None, ge=1)
+    max_total_tokens: int | None = Field(default=None, ge=1)
+    max_cost_usd: Decimal | None = Field(default=None, ge=0)
+    tool_call_limits: dict[str, int] | None = None
+    deadline_at: str | None = None
+    max_delegations: int | None = Field(default=None, ge=1)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
 class BudgetRequest(BaseModel):
     """请求体里的可选 `budget` 对象（`11 §6.1` 的公开形状）。
 
-    作用域就位情况（谁实现谁加）：`local`（#308）、`run`（#312）；`session`
-    （`#318`）仍未实现 ⇒ 提前发它照样响亮 422（`extra="forbid"`）。
+    作用域就位情况（谁实现谁加）：`local`（#308）、`run`（#312）、`session`
+    （`#318`）——三个作用域全部就位，`extra="forbid"` 只挡真正的未知键。
     """
 
     model_config = {"extra": "forbid"}
@@ -226,35 +254,43 @@ class BudgetRequest(BaseModel):
     #: 预算版本（CAS，`03 §3.4`）：同 run 恢复暂停预算时**必填**（客户端必须证明自己
     #: 看到的暂停是当前的那一份），首次创建省略。它是"这次预算变更"的属性、
     #: 不是某个作用域的 ceiling，所以按 PRD §3 的冻结形状与 `local`/`run`/`session`
-    #: **平级**——别挪进 `run` 里。
+    #: **平级**——别挪进 `run` 里。session 账行的 CAS 版本**不**复用这一位：
+    #: 两把锁对应两个持久对象，见 `SessionBudgetRequest.expected_version`。
     expected_version: int | None = Field(default=None, ge=1)
     local: LocalBudgetRequest | None = None
     run: RunBudgetRequest | None = None
+    session: SessionBudgetRequest | None = None
 
 
 def budget_claims(
     budget: BudgetRequest | None,
-    max_steps: int | None,
     *,
     resume_surface: bool = False,
+    create_surface: bool = False,
 ) -> dict[str, Any]:
     """把请求体的预算声明摊平成领域入口的关键字参数。
 
-    刻意**只摊平、不判定**语义：相等 / 不等 / 越权的规则住在
+    刻意**只摊平、不判定**语义：越权的规则住在
     `agent_harness.agent.budget.resolve_local_fuse`，暂停恢复的 CAS 与 ceiling 判定
     住在 `agent_harness.agent.run_budget.validate_resume`（各自单一规则来源，HTTP 与
-    WS 共用同一份判定，web 层不再解释一遍）。
+    WS 共用同一份判定，web 层不再解释一遍）。迁移期 alias `max_steps` 已随 #320
+    移除（模型 `extra="forbid"` 挡未知字段），本函数不再有第二条摊平输入。
 
     `resume_surface` 是**形状级**的唯一例外：`budget.expected_version` 只在
     "更新已持久化的暂停预算"时有意义（PRD §3）。创建会话与投递消息都会启动**新**
     run——没有可比较的版本，所以那两个入口收到它就是矛盾请求 ⇒ 422（交给
     `BudgetRejection` 走既有 422 映射），不静默丢掉一个客户端明确表达过的意图。
+
+    `create_surface`（`#318`）同理只管 `budget.session.expected_version`：session
+    账行随首个 run 才建出，**新建**会话没有可比较的行版本 ⇒ 422；其余入口
+    （/resume、/messages、WS）都面向已存在会话，session CAS 合法（它是跨 run
+    的 durable 行，与 run 账的"仅暂停恢复面"不同）。
     """
     local = budget.local if budget is not None else None
     run = budget.run if budget is not None else None
+    session = budget.session if budget is not None else None
     claims: dict[str, Any] = {
         "local_max_agent_turns": local.max_agent_turns if local is not None else None,
-        "max_steps": max_steps,
         # `#312` 一维 + `#313` 三维：**只摊平**（四个领域参数名与 `budget.run.*`
         # 一一对应）。形态由 pydantic 挡，可执行性由领域层
         # `validate_ceiling_enforceability` 在首个 Provider 请求之前挡
@@ -276,6 +312,25 @@ def budget_claims(
         # `parse_tool_call_limits` 判（本层只摊平），"名字已注册"由装配层判
         # （`validate_tool_call_limits_registered`）——两处都在首个 Provider 请求之前。
         "run_tool_call_limits": run.tool_call_limits if run is not None else None,
+        # `#318`：session 作用域（跨 run 持久账行）。同名一一对应，判定全在领域层
+        # （`session_limits_from_request` 422 / 账本 CAS 409）——本层只摊平。
+        "session_max_agent_turns_total": (
+            session.max_agent_turns_total if session is not None else None
+        ),
+        "session_max_model_requests": (
+            session.max_model_requests if session is not None else None
+        ),
+        "session_max_total_tokens": (
+            session.max_total_tokens if session is not None else None
+        ),
+        "session_max_cost_usd": session.max_cost_usd if session is not None else None,
+        "session_deadline_at": session.deadline_at if session is not None else None,
+        "session_tool_call_limits": (
+            session.tool_call_limits if session is not None else None
+        ),
+        "session_max_delegations": (
+            session.max_delegations if session is not None else None
+        ),
     }
     expected = budget.expected_version if budget is not None else None
     if expected is not None:
@@ -285,6 +340,14 @@ def budget_claims(
                 "（本入口会启动新 run，没有可比较的预算版本）；请去掉它"
             )
         claims["expected_version"] = expected
+    session_expected = session.expected_version if session is not None else None
+    if session_expected is not None:
+        if create_surface:
+            raise BudgetRejection(
+                "budget.session.expected_version 在新建会话上没有意义"
+                "（session 账行随首个 run 才建出，没有可比较的版本）；请去掉它"
+            )
+        claims["session_expected_version"] = session_expected
     return claims
 
 
@@ -293,16 +356,17 @@ def ws_budget_claims(msg: dict[str, Any]) -> dict[str, Any]:
 
     WS 帧是裸 dict（没有 pydantic 模型做解析），所以形状校验在这里显式做：
     **未知键 / 非法形状当场拒绝**（`ValueError` → 错误帧），不静默丢弃——
-    `budget.session` 尚未实现，静默忽略等于让客户端以为设了预算。
+    静默忽略等于让客户端以为设了预算。三个作用域（`local` / `run` / `session`）
+    都由 `BudgetRequest` 承接（`budget.session` 自 `#318` 起就位）。
 
     `expected_version` 走与 HTTP 消息入口同一条规则（`resume_surface=False`）：
     WS 帧只能投递消息（不是恢复面），带版本是矛盾请求 ⇒ 错误帧。
 
-    `budget.local.max_agent_turns` 与迁移期 alias `max_steps` 的**语义**判定
-    （相等接受 / 不等 422 / 越权 422）仍在领域层 `resolve_local_fuse`，本函数只摊平。
+    `budget.local.max_agent_turns` 的**语义**判定（越权 422）仍在领域层
+    `resolve_local_fuse`，本函数只摊平。迁移期 alias `max_steps` 已随 #320 移除：
+    WS 帧带它按未知键拒绝（与 HTTP 请求模型的 `extra="forbid"` 同一纪律）。
     """
     raw = msg.get("budget")
-    alias = msg.get("max_steps")
     budget: BudgetRequest | None = None
     if raw is not None:
         if not isinstance(raw, dict):
@@ -313,10 +377,10 @@ def ws_budget_claims(msg: dict[str, Any]) -> dict[str, Any]:
             first = error.errors()[0] if error.errors() else {}
             where = ".".join(str(part) for part in first.get("loc", ()))
             raise ValueError(f"budget 形状非法：{where} {first.get('msg', '')}".strip()) from error
-    if alias is not None and (isinstance(alias, bool) or not isinstance(alias, int)):
-        raise ValueError("max_steps must be an integer")
+    if "max_steps" in msg:
+        raise ValueError("max_steps 不再被接受：请改用 budget.local.max_agent_turns（#320）")
     try:
-        return budget_claims(budget, alias)
+        return budget_claims(budget)
     except BudgetRejection as error:
         # WS 层只回错误帧（同一个 except 通道），把领域异常翻成帧文本。
         raise ValueError(str(error)) from error
@@ -324,6 +388,12 @@ def ws_budget_claims(msg: dict[str, Any]) -> dict[str, Any]:
 
 class CreateSessionRequest(_AmendValueValidators):
     """POST /api/sessions 的请求体。"""
+
+    # 迁移期 alias `max_steps` 已由 #320 移除（`02 §5.1` contract 收口）。本模型
+    # 刻意 `extra="forbid"`：旧客户端发 `max_steps` 必须按**未知字段响亮 422**，
+    # 不允许静默忽略（静默 = 旧客户端以为设了保险丝）。前端三个入口只发已声明
+    # 键（`web/src/lib/api.ts` 的字段表逐键对照过），收紧不影响受支持调用方。
+    model_config = {"extra": "forbid"}
 
     # #204：task 从"必填"变为"可选"——**刻意放宽，不是偷偷放宽**。空会话入口
     # （"在项目中新建任务"弹窗）只需要"创建文件 + 设好默认权限"，然后在 chat
@@ -339,14 +409,13 @@ class CreateSessionRequest(_AmendValueValidators):
     # 不复制），并自动注册为项目 + 归组。与 `workspace` 互斥（同时非空 → 422）。
     # 形态/存在性/是否目录的校验在 SessionService._resolve_cwd（领域层，与 CLI 共用）。
     cwd: str | None = None
-    # local fuse（#308）：公共字段 `budget.local.max_agent_turns`，`max_steps` 是迁移期
-    # deprecated alias（规则见 `agent/budget.py`；这里只挡形状：非正数 → 422）。
+    # local fuse（#308）：公共字段 `budget.local.max_agent_turns`（迁移期 alias
+    # `max_steps` 已随 #320 移除；规则见 `agent/budget.py`，这里只挡形状：非正数 → 422）。
     #
     # 这里刻意**没有** `le=` 上限：生效上限 = min(Deployment, 档位声明)（判定见
     # `agent/budget.py`）；一个与策略无关的数字只会造成两种假象——"200 以内随便传"与
     # "策略允许 500 却被 200 挡住"。
     budget: BudgetRequest | None = None
-    max_steps: int | None = Field(default=None, ge=1)
     # Phase 5：permission_mode 是会话级「审批阈值」声明（不是硬墙）。三档真实
     # PermissionPolicy；未知值 → 422。permission_mode 决定 ToolExecutor 的 policy
     # 上限，审批本身仍走 ApprovalCallback（默认 auto-approve）。
@@ -426,16 +495,17 @@ class ResumeRequest(_AmendValueValidators):
         的那个 run / ceiling 没真提高 / 有在途 run）⇒ 409，且零副作用。
     """
 
+    # 与 CreateSessionRequest 同款 `extra="forbid"`（#320：alias `max_steps` 移除后，
+    # 旧客户端发它必须 422，规则全局一致——`02 §5.1` D8 的恢复面也不例外）。
+    model_config = {"extra": "forbid"}
+
     task: str | None = Field(default=None, min_length=1, max_length=100_000)
     # 同 run 续跑的三个声明（同形恢复面，PRD §9）。合法值集合 / CAS 比较都在领域层
     # `agent_harness.agent.run_budget.validate_resume`（单一规则来源）——这里只挡形状。
     run_id: str | None = Field(default=None, min_length=1)
     resume_basis: str | None = Field(default=None, min_length=1)
-    # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。`max_steps` 必须在这里
-    # 一起出现：alias 规则是**全局**的（`02 §5.1` D8），漏掉它会让 `{max_steps:8,
-    # budget:{…9}}` 在本端点静默通过、在创建端点 422。
+    # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。
     budget: BudgetRequest | None = None
-    max_steps: int | None = Field(default=None, ge=1)
     # staged amend 字段（可选，None = 默认行为）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
@@ -466,8 +536,9 @@ class SendMessageRequest(_AmendValueValidators):
     mode: str = Field(default="queue", pattern="^(queue|steer)$")
     # local fuse（#308）：与创建端点同一套字段与规则。生效值只有 idle → launched
     # 消费；queued / steer 只判定、丢弃（`11 §6.1`——判定照跑是为了让状态码与运行态无关）。
+    # 与 CreateSessionRequest 同款 `extra="forbid"`（#320：alias 移除后统一响亮 422）。
+    model_config = {"extra": "forbid"}
     budget: BudgetRequest | None = None
-    max_steps: int | None = Field(default=None, ge=1)
     supersedes_seq: int | None = Field(default=None, ge=0)
     queue_id: str | None = None
     # staged amend 字段（可选，None = 默认行为）
@@ -858,10 +929,9 @@ def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     同一个问题立的先例），而 JSON 分支与 SSE 分支用同一条通道才能"两处一致"。
 
     值一律取自 `agent.budget.LocalFuse.as_projection()`（**单一形状**：客户端可见的字段与
-    它们的取值只定义一次，这里只做"字段名 → 响应头名"的映射，不重新组装事实）。用了迁移期
-    `max_steps` 时另加 `Deprecation: true` 与 `Warning: 299 …`（RFC 8594 / RFC 7234 §5.5
-    的标准形状）——这就是 R5 要的 deprecation signal：旧客户端不改代码也能看到自己用的是
-    废弃字段，且文案里的字段名同样来自投影（改别名只改一处）。
+    它们的取值只定义一次，这里只做"字段名 → 响应头名"的映射，不重新组装事实）。迁移期
+    `max_steps` 的 `Deprecation` / `Warning: 299` 信号已随 #320 移除——alias 不再被接受，
+    没有"还在用废弃字段"的请求需要提示。
 
     `fuse is None` ⇒ 空 dict（没有生效 fuse 的响应不投影：queued / steered 分支）。反向
     的抑制发生在**调用点**：`launch=False` 的只建会话**有**生效 fuse，但那个值是请求级、
@@ -870,17 +940,10 @@ def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     if fuse is None:
         return {}
     projection = fuse.as_projection()
-    headers = {
+    return {
         "X-Local-Max-Agent-Turns": str(projection["max_agent_turns"]),
         "X-Local-Fuse-Source": projection["source"],
     }
-    deprecation = projection.get("deprecation")
-    if deprecation:
-        headers["Deprecation"] = "true"
-        headers["Warning"] = (
-            f'299 - "{deprecation["field"]} is deprecated; use {deprecation["replacement"]}"'
-        )
-    return headers
 
 
 def _run_stream_response(
@@ -1274,7 +1337,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 task=req.task,
                 workspace_name=req.workspace,
                 cwd=req.cwd,
-                **budget_claims(req.budget, req.max_steps),
+                # `#318`：新建会话没有 session 账行 ⇒ session CAS 版本是矛盾请求。
+                **budget_claims(req.budget, create_surface=True),
                 permission_mode=permission_mode,
                 permission_mode_explicit=permission_mode_explicit,
                 auto_approve_explicit=auto_approve_explicit,
@@ -1405,7 +1469,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 task=req.task,
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
-                **budget_claims(req.budget, req.max_steps, resume_surface=True),
+                **budget_claims(req.budget, resume_surface=True),
                 amend=amend,
             )
         except (
@@ -1867,7 +1931,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 session_id=session_id,
                 content=req.content,
                 mode=req.mode,
-                **budget_claims(req.budget, req.max_steps),
+                **budget_claims(req.budget),
                 amend=amend,
                 supersedes_seq=req.supersedes_seq,
                 queue_id=req.queue_id,
@@ -1883,6 +1947,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SeqConflict,
             WorkspaceBindingConflict,
             BudgetRejection,
+            BudgetConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。

@@ -39,7 +39,14 @@ SECTION_ORDERS: dict[str, int] = {
     "aux:fork_tail": 3200,
     "frame:untrusted_data": 9000,  # 槽位：knowledge / websearch 两条 frame section 共用
     "corrective:tool_failure_guard": 9100,
+    # `#317`：stuck 检测（②–⑤）的纠正性 replan 片段。与上一条同在"纠正"带里（都在
+    # 工具回填之后、下一轮模型请求之前注入），顺序值只要求与其它纠正片段互相可辨。
+    "corrective:stuck_pattern": 9150,
     "frame:recovery_skipped": 9200,  # 恢复期"未启动即跳过"的合成 ToolResult 文案
+    # W-04 (#348)：接近上下文硬护栏的落盘提醒（builder 注入，非持久化）。与纠正带
+    # 同族（工具回填之后、下一轮模型请求之前），顺序值只要求与相邻框架/纠正片段
+    # 互相可辨。
+    "frame:context_pressure": 9250,
     "runtime:context_snapshot": 9500,
     "persona:suffix": 10200,
 }

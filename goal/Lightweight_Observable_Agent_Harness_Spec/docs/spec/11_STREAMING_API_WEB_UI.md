@@ -140,8 +140,8 @@ UI 不得维护第二套不可对账业务真相。
 或 `null`（wire 序列化 MUST NOT 要求二进制浮点相等）；`deadline_at` 是 RFC 3339 UTC 或 `null`；
 `tool_call_limits` 映射**已注册**工具名到正整数绝对上限；首次创建省略 `expected_version`，更新已持久化的
 暂停预算时必填；缺省 `budget` 用 AgentProfile 与 Deployment 默认；默认情况下 model requests / tool calls /
-tokens / cost / deadline **只观测不限制**；SessionBudget 默认 `max_delegations=8`；`max_steps` 是迁移期
-alias（相等接受、不等 422，见 `02 §5.1`）；活动 run MUST NOT 把 ceiling 降到已消耗之下；
+tokens / cost / deadline **只观测不限制**；SessionBudget 默认 `max_delegations=8`；`max_steps`
+已退役为未知字段（出现即 422，见 `02 §5.1` 收尾段）；活动 run MUST NOT 把 ceiling 降到已消耗之下；
 恢复只接受**绝对** ceiling，不接受增量、不重置 counter。
 
 **状态码**：

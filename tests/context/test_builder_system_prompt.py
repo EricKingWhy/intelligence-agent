@@ -17,12 +17,25 @@ from __future__ import annotations
 import logging
 
 import pytest
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from agent_harness.context.builder import ContextBuilder
-from agent_harness.session import MODEL_COMPLETED, USER_MESSAGE
+from agent_harness.session import COMPACTION_START, MODEL_COMPLETED, USER_MESSAGE
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
+
+COMPACT_SUMMARY = """\
+## 已完成工作与关键决策
+已检查早期记录。
+
+## 失败方案
+(none)
+
+## 当前进行中状态
+早期记录处理完成。
+
+## Next Step
+继续当前请求。"""
 
 
 @pytest.mark.asyncio
@@ -160,18 +173,20 @@ async def test_context_builder_compaction_path_reserves_system_prompt_tokens(tmp
     session = make_session(tmp_path)
     # 填入足够多的事件以触发 compaction（需要至少一个完整 early turn）
     for i in range(5):
-        session.append(USER_MESSAGE, {"content": f"这是第 {i} 条用户消息，内容稍长以触发压缩。"})
-        session.append(MODEL_COMPLETED, {"content": f"这是第 {i} 条模型回复，同样稍长一些。"})
+        session.append(USER_MESSAGE, {"content": f"处理第 {i} 条记录。"})
+        session.append(MODEL_COMPLETED, {"content": f"历史模型输出 {i} " * 100})
+    compact_summary = AIMessage(content=COMPACT_SUMMARY)
     builder = ContextBuilder(
-        ScriptedModel([]),
-        max_context_tokens=500,
-        auto_compact_threshold=0.70,
-        hard_guard_threshold=0.85,
+        ScriptedModel([compact_summary]),
+        max_context_tokens=8000,
+        auto_compact_threshold=0.30,
+        hard_guard_threshold=0.90,
         system_prompt="你是 coding agent。",
     )
 
     await builder.build(session)
 
+    assert any(event.type == COMPACTION_START for event in session.events)
     assert builder._system_prompt_tokens is not None
     assert builder._token_estimate_total >= builder._system_prompt_tokens, (
         "压缩路径的 token_estimate 必须包含 system_prompt 的 token 成本"

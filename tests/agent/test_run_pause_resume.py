@@ -29,6 +29,7 @@ import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -118,6 +119,7 @@ def _runtime(
     tool_call_limits: dict[str, int] | None = None,
     tools: Sequence[Tool] = (),
     deadline_at: datetime | None = None,
+    session_budget: Any | None = None,
 ) -> AgentRuntime:
     """一个执行实例：`local_fuse` 是本实例的保险丝，`run_budget` 是启动时的 run 账本。
 
@@ -126,6 +128,7 @@ def _runtime(
     `tool_call_limits`（`#314`）是 run 档的 per-tool 绝对配额（未配 ⇒ 该工具不限）。
     `tools`（`#315`）是额外注册的工具（默认只有 echo）。
     `deadline_at`（`#315`）是本 run 的绝对截止时刻（判据只看它和"现在"，见 `_now`）。
+    `session_budget`（`#318`）是 session 作用域的准入端口（生产里由服务装配）。
     """
     registry = ToolRegistry()
     registry.register(_EchoTool())
@@ -144,6 +147,7 @@ def _runtime(
             ),
             consumed=BudgetConsumed(agent_turns=consumed), run_id=run_id,
         ),
+        session_budget=session_budget,
     )
 
 
@@ -1059,3 +1063,86 @@ async def test_explicit_cancel_stays_terminal_and_is_not_rewritten_into_a_pause(
     assert terminal[-1].data.get("reason") == "cancelled"
     assert [e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED] == []
     assert latest_paused_run(session.events) is None
+
+
+# ---------------------------------------------------------------------------
+# session 作用域账（`#318`）：运行时层的准入 / 退回接线
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_admission_pauses_before_the_model_is_invoked(tmp_path) -> None:
+    """session 准入在**任何模型工作之前**判（`02 §5.1`）：到线 ⇒ 0 次模型调用收口。
+
+    预留语义让 ceiling=1 一个产出轮都放不下（`0 + 1 >= 1`）；closeout 走模型
+    （requests 维未配 ceiling ⇒ 有余量），那一格请求落进 durable 行。
+    """
+    from agent_harness.agent.run_budget import SessionLimits
+    from agent_harness.storage.delegation_tree import (
+        InMemoryDelegationTreeLedger,
+        SessionBudgetHandle,
+    )
+
+    ledger = InMemoryDelegationTreeLedger()
+    handle = SessionBudgetHandle(
+        ledger, budget_key="root-s", root_session_id="root-s",
+        limits=SessionLimits(max_agent_turns_total=1),
+    )
+    scripted = ScriptedModel([_continuation_json()])
+    runtime = _runtime(scripted, ceiling=None, session_budget=handle)
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "session 线一步就到")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["trigger_dimension"] == "session.max_agent_turns_total"
+    row = await ledger.get_session_budget("root-s")
+    assert row.consumed.agent_turns == 0, "零产出轮：准入在模型工作前拒绝"
+    assert row.consumed.model_requests == 1, "closeout 的那次真实请求落进树账"
+    # 自包含暂停（`#318`）：CAS 版本 + 最新 consumed 直接可读
+    assert paused.data["session"]["version"] == 1
+    assert paused.data["session"]["consumed"]["model_requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_context_exceeded_refunds_the_session_step_reservation(tmp_path) -> None:
+    """context 超限 ⇒ 模型从未被调用 ⇒ session 预留**整步退回**（turns + requests）。
+
+    准入已把两格预付进 durable 行；退款缺失的话，一次没跑成的步会在树账上留下
+    幻影，跨 run 聚合会把幻影累进后续每一次准入判定。
+
+    W-04（#348）起这条臂收口为**非终态暂停**（`reason=budget_exhausted`，
+    `trigger_dimension=max_context_tokens`），退款语义不变——模型一次都没被调用，
+    closeout 也因 context 装配失败落确定性 continuation，两格必须原样退回。
+    """
+    from agent_harness.agent.run_budget import SessionLimits
+    from agent_harness.context.compactor import ContextWindowExceededError
+    from agent_harness.storage.delegation_tree import (
+        InMemoryDelegationTreeLedger,
+        SessionBudgetHandle,
+    )
+
+    ledger = InMemoryDelegationTreeLedger()
+    handle = SessionBudgetHandle(
+        ledger, budget_key="root-s", root_session_id="root-s",
+        limits=SessionLimits(max_agent_turns_total=3),
+    )
+    scripted = ScriptedModel([AIMessage(content="不应被调用")])
+    runtime = _runtime(scripted, ceiling=None, session_budget=handle)
+    session = make_session(tmp_path)
+
+    class _ExplodingContext:
+        async def build(self, _session):
+            raise ContextWindowExceededError("上下文超限")
+
+    runtime._context_builder = _ExplodingContext()
+    result = await runtime.run(session, "第一步就超限")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED
+    assert paused.data["trigger_dimension"] == "max_context_tokens"
+    row = await ledger.get_session_budget("root-s")
+    assert row.consumed.agent_turns == 0
+    assert row.consumed.model_requests == 0, "预留整步退回，不留幻影"

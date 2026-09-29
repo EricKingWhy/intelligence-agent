@@ -73,32 +73,32 @@ _DECLARED_VARIABLES: tuple[tuple[str, str], ...] = (
     # `_CORRECTIVE_TOOL_FAILURE_GUARD` 的说明）。
     ("tool_name", "工具名（用于纠偏消息与恢复跳过文案）"),
     ("consecutive_failures", "连续失败次数（用作十进制字符串）"),
+    # `#317` stuck 检测（②–⑤）的纠正性 replan 文案：模式的人类可读名 + 已连续次数。
+    # 模式**名**与计数都由 guard 给出（`STUCK_PATTERN_LABELS` 是唯一词表）——
+    # section 不自己判断"像不像打转"，只负责排版（同 §10.8 的分工）。
+    ("pattern_label", "stuck 模式的人类可读名（用于纠正消息）"),
+    ("pattern_count", "该模式已连续的次数（用作十进制字符串）"),
 )
 
-#: 会话压缩器的六段式摘要指令（迁移前在 `context/compactor.py::_SIX_SECTION_PROMPT`）。
+#: 会话压缩器的模型撰写部分；其余四节由 harness 从事件投影中精确生成。
 #: **结尾保留一个 `\n`**，段落之间是空行——组装不做 strip，逐字节等价由
 #: `tests/prompt/test_aux_prompts.py` 的 trailing-newline 断言锁死。
 _AUX_COMPACTION_TEXT = """\
-你是会话压缩器。把下面的历史对话压缩成六段式结构化 Markdown 摘要，
-替代被压缩的原始事件。严格按以下格式输出，不要输出任何其他内容：
+你是会话压缩器。把下面的历史对话压缩成四段 Markdown 摘要，
+供 harness 与原始目标、保护事实、精确标识和文件清单组成八节摘要。
+只输出以下四节，不得重写或补充其他节；每个空节明确写 (none)：
 
-## 目标
-用户在本轮对话中想要达成的目标（1-3 句）。
+## 已完成工作与关键决策
+列出已由事件确认的完成事项与决策，并简述决策理由；无则写 (none)。
 
-## 约束
-用户明确或隐含提出的约束条件（每条一行）。
+## 失败方案
+列出已经证伪的路径、证伪依据和对应事件标识；无则写 (none)。
 
-## 进展
-已完成的关键步骤和中间结果（每条一行）。
+## 当前进行中状态
+列出尚未完成的工作及其当前状态；无则写 (none)。
 
-## 决策
-做出的重要技术或设计决策（每条一行）。
-
-## 下一步
-尚未完成、正在等待或需要继续的工作（每条一行）。
-
-## 关键上下文
-对理解当前状态至关重要的其他信息（每条一行）。
+## Next Step
+列出下一个动作及解除条件；无则写 (none)。
 
 历史对话如下：
 """
@@ -134,7 +134,7 @@ _AUX_SECTIONS: tuple[PromptSection, ...] = (
         scopes=frozenset({"aux:compaction"}),
         target=Target.SYSTEM,
         text=_AUX_COMPACTION_TEXT,
-        description="会话压缩器的六段式摘要指令",
+        description="会话压缩器的四节摘要补充指令",
     ),
     PromptSection(
         name="aux:memory_extraction",
@@ -208,6 +208,16 @@ _CORRECTIVE_TOOL_FAILURE_GUARD = (
     "以相同方式重试。"
 )
 
+#: `#317` stuck 检测（②–⑤ 与 ① 的暂停）的纠正性 replan 文案。
+#: 与 `_CORRECTIVE_TOOL_FAILURE_GUARD` 的分工：那一条说的是"同一调用连续失败"，
+#: 这一条覆盖"失败以外的四种打转"（同观察 / 无工具独白 / 两动作交替 / 项目级无进展），
+#: 所以它不提具体工具，而是提**模式**（`pattern_label`）与次数。
+_CORRECTIVE_STUCK_PATTERN = (
+    "检测到循环：{{pattern_label}}（已连续 {{pattern_count}} 次）。同一个动作不会"
+    "因为再试一次而得到不同的结果。请先用一句话说明你从最近的输出里看到了什么，"
+    "再换一条路：改参数、换工具、缩小目标，或者直接向用户说明卡在哪里。"
+)
+
 #: 恢复期"未启动即跳过"的合成 ToolResult 文案（迁移前内联在
 #: `recovery/coordinator.py::SkipPendingPolicy.result_for`）。
 _FRAME_RECOVERY_SKIPPED = (
@@ -249,12 +259,38 @@ _FRAME_SECTIONS: tuple[PromptSection, ...] = (
         description="同错熔断的纠偏消息（含 tool_name / consecutive_failures）",
     ),
     PromptSection(
+        name="corrective:stuck_pattern",
+        order=SECTION_ORDERS["corrective:stuck_pattern"],
+        scopes=frozenset({"corrective:stuck_pattern"}),
+        target=Target.FRAGMENT,
+        text=_CORRECTIVE_STUCK_PATTERN,
+        description="stuck 检测的纠偏消息（含 pattern_label / pattern_count）",
+    ),
+    PromptSection(
         name="frame:recovery_skipped",
         order=SECTION_ORDERS["frame:recovery_skipped"],
         scopes=frozenset({"frame:recovery_skipped"}),
         target=Target.FRAGMENT,
         text=_FRAME_RECOVERY_SKIPPED,
         description="恢复期未启动即跳过的合成结果文案（含 tool_name）",
+    ),
+)
+
+#: W-04（#348）：接近上下文硬护栏时的落盘提醒（PRD §4.5 增量，Anthropic
+#: `memory_20250818` 式）。**文案按 PRD 逐字冻结**（advisory：W-02/W-26 落地后
+#: "保护事实/进度清单"自动有了确切落点，文案届时不必改）。注入点在 ContextBuilder
+#: ——压缩后仍落在 [auto, hard) 带内才发（压缩成功分支必然 < auto ⇒ 对健康路径
+#: 零误报）。META_USER：装进 user-role 消息（与运行时快照同族，非持久化注入）。
+_CONTEXT_PRESSURE_TEXT = "即将到达上下文上限，请把关键信息显式落盘（保护事实/进度清单）"
+
+_PRESSURE_SECTIONS: tuple[PromptSection, ...] = (
+    PromptSection(
+        name="frame:context_pressure",
+        order=SECTION_ORDERS["frame:context_pressure"],
+        scopes=frozenset({"frame:context_pressure"}),
+        target=Target.META_USER,
+        text=_CONTEXT_PRESSURE_TEXT,
+        description="接近上下文硬护栏的落盘提醒（builder 注入，非持久化）",
     ),
 )
 
@@ -281,7 +317,10 @@ def build_registry(
     registry = PromptRegistry()
     for name, description in _DECLARED_VARIABLES:
         registry.variable(name, description=description)
-    for section in _BUILTIN_SECTIONS + _AUX_SECTIONS + _RUNTIME_SECTIONS + _FRAME_SECTIONS:
+    for section in (
+        _BUILTIN_SECTIONS + _AUX_SECTIONS + _RUNTIME_SECTIONS + _FRAME_SECTIONS
+        + _PRESSURE_SECTIONS
+    ):
         registry.register(section)
     if persona is not None:
         for section in persona_sections(persona):

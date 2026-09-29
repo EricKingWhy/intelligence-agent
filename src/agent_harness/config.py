@@ -93,7 +93,14 @@ class Settings(BaseSettings):
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
+    # W-29 (#383)：进度清单兜底重注入周期（每 N 条投影消息，PRD §4.6 的
+    # Cline Focus Chain 默认值 6，可配置）。
+    plan_reinject_every_messages: int = Field(default=6, gt=0)
     artifact_overflow_chars: int = 2000
+    # W-31.3（#415）：子代理结论 ref 化阈值（token）——delegate 回传的 summary 估算
+    # token 超过本值时，全文外置 ArtifactStore，父窗只收截断摘要行 + summary_ref
+    # （不变量 #15）。0 = 关闭本特性；负值由 ge=0 响亮拒绝。
+    subagent_summary_overflow_tokens: int = Field(default=2000, ge=0)
     # Phase Multiturn T5 (#135)：MinIO 作为大产物外置对象存储。
     # 与 artifact_store_* 字段独立——MinIO 用于 tool result 外置，
     # artifact_store_* 用于 inspect_artifact 的 S3 兼容存储。

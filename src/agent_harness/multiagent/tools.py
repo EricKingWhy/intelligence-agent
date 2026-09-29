@@ -19,11 +19,21 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agent_harness.context.tokens import estimate_tokens
 from agent_harness.multiagent.provider import InProcessSubagentProvider
+from agent_harness.session.context import current_session_var
 from agent_harness.tooling import Tool, ToolResult, ToolRuntimeSignal, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
+
+#: 外置后父窗保留的摘要行长度（字符）。依据（2026-09-29 调研）：Anthropic 工程博客
+# 对子代理回传的口径是 "a condensed, distilled summary ... (often 1,000-2,000
+# tokens)"，Claude Code 的 TASK_MAX_OUTPUT_LENGTH 到 32_000 字符才落盘——200 字符
+# （≈50-100 token）低于一切公开先例，父窗往往被迫多一轮 read-back。1500 字符
+# ≈中文 1K token / 英文 ~375 token，落在该区间内且仍是有界载荷。
+# 只作用于**超阈值外置**路径；未超阈值路径全文回传，不经此常量（逐字节不变）。
+_EXTERNALIZED_SUMMARY_HEAD_CHARS = 1500
 
 
 class _DelegateArgs(BaseModel):
@@ -54,10 +64,17 @@ class DelegateTool(Tool):
         provider: InProcessSubagentProvider,
         *,
         max_delegations: int = 8,
+        artifact_store: Any | None = None,
+        summary_overflow_tokens: int = 0,
     ) -> None:
         self._provider = provider
         # 树级默认上限（#287）：持久化计数由 provider 的共享 tree ledger 负责。
         self._max_delegations = max_delegations
+        # 结论 ref 化（W-31.3 / #415，不变量 #15）：summary 超阈值时全文外置
+        # ArtifactStore，父窗只收截断摘要行 + summary_ref。默认关（store=None 或
+        # 阈值 0）⇒ 现有行为逐字节不变；wiring 的 wire 期构造不传即关。
+        self._artifact_store = artifact_store
+        self._summary_overflow_tokens = summary_overflow_tokens
 
     @property
     def name(self) -> str:
@@ -69,8 +86,10 @@ class DelegateTool(Tool):
         return (
             "把一个 scoped task 委派给专门的子代理执行（阻塞：返回时任务已完"
             f"成或失败）。可选 target：{available}。子代理拥有独立上下文，"
-            "task 描述必须自洽；返回结构化结果（status/summary 等）。适合可"
-            "并行的专项深入；琐碎小事请亲自完成，不要为委派而委派。"
+            "task 描述必须自洽；返回结构化结果（status/summary 等）。重探索"
+            "类工作（全仓搜索、大文件分析、多源检索）默认走 delegate，在子代"
+            "理的干净上下文里执行，父窗口只收结论；琐碎小事请亲自完成，不要"
+            "为委派而委派。"
         )
 
     @property
@@ -108,7 +127,9 @@ class DelegateTool(Tool):
         """
         return (
             f"委派须知：整棵委派树最多委派 {self._max_delegations} 次，超出会明确失败，"
-            "请预留收尾余量；子代理看不到你们的对话历史，task 描述必须自洽；"
+            "请预留收尾余量；重探索（全仓搜索、大文件分析、多源检索）默认走 delegate，"
+            "你只接收它的结论（超长结论会以外置产物 ref 提供，可按需读回全文），"
+            "不要在父窗口亲自重复执行这类检索；子代理看不到你们的对话历史，task 描述必须自洽；"
             "子代理失败会原样回填（含它的结构化结果），是否重试由你决定。"
         )
 
@@ -125,12 +146,15 @@ class DelegateTool(Tool):
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
         if not reservation.accepted:
-            result = ToolResult.failure(
+            # 预算拒绝**不**进树守卫：熔断器（#88）数的是"子代理执行了且失败"；
+            # 配额拒绝里子代理从未启动（`#318` 起 session 级拒绝还可能先于本 run
+            # 的树行存在——observe 一个不存在的树只会拿到 KeyError）。拒绝消息
+            # 自己带 used/limit，模型据此收尾；反复空转由 turns 预算兜底。
+            return ToolResult.failure(
                 message=(f"delegation 预算耗尽（已用 {reservation.used}/{reservation.limit}）。"
                          "请综合已有结果直接收尾，或改变策略，不要再委派。"),
                 error_code=ErrorCode.INVALID_ARGUMENT,
             )
-            return await self._with_tree_guard(result, tree_id, fingerprint)
         try:
             result = await self._provider.run(
                 target=args.target, task=args.task, constraints=args.constraints,
@@ -150,6 +174,11 @@ class DelegateTool(Tool):
             "status": result.status,
             "summary": result.summary,
         }
+        # 结论 ref 化（W-31.3 / #415）：成功与失败两条回传路径共用本 payload，
+        # 在分支前统一处理；未超阈值/特性关/外置失败时 payload 原样返回。
+        payload, externalize_event = await self._externalize_summary_if_overflowed(
+            result, payload,
+        )
         # 真实来源字段：无则省略（绝不伪造/补零，ADR-0015 决策 12）
         for field_name in ("citations", "artifacts", "changed_files", "unresolved"):
             value = getattr(result, field_name, [])
@@ -169,6 +198,10 @@ class DelegateTool(Tool):
                 "status": result.status, "summary": result.summary,
             }),
         ]
+        # 外置事实走 overflow 同款 artifact/externalized 白盒事件（第二遍复审
+        # P2：web 工件面靠它可见）；未外置时为 None 不发。
+        if externalize_event is not None:
+            pending_events.append(externalize_event)
         if result.status == "completed":
             completed = ToolResult.success(
                 message=f"子代理 '{result.agent_id}' 完成：{result.summary[:200]}",
@@ -187,6 +220,55 @@ class DelegateTool(Tool):
             pending_events=pending_events,
         )
         return await self._with_tree_guard(failed, tree_id, fingerprint)
+
+    async def _externalize_summary_if_overflowed(
+        self, result: Any, payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], tuple[str, dict[str, Any]] | None]:
+        """summary 超阈值时把全文外置 ArtifactStore，payload 只留摘要行 + ref。
+
+        返回 (payload, externalize_event)；event 非 None 时由调用方并入
+        pending_events（overflow 同款 artifact/externalized，含 size/mime_type）。
+
+        fail-open 三级（W-31.3 / #415）：特性关（store=None 或阈值 ≤0）、执行期
+        无会话上下文、save 抛异常——任一发生都回退现有行为（payload 带全文），
+        绝不因外置失败丢结论。session_id 取执行期的父会话：装配层给本工具的
+        artifact store 绑定的是根会话命名空间（LocalArtifactStore 校验
+        session_id 必须等于命名空间），child_session_id 会被它拒收。深层委派
+        （depth ≥ 2）时执行期会话本身已不在根命名空间 ⇒ save 被同一校验拒收、
+        同口径 fail-open——本特性在嵌套委派内层有意不生效（结论不丢，provider
+        侧工具输出截断托底）。
+        """
+        if (self._artifact_store is None or self._summary_overflow_tokens <= 0
+                or estimate_tokens(result.summary) <= self._summary_overflow_tokens):
+            return payload, None
+        session = current_session_var.get()
+        if session is None:
+            # Tool.execute 协议不带 session；直呼工具（无 run 上下文）时拿不到
+            # 会话命名空间——fail-open 不外置，与 store=None 同口径。
+            return payload, None
+        try:
+            artifact = await self._artifact_store.save(
+                session.session_id, result.summary,
+                mime_type="text/plain", source_tool=self.name,
+                # execute 期拿不到 tool_call_id（executor 在 execute 返回后才绑定
+                # 调用 id）；今日无任何消费方读 Artifact.tool_call_id，空串 =
+                # 如实"无值"。委派事实的关联走 pending_events 里的 child_session_id。
+                tool_call_id="",
+            )
+        except Exception:  # noqa: BLE001 - 外置失败必须回退全文，不丢结论
+            return payload, None
+        deferred = ("artifact/externalized", {
+            "artifact_id": artifact.artifact_id,
+            "session_id": session.session_id,
+            "source_tool": self.name, "tool_call_id": "",
+            "size": artifact.size, "mime_type": artifact.mime_type,
+        })
+        return {
+            **payload,
+            "summary": result.summary[:_EXTERNALIZED_SUMMARY_HEAD_CHARS],
+            "summary_ref": artifact.artifact_id,
+            "summary_truncated": True,
+        }, deferred
 
     @staticmethod
     def _fingerprint(target: str, task: str, constraints: list[str]) -> str:

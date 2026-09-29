@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.factory import AgentFactory
@@ -211,10 +211,13 @@ class TestDelegationBudget:
         assert "2/2" in r3.message, "失败消息必须带已用/上限（模型可决策收尾）"
 
     @pytest.mark.asyncio
-    async def test_budget_resets_per_run(self, tmp_path, caplog):
-        """计数按 run_id 隔离：不同 run 各自独立预算。"""
-        import logging
+    async def test_delegation_counter_aggregates_across_runs(self, tmp_path):
+        """`#318`：delegations 计数器在 durable session 账行上**跨 run 聚合**。
 
+        旧 #287 语义是"计数按 run_id 隔离、新 run 预算重置"；#318 把这一维挪进
+        session 账行（budget_key = 树根会话 id，`02 §5.1` 的树级真相），run-b 的
+        第一次委派也看得到 run-a 的消耗——树账不因换 run 而回血。
+        """
         from agent_harness.session import run_context_var
 
         child_model = ScriptedModel([
@@ -229,30 +232,30 @@ class TestDelegationBudget:
         finally:
             run_context_var.reset(t1)
         assert r1.ok and not over.ok
+        assert "1/1" in over.message
 
         t2 = run_context_var.set("run-b")
         try:
-            with caplog.at_level(logging.DEBUG, logger="agent_harness.agent"):
-                r2 = await tool.execute(_args("coding", "b"))
+            r2 = await tool.execute(_args("coding", "b"))
         finally:
             run_context_var.reset(t2)
-        for rec in caplog.records:
-            if "异常终止" in rec.getMessage():
-                print("DEBUG-ERR:", rec.error, "|", rec.error_type)
-        assert r2.ok, "新 run 预算必须重置"
+        assert not r2.ok, "新 run 不重置树级账：session 行的 delegations 已到线"
+        assert "预算耗尽" in r2.message
+        assert "1/1" in r2.message, "拒绝消息带的是**跨 run 聚合**的已用/上限"
 
 
 class TestRepeatedDelegationBreaker:
     """#88：repeated-delegation 熔断复用同错熔断机制——delegate 是普通工具，
-    同指纹 (delegate, {target, task}) 连续失败 3 次 → 软熔断，6 次 → 硬熔断。
-    无需新机制：验证既有护栏对 delegate 工具的真实覆盖。"""
+    同指纹 (delegate, {target, task}) 连续失败 3 次 → 一次纠正，6 次 → **非终态**
+    `run/paused(reason=stuck)`（`#317` T9：旧硬熔断终结臂已从生产路径移除，
+    ADR-0048 D5；计数权威仍是委派树账本，见 `guards.external_failure_signal`）。"""
 
     @pytest.mark.asyncio
     async def test_repeated_failing_delegation_trips_guard(self, tmp_path):
         from langchain_core.messages import AIMessage as _AIM
 
         from agent_harness.agent.runtime import AgentRuntime
-        from agent_harness.agent.types import STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        from agent_harness.agent.types import STATUS_PAUSED
         from agent_harness.tooling import ToolExecutor as _TE
 
         failing_child = ScriptedModel([])  # 空剧本：child run 必失败
@@ -282,15 +285,23 @@ class TestRepeatedDelegationBreaker:
 
         result = await runtime.run(session, "反复委派同一任务")
 
-        assert result.status == STATUS_IDENTICAL_TOOL_FAILURE_LOOP
+        assert result.status == STATUS_PAUSED
         guard_events = [e for e in session._events if e.type == "tool/failure-guard"]
-        levels = [e.data["level"] for e in guard_events]
-        assert "soft" in levels and "hard" in levels
-        assert guard_events[-1].data["consecutive_failures"] == 6
+        assert [e.data["level"] for e in guard_events] == ["soft"]
+        assert guard_events[0].data["consecutive_failures"] == 3
+        # 再达阈值（2T=6）收口：结构化暂停事件 + 非终态 run/paused，**不是** run/failed
+        stuck = [e.data for e in session._events if e.type == "guard/stuck"]
+        assert [e["level"] for e in stuck] == ["paused"]
+        assert stuck[0]["pattern"] == "stuck.tool_failure_loop"
+        assert stuck[0]["count"] == 6 and stuck[0]["threshold"] == 3
+        assert [e.data["reason"] for e in session._events if e.type == "run/paused"] == [
+            "stuck"
+        ]
+        assert [e for e in session._events if e.type == "run/failed"] == []
 
 
 class _SlowChildModel(ScriptedModel):
-    """ainvoke 睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
+    """流式睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
 
     def __init__(self, delay: float, responses_count: int = 12) -> None:
         super().__init__([AIMessage(content="child 完成") for _ in range(responses_count)])
@@ -298,14 +309,17 @@ class _SlowChildModel(ScriptedModel):
         self.in_flight = 0
         self.peak = 0
 
-    async def ainvoke(self, messages, **kwargs):
+    async def astream(self, messages, **kwargs):
+        # child 走 run_stream（astream）：延迟与在飞计数必须挂在流式路径上，
+        # 否则并发闸的测量 instrument 失效（独立审查 8ebc9841 的 P1）。
         import asyncio
 
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
         try:
             await asyncio.sleep(self._delay)
-            return await super().ainvoke(messages, **kwargs)
+            async for chunk in super().astream(messages, **kwargs):
+                yield chunk
         finally:
             self.in_flight -= 1
 
@@ -379,9 +393,10 @@ class TestCancelAndResume:
         from agent_harness.session import Session as _Session
 
         class _BlockingChildModel(ScriptedModel):
-            async def ainvoke(self, messages, **kwargs):
+            async def astream(self, messages, **kwargs):
+                # child 走 run_stream（astream）：流式路径同样阻塞，取消语义才可测。
                 await asyncio.sleep(30)
-                return AIMessage(content="never")
+                yield AIMessageChunk(content="never")
 
         provider = InProcessSubagentProvider()
         delegate = DelegateTool(provider)
@@ -451,3 +466,276 @@ class TestCancelAndResume:
     @pytest.mark.asyncio
     async def test_child_session_persisted_after_disconnect(self, tmp_path):
         """child 留档可查（不删除、不复活）——第二次委派不影响首次留档。"""
+
+
+class TestSummaryRefExternalization:
+    """W-31.3（#415）：结论 ref 化——summary 估算 token 超阈值时全文外置
+    ArtifactStore，父窗只收截断摘要行 + summary_ref（不变量 #15）。
+    未超阈值 / 特性关 / 外置失败 ⇒ 现有行为逐字节不变（fail-open 不丢结论）。
+    """
+
+    # 2000 字符（真 tiktoken 实测 = 2000 tokens）：必须 > 外置头 1500，令
+    # [:1500] 断言成为真钉子（审查 P2：600 字符时 [:1500] 恒等于全文，是空真）；
+    # 同时远超用例小阈值 10。
+    LONG = "结" * 2000
+
+    def _overflow_tool(
+        self, tmp_path: Path, *, artifact_store: object | None, threshold: int,
+        child_summary: str | None = None,
+    ) -> tuple[DelegateTool, InProcessSubagentProvider]:
+        child_model = ScriptedModel([
+            AIMessage(content=self.LONG if child_summary is None else child_summary),
+        ])
+        tool, _, _, provider = _activated_tool(tmp_path, child_model=child_model)
+        tool = DelegateTool(
+            provider, artifact_store=artifact_store,
+            summary_overflow_tokens=threshold,
+        )
+        return tool, provider
+
+    @staticmethod
+    def _with_parent_session(tmp_path: Path):
+        """设 current_session_var（父 run 执行期工具经它取会话命名空间）。"""
+        from agent_harness.session import current_session_var
+
+        session = make_session(tmp_path / "parent-root")
+        token = current_session_var.set(session)
+
+        def reset() -> None:
+            current_session_var.reset(token)
+
+        return reset
+
+    def test_tool_surface_unchanged(self, tmp_path):
+        """AC-A：工具面只有描述文本变化——schema / 权限 / 副作用 / 超时 /
+        reconcile 与改动前一致；描述含「默认走 delegate」措辞且保留既有
+        「不要为委派而委派」语义。"""
+        from agent_harness.tooling import ToolSideEffect
+        from agent_harness.tooling.contract import ToolPermission
+        from agent_harness.tooling.reconcile import ReconcileHint
+
+        tool, _, _, _ = _activated_tool(tmp_path)
+        assert set(tool.args_schema.model_fields) == {"target", "task", "constraints"}
+        assert tool.side_effect is ToolSideEffect.MUTATING
+        assert tool.permission is ToolPermission.WORKSPACE_WRITE
+        assert tool.timeout_seconds == 1800.0
+        assert isinstance(tool.reconcile_hint, ReconcileHint)
+        assert tool.reconcile_hint.verifiable is True
+        assert "默认走 delegate" in tool.description
+        assert "不要为委派而委派" in tool.description
+        assert "默认走 delegate" in tool.prompt_guidance
+        assert "委派须知" in tool.prompt_guidance
+
+    @pytest.mark.asyncio
+    async def test_overflow_externalizes_summary_ref_on_success(self, tmp_path):
+        """AC-B 往返（成功路径）：summary_ref 非空，真 store save/load 往返
+        content 与 child 原 summary 逐字相等；data.summary 是截断行；
+        message 保持既有截断形态。"""
+        from agent_harness.storage.artifact import FakeArtifactStore
+
+        store = FakeArtifactStore()
+        tool, _ = self._overflow_tool(tmp_path, artifact_store=store, threshold=10)
+        reset = self._with_parent_session(tmp_path)
+        try:
+            result = await tool.execute(_args("coding", "重探索任务"))
+        finally:
+            reset()
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        ref = payload["summary_ref"]
+        assert ref, "超阈值时 summary_ref 必须存在且非空"
+        artifact = await store.load(ref)
+        assert artifact.content == self.LONG, "往返必须逐字相等（不丢结论）"
+        assert payload["summary_truncated"] is True
+        # 钉住契约：外置后 data 摘要行 = 1500 字符头（Anthropic 1-2K token 蒸馏
+        # 口径，见 tools.py `_EXTERNALIZED_SUMMARY_HEAD_CHARS`）；message 保持
+        # 既有 200 字符截断不动。两个长度各钉一条，防止未来无声漂移。
+        assert payload["summary"] == self.LONG[:1500]
+        assert result.message == f"子代理 'coding' 完成：{self.LONG[:200]}"
+        # 第二遍复审 P2：外置事实必须走 overflow 同款 artifact/externalized
+        # 白盒事件（web 工件面靠它可见），与 tool/result 一起经 executor 落盘；
+        # 事件载荷逐字段对账 load 回的 Artifact 元数据。
+        externalized = [p for t, p in result.pending_events
+                        if t == "artifact/externalized"]
+        assert len(externalized) == 1, "外置路径必须恰好发一条 externalized 事件"
+        assert externalized[0] == {
+            "artifact_id": ref, "session_id": artifact.session_id,
+            "source_tool": "delegate", "tool_call_id": "",
+            "size": artifact.size, "mime_type": artifact.mime_type,
+        }
+
+    @pytest.mark.asyncio
+    async def test_under_threshold_keeps_payload_without_new_keys(self, tmp_path):
+        """AC-B 未超阈值：data 无 summary_ref / summary_truncated 新键，
+        summary 全文回传（与改动前断言一致）。"""
+        from agent_harness.storage.artifact import FakeArtifactStore
+
+        tool, _ = self._overflow_tool(
+            tmp_path, artifact_store=FakeArtifactStore(), threshold=10**9,
+        )
+        result = await tool.execute(_args("coding", "轻任务"))
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == self.LONG
+        assert "summary_ref" not in payload
+        assert "summary_truncated" not in payload
+
+    @pytest.mark.asyncio
+    async def test_exactly_at_threshold_not_externalized(self, tmp_path):
+        """票面语义「超过」= 严格大于（第二遍复审 P3 边界钉）：estimate == 阈值
+        ⇒ 不外置、不发 externalized 事件、无新键。"""
+        from agent_harness.context.tokens import estimate_tokens
+        from agent_harness.storage.artifact import FakeArtifactStore
+
+        tool, _ = self._overflow_tool(
+            tmp_path, artifact_store=FakeArtifactStore(),
+            threshold=estimate_tokens(self.LONG),
+        )
+        result = await tool.execute(_args("coding", "边界"))
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == self.LONG
+        assert "summary_ref" not in payload
+        assert not [t for t, _ in result.pending_events
+                    if t == "artifact/externalized"]
+
+    @pytest.mark.asyncio
+    async def test_no_store_fails_open_with_full_summary(self, tmp_path):
+        """AC-B fail-open：artifact_store=None ⇒ 不外置、不抛错，全文回传。"""
+        tool, _ = self._overflow_tool(tmp_path, artifact_store=None, threshold=10)
+        result = await tool.execute(_args("coding", "x"))
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == self.LONG
+        assert "summary_ref" not in payload
+        assert "summary_truncated" not in payload
+
+    @pytest.mark.asyncio
+    async def test_no_session_context_fails_open(self, tmp_path):
+        """fail-open：直呼工具（无 run 上下文）拿不到会话命名空间 ⇒ 不外置。"""
+        from agent_harness.session import current_session_var
+        from agent_harness.storage.artifact import FakeArtifactStore
+
+        tool, _ = self._overflow_tool(
+            tmp_path, artifact_store=FakeArtifactStore(), threshold=10,
+        )
+        token = current_session_var.set(None)  # 显式置空，防跨用例上下文泄漏
+        try:
+            result = await tool.execute(_args("coding", "x"))
+        finally:
+            current_session_var.reset(token)
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == self.LONG
+        assert "summary_ref" not in payload
+
+    @pytest.mark.asyncio
+    async def test_zero_threshold_disables_feature(self, tmp_path):
+        """fail-open：阈值 0 = 显式关闭（.env.example 的契约点）——即便 store
+        在场、summary 再长也不外置（审查 P3：`<= 0` 短路分支此前无显式用例）。"""
+        from agent_harness.storage.artifact import FakeArtifactStore
+
+        tool, _ = self._overflow_tool(
+            tmp_path, artifact_store=FakeArtifactStore(), threshold=0,
+        )
+        result = await tool.execute(_args("coding", "x"))
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == self.LONG
+        assert "summary_ref" not in payload
+        assert "summary_truncated" not in payload
+
+    @pytest.mark.asyncio
+    async def test_store_failure_falls_back_to_full_summary(self, tmp_path):
+        """AC-B fail-open：store.save 抛异常 ⇒ 回退现有行为（data 带全文），
+        绝不因外置失败丢结论。"""
+
+        class _BrokenStore:
+            async def save(self, *args: object, **kwargs: object) -> object:
+                raise RuntimeError("对象存储不可用")
+
+        tool, _ = self._overflow_tool(
+            tmp_path, artifact_store=_BrokenStore(), threshold=10,
+        )
+        reset = self._with_parent_session(tmp_path)
+        try:
+            result = await tool.execute(_args("coding", "x"))
+        finally:
+            reset()
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == self.LONG
+        assert "summary_ref" not in payload
+
+    @pytest.mark.asyncio
+    async def test_overflow_externalizes_on_failure_path(self, tmp_path):
+        """AC-B 失败路径：child 失败但 summary 超长时同样 ref 化。
+
+        真实 provider 的失败臂 final_text 恒为空串（runtime 失败臂硬编码），
+        "失败且 summary 很长"经最小替身直达工具层失败回传分支——工具层对
+        status 无特判，成功/失败共用同一段 payload 组装（与生产同路径）。
+        """
+        from types import SimpleNamespace
+
+        from agent_harness.agent.guards import GuardLevel, GuardSignal
+        from agent_harness.multiagent.provider import SubAgentResult
+        from agent_harness.storage.artifact import FakeArtifactStore
+
+        class _StubProvider:
+            def __init__(self, result: SubAgentResult) -> None:
+                # description 属性读 `provider._profiles` 列可选 target（与真实
+                # provider 同名属性同形：dict，sorted() 取键）。
+                self._profiles = {"coding": None, "research_review": None}
+                self._result = result
+
+            def tree_id(self) -> str:
+                return "stub-tree"
+
+            async def reserve_delegation(self, tree_id: str, *, max_delegations: int):
+                return SimpleNamespace(accepted=True, used=0, limit=max_delegations)
+
+            async def run(self, *, target: str, task: str,
+                          constraints: list[str]) -> SubAgentResult:
+                return self._result
+
+            async def observe_delegation_result(
+                self, tree_id: str, fingerprint: str, *, ok: bool,
+            ) -> GuardSignal:
+                return GuardSignal(level=GuardLevel.NONE, tool_name="delegate",
+                                   fingerprint=fingerprint, consecutive_failures=0)
+
+        store = FakeArtifactStore()
+        tool = DelegateTool(
+            _StubProvider(SubAgentResult(
+                agent_id="coding", status="failed",
+                summary=self.LONG, child_session_id="child-stub-1",
+            )),
+            artifact_store=store, summary_overflow_tokens=10,
+        )
+        reset = self._with_parent_session(tmp_path)
+        try:
+            result = await tool.execute(_args("coding", "会失败的重探索"))
+        finally:
+            reset()
+
+        assert not result.ok
+        payload = json.loads(result.metadata["output"])
+        ref = payload["summary_ref"]
+        assert ref, "失败路径同样必须 ref 化（child 失败时结论仍可能很长）"
+        artifact = await store.load(ref)
+        assert artifact.content == self.LONG
+        assert payload["summary_truncated"] is True
+        assert payload["summary"] == self.LONG[:1500]
+        # 失败路径同样发 externalized 事件（成功/失败两臂对称，复审 P2）。
+        externalized = [p for t, p in result.pending_events
+                        if t == "artifact/externalized"]
+        assert len(externalized) == 1
+        assert externalized[0]["artifact_id"] == ref
+        assert externalized[0]["session_id"] == artifact.session_id

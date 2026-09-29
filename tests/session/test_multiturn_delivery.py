@@ -594,11 +594,13 @@ async def test_steer_message_is_not_marked_as_runtime_injected(tmp_path, monkeyp
 async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatch):
     """run 在途时发的消息**不消费** budget，但**判定照跑**。
 
-    同一份请求体不该因为"此刻有没有 run"而换语义：`{max_steps:8, budget:9}` 在空转
+    同一份请求体不该因为"此刻有没有 run"而换语义：越权 budget 在空转
     会话上 422，在活跃 run 上也必须是拒绝，而不是静默入队——入队那版还会在下一次
     投递时按 deployment 默认启动（`deliver_next_undelivered` 不带请求级覆盖）。
+    迁移期 alias `max_steps` 已随 #320 移除：service 层不再接受它（TypeError 钉在
+    下面），wire 层由请求模型 `extra="forbid"` 按未知字段 422。
 
-    判定要看的**所有**声明都在这里逐项过：请求字段 / alias / 档位 ceiling（后者经
+    判定要看的**所有**声明都在这里逐项过：请求字段 / 档位 ceiling（后者经
     `amend.agent_profile` 传入，web 层在非启动分支只保留这一个字段——见
     `tests/web/test_web_amend_validation.py::test_in_flight_message_keeps_only_the_profile_for_judgement`）。
 
@@ -608,7 +610,7 @@ async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatc
     """
     import dataclasses
 
-    from agent_harness.agent.budget import BudgetAliasConflict, BudgetCeilingExceeded
+    from agent_harness.agent.budget import BudgetCeilingExceeded
     from agent_harness.agent.profiles import BUILTIN_PROFILES
     from agent_harness.session.service import AmendOptions
 
@@ -624,12 +626,11 @@ async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatc
     )
     before = [e.type for e in harness.events(session_id)]
 
-    with pytest.raises(BudgetAliasConflict) as conflict:
+    with pytest.raises(TypeError):
         await harness.service.send_message(
             session_id=session_id, content="B", mode="queue",
-            local_max_agent_turns=9, max_steps=8,
+            local_max_agent_turns=9, max_steps=8,  # type: ignore[call-arg]
         )
-    assert "8" in str(conflict.value) and "9" in str(conflict.value)
 
     with pytest.raises(BudgetCeilingExceeded):
         await harness.service.send_message(
@@ -638,10 +639,10 @@ async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatc
         )
 
     # steer 分支同一条判定（顺序也在：预算拒绝先于"steer 必须有在途 run"）。
-    with pytest.raises(BudgetAliasConflict):
+    with pytest.raises(BudgetCeilingExceeded):
         await harness.service.send_message(
             session_id=session_id, content="B", mode="steer",
-            local_max_agent_turns=9, max_steps=8,
+            local_max_agent_turns=10_000,
         )
 
     # 档位 ceiling 也参与判定：内置三档位声明 None（出厂不写死数字），所以这里把
@@ -662,9 +663,10 @@ async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatc
     # queue/cancelled、message/superseded 这类新写的记录）。
     assert [e.type for e in harness.events(session_id)] == before
 
-    # 合法（且不消费）的旧字段仍照旧排队：迁移期兼容不能被这条判定收紧掉。
+    # 合法的新字段仍照旧排队（#320：alias 已移除，排队面只剩 `budget.local`）。
     queued = await harness.service.send_message(
-        session_id=session_id, content="B", mode="queue", max_steps=9,
+        session_id=session_id, content="B", mode="queue",
+        local_max_agent_turns=9,
     )
     assert queued.status == "queued"
     assert [e.data["content"] for e in harness.of_type(session_id, MESSAGE_QUEUED)] == ["B"]
@@ -684,7 +686,7 @@ async def test_rejected_queue_edit_keeps_the_old_queued_item(tmp_path, monkeypat
     从未被接受时只剩前半句——用户既丢了旧项，也没收到新内容。所以预算判定必须
     早于 `cancel_queue` 那次落盘（同 `_assert_supersedable` 已立的纪律）。
     """
-    from agent_harness.agent.budget import BudgetAliasConflict
+    from agent_harness.agent.budget import BudgetCeilingExceeded
 
     gate = asyncio.Event()
     harness = _build_harness(
@@ -704,10 +706,12 @@ async def test_rejected_queue_edit_keeps_the_old_queued_item(tmp_path, monkeypat
     queue_id = queued.queued_message.queue_id
     before = [e.type for e in harness.events(session_id)]
 
-    with pytest.raises(BudgetAliasConflict):
+    # 拒绝成因换成越权 ceiling（#320：alias 冲突这一档已随迁移收口删除）；
+    # 要钉的性质不变——预算拒绝早于 `cancel_queue` 的落盘，旧排队项原样保留。
+    with pytest.raises(BudgetCeilingExceeded):
         await harness.service.send_message(
             session_id=session_id, content="新内容", mode="queue",
-            queue_id=queue_id, local_max_agent_turns=9, max_steps=8,
+            queue_id=queue_id, local_max_agent_turns=10_000,
         )
 
     assert [e.type for e in harness.events(session_id)] == before, "被拒请求不得落盘"

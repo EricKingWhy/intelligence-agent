@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.agent.profiles import AgentSpec
@@ -30,10 +30,11 @@ class _WriteThenKillModel:
     def bind_tools(self, tools, **kwargs):
         return self
 
-    async def ainvoke(self, messages, **kwargs):
+    async def astream(self, messages, **kwargs):
+        # child 走 run_stream（astream）：kill 钩子必须在流式路径上才有效。
         self._calls += 1
         if self._calls == 1:
-            return AIMessage(content="", tool_calls=[{
+            yield AIMessageChunk(content="", tool_calls=[{
                 "id": "coding-write-marker",
                 "name": "write",
                 "args": {
@@ -41,6 +42,7 @@ class _WriteThenKillModel:
                     "content": "written-before-crash",
                 },
             }])
+            return
         sys.stdout.write("KILL_AFTER_CHILD_WORKSPACE_WRITE\n")
         sys.stdout.flush()
         os._exit(91)

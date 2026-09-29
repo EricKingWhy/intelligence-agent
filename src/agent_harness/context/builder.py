@@ -6,18 +6,30 @@ from typing import Any
 
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 
-from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
+from agent_harness.context.compactor import (
+    CompactionFailure,
+    ContextCompactor,
+    ContextWindowExceededError,
+    _is_compaction_summary,
+)
 from agent_harness.context.provider import ContextProvider
+from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
+from agent_harness.session.derive import derive_messages_with_source_ranges
 from agent_harness.session.event import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
+    TASK_PLAN_UPDATED,
     TOOL_RESULT,
     USER_MESSAGE,
+    SessionEvent,
 )
+from agent_harness.session.plan import PlanState, derive_plan
 
 logger = logging.getLogger("agent_harness.context")
 
@@ -29,6 +41,113 @@ __all__ = ["ContextBuilder", "ContextWindowExceededError"]
 _PROJECTING_EVENT_TYPES = frozenset({USER_MESSAGE, MODEL_COMPLETED, TOOL_RESULT})
 
 
+def _insert_before_last_human(
+    messages: list[AnyMessage], message: AnyMessage,
+) -> list[AnyMessage]:
+    """把一条 user-role 消息插在最后一条 HumanMessage 之前（运行时注入的统一位置）。
+
+    位置语义见 `_inject_runtime_context` 的 docstring（ADR-0023 D8）；找不到
+    HumanMessage 时插到末尾——宁可位置退化，不可静默丢弃。
+    """
+    index = len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            index = i
+            break
+    return [*messages[:index], message, *messages[index:]]
+
+
+#: W-29 (#383)：清单重注入块标题。刻意避开 `_is_compaction_summary` 的识别前缀
+#: （"## 原始目标与用户约束"/"## 目标"）与八节摘要的全部标题——注入块是
+#: ephemeral 块，与持久化摘要**绝不同形**，任何把 build 产物喂给摘要识别逻辑
+#: 的消费方（现行 compactor 输入只收投影，此处是防御）都不会误判。
+_PLAN_BLOCK_HEADING = "## 当前进度清单（context/plan）"
+
+#: 事件驱动窗口：清单变更事件之后至多这么多条投影消息内仍算「变更即注入」。
+#: 生产路径里 update_plan 的 ToolResult 恒在清单事件之后、下一次 build 之前，
+#: 窗口必须含它，模型才能在自己刚变更清单后的下一步就看到新表。
+_PLAN_EVENT_DRIVEN_WINDOW = 1
+
+
+def _should_inject_plan(
+    events: list[SessionEvent], fallback_period: int,
+) -> PlanState | None:
+    """W-29 (#383)：清单重注入决策——**纯函数**，只依赖事件流。
+
+    票面硬约束「兜底周期计数器必须是确定性事件计数（durable seq）」的落地：
+    不读 wall-clock、不持有 builder 实例状态，同一份事件流在任何实例、任何
+    时刻、重放多少次都得到同一决策。
+
+    - 无清单 → None（不注入）；
+    - 会话已发生过压缩（存在 COMPACTION_END）→ 恒注入：清单是 PRD §4.6 重注入
+      包里排在摘要之前的一环（"压缩锚点"），接班后必须**持续**在场——判据①
+      与 W-30 判据 1（压缩接班后清单不丢）的耐久读法；
+    - 尚未压缩过走节奏（PRD §4.6：事件驱动 + 周期兜底）：
+      * 事件驱动：距最近一次 `task/plan_updated` ≤ `_PLAN_EVENT_DRIVEN_WINDOW`
+        条投影消息（判据②「变更后下一 build 即含新版」）；
+      * 周期兜底：≥ `fallback_period` 条投影消息无变更后恒注入（判据③
+        「连续 6 条无变更兜底注入一次」；注入后保持在场——本架构注入是逐
+        build 重算的 ephemeral 块，锚点在场比复刻 Cline 的闪烁节奏更稳）；
+      * 中间的静默窗是刻意的 token 经济：模型刚见过表，不必每步重发。
+
+    「消息」计数 = 三类投影事件（USER/MODEL_COMPLETED/TOOL_RESULT）按 durable
+    seq 距最近一次 `task/plan_updated` 的条数。不含压缩摘要 SystemMessage
+    （那是投影产物而非事件类型，压缩后由 COMPACTION_END 分支短路恒注入）；
+    superseded 事件（被 bracket shadow 的 USER_MESSAGE 等）仍留在原始事件流
+    里会计入——计数偏多 = 兜底更早触发，偏差方向安全（P2-5 审查修正的措辞）。
+    """
+    plan = derive_plan(events)
+    if not plan.items:
+        return None
+    if any(event.type == COMPACTION_END for event in events):
+        return plan
+    last_plan_seq = max(
+        (event.seq for event in events if event.type == TASK_PLAN_UPDATED),
+        default=0,
+    )
+    stale = sum(
+        1 for event in events
+        if event.type in _PROJECTING_EVENT_TYPES and event.seq > last_plan_seq
+    )
+    if stale <= _PLAN_EVENT_DRIVEN_WINDOW or stale >= fallback_period:
+        return plan
+    return None
+
+
+def _render_plan_block(plan: PlanState) -> str:
+    """清单块的确定性渲染——逐字来自 `derive_plan` 投影。
+
+    判据①「逐字比对投影」的基准：同一份 PlanState 渲染出的文本逐字节相同，
+    测试用 `derive_plan(events)` 重算比对即可，不需要快照文件。
+    """
+    lines = [_PLAN_BLOCK_HEADING, "当前进度清单（整表覆盖，服务端投影）："]
+    for item in plan.items:
+        lines.append(
+            f"- [{item.status}] {item.content}（{item.active_form}）"
+            f"(id: {item.id}, source: {item.source})"
+        )
+    return "\n".join(lines)
+
+
+def _inject_plan_block(messages: list[AnyMessage], plan_text: str) -> list[AnyMessage]:
+    """把清单块作为一条 SystemMessage 注入（票面契约 4：`context/plan` 系统块，
+    与用户消息、摘要分块，互不串扰）。
+
+    落点（PRD §4.6 顺序「清单 → 摘要」）：存在压缩摘要时插在**第一条摘要之前**；
+    尚无摘要时插在开头连续 SystemMessage 之后（同一系统块区域）。两种落点都只
+    依赖 SystemMessage 分布，不会插进 AI(tool_calls)/ToolResult 配对中间。
+    """
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
+            return [
+                *messages[:index], SystemMessage(content=plan_text), *messages[index:],
+            ]
+    insertion = 0
+    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
+        insertion += 1
+    return [*messages[:insertion], SystemMessage(content=plan_text), *messages[insertion:]]
+
+
 class ContextBuilder:
     """按预算压缩投影与选择 Provider 内容，不修改历史。"""
 
@@ -37,15 +156,25 @@ class ContextBuilder:
         model_provider: Any,
         *,
         max_context_tokens: int = 200_000,
-        auto_compact_threshold: float = 0.80,
-        hard_guard_threshold: float = 0.90,
+        auto_compact_threshold: float = 0.70,
+        hard_guard_threshold: float = 0.85,
         context_providers: list[ContextProvider] | None = None,
         system_prompt: str | None = None,
         runtime_context_provider: Callable[[], str] | None = None,
+        artifact_store: Any | None = None,
+        artifact_read_tool_name: str | None = None,
+        summary_model: Any | None = None,
+        plan_reinject_every_messages: int = 6,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
+        if plan_reinject_every_messages <= 0:
+            # W-29 (#383)：0 会让兜底判据退化为"变更即恒注入"，配错必须响亮失败。
+            raise ValueError("plan_reinject_every_messages must be positive")
         self.model_provider = model_provider
+        # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
+        # 档位选择留配置面（后续票），本层只透传给 compactor。
+        self.summary_model = summary_model
         self.max_context_tokens = max_context_tokens
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
@@ -80,10 +209,42 @@ class ContextBuilder:
         self._last_provider_tokens_by_name: dict[str, int] = {}
         # 最近一次 build 的运行时快照成本（非持久化注入，见 _inject_runtime_context）。
         self._last_runtime_context_tokens: int = 0
+        # W-29 (#383)：最近一次 build 实际注入的清单锚块成本（非持久化注入）。
+        # 独立记账口（票面硬约束 3「计入独立预算」）；usage_snapshot 把它折进
+        # "other"（未归类注入的定义性内容），不另开看板桶（那是 UI 票的面）。
+        self._last_plan_tokens: int = 0
+        # 清单兜底重注入周期（PRD §4.6 Cline Focus Chain 默认值 6，配置可调）。
+        self.plan_reinject_every_messages = plan_reinject_every_messages
+        # W-03 (#347)：可回读 Artifact 前提下的旧 Tool Result 投影裁剪。
+        # artifact_store 为 None（默认）→ pruner 整体缺席，行为与 W-03 之前一致；
+        # 装配时 read_tool_name 必须显式给出——骨架行的回读提示点名**装配期真实
+        # 读回工具**（#186 教训：名字不得写死、不得静默缺省）。
+        if artifact_store is None:
+            if artifact_read_tool_name is not None:
+                raise ValueError("artifact_read_tool_name requires artifact_store")
+            self._pruner: ToolResultPruner | None = None
+        else:
+            if not artifact_read_tool_name:
+                raise ValueError("artifact_store requires artifact_read_tool_name")
+            self._pruner = ToolResultPruner(artifact_store, artifact_read_tool_name)
+        # 最近一次 build 的裁剪决策：session_id → {seq → 骨架行}。**整体替换**
+        # （不增量合并）：重放路径（usage_snapshot）必须逐字节等于最近一次 build
+        # 的投影，决策回退 / 事件 shadow 时旧条目不得残留。
+        self._prune_decisions: dict[str, dict[int, str]] = {}
+        # 最近一次 build 的裁剪账目（测试观察口，生产路径不消费）。
+        self._last_prune_report: PruneReport | None = None
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
-        messages = session.derive_messages()
+        # W-03 (#347)：pruner 在 derive 之后、估算之前接入。裁剪是原位替换
+        # （消息数 / 顺序 / tool_call_id / source seq 不变），估算、provider 注入
+        # 与压缩消费同一份投影——不存在第二视图。
+        source_ranges: list[tuple[int, int] | None] | None = None
+        if self._pruner is None:
+            messages = session.derive_messages()
+        else:
+            pairs = derive_messages_with_source_ranges(session.events)
+            messages, source_ranges = await self._prune_projection(session, pairs)
         token_estimate = self._estimate_tokens_cached(session, messages)
         # 运行时上下文快照（T7）：provider 每次 build **只调一次**——token 估算与
         # 注入必须用同一份文本，否则预算与内容可能不一致（且 callable 的调用
@@ -119,6 +280,21 @@ class ContextBuilder:
                     [SystemMessage(content=self.system_prompt)]
                 )
             token_estimate += self._system_prompt_tokens
+        # W-29 (#383)：清单重注入决策与成本（两条路径共用同一份决策）。决策是
+        # 纯事件推导（见 _should_inject_plan）；token 成本**先计入**本次估算再走
+        # 阈值判定——清单块确实会发给模型，不计数就是系统性低估（看板漏报同源
+        # 教训）。注入动作在各路径装配末段执行（压缩路径在重投影确认**之后**，
+        # 见 build 尾部）；压缩落 bracket 后会重估一次（进入"恒注入"状态）。
+        plan_state = _should_inject_plan(
+            session.events, self.plan_reinject_every_messages,
+        )
+        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
+        plan_tokens = (
+            estimate_message_tokens([SystemMessage(content=plan_text)])
+            if plan_text is not None else 0
+        )
+        token_estimate += plan_tokens
+        self._last_plan_tokens = plan_tokens
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
@@ -126,13 +302,29 @@ class ContextBuilder:
         if token_estimate <= self.max_context_tokens * self.auto_compact_threshold:
             built = await self._with_providers(session, messages, token_estimate)
             built = self._inject_runtime_context(built, runtime_context)
+            if plan_text is not None:
+                built = _inject_plan_block(built, plan_text)
             return self._prepend_system_prompt(built)
-        result = await ContextCompactor(
+        compactor = ContextCompactor(
             self.model_provider, max_context_tokens=self.max_context_tokens,
             auto_compact_threshold=self.auto_compact_threshold,
             hard_guard_threshold=self.hard_guard_threshold,
-        ).compact(messages, token_estimate, events=session.events)
+            summary_model=self.summary_model,
+        )
+        try:
+            result = await compactor.compact(messages, token_estimate, events=session.events,
+                                             source_ranges=source_ranges)
+        except ContextWindowExceededError as error:
+            # W-04 (#348)：异常路径的尝试记录也要落成任务可见状态——builder 是
+            # 唯一持有 session 的层；预检类超限没有 failures，原样保持零事件。
+            self._record_compaction_failures(session, error.failures)
+            raise
+        self._record_compaction_failures(session, result.failures)
         if result.compacted_turn_count:
+            if not result.summary or not result.bracket_id:
+                raise ContextWindowExceededError(
+                    "Refusing to persist an unvalidated compaction summary"
+                )
             # T4 (#134)：写 4-event bracket 替代单个 CONTEXT_COMPACTED。
             # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
             bracket_id = result.bracket_id or ""
@@ -142,8 +334,8 @@ class ContextBuilder:
                 "source_seq_end": result.source_seq_end or 0,
             })
             session.append(CONTEXT_COMPACTED, {
-                "schema": "six_section",
-                "summary": result.summary or "",
+                "schema": "eight_section",
+                "summary": result.summary,
                 "source_seq_start": result.source_seq_start or 0,
                 "source_seq_end": result.source_seq_end or 0,
                 "compacted_turn_count": result.compacted_turn_count,
@@ -154,15 +346,121 @@ class ContextBuilder:
             session.append(COMPACTION_END, {
                 "bracket_id": bracket_id,
             })
-        # 压缩后的 token_estimate 只含 messages，不含 system_prompt / 快照——
-        # 两者都要补回，否则 _with_providers 会把它们占用的预算当作可用空间
-        # 分配给 provider 内容（快照的补回与 system_prompt 同理由）。
+            # W-04 (#348)：落 bracket 后重投影确认——从已持久化的事件重算"下一次
+            # build 会看到的投影"，与本次产物比对（裁剪路径重放本 build 的裁剪决策，
+            # 保证与 compact 输入同一视图）。不合即 fail-closed：bracket 已在 JSONL
+            # （历史不删除），但本次执行不得继续在未核验的投影上工作。
+            projected = self._reproject(session)
+            if projected != result.messages:
+                raise ContextWindowExceededError(
+                    "Compaction bracket re-projection mismatch; refusing to "
+                    "continue on an unverifiable projection"
+                )
+            recheck = estimate_message_tokens(projected)
+            # 复核式刻意不含 plan_tokens（P2-1 审查修正的注释声明）：本式守的是
+            # **持久化压缩结果**是否越硬护栏（fail-closed 面）；清单锚块是
+            # ephemeral 注入，其成本已经从 provider remaining 里扣减（见下
+            # provider_estimate），总量越界由下一 build 的阈值判定（含清单）自纠。
+            if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
+                    > self.max_context_tokens * self.hard_guard_threshold):
+                raise ContextWindowExceededError(
+                    f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
+                )
+        # W-29 (#383)：落 bracket 后重算清单决策——本次 build 可能恰好触发首次
+        # 压缩，决策必须在 bracket 事件在场的前提下重估，才能进入"压缩后恒注入"
+        # 状态（判据①：压缩后模型输入含完整清单）。
+        plan_state = _should_inject_plan(
+            session.events, self.plan_reinject_every_messages,
+        )
+        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
+        if plan_text is not None:
+            plan_tokens = estimate_message_tokens([SystemMessage(content=plan_text)])
+        self._last_plan_tokens = plan_tokens
+        # 压缩后的 token_estimate 只含 messages，不含 system_prompt / 快照 /
+        # 清单锚块——全部补回，否则 _with_providers 会把它们占用的预算当作可用
+        # 空间分配给 provider 内容（快照与清单的补回与 system_prompt 同理由）。
         provider_estimate = (
-            result.token_estimate + (self._system_prompt_tokens or 0) + runtime_context_tokens
+            result.token_estimate + (self._system_prompt_tokens or 0)
+            + runtime_context_tokens + plan_tokens
         )
         built = await self._with_providers(session, result.messages, provider_estimate)
         built = self._inject_runtime_context(built, runtime_context)
+        if plan_text is not None:
+            built = _inject_plan_block(built, plan_text)
+        # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
+        # （messages + system prompt + 运行时快照，与 :103 的看板口径同源）落
+        # [auto, hard) 带：有效用量 < auto 的健康路径不发；成功压缩的 messages
+        # 估算必然 < auto 线（compactor 的 target 闸门），但 system/快照可能把它
+        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。
+        pressure_text = DEFAULT_REGISTRY.assemble("frame:context_pressure").meta_user_text
+        if (self.auto_compact_threshold * self.max_context_tokens <= provider_estimate
+                < self.hard_guard_threshold * self.max_context_tokens and pressure_text):
+            built = _insert_before_last_human(
+                built, HumanMessage(content=pressure_text),
+            )
         return self._prepend_system_prompt(built)
+
+    def _record_compaction_failures(
+        self, session: Session, failures: list[CompactionFailure],
+    ) -> None:
+        """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
+
+        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 进入压缩时
+        的估算）；`message` 已在 compactor 侧按"只装自家文案或类型名"脱敏。失败
+        不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
+        """
+        for failure in failures:
+            session.append(CONTEXT_COMPACTION_FAILED, {
+                "attempt": failure.attempt,
+                "error_class": failure.error_class,
+                "message": failure.message,
+                "auto_limit": failure.auto_limit,
+                "hard_limit": failure.hard_limit,
+                "token_estimate": failure.token_estimate,
+            })
+
+    def _reproject(self, session: Session) -> list[AnyMessage]:
+        """从已持久化的事件重算模型可见投影（W-04 重投影确认的读数来源）。
+
+        裁剪路径重放**本 build 刚落下的**裁剪决策（与 usage_snapshot 同一读法），
+        保证重算视图与 compact 的输入一致——否则被裁的骨架行会被当成失配。
+        """
+        if self._pruner is None:
+            return session.derive_messages()
+        pairs = derive_messages_with_source_ranges(session.events)
+        return self._pruner.apply(
+            pairs, self._prune_decisions.get(session.session_id, {}),
+        )
+
+    async def _prune_projection(
+        self, session: Session,
+        pairs: list[tuple[AnyMessage, tuple[int, int] | None]],
+    ) -> tuple[list[AnyMessage], list[tuple[int, int] | None]]:
+        """W-03 (#347)：对 derive 产物做投影级裁剪，返回 (messages, source_ranges)。
+
+        裁剪只替换被裁 seq 的 ToolMessage.content，消息数与顺序不变，因此
+        source_ranges 与返回的 messages 位置一一对应（压缩器 ranges 覆盖入参
+        就按这个对应关系取值）。
+        """
+        messages, report = await self._pruner.prune(pairs, session.events)
+        sid = session.session_id
+        pruned = report.pruned_seqs
+        if pruned or sid in self._prune_decisions:
+            # memo 失效（地雷 1）：memo 以 (session_id, seq) 为 key，前提是投影
+            # 内容终身不变——裁剪破坏该前提。失效「本次被裁 ∪ 上次被裁」：
+            # 失效不彻底 = 高估（安全方向）；失效错条目 = 低估（危险方向）。
+            # 后一个集合防「决策回退」（上次裁了这次没裁，理论上被校验粘滞
+            # 挡住，这里双保险）时 memo 残留骨架成本造成低估。
+            stale = pruned | self._prune_decisions.get(sid, {}).keys()
+            self._token_memo = {
+                key: cost for key, cost in self._token_memo.items()
+                if not (key[0] == sid and key[1] in stale)
+            }
+        self._prune_decisions[sid] = {
+            record.seq: record.skeleton for record in report.pruned
+        }
+        self._last_prune_report = report
+        return messages, [source_range for _message, source_range in pairs]
 
     def _inject_runtime_context(
         self, messages: list[AnyMessage], runtime_context: str | None,
@@ -189,12 +487,9 @@ class ContextBuilder:
         """
         if not runtime_context:
             return messages
-        index = len(messages)
-        for i in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[i], HumanMessage):
-                index = i
-                break
-        return [*messages[:index], HumanMessage(content=runtime_context), *messages[index:]]
+        return _insert_before_last_human(
+            messages, HumanMessage(content=runtime_context),
+        )
 
     def _prepend_system_prompt(self, messages: list[AnyMessage]) -> list[AnyMessage]:
         """把 system_prompt 作为列表首条 SystemMessage 注入（runtime context，非事件）。
@@ -285,16 +580,31 @@ class ContextBuilder:
         注入成本才是同一份真相（上次审查正是这里出过"live 与缓存两个视图不一致"）。
 
         工具两组由端点层持有 registry 单独估算后合并（T4 求和不变式在端点层闭合）。
+
+        W-03 (#347)：pruner 装配时，messages 桶走与 build 同一条裁剪路径
+        （地雷 2，#200 双视图教训）。本方法是同步读口而 store 校验是 async，
+        因此重放**最近一次 build 落下的决策**（seq → 骨架行）——同一 builder
+        实例上与 build 产物逐字节一致；build 之后新到达的结果尚未裁，
+        估值偏高（安全方向），下一次 build 收敛。在途 run 的看板读的正是
+        刚 build 过的同一个 builder 实例，常态下两者一致。
         """
-        messages_tokens = estimate_message_tokens(session.derive_messages())
+        if self._pruner is None:
+            messages_tokens = estimate_message_tokens(session.derive_messages())
+        else:
+            pairs = derive_messages_with_source_ranges(session.events)
+            messages = self._pruner.apply(
+                pairs, self._prune_decisions.get(session.session_id, {}),
+            )
+            messages_tokens = estimate_message_tokens(messages)
         system_prompt_tokens = self._system_prompt_tokens or 0
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)
-        # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照。这是"其他"
-        # 的定义性内容，不是"总量减各项"的残差——残差写法在总量只含 messages 时
-        # 会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
+        # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
+        # （W-29 #383，`_last_plan_tokens` 的实测值）。这是"其他"的定义性内容
+        # （未归类注入），不是"总量减各项"的残差——残差写法在总量只含 messages
+        # 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
         other = (sum(v for k, v in by_name.items() if k != "skills")
-                 + self._last_runtime_context_tokens)
+                 + self._last_runtime_context_tokens + self._last_plan_tokens)
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,

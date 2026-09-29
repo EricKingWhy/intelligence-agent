@@ -1360,6 +1360,22 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectContextCompacted,
     summarize: summarizeContextCompacted,
   },
+  // W-04（#348）：摘要尝试失败的任务可见状态——失败**不是**压缩：derive 不投影它，
+  // 不带来新的投影状态。与 MEMORY_UPDATED / GUARD_STUCK 同形登记为 no-op ⇒ 已知
+  // 类型、不进 `unknown_events`；失败时间线的展示面归后续票，本行只负责 `Record`
+  // 的穷尽性（生成物新增类型时 tsc 失败直到登记）。
+  [EventType.CONTEXT_COMPACTION_FAILED]: {
+    apply: noopProjection,
+    summarize: emptySummary,
+  },
+  // W-26（#380）：`task/plan_updated` 是进度清单整表覆盖的状态事件——不投影成消息、
+  // 不带来新的投影状态。与 CONTEXT_COMPACTION_FAILED 同形登记为 no-op ⇒ 已知类型、
+  // 不进 `unknown_events`；清单渲染面归 W-27（#381 Web+桌面渲染）与 W-28（#382 TUI 渲染），
+  // 本行只负责 `Record` 的穷尽性。
+  [EventType.TASK_PLAN_UPDATED]: {
+    apply: noopProjection,
+    summarize: emptySummary,
+  },
   [EventType.MEMORY_DEGRADED]: { apply: noopProjection, summarize: emptySummary },
   // #298（T6 引入 `memory/updated`，T8 补登记）：与 MEMORY_DEGRADED 同形——提交型记忆变更，
   // 载荷只有 count / memory IDs / action counts / job ID，**不带内容**（PRD V2 §6.5）。
@@ -1374,6 +1390,13 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectToolFailureGuard,
     summarize: summarizeToolFailureGuard,
   },
+  // #317（T9）：`guard/stuck` 是循环护栏的第二条事件面，**它自己不带来新的投影状态**——
+  // `level=replan` 的纠正以 `user/message`（`injected_by='stuck_guard'`）落地，渲染层照
+  // `projectUserMessage` 的既有标记显示为系统提示条；`level=paused` 的那一步由紧随其后的
+  // `run/paused(reason=stuck)` 承载（`run/paused.data.stuck` 是它的可读投影）。
+  // 与 `MODEL_REQUEST` / `MEMORY_UPDATED` 同形：登记为 no-op ⇒ 已知类型、不进
+  // `unknown_events`；护栏卡面的展示面归后续票，本行只负责 `Record` 的穷尽性。
+  [EventType.GUARD_STUCK]: { apply: noopProjection, summarize: emptySummary },
   [EventType.MODEL_FALLBACK]: { apply: projectModelFallback, summarize: summarizeModelFallback },
   [EventType.MODEL_CHANGED]: { apply: projectModelChanged, summarize: summarizeModelChanged },
   // F18-B（#283）：会话内改档落真投影——「最后一条 permission/changed 胜」（ADR-0041 D3）。
