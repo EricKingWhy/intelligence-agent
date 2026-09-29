@@ -243,6 +243,41 @@ records, and Qiniu test objects were verified absent; the dedicated Knowledge co
 pre-existed and was neither created nor dropped by the gate. Synthetic Langfuse trace,
 dataset, and experiment evidence was retained with content fields omitted.
 
+### D12 — Make the project-gold gate measure stored facts and raw hybrid Recall@6
+
+2026-09-30 review found that the evaluator counted a write case as correct when it had
+the expected labels and at least one persisted record, without checking that the record
+retained the gold fact or penalizing extra writes. It also read Recall@6 from
+`MEMORY_RECALLED`, which records only the items left after token-budget filtering. The
+runner now compares committed ADD/UPDATE records against one synthetic `write_fact`
+anchor per expected write, retaining only match counts in the report. A match requires
+the full ordered gold phrase after case and punctuation normalization; overlapping tokens
+cannot mask changed values or negation. Record action, kind, scope, and source authority
+must also match. The normalized stored content must equal the full gold anchor, allowing
+only an optional leading `Record` / `Recorded` label; a correct phrase followed by a
+contradiction does not count. `write_precision` remains at the PRD's 0.95 threshold and is computed
+over persisted ADD/UPDATE records, including writes observed on cases that expected NOOP.
+A separate `write_target_coverage` check at 0.95 ensures expected writes cannot disappear
+from that denominator. The synthetic gold corpus version advances to 1.9.0; the PRD
+threshold is unchanged.
+
+Recall@6 is captured from the first six IDs returned by the same real `hybrid_search`
+call before context-budget selection. The event and prompt still record only injected
+memories; raw search results are exposed to this gate through a callback carrying IDs
+only. The report maps matching records to fixed gold labels and stores no memory text.
+
+The real-gold runner requires the explicit `--env-file` path and constructs Settings
+from that file, so an absent path cannot silently fall back to the checkout `.env`. A
+vector-store close failure is recorded as a gate failure while temporary SQLite cleanup
+and report generation still run. The project-gold runner is one lane only; it does not
+claim that the full #304 static, frontend, browser, Langfuse, Knowledge, or Qiniu lanes
+were executed. This gate uses the user-approved Cline-compatible primary and Mimo
+fallback only for evaluation; it adds no dedicated memory model and does not change
+production model aliases. Sampling temperature is set to zero only in this runner;
+production Memory V2 calls retain their configured value. API secret probes require the
+exact secret-policy rejection after a successful ordinary edit. Replay cases measure
+terminal idempotency separately and do not claim that replay reruns secret policy.
+
 ## 4. Verification contract
 
 落实证据位于 `tests/observability/test_tracer_port.py`、`tests/memory/v2/test_v2_executor.py`、

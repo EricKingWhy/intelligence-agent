@@ -12,7 +12,7 @@ Prove the fully integrated V2 memory product works with real configured models a
 
 ## Context
 
-The user requires the final real Gate only after all implementation tickets are integrated. Local memory model aliases are `memory.primary → senseaudio` and `memory.fallback → qwen`. Real Milvus uses a dedicated temporary Memory collection. Langfuse test dataset/experiment/trace evidence is retained and checked for accidental duplicates. Milvus, Knowledge, and Qiniu temporary test data must be cleaned and verified at zero.
+The user requires the final real Gate only after all implementation tickets are integrated. The approved project-gold gate uses the configured Cline-compatible primary and Mimo fallback for this evaluation lane only; it does not change production `memory.primary` / `memory.fallback` aliases or add a dedicated memory model. Real Milvus uses a dedicated temporary Memory collection. Langfuse test dataset/experiment/trace evidence is retained and checked for accidental duplicates. Milvus, Knowledge, and Qiniu temporary test data must be cleaned and verified at zero.
 
 Credentials exist only in ignored local configuration. This ticket may check whether required keys are configured but must never print values.
 
@@ -105,3 +105,13 @@ parallelizable: no; run only on the fully integrated frozen tree
 - Required Langfuse evidence remains available and all other temporary external data is verified clean.
 - No credential value appears in logs, issues, documents, traces, screenshots, or terminal output.
 - Tracker and PHASE_STATUS point to the frozen SHA, machine evidence, and final verdict.
+
+## Approved evaluator and runner corrections (2026-09-30)
+
+- The project gold corpus is versioned as `1.9.0` and gives each expected ADD/UPDATE one synthetic content anchor. Reports retain only content-free match counts. The existing 95% write-precision threshold is computed over persisted ADD/UPDATE records, including writes observed on cases that expected NOOP; a separate 95% target-coverage metric prevents missing expected writes from disappearing from the denominator. After case and punctuation normalization, the entire stored content must equal the anchor, optionally preceded by a `Record` / `Recorded` label; appended contradictions or changed values cannot count as matches. Action, kind, scope, and source authority must also match. No PRD threshold was lowered.
+- Recall@6 is measured from the first six results returned by the real hybrid search, before profile/collection token-budget filtering. Final context injection remains a separate lifecycle check; report identifiers are allowlisted labels, not record text.
+- The runner must require the caller-supplied `--env-file`, load that file explicitly, and fail closed when it is absent; it must not silently read the checkout's default `.env`.
+- A Milvus client close error must not skip temporary SQLite cleanup or report generation. Any client-close or local-cleanup error fails the gate.
+- Sampling temperature is set to zero in the real-gold evaluation runner only; production Memory V2 calls retain their configured temperature.
+- API secret-write probes require the exact secret-policy rejection after a successful ordinary edit. Replay idempotency is measured separately and is not described as replay rerunning secret policy.
+- `scripts/run_memory_v2_real_gold_gate.py` is only the project-memory-gold lane. It cannot satisfy AC1/AC7/AC8 or be reported as the complete #304 release gate by itself.
