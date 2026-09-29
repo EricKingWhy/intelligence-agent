@@ -96,3 +96,24 @@ async def test_project_upsert_search_and_delete_use_namespaced_trusted_routing()
         "tenant": "tenant-a", "user": "user-a", "scope": "project",
         "route": "project-x", "memory": record.id,
     }
+
+@pytest.mark.asyncio
+async def test_repeated_upsert_uses_the_same_stable_milvus_primary_key() -> None:
+    vectors = _InitializedVectorStore()
+    index = MilvusMemoryV2Index(vectors)
+    record = make_record(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        memory_id="memory-stable",
+        scope=MemoryScope.PROJECT,
+        project_id="project-x",
+    )
+
+    await index.upsert(record)
+    first_id = vectors.calls[-1][1]["data"][0]["id"]
+    await index.upsert(record)
+    second_id = vectors.calls[-1][1]["data"][0]["id"]
+
+    assert first_id == second_id
+    assert len(first_id) == 64
+    assert [operation for operation, _ in vectors.calls] == ["upsert", "upsert"]

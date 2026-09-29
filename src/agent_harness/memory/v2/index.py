@@ -156,6 +156,18 @@ class MemoryV2IndexRelay:
         async with self._lock:
             return await self._flush()
 
+    async def rebuild_from_authority(self) -> int:
+        """Rebuild the derived index from SQLite and fail if the outbox does not drain.
+
+        The operator command must hold the workspace lock, publish its startup fence, and
+        reject active bypass leases so no application process can race a stale in-flight write.
+        """
+        queued_count = await self._store.enqueue_active_index_rebuild()
+        await self.flush()
+        if await self._store.pending(limit=1):
+            raise RuntimeError("memory index rebuild did not converge; outbox remains pending")
+        return queued_count
+
     async def delete_now(self, memories) -> None:
         """Remove vectors after authoritative tombstones commit, under the relay lock."""
         async with self._lock:

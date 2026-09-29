@@ -494,3 +494,27 @@ LangMem / 其他项目的代码，**该票**必须补 license notice——本 AD
 - **覆盖**：本票的 commit 必须在 `docs/review_ledger.d/` 有归属行（`scripts/check_review_coverage.py`）。
 - **ADR 索引**：本 ADR 已在 `docs/PHASE_STATUS.md` 的 Memory V2 条目下被引用（2026-09-24 补），
   否则后续票找不到它。
+
+### D7.1 - explicit recovery after total derived-index loss (2026-09-30)
+
+SQLite remains the sole rebuild source. The operator command `scripts/rebuild_memory_v2_index.py`
+rebuilds only active V2 records from the existing `<workspace_dir>/memory-v2.db`; it does not
+rebuild legacy V1 records in `memory.db`. It requires an existing V2 database/schema, takes the
+workspace `InstanceLock`, refuses `ALLOW_SHARED_ROOT`, and publishes the separate
+`.memory-v2-index-rebuild-in-progress` fence before checking active shared-root writer leases.
+The JSON is written and synced to a same-directory temporary file before atomic publication;
+a retry recovers the narrow interruption window after publication. Normal startup and late
+`ALLOW_SHARED_ROOT` registration both refuse that fence. A failed run retains it so the operator
+can stop the writer and retry; only a successful drained rebuild clears it while holding the
+workspace lock. This fence is root-local and only understood by the current code: operators must
+stop every writer that can target the same Milvus collection from any workspace root, clone, or
+host, including old builds and auto-restarting services, before running the command. It is
+separate from the destructive clean-slate cutover fence. The command has no
+collection argument: it uses the application's configured Memory collection and rejects an exact
+alias of the separate Knowledge collection. It never drops or clears a collection.
+
+The store atomically requeues each current `active` record as an outbox UPSERT using only its
+trusted routing fields; the existing relay and stable-ID Milvus adapter perform the writes.
+Existing DELETE intents remain authoritative for inactive records. Repeating the command
+converges by upsert, while a failed relay leaves durable outbox work and returns a non-zero
+process status. Tests use a fake index; no live collection is accessed as part of this decision.
