@@ -90,8 +90,11 @@ def _should_inject_plan(
         build 重算的 ephemeral 块，锚点在场比复刻 Cline 的闪烁节奏更稳）；
       * 中间的静默窗是刻意的 token 经济：模型刚见过表，不必每步重发。
 
-    「消息」计数 = 投影事件（USER/MODEL_COMPLETED/TOOL_RESULT，与 derive_messages
-    同一投影集合）按 durable seq 距最近一次清单变更事件的条数。
+    「消息」计数 = 三类投影事件（USER/MODEL_COMPLETED/TOOL_RESULT）按 durable
+    seq 距最近一次 `task/plan_updated` 的条数。不含压缩摘要 SystemMessage
+    （那是投影产物而非事件类型，压缩后由 COMPACTION_END 分支短路恒注入）；
+    superseded 事件（被 bracket shadow 的 USER_MESSAGE 等）仍留在原始事件流
+    里会计入——计数偏多 = 兜底更早触发，偏差方向安全（P2-5 审查修正的措辞）。
     """
     plan = derive_plan(events)
     if not plan.items:
@@ -354,6 +357,10 @@ class ContextBuilder:
                     "continue on an unverifiable projection"
                 )
             recheck = estimate_message_tokens(projected)
+            # 复核式刻意不含 plan_tokens（P2-1 审查修正的注释声明）：本式守的是
+            # **持久化压缩结果**是否越硬护栏（fail-closed 面）；清单锚块是
+            # ephemeral 注入，其成本已经从 provider remaining 里扣减（见下
+            # provider_estimate），总量越界由下一 build 的阈值判定（含清单）自纠。
             if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
                     > self.max_context_tokens * self.hard_guard_threshold):
                 raise ContextWindowExceededError(

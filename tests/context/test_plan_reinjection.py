@@ -30,6 +30,7 @@ from agent_harness.session import (
     CONTEXT_COMPACTED,
     CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
+    TOOL_RESULT,
     USER_MESSAGE,
     JsonlSessionStore,
     Session,
@@ -142,12 +143,26 @@ async def test_after_compaction_model_input_contains_full_plan_verbatim(tmp_path
 
 @pytest.mark.asyncio
 async def test_plan_change_next_build_contains_new_version(tmp_path):
-    """判据②：清单变更后下一 build 即含新版（事件驱动窗口，M=0）。"""
+    """判据②：清单变更后下一 build 即含新版（事件驱动窗口，stale=1）。
+
+    生产形态复现（P2-2 审查修正）：update_plan 工具回合 = MODEL_COMPLETED
+    (tool_calls) → `task/plan_updated` → TOOL_RESULT → 下一次 build。TOOL_RESULT
+    钉住事件驱动窗口 =1 的边界——窗口若回归成 0，本用例即红（stale=1 落进
+    静默窗，生产「变更后下一 build 即含新版」会破）。
+    """
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "开始。"})
     _apply_plan(session, PLAN_ITEMS_V1)
     session.append(MODEL_COMPLETED, {"content": "推进中。"})
+    session.append(MODEL_COMPLETED, {
+        "content": "",
+        "tool_calls": [{"id": "call-plan-2", "name": "update_plan",
+                        "args": {"items": PLAN_ITEMS_V2}}],
+    })
     _apply_plan(session, PLAN_ITEMS_V2)
+    session.append(TOOL_RESULT, {
+        "tool_call_id": "call-plan-2", "content": "清单已更新。",
+    })
 
     messages = await ContextBuilder(ScriptedModel([])).build(session)
 
