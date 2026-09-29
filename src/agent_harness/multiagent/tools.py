@@ -176,7 +176,9 @@ class DelegateTool(Tool):
         }
         # 结论 ref 化（W-31.3 / #415）：成功与失败两条回传路径共用本 payload，
         # 在分支前统一处理；未超阈值/特性关/外置失败时 payload 原样返回。
-        payload = await self._externalize_summary_if_overflowed(result, payload)
+        payload, externalize_event = await self._externalize_summary_if_overflowed(
+            result, payload,
+        )
         # 真实来源字段：无则省略（绝不伪造/补零，ADR-0015 决策 12）
         for field_name in ("citations", "artifacts", "changed_files", "unresolved"):
             value = getattr(result, field_name, [])
@@ -196,6 +198,10 @@ class DelegateTool(Tool):
                 "status": result.status, "summary": result.summary,
             }),
         ]
+        # 外置事实走 overflow 同款 artifact/externalized 白盒事件（第二遍复审
+        # P2：web 工件面靠它可见）；未外置时为 None 不发。
+        if externalize_event is not None:
+            pending_events.append(externalize_event)
         if result.status == "completed":
             completed = ToolResult.success(
                 message=f"子代理 '{result.agent_id}' 完成：{result.summary[:200]}",
@@ -217,23 +223,29 @@ class DelegateTool(Tool):
 
     async def _externalize_summary_if_overflowed(
         self, result: Any, payload: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], tuple[str, dict[str, Any]] | None]:
         """summary 超阈值时把全文外置 ArtifactStore，payload 只留摘要行 + ref。
+
+        返回 (payload, externalize_event)；event 非 None 时由调用方并入
+        pending_events（overflow 同款 artifact/externalized，含 size/mime_type）。
 
         fail-open 三级（W-31.3 / #415）：特性关（store=None 或阈值 ≤0）、执行期
         无会话上下文、save 抛异常——任一发生都回退现有行为（payload 带全文），
         绝不因外置失败丢结论。session_id 取执行期的父会话：装配层给本工具的
         artifact store 绑定的是根会话命名空间（LocalArtifactStore 校验
-        session_id 必须等于命名空间），child_session_id 会被它拒收。
+        session_id 必须等于命名空间），child_session_id 会被它拒收。深层委派
+        （depth ≥ 2）时执行期会话本身已不在根命名空间 ⇒ save 被同一校验拒收、
+        同口径 fail-open——本特性在嵌套委派内层有意不生效（结论不丢，provider
+        侧工具输出截断托底）。
         """
         if (self._artifact_store is None or self._summary_overflow_tokens <= 0
                 or estimate_tokens(result.summary) <= self._summary_overflow_tokens):
-            return payload
+            return payload, None
         session = current_session_var.get()
         if session is None:
             # Tool.execute 协议不带 session；直呼工具（无 run 上下文）时拿不到
             # 会话命名空间——fail-open 不外置，与 store=None 同口径。
-            return payload
+            return payload, None
         try:
             artifact = await self._artifact_store.save(
                 session.session_id, result.summary,
@@ -244,13 +256,19 @@ class DelegateTool(Tool):
                 tool_call_id="",
             )
         except Exception:  # noqa: BLE001 - 外置失败必须回退全文，不丢结论
-            return payload
+            return payload, None
+        deferred = ("artifact/externalized", {
+            "artifact_id": artifact.artifact_id,
+            "session_id": session.session_id,
+            "source_tool": self.name, "tool_call_id": "",
+            "size": artifact.size, "mime_type": artifact.mime_type,
+        })
         return {
             **payload,
             "summary": result.summary[:_EXTERNALIZED_SUMMARY_HEAD_CHARS],
             "summary_ref": artifact.artifact_id,
             "summary_truncated": True,
-        }
+        }, deferred
 
     @staticmethod
     def _fingerprint(target: str, task: str, constraints: list[str]) -> str:

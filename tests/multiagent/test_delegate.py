@@ -553,6 +553,17 @@ class TestSummaryRefExternalization:
         # 既有 200 字符截断不动。两个长度各钉一条，防止未来无声漂移。
         assert payload["summary"] == self.LONG[:1500]
         assert result.message == f"子代理 'coding' 完成：{self.LONG[:200]}"
+        # 第二遍复审 P2：外置事实必须走 overflow 同款 artifact/externalized
+        # 白盒事件（web 工件面靠它可见），与 tool/result 一起经 executor 落盘；
+        # 事件载荷逐字段对账 load 回的 Artifact 元数据。
+        externalized = [p for t, p in result.pending_events
+                        if t == "artifact/externalized"]
+        assert len(externalized) == 1, "外置路径必须恰好发一条 externalized 事件"
+        assert externalized[0] == {
+            "artifact_id": ref, "session_id": artifact.session_id,
+            "source_tool": "delegate", "tool_call_id": "",
+            "size": artifact.size, "mime_type": artifact.mime_type,
+        }
 
     @pytest.mark.asyncio
     async def test_under_threshold_keeps_payload_without_new_keys(self, tmp_path):
@@ -570,6 +581,26 @@ class TestSummaryRefExternalization:
         assert payload["summary"] == self.LONG
         assert "summary_ref" not in payload
         assert "summary_truncated" not in payload
+
+    @pytest.mark.asyncio
+    async def test_exactly_at_threshold_not_externalized(self, tmp_path):
+        """票面语义「超过」= 严格大于（第二遍复审 P3 边界钉）：estimate == 阈值
+        ⇒ 不外置、不发 externalized 事件、无新键。"""
+        from agent_harness.context.tokens import estimate_tokens
+        from agent_harness.storage.artifact import FakeArtifactStore
+
+        tool, _ = self._overflow_tool(
+            tmp_path, artifact_store=FakeArtifactStore(),
+            threshold=estimate_tokens(self.LONG),
+        )
+        result = await tool.execute(_args("coding", "边界"))
+
+        assert result.ok
+        payload = json.loads(result.data["output"])
+        assert payload["summary"] == self.LONG
+        assert "summary_ref" not in payload
+        assert not [t for t, _ in result.pending_events
+                    if t == "artifact/externalized"]
 
     @pytest.mark.asyncio
     async def test_no_store_fails_open_with_full_summary(self, tmp_path):
@@ -702,3 +733,9 @@ class TestSummaryRefExternalization:
         assert artifact.content == self.LONG
         assert payload["summary_truncated"] is True
         assert payload["summary"] == self.LONG[:1500]
+        # 失败路径同样发 externalized 事件（成功/失败两臂对称，复审 P2）。
+        externalized = [p for t, p in result.pending_events
+                        if t == "artifact/externalized"]
+        assert len(externalized) == 1
+        assert externalized[0]["artifact_id"] == ref
+        assert externalized[0]["session_id"] == artifact.session_id
