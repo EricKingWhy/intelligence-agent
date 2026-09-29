@@ -203,9 +203,11 @@ class TestAgentLoopOneTool:
 
         message_types = [type(m).__name__ for m in second_round]
         assert isinstance(second_round[0], SystemMessage)
-        assert message_types[1:] == ["HumanMessage", "AIMessage", "ToolMessage"]
-        assert second_round[2].tool_calls[0]["id"] == TOOL_CALL_ID
-        assert second_round[3].tool_call_id == TOOL_CALL_ID
+        assert message_types[1:] == [
+            "HumanMessage", "HumanMessage", "AIMessage", "ToolMessage",
+        ]
+        assert second_round[3].tool_calls[0]["id"] == TOOL_CALL_ID
+        assert second_round[4].tool_call_id == TOOL_CALL_ID
 
 
 # ---------- 场景③：连续两轮工具 ----------
@@ -270,20 +272,21 @@ class TestAgentLoopTwoConsecutiveToolRounds:
 
         third_round = scripted.snapshots[2].messages
 
-        assert len(third_round) == 6
+        assert len(third_round) == 7
         assert isinstance(third_round[0], SystemMessage)
         message_types = [type(m).__name__ for m in third_round]
         assert message_types[1:] == [
+            "HumanMessage",
             "HumanMessage",
             "AIMessage",
             "ToolMessage",
             "AIMessage",
             "ToolMessage",
         ]
-        assert third_round[2].tool_calls[0]["id"] == TOOL_CALL_ID_A
-        assert third_round[3].tool_call_id == TOOL_CALL_ID_A
-        assert third_round[4].tool_calls[0]["id"] == TOOL_CALL_ID_B
-        assert third_round[5].tool_call_id == TOOL_CALL_ID_B
+        assert third_round[3].tool_calls[0]["id"] == TOOL_CALL_ID_A
+        assert third_round[4].tool_call_id == TOOL_CALL_ID_A
+        assert third_round[5].tool_calls[0]["id"] == TOOL_CALL_ID_B
+        assert third_round[6].tool_call_id == TOOL_CALL_ID_B
         assert TOOL_CALL_ID_A != TOOL_CALL_ID_B
 
 
@@ -459,9 +462,9 @@ class TestAgentLoopUnknownTool:
         second_round = scripted.snapshots[1].messages
         assert isinstance(second_round[0], SystemMessage)
         assert [type(m).__name__ for m in second_round[1:]] == [
-            "HumanMessage", "AIMessage", "ToolMessage",
+            "HumanMessage", "HumanMessage", "AIMessage", "ToolMessage",
         ]
-        tool_msg = second_round[3]
+        tool_msg = second_round[4]
         assert tool_msg.tool_call_id == "call_unknown_001"
         # content 是 ToolResult JSON：multiply 未注册 -> TOOL_NOT_FOUND。
         assert "multiply" in tool_msg.content
@@ -494,7 +497,7 @@ class TestAgentLoopToolException:
         assert result.steps == 2
         second_round = scripted.snapshots[1].messages
         assert isinstance(second_round[0], SystemMessage)
-        tool_msg = second_round[3]
+        tool_msg = second_round[4]
         assert tool_msg.tool_call_id == "call_boom_001"
         # content 是 ToolResult JSON，error_code 是结构化码：
         # boom 抛 ValueError -> Executor 分类表未命中 -> TOOL_EXECUTION_ERROR。

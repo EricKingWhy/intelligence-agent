@@ -19,7 +19,11 @@ from langchain_core.messages import (
 
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
-from agent_harness.session.derive import ProtectedFact, serialize_protected_facts
+from agent_harness.session.derive import (
+    COMPACTION_SUMMARY_MESSAGE_NAME,
+    ProtectedFact,
+    serialize_protected_facts,
+)
 from agent_harness.session.event import SessionEvent
 
 logger = logging.getLogger("agent_harness.context.compactor")
@@ -228,13 +232,20 @@ class ContextCompactor:
                 summary_text = _assemble_summary(early, model_sections, protected_facts)
                 _validate_summary(summary_text, early, protected_facts)
                 early_tokens = estimate_message_tokens(early)
-                summary_tokens = estimate_message_tokens([SystemMessage(content=summary_text)])
+                summary_tokens = estimate_message_tokens([HumanMessage(content=summary_text)])
                 if summary_tokens >= early_tokens:
                     raise ContextWindowExceededError(
                         f"Summary ({summary_tokens} tokens) is not smaller than "
                         f"compressed segment ({early_tokens} tokens)"
                     )
-                compacted = [*prefix, SystemMessage(content=summary_text), *recent]
+                compacted = [
+                    *prefix,
+                    HumanMessage(
+                        content=summary_text,
+                        name=COMPACTION_SUMMARY_MESSAGE_NAME,
+                    ),
+                    *recent,
+                ]
                 if estimate_message_tokens(compacted) + reserved_tokens >= self._auto_limit:
                     raise ContextWindowExceededError(
                         "LLM summary does not reach compaction target"
@@ -315,7 +326,11 @@ class ContextCompactor:
             return CompactionResult(list(messages), 0, token_estimate, False)
         return CompactionResult(
             compacted,
-            sum(isinstance(message, HumanMessage) for message in early),
+            sum(
+                isinstance(message, HumanMessage)
+                and not _is_compaction_summary(message)
+                for message in early
+            ),
             count,
             False,
             source_seq_start=source_seq_start,
@@ -402,10 +417,10 @@ def _programmatic_summary_sections(
                 add_once(identifiers, match.group())
 
     for message in messages:
-        if isinstance(message, HumanMessage):
-            user_messages.append(message.content)
-        if (isinstance(message, SystemMessage)
-                and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")):
+        if (
+            _is_compaction_summary(message)
+            and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")
+        ):
             previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
             previous_users = decode_summary_values(previous[0])
             if protected_facts is None:
@@ -418,6 +433,8 @@ def _programmatic_summary_sections(
             for value in previous_paths:
                 add_once(file_paths, value)
             continue
+        if isinstance(message, HumanMessage):
+            user_messages.append(message.content)
         visit(message.model_dump(mode="json"))
 
     return {
@@ -437,9 +454,13 @@ def _programmatic_summary_sections(
     }
 
 
-def _is_compaction_summary(message: SystemMessage) -> bool:
-    """识别新旧持久化摘要，避免把旧摘要当不可压缩系统前缀。"""
-    return message.content.startswith((f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n"))
+def _is_compaction_summary(message: AnyMessage) -> bool:
+    """识别带内部标记的新摘要及旧版 SystemMessage 摘要。"""
+    if isinstance(message, HumanMessage):
+        return message.name == COMPACTION_SUMMARY_MESSAGE_NAME
+    return isinstance(message, SystemMessage) and message.content.startswith(
+        (f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n")
+    )
 
 
 def _assemble_summary(

@@ -44,6 +44,14 @@ MODEL_SECTIONS = """## 已完成工作与关键决策
 SNAPSHOT = "RUNTIME_SNAPSHOT_TEXT_9f3a"
 
 
+def _facts_message(messages):
+    return next(
+        message for message in messages
+        if isinstance(message, HumanMessage)
+        and message.content.startswith("## Protected task facts\n")
+    )
+
+
 class _RecordingProvider:
     """记录每次 select 拿到的 remaining_tokens（验证预算扣减），不注入任何内容。
 
@@ -81,8 +89,9 @@ async def test_runtime_context_injected_before_last_user_message(tmp_path):
 
     messages = await builder.build(session)
 
-    assert len(messages) == 3
-    assert messages[0].content.startswith("## Protected task facts\n")
+    assert len(messages) == 4
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
     assert messages[-1].content == "你好"
     assert messages[-2].content == SNAPSHOT
 
@@ -95,8 +104,9 @@ async def test_runtime_context_absent_by_default(tmp_path):
     builder = ContextBuilder(ScriptedModel([]))
 
     messages = await builder.build(session)
-    assert messages[0].content.startswith("## Protected task facts\n")
-    assert messages[1:] == session.derive_messages()
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
+    assert messages[2:] == session.derive_messages()
 
 
 @pytest.mark.asyncio
@@ -113,8 +123,9 @@ async def test_runtime_context_provider_returning_blank_is_skipped(tmp_path, bla
 
     messages = await builder.build(session)
 
-    assert messages[0].content.startswith("## Protected task facts\n")
-    assert messages[1:] == session.derive_messages()
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
+    assert messages[2:] == session.derive_messages()
 
 
 @pytest.mark.asyncio
@@ -169,9 +180,11 @@ async def test_runtime_context_midtolloop_position(tmp_path):
     )
     messages = await builder.build(session)
 
-    contents = [m.content for m in messages]
-    assert contents[0].startswith("## Protected task facts\n")
-    assert contents[1:] == [SNAPSHOT, "用工具查一下", "", "文件内容"]
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
+    assert [m.content for m in messages[2:]] == [
+        SNAPSHOT, "用工具查一下", "", "文件内容"
+    ]
 
     # 配对未被切开：带 tool_calls 的 AIMessage 紧跟其 ToolMessage
     ai_index = next(
@@ -199,11 +212,13 @@ async def test_runtime_context_after_system_prompt_and_providers(tmp_path):
     assert isinstance(messages[0], SystemMessage)
     assert messages[0].content == "你是 coding agent。"
     assert isinstance(messages[1], SystemMessage)
-    assert messages[1].content.startswith("## Protected task facts\n")
+    assert "Runtime permission and approval checks are authoritative" in messages[1].content
     assert isinstance(messages[2], SystemMessage)
     assert messages[2].content == "[provider 注入]"
-    assert messages[3].content == SNAPSHOT
-    assert messages[4].content == "你好"
+    assert isinstance(messages[3], HumanMessage)
+    assert messages[3].content.startswith("## Protected task facts\n")
+    assert messages[4].content == SNAPSHOT
+    assert messages[5].content == "你好"
 
 
 @pytest.mark.asyncio

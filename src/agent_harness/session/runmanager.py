@@ -30,6 +30,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.memory.types import memory_session_var
@@ -287,7 +288,7 @@ class RunManager:
 
     def launch(
         self, session: Session, runtime: AgentRuntime, user_input: str | None,
-        user_input_metadata: dict[str, str] | None = None,
+        user_input_metadata: dict[str, Any] | None = None,
     ) -> tuple[ManagedRun, Subscriber]:
         """启动 detached run 并返回（run, 首个订阅者）。
 
@@ -320,7 +321,7 @@ class RunManager:
 
     async def _drive(
         self, run: ManagedRun, runtime: AgentRuntime, user_input: str | None,
-        user_input_metadata: dict[str, str] | None,
+        user_input_metadata: dict[str, Any] | None,
     ) -> None:
         """run task 本体：驱动 run_stream，终结时广播哨兵。"""
         token = memory_session_var.set(run.session.session_id)

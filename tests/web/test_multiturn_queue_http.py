@@ -95,7 +95,9 @@ async def _collect_stream(port: int, method: str, path: str,
         else:
             context = client.stream(method, f"http://127.0.0.1:{port}{path}")
         async with context as response:
-            assert response.status_code == 200
+            if response.status_code != 200:
+                await response.aread()
+            assert response.status_code == 200, response.text
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -222,6 +224,99 @@ async def test_messages_accept_explicit_authorization_revocation_and_veto_links(
             and fact.evidence_event_id == user_event.event_id
             for fact in facts
         )
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_messages_register_explicit_typed_source_bound_facts(tmp_path, monkeypatch):
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        sid = await _empty_session(port)
+        from agent_harness.session import USER_MESSAGE
+        from agent_harness.session.derive import derive_protected_facts
+        from agent_harness.session.store import JsonlSessionStore
+
+        content = (
+            "约束：只读检查；验收标准：所有测试通过；"
+            "精确标识 ORD-84721；决策：先跑完整回归；"
+            "未完成项：检查 Milvus recall。"
+        )
+        annotations = [
+            {"fact_type": "constraint", "value": "只读检查"},
+            {
+                "fact_type": "acceptance_criterion",
+                "value": "所有测试通过",
+            },
+            {"fact_type": "exact_identifier", "value": "ORD-84721"},
+            {"fact_type": "confirmed_decision", "value": "先跑完整回归"},
+            {"fact_type": "task_progress", "value": "未完成项：检查 Milvus recall"},
+        ]
+        frames = await _collect_stream(
+            port,
+            "POST",
+            f"/api/sessions/{sid}/messages",
+            {"content": content, "protected_facts": annotations},
+        )
+
+        assert frames and frames[-1]["type"] == "run/completed"
+        events = JsonlSessionStore(root=tmp_path / "sessions").read_events(sid)
+        source = next(
+            event for event in events
+            if event.type == USER_MESSAGE and event.data.get("protected_facts")
+        )
+        facts = [
+            fact for fact in derive_protected_facts(events)
+            if fact.source_event_id == source.event_id
+            if fact.type in {
+                "constraint",
+                "acceptance_criterion",
+                "exact_identifier",
+                "confirmed_decision",
+                "task_progress",
+            }
+        ]
+
+        assert source.data["protected_facts"] == annotations
+        assert {fact.type for fact in facts} == {
+            "constraint",
+            "acceptance_criterion",
+            "exact_identifier",
+            "confirmed_decision",
+            "task_progress",
+        }
+        assert all(fact.source_event_id == source.event_id for fact in facts)
+        assert all(fact.source_seq == source.seq for fact in facts)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_invalid_protected_fact_annotation_is_rejected_without_user_event(
+    tmp_path, monkeypatch,
+):
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        sid = await _empty_session(port)
+        from agent_harness.session import USER_MESSAGE
+        from agent_harness.session.event import SESSION_STARTED
+        from agent_harness.session.store import JsonlSessionStore
+
+        status, _ = await _post(
+            port,
+            f"/api/sessions/{sid}/messages",
+            {
+                "content": "只读检查。",
+                "protected_facts": [
+                    {"fact_type": "constraint", "value": "允许写入"}
+                ],
+            },
+        )
+
+        events = JsonlSessionStore(root=tmp_path / "sessions").read_events(sid)
+        assert status == 422
+        assert [event.type for event in events] == [SESSION_STARTED]
+        assert all(event.type != USER_MESSAGE for event in events)
     finally:
         await _shutdown(server, serve_task)
 

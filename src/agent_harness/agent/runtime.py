@@ -1053,7 +1053,7 @@ class AgentRuntime:
         appended: list[SessionEvent] = []
         for steer in self._applicable_steers(drained, run_id):
             user_data = {"content": steer.content, "steer_id": steer.steer_id}
-            for key in ("revoke_fact_id", "refutes_event_id"):
+            for key in ("revoke_fact_id", "refutes_event_id", "protected_facts"):
                 value = getattr(steer, key, None)
                 if value is not None:
                     user_data[key] = value
@@ -1113,8 +1113,8 @@ class AgentRuntime:
     async def run_stream(
         self, session: Session, user_input: str | None,
         cancel_reason_supplier: Callable[[], str] | None = None,
-        user_input_metadata: dict[str, str] | None = None,
         result_holder: list[AgentRunResult] | None = None,
+        user_input_metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """流式驱动 Agent Loop，逐条 yield AgentEvent。
 
@@ -1154,7 +1154,7 @@ class AgentRuntime:
         self, session: Session, user_input: str | None, *, stream: bool,
         result_holder: list[AgentRunResult] | None = None,
         cancel_reason_supplier: Callable[[], str] | None = None,
-        user_input_metadata: dict[str, str] | None = None,
+        user_input_metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """共享的主循环——run 和 run_stream 的唯一实现，消除重复。
 
@@ -1238,7 +1238,11 @@ class AgentRuntime:
                 message_data.update(
                     {
                         key: user_input_metadata[key]
-                        for key in ("revoke_fact_id", "refutes_event_id")
+                        for key in (
+                            "revoke_fact_id",
+                            "refutes_event_id",
+                            "protected_facts",
+                        )
                         if user_input_metadata is not None
                         and key in user_input_metadata
                     }

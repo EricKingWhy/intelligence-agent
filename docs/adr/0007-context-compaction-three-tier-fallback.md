@@ -50,13 +50,15 @@ LLM 摘要可能失败（模型超时、格式不对、拒绝生成）。失败�
 > `trigger_dimension=max_context_tokens`，ADR-0033 边界 5）——"停止"不再意味着终结。
 > 便宜摘要模型接缝（`summary_model`）同票就位，缺省 = 主模型，装配留后续票。
 
-**第 1 层 — LLM 摘要**：取早期完整 turns，送给同一个 ModelProvider 的 `ainvoke()`，prompt 要求产出结构化 summary（至少保留 facts / decisions / constraints / failed_attempts / unresolved / artifact_refs / citations / important tool outcomes——spec §5 列举）。产出为一条 `SystemMessage` 注入 messages 头部。
+**第 1 层 — LLM 摘要**：取早期完整 turns，送给同一个 ModelProvider 的 `ainvoke()`，prompt 要求产出结构化 summary（至少保留 facts / decisions / constraints / failed_attempts / unresolved / artifact_refs / citations / important tool outcomes——spec §5 列举）。产出为一条 `HumanMessage` 注入 messages 头部。摘要来自历史用户、模型和工具内容，属于不可信上下文，不得提升为系统指令。
 
 **第 2 层 — Deterministic fallback**：不用 LLM。机械提取：
 - HumanMessage → 原文截断保留（前 200 字符）
 - AIMessage → 保留 tool_calls 列表（丢 content）
 - ToolMessage → 保留 `tool_call_id` + content 截断（前 100 字符）
-拼成一条 `SystemMessage` 注入头部。信息损失大但零失败面。
+拼成一条 `HumanMessage` 注入头部。信息损失大但零失败面。
+
+> **2026-09-29 修订（#346 信任边界）**：压缩摘要以及 ProtectedFact 的值都作为 `HumanMessage` 上下文注入；只有静态运行时策略和授权规则使用 `SystemMessage`。摘要即使经过校验，也不能获得系统指令权限。
 
 **第 3 层 — Hard guard 拒绝**：两层降级后 token 估算仍超 `hard_guard_threshold` → 抛 `ContextWindowExceededError`。Runtime 捕获后终止当前 run（spec §8："必须停止或要求用户处理"）。不继续发送超窗口请求。
 

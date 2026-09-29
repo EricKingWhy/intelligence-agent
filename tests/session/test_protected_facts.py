@@ -10,6 +10,7 @@ from agent_harness.session import (
 from agent_harness.session.derive import (
     build_protected_fact_data,
     derive_protected_facts,
+    undelivered_inputs,
 )
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
@@ -22,6 +23,7 @@ from agent_harness.session.event import (
     RUN_COMPLETED,
     RUN_PAUSED,
     RUN_STARTED,
+    STEER_REQUESTED,
     SessionEvent,
 )
 from agent_harness.session.fork import fork_session
@@ -284,6 +286,18 @@ def test_confirmed_runtime_facts_project_and_resolved_operations_disappear(tmp_p
     assert by_source[paused.event_id].value["state"] == "run/paused"
     assert by_source[operation.event_id].type == "unresolved_operation"
     assert by_source[artifact.event_id].value["artifact_ref"] == "local://artifact-1"
+
+    user_source = session.append(USER_MESSAGE, {"content": "已完成项：继续处理。"})
+    with pytest.raises(ValueError, match="source"):
+        session.register_protected_fact(
+            fact_type="work_boundary",
+            value="已完成项：继续处理。",
+            source_event_id=user_source.event_id,
+        )
+    assert next(
+        fact for fact in derive_protected_facts(session.events)
+        if fact.source_event_id == paused.event_id
+    ).status == "active"
 
     session.append(MESSAGE_SUPERSEDED, {"superseded_seq": permission.seq})
     assert next(
@@ -717,3 +731,440 @@ async def test_fork_projects_permission_inherited_at_its_boundary(tmp_path):
     }
     assert authorization.source_event_id == child.events[0].event_id
     assert authorization.session_id == child.session_id
+
+
+def test_explicit_user_annotations_project_as_source_linked_facts(tmp_path):
+    session = _session(tmp_path)
+    content = "约束：只读检查；验收：保留 ORD-84721；决策：先跑回归。"
+    source = session.append(
+        USER_MESSAGE,
+        {
+            "content": content,
+            "protected_facts": [
+                {"fact_type": "constraint", "value": "只读检查"},
+                {"fact_type": "acceptance_criterion", "value": "保留 ORD-84721"},
+                {"fact_type": "exact_identifier", "value": "ORD-84721"},
+                {"fact_type": "confirmed_decision", "value": "先跑回归"},
+            ],
+        },
+    )
+
+    facts = derive_protected_facts(session.events)
+
+    annotated = [fact for fact in facts if fact.type != "user_goal"]
+    assert {fact.type for fact in annotated} == {
+        "constraint",
+        "acceptance_criterion",
+        "exact_identifier",
+        "confirmed_decision",
+    }
+    assert all(fact.source_event_id == source.event_id for fact in annotated)
+    assert all(fact.source_seq == source.seq for fact in annotated)
+    assert all(fact.status == "active" for fact in annotated)
+
+
+def test_user_annotation_must_match_direct_message_before_append(tmp_path):
+    session = _session(tmp_path)
+
+    with pytest.raises(ValueError, match="match the direct user message"):
+        session.append(
+            USER_MESSAGE,
+            {
+                "content": "只读检查。",
+                "protected_facts": [
+                    {"fact_type": "constraint", "value": "允许写入"}
+                ],
+            },
+        )
+
+    assert len(session.events) == 1
+
+
+def test_explicit_fact_change_supersedes_only_the_named_fact(tmp_path):
+    session = _session(tmp_path)
+    first = session.append(
+        USER_MESSAGE,
+        {
+            "content": "验收标准是 3 个用例通过。",
+            "protected_facts": [
+                {
+                    "fact_type": "acceptance_criterion",
+                    "value": "3 个用例通过",
+                }
+            ],
+        },
+    )
+    first_fact = next(
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "acceptance_criterion"
+    )
+    second = session.append(
+        USER_MESSAGE,
+        {
+            "content": "验收标准改为 5 个用例通过。",
+            "protected_facts": [
+                {
+                    "fact_type": "acceptance_criterion",
+                    "value": "5 个用例通过",
+                    "supersedes_fact_id": first_fact.fact_id,
+                }
+            ],
+        },
+    )
+
+    facts = derive_protected_facts(session.events)
+    by_id = {fact.fact_id: fact for fact in facts}
+
+    assert first.event_id == first_fact.source_event_id
+    assert second.source_event_ids == [first.event_id]
+    assert by_id[first_fact.fact_id].status == "superseded"
+    updated = next(
+        fact for fact in facts
+        if fact.type == "acceptance_criterion" and fact.source_event_id == second.event_id
+    )
+    assert updated.value == "5 个用例通过"
+    assert updated.status == "active"
+
+
+def test_user_annotation_supersession_requires_an_existing_same_type_fact(tmp_path):
+    session = _session(tmp_path)
+    prior = session.append(
+        USER_MESSAGE,
+        {
+            "content": "约束：只读检查。",
+            "protected_facts": [
+                {"fact_type": "constraint", "value": "只读检查"}
+            ],
+        },
+    )
+    prior_fact = next(
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "constraint"
+    )
+
+    with pytest.raises(ValueError, match="earlier fact of the same type"):
+        session.append(
+            USER_MESSAGE,
+            {
+                "content": "验收：测试全绿。",
+                "protected_facts": [
+                    {
+                        "fact_type": "acceptance_criterion",
+                        "value": "测试全绿",
+                        "supersedes_fact_id": prior_fact.fact_id,
+                    }
+                ],
+            },
+        )
+
+    assert session.events[-1].event_id == prior.event_id
+
+
+def test_queued_and_steer_annotations_survive_event_stream_rehydration(tmp_path):
+    session = _session(tmp_path)
+    queue_facts = [{"fact_type": "constraint", "value": "只读检查"}]
+    steer_facts = [{"fact_type": "exact_identifier", "value": "ORD-84721"}]
+    session.append(
+        MESSAGE_QUEUED,
+        {
+            "queue_id": "queue-1",
+            "content": "只读检查后继续。",
+            "protected_facts": queue_facts,
+        },
+    )
+    session.append(
+        STEER_REQUESTED,
+        {
+            "steer_id": "steer-1",
+            "run_id": "run-1",
+            "content": "保留 ORD-84721。",
+            "protected_facts": steer_facts,
+        },
+    )
+
+    pending = undelivered_inputs(session.events)
+
+    assert [item.protected_facts for item in pending] == [queue_facts, steer_facts]
+
+
+def test_delayed_revocation_does_not_replace_a_newer_authorization(tmp_path):
+    session = Session.start(
+        JsonlSessionStore(tmp_path),
+        session_id="task",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    original = next(
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "authorization"
+    )
+    changed = session.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "workspace-write", "auto_approve": False},
+    )
+    delayed_revoke = session.append(
+        USER_MESSAGE,
+        {
+            "content": "撤销先前的只读授权。",
+            "revoke_fact_id": original.fact_id,
+        },
+    )
+
+    facts = derive_protected_facts(session.events)
+    updated_authorization = next(
+        fact for fact in facts
+        if fact.type == "authorization" and fact.source_event_id == changed.event_id
+    )
+    revocation = next(
+        fact for fact in facts
+        if fact.type == "authorization_revocation"
+        and fact.source_event_id == delayed_revoke.event_id
+    )
+    original_after = next(fact for fact in facts if fact.fact_id == original.fact_id)
+
+    assert original_after.superseded_by_fact_id == updated_authorization.fact_id
+    assert updated_authorization.status == "active"
+    assert revocation.status == "superseded"
+    assert revocation.superseded_by_fact_id == updated_authorization.fact_id
+
+
+@pytest.mark.asyncio
+async def test_fork_remaps_revocation_of_parent_session_authorization(tmp_path):
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta = SqliteSessionMetaStore(tmp_path / "meta.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="parent",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    parent_authorization = next(
+        fact for fact in derive_protected_facts(parent.events)
+        if fact.type == "authorization"
+    )
+    revoke = parent.append(
+        USER_MESSAGE,
+        {
+            "content": "撤销当前授权。",
+            "revoke_fact_id": parent_authorization.fact_id,
+        },
+    )
+    parent.append(RUN_STARTED, {})
+    parent.append(RUN_COMPLETED, {})
+    anchor = parent.append(USER_MESSAGE, {"content": "继续剩余工作。"})
+
+    child = await fork_session(
+        store,
+        meta,
+        parent.session_id,
+        boundary_user_message_seq=anchor.seq,
+        child_session_id="child",
+    )
+
+    child_revoke = next(
+        event for event in child.events
+        if event.type == USER_MESSAGE and event.data.get("content") == revoke.data["content"]
+    )
+    facts = derive_protected_facts(child.events)
+    child_authorization = next(
+        fact for fact in facts if fact.type == "authorization"
+    )
+    child_revocation = next(
+        fact for fact in facts if fact.type == "authorization_revocation"
+    )
+
+    assert child_revoke.data["revoke_fact_id"] == child_authorization.fact_id
+    assert child_revoke.source_event_ids == [child.events[0].event_id]
+    assert child_authorization.status == "superseded"
+    assert child_revocation.source_event_id == child_revoke.event_id
+
+
+@pytest.mark.asyncio
+async def test_fork_remaps_revocation_of_latest_permission_at_boundary(tmp_path):
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta = SqliteSessionMetaStore(tmp_path / "meta.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="parent",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    parent.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "workspace-write", "auto_approve": False},
+    )
+    current_authorization = max(
+        (
+            fact for fact in derive_protected_facts(parent.events)
+            if fact.type == "authorization"
+        ),
+        key=lambda fact: fact.source_seq,
+    )
+    revoke = parent.append(
+        USER_MESSAGE,
+        {
+            "content": "撤销当前授权。",
+            "revoke_fact_id": current_authorization.fact_id,
+        },
+    )
+    anchor = parent.append(USER_MESSAGE, {"content": "继续处理。"})
+
+    child = await fork_session(
+        store,
+        meta,
+        parent.session_id,
+        boundary_user_message_seq=anchor.seq,
+        child_session_id="child",
+    )
+
+    child_revoke = next(
+        event for event in child.events
+        if event.type == USER_MESSAGE and event.data.get("content") == revoke.data["content"]
+    )
+    child_facts = derive_protected_facts(child.events)
+    child_authorization = next(
+        fact for fact in child_facts if fact.type == "authorization"
+    )
+    child_revocation = next(
+        fact for fact in child_facts if fact.type == "authorization_revocation"
+    )
+
+    assert child_authorization.value == {
+        "permission_mode": "workspace-write",
+        "auto_approve": False,
+    }
+    assert child_revoke.data["revoke_fact_id"] == child_authorization.fact_id
+    assert child_authorization.status == "superseded"
+    assert child_revocation.source_event_id == child_revoke.event_id
+
+
+@pytest.mark.asyncio
+async def test_fork_drops_superseded_revocation_reference_when_state_is_replaced(tmp_path):
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta = SqliteSessionMetaStore(tmp_path / "meta.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="parent",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    old_authorization = next(
+        fact for fact in derive_protected_facts(parent.events)
+        if fact.type == "authorization"
+    )
+    parent.append(
+        USER_MESSAGE,
+        {
+            "content": "撤销先前授权。",
+            "revoke_fact_id": old_authorization.fact_id,
+        },
+    )
+    parent.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "workspace-write", "auto_approve": False},
+    )
+    anchor = parent.append(USER_MESSAGE, {"content": "继续处理。"})
+
+    child = await fork_session(
+        store,
+        meta,
+        parent.session_id,
+        boundary_user_message_seq=anchor.seq,
+        child_session_id="child",
+    )
+
+    child_revoke = next(
+        event for event in child.events
+        if event.type == USER_MESSAGE and event.data.get("content") == "撤销先前授权。"
+    )
+    child_facts = derive_protected_facts(child.events)
+    child_authorization = next(
+        fact for fact in child_facts if fact.type == "authorization"
+    )
+
+    assert "revoke_fact_id" not in child_revoke.data
+    assert child_revoke.source_event_ids == []
+    assert child_authorization.value == {
+        "permission_mode": "workspace-write",
+        "auto_approve": False,
+    }
+    assert child_authorization.status == "active"
+    assert all(fact.type != "authorization_revocation" for fact in child_facts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pending_type", "pending_data"),
+    [
+        (
+            MESSAGE_QUEUED,
+            {"queue_id": "queued-1"},
+        ),
+        (
+            STEER_REQUESTED,
+            {"steer_id": "steer-1", "run_id": "run-pending"},
+        ),
+    ],
+)
+async def test_fork_remaps_pending_input_authorization_before_delivery(
+    tmp_path, pending_type, pending_data
+):
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta = SqliteSessionMetaStore(tmp_path / "meta.db")
+    await meta.initialize()
+    parent = Session.start(
+        store,
+        session_id="parent",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    parent_authorization = next(
+        fact for fact in derive_protected_facts(parent.events)
+        if fact.type == "authorization"
+    )
+    content = "撤销当前授权，保留精确编号 ORD-84721。"
+    parent.append(
+        pending_type,
+        {
+            **pending_data,
+            "content": content,
+            "revoke_fact_id": parent_authorization.fact_id,
+            "protected_facts": [
+                {"fact_type": "exact_identifier", "value": "ORD-84721"}
+            ],
+        },
+    )
+    anchor = parent.append(USER_MESSAGE, {"content": "继续剩余工作。"})
+
+    child = await fork_session(
+        store,
+        meta,
+        parent.session_id,
+        boundary_user_message_seq=anchor.seq,
+        child_session_id="child",
+    )
+
+    pending = undelivered_inputs(child.events)
+    assert len(pending) == 1
+    assert pending[0].revoke_fact_id != parent_authorization.fact_id
+    assert pending[0].protected_facts == [
+        {"fact_type": "exact_identifier", "value": "ORD-84721"}
+    ]
+
+    delivered = child.append(
+        USER_MESSAGE,
+        {
+            "content": pending[0].content,
+            "revoke_fact_id": pending[0].revoke_fact_id,
+            "protected_facts": pending[0].protected_facts,
+        },
+    )
+    assert delivered.data["revoke_fact_id"] != parent_authorization.fact_id
+    assert any(
+        fact.type == "authorization_revocation" and fact.source_event_id == delivered.event_id
+        for fact in derive_protected_facts(child.events)
+    )
+    assert any(
+        fact.type == "exact_identifier"
+        and fact.source_event_id == delivered.event_id
+        and fact.value == "ORD-84721"
+        for fact in derive_protected_facts(child.events)
+    )

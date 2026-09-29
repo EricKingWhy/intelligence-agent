@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.compactor import (
@@ -107,7 +107,8 @@ class TestDeriveMessagesBracket:
         messages = derive_messages(events)
         # shadowed 的 seq 1-2 不应出现；只有 summary + current request
         assert len(messages) == 2
-        assert isinstance(messages[0], SystemMessage)
+        assert isinstance(messages[0], HumanMessage)
+        assert messages[0].name == "context_compaction_summary"
         assert LEGACY_SUMMARY in messages[0].content
         assert isinstance(messages[1], HumanMessage)
         assert messages[1].content == "current request"
@@ -177,8 +178,8 @@ class TestDeriveMessagesBracket:
         messages = derive_messages(events)
         # 两个 summary + 一个 current
         assert len(messages) == 3
-        assert isinstance(messages[0], SystemMessage)
-        assert isinstance(messages[1], SystemMessage)
+        assert isinstance(messages[0], HumanMessage)
+        assert isinstance(messages[1], HumanMessage)
         assert isinstance(messages[2], HumanMessage)
 
     def test_newer_covering_bracket_replaces_older_summary(self):
@@ -250,8 +251,8 @@ class TestCompactorBracketMetadata:
         result = await ContextCompactor(
             model, max_context_tokens=8000,
         ).compact(messages, estimate_message_tokens(messages))
-        # 摘要消息应该是 SystemMessage，内容按八节顺序组成
-        assert isinstance(result.messages[0], SystemMessage)
+        # 摘要消息应该是 HumanMessage，内容按八节顺序组成
+        assert isinstance(result.messages[0], HumanMessage)
         assert result.summary is not None
         assert [line for line in result.summary.splitlines() if line.startswith("## ")] == [
             "## 原始目标与用户约束", "## 保护事实表",
@@ -426,7 +427,11 @@ class TestBuilderWritesBracket:
 
         reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
         messages = reloaded.derive_messages()
-        summaries = [message for message in messages if isinstance(message, SystemMessage)]
+        summaries = [
+            message for message in messages
+            if isinstance(message, HumanMessage)
+            and message.content.startswith("## 原始目标与用户约束\n")
+        ]
         latest = next(
             event for event in reversed(reloaded.events)
             if event.type == CONTEXT_COMPACTED
@@ -527,6 +532,10 @@ class TestCompactionWithPrunedToolResults:
         # source 区间覆盖被压缩的原始事件（seq 1..13：user + 3×(model+call+artifact+result)）
         assert starts[0].data["source_seq_start"] == 1
         assert starts[0].data["source_seq_end"] == 13
-        # 压缩后的投影：摘要 + 当前请求
-        assert isinstance(messages[0], SystemMessage)
+        # 压缩后的投影：摘要 + 当前请求（静态事实策略在摘要前）
+        summary = next(
+            message for message in messages
+            if message.name == "context_compaction_summary"
+        )
+        assert isinstance(summary, HumanMessage)
         assert messages[-1].content == "当前请求"

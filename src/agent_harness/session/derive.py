@@ -30,7 +30,6 @@ from langchain_core.messages import (
     AIMessage,
     AnyMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
 
@@ -77,8 +76,10 @@ _USER_FACT_TYPES = frozenset(
         "acceptance_criterion",
         "exact_identifier",
         "confirmed_decision",
+        "task_progress",
     }
 )
+_USER_INPUT_FACT_TYPES = _USER_FACT_TYPES - {"authorization_revocation"}
 _USER_SOURCE_TYPES = frozenset({USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED})
 _RUN_BOUNDARY_TYPES = frozenset(
     {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED, RUN_PAUSED}
@@ -185,6 +186,62 @@ def _user_value_matches(value: Any, source: SessionEvent) -> bool:
         return False
 
 
+def validate_user_protected_fact_annotations(
+    content: Any, annotations: Any
+) -> list[dict[str, Any]]:
+    """Validate explicit, source-bound fact annotations on a direct user input."""
+    if not isinstance(content, str) or not content:
+        raise ValueError("protected facts require a direct user message")
+    if not isinstance(annotations, list) or len(annotations) > 32:
+        raise ValueError("protected_facts must be a list of at most 32 annotations")
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for annotation in annotations:
+        if not isinstance(annotation, dict) or set(annotation) - {
+            "fact_type",
+            "value",
+            "supersedes_fact_id",
+        }:
+            raise ValueError("protected fact annotation has unsupported fields")
+        fact_type = annotation.get("fact_type")
+        value = annotation.get("value")
+        supersedes_id = annotation.get("supersedes_fact_id")
+        if not isinstance(fact_type, str) or fact_type not in _USER_INPUT_FACT_TYPES:
+            raise ValueError("protected fact annotation type is unsupported")
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > 10_000
+            or value not in content
+        ):
+            raise ValueError(
+                "protected fact value must match the direct user message"
+            )
+        if supersedes_id is not None and (
+            not isinstance(supersedes_id, str)
+            or not supersedes_id
+            or len(supersedes_id) > 200
+        ):
+            raise ValueError("supersedes_fact_id must be a non-empty fact id")
+        identity = (fact_type, value, supersedes_id)
+        if identity in seen:
+            raise ValueError("duplicate protected fact annotation")
+        seen.add(identity)
+        normalized.append(
+            {
+                "fact_type": fact_type,
+                "value": value,
+                **(
+                    {"supersedes_fact_id": supersedes_id}
+                    if supersedes_id is not None
+                    else {}
+                ),
+            }
+        )
+    return normalized
+
+
 def _failed_tool_result(evidence: SessionEvent) -> dict[str, Any] | None:
     if evidence.type != TOOL_RESULT:
         return None
@@ -249,6 +306,29 @@ def validate_user_fact_links(
     refs: list[str] = []
     revoke_id = data.get("revoke_fact_id")
     refutes_id = data.get("refutes_event_id")
+    annotations = data.get("protected_facts")
+    if annotations is not None:
+        if data.get("injected_by"):
+            raise ValueError("only direct user input can register protected facts")
+        normalized_annotations = validate_user_protected_fact_annotations(
+            data.get("content"), annotations
+        )
+        referenced_facts = {
+            fact.fact_id: fact
+            for fact in derive_protected_facts(events)
+            if fact.session_id == session_id
+        }
+        for annotation in normalized_annotations:
+            supersedes_id = annotation.get("supersedes_fact_id")
+            if supersedes_id is None:
+                continue
+            superseded = referenced_facts.get(supersedes_id)
+            if superseded is None or superseded.type != annotation["fact_type"]:
+                raise ValueError(
+                    "supersedes_fact_id must reference an earlier fact of the same type"
+                )
+            if superseded.source_event_id not in refs:
+                refs.append(superseded.source_event_id)
     if data.get("injected_by") and (revoke_id is not None or refutes_id is not None):
         raise ValueError("only direct user input can link protected facts")
 
@@ -308,6 +388,11 @@ def _expected_fact_id(data: dict[str, Any]) -> str:
     return "pf-" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
 
 
+def protected_fact_id(data: dict[str, Any]) -> str:
+    """Return the stable identity for a protected-fact registration payload."""
+    return _expected_fact_id(data)
+
+
 def validate_protected_fact_data(
     events: list[SessionEvent],
     data: dict[str, Any],
@@ -340,8 +425,10 @@ def validate_protected_fact_data(
 
     value = data.get("value")
     if fact_type in _USER_FACT_TYPES or fact_type in {"authorization", "work_boundary"}:
-        allowed_user = source.type in _USER_SOURCE_TYPES and not source.data.get(
-            "injected_by"
+        allowed_user = (
+            fact_type != "work_boundary"
+            and source.type in _USER_SOURCE_TYPES
+            and not source.data.get("injected_by")
         )
         if allowed_user and _user_value_matches(value, source):
             pass
@@ -471,6 +558,8 @@ def validate_protected_fact_data(
             raise ValueError(
                 "authorization revocation must supersede an authorization fact"
             )
+        if fact_type != "authorization_revocation" and prior[1] != fact_type:
+            raise ValueError("updated protected fact must supersede the same fact type")
 
     fact_id = data.get("fact_id")
     if not isinstance(fact_id, str) or fact_id != _expected_fact_id(data):
@@ -525,6 +614,7 @@ def build_protected_fact_data(
 def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     """Rebuild protected task facts from the immutable event prefix."""
     event_by_seq = {event.seq: event for event in events}
+    event_by_id = {event.event_id: event for event in events}
     superseded_sources = {
         source.event_id
         for event in events
@@ -707,7 +797,64 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                         session_id=event.session_id,
                     )
                 ):
-                    superseded_by[revoke_id] = fact_id
+                    successor_id = superseded_by.get(revoke_id)
+                    if successor_id is None:
+                        superseded_by[revoke_id] = fact_id
+                    else:
+                        superseded_by[fact_id] = successor_id
+
+            try:
+                annotations = validate_user_protected_fact_annotations(
+                    data.get("content"), data.get("protected_facts", [])
+                )
+            except ValueError:
+                annotations = []
+            if not data.get("injected_by"):
+                for annotation in annotations:
+                    fact_data = {
+                        "fact_type": annotation["fact_type"],
+                        "value": annotation["value"],
+                        "source_event_id": event.event_id,
+                        "source_event_seq": event.seq,
+                    }
+                    supersedes_id = annotation.get("supersedes_fact_id")
+                    if supersedes_id is not None:
+                        fact_data["supersedes_fact_id"] = supersedes_id
+                    fact_data["fact_id"] = _expected_fact_id(fact_data)
+                    try:
+                        validate_protected_fact_data(
+                            events,
+                            fact_data,
+                            session_id=event.session_id,
+                            event_index=event_by_id,
+                            fact_index=prior_fact_by_id,
+                            latest_tool_result_seq=latest_tool_result_seq,
+                            latest_reconciled_seq=latest_reconciled_seq,
+                        )
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "Ignoring invalid protected fact annotation on %s",
+                            event.event_id,
+                        )
+                        continue
+                    fact_id = fact_data["fact_id"]
+                    added = add_fact(
+                        ProtectedFact(
+                            fact_id=fact_id,
+                            type=annotation["fact_type"],
+                            value=annotation["value"],
+                            source_event_id=event.event_id,
+                            source_seq=event.seq,
+                            status="active",
+                            session_id=event.session_id,
+                        )
+                    )
+                    if added and supersedes_id is not None:
+                        successor_id = superseded_by.get(supersedes_id)
+                        if successor_id is None:
+                            superseded_by[supersedes_id] = fact_id
+                        else:
+                            superseded_by[fact_id] = successor_id
 
             refutes_id = data.get("refutes_event_id")
             source = (
@@ -806,7 +953,11 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 continue
             prior_fact_id = data.get("supersedes_fact_id")
             if prior_fact_id:
-                superseded_by[prior_fact_id] = fact_id
+                successor_id = superseded_by.get(prior_fact_id)
+                if successor_id is None:
+                    superseded_by[prior_fact_id] = fact_id
+                else:
+                    superseded_by[fact_id] = successor_id
 
         prior_event_by_id[event.event_id] = event
 
@@ -839,6 +990,7 @@ def _fact_from_system_event(
 _BRACKET_META_TYPES = frozenset({
     COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
 })
+COMPACTION_SUMMARY_MESSAGE_NAME = "context_compaction_summary"
 
 
 def _normalize_tool_calls_for_projection(
@@ -899,7 +1051,7 @@ def derive_messages_with_source_ranges(
 
     T4 (#134)：识别 4-event compaction bracket。bracket 标记的 source_seq 区间
     内的原始投影事件被 shadowed（跳过），CONTEXT_COMPACTED 的 summary 投影成
-    SystemMessage 替代被压缩段。
+    HumanMessage 替代被压缩段，避免把不可信历史内容提升为系统指令。
 
     ADR-0030 (#196)：识别 `message/superseded`——被取代的 user/message 及其整轮
     （答 + tool_call/result）走同一条 shadowed 跳过路径，所以"编辑了问句"在模型可见
@@ -1038,7 +1190,7 @@ def derive_messages_with_source_ranges(
 
     # 第二遍：从事件按顺序投影 messages（不含 dangling 合成）。
     #
-    # summary SystemMessage 必须在被压缩段的**原位置**注入——即遇到第一个
+    # summary HumanMessage 必须在被压缩段的**原位置**注入——即遇到第一个
     # shadowed 事件时插入 summary，而不是在 CONTEXT_COMPACTED 事件的位置
     # 插入。原因：bracket 事件可能排在当前用户消息之后（compaction 在
     # context build 阶段触发，此时 user/message 已经 append），如果按
@@ -1055,7 +1207,13 @@ def derive_messages_with_source_ranges(
                     summary = bracket_summaries[bi]
                     if summary:
                         start, end = shadowed_ranges[bi]
-                        messages.append((SystemMessage(content=summary), (start, end)))
+                        messages.append((
+                            HumanMessage(
+                                content=summary,
+                                name=COMPACTION_SUMMARY_MESSAGE_NAME,
+                            ),
+                            (start, end),
+                        ))
                 summary_emitted[bi] = True
                 break
 
@@ -1206,6 +1364,7 @@ class UndeliveredInput:
     run_id: str | None = None
     revoke_fact_id: str | None = None
     refutes_event_id: str | None = None
+    protected_facts: list[dict[str, Any]] | None = None
 
 
 def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
@@ -1242,6 +1401,8 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                 continue
             if input_id in cancelled or input_id in consumed:
                 continue
+            content = event.data.get("content", "")
+            annotations = _undelivered_fact_annotations(event, content)
             items.append(
                 UndeliveredInput(
                     kind=KIND_QUEUE,
@@ -1251,6 +1412,7 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     created_at=event.time,
                     revoke_fact_id=event.data.get("revoke_fact_id"),
                     refutes_event_id=event.data.get("refutes_event_id"),
+                    protected_facts=annotations,
                 )
             )
         elif event.type == STEER_REQUESTED:
@@ -1260,6 +1422,8 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
             if input_id in applied:
                 continue
             run_id = event.data.get("run_id")
+            content = event.data.get("content", "")
+            annotations = _undelivered_fact_annotations(event, content)
             items.append(
                 UndeliveredInput(
                     kind=KIND_STEER,
@@ -1270,7 +1434,24 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     run_id=run_id if isinstance(run_id, str) else None,
                     revoke_fact_id=event.data.get("revoke_fact_id"),
                     refutes_event_id=event.data.get("refutes_event_id"),
+                    protected_facts=annotations,
                 )
             )
     items.sort(key=lambda item: item.seq)
     return items
+
+
+def _undelivered_fact_annotations(
+    event: SessionEvent, content: Any
+) -> list[dict[str, Any]] | None:
+    raw = event.data.get("protected_facts")
+    if raw is None:
+        return None
+    try:
+        return validate_user_protected_fact_annotations(content, raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid protected fact annotations on queued input %s",
+            event.event_id,
+        )
+        return None

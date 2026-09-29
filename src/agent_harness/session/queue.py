@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 logger = logging.getLogger("agent_harness.session.queue")
@@ -36,6 +36,7 @@ class QueuedMessage:
     cancelled: bool = False
     revoke_fact_id: str | None = None
     refutes_event_id: str | None = None
+    protected_facts: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -52,6 +53,7 @@ class SteerRequest:
     created_at: str
     revoke_fact_id: str | None = None
     refutes_event_id: str | None = None
+    protected_facts: list[dict[str, Any]] | None = None
 
 
 class SteerSource(Protocol):
@@ -95,6 +97,7 @@ class MessageQueueManager:
     async def enqueue(
         self, *, session_id: str, content: str, created_at: str,
         revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
+        protected_facts: list[dict[str, Any]] | None = None,
     ) -> QueuedMessage:
         """把消息放入 session 的队列，返回 QueuedMessage。"""
         queue_id = str(uuid4())
@@ -105,6 +108,7 @@ class MessageQueueManager:
             created_at=created_at,
             revoke_fact_id=revoke_fact_id,
             refutes_event_id=refutes_event_id,
+            protected_facts=protected_facts,
         )
         async with self._lock:
             self._queues.setdefault(session_id, []).append(msg)
@@ -156,6 +160,7 @@ class MessageQueueManager:
     async def register_steer(
         self, *, session_id: str, content: str, run_id: str | None, created_at: str,
         revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
+        protected_facts: list[dict[str, Any]] | None = None,
     ) -> SteerRequest:
         """注册一个 steer 请求。runtime 在下一步前检查并注入。"""
         steer_id = str(uuid4())
@@ -167,6 +172,7 @@ class MessageQueueManager:
             created_at=created_at,
             revoke_fact_id=revoke_fact_id,
             refutes_event_id=refutes_event_id,
+            protected_facts=protected_facts,
         )
         async with self._lock:
             self._steers.setdefault(session_id, []).append(req)

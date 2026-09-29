@@ -99,9 +99,11 @@ from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
     UndeliveredInput,
+    derive_protected_facts,
     detect_dangling,
     undelivered_inputs,
     validate_user_fact_links,
+    validate_user_protected_fact_annotations,
 )
 from agent_harness.session.errors import (
     ActiveRunConflict,
@@ -1006,7 +1008,7 @@ class SessionService:
         *,
         session_id: str,
         task: str | None = None,
-        user_input_metadata: dict[str, str] | None = None,
+        user_input_metadata: dict[str, Any] | None = None,
         local_max_agent_turns: int | None = None,
         amend: AmendOptions | None = None,
         resume_run_id: str | None = None,
@@ -1743,6 +1745,7 @@ class SessionService:
         queue_id: str | None = None,
         revoke_fact_id: str | None = None,
         refutes_event_id: str | None = None,
+        protected_facts: list[dict[str, Any]] | None = None,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -1807,7 +1810,14 @@ class SessionService:
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
 
-        user_input_metadata = {
+        try:
+            normalized_protected_facts = validate_user_protected_fact_annotations(
+                content, [] if protected_facts is None else protected_facts
+            )
+        except ValueError as error:
+            raise ProtectedFactReferenceInvalid(str(error)) from error
+
+        user_input_metadata: dict[str, Any] = {
             key: value
             for key, value in (
                 ("revoke_fact_id", revoke_fact_id),
@@ -1815,15 +1825,36 @@ class SessionService:
             )
             if value is not None
         }
+        if normalized_protected_facts:
+            user_input_metadata["protected_facts"] = normalized_protected_facts
         if user_input_metadata:
             events = await anyio.to_thread.run_sync(
                 self._store.read_events, session_id
             )
             try:
                 validate_user_fact_links(
-                    events, user_input_metadata, session_id=session_id,
+                    events,
+                    {"content": content, **user_input_metadata},
+                    session_id=session_id,
                     require_active_revocation=True,
                 )
+                current_facts = {
+                    fact.fact_id: fact
+                    for fact in derive_protected_facts(events)
+                }
+                for annotation in normalized_protected_facts:
+                    supersedes_id = annotation.get("supersedes_fact_id")
+                    if supersedes_id is None:
+                        continue
+                    superseded = current_facts.get(supersedes_id)
+                    if (
+                        superseded is None
+                        or superseded.status != "active"
+                        or superseded.type != annotation["fact_type"]
+                    ):
+                        raise ValueError(
+                            "supersedes_fact_id must reference an active fact of the same type"
+                        )
             except ValueError as error:
                 raise ProtectedFactReferenceInvalid(str(error)) from error
 
@@ -1869,6 +1900,7 @@ class SessionService:
                 created_at=_utc_now_iso(),
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
+                protected_facts=normalized_protected_facts or None,
             )
             self._append_session_event(
                 session_id, STEER_REQUESTED,
@@ -1916,6 +1948,7 @@ class SessionService:
                 session_id=session_id, content=content, created_at=_utc_now_iso(),
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
+                protected_facts=normalized_protected_facts or None,
             )
             self._append_session_event(
                 session_id, MESSAGE_QUEUED,
@@ -2046,7 +2079,7 @@ class SessionService:
         if not pending:
             return None
         nxt = pending[0]
-        user_input_metadata = {
+        user_input_metadata: dict[str, Any] = {
             key: value
             for key, value in (
                 ("revoke_fact_id", nxt.revoke_fact_id),
@@ -2054,6 +2087,8 @@ class SessionService:
             )
             if value is not None
         }
+        if nxt.protected_facts:
+            user_input_metadata["protected_facts"] = nxt.protected_facts
         launched = await self.resume_and_launch(
             session_id=session_id, task=nxt.content, amend=amend,
             user_input_metadata=user_input_metadata or None,
@@ -2488,6 +2523,7 @@ class SessionService:
                     created_at=item.created_at,
                     revoke_fact_id=item.revoke_fact_id,
                     refutes_event_id=item.refutes_event_id,
+                    protected_facts=item.protected_facts,
                 )
                 for item in pending
                 if item.kind == KIND_QUEUE
@@ -2501,6 +2537,7 @@ class SessionService:
                     created_at=item.created_at,
                     revoke_fact_id=item.revoke_fact_id,
                     refutes_event_id=item.refutes_event_id,
+                    protected_facts=item.protected_facts,
                 )
                 for item in pending
                 if item.kind != KIND_QUEUE

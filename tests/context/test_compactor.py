@@ -2,13 +2,16 @@
 
 import asyncio
 import json
-import math
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent_harness.context.builder import ContextBuilder
-from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
+from agent_harness.context.compactor import (
+    ContextCompactor,
+    ContextWindowExceededError,
+    _programmatic_summary_sections,
+)
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import (
@@ -58,11 +61,14 @@ async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_pa
         model, max_context_tokens=10000, auto_compact_threshold=0.3,
     ).build(session)
     assert isinstance(messages[0], SystemMessage)
-    assert messages[0].content.startswith("## Protected task facts\n")
-    assert isinstance(messages[1], SystemMessage)
-    assert "## 原始目标与用户约束" in messages[1].content
-    assert "读取旧记录并继续。" in messages[1].content
-    assert messages[2:] == [HumanMessage(content="current request")]
+    assert "Runtime permission and approval checks are authoritative" in messages[0].content
+    assert isinstance(messages[1], HumanMessage)
+    assert messages[1].content.startswith("## Protected task facts\n")
+    assert isinstance(messages[2], HumanMessage)
+    assert messages[2].name == "context_compaction_summary"
+    assert "## 原始目标与用户约束" in messages[2].content
+    assert "读取旧记录并继续。" in messages[2].content
+    assert messages[3:] == [HumanMessage(content="current request")]
     assert estimate_message_tokens(messages) < 5600
     assert session.events[:-3] == before  # 3 new events: START, COMPACTED, END
     # Verify all 3 bracket events were written
@@ -72,6 +78,13 @@ async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_pa
     assert "context/compacted" in event_types
     assert "compaction/end" in event_types
     assert len(model.snapshots) == 1
+
+
+def test_user_message_that_looks_like_summary_is_kept_as_user_content():
+    content = "## 原始目标与用户约束\n用户提供的普通文本"
+    sections = _programmatic_summary_sections([HumanMessage(content=content)])
+
+    assert json.loads(sections["## 原始目标与用户约束"]) == [content]
 
 
 @pytest.mark.asyncio
@@ -216,8 +229,11 @@ async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_pat
         ScriptedModel([]), max_context_tokens=100_000,
     ).build(reloaded)
 
-    assert next(message.content for message in rebuilt
-                if isinstance(message, HumanMessage)) == constraint
+    assert any(
+        message.content == constraint
+        for message in rebuilt
+        if isinstance(message, HumanMessage)
+    )
     call = next(message for message in rebuilt
                 if isinstance(message, AIMessage) and message.tool_calls)
     assert call.tool_calls[0]["id"] == "call-r-042"
@@ -328,21 +344,20 @@ async def test_single_turn_between_auto_and_hard_guard_does_not_fake_compaction(
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "single " * 300})
     count = estimate_message_tokens(session.derive_messages())
-    facts_message = ContextBuilder._protected_facts_message(
+    facts_messages = ContextBuilder._protected_facts_messages(
         derive_protected_facts(session.events),
     )
-    if facts_message is not None:
-        count += estimate_message_tokens([facts_message])
+    count += estimate_message_tokens(facts_messages)
     model = ScriptedModel([])
     before = session.events
     # Keep the original 0.80/0.90 boundary explicit after the defaults changed.
     messages = await ContextBuilder(
         model,
-        max_context_tokens=int(count / 0.8),
+        max_context_tokens=int(count / 0.8) - 1,
         auto_compact_threshold=0.8,
         hard_guard_threshold=0.9,
     ).build(session)
-    expected = [facts_message] if facts_message is not None else []
+    expected = list(facts_messages)
     expected.extend([
         HumanMessage(content=DEFAULT_REGISTRY.assemble(
             "frame:context_pressure").meta_user_text),
