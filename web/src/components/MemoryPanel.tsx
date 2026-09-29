@@ -287,7 +287,7 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
             onChanged={() => void memories.retry()}
           />)}
         </ul>}
-        {memories.loadError && <div className="memory-error" role="alert"><span>{memories.loadError}</span><button disabled={memories.loadingMore} onClick={() => void memories.retry()}>重试</button></div>}
+        {memories.loadError && <div className="memory-error" role="alert"><span>{memories.loadError}</span><button disabled={memories.loadingMore} onClick={() => void memories.retryFailedPage()}>重试</button></div>}
         {panelError && <div className="memory-v2-error memory-error" role="status">{panelError}<button className="memory-v2-quiet" onClick={() => setPanelError(null)}>知道了</button></div>}
         {!memories.loading && memories.visible.length > 0 && (memories.hasMore
           ? <button className="memory-more-btn" disabled={memories.loadingMore} onClick={() => void memories.loadMore()}>{memories.loadingMore ? '加载中…' : '加载更多'}</button>

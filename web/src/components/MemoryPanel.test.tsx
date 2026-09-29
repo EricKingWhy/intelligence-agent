@@ -62,6 +62,7 @@ describe('MemoryPanel pagination boundary', () => {
       remove: vi.fn(async () => {}),
       loadMore: vi.fn(async () => {}),
       retry: vi.fn(async () => {}),
+      retryFailedPage: vi.fn(async () => {}),
     };
     vi.mocked(useMemories).mockReturnValue(state);
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {

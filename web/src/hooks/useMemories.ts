@@ -42,6 +42,7 @@ export interface MemoriesState {
   remove: (memoryId: string, projectId?: string) => Promise<void>;
   loadMore: () => Promise<void>;
   retry: () => Promise<void>;
+  retryFailedPage: () => Promise<void>;
 }
 
 const DELETE_TIMEOUT_MS = 30_000;
@@ -181,15 +182,28 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
 
   const retry = useCallback(
     async () => {
+      setPage((previous) => previous.key === filterKey
+        ? {
+          ...previous,
+          status: 'loading',
+          loadingMore: false,
+          failedMoreOffset: null,
+          loadError: null,
+          disabled: null,
+        }
+        : previous);
+      await refetch(refetchLimit(currentRows.length));
+    }, [currentRows.length, filterKey, refetch],
+  );
+
+  const retryFailedPage = useCallback(
+    async () => {
       if (page.key === filterKey && page.failedMoreOffset === page.nextOffset) {
         await loadMore();
         return;
       }
-      setPage((previous) => previous.key === filterKey
-        ? { ...previous, status: 'loading', loadError: null, disabled: null }
-        : previous);
-      await refetch(refetchLimit(currentRows.length));
-    }, [currentRows.length, filterKey, loadMore, page.failedMoreOffset, page.key, page.nextOffset, refetch],
+      await retry();
+    }, [filterKey, loadMore, page.failedMoreOffset, page.key, page.nextOffset, retry],
   );
 
   const remove = useCallback(async (memoryId: string, projectId?: string) => {
@@ -236,5 +250,6 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
     remove,
     loadMore,
     retry,
+    retryFailedPage,
   };
 }

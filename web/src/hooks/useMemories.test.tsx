@@ -119,10 +119,41 @@ describe('useMemories pagination retry', () => {
     await act(async () => { await current!.loadMore(); });
     expect(current?.loadError).toContain('temporary page failure');
 
-    await act(async () => { await current!.retry(); });
+    await act(async () => { await current!.retryFailedPage(); });
 
     expect(requestedOffsets.filter((offset) => offset === '50')).toHaveLength(2);
     expect(current?.visible).toHaveLength(55);
+    expect(current?.loadError).toBeNull();
+  });
+
+  it('performs a full first-page refresh after a later-page failure', async () => {
+    const firstPage = Array.from({ length: 50 }, (_, index) => memory(`m-${index}`));
+    const refreshedPage = Array.from({ length: 50 }, (_, index) => memory(`m-${index + 1}`));
+    const requestedOffsets: string[] = [];
+    let firstPageCalls = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'http://localhost');
+      const offset = url.searchParams.get('offset') ?? '0';
+      requestedOffsets.push(offset);
+      if (offset === '50') {
+        return Promise.resolve(response({ detail: 'temporary page failure' }, 503));
+      }
+      firstPageCalls += 1;
+      return Promise.resolve(response(firstPageCalls === 1 ? firstPage : refreshedPage));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await act(async () => { root.render(<Harness query="" />); });
+    await vi.waitFor(() => expect(current?.visible).toHaveLength(50));
+    await act(async () => { await current!.loadMore(); });
+    expect(current?.loadError).toContain('temporary page failure');
+
+    // Mutation completion and the manual Refresh button both need this full refresh path.
+    await act(async () => { await current!.retry(); });
+
+    expect(requestedOffsets).toEqual(['0', '50', '0']);
+    expect(current?.visible.map(({ id }) => id)).not.toContain('m-0');
+    expect(current?.visible.map(({ id }) => id)).toContain('m-50');
     expect(current?.loadError).toBeNull();
   });
 
