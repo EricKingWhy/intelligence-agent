@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前焦点：Memory V2 `#302` 已随 PR #339 集成并 CLOSED（merge `3394d46925d86ab5b631f007fd5dc4cbb44ab8ae`）。`#303` 已由 PR #374 集成（merge `9c7181ce82d33a52f517be6b273101711652f981`），integration clean-slate、保留证明和 AC8 真实形成/召回/删除验证均完成。`#304` 后续定位到 positive_procedure 过程字段的提示词/Schema 形状歧义，已由 `ccc7c83e` 修复；最终真实 gold 27/27 通过，完整 pytest 4766 passed / 2 skipped / 51 deselected，两轴复审通过。裸 Gate-0 在 `d882d5ac` / tree `1380c10885ab` 通过 6/6，机器报告 `docs/gate/d882d5aca5950347e83f15496cafeb3e9f6e66f6.json`；review coverage exit 0。分支集成仍待处理。明细见 Tracker 与月度归档。
+**当前焦点：Memory V2 `#302` 已随 PR #339 集成并 CLOSED（merge `3394d46925d86ab5b631f007fd5dc4cbb44ab8ae`）。`#303` 已由 PR #374 集成（merge `9c7181ce82d33a52f517be6b273101711652f981`），integration clean-slate、保留证明和 AC8 真实形成/召回/删除验证均完成。`#304` 后续定位到 positive_procedure 过程字段的提示词/Schema 形状歧义，已由 `ccc7c83e` 修复；最终真实 gold 27/27 通过，完整 pytest 4766 passed / 2 skipped / 51 deselected，两轴复审通过。同步最新 `origin/main` 后，`3cd05f4b` 树上的裸 Gate-0 通过 6/6，报告 `docs/gate/3cd05f4ba0d41170dd0d314fe25b06ed61aaa7e1.json`。分支尚未推送，PR 集成待办。明细见 Tracker 与月度归档。
 
 **最近集成（2026-09-27）**：#342 并发 resume SeqConflict 已由 PR #369 修复并关闭（根因 9496226e，修复 8ffd4875，merge 1774f4fb）；#341 relay cleanup 遗留已由 PR #343 合入并关闭（merge d4d65fff）。明细与门禁证据见 2026-09 归档。
 
