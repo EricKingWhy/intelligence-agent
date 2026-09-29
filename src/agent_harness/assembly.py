@@ -497,6 +497,9 @@ async def build_runtime(
             # W-03 (#347)：store 未装配时传 None（裁剪整体关闭，行为不变）。
             artifact_store=context_artifact_store,
             artifact_read_tool_name=context_read_tool_name,
+            # W-31.2 (#414)：裁剪的两个确定性护栏，原样透传（校验在 pruner 构造处）。
+            keep_recent_tool_results=settings.keep_recent_tool_results,
+            clear_at_least_tokens=settings.clear_at_least_tokens,
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
