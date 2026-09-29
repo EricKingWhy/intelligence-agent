@@ -30,7 +30,13 @@ from tests.scripted_model import ScriptedModel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_runtime_stops_before_model_request_when_context_exceeds_guard(tmp_path, stream):
+async def test_runtime_pauses_when_context_exceeds_guard(tmp_path, stream):
+    """W-04 (#348)：估值越硬护栏 ⇒ 走既有暂停生命周期收口，不再落 run/failed。
+
+    无完整早期轮可压（预检拒绝，不算尝试）⇒ 模型从未被调用；run/paused 的
+    trigger_dimension = `max_context_tokens`（config 字段路径），reason 经
+    `reason_for_dimension` 自动 = budget_exhausted（不新增 reason 值）。
+    """
     model = ScriptedModel([])
     registry = ToolRegistry()
     runtime = AgentRuntime(model, registry, ToolExecutor(registry),
@@ -38,14 +44,65 @@ async def test_runtime_stops_before_model_request_when_context_exceeds_guard(tmp
     session = make_session(tmp_path)
     if stream:
         events = [event async for event in runtime.run_stream(session, "huge " * 200)]
-        assert events[-1].type == "run/failed"
-        assert events[-1].data["reason"] == "context_window_exceeded"
+        assert events[-1].type == "run/paused"
+        assert events[-1].data["reason"] == "budget_exhausted"
+        assert events[-1].data["trigger_dimension"] == "max_context_tokens"
     else:
         result = await runtime.run(session, "huge " * 200)
-        assert result.status == "context_window_exceeded"
+        assert result.status == "paused"
         assert result.steps == 0 and not result.completed
-    assert model.snapshots == []
-    assert session.events[-1].type == "run/failed"
+    assert model.snapshots == [], "模型在本轮从未被调用（含 closeout：build 先炸）"
+    assert session.events[-1].type == "run/paused"
+    assert not any(e.type == "run/failed" for e in session.events)
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_exceeded_with_double_summary_failure_pauses(tmp_path):
+    """W-04 (#348)：双次摘要失败 + 估值越硬护栏 ⇒ run/paused（不是 run/failed）。
+
+    有完整早期轮 ⇒ 摘要尝试真实发生：主 build 两次尝试各留一条失败事件；暂停
+    closeout 里的二次 build 再走一轮重试（再两条）——有界噪声（至多 4 条 + 4 次
+    摘要调用），随后确定性 continuation 收口。用户消息逐字保留（调研 B6）。
+    """
+    class FailingSummary:
+        calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            raise ConnectionError("offline")
+
+    model = FailingSummary()
+    registry = ToolRegistry()
+    runtime = AgentRuntime(model, registry, ToolExecutor(registry),
+                           context_builder=ContextBuilder(model, max_context_tokens=1000))
+    session = make_session(tmp_path)
+    exact_user_words = "先读取 records.csv 并保留 R-042 这一行。"
+    session.append(USER_MESSAGE, {"content": exact_user_words})
+    session.append(MODEL_COMPLETED, {"content": "done"})
+    before = len(session.events)
+
+    result = await runtime.run(session, "huge " * 1200)
+
+    assert result.status == "paused"
+    types = [e.type for e in session.events[before:]]
+    assert types[-1] == "run/paused"
+    assert "run/failed" not in types
+    assert types.count("context/compaction_failed") == 4, (
+        "主 build 与 closeout 各两次尝试：失败事件有界且可数"
+    )
+    attempts = [e.data["attempt"] for e in session.events[before:]
+                if e.type == "context/compaction_failed"]
+    assert attempts == [1, 2, 1, 2]
+    paused = session.events[-1]
+    assert paused.data["reason"] == "budget_exhausted"
+    assert paused.data["trigger_dimension"] == "max_context_tokens"
+    assert paused.data["closeout_source"] == "deterministic"
+    # 用户消息逐字保留：事件流原样（无裁剪 / 摘要改写）。
+    user_events = [e for e in session.events if e.type == USER_MESSAGE]
+    assert [e.data["content"] for e in user_events] == [
+        exact_user_words, "huge " * 1200,
+    ]
+    assert model.calls == 4
 
 
 @pytest.mark.asyncio

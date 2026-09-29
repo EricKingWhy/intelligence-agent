@@ -11,8 +11,9 @@
 `agent_turns` 的计数点就是既有的 Agent Loop 轮次计数（`runtime.py` 里"这一轮算一步"
 那一行，在模型响应被规范化并接纳为决策之后递增）——本票不新增计数器、不新增 loop。
 
-`max_steps` 是迁移期 deprecated alias（只发它 ⇒ 解释为根 AgentRuntime 的 local fuse）；
-它的**删除**由 `#320` 在证明零剩余调用方后执行，所以本模块不删它、也不猜它。
+迁移期 alias `max_steps` 已由 `#320` 移除（`02 §5.1` 的 contract 阶段收口）：本模块只认
+`budget.local.max_agent_turns`；旧客户端发 `max_steps` 由请求模型的 `extra="forbid"`
+按未知字段 422 拒绝，不再有任何静默解释。
 
 之所以是"解析"而不是"持有计数器"：本模块是**纯函数 + 值对象**，计数器与暂停/恢复状态
 归 runtime 与后续票。这样"生效几轮、谁定的"能在 HTTP 层被投影（`as_projection()`），
@@ -21,13 +22,10 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
 from agent_harness.session.errors import SessionServiceError
-
-logger = logging.getLogger(__name__)
 
 #: 默认 local fuse（`02 §5.1` 权威表 / PRD 决策 3）。**不是**"另一个低位数字"：
 #: 它是"模型不收敛"的最后一道防线，正常停止由"模型不再返回 tool_calls"决定。
@@ -37,14 +35,6 @@ DEFAULT_MAX_AGENT_TURNS = 500
 SOURCE_DEPLOYMENT = "deployment"
 SOURCE_PROFILE = "agent_profile"
 SOURCE_REQUEST = "budget.local.max_agent_turns"
-SOURCE_ALIAS = "max_steps_alias"
-
-#: 迁移期 alias 的字段名（`#320` 删除；本模块只把它当作一条输入）。
-LEGACY_ALIAS_FIELD = "max_steps"
-
-#: alias 来源时的 deprecation 提示（投影与响应头共用一份文案；日志文案 FREE，
-#: 但这句会出现在**客户端可见**的投影里，所以固定下来）。
-DEPRECATION_REPLACEMENT = "budget.local.max_agent_turns"
 
 
 class BudgetRejection(SessionServiceError):
@@ -55,10 +45,6 @@ class BudgetRejection(SessionServiceError):
     """
 
 
-class BudgetAliasConflict(BudgetRejection):
-    """`max_steps` 与新字段同时出现且**不等**（`02 §5.1` 冻结规则）。"""
-
-
 class BudgetCeilingExceeded(BudgetRejection):
     """下层声明的 ceiling **越过**生效上层 ceiling（D1：下层只能收窄）。"""
 
@@ -67,7 +53,7 @@ class BudgetConflict(SessionServiceError):
     """预算生命周期请求与当前**持久化状态**冲突（HTTP 409，零副作用）。
 
     与 `BudgetRejection`（422）的分界按 `11 §6.1`：**形状非法**是 422（字段缺失、
-    值域不对、alias 冲突、越权 ceiling），**状态对不上**是 409（version 过期、
+    值域不对、越权 ceiling），**状态对不上**是 409（version 过期、
     ceiling 不足以继续、活动 run 冲突、缺少所需变更依据、存在未 reconcile 副作用）。
     继承 `SessionServiceError` 的理由同 `BudgetRejection`：走 `web/domain_errors.py`
     的**单一**状态码映射。
@@ -92,58 +78,17 @@ class LocalFuse:
     max_agent_turns: int
     source: str
 
-    @property
-    def used_legacy_alias(self) -> bool:
-        """本次请求是否用了迁移期 alias（客户端 deprecation signal 的判据）。"""
-        return self.source == SOURCE_ALIAS
-
     def as_projection(self) -> dict[str, Any]:
         """客户端可读的只读投影（`#308` Must Do「effective local fuse 的只读投影」）。
 
-        形状刻意扁平：`max_agent_turns` / `source`，用了 alias 时多一个 `deprecation`
-        段——HTTP 层把它映射成响应头（`X-Local-Max-Agent-Turns` / `X-Local-Fuse-Source`
-        / `Warning`），CLI 与后续票直接读字段。**不含**已消耗 counter：那是 RunBudget
-        （`#312`）的数据面，本票没有。
+        形状刻意扁平：`max_agent_turns` / `source`。HTTP 层把它映射成响应头
+        （`X-Local-Max-Agent-Turns` / `X-Local-Fuse-Source`），CLI 与后续票直接读字段。
+        **不含**已消耗 counter：那是 RunBudget（`#312`）的数据面，本票没有。
         """
-        projection: dict[str, Any] = {
+        return {
             "max_agent_turns": self.max_agent_turns,
             "source": self.source,
         }
-        if self.used_legacy_alias:
-            projection["deprecation"] = {
-                "field": LEGACY_ALIAS_FIELD,
-                "replacement": DEPRECATION_REPLACEMENT,
-            }
-        return projection
-
-
-def _merge_turn_claims(
-    *, request: int | None, alias: int | None
-) -> tuple[int | None, str]:
-    """合并「新字段」与「alias」两条声明（同一个请求上的两个字段）。
-
-    返回 `(生效声明值, 来源)`。相等双字段**接受**（迁移期合法状态），并把来源记为
-    alias —— 客户端还在发 deprecated 字段这件事必须继续可见（R5 的 deprecation
-    signal 不能因为"恰好也发了新字段"而消失）。
-    """
-    if request is not None:
-        _positive(request, layer=SOURCE_REQUEST)
-    if alias is not None:
-        _positive(alias, layer=LEGACY_ALIAS_FIELD)
-    if request is None and alias is None:
-        return None, ""
-    if request is not None and alias is not None and request != alias:
-        raise BudgetAliasConflict(
-            f"{LEGACY_ALIAS_FIELD}={alias} 与 {SOURCE_REQUEST}={request} 冲突："
-            f"两者同时出现时必须相等（迁移期 alias，见 02 §5.1）"
-        )
-    if alias is not None:
-        logger.warning(
-            "budget_local_fuse_alias_deprecated: 请求使用了 %s；请改用 %s",
-            LEGACY_ALIAS_FIELD, DEPRECATION_REPLACEMENT,
-        )
-        return alias, SOURCE_ALIAS
-    return request, SOURCE_REQUEST
 
 
 def resolve_local_fuse(
@@ -151,7 +96,6 @@ def resolve_local_fuse(
     deployment: int = DEFAULT_MAX_AGENT_TURNS,
     profile: int | None = None,
     request: int | None = None,
-    alias: int | None = None,
 ) -> LocalFuse:
     """解析生效 local fuse（纯函数，任何工作开始前调用）。
 
@@ -162,7 +106,7 @@ def resolve_local_fuse(
     - `profile`：AgentProfile 的声明值，`None` = 继承上层（内置三档位就是 `None`——
       出厂设定不写死数字，见 `profiles.py`）。它只能**收窄**：大于 deployment 的
       声明是配置错误（拒绝，不静默取小值）。
-    - `request` / `alias`：本次请求的覆盖，只能收窄到 ceiling 之下；越权 ⇒ 拒绝。
+    - `request`：本次请求的覆盖，只能收窄到 ceiling 之下；越权 ⇒ 拒绝。
 
     生效值 = 各层显式声明中的**最小**值（未声明即继承），来源如实回传。
     """
@@ -180,12 +124,12 @@ def resolve_local_fuse(
         ceiling = profile
         ceiling_source = SOURCE_PROFILE
 
-    claimed, claimed_source = _merge_turn_claims(request=request, alias=alias)
-    if claimed is None:
+    if request is None:
         return LocalFuse(max_agent_turns=ceiling, source=ceiling_source)
-    if claimed > ceiling:
+    _positive(request, layer=SOURCE_REQUEST)
+    if request > ceiling:
         raise BudgetCeilingExceeded(
-            f"请求的 local fuse={claimed} 超过生效 ceiling={ceiling}"
+            f"请求的 local fuse={request} 超过生效 ceiling={ceiling}"
             f"（{ceiling_source}）：下层只能收窄（ADR-0044 D1）"
         )
-    return LocalFuse(max_agent_turns=claimed, source=claimed_source)
+    return LocalFuse(max_agent_turns=request, source=SOURCE_REQUEST)

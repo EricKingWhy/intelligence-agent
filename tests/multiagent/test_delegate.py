@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.factory import AgentFactory
@@ -301,7 +301,7 @@ class TestRepeatedDelegationBreaker:
 
 
 class _SlowChildModel(ScriptedModel):
-    """ainvoke 睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
+    """流式睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
 
     def __init__(self, delay: float, responses_count: int = 12) -> None:
         super().__init__([AIMessage(content="child 完成") for _ in range(responses_count)])
@@ -309,14 +309,17 @@ class _SlowChildModel(ScriptedModel):
         self.in_flight = 0
         self.peak = 0
 
-    async def ainvoke(self, messages, **kwargs):
+    async def astream(self, messages, **kwargs):
+        # child 走 run_stream（astream）：延迟与在飞计数必须挂在流式路径上，
+        # 否则并发闸的测量 instrument 失效（独立审查 8ebc9841 的 P1）。
         import asyncio
 
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
         try:
             await asyncio.sleep(self._delay)
-            return await super().ainvoke(messages, **kwargs)
+            async for chunk in super().astream(messages, **kwargs):
+                yield chunk
         finally:
             self.in_flight -= 1
 
@@ -390,9 +393,10 @@ class TestCancelAndResume:
         from agent_harness.session import Session as _Session
 
         class _BlockingChildModel(ScriptedModel):
-            async def ainvoke(self, messages, **kwargs):
+            async def astream(self, messages, **kwargs):
+                # child 走 run_stream（astream）：流式路径同样阻塞，取消语义才可测。
                 await asyncio.sleep(30)
-                return AIMessage(content="never")
+                yield AIMessageChunk(content="never")
 
         provider = InProcessSubagentProvider()
         delegate = DelegateTool(provider)

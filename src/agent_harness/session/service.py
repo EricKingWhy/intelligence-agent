@@ -742,7 +742,6 @@ class SessionService:
         workspace_name: str | None = None,
         cwd: str | None = None,
         local_max_agent_turns: int | None = None,
-        max_steps: int | None = None,
         permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
         permission_mode_explicit: bool = False,
         auto_approve_explicit: bool = False,
@@ -780,9 +779,9 @@ class SessionService:
         避免 runtime 组装失败时留下只含 session/started 的孤儿 session。
 
         local fuse（#308）：`local_max_agent_turns` 是 `budget.local.max_agent_turns`
-        的请求声明，`max_steps` 是迁移期 deprecated alias——两者由
-        `agent.budget.resolve_local_fuse` 与 Deployment ceiling 合成生效值
-        （不等 / 越权 ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。
+        的请求声明，由 `agent.budget.resolve_local_fuse` 与 Deployment ceiling
+        合成生效值
+        （越权 ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。
 
         run 作用域（`#312` 建账本 / `#313` 扩到四维 / `#315` 加 deadline）：四个
         `run_max_*` 与 `run_deadline_at` 是本 run 的**绝对** ceiling（`budget.run.*`），
@@ -815,7 +814,6 @@ class SessionService:
             deployment=self._settings.local_max_agent_turns,
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
-            alias=max_steps,
         )
         # run 作用域 ceiling（`#313`）：与 fuse 同一条纪律——形态校验与可执行性判定
         # 都发生在任何副作用之前（不建 workspace、不落任何事件、不启动 model / tool /
@@ -1010,7 +1008,6 @@ class SessionService:
         task: str | None = None,
         user_input_metadata: dict[str, str] | None = None,
         local_max_agent_turns: int | None = None,
-        max_steps: int | None = None,
         amend: AmendOptions | None = None,
         resume_run_id: str | None = None,
         resume_basis: str | None = None,
@@ -1100,7 +1097,6 @@ class SessionService:
             deployment=self._settings.local_max_agent_turns,
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
-            alias=max_steps,
         )
         # run 作用域 ceiling（`#313`）：与创建路径同一个装配点、同一条"先校验后副作用"
         # 纪律；形态非法 / 不可强制的维度在这里 422（不写 session/resumed、不建目录）。
@@ -1742,7 +1738,6 @@ class SessionService:
         content: str,
         mode: str = "queue",
         local_max_agent_turns: int | None = None,
-        max_steps: int | None = None,
         amend: AmendOptions | None = None,
         supersedes_seq: int | None = None,
         queue_id: str | None = None,
@@ -1843,7 +1838,7 @@ class SessionService:
             await self._assert_supersedable(session_id, supersedes_seq)
 
         # local fuse（#308）判定：**与分支无关**（同一条解析函数、同一个档位来源），形状
-        # 错误 / 不等双字段 / 越权三档拒绝都在任何工作开始前发生。判定不看运行态是刻意
+        # 错误 / 越权两档拒绝都在任何工作开始前发生。判定不看运行态是刻意
         # 的：否则同一份请求体在 idle 会话上 422、在活跃 run 上 200（queued），客户端没法
         # 预期，复核者读到的状态码取决于"此刻有没有 run"。
         # 生效值在这里**丢弃**：idle 分支由 `resume_and_launch` 再解析一次（同一纯函数、
@@ -1852,7 +1847,6 @@ class SessionService:
             deployment=self._settings.local_max_agent_turns,
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
-            alias=max_steps,
         )
 
         if queue_id is not None:
@@ -1890,7 +1884,6 @@ class SessionService:
                 session_id=session_id, task=content,
                 user_input_metadata=user_input_metadata or None,
                 local_max_agent_turns=local_max_agent_turns,
-                max_steps=max_steps,
                 amend=amend,
                 run_max_agent_turns_total=run_max_agent_turns_total,
                 run_max_model_requests=run_max_model_requests,

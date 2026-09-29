@@ -276,6 +276,24 @@ _FRAME_SECTIONS: tuple[PromptSection, ...] = (
     ),
 )
 
+#: W-04（#348）：接近上下文硬护栏时的落盘提醒（PRD §4.5 增量，Anthropic
+#: `memory_20250818` 式）。**文案按 PRD 逐字冻结**（advisory：W-02/W-26 落地后
+#: "保护事实/进度清单"自动有了确切落点，文案届时不必改）。注入点在 ContextBuilder
+#: ——压缩后仍落在 [auto, hard) 带内才发（压缩成功分支必然 < auto ⇒ 对健康路径
+#: 零误报）。META_USER：装进 user-role 消息（与运行时快照同族，非持久化注入）。
+_CONTEXT_PRESSURE_TEXT = "即将到达上下文上限，请把关键信息显式落盘（保护事实/进度清单）"
+
+_PRESSURE_SECTIONS: tuple[PromptSection, ...] = (
+    PromptSection(
+        name="frame:context_pressure",
+        order=SECTION_ORDERS["frame:context_pressure"],
+        scopes=frozenset({"frame:context_pressure"}),
+        target=Target.META_USER,
+        text=_CONTEXT_PRESSURE_TEXT,
+        description="接近上下文硬护栏的落盘提醒（builder 注入，非持久化）",
+    ),
+)
+
 
 def build_registry(
     persona: PersonaConfig | None = None,
@@ -299,7 +317,10 @@ def build_registry(
     registry = PromptRegistry()
     for name, description in _DECLARED_VARIABLES:
         registry.variable(name, description=description)
-    for section in _BUILTIN_SECTIONS + _AUX_SECTIONS + _RUNTIME_SECTIONS + _FRAME_SECTIONS:
+    for section in (
+        _BUILTIN_SECTIONS + _AUX_SECTIONS + _RUNTIME_SECTIONS + _FRAME_SECTIONS
+        + _PRESSURE_SECTIONS
+    ):
         registry.register(section)
     if persona is not None:
         for section in persona_sections(persona):

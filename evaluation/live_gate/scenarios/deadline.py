@@ -438,7 +438,7 @@ class RunDeadlineBoundaryScenario:
         # 预热装配（`#319` 实测）：`resume_and_launch` 惰性执行 wire_capabilities ——
         # Milvus 连接（15s 超时）+ embedding 维度探针（15s×retries）最多吃掉 ~60s，
         # 而 `DEADLINE_SECONDS=30` 的窗口量的是 **run 的准入**，不是装配。不预热时
-        # 装配时间落在窗口内，到点会在第一次准入边界之前被读到（9 次实测 4 次：
+        # 装配时间落在窗口内，到点会在第一次准入边界之前被读到（9 次实测 6 红：
         # `real_work_admitted_before_the_deadline`，到点前 turns=0 / primary=0）。
         # 预热只把装配挪出窗口，不改产品行为；失败（降级路径）照旧在 run 里如实发生。
         await state.get_wiring()

@@ -520,7 +520,15 @@ class InProcessSubagentProvider:
         with bind_tree_id(tree_id), bind_scope(SpawnScope(
             registry=child_runtime.registry, remaining=allowance,
         )):
-            run_result: AgentRunResult = await child_runtime.run(child_session, full_task)
+            # 流式驱动（`run_stream` + result_holder 回传与 `run()` 同一终态结果）：
+            # child 与主 run（RunManager）同走流式——某些 OpenAI 兼容网关对带工具的
+            # 非流式请求返回 choices=null 的畸形响应（cline 实测，2026-09-28）。
+            holder: list[AgentRunResult] = []
+            async for _ in child_runtime.run_stream(
+                child_session, full_task, result_holder=holder,
+            ):
+                pass
+            run_result = holder[-1]
 
         status = ("completed" if run_result.status == "completed" else "failed")
         logger.info(

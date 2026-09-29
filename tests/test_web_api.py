@@ -320,7 +320,7 @@ def test_create_session_rejects_missing_task_on_launch(tmp_path):
     _assert_rejection_left_no_trace(app)
 
 
-def test_create_session_rejects_invalid_max_steps(tmp_path):
+def test_create_session_rejects_invalid_local_fuse(tmp_path):
     """local fuse 非法值 → 422，且不留任何落盘痕迹（两道闸门各挡一类）。
 
     - `0`：非正数——pydantic `ge=1` 挡在形状层（领域层还有一层 `_positive`）；
@@ -329,14 +329,18 @@ def test_create_session_rejects_invalid_max_steps(tmp_path):
 
     旧行为是 pydantic `le=200` 挡住 1000；那个与策略无关的硬数字已删（它既让"200 以内
     随便传"看起来合法，又会挡住策略允许的 500）。逐类语义与投影见
-    `tests/web/test_budget_local_fuse_api.py`。
+    `tests/web/test_budget_local_fuse_api.py`；退役 alias `max_steps` 的未知字段
+    422 也在那个文件（#320：`extra="forbid"`）。
     """
     settings = Settings(workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
-    for max_steps in (0, 1000):
-        resp = client.post("/api/sessions", json={"task": "hi", "max_steps": max_steps})
-        assert resp.status_code == 422, f"local fuse={max_steps} 应被 422 拒绝"
+    for turns in (0, 1000):
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"local": {"max_agent_turns": turns}}},
+        )
+        assert resp.status_code == 422, f"local fuse={turns} 应被 422 拒绝"
     _assert_rejection_left_no_trace(app)
 
 

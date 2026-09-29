@@ -142,6 +142,13 @@ TRIGGER_RUN_TOOL_PREFIX = "run.tool_call_limits."
 #: 客户端据此知道该换哪一个字段。
 TRIGGER_RUN_DEADLINE = "run.deadline_at"
 
+#: W-04（#348）：context 硬护栏触发的暂停维度（config.py:93 的 `max_context_tokens`
+#: 配置字段路径）。它不是"consumed 与 ceiling 比较"的计数维（不在 `TRIGGER_ORDER` /
+#: `RUN_DIMENSIONS`）——判据是"投影放不进窗口"。`reason_for_dimension` 把它归入
+#: budget_exhausted（`03 §3.4` 的词表里没有也不该有第二个名字）；恢复侧的窄豁免
+#: 见 `validate_resume`。
+TRIGGER_MAX_CONTEXT_TOKENS = "max_context_tokens"
+
 
 def utc_now() -> datetime:
     """本模块的时间源（**唯一一处**读挂钟）。
@@ -1753,7 +1760,8 @@ def validate_resume(
             f"{resume_basis} 的有效性需要变更证据（属 stuck 暂停的责任域，"
             f"`stuck_resume_evidence`），本路径不假装校验过它"
         )
-    if not limits.configured and not session_ceiling_raised:
+    if (not limits.configured and not session_ceiling_raised
+            and paused.trigger_dimension != TRIGGER_MAX_CONTEXT_TOKENS):
         # `03 §5`：恢复请求 MUST 给出**绝对** ceiling（不是"可以不给"）。各维里点
         # 哪一维由客户端决定（暂停可能落在任一维上），但一个都不点 = 客户端没有抬高
         # 任何东西，那个 run 只会在同一个维度上立刻再停一次。
@@ -1761,6 +1769,11 @@ def validate_resume(
         # 触发的暂停**，抬 session ceiling（durable 行的 CAS，service 层已在调用前完成）
         # 就是那次"抬高"，run 维一个都不点也成立；若 run 维才是真约束，`_validated_resume_limits`
         # 的 run headroom 照样拒绝（豁免不豁免判定，只豁免"必须点名 run 维"这条形式）。
+        # W-04（#348）窄豁免：context 硬护栏触发的暂停（`max_context_tokens`）不适用
+        # "必须点名 run ceiling"——它不是计数预算维，抬高任何 ceiling 都改变不了
+        # "投影放不进窗口"这个事实（恢复的依据是换窗口更大的模型 / 裁剪后的会话面，
+        # 那不是本函数的判定对象）。豁免的只有这一条形式要求；`resume_headroom_ok`
+        # 与基数未知检查照跑（豁免不豁免判定）。
         raise BudgetConflict(
             "恢复必须至少给出一个绝对 ceiling（budget.run.* 任一维，含 deadline_at；"
             "或 session 触发的暂停配 session ceiling 的 CAS 抬高）；"

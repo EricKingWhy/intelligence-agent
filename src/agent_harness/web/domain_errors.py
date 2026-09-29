@@ -103,7 +103,6 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from agent_harness.agent.budget import (
-    BudgetAliasConflict,
     BudgetCeilingExceeded,
     BudgetConflict,
     BudgetRejection,
@@ -151,7 +150,6 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # T3 / #308（ADR-0044 D1/D8/D9）：预算配置不可接受——alias 冲突 / 越过生效上层
     # ceiling。父类与两个子类各自登记（精确类型索引）。
     BudgetRejection: 422,
-    BudgetAliasConflict: 422,
     BudgetCeilingExceeded: 422,
     # 404：目标不存在（approve 的三个来源有意不可区分，见模块 docstring）
     SessionNotFound: 404,

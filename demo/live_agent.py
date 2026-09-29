@@ -18,7 +18,7 @@ spec 不变，roadmap 不变——这是一份纯可见性 demo。
 ----
     uv run python demo/live_agent.py
     uv run python demo/live_agent.py --task "在 workspace 建个 hello.py 并跑一下"
-    uv run python demo/live_agent.py --workspace ./_demo_workspace --max-steps 10
+    uv run python demo/live_agent.py --workspace ./_demo_workspace --max-agent-turns 10
 
 不带 --task 进入交互模式；每输一行就是一次任务，输入 :q 退出。
 """
@@ -109,7 +109,7 @@ EVENT_STYLE: dict[str, str] = {
 def _build_runtime(
     workspace: Path,
     settings: Settings,
-    max_steps: int,
+    max_agent_turns: int,
     policy: PermissionPolicy,
     approval_callback,
     model_name: str | None = None,
@@ -142,7 +142,7 @@ def _build_runtime(
             policy=policy,
             approval_callback=approval_callback,
         ),
-        max_steps=max_steps,
+        max_agent_turns=max_agent_turns,
     )
 
 
@@ -151,7 +151,7 @@ def _runtime_for_session(
     store_root: Path,
     workspace: Path,
     settings: Settings,
-    max_steps: int,
+    max_agent_turns: int,
     policy: PermissionPolicy,
     approval_callback,
 ) -> AgentRuntime:
@@ -167,17 +167,17 @@ def _runtime_for_session(
     _, model_id = current_model_selection(events)
     if model_id is None:
         return _build_runtime(
-            workspace, settings, max_steps, policy, approval_callback
+            workspace, settings, max_agent_turns, policy, approval_callback
         )
     try:
         return _build_runtime(
-            workspace, settings, max_steps, policy, approval_callback,
+            workspace, settings, max_agent_turns, policy, approval_callback,
             model_name=model_id,
         )
     except ConfigError:
         console.print(f"[yellow]会话模型 {model_id} 已不在 catalog，回落默认链[/yellow]")
         return _build_runtime(
-            workspace, settings, max_steps, policy, approval_callback
+            workspace, settings, max_agent_turns, policy, approval_callback
         )
 
 
@@ -327,7 +327,7 @@ async def _main() -> int:
         "--store", default="./_demo_sessions",
         help="SessionEvent JSONL 存放目录（默认 ./_demo_sessions）",
     )
-    parser.add_argument("--max-steps", type=int, default=10, help="Agent Loop 最大轮数")
+    parser.add_argument("--max-agent-turns", type=int, default=10, help="Agent Loop 最大轮数")
     parser.add_argument(
         "--yolo", action="store_true",
         help="DANGER_FULL_ACCESS 策略——绕过审批关卡（任何工具直接放行）",
@@ -354,7 +354,7 @@ async def _main() -> int:
         f"workspace : {workspace}\n"
         f"sessions  : {store_root}\n"
         f"model     : {settings.model_name}\n"
-        f"max_steps : {args.max_steps}\n"
+        f"max_agent_turns : {args.max_agent_turns}\n"
         f"policy    : {'DANGER_FULL_ACCESS (--yolo)' if args.yolo else 'WORKSPACE_WRITE'}\n"
         f"approval  : {'n/a (yolo)' if args.yolo else args.approve}\n"
         f"tools     : read / write / bash / edit / apply_patch / glob / grep / git_status / git_diff",
@@ -368,7 +368,7 @@ async def _main() -> int:
         policy = PermissionPolicy.WORKSPACE_WRITE
         approval_callback = _make_approval_callback(auto=(args.approve == "auto"))
 
-    runtime = _build_runtime(workspace, settings, args.max_steps, policy, approval_callback)
+    runtime = _build_runtime(workspace, settings, args.max_agent_turns, policy, approval_callback)
 
     if args.task:
         session = _new_session(store_root)
@@ -430,7 +430,7 @@ async def _main() -> int:
                         # runtime，否则会沿用上一个会话的模型。
                         runtime = _runtime_for_session(
                             current_session, store_root, workspace, settings,
-                            args.max_steps, policy, approval_callback,
+                            args.max_agent_turns, policy, approval_callback,
                         )
                         console.print(f"[green]恢复 session: {target_id}[/green]")
                     else:
@@ -468,7 +468,7 @@ async def _main() -> int:
                             append_model_change(current_session, target)
                             runtime = _runtime_for_session(
                                 current_session, store_root, workspace, settings,
-                                args.max_steps, policy, approval_callback,
+                                args.max_agent_turns, policy, approval_callback,
                             )
                             label = (f"{target.provider}/{target.model_id}"
                                      if target.model_id
@@ -529,7 +529,7 @@ async def _main() -> int:
                     current_session = child
                     runtime = _runtime_for_session(
                         child, store_root, workspace, settings,
-                        args.max_steps, policy, approval_callback,
+                        args.max_agent_turns, policy, approval_callback,
                     )
                     console.print(
                         f"[green]fork 出 child session: {child.session_id}"

@@ -1,0 +1,1 @@
+2026-09-28	#395 规格订正（docs-only，goal/ 下 4 个 spec 文件 7 处）：max_steps 迁移期 alias 叙事退役为「#320 已收尾、出现即 422」。两轴审查：内容轴逐处对照 #320 退役口径 / #305 AC-15 预告 / R1 盘点结论（72 处 py 命中五分类合法、web/src 零活代码）；一致性轴 grep spec/ 全目录确认零残留迁移叙事，跨仓契约 BACKEND_CONTRACT_STREAMING_UI.md 已是 #312 删除线口径无需改，历史 ADR 冻结不入范围。	9887c3b2~1..9887c3b2

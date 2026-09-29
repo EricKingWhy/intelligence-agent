@@ -28,12 +28,17 @@ from agent_harness.session import (
     COMPACTION_START,
     CONTEXT_COMPACTED,
     MODEL_COMPLETED,
+    TOOL_CALL,
+    TOOL_RESULT,
     USER_MESSAGE,
     JsonlSessionStore,
     Session,
     SessionEvent,
 )
 from agent_harness.session.derive import derive_messages
+from agent_harness.storage.artifact import FakeArtifactStore
+from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.result import ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -447,21 +452,81 @@ class TestBuilderWritesBracket:
 # ── 参数融合 ────────────────────────────────────────────────────────
 
 class TestFusedCompactionParameters:
-    """PRD §3 参数融合：80% trigger, 90% hard guard, 20k keep recent, reserve max(15%, 16k)。"""
+    """Spec 06 参数融合：70% trigger, 85% hard guard, 20k keep recent, reserve max(15%, 16k)。"""
 
     @pytest.mark.asyncio
-    async def test_default_parameters_match_prd(self):
-        """ContextCompactor 默认参数匹配 PRD §3。"""
+    async def test_default_parameters_match_spec(self):
+        """ContextCompactor 默认参数匹配 Spec 06 冻结值（0.70/0.85，#379）。"""
         compactor = ContextCompactor(ScriptedModel([]), max_context_tokens=200_000)
-        assert compactor.auto_compact_threshold == 0.80
-        assert compactor.hard_guard_threshold == 0.90
+        assert compactor.auto_compact_threshold == 0.70
+        assert compactor.hard_guard_threshold == 0.85
         assert compactor.keep_recent_tokens == 20_000
         # reserve = max(15% of 200k, 16384) = max(30000, 16384) = 30000
         assert compactor.reserve == max(int(200_000 * 0.15), 16384)
+        # #379 AC：缺省阈值落到 token 限额（同表达式浮点，位级相等）
+        assert compactor._auto_limit == 200_000 * 0.70
+        assert compactor._hard_limit == 200_000 * 0.85
 
     @pytest.mark.asyncio
-    async def test_builder_default_parameters_match_prd(self):
-        """ContextBuilder 默认参数匹配 PRD §3。"""
+    async def test_builder_default_parameters_match_spec(self):
+        """ContextBuilder 默认参数匹配 Spec 06 冻结值（0.70/0.85，#379）。"""
         builder = ContextBuilder(ScriptedModel([]), max_context_tokens=200_000)
-        assert builder.auto_compact_threshold == 0.80
-        assert builder.hard_guard_threshold == 0.90
+        assert builder.auto_compact_threshold == 0.70
+        assert builder.hard_guard_threshold == 0.85
+
+
+# ── W-03 #347：裁剪后仍超限 → ranges 覆盖 → bracket 正确 ────────────
+
+class TestCompactionWithPrunedToolResults:
+    """W-03 (#347) 地雷 3 回归：builder 传裁剪后消息时，投影内容与 derive 产物
+    不再逐条相等——compactor 必须走 source_ranges 覆盖入参拿 source_seq 区间，
+    否则压缩被静默拒绝（不写 bracket）、上下文只靠硬护栏停摆。"""
+
+    @pytest.mark.asyncio
+    async def test_bracket_written_for_pruned_projection(self, tmp_path):
+        """裁剪后消息触发压缩：bracket 落盘、source 区间覆盖被压缩的原始事件。"""
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "历史数据行，包含编号 R-042 与路径 docs/a.md。\n" * 500
+
+        async def overflowed_read(call_id: str) -> None:
+            session.append(TOOL_CALL, {"tool_call_id": call_id,
+                                       "tool_name": "read_file",
+                                       "args": {"path": "big.txt"}})
+            handler = ArtifactOverflowHandler(store, 2000, read_tool_name="read_artifact")
+            result = ToolResult.success("file content", data={"output": content})
+            overflowed, deferred = await handler.maybe_overflow(
+                session, call_id, "read_file", result,
+            )
+            for event_type, data in deferred:
+                session.append(event_type, data)
+            session.append(TOOL_RESULT, {"tool_call_id": call_id,
+                                         "content": overflowed.model_dump_json()})
+
+        session.append(USER_MESSAGE, {"content": "读取历史。"})
+        for i in range(3):
+            session.append(MODEL_COMPLETED, {"content": "", "tool_calls": [
+                {"id": f"c{i}", "name": "read_file", "args": {"path": "big.txt"}},
+            ]})
+            await overflowed_read(f"c{i}")
+        session.append(USER_MESSAGE, {"content": "当前请求"})
+
+        builder = ContextBuilder(
+            ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
+            max_context_tokens=2000, auto_compact_threshold=0.3,
+            artifact_store=store, artifact_read_tool_name="read_artifact",
+        )
+        messages = await builder.build(session)
+
+        # 压缩确已触发（裁剪后估算仍超过 auto 阈值）并写出了 4-event bracket
+        starts = [e for e in session.events if e.type == COMPACTION_START]
+        assert len(starts) == 1
+        assert [e.type for e in session.events[-3:]] == [
+            COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+        ]
+        # source 区间覆盖被压缩的原始事件（seq 1..13：user + 3×(model+call+artifact+result)）
+        assert starts[0].data["source_seq_start"] == 1
+        assert starts[0].data["source_seq_end"] == 13
+        # 压缩后的投影：摘要 + 当前请求
+        assert isinstance(messages[0], SystemMessage)
+        assert messages[-1].content == "当前请求"

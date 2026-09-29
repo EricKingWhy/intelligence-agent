@@ -63,6 +63,9 @@ class TestSessionEventDTO:
             "artifact/created",
             "artifact/externalized",
             "context/compacted",
+            # W-04 (#348)：摘要尝试失败的任务可见状态（每次尝试一条，载荷有界；
+            # 不投影成消息——derive 的投影集合不收它）。
+            "context/compaction_failed",
             "memory/degraded",
             "tool/failure-guard",
             "model/fallback",
