@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any
 from uuid import uuid4
 
@@ -50,8 +51,65 @@ _PATH_FIELDS = {"path", "file", "filename", "filepath", "file_path", "source_fil
 _EXACT_FIELDS = {"command", "cmd", "shell", "error", "error_message"}
 
 
+#: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
+#: timeout / transport_error 覆盖调用面；其余八类逐一对应校验闸门与 shrink 的各条拒绝。
+_SUMMARY_ERROR_CLASSES = (
+    "timeout",
+    "transport_error",
+    "empty_summary",
+    "tool_calls_in_response",
+    "non_text",
+    "heading_mismatch",
+    "empty_section",
+    "programmatic_mismatch",
+    "summary_not_smaller",
+    "target_not_reached",
+)
+
+#: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
+_FAILURE_MESSAGE_LIMIT = 300
+
+
+@dataclass(frozen=True)
+class CompactionFailure:
+    """一次摘要尝试的失败记录（W-04 #348）。
+
+    `message` 只装本项目自己的拒绝文案或异常**类型名**——绝不透传 provider
+    回显原文（与 ADR-0033 边界 1 同一条脱敏纪律）。`auto_limit` / `hard_limit`
+    取触发时的整型阈值读数；`token_estimate` 是调用方进入压缩时的估算。
+    """
+
+    attempt: int
+    error_class: str
+    message: str
+    auto_limit: int
+    hard_limit: int
+    token_estimate: int
+
+
+class _SummaryRejected(ValueError):
+    """摘要尝试内的单次拒绝（#348）：携带 `_SUMMARY_ERROR_CLASSES` 里的一个类。
+
+    ValueError 子类：与既有校验 helper 的 ValueError 族在同一 except 面内被收拢，
+    直接调用这些 helper 的既有测试不受影响。
+    """
+
+    def __init__(self, error_class: str, message: str) -> None:
+        super().__init__(message)
+        self.error_class = error_class
+
+
 class ContextWindowExceededError(RuntimeError):
     """无法构造安全的模型上下文，调用方必须停止当前 run。"""
+
+    def __init__(
+        self, message: str, *,
+        failures: list[CompactionFailure] | None = None,
+    ) -> None:
+        super().__init__(message)
+        #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。预检类超限
+        #: （tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录，保持为空表。
+        self.failures = list(failures or [])
 
 
 @dataclass
@@ -65,6 +123,9 @@ class CompactionResult:
     source_seq_end: int | None = None
     bracket_id: str | None = None
     summary: str | None = None
+    # W-04 (#348)：本次 compact 里失败过的摘要尝试（成功尝试之前的都在内；
+    # 双失败安全继续时是两条）。调用方（builder）负责把它们落成任务可见状态。
+    failures: list[CompactionFailure] = dataclass_field(default_factory=list)
 
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
@@ -76,12 +137,15 @@ class ContextCompactor:
                  auto_compact_threshold: float = 0.70,
                  hard_guard_threshold: float = 0.85,
                  keep_recent_tokens: int = 20_000,
-                 summary_timeout_seconds: float = 30.0) -> None:
+                 summary_timeout_seconds: float = 30.0,
+                 summary_model: Any | None = None) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("invalid context budget")
         if summary_timeout_seconds <= 0:
             raise ValueError("summary_timeout_seconds must be positive")
-        self._model = model_provider
+        # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（装配前的既有行为逐字节
+        # 等价）。便宜档选择本身留在配置面（后续票），本层只负责"用谁摘要"。
+        self._model = summary_model if summary_model is not None else model_provider
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
         self.keep_recent_tokens = keep_recent_tokens
@@ -121,43 +185,80 @@ class ContextCompactor:
             [message.model_dump(mode="json") for message in early], ensure_ascii=False,
         ))
         request = [prompt, transcript]
-        summary_text: str
-        try:
-            if estimate_message_tokens(request) > self._hard_limit:
-                raise ContextWindowExceededError("Summary request exceeds hard guard")
-            async with asyncio.timeout(self._summary_timeout):
-                response = await self._model.ainvoke(request)
-            if not isinstance(response, AIMessage) or response.tool_calls:
-                raise ValueError("Summary must be text without tool calls")
-            if not isinstance(response.content, str):
-                raise TypeError("Summary must be plain text")
-            model_sections = _parse_summary_sections(
-                response.content, _MODEL_SUMMARY_HEADINGS,
-            )
-            summary_text = _assemble_summary(early, model_sections)
-            _validate_summary(summary_text, early)
-            early_tokens = estimate_message_tokens(early)
-            summary_tokens = estimate_message_tokens([SystemMessage(content=summary_text)])
-            if summary_tokens >= early_tokens:
-                raise ContextWindowExceededError(
-                    f"Summary ({summary_tokens} tokens) is not smaller than "
-                    f"compressed segment ({early_tokens} tokens)"
-                )
-            compacted = [*prefix, SystemMessage(content=summary_text), *recent]
-            if estimate_message_tokens(compacted) >= self._auto_limit:
-                raise ContextWindowExceededError("LLM summary does not reach compaction target")
-        except Exception as exc:  # noqa: BLE001
-            # 摘要失败时不能只在当前轮使用 fallback、却把空摘要写入事件流。
-            # 保留原投影；超出硬护栏时安全停止，CancelledError 仍向调用方传播。
+        # 预检（不算尝试，维持既有拒绝语义）：请求本身已超硬护栏时不再发起摘要调用，
+        # 旧投影超护栏则停止、否则安全继续。此处不产生尝试记录。
+        if estimate_message_tokens(request) > self._hard_limit:
             logger.warning(
-                "Context compaction rejected; keeping original projection (%s)",
-                type(exc).__name__,
+                "Context compaction rejected; summary request exceeds hard guard",
             )
             if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError(
                     "Summary validation failed and original context exceeds hard guard"
                 ) from None
             return CompactionResult(list(messages), 0, token_estimate, False)
+        # W-04 (#348)：摘要生成至多两次尝试。一次尝试 = ainvoke → 解析 → 程序化组装
+        # → 校验闸门 → shrink 全链；预检（上面与 tool 块检查）不计入。每次失败记一条
+        # 有界 CompactionFailure，由调用方落成任务可见状态。
+        failures: list[CompactionFailure] = []
+        summary_text = ""
+        compacted: list[AnyMessage] | None = None
+        for attempt in (1, 2):
+            try:
+                async with asyncio.timeout(self._summary_timeout):
+                    response = await self._model.ainvoke(request)
+                if not isinstance(response, AIMessage) or response.tool_calls:
+                    raise _SummaryRejected(
+                        "tool_calls_in_response",
+                        "Summary must be text without tool calls",
+                    )
+                if not isinstance(response.content, str):
+                    raise _SummaryRejected("non_text", "Summary must be plain text")
+                if not response.content.strip():
+                    raise _SummaryRejected("empty_summary", "Summary must not be empty")
+                model_sections = _parse_summary_sections(
+                    response.content, _MODEL_SUMMARY_HEADINGS,
+                )
+                summary_text = _assemble_summary(early, model_sections)
+                _validate_summary(summary_text, early)
+                early_tokens = estimate_message_tokens(early)
+                summary_tokens = estimate_message_tokens([SystemMessage(content=summary_text)])
+                if summary_tokens >= early_tokens:
+                    raise ContextWindowExceededError(
+                        f"Summary ({summary_tokens} tokens) is not smaller than "
+                        f"compressed segment ({early_tokens} tokens)"
+                    )
+                compacted = [*prefix, SystemMessage(content=summary_text), *recent]
+                if estimate_message_tokens(compacted) >= self._auto_limit:
+                    raise ContextWindowExceededError(
+                        "LLM summary does not reach compaction target"
+                    )
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # 摘要失败不能把空摘要写入事件流；先记录、再决定重试或保留原投影。
+                # CancelledError 不在这里吞（上面显式重抛）。
+                failures.append(_record_failure(
+                    attempt, exc, token_estimate, self._auto_limit, self._hard_limit,
+                ))
+                logger.warning(
+                    "Context compaction attempt %s rejected (%s)",
+                    attempt, failures[-1].error_class,
+                )
+        if compacted is None:
+            # 两次尝试都失败：旧投影仍在硬护栏内则安全继续（下一稳定边界再评估）；
+            # 已达硬护栏而仍无核验过的上下文 ⇒ 停止，异常携带失败记录供暂停面引用。
+            logger.warning(
+                "Context compaction rejected; keeping original projection (%s)",
+                failures[-1].error_class if failures else "unknown",
+            )
+            if token_estimate > self._hard_limit:
+                raise ContextWindowExceededError(
+                    "Summary validation failed and original context exceeds hard guard",
+                    failures=failures,
+                ) from None
+            return CompactionResult(list(messages), 0, token_estimate, False,
+                                    failures=failures)
         count = estimate_message_tokens(compacted)
         if count > self._hard_limit:
             raise ContextWindowExceededError(
@@ -362,3 +463,55 @@ def _validate_tool_blocks(messages: list[AnyMessage]) -> None:
             raise ContextWindowExceededError("Orphan tool result in context")
         else:
             index += 1
+
+
+def _classify_failure(exc: BaseException) -> str:
+    """异常 → `_SUMMARY_ERROR_CLASSES` 里的一个有界类（W-04 #348）。
+
+    逐字文案是本模块自己冻结的（tests 依赖其稳定性），按前缀归类；无法辨认的
+    ValueError 一律归 `heading_mismatch`（同为"摘要结构不合契约"面），非 ValueError
+    的调用面故障归 `transport_error`。本函数不抛。
+    """
+    if isinstance(exc, _SummaryRejected):
+        return exc.error_class
+    if isinstance(exc, ContextWindowExceededError):
+        message = str(exc)
+        if message.startswith("Summary ("):
+            return "summary_not_smaller"
+        if "compaction target" in message:
+            return "target_not_reached"
+        return "transport_error"
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return "timeout"
+    if isinstance(exc, ValueError):
+        message = str(exc)
+        if message.startswith("Empty summary section"):
+            return "empty_section"
+        if ("Programmatic summary section" in message
+                or message.startswith("Previous summary")):
+            return "programmatic_mismatch"
+        return "heading_mismatch"
+    return "transport_error"
+
+
+def _record_failure(
+    attempt: int, exc: BaseException, token_estimate: int,
+    auto_limit: float, hard_limit: float,
+) -> CompactionFailure:
+    """一次尝试的异常 → 有界 CompactionFailure。
+
+    message 只装本项目自己的拒绝文案或异常**类型名**；正文（可能含 provider
+    回显）与调用栈一样只进诊断日志，不进任务可见状态（ADR-0033 边界 1 同源）。
+    """
+    if isinstance(exc, (_SummaryRejected, ContextWindowExceededError, ValueError)):
+        message = str(exc) or type(exc).__name__
+    else:
+        message = type(exc).__name__
+    return CompactionFailure(
+        attempt=attempt,
+        error_class=_classify_failure(exc),
+        message=message[:_FAILURE_MESSAGE_LIMIT],
+        auto_limit=int(auto_limit),
+        hard_limit=int(hard_limit),
+        token_estimate=token_estimate,
+    )

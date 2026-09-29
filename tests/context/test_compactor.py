@@ -9,10 +9,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
 from agent_harness.context.tokens import estimate_message_tokens
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -70,6 +72,7 @@ async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_pa
 
 @pytest.mark.asyncio
 async def test_summary_failure_keeps_constraints_and_tool_pair_after_store_reload(tmp_path):
+    """timeout ×2：低估值保留原投影；每次失败落一条任务可见状态（W-04 #348）。"""
     class FailingModel:
         calls = 0
 
@@ -100,12 +103,29 @@ async def test_summary_failure_keeps_constraints_and_tool_pair_after_store_reloa
         model, max_context_tokens=100_000, auto_compact_threshold=0.05,
     ).build(session)
 
+    # W-04 (#348)：失败至多重试一次（两次调用），且每次失败留任务可见状态。
+    assert model.calls == 2
+    failure_events = [e for e in session.events
+                      if e.type == CONTEXT_COMPACTION_FAILED]
+    assert [e.data["attempt"] for e in failure_events] == [1, 2]
+    assert all(e.data["error_class"] == "timeout" for e in failure_events)
+    assert all(e.data["message"] == "TimeoutError" for e in failure_events)
+    # 低估（< hard guard）：安全继续，原投影保留、无压缩 bracket。
+    assert not any(event.type in {
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    } for event in session.events)
+
     reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
+    # 失败事件先于压缩事实持久化：重载后原事件 + 两条失败记录原样在场
+    #（重放不丢、不重复、不伪造）。
+    persisted = store.read_events(session.session_id)
+    assert persisted[:len(original_events)] == original_events
+    assert [e.data["attempt"] for e in persisted
+            if e.type == CONTEXT_COMPACTION_FAILED] == [1, 2]
     rebuilt = await ContextBuilder(
         ScriptedModel([]), max_context_tokens=100_000,
     ).build(reloaded)
 
-    assert model.calls == 1
     assert any(isinstance(message, HumanMessage)
                and message.content == exact_constraint for message in rebuilt)
     tool_call = next(message for message in rebuilt
@@ -114,7 +134,6 @@ async def test_summary_failure_keeps_constraints_and_tool_pair_after_store_reloa
     tool_result = next(message for message in rebuilt if isinstance(message, ToolMessage))
     assert tool_result.tool_call_id == "call-r-042"
     assert tool_result.content == large_result
-    assert store.read_events(session.session_id) == original_events
     assert not any(event.type in {
         COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
     } for event in store.read_events(session.session_id))
@@ -218,7 +237,14 @@ async def test_hard_guard_rejects_when_recent_turn_cannot_fit(tmp_path):
     before = session.events
     with pytest.raises(ContextWindowExceededError):
         await ContextBuilder(ScriptedModel([]), max_context_tokens=1000).build(session)
-    assert session.events == before
+    # W-04 (#348)：双次摘要尝试的失败记录先于拒绝落盘（任务可见状态），
+    # 除此之外不新增任何事件（无 bracket、无改写）。
+    assert session.events[:len(before)] == before
+    failure_events = [e for e in session.events
+                      if e.type == CONTEXT_COMPACTION_FAILED]
+    assert [e.data["attempt"] for e in failure_events] == [1, 2]
+    assert all(e.data["error_class"] == "transport_error" for e in failure_events)
+    assert len(session.events) == len(before) + 2
 
 
 @pytest.mark.asyncio
@@ -305,7 +331,13 @@ async def test_single_turn_between_auto_and_hard_guard_does_not_fake_compaction(
     messages = await ContextBuilder(model, max_context_tokens=int(count / 0.8),
                                     auto_compact_threshold=0.8,
                                     hard_guard_threshold=0.9).build(session)
-    assert messages == session.derive_messages()
+    # W-04 (#348)：该带（[auto, hard)）注入一条接近护栏 warning（advisory）；
+    # 无完整早期轮可压 ⇒ 原投影保留，只是多了这条 user-role 提醒。
+    assert messages == [
+        HumanMessage(content=DEFAULT_REGISTRY.assemble(
+            "frame:context_pressure").meta_user_text),
+        *session.derive_messages(),
+    ]
     assert session.events == before
     assert model.snapshots == []
 

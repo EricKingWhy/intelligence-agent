@@ -1111,9 +1111,12 @@ async def test_context_exceeded_refunds_the_session_step_reservation(tmp_path) -
 
     准入已把两格预付进 durable 行；退款缺失的话，一次没跑成的步会在树账上留下
     幻影，跨 run 聚合会把幻影累进后续每一次准入判定。
+
+    W-04（#348）起这条臂收口为**非终态暂停**（`reason=budget_exhausted`，
+    `trigger_dimension=max_context_tokens`），退款语义不变——模型一次都没被调用，
+    closeout 也因 context 装配失败落确定性 continuation，两格必须原样退回。
     """
     from agent_harness.agent.run_budget import SessionLimits
-    from agent_harness.agent.types import STATUS_CONTEXT_WINDOW_EXCEEDED
     from agent_harness.context.compactor import ContextWindowExceededError
     from agent_harness.storage.delegation_tree import (
         InMemoryDelegationTreeLedger,
@@ -1136,7 +1139,10 @@ async def test_context_exceeded_refunds_the_session_step_reservation(tmp_path) -
     runtime._context_builder = _ExplodingContext()
     result = await runtime.run(session, "第一步就超限")
 
-    assert result.status == STATUS_CONTEXT_WINDOW_EXCEEDED
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED
+    assert paused.data["trigger_dimension"] == "max_context_tokens"
     row = await ledger.get_session_budget("root-s")
     assert row.consumed.agent_turns == 0
     assert row.consumed.model_requests == 0, "预留整步退回，不留幻影"

@@ -111,9 +111,6 @@ from agent_harness.agent.run_budget import (
     REASON_BUDGET_EXHAUSTED,
     TRIGGER_LOCAL_TURNS,
 )
-from agent_harness.agent.types import (
-    STATUS_CONTEXT_WINDOW_EXCEEDED,
-)
 from agent_harness.context.compactor import ContextWindowExceededError
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
 from agent_harness.session import (
@@ -594,19 +591,20 @@ def _scenarios() -> tuple[Scenario, ...]:
         ),
         Scenario(
             name="context_exceeded",
-            note="投影阶段超限：模型从未被调用，故流里一个 model/* 都没有；"
-                 "该臂在 `_write_memories` 之前 return ⇒ 记忆提交 0 次",
+            note="投影阶段超限（W-04 #348 起改走暂停生命周期）：模型从未被调用，"
+                 "故流里一个 model/* 都没有；closeout 里的二次 build 同样在模型调用"
+                 "之前抛出 ⇒ 无 closeout 请求，确定性 continuation；run 未终结 ⇒ "
+                 "不写记忆（paused 不在形成白名单）",
             build=lambda w: _runtime(_simple_model(),
                                      context_builder=_ExplodingContextBuilder(),
                                      memory_writer=w.memory),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, RUN_FAILED),
-            terminal=RUN_FAILED,
-            terminal_payload={"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": PROSE,
-                              "trace_id": None, "trace_url": None},
-            terminal_step_id=0,  # 该臂显式写 step_base + steps（其余臂走 end_run ⇒ None）
-            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (RUN_FAILED, 1)),
+            durable=(USER_MESSAGE, RUN_STARTED, RUN_PAUSED),
+            emitted=(USER_MESSAGE, RUN_STARTED, RUN_PAUSED),
+            terminal=None,
+            terminal_payload={},
+            terminal_step_id=0,  # 暂停臂显式写 envelope_step（run/paused 不在 RUN_TERMINAL_TYPES）
+            turn2=((USER_MESSAGE, None), (RUN_STARTED, None), (RUN_PAUSED, 1)),
         ),
         Scenario(
             name="provider_error",
@@ -1227,13 +1225,13 @@ async def test_memory_writeback_submits_the_declared_events(name: str, tmp_path:
 # ---------------------------------------------------------------------------
 
 # 只在"已跑完一轮"的 session 上才分岔的臂。
-# 前三条显式写 `step_base + steps` ⇒ 第二轮必须是 1（不是 0）；
+# 前两条显式写 `step_base + steps` ⇒ 第二轮必须是 1（不是 0）；
 # 后两条走 `end_run`，其 `steps=` 是死参数（见文件头"死参数"段）⇒ 恒 None，
 # 这一半钉的是"它**仍然**是 None"：哪天那参数真的生效（= 行为变更），基线必红。
-# `local_fuse_pause` 不在本表：它的收口事件是**非终态**的 `run/paused`（#312 T4），
-# 落在下面 `_TURN2_ENVELOPE_ARMS` 的"全事件信封"覆盖里（含它自己的 step_id）。
+# `local_fuse_pause` / `context_exceeded` 不在本表：它们的收口事件是**非终态**的
+# `run/paused`（#312 T4；#348 起后者也走暂停生命周期），落在下面
+# `_TURN2_ENVELOPE_ARMS` 的"全事件信封"覆盖里（含它自己的 step_id）。
 _TURN2_TERMINAL_ARMS = (
-    ("context_exceeded", 1),
     ("generator_exit_post_run", 1),
     ("cancel_while_blocked", 1),
     ("provider_error", None),
