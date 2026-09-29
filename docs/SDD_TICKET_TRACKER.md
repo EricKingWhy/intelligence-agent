@@ -24,13 +24,13 @@
 | MEM-V2-5 | #301 | CLOSED / integrated | Memory management Web UI | #300 |
 | MEM-V2-6 | #302 | CLOSED / integrated (PR #339) | Privacy observability and quality evaluation | #298, #299, #300 |
 | MEM-V2-7 | #303 | COMPLETED / integrated (PR #374); cutover and AC8 verified | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
-| MEM-V2-8 | #304 | OPEN / final real Gate passed locally | Final real Gate and release evidence | #301, #302, #303 |
+| MEM-V2-8 | #304 | OPEN / final real Gate passed on local branch; integration pending | Final real Gate and release evidence | #301, #302, #303 |
 
-> **#304 当前状态（2026-09-29）**：Cline SSE 适配和批准 endpoint fail-closed 校验已修复并经两轴审查 PASS（复审范围 `9fc6f8b7..3ee3426a`）；修后最终 Playwright race fix 也经两轴 PASS（`f7242294..1e76bc6a`）。真实 27-case gold 报告 `docs/evidence/memory-v2-real-gold-v1.8.0-1c8382a709b1-52d6427d.json` 为 27/27 PASS，全部阻塞指标达标，临时 Milvus collection `verified_absent`。最终冻结树全量 pytest 4722 passed / 2 skipped / 51 deselected；Vitest 73/73 files、1157 passed；build 通过；Playwright 460/460；Milvus、Knowledge、Langfuse、Phase 15 Gate 2/5、Qiniu 六个真实服务 lane 各 1 passed。上一次空报告是 provenance 正确拒绝未跟踪的历史报告；归档后 clean-tree 重跑通过，没有更换模型或阈值。待在本批最终文档提交后重跑 Gate-0 并补入机器读数；随后关单并记录分支状态。
+> **#304 当前状态（2026-09-29，过程字段修复后）**：真实 gold 报告 `docs/evidence/memory-v2-real-gold-v1.8.0-84084e250b46-a79e70fc.json` 绑定 `84084e250b46ac23770afe4bb6b499c803940446` / tree `53b18572c4225eb3287961114e99cc037e63e056`，27/27 执行且无失败、降级或跳过；NOOP 10/10、write precision 11/11、kind accuracy 12/12、contradiction 3/3、cross-session Recall@6 2/2、fallback 2/2 均达标，安全探针零违规，Milvus 临时 collection `verified_absent`。根因是 formation prompt 没约束 procedural.procedure 的字符串形状，而既有 Pydantic 契约要求字符串；`ccc7c83e` 补充形状指令和回归断言，未改模型、Schema 或门槛。修复后 focused tests 140 passed、全量 pytest 4766 passed / 2 skipped / 51 deselected；两轴复审通过。最终 Gate-0 和覆盖闸门报告将在下方记录。分支 `codex/mem-v2-8-final-gate` 尚未推送/集成，当前落后 `origin/main` 2 笔；issue 保持 OPEN。
 
 **事实源与边界（截至 2026-09-29）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。`#297`–`#303` 的实现均已集成；`#303` 的真实 cutover、保留证明与 AC8 smoke 已完成，最终证据见 `docs/evidence/memory-v2-*2026-09-27.json`。`#304` 的本地最终真实门禁已通过，证据与未决集成状态见本段及票面。
 
-**施工顺序**：`#297`–`#303` 已完成并集成；`#304` 的最终真实门禁已通过，正在完成最后的 Gate-0 记录与关单流程。
+**施工顺序**：`#297`–`#303` 已完成并集成；`#304` 的后续过程字段修复、真实 gold、全量 pytest 与双轴复审已完成，最终 Gate-0 读数和 artifact 指针见上方状态及 2026-09 月档；短分支尚待按 Git 保护流程集成，之后再按票面完成关单。
 
 > **状态更新（2026-09-24）**：上表「OPEN / `ready-for-agent`」与上一段的「当前没有任何票进入实现」**均已过期**，
 > 按「历史片段不改写、新状态追加」的惯例在此更正：`#297`（`T297-mem-v2-1-typed-lifecycle`，tip `32ef89b`）
