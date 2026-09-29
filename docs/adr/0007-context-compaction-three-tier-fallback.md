@@ -1,6 +1,6 @@
 # ADR-0007: Context Compaction 三层降级 + tiktoken 精确计数
 
-**Status**: Accepted  
+**Status**: Accepted（子决策 2 已于 #348 部分修订，见下方修订注）
 **Date**: 2026-09-04  
 **Phase**: 5 (Artifact + MinIO + Context Compaction)
 
@@ -37,6 +37,18 @@ LLM 摘要可能失败（模型超时、格式不对、拒绝生成）。失败�
    ↓ (机械提取后仍超 hard guard)
 3. 抛 ContextWindowExceededError → Runtime 停止 loop
 ```
+
+> **2026-09-29 修订（#348 落地失败契约）**：**第 2 层的"机械提取"从未按上图形状实现**——
+> 实际降级是**保留原投影**（不伪造一份截断拼贴，摘要失败 ≠ 压缩发生）。#348 把这一
+> 实际语义冻结为契约并补齐失败面：① 摘要生成至多**两次尝试**（预检不算尝试），
+> 每次失败落一条有界 `CompactionFailure`（`error_class` 十类词表 + `message` 只装
+> 本项目文案或异常类型名，绝不透传 provider 回显）⇒ 调用方（builder）落成任务可见
+> 状态 `context/compaction_failed`（规格 06 §8"每次失败原因留诊断与任务可见状态"）；
+> ② 两次都失败时旧投影仍在硬护栏内 ⇒ **安全继续**（原投影 + 失败记录，下一稳定边界
+> 再评估）；已超硬护栏 ⇒ 抛 `ContextWindowExceededError`（携带失败记录）。③ 第 3 层
+> 的"Runtime 停止 loop"随 #348 改为**非终态暂停**（`run/paused`，
+> `trigger_dimension=max_context_tokens`，ADR-0033 边界 5）——"停止"不再意味着终结。
+> 便宜摘要模型接缝（`summary_model`）同票就位，缺省 = 主模型，装配留后续票。
 
 **第 1 层 — LLM 摘要**：取早期完整 turns，送给同一个 ModelProvider 的 `ainvoke()`，prompt 要求产出结构化 summary（至少保留 facts / decisions / constraints / failed_attempts / unresolved / artifact_refs / citations / important tool outcomes——spec §5 列举）。产出为一条 `SystemMessage` 注入 messages 头部。
 

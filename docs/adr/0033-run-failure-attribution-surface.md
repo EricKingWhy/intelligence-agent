@@ -96,7 +96,7 @@
 
 | 路径 | `reason` | `message` |
 | --- | --- | --- |
-| 上下文超限（`ContextWindowExceededError`，直接 append） | `context_window_exceeded` | `str(error)`（内部英文串，见 §2.3 的警告） |
+| 上下文超限（`ContextWindowExceededError`，直接 append） | `context_window_exceeded` | `str(error)`（内部英文串，见 §2.3 的警告）。**（#348 起运行期不可达，见边界 5）** |
 | `max_steps` 保险丝 | `max_steps_exceeded` | 与 `agent_decision` 日志同一句（「连续 N 轮仍在请求工具，触发保险丝」） |
 | （`#312` 起）`max_steps` / 预算到顶 | **不再是失败终态** | 改落**非终态** `run/paused`（`reason=budget_exhausted` + `trigger_dimension`），本表该行只对历史载荷成立，见下方边界 4 |
 | 同错熔断硬保险丝 | `identical_tool_failure_loop` | 无（码即信息） |
@@ -109,6 +109,7 @@
 2. **`model/failed.message` 不跟着变**：它未分类时仍是 `model call failed: {error_type}`。两个面各有读者，`run/failed` 是给人看的终态，`model/failed` 是逐步归因（前端不投影，§3）。写代码时用一个中间变量显式分开，别把同一句喂给两边。
 3. **`max_steps` 改走 `failure_terminal`**。这条路径原先自己拼 `session.end_run`，绕过了终态字段的唯一 owner —— 这正是它"一个键都没有"而长期没人发现的机制原因（字段集中供给被绕过，下次加字段还会漏它）。
 4. **（`#312` 追加）预算到顶不是失败，故它离开了本表**。撞 `local.max_agent_turns` / `run.max_agent_turns_total` 时该次执行落**非终态** `run/paused`（`reason=budget_exhausted` + `trigger_dimension`），既不写 `run/failed` 也不写 `run/completed`；`max_steps_exceeded` 这个受控失败终态随之**在运行期不可达并删除**（`memory/v2/eligibility.py` 的白名单同步移除它）。本表上一条只对 `#312` 之前的历史载荷成立 ⇒ 读到旧载荷要照旧渲染成失败，但**不得**把它当作今天还可能出现的归因面。前端契约的对应处已同步（`docs/BACKEND_CONTRACT_STREAMING_UI.md` §4）。
+5. **（`#348` 追加）context 超限也不是失败，同它离开了本表**。`ContextWindowExceededError` 的收口从"直接 append `run/failed`"改为委托**既有暂停生命周期**（`_terminal_paused`）：`trigger_dimension="max_context_tokens"`（config.py 的配置字段路径，非计数维）经 `reason_for_dimension` 自动映射为 `reason=budget_exhausted`——**不新增 reason 值**（`03 §3.4` 词表冻结）。理由：超限是"投影放不进窗口"，抬任意 run ceiling 都改变不了这个事实，它和预算到顶一样是**可恢复**的停止，不是终结。`STATUS_CONTEXT_WINDOW_EXCEEDED` 常量保留只读历史载荷；恢复侧的窄豁免（不点名 run ceiling 也可恢复）见 `run_budget.validate_resume`。本表该行只对 `#348` 之前的历史载荷成立。
 
 **未覆盖（有据，非本票引入）**：失败发生在 `begin_run` **之前**（`USER_ACCEPTED` checkpoint / 写 user 消息阶段）时 `run_id` 为 `None`，此时**没有任何终态事件可写**（`failure_terminal` 返回 `None`），durable 历史停在 `run/started` 之前。这是"没有 run 可终结"的正当语义，不是本票要改的形状；真要覆盖得先定义"无 run 的失败"往哪写。
 

@@ -33,7 +33,9 @@ import pytest
 
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
+    REASON_BUDGET_EXHAUSTED,
     TRIGGER_LOCAL_TURNS,
+    TRIGGER_MAX_CONTEXT_TOKENS,
     BudgetConsumed,
     LaunchRunBudget,
 )
@@ -692,31 +694,44 @@ async def test_failed_run_arm_without_message_omits_the_key(session: Session) ->
 
 
 # ---------------------------------------------------------------------------
-# context 超限臂
+# context 超限臂（W-04 #348：走暂停生命周期，不再落 run/failed）
 # ---------------------------------------------------------------------------
+
+
+def _context_pause_launch() -> LaunchRunBudget:
+    return LaunchRunBudget(consumed=BudgetConsumed())
 
 
 @pytest.mark.asyncio
 async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> None:
-    """模型从未被调用 ⇒ 没有可抽取的对话内容，跳过 writeback（0 次是证据）。"""
+    """模型从未被调用 ⇒ 没有可抽取的对话内容，跳过 writeback（0 次是证据）。
+
+    #348 起：收口是**非终态** `run/paused`（reason 经 `reason_for_dimension` 自动
+    = budget_exhausted，trigger_dimension = max_context_tokens）。closeout 尝试一次
+    模型调用（本 kit 的 model 是 `object()` ⇒ 失败）——那次失败请求照样记
+    `model_requests`（与预算暂停臂同一形状）。
+    """
     memory = _MemorySpy()
     kit = _kit(session, memory_writer=memory)
 
     emitted = await _drain(
         kit.runtime._terminal_context_exceeded(
-            kit.arms, steps=0, error=ContextWindowExceededError("上下文超限"),
+            kit.arms, launch=_context_pause_launch(), steps=0,
+            error=ContextWindowExceededError("上下文超限"),
         ),
     )
 
-    assert [e.type for e in emitted] == [RUN_FAILED]
-    terminal = session.events[-1]
-    assert terminal.data["reason"] == STATUS_CONTEXT_WINDOW_EXCEEDED
-    assert terminal.data["message"] == "上下文超限"
-    assert terminal.step_id == kit.arms.envelope_step(0)
-    assert terminal.run_id == RUN_ID, "终态事件必须挂在本次 run 上"
-    assert kit.result_holder[0].status == STATUS_CONTEXT_WINDOW_EXCEEDED
+    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    paused = session.events[-1]
+    assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED
+    assert paused.data["trigger_dimension"] == TRIGGER_MAX_CONTEXT_TOKENS
+    assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
+    assert paused.step_id == kit.arms.envelope_step(0)
+    assert paused.run_id == RUN_ID, "暂停事件必须挂在本次 run 上"
+    assert kit.result_holder[0].status == STATUS_PAUSED
     assert memory.submits == []
-    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
+    # 暂停不产生终态归因：ctx span 已由本臂裸调收口，tracer 没有其它调用
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"]
 
 
 @pytest.mark.asyncio
@@ -728,11 +743,12 @@ async def test_context_exceeded_arm_closes_and_clears_the_handle(session: Sessio
     收口——`#265` 的等价重构逐字复刻了该形状（`keep_handle=True`）并把它登记为残余
     R2 / R3；`#285` 修掉它，本用例随新语义翻转（旧名
     `..._keeps_the_handle_it_closed`，此前钉的是"二次收口"这一缺陷事实）。
-
-    钉四件事，缺一不可：① 收口后句柄为空；② 取消臂在同一 arms 上**不再**产生第二条
-    `context_build_completed`；③ 终态语义不变（只有一条 `run/failed`）；④ 收口是
-    **裸调**（残余 R1 在这一层的形状——只钉 `_Telemetry` 自己的缺省行为抓不住
-    "臂把 `compacted_turn_count=None` 显式传回去"这种回归）。
+    #348 起该臂委托暂停臂收口，本用例钉的四件事随之改写：① 收口后句柄为空；
+    ② 取消臂在同一 arms 上**不再**产生第二条 `context_build_completed`（span 已清）
+    也不补第二条终态（暂停已 mark_terminal_written，单终态不变量）；③ 收口语义
+    = 一条 `run/paused`（暂停是本次执行的收口事实）；④ 收口是**裸调**（残余 R1：
+    只钉 `_Telemetry` 自己的缺省行为抓不住"臂把 `compacted_turn_count=None` 显式
+    传回去"这种回归）。
     """
     ctx_kwargs: list[tuple[str, ...]] = []
 
@@ -746,33 +762,38 @@ async def test_context_exceeded_arm_closes_and_clears_the_handle(session: Sessio
 
     emitted = await _drain(
         kit.runtime._terminal_context_exceeded(
-            kit.arms, steps=3, error=ContextWindowExceededError("上下文超限"),
+            kit.arms, launch=_context_pause_launch(), steps=3,
+            error=ContextWindowExceededError("上下文超限"),
         ),
     )
 
-    assert [e.type for e in emitted] == [RUN_FAILED]
-    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
+    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"]
     # 收口即清口（与成功路径同形）
     assert kit.arms.telemetry.ctx_span is None
     assert ctx_kwargs == [()], "超限臂的收口是裸调（R1：不传 compacted_turn_count）"
 
-    # 取消臂（终态帧之后断连）拿不到句柄 ⇒ **没有**第二次收口
+    # 取消臂（暂停帧之后断连）拿不到句柄 ⇒ **没有**第二次收口；
+    # 单终态不变量 ⇒ 也不补第二条终结事件。
+    before = len(session.events)
     kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     assert [name for name, _ in kit.tracer.calls] == [
-        "context_build_completed", "run_failed", "run_failed",
-    ]
+        "context_build_completed", "run_failed",
+    ], "close_pending 的 run_failed 归因是取消臂的既有形状；span 不再收第二次"
     assert ctx_kwargs == [()], "第二条收集臂根本不该调端口"
+    assert session.events[before:] == [], "已暂停的 run 不得再补终态（单终态不变量）"
 
 
 @pytest.mark.asyncio
 async def test_context_exceeded_arm_append_failure_does_not_recollect_the_span(
     session: Session, tmp_path: Any,
 ) -> None:
-    """R3 的第二条收集出口 = **异常臂**：超限臂落终态的 `append` 失败也只收一次（#285）。
+    """R3 的第二条收集出口 = **异常臂**：超限臂落 `run/paused` 的 `append` 失败也只收
+    一次（#285）。
 
     构造方式用的是仓库既有夹具（`tests/session/store_fixtures.py`，残余⑦ 指明的成本口径）：
-    终态 `append` 抛 `SeqConflict` ⇒ 生产路径把异常交给顶层异常臂处理，异常臂经
+    暂停 `append` 抛 `SeqConflict` ⇒ 生产路径把异常交给顶层异常臂处理，异常臂经
     `arms.context(steps)` 取**快照**再收口。修 R2/R3 之前，快照里仍有那个已被超限臂
     收过的句柄 ⇒ 端口收到第二次 `context_build_completed`（与取消臂同源，只是出口不同）。
 
@@ -786,11 +807,12 @@ async def test_context_exceeded_arm_append_failure_does_not_recollect_the_span(
     with pytest.raises(SeqConflict):
         await _drain(
             kit.runtime._terminal_context_exceeded(
-                kit.arms, steps=3, error=ContextWindowExceededError("上下文超限"),
+                kit.arms, launch=_context_pause_launch(), steps=3,
+                error=ContextWindowExceededError("上下文超限"),
             ),
         )
 
-    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed", "run_failed"]
+    assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"]
     assert kit.arms.telemetry.ctx_span is None
 
     # 顶层异常臂（生产里由 _drive 的 except 调用）——同一 arms、同一份快照语义
@@ -800,7 +822,7 @@ async def test_context_exceeded_arm_append_failure_does_not_recollect_the_span(
         )
 
     assert [name for name, _ in kit.tracer.calls] == [
-        "context_build_completed", "run_failed", "run_failed",
+        "context_build_completed", "run_failed",
     ], "异常臂不得对已收口的 span 再收一次（R3）"
 
 

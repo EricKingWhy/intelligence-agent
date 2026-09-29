@@ -20,10 +20,7 @@ from langchain_core.messages import AIMessage
 import agent_harness.agent.runtime as runtime_module
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.run_budget import TRIGGER_LOCAL_TURNS
-from agent_harness.agent.types import (
-    STATUS_CONTEXT_WINDOW_EXCEEDED,
-    STATUS_PAUSED,
-)
+from agent_harness.agent.types import STATUS_PAUSED
 from agent_harness.context.builder import ContextWindowExceededError
 from agent_harness.observability import LangfuseSink
 from agent_harness.observability.port import NullSpan, NullTracer, Span, Tracer
@@ -522,7 +519,10 @@ async def test_compaction_count_reaches_the_context_span_metadata(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_context_window_exceeded_drives_terminal_port_lifecycle(tmp_path, monkeypatch):
-    """超限臂：这一臂连 model_call_started 都不会发生，run_failed 仍必须到达端口。"""
+    """超限臂：这一臂连 model_call_started 都不会发生（closeout 的二次 build 同样在
+    模型调用之前抛出 ⇒ 无 closeout 请求）。#348 起收口是非终态 `run/paused`
+    （ADR-0033 边界 5）——端口不收任何终态调用，与 stuck 暂停同形状
+    （`NullTracer` 没有暂停钩子：暂停不是 run 的结局）。"""
     calls = _record_null_tracer_calls(monkeypatch)
     session = make_session(tmp_path)
     registry = ToolRegistry()
@@ -534,10 +534,10 @@ async def test_context_window_exceeded_drives_terminal_port_lifecycle(tmp_path, 
 
     result = await runtime.run(session, "hi")
 
-    assert result.status == STATUS_CONTEXT_WINDOW_EXCEEDED
+    assert result.status == STATUS_PAUSED
     assert calls == [
-        "run_started", "context_build_started", "context_build_completed", "run_failed",
-    ]
+        "run_started", "context_build_started", "context_build_completed",
+    ], "暂停不是失败：端口不得收到 run_failed（同 test_stuck_pause 的判据）"
 
 
 class _IdentifiedNullSpan(NullSpan):
@@ -602,11 +602,12 @@ def _record_context_spans(monkeypatch) -> _ContextSpanRecordingNullTracer:
 async def test_context_window_exceeded_then_disconnect_collects_the_span_once(
     tmp_path, monkeypatch,
 ):
-    """超限臂 + 终态帧上断连：同一 context span **只收一次**（#285 / 残余 R2 修复）。
+    """超限臂 + 暂停帧上断连：同一 context span **只收一次**（#285 / 残余 R2 修复）。
 
-    这条路径**生产可达**（消费方在终态帧上断连 ⇒ GeneratorExit 落进 `_drive` 的取消
+    这条路径**生产可达**（消费方在收口帧上断连 ⇒ GeneratorExit 落进 `_drive` 的取消
     臂）。#264 之前超限臂收口后保留句柄，于是取消臂拿同一句柄**再收一次**（6 次端口
-    调用）；`#265` 的等价重构逐字复刻了该形状并登记为残余 R2，`#285` 修掉它 ⇒ 5 次。
+    调用）；`#265` 的等价重构逐字复刻了该形状并登记为残余 R2，`#285` 修掉它。#348 起
+    超限臂的收口帧是**非终态** `run/paused`——本用例随之在暂停帧上断连。
 
     断言面按残余⑧ 的要求补全：方法名序列（次数 + 顺序）+ **句柄身份**（收回来的就是
     起出去的那一个）+ **调用形状**（残余 R1：超限臂裸调，不带 `compacted_turn_count`）
@@ -624,14 +625,13 @@ async def test_context_window_exceeded_then_disconnect_collects_the_span_once(
 
     agen = runtime.run_stream(session, "hi")
     async for event in agen:
-        if event.type == RUN_FAILED:
-            break  # 悬空点：终态帧已出，消费方在此断开
+        if event.type == RUN_PAUSED:
+            break  # 悬空点：暂停帧已出，消费方在此断开
     await agen.aclose()
 
     assert tracer.calls == [
         "run_started", "context_build_started", "context_build_completed", "run_failed",
-        "run_failed",
-    ], "取消臂不得对已收口的 span 再收一次——第二次 run_failed 是取消臂自己的归因"
+    ], "取消臂不得对已收口的 span 再收一次；唯一的 run_failed 是取消臂自己的 close_pending 归因（暂停本身不产生终态调用）"
     assert isinstance(tracer.started[0], NullSpan), \
         "句柄与生产 / 共享替身同型（此前这里是 `str` 分叉，见 tracker B-35 段）"
     assert [span.step for span in tracer.started] == [0]

@@ -61,6 +61,12 @@ ARTIFACT_CREATED = "artifact/created"
 # 模型可凭 artifact_ref 用 read_artifact 工具按需读取局部内容。
 ARTIFACT_EXTERNALIZED = "artifact/externalized"
 CONTEXT_COMPACTED = "context/compacted"
+# ── W-04 (#348)：摘要尝试失败的任务可见状态 ──────────────────────────────
+# 每次"自动压缩的摘要尝试失败"落一条（attempt 有界 ≤2，载荷有界）。失败**不是**
+# 压缩：derive 的投影集合不收它、不 shadow 任何事件——它只是"这次没压成、原投影
+# 保留（或超硬护栏走暂停）"的 durable 事实，恢复面与对账面都要能看见（规格 06 §8：
+# 每次失败原因留诊断与任务可见状态）。
+CONTEXT_COMPACTION_FAILED = "context/compaction_failed"
 MEMORY_DEGRADED = "memory/degraded"
 # #298 / MEM-V2-2（PRD §6.5）：一次**已提交**的记忆变更。只带计数、memory id、
 # action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
@@ -172,6 +178,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         ARTIFACT_CREATED,
         ARTIFACT_EXTERNALIZED,
         CONTEXT_COMPACTED,
+        # W-04 (#348)：摘要尝试失败的任务可见状态（不投影成消息）
+        CONTEXT_COMPACTION_FAILED,
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,

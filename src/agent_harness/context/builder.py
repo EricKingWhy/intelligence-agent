@@ -6,16 +6,22 @@ from typing import Any
 
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 
-from agent_harness.context.compactor import ContextCompactor, ContextWindowExceededError
+from agent_harness.context.compactor import (
+    CompactionFailure,
+    ContextCompactor,
+    ContextWindowExceededError,
+)
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
 from agent_harness.session.derive import derive_messages_with_source_ranges
 from agent_harness.session.event import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
     TOOL_RESULT,
     USER_MESSAGE,
@@ -29,6 +35,22 @@ __all__ = ["ContextBuilder", "ContextWindowExceededError"]
 #: （每个此类事件恰好产出一条消息，顺序一致；dangling 合成注入是唯一例外，
 #: 由 _estimate_tokens_cached 的计数守卫回退处理）。
 _PROJECTING_EVENT_TYPES = frozenset({USER_MESSAGE, MODEL_COMPLETED, TOOL_RESULT})
+
+
+def _insert_before_last_human(
+    messages: list[AnyMessage], message: AnyMessage,
+) -> list[AnyMessage]:
+    """把一条 user-role 消息插在最后一条 HumanMessage 之前（运行时注入的统一位置）。
+
+    位置语义见 `_inject_runtime_context` 的 docstring（ADR-0023 D8）；找不到
+    HumanMessage 时插到末尾——宁可位置退化，不可静默丢弃。
+    """
+    index = len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            index = i
+            break
+    return [*messages[:index], message, *messages[index:]]
 
 
 class ContextBuilder:
@@ -46,10 +68,14 @@ class ContextBuilder:
         runtime_context_provider: Callable[[], str] | None = None,
         artifact_store: Any | None = None,
         artifact_read_tool_name: str | None = None,
+        summary_model: Any | None = None,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
         self.model_provider = model_provider
+        # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
+        # 档位选择留配置面（后续票），本层只透传给 compactor。
+        self.summary_model = summary_model
         self.max_context_tokens = max_context_tokens
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
@@ -157,12 +183,21 @@ class ContextBuilder:
             built = await self._with_providers(session, messages, token_estimate)
             built = self._inject_runtime_context(built, runtime_context)
             return self._prepend_system_prompt(built)
-        result = await ContextCompactor(
+        compactor = ContextCompactor(
             self.model_provider, max_context_tokens=self.max_context_tokens,
             auto_compact_threshold=self.auto_compact_threshold,
             hard_guard_threshold=self.hard_guard_threshold,
-        ).compact(messages, token_estimate, events=session.events,
-                  source_ranges=source_ranges)
+            summary_model=self.summary_model,
+        )
+        try:
+            result = await compactor.compact(messages, token_estimate, events=session.events,
+                                             source_ranges=source_ranges)
+        except ContextWindowExceededError as error:
+            # W-04 (#348)：异常路径的尝试记录也要落成任务可见状态——builder 是
+            # 唯一持有 session 的层；预检类超限没有 failures，原样保持零事件。
+            self._record_compaction_failures(session, error.failures)
+            raise
+        self._record_compaction_failures(session, result.failures)
         if result.compacted_turn_count:
             if not result.summary or not result.bracket_id:
                 raise ContextWindowExceededError(
@@ -189,6 +224,22 @@ class ContextBuilder:
             session.append(COMPACTION_END, {
                 "bracket_id": bracket_id,
             })
+            # W-04 (#348)：落 bracket 后重投影确认——从已持久化的事件重算"下一次
+            # build 会看到的投影"，与本次产物比对（裁剪路径重放本 build 的裁剪决策，
+            # 保证与 compact 输入同一视图）。不合即 fail-closed：bracket 已在 JSONL
+            # （历史不删除），但本次执行不得继续在未核验的投影上工作。
+            projected = self._reproject(session)
+            if projected != result.messages:
+                raise ContextWindowExceededError(
+                    "Compaction bracket re-projection mismatch; refusing to "
+                    "continue on an unverifiable projection"
+                )
+            recheck = estimate_message_tokens(projected)
+            if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
+                    > self.max_context_tokens * self.hard_guard_threshold):
+                raise ContextWindowExceededError(
+                    f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
+                )
         # 压缩后的 token_estimate 只含 messages，不含 system_prompt / 快照——
         # 两者都要补回，否则 _with_providers 会把它们占用的预算当作可用空间
         # 分配给 provider 内容（快照的补回与 system_prompt 同理由）。
@@ -197,7 +248,50 @@ class ContextBuilder:
         )
         built = await self._with_providers(session, result.messages, provider_estimate)
         built = self._inject_runtime_context(built, runtime_context)
+        # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
+        # （messages + system prompt + 运行时快照，与 :103 的看板口径同源）落
+        # [auto, hard) 带：有效用量 < auto 的健康路径不发；成功压缩的 messages
+        # 估算必然 < auto 线（compactor 的 target 闸门），但 system/快照可能把它
+        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。
+        pressure_text = DEFAULT_REGISTRY.assemble("frame:context_pressure").meta_user_text
+        if (self.auto_compact_threshold * self.max_context_tokens <= provider_estimate
+                < self.hard_guard_threshold * self.max_context_tokens and pressure_text):
+            built = _insert_before_last_human(
+                built, HumanMessage(content=pressure_text),
+            )
         return self._prepend_system_prompt(built)
+
+    def _record_compaction_failures(
+        self, session: Session, failures: list[CompactionFailure],
+    ) -> None:
+        """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
+
+        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 进入压缩时
+        的估算）；`message` 已在 compactor 侧按"只装自家文案或类型名"脱敏。失败
+        不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
+        """
+        for failure in failures:
+            session.append(CONTEXT_COMPACTION_FAILED, {
+                "attempt": failure.attempt,
+                "error_class": failure.error_class,
+                "message": failure.message,
+                "auto_limit": failure.auto_limit,
+                "hard_limit": failure.hard_limit,
+                "token_estimate": failure.token_estimate,
+            })
+
+    def _reproject(self, session: Session) -> list[AnyMessage]:
+        """从已持久化的事件重算模型可见投影（W-04 重投影确认的读数来源）。
+
+        裁剪路径重放**本 build 刚落下的**裁剪决策（与 usage_snapshot 同一读法），
+        保证重算视图与 compact 的输入一致——否则被裁的骨架行会被当成失配。
+        """
+        if self._pruner is None:
+            return session.derive_messages()
+        pairs = derive_messages_with_source_ranges(session.events)
+        return self._pruner.apply(
+            pairs, self._prune_decisions.get(session.session_id, {}),
+        )
 
     async def _prune_projection(
         self, session: Session,
@@ -254,12 +348,9 @@ class ContextBuilder:
         """
         if not runtime_context:
             return messages
-        index = len(messages)
-        for i in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[i], HumanMessage):
-                index = i
-                break
-        return [*messages[:index], HumanMessage(content=runtime_context), *messages[index:]]
+        return _insert_before_last_human(
+            messages, HumanMessage(content=runtime_context),
+        )
 
     def _prepend_system_prompt(self, messages: list[AnyMessage]) -> list[AnyMessage]:
         """把 system_prompt 作为列表首条 SystemMessage 注入（runtime context，非事件）。

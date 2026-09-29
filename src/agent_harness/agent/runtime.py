@@ -60,6 +60,7 @@ from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
     REASON_STUCK,
+    TRIGGER_MAX_CONTEXT_TOKENS,
     BudgetConsumed,
     LaunchRunBudget,
     RunLimits,
@@ -86,7 +87,6 @@ from agent_harness.agent.run_budget import (
 from agent_harness.agent.streaming import BlockStreamer
 from agent_harness.agent.types import (
     STATUS_COMPLETED,
-    STATUS_CONTEXT_WINDOW_EXCEEDED,
     STATUS_FAILED,
     STATUS_PAUSED,
     STATUS_QUIESCENCE_BLOCKED,
@@ -1383,7 +1383,7 @@ class AgentRuntime:
                         session_step_reserved = False
                         await self._session_budget.refund_step()
                     async for streamed in self._terminal_context_exceeded(
-                        arms, steps=steps, error=error,
+                        arms, launch=launch_budget, steps=steps, error=error,
                     ):
                         yield streamed
                     return
@@ -2513,30 +2513,30 @@ class AgentRuntime:
         )
 
     async def _terminal_context_exceeded(
-        self, arms: _TerminalArms, *, steps: int, error: ContextWindowExceededError,
+        self, arms: _TerminalArms, *, launch: LaunchRunBudget, steps: int,
+        error: ContextWindowExceededError,
     ) -> AsyncIterator[AgentEvent]:
-        """context 超限臂：模型在本轮从未被调用，直接落终态（不经 failure_terminal）。"""
-        # 裸调（不带 compacted_turn_count）是 #264 之前的调用形状，逐字保留（残余 R1）；
-        # 收口即清口 ⇒ 本句柄不会被第二条收集臂再收一次——取消臂（"终态帧上断连"）与
-        # 异常臂（"下面这次 append 失败"）两条出口都因此只收一次（#285 修的 R2 / R3，
-        # 两条出口各有仓库内用例）。
+        """context 超限臂（W-04 #348）：模型在本轮从未被调用，走既有暂停生命周期收口。
+
+        历史上这条臂直接落终态 `run/failed(reason=context_window_exceeded)`
+        （ADR-0033 归因面的一行）；#348 起改为**非终态** `run/paused`：
+        `trigger_dimension="max_context_tokens"`（config.py 的配置字段路径）经
+        `reason_for_dimension` 自动映射为 `reason=budget_exhausted`——不新增
+        reason 值（`03 §3.4` 词表冻结）。`STATUS_CONTEXT_WINDOW_EXCEEDED` 常量
+        保留（历史会话可读）。
+
+        ctx span 收口保持"裸调 + 收口即清口"（#285 / 残余 R1）：先收口再委托暂停臂
+        ——暂停臂 closeout 里的二次 build 失败不碰 telemetry，本句柄不会被第二条
+        收集臂再收一次（R2/R3 的两条出口各有仓库内用例）。"""
         arms.telemetry.context_build_completed()
-        arms.telemetry.run_failed(STATUS_CONTEXT_WINDOW_EXCEEDED)
-        failed = arms.session.append(
-            RUN_FAILED,
-            {"reason": STATUS_CONTEXT_WINDOW_EXCEEDED, "message": str(error),
-             "trace_id": arms.telemetry.trace_id,
-             "trace_url": arms.telemetry.trace_url},
-            run_id=arms.run_id, step_id=arms.envelope_step(steps),
-        )
-        arms.terminal.mark_terminal_written()
-        yield to_agent_event(failed)
-        # 模型在本轮从未被调用：没有可抽取的对话内容，跳过 writeback。
-        arms.result_holder.append(
-            AgentRunResult(
-                status=STATUS_CONTEXT_WINDOW_EXCEEDED, final_text="", steps=steps,
-            ),
-        )
+        # error 的正文只装本项目的拒绝文案（compactor 侧已按类型名脱敏），进诊断
+        # 日志不进事件——暂停载荷的字段清单是 03 §3.4 的契约，不多不少。
+        logger.warning("context 超限，走暂停收口（%s）", error)
+        async for streamed in self._terminal_paused(
+            arms, launch=launch, steps=steps,
+            trigger_dimension=TRIGGER_MAX_CONTEXT_TOKENS,
+        ):
+            yield streamed
 
     async def _terminal_completed(
         self, arms: _TerminalArms, *, steps: int, final: str,
