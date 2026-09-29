@@ -66,6 +66,13 @@ logger = logging.getLogger("agent_harness.session.derive")
 #: 合成 dangling ToolMessage 的固定内容（模型可见，引导自主决策）
 DANGLING_TOOL_CONTENT = "工具执行被中断，结果未知"
 
+#: 「修改文件」写工具语义（W-31.5 #417）——唯一权威定义。
+#: 消费方：`multiagent/provider.py` 的 changed_files（SubAgentResult 字段，
+#: 只活在 delegate 回传里）与本模块 `derive_modified_file_paths`（PRD §4.6
+#: 第 4 项 build 注入清单）。读文件不在此列：摘要第 8 节「文件清单」是
+#: 另一口径（读+改都进，见 compactor._programmatic_summary_sections）。
+WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch"})
+
 _USER_FACT_TYPES = frozenset(
     {
         "user_instruction",
@@ -1463,3 +1470,39 @@ def _undelivered_fact_annotations(
             event.event_id,
         )
         return None
+
+
+def derive_modified_file_paths(events: list[SessionEvent]) -> list[str]:
+    """最近修改文件路径清单（W-31.5 #417，PRD §4.6 第 4 项）：只回路径。
+
+    判据：`tool/call` 事件 `tool_name ∈ WRITE_TOOL_NAMES` 时取 `args["path"]`
+    （str 且非空才收）；去重保序（首次出现顺序）。坏形状（缺 path / 非串 /
+    args 非 dict / 未知工具）只损失该条，与 `collect_result_fields`
+    （multiagent/provider.py，SubAgentResult.changed_files）的守卫同口径——
+    那个函数只活在 delegate 回传里，本函数服务 build 注入；两者共用
+    WRITE_TOOL_NAMES 一个常量、其余各走各的判据。
+
+    与摘要第 8 节「文件清单」的口径差异（票面硬要求，禁止含糊）：§8 走
+    `compactor._programmatic_summary_sections` 按 `_PATH_FIELDS` 从消息 dump
+    提取——**读 + 改都进**、跨压缩累积；本函数**仅修改**。两处各钉用例
+    （tests/session/test_derive_modified_paths.py 与
+    tests/context/test_modified_paths_injection.py T7）。
+
+    纯函数：只读事件流（**含被 bracket shadow 的事件**——压缩只 shadow 不
+    删除，故跨压缩派生结果天然稳定，票面 AC「跨压缩不丢」的实现根基），
+    无 wall-clock、无实例状态；重放 / 换实例同结果。只看 `tool/call` 单源，
+    不做 MODEL_COMPLETED 兜底（票面定死；`collect_result_fields` 先例）。
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    for event in events:
+        if event.type != TOOL_CALL:
+            continue
+        if event.data.get("tool_name") not in WRITE_TOOL_NAMES:
+            continue
+        args = event.data.get("args")
+        path = args.get("path") if isinstance(args, dict) else None
+        if isinstance(path, str) and path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
