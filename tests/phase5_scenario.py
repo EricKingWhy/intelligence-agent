@@ -60,7 +60,7 @@ async def run_phase5_scenario(tmp_path, session, artifact_store, *, stream=True)
         AIMessage(content="", tool_calls=[{"id": "bash-1", "name": "bash",
                                            "args": {"command": command}}]),
         AIMessage(content="", tool_calls=[{"id": "inspect-1", "name": "inspect_artifact",
-            "args": {"artifact_id": ARTIFACT_ID, "start_line": 2501, "end_line": 2501}}]),
+            "args": {"artifact_ref": ARTIFACT_ID, "start_line": 2501, "end_line": 2501}}]),
         AIMessage(content="verified output 2500"),
     ])
     registry = ToolRegistry()

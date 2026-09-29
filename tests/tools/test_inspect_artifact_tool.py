@@ -71,7 +71,7 @@ class TestInspectArtifactToolExecute:
     @pytest.mark.asyncio
     async def test_execute_default_reads_all(self, setup: tuple[InspectArtifactTool, str]) -> None:
         tool, artifact_id = setup
-        args = tool.args_schema(artifact_id=artifact_id)
+        args = tool.args_schema(artifact_ref=artifact_id)
         result = await tool.execute(args)
         assert result.ok is True
         assert result.data["total_lines"] == 50
@@ -81,7 +81,7 @@ class TestInspectArtifactToolExecute:
     @pytest.mark.asyncio
     async def test_execute_line_range(self, setup: tuple[InspectArtifactTool, str]) -> None:
         tool, artifact_id = setup
-        args = tool.args_schema(artifact_id=artifact_id, start_line=5, end_line=10)
+        args = tool.args_schema(artifact_ref=artifact_id, start_line=5, end_line=10)
         result = await tool.execute(args)
         assert result.ok is True
         assert result.data["returned_lines"] == 6
@@ -91,7 +91,7 @@ class TestInspectArtifactToolExecute:
     @pytest.mark.asyncio
     async def test_execute_keyword(self, setup: tuple[InspectArtifactTool, str]) -> None:
         tool, artifact_id = setup
-        args = tool.args_schema(artifact_id=artifact_id, keyword="line 2")
+        args = tool.args_schema(artifact_ref=artifact_id, keyword="line 2")
         result = await tool.execute(args)
         assert result.ok is True
         # line 2, 20-29, etc → 所有含 "line 2" 的行
@@ -100,7 +100,7 @@ class TestInspectArtifactToolExecute:
     @pytest.mark.asyncio
     async def test_execute_max_lines_truncation(self, setup: tuple[InspectArtifactTool, str]) -> None:
         tool, artifact_id = setup
-        args = tool.args_schema(artifact_id=artifact_id, max_lines=5)
+        args = tool.args_schema(artifact_ref=artifact_id, max_lines=5)
         result = await tool.execute(args)
         assert result.ok is True
         assert result.data["returned_lines"] == 5
@@ -109,7 +109,7 @@ class TestInspectArtifactToolExecute:
     @pytest.mark.asyncio
     async def test_execute_nonexistent_returns_failure(self, setup: tuple[InspectArtifactTool, str]) -> None:
         tool, _ = setup
-        args = tool.args_schema(artifact_id="nonexistent")
+        args = tool.args_schema(artifact_ref="nonexistent")
         result = await tool.execute(args)
         assert result.ok is False
         assert result.error_code is not None
@@ -147,7 +147,7 @@ class TestInspectArtifactCharCap:
     async def test_single_huge_line_is_truncated(self) -> None:
         """场景 1：max_lines=1 + 十万字符单行 → 受控截断，保留定位信息。"""
         tool, artifact_id = self._tool_with("x" * 100_000)
-        args = tool.args_schema(artifact_id=artifact_id, max_lines=1)
+        args = tool.args_schema(artifact_ref=artifact_id, max_lines=1)
         result = await tool.execute(args)
         assert result.ok is True
         assert result.data["truncated"] is True
@@ -163,7 +163,7 @@ class TestInspectArtifactCharCap:
         """场景 2：多条中长行各自独立截断。"""
         content = "\n".join(["y" * 5000 for _ in range(5)])
         tool, artifact_id = self._tool_with(content)
-        result = await tool.execute(tool.args_schema(artifact_id=artifact_id))
+        result = await tool.execute(tool.args_schema(artifact_ref=artifact_id))
         assert result.ok is True
         assert result.data["truncated"] is True
         for line in result.data["lines"]:
@@ -176,7 +176,7 @@ class TestInspectArtifactCharCap:
         """场景 3：正常短片段——契约回归，无 char 字段污染。"""
         content = "\n".join([f"line {i}" for i in range(1, 11)])
         tool, artifact_id = self._tool_with(content)
-        result = await tool.execute(tool.args_schema(artifact_id=artifact_id))
+        result = await tool.execute(tool.args_schema(artifact_ref=artifact_id))
         assert result.ok is True
         assert result.data["truncated"] is False
         assert result.data["lines"][0] == {"line_number": 1, "text": "line 1"}
@@ -186,7 +186,7 @@ class TestInspectArtifactCharCap:
         """模型可经 max_chars_per_line 参数放宽上限，拿到更多内容。"""
         tool, artifact_id = self._tool_with("z" * 8000)
         args = tool.args_schema(
-            artifact_id=artifact_id, max_chars_per_line=5000,
+            artifact_ref=artifact_id, max_chars_per_line=5000,
         )
         result = await tool.execute(args)
         assert result.ok is True
@@ -196,7 +196,7 @@ class TestInspectArtifactCharCap:
     async def test_overflow_loop_not_triggered(self) -> None:
         """截断后返回体严格小于 OverflowHandler 阈值，不触发二次溢出循环。"""
         tool, artifact_id = self._tool_with("q" * 100_000)
-        args = tool.args_schema(artifact_id=artifact_id, max_lines=1)
+        args = tool.args_schema(artifact_ref=artifact_id, max_lines=1)
         result = await tool.execute(args)
         # ToolResult 整体序列化长度远小于默认 overflow_chars(2000) 的几倍
         import json

@@ -21,7 +21,7 @@ from agent_harness.tooling.result import ErrorCode
 
 
 class _InspectArgs(BaseModel):
-    artifact_id: str = Field(..., description="要读取的 artifact ID（从 ToolResult.artifact_ref 获得）")
+    artifact_ref: str = Field(..., description="要读取的 artifact ID（从 ToolResult.artifact_ref 获得）")
     start_line: int | None = Field(default=None, ge=1, description="起始行号（1-based）")
     end_line: int | None = Field(default=None, ge=1, description="结束行（含）")
     keyword: str | None = Field(default=None, description="关键词过滤，只返回含此关键词的行")
@@ -47,7 +47,7 @@ class InspectArtifactTool(Tool):
     def description(self) -> str:
         return (
             "读取之前被自动保存为 artifact 的大输出（如 bash 的长 stdout）的局部内容。"
-            "参数：artifact_id（从工具结果的 artifact_ref 获得），"
+            "参数：artifact_ref（从工具结果的 artifact_ref 获得），"
             "start_line/end_line 按行范围读取，keyword 按关键词过滤，"
             "max_lines 返回行数上限（默认 200），"
             "max_chars_per_line 单行字符上限（默认 2000，单行超限时可放宽）。"
@@ -75,7 +75,7 @@ class InspectArtifactTool(Tool):
     async def execute(self, args: _InspectArgs) -> ToolResult:
         try:
             result = await self._store.inspect(
-                args.artifact_id,
+                args.artifact_ref,
                 start_line=args.start_line,
                 end_line=args.end_line,
                 keyword=args.keyword,
@@ -88,7 +88,7 @@ class InspectArtifactTool(Tool):
                 error_code=ErrorCode.INVALID_ARGUMENT,
             )
         return ToolResult.success(
-            message=f"读取 artifact {args.artifact_id}：返回 {result.returned_lines} 行"
+            message=f"读取 artifact {args.artifact_ref}：返回 {result.returned_lines} 行"
                     + ("（已截断）" if result.truncated else "")
                     + f"，共 {result.total_lines} 行。",
             data={
