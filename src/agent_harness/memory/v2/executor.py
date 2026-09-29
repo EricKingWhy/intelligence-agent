@@ -626,6 +626,20 @@ class MemoryJobExecutor:
                 "schema_valid": False, "reason_code": "adjudication_incomplete",
             })
             raise _Degraded(DegradedReason.ADJUDICATION_INCOMPLETE)
+        # Formation owns classification; adjudication may refine content, not reclassify it.
+        if any(
+            verdict.result is not None
+            and (verdict.result.kind != candidate.kind
+                 or verdict.result.tier != candidate.tier
+                 or verdict.result.scope != candidate.scope)
+            for candidate, verdict in zip(candidates, verdicts, strict=True)
+        ):
+            self._observe("schema", {
+                "job_id": job.job_id, "model_stage": MemoryModelStage.ADJUDICATION.value,
+                "schema_valid": False,
+                "reason_code": "adjudication_classification_mismatch",
+            })
+            raise _Degraded(DegradedReason.INVALID_MODEL_OUTPUT)
         self._observe("schema", {
             "job_id": job.job_id, "model_stage": MemoryModelStage.ADJUDICATION.value,
             "schema_valid": True,

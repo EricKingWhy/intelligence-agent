@@ -763,6 +763,41 @@ async def test_an_adjudication_batch_of_the_wrong_size_degrades(env: Env) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result_overrides",
+    [
+        pytest.param(
+            {"kind": "episodic", "payload": {"kind": "episodic", "situation": "s",
+                                                   "action": "a", "outcome": "o", "lesson": "l"}},
+            id="kind",
+        ),
+        pytest.param({"tier": "profile"}, id="tier"),
+        pytest.param({"scope": "project", "project_id": "project-x"}, id="scope"),
+    ],
+)
+async def test_adjudication_cannot_reclassify_a_candidate(env: Env, result_overrides: dict) -> None:
+    """A structurally valid replacement must preserve the formation classification."""
+    candidate = _candidate()
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(candidate)],
+        adjudication=[_adjudication(_add(**result_overrides))],
+    )
+    job = await _claimed(env, trusted=PROJECT_X)
+    observations: list[tuple[str, dict]] = []
+    _job, result, _sink = await _run(
+        env, invoker, job=job,
+        observer=lambda name, metadata: observations.append((name, metadata)))
+
+    assert result is not None
+    assert result.stage is MemoryJobStage.DEGRADED
+    assert result.reason == DegradedReason.INVALID_MODEL_OUTPUT.value
+    assert await _active(env) == []
+    mismatch = next(metadata for name, metadata in observations
+                    if name == "schema" and metadata.get("schema_valid") is False)
+    assert mismatch["reason_code"] == "adjudication_classification_mismatch"
+
+
+@pytest.mark.asyncio
 async def test_the_call_budget_stops_the_job_before_any_write(env: Env) -> None:
     """R10：调用次数用尽 ⇒ 一个终态降级、零写入（在这里：formation 用掉唯一一次）。"""
     invoker = FakeInvoker(
