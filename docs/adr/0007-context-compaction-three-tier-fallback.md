@@ -1,6 +1,6 @@
 # ADR-0007: Context Compaction 三层降级 + tiktoken 精确计数
 
-**Status**: Accepted（子决策 2 已于 #348 部分修订，见下方修订注）  
+**Status**: Accepted（子决策 2 已于 #348 部分修订，见下方修订注）
 **Date**: 2026-09-04  
 **Phase**: 5 (Artifact + MinIO + Context Compaction)
 
