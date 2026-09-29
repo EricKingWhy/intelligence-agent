@@ -69,12 +69,14 @@ _DECLARED_SCOPES: dict[str, frozenset[str]] = {
         "git_status", "git_diff", "retrieve_memory", "remember_this",
         "forget_memory", "retrieve_knowledge", "read_knowledge_source",
         "web_search", "delegate", "inspect_artifact",
+        "update_plan",  # W-26（#380）：进度清单整表覆盖
     }),
     # #202 / ADR-0031 D8：记忆工具（检索 + 显式写入 + 删除）对 coding 开放
     "coding": frozenset({
         "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
         "git_status", "git_diff", "retrieve_memory", "remember_this",
         "forget_memory",
+        "update_plan",  # W-26（#380）：进度清单整表覆盖
     }),
     # #202 / #299：只读记忆检索对 research 开放；写侧工具不进
     "research_review": frozenset({
