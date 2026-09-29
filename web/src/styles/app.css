@@ -2844,16 +2844,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   outline: 2px solid color-mix(in srgb, var(--color-warning) 60%, transparent);
   outline-offset: 2px;
 }
-.approval-card.approved {
-  border-color: color-mix(in srgb, var(--color-success) 28%, transparent);
-  border-left-color: var(--color-success);
-  background: color-mix(in srgb, var(--color-success) 6%, transparent);
-}
-.approval-card.denied {
-  border-color: color-mix(in srgb, var(--color-destructive) 28%, transparent);
-  border-left-color: var(--color-destructive);
-  background: color-mix(in srgb, var(--color-destructive) 6%, transparent);
-}
+/* #420 AC3：`.approved` / `.denied` 语义色已随「本地自演翻转」删除——决策结果
+ * 是事件流事实（resolved 后卡片随投影卸载），本卡只呈现 pending/失效/已提交。 */
 .approval-header {
   display: flex;
   align-items: center;
@@ -2861,12 +2853,6 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .approval-icon {
   color: var(--color-warning);
-}
-.approval-card.approved .approval-icon {
-  color: var(--color-success);
-}
-.approval-card.denied .approval-icon {
-  color: var(--color-destructive);
 }
 .approval-title {
   font-weight: 600;
@@ -3019,6 +3005,37 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .approval-card.invalid .approval-actions button {
   cursor: not-allowed;
+}
+
+/* #421：审批模态（ApprovalModal）——卡本体沿用 .approval-card 材质，Content
+ * 只做**透明壳**（去背景/边框/内边距），让卡在浮层里与流内长得一模一样。
+ * 浮层定位纪律（见 .project-dialog 上方 #203 注记）：新浮层内容类必须自带
+ * 等价定位规则——portal 会把内容追加到 body 末尾，没有 fixed 定位就会落在
+ * 文档流末尾、被 overlay 盖住。 */
+.approval-modal-content {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(640px, calc(100vh - 80px));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  z-index: 51; /* 与 .palette-overlay(50)/.project-dialog(51) 同层族 */
+  animation: project-dialog-in var(--dur-palette) var(--ease-apple);
+}
+/* Radix 用 Title 命名 dialog（读屏名）；卡片头部已有可见标题，这里视觉隐藏。 */
+.approval-modal-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ── Composer：Floating Command Dock（视觉中心） ──
@@ -6057,6 +6074,32 @@ button.json-row {
   align-items: center;
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
+}
+/* #426：新建会话的预算入口（一维 turns）。与档位 picker 同行同高——它是同级的
+   "本次运行条件"设置，不是全局设置页的成员；数值窄框 + 前置标签，留空即默认。 */
+.composer-budget {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  cursor: default;
+}
+.composer-budget-input {
+  width: 64px;
+  padding: 3px var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  background: var(--surface-elevated);
+  border: 1px solid color-mix(in srgb, var(--text-primary) 14%, transparent);
+  border-radius: var(--radius-sm);
+}
+.composer-budget-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, var(--text-primary)) 45%, transparent);
+  outline-offset: 1px;
+}
+.composer-budget-input:disabled {
+  opacity: 0.55;
 }
 /* ── Picker 浮层（Radix portal，客户端渲染）──
  *   #201 正名：这层壳原本叫 `model-picker-*`，却同时被权限/档位/深度三个控件共用

@@ -13,8 +13,8 @@
 4. 续聊：`danger-full-access` → 非交互（回调 None）；
 5. 续聊：未声明 → `workspace-write` + `None`（今天的行为逐字不变）；
 6. 纯函数 `declared_permission_mode` 的边界（无 started / 坏值 → None）；
-7. `auto_approve` 同病同修：显式声明才落键；续聊复原 **deny 路由**（回调非 None）
-   而不是退化成全自动批准；档位声明优先于它（与创建路径同一优先级）；
+7. `auto_approve` 同病同修：显式声明才落键；续聊复原**审批路由**（交互式回调非
+   None，#423）而不是退化成全自动批准；档位声明优先于它（与创建路径同一优先级）；
 8. 纯函数 `declared_auto_approve` 只认 bool，坏值按未声明处理。
 """
 
@@ -195,7 +195,7 @@ def test_resume_without_declared_mode_keeps_legacy_behavior(tmp_path):
 
 
 def test_explicit_auto_approve_false_is_persisted(tmp_path):
-    """auto_approve 的显式声明也要落盘——它是 deny 路由的唯一依据。"""
+    """auto_approve 的显式声明也要落盘——它是续聊审批路由（#423 弹卡）的唯一依据。"""
     state = _state(tmp_path)
     _, patcher = _capture_build()
     with patcher:
@@ -219,9 +219,13 @@ def test_undeclared_auto_approve_writes_no_key(tmp_path):
     assert "auto_approve" not in state.store.read_events(session_id)[0].data
 
 
-def test_resume_restores_deny_route_instead_of_auto_approving(tmp_path):
-    """续聊复原 deny 路由：回调必须**存在**——None 在 build_runtime 里 = 全自动批准，
-    等于把用户创建的"不自动批准"从第二条消息起悄悄撤掉。"""
+def test_resume_restores_interactive_route_instead_of_auto_approving(tmp_path):
+    """续聊复原审批路由（#423）：auto_approve=false 的会话续聊必须重新弹卡。
+
+    创建期该组合走 interactive 路由（#423，不再 deny）；续聊必须同一待遇。
+    回调退化成 None 才是 F15 的原始 bug——``build_runtime`` 对 ``None`` 的
+    语义是全自动批准，等于把用户声明悄悄撤掉。
+    """
     state = _state(tmp_path)
     _, patcher = _capture_build()
     with patcher:
@@ -230,13 +234,16 @@ def test_resume_restores_deny_route_instead_of_auto_approving(tmp_path):
             auto_approve_explicit=True,
             auto_approve=False,
         )
+    # 创建路径已登记过队列；清掉才能证明是续聊自己重新登记的。
+    state.approval_queues.clear()
 
     captured = _resume(state, session_id)
 
     callback = captured[0]["approval_callback"]
-    assert callback is not None, "deny 路由续聊退化成全自动批准（F15 的同一根因）"
-    assert not isinstance(callback, InteractiveCallbackHolder)  # 非交互 = 不经人工
-    assert session_id not in state.approval_queues  # 没有人工队列，就不会有等待
+    assert isinstance(callback, InteractiveCallbackHolder), (
+        "续聊必须重建交互式回调——None 在 build_runtime 里的语义是全自动批准"
+    )
+    assert session_id in state.approval_queues  # 人工队列重新登记，等待有人接
 
 
 def test_resume_declared_auto_approve_true_keeps_auto_approve(tmp_path):
