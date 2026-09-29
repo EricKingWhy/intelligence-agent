@@ -1360,6 +1360,14 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectContextCompacted,
     summarize: summarizeContextCompacted,
   },
+  // W-04（#348）：摘要尝试失败的任务可见状态——失败**不是**压缩：derive 不投影它，
+  // 不带来新的投影状态。与 MEMORY_UPDATED / GUARD_STUCK 同形登记为 no-op ⇒ 已知
+  // 类型、不进 `unknown_events`；失败时间线的展示面归后续票，本行只负责 `Record`
+  // 的穷尽性（生成物新增类型时 tsc 失败直到登记）。
+  [EventType.CONTEXT_COMPACTION_FAILED]: {
+    apply: noopProjection,
+    summarize: emptySummary,
+  },
   [EventType.MEMORY_DEGRADED]: { apply: noopProjection, summarize: emptySummary },
   // #298（T6 引入 `memory/updated`，T8 补登记）：与 MEMORY_DEGRADED 同形——提交型记忆变更，
   // 载荷只有 count / memory IDs / action counts / job ID，**不带内容**（PRD V2 §6.5）。
