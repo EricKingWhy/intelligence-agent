@@ -235,6 +235,37 @@ test('AC8: a stale version conflict refreshes the row and leaves a dismissible e
   await expect(notice).toHaveCount(0);
 });
 
+test('AC8: retry after a failed next page fetches that same offset', async ({ page }) => {
+  const requestedOffsets: string[] = [];
+  let nextPageAttempts = 0;
+  const memories = Array.from({ length: 55 }, (_, index) => semantic(`m-page-${index}`, `page fact ${index}`));
+  await routeApi(page, {
+    memories,
+    onMemoriesGet: (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      const offset = params.get('offset') ?? '0';
+      requestedOffsets.push(offset);
+      if (offset === '50' && nextPageAttempts++ === 0) {
+        return route.fulfill({
+          status: 503,
+          body: JSON.stringify({ detail: 'temporary next-page failure' }),
+          contentType: 'application/json',
+        }).then(() => true);
+      }
+      return false;
+    },
+  });
+  await page.goto('/');
+  await openPanel(page);
+
+  await panel(page).getByRole('button', { name: '加载更多' }).click();
+  await expect(panel(page).locator('.memory-error')).toContainText('temporary next-page failure');
+  await panel(page).locator('.memory-error').getByRole('button', { name: '重试' }).click();
+
+  await expect(panel(page).locator('.memory-row')).toHaveCount(55);
+  expect(requestedOffsets.filter((offset) => offset === '50')).toHaveLength(2);
+});
+
 test('AC4: bulk delete previews an exact server count and sends the confirmation token', async ({ page }) => {
   let bulkBody: unknown;
   page.on('request', (request) => {

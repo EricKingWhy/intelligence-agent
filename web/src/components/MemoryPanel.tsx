@@ -19,6 +19,8 @@ import {
 import type { Project } from '../types';
 import {
   formatMemoryTime,
+  MEMORY_MAX_OFFSET,
+  MEMORY_PAGE_SIZE,
   MEMORY_CONTENT_MAX_CHARS,
   MEMORY_PAYLOAD_FIELDS,
   memoryPayloadDraft,
@@ -285,11 +287,13 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
             onChanged={() => void memories.retry()}
           />)}
         </ul>}
-        {memories.loadError && <div className="memory-error" role="alert"><span>{memories.loadError}</span><button onClick={() => void memories.retry()}>重试</button></div>}
+        {memories.loadError && <div className="memory-error" role="alert"><span>{memories.loadError}</span><button disabled={memories.loadingMore} onClick={() => void memories.retry()}>重试</button></div>}
         {panelError && <div className="memory-v2-error memory-error" role="status">{panelError}<button className="memory-v2-quiet" onClick={() => setPanelError(null)}>知道了</button></div>}
         {!memories.loading && memories.visible.length > 0 && (memories.hasMore
           ? <button className="memory-more-btn" disabled={memories.loadingMore} onClick={() => void memories.loadMore()}>{memories.loadingMore ? '加载中…' : '加载更多'}</button>
-          : <span className="memory-more-end">已全部加载</span>)}
+          : <span className="memory-more-end" role="status">{memories.paginationLimitReached
+            ? `已达到查询上限（最多 ${(MEMORY_MAX_OFFSET + MEMORY_PAGE_SIZE).toLocaleString('en-US')} 条）。请缩小筛选范围以查找更早的记忆。`
+            : '已全部加载'}</span>)}
       </div>
 
       <div className="project-dialog-actions"><Dialog.Close asChild><button className="project-btn project-btn-primary">关闭</button></Dialog.Close></div>

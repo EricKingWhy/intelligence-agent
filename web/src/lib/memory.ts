@@ -104,6 +104,9 @@ export function memoryPayloadDraft(payload: MemoryPayload): MemoryPayloadDraft {
  *  既慢又白耗内存。 */
 export const MEMORY_PAGE_SIZE = 50;
 
+/** Backend list offset ceiling (`web/memory.py::_MAX_OFFSET`). */
+export const MEMORY_MAX_OFFSET = 10_000;
+
 /** 后端单页**硬上界**（`web/memory.py::_MAX_LIMIT`：`Query(50, ge=1, le=200)`）。
  *
  *  前端必须知道这个数：重拉时如果照抄"用户已加载的条数"，加载超过 200 条后
@@ -146,6 +149,16 @@ export function formatMemoryTime(createdAt: string): string {
  *  取少一条就确定到底了——后端按 offset 分页，返回少于请求量只可能是数据到底。 */
 export function hasMoreAfter(received: number, requested: number): boolean {
   return requested > 0 && received >= requested;
+}
+
+/** Classify a full page by whether its next request remains within the backend offset ceiling. */
+export function memoryPageContinuation(
+  nextOffset: number,
+  received: number,
+  requested: number,
+): 'more' | 'complete' | 'limit' {
+  if (!hasMoreAfter(received, requested)) return 'complete';
+  return nextOffset <= MEMORY_MAX_OFFSET ? 'more' : 'limit';
 }
 
 /** 删除过程中被乐观移出的行——仅用于**把权威列表里对应的行暂时藏起来**，
