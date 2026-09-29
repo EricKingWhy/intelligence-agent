@@ -453,15 +453,17 @@ async def test_real_langmem_manager_delete_and_update_reach_milvus(gate_settings
             identity_context_var.reset(token)
 
 
-async def test_real_forget_tool_reaches_milvus_and_listing_sees_the_authority(
+async def test_real_forget_reaches_milvus_and_listing_sees_the_authority(
     gate_settings, tmp_path
 ):
-    """MEM-4（#159）真实验收：遗忘**工具**真的改到真索引，`list_entries` 读的是权威记录。
+    """真实验收：遗忘真的改到真索引，`list_entries` 读的是权威记录（#159 MEM-4 覆盖）。
 
     分工说明：#159 的用户 API 用真 uvicorn + 真 HTTP 的 gate 脚本验收
     （`.scratch/run_forget_entry_gate.py`）；这里钉的是**不用起服务**也能跑的那半——
-    工具的审批闸门 + 真删除 + 真实 count（AC9 的口径：`query(count(*))`，不用
+    capability 层真删除 + 真实 count（AC9 的口径：`query(count(*))`，不用
     `get_collection_stats`），以及契约方法 `list_entries` 在真 provider 上的行为。
+    工具层的审批闸门由 `tests/tooling/test_approval_gate.py` 泛化覆盖；V1 遗忘工具
+    已随 V2 接线退场，本用例直调 capability 契约动词。
     """
     from langchain_openai import OpenAIEmbeddings
 
@@ -469,15 +471,6 @@ async def test_real_forget_tool_reaches_milvus_and_listing_sees_the_authority(
     from agent_harness.memory.langmem_capability import LangMemMemoryCapability
     from agent_harness.memory.outbox_relay import OutboxRelay
     from agent_harness.memory.sqlite_record_store import SqliteMemoryRecordStore
-    from agent_harness.memory.tools import ForgetMemoryTool, _ForgetMemoryArgs
-    from agent_harness.tooling import (
-        ApprovalRequest,
-        ApprovalResponse,
-        ErrorCode,
-        PermissionPolicy,
-        ToolExecutor,
-        ToolRegistry,
-    )
 
     if not gate_settings.embedding_api_key.get_secret_value() or not gate_settings.embedding_model:
         pytest.skip("Real embedding model is not configured")
@@ -492,13 +485,8 @@ async def test_real_forget_tool_reaches_milvus_and_listing_sees_the_authority(
     await records.initialize()
     relay = OutboxRelay(records, vectors)
     capability = LangMemMemoryCapability(records, vectors)
-    alice = IdentityContext("gate_forget_tool_" + uuid4().hex, "alice", ["user"])
+    alice = IdentityContext("gate_forget_" + uuid4().hex, "alice", ["user"])
     token = set_identity_context(alice)
-    registry = ToolRegistry()
-    registry.register(ForgetMemoryTool(capability))
-
-    async def approved(_req: ApprovalRequest) -> ApprovalResponse:
-        return ApprovalResponse(approved=True, reason="gate")
 
     try:
         await vectors.initialize()
@@ -513,26 +501,15 @@ async def test_real_forget_tool_reaches_milvus_and_listing_sees_the_authority(
         # 分页参数在真 provider 上也成立：limit=1 只返回一条（`!= []` 会漏掉"忽略 limit"）。
         assert len(await capability.list_entries(MemoryScope.USER, 1)) == 1
 
-        # 没有审批回调 → DANGER 工具被拒（安全默认值），真实 count 不变。
-        denied = (await ToolExecutor(registry, policy=PermissionPolicy.WORKSPACE_WRITE)
-                  .execute({"id": "c1", "name": "forget_memory", "args": {"memory_id": doomed}})).result
-        assert denied.ok is False and denied.error_code is ErrorCode.PERMISSION_DENIED
-        assert await _real_count(vectors, gate_settings, doomed, alice) == 1
-
-        # 审批通过 → 工具真的删：真实 count 1 → 0，对照组仍是 1。
-        executor = ToolExecutor(registry, policy=PermissionPolicy.WORKSPACE_WRITE,
-                                approval_callback=approved)
-        result = (await executor.execute(
-            {"id": "c2", "name": "forget_memory", "args": {"memory_id": doomed}})).result
-        assert result.ok is True and result.data["forgotten"] is True
+        # 遗忘真的删：真实 count 1 → 0，对照组仍是 1。
+        assert await capability.forget(doomed)
         await _drain(relay, records)
         assert await _real_count(vectors, gate_settings, doomed, alice) == 0
         assert await _real_count(vectors, gate_settings, control, alice) == 1
         assert doomed not in {entry.id for entry in await capability.list_entries(MemoryScope.USER, 10)}
 
-        # 幂等：再忘一次说的是"不存在"，不是错误。
-        again = await ForgetMemoryTool(capability).execute(_ForgetMemoryArgs(memory_id=doomed))
-        assert again.ok is True and again.data["forgotten"] is False
+        # 幂等：再忘一次是"不存在"（False），不是错误。
+        assert not await capability.forget(doomed)
     finally:
         try:
             for entry in await records.list_by_scope(MemoryScope.USER, alice, 100):
