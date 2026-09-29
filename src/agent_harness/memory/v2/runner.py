@@ -230,8 +230,7 @@ class ChatModelInvoker:
         key = (config.provider, config.model_name, config.base_url)
         cached = self._models.get(key)
         if cached is None:
-            # Memory formation/adjudication are contract decisions, so keep their
-            # classification stable even when the interactive agent uses sampling.
+            # Deterministic Memory V2 sampling is recorded in ADR-0044 D18.
             memory_config = copy(config)
             memory_config.temperature = _MEMORY_MODEL_TEMPERATURE
             cached = self._factory(memory_config, reasoning_effort=self._reasoning_effort)
