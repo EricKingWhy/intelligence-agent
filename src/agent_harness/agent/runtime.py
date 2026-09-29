@@ -135,6 +135,7 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
     SessionEvent,
+    current_session_var,
     memory_injected_ids_var,
     run_context_var,
 )
@@ -1193,6 +1194,9 @@ class AgentRuntime:
         # 初始化点——异常发生在两个 set 之间时 finally 引用未绑定变量会掩盖
         # 原异常（全量回归实证：UnboundLocalError 掩盖 queue 竞态）。
         memory_injected_token = None
+        # W-26（#380）：current_session_var 的 token，与上面两个 token 同一条
+        # UnboundLocalError 纪律（set 之前生成器被关闭时 finally 不能炸）。
+        session_token = None
         # session 树账的预留状态（`#318`）：True = 当前步已原子预留（turns/requests
         # 各一格）而决策尚未被接纳——取消臂 / 异常臂 / context 超限臂据此退回。
         # 初始化在 try 之前（与两个 token 同一条 UnboundLocalError 纪律）。
@@ -1280,6 +1284,11 @@ class AgentRuntime:
             # 事件降级时需要 run_id 对账，经 contextvar 传递。嵌套运行的恢复
             # 由外层 finally 兜底（token 捕获于下）。
             run_context_token = run_context_var.set(run_id)
+            # W-26（#380）：要写会话事件的工具（update_plan）在执行期经
+            # `current_session_var` 拿会话——`Tool.execute` 协议不带 session，
+            # 生产装配里工具注册又早于 Session 对象存在，构造注入接不上。
+            # 设点与收尾和 run_context_var 完全同构。
+            session_token = current_session_var.set(session)
             # 本 run 的记忆注入注册表（#202 / ADR-0031 D4）：设空集合，由
             # MemoryContextProvider.select() 在注入时写入；run 收尾 reset。
             memory_injected_token = memory_injected_ids_var.set(frozenset())
@@ -1942,6 +1951,13 @@ class AgentRuntime:
             if memory_injected_token is not None:
                 try:
                     memory_injected_ids_var.reset(memory_injected_token)
+                except ValueError:
+                    pass
+            # W-26（#380）：current_session_var 与 run_context_var 同一收口窗口、
+            # 同一 ValueError 语义（跨上下文 aclose 时 token 随任务消亡）。
+            if session_token is not None:
+                try:
+                    current_session_var.reset(session_token)
                 except ValueError:
                     pass
 

@@ -65,6 +65,10 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     # storage/artifact_select：与 store 配对的读回工具（两个 Provider 各一个）
     ("ReadArtifactTool", "agent_harness.tools.read_artifact"),
     ("InspectArtifactTool", "agent_harness.tools.inspect_artifact"),
+    # W-26（#380）：会话域工具（写 task/plan_updated，不碰 sandbox），由
+    # build_runtime 在 BUILTIN_LOCAL_TOOLS 循环外单独注册（无构造依赖，会话经
+    # current_session_var 执行期取得）
+    ("UpdatePlanTool", "agent_harness.tools.update_plan"),
     # knowledge / memory / websearch / skills / multiagent / ticker（demo）
     ("RetrieveKnowledgeTool", "agent_harness.knowledge.tools"),
     ("ReadKnowledgeSourceTool", "agent_harness.knowledge.tools"),

@@ -1368,6 +1368,14 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: noopProjection,
     summarize: emptySummary,
   },
+  // W-26（#380）：`task/plan_updated` 是进度清单整表覆盖的状态事件——不投影成消息、
+  // 不带来新的投影状态。与 CONTEXT_COMPACTION_FAILED 同形登记为 no-op ⇒ 已知类型、
+  // 不进 `unknown_events`；清单渲染面归 W-27（#381 Web+桌面渲染）与 W-28（#382 TUI 渲染），
+  // 本行只负责 `Record` 的穷尽性。
+  [EventType.TASK_PLAN_UPDATED]: {
+    apply: noopProjection,
+    summarize: emptySummary,
+  },
   [EventType.MEMORY_DEGRADED]: { apply: noopProjection, summarize: emptySummary },
   // #298（T6 引入 `memory/updated`，T8 补登记）：与 MEMORY_DEGRADED 同形——提交型记忆变更，
   // 载荷只有 count / memory IDs / action counts / job ID，**不带内容**（PRD V2 §6.5）。

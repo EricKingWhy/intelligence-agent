@@ -74,6 +74,7 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
+from agent_harness.tools.update_plan import UpdatePlanTool
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 from agent_harness.workspace.index import SessionHeaders
 
@@ -295,6 +296,11 @@ async def build_runtime(
             else {}
         )
         registry.register(tool_cls(sandbox, **kwargs))
+
+    # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
+    # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
+    # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
+    registry.register(UpdatePlanTool())
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
