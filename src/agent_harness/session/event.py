@@ -70,6 +70,12 @@ TASK_PROTECTED_FACT = "task/protected_fact"
 # 保留（或超硬护栏走暂停）"的 durable 事实，恢复面与对账面都要能看见（规格 06 §8：
 # 每次失败原因留诊断与任务可见状态）。
 CONTEXT_COMPACTION_FAILED = "context/compaction_failed"
+# ── W-26 (#380)：进度清单整表覆盖（PRD §7）────────────────────────────────
+# agent 每次提交**全量清单**（Codex/Gemini 范式：弱模型不易写坏、天然解决并发合并）。
+# 它是状态事件不是对话消息：不进 derive_messages 的投影集合、渲染走客户端自己的
+# 清单投影（W-27/W-28）。handler 硬校验住在 `session/plan.py`（PRD §7.2 四条，
+# 任一违反 → 不产生事件、带原因 + 当前清单整表拒绝）。
+TASK_PLAN_UPDATED = "task/plan_updated"
 MEMORY_DEGRADED = "memory/degraded"
 # #298 / MEM-V2-2（PRD §6.5）：一次**已提交**的记忆变更。只带计数、memory id、
 # action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
@@ -185,6 +191,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TASK_PROTECTED_FACT,
         # W-04 (#348)：摘要尝试失败的任务可见状态（不投影成消息）
         CONTEXT_COMPACTION_FAILED,
+        # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息）
+        TASK_PLAN_UPDATED,
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,

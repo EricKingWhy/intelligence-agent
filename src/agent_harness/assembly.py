@@ -74,6 +74,7 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
+from agent_harness.tools.update_plan import UpdatePlanTool
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 from agent_harness.workspace.index import SessionHeaders
 
@@ -296,6 +297,11 @@ async def build_runtime(
         )
         registry.register(tool_cls(sandbox, **kwargs))
 
+    # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
+    # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
+    # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
+    registry.register(UpdatePlanTool())
+
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
     # 选择口径（优先级 + 半配置判定）收敛在 `storage/artifact_select.py`，读路径
@@ -462,6 +468,8 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
+            plan_reinject_every_messages=settings.plan_reinject_every_messages,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
             # wiring 自动装配的 provider 子集；None=默认全量，[]=显式零，未知名字 fail-open。
             context_providers=_select_context_providers(

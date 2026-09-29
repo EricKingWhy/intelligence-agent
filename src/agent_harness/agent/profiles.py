@@ -66,10 +66,13 @@ class AgentSpec:
 #: coding 角色的工具集（spec §8：read/write/edit/apply_patch/bash/grep/glob，
 #: 加 git_status/git_diff；默认不开放 web）。
 #: #202 / ADR-0031 D8：记忆检索与显式写入工具对 coding 开放（写入源是模型自己）。
+#: W-26（#380）：`update_plan` 对 coding 开放——长任务执行面就是进度清单的写者；
+#: research 只读审阅不进（与 remember_this 同一取舍）。
 _CODING_TOOLS = frozenset({
     "read", "write", "edit", "apply_patch", "bash", "grep", "glob",
     "git_status", "git_diff", "retrieve_memory",
     "remember_this", "forget_memory",
+    "update_plan",
 })
 
 #: research/review 角色的只读工具集（spec §8：Knowledge/Web/MCP 只读，无

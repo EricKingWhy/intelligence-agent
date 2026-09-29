@@ -150,6 +150,10 @@ async def test_build_runtime_main_profile_injects_system_prompt(tmp_path):
 #: 只读 `.name`，构造器不碰沙箱），不再手抄第三份：手抄的那份不会随常量漂移，
 #: 而常量本身由 `tests/agent/test_tool_scope_reconciliation.py` 的 AST 闸看住。
 _LOCAL_TOOL_NAMES = frozenset(cls(None).name for cls in BUILTIN_LOCAL_TOOLS)
+#: W-26（#380）：`update_plan` 是会话域工具（零构造依赖），assembly 在
+#: BUILTIN_LOCAL_TOOLS 循环之外**无条件** register ⇒ 注册面 = 两者并集。名字由
+#: 对账测试的 AST 清单看住（`_CAPABILITY_TOOL_CLASSES`），故此处不手抄第三份来源。
+_UNCONDITIONAL_TOOL_NAMES = _LOCAL_TOOL_NAMES | {"update_plan"}
 
 
 @pytest.mark.asyncio
@@ -158,18 +162,19 @@ async def test_effective_scope_is_intersection_when_capabilities_absent(tmp_path
     """#238 AC2：optional capability 缺席 ⇒ effective = declared ∩ registered。
 
     `artifact_dir=""` 关掉本地 artifact store（合法配置：写了就是"别落盘"），注册面只剩
-    9 个本地工具，capability 工具（knowledge / websearch / memory / delegate）全部缺席。
+    9 个本地工具 + `update_plan`（W-26 会话域工具，零构造依赖），capability 工具
+    （knowledge / websearch / memory / delegate）全部缺席。
     缺席**不是**被剔除：它们不进 registry，也**不**进 `dropped_tools`——后者只装"注册了
-    但未声明"的名字。声明数（17/12/7）与实际数（9/9/3）在这里必然不等，这正是
+    但未声明"的名字。声明数（18/13/7）与实际数（10/10/4）在这里必然不等，这正是
     `tool_scope_summary` docstring 说的"这两个数不能读作实际工具数"。
     """
     runtime = await _build_runtime(tmp_path, agent_profile=profile, artifact_dir="")
     registered = {tool.name for tool in runtime.registry.list()}
     declared = BUILTIN_PROFILES[profile].tool_scope
 
-    assert registered == declared & _LOCAL_TOOL_NAMES  # 交集，不多不少
+    assert registered == declared & _UNCONDITIONAL_TOOL_NAMES  # 交集，不多不少
     assert registered < declared                       # 缺席 ⇒ 严格子集（不虚报实际数）
-    assert set(runtime.dropped_tools) == _LOCAL_TOOL_NAMES - declared
+    assert set(runtime.dropped_tools) == _UNCONDITIONAL_TOOL_NAMES - declared
     # 缺席的名字一个都不许出现在 dropped 里（否则就是把"没配"报成"被剔除"）
     assert not (declared - registered) & set(runtime.dropped_tools)
 

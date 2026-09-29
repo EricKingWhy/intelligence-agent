@@ -25,6 +25,7 @@ from agent_harness.session.derive import (
     serialize_protected_facts,
 )
 from agent_harness.session.event import SessionEvent
+from agent_harness.session.plan import PlanItem, derive_plan
 
 logger = logging.getLogger("agent_harness.context.compactor")
 
@@ -67,6 +68,8 @@ _SUMMARY_ERROR_CLASSES = (
     "heading_mismatch",
     "empty_section",
     "programmatic_mismatch",
+    # W-29 (#383)：摘要第 5 节与进度清单一致性闸门的拒绝类。
+    "plan_section_mismatch",
     "summary_not_smaller",
     "target_not_reached",
 )
@@ -121,6 +124,12 @@ class ContextWindowExceededError(RuntimeError):
 class CompactionResult:
     messages: list[AnyMessage]
     compacted_turn_count: int
+    # 契约（P2-4 双计修正后统一）：**只含返回的 messages 本身**的估算，不含
+    # 调用方（builder）另行记账的 system_prompt / 运行时快照 / 清单锚块——
+    # 压缩成功路径本来就是 messages-only（test_builder_system_prompt 的回归钉），
+    # 三条直通路径（预检放行 / 双失败安全继续 / 源区间不可用）已从
+    # "原样回传调用方入参（含 sys+rt+plan）"统一到本契约，否则 builder 的
+    # 补回项会二次计入，provider 预算被虚扣（方向安全但账目失真）。
     token_estimate: int
     fallback_used: bool
     # T4 (#134)：bracket 元数据——被压缩段的 seq 区间 + 唯一 bracket_id。
@@ -184,11 +193,12 @@ class ContextCompactor:
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)
-            if count + reserved_tokens > self._hard_limit:
-                raise ContextWindowExceededError(
-                    "Protected facts and context exceed the hard guard; "
-                    "no complete early turn can be compacted"
-                )
+            # 硬护栏比对用**有效用量**（调用方入参，含 sys+rt+plan），与下方其余
+            # 三处 `token_estimate > self._hard_limit` 同一口径——messages-only
+            # 比对会在 (messages, 有效用量) 落入 (count≤hard<effective) 缝隙时
+            # 放行越窗请求。
+            if token_estimate > self._hard_limit:
+                raise ContextWindowExceededError("No complete early turn can be compacted")
             return CompactionResult(list(messages), 0, count, False)
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
@@ -206,7 +216,11 @@ class ContextCompactor:
                 raise ContextWindowExceededError(
                     "Summary validation failed and original context exceeds hard guard"
                 ) from None
-            return CompactionResult(list(messages), 0, token_estimate, False)
+            # P2-4：token_estimate 回传 messages-only（契约见 CompactionResult），
+            # 不原样回传调用方入参（其已含 sys+rt+plan，builder 会再补一次）。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+            )
         # W-04 (#348)：摘要生成至多两次尝试。一次尝试 = ainvoke → 解析 → 程序化组装
         # → 校验闸门 → shrink 全链；预检（上面与 tool 块检查）不计入。每次失败记一条
         # 有界 CompactionFailure，由调用方落成任务可见状态。
@@ -231,21 +245,24 @@ class ContextCompactor:
                 )
                 summary_text = _assemble_summary(early, model_sections, protected_facts)
                 _validate_summary(summary_text, early, protected_facts)
+                # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
+                # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
+                # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
+                # 会话的行为逐字节等价。
+                if events is not None:
+                    _validate_plan_section(summary_text, derive_plan(events).items)
                 early_tokens = estimate_message_tokens(early)
-                summary_tokens = estimate_message_tokens([HumanMessage(content=summary_text)])
+                summary_message = HumanMessage(
+                    content=summary_text,
+                    name=COMPACTION_SUMMARY_MESSAGE_NAME,
+                )
+                summary_tokens = estimate_message_tokens([summary_message])
                 if summary_tokens >= early_tokens:
                     raise ContextWindowExceededError(
                         f"Summary ({summary_tokens} tokens) is not smaller than "
                         f"compressed segment ({early_tokens} tokens)"
                     )
-                compacted = [
-                    *prefix,
-                    HumanMessage(
-                        content=summary_text,
-                        name=COMPACTION_SUMMARY_MESSAGE_NAME,
-                    ),
-                    *recent,
-                ]
+                compacted = [*prefix, summary_message, *recent]
                 if estimate_message_tokens(compacted) + reserved_tokens >= self._auto_limit:
                     raise ContextWindowExceededError(
                         "LLM summary does not reach compaction target"
@@ -275,8 +292,11 @@ class ContextCompactor:
                     "Summary validation failed and original context exceeds hard guard",
                     failures=failures,
                 ) from None
-            return CompactionResult(list(messages), 0, token_estimate, False,
-                                    failures=failures)
+            # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+                failures=failures,
+            )
         count = estimate_message_tokens(compacted)
         if count + reserved_tokens > self._hard_limit:
             raise ContextWindowExceededError(
@@ -323,7 +343,10 @@ class ContextCompactor:
                 raise ContextWindowExceededError(
                     "Cannot persist compaction without a source event range"
                 )
-            return CompactionResult(list(messages), 0, token_estimate, False)
+            # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+            )
         return CompactionResult(
             compacted,
             sum(
@@ -337,6 +360,12 @@ class ContextCompactor:
             source_seq_end=source_seq_end,
             bracket_id=str(uuid4()),
             summary=summary_text,
+            # W-29 (#383) 补课：成功前的失败尝试也要带给调用方落任务可见状态——
+            # CompactionResult.failures 的契约（"成功尝试之前的都在内"）与冻结
+            # PRD §4.5（"每次失败留诊断与任务可见状态"）都要求这一条；此前成功
+            # 路径漏传，首试被拒、重试成功时失败记录被静默丢弃（本票新闸门使
+            # 该路径成为常态，判据测试暴露）。
+            failures=failures,
         )
 
 
@@ -487,6 +516,44 @@ def _validate_summary(
             raise ValueError("Programmatic summary section failed exact comparison")
     if not summary.strip():
         raise ValueError("Summary must not be empty")
+
+
+def _validate_plan_section(
+    summary: str, plan_items: tuple[PlanItem, ...],
+) -> None:
+    """W-29 (#383)：摘要第 5 节 ↔ 进度清单 in_progress 项一致性闸门。
+
+    会话**有**清单时启用（PRD §6.1 表行 5「与进度清单 in_progress 项一致」）：
+    每个进行中项的 `content` 或 `activeForm` 必须逐字出现在第 5 节内；清单存在
+    但零 in_progress ⇒ 第 5 节必须是 `(none)`（与 `aux:compaction` prompt 的
+    「无则写 (none)」同款约定）。无清单（items 为空）不启用——未用清单的会话
+    第 5 节本就是自由文本，保持 W-04 之前的既有行为。
+
+    判据刻意用逐字子串而非语义比对：PRD 执行约束要求确定性机制兜底，弱模型
+    重述不能靠"觉得差不多"。清单表本身就在转录的 update_plan 工具调用里，
+    模型有能力逐字带上。
+    """
+    if not plan_items:
+        return
+    section = _parse_summary_sections(summary, _SUMMARY_HEADINGS)[4]
+    in_progress = [item for item in plan_items if item.status == "in_progress"]
+    if not in_progress:
+        if section != "(none)":
+            raise _SummaryRejected(
+                "plan_section_mismatch",
+                "Plan section must be (none): no plan item is in progress",
+            )
+        return
+    missing = [
+        item.id for item in in_progress
+        if item.content not in section and item.active_form not in section
+    ]
+    if missing:
+        raise _SummaryRejected(
+            "plan_section_mismatch",
+            "Plan section is inconsistent with the progress plan; "
+            f"in-progress item(s) missing: {', '.join(missing)}",
+        )
 
 
 def _validate_tool_blocks(messages: list[AnyMessage]) -> None:

@@ -50,6 +50,39 @@ LLM 摘要可能失败（模型超时、格式不对、拒绝生成）。失败�
 > `trigger_dimension=max_context_tokens`，ADR-0033 边界 5）——"停止"不再意味着终结。
 > 便宜摘要模型接缝（`summary_model`）同票就位，缺省 = 主模型，装配留后续票。
 
+> **修订注（2026-09-29，W-29 / #383：进度清单重注入锚点）**：PRD §4.6 的
+> 「压缩后确定性重注入」落地。机制决议（实现细节以 `context/builder.py` /
+> `context/compactor.py` 为准，此处只写**为什么**）：
+>
+> 1. **重注入是 build 层的 ephemeral 块，不是持久化事件**——清单已经是
+>    `task/plan_updated` 事件流（W-26），`derive_plan` 纯投影天然穿透压缩
+>    （plan 事件不进 shadow 区间判定的投影集合）；缺的只是把投影结果放回
+>    模型可见上下文。每次 build 重新决策、重新渲染、随用随弃，与运行时快照
+>    同一哲学（不写 JSONL、不进 derive_messages、不进记忆抽取）。
+> 2. **决策 = 纯事件流函数**（durable seq，票面硬约束）：无清单不注入；
+>    会话发生过压缩（存在 `COMPACTION_END`）**恒注入**——清单是重注入包里
+>    排在摘要之前的一环，"接班后必须持续在场"是判据①/W-30 判据 1 的耐久
+>    读法；未压缩过走「事件驱动（距最近变更 ≤1 条投影消息）+ 周期兜底
+>    （≥N 条后恒注入，N 缺省 6 = Cline Focus Chain 默认值，可配置）」，
+>    中间静默窗是刻意的 token 经济。计数不读 wall-clock、不持实例状态——
+>    重放/换实例决策一致。
+> 3. **落点顺序**：清单块（SystemMessage，标题含 `context/plan` 标记）插在
+>    第一条压缩摘要之前；尚无摘要时插在开头系统块区。标题刻意避开
+>    `_is_compaction_summary` 的识别前缀与八节标题——注入块与持久化摘要绝不同形。
+> 4. **成本口径**：清单 token 在阈值判定**之前**计入估算（不计数 = 系统性
+>    低估），压缩路径计入 provider 预算补回项；`_last_plan_tokens` 独立记账
+>    （"独立预算"的落点），看板折进"其他"桶（实测值非残差，不破坏六桶求和）。
+> 5. **摘要第 5 节联动校验**（PRD §6.1 表行 5，W-04 留下的空接缝）：会话有
+>    清单时，每个 in_progress 项的 `content`/`activeForm` 必须逐字出现在
+>    第 5 节；零 in_progress ⇒ 第 5 节必须是 `(none)`；无清单不启用（既有
+>    行为逐字节等价）。判据用逐字子串而非语义比对——PRD 执行约束要求确定性
+>    机制兜底。拒绝走 `_SummaryRejected("plan_section_mismatch")`，进 W-04
+>    既有失败通道（重试 ×1 → 双失败安全继续）。同票补上：`compact()` 成功
+>    路径此前漏传 `failures`，首试被拒、重试成功时失败记录被静默丢弃——
+>    与 `CompactionResult.failures` 自述契约及 PRD §4.5"每次失败留任务可见
+>    状态"相悖，判据测试暴露后补齐。
+
+
 **第 1 层 — LLM 摘要**：取早期完整 turns，送给同一个 ModelProvider 的 `ainvoke()`，prompt 要求产出结构化 summary（至少保留 facts / decisions / constraints / failed_attempts / unresolved / artifact_refs / citations / important tool outcomes——spec §5 列举）。产出为一条 `HumanMessage` 注入 messages 头部。摘要来自历史用户、模型和工具内容，属于不可信上下文，不得提升为系统指令。
 
 **第 2 层 — Deterministic fallback**：不用 LLM。机械提取：

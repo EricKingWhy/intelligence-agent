@@ -3,7 +3,11 @@
 Phase 1 完整导出：SessionEvent DTO、JsonlSessionStore、derive_messages、Session 聚合根。
 """
 
-from agent_harness.session.context import memory_injected_ids_var, run_context_var
+from agent_harness.session.context import (
+    current_session_var,
+    memory_injected_ids_var,
+    run_context_var,
+)
 from agent_harness.session.cwd import cwd_event_data, session_cwd
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
@@ -47,6 +51,7 @@ from agent_harness.session.event import (
     SESSION_RESUMED,
     SESSION_STARTED,
     STREAM_ONLY_TYPES,
+    TASK_PLAN_UPDATED,
     TASK_PROTECTED_FACT,
     TEXT_DELTA,
     TOOL_CALL,
@@ -57,6 +62,14 @@ from agent_harness.session.event import (
     SessionEvent,
 )
 from agent_harness.session.header import StartedHeader
+from agent_harness.session.plan import (
+    PLAN_MAX_ITEMS,
+    PlanItem,
+    PlanState,
+    PlanUpdateOutcome,
+    apply_plan_update,
+    derive_plan,
+)
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 
@@ -83,6 +96,7 @@ __all__ = [
     "OPERATION_RECONCILED",
     "OPERATION_RECONCILE_REQUIRED",
     "PERMISSION_CHANGED",
+    "PLAN_MAX_ITEMS",
     "REASONING_COMPLETED",
     "REASONING_DELTA",
     "REASONING_INTERRUPTED",
@@ -98,6 +112,7 @@ __all__ = [
     "SESSION_RESUMED",
     "SESSION_STARTED",
     "STREAM_ONLY_TYPES",
+    "TASK_PLAN_UPDATED",
     "TASK_PROTECTED_FACT",
     "TEXT_DELTA",
     "TOOL_CALL",
@@ -106,11 +121,17 @@ __all__ = [
     "TOOL_RESULT",
     "USER_MESSAGE",
     "JsonlSessionStore",
+    "PlanItem",
+    "PlanState",
+    "PlanUpdateOutcome",
     "Session",
     "SessionEvent",
     "StartedHeader",
+    "apply_plan_update",
+    "current_session_var",
     "cwd_event_data",
     "derive_messages",
+    "derive_plan",
     "detect_dangling",
     "memory_injected_ids_var",
     "run_context_var",
