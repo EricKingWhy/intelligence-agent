@@ -20,6 +20,7 @@ from langchain_core.messages import (
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.event import SessionEvent
+from agent_harness.session.plan import PlanItem, derive_plan
 
 logger = logging.getLogger("agent_harness.context.compactor")
 
@@ -62,6 +63,8 @@ _SUMMARY_ERROR_CLASSES = (
     "heading_mismatch",
     "empty_section",
     "programmatic_mismatch",
+    # W-29 (#383)：摘要第 5 节与进度清单一致性闸门的拒绝类。
+    "plan_section_mismatch",
     "summary_not_smaller",
     "target_not_reached",
 )
@@ -220,6 +223,12 @@ class ContextCompactor:
                 )
                 summary_text = _assemble_summary(early, model_sections)
                 _validate_summary(summary_text, early)
+                # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
+                # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
+                # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
+                # 会话的行为逐字节等价。
+                if events is not None:
+                    _validate_plan_section(summary_text, derive_plan(events).items)
                 early_tokens = estimate_message_tokens(early)
                 summary_tokens = estimate_message_tokens([SystemMessage(content=summary_text)])
                 if summary_tokens >= early_tokens:
@@ -313,6 +322,12 @@ class ContextCompactor:
             source_seq_end=source_seq_end,
             bracket_id=str(uuid4()),
             summary=summary_text,
+            # W-29 (#383) 补课：成功前的失败尝试也要带给调用方落任务可见状态——
+            # CompactionResult.failures 的契约（"成功尝试之前的都在内"）与冻结
+            # PRD §4.5（"每次失败留诊断与任务可见状态"）都要求这一条；此前成功
+            # 路径漏传，首试被拒、重试成功时失败记录被静默丢弃（本票新闸门使
+            # 该路径成为常态，判据测试暴露）。
+            failures=failures,
         )
 
 
@@ -442,6 +457,44 @@ def _validate_summary(summary: str, messages: list[AnyMessage]) -> None:
             raise ValueError("Programmatic summary section failed exact comparison")
     if not summary.strip():
         raise ValueError("Summary must not be empty")
+
+
+def _validate_plan_section(
+    summary: str, plan_items: tuple[PlanItem, ...],
+) -> None:
+    """W-29 (#383)：摘要第 5 节 ↔ 进度清单 in_progress 项一致性闸门。
+
+    会话**有**清单时启用（PRD §6.1 表行 5「与进度清单 in_progress 项一致」）：
+    每个进行中项的 `content` 或 `activeForm` 必须逐字出现在第 5 节内；清单存在
+    但零 in_progress ⇒ 第 5 节必须是 `(none)`（与 `aux:compaction` prompt 的
+    「无则写 (none)」同款约定）。无清单（items 为空）不启用——未用清单的会话
+    第 5 节本就是自由文本，保持 W-04 之前的既有行为。
+
+    判据刻意用逐字子串而非语义比对：PRD 执行约束要求确定性机制兜底，弱模型
+    重述不能靠"觉得差不多"。清单表本身就在转录的 update_plan 工具调用里，
+    模型有能力逐字带上。
+    """
+    if not plan_items:
+        return
+    section = _parse_summary_sections(summary, _SUMMARY_HEADINGS)[4]
+    in_progress = [item for item in plan_items if item.status == "in_progress"]
+    if not in_progress:
+        if section != "(none)":
+            raise _SummaryRejected(
+                "plan_section_mismatch",
+                "Plan section must be (none): no plan item is in progress",
+            )
+        return
+    missing = [
+        item.id for item in in_progress
+        if item.content not in section and item.active_form not in section
+    ]
+    if missing:
+        raise _SummaryRejected(
+            "plan_section_mismatch",
+            "Plan section is inconsistent with the progress plan; "
+            f"in-progress item(s) missing: {', '.join(missing)}",
+        )
 
 
 def _validate_tool_blocks(messages: list[AnyMessage]) -> None:

@@ -10,6 +10,7 @@ from agent_harness.context.compactor import (
     CompactionFailure,
     ContextCompactor,
     ContextWindowExceededError,
+    _is_compaction_summary,
 )
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
@@ -23,9 +24,12 @@ from agent_harness.session.event import (
     CONTEXT_COMPACTED,
     CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
+    TASK_PLAN_UPDATED,
     TOOL_RESULT,
     USER_MESSAGE,
+    SessionEvent,
 )
+from agent_harness.session.plan import PlanState, derive_plan
 
 logger = logging.getLogger("agent_harness.context")
 
@@ -53,6 +57,97 @@ def _insert_before_last_human(
     return [*messages[:index], message, *messages[index:]]
 
 
+#: W-29 (#383)：清单重注入块标题。刻意避开 `_is_compaction_summary` 的识别前缀
+#: （"## 原始目标与用户约束"/"## 目标"）与八节摘要的全部标题——注入块是
+#: ephemeral 块，与持久化摘要**绝不同形**，任何把 build 产物喂给摘要识别逻辑
+#: 的消费方（现行 compactor 输入只收投影，此处是防御）都不会误判。
+_PLAN_BLOCK_HEADING = "## 当前进度清单（context/plan）"
+
+#: 事件驱动窗口：清单变更事件之后至多这么多条投影消息内仍算「变更即注入」。
+#: 生产路径里 update_plan 的 ToolResult 恒在清单事件之后、下一次 build 之前，
+#: 窗口必须含它，模型才能在自己刚变更清单后的下一步就看到新表。
+_PLAN_EVENT_DRIVEN_WINDOW = 1
+
+
+def _should_inject_plan(
+    events: list[SessionEvent], fallback_period: int,
+) -> PlanState | None:
+    """W-29 (#383)：清单重注入决策——**纯函数**，只依赖事件流。
+
+    票面硬约束「兜底周期计数器必须是确定性事件计数（durable seq）」的落地：
+    不读 wall-clock、不持有 builder 实例状态，同一份事件流在任何实例、任何
+    时刻、重放多少次都得到同一决策。
+
+    - 无清单 → None（不注入）；
+    - 会话已发生过压缩（存在 COMPACTION_END）→ 恒注入：清单是 PRD §4.6 重注入
+      包里排在摘要之前的一环（"压缩锚点"），接班后必须**持续**在场——判据①
+      与 W-30 判据 1（压缩接班后清单不丢）的耐久读法；
+    - 尚未压缩过走节奏（PRD §4.6：事件驱动 + 周期兜底）：
+      * 事件驱动：距最近一次 `task/plan_updated` ≤ `_PLAN_EVENT_DRIVEN_WINDOW`
+        条投影消息（判据②「变更后下一 build 即含新版」）；
+      * 周期兜底：≥ `fallback_period` 条投影消息无变更后恒注入（判据③
+        「连续 6 条无变更兜底注入一次」；注入后保持在场——本架构注入是逐
+        build 重算的 ephemeral 块，锚点在场比复刻 Cline 的闪烁节奏更稳）；
+      * 中间的静默窗是刻意的 token 经济：模型刚见过表，不必每步重发。
+
+    「消息」计数 = 三类投影事件（USER/MODEL_COMPLETED/TOOL_RESULT）按 durable
+    seq 距最近一次 `task/plan_updated` 的条数。不含压缩摘要 SystemMessage
+    （那是投影产物而非事件类型，压缩后由 COMPACTION_END 分支短路恒注入）；
+    superseded 事件（被 bracket shadow 的 USER_MESSAGE 等）仍留在原始事件流
+    里会计入——计数偏多 = 兜底更早触发，偏差方向安全（P2-5 审查修正的措辞）。
+    """
+    plan = derive_plan(events)
+    if not plan.items:
+        return None
+    if any(event.type == COMPACTION_END for event in events):
+        return plan
+    last_plan_seq = max(
+        (event.seq for event in events if event.type == TASK_PLAN_UPDATED),
+        default=0,
+    )
+    stale = sum(
+        1 for event in events
+        if event.type in _PROJECTING_EVENT_TYPES and event.seq > last_plan_seq
+    )
+    if stale <= _PLAN_EVENT_DRIVEN_WINDOW or stale >= fallback_period:
+        return plan
+    return None
+
+
+def _render_plan_block(plan: PlanState) -> str:
+    """清单块的确定性渲染——逐字来自 `derive_plan` 投影。
+
+    判据①「逐字比对投影」的基准：同一份 PlanState 渲染出的文本逐字节相同，
+    测试用 `derive_plan(events)` 重算比对即可，不需要快照文件。
+    """
+    lines = [_PLAN_BLOCK_HEADING, "当前进度清单（整表覆盖，服务端投影）："]
+    for item in plan.items:
+        lines.append(
+            f"- [{item.status}] {item.content}（{item.active_form}）"
+            f"(id: {item.id}, source: {item.source})"
+        )
+    return "\n".join(lines)
+
+
+def _inject_plan_block(messages: list[AnyMessage], plan_text: str) -> list[AnyMessage]:
+    """把清单块作为一条 SystemMessage 注入（票面契约 4：`context/plan` 系统块，
+    与用户消息、摘要分块，互不串扰）。
+
+    落点（PRD §4.6 顺序「清单 → 摘要」）：存在压缩摘要时插在**第一条摘要之前**；
+    尚无摘要时插在开头连续 SystemMessage 之后（同一系统块区域）。两种落点都只
+    依赖 SystemMessage 分布，不会插进 AI(tool_calls)/ToolResult 配对中间。
+    """
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
+            return [
+                *messages[:index], SystemMessage(content=plan_text), *messages[index:],
+            ]
+    insertion = 0
+    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
+        insertion += 1
+    return [*messages[:insertion], SystemMessage(content=plan_text), *messages[insertion:]]
+
+
 class ContextBuilder:
     """按预算压缩投影与选择 Provider 内容，不修改历史。"""
 
@@ -69,9 +164,13 @@ class ContextBuilder:
         artifact_store: Any | None = None,
         artifact_read_tool_name: str | None = None,
         summary_model: Any | None = None,
+        plan_reinject_every_messages: int = 6,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
+        if plan_reinject_every_messages <= 0:
+            # W-29 (#383)：0 会让兜底判据退化为"变更即恒注入"，配错必须响亮失败。
+            raise ValueError("plan_reinject_every_messages must be positive")
         self.model_provider = model_provider
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
         # 档位选择留配置面（后续票），本层只透传给 compactor。
@@ -110,6 +209,12 @@ class ContextBuilder:
         self._last_provider_tokens_by_name: dict[str, int] = {}
         # 最近一次 build 的运行时快照成本（非持久化注入，见 _inject_runtime_context）。
         self._last_runtime_context_tokens: int = 0
+        # W-29 (#383)：最近一次 build 实际注入的清单锚块成本（非持久化注入）。
+        # 独立记账口（票面硬约束 3「计入独立预算」）；usage_snapshot 把它折进
+        # "other"（未归类注入的定义性内容），不另开看板桶（那是 UI 票的面）。
+        self._last_plan_tokens: int = 0
+        # 清单兜底重注入周期（PRD §4.6 Cline Focus Chain 默认值 6，配置可调）。
+        self.plan_reinject_every_messages = plan_reinject_every_messages
         # W-03 (#347)：可回读 Artifact 前提下的旧 Tool Result 投影裁剪。
         # artifact_store 为 None（默认）→ pruner 整体缺席，行为与 W-03 之前一致；
         # 装配时 read_tool_name 必须显式给出——骨架行的回读提示点名**装配期真实
@@ -175,6 +280,21 @@ class ContextBuilder:
                     [SystemMessage(content=self.system_prompt)]
                 )
             token_estimate += self._system_prompt_tokens
+        # W-29 (#383)：清单重注入决策与成本（两条路径共用同一份决策）。决策是
+        # 纯事件推导（见 _should_inject_plan）；token 成本**先计入**本次估算再走
+        # 阈值判定——清单块确实会发给模型，不计数就是系统性低估（看板漏报同源
+        # 教训）。注入动作在各路径装配末段执行（压缩路径在重投影确认**之后**，
+        # 见 build 尾部）；压缩落 bracket 后会重估一次（进入"恒注入"状态）。
+        plan_state = _should_inject_plan(
+            session.events, self.plan_reinject_every_messages,
+        )
+        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
+        plan_tokens = (
+            estimate_message_tokens([SystemMessage(content=plan_text)])
+            if plan_text is not None else 0
+        )
+        token_estimate += plan_tokens
+        self._last_plan_tokens = plan_tokens
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
@@ -182,6 +302,8 @@ class ContextBuilder:
         if token_estimate <= self.max_context_tokens * self.auto_compact_threshold:
             built = await self._with_providers(session, messages, token_estimate)
             built = self._inject_runtime_context(built, runtime_context)
+            if plan_text is not None:
+                built = _inject_plan_block(built, plan_text)
             return self._prepend_system_prompt(built)
         compactor = ContextCompactor(
             self.model_provider, max_context_tokens=self.max_context_tokens,
@@ -235,19 +357,36 @@ class ContextBuilder:
                     "continue on an unverifiable projection"
                 )
             recheck = estimate_message_tokens(projected)
+            # 复核式刻意不含 plan_tokens（P2-1 审查修正的注释声明）：本式守的是
+            # **持久化压缩结果**是否越硬护栏（fail-closed 面）；清单锚块是
+            # ephemeral 注入，其成本已经从 provider remaining 里扣减（见下
+            # provider_estimate），总量越界由下一 build 的阈值判定（含清单）自纠。
             if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
                     > self.max_context_tokens * self.hard_guard_threshold):
                 raise ContextWindowExceededError(
                     f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
                 )
-        # 压缩后的 token_estimate 只含 messages，不含 system_prompt / 快照——
-        # 两者都要补回，否则 _with_providers 会把它们占用的预算当作可用空间
-        # 分配给 provider 内容（快照的补回与 system_prompt 同理由）。
+        # W-29 (#383)：落 bracket 后重算清单决策——本次 build 可能恰好触发首次
+        # 压缩，决策必须在 bracket 事件在场的前提下重估，才能进入"压缩后恒注入"
+        # 状态（判据①：压缩后模型输入含完整清单）。
+        plan_state = _should_inject_plan(
+            session.events, self.plan_reinject_every_messages,
+        )
+        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
+        if plan_text is not None:
+            plan_tokens = estimate_message_tokens([SystemMessage(content=plan_text)])
+        self._last_plan_tokens = plan_tokens
+        # 压缩后的 token_estimate 只含 messages，不含 system_prompt / 快照 /
+        # 清单锚块——全部补回，否则 _with_providers 会把它们占用的预算当作可用
+        # 空间分配给 provider 内容（快照与清单的补回与 system_prompt 同理由）。
         provider_estimate = (
-            result.token_estimate + (self._system_prompt_tokens or 0) + runtime_context_tokens
+            result.token_estimate + (self._system_prompt_tokens or 0)
+            + runtime_context_tokens + plan_tokens
         )
         built = await self._with_providers(session, result.messages, provider_estimate)
         built = self._inject_runtime_context(built, runtime_context)
+        if plan_text is not None:
+            built = _inject_plan_block(built, plan_text)
         # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
         # （messages + system prompt + 运行时快照，与 :103 的看板口径同源）落
         # [auto, hard) 带：有效用量 < auto 的健康路径不发；成功压缩的 messages
@@ -460,11 +599,12 @@ class ContextBuilder:
         system_prompt_tokens = self._system_prompt_tokens or 0
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)
-        # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照。这是"其他"
-        # 的定义性内容，不是"总量减各项"的残差——残差写法在总量只含 messages 时
-        # 会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
+        # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
+        # （W-29 #383，`_last_plan_tokens` 的实测值）。这是"其他"的定义性内容
+        # （未归类注入），不是"总量减各项"的残差——残差写法在总量只含 messages
+        # 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
         other = (sum(v for k, v in by_name.items() if k != "skills")
-                 + self._last_runtime_context_tokens)
+                 + self._last_runtime_context_tokens + self._last_plan_tokens)
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,

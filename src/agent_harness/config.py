@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     max_context_tokens: int = 200_000
     auto_compact_threshold: float = 0.70
     hard_guard_threshold: float = 0.85
+    # W-29 (#383)：进度清单兜底重注入周期（每 N 条投影消息，PRD §4.6 的
+    # Cline Focus Chain 默认值 6，可配置）。
+    plan_reinject_every_messages: int = Field(default=6, gt=0)
     artifact_overflow_chars: int = 2000
     # Phase Multiturn T5 (#135)：MinIO 作为大产物外置对象存储。
     # 与 artifact_store_* 字段独立——MinIO 用于 tool result 外置，
