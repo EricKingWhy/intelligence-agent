@@ -569,7 +569,7 @@ def _well_separated_entries() -> list[MemoryEntry]:
 def _near_tie_entries() -> list[MemoryEntry]:
     """近平票对：base 差 0.00175（0.7*score 差），recency 项在 t0 补 0.00238、
     t0+3d 只补 0.00111 ⇒ +3 天后排序翻转（手算可复核，非概率性 flake）。
-    importance 均缺省 0.5（rank.py:26），age 取整日避免毫秒噪声。"""
+    importance 均缺省 0.5（rank.py:33），age 取整日避免毫秒噪声。"""
     now = datetime.now(UTC)
     return [
         # 甲：较新（-5d）、分稍低。
@@ -612,7 +612,8 @@ async def test_memory_injection_identical_across_consecutive_builds(tmp_path):
     """§3.3(6) 基线：确定性 fake capability，两次连续 build 的 memory 注入逐字节
     相等，且落在前缀头部（system 段内、pf 数据行之前——#411 下首个 Human 是
     pf 数据行，位置断言随其重推，见通道 2 × provider 用例）。
-    EXPECTED-PASS（毫秒级漂移 ~1e-9，keys 相差 ~0.02，翻转概率可忽略——审计 §4.7）。"""
+    EXPECTED-PASS（修复后锚为事件流/批内 durable 时间，无漂移可言；此钉同时是
+    回归绊线——有人重新引入 wall-clock 排序时 _ShiftableClock 会让它转红）。"""
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "帮我回忆用户偏好"})
     builder = _make_builder(context_providers=[_memory_provider(_well_separated_entries())])

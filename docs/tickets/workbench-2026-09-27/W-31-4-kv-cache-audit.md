@@ -1,6 +1,6 @@
 # W-31.4 (#416) KV-cache / 确定性卫生审计报告
 
-- **审计两阶段**：① 审计阶段在 `origin/codex/346-protected-facts` 分支树（head `0974d6d3`，含 #411）完成——独立审计（只读）；② 复核阶段在本票分支树（`zcode/T416-w31-4-kv-cache-audit`，head `0e639364` = main `88c258a8`〔#411 已合并〕+ 测试 `db0e34e2` + 修复 `0e639364`）对全部行号引用逐条重验（99 条构造体：90 CONFIRMED / 7 SHIFTED 已就地更正 / 2 STALE——STALE 的两条正是 ⚠️A 被修复删除的原文证据，属修复生效的直接结果）。全部 29 个被引文件 `git diff 0974d6d3 0e639364` 逐一核对：context/builder.py、session/derive.py、context/compactor.py、context/pruner.py、context/tokens.py、session/plan.py、prompt/* 等 27 个文件**零漂移**（builder.py 额外验证 `0974d6d3..88c258a8` 空 diff）；仅 assembly.py（#415 +6 行）、memory/rank.py、memory/context_provider.py（本票修复）三个文件漂移。
+- **审计两阶段**：① 审计阶段在 `origin/codex/346-protected-facts` 分支树（head `0974d6d3`，含 #411）完成——独立审计（只读）；② 复核阶段在本票分支树（`zcode/T416-w31-4-kv-cache-audit`，head `0e639364` = main `88c258a8`〔#411 已合并〕+ 测试 `db0e34e2` + 修复 `0e639364`）对全部行号引用逐条重验（99 条构造体：90 CONFIRMED / 7 SHIFTED 已就地更正 / 2 STALE——STALE 的两条正是 ⚠️A 被修复删除的原文证据，属修复生效的直接结果）。全部 29 个被引文件 `git diff 0974d6d3 0e639364` 逐一核对：context/builder.py、session/derive.py、context/compactor.py、context/pruner.py、context/tokens.py、session/plan.py、prompt/* 等 27 个文件**零漂移**（builder.py 额外验证 `0974d6d3..88c258a8` 空 diff）；被引文件中仅 assembly.py（#415 +6 行）、memory/rank.py、memory/context_provider.py（本票修复）三个文件漂移（被引文件之外另有 6 个 src 文件漂移——config.py、multiagent/tools.py、tools/inspect_artifact.py、memory/v2/{tools,types}.py 及 memory/tools.py 删除——均无行号引用）。
 - **审计者**：审计阶段独立只读；复核阶段独立只读 subagent（逐 claim 实测，仓库零写入）。
 - **复现命令**（审计阶段证据可按此重跑；复核阶段把 rev 换成 `0e639364`）：
 
@@ -59,7 +59,7 @@ git show 0974d6d3:src/agent_harness/context/builder.py
   2. **`memory/context_provider.py`**：provider 路径显式传 `_event_flow_anchor(session)`（:51）= 会话最新 durable 事件时间（`session.events[-1].time`，ISO 毫秒 UTC 字符串，append-only 逐字重放）；:19-27 新增模块级纯函数。无新事件 ⇒ 锚不变 ⇒ 注入逐字节稳定；新事件 ⇒ 锚推进（变化有语义原因）。
 - **为什么必须改**：这是审计 21 项中唯一需要行为级变更的非确定成分；机械就地修（选项 1：select 开头取一次 now）只消除同一次 select 内的漂移、不解决跨 build——与本票的 KV-cache 目标（前缀跨 build 稳定）不符。
 - **影响面（行为级变更登记）**：① 检索排序语义从「相对 wall clock 的绝对龄」变为「相对事件流/批内锚的龄」——**历史数据零迁移**（事件 append-only，已落盘内容不重算；`MemoryEntry.created_at` 写入路径不动）；② exact-tie 条目次序可能变化（输入序本就不是契约）；③ 生产调用点仅剩 provider 一处（PR #429 已删除 V1 `memory/tools.py` 的第二个调用点，审计后置变更，恰好消解「两调用点锚来源不同」的历史顾虑）；④ **回归红→绿实证**：`tests/context/test_prefix_stability.py` 15 条在修复前树首跑 **13 passed / 2 failed**（红 = 本发现的症状钉 + 根因钉，逐条对应），修复后 **15 passed**；⑤ 公式本体（0.7/0.2/0.1 权重）不动，D1「排序只落一处」不破。
-- **残余（登记不修，另立票同口径）**：`memory/v2/recall.py:101` 的 `as_of or datetime.now(UTC).date()` 是同型 wall-clock 缺省——V2 未接 provider 注入、不入前缀，不属本票面（见 §4-3）。
+- **残余（登记不修，另立票同口径）**：`memory/v2/recall.py:101` 的 `as_of or datetime.now(UTC).date()` 是同型 wall-clock 缺省——V2 未接 provider 注入、不入前缀，不属本票面（见 §4-3）。**复审登记两项观察（P3，不修）**：① `_event_flow_anchor` 的 `datetime.fromisoformat` 无守卫——实测不可失败（`SessionEvent.time` 恒由 `_utc_now_iso()` 产 aware ISO、`Session.append` 先持久化后入内存；若真畸形，ValueError 落进 `select()` 既有 `except Exception` → MEMORY_DEGRADED + `[]`，且降级事件成为新末事件自愈）；② NaN `score` 会污染排序键（`entry.score or 0` 放行 NaN）——**修复前即有**（`reverse=True` 同暴露），向量库余弦分有界，非本票回归，留待后续票加护栏。
 
 ### ⚠️B（登记，设计使然）：pruner 读回校验依赖 artifact store 状态
 
@@ -96,7 +96,7 @@ git show 0974d6d3:src/agent_harness/context/builder.py
 3. **摘要双形态识别 1 条**：`_is_compaction_summary` 对 `HumanMessage(name=COMPACTION_SUMMARY_MESSAGE_NAME)` 与旧形态 SystemMessage 双认可 + 非摘要系统块不误判 + pruner 对两形态零改动。
 4. **memory 确定性 4 条**（审计后置：接确定性 fake capability）：两次 build 注入逐字节相等；**wall-clock 推进钉**（`_ShiftableClock` 替身平移时钟，注入仍不变——修复前此钉红，即 ⚠️A 症状）；`rank_entries` 同批两时钟同序钉（修复前红，即 ⚠️A 根因）；显式 `now` 契约确定性。
 
-**红→绿实证（行为级修复的证据链）**：修复前树首跑 **13 passed / 2 failed / 1.90s**（两条红 = ⚠️A 症状钉 + 根因钉，与审计预测逐条一致，全部 #411 通道用例首跑即绿）；修复后 **15 passed / 0.98s**；聚焦面 `tests/context/ + tests/memory/` **888 passed**；冻结树全量 **4804 passed / 2 skipped / 0 failed / 858.01s**（= 4789 基线 + 15 新用例，零新失败零 flake）；ruff 0 error。
+**红→绿实证（行为级修复的证据链）**：修复前树首跑 **13 passed / 2 failed / 1.90s**（两条红 = ⚠️A 症状钉 + 根因钉，与审计预测逐条一致，全部 #411 通道用例首跑即绿）；修复后 **15 passed / 0.98s**；聚焦面 `tests/memory/ + tests/context/test_prefix_stability.py` **888 passed**（复核 subagent 实测复现；`tests/context/` 全目录 139 passed、与 `tests/memory/` 合并 **1012 passed / 0 failed**）；冻结树全量 **4804 passed / 2 skipped / 0 failed / 858.01s**（= 4789 基线 + 15 新用例，零新失败零 flake；复核核对 `pytest --collect-only` = 4806 collected − 51 deselected 自洽）；ruff 0 error。
 
 **测试设计要点**：全部断言走 `model_dump_json()`（含 role/name/content/tool_calls 全字段）；memory 用确定性 fake capability（真检索是外部非确定面，且真 provider 失败臂会 append MEMORY_DEGRADED 破坏「零新事件」——见 ⚠️D）；`runtime_context_provider` 用固定文本 lambda（真闭包含 `date.today()`，直接用会在午夜边界偶发 flake）；预置合法压缩 bracket（COMPACTION_START → CONTEXT_COMPACTED → COMPACTION_END）让「摘要 + 恒注入清单 + 保护事实」三条注入通道同场且零模型调用。
 
