@@ -416,8 +416,25 @@ async def test_huge_tool_call_args_and_summary_failure_hit_hard_guard():
 
 
 @pytest.mark.asyncio
-async def test_eight_section_summary_passes_shrink_validation():
+async def test_eight_section_summary_passes_shrink_validation(monkeypatch):
     """harness 生成四个确定性节后，完整八节摘要通过精确与 shrink 校验。"""
+    import agent_harness.context.compactor as compactor_module
+
+    estimate = compactor_module.estimate_message_tokens
+    shrink_candidates = []
+
+    def track_shrink_candidate(messages):
+        if (
+            len(messages) == 1
+            and isinstance(messages[0], HumanMessage)
+            and messages[0].name == "context_compaction_summary"
+        ):
+            shrink_candidates.append(messages[0])
+        return estimate(messages)
+
+    monkeypatch.setattr(
+        compactor_module, "estimate_message_tokens", track_shrink_candidate,
+    )
     model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
     messages = [
         HumanMessage(content="不得删除 old_rows；精确 ID 是 R-042"),
@@ -435,6 +452,7 @@ async def test_eight_section_summary_passes_shrink_validation():
     assert "R-042" in result.summary
     assert "## 文件清单\n(none)" in result.summary
     assert result.bracket_id is not None
+    assert any(candidate is result.messages[0] for candidate in shrink_candidates)
 
 
 def test_programmatic_sections_preserve_exact_command_error_and_path():

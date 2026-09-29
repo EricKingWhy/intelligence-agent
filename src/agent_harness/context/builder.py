@@ -248,7 +248,24 @@ class ContextBuilder:
         else:
             pairs = derive_messages_with_source_ranges(session.events)
             messages, source_ranges = await self._prune_projection(session, pairs)
-        protected_facts = derive_protected_facts(session.events)
+        all_protected_facts = derive_protected_facts(session.events)
+        latest_work_boundary = max(
+            (
+                fact for fact in all_protected_facts
+                if fact.type == "work_boundary"
+            ),
+            key=lambda fact: fact.source_seq,
+            default=None,
+        )
+        # Run boundaries remain losslessly derivable from the append-only event
+        # history; only the latest one is relevant to the current model context.
+        protected_facts = [
+            fact for fact in all_protected_facts
+            if fact.type != "work_boundary"
+            or fact.fact_id == (
+                latest_work_boundary.fact_id if latest_work_boundary else None
+            )
+        ]
         protected_facts_messages = self._protected_facts_messages(protected_facts)
         protected_facts_tokens = (
             estimate_message_tokens(protected_facts_messages)

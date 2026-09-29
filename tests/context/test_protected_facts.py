@@ -17,6 +17,7 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import ProtectedFact, derive_protected_facts
+from agent_harness.session.event import RUN_PAUSED
 from agent_harness.session.fork import fork_session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
@@ -364,3 +365,40 @@ async def test_compaction_writes_protected_fact_table_from_projection_not_summar
     assert records == [fact.to_dict()]
     assert "ORD-99999" in result.summary
     assert "ORD-84721" in section
+
+
+@pytest.mark.asyncio
+async def test_context_projection_keeps_only_latest_run_boundary_within_fact_budget(
+    tmp_path,
+):
+    session = Session.start(
+        JsonlSessionStore(tmp_path), session_id="many-run-boundaries",
+    )
+    session.append(USER_MESSAGE, {"content": "Continue the task."})
+    boundaries = [
+        session.append(
+            RUN_PAUSED,
+            {"reason": f"Run {index}: " + "prior state " * 80},
+            run_id=f"run-{index}",
+        )
+        for index in range(128)
+    ]
+
+    history = [
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "work_boundary"
+    ]
+    assert len(history) == len(boundaries)
+
+    builder = ContextBuilder(None, max_context_tokens=50_000)
+    messages = await builder.build(session)
+    facts_message = _fact_data_message(messages)
+    injected = json.loads(facts_message.content.rsplit("\n", 1)[1])
+    injected_boundaries = [
+        fact for fact in injected if fact["type"] == "work_boundary"
+    ]
+
+    assert len(injected_boundaries) == 1
+    assert injected_boundaries[0]["source_event_id"] == boundaries[-1].event_id
+    assert injected_boundaries[0]["value"]["reason"].startswith("Run 127:")
+    assert builder._last_protected_fact_tokens < builder.protected_fact_token_budget
