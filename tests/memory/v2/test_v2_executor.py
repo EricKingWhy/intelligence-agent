@@ -70,8 +70,9 @@ def test_formation_prompt_distinguishes_episodic_decisions_from_semantic_facts()
         "constraints, or accepted corrections" in _FORMATION_PROMPT
     assert "Episodic memories are reusable accounts of a specific situation, action or " \
         "decision, outcome, and lesson" in _FORMATION_PROMPT
-    assert "For a consequential decision with a stated situation and rationale, use " \
-        "episodic when future planning needs to remember what happened and why" \
+    assert "Classify a concrete user decision with its stated situation and rationale as episodic " \
+        "when future planning needs to remember what happened and why" in _FORMATION_PROMPT
+    assert "do not classify that decision as semantic only because it produced a stable state" \
         in _FORMATION_PROMPT
     assert "Do not infer missing events or lessons" in _FORMATION_PROMPT
 
@@ -89,6 +90,14 @@ def test_adjudication_prompt_distinguishes_withdrawal_from_replacement():
     assert "user evidence supplies a replacement value" in _ADJUDICATION_PROMPT
     assert "choose UPDATE with only that supplied value" in _ADJUDICATION_PROMPT
     assert "unclear, choose NOOP" in _ADJUDICATION_PROMPT
+
+
+def test_adjudication_prompt_preserves_candidate_classification():
+    assert "Preserve each candidate's `kind`, `tier`, and `scope` in its `result`" \
+        in _ADJUDICATION_PROMPT
+    assert "keep `payload.kind` equal to `kind`" in _ADJUDICATION_PROMPT
+    assert "Adjudication selects the action and target; it does not reclassify candidates" \
+        in _ADJUDICATION_PROMPT
 
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"

@@ -323,6 +323,10 @@ Cline is not a production provider preset. The real-gate runner therefore maps t
 
 The #304 real gate showed that the same configured models could intermittently change fact kind and source authority at the default interactive temperature. The user approved fixing gate-discovered blockers without changing frozen quality thresholds. Memory V2 therefore constructs its model invokers from a shallow copy of the configured model and sets that copy's temperature to `0.0` for formation and adjudication. The shared configuration remains unchanged, so interactive agent responses retain their configured sampling temperature. This applies to Memory V2 production aliases as well as the gate-local Cline/Mimo mapping; it does not change provider selection or the PRD role aliases. The focused regression is `tests/memory/v2/test_v2_runner.py::test_memory_calls_do_not_inherit_the_agent_sampling_temperature`.
 
+### D19 — Preserve event classification through adjudication
+
+The 2026-09-29 full #304 run completed all 27 cases without transport or schema failures, but `positive_episode` was stored as `semantic`; write precision was 10/11 (0.909), below the frozen 0.95 threshold. The formation prompt described episodic decisions but did not explicitly prohibit treating a stable outcome as a semantic replacement, and the adjudication prompt did not explicitly preserve a candidate's classification in its complete result. Align both prompts with PRD §4.1: a concrete decision with its situation and rationale remains episodic when future planning needs the event, and adjudication preserves candidate `kind`, `tier`, and `scope` with a matching `payload.kind`. This clarification does not change the gold corpus, thresholds, retry policy, or production model aliases.
+
 ## 4. Verification contract
 
 落实证据位于 `tests/observability/test_tracer_port.py`、`tests/memory/v2/test_v2_executor.py`、
