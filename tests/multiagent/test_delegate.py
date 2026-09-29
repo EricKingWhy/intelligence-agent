@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.factory import AgentFactory
@@ -211,10 +211,13 @@ class TestDelegationBudget:
         assert "2/2" in r3.message, "失败消息必须带已用/上限（模型可决策收尾）"
 
     @pytest.mark.asyncio
-    async def test_budget_resets_per_run(self, tmp_path, caplog):
-        """计数按 run_id 隔离：不同 run 各自独立预算。"""
-        import logging
+    async def test_delegation_counter_aggregates_across_runs(self, tmp_path):
+        """`#318`：delegations 计数器在 durable session 账行上**跨 run 聚合**。
 
+        旧 #287 语义是"计数按 run_id 隔离、新 run 预算重置"；#318 把这一维挪进
+        session 账行（budget_key = 树根会话 id，`02 §5.1` 的树级真相），run-b 的
+        第一次委派也看得到 run-a 的消耗——树账不因换 run 而回血。
+        """
         from agent_harness.session import run_context_var
 
         child_model = ScriptedModel([
@@ -229,17 +232,16 @@ class TestDelegationBudget:
         finally:
             run_context_var.reset(t1)
         assert r1.ok and not over.ok
+        assert "1/1" in over.message
 
         t2 = run_context_var.set("run-b")
         try:
-            with caplog.at_level(logging.DEBUG, logger="agent_harness.agent"):
-                r2 = await tool.execute(_args("coding", "b"))
+            r2 = await tool.execute(_args("coding", "b"))
         finally:
             run_context_var.reset(t2)
-        for rec in caplog.records:
-            if "异常终止" in rec.getMessage():
-                print("DEBUG-ERR:", rec.error, "|", rec.error_type)
-        assert r2.ok, "新 run 预算必须重置"
+        assert not r2.ok, "新 run 不重置树级账：session 行的 delegations 已到线"
+        assert "预算耗尽" in r2.message
+        assert "1/1" in r2.message, "拒绝消息带的是**跨 run 聚合**的已用/上限"
 
 
 class TestRepeatedDelegationBreaker:
@@ -299,7 +301,7 @@ class TestRepeatedDelegationBreaker:
 
 
 class _SlowChildModel(ScriptedModel):
-    """ainvoke 睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
+    """流式睡眠的 child 模型（峰值在飞计数可观测并行度）。"""
 
     def __init__(self, delay: float, responses_count: int = 12) -> None:
         super().__init__([AIMessage(content="child 完成") for _ in range(responses_count)])
@@ -307,14 +309,17 @@ class _SlowChildModel(ScriptedModel):
         self.in_flight = 0
         self.peak = 0
 
-    async def ainvoke(self, messages, **kwargs):
+    async def astream(self, messages, **kwargs):
+        # child 走 run_stream（astream）：延迟与在飞计数必须挂在流式路径上，
+        # 否则并发闸的测量 instrument 失效（独立审查 8ebc9841 的 P1）。
         import asyncio
 
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
         try:
             await asyncio.sleep(self._delay)
-            return await super().ainvoke(messages, **kwargs)
+            async for chunk in super().astream(messages, **kwargs):
+                yield chunk
         finally:
             self.in_flight -= 1
 
@@ -388,9 +393,10 @@ class TestCancelAndResume:
         from agent_harness.session import Session as _Session
 
         class _BlockingChildModel(ScriptedModel):
-            async def ainvoke(self, messages, **kwargs):
+            async def astream(self, messages, **kwargs):
+                # child 走 run_stream（astream）：流式路径同样阻塞，取消语义才可测。
                 await asyncio.sleep(30)
-                return AIMessage(content="never")
+                yield AIMessageChunk(content="never")
 
         provider = InProcessSubagentProvider()
         delegate = DelegateTool(provider)

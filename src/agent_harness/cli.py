@@ -41,9 +41,11 @@ from agent_harness.agent.run_budget import (
     RESUME_BASIS_RELEVANT_STEER,
     STUCK_RESUME_REQUIREMENTS,
     TRIGGER_RUN_DEADLINE,
+    TRIGGER_SESSION_DEADLINE,
     LaunchRunBudget,
     latest_paused_run,
     run_limits_from_request,
+    session_limits_from_request,
     tool_name_of_dimension,
 )
 from agent_harness.assembly import (
@@ -97,6 +99,7 @@ from agent_harness.session.lineage import (
     build_lineage_tree,
     render_lineage_tree,
 )
+from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from agent_harness.tooling.contract import PermissionPolicy
 
@@ -446,13 +449,19 @@ def render_pause_block(data: dict) -> str:
     return "".join(lines)
 
 
-#: 触发维度 → 抬高它的 CLI 开关（`#313`：四维各自可抬；提示必须指向**真存在**的开关）。
+#: 触发维度 → 抬高它的 CLI 开关（`#313`：四维各自可抬；`#318`：session 四维同表——
+#: 提示必须指向**真存在**的开关）。
 _RESUME_FLAGS: dict[str, str] = {
     "run.max_agent_turns_total": "--run-turns-total",
     "run.max_model_requests": "--run-model-requests",
     "run.max_total_tokens": "--run-total-tokens",
     "run.max_cost_usd": "--run-cost-usd",
     TRIGGER_RUN_DEADLINE: "--run-deadline",
+    "session.max_agent_turns_total": "--session-turns-total",
+    "session.max_model_requests": "--session-model-requests",
+    "session.max_total_tokens": "--session-total-tokens",
+    "session.max_cost_usd": "--session-cost-usd",
+    TRIGGER_SESSION_DEADLINE: "--session-deadline",
 }
 
 #: deadline 维的开关值**不是数字**：提示里给 `N` 会得到一句抄了跑不起来的假指令
@@ -461,12 +470,17 @@ _RESUME_FLAGS: dict[str, str] = {
 _DEADLINE_PLACEHOLDER = "2026-09-26T04:30:00Z"
 
 
-def parse_run_tool_limits(raw: list[str] | None) -> dict[str, int]:
+def parse_run_tool_limits(
+    raw: list[str] | None, *, flag: str = "--run-tool-limit",
+) -> dict[str, int]:
     """`--run-tool-limit NAME=N`（可重复）→ `budget.run.tool_call_limits` 的形状输入。
 
+    `flag`（`#318`）：session 作用域的 `--session-tool-limit` 走同一切分/整数化，
+    报错文案跟着开关名走——CLI 不写第二份形状规则（`run` / `resume` / Web 三个
+    入口共用同一份 422 口径）。
+
     只做 **argv 层**的切分与整数化（`"N"` → int）；"工具名是否合法、值是否为正整数"
-    仍由领域层 `parse_tool_call_limits` 判——CLI 不写第二份形状规则（`run` / `resume` /
-    Web 三个入口共用同一份 422 口径）。
+    仍由领域层 `parse_tool_call_limits` 判。
 
     缺 `=`（连名字和值都分不出来）与重复点名同一个工具都在这里拒绝：两者都是
     **命令行用法**问题，而"重复"若按 argv 惯例静默取最后一个，用户会以为自己设的是
@@ -478,14 +492,14 @@ def parse_run_tool_limits(raw: list[str] | None) -> dict[str, int]:
     for item in raw:
         name, sep, value = item.partition("=")
         if not sep:
-            raise ValueError(f"--run-tool-limit 需要 NAME=N 形式，收到 {item!r}")
+            raise ValueError(f"{flag} 需要 NAME=N 形式，收到 {item!r}")
         if name in parsed:
-            raise ValueError(f"--run-tool-limit 重复点名了工具 {name!r}（不静默取最后一个）")
+            raise ValueError(f"{flag} 重复点名了工具 {name!r}（不静默取最后一个）")
         try:
             parsed[name] = int(value)
         except ValueError:
             raise ValueError(
-                f"--run-tool-limit {item!r} 的值必须是整数（收到 {value!r}）"
+                f"{flag} {item!r} 的值必须是整数（收到 {value!r}）"
             ) from None
     return parsed
 
@@ -501,10 +515,14 @@ def _resume_command_tail(dimension: str) -> str:
     tool_name = tool_name_of_dimension(dimension)
     if tool_name is not None:
         return f"--run-tool-limit {tool_name}=N"
-    if dimension == TRIGGER_RUN_DEADLINE:
+    if dimension.startswith("session.tool_call_limits."):
+        # session 侧 per-tool 维（`#318`）：值在同一个 argv 里，与 run 侧同因
+        session_tool = dimension.removeprefix("session.tool_call_limits.")
+        return f"--session-tool-limit {session_tool}=N"
+    if dimension in (TRIGGER_RUN_DEADLINE, TRIGGER_SESSION_DEADLINE):
         # 值在"同一个 argv 里"这一点与 per-tool 维同因：`--run-deadline N` 的 `N`
         # 会被读成一个整数（或直接被拒），照抄的人拿到的是一条跑不通的命令。
-        return f"{_RESUME_FLAGS[TRIGGER_RUN_DEADLINE]} {_DEADLINE_PLACEHOLDER}"
+        return f"{_RESUME_FLAGS[dimension]} {_DEADLINE_PLACEHOLDER}"
     return f"{_RESUME_FLAGS.get(dimension, '--run-turns-total')} N"
 
 
@@ -551,6 +569,18 @@ def resume_hint(session_id: str, *, data: dict) -> str:
     if data.get("reason") == REASON_STUCK:
         return _stuck_resume_hint(session_id, data)
     dimension = str(data.get("trigger_dimension", ""))
+    if dimension.startswith("session."):
+        # session 维触发的暂停（`#318`）：抬高发生在 **durable 的 session 账行**上，
+        # CAS 用的是行版本（`data.session.version`），不是 run 的 budget_version——
+        # 给错版本的提示就是一条恒 409 的假指令。
+        session = data.get("session") or {}
+        return (
+            f"  resume: agent-harness resume {session_id}"
+            f" {_resume_command_tail(dimension)}"
+            f" --session-expected-version {session.get('version', '')}"
+            f" --expected-version {data.get('budget_version', '')}"
+            f"  ({_resume_ceiling_rule(dimension)})\n"
+        )
     return (
         f"  resume: agent-harness resume {session_id}"
         f" {_resume_command_tail(dimension)}"
@@ -643,6 +673,13 @@ async def run(
     run_cost_usd: str | None = None,
     run_deadline_at: str | None = None,
     run_tool_limits: dict[str, int] | None = None,
+    session_turns_total: int | None = None,
+    session_model_requests: int | None = None,
+    session_total_tokens: int | None = None,
+    session_cost_usd: str | None = None,
+    session_deadline_at: str | None = None,
+    session_tool_limits: dict[str, int] | None = None,
+    session_max_delegations: int | None = None,
     write: Callable[[str], None] | None = None,
 ) -> RunOutcome:
     """跑一次 Agent Loop：流式渲染到 write，返回 `RunOutcome`。
@@ -727,6 +764,23 @@ async def run(
                     max_cost_usd=run_cost_usd,
                     deadline_at=run_deadline_at,
                     tool_call_limits=run_tool_limits,
+                    accounting=HARNESS_MODEL_ACCOUNTING,
+                ),
+            ),
+            # `#318`：session 作用域账（--session-* 旗标 → durable 账行的首用声明；
+            # 恒接线，账从本会话第一个 run 起就有持久读数，与 Web 创建路径同一条规则）。
+            session_budget=SessionBudgetHandle(
+                stores.delegation_tree_ledger,
+                budget_key=session_id,
+                root_session_id=session_id,
+                limits=session_limits_from_request(
+                    max_agent_turns_total=session_turns_total,
+                    max_model_requests=session_model_requests,
+                    max_total_tokens=session_total_tokens,
+                    max_cost_usd=session_cost_usd,
+                    deadline_at=session_deadline_at,
+                    tool_call_limits=session_tool_limits,
+                    max_delegations=session_max_delegations,
                     accounting=HARNESS_MODEL_ACCOUNTING,
                 ),
             ),
@@ -851,9 +905,48 @@ def _main_dispatch() -> None:
              "用尽后该工具的新调用在接纳前被拒并让 run 暂停，用 `agent-harness resume` "
              "抬高后接上同一个 run。",
     )
+    parser.add_argument(
+        "--session-turns-total", type=int, default=None,
+        help="session 作用域的**绝对** turn ceiling"
+             "（budget.session.max_agent_turns_total，`#318`：跨 run 持久的 durable 账；"
+             "缺省=不设）。与 run 档叠加判定：任一作用域到线都让 run 暂停",
+    )
+    parser.add_argument(
+        "--session-model-requests", type=int, default=None,
+        help="session 作用域的**绝对** Provider 请求 ceiling"
+             "（budget.session.max_model_requests；跨 run 累计）",
+    )
+    parser.add_argument(
+        "--session-total-tokens", type=int, default=None,
+        help="session 作用域的**绝对** token ceiling"
+             "（budget.session.max_total_tokens；跨 run 累计）",
+    )
+    parser.add_argument(
+        "--session-cost-usd", default=None,
+        help="session 作用域的**绝对**成本 ceiling"
+             "（budget.session.max_cost_usd，十进制；跨 run 累计）",
+    )
+    parser.add_argument(
+        "--session-deadline", default=None, metavar="RFC3339",
+        help="session 作用域的**绝对**截止时刻"
+             "（budget.session.deadline_at，RFC 3339 UTC；跨 run 生效）",
+    )
+    parser.add_argument(
+        "--session-tool-limit", action="append", default=None, metavar="NAME=N",
+        help="session 作用域对某个已注册工具的**绝对**调用次数上限"
+             "（budget.session.tool_call_limits；可重复，如 --session-tool-limit bash=50）",
+    )
+    parser.add_argument(
+        "--session-max-delegations", type=int, default=None,
+        help="session 作用域的**整棵委派树**跨 run 累计上限"
+             "（budget.session.max_delegations；缺省沿用域默认 8，`10 §5.1`）",
+    )
     args = parser.parse_args(argv)
     try:
         tool_limits = parse_run_tool_limits(args.run_tool_limit)
+        session_tool_limits = parse_run_tool_limits(
+            args.session_tool_limit, flag="--session-tool-limit",
+        )
     except ValueError as error:
         parser.error(str(error))
     outcome = asyncio.run(
@@ -865,6 +958,13 @@ def _main_dispatch() -> None:
             run_cost_usd=args.run_cost_usd,
             run_deadline_at=args.run_deadline,
             run_tool_limits=tool_limits,
+            session_turns_total=args.session_turns_total,
+            session_model_requests=args.session_model_requests,
+            session_total_tokens=args.session_total_tokens,
+            session_cost_usd=args.session_cost_usd,
+            session_deadline_at=args.session_deadline,
+            session_tool_limits=session_tool_limits,
+            session_max_delegations=args.session_max_delegations,
         )
     )
     if outcome.paused:
@@ -976,6 +1076,11 @@ async def fork_command(
     store = JsonlSessionStore(root=workspace_root / "sessions")
     meta_store = SqliteSessionMetaStore(workspace_root / "harness.db")
     await meta_store.initialize()
+    # `#318`：session 预算谱系的账行读数源（同一 harness.db；幂等初始化）。
+    from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+
+    delegation_ledger = SqliteDelegationTreeLedger(workspace_root / "harness.db")
+    await delegation_ledger.initialize()
     workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
     summarizer = None
     if not no_summary:
@@ -989,6 +1094,9 @@ async def fork_command(
         boundary_user_message_seq=from_message,
         workspace_registry=workspace_registry,
         summarizer=summarizer, with_tail_summary=not no_summary,
+        # `#318`：fork 谱系读父账行（只读；同一 harness.db 的 durable 账）。
+        # 表先于读（initialize 幂等，与 meta_store 同一条纪律）。
+        budget_ledger=delegation_ledger,
     )
     # child 继承父当前模型（T7 #137：fork seed 不含父 session/started）。
     from agent_harness.session.service import inherit_parent_model
@@ -1160,6 +1268,14 @@ async def resume_command(
     expected_version: int,
     run_id: str | None = None,
     basis: str = RESUME_BASIS_BUDGET_INCREASE,
+    session_turns_total: int | None = None,
+    session_model_requests: int | None = None,
+    session_total_tokens: int | None = None,
+    session_cost_usd: str | None = None,
+    session_deadline_at: str | None = None,
+    session_tool_limits: dict[str, int] | None = None,
+    session_max_delegations: int | None = None,
+    session_expected_version: int | None = None,
     workspace_dir: str | None = None,
     write: Callable[[str], None] | None = None,
 ) -> RunOutcome:
@@ -1216,6 +1332,16 @@ async def resume_command(
         run_deadline_at=run_deadline_at,
         run_tool_call_limits=run_tool_limits,
         expected_version=expected_version,
+        # `#318`：session 维触发的暂停（或想顺手抬高 session 账）在这里点名——
+        # durable 行的 CAS 更新（session_expected_version 必带，判定在 service/账本）。
+        session_max_agent_turns_total=session_turns_total,
+        session_max_model_requests=session_model_requests,
+        session_max_total_tokens=session_total_tokens,
+        session_max_cost_usd=session_cost_usd,
+        session_deadline_at=session_deadline_at,
+        session_tool_call_limits=session_tool_limits,
+        session_max_delegations=session_max_delegations,
+        session_expected_version=session_expected_version,
     )
     # 恢复后的版本事实**取自事件**（`run/resumed` 在 launch 之前落盘，不在 live
     # 订阅窗口内——读回 durable 事件才是权威读数）。
@@ -1281,6 +1407,41 @@ def _main_resume(argv: list[str]) -> None:
         help="客户端看到的预算版本（CAS；版本过期 ⇒ 409，不启动任何工作）",
     )
     parser.add_argument(
+        "--session-turns-total", type=int, default=None,
+        help="session 作用域的**绝对** turn ceiling（budget.session.max_agent_turns_total；"
+             "CAS 抬高 durable 账行，`#318`）。session 维触发的暂停恢复靠它",
+    )
+    parser.add_argument(
+        "--session-model-requests", type=int, default=None,
+        help="session 作用域的**绝对** Provider 请求 ceiling（跨 run 累计；CAS 抬高）",
+    )
+    parser.add_argument(
+        "--session-total-tokens", type=int, default=None,
+        help="session 作用域的**绝对** token ceiling（跨 run 累计；CAS 抬高）",
+    )
+    parser.add_argument(
+        "--session-cost-usd", default=None,
+        help="session 作用域的**绝对**成本 ceiling（十进制；跨 run 累计；CAS 抬高）",
+    )
+    parser.add_argument(
+        "--session-tool-limit", action="append", default=None, metavar="NAME=N",
+        help="session 作用域对某个工具的**绝对**调用上限"
+             "（budget.session.tool_call_limits；可重复；CAS 抬高）",
+    )
+    parser.add_argument(
+        "--session-deadline", default=None, metavar="RFC3339",
+        help="session 作用域的**新**绝对截止时刻（RFC 3339 UTC；CAS 抬高）",
+    )
+    parser.add_argument(
+        "--session-max-delegations", type=int, default=None,
+        help="session 作用域的整棵委派树跨 run 累计上限（CAS 抬高）",
+    )
+    parser.add_argument(
+        "--session-expected-version", type=int, default=None,
+        help="客户端看到的 session 账行版本（CAS；点名任一 --session-* 维时必填，"
+             "版本过期 ⇒ 409）",
+    )
+    parser.add_argument(
         "--run-id", default=None,
         help="被暂停的 run_id（缺省取会话最新暂停 run；显式给出用于对齐客户端已知事实）",
     )
@@ -1292,24 +1453,42 @@ def _main_resume(argv: list[str]) -> None:
              "（新 steer / 工作区变过 / 策略变过），不是用户声明",
     )
     args = parser.parse_args(argv)
+    session_dims_named = (
+        args.session_turns_total is not None
+        or args.session_model_requests is not None
+        or args.session_total_tokens is not None
+        or args.session_cost_usd is not None
+        or args.session_deadline is not None
+        or bool(args.session_tool_limit)
+        or args.session_max_delegations is not None
+    )
+    # session CAS 版本是否必带由 service 判（行**已存在**才必带；首次钉死没有可竞争
+    # 的版本）——CLI 无法便宜地知道行存不存在，不在这里复制一半规则制造假拒绝。
     if (
         args.run_turns_total is None and args.run_model_requests is None
         and args.run_total_tokens is None and args.run_cost_usd is None
         and args.run_deadline is None and not args.run_tool_limit
+        # `#318`：session 维的 CAS 抬高同样是合法的恢复依据（session 触发的
+        # 暂停恢复就靠它；run 维一个都不点也成立——headroom 仍由领域层判）。
+        and not session_dims_named
         # stuck 暂停的恢复**不**以 ceiling 为依据（`02 §5.3`：抬高预算不是它的依据），
         # 所以三类 stuck 依据不要求给 ceiling——领域层那边同样不要求。
         and args.basis not in STUCK_RESUME_REQUIREMENTS
     ):
-        # 一个都不给 = 去掉全部 run ceiling，而不是"抬高"：那是另一件事（普通续聊也能做到），
+        # 一个都不给 = 去掉全部 ceiling，而不是"抬高"：那是另一件事（普通续聊也能做到），
         # 不在 `resume` 的语义里。CLI 层拒绝，不给用户一个看不出差别的成功。
         parser.error(
             "至少给一个绝对 ceiling（--run-turns-total / --run-model-requests / "
-            "--run-total-tokens / --run-cost-usd / --run-deadline / --run-tool-limit）"
+            "--run-total-tokens / --run-cost-usd / --run-deadline / --run-tool-limit / "
+            "任一 --session-* 维）"
         )
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
     try:
         tool_limits = parse_run_tool_limits(args.run_tool_limit)
+        session_tool_limits = parse_run_tool_limits(
+            args.session_tool_limit, flag="--session-tool-limit",
+        )
     except ValueError as error:
         parser.error(str(error))
     try:
@@ -1324,6 +1503,14 @@ def _main_resume(argv: list[str]) -> None:
             expected_version=args.expected_version,
             run_id=args.run_id,
             basis=args.basis,
+            session_turns_total=args.session_turns_total,
+            session_model_requests=args.session_model_requests,
+            session_total_tokens=args.session_total_tokens,
+            session_cost_usd=args.session_cost_usd,
+            session_deadline_at=args.session_deadline,
+            session_tool_limits=session_tool_limits,
+            session_max_delegations=args.session_max_delegations,
+            session_expected_version=args.session_expected_version,
         ))
     except (BudgetConflict, BudgetRejection, InvalidSessionId, SessionNotFound) as error:
         # 被拒请求零副作用——这里只说事实，不重试、不猜（PRD §9：422 形状 / 409 冲突）。

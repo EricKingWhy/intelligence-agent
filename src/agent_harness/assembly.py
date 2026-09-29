@@ -26,6 +26,7 @@ from agent_harness.agent.budget import SOURCE_DEPLOYMENT
 from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
+    SessionBudgetPort,
     validate_tool_call_limits_registered,
 )
 
@@ -73,6 +74,7 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
+from agent_harness.tools.update_plan import UpdatePlanTool
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 from agent_harness.workspace.index import SessionHeaders
 
@@ -201,6 +203,7 @@ async def build_runtime(
     run_budget: LaunchRunBudget | None = None,
     local_fuse_source: str = SOURCE_DEPLOYMENT,
     stuck_evidence: StuckEvidencePort | None = None,
+    session_budget: SessionBudgetPort | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -294,12 +297,19 @@ async def build_runtime(
         )
         registry.register(tool_cls(sandbox, **kwargs))
 
+    # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
+    # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
+    # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
+    registry.register(UpdatePlanTool())
+
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
     # 选择口径（优先级 + 半配置判定）收敛在 `storage/artifact_select.py`，读路径
     # （`web/artifacts.py`）用同一个函数——两处各写一遍 if 级联就等于给漂移留门
     # （#192 批 1 审查发现）。
     overflow_handler = None
+    context_artifact_store = None
+    context_read_tool_name: str | None = None
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
         read_tool = selection.read_tool(selection.store)
@@ -312,6 +322,11 @@ async def build_runtime(
             settings.artifact_overflow_chars,
             read_tool_name=read_tool.name,
         )
+        # W-03 (#347)：ContextBuilder 的旧 Tool Result 裁剪与 overflow 共用同一个
+        # store 与同一个真实读回工具名——骨架行的回读提示必须指向**确实配对**的
+        # 工具（名字不得写死）。store 未选中（None）→ builder 裁剪整体关闭。
+        context_artifact_store = selection.store
+        context_read_tool_name = read_tool.name
 
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
@@ -453,6 +468,8 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
+            plan_reinject_every_messages=settings.plan_reinject_every_messages,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
             # wiring 自动装配的 provider 子集；None=默认全量，[]=显式零，未知名字 fail-open。
             context_providers=_select_context_providers(
@@ -471,6 +488,9 @@ async def build_runtime(
             # T7：快照**不**拼进 system_prompt（那会破坏 T5/T6 与 C4/C5/C7 的逐字节
             # 契约），而是走独立通道，由 builder 按 meta_user 语义插到当前用户消息前。
             runtime_context_provider=_render_runtime_context,
+            # W-03 (#347)：store 未装配时传 None（裁剪整体关闭，行为不变）。
+            artifact_store=context_artifact_store,
+            artifact_read_tool_name=context_read_tool_name,
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
@@ -497,4 +517,7 @@ async def build_runtime(
         # 构造方是服务层（它才有一份"本次生效策略"的完整输入，恢复侧也用同一份函数
         # 现算再比较；ADR-0048 D8）。None = 不观测（CLI / 单测的既有路径逐字不变）。
         stuck_evidence=stuck_evidence,
+        # `#318`：session 树账端口（跨 run / 跨会话共享）。装配点只透传；构造方是
+        # 服务层（它才知道预算 key 与请求声明）。None = 不接 session 账（旧行为）。
+        session_budget=session_budget,
     )

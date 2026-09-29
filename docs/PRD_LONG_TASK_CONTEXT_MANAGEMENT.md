@@ -89,7 +89,7 @@
 3. **新摘要**（8 节）；
 4. **最近修改文件路径清单**（只回路径不读正文；Claude Code 同款：>5000 token 只回 `Referenced file` 路径引用）。
 
-注入节奏：**事件驱动**（清单/保护事实变更即注入）+ **周期兜底每 6 条消息**（Cline Focus Chain 默认值，可配置）。**不做** Claude Code `SessionStart(compact)` hook 自定义注入（仅一家采用，YAGNI）。
+注入节奏：**事件驱动**（清单/保护事实变更即注入）+ **周期兜底每 6 条消息**（Cline Focus Chain 默认值，可配置）。⚠ W-29 实施澄清（2026-09-29，用户批准）：本架构注入为逐 build 重算的 ephemeral 块，「每 6 条」落地为「距最近一次清单变更 ≥N 条投影消息后恒在场」——Cline 的持久消息副本在两次重注入之间仍在场，恒在场才是其有效行为的忠实转写（逐窗口闪烁=上下文抖动）。**不做** Claude Code `SessionStart(compact)` hook 自定义注入（仅一家采用，YAGNI）。
 
 ## 5. 保护事实（W-02 增量）
 

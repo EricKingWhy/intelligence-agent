@@ -59,6 +59,7 @@ from agent_harness.agent.run_budget import (
     PausedRun,
     RunBudgetState,
     RunLimits,
+    SessionLimits,
     build_limits_snapshot,
     build_resume_data,
     derive_run_budget,
@@ -66,6 +67,8 @@ from agent_harness.agent.run_budget import (
     latest_run_id,
     project_budget,
     run_limits_from_request,
+    session_budget_key,
+    session_limits_from_request,
     stuck_resume_evidence,
     validate_resume,
 )
@@ -160,6 +163,7 @@ from agent_harness.session.store import (
     WorkspaceRef,
 )
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
+from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.local_artifact import discard_local_artifacts
 from agent_harness.storage.operation import needs_reconcile
 from agent_harness.storage.session_meta import SessionMeta
@@ -283,6 +287,36 @@ def _run_limits(
         max_cost_usd=max_cost_usd,
         deadline_at=deadline_at,
         tool_call_limits=tool_call_limits,
+        accounting=HARNESS_MODEL_ACCOUNTING,
+    )
+
+
+def _session_limits(
+    *,
+    max_agent_turns_total: int | None,
+    max_model_requests: int | None,
+    max_total_tokens: int | None,
+    max_cost_usd: Decimal | str | float | None,
+    deadline_at: Any = None,
+    tool_call_limits: Mapping[str, Any] | None = None,
+    max_delegations: int | None = None,
+) -> SessionLimits:
+    """session 作用域 ceiling → `SessionLimits`（`#318`；`budget.session.*`）。
+
+    与 `_run_limits` 同一条纪律：规则本体在
+    `agent/run_budget.py::session_limits_from_request`（Web / CLI 共用，422 只有一处
+    ——形态、`max_delegations` 的正整数域、token / cost 的可执行性都在那里判）；
+    这里只绑本部署的账目能力声明。任何一维都没配 ⇒ 全 `None` 的默认形状
+    （ceiling 全空 = 永不因 session 预算暂停；账照记）。
+    """
+    return session_limits_from_request(
+        max_agent_turns_total=max_agent_turns_total,
+        max_model_requests=max_model_requests,
+        max_total_tokens=max_total_tokens,
+        max_cost_usd=max_cost_usd,
+        deadline_at=deadline_at,
+        tool_call_limits=tool_call_limits,
+        max_delegations=max_delegations,
         accounting=HARNESS_MODEL_ACCOUNTING,
     )
 
@@ -625,6 +659,12 @@ class SessionService:
         名"，两者都不给出"现在还没结清"这个**当前态**）。判据与恢复闸门同一把尺子
         （`_unreconciled_tool_calls`）——投影说"要 reconcile"、恢复却放行，或者反过来，
         都是同一份事实的两套口径。
+
+        `session` 段（`#318`）：session 作用域账行的读数（limits / consumed /
+        remaining / version）。它**不**从事件流派生——账的真源是 durable 的
+        `session_budgets` 行（`02 §5.1`：跨 run 聚合，事件流里没有也不该有第二份），
+        投影读账行与恢复/暂停读同一行。行不存在（会话还没跑过任何 step）⇒ 整段
+        **缺席**：没有账与"账是空的"是两件事。
         """
         events = await self.get_events(session_id)
         run_id = latest_run_id(events)
@@ -644,10 +684,15 @@ class SessionService:
                     max_agent_turns=runtime.max_agent_turns,
                     source=runtime.local_fuse_source,
                 )
+        await self._ensure_stores()
+        session_snapshot = await self._stores.delegation_tree_ledger.get_session_budget(
+            session_budget_key(events, session_id=session_id)
+        )
         return project_budget(
             state,
             accounting=HARNESS_MODEL_ACCOUNTING,
             local_fuse=local_fuse,
+            session=session_snapshot,
             reconcile_pending=await self._unreconciled_tool_calls(session_id),
         )
 
@@ -695,7 +740,6 @@ class SessionService:
         workspace_name: str | None = None,
         cwd: str | None = None,
         local_max_agent_turns: int | None = None,
-        max_steps: int | None = None,
         permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
         permission_mode_explicit: bool = False,
         auto_approve_explicit: bool = False,
@@ -708,6 +752,13 @@ class SessionService:
         run_max_cost_usd: Decimal | str | float | None = None,
         run_deadline_at: Any = None,
         run_tool_call_limits: Mapping[str, Any] | None = None,
+        session_max_agent_turns_total: int | None = None,
+        session_max_model_requests: int | None = None,
+        session_max_total_tokens: int | None = None,
+        session_max_cost_usd: Decimal | str | float | None = None,
+        session_deadline_at: Any = None,
+        session_tool_call_limits: Mapping[str, Any] | None = None,
+        session_max_delegations: int | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -726,15 +777,24 @@ class SessionService:
         避免 runtime 组装失败时留下只含 session/started 的孤儿 session。
 
         local fuse（#308）：`local_max_agent_turns` 是 `budget.local.max_agent_turns`
-        的请求声明，`max_steps` 是迁移期 deprecated alias——两者由
-        `agent.budget.resolve_local_fuse` 与 Deployment ceiling 合成生效值
-        （不等 / 越权 ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。
+        的请求声明，由 `agent.budget.resolve_local_fuse` 与 Deployment ceiling
+        合成生效值
+        （越权 ⇒ 422，`02 §5.1` / ADR-0044 D1/D8）。
 
         run 作用域（`#312` 建账本 / `#313` 扩到四维 / `#315` 加 deadline）：四个
         `run_max_*` 与 `run_deadline_at` 是本 run 的**绝对** ceiling（`budget.run.*`），
         落 `run/started.data.budget`——重启后投影要能重建同一个 ceiling（`03 §3.4`）。
         None = 该维度无 run 作用域 ceiling（**不是** 0）。形态非法或本链强制执行不了的
         维度（见 `_run_limits`）在此 422，零副作用。
+
+        session 作用域（`#318`，`budget.session.*`）：`session_max_*` /
+        `session_deadline_at` / `session_tool_call_limits` / `session_max_delegations`
+        是**跨 run 持久**的会话账 ceiling。账的真源是 durable 的
+        `session_budgets` 行（storage/delegation_tree，**唯一 owner**——事件流里不落
+        第二份账），此处只解析声明（非法 422，零副作用）并把它作为 handle 的建行
+        声明传入装配；`max_delegations` 未点名时沿用域默认 8（`10 §5.1`，由账本在
+        首用委派时钉死，与是否显式配置无关）。恢复路径点名任一维 ⇒ CAS 更新
+        （见 `resume_and_launch`）。
 
         `workspace_name` 与 `cwd` 二选一（ADR-0027）：
         - `workspace_name`（旧契约，逐字节不变）：单个目录名，目录在
@@ -752,7 +812,6 @@ class SessionService:
             deployment=self._settings.local_max_agent_turns,
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
-            alias=max_steps,
         )
         # run 作用域 ceiling（`#313`）：与 fuse 同一条纪律——形态校验与可执行性判定
         # 都发生在任何副作用之前（不建 workspace、不落任何事件、不启动 model / tool /
@@ -765,7 +824,17 @@ class SessionService:
             deadline_at=run_deadline_at,
             tool_call_limits=run_tool_call_limits,
         )
-
+        # session 作用域 ceiling（`#318`）：与 run 作用域同一纪律——422 发生在任何
+        # 副作用之前。真源账行由 handle 在首用（首次 admit / 首次投影）时惰性建出。
+        session_limits = _session_limits(
+            max_agent_turns_total=session_max_agent_turns_total,
+            max_model_requests=session_max_model_requests,
+            max_total_tokens=session_max_total_tokens,
+            max_cost_usd=session_max_cost_usd,
+            deadline_at=session_deadline_at,
+            tool_call_limits=session_tool_call_limits,
+            max_delegations=session_max_delegations,
+        )
         # 校验顺序即契约（PRD §4.1）：先"二选一"（两个都给了就没有优先级问题可言），
         # 再各走各的形态校验。"非空"按 strip 后的内容判；只给了一个但内容空白（如
         # `cwd=""`）**不**当作缺省——显式传的字段必须给出明确的形态错误，静默忽略是
@@ -837,6 +906,16 @@ class SessionService:
         )
 
         launch_budget = LaunchRunBudget(limits=run_limits)
+        # `#318`：根会话的 SessionBudget 端口。账键 = 自身 session_id（根）；声明 =
+        # 本次请求（行由 handle 在首用时惰性建出——创建路径行必不存在）。**恒接线**，
+        # 与是否配了 ceiling 无关：账（含 delegations，域默认 8）从第一个 run 起就有
+        # 持久读数；没配 ceiling 的行永不触发暂停，只是记账。
+        session_budget = SessionBudgetHandle(
+            self._stores.delegation_tree_ledger,
+            budget_key=session_id,
+            root_session_id=session_id,
+            limits=session_limits,
+        )
         runtime = await build_runtime(
             settings=self._settings,
             wiring=wiring,
@@ -852,6 +931,9 @@ class SessionService:
             # `#312`：新会话的第一个逻辑 run 也吃 run 作用域 ceiling（低预算触发
             # `run/paused` 的入口之一）。
             run_budget=launch_budget,
+            # `#318`：session 作用域账（跨 run 持久；子会话经 multiagent/provider 的
+            # `session_budget_port` 接到同一行）。
+            session_budget=session_budget,
             local_fuse_source=fuse.source,
             **amend_kwargs(amend),
             # `#317`：stuck 暂停要在 `run/paused` 里记下**停下那一刻**的环境 revision
@@ -923,7 +1005,6 @@ class SessionService:
         session_id: str,
         task: str | None = None,
         local_max_agent_turns: int | None = None,
-        max_steps: int | None = None,
         amend: AmendOptions | None = None,
         resume_run_id: str | None = None,
         resume_basis: str | None = None,
@@ -934,6 +1015,14 @@ class SessionService:
         run_deadline_at: Any = None,
         run_tool_call_limits: Mapping[str, Any] | None = None,
         expected_version: int | None = None,
+        session_max_agent_turns_total: int | None = None,
+        session_max_model_requests: int | None = None,
+        session_max_total_tokens: int | None = None,
+        session_max_cost_usd: Decimal | str | float | None = None,
+        session_deadline_at: Any = None,
+        session_tool_call_limits: Mapping[str, Any] | None = None,
+        session_max_delegations: int | None = None,
+        session_expected_version: int | None = None,
     ) -> LaunchResult:
         """恢复已有 Session 并追加一轮新 user input（原 POST /resume）。
 
@@ -963,7 +1052,20 @@ class SessionService:
         （`resume_headroom_ok`）：任一维"放不下一次新准入"就整个请求 409——接受它等于让
         客户端拿到"恢复成功但立刻再次暂停"的假象。deadline 维度的判据是**严格在未来**：
         沿用一个已过去的时刻（含"没点名、沿用暂停快照里那个已过时刻"）同样在这里被拒。
-        ``budget.session`` 属 `#318`，本层没有它的参数。
+
+        ``session_max_*`` / ``session_deadline_at`` / ``session_tool_call_limits`` /
+        ``session_max_delegations``（`#318`，`budget.session.*`）在两种形态下同样合法：
+        它们作用于**跨 run 持久**的 session 账行（durable 真源在 `session_budgets`），
+        点名 = **CAS 更新**（`03 §3.4`：绝对 ceiling + 版本化乐观锁）——必须同时带
+        ``session_expected_version``（账行当前 version；缺失 ⇒ 422，不是猜 1），
+        版本不符 / 任一生效 ceiling 低于已消耗 / 生效 ceiling 放不下一次新准入
+        （headroom）⇒ 409 且账行零改动（判据全部在账本 `update_session_limits` 的
+        单个事务里）。行尚不存在时点名 = 首次钉死（建行，无需 CAS——没有可竞争的
+        版本）。未点名 ⇒ 账行原样沿用：handle 的声明取**账行现值**，绝不拿本次请求的
+        （可能为 None 的）声明重新 ensure——那会在重启/续聊时把抬过高的 ceiling
+        静默收紧回去。CAS 更新先于 workspace / 恢复等后续步骤：409 的拒绝点尽量靠前；
+        代价是 CAS 成功后若后续步骤失败，ceiling 抬升已生效（绝对 ceiling 只放宽不
+        收紧，且带审计事件——比"先落 session/resumed 再 409"诚实）。
 
         对账闸门（`#315`）：账本上还有未结清的副作用（`RUNNING` / `UNKNOWN` /
         `NEED_RECONCILE`，或带"未证"标记的行）时，本入口先走 `recover()`——对账优先于
@@ -992,7 +1094,6 @@ class SessionService:
             deployment=self._settings.local_max_agent_turns,
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
-            alias=max_steps,
         )
         # run 作用域 ceiling（`#313`）：与创建路径同一个装配点、同一条"先校验后副作用"
         # 纪律；形态非法 / 不可强制的维度在这里 422（不写 session/resumed、不建目录）。
@@ -1003,6 +1104,58 @@ class SessionService:
             max_cost_usd=run_max_cost_usd,
             deadline_at=run_deadline_at,
             tool_call_limits=run_tool_call_limits,
+        )
+        # session 作用域（`#318`）：账键 = 树根（子会话续聊也落同一行）；现状行先读
+        # （只读）——它决定 CAS 判定与 handle 的建行声明。表先于读（`_ensure_stores`
+        # 幂等，与 `_unreconciled_tool_calls` 同一条纪律）。
+        await self._ensure_stores()
+        budget_key = session_budget_key(existing, session_id=session_id)
+        session_row = await self._stores.delegation_tree_ledger.get_session_budget(
+            budget_key
+        )
+        # 点名任一 session 维 ⇒ 账行 CAS 更新（绝对 ceiling + 乐观锁 + headroom，
+        # 判定全在账本单事务里 ⇒ 409 零改动）。行不存在 = 首次钉死，无版本可竞争。
+        session_limits = _session_limits(
+            max_agent_turns_total=session_max_agent_turns_total,
+            max_model_requests=session_max_model_requests,
+            max_total_tokens=session_max_total_tokens,
+            max_cost_usd=session_max_cost_usd,
+            deadline_at=session_deadline_at,
+            tool_call_limits=session_tool_call_limits,
+            max_delegations=session_max_delegations,
+        )
+        if session_limits.configured:
+            if session_row is not None:
+                if session_expected_version is None:
+                    raise BudgetRejection(
+                        "点名了 budget.session.* 的恢复必须带 session_expected_version"
+                        "（账行的 CAS 乐观锁；`03 §3.4`）"
+                    )
+                await self._stores.delegation_tree_ledger.update_session_limits(
+                    budget_key,
+                    expected_version=session_expected_version,
+                    limits=session_limits,
+                )
+                session_row = await self._stores.delegation_tree_ledger.get_session_budget(
+                    budget_key
+                )
+            else:
+                # 行不存在 = 首次钉死（上面的 docstring），没有可竞争的版本——
+                # 此时带不带 expected_version 都走建行（带了也忽略：客户端不可能
+                # 在"行不存在"的投影上拿到过版本，带版本只是过期认知，不是竞争）。
+                await self._stores.delegation_tree_ledger.ensure_session_budget(
+                    budget_key, root_session_id=budget_key,
+                    limits=session_limits,
+                )
+        # handle 的声明 = **账行现值**（点名后即更新后的行）；行不存在才是请求声明。
+        # 拿请求声明当 ensure 声明会把抬过的 ceiling 收紧回去（重启收紧回退 bug）。
+        session_budget = SessionBudgetHandle(
+            self._stores.delegation_tree_ledger,
+            budget_key=budget_key,
+            root_session_id=budget_key,
+            limits=(
+                session_row.limits if session_row is not None else session_limits
+            ),
         )
         # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
         amend = _amend_with_session_model(amend, existing, self._settings)
@@ -1054,6 +1207,9 @@ class SessionService:
                 session_id=session_id, run_id=claim_run_id,
                 expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis,
+                # `#318`：session 维触发的暂停，session CAS 已在上方完成 ⇒ 豁免
+                # "必须点名 run 维 ceiling"（run headroom 仍照判）。
+                session_ceiling_raised=session_limits.configured,
                 # `#317`：stuck 暂停的"环境变了没有"要现算——阶段一就该挡住无依据的
                 # 恢复（阶段二再算一次是同一条规则、同一份输入；见 ADR-0048 D7）。
                 port=stuck_evidence,
@@ -1194,6 +1350,8 @@ class SessionService:
                 # 同一 run_id + 新版本 + 已消耗快照）。装配点只消费，判定在
                 # `agent/run_budget.py` 与 `_paused_resume_state`。
                 run_budget=budget,
+                # `#318`：session 作用域账（跨 run 持久；声明 = 账行现值，见上方装配）。
+                session_budget=session_budget,
                 # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
                 # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
                 local_fuse_source=fuse.source,
@@ -1217,6 +1375,8 @@ class SessionService:
                 session_id=session_id, run_id=claim_run_id,
                 expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis, fuse=fuse,
+                # `#318`：与阶段一同一格豁免输入（两阶段共用同一份判定）。
+                session_ceiling_raised=session_limits.configured,
                 # `#317`：阶段二要把依据落进 `run/resumed.resume_evidence`——**必须**
                 # 带上端口（缺了它本次观测全为 None，环境 / 策略两条依据一律判"无快照
                 # 可比"而来不到这里）。两阶段共用同一枚端口 ⇒ 同一份输入。
@@ -1310,6 +1470,7 @@ class SessionService:
         limits: RunLimits,
         resume_basis: str | None,
         resume_evidence: ResumeEvidence | None = None,
+        session_ceiling_raised: bool = False,
     ) -> tuple[PausedRun, RunLimits, ResumeEvidence | None]:
         """恢复声明的唯一权威判定（纯函数；锁由调用方持有）。
 
@@ -1338,6 +1499,9 @@ class SessionService:
             # 任何观测）。**不转发 = 判据永远看不到现场证据**——那会把每一条依据都
             # 变成"无快照可比"的 409（fail-closed 到用不了），所以这一格必须传。
             resume_evidence=resume_evidence,
+            # `#318`：session 维触发的暂停，"抬高"发生在 session durable 行上
+            # （调用方已 CAS 成功）——validate_resume 据此豁免"必须点名 run 维"。
+            session_ceiling_raised=session_ceiling_raised,
         )
         return paused, effective, resume_evidence
 
@@ -1359,6 +1523,7 @@ class SessionService:
         self, *, session_id: str, run_id: str, expected_version: int,
         limits: RunLimits, resume_basis: str,
         port: StuckEvidencePort | None = None,
+        session_ceiling_raised: bool = False,
     ) -> LaunchRunBudget:
         """阶段一（锁内只读）：校验恢复声明并算出续跑账本，**不写任何东西**。"""
         async with self._resume_lock(session_id):
@@ -1367,6 +1532,7 @@ class SessionService:
             paused, effective, _ = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
                 limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
+                session_ceiling_raised=session_ceiling_raised,
             )
             if self._run_manager.get_active(session_id) is not None:
                 # 暂停后"当前执行"已收口（task done），所以这里命中的是**并发**：
@@ -1378,6 +1544,7 @@ class SessionService:
         self, *, session_id: str, run_id: str, expected_version: int,
         limits: RunLimits, resume_basis: str, fuse: LocalFuse,
         port: StuckEvidencePort | None = None,
+        session_ceiling_raised: bool = False,
         runtime_builder: Callable[
             [LaunchRunBudget],
             Awaitable[tuple[Any, bool, ApprovalCallback | None | _InteractiveCallbackHolder]],
@@ -1405,6 +1572,7 @@ class SessionService:
             paused, effective, evidence = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
                 limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
+                session_ceiling_raised=session_ceiling_raised,
             )
             needs_recovery = (
                 detect_dangling(events)
@@ -1425,6 +1593,7 @@ class SessionService:
                 paused, effective, evidence = self._paused_resume_state(
                     events, run_id=run_id, expected_version=expected_version,
                     limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
+                    session_ceiling_raised=session_ceiling_raised,
                 )
             session = Session.load(
                 self._store, session_id,
@@ -1564,7 +1733,6 @@ class SessionService:
         content: str,
         mode: str = "queue",
         local_max_agent_turns: int | None = None,
-        max_steps: int | None = None,
         amend: AmendOptions | None = None,
         supersedes_seq: int | None = None,
         queue_id: str | None = None,
@@ -1574,6 +1742,14 @@ class SessionService:
         run_max_cost_usd: Decimal | str | float | None = None,
         run_deadline_at: Any = None,
         run_tool_call_limits: Mapping[str, Any] | None = None,
+        session_max_agent_turns_total: int | None = None,
+        session_max_model_requests: int | None = None,
+        session_max_total_tokens: int | None = None,
+        session_max_cost_usd: Decimal | str | float | None = None,
+        session_deadline_at: Any = None,
+        session_tool_call_limits: Mapping[str, Any] | None = None,
+        session_max_delegations: int | None = None,
+        session_expected_version: int | None = None,
     ) -> SendMessageResult:
         """续聊消息入口（统一 CLI / Web 续聊路径）。
 
@@ -1635,7 +1811,7 @@ class SessionService:
             await self._assert_supersedable(session_id, supersedes_seq)
 
         # local fuse（#308）判定：**与分支无关**（同一条解析函数、同一个档位来源），形状
-        # 错误 / 不等双字段 / 越权三档拒绝都在任何工作开始前发生。判定不看运行态是刻意
+        # 错误 / 越权两档拒绝都在任何工作开始前发生。判定不看运行态是刻意
         # 的：否则同一份请求体在 idle 会话上 422、在活跃 run 上 200（queued），客户端没法
         # 预期，复核者读到的状态码取决于"此刻有没有 run"。
         # 生效值在这里**丢弃**：idle 分支由 `resume_and_launch` 再解析一次（同一纯函数、
@@ -1644,7 +1820,6 @@ class SessionService:
             deployment=self._settings.local_max_agent_turns,
             profile=_profile_turn_ceiling(amend),
             request=local_max_agent_turns,
-            alias=max_steps,
         )
 
         if queue_id is not None:
@@ -1678,7 +1853,6 @@ class SessionService:
             launched = await self.resume_and_launch(
                 session_id=session_id, task=content,
                 local_max_agent_turns=local_max_agent_turns,
-                max_steps=max_steps,
                 amend=amend,
                 run_max_agent_turns_total=run_max_agent_turns_total,
                 run_max_model_requests=run_max_model_requests,
@@ -1686,6 +1860,17 @@ class SessionService:
                 run_max_cost_usd=run_max_cost_usd,
                 run_deadline_at=run_deadline_at,
                 run_tool_call_limits=run_tool_call_limits,
+                # `#318`：session 作用域与 run 作用域同一纪律——只有 idle → launched
+                # 才消费；但 session 账行跨 run 存续，点名 = 对 durable 行的 CAS 更新
+                # （session_expected_version 必带，判定在 resume_and_launch）。
+                session_max_agent_turns_total=session_max_agent_turns_total,
+                session_max_model_requests=session_max_model_requests,
+                session_max_total_tokens=session_max_total_tokens,
+                session_max_cost_usd=session_max_cost_usd,
+                session_deadline_at=session_deadline_at,
+                session_tool_call_limits=session_tool_call_limits,
+                session_max_delegations=session_max_delegations,
+                session_expected_version=session_expected_version,
             )
             result = SendMessageResult(
                 status="launched",
@@ -2443,6 +2628,8 @@ class SessionService:
                 boundary_user_message_seq=from_seq,
                 workspace_registry=self._workspace_registry,
                 with_tail_summary=with_tail_summary,
+                # `#318`：fork 谱系读父账行（只读；父零写入）。
+                budget_ledger=self._stores.delegation_tree_ledger,
             )
         except ForkBoundaryError as error:
             raise InvalidForkBoundary(str(error)) from error

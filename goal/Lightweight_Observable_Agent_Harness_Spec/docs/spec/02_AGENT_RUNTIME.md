@@ -61,9 +61,8 @@ Streaming MUST：
 - `Run`：一次用户请求驱动的一轮 Agent 执行；
 - `Step`：一次模型决策及其后续 Tool batch。
 
-终止不再由低位 `max_steps` 决定。四类出口各有契约：**完成**（§5.4）、**暂停**（§5.2）、
-**取消**（立即语义，不被改写成暂停）、**失败**。`max_steps` 只在迁移期作为
-`budget.local.max_agent_turns` 的 deprecated alias 存在（§5.1）。
+终止不由 `max_steps` 决定（该字段已按 #305 AC-15 的预告由 #320 于 2026-09 退役：任何入口出现即按未知字段 422 拒绝）。四类出口各有契约：**完成**（§5.4）、**暂停**（§5.2）、
+**取消**（立即语义，不被改写成暂停）、**失败**。
 
 ### 5.1 预算层级与 counter（冻结契约）
 
@@ -91,10 +90,11 @@ Streaming MUST：
 | `cost_usd` | Provider 归属的 USD 成本之和；**不可得时记 unavailable，MUST NOT 编价、MUST NOT 记 0** |
 | `delegations` | 委派树内被接纳的 `delegate` 调用数 |
 
-**兼容与迁移**：公开字段是 `budget.local.max_agent_turns`。只发 `max_steps` 的旧客户端 ⇒ 解释为
-根 AgentRuntime 的 local fuse；两者同时出现且**相等** ⇒ 接受；**不等** ⇒ 422（开工前）。`max_steps`
-的**删除**由后续 contract 票在**证明零剩余调用方**后执行（#305 AC-15）——五场景真实 Live Gate
-（`12 §9.1`）是本特性的集成门禁，MUST NOT 被当成该删除动作的额外前置条件。
+**兼容与迁移（已收尾，#320 / 2026-09）**：公开字段是 `budget.local.max_agent_turns`。
+迁移期 alias（同传相等接受、不等 422）已按 #305 AC-15 的预告删除——删除前置的零剩余调用方
+证明见 #320 的 R1 盘点（全仓 72 处 py 命中五分类合法、`web/src` 零活代码命中）。退役后
+`max_steps` 是**未知字段**：任何入口出现即 422 拒绝（`11 §6.1`）。五场景真实 Live Gate
+（`12 §9.1`）仍是预算特性的集成门禁，与删除动作无关。
 公开 `budget` 对象的字段形状、校验规则与投影字段见 `11 §6.1`。
 
 ### 5.2 暂停与恢复（durable 边界，不是终态）
@@ -231,7 +231,7 @@ Runtime 应明确区分：
 - 模型无 Tool 时正常结束；
 - 单 Tool、多 Tool 均可循环；
 - streaming 后 tool_calls 不丢；
-- `max_steps` 可终止（迁移期作为 alias，见 §5.1）；
+- 预算/闸门终止可达（`max_steps` 已退役为未知字段 422，见 §5.1）；
 - repeated-tool guard 在无状态变化的重复调用时触发；
 - Model transient failure 可 fallback；
 - auth/config 错误不会无限 fallback；

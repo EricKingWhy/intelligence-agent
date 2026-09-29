@@ -63,6 +63,12 @@ class TestSessionEventDTO:
             "artifact/created",
             "artifact/externalized",
             "context/compacted",
+            # W-04 (#348)：摘要尝试失败的任务可见状态（每次尝试一条，载荷有界；
+            # 不投影成消息——derive 的投影集合不收它）。
+            "context/compaction_failed",
+            # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
+            # 硬校验在 session/plan.py）。
+            "task/plan_updated",
             "memory/degraded",
             "tool/failure-guard",
             "model/fallback",

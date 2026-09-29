@@ -1,0 +1,409 @@
+{
+  "schema_version": 1,
+  "scenario_id": "delegation-budget-tree-wide",
+  "scenario_version": 1,
+  "verdict": "FAIL",
+  "reason": "attempt 1: accepted_delegations_capped_across_runs 未满足（agent/delegation-started=4，去重 child_session_id=4（期望恰好 8：计数器跨 run 聚合，若按 run 重置，总数会超过配额））；attempt 2: accepted_delegations_capped_across_runs 未满足（agent/delegation-started=4，去重 child_session_id=4（期望恰好 8：计数器跨 run 聚合，若按 run 重置，总数会超过配额））；attempt 3: pause_exactly_once_structural 未满足（run/paused=2 reason='budget_exhausted' trigger='run.max_agent_turns_total'（ceiling=2 ⇒ 首轮之后结构性地暂停））",
+  "missing_preconditions": [],
+  "created_at": "2026-09-28T14:02:39.673+00:00",
+  "sha": "5480a00d16a4b0e16887b2496f94c4eadb3985ab",
+  "tree": "a825a1aeca77c7ff16a4b1dcb996b3cb425f015f",
+  "worktree": {
+    "head_sha": "5480a00d16a4b0e16887b2496f94c4eadb3985ab",
+    "tree": "a825a1aeca77c7ff16a4b1dcb996b3cb425f015f",
+    "tracked_matches_head": true,
+    "untracked": [
+      ".zcodeignore"
+    ],
+    "hidden": [],
+    "risky": []
+  },
+  "provider": {
+    "provider_id": "qwen",
+    "model_name": "cline-pass/glm-5.3-flash",
+    "base_url_host": "api.cline.bot",
+    "credential_names": [
+      "AGENT_MODELS",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "EMBEDDING_API_KEY",
+      "FALLBACK_MODEL_API_KEY",
+      "LANGFUSE_PUBLIC_KEY",
+      "LANGFUSE_SECRET_KEY",
+      "MILVUS_TOKEN",
+      "MODEL_API_KEY",
+      "TAVILY_API_KEY"
+    ],
+    "fallback_provider_id": "mimo",
+    "fallback_model_name": "mimo-v2.6-flash"
+  },
+  "sandbox": {
+    "backend": "local",
+    "disposable": true,
+    "created": true,
+    "deleted": true,
+    "env_allowlisted": true,
+    "teardown": "sandbox.delete+force-remove",
+    "workspace_ids": [
+      "fb9b481b110e892d",
+      "7f095467a8a44513",
+      "fc782ab356d6a834"
+    ]
+  },
+  "capability": {
+    "verdict": "READY",
+    "reason": "",
+    "probes": [
+      {
+        "label": "primary",
+        "ok": false,
+        "reason": "provider_server_error",
+        "error_type": "InternalServerError",
+        "message": "provider_server_error：端点服务端错误（5xx）（InternalServerError）"
+      },
+      {
+        "label": "fallback",
+        "ok": true,
+        "reason": null,
+        "error_type": "",
+        "message": "可用"
+      }
+    ]
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "started_at": "2026-09-28T13:49:48.425+00:00",
+      "ended_at": "2026-09-28T13:53:06.826+00:00",
+      "status": "FAIL",
+      "duration_ms": 198400,
+      "session_id": "delegation-budget-tree-wide-a1-ed4ff418",
+      "run_id": "17b3ebba-4218-4361-9e55-10b2a6038dc5",
+      "run_status": "completed",
+      "steps": 5,
+      "event_count": 116,
+      "tool_calls": [
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate"
+      ],
+      "events_ref": "docs/live_gate/20260928T134948-5480a00d16a4-delegation-budget-tree-wide/attempt-1.jsonl",
+      "events_sha256": "2456f10224f61334420c4cb740e7e06308eefb5d2e3aa1220491d2fa2ec10ecc",
+      "assertions": [
+        {
+          "name": "pause_exactly_once_structural",
+          "ok": true,
+          "detail": "run/paused=1 reason='budget_exhausted' trigger='run.max_agent_turns_total'（ceiling=2 ⇒ 首轮之后结构性地暂停）"
+        },
+        {
+          "name": "resume_same_run_without_session_dims",
+          "ok": true,
+          "detail": "run/resumed=1 from_pause_seq=28 basis='budget_increase'（续跑不点名 session 维：账行现值原样沿用）"
+        },
+        {
+          "name": "run_completed_without_terminal_noise",
+          "ok": true,
+          "detail": "run/completed=1 failed/interrupted=0 run/started=1 run_id 集合=['17b3ebba-4218-4361-9e55-10b2a6038dc5']"
+        },
+        {
+          "name": "all_subtask_attempts_made",
+          "ok": true,
+          "detail": "tool/call(delegate)=12（任务书要求实际发起 9 次；模型少发即如实判红）"
+        },
+        {
+          "name": "accepted_delegations_capped_across_runs",
+          "ok": false,
+          "detail": "agent/delegation-started=4，去重 child_session_id=4（期望恰好 8：计数器跨 run 聚合，若按 run 重置，总数会超过配额）"
+        },
+        {
+          "name": "over_budget_rejection_before_child_execution",
+          "ok": false,
+          "detail": "带「预算耗尽 8/8」的拒绝回填=0；尝试 12 - 接纳 4 = 8 次未产生任何子会话（拒绝发生在 reserve_delegation，先于 provider.run）"
+        },
+        {
+          "name": "children_are_real_and_completed",
+          "ok": false,
+          "detail": "agent/delegation-finished=4，statuses=['failed']，child_session_id 与 started 一一对应（不是空账）"
+        },
+        {
+          "name": "session_row_projection_agrees",
+          "ok": false,
+          "detail": "投影 session.consumed.delegations=4 limits.max_delegations=8 version=1（durable 行的客户端面与事件面互证）"
+        },
+        {
+          "name": "stream_mirrors_pause_and_completion",
+          "ok": true,
+          "detail": "低预算流 run/paused=1；续跑流 run/completed=1"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 116 条事件与内存态逐条同序"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 delegate 调用=12"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我看到的：4 次实际执行的委派（子任务 1、2、3、4）全部以完全相同的方式失败——coding 子代理返回 `status=failed`、无任何输出、`retryable=false`，这不是某个任务的问题，而是 coding 子代理本身当前不可用。\n\n卡点说明：继续对 5–9 发起一模一样的委派只会得到同样的失败（且按配额 8 次上限，剩余额度约 4 次，第 9 个必然撞墙），所以按运行时的循环中断要求，我先停下来向你汇报，而不是空转。\n\n**当前汇总**：完成 0 个；子任务 1–4 已实际委派但均被 coding 子代理执行失败（无输出）；子任务 5–9 尚未发起（首批因串行批次级联取消）。\n\n你希望我怎么走：\n1. **继续硬发 5–9**（满足\"全部 9 次尝试\"的审计字面要求，接受每次约 7–10 秒的相同失败，且第 9 次会撞配额墙）；\n2. **就此停止**，把上述失败记录作为审计证据交付；\n3. **换目标诊断**（如 target 改为 \"main\" 发一次探针，区分是 coding 角色坏了还是委派通道坏了）——但这会偏离你\"target 用 coding\"的审计口径。\n\n默认建议选 2 或 3，请指示。",
+      "workspace_id": "fb9b481b110e892d",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 2,
+      "started_at": "2026-09-28T13:53:06.826+00:00",
+      "ended_at": "2026-09-28T13:57:26.582+00:00",
+      "status": "FAIL",
+      "duration_ms": 259755,
+      "session_id": "delegation-budget-tree-wide-a2-468d8a80",
+      "run_id": "150cb1b5-9849-48d2-85a3-78dfa2024d09",
+      "run_status": "completed",
+      "steps": 5,
+      "event_count": 86,
+      "tool_calls": [
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate"
+      ],
+      "events_ref": "docs/live_gate/20260928T134948-5480a00d16a4-delegation-budget-tree-wide/attempt-2.jsonl",
+      "events_sha256": "675343a7e19f96a1f762781f171523ff419595629b03a3d087ba31a163254128",
+      "assertions": [
+        {
+          "name": "pause_exactly_once_structural",
+          "ok": true,
+          "detail": "run/paused=1 reason='budget_exhausted' trigger='run.max_agent_turns_total'（ceiling=2 ⇒ 首轮之后结构性地暂停）"
+        },
+        {
+          "name": "resume_same_run_without_session_dims",
+          "ok": true,
+          "detail": "run/resumed=1 from_pause_seq=28 basis='budget_increase'（续跑不点名 session 维：账行现值原样沿用）"
+        },
+        {
+          "name": "run_completed_without_terminal_noise",
+          "ok": true,
+          "detail": "run/completed=1 failed/interrupted=0 run/started=1 run_id 集合=['150cb1b5-9849-48d2-85a3-78dfa2024d09']"
+        },
+        {
+          "name": "all_subtask_attempts_made",
+          "ok": true,
+          "detail": "tool/call(delegate)=12（任务书要求实际发起 9 次；模型少发即如实判红）"
+        },
+        {
+          "name": "accepted_delegations_capped_across_runs",
+          "ok": false,
+          "detail": "agent/delegation-started=4，去重 child_session_id=4（期望恰好 8：计数器跨 run 聚合，若按 run 重置，总数会超过配额）"
+        },
+        {
+          "name": "over_budget_rejection_before_child_execution",
+          "ok": false,
+          "detail": "带「预算耗尽 8/8」的拒绝回填=0；尝试 12 - 接纳 4 = 8 次未产生任何子会话（拒绝发生在 reserve_delegation，先于 provider.run）"
+        },
+        {
+          "name": "children_are_real_and_completed",
+          "ok": false,
+          "detail": "agent/delegation-finished=4，statuses=['failed']，child_session_id 与 started 一一对应（不是空账）"
+        },
+        {
+          "name": "session_row_projection_agrees",
+          "ok": false,
+          "detail": "投影 session.consumed.delegations=4 limits.max_delegations=8 version=1（durable 行的客户端面与事件面互证）"
+        },
+        {
+          "name": "stream_mirrors_pause_and_completion",
+          "ok": true,
+          "detail": "低预算流 run/paused=1；续跑流 run/completed=1"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 86 条事件与内存态逐条同序"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 delegate 调用=12"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "我看到的：对 'coding' 子代理的每一次实际委派都以完全相同的方式确定性失败（status=failed、无输出、retryable=false），失败原因在子代理本身而非某个子任务，再发 5–9 次同样的调用只会复现同样的失败，因此按循环检测要求停止重复并直接说明卡点。\n\n**卡点说明**：'coding' 子代理当前不可用——每次真实调用都返回 `status=failed`（无任何输出，不可重试），并非预算耗尽，而是子代理执行层故障；我无法在不违反你\"target 必须用 coding\"要求的前提下换参数绕过。\n\n**一句话汇总**：无任何子任务完成；子任务 1–4 均已实际发起委派但全部被 'coding' 子代理确定性拒绝（失败即本次采集到的证据），子任务 5–9 暂停未发起，待子代理恢复后告诉我即可继续补齐。",
+      "workspace_id": "7f095467a8a44513",
+      "redactions": [
+        "workspace_path"
+      ]
+    },
+    {
+      "index": 3,
+      "started_at": "2026-09-28T13:57:26.582+00:00",
+      "ended_at": "2026-09-28T14:02:39.480+00:00",
+      "status": "FAIL",
+      "duration_ms": 312898,
+      "session_id": "delegation-budget-tree-wide-a3-fb68f005",
+      "run_id": "8731318d-1d8d-403a-8079-cb3269d8f83a",
+      "run_status": "unknown",
+      "steps": 8,
+      "event_count": 109,
+      "tool_calls": [
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate",
+        "delegate"
+      ],
+      "events_ref": "docs/live_gate/20260928T134948-5480a00d16a4-delegation-budget-tree-wide/attempt-3.jsonl",
+      "events_sha256": "aae086615702501351c1c84ef70e287b6ccaeb5eff76df1723904b7677a5781c",
+      "assertions": [
+        {
+          "name": "pause_exactly_once_structural",
+          "ok": false,
+          "detail": "run/paused=2 reason='budget_exhausted' trigger='run.max_agent_turns_total'（ceiling=2 ⇒ 首轮之后结构性地暂停）"
+        },
+        {
+          "name": "resume_same_run_without_session_dims",
+          "ok": true,
+          "detail": "run/resumed=1 from_pause_seq=28 basis='budget_increase'（续跑不点名 session 维：账行现值原样沿用）"
+        },
+        {
+          "name": "run_completed_without_terminal_noise",
+          "ok": false,
+          "detail": "run/completed=0 failed/interrupted=0 run/started=1 run_id 集合=['8731318d-1d8d-403a-8079-cb3269d8f83a']"
+        },
+        {
+          "name": "all_subtask_attempts_made",
+          "ok": true,
+          "detail": "tool/call(delegate)=16（任务书要求实际发起 9 次；模型少发即如实判红）"
+        },
+        {
+          "name": "accepted_delegations_capped_across_runs",
+          "ok": true,
+          "detail": "agent/delegation-started=8，去重 child_session_id=8（期望恰好 8：计数器跨 run 聚合，若按 run 重置，总数会超过配额）"
+        },
+        {
+          "name": "over_budget_rejection_before_child_execution",
+          "ok": false,
+          "detail": "带「预算耗尽 8/8」的拒绝回填=0；尝试 16 - 接纳 8 = 8 次未产生任何子会话（拒绝发生在 reserve_delegation，先于 provider.run）"
+        },
+        {
+          "name": "children_are_real_and_completed",
+          "ok": false,
+          "detail": "agent/delegation-finished=8，statuses=['failed']，child_session_id 与 started 一一对应（不是空账）"
+        },
+        {
+          "name": "session_row_projection_agrees",
+          "ok": true,
+          "detail": "投影 session.consumed.delegations=8 limits.max_delegations=8 version=1（durable 行的客户端面与事件面互证）"
+        },
+        {
+          "name": "stream_mirrors_pause_and_completion",
+          "ok": false,
+          "detail": "低预算流 run/paused=1；续跑流 run/completed=0"
+        },
+        {
+          "name": "durable_replay_matches_live",
+          "ok": true,
+          "detail": "重新读盘 109 条事件与内存态逐条同序"
+        },
+        {
+          "name": "no_dangling_tool_calls",
+          "ok": true,
+          "detail": "悬空 call=[]"
+        },
+        {
+          "name": "session_identity_present",
+          "ok": true,
+          "detail": "session_id=有 run_id=有 delegate 调用=16"
+        }
+      ],
+      "error": "",
+      "secret_scan_rules": [],
+      "output_tail": "",
+      "workspace_id": "fc782ab356d6a834",
+      "redactions": [
+        "workspace_path"
+      ]
+    }
+  ],
+  "seams": {},
+  "injected_failure": "",
+  "secret_scan": {
+    "exact_value_scan": "ran",
+    "scanned": [
+      "evidence",
+      "attempt[1].error",
+      "attempt[1].output_tail",
+      "docs/live_gate/20260928T134948-5480a00d16a4-delegation-budget-tree-wide/attempt-1.jsonl",
+      "attempt[2].error",
+      "attempt[2].output_tail",
+      "docs/live_gate/20260928T134948-5480a00d16a4-delegation-budget-tree-wide/attempt-2.jsonl",
+      "attempt[3].error",
+      "attempt[3].output_tail",
+      "docs/live_gate/20260928T134948-5480a00d16a4-delegation-budget-tree-wide/attempt-3.jsonl"
+    ],
+    "findings": []
+  },
+  "runner": {
+    "tool_versions": {
+      "git": "git version 2.52.0.windows.1",
+      "python": "3.13.5",
+      "platform": "win32"
+    },
+    "argv": [
+      "scripts/live_gate.py",
+      "run",
+      "--scenario",
+      "delegation-budget-tree-wide"
+    ],
+    "attempts_planned": 3
+  },
+  "scope": {
+    "does_not_cover": [
+      "委派树场景（尚未落地）——已落地的六条：运行冒烟 `#307`、长任务 `#311`、预算暂停恢复 `#312`、deadline 边界 `#315`、完成闸门 `#316`、重复工具失败 ⇒ stuck 暂停 `#317`（各自的票据里带走证据目录）",
+      "Docker 后端（本票证据取自生产默认的 local；docker 后端的覆盖在 tests/sandbox/）",
+      "模型语义质量（本 runner 只做结构性断言，不评文本好坏）"
+    ]
+  }
+}

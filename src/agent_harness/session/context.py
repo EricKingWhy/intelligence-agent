@@ -8,9 +8,23 @@ agent；它们只需要"当前 run 是谁"。runtime 在 begin_run 之后设置�
 from __future__ import annotations
 
 from contextvars import ContextVar
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_harness.session.session import Session
 
 #: 当前 run 的 id（begin_run 之后有效）；None = 不在 run 上下文中。
 run_context_var: ContextVar[str | None] = ContextVar("run_context", default=None)
+
+#: 当前 run 绑定的 Session 实例（W-26 / #380）。`update_plan` 这类**要写会话事件**
+#: 的工具在执行期读它——`Tool.execute(args)` 协议不带 session（contract.py），而
+#: 生产装配里工具注册发生在 Session 对象存在之前（build_runtime），构造注入接不上；
+#: 与 `run_context_var` 同一设点（runtime begin_run 之后 set、收尾 reset）是既有
+#: 通道（output_stream / deadline 的 contextvar 同族）。None = 不在 run 上下文：
+#: 消费方如实失败，不假装可用。
+current_session_var: ContextVar[Session | None] = ContextVar(
+    "current_session", default=None,
+)
 
 #: 本 run 已作为自动注入进模型上下文的记忆 entry id（#202 / ADR-0031 D4）。
 #: provider 在 `select()` 把实际被拼接进 SystemMessage 的 id 写入（frozenset

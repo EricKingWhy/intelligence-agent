@@ -23,6 +23,7 @@ from typing import Any
 
 from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS, resolve_local_fuse
 from agent_harness.agent.profiles import AgentSpec
+from agent_harness.agent.run_budget import SessionBudgetPort
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.prompt import PersonaConfig, compose_agent_prompt, join_guidance
 from agent_harness.tooling import ToolExecutor, ToolRegistry
@@ -80,6 +81,7 @@ class AgentFactory:
         *,
         source_registry: ToolRegistry,
         grantable: frozenset[str] | set[str],
+        session_budget: SessionBudgetPort | None = None,
     ) -> AgentRuntime:
         """按 spec 构造 child runtime（复用同一 Agent Loop，不变量 #19）。
 
@@ -87,6 +89,10 @@ class AgentFactory:
         registry 全量」——child 申请 `delegate` 而调用点忘了收窄，递归委派的
         逃逸通道就开了。可授予集合是**权限决策**，不是能隐式兜底的默认值：
         「谁能被授予什么」是每个调用点必须说出口的事。
+
+        `session_budget`（`#318`）：委派提供方把**共享**的树账端口交给 child
+        （`10 §5.1`：根 / 子 / 孙消费同一份 SessionBudget；local fuse 不池化，
+        session 账恰恰要池化——两者互不替代）。
         """
         source_names = {tool.name for tool in source_registry.list()}
         grantable_names = set(grantable)
@@ -142,4 +148,5 @@ class AgentFactory:
             system_prompt=compose_agent_prompt(
                 spec.system_prompt, self._persona, guidance_text,
             ),
+            session_budget=session_budget,
         )

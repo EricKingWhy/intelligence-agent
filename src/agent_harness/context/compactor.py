@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import logging
+import re
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any
 from uuid import uuid4
 
@@ -17,16 +20,111 @@ from langchain_core.messages import (
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.event import SessionEvent
+from agent_harness.session.plan import PlanItem, derive_plan
+
+logger = logging.getLogger("agent_harness.context.compactor")
+
+
+_SUMMARY_HEADINGS = (
+    "## 原始目标与用户约束",
+    "## 保护事实表",
+    "## 已完成工作与关键决策",
+    "## 失败方案",
+    "## 当前进行中状态",
+    "## Next Step",
+    "## 精确标识清单",
+    "## 文件清单",
+)
+_MODEL_SUMMARY_HEADINGS = _SUMMARY_HEADINGS[2:6]
+_PROGRAMMATIC_SUMMARY_HEADINGS = (0, 1, 6, 7)
+_IDENTIFIER_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d+"
+    r"[A-Za-z0-9-]*|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(?![A-Za-z0-9_])"
+)
+_FILE_PATH_PATTERN = re.compile(
+    r"(?<![\w])(?:[A-Za-z]:[\\/]|/)?"
+    r"[\w.@+-]+(?:[\\/][\w.@+-]+)*\.[A-Za-z0-9]{1,12}(?![\w])"
+)
+_NUMBER_PATTERN = re.compile(
+    r"(?<![\w.-])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?%?(?![\w.-])"
+)
+_PATH_FIELDS = {"path", "file", "filename", "filepath", "file_path", "source_file"}
+_EXACT_FIELDS = {"command", "cmd", "shell", "error", "error_message"}
+
+
+#: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
+#: timeout / transport_error 覆盖调用面；其余八类逐一对应校验闸门与 shrink 的各条拒绝。
+_SUMMARY_ERROR_CLASSES = (
+    "timeout",
+    "transport_error",
+    "empty_summary",
+    "tool_calls_in_response",
+    "non_text",
+    "heading_mismatch",
+    "empty_section",
+    "programmatic_mismatch",
+    # W-29 (#383)：摘要第 5 节与进度清单一致性闸门的拒绝类。
+    "plan_section_mismatch",
+    "summary_not_smaller",
+    "target_not_reached",
+)
+
+#: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
+_FAILURE_MESSAGE_LIMIT = 300
+
+
+@dataclass(frozen=True)
+class CompactionFailure:
+    """一次摘要尝试的失败记录（W-04 #348）。
+
+    `message` 只装本项目自己的拒绝文案或异常**类型名**——绝不透传 provider
+    回显原文（与 ADR-0033 边界 1 同一条脱敏纪律）。`auto_limit` / `hard_limit`
+    取触发时的整型阈值读数；`token_estimate` 是调用方进入压缩时的估算。
+    """
+
+    attempt: int
+    error_class: str
+    message: str
+    auto_limit: int
+    hard_limit: int
+    token_estimate: int
+
+
+class _SummaryRejected(ValueError):
+    """摘要尝试内的单次拒绝（#348）：携带 `_SUMMARY_ERROR_CLASSES` 里的一个类。
+
+    ValueError 子类：与既有校验 helper 的 ValueError 族在同一 except 面内被收拢，
+    直接调用这些 helper 的既有测试不受影响。
+    """
+
+    def __init__(self, error_class: str, message: str) -> None:
+        super().__init__(message)
+        self.error_class = error_class
 
 
 class ContextWindowExceededError(RuntimeError):
     """无法构造安全的模型上下文，调用方必须停止当前 run。"""
+
+    def __init__(
+        self, message: str, *,
+        failures: list[CompactionFailure] | None = None,
+    ) -> None:
+        super().__init__(message)
+        #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。预检类超限
+        #: （tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录，保持为空表。
+        self.failures = list(failures or [])
 
 
 @dataclass
 class CompactionResult:
     messages: list[AnyMessage]
     compacted_turn_count: int
+    # 契约（P2-4 双计修正后统一）：**只含返回的 messages 本身**的估算，不含
+    # 调用方（builder）另行记账的 system_prompt / 运行时快照 / 清单锚块——
+    # 压缩成功路径本来就是 messages-only（test_builder_system_prompt 的回归钉），
+    # 三条直通路径（预检放行 / 双失败安全继续 / 源区间不可用）已从
+    # "原样回传调用方入参（含 sys+rt+plan）"统一到本契约，否则 builder 的
+    # 补回项会二次计入，provider 预算被虚扣（方向安全但账目失真）。
     token_estimate: int
     fallback_used: bool
     # T4 (#134)：bracket 元数据——被压缩段的 seq 区间 + 唯一 bracket_id。
@@ -34,23 +132,29 @@ class CompactionResult:
     source_seq_end: int | None = None
     bracket_id: str | None = None
     summary: str | None = None
+    # W-04 (#348)：本次 compact 里失败过的摘要尝试（成功尝试之前的都在内；
+    # 双失败安全继续时是两条）。调用方（builder）负责把它们落成任务可见状态。
+    failures: list[CompactionFailure] = dataclass_field(default_factory=list)
 
 
-#: T4 (#134)：六段式摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
+#: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
 #: （section `aux:compaction`）——改文案开那一个文件。
 
 
 class ContextCompactor:
     def __init__(self, model_provider: Any, *, max_context_tokens: int = 200_000,
-                 auto_compact_threshold: float = 0.80,
-                 hard_guard_threshold: float = 0.90,
+                 auto_compact_threshold: float = 0.70,
+                 hard_guard_threshold: float = 0.85,
                  keep_recent_tokens: int = 20_000,
-                 summary_timeout_seconds: float = 30.0) -> None:
+                 summary_timeout_seconds: float = 30.0,
+                 summary_model: Any | None = None) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("invalid context budget")
         if summary_timeout_seconds <= 0:
             raise ValueError("summary_timeout_seconds must be positive")
-        self._model = model_provider
+        # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（装配前的既有行为逐字节
+        # 等价）。便宜档选择本身留在配置面（后续票），本层只负责"用谁摘要"。
+        self._model = summary_model if summary_model is not None else model_provider
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
         self.keep_recent_tokens = keep_recent_tokens
@@ -66,10 +170,13 @@ class ContextCompactor:
         token_estimate: int,
         *,
         events: list[SessionEvent] | None = None,
+        source_ranges: list[tuple[int, int] | None] | None = None,
     ) -> CompactionResult:
         _validate_tool_blocks(messages)
         prefix_end = 0
-        while prefix_end < len(messages) and isinstance(messages[prefix_end], SystemMessage):
+        while (prefix_end < len(messages)
+               and isinstance(messages[prefix_end], SystemMessage)
+               and not _is_compaction_summary(messages[prefix_end])):
             prefix_end += 1
         prefix = messages[:prefix_end]
         cut = max((i for i, message in enumerate(messages)
@@ -77,7 +184,11 @@ class ContextCompactor:
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)
-            if count > self._hard_limit:
+            # 硬护栏比对用**有效用量**（调用方入参，含 sys+rt+plan），与下方其余
+            # 三处 `token_estimate > self._hard_limit` 同一口径——messages-only
+            # 比对会在 (messages, 有效用量) 落入 (count≤hard<effective) 缝隙时
+            # 放行越窗请求。
+            if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError("No complete early turn can be compacted")
             return CompactionResult(list(messages), 0, count, False)
         prompt = SystemMessage(
@@ -87,105 +198,323 @@ class ContextCompactor:
             [message.model_dump(mode="json") for message in early], ensure_ascii=False,
         ))
         request = [prompt, transcript]
-        fallback_used = False
-        summary_text: str | None = None
-        try:
-            if estimate_message_tokens(request) > self._hard_limit:
-                raise ContextWindowExceededError("Summary request exceeds hard guard")
-            async with asyncio.timeout(self._summary_timeout):
-                response = await self._model.ainvoke(request)
-            if not isinstance(response, AIMessage) or response.tool_calls:
-                raise ValueError("Summary must be text without tool calls")
-            summary_text = response.content
-            # T4 (#134)：shrink 校验——摘要必须严格小于被压缩段，
-            # 否则压缩无意义且可能让上下文更大。
-            early_tokens = estimate_message_tokens(early)
-            summary_tokens = estimate_message_tokens([SystemMessage(content=summary_text)])
-            if summary_tokens >= early_tokens:
+        # 预检（不算尝试，维持既有拒绝语义）：请求本身已超硬护栏时不再发起摘要调用，
+        # 旧投影超护栏则停止、否则安全继续。此处不产生尝试记录。
+        if estimate_message_tokens(request) > self._hard_limit:
+            logger.warning(
+                "Context compaction rejected; summary request exceeds hard guard",
+            )
+            if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError(
-                    f"Summary ({summary_tokens} tokens) is not smaller than "
-                    f"compressed segment ({early_tokens} tokens)"
+                    "Summary validation failed and original context exceeds hard guard"
+                ) from None
+            # P2-4：token_estimate 回传 messages-only（契约见 CompactionResult），
+            # 不原样回传调用方入参（其已含 sys+rt+plan，builder 会再补一次）。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+            )
+        # W-04 (#348)：摘要生成至多两次尝试。一次尝试 = ainvoke → 解析 → 程序化组装
+        # → 校验闸门 → shrink 全链；预检（上面与 tool 块检查）不计入。每次失败记一条
+        # 有界 CompactionFailure，由调用方落成任务可见状态。
+        failures: list[CompactionFailure] = []
+        summary_text = ""
+        compacted: list[AnyMessage] | None = None
+        for attempt in (1, 2):
+            try:
+                async with asyncio.timeout(self._summary_timeout):
+                    response = await self._model.ainvoke(request)
+                if not isinstance(response, AIMessage) or response.tool_calls:
+                    raise _SummaryRejected(
+                        "tool_calls_in_response",
+                        "Summary must be text without tool calls",
+                    )
+                if not isinstance(response.content, str):
+                    raise _SummaryRejected("non_text", "Summary must be plain text")
+                if not response.content.strip():
+                    raise _SummaryRejected("empty_summary", "Summary must not be empty")
+                model_sections = _parse_summary_sections(
+                    response.content, _MODEL_SUMMARY_HEADINGS,
                 )
-            compacted = [*prefix, SystemMessage(content=summary_text), *recent]
-            if estimate_message_tokens(compacted) >= self._auto_limit:
-                raise ContextWindowExceededError("LLM summary does not reach compaction target")
-        except Exception:  # noqa: BLE001
-            # Provider/超时/格式错误统一降级；CancelledError 仍向调用方传播。
-            fallback_used = True
-            compacted = [*prefix, SystemMessage(content=_mechanical_summary(early)), *recent]
+                summary_text = _assemble_summary(early, model_sections)
+                _validate_summary(summary_text, early)
+                # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
+                # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
+                # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
+                # 会话的行为逐字节等价。
+                if events is not None:
+                    _validate_plan_section(summary_text, derive_plan(events).items)
+                early_tokens = estimate_message_tokens(early)
+                summary_tokens = estimate_message_tokens([SystemMessage(content=summary_text)])
+                if summary_tokens >= early_tokens:
+                    raise ContextWindowExceededError(
+                        f"Summary ({summary_tokens} tokens) is not smaller than "
+                        f"compressed segment ({early_tokens} tokens)"
+                    )
+                compacted = [*prefix, SystemMessage(content=summary_text), *recent]
+                if estimate_message_tokens(compacted) >= self._auto_limit:
+                    raise ContextWindowExceededError(
+                        "LLM summary does not reach compaction target"
+                    )
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # 摘要失败不能把空摘要写入事件流；先记录、再决定重试或保留原投影。
+                # CancelledError 不在这里吞（上面显式重抛）。
+                failures.append(_record_failure(
+                    attempt, exc, token_estimate, self._auto_limit, self._hard_limit,
+                ))
+                logger.warning(
+                    "Context compaction attempt %s rejected (%s)",
+                    attempt, failures[-1].error_class,
+                )
+        if compacted is None:
+            # 两次尝试都失败：旧投影仍在硬护栏内则安全继续（下一稳定边界再评估）；
+            # 已达硬护栏而仍无核验过的上下文 ⇒ 停止，异常携带失败记录供暂停面引用。
+            logger.warning(
+                "Context compaction rejected; keeping original projection (%s)",
+                failures[-1].error_class if failures else "unknown",
+            )
+            if token_estimate > self._hard_limit:
+                raise ContextWindowExceededError(
+                    "Summary validation failed and original context exceeds hard guard",
+                    failures=failures,
+                ) from None
+            # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+                failures=failures,
+            )
         count = estimate_message_tokens(compacted)
         if count > self._hard_limit:
             raise ContextWindowExceededError(
                 f"Compaction cannot fit context: {token_estimate} -> {count} tokens; "
                 f"hard guard {self._hard_limit:g}"
             )
-        # T4 (#134)：从 events 计算 source_seq 区间。
-        # projecting events 一一对应 messages（derive_messages 的投影集合），
-        # 但 prefix（开头的 SystemMessages）不是由投影事件产生的——
-        # 所以产生 early 消息的事件是 projecting[prefix_end:cut]。
+        # T4 (#134)：从投影映射计算 source_seq 区间。旧摘要带有原 bracket 的
+        # 完整来源范围，因此下一次压缩可以覆盖并替代之前的摘要。
         source_seq_start: int | None = None
         source_seq_end: int | None = None
         if events is not None:
-            from agent_harness.session.event import (
-                MODEL_COMPLETED,
-                TOOL_RESULT,
-                USER_MESSAGE,
+            if source_ranges is not None:
+                # W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
+                # （ToolMessage.content 原位替换），但消息数与顺序不变——调用方
+                # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
+                # 长度不符视同区间不可用（走既有拒绝路径），不做静默截断。
+                early_ranges = (
+                    list(source_ranges[prefix_end:cut])
+                    if len(source_ranges) == len(messages) else None
+                )
+            else:
+                from agent_harness.session.derive import (
+                    derive_messages_with_source_ranges,
+                )
+
+                mapped = derive_messages_with_source_ranges(events)
+                aligned = len(mapped) == len(messages) and all(
+                    projected == supplied
+                    for (projected, _source_range), supplied in zip(mapped, messages)
+                )
+                early_ranges = (
+                    [source_range for _message, source_range in mapped[prefix_end:cut]]
+                    if aligned else None
+                )
+            if early_ranges and all(source_range is not None for source_range in early_ranges):
+                source_seq_start = min(source_range[0] for source_range in early_ranges)
+                source_seq_end = max(source_range[1] for source_range in early_ranges)
+        if events is not None and (source_seq_start is None or source_seq_end is None):
+            logger.warning(
+                "Context compaction rejected; source event range is unavailable",
             )
-            projecting = [e for e in events if e.type in {
-                USER_MESSAGE, MODEL_COMPLETED, TOOL_RESULT,
-            }]
-            # 如果 dangling 合成注入导致计数失配，放弃 source_seq 计算
-            if len(projecting) == len(messages):
-                early_events = projecting[prefix_end:cut]
-                if early_events:
-                    source_seq_start = early_events[0].seq
-                    source_seq_end = early_events[-1].seq
+            if token_estimate > self._hard_limit:
+                raise ContextWindowExceededError(
+                    "Cannot persist compaction without a source event range"
+                )
+            # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
+            return CompactionResult(
+                list(messages), 0, estimate_message_tokens(messages), False,
+            )
         return CompactionResult(
             compacted,
             sum(isinstance(message, HumanMessage) for message in early),
-            count, fallback_used,
+            count, False,
             source_seq_start=source_seq_start,
             source_seq_end=source_seq_end,
-            bracket_id=str(uuid4()) if not fallback_used else None,
-            summary=summary_text if not fallback_used else None,
+            bracket_id=str(uuid4()),
+            summary=summary_text,
+            # W-29 (#383) 补课：成功前的失败尝试也要带给调用方落任务可见状态——
+            # CompactionResult.failures 的契约（"成功尝试之前的都在内"）与冻结
+            # PRD §4.5（"每次失败留诊断与任务可见状态"）都要求这一条；此前成功
+            # 路径漏传，首试被拒、重试成功时失败记录被静默丢弃（本票新闸门使
+            # 该路径成为常态，判据测试暴露）。
+            failures=failures,
         )
 
 
-#: mechanical 摘要单字段截断预算（与 human/tool content 的 200/100 同级）。
-_MECHANICAL_CAP = 200
+def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
+    lines = text.strip().splitlines()
+    heading_positions = [
+        (index, line) for index, line in enumerate(lines)
+        if line.startswith("## ")
+    ]
+    if tuple(line for _, line in heading_positions) != headings:
+        raise ValueError("Summary section headings do not match the contract")
+    if not heading_positions or heading_positions[0][0] != 0:
+        raise ValueError("Summary contains text outside its sections")
+    contents = []
+    for index, (line_number, _) in enumerate(heading_positions):
+        end = (heading_positions[index + 1][0]
+               if index + 1 < len(heading_positions) else len(lines))
+        content = "\n".join(lines[line_number + 1:end]).strip()
+        if not content:
+            raise ValueError("Empty summary section must use (none)")
+        contents.append(content)
+    return contents
 
 
-def _mechanical_summary(messages: list[AnyMessage]) -> str:
-    rows = []
+def _programmatic_summary_sections(messages: list[AnyMessage]) -> dict[str, str]:
+    user_messages: list[str] = []
+    identifiers: list[str] = []
+    file_paths: list[str] = []
+
+    def add_once(target: list[str], value: str) -> None:
+        if value and value not in target:
+            target.append(value)
+
+    def decode_summary_values(value: str) -> list[str]:
+        if value == "(none)":
+            return []
+        parsed = json.loads(value)
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError("Previous summary programmatic section is not a string list")
+        return parsed
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            is_error = value.get("status") == "error" or value.get("is_error") is True
+            for key, child in value.items():
+                normalized = key.lower().replace("-", "_")
+                if isinstance(child, str):
+                    if normalized in _PATH_FIELDS:
+                        add_once(file_paths, child)
+                        add_once(identifiers, child)
+                    if (normalized in _EXACT_FIELDS or normalized == "id"
+                            or normalized.endswith("_id")):
+                        add_once(identifiers, child)
+                    for match in _NUMBER_PATTERN.finditer(child):
+                        add_once(identifiers, match.group())
+                elif isinstance(child, (int, float)) and not isinstance(child, bool):
+                    add_once(identifiers, str(child))
+                visit(child)
+            error_content = value.get("content")
+            if is_error and isinstance(error_content, str):
+                add_once(identifiers, error_content)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            add_once(identifiers, str(value))
+        elif isinstance(value, str):
+            for match in _IDENTIFIER_PATTERN.finditer(value):
+                add_once(identifiers, match.group())
+            for match in _NUMBER_PATTERN.finditer(value):
+                add_once(identifiers, match.group())
+            for match in _FILE_PATH_PATTERN.finditer(value):
+                add_once(file_paths, match.group())
+                add_once(identifiers, match.group())
+
     for message in messages:
         if isinstance(message, HumanMessage):
-            rows.append({"type": "human", "content": message.text[:200]})
-        elif isinstance(message, AIMessage):
-            # tool_call.args 必须截断：args 是模型自由生成的（write 大文件等），
-            # 原样嵌入会让摘要本身超硬护栏——历史从不裁剪 + 投影每轮重建，
-            # 该 session 从此每次 run 都 context_window_exceeded，永久 brick。
-            rows.append({"type": "ai", "tool_calls": [
-                {"id": call.get("id"), "name": call.get("name"),
-                 "args": _cap_text(json.dumps(call.get("args", {}), ensure_ascii=False))}
-                for call in message.tool_calls
-            ]})
-        elif isinstance(message, ToolMessage):
-            rows.append({"type": "tool", "tool_call_id": message.tool_call_id,
-                         "content": message.text[:100]})
-        elif isinstance(message, SystemMessage):
-            rows.append({"type": "system", "content": message.text[:_MECHANICAL_CAP]})
-        else:
-            # 不丢弃系统约束或未知类型的消息；dump 整体截断成字符串，保证摘要有界。
-            rows.append(_cap_text(
-                json.dumps(message.model_dump(mode="json"), ensure_ascii=False), 300,
-            ))
-    return json.dumps({"mechanical_extract": rows}, ensure_ascii=False)
+            user_messages.append(message.content)
+        if (isinstance(message, SystemMessage)
+                and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")):
+            previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
+            previous_users = decode_summary_values(previous[0])
+            previous_identifiers = decode_summary_values(previous[6])
+            previous_paths = decode_summary_values(previous[7])
+            user_messages.extend(previous_users)
+            for value in previous_identifiers:
+                add_once(identifiers, value)
+            for value in previous_paths:
+                add_once(file_paths, value)
+            continue
+        visit(message.model_dump(mode="json"))
+
+    return {
+        _SUMMARY_HEADINGS[0]: json.dumps(user_messages, ensure_ascii=False)
+        if user_messages else "(none)",
+        # #346 adds the durable protected-fact registry; until then its exact value is empty.
+        _SUMMARY_HEADINGS[1]: "(none)",
+        _SUMMARY_HEADINGS[6]: json.dumps(identifiers, ensure_ascii=False)
+        if identifiers else "(none)",
+        _SUMMARY_HEADINGS[7]: json.dumps(file_paths, ensure_ascii=False)
+        if file_paths else "(none)",
+    }
 
 
-def _cap_text(text: str, cap: int = _MECHANICAL_CAP) -> str:
-    if len(text) <= cap:
-        return text
-    return text[:cap] + "…[truncated]"
+def _is_compaction_summary(message: SystemMessage) -> bool:
+    """识别新旧持久化摘要，避免把旧摘要当不可压缩系统前缀。"""
+    return message.content.startswith((f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n"))
+
+
+def _assemble_summary(
+    messages: list[AnyMessage], model_sections: list[str],
+) -> str:
+    programmatic = _programmatic_summary_sections(messages)
+    bodies = [programmatic.get(heading, "") for heading in _SUMMARY_HEADINGS]
+    for index, body in enumerate(model_sections, start=2):
+        bodies[index] = body
+    return "\n\n".join(
+        f"{heading}\n{body}" for heading, body in zip(_SUMMARY_HEADINGS, bodies)
+    )
+
+
+def _validate_summary(summary: str, messages: list[AnyMessage]) -> None:
+    sections = _parse_summary_sections(summary, _SUMMARY_HEADINGS)
+    expected = _programmatic_summary_sections(messages)
+    for index in _PROGRAMMATIC_SUMMARY_HEADINGS:
+        if sections[index] != expected[_SUMMARY_HEADINGS[index]]:
+            raise ValueError("Programmatic summary section failed exact comparison")
+    if not summary.strip():
+        raise ValueError("Summary must not be empty")
+
+
+def _validate_plan_section(
+    summary: str, plan_items: tuple[PlanItem, ...],
+) -> None:
+    """W-29 (#383)：摘要第 5 节 ↔ 进度清单 in_progress 项一致性闸门。
+
+    会话**有**清单时启用（PRD §6.1 表行 5「与进度清单 in_progress 项一致」）：
+    每个进行中项的 `content` 或 `activeForm` 必须逐字出现在第 5 节内；清单存在
+    但零 in_progress ⇒ 第 5 节必须是 `(none)`（与 `aux:compaction` prompt 的
+    「无则写 (none)」同款约定）。无清单（items 为空）不启用——未用清单的会话
+    第 5 节本就是自由文本，保持 W-04 之前的既有行为。
+
+    判据刻意用逐字子串而非语义比对：PRD 执行约束要求确定性机制兜底，弱模型
+    重述不能靠"觉得差不多"。清单表本身就在转录的 update_plan 工具调用里，
+    模型有能力逐字带上。
+    """
+    if not plan_items:
+        return
+    section = _parse_summary_sections(summary, _SUMMARY_HEADINGS)[4]
+    in_progress = [item for item in plan_items if item.status == "in_progress"]
+    if not in_progress:
+        if section != "(none)":
+            raise _SummaryRejected(
+                "plan_section_mismatch",
+                "Plan section must be (none): no plan item is in progress",
+            )
+        return
+    missing = [
+        item.id for item in in_progress
+        if item.content not in section and item.active_form not in section
+    ]
+    if missing:
+        raise _SummaryRejected(
+            "plan_section_mismatch",
+            "Plan section is inconsistent with the progress plan; "
+            f"in-progress item(s) missing: {', '.join(missing)}",
+        )
 
 
 def _validate_tool_blocks(messages: list[AnyMessage]) -> None:
@@ -207,3 +536,55 @@ def _validate_tool_blocks(messages: list[AnyMessage]) -> None:
             raise ContextWindowExceededError("Orphan tool result in context")
         else:
             index += 1
+
+
+def _classify_failure(exc: BaseException) -> str:
+    """异常 → `_SUMMARY_ERROR_CLASSES` 里的一个有界类（W-04 #348）。
+
+    逐字文案是本模块自己冻结的（tests 依赖其稳定性），按前缀归类；无法辨认的
+    ValueError 一律归 `heading_mismatch`（同为"摘要结构不合契约"面），非 ValueError
+    的调用面故障归 `transport_error`。本函数不抛。
+    """
+    if isinstance(exc, _SummaryRejected):
+        return exc.error_class
+    if isinstance(exc, ContextWindowExceededError):
+        message = str(exc)
+        if message.startswith("Summary ("):
+            return "summary_not_smaller"
+        if "compaction target" in message:
+            return "target_not_reached"
+        return "transport_error"
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return "timeout"
+    if isinstance(exc, ValueError):
+        message = str(exc)
+        if message.startswith("Empty summary section"):
+            return "empty_section"
+        if ("Programmatic summary section" in message
+                or message.startswith("Previous summary")):
+            return "programmatic_mismatch"
+        return "heading_mismatch"
+    return "transport_error"
+
+
+def _record_failure(
+    attempt: int, exc: BaseException, token_estimate: int,
+    auto_limit: float, hard_limit: float,
+) -> CompactionFailure:
+    """一次尝试的异常 → 有界 CompactionFailure。
+
+    message 只装本项目自己的拒绝文案或异常**类型名**；正文（可能含 provider
+    回显）与调用栈一样只进诊断日志，不进任务可见状态（ADR-0033 边界 1 同源）。
+    """
+    if isinstance(exc, (_SummaryRejected, ContextWindowExceededError, ValueError)):
+        message = str(exc) or type(exc).__name__
+    else:
+        message = type(exc).__name__
+    return CompactionFailure(
+        attempt=attempt,
+        error_class=_classify_failure(exc),
+        message=message[:_FAILURE_MESSAGE_LIMIT],
+        auto_limit=int(auto_limit),
+        hard_limit=int(hard_limit),
+        token_estimate=token_estimate,
+    )

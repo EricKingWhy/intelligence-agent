@@ -49,11 +49,19 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
 
 
 def test_web_applies_context_budget_before_calling_model(tmp_path, monkeypatch):
+    """超预算任务：装配链的 `max_context_tokens` 在**调模型之前**生效——模型一次都
+    不被调用。W-04（#348）起收口是非终态 `run/paused`（`reason` 经
+    `reason_for_dimension` 自动 = budget_exhausted，`trigger_dimension` =
+    max_context_tokens），不再有 `context_window_exceeded` 终态帧。"""
     model = ScriptedModel([])
     monkeypatch.setattr("agent_harness.assembly.create_chat_model", lambda config, **kw: model)
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
                         model_api_key="sk-test-placeholder", max_context_tokens=100)
     with TestClient(create_app(settings)) as client:
         response = client.post("/api/sessions", json={"task": "large " * 200})
-        assert "context_window_exceeded" in response.text
+        live = [json.loads(line[5:]) for line in response.text.splitlines()
+                if line.startswith("data:")]
+        paused = next(e for e in live if e["type"] == "run/paused")
+        assert paused["data"]["reason"] == "budget_exhausted"
+        assert paused["data"]["trigger_dimension"] == "max_context_tokens"
         assert model.snapshots == []
