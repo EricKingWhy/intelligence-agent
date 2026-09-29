@@ -750,7 +750,15 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                     event, "authorization", permission_value
                 )
                 if latest_permission_fact_id is not None:
-                    superseded_by[latest_permission_fact_id] = fact.fact_id
+                    successor_id = superseded_by.get(latest_permission_fact_id)
+                    if (
+                        successor_id is not None
+                        and prior_fact_by_id.get(successor_id, (0, ""))[1]
+                        == "authorization_revocation"
+                    ):
+                        superseded_by[successor_id] = fact.fact_id
+                    else:
+                        superseded_by[latest_permission_fact_id] = fact.fact_id
                 latest_permission_fact_id = fact.fact_id
                 add_fact(fact)
         elif event.type in _RUN_BOUNDARY_TYPES:

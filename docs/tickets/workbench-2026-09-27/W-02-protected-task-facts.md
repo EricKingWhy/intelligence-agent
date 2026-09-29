@@ -1,7 +1,7 @@
 # W-02 · 建立带 SessionEvent 来源的任务保护事实
 **目标仓库**：intelligence-agent-backend（Python Core / SessionEvent 投影）。
 
-**类型/优先级**：P0 Contract。**依赖**：W-01。**范围**：SessionEvent schema/服务端投影与 `ContextBuilder` 注入点；候选 `session/event.py`、`session/derive.py`、`context/builder.py`。先核对 Engineering Spec 03/06 和 `CONTEXT.md`；不得建 Memory V2 平行事实库。
+**类型/优先级**：P0 Contract。**依赖**：W-01。**范围**：SessionEvent schema/服务端投影、`ContextBuilder` 注入点，以及普通消息 API 的类型化元数据透传；候选 `session/event.py`、`session/derive.py`、`context/builder.py`、Web API client。先核对 Engineering Spec 03/06 和 `CONTEXT.md`；不得建 Memory V2 平行事实库。**不做任务 UI 控件**。
 
 > ⚠️ **2026-09-27 修订**（来源：`docs/PRD_LONG_TASK_CONTEXT_MANAGEMENT.md` §5）：fact 类型新增「失败方案」，见正文 [增量] 标注。
 
@@ -9,7 +9,7 @@
 
 保护事实仅包含：用户原目标、明确约束/授权及其撤销、验收项与变更、精确标识、已确认的关键决策、已完成/未完成边界、未决 Operation、关键证据 ref，**[增量] 失败方案**。每项至少有 `fact_id`、类型、原文字面值或无损结构值、`source_event_id/seq`、状态（生效/被后续用户事件取代）和任务 Session ID。[增量] **失败方案结构**：`{fact_id, type: "failed_approach", 路径描述, 证伪依据, source_event_id/seq, 状态, session_id}`——证伪依据必须指向证伪事件（测试红/用户否决/运行时错误），不接受「模型觉得不行」。仅用户事件/已确认系统事实可改变授权；搜索结果、仓库文本、模型摘要、进度文件及 Memory 候选均不能升级成用户授权。投影须能从原 SessionEvent 前缀重建，Fork 在合法边界继承那一刻生效事实并留来源。
 
-> **2026-09-29 用户批准的运行边界投影澄清**：append-only SessionEvent 与 `derive_protected_facts()` 保留/重建所有 run 边界；`ContextBuilder` 与压缩摘要只向模型提供按 `source_seq` 最新的一条 `work_boundary`，其余事实类别仍按原契约完整注入。这样重复 run 的边界不会累计耗尽独立事实预算。
+> 运行边界的模型上下文投影遵循 [ADR-0007](../../adr/0007-context-compaction-three-tier-fallback.md) 的决议；SessionEvent 全量历史不变。
 
 ## 工作指令
 

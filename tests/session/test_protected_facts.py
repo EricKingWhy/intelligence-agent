@@ -927,6 +927,47 @@ def test_delayed_revocation_does_not_replace_a_newer_authorization(tmp_path):
     assert revocation.superseded_by_fact_id == updated_authorization.fact_id
 
 
+def test_permission_change_after_revocation_supersedes_the_revocation(tmp_path):
+    session = Session.start(
+        JsonlSessionStore(tmp_path),
+        session_id="task",
+        started_data={"permission_mode": "read-only", "auto_approve": False},
+    )
+    original = next(
+        fact for fact in derive_protected_facts(session.events)
+        if fact.type == "authorization"
+    )
+    revoke = session.append(
+        USER_MESSAGE,
+        {
+            "content": "撤销先前授权。",
+            "revoke_fact_id": original.fact_id,
+        },
+    )
+    changed = session.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "workspace-write", "auto_approve": False},
+    )
+
+    facts = derive_protected_facts(session.events)
+    revocation = next(
+        fact for fact in facts
+        if fact.type == "authorization_revocation"
+        and fact.source_event_id == revoke.event_id
+    )
+    updated_authorization = next(
+        fact for fact in facts
+        if fact.type == "authorization" and fact.source_event_id == changed.event_id
+    )
+    original_after = next(fact for fact in facts if fact.fact_id == original.fact_id)
+
+    assert original_after.status == "superseded"
+    assert original_after.superseded_by_fact_id == revocation.fact_id
+    assert revocation.status == "superseded"
+    assert revocation.superseded_by_fact_id == updated_authorization.fact_id
+    assert updated_authorization.status == "active"
+
+
 @pytest.mark.asyncio
 async def test_fork_remaps_revocation_of_parent_session_authorization(tmp_path):
     store = JsonlSessionStore(tmp_path / "sessions")
