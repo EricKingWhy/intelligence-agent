@@ -6590,5 +6590,5 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 ## 2026-09-29 源码审计与 W-02 #346 交付状态
 
-- **#346 / W-02**：实现和两轴审查完成，分支 `codex/346-protected-facts`，当前 tip `5c62e41c`；GitHub issue 正文已同步用户批准的 API 接线与上下文投影范围。全量 pytest 4802 passed / 2 skipped / 51 deselected；本地 Gate-0 `2f1d0d7a` / tree `858c568c` 为 6/6 PASS，报告 `docs/gate/2f1d0d7a0c81a6e1755a89b27b436a89d2c9de8c.json`，后续 tip 仅追加此读数文件。分支已推送，PR #411 OPEN，GitHub 服务端 `gate0` 通过；尚未合并。
+- **#346 / W-02**：实现和两轴审查完成，代码提交 `39a7ee97`；分支 `codex/346-protected-facts` 已推送，PR #411 OPEN，GitHub 服务端 `gate0` 通过，尚未合并。GitHub issue 正文已同步用户批准的 API 接线与上下文投影范围。全量 pytest 4802 passed / 2 skipped / 51 deselected；本地 Gate-0 `cf6f94cd` / tree `f7c4cdb5` 为 6/6 PASS，报告 `docs/gate/cf6f94cdc8947510e8bb21988f5e07625c22d3d3.json`。
 - **Memory V2 #296–#304 源码审计**：#296 OPEN；#298 敏感事实独立 Runtime 检查存在 P1；SQLite→Milvus collection 全量重建路径未闭环；#299 的 Recall@6=0.95 绑定旧 SHA；#301 AC8 测试覆盖有缺口；#302 只有非阻塞公开 smoke、无冻结 baseline；#304 runner / real-gold 报告仅在本机 `codex/mem-v2-8-final-gate`，未推送且落后当前 main。其余逐票实现/证据核对见 `docs/phase_status/2026-09.md`。

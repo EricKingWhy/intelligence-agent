@@ -40,7 +40,7 @@
 
 ## 当前工作焦点
 
-**当前焦点（2026-09-29）**：W-02 / #346 实现与两轴审查已完成，分支 `codex/346-protected-facts` 当前 tip `5c62e41c`；全量 pytest 4802 passed / 2 skipped / 51 deselected。本地 Gate-0 绑定 `2f1d0d7a` / tree `858c568c` 为 6/6 PASS，机器读数 `docs/gate/2f1d0d7a0c81a6e1755a89b27b436a89d2c9de8c.json`；`5c62e41c` 只追加该读数文件。分支已推送，PR #411 OPEN，GitHub 服务端 `gate0` 通过；尚未合并，详见本月归档。
+**当前焦点（2026-09-29）**：W-02 / #346 实现与两轴审查已完成，代码提交 `39a7ee97`；全量 pytest 4802 passed / 2 skipped / 51 deselected。本地 Gate-0 绑定 `cf6f94cd` / tree `f7c4cdb5` 为 6/6 PASS，机器读数 `docs/gate/cf6f94cdc8947510e8bb21988f5e07625c22d3d3.json`。分支 `codex/346-protected-facts` 已推送，PR #411 OPEN，GitHub 服务端 `gate0` 通过；尚未合并，详见本月归档。
 
 **最近集成（2026-09-27）**：#342 并发 resume SeqConflict 已由 PR #369 修复并关闭（根因 9496226e，修复 8ffd4875，merge 1774f4fb）；#341 relay cleanup 遗留已由 PR #343 合入并关闭（merge d4d65fff）。明细与门禁证据见 2026-09 归档。
 
