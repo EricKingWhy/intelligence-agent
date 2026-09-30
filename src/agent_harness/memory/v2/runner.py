@@ -74,6 +74,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Sequence
+from copy import copy
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
@@ -113,6 +114,7 @@ DEFAULT_RECOVERY_LIMIT = 100
 #: 泵空闲但库里还有"等 lease 到期"的 job 时，最短睡多久再回来看一眼（秒）。
 #: 下限存在的理由：`lease_expires_at` 与当前时刻的差可能已经极近，睡 0 秒会变成热循环。
 _MIN_WAKE_SECONDS = 0.05
+_MEMORY_MODEL_TEMPERATURE = 0.0
 
 #: `drain` / `aclose` 等待在途服务循环的上限（秒）。超时即取消——被取消的 job 停在
 #: 非终态，下次恢复扫描重跑（AC6 的四个窗口共用同一条论证）。
@@ -204,13 +206,21 @@ class ChatModelInvoker:
             HumanMessage(content=json.dumps(call.payload, ensure_ascii=False)),
         ]
         async with asyncio.timeout(call.timeout_seconds):
-            response = await model.ainvoke(messages, max_tokens=call.max_output_tokens)
+            response = await model.ainvoke(
+                messages,
+                max_tokens=call.max_output_tokens,
+                response_format={"type": "json_object"},
+            )
         content = getattr(response, "content", None)
+        if isinstance(content, list) and content and all(
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            for block in content
+        ):
+            content = "".join(block["text"] for block in content)
         if not isinstance(content, str):
-            # 非文本形状（多模态块列表等）不是"内容不合格"而是"provider 没按契约回话"：
-            # 归 `provider_error` 而不是 `invalid_model_output`——后者是**解析**失败，
-            # 而这里连可以解析的文本都没拿到。两者处置相同（都终态降级、零写入），
-            # 但归因分开才看得出是哪一层坏了。
+            # 仅接受纯文本或纯文本块；混入图像等非文本内容时仍按 provider 错误 fail closed。
             raise TypeError(
                 f"memory model returned non-text content: {type(content).__name__}"
             )
@@ -220,7 +230,10 @@ class ChatModelInvoker:
         key = (config.provider, config.model_name, config.base_url)
         cached = self._models.get(key)
         if cached is None:
-            cached = self._factory(config, reasoning_effort=self._reasoning_effort)
+            # Deterministic Memory V2 sampling is recorded in ADR-0044 D18.
+            memory_config = copy(config)
+            memory_config.temperature = _MEMORY_MODEL_TEMPERATURE
+            cached = self._factory(memory_config, reasoning_effort=self._reasoning_effort)
             self._models[key] = cached
         return cached
 

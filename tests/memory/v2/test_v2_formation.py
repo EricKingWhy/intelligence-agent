@@ -28,9 +28,10 @@ from agent_harness.memory.v2.formation import (
     ModelSkipReason,
     Sensitivity,
     parse_adjudication_result,
+    parse_adjudication_results,
     parse_formation_result,
 )
-from agent_harness.memory.v2.types import MemoryKind
+from agent_harness.memory.v2.types import MemoryKind, TrustedMemoryIdentity
 
 
 def _semantic_payload() -> dict:
@@ -264,6 +265,20 @@ def test_a_project_candidate_is_valid_with_one() -> None:
     assert (candidate.scope.value, candidate.project_id) == ("project", "p-1")
 
 
+@pytest.mark.parametrize("model_project_id", [None, "model-guessed-project"])
+def test_runtime_replaces_candidate_project_id_with_trusted_identity(model_project_id):
+    candidate = _candidate(scope="project")
+    if model_project_id is not None:
+        candidate["project_id"] = model_project_id
+
+    parsed = parse_formation_result(
+        _formation(candidates=[candidate]),
+        trusted=TrustedMemoryIdentity("tenant", "user", "trusted-project"),
+    )
+
+    assert parsed.candidates[0].project_id == "trusted-project"
+
+
 def test_content_over_the_limit_is_rejected() -> None:
     with pytest.raises(ModelOutputError):
         parse_formation_result(_formation(candidates=[_candidate(content="长" * 501)]))
@@ -403,6 +418,20 @@ def test_an_adjudication_result_is_content_only() -> None:
     assert isinstance(result.result, AdjudicatedContent)
     assert "id" not in AdjudicatedContent.model_fields
     assert "tenant_id" not in AdjudicatedContent.model_fields
+
+
+def test_runtime_replaces_adjudicated_project_id_with_trusted_identity():
+    raw = {"results": [{
+        "action": "ADD", "result": _content(scope="project"),
+        "reason_code": "durable_new",
+    }]}
+
+    parsed = parse_adjudication_results(
+        raw, trusted=TrustedMemoryIdentity("tenant", "user", "trusted-project"),
+    )
+
+    assert parsed[0].result is not None
+    assert parsed[0].result.project_id == "trusted-project"
 
 
 def test_an_adjudication_result_cannot_forge_identity_fields() -> None:

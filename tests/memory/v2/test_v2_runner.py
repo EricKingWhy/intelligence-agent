@@ -795,9 +795,31 @@ async def test_the_invoker_passes_max_tokens_and_the_two_messages() -> None:
     assert await invoker(_call(max_output_tokens=123)) == "{}"
 
     messages, kwargs = model.calls[0]
-    assert kwargs == {"max_tokens": 123}
+    assert kwargs == {
+        "max_tokens": 123,
+        "response_format": {"type": "json_object"},
+    }
     assert [message.content for message in messages] == ["SYSTEM", '{"a": 1}']
     assert len(built) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_calls_do_not_inherit_the_agent_sampling_temperature() -> None:
+    """Memory decisions use deterministic decoding even when chat uses sampling."""
+    model = FakeChatModel()
+    configured = ModelConfig(
+        provider="senseaudio", model_name="senseaudio-model", api_key="unit-test-key",
+        base_url="http://localhost:1", temperature=0.7,
+    )
+    built: list[ModelConfig] = []
+    invoker = ChatModelInvoker(
+        factory=lambda config, **kwargs: (built.append(config), model)[1]
+    )
+
+    assert await invoker(_call(model=configured)) == "{}"
+
+    assert configured.temperature == 0.7
+    assert built[0].temperature == 0.0
 
 
 @pytest.mark.asyncio
@@ -827,10 +849,22 @@ async def test_the_invoker_turns_a_slow_call_into_a_transient_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_invoker_joins_text_only_provider_content_blocks() -> None:
+    model = FakeChatModel()
+    model.content = [
+        {"type": "text", "text": '{"kind":'},
+        {"type": "text", "text": '"semantic"}'},
+    ]
+    invoker = ChatModelInvoker(factory=lambda config, **kwargs: model)
+
+    assert await invoker(_call()) == '{"kind":"semantic"}'
+
+
+@pytest.mark.asyncio
 async def test_the_invoker_rejects_non_text_content() -> None:
     """非文本形状是 provider 没按契约回话（`provider_error`），不是解析失败——两者归因要分开。"""
     model = FakeChatModel()
-    model.content = [{"type": "image"}]
+    model.content = [{"type": "text", "text": "{}"}, {"type": "image"}]
     invoker = ChatModelInvoker(factory=lambda config, **kwargs: model)
 
     with pytest.raises(TypeError):
