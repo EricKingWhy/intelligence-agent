@@ -641,11 +641,17 @@ test('T12l：迟到的 409（人工裁决）→ 原样显示后端 detail（不�
 });
 
 test('T12m：迟到的 404 → 说出「会话已不存在」（不静默丢消息）', async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  let settled = false;
   await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
-    onMessagesPost: (route) => answerLate(route, 404, { detail: 'session not found' }),
+    onMessagesPost: async (route) => {
+      bodies.push(JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>);
+      await answerLate(route, 404, { detail: 'session not found' });
+      settled = true;
+    },
   });
 
   await page.goto('/');
@@ -655,15 +661,27 @@ test('T12m：迟到的 404 → 说出「会话已不存在」（不静默丢消�
   await box.fill('发往已删会话的一句');
   await box.press('Enter');
 
+  // 确定性锚（#442 族3，同 T12k 的 bodies + poll 写法）：先等 POST 真的发出、且
+  // **在窗外落定**回给浏览器（负载下 LATE_MS 的兑现本身可能被拖慢），再断言错误条
+  // ——断言的 5s 预算全部花在前端消费上，不再和迟到落定抢同一个窗口。文案期望一字不改。
+  await expect.poll(() => bodies.length, { timeout: 8000 }).toBeGreaterThanOrEqual(1);
+  expect(bodies[0]).toMatchObject({ content: '发往已删会话的一句' });
+  await expect.poll(() => settled, { timeout: 8000 }).toBe(true);
   await expect(page.locator('.app-error')).toContainText('会话已不存在');
 });
 
 test('T12n：迟到的 422 → 说出「续聊参数无效」（与窗内同一条文案）', async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  let settled = false;
   await routeApi(page, {
     sessions: [],
     events: [],
     onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
-    onMessagesPost: (route) => answerLate(route, 422, { detail: 'bad params' }),
+    onMessagesPost: async (route) => {
+      bodies.push(JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>);
+      await answerLate(route, 422, { detail: 'bad params' });
+      settled = true;
+    },
   });
 
   await page.goto('/');
@@ -673,6 +691,10 @@ test('T12n：迟到的 422 → 说出「续聊参数无效」（与窗内同一�
   await box.fill('参数不对的一句');
   await box.press('Enter');
 
+  // 确定性锚（#442 族3）：同 T12m——先锚「POST 已发出且窗外落定」，再断言文案。
+  await expect.poll(() => bodies.length, { timeout: 8000 }).toBeGreaterThanOrEqual(1);
+  expect(bodies[0]).toMatchObject({ content: '参数不对的一句' });
+  await expect.poll(() => settled, { timeout: 8000 }).toBe(true);
   await expect(page.locator('.app-error')).toContainText('续聊参数无效');
 });
 

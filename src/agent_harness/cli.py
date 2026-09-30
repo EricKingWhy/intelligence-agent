@@ -1070,7 +1070,13 @@ def _resolve_fork_ordinal(
     就不合法，只能按可分叉的锚点数序数。越界报错同时给序数范围与 seq
     清单（用户按序数提问，按 seq 对账）。
     """
-    boundaries = find_fork_boundaries(store.read_events(session_id))
+    # `#445`：read_events 对不存在的会话返回 []（不抛 SessionNotFound），
+    # 解析器又先于 fork_session 运行——不存在/空日志必须在此分开报，
+    # 否则被误报成下面的序数越界。
+    events = store.read_events(session_id)
+    if not events:
+        raise ForkBoundaryError(f"Session '{session_id}' 不存在或事件日志为空")
+    boundaries = find_fork_boundaries(events)
     if not 1 <= from_message <= len(boundaries):
         raise ForkBoundaryError(
             f"--from-message {from_message} 超出范围：父会话 '{session_id}' "
