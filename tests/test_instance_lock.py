@@ -241,8 +241,9 @@ def test_rebuild_maintenance_publishes_fence_then_detects_active_bypass_writer(
         (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).write_text(
             "pending", encoding="utf-8",
         )
-        with pytest.raises(InstanceLockError, match="workspace writer is active"):
+        with pytest.raises(InstanceLockError, match="workspace writer is active") as error:
             maintenance.assert_no_shared_root_writers()
+        assert "maintenance" not in str(error.value)
     finally:
         proc.kill()
         proc.wait(timeout=30)

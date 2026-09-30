@@ -248,7 +248,7 @@ class InstanceLock:
                     _take_os_lock(fd)
                 except OSError as error:
                     raise InstanceLockError(
-                        "A shared-root workspace writer is active; stop it before retrying maintenance."
+                        "A shared-root workspace writer is active; stop it before retrying."
                     ) from error
             finally:
                 os.close(fd)
