@@ -319,3 +319,46 @@ async def test_child_without_cwd_anchor_resolves_to_owner_workspace(
     assert harness.state.workspace_registry.recorded_workspace_roots(child_id) == [
         str(owner_root)
     ]
+
+
+# ── AC2 补强：委派标记在而 agent_id 不可解析 ⇒ 响亮失败（fail-closed）──────
+
+
+def _corrupt_started_agent_id(
+    harness: _Harness, session_id: str, new_agent_id: str | None
+) -> None:
+    """篡改 session/started 信封的 agent_id（模拟损坏 / 历史遗留数据）。"""
+    path = harness.state.sessions_root / session_id / "events.jsonl"
+    rewritten: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        obj = json.loads(line)
+        if obj.get("type") == "session/started":
+            if new_agent_id is None:
+                obj.pop("agent_id", None)
+            else:
+                obj["agent_id"] = new_agent_id
+        rewritten.append(json.dumps(obj, ensure_ascii=False))
+    path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("broken_agent_id", ["ghost-profile", None])
+@pytest.mark.asyncio
+async def test_child_resume_with_unresolvable_agent_id_refuses_full_surface(
+    tmp_path: Path, monkeypatch, broken_agent_id,
+):
+    """委派标记在而 agent_id 缺失/未知 ⇒ 拒绝恢复，不静默回落全集工具面。
+
+    `_delegated_child_agent_profile` 的 fail-closed 分支：无法按子会话自己的
+    AgentSpec 重建授权时，唯一安全的动作是响亮失败——静默返回 None 等于把
+    恢复入口开成 BUILTIN_LOCAL_TOOLS 全集（变异实证：把 raise 改成
+    `return None` 后本测试是唯一转红者）。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(harness, parent_cwd=tmp_path / "project")
+    _corrupt_started_agent_id(harness, child_id, broken_agent_id)
+
+    types_before = harness.types(child_id)
+    with pytest.raises(ValueError):
+        await harness.service.resume_and_launch(session_id=child_id, task="继续")
+    # 响亮失败且零副作用：不落 session/resumed、不建 run、不改注册表。
+    assert harness.types(child_id) == types_before
