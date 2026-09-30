@@ -96,6 +96,65 @@ async def test_fork_command_child_inherits_parent_model(tmp_path: Path) -> None:
     ) == ("deepseek", "gpt-4o")
 
 
+# ── #424：--from-message 承诺的是**序数**（第 N 条用户消息）───────────
+#
+# 历史行为把 N 当事件 seq 直传 fork_session。纯消息会话里二者恰好重合
+# （session/started 占 seq 0，用户消息 seq 1,2,…——ordinal N == seq N），
+# 掩盖了语义错位；真实会话里有 run/model/tool 事件插在消息之间，seq 与
+# 序数立刻分叉：要么报错只给 seq 清单，要么 fork 到错误的点。
+
+
+def _prepare_with_gap(tmp_path: Path) -> JsonlSessionStore:
+    """started(0) + user#1(1) + model/completed(2) + user#2(3)：序数 ≠ seq。"""
+    from agent_harness.session.event import MODEL_COMPLETED
+
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    parent = Session.start(store, session_id="parent")
+    parent.append(USER_MESSAGE, {"content": "第一条"})
+    parent.append(MODEL_COMPLETED, {"content": "ok"})
+    parent.append(USER_MESSAGE, {"content": "第二条"})
+    return store
+
+
+async def test_from_message_is_ordinal_not_seq(tmp_path: Path) -> None:
+    """--from-message 2 = 第 2 条用户消息（seq 3），不是事件 seq 2。
+
+    seq 2 是 model/completed——旧语义在此直接抛 ForkBoundaryError，
+    或（消息恰在 seq N 时）静默 fork 到错误的点。
+    """
+    store = _prepare_with_gap(tmp_path)
+
+    child_id = await fork_command(
+        "parent", from_message=2, no_summary=True,
+        workspace_dir=str(tmp_path), write=lambda _line: None,
+    )
+
+    seed_user_messages = [
+        e.data.get("content") for e in store.read_events(child_id)
+        if e.type == USER_MESSAGE
+    ]
+    assert seed_user_messages == ["第一条"], (
+        "序数 2 应锚定第二条用户消息（其本身不进 seed），seed 只留第一条"
+    )
+
+
+async def test_from_message_out_of_range_error_is_dual_annotated(
+    tmp_path: Path,
+) -> None:
+    """越界报错同时给序数范围与底层 seq 清单（用户按序数提问，按 seq 对账）。"""
+    _prepare_with_gap(tmp_path)
+    from agent_harness.session.fork import ForkBoundaryError
+
+    with pytest.raises(ForkBoundaryError) as exc_info:
+        await fork_command(
+            "parent", from_message=3, no_summary=True,
+            workspace_dir=str(tmp_path), write=lambda _line: None,
+        )
+    message = str(exc_info.value)
+    assert "3" in message, message
+    assert "[1, 3]" in message, f"错误信息应列出合法锚点 seq 清单：{message}"
+
+
 def test_parse_fork_args() -> None:
     args = _parse_fork_args(["sess-1", "--from-message", "3"])
     assert (args.session_id, args.from_message, args.no_summary) == (

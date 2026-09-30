@@ -12,7 +12,7 @@
  *  "未选"时的行为一致。 */
 
 import { describe, expect, it } from 'vitest';
-import { toAmendFields, toCreateControls, type ComposerControls } from './amend';
+import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './amend';
 
 const EMPTY: ComposerControls = {
   model: null,
@@ -67,5 +67,28 @@ describe('toCreateControls — 创建路径控制面（amend 三项 + permission
   it('空档位 → 各字段 undefined（api 层丢弃后即「不传键」）', () => {
     expect(toCreateControls(EMPTY).permission_mode).toBeUndefined();
     expect(toCreateControls(EMPTY).model).toBeUndefined();
+  });
+});
+
+// ── #426：新建会话的预算入口（最小可用，一维 turns）──
+
+describe('toCreateBudget — turns 上限草稿 → budget.run 声明', () => {
+  it('正整数草稿 → budget.run.max_agent_turns_total（随启动 run 的请求提交）', () => {
+    expect(toCreateBudget('12')).toEqual({
+      run: { max_agent_turns_total: 12 },
+    });
+  });
+
+  it('空 / 半截 / 非数字草稿 → undefined = 不发键 = 后端默认（默认行为不变）', () => {
+    expect(toCreateBudget(null)).toBeUndefined();
+    expect(toCreateBudget('')).toBeUndefined();
+    expect(toCreateBudget('  ')).toBeUndefined();
+    expect(toCreateBudget('12a')).toBeUndefined();
+    expect(toCreateBudget('abc')).toBeUndefined();
+  });
+
+  it('0 / 负数不是合法 ceiling（后端 ge=1 必 422）→ 视同未设置，不发键', () => {
+    expect(toCreateBudget('0')).toBeUndefined();
+    expect(toCreateBudget('-3')).toBeUndefined();
   });
 });
