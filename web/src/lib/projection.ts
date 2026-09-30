@@ -1370,6 +1370,13 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: noopProjection,
     summarize: emptySummary,
   },
+  // #430（W-02.1）：保护事实独立预算超限的 fail-closed 诊断事件——与
+  // CONTEXT_COMPACTION_FAILED / MEMORY_DEGRADED 同形：状态/诊断面，不投影成对话
+  // 消息（run 的暂停生命周期由 run/paused 承载），本行只负责 `Record` 的穷尽性。
+  [EventType.CONTEXT_PROTECTED_FACTS_EXCEEDED]: {
+    apply: noopProjection,
+    summarize: emptySummary,
+  },
   // W-26（#380）：`task/plan_updated` 是进度清单整表覆盖的状态事件——不投影成消息、
   // 不带来新的投影状态。与 CONTEXT_COMPACTION_FAILED 同形登记为 no-op ⇒ 已知类型、
   // 不进 `unknown_events`；清单渲染面归 W-27（#381 Web+桌面渲染）与 W-28（#382 TUI 渲染），
