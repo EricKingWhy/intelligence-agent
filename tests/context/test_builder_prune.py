@@ -44,7 +44,10 @@ async def _append_read(
 def _builder(store, **kwargs) -> ContextBuilder:
     return ContextBuilder(
         ScriptedModel([]), max_context_tokens=10_000_000,
-        artifact_store=store, artifact_read_tool_name="read_artifact", **kwargs,
+        artifact_store=store, artifact_read_tool_name="read_artifact",
+        keep_recent_tool_results=kwargs.pop("keep_recent_tool_results", 0),
+        clear_at_least_tokens=kwargs.pop("clear_at_least_tokens", 0),
+        **kwargs,
     )
 
 
@@ -100,7 +103,11 @@ class TestBuilderPruneIntegration:
         assert builder._token_estimate_total == _expected_pruned_total(session, builder)
         # 每次裁剪的骨架成本已进 memo（同决策再 build 命中缓存，数字不变）
         again = await builder.build(session)
-        assert builder._token_estimate_total == estimate_message_tokens(again)
+        # Protected facts are injected SystemMessages but tracked in usage_snapshot's
+        # separate ``other`` bucket; the cache remains the durable session projection.
+        assert builder._token_estimate_total == (
+            estimate_message_tokens(again) - builder._last_protected_fact_tokens
+        )
 
     @pytest.mark.asyncio
     async def test_memo_invalidated_when_new_duplicate_arrives(self, tmp_path):
@@ -139,7 +146,9 @@ class TestBuilderPruneIntegration:
         builder = _builder(store)
         messages = await builder.build(session)
         snapshot = builder.usage_snapshot(session)
-        assert snapshot["messages"] == estimate_message_tokens(messages)
+        assert snapshot["messages"] == (
+            estimate_message_tokens(messages) - builder._last_protected_fact_tokens
+        )
         assert snapshot["messages"] < estimate_message_tokens(session.derive_messages())
 
     def test_constructor_requires_pairing(self):
@@ -148,3 +157,50 @@ class TestBuilderPruneIntegration:
             ContextBuilder(model, artifact_store=FakeArtifactStore())
         with pytest.raises(ValueError):
             ContextBuilder(model, artifact_read_tool_name="read_artifact")
+
+    @pytest.mark.asyncio
+    async def test_builder_gate_blocks_small_benefit_prunes(self, tmp_path):
+        """T9（#414）：门在 build 链路里真实生效——同一重复 read 流，护栏关
+        （夹具缺省双 0）照常裁；clear_at_least_tokens=5000 时单次小收益
+        （数百 token）低于阈值 ⇒ 不再被裁（投影保持全文）。"""
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "result line\n" * 20
+        for i in range(3):
+            await _append_read(
+                session, store, call_id=f"c{i}", path="a.txt", content=content)
+
+        off_builder = _builder(store)
+        messages = await off_builder.build(session)
+        assert sum(1 for m in messages if m.type == "tool" and json_pruned(m.content)) == 2
+
+        gated_builder = _builder(store, clear_at_least_tokens=5000)
+        messages = await gated_builder.build(session)
+        assert not any(
+            m.type == "tool" and json_pruned(m.content) for m in messages
+        ), "小收益低于 clear_at_least_tokens ⇒ 门拦下，投影保持全文"
+
+    @pytest.mark.asyncio
+    async def test_builder_gate_blocks_prune_keeps_memo_consistent(self, tmp_path):
+        """T10（#414）：门拦下路径的记账一致性。build1 用护栏关的 builder 裁掉
+        （决策落地）；追加事件后换一个带 clear_at_least_tokens 门的 builder 重
+        build——门拦下时 report.pruned 为空、决策 dict 被覆写为空，投影回到全文
+        成本；`_token_estimate_total` 必须仍等于「按该 builder 决策重放投影」的重估
+        （`_expected_pruned_total` 对账）。"""
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "result line\n" * 20
+        for i in range(3):
+            await _append_read(
+                session, store, call_id=f"c{i}", path="a.txt", content=content)
+
+        builder = _builder(store)
+        await builder.build(session)
+        assert builder._prune_decisions.get(session.session_id), "build1 必须裁过"
+
+        # 追加一条不改变等价类的新结果，再以门拦形态重 build。
+        await _append_read(
+            session, store, call_id="tail", path="other.txt", content=content)
+        builder = _builder(store, clear_at_least_tokens=5000)
+        await builder.build(session)
+        assert builder._token_estimate_total == _expected_pruned_total(session, builder)

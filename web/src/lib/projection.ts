@@ -1346,6 +1346,8 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectOperationReconcileRequired,
     summarize: summarizeOperationReconcileRequired,
   },
+  // #346：reconciliation confirmation is durable source evidence, not a timeline item.
+  [EventType.OPERATION_RECONCILED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.ARTIFACT_CREATED]: {
     apply: projectArtifactCreated,
     summarize: summarizeArtifactCreated,
@@ -1386,6 +1388,8 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.MEMORY_UPDATED]: { apply: noopProjection, summarize: emptySummary },
   // The event is durable for the #301 explanation UI, but does not mutate session projection state.
   [EventType.MEMORY_RECALLED]: { apply: noopProjection, summarize: emptySummary },
+  // #346: protected facts are a durable context projection, not a conversation timeline item.
+  [EventType.TASK_PROTECTED_FACT]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_FAILURE_GUARD]: {
     apply: projectToolFailureGuard,
     summarize: summarizeToolFailureGuard,

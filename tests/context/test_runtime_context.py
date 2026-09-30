@@ -17,10 +17,14 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.session import (
+    COMPACTION_END,
     COMPACTION_START,
+    CONTEXT_COMPACTED,
     MODEL_COMPLETED,
     TOOL_RESULT,
     USER_MESSAGE,
+    JsonlSessionStore,
+    Session,
 )
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -38,6 +42,14 @@ MODEL_SECTIONS = """## 已完成工作与关键决策
 继续当前请求。"""
 
 SNAPSHOT = "RUNTIME_SNAPSHOT_TEXT_9f3a"
+
+
+def _facts_message(messages):
+    return next(
+        message for message in messages
+        if isinstance(message, HumanMessage)
+        and message.content.startswith("## Protected task facts\n")
+    )
 
 
 class _RecordingProvider:
@@ -77,7 +89,9 @@ async def test_runtime_context_injected_before_last_user_message(tmp_path):
 
     messages = await builder.build(session)
 
-    assert len(messages) == 2
+    assert len(messages) == 4
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
     assert messages[-1].content == "你好"
     assert messages[-2].content == SNAPSHOT
 
@@ -89,7 +103,10 @@ async def test_runtime_context_absent_by_default(tmp_path):
     session.append(USER_MESSAGE, {"content": "你好"})
     builder = ContextBuilder(ScriptedModel([]))
 
-    assert await builder.build(session) == session.derive_messages()
+    messages = await builder.build(session)
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
+    assert messages[2:] == session.derive_messages()
 
 
 @pytest.mark.asyncio
@@ -106,7 +123,9 @@ async def test_runtime_context_provider_returning_blank_is_skipped(tmp_path, bla
 
     messages = await builder.build(session)
 
-    assert messages == session.derive_messages()
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
+    assert messages[2:] == session.derive_messages()
 
 
 @pytest.mark.asyncio
@@ -161,8 +180,11 @@ async def test_runtime_context_midtolloop_position(tmp_path):
     )
     messages = await builder.build(session)
 
-    contents = [m.content for m in messages]
-    assert contents == [SNAPSHOT, "用工具查一下", "", "文件内容"]
+    assert isinstance(messages[0], SystemMessage)
+    assert _facts_message(messages).content.startswith("## Protected task facts\n")
+    assert [m.content for m in messages[2:]] == [
+        SNAPSHOT, "用工具查一下", "", "文件内容"
+    ]
 
     # 配对未被切开：带 tool_calls 的 AIMessage 紧跟其 ToolMessage
     ai_index = next(
@@ -190,9 +212,13 @@ async def test_runtime_context_after_system_prompt_and_providers(tmp_path):
     assert isinstance(messages[0], SystemMessage)
     assert messages[0].content == "你是 coding agent。"
     assert isinstance(messages[1], SystemMessage)
-    assert messages[1].content == "[provider 注入]"
-    assert messages[2].content == SNAPSHOT
-    assert messages[3].content == "你好"
+    assert "Runtime permission and approval checks are authoritative" in messages[1].content
+    assert isinstance(messages[2], SystemMessage)
+    assert messages[2].content == "[provider 注入]"
+    assert isinstance(messages[3], HumanMessage)
+    assert messages[3].content.startswith("## Protected task facts\n")
+    assert messages[4].content == SNAPSHOT
+    assert messages[5].content == "你好"
 
 
 @pytest.mark.asyncio
@@ -276,26 +302,32 @@ async def test_runtime_context_compaction_path_includes_cost(tmp_path):
     def builder_with(**kwargs) -> ContextBuilder:
         return ContextBuilder(
             ScriptedModel([AIMessage(content=MODEL_SECTIONS)]), max_context_tokens=5000,
-            auto_compact_threshold=0.20, hard_guard_threshold=0.85, **kwargs,
+            auto_compact_threshold=0.30, hard_guard_threshold=0.85, **kwargs,
         )
 
-    session_a = make_session(tmp_path / "a")
-    fill(session_a)
+    with_store = JsonlSessionStore(root=tmp_path / "with-snapshot")
+    session = Session.start(with_store)
+    fill(session)
+    without_store = JsonlSessionStore(root=tmp_path / "without-snapshot")
+    session_without_snapshot = Session(session.session_id, without_store)
+    session_without_snapshot.adopt_history(session.events)
+
     provider_a = _RecordingProvider()
     builder_a = builder_with(
         context_providers=[provider_a], runtime_context_provider=lambda: SNAPSHOT,
     )
-    await builder_a.build(session_a)
+    await builder_a.build(session)
 
-    # 控制断言：必须真的走了压缩路径，否则本测试测的是另一条分支
-    assert any(e.type == COMPACTION_START for e in session_a.events), "未触发压缩路径"
-
-    session_b = make_session(tmp_path / "b")
-    fill(session_b)
     provider_b = _RecordingProvider()
     builder_b = builder_with(context_providers=[provider_b])
-    await builder_b.build(session_b)
-    assert any(e.type == COMPACTION_START for e in session_b.events), "未触发压缩路径"
+    await builder_b.build(session_without_snapshot)
+
+    expected_compaction_events = {
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    }
+    for store in (with_store, without_store):
+        persisted_types = {event.type for event in store.read_events(session.session_id)}
+        assert expected_compaction_events <= persisted_types
 
     assert provider_a.remaining and provider_b.remaining
     assert len(provider_a.remaining) == 1, "压缩路径 provider 也只应被调用一次"

@@ -16,7 +16,9 @@ supersession 只设一条规则 **R1（同源重复）**，宁可窄而确定、
 + 内容指纹相同（外置结果即 artifact_ref = 原文 sha256）⇒ 较旧的可裁、保留最新。
 不裁清单全部确定性：指纹不同 / ok=false（失败诊断保留）/ 等价类最新一条 /
 被 ``source_event_ids`` 引用（W-02 保护事实接缝，main 上恒空）/ 无 artifact_ref
-（已保存裁决 (A)：pruner 不现场 store.save，未外置结果不参与）/ ref 校验失败。
+（已保存裁决 (A)：pruner 不现场 store.save，未外置结果不参与）/ ref 校验失败 /
+最近 K 条 tool 结果窗口内（#414 W-31.2 ``keep_recent_tool_results``）/
+一轮收益低于收益门（#414 W-31.2 ``clear_at_least_tokens``）。
 
 零新事件类型、零模型调用、零工具执行——纯投影决策，供重启后按事件流重建解释。
 """
@@ -31,6 +33,7 @@ from typing import Any
 
 from langchain_core.messages import AnyMessage, ToolMessage
 
+from agent_harness.context.tokens import estimate_tokens
 from agent_harness.session.event import (
     MODEL_COMPLETED,
     TOOL_CALL,
@@ -42,7 +45,9 @@ from agent_harness.storage.artifact import ArtifactStore
 logger = logging.getLogger("agent_harness.context.pruner")
 
 __all__ = [
+    "SKIP_BELOW_CLEAR_FLOOR",
     "SKIP_PROTECTED_REFERENCE",
+    "SKIP_RECENT_WINDOW",
     "SKIP_UNREADABLE_REF",
     "PruneRecord",
     "PruneReport",
@@ -60,6 +65,14 @@ SKIP_PROTECTED_REFERENCE = "protected_reference"
 
 #: 豁免原因：artifact_ref 读回校验失败（含 KeyError 与其他 store 异常）。
 SKIP_UNREADABLE_REF = "unreadable_ref"
+
+#: 豁免原因：候选落在最近 K 条 tool 结果窗口内（#414 W-31.2；窗口按全量
+#: tool/result 事件序计、含失败结果——保守口径）。
+SKIP_RECENT_WINDOW = "recent_window"
+
+#: 豁免原因：一轮 planned 的总收益估算（原文 − 骨架，token）低于收益下限门
+#: （#414 W-31.2 ``clear_at_least_tokens``；门拦下也照记 planned_freed_tokens）。
+SKIP_BELOW_CLEAR_FLOOR = "below_clear_floor"
 
 
 @dataclass(frozen=True)
@@ -98,6 +111,9 @@ class PruneReport:
 
     pruned: tuple[PruneRecord, ...] = ()
     skipped: tuple[PruneSkip, ...] = ()
+    #: #414 W-31.2：本轮 planned（窗口/豁免/校验之后本会裁掉）的总收益估算
+    #: （原文 − 骨架，token）。门拦下时同样照记——观测口径与门判定同源。
+    planned_freed_tokens: int = 0
 
     @property
     def pruned_seqs(self) -> frozenset[int]:
@@ -106,7 +122,11 @@ class PruneReport:
 
 @dataclass(frozen=True)
 class _Candidate:
-    """一条满足 R1 全部前置条件的 tool/result（等价类成员，等待豁免/校验）。"""
+    """一条满足 R1 全部前置条件的 tool/result（等价类成员，等待豁免/校验）。
+
+    ``content``（#414 W-31.2）是被替换 ToolMessage 的完整 content（ToolResult
+    JSON）——收益门的估算基准（原文 − 骨架），与 builder memo 对账同源。
+    """
 
     seq: int
     event_id: str
@@ -116,6 +136,7 @@ class _Candidate:
     message: str
     args: Any
     args_key: str
+    content: str
 
 
 class ToolResultPruner:
@@ -125,17 +146,35 @@ class ToolResultPruner:
     store ABC 无删除语义），False（校验异常）同样缓存：读回失败是保守方向，
     缓存它避免远端 store 每次 build 重复探测。两向缓存 ⇒ 决策在事件 append-only
     + 校验粘滞下单调收敛，不会回退。
+
+    #414 W-31.2 增加两个确定性护栏（语义见 PRD §4.2 对照笔）：
+    ``keep_recent_tool_results`` = 最近 K 条 tool 结果窗口豁免（含失败结果）；
+    ``clear_at_least_tokens`` = 收益下限门（planned 总收益低于阈值 ⇒ 本轮整体
+    不裁）。两者 0 = 关闭，回落 W-03 冻结行为。
     """
 
-    def __init__(self, artifact_store: ArtifactStore, read_tool_name: str) -> None:
+    def __init__(
+        self,
+        artifact_store: ArtifactStore,
+        read_tool_name: str,
+        *,
+        keep_recent_tool_results: int = 3,
+        clear_at_least_tokens: int = 5000,
+    ) -> None:
         if artifact_store is None:
             raise ValueError("artifact_store is required")
         if not read_tool_name:
             # #186 教训：骨架行的回读提示必须点名装配期真实读回工具，
             # 名字不得写死、也不得静默缺省。
             raise ValueError("read_tool_name is required (skeleton note names the real tool)")
+        if keep_recent_tool_results < 0 or clear_at_least_tokens < 0:
+            # #414 W-31.2：负值 = 配错，构造处响亮失败；0 合法 = 关闭该护栏。
+            raise ValueError(
+                "keep_recent_tool_results / clear_at_least_tokens must be >= 0 (0 = off)")
         self._store = artifact_store
         self._read_tool_name = read_tool_name
+        self._keep_recent_tool_results = keep_recent_tool_results
+        self._clear_at_least_tokens = clear_at_least_tokens
         self._validation: dict[str, bool] = {}
 
     async def prune(
@@ -158,7 +197,7 @@ class ToolResultPruner:
     ) -> list[AnyMessage]:
         """把 seq → 骨架行 映射原位套到 derive 产物上（同步重放路径）。
 
-        仅替换 source_range 已知的 ToolMessage——compaction summary（SystemMessage）
+        仅替换 source_range 已知的 ToolMessage——compaction summary（HumanMessage）
         与 dangling 合成（range=None）天然排除，seq 碰撞（bracket 起点恰为某
         tool/result seq）也不会误伤。
         """
@@ -193,7 +232,13 @@ class ToolResultPruner:
             ref for event in events for ref in (event.source_event_ids or [])
             if isinstance(ref, str)
         }
-        pruned: list[PruneRecord] = []
+        # #414 W-31.2 keep_recent_tool_results：最近 K 条 tool 结果窗口（按全量
+        # 事件序计、**含失败结果**——失败结果占窗口名额，口径保守）。
+        window: frozenset[int] = frozenset()
+        if self._keep_recent_tool_results > 0:
+            result_seqs = [e.seq for e in events if e.type == TOOL_RESULT]
+            window = frozenset(result_seqs[-self._keep_recent_tool_results:])
+        planned: list[tuple[_Candidate, PruneRecord]] = []
         skipped: list[PruneSkip] = []
         for members in groups.values():
             # 等价类最新一条永远保留；较旧者逐条过豁免与校验。
@@ -206,6 +251,14 @@ class ToolResultPruner:
                         reason=SKIP_PROTECTED_REFERENCE,
                     ))
                     continue
+                if candidate.seq in window:
+                    # 纯事件推导的豁免先于 store I/O：窗口命中不做读回探测。
+                    skipped.append(PruneSkip(
+                        seq=candidate.seq, tool_call_id=candidate.tool_call_id,
+                        artifact_ref=candidate.artifact_ref,
+                        reason=SKIP_RECENT_WINDOW,
+                    ))
+                    continue
                 if not await self._readable(candidate.artifact_ref):
                     skipped.append(PruneSkip(
                         seq=candidate.seq, tool_call_id=candidate.tool_call_id,
@@ -213,17 +266,37 @@ class ToolResultPruner:
                         reason=SKIP_UNREADABLE_REF,
                     ))
                     continue
-                pruned.append(PruneRecord(
+                planned.append((candidate, PruneRecord(
                     seq=candidate.seq,
                     tool_call_id=candidate.tool_call_id,
                     tool_name=candidate.tool_name,
                     artifact_ref=candidate.artifact_ref,
                     superseded_by_seq=survivor.seq,
                     skeleton=self._render_skeleton(candidate),
-                ))
-        pruned.sort(key=lambda record: record.seq)
+                )))
+        # 第二遍裁决（#414 W-31.2 clear_at_least_tokens 收益下限门）：planned 的
+        # 总收益（原文 − 骨架，token）低于阈值 ⇒ 本轮 planned 整体转豁免；收益量
+        # 无论门开与否都照记（观测口径与门判定同源）。严格 < 才拦，恰好等于放行。
+        planned_freed_tokens = sum(
+            estimate_tokens(candidate.content) - estimate_tokens(record.skeleton)
+            for candidate, record in planned
+        )
+        if (self._clear_at_least_tokens > 0
+                and planned_freed_tokens < self._clear_at_least_tokens):
+            records: list[PruneRecord] = []
+            skipped.extend(PruneSkip(
+                seq=record.seq, tool_call_id=record.tool_call_id,
+                artifact_ref=record.artifact_ref,
+                reason=SKIP_BELOW_CLEAR_FLOOR,
+            ) for _candidate, record in planned)
+        else:
+            records = [record for _candidate, record in planned]
+        records.sort(key=lambda record: record.seq)
         skipped.sort(key=lambda skip: skip.seq)
-        report = PruneReport(pruned=tuple(pruned), skipped=tuple(skipped))
+        report = PruneReport(
+            pruned=tuple(records), skipped=tuple(skipped),
+            planned_freed_tokens=planned_freed_tokens,
+        )
         if report.pruned:
             logger.debug(
                 "Tool result pruner removed %d superseded projection(s)",
@@ -283,6 +356,7 @@ def _candidate_from(
     if args_key is None:
         return None
     message = payload.get("message")
+    content = event.data.get("content")
     return _Candidate(
         seq=event.seq,
         event_id=event.event_id,
@@ -292,6 +366,8 @@ def _candidate_from(
         message=message if isinstance(message, str) else "",
         args=args,
         args_key=args_key,
+        # #414 W-31.2：原文全文——收益门的估算基准（原文 − 骨架）。
+        content=content if isinstance(content, str) else "",
     )
 
 

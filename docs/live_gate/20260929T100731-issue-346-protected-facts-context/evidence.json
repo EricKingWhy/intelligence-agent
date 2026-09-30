@@ -1,0 +1,39 @@
+{
+  "ticket": 346,
+  "captured_at_utc": "2026-09-29T10:07:31.856740+00:00",
+  "model_source": "configured fallback; primary provider is not in the app provider registry",
+  "model": {
+    "provider": "mimo",
+    "name": "mimo-v2.6-flash",
+    "base_url": "https://api.xiaomimimo.com/v1",
+    "credential_present": true
+  },
+  "primary_provider_supported": false,
+  "request_messages_redacted": [
+    {
+      "role": "system",
+      "name": null,
+      "content_sha256": "a4ef371da49d7dc0051302cf00ea718b0967b63c84c966ebf73a082d5cd809d4",
+      "contains_synthetic_identifier": false
+    },
+    {
+      "role": "human",
+      "name": null,
+      "content_sha256": "378e4990c5ff7b2b96e00259fa1f8ca9aa31d7880ff520c2026d9896259ea135",
+      "contains_synthetic_identifier": true
+    },
+    {
+      "role": "human",
+      "name": null,
+      "content_sha256": "d3ffd2ccc0a19b7753281de0f545b14d5b360c36819dfb930c547d6d310de5a5",
+      "contains_synthetic_identifier": true
+    }
+  ],
+  "assertions": {
+    "protected_value_present_in_human_context": true,
+    "protected_value_absent_from_system_context": true,
+    "real_model_returned_the_exact_synthetic_identifier": true
+  },
+  "result": "passed",
+  "redaction": "Raw prompts, model response, and credentials were not persisted."
+}

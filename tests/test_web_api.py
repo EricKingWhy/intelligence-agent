@@ -568,7 +568,8 @@ class _ImmediateRuntime:
     """预热用替身：立刻结束，只为把进程一次性冷启动成本在测量窗外付掉。"""
 
     async def run_stream(self, session: Any, task: str,
-                         cancel_reason_supplier=None) -> AsyncIterator[AgentEvent]:
+                         cancel_reason_supplier=None,
+                         user_input_metadata=None) -> AsyncIterator[AgentEvent]:
         yield AgentEvent(type=RUN_STARTED)
 
 
@@ -589,7 +590,8 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
             self.persisted_session_id: str | None = None
 
         async def run_stream(self, session: Any, task: str,
-                             cancel_reason_supplier=None) -> AsyncIterator[AgentEvent]:
+                             cancel_reason_supplier=None,
+                             user_input_metadata=None) -> AsyncIterator[AgentEvent]:
             self.persisted_session_id = session.session_id
             session.append(event_type=RUN_STARTED, data={"reason": "disconnect-test"})
             try:

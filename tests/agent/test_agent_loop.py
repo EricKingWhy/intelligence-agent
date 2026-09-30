@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Annotated
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentRuntime
@@ -29,7 +29,7 @@ from agent_harness.agent.run_budget import (
     RunLimits,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
-from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED
+from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED, USER_MESSAGE
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -136,6 +136,21 @@ class TestAgentLoopNoTool:
         assert result.final_text == "你好，我是助手"
         assert len(scripted.snapshots) == 1
 
+    @pytest.mark.asyncio
+    async def test_input_metadata_cannot_override_user_message_content(self, tmp_path):
+        session = make_session(tmp_path)
+        runtime = _runtime(_scripted_no_tool())
+
+        async for _ in runtime.run_stream(
+            session,
+            "用户实际输入",
+            user_input_metadata={"content": "伪造的覆盖内容"},
+        ):
+            pass
+
+        user_event = next(event for event in session.events if event.type == USER_MESSAGE)
+        assert user_event.data["content"] == "用户实际输入"
+
 
 # ---------- 路径 B：一次工具往返 ----------
 def _scripted_one_tool() -> ScriptedModel:
@@ -187,9 +202,12 @@ class TestAgentLoopOneTool:
         second_round = scripted.snapshots[1].messages
 
         message_types = [type(m).__name__ for m in second_round]
-        assert message_types == ["HumanMessage", "AIMessage", "ToolMessage"]
-        assert second_round[1].tool_calls[0]["id"] == TOOL_CALL_ID
-        assert second_round[2].tool_call_id == TOOL_CALL_ID
+        assert isinstance(second_round[0], SystemMessage)
+        assert message_types[1:] == [
+            "HumanMessage", "HumanMessage", "AIMessage", "ToolMessage",
+        ]
+        assert second_round[3].tool_calls[0]["id"] == TOOL_CALL_ID
+        assert second_round[4].tool_call_id == TOOL_CALL_ID
 
 
 # ---------- 场景③：连续两轮工具 ----------
@@ -254,19 +272,21 @@ class TestAgentLoopTwoConsecutiveToolRounds:
 
         third_round = scripted.snapshots[2].messages
 
-        assert len(third_round) == 5
+        assert len(third_round) == 7
+        assert isinstance(third_round[0], SystemMessage)
         message_types = [type(m).__name__ for m in third_round]
-        assert message_types == [
+        assert message_types[1:] == [
+            "HumanMessage",
             "HumanMessage",
             "AIMessage",
             "ToolMessage",
             "AIMessage",
             "ToolMessage",
         ]
-        assert third_round[1].tool_calls[0]["id"] == TOOL_CALL_ID_A
-        assert third_round[2].tool_call_id == TOOL_CALL_ID_A
-        assert third_round[3].tool_calls[0]["id"] == TOOL_CALL_ID_B
-        assert third_round[4].tool_call_id == TOOL_CALL_ID_B
+        assert third_round[3].tool_calls[0]["id"] == TOOL_CALL_ID_A
+        assert third_round[4].tool_call_id == TOOL_CALL_ID_A
+        assert third_round[5].tool_calls[0]["id"] == TOOL_CALL_ID_B
+        assert third_round[6].tool_call_id == TOOL_CALL_ID_B
         assert TOOL_CALL_ID_A != TOOL_CALL_ID_B
 
 
@@ -440,10 +460,11 @@ class TestAgentLoopUnknownTool:
         # 第二轮喂给模型的消息链里，ToolMessage 的 content 是错误信息，
         # 且 tool_call_id 依然配对原 id（错误回执也要能配对请求）。
         second_round = scripted.snapshots[1].messages
-        assert [type(m).__name__ for m in second_round] == [
-            "HumanMessage", "AIMessage", "ToolMessage",
+        assert isinstance(second_round[0], SystemMessage)
+        assert [type(m).__name__ for m in second_round[1:]] == [
+            "HumanMessage", "HumanMessage", "AIMessage", "ToolMessage",
         ]
-        tool_msg = second_round[2]
+        tool_msg = second_round[4]
         assert tool_msg.tool_call_id == "call_unknown_001"
         # content 是 ToolResult JSON：multiply 未注册 -> TOOL_NOT_FOUND。
         assert "multiply" in tool_msg.content
@@ -474,7 +495,9 @@ class TestAgentLoopToolException:
 
         assert result.status == STATUS_COMPLETED
         assert result.steps == 2
-        tool_msg = scripted.snapshots[1].messages[2]
+        second_round = scripted.snapshots[1].messages
+        assert isinstance(second_round[0], SystemMessage)
+        tool_msg = second_round[4]
         assert tool_msg.tool_call_id == "call_boom_001"
         # content 是 ToolResult JSON，error_code 是结构化码：
         # boom 抛 ValueError -> Executor 分类表未命中 -> TOOL_EXECUTION_ERROR。

@@ -13,7 +13,7 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
 from decimal import Decimal
@@ -32,18 +32,25 @@ if TYPE_CHECKING:
 from agent_harness.session.cwd import cwd_event_data
 from agent_harness.session.derive import (
     DANGLING_TOOL_CONTENT,
+    build_protected_fact_data,
     derive_messages,
     detect_dangling,
+    protected_fact_id,
+    validate_protected_fact_data,
+    validate_user_fact_links,
 )
 from agent_harness.session.errors import SeqConflict, SessionNotFound
 from agent_harness.session.event import (
     EVENT_TYPES,
+    MESSAGE_QUEUED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_STARTED,
     SESSION_RESUMED,
     SESSION_STARTED,
+    STEER_REQUESTED,
     STREAM_ONLY_TYPES,
+    TASK_PROTECTED_FACT,
     TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
@@ -303,6 +310,24 @@ class Session:
             )
         if event_type not in EVENT_TYPES:
             raise ValueError(f"未知事件类型 '{event_type}'：不在 EVENT_TYPES 词汇表中")
+        if event_type == USER_MESSAGE:
+            refs = validate_user_fact_links(
+                self._events, data, session_id=self.session_id
+            )
+            if refs:
+                if source_event_ids is not None and source_event_ids != refs:
+                    raise ValueError("user fact links do not match source_event_ids")
+                source_event_ids = refs
+        elif event_type == TASK_PROTECTED_FACT:
+            validate_protected_fact_data(self._events, data, session_id=self.session_id)
+            refs = [data["source_event_id"]]
+            if data.get("evidence_event_id") is not None:
+                refs.append(data["evidence_event_id"])
+            if source_event_ids is not None and source_event_ids != refs:
+                raise ValueError(
+                    "protected fact event references do not match its payload"
+                )
+            source_event_ids = refs
         seq = self._next_seq
         event = SessionEvent(
             seq=seq,
@@ -317,6 +342,40 @@ class Session:
         )
         self._persist_event(event, notify=True)
         return event
+
+    def register_protected_fact(
+        self,
+        *,
+        fact_type: str,
+        value: Any,
+        source_event_id: str | None,
+        supersedes_fact_id: str | None = None,
+        evidence_event_id: str | None = None,
+    ) -> SessionEvent:
+        """Append a fact registration after validating its original event sources."""
+        data = build_protected_fact_data(
+            self._events,
+            session_id=self.session_id,
+            fact_type=fact_type,
+            value=value,
+            source_event_id=source_event_id,
+            supersedes_fact_id=supersedes_fact_id,
+            evidence_event_id=evidence_event_id,
+        )
+        existing = next(
+            (
+                event
+                for event in self._events
+                if event.type == TASK_PROTECTED_FACT
+                and event.data.get("fact_id") == data["fact_id"]
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.data != data:
+                raise ValueError("protected fact id already exists with different data")
+            return existing
+        return self.append(TASK_PROTECTED_FACT, data)
 
     def _persist_event(self, event: SessionEvent, *, notify: bool) -> None:
         """提交一条已构造事件，并在需要时通知实时观察者。
@@ -341,7 +400,13 @@ class Session:
                     self.session_id, event.type,
                 )
 
-    def adopt_history(self, events: list[SessionEvent]) -> list[SessionEvent]:
+    def adopt_history(
+        self,
+        events: list[SessionEvent],
+        *,
+        event_id_remap: Mapping[str, str | None] | None = None,
+        fact_id_remap: Mapping[str, str | None] | None = None,
+    ) -> list[SessionEvent]:
         """移植既有事件（fork seed 的唯一 owner，ADR-0017 决策 3）。
 
         重编 seq（本聚合按序分配，child 局部单调），逐字保留原 event_id /
@@ -349,6 +414,11 @@ class Session:
         session_id 改写为本会话。类型必须在 EVENT_TYPES 词表内（流式专属拒绝）。
         """
         adopted: list[SessionEvent] = []
+        adopted_by_id: dict[str, SessionEvent] = {
+            event.event_id: event for event in self._events
+        }
+        event_remap = dict(event_id_remap or {})
+        fact_remap = dict(fact_id_remap or {})
         for event in events:
             if event.type in STREAM_ONLY_TYPES:
                 raise ValueError(
@@ -356,9 +426,150 @@ class Session:
                 )
             if event.type not in EVENT_TYPES:
                 raise ValueError(f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中")
-            moved = replace(event, seq=self._next_seq, session_id=self.session_id)
+            moved_data = event.data
+            if event.type in {
+                USER_MESSAGE,
+                MESSAGE_QUEUED,
+                STEER_REQUESTED,
+                TASK_PROTECTED_FACT,
+            }:
+                moved_data = dict(event.data)
+            if event.type in {USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED}:
+                revoke_id = moved_data.get("revoke_fact_id")
+                if isinstance(revoke_id, str) and revoke_id in fact_remap:
+                    remapped_revoke_id = fact_remap[revoke_id]
+                    if remapped_revoke_id is None:
+                        moved_data.pop("revoke_fact_id", None)
+                    else:
+                        moved_data["revoke_fact_id"] = remapped_revoke_id
+                annotations = moved_data.get("protected_facts")
+                if isinstance(annotations, list):
+                    copied_annotations = []
+                    for annotation in annotations:
+                        if not isinstance(annotation, dict):
+                            copied_annotations.append(annotation)
+                            continue
+                        copied_annotation = dict(annotation)
+                        supersedes_id = annotation.get("supersedes_fact_id")
+                        if isinstance(supersedes_id, str) and supersedes_id in fact_remap:
+                            remapped_supersedes_id = fact_remap[supersedes_id]
+                            if remapped_supersedes_id is None:
+                                copied_annotation.pop("supersedes_fact_id", None)
+                            else:
+                                copied_annotation["supersedes_fact_id"] = (
+                                    remapped_supersedes_id
+                                )
+                        copied_annotations.append(copied_annotation)
+                    moved_data["protected_facts"] = copied_annotations
+            elif event.type == TASK_PROTECTED_FACT:
+                source_id = moved_data.get("source_event_id")
+                evidence_id = moved_data.get("evidence_event_id")
+                supersedes_id = moved_data.get("supersedes_fact_id")
+                if isinstance(source_id, str):
+                    source_id = event_remap.get(source_id, source_id)
+                if isinstance(evidence_id, str):
+                    evidence_id = event_remap.get(evidence_id, evidence_id)
+                if source_id is None or (moved_data.get("evidence_event_id") is not None and evidence_id is None):
+                    # A source event removed at the fork boundary cannot back a child fact.
+                    continue
+                if isinstance(supersedes_id, str) and supersedes_id in fact_remap:
+                    supersedes_id = fact_remap[supersedes_id]
+                    if supersedes_id is None:
+                        moved_data.pop("supersedes_fact_id", None)
+                refs_changed = (
+                    source_id != event.data.get("source_event_id")
+                    or evidence_id != event.data.get("evidence_event_id")
+                    or supersedes_id != event.data.get("supersedes_fact_id")
+                )
+                if refs_changed:
+                    moved_data = build_protected_fact_data(
+                        self._events,
+                        session_id=self.session_id,
+                        fact_type=moved_data["fact_type"],
+                        value=moved_data["value"],
+                        source_event_id=source_id,
+                        supersedes_fact_id=supersedes_id,
+                        evidence_event_id=evidence_id,
+                    )
+                else:
+                    for id_key, seq_key in (
+                        ("source_event_id", "source_event_seq"),
+                        ("evidence_event_id", "evidence_event_seq"),
+                    ):
+                        ref_id = moved_data.get(id_key)
+                        if ref_id is None:
+                            continue
+                        referenced = adopted_by_id.get(ref_id)
+                        if referenced is None:
+                            raise ValueError(
+                                "forked protected fact is missing its source event"
+                            )
+                        moved_data[seq_key] = referenced.seq
+            moved_sources = (
+                [
+                    remapped
+                    for ref in event.source_event_ids
+                    if (remapped := event_remap.get(ref, ref)) is not None
+                ]
+                if event.source_event_ids is not None
+                else None
+            )
+            if event.type == TASK_PROTECTED_FACT:
+                moved_sources = [moved_data["source_event_id"]]
+                if moved_data.get("evidence_event_id") is not None:
+                    moved_sources.append(moved_data["evidence_event_id"])
+            moved = replace(
+                event,
+                seq=self._next_seq,
+                session_id=self.session_id,
+                data=moved_data,
+                source_event_ids=moved_sources,
+            )
             self._persist_event(moved, notify=False)
             adopted.append(moved)
+            adopted_by_id[moved.event_id] = moved
+            if event.type in {USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED}:
+                old_annotations = event.data.get("protected_facts")
+                new_annotations = moved.data.get("protected_facts")
+                if isinstance(old_annotations, list) and isinstance(
+                    new_annotations, list
+                ):
+                    for old_annotation, new_annotation in zip(
+                        old_annotations, new_annotations, strict=False
+                    ):
+                        if not isinstance(old_annotation, dict) or not isinstance(
+                            new_annotation, dict
+                        ):
+                            continue
+                        old_identity = {
+                            "fact_type": old_annotation.get("fact_type"),
+                            "value": old_annotation.get("value"),
+                            "source_event_id": event.event_id,
+                        }
+                        old_supersedes = old_annotation.get("supersedes_fact_id")
+                        if isinstance(old_supersedes, str):
+                            old_identity["supersedes_fact_id"] = old_supersedes
+                        try:
+                            new_fact = build_protected_fact_data(
+                                self._events,
+                                session_id=self.session_id,
+                                fact_type=new_annotation["fact_type"],
+                                value=new_annotation["value"],
+                                source_event_id=event.event_id,
+                                supersedes_fact_id=new_annotation.get(
+                                    "supersedes_fact_id"
+                                ),
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        fact_remap[protected_fact_id(old_identity)] = new_fact[
+                            "fact_id"
+                        ]
+            elif event.type == TASK_PROTECTED_FACT:
+                old_fact_id = event.data.get("fact_id")
+                new_fact_id = moved.data.get("fact_id")
+                if isinstance(old_fact_id, str) and isinstance(new_fact_id, str):
+                    fact_remap[old_fact_id] = new_fact_id
         return adopted
 
     def derive_messages(self) -> list[AnyMessage]:

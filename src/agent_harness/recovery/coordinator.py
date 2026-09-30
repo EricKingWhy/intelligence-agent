@@ -56,6 +56,7 @@ from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import (
     ARTIFACT_EXTERNALIZED,
     OPERATION_RECONCILE_REQUIRED,
+    OPERATION_RECONCILED,
     SESSION_RESUMED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -63,6 +64,7 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import DANGLING_TOOL_CONTENT, collect_dangling
+from agent_harness.session.event import SessionEvent
 from agent_harness.storage import (
     Operation,
     OperationLedger,
@@ -72,6 +74,16 @@ from agent_harness.storage import (
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
 
 logger = logging.getLogger("agent_harness.recovery")
+
+
+def _committed_reconcile_verdict(operation: Operation) -> ReconcileVerdict | None:
+    if not operation.reconcile_meta:
+        return None
+    try:
+        value = json.loads(operation.reconcile_meta).get("verdict")
+        return ReconcileVerdict(value)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _try_parse_result_json(result_json: str, tool_name: str) -> ToolResult | None:
@@ -364,6 +376,29 @@ class RecoveryCoordinator:
                     )
 
             # 人工裁决只推进到 NEED_RECONCILE 并记录事实；callback 在锁外等待。
+            reconciled_tool_call_ids = {
+                event.data["tool_call_id"]
+                for event in session.events
+                if event.type == OPERATION_RECONCILED
+                and isinstance(event.data.get("tool_call_id"), str)
+            }
+            required_events_by_call_id = {
+                event.data["tool_call_id"]: event
+                for event in session.events
+                if event.type == OPERATION_RECONCILE_REQUIRED
+                and isinstance(event.data.get("tool_call_id"), str)
+            }
+            for operation in operations:
+                verdict = _committed_reconcile_verdict(operation)
+                if verdict is not None:
+                    self._append_reconciled_event(
+                        session,
+                        operation,
+                        verdict,
+                        reconciled_tool_call_ids=reconciled_tool_call_ids,
+                        required_events_by_call_id=required_events_by_call_id,
+                    )
+
             for tool_call_id, operation in reconcile_required:
                 prepared = await self._prepare_reconcile(
                     session, tool_call_id, operation
@@ -685,6 +720,57 @@ class RecoveryCoordinator:
                 run_id=operation.run_id,
                 agent_id=operation.agent_id,
             )
+        self._append_reconciled_event(
+            session, operation, verdict, state=ledger_state
+        )
+
+    @staticmethod
+    def _append_reconciled_event(
+        session: Session,
+        operation: Operation,
+        verdict: ReconcileVerdict,
+        *,
+        state: OperationState | None = None,
+        reconciled_tool_call_ids: set[str] | None = None,
+        required_events_by_call_id: dict[str, SessionEvent] | None = None,
+    ) -> None:
+        if reconciled_tool_call_ids is None:
+            already_reconciled = any(
+                event.type == OPERATION_RECONCILED
+                and event.data.get("tool_call_id") == operation.tool_call_id
+                for event in session.events
+            )
+        else:
+            already_reconciled = operation.tool_call_id in reconciled_tool_call_ids
+        if already_reconciled:
+            return
+        if required_events_by_call_id is None:
+            required = next(
+                (
+                    event for event in reversed(session.events)
+                    if event.type == OPERATION_RECONCILE_REQUIRED
+                    and event.data.get("tool_call_id") == operation.tool_call_id
+                ),
+                None,
+            )
+        else:
+            required = required_events_by_call_id.get(operation.tool_call_id)
+        data = {
+            "tool_call_id": operation.tool_call_id,
+            "verdict": verdict.value,
+            "state": (state or operation.state).value,
+        }
+        if required is not None:
+            data["reconcile_required_event_id"] = required.event_id
+        session.append(
+            OPERATION_RECONCILED,
+            data,
+            run_id=operation.run_id,
+            agent_id=operation.agent_id,
+            source_event_ids=[required.event_id] if required is not None else None,
+        )
+        if reconciled_tool_call_ids is not None:
+            reconciled_tool_call_ids.add(operation.tool_call_id)
 
     @staticmethod
     def _verdict_outcome(

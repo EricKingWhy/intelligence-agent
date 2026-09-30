@@ -47,6 +47,7 @@ from agent_harness.session import (
     run_context_var,
     session_cwd,
 )
+from agent_harness.session.derive import WRITE_TOOL_NAMES
 from agent_harness.session.event import RUN_INTERRUPTED, RUN_TERMINAL_TYPES
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.delegation_tree import (
@@ -78,7 +79,6 @@ class SubAgentResult:
     unresolved: list[str] = field(default_factory=list)
 
 
-_WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch"})
 _SEARCH_TOOL_NAMES = frozenset({"retrieve_knowledge", "web_search"})
 _UNRESOLVED_MARKERS = ("未解决事项", "未解决")
 
@@ -104,7 +104,7 @@ def collect_result_fields(
         if event.type == "tool/call":
             call_names[event.data.get("tool_call_id", "")] = event.data.get("tool_name", "")
             tool_name = event.data.get("tool_name", "")
-            if tool_name in _WRITE_TOOL_NAMES:
+            if tool_name in WRITE_TOOL_NAMES:
                 path = (event.data.get("args") or {}).get("path")
                 if path and path not in changed:
                     changed.append(path)

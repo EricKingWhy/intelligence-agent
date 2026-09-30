@@ -100,6 +100,18 @@ async def test_run_stream_durable_events_have_seq(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_stream_keeps_result_holder_as_fourth_positional_argument(tmp_path):
+    runtime = _build_runtime(ScriptedModel([AIMessage(content="answer")]), tmp_path)
+    session = make_session(tmp_path)
+    result_holder = []
+
+    _ = [event async for event in runtime.run_stream(session, "hi", None, result_holder)]
+
+    assert result_holder[-1].status == "completed"
+    assert result_holder[-1].final_text == "answer"
+
+
+@pytest.mark.asyncio
 async def test_run_stream_emits_tool_events(tmp_path):
     """带 tool_calls 的轮次：tool/call + tool/result 事件也被 yield（带 seq）。
 

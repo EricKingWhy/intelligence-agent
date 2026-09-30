@@ -145,6 +145,10 @@ class SteerTargetNotFound(SessionServiceError):
     """steer 目标 run 不存在（无在途 run）。"""
 
 
+class ProtectedFactReferenceInvalid(SessionServiceError):
+    """A user-supplied protected-fact link is stale or does not match its target."""
+
+
 class SupersedeTargetInvalid(SessionServiceError):
     """supersede 目标不合法（ADR-0030 §4.4 第 1 步）。
 

@@ -30,6 +30,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from agent_harness.agent import AgentEvent, AgentRuntime
 from agent_harness.memory.types import memory_session_var
@@ -287,6 +288,7 @@ class RunManager:
 
     def launch(
         self, session: Session, runtime: AgentRuntime, user_input: str | None,
+        user_input_metadata: dict[str, Any] | None = None,
     ) -> tuple[ManagedRun, Subscriber]:
         """启动 detached run 并返回（run, 首个订阅者）。
 
@@ -308,7 +310,7 @@ class RunManager:
         run.runtime = runtime
         self._runs[session.session_id] = run
         run.task = asyncio.create_task(
-            self._drive(run, runtime, user_input),
+            self._drive(run, runtime, user_input, user_input_metadata),
             name=f"agent-run-{session.session_id}",
         )
         # #341：task 进独立集合——`aclose()` 靠它兜住被 `_runs` 覆盖掉的旧 task。
@@ -317,8 +319,10 @@ class RunManager:
         subscriber = run.subscribe()
         return run, subscriber
 
-    async def _drive(self, run: ManagedRun, runtime: AgentRuntime,
-                     user_input: str | None) -> None:
+    async def _drive(
+        self, run: ManagedRun, runtime: AgentRuntime, user_input: str | None,
+        user_input_metadata: dict[str, Any] | None,
+    ) -> None:
         """run task 本体：驱动 run_stream，终结时广播哨兵。"""
         token = memory_session_var.set(run.session.session_id)
         run.session.add_listener(run._on_session_event)
@@ -329,6 +333,7 @@ class RunManager:
         try:
             async for event in runtime.run_stream(
                 run.session, user_input, cancel_reason_supplier=cancel_reason,
+                user_input_metadata=user_input_metadata,
             ):
                 run.enqueue_agent_event(event)
         finally:

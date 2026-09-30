@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-09-29T19:34:32+08:00",
+  "sha": "f2eb03c87c40171e5dcdbd31c6a92061e2c400db",
+  "tree": "40055835dff9fc67e3edd84192710594b9bf466d",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 5,
+  "total": 6,
+  "failed": [
+    "coverage"
+  ],
+  "wall_seconds": 12.18,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "Python 3.13.5",
+    "ruff": "ruff 0.16.3",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.81.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [
+      "docs/gate/f2eb03c87c40171e5dcdbd31c6a92061e2c400db.json"
+    ],
+    "untracked_total": 1
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.05,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.07,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/ruff.exe",
+        "check",
+        "."
+      ],
+      "command": "./.venv/Scripts/ruff.exe check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.27,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 6.0,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 4.79,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 1.0,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py",
+      "output_tail": [
+        "✅ 零新增内容（树 4b28ee6f0d15bc04e91d83f7d5dce7055f9b9631 == 父 40fbea8f1cf6c59b2cd4d5a60c21fdda6efe2534 的树）: f64624ab  Merge pull request #408 from EricKingWhy/zcode/T380-w26-plan-contract",
+        "✅ docs-only（按路径自动归属）: f89518a6  docs(gate): W-29 残余闭环 Gate-0 裸全量读数入库（tip 38ab1072，6/6 PASS，墙钟 24.2s） — docs/gate/38ab1072e89afc7cb83cfb3c08965d9d01f2ba50.json",
+        "闸门失败。处置（不要改台账蒙过去）：",
+        "  · 这些 commit 动了代码 ⇒ **补一次审查**（两轴 /code-review，范围写进台账的新行）；",
+        "  · 若确认只是文档改动 ⇒ 归属**本该自动**（脚本按路径机械判定）；仍失败说明它的改动文件",
+        "    **核对不了**（合并提交的 `--cc` 空表）或含非文档文件。⚠ **别写 `[whitelist]`**：那一支",
+        "    自 2026-09-23 起已不再放行任何提交（写进去只会得到一个 ⚠ 未用到，见协议 §7 第 8 条）。",
+        "  协议原文与全部例外条款：docs/SDD_WORKFLOW_PROTOCOL.md §7 第 8 条。"
+      ]
+    }
+  ]
+}

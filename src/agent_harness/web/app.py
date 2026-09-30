@@ -44,6 +44,7 @@ from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
+from agent_harness.session.derive import validate_user_protected_fact_annotations
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
@@ -57,6 +58,7 @@ from agent_harness.session.service import (
     InvalidDecision,
     InvalidSessionId,
     PendingApprovalConflict,
+    ProtectedFactReferenceInvalid,
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
@@ -523,6 +525,25 @@ class ResumeRequest(_AmendValueValidators):
     model: str | None = None
 
 
+class ProtectedFactAnnotation(BaseModel):
+    """Explicit fact metadata; the server binds it to the accepted user event."""
+
+    model_config = {"extra": "forbid"}
+
+    fact_type: Literal[
+        "user_instruction",
+        "user_goal",
+        "constraint",
+        "authorization",
+        "acceptance_criterion",
+        "exact_identifier",
+        "confirmed_decision",
+        "task_progress",
+    ]
+    value: str = Field(min_length=1, max_length=10_000)
+    supersedes_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class SendMessageRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/messages 的请求体（PRD §5.3 续聊入口）。
 
@@ -551,11 +572,24 @@ class SendMessageRequest(_AmendValueValidators):
     budget: BudgetRequest | None = None
     supersedes_seq: int | None = Field(default=None, ge=0)
     queue_id: str | None = None
+    revoke_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
+    refutes_event_id: str | None = Field(default=None, min_length=1, max_length=200)
     # staged amend 字段（可选，None = 默认行为）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
     context_providers: list[str] | None = None
     model: str | None = None
+    protected_facts: list[ProtectedFactAnnotation] = Field(
+        default_factory=list, max_length=32
+    )
+
+    @model_validator(mode="after")
+    def validate_protected_facts_match_user_text(self) -> SendMessageRequest:
+        validate_user_protected_fact_annotations(
+            self.content,
+            [fact.model_dump(exclude_none=True) for fact in self.protected_facts],
+        )
+        return self
 
 
 class WorkspaceRef(BaseModel):
@@ -1956,6 +1990,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 amend=amend,
                 supersedes_seq=req.supersedes_seq,
                 queue_id=req.queue_id,
+                revoke_fact_id=req.revoke_fact_id,
+                refutes_event_id=req.refutes_event_id,
+                protected_facts=[
+                    fact.model_dump(exclude_none=True)
+                    for fact in req.protected_facts
+                ],
             )
         except (
             InvalidSessionId,
@@ -1964,6 +2004,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             RecoveryConflict,
             QueueItemNotFound,
             SteerTargetNotFound,
+            ProtectedFactReferenceInvalid,
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,

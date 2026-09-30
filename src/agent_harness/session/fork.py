@@ -31,6 +31,7 @@ from agent_harness.session.approval import (
     effective_permission_mode,
 )
 from agent_harness.session.cwd import session_cwd
+from agent_harness.session.derive import derive_protected_facts
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     MODEL_COMPLETED,
@@ -211,10 +212,11 @@ async def fork_session(
     # 对话历史——从 seed 里剔除（child 用 `started_data` 重新声明自己的档）。若不剔除，
     # child 的「最后一次 changed 胜」会取到 seed 里**更早**的那条（锚点之前），覆盖掉
     # 下面从父派生的**当下** effective 档，造成「父 fork 后又改过档、child 却继承旧档」。
+    boundary_events = [event for event in parent_events if event.seq < anchor.seq]
     seed = [
-        e
-        for e in parent_events
-        if e.seq < anchor.seq and e.type not in (SESSION_STARTED, PERMISSION_CHANGED)
+        event
+        for event in boundary_events
+        if event.type not in {SESSION_STARTED, PERMISSION_CHANGED}
     ]
     _validate_run_complete(seed, parent_session_id)
 
@@ -226,10 +228,10 @@ async def fork_session(
     # "未声明"的话，续聊会落到 workspace-write + 全自动批准（复制了父的 workspace 文件，
     # 却对写操作免审批）。继承的是父**当下生效**档（ADR-0041 §2 D7），父未声明 → 不写键。
     inherited: dict[str, object] = {}
-    parent_mode = effective_permission_mode(parent_events)
+    parent_mode = effective_permission_mode(boundary_events)
     if parent_mode is not None:
         inherited[SESSION_PERMISSION_MODE_KEY] = parent_mode.value
-    parent_auto = effective_auto_approve(parent_events)
+    parent_auto = effective_auto_approve(boundary_events)
     if parent_auto is not None:
         inherited[SESSION_AUTO_APPROVE_KEY] = parent_auto
 
@@ -239,9 +241,60 @@ async def fork_session(
         started_data=inherited or None,
         cwd=session_cwd(parent_events),
     )
+    removed_state_event_ids = {
+        event.event_id
+        for event in boundary_events
+        if event.type in {SESSION_STARTED, PERMISSION_CHANGED}
+    }
+    event_id_remap: dict[str, str | None] = {
+        event_id: None for event_id in removed_state_event_ids
+    }
+    fact_id_remap: dict[str, str | None] = {}
+    parent_facts = derive_protected_facts(boundary_events)
+    removed_authorizations = [
+        fact
+        for fact in parent_facts
+        if fact.type == "authorization"
+        and fact.source_event_id in removed_state_event_ids
+    ]
+    child_started = child.events[0]
+    child_authorizations = [
+        fact
+        for fact in derive_protected_facts(child.events)
+        if fact.type == "authorization" and fact.source_event_id == child_started.event_id
+    ]
+    if removed_authorizations:
+        # Fork carries the permission value effective at its boundary in the child's
+        # SESSION_STARTED event. Only the latest removed authorization maps to it;
+        # older revoked/superseded links must not revoke the new boundary state.
+        latest_parent_authorization = max(
+            removed_authorizations, key=lambda fact: fact.source_seq
+        )
+        replacement = next(
+            (
+                fact
+                for fact in child_authorizations
+                if fact.value == latest_parent_authorization.value
+            ),
+            None,
+        )
+        for removed in removed_authorizations:
+            fact_id_remap[removed.fact_id] = (
+                replacement.fact_id
+                if removed is latest_parent_authorization and replacement is not None
+                else None
+            )
+        if replacement is not None:
+            event_id_remap[latest_parent_authorization.source_event_id] = (
+                child_started.event_id
+            )
     if workspace_registry is not None:
         _copy_workspace(workspace_registry, parent_session_id, child)
-    child.adopt_history(seed)
+    child.adopt_history(
+        seed,
+        event_id_remap=event_id_remap,
+        fact_id_remap=fact_id_remap,
+    )
     fork_point_seq = seed[-1].seq if seed else None
 
     # tail summary（决策 9）：锚点之后被放弃的路线压缩成一段上下文。

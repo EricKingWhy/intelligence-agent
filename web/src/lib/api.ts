@@ -456,10 +456,29 @@ export async function startSessionErrorDetail(res: Response): Promise<string> {
  *      res.headers.get('content-type') 区分。
  *  空闲会话（无在途 run）→ launched 直驱新 run，返回 SSE。
  *  在途会话 → queued 入队（JSON），消息在下个 run 自然消费。 */
+export interface ProtectedFactAnnotationPayload {
+  fact_type:
+    | 'user_instruction'
+    | 'user_goal'
+    | 'constraint'
+    | 'authorization'
+    | 'acceptance_criterion'
+    | 'exact_identifier'
+    | 'confirmed_decision'
+    | 'task_progress';
+  value: string;
+  supersedes_fact_id?: string;
+}
+
 export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
   budget?: BudgetPayload;
+  /** Explicit, source-bound protected facts; backend validates values against content. */
+  protected_facts?: ProtectedFactAnnotationPayload[];
+  /** Explicit fact/event links for user revocations and vetoes. */
+  revoke_fact_id?: string;
+  refutes_event_id?: string;
   /** 编辑语义（ADR-0030 §4.4，后端 #196 起接受；默认缺省不发键 = 现有行为不变）：
    *  - supersedes_seq：取代 seq 为它的那条 user/message **及其整轮**（只影响
    *    模型可见投影与界面，历史事件照旧保留）。目标必须是最新一条非注入用户
@@ -491,6 +510,12 @@ export interface SendMessagePayload {
 const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
+  protected_facts: (p) =>
+    p.protected_facts && p.protected_facts.length > 0
+      ? ['protected_facts', p.protected_facts]
+      : null,
+  revoke_fact_id: (p) => (p.revoke_fact_id ? ['revoke_fact_id', p.revoke_fact_id] : null),
+  refutes_event_id: (p) => (p.refutes_event_id ? ['refutes_event_id', p.refutes_event_id] : null),
   // budget（#308）：与 create 路径同款「有值才带键」，**没有**前端默认值。
   // 旧的 `max_steps: p.max_steps ?? 10` 正是产品侧低位默认的来源之一，随本票移除。
   budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),

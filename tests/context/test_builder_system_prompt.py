@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 import pytest
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.session import COMPACTION_START, MODEL_COMPLETED, USER_MESSAGE
@@ -47,24 +47,31 @@ async def test_context_builder_injects_system_prompt(tmp_path):
 
     messages = await builder.build(session)
 
-    assert len(messages) == 2
+    assert len(messages) == 4
     assert isinstance(messages[0], SystemMessage)
     assert messages[0].content == "你是编码 agent。"
-    # 第二条是投影出的用户消息（system_prompt 不是事件，不替换投影结果）
-    assert messages[1].content == "你好"
+    assert isinstance(messages[1], SystemMessage)
+    assert "Runtime permission and approval checks are authoritative" in messages[1].content
+    assert isinstance(messages[2], HumanMessage)
+    assert messages[2].content.startswith("## Protected task facts\n")
+    # 最后一条仍是投影出的用户消息；system_prompt 与事实注入都不改写历史。
+    assert messages[3].content == "你好"
 
 
 @pytest.mark.asyncio
 async def test_context_builder_no_system_prompt_by_default(tmp_path):
-    """G2：不传 system_prompt → 不注入任何 SystemMessage（向后兼容）。"""
+    """G2：不传 system_prompt；仅保留独立的保护事实注入。"""
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "你好"})
     builder = ContextBuilder(ScriptedModel([]))
 
     messages = await builder.build(session)
 
-    assert not any(isinstance(m, SystemMessage) for m in messages)
-    assert messages == session.derive_messages()
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[1], HumanMessage)
+    assert messages[1].content.startswith("## Protected task facts\n")
+    assert not any(m.content == "你是编码 agent。" for m in messages)
+    assert messages[2:] == session.derive_messages()
 
 
 @pytest.mark.asyncio
@@ -95,11 +102,14 @@ async def test_context_builder_system_prompt_before_providers(tmp_path):
     # system_prompt 最前
     assert isinstance(messages[0], SystemMessage)
     assert messages[0].content == "你是 coding agent。"
-    # provider 内容紧随其后
+    # 静态事实规则与 provider 都留在 system 前缀，事实值保持 user role。
     assert isinstance(messages[1], SystemMessage)
-    assert messages[1].content == "[provider 注入]"
+    assert isinstance(messages[2], SystemMessage)
+    assert messages[2].content == "[provider 注入]"
+    assert isinstance(messages[3], HumanMessage)
+    assert messages[3].content.startswith("## Protected task facts\n")
     # 对话在最后
-    assert messages[2].content == "你好"
+    assert messages[4].content == "你好"
 
 
 @pytest.mark.asyncio

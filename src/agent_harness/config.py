@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     # token 超过本值时，全文外置 ArtifactStore，父窗只收截断摘要行 + summary_ref
     # （不变量 #15）。0 = 关闭本特性；负值由 ge=0 响亮拒绝。
     subagent_summary_overflow_tokens: int = Field(default=2000, ge=0)
+    # W-31.2（#414）：确定性裁剪的两个参数（Settings → ContextBuilder →
+    # ToolResultPruner）。keep_recent_tool_results = 最近 N 条 tool 结果窗口豁免
+    # （按全量 tool/result 事件序计，含失败结果），0 = 关闭窗口豁免；
+    # clear_at_least_tokens = 一轮裁剪的总收益估算（原文 − 骨架，token）低于该值
+    # 则本轮整体不裁，0 = 关闭收益门。默认值对照 Anthropic 官方 context-editing
+    # 示例（clear_tool_uses_20250919）；负值由 ge=0 响亮拒绝。
+    keep_recent_tool_results: int = Field(default=3, ge=0)
+    clear_at_least_tokens: int = Field(default=5000, ge=0)
     # Phase Multiturn T5 (#135)：MinIO 作为大产物外置对象存储。
     # 与 artifact_store_* 字段独立——MinIO 用于 tool result 外置，
     # artifact_store_* 用于 inspect_artifact 的 S3 兼容存储。

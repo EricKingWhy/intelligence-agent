@@ -26,6 +26,7 @@ from agent_harness.recovery import (
 from agent_harness.sandbox.local import LocalSubprocessSandbox
 from agent_harness.session import (
     MODEL_COMPLETED,
+    OPERATION_RECONCILED,
     SESSION_RESUMED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -34,6 +35,7 @@ from agent_harness.session import (
     Session,
     detect_dangling,
 )
+from agent_harness.session.derive import derive_protected_facts
 from agent_harness.storage import (
     Operation,
     OperationState,
@@ -938,8 +940,8 @@ async def test_non_dangling_unproven_operation_is_reconciled_without_a_second_re
 
     非悬空的行已经有一条如实的结果（"超时、状态未证"）——再补一条会破坏
     `derive_messages` 依赖的 1:1 配对（`07 §8`）。所以裁决的 durable 落点是
-    **Ledger 行本身**：状态进终态、`reconcile_meta` 记下裁决。事件流里多出来的
-    只有 `operation/reconcile-required`（必填人工关卡）与收尾的 `session/resumed`。
+    Ledger 记录裁决，并追加 `operation/reconciled` 收口事件；原有
+    `tool/result` 保持不变，继续满足 1:1 配对。
     """
     store = JsonlSessionStore(tmp_path / "sessions")
     session = _make_timeout_session(store)
@@ -961,6 +963,14 @@ async def test_non_dangling_unproven_operation_is_reconciled_without_a_second_re
 
     assert len(callback.calls) == 1
     assert len(_reconcile_required_events(recovered)) == 1
+    reconciled = [
+        event for event in recovered.events
+        if event.type == OPERATION_RECONCILED
+        and event.data.get("tool_call_id") == "call-1"
+    ]
+    assert len(reconciled) == 1
+    assert reconciled[0].data["verdict"] == ReconcileVerdict.CONFIRM_SUCCESS.value
+    assert reconciled[0].data["state"] == OperationState.SUCCEEDED.value
     results = _results_for(recovered, "call-1")
     assert len(results) == 1, "同一 tool_call_id 只能有一条 tool/result（07 §8 的配对）"
     assert results[0].data["content"] == original_content, "原来那条如实的结果不被改写"
@@ -970,7 +980,61 @@ async def test_non_dangling_unproven_operation_is_reconciled_without_a_second_re
     assert (
         json.loads(operation.reconcile_meta)["verdict"]
         == ReconcileVerdict.CONFIRM_SUCCESS.value
-    ), "裁决内容覆盖那一格标记：疑问已解除，不需要第二个清除标记"
+    ), "Ledger keeps the committed reconciliation verdict"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_event_is_repaired_after_append_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_timeout_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(
+        ledger, session.session_id, "call-1", OperationState.UNKNOWN,
+        tool_name="write_file",
+        reconcile_meta=unproven_meta(
+            error_code=ErrorCode.TIMEOUT.value, note="MUTATING 超时：副作用未证"
+        ),
+    )
+
+    original_append = Session.append
+    fail_reconcile_append = True
+
+    def append_with_one_reconcile_failure(self, event_type, data, **kwargs):
+        nonlocal fail_reconcile_append
+        if fail_reconcile_append and event_type == OPERATION_RECONCILED:
+            fail_reconcile_append = False
+            raise OSError("simulated crash before reconcile event append")
+        return original_append(self, event_type, data, **kwargs)
+
+    monkeypatch.setattr(Session, "append", append_with_one_reconcile_failure)
+    with pytest.raises(OSError, match="simulated crash"):
+        await _make_coordinator(
+            store,
+            ledger,
+            tmp_path / "state.db",
+            reconcile_callback=_ScriptedCallback(ReconcileVerdict.CONFIRM_SUCCESS),
+        ).recover(session.session_id)
+
+    operation = await ledger.get(session.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.SUCCEEDED
+
+    recovered = await _make_coordinator(
+        store, ledger, tmp_path / "state.db"
+    ).recover(session.session_id)
+
+    reconciled = [
+        event for event in recovered.events
+        if event.type == OPERATION_RECONCILED
+        and event.data.get("tool_call_id") == "call-1"
+    ]
+    assert len(reconciled) == 1
+    assert not any(
+        fact.type == "unresolved_operation"
+        for fact in derive_protected_facts(recovered.events)
+    )
 
 
 @pytest.mark.asyncio
