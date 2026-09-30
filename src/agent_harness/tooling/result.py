@@ -48,6 +48,10 @@ class ErrorCode(str, Enum):
     # `reason=deadline` 暂停，恢复要点名一个**未来**的时刻。
     # 已在途的调用**不**产生这条码：它们按各自的 timeout / cancel / Ledger 语义收尾。
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
+    # `#449`：模型响应因长度上限截断（finish_reason=length），本批 tool_call 的
+    # 参数可能不完整或被流式 salvage 凭空补全 → 整批判错、绝不执行（错误即消息，
+    # 重发由模型决定）。同族："准入**前**被拒"的可审计理由，不消耗配额（记 0）。
+    ARGS_TRUNCATED = "ARGS_TRUNCATED"
 
 
 class ToolRuntimeSignal(BaseModel):

@@ -1671,6 +1671,44 @@ class AgentRuntime:
                 # session 预留成为真账，取消 / 异常臂不再退回（`#318`）。
                 session_step_reserved = False
 
+                # ── #449：length 截断轮的全部 tool_call 判错（准入前拒绝）──
+                # 位置在**完成闸门之前**：合法桶为空（salvage 全灭、只剩 invalid 桶）
+                # 的截断轮若先闸门，会被当最终答复静默收口。finish_reason ==
+                # "length" 且存在 tool_calls（含 invalid 桶）时，流式参数可能已被
+                # JSON salvage 丢尾或凭空补全（分桶实测见
+                # tests/agent/test_length_truncation.py §聚合事实），照常执行就是拿
+                # 残缺参数跑真实副作用。Pi 语义：整批判错、绝不执行，错误即消息
+                # （04 §4）回给模型、重发由模型决定；零配额（显式 0 增量）。事件形状
+                # 的单一 owner 仍是 executor（emit_truncation_refusals），Runtime 只镜像。
+                # invalid 桶条目不在 model_data.tool_calls 里（derive 不投影、无配对
+                # 义务），只参与本判定、不落 tool 事件；这轮跳过 stuck 喂事件，检测器
+                # 下一轮照常补上（它读的是 durable 全流）。本轮之后没有工具账增量
+                # （delta 显式 0），故不调 _record_session_tool_deltas。
+                if (response_meta.get("finish_reason") == "length"
+                        and (calls or getattr(ai, "invalid_tool_calls", None))):
+                    if calls:
+                        for refusal_event in self.executor.emit_truncation_refusals(
+                            session, calls, run_id=run_id, step_id=step_base + steps,
+                        ):
+                            yield to_agent_event(refusal_event)
+                    if defer_model_event:
+                        model_event = session.append(
+                            MODEL_COMPLETED,
+                            model_data,
+                            run_id=run_id,
+                            step_id=step_base + steps,
+                        )
+                        yield to_agent_event(model_event)
+                        # MODEL_COMPLETED 稳定边界：判错事件之后延迟写入的 model/completed。
+                        await self._save_checkpoint(session, CheckpointBoundary.MODEL_COMPLETED)
+                    await self._save_checkpoint(
+                        session, CheckpointBoundary.TOOL_BATCH_COMPLETED
+                    )
+                    self._log("tool_operation", "截断轮 tool_call 全部判错，未执行（#449）",
+                              span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                              tool_call_ids=[c.id for c in calls], outcome="failure")
+                    continue
+
                 # 第 5 步：先判停止信号——若模型选择最终答复，进**完成闸门**（`#316`）。
                 # 顺序是契约（`02 §5.4`）：先证六条 quiescence，静止才轮到 policy；
                 # 两道任一不过都不落 `run/completed`，而**闸门这个臂自身零写入**：
