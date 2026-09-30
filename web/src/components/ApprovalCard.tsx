@@ -220,7 +220,9 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
           </button>
         </div>
       )}
-      {submitted && (
+      {/* #444：invalid 时标题已说「审批已失效」，这句「决策已提交」不得同卡同现
+          （POST 成功置 submitted 后审批仍可能被判失效——stale 或 404-gone）。 */}
+      {submitted && !invalid && (
         <p className="approval-invalid-note" role="status">
           决策已提交，等待后端确认——结果以事件流为准。
         </p>
