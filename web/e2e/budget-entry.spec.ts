@@ -40,6 +40,10 @@ function pausedFrames(): FrameSpec[] {
 
 test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 → PausedPanel 恢复抬高同维', async ({ page }) => {
   const frames = pausedFrames();
+  // durable log = /events 与 WS 快照的同源真相（fixtures 纪律）。恢复帧在恢复请求
+  // 应答时补进这份 log——真后端里 run/resumed 及其后的事件都是 durable 的，恢复后的
+  // 历史重载必须能看到它们，否则投影会退回"暂停中"。
+  const history: FrameSpec[] = [...frames];
   let createBody: Record<string, unknown> | null = null;
   let resumeBody: Record<string, unknown> | null = null;
 
@@ -48,21 +52,27 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
       createBody = route.request().postDataJSON() as Record<string, unknown>;
       await fulfillSse(route, frames);
     },
-    events: frames,
-    // 初接 SSE 在非终态帧后包体结束 ⇒ 客户端按「流异常收尾」重连 ⇒ WS 快照接住。
-    // 暂停的 run 在真后端确实是在途 run：连接保持（不发 done），与 websocket.py 同语义。
-    onWs: () => ({ events: frames, hasActiveRun: true, ending: 'keep' }),
+    events: history,
+    // 暂停 run 的传输语义（runmanager.py:342 `_drive` finally → finish() → DONE）：
+    // POST 流在 run/paused 后**干净收尾**（非终态 ⇒ 客户端视为"流异常收尾"）；
+    // 重连订阅时 run task 已结束 ⇒ `get_active()` 为 None ⇒ 快照 `has_active_run:
+    // false`（websocket.py:240），客户端据此自行收流（wsStream.ts:259）。
+    // 客户端在重连额度耗尽后退回 viewing 并重读历史——面板（App.tsx:818 要求
+    // `!streaming`）正是在那一步出现的。
+    onWs: () => ({ events: history, hasActiveRun: false }),
   });
   // fixtures 的 routeApi 不认识 /resume（真实端点 POST /api/sessions/{id}/resume，
   // api.ts:1274）。Playwright 后注册的路由先匹配 ⇒ 这里盖过 catch-all；响应 = SSE 帧
   // （与真后端 `_run_stream_response` 同形），seq 接着暂停帧单调续。
   await page.route(new RegExp(`/api/sessions/${SID}/resume$`), async (route: Route) => {
     resumeBody = route.request().postDataJSON() as Record<string, unknown>;
-    await fulfillSse(route, [
+    const resumeFrames: FrameSpec[] = [
       { type: 'run/resumed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
       { type: 'text/delta', data: { delta: '预算已抬高，继续。' }, seq: 7, session_id: SID, run_id: RUN, step_id: 2, time: T },
       { type: 'run/completed', data: {}, seq: 8, session_id: SID, run_id: RUN, time: T },
-    ]);
+    ];
+    history.push(...resumeFrames);
+    await fulfillSse(route, resumeFrames);
   });
 
   await page.goto('/');
@@ -84,9 +94,11 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
     },
   });
 
-  // ③ 预算暂停 → PausedPanel 在场（恢复前置条件逐字来自 run/paused 载荷）
+  // ③ 预算暂停 → PausedPanel 在场（恢复前置条件逐字来自 run/paused 载荷）。
+  //    面板出现在客户端退回 viewing 并重读历史之后（见上面 onWs 的传输语义注释），
+  //    重连退避（500ms×2³）走完需要几秒 ⇒ 放宽这一条 expect 的超时。
   const panel = page.locator('.pause-panel');
-  await expect(panel).toBeVisible();
+  await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect(panel).toContainText('已在预算到顶处暂停');
   await expect(panel).toContainText('抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复');
 
