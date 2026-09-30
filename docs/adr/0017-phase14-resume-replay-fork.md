@@ -42,3 +42,11 @@ Phase 13 交付了 spawn 型 child（全新上下文）与 delegation lineage �
 - `session/forked` 进 EVENT_TYPES；`SessionMeta` schema 扩列（SQLite migration，向后兼容：NULL = root）。
 - child 文件自包含带来存储重复（前缀复制）——以「独立可读 + 实现简单」换空间，workspace 本地文本量级可接受；如未来成为问题，lazy-seed（引用式）作为演进位。
 - 与流式改造（ADR-0016）的合并顺序：本阶段先行文件（session/event.py、session_meta、cli、新 workspace fork 模块）与流式改造交集极小；Web 端点独立文件避免 app.py 冲突。§14.9 集成一次一支：流式改造（已在跑）先，Phase 14 后。
+
+## 附注：2026-09-30 跨源复核（不改上文决策）
+
+调研（`docs/agents/pi-research-2026-09/synthesis-report.md` §2，上游 Pi 实测 `1b34779`）复核决策 1 / 9 的跨源依据，结论为**维持**：
+
+- **否决 tree-in-file 被跨源证据加强**：生产级同类无第二例把对话分支做进单文件——Cline 的 checkpoint 恢复 = 截断（删除其后消息）+ shadow git 只管文件快照（docs.cline.bot/features/checkpoints，读取 2026-09-30）；Claude Code / Manus / OpenHands 无会话树概念。决策 1「lineage 视图近似原地探索」与决策 9 tail summary 在 Pi HEAD 的对应物仍是 `branchWithSummary()`（session-manager.ts:1600-1622），语义同构。
+- **新增可移植项（backlog，未立项）**：Pi HEAD 新增 `ContextEditEntry`——append-only 地修饰早前 entry 的**投影**（替换内容 / 整体隐藏，原始 entry 不动；白名单限 user/assistant/toolResult/custom 四类消息），对应「完整保存 ≠ 完整注入」（不变量 #6）的投影层纠错（如敏感信息事后隐去）。与 file-per-lineage 不冲突（entry 级投影修饰，不引入 tree-in-file）；若立项须先厘清与 spec 03 §8「不允许删除原 tool interaction 事实」的边界。
+- Manus「Erasing failure removes evidence」与决策 9「被放弃的那条线得出了什么」同向，重申：fork 不隐藏错误路径。
