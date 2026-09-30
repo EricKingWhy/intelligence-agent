@@ -386,6 +386,14 @@ export function useSession() {
   const streamGenRef = useRef(0);
   const terminalSeenRef = useRef(false);
   const lastFrameAtRef = useRef(Date.now());
+  // #420 AC1：WS 传输层的活性观察者——每条服务帧（含 2s 一次的 server_ping）
+  // 都刷新停摆基准。审批等待期后端零事件、唯一下行是心跳；不把心跳计入活性，
+  // 停摆看门狗就会把「人在决策」掐死成「连接僵死」（误判重连 → give-up → viewing）。
+  // 事件帧本就经 onEvent 刷新同一 ref，这里幂等；SSE 降级路径没有心跳、不调
+  // 它，停摆检查在那里照旧生效。
+  const markStreamFrame = useCallback(() => {
+    lastFrameAtRef.current = Date.now();
+  }, []);
   // submitTask 闭包内的停摆检查（依赖 gen/coalescer 等闭包状态）——
   // hook 级心跳与 visibilitychange 经此触达当前活跃流。
   const stallCheckRef = useRef<(() => void) | null>(null);
@@ -792,7 +800,7 @@ export function useSession() {
                 // 「run 还在跑」的长流，用 HTTP SSE 会一并继承交付层攒包的毛病
                 // ——重连成功却要等 run 结束才看到帧。WS 不可用时由
                 // wsStreamResponse 内部降级回 SSE（见 lib/wsStream.ts）。
-                const streamRes = wsStreamResponse(sid as string, after);
+                const streamRes = wsStreamResponse(sid as string, after, markStreamFrame);
                 if (streamGenRef.current !== gen) return;
                 reconnectRef.current.release();
                 attach(streamRes, { awaitingEvidence: true });
@@ -824,7 +832,7 @@ export function useSession() {
               // 续传同样走 WS：重建之后要补的那一截还是「run 在跑」的长流。
               // 条交给「首帧」收（重建期间那条由上面的 setReconnecting(true)
               // 亮着）——续传流若一直不吐帧，条留在场才是对的。
-              const streamRes = wsStreamResponse(sid, maxSeq ?? -1);
+              const streamRes = wsStreamResponse(sid, maxSeq ?? -1, markStreamFrame);
               if (streamGenRef.current !== gen) return;
               reconnectRef.current.release();
               attach(streamRes, { awaitingEvidence: true });
@@ -850,7 +858,7 @@ export function useSession() {
 
         sseRef.current = consumeSSE(res, onEvent, onStreamEnd, onStreamError);
     },
-    [refreshSessions],
+    [refreshSessions, markStreamFrame],
   );
 
   /** Submit a new task. Creates a fresh session and streams the response.
@@ -934,7 +942,7 @@ export function useSession() {
         // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为
         // null，重连决策会把「不认识这个会话」判成 give-up（假错误横幅）。
         liveSidRef.current = sid;
-        attachLiveStream(wsStreamResponse(sid), gen, null);
+        attachLiveStream(wsStreamResponse(sid, -1, markStreamFrame), gen, null);
         return null;
       } catch (e) {
         // 过期请求迟到失败：丢弃，不污染新会话（调用方也不该当成功——返回一句
@@ -947,7 +955,7 @@ export function useSession() {
         return message;
       }
     },
-    [refreshSessions, attachLiveStream],
+    [refreshSessions, attachLiveStream, markStreamFrame],
   );
 
   /** 刷新后接回**仍在服务端运行的** run（BUG-006）。
@@ -1002,7 +1010,7 @@ export function useSession() {
         // 会话已删的 404 语义由历史装载路径兜住：mode 变更会重跑装载，
         // `getSessionEvents` 404 → NotFoundError → 清键 + 回 idle（见下方原注释）。
         if (streamGenRef.current !== gen) return;
-        attachLiveStream(wsStreamResponse(sid, afterSeq), gen, initialConv, { resume: true });
+        attachLiveStream(wsStreamResponse(sid, afterSeq, markStreamFrame), gen, initialConv, { resume: true });
       } catch (e) {
         if (streamGenRef.current !== gen) return;
         // 历史已渲染，这里只报告「继续接收」失败——不把视图打回空态。
@@ -1010,7 +1018,7 @@ export function useSession() {
         setError(`继续接收失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream],
+    [attachLiveStream, markStreamFrame],
   );
   useEffect(() => {
     resumeLiveStreamRef.current = resumeLiveStream;
@@ -1018,6 +1026,28 @@ export function useSession() {
   // 镜像给上方历史装载 effect 用（跨区块调用，与 stallCheckRef 同一手法）。
   // 放在 effect 里赋值而不是 render 期：refs 规则禁止 render 期读写 ref，
   // 而这里没有时序风险——历史装载的 .then 在 fetch 之后才跑，远晚于本 effect。
+
+  /** #420 AC2：审批决策提交成功后的事件必达路径。
+   *
+   *  POST /approve 只改变后端状态；其后的 `permission/resolved → tool/result →
+   *  … → run/completed` 需要**某个订阅**去消费。流活着（live 同会话）时事件
+   *  自然到达，无事可做；但 give-up / 恢复失败落进 viewing 后没有任何活跃
+   *  消费者——决策前投影定格，终答案永不渲染、composer 永久锁死（R5-B4 链
+   *  的第 6 步）。这里做与「刷新页面」等效的对账：全量重读历史（projectHistory
+   *  消费已落盘的 resolved 及其后继事件），并在 run 仍未收口时经
+   *  forgetResumeAttempt 重新武装自动接流，让后继事件继续增量到达。
+   *  决策是状态转换（GitHub Actions approval 语义）：提交成功 ≠ 客户端已看到
+   *  结果，必须显式对账一次。
+   *
+   *  防循环：live 分支直接返回；viewing 分支的重新装载至多把 hasUnterminatedRun
+   *  的会话带回 live——若又 give-up，没有下一次决策 POST 就不会再 resync
+   *  （额度机制照旧兜底，不会死循环）。 */
+  const resyncAfterDecision = useCallback((sid: string) => {
+    if (modeRef.current.kind === 'live' && modeRef.current.sessionId === sid) return;
+    resumeAttemptedRef.current = forgetResumeAttempt(resumeAttemptedRef.current, sid);
+    // 新对象强制 deps=[mode] 的历史装载 effect 重跑（哪怕 sid 没变）。
+    setMode({ kind: 'viewing', sessionId: sid });
+  }, []);
 
   /** 续聊：向已有会话发消息（PRD §5.3）。
    *  空闲会话 → 后端 launched 直驱新 run（同形 SSE）→ attachLiveStream 续接。
@@ -1696,5 +1726,6 @@ export function useSession() {
     sendSteer,
     flushQueue,
     cancelItem,
+    resyncAfterDecision,
   };
 }

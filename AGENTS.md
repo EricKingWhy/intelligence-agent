@@ -203,7 +203,7 @@ Review 必须同时检查**代码正确性 + 当前规格一致性**，不能只
 
 尤其参考：
 
-- Pi：`https://github.com/badlogic/pi-mono`
+- Pi：`https://github.com/earendil-works/pi`（原名 `badlogic/pi-mono`，旧链接自动重定向）
 - DeepSeek Harness：`https://github.com/deepseek-ai/deepseek-harness`
 
 已有成熟 SDK / 开源设计时，不得为了“自研”重复造轮子。
@@ -217,6 +217,18 @@ Review 必须同时检查**代码正确性 + 当前规格一致性**，不能只
 - MCP Tool 不能绕过统一 ToolExecutor。
 
 实质复制或 Port 上游代码时，检查 License 并保留必要来源。
+
+## 6.1 方案先行调研（2026-09-30 起）
+
+设计 / 选型类工作（新方案、新集成、架构改动）动手前：
+
+1. 先查 `docs/agents/reference-sources.md` 对应领域，看成熟实现怎么做；
+2. 至少 2 个独立来源交叉验证；代码来源用本地浅克隆对照 `file:line` 并记录所读 commit，
+   第三方笔记 / 文章先核实再引用（口径见清单 §1）；
+3. 方案 / ticket 落「方案依据」块：来源、机制摘要、与 §7 不变量的契合点、
+   REUSE / ADAPT / PORT DESIGN / BUILD / DEFER 判定（字段与豁免见
+   `docs/SDD_WORKFLOW_PROTOCOL.md` §1.3）；
+4. 不懂先查再动手。无依据的逐方案试错只属于 §4.2 debug 闭环，不属于设计阶段。
 
 ---
 

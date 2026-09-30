@@ -139,10 +139,41 @@ class ProtectedFact:
 
 
 def serialize_protected_facts(facts: list[ProtectedFact]) -> str:
+    """保护事实表的投影序列化（#346 注册值 → 模型可见注入体 / 摘要 §2）。
+
+    #430（W-02.1）：只投影 ``status == "active"`` 的条目——superseded 是已被
+    取代/撤权的旧真相，继续全额占用 ``protected_fact_token_budget`` 会让长
+    会话的注入体单调膨胀直至预算闸永久 fail-closed（#411 审查 P1）。注册表
+    语义不变：``derive_protected_facts`` 仍返回全量（撤销链 / fork 重映射 /
+    service 校验消费全量列表）；撤权信息由 active 的 ``authorization_revocation``
+    条目与事件流承载（OpenHands「抑制在视图层、历史不删」同构）。注入与摘要
+    §2 两个消费方共用本函数，投影口径天然一致（旧摘要里的 §2 不回改、不参与
+    跨代比对——compactor 恒现算）。
+    """
     return json.dumps(
-        [fact.to_dict() for fact in facts],
+        [fact.to_dict() for fact in facts if fact.status == "active"],
         ensure_ascii=False,
         sort_keys=True,
+    )
+
+
+#: user_goal 注入值硬上限（#430 验收 2）：API 层单条消息可接受 100,000 字符，
+#: 逐字全文进注册表投影会让保护事实注入体单独击穿独立预算（fail-closed 无
+#: 自愈）。上限取 2000 = Pi 序列化截断（TOOL_RESULT_MAX_CHARS）同源、#415
+#: 子代理结论 1500 字符头同家族。fact_id 仍按全文内容寻址（截断只改投影值，
+#: 不改注册表身份，已持久化的 supersedes 引用不断链）；全文逐字活在转录与
+#: 摘要 §1（冻结），source_event_id 即指针。
+_USER_GOAL_VALUE_MAX_CHARS = 2000
+
+
+def _bounded_goal_value(content: str, source_event_id: str) -> str:
+    if not isinstance(content, str) or len(content) <= _USER_GOAL_VALUE_MAX_CHARS:
+        return content
+    return (
+        content[:_USER_GOAL_VALUE_MAX_CHARS]
+        + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
+        + f"全文共{len(content)}字符，见首条用户消息 "
+        + f"source_event_id={source_event_id}］"
     )
 
 
@@ -743,7 +774,7 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 ProtectedFact(
                     fact_id=_expected_fact_id(fact_data),
                     type="user_goal",
-                    value=data["content"],
+                    value=_bounded_goal_value(data["content"], event.event_id),
                     source_event_id=event.event_id,
                     source_seq=event.seq,
                     status="active",

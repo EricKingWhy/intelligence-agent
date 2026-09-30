@@ -91,6 +91,8 @@
 3. **新摘要**（8 节）；
 4. **最近修改文件路径清单**（只回路径不读正文；Claude Code 同款：>5000 token 只回 `Referenced file` 路径引用）。
 
+> **W-02.1 实施对照（#430，2026-09-30）**：「全量」指注册表对**回放/对账面**全量保留（derive 层不动，revocation 链与 Fork 继承照旧）；**注入面只投影 `status == "active"` 条目**——撤销生效即被撤销项退出注入面，撤销事实（`authorization_revocation`）本身作为 active 条目在场；摘要 §2 同一投影。user_goal 注入值超 2000 字符时截断为自描述标记（原文长度 + source_event_id 指回源事件；fact_id 仍对全文内容寻址，截断不改变注册表身份）。预算超限 fail-closed 语义不变，新增 durable 诊断事件 `context/protected_facts_exceeded`（载荷只装 fact 的 id/type/尺寸，不装 value）。
+
 注入节奏：**事件驱动**（清单/保护事实变更即注入）+ **周期兜底每 6 条消息**（Cline Focus Chain 默认值，可配置）。⚠ W-29 实施澄清（2026-09-29，用户批准）：本架构注入为逐 build 重算的 ephemeral 块，「每 6 条」落地为「距最近一次清单变更 ≥N 条投影消息后恒在场」——Cline 的持久消息副本在两次重注入之间仍在场，恒在场才是其有效行为的忠实转写（逐窗口闪烁=上下文抖动）。**不做** Claude Code `SessionStart(compact)` hook 自定义注入（仅一家采用，YAGNI）。
 
 ## 5. 保护事实（W-02 增量）
@@ -102,6 +104,8 @@ fact 类型全集（#346 原有 + **加粗为增量**）：
 「失败方案」结构：`{fact_id, type: "failed_approach", 路径描述, 证伪依据, source_event_id/seq, 状态, session_id}`——证伪依据必须指向证伪事件（测试红/用户否决/运行时错误），不接受「模型觉得不行」。其余契约（字段、来源、撤销语义、独立预算、Fork 继承）按 #346 票面不动。
 
 > **W-02 上下文投影约束（2026-09-29，用户批准）**：模型上下文只注入按 `source_seq` 最新的一条系统 `work_boundary`；完整 run 历史仍由 append-only SessionEvent 重建。决策与压缩摘要处理见 [ADR-0007](adr/0007-context-compaction-three-tier-fallback.md)。
+
+> **W-02.1 残余登记（#430，2026-09-30，Scope Lock：本票不修，另行开票）**：① `failed_approach` 注册值无长度上限（整 args 落 value）；② 同 value 重复注册时 annotations 累积；③ 摘要 §1 用户消息逐字引用无上限（§6.1 冻结语义，不在此解）；④ `protected_fact_token_budget` 未进 Settings 配置面（构造参数直传）。
 
 ## 6. 摘要内容契约（逐字规范）
 

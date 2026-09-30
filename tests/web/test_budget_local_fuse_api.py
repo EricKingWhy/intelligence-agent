@@ -401,6 +401,73 @@ def test_unimplemented_scopes_and_dimensions_not_accepted_yet(tmp_path):
     assert ok.status_code == 200, ok.text
 
 
+def test_run_budget_on_launch_false_rejected_loudly(tmp_path):
+    """#422：launch=false 的创建请求携带 `budget.run` ⇒ 422（响亮拒绝，不静默丢弃）。
+
+    `budget.run` 是**启动 run 的请求**上的 per-run 绝对上限（`service.fork` 同款
+    语义族；`run/started.data.budget` 是它唯一的宿主）。launch=false 没有 run 可挂：
+    该上限既不持久化、也不被任何后续 run 消费（后续 `/messages` 只吃**自己**请求体
+    里的 budget）——静默收下等于客户端以为设了防失控闸而实际什么都没设，比报错
+    危险（Stripe `invalid_request_error` 原则：参数必须能生效，否则拒绝）。判定线
+    与 task×launch=false 互斥（#204 裁定 §2）同一条 handler 级、零副作用。
+
+    对照正控（上一个用例末段）：`budget.session` 在 launch=false 合法——session
+    账行就是它的宿主，跨 run 存续。`budget.local` 不在本判定内：它是请求级熔断，
+    launch=false 下"不投影"的设计注记在 handler（`_local_fuse_headers` 只在 launch
+    时带），其残余边界登记在 issue #422 的核实评论里。
+    """
+    app, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"budget": {"run": {"max_agent_turns_total": 1}}},
+            params={"launch": "false"},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "budget.run" in resp.text, resp.text
+    _assert_rejected_without_side_effects(app, probe)
+
+    # 对照：同一预算在 launch=true（默认）路径上合法（既有正路径不回归）。
+    with probe:
+        ok = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"run": {"max_agent_turns_total": 1}}},
+        )
+    assert ok.status_code == 200, ok.text
+
+
+@pytest.mark.parametrize(
+    ("dim", "value"),
+    [
+        ("max_agent_turns_total", 1),
+        ("max_model_requests", 1),
+        ("max_total_tokens", 1),
+        ("max_cost_usd", "0.01"),
+        ("deadline_at", "2099-01-01T00:00:00Z"),
+        ("tool_call_limits", {"read": 3}),
+    ],
+)
+def test_run_budget_any_dimension_on_launch_false_rejected(tmp_path, dim, value):
+    """#422：launch=false × `budget.run` **任一维**非空都是同一条 422（组合全覆盖）。
+
+    判定线在"带没带 run"这一层（handler 级、零副作用），不逐维放行——某个维度
+    单独看再"无害"（比如 deadline）也不构成豁免：launch=false 没有 run 可挂，
+    任何维度都不可能被消费。`max_tool_calls` 非空在 pydantic `model_validator`
+    （形状层、更早）就被拒，不在此列。
+    """
+    app, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"budget": {"run": {dim: value}}},
+            params={"launch": "false"},
+        )
+    assert resp.status_code == 422, f"{dim}={value} 应被拒：{resp.text}"
+    _assert_rejected_without_side_effects(app, probe)
+
+
 def test_tool_call_limits_requires_registered_names(tmp_path):
     """`budget.run.tool_call_limits` 的工具名必须**已注册**（`#314` / `04 §9.1`）⇒ 422。
 

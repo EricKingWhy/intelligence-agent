@@ -92,6 +92,7 @@ from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.session.fork import (
     ForkBoundaryError,
     TailSummarizer,
+    find_fork_boundaries,
     fork_session,
 )
 from agent_harness.session.lineage import (
@@ -1046,13 +1047,37 @@ def _parse_fork_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("session_id", help="要分叉的父会话 id")
     parser.add_argument(
         "--from-message", type=int, required=True, metavar="N",
-        help="从父会话的第 N 条用户消息处分叉（该消息不进 seed，由你在新分支重发）",
+        help="从父会话的第 N 条用户消息处分叉（只数可作分叉锚点的用户消息；"
+             "该消息不进 seed，由你在新分支重发）",
     )
     parser.add_argument(
         "--no-summary", action="store_true",
         help="跳过 tail summary（默认对被放弃路线生成一次 LLM 摘要挂进新会话）",
     )
     return parser.parse_args(argv)
+
+
+def _resolve_fork_ordinal(
+    store: JsonlSessionStore, session_id: str, from_message: int,
+) -> int:
+    """把 `--from-message` 的**序数**解析成 fork 锚点的**事件 seq**（#424）。
+
+    help 承诺"第 N 条用户消息"，而 ``fork_session`` 的契约是事件 seq——历史
+    行为把 N 当 seq 直传，纯消息会话里二者恰好重合（started 占 seq 0），
+    真实会话（消息间夹着 run/model/tool 事件）立刻分叉。解析范围是
+    :func:`find_fork_boundaries` 的合法锚点：run 完整处的用户消息——
+    "第 N 条用户消息"若落在 run 未收口处，fork 进 run 不完整的前缀本来
+    就不合法，只能按可分叉的锚点数序数。越界报错同时给序数范围与 seq
+    清单（用户按序数提问，按 seq 对账）。
+    """
+    boundaries = find_fork_boundaries(store.read_events(session_id))
+    if not 1 <= from_message <= len(boundaries):
+        raise ForkBoundaryError(
+            f"--from-message {from_message} 超出范围：父会话 '{session_id}' "
+            f"只有 {len(boundaries)} 个可作分叉锚点的用户消息"
+            f"（事件 seq: {boundaries}）"
+        )
+    return boundaries[from_message - 1]
 
 
 async def fork_command(
@@ -1091,7 +1116,9 @@ async def fork_command(
         )
     child = await fork_session(
         store, meta_store, session_id,
-        boundary_user_message_seq=from_message,
+        boundary_user_message_seq=_resolve_fork_ordinal(
+            store, session_id, from_message,
+        ),
         workspace_registry=workspace_registry,
         summarizer=summarizer, with_tail_summary=not no_summary,
         # `#318`：fork 谱系读父账行（只读；同一 harness.db 的 durable 账）。

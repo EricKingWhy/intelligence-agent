@@ -66,6 +66,9 @@ class TestSessionEventDTO:
             # W-04 (#348)：摘要尝试失败的任务可见状态（每次尝试一条，载荷有界；
             # 不投影成消息——derive 的投影集合不收它）。
             "context/compaction_failed",
+            # #430（W-02.1）：保护事实独立预算超限的诊断事件（fail-closed 暂停
+            # 语义不变；载荷只装预算读数 + fact 的 id/type/尺寸，不装 value）。
+            "context/protected_facts_exceeded",
             # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
             # 硬校验在 session/plan.py）。
             "task/plan_updated",

@@ -164,12 +164,24 @@ export const WAIT_HINT_IDLE_SEC = 30;
 /** 该不该出现等待提示：模型正在思考 **且** 流仍挂着。
  *
  *  两个条件缺一不可，各自挡掉一种失真的提示：
- *  - 脉冲不是 thinking（工具执行 / 审批等待 → 'tool'）挡掉自相矛盾——顶栏不能一边
+ *  - 脉冲不是 thinking（工具执行 → 'tool'）挡掉自相矛盾——顶栏不能一边
  *    写「执行工具」一边写「仍在等待模型」；终态同理（没有停顿可言）。
  *  - 流已脱离挡掉「我们根本没在听」——重连额度耗尽或会话已收口时，那句「仍在等待」
- *    是断线条 / 恢复入口的语义地盘，不是这句旁注的。 */
-export function shouldShowWaitHint(pulseState: RunPulseState, streaming: boolean): boolean {
-  return pulseState === 'thinking' && streaming;
+ *    是断线条 / 恢复入口的语义地盘，不是这句旁注的。
+ *
+ *  #427：`awaitingApproval`（会话挂着待决策审批卡）时**提示要出现**，但等待的
+ *  对象是用户——文案由 `waitingHintText` 换向（见那里）。审批等待期间脉冲通常
+ *  归「思考中」（等待审批的工具调用不算 running），这里显式放行 `awaitingApproval`
+ *  是防御性的：投影若将来把该状态归到 'tool' 档，提示也不能跟着消失。
+ *  终态仍优先：run 已收口就不存在「还在等什么」。 */
+export function shouldShowWaitHint(
+  pulseState: RunPulseState,
+  streaming: boolean,
+  awaitingApproval = false,
+): boolean {
+  if (!streaming) return false;
+  if (awaitingApproval) return pulseState === 'thinking' || pulseState === 'tool';
+  return pulseState === 'thinking';
 }
 
 /** 空闲 idleSec 秒后的等待说明；未到阈值返回 null（渲染零变化）。
@@ -179,13 +191,18 @@ export function shouldShowWaitHint(pulseState: RunPulseState, streaming: boolean
  *  不含进度/ETA/回退预测——后端此刻并没有发出任何「正在回退」的事实，等待态是
  *  展示层状态（不变量 #4：Event ≠ Diagnostic Log；#22：Web UI 不造第二套真相）。
  *
+ *  #427：`awaitingApproval` 时等待的主语是**用户**（后端在等审批决策，没有
+ *  任何东西"还在跑"），文案换向说「等审批」——沿用旧句子而主语错成"模型"，
+ *  用户会以为卡死在 provider 上，其实阻塞点是他自己没点按钮。
+ *
  *  阈值依据：本仓 `docs/FRONTEND_ISSUES_LOG.md`「停顿提示阈值」小节（可复现的实测方法
  *  与分布，n=13：p50 4.6s / max 61.0s，>30s 占 2/13）；参照实现的 idle 看门狗对照见
  *  后端仓 `docs/RESEARCH_STREAM_STALL_HANDLING.md`。本提示是**展示层旁注、不中止任何
  *  东西**，所以刻意比三方的看门狗（本项目 60s / dsh 300s / ZCode 600s）都早出现。
  *  非有限值不产文案（畸形计时不得被渲染成句子）。 */
-export function waitingHintText(idleSec: number): string | null {
+export function waitingHintText(idleSec: number, awaitingApproval = false): string | null {
   if (!Number.isFinite(idleSec) || idleSec < WAIT_HINT_IDLE_SEC) return null;
+  if (awaitingApproval) return `已 ${Math.floor(idleSec)}s 没有新进展，正在等待你的审批决定`;
   return `已 ${Math.floor(idleSec)}s 没有新进展，仍在等待模型`;
 }
 

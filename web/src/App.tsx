@@ -59,7 +59,7 @@ import {
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
-import { toAmendFields, toCreateControls, type ComposerControls } from './lib/amend';
+import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
 import type { ToolCall, PresetTask, AgentEvent, Project, UndeliveredInput } from './types';
 
@@ -123,6 +123,7 @@ export default function App() {
     sendSteer,
     flushQueue,
     cancelItem,
+    resyncAfterDecision,
   } = useSession();
 
   // ── 项目（WS-5 / #155）──
@@ -481,6 +482,10 @@ export default function App() {
     [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
 
+  // #426：新建会话的预算入口草稿（Composer 输入框原样字符串；判形在映射层
+  // toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。
+  const [budgetRunTurnsDraft, setBudgetRunTurnsDraft] = useState('');
+
   // #283：权限 pill 在会话内**可改**（#236 的「创建时确定、会话内不可修改」已被 F18-A
   // 推翻）。取值 + 跨会话身份闸仍在纯函数 `composerPermissionMode` 里（App 没有 SSR
   // 测试车道，逻辑放 lib 直测）；禁用与升档确认在 Composer 内（它知道 `streaming` /
@@ -533,9 +538,11 @@ export default function App() {
         task,
         auto_approve: true,
         ...toCreateControls(composerControls),
+        // #426：可选预算上限——空/非法草稿在映射层返回 undefined（不发键）。
+        budget: toCreateBudget(budgetRunTurnsDraft),
       });
     },
-    [submitTask, sendMessage, focusRun, selectedId, composerControls],
+    [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft],
   );
 
   /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 创建**空会话**
@@ -1209,6 +1216,8 @@ export default function App() {
                     onEditTurn={handleEditTurn}
                     goneApprovalIds={goneApprovalIds}
                     onApprovalGone={onApprovalGone}
+                    /* #420 AC2：决策 POST 成功 → 对账一次，决策后事件必达 */
+                    onApprovalDecided={resyncAfterDecision}
                   />
                   <Composer
                     streaming={streaming}
@@ -1242,6 +1251,9 @@ export default function App() {
                     reasoningEfforts={reasoningEfforts}
                     selectedReasoningEffort={selectedReasoningEffort}
                     onReasoningEffortChange={setSelectedReasoningEffort}
+                    /* #426：新建会话的预算入口（会话内 Composer 不显示，见组件注释） */
+                    budgetRunTurns={budgetRunTurnsDraft}
+                    onBudgetRunTurnsChange={setBudgetRunTurnsDraft}
                   />
                 </>
               ) : null}

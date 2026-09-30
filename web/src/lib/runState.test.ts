@@ -454,7 +454,7 @@ describe('shouldShowWaitHint', () => {
     expect(shouldShowWaitHint('thinking', true)).toBe(true);
   });
 
-  it('工具执行 / 审批等待不提示——否则顶栏一边写「执行工具」一边写「仍在等待模型」', () => {
+  it('工具执行不提示——否则顶栏一边写「执行工具」一边写「仍在等待模型」', () => {
     expect(shouldShowWaitHint('tool', true)).toBe(false);
   });
 
@@ -466,6 +466,53 @@ describe('shouldShowWaitHint', () => {
 
   it('流已脱离不提示——我们没在听，那句「仍在等待」是断线条的地盘', () => {
     expect(shouldShowWaitHint('thinking', false)).toBe(false);
+  });
+});
+
+// ── #427：审批等待的文案分支——等的是用户，不是模型 ──
+//
+// 审批等待期间脉冲仍归「思考中」（等待审批的工具调用不算 running），旧逻辑
+// 于是把「已 Ns 没有新进展，仍在等待模型」挂在审批卡上方——但此刻后端没事
+// 可做，阻塞点是**用户没点按钮**。等待的对象不同，文案必须换向；提示该不该
+// 出现的判定也随之放宽（审批等待时即便脉冲将来归到工具档，提示仍要出现——
+// 只是句子换了主语）。
+
+describe('waitingHintText — #427 审批等待分支', () => {
+  it('审批等待时文案换向：等审批，不说「等待模型」', () => {
+    const text = waitingHintText(WAIT_HINT_IDLE_SEC, true) ?? '';
+    expect(text).toContain('审批');
+    expect(text).not.toContain('等待模型');
+  });
+
+  it('审批等待同样受阈值约束', () => {
+    expect(waitingHintText(WAIT_HINT_IDLE_SEC - 1, true)).toBeNull();
+  });
+
+  it('审批等待的文案同样只说「还在等」——不预测进度（零伪造）', () => {
+    const text = waitingHintText(95, true) ?? '';
+    expect(text).toContain('95');
+    for (const banned of ['%', '进度', '预计', 'ETA', '即将', '回退']) {
+      expect(text).not.toContain(banned);
+    }
+  });
+
+  it('默认参数（无审批）行为逐字不变', () => {
+    expect(waitingHintText(WAIT_HINT_IDLE_SEC)).toContain('等待模型');
+  });
+});
+
+describe('shouldShowWaitHint — #427 审批等待分支', () => {
+  it('审批等待时提示出现，脉冲是 thinking 或 tool 都一样', () => {
+    expect(shouldShowWaitHint('thinking', true, true)).toBe(true);
+    expect(shouldShowWaitHint('tool', true, true)).toBe(true);
+  });
+
+  it('审批等待但流已脱离不提示——断线条语义地盘不变', () => {
+    expect(shouldShowWaitHint('thinking', false, true)).toBe(false);
+  });
+
+  it('终态 + 审批等待的矛盾组合不提示（终态优先）', () => {
+    expect(shouldShowWaitHint('completed', true, true)).toBe(false);
   });
 });
 

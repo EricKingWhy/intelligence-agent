@@ -334,7 +334,11 @@ async def build_runtime(
     policy = permission_mode
     if auto_approve is False and approval_callback is None:
         async def approval_callback(_req):  # type: ignore[no-redef]
-            return ApprovalResponse(approved=False, reason="manual approval not yet wired")
+            # #423：用户向措辞（原 "manual approval not yet wired" 已退役，见 CHANGELOG）。
+            return ApprovalResponse(
+                approved=False,
+                reason="自动批准未开启，且当前会话没有可用的审批通道；已按 fail-closed 拒绝本次工具执行",
+            )
     elif approval_callback is None:
         async def approval_callback(_req):  # type: ignore[no-redef]
             return ApprovalResponse(approved=True, reason="auto-approve")

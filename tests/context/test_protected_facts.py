@@ -1,9 +1,14 @@
 import json
+from dataclasses import replace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from agent_harness.context.builder import ContextBuilder, ContextWindowExceededError
+from agent_harness.context.builder import (
+    ContextBuilder,
+    ContextWindowExceededError,
+    ProtectedFactBudgetExceededError,
+)
 from agent_harness.context.compactor import (
     ContextCompactor,
     _programmatic_summary_sections,
@@ -16,7 +21,11 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
 )
-from agent_harness.session.derive import ProtectedFact, derive_protected_facts
+from agent_harness.session.derive import (
+    ProtectedFact,
+    derive_protected_facts,
+    serialize_protected_facts,
+)
 from agent_harness.session.event import RUN_PAUSED
 from agent_harness.session.fork import fork_session
 from agent_harness.session.store import JsonlSessionStore
@@ -402,3 +411,177 @@ async def test_context_projection_keeps_only_latest_run_boundary_within_fact_bud
     assert injected_boundaries[0]["source_event_id"] == boundaries[-1].event_id
     assert injected_boundaries[0]["value"]["reason"].startswith("Run 127:")
     assert builder._last_protected_fact_tokens < builder.protected_fact_token_budget
+
+
+# ── #430（W-02.1 预算护栏）：序列化投影面只携带 active ──────────────────
+
+
+def _revocation_session(tmp_path):
+    """授权 + 撤销的最小注册表：grant 被翻成 superseded，revocation active。"""
+    session = Session.start(JsonlSessionStore(tmp_path), session_id="revoke-projection")
+    grant_text = "授权只运行测试；订单号 ORD-84721 必须原样保留。"
+    grant_event = session.append(USER_MESSAGE, {"content": grant_text})
+    grant = session.register_protected_fact(
+        fact_type="authorization",
+        value=grant_text,
+        source_event_id=grant_event.event_id,
+    )
+    revoke_event = session.append(USER_MESSAGE, {"content": "撤销刚才的运行授权。"})
+    session.register_protected_fact(
+        fact_type="authorization_revocation",
+        value="撤销刚才的运行授权。",
+        source_event_id=revoke_event.event_id,
+        supersedes_fact_id=grant.data["fact_id"],
+    )
+    return session, grant.data["fact_id"]
+
+
+def test_serialization_projects_active_facts_only_and_shrinks_on_revocation(tmp_path):
+    """验收 1：superseded 事实退出序列化投影面，撤权前后投影预算差可测。
+
+    derive 层不动（注册表全量语义是撤销链 / fork / service 的契约）——过滤只
+    在 serialize 投影面（OpenHands「抑制标记在视图层」同构）；撤权信息不丢：
+    active 的 authorization_revocation 仍全保真。
+    """
+    session, grant_fact_id = _revocation_session(tmp_path)
+    facts = derive_protected_facts(session.events)
+    grant_fact = next(fact for fact in facts if fact.fact_id == grant_fact_id)
+    assert grant_fact.status == "superseded"
+
+    serialized = serialize_protected_facts(facts)
+    assert grant_fact_id not in serialized
+    assert "authorization_revocation" in serialized
+
+    pre_revocation = replace(grant_fact, status="active")
+    before = serialize_protected_facts([pre_revocation, *facts])
+    before_tokens = estimate_message_tokens([HumanMessage(content=before)])
+    after_tokens = estimate_message_tokens([HumanMessage(content=serialized)])
+    assert before_tokens > after_tokens
+
+
+def test_summary_section_two_projects_active_facts_only(tmp_path):
+    """验收 1（摘要面）：§2 保护事实表与注入体同源——superseded 不进 §2。"""
+    session, grant_fact_id = _revocation_session(tmp_path)
+    facts = derive_protected_facts(session.events)
+    sections = _programmatic_summary_sections(
+        [HumanMessage(content="目标。")], protected_facts=facts,
+    )
+    assert grant_fact_id not in sections["## 保护事实表"]
+    assert "authorization_revocation" in sections["## 保护事实表"]
+
+
+@pytest.mark.asyncio
+async def test_budget_exceeded_raises_diagnosable_subclass(tmp_path):
+    """验收 3/4：fail-closed 语义不变（仍抛 ContextWindowExceededError 子类，
+    错误文案逐字保留），但异常携带结构化载荷供 runtime 发任务可见诊断事件。"""
+    session = Session.start(JsonlSessionStore(tmp_path), session_id="over-budget")
+    session.append(USER_MESSAGE, {"content": "必须保留精确编号 ORD-123456789。"})
+    builder = ContextBuilder(
+        None, max_context_tokens=4_000, protected_fact_token_budget=1,
+    )
+
+    with pytest.raises(ProtectedFactBudgetExceededError) as excinfo:
+        await builder.build(session)
+
+    error = excinfo.value
+    assert isinstance(error, ContextWindowExceededError)
+    assert "facts withheld" in str(error)
+    assert error.budget_tokens == 1
+    assert error.estimated_tokens > error.budget_tokens
+    assert [fact["type"] for fact in error.facts] == ["user_goal"]
+    assert all(
+        set(fact) == {"fact_id", "type", "value_chars"} for fact in error.facts
+    )
+    assert all(fact["value_chars"] > 0 for fact in error.facts)
+
+
+@pytest.mark.asyncio
+async def test_truncated_goal_marker_is_model_visible_and_prefix_stable(tmp_path):
+    """验收 2（模型可见面）：超限 user_goal 的自描述截断标记进注入体；
+    截断发生时两次 build 逐字节一致（#416 前缀稳定性纪律）。"""
+    session = Session.start(JsonlSessionStore(tmp_path), session_id="goal-marker")
+    session.append(USER_MESSAGE, {"content": "目标头。" + "约束正文。" * 600})
+    builder = ContextBuilder(None, max_context_tokens=1_000_000)
+    first = await builder.build(session)
+    second = await builder.build(session)
+    assert [m.model_dump_json() for m in first] == [m.model_dump_json() for m in second]
+    facts_message = _fact_data_message(first)
+    assert "已截断" in facts_message.content
+    assert str(len("目标头。" + "约束正文。" * 600)) in facts_message.content
+
+
+@pytest.mark.asyncio
+async def test_superseding_the_oversized_goal_restores_build(tmp_path):
+    """验收 3（自愈回归）：超限目标被显式 supersedes 替换后，build 不再抛——
+    诊断事件给出 fact_id，用户经既有注册 API 撤权即可恢复。"""
+    session = Session.start(JsonlSessionStore(tmp_path), session_id="self-heal")
+    huge = "keep record ORD-84721. " + "body text line. " * 700
+    session.append(USER_MESSAGE, {"content": huge})
+    builder = ContextBuilder(
+        None, max_context_tokens=1_000_000, protected_fact_token_budget=300,
+    )
+    with pytest.raises(ContextWindowExceededError):
+        await builder.build(session)
+
+    goal_fact_id = next(
+        fact.fact_id
+        for fact in derive_protected_facts(session.events)
+        if fact.type == "user_goal"
+    )
+    replacement_event = session.append(
+        USER_MESSAGE, {"content": "改为：只跑上下文测试。"},
+    )
+    session.register_protected_fact(
+        fact_type="user_goal",
+        value="改为：只跑上下文测试。",
+        source_event_id=replacement_event.event_id,
+        supersedes_fact_id=goal_fact_id,
+    )
+
+    messages = await builder.build(session)
+    facts_message = _fact_data_message(messages)
+    assert huge not in facts_message.content
+    assert "改为：只跑上下文测试。" in facts_message.content
+
+
+@pytest.mark.asyncio
+async def test_budget_payload_names_active_facts_only(tmp_path):
+    """审查 P2 修复钉死（#430）：raise 的文案与载荷只指认 active 条目——
+    superseded 事实不占预算（serialize 已过滤），不进 "facts withheld" 明细，
+    否则会诱导用户去撤一条已经不占预算的死事实。"""
+    session = Session.start(
+        JsonlSessionStore(tmp_path), session_id="active-only-payload",
+    )
+    grant_event = session.append(
+        USER_MESSAGE, {"content": "授权只运行测试；订单号 ORD-84721 必须原样保留。"},
+    )
+    grant = session.register_protected_fact(
+        fact_type="authorization",
+        value=grant_event.data["content"],
+        source_event_id=grant_event.event_id,
+    )
+    revoke_event = session.append(USER_MESSAGE, {"content": "撤销刚才的运行授权。"})
+    session.register_protected_fact(
+        fact_type="authorization_revocation",
+        value=revoke_event.data["content"],
+        source_event_id=revoke_event.event_id,
+        supersedes_fact_id=grant.data["fact_id"],
+    )
+    huge = "huge goal " + "x" * 4000
+    huge_event = session.append(USER_MESSAGE, {"content": huge})
+    session.register_protected_fact(
+        fact_type="user_goal",
+        value=huge,
+        source_event_id=huge_event.event_id,
+    )
+    builder = ContextBuilder(
+        None, max_context_tokens=1_000_000, protected_fact_token_budget=300,
+    )
+    with pytest.raises(ProtectedFactBudgetExceededError) as excinfo:
+        await builder.build(session)
+
+    assert grant.data["fact_id"] not in str(excinfo.value)
+    assert all(
+        fact["fact_id"] != grant.data["fact_id"] for fact in excinfo.value.facts
+    )
+    assert any(fact["type"] == "user_goal" for fact in excinfo.value.facts)
