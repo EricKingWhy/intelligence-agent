@@ -134,3 +134,17 @@ clean-runner script could not start because this machine's `bash` resolves to WS
 `docs/gate/0f8b1ea5941fff7b91408c667234386fbde0ade6.json`. No live Milvus rebuild is claimed.
 Actual execution remains an operator action after all writers to the configured collection are
 stopped, including writers in other clones.
+
+## 2026-09-30 follow-up review and regression closure
+
+The branch was synchronized with `origin/main` `5b6af76a`. Full-range independent Spec and
+Standards review covered the rebuild implementation and merge; Standards found a P2 in the
+maintenance-lock flags, while Spec found no P0–P2 issue. The fix at `6d149d6a` makes cutover
+and index-rebuild maintenance modes mutually exclusive. A new test failed before the fix
+(`DID NOT RAISE`) and passed afterward. The combined lock, rebuild, and clean-slate regression
+set passed 94 tests; Ruff and `git diff --check` passed. Review ranges and the merge analysis
+are in `docs/review_ledger.d/424-mem-v2-297-full-review.tsv` and
+`docs/review_ledger.d/425-mem-v2-297-maintenance-lock-fix.tsv`. The quoted-collation `where`
+identifier observation is fail-closed and remains a low-priority compatibility limitation.
+This evidence is local to `codex/mem-v2-297-index-rebuild`; it does not claim a live Milvus
+rebuild or GitHub integration.
