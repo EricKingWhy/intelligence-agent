@@ -240,6 +240,11 @@ def _replace_table_definition(
             "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL DEFAULT (NULL)",
         ),
         (
+            "memory_v2_records",
+            "updated_at TEXT NOT NULL",
+            "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL DEFAULT (NULL /* comment */)",
+        ),
+        (
             "memory_v2_outbox",
             "project_id TEXT",
             "project_id TEXT, extension_required TEXT NOT NULL",
@@ -253,6 +258,11 @@ def _replace_table_definition(
             "memory_v2_outbox",
             "project_id TEXT",
             "project_id TEXT, extension_required TEXT NOT NULL DEFAULT (NULL)",
+        ),
+        (
+            "memory_v2_outbox",
+            "project_id TEXT",
+            "project_id TEXT, extension_required TEXT NOT NULL DEFAULT (NULL /* comment */)",
         ),
     ],
     ids=[
@@ -273,9 +283,11 @@ def _replace_table_definition(
         "extra-required-record-column",
         "extra-required-record-column-default-null",
         "extra-required-record-column-default-parenthesized-null",
+        "extra-required-record-column-default-commented-null",
         "extra-required-outbox-column",
         "extra-required-outbox-column-default-null",
         "extra-required-outbox-column-default-parenthesized-null",
+        "extra-required-outbox-column-default-commented-null",
     ],
 )
 def test_preflight_rejects_incompatible_v2_schema(tmp_path, table, old, new) -> None:

@@ -199,7 +199,8 @@ def _normalize_schema_sql(sql: str | None) -> str:
 def _is_null_default(value: object) -> bool:
     if value is None:
         return True
-    normalized = re.sub(r"\s+", "", str(value))
+    without_comments = re.sub(r"/\*.*?\*/|--[^\r\n]*", "", str(value), flags=re.DOTALL)
+    normalized = re.sub(r"\s+", "", without_comments)
     return _strip_redundant_parentheses(normalized).casefold() == "null"
 
 
