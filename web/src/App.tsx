@@ -513,8 +513,11 @@ export default function App() {
   );
 
   const handleSubmit = useCallback(
-    (task: string) => {
+    (task: string, rememberAsProceduralRule = false) => {
       focusRun();
+      const ruleSignal = rememberAsProceduralRule
+        ? { remember_as_procedural_rule: true }
+        : {};
       // Composer 档位 → 契约字段的映射统一走 lib/amend.ts（单一构造器）；
       // 空值丢弃由 api 层单一执行（见 amend.ts 顶部契约说明）。
       // 续聊：已有会话 → 发消息到现有会话（PRD §5.3 续聊入口）。
@@ -525,13 +528,14 @@ export default function App() {
       // 新会话：无 selectedId → startSession 创建新会话。
       if (selectedId) {
         void sendMessage(selectedId, task, {
-          amend: toAmendFields(composerControls),
+          amend: { ...toAmendFields(composerControls), ...ruleSignal },
         });
         return;
       }
       void submitTask({
         task,
         auto_approve: true,
+        ...ruleSignal,
         ...toCreateControls(composerControls),
       });
     },
@@ -652,12 +656,12 @@ export default function App() {
   // "有会话但 run 已终结"那一支由后端 409 + 交付层回退 queue 兜住
   // （useSession.sendFollowUp），这里不重复判断。
   const handleSteer = useCallback(
-    (task: string) => {
+    (task: string, rememberAsProceduralRule = false) => {
       if (!selectedId) {
-        handleSubmit(task);
+        handleSubmit(task, rememberAsProceduralRule);
         return;
       }
-      void sendSteer(selectedId, task);
+      void sendSteer(selectedId, task, rememberAsProceduralRule);
     },
     [sendSteer, selectedId, handleSubmit],
   );

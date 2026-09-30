@@ -144,10 +144,10 @@ PRD §5.7.2 的 9 类敏感（健康 / 财务 / 证件 / 精确位置 / 生物�
 AC3 的字面判据仍成立（它要求"未被授权的 sensitive"被拒，而"未被标为 sensitive"不在此列），
 但"运行期完全独立于模型分类"这个更强的说法**在本票不成立**，不要对外这样讲。
 
-### D9 — `project_id` 恒 `None`：作用域收敛到 `user_global`
+### D9 — 当时 `project_id` 恒 `None`：作用域收敛到 `user_global`
 
-本票没有**可信的项目绑定来源**（`types.TrustedMemoryIdentity` 自己写明"具体解析链在后续票据接线"）。
-后果：执行器的检索与政策判据都只看到 `user_global` 一个作用域。
+记录本 ADR 时，本票没有**可信的项目绑定来源**（`types.TrustedMemoryIdentity` 写明"具体解析链在后续票据接线"）。
+当时执行器的检索与政策判据都只看到 `user_global` 一个作用域。该实现限制由 D13 更新。
 
 选**诚实的窄**：少形成一条 project 记忆，而不是把一条用户事实**错记到项目名下**。
 （后者是脏数据——它会在别的项目里被检索到。）
@@ -176,6 +176,45 @@ AC3 的字面判据仍成立（它要求"未被授权的 sensitive"被拒，而"
 
 不做：检索/UI/cutover（后续票）、把未采纳的候选留在持久待办队列（票面明禁）、把 Langfuse
 可用性变成 job 成功依赖、V1 路径的任何改动（V1 逐字保留，退场归 #303）。
+
+### D13 — 项目作用域由 Runtime 绑定可信 ID
+
+Formation / Adjudication 的模型输入只包含 `trusted_context.project_available` 布尔值；模型响应
+不定义 `project_id` 字段。模型可在该值为 true 时提出 project scope，Runtime 再从持久 job 的
+`TrustedMemoryIdentity` 注入真实项目 ID。没有可信项目时，政策层拒绝 project 候选；最终
+`MemoryDraftV2`、存储写入和项目隔离校验继续要求并核对真实 ID。
+
+这替代 D9 的“生产路径只能使用 user_global”限制，不放宽任何持久化身份校验，不增加模型、
+权重、provider 或外部服务，也不把 tenant/user/project/session ID 暴露给模型。
+
+该边界与成熟实现保持一致：LangMem 从运行时配置展开 namespace；Zep/Graphiti 要求应用先授权
+`group_id`，并明确 namespace filter 不能替代授权。因此运行时绑定项目 ID，模型只拿到上下文
+是否可用的布尔值。参考：[LangMem namespace API](https://langchain-ai.github.io/langmem/reference/memory/)、
+[LangMem runtime namespace configuration](https://langchain-ai.github.io/langmem/guides/dynamically_configure_namespaces/)、
+[Zep Graphiti namespacing](https://help.getzep.com/graphiti/core-concepts/graph-namespacing)。
+
+### D14 — R5 单事件规则豁免必须由用户显式标记
+
+普通 `user/message` 不能单独证明用户明确陈述了一条可复用规则。创建任务、带任务恢复和续聊
+请求可带 `remember_as_procedural_rule: true`；Runtime 只把它写到对应的 genuine user event，
+且单事件 Procedural 候选必须引用该事件，并提供能在原文中逐字核实的非空摘录。空白输入不能
+设置该标记。缺省为 false；空会话创建和不带 task 的同 run 恢复拒绝该标记。Composer 提供
+逐条消息的 opt-in 控件，提交后复位。
+
+没有显式标记时，R5 要求两条不同的合格事件：运行时可解析的成功 tool result，或带有指向同一
+session 中已持久化 direct user input / valid tool attempt 的 `refutes_event_id` 的 genuine user
+correction。单纯失败结果不证明成功或纠正，因此不能计数。该调整严格化原有门槛，不需要新的
+模型、权重或外部服务。
+
+成熟产品资料展示了显式管理记忆工具和“Remember …”用户指令；Pi 的项目资料还区分稳定长期规则
+（Context Files）与每轮动态上下文。由此采用逐条 UI/API opt-in，避免把任意用户消息自动解释为
+可复用规则。该字段和 Runtime 校验是本项目的 R5 契约，不复制上游实现。参考：[LangMem memory tools](https://langchain-ai.github.io/langmem/)、[dg-ai-notes G04 preload context](https://github.com/buchidonggua/dg-ai-notes/blob/main/skills/dg-piagent/references/scenarios/G04-preload-context.md)。
+
+### D15 — `project_fact` 必须使用项目作用域
+
+`project_fact` 不能写入 `user_global`。该约束在共享 draft/record 内容契约中校验，覆盖自动
+Formation、显式记忆工具、编辑 API 和存储调用方；缺少可信项目上下文时，显式 project-fact
+写入失败且不落盘。这样避免单个调用入口漏掉策略检查后把项目事实带入其他项目。
 
 ---
 

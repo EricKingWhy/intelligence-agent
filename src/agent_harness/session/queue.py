@@ -37,6 +37,7 @@ class QueuedMessage:
     revoke_fact_id: str | None = None
     refutes_event_id: str | None = None
     protected_facts: list[dict[str, Any]] | None = None
+    remember_as_procedural_rule: bool = False
 
 
 @dataclass
@@ -54,6 +55,7 @@ class SteerRequest:
     revoke_fact_id: str | None = None
     refutes_event_id: str | None = None
     protected_facts: list[dict[str, Any]] | None = None
+    remember_as_procedural_rule: bool = False
 
 
 class SteerSource(Protocol):
@@ -98,6 +100,7 @@ class MessageQueueManager:
         self, *, session_id: str, content: str, created_at: str,
         revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
+        remember_as_procedural_rule: bool = False,
     ) -> QueuedMessage:
         """把消息放入 session 的队列，返回 QueuedMessage。"""
         queue_id = str(uuid4())
@@ -109,6 +112,7 @@ class MessageQueueManager:
             revoke_fact_id=revoke_fact_id,
             refutes_event_id=refutes_event_id,
             protected_facts=protected_facts,
+            remember_as_procedural_rule=remember_as_procedural_rule,
         )
         async with self._lock:
             self._queues.setdefault(session_id, []).append(msg)
@@ -161,6 +165,7 @@ class MessageQueueManager:
         self, *, session_id: str, content: str, run_id: str | None, created_at: str,
         revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
+        remember_as_procedural_rule: bool = False,
     ) -> SteerRequest:
         """注册一个 steer 请求。runtime 在下一步前检查并注入。"""
         steer_id = str(uuid4())
@@ -173,6 +178,7 @@ class MessageQueueManager:
             revoke_fact_id=revoke_fact_id,
             refutes_event_id=refutes_event_id,
             protected_facts=protected_facts,
+            remember_as_procedural_rule=remember_as_procedural_rule,
         )
         async with self._lock:
             self._steers.setdefault(session_id, []).append(req)

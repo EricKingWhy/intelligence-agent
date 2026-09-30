@@ -27,10 +27,10 @@ interface Props {
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
    *  与审批互斥，不允许两条修复路径同时开放（评审 Riley 红旗）。 */
   approvalPending?: boolean;
-  onSubmit: (task: string) => void;
+  onSubmit: (task: string, rememberAsProceduralRule: boolean) => void;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
-  onSteer?: (task: string) => void;
+  onSteer?: (task: string, rememberAsProceduralRule: boolean) => void;
   onCancel: () => void;
   presetTask?: PresetTask | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
@@ -104,6 +104,7 @@ export const Composer = memo(function Composer({
   onFlush,
 }: Props) {
   const [value, setValue] = useState('');
+  const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
@@ -243,11 +244,12 @@ export const Composer = memo(function Composer({
     // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
     // **本页有活流**，跨客户端时判反）。
     if (mode === 'steer' && onSteer) {
-      onSteer(trimmed);
+      onSteer(trimmed, rememberAsProceduralRule);
     } else {
-      onSubmit(trimmed);
+      onSubmit(trimmed, rememberAsProceduralRule);
     }
     setValue('');
+    setRememberAsProceduralRule(false);
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
@@ -413,6 +415,18 @@ export const Composer = memo(function Composer({
           disabled={locked}
           aria-label="Agent 任务"
         />
+        <label className="composer-rule-signal" htmlFor="remember-as-procedural-rule">
+          <input
+            id="remember-as-procedural-rule"
+            type="checkbox"
+            checked={rememberAsProceduralRule}
+            onChange={(event) => setRememberAsProceduralRule(event.target.checked)}
+            disabled={locked}
+          />
+          <span title="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
+            将这条消息作为可复用规则
+          </span>
+        </label>
         {hasControls && (
           <div className="composer-controls">
             <ModelPicker

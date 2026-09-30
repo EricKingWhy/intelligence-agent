@@ -116,6 +116,17 @@ def test_project_scope_accepts_matching_project_id() -> None:
     assert built.project_id == "project-x"
 
 
+def test_project_fact_requires_project_scope() -> None:
+    project_fact = SemanticPayload(
+        subject="项目构建", fact="使用 pnpm", category=SemanticCategory.PROJECT_FACT,
+    )
+    with pytest.raises(ValidationError, match="project_fact requires project scope"):
+        record(payload=project_fact)
+
+    built = record(scope=MemoryScope.PROJECT, project_id="project-x", payload=project_fact)
+    assert built.scope is MemoryScope.PROJECT and built.project_id == "project-x"
+
+
 def test_user_edit_source_is_representable() -> None:
     """R8：用户编辑权威必须能在记录契约里表达（后续票据此防止被助手证据覆盖）。
 

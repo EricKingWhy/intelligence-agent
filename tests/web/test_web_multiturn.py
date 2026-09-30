@@ -37,9 +37,68 @@ class TestSendMessageEndpoint:
         _, client = app_and_client
         response = client.post(
             "/api/sessions/nonexistent-uuid/messages",
-            json={"content": "hello", "mode": "queue"},
+            json={
+                "content": "hello",
+                "mode": "queue",
+                "remember_as_procedural_rule": True,
+            },
         )
         assert response.status_code == 404
+
+    def test_rule_signal_is_a_supported_message_field(self, app_and_client):
+        _, client = app_and_client
+        response = client.post(
+            "/api/sessions/nonexistent-uuid/messages",
+            json={
+                "content": "后续始终使用 pnpm",
+                "remember_as_procedural_rule": True,
+            },
+        )
+        assert response.status_code == 404
+
+    def test_rule_signal_requires_a_real_task_on_create_and_resume(self, app_and_client):
+        _, client = app_and_client
+        create = client.post(
+            "/api/sessions?launch=false",
+            json={"remember_as_procedural_rule": True},
+        )
+        resume = client.post(
+            "/api/sessions/nonexistent-uuid/resume",
+            json={"remember_as_procedural_rule": True},
+        )
+        assert create.status_code == 422
+        assert resume.status_code == 422
+
+    def test_rule_signal_is_rejected_for_same_run_resume(self, app_and_client):
+        _, client = app_and_client
+        response = client.post(
+            "/api/sessions/nonexistent-uuid/resume",
+            json={
+                "task": "继续当前运行",
+                "run_id": "run-1",
+                "resume_basis": "user",
+                "remember_as_procedural_rule": True,
+            },
+        )
+        assert response.status_code == 422
+
+    def test_rule_signal_rejects_blank_user_input(self, app_and_client):
+        _, client = app_and_client
+        create = client.post(
+            "/api/sessions",
+            json={"task": "   ", "remember_as_procedural_rule": True},
+        )
+        resume = client.post(
+            "/api/sessions/nonexistent-uuid/resume",
+            json={"task": "   ", "remember_as_procedural_rule": True},
+        )
+        message = client.post(
+            "/api/sessions/nonexistent-uuid/messages",
+            json={"content": "   ", "remember_as_procedural_rule": True},
+        )
+        assert create.status_code == 422
+        assert resume.status_code == 422
+        assert message.status_code == 422
 
     def test_messages_endpoint_invalid_mode(self, app_and_client):
         """mode 不合法 → 422。"""
