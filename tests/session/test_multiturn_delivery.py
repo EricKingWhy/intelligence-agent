@@ -235,12 +235,18 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
     harness = _build_harness(
         tmp_path, monkeypatch, [AIMessage(content="答")], gate=gate,
     )
-    launched = await harness.service.create_and_launch(task="A")
+    launched = await harness.service.create_and_launch(
+        task="A", remember_as_procedural_rule=True,
+    )
     session_id = launched.session.session_id
     await harness.wait_for(
         lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
         what="run 1 起跑",
     )
+    assert next(
+        event for event in harness.of_type(session_id, USER_MESSAGE)
+        if event.data.get("content") == "A"
+    ).data["remember_as_procedural_rule"] is True
 
     queued = await harness.service.send_message(
         session_id=session_id,
@@ -249,6 +255,7 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
         protected_facts=[
             {"fact_type": "exact_identifier", "value": "ORD-84721"}
         ],
+        remember_as_procedural_rule=True,
     )
     assert queued.status == "queued"
     queued_events = harness.of_type(session_id, MESSAGE_QUEUED)
@@ -259,6 +266,7 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
     assert queued_events[0].data["protected_facts"] == [
         {"fact_type": "exact_identifier", "value": "ORD-84721"}
     ]
+    assert queued_events[0].data["remember_as_procedural_rule"] is True
 
     # 放行 run 1 → 终态 → 终态驱动接力（全程无任何客户端动作）
     gate.set()
@@ -286,6 +294,7 @@ async def test_queue_relays_to_new_run_without_client_action(tmp_path, monkeypat
         event for event in harness.of_type(session_id, USER_MESSAGE)
         if event.data.get("content") == queued_text
     )
+    assert delivered_user.data["remember_as_procedural_rule"] is True
     identifier = next(
         fact for fact in derive_protected_facts(harness.events(session_id))
         if fact.type == "exact_identifier"
@@ -363,11 +372,13 @@ async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):
         content="B，保留 ORD-84721。",
         mode="steer",
         protected_facts=steer_facts,
+        remember_as_procedural_rule=True,
     )
     assert steered.status == "steered"
     steer_event = harness.of_type(session_id, STEER_REQUESTED)[0]
     assert steer_event.data["run_id"] == run_id_1
     assert steer_event.data["protected_facts"] == steer_facts
+    assert steer_event.data["remember_as_procedural_rule"] is True
 
     gate.set()
     await harness.wait_for(
@@ -384,6 +395,7 @@ async def test_steer_injected_at_loop_head_in_same_run(tmp_path, monkeypatch):
     ]
     assert len(steer_user) == 1
     assert steer_user[0].data["protected_facts"] == steer_facts
+    assert steer_user[0].data["remember_as_procedural_rule"] is True
     assert applied.data["applied_seq"] == steer_user[0].seq
     assert steer_user[0].run_id == run_id_1
     # D6：steer 是**用户自己的话**，绝不带 injected_by——否则记忆抽取会静默丢弃它
@@ -479,6 +491,7 @@ async def test_rebuild_restores_pending_inputs_without_launching(tmp_path, monke
             "queue_id": "q-restart",
             "content": "别忘了 ORD-84721。",
             "protected_facts": queued_facts,
+            "remember_as_procedural_rule": True,
         },
     )
 
@@ -496,6 +509,7 @@ async def test_rebuild_restores_pending_inputs_without_launching(tmp_path, monke
     assert await harness.state.message_queues.list_pending(session_id) != [], "镜像已重建"
     restored = await harness.state.message_queues.list_pending(session_id)
     assert restored[0].protected_facts == queued_facts
+    assert restored[0].remember_as_procedural_rule is True
     # 只重建，不自动起 run：刚启动无订阅者（起了会被 orphan 回收），用户也不在场
     assert harness.state.run_manager.get_active(session_id) is None
     assert harness.of_type(session_id, RUN_STARTED)[0].run_id is None
@@ -575,6 +589,7 @@ async def test_deliver_skips_cancelled_and_delivers_one(tmp_path, monkeypatch):
     )
     harness.service._append_session_event(
         session_id, MESSAGE_QUEUED, queue_id="q2", content="第二条",
+        remember_as_procedural_rule=True,
     )
     await harness.state.message_queues.restore(
         session_id=session_id,
@@ -598,6 +613,10 @@ async def test_deliver_skips_cancelled_and_delivers_one(tmp_path, monkeypatch):
         lambda: harness.snapshots and "第二条" in _last_human_texts(harness),
         what="第二条被模型看到",
     )
+    assert next(
+        event for event in harness.of_type(session_id, USER_MESSAGE)
+        if event.data.get("content") == "第二条"
+    ).data["remember_as_procedural_rule"] is True
     assert await harness.service.list_undelivered_inputs(session_id) == []
 
 

@@ -21,6 +21,7 @@ import pytest_asyncio
 from agent_harness.memory.v2.budget import MemoryBudgetLimits
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import (
+    _ADJUDICATION_PROMPT,
     _FORMATION_PROMPT,
     DegradedReason,
     MemoryJobExecutor,
@@ -56,6 +57,12 @@ def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
     assert "preserve explicitly stated names, values, quantities, dates, and qualifiers" \
         in _FORMATION_PROMPT
     assert "every detail must remain supported by cited evidence" in _FORMATION_PROMPT
+
+
+def test_adjudication_prompt_preserves_formation_classification():
+    assert "copy its kind, tier, and scope exactly from the corresponding candidate" \
+        in _ADJUDICATION_PROMPT
+    assert "Runtime rejects any mismatch and writes nothing" in _ADJUDICATION_PROMPT
 
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"
@@ -514,7 +521,9 @@ async def test_repeated_evidence_references_are_deduplicated_but_all_kept(env: E
 
 @pytest.mark.asyncio
 async def test_an_update_supersedes_the_target(env: Env) -> None:
-    existing = await env.service.create(make_draft(content="用户偏好 npm"), USER_A)
+    existing = await env.service.create(
+        make_draft(content="用户偏好用 pnpm 安装依赖"), USER_A)
+    await env.index.upsert(existing)
     invoker = FakeInvoker(
         formation=[_formation_candidates(_candidate())],
         adjudication=[_adjudication(_update(existing.id, content="用户偏好 pnpm"))])
@@ -534,7 +543,9 @@ async def test_an_update_supersedes_the_target(env: Env) -> None:
 
 @pytest.mark.asyncio
 async def test_an_invalidate_keeps_the_content_but_drops_it_from_active(env: Env) -> None:
-    existing = await env.service.create(make_draft(content="用户在用 npm"), USER_A)
+    content = "用户偏好用 pnpm 安装依赖"
+    existing = await env.service.create(make_draft(content=content), USER_A)
+    await env.index.upsert(existing)
     invoker = FakeInvoker(
         formation=[_formation_candidates(_candidate())],
         adjudication=[_adjudication(_invalidate(existing.id))])
@@ -544,9 +555,47 @@ async def test_an_invalidate_keeps_the_content_but_drops_it_from_active(env: Env
     assert result.outcome is MemoryJobOutcome.COMMITTED
     stored = await env.store.get(existing.id, USER_A)
     assert stored.status is MemoryStatus.INVALIDATED
-    assert stored.content == "用户在用 npm"          # §5.4.2：内容保留
+    assert stored.content == content                # §5.4.2：内容保留
     assert await _active(env) == []
     assert sink.events[0][1]["actions"] == {"INVALIDATE": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_project_candidate_cannot_invalidate_a_user_global_memory(env: Env) -> None:
+    content = "用户偏好用 pnpm 安装依赖"
+    existing = await env.service.create(make_draft(content=content), USER_A)
+    await env.index.upsert(existing)
+    project_candidate = _candidate(scope="project")
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(project_candidate)],
+        adjudication=[_adjudication(_invalidate(existing.id))],
+    )
+    job = await _claimed(env, trusted=PROJECT_X)
+
+    _job, result, _sink = await _run(env, invoker, job=job)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.NO_WRITE
+    assert (await env.store.get(existing.id, USER_A)).status is MemoryStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_a_project_candidate_can_invalidate_a_same_project_memory(env: Env) -> None:
+    content = "用户偏好用 pnpm 安装依赖"
+    existing = await env.service.create(
+        make_draft(scope=MemoryScope.PROJECT, project_id=PROJECT_X.project_id,
+                   content=content), PROJECT_X)
+    await env.index.upsert(existing)
+    project_candidate = _candidate(scope="project")
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(project_candidate)],
+        adjudication=[_adjudication(_invalidate(existing.id))],
+    )
+    job = await _claimed(env, trusted=PROJECT_X)
+
+    _job, result, _sink = await _run(env, invoker, job=job)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
+    assert (await env.store.get(existing.id, PROJECT_X)).status is MemoryStatus.INVALIDATED
 
 
 @pytest.mark.asyncio
@@ -903,6 +952,15 @@ async def test_adjudication_sees_bounded_relevant_active_memories(env: Env) -> N
     assert memories == [{"memory_id": existing.id, "kind": "semantic",
                          "scope": "user_global", "content": content}]
     assert "candidates" in adjudication_call.payload
+    assert adjudication_call.payload["trusted_context"] == {"project_available": False}
+    assert "project_id" not in json.dumps(adjudication_call.payload, ensure_ascii=False)
+    assert "`target_memory_id` must be copied exactly as it appears" \
+        in adjudication_call.system_prompt
+    assert "direct user evidence establishes the active fact is no longer true" \
+        in adjudication_call.system_prompt
+    assert "do not infer invalidation from unrelated facts" in adjudication_call.system_prompt
+    assert "A stated replacement is an UPDATE, not an INVALIDATE" \
+        in adjudication_call.system_prompt
 
 
 @pytest.mark.asyncio
@@ -916,8 +974,10 @@ async def test_the_formation_call_carries_the_safe_projection(env: Env) -> None:
         {"ref": "e1", "role": "user", "text": "请以后都用 pnpm 装依赖"},
         {"ref": "e2", "role": "assistant", "text": "好的"},
     ]
+    assert call.payload["trusted_context"] == {"project_available": False}
     # AC9 的另一半：真实事件 id 不进模型输入——模型只能引投影发给它的别名。
     assert "u:1" not in json.dumps(call.payload, ensure_ascii=False)
+    assert "project-x" not in json.dumps(call.payload, ensure_ascii=False)
     assert "all listed keys are required" in call.system_prompt
     assert "`payload.kind` is required" in call.system_prompt
     assert "top-level only and never a candidate field" in call.system_prompt
@@ -928,10 +988,111 @@ async def test_the_formation_call_carries_the_safe_projection(env: Env) -> None:
         "and `lesson`" in call.system_prompt
     assert "Procedural payload keys are `kind`=`procedural`, `trigger`, `procedure`, and " \
         "`success_condition`" in call.system_prompt
+    assert "semantic is a durable fact, preference, profile, project fact, or constraint" \
+        in call.system_prompt
+    assert "episodic is one specific event and its outcome" in call.system_prompt
+    assert "procedural is a repeatable procedure supported by evidence" in call.system_prompt
+    assert "Never return `project_id`; Runtime binds it from trusted context" \
+        in call.system_prompt
     assert "Keep payload nested under its candidate" in call.system_prompt
     assert '"payload":{"kind":"semantic"' in call.system_prompt
     assert call.max_output_tokens == 4000
     assert call.timeout_seconds > 0
+
+
+@pytest.mark.asyncio
+async def test_project_memory_uses_boolean_model_context_and_runtime_project_binding(
+    env: Env,
+) -> None:
+    project_candidate = _candidate(
+        scope="project", content="项目使用 pnpm 安装依赖",
+        payload={"kind": "semantic", "subject": "包管理器", "fact": "项目使用 pnpm",
+                 "category": "project_fact"})
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(project_candidate)],
+        adjudication=[_adjudication(_add(
+            scope="project", content="项目使用 pnpm 安装依赖",
+            payload={"kind": "semantic", "subject": "包管理器", "fact": "项目使用 pnpm",
+                     "category": "project_fact"}))],
+    )
+    job = await _claimed(env, trusted=PROJECT_X)
+
+    _job, result, _sink = await _run(env, invoker, job=job)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
+    assert [call.payload["trusted_context"] for call in invoker.calls] == [
+        {"project_available": True}, {"project_available": True},
+    ]
+    assert all("project-x" not in json.dumps(call.payload, ensure_ascii=False)
+               for call in invoker.calls)
+    project_memories = await env.store.list_active(
+        PROJECT_X, scope=MemoryScope.PROJECT, limit=10)
+    assert len(project_memories) == 1
+    assert project_memories[0].project_id == PROJECT_X.project_id
+
+
+@pytest.mark.asyncio
+async def test_project_candidate_without_trusted_project_context_never_reaches_adjudication(
+    env: Env,
+) -> None:
+    project_candidate = _candidate(
+        scope="project", content="项目使用 pnpm 安装依赖",
+        payload={"kind": "semantic", "subject": "包管理器", "fact": "项目使用 pnpm",
+                 "category": "project_fact"})
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(project_candidate)], adjudication=[])
+
+    job, result, _sink = await _run(env, invoker)
+
+    assert result is not None and result.outcome is MemoryJobOutcome.NO_WRITE
+    assert [call.stage for call in invoker.calls] == [MemoryModelStage.FORMATION]
+    assert (await env.store.list_active(USER_A, scope=MemoryScope.USER_GLOBAL, limit=10)) == []
+    stored_job = await env.jobs.get(job.job_id)
+    assert stored_job is not None
+    assert stored_job.state["rejected"] == {"project_context_unavailable": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result_overrides",
+    [
+        pytest.param(
+            {
+                "kind": "episodic",
+                "payload": {
+                    "kind": "episodic", "situation": "安装依赖",
+                    "action": "使用 pnpm", "outcome": "安装成功", "lesson": "继续使用 pnpm",
+                },
+            },
+            id="kind",
+        ),
+        pytest.param({"tier": "profile"}, id="tier"),
+        pytest.param({"scope": "project"}, id="scope"),
+    ],
+)
+async def test_adjudication_cannot_change_candidate_classification(
+    env: Env, result_overrides: dict,
+) -> None:
+    observations: list[tuple[str, dict]] = []
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add(**result_overrides))],
+    )
+
+    _job, result, _sink = await _run(
+        env, invoker,
+        observer=lambda name, metadata: observations.append((name, metadata)),
+    )
+
+    assert result is not None and result.stage is MemoryJobStage.DEGRADED
+    assert result.reason == DegradedReason.INVALID_MODEL_OUTPUT.value
+    assert result.written == ()
+    schema_failure = next(
+        data for name, data in observations
+        if name == "schema" and data.get("schema_valid") is False
+    )
+    assert schema_failure["reason_code"] == "adjudication_classification_mismatch"
+    assert await env.store.list_active(USER_A, scope=MemoryScope.USER_GLOBAL, limit=10) == []
 
 
 # --------------------------------------------------------------------------------------

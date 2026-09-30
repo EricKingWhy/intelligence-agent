@@ -414,8 +414,10 @@ class CreateSessionRequest(_AmendValueValidators):
     # handler 校验，422 不变）；launch=false 时 task 可省略——给了 task 又
     # launch=false 是矛盾组合（给了任务却静默不执行）⇒ 422。纯空白 task 容忍
     # （runtime 侧无意义但不危险）；max_length 封顶原因不变：task 会逐字持久化
-    # 进 JSONL（user/message）并整体进模型上下文。
+    # 进 JSONL（user/message）并整体进模型上下文。R5 显式规则标记只接受非空白 task。
     task: str | None = Field(default=None, min_length=1, max_length=100_000)
+    # #298 R5：仅用户显式勾选时，Runtime 才把该真实输入作为单事件规则证据。
+    remember_as_procedural_rule: bool = False
     workspace: str | None = None  # None → 用默认 workspace；只接受单段目录名（校验在 SessionService._validate_workspace_name，路径形态走 POST /api/projects）
     # ADR-0027 / #169：任意**已存在**的绝对目录，会话直接以它为操作目录（不创建、
     # 不复制），并自动注册为项目 + 归组。与 `workspace` 互斥（同时非空 → 422）。
@@ -512,6 +514,7 @@ class ResumeRequest(_AmendValueValidators):
     model_config = {"extra": "forbid"}
 
     task: str | None = Field(default=None, min_length=1, max_length=100_000)
+    remember_as_procedural_rule: bool = False
     # 同 run 续跑的三个声明（同形恢复面，PRD §9）。合法值集合 / CAS 比较都在领域层
     # `agent_harness.agent.run_budget.validate_resume`（单一规则来源）——这里只挡形状。
     run_id: str | None = Field(default=None, min_length=1)
@@ -523,6 +526,16 @@ class ResumeRequest(_AmendValueValidators):
     agent_profile: str | None = None
     context_providers: list[str] | None = None
     model: str | None = None
+
+    @model_validator(mode="after")
+    def validate_procedural_rule_requires_task(self) -> ResumeRequest:
+        if self.remember_as_procedural_rule and (
+            self.task is None or not self.task.strip() or self.run_id is not None
+        ):
+            raise ValueError(
+                "remember_as_procedural_rule requires a non-blank new task, not same-run resume"
+            )
+        return self
 
 
 class ProtectedFactAnnotation(BaseModel):
@@ -574,6 +587,7 @@ class SendMessageRequest(_AmendValueValidators):
     queue_id: str | None = None
     revoke_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
     refutes_event_id: str | None = Field(default=None, min_length=1, max_length=200)
+    remember_as_procedural_rule: bool = False
     # staged amend 字段（可选，None = 默认行为）
     reasoning_effort: str | None = None
     agent_profile: str | None = None
@@ -585,6 +599,8 @@ class SendMessageRequest(_AmendValueValidators):
 
     @model_validator(mode="after")
     def validate_protected_facts_match_user_text(self) -> SendMessageRequest:
+        if self.remember_as_procedural_rule and not self.content.strip():
+            raise ValueError("remember_as_procedural_rule requires non-blank content")
         validate_user_protected_fact_annotations(
             self.content,
             [fact.model_dump(exclude_none=True) for fact in self.protected_facts],
@@ -1366,6 +1382,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 detail="task 与 launch=false 互斥：要么带 task 启动 run（launch=true），"
                        "要么只建会话（省略 task）",
             )
+        if req.remember_as_procedural_rule and (
+            not launch or req.task is None or not req.task.strip()
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="remember_as_procedural_rule requires a launched non-blank user task",
+            )
         # run 预算与 launch=false 互斥（#422）：`budget.run` 是启动 run 的请求上的
         # per-run 绝对上限（`run/started.data.budget` 是它唯一的宿主）；launch=false
         # 没有 run 可挂——静默收下等于客户端以为设了防失控闸而实际什么都没设。
@@ -1406,6 +1429,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 auto_approve=req.auto_approve,
                 amend=AmendOptions.from_request(req),
                 launch=launch,
+                remember_as_procedural_rule=req.remember_as_procedural_rule,
             )
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
@@ -1528,6 +1552,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             result = await service.resume_and_launch(
                 session_id=session_id,
                 task=req.task,
+                user_input_metadata=(
+                    {"remember_as_procedural_rule": True}
+                    if req.remember_as_procedural_rule else None
+                ),
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
                 **budget_claims(req.budget, resume_surface=True),
@@ -1998,6 +2026,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 queue_id=req.queue_id,
                 revoke_fact_id=req.revoke_fact_id,
                 refutes_event_id=req.refutes_event_id,
+                remember_as_procedural_rule=req.remember_as_procedural_rule,
                 protected_facts=[
                     fact.model_dump(exclude_none=True)
                     for fact in req.protected_facts

@@ -71,6 +71,7 @@ from agent_harness.memory.extractor import _is_runtime_injected
 from agent_harness.memory.v2.formation import FormationCandidate, Sensitivity
 from agent_harness.memory.v2.types import (
     MemoryKind,
+    MemoryScope,
     MemoryTier,
     SemanticCategory,
     SemanticPayload,
@@ -313,6 +314,7 @@ class PolicyRejection(str, Enum):
     SENSITIVE_WITHOUT_CONSENT = "sensitive_without_consent"
     PROCEDURAL_THRESHOLD_NOT_MET = "procedural_threshold_not_met"
     USER_FACT_WITHOUT_USER_EVIDENCE = "user_fact_without_user_evidence"
+    PROJECT_CONTEXT_UNAVAILABLE = "project_context_unavailable"
     #: 名额不足（R4），**不是**对内容的否定判断——同一条候选在更空的批次里会被接受。
     OVER_CAP = "over_cap"
     #: 证据引用的 `event_id` 一条都回查不到（AC3 的 unsupported-source）。
@@ -356,6 +358,7 @@ def select_candidates(
     events: Iterable[SessionEvent],
     explicit_remember: bool = False,
     refs: Mapping[str, str] | None = None,
+    trusted_project_id: str | None = None,
 ) -> CandidateSelection:
     """政策执法 + 名额截断。
 
@@ -371,6 +374,9 @@ def select_candidates(
 
     `explicit_remember` 是**运行时**持有的同意信号（`Remember X` 那条命令路径的产物，
     PRD §5.6.1）。自动形成路径上恒为 False。模型输出里没有任何字段能影响它。
+
+    `trusted_project_id` 来自运行时会话绑定，不来自模型提案。模型提案不含该字段；没有
+    可信项目上下文时，project 候选不会进入裁决阶段。
     """
     # 先物化再建两份索引：`events` 声明成 `Iterable`，若调用方传的是生成器，
     # 第二遍遍历会看到空序列——那会让 "qualifying" 静默变成空集（一处沉默的过严）。
@@ -385,11 +391,24 @@ def select_candidates(
     qualifying = frozenset(
         keys[event_id] for event_id in _qualifying_event_ids(event_list) if event_id in keys
     )
+    explicit_rule_sources = {
+        keys[event.event_id]: event.data["content"]
+        for event in event_list
+        if event.event_id in keys
+        and event.type == USER_MESSAGE
+        and resolve_evidence_source(event) is EvidenceSource.USER
+        and isinstance(event.data, dict)
+        and event.data.get("remember_as_procedural_rule") is True
+        and isinstance(event.data.get("content"), str)
+        and event.data["content"].strip()
+    }
     admissible: list[tuple[int, FormationCandidate]] = []
     rejected: list[RejectedCandidate] = []
     for index, candidate in enumerate(candidates):
         reason = _reject(
-            candidate, sources, explicit_remember=explicit_remember, qualifying=qualifying
+            candidate, sources, explicit_remember=explicit_remember, qualifying=qualifying,
+            explicit_rule_sources=explicit_rule_sources,
+            trusted_project_id=trusted_project_id,
         )
         if reason is None:
             admissible.append((index, candidate))
@@ -422,6 +441,8 @@ def _evidence_keys(
 def _reject(
     candidate: FormationCandidate, sources: Mapping[str, EvidenceSource], *,
     explicit_remember: bool, qualifying: frozenset[str],
+    explicit_rule_sources: Mapping[str, str],
+    trusted_project_id: str | None,
 ) -> PolicyRejection | None:
     """逐条判据，**顺序即优先级**（先命中先返回）。
 
@@ -435,7 +456,10 @@ def _reject(
        提前会让上一条的归因码被顶掉：排障者看到"来源不可解析"，却看不到
        "模型把助手的话当成了用户事实"。
     """
-    if candidate.sensitivity is Sensitivity.SECRET or _secret_in(candidate) is not None:
+    if (candidate.sensitivity is Sensitivity.SECRET or _secret_in(candidate) is not None
+            or (candidate.scope is MemoryScope.PROJECT
+                and trusted_project_id is not None
+                and find_secret(trusted_project_id) is not None)):
         return PolicyRejection.SECRET
     if candidate.sensitivity is Sensitivity.SENSITIVE and not explicit_remember:
         return PolicyRejection.SENSITIVE_WITHOUT_CONSENT
@@ -443,8 +467,10 @@ def _reject(
         candidate, sources, explicit_remember
     ):
         return PolicyRejection.USER_FACT_WITHOUT_USER_EVIDENCE
+    if candidate.scope is MemoryScope.PROJECT and not trusted_project_id:
+        return PolicyRejection.PROJECT_CONTEXT_UNAVAILABLE
     if candidate.kind is MemoryKind.PROCEDURAL and not _meets_procedural_threshold(
-        candidate, sources, qualifying
+        candidate, explicit_rule_sources, qualifying
     ):
         return PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
     if not any(item.event_id in sources for item in candidate.evidence):
@@ -485,10 +511,9 @@ def _rank_and_cap(
 def _texts(candidate: FormationCandidate) -> Iterator[str]:
     """候选里所有会**落盘或被展示**的文本面。
 
-    `project_id` 也在内：它是要写进记录的字段，密钥藏在那儿同样是泄漏。
+    Project ID 不由模型提供；trusted value 在 `_reject` 单独扫描。
     """
     yield candidate.content
-    yield candidate.project_id or ""
     for value in candidate.payload.model_dump().values():
         if isinstance(value, str):
             yield value
@@ -535,32 +560,56 @@ def _has_user_authority(
 def _qualifying_event_ids(events: Iterable[SessionEvent]) -> frozenset[str]:
     """R5 里"成功或纠正"这一半的运行时判据：哪些事件算**可验证的行动结果**。
 
-    合格 = 用户真的说了这句话（genuine `user/message`，注入样板不算），或一条运行时
-    读得出 `ok` 的 `tool/result`（`SUCCESS` 与 `FAILURE` 都算）。
-
-    为什么失败也算：R5 要挡的是"一次观察（或一次幻觉）就变成规则"，而运行时能确定性
-    验证的只有"这次行动真的发生过、结果读得出来"。"这次做法对不对"是语义判断，运行时
-    给不出证据；把 `FAILURE` 也排除，会让"失败两次 ⇒ 换个方案"这类正当经验永远形不成
-    规则（§4.1 的 Procedural 本来就承载"已验证的过程"）。
+    合格 = 带有指向现存事件的 `refutes_event_id` 的 genuine `user/message`，或一条运行时
+    读得出 `ok=True` 的 `tool/result`。普通用户消息本身不能证明发生过成功或纠正；失败结果
+    本身也不能证明用户已经纠正了做法。
 
     为什么 `UNKNOWN` / `MISSING` 不算：读不出来时运行时**没有**证据说明这次行动发生过，
     拿它凑第二条事件等于用一条形态污染的结果伪造门槛。这正是 `resolve_tool_outcome`
     把"读不出"与"没结果"同列为非成功的原因。
     """
+    event_list = list(events)
+    events_by_id = {event.event_id: event for event in event_list}
     qualifying: set[str] = set()
-    for event in events:
-        readable_outcome = event.type == TOOL_RESULT and resolve_tool_outcome(event) in (
-            ToolOutcome.SUCCESS,
-            ToolOutcome.FAILURE,
+    for event in event_list:
+        successful_outcome = (
+            event.type == TOOL_RESULT
+            and resolve_tool_outcome(event) is ToolOutcome.SUCCESS
         )
-        if resolve_evidence_source(event) is EvidenceSource.USER or readable_outcome:
+        data = event.data if isinstance(event.data, dict) else {}
+        refuted_event = events_by_id.get(data.get("refutes_event_id"))
+        valid_refutation_target = (
+            refuted_event is not None
+            and refuted_event.event_id != event.event_id
+            and refuted_event.session_id == event.session_id
+            and (
+                (
+                    refuted_event.type == USER_MESSAGE
+                    and resolve_evidence_source(refuted_event) is EvidenceSource.USER
+                    and isinstance(refuted_event.data.get("content"), str)
+                )
+                or (
+                    refuted_event.type == TOOL_CALL
+                    and isinstance(refuted_event.data.get("tool_call_id"), str)
+                    and bool(refuted_event.data.get("tool_call_id"))
+                    and isinstance(refuted_event.data.get("tool_name"), str)
+                    and bool(refuted_event.data.get("tool_name"))
+                    and isinstance(refuted_event.data.get("args"), dict)
+                )
+            )
+        )
+        explicit_correction = (
+            resolve_evidence_source(event) is EvidenceSource.USER
+            and valid_refutation_target
+        )
+        if explicit_correction or successful_outcome:
             qualifying.add(event.event_id)
     return frozenset(qualifying)
 
 
 def _meets_procedural_threshold(
     candidate: FormationCandidate,
-    sources: Mapping[str, EvidenceSource],
+    explicit_rule_sources: Mapping[str, str],
     qualifying: frozenset[str],
 ) -> bool:
     """R5：两条合格的**独立**事件，或用户明确陈述了规则。
@@ -573,10 +622,14 @@ def _meets_procedural_threshold(
     `content` 就是 `ToolResult` 的 JSON，`ok` 一直在里面（`read_tool_result` 就是读它）。
     前提不成立，结论也就不成立，所以这一半在这里补上，不再挂在"已知缺口"里。
 
-    用户证据走豁免分支：用户直接把规则讲出来时，一条事件就够（R5 原文的 unless）。
+    用户证据走豁免分支：用户显式标记规则、候选引用该用户事件，且摘录确实来自原文时，
+    一条事件就够（R5 原文的 unless）。普通 user/message 的角色本身不能证明它是一条规则。
     """
     if any(
-        sources.get(item.event_id) is EvidenceSource.USER for item in candidate.evidence
+        item.event_id in explicit_rule_sources
+        and bool(item.excerpt.strip())
+        and item.excerpt in explicit_rule_sources[item.event_id]
+        for item in candidate.evidence
     ):
         return True
     return len({item.event_id for item in candidate.evidence} & qualifying) >= 2

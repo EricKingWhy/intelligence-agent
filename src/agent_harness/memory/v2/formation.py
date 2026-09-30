@@ -182,14 +182,13 @@ class CandidateEvidence(_ContractModel):
 class AdjudicatedContent(_ContractModel):
     """一条"内容字段齐全"的记忆内容（adjudication 的 `result` 用的就是它）。
 
-    身份（tenant/user/project 之外的 id）、版本、时间戳都不在这里——它们由存储层从可信
-    上下文与既有版本补齐（见模块 docstring 末节）。
+    模型响应不带任何身份字段或 `project_id`。项目作用域可先保持未绑定，之后由运行时从
+    `TrustedMemoryIdentity` 注入项目 ID；持久化的 `MemoryDraftV2` 仍要求该字段。
     """
 
     kind: MemoryKind
     tier: MemoryTier = MemoryTier.COLLECTION
     scope: MemoryScope
-    project_id: str | None = Field(default=None, min_length=1)
     content: str = Field(min_length=1, max_length=CONTENT_MAX_CHARS)
     payload: MemoryPayload
     importance: float = Field(ge=0.0, le=1.0)
@@ -200,7 +199,7 @@ class AdjudicatedContent(_ContractModel):
     def _enforce(self) -> Self:
         assert_content_contract(
             kind=self.kind, tier=self.tier, scope=self.scope,
-            project_id=self.project_id, payload=self.payload)
+            project_id=None, payload=self.payload, allow_unbound_project=True)
         return self
 
 
