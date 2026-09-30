@@ -44,6 +44,58 @@ const openPanel = async (page: Page) => {
   await expect(panel(page)).toBeVisible();
 };
 
+test('AC8: browser keeps loading visible until the memory list request completes', async ({ page }) => {
+  let releaseList!: () => void;
+  let markRequestStarted!: () => void;
+  const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+  const requestStarted = new Promise<void>((resolve) => { markRequestStarted = resolve; });
+  await routeApi(page, {
+    memories: [semantic('m-delayed', 'loaded after the pending response')],
+    onMemoriesGet: async () => {
+      markRequestStarted();
+      await listGate;
+      return false;
+    },
+  });
+  await page.goto('/');
+  await openPanel(page);
+
+  try {
+    await requestStarted;
+    await expect(panel(page).locator('.memory-loading')).toBeVisible();
+    await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
+    await expect(panel(page).locator('.memory-row')).toHaveCount(0);
+
+    releaseList();
+    await expect(panel(page).locator('.memory-row')).toContainText('loaded after the pending response');
+    await expect(panel(page).locator('.memory-loading')).toHaveCount(0);
+  } finally {
+    releaseList();
+  }
+});
+
+test('AC8: browser shows an empty state only after a successful empty response', async ({ page }) => {
+  await routeApi(page, { memories: [] });
+  await page.goto('/');
+  await openPanel(page);
+
+  await expect(panel(page).locator('.memory-empty')).toContainText('还没有记忆');
+  await expect(panel(page).locator('.memory-loading')).toHaveCount(0);
+  await expect(panel(page).locator('.memory-degraded')).toHaveCount(0);
+  await expect(panel(page).locator('.memory-error')).toHaveCount(0);
+});
+
+test('AC8: browser reports a disabled memory capability as degraded, not empty', async ({ page }) => {
+  await routeApi(page, { memoryDisabled: 'memory capability 未启用' });
+  await page.goto('/');
+  await openPanel(page);
+
+  await expect(panel(page).locator('.memory-degraded')).toContainText('记忆未启用');
+  await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
+  await expect(panel(page).locator('.memory-loading')).toHaveCount(0);
+  await expect(panel(page).locator('.memory-error')).toHaveCount(0);
+});
+
 test('AC1: search and all list filters are sent to the API and render its result', async ({ page }) => {
   const requests: URL[] = [];
   await routeApi(page, {
@@ -222,6 +274,9 @@ test('AC8: a stale version conflict refreshes the row and leaves a dismissible e
   await routeApi(page, {
     memories: [semantic('m-stale', 'stale fact')],
     memoryEditConflictIds: ['m-stale'],
+    memoryEditConflictUpdates: {
+      'm-stale': { content: 'server refreshed fact', version: 2 },
+    },
   });
   await page.goto('/');
   await openPanel(page);
@@ -230,7 +285,9 @@ test('AC8: a stale version conflict refreshes the row and leaves a dismissible e
   await row.getByRole('button', { name: '保存新版本' }).click();
   const notice = panel(page).locator('.memory-error');
   await expect(notice).toContainText('已被其他操作更新或删除');
-  await expect(row).toBeVisible();
+  const refreshed = panel(page).locator('.memory-row').filter({ hasText: 'server refreshed fact' });
+  await expect(refreshed).toContainText('v2');
+  await expect(row.locator('.memory-content')).toHaveText('server refreshed fact');
   await notice.getByRole('button', { name: '知道了' }).click();
   await expect(notice).toHaveCount(0);
 });
@@ -295,6 +352,9 @@ test('AC8: retry after a failed next page fetches that same offset', async ({ pa
 
   await panel(page).getByRole('button', { name: '加载更多' }).click();
   await expect(panel(page).locator('.memory-error')).toContainText('temporary next-page failure');
+  await expect(panel(page).locator('.memory-row')).toHaveCount(50);
+  await expect(panel(page).locator('.memory-row').first()).toContainText('page fact 0');
+  await expect(panel(page).locator('.memory-row').filter({ hasText: 'page fact 50' })).toHaveCount(0);
   await panel(page).locator('.memory-error').getByRole('button', { name: '重试' }).click();
 
   await expect(panel(page).locator('.memory-row')).toHaveCount(55);
@@ -440,14 +500,71 @@ test('AC6 and AC7: update content is fetched only on expansion and recall shows 
   expect(requested.some((url) => url.includes('/memory-recalls'))).toBe(true);
 });
 
-test('AC9: dialog keyboard escape restores focus to its opener', async ({ page }) => {
-  await routeApi(page, { memories: [] });
+test('AC9: keyboard-only dialog navigation shows focus and Escape restores the opener', async ({ page }) => {
+  const listQueries: string[] = [];
+  await routeApi(page, {
+    memories: [semantic('m-keyboard', 'keyboard-only search target')],
+    onMemoriesGet: (route) => {
+      const url = new URL(route.request().url());
+      listQueries.push(url.searchParams.get('q') ?? '');
+      if (listQueries.length === 1) {
+        return route.fulfill({ status: 200, body: '[]', contentType: 'application/json' }).then(() => true);
+      }
+      return false;
+    },
+  });
   await page.goto('/');
   const opener = page.getByRole('button', { name: '记忆管理' });
-  await opener.focus();
+
+  // Start at the page and use Tab until the trigger is reached; no pointer or
+  // scripted focus is used to enter the management flow.
+  for (let index = 0; index < 100; index += 1) {
+    if (await opener.evaluate((element) => element === document.activeElement)) break;
+    await page.keyboard.press('Tab');
+  }
+  await expect(opener).toBeFocused();
+  await expect.poll(() => opener.evaluate((element) => element.matches(':focus-visible'))).toBe(true);
   await page.keyboard.press('Enter');
   await expect(panel(page)).toBeVisible();
   await expect.poll(() => panel(page).evaluate((dialog) => dialog.contains(document.activeElement))).toBe(true);
+  await expect.poll(() => page.evaluate(() => {
+    const active = document.activeElement;
+    return active instanceof HTMLElement && active.matches(':focus-visible')
+      && Number.parseFloat(getComputedStyle(active).outlineWidth) > 0;
+  })).toBe(true);
+
+  const search = panel(page).getByRole('textbox', { name: '搜索记忆' });
+  for (let index = 0; index < 50; index += 1) {
+    if (await search.evaluate((element) => element === document.activeElement)) break;
+    await page.keyboard.press('Tab');
+  }
+  await expect(search).toBeFocused();
+  await expect.poll(() => search.evaluate((element) => element.matches(':focus-visible')
+    && Number.parseFloat(getComputedStyle(element).outlineWidth) > 0)).toBe(true);
+  await page.keyboard.type('keyboard-only');
+  await page.keyboard.press('Tab');
+  const submitSearch = panel(page).getByRole('button', { name: '搜索' });
+  await expect(submitSearch).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => listQueries).toContain('keyboard-only');
+  await expect(panel(page).locator('.memory-row')).toContainText('keyboard-only search target');
+
+  const initialFocus = await panel(page).evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    return `${active?.tagName ?? ''}|${active?.getAttribute('aria-label') ?? ''}|${active?.textContent ?? ''}`;
+  });
+  await page.keyboard.press('Tab');
+  await expect.poll(() => panel(page).evaluate((dialog) => dialog.contains(document.activeElement))).toBe(true);
+  await expect.poll(() => panel(page).evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    return `${active?.tagName ?? ''}|${active?.getAttribute('aria-label') ?? ''}|${active?.textContent ?? ''}`;
+  })).not.toBe(initialFocus);
+  await expect.poll(() => page.evaluate(() => {
+    const active = document.activeElement;
+    return active instanceof HTMLElement && active.matches(':focus-visible')
+      && Number.parseFloat(getComputedStyle(active).outlineWidth) > 0;
+  })).toBe(true);
+
   await page.keyboard.press('Escape');
   await expect(panel(page)).toBeHidden();
   await expect(opener).toBeFocused();
