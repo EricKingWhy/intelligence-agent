@@ -167,11 +167,13 @@ Memory Context Provider 应负责：
 
 ## 7. Memory Scope
 
-至少支持抽象 Scope：
-- user
+Memory 的 scope 是抽象边界；各发布版本实际支持的范围由该版本已批准的 PRD 定义。
+
+Phase 6 Memory V2 支持：
+- user（Memory V2 PRD 中命名为 `user_global`）
 - project
-- task
-- agent
+
+`task` 与 `agent` scope 延期至 Phase 6 之后；本版本不得创建、查询或注入这两种 scope 的记忆。增加任一种 scope 前，必须有单独批准的 ticket 定义可信身份来源、生命周期、隔离、权限与召回可见性。
 
 Memory 的存储实现不应改变 Agent Core。
 
