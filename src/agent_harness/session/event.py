@@ -70,6 +70,14 @@ TASK_PROTECTED_FACT = "task/protected_fact"
 # 保留（或超硬护栏走暂停）"的 durable 事实，恢复面与对账面都要能看见（规格 06 §8：
 # 每次失败原因留诊断与任务可见状态）。
 CONTEXT_COMPACTION_FAILED = "context/compaction_failed"
+# ── #430（W-02.1）：保护事实独立预算超限的任务可见诊断 ────────────────────
+# 保护事实注入体超出 protected_fact_token_budget 时 fail-closed 照旧（run 走
+# 暂停生命周期，冻结词表不动）；本事件把"哪些 fact 撑爆了预算"从 logger-only
+# 提升为 durable 事件（MEMORY_DEGRADED 先例；OpenHands Condensation 事件 /
+# Anthropic context_management 上报同构）。载荷只装 budget/estimates 与
+# fact 的 id/type/尺寸，**不装 value**——value 已在源事件里，事件不复制第二份
+# （脱敏纪律）。发射点：runtime 终结臂（build 外），每次主循环 build 失败一条。
+CONTEXT_PROTECTED_FACTS_EXCEEDED = "context/protected_facts_exceeded"
 # ── W-26 (#380)：进度清单整表覆盖（PRD §7）────────────────────────────────
 # agent 每次提交**全量清单**（Codex/Gemini 范式：弱模型不易写坏、天然解决并发合并）。
 # 它是状态事件不是对话消息：不进 derive_messages 的投影集合、渲染走客户端自己的
@@ -191,6 +199,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TASK_PROTECTED_FACT,
         # W-04 (#348)：摘要尝试失败的任务可见状态（不投影成消息）
         CONTEXT_COMPACTION_FAILED,
+        # #430（W-02.1）：保护事实预算超限的诊断事件（不投影成消息）
+        CONTEXT_PROTECTED_FACTS_EXCEEDED,
         # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息）
         TASK_PLAN_UPDATED,
         MEMORY_DEGRADED,

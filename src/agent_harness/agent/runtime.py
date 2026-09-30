@@ -94,7 +94,11 @@ from agent_harness.agent.types import (
     AgentRunResult,
     to_agent_event,
 )
-from agent_harness.context.builder import ContextBuilder, ContextWindowExceededError
+from agent_harness.context.builder import (
+    ContextBuilder,
+    ContextWindowExceededError,
+    ProtectedFactBudgetExceededError,
+)
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
 from agent_harness.memory.writeback import MemoryWriteback
@@ -139,7 +143,11 @@ from agent_harness.session import (
     memory_injected_ids_var,
     run_context_var,
 )
-from agent_harness.session.event import STEER_APPLIED, TOOL_RESULT
+from agent_harness.session.event import (
+    CONTEXT_PROTECTED_FACTS_EXCEEDED,
+    STEER_APPLIED,
+    TOOL_RESULT,
+)
 from agent_harness.session.queue import SteerRequest, SteerSource
 from agent_harness.storage import (
     CheckpointBoundary,
@@ -2569,6 +2577,22 @@ class AgentRuntime:
         ctx span 收口保持"裸调 + 收口即清口"（#285 / 残余 R1）：先收口再委托暂停臂
         ——暂停臂 closeout 里的二次 build 失败不碰 telemetry，本句柄不会被第二条
         收集臂再收一次（R2/R3 的两条出口各有仓库内用例）。"""
+        if isinstance(error, ProtectedFactBudgetExceededError):
+            # #430（W-02.1）：预算超限的成因明细从 logger-only 提升为任务可见
+            # durable 事件（MEMORY_DEGRADED 先例）。fail-closed 暂停本身不变，
+            # 冻结词表不动；载荷只装预算读数与 fact 的 id/type/尺寸，不装 value
+            # （脱敏纪律——value 已在源事件里，事件不复制第二份）。
+            # 本臂每次主循环 build 失败进一次；closeout 的二次 build 失败不进
+            # 本臂（见 docstring），发射恰一次。
+            arms.session.append(
+                CONTEXT_PROTECTED_FACTS_EXCEEDED,
+                {
+                    "budget_tokens": error.budget_tokens,
+                    "estimated_tokens": error.estimated_tokens,
+                    "facts": error.facts,
+                },
+                run_id=arms.run_id,
+            )
         arms.telemetry.context_build_completed()
         # error 的正文只装本项目的拒绝文案（compactor 侧已按类型名脱敏），进诊断
         # 日志不进事件——暂停载荷的字段清单是 03 §3.4 的契约，不多不少。

@@ -8,6 +8,7 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import (
+    _expected_fact_id,
     build_protected_fact_data,
     derive_protected_facts,
     undelivered_inputs,
@@ -1209,3 +1210,63 @@ async def test_fork_remaps_pending_input_authorization_before_delivery(
         and fact.value == "ORD-84721"
         for fact in derive_protected_facts(child.events)
     )
+
+
+# ── #430（W-02.1 预算护栏）：user_goal 值硬上限 ──────────────────────────
+
+
+def test_user_goal_value_is_bounded_with_self_describing_marker(tmp_path):
+    """验收 2：user_goal 注册值超上限时截断为头 N 字符 + 自描述标记
+    （含原文总长与来源指针）——「不静默截断」由值内标记满足。"""
+    huge = "必须保留 ORD-84721。" + "详细约束正文。" * 500
+    session = _session(tmp_path, "bounded-goal")
+    session.append(USER_MESSAGE, {"content": huge})
+
+    facts = derive_protected_facts(session.events)
+    goal = next(fact for fact in facts if fact.type == "user_goal")
+
+    assert len(goal.value) < len(huge)
+    assert goal.value.startswith("必须保留 ORD-84721。")
+    assert "2000" in goal.value
+    assert str(len(huge)) in goal.value
+    assert goal.source_event_id in goal.value
+
+
+def test_user_goal_value_at_exact_cap_is_not_truncated(tmp_path):
+    """边界：恰好等于上限 ⇒ 原样保留，无标记。"""
+    exact = "目标。" + "约" * 1997  # 恰好 2000 字符
+    assert len(exact) == 2000
+    session = _session(tmp_path, "exact-cap")
+    session.append(USER_MESSAGE, {"content": exact})
+
+    goal = next(
+        fact
+        for fact in derive_protected_facts(session.events)
+        if fact.type == "user_goal"
+    )
+    assert goal.value == exact
+
+
+def test_user_goal_fact_id_stays_content_addressed_to_full_text(tmp_path):
+    """fact_id 仍按全文内容寻址（截断只改注入值，不改注册表身份）——已持久化
+    的 supersedes 引用对截断参数变更稳定；重放确定性。"""
+    huge = "保留 R-042。" + "正文。" * 900
+    session = _session(tmp_path, "goal-identity")
+    session.append(USER_MESSAGE, {"content": huge})
+
+    first = next(
+        fact
+        for fact in derive_protected_facts(session.events)
+        if fact.type == "user_goal"
+    )
+    second = next(
+        fact
+        for fact in derive_protected_facts(session.events)
+        if fact.type == "user_goal"
+    )
+    expected_id = _expected_fact_id({
+        "fact_type": "user_goal",
+        "value": huge,
+        "source_event_id": first.source_event_id,
+    })
+    assert first.fact_id == second.fact_id == expected_id
