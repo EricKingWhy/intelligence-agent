@@ -26,6 +26,10 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
   上游持续变化，不带 commit 的引用无法复核；
 - 第三方笔记 / 文章是二手来源：**先对照上游源码或官方文档核实再引用**，并记下核实结果。
   （dg-ai-notes 的 TypeScript 章节对上游真实实现；Python 章节是作者转写，两版不一致时以上游 / TS 为准。）
+- **版本漂移实测（2026-09-30，Pi 调研批次）**：dg-ai-notes 基于 **v0.80.2**，上游 HEAD 已到 **v0.99.1**
+  （实测 `1b34779`）——逐章核对 67 处吻合 / 24 处漂移 / 2 处存疑、零捏造；笔记的行号与「包清单 / 不做清单」
+  类章节可能整体过时（如「Pi 不做 MCP」已不成立），引用行号一律以上游实测为准。核对明细：
+  `docs/agents/pi-research-2026-09/`。
 - 文章类来源记链接 + 读取日期；实质复制 / Port 前查 License 并保留来源（`AGENTS.md` §6 末段）。
 
 ## 2. 领域 → 来源
