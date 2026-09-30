@@ -98,6 +98,7 @@ from agent_harness.session.approval import (
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
+    KIND_STEER,
     UndeliveredInput,
     derive_protected_facts,
     detect_dangling,
@@ -142,6 +143,7 @@ from agent_harness.session.event import (
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
     USER_MESSAGE,
+    SessionEvent,
     _utc_now_iso,
 )
 from agent_harness.session.interrupt import detect_unterminated_runs
@@ -242,6 +244,24 @@ def validate_session_id(session_id: str) -> str:
             f"session_id 只接受单个安全名字段：{session_id!r}"
         )
     return session_id
+
+
+def _has_procedural_rule_signal(
+    events: list[SessionEvent], input_kind: str, input_id: str,
+) -> bool:
+    """Recover the user's explicit rule signal from its durable queue/steer event."""
+    if input_kind == KIND_QUEUE:
+        event_type, id_field = MESSAGE_QUEUED, "queue_id"
+    elif input_kind == KIND_STEER:
+        event_type, id_field = STEER_REQUESTED, "steer_id"
+    else:
+        return False
+    return any(
+        event.type == event_type
+        and event.data.get(id_field) == input_id
+        and event.data.get("remember_as_procedural_rule") is True
+        for event in events
+    )
 
 
 # ── 数据载体 ──────────────────────────────────────────────────────────
@@ -780,6 +800,7 @@ class SessionService:
         auto_approve: bool = True,
         amend: AmendOptions | None = None,
         launch: bool = True,
+        remember_as_procedural_rule: bool = False,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -836,6 +857,8 @@ class SessionService:
         - `cwd`（#169 新增）：**已存在**的绝对目录，会话直接以它为操作目录
           （不创建、不复制），并自动注册为项目 + 归组。
         """
+        if remember_as_procedural_rule and (not launch or not task.strip()):
+            raise ValueError("remember_as_procedural_rule requires a launched non-blank user task")
         from uuid import uuid4
 
         from agent_harness.model.config import ConfigError, ModelConfig
@@ -1027,7 +1050,13 @@ class SessionService:
                 session=session, run=None, subscriber=None, local_fuse=fuse,
             )
 
-        run, subscriber = self._run_manager.launch(session, runtime, task)
+        run, subscriber = self._run_manager.launch(
+            session, runtime, task,
+            user_input_metadata=(
+                {"remember_as_procedural_rule": True}
+                if remember_as_procedural_rule else None
+            ),
+        )
 
         # run 终结时 GC approval_queue（防泄漏）
         if interactive:
@@ -1112,6 +1141,14 @@ class SessionService:
         恢复（`03 §5`）。没有 ReconcileCallback 时那条路径**安全拒绝**（409「存在未
         reconcile 的副作用」），不伪造结果、不盲目重跑（不变量 #13/#14）。
         """
+        if (
+            user_input_metadata
+            and user_input_metadata.get("remember_as_procedural_rule") is True
+            and (task is None or not task.strip() or resume_run_id is not None)
+        ):
+            raise ValueError(
+                "remember_as_procedural_rule requires a non-blank new user task"
+            )
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
@@ -1813,6 +1850,7 @@ class SessionService:
         revoke_fact_id: str | None = None,
         refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
+        remember_as_procedural_rule: bool = False,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -1873,6 +1911,8 @@ class SessionService:
         run 边界（``on_run_terminal``）/ runtime 循环头驱动，本方法只做注册与
         durable 记录。
         """
+        if remember_as_procedural_rule and not content.strip():
+            raise ValueError("remember_as_procedural_rule requires non-blank user content")
         self._validate_session_id(session_id)
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
@@ -1894,6 +1934,8 @@ class SessionService:
         }
         if normalized_protected_facts:
             user_input_metadata["protected_facts"] = normalized_protected_facts
+        if remember_as_procedural_rule:
+            user_input_metadata["remember_as_procedural_rule"] = True
         if user_input_metadata:
             events = await anyio.to_thread.run_sync(
                 self._store.read_events, session_id
@@ -1968,6 +2010,7 @@ class SessionService:
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
+                remember_as_procedural_rule=remember_as_procedural_rule,
             )
             self._append_session_event(
                 session_id, STEER_REQUESTED,
@@ -2016,6 +2059,7 @@ class SessionService:
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
+                remember_as_procedural_rule=remember_as_procedural_rule,
             )
             self._append_session_event(
                 session_id, MESSAGE_QUEUED,
@@ -2156,6 +2200,11 @@ class SessionService:
         }
         if nxt.protected_facts:
             user_input_metadata["protected_facts"] = nxt.protected_facts
+        events = await anyio.to_thread.run_sync(
+            self._store.read_events, session_id
+        )
+        if _has_procedural_rule_signal(events, nxt.kind, nxt.input_id):
+            user_input_metadata["remember_as_procedural_rule"] = True
         launched = await self.resume_and_launch(
             session_id=session_id, task=nxt.content, amend=amend,
             user_input_metadata=user_input_metadata or None,
@@ -2591,6 +2640,9 @@ class SessionService:
                     revoke_fact_id=item.revoke_fact_id,
                     refutes_event_id=item.refutes_event_id,
                     protected_facts=item.protected_facts,
+                    remember_as_procedural_rule=_has_procedural_rule_signal(
+                        events, item.kind, item.input_id,
+                    ),
                 )
                 for item in pending
                 if item.kind == KIND_QUEUE
@@ -2605,6 +2657,9 @@ class SessionService:
                     revoke_fact_id=item.revoke_fact_id,
                     refutes_event_id=item.refutes_event_id,
                     protected_facts=item.protected_facts,
+                    remember_as_procedural_rule=_has_procedural_rule_signal(
+                        events, item.kind, item.input_id,
+                    ),
                 )
                 for item in pending
                 if item.kind != KIND_QUEUE

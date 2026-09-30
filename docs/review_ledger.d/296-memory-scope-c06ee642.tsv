@@ -1,0 +1,1 @@
+2026-09-30	#296 范围决策；Gate-0 后 Standards + Spec 两轴独立复审 fixed point c06ee642：双 PASS、P0-P4=0。记录用户批准的 Phase 6 user/project 范围及 task/agent 延后；证据：ADR-0049 与 Engineering Spec 06 §7。	89bf106a..c06ee642

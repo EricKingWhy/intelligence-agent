@@ -1,0 +1,1 @@
+2026-09-30	#297 P2 修后双轴复审（Spec + Standards，范围 c7bbec99..6d149d6a）：InstanceLock 构造器拒绝 allow_cutover + allow_memory_index_rebuild 同时启用；无 P0–P2 残余。旧树新用例红（DID NOT RAISE），修后 tests/test_instance_lock.py + test_v2_index_rebuild.py + test_clean_slate_cutover.py 94 passed；Ruff 与 diff --check 通过。	c7bbec997c93f9925d60d966a09ba46d0abb186a..6d149d6a3ea9077edc40e6c460c66125ce557e9f

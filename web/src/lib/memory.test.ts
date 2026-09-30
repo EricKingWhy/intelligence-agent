@@ -6,10 +6,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   MEMORY_MAX_LIMIT,
+  MEMORY_MAX_OFFSET,
   MEMORY_PAGE_SIZE,
   MEMORY_CONTENT_MAX_CHARS,
   formatMemoryTime,
   hasMoreAfter,
+  memoryPageContinuation,
   memoryPayloadDraft,
   memoryPayloadFromDraft,
   refetchLimit,
@@ -57,6 +59,15 @@ describe('hasMoreAfter', () => {
 
   it('请求量为 0 视为到底（防止 0 >= 0 恒真导致死循环式翻页）', () => {
     expect(hasMoreAfter(0, 0)).toBe(false);
+  });
+});
+
+describe('memoryPageContinuation', () => {
+  it('allows a request at offset 10000, then reports the hard query boundary', () => {
+    expect(MEMORY_MAX_OFFSET).toBe(10_000);
+    expect(memoryPageContinuation(10_000, 50, 50)).toBe('more');
+    expect(memoryPageContinuation(10_050, 50, 50)).toBe('limit');
+    expect(memoryPageContinuation(10_050, 49, 50)).toBe('complete');
   });
 });
 

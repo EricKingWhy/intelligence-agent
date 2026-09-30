@@ -184,6 +184,7 @@ def assert_kind_tier_payload_contract(
 def assert_content_contract(
     *, kind: MemoryKind, tier: MemoryTier, scope: MemoryScope,
     project_id: str | None, payload: MemoryPayload,
+    allow_unbound_project: bool = False,
 ) -> None:
     """§4.1/§4.2/§4.3 里"单字段看不出错"的组合规则。
 
@@ -198,8 +199,14 @@ def assert_content_contract(
     # 所有会话会越界。
     if tier is MemoryTier.PROFILE and scope is not MemoryScope.USER_GLOBAL:
         raise ValueError(f"profile tier requires user_global scope, got {scope.value!r}")
+    if (
+        isinstance(payload, SemanticPayload)
+        and payload.category is SemanticCategory.PROJECT_FACT
+        and scope is not MemoryScope.PROJECT
+    ):
+        raise ValueError("project_fact requires project scope")
     if scope is MemoryScope.PROJECT:
-        if project_id is None:
+        if project_id is None and not allow_unbound_project:
             raise ValueError("project scope requires project_id")
     elif project_id is not None:
         raise ValueError("user_global scope must not carry project_id")

@@ -243,6 +243,12 @@ records, and Qiniu test objects were verified absent; the dedicated Knowledge co
 pre-existed and was neither created nor dropped by the gate. Synthetic Langfuse trace,
 dataset, and experiment evidence was retained with content fields omitted.
 
+### D12 — Formation owns memory classification
+
+2026-09-29 的 #304 真实金集运行把 `positive_episode` 作为 `semantic` 写入，write precision 为 10/11（0.909），低于冻结的 0.95 门槛。用户于 2026-09-30 批准将分类归属明确为：Formation 决定候选的 `kind`、`tier`、`scope`；Adjudication 只决定 `ADD` / `UPDATE` / `INVALIDATE` / `NOOP` 并可完善内容，不得重分类或改变 tier / scope。每个非空裁决结果必须逐字段保持对应 Formation 候选的这三项值。Runtime 对任一错配 fail-closed，记录脱敏的 `adjudication_classification_mismatch`，且不写入记忆。
+
+此约束落实 PRD §5.2 第 5 项、§6.3 与 #298 R8 / AC3；不修改 PRD 的质量阈值、样本集、重试预算或模型角色。回归位于 `tests/memory/v2/test_v2_executor.py::test_adjudication_cannot_change_candidate_classification`，分别覆盖 kind、tier、scope 错配。旧分支的历史记录不代表此规则已在 `origin/main` 集成。
+
 ## 4. Verification contract
 
 落实证据位于 `tests/observability/test_tracer_port.py`、`tests/memory/v2/test_v2_executor.py`、

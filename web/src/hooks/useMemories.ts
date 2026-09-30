@@ -8,16 +8,24 @@ import {
   type MemoryFilters,
   type MemoryRecord,
 } from '../lib/memoryV2Api';
-import { MEMORY_PAGE_SIZE, hasMoreAfter, refetchLimit } from '../lib/memory';
+import {
+  MEMORY_PAGE_SIZE,
+  hasMoreAfter,
+  memoryPageContinuation,
+  refetchLimit,
+} from '../lib/memory';
 import { withTimeout } from '../lib/timeout';
 
 interface PageState {
   key: string;
   rows: MemoryRecord[];
+  nextOffset: number;
   hiddenIds: ReadonlySet<string>;
   status: 'loading' | 'ready' | 'error' | 'disabled';
   loadingMore: boolean;
   hasMore: boolean;
+  paginationLimitReached: boolean;
+  failedMoreOffset: number | null;
   loadError: string | null;
   disabled: string | null;
 }
@@ -29,10 +37,12 @@ export interface MemoriesState {
   loadError: string | null;
   disabled: string | null;
   hasMore: boolean;
+  paginationLimitReached: boolean;
   pending: ReadonlySet<string>;
   remove: (memoryId: string, projectId?: string) => Promise<void>;
   loadMore: () => Promise<void>;
   retry: () => Promise<void>;
+  retryFailedPage: () => Promise<void>;
 }
 
 const DELETE_TIMEOUT_MS = 30_000;
@@ -61,10 +71,13 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
   const [page, setPage] = useState<PageState>({
     key: '',
     rows: [],
+    nextOffset: 0,
     hiddenIds: new Set(),
     status: 'loading',
     loadingMore: false,
     hasMore: false,
+    paginationLimitReached: false,
+    failedMoreOffset: null,
     loadError: null,
     disabled: null,
   });
@@ -84,10 +97,13 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
         return {
           key: filterKey,
           rows,
+          nextOffset: rows.length,
           hiddenIds,
           status: 'ready',
           loadingMore: false,
           hasMore: hasMoreAfter(rows.length, limit),
+          paginationLimitReached: false,
+          failedMoreOffset: null,
           loadError: null,
           disabled: null,
         };
@@ -98,10 +114,13 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
       setPage((previous) => ({
         key: filterKey,
         rows: previous.key === filterKey ? previous.rows : [],
+        nextOffset: previous.key === filterKey ? previous.nextOffset : 0,
         hiddenIds: previous.key === filterKey ? previous.hiddenIds : new Set<string>(),
         status: isMemoryDisabled(error) ? 'disabled' : 'error',
         loadingMore: false,
         hasMore: previous.key === filterKey && previous.hasMore,
+        paginationLimitReached: previous.key === filterKey && previous.paginationLimitReached,
+        failedMoreOffset: null,
         loadError: isMemoryDisabled(error) ? null : message,
         disabled: isMemoryDisabled(error) ? message : null,
       }));
@@ -121,33 +140,30 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
     [currentRows, page.hiddenIds],
   );
 
-  const retry = useCallback(
-    async () => {
-      setPage((previous) => previous.key === filterKey
-        ? { ...previous, status: 'loading', loadError: null, disabled: null }
-        : previous);
-      await refetch(refetchLimit(currentRows.length));
-    }, [currentRows.length, filterKey, refetch],
-  );
-
   const loadMore = useCallback(async () => {
     if (page.key !== filterKey || page.loadingMore || !page.hasMore) return;
+    const requestedOffset = page.nextOffset;
     const gen = ++generation.current;
     setPage((previous) => previous.key === filterKey
-      ? { ...previous, loadingMore: true }
+      ? { ...previous, loadingMore: true, loadError: null }
       : previous);
     try {
-      const nextPage = await listMemoryRecords(MEMORY_PAGE_SIZE, page.rows.length, apiFilters);
+      const nextPage = await listMemoryRecords(MEMORY_PAGE_SIZE, requestedOffset, apiFilters);
       if (gen !== generation.current) return;
       setPage((previous) => {
         if (previous.key !== filterKey) return previous;
         const seen = new Set(previous.rows.map((row) => row.id));
         const rows = [...previous.rows, ...nextPage.filter((row) => !seen.has(row.id))];
+        const nextOffset = requestedOffset + nextPage.length;
+        const continuation = memoryPageContinuation(nextOffset, nextPage.length, MEMORY_PAGE_SIZE);
         return {
           ...previous,
           rows,
+          nextOffset,
           loadingMore: false,
-          hasMore: hasMoreAfter(nextPage.length, MEMORY_PAGE_SIZE),
+          hasMore: continuation === 'more',
+          paginationLimitReached: continuation === 'limit',
+          failedMoreOffset: null,
           loadError: null,
         };
       });
@@ -157,11 +173,38 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
         ? {
           ...previous,
           loadingMore: false,
+          failedMoreOffset: requestedOffset,
           loadError: describeMemoryError(error, '加载更多记忆失败'),
         }
         : previous);
     }
   }, [apiFilters, filterKey, page]);
+
+  const retry = useCallback(
+    async () => {
+      setPage((previous) => previous.key === filterKey
+        ? {
+          ...previous,
+          status: 'loading',
+          loadingMore: false,
+          failedMoreOffset: null,
+          loadError: null,
+          disabled: null,
+        }
+        : previous);
+      await refetch(refetchLimit(currentRows.length));
+    }, [currentRows.length, filterKey, refetch],
+  );
+
+  const retryFailedPage = useCallback(
+    async () => {
+      if (page.key === filterKey && page.failedMoreOffset === page.nextOffset) {
+        await loadMore();
+        return;
+      }
+      await retry();
+    }, [filterKey, loadMore, page.failedMoreOffset, page.key, page.nextOffset, retry],
+  );
 
   const remove = useCallback(async (memoryId: string, projectId?: string) => {
     if (pending.has(memoryId)) return;
@@ -202,9 +245,11 @@ export function useMemories(filters: MemoryFilters = EMPTY_FILTERS): MemoriesSta
     loadError: matches ? page.loadError : null,
     disabled: matches ? page.disabled : null,
     hasMore: matches && page.hasMore,
+    paginationLimitReached: matches && page.paginationLimitReached,
     pending,
     remove,
     loadMore,
     retry,
+    retryFailedPage,
   };
 }
