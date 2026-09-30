@@ -25,7 +25,38 @@ _SCOPES = {"user_global", "project", "none"}
 _AUTHORITIES = {"user", "assistant", "tool", "system", "none"}
 _STATUSES = {"executed", "degraded", "failed", "skipped", "unawaited"}
 _WRITE_ACTIONS = {"ADD", "UPDATE"}
+# Write matching is value-preserving, not verbatim (ADR-0044 D12, 2026-09-30 review):
+# every gold content token must survive into the stored record whatever the word order,
+# and a negation in the gold fact must still be a negation in the record. This replaced
+# exact full-sequence equality, which rejected legitimate paraphrases even though every
+# gold value, name and date was intact. Function words are dropped from the gold side
+# only; the record may add its own context. Tokens are compared exactly, without
+# stemming or plural folding ("summary" does not match "summaries"), and negations
+# ("no", "without", ...) plus date-like tokens ("may") stay content words.
 _WRITE_FACT_TOKENS = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+_WRITE_FACT_FUNCTION_WORDS = frozenset({
+    # Articles.
+    "a", "an", "the",
+    # Copulas and auxiliary verbs.
+    "am", "is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "will", "would", "shall", "should", "can", "could",
+    "must", "have", "has", "had",
+    # Prepositions (excluding "without", which is a negation).
+    "of", "to", "in", "on", "at", "by", "for", "from", "with", "into", "onto",
+    "about", "above", "below", "over", "under", "after", "before", "between",
+    "during", "through", "across", "around", "against", "along", "within", "upon",
+    # Conjunctions.
+    "and", "or", "but", "if", "then", "than", "as", "so", "because", "while",
+    "when", "where", "whether", "although", "though",
+    # Pronouns and bare determiners.
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us",
+    "them", "my", "your", "his", "its", "our", "their",
+    "this", "that", "these", "those",
+})
+_WRITE_FACT_NEGATIONS = frozenset({
+    "no", "not", "never", "none", "without", "cannot",
+    "dont", "doesnt", "isnt", "arent", "wasnt", "werent",
+})
 _VECTOR_STORE_ERROR_CODES = {
     "configuration", "connection", "not_connected", "authentication",
     "permission_denied", "collection_not_found", "invalid_request", "unavailable",
@@ -206,14 +237,23 @@ def _metric(
 
 
 def write_fact_matches(content: str, expected_fact: str) -> bool:
-    """Require the whole stored fact to match gold, allowing a record label."""
-    actual_tokens = _WRITE_FACT_TOKENS.findall(content.casefold())
-    expected_tokens = _WRITE_FACT_TOKENS.findall(expected_fact.casefold())
-    if not actual_tokens or not expected_tokens:
+    """Accept a record that keeps every gold content word and the gold negation."""
+    if not isinstance(content, str) or not isinstance(expected_fact, str):
         return False
-    if actual_tokens[0] in {"record", "recorded"}:
-        actual_tokens = actual_tokens[1:]
-    return actual_tokens == expected_tokens
+    if not expected_fact.strip():
+        return False
+    actual_tokens = set(_WRITE_FACT_TOKENS.findall(content.lower()))
+    gold_tokens = _WRITE_FACT_TOKENS.findall(expected_fact.lower())
+    gold_content = {
+        token for token in gold_tokens if token not in _WRITE_FACT_FUNCTION_WORDS
+    }
+    if not actual_tokens or not gold_content:
+        return False
+    negation_kept = (
+        not set(gold_tokens) & _WRITE_FACT_NEGATIONS
+        or bool(actual_tokens & _WRITE_FACT_NEGATIONS)
+    )
+    return gold_content <= actual_tokens and negation_kept
 
 
 def evaluate_memory_gold(

@@ -1428,26 +1428,133 @@ def test_write_match_requires_gold_content_and_correct_attribution():
     assert _write_match_count(case, [correct_record], **(metadata | {"scope": "project"})) == 0
 
 
-def test_write_fact_matching_rejects_changed_values_and_negation():
+def test_write_fact_matching_rejects_changed_values_and_lost_gold_negation():
     _corpus, cases = load_memory_gold()
     fact = next(
         item.expected["write_fact"] for item in cases
         if item.case_id == "positive_episode"
     )
+    negated = fact.replace("are still failing", "are not still failing")
 
     assert write_fact_matches(f"Recorded: {fact.upper()}", fact)
     assert not write_fact_matches(fact.replace("Friday", "Monday"), fact)
-    assert not write_fact_matches(fact.replace("are still failing", "are not still failing"), fact)
-    assert not write_fact_matches(
-        f"{fact} But that is false; the integration tests are passing.", fact,
-    )
+    assert not write_fact_matches(fact, negated)
+    assert write_fact_matches(f"{fact} Context: release planning note.", fact)
 
 
-def test_write_fact_matching_requires_the_full_ordered_phrase():
+def test_write_fact_matching_ignores_order_but_keeps_every_gold_value_word():
     fact = "The synthetic deploy window is Thursday."
 
     assert write_fact_matches(f"Record: {fact}", fact)
-    assert not write_fact_matches("The synthetic Thursday deploy window is scheduled.", fact)
+    assert write_fact_matches("The synthetic Thursday deploy window is scheduled.", fact)
+
+
+# Real pair evidence from the 2026-09-30 gate probe: (gold write_fact, stored record text).
+# Eight are wording-only paraphrases the old full-sequence equality rejected; two are exact.
+_REAL_WRITE_FACT_PAIRS = (
+    ("positive_semantic_preference",
+     "The user prefers concise code review summaries.",
+     "User explicitly prefers concise code review summaries."),
+    ("positive_project_fact",
+     "Cursor pagination is the selected API listing strategy for this synthetic project.",
+     ("For this synthetic project, cursor pagination is the selected API listing strategy "
+      "and remains the design until the user changes it.")),
+    ("positive_episode",
+     "The release is postponed until Friday because integration tests are still failing.",
+     ("Release postponed until Friday because integration tests are still failing; "
+      "remember this when doing release planning.")),
+    ("positive_procedure",
+     ("The approved deploy procedure is to confirm the release commit, run integration "
+      "tests, deploy to staging, and verify health checks before production."),
+     ("Approved deploy procedure for this project: (1) confirm the release commit, "
+      "(2) run integration tests, (3) deploy to staging, (4) verify health checks before "
+      "promoting to production. Success means all health checks pass.")),
+    ("contradiction_supersession",
+     "The synthetic deploy window is Thursday.",
+     "The synthetic deploy window is Thursday (updated from Monday)."),
+    ("contradiction_user_wins",
+     "The synthetic project codename is Cedar Lantern.",
+     "The synthetic project codename is Cedar Lantern, replacing the earlier codename Amber Fox."),
+    ("cross_session_recall_one",
+     "On our synthetic project, the prototype is named Sample Harbor.",
+     "On the synthetic project, the prototype is named Sample Harbor."),
+    ("replay_committed_job",
+     "The synthetic project retains audit events for 90 days.",
+     "The synthetic project retains audit events for 90 days to support release investigations."),
+    ("explicit_remember",
+     "The demo project is named Sample Harbor.",
+     "the demo project is named Sample Harbor"),
+    ("cross_session_recall_two",
+     "The project API uses cursor pagination for listings.",
+     "The project API uses cursor pagination for listings."),
+)
+
+
+@pytest.mark.parametrize(
+    ("gold", "stored"),
+    [
+        pytest.param(gold, stored, id=case_id)
+        for case_id, gold, stored in _REAL_WRITE_FACT_PAIRS
+    ],
+)
+def test_write_fact_matching_accepts_real_gold_paraphrases(gold, stored):
+    assert write_fact_matches(stored, gold)
+
+
+@pytest.mark.parametrize(
+    ("stored", "gold"),
+    [
+        pytest.param(
+            "The synthetic deploy window is Friday.",
+            "The synthetic deploy window is Thursday.", id="wrong-value",
+        ),
+        pytest.param(
+            "The synthetic project retains audit events for release investigations.",
+            "The synthetic project retains audit events for 90 days.", id="missing-quantity",
+        ),
+        pytest.param(
+            "The user wants verbose summaries.",
+            "The user does not want verbose summaries.", id="negation-flip",
+        ),
+        pytest.param(
+            "The synthetic project codename is Amber Fox.",
+            "The synthetic project codename is Cedar Lantern.", id="wrong-name",
+        ),
+    ],
+)
+def test_write_fact_matching_rejects_changed_values(stored, gold):
+    assert not write_fact_matches(stored, gold)
+
+
+@pytest.mark.parametrize("gold", ["", "   ", None])
+def test_write_fact_matching_requires_a_gold_fact(gold):
+    assert not write_fact_matches("The user prefers concise code review summaries.", gold)
+
+
+def test_write_fact_matching_ignores_function_words_and_order():
+    assert write_fact_matches(
+        "User prefers concise code review summaries.",
+        "The user prefers concise code review summaries.",
+    )
+    assert write_fact_matches(
+        "For this synthetic project, cursor pagination is the selected API listing strategy "
+        "and remains the design until the user changes it.",
+        "Cursor pagination is the selected API listing strategy for this synthetic project.",
+    )
+
+
+def test_write_fact_matching_keeps_a_gold_negation_in_the_record():
+    gold = "The user does not want verbose summaries."
+
+    assert write_fact_matches("The user does not want verbose summaries.", gold)
+    assert not write_fact_matches("The user wants verbose summaries.", gold)
+
+
+def test_write_fact_matching_keeps_tokens_strict_without_plural_folding():
+    assert not write_fact_matches(
+        "The synthetic project retains audit events for 90 day.",
+        "The synthetic project retains audit events for 90 days.",
+    )
 
 
 def test_write_precision_counts_unmatched_memory_written_for_noop_case():
