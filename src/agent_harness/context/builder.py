@@ -39,7 +39,35 @@ from agent_harness.session.plan import PlanState, derive_plan
 
 logger = logging.getLogger("agent_harness.context")
 
-__all__ = ["ContextBuilder", "ContextWindowExceededError"]
+__all__ = [
+    "ContextBuilder",
+    "ContextWindowExceededError",
+    "ProtectedFactBudgetExceededError",
+]
+
+
+class ProtectedFactBudgetExceededError(ContextWindowExceededError):
+    """保护事实超出独立预算（#430，W-02.1）。
+
+    语义与父类完全一致（fail-closed：本轮不发生模型调用，走既有暂停生命
+    周期）；子类化只为让 runtime 在同一条失败通道上区分成因，发射任务可见
+    诊断事件（``context/protected_facts_exceeded``，MEMORY_DEGRADED 先例）。
+    结构化载荷只装 id / type / 尺寸，不装 value（脱敏纪律同 MEMORY_DEGRADED；
+    value 已在源事件里，事件不复制第二份）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        budget_tokens: int,
+        estimated_tokens: int,
+        facts: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(message)
+        self.budget_tokens = budget_tokens
+        self.estimated_tokens = estimated_tokens
+        self.facts = facts
 
 #: 会投影成消息的事件类型——与 derive_messages 的投影集合一一对应
 #: （每个此类事件恰好产出一条消息，顺序一致；dangling 合成注入是唯一例外，
@@ -328,10 +356,29 @@ class ContextBuilder:
         )
         self._last_protected_fact_tokens = protected_facts_tokens
         if protected_facts_tokens > self.protected_fact_token_budget:
-            fact_ids = ", ".join(fact.fact_id for fact in protected_facts)
-            raise ContextWindowExceededError(
+            # #430（W-02.1）：注入面与预算读数都只算 active（serialize 已过滤），
+            # "facts withheld" 的指认面必须同口径——superseded 条目不占预算，
+            # 列进成因明细会诱导用户去撤一条已经不占预算的死事实。
+            active_facts = [
+                fact for fact in protected_facts
+                if fact.status == "active"
+            ]
+            fact_ids = ", ".join(fact.fact_id for fact in active_facts)
+            raise ProtectedFactBudgetExceededError(
                 "Protected facts exceed their dedicated token budget; "
-                f"facts withheld: {fact_ids}"
+                f"facts withheld: {fact_ids}",
+                budget_tokens=self.protected_fact_token_budget,
+                estimated_tokens=protected_facts_tokens,
+                facts=[
+                    {
+                        "fact_id": fact.fact_id,
+                        "type": fact.type,
+                        "value_chars": len(fact.value)
+                        if isinstance(fact.value, str)
+                        else len(repr(fact.value)),
+                    }
+                    for fact in active_facts
+                ],
             )
         token_estimate = self._estimate_tokens_cached(session, messages)
         token_estimate += protected_facts_tokens

@@ -276,3 +276,37 @@ async def test_artifact_created_lands_after_tool_call(tmp_path):
 
     types = [e.type for e in session.events]
     assert types.index("tool/call") < types.index("artifact/externalized") < types.index("tool/result"), types
+
+
+@pytest.mark.asyncio
+async def test_runtime_emits_protected_facts_budget_event_before_pause(tmp_path):
+    """#430（W-02.1）验收 3/4：预算超限保持 fail-closed 暂停（冻结词表
+    budget_exhausted / max_context_tokens 不动），但落任务可见诊断事件
+    context/protected_facts_exceeded——fact 明细从 logger-only 变为事件流
+    可消费（OpenHands Condensation 事件 / Anthropic context_management 上报
+    同构；载荷只装 id/type/尺寸，不装 value——脱敏纪律同 MEMORY_DEGRADED）。"""
+    model = ScriptedModel([])
+    registry = ToolRegistry()
+    runtime = AgentRuntime(model, registry, ToolExecutor(registry),
+                           context_builder=ContextBuilder(
+                               model, max_context_tokens=1_000_000,
+                               protected_fact_token_budget=1))
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "必须保留精确编号 ORD-123456789。"})
+    before = len(session.events)
+
+    result = await runtime.run(session, "继续。")
+
+    assert result.status == "paused"
+    degraded = [e for e in session.events[before:]
+                if e.type == "context/protected_facts_exceeded"]
+    assert len(degraded) == 1, "主循环 build 失败恰发射一条（closeout 二次失败不进终结臂）"
+    payload = degraded[0].data
+    assert payload["budget_tokens"] == 1
+    assert payload["estimated_tokens"] > 1
+    assert any(f["type"] == "user_goal" for f in payload["facts"])
+    assert all(
+        set(fact) == {"fact_id", "type", "value_chars"} for fact in payload["facts"]
+    )
+    assert session.events[-1].type == "run/paused"
+    assert session.events[-1].data["reason"] == "budget_exhausted"
