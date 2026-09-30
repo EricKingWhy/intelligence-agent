@@ -123,7 +123,8 @@ and the merge attribution in `docs/review_ledger.d/422-mem-v2-297-merge-8daf6b62
 The branch is synchronized through `origin/main` `e31cb654` (merge `7e1d77ce`). On that merged
 tree, the focused Python regression set passed 788 tests; the web projection test passed 212 tests;
 `npm run build` succeeded. `scripts/check_review_coverage.py` exits 0. The older merge report at
-`8daf6b62` is retained as historical evidence of its 5/6 coverage failure; the final Gate-0 for
-the current tree is still pending. No live Milvus rebuild is claimed. Actual execution remains an
-operator action after all writers to the configured collection are stopped, including writers in
-other clones.
+`8daf6b62` is retained as historical evidence of its 5/6 coverage failure. Final Gate-0 on commit
+`621158aa` / tree `6227bbaba154bba2633e066b284d65c1c3f3d1fe` passed 6/6 in 18.1 seconds; its
+machine record is `docs/gate/621158aa8867b07b77fc536c3b8fcb57c2f2b4e8.json`. No live Milvus rebuild
+is claimed. Actual execution remains an operator action after all writers to the configured
+collection are stopped, including writers in other clones.
