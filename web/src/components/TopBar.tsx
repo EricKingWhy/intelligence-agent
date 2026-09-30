@@ -12,6 +12,7 @@ import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
+import { awaitingApproval as hasLiveApproval } from '../lib/projection';
 import type { ConversationState } from '../types';
 
 interface Props {
@@ -82,7 +83,10 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   // 工具执行（pulse 'tool'）与 run 已收口时都不能出现——那样顶栏会一边写
   // 「执行工具」一边写「仍在等待模型」，自相矛盾。
   // #427：审批等待是例外——等待的主语是用户，提示照出但文案换向（等审批）。
-  const awaitingApproval = (conversation?.pending_approvals.length ?? 0) > 0;
+  // #443：判据与投影同源（projection.awaitingApproval，App.tsx 同款）——run 终结时
+  // markPendingApprovalsStale 只置 stale 不移出数组，length > 0 ≠ 有事在等；
+  // 失效审批不算，否则新 run 运行中会把等待的主语错说成"等你审批"。
+  const awaitingApproval = hasLiveApproval(conversation?.pending_approvals ?? []);
   //
   // 进度信号走 ref 而不是 effect 依赖：依赖它会让**每个 delta** 都 teardown/重建一次
   // interval（快速流里每秒成百次）。这里 interval 只在 waiting 翻转时重建，每个事件只
