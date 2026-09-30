@@ -265,7 +265,18 @@ context allowed, and with tokens compared exactly (no stemming or plural folding
 polarity is two-way: a record may neither drop a gold negation nor add a negation the
 gold fact does not have, because an added negation reverses the value ("is named Sample
 Harbor" vs "is not named Sample Harbor"). Position-relative words (`before` / `after`)
-are content words for the same reason. This replaced the earlier requirement that the
+are content words for the same reason. Two normalizations keep that comparison honest,
+and the boundary is deliberate rather than accidental: negated contractions are expanded
+before tokenizing (`isn't` -> `is not`, `won't` -> `will not`), because the raw tokenizer
+splits `isn't` into `isn` + `t` and the elided negation would otherwise be invisible to
+the polarity check; possessive clitics are dropped (`project's` -> `project`,
+`users'` -> `users`) because they carry no value, so a gold anchor written with a clitic
+still matches an equally faithful record that phrases the same value without one. Only
+the explicit negators the evaluator lists count — hedges (`hardly`, `barely`) and focus
+particles (`only`) are out of scope because they shift emphasis more than truth value.
+The per-case anchor is a floor, not a full-fidelity contract: a record that keeps the
+anchor value and adds its own context matches, and content the anchor does not name — a
+procedure's success condition, for example — is not itself measured. This replaced the earlier requirement that the
 normalized stored content equal the full ordered gold anchor, which rejected eight of
 the ten real wording-only paraphrases in the corpus even though every gold value, name,
 date and quantity was intact. Matching is token-set containment, not sequence matching:

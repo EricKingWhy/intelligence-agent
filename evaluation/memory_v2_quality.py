@@ -36,6 +36,17 @@ _WRITE_ACTIONS = {"ADD", "UPDATE"}
 # stemming or plural folding ("summary" does not match "summaries"), and negations
 # ("no", "without", ...) plus position/time-relative content words ("before", "after")
 # stay content words because swapping them changes the fact.
+#
+# Boundary of the polarity rule, recorded here so the leniency is deliberate:
+#  - Only the explicit negators in `_WRITE_FACT_NEGATIONS` count. Hedges ("hardly",
+#    "barely") and focus particles ("only") are out of scope: they shift emphasis more
+#    than truth value, and treating them as negations would reject legitimate records.
+#  - Negated contractions are expanded before tokenizing (`isn't` -> `is not`,
+#    `won't` -> `will not`), because the raw tokenizer splits `isn't` into `isn` + `t`,
+#    which would make the elided negation invisible to the polarity check.
+#  - Possessive clitics carry no value and are dropped (`project's` -> `project`,
+#    `users'` -> `users`), so a gold anchor written with a clitic still matches a record
+#    that phrases the same value without one.
 _WRITE_FACT_TOKENS = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 _WRITE_FACT_FUNCTION_WORDS = frozenset({
     # Articles.
@@ -56,8 +67,16 @@ _WRITE_FACT_FUNCTION_WORDS = frozenset({
     "them", "my", "your", "his", "its", "our", "their",
     "this", "that", "these", "those",
 })
+_WRITE_FACT_APOSTROPHES = str.maketrans(
+    {"\u2019": "'", "\u2018": "'", "\u00b4": "'", "`": "'"}
+)
+_WRITE_FACT_CONTRACTIONS = re.compile(r"won't|can't|shan't|n't\b")
+_WRITE_FACT_IRREGULAR_NEGATIONS = {
+    "won't": "will not", "can't": "cannot", "shan't": "shall not",
+}
+_WRITE_FACT_POSSESSIVES = re.compile(r"(?<=[a-z0-9])'(?:s\b)?")
 _WRITE_FACT_NEGATIONS = frozenset({
-    "no", "not", "never", "none", "without", "cannot",
+    "no", "not", "never", "none", "nothing", "nor", "neither", "without", "cannot",
     "dont", "doesnt", "isnt", "arent", "wasnt", "werent",
 })
 _VECTOR_STORE_ERROR_CODES = {
@@ -239,6 +258,19 @@ def _metric(
     }
 
 
+def _write_fact_comparable(value: str) -> str:
+    """Lowercase, normalize apostrophes, expand negated contractions, drop clitics.
+
+    Order matters: expansion runs before clitic stripping, so `isn't` becomes `is not`
+    instead of `isn t`, and a possessive `'s` never reaches the token set as a bare `s`.
+    """
+    text = value.lower().translate(_WRITE_FACT_APOSTROPHES)
+    text = _WRITE_FACT_CONTRACTIONS.sub(
+        lambda match: _WRITE_FACT_IRREGULAR_NEGATIONS.get(match.group(0), " not"), text,
+    )
+    return _WRITE_FACT_POSSESSIVES.sub("", text)
+
+
 def write_fact_matches(content: str, expected_fact: str) -> bool:
     """Accept a record that keeps every gold content word and the gold polarity.
 
@@ -250,8 +282,8 @@ def write_fact_matches(content: str, expected_fact: str) -> bool:
         return False
     if not expected_fact.strip():
         return False
-    actual_tokens = set(_WRITE_FACT_TOKENS.findall(content.lower()))
-    gold_tokens = _WRITE_FACT_TOKENS.findall(expected_fact.lower())
+    actual_tokens = set(_WRITE_FACT_TOKENS.findall(_write_fact_comparable(content)))
+    gold_tokens = _WRITE_FACT_TOKENS.findall(_write_fact_comparable(expected_fact))
     gold_content = {
         token for token in gold_tokens if token not in _WRITE_FACT_FUNCTION_WORDS
     }

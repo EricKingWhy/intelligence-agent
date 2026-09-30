@@ -1601,6 +1601,93 @@ def test_write_fact_matching_keeps_before_and_after_as_content_words():
     )
 
 
+def test_write_fact_matching_rejects_an_added_elided_negation():
+    """省略式否定同样是值反转：缩写必须在分词前展开，否则 isn't 只剩 {isn, t}。"""
+    gold = "The demo project is named Sample Harbor."
+
+    assert not write_fact_matches("The demo project isn't named Sample Harbor.", gold)
+    assert not write_fact_matches("The demo project isn\u2019t named Sample Harbor.", gold)
+    assert not write_fact_matches(
+        "The synthetic deploy window won't be Thursday.",
+        "The synthetic deploy window is Thursday.",
+    )
+    assert not write_fact_matches(
+        "The user didn't approve the release plan.",
+        "The user approved the release plan.",
+    )
+
+
+def test_write_fact_matching_accepts_a_contracted_gold_negation():
+    gold = "The user does not want verbose summaries."
+
+    assert write_fact_matches("The user doesn't want verbose summaries.", gold)
+    assert write_fact_matches(
+        "The synthetic deploy window will not be Thursday.",
+        "The synthetic deploy window won't be Thursday.",
+    )
+
+
+def test_write_fact_matching_counts_plain_negators_in_both_directions():
+    gold = "The synthetic project has a public listing API."
+
+    assert not write_fact_matches("The synthetic project has no public listing API.", gold)
+    assert not write_fact_matches(
+        "Neither the synthetic project nor its API has a public listing API.", gold,
+    )
+    assert not write_fact_matches(
+        "Nothing about the synthetic project has a public listing API.", gold,
+    )
+
+
+def test_write_fact_matching_drops_possessive_clitics():
+    """所有格 's 不承载值：带 clitic 的金锚要能被不带 clitic 的同值改述命中。"""
+    gold = (
+        "The synthetic project's public listing API uses cursor pagination for stable pages."
+    )
+
+    assert write_fact_matches(
+        "The public listing API of the synthetic project uses cursor pagination "
+        "for stable pages.",
+        gold,
+    )
+    assert write_fact_matches(gold.replace("project's", "project"), gold)
+    assert not write_fact_matches(
+        "The synthetic projects public listing API uses cursor pagination for stable pages.",
+        gold,
+    )
+
+
+def test_prd_quality_thresholds_are_pinned():
+    """PRD §8.2 的阈值是冻结值：改动这些数字必须是刻意的、经 review 的改动。"""
+    corpus, cases = load_memory_gold()
+
+    report = evaluate_memory_gold(corpus, cases, _results(cases))
+    thresholds = {
+        name: metric["threshold"] for name, metric in report["metrics"].items()
+    }
+
+    assert thresholds == {
+        "secret_writes": 0,
+        "secret_path_coverage": 1.0,
+        "unauthorized_recalls": 0,
+        "unauthorized_mutations": 0,
+        "ineligible_trigger_writes": 0,
+        "ineligible_trigger_jobs": 0,
+        "noop_accuracy": 0.95,
+        "write_precision": 0.95,
+        "write_target_coverage": 0.95,
+        "kind_accuracy": 0.90,
+        "contradiction_handling": 0.95,
+        "cross_session_recall_at_6": 0.85,
+        "cross_session_lifecycle": 1.0,
+        "non_privileged_recall": 1.0,
+        "transient_primary_fallback": 1.0,
+        "fallback_model_success": 1.0,
+        "replay_duplicate_active_memories": 0,
+        "replay_idempotency": 1.0,
+    }
+
+
 def test_write_fact_matching_keeps_tokens_strict_without_plural_folding():
     assert not write_fact_matches(
         "The synthetic project retains audit events for 90 day.",
