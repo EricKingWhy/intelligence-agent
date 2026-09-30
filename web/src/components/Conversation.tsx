@@ -31,7 +31,9 @@ import { DelegationNode } from './DelegationNode';
 import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
 import { CopyButton } from './CopyButton';
 import { ApprovalCard } from './ApprovalCard';
+import { ApprovalEchoCard } from './ApprovalEchoCard';
 import { ApprovalModal } from './ApprovalModal';
+import { collectApprovalEchoes, notePendingApprovals } from '../lib/approvalEcho';
 import { MemoryActivity } from './MemoryActivity';
 
 interface Props {
@@ -198,6 +200,8 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   // 的用户不能被他没要的滚动拽走。复位与补底都在同一个 effect 里，顺序是
   // 「先记下 wasFollowing → 复位 → 需要则补底」。
   const prevRunActiveRef = useRef(false);
+  /* #420 AC3：回显锚定的 seen 集合宿主。{ sid, ids } 一起换，杜绝跨会话串卡。 */
+  const approvalEchoSeenRef = useRef<{ sid: string; ids: Set<string> }>({ sid: '', ids: new Set<string>() });
   useEffect(() => {
     const wasActive = prevRunActiveRef.current;
     prevRunActiveRef.current = runActive;
@@ -371,6 +375,15 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
     );
   }
 
+  // #420 AC3：审批结果回显的 seen 集合（锚定规则见 lib/approvalEcho——只回显本次
+  // 观看期间见过挂起的审批；换会话即重置，历史决策不平铺）。ref 声明在 hooks 区
+  // （无条件），这里是非 hook 的派生：登记当前待决 → 收集已决回显。
+  if (approvalEchoSeenRef.current.sid !== conversation.session_id) {
+    approvalEchoSeenRef.current = { sid: conversation.session_id, ids: new Set<string>() };
+  }
+  notePendingApprovals(approvalEchoSeenRef.current.ids, conversation);
+  const approvalEchoes = collectApprovalEchoes(approvalEchoSeenRef.current.ids, conversation);
+
   return (
     <div className="conversation">
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
@@ -468,6 +481,16 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
                   }
                 />
               )}
+              {/* #420 AC3：已决回显——本观看窗内见过挂起的审批，决出后在这里留
+                  结果卡（消费投影 `approval_decisions`，不本地伪造）。模态收起后
+                  结果落点就在这条队列里，与内联待决卡同一位置。 */}
+              {approvalEchoes.map((d) => (
+                /* `data-approval-key` 沿用：决出后 Inspector PERMISSION 段的跳转
+                    落点仍在原地（不再跳到已消失的待决卡）。 */
+                <div key={`echo-${d.approval_id}`} data-approval-key={d.approval_id}>
+                  <ApprovalEchoCard decision={d} />
+                </div>
+              ))}
             </>
           );
         })()}

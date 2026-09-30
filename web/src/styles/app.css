@@ -3038,6 +3038,43 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 0;
 }
 
+/* #420 AC3：审批结果回显（ApprovalEchoCard）——待决卡决出后的只读落点。
+   沿用 .approval-card 材质（同一视觉族），仅加语义色左边线：allow=success、
+   deny=danger、neutral 不上色（缺字段/未知决策不得被画成已批准的样子）。
+   它在对话流内联渲染（非 portal），无悬浮层定位义务。 */
+.approval-echo {
+  border-left: 3px solid color-mix(in srgb, var(--text-primary) 25%, transparent);
+}
+.approval-echo.allow {
+  border-left-color: var(--success);
+}
+.approval-echo.deny {
+  border-left-color: var(--danger);
+}
+.approval-echo-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+.approval-echo-title {
+  font-weight: 600;
+}
+.approval-echo.allow .approval-echo-title {
+  color: var(--success);
+}
+.approval-echo.deny .approval-echo-title {
+  color: var(--danger);
+}
+.approval-echo-tool {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.approval-echo-reason {
+  margin: var(--space-xs) 0 0;
+  color: var(--text-secondary);
+}
+
 /* ── Composer：Floating Command Dock（视觉中心） ──
  * elevation 提到最高档：它是空闲时唯一的动作焦点，值得浮在 workspace 之上；
  * focus 时 accent ring + 轻微上浮，给出"工作台已激活"的明确反馈。 */
