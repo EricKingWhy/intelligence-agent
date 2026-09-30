@@ -104,6 +104,10 @@ test('刷新后不残留：提示不在，会话内容仍在（本地状态不�
 
   await page.goto('/');
   await submitTask(page, '慢慢回答');
+  // 确定性锚（#442 族4，与上一条用例 fastForward 前的「思考中」锚同款）：等生成态
+  // 真的起来（POST 流的帧已被消费、空闲基准已在实时侧复位）再快进——否则虚拟时钟
+  // burst 与实时帧消费交错，空闲秒数永远到不了 30，下面的前置条件必然超时。
+  await expect(page.locator('.run-pulse')).toContainText('思考中');
   await page.clock.fastForward(31_000);
   // 前置条件：本次会话刷新前确实出现过提示（否则「刷新后没有」毫无信息量）
   await expect(page.locator('.wait-hint')).toBeVisible();
