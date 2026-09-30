@@ -336,6 +336,8 @@ export interface ApiMock {
   memoryRecalls?: unknown[];
   /** These ids simulate a stale expected_version returned by concurrent editing. */
   memoryEditConflictIds?: string[];
+  /** When a simulated edit conflict occurs, update the authoritative row before returning 409. */
+  memoryEditConflictUpdates?: Record<string, Partial<MemoryFixture>>;
   // ── WS-6 / #169 项目内新建任务 ──
   /** 带 `cwd` 建会话时伪造失败（AC12：422 留在确认面）。spec 可以先设它、断言错误
    *  在浮层里，再设回 undefined 并重试——同一条路径因此能覆盖"可重试"。
@@ -956,7 +958,11 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       const at = memoryState.findIndex((item) => item.id === id);
       const current = memoryState[at];
       const body = (req.postDataJSON() ?? {}) as { expected_version?: number; content?: string; payload?: Record<string, unknown> };
-      if ((mock.memoryEditConflictIds ?? []).includes(id)) return json(route, { detail: '记忆版本已变化' }, 409);
+      if ((mock.memoryEditConflictIds ?? []).includes(id)) {
+        const conflictUpdate = mock.memoryEditConflictUpdates?.[id];
+        if (current && conflictUpdate) Object.assign(current, conflictUpdate);
+        return json(route, { detail: '记忆版本已变化' }, 409);
+      }
       if (!current || !current.kind) return json(route, { detail: `记忆不存在：${id}` }, 404);
       if (current.project_id && new URL(req.url()).searchParams.get('project_id') !== current.project_id) {
         return json(route, { detail: `记忆不存在：${id}` }, 404);
