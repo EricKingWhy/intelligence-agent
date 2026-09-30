@@ -518,3 +518,44 @@ trusted routing fields; the existing relay and stable-ID Milvus adapter perform 
 Existing DELETE intents remain authoritative for inactive records. Repeating the command
 converges by upsert, while a failed relay leaves durable outbox work and returns a non-zero
 process status. Tests use a fake index; no live collection is accessed as part of this decision.
+
+#### 方案依据（REUSE / ADAPT / BUILD）
+
+- **REUSE — existing SQLite outbox and relay.** AWS Prescriptive Guidance describes the
+  transactional-outbox pattern as keeping authoritative state and delivery intent together,
+  and explicitly warns that consumers must be idempotent because delivery can duplicate.
+  Rebuild therefore requeues active SQLite records through `memory_v2_outbox` and uses the
+  existing relay; it does not add a second direct-to-Milvus writer. This preserves SQLite
+  authority and the single Provider/Adapter boundary in `AGENTS.md` §7. Local source proof at
+  read commit `8daf6b62788cf0569fa7d5aafb7dc2ed4046ea8f`: `src/agent_harness/memory/v2/store.py:739-768`
+  atomically requeues active routing rows; `src/agent_harness/memory/v2/index.py:159-168`
+  drains the existing relay and fails if work remains.
+- **ADAPT — Milvus upsert for replay.** Milvus documents upsert as insert when the primary key
+  is absent and update when it exists. The V2 adapter derives a stable key from tenant, user,
+  scope, project route, and record ID, so retries converge without clearing or recreating the
+  shared collection. This preserves V1 data and the separate Knowledge collection. Local source
+  proof at the same read commit: `src/agent_harness/memory/v2/milvus_index.py:27-48` hashes the
+  stable routing identity and calls the existing adapter's `upsert` operation.
+- **BOUNDARY — consistency and operator coordination.** Milvus documents four consistency
+  levels and defaults to bounded staleness; V2 search explicitly requests `Strong` in
+  `src/agent_harness/memory/v2/milvus_index.py:91` (read commit
+  `8daf6b62788cf0569fa7d5aafb7dc2ed4046ea8f`). A successful command means all SQLite outbox
+  work drained through the adapter; collection writers outside this workspace still must be
+  stopped because the local `InstanceLock` cannot fence another clone or host.
+- **BUILD — operator entry point and local fence.** At baseline
+  `2c2e7b481828f4d638865fd2c2664257baa6ca1d`, `git ls-tree -r --name-only 2c2e7b481828f4d638865fd2c2664257baa6ca1d -- scripts | rg -i 'rebuild|reindex|memory.*index'`
+  returned no matching script. A matching
+  `git grep -n -i -E '(rebuild|reindex).*(memory|milvus)|(memory|milvus).*(rebuild|reindex)' 2c2e7b481828f4d638865fd2c2664257baa6ca1d -- scripts/ src/agent_harness/memory/v2/`
+  found only `src/agent_harness/memory/v2/runner.py:604`, which rebuilds a run slice rather
+  than the vector index. The V2 index-rebuild operator entry point and local fence are therefore new;
+  persistence, retries, and index writes reuse the existing implementation. No upstream code is
+  copied or ported, so no third-party code license is introduced.
+
+Sources checked 2026-09-30:
+
+1. AWS Prescriptive Guidance, [Transactional outbox pattern](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html) — atomic delivery intent and idempotent consumers.
+2. Milvus, [Upsert Entities](https://milvus.io/docs/upsert-entities.md) — primary-key insert/update semantics used for retry convergence.
+3. Milvus, [Consistency](https://milvus.io/docs/consistency.md) — read-visibility levels and the bounded-staleness default.
+4. SQLite, [Online Backup API](https://www.sqlite.org/backup.html) — a consistent snapshot alternative; this command instead requires writers to be stopped and reads the authoritative database directly.
+
+These sources are listed for future design work in `docs/agents/reference-sources.md` §2 Memory.

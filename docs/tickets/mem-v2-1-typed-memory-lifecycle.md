@@ -111,15 +111,18 @@ parallelizable: no; this is the contract foundation
 
 ## Approved follow-up addendum: full derived-index recovery (2026-09-30)
 The approved #297 follow-up adds an operator recovery path for total loss of the configured
-Memory V2 index. The authoritative contract, fence lifecycle, writer-stop precondition, and
-recovery semantics are defined once in ADR-0042 D7.1. Scope is V2-only as approved; no live
-Milvus rebuild is claimed by this ticket addendum.
+Memory V2 index. The authoritative contract, design sources, reuse/build decision, fence
+lifecycle, writer-stop precondition, and recovery semantics are defined once in ADR-0042 D7.1.
+Scope is V2-only as approved; no live Milvus rebuild is claimed by this ticket addendum.
 
 Implementation and fake-index tests are on `codex/mem-v2-297-index-rebuild`. On 2026-09-30,
 the focused rebuild, lock, and Milvus-adapter regression set passed 36 tests; independent
 Correctness/Security and Standards reviews passed, with one P3 error-message issue fixed and
 re-reviewed. Review coverage is recorded in `docs/review_ledger.d/421-mem-v2-1-index-rebuild.tsv`.
-Gate-0 at code commit `dce46b6e` passed its five non-coverage lanes; its sole coverage failure was
-the missing review row, now added. The final Gate-0 run is recorded separately. No live Milvus
-rebuild is claimed. Actual execution remains an operator action after all writers to the configured
-collection are stopped, including writers in other clones.
+Gate-0 at code commit `dce46b6e` passed its five non-coverage lanes. The merged tree at
+`8daf6b62` still reports 5/6 because the merge commit itself lacks review-ledger attribution;
+the machine report is `docs/gate/8daf6b62788cf0569fa7d5aafb7dc2ed4046ea8f.json`. This is not a
+passing final Gate. Add merge attribution, synchronize the latest `origin/main`, and rerun Gate-0
+before presenting the follow-up as ready to integrate. No live Milvus rebuild is claimed. Actual
+execution remains an operator action after all writers to the configured collection are stopped,
+including writers in other clones.
