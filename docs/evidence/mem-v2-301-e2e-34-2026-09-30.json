@@ -1,0 +1,14 @@
+{
+  "ticket": "mem-v2-301",
+  "spec": "web/e2e/memory-management.spec.ts",
+  "run": "npx playwright test --config=playwright.tmp-301.config.ts e2e/memory-management.spec.ts",
+  "environment": "isolated port 5174 (5173 owned by D:\\intelligence-agent vite PID 15508, not touched); temp config playwright.tmp-301.config.ts deleted after run",
+  "summary": "34 passed (1.1m)",
+  "count": 34,
+  "passed": 34,
+  "failed": 0,
+  "commit": "6a52b6e65e8dba9b967f6d8fa44aa92e56c9b46b",
+  "tree": "9ab055ab5a812b92a59027a5688e767b0034d80d",
+  "log_sha256": "7f6c5bd41fffe1e269c24a2dff15245729849b6a0ba634419562aed3ccfde631",
+  "recorded": "2026-09-30"
+}
