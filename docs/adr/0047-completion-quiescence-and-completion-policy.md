@@ -219,20 +219,26 @@ class CompletionDecision:
 4. **`PENDING` 行也算 blocker**（D1 表第 4 条）：`07 §6` 说它"能证明尚未启动、可按策略重执行"，
    但那句话的宾语是**重执行**，不是**完成**。一个还没开始的调用同样说明"这次 run 没有把
    它该做的事做完"。
-5. **审批类 blocker 的结清面只有一半**（两轴审查 P1 的残余）：闸门是会话级的，而一条配不上
+5. **审批类 blocker 的结清面只有一半**（两轴审查 P1 的残余 ⑩；2026-09-30 起两条成因都已修齐，
+   本条状态改写见下）：闸门是会话级的，而一条配不上
    `permission/resolved` 的 `tool/approval-requested` 会让这段会话此后每次 run 都 blocked。
    两条成因分开处置——
    - **run 被取消 / 异常退出**：已修。交互式 callback 在非正常退出时按 fail-closed 补一条
      `permission/resolved(deny)` 并清掉 pending（`session/approval.py`），
      `test_cancelled_approval_does_not_wedge_the_session` 钉住"取消后闸门不再有 phantom blocker"。
-   - **进程重启**：**仍未修**。审批队列是纯内存的，重启后没有任何写入方能让那条陈旧请求
-     变成 resolved（`/approve` 对不存在的 id 404，后端行为符合冻结契约）。⇒ 需要恢复层
-     （启动扫描，`03 §5` 里 `run/interrupted` 的同一责任域）决定"陈旧请求按 fail-closed 落决议"
-     还是别的语义词。**不在本票范围**：改它要动恢复契约，属恢复票。
+   - **进程重启**：已修（#337）。恢复层 `recovery/coordinator.py` 在写入阶段（紧邻悬空
+     工具调用处置）把"有 requested 无配对 resolved"的陈旧请求逐条结清为
+     `permission/resolved(decision=deny)`，理由串 `RECOVERY_STALE_APPROVAL_REASON` 稳定
+     可观测；判据与谓词 2 共用同一份 `unresolved_approval_ids`（durable 流），幂等
+     （重复 / 并发恢复恰一条，先写入者胜），绝不结清成"批准"、绝不重跑调用。
+     `tests/recovery/test_recovery_coordinator.py`（#337 段）与
+     `tests/recovery/test_approval_restart.py`（真实子进程 Kill ⇒ 恢复 ⇒ 下一次 run
+     达成 `run/completed`）钉住。
    - **结清写入本身失败**（存储故障，`Session.append` 抛错）：上面那条 fail-closed 补齐在
      取消 / 退出的栈上，所以它**吞掉**自己的写入异常并记 ERROR，只为不顶掉栈上的原异常
      （换掉它会让 run 被记成 `failed` 而不是 `cancelled`，`02 §17`）；
-     代价是这条请求的配对仍然缺失——与重启同病，同样等恢复票。
+     代价是这条请求的配对仍然缺失——与重启同病，等恢复层的下一次运行补齐
+     （`recovery/coordinator.py` 的结清以 durable 流为判据，重试即收敛）。
      `test_cancel_survives_a_failing_resolution_write` 钉住"上抛的仍是取消 + 留 ERROR 记录"。
 6. **委派树里 blocked 子 run 映射成 `failed`**：`multiagent/provider.py` 只区分
    `completed` / 其余 → 父看到的是子代理失败，而不是"子会话有未结清工作"。语义上没说错
