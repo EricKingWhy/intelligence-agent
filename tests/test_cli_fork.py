@@ -142,7 +142,7 @@ async def test_from_message_out_of_range_error_is_dual_annotated(
     tmp_path: Path,
 ) -> None:
     """越界报错同时给序数范围与底层 seq 清单（用户按序数提问，按 seq 对账）。"""
-    store = _prepare_with_gap(tmp_path)
+    _prepare_with_gap(tmp_path)
     from agent_harness.session.fork import ForkBoundaryError
 
     with pytest.raises(ForkBoundaryError) as exc_info:
