@@ -143,7 +143,7 @@ def _validate_table_columns(
         if column[2].upper() != expected_type or bool(column[3]) != expected_notnull:
             raise ValueError("existing Memory V2 schema is incomplete or incompatible")
     if any(
-        name not in expected and bool(column[3]) and column[4] is None
+        name not in expected and bool(column[3]) and _is_null_default(column[4])
         for name, column in columns.items()
     ):
         raise ValueError("existing Memory V2 schema is incomplete or incompatible")
@@ -182,8 +182,25 @@ def _validate_unique_index(
 def _normalize_schema_sql(sql: str | None) -> str:
     if sql is None:
         return ""
-    normalized = re.sub(r"\s+", "", sql.casefold()).replace('"', "").replace("`", "")
-    return normalized.replace("[", "").replace("]", "").rstrip(";")
+    parts = re.split(r"('(?:''|[^'])*')", sql)
+    normalized_parts = []
+    for index, part in enumerate(parts):
+        if index % 2:
+            normalized_parts.append(part)
+            continue
+        normalized_parts.append(
+            re.sub(r"\s+", "", part.casefold())
+            .replace('"', "").replace("`", "").replace("[", "").replace("]", "")
+        )
+    normalized = "".join(normalized_parts)
+    return normalized.rstrip(";")
+
+
+def _is_null_default(value: object) -> bool:
+    if value is None:
+        return True
+    normalized = re.sub(r"\s+", "", str(value))
+    return _strip_redundant_parentheses(normalized).casefold() == "null"
 
 
 def _strip_redundant_parentheses(expression: str) -> str:

@@ -220,14 +220,39 @@ def _replace_table_definition(
             "CHECK (operation IN ('upsert', 'delete') AND 0)",
         ),
         (
+            "memory_v2_outbox",
+            "CHECK (operation IN ('upsert', 'delete'))",
+            "CHECK (operation IN ('UPSERT', 'DELETE'))",
+        ),
+        (
             "memory_v2_records",
             "updated_at TEXT NOT NULL",
             "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL",
         ),
         (
+            "memory_v2_records",
+            "updated_at TEXT NOT NULL",
+            "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL DEFAULT NULL",
+        ),
+        (
+            "memory_v2_records",
+            "updated_at TEXT NOT NULL",
+            "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL DEFAULT (NULL)",
+        ),
+        (
             "memory_v2_outbox",
             "project_id TEXT",
             "project_id TEXT, extension_required TEXT NOT NULL",
+        ),
+        (
+            "memory_v2_outbox",
+            "project_id TEXT",
+            "project_id TEXT, extension_required TEXT NOT NULL DEFAULT NULL",
+        ),
+        (
+            "memory_v2_outbox",
+            "project_id TEXT",
+            "project_id TEXT, extension_required TEXT NOT NULL DEFAULT (NULL)",
         ),
     ],
     ids=[
@@ -244,8 +269,13 @@ def _replace_table_definition(
         "missing-operation-check",
         "conflicting-operation-check",
         "overconstrained-operation-check",
+        "case-sensitive-operation-literals",
         "extra-required-record-column",
+        "extra-required-record-column-default-null",
+        "extra-required-record-column-default-parenthesized-null",
         "extra-required-outbox-column",
+        "extra-required-outbox-column-default-null",
+        "extra-required-outbox-column-default-parenthesized-null",
     ],
 )
 def test_preflight_rejects_incompatible_v2_schema(tmp_path, table, old, new) -> None:
@@ -323,10 +353,14 @@ def test_preflight_accepts_extra_required_column_with_default(
         ),
         (
             "CREATE UNIQUE INDEX memory_v2_one_active "
+            "ON memory_v2_records(root_id) WHERE status='ACTIVE'"
+        ),
+        (
+            "CREATE UNIQUE INDEX memory_v2_one_active "
             "ON memory_v2_records(root_id) WHERE kind='semantic' AND status='active'"
         ),
     ],
-    ids=["not-unique", "wrong-predicate", "extra-predicate"],
+    ids=["not-unique", "wrong-predicate", "case-sensitive-literal", "extra-predicate"],
 )
 def test_preflight_rejects_incompatible_active_index(tmp_path, index_ddl) -> None:
     from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
