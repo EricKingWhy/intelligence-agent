@@ -211,6 +211,16 @@ def _replace_table_definition(
         ),
         (
             "memory_v2_outbox",
+            " CHECK (operation IN ('upsert', 'delete'))",
+            " /* CHECK (operation IN ('upsert', 'delete')) */",
+        ),
+        (
+            "memory_v2_outbox",
+            " CHECK (operation IN ('upsert', 'delete'))",
+            ", marker TEXT DEFAULT \"CHECK(operation IN ('upsert', 'delete'))\"",
+        ),
+        (
+            "memory_v2_outbox",
             "CHECK (operation IN ('upsert', 'delete'))",
             "CHECK (operation IN ('upsert', 'delete')) CHECK (operation = 'delete')",
         ),
@@ -245,6 +255,11 @@ def _replace_table_definition(
             "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL DEFAULT (NULL /* comment */)",
         ),
         (
+            "memory_v2_records",
+            "updated_at TEXT NOT NULL",
+            "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL DEFAULT (NULLIF('x', 'x'))",
+        ),
+        (
             "memory_v2_outbox",
             "project_id TEXT",
             "project_id TEXT, extension_required TEXT NOT NULL",
@@ -264,6 +279,11 @@ def _replace_table_definition(
             "project_id TEXT",
             "project_id TEXT, extension_required TEXT NOT NULL DEFAULT (NULL /* comment */)",
         ),
+        (
+            "memory_v2_outbox",
+            "project_id TEXT",
+            "project_id TEXT, extension_required TEXT NOT NULL DEFAULT (NULLIF('x', 'x'))",
+        ),
     ],
     ids=[
         "wrong-column-type",
@@ -277,6 +297,8 @@ def _replace_table_definition(
         "missing-outbox-column",
         "missing-outbox-primary-key",
         "missing-operation-check",
+        "comment-only-operation-check",
+        "string-only-operation-check",
         "conflicting-operation-check",
         "overconstrained-operation-check",
         "case-sensitive-operation-literals",
@@ -284,10 +306,12 @@ def _replace_table_definition(
         "extra-required-record-column-default-null",
         "extra-required-record-column-default-parenthesized-null",
         "extra-required-record-column-default-commented-null",
+        "extra-required-record-column-default-nullif",
         "extra-required-outbox-column",
         "extra-required-outbox-column-default-null",
         "extra-required-outbox-column-default-parenthesized-null",
         "extra-required-outbox-column-default-commented-null",
+        "extra-required-outbox-column-default-nullif",
     ],
 )
 def test_preflight_rejects_incompatible_v2_schema(tmp_path, table, old, new) -> None:
@@ -318,6 +342,52 @@ def test_preflight_accepts_equivalent_parenthesized_schema(tmp_path) -> None:
             "memory_v2_outbox",
             "CHECK (operation IN ('upsert', 'delete'))",
             "CHECK ((operation IN ('upsert', 'delete')))",
+        )
+
+    validate_existing_memory_v2_database(database)
+
+
+def test_preflight_rejects_quoted_string_active_index_predicate(tmp_path) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX memory_v2_one_active")
+        connection.execute(
+            'CREATE UNIQUE INDEX memory_v2_one_active ON memory_v2_records(root_id) '
+            'WHERE "status=\'active\'"'
+        )
+
+    with pytest.raises(ValueError, match="incomplete or incompatible"):
+        validate_existing_memory_v2_database(database)
+
+
+def test_preflight_accepts_quoted_active_index_column(tmp_path) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX memory_v2_one_active")
+        connection.execute(
+            'CREATE UNIQUE INDEX memory_v2_one_active ON memory_v2_records(root_id) '
+            'WHERE "status" = \'active\''
+        )
+
+    validate_existing_memory_v2_database(database)
+
+
+def test_preflight_ignores_where_inside_index_comment(tmp_path) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX memory_v2_one_active")
+        connection.execute(
+            "CREATE UNIQUE INDEX memory_v2_one_active ON memory_v2_records(root_id) "
+            "/* WHERE status='inactive' */ WHERE status='active'"
         )
 
     validate_existing_memory_v2_database(database)

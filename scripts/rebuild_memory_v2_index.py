@@ -143,7 +143,8 @@ def _validate_table_columns(
         if column[2].upper() != expected_type or bool(column[3]) != expected_notnull:
             raise ValueError("existing Memory V2 schema is incomplete or incompatible")
     if any(
-        name not in expected and bool(column[3]) and _is_null_default(column[4])
+        name not in expected and bool(column[3])
+        and _is_null_or_unproven_default(column[4])
         for name, column in columns.items()
     ):
         raise ValueError("existing Memory V2 schema is incomplete or incompatible")
@@ -182,26 +183,96 @@ def _validate_unique_index(
 def _normalize_schema_sql(sql: str | None) -> str:
     if sql is None:
         return ""
-    parts = re.split(r"('(?:''|[^'])*')", sql)
+    parts = re.split(r"('(?:''|[^'])*')", _strip_sql_comments(sql))
     normalized_parts = []
     for index, part in enumerate(parts):
         if index % 2:
             normalized_parts.append(part)
             continue
-        normalized_parts.append(
-            re.sub(r"\s+", "", part.casefold())
-            .replace('"', "").replace("`", "").replace("[", "").replace("]", "")
-        )
+        normalized_parts.append(_normalize_sql_code(part))
     normalized = "".join(normalized_parts)
     return normalized.rstrip(";")
 
 
-def _is_null_default(value: object) -> bool:
+def _normalize_sql_code(sql: str) -> str:
+    normalized = []
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char in '"`[':
+            end = _skip_quoted_sql(sql, index)
+            raw = sql[index:end]
+            closing = "]" if char == "[" else char
+            identifier = raw[1:-1].replace(closing * 2, closing)
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+                normalized.append(identifier.casefold())
+            else:
+                normalized.append(raw.casefold())
+            index = end
+        elif char.isspace():
+            index += 1
+        else:
+            normalized.append(char.casefold())
+            index += 1
+    return "".join(normalized)
+
+
+def _skip_quoted_sql(sql: str, start: int) -> int:
+    opening = sql[start]
+    closing = "]" if opening == "[" else opening
+    index = start + 1
+    while index < len(sql):
+        if sql[index] == closing:
+            if closing != "]" and index + 1 < len(sql) and sql[index + 1] == closing:
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return len(sql)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    result = []
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char in "'\"`[":
+            end = _skip_quoted_sql(sql, index)
+            result.append(sql[index:end])
+            index = end
+        elif sql.startswith("--", index):
+            newline = sql.find("\n", index + 2)
+            if newline < 0:
+                break
+            result.append("\n")
+            index = newline + 1
+        elif sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            if end < 0:
+                break
+            result.append(" ")
+            index = end + 2
+        else:
+            result.append(char)
+            index += 1
+    return "".join(result)
+
+
+def _is_null_or_unproven_default(value: object) -> bool:
     if value is None:
         return True
-    without_comments = re.sub(r"/\*.*?\*/|--[^\r\n]*", "", str(value), flags=re.DOTALL)
-    normalized = re.sub(r"\s+", "", without_comments)
-    return _strip_redundant_parentheses(normalized).casefold() == "null"
+    normalized = _strip_redundant_parentheses(_normalize_schema_sql(str(value)))
+    if normalized.casefold() == "null":
+        return True
+    known_non_null = (
+        r"'(?:''|[^'])*'"
+        r"|x'(?:[0-9a-f]{2})*'"
+        r"|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?"
+        r"|0x[0-9a-f]+"
+        r"|current_(?:time|date|timestamp)"
+        r"|true|false"
+    )
+    return re.fullmatch(known_non_null, normalized, flags=re.IGNORECASE) is None
 
 
 def _strip_redundant_parentheses(expression: str) -> str:
@@ -246,36 +317,59 @@ def _validate_active_index(connection: sqlite3.Connection) -> None:
         (index[1],),
     ).fetchone()
     sql = definition[0] if definition else None
-    where = re.search(r"\bwhere\b", sql or "", flags=re.IGNORECASE)
+    sql_without_comments = _strip_sql_comments(sql or "")
+    where = re.search(r"\bwhere\b", sql_without_comments, flags=re.IGNORECASE)
     predicate = (
-        _normalize_schema_sql(sql[where.end():]) if sql is not None and where
+        _normalize_schema_sql(sql_without_comments[where.end():]) if where
         else ""
     )
     if _strip_redundant_parentheses(predicate) != "status='active'":
         raise ValueError("existing Memory V2 schema is incomplete or incompatible")
 
 
-def _check_expression(sql: str) -> str | None:
-    match = re.search(r"\bcheck\s*\(", sql, flags=re.IGNORECASE)
-    if match is None:
-        return None
-    opening = match.end() - 1
+def _check_expressions(sql: str) -> list[str]:
+    expressions = []
+    sql = _strip_sql_comments(sql)
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char in "'\"`[":
+            index = _skip_quoted_sql(sql, index)
+        elif char.isalpha() or char == "_":
+            end = index + 1
+            while end < len(sql) and (sql[end].isalnum() or sql[end] == "_"):
+                end += 1
+            if sql[index:end].casefold() == "check":
+                opening = end
+                while opening < len(sql) and sql[opening].isspace():
+                    opening += 1
+                if opening < len(sql) and sql[opening] == "(":
+                    parsed = _extract_parenthesized_sql(sql, opening)
+                    if parsed is None:
+                        return []
+                    expression, index = parsed
+                    expressions.append(expression)
+                    continue
+            index = end
+        else:
+            index += 1
+    return expressions
+
+
+def _extract_parenthesized_sql(sql: str, opening: int) -> tuple[str, int] | None:
     depth = 0
-    quoted = False
     index = opening
     while index < len(sql):
         char = sql[index]
-        if char == "'":
-            if quoted and index + 1 < len(sql) and sql[index + 1] == "'":
-                index += 2
-                continue
-            quoted = not quoted
-        elif not quoted and char == "(":
+        if char in "'\"`[":
+            index = _skip_quoted_sql(sql, index)
+            continue
+        if char == "(":
             depth += 1
-        elif not quoted and char == ")":
+        elif char == ")":
             depth -= 1
             if depth == 0:
-                return sql[opening + 1:index]
+                return sql[opening + 1:index], index + 1
         index += 1
     return None
 
@@ -285,13 +379,12 @@ def _validate_outbox_operation_check(connection: sqlite3.Connection) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_v2_outbox'"
     ).fetchone()
     sql = definition[0] if definition else None
-    normalized = _normalize_schema_sql(sql)
-    expression = _check_expression(sql or "")
+    expressions = _check_expressions(sql or "")
     normalized_expression = _strip_redundant_parentheses(
-        _normalize_schema_sql(expression),
-    ) if expression is not None else ""
+        _normalize_schema_sql(expressions[0]),
+    ) if len(expressions) == 1 else ""
     if (
-        normalized.count("check(") != 1
+        len(expressions) != 1
         or normalized_expression != "operationin('upsert','delete')"
     ):
         raise ValueError("existing Memory V2 schema is incomplete or incompatible")
