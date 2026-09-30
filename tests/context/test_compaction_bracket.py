@@ -520,6 +520,7 @@ class TestCompactionWithPrunedToolResults:
             ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
             max_context_tokens=2000, auto_compact_threshold=0.3,
             artifact_store=store, artifact_read_tool_name="read_artifact",
+            keep_recent_tool_results=0, clear_at_least_tokens=0,
         )
         messages = await builder.build(session)
 
