@@ -122,10 +122,6 @@ _RECALL_LABELS = {
     "cross_session_recall_one": "gold-project-name",
     "cross_session_recall_two": "gold-pagination",
 }
-_RECALL_FACTS = {
-    "cross_session_recall_one": "The synthetic project is named Sample Harbor.",
-    "cross_session_recall_two": "The project API lists results with cursor pagination.",
-}
 _RECALL_DISTRACTORS = (
     "Project status summaries should stay concise.",
     "The release cutoff is Wednesday.",
