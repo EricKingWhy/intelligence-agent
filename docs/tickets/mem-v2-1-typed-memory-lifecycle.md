@@ -148,3 +148,7 @@ are in `docs/review_ledger.d/424-mem-v2-297-full-review.tsv` and
 identifier observation is fail-closed and remains a low-priority compatibility limitation.
 This evidence is local to `codex/mem-v2-297-index-rebuild`; it does not claim a live Milvus
 rebuild or GitHub integration.
+
+The follow-up Gate-0 run on commit `849c03d2` / tree `b1e30761` passed 6/6 in 28.7 seconds;
+its machine record is `docs/gate/849c03d26d6260077ae92362505e2bf0bac60de4.json`. It covers the
+six mechanical lanes only; the focused 94-test result above is recorded separately.
