@@ -579,6 +579,9 @@ export function useSession() {
         // 回前台 flush 对账。折叠逐帧即时（真相不延迟），延迟的只是通知。
         // T4：conv 由重连路径与 live 帧共享——同一折叠累积器，重放帧经
         // seenSeqs 去重吸收（无缝无重复的关键在 T1 去重门 + seq 游标本地记账）。
+        // #456：初接流同样重置停摆宽限起点——否则上一条流/挂载时刻的旧基准
+        // 会延伸到这条新流（页面挂载后闲置再提交，首个心跳 tick 就误判停摆）。
+        lastFrameAtRef.current = Date.now();
         let conv: ConversationState | null = initialConv;
         /** 本代际收到的帧数（含重放帧）——只给 resume 的零帧判定用。 */
         let framesSeen = 0;
@@ -748,6 +751,11 @@ export function useSession() {
 
         const attach = (streamRes: Response, opts?: { awaitingEvidence?: boolean }) => {
           attachFrames = 0;
+          // #456：挂新流 = 重置停摆**宽限起点**（直接写基准 ref，不经 onLiveness
+          // 回调——挂流不是帧，不伪造活性信号）。否则停摆驱动的重连挂上新流后，
+          // 下一次心跳 tick 仍按旧流最后一帧算 elapsed ⇒ 立即再判停，重连链以
+          // 10s 节奏空耗额度直至 give-up。
+          lastFrameAtRef.current = Date.now();
           awaitingEvidence = opts?.awaitingEvidence === true;
           // 首接流（提交/续聊/恢复）不是「断线重连」：条不该在场，清掉遗留状态。
           if (!awaitingEvidence) endReconnecting();
