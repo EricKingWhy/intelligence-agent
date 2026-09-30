@@ -10,7 +10,8 @@
  *    这里只有组件内的"这次请求的三种状态"。
  *  - **三态如实**（AC1）：加载中 / 拿不到（分因）/ 拿到了。拿不到时显示**后端 detail
  *    原文**，不替它翻译，也不把"部署没配存储"糊成"产物不存在"。
- *  - **不完整要说**：`truncated` 是行数截断与字符截断的并集；单行超长另有行内标记。
+ *  - **不完整要说**：`truncated` 是行数截断与字符截断的并集，两种截断各有其辞
+ *    （#428：行数没少的字符截断不说"显示 N / 共 N 行"）；单行超长另有行内标记。
  *    把半截内容当全文显示，比不显示更糟。
  *
  *  为什么拆成 `ArtifactContentView`（纯渲染）+ `ArtifactViewer`（取数）：
@@ -104,8 +105,14 @@ export function ArtifactContentView({
     <div className="artifact-content">
       <div className="artifact-content-bar">
         <span className="artifact-content-count">
+          {/* #428：`truncated` 是行数截断与字符截断的并集（storage/artifact.py）。
+              行数截断 → 报两个行数；字符截断（returned === total）→ 行数没少，
+              报"显示 N / 共 N 行"等于自证没截断、括号却说截断了——改为直说
+              "超长行的内容被削短"，具体削在哪儿由行内 `artifact-line-cut` 标记。 */}
           {slice.truncated
-            ? `显示 ${slice.returned_lines} / 共 ${slice.total_lines} 行（已截断）`
+            ? slice.returned_lines < slice.total_lines
+              ? `显示 ${slice.returned_lines} / 共 ${slice.total_lines} 行（已截断）`
+              : `共 ${slice.total_lines} 行（部分超长行的内容已截断）`
             : `共 ${slice.total_lines} 行`}
         </span>
         <span className="artifact-content-id mono">{slice.artifact_id.slice(0, 16)}…</span>
