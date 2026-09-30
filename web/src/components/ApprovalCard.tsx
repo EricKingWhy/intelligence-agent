@@ -192,9 +192,14 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
           )}
         </div>
       )}
+      {/* #460：失效说明按「是否已提交」分支——已提交的用户已被说过「无法再提交」
+          会失真（他确实提交过）；也不得回到 #444 修掉的「等待后端确认」措辞
+          （该审批已死，没有等待对象）。 */}
       {invalid && (
         <p className="approval-invalid-note" role="status">
-          该审批已失效——所在运行已结束或服务已重启，决策无法再提交。
+          {submitted
+            ? '决策已提交——该审批随后失效，最终结果以事件流为准。'
+            : '该审批已失效——所在运行已结束或服务已重启，决策无法再提交。'}
         </p>
       )}
       {error && !invalid && (
@@ -220,7 +225,9 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
           </button>
         </div>
       )}
-      {submitted && (
+      {/* #444/#460：invalid 时本篇「等待后端确认」式措辞不渲染——submitted 的失效卡
+          由上方失效说明的已提交分支承接（说结果以事件流为准，不说「等待」）。 */}
+      {submitted && !invalid && (
         <p className="approval-invalid-note" role="status">
           决策已提交，等待后端确认——结果以事件流为准。
         </p>

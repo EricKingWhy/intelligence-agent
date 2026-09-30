@@ -11,7 +11,12 @@
  * → 决后 UI），与网络真实与否解耦，故可进标准门禁。
  *
  * OBS-015 回归锁：POST 500 → 卡片保持 pending + 按钮仍可用 + 出现错误提示；
- * POST 409 → 视为幂等成功，翻「已批准」。 */
+ * POST 409 → 视为幂等成功，翻「决策已提交」。
+ *
+ * R5/#421 注记：首个**非失效**待决审批由内联位移进 Radix 模态（ApprovalModal，
+ * `.approval-modal-content`，body 末尾 portal；失效卡留在内联只读位）。POST 成功的
+ * 可观测标题是「决策已提交」——「已批准/已拒绝」的本地翻面已删除（#420 AC3：
+ * 决策结果一律等 permission/resolved 事件说话，卡不自演）。 */
 
 import { expect, test } from '@playwright/test';
 import { RUN, SID, T, routeApi, fulfillSse, submitTask, type FrameSpec } from './fixtures';
@@ -115,12 +120,13 @@ test('焦点落卡 + Ctrl+Enter → POST decision=approve_once', async ({ page }
   const sent: unknown[] = [];
   await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4)], sent);
 
+  // 单卡场景：唯一的活审批进模态（#421），`.approval-card` 即模态卡。
   const card = page.locator('.approval-card');
   await expect(card).toBeVisible();
-  await expect(card).toBeFocused(); // alertdialog 挂载焦点（多卡只有第一张）
+  await expect(card).toBeFocused(); // 模态卡挂载焦点（多卡只有第一张）
 
   await page.keyboard.press('Control+Enter');
-  await expect(card.locator('.approval-title')).toHaveText('已批准');
+  await expect(card.locator('.approval-title')).toHaveText('决策已提交');
   await expect(card.locator('.approval-actions')).toHaveCount(0);
   expect(sent).toEqual([
     { path: `/api/sessions/${SID}/approve`, body: { approval_id: 'ap-1', approved: true, decision: 'approve_once' } },
@@ -135,7 +141,7 @@ test('Ctrl+Backspace → POST decision=deny；决后快捷键失效', async ({ p
   const card = page.locator('.approval-card');
   await expect(card).toBeVisible();
   await page.keyboard.press('Control+Backspace');
-  await expect(card.locator('.approval-title')).toHaveText('已拒绝');
+  await expect(card.locator('.approval-title')).toHaveText('决策已提交');
 
   // 决后再按快捷键：监听已卸载 → 无新请求
   await page.keyboard.press('Control+Enter');
@@ -154,12 +160,16 @@ test('双卡并存 → Ctrl+Enter 只 POST 第一张（不批量批准）', asyn
   second.data = { ...second.data, approval_id: 'ap-2', title: 'write (workspace-write) #2' };
   await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4), second], sent);
 
+  // R5/#421 后的承载形态：第一张活审批（ap-1）进模态（body 末尾 portal），第二张
+  // （ap-2）留在内联（`data-approval-key` 容器）。DOM 序 = 内联在前、模态在后，
+  // `.approval-card` 的文档序不再等于审批队列序——按承载容器定位，不用 first()/nth()。
   const cards = page.locator('.approval-card');
   await expect(cards).toHaveCount(2);
-  await expect(cards.first()).toBeFocused();
+  const modalCard = page.locator('.approval-modal-content .approval-card');
+  await expect(modalCard).toBeFocused(); // 模态卡 = 唯一 autoFocus 卡（全局快捷键只挂它）
 
   await page.keyboard.press('Control+Enter');
-  await expect(cards.first().locator('.approval-title')).toHaveText('已批准');
+  await expect(modalCard.locator('.approval-title')).toHaveText('决策已提交');
   await page.waitForTimeout(NO_SECOND_REQUEST_WAIT_MS);
   expect(sent).toHaveLength(1);
   expect(sent[0]).toEqual({
@@ -167,7 +177,9 @@ test('双卡并存 → Ctrl+Enter 只 POST 第一张（不批量批准）', asyn
     body: { approval_id: 'ap-1', approved: true, decision: 'approve_once' },
   });
   // 第二张保持 pending，可继续决策
-  await expect(cards.nth(1).locator('.approval-title')).toHaveText('需要审批');
+  await expect(
+    page.locator('[data-approval-key="ap-2"] .approval-card .approval-title'),
+  ).toHaveText('需要审批');
 });
 
 /** APR-01（第十一轮真机）：run 终结后仍 pending 的审批 = 孤儿（后端队列随 run GC，
@@ -228,7 +240,7 @@ test('permission/resolved 后卡片消失 + composer 解锁', async ({ page }) =
   await expect(page.locator('.composer-locked-hint')).toHaveCount(0);
 });
 
-test('点「批准」→ 已批准 + 按钮消失 + POST decision=approve_once', async ({ page }) => {
+test('点「批准」→ 决策已提交 + 按钮消失 + POST decision=approve_once', async ({ page }) => {
   const sent: unknown[] = [];
   await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4)], sent);
 
@@ -236,14 +248,14 @@ test('点「批准」→ 已批准 + 按钮消失 + POST decision=approve_once',
   await expect(card).toBeVisible();
   await card.locator('.approval-approve').click();
 
-  await expect(card.locator('.approval-title')).toHaveText('已批准');
+  await expect(card.locator('.approval-title')).toHaveText('决策已提交');
   await expect(card.locator('.approval-actions')).toHaveCount(0);
   expect(sent).toEqual([
     { path: `/api/sessions/${SID}/approve`, body: { approval_id: 'ap-1', approved: true, decision: 'approve_once' } },
   ]);
 });
 
-test('点「拒绝」→ 已拒绝 + 按钮消失 + POST decision=deny', async ({ page }) => {
+test('点「拒绝」→ 决策已提交 + 按钮消失 + POST decision=deny', async ({ page }) => {
   const sent: unknown[] = [];
   await openCard(page, [...HEAD, approvalRequestedFrame('ap-1', 4)], sent);
 
@@ -251,7 +263,7 @@ test('点「拒绝」→ 已拒绝 + 按钮消失 + POST decision=deny', async (
   await expect(card).toBeVisible();
   await card.locator('.approval-deny').click();
 
-  await expect(card.locator('.approval-title')).toHaveText('已拒绝');
+  await expect(card.locator('.approval-title')).toHaveText('决策已提交');
   await expect(card.locator('.approval-actions')).toHaveCount(0);
   expect(sent).toEqual([
     { path: `/api/sessions/${SID}/approve`, body: { approval_id: 'ap-1', approved: false, decision: 'deny' } },
@@ -319,9 +331,9 @@ test('POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错�
   expect(approveCalls).toHaveLength(2);
 });
 
-/** POST /approve 返回 409 → 幂等成功，翻「已批准」。
+/** POST /approve 返回 409 → 幂等成功，翻「决策已提交」。
  *  后端对同一 approval_id 的第二次决策返回 409。 */
-test('POST 409 → 幂等成功，卡片翻「已批准」', async ({ page }) => {
+test('POST 409 → 幂等成功，卡片翻「决策已提交」', async ({ page }) => {
   const approveCalls: unknown[] = [];
   const frames = [...HEAD, approvalRequestedFrame('ap-1', 4)];
   await routeApi(page, {
@@ -344,7 +356,7 @@ test('POST 409 → 幂等成功，卡片翻「已批准」', async ({ page }) =>
 
   // 点批准 → 409 → 幂等成功
   await card.locator('.approval-approve').click();
-  await expect(card.locator('.approval-title')).toHaveText('已批准');
+  await expect(card.locator('.approval-title')).toHaveText('决策已提交');
   await expect(card.locator('.approval-actions')).toHaveCount(0);
   expect(approveCalls).toHaveLength(1);
 });
