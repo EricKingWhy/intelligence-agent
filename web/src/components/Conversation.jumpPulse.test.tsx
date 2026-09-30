@@ -130,19 +130,22 @@ describe('#459 — approval: jumpRequest → 内联卡脉冲', () => {
 
   it('jump approval:ap-1 → 卡片加 stream-jump-pulse + scrollIntoView，900ms 回调移除', () => {
     const timeoutSpy = vi.spyOn(window, 'setTimeout');
-    render(host({ key: 'approval:ap-1', nonce: 1 }));
+    try {
+      render(host({ key: 'approval:ap-1', nonce: 1 }));
 
-    const el = inlineCard();
-    expect(el.className).toContain('stream-jump-pulse');
-    expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' });
+      const el = inlineCard();
+      expect(el.className).toContain('stream-jump-pulse');
+      expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' });
 
-    const pulseCall = timeoutSpy.mock.calls
-      .filter((call): call is [() => void, number] => typeof call[0] === 'function' && call[1] === 900)
-      .pop();
-    expect(pulseCall, '应有 900ms 的 pulse 移除定时器').toBeTruthy();
-    act(() => pulseCall![0]());
-    expect(inlineCard().className).not.toContain('stream-jump-pulse');
-    timeoutSpy.mockRestore();
+      const pulseCall = timeoutSpy.mock.calls
+        .filter((call): call is [() => void, number] => typeof call[0] === 'function' && call[1] === 900)
+        .pop();
+      expect(pulseCall, '应有 900ms 的 pulse 移除定时器').toBeTruthy();
+      act(() => pulseCall![0]());
+      expect(inlineCard().className).not.toContain('stream-jump-pulse');
+    } finally {
+      timeoutSpy.mockRestore(); // 失败路径也不把 spy 泄漏给同文件后续用例
+    }
   });
 
   it('同 nonce 重渲染不重触发（processedJumpNonce 守卫）；新 nonce 再触发（装置非 vacuous）', () => {

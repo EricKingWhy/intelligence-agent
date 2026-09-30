@@ -68,7 +68,7 @@ afterEach(() => {
 });
 
 describe('ApprovalCard — invalid 与 submitted 相遇（#444 / #460）', () => {
-  it('已提交后再被判失效：只说「审批已失效」，不再说「决策已提交」', async () => {
+  it('已提交后再被判失效：失效说明按已提交措辞（含「决策已提交」、不含「无法再提交」）', async () => {
     vi.mocked(postApproval).mockResolvedValueOnce(undefined as never);
     render(<ApprovalCard sessionId="s" approval={approval()} />);
     await act(async () => {
@@ -81,13 +81,18 @@ describe('ApprovalCard — invalid 与 submitted 相遇（#444 / #460）', () =>
     // 随后审批被判失效：同一实例重渲染，invalid prop 下发、内部 submitted 保留
     render(<ApprovalCard sessionId="s" approval={approval()} invalid />);
     expect(card().className).toContain('invalid');
-    expect(card().textContent).toContain('审批已失效');
     // #460：用户已提交过 ⇒ 失效说明按已提交措辞，且不得出现两处旧措辞。
     const note = card().querySelector('.approval-invalid-note')!;
     expect(note.textContent).toContain('决策已提交');
     expect(note.textContent).toContain('以事件流为准');
     expect(note.textContent).not.toContain('无法再提交');
     expect(note.textContent).not.toContain('等待后端确认');
+    // #444 组合不变量（本文件是它唯一的锁；独立审查 2026-09-30 实测验尸确认）：
+    // 失效卡**全卡**不得回到「等待后端确认」式措辞（submitted 篇不得在 invalid 时渲染）、
+    // 失效说明恰一条、标题三态以 invalid 优先。
+    expect(card().querySelectorAll('.approval-invalid-note')).toHaveLength(1);
+    expect(card().textContent).not.toContain('等待后端确认');
+    expect(card().querySelector('.approval-title')!.textContent).toBe('审批已失效');
   });
 
   it('未提交即失效（对照）：文案原样——「无法再提交」，且不蹭「决策已提交」措辞', () => {
