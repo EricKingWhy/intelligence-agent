@@ -31,6 +31,9 @@ import { DelegationNode } from './DelegationNode';
 import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
 import { CopyButton } from './CopyButton';
 import { ApprovalCard } from './ApprovalCard';
+import { ApprovalEchoCard } from './ApprovalEchoCard';
+import { ApprovalModal } from './ApprovalModal';
+import { collectApprovalEchoes, notePendingApprovals } from '../lib/approvalEcho';
 import { MemoryActivity } from './MemoryActivity';
 
 interface Props {
@@ -62,6 +65,9 @@ interface Props {
    *  失效事实由 App 持有（同时驱动 composer 解锁与卡片只读），卡内不存第二份。 */
   goneApprovalIds?: ReadonlySet<string>;
   onApprovalGone?: (approvalId: string) => void;
+  /** #420 AC2：审批决策 POST 成功 → App 对账一次（resync），保证决策后事件
+   *  （resolved → … → run/completed）有一条消费路径。参数 = 会话 id。 */
+  onApprovalDecided?: (sessionId: string) => void;
 }
 
 const EMPTY_TURNS: Turn[] = [];
@@ -83,7 +89,7 @@ const EXAMPLE_TASKS = [
  * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
  * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone }: Props) {
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -194,6 +200,8 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   // 的用户不能被他没要的滚动拽走。复位与补底都在同一个 effect 里，顺序是
   // 「先记下 wasFollowing → 复位 → 需要则补底」。
   const prevRunActiveRef = useRef(false);
+  /* #420 AC3：回显锚定的 seen 集合宿主。{ sid, ids } 一起换，杜绝跨会话串卡。 */
+  const approvalEchoSeenRef = useRef<{ sid: string; ids: Set<string> }>({ sid: '', ids: new Set<string>() });
   useEffect(() => {
     const wasActive = prevRunActiveRef.current;
     prevRunActiveRef.current = runActive;
@@ -367,6 +375,15 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
     );
   }
 
+  // #420 AC3：审批结果回显的 seen 集合（锚定规则见 lib/approvalEcho——只回显本次
+  // 观看期间见过挂起的审批；换会话即重置，历史决策不平铺）。ref 声明在 hooks 区
+  // （无条件），这里是非 hook 的派生：登记当前待决 → 收集已决回显。
+  if (approvalEchoSeenRef.current.sid !== conversation.session_id) {
+    approvalEchoSeenRef.current = { sid: conversation.session_id, ids: new Set<string>() };
+  }
+  notePendingApprovals(approvalEchoSeenRef.current.ids, conversation);
+  const approvalEchoes = collectApprovalEchoes(approvalEchoSeenRef.current.ids, conversation);
+
   return (
     <div className="conversation">
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
@@ -407,25 +424,76 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
           ))}
         </div>
         <MemoryActivity key={conversation.session_id} conversation={conversation} />
-        {/* #37 交互式审批——pending_approvals 非空时内联渲染。
-         *  位于虚拟化轮次列表之后、列表末尾之前，确保：
-         *  - 不参与虚拟化窗口（审批卡必须始终可见）
-         *  - 瞬时贴底（scrollTop = scrollHeight）会把审批卡包含进来 */}
-        {conversation.pending_approvals.map((a, i) => (
-          /* `data-approval-key` 是 Inspector PERMISSION 段（#184）反向联动的落点：
-             点那一行的"待审批"→ jumpRequest key `approval:<id>` → 滚到这里 + pulse。 */
-          <div key={a.approval_id} data-approval-key={a.approval_id}>
-            <ApprovalCard
-              sessionId={conversation.session_id}
-              approval={a}
-              /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
-              invalid={a.stale === true || goneApprovalIds?.has(a.approval_id) === true}
-              onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
-              /* UI-01：多卡并存只有第一张自动聚焦（alertdialog 焦点不打架）。 */
-              autoFocus={i === 0}
-            />
-          </div>
-        ))}
+        {/* #37 交互式审批 + #421 模态承载。
+         *
+         *  R5-B3 的根因是审批卡与虚拟化行抢同一块画布：行是 absolute 定位的绘制层，
+         *  测高滞后就盖到卡片的按钮上。修法 = **第一张非失效**待决审批进模态
+         *  （ApprovalModal，Portal + Overlay，指针/焦点都被 Radix 圈住，且没有
+         *  决策不允许关——GitHub required-review 语义）；其余 pending 卡（失效的
+         *  stale/404 孤儿、多卡并存的第 2+ 张）留在内联位置。
+         *
+         *  失效卡**绝不**进模态：它只剩禁用按钮和只读说明，模态化等于把用户锁死
+         *  在一个关不掉的面板里（APR-01 的关闭路径必须保留）。
+         *
+         *  模态候选身上不挂 `data-approval-key`：Inspector PERMISSION 段的跳转
+         *  （#184）在 conversation 根里 querySelector，而模态内容在 body 末尾的
+         *  portal 里，跳不过去——但模态本来就常驻可见，跳转目标已在眼前，no-op
+         *  是可接受的降级（内联卡的跳转不受影响）。 */}
+        {(() => {
+          const isInvalid = (a: (typeof conversation.pending_approvals)[number]) =>
+            a.stale === true || goneApprovalIds?.has(a.approval_id) === true;
+          const firstLiveIdx = conversation.pending_approvals.findIndex((a) => !isInvalid(a));
+          const firstLive = firstLiveIdx >= 0 ? conversation.pending_approvals[firstLiveIdx] : null;
+          return (
+            <>
+              {conversation.pending_approvals.map((a, i) =>
+                i === firstLiveIdx ? null : (
+                  /* `data-approval-key` 是 Inspector PERMISSION 段（#184）反向联动的落点：
+                     点那一行的"待审批"→ jumpRequest key `approval:<id>` → 滚到这里 + pulse。 */
+                  <div key={a.approval_id} data-approval-key={a.approval_id}>
+                    <ApprovalCard
+                      sessionId={conversation.session_id}
+                      approval={a}
+                      /* 失效 = 投影判定（run 已终结）∪ 后端实证（该卡提交过且回了 404） */
+                      invalid={isInvalid(a)}
+                      onGone={onApprovalGone ? () => onApprovalGone(a.approval_id) : undefined}
+                      onDecided={
+                        onApprovalDecided
+                          ? () => onApprovalDecided(conversation.session_id)
+                          : undefined
+                      }
+                      /* UI-01 键盘安全（U-1 P1）：全局快捷键只挂在唯一 autoFocus 卡上。
+                          模态候选存在时它是唯一 autoFocus 卡，内联卡一律 false。 */
+                      autoFocus={false}
+                    />
+                  </div>
+                ),
+              )}
+              {firstLive && (
+                <ApprovalModal
+                  sessionId={conversation.session_id}
+                  approval={firstLive}
+                  onGone={onApprovalGone ? () => onApprovalGone(firstLive.approval_id) : undefined}
+                  onDecided={
+                    onApprovalDecided
+                      ? () => onApprovalDecided(conversation.session_id)
+                      : undefined
+                  }
+                />
+              )}
+              {/* #420 AC3：已决回显——本观看窗内见过挂起的审批，决出后在这里留
+                  结果卡（消费投影 `approval_decisions`，不本地伪造）。模态收起后
+                  结果落点就在这条队列里，与内联待决卡同一位置。 */}
+              {approvalEchoes.map((d) => (
+                /* `data-approval-key` 沿用：决出后 Inspector PERMISSION 段的跳转
+                    落点仍在原地（不再跳到已消失的待决卡）。 */
+                <div key={`echo-${d.approval_id}`} data-approval-key={d.approval_id}>
+                  <ApprovalEchoCard decision={d} />
+                </div>
+              ))}
+            </>
+          );
+        })()}
       </div>
       {/* Follow-mode 浮标（pi-mono "jump to latest"）：在**投影上仍是 running 的
           run** 里、用户已上滚时出现。`suspended` 由 FOLLOW 原语给出（= 已脱离跟随），

@@ -121,6 +121,23 @@ describe('#186 AC1：不完整必须说', () => {
     const html = render(ready());
     expect(html).not.toContain('已截断');
   });
+
+  it('#428：字符截断（returned === total）不说"显示 N / 共 N 行"——行数没少，少的是行内字符', () => {
+    // 后端 `truncated = char_truncated or 行数截断`（storage/artifact.py）：单行超长
+    // 被削短时 returned_lines === total_lines，旧文案渲染成"显示 200 / 共 200 行
+    // （已截断）"——数字自证没少行，括号却说截断，用户不知道到底少了什么。
+    const html = render(
+      ready({
+        lines: [{ line_number: 1, text: 'x'.repeat(40), truncated: true, full_length: 9000 }],
+        total_lines: 1,
+        returned_lines: 1,
+        truncated: true,
+      }),
+    );
+    expect(html).not.toContain('显示 1 / 共 1 行');
+    expect(html).toContain('已截断');
+    expect(html).toContain('共 1 行');
+  });
 });
 
 describe('#186 AC1：只读面', () => {

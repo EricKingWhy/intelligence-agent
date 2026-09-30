@@ -4,6 +4,14 @@
 
 ---
 
+## [Unreleased]
+
+### 变更（Changed）
+
+- **#423**：创建或续聊会话时显式声明不自动批准（`auto_approve=false`、未选档位）的行为变更——危险工具调用不再落入 deny 兜底（旧文案 "manual approval not yet wired"），而是进入交互审批队列（Web UI 弹审批卡，超时按 fail-closed 拒绝）。`danger-full-access` 档行为不变（无需审批）；未声明任何档位时维持原装配默认。
+
+---
+
 ## [1.0.0] — 2026-09-07
 
 **首个正式版本——冻结 Roadmap 全部交付。**

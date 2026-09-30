@@ -50,3 +50,22 @@ export function toCreateControls(
     permission_mode: c.permissionMode ?? undefined,
   };
 }
+
+/** #426：新建会话的预算入口（最小可用，一维）——Composer 的可选 turns 上限草稿 →
+ *  `budget.run.max_agent_turns_total`，随启动 run 的 create 请求提交（#422 裁决：
+ *  `budget.run` 属于**启动 run** 的请求；composer 提交恒为 launch=true，无冲突）。
+ *
+ *  空白 / 半截 / 非正整数草稿 → `undefined` = 不发键 = 后端按 Deployment 默认——
+ *  「不设置预算的默认行为不变」。0 与负数视同未设置（后端 `ge=1` 必 422，
+ *  与其发一个必然被拒的请求，不如在映射层就不发）。
+ *
+ *  **刻意只开一维**：票面（#426）明说「具体交互设计可另拆设计票」——
+ *  max_total_tokens / deadline_at 等“常用三项”的其余维是那件事的范围；
+ *  这里先把「纯 UI 用户能触发预算暂停 → PausedPanel 恢复」这条链接通。 */
+export function toCreateBudget(turnsDraft: string | null): StartSessionPayload['budget'] {
+  const trimmed = turnsDraft?.trim() ?? '';
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const value = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(value) || value < 1) return undefined;
+  return { run: { max_agent_turns_total: value } };
+}

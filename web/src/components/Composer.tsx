@@ -61,6 +61,12 @@ interface Props {
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
   onReasoningEffortChange?: (id: string | null) => void;
+  // ── #426：新建会话的预算入口（最小可用，一维 turns）──
+  /** `budget.run.max_agent_turns_total` 的草稿（字符串，由映射层 `toCreateBudget`
+   *  判形）。**仅新建会话态显示**（`permissionInSession=false`）：预算属于启动
+   *  run 的请求（#422），续聊 /messages 不带 budget（#308）。 */
+  budgetRunTurns?: string;
+  onBudgetRunTurnsChange?: (value: string) => void;
   // ── ADR-0030 §5.2 队列条（#195）──
   /** 未投递输入（事件流逐事件折叠，事件流是唯一事实）。空 → 队列条不渲染。 */
   undelivered?: UndeliveredInput[];
@@ -97,6 +103,8 @@ export const Composer = memo(function Composer({
   reasoningEfforts = [],
   selectedReasoningEffort = null,
   onReasoningEffortChange,
+  budgetRunTurns,
+  onBudgetRunTurnsChange,
   undelivered = [],
   onSteerItem,
   onCancelItem,
@@ -267,12 +275,13 @@ export const Composer = memo(function Composer({
     }
   };
 
-  // 控件行是否渲染——至少有一个非空目录时才显示 control row 容器
+  // 控件行是否渲染——至少有一个非空目录或预算入口（#426）时才显示 control row 容器
   const hasControls =
     models.length > 0 ||
     permissionModes.length > 0 ||
     agentProfiles.length > 0 ||
-    reasoningEfforts.length > 0;
+    reasoningEfforts.length > 0 ||
+    (!permissionInSession && onBudgetRunTurnsChange !== undefined);
 
   return (
     <div className="composer-wrap">
@@ -493,6 +502,25 @@ export const Composer = memo(function Composer({
               placeholder="推理"
               disabled={locked}
             />
+            {/* #426：新建会话的预算入口（最小可用，一维 turns）。会话内不显示——
+                budget.run 属于**启动 run** 的请求（#422），续聊不带 budget（#308）。
+                留空 = 后端默认（不发键）；到顶自动暂停，恢复面板抬高同一维继续。 */}
+            {!permissionInSession && onBudgetRunTurnsChange !== undefined && (
+              <label className="composer-budget" title="本次 run 的 Agent turn 绝对上限；留空 = 后端默认。到顶自动暂停，可在恢复面板抬高后继续。">
+                <span className="composer-budget-label">turns 上限</span>
+                <input
+                  type="number"
+                  min={1}
+                  inputMode="numeric"
+                  className="composer-budget-input"
+                  value={budgetRunTurns ?? ''}
+                  onChange={(e) => onBudgetRunTurnsChange(e.target.value)}
+                  placeholder="默认"
+                  disabled={locked}
+                  aria-label="预算上限（Agent turns，留空为默认）"
+                />
+              </label>
+            )}
           </div>
         )}
         {/* #194：右侧动作簇——发送/停止按钮与 Esc 提示**同一处、同一行**。
