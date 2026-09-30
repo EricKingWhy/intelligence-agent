@@ -194,8 +194,8 @@ def declared_auto_approve(events: list[SessionEvent]) -> bool | None:
     """派生会话创建时**显式声明的** ``auto_approve``；未声明 → None（F15 #234）。
 
     与 :func:`declared_permission_mode` 同一个病、同一把锁：创建期
-    ``auto_approve_explicit=True, auto_approve=False`` 走 deny 路由
-    （``build_approval_callback`` 的第二支），但这条决策此前不落盘 ⇒ 续聊落到
+    ``auto_approve_explicit=True, auto_approve=False`` 走审批路由（#423 弹审批卡；
+    早期版本是 deny 路由），但这条决策此前不落盘 ⇒ 续聊落到
     "未声明"分支（``None`` = 全自动批准），用户勾的"不自动批准"从第二条消息起失效。
 
     只认第一条 ``session/started`` 里的 ``auto_approve`` 键。值不是 bool（日志被手改）
@@ -227,11 +227,14 @@ def build_approval_callback(
     session_id: str,
     approval_timeout_seconds: float,
 ) -> ApprovalCallback | None | InteractiveCallbackHolder:
-    """构建审批 callback（三种路由，与原 handler 行为完全一致）。
+    """构建审批 callback（三种路由；#423 起第二支只剩历史/防御角色）。
 
     从 ``SessionService._build_approval_callback`` 抽出：把对 ``self._state`` 的
     三处依赖（approval_queues 字典 / settings.approval_timeout_seconds）改为显式
     参数，其余逻辑与分支条件逐字保持。
+    #423 之后，web 的创建/续聊路径把「auto_approve=false 未选档位」直接判为
+    interactive（第三支不再从这两条路进入）；第二支保留给直接调用本函数的
+    历史组合与防御性兜底。
     """
     if interactive:
         queue = PendingApprovalQueue()
@@ -246,8 +249,11 @@ def build_approval_callback(
         and auto_approve is False
     ):
         async def _deny_callback(_req):
+            # #423：措辞改为用户向（fail-closed 是行为，不是"没接线"的开发者笔记；
+            # issue AC：全库用户可见通道无 "not yet wired" 类开发者文案）。
             return ApprovalResponse(
-                approved=False, reason="manual approval not yet wired"
+                approved=False,
+                reason="自动批准未开启，且当前会话没有可用的审批通道；已按 fail-closed 拒绝本次工具执行",
             )
 
         return _deny_callback

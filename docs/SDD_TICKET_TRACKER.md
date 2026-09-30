@@ -46,6 +46,17 @@
 
 ---
 
+## GUI-R5 修复批次（2026-09-30，已合并：PR #436 → main `5728d94e`）
+
+- **来源**：GUI round-5 暴力测试产出 9 张 issue（#420–#428；#425 白盒核实为 HEAD 已修复 → CLOSED）。白盒核实与实现记录见各 issue 评论。
+- **交付**：PR #436（fix/r5-issues → main）：`20e272c3` 8 项代码修复（29 文件 +889/−121，TDD）→ `ce08cc8c` #420 AC3 回显卡（`lib/approvalEcho.ts` seen 锚定 + `ApprovalEchoCard` + Conversation 接线，14 条新测试；消费投影 `approval_decisions` 不本地伪造，历史/换会话/刷新不回显）→ `497b5952` GUI 报告/截图入库 → `73b87693` CI 修复 → 合并前「先回后正」merge `98f8241d`（§14.6；同改 5 文件两侧存活核对，审计行落台账）。
+- **关票（§14.12）**：#420/#421/#422/#423/#424/#427/#428 随合并自动关闭 + 证据评论；**#426 保持 open**——一维（turns）已落地，三维闭环跟设计票 **#435**（用户批准拆票）。
+- **门禁**：代码树读数见台账 `420-ff64228d-20e272c3.tsv`（pytest 全量 4739 passed / 2 skipped，唯一 failed=stall_watchdog 负载 flake 隔离过）；回显树见 `420-20e272c3-ce08cc8c.tsv`（vitest 1187 + 1 同源负载 flake 隔离 6/6；tsc 0 错；oxlint 41 基线）；**CI gate0 首跑红**（ruff F841 + 12 GUI 文件缺 verification.map 行——本地漏跑 gate0 本体、且 shell `python` 解析到仓外 venv 的环境差，又一例「同份脚本 ≠ 同一环境」），`73b87693` 修后 CI 绿；合并树 `c1bb3f73` gate0 6/6 PASS（读数落盘 `docs/gate/`）。
+- **真浏览器 e2e**：approve（模态 36s+ 不断流 = #420 AC4）、deny、300s fail-closed 超时（seq8→seq9 间隔 300.01s = config 默认精确吻合）三路径全验；#427 文案、#426 预算落库同批验证。e2e 会话 `4a5bc9a2` 留存作证据。
+- **遗留**：清理候选（deny 第二支防御分支、Conversation 内联/模态接线轻微重复）；`SDD_FLOW_REVIEW_2026-09-27.md` 未获指示保持未跟踪；远端分支 `fix/r5-issues` 未删（§14.4 需批准）。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过

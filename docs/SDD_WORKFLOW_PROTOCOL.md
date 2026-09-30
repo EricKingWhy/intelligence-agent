@@ -42,6 +42,23 @@
 2. 每个 Ticket 跑与改动相称的 focused tests、lint / type check 和必要的集成测试；**不要求每张票都重跑全量测试**。高风险跨模块改动可在自然边界提前跑更广门禁。**全量的跑法见 §8.1（冻结树单次全量）——只跑一次，但必须跑在冻结树、且读数可机械传递。** 本步（TDD / 写测试 / 留测试）的**方法归属见 §9**——TDD 与测试质量用 **Matt（mattpocock）主开发 skills**（`tdd`），pstack 辅助项才按路径读 `docs/agents/skills/`；**不要在本文件重写一遍等价文字**。
 3. 相关验证通过后再提交，commit message 描述实际工程事实；更新 `docs/SDD_TICKET_TRACKER.md` 的状态、提交、门禁证据和残余问题。`uv run` 后检查 `uv.lock`，处理规则见 §7 第 6 条（该条同时写明本仓当前的跑法：按用户指令用 `.venv` 里的 pytest，不用 `uv run`）。
 
+### 1.3 方案依据（设计 / 选型前置调研）
+
+设计 / 选型类 ticket（新方案、新集成、架构改动）在写实现计划前，按 `AGENTS.md` §6.1 完成
+成熟实现调研，并在 ticket / 计划的方案部分落「方案依据」块：
+
+- **来源**：≥2 个独立来源（优先 `docs/agents/reference-sources.md` 清单内）。代码来源给克隆
+  路径的 `file:line` + 所读 commit；文章给链接 + 读取日期；第三方笔记先核实再引用；
+- **机制摘要**：每个来源怎么解这个问题（不是「它也有这个功能」）；
+- **契合点**：与本仓不变量（`AGENTS.md` §7）的冲突 / 兼容，及对冻结架构的影响；
+- **判定**：REUSE / ADAPT / PORT DESIGN / BUILD / DEFER 与理由（口径 = `SPEC_ROOT/13_OPEN_SOURCE_REUSE_MATRIX.md`）；
+- **License**：实质复制 / Port 时的结论与保留来源方式。
+
+豁免：纯缺陷修复（走 `AGENTS.md` §4.2 debug 闭环）与纯文档改动不需要本块。是否属「设计 /
+选型」由范围决定，拿不准时按需要做——**宁可少一块，不要为走过场补空块**。
+
+review 侧检查项：`docs/agents/review-debug-playbook.md` Independent Review。
+
 ## 2. 按风险安排 Code Review
 
 V3-lite **不设固定 Ticket 数量或日历节奏**。在变更风险高、边界清楚且 review 能显著降低风险时审查；具体时点由实现证据决定。
