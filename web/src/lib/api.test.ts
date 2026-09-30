@@ -432,6 +432,23 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
     expect(cap.calls[0].body).not.toHaveProperty('max_steps');
   });
 
+  it('#426：budget.run 常用三维 → 逐字透传（随启动 run 的请求提交，run 启动契约形状）', async () => {
+    const cap = captureFetch();
+    await startSession({
+      task: '干活',
+      budget: {
+        run: { max_agent_turns_total: 12, max_total_tokens: 8000, deadline_at: '2026-10-01T04:30:00.000Z' },
+      },
+    });
+    // 深比较 = wire 上的形状与字段名逐字对齐 RunBudgetRequest（extra="forbid"）。
+    expect(cap.calls[0].body).toEqual({
+      task: '干活',
+      budget: {
+        run: { max_agent_turns_total: 12, max_total_tokens: 8000, deadline_at: '2026-10-01T04:30:00.000Z' },
+      },
+    });
+  });
+
   it('context_providers 空数组 → 不发键（空 = 后端默认全集，不是显式零）', async () => {
     const cap = captureFetch();
     await startSession({ task: 't', context_providers: [] });
