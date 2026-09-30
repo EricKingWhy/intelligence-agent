@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -160,6 +161,253 @@ async def test_command_preflight_requires_an_existing_v2_database(tmp_path) -> N
     initialized = SqliteMemoryV2Store(database)
     await initialized.initialize()
     validate_existing_memory_v2_database(database)
+
+
+def _replace_table_definition(
+    connection: sqlite3.Connection,
+    table: str,
+    old: str,
+    new: str,
+) -> None:
+    definition = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,),
+    ).fetchone()[0]
+    indexes = [
+        row[0]
+        for row in connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,),
+        )
+    ]
+    replacement = f"{table}_replacement"
+    replacement_definition = definition.replace(
+        f"CREATE TABLE {table}", f"CREATE TABLE {replacement}", 1,
+    )
+    assert old in replacement_definition
+    connection.execute(replacement_definition.replace(old, new, 1))
+    connection.execute(f'DROP TABLE "{table}"')
+    connection.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
+    for index in indexes:
+        connection.execute(index)
+
+
+@pytest.mark.parametrize(
+    ("table", "old", "new"),
+    [
+        ("memory_v2_records", "content TEXT NOT NULL", "content BLOB NOT NULL"),
+        ("memory_v2_records", "status TEXT NOT NULL", "status TEXT"),
+        ("memory_v2_records", "project_id TEXT,", "project_id TEXT NOT NULL,"),
+        ("memory_v2_records", "memory_id TEXT PRIMARY KEY", "memory_id TEXT"),
+        ("memory_v2_records", ",\n    UNIQUE(root_id, version)", ""),
+        ("memory_v2_outbox", "revision TEXT NOT NULL", "revision BLOB NOT NULL"),
+        ("memory_v2_outbox", "scope TEXT NOT NULL", "scope TEXT"),
+        ("memory_v2_outbox", "project_id TEXT", "project_id TEXT NOT NULL"),
+        ("memory_v2_outbox", "revision TEXT NOT NULL,", ""),
+        ("memory_v2_outbox", "memory_id TEXT PRIMARY KEY", "memory_id TEXT"),
+        (
+            "memory_v2_outbox",
+            " CHECK (operation IN ('upsert', 'delete'))",
+            "",
+        ),
+        (
+            "memory_v2_outbox",
+            "CHECK (operation IN ('upsert', 'delete'))",
+            "CHECK (operation IN ('upsert', 'delete')) CHECK (operation = 'delete')",
+        ),
+        (
+            "memory_v2_outbox",
+            "CHECK (operation IN ('upsert', 'delete'))",
+            "CHECK (operation IN ('upsert', 'delete') AND 0)",
+        ),
+        (
+            "memory_v2_records",
+            "updated_at TEXT NOT NULL",
+            "updated_at TEXT NOT NULL,\n    extension_required TEXT NOT NULL",
+        ),
+        (
+            "memory_v2_outbox",
+            "project_id TEXT",
+            "project_id TEXT, extension_required TEXT NOT NULL",
+        ),
+    ],
+    ids=[
+        "wrong-column-type",
+        "nullable-required-column",
+        "non-null-optional-column",
+        "missing-records-primary-key",
+        "missing-root-version-uniqueness",
+        "wrong-outbox-column-type",
+        "nullable-outbox-column",
+        "non-null-optional-outbox-column",
+        "missing-outbox-column",
+        "missing-outbox-primary-key",
+        "missing-operation-check",
+        "conflicting-operation-check",
+        "overconstrained-operation-check",
+        "extra-required-record-column",
+        "extra-required-outbox-column",
+    ],
+)
+def test_preflight_rejects_incompatible_v2_schema(tmp_path, table, old, new) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        _replace_table_definition(connection, table, old, new)
+
+    with pytest.raises(ValueError, match="incomplete or incompatible"):
+        validate_existing_memory_v2_database(database)
+
+
+def test_preflight_accepts_equivalent_parenthesized_schema(tmp_path) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX memory_v2_one_active")
+        connection.execute(
+            "CREATE UNIQUE INDEX memory_v2_one_active "
+            "ON memory_v2_records(root_id) WHERE (status='active')"
+        )
+        _replace_table_definition(
+            connection,
+            "memory_v2_outbox",
+            "CHECK (operation IN ('upsert', 'delete'))",
+            "CHECK ((operation IN ('upsert', 'delete')))",
+        )
+
+    validate_existing_memory_v2_database(database)
+
+
+@pytest.mark.parametrize(
+    ("table", "old", "new"),
+    [
+        (
+            "memory_v2_records",
+            "updated_at TEXT NOT NULL",
+            "updated_at TEXT NOT NULL, extension_required TEXT NOT NULL DEFAULT 'present'",
+        ),
+        (
+            "memory_v2_outbox",
+            "project_id TEXT",
+            "project_id TEXT, extension_required TEXT NOT NULL DEFAULT 'present'",
+        ),
+    ],
+    ids=["records-default", "outbox-default"],
+)
+def test_preflight_accepts_extra_required_column_with_default(
+    tmp_path, table, old, new,
+) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        _replace_table_definition(connection, table, old, new)
+
+    validate_existing_memory_v2_database(database)
+
+
+@pytest.mark.parametrize(
+    "index_ddl",
+    [
+        (
+            "CREATE INDEX memory_v2_one_active "
+            "ON memory_v2_records(root_id) WHERE status='active'"
+        ),
+        (
+            "CREATE UNIQUE INDEX memory_v2_one_active "
+            "ON memory_v2_records(root_id) WHERE status='inactive'"
+        ),
+        (
+            "CREATE UNIQUE INDEX memory_v2_one_active "
+            "ON memory_v2_records(root_id) WHERE kind='semantic' AND status='active'"
+        ),
+    ],
+    ids=["not-unique", "wrong-predicate", "extra-predicate"],
+)
+def test_preflight_rejects_incompatible_active_index(tmp_path, index_ddl) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX memory_v2_one_active")
+        connection.execute(index_ddl)
+
+    with pytest.raises(ValueError, match="incomplete or incompatible"):
+        validate_existing_memory_v2_database(database)
+
+
+def test_preflight_rejects_partial_root_version_uniqueness(tmp_path) -> None:
+    from scripts.rebuild_memory_v2_index import validate_existing_memory_v2_database
+
+    database = tmp_path / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        _replace_table_definition(
+            connection, "memory_v2_records", ",\n    UNIQUE(root_id, version)", "",
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX memory_v2_root_version_active "
+            "ON memory_v2_records(root_id, version) WHERE status='active'"
+        )
+
+    with pytest.raises(ValueError, match="incomplete or incompatible"):
+        validate_existing_memory_v2_database(database)
+
+
+def test_command_rejects_incomplete_schema_before_lock_or_fence(tmp_path, monkeypatch, capsys) -> None:
+    from scripts import rebuild_memory_v2_index as command
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    database = workspace / "memory-v2.db"
+    asyncio.run(SqliteMemoryV2Store(database).initialize())
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "ALTER TABLE memory_v2_records RENAME TO memory_v2_records_old"
+        )
+        connection.execute(
+            "CREATE TABLE memory_v2_records (memory_id TEXT PRIMARY KEY)"
+        )
+        connection.execute("DROP TABLE memory_v2_records_old")
+
+    class FakeSettings:
+        workspace_dir = str(workspace)
+        milvus_collection = "memory"
+        knowledge_collection = "knowledge"
+        milvus_uri = "https://milvus.example"
+
+    lock_attempts = []
+
+    class FakeLock:
+        def __init__(self, root, *, allow_memory_index_rebuild=False):
+            lock_attempts.append((root, allow_memory_index_rebuild))
+
+        def acquire(self):
+            return self
+
+        def assert_no_shared_root_writers(self):
+            pytest.fail("schema preflight must happen before writer scan")
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(command, "Settings", FakeSettings)
+    monkeypatch.setattr(command, "InstanceLock", FakeLock)
+    monkeypatch.setattr(command, "reject_shared_root_mode", lambda: None)
+    monkeypatch.setattr(
+        command, "_rebuild", lambda *_args: pytest.fail("invalid schema must not rebuild"),
+    )
+    monkeypatch.delenv("ALLOW_SHARED_ROOT", raising=False)
+
+    assert command.main([]) == 1
+    assert lock_attempts == []
+    assert not (workspace / MEMORY_INDEX_REBUILD_FENCE_FILENAME).exists()
+    assert "ValueError" in capsys.readouterr().err
 
 
 def test_command_returns_nonzero_without_echoing_provider_error(

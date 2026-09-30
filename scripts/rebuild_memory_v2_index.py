@@ -39,6 +39,42 @@ _FENCE_VERSION = 1
 _FENCE_OPERATION = "memory-v2-index-rebuild"
 _MAX_FENCE_BYTES = 4096
 
+_RECORD_COLUMN_CONTRACT = {
+    "memory_id": ("TEXT", False),
+    "schema_version": ("INTEGER", True),
+    "root_id": ("TEXT", True),
+    "version": ("INTEGER", True),
+    "kind": ("TEXT", True),
+    "tier": ("TEXT", True),
+    "scope": ("TEXT", True),
+    "tenant_id": ("TEXT", True),
+    "user_id": ("TEXT", True),
+    "project_id": ("TEXT", False),
+    "content": ("TEXT", True),
+    "payload": ("TEXT", True),
+    "status": ("TEXT", True),
+    "importance": ("REAL", True),
+    "strength": ("REAL", True),
+    "source_type": ("TEXT", True),
+    "source_session_id": ("TEXT", False),
+    "source_event_ids": ("TEXT", True),
+    "evidence": ("TEXT", True),
+    "valid_at": ("TEXT", False),
+    "invalidated_at": ("TEXT", False),
+    "superseded_by": ("TEXT", False),
+    "created_at": ("TEXT", True),
+    "updated_at": ("TEXT", True),
+}
+_OUTBOX_COLUMN_CONTRACT = {
+    "memory_id": ("TEXT", False),
+    "revision": ("TEXT", True),
+    "operation": ("TEXT", True),
+    "tenant_id": ("TEXT", True),
+    "user_id": ("TEXT", True),
+    "scope": ("TEXT", True),
+    "project_id": ("TEXT", False),
+}
+
 
 def memory_collection_name(settings: Settings) -> str:
     """Select the application Memory collection and refuse an aliased Knowledge target."""
@@ -56,23 +92,191 @@ def memory_collection_name(settings: Settings) -> str:
 
 
 def validate_existing_memory_v2_database(database: Path) -> None:
-    """Refuse to create or initialize a database when the operator chose the wrong path."""
+    """Refuse missing or incompatible authority schema before taking the workspace lock."""
     if not database.is_file():
         raise ValueError("existing Memory V2 database was not found")
     try:
         uri = f"{database.resolve().as_uri()}?mode=ro"
         connection = sqlite3.connect(uri, uri=True)
         try:
-            rows = connection.execute(
+            connection.execute("PRAGMA query_only = ON")
+            tables = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name IN ('memory_v2_records', 'memory_v2_outbox')"
             ).fetchall()
+            if {row[0] for row in tables} != {
+                "memory_v2_records", "memory_v2_outbox",
+            }:
+                raise ValueError("existing Memory V2 schema was not found")
+
+            _validate_table_columns(
+                connection, "memory_v2_records", _RECORD_COLUMN_CONTRACT,
+            )
+            _validate_table_columns(
+                connection, "memory_v2_outbox", _OUTBOX_COLUMN_CONTRACT,
+            )
+            _validate_primary_key(connection, "memory_v2_records")
+            _validate_primary_key(connection, "memory_v2_outbox")
+            _validate_unique_index(
+                connection, "memory_v2_records", ("root_id", "version"),
+            )
+            _validate_active_index(connection)
+            _validate_outbox_operation_check(connection)
         finally:
             connection.close()
     except sqlite3.Error:
-        raise ValueError("existing Memory V2 database could not be read") from None
-    if {row[0] for row in rows} != {"memory_v2_records", "memory_v2_outbox"}:
-        raise ValueError("existing Memory V2 schema was not found")
+        raise ValueError("existing Memory V2 schema could not be validated") from None
+
+
+def _validate_table_columns(
+    connection: sqlite3.Connection,
+    table: str,
+    expected: dict[str, tuple[str, bool]],
+) -> None:
+    quoted_table = table.replace('"', '""')
+    rows = connection.execute(f'PRAGMA table_info("{quoted_table}")').fetchall()
+    columns = {row[1]: row for row in rows}
+    if not expected.keys() <= columns.keys():
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+    for name, (expected_type, expected_notnull) in expected.items():
+        column = columns[name]
+        if column[2].upper() != expected_type or bool(column[3]) != expected_notnull:
+            raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+    if any(
+        name not in expected and bool(column[3]) and column[4] is None
+        for name, column in columns.items()
+    ):
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+
+
+def _validate_primary_key(connection: sqlite3.Connection, table: str) -> None:
+    quoted_table = table.replace('"', '""')
+    rows = connection.execute(f'PRAGMA table_info("{quoted_table}")').fetchall()
+    primary_key = [row[1] for row in sorted(rows, key=lambda item: item[5]) if row[5]]
+    if primary_key != ["memory_id"]:
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+
+
+def _index_columns(connection: sqlite3.Connection, index: str) -> list[str | None]:
+    quoted_index = index.replace('"', '""')
+    rows = connection.execute(f'PRAGMA index_info("{quoted_index}")').fetchall()
+    return [row[2] for row in sorted(rows, key=lambda item: item[0])]
+
+
+def _validate_unique_index(
+    connection: sqlite3.Connection,
+    table: str,
+    expected_columns: tuple[str, ...],
+) -> None:
+    quoted_table = table.replace('"', '""')
+    rows = connection.execute(f'PRAGMA index_list("{quoted_table}")').fetchall()
+    if not any(
+        bool(row[2])
+        and not bool(row[4])
+        and _index_columns(connection, row[1]) == list(expected_columns)
+        for row in rows
+    ):
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+
+
+def _normalize_schema_sql(sql: str | None) -> str:
+    if sql is None:
+        return ""
+    normalized = re.sub(r"\s+", "", sql.casefold()).replace('"', "").replace("`", "")
+    return normalized.replace("[", "").replace("]", "").rstrip(";")
+
+
+def _strip_redundant_parentheses(expression: str) -> str:
+    """Remove only parentheses that enclose the complete expression."""
+    while expression.startswith("(") and expression.endswith(")"):
+        depth = 0
+        quoted = False
+        wraps_expression = True
+        index = 0
+        while index < len(expression):
+            char = expression[index]
+            if char == "'":
+                if quoted and index + 1 < len(expression) and expression[index + 1] == "'":
+                    index += 2
+                    continue
+                quoted = not quoted
+            elif not quoted and char == "(":
+                depth += 1
+            elif not quoted and char == ")":
+                depth -= 1
+                if depth == 0 and index != len(expression) - 1:
+                    wraps_expression = False
+                    break
+            index += 1
+        if not wraps_expression or depth != 0 or quoted:
+            return expression
+        expression = expression[1:-1]
+    return expression
+
+
+def _validate_active_index(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "PRAGMA index_list(\"memory_v2_records\")"
+    ).fetchall()
+    index = next((row for row in rows if row[1] == "memory_v2_one_active"), None)
+    if index is None or not bool(index[2]) or not bool(index[4]):
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+    if _index_columns(connection, index[1]) != ["root_id"]:
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+    definition = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+        (index[1],),
+    ).fetchone()
+    sql = definition[0] if definition else None
+    where = re.search(r"\bwhere\b", sql or "", flags=re.IGNORECASE)
+    predicate = (
+        _normalize_schema_sql(sql[where.end():]) if sql is not None and where
+        else ""
+    )
+    if _strip_redundant_parentheses(predicate) != "status='active'":
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
+
+
+def _check_expression(sql: str) -> str | None:
+    match = re.search(r"\bcheck\s*\(", sql, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    opening = match.end() - 1
+    depth = 0
+    quoted = False
+    index = opening
+    while index < len(sql):
+        char = sql[index]
+        if char == "'":
+            if quoted and index + 1 < len(sql) and sql[index + 1] == "'":
+                index += 2
+                continue
+            quoted = not quoted
+        elif not quoted and char == "(":
+            depth += 1
+        elif not quoted and char == ")":
+            depth -= 1
+            if depth == 0:
+                return sql[opening + 1:index]
+        index += 1
+    return None
+
+
+def _validate_outbox_operation_check(connection: sqlite3.Connection) -> None:
+    definition = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_v2_outbox'"
+    ).fetchone()
+    sql = definition[0] if definition else None
+    normalized = _normalize_schema_sql(sql)
+    expression = _check_expression(sql or "")
+    normalized_expression = _strip_redundant_parentheses(
+        _normalize_schema_sql(expression),
+    ) if expression is not None else ""
+    if (
+        normalized.count("check(") != 1
+        or normalized_expression != "operationin('upsert','delete')"
+    ):
+        raise ValueError("existing Memory V2 schema is incomplete or incompatible")
 
 
 def reject_shared_root_mode() -> None:
