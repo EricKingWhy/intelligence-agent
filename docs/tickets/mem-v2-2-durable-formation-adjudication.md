@@ -57,7 +57,7 @@ Only eligible runs create one durable idempotent job. The job executes Formation
 - **R2:** Model input contains current-run safe projection, at most eight earlier user/assistant messages, at most ten similar active memories, tool names/status/structured summaries, and artifact references only.
 - **R3:** Formation returns `CANDIDATES` or `NO_MEMORY`; parse/schema failure is a failed attempt, never an abstention.
 - **R4:** At most five candidates proceed: Semantic ≤3, Episodic ≤2, Procedural ≤1, ranked by durable value before truncation.
-- **R5:** Procedural automatic memory needs two independent success/correction events unless the user explicitly states the rule.
+- **R5:** A single event may create Procedural memory only when the user supplies the typed `remember_as_procedural_rule=true` signal on a non-blank new task/message. Runtime attaches it only to the corresponding genuine `user/message`; the candidate must cite that same event and provide a non-empty excerpt verifiable verbatim against its content. Without the signal, two distinct qualifying success/correction events are required.
 - **R6:** USER/profile facts require direct user evidence or explicit user confirmation. Assistant/tool evidence cannot independently create them.
 - **R7:** Credentials/secrets are always rejected. Sensitive categories require an explicit remember request. Runtime enforcement is independent of model classification.
 - **R8:** Adjudication returns exactly one of ADD/UPDATE/INVALIDATE/NOOP per candidate and passes provider-neutral authority/version validation before commit.
@@ -118,7 +118,7 @@ The agent must reuse the repository's existing SQLite/Event/Outbox persistence s
 - **AC5:** Injected non-transient failure proves no inappropriate retry or fallback and no write.
 - **AC6:** Kill tests at job-persisted, Formation-completed, Adjudication-completed, and SQLite-committed/outbox-pending windows recover to one correct terminal outcome.
 - **AC7:** Replaying a committed job creates zero duplicate active logical memories and does not emit a second logical update.
-- **AC8:** A single event cannot create Procedural memory without explicit user rule evidence; two qualifying independent events can.
+- **AC8:** A single event cannot create Procedural memory without the explicit signal bound to that genuine user event and verbatim source evidence; two distinct qualifying independent events can. API, queued/steered delivery, and restart restoration preserve the signal only for its matching user input.
 - **AC9:** Tests prove no secret reaches model input, persisted record, event, log, or trace, and stored content cannot grant runtime permission.
 - **AC10:** The user-visible run answer completes without waiting for Formation/Adjudication under a deliberately slow memory model.
 
