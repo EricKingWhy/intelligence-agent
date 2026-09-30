@@ -115,8 +115,11 @@ Memory V2 index. The authoritative contract, fence lifecycle, writer-stop precon
 recovery semantics are defined once in ADR-0042 D7.1. Scope is V2-only as approved; no live
 Milvus rebuild is claimed by this ticket addendum.
 
-Implementation and fake-index tests are on `codex/mem-v2-297-index-rebuild`. The focused
-rebuild, lock, and Milvus-adapter regression set passed 36 tests on 2026-09-30. The branch still
-needs two-axis review and final Gate-0/coverage evidence; no live Milvus rebuild is claimed.
-Actual execution remains an operator action after all writers to the configured collection are
-stopped, including writers in other clones.
+Implementation and fake-index tests are on `codex/mem-v2-297-index-rebuild`. On 2026-09-30,
+the focused rebuild, lock, and Milvus-adapter regression set passed 36 tests; independent
+Correctness/Security and Standards reviews passed, with one P3 error-message issue fixed and
+re-reviewed. Review coverage is recorded in `docs/review_ledger.d/421-mem-v2-1-index-rebuild.tsv`.
+Gate-0 at code commit `dce46b6e` passed its five non-coverage lanes; its sole coverage failure was
+the missing review row, now added. The final Gate-0 run is recorded separately. No live Milvus
+rebuild is claimed. Actual execution remains an operator action after all writers to the configured
+collection are stopped, including writers in other clones.
