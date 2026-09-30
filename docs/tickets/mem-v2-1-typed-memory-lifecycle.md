@@ -108,3 +108,47 @@ parallelizable: no; this is the contract foundation
 - No V1 real data was deleted and no final cutover was performed.
 - Review coverage identifies this issue and the implementation commit.
 - Tracker/PHASE_STATUS record the commit and exact verification results after integration.
+
+## Approved follow-up addendum: full derived-index recovery (2026-09-30)
+The approved #297 follow-up adds an operator recovery path for total loss of the configured
+Memory V2 index. The authoritative contract, design sources, reuse/build decision, fence
+lifecycle, writer-stop precondition, and recovery semantics are defined once in ADR-0042 D7.1.
+Scope is V2-only as approved; no live Milvus rebuild is claimed by this ticket addendum.
+
+Implementation and fake-index tests are on `codex/mem-v2-297-index-rebuild`. On 2026-09-30,
+independent Correctness/Security and Standards reviews passed after one P3 error-message fix;
+the standards-source review also passed after adding official references and exact local source
+citations. Review ranges are recorded in `docs/review_ledger.d/421-mem-v2-1-index-rebuild.tsv`
+and the merge attribution in `docs/review_ledger.d/422-mem-v2-297-merge-8daf6b62.tsv`.
+The branch is synchronized through `origin/main` `89bf106a` (latest merge `3e8e925a`). On the
+combined code tree, the focused Python regression set passed 788 tests; the web projection test
+passed 212 tests; and `npm run build` succeeded. A clean full-suite equivalent on commit
+`49308fd9` (source tree unchanged by the later docs-only main sync; cleared `PYTHONPATH`, project
+`.venv` interpreter, `pytest tests/ -q --no-header -p no:cacheprovider`) passed 4,836 tests, with
+31 skipped, 51 deselected, and 9 existing warnings. The repository
+clean-runner script could not start because this machine's `bash` resolves to WSL without
+`/bin/bash`; the PowerShell invocation used the same environment and pytest arguments. The latest
+`scripts/check_review_coverage.py` exits 0. The older `8daf6b62` merge report remains as historical
+5/6 coverage-failure evidence. Final Gate-0 on commit `0f8b1ea5` / tree
+`59e55a378acad91e0236466cc19397c1f7ab0f41` passed 6/6 in 26.0 seconds; its machine record is
+`docs/gate/0f8b1ea5941fff7b91408c667234386fbde0ade6.json`. No live Milvus rebuild is claimed.
+Actual execution remains an operator action after all writers to the configured collection are
+stopped, including writers in other clones.
+
+## 2026-09-30 follow-up review and regression closure
+
+The branch was synchronized with `origin/main` `5b6af76a`. Full-range independent Spec and
+Standards review covered the rebuild implementation and merge; Standards found a P2 in the
+maintenance-lock flags, while Spec found no P0–P2 issue. The fix at `6d149d6a` makes cutover
+and index-rebuild maintenance modes mutually exclusive. A new test failed before the fix
+(`DID NOT RAISE`) and passed afterward. The combined lock, rebuild, and clean-slate regression
+set passed 94 tests; Ruff and `git diff --check` passed. Review ranges and the merge analysis
+are in `docs/review_ledger.d/424-mem-v2-297-full-review.tsv` and
+`docs/review_ledger.d/425-mem-v2-297-maintenance-lock-fix.tsv`. The quoted-collation `where`
+identifier observation is fail-closed and remains a low-priority compatibility limitation.
+This evidence is local to `codex/mem-v2-297-index-rebuild`; it does not claim a live Milvus
+rebuild or GitHub integration.
+
+The follow-up Gate-0 run on commit `849c03d2` / tree `b1e30761` passed 6/6 in 28.7 seconds;
+its machine record is `docs/gate/849c03d26d6260077ae92362505e2bf0bac60de4.json`. It covers the
+six mechanical lanes only; the focused 94-test result above is recorded separately.

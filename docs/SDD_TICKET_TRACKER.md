@@ -6639,3 +6639,5 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 
 **字节审计残余（2026-09-30，#430 收尾审计登记，另行开票，本票不修）**：受控中文大文件存在 3 个**预存**「转义物化」控制字节（与本次三次行尾事故同类病灶、19 天前引入）——`docs/phase_status/2026-09.md` blob 偏移 276971 / 276987（行 248，2×0x08：词边界记法的转义被物化，`60bdaabc` 2026-09-11 引入、`2447c0ab` 随归档拆分带入）；`docs/SDD_TICKET_TRACKER.md` blob 偏移 77881（行 574，1×0x07：Windows 路径转义被物化，`cf8f3a73` 2026-09-11 引入）。独立字节审计 subagent 全量扫描结论：#430 收尾写入的一切（归档追加节 / tracker #430 块 / 台账行 378 / PRD 两笔 / 6 个实现 blob）**字节级全净**（0 CR、0 NUL、0 控制字符、纯追加前缀成立）；3 个 FAIL 字节均预存，按 Scope Lock 登记不修，最小清理 = 换成 chr(92) 构造的字面记法。
+
+**#298（MEM-V2-2）分类锁收口（2026-09-30，分支 `codex/mem-v2-298-prompt-contract`，commit `1dca6fa3`，台账行 `docs/review_ledger.d/298-durable-formation-8db02e83-1dca6fa3.tsv`）**：Formation/Adjudication 主链路经查已在 origin/main（memory/v2 22 文件）；分支净增量 = 分类锁 kind+tier/scope fail-closed + 显式规则信号 R5 + project_available 契约（7 文件 +191/−12）。pytest 67 passed / vitest 7 passed / 两轴复核无 P0–P2（4×P4 信息级）。R7 按用户暂停、如实未解决；#298/#296 保持 OPEN。分支 12 behind origin/main，未 push/PR（§14.4 待批）。

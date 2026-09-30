@@ -87,6 +87,14 @@ describe('Composer 队列条（ADR-0030 §5.2）', () => {
   });
 });
 
+describe('Composer procedural rule signal (#298 R5)', () => {
+  it('offers an explicit opt-in for reusable rules', () => {
+    const html = renderToString(createElement(Composer, base)).replaceAll('<!-- -->', '');
+    expect(html).toContain('将这条消息作为可复用规则');
+    expect(html).toContain('remember-as-procedural-rule');
+  });
+});
+
 // ── #283（F18-B）：会话内可改权限档 + 中性禁用文案 ──
 // pill 的**触发按钮**不在 Radix portal 里，所以它的禁用态与 title 是 SSR 可断的；浮层内的
 // 升档确认面（role/aria + 取消不发请求）在 `e2e/control-row.spec.ts` 里锁——本仓没有 jsdom。

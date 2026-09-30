@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 
 from agent_harness.capability.wiring import _MemorySettingsContextProvider
 from agent_harness.identity import (
@@ -51,6 +52,7 @@ from agent_harness.session import (
     run_context_var,
 )
 from agent_harness.session.event import MEMORY_DEGRADED
+from agent_harness.tooling.result import ErrorCode
 from tests.memory.v2._records import make_draft
 
 IDENTITY = IdentityContext("tenant-a", "user-a", ["user"])
@@ -861,6 +863,51 @@ async def test_explicit_remember_uses_the_current_project_scope(governance, tmp_
     record = await store.get(result.data["memory_id"], project_identity)
     assert record.scope is MemoryScope.PROJECT
     assert record.project_id == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_explicit_remember_rejects_project_fact_without_project_context(
+    governance, tmp_path,
+):
+    service, store, _index = governance
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    session_id = "unbound-project-session"
+    await _write_user_turn(sessions, session_id, "Remember this project uses pnpm")
+    tool = RememberMemoryV2Tool(service, sessions)
+    binding = memory_session_var.set(session_id)
+    identity_token = set_identity_context(IDENTITY)
+    try:
+        result = await tool.execute(_RememberV2Args(
+            content="this project uses pnpm", kind=MemoryKind.SEMANTIC,
+            payload=SemanticPayload(
+                subject="this project", fact="uses pnpm",
+                category=SemanticCategory.PROJECT_FACT,
+            ),
+        ))
+    finally:
+        identity_context_var.reset(identity_token)
+        memory_session_var.reset(binding)
+
+    assert not result.ok
+    assert result.error_code is ErrorCode.INVALID_ARGUMENT
+    assert await store.list_records(TRUSTED, status=MemoryStatus.ACTIVE) == []
+
+
+@pytest.mark.asyncio
+async def test_edit_cannot_change_user_global_memory_into_a_project_fact(governance):
+    service, store, _index = governance
+    original = await service.create(make_draft(content="偏好简洁回答"), TRUSTED)
+
+    with pytest.raises(ValidationError, match="project_fact requires project scope"):
+        await service.edit(
+            original.id, TRUSTED, expected_version=1, content="项目使用 pnpm",
+            payload=SemanticPayload(
+                subject="build", fact="uses pnpm", category=SemanticCategory.PROJECT_FACT,
+            ),
+        )
+
+    persisted = await store.get(original.id, TRUSTED)
+    assert persisted.version == 1 and persisted.content == "偏好简洁回答"
 
 
 @pytest.mark.asyncio

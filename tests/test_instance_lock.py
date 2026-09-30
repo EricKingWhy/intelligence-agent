@@ -19,6 +19,7 @@ from agent_harness.instance_lock import (
     ALLOW_SHARED_ROOT_ENV,
     CUTOVER_FENCE_FILENAME,
     DEFAULT_LOCK_FILENAME,
+    MEMORY_INDEX_REBUILD_FENCE_FILENAME,
     InstanceLock,
     InstanceLockError,
 )
@@ -164,6 +165,142 @@ def test_cutover_fence_blocks_application_but_allows_maintenance_resume(tmp_path
 
     maintenance = InstanceLock(tmp_path, allow_cutover=True).acquire()
     maintenance.release()
+
+
+def test_memory_index_rebuild_fence_blocks_application_and_escape_hatch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+
+    with pytest.raises(InstanceLockError, match="index rebuild is incomplete"):
+        InstanceLock(tmp_path).acquire()
+
+    with pytest.raises(InstanceLockError, match="index rebuild is incomplete"):
+        InstanceLock(tmp_path, allow_cutover=True).acquire()
+
+    monkeypatch.setenv(ALLOW_SHARED_ROOT_ENV, "1")
+    with pytest.raises(InstanceLockError, match="index rebuild is incomplete"):
+        InstanceLock(tmp_path).acquire()
+    assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
+
+    maintenance = InstanceLock(tmp_path, allow_memory_index_rebuild=True).acquire()
+    maintenance.release()
+
+
+def test_rebuild_maintenance_and_application_cannot_reuse_same_process_lock(
+    tmp_path: Path,
+) -> None:
+    application = InstanceLock(tmp_path).acquire()
+    try:
+        with pytest.raises(InstanceLockError, match="different operation"):
+            InstanceLock(tmp_path, allow_memory_index_rebuild=True).acquire()
+    finally:
+        application.release()
+
+    maintenance = InstanceLock(tmp_path, allow_memory_index_rebuild=True).acquire()
+    try:
+        with pytest.raises(InstanceLockError, match="different operation"):
+            InstanceLock(tmp_path).acquire()
+    finally:
+        maintenance.release()
+
+
+def test_memory_index_rebuild_maintenance_still_refuses_cutover_fence(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+    (tmp_path / CUTOVER_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+
+    with pytest.raises(InstanceLockError, match="reset is incomplete"):
+        InstanceLock(tmp_path, allow_memory_index_rebuild=True).acquire()
+
+
+def test_cutover_and_index_rebuild_maintenance_modes_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / CUTOVER_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+    (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).write_text(
+        "pending", encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        InstanceLock(
+            tmp_path,
+            allow_cutover=True,
+            allow_memory_index_rebuild=True,
+        ).acquire()
+
+
+def test_rebuild_maintenance_publishes_fence_then_detects_active_bypass_writer(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.delenv(ALLOW_SHARED_ROOT_ENV, raising=False)
+    holder = InstanceLock(tmp_path).acquire()
+    ready = tmp_path / "shared-root-ready"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+    )
+    maintenance = None
+    try:
+        _wait_for_ready(ready)
+        assert len(list(tmp_path.glob(".instance-shared-root-*.lease"))) == 1
+        holder.release()
+
+        maintenance = InstanceLock(
+            tmp_path, allow_memory_index_rebuild=True,
+        ).acquire()
+        (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).write_text(
+            "pending", encoding="utf-8",
+        )
+        with pytest.raises(InstanceLockError, match="workspace writer is active") as error:
+            maintenance.assert_no_shared_root_writers()
+        assert "maintenance" not in str(error.value)
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+        holder.release()
+        if maintenance is not None:
+            (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).unlink(missing_ok=True)
+            maintenance.release()
+
+
+def test_escape_hatch_rechecks_rebuild_fence_after_registering_lease(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setenv(ALLOW_SHARED_ROOT_ENV, "1")
+    real_take_lock = instance_lock_module._take_os_lock
+    first_attempt = True
+
+    def simulate_contention_once(fd: int) -> None:
+        nonlocal first_attempt
+        if first_attempt:
+            first_attempt = False
+            raise OSError("simulated existing lock holder")
+        real_take_lock(fd)
+
+    real_create_lease = InstanceLock._create_shared_root_lease
+
+    def create_lease_then_publish_fence(lock: InstanceLock) -> tuple[Path, int]:
+        lease = real_create_lease(lock)
+        (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).write_text(
+            "pending", encoding="utf-8",
+        )
+        return lease
+
+    monkeypatch.setattr(instance_lock_module, "_take_os_lock", simulate_contention_once)
+    monkeypatch.setattr(
+        InstanceLock, "_create_shared_root_lease", create_lease_then_publish_fence,
+    )
+
+    with pytest.raises(InstanceLockError, match="index rebuild is in progress"):
+        InstanceLock(tmp_path).acquire()
+
+    assert list(tmp_path.glob(".instance-shared-root-*.lease")) == []
 
 
 def test_cutover_and_application_cannot_reuse_each_others_same_process_lock(
