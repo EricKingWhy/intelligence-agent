@@ -116,13 +116,14 @@ lifecycle, writer-stop precondition, and recovery semantics are defined once in 
 Scope is V2-only as approved; no live Milvus rebuild is claimed by this ticket addendum.
 
 Implementation and fake-index tests are on `codex/mem-v2-297-index-rebuild`. On 2026-09-30,
-the focused rebuild, lock, and Milvus-adapter regression set passed 36 tests; independent
-Correctness/Security and Standards reviews passed, with one P3 error-message issue fixed and
-re-reviewed. Review coverage is recorded in `docs/review_ledger.d/421-mem-v2-1-index-rebuild.tsv`.
-Gate-0 at code commit `dce46b6e` passed its five non-coverage lanes. The merged tree at
-`8daf6b62` still reports 5/6 because the merge commit itself lacks review-ledger attribution;
-the machine report is `docs/gate/8daf6b62788cf0569fa7d5aafb7dc2ed4046ea8f.json`. This is not a
-passing final Gate. Add merge attribution, synchronize the latest `origin/main`, and rerun Gate-0
-before presenting the follow-up as ready to integrate. No live Milvus rebuild is claimed. Actual
-execution remains an operator action after all writers to the configured collection are stopped,
-including writers in other clones.
+independent Correctness/Security and Standards reviews passed after one P3 error-message fix;
+the standards-source review also passed after adding official references and exact local source
+citations. Review ranges are recorded in `docs/review_ledger.d/421-mem-v2-1-index-rebuild.tsv`
+and the merge attribution in `docs/review_ledger.d/422-mem-v2-297-merge-8daf6b62.tsv`.
+The branch is synchronized through `origin/main` `e31cb654` (merge `7e1d77ce`). On that merged
+tree, the focused Python regression set passed 788 tests; the web projection test passed 212 tests;
+`npm run build` succeeded. `scripts/check_review_coverage.py` exits 0. The older merge report at
+`8daf6b62` is retained as historical evidence of its 5/6 coverage failure; the final Gate-0 for
+the current tree is still pending. No live Milvus rebuild is claimed. Actual execution remains an
+operator action after all writers to the configured collection are stopped, including writers in
+other clones.
