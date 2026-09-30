@@ -161,16 +161,24 @@ export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]>
 }
 
 export interface BudgetPayload {
-  /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。**本票只开这一层**：
-   *  `run` / `session` 由 T4/T10 落地，在那之前后端对未知键是 422
-   *  （`extra="forbid"`），所以类型里也不预留——预留会让"编译通过、请求 422"
-   *  变成新的漂移源。
+  /** local 作用域的 turn 保险丝（`11 §6.1` / ADR-0044 D8）。
    *
    *  **缺省不发键**：不传 = 后端按 Deployment/AgentProfile 解析（默认 500）。
    *  前端刻意没有默认值——硬编码一个数字会变成请求侧覆盖：运维把 deployment
    *  ceiling 调低时，它反而让请求 422（#308 AC：产品调用方不再主动发送
    *  `max_steps`）。 */
   local?: { max_agent_turns?: number };
+  /** run 作用域预算（`#312`/`#313` 落地后开放；T4 交付前注释声明"类型里也不预留"
+   *  的前提已不再成立，遂随 #426 补上——只声明 UI 真正会发送的维，其余维
+   *  （model_requests / cost_usd / per-tool / deadline）等到有入口再加，别预留。
+   *
+   *  #422：`budget.run` 与 launch=false **互斥**（422）——只在启动 run 的请求上
+   *  发送。 */
+  run?: {
+    /** 本 run 的 Agent turn 绝对上限（正整数；`11 §6.1`）。到顶 → run/paused
+     *  （非终态），PausedPanel 抬高同一维的绝对 ceiling 后同 run 恢复。 */
+    max_agent_turns_total?: number;
+  };
 }
 
 export interface StartSessionPayload {

@@ -55,7 +55,7 @@ describe('ApprovalCard — 失效态（APR-01）', () => {
     );
     expect(html).toContain('决策无法再提交');
     expect(html).not.toContain('approval-kbd');
-    expect(html).toContain('approval-card pending invalid');
+    expect(html).toContain('approval-card invalid');
   });
 
   it('非 invalid：仍是可提交的正常卡（防误伤——run 活着时审批就该能点）', () => {
@@ -65,5 +65,25 @@ describe('ApprovalCard — 失效态（APR-01）', () => {
     expect(buttonTag(html, 'btn-primary approval-approve')).not.toContain('disabled');
     expect(html).toContain('approval-kbd'); // 快捷键提示保留
     expect(html).not.toContain('invalid');
+  });
+});
+
+describe('ApprovalCard — 模态变体（#421）', () => {
+  it('modal：让出 dialog 语义（无 alertdialog / aria-modal），材质与交互不变', () => {
+    // Radix 的 Dialog.Content 承担 role="dialog" aria-modal="true"——同一棵树里
+    // 卡片再声明一层 alertdialog/aria-modal 会让读屏自相矛盾。
+    const html = renderToStaticMarkup(
+      <ApprovalCard sessionId="s" approval={approval()} modal />,
+    );
+    expect(html).not.toContain('alertdialog');
+    expect(html).not.toContain('aria-modal');
+    expect(html).toContain('approval-card'); // 材质不变（pending 状态类已随 #420 AC3 移除）
+    expect(html).toContain('需要审批');
+    expect(buttonTag(html, 'btn-primary approval-approve')).not.toContain('disabled');
+  });
+
+  it('默认（内联）：仍是 alertdialog（失效卡/多卡并存者留在流内的语义不变）', () => {
+    const html = renderToStaticMarkup(<ApprovalCard sessionId="s" approval={approval()} />);
+    expect(html).toContain('alertdialog');
   });
 });

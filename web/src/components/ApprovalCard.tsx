@@ -27,7 +27,14 @@
  *  - role="alertdialog" + 挂载焦点（多卡只有第一张聚焦，防焦点打架）。
  *  - 键盘路径：Ctrl/⌘+Enter 批准、Ctrl/⌘+Backspace 拒绝（按钮上以 kbd
  *    标注）。Esc 明确不占——它是全局中断运行，语义冲突。
- *  - 材质回归实心卡（R4 Glass Only Floating）：去 glass 类与第三级辉光。 */
+ *  - 材质回归实心卡（R4 Glass Only Floating）：去 glass 类与第三级辉光。
+ *
+ * #420 AC3 单一状态源：卡片**不自演**「已批准/已拒绝」翻转——那两个是后端
+ * 事实（permission/resolved 事件），本地 state 硬编会在流断时与真相分叉
+ * （R5-B4：本地说已批准、投影停在 pending，composer 永锁）。本卡只持有
+ * **交互状态** submitted（"我的 POST 成功了"）与 busy/error；决策结果一律
+ * 等投影说话——resolved 事件到达后审批离开 pending 队列，卡片由调用方
+ * （内联位 / 模态）随投影卸载。 */
 import { useEffect, useRef, useState } from 'react';
 import { ShieldAlert, Check, X } from 'lucide-react';
 import type { PendingApproval } from '../types';
@@ -47,16 +54,24 @@ interface Props {
   invalid?: boolean;
   /** 提交时后端回 404 → 上报 approval_id，让 App 记下这条审批已失效。 */
   onGone?: () => void;
+  /** POST 成功（含 409 幂等成功）后上报——#420 AC2：调用方据此对账一次
+   *  （resync），保证决策后事件有一条消费路径。404 不算决策成功，不走这里。 */
+  onDecided?: () => void;
+  /** #421：作为 Radix Dialog.Content 的内容渲染（模态承载，见 ApprovalModal）。
+   *  dialog 语义（role="dialog" aria-modal="true"）由 Radix 的 Content 提供，
+   *  卡片自带的 alertdialog/aria-modal 必须让位——同一棵树里两层"模态"声明
+   *  会让读屏自相矛盾。视觉与交互（键盘快捷键 / 决策流）一字不变。 */
+  modal?: boolean;
 }
 
-export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: invalidProp = false, onGone }: Props) {
-  const [decision, setDecision] = useState<'pending' | 'approved' | 'denied'>('pending');
+export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: invalidProp = false, onGone, onDecided, modal = false }: Props) {
+  // 交互状态（不是决策真相）：POST 成功后置位，防重复提交 + 隐藏按钮；
+  // 「批准了还是拒绝了」由事件流投影回答（见文件头 #420 AC3）。
+  const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
-  // `decision === 'pending'` 是前提：已批准的卡不该因为之后又来一个 run 终结事件
-  // 而丢掉「已批准」字样（失效只描述"还能不能提交决策"）。
-  const invalid = decision === 'pending' && invalidProp;
+  const invalid = invalidProp;
 
   // 挂载聚焦一次即可：决策后不抢回焦点（用户可能已在别处操作）。
   useEffect(() => {
@@ -65,16 +80,20 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
   }, []);
 
   const decide = async (approved: boolean) => {
-    if (busy || invalid) return;
+    if (busy || invalid || submitted) return;
     setBusy(true);
     setError(null);
     try {
       await postApproval(sessionId, approval.approval_id, approved);
-      setDecision(approved ? 'approved' : 'denied');
+      setSubmitted(true);
+      // 决策成功 ≠ 客户端已看到结果：上报调用方对账一次（#420 AC2——流活着
+      // 时它是 no-op；give-up 落 viewing 后它就是唯一的消费路径）。
+      onDecided?.();
     } catch (e) {
       if (e instanceof AlreadyResolvedError) {
         // 409 = another tab or retry already resolved it; treat as our intent succeeding.
-        setDecision(approved ? 'approved' : 'denied');
+        setSubmitted(true);
+        onDecided?.();
       } else if (e instanceof ApprovalGoneError) {
         // 404 = 后端队列里没有这条审批（重启/run 终结已 GC）——重试无意义。
         // 失效事实上报给 App（它同时管着 composer 锁），本卡只读下来。
@@ -89,14 +108,14 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
     }
   };
 
-  // 键盘路径（UI-01 ③）：仅 pending 且非 busy 时挂在 document 上；
-  // decision/busy 变化即重挂/移除，决后快捷键失效。
+  // 键盘路径（UI-01 ③）：仅可提交且非 busy 时挂在 document 上；
+  // submitted/busy 变化即重挂/移除，决后快捷键失效。
   // 安全约束（U-1 review P1）：**只有 autoFocus 卡（第一张 pending 卡）挂全局
   // 监听**——否则 N 卡并存时一次 Ctrl+Enter 会向 N 个 approval_id 各发一 POST，
   // 等于一次按键批量批准多个危险操作。
   // 失效卡同样不挂：一次 Ctrl+Enter 只该得到 404，不该发送请求。
   useEffect(() => {
-    if (!autoFocus || decision !== 'pending' || busy || invalid) return;
+    if (!autoFocus || submitted || busy || invalid) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.repeat) return;
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -111,7 +130,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
     return () => document.removeEventListener('keydown', onKey);
     // decide 闭包内的 busy 守卫由本 effect 的依赖（busy）保证新鲜。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoFocus, decision, busy]);
+  }, [autoFocus, submitted, busy]);
 
   const preview = classifyPreviewArgs(approval.arguments_preview);
   const desc = approval.description || approval.reason || '';
@@ -127,9 +146,9 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
   return (
     <div
       ref={cardRef}
-      className={`approval-card ${decision}${invalid ? ' invalid' : ''}`}
-      role="alertdialog"
-      aria-modal="false"
+      className={`approval-card${invalid ? ' invalid' : ''}${submitted ? ' submitted' : ''}`}
+      role={modal ? undefined : 'alertdialog'}
+      aria-modal={modal ? undefined : 'false'}
       aria-labelledby={titleId}
       aria-describedby={descId}
       tabIndex={-1}
@@ -138,9 +157,8 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
         <ShieldAlert size={16} className="approval-icon" />
         <span className="approval-title" id={titleId}>
           {invalid && '审批已失效'}
-          {!invalid && decision === 'pending' && '需要审批'}
-          {!invalid && decision === 'approved' && '已批准'}
-          {!invalid && decision === 'denied' && '已拒绝'}
+          {!invalid && submitted && '决策已提交'}
+          {!invalid && !submitted && '需要审批'}
         </span>
       </div>
       {desc && (
@@ -184,7 +202,7 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
           {error}
         </div>
       )}
-      {decision === 'pending' && (
+      {!submitted && (
         <div className="approval-actions">
           <button
             className="btn-primary approval-approve"
@@ -201,6 +219,11 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
             <X size={14} /> 拒绝 {!invalid && <kbd className="approval-kbd">{mod}+⌫</kbd>}
           </button>
         </div>
+      )}
+      {submitted && (
+        <p className="approval-invalid-note" role="status">
+          决策已提交，等待后端确认——结果以事件流为准。
+        </p>
       )}
     </div>
   );

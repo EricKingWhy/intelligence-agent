@@ -260,7 +260,17 @@ class BudgetRequest(BaseModel):
     #: 两把锁对应两个持久对象，见 `SessionBudgetRequest.expected_version`。
     expected_version: int | None = Field(default=None, ge=1)
     local: LocalBudgetRequest | None = None
-    run: RunBudgetRequest | None = None
+    #: #422：`run` 是启动 run 的请求上的 per-run 绝对上限（`run/started.data.budget`
+    #: 是它唯一的宿主）。`launch=false` 的只建会话没有 run 可挂 ⇒ 非空 `run` 一律 422。
+    #: 对照：`session` 在 launch=false 合法（session 账行就是宿主，#318）；`local` 是
+    #: 请求级熔断，launch=false 下不投影（`_local_fuse_headers`）。
+    run: RunBudgetRequest | None = Field(
+        default=None,
+        description=(
+            "per-run 绝对上限；仅随启动 run 的请求（launch=true）合法。"
+            "launch=false（只建会话不启动）时传非空 run → 422（#422）"
+        ),
+    )
     session: SessionBudgetRequest | None = None
 
 
@@ -1372,6 +1382,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise HTTPException(
                 status_code=422,
                 detail="remember_as_procedural_rule requires a launched non-blank user task",
+            )
+        # run 预算与 launch=false 互斥（#422）：`budget.run` 是启动 run 的请求上的
+        # per-run 绝对上限（`run/started.data.budget` 是它唯一的宿主）；launch=false
+        # 没有 run 可挂——静默收下等于客户端以为设了防失控闸而实际什么都没设。
+        # 对照：`budget.session` 在 launch=false 合法（session 账行就是宿主，#318）；
+        # `budget.local` 是请求级熔断，launch=false 下不投影（见 `_local_fuse_headers`）。
+        if not launch and req.budget is not None and req.budget.run is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="budget.run 与 launch=false 互斥：run 级预算属于启动 run 的请求"
+                       "（POST /messages 或 launch=true）；只建会话请省略 budget.run",
             )
         if launch and req.task is None:
             # launch=true 恢复既有契约：task 必填（422，行为与原 min_length 校验一致）。
