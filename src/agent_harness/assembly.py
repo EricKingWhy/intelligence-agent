@@ -285,7 +285,17 @@ async def build_runtime(
     # 同一实例（全局在飞模型调用数的语义）。
     model_call_gate = ModelCallGate(settings.model_max_concurrency)
 
-    sandbox = workspace_registry.create(session_id, workspace_root=workspace)
+    # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
+    # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
+    # create() 对它响亮拒绝（防改写属主绑定，tests/sandbox/test_workspace_registry.py
+    # 钉住），恢复路径不该撞它。无映射 = 新会话，照旧 create。注意：工具面收窄
+    # （agent_profile → registry.filtered）在本函数下游与 sandbox 解析无关，恢复
+    # 入口的授权重建由调用方（service.resume_and_launch）按子会话 AgentSpec 传
+    # agent_profile 兑现——只放开这一半会放大子会话工具面，两条必须一起成立。
+    if workspace_registry.exists(session_id):
+        sandbox = workspace_registry.get(session_id)
+    else:
+        sandbox = workspace_registry.create(session_id, workspace_root=workspace)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识

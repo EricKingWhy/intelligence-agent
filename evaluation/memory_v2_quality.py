@@ -25,14 +25,17 @@ _SCOPES = {"user_global", "project", "none"}
 _AUTHORITIES = {"user", "assistant", "tool", "system", "none"}
 _STATUSES = {"executed", "degraded", "failed", "skipped", "unawaited"}
 _WRITE_ACTIONS = {"ADD", "UPDATE"}
-# Write matching is value-preserving, not verbatim (ADR-0044 D12, 2026-09-30 review):
+# Write matching is value-preserving, not verbatim (ADR-0044 D13, 2026-09-30 review):
 # every gold content token must survive into the stored record whatever the word order,
-# and a negation in the gold fact must still be a negation in the record. This replaced
+# and the gold polarity must survive with it: a record may neither drop a gold negation
+# nor add a negation the gold fact does not have (an added negation can reverse the
+# value, e.g. "is named Sample Harbor" vs "is not named Sample Harbor"). This replaced
 # exact full-sequence equality, which rejected legitimate paraphrases even though every
 # gold value, name and date was intact. Function words are dropped from the gold side
 # only; the record may add its own context. Tokens are compared exactly, without
 # stemming or plural folding ("summary" does not match "summaries"), and negations
-# ("no", "without", ...) plus date-like tokens ("may") stay content words.
+# ("no", "without", ...) plus position/time-relative content words ("before", "after")
+# stay content words because swapping them changes the fact.
 _WRITE_FACT_TOKENS = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 _WRITE_FACT_FUNCTION_WORDS = frozenset({
     # Articles.
@@ -43,7 +46,7 @@ _WRITE_FACT_FUNCTION_WORDS = frozenset({
     "must", "have", "has", "had",
     # Prepositions (excluding "without", which is a negation).
     "of", "to", "in", "on", "at", "by", "for", "from", "with", "into", "onto",
-    "about", "above", "below", "over", "under", "after", "before", "between",
+    "about", "above", "below", "over", "under", "between",
     "during", "through", "across", "around", "against", "along", "within", "upon",
     # Conjunctions.
     "and", "or", "but", "if", "then", "than", "as", "so", "because", "while",
@@ -237,7 +240,12 @@ def _metric(
 
 
 def write_fact_matches(content: str, expected_fact: str) -> bool:
-    """Accept a record that keeps every gold content word and the gold negation."""
+    """Accept a record that keeps every gold content word and the gold polarity.
+
+    Polarity is two-way: the record must carry a negation exactly when the gold fact
+    carries one. Adding a negation the gold fact does not have is a value reversal and
+    is rejected even though every gold content word is still present.
+    """
     if not isinstance(content, str) or not isinstance(expected_fact, str):
         return False
     if not expected_fact.strip():
@@ -249,11 +257,10 @@ def write_fact_matches(content: str, expected_fact: str) -> bool:
     }
     if not actual_tokens or not gold_content:
         return False
-    negation_kept = (
-        not set(gold_tokens) & _WRITE_FACT_NEGATIONS
-        or bool(actual_tokens & _WRITE_FACT_NEGATIONS)
+    polarity_kept = bool(set(gold_tokens) & _WRITE_FACT_NEGATIONS) == bool(
+        actual_tokens & _WRITE_FACT_NEGATIONS
     )
-    return gold_content <= actual_tokens and negation_kept
+    return gold_content <= actual_tokens and polarity_kept
 
 
 def evaluate_memory_gold(

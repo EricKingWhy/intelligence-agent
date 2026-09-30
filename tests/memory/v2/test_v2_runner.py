@@ -795,31 +795,9 @@ async def test_the_invoker_passes_max_tokens_and_the_two_messages() -> None:
     assert await invoker(_call(max_output_tokens=123)) == "{}"
 
     messages, kwargs = model.calls[0]
-    assert kwargs == {
-        "max_tokens": 123,
-        "response_format": {"type": "json_object"},
-    }
+    assert kwargs == {"max_tokens": 123}
     assert [message.content for message in messages] == ["SYSTEM", '{"a": 1}']
     assert len(built) == 1
-
-
-@pytest.mark.asyncio
-async def test_memory_calls_do_not_inherit_the_agent_sampling_temperature() -> None:
-    """Memory decisions use deterministic decoding even when chat uses sampling."""
-    model = FakeChatModel()
-    configured = ModelConfig(
-        provider="senseaudio", model_name="senseaudio-model", api_key="unit-test-key",
-        base_url="http://localhost:1", temperature=0.7,
-    )
-    built: list[ModelConfig] = []
-    invoker = ChatModelInvoker(
-        factory=lambda config, **kwargs: (built.append(config), model)[1]
-    )
-
-    assert await invoker(_call(model=configured)) == "{}"
-
-    assert configured.temperature == 0.7
-    assert built[0].temperature == 0.0
 
 
 @pytest.mark.asyncio

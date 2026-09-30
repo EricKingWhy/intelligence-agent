@@ -1578,8 +1578,13 @@ export function useSession() {
    *  复用 `/messages` 的 mode='steer' 分支——在途 run 在下个循环头消费；
    *  无在途 run 时后端可能回 launched/错误，与 sendFollowUp 同一条错误通道。 */
   const sendSteer = useCallback(
-    async (sessionId: string, content: string) => {
-      await sendFollowUp(sessionId, content, { amend: { mode: 'steer' } });
+    async (sessionId: string, content: string, rememberAsProceduralRule = false) => {
+      await sendFollowUp(sessionId, content, {
+        amend: {
+          mode: 'steer',
+          ...(rememberAsProceduralRule ? { remember_as_procedural_rule: true } : {}),
+        },
+      });
     },
     [sendFollowUp],
   );

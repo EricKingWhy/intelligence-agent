@@ -678,7 +678,12 @@ def _seed_draft(
         content=content,
         payload=SemanticPayload(
             subject="synthetic fact", fact=content,
-            category=SemanticCategory.PROJECT_FACT,
+            # `project_fact` 只允许 project 作用域（#298 落进 types 的组合规则）；api_edit 探针
+            # 刻意走 user_global 命名空间，所以那里的种子事实必须换一个类目。
+            category=(
+                SemanticCategory.PROJECT_FACT if scope is MemoryScope.PROJECT
+                else SemanticCategory.PROFILE
+            ),
         ),
         importance=0.8,
         strength=0.9,
@@ -765,7 +770,7 @@ async def _run_secret_write_probe(
             "content": safe_content,
             "payload": {
                 "kind": "semantic", "subject": "demo project",
-                "fact": safe_content, "category": "project_fact",
+                "fact": safe_content, "category": "profile",
             },
         }
         payload = {
@@ -773,7 +778,7 @@ async def _run_secret_write_probe(
             "content": secret,
             "payload": {
                 "kind": "semantic", "subject": "api_key",
-                "fact": secret, "category": "project_fact",
+                "fact": secret, "category": "profile",
             },
         }
         async with AsyncClient(

@@ -243,21 +243,38 @@ records, and Qiniu test objects were verified absent; the dedicated Knowledge co
 pre-existed and was neither created nor dropped by the gate. Synthetic Langfuse trace,
 dataset, and experiment evidence was retained with content fields omitted.
 
-### D12 — Make the project-gold gate measure stored facts and raw hybrid Recall@6
+### D12 — Formation owns memory classification
+
+2026-09-29 的 #304 真实金集运行把 `positive_episode` 作为 `semantic` 写入，write precision 为 10/11（0.909），低于冻结的 0.95 门槛。用户于 2026-09-30 批准将分类归属明确为：Formation 决定候选的 `kind`、`tier`、`scope`；Adjudication 只决定 `ADD` / `UPDATE` / `INVALIDATE` / `NOOP` 并可完善内容，不得重分类或改变 tier / scope。每个非空裁决结果必须逐字段保持对应 Formation 候选的这三项值。Runtime 对任一错配 fail-closed，记录脱敏的 `adjudication_classification_mismatch`，且不写入记忆。
+
+此约束落实 PRD §5.2 第 5 项、§6.3 与 #298 R8 / AC3；不修改 PRD 的质量阈值、样本集、重试预算或模型角色。回归位于 `tests/memory/v2/test_v2_executor.py::test_adjudication_cannot_change_candidate_classification`，分别覆盖 kind、tier、scope 错配。旧分支的历史记录不代表此规则已在 `origin/main` 集成。
+
+### D13 — Make the project-gold gate measure stored facts and raw hybrid Recall@6
 
 2026-09-30 review found that the evaluator counted a write case as correct when it had
 the expected labels and at least one persisted record, without checking that the record
 retained the gold fact or penalizing extra writes. It also read Recall@6 from
-`MEMORY_RECALLED`, which records only the items left after token-budget filtering. The
-runner now compares committed ADD/UPDATE records against one synthetic `write_fact`
-anchor per expected write, retaining only match counts in the report. A match requires
-the full ordered gold phrase after case and punctuation normalization; overlapping tokens
-cannot mask changed values or negation. Record action, kind, scope, and source authority
-must also match. The normalized stored content must equal the full gold anchor, allowing
-only an optional leading `Record` / `Recorded` label; a correct phrase followed by a
-contradiction does not count. `write_precision` remains at the PRD's 0.95 threshold and is computed
-over persisted ADD/UPDATE records, including writes observed on cases that expected NOOP.
-A separate `write_target_coverage` check at 0.95 ensures expected writes cannot disappear
+`MEMORY_RECALLED`, which records only the items left after token-budget filtering.
+
+The runner now compares committed ADD/UPDATE records against one synthetic `write_fact`
+anchor per expected write, retaining only match counts in the report. Matching is
+value-preserving, not verbatim. After case and punctuation normalization every gold
+content word must survive into the stored record — in any order, with extra record
+context allowed, and with tokens compared exactly (no stemming or plural folding:
+"summary" does not match "summaries"). The gold polarity must survive with it, and
+polarity is two-way: a record may neither drop a gold negation nor add a negation the
+gold fact does not have, because an added negation reverses the value ("is named Sample
+Harbor" vs "is not named Sample Harbor"). Position-relative words (`before` / `after`)
+are content words for the same reason. This replaced the earlier requirement that the
+normalized stored content equal the full ordered gold anchor, which rejected eight of
+the ten real wording-only paraphrases in the corpus even though every gold value, name,
+date and quantity was intact. Matching is token-set containment, not sequence matching:
+word order is deliberately unconstrained, and numeric punctuation is split into digit
+tokens (`1.2` and `2.1` both yield the same two tokens) — a known leniency recorded here
+rather than silently fixed. Record action, kind, scope, and source authority must still
+match. `write_precision` remains at the PRD's 0.95 threshold and is computed over
+persisted ADD/UPDATE records, including writes observed on cases that expected NOOP. A
+separate `write_target_coverage` check at 0.95 ensures expected writes cannot disappear
 from that denominator. The synthetic gold corpus version advances to 1.9.0; the PRD
 threshold is unchanged.
 

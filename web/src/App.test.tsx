@@ -73,6 +73,7 @@ vi.mock('./components/StepDetail', () => ({
 const H = vi.hoisted(() => ({
   conv: null as ConversationState | null,
   set: null as unknown as (c: ConversationState) => void,
+  submitTask: vi.fn(),
 }));
 
 const NOOP = () => {};
@@ -97,7 +98,7 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
         titlesById: {},
         recoverState: { phase: 'idle' },
         selectSession: NOOP,
-        submitTask: NOOP,
+        submitTask: H.submitTask,
         sendMessage: NOOP,
         cancelStream: NOOP,
         removeSession: NOOP,
@@ -213,6 +214,7 @@ beforeEach(() => {
   cap.props.length = 0;
   eventBudget = EVENT_COUNT;
   H.conv = buildConversation(EVENT_COUNT);
+  H.submitTask.mockClear();
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
@@ -327,5 +329,32 @@ describe('F4 AC5 — 键盘导航与执行', () => {
     });
     expect(document.querySelector('.palette-content')).toBeNull();
     expect(container!.querySelector('.app-regions')!.className).not.toBe(before);
+  });
+});
+
+describe('Composer procedural rule signal (#298 R5)', () => {
+  it('checked rule opt-in reaches the create request payload', async () => {
+    await mount();
+    const input = container!.querySelector<HTMLTextAreaElement>('#composer-input')!;
+    const checkbox = container!.querySelector<HTMLInputElement>(
+      '#remember-as-procedural-rule',
+    )!;
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype, 'value',
+    )?.set;
+
+    await act(async () => {
+      valueSetter!.call(input, '后续始终使用 pnpm');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => checkbox.click());
+    await act(async () => {
+      container!.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click();
+    });
+
+    expect(H.submitTask).toHaveBeenCalledWith(expect.objectContaining({
+      task: '后续始终使用 pnpm',
+      remember_as_procedural_rule: true,
+    }));
   });
 });

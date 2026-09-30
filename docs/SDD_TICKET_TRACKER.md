@@ -69,6 +69,17 @@
 
 ---
 
+## R5 深检 P3 清扫批（2026-09-30，已合并：PR #461 + PR #462 → main `10804b84`）
+
+- **来源**：`R5_FIX_DEEP_CHECK_REPORT_2026-09-30.md`（独立深查）F3/F4/F5 三张 P3（#458/#459/#460）；用户指令「1. 两份简报可以入库。2. 三条 P3 开票修吧」。
+- **交付**：①PR #461（docs/r5-briefs-gate-readings）：两份批次简报 + `verification.map.tsv` `r5-briefs` 行 + Gate-0 读数 7 份入库（#458，含终态 `5b6af76a` 与 FAIL 存证 `db41a766`/`17df2b99`）——CI gate0 绿 35s，merge `7883cfdd`；②PR #462（fix/r5-p3-459-460）：`b5655601` #460（失效说明按 `submitted` 分支，未提交文案逐字未变）/ `d7fe34e1` #459（`Conversation.jumpPulse.test.tsx` 4 用例 + 变异判别）/ `59aaa6fb` 审查跟进（补回 #444 全卡组合锁 + 用例名 + spy try/finally）/ `d04997a7` 台账 3 行（`r5-p3-459-460-b5655601-59aaa6fb.tsv`）——CI gate0 绿 30s，merge `10804b84`。
+- **门禁**：受影响 e2e（n-approval-card + x-permission-section，临时 5286 配置跑完即删）**32 passed**；vitest 全量 1205 passed / 2 failed（唯一文件 = StepDetail.window 已知负载 flake，隔离 **6/6**）；tsc / oxlint（0 错）/ build 绿；gate0 裸全量 6/6（读数 `docs/gate/d04997a7….json`）+ `--since 7883cfdd` 6/6；覆盖闸门 exit 0。
+- **审查**：独立审查 subagent 两轮均 CLEAN（无 P0–P2）；首轮 P3-1（我说改断言时丢失 #444 组合锁，验尸实证 8/8、11/11 假绿）→ 跟进笔修复 → 次轮 B3/B4 变异复验各 1 failed / 5 passed 转红。
+- **关票（§14.12）**：#458 / #459 / #460 全部 CLOSED 带证据评论。
+- **遗留**：远端分支 `docs/r5-briefs-gate-readings`、`fix/r5-p3-459-460` 未删（§14.4 需批准）；`R5_FIX_DEEP_CHECK_REPORT_2026-09-30.md`、`SDD_FLOW_REVIEW_2026-09-27.md`、`docs/gate/98f8241d….json` 保持 untracked（用户处置）。明细见 2026-09 归档末节。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过
@@ -6628,3 +6639,5 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 
 **字节审计残余（2026-09-30，#430 收尾审计登记，另行开票，本票不修）**：受控中文大文件存在 3 个**预存**「转义物化」控制字节（与本次三次行尾事故同类病灶、19 天前引入）——`docs/phase_status/2026-09.md` blob 偏移 276971 / 276987（行 248，2×0x08：词边界记法的转义被物化，`60bdaabc` 2026-09-11 引入、`2447c0ab` 随归档拆分带入）；`docs/SDD_TICKET_TRACKER.md` blob 偏移 77881（行 574，1×0x07：Windows 路径转义被物化，`cf8f3a73` 2026-09-11 引入）。独立字节审计 subagent 全量扫描结论：#430 收尾写入的一切（归档追加节 / tracker #430 块 / 台账行 378 / PRD 两笔 / 6 个实现 blob）**字节级全净**（0 CR、0 NUL、0 控制字符、纯追加前缀成立）；3 个 FAIL 字节均预存，按 Scope Lock 登记不修，最小清理 = 换成 chr(92) 构造的字面记法。
+
+**#298（MEM-V2-2）分类锁收口（2026-09-30，分支 `codex/mem-v2-298-prompt-contract`，commit `1dca6fa3`，台账行 `docs/review_ledger.d/298-durable-formation-8db02e83-1dca6fa3.tsv`）**：Formation/Adjudication 主链路经查已在 origin/main（memory/v2 22 文件）；分支净增量 = 分类锁 kind+tier/scope fail-closed + 显式规则信号 R5 + project_available 契约（7 文件 +191/−12）。pytest 67 passed / vitest 7 passed / 两轴复核无 P0–P2（4×P4 信息级）。R7 按用户暂停、如实未解决；#298/#296 保持 OPEN。分支 12 behind origin/main，未 push/PR（§14.4 待批）。

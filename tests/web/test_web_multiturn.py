@@ -32,14 +32,164 @@ def app_and_client(tmp_path):
 class TestSendMessageEndpoint:
     """POST /api/sessions/{id}/messages 续聊端点。"""
 
+    def test_rule_signal_from_successful_message_request_is_on_user_event(
+        self, tmp_path, monkeypatch,
+    ):
+        """真实 API → SessionService 路径把明确规则信号持久到 genuine user/message。"""
+        from langchain_core.messages import AIMessage
+
+        from agent_harness.session.event import USER_MESSAGE
+        from tests.scripted_model import ScriptedModel
+
+        monkeypatch.setattr(
+            "agent_harness.assembly.create_chat_model",
+            lambda config, **kwargs: ScriptedModel([AIMessage(content="done")]),
+        )
+        app = create_app(Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            model_api_key="test-key",
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            capabilities="{}",
+            enable_cors=False,
+        ))
+
+        with TestClient(app) as client:
+            created = client.post("/api/sessions?launch=false", json={})
+            assert created.status_code == 200, created.text
+            session_id = created.json()["session_id"]
+
+            response = client.post(
+                f"/api/sessions/{session_id}/messages",
+                json={
+                    "content": "后续始终使用 pnpm",
+                    "mode": "queue",
+                    "remember_as_procedural_rule": True,
+                    "budget": {"local": {"max_agent_turns": 1}},
+                },
+            )
+            assert response.status_code == 200, response.text
+
+        user_event = next(
+            event for event in app.state.agent.store.read_events(session_id)
+            if event.type == USER_MESSAGE
+            and event.data.get("content") == "后续始终使用 pnpm"
+        )
+        assert user_event.data["remember_as_procedural_rule"] is True
+
+    def test_rule_signal_from_successful_new_task_resume_is_on_user_event(
+        self, tmp_path, monkeypatch,
+    ):
+        """新任务 resume API 把显式规则信号写到真实 user/message。"""
+        from langchain_core.messages import AIMessage
+
+        from agent_harness.session.event import USER_MESSAGE
+        from tests.scripted_model import ScriptedModel
+
+        monkeypatch.setattr(
+            "agent_harness.assembly.create_chat_model",
+            lambda config, **kwargs: ScriptedModel([AIMessage(content="done")]),
+        )
+        app = create_app(Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            model_api_key="test-key",
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            capabilities="{}",
+            enable_cors=False,
+        ))
+
+        with TestClient(app) as client:
+            created = client.post("/api/sessions?launch=false", json={})
+            assert created.status_code == 200, created.text
+            session_id = created.json()["session_id"]
+
+            response = client.post(
+                f"/api/sessions/{session_id}/resume",
+                json={
+                    "task": "后续始终使用 pnpm",
+                    "remember_as_procedural_rule": True,
+                    "budget": {"local": {"max_agent_turns": 1}},
+                },
+            )
+            assert response.status_code == 200, response.text
+
+        user_event = next(
+            event for event in app.state.agent.store.read_events(session_id)
+            if event.type == USER_MESSAGE
+            and event.data.get("content") == "后续始终使用 pnpm"
+        )
+        assert user_event.data["remember_as_procedural_rule"] is True
+
     def test_messages_endpoint_not_found(self, app_and_client):
         """不存在的 session → 404。"""
         _, client = app_and_client
         response = client.post(
             "/api/sessions/nonexistent-uuid/messages",
-            json={"content": "hello", "mode": "queue"},
+            json={
+                "content": "hello",
+                "mode": "queue",
+                "remember_as_procedural_rule": True,
+            },
         )
         assert response.status_code == 404
+
+    def test_rule_signal_is_a_supported_message_field(self, app_and_client):
+        _, client = app_and_client
+        response = client.post(
+            "/api/sessions/nonexistent-uuid/messages",
+            json={
+                "content": "后续始终使用 pnpm",
+                "remember_as_procedural_rule": True,
+            },
+        )
+        assert response.status_code == 404
+
+    def test_rule_signal_requires_a_real_task_on_create_and_resume(self, app_and_client):
+        _, client = app_and_client
+        create = client.post(
+            "/api/sessions?launch=false",
+            json={"remember_as_procedural_rule": True},
+        )
+        resume = client.post(
+            "/api/sessions/nonexistent-uuid/resume",
+            json={"remember_as_procedural_rule": True},
+        )
+        assert create.status_code == 422
+        assert resume.status_code == 422
+
+    def test_rule_signal_is_rejected_for_same_run_resume(self, app_and_client):
+        _, client = app_and_client
+        response = client.post(
+            "/api/sessions/nonexistent-uuid/resume",
+            json={
+                "task": "继续当前运行",
+                "run_id": "run-1",
+                "resume_basis": "user",
+                "remember_as_procedural_rule": True,
+            },
+        )
+        assert response.status_code == 422
+
+    def test_rule_signal_rejects_blank_user_input(self, app_and_client):
+        _, client = app_and_client
+        create = client.post(
+            "/api/sessions",
+            json={"task": "   ", "remember_as_procedural_rule": True},
+        )
+        resume = client.post(
+            "/api/sessions/nonexistent-uuid/resume",
+            json={"task": "   ", "remember_as_procedural_rule": True},
+        )
+        message = client.post(
+            "/api/sessions/nonexistent-uuid/messages",
+            json={"content": "   ", "remember_as_procedural_rule": True},
+        )
+        assert create.status_code == 422
+        assert resume.status_code == 422
+        assert message.status_code == 422
 
     def test_messages_endpoint_invalid_mode(self, app_and_client):
         """mode 不合法 → 422。"""

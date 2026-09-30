@@ -1062,7 +1062,10 @@ class AgentRuntime:
         appended: list[SessionEvent] = []
         for steer in self._applicable_steers(drained, run_id):
             user_data = {"content": steer.content, "steer_id": steer.steer_id}
-            for key in ("revoke_fact_id", "refutes_event_id", "protected_facts"):
+            for key in (
+                "revoke_fact_id", "refutes_event_id", "protected_facts",
+                "remember_as_procedural_rule",
+            ):
                 value = getattr(steer, key, None)
                 if value is not None:
                     user_data[key] = value
@@ -1254,6 +1257,7 @@ class AgentRuntime:
                             "revoke_fact_id",
                             "refutes_event_id",
                             "protected_facts",
+                            "remember_as_procedural_rule",
                         )
                         if user_input_metadata is not None
                         and key in user_input_metadata

@@ -21,13 +21,12 @@ Formation 把一次 run 压成 `CANDIDATES` 或 `NO_MEMORY`；Adjudication 对**
 3. **语义层**：跨字段搭配（`decision` 与 candidates/skip_reason、`action` 与
    target/result、kind↔payload、tier/scope/project_id）。
 
-# 服务器身份字段不在契约里（§6.2 末句）
+# 身份字段不在契约里（§6.2 末句）
 
 "Runtime replaces all identity fields with trusted request/session identity" 在类型上的
-落地方式是不给模型 `tenant_id` / `user_id` / `id` / `version` / 时间戳等字段；
-`extra="forbid"` 让模型一旦写了就解析失败。`project_id` 是为 scope 组合校验保留的唯一
-例外，但 executor 在解析前总用 `job.trusted.project_id` 覆盖模型给出的值；项目 ID 不从
-模型响应中取得。独立调用解析器、不传可信身份时，仍按原值严格校验。
+落地方式是**根本不给模型位置**：候选里没有 `tenant_id` / `user_id` / `id` / `version` /
+时间戳，`extra="forbid"` 让模型一旦写了就解析失败（"forged identity" 因此不是被忽略，
+而是被拒绝）。
 
 §6.3 说 adjudication 的 `result` 是 "complete MemoryRecordV2 candidate"。本模块读作
 **内容字段齐全**的 draft 形状，而不是含服务器拥有字段的完整信封：§6.1 把 id / version /
@@ -37,7 +36,6 @@ Formation 把一次 run 压成 `CANDIDATES` 或 `NO_MEMORY`；Adjudication 对**
 
 from __future__ import annotations
 
-import copy
 import json
 import re
 from collections.abc import Mapping
@@ -54,7 +52,6 @@ from agent_harness.memory.v2.types import (
     MemoryPayload,
     MemoryScope,
     MemoryTier,
-    TrustedMemoryIdentity,
     assert_content_contract,
 )
 
@@ -185,14 +182,13 @@ class CandidateEvidence(_ContractModel):
 class AdjudicatedContent(_ContractModel):
     """一条"内容字段齐全"的记忆内容（adjudication 的 `result` 用的就是它）。
 
-    身份（tenant/user/project 之外的 id）、版本、时间戳都不在这里——它们由存储层从可信
-    上下文与既有版本补齐（见模块 docstring 末节）。
+    模型响应不带任何身份字段或 `project_id`。项目作用域可先保持未绑定，之后由运行时从
+    `TrustedMemoryIdentity` 注入项目 ID；持久化的 `MemoryDraftV2` 仍要求该字段。
     """
 
     kind: MemoryKind
     tier: MemoryTier = MemoryTier.COLLECTION
     scope: MemoryScope
-    project_id: str | None = Field(default=None, min_length=1)
     content: str = Field(min_length=1, max_length=CONTENT_MAX_CHARS)
     payload: MemoryPayload
     importance: float = Field(ge=0.0, le=1.0)
@@ -203,7 +199,7 @@ class AdjudicatedContent(_ContractModel):
     def _enforce(self) -> Self:
         assert_content_contract(
             kind=self.kind, tier=self.tier, scope=self.scope,
-            project_id=self.project_id, payload=self.payload)
+            project_id=None, payload=self.payload, allow_unbound_project=True)
         return self
 
 
@@ -309,54 +305,19 @@ class AdjudicationBatch(_ContractModel):
 _JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", flags=re.IGNORECASE)
 
 
-def parse_formation_result(
-    raw: str | Mapping[str, Any], *, trusted: TrustedMemoryIdentity | None = None,
-) -> FormationResult:
-    """解析 Formation；运行时调用时用可信上下文替换模型给出的 project_id。"""
-    return _validate(
-        _with_trusted_project_id(raw, trusted, collection="candidates"), FormationResult)
+def parse_formation_result(raw: str | Mapping[str, Any]) -> FormationResult:
+    """把模型的原始输出解析成 `FormationResult`；失败抛 `ModelOutputError`。"""
+    return _validate(raw, FormationResult)
 
 
-def parse_adjudication_result(
-    raw: str | Mapping[str, Any], *, trusted: TrustedMemoryIdentity | None = None,
-) -> AdjudicationResult:
-    """解析单条裁决；运行时调用时用可信上下文替换结果的 project_id。"""
-    return _validate(_with_trusted_project_id(raw, trusted, collection=None), AdjudicationResult)
+def parse_adjudication_result(raw: str | Mapping[str, Any]) -> AdjudicationResult:
+    """把模型的原始输出解析成**一条** `AdjudicationResult`；失败抛 `ModelOutputError`。"""
+    return _validate(raw, AdjudicationResult)
 
 
-def parse_adjudication_results(
-    raw: str | Mapping[str, Any], *, trusted: TrustedMemoryIdentity | None = None,
-) -> list[AdjudicationResult]:
-    """解析整批裁决；运行时调用时用可信上下文替换结果的 project_id。"""
-    return _validate(_with_trusted_project_id(raw, trusted, collection="results"),
-                     AdjudicationBatch).results
-
-
-def _with_trusted_project_id(
-    raw: str | Mapping[str, Any], trusted: TrustedMemoryIdentity | None, *,
-    collection: str | None,
-) -> Any:
-    if trusted is None:
-        return raw
-    payload = _loads(raw)
-    if not isinstance(payload, Mapping):
-        return payload
-    payload = copy.deepcopy(dict(payload))
-    if collection == "candidates":
-        contents = payload.get("candidates")
-    elif collection == "results":
-        contents = [
-            item.get("result") for item in payload.get("results", [])
-            if isinstance(item, dict)
-        ] if isinstance(payload.get("results"), list) else []
-    else:
-        contents = [payload.get("result")]
-    for content in contents if isinstance(contents, list) else []:
-        if isinstance(content, dict) and "scope" in content:
-            content["project_id"] = (
-                trusted.project_id if content.get("scope") == MemoryScope.PROJECT.value else None
-            )
-    return payload
+def parse_adjudication_results(raw: str | Mapping[str, Any]) -> list[AdjudicationResult]:
+    """把模型的原始输出解析成**整批**裁决（顺序即候选顺序）；失败抛 `ModelOutputError`。"""
+    return _validate(raw, AdjudicationBatch).results
 
 
 def _validate(raw: str | Mapping[str, Any], model: type[_ContractModel]):

@@ -16,7 +16,12 @@ from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
 from agent_harness.memory.v2.policy import resolve_evidence_source
 from agent_harness.memory.v2.projection import build_formation_input
-from agent_harness.memory.v2.recall import MemoryV2ContextProvider, run_context_var
+from agent_harness.memory.v2.recall import (
+    MemoryV2ContextProvider,
+    keyword_overlap,
+    keyword_terms,
+    run_context_var,
+)
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
     EvidenceItem,
@@ -260,12 +265,36 @@ def _gold_payload(
     return payload_for(memory_kind, **values).model_dump(mode="json")
 
 
+class _GoldRetrievalIndex(InMemoryMemoryV2Index):
+    """金集夹具的检索替身：词重叠而不是子串。
+
+    真实门禁的检索是 Milvus dense——"旧值 ≠ 新值"的近句（如 Amber Fox / Cedar Lantern）
+    照样命中；进程内实现是子串匹配，那种旧记录永远不可见，UPDATE 的目标于是被运行时的
+    目标校验拒掉（#298 `_validate_adjudication_target`），用例就测不到它本要测的东西。
+    这里复用 `recall.keyword_terms` / `keyword_overlap`（与 `hybrid_search` 的关键词腿同源）
+    打分，忠实复现 dense 检索的可见性，而不是放宽任何生产判定。
+    """
+
+    async def search(self, query, trusted, scope, limit):
+        if not query or limit <= 0:
+            return []
+        terms = keyword_terms(query)
+        scored = [
+            (memory_id, keyword_overlap(content, terms))
+            for memory_id, (content, route) in self._rows.items()
+            if self._route_matches(route, trusted, scope)
+        ]
+        hits = [(memory_id, score) for memory_id, score in scored if score > 0]
+        hits.sort(key=lambda item: (-item[1], item[0]))
+        return hits[:limit]
+
+
 async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
     store = SqliteMemoryV2Store(database_path)
     await store.initialize()
     jobs = SqliteMemoryV2JobStore(database_path)
     await jobs.initialize()
-    index = InMemoryMemoryV2Index()
+    index = _GoldRetrievalIndex()
     service = MemoryV2Service(store, index)
     trusted = TrustedMemoryIdentity("gold-tenant", "gold-user", "gold-project")
     provider_output = _GOLD_MODEL_OUTPUTS[case.case_id]
@@ -353,7 +382,6 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             sensitivity = extras[1] if evidence_role == "user" and len(extras) > 1 else (
                 extras[0] if extras and extras[0] not in {"user", "assistant"} else None
             )
-            project_id = trusted.project_id if scope == "project" else None
             evidence_alias = "e2" if evidence_role == "assistant" else "e1"
             evidence = [{"event_id": evidence_alias, "role": evidence_role,
                          "excerpt": candidate_content}]
@@ -363,8 +391,10 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
                     {"event_id": "e4", "role": "tool", "excerpt": "second successful action"},
                 ])
             candidate_evidence = evidence
+            # 模型输出里没有 `project_id`：Runtime 从可信身份绑定（#298 契约，模型层多写即
+            # `Extra inputs are not permitted`）。这里刻意不喂这个字段，喂了就不是"模型输出"。
             candidate = _candidate(
-                kind=kind, scope=scope, project_id=project_id,
+                kind=kind, scope=scope,
                 content=candidate_content,
                 payload=_gold_payload(
                     kind, candidate_content, category=SemanticCategory(category),
@@ -1548,6 +1578,27 @@ def test_write_fact_matching_keeps_a_gold_negation_in_the_record():
 
     assert write_fact_matches("The user does not want verbose summaries.", gold)
     assert not write_fact_matches("The user wants verbose summaries.", gold)
+
+
+def test_write_fact_matching_rejects_a_negation_the_gold_fact_does_not_have():
+    """新增否定是值反转：极性判定是两向的，孤立地"多一个 not"不算命中。"""
+    gold = "The demo project is named Sample Harbor."
+
+    assert write_fact_matches("The demo project is named Sample Harbor.", gold)
+    assert not write_fact_matches("The demo project is not named Sample Harbor.", gold)
+    assert not write_fact_matches("The demo project is never named Sample Harbor.", gold)
+
+
+def test_write_fact_matching_keeps_before_and_after_as_content_words():
+    """before / after 互换是值反转，不能按功能词丢弃。"""
+    gold = "The approved deploy procedure verifies health checks before production."
+
+    assert write_fact_matches(
+        "The approved deploy procedure verifies health checks before production.", gold,
+    )
+    assert not write_fact_matches(
+        "The approved deploy procedure verifies health checks after production.", gold,
+    )
 
 
 def test_write_fact_matching_keeps_tokens_strict_without_plural_folding():
