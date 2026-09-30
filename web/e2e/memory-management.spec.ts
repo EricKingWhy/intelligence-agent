@@ -235,6 +235,41 @@ test('AC8: a stale version conflict refreshes the row and leaves a dismissible e
   await expect(notice).toHaveCount(0);
 });
 
+for (const { status, detail } of [
+  { status: 403, detail: 'memory list forbidden' },
+  { status: 404, detail: 'memory list not found' },
+]) {
+  test(`AC8: list HTTP ${status} stays visible and can recover after retry`, async ({ page }) => {
+    let unavailable = true;
+    let calls = 0;
+    await routeApi(page, {
+      memories: [semantic(`m-list-${status}`, `list record after ${status}`)],
+      onMemoriesGet: (route) => {
+        calls += 1;
+        if (!unavailable) return false;
+        return route.fulfill({
+          status,
+          body: JSON.stringify({ detail }),
+          contentType: 'application/json',
+        }).then(() => true);
+      },
+    });
+    await page.goto('/');
+    await openPanel(page);
+
+    const error = panel(page).locator('.memory-error');
+    await expect(error).toContainText(detail);
+    await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
+    await expect(panel(page).locator('.memory-degraded')).toHaveCount(0);
+
+    unavailable = false;
+    await error.getByRole('button', { name: '重试' }).click();
+    await expect(panel(page).locator('.memory-row')).toContainText(`list record after ${status}`);
+    await expect(error).toHaveCount(0);
+    expect(calls).toBeGreaterThan(1);
+  });
+}
+
 test('AC8: retry after a failed next page fetches that same offset', async ({ page }) => {
   const requestedOffsets: string[] = [];
   let nextPageAttempts = 0;
