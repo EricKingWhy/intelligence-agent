@@ -138,6 +138,29 @@ describe('wsStreamResponse — WS 帧重编码为 SSE 文本', () => {
     expect((await readEvent(reader))?.type).toBe('run/started');
   });
 
+  it('#420 AC1：每条服务帧（含 server_ping）都通知活性观察者——心跳计入活性', () => {
+    // 审批等待期后端零事件、唯一下行是 2s 一次的 server_ping；观察者（useSession
+    // 的 lastFrameAtRef）据此让停摆看门狗知道「链路活着，是人（模型/审批）在安静」，
+    // 不再把 10s 无事件误判成连接僵死而掐断重连。Slack RTM 心跳语义同款。
+    const liveness = vi.fn();
+    const res = wsStreamResponse(sid, -1, liveness);
+    const reader = res.body!.getReader();
+    socket = FakeWebSocket.instances[0];
+    socket.fireOpen();
+
+    socket.fire({ type: 'server_ping' });
+    expect(liveness).toHaveBeenCalledTimes(1);
+
+    socket.fire({ type: 'event', event: { type: 'run/started', seq: 1 } });
+    expect(liveness).toHaveBeenCalledTimes(2);
+
+    // 非 JSON 帧不算：它没有证明任何东西（连"服务端还活着"都证不了）
+    socket.fireRaw('<<not json>>');
+    expect(liveness).toHaveBeenCalledTimes(2);
+
+    void reader.cancel().catch(() => {});
+  });
+
   it('非 JSON 帧被忽略，不污染流也不抛错', async () => {
     const reader = openStream();
     socket.fireRaw('<<not json>>');

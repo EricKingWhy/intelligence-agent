@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
 from agent_harness.session import service as service_module
+from agent_harness.session.approval import InteractiveCallbackHolder
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.web.app import create_app
 
@@ -109,8 +110,15 @@ class TestPermissionModeRouting:
         # auto_approve=true → web 不注入 deny callback → None（assembly 默认 auto-approve）
         assert calls[0]["approval_callback"] is None
 
-    def test_auto_approve_backward_compat_false(self, captured_build):
-        """只传 auto_approve=false → workspace-write + deny callback（旧行为）。"""
+    def test_auto_approve_false_prompts_approval_queue(self, captured_build):
+        """只传 auto_approve=false → workspace-write + 交互式审批队列（#423）。
+
+        旧语义是 deny callback（"manual approval not yet wired"）：用户承诺的是
+        "每一步问我"，收到的却是"全部拒绝"——同一份声明的两种读法里，弹审批卡
+        才兑现承诺。#423 裁定：该组合改走 interactive 路由，与显式选档位的
+        会话同一待遇；deny 路由从此只留给直接调用 build_approval_callback 的
+        历史组合，web 两条路径（创建/续聊）都不再进。
+        """
         client, calls = captured_build
         with client.stream(
             "POST", "/api/sessions",
@@ -119,12 +127,10 @@ class TestPermissionModeRouting:
             assert resp.status_code == 200
             _consume_sse(resp)
         assert calls[0]["permission_mode"] == PermissionPolicy.WORKSPACE_WRITE
-        # auto_approve=false → web 注入 deny callback（manual approval not yet wired）
         cb = calls[0]["approval_callback"]
-        assert cb is not None
-        import asyncio
-        result = asyncio.new_event_loop().run_until_complete(cb(None))
-        assert result.approved is False
+        assert isinstance(cb, InteractiveCallbackHolder), (
+            "auto_approve=false 应弹审批卡（interactive 路由），而不是静默 deny"
+        )
 
     def test_permission_mode_overrides_auto_approve(self, captured_build):
         """两者同传 → permission_mode 优先。"""
@@ -134,7 +140,7 @@ class TestPermissionModeRouting:
             json={
                 "task": "t",
                 "permission_mode": "danger-full-access",
-                "auto_approve": False,  # 若 auto_approve 赢就会变 deny
+                "auto_approve": False,  # 若 auto_approve 赢就会弹审批卡（#423）
             },
         ) as resp:
             assert resp.status_code == 200

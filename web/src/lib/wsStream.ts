@@ -78,8 +78,19 @@ function wsEndpoint(): string {
  * @param sessionId 目标会话
  * @param afterSeq  游标：≤ 该 seq 的事件不再下发给上层（-1 = 从头发）。用于接流/续传，
  *                  让快照只补「本地还没有的」那一截，避免历史被重复投影。
+ * @param onLiveness 每条服务帧（快照/事件/心跳/错误）到达时的活性通知（#420）。
+ *                   审批等待期后端零事件、唯一下行是 2s 一次的 server_ping——把它
+ *                   排除在活性之外，上层停摆看门狗会把「人在决策」误判成「连接僵死」
+ *                   而掐断一条被心跳证明存活的连接（Slack RTM 心跳语义：心跳计入
+ *                   活性，才能分清「断线」与「大家都在安静」）。本模块**不**把心跳
+ *                   编码进 SSE 流（不污染事件管道），只走这条侧信道。非 JSON 帧
+ *                   不算活性——它什么都没证明。
  */
-export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
+export function wsStreamResponse(
+  sessionId: string,
+  afterSeq = -1,
+  onLiveness?: () => void,
+): Response {
   const encoder = new TextEncoder();
   let sock: WebSocket | null = null;
   let closed = false;
@@ -209,6 +220,9 @@ export function wsStreamResponse(sessionId: string, afterSeq = -1): Response {
           return; // 非 JSON 帧（理论上不存在）：忽略，不污染流
         }
         serverFrames += 1;
+        // #420：JSON 解析成功的服务帧 = 链路存活的证据（心跳尤其重要——它是
+        // 审批等待期唯一的服务帧）。放在 switch 之前：任何帧类型都算。
+        onLiveness?.();
 
         switch (frame.type) {
           case 'server_ping':

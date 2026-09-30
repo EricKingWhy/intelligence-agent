@@ -884,8 +884,8 @@ class SessionService:
         # session/started 落进事件流。续聊路径（resume_and_launch）读不到创建请求，
         # 只能从这里派生——不落盘就等于用户在创建时做的选择从第二轮起静默失效。
         # 不显式声明 → 不写键 → 与历史会话逐字不可区分（与模型初始值同一条规矩：
-        # 有才写）。auto_approve 只在「未声明档位」时才成为唯一决策依据（deny 路由），
-        # 但同样必须落盘，否则那条路由的"不自动批准"承诺在续聊时消失。
+        # 有才写）。auto_approve=false 且未选档位时是审批路由（#423 弹审批卡）的
+        # 唯一决策依据，但同样必须落盘，否则那条承诺在续聊时消失。
         session_start_data: dict[str, Any] = dict(initial_model_data)
         if permission_mode_explicit:
             session_start_data[SESSION_PERMISSION_MODE_KEY] = permission_mode.value
@@ -895,9 +895,14 @@ class SessionService:
         _, wiring = await self._get_wiring()
         await self._ensure_stores()
 
-        # 审批路由（三种，保留向后兼容）
+        # 审批路由（三种，保留向后兼容）。#423：显式声明 auto_approve=false（未选
+        # 档位）也走 interactive——用户承诺的是"每一步问我"，deny（全部拒绝）不兑现
+        # 承诺；danger 档仍是"无需审批"，优先于 auto_approve。
         interactive = (
-            permission_mode_explicit
+            (
+                permission_mode_explicit
+                or (auto_approve_explicit and not auto_approve)
+            )
             and permission_mode != PermissionPolicy.DANGER_FULL_ACCESS
         )
 
@@ -1312,10 +1317,12 @@ class SessionService:
             if effective_mode is None:
                 permission_mode = PermissionPolicy.WORKSPACE_WRITE
                 if effective_auto is False:
-                    # deny 路由（创建时声明了"不自动批准"且未选档位）也只能从事件流复原：
-                    # 它同样不落盘的话，第二条消息起会变成全自动批准——与该路由的承诺相反。
+                    # #423：创建时声明"不自动批准"（未选档位）→ 续聊同样弹审批卡
+                    # （interactive 路由），与创建路径同判据，不在这里发明第二套判定。
+                    # （#423 之前这里复原的是 deny 路由——"每一步问我"被降级成
+                    # "全部拒绝"，同样不兑现承诺。）
                     approval_callback = await self._build_approval_callback(
-                        interactive=False,
+                        interactive=True,
                         auto_approve_explicit=True,
                         permission_mode_explicit=False,
                         auto_approve=False,
@@ -2823,7 +2830,7 @@ class SessionService:
         auto_approve: bool,
         session_id: str,
     ) -> ApprovalCallback | None | _InteractiveCallbackHolder:
-        """构建审批 callback（三种路由，与原 handler 行为完全一致）。
+        """构建审批 callback（三种路由；#423 起 interactive 判据含显式 auto_approve=false）。
 
         委托 ``session/approval.py`` 的模块级函数（候选 2）；把本层持有的
         settings / approval_queues 两处依赖显式传入，签名与调用点保持不变。
