@@ -120,11 +120,17 @@ independent Correctness/Security and Standards reviews passed after one P3 error
 the standards-source review also passed after adding official references and exact local source
 citations. Review ranges are recorded in `docs/review_ledger.d/421-mem-v2-1-index-rebuild.tsv`
 and the merge attribution in `docs/review_ledger.d/422-mem-v2-297-merge-8daf6b62.tsv`.
-The branch is synchronized through `origin/main` `e31cb654` (merge `7e1d77ce`). On that merged
-tree, the focused Python regression set passed 788 tests; the web projection test passed 212 tests;
-`npm run build` succeeded. `scripts/check_review_coverage.py` exits 0. The older merge report at
-`8daf6b62` is retained as historical evidence of its 5/6 coverage failure. Final Gate-0 on commit
-`621158aa` / tree `6227bbaba154bba2633e066b284d65c1c3f3d1fe` passed 6/6 in 18.1 seconds; its
-machine record is `docs/gate/621158aa8867b07b77fc536c3b8fcb57c2f2b4e8.json`. No live Milvus rebuild
-is claimed. Actual execution remains an operator action after all writers to the configured
-collection are stopped, including writers in other clones.
+The branch is synchronized through `origin/main` `89bf106a` (latest merge `3e8e925a`). On the
+combined code tree, the focused Python regression set passed 788 tests; the web projection test
+passed 212 tests; and `npm run build` succeeded. A clean full-suite equivalent on commit
+`49308fd9` (source tree unchanged by the later docs-only main sync; cleared `PYTHONPATH`, project
+`.venv` interpreter, `pytest tests/ -q --no-header -p no:cacheprovider`) passed 4,836 tests, with
+31 skipped, 51 deselected, and 9 existing warnings. The repository
+clean-runner script could not start because this machine's `bash` resolves to WSL without
+`/bin/bash`; the PowerShell invocation used the same environment and pytest arguments. The latest
+`scripts/check_review_coverage.py` exits 0. The older `8daf6b62` merge report remains as historical
+5/6 coverage-failure evidence. Final Gate-0 on commit `0f8b1ea5` / tree
+`59e55a378acad91e0236466cc19397c1f7ab0f41` passed 6/6 in 26.0 seconds; its machine record is
+`docs/gate/0f8b1ea5941fff7b91408c667234386fbde0ade6.json`. No live Milvus rebuild is claimed.
+Actual execution remains an operator action after all writers to the configured collection are
+stopped, including writers in other clones.
