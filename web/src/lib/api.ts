@@ -170,7 +170,7 @@ export interface BudgetPayload {
   local?: { max_agent_turns?: number };
   /** run 作用域预算（`#312`/`#313` 落地后开放；T4 交付前注释声明"类型里也不预留"
    *  的前提已不再成立，遂随 #426 补上——只声明 UI 真正会发送的维，其余维
-   *  （model_requests / cost_usd / per-tool / deadline）等到有入口再加，别预留。
+   *  （model_requests / cost_usd / per-tool）等到有入口再加，别预留。
    *
    *  #422：`budget.run` 与 launch=false **互斥**（422）——只在启动 run 的请求上
    *  发送。 */
@@ -178,6 +178,12 @@ export interface BudgetPayload {
     /** 本 run 的 Agent turn 绝对上限（正整数；`11 §6.1`）。到顶 → run/paused
      *  （非终态），PausedPanel 抬高同一维的绝对 ceiling 后同 run 恢复。 */
     max_agent_turns_total?: number;
+    /** 本 run 的总 token 绝对上限（正整数；#426 起 UI 有入口，与 turns 同一
+     *  「到顶 → 暂停 → 恢复抬高」闭环）。 */
+    max_total_tokens?: number;
+    /** 本 run 的绝对截止时刻（#315 契约）：RFC 3339 UTC 文本。datetime-local 的
+     *  本地读数由映射层 `toCreateBudget` 换算成 UTC 瞬时（朴素时间后端 422）。 */
+    deadline_at?: string;
   };
 }
 
