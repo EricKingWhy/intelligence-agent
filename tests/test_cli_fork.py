@@ -155,6 +155,44 @@ async def test_from_message_out_of_range_error_is_dual_annotated(
     assert "[1, 3]" in message, f"错误信息应列出合法锚点 seq 清单：{message}"
 
 
+# ── #445：不存在 / 空日志与序数越界分开报 ────────────────────────────
+#
+# JsonlSessionStore.read_events 对不存在的会话返回 []（不抛 SessionNotFound），
+# 解析器先于 fork_session 运行——原「Session 'x' 不存在或事件日志为空」措辞
+# 不可达，缺会话被误报成「--from-message 超出范围」。两类不可分叉事实
+# （会话不在 / 一条事件都没有）都该按本来面目报，而不是伪装成越界。
+
+
+async def test_fork_command_missing_session_reports_not_found(
+    tmp_path: Path,
+) -> None:
+    """不存在的会话 id → 「不存在或事件日志为空」，不是序数越界。"""
+    from agent_harness.session.fork import ForkBoundaryError
+
+    with pytest.raises(ForkBoundaryError, match="不存在或事件日志为空"):
+        await fork_command(
+            "nope", from_message=1, no_summary=True,
+            workspace_dir=str(tmp_path), write=lambda _line: None,
+        )
+
+
+async def test_fork_command_empty_session_same_message(
+    tmp_path: Path,
+) -> None:
+    """存在但 0 事件的会话与不存在同一措辞（同一不可分叉事实）。"""
+    from agent_harness.session.fork import ForkBoundaryError
+
+    empty_log = tmp_path / "sessions" / "empty" / "events.jsonl"
+    empty_log.parent.mkdir(parents=True)
+    empty_log.touch()
+
+    with pytest.raises(ForkBoundaryError, match="不存在或事件日志为空"):
+        await fork_command(
+            "empty", from_message=1, no_summary=True,
+            workspace_dir=str(tmp_path), write=lambda _line: None,
+        )
+
+
 def test_parse_fork_args() -> None:
     args = _parse_fork_args(["sess-1", "--from-message", "3"])
     assert (args.session_id, args.from_message, args.no_summary) == (

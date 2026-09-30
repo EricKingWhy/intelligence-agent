@@ -389,8 +389,11 @@ export function useSession() {
   // #420 AC1：WS 传输层的活性观察者——每条服务帧（含 2s 一次的 server_ping）
   // 都刷新停摆基准。审批等待期后端零事件、唯一下行是心跳；不把心跳计入活性，
   // 停摆看门狗就会把「人在决策」掐死成「连接僵死」（误判重连 → give-up → viewing）。
-  // 事件帧本就经 onEvent 刷新同一 ref，这里幂等；SSE 降级路径没有心跳、不调
-  // 它，停摆检查在那里照旧生效。
+  // 事件帧本就经 onEvent 刷新同一 ref，这里幂等。#440：因此**每个**接流点
+  // （submit / 重连 / truncated 重建 / resume、续聊 ack 与 launched、恢复、flush）
+  // 都必须把它作为 wsStreamResponse 第三参带上——漏一处，那条流在审批等待期就
+  // 会 10s 假停摆；SSE 降级路径由 wsStream 的降级读循环按「读到字节即活性」走
+  // 同一侧信道（见 lib/wsStream.ts）。useSession.liveness.test.tsx 逐点锁覆盖度。
   const markStreamFrame = useCallback(() => {
     lastFrameAtRef.current = Date.now();
   }, []);
@@ -1133,7 +1136,7 @@ export function useSession() {
             const conv = conversationRef.current;
             const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
             lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
-            attachLiveStream(wsStreamResponse(sessionId, cursor), myGen, conversationRef.current);
+            attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
             return;
           }
           if (outcome.kind === 'retry-queue') {
@@ -1188,7 +1191,7 @@ export function useSession() {
         const conv = conversationRef.current;
         const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
         lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
-        attachLiveStream(wsStreamResponse(sessionId, cursor), myGen, conversationRef.current);
+        attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
       };
 
       try {
@@ -1205,7 +1208,7 @@ export function useSession() {
         setError(`续聊失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream],
+    [attachLiveStream, markStreamFrame],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
@@ -1499,7 +1502,7 @@ export function useSession() {
         const conv = conversationRef.current;
         const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
         lastAppliedSeqRef.current = cursor;
-        attachLiveStream(wsStreamResponse(sessionId, cursor), gen, conversationRef.current);
+        attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), gen, conversationRef.current);
         // 悬挂的 promise 仍会落定：真是事件流就什么都不做，否则说明判错了。
         void pending
           .then((late) => {
@@ -1521,7 +1524,7 @@ export function useSession() {
         fail(`恢复失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, selectSession],
+    [attachLiveStream, selectSession, markStreamFrame],
   );
 
   /** T7 #137：切换会话当前模型（POST /api/sessions/{id}/model）。
@@ -1618,7 +1621,7 @@ export function useSession() {
             const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
             lastAppliedSeqRef.current = cursor;
             setMode({ kind: 'live', sessionId });
-            attachLiveStream(wsStreamResponse(sessionId, cursor), gen, conversationRef.current);
+            attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), gen, conversationRef.current);
             // 这条 promise 仍会悬挂到 run 结束。**窗外落定必须照样消费**：判别是
             // 推断（idle/404/409 都是极短 JSON，攒不住），推断错了不能静默——
             // 迟到的 idle 会白白接流到假「连接中断」，迟到的 409/404 会被吞成
@@ -1677,7 +1680,7 @@ export function useSession() {
         setError(`投递失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream],
+    [attachLiveStream, markStreamFrame],
   );
 
   /** ADR-0030 D11：取消一条尚未消费的排队/引导项。后端写 `queue/cancelled`

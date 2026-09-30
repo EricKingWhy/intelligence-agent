@@ -84,13 +84,15 @@ test('AC1/AC2：项目 → 会话层级按账本手工序渲染；未分组区�
 
   await page.goto('/');
 
-  // 项目块存在且顺序 = 注册表顺序（新项目前插 → p1 在 p2 前）
-  const headers = await page.locator('.rail-project-title').allTextContents();
-  expect(headers).toEqual(['项目 alpha', '项目 beta']);
+  // 项目块要等 GET /api/projects 落地才渲染（useProjects 初始 `[]`）——裸读会竞逐成
+  // []（#442 族2），改自动重试断言锚住 fetch 已落地；期望值原样保留。
+  await expect(page.locator('.rail-project-title')).toHaveText(['项目 alpha', '项目 beta']);
 
-  // AC1：项目内顺序 = 账本手工序（活动时间序是它的反序）
-  expect(await railOrder(page, '项目 alpha')).toEqual(['s2', 's1']);
-  expect(await railOrder(page, '项目 beta')).toEqual(['s3']);
+  // AC1：项目内顺序 = 账本手工序（活动时间序是它的反序）。
+  // 会话行是**第二份**载荷（GET /api/sessions）落地后才存在的 DOM——上面那条锚只
+  // 保证 projects 落了，这里同样用重试断言（#442 族2 同机制加固）。
+  await expect.poll(() => railOrder(page, '项目 alpha')).toEqual(['s2', 's1']);
+  await expect.poll(() => railOrder(page, '项目 beta')).toEqual(['s3']);
 
   // AC2：未分组区存在，只装未分组会话，计数正确
   await expect(ungrouped(page)).toContainText('未分组');
@@ -142,7 +144,8 @@ test('AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排', as
     projects: [{ id: 'p1', path: 'D:/repos/alpha', title: '项目 alpha', session_ids: ['s1', 's2', 's3'] }],
   });
   await page.goto('/');
-  expect(await railOrder(page, '项目 alpha')).toEqual(['s1', 's2', 's3']);
+  // 同 AC1：会话行要等 sessions 载荷落地才存在（#442 族2 同机制加固）。
+  await expect.poll(() => railOrder(page, '项目 alpha')).toEqual(['s1', 's2', 's3']);
 
   // 重命名：行内输入，Enter 提交
   //
@@ -285,12 +288,11 @@ test('项目列表端点失败时不隐藏会话：全部落到未分组 + 一�
 
   await page.goto('/');
   await expect(page.locator('.rail-error')).toContainText('项目列表加载失败');
-  expect(await ungrouped(page).locator('.session-item-id').allTextContents()).toEqual([
-    's1',
-    's2',
-    's3',
-    'free-1',
-  ]);
+  // `.rail-error` 锚只保证 projects 载荷已（失败）落定；会话行是另一份 GET /api/sessions
+  // 载荷，同样用重试断言（#442 族2 同机制加固）。
+  await expect
+    .poll(() => ungrouped(page).locator('.session-item-id').allTextContents())
+    .toEqual(['s1', 's2', 's3', 'free-1']);
   await expect(page.getByRole('button', { name: '重试' })).toBeVisible();
 
   // AC6：`SessionSummary.workspace` 的唯一运行时用途就在这里——解释"自称属于某项目、
