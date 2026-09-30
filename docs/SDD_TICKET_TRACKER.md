@@ -18,13 +18,13 @@
 | --- | --- | --- | --- | --- |
 | Spec | #296 | OPEN / `ready-for-agent` | Production Long-Term Memory V2 产品与工程合同 | — |
 | MEM-V2-1 | #297 | CLOSED / integrated | Typed Memory lifecycle vertical slice | — |
-| MEM-V2-2 | #298 | CLOSED / integrated | Durable Formation and Adjudication | #297 |
+| MEM-V2-2 | #298 | **OPEN**（GitHub 实况：从未关闭；R7 敏感自陈未解决）/ integrated | Durable Formation and Adjudication | #297 |
 | MEM-V2-3 | #299 | CLOSED / integrated | Cross-session Profile and hybrid recall | #297 |
 | MEM-V2-4 | #300 | CLOSED / integrated | Explicit commands and governance API | #297 |
 | MEM-V2-5 | #301 | CLOSED / integrated | Memory management Web UI | #300 |
 | MEM-V2-6 | #302 | CLOSED / integrated (PR #339) | Privacy observability and quality evaluation | #298, #299, #300 |
 | MEM-V2-7 | #303 | COMPLETED / integrated (PR #374); cutover and AC8 verified | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
-| MEM-V2-8 | #304 | OPEN / unblocked | Final real Gate and release evidence | #301, #302, #303 |
+| MEM-V2-8 | #304 | OPEN / **branch ready + PR #473**；live 真实金集门禁待用户重认证 | Final real Gate and release evidence | #301, #302, #303 |
 
 **事实源与边界（截至 2026-09-27）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。`#297`–`#303` 的实现均已集成；`#303` 的真实 cutover、保留证明与 AC8 smoke 已完成，最终证据见 `docs/evidence/memory-v2-*2026-09-27.json`。`#304` 已解除依赖并可开始。
 
@@ -37,6 +37,8 @@
 > 「MEM-V2-2（`#298`）T1–T6b 施工记录」段。
 
 > **当前状态（2026-09-25）**：`#297`–`#301` 已集成并 CLOSED；#299 AC10 的冻结语料 Recall@6=0.95、真实 Milvus hybrid 检索及证据已随 `fbb8a98c` 集成，GitHub issue 已关闭。`#302` / `#303` 已解除阻塞，`#304` 仍等后二票。逐票历史记录保留在下文。
+> **当前状态（2026-09-30，#304 分支就绪）**：MEM-V2-8（#304）分支 `codex/mem-v2-304-fusion-candidate` 已就绪并推送（PR #473）：先回后正 merge `6aff387f` → 审查修复 `946d240c` → 残余 P3 处置 `e4ab6e0d`（tree `f7021232`）→ 台账 `943aca74` → Gate-0 落盘 `88672f41`。读数：`tests/memory/v2 tests/evaluation` 925 passed；重车道 5 failed / 5003 passed / 31 skipped / 51 deselected（564.10s），唯一红面 = `tests/web/test_web_phase5_permission.py::TestPermissionModeRouting` 5 例**既有红**（三条件证据在案、登记待用户裁决，本轮不越 scope 修）；Gate-0 6/6 PASS（`docs/gate/943aca74bdb67309fdec0733a8bf6f2cce2e5c78.json`，另 `--since origin/main --no-record` 6/6）；覆盖闸门 exit 0。两轴独立审查（Correctness + Standards）发现 1×P1 + 1×P2 已修复并由同一代理复验 FIXED；台账行 `432`/`433`/`434`。**未完成**：live 真实金集门禁待用户重认证 `FALLBACK_MODEL_API_KEY` 后在冻结树上跑；#304 未关单；#296 与 #298（GitHub 实况 OPEN，此前表中 CLOSED 系过期项）保持 OPEN。明细见 `docs/phase_status/2026-09.md` L2419。
+
 > **当前状态（2026-09-27，#302 集成后）**：#302 已随 PR #339 集成到 `main`（merge `3394d46925d86ab5b631f007fd5dc4cbb44ab8ae`），GitHub issue 已 CLOSED；`main` 的树 `222860fc922bb124994a838f00030e5fe3a6a65b` 与通过验证的 PR 分支树相同。全量 pytest 4402 passed / 14 skipped / 51 deselected，focused Memory V2 tests 50 passed，Ruff 与 Playwright control-row 24 passed；必需 Gate-0 成功记录见 `docs/gate/bb5b4828f842cae46eebc90e427066cde1ff803a.json`，review coverage exit 0。AC9 由当前 LoCoMo F1=1.0 和完整官方 LongMemEval 数据集的已完成 smoke F1=0.5 支持；两次后续 LongMemEval 重跑遇到答题端 HTTP 500，未产生分数，已如实记录。真实服务清理门禁 6/6 通过。下一票 `#303` 已解锁；`#304` 只等待 `#303`。旧 Memory 数据仍保留，clean-slate 尚未执行。
 > **历史复审记录（截至 tip 7854b75b；已由上方最新状态取代）**：#302 在 `codex/mem-v2-6-quality-repair`（tip `7854b75b`）完成 tip 双轴独立审查并记账（`docs/review_ledger.d/213-mem-v2-6-302-tip-review.tsv`，范围 `5e1e9a01..7854b75b` = 11 代码提交 + merge `60220117` conflict delta）。Spec 轴 PASS-WITH-FINDINGS（P0:0 P1:0 P2:0 P3:3）；Standards 轴子代理因推理网关基础设施故障 5 次中断（HTTP 422 + 502×4，均无结论行）⇒ 按 §8.3 第 4 条触发记录在案的替代过程（Primary 有界审查，P0:0 P1:0 P2:1 P3:2），核心红线全过：凭证零泄漏 / 报告内容-free / Langfuse 对 public 内容 disabled / AC9 选例 fail-closed / 0.5 token-F1 门槛未放宽 / 临时 collection cleanup 真实验证。覆盖闸门复跑 **exit 0**。票面保持 **OPEN**：`docs/evidence/` 两份期限失效报告（自证身份 c4c02e52/64dce42e）只作失败诊断，真实 smoke 证据缺口（tip 无新报告）需待模型/embedding 额度恢复后在冻结 tip 重跑两个 smoke 才能闭合，不下结、不关单，未获授权不做 push/PR/merge。
 > **历史烟测记录（代码身份 87a02d68；已由上方最新状态取代）**：在代码身份 `87a02d68` 的干净 tip 上，LoCoMo 与 LongMemEval 严格选例 smoke 均完成并确认临时 Milvus collection 清理，但都未过答案 F1 门槛（均为 0）；LoCoMo 权威答案词已进入注入 profile，LongMemEval 权威记忆仍未被注入。脱敏报告分别为 `memory-v2-public-smoke-locomo-071fbde5.json`、`memory-v2-public-smoke-longmemeval-5daa9284.json`。已修复 adapter 丢失 LongMemEval `question_date` 与 LoCoMo 正向样例额外拒答指令，并加入只含计数/排名的诊断；针对性测试 36 passed、Ruff 和 `git diff --check` 通过。下一步需提交这些更改后在干净新 tip 重跑两个真实 smoke；#302 仍 OPEN，不推送、不 PR、不合并、不关单。
