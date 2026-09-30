@@ -437,24 +437,53 @@ def test_run_budget_on_launch_false_rejected_loudly(tmp_path):
     assert ok.status_code == 200, ok.text
 
 
+# launch=false × budget.run 的两条**规格内拒绝者**的文案判据（#446 判别力修正）：
+_MUTEX_DETAIL = "budget.run 与 launch=false 互斥"  # #422 handler 级检查（web/app.py）
+_COST_UNENFORCEABLE = "不自报归属成本"  # validate_ceiling_enforceability（agent/run_budget.py）
+
+
 @pytest.mark.parametrize(
-    ("dim", "value"),
+    ("dim", "value", "detail_markers"),
     [
-        ("max_agent_turns_total", 1),
-        ("max_model_requests", 1),
-        ("max_total_tokens", 1),
-        ("max_cost_usd", "0.01"),
-        ("deadline_at", "2099-01-01T00:00:00Z"),
-        ("tool_call_limits", {"read": 3}),
+        pytest.param("max_agent_turns_total", 1, (_MUTEX_DETAIL,),
+                     id="max_agent_turns_total-rejected-by-mutex"),
+        pytest.param("max_model_requests", 1, (_MUTEX_DETAIL,),
+                     id="max_model_requests-rejected-by-mutex"),
+        pytest.param("max_total_tokens", 1, (_MUTEX_DETAIL,),
+                     id="max_total_tokens-rejected-by-mutex"),
+        pytest.param("max_cost_usd", "0.01",
+                     (_MUTEX_DETAIL, _COST_UNENFORCEABLE),
+                     id="max_cost_usd-rejected-by-cost-enforceability-or-mutex"),
+        pytest.param("deadline_at", "2099-01-01T00:00:00Z", (_MUTEX_DETAIL,),
+                     id="deadline_at-rejected-by-mutex"),
+        pytest.param("tool_call_limits", {"read": 3}, (_MUTEX_DETAIL,),
+                     id="tool_call_limits-rejected-by-mutex"),
     ],
 )
-def test_run_budget_any_dimension_on_launch_false_rejected(tmp_path, dim, value):
+def test_run_budget_any_dimension_on_launch_false_rejected(
+    tmp_path, dim, value, detail_markers,
+):
     """#422：launch=false × `budget.run` **任一维**非空都是同一条 422（组合全覆盖）。
 
     判定线在"带没带 run"这一层（handler 级、零副作用），不逐维放行——某个维度
     单独看再"无害"（比如 deadline）也不构成豁免：launch=false 没有 run 可挂，
     任何维度都不可能被消费。`max_tool_calls` 非空在 pydantic `model_validator`
     （形状层、更早）就被拒，不在此列。
+
+    拒绝**理由**按维断言（#446：原来六维只看状态码，判别不了是谁在拒——把
+    #422 互斥检查整个删掉，`max_cost_usd` 维仍被既有护栏 422，用例照样绿，
+    属假覆盖）：
+
+    * 五维的预期拒绝者是 **#422 互斥检查**（`detail` 含"budget.run 与
+      launch=false 互斥"）。它们是本用例对互斥检查的**判别力**所在：该检查
+      一旦缺席，这五维会拿到 200 ⇒ 参数化转红。
+    * `max_cost_usd` 的规格内拒绝者有**两条**，文案二选一出现即算锁住：
+      现状是互斥检查先挡（`detail` = 互斥文案）；互斥检查缺席时由成本上限
+      **可执行性**护栏 `validate_ceiling_enforceability` 接管（`detail` 含
+      "不自报归属成本"——本链 Provider 不自报归属成本，这条 ceiling 无法
+      强制执行）。所以本维**不承担**互斥检查的判别力（那是五维的职责），
+      只钉"launch=false 携带 `budget.run.max_cost_usd` 必被某条规格内护栏
+      以明确理由拒绝、绝不静默收下"。
     """
     app, client = _web(tmp_path)
     probe = _ModelProbe()
@@ -465,6 +494,11 @@ def test_run_budget_any_dimension_on_launch_false_rejected(tmp_path, dim, value)
             params={"launch": "false"},
         )
     assert resp.status_code == 422, f"{dim}={value} 应被拒：{resp.text}"
+    detail = resp.json()["detail"]
+    assert any(marker in detail for marker in detail_markers), (
+        f"{dim} 的拒绝理由不在预期集合内：{detail!r}"
+        f"（预期含 {' 或 '.join(detail_markers)}）"
+    )
     _assert_rejected_without_side_effects(app, probe)
 
 
