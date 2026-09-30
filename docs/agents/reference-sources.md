@@ -55,6 +55,9 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 | Mem0（`mem0ai/mem0`） | 生产级「记忆层」实现 | 增量抽取管线、向量 + 图混合存储 |
 | Graphiti（`getzep/graphiti`） | 时序知识图谱 | bi-temporal 建模、事实失效 / 矛盾处理 |
 | Letta（`letta-ai/letta`，原 MemGPT） | 有状态 agent 平台 | core / archival memory 分页、agent 自我编辑记忆 |
+| AWS Prescriptive Guidance | 官方架构模式文档 | [Transactional outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)：双写原子性、重复投递与幂等消费者 |
+| Milvus 官方文档 | 向量索引适配器行为依据 | [Upsert Entities](https://milvus.io/docs/upsert-entities.md) 的主键插入/更新语义；[Consistency](https://milvus.io/docs/consistency.md) 的可见性级别 |
+| SQLite 官方文档 | 权威本地存储与备份语义 | [Online Backup API](https://www.sqlite.org/backup.html)：一致快照及在线备份边界 |
 
 ## 3. 怎么用（与流程的挂钩）
 

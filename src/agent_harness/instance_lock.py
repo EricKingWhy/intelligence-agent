@@ -22,9 +22,8 @@
 
 逃生门 `ALLOW_SHARED_ROOT` **默认关闭**；显式设为真值时降级为警告放行，且日志
 显著留痕（宁可吵，不要静默降级）。绕锁进程还会在 workspace root 持有独立 OS
-租约；cutover 发布 fence 后扫描租约并拒绝与存量绕锁 writer 并发。进程退出由 OS
-释放租约，留下的文件可由后续 cutover 确认为 stale 后清理。应用启动在注册租约后
-再次检查 fence，避免启动和 cutover fence 发布竞态。
+租约；cutover 与 Memory V2 索引重建各自发布专用 fence 后扫描租约并拒绝与存量
+绕锁 writer 并发。应用启动在注册租约后再次检查相应 fence，避免 fence 发布竞态。
 
 进程内幂等**且线程安全**：同一路径重复 `acquire()` 返回同一把锁并计数，最后一个
 `release()` 才真正放锁——避免"同一进程重复装配 = 自锁"。
@@ -46,6 +45,7 @@ __all__ = [
     "ALLOW_SHARED_ROOT_ENV",
     "CUTOVER_FENCE_FILENAME",
     "DEFAULT_LOCK_FILENAME",
+    "MEMORY_INDEX_REBUILD_FENCE_FILENAME",
     "InstanceLock",
     "InstanceLockError",
 ]
@@ -59,6 +59,7 @@ ALLOW_SHARED_ROOT_ENV = "ALLOW_SHARED_ROOT"
 #: 锁文件名（位于 workspace root 下）。
 DEFAULT_LOCK_FILENAME = ".instance.lock"
 CUTOVER_FENCE_FILENAME = ".memory-cutover-in-progress"
+MEMORY_INDEX_REBUILD_FENCE_FILENAME = ".memory-v2-index-rebuild-in-progress"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -144,12 +145,22 @@ def _shared_root_registry_lock(root: Path) -> Iterator[None]:
 class InstanceLock:
     """`root` 目录的单实例锁。用法：``lock = InstanceLock(root).acquire()``。
 
-    `release()` 幂等；持有者是同一进程时按引用计数，最后一次才真正放锁。
+    `allow_memory_index_rebuild=True` 仅供重建协调器使用：拿锁后必须先发布专用 fence，
+    再调用 `assert_no_shared_root_writers()`。`release()` 幂等；持有者是同一进程时按引用
+    计数，最后一次才真正放锁。
     """
 
     def __init__(
-        self, root: str | os.PathLike[str], *, allow_cutover: bool = False,
+        self,
+        root: str | os.PathLike[str],
+        *,
+        allow_cutover: bool = False,
+        allow_memory_index_rebuild: bool = False,
     ) -> None:
+        if allow_cutover and allow_memory_index_rebuild:
+            raise ValueError(
+                "cutover and memory index rebuild maintenance modes are mutually exclusive"
+            )
         # 展示路径用 abspath（不 resolve）：只做规范化，不动 symlink / Windows
         # 短名——错误信息里出现的路径必须和调用方给的一致，否则用户认不出自己
         # 的目录。文件身份另用 realpath（见 `_key_for`）。
@@ -157,6 +168,7 @@ class InstanceLock:
         self._path = self._root / DEFAULT_LOCK_FILENAME
         self._key = _key_for(self._path)
         self._allow_cutover = allow_cutover
+        self._allow_memory_index_rebuild = allow_memory_index_rebuild
         self._fd: int | None = None
         self._shared_lease_path: Path | None = None
         self._shared_lease_fd: int | None = None
@@ -203,13 +215,13 @@ class InstanceLock:
                 logger.warning("清理 shared-root 租约文件失败：%s", path)
 
     def assert_no_shared_root_writers(self) -> None:
-        """Refuse startup or cutover while another process holds an escape-hatch lease."""
+        """Refuse startup or maintenance while a bypass writer holds a lease."""
         try:
             with _shared_root_registry_lock(self._root):
                 self._scan_shared_root_writers()
         except OSError as error:
             raise InstanceLockError(
-                "The shared-root lease registry is busy or unavailable; refusing startup or cutover."
+                "The shared-root lease registry is busy or unavailable; refusing startup or maintenance."
             ) from error
 
     def _scan_shared_root_writers(self) -> None:
@@ -221,11 +233,11 @@ class InstanceLock:
                 continue
             except OSError as error:
                 raise InstanceLockError(
-                    "A shared-root writer lease cannot be inspected; refusing startup or cutover."
+                    "A shared-root writer lease cannot be inspected; refusing startup or maintenance."
                 ) from error
             if not path.is_file() or path.is_symlink() or info.st_nlink != 1:
                 raise InstanceLockError(
-                    "A shared-root writer lease is invalid; refusing startup or cutover."
+                    "A shared-root writer lease is invalid; refusing startup or maintenance."
                 )
             try:
                 fd = os.open(path, os.O_RDWR)
@@ -233,14 +245,14 @@ class InstanceLock:
                 continue
             except OSError as error:
                 raise InstanceLockError(
-                    "A shared-root writer lease cannot be inspected; refusing startup or cutover."
+                        "A shared-root writer lease cannot be inspected; refusing startup or maintenance."
                 ) from error
             try:
                 try:
                     _take_os_lock(fd)
                 except OSError as error:
                     raise InstanceLockError(
-                        "A shared-root workspace writer is active; stop it before startup or cutover."
+                        "A shared-root workspace writer is active; stop it before retrying."
                     ) from error
             finally:
                 os.close(fd)
@@ -250,7 +262,7 @@ class InstanceLock:
                 pass
             except OSError as error:
                 raise InstanceLockError(
-                    "A stale shared-root writer lease cannot be removed; refusing startup or cutover."
+                    "A stale shared-root writer lease cannot be removed; refusing startup or maintenance."
                 ) from error
 
     def acquire(self) -> InstanceLock:
@@ -267,9 +279,20 @@ class InstanceLock:
                 raise InstanceLockError(
                     "Memory clean-slate reset is incomplete; resume the cutover before startup."
                 )
+            if (
+                not self._allow_memory_index_rebuild
+                and os.path.lexists(self._root / MEMORY_INDEX_REBUILD_FENCE_FILENAME)
+            ):
+                raise InstanceLockError(
+                    "Memory V2 index rebuild is incomplete; rerun the rebuild before startup."
+                )
             existing = _lock_by_path.get(self._key)
             if existing is not None:
-                if existing._allow_cutover != self._allow_cutover:
+                if (
+                    existing._allow_cutover != self._allow_cutover
+                    or existing._allow_memory_index_rebuild
+                    != self._allow_memory_index_rebuild
+                ):
                     raise InstanceLockError(
                         "Workspace lock is already held for a different operation."
                     )
@@ -282,7 +305,7 @@ class InstanceLock:
                 _take_os_lock(fd)
             except OSError as error:
                 os.close(fd)
-                if not _escape_hatch_enabled():
+                if self._allow_memory_index_rebuild or not _escape_hatch_enabled():
                     raise InstanceLockError(
                         self._locked_message(self._read_holder())
                     ) from error
@@ -302,6 +325,16 @@ class InstanceLock:
                     raise InstanceLockError(
                         "Memory clean-slate reset is in progress; startup is refused."
                     )
+                if (
+                    not self._allow_memory_index_rebuild
+                    and os.path.lexists(
+                        self._root / MEMORY_INDEX_REBUILD_FENCE_FILENAME
+                    )
+                ):
+                    self._release_shared_root_lease()
+                    raise InstanceLockError(
+                        "Memory V2 index rebuild is in progress; startup is refused."
+                    )
                 # 逃生门：显式开启才降级。消息里带字面 "WARNING" 前缀，便于
                 # grep 与人工审计；OS 锁定的租约让 cutover 能发现仍运行的进程。
                 logger.warning(
@@ -317,7 +350,10 @@ class InstanceLock:
                 _lock_by_path[self._key] = self
                 return self
 
-            if not _escape_hatch_enabled():
+            if (
+                not _escape_hatch_enabled()
+                and not self._allow_memory_index_rebuild
+            ):
                 try:
                     self.assert_no_shared_root_writers()
                 except BaseException:
