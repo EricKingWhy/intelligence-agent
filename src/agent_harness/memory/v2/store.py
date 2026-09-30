@@ -736,6 +736,37 @@ class SqliteMemoryV2Store:
     # outbox（relay 专用，不暴露给模型/请求）
     # ----------------------------------------------------------------------------------
 
+    async def enqueue_active_index_rebuild(self, *, page_size: int = 500) -> int:
+        """Requeue every authoritative active row for an operator-led index rebuild.
+
+        This is intentionally not part of the user-facing capability. It reads routing
+        columns only and atomically records the current desired state in the durable outbox.
+        The caller must hold the workspace instance lock while the derived index is rebuilt.
+        """
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+        count = 0
+        after_id = ""
+        async with write_connection(self.database_path) as connection:
+            while True:
+                async with connection.execute(
+                    "SELECT memory_id, tenant_id, user_id, scope, project_id "
+                    "FROM memory_v2_records WHERE status=? AND memory_id>? "
+                    "ORDER BY memory_id LIMIT ?",
+                    (MemoryStatus.ACTIVE.value, after_id, page_size),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    await self._enqueue(
+                        connection, row["memory_id"], MemoryOperationV2.UPSERT,
+                        row["tenant_id"], row["user_id"], row["scope"], row["project_id"],
+                    )
+                count += len(rows)
+                after_id = rows[-1]["memory_id"]
+        return count
+
     async def pending(self, limit: int = 100, after_id: str = "") -> list[PendingMemoryChangeV2]:
         """relay 的读取入口：以 **outbox 为驱动表**（LEFT JOIN 记录行）。
 

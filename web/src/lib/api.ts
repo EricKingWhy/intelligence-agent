@@ -189,6 +189,8 @@ export interface BudgetPayload {
 
 export interface StartSessionPayload {
   task: string;
+  /** User explicitly declares this input as a reusable procedural rule (#298 R5). */
+  remember_as_procedural_rule?: boolean;
   workspace?: string;
   /** 目录根会话（WS-6 / #169，ADR-0027 D2）：会话直接在**这个已存在的绝对路径**
    *  下运行，它同时成为会话的 workspace root（工具的相对路径都相对它解析），
@@ -420,6 +422,8 @@ function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<s
 /** create 路径字段表（与下方 sendMessage 的 amend 四项同词汇、各自登记）。 */
 const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
+  remember_as_procedural_rule: (p) =>
+    p.remember_as_procedural_rule ? ['remember_as_procedural_rule', true] : null,
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
   cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
   budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
@@ -479,6 +483,8 @@ export interface ProtectedFactAnnotationPayload {
 export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
+  /** User explicitly declares this input as a reusable procedural rule (#298 R5). */
+  remember_as_procedural_rule?: boolean;
   budget?: BudgetPayload;
   /** Explicit, source-bound protected facts; backend validates values against content. */
   protected_facts?: ProtectedFactAnnotationPayload[];
@@ -516,6 +522,8 @@ export interface SendMessagePayload {
 const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
+  remember_as_procedural_rule: (p) =>
+    p.remember_as_procedural_rule ? ['remember_as_procedural_rule', true] : null,
   protected_facts: (p) =>
     p.protected_facts && p.protected_facts.length > 0
       ? ['protected_facts', p.protected_facts]

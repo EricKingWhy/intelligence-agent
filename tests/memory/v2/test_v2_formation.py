@@ -221,7 +221,7 @@ def test_a_valid_candidate_roundtrips_every_field() -> None:
     assert candidate.kind is MemoryKind.SEMANTIC
     assert candidate.tier.value == "collection"
     assert candidate.scope.value == "user_global"
-    assert candidate.project_id is None
+    assert "project_id" not in type(candidate).model_fields
     assert candidate.importance == 0.8 and candidate.strength == 0.9
     assert candidate.sensitivity is Sensitivity.ORDINARY
     assert candidate.sensitive_category is None
@@ -247,21 +247,40 @@ def test_the_profile_tier_combination_rules_hold_for_candidates(overrides: dict)
         parse_formation_result(_formation(candidates=[_candidate(**overrides)]))
 
 
-def test_a_project_candidate_requires_a_project_id() -> None:
-    with pytest.raises(ModelOutputError):
-        parse_formation_result(_formation(candidates=[_candidate(scope="project")]))
-
-
-def test_a_user_global_candidate_must_not_carry_a_project_id() -> None:
-    with pytest.raises(ModelOutputError):
-        parse_formation_result(_formation(candidates=[_candidate(project_id="p-1")]))
-
-
-def test_a_project_candidate_is_valid_with_one() -> None:
+def test_a_project_candidate_is_a_proposal_without_project_identity() -> None:
     candidate = parse_formation_result(
-        _formation(candidates=[_candidate(scope="project", project_id="p-1")])).candidates[0]
+        _formation(candidates=[_candidate(scope="project")])).candidates[0]
 
-    assert (candidate.scope.value, candidate.project_id) == ("project", "p-1")
+    assert candidate.scope.value == "project"
+    assert "project_id" not in type(candidate).model_fields
+
+
+@pytest.mark.parametrize("scope", ["user_global", "project"])
+@pytest.mark.parametrize("project_id", ["p-1", None])
+def test_a_model_candidate_cannot_supply_project_identity(scope: str, project_id) -> None:
+    with pytest.raises(ModelOutputError):
+        parse_formation_result(
+            _formation(candidates=[_candidate(scope=scope, project_id=project_id)]))
+
+
+def test_a_project_adjudication_result_omits_project_identity() -> None:
+    result = parse_adjudication_result({
+        "action": "ADD", "result": _content(scope="project"),
+        "reason_code": "durable_new",
+    })
+
+    assert result.result is not None
+    assert result.result.scope.value == "project"
+    assert "project_id" not in type(result.result).model_fields
+
+
+@pytest.mark.parametrize("project_id", ["p-1", None])
+def test_an_adjudication_result_cannot_supply_project_identity(project_id) -> None:
+    with pytest.raises(ModelOutputError):
+        parse_adjudication_result({
+            "action": "ADD", "result": _content(scope="project", project_id=project_id),
+            "reason_code": "durable_new",
+        })
 
 
 def test_content_over_the_limit_is_rejected() -> None:

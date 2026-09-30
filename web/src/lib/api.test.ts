@@ -242,6 +242,18 @@ describe('清单端点 — icon 窄化解析（#214：白名单投影，新字�
 });
 
 describe('sendMessage — 续聊 amend 透传（Q2：有值才带键）', () => {
+  it('显式规则信号为 true 时随消息发送', async () => {
+    const cap = captureFetch();
+    await sendMessage('s1', {
+      content: '后续始终使用 pnpm',
+      remember_as_procedural_rule: true,
+    });
+    expect(cap.calls[0].body).toMatchObject({
+      content: '后续始终使用 pnpm',
+      remember_as_procedural_rule: true,
+    });
+  });
+
   it('四项 amend 全有值 → payload 带全部键（端点路径不变）', async () => {
     const cap = captureFetch();
     await sendMessage('s1', {
@@ -399,6 +411,15 @@ describe('startSession — create 路径的有值才带（归一化单一执行�
     ]) {
       expect(cap.calls[0].body).not.toHaveProperty(key);
     }
+  });
+
+  it('显式规则信号为 true 时才带键', async () => {
+    const cap = captureFetch();
+    await startSession({ task: '后续始终使用 pnpm', remember_as_procedural_rule: true });
+    expect(cap.calls[0].body).toMatchObject({
+      task: '后续始终使用 pnpm',
+      remember_as_procedural_rule: true,
+    });
   });
 
   it('显式 budget → 带键（#308：新字段可传，缺省不发数字）', async () => {
