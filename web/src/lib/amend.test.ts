@@ -70,25 +70,51 @@ describe('toCreateControls — 创建路径控制面（amend 三项 + permission
   });
 });
 
-// ── #426：新建会话的预算入口（最小可用，一维 turns）──
+// ── #426：新建会话的预算入口（常用三项：turns / total_tokens / deadline_at）──
 
-describe('toCreateBudget — turns 上限草稿 → budget.run 声明', () => {
-  it('正整数草稿 → budget.run.max_agent_turns_total（随启动 run 的请求提交）', () => {
-    expect(toCreateBudget('12')).toEqual({
-      run: { max_agent_turns_total: 12 },
+describe('toCreateBudget — 预算三项草稿 → budget.run 声明（#426）', () => {
+  const DEADLINE_LOCAL = '2026-10-01T12:30';
+
+  it('三项全填 → 形状严格符合 run 启动契约（正整数 ×2 + RFC 3339 UTC deadline_at）', () => {
+    expect(toCreateBudget({ turns: '12', totalTokens: '8000', deadlineAt: DEADLINE_LOCAL })).toEqual({
+      run: {
+        max_agent_turns_total: 12,
+        max_total_tokens: 8000,
+        deadline_at: new Date(DEADLINE_LOCAL).toISOString(),
+      },
     });
   });
 
-  it('空 / 半截 / 非数字草稿 → undefined = 不发键 = 后端默认（默认行为不变）', () => {
-    expect(toCreateBudget(null)).toBeUndefined();
-    expect(toCreateBudget('')).toBeUndefined();
-    expect(toCreateBudget('  ')).toBeUndefined();
-    expect(toCreateBudget('12a')).toBeUndefined();
-    expect(toCreateBudget('abc')).toBeUndefined();
+  it('单项填写 → run 只带该维的键（后端 extra="forbid"：没填的维不发键）', () => {
+    expect(toCreateBudget({ turns: '3', totalTokens: null, deadlineAt: null })).toEqual({
+      run: { max_agent_turns_total: 3 },
+    });
+    expect(toCreateBudget({ turns: null, totalTokens: '8000', deadlineAt: null })).toEqual({
+      run: { max_total_tokens: 8000 },
+    });
+    expect(toCreateBudget({ turns: null, totalTokens: null, deadlineAt: DEADLINE_LOCAL })).toEqual({
+      run: { deadline_at: new Date(DEADLINE_LOCAL).toISOString() },
+    });
   });
 
-  it('0 / 负数不是合法 ceiling（后端 ge=1 必 422）→ 视同未设置，不发键', () => {
-    expect(toCreateBudget('0')).toBeUndefined();
-    expect(toCreateBudget('-3')).toBeUndefined();
+  it('deadline_at 是 RFC 3339 UTC 文本（Z 后缀）——datetime-local 的本地读数换算为 UTC 瞬时', () => {
+    const budget = toCreateBudget({ turns: null, totalTokens: null, deadlineAt: DEADLINE_LOCAL });
+    expect(budget?.run?.deadline_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/);
+    // 与本地时区无关的等价断言：同一瞬时（测试环境 TZ 两侧一致）。
+    expect(budget?.run?.deadline_at).toBe(new Date(DEADLINE_LOCAL).toISOString());
+  });
+
+  it('全部为空 → undefined = App 不发 budget 键 = 提交载荷与无预算现状逐字节一致', () => {
+    expect(toCreateBudget({ turns: null, totalTokens: null, deadlineAt: null })).toBeUndefined();
+    expect(toCreateBudget({ turns: '', totalTokens: '  ', deadlineAt: '' })).toBeUndefined();
+  });
+
+  it('非法草稿 → 该维不发键（不发必然 422 的请求），合法的其余维照常带上', () => {
+    // 0 / 负数不是合法 ceiling（后端 ge=1 必 422）→ 视同未设置。
+    expect(toCreateBudget({ turns: '0', totalTokens: '-3', deadlineAt: null })).toBeUndefined();
+    // 半截 / 非数字 / 非日期：该维丢弃，合法维保留。
+    expect(toCreateBudget({ turns: '12a', totalTokens: '8000', deadlineAt: 'not-a-date' })).toEqual({
+      run: { max_total_tokens: 8000 },
+    });
   });
 });

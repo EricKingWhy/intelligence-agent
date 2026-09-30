@@ -138,3 +138,49 @@ describe('Composer 权限 pill（#283）', () => {
     expect(html).not.toContain('aria-disabled="true"');
   });
 });
+
+// ── #426：新建会话的预算入口（常用三项：turns / total_tokens / deadline_at）──
+// 预算属于**启动 run** 的请求（#422 裁决）：仅新建会话态渲染；会话内（续聊
+// /messages 不带 budget，#308）不显示。判形在映射层 toCreateBudget（lib/amend.ts）。
+
+describe('Composer 预算入口（#426）', () => {
+  const budgetProps = {
+    budgetRunTurns: '',
+    onBudgetRunTurnsChange: noop,
+    budgetRunTokens: '',
+    onBudgetRunTokensChange: noop,
+    budgetRunDeadline: '',
+    onBudgetRunDeadlineChange: noop,
+  };
+
+  it('新会话态：三项入口在场（turns 数值框 / tokens 数值框 / deadline datetime 输入）', () => {
+    const html = renderToString(
+      createElement(Composer, { ...base, ...budgetProps }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
+    expect(html).toContain('aria-label="预算上限（总 tokens，留空为默认）"');
+    expect(html).toContain('aria-label="预算截止时间（留空为不设）"');
+    expect(html).toContain('type="datetime-local"');
+  });
+
+  it('会话内（permissionInSession）→ 预算入口不渲染（续聊不带 budget，#308）', () => {
+    const html = renderToString(
+      createElement(Composer, { ...base, permissionInSession: true, ...budgetProps }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).not.toContain('预算上限');
+    expect(html).not.toContain('预算截止时间');
+  });
+
+  it('未接 onChange 的维不渲染输入框（不渲染吞输入的死框）', () => {
+    const html = renderToString(
+      createElement(Composer, {
+        ...base,
+        budgetRunTurns: '',
+        onBudgetRunTurnsChange: noop,
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
+    expect(html).not.toContain('aria-label="预算上限（总 tokens，留空为默认）"');
+    expect(html).not.toContain('aria-label="预算截止时间（留空为不设）"');
+  });
+});
