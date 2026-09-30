@@ -215,6 +215,22 @@ def test_memory_index_rebuild_maintenance_still_refuses_cutover_fence(
         InstanceLock(tmp_path, allow_memory_index_rebuild=True).acquire()
 
 
+def test_cutover_and_index_rebuild_maintenance_modes_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / CUTOVER_FENCE_FILENAME).write_text("pending", encoding="utf-8")
+    (tmp_path / MEMORY_INDEX_REBUILD_FENCE_FILENAME).write_text(
+        "pending", encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        InstanceLock(
+            tmp_path,
+            allow_cutover=True,
+            allow_memory_index_rebuild=True,
+        ).acquire()
+
+
 def test_rebuild_maintenance_publishes_fence_then_detects_active_bypass_writer(
     tmp_path: Path, monkeypatch,
 ) -> None:

@@ -157,6 +157,10 @@ class InstanceLock:
         allow_cutover: bool = False,
         allow_memory_index_rebuild: bool = False,
     ) -> None:
+        if allow_cutover and allow_memory_index_rebuild:
+            raise ValueError(
+                "cutover and memory index rebuild maintenance modes are mutually exclusive"
+            )
         # 展示路径用 abspath（不 resolve）：只做规范化，不动 symlink / Windows
         # 短名——错误信息里出现的路径必须和调用方给的一致，否则用户认不出自己
         # 的目录。文件身份另用 realpath（见 `_key_for`）。
