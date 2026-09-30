@@ -69,6 +69,17 @@
 
 ---
 
+## R5 深检 P3 清扫批（2026-09-30，已合并：PR #461 + PR #462 → main `10804b84`）
+
+- **来源**：`R5_FIX_DEEP_CHECK_REPORT_2026-09-30.md`（独立深查）F3/F4/F5 三张 P3（#458/#459/#460）；用户指令「1. 两份简报可以入库。2. 三条 P3 开票修吧」。
+- **交付**：①PR #461（docs/r5-briefs-gate-readings）：两份批次简报 + `verification.map.tsv` `r5-briefs` 行 + Gate-0 读数 7 份入库（#458，含终态 `5b6af76a` 与 FAIL 存证 `db41a766`/`17df2b99`）——CI gate0 绿 35s，merge `7883cfdd`；②PR #462（fix/r5-p3-459-460）：`b5655601` #460（失效说明按 `submitted` 分支，未提交文案逐字未变）/ `d7fe34e1` #459（`Conversation.jumpPulse.test.tsx` 4 用例 + 变异判别）/ `59aaa6fb` 审查跟进（补回 #444 全卡组合锁 + 用例名 + spy try/finally）/ `d04997a7` 台账 3 行（`r5-p3-459-460-b5655601-59aaa6fb.tsv`）——CI gate0 绿 30s，merge `10804b84`。
+- **门禁**：受影响 e2e（n-approval-card + x-permission-section，临时 5286 配置跑完即删）**32 passed**；vitest 全量 1205 passed / 2 failed（唯一文件 = StepDetail.window 已知负载 flake，隔离 **6/6**）；tsc / oxlint（0 错）/ build 绿；gate0 裸全量 6/6（读数 `docs/gate/d04997a7….json`）+ `--since 7883cfdd` 6/6；覆盖闸门 exit 0。
+- **审查**：独立审查 subagent 两轮均 CLEAN（无 P0–P2）；首轮 P3-1（我说改断言时丢失 #444 组合锁，验尸实证 8/8、11/11 假绿）→ 跟进笔修复 → 次轮 B3/B4 变异复验各 1 failed / 5 passed 转红。
+- **关票（§14.12）**：#458 / #459 / #460 全部 CLOSED 带证据评论。
+- **遗留**：远端分支 `docs/r5-briefs-gate-readings`、`fix/r5-p3-459-460` 未删（§14.4 需批准）；`R5_FIX_DEEP_CHECK_REPORT_2026-09-30.md`、`SDD_FLOW_REVIEW_2026-09-27.md`、`docs/gate/98f8241d….json` 保持 untracked（用户处置）。明细见 2026-09 归档末节。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过
