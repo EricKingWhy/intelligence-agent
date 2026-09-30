@@ -1,0 +1,1 @@
+2026-09-30	#297 SQLite schema 兼容性预检 P2 修复（固定点 77c87027）。独立 Standards 与 Spec 审查均通过。修前 records/outbox 两个 DEFAULT (NULL /* comment */) 用例均复现漏拒；修复先剥 SQL 注释再规范化 NULL。tests/memory/v2/test_v2_index_rebuild.py：41 passed；ruff、diff-check 通过。仅 SQLite/fake index 验证，未做真实 Milvus 重建；无凭证接触。	77c87027~1..77c87027
