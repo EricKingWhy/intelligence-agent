@@ -297,6 +297,50 @@ describe('wsStreamResponse — WS 不可用时降级到 HTTP SSE', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
+  it('#440：降级流每读到一段字节都通知活性观察者——keepalive 注释帧也算（done 不算）', async () => {
+    // 后端 SSE keepalive 是注释帧（`: ping - <ts>`），parseFrame 只取 data: 行 ⇒
+    // 永远不会成为事件。降级读循环若不把「读到字节」喂给活性侧信道，审批等待期
+    // 的降级流 10s 后会被停摆看门狗误判成僵死（#440 的 SSE 半边）。
+    const liveness = vi.fn();
+    const enc = new TextEncoder();
+    let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              controller = c;
+              c.enqueue(enc.encode('data: {"type":"run/started","seq":1}\n\n'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+      ),
+    );
+
+    const res = wsStreamResponse(sid, -1, liveness);
+    const reader = res.body!.getReader();
+    socket = FakeWebSocket.instances[0];
+    socket.fireClose(); // 零服务帧 → 降级
+
+    // 事件字节到达 = 活性（与 WS 侧「每条服务帧算活性」同一口径）
+    expect((await readEvent(reader))?.type).toBe('run/started');
+    expect(liveness).toHaveBeenCalledTimes(1);
+
+    // 2s 后的 keepalive 注释帧：不成事件，但字节到达 = 链路活着的证据
+    controller!.enqueue(enc.encode(': ping - 2026-09-30T00:00:02Z\n\n'));
+    const chunk = await reader.read();
+    expect(chunk.done).toBe(false);
+    expect(new TextDecoder().decode(chunk.value!)).toContain(': ping');
+    expect(liveness).toHaveBeenCalledTimes(2);
+
+    // 流正常收口（done = 空 read）：什么都没证明——不得再刷活性（结束不误报）
+    controller!.close();
+    expect(await readEvent(reader)).toBeNull();
+    expect(liveness).toHaveBeenCalledTimes(2);
+  });
+
   it('零服务帧 + 直接 close（Upgrade 握手被拒）→ 同样降级', async () => {
     const fetchMock = vi.fn(async () => sseResponse('data: {"type":"run/started","seq":1}\n\n'));
     vi.stubGlobal('fetch', fetchMock);

@@ -5,7 +5,10 @@
  *    显示 `—` 并说明原因（AC4：拿不到就说拿不到，不填 0、不拿 composer 的选择冒充）；
  *  - **"没有"要说出来**（AC2）：零待审批显示「无待审批」、零裁决显示「尚无裁决」，
  *    整段不消失——段消失会被读成"这个会话没有权限概念"；
- *  - **能进审批面**（AC5）：点待审批行 → 中间主区的审批卡被脉冲高亮（反向联动）。
+ *  - **能进审批面**（AC5）：待决审批的审批面在场。#421 起首个**非失效**待决审批
+ *    由内联位移进常驻模态（模态打开时整个应用 inert，Inspector 不可点）——原
+ *    「点待审批行 → 脉冲高亮」对模态候选是设计内 no-op 降级（审批面已在眼前，
+ *    见 Conversation.tsx 该段注释），审批面断言相应改为模态常驻可见。
  */
 
 import { expect, test } from '@playwright/test';
@@ -57,13 +60,61 @@ async function openInspectorOverview(page: import('@playwright/test').Page, fram
   await expect(permissionSection(page)).toBeVisible();
 }
 
-test('AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；点它进入审批面（脉冲 + 卡片可见）', async ({
+test('AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；审批面（模态）常驻可见', async ({
   page,
 }) => {
-  await openInspectorOverview(page, [...HEAD, approvalRequested('ap-1', 4)]);
+  // #421 后审批一到位模态就开、整个应用 inert——「先提交任务再点 Overview」不再
+  // 可行。改为把审批事件挪到**第二轮**（经 /messages 续聊端点送入）：第一轮先正常
+  // 跑完（无审批）→ 开 Overview → 续聊把审批送进来。「先开着 Inspector 遇上审批」
+  // 是真实用户路径，权限区块的信息断言（AC1）一条不少。
+  const firstRun: FrameSpec[] = [
+    ...HEAD,
+    { type: 'model/completed', data: { text: '好了' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
+  ];
+  const secondRun: FrameSpec[] = [
+    { type: 'run/started', seq: 6, session_id: SID, run_id: 'e2e-run-0002', time: T },
+    {
+      type: 'user/message',
+      data: { content: '再写一个' },
+      seq: 7,
+      session_id: SID,
+      run_id: 'e2e-run-0002',
+      step_id: 2,
+      time: T,
+    },
+    { ...approvalRequested('ap-1', 8), run_id: 'e2e-run-0002', step_id: 2 },
+  ];
+  await routeApi(page, {
+    // durable log 只放第一轮：run 1 终结后的 viewing 历史对账会重读 GET /events，
+    // 若带上审批帧，审批会在 tab 点击之前就投影出模态、前置动作又被 inert 锁死。
+    events: firstRun,
+    onSessionPost: (route) => fulfillSse(route, firstRun),
+    onMessagesPost: (route) => fulfillSse(route, secondRun),
+    // 第二轮 SSE 无终态帧 → 客户端必然重连接流。剧本回放全量 + 声明在途 run、
+    // 连接保持：若按缺省剧本答 has_active_run:false，重连链会耗尽额度 give-up 落
+    // viewing 重读历史（无审批），模态在断言窗口内被撤掉——mock 必须与真后端
+    // 「审批等待期 run 仍在途」的语义一致。
+    onWs: () => ({ events: [...firstRun, ...secondRun], hasActiveRun: true, ending: 'keep' }),
+  });
+  await page.goto('/');
+  await submitTask(page, '写个文件');
+  // 审批尚未出现：先打开 Inspector Overview（模态一开就点不到了）。
+  await page
+    .getByRole('tablist', { name: 'Inspector 视图' })
+    .getByRole('tab', { name: 'Overview' })
+    .click();
+  await expect(permissionSection(page)).toBeVisible();
+
+  // 第二轮把审批送进来 → 模态接管审批面（#421）。
+  await submitTask(page, '再写一个');
+  const modalCard = page.locator('.approval-modal-content .approval-card');
+  await expect(modalCard).toBeVisible();
 
   const section = permissionSection(page);
   // 权限档 = 审批请求携带的生效阈值（不是 composer 里"下次运行"的选择）。
+  // 模态打开后 Inspector 处于 inert 背景，但段仍渲染在文档里——信息性断言
+  // （文本 / 计数）不依赖可交互性，照常可断。
   await expect(section).toContainText('权限档');
   await expect(section).toContainText('read-only');
   await expect(section).toContainText('1 条');
@@ -73,14 +124,9 @@ test('AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；点它�
   await expect(row).toContainText('write');
   await expect(row).toContainText('workspace-write');
 
-  const card = page.locator('.approval-card');
-  await expect(card).toBeVisible();
-  await row.click();
-  // 「能进审批面」的可观测形式：跳转落点被脉冲高亮（复用 Timeline→主区的反向联动）。
-  // 落点是包住卡片的 `[data-approval-key]` 容器（卡片本身不在虚拟化列表里，
-  // 所以它由外层容器承担滚动定位与高亮——脉冲类加在容器上，不是 `.approval-card`）。
-  await expect(page.locator('[data-approval-key="ap-1"]')).toHaveClass(/stream-jump-pulse/);
-  await expect(card).toBeVisible();
+  // AC5（#421 后的形态）：待决审批的「审批面」就是常驻模态——它在断言开始前
+  // 已在眼前；行本身处于 inert 背景不可点，跳转对模态候选是设计内 no-op。
+  await expect(modalCard.locator('.approval-title')).toHaveText('需要审批');
 });
 
 test('AC2/AC4：零审批的会话段不消失——权限档 `—` 并说明原因，两项"没有"都说出来', async ({

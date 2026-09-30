@@ -944,7 +944,13 @@ STREAM_REPLAY_MAX_EVENTS = 1000
 #: `WS_PING_INTERVAL`（websocket.py）：两条通道同一拍，观测/调优不必记两套数。
 #:
 #: 注意注释帧**不是**事件：客户端（`lib/sse.ts::parseFrame`）只取 `data:` 行，
-#: 停摆检测（`RECONNECT_STALL_MS`）看的是真实帧，不会被 keepalive 喂假进展。
+#: 注释帧永远不会被投影成对话事件。但它是**链路活性**证据（#440 定口径：心跳 /
+#: 任何到达字节 = 链路活着）：前端停摆检测（`RECONNECT_STALL_MS`，10s 无帧判僵死）
+#: 的活性侧信道把 WS 心跳帧（`server_ping`）与 SSE 降级流读到的字节都计入同一
+#: 基准（`wsStream.ts` 的 `onLiveness`）——审批等待期后端零事件、两条通道唯一的
+#: 下行就是这份 2s 心跳，没有它，看门狗会把「人在决策」误判成「连接僵死」而
+#: 掐断一条被心跳证明存活的连接。字节到不了的部署（交付层攒包）自然也没有活性
+#: 证据，停摆检测照旧生效——活性只来自真实到达的字节，不存在「喂假进展」。
 SSE_PING_INTERVAL_SECONDS = 2
 
 
