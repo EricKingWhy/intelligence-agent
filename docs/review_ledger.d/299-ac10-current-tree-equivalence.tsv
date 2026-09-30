@@ -1,0 +1,1 @@
+2026-09-30	#299 AC10 当前树等价手工 Standards + Spec 审查；0 confirmed P0-P3。固定点 89bf106a；范围仅含 Recall@6 脱敏报告与两个 Gate-0 读数。对象级比较确认 Memory V2 / 评测器 / 冻结数据 / 集成测试路径与报告树等价；session/derive.py 的 #430 改动不进入普通 USER_MESSAGE→derive_messages→hybrid_search 路径。未重跑 live；原始报告为 1 passed / 55.58s。	89bf106af44b028554ca030430815c1c4a0f81a9..2db11e14ceed10a9d0e2f51b4ff1fc7a33210598
