@@ -59,6 +59,8 @@
 4. **残留形态**：骨架行 = `结论 + 精确 ID + artifact ref`（W-03 冻结）。**不引 dsh 头尾截断**（8192→头 4096+尾 1024）——那是 dsh 没有统一 ArtifactStore 时的次优解；本仓 ArtifactStore 可回读，骨架行更严。
 5. **兜底**：超长单条且无 Artifact 可读回 → 不裁，压力交 §4.5 硬护栏，**不得伪造 ref**。
 
+对照笔（#414 W-31.2）：不采纳调研对象 dsh 式的按工具名静态豁免——第 2 条已冻结的立场不变（静态名单会腐化，动态引用判定才是确定性的）。增量采纳两个形状来自 Anthropic 官方 context-editing（clear_tool_uses_20250919）的参数，语义按本仓收窄：`keep_recent_tool_results` = 最近 K 条 tool 结果窗口豁免（按全量 tool/result 事件序计，**含失败结果**——保守；默认 3）；`clear_at_least_tokens` = **收益下限门而非触发器**——本仓的触发器仍是第 1 条 supersession 判定，门只做第二遍裁决：一轮 planned 的总收益估算（原文 − 骨架，token）低于阈值 ⇒ 本轮整体不裁（skip 理由 `below_clear_floor`），`planned_freed_tokens` 仍入报告（默认 5000）。两者 0 = 关闭，回落 W-03 冻结行为。
+
 ### 4.3 混合式摘要（程序化预填 + 模型补空）
 
 摘要 8 节契约见 §6。**第 1/2/7/8 节由 harness 程序化生成**（从 SessionEvent/保护事实注册表确定性提取），**模型只写第 3/4/5/6 节**。摘要模型默认主 provider 便宜档；失败代价由 §6.4 闸门兜住 = 放弃本次压缩（安全），而非污染上下文（危险）。
