@@ -29,6 +29,78 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function memoriesState(overrides: Partial<MemoriesState> = {}): MemoriesState {
+  return {
+    visible: [],
+    loading: false,
+    loadingMore: false,
+    loadError: null,
+    disabled: null,
+    hasMore: false,
+    paginationLimitReached: false,
+    pending: new Set(),
+    remove: vi.fn(async () => {}),
+    loadMore: vi.fn(async () => {}),
+    retry: vi.fn(async () => {}),
+    retryFailedPage: vi.fn(async () => {}),
+    ...overrides,
+  };
+}
+
+async function renderPanel(state: MemoriesState): Promise<void> {
+  vi.mocked(useMemories).mockReturnValue(state);
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    return Promise.resolve(response(url.includes('/api/memory-settings')
+      ? { extraction_enabled: true, recall_enabled: true }
+      : []));
+  }));
+  await act(async () => {
+    root.render(<MemoryPanel open onOpenChange={() => {}} />);
+    await Promise.resolve();
+  });
+}
+
+describe('MemoryPanel list states', () => {
+  it('shows loading without presenting an empty state', async () => {
+    await renderPanel(memoriesState({ loading: true }));
+
+    expect(document.body.querySelector('.memory-loading')?.textContent).toContain('正在加载记忆');
+    expect(document.body.querySelector('.memory-empty')).toBeNull();
+  });
+
+  it('shows an empty state only after a successful empty response', async () => {
+    await renderPanel(memoriesState());
+
+    expect(document.body.querySelector('.memory-empty')?.textContent).toContain('还没有记忆');
+    expect(document.body.querySelector('.memory-degraded')).toBeNull();
+    expect(document.body.querySelector('.memory-error')).toBeNull();
+  });
+
+  it('shows degraded capability separately from empty and error states', async () => {
+    await renderPanel(memoriesState({ disabled: 'memory capability 未启用' }));
+
+    expect(document.body.querySelector('.memory-degraded')?.textContent).toContain('记忆未启用');
+    expect(document.body.querySelector('.memory-empty')).toBeNull();
+    expect(document.body.querySelector('.memory-error')).toBeNull();
+    expect(document.body.querySelector('.memory-degraded')?.querySelector('button')).toBeNull();
+  });
+
+  it('keeps retryable read errors visible and retries the failed page', async () => {
+    const retryFailedPage = vi.fn(async () => {});
+    await renderPanel(memoriesState({ loadError: 'temporary failure', retryFailedPage }));
+
+    const error = document.body.querySelector('.memory-error');
+    expect(error?.textContent).toContain('temporary failure');
+    expect(document.body.querySelector('.memory-empty')).toBeNull();
+
+    const retry = error?.querySelector('button');
+    expect(retry?.textContent).toBe('重试');
+    await act(async () => { retry?.click(); });
+    expect(retryFailedPage).toHaveBeenCalledOnce();
+  });
+});
+
 describe('MemoryPanel pagination boundary', () => {
   it('shows the query ceiling instead of claiming that every record was loaded', async () => {
     const record: MemoryRecord = {

@@ -317,9 +317,7 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
   });
 
   const pageOffsets = requestedOffsets.filter((offset) => offset > 0);
-  expect(pageOffsets).toHaveLength(200);
-  expect(pageOffsets[0]).toBe(50);
-  expect(pageOffsets.at(-1)).toBe(10_000);
+  expect(pageOffsets).toEqual(Array.from({ length: 200 }, (_, index) => (index + 1) * 50));
   await expect(panel(page).locator('.memory-row')).toHaveCount(50);
   await expect(panel(page).locator('.memory-more-end')).toHaveAttribute('role', 'status');
   await expect(panel(page).locator('.memory-more-end')).toContainText('已达到查询上限');
