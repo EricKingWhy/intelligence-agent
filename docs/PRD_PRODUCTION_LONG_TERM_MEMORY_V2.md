@@ -151,7 +151,7 @@ A USER/profile fact requires a direct user statement or an explicit user confirm
 2. **Given** raw large tool output, artifact content, credentials, hidden reasoning, or unrestricted full history exists, **when** the formation prompt is built, **then** that material is absent.
 3. **Given** formation returns candidates, **when** runtime validation executes, **then** no more than five candidates are accepted: Semantic at most three, Episodic at most two, Procedural at most one, total at most five.
 4. **Given** a candidate exceeds a per-kind or total cap, **when** candidates are selected, **then** candidates are ranked by durable value and the lower-ranked excess candidates are discarded before adjudication.
-5. **Given** an accepted candidate, **when** adjudication compares it with bounded relevant active memory, **then** it produces exactly one of `ADD`, `UPDATE`, `INVALIDATE`, or `NOOP`.
+5. **Given** an accepted candidate, **when** adjudication compares it with bounded relevant active memory, **then** it produces exactly one of `ADD`, `UPDATE`, `INVALIDATE`, or `NOOP`. For every non-null result, it preserves that candidate's `kind`, `tier`, and `scope`; Runtime rejects any mismatch and writes nothing.
 6. **Given** a single observed event, **when** a Procedural candidate is proposed, **then** it is rejected unless the user explicitly opts in with `remember_as_procedural_rule: true` on that non-blank task/message. Runtime stores the signal only on the corresponding genuine `user/message`, and the candidate must cite that same event with a non-empty excerpt found verbatim in its content. A normal user message does not imply this signal. Without it, Procedural memory requires at least two distinct qualifying events: successful tool results (`ok=true`) or genuine user corrections whose `refutes_event_id` resolves to a persisted direct user input or valid tool attempt in the same session. Failed tool results do not count by themselves.
 
 ### 5.3 Model retry and fallback
@@ -254,7 +254,7 @@ reason_code: durable_new | enrich_existing | contradicts_existing |
              procedural_threshold_not_met | policy_rejected
 ```
 
-`ADD` requires no target and a complete result. `UPDATE` requires an active target and a complete result. `INVALIDATE` requires an active target and no replacement result. `NOOP` writes nothing. Model results omit `project_id`; Runtime binds the trusted project identifier for project-scoped results, rejects scope changes from the corresponding candidate, and validates target ownership, version, source authority, and scope before applying the action.
+`ADD` requires no target and a complete result. `UPDATE` requires an active target and a complete result. `INVALIDATE` requires an active target and no replacement result. `NOOP` writes nothing. A non-null result must preserve the corresponding Formation candidate's `kind`, `tier`, and `scope`; Adjudication chooses the action and may refine content, but cannot reclassify the candidate. Any mismatch is a contract failure and writes nothing. Model results omit `project_id`; Runtime binds the trusted project identifier for project-scoped results and validates target ownership, version, source authority, and scope before applying the action.
 
 ### 6.4 API
 

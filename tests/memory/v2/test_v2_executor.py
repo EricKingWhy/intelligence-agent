@@ -21,6 +21,7 @@ import pytest_asyncio
 from agent_harness.memory.v2.budget import MemoryBudgetLimits
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import (
+    _ADJUDICATION_PROMPT,
     _FORMATION_PROMPT,
     DegradedReason,
     MemoryJobExecutor,
@@ -56,6 +57,12 @@ def test_formation_prompt_preserves_explicit_values_in_durable_user_memories():
     assert "preserve explicitly stated names, values, quantities, dates, and qualifiers" \
         in _FORMATION_PROMPT
     assert "every detail must remain supported by cited evidence" in _FORMATION_PROMPT
+
+
+def test_adjudication_prompt_preserves_formation_classification():
+    assert "copy its kind, tier, and scope exactly from the corresponding candidate" \
+        in _ADJUDICATION_PROMPT
+    assert "Runtime rejects any mismatch and writes nothing" in _ADJUDICATION_PROMPT
 
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"
@@ -1046,16 +1053,45 @@ async def test_project_candidate_without_trusted_project_context_never_reaches_a
 
 
 @pytest.mark.asyncio
-async def test_adjudication_cannot_change_the_candidate_scope(env: Env) -> None:
+@pytest.mark.parametrize(
+    "result_overrides",
+    [
+        pytest.param(
+            {
+                "kind": "episodic",
+                "payload": {
+                    "kind": "episodic", "situation": "安装依赖",
+                    "action": "使用 pnpm", "outcome": "安装成功", "lesson": "继续使用 pnpm",
+                },
+            },
+            id="kind",
+        ),
+        pytest.param({"tier": "profile"}, id="tier"),
+        pytest.param({"scope": "project"}, id="scope"),
+    ],
+)
+async def test_adjudication_cannot_change_candidate_classification(
+    env: Env, result_overrides: dict,
+) -> None:
+    observations: list[tuple[str, dict]] = []
     invoker = FakeInvoker(
         formation=[_formation_candidates(_candidate())],
-        adjudication=[_adjudication(_add(scope="project"))],
+        adjudication=[_adjudication(_add(**result_overrides))],
     )
 
-    _job, result, _sink = await _run(env, invoker)
+    _job, result, _sink = await _run(
+        env, invoker,
+        observer=lambda name, metadata: observations.append((name, metadata)),
+    )
 
     assert result is not None and result.stage is MemoryJobStage.DEGRADED
     assert result.reason == DegradedReason.INVALID_MODEL_OUTPUT.value
+    assert result.written == ()
+    schema_failure = next(
+        data for name, data in observations
+        if name == "schema" and data.get("schema_valid") is False
+    )
+    assert schema_failure["reason_code"] == "adjudication_classification_mismatch"
     assert await env.store.list_active(USER_A, scope=MemoryScope.USER_GLOBAL, limit=10) == []
 
 

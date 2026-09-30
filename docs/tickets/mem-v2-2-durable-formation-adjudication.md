@@ -54,13 +54,13 @@ Only eligible runs create one durable idempotent job. The job executes Formation
 ## Requirements
 
 - **R1:** One eligible terminal run maps to one stable job idempotency key. Repeated finalization/recovery cannot create multiple active jobs.
-- **R2:** Model input contains current-run safe projection, at most eight earlier user/assistant messages, at most ten similar active memories, tool names/status/structured summaries, and artifact references only.
+- **R2:** Model input contains current-run safe projection, at most eight earlier user/assistant messages, at most ten similar active memories, tool names/status/structured summaries, artifact references, and only a `trusted_context.project_available` boolean for project availability. The real project identifier and all other tenant/user/session/event identifiers remain runtime-owned and are never sent to the model; Runtime binds the trusted project identifier after validating model output.
 - **R3:** Formation returns `CANDIDATES` or `NO_MEMORY`; parse/schema failure is a failed attempt, never an abstention.
 - **R4:** At most five candidates proceed: Semantic ≤3, Episodic ≤2, Procedural ≤1, ranked by durable value before truncation.
 - **R5:** A single event may create Procedural memory only when the user supplies the typed `remember_as_procedural_rule=true` signal on a non-blank new task/message. Runtime attaches it only to the corresponding genuine `user/message`; the candidate must cite that same event and provide a non-empty excerpt verifiable verbatim against its content. Without the signal, two distinct qualifying success/correction events are required.
 - **R6:** USER/profile facts require direct user evidence or explicit user confirmation. Assistant/tool evidence cannot independently create them.
 - **R7:** Credentials/secrets are always rejected. Sensitive categories require an explicit remember request. Runtime enforcement is independent of model classification.
-- **R8:** Adjudication returns exactly one of ADD/UPDATE/INVALIDATE/NOOP per candidate and passes provider-neutral authority/version validation before commit.
+- **R8:** Adjudication returns exactly one of ADD/UPDATE/INVALIDATE/NOOP per candidate. Every non-null result preserves the corresponding Formation candidate's `kind`, `tier`, and `scope`; Runtime fails closed and writes nothing on a mismatch. Provider-neutral authority/version validation also passes before commit.
 - **R9:** Primary receives initial + two transient retries; fallback receives initial + one transient retry. Non-transient authentication, permission, schema, and policy errors are not retried.
 - **R10:** One job is bounded by 120 seconds, five calls, 32k cumulative input tokens, and 4k output tokens per call; exhaustion produces one terminal degraded result and no write.
 - **R11:** Jobs serialize per user. Default global concurrency is four and configurable.
@@ -113,7 +113,7 @@ The agent must reuse the repository's existing SQLite/Event/Outbox persistence s
 
 - **AC1:** Normal completion and each approved controlled failure enqueue exactly one job; all excluded terminal shapes enqueue zero jobs and write zero memories.
 - **AC2:** A `NO_MEMORY` result and an adjudication `NOOP` produce no record, no degraded event, and a terminal successful job state.
-- **AC3:** Malformed, over-limit, mismatched, forged-identity, unsupported-source, secret, and unauthorized-sensitive outputs write nothing and follow the fixed retry/terminal rules.
+- **AC3:** Malformed, over-limit, classification-mismatched (`kind`, `tier`, or `scope` differs from the corresponding Formation candidate), forged-identity, unsupported-source, secret, and unauthorized-sensitive outputs write nothing and follow the fixed retry/terminal rules.
 - **AC4:** Injected transient primary failures prove exactly three primary attempts followed by at most two fallback attempts; successful fallback commits once.
 - **AC5:** Injected non-transient failure proves no inappropriate retry or fallback and no write.
 - **AC6:** Kill tests at job-persisted, Formation-completed, Adjudication-completed, and SQLite-committed/outbox-pending windows recover to one correct terminal outcome.
@@ -121,6 +121,8 @@ The agent must reuse the repository's existing SQLite/Event/Outbox persistence s
 - **AC8:** A single event cannot create Procedural memory without the explicit signal bound to that genuine user event and verbatim source evidence; two distinct qualifying independent events can. API, queued/steered delivery, and restart restoration preserve the signal only for its matching user input.
 - **AC9:** Tests prove no secret reaches model input, persisted record, event, log, or trace, and stored content cannot grant runtime permission.
 - **AC10:** The user-visible run answer completes without waiting for Formation/Adjudication under a deliberately slow memory model.
+
+**R7 status (2026-09-30):** The user paused independent sensitive-category detector implementation and confirmed no additional memory model is needed. The current Runtime still relies on the model's sensitivity label for the listed sensitive categories, so R7 remains unresolved; this ticket must remain open until the requirement is implemented or formally revised.
 
 ## Dependencies
 
@@ -146,3 +148,7 @@ parallelizable: with #299 and #300 after #297
 - No heuristic V2 write path remains reachable.
 - Exact attempt/budget and crash-window evidence is attached to the issue.
 - Review coverage, tracker, and PHASE_STATUS are updated after integration.
+
+## 用户批准的裁决分类约束（2026-09-30）
+
+用户批准 Formation 对每个候选拥有 `kind`、`tier`、`scope` 分类；Adjudication 只能选择动作并完善内容，不能改写这三个字段。任何非空结果与原候选不一致时，Runtime fail-closed、终止该 job 的裁决并且不写入。此规则补充 AC3 的 `mismatched` 含义及 R8 的 Runtime 校验要求。

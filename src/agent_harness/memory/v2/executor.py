@@ -211,6 +211,11 @@ _ADJUDICATION_PROMPT = (
     "policy_rejected.\n"
     "A `result` uses the same content fields as a candidate (without sensitivity or "
     "project_id): kind, tier, scope, content, payload, importance, strength, evidence. "
+    "Formation owns the candidate classification: for every non-null result, copy its "
+    "kind, tier, and scope exactly from the corresponding candidate. Adjudication chooses "
+    "the action and may refine content, but must never reclassify or change tier or scope. "
+    "If an action would require changing any of these fields, return NOOP. Runtime rejects "
+    "any mismatch and writes nothing. "
     "The input's `trusted_context.project_available` is only a boolean; never return "
     "`project_id`, because Runtime binds it from trusted context. Copy "
     "every `evidence` item's `event_id` from the candidate unchanged — those values are "
@@ -621,11 +626,17 @@ class MemoryJobExecutor:
                 "schema_valid": False, "reason_code": "adjudication_incomplete",
             })
             raise _Degraded(DegradedReason.ADJUDICATION_INCOMPLETE)
-        if any(verdict.result is not None and verdict.result.scope is not candidate.scope
-               for candidate, verdict in zip(candidates, verdicts)):
+        if any(
+            verdict.result is not None
+            and (verdict.result.kind is not candidate.kind
+                 or verdict.result.tier is not candidate.tier
+                 or verdict.result.scope is not candidate.scope)
+            for candidate, verdict in zip(candidates, verdicts, strict=True)
+        ):
             self._observe("schema", {
                 "job_id": job.job_id, "model_stage": MemoryModelStage.ADJUDICATION.value,
-                "schema_valid": False, "reason_code": "adjudication_scope_mismatch",
+                "schema_valid": False,
+                "reason_code": "adjudication_classification_mismatch",
             })
             raise _Degraded(DegradedReason.INVALID_MODEL_OUTPUT)
         self._observe("schema", {
