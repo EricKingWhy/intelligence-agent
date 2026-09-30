@@ -24,6 +24,7 @@ from agent_harness.recovery import (
     RecoveryError,
     SkipPendingPolicy,
 )
+from agent_harness.recovery.coordinator import RECOVERY_STALE_APPROVAL_REASON
 from agent_harness.session import (
     MODEL_COMPLETED,
     SESSION_RESUMED,
@@ -33,7 +34,9 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
+from agent_harness.session.approval import unresolved_approval_ids
 from agent_harness.session.derive import DANGLING_TOOL_CONTENT
+from agent_harness.session.event import PERMISSION_RESOLVED, TOOL_APPROVAL_REQUESTED
 from agent_harness.storage import (
     Operation,
     OperationState,
@@ -691,3 +694,166 @@ async def test_synthesized_tool_call_carries_real_args_not_empty(
         e for e in recovered.events if e.type == TOOL_CALL and e.data["tool_call_id"] == "call-1"
     )
     assert synthesized_call.data["args"] == {"command": "migrate"}
+
+
+# ── 陈旧审批的 fail-closed 结清（#337）──
+#
+# 审批队列是纯内存的：进程在审批等待中崩溃 ⇒ durable 流里留下"有
+# tool/approval-requested 而无配对 permission/resolved"的请求，重启后没有任何
+# 写入方能让它变成 resolved（/approve 对不存在的 id 404），完成闸门谓词 2
+# （02 §5.4）把该会话永久挡在 quiescence_blocked。恢复层是唯一结清入口：
+# fail-closed 落 deny，幂等，绝不"批准"、绝不重跑调用。
+
+
+def _make_session_with_stale_approval(store: JsonlSessionStore) -> Session:
+    """审批等待中崩溃的现场（形状照 InteractiveCallbackHolder 的真实写入）：
+
+    session/started → user/message → model/completed(tool_calls) → tool/call
+    → tool/approval-requested（无 resolved）。审批闸门在接纳点**之前**
+    （executor.py 阶段 2.5）⇒ Ledger 里没有 Operation，可运行性只依赖事件流。
+    """
+    session = Session.start(store, session_id="sess-stale-approval")
+    session.append(USER_MESSAGE, {"content": "delete the database"})
+    session.append(
+        MODEL_COMPLETED,
+        {
+            "content": "",
+            "tool_calls": [
+                {"id": "call-1", "name": "bash", "args": {"command": "rm -rf"}}
+            ],
+        },
+        run_id="run-1",
+        step_id=1,
+    )
+    session.append(
+        TOOL_CALL,
+        {"tool_call_id": "call-1", "tool_name": "bash", "args": {"command": "rm -rf"}},
+        run_id="run-1",
+        step_id=1,
+    )
+    session.append(
+        TOOL_APPROVAL_REQUESTED,
+        {
+            "approval_id": "appr-1",
+            "tool_name": "bash",
+            "tool_call_id": "call-1",
+        },
+    )
+    return session
+
+
+@pytest.mark.asyncio
+async def test_stale_approval_settled_fail_closed_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """恢复把"有 requested 无 resolved"结清为恰好一条 deny；谓词 2 从真变假。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_session_with_stale_approval(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+
+    before = store.read_events(crashed.session_id)
+    assert unresolved_approval_ids(before) == ["appr-1"], "现场是谓词 2 为真的 wedge"
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    recovered = await coordinator.recover(crashed.session_id)
+
+    settlements = [e for e in recovered.events if e.type == PERMISSION_RESOLVED]
+    assert len(settlements) == 1, "恰好一条结清，不多写"
+    data = settlements[0].data
+    assert data["approval_id"] == "appr-1"
+    assert data["decision"] == "deny", "fail-closed：没有批准就是拒绝"
+    assert data["reason"] == RECOVERY_STALE_APPROVAL_REASON, "理由串稳定可观测"
+    # 谓词 2 从真变假，且只因那一条 resolved（dangling 占位照旧，历史未被改写）。
+    assert unresolved_approval_ids(recovered.events) == []
+    assert [e.type for e in recovered.events][: len(before)] == [
+        e.type for e in before
+    ], "恢复不改写崩溃前的事件"
+    assert [e.type for e in recovered.events][len(before):] == [
+        TOOL_RESULT,  # 悬空调用的 Phase 1 占位（既有语义不变）
+        PERMISSION_RESOLVED,
+        SESSION_RESUMED,
+    ], "新增事件的顺序：占位 → 审批结清 → session/resumed"
+
+
+@pytest.mark.asyncio
+async def test_stale_approval_settlement_is_idempotent(tmp_path: Path) -> None:
+    """重复恢复不产生第二条决议（幂等判据来自 durable 流，与既有恢复幂等同法）。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_session_with_stale_approval(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    first = await coordinator.recover(crashed.session_id)
+    second = await coordinator.recover(crashed.session_id)
+
+    for recovered in (first, second):
+        assert (
+            len([e for e in recovered.events if e.type == PERMISSION_RESOLVED]) == 1
+        )
+    assert len(second.events) - len(first.events) == 1, "第二次只多 session/resumed"
+
+
+@pytest.mark.asyncio
+async def test_existing_resolution_is_never_overwritten(tmp_path: Path) -> None:
+    """已有决议（人工批准过）的请求原样保留——恢复结清只补缺，先写入者胜。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_session_with_stale_approval(store)
+    crashed.append(
+        PERMISSION_RESOLVED,
+        {"approval_id": "appr-1", "decision": "approve_once", "reason": "人工批准"},
+    )
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    recovered = await coordinator.recover(crashed.session_id)
+
+    settlements = [e for e in recovered.events if e.type == PERMISSION_RESOLVED]
+    assert len(settlements) == 1, "已有决议不被覆盖，也不追加第二条"
+    assert settlements[0].data["decision"] == "approve_once"
+    assert settlements[0].data["reason"] == "人工批准"
+
+
+@pytest.mark.asyncio
+async def test_multiple_stale_approvals_each_settled_once(tmp_path: Path) -> None:
+    """多个陈旧请求逐条结清，各恰好一条（batch 审批被一次崩溃打断的形状）。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_session_with_stale_approval(store)
+    crashed.append(
+        TOOL_APPROVAL_REQUESTED,
+        {"approval_id": "appr-2", "tool_name": "bash", "tool_call_id": "call-2"},
+    )
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    recovered = await coordinator.recover(crashed.session_id)
+
+    settlements = [e for e in recovered.events if e.type == PERMISSION_RESOLVED]
+    assert sorted(e.data["approval_id"] for e in settlements) == ["appr-1", "appr-2"]
+    assert all(e.data["decision"] == "deny" for e in settlements)
+    assert unresolved_approval_ids(recovered.events) == []
+
+
+@pytest.mark.asyncio
+async def test_refusal_with_stale_approval_still_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """恢复被人工裁决闸门拒绝时零写入——结清也在其内（ refusal 先于一切写入）。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_session_with_stale_approval(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, "call-1", OperationState.RUNNING, crashed.session_id)
+    events_before = store.read_events(crashed.session_id)
+
+    coordinator = _make_coordinator(store, ledger, tmp_path / "state.db")
+    with pytest.raises(RecoveryError):
+        await coordinator.recover(crashed.session_id)
+
+    assert store.read_events(crashed.session_id) == events_before, (
+        "拒绝零写入：陈旧审批也未被结清（结清只发生在恢复真正推进时）"
+    )
+    assert unresolved_approval_ids(events_before) == ["appr-1"]

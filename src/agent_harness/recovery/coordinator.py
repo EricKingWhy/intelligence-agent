@@ -63,8 +63,9 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
+from agent_harness.session.approval import unresolved_approval_ids
 from agent_harness.session.derive import DANGLING_TOOL_CONTENT, collect_dangling
-from agent_harness.session.event import SessionEvent
+from agent_harness.session.event import PERMISSION_RESOLVED, SessionEvent
 from agent_harness.storage import (
     Operation,
     OperationLedger,
@@ -72,8 +73,18 @@ from agent_harness.storage import (
     needs_reconcile,
 )
 from agent_harness.tooling import ErrorCode, ReconcileHint, ToolRegistry, ToolResult
+from agent_harness.tooling.approval import PermissionDecision
 
 logger = logging.getLogger("agent_harness.recovery")
+
+#: 恢复层对陈旧审批的 fail-closed 结清理由（#337）。
+#: 串必须稳定可观测（不含时间戳 / id / 密钥值），措辞与取消路径的 fail-closed
+#: 家族（session/approval.py 的超时 / 中断分支）同族——读日志的人按同一把尺子
+#: 理解三条 deny 的来源差异。
+RECOVERY_STALE_APPROVAL_REASON = (
+    "审批等待因进程重启中断（重启后没有任何写入方能裁决这条请求），"
+    "恢复层按 fail-closed 结清为拒绝"
+)
 
 
 def _committed_reconcile_verdict(operation: Operation) -> ReconcileVerdict | None:
@@ -374,6 +385,23 @@ class RecoveryCoordinator:
                         OperationState.CANCELLED,
                         result_json=item.content,
                     )
+
+            # #337：陈旧审批的 fail-closed 结清。操作约束：这是恢复链里唯一且幂等的
+            # 结清入口——判据只读 durable 流（与完成闸门谓词 2 同一份
+            # unresolved_approval_ids），只为仍无配对的 id 各落一条 deny（先写入者胜，
+            # 与取消路径 session/approval.py 的 expire 同一把尺子）；绝不结清成批准，
+            # 绝不因此重跑工具调用（副作用处置仍走 Ledger 终态 / 人工裁决路径，
+            # 不变量 #14）。成因与机制叙述见
+            # docs/adr/0047-completion-quiescence-and-completion-policy.md §4 第 5 条。
+            for approval_id in unresolved_approval_ids(session.events):
+                session.append(
+                    PERMISSION_RESOLVED,
+                    {
+                        "approval_id": approval_id,
+                        "decision": PermissionDecision.DENY.value,
+                        "reason": RECOVERY_STALE_APPROVAL_REASON,
+                    },
+                )
 
             # 人工裁决只推进到 NEED_RECONCILE 并记录事实；callback 在锁外等待。
             reconciled_tool_call_ids = {
