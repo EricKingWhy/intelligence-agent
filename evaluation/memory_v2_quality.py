@@ -43,7 +43,15 @@ _WRITE_ACTIONS = {"ADD", "UPDATE"}
 #    than truth value, and treating them as negations would reject legitimate records.
 #  - Negated contractions are expanded before tokenizing (`isn't` -> `is not`,
 #    `won't` -> `will not`), because the raw tokenizer splits `isn't` into `isn` + `t`,
-#    which would make the elided negation invisible to the polarity check.
+#    which would make the elided negation invisible to the polarity check. Apostrophe-like
+#    characters (curly, modifier, fullwidth, prime) are normalized first so the
+#    contraction and clitic rules see the same shape.
+#  - Polarity is compared as a boolean, not counted: a doubled negation ("does not not")
+#    still reads as one negation. Counting would reject records that add legitimate
+#    non-polarity context ("no extra verbosity") — recorded here, not silently fixed.
+#  - Modals and tense auxiliaries ("is" / "was" / "will be") are function words, so a
+#    record that changes tense while keeping every value and the polarity matches: this
+#    rule measures value fidelity, not temporal fidelity.
 #  - Possessive clitics carry no value and are dropped (`project's` -> `project`,
 #    `users'` -> `users`), so a gold anchor written with a clitic still matches a record
 #    that phrases the same value without one.
@@ -68,7 +76,10 @@ _WRITE_FACT_FUNCTION_WORDS = frozenset({
     "this", "that", "these", "those",
 })
 _WRITE_FACT_APOSTROPHES = str.maketrans(
-    {"\u2019": "'", "\u2018": "'", "\u00b4": "'", "`": "'"}
+    {
+        "\u2019": "'", "\u2018": "'", "\u201a": "'", "\u02bc": "'",
+        "\u201b": "'", "\uff07": "'", "\u2032": "'", "\u00b4": "'", "`": "'",
+    }
 )
 _WRITE_FACT_CONTRACTIONS = re.compile(r"won't|can't|shan't|n't\b")
 _WRITE_FACT_IRREGULAR_NEGATIONS = {
@@ -76,7 +87,8 @@ _WRITE_FACT_IRREGULAR_NEGATIONS = {
 }
 _WRITE_FACT_POSSESSIVES = re.compile(r"(?<=[a-z0-9])'(?:s\b)?")
 _WRITE_FACT_NEGATIONS = frozenset({
-    "no", "not", "never", "none", "nothing", "nor", "neither", "without", "cannot",
+    "no", "not", "never", "none", "nothing", "nowhere", "nobody",
+    "nor", "neither", "without", "cannot",
     "dont", "doesnt", "isnt", "arent", "wasnt", "werent",
 })
 _VECTOR_STORE_ERROR_CODES = {

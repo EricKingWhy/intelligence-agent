@@ -274,6 +274,13 @@ the polarity check; possessive clitics are dropped (`project's` -> `project`,
 still matches an equally faithful record that phrases the same value without one. Only
 the explicit negators the evaluator lists count — hedges (`hardly`, `barely`) and focus
 particles (`only`) are out of scope because they shift emphasis more than truth value.
+Polarity is compared as a boolean rather than counted, so a doubled negation still reads
+as one negation; counting would reject records that add legitimate non-polarity context
+("no extra verbosity"). Modals and tense auxiliaries (`is` / `was` / `will be`) are
+function words, so a record that changes tense while keeping every value and the polarity
+matches — this rule measures value fidelity, not temporal fidelity. Apostrophe-like
+characters (curly, modifier, fullwidth, prime) are normalized before the contraction and
+clitic rules run.
 The per-case anchor is a floor, not a full-fidelity contract: a record that keeps the
 anchor value and adds its own context matches, and content the anchor does not name — a
 procedure's success condition, for example — is not itself measured. This replaced the earlier requirement that the

@@ -1607,6 +1607,7 @@ def test_write_fact_matching_rejects_an_added_elided_negation():
 
     assert not write_fact_matches("The demo project isn't named Sample Harbor.", gold)
     assert not write_fact_matches("The demo project isn\u2019t named Sample Harbor.", gold)
+    assert not write_fact_matches("The demo project isn\u02bct named Sample Harbor.", gold)
     assert not write_fact_matches(
         "The synthetic deploy window won't be Thursday.",
         "The synthetic deploy window is Thursday.",
@@ -1636,6 +1637,12 @@ def test_write_fact_matching_counts_plain_negators_in_both_directions():
     )
     assert not write_fact_matches(
         "Nothing about the synthetic project has a public listing API.", gold,
+    )
+    assert not write_fact_matches(
+        "The synthetic project has a public listing API nowhere else.", gold,
+    )
+    assert not write_fact_matches(
+        "Nobody documented that the synthetic project has a public listing API.", gold,
     )
 
 
