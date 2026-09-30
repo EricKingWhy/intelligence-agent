@@ -12,7 +12,7 @@ Prove the fully integrated V2 memory product works with real configured models a
 
 ## Context
 
-The user requires the final real Gate only after all implementation tickets are integrated. The approved project-gold gate uses the configured Cline-compatible primary and Mimo fallback for this evaluation lane only; it does not change production `memory.primary` / `memory.fallback` aliases or add a dedicated memory model. Real Milvus uses a dedicated temporary Memory collection. Langfuse test dataset/experiment/trace evidence is retained and checked for accidental duplicates. Milvus, Knowledge, and Qiniu temporary test data must be cleaned and verified at zero.
+The user requires the final real Gate only after all implementation tickets are integrated. The approved project-gold gate uses the configured Mimo primary and Cline-compatible fallback for this evaluation lane only; it does not change production `memory.primary` / `memory.fallback` aliases or add a dedicated memory model. Real Milvus uses a dedicated temporary Memory collection. Langfuse test dataset/experiment/trace evidence is retained and checked for accidental duplicates. Milvus, Knowledge, and Qiniu temporary test data must be cleaned and verified at zero.
 
 Credentials exist only in ignored local configuration. This ticket may check whether required keys are configured but must never print values.
 

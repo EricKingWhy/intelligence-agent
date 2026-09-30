@@ -133,13 +133,14 @@ _RECALL_DISTRACTORS = (
 )
 _SECRET_SENTINEL = "NEVER-A-REAL-CREDENTIAL"
 _SECRET_POLICY_REJECTION = "memory content contains a credential or secret"
-_GATE_CONFIGURED_PRIMARY_PROVIDER = "cline"
-_GATE_PRIMARY_PROVIDER = "deepseek"  # Existing preset slot for the generic OpenAI-compatible adapter.
-_GATE_PRIMARY_MODEL = "cline-pass/deepseek-v4.1-flash"
-_GATE_PRIMARY_BASE_URL = "https://api.cline.bot/api/v1"
-_GATE_FALLBACK_PROVIDER = "mimo"
-_GATE_FALLBACK_MODEL = "mimo-v2.6-flash"
-_GATE_FALLBACK_BASE_URL = "https://api.xiaomimimo.com/v1"
+_GATE_CONFIGURED_PRIMARY_PROVIDER = "mimo"
+_GATE_PRIMARY_PROVIDER = "mimo"
+_GATE_PRIMARY_MODEL = "mimo-v2.6-flash"
+_GATE_PRIMARY_BASE_URL = "https://api.xiaomimimo.com/v1"
+_GATE_CONFIGURED_FALLBACK_PROVIDER = "cline"
+_GATE_FALLBACK_PROVIDER = "deepseek"  # Generic OpenAI-compatible adapter used for Cline.
+_GATE_FALLBACK_MODEL = "cline-pass/deepseek-v4.1-flash"
+_GATE_FALLBACK_BASE_URL = "https://api.cline.bot/api/v1"
 _GATE_JWT_SECRET = "memory-v2-gold-local-signing-key-not-a-credential"
 
 
@@ -151,8 +152,8 @@ def _create_gate_chat_model(
     gate_config.temperature = 0.0
     model = create_chat_model(gate_config, reasoning_effort=reasoning_effort)
     if (
-        config.provider == _GATE_PRIMARY_PROVIDER
-        and config.model_name == _GATE_PRIMARY_MODEL
+        config.provider == _GATE_FALLBACK_PROVIDER
+        and config.model_name == _GATE_FALLBACK_MODEL
     ):
         # Cline's non-streaming endpoint currently wraps the completion under
         # {"success": true, "data": ...}; streaming returns standard OpenAI SSE.
@@ -364,14 +365,22 @@ async def _close_runner_resources(
 
 
 def _resolve_approved_gate_roles(settings: Settings) -> MemoryModelRoles:
-    """Use the approved Cline/Mimo chain only for #304 without changing production defaults."""
+    """Use the approved Mimo/Cline chain only for #304 without changing production defaults."""
     if settings.model_provider.casefold() != _GATE_CONFIGURED_PRIMARY_PROVIDER:
-        raise RuntimeError("approved Memory V2 gate Cline primary is not configured")
+        raise RuntimeError("approved Memory V2 gate Mimo primary is not configured")
+    if (
+        not settings.fallback_model_provider
+        or settings.fallback_model_provider.casefold()
+        != _GATE_CONFIGURED_FALLBACK_PROVIDER
+    ):
+        raise RuntimeError("approved Memory V2 gate Cline fallback is not configured")
 
-    # Cline exposes an OpenAI-compatible endpoint but is not a production provider preset.
-    # The preset selects the generic OpenAI-compatible adapter; retain the configured Cline
-    # model name, base URL, and key. This normalization is local to this evidence runner.
-    gate_settings = settings.model_copy(update={"model_provider": _GATE_PRIMARY_PROVIDER})
+    # Cline exposes an OpenAI-compatible endpoint but is not the adapter used by
+    # ChatModel. Map only its fallback slot to that adapter, retaining the configured
+    # model, endpoint, and key in this evidence runner.
+    gate_settings = settings.model_copy(update={
+        "fallback_model_provider": _GATE_FALLBACK_PROVIDER,
+    })
     primary = ModelConfig.from_settings(gate_settings)
     fallback = primary.fallback
     if fallback is None:

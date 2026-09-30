@@ -271,7 +271,7 @@ from that file, so an absent path cannot silently fall back to the checkout `.en
 vector-store close failure is recorded as a gate failure while temporary SQLite cleanup
 and report generation still run. The project-gold runner is one lane only; it does not
 claim that the full #304 static, frontend, browser, Langfuse, Knowledge, or Qiniu lanes
-were executed. This gate uses the user-approved Cline-compatible primary and Mimo
+were executed. This gate uses the user-approved Mimo primary and Cline-compatible
 fallback only for evaluation; it adds no dedicated memory model and does not change
 production model aliases. Sampling temperature is set to zero only in this runner;
 production Memory V2 calls retain their configured value. API secret probes require the

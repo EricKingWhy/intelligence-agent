@@ -651,11 +651,11 @@ def test_gate_rejects_an_unapproved_fallback_model():
     with pytest.raises(RuntimeError, match="fallback model does not match"):
         _require_approved_gate_roles(SimpleNamespace(
             primary=SimpleNamespace(
-                provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
-                base_url="https://api.cline.bot/api/v1",
-            ), fallback=SimpleNamespace(
-                provider="mimo", model_name="another-model",
+                provider="mimo", model_name="mimo-v2.6-flash",
                 base_url="https://api.xiaomimimo.com/v1",
+            ), fallback=SimpleNamespace(
+                provider="deepseek", model_name="another-model",
+                base_url="https://api.cline.bot/api/v1",
             ),
         ))
 
@@ -670,12 +670,12 @@ def test_gate_rejects_an_unapproved_fallback_model():
 def test_gate_rejects_unapproved_model_endpoints(role, base_url):
     roles = SimpleNamespace(
         primary=SimpleNamespace(
-            provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
-            base_url="https://api.cline.bot/api/v1",
-        ),
-        fallback=SimpleNamespace(
             provider="mimo", model_name="mimo-v2.6-flash",
             base_url="https://api.xiaomimimo.com/v1",
+        ),
+        fallback=SimpleNamespace(
+            provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
+            base_url="https://api.cline.bot/api/v1",
         ),
     )
     getattr(roles, role).base_url = base_url
@@ -687,19 +687,19 @@ def test_gate_rejects_unapproved_model_endpoints(role, base_url):
 @pytest.mark.parametrize(
     ("role", "base_url"),
     [
-        ("primary", "https://api.cline.bot/api/v1/"),
-        ("fallback", "https://api.xiaomimimo.com/v1/"),
+        ("primary", "https://api.xiaomimimo.com/v1/"),
+        ("fallback", "https://api.cline.bot/api/v1/"),
     ],
 )
 def test_gate_accepts_approved_model_endpoint_with_one_trailing_slash(role, base_url):
     roles = SimpleNamespace(
         primary=SimpleNamespace(
-            provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
-            base_url="https://api.cline.bot/api/v1",
-        ),
-        fallback=SimpleNamespace(
             provider="mimo", model_name="mimo-v2.6-flash",
             base_url="https://api.xiaomimimo.com/v1",
+        ),
+        fallback=SimpleNamespace(
+            provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash",
+            base_url="https://api.cline.bot/api/v1",
         ),
     )
     getattr(roles, role).base_url = base_url
@@ -707,31 +707,32 @@ def test_gate_accepts_approved_model_endpoint_with_one_trailing_slash(role, base
     _require_approved_gate_roles(roles)
 
 
-def test_gate_uses_cline_gateway_primary_and_mimo_fallback():
+def test_gate_uses_mimo_primary_and_cline_gateway_fallback():
     settings = Settings(
-        _env_file=None, model_provider="Cline",
-        model_name="cline-pass/deepseek-v4.1-flash", model_api_key="primary-test-key",
-        model_base_url="https://api.cline.bot/api/v1",
-        fallback_model_provider="mimo", fallback_model_name="mimo-v2.6-flash",
+        _env_file=None, model_provider="mimo",
+        model_name="mimo-v2.6-flash", model_api_key="primary-test-key",
+        model_base_url="https://api.xiaomimimo.com/v1",
+        fallback_model_provider="Cline",
+        fallback_model_name="cline-pass/deepseek-v4.1-flash",
         fallback_model_api_key="fallback-test-key",
-        fallback_model_base_url="https://api.xiaomimimo.com/v1",
+        fallback_model_base_url="https://api.cline.bot/api/v1",
     )
 
     roles = _resolve_approved_gate_roles(settings)
 
-    assert roles.primary.provider == "deepseek"
-    assert roles.primary.model_name == "cline-pass/deepseek-v4.1-flash"
-    assert roles.primary.base_url == "https://api.cline.bot/api/v1"
+    assert roles.primary.provider == "mimo"
+    assert roles.primary.model_name == "mimo-v2.6-flash"
+    assert roles.primary.base_url == "https://api.xiaomimimo.com/v1"
     assert roles.primary.get_secret_value() == "primary-test-key"
     assert roles.primary.fallback is None
-    assert roles.fallback.provider == "mimo"
-    assert roles.fallback.model_name == "mimo-v2.6-flash"
-    assert roles.fallback.base_url == "https://api.xiaomimimo.com/v1"
+    assert roles.fallback.provider == "deepseek"
+    assert roles.fallback.model_name == "cline-pass/deepseek-v4.1-flash"
+    assert roles.fallback.base_url == "https://api.cline.bot/api/v1"
     assert roles.fallback.get_secret_value() == "fallback-test-key"
     assert roles.fallback.fallback is None
 
 
-def test_gate_streams_only_cline_primary_to_avoid_nonstandard_nonstream_envelope(monkeypatch):
+def test_gate_streams_only_cline_fallback_to_avoid_nonstandard_nonstream_envelope(monkeypatch):
     created = []
 
     class FakeModel:
@@ -750,21 +751,21 @@ def test_gate_streams_only_cline_primary_to_avoid_nonstandard_nonstream_envelope
     )
 
     primary_config = SimpleNamespace(
-        provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash", temperature=0.7,
+        provider="mimo", model_name="mimo-v2.6-flash", temperature=0.7,
     )
     fallback_config = SimpleNamespace(
-        provider="mimo", model_name="mimo-v2.6-flash", temperature=0.7,
+        provider="deepseek", model_name="cline-pass/deepseek-v4.1-flash", temperature=0.7,
     )
     primary = _create_gate_chat_model(primary_config, reasoning_effort="deep")
     fallback = _create_gate_chat_model(fallback_config, reasoning_effort="deep")
 
-    assert primary.streaming is True
-    assert fallback.streaming is False
+    assert primary.streaming is False
+    assert fallback.streaming is True
     assert primary_config.temperature == 0.7
     assert fallback_config.temperature == 0.7
     assert created == [
-        ("deepseek", "cline-pass/deepseek-v4.1-flash", 0.0, "deep"),
         ("mimo", "mimo-v2.6-flash", 0.0, "deep"),
+        ("deepseek", "cline-pass/deepseek-v4.1-flash", 0.0, "deep"),
     ]
 
 
