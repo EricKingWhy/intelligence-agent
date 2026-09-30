@@ -110,15 +110,13 @@ parallelizable: no; this is the contract foundation
 - Tracker/PHASE_STATUS record the commit and exact verification results after integration.
 
 ## Approved follow-up addendum: full derived-index recovery (2026-09-30)
-The approved #297 follow-up adds an explicit operator recovery path for total loss of the
-configured Memory V2 Milvus collection. Its authority is only the active V2 records in the
-existing `<workspace_dir>/memory-v2.db`; it does not rebuild legacy V1 records from `memory.db`,
-which remain outside this command's scope:
+The approved #297 follow-up adds an operator recovery path for total loss of the configured
+Memory V2 index. The authoritative contract, fence lifecycle, writer-stop precondition, and
+recovery semantics are defined once in ADR-0042 D7.1. Scope is V2-only as approved; no live
+Milvus rebuild is claimed by this ticket addendum.
 
-- The command requires an existing `memory-v2.db` with the V2 record and outbox tables; it must not silently create an empty authority database.
-- It targets only the application's configured Memory collection, accepts no collection override, and refuses a collection name that aliases the separately configured Knowledge collection.
-- It requires the workspace's exclusive instance lock and refuses `ALLOW_SHARED_ROOT`. A dedicated `.memory-v2-index-rebuild-in-progress` fence blocks normal and late bypass startup; it is written and synced to a same-directory temporary file before atomic publication, retained after failure for retry, and cleared only after a successful drain while the lock is held. A retry recovers the narrow interruption window after publication. This fence is workspace-root-local and only understood by the current code, so stop every writer targeting the same Milvus collection across other workspace roots, clones, and hosts, including old builds or auto-restarting services, before running the command. It is separate from the destructive cutover fence.
-- It atomically requeues all current SQLite `active` rows through the durable outbox and the existing V2 Milvus adapter. Stable primary IDs make retries idempotent. Inactive history is not upserted, existing delete intents are preserved, and no collection drop/clear operation is permitted.
-- If any outbox work remains after relay, the command exits non-zero, leaves SQLite as authority, and retains the fence for a later retry after all writers are stopped.
-
-Focused verification uses a fake index only. It covers total index loss, repeated rebuild, active/inactive selection, identity/scope routing, failure retention, and collection separation; it does not claim a live Milvus run.
+Implementation and fake-index tests are on `codex/mem-v2-297-index-rebuild`. The focused
+rebuild, lock, and Milvus-adapter regression set passed 36 tests on 2026-09-30. The branch still
+needs two-axis review and final Gate-0/coverage evidence; no live Milvus rebuild is claimed.
+Actual execution remains an operator action after all writers to the configured collection are
+stopped, including writers in other clones.
