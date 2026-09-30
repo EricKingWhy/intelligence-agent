@@ -1,0 +1,1 @@
+2026-09-30	机械归属（仅说明来源，不构成对合并内容的独立审查）：3f9480ad = Merge origin/main into codex/mem-v2-301-pagination（先回后正），父一 0e96e4a5（分支）、父二 ee8f14a8（origin/main）。merge-base c2ba7307；`git diff-tree --cc --name-only` 仅列出 0 个文件；2096 路径中 2092 等于父一、4 等于父二、0 其余（均为合并聚合文件）；两侧相对 merge-base 的改动文件 20 / 4。本次合并由 git 自动完成（无冲突），逐路径 blob 全部等于某一父的同路径 blob。	c2ba7307..3f9480ad
