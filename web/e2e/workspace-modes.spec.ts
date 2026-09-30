@@ -48,7 +48,9 @@ test('AC2/AC3 + #193：**真实后端默认**（`CAPABILITIES=""`，只有 core�
   await routeApi(page, {});
   await page.goto('/');
 
-  expect(await tabLabels(page)).toEqual(['Chat', '文件/改动', '输出']);
+  // tab 集要等 GET /api/capabilities 落地才从缺省单 Chat 变三面——裸读会竞逐成
+  // ['Chat']（#442 族1），改自动重试断言锚住"fetch 已落地"的终态。
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat', '文件/改动', '输出']);
   const chat = tabs(page).getByRole('tab', { name: 'Chat' });
   await expect(chat).toHaveAttribute('aria-selected', 'true');
   // roving tabindex：整条只占一个 Tab 停靠点（选中项 0，其余 -1）。
@@ -86,7 +88,8 @@ test('AC4 + 端点真被消费：面跟着**真实默认载荷**出现（`change
   });
   await page.goto('/');
 
-  expect(await tabLabels(page)).toEqual(['Chat', '文件/改动', '输出']);
+  // 同 :51：多 tab 集合必须等 capabilities 落地（#442 族1）。
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat', '文件/改动', '输出']);
   // StrictMode 在 dev 下会双调用 effect（React 既定行为），所以**不锁精确次数**；
   // 锁两件真事：(a) 端点确实被消费了；(b) 消费完之后没有继续重拉——依赖写错会变成
   // 请求循环，而那种 bug 靠 tab 集看不出来。
@@ -105,26 +108,25 @@ test('AC6：tab 集恰好等于"声明为真 **且有实现**"的面（逐面独
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: false, terminal: false })],
   });
   await page.goto('/');
-  const declaredFalse = await tabLabels(page);
+  // 期望值 = 缺省单 Chat 态：fetch 落地前后 tab 集一致（都是 ['Chat']），裸读没有
+  // 竞逐可吃——保持裸读（#442 族1 逐点处置）。
+  expect(await tabLabels(page)).toEqual(['Chat']);
 
   await page.unroute('**/api/**');
   await routeApi(page, {
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: false, terminal: true })],
   });
   await page.goto('/');
-  const declaredTrue = await tabLabels(page);
+  // 「输出」要等 capabilities 落地才出现——裸读会竞逐成缺省单 Chat（#442 族1）。
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat', '输出']);
 
   await page.unroute('**/api/**');
   await routeApi(page, {
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: true, terminal: false })],
   });
   await page.goto('/');
-  const changesOnly = await tabLabels(page);
-
-  expect(declaredFalse).toEqual(['Chat']);
-  expect(declaredTrue).toEqual(['Chat', '输出']);
-  // changes 单独声明为真 → 恰好只有它出现（与 terminal 互不牵连）
-  expect(changesOnly).toEqual(['Chat', '文件/改动']);
+  // changes 单独声明为真 → 恰好只有它出现（与 terminal 互不牵连）；同样要等 fetch 落地。
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat', '文件/改动']);
 });
 
 test('#193：前端取**并集**——插件声明 false 不能关掉 core 已声明的面', async ({ page }) => {
@@ -141,7 +143,8 @@ test('#193：前端取**并集**——插件声明 false 不能关掉 core 已�
   });
   await page.goto('/');
 
-  expect(await tabLabels(page)).toEqual(['Chat', '文件/改动', '输出']);
+  // 同 :51：core 恒声明三面，但集合要等 fetch 落地才齐（#442 族1）。
+  await expect.poll(() => tabLabels(page)).toEqual(['Chat', '文件/改动', '输出']);
 });
 
 test('AC3：能力接口不可用 → 降级为缺省语义，Chat 永不消失', async ({ page }) => {
