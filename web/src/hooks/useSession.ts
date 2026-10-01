@@ -385,6 +385,14 @@ export function useSession() {
   const reconnectRef = useRef<ReconnectController>(new ReconnectController());
   const streamGenRef = useRef(0);
   const terminalSeenRef = useRef(false);
+  // #478：durable pause 的干净收流标记。run/paused 被 #312 刻意排除在
+  // RUN_TERMINAL_TYPES 外（「暂停」≠「跑完」——该集合还消费于 wsStream 终态兜底
+  // 计时器与 runState 的恢复/时长结算），但它对本条流同样是应用层终止事件：
+  // 服务端随后关流是预期行为，不是异常断连。生命周期与 terminalSeenRef 完全同步
+  // （同一批边界复位；重连不复位）。两条收敛路（独立审查核实）：帧已投影时游标
+  // 已越过 paused，重放不会再投递——靠标记跨重连存活在第二次收流直接 finishLive；
+  // 帧丢失时游标落后于 paused，重放重新投递 run/paused 重新置真。殊途同归。
+  const pausedSeenRef = useRef(false);
   const lastFrameAtRef = useRef(Date.now());
   // #420 AC1：WS 传输层的活性观察者——每条服务帧（含 2s 一次的 server_ping）
   // 都刷新停摆基准。审批等待期后端零事件、唯一下行是心跳；不把心跳计入活性，
@@ -654,6 +662,9 @@ export function useSession() {
           if (RUN_TERMINAL_TYPES.has(event.type)) {
             terminalSeenRef.current = true;
           }
+          if (event.type === 'run/paused') {
+            pausedSeenRef.current = true;
+          }
           const sid = event.session_id ?? null;
           if (sid) {
             liveSidRef.current = sid;
@@ -708,6 +719,13 @@ export function useSession() {
           // 终态已见 = 自然终结（含重放收到终态）；未终态 = 服务端提前收流
           //（契约推荐重连时机①：连接异常关闭）。
           if (terminalSeenRef.current) {
+            finishLive();
+            return;
+          }
+          // #478：本轮见过 run/paused ⇒ 收流是 durable pause 的预期收尾——
+          // 直接干净迁移到 viewing（paused 面板经 run_paused 投影出现），
+          // 不进重连链、不报「连接中断」。
+          if (pausedSeenRef.current) {
             finishLive();
             return;
           }
@@ -893,6 +911,7 @@ export function useSession() {
       setReconnecting(false);
       lastAppliedSeqRef.current = null;
       terminalSeenRef.current = false;
+      pausedSeenRef.current = false;
       reconnectRef.current.reset();
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
@@ -1009,6 +1028,7 @@ export function useSession() {
       liveSidRef.current = sid;
       lastAppliedSeqRef.current = afterSeq;
       terminalSeenRef.current = false;
+      pausedSeenRef.current = false;
       lastFrameAtRef.current = Date.now();
       reconnectRef.current.reset();
       streamGenRef.current += 1;
@@ -1089,6 +1109,7 @@ export function useSession() {
       liveSidRef.current = sessionId;
       setReconnecting(false);
       terminalSeenRef.current = false;
+      pausedSeenRef.current = false;
       reconnectRef.current.reset();
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
@@ -1466,6 +1487,7 @@ export function useSession() {
       liveSidRef.current = sessionId;
       setReconnecting(false);
       terminalSeenRef.current = false;
+      pausedSeenRef.current = false;
       reconnectRef.current.reset();
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
@@ -1605,6 +1627,7 @@ export function useSession() {
       setError(null);
       liveSidRef.current = sessionId;
       terminalSeenRef.current = false;
+      pausedSeenRef.current = false;
       reconnectRef.current.reset();
       streamGenRef.current += 1;
       const gen = streamGenRef.current;
