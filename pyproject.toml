@@ -8,7 +8,7 @@ version = "1.0.0"
 requires-python = ">=3.11"
 dependencies = [
     "aiosqlite>=0.21.0",
-    "fastapi>=0.115.0",
+    "fastapi>=0.141.1",
     # #203 / ADR-0032：自定义供应商密钥进凭据管理器（Windows 后端即 WinVault）。
     "keyring>=24",
     "langchain-core>=1.5.4",
