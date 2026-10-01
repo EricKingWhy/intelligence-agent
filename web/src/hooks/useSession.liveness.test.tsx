@@ -22,7 +22,12 @@ import { act, useEffect } from 'react';
 import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EARLY_RESPONSE_WINDOW_MS, useSession } from './useSession';
+import {
+  EARLY_RESPONSE_WINDOW_MS,
+  MAX_RECONNECT_ATTEMPTS,
+  RECONNECT_STALL_MS,
+  useSession,
+} from './useSession';
 
 // ── wsStream mock：捕获三参；流不出帧、不收尾（帧时机归测试驱动）────────────
 const wsMock = vi.hoisted(() => ({
@@ -140,12 +145,14 @@ describe('#440 AC1 — 审批等待期只有心跳帧（无事件）不得触发
   it('对照（无任何帧）：停摆看门狗必须触发——3 次重连耗尽后 give-up（夹具敏感性证明）', async () => {
     // 无心跳 = lastFrameAt 停在挂载时刻：看门狗必须把它判成僵死。这条**不**随
     // 修复变红变绿——它证明上面的绿不是「怎么跑都绿」，断言对停摆真的敏感。
+    // （窗口取 90s：#456 修复后每条新流有各自完整的 10s 宽限，give-up 从
+    // ~T+50s 推迟到 ~T+80s——判定语义不变，只是节奏被正确地放慢。）
     vi.mocked(sendMessage).mockResolvedValue(ackResponse());
     await mount();
     await act(async () => { await captured.hook!.sendMessage(SID, 'hi'); });
     expect(captured.hook!.streaming).toBe(true);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(70_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
 
     expect(captured.hook!.streaming).toBe(false); // give-up → viewing
     // 1 次初接 + 3 次重连 = 4；give-up 后不得继续空转
@@ -229,5 +236,50 @@ describe('#440 — 未接 4 处的逐点回归：wsStreamResponse 第三参必�
     await act(async () => { await captured.hook!.sendMessage(SID, 'hi'); });
     expect(getSessionEvents).not.toHaveBeenCalled();
     expect(listSessionQueue).not.toHaveBeenCalled();
+  });
+});
+
+describe('#456 — 挂新流必须重置停摆宽限起点（lastFrameAtRef）', () => {
+  it('停摆触发的重连挂上新流后，新流一个宽限窗内无帧不得立即再判停；持续无帧最终仍 give-up', async () => {
+    vi.mocked(sendMessage).mockResolvedValue(ackResponse());
+    await mount();
+    await act(async () => { await captured.hook!.sendMessage(SID, 'hi'); });
+    expect(captured.hook!.streaming).toBe(true);
+    expect(wsMock.calls).toHaveLength(1);
+
+    // 推进到第一次停摆判定（首个心跳 tick 的 elapsed 恰等于阈值不判停，第二个
+    // tick 必判）⇒ 重连挂上新流（第 2 条流，~T+20.5s）。
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECT_STALL_MS * 2 + 1_000); });
+    expect(wsMock.calls).toHaveLength(2);
+
+    // 新流挂上后的一个宽限窗内（阈值 + 一个心跳 tick 余量，止于 ~T+32s）无帧：
+    // 不得再判停。红（#456 在场）：基准仍是旧流最后一帧 ⇒ T+30s 的心跳 tick
+    // 按**旧基准**算 elapsed ⇒ 立即再判停 ⇒ 挂上第 3 条流（新流自己才活了 9.5s）。
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECT_STALL_MS + 1_000); });
+    expect(wsMock.calls).toHaveLength(2);
+
+    // 负对照（证明重置的是宽限**起点**、不是取消了判定）：持续无帧 ⇒ 新流的
+    // 宽限照常耗尽 ⇒ 重连链走完额度 give-up（1 初接 + 3 重连 = 4 条流）。
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(captured.hook!.streaming).toBe(false);
+    expect(wsMock.calls).toHaveLength(MAX_RECONNECT_ATTEMPTS + 1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(wsMock.calls).toHaveLength(MAX_RECONNECT_ATTEMPTS + 1);
+  });
+
+  it('初接流同样重置宽限起点：挂载后闲置再提交，首条流获得完整 10s 宽限', async () => {
+    vi.mocked(sendMessage).mockResolvedValue(ackResponse());
+    await mount();
+    // 页面挂载后用户思考了 15s 才提交：初接流不得继承挂载时刻的旧基准，
+    // 否则提交后第一个心跳 tick 就会按旧基准误判停摆。
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    await act(async () => { await captured.hook!.sendMessage(SID, 'hi'); });
+    expect(captured.hook!.streaming).toBe(true);
+    expect(wsMock.calls).toHaveLength(1);
+
+    // 新流一个宽限窗内无帧（推进止于 ~T+26s，旧基准下 T+20s tick 就会误判）：
+    // 不得判停重连。
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECT_STALL_MS + 1_000); });
+    expect(wsMock.calls).toHaveLength(1);
   });
 });

@@ -171,14 +171,15 @@ describe('#440 — 审批等待期走 SSE 降级流：keepalive 注释帧计入�
   });
 
   it('字节也断供的降级流仍必须被看门狗判停（活性口径没有被放宽成「永不超时」）', async () => {
-    // 部署交付层把 SSE 整个攒到流结束才下发时，连注释帧都到不了——那**没有**
-    // 任何活性证据，看门狗照旧要把它判成僵死走重连（wsStream.ts 头注的「不静默」
-    // 契约）。守这条边界：#440 的修复不得把停摆检测焊死成永触发。
+    // 字节也断供 = 没有任何活性证据，看门狗照旧要把它判成僵死走重连
+    //（wsStream.ts 头注的「不静默」契约）。守这条边界：#440/#456 的修复不得
+    // 把停摆检测焊死成永触发。（窗口取 90s：#456 修复后每条新流有各自完整的
+    // 10s 宽限，give-up 从 ~T+50s 推迟到 ~T+80s——判定语义不变，节奏被放慢。）
     const SID = 's-2';
     await mount();
     await driveAckAndFallback(SID);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(70_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
 
     expect(captured.hook!.streaming).toBe(false); // give-up
     expect(FakeWebSocket.instances).toHaveLength(4); // 1 初接 + 3 重连

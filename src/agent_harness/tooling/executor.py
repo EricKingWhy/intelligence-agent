@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -95,6 +95,13 @@ def utc_now() -> datetime:
     生产路径仍是裸挂钟。
     """
     return datetime.now(UTC)
+
+
+_ARGS_TRUNCATED_MESSAGE = (
+    "模型响应因达到长度上限被截断（finish_reason=length），本批工具调用的参数"
+    "可能不完整或被流式补全拼接，本次调用未被接纳（#449，04 §4 错误即消息）。"
+    "请重新发起完整的工具调用。"
+)
 
 
 def _rejected_delta(tool_name: str) -> dict[str, Any]:
@@ -793,6 +800,39 @@ class ToolExecutor:
             data,
             run_id=run_id, step_id=step_id,
         )
+
+    def emit_truncation_refusals(
+        self,
+        session: Any,
+        calls: list[ToolCall],
+        *,
+        run_id: str | None,
+        step_id: int | None,
+    ) -> Iterator[SessionEvent]:
+        """#449：length 截断轮的全部 tool_call 判错（准入前拒绝，零执行、零配额）。
+
+        Pi 语义（failToolCallsFromTruncatedMessage）：截断消息的每个 toolCall 一律
+        生成错误结果、绝不执行——流式参数经 JSON salvage 可能「看似合法实则残缺」
+        （丢尾或凭空补全）。事件形状与显式 0 增量 delta 与本域其它准入前拒绝完全
+        同形（emit_call_event / emit_result_event / _rejected_delta，单一 owner 不变）；
+        调用方（AgentRuntime）只镜像 yield，不自己 append。
+        """
+        for call in calls:
+            yield self.emit_call_event(
+                session, tool_call_id=call.id, tool_name=call.name,
+                args=call.args, run_id=run_id, step_id=step_id,
+            )
+            result = ToolResult.failure(
+                message=_ARGS_TRUNCATED_MESSAGE,
+                error_code=ErrorCode.ARGS_TRUNCATED,
+                retryable=False,
+            )
+            yield self.emit_result_event(
+                session, tool_call_id=call.id,
+                content=result.model_dump_json(),
+                run_id=run_id, step_id=step_id,
+                budget_delta=_rejected_delta(call.name),
+            )
 
     def _flush_committed_events(
         self,

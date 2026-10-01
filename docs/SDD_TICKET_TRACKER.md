@@ -82,6 +82,17 @@
 
 ---
 
+## 修票批次：#372/#456/#426/#337/#449（2026-09-30 批准，2026-10-01 收口，已合并：PR #464 + #465 + #471 + #472 → main `c1bbcecc`）
+
+- **来源与授权**：用户 2026-09-30 批准「#372 → #337 → #426 → #449（全部无需外部资源、票面工程化程度高），#456 顺手带进同批（一句话修法）」并要求「subagent 提速但质量不降、尤其测试必须仔细认真」；追加「多派 subagent（最少两个）为质量不为速度、不许出现任何错误、多做 review、不能有任何潜在风险」⇒ 每个 PR 推进前独立审查 subagent 复核、findings 全处置后才合并。#449 在 Pi 调研小节记「先开票不修」，由本批批次批准覆盖。
+- **交付**（四 PR 依次，均先回后正后推）：①PR #464（`fix/t372-child-resume`，#372 委派子会话恢复）→ merge `ee8f14a8`；②PR #465（`fix/t456-t426-frontend`，#456 停摆重连重置 `lastFrameAtRef` + #426 预算 UI 入口）→ merge `bd8b31a9`（合并提交 `cc1bb4b5` 7 个两侧同改文件 → 两侧存活核对审计行 + 合并树重车道：vitest 1227P+1F 已知 flake 隔离 3×6/6、tsc/oxlint/build 绿）；③PR #471（`fix/t337-recovery-approval-settlement`，恢复层对陈旧审批 fail-closed 结清：唯一幂等 deny 入口、先写入者胜、绝不结清成批准、绝不重跑工具调用）→ merge `334d99d4`；④PR #472（`fix/t449-length-truncation`，length 截断轮 toolCalls 全批判错：完成闸门前判 finish_reason==length 含 invalid 桶 → emit_truncation_refusals 准入前拒绝、零执行、budget_delta 显式 0、错误即消息 04 §4，新增 `ErrorCode.ARGS_TRUNCATED`；salvage 分桶暴露面 6 用例）→ merge `c1bbcecc`。
+- **施工与审查**：主线实现 + 独立审查 subagent 双轴（Reviewer A = PR #465 前端；Reviewer B = #337 代码+测试）；findings 全部处置后推进（Reviewer B：4×I001+RUF022 经 ruff --fix、F841 手工改 `_run_task` 保留引用防 GC）。
+- **门禁**：每 PR 本地 Gate-0 裸全量落盘（#471 读数 `docs/gate/544002d0….json` 17.8s；#472 `docs/gate/7cb32c06….json` 24.5s）+ CI gate0 绿（四 PR 27-34s）；覆盖闸门台账 `t456-t426-frontend-….tsv` 5 行 / `t337-….tsv` 2 行 / `t449-….tsv` 3 行（合并机械归属 5 行：四次 --cc 空表 + cc1bb4b5 --cc 非空两侧存活核对 + 触达面绑树声明）；#449 受影响面 939 passed + 变异 M1=3 红 / M2=2 红。
+- **关票（§14.12）**：#372 / #456 / #426 / #337 / #449 全部 CLOSED 带证据评论（#449 由 PR body Closes 自动关 + 补证据评论 issuecomment-5918140999）。
+- **遗留**：①✅ **P1 覆盖闸门缺口已修复（2026-10-01，PR #480 → merge `00eac4ed`，用户批准方案 a + 加固）**：台账 `431-mem-v2-301-heavy-lanes.tsv` range 钉死 `60bc15d0..d6b3c6e4` + 更正注记（留痕）；`check_review_coverage.py` 加 range 端点不可变引用校验（活动引用 HEAD/tag/分支名一律 die，短 SHA/`~N`/`^N` 放行）；TDD 4 用例 + 变异 M1 恰 1 红。过程异常与违规披露（一次未批准 reset --hard，零内容丢失）见 2026-10 归档。②backend clone 本地 `main` 分叉（`649bd287`/`f46af03c` + merge `55c09bd6`，merge-base `c2ba7307`，重叠仅 `docs/phase_status/2026-09.md`）待裁决推法。③暂停后 UX 毛刺（空转重连 3 次 + 中断横幅延迟落面板，#312 既有）建议另开票。④P3 备忘（未开票）：DST 歧义、`hasControls` 子集调用方、#449 范围外 R6-2 空响应文案欠精确。⑤远端分支未删（§14.4 需批准）：`fix/t372-child-resume`、`fix/t456-t426-frontend`、`fix/t337-recovery-approval-settlement`、`fix/t449-length-truncation`。明细见 docs/phase_status/2026-10.md。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过

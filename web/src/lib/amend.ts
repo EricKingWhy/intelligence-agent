@@ -51,21 +51,63 @@ export function toCreateControls(
   };
 }
 
-/** #426：新建会话的预算入口（最小可用，一维）——Composer 的可选 turns 上限草稿 →
- *  `budget.run.max_agent_turns_total`，随启动 run 的 create 请求提交（#422 裁决：
- *  `budget.run` 属于**启动 run** 的请求；composer 提交恒为 launch=true，无冲突）。
+/** #426：新建会话的预算入口（常用三项）——Composer 的可选草稿 → `budget.run.*`，
+ *  随启动 run 的 create 请求提交（#422 裁决：`budget.run` 属于**启动 run** 的请求；
+ *  composer 提交恒为 launch=true，无冲突）。
  *
- *  空白 / 半截 / 非正整数草稿 → `undefined` = 不发键 = 后端按 Deployment 默认——
- *  「不设置预算的默认行为不变」。0 与负数视同未设置（后端 `ge=1` 必 422，
- *  与其发一个必然被拒的请求，不如在映射层就不发）。
+ *  空白 / 半截 / 非法草稿 → 该维不发键 = 后端按 Deployment 默认——「不设置预算的
+ *  默认行为不变」，也不发一个必然被 422 拒掉的请求（turns/tokens 后端 `ge=1`；
+ *  deadline 朴素时间/空串必 422）。
  *
- *  **刻意只开一维**：票面（#426）明说「具体交互设计可另拆设计票」——
- *  max_total_tokens / deadline_at 等“常用三项”的其余维是那件事的范围；
- *  这里先把「纯 UI 用户能触发预算暂停 → PausedPanel 恢复」这条链接通。 */
-export function toCreateBudget(turnsDraft: string | null): StartSessionPayload['budget'] {
-  const trimmed = turnsDraft?.trim() ?? '';
+ *  wire 形状（`RunBudgetRequest`，`src/agent_harness/web/app.py`，extra="forbid"）：
+ *  `max_agent_turns_total` / `max_total_tokens` 正整数；`deadline_at` RFC 3339 UTC
+ *  文本（datetime-local 的 naive-local 读数经 `Date`/`toISOString` 换算成 UTC 瞬时）。
+ *  三项全空 → `undefined` = 整个 budget 键不发（提交载荷与无预算现状逐字节一致）。 */
+export interface CreateBudgetDrafts {
+  /** `budget.run.max_agent_turns_total` 草稿（输入框原样字符串）。 */
+  turns: string | null;
+  /** `budget.run.max_total_tokens` 草稿。 */
+  totalTokens: string | null;
+  /** `budget.run.deadline_at` 草稿（`datetime-local` 原始值，如 `2026-10-01T12:30`）。 */
+  deadlineAt: string | null;
+}
+
+/** 正整数草稿判形：turns / total_tokens 共用（`/^\d+$/` + 安全整数 + ≥1；后端
+ *  `ge=1`，0 与负数视同未设置而不发键）。 */
+function parsePositiveIntDraft(draft: string | null): number | undefined {
+  const trimmed = draft?.trim() ?? '';
   if (!/^\d+$/.test(trimmed)) return undefined;
   const value = Number.parseInt(trimmed, 10);
   if (!Number.isSafeInteger(value) || value < 1) return undefined;
-  return { run: { max_agent_turns_total: value } };
+  return value;
+}
+
+/** deadline 草稿 → RFC 3339 UTC 文本。无时区的 datetime-local 读数按**本地时区**
+ *  解析（ES 对无偏移 date-time 的规定），`toISOString()` 归一到 UTC `Z` 形——
+ *  后端 `parse_deadline_at` 收 Z/任意偏移并归一化，但拒朴素时间。 */
+function parseDeadlineDraft(draft: string | null): string | undefined {
+  const text = draft?.trim() ?? '';
+  if (!text) return undefined;
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
+}
+
+export function toCreateBudget(drafts: CreateBudgetDrafts): StartSessionPayload['budget'] {
+  const turns = parsePositiveIntDraft(drafts.turns);
+  const totalTokens = parsePositiveIntDraft(drafts.totalTokens);
+  const deadlineAt = parseDeadlineDraft(drafts.deadlineAt);
+  if (turns === undefined && totalTokens === undefined && deadlineAt === undefined) {
+    return undefined;
+  }
+  // 键按固定顺序构造：wire 字节可复现（「不填 = 与现状逐字节一致」的反向承诺）。
+  const run: {
+    max_agent_turns_total?: number;
+    max_total_tokens?: number;
+    deadline_at?: string;
+  } = {};
+  if (turns !== undefined) run.max_agent_turns_total = turns;
+  if (totalTokens !== undefined) run.max_total_tokens = totalTokens;
+  if (deadlineAt !== undefined) run.deadline_at = deadlineAt;
+  return { run };
 }
