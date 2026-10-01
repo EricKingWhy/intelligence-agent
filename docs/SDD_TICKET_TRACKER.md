@@ -128,6 +128,13 @@
 - **关票（§14.12）**：#479 CLOSED（PR Closes 自动关 + 证据评论 issuecomment-5933179937）；#476 CLOSED（issuecomment-5932075849）；#477 CLOSED（issuecomment-5932076547）；#478 随本 PR Closes 自动关 + 证据评论（merge sha 以 PR 页为准）。
 - **遗留**：①远端分支 `fix/t479-empty-response-copy`、`fix/t478-pause-clean-close` 未删（§14.4 需批准）；②独立审查非阻塞观察（stop+畸形 JSON 亦得 "likely truncated" 属票面措辞上限；runtime 防御性重建分支丢 invalid_tool_calls 为既有死代码；纯空响应旧文案无文案级钉住测试，P4 以下）不另开票。明细见 `docs/phase_status/2026-10.md` 本批节。
 
+## #376/#508 测试稳定性批（2026-10-02 · #508 交付完成待集成；#376 无法复现待用户裁决）
+
+- **来源与授权**：用户固定 2 票批（#376 伞票 #505 / #508 [P3]）。push/PR/合并需逐项批准，本地全链就绪即停。分支 `fix/t376-t508-test-stability`（基点 `2cfb01f1`，fix `98759e3a`，**未 push**）。文件边界全程零越界（#376 探针进过 memory/v2/_sqlite.py，已还原，patch 存 D:/t376_logs/t376_probe.patch）。
+- **#376**：memory-v2 写锁超时（`database is locked @ BEGIN IMMEDIATE`，store.py:632）**无法复现**——3 轮全量（含 16 核满载 831s）+ 微压力 700 同形迭代 + in_transaction 探针全绿零持锁（p100<100ms，距 10s busy_timeout 100 倍裕度）；机械判定证明报错需同进程另一连接真实持写锁 >10s，静态排查无持锁者。§9.1.1 ⇒ 不伪造修复；协议 §8.6 第 3 条独立确认拿不到（全史仅 1 次 2026-09-27 `c998b222`）⇒ 已知 flake 亦不登记。**#376 保持 OPEN 待用户裁决**（挂起观察 / 降 busy_timeout 提高检出 / 关单为环境事件）。
+- **#508**：exec_hardening 调度敏感假红收口——`_SCHED_GRACE_SECONDS=10` 事件驱动等待统一 5 处启动窗、命名红刺激窗 0.1→5.0、两处收割轮询条件扩到 kill∧wait、4 条真进程用例 delay/观察窗 10.0/15.0（窗>delay）；kill/reap 断言逐字保留；压力脚本落盘（python 燃烧器满核，bash 死循环极限形状物理不可存活结论登记进脚本头）。读数：修复后 3×31 绿（37.95/41.33/33.90s < 2× 基线 54.6s）；tests/sandbox/ 134P；ruff clean。审查：独立 7 维 + 双轴 APPROVE；amend 差量复审 REQUEST_CHANGES 单项（燃烧器孤儿进程：trap 只杀父 PID 绕过 atexit）已修（TTL + 杀树 + 守卫），双路径实证零孤儿，修复后复跑绿，复核 APPROVE（两条 P3 非阻断备注登记：trap 内 kill 先于树杀的竞速类、3600s TTL 最坏上界）。台账 `t508-exec-sched-windows-2cfb01f1-98759e3a.tsv`。
+- **遗留**：push/PR/合并待批；#505 伞票 comment 进展不关；#508 集成完成后关单（§14.12 分支+commit 记录式）。明细见 `docs/phase_status/2026-10.md` 2026-10-02 节。
+
 ---
 
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
