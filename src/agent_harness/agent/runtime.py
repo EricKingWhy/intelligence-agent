@@ -1558,10 +1558,11 @@ class AgentRuntime:
                 # #479：双空但 invalid_tool_calls 有货（#449 的 C 形态——本轮发起过
                 # 工具调用，args 被 salvage 也解析不了）时，消息必须区分形态，
                 # 否则"empty response"会把排查者引向内容过滤/上游失败。#506：截断
-                # 推测只属于 length 收尾（只有 length/max_tokens 是截断信号）——
-                # stop 等非截断收尾点名 malformed（模型格式坏），finish_reason 缺失
-                # 回落中性、不臆断截断。消息按 OBS-008 只进诊断日志（事件侧仍只有
-                # 类型名），归因与失败兜底语义各分支完全一致。
+                # 推测只属于 length 收尾（langchain finish_reason 口径下的截断信号，
+                # Pi/deepseek-harness/官方枚举同口径）——stop 等非截断收尾点名
+                # malformed（模型格式坏），finish_reason 缺失回落中性、不臆断截断。
+                # 消息按 OBS-008 只进诊断日志（事件侧仍只有类型名），归因与失败
+                # 兜底语义各分支完全一致。
                 extracted_content = _extract_text(ai.content)
                 if not extracted_content and not ai.tool_calls:
                     invalid_calls = getattr(ai, "invalid_tool_calls", None)

@@ -423,9 +423,9 @@ async def test_c_form_stop_finish_reason_gets_malformed_wording(tmp_path, caplog
     assert tool.executed_args == []
     logged = _task_failed_errors(caplog)
     assert any(
-        "1 malformed tool_call arguments" in e
-        and "unparsable after salvage" in e
-        and "likely truncated" not in e
+        e == "model returned an empty response; "
+        "1 malformed tool_call arguments"
+        " (unparsable after salvage — none were executed)"
         for e in logged
     ), logged
 
@@ -466,9 +466,9 @@ async def test_c_form_missing_finish_reason_gets_neutral_wording(tmp_path, caplo
 
     logged = _task_failed_errors(caplog)
     assert any(
-        "1 unparsable tool_call_chunks" in e
-        and "none were executed" in e
-        and "likely truncated" not in e
+        e == "model returned an empty response; "
+        "1 unparsable tool_call_chunks present"
+        " (none were executed)"
         for e in logged
     ), logged
 
