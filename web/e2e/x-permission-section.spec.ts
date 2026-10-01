@@ -129,6 +129,36 @@ test('AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；审批�
   await expect(modalCard.locator('.approval-title')).toHaveText('需要审批');
 });
 
+test('AC5 反向联动（#510 补 #441 移除的覆盖）：点待审批行 → 内联失效卡脉冲高亮', async ({
+  page,
+}) => {
+  // #421 后首个**非失效**待决审批进常驻模态、模态打开时应用 inert ⇒ 跳转对模态候选
+  // 是设计内 no-op，反向联动的可达对象只剩失效孤儿（同 Conversation.jumpPulse 单测
+  // 的夹具口径）。让 ap-1 随 run 终结判失效（projection.markPendingApprovalsStale：
+  // run 已终结仍未配对 ⇒ stale）——全失效 ⇒ 无模态 ⇒ 应用可交互，且内联卡挂着
+  // data-approval-key（模态候选不挂，Conversation.tsx:438-441）。
+  const frames: FrameSpec[] = [
+    ...HEAD,
+    approvalRequested('ap-1', 4),
+    { type: 'run/completed', data: {}, seq: 5, session_id: SID, run_id: RUN, time: T },
+  ];
+  await openInspectorOverview(page, frames);
+
+  const section = permissionSection(page);
+  const row = section.locator('.detail-permission-row');
+  await expect(row).toHaveCount(1);
+  await expect(row).toContainText('已失效');
+
+  // 脉冲落点是包住卡片的 [data-approval-key] 容器（旧用例 3a579242 同口径：类加在
+  // 容器上而非 .approval-card）；断言 class 属性，不截屏比对。
+  const target = page.locator('[data-approval-key="ap-1"]');
+  await expect(target).toBeVisible();
+  await row.click();
+  await expect(target).toHaveClass(/stream-jump-pulse/);
+  // 900ms 后由 timeout 摘除（Conversation.tsx:150）——类来过又走，装置非 vacuous。
+  await expect(target).not.toHaveClass(/stream-jump-pulse/);
+});
+
 test('AC2/AC4：零审批的会话段不消失——权限档 `—` 并说明原因，两项"没有"都说出来', async ({
   page,
 }) => {
