@@ -11,12 +11,15 @@ import pytest
 
 from agent_harness.memory.errors import MemoryDomainError, MemoryNotFound
 from agent_harness.session.errors import SessionNotFound, SessionServiceError
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.domain_errors import (
     _DOMAIN_ERROR_STATUS,
     _MEMORY_ERROR_STATUS,
+    _STORAGE_ERROR_STATUS,
     _WORKSPACE_ERROR_STATUS,
     http_error,
     memory_http_error,
+    storage_http_error,
     workspace_http_error,
 )
 from agent_harness.workspace import (
@@ -260,3 +263,22 @@ def test_memory_http_error_preserves_detail_and_rejects_unregistered_types():
     # 未登记类型是编码错误：直接索引 → KeyError（由覆盖测试先红挡住），不静默 500。
     with pytest.raises(KeyError):
         memory_http_error(ValueError("session binding missing"))
+
+
+# ── #515：第四张表（storage 共享库写锁词汇）──
+
+
+def test_storage_map_is_the_audited_contract():
+    """写锁重试耗尽 = 「服务端暂时不可用」→ 503（可重试），不是 500（服务端 bug）。
+
+    表刻意只含这一项：`storage/sqlite` 的其余异常里，非锁 `OperationalError` 继续
+    500（真正的意外故障），`IntegrityError` 等约束冲突有自己的语义（#519 的域）。
+    """
+    assert _STORAGE_ERROR_STATUS == {StorageBusyError: 503}
+
+
+def test_storage_busy_maps_to_503_with_detail():
+    exc = StorageBusyError("SQLite 写锁竞争重试 4 次仍超时")
+    error = storage_http_error(exc)
+    assert error.status_code == 503
+    assert error.detail == str(exc)

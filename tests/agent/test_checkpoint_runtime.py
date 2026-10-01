@@ -35,6 +35,10 @@ from agent_harness.storage import (
     SqliteCheckpointStore,
     SqliteSessionMetaStore,
 )
+from agent_harness.storage.checkpoint import (
+    checkpoint_save_failure_count,
+    reset_checkpoint_save_failure_count,
+)
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.scripted_model import ScriptedModel
 
@@ -426,3 +430,27 @@ async def test_checkpoint_failure_emits_log_record(tmp_path: Path, caplog) -> No
         and "FINAL_COMPLETED" in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_increments_visibility_counter(tmp_path) -> None:
+    """#515 BUG-02：checkpoint 保存失败计入进程级可见计数（健康面对外读）。
+
+    logger.exception 只进人类日志；计数是机器可检索的对外信号——恢复为什么回到
+    更旧的稳定边界，得有一个能回答"失败了几次"的地方（ADR-0004 Round 5：checkpoint
+    不进 SessionEvent，所以健康面是唯一的对外口径）。
+    """
+    reset_checkpoint_save_failure_count()
+    try:
+        runtime, session = _runtime_with_failing_store(
+            tmp_path, CheckpointBoundary.FINAL_COMPLETED
+        )
+        before = checkpoint_save_failure_count()
+        result = await runtime.run(session, "hello")
+
+        assert result.status == STATUS_COMPLETED
+        # 替身只在 FINAL_COMPLETED 抛，单轮恰好 +1（进程级计数会被其他测试推进，
+        # 所以必须先清零再量增量）。
+        assert checkpoint_save_failure_count() == before + 1
+    finally:
+        reset_checkpoint_save_failure_count()

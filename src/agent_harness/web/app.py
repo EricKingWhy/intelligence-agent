@@ -78,14 +78,16 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.storage.checkpoint import checkpoint_save_failure_count
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.context_usage import build_context_usage_payload
-from agent_harness.web.domain_errors import http_error
+from agent_harness.web.domain_errors import http_error, storage_http_error
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
@@ -1286,8 +1288,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # ── 路由 ──
 
     @app.get("/api/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, object]:
+        """存活探针 + durability 观测（#515）。
+
+        `checkpoint_save_failures` 是进程级累计的 checkpoint 维护失败次数（重启归零）：
+        非零说明有 checkpoint 帧丢失，之后的 resume 可能回到更旧的稳定边界——这是
+        ADR-0004 Round 5 之下 checkpoint 故障唯一的对外口径（不进 SessionEvent）。
+        """
+        return {
+            "status": "ok",
+            "checkpoint_save_failures": checkpoint_save_failure_count(),
+        }
 
     @app.get("/api/sessions")
     async def list_sessions(
@@ -1653,6 +1664,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             )
         except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：共享 harness.db 写锁重试耗尽——暂时性故障报 503，不伪装成 500。
+            raise storage_http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
 
     @app.delete("/api/sessions/{session_id}/archive")
@@ -1672,6 +1686,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             )
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
 
     @app.get("/api/sessions/{session_id}/context-usage")
@@ -1751,6 +1767,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionHasChildren,
         ) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：硬删要写多张共享表（ledger/checkpoint/meta/工件），锁竞争重试
+            # 耗尽时报 503——删除未开始，客户端稍后重试即可。
+            raise storage_http_error(e) from e
         return SessionDeleted(
             id=stats.session_id,
             events=stats.events,
@@ -1974,6 +1994,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SeqConflict,
         ) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：改档要持久化权限设置（session_meta 写），锁竞争重试耗尽报 503。
+            raise storage_http_error(e) from e
         # 回传**改后**的当下生效值（service 解析出的档位），前端按回执对齐即可，不必
         # 本地推导（不引入乐观状态；见 F18-B）。
         return {

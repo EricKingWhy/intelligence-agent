@@ -33,8 +33,9 @@ from agent_harness.session.service import (
     InvalidSessionId,
     SessionNotFound,
 )
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.app import session_service
-from agent_harness.web.domain_errors import http_error
+from agent_harness.web.domain_errors import http_error, storage_http_error
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -129,6 +130,10 @@ def register_lineage_routes(
             InvalidForkBoundary,
         ) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：fork 要给 child 补 session_meta 行（共享 harness.db 写），锁竞争
+            # 重试耗尽报 503——child 未创建，客户端稍后重试即可。
+            raise storage_http_error(e) from e
         return {"session_id": child_id, "from_seq": req.from_seq}
 
 
