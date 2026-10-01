@@ -432,8 +432,10 @@ def _boundary_checked(sandbox: Sandbox, value: str) -> str:
     """给 git 命令用的路径：**过一遍 Sandbox 边界**后原样返回（空串直接放行）。
 
     只校验不读（`resolve_within_workspace` 的返回值这里不要）：git 的命令范围是**仓库**，
-    它不会替我们守 workspace 边界，所以穿越型 pathspec（`..`、指向外面的绝对路径）必须先
-    在这里被挡掉——否则它会与围栏 pathspec 取**并集**，把外面重新拉进输出。
+    它不会替我们守 workspace 边界，所以 resolve 后落在 workspace **之外**的穿越型（含 `..`、
+    指向外面的绝对路径）必须先在这里被挡掉——否则它会与围栏 pathspec 取**并集**，把外面重新
+    拉进输出。`..` 段本身不归本层判：resolve 后仍在内的形态（如 `a/../b`）能过本层，由契约层
+    `_checked_pathspec` 按段拒绝（→ 422）。
     越界 → `PermissionError` → 403；含 NUL → `ValueError`（`Path.resolve()` 抛）→ 422。
     """
     if not value:
@@ -519,7 +521,7 @@ def register_workspace_file_routes(
     @app.get("/api/sessions/{session_id}/workspace/git/status")
     async def workspace_git_status(
         session_id: str,
-        pathspec: str = Query(default="", description="可选路径过滤（纯路径，不支持通配符）"),
+        pathspec: str = Query(default="", description="可选路径过滤（纯路径，不支持通配符与 `..` 段）"),
         _: None = Depends(require_trusted_origin),
     ) -> GitCommandResult:
         """`git status --porcelain=v1`（只读）。
@@ -552,7 +554,7 @@ def register_workspace_file_routes(
     @app.get("/api/sessions/{session_id}/workspace/git/diff")
     async def workspace_git_diff(
         session_id: str,
-        path: str = Query(default="", description="可选路径过滤（纯路径，不支持通配符）"),
+        path: str = Query(default="", description="可选路径过滤（纯路径，不支持通配符与 `..` 段）"),
         staged: bool = Query(default=False, description="True 时看暂存区差异（git diff --staged）"),
         _: None = Depends(require_trusted_origin),
     ) -> GitCommandResult:

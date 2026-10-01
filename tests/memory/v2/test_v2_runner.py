@@ -827,10 +827,22 @@ async def test_the_invoker_turns_a_slow_call_into_a_transient_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_invoker_joins_text_only_provider_content_blocks() -> None:
+    model = FakeChatModel()
+    model.content = [
+        {"type": "text", "text": '{"kind":'},
+        {"type": "text", "text": '"semantic"}'},
+    ]
+    invoker = ChatModelInvoker(factory=lambda config, **kwargs: model)
+
+    assert await invoker(_call()) == '{"kind":"semantic"}'
+
+
+@pytest.mark.asyncio
 async def test_the_invoker_rejects_non_text_content() -> None:
     """非文本形状是 provider 没按契约回话（`provider_error`），不是解析失败——两者归因要分开。"""
     model = FakeChatModel()
-    model.content = [{"type": "image"}]
+    model.content = [{"type": "text", "text": "{}"}, {"type": "image"}]
     invoker = ChatModelInvoker(factory=lambda config, **kwargs: model)
 
     with pytest.raises(TypeError):

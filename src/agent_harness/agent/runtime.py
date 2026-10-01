@@ -1555,8 +1555,20 @@ class AgentRuntime:
                 # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
                 # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），
                 # SSE 客户端因此能区分"模型答了空话"与"上游失败"。
+                # #479：双空但 invalid_tool_calls 有货（#449 的 C 形态——本轮发起过
+                # 工具调用，args 被截断到 salvage 也解析不了）时，消息必须区分形态，
+                # 否则"empty response"会把排查者引向内容过滤/上游失败，而真因指向
+                # 长度上限/供应商截断。消息按 OBS-008 只进诊断日志（事件侧仍只有
+                # 类型名），归因与失败兜底语义两形态完全一致。
                 extracted_content = _extract_text(ai.content)
                 if not extracted_content and not ai.tool_calls:
+                    invalid_calls = getattr(ai, "invalid_tool_calls", None)
+                    if invalid_calls:
+                        raise RuntimeError(
+                            f"model returned an empty response; "
+                            f"{len(invalid_calls)} unparsable tool_call_chunks present"
+                            " (likely truncated — none were executed)"
+                        )
                     raise RuntimeError(
                         "model returned an empty response (no content, no tool calls)"
                     )

@@ -51,7 +51,10 @@ from agent_harness.model.fallback import is_transient_model_error
 #: PRD §5.3 第 5 条：整作业墙钟上界（秒）。
 MEMORY_JOB_TIMEOUT_SECONDS = 120.0
 #: PRD §5.3 第 5 条：单作业模型调用次数上界。
-MEMORY_JOB_MAX_CALLS = 5
+#: R9 修订（#485，用户裁决 2026-10-01）：瞬态最坏 3+2 之外，每个模型阶段各有
+#: **1 次**契约违规修复重试的合法额度 ⇒ 3 + 2 + 2×1 = 7（`_invoke_parsed` 的失败尝试
+#: 也经 `begin_call` 记账，耗尽即终态 degraded，fail-closed 语义不变）。
+MEMORY_JOB_MAX_CALLS = 7
 #: PRD §5.3 第 5 条：**累计**输入 token 上界。
 MEMORY_JOB_MAX_INPUT_TOKENS = 32_000
 #: PRD §5.3 第 5 条：单次调用的输出 token 上界（非累计）。
@@ -60,6 +63,10 @@ MEMORY_JOB_MAX_OUTPUT_TOKENS = 4_000
 PRIMARY_MAX_ATTEMPTS = 3
 #: PRD §5.3 第 2 条：fallback = 初次 + 至多 1 次重试。
 FALLBACK_MAX_ATTEMPTS = 2
+#: R9 修订（#485）：**每个模型阶段**至多 1 次解析失败的修复重试（带结构提醒、重新记账）。
+#: 仅覆盖 parse 层 `ModelOutputError`；auth/permission/policy 与 parse 成功后的语义守卫
+#: （分类篡改 / 条数不符）维持即刻降级。
+MEMORY_JOB_REPAIR_ATTEMPTS = 1
 
 
 class BudgetDimension(str, Enum):
@@ -196,9 +203,10 @@ def next_attempt(
 ) -> MemoryAttempt | None:
     """R9 的下一次尝试；返回 `None` = 不再重试（终态 degraded、零写入）。
 
-    - **非瞬时**错误（认证 / 权限 / schema / 内容策略 / 任何意外异常）一律返回 `None`：
-      换一个 provider 修不好一个认证错，也修不好一个 bug。R3 的解析失败（schema）
-      走同一条路——它消耗一次尝试，但不再获得重试。
+    - **非瞬时**错误（认证 / 权限 / 内容策略 / 任何意外异常）一律返回 `None`：
+      换一个 provider 修不好一个认证错，也修不好一个 bug。
+    - 解析失败（schema）根本不进本函数：它在 `_invoke_parsed` 处理（R9 修订 #485，
+      每阶段一次修复重试），不占用这里的尝试序列。
     - primary：第 1→2→3 次；第 3 次之后**且有备用**才切到 fallback 的初次。
     - fallback：第 1→2 次；之后停。**never 切回** primary。
     """
