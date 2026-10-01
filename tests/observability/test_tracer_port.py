@@ -320,6 +320,17 @@ def test_memory_metadata_hashes_are_accepted_but_raw_evidence_is_removed():
     }) == {"input_sha256": digest, "evidence_sha256": digest}
 
 
+def test_memory_metadata_keeps_repair_flags_through_sanitization():
+    """R9 修订（#485）：`repair` / `repair_used` 是观测契约的一部分，白名单不得剥离——
+    否则 Langfuse 排障路径上看不到修复调用（布尔值本就零内容）。"""
+    from agent_harness.observability.sink import sanitize_memory_metadata
+
+    assert sanitize_memory_metadata({
+        "repair": True, "repair_used": True,
+        "repair_feedback": {"required": "secret-ish"},
+    }) == {"repair": True, "repair_used": True}
+
+
 @pytest.mark.asyncio
 async def test_exploding_sink_leaves_run_events_identical_to_no_sink(tmp_path):
     """sink 每个方法都抛：事件流（含工具重试链与 ToolResult）与"没有 sink"逐字段一致。"""

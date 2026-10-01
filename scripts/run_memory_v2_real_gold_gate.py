@@ -64,6 +64,7 @@ from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.budget import (
     FALLBACK_MAX_ATTEMPTS,
     MEMORY_JOB_MAX_CALLS,
+    MEMORY_JOB_REPAIR_ATTEMPTS,
     PRIMARY_MAX_ATTEMPTS,
 )
 from agent_harness.memory.v2.capability import MemoryV2Service
@@ -846,6 +847,16 @@ def _decision_diagnostics(
     if schema_failure is not None:
         diagnostics["schema_failure_stage"] = schema_failure.get("model_stage")
         diagnostics["schema_failure_kind"] = schema_failure.get("output_failure_kind")
+        stage = schema_failure.get("model_stage")
+        last_in_stage = next((metadata for name, metadata in reversed(observer_rows)
+                              if name == "schema" and metadata.get("model_stage") == stage),
+                             None)
+        if last_in_stage is not None and last_in_stage.get("repair_used") is True:
+            # 只有"该阶段最后一条 schema 行就是修复行且解析通过"才算修复成功；
+            # 修复成功后语义守卫（条数/分类）再败时末行是守卫行——不标修复成功。
+            diagnostics["schema_failure_repaired"] = (
+                last_in_stage.get("schema_valid") is True
+            )
     diagnostics["discarded_action_counts"] = job_state.get("discarded", {})
     return diagnostics
 
@@ -1398,8 +1409,15 @@ def _model_execution_summary(report: Mapping[str, Any]) -> dict[str, Any]:
             per_stage_role[(role, stage)] += 1
         if len(attempts) > MEMORY_JOB_MAX_CALLS:
             budget_checks_pass = False
+        # R9 修订（#485）：每阶段一次 parse 层修复重试。修复调用从 FIRST_ATTEMPT（primary）
+        # 重新起步，所以 primary 每阶段上界 = 初始尝试序列 + 修复重试的尝试序列；
+        # fallback 不放宽：单个 `_invoke` 序列内的 fallback 尝试本就受 FALLBACK_MAX_ATTEMPTS
+        # 约束，而"两条序列都走到 fallback"至少要 4+4=8 次调用，被 7 次总上限排除。
         if any(
-            count > (PRIMARY_MAX_ATTEMPTS if role == "primary" else FALLBACK_MAX_ATTEMPTS)
+            count > (
+                (1 + MEMORY_JOB_REPAIR_ATTEMPTS) * PRIMARY_MAX_ATTEMPTS
+                if role == "primary" else FALLBACK_MAX_ATTEMPTS
+            )
             for (role, _stage), count in per_stage_role.items()
         ):
             budget_checks_pass = False
@@ -1449,6 +1467,7 @@ def _model_execution_summary(report: Mapping[str, Any]) -> dict[str, Any]:
         "budgets": {
             "primary_attempts_per_stage": PRIMARY_MAX_ATTEMPTS,
             "fallback_attempts_per_stage": FALLBACK_MAX_ATTEMPTS,
+            "repair_attempts_per_stage": MEMORY_JOB_REPAIR_ATTEMPTS,
             "calls_per_job": MEMORY_JOB_MAX_CALLS,
             "observed_within_budget": budget_checks_pass,
         },

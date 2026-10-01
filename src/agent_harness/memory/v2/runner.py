@@ -183,7 +183,7 @@ class ChatModelInvoker:
     - `asyncio.timeout(call.timeout_seconds)`——"120 seconds per job"，在**调用边界**上
       兑现。超时抛内建 `TimeoutError`，`model.fallback.is_transient_model_error` 认它，
       于是走 R9 的瞬时序列而不是当成非瞬时致命错。
-    - 模型按**公开字段**缓存：一次 job 最多 5 次调用，每次 `create_chat_model` 都会重建
+    - 模型按**公开字段**缓存：一次 job 最多 7 次调用（瞬态 3+2 + 每阶段 1 次修复重试，R9 修订 #485），每次 `create_chat_model` 都会重建
       底层 httpx client（新连接池、重做 TLS）。键取 `(provider, model_name, base_url)`，
       不含 key——`ModelConfig.api_key` 是 `SecretStr`，本模块从不读它的明文，也从不打印
       任何 provider / 端点 / 凭据值。
