@@ -249,6 +249,70 @@ dataset, and experiment evidence was retained with content fields omitted.
 
 此约束落实 PRD §5.2 第 5 项、§6.3 与 #298 R8 / AC3；不修改 PRD 的质量阈值、样本集、重试预算或模型角色。回归位于 `tests/memory/v2/test_v2_executor.py::test_adjudication_cannot_change_candidate_classification`，分别覆盖 kind、tier、scope 错配。旧分支的历史记录不代表此规则已在 `origin/main` 集成。
 
+### D13 — Make the project-gold gate measure stored facts and raw hybrid Recall@6
+
+2026-09-30 review found that the evaluator counted a write case as correct when it had
+the expected labels and at least one persisted record, without checking that the record
+retained the gold fact or penalizing extra writes. It also read Recall@6 from
+`MEMORY_RECALLED`, which records only the items left after token-budget filtering.
+
+The runner now compares committed ADD/UPDATE records against one synthetic `write_fact`
+anchor per expected write, retaining only match counts in the report. Matching is
+value-preserving, not verbatim. After case and punctuation normalization every gold
+content word must survive into the stored record — in any order, with extra record
+context allowed, and with tokens compared exactly (no stemming or plural folding:
+"summary" does not match "summaries"). The gold polarity must survive with it, and
+polarity is two-way: a record may neither drop a gold negation nor add a negation the
+gold fact does not have, because an added negation reverses the value ("is named Sample
+Harbor" vs "is not named Sample Harbor"). Position-relative words (`before` / `after`)
+are content words for the same reason. Two normalizations keep that comparison honest,
+and the boundary is deliberate rather than accidental: negated contractions are expanded
+before tokenizing (`isn't` -> `is not`, `won't` -> `will not`), because the raw tokenizer
+splits `isn't` into `isn` + `t` and the elided negation would otherwise be invisible to
+the polarity check; possessive clitics are dropped (`project's` -> `project`,
+`users'` -> `users`) because they carry no value, so a gold anchor written with a clitic
+still matches an equally faithful record that phrases the same value without one. Only
+the explicit negators the evaluator lists count — hedges (`hardly`, `barely`) and focus
+particles (`only`) are out of scope because they shift emphasis more than truth value.
+Polarity is compared as a boolean rather than counted, so a doubled negation still reads
+as one negation; counting would reject records that add legitimate non-polarity context
+("no extra verbosity"). Modals and tense auxiliaries (`is` / `was` / `will be`) are
+function words, so a record that changes tense while keeping every value and the polarity
+matches — this rule measures value fidelity, not temporal fidelity. Apostrophe-like
+characters (curly, modifier, fullwidth, prime) are normalized before the contraction and
+clitic rules run.
+The per-case anchor is a floor, not a full-fidelity contract: a record that keeps the
+anchor value and adds its own context matches, and content the anchor does not name — a
+procedure's success condition, for example — is not itself measured. This replaced the earlier requirement that the
+normalized stored content equal the full ordered gold anchor, which rejected eight of
+the ten real wording-only paraphrases in the corpus even though every gold value, name,
+date and quantity was intact. Matching is token-set containment, not sequence matching:
+word order is deliberately unconstrained, and numeric punctuation is split into digit
+tokens (`1.2` and `2.1` both yield the same two tokens) — a known leniency recorded here
+rather than silently fixed. Record action, kind, scope, and source authority must still
+match. `write_precision` remains at the PRD's 0.95 threshold and is computed over
+persisted ADD/UPDATE records, including writes observed on cases that expected NOOP. A
+separate `write_target_coverage` check at 0.95 ensures expected writes cannot disappear
+from that denominator. The synthetic gold corpus version advances to 1.9.0; the PRD
+threshold is unchanged.
+
+Recall@6 is captured from the first six IDs returned by the same real `hybrid_search`
+call before context-budget selection. The event and prompt still record only injected
+memories; raw search results are exposed to this gate through a callback carrying IDs
+only. The report maps matching records to fixed gold labels and stores no memory text.
+
+The real-gold runner requires the explicit `--env-file` path and constructs Settings
+from that file, so an absent path cannot silently fall back to the checkout `.env`. A
+vector-store close failure is recorded as a gate failure while temporary SQLite cleanup
+and report generation still run. The project-gold runner is one lane only; it does not
+claim that the full #304 static, frontend, browser, Langfuse, Knowledge, or Qiniu lanes
+were executed. This gate uses the user-approved Mimo primary and Cline-compatible
+fallback only for evaluation; it adds no dedicated memory model and does not change
+production model aliases. Sampling temperature is set to zero only in this runner;
+production Memory V2 calls retain their configured value. API secret probes require the
+exact secret-policy rejection after a successful ordinary edit. Replay cases measure
+terminal idempotency separately and do not claim that replay reruns secret policy.
+
 ## 4. Verification contract
 
 落实证据位于 `tests/observability/test_tracer_port.py`、`tests/memory/v2/test_v2_executor.py`、

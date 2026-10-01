@@ -45,7 +45,7 @@ _MEMORY_METADATA_FIELDS = frozenset({
     "recall_target", "recall_hits", "retry_count", "attempt_count",
     "schema_valid", "output_failure_kind", "safety_outcome", "compacted_turn_count",
     "input_sha256", "output_sha256", "content_sha256", "evidence_sha256",
-    "output_tokens_estimated",
+    "output_tokens_estimated", "repair", "repair_used",
 })
 _SAFE_METADATA_TOKEN = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
 
