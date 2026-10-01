@@ -1699,7 +1699,17 @@ export function awaitingApproval(approvals: readonly PendingApproval[]): boolean
  *  在投影层一次判定，渲染层不必自己拼事件顺序。
  *
  *  正常流程不受影响：run 会停在审批上等待决策，只有 run 已经结束还在 pending 的
- *  才是孤儿（即 `permission/resolved` 事件缺失的那种）。 */
+ *  才是孤儿（即 `permission/resolved` 事件缺失的那种）。
+ *
+ *  调用口径（#512 查证）：终态（completed/failed/interrupted）与**非终态 paused**
+ *  都走这里——后者是防御：审批在 turn 中途被等待（executor → interactive callback
+ *  → wait_for 阻塞），而暂停臂全部在回合边界（deadline/配额闸还在 approval 之前，
+ *  executor.py 明文「注定被拒的调用不先弹审批」），审批未决时任何暂停臂都到不了；
+ *  等待被取消时 fail-closed 分支会补 `permission/resolved`（session/approval.py）。
+ *  即使手写/污染 JSONL 让 paused 先于未决审批到达：paused 执行的 task 完成 ⇒
+ *  done_callback 已 GC 掉 approval_queues（service.py `_attach_approval_queue_gc`），
+ *  resume 后旧审批无队列可 resolve——标 stale 恰好是正确语义（防 APR-01 式永久锁死），
+ *  不会把「resume 后本可恢复的审批」错误锁死。 */
 function markPendingApprovalsStale(state: ConversationState): void {
   if (!state.pending_approvals.some((a) => !a.stale)) return;
   state.pending_approvals = state.pending_approvals.map((a) =>
