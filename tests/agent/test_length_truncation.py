@@ -365,6 +365,114 @@ async def test_c_form_empty_content_error_names_unparsable_chunks(tmp_path, capl
     ), logged_errors
 
 
+# --------------------------------------------------------------------------------------
+# §#506：守卫按 finish_reason 精确化——截断推测只属于 length 收尾（Pi
+# agent-loop.ts:264-269 只认 length、deepseek-harness EMPTY_RESPONSE 限 stop+零内容块
+# 且 max-tokens 保留截断语义、OpenAI/Anthropic 官方枚举同口径）；stop 等非截断收尾
+# 点名 malformed（格式坏），finish_reason 缺失回落中性（不臆断截断）。
+# --------------------------------------------------------------------------------------
+
+
+def _task_failed_errors(caplog) -> list[str]:
+    """提取 task_failed 诊断日志承载的 error 原文（OBS-008：文案只进日志）。"""
+    return [
+        str(getattr(r, "error", ""))
+        for r in caplog.records
+        if r.name == "agent_harness.agent" and getattr(r, "event_type", "") == "task_failed"
+    ]
+
+
+def _c_form_script(finish_reason: str | None) -> list[list[AIMessageChunk]]:
+    """C 形态剧本：tool_call_chunk args 完全解析不了 + 空 content 收尾帧。
+
+    finish_reason=None 时收尾帧不带 response_metadata（聚合后 finish_reason 缺失）。
+    """
+    closing = AIMessageChunk(content="")
+    if finish_reason is not None:
+        closing = AIMessageChunk(
+            content="", response_metadata={"finish_reason": finish_reason}
+        )
+    return [[
+        AIMessageChunk(
+            content="",
+            tool_call_chunks=[{
+                "name": "echo",
+                "args": "not json at all",
+                "id": TRUNCATED_CALL_ID,
+                "index": 0,
+                "type": "tool_call_chunk",
+            }],
+        ),
+        closing,
+    ]]
+
+
+@pytest.mark.asyncio
+async def test_c_form_stop_finish_reason_gets_malformed_wording(tmp_path, caplog) -> None:
+    """#506：stop 收尾 + 畸形 JSON（模型格式坏，非截断）⇒ 措辞点名 malformed，
+    不再吃 "likely truncated" 的截断推测；失败兜底与归因零变化。"""
+    tool = EchoTool()
+    model = _SalvageChunkModel(_c_form_script("stop"))
+    runtime = _runtime(model, tool)
+    session = make_session(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.agent"):
+        async for _ in runtime.run_stream(session, "hi"):
+            pass
+
+    assert tool.executed_args == []
+    logged = _task_failed_errors(caplog)
+    assert any(
+        e == "model returned an empty response; "
+        "1 malformed tool_call arguments"
+        " (unparsable after salvage — none were executed)"
+        for e in logged
+    ), logged
+
+
+@pytest.mark.asyncio
+async def test_c_form_length_finish_reason_wording_verbatim(tmp_path, caplog) -> None:
+    """#506：length 收尾 C 形态 ⇒ 原文案逐字不变（钉住回归边界）。"""
+    tool = EchoTool()
+    model = _SalvageChunkModel(_c_form_script("length"))
+    runtime = _runtime(model, tool)
+    session = make_session(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.agent"):
+        async for _ in runtime.run_stream(session, "hi"):
+            pass
+
+    logged = _task_failed_errors(caplog)
+    assert any(
+        e == "model returned an empty response; "
+        "1 unparsable tool_call_chunks present"
+        " (likely truncated — none were executed)"
+        for e in logged
+    ), logged
+
+
+@pytest.mark.asyncio
+async def test_c_form_missing_finish_reason_gets_neutral_wording(tmp_path, caplog) -> None:
+    """#506：finish_reason 缺失 ⇒ 保守回落中性措辞——保留 unparsable 事实，
+    不臆断截断（也不误报 malformed 的确定性归因）。"""
+    tool = EchoTool()
+    model = _SalvageChunkModel(_c_form_script(None))
+    runtime = _runtime(model, tool)
+    session = make_session(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.agent"):
+        async for _ in runtime.run_stream(session, "hi"):
+            pass
+
+    logged = _task_failed_errors(caplog)
+    assert any(
+        e == "model returned an empty response; "
+        "1 unparsable tool_call_chunks present"
+        " (none were executed)"
+        for e in logged
+    ), logged
+
+
 @pytest.mark.asyncio
 async def test_no_truncation_path_unchanged(tmp_path) -> None:
     """金钉：finish_reason="stop" 的同形状剧本行为逐字节不变——工具照常执行。"""
