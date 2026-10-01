@@ -522,7 +522,7 @@ def test_web_git_audit_redacts_relative_and_absolute_pathspec(
 
 def test_web_git_rejects_parent_dir_segment_pathspec(tmp_path: Path) -> None:
     """`..` 段在契约层拒绝：能过 Sandbox 边界的 `a/../secret.py`（resolve 后仍在
-    workspace 内）⇒ 422；越界形态（resolve 后在外）仍先被边界挡成 403/422。"""
+    workspace 内）⇒ 422；越界形态（resolve 后在外）仍先被边界挡成 403。"""
     client = _client(tmp_path)
     sid = _create_session(client)
     root = _root(client, sid)

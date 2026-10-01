@@ -84,8 +84,7 @@ def git_status_command(pathspec: str = "", *, scope: str = "") -> str:
     **以外**的文件。Web 路由传 `scope="."`（cwd 即 workspace）把输出围回子树。
     多个 pathspec 是**并集**，所以 scope 必须涵盖 pathspec——调用方必须先保证 pathspec
     在 workspace 内（越过 Sandbox 的 `resolve_within_workspace`），否则围栏形同虚设。
-    `..` 段由 `_checked_pathspec` 在契约层按段拒绝：`a/../b` resolve 后仍在内、边界拦不住，
-    而段语义字符集表达不了。
+    `..` 段由 `_checked_pathspec` 按段拒绝（见该函数注释）。
     工具不传 scope：Agent 侧的命令语义逐字不变。
     """
     checked = _checked_pathspec(pathspec) if pathspec else ""

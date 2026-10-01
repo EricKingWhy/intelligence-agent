@@ -3,7 +3,7 @@
 > **被检对象**：`D:\intelligence-agent`（main `5b6af76a`）刚合并的「R5 深检修复批次」——
 > PR #453（报告入库）、PR #455（7 个修复 commit）、PR #457（记账）。
 > **被检方自述**：`R5_FIX_BATCH_BRIEF_2026-09-30.md`（untracked；本报告逐条对账但不采信其结论）。
-> **本报告未入库**（untracked，等用户处置）。
+> **入库状态**：2026-10-01 按用户指令归置入库（commit `d6a83b91`，仓库根；撰写时为 untracked）。
 > **纪律**：全程默认只读；仅有的两处写操作是两个**突变实验**（随后 `git checkout` 还原，
 > blob 哈希逐字节校验一致）与我自己运行的 gate0 落盘读数；临时 playwright 配置与 `tmp` 日志已删。
 > 未打印任何 `.env` 值；未触碰端口 8000 / 全局 `model-providers.json`。
