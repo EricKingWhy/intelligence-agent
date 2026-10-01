@@ -36,6 +36,14 @@ _SAFE_PATHSPEC = re.compile(r"^[\w /.\-]+$", re.UNICODE)
 
 def _checked_pathspec(value: str) -> str:
     """校验 pathspec/path 是纯路径段；非法即抛 ValueError（调用方映射 INVALID_ARGUMENT）。"""
+    # `/` 必须留在白名单（相对子路径需要），字符集挡不住 POSIX 绝对路径——
+    # 而绝对 pathspec 违反"workspace 相对 POSIX 路径"契约（gate1 首航实测：
+    # Linux 上 git 对仓库内的绝对路径照常执行）。Windows 形式含 \ 与 :，
+    # 字符集已拒绝，这里只需显式拒绝首字符 / 的 POSIX 形式。
+    if value.startswith("/"):
+        raise ValueError(
+            f"pathspec 必须是 workspace 相对路径，不接受绝对路径：{value!r}"
+        )
     if not _SAFE_PATHSPEC.fullmatch(value):
         raise ValueError(
             f"pathspec 含非法字符，只接受纯文件路径（字母/数字/空格/.-_/，"

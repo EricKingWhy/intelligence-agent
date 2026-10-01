@@ -233,3 +233,27 @@ async def test_git_pathspec_accepts_normal_paths(tmp_path):
     stdout = result.result.data["stdout"]
     assert "文件 名.md" in stdout, f"空格路径过滤失效: {stdout!r}"
     assert "other/" not in stdout
+
+
+@pytest.mark.asyncio
+async def test_git_pathspec_rejects_absolute_paths(tmp_path):
+    """绝对路径 pathspec 一律拒绝——`/` 在白名单里（相对子路径需要），字符集挡不住。
+
+    工具契约是 workspace 相对 POSIX 路径；POSIX 形式的绝对路径字符集全合法，
+    Linux 上 git 会照常执行（gate1 首航实测：exit 0 且列出文件，web 层返回 200
+    而非 422）。Windows 形式（C:\\、C:/）已由字符集拒绝（反斜杠与冒号不在
+    白名单），无需另判。
+    """
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    registry = ToolRegistry()
+    registry.register(GitStatusTool(sandbox))
+    registry.register(GitDiffTool(sandbox))
+    executor = ToolExecutor(registry)
+
+    for name, args in (
+        ("git_status", {"pathspec": "/etc/passwd"}),
+        ("git_diff", {"path": "/tmp/secret.py"}),
+    ):
+        result = await executor.execute(_tool_call(name, args))
+        assert not result.result.ok, f"{name} {args} 应被拒绝"
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
