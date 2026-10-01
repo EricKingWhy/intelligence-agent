@@ -252,6 +252,39 @@ async def test_profile_collection_budgets_are_complete_and_untrusted(recall, tmp
 
 
 @pytest.mark.asyncio
+async def test_hybrid_top_six_observer_captures_raw_hits_before_context_budget(recall, tmp_path):
+    service, _store, _index, relay = recall
+    record_ids = set()
+    for index in range(8):
+        record = await service.create(make_draft(
+            content=f"common token project fact {index}",
+        ), USER)
+        record_ids.add(record.id)
+    await relay.flush()
+
+    session = Session.start(
+        JsonlSessionStore(root=tmp_path / "sessions"), session_id="session-raw-top-six",
+    )
+    session.append(USER_MESSAGE, {"content": "common token"})
+    observed_top_six: list[tuple[str, ...]] = []
+    from scripts.run_memory_v2_real_gold_gate import _RecallEvaluationCapability
+
+    provider = MemoryV2ContextProvider(
+        _RecallEvaluationCapability(service, observed_top_six.append),
+    )
+    identity_token = set_identity_context(IdentityContext("tenant-a", "user-a", ["user"]))
+    try:
+        injected = await provider.select(session, 1)
+    finally:
+        identity_context_var.reset(identity_token)
+
+    assert injected == []
+    assert len(observed_top_six) == 1
+    assert len(observed_top_six[0]) == 6
+    assert set(observed_top_six[0]) <= record_ids
+
+
+@pytest.mark.asyncio
 async def test_untrusted_memory_cannot_grant_dangerous_tool_permission(recall, tmp_path) -> None:
     service, _store, _index, relay = recall
     await service.create(make_draft(

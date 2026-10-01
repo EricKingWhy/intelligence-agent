@@ -2,7 +2,7 @@
 
 两条 seam，都是纯对象、都不碰 I/O：
 
-- `MemoryJobBudget`：120 秒 / 5 次调用 / 32k 累计输入 token 的账本；
+- `MemoryJobBudget`：120 秒 / 7 次调用（瞬态 3+2 + 每阶段 1 次修复，R9 修订 #485）/ 32k 累计输入 token 的账本；
 - `next_attempt`：主 1+2、备 1+1，**非瞬时错误不重试也不切备**。
 
 时钟由构造方注入 ⇒ "已经过了 120 秒"在测试里是**手摇**的，不是真的等（Verification
@@ -27,6 +27,7 @@ from agent_harness.memory.v2.budget import (
     MEMORY_JOB_MAX_CALLS,
     MEMORY_JOB_MAX_INPUT_TOKENS,
     MEMORY_JOB_MAX_OUTPUT_TOKENS,
+    MEMORY_JOB_REPAIR_ATTEMPTS,
     MEMORY_JOB_TIMEOUT_SECONDS,
     PRIMARY_MAX_ATTEMPTS,
     BudgetDimension,
@@ -99,16 +100,26 @@ def _walk(*, has_fallback: bool, error: BaseException) -> list[MemoryAttempt]:
 
 def test_the_budget_numbers_are_the_ones_the_prd_fixes() -> None:
     assert MEMORY_JOB_TIMEOUT_SECONDS == 120.0
-    assert MEMORY_JOB_MAX_CALLS == 5
+    assert MEMORY_JOB_MAX_CALLS == 7
     assert MEMORY_JOB_MAX_INPUT_TOKENS == 32_000
     assert MEMORY_JOB_MAX_OUTPUT_TOKENS == 4_000
     assert PRIMARY_MAX_ATTEMPTS == 3
     assert FALLBACK_MAX_ATTEMPTS == 2
+    assert MEMORY_JOB_REPAIR_ATTEMPTS == 1
 
 
 def test_the_role_attempt_budgets_add_up_to_the_call_budget() -> None:
-    """两条独立数字必须自洽：否则"尝试序列"能合法地跑出调用预算之外。"""
-    assert PRIMARY_MAX_ATTEMPTS + FALLBACK_MAX_ATTEMPTS == MEMORY_JOB_MAX_CALLS
+    """三条独立数字必须自洽：否则"尝试序列"能合法地跑出调用预算之外。
+
+    R9 修订（#485，用户裁决 2026-10-01）：瞬态最坏 3+2 之外，每个模型阶段各有
+    **1 次**契约违规修复重试的合法额度 ⇒ 调用预算 = 3 + 2 + 2×1。
+    """
+    assert (
+        PRIMARY_MAX_ATTEMPTS
+        + FALLBACK_MAX_ATTEMPTS
+        + 2 * MEMORY_JOB_REPAIR_ATTEMPTS
+        == MEMORY_JOB_MAX_CALLS
+    )
 
 
 def test_the_budget_dimensions_are_stable_strings() -> None:
@@ -324,8 +335,12 @@ def test_a_transient_failure_walks_three_primaries_then_two_fallbacks() -> None:
     ]
 
 
-def test_a_fully_exhausted_transient_run_costs_exactly_the_call_budget() -> None:
-    assert len(_walk(has_fallback=True, error=_StatusError(503))) == MEMORY_JOB_MAX_CALLS
+def test_a_fully_exhausted_transient_run_costs_exactly_the_transient_budget() -> None:
+    """瞬态耗尽走完 3+2 就停；修复重试的额度只给 parse 层（R9 修订 #485），
+    两者相加才是调用总上界（由恒等式用例钉住）。"""
+    assert len(_walk(has_fallback=True, error=_StatusError(503))) == (
+        PRIMARY_MAX_ATTEMPTS + FALLBACK_MAX_ATTEMPTS
+    )
 
 
 def test_a_transient_failure_without_a_fallback_stops_after_three_primaries() -> None:
