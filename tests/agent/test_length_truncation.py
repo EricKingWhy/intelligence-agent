@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -23,7 +24,14 @@ from pydantic import BaseModel, Field
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.types import STATUS_COMPLETED
-from agent_harness.session import MODEL_COMPLETED, RUN_COMPLETED, TOOL_CALL, TOOL_RESULT
+from agent_harness.session import (
+    MODEL_COMPLETED,
+    MODEL_FAILED,
+    RUN_COMPLETED,
+    RUN_FAILED,
+    TOOL_CALL,
+    TOOL_RESULT,
+)
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -307,6 +315,54 @@ async def test_unparseable_truncated_turn_is_not_silent_final(tmp_path) -> None:
     ]
     assert any(e.type == RUN_COMPLETED for e in session.events)
     assert len(model.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_c_form_empty_content_error_names_unparsable_chunks(tmp_path, caplog) -> None:
+    """#479：C 形态且 content 为空 ⇒ R6-2 空响应守卫先于 #449 防线触发，失败
+    兜底语义与归因不变；但错误消息必须区分两种形态——点名本轮存在无法解析的
+    tool_call_chunks（likely truncated），不得再误导为纯 empty response。
+    （消息按 OBS-008 不进 model/failed 事件，只由诊断日志承载——断言 log。）"""
+    tool = EchoTool()
+    model = _SalvageChunkModel([
+        [
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[{
+                    "name": "echo",
+                    "args": "not json at all",
+                    "id": TRUNCATED_CALL_ID,
+                    "index": 0,
+                    "type": "tool_call_chunk",
+                }],
+            ),
+            AIMessageChunk(content="", response_metadata={"finish_reason": "length"}),
+        ],
+    ])
+    runtime = _runtime(model, tool)
+    session = make_session(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.agent"):
+        async for _ in runtime.run_stream(session, "hi"):
+            pass
+
+    # 失败兜底与归因不变：model/failed + run/failed 收尾、无 model/completed、零执行
+    assert tool.executed_args == []
+    types = [e.type for e in session.events]
+    assert MODEL_FAILED in types
+    assert types[-1] == RUN_FAILED
+    assert not [e for e in session.events if e.type == MODEL_COMPLETED]
+    # 错误消息区分形态：点名 unparsable tool_call_chunks（数量 + likely truncated）。
+    # task_failed 生命周期日志按项目约定走 INFO 级（outcome=error 字段承载严重度）。
+    logged_errors = [
+        str(getattr(r, "error", ""))
+        for r in caplog.records
+        if r.name == "agent_harness.agent" and getattr(r, "event_type", "") == "task_failed"
+    ]
+    assert any(
+        "1 unparsable tool_call_chunks" in e and "likely truncated" in e
+        for e in logged_errors
+    ), logged_errors
 
 
 @pytest.mark.asyncio
