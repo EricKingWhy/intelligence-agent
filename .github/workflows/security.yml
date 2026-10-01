@@ -54,7 +54,8 @@ jobs:
         uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
         with:
           results_file: results.sarif
-          # publish_results 需要仓库管理员 PAT 才能发布到评分 API（可选）；先 artifact 保留。
+          # publish_results=true 走 OIDC（需 id-token: write 的可复用工作流调用），本仓
+          # 不开：先 artifact 保留，要展示再接 Code Scanning（见下）。
           publish_results: false
 
       # 可选：开 Code Scanning 后，可把 results.sarif 喂给

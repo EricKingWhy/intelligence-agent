@@ -1,8 +1,8 @@
 # .github/workflows/gate1.yml —— postsubmit（提交后）完整门禁
 #
 # 与 gate0 的分工（参考《Software Engineering at Google》Ch.23 的 presubmit/postsubmit 设
-# 计：presubmit 只跑快而可靠的小测试，完整集合在提交后验证，且后置 CI 能把故障排查
-# 缩小约 12 倍——本仓的真实差距正是"重车道零服务端证据"）：
+# 计：presubmit 只跑快而可靠的小测试，完整集合在提交后验证，故障定位不必在生产回溯
+# ——本仓的真实差距正是"重车道零服务端证据"）：
 #   gate0 = presubmit：PR 前 6 条机械车道（≤60s），是 main 分支保护的必需检查；
 #   本工作流 = postsubmit：合入 main 之后自动跑**本地协议 §8.8.4 里人工执行的重车道**
 #   （后端全量 pytest + 覆盖率、前端 vitest + vite build），把"集成前跑没跑全量"
