@@ -1,0 +1,140 @@
+# 分支删除清单（冻结于 2026-09-30，作为一次批准的对象）
+# 判据（两条同时成立，fail-closed）：A) tip 是 origin/main 的祖先；B) `git rev-list --count origin/main..<tip>` == 0
+# 冻结基准 origin/main = c2ba7307cda108dbca0f1f674afb203a385d6b72
+# 删除的是 ref 不是提交对象：A 保证每个 tip 仍在 main 的祖先链上，删除后仍可从 main 复核。
+# 说明：上一轮口头报数「69 条远端」多算 1（origin/HEAD 符号引用被 %(refname:short) 渲染成 origin），实际 68 条。
+# 段落：DELETE_REMOTE / DELETE_LOCAL / DEFERRED_LOCAL_MIRROR（同判据但不在本次批准范围）/ EXCLUDED
+# section	name	tip_sha	last_commit_date	proof_or_reason
+DELETE_REMOTE	T297-mem-v2-1-typed-lifecycle	32ef89bccf0d3ff14d7979abc18c328deef5ef59	2026-09-24	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	T298-mem-v2-2-durable-formation-adjudication	71215a280ac87f75eb6e6a75470d2db84a8f6281	2026-09-24	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	ci/gate0-main-protection	be7cd592da3dec2f08324f60e3a1322493bcdea9	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/342-resume-seq-conflict	8b431dce913087bc4fa4e19fbde3f1e5045b47b8	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/343-docs-backfill	ccc552163af81024757225b8292ecdbe12b665c5	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/345-compaction-reload	6eea31dcd1086fccc4e94cdd4623798c47f37add	2026-09-28	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/346-protected-facts	6fa4eb752995ee453f6c46199f3651ffb87b44ca	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/mem-v2-3-cross-session-profile	053502b0a0fd6ef3715c2db09d60bc73e2c700bc	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/mem-v2-4-explicit-commands	e1905804c77252126b8c8eb449b743cebf2e8264	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/mem-v2-6-closeout	4e6c7d3d862f5895be1470e163583b7c500abd5e	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/mem-v2-6-quality-repair	47ceb55f54f35fd0254684951b02ea1b1ed72d70	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/mem-v2-7-clean-slate-cutover	e7e6f910bea2151aa95b23ecb76ee5983ae9940f	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	codex/mem-v2-7-cutover-evidence	caf7ea088ceadd35ebb7a9d8f8bfd13ef87b4515	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/pi-research-epilogue	b6d09e7b3d1d9b78a1fa7657dc55d3a05a2dc9c1	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/pi-research-import	5331fc3c9844a18680754aac6a0e59f89d755fb4	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/r5-batch-epilogue	1210f57f6c2f3973aa4b580a3f411fd214e86cdb	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/r5-briefs-gate-readings	4e454aab3163410c3ecf38f78c4ce271d86ba5ba	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/r5-deep-check-report	89b849f2ae50946ac1032c96b30dad7840bcfacc	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/r5-fix-batch-epilogue	b3b8f2e2006e9c02fb55246ee465c0a7d4804a7a	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/r5-p3-epilogue	352b18adfa67d2840b46fc14124fa4632f46fca9	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/research-first-epilogue	69509ad0971a3d9b8b45024466461dbb65e6aa55	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	docs/research-first-policy	e0ace73239a93db681b7e8b6ce32b14f79f9deb3	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	feat/FixBUG	cca1fa15d9f1c6c064af676f480c8429b187991f	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	feat/backend	9727344d00f910bca9a9898f5cda97bc290c2997	2026-09-13	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	feat/frontend	3706e9bfe5094a9c53879060763171c594ce675d	2026-09-14	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	fix/r5-deep-check-440-446	07166334a838010b6d26b46d0a3c59d7d1a6aec4	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	fix/r5-issues	367378dd3c086ce1e16683ea5ebebc126248836a	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	fix/r5-p3-459-460	d04997a714dadf87e5ded385276ed9dc37aa16da	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	workbuddy/341-relay-cleanup-hardening	4d911e70d8d9a46a7b5838ba7727761fc08ea63f	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	workbuddy/gate0-preflight-execbit	b25eaff39c5aef62651ba9a4f58ccfa6ee9f8c4d	2026-09-28	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	workbuddy/main-f049fadd	500e4e69a9249c8c7fb3f271346a1060b560b499	2026-09-22	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T306-integration-record	cf835f9c0be3fa2dec50be611c9a6752763e2fd2	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T306-longrun-budget-contracts	c3657dc6a42eaa422c2310485204e11639676ae4	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T307-live-gate-evidence-runner	08a9bdd170113edd73445690e10140ffd023bafe	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T308-local-turn-budget	dfdded6a7df0bb84ae74a2e70393a9744c118e09	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T312-run-pause-resume	c7a1a8f0d78d7e808d3c38653889e68a7ae45b08	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T313-integration-record	0e0f8036bccae61cb81972cd7d9e7b4c8f0373c4	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T313-model-request-budget	efa00fa8deb057f8043176734c824b7ce694bcb8	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T314-integration-record	4e9b996160b07b1984bee15b646e49bb22d659a7	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T314-tool-quotas	1314904fa590f0d237ded2adc016598e666216ae	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T315-integration-record	dcf5bc03aa953ab3cd51fd35e664910c6f8c95b1	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T315-run-deadline	91eb76f824b8b6cf2871fbee81df59cff0d907ef	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T316-completion-quiescence	16f992abfc26edd1de99d76a4f4cf4dd9bafcfea	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T316-integration-record	297bea92709cdfaf05861ff09dcf32008349e016	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T317-stuck-detection	8721a70f441cca8c9b6721099871a835b02da745	2026-09-28	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T318-session-budget	1baa3ac58f44049d2525e6fd4ce865d3852cd4b6	2026-09-28	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T319-integration	0f6c1496fee2a8d96d168bee4d64ae5f521567c0	2026-09-28	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T320-integration-ledger	75befd41d4a412ad1aa18ef0aeed2483188b4eff	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T320-max-steps-alias	01e21ca419d0c3ef0f18a96fa3f77fe620efedf2	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T347-w03-tool-result-pruner	bb9b7e3f4c0158d98239b39a1307b97baaf679b0	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T348-w04-summary-retry-hardguard	998fde85278706430745ec5e8a7c796291c95a24	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T379-w25-compression-thresholds	ce1b3da77542e7418b36306c6f025c0cb5c7b5ec	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T380-w26-plan-contract	40fbea8f1cf6c59b2cd4d5a60c21fdda6efe2534	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T383-w29-residuals	f89518a67ea8943351875093d0279c4037badf47	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T395-spec-retire-maxsteps	8e9f2d5c3254643185bf5409fc7ebf67ddd54ce4	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T396-delegation-scenario-tests	26e937e48625dff2df0d980c3177c528e1a93061	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T414-w31-2-prune-params-redo	befaef3fe2d3c5fed9d06c065e7dcaa0f47c26e4	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T415-w31-3-subagent-refs	83235a1a52d57647332b84233d872aa6a8247edc	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T416-w31-4-kv-cache-audit	6a8e80b474ba35364c48386f0beda7af647bf8b6	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T417-post-merge-focus	8bf0d1ed35a1c9dc9f60763a199d8b7c384b0758	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T417-w31-5-modified-paths	116ef5869363da14209c96c3c4b265dc5bfae9b3	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T430-audit-fixups	826d56f3875205d42c34464ec7010bb8c7a747c8	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/T430-w02-1-fact-budget	11d8834ab1365c3e5c81ee12cd96b48d49d41b24	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/gate-readme-w04-scout	554ad6b1008aa2bc1a89e9a786ea73c52cbf37f7	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/night-ledger-3tickets	8ed769706c9d38a88d060b85715e98e0d324dee2	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/night-ledger-w03	943869d69563f5678a628e67c35379d6a904c2e4	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/post-chain-reconciliation	d48309a0983e8abedac975ba4b0478dcbad3841f	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_REMOTE	zcode/t348-closeout-ledger	00a08ae7abefe0e842c37cdb581d5af97a3c25bd	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DELETE_LOCAL	codex/mem-v2-5-tombstone-read-api	af8dd8d840c887248795756891269daf21a23da5	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DELETE_LOCAL	codex/tickets-287-290-on-main	799f4d781cb6856c2c7216ba49d425c617aef4ea	2026-09-24	ancestor-of-c2ba7307cd;ahead=0
+DELETE_LOCAL	feat/FIX-test-BUG	507a03b2d37b1ae47fc544bf278e95f3e54e9625	2026-09-14	ancestor-of-c2ba7307cd;ahead=0
+DELETE_LOCAL	zcode/T414-w31-2-prune-params	9bb16e6486f923efb60d38457db822e8891df90c	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	codex/346-protected-facts	6fa4eb752995ee453f6c46199f3651ffb87b44ca	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	feat/FixBUG	cca1fa15d9f1c6c064af676f480c8429b187991f	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	feat/backend	7a2645b33563b4a50b8a0def005cf2ff00cc9c0a	2026-09-15	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	workbuddy/main-f049fadd	500e4e69a9249c8c7fb3f271346a1060b560b499	2026-09-22	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T306-integration-record	cf835f9c0be3fa2dec50be611c9a6752763e2fd2	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T306-longrun-budget-contracts	c3657dc6a42eaa422c2310485204e11639676ae4	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T307-live-gate-evidence-runner	08a9bdd170113edd73445690e10140ffd023bafe	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T308-local-turn-budget	dfdded6a7df0bb84ae74a2e70393a9744c118e09	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T312-run-pause-resume	c7a1a8f0d78d7e808d3c38653889e68a7ae45b08	2026-09-25	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T313-integration-record	0e0f8036bccae61cb81972cd7d9e7b4c8f0373c4	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T313-model-request-budget	efa00fa8deb057f8043176734c824b7ce694bcb8	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T314-integration-record	4e9b996160b07b1984bee15b646e49bb22d659a7	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T314-tool-quotas	1314904fa590f0d237ded2adc016598e666216ae	2026-09-26	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T315-integration-record	dcf5bc03aa953ab3cd51fd35e664910c6f8c95b1	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T315-run-deadline	91eb76f824b8b6cf2871fbee81df59cff0d907ef	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T316-completion-quiescence	16f992abfc26edd1de99d76a4f4cf4dd9bafcfea	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T316-integration-record	297bea92709cdfaf05861ff09dcf32008349e016	2026-09-27	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T317-stuck-detection	8721a70f441cca8c9b6721099871a835b02da745	2026-09-28	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T319-integration	0f6c1496fee2a8d96d168bee4d64ae5f521567c0	2026-09-28	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T320-integration-ledger	75befd41d4a412ad1aa18ef0aeed2483188b4eff	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T320-max-steps-alias	01e21ca419d0c3ef0f18a96fa3f77fe620efedf2	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T348-w04-summary-retry-hardguard	998fde85278706430745ec5e8a7c796291c95a24	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T380-w26-plan-contract	40fbea8f1cf6c59b2cd4d5a60c21fdda6efe2534	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T383-w29-residuals	f89518a67ea8943351875093d0279c4037badf47	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T414-w31-2-prune-params-redo	befaef3fe2d3c5fed9d06c065e7dcaa0f47c26e4	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T415-w31-3-subagent-refs	83235a1a52d57647332b84233d872aa6a8247edc	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T416-w31-4-kv-cache-audit	6a8e80b474ba35364c48386f0beda7af647bf8b6	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T417-w31-5-modified-paths	399168cf12e88866a7df5874d12e6a59c5bb672e	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T430-audit-fixups	826d56f3875205d42c34464ec7010bb8c7a747c8	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/T430-w02-1-fact-budget	11d8834ab1365c3e5c81ee12cd96b48d49d41b24	2026-09-30	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/post-chain-reconciliation	d48309a0983e8abedac975ba4b0478dcbad3841f	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+DEFERRED_LOCAL_MIRROR	zcode/t348-closeout-ledger	00a08ae7abefe0e842c37cdb581d5af97a3c25bd	2026-09-29	ancestor-of-c2ba7307cd;ahead=0
+EXCLUDED	codex/mem-v2-8-final-gate	64b5de40d228bcd9e0617be301fe57045fda067a	''	ancestor=False ahead=77
+EXCLUDED	codex/tickets-287-290	83d1df1d2141aaedd3de677dc877c29adf0aa6a6	''	ancestor=False ahead=5
+#
+# RESULT 执行于 2026-09-30T21:50:19+0800
+# 基准 origin/main = c2ba7307cda108dbca0f1f674afb203a385d6b72
+# 实际删除：远端 68 条、本地 4 条；执行时剔除 0 条
+# 后验：远端剩余分支 2 条 = codex/mem-v2-8-final-gate, main
+# 保留（未删）：codex/mem-v2-8-final-gate（未合并活线）、codex/tickets-287-290（本地唯一副本）、本地 32 条与 origin 同名镜像（DEFERRED_LOCAL_MIRROR）
+#
+#
+# FOLLOW-UP（同一次执行）
+# 未删的 3 条本地候选：被 linked worktree 检出占用，git branch -d 拒绝（rc=1），未强删、未动 worktree：
+#   codex/mem-v2-5-tombstone-read-api     ← worktree D:/intelligence-agent-backend-mem-v2-5（工作树干净）
+#   codex/tickets-287-290-on-main         ← worktree D:/intelligence-agent-backend-candidate-f15bd51（干净）
+#   feat/FIX-test-BUG                     ← worktree D:/intelligence-agent-fixbug（干净）
+#   三者的内容均已在 main（本清单判据 A+B 成立）；清理需先删 worktree，属 §14.4 单独批准项。
+# 未删的 32 条本地镜像分支（DEFERRED_LOCAL_MIRROR）：与 origin 同名，判据同成立，但不在本次批准范围。
+#   ⚠ 其中 workbuddy/main-f049fadd 的 origin 同名分支已在本次删除之列 → 它现在是没有远端对应的本地镜像。
+# 保留：codex/mem-v2-8-final-gate（未合并活线，77 笔）、codex/tickets-287-290（本地唯一副本：Gate-0 JSON + 台账行 153/154）。
+# 另注：worktree C:/Users/王浩宇/WorkBuddy/Worktrees/intelligence-agent-backend/main-f049fadd 不在本仓库目录下，但仍登记为本仓库 worktree。
+#
+#
+# RESULT-PASS-2 执行于 2026-09-30T21:55:42+0800（32 条本地镜像；用户批准）
+# 基准 origin/main = c2ba7307cda108dbca0f1f674afb203a385d6b72
+# 复核项：tip 与冻结值一致 + 是 main 祖先 + ahead=0 + 未被 worktree 占用 + 非 main
+# 实际删除 31 条：codex/346-protected-facts, feat/FixBUG, feat/backend, zcode/T306-integration-record, zcode/T306-longrun-budget-contracts, zcode/T307-live-gate-evidence-runner, zcode/T308-local-turn-budget, zcode/T312-run-pause-resume, zcode/T313-integration-record, zcode/T313-model-request-budget, zcode/T314-integration-record, zcode/T314-tool-quotas, zcode/T315-integration-record, zcode/T315-run-deadline, zcode/T316-completion-quiescence, zcode/T316-integration-record, zcode/T317-stuck-detection, zcode/T319-integration, zcode/T320-integration-ledger, zcode/T320-max-steps-alias, zcode/T348-w04-summary-retry-hardguard, zcode/T380-w26-plan-contract, zcode/T383-w29-residuals, zcode/T414-w31-2-prune-params-redo, zcode/T415-w31-3-subagent-refs, zcode/T416-w31-4-kv-cache-audit, zcode/T417-w31-5-modified-paths, zcode/T430-audit-fixups, zcode/T430-w02-1-fact-budget, zcode/post-chain-reconciliation, zcode/t348-closeout-ledger
+# 跳过/拒绝 1 条：workbuddy/main-f049fadd(被 worktree 占用)
+# 后验：本地剩余分支 6 条 = codex/mem-v2-5-tombstone-read-api, codex/tickets-287-290, codex/tickets-287-290-on-main, feat/FIX-test-BUG, main, workbuddy/main-f049fadd
+#
