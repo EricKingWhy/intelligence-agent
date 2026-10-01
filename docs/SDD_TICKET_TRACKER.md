@@ -139,6 +139,7 @@
 - **gate0（两项环境发现待裁决）**：--no-record 裸跑 diff-check/oxlint/tsc/guards 绿——guards 须 `PYTHONPATH=<本仓>/src`（**发现①**：本仓 .venv 的 .pth 把 `agent_harness` 解析到 codex 遗留 worktree `issue-378-e2e-flakes`，guards expected 侧量错树）；ruff 2 错 + 落盘拒绝均由 4 个非本批未跟踪用户文件（`codex_issue346_write.py` 等）造成（**发现②**；tracked 树单独 All checks passed）⇒ **裸全量读数落盘被阻断，待用户裁决**（不代提交/不代删用户文件）。coverage FAIL = 本笔无审查行的预期形状（台账行入库后闭合）。
 - **台账**：`t509-t510-e2e-stability-2cfb01f1-c22e4275.tsv`（774 字符）。
 - **收口（2026-10-02，用户批准「我都同意了」后执行）**：4 个用户未跟踪文件移出 → gate0 裸全量 **6/6 PASS 25.2s** → sha256 逐一校验原样归还（用户文件零改动）；`.pth` 污染修复（单行重指本仓 `src`，guards 量树恢复设计假设；codex worktree 本体保留、处置留用户）→ 读数落盘 `docs/gate/a759716cf235670c614080bf3f4d61f046347f20.json`（`cd06025b`）→ push → **PR #511（CI gate0 40s 绿 + gitleaks 绿）→ merge `ff20b89d`** → #509/#510 自动关单 + 证据评论（issuecomment-5936947418 / 5936948145）→ F3 开票 #512 → 本地 main ff 对齐 `ff20b89d`，§14.9 回补通知已记。
+- **复审（第二轮 code-review，用户指令；两轴独立 subagent 串行）**：Standards 无硬违规（3 judgement call 与首轮登记一致）；Spec 无实质偏差（F2/采样未复现均属已登记的有意识接受；纯插入 0 删除行、可达路径与断言非 vacuous、数字自洽逐项实查通过）；抓出 1 处事实性出入并已更正——#510 关单评论括注「文件尾追加 +2 处 import 复用」与实际 diff（单 hunk 中部纯插入 +30/−0，imports 零改动）不符 → 更正注记 issuecomment-5937277240；repo 文档与 PR 描述无此说法；#509 评论引用行号 92/120/156 实测相符。
 - **遗留**：①红证副本 `D:/tmp-t510-red` 用毕待删；②远端分支 `fix/t509-t510-e2e-stability` 未删（§14.4 需批准）；③codex worktree `issue-378-e2e-flakes` 处置留用户（.pth 已重指本仓，删除已无必要）；④本收口记账笔在本地 main，待随下一批 PR 进 origin（main 受保护）。明细见 `docs/phase_status/2026-10.md` 本批节。
 
 ---
