@@ -257,3 +257,45 @@ async def test_git_pathspec_rejects_absolute_paths(tmp_path):
         result = await executor.execute(_tool_call(name, args))
         assert not result.result.ok, f"{name} {args} 应被拒绝"
         assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_git_pathspec_rejects_parent_dir_segments(tmp_path):
+    """`..` 路径段一律拒绝——`.` 与 `/` 都在白名单里，字符集表达不了**段语义**。
+
+    `..` 是上行逃逸段，违反「workspace 相对路径」契约：#191 的 scope 围栏与
+    pathspec 取**并集**，只有「pathspec 落在 workspace 内」这条不变式成立，
+    围栏才能拦住外面。web 层只拦越界形态（resolve 后在外 ⇒ 403）；`a/../b`
+    resolve 后仍在内、能过边界，必须由契约层按段拒绝。与首 `/`（POSIX 绝对
+    路径）同一处校验；含 `..` 子串的合法文件名不受影响（下一条正控）。
+    """
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    registry = ToolRegistry()
+    registry.register(GitStatusTool(sandbox))
+    registry.register(GitDiffTool(sandbox))
+    executor = ToolExecutor(registry)
+
+    for name, args in (
+        ("git_status", {"pathspec": ".."}),
+        ("git_status", {"pathspec": "../out"}),
+        ("git_diff", {"path": "src/.."}),
+        ("git_diff", {"path": "a/../b"}),
+    ):
+        result = await executor.execute(_tool_call(name, args))
+        assert not result.result.ok, f"{name} {args} 应被拒绝"
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_git_pathspec_keeps_dotdot_substring_names(tmp_path):
+    """`..` 段判别不得误伤含 `..` 子串的合法文件名（正控：段判别 ≠ 子串匹配）。"""
+    sandbox = LocalSubprocessSandbox(workspace_root=tmp_path)
+    registry = ToolRegistry()
+    registry.register(GitStatusTool(sandbox))
+    executor = ToolExecutor(registry)
+    _init_git_repo(sandbox)
+    sandbox.write_text("a..b.txt", "x")
+
+    result = await executor.execute(_tool_call("git_status", {"pathspec": "a..b.txt"}))
+    assert result.result.ok is True
+    assert "a..b.txt" in result.result.data["stdout"]

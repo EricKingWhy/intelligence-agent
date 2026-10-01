@@ -50,6 +50,15 @@ def _checked_pathspec(value: str) -> str:
             "不支持通配符与 pathspec magic）："
             f"{value!r}"
         )
+    # `.` 与 `/` 都在白名单里（相对子路径与 `./x` 需要），字符集表达不了**段语义**：
+    # `..` 是上行逃逸段，违反"workspace 相对"契约——scope 围栏与 pathspec 取**并集**
+    # （见 git_status_command docstring），只有"pathspec 落在 workspace 内"这条不变式
+    # 成立，围栏才拦得住外面。`a/../b` resolve 后仍在内、能过 Sandbox 边界，所以必须
+    # 在这里按段拒绝。判别是段级（split("/")），不误伤 `a..b` 这类含 `..` 子串的合法文件名。
+    if any(part == ".." for part in value.split("/")):
+        raise ValueError(
+            f"pathspec 不接受 `..` 路径段（workspace 相对路径不含上行逃逸）：{value!r}"
+        )
     return value
 
 
@@ -75,6 +84,7 @@ def git_status_command(pathspec: str = "", *, scope: str = "") -> str:
     **以外**的文件。Web 路由传 `scope="."`（cwd 即 workspace）把输出围回子树。
     多个 pathspec 是**并集**，所以 scope 必须涵盖 pathspec——调用方必须先保证 pathspec
     在 workspace 内（越过 Sandbox 的 `resolve_within_workspace`），否则围栏形同虚设。
+    `..` 段由 `_checked_pathspec` 按段拒绝（见该函数注释）。
     工具不传 scope：Agent 侧的命令语义逐字不变。
     """
     checked = _checked_pathspec(pathspec) if pathspec else ""
@@ -111,7 +121,7 @@ async def run_git_command(sandbox: Sandbox, command: str) -> ExecResult:
 
 
 class _GitStatusArgs(BaseModel):
-    pathspec: str = Field(default="", description="可选路径过滤，如 'src/' 或 'README.md'（纯路径，不支持通配符与 pathspec magic）")
+    pathspec: str = Field(default="", description="可选路径过滤，如 'src/' 或 'README.md'（纯路径，不支持通配符、pathspec magic 与 `..` 段）")
 
 
 class GitStatusTool(Tool):
@@ -173,7 +183,7 @@ class GitStatusTool(Tool):
 
 class _GitDiffArgs(BaseModel):
     staged: bool = Field(default=False, description="True 时查看暂存区差异（git diff --staged）")
-    path: str = Field(default="", description="可选路径过滤（纯路径，不支持通配符）")
+    path: str = Field(default="", description="可选路径过滤（纯路径，不支持通配符与 `..` 段）")
 
 
 class GitDiffTool(Tool):
