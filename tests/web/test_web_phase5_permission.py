@@ -42,7 +42,9 @@ def captured_build(monkeypatch, tmp_path):
     # （队列里预先塞入 DONE sentinel，event_generator 拿到就立刻干净收尾）。
     from agent_harness.session.runmanager import RunManager, Subscriber
 
-    def _fake_launch(self, session, runtime, user_input):
+    def _fake_launch(self, session, runtime, user_input, user_input_metadata=None):
+        # b1718af6 起 create_session 必传 user_input_metadata；本文件不跑真实
+        # run，stub 只需与生产签名对齐（行为测试在 test_agent_loop/test_web_api）。
         sub = Subscriber()
         sub.queue.put_nowait(self.DONE)
         return _FakeRun(), sub

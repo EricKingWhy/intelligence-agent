@@ -38,7 +38,9 @@ def client(tmp_path, monkeypatch):
 
     from agent_harness.session.runmanager import RunManager, Subscriber
 
-    def _fake_launch(self, session, runtime, user_input):
+    def _fake_launch(self, session, runtime, user_input, user_input_metadata=None):
+        # 与生产 RunManager.launch 签名对齐（b1718af6 起必传 user_input_metadata）；
+        # 本文件经 ?launch=false 造会话，不会进 launch，stub 仅防潜伏 TypeError。
         sub = Subscriber()
         sub.queue.put_nowait(self.DONE)
         return _FakeRun(), sub
