@@ -678,10 +678,28 @@ def main(argv: list[str]) -> int:
     # 先把全部 rev 一次解掉（快路径），再**按台账行序**做同样的 fail-closed 校验（错误文案同 `.sh`）。
     revs: list[str] = []
     parsed: list[tuple[str, str, str, str]] = []
+    # Range 端点必须是**不可变引用**（40 位十六进制 SHA）。in-toto statement 的 subject
+    # "MUST have digest set"、SLSA provenance 记录 resolvedDependencies（pinned digest）
+    # 同构：tag / 分支 / HEAD 这类**活动引用**是可变的——431 行真实事故（range 写
+    # `60bc15d0..HEAD`，检查器把 HEAD resolve 到运行时 HEAD ⇒ 该行客观放行其从未审查的
+    # 后续 12 提交）。校验形状而不只看 resolve 结果：`resolve_many` 对活动引用也退非 None
+    #（它确实存在），形状校验才是唯一能当场打回它的判据。fail-closed，不是 warn。
     for row in rows:
         date, desc, rng = split_fields(row, 3)
-        rbase = rng.split("..")[0]
-        rtip = rng.rsplit("..", 1)[-1]
+        if rng.count("..") != 1:
+            die(f"❌ 台账 range 不是 `base..tip` 两段: {rng!r}（{desc}）")
+        rbase, rtip = rng.split("..")
+        for name, rev in (("base", rbase), ("tip", rtip)):
+            # 端点必须是**不可变引用**：纯十六进制 SHA（完整 40/64 位或短缩写）后可跟
+            # `~N`/`^N` 代际修饰符（`089524a~1` 仍是同一提交图上的固定点，存量 32 行用此
+            # 形态）。只拒绝**活动引用**：HEAD / tag / 分支名 / refs/ 等——431 行真实事故
+            #（range 写 `60bc15d0..HEAD`，检查器把 HEAD resolve 到运行时 HEAD ⇒ 该行客观
+            # 放行其从未审查的后续 12 提交）。`resolve_many` 对活动引用也退非 None（它确实
+            # 存在），形状校验才是唯一能当场打回它的判据。fail-closed，不是 warn。
+            if not re.fullmatch(r"[0-9a-fA-F]{7,64}(~\d+|\^\d*|)?", rev):
+                die(f"❌ 台账 range 端点必须是不可变 SHA（可带 ~N/^N 修饰符），"
+                    f"活动引用（HEAD/tag/分支名）一律打回: "
+                    f"{name}={rev!r} in {rng!r}（{desc}）")
         parsed.append((date, desc, rbase, rtip))
         revs += [rbase, rtip]
     resolved = resolve_many(revs)
