@@ -742,6 +742,23 @@ export interface ConversationState {
    *  补齐（`restoreUndeliveredFromQueue`），不维护第二份真相。
    *  空数组 = 队列条不渲染（§5.2：不占位不闪烁）。 */
   undelivered: UndeliveredInput[];
+  /** 进度清单（#381 W-27）：`task/plan_updated` 整表覆盖投影（last-wins，W-26 契约）。
+   *  数据源仅此事件流（不变量 #22，PRD 长任务 §7.4）；null = 本会话未出现过清单
+   *  （与「清空成 []」是两个状态），组件对两者都不渲染、不留空壳。渲染四件套
+   *  契约见 PRD §7.5（PlanList）。 */
+  plan: PlanItem[] | null;
+}
+
+/** 进度清单行（#381 W-27；PRD 长任务 §7.1 五字段，`task/plan_updated.data.items`）。
+ *  status 的封闭三态（pending / in_progress / completed）由服务端 handler 硬校验
+ *  （PRD §7.2，session/plan.py）；前端类型刻意放宽为 string——投影不改写未知值，
+ *  未知状态的渲染容错归 PlanList（票面：双 in_progress 只高亮第一个、不崩）。 */
+export interface PlanItem {
+  id: string;
+  content: string;
+  activeForm: string;
+  status: string;
+  source: string;
 }
 
 /** ADR-0030 §2 术语表的前端镜像：queue（等下个 run）与 steer（同 run 注入 /
