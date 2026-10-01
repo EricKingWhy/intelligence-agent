@@ -154,6 +154,17 @@
 
 ---
 
+## 三票批：#381 W-27 进度清单 + #435 预算 UI 设计稿 + #512 paused 查证（2026-10-02 收口：PR #535 → merge `2ee6a1a0`）
+
+- **来源与授权**：用户指定 3 张干净票（协议 CLAIM 机制首航：`gh label create in-progress` + 三票 CLAIM 评论 + 施工前置检查全过）；质量指令「起 subagent、质量唯一、不许偷懒」。
+- **交付**：①#381（代码 `68c19c8a`，9 文件 +445/−6）——`task/plan_updated` 投影接线（`projectPlanUpdated`：整表覆盖 last-wins、行级容错同 `derive_plan`、状态机违规不改写）+ `PlanList` 四件套（PRD 长任务 §7.5；计数/activeForm 高亮/划线勾/`hidden` 折叠保节点身份 reconcile，key=id）+ CSS 全既有 token 零新增 :root（§15）；TDD 红 10→绿 17/17；全量 vitest 1245P/1F（唯一红=在册 StepDetail flake 隔离 3× 绿）；tsc/oxlint/build rc=0。②#435（`c3b5b922`）——设计稿落 `docs/design/t435-budget-ui-interaction-design.md`（三组问题逐题取舍 + 明确不做五项），**待用户确认后拆 A/B 票，票保持 OPEN**。③#512（`7dc3f325`）——可达性三链查证（审批 turn 中途阻塞、暂停臂在回合边界 approval 之前、取消 fail-closed 补对、paused GC 队列）⇒ 行为正确，docstring 口径补充，**已关单**。
+- **审查**：双轴独立 subagent APPROVE（Standards 0 硬违规；Spec 逐项实测 + 本机复跑 17/17+tsc+全量读数自洽）；台账行 661 字符（`t381-t435-t512-plan-batch-c4cc6f77-7dc3f325.tsv`）。
+- **同步与合并**：先回后正 ×3（`f7786632`←`2a3c00c5` 另一收口线零冲突；`1aabbc5b`←`022b809e` Standards 补审线零冲突；`f6483ca2`←`53ff3216` **EOF 修复撞车线**——PR #535 CI 红的 diff-check 根因 = `9b13f9ff` 入库的两个写盘脚本文件尾空行，另一条线 `b84e9a64` 已修同样两文件，本线工作树重复修复撤销改由父二提供；工作树同名未跟踪副本与提交版逐字节相同移走后合并）→ push（origin/main 两次前进 strict 挡合并，均先回后正再推）→ **PR #535 CI 红一轮（EOF 空行）→ 修复合入后 gate0 32s 绿 → merge `2ee6a1a0`**。
+- **关票**：#512 CLOSED（PR Closes + 证据评论 issuecomment-5942041983）；#381 部分交付不关单（录屏证据项待补，issuecomment-5942042625）；#435 设计票 OPEN（待用户确认）。
+- **遗留**：①#381 真实会话录屏证据项；②#435 拆票待确认；③远端分支未删（§14.4）；④另一收口线已并入，其后如有新 tip 需再对账。明细见 `docs/phase_status/2026-10.md`。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过
