@@ -140,15 +140,17 @@
 
 ---
 
-## e2e 稳定性批：#509 budget 入口竞态 + #510 审批行→内联卡脉冲（2026-10-02 交付：分支 `fix/t509-t510-e2e-stability`，tip `c22e4275`；未 push/PR——§14.4 待批）
+## e2e 稳定性批：#509 budget 入口竞态 + #510 审批行→内联卡脉冲（2026-10-02 收口：PR #511 → merge `ff20b89d`；分支 tip `c22e4275`）
 
 - **来源与授权**：用户 2026-10-02 指定固定 2 票（#509 triage 先行：竞态机理书面定位 + web-first 修复，禁 waitForTimeout/删用例/弱断言；#510 补 #441 移除的脉冲反向联动 e2e + 红证）；§6.1 调研完成（Playwright best-practices / test-assertions / actionability + 仓内 expect.poll 先例）；push/PR/合并需用户逐项批准，本地全链就绪即停。
 - **交付**（`c22e4275`，2 文件 +44/−4，基点 `2cfb01f1`）：#509 budget-entry 三处同步断言 web-first 化（竞态①=submitTask 只到 fill+click、CDP 拦截 handler 在 Node 侧异步分发与测试下一语句无顺序保证；竞态②=resumePausedRun 发起时乐观 `setMode('live')` 先于拦截捕获 resumeBody、与响应无因果；三处 `expect.poll`）；#510 x-permission-section 补「点待审批行 → 内联失效卡脉冲」（ap-1 随 run 终结判 stale ⇒ 无模态可交互；`toHaveClass` 断言 900ms 加/摘，不截屏）。
 - **门禁**：未修复树 3× 采样绿（间歇未复现，如实记）；修复后目标 spec 3×12 全绿；红证（副本 `D:/tmp-t510-red`，§8.1.6）摘接线→2 红→还原→2 绿，主树零变异；**playwright 全量 480 passed / 0 failed**（16.1m，--workers=2；main 478 = 239×2project，本笔恰 +1）；vitest 全量 1229P（唯一稳定红 = StepDetail.window:132 在册 timeout 签名，隔离 3×6/6 绿，按在册 hazard 处置）；tsc/build rc=0；oxlint 0 错（改动文件 0 警）。
-- **审查**：独立 7 维 + code-review 双轴 **APPROVE**（Standards 无硬违规、Spec 无实现错误；2 个可选 judgement call 登记不修以保持已审 sha）；F1 证据落台账/归档/PR，F2/F4 登记不修，**F3 另报：scope 外发现 `markPendingApprovalsStale` 在 `finalizeRun('paused')` 路径也无条件触发（projection.ts:1696←:821），与 docstring 口径不符，待用户裁决是否开票**。
+- **审查**：独立 7 维 + code-review 双轴 **APPROVE**（Standards 无硬违规、Spec 无实现错误；2 个可选 judgement call 登记不修以保持已审 sha）；F1 证据落台账/归档/PR，F2/F4 登记不修，**F3 另报（scope 外）：`markPendingApprovalsStale` 在 `finalizeRun('paused')` 路径也无条件触发（projection.ts:1696←:821），与 docstring 口径不符 → 经用户批准开票 #512 跟踪**。
 - **gate0（两项环境发现待裁决）**：--no-record 裸跑 diff-check/oxlint/tsc/guards 绿——guards 须 `PYTHONPATH=<本仓>/src`（**发现①**：本仓 .venv 的 .pth 把 `agent_harness` 解析到 codex 遗留 worktree `issue-378-e2e-flakes`，guards expected 侧量错树）；ruff 2 错 + 落盘拒绝均由 4 个非本批未跟踪用户文件（`codex_issue346_write.py` 等）造成（**发现②**；tracked 树单独 All checks passed）⇒ **裸全量读数落盘被阻断，待用户裁决**（不代提交/不代删用户文件）。coverage FAIL = 本笔无审查行的预期形状（台账行入库后闭合）。
 - **台账**：`t509-t510-e2e-stability-2cfb01f1-c22e4275.tsv`（774 字符）。
-- **遗留**：①gate0 落盘与两项环境发现待用户裁决；②push/开 PR（描述携带机理+依据+读数）/合并待批；③红证副本 `D:/tmp-t510-red` 用毕待删。明细见 `docs/phase_status/2026-10.md` 本批节。
+- **收口（2026-10-02，用户批准「我都同意了」后执行）**：4 个用户未跟踪文件移出 → gate0 裸全量 **6/6 PASS 25.2s** → sha256 逐一校验原样归还（用户文件零改动）；`.pth` 污染修复（单行重指本仓 `src`，guards 量树恢复设计假设；codex worktree 本体保留、处置留用户）→ 读数落盘 `docs/gate/a759716cf235670c614080bf3f4d61f046347f20.json`（`cd06025b`）→ push → **PR #511（CI gate0 40s 绿 + gitleaks 绿）→ merge `ff20b89d`** → #509/#510 自动关单 + 证据评论（issuecomment-5936947418 / 5936948145）→ F3 开票 #512 → 本地 main ff 对齐 `ff20b89d`，§14.9 回补通知已记。
+- **复审（第二轮 code-review，用户指令；两轴独立 subagent 串行）**：Standards 无硬违规（3 judgement call 与首轮登记一致）；Spec 无实质偏差（F2/采样未复现均属已登记的有意识接受；纯插入 0 删除行、可达路径与断言非 vacuous、数字自洽逐项实查通过）；抓出 1 处事实性出入并已更正——#510 关单评论括注「文件尾追加 +2 处 import 复用」与实际 diff（单 hunk 中部纯插入 +30/−0，imports 零改动）不符 → 更正注记 issuecomment-5937277240；repo 文档与 PR 描述无此说法；#509 评论引用行号 92/120/156 实测相符。
+- **遗留**：①红证副本 `D:/tmp-t510-red` 用毕待删；②远端分支 `fix/t509-t510-e2e-stability` 未删（§14.4 需批准）；③codex worktree `issue-378-e2e-flakes` 处置留用户（.pth 已重指本仓，删除已无必要）；④本收口记账笔在本地 main，待随下一批 PR 进 origin（main 受保护）。明细见 `docs/phase_status/2026-10.md` 本批节。
 
 ---
 
