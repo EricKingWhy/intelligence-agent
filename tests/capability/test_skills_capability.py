@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -257,9 +258,10 @@ def test_load_body_rejects_out_of_root_swap_after_discovery(tmp_path):
     skill 目录整体替换成指向目录外的 junction/symlink——只靠发现时一次性
     resolve_within 是 TOCTOU：wiring 之后的任意时刻换入，load_body 都会把
     任意宿主文件读进模型 Context。重验证后必须显式报错（CapabilityError），
-    绝不返回外部内容。win32 用 _winapi.CreateJunction 构造（无需特权）。
+    绝不返回外部内容。win32 用 _winapi.CreateJunction、POSIX 用目录 symlink
+    构造（均无需特权；两者 Path.resolve() 后都落到 skills 根之外，防线同一机制）。
     """
-    import _winapi
+    import os
     import shutil
 
     skills_dir = tmp_path / "skills"
@@ -277,9 +279,14 @@ def test_load_body_rejects_out_of_root_swap_after_discovery(tmp_path):
     catalog = SkillDiscovery([skills_dir]).discover()
     assert [e.name for e in catalog.entries] == ["good"]
 
-    # 发现后替换：删除真实目录，换成指向 skills 根之外的 junction。
+    # 发现后替换：删除真实目录，换成指向 skills 根之外的 junction/symlink。
     shutil.rmtree(good)
-    _winapi.CreateJunction(str(outside), str(good))
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(outside), str(good))
+    else:
+        os.symlink(outside, good, target_is_directory=True)
 
     capability = SkillCapability(catalog)
     with pytest.raises(CapabilityError):
