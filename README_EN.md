@@ -6,7 +6,7 @@ English | [中文](README.md)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](pyproject.toml)
 [![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](pyproject.toml)
 
-![intelligence-agent](docs/images/banner.webp)
+![intelligence-agent](docs/images/banner.svg)
 
 > A lightweight, observable, recoverable, plugin-extensible general-purpose Agent Harness in Python — with its own async main loop (no LangGraph binding).
 
