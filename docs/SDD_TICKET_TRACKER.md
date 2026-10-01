@@ -91,14 +91,14 @@
 
 ---
 
-## 修票：#448 压缩触发真实 usage 锚（2026-10-01，在途：分支 `fix/448-compaction-usage-anchor` 待 push/PR，§14.4 待批）
+## 修票：#448 压缩触发真实 usage 锚（2026-10-01 收口：已合并 PR #498 → merge `4b57b02c`）
 
 - **来源与授权**：P3 检查项（Pi 调研 §3 开票），票面预授权「确认暴露 → 按最小修复落修复 + 回归（含『无 usage 数据时不回归估算』用例）」；用户批准逐票推进（#481 已由并行会话 PR #484 完成 → 本票 #448）。
 - **实测（交付物 1/2）**：2 provider（MiMo/GLM）同会话逐轮 est/real——常规文本 1.05–1.65（高估安全）；数字/hex 密集 0.359–0.739；剪枝后真实投影 **0.674**（est 181,219 vs real 268,807）⇒ 估算 140k（0.70 阈值）时真实 ~207k 越 200k 窗口、170k 硬护栏时 ~252k；`failure.py` 无 context-length 分类（溢出 = 未分类 run 失败）。暴露成立。
 - **交付**：`31ef3246` 锚实现（source_ranges `(seq,seq)` 反查跨 bracket 存活、`max()` 只抬高不降低、无锚回落纯估算零回归）+ 5 场景测试；`b9757948` Spec 轴处置（防御分支/pruner 透传路径 4 用例 + cache-read 口径边界注记）。锚用例 9/9；变异 M1 删锚=1/4/5 红 / M2 覆盖=3 红 / M3 漏响应=4 红（逐字节还原 diff hash 一致）；全量离线终态 **4684P+2S**（4 deselect 含 #483 既有红；4680P 为处置前 31ef3246 树读数）；ruff 全仓 clean。
 - **审查**：独立审查 subagent（8 项重点 + 7 形态定位探针 + 10k 事件 2.2ms + memo 无互扰，CHANGES-REQUIRED → 3 条 lint 修复）；code-review skill 双轴（Standards 无硬违规、4 低危 judgement call 不动；Spec 忠实，2 项处置于 b9757948）；codex CLI 全模型 400 环境受阻（9 月尚可用，需用户侧处理），如实记。台账行 `t448-compaction-usage-anchor-809f4410-b9757948.tsv`，覆盖闸门 exit 0。
 - **同步与合并（先回后正，2026-10-01）**：用户批准 push/PR/合并前提示「ci 更新了，main 往前进了，先同步」——fetch 后 origin/main `cc3bfeb0→3cfdf1c7`（PR #487–#492 依赖抬升：**langchain-core 1.5.4→1.6.6**、pymilvus/fastapi 等 + CI workflows ×5 新增/gate0.yml 修订 + `src/agent_harness/tools/git.py` + **#483 gold fixture 修复**）。与我的 7 文件改动面 `comm -12` = 空集，merge `528cea74` ort 零冲突；逐 blob 存活核对 = 纯不相交并集（相对父一恰 30 文件/相对父二恰 7 文件），机械归属行 `t448-merge-14db87a1-528cea74.tsv`。venv 重对齐：`uv sync --frozen` 曾削掉 extras（trustcall 等 → langmem 测试收集错误），`--all-extras` 重装后恢复。合并树全量（无 deselect）**4685P+2S**（#483 已绿；唯一红 = 真实台账测试的未归属预期瞬态，归属行入库后 4/4 转绿、覆盖闸门 exit 0）。
-- **在途/待批**：push 分支 + 开 PR（已获批准，执行中）+ CI gate0 绿后合并（已获批准）；关票评论带实测表与推导；过程异常（误改集成 clone 已还原等）见 2026-10 归档。
+- **收口（2026-10-01，push/合并均已获批准）**：PR #498（分支 tip `617a4302`）CI gate0 **31s 绿** → 合并 **`4b57b02c`**，#448 随 merge 自动关闭；关票评论 issuecomment-5929739407（实测表 + 锚公式 + 估算偏差推导 + 变异矩阵）；§14.9 回补通知已记（集成 clone 当时段位 `3cfdf1c7`，由另一条线回补）；远端分支 `fix/448-compaction-usage-anchor` 已删（双条件核验：tip 是 `4b57b02c` 祖先 + PR MERGED）。终态记账由 2026-10-01 docs 同步小 PR 落定；过程异常（误改集成 clone 已还原等）见 2026-10 归档。
 
 ---
 
