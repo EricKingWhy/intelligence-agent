@@ -1,0 +1,116 @@
+# .github/workflows/gate1.yml —— postsubmit（提交后）完整门禁
+#
+# 与 gate0 的分工（参考《Software Engineering at Google》Ch.23 的 presubmit/postsubmit 设
+# 计：presubmit 只跑快而可靠的小测试，完整集合在提交后验证，故障定位不必在生产回溯
+# ——本仓的真实差距正是"重车道零服务端证据"）：
+#   gate0 = presubmit：PR 前 6 条机械车道（≤60s），是 main 分支保护的必需检查；
+#   本工作流 = postsubmit：合入 main 之后自动跑**本地协议 §8.8.4 里人工执行的重车道**
+#   （后端全量 pytest + 覆盖率、前端 vitest + vite build），把"集成前跑没跑全量"
+#   从人肉记忆变成 GitHub 上可追溯的记录与报告产物。
+#
+# 为什么不并入 gate0：gate0 的 jobs.gate0.name 是分支保护的必需检查名（改名=保护规则
+#   失配），且它面向 pull_request；postsubmit 面向 push 到 main，触发、权限、预算都
+#   不同 ⇒ 独立文件、独立 name（本文件不与任何保护规则绑定）。
+#
+# 为什么不阻塞合并：presubmit 是准入闸、postsubmit 是兜底网。⚠ 它不是"本地可以
+#   不跑"的理由 —— 协议 §8.8.4 的重车道本地仍要跑；本工作流的价值是让"漏跑"在
+#   24 小时内必然暴露，而不是无从知道。
+#
+# 环境与 gate0 对齐：python 3.13 / node 22 / pnpm 10.32.1 / uv 0.10.9（本地实测版本）。
+#   uv/pnpm 均 --locked / --frozen-lockfile：锁文件过期时报错，不静默改依赖。
+# 产物：junit + coverage XML 上传为 artifact，30 天自动删除（public 仓库存储免费）。
+
+name: gate1
+
+on:
+  push:
+    branches: [main]
+  # 手动重跑：postsubmit 失败后没有 PR 可点 re-run，给一个显式入口。
+  workflow_dispatch:
+
+# 仓库只读；artifact 上传与缓存写需要 `actions: write`（GitHub 对 token 的作用域要求，
+# 不是我们想放权 —— 没有它 upload-artifact / cache 会 403 "Resource not accessible"）。
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  # main 的同一次推进只留一份结果；出新 push 时旧运行取消（旧结论已失效）。
+  group: gate1-main
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: pytest-full + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（Dependabot 维护 SHA pin）
+        # 全量历史：全量 pytest 含审查覆盖闸门用例，按 ledger 区间走 git 历史，浅克隆必 FAIL（gate0 检出同理）
+        with:
+          fetch-depth: 0
+      - name: 装 Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: 装 uv 0.10.9（缓存 ~/.cache/uv，锁文件变更时失效）
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.9'
+          cache-dependency-glob: uv.lock
+      - name: 装后端依赖（dev 组 + 全部 extras，对齐本地 .venv）
+        run: uv sync --locked --all-extras
+      - name: 全量后端测试 + 覆盖率
+        run: |
+          mkdir -p artifacts
+          uv run pytest tests \
+            --junitxml=artifacts/pytest.xml \
+            --cov=src/agent_harness \
+            --cov-report=term \
+            --cov-report=xml:artifacts/coverage.xml
+      - name: 上传测试报告（失败也传，便于排查）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: backend-reports
+          path: artifacts/
+          retention-days: 30
+
+  frontend:
+    name: vitest + vite build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: 装 pnpm 10.32.1
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.32.1
+      - name: 装 Node 22（pnpm store 缓存）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: 装前端依赖
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: 前端单测（vitest，junit 报告）
+        working-directory: web
+        run: |
+          mkdir -p ../artifacts
+          pnpm exec vitest run --reporter=junit --outputFile=../artifacts/vitest.junit.xml
+      - name: 前端构建
+        working-directory: web
+        run: pnpm build
+      - name: 上传测试报告（失败也传）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: frontend-reports
+          path: artifacts/
+          retention-days: 30
