@@ -64,6 +64,67 @@ def test_adjudication_prompt_preserves_formation_classification():
         in _ADJUDICATION_PROMPT
     assert "Runtime rejects any mismatch and writes nothing" in _ADJUDICATION_PROMPT
 
+
+def test_formation_prompt_rejects_transient_content_and_retrieval_questions():
+    """durability 段：一次性活动与"取回已有事实"的提问都不是记忆内容。"""
+    assert "one-off request to run a job, replay instruction, or injected test failure is not " \
+        "memory content" in _FORMATION_PROMPT
+    assert "A question whose purpose is to retrieve or inspect an existing fact is not itself a " \
+        "memory or answer and must not be stored" in _FORMATION_PROMPT
+    assert "A procedural memory must include reusable steps and a success condition" \
+        in _FORMATION_PROMPT
+    assert "deriving it from evidence is not inventing it" in _FORMATION_PROMPT
+    assert "Approval without the actual procedure is not enough" in _FORMATION_PROMPT
+
+
+def test_formation_prompt_requires_procedure_fields_to_be_strings():
+    assert (
+        "For procedural payloads, `trigger`, `procedure`, and `success_condition` "
+        "must each be non-empty strings"
+    ) in _FORMATION_PROMPT
+    assert (
+        "Encode ordered reusable steps as one `procedure` string, never as a list or object"
+    ) in _FORMATION_PROMPT
+
+
+def test_formation_prompt_distinguishes_episodic_decisions_from_semantic_facts():
+    assert "Semantic memories represent stable facts, preferences, profiles, project facts, " \
+        "constraints, or accepted corrections" in _FORMATION_PROMPT
+    assert "Episodic memories are reusable accounts of a specific situation, action or " \
+        "decision, outcome, and lesson" in _FORMATION_PROMPT
+    assert "as episodic when future planning needs to remember what happened and why" \
+        in _FORMATION_PROMPT
+    assert "do not classify that decision as semantic only because it produced a stable state" \
+        in _FORMATION_PROMPT
+    assert "stays semantic even when learned during a conversation" in _FORMATION_PROMPT
+    assert "Do not infer missing events or lessons" in _FORMATION_PROMPT
+
+
+def test_adjudication_prompt_never_replaces_concrete_values_in_refined_content():
+    """#496：refine content = 压缩/澄清而非替换，用户原话的具体值逐字保留。"""
+    assert "Refining content means condensing or clarifying, never replacing" \
+        in _ADJUDICATION_PROMPT
+    assert "copy the user's exact names, values, quantities, and key terms" \
+        in _ADJUDICATION_PROMPT
+    assert "do not paraphrase them away" in _ADJUDICATION_PROMPT
+
+
+def test_adjudication_prompt_requires_exact_existing_target_ids():
+    assert "copied exactly as it appears" in _ADJUDICATION_PROMPT
+    assert "never invent, rewrite, or infer an ID" in _ADJUDICATION_PROMPT
+    assert "no exact active target can be established" in _ADJUDICATION_PROMPT
+
+
+def test_adjudication_prompt_distinguishes_withdrawal_from_replacement():
+    assert "Use candidate evidence to distinguish withdrawal from replacement" \
+        in _ADJUDICATION_PROMPT
+    assert "with only that supplied value and reason_code `user_authority_wins`" \
+        in _ADJUDICATION_PROMPT
+    assert "choosing that exact target with no result and reason_code " \
+        "`contradicts_existing`" in _ADJUDICATION_PROMPT
+    assert "If the relation or replacement value is unclear, choose NOOP" in _ADJUDICATION_PROMPT
+
+
 #: 埋雷用的假凭证。形态命中 `policy._SECRET_PATTERNS` 的 provider token 前缀。
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz"
 
@@ -334,6 +395,9 @@ async def test_job_observations_include_metadata_without_projected_content(env: 
     assert model["output_tokens_estimated"] is True
     assert "payload" not in model
     assert "system_prompt" not in model
+    formation = next(metadata for name, metadata in observations if name == "formation")
+    assert formation["outcome"] == "NO_MEMORY"
+    assert formation["skip_reason"] == "no_durable_value"
 
 
 @pytest.mark.asyncio
@@ -713,23 +777,108 @@ async def test_a_non_transient_failure_is_neither_retried_nor_switched(env: Env)
 
 
 @pytest.mark.asyncio
-async def test_a_schema_failure_is_a_failed_attempt_that_stops(env: Env) -> None:
-    """R3 + R9：解析失败是**失败尝试**（不是 abstention），且不重试。"""
-    invoker = FakeInvoker(formation=["这不是 JSON", _formation_no_memory()], adjudication=[])
+async def test_a_schema_failure_gets_one_repair_retry_then_executes(env: Env) -> None:
+    """R3 + R9(v2,#485)：解析失败是**失败尝试**（不是 abstention），允许一次修复重试。
+
+    首发违反契约 → 同阶段一次带结构提醒的重试 → 合法输出 ⇒ 照常执行，**不降级**。
+    """
+    invoker = FakeInvoker(
+        formation=["这不是 JSON", _formation_candidates(_candidate())],
+        adjudication=[_adjudication(_add())],
+    )
     observations: list[tuple[str, dict]] = []
     _job, result, _sink = await _run(
         env, invoker, _fallback=True,
         observer=lambda name, metadata: observations.append((name, metadata)),
     )
 
-    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1)]
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1), ("primary", 1)]
+    assert result is not None
+    assert result.stage is MemoryJobStage.COMPLETED
+    assert result.outcome is not None
+    assert result.written != ()
+    schemas = [metadata for name, metadata in observations if name == "schema"]
+    assert schemas[0]["schema_valid"] is False
+    assert schemas[0]["output_failure_kind"] == "invalid_json"
+    assert "repair_used" not in schemas[0]
+    assert schemas[1]["schema_valid"] is True
+    assert schemas[1]["repair_used"] is True
+    models = [metadata for name, metadata in observations if name == "model"]
+    # formation 首发 + formation 修复 + adjudication 首发：只有修复调用带 `repair=True`。
+    assert [m.get("repair") for m in models] == [False, True, False]
+    # 修复调用的载荷必须带结构提醒（三键、不含任何内容字段——AC9）。
+    feedback = invoker.calls[1].payload["repair_feedback"]
+    assert set(feedback) == {"previous_response_rejected", "failure_kind", "required"}
+    assert feedback["previous_response_rejected"] is True
+    assert feedback["failure_kind"] == "invalid_json"
+    assert "这不是 JSON" not in repr(observations)
+
+
+@pytest.mark.asyncio
+async def test_two_schema_failures_still_degrade_with_zero_writes(env: Env) -> None:
+    """R9(v2,#485) 边界：修复重试只有一次；再败仍 fail-closed 降级、零写入。"""
+    invoker = FakeInvoker(formation=["这不是 JSON", "也不是 JSON"], adjudication=[])
+    observations: list[tuple[str, dict]] = []
+    _job, result, _sink = await _run(
+        env, invoker, _fallback=True,
+        observer=lambda name, metadata: observations.append((name, metadata)),
+    )
+
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1), ("primary", 1)]
     assert result is not None
     assert result.stage is MemoryJobStage.DEGRADED
     assert result.reason == DegradedReason.INVALID_MODEL_OUTPUT.value
     assert result.outcome is None
-    schema = next(metadata for name, metadata in observations if name == "schema")
-    assert schema["output_failure_kind"] == "invalid_json"
+    assert result.written == ()
+    schemas = [metadata for name, metadata in observations if name == "schema"]
+    assert [s["schema_valid"] for s in schemas] == [False, False]
+    assert schemas[1]["repair_used"] is True
     assert "这不是 JSON" not in repr(observations)
+
+
+@pytest.mark.asyncio
+async def test_the_repair_retry_is_accounted_and_budget_bounded(env: Env) -> None:
+    """修复调用同样经 `begin_call` 记账：预算用尽时修复被截断 ⇒ 终态 degraded、零写入。"""
+    invoker = FakeInvoker(formation=["这不是 JSON"], adjudication=[])
+    _job, result, _sink = await _run(
+        env, invoker, _fallback=True, limits=MemoryBudgetLimits(max_calls=1))
+
+    assert result is not None
+    assert result.stage is MemoryJobStage.DEGRADED
+    assert result.reason == DegradedReason.CALLS.value
+    assert result.written == ()
+    # 修复调用在 invoker 之前就被账本拦下：首发之后没有任何第二次模型调用。
+    assert invoker.attempts(MemoryModelStage.FORMATION) == [("primary", 1)]
+
+
+@pytest.mark.asyncio
+async def test_an_adjudication_schema_failure_gets_one_repair_retry(env: Env) -> None:
+    """R9(v2,#485)：adjudication 首发违规 → 一次修复重试成功 ⇒ 照常写入。"""
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())],
+        adjudication=["这不是 JSON", _adjudication(_add())],
+    )
+    _job, result, _sink = await _run(env, invoker, _fallback=True)
+
+    assert invoker.attempts(MemoryModelStage.ADJUDICATION) == [("primary", 1), ("primary", 1)]
+    assert result is not None
+    assert result.stage is MemoryJobStage.COMPLETED
+    assert result.written != ()
+
+
+@pytest.mark.asyncio
+async def test_two_adjudication_schema_failures_still_degrade(env: Env) -> None:
+    """R9(v2,#485) 边界：adjudication 修复后仍违规 ⇒ 降级零写入（fail-closed 不变）。"""
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())],
+        adjudication=["这不是 JSON", "也不是 JSON"],
+    )
+    _job, result, _sink = await _run(env, invoker, _fallback=True)
+
+    assert result is not None
+    assert result.stage is MemoryJobStage.DEGRADED
+    assert result.reason == DegradedReason.INVALID_MODEL_OUTPUT.value
+    assert result.written == ()
 
 
 @pytest.mark.asyncio

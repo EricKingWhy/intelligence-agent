@@ -183,7 +183,7 @@ class ChatModelInvoker:
     - `asyncio.timeout(call.timeout_seconds)`——"120 seconds per job"，在**调用边界**上
       兑现。超时抛内建 `TimeoutError`，`model.fallback.is_transient_model_error` 认它，
       于是走 R9 的瞬时序列而不是当成非瞬时致命错。
-    - 模型按**公开字段**缓存：一次 job 最多 5 次调用，每次 `create_chat_model` 都会重建
+    - 模型按**公开字段**缓存：一次 job 最多 7 次调用（瞬态 3+2 + 每阶段 1 次修复重试，R9 修订 #485），每次 `create_chat_model` 都会重建
       底层 httpx client（新连接池、重做 TLS）。键取 `(provider, model_name, base_url)`，
       不含 key——`ModelConfig.api_key` 是 `SecretStr`，本模块从不读它的明文，也从不打印
       任何 provider / 端点 / 凭据值。
@@ -206,11 +206,18 @@ class ChatModelInvoker:
         async with asyncio.timeout(call.timeout_seconds):
             response = await model.ainvoke(messages, max_tokens=call.max_output_tokens)
         content = getattr(response, "content", None)
+        if isinstance(content, list) and content and all(
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            for block in content
+        ):
+            content = "".join(block["text"] for block in content)
         if not isinstance(content, str):
-            # 非文本形状（多模态块列表等）不是"内容不合格"而是"provider 没按契约回话"：
-            # 归 `provider_error` 而不是 `invalid_model_output`——后者是**解析**失败，
-            # 而这里连可以解析的文本都没拿到。两者处置相同（都终态降级、零写入），
-            # 但归因分开才看得出是哪一层坏了。
+            # 纯文本或纯文本块都接受；混入图像等非文本内容仍按 provider 错误 fail closed——
+            # 非文本形状不是"内容不合格"而是"provider 没按契约回话"：归 `provider_error`
+            # 而不是 `invalid_model_output`——后者是**解析**失败，而这里连可以解析的文本都
+            # 没拿到。两者处置相同（都终态降级、零写入），但归因分开才看得出是哪一层坏了。
             raise TypeError(
                 f"memory model returned non-text content: {type(content).__name__}"
             )
