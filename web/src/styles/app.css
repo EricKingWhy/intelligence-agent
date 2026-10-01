@@ -6071,6 +6071,14 @@ button.json-row {
   padding: 3px 0;
 }
 
+/* 同 `.workspace-panel[hidden]` / `.detail-peek[hidden]` 那两条（2026-10-02 真机
+   第三次踩到）：`hidden` 的 UA 规则是 `[hidden] { display: none }`，会被上面
+   `display: flex` 盖过——折叠态的完成行照常可见。不显式写这条，PlanList.test 的
+   jsdom 断言（hidden 属性）全绿也照旧漏。 */
+.plan-list-item[hidden] {
+  display: none;
+}
+
 /* 当前项：activeForm 进行时文案 + → 前缀（zcode 实测同构）；accent 是既有的
    交互/进行色，与完成（tertiary 划线）、未完成（tertiary 圆圈）拉开层级。 */
 .plan-list-item-current {
