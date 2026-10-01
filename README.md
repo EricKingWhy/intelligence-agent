@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](pyproject.toml)
 [![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](pyproject.toml)
 
-![intelligence-agent](docs/images/banner.webp)
+![intelligence-agent](docs/images/banner.svg)
 
 > 轻量、可观测、可恢复、可插件化的通用 Agent Harness（Python / Async-first），自有主循环，不绑定 LangGraph。
 
