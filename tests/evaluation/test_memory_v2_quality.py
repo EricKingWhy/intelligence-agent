@@ -98,14 +98,18 @@ _GOLD_MODEL_OUTPUTS = {
     "unsupported_assistant_claim": (
         "semantic", "user_global", "NOOP", "profile", "assistant",
     ),
-    "secret_probe": ("semantic", "user_global", "NOOP", "project_fact", "user", "secret"),
+    # 作用域必须是 project：#298（a9d08891）起契约禁止 user_global 承载 project_fact
+    # （types.assert_content_contract），user_global 候选会在 formation 解析层直接
+    # contract_violation 降级，根本到不了政策层。这两个用例要测的是"政策拒掉
+    # secret/sensitive 自陈"（R7），所以给一个 schema 合法、会被政策拒绝的候选。
+    "secret_probe": ("semantic", "project", "NOOP", "project_fact", "user", "secret"),
     "secret_direct_probe": None,
     "secret_api_edit_probe": None,
     "secret_fallback_probe": None,
     "secret_replay_probe": None,
     "explicit_remember_secret_probe": None,
     "sensitive_without_consent": (
-        "semantic", "user_global", "NOOP", "project_fact", "user", "sensitive",
+        "semantic", "project", "NOOP", "project_fact", "user", "sensitive",
     ),
     "explicit_opt_out": None,
     "ineligible_cancelled": None,

@@ -1,0 +1,1 @@
+2026-10-01	dd976ff7 Standards 轴 hard findings 的逐条注释修正（三处：scorecard publish_results 改按 OIDC 机制 / setup-node 失败模式改按响亮失败 / 删除“约12倍”不可核实量化断言）。diff 全部为工作流注释行，YAML 语义零变化；审查依据 = ci-p0p1-dd976ff7 行所记两轴报告本体（修正内容即审查方处方），并复核 actions: write 存疑不成立（v4 上游文档要求）。	9995de2f..ff7f61c9
