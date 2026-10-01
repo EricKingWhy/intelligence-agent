@@ -120,6 +120,16 @@
 
 ---
 
+## P3 批：#479 R6-2 文案 + #478 暂停收流 + #476/#477 登记关票（2026-10-01 收口：#479 已合并 PR #503 → merge `7592b273`；#478 随本批 PR 进 main）
+
+- **来源与授权**：用户 2026-10-01 批准 #479（#449 登记的范围外项：R6-2 空响应守卫文案欠精确）并点名把三张前端 P3（#476 DST 歧义 / #477 hasControls / #478 暂停恢复 UX）带进同批，要求「多起 subagent、多查成熟产品做法、多做 code-review、不许有错误与潜在风险」。
+- **交付**：①#479（`fix/t479-empty-response-copy`，fix `8d0c56a8`）→ **PR #503** CI gate0 44s 绿 → merge **`7592b273`**（两轮先回后正：`32a3e3b9` ← `1416b13b`（#501/#473 整线）；`e08c496f` ← `aefffe6f`（#502/#500，#502 开 PR 后 main 又前进 strict 挡合并所致），均 ort 零冲突、`--cc` 空表、触达面 blob 逐一相等、机械归属行 ×2）；②#478（`fix/t478-pause-clean-close`，fix `c70d40b2`）：`pausedSeenRef` 干净收流（onStreamEnd 见标记走 `finishLive`，不进重连链、不报「连接中断」；RUN_TERMINAL_TYPES 语义零改动，#312 决议不动）+ liveness `feedStream/closeStream` 夹具（构造期灌帧会抢在 setMode 渲染提交前被微任务消费的时序竞态绕过）；③#476/#477 登记级关票（#476 引 ECMAScript `Date` 确定性语义 + Temporal/vixie cron/APScheduler/GHA 四先例确认维持现状；#477 记录触发条件与一行修法）；#435 留 DST 语义交叉提示（issuecomment-5932077386）。
+- **门禁**：#479 合并树全量 pytest **5062P+9S**（唯一红 = 覆盖 ref 在机械归属行落盘前的预期瞬态，补行后 4/4 绿；同树 gate0 裸全量 6/6 @`7651ad95` 18.1s）；#478 liveness 9/9 + 变异 M1 恰 1 红 + vitest 全量 1229P（唯一红 StepDetail.window 已知 flake，单跑 3×6/6 绿）+ tsc/oxlint/build 绿（同树 gate0 裸全量 6/6 @`ea6c4adc` 16.4s）；两线审查 = 独立 7 维 subagent + code-review 双轴各 **APPROVE**（#478 Spec 轴抓到注释失真「重放会再次投递 run/paused」与两路收敛实际不符，已修正后入提交）；台账 `t479-r62-…`+`t479-sync-merge-…`+`t479-sync-merge2-…`+`t478-pause-clean-close-…`+`t478-pause-clean-sync-merge-…` 共 5 行。
+- **关票（§14.12）**：#479 CLOSED（PR Closes 自动关 + 证据评论 issuecomment-5933179937）；#476 CLOSED（issuecomment-5932075849）；#477 CLOSED（issuecomment-5932076547）；#478 随本 PR Closes 自动关 + 证据评论（merge sha 以 PR 页为准）。
+- **遗留**：①远端分支 `fix/t479-empty-response-copy`、`fix/t478-pause-clean-close` 未删（§14.4 需批准）；②独立审查非阻塞观察（stop+畸形 JSON 亦得 "likely truncated" 属票面措辞上限；runtime 防御性重建分支丢 invalid_tool_calls 为既有死代码；纯空响应旧文案无文案级钉住测试，P4 以下）不另开票。明细见 `docs/phase_status/2026-10.md` 本批节。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过

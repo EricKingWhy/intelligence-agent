@@ -32,6 +32,10 @@ import {
 // ── wsStream mock：捕获三参；流不出帧、不收尾（帧时机归测试驱动）────────────
 const wsMock = vi.hoisted(() => ({
   calls: [] as { sessionId: string; afterSeq: number; onLiveness?: () => void }[],
+  // #478：每条流的控制器——帧出现时机由测试经 feedStream/closeStream 显式驱动，
+  // **不在构造时灌帧**：modeRef 是渲染期同步的，构造期灌帧会在 sendMessage 的
+  // act 内、setMode 提交之前就被微任务消费掉（生产上帧走网络，无此竞态）。
+  controllers: [] as ReadableStreamDefaultController<Uint8Array>[],
 }));
 
 vi.mock('../lib/wsStream', async (importOriginal) => {
@@ -40,13 +44,32 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
     ...actual,
     wsStreamResponse: (sessionId: string, afterSeq?: number, onLiveness?: () => void) => {
       wsMock.calls.push({ sessionId, afterSeq: afterSeq ?? -1, onLiveness });
-      return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      });
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            wsMock.controllers.push(controller);
+          },
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        },
+      );
     },
   };
 });
+
+/** 向当前（最新一条）流喂 SSE 帧。必须在 mode 提交后调用（见 wsMock 注释）。 */
+function feedStream(...chunks: string[]): void {
+  const controller = wsMock.controllers.at(-1);
+  const encoder = new TextEncoder();
+  for (const chunk of chunks) controller?.enqueue(encoder.encode(chunk));
+}
+
+/** 收掉当前流（干净 close ⇒ consumeSSE 走 onDone）。 */
+function closeStream(): void {
+  wsMock.controllers.at(-1)?.close();
+}
 
 vi.mock('../lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/api')>();
@@ -129,6 +152,7 @@ beforeEach(() => {
   window.localStorage.clear();
   vi.useFakeTimers();
   wsMock.calls.length = 0;
+  wsMock.controllers.length = 0;
 });
 
 afterEach(async () => {
@@ -281,5 +305,81 @@ describe('#456 — 挂新流必须重置停摆宽限起点（lastFrameAtRef）',
     // 不得判停重连。
     await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECT_STALL_MS + 1_000); });
     expect(wsMock.calls).toHaveLength(1);
+  });
+});
+
+describe('#478 — durable pause 的干净收流不得触发重连链', () => {
+  /** 真实形状的 run/paused 帧（载荷样板取自 projection.pause.test.ts 的 pausedEvent；
+   *  seq 由用例按接流游标连续填充）。 */
+  const pausedEventWire = {
+    type: 'run/paused',
+    session_id: SID,
+    run_id: 'run-1',
+    step_id: 2,
+    time: '2026-09-25T00:00:00.000Z',
+    data: {
+      reason: 'budget_exhausted',
+      trigger_dimension: 'run.max_agent_turns_total',
+      budget_version: 1,
+      consumed: { agent_turns: 3 },
+      limits: {
+        local: { max_agent_turns: 500, source: 'deployment' },
+        run: { max_agent_turns_total: 4 },
+      },
+      continuation: {
+        completed: ['本逻辑 run 已消耗 3 个 agent turn'],
+        remaining: ['暂停发生在下一轮模型决策之前'],
+        blockers: ['run.max_agent_turns_total 到顶：consumed=3, ceiling=4'],
+        next_safe_action: '提高绝对 ceiling 后以同一 run_id 恢复',
+      },
+      closeout_source: 'model',
+      resume_requirements: [],
+      trace_id: 'trace-abc',
+    },
+  };
+
+  it('收到 run/paused 后服务端关流：零重连、零横幅，直接落到可续跑的 paused 态', async () => {
+    // durable log 与流帧同一份事件：finishLive 进 viewing 后的历史重载会从
+    // **权威源**（GET /events）重投影 paused 事实（不变量 #22），因此 mock 返回
+    // 同一序列。#312：run/paused 算收口 ⇒ hasUnterminatedRun=false，重载不再
+    // 触发 resume 接流——流计数恒 1 是断言的一部分。
+    const startedEvent = {
+      type: 'run/started',
+      seq: 0,
+      session_id: SID,
+      run_id: 'run-1',
+      time: '2026-09-25T00:00:00.000Z',
+      data: { turn_index: 1, model: 'glm-5.3' },
+    };
+    const pausedEvent = { ...pausedEventWire, seq: 1 };
+    vi.mocked(getSessionEvents).mockResolvedValue([
+      startedEvent as never,
+      pausedEvent as never,
+    ]);
+    vi.mocked(sendMessage).mockResolvedValue(ackResponse());
+    await mount();
+    await act(async () => { await captured.hook!.sendMessage(SID, 'hi'); });
+    expect(captured.hook!.streaming).toBe(true);
+    expect(wsMock.calls).toHaveLength(1);
+
+    // mode 已提交（streaming=true 断言已过）再喂帧：ack 分支的接流游标是 -1
+    //（空会话无历史）⇒ 帧必须从 seq 0 连续起，否则 isSeqGap 会把首帧判成 gap。
+    await act(async () => {
+      feedStream(
+        `data: ${JSON.stringify(startedEvent)}\n\n`,
+        `data: ${JSON.stringify(pausedEvent)}\n\n`,
+      );
+      closeStream();
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    // 干净迁移：不进重连链（恒 1 条流）、不落「连接中断」、退出 streaming，
+    // paused 事实经权威重载投影在案 ⇒ PausedPanel 渲染条件成立。
+    expect(wsMock.calls).toHaveLength(1);
+    expect(captured.hook!.streaming).toBe(false);
+    expect(captured.hook!.error).toBeNull();
+    expect(captured.hook!.reconnecting).toBe(false);
+    expect(captured.hook!.conversation?.run_paused).not.toBeNull();
+    expect(captured.hook!.conversation?.run_paused?.reason).toBe('budget_exhausted');
   });
 });
