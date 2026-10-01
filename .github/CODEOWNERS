@@ -1,0 +1,13 @@
+# CODEOWNERS —— 门禁与 CI 的信任边界（AGENTS.md §14.10 / §14.4 的"闸门本身"）
+#
+# 作用：这些文件有改动时自动把仓库所有者列为 reviewer。
+# ⚠ 边界：CODEOWNERS 只负责"自动建议"；要**强制**"改动必须经 owner 审批"，
+#   还需在 main 分支保护里打开 "Require review from Code Owners"（仓库设置一档，
+#   不在本文件能力内）。开启前注意：owner 的 PR 也会被要求审批（enforce_admins 同理）。
+
+.github/workflows/                @EricKingWhy
+.githooks/                        @EricKingWhy
+scripts/gate0.py                  @EricKingWhy
+scripts/check_review_coverage.py  @EricKingWhy
+scripts/check_exec_bit.py         @EricKingWhy
+scripts/live_gate.py              @EricKingWhy

@@ -51,6 +51,7 @@ dev = [
     # demo/live_agent.py 用它做彩色终端渲染；不是运行时依赖。
     "rich>=13.7.0",
     "wsproto>=1.3.2",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.pytest.ini_options]

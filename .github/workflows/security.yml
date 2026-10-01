@@ -1,0 +1,67 @@
+# .github/workflows/security.yml —— 供应链与秘密扫描
+#
+# 定位：gate0/gate1 守"代码对不对"，本工作流守"仓库里有没有不该有的东西"：
+#   ① gitleaks：AGENTS.md 第 0 条红线"凭证零泄漏"的机械面 —— 本地没有任何
+#      secret 扫描（.githooks 只有 gate0），这条是唯一防线。每次 push/PR 都扫
+#      （几秒成本），每周日再扫一遍全历史。
+#   ② OpenSSF Scorecard：供应链风险评分（public 仓库自动可评）。SARIF 按
+#      artifact 保留；要出现在 GitHub 的 "Security / Code scanning" 里，需要
+#      管理员开启 Code Scanning 并改上传到 code scanning（可选步骤，见 job 注释）。
+#
+# 权限：两个工具都只读仓库；upload-artifact 需要 actions: write。
+
+name: security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 2 * * 0'   # 每周日 10:00 (UTC+8)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  gitleaks:
+    name: gitleaks (secret 扫描)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出（全历史，供历史泄漏扫描）
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        with:
+          # --redact：泄漏值打码（本仓第 0 条红线：任何输出不带真实 key）。
+          args: --redact
+
+  scorecard:
+    name: OpenSSF Scorecard
+    # Scorecard 评的是仓库整体状态，不是某个 PR ⇒ 只跑 push main + 定时/手动。
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出（全历史，评分需要完整 git 历史）
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Scorecard
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          # publish_results 需要仓库管理员 PAT 才能发布到评分 API（可选）；先 artifact 保留。
+          publish_results: false
+
+      # 可选：开 Code Scanning 后，可把 results.sarif 喂给
+      # github/codeql-action/upload-sarif 在 Security 页展示（不在本文件做，避免提权）。
+      - name: 上传 SARIF
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 30

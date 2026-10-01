@@ -1,0 +1,32 @@
+# Dependabot（GitHub 自动依赖更新）
+#
+# 说明/限制（本仓用 uv + pnpm 锁文件）：
+#  - pip 生态只读 pyproject.toml 的声明，**不认 uv.lock**（uv 专用格式）。它开的
+#    PR 更新 pyproject 后，需要本地 `uv lock` 重新生成锁文件；CI 的
+#    `uv sync --locked` 会在锁文件过期时报错 —— 这正是"不静默改依赖"的机制。
+#  - npm 生态认 pnpm-lock.yaml（web/），正常闭环。
+#  - github-actions 生态负责把工作流里的 SHA pin 更新到新版本（2026-10-01 起
+#    全部 action 改为完整 SHA + 标签注释的形式，Dependabot 可识别并升级）。
+
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
