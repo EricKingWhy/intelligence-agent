@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
 from agent_harness.context.compactor import (
     CompactionFailure,
@@ -325,11 +325,15 @@ class ContextBuilder:
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
         source_ranges: list[tuple[int, int] | None] | None = None
+        pairs = derive_messages_with_source_ranges(session.events)
         if self._pruner is None:
-            messages = session.derive_messages()
+            # 与 session.derive_messages() 同一投影；额外留下 source_ranges 供
+            # #448 的真实 usage 锚做「事件 → 消息」定位（不传给压缩器，行为不变）。
+            messages = [message for message, _source_range in pairs]
+            anchor_ranges = [source_range for _message, source_range in pairs]
         else:
-            pairs = derive_messages_with_source_ranges(session.events)
             messages, source_ranges = await self._prune_projection(session, pairs)
+            anchor_ranges = source_ranges
         all_protected_facts = derive_protected_facts(session.events)
         latest_work_boundary = max(
             (
@@ -381,6 +385,17 @@ class ContextBuilder:
                 ],
             )
         token_estimate = self._estimate_tokens_cached(session, messages)
+        # #448：真实 usage 锚（Pi `compaction.ts:214-243` estimateContextTokens 同构）。
+        # tiktoken 估算对数字/十六进制密集的 tool 结果会**低估**（#448 实测两 provider
+        # ratio 低至 0.674：估算读到 140k 时真实已 ~207k，越 200k 窗口），单看估算把
+        # 压力全留给硬护栏。以最近一条可定位的带 usage model/completed 的真实
+        # prompt_tokens 为锚、其响应消息与其后新增消息按投影估算补上（尾部仍是
+        # 估算：provider 偶发缺 usage 时未锚窗口变宽——低估通道被收窄但未消除）；
+        # `max()` **只抬高不降低**（锚把 system/tools 真实开销一并算入且不扣除——
+        # 高估方向，与 Pi 的 totalTokens 同一口径）。无锚（无 usage / 事件全被
+        # shadow）⇒ 0，纯估算路径零回归。
+        usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
+        token_estimate = max(token_estimate, usage_anchor)
         token_estimate += protected_facts_tokens
         # 运行时上下文快照（T7）：provider 每次 build **只调一次**——token 估算与
         # 注入必须用同一份文本，否则预算与内容可能不一致（且 callable 的调用
@@ -732,6 +747,55 @@ class ContextBuilder:
         if not self.system_prompt:
             return messages
         return [SystemMessage(content=self.system_prompt), *messages]
+
+    def _usage_anchored_tokens(
+        self, session: Session,
+        messages: list[AnyMessage],
+        ranges: list[tuple[int, int] | None],
+    ) -> int:
+        """真实 usage 锚 + 其后增量估算；返回 0 = 无可用锚（调用点 #448 注释）。
+
+        「可定位」用 source_ranges 反查：model/completed 投影出的 AIMessage 区间是
+        全局唯一的 `(seq, seq)`（derive.py 投影契约），据此 O(1) 找到该事件对应的
+        消息位。被 bracket shadow 的旧 usage 事件反查不到 → 自动落到更早的可用锚
+        （旧锚的真实用量对当前投影只高不低——安全方向）；全部映射不上 ⇒ 0。
+        bracket 之后的新 usage 事件照常映射 ⇒ 锚跨压缩存活（这是不走
+        「事件数 == 消息数」计数配对的原因：压缩后两者永久失配，锚会失效）。
+        """
+        if len(ranges) != len(messages):
+            return 0  # 防御：映射前提破坏时宁可不用锚
+        index_by_seq: dict[int, int] = {}
+        for index, source_range in enumerate(ranges):
+            if (source_range is not None
+                    and source_range[0] == source_range[1]
+                    and isinstance(messages[index], AIMessage)):
+                index_by_seq[source_range[0]] = index
+        for event in reversed(session.events):
+            if event.type != MODEL_COMPLETED:
+                continue
+            usage = event.data.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            prompt_tokens = usage.get("prompt_tokens")
+            if (not isinstance(prompt_tokens, int)
+                    or isinstance(prompt_tokens, bool)
+                    or prompt_tokens < 0):
+                continue
+            anchor_index = index_by_seq.get(event.seq)
+            if anchor_index is None:
+                continue
+            # 锚覆盖的是该轮的输入 prompt；响应消息与其后的新增消息不在其中，
+            # 按投影估算补上（与 _estimate_tokens_cached 同一编码口径）。
+            anchored = prompt_tokens
+            anchored += estimate_tokens(
+                messages[anchor_index].model_dump_json(),
+            )
+            anchored += sum(
+                estimate_tokens(message.model_dump_json())
+                for message in messages[anchor_index + 1:]
+            )
+            return anchored
+        return 0
 
     def _estimate_tokens_cached(
         self, session: Session, messages: list[AnyMessage],
