@@ -73,6 +73,7 @@ def test_formation_prompt_rejects_transient_content_and_retrieval_questions():
         "memory or answer and must not be stored" in _FORMATION_PROMPT
     assert "A procedural memory must include reusable steps and a success condition" \
         in _FORMATION_PROMPT
+    assert "deriving it from evidence is not inventing it" in _FORMATION_PROMPT
     assert "Approval without the actual procedure is not enough" in _FORMATION_PROMPT
 
 
@@ -95,7 +96,17 @@ def test_formation_prompt_distinguishes_episodic_decisions_from_semantic_facts()
         in _FORMATION_PROMPT
     assert "do not classify that decision as semantic only because it produced a stable state" \
         in _FORMATION_PROMPT
+    assert "stays semantic even when learned during a conversation" in _FORMATION_PROMPT
     assert "Do not infer missing events or lessons" in _FORMATION_PROMPT
+
+
+def test_adjudication_prompt_never_replaces_concrete_values_in_refined_content():
+    """#496：refine content = 压缩/澄清而非替换，用户原话的具体值逐字保留。"""
+    assert "Refining content means condensing or clarifying, never replacing" \
+        in _ADJUDICATION_PROMPT
+    assert "copy the user's exact names, values, quantities, and key terms" \
+        in _ADJUDICATION_PROMPT
+    assert "do not paraphrase them away" in _ADJUDICATION_PROMPT
 
 
 def test_adjudication_prompt_requires_exact_existing_target_ids():
