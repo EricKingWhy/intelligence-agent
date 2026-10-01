@@ -71,8 +71,11 @@ def _event(event_id: str, event_type: str, data: dict | None = None) -> SessionE
     )
 
 
-def _user(event_id: str = "u:1") -> SessionEvent:
-    return _event(event_id, USER_MESSAGE, {"content": "请用 pnpm"})
+def _user(event_id: str = "u:1", *, remember_as_rule: bool = False) -> SessionEvent:
+    return _event(event_id, USER_MESSAGE, {
+        "content": "请用 pnpm",
+        **({"remember_as_procedural_rule": True} if remember_as_rule else {}),
+    })
 
 
 def _injected_user(event_id: str = "u:inj") -> SessionEvent:
@@ -145,20 +148,27 @@ def _candidate(**overrides) -> FormationCandidate:
 
 def _default_events() -> list[SessionEvent]:
     """默认事件池：一条用户消息、一条助手消息、一条**读不出**的工具结果，
-    以及两条**读得出**的工具结果（成功 + 失败各一）。
+    以及三条**读得出**的工具结果（成功两条、失败一条）。
 
-    为什么池子里要有"读得出 ok"的两条：R5 的"成功/纠正"半边要求证据事件本身合格，
+    为什么池子里要有两条成功结果：R5 要求两条独立成功/纠正证据，
     没有它们的池子只能测到"独立"那半边。
     """
-    return [_user(), _model(), _tool(), _tool_ok("t:ok1", "c1"), _tool_failed()]
+    return [
+        _user(), _model(), _tool(), _tool_ok("t:ok1", "c1"),
+        _tool_ok("t:ok2", "c2"), _tool_failed(),
+    ]
 
 
-def _select(candidates, *, events=None, explicit_remember: bool = False, refs=None):
+def _select(
+    candidates, *, events=None, explicit_remember: bool = False, refs=None,
+    trusted_project_id: str | None = None,
+):
     return select_candidates(
         candidates,
         events=_default_events() if events is None else events,
         explicit_remember=explicit_remember,
         refs=refs,
+        trusted_project_id=trusted_project_id,
     )
 
 
@@ -264,10 +274,24 @@ def test_a_secret_outranks_a_missing_sensitive_consent() -> None:
     assert [item.reason for item in outcome.rejected] == [PolicyRejection.SECRET]
 
 
-def test_a_secret_in_the_project_identifier_rejects_the_candidate() -> None:
-    """`project_id` 也是要写进记录的字段——密钥藏在那儿一样是泄漏。"""
-    outcome = _select([_candidate(
-        scope="project", project_id="sk-abcdefghijklmnopqrstuv")])
+def test_a_project_candidate_requires_a_trusted_project_context() -> None:
+    outcome = _select([_candidate(scope="project")])
+
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROJECT_CONTEXT_UNAVAILABLE
+    ]
+
+
+def test_a_project_candidate_is_allowed_when_trusted_context_is_available() -> None:
+    outcome = _select([_candidate(scope="project")], trusted_project_id="project-1")
+
+    assert len(outcome.accepted) == 1
+
+
+def test_a_secret_in_the_trusted_project_identifier_rejects_a_project_candidate() -> None:
+    outcome = _select(
+        [_candidate(scope="project")], trusted_project_id="sk-abcdefghijklmnopqrstuv")
+
     assert [item.reason for item in outcome.rejected] == [PolicyRejection.SECRET]
 
 
@@ -430,7 +454,11 @@ def test_an_explicit_remember_request_counts_as_user_confirmation() -> None:
 )
 def test_non_user_facts_may_rest_on_assistant_evidence(payload: dict) -> None:
     """§4.4：助手/工具输出**可以**支撑项目事实、情节与过程——只有用户事实不行。"""
-    outcome = _select([_candidate(payload=payload, evidence=[_evidence("m:1")])])
+    scope = "project" if payload.get("category") == "project_fact" else "user_global"
+    outcome = _select(
+        [_candidate(scope=scope, payload=payload, evidence=[_evidence("m:1")])],
+        trusted_project_id="project-x" if scope == "project" else None,
+    )
     assert len(outcome.accepted) == 1
 
 
@@ -473,8 +501,8 @@ def test_a_procedural_candidate_from_two_independent_events_is_accepted() -> Non
         kind="procedural", payload=_payload("procedural"),
         evidence=[
             _evidence("t:ok1", "tool", "第一次成功了"),
-            _evidence("t:bad", "tool", "第二次踩了坑改过来"),
-        ])])
+            _evidence("t:ok2", "tool", "第二次也成功了"),
+        ])], events=[_tool_ok("t:ok1", "c1"), _tool_ok("t:ok2", "c2")])
     assert len(outcome.accepted) == 1
 
 
@@ -551,9 +579,8 @@ def test_a_tool_call_without_any_result_does_not_count_as_a_qualifying_event() -
     ]
 
 
-def test_two_failed_attempts_count_as_two_qualifying_events() -> None:
-    """R5 的"纠正"半边：失败也**可验证**（运行时读得出 `ok=False`），而"做法对不对"
-    是语义判断。把失败排除会让"失败两次 ⇒ 换个方案"这类正当经验永远形不成规则。"""
+def test_two_failed_attempts_do_not_count_as_success_or_correction_events() -> None:
+    """R5 要求成功或纠正；失败结果本身既非成功，也不证明用户已纠正。"""
     outcome = _select(
         [_candidate(
             kind="procedural", payload=_payload("procedural"),
@@ -563,15 +590,125 @@ def test_two_failed_attempts_count_as_two_qualifying_events() -> None:
             ])],
         events=[_tool_failed("t:bad", "c1"), _tool_failed("t:bad2", "c2")],
     )
-    assert len(outcome.accepted) == 1
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
 
 
 def test_a_procedural_candidate_from_one_user_stated_rule_is_accepted() -> None:
-    """R5 的豁免支：用户明确陈述了规则 ⇒ 一条事件即可。"""
+    """R5 的豁免支：请求显式标注规则，且证据指向该用户事件 ⇒ 一条事件即可。"""
     outcome = _select([_candidate(
         kind="procedural", payload=_payload("procedural"),
-        evidence=[_evidence("u:1", "user", "以后一律用 pnpm")])])
+        evidence=[_evidence("u:1", "user", "请用 pnpm")])],
+        events=[_user(remember_as_rule=True)],
+    )
     assert len(outcome.accepted) == 1
+
+
+@pytest.mark.parametrize("excerpt", ["请用 npm", " "])
+def test_a_procedural_candidate_must_quote_the_marked_user_rule(excerpt: str) -> None:
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[_evidence("u:1", "user", excerpt)],
+        )],
+        events=[_event("u:1", USER_MESSAGE, {
+            "content": "请用 pnpm",
+            "remember_as_procedural_rule": True,
+        })],
+    )
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
+
+
+def test_a_blank_marked_user_event_does_not_exempt_the_procedural_threshold() -> None:
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[_evidence("u:1", "user", " ")],
+        )],
+        events=[_event("u:1", USER_MESSAGE, {
+            "content": " ",
+            "remember_as_procedural_rule": True,
+        })],
+    )
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
+
+
+def test_an_unmarked_user_message_does_not_exempt_the_procedural_threshold() -> None:
+    outcome = _select([_candidate(
+        kind="procedural", payload=_payload("procedural"),
+        evidence=[_evidence("u:1", "user", "请用 pnpm")])],
+        events=[_user()],
+    )
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
+
+
+def test_a_user_message_counts_as_corrective_only_with_an_explicit_refutation_link() -> None:
+    outcome = _select([_candidate(
+        kind="procedural", payload=_payload("procedural"),
+        evidence=[
+            _evidence("u:correction", "user", "改用 pnpm"),
+            _evidence("t:ok1", "tool", "执行结果"),
+        ])],
+        events=[
+            _event("tc:previous", TOOL_CALL, {
+                "tool_call_id": "call-previous",
+                "tool_name": "shell",
+                "args": {},
+            }),
+            _event("u:correction", USER_MESSAGE, {
+                "content": "这次改用 pnpm",
+                "refutes_event_id": "tc:previous",
+            }),
+            _tool_ok("t:ok1", "c1"),
+        ],
+    )
+    assert len(outcome.accepted) == 1
+
+
+def test_a_user_message_with_an_unresolved_refutation_link_does_not_count() -> None:
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[_evidence("u:correction", "user", "改用 pnpm")],
+        )],
+        events=[_event("u:correction", USER_MESSAGE, {
+            "content": "这次改用 pnpm",
+            "refutes_event_id": "missing-event",
+        })],
+    )
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
+
+
+def test_a_user_message_refuting_an_assistant_event_does_not_count() -> None:
+    outcome = _select(
+        [_candidate(
+            kind="procedural", payload=_payload("procedural"),
+            evidence=[
+                _evidence("u:correction", "user", "改用 pnpm"),
+                _evidence("t:ok1", "tool", "执行结果"),
+            ],
+        )],
+        events=[
+            _model("m:assistant"),
+            _event("u:correction", USER_MESSAGE, {
+                "content": "这次改用 pnpm",
+                "refutes_event_id": "m:assistant",
+            }),
+            _tool_ok("t:ok1", "c1"),
+        ],
+    )
+    assert [item.reason for item in outcome.rejected] == [
+        PolicyRejection.PROCEDURAL_THRESHOLD_NOT_MET
+    ]
 
 
 def test_an_injected_user_message_cannot_exempt_the_procedural_threshold() -> None:
@@ -594,7 +731,7 @@ def test_an_injected_user_message_cannot_exempt_the_procedural_threshold() -> No
 def _many(kind: str, count: int, *, importance: float = 0.5) -> list[FormationCandidate]:
     """同 kind 的 `count` 条候选；内容互不相同，证据指向同一批可解析事件。
 
-    procedural 的 fixture 带**两条合格**证据（两条读得出 `ok` 的工具结果）：R5 的门槛比
+    procedural 的 fixture 带**两条合格**证据（两条成功工具结果）：R5 的门槛比
     名额先判，用一条证据的 procedural 会全部死在 `PROCEDURAL_THRESHOLD_NOT_MET` 上，
     名额那条规则就永远测不到。
     """
@@ -609,7 +746,7 @@ def _many(kind: str, count: int, *, importance: float = 0.5) -> list[FormationCa
             evidence=(
                 [
                     _evidence("t:ok1", "tool", f"#{index}"),
-                    _evidence("t:bad", "tool", f"#{index}"),
+                    _evidence("t:ok2", "tool", f"#{index}"),
                 ]
                 if kind == "procedural"
                 else [_evidence("m:1", "assistant", f"#{index}")]
@@ -932,7 +1069,7 @@ def test_the_procedural_threshold_counts_aliased_events() -> None:
             kind="procedural", payload=_payload("procedural"),
             evidence=[_evidence("e1", "tool", "第一次成功了"),
                       _evidence("e2", "tool", "第二次踩了坑改过来")])],
-        refs={"e1": "t:ok1", "e2": "t:bad"},
+        refs={"e1": "t:ok1", "e2": "t:ok2"},
     )
     assert len(outcome.accepted) == 1
 

@@ -121,6 +121,7 @@ Each record also contains a self-contained canonical `content` string used for d
 
 - `user_global`: reusable across all conversations and projects for the same tenant and user. Intended for user preferences and profile facts.
 - `project`: reusable across conversations only within the same tenant, user, and project/workspace identity.
+- A semantic `project_fact` must use `project` scope; shared draft/record validation rejects it in `user_global` regardless of which write path produced it.
 - `source_session_id` is provenance only. It must never restrict recall and must not recreate SESSION-scoped long-term memory.
 - No request may read or mutate another tenant's or user's records. Project-scoped records must not be recalled outside their project.
 
@@ -146,12 +147,12 @@ A USER/profile fact requires a direct user statement or an explicit user confirm
 
 ### 5.2 Formation and adjudication
 
-1. **Given** an eligible run, **when** formation executes, **then** the model receives only the approved safe projection: the current run, at most eight prior user/assistant messages, at most ten similar active memories, tool names/status/structured summaries, and artifact references.
+1. **Given** an eligible run, **when** formation executes, **then** the model receives only the approved safe projection: the current run, at most eight prior user/assistant messages, at most ten similar active memories, tool names/status/structured summaries, artifact references, and a `trusted_context.project_available` boolean. Tenant, user, project, session, and event identifiers are runtime-owned and are not sent to the model.
 2. **Given** raw large tool output, artifact content, credentials, hidden reasoning, or unrestricted full history exists, **when** the formation prompt is built, **then** that material is absent.
 3. **Given** formation returns candidates, **when** runtime validation executes, **then** no more than five candidates are accepted: Semantic at most three, Episodic at most two, Procedural at most one, total at most five.
 4. **Given** a candidate exceeds a per-kind or total cap, **when** candidates are selected, **then** candidates are ranked by durable value and the lower-ranked excess candidates are discarded before adjudication.
-5. **Given** an accepted candidate, **when** adjudication compares it with bounded relevant active memory, **then** it produces exactly one of `ADD`, `UPDATE`, `INVALIDATE`, or `NOOP`.
-6. **Given** a single observed event, **when** a Procedural candidate is proposed, **then** it is rejected unless the user explicitly stated the rule. Otherwise Procedural memory requires at least two independent successful or corrective source events.
+5. **Given** an accepted candidate, **when** adjudication compares it with bounded relevant active memory, **then** it produces exactly one of `ADD`, `UPDATE`, `INVALIDATE`, or `NOOP`. For every non-null result, it preserves that candidate's `kind`, `tier`, and `scope`; Runtime rejects any mismatch and writes nothing.
+6. **Given** a single observed event, **when** a Procedural candidate is proposed, **then** it is rejected unless the user explicitly opts in with `remember_as_procedural_rule: true` on that non-blank task/message. Runtime stores the signal only on the corresponding genuine `user/message`, and the candidate must cite that same event with a non-empty excerpt found verbatim in its content. A normal user message does not imply this signal. Without it, Procedural memory requires at least two distinct qualifying events: successful tool results (`ok=true`) or genuine user corrections whose `refutes_event_id` resolves to a persisted direct user input or valid tool attempt in the same session. Failed tool results do not count by themselves.
 
 ### 5.3 Model retry and fallback
 
@@ -238,7 +239,7 @@ skip_reason: null | no_durable_value | transient_only | unsupported_evidence |
 
 `CANDIDATES` requires at least one valid candidate and a null `skip_reason`. `NO_MEMORY` requires an empty candidate list and a non-null `skip_reason`. A parse or schema error is a failed attempt, not `NO_MEMORY`.
 
-Each candidate contains kind, tier, scope, canonical content, matching typed payload, importance, strength, evidence references, `sensitivity` (`ordinary`, `sensitive`, or `secret`), an applicable sensitive-category enum from §5.7, and the proposed project identifier when scope is `project`. Runtime replaces all identity fields with trusted request/session identity and independently enforces secret/sensitive policy.
+Each candidate contains kind, tier, scope, canonical content, matching typed payload, importance, strength, evidence references, `sensitivity` (`ordinary`, `sensitive`, or `secret`), and an applicable sensitive-category enum from §5.7. The model never supplies `project_id`; it may propose `project` scope only when `trusted_context.project_available` is true. Runtime binds the trusted project identifier before persistence and rejects project-scoped candidates when no trusted project exists. Runtime independently enforces secret/sensitive policy.
 
 ### 6.3 Adjudication result
 
@@ -247,13 +248,13 @@ The model must return one JSON object per candidate:
 ```text
 action: ADD | UPDATE | INVALIDATE | NOOP
 target_memory_id: string | null
-result: complete MemoryRecordV2 candidate | null
+result: complete MemoryRecordV2 content proposal | null
 reason_code: durable_new | enrich_existing | contradicts_existing |
              user_authority_wins | duplicate | insufficient_evidence |
              procedural_threshold_not_met | policy_rejected
 ```
 
-`ADD` requires no target and a complete result. `UPDATE` requires an active target and a complete result. `INVALIDATE` requires an active target and no replacement result. `NOOP` writes nothing. Runtime validates target ownership, version, source authority, and scope before applying the action.
+`ADD` requires no target and a complete result. `UPDATE` requires an active target and a complete result. `INVALIDATE` requires an active target and no replacement result. `NOOP` writes nothing. A non-null result must preserve the corresponding Formation candidate's `kind`, `tier`, and `scope`; Adjudication chooses the action and may refine content, but cannot reclassify the candidate. Any mismatch is a contract failure and writes nothing. Model results omit `project_id`; Runtime binds the trusted project identifier for project-scoped results and validates target ownership, version, source authority, and scope before applying the action.
 
 ### 6.4 API
 
@@ -268,6 +269,12 @@ Existing authenticated `/api/memories` list/delete behavior remains compatible w
 - `GET /api/memory-settings`: returns tenant/user-global `extraction_enabled` and `recall_enabled` for the current user.
 - `PATCH /api/memory-settings`: updates one or both settings without deleting records.
 - `GET /api/sessions/{session_id}/memory-recalls`: returns redacted “why recalled” records for that session.
+
+`POST /api/sessions`, task-bearing `POST /api/sessions/{session_id}/resume`, and
+`POST /api/sessions/{session_id}/messages` accept the optional boolean
+`remember_as_procedural_rule`. It defaults to false; true requires a non-blank task/message and is
+stored on that user event for the R5 single-event rule exception. Empty-session creation and
+same-run resume cannot set it.
 
 All mutation endpoints derive tenant/user/project authority from trusted server context, never request-body identity. Cross-identity access returns the existing non-disclosing authorization/not-found behavior and never reveals whether another user's record exists.
 

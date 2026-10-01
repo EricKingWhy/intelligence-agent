@@ -44,7 +44,7 @@ from agent_harness.agent.budget import (
     LocalFuse,
     resolve_local_fuse,
 )
-from agent_harness.agent.profiles import declared_turn_ceiling
+from agent_harness.agent.profiles import BUILTIN_PROFILES, declared_turn_ceiling
 from agent_harness.agent.resume_evidence import (
     ResumeEvidence,
     StuckEvidencePort,
@@ -98,6 +98,7 @@ from agent_harness.session.approval import (
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
+    KIND_STEER,
     UndeliveredInput,
     derive_protected_facts,
     detect_dangling,
@@ -137,10 +138,12 @@ from agent_harness.session.event import (
     RUN_RESUMED,
     SESSION_FORKED,
     SESSION_RESUMED,
+    SESSION_STARTED,
     STEER_APPLIED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
     USER_MESSAGE,
+    SessionEvent,
     _utc_now_iso,
 )
 from agent_harness.session.interrupt import detect_unterminated_runs
@@ -243,6 +246,24 @@ def validate_session_id(session_id: str) -> str:
     return session_id
 
 
+def _has_procedural_rule_signal(
+    events: list[SessionEvent], input_kind: str, input_id: str,
+) -> bool:
+    """Recover the user's explicit rule signal from its durable queue/steer event."""
+    if input_kind == KIND_QUEUE:
+        event_type, id_field = MESSAGE_QUEUED, "queue_id"
+    elif input_kind == KIND_STEER:
+        event_type, id_field = STEER_REQUESTED, "steer_id"
+    else:
+        return False
+    return any(
+        event.type == event_type
+        and event.data.get(id_field) == input_id
+        and event.data.get("remember_as_procedural_rule") is True
+        for event in events
+    )
+
+
 # ── 数据载体 ──────────────────────────────────────────────────────────
 # AmendOptions 已移至 session/amend.py（候选 2 后续修正：消除 model_switch ↔
 # service 的双向导入环）。本模块从那里重新导出，既有导入路径不变。
@@ -256,6 +277,35 @@ def _profile_turn_ceiling(amend: AmendOptions | None) -> int | None:
     ceiling"会静默成立（ADR-0044 D1/D7，判定见 `agent/budget.py`）。
     """
     return declared_turn_ceiling(amend.agent_profile if amend is not None else None)
+
+
+def _delegated_child_agent_profile(events: list) -> str | None:
+    """判定"这是委派子会话"并给出它的 AgentSpec 档位名（`#372`）。
+
+    恢复期的 AgentSpec 来源（票面决定性调研点）：spawn 时 `session/started` 的
+    信封 `agent_id` 写的就是 `spec.name`（`multiagent/provider.py` 的
+    `session.append(SESSION_STARTED, {...}, agent_id=spec.name)`），且
+    `SessionEvent.agent_id` 随 JSONL 持久化；生产 provider 的 profiles 就是
+    `BUILTIN_PROFILES`（capability wiring 构造 `InProcessSubagentProvider()`，
+    无自定义注入点）。data 里的 `delegation_tree_id` 是 spawn 标记（同一处写入）。
+
+    非委派会话返回 None——main / fork / 普通会话的恢复行为逐字不变。委派标记
+    在而 `agent_id` 缺失 / 指向 `main` / 不是已知档位 ⇒ 响亮失败：那意味着无法
+    按子会话自己的 spec 重建授权，静默落到 None 等于给恢复入口开全集工具面
+    （ADR-0048 残余 16 的红线：放开恢复入口必须与授权重建一起成立）。
+    """
+    first = events[0] if events else None
+    if first is None or first.type != SESSION_STARTED:
+        return None
+    if "delegation_tree_id" not in (first.data or {}):
+        return None
+    agent_id = first.agent_id
+    if agent_id is None or agent_id == "main" or agent_id not in BUILTIN_PROFILES:
+        raise ValueError(
+            f"委派子会话的 session/started.agent_id={agent_id!r} 无法解析为"
+            "可重建收窄工具面的子代理档位；拒绝以全集工具面恢复（#372）"
+        )
+    return agent_id
 
 
 def _run_limits(
@@ -750,6 +800,7 @@ class SessionService:
         auto_approve: bool = True,
         amend: AmendOptions | None = None,
         launch: bool = True,
+        remember_as_procedural_rule: bool = False,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -806,6 +857,8 @@ class SessionService:
         - `cwd`（#169 新增）：**已存在**的绝对目录，会话直接以它为操作目录
           （不创建、不复制），并自动注册为项目 + 归组。
         """
+        if remember_as_procedural_rule and (not launch or not task.strip()):
+            raise ValueError("remember_as_procedural_rule requires a launched non-blank user task")
         from uuid import uuid4
 
         from agent_harness.model.config import ConfigError, ModelConfig
@@ -997,7 +1050,13 @@ class SessionService:
                 session=session, run=None, subscriber=None, local_fuse=fuse,
             )
 
-        run, subscriber = self._run_manager.launch(session, runtime, task)
+        run, subscriber = self._run_manager.launch(
+            session, runtime, task,
+            user_input_metadata=(
+                {"remember_as_procedural_rule": True}
+                if remember_as_procedural_rule else None
+            ),
+        )
 
         # run 终结时 GC approval_queue（防泄漏）
         if interactive:
@@ -1082,6 +1141,14 @@ class SessionService:
         恢复（`03 §5`）。没有 ReconcileCallback 时那条路径**安全拒绝**（409「存在未
         reconcile 的副作用」），不伪造结果、不盲目重跑（不变量 #13/#14）。
         """
+        if (
+            user_input_metadata
+            and user_input_metadata.get("remember_as_procedural_rule") is True
+            and (task is None or not task.strip() or resume_run_id is not None)
+        ):
+            raise ValueError(
+                "remember_as_procedural_rule requires a non-blank new user task"
+            )
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
@@ -1098,6 +1165,20 @@ class SessionService:
                 paused_policy_inputs(existing, run_id=resume_run_id),
                 existing,
             )
+        # #372（ADR-0048 残余 16）：委派子会话的档位由它自己的 AgentSpec 决定，
+        # 恢复入口按 session/started 的 agent_id 重建收窄工具面（build_runtime 的
+        # profile 过滤）。子会话的授权不可经恢复请求改写：请求点名别的档位不生效
+        # （warn + 子会话 spec 胜），省略也不回落到全集。位置在 fuse 解析之前——
+        # `_profile_turn_ceiling` 取的必须与真正生效的同一个档位（ADR-0044 D1）。
+        child_profile = _delegated_child_agent_profile(existing)
+        if child_profile is not None:
+            if amend is not None and amend.agent_profile not in (None, child_profile):
+                logger.warning(
+                    "委派子会话 %s 的档位由其 AgentSpec（%s）决定，恢复请求的"
+                    " agent_profile=%r 不生效",
+                    session_id, child_profile, amend.agent_profile,
+                )
+            amend = replace(amend or AmendOptions(), agent_profile=child_profile)
         # local fuse（#308）：位置在只读前置检查之后、`Session.resume` 追加事件之前——
         # 被拒请求不写 session/resumed、不建目录。
         fuse = resolve_local_fuse(
@@ -1269,6 +1350,10 @@ class SessionService:
         # `Session.load` 的 seq 冲突（数据完整性）一律谎报成 404，客户端只能显示
         # `Send failed: 404`。现在 load/resume 抛类型化领域异常（SeqConflict /
         # SessionNotFound），由端点各自的 except 元组精确翻译。
+        # #372 AC4：新任务恢复是否需要"装配成功后补落恢复标记"——三条腿里只有
+        # 无 recovery 的分支为 True（见下）；同 run 腿在 `_commit_paused_resume`
+        # 锁内先装配后落标记（无孤儿形态），recovery 腿的标记由 recover() 自己落。
+        deferred_session_resume = False
         if same_run_resume:
             # 同 run 的 Recovery 判定与写入都延迟到锁内 CAS 胜者路径；recover()
             # 会追加 session/resumed，输家不能在锁外执行它。
@@ -1291,11 +1376,14 @@ class SessionService:
                     workspace_registry=self._workspace_registry,
                 )
             else:
-                session = Session.resume(
-                    self._store,
-                    session_id,
-                    workspace_registry=self._workspace_registry,
-                )
+                # #372 AC4（ADR-0048 残余 13/16 同族）：恢复标记**延迟到装配成功
+                # 之后**再落（下方 build_resume_runtime 之后）——旧顺序是先
+                # Session.resume（落 session/resumed）再装配，装配期失败（模型
+                # 解析 / workspace / 档位解析）就把标记留成孤儿。此分支无
+                # dangling（detect_dangling 已为 False）、无 recovery 事件，聚合
+                # 在 launch 前才需要。
+                session = None
+                deferred_session_resume = True
 
         # F15 #234 + F18-A #282：权限决策（档位 + 是否自动批准）从事件流派生——创建时
         # 显式声明**或**会话内改过档（permission/changed，最后一次胜）都作数。续聊路径
@@ -1397,6 +1485,15 @@ class SessionService:
             )
         else:
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
+            if deferred_session_resume:
+                # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
+                # 单一来源于 Session.resume；本分支无 dangling、无 recovery 事件，
+                # 这里只会追加 session/resumed 本身）。
+                session = Session.resume(
+                    self._store,
+                    session_id,
+                    workspace_registry=self._workspace_registry,
+                )
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
         run, subscriber = self._run_manager.launch(
@@ -1753,6 +1850,7 @@ class SessionService:
         revoke_fact_id: str | None = None,
         refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
+        remember_as_procedural_rule: bool = False,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -1813,6 +1911,8 @@ class SessionService:
         run 边界（``on_run_terminal``）/ runtime 循环头驱动，本方法只做注册与
         durable 记录。
         """
+        if remember_as_procedural_rule and not content.strip():
+            raise ValueError("remember_as_procedural_rule requires non-blank user content")
         self._validate_session_id(session_id)
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
@@ -1834,6 +1934,8 @@ class SessionService:
         }
         if normalized_protected_facts:
             user_input_metadata["protected_facts"] = normalized_protected_facts
+        if remember_as_procedural_rule:
+            user_input_metadata["remember_as_procedural_rule"] = True
         if user_input_metadata:
             events = await anyio.to_thread.run_sync(
                 self._store.read_events, session_id
@@ -1908,6 +2010,7 @@ class SessionService:
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
+                remember_as_procedural_rule=remember_as_procedural_rule,
             )
             self._append_session_event(
                 session_id, STEER_REQUESTED,
@@ -1956,6 +2059,7 @@ class SessionService:
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
+                remember_as_procedural_rule=remember_as_procedural_rule,
             )
             self._append_session_event(
                 session_id, MESSAGE_QUEUED,
@@ -2096,6 +2200,11 @@ class SessionService:
         }
         if nxt.protected_facts:
             user_input_metadata["protected_facts"] = nxt.protected_facts
+        events = await anyio.to_thread.run_sync(
+            self._store.read_events, session_id
+        )
+        if _has_procedural_rule_signal(events, nxt.kind, nxt.input_id):
+            user_input_metadata["remember_as_procedural_rule"] = True
         launched = await self.resume_and_launch(
             session_id=session_id, task=nxt.content, amend=amend,
             user_input_metadata=user_input_metadata or None,
@@ -2531,6 +2640,9 @@ class SessionService:
                     revoke_fact_id=item.revoke_fact_id,
                     refutes_event_id=item.refutes_event_id,
                     protected_facts=item.protected_facts,
+                    remember_as_procedural_rule=_has_procedural_rule_signal(
+                        events, item.kind, item.input_id,
+                    ),
                 )
                 for item in pending
                 if item.kind == KIND_QUEUE
@@ -2545,6 +2657,9 @@ class SessionService:
                     revoke_fact_id=item.revoke_fact_id,
                     refutes_event_id=item.refutes_event_id,
                     protected_facts=item.protected_facts,
+                    remember_as_procedural_rule=_has_procedural_rule_signal(
+                        events, item.kind, item.input_id,
+                    ),
                 )
                 for item in pending
                 if item.kind != KIND_QUEUE

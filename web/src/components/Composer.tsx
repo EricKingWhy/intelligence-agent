@@ -27,10 +27,10 @@ interface Props {
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
    *  与审批互斥，不允许两条修复路径同时开放（评审 Riley 红旗）。 */
   approvalPending?: boolean;
-  onSubmit: (task: string) => void;
+  onSubmit: (task: string, rememberAsProceduralRule: boolean) => void;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
-  onSteer?: (task: string) => void;
+  onSteer?: (task: string, rememberAsProceduralRule: boolean) => void;
   onCancel: () => void;
   presetTask?: PresetTask | null;
   /** T10 #103 模型目录（GET /api/models）：空 = 端点缺席/解析失败 → 选择器
@@ -61,12 +61,19 @@ interface Props {
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
   onReasoningEffortChange?: (id: string | null) => void;
-  // ── #426：新建会话的预算入口（最小可用，一维 turns）──
-  /** `budget.run.max_agent_turns_total` 的草稿（字符串，由映射层 `toCreateBudget`
-   *  判形）。**仅新建会话态显示**（`permissionInSession=false`）：预算属于启动
-   *  run 的请求（#422），续聊 /messages 不带 budget（#308）。 */
+  // ── #426：新建会话的预算入口（常用三项：turns / total_tokens / deadline_at）──
+  /** 各维草稿（输入框原样字符串，判形在映射层 `toCreateBudget` 一处）。
+   *  **仅新建会话态显示**（`permissionInSession=false`）：预算属于启动 run 的
+   *  请求（#422），续聊 /messages 不带 budget（#308）。没接 onChange 的维不渲染
+   *  输入框（不渲染吞输入的死框）。 */
   budgetRunTurns?: string;
   onBudgetRunTurnsChange?: (value: string) => void;
+  /** `budget.run.max_total_tokens` 的草稿。 */
+  budgetRunTokens?: string;
+  onBudgetRunTokensChange?: (value: string) => void;
+  /** `budget.run.deadline_at` 的草稿（`datetime-local` 原始值；映射层换算 RFC 3339 UTC）。 */
+  budgetRunDeadline?: string;
+  onBudgetRunDeadlineChange?: (value: string) => void;
   // ── ADR-0030 §5.2 队列条（#195）──
   /** 未投递输入（事件流逐事件折叠，事件流是唯一事实）。空 → 队列条不渲染。 */
   undelivered?: UndeliveredInput[];
@@ -105,6 +112,10 @@ export const Composer = memo(function Composer({
   onReasoningEffortChange,
   budgetRunTurns,
   onBudgetRunTurnsChange,
+  budgetRunTokens,
+  onBudgetRunTokensChange,
+  budgetRunDeadline,
+  onBudgetRunDeadlineChange,
   undelivered = [],
   onSteerItem,
   onCancelItem,
@@ -112,6 +123,7 @@ export const Composer = memo(function Composer({
   onFlush,
 }: Props) {
   const [value, setValue] = useState('');
+  const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
   /** 注入示例任务 / 提交后要把焦点交回的输入框（A-06）。 */
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // ADR-0030 §5.2 就地编辑态：正在编辑的排队项 id + 草稿内容。只存 id 不存整条
@@ -251,11 +263,12 @@ export const Composer = memo(function Composer({
     // 「服务端有在途 run」用——那正是 issue #196 的病灶（`streaming` 只表示
     // **本页有活流**，跨客户端时判反）。
     if (mode === 'steer' && onSteer) {
-      onSteer(trimmed);
+      onSteer(trimmed, rememberAsProceduralRule);
     } else {
-      onSubmit(trimmed);
+      onSubmit(trimmed, rememberAsProceduralRule);
     }
     setValue('');
+    setRememberAsProceduralRule(false);
   };
 
   // §5.1 发送键语义（与上游一致）：Enter = queue（默认）；Ctrl/Cmd+Enter = steer。
@@ -422,6 +435,18 @@ export const Composer = memo(function Composer({
           disabled={locked}
           aria-label="Agent 任务"
         />
+        <label className="composer-rule-signal" htmlFor="remember-as-procedural-rule">
+          <input
+            id="remember-as-procedural-rule"
+            type="checkbox"
+            checked={rememberAsProceduralRule}
+            onChange={(event) => setRememberAsProceduralRule(event.target.checked)}
+            disabled={locked}
+          />
+          <span title="仅在这条消息明确表达希望长期沿用的操作规则时勾选。">
+            将这条消息作为可复用规则
+          </span>
+        </label>
         {hasControls && (
           <div className="composer-controls">
             <ModelPicker
@@ -502,9 +527,10 @@ export const Composer = memo(function Composer({
               placeholder="推理"
               disabled={locked}
             />
-            {/* #426：新建会话的预算入口（最小可用，一维 turns）。会话内不显示——
-                budget.run 属于**启动 run** 的请求（#422），续聊不带 budget（#308）。
-                留空 = 后端默认（不发键）；到顶自动暂停，恢复面板抬高同一维继续。 */}
+            {/* #426：新建会话的预算入口（常用三项：turns / total_tokens / deadline_at）。
+                会话内不显示——budget.run 属于**启动 run** 的请求（#422），续聊不带
+                budget（#308）。留空 = 后端默认（不发键）；到顶/到点自动暂停，恢复
+                面板抬高后继续。deadline 是 datetime-local 本地读数，映射层换算 UTC。 */}
             {!permissionInSession && onBudgetRunTurnsChange !== undefined && (
               <label className="composer-budget" title="本次 run 的 Agent turn 绝对上限；留空 = 后端默认。到顶自动暂停，可在恢复面板抬高后继续。">
                 <span className="composer-budget-label">turns 上限</span>
@@ -518,6 +544,35 @@ export const Composer = memo(function Composer({
                   placeholder="默认"
                   disabled={locked}
                   aria-label="预算上限（Agent turns，留空为默认）"
+                />
+              </label>
+            )}
+            {!permissionInSession && onBudgetRunTokensChange !== undefined && (
+              <label className="composer-budget" title="本次 run 的总 token 绝对上限；留空 = 不设。到顶自动暂停，可在恢复面板抬高后继续。">
+                <span className="composer-budget-label">tokens 上限</span>
+                <input
+                  type="number"
+                  min={1}
+                  inputMode="numeric"
+                  className="composer-budget-input"
+                  value={budgetRunTokens ?? ''}
+                  onChange={(e) => onBudgetRunTokensChange(e.target.value)}
+                  placeholder="默认"
+                  disabled={locked}
+                  aria-label="预算上限（总 tokens，留空为默认）"
+                />
+              </label>
+            )}
+            {!permissionInSession && onBudgetRunDeadlineChange !== undefined && (
+              <label className="composer-budget" title="本次 run 的绝对截止时刻（按本机时区输入，提交换算为 UTC）；留空 = 不设。到点自动暂停，可在恢复面板调整后继续。">
+                <span className="composer-budget-label">截止时间</span>
+                <input
+                  type="datetime-local"
+                  className="composer-budget-input composer-budget-input--datetime"
+                  value={budgetRunDeadline ?? ''}
+                  onChange={(e) => onBudgetRunDeadlineChange(e.target.value)}
+                  disabled={locked}
+                  aria-label="预算截止时间（留空为不设）"
                 />
               </label>
             )}

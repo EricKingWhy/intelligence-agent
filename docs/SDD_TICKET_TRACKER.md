@@ -80,6 +80,17 @@
 
 ---
 
+## 修票批次：#372/#456/#426/#337/#449（2026-09-30 批准，2026-10-01 收口，已合并：PR #464 + #465 + #471 + #472 → main `c1bbcecc`）
+
+- **来源与授权**：用户 2026-09-30 批准「#372 → #337 → #426 → #449（全部无需外部资源、票面工程化程度高），#456 顺手带进同批（一句话修法）」并要求「subagent 提速但质量不降、尤其测试必须仔细认真」；追加「多派 subagent（最少两个）为质量不为速度、不许出现任何错误、多做 review、不能有任何潜在风险」⇒ 每个 PR 推进前独立审查 subagent 复核、findings 全处置后才合并。#449 在 Pi 调研小节记「先开票不修」，由本批批次批准覆盖。
+- **交付**（四 PR 依次，均先回后正后推）：①PR #464（`fix/t372-child-resume`，#372 委派子会话恢复）→ merge `ee8f14a8`；②PR #465（`fix/t456-t426-frontend`，#456 停摆重连重置 `lastFrameAtRef` + #426 预算 UI 入口）→ merge `bd8b31a9`（合并提交 `cc1bb4b5` 7 个两侧同改文件 → 两侧存活核对审计行 + 合并树重车道：vitest 1227P+1F 已知 flake 隔离 3×6/6、tsc/oxlint/build 绿）；③PR #471（`fix/t337-recovery-approval-settlement`，恢复层对陈旧审批 fail-closed 结清：唯一幂等 deny 入口、先写入者胜、绝不结清成批准、绝不重跑工具调用）→ merge `334d99d4`；④PR #472（`fix/t449-length-truncation`，length 截断轮 toolCalls 全批判错：完成闸门前判 finish_reason==length 含 invalid 桶 → emit_truncation_refusals 准入前拒绝、零执行、budget_delta 显式 0、错误即消息 04 §4，新增 `ErrorCode.ARGS_TRUNCATED`；salvage 分桶暴露面 6 用例）→ merge `c1bbcecc`。
+- **施工与审查**：主线实现 + 独立审查 subagent 双轴（Reviewer A = PR #465 前端；Reviewer B = #337 代码+测试）；findings 全部处置后推进（Reviewer B：4×I001+RUF022 经 ruff --fix、F841 手工改 `_run_task` 保留引用防 GC）。
+- **门禁**：每 PR 本地 Gate-0 裸全量落盘（#471 读数 `docs/gate/544002d0….json` 17.8s；#472 `docs/gate/7cb32c06….json` 24.5s）+ CI gate0 绿（四 PR 27-34s）；覆盖闸门台账 `t456-t426-frontend-….tsv` 5 行 / `t337-….tsv` 2 行 / `t449-….tsv` 3 行（合并机械归属 5 行：四次 --cc 空表 + cc1bb4b5 --cc 非空两侧存活核对 + 触达面绑树声明）；#449 受影响面 939 passed + 变异 M1=3 红 / M2=2 红。
+- **关票（§14.12）**：#372 / #456 / #426 / #337 / #449 全部 CLOSED 带证据评论（#449 由 PR body Closes 自动关 + 补证据评论 issuecomment-5918140999）。
+- **遗留**：①⚠ **P1 覆盖闸门缺口（待用户裁决）**：台账 `431-mem-v2-301-heavy-lanes.tsv`（#470 线入库）range 写 `60bc15d0..HEAD` 活动引用——检查器 resolve 到运行时 HEAD ⇒ 该行客观放行其从未审查的后续一切提交；机制与修复选项见 2026-10 归档；改该行需用户批准。②backend clone 本地 `main` 分叉（`649bd287`/`f46af03c` + merge `55c09bd6`，merge-base `c2ba7307`，重叠仅 `docs/phase_status/2026-09.md`）待裁决推法。③暂停后 UX 毛刺（空转重连 3 次 + 中断横幅延迟落面板，#312 既有）建议另开票。④P3 备忘（未开票）：DST 歧义、`hasControls` 子集调用方、#449 范围外 R6-2 空响应文案欠精确。⑤远端分支未删（§14.4 需批准）：`fix/t372-child-resume`、`fix/t456-t426-frontend`、`fix/t337-recovery-approval-settlement`、`fix/t449-length-truncation`。明细见 docs/phase_status/2026-10.md。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过
@@ -6639,3 +6650,5 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 
 **字节审计残余（2026-09-30，#430 收尾审计登记，另行开票，本票不修）**：受控中文大文件存在 3 个**预存**「转义物化」控制字节（与本次三次行尾事故同类病灶、19 天前引入）——`docs/phase_status/2026-09.md` blob 偏移 276971 / 276987（行 248，2×0x08：词边界记法的转义被物化，`60bdaabc` 2026-09-11 引入、`2447c0ab` 随归档拆分带入）；`docs/SDD_TICKET_TRACKER.md` blob 偏移 77881（行 574，1×0x07：Windows 路径转义被物化，`cf8f3a73` 2026-09-11 引入）。独立字节审计 subagent 全量扫描结论：#430 收尾写入的一切（归档追加节 / tracker #430 块 / 台账行 378 / PRD 两笔 / 6 个实现 blob）**字节级全净**（0 CR、0 NUL、0 控制字符、纯追加前缀成立）；3 个 FAIL 字节均预存，按 Scope Lock 登记不修，最小清理 = 换成 chr(92) 构造的字面记法。
+
+**#298（MEM-V2-2）分类锁收口（2026-09-30，分支 `codex/mem-v2-298-prompt-contract`，commit `1dca6fa3`，台账行 `docs/review_ledger.d/298-durable-formation-8db02e83-1dca6fa3.tsv`）**：Formation/Adjudication 主链路经查已在 origin/main（memory/v2 22 文件）；分支净增量 = 分类锁 kind+tier/scope fail-closed + 显式规则信号 R5 + project_available 契约（7 文件 +191/−12）。pytest 67 passed / vitest 7 passed / 两轴复核无 P0–P2（4×P4 信息级）。R7 按用户暂停、如实未解决；#298/#296 保持 OPEN。分支 12 behind origin/main，未 push/PR（§14.4 待批）。

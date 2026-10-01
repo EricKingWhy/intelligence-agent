@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-09-30T09:13:23+08:00",
+  "sha": "4c9bca5522aac79d8916f4b210bf6cb9f88bd1e9",
+  "tree": "ce3a7c3fae08b4460696e2bb16d9064464edfe93",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 4,
+  "total": 6,
+  "failed": [
+    "guards",
+    "coverage"
+  ],
+  "wall_seconds": 7.94,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "missing",
+    "ruff": "ruff 0.16.6",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.81.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.05,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 1.47,
+      "cwd": ".",
+      "argv": [
+        "~/AppData/Local/Programs/Python/Python312/Scripts/ruff.EXE",
+        "check",
+        "."
+      ],
+      "command": "~/AppData/Local/Programs/Python/Python312/Scripts/ruff.EXE check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.19,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 6.23,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 0.0,
+      "cwd": ".",
+      "argv": null,
+      "command": null,
+      "blocked": "找不到 .venv 解释器",
+      "output_tail": [
+        "工具缺失：找不到 .venv 解释器"
+      ]
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 0.0,
+      "cwd": ".",
+      "argv": null,
+      "command": null,
+      "blocked": "找不到 .venv 解释器",
+      "output_tail": [
+        "工具缺失：找不到 .venv 解释器"
+      ]
+    }
+  ]
+}

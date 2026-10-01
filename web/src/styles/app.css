@@ -3252,6 +3252,21 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   resize: none;
   min-height: 52px;
 }
+.composer-rule-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0 var(--space-lg) var(--space-sm);
+  color: var(--color-muted-foreground);
+  font: 400 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+}
+.composer-rule-signal input {
+  accent-color: var(--color-accent);
+}
+.composer-rule-signal input:disabled {
+  cursor: not-allowed;
+}
 .composer:focus {
   outline: none;
 }
@@ -6137,6 +6152,11 @@ button.json-row {
 }
 .composer-budget-input:disabled {
   opacity: 0.55;
+}
+/* #426：datetime-local 读数（YYYY-MM-DDTHH:mm）比 64px 数值框长得多，同族加宽
+   一档。只动宽度、复用既有 token——不新增主题变量（§15 的双主题块不涉及）。 */
+.composer-budget-input--datetime {
+  width: 175px;
 }
 /* ── Picker 浮层（Radix portal，客户端渲染）──
  *   #201 正名：这层壳原本叫 `model-picker-*`，却同时被权限/档位/深度三个控件共用

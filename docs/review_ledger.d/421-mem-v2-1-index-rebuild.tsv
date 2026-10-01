@@ -1,0 +1,1 @@
+2026-09-30	#297 V2-only SQLite→Milvus rebuild: independent Correctness/Security and Standards reviews PASS after P3 message fix; P0/P1/P2/P3=0. Scope origin/main..c64944ce, follow-up dce46b6e re-reviewed. Focused pytest: 36 passed; Ruff PASS. Pre-ledger Gate-0 dce46b6e was 5/6 with only coverage pending this row. No live Milvus run claimed.	8db02e83..dce46b6e

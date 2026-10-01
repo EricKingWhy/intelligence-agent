@@ -170,7 +170,7 @@ export interface BudgetPayload {
   local?: { max_agent_turns?: number };
   /** run 作用域预算（`#312`/`#313` 落地后开放；T4 交付前注释声明"类型里也不预留"
    *  的前提已不再成立，遂随 #426 补上——只声明 UI 真正会发送的维，其余维
-   *  （model_requests / cost_usd / per-tool / deadline）等到有入口再加，别预留。
+   *  （model_requests / cost_usd / per-tool）等到有入口再加，别预留。
    *
    *  #422：`budget.run` 与 launch=false **互斥**（422）——只在启动 run 的请求上
    *  发送。 */
@@ -178,11 +178,19 @@ export interface BudgetPayload {
     /** 本 run 的 Agent turn 绝对上限（正整数；`11 §6.1`）。到顶 → run/paused
      *  （非终态），PausedPanel 抬高同一维的绝对 ceiling 后同 run 恢复。 */
     max_agent_turns_total?: number;
+    /** 本 run 的总 token 绝对上限（正整数；#426 起 UI 有入口，与 turns 同一
+     *  「到顶 → 暂停 → 恢复抬高」闭环）。 */
+    max_total_tokens?: number;
+    /** 本 run 的绝对截止时刻（#315 契约）：RFC 3339 UTC 文本。datetime-local 的
+     *  本地读数由映射层 `toCreateBudget` 换算成 UTC 瞬时（朴素时间后端 422）。 */
+    deadline_at?: string;
   };
 }
 
 export interface StartSessionPayload {
   task: string;
+  /** User explicitly declares this input as a reusable procedural rule (#298 R5). */
+  remember_as_procedural_rule?: boolean;
   workspace?: string;
   /** 目录根会话（WS-6 / #169，ADR-0027 D2）：会话直接在**这个已存在的绝对路径**
    *  下运行，它同时成为会话的 workspace root（工具的相对路径都相对它解析），
@@ -414,6 +422,8 @@ function buildBody<T extends object>(payload: T, table: BodyFields<T>): Record<s
 /** create 路径字段表（与下方 sendMessage 的 amend 四项同词汇、各自登记）。 */
 const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   task: (p) => ['task', p.task],
+  remember_as_procedural_rule: (p) =>
+    p.remember_as_procedural_rule ? ['remember_as_procedural_rule', true] : null,
   workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
   cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
   budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
@@ -473,6 +483,8 @@ export interface ProtectedFactAnnotationPayload {
 export interface SendMessagePayload {
   content: string;
   mode?: 'queue' | 'steer';
+  /** User explicitly declares this input as a reusable procedural rule (#298 R5). */
+  remember_as_procedural_rule?: boolean;
   budget?: BudgetPayload;
   /** Explicit, source-bound protected facts; backend validates values against content. */
   protected_facts?: ProtectedFactAnnotationPayload[];
@@ -510,6 +522,8 @@ export interface SendMessagePayload {
 const SEND_MESSAGE_FIELDS: BodyFields<SendMessagePayload> = {
   content: (p) => ['content', p.content],
   mode: (p) => ['mode', p.mode ?? 'queue'],
+  remember_as_procedural_rule: (p) =>
+    p.remember_as_procedural_rule ? ['remember_as_procedural_rule', true] : null,
   protected_facts: (p) =>
     p.protected_facts && p.protected_facts.length > 0
       ? ['protected_facts', p.protected_facts]
