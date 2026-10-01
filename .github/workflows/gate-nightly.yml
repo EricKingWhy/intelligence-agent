@@ -59,7 +59,7 @@ jobs:
             --cov-report=term \
             --cov-report=xml:artifacts/coverage.xml
       - name: 上传测试报告（失败也传）
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: nightly-backend-reports
@@ -97,7 +97,7 @@ jobs:
         working-directory: web
         run: pnpm build
       - name: 上传测试报告（失败也传）
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: nightly-frontend-reports
@@ -138,7 +138,7 @@ jobs:
         working-directory: web
         run: node node_modules/@playwright/test/cli.js test --workers=2
       - name: 上传 e2e 产物（trace/截图，失败也传）
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: nightly-e2e-artifacts
