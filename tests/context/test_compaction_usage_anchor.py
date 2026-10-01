@@ -36,14 +36,17 @@ AI「历史分析」×100≈540、×200≈1040；AI "ok"≈41；Human "next"≈2
 from __future__ import annotations
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agent_harness.context.builder import ContextBuilder
+from agent_harness.context.tokens import estimate_tokens
 from agent_harness.session import (
     COMPACTION_END,
     MODEL_COMPLETED,
     USER_MESSAGE,
 )
+from agent_harness.session.derive import derive_messages_with_source_ranges
+from agent_harness.storage.artifact import FakeArtifactStore
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -204,4 +207,110 @@ async def test_anchor_survives_compaction_bracket(tmp_path):
     assert len(model.snapshots) >= 2, (
         "bracket 后新 usage(3500) 已越阈值，必须再次发起压缩尝试；"
         "未尝试说明锚在压缩后失效（事件/消息计数配对被 bracket 打破）"
+    )
+
+
+# ── 防御分支与路径覆盖（Spec 轴审查补） ─────────────────────────────
+
+
+def _anchor_formula(prompt_tokens: int, messages: list, anchor_index: int) -> int:
+    """与 builder._usage_anchored_tokens 同口径的期望值：锚 + 响应消息 + 尾部估算。"""
+    return prompt_tokens + sum(
+        estimate_tokens(m.model_dump_json()) for m in messages[anchor_index:]
+    )
+
+
+def test_anchor_skips_invalid_usage_entries(tmp_path):
+    """bool/负数 prompt_tokens 不是合法 usage——锚必须落最近一条**合法**读数。
+
+    bool 是 int 子类：True 若被收下会把锚抬成 1 且静默错位；负数同理无效。
+    事件序：completed#1(3000, 合法) → #2(True) → #3(-5) ⇒ 锚 = #1。
+    """
+    session = make_session(tmp_path)
+    session.append(MODEL_COMPLETED, {"content": "历史分析" * 100, "usage": _usage(3000)})
+    session.append(
+        MODEL_COMPLETED,
+        {"content": "历史分析" * 100, "usage": {"prompt_tokens": True}},
+    )
+    session.append(
+        MODEL_COMPLETED,
+        {"content": "历史分析" * 100, "usage": {"prompt_tokens": -5}},
+    )
+
+    pairs = derive_messages_with_source_ranges(session.events)
+    messages = [m for m, _ in pairs]
+    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10000)
+    anchored = builder._usage_anchored_tokens(session, messages, [r for _, r in pairs])
+
+    assert anchored == _anchor_formula(3000, messages, 0), (
+        "锚必须落在唯一合法读数 #1(3000)；收下 bool/负数会得到别的值"
+    )
+
+
+def test_anchor_returns_zero_on_length_mismatch(tmp_path):
+    """ranges 与 messages 长度失配 ⇒ 0（防御分支：宁可不用锚）。"""
+    session = make_session(tmp_path)
+    session.append(MODEL_COMPLETED, {"content": "历史分析" * 100, "usage": _usage(3000)})
+
+    pairs = derive_messages_with_source_ranges(session.events)
+    messages = [m for m, _ in pairs]
+    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10000)
+    truncated_ranges = [r for _, r in pairs][:-1]
+
+    assert len(truncated_ranges) != len(messages)
+    assert builder._usage_anchored_tokens(session, messages, truncated_ranges) == 0
+
+
+def test_anchor_maps_only_seq_aligned_ai_messages(tmp_path):
+    """None 区间与非 AIMessage 占位必须被反查跳过。
+
+    摘要 HumanMessage 的区间是 (start,end)——含 start==end 的单事件角落，此
+    时候 AIMessage 守卫才是 MODEL_COMPLETED 专属判据（否则摘要消息会顶替真锚）。
+    """
+    session = make_session(tmp_path)
+    session.append(MODEL_COMPLETED, {"content": "历史分析" * 100, "usage": _usage(1234)})
+    seq = next(
+        e.seq for e in session.events if e.type == MODEL_COMPLETED
+    )
+
+    messages = [
+        HumanMessage(content="user"),
+        AIMessage(content="hi"),
+        HumanMessage(content="next"),
+    ]
+    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10000)
+
+    # (seq,seq) 落在 AIMessage 上：正常映射，None 区间被跳过
+    anchored = builder._usage_anchored_tokens(session, messages, [None, (seq, seq), None])
+    assert anchored == _anchor_formula(1234, messages, 1)
+
+    # (seq,seq) 落在 HumanMessage 占位上：不映射 ⇒ 无锚回落 0
+    assert builder._usage_anchored_tokens(session, messages, [(seq, seq), None, None]) == 0
+
+
+@pytest.mark.asyncio
+async def test_anchor_wired_through_pruner_path(tmp_path):
+    """pruner 激活时锚同样生效（anchor_ranges = source_ranges 的分支接线）。
+
+    会话无 tool result ⇒ pruner 纯透传；要钉的是这条路径下 ranges 仍被
+    传给锚——接线遗漏（比如只把 ranges 接到无 pruner 分支）会让锚静默失效。
+    """
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+    session.append(MODEL_COMPLETED, {"content": "历史分析" * 100, "usage": _usage(4000)})
+    session.append(USER_MESSAGE, {"content": "next"})
+
+    model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+    builder = ContextBuilder(
+        model,
+        max_context_tokens=10000,
+        auto_compact_threshold=0.3,
+        artifact_store=FakeArtifactStore(),
+        artifact_read_tool_name="read_artifact",
+    )
+    assert builder._pruner is not None, "前置：pruner 必须真的被装配"
+    await builder.build(session)
+
+    assert _has_bracket(session), (
+        "pruner 路径下锚(4000)必须照常触发压缩；未触发 = ranges 没接进锚"
     )

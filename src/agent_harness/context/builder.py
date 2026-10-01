@@ -392,8 +392,11 @@ class ContextBuilder:
         # prompt_tokens 为锚、其响应消息与其后新增消息按投影估算补上（尾部仍是
         # 估算：provider 偶发缺 usage 时未锚窗口变宽——低估通道被收窄但未消除）；
         # `max()` **只抬高不降低**（锚把 system/tools 真实开销一并算入且不扣除——
-        # 高估方向，与 Pi 的 totalTokens 同一口径）。无锚（无 usage / 事件全被
-        # shadow）⇒ 0，纯估算路径零回归。
+        # 高估方向，与 Pi 的 totalTokens 同一口径）。口径边界：prompt_tokens 为
+        # OpenAI 兼容口径、**含 cache read**（本项目全部 provider 面成立）；若未来
+        # 接 Anthropic 系（input_tokens 不含 cache_read），锚口径须随
+        # `_usage_from_response` 一并重审（dashboard 口径文档同）。无锚（无
+        # usage / 事件全被 shadow）⇒ 0，纯估算路径零回归。
         usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
         token_estimate = max(token_estimate, usage_anchor)
         token_estimate += protected_facts_tokens
