@@ -35,14 +35,18 @@ jobs:
           fetch-depth: 0
       - name: gitleaks
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          # v3 起 PR 事件扫描必须显式带 token（实测缺失即 fail；个人账户无需 license）。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # --redact：泄漏值打码（本仓第 0 条红线：任何输出不带真实 key）。
           args: --redact
 
   scorecard:
     name: OpenSSF Scorecard
-    # Scorecard 评的是仓库整体状态，不是某个 PR ⇒ 只跑 push main + 定时/手动。
-    if: github.event_name != 'pull_request'
+    # Scorecard 评的是仓库整体状态，且上游只支持默认分支（实测非 main push 即
+    # "Only the default branch main is supported"）⇒ 只跑 push main + 定时/手动。
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
