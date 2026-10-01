@@ -29,6 +29,11 @@ from agent_harness.sandbox import ExecResult, LocalSubprocessSandbox
 from agent_harness.tools import BashTool
 from agent_harness.tools.bash import _BashArgs
 
+# 「等待子线程/流启动」类断言的统一上界（#508）：事件已置时 wait 立即返回、
+# 正常路径零耗时；未置时容忍远超最坏线程调度延迟才判失败。口径依据见
+# test_docker_timeout_kills_exec_and_keeps_partial_output 的注释。
+_SCHED_GRACE_SECONDS = 10
+
 
 def test_local_exec_caps_captured_output(tmp_path):
     """输出超过捕获上限：子进程正常结束，超限部分丢弃且带截断标记。"""
@@ -92,7 +97,7 @@ def _python_command(script, *args):
     return " ".join(shlex.quote(part) for part in parts)
 
 
-def _wait_for_path(path, timeout=2.0):
+def _wait_for_path(path, timeout=10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
@@ -158,12 +163,12 @@ def test_windows_native_fallback_kills_real_descendants(monkeypatch, tmp_path):
         lambda *args, **kwargs: Mock(returncode=1),
     )
     result = sandbox.exec(
-        _python_command(script, "parent", marker, 3.0),
+        _python_command(script, "parent", marker, 10.0),
         timeout=1.5,
     )
     _wait_for_path(started)
     assert result.exit_code == -1
-    deadline = time.monotonic() + 4.0
+    deadline = time.monotonic() + 15.0
     while marker.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not marker.exists()
@@ -200,7 +205,7 @@ def test_local_timeout_kills_child_tree_without_late_marker(tmp_path):
     )
     # The writer process is the parent of the delayed marker child; its shell is
     # the process owned by LocalSubprocessSandbox.
-    command = _python_command(script, "parent", marker, 3.0)
+    command = _python_command(script, "parent", marker, 10.0)
     sandbox = LocalSubprocessSandbox(tmp_path)
     result = sandbox.exec(command, timeout=1.5)
 
@@ -209,7 +214,9 @@ def test_local_timeout_kills_child_tree_without_late_marker(tmp_path):
     assert "超时" in result.stderr
     assert "stdout-before" in result.stdout
     assert "stderr-before" in result.stderr
-    deadline = time.monotonic() + 4.0
+    # 观察窗必须 > 子进程 delay（10s）：杀树失败时 marker 仍会在 delay 秒后出现，
+    # 窗口短于 delay 会把"没杀掉"漏成绿；绿路径（杀干净）立即退出，零墙钟代价。
+    deadline = time.monotonic() + 15.0
     while marker.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not marker.exists(), "timeout 后 child/grandchild 仍写入 marker"
@@ -231,7 +238,7 @@ def test_local_cancel_kills_child_tree_without_late_marker(tmp_path):
     thread = threading.Thread(
         target=lambda: result_holder.append(
             sandbox.exec(
-                _python_command(script, "parent", marker, 1.5),
+                _python_command(script, "parent", marker, 10.0),
                 timeout=5,
                 cancel_event=cancel_event,
             )
@@ -248,7 +255,7 @@ def test_local_cancel_kills_child_tree_without_late_marker(tmp_path):
     assert result_holder[0].cancelled is True
     assert "stdout-before" in result_holder[0].stdout
     assert "stderr-before" in result_holder[0].stderr
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 15.0
     while marker.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not marker.exists(), "cancel 后 child/grandchild 仍写入 marker"
@@ -386,7 +393,7 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
     execution = await executor.execute({
         "id": "executor-timeout",
         "name": "bash",
-        "args": {"command": _python_command(script, "parent", marker, 4.0)},
+        "args": {"command": _python_command(script, "parent", marker, 10.0)},
     })
 
     _wait_for_path(started)
@@ -396,7 +403,9 @@ async def test_executor_bash_local_timeout_stops_process_tree(tmp_path):
     assert execution.result.error_code == "TIMEOUT"
     assert execution.result.retryable is False
     assert execution.result.metadata["attempt"] == 1
-    deadline = time.monotonic() + 5.0
+    # 观察窗必须 > 子进程 delay（10s）：杀树失败时 marker 仍会出现，窗口短于
+    # delay 会把"没杀掉"漏成绿；绿路径（杀干净）立即退出，零墙钟代价。
+    deadline = time.monotonic() + 15.0
     while marker.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     assert not marker.exists()
@@ -725,7 +734,7 @@ def test_docker_exec_create_late_result_is_reaped_after_cancel():
         )
     )
     thread.start()
-    assert api.entered.wait(1)
+    assert api.entered.wait(_SCHED_GRACE_SECONDS)
     cancel_event.set()
     try:
         thread.join(0.2)
@@ -737,9 +746,10 @@ def test_docker_exec_create_late_result_is_reaped_after_cancel():
         api.release.set()
         thread.join(2)
 
-    for _ in range(50):
-        if container.kill.called:
-            break
+    # 收割在后台线程做：kill 与 wait 是相邻的两次 mock 调用，饱和负载下二者之间
+    # 也可能被调度打断——轮询条件必须覆盖到 wait，断言才不吃调度延迟（#508）。
+    deadline = time.monotonic() + _SCHED_GRACE_SECONDS
+    while not (container.kill.called and container.wait.called) and time.monotonic() < deadline:
         time.sleep(0.02)
     container.kill.assert_called_once_with()
     container.wait.assert_called_once_with()
@@ -804,7 +814,7 @@ def test_abandoned_sandbox_reaps_late_exec_without_a_second_exec():
         )
     )
     thread.start()
-    assert api.entered.wait(2)
+    assert api.entered.wait(_SCHED_GRACE_SECONDS)
     cancel_event.set()
     thread.join(2)
     assert not thread.is_alive(), "取消不得等待 Docker API 调用返回"
@@ -819,15 +829,13 @@ def test_abandoned_sandbox_reaps_late_exec_without_a_second_exec():
         # 关键：从这里到用例结束**不发起第二次 exec()**。
         # 修复前：清理只排进 `cleanup_pending`，而唯一的出队点是下一次 exec()
         # 的开头 ⇒ 下面这个循环会空转到超时，kill 永不被调用。
-        for _ in range(150):
-            if container.kill.called:
-                break
+        # 轮询条件覆盖到 wait 与 pending 消费（同 #508：相邻断言不吃调度延迟）。
+        deadline = time.monotonic() + _SCHED_GRACE_SECONDS
+        while not (container.kill.called and container.wait.called) and time.monotonic() < deadline:
             time.sleep(0.02)
         container.kill.assert_called_once_with()
         container.wait.assert_called_once_with()
-        for _ in range(100):
-            if not state.cleanup_pending:
-                break
+        while state.cleanup_pending and time.monotonic() < deadline:
             time.sleep(0.02)
         assert state.cleanup_pending is False, "排队的清理没有被消费（永久 pending）"
         assert state.late_cleanup is None
@@ -987,7 +995,7 @@ def test_docker_timeout_does_not_kill_a_concurrent_exec():
     second_thread = threading.Thread(target=run_second)
     second_thread.start()
     try:
-        assert second_attempted.wait(1)
+        assert second_attempted.wait(_SCHED_GRACE_SECONDS)
         deadline = time.monotonic() + 0.2
         while len(api.started_ids) < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -1065,9 +1073,17 @@ def test_docker_incomplete_pid_marker_keeps_stderr():
 def test_docker_timeout_kills_exec_and_keeps_partial_output():
     """Timeout terminates the container exec and retains output emitted before it."""
     sandbox, api = _docker_sandbox_with_streaming_exec()
-    result = sandbox.exec("sleep forever", timeout=0.1)
+    # 预算窗必须宽于最坏线程调度延迟（#508）：0.1s 下 CPU 满载时 worker 线程可能
+    # 晚于 deadline 才首次推进 exec_start，kill 落在"启动前"⇒ partial output 与
+    # started 断言全部落空（全量下偶发假红的签名）。kill 仍由 timeout 驱动，
+    # cancelled=False 语义不变。取 5s ≫ 观测到的最坏调度延迟（CPython test.support
+    # 的同款口径：窗被慢机器打穿就放大到 LONG_TIMEOUT 量级）。
+    result = sandbox.exec("sleep forever", timeout=5.0)
 
-    assert api.started.is_set()
+    # started 由 worker 线程首次推进 exec_start 生成器时置位；标志已置时 wait
+    # 立即返回 True（正常路径零耗时），未置时最多等 10s 再判失败——调度延迟
+    # 不再是断言对象，kill/reap 语义断言逐字保留。
+    assert api.started.wait(_SCHED_GRACE_SECONDS)
     assert api.command[:4] == ["setsid", "-w", "/bin/sh", "-lc"]
     assert api.create_kwargs["workdir"] == "/workspace"
     assert api.kill_commands
@@ -1128,7 +1144,7 @@ def test_docker_cancel_kills_exec_and_marks_cancelled():
         )
     )
     thread.start()
-    assert api.started.wait(2)
+    assert api.started.wait(_SCHED_GRACE_SECONDS)
     cancel_event.set()
     thread.join(5)
 
