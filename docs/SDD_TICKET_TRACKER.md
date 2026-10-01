@@ -161,7 +161,18 @@
 - **审查**：双轴独立 subagent APPROVE（Standards 0 硬违规；Spec 逐项实测 + 本机复跑 17/17+tsc+全量读数自洽）；台账行 661 字符（`t381-t435-t512-plan-batch-c4cc6f77-7dc3f325.tsv`）。
 - **同步与合并**：先回后正 ×3（`f7786632`←`2a3c00c5` 另一收口线零冲突；`1aabbc5b`←`022b809e` Standards 补审线零冲突；`f6483ca2`←`53ff3216` **EOF 修复撞车线**——PR #535 CI 红的 diff-check 根因 = `9b13f9ff` 入库的两个写盘脚本文件尾空行，另一条线 `b84e9a64` 已修同样两文件，本线工作树重复修复撤销改由父二提供；工作树同名未跟踪副本与提交版逐字节相同移走后合并）→ push（origin/main 两次前进 strict 挡合并，均先回后正再推）→ **PR #535 CI 红一轮（EOF 空行）→ 修复合入后 gate0 32s 绿 → merge `2ee6a1a0`**。
 - **关票**：#512 CLOSED（PR Closes + 证据评论 issuecomment-5942041983）；#381 部分交付不关单（录屏证据项待补，issuecomment-5942042625）；#435 设计票 OPEN（待用户确认）。
-- **遗留**：①#381 真实会话录屏证据项；②#435 拆票待确认；③远端分支未删（§14.4）；④另一收口线已并入，其后如有新 tip 需再对账。明细见 `docs/phase_status/2026-10.md`。
+- **遗留**：①#381 真实会话录屏证据项；②#435 拆票待确认；③远端分支未删（§14.4）；④另一收口线已并入，其后如有新 tip 需再对账。明细见 `docs/phase_status/2026-10.md`。**（①②③ 已在同日后续批收口，见下一节）**
+
+---
+
+## 拆票 + #381 真机证据批（2026-10-02 用户三批准：#435 拆票 / #381 录屏证据 / 删远端分支）
+
+- **#435 拆票收口**：设计稿五项决策用户确认 → 拆 **#536（A：预算输入形态——popover 单入口 + tokens 档位 + deadline 时长/预览，P1/ready-for-agent）** 与 **#537（B：用量呈现——TopBar「已用/上限」+ 80% 预警，P2，A 先 B 后）**；#435 关单（设计票完成定义达成；#426 关票条件不变，保持 open）。
+- **#381 真机证据 → 关单**：自起证据栈（后端 uvicorn 8010 + vite dev 5173 临时 config 代理，8000 Docker 占用未碰；仓库零改动）；真模型 mimo-v2.6-Flash，会话 762f03cc（96 事件，3 次真实 update_plan）——四件套全对 + **跨更新 DOM 节点身份 ul/p1/p2/p3 全 true（零重挂载 = 无闪烁实证，与单测 reconcile pin 互证）** + 会话重放路径复验；证据评论关单，in-progress 摘除。
+- **走查抓出真 bug 并当场修复（`87a5734a`）**：折叠态完成行仍可见——hidden 的 UA 规则被 `.plan-list-item{display:flex}` 盖过（workspace-panel/detail-peek 注释守卫后**第三次**同坑；jsdom 不应用 CSS 故单测盲）。修复三层：PlanRow 内联 display:none 执行层 + `.plan-list-item[hidden]` 惯例层 + 测试断言升级 style 级；tsc 0 红、vitest 17/17。截图 `.scratch/acceptance/13–16`（4494f689，13/14=修复前 15/16=修复后）。
+- **台账**：`t381-collapse-fix-2ee6a1a0-87a5734a.tsv`（594 字符）+ 机械归属行 `t381-evidence-shots-87a5734a-4494f689.tsv`；coverage 闸门 exit 0。
+- **集成**：本地 main `56e5e7af`（13c6eeb7 记账 → 87a5734a fix → 4494f689 证据 → 56e5e7af 归属行），**待下批 PR 进 origin**（push/PR/合并 §14.4 另批）。
+- **开放票**：#536/#537 ready-for-agent 未认领；远端分支 `feat/t381-t435-t512-plan-batch` 已删（用户批准）。
 
 ---
 
