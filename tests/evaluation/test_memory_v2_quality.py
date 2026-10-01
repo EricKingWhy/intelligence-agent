@@ -31,6 +31,7 @@ from agent_harness.memory.v2.types import (
 )
 from agent_harness.session import (
     MODEL_COMPLETED,
+    TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
     SessionEvent,
@@ -65,9 +66,13 @@ _GOLD_MODEL_OUTPUTS = {
     "unsupported_assistant_claim": (
         "semantic", "user_global", "NOOP", "profile", "assistant",
     ),
-    "secret_probe": ("semantic", "user_global", "NOOP", "project_fact", "user", "secret"),
+    # 作用域必须是 project：#298（a9d08891）起契约禁止 user_global 承载 project_fact
+    # （types.assert_content_contract），user_global 候选会在 formation 解析层直接
+    # contract_violation 降级，根本到不了政策层。这两个用例要测的是"政策拒掉
+    # secret/sensitive 自陈"（R7），所以给一个 schema 合法、会被政策拒绝的候选。
+    "secret_probe": ("semantic", "project", "NOOP", "project_fact", "user", "secret"),
     "sensitive_without_consent": (
-        "semantic", "user_global", "NOOP", "project_fact", "user", "sensitive",
+        "semantic", "project", "NOOP", "project_fact", "user", "sensitive",
     ),
     "explicit_opt_out": None,
     "wrong_project_isolation": None,
@@ -213,9 +218,22 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
         ),
     ]
     if provider_output is not None and provider_output[0] == "procedural":
+        # R5 门槛（policy._qualifying_event_ids + projection._project_tool_calls）：
+        # 工具结果的**别名**只在存在配对 `tool/call` 时才会发出——只给 `tool/result`
+        # 的话 refs 里没有 e3/e4，候选证据指不到合格事件，门槛恒不满足。这里补上
+        # 调用事件，投影才会按结果事件发别名（e3=gold-tool-2, e4=gold-tool-3）。
         events.extend([
             SessionEvent(
-                event_id=f"gold-tool-{index}", seq=index + 1, type=TOOL_RESULT,
+                event_id=f"gold-call-{index}", seq=index + 1, type=TOOL_CALL,
+                session_id="gold-session", run_id="gold-run",
+                data={"tool_call_id": f"gold-call-{index}",
+                      "tool_name": "synthetic_tool", "args": {"step": index}},
+            )
+            for index in (2, 3)
+        ])
+        events.extend([
+            SessionEvent(
+                event_id=f"gold-tool-{index}", seq=index + 3, type=TOOL_RESULT,
                 session_id="gold-session", run_id="gold-run",
                 data={"tool_call_id": f"gold-call-{index}",
                       "content": ToolResult.success("done").model_dump_json()},
@@ -281,7 +299,10 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             sensitivity = extras[1] if evidence_role == "user" and len(extras) > 1 else (
                 extras[0] if extras and extras[0] not in {"user", "assistant"} else None
             )
-            project_id = trusted.project_id if scope == "project" else None
+            # #298 契约（ADR-0044 / a9d08891）：formation 输出的候选**不得携带** `project_id`
+            # （`_ContractModel` 是 `extra="forbid"`，模型一写就会 parse 失败 → 整批降级零写入）。
+            # 项目作用域由 executor 在写盘时从 `job.trusted.project_id` 绑定（executor.py），
+            # 项目案例仍由 `scope` 驱动。
             evidence_alias = "e2" if evidence_role == "assistant" else "e1"
             evidence = [{"event_id": evidence_alias, "role": evidence_role,
                          "excerpt": candidate_content}]
@@ -291,11 +312,20 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
                     {"event_id": "e4", "role": "tool", "excerpt": "second successful action"},
                 ])
             candidate_evidence = evidence
+            # #298（a9d08891）起 UPDATE 目标必须出现在 `_relevant` 命中的
+            # relevant_memories 里；进程内索引替身是子串匹配（`query in content`），
+            # 故 contradiction 用例的 formation 候选内容取**既有记忆的内容**让它可被
+            # 命中，修正后的新事实由裁决结果携带（与 test_v2_executor 的
+            # test_an_update_supersedes_the_target 同款做法）。
+            retrieval_content = (
+                previous.content
+                if action == "UPDATE" and previous is not None else candidate_content
+            )
             candidate = _candidate(
-                kind=kind, scope=scope, project_id=project_id,
-                content=candidate_content,
+                kind=kind, scope=scope,
+                content=retrieval_content,
                 payload=_gold_payload(
-                    kind, candidate_content, category=SemanticCategory(category),
+                    kind, retrieval_content, category=SemanticCategory(category),
                 ),
                 evidence=evidence,
             )
@@ -306,7 +336,12 @@ async def _execute_gold_case_with_memory_v2(case: GoldCase, database_path):
             formation = _formation_candidates(candidate)
             if action == "UPDATE":
                 assert previous is not None
-                adjudications = [_adjudication(_update(previous.id, **candidate))]
+                adjudications = [_adjudication(_update(
+                    previous.id,
+                    **{**candidate, "content": candidate_content,
+                       "payload": _gold_payload(
+                           kind, candidate_content, category=SemanticCategory(category))},
+                ))]
             elif action == "ADD":
                 adjudications = [_adjudication(_add(**candidate))]
             else:

@@ -1,0 +1,139 @@
+# .github/workflows/gate-nightly.yml —— 夜间大范围验证（三段式 CI 的第三段）
+#
+# 定位：gate0（presubmit）→ gate1（postsubmit）之后，更长周期的完整验证。
+# 每晚 21:00（UTC+8，cron 用 UTC 写 13:00）跑一遍"完整门禁 + playwright e2e"：
+#   ① backend 全量 pytest（与 gate1 相同命令，刻意重复 —— 每晚跑同一套才能比出
+#      漂移/flake：外部 snapshot、时序、网络变化；参考 Google 后置 CI 的机制）；
+#   ② frontend vitest + vite build；
+#   ③ playwright e2e（Chromium，1280/1920 两档；webServer 自动起 vite :5173，
+#      API 由 page.route 拦截 mock，**不需要真后端** —— 见 web/playwright.config.ts；
+#      e2e 慢且偶发，放夜间不占 PR 时间）。
+#
+# 手动触发：集成前想临时跑一次完整 e2e 时用 workflow_dispatch。
+# 产物：junit/coverage/e2e trace 上传 artifact，30 天自动删除。
+
+name: gate-nightly
+
+on:
+  schedule:
+    - cron: '0 13 * * *'   # 每天 21:00 (UTC+8)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  # 手动触发与定时跑重叠时取消旧的（结果不会被消费，避免浪费 runner）。
+  group: gate-nightly
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: pytest-full + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: 装 Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - name: 装 uv 0.10.9（缓存 ~/.cache/uv）
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.9'
+          cache-dependency-glob: uv.lock
+      - name: 装后端依赖
+        run: uv sync --locked --all-extras
+      - name: 全量后端测试 + 覆盖率
+        run: |
+          mkdir -p artifacts
+          uv run pytest tests \
+            --junitxml=artifacts/pytest.xml \
+            --cov=src/agent_harness \
+            --cov-report=term \
+            --cov-report=xml:artifacts/coverage.xml
+      - name: 上传测试报告（失败也传）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: nightly-backend-reports
+          path: artifacts/
+          retention-days: 30
+
+  frontend:
+    name: vitest + vite build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: 装 pnpm 10.32.1
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.32.1
+      - name: 装 Node 22（pnpm store 缓存）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: 装前端依赖
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: 前端单测（vitest，junit 报告）
+        working-directory: web
+        run: |
+          mkdir -p ../artifacts
+          pnpm exec vitest run --reporter=junit --outputFile=../artifacts/vitest.junit.xml
+      - name: 前端构建
+        working-directory: web
+        run: pnpm build
+      - name: 上传测试报告（失败也传）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: nightly-frontend-reports
+          path: artifacts/
+          retention-days: 30
+
+  e2e:
+    name: playwright e2e（Chromium）
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: 装 pnpm 10.32.1
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.32.1
+      - name: 装 Node 22（pnpm store 缓存）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: 装前端依赖
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: 缓存 playwright 浏览器
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
+      - name: 装 Chromium（--with-deps 由 runner root 装系统库）
+        working-directory: web
+        run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: 运行 e2e（2 worker；webServer 自动起 vite :5173）
+        working-directory: web
+        run: node node_modules/@playwright/test/cli.js test --workers=2
+      - name: 上传 e2e 产物（trace/截图，失败也传）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: nightly-e2e-artifacts
+          path: web/test-results/
+          retention-days: 30
