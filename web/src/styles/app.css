@@ -6015,6 +6015,90 @@ button.json-row {
   color: var(--danger);
 }
 
+/* 进度清单（#381 W-27，PRD 长任务 §7.5 四件套）：钉在会话滚动区上方的常驻面板。
+   数据源仅 task/plan_updated 投影（不变量 #22）；完成组折叠用 hidden 属性——
+   保留 DOM 节点，折叠/展开不改结构（票面「已完成项不重新挂载」）。
+   复用既有语义 token（§15）：不新增 :root 变量，亮色覆盖自动生效。 */
+.plan-list {
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.plan-list-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-xs);
+}
+
+.plan-list-counter {
+  color: var(--text-secondary);
+}
+
+.plan-list-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  margin-left: auto;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.plan-list-toggle:hover {
+  background: var(--color-hover);
+  color: var(--text-primary);
+}
+
+.plan-list-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.plan-list-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding: 3px 0;
+}
+
+/* 当前项：activeForm 进行时文案 + → 前缀（zcode 实测同构）；accent 是既有的
+   交互/进行色，与完成（tertiary 划线）、未完成（tertiary 圆圈）拉开层级。 */
+.plan-list-item-current {
+  color: var(--accent);
+}
+
+.plan-list-marker {
+  flex: none;
+  width: 15px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.plan-list-item-done .plan-list-marker {
+  display: inline-flex;
+  color: var(--success);
+}
+
+.plan-list-item-done .plan-list-text {
+  text-decoration: line-through;
+  color: var(--text-tertiary);
+}
+
+.plan-list-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .reconnect-dot {
   width: 8px;
   height: 8px;

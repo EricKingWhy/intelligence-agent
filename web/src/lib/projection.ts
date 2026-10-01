@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
+import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { isCancelledRunFailure } from './runCancel';
 import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
@@ -171,6 +171,7 @@ export function initConversation(session_id: string): ConversationState {
     model: null,
     usage_total: null,
     cost_usd: null,
+    plan: null,
     trace_id: null,
     trace_url: null,
     run_id: null,
@@ -1059,6 +1060,39 @@ function projectModelFallback(state: ConversationState, event: AgentEvent): void
 
 /** T7 #137：会话级模型切换——更新 conversation.model 为新模型。
  *  切换不打断在途 run，下一轮 run 从事件流派生当前模型生效。 */
+// ── #381（W-27）：task/plan_updated → state.plan ─────────────────────────────
+//
+// 后端 handler 已硬校验（单 in_progress / 状态机 / id 唯一 / 软上限 50，
+// session/plan.py，PRD 长任务 §7.2）⇒ 前端只防「手写 / 污染 JSONL 的旧数据」，
+// 与后端 derive_plan 同一容错哲学：一行坏数据只损失该行，不 brick 恢复链。
+//   * 行必须是非空普通对象且 id 为非空字符串（id 是覆盖对齐键与 React key，
+//     缺了没法定点）；重复 id 首个胜；
+//   * 其余字段防御性归一（content 非字符串取空串、activeForm 缺失回落 content、
+//     status / source 非 string 记 ''）——**不改写、不猜测状态机**：双 in_progress
+//     等违规原样进 state.plan，渲染端容错归 PlanList（票面）；
+//   * data.items 非数组 = 坏帧整个忽略（清单保持原值）；[] 是合法清空。
+function projectPlanUpdated(state: ConversationState, event: AgentEvent): void {
+  const rawItems = event.data.items;
+  if (!Array.isArray(rawItems)) return;
+  const items: PlanItem[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawItems) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
+    const row = raw as Record<string, unknown>;
+    if (typeof row.id !== 'string' || row.id === '' || seen.has(row.id)) continue;
+    seen.add(row.id);
+    const content = typeof row.content === 'string' ? row.content : '';
+    items.push({
+      id: row.id,
+      content,
+      activeForm: typeof row.activeForm === 'string' && row.activeForm !== '' ? row.activeForm : content,
+      status: typeof row.status === 'string' ? row.status : '',
+      source: typeof row.source === 'string' ? row.source : '',
+    });
+  }
+  state.plan = items;
+}
+
 function projectModelChanged(state: ConversationState, event: AgentEvent): void {
   const toModel = typeof event.data.to_model_id === 'string' ? event.data.to_model_id : null;
   if (toModel) {
@@ -1377,12 +1411,11 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: noopProjection,
     summarize: emptySummary,
   },
-  // W-26（#380）：`task/plan_updated` 是进度清单整表覆盖的状态事件——不投影成消息、
-  // 不带来新的投影状态。与 CONTEXT_COMPACTION_FAILED 同形登记为 no-op ⇒ 已知类型、
-  // 不进 `unknown_events`；清单渲染面归 W-27（#381 Web+桌面渲染）与 W-28（#382 TUI 渲染），
-  // 本行只负责 `Record` 的穷尽性。
+  // W-26（#380）契约 + W-27（#381）接线：`task/plan_updated` 是进度清单**整表覆盖**
+  // 状态事件（last-wins，PRD 长任务 §7.3）——投影进 `state.plan`，渲染面归 PlanList
+  // 组件（PRD §7.5 四件套）。原 no-op 登记（只保 Record 穷尽性）由本行替换。
   [EventType.TASK_PLAN_UPDATED]: {
-    apply: noopProjection,
+    apply: projectPlanUpdated,
     summarize: emptySummary,
   },
   [EventType.MEMORY_DEGRADED]: { apply: noopProjection, summarize: emptySummary },
@@ -1666,7 +1699,17 @@ export function awaitingApproval(approvals: readonly PendingApproval[]): boolean
  *  在投影层一次判定，渲染层不必自己拼事件顺序。
  *
  *  正常流程不受影响：run 会停在审批上等待决策，只有 run 已经结束还在 pending 的
- *  才是孤儿（即 `permission/resolved` 事件缺失的那种）。 */
+ *  才是孤儿（即 `permission/resolved` 事件缺失的那种）。
+ *
+ *  调用口径（#512 查证）：终态（completed/failed/interrupted）与**非终态 paused**
+ *  都走这里——后者是防御：审批在 turn 中途被等待（executor → interactive callback
+ *  → wait_for 阻塞），而暂停臂全部在回合边界（deadline/配额闸还在 approval 之前，
+ *  executor.py 明文「注定被拒的调用不先弹审批」），审批未决时任何暂停臂都到不了；
+ *  等待被取消时 fail-closed 分支会补 `permission/resolved`（session/approval.py）。
+ *  即使手写/污染 JSONL 让 paused 先于未决审批到达：paused 执行的 task 完成 ⇒
+ *  done_callback 已 GC 掉 approval_queues（service.py `_attach_approval_queue_gc`），
+ *  resume 后旧审批无队列可 resolve——标 stale 恰好是正确语义（防 APR-01 式永久锁死），
+ *  不会把「resume 后本可恢复的审批」错误锁死。 */
 function markPendingApprovalsStale(state: ConversationState): void {
   if (!state.pending_approvals.some((a) => !a.stale)) return;
   state.pending_approvals = state.pending_approvals.map((a) =>
