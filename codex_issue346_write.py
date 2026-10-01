@@ -42,4 +42,3 @@ for item in payload["changes"]:
         text=True,
     ).stdout.strip()
     print(f"{item['path']} bytes={len(actual)} sha256={hashlib.sha256(actual).hexdigest()} blob={blob}")
-
