@@ -84,8 +84,12 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   await page.getByLabel('预算截止时间（留空为不设）').fill(deadlineLocal);
   await submitTask(page, '跑一个长任务');
 
-  // ② 创建请求体：budget.run 三维逐字对齐 RunBudgetRequest（deadline = UTC 瞬时文本）
-  expect(createBody).not.toBeNull();
+  // ② 创建请求体：budget.run 三维逐字对齐 RunBudgetRequest（deadline = UTC 瞬时文本）。
+  //    #509 竞态①：submitTask 只到 fill+click 为止，click resolve ≠ CDP 拦截层已在
+  //    Node 侧跑完路由 handler——拦截分发是异步的，与测试的下一语句无顺序保证，负载下
+  //    （--workers=2）同步 expect 会取到 null 瞬时红（无重试）。改 web-first：poll 等
+  //    「请求体已被捕获」这个确定性状态，再断言形状（断言语义只增不减）。
+  await expect.poll(() => createBody).not.toBeNull();
   expect((createBody as Record<string, unknown>).budget).toEqual({
     run: {
       max_agent_turns_total: 3,
@@ -108,8 +112,12 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
 
   // ⑤ 面板收起（run/resumed 清 run_paused）之后，恢复请求体必已发出：同 run CAS
   //    + budget_increase + 抬高的绝对值（字段名由 resumeTarget 从触发维度导出）。
+  //    #509 竞态②：面板卸载由 resumePausedRun **发起时**的乐观 setMode('live') 驱动
+  //    （useSession.ts:1494），先于拦截层捕获 resumeBody，与 run/resumed 响应无因果
+  //    ⇒ toHaveCount(0) 通过后 resumeBody 仍可能是 null（因果链不闭合）。poll 把
+  //    「形状相等」本身变成重试条件：null 时不等、捕获后逐字相等才放行。
   await expect(panel).toHaveCount(0);
-  expect(resumeBody).toEqual({
+  await expect.poll(() => resumeBody).toEqual({
     run_id: RUN,
     resume_basis: 'budget_increase',
     budget: { expected_version: 1, run: { max_total_tokens: 9999 } },
@@ -143,7 +151,9 @@ test('#426 不设置预算：创建载荷不含 budget 键（默认行为不变�
   await expect(page.getByLabel('预算上限（Agent turns，留空为默认）')).toBeVisible();
   await submitTask(page, '普通任务');
 
-  expect(createBody).not.toBeNull();
+  // #509 竞态①（同上）：poll 到捕获为止——这里的守卫还不可省，null 上
+  // not.toHaveProperty 会平凡通过，先锁「请求体已捕获」再断言「无 budget 键」。
+  await expect.poll(() => createBody).not.toBeNull();
   expect(createBody).not.toHaveProperty('budget');
   await expect(page.locator('.model-output').last()).toContainText('完成。');
 });
