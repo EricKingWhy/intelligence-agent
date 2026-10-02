@@ -171,6 +171,32 @@ class ReconcileRequired(RecoveryError):
     """
 
 
+class DecisionsReconcileCallback(ReconcileCallback):
+    """把 /recover 请求携带的显式用户裁决接到 ``ReconcileCallback`` 契约上（#547）。
+
+    四裁决词表就是 ``ReconcileVerdict``——不造第二套词汇（07 §6/§7）。目标合法性与
+    覆盖性由 ``SessionService.recover`` 的**开工前预检**保证（未覆盖 → 409 附机器
+    可读清单；目标不存在/已结清 → 422），本类只做最后的 fail-closed 兜底：预检后
+    待裁决集合变化的竞态窗口里缺裁决 → ``ReconcileRequired``，绝不猜测、绝不自动
+    重跑（不变量 #14）。防重复提交由两层共同保证：预检拒绝非 pending 目标 + 提交
+    时 ``RecoveryAdjudicationToken`` 的 CAS 复核。
+    """
+
+    def __init__(self, decisions: dict[str, ReconcileVerdict]) -> None:
+        self._decisions = dict(decisions)
+
+    async def resolve(
+        self, operation: Operation, hint: ReconcileHint
+    ) -> ReconcileVerdict:
+        verdict = self._decisions.get(operation.tool_call_id)
+        if verdict is None:
+            raise ReconcileRequired(
+                f"Operation '{operation.tool_call_id}' 没有对应的用户裁决"
+                "（预检后待裁决集合发生变化）——拒绝恢复，避免伪造结果或盲目重跑"
+            )
+        return verdict
+
+
 class PendingPolicy(ABC):
     """PENDING Operation 的恢复策略 seam（ADR-0004 Round 3 §Q13）。
 

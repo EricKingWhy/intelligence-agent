@@ -861,3 +861,41 @@ async def test_refusal_with_stale_approval_still_writes_nothing(
         "拒绝零写入：陈旧审批也未被结清（结清只发生在恢复真正推进时）"
     )
     assert unresolved_approval_ids(events_before) == ["appr-1"]
+
+
+# ── #547：DecisionsReconcileCallback——HTTP 裁决进契约的最后一道 fail-closed ──
+
+
+def _operation_for(tool_call_id: str) -> Operation:
+    return Operation(
+        tool_call_id=tool_call_id,
+        session_id="s",
+        run_id="run-1",
+        agent_id=None,
+        tool_name="bash",
+        args_identity="{}",
+        state=OperationState.NEED_RECONCILE,
+        started_at="2026-10-03T00:00:00Z",
+    )
+
+
+def test_decisions_callback_returns_verdict_for_known_target() -> None:
+    from agent_harness.recovery.coordinator import DecisionsReconcileCallback
+    from agent_harness.recovery.reconcile import ReconcileVerdict
+
+    callback = DecisionsReconcileCallback({"call-1": ReconcileVerdict.ABANDON})
+    verdict = asyncio.run(callback.resolve(_operation_for("call-1"), None))
+    assert verdict is ReconcileVerdict.ABANDON
+
+
+def test_decisions_callback_missing_decision_fails_closed() -> None:
+    """预检后待裁决集合变化的竞态窗口：缺裁决 → ReconcileRequired，绝不猜测。"""
+    from agent_harness.recovery.coordinator import (
+        DecisionsReconcileCallback,
+        ReconcileRequired,
+    )
+    from agent_harness.recovery.reconcile import ReconcileVerdict
+
+    callback = DecisionsReconcileCallback({"call-1": ReconcileVerdict.ABANDON})
+    with pytest.raises(ReconcileRequired):
+        asyncio.run(callback.resolve(_operation_for("call-other"), None))

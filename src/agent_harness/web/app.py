@@ -68,6 +68,7 @@ from agent_harness.session.service import (
     PendingApprovalConflict,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
+    ReconcileDecision,
     RecoveryConflict,
     SeqConflict,
     SessionHasChildren,
@@ -493,6 +494,28 @@ class PermissionChangeRequest(BaseModel):
 
     permission_mode: str = Field(min_length=1)
     auto_approve: bool
+
+
+class RecoverDecisionRequest(BaseModel):
+    """POST /api/sessions/{id}/recover 的单条用户裁决（#547 四裁决合同）。
+
+    ``verdict`` 用字符串承载，合法值由领域层校验（``InvalidDecision`` 422）——
+    与 PermissionChangeRequest 同一条纪律：规则单一来源，传输层不复述。
+    """
+
+    tool_call_id: str = Field(min_length=1)
+    verdict: str = Field(min_length=1)
+
+
+class RecoverRequest(BaseModel):
+    """POST /api/sessions/{id}/recover 的可选请求体（#547 裁决合同）。
+
+    省略 body（或空 ``decisions``）＝纯恢复尝试：有 UNKNOWN 行时 409，
+    ``detail`` 附机器可读 ``pending_decisions`` 清单指引裁决；携带覆盖全部待
+    裁决行的 ``decisions`` 才开工（预检在领域层，被拒请求零写入）。
+    """
+
+    decisions: list[RecoverDecisionRequest] = Field(default_factory=list)
 
 
 class ApproveRequest(BaseModel):
@@ -1993,19 +2016,35 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         }
 
     @app.post("/api/sessions/{session_id}/recover")
-    async def recover_session(session_id: str) -> list[dict]:
+    async def recover_session(
+        session_id: str, req: RecoverRequest | None = None
+    ) -> list[dict]:
         """恢复崩溃 session（R8-1 接线）：RecoveryCoordinator 唯一入口（07 §9）。
 
         修复 dangling tool_call（配对合成）、按 Ledger 终态精确回填结果、
-        PENDING 默认 skip；RUNNING/UNKNOWN 需要人工裁决时返回 409（不伪造、
-        不盲跑，不变量 #14）。幂等：重复调用靠事件配对自然跳过已修复项。
+        PENDING 默认 skip。#547 裁决合同：RUNNING/UNKNOWN 需要人工裁决时，
+        无裁决 → 409（detail 附机器可读 ``pending_decisions`` 清单）；携带覆盖
+        全部待裁决行的 ``decisions`` → 用户显式裁决结清后继续（四值词表，
+        不伪造、不盲跑，不变量 #14）。幂等：重复调用靠事件配对自然跳过已修复项。
         """
         service = session_service(app.state.agent)
+        decisions = [
+            ReconcileDecision(tool_call_id=d.tool_call_id, verdict=d.verdict)
+            for d in (req.decisions if req is not None else [])
+        ]
         try:
-            events = await service.recover(session_id)
-        except (InvalidSessionId, SessionNotFound, RecoveryConflict, SeqConflict) as e:
+            events = await service.recover(session_id, decisions=decisions)
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            InvalidDecision,
+            RecoveryConflict,
+            SeqConflict,
+        ) as e:
             # RecoveryConflict → 409：RUNNING/UNKNOWN 需人工裁决，不伪造不盲跑
-            # （不变量 #14）。SeqConflict → 409：日志 seq 冲突（BUG-011）。
+            # （不变量 #14）；#547 起该分支 detail 附 pending_decisions 清单。
+            # InvalidDecision → 422：裁决值/目标/重复提交非法（#547 预检）。
+            # SeqConflict → 409：日志 seq 冲突（BUG-011）。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 

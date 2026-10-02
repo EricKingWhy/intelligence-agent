@@ -64,7 +64,22 @@ class InvalidDecision(SessionServiceError):
 
 
 class RecoveryConflict(SessionServiceError):
-    """恢复需要人工裁决（UNKNOWN 工具状态）。"""
+    """恢复需要人工裁决（UNKNOWN 工具状态）。
+
+    ``pending_decisions``（#547）是可选的机器可读载荷：HTTP 层把它附进 409
+    响应体（``detail`` 升级为 ``{"message", "pending_decisions"}``），UI 据此
+    渲染裁决表单。只在 recover 的裁决预检分支携带；其余构造点（resume/messages
+    闸门、协调器 ``RecoveryError`` 转译）保持纯文本 ``detail`` 不变。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        pending_decisions: list[dict] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.pending_decisions = pending_decisions
 
 
 class SeqConflict(SessionServiceError):
