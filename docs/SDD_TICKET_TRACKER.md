@@ -6825,3 +6825,8 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **待批准（§14.4）**：push `fix/standards-findings` / 开 PR / PR merge（分别批准）；worktree `/tmp/std-fix-gate-wt` 与隔离副本 `/tmp/std-fix-copy` 清理。观察项未动：`make_session` 自 `tests.conftest` 导入系既有面，清扫另立。
 
 - **集成落账（2026-10-02，用户批准全链后执行）**：PR #539（正文带机理/§6.1 四源/读数表）→ CI gate0 首轮 39s 红＝月档 EOF 空行（本地未带 `--since` 未复现；按 CI 口径复现→修 `7ef227e9`→复验）→ 二轮 **37s 绿 + gitleaks 绿 → merge `713282a5`**（树 `f0b59c63` = 分支终态 `1704eb5d` 树逐字相同 ⇒ 覆盖闸门「树=父树」规则自动归属）。postsubmit：security 22s 绿；gate1 运行 30m20s 被外部取消（vitest 绿，pytest-full 中断，非并发取代非本线）——读数未取得，待补观察。先回后正共 3 次（`62f9f4d3` 收口笔误附着 main / `ed7af89e` #513 线 / `9f48cb80` #538 线——唯一冲突月档 EOF 并集裁决获批）。明细见 2026-10 归档「Standards findings 修复批集成落账」节。遗留：分支本地+远端未删（§14.4）；本地 main 由并行线 checkout 仍在 `630a0c60`（§14.9 回补通知）；观察项 `make_session` 清扫另立。
+
+
+## AGENTS 规则发布（2026-10-03）
+
+用户授权四端同步；最终根/必读 Git 手册/HTML/原版快照已进入发布收口。审查、完整车道证据与范围见 `docs/agents/agents-md-release-integration-2026-10-03.md`。TodoWrite 阅读项错误完成仍 OPEN；最新 main 的 Composer 视觉用例（期望3控件、实际4）经原始基线复跑确认为既有红，待用户裁决是否另行修复，本任务不改产品/测试。状态以 Git/PR 实况为准，未据待执行动作宣称已发布。

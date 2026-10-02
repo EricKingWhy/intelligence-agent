@@ -47,6 +47,16 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 
 （DeepSeek Harness 的核查链接已在 Reuse Matrix §3 / §7，此处不重复。）
 
+### Coding Agent 工具链 / 执行期检查
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| [ZCode Hooks 官方文档](https://zcode.z.ai/en/docs/hooks) | ZCode CLI 事件钩子规范 | `PreToolUse` 拒绝、`PostToolUse` 工具结果、`Stop`、Hook 启用和配置作用域；确认当前版本的项目配置是否执行 |
+| [腾讯云 CodeBuddy Code Hooks](https://cloud.tencent.com/document/product/1831/137030) | WorkBuddy 随附 CodeBuddy Code CLI 官方 Hook 规范；文档标注 Beta | `PreToolUse`／`PostToolUse`／`Stop`、转录路径、权限行为、配置作用域、错误与超时；区分 CLI 能力与 WorkBuddy 桌面实际接线 |
+| [CodeBuddy CLI 设置](https://www.workbuddy.ai/docs/cli/settings)；[WorkBuddy v2.48.0 配置分离说明](https://www.workbuddy.ai/docs/cli/release-notes/v2.48.0) | CLI 分层配置与 WorkBuddy 独立 `.workbuddy/` 路径的一手依据 | CLI 通用 `.codebuddy/` 配置和 WorkBuddy 桌面配置不能互相推定；核实具体应用的运行器与 Hook 接线 |
+
+以上是一手工具文档，不表示本项目已启用或验收。调研结论与边界见 `docs/agents/agent-tool-read-gates-research-2026-10.md`。
+
 ### Memory
 
 | 来源 | 是什么 | 看什么 |
