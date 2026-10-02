@@ -33,6 +33,10 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
 )
+from agent_harness.storage.checkpoint import (
+    note_checkpoint_save_failure,
+    reset_checkpoint_save_failure_count,
+)
 from agent_harness.web.app import create_app
 from tests.scripted_model import ScriptedModel
 
@@ -58,7 +62,27 @@ def client(app):
 def test_health_ok(client):
     resp = client.get("/api/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    # #515 BUG-02：durability 观测字段——checkpoint 维护失败累计（进程级，重启归零）
+    assert isinstance(body["checkpoint_save_failures"], int)
+    assert body["checkpoint_save_failures"] >= 0
+
+
+def test_health_surfaces_checkpoint_save_failures(client):
+    """#515 BUG-02：checkpoint 保存失败计数经 /api/health 对外可见。
+
+    恢复回到更旧的稳定边界时，得有一个机器可读的地方回答"失败了几次"
+    （checkpoint 不进 SessionEvent，ADR-0004 Round 5——健康面是唯一对外口径）。
+    """
+    reset_checkpoint_save_failure_count()
+    try:
+        note_checkpoint_save_failure()
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        assert resp.json()["checkpoint_save_failures"] == 1
+    finally:
+        reset_checkpoint_save_failure_count()
 
 
 # ── sessions list ──

@@ -159,6 +159,7 @@ from agent_harness.storage import (
     SessionMeta,
     needs_reconcile,
 )
+from agent_harness.storage.checkpoint import note_checkpoint_save_failure
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 from agent_harness.tooling.quota import ToolQuotaWindow
 
@@ -3043,11 +3044,27 @@ class AgentRuntime:
                     )
         except Exception:
             # 宽捕获理由：checkpoint 是恢复辅助，任何存储侧故障都不属于 run 语义。
+            note_checkpoint_save_failure()
             logger.exception(
                 "checkpoint 保存失败（boundary=%s, session=%s）：不影响 run 结果",
                 boundary_type.value,
                 session.session_id,
             )
+            # 机器可检索信号（#515 BUG-02）：logger.exception 只进人类日志，稳定的
+            # outcome 让 JSONL / 健康面能回答"这次恢复为什么回到更旧的稳定边界"。
+            # 不发 SessionEvent——checkpoint 失败不是会话真相（ADR-0004 Round 5）。
+            if logger.hasHandlers():
+                log_event(
+                    logger,
+                    "system_log",
+                    "checkpoint 保存失败：恢复辅助降级",
+                    level="error",
+                    exc_info=True,
+                    component="checkpoint",
+                    outcome="checkpoint_save_failed",
+                    boundary=boundary_type.value,
+                    session_id=session.session_id,
+                )
 
     def _log(self, event_type: str, message: str, *, exc_info: bool = False,
              **fields: Any) -> None:
