@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_harness.agent.run_budget import SessionLimits
 from agent_harness.storage import (
     SessionMeta,
     SqliteCheckpointStore,
@@ -255,3 +256,58 @@ def test_write_methods_are_retry_wrapped(store_cls, method_names) -> None:
         assert getattr(method, "__wrapped__", None) is not None, (
             f"{store_cls.__name__}.{name} 未挂锁竞争重试（#515 BUG-01）"
         )
+
+
+@pytest.mark.asyncio
+async def test_admit_session_step_retry_does_not_double_reserve(tmp_path, monkeypatch) -> None:
+    """P2-B：admit 的 commit 后快照读撞锁 → 整方法重跑不得二次预留。
+
+    装饰器「整块重跑等价于首次执行」的前提是 OperationalError 抛出时事务未
+    提交；`admit_session_step` 在 `commit()` 之后还有一次 `_session_snapshot`
+    读——该读撞锁时，已提交的 turns/requests +1 已是持久账，重跑会把预留
+    再执行一遍（双计数，调用方却只拿到一次准入，refund 也只退一格）。
+
+    毒化第 2 次 `_session_snapshot` 读：修复前它位于 commit 之后（毒窗内，
+    回滚救不了已提交的 +1，重跑后账面 = 2）；修复后它位于事务内 commit 之前
+    （命中即整体回滚，重跑从干净账面重新预留，账面 = 1）。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    key = "sess-p2b"
+    await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=10, max_delegations=4),
+    )
+
+    original = SqliteDelegationTreeLedger._session_snapshot
+    calls = {"n": 0}
+
+    async def poisoned_second_read(self, connection, budget_key):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return await original(self, connection, budget_key)
+
+    monkeypatch.setattr(SqliteDelegationTreeLedger, "_session_snapshot", poisoned_second_read)
+
+    admission = await ledger.admit_session_step(key)
+    assert admission.accepted is True
+
+    con = sqlite3.connect(ledger.database_path)
+    try:
+        row = con.execute(
+            "SELECT agent_turns, model_requests FROM session_budgets WHERE budget_key = ?",
+            (key,),
+        ).fetchone()
+        admitted_events = con.execute(
+            "SELECT COUNT(*) FROM session_budget_events"
+            " WHERE budget_key = ? AND kind = 'step_admitted'",
+            (key,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert row == (1, 1), f"账面必须恰好一次预留，实际 {row}"
+    assert admission.snapshot.consumed.agent_turns == 1
+    assert admitted_events == 1, f"step_admitted 事件恰好一条，实际 {admitted_events}"
