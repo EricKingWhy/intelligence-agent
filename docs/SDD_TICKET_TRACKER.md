@@ -171,7 +171,9 @@
 - **#381 真机证据 → 关单**：自起证据栈（后端 uvicorn 8010 + vite dev 5173 临时 config 代理，8000 Docker 占用未碰；仓库零改动）；真模型 mimo-v2.6-Flash，会话 762f03cc（96 事件，3 次真实 update_plan）——四件套全对 + **跨更新 DOM 节点身份 ul/p1/p2/p3 全 true（零重挂载 = 无闪烁实证，与单测 reconcile pin 互证）** + 会话重放路径复验；证据评论关单，in-progress 摘除。
 - **走查抓出真 bug 并当场修复（`87a5734a`）**：折叠态完成行仍可见——hidden 的 UA 规则被 `.plan-list-item{display:flex}` 盖过（workspace-panel/detail-peek 注释守卫后**第三次**同坑；jsdom 不应用 CSS 故单测盲）。修复三层：PlanRow 内联 display:none 执行层 + `.plan-list-item[hidden]` 惯例层 + 测试断言升级 style 级；tsc 0 红、vitest 17/17。截图 `.scratch/acceptance/13–16`（4494f689，13/14=修复前 15/16=修复后）。
 - **台账**：`t381-collapse-fix-2ee6a1a0-87a5734a.tsv`（587 字符，内容列口径同 661 先例）+ 机械归属行 `t381-evidence-shots-87a5734a-4494f689.tsv`；coverage 闸门 exit 0。
-- **集成**：本地 main 链 13c6eeb7 记账 → 87a5734a fix → 4494f689 证据 → 56e5e7af 归属行 → e128abd6 记账（5 笔），**待下批 PR 进 origin**（push/PR/合并已获批，§14.4 逐跳执行）。
+- **审查（集成前完整链）**：双轴独立 subagent APPROVE——正确性轴 0×P0/P1/P2（2×P3 信息项登记：断言 null 时 TypeError 信息、双隐藏信号未来动画需同步）+ 规范轴 1×P2（台账字符数账实不符 594→587）+ 3×P3（#512 in-progress 残留已摘 / tip 自指滞后句已中性化 / vitest 合跑偶发 worker 超时登记级）；P2/P3 处置笔 `2001c670`；审查方独立复跑 tsc 0 红 + 17/17 绿。
+- **门禁**：vitest 全量 1245P/1F（唯一红 = 在册 StepDetail.window flake，隔离 3× 全绿 6/6×3）；Gate-0 6/6 两棵树落盘（`2001c670` 68.5s / `97458732` 33.4s）。
+- **集成**：**PR #538 → merge `b1787138`（CI gate0 36s + gitleaks 绿，2026-10-02）**。过程：先回后正吸收 origin/main `b6aec71d`（#513 README 双语批 6 笔纯 docs，零冲突、零文件重叠）→ 合并 `4499e4b5` 落 coverage fail-closed（--cc 空表）⇒ 补机械归属行（`97458732`，同 c8e04cb9/5502acd5 先例）→ 终态 Gate-0 6/6 → 推分支 → CI 绿 → 合并；本地 main 已 ff 对齐 `b1787138`（树 42ba9819 一致）。⚠ 集成分支 `fix/t381-plan-collapse-evidence` 未删（§14.4 Branch 删除需单独批准）；另一条线按 §14.9 回补自检。
 - **开放票**：#536/#537 ready-for-agent 未认领；远端分支 `feat/t381-t435-t512-plan-batch` 已删（用户批准）。
 
 ---
