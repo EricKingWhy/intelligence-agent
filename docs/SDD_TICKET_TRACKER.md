@@ -6838,3 +6838,10 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **读数**：focused 661P（session/recovery/multiagent/cli-fork/生成守卫/web 错误映射）绿；`ruff check .` 绿；`tsc -b --force` 绿；main 症状级复现 + 真崩溃集成测试（os._exit(9)）绿。
 - **台账**：`docs/review_ledger.d/t555-fork-phase-visibility-22cd4d64-a7dff703.tsv`（唯一写全处）。
 - **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。同批 #566/#547/#549 待续。
+
+## 2026-10-03 · A 线 #566 悬空 tool_call 诚实分类（分支 `fix/t547-t566-sandbox-recovery`，base `a7dff703`）
+
+- **代码笔 `50a406ba`**：approval_outcome_for_call 封闭枚举（NOT_REQUESTED/UNRESOLVED/APPROVED/DENIED，未知值 fail-closed）+ coordinator._decide 无账分类（审批门前 UNRESOLVED/DENIED→未执行（审批未通过）、APPROVED→未执行（已批准未开始）、无审批→未执行（尚未开始））+ Session.resume 仅 UNRESOLVED 升级、其余保守「结果未知」+ Ledger 行在场语义不变（PENDING skip / RUNNING+UNKNOWN→ReconcileRequired，不变量 #14）。
+- **读数**：红读数两截（修复前树上收集 ImportError 机制红 + stash 探针窗口 A 合成旧文案「工具执行被中断，结果未知」症状红）；修复后分类 10 用例 + coordinator 23 用例绿，recovery+session 全套 634P 绿；`ruff check .` 绿；真崩溃集成窗口 A（复用 _approval_kill_child.py）+ 窗口 B（新增 _approval_admitted_kill_child.py）绿。
+- **台账**：`docs/review_ledger.d/t566-dangling-classification-a7dff703-50a406ba.tsv`（唯一写全处）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。同批 #547/#549 待用户裁决包后施工。
