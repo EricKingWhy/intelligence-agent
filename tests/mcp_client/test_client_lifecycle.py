@@ -346,3 +346,111 @@ async def test_aclose_cancellation_is_not_swallowed():
     closer.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(closer, timeout=6)
+
+
+# ── #557：CONNECTION_CLOSED ≠ 调用拒绝；畸形协议消息快速失败（不烧超时窗）──
+
+
+@pytest.mark.asyncio
+async def test_connection_closed_is_server_down_and_next_call_reconnects():
+    """MCP-F4：transport 死亡以 MCPError(CONNECTION_CLOSED) 形态抵达时必须按
+    连接死亡处理（标记断开 + MCPServerDownError），不得包装成"拒绝调用"；
+    下次调用先重连（连接创建计数 +1），失败的旧调用不被重放。"""
+    from mcp import types
+    from mcp.shared.exceptions import MCPError
+    from mcp.types import CONNECTION_CLOSED
+
+    dead_session = _ScriptedSession([MCPError(CONNECTION_CLOSED, "Connection closed")])
+    live_session = _ScriptedSession([
+        types.CallToolResult(
+            content=[types.TextContent(type="text", text="ok")], is_error=False),
+    ])
+    factory = _factory([dead_session, live_session])
+    conn = MCPServerConnection(_config(), session_factory=factory)
+    await conn.connect()
+
+    with pytest.raises(MCPServerDownError, match="连接已断开"):
+        await conn.call_tool("die_on_call", {})
+    assert conn.connected is False, "CONNECTION_CLOSED 必须标记连接死亡"
+    assert len(dead_session._behaviors) == 0, "死亡的旧调用不被重放"
+
+    result = await conn.call_tool("echo", {"text": "hi"})
+    assert result.is_error is False
+    assert factory.state["count"] == 2, (
+        "下次调用必须先重连（新建连接），而非拿着死会话直接再抛"
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_protocol_message_fails_call_fast_not_timeout():
+    """MCP-F2：调用等待期间读循环检出畸形协议消息（SDK 经 message_handler 以
+    Exception 项送达）→ 确定性违规快速失败（MCPProtocolError，秒级，不混入
+    通用 TIMEOUT），连接标记断开；下次调用先重连（fault 状态随新连接重置）。"""
+    import time
+
+    from mcp import types
+
+    from agent_harness.mcp.client import MCPProtocolError
+
+    async def hang(name, arguments):
+        await asyncio.Event().wait()  # 期待的响应正是那条坏消息：永不返回
+
+    hang_session = _ScriptedSession([])
+    hang_session.call_tool = hang
+    live_session = _ScriptedSession([
+        types.CallToolResult(
+            content=[types.TextContent(type="text", text="ok")], is_error=False),
+    ])
+    factory = _factory([hang_session, live_session])
+    conn = MCPServerConnection(_config(), session_factory=factory)
+    await conn.connect()
+
+    call_task = asyncio.create_task(conn.call_tool("echo", {"text": "hi"}))
+    await asyncio.sleep(0.05)  # 调用进入等待
+    started = time.monotonic()
+    # 真实路径 = ClientSession message_handler（官方钩子，不另写 read loop）
+    await conn._on_protocol_message(ValueError("invalid JSON-RPC message"))
+
+    with pytest.raises(MCPProtocolError, match="畸形"):
+        await asyncio.wait_for(call_task, timeout=5)
+    assert time.monotonic() - started < 5, "确定性协议违规必须快速失败，不烧超时窗"
+    assert conn.connected is False
+
+    result = await conn.call_tool("echo", {"text": "hi"})
+    assert result.is_error is False
+    assert factory.state["count"] == 2, "协议违规后下次调用先重连，而非继承污染状态"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_hang_call_is_not_misread_as_protocol_violation():
+    """纠偏臂：真无响应（remote hang）被调用方取消 = TIMEOUT 语义（归
+    Executor 统一执行），不得误判为协议违规；连接保持存活。"""
+    async def hang(name, arguments):
+        await asyncio.Event().wait()
+
+    session = _ScriptedSession([])
+    session.call_tool = hang
+    factory = _factory([session])
+    conn = MCPServerConnection(_config(), session_factory=factory)
+    await conn.connect()
+
+    call_task = asyncio.create_task(conn.call_tool("hang_on_call", {}))
+    await asyncio.sleep(0.05)
+    call_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call_task
+    assert conn.connected is True, "取消/挂起不是协议违规，连接保持存活"
+    assert conn._protocol_fault is None
+
+
+@pytest.mark.asyncio
+async def test_real_client_session_wires_protocol_fault_handler():
+    """真实 transport 的 ClientSession 构造必须接线 message_handler——
+    读循环检出的畸形输入只有经它才能到达连接级 fault 状态。"""
+    from mcp.shared.memory import create_client_server_memory_streams
+
+    conn = MCPServerConnection(_config())
+    async with create_client_server_memory_streams() as (client_streams, _server_streams):
+        read, write = client_streams
+        session = conn._open_session(read, write)
+    assert session._message_handler == conn._on_protocol_message
