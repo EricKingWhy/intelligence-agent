@@ -233,11 +233,14 @@ _WRITE_CONFLICT_ATTEMPTS = 3
 def validate_session_id(session_id: str) -> str:
     """校验 session_id 是否为单个安全名字段。
 
-    正则 ``[A-Za-z0-9_-]+`` 保证只接受字母、数字、下划线、连字符，
-    拒绝含 ``/`` ``\\\\`` ``.`` 等路径分隔符的输入（路径穿越防护）。
+    正则 ``[A-Za-z0-9_-]{1,128}`` 保证只接受字母、数字、下划线、连字符，
+    拒绝含 ``/`` ``\\\\`` ``.`` 等路径分隔符的输入（路径穿越防护）；
+    长度上限 128（#517 BUG-07）：无上限时超长 id 直达文件系统（Linux
+    errno 36 → 500，Windows → 404），128 与 uuid4 hex 生成形态同量级，
+    两个平台的文件名上限（255）之内。
 
     :returns: 校验通过的 session_id（原值返回）。
-    :raises InvalidSessionId: session_id 含非法字符或为空。
+    :raises InvalidSessionId: session_id 含非法字符、为空或超长。
     """
     if not _SESSION_ID_PATTERN.fullmatch(session_id):
         raise InvalidSessionId(

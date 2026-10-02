@@ -36,7 +36,14 @@ ARTIFACT_ID_PATTERN = re.compile(r"[0-9a-f]{16}")
 #: 的"路径穿越防护"同款问题）。
 #: 规则本体放这里而不是 session 层：`session/service.py` 的 `_SESSION_ID_PATTERN`
 #: 注释写的就是"字符集与 S3ArtifactStore 的 key 段规则一致"——同一条规则，一份定义。
-SESSION_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+#:
+#: `{1,128}`（#517）：只有字符集白名单时，超长 id 会穿过校验直达文件系统——
+#: Linux 上 `os.stat` 抛 `OSError [Errno 36] File name too long`（→ 裸 500），
+#: Windows 上 `Path.exists()` 把超长名映射成 FileNotFoundError（→ 404），同一
+#: 输入两种错误形态、都不是校验层的回答。128 与 uuid4 hex 生成形态同量级；
+#: 白名单字符 + ≤128 长度保证拼出的路径必然在两个平台的文件名上限（255）内，
+#: 结构上杜绝"通过校验的输入打穿到文件系统语义"。
+SESSION_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class Artifact(BaseModel):

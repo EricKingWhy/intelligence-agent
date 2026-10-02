@@ -24,6 +24,7 @@ class TestValidateSessionId:
             "a",
             "0",
             "-_",
+            "a" * 128,  # #517：长度上限内合法（与 uuid4 hex 形态同量级）
         ],
     )
     def test_legal_session_id_returns_original(self, sid: str) -> None:
@@ -40,6 +41,8 @@ class TestValidateSessionId:
             "a b",       # 空格
             "..",        # 目录穿越
             "a*b",       # 通配符
+            "a" * 129,    # #517：超过 128 上限——Linux 会以 errno 36 500，Windows 404
+            "a" * 10_000,  # #517 票面原始复现：超长 id 稳定打穿到文件系统
         ],
     )
     def test_illegal_session_id_raises(self, sid: str) -> None:

@@ -47,6 +47,7 @@ from agent_harness.identity import (
 from agent_harness.instance_lock import InstanceLock
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
@@ -94,7 +95,11 @@ from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.context_usage import build_context_usage_payload
-from agent_harness.web.domain_errors import http_error, storage_http_error
+from agent_harness.web.domain_errors import (
+    http_error,
+    model_http_error,
+    storage_http_error,
+)
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
@@ -1223,6 +1228,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
 
+    # #517 BUG-06：未捕获异常的全局兜底。Starlette 默认给 text/plain 的
+    # "Internal Server Error"（TestClient 则直接 re-raise），前端按 JSON 解析
+    # 错误体时拿到纯文本。注册 Exception handler 后换回 JSON 信封——状态码
+    # 仍是诚实的 500，这层只换**表示**，不把任何意外异常洗成 4xx。
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_to_json(request: Any, exc: Exception):
+        logging.getLogger("agent_harness.web").exception(
+            "未处理异常：%s %s", request.method, request.url.path
+        )
+        return JSONResponse(
+            status_code=500, content={"detail": "Internal Server Error"}
+        )
+
+    # #517 BUG-06：OpenAPI 错误面对齐（422 oneOf / SSE CT / 500+503 声明）。
+    from agent_harness.web.error_contract import apply_error_contract
+
+    apply_error_contract(app)
+
     # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
     from agent_harness.web.lineage import register_lineage_routes
 
@@ -1462,6 +1485,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             )
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05：client 构造期失败（代理环境/配置问题）→ 503。
+            raise model_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
@@ -1608,6 +1634,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # ceiling 没真提高 / 有在途 run——请求形状合法但状态对不上，且
             # **零副作用**（判定在任何落盘之前，见 `validate_resume`）。
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05：同 create——构造期失败 → 503，不冒充 500。
+            raise model_http_error(e) from e
 
         session_id = result.session.session_id
         return _run_stream_response(
@@ -2093,6 +2122,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # WorkspaceBindingConflict → 409（#266）：idle 分支会走 resume_and_launch，
             # 工作目录归属冲突同样拒绝静默选边。
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
+            raise model_http_error(e) from e
 
         if result.status == "launched":
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。

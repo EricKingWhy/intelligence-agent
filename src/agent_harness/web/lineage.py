@@ -57,7 +57,12 @@ def register_lineage_routes(
 
     @app.get("/api/sessions/{session_id}/lineage")
     async def get_session_lineage(session_id: str) -> dict:
-        validate_session_id(session_id)
+        # #517 BUG-07：/events、/budget 对同一非法 id 都给 422，这里曾漏映射——
+        # `InvalidSessionId` 逃逸成 500（同类输入三种结果）。与其余端点对齐。
+        try:
+            validate_session_id(session_id)
+        except InvalidSessionId as e:
+            raise http_error(e) from e
         state = app.state.agent
         await state.ensure_stores()
         metas = await build_lineage_index(state.store, state.session_meta_store)

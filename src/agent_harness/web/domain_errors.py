@@ -108,6 +108,7 @@ from agent_harness.agent.budget import (
     BudgetRejection,
 )
 from agent_harness.memory.errors import MemoryNotFound
+from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.session.errors import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -338,6 +339,28 @@ def storage_http_error(exc: Exception) -> HTTPException:
     """
     return HTTPException(
         status_code=_STORAGE_ERROR_STATUS[type(exc)], detail=str(exc)
+    )
+
+
+#: 模型 provider 词汇 → HTTP status 的第五张表（#517 BUG-05）。
+#:
+#: 为什么单独一张：`ModelClientConstructionError` 是 model 包的词汇（构造 client
+#: 失败：代理变量坏 / key 形态非法），不属于 session / workspace / memory / storage
+#: 任一键域。**刻意只登记这一项**：真正的网络错误发生在 run 期、由 Harness 的
+#: fallback/attempt 记账接管（不变量 #9），不打成 HTTP 状态；构造是纯本地操作，
+#: 失败即环境/配置暂时不可用——503（可修好重试）比 500（服务端 bug）诚实。
+_MODEL_ERROR_STATUS: dict[type[Exception], int] = {
+    ModelClientConstructionError: 503,
+}
+
+
+def model_http_error(exc: Exception) -> HTTPException:
+    """model provider 异常 → `HTTPException`；状态码取自 `_MODEL_ERROR_STATUS`。
+
+    与另外四张表同款：直接索引（不 `.get` 回退），未登记类型是编码错误。
+    """
+    return HTTPException(
+        status_code=_MODEL_ERROR_STATUS[type(exc)], detail=str(exc)
     )
 
 
