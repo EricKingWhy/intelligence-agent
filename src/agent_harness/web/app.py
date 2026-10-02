@@ -1197,6 +1197,21 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 logging.getLogger("agent_harness.web").exception(
                     "启动崩溃扫描失败（不阻塞启动）"
                 )
+            # #555：未完成 fork 扫描——`fork/in-progress` 无 `session/forked` 的
+            # child，回收 harness 自建工件（暂存根 + 默认形态工作区），JSONL/
+            # 映射保留作可读事实。与崩溃扫描同序：失败不阻塞启动，但响亮落日志。
+            try:
+
+                fork_results = await session_service(state).scan_unfinished_forks()
+                for result in fork_results:
+                    logging.getLogger("agent_harness.web").warning(
+                        "启动 fork 扫描：child=%s reclaimed=%s detail=%s",
+                        result.session_id, result.reclaimed, result.detail,
+                    )
+            except Exception:
+                logging.getLogger("agent_harness.web").exception(
+                    "启动 fork 扫描失败（不阻塞启动）"
+                )
             # Phase Multiturn（ADR-0030 §4.8 / D5）：按事件流重建"未投递输入"的
             # 内存镜像。**不自动起 run**：刚启动没有订阅者，起了会被 orphan 回收，
             # 用户回来时会话已被跑掉（用户不在场时自动消耗 token 更不可接受）。

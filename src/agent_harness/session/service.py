@@ -131,6 +131,7 @@ from agent_harness.session.errors import (
     WorkspacePathInvalid,
 )
 from agent_harness.session.event import (
+    FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
     QUEUE_CANCELLED,
@@ -188,7 +189,7 @@ if TYPE_CHECKING:
     from agent_harness.capability.base import CapabilityRegistry
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
-    from agent_harness.recovery.scan import InterruptionScanResult
+    from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
     from agent_harness.session.runmanager import ManagedRun, RunManager, Subscriber
@@ -1831,6 +1832,8 @@ class SessionService:
         - fork 子会话：cwd 锚记的是**项目归属**（父的目录），映射是 copy-on-fork 的
           副本目录（ADR-0017 决策 5 / `test_session_cwd.py::TestForkInheritance`）。
           真机上 3 条 fork 子会话正是这个形状——判成冲突等于让它们再也无法续聊。
+          未完成的 fork（`fork/in-progress` 无 `session/forked`，#555）不豁免：
+          冲突是 fork 中断的后续状态，类型化失败里给 fork 专属处置指引。
 
         冲突为什么必须类型化失败（不静默选边）单点在 `WorkspaceBindingConflict` 的
         docstring，这里不重复（§16.1）。
@@ -1847,6 +1850,18 @@ class SessionService:
             return
         if any(event.type == SESSION_FORKED for event in events):
             return
+        if any(event.type == FORK_IN_PROGRESS for event in events):
+            # #555：有意图标记、无 session/forked = 一次没完成的 fork（启动扫描
+            # 已回收其暂存/工作区残留）。这不是"绑定漂移"，是 fork 中断的后续
+            # 状态——child 没有可用历史，修复方向是删除后从父会话重新 fork，
+            # 不是让用户去改映射。
+            raise WorkspaceBindingConflict(
+                f"session '{session_id}' 是一次未完成的 fork"
+                f"（有 fork/in-progress 标记、无 session/forked，"
+                f"session/started.cwd={persisted_cwd}，"
+                f"沙箱登记={', '.join(disagreeing)}）。"
+                "该会话没有可用历史、不能续聊——请删除该会话后从父会话重新 fork。"
+            )
         raise WorkspaceBindingConflict(
             f"session '{session_id}' 的工作目录绑定冲突："
             f"session/started.cwd={persisted_cwd}，"
@@ -2646,6 +2661,20 @@ class SessionService:
             database_path=self._harness_db,
         )
         return results
+
+    async def scan_unfinished_forks(self) -> list[ForkScanResult]:
+        """进程启动扫描（#555）：按 ``fork/in-progress`` 标记回收未完成 fork 残留。
+
+        与 ``scan_interrupted`` 同一 lifespan、同一单进程假设；只回收 harness
+        自建工件（暂存根 + 默认形态子工作区），child 的 JSONL/映射保留。
+        """
+        from agent_harness.recovery.scan import scan_unfinished_forks
+
+        await self._ensure_stores()
+        return await scan_unfinished_forks(
+            session_store=self._store,
+            workspace_registry=self._workspace_registry,
+        )
 
     async def rebuild_message_queues(self) -> int:
         """按事件流重建内存队列镜像（ADR-0030 §4.8，D5）。返回重建的会话数。

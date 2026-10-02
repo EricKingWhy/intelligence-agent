@@ -3,7 +3,9 @@
 事件 = 真相（agent/delegation-started 的 child_session_id、child 文件里的
 session/forked），SessionMetaStore = 索引（parent_session_id / origin /
 fork_point_seq）。建树查索引 O(1)；索引缺口查询时惰性回填——只做
-NULL→具体值 的升级，绝不覆盖既有 origin=fork（fork 语义由 fork 流程独占）。
+NULL→具体值 的升级，绝不覆盖既有 origin=fork / delegation 行（#555 修订：
+回填范围包括 delegation 边与 fork 边两类真相；fork 边读 child 自己文件里的
+session/forked，是自证 provenance，优先于父侧 delegation 边）。
 """
 
 from __future__ import annotations
@@ -12,17 +14,24 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from agent_harness.session.event import AGENT_DELEGATION_STARTED
+from agent_harness.session.event import AGENT_DELEGATION_STARTED, SESSION_FORKED
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.session_meta import SessionMeta, SessionMetaStore
 
 
 def _scan_edges(
     store: JsonlSessionStore, all_ids: list[str]
-) -> tuple[dict[str, str], dict[str, str]]:
-    """同步扫描全部会话事件：delegation 边 + created_at（线程池内执行）。"""
+) -> tuple[dict[str, str], dict[str, str], dict[str, tuple[str, int | None]]]:
+    """同步扫描全部会话事件（线程池内执行）。
+
+    返回（delegation 边 child→parent, created_at, fork 边 child→(parent,
+    fork_point_seq)）。fork 边只认 child **自己文件**里的 session/forked
+    （data.parent_session_id / fork_point_seq）——provenance 事件即真相，
+    索引缺口（meta 行缺失或全 NULL）按它回填（#555 W5）。
+    """
     edges: dict[str, str] = {}  # child_session_id -> parent_session_id
     created_at_by_id: dict[str, str] = {}
+    fork_edges: dict[str, tuple[str, int | None]] = {}
     for sid in all_ids:
         events = store.read_events(sid)
         if events:
@@ -32,7 +41,15 @@ def _scan_edges(
                 child_id = event.data.get("child_session_id")
                 if child_id:
                     edges.setdefault(str(child_id), sid)
-    return edges, created_at_by_id
+            elif event.type == SESSION_FORKED:
+                parent_id = event.data.get("parent_session_id")
+                if parent_id and sid not in fork_edges:
+                    fork_seq = event.data.get("fork_point_seq")
+                    fork_edges[sid] = (
+                        str(parent_id),
+                        fork_seq if isinstance(fork_seq, int) else None,
+                    )
+    return edges, created_at_by_id, fork_edges
 
 
 @dataclass
@@ -54,8 +71,10 @@ async def build_lineage_index(
     """惰性回填索引并返回全量行（幂等）。
 
     缺口来源：Phase 13 的 delegation child（checkpoint 时代可能已有 origin
-    全 NULL 的行，或完全没有行）。回填只允许 NULL→delegation 的升级——
-    origin=fork 的行永远不动。完全无缺口时零扫描零写入。
+    全 NULL 的行，或完全没有行），以及 #555 W5 之前的 fork child（索引回填
+    只扫过 delegation 边，fork child 被按 root 建行——树把 fork 线断成多个
+    假 root）。回填只允许 NULL→具体值 的升级——已有 origin=fork / delegation
+    的行永远不动。完全无缺口时零扫描零写入。
     """
     existing = {m.session_id: m for m in await meta_store.list_all()}
     all_ids = store.list_session_ids()
@@ -68,15 +87,26 @@ async def build_lineage_index(
         return list(existing.values())
 
     # 扫描事件真相（同步磁盘 IO 走线程卸载——web 读取面也复用本函数）：
-    # delegation-started 边（parent → child_session_id）+ 各会话 created_at
-    edges, created_at_by_id = await asyncio.to_thread(
+    # delegation-started 边（parent → child_session_id）、child 文件里的
+    # session/forked 边 + 各会话 created_at
+    edges, created_at_by_id, fork_edges = await asyncio.to_thread(
         _scan_edges, store, all_ids
     )
 
     now = datetime.now(UTC).isoformat(timespec="milliseconds")
-    # 缺行的会话：delegation child 按边回填，其余按 root 建行
+    # 缺行的会话：fork child 按 child 自证的 forked 事件回填（优先——它是
+    # child 自己文件的 provenance），delegation child 按边回填，其余按 root 建行
     for sid in missing:
-        if sid in edges:
+        if sid in fork_edges:
+            parent_id, fork_point_seq = fork_edges[sid]
+            await meta_store.upsert(
+                SessionMeta(
+                    session_id=sid, created_at=created_at_by_id.get(sid, now),
+                    parent_session_id=parent_id, origin="fork",
+                    fork_point_seq=fork_point_seq,
+                )
+            )
+        elif sid in edges:
             await meta_store.upsert(
                 SessionMeta(
                     session_id=sid, created_at=created_at_by_id.get(sid, now),
@@ -89,8 +119,21 @@ async def build_lineage_index(
                     session_id=sid, created_at=created_at_by_id.get(sid, now)
                 )
             )
-    # 已有行但 origin 全 NULL：若是 delegation child，升级为 delegation 边
+    # 已有行但 origin 全 NULL：fork 边优先升级为 fork，否则 delegation
     for meta in needs_upgrade:
+        if meta.session_id in fork_edges:
+            parent_id, fork_point_seq = fork_edges[meta.session_id]
+            await meta_store.upsert(
+                SessionMeta(
+                    session_id=meta.session_id, created_at=meta.created_at,
+                    agent_id=meta.agent_id,
+                    last_checkpoint_seq=meta.last_checkpoint_seq,
+                    archived=meta.archived,
+                    parent_session_id=parent_id, origin="fork",
+                    fork_point_seq=fork_point_seq,
+                )
+            )
+            continue
         parent_id = edges.get(meta.session_id)
         if parent_id is not None:
             await meta_store.upsert(
