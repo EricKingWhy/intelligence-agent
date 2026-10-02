@@ -226,6 +226,12 @@ class TestFallbackReanswerBoundary:
         assert fb_data.get("primary_content_chars") == len(primary_text)
         assert fb_data.get("primary_finish_reason") == "stop"
 
+        # C2（配对）：本步发生过 fallback ⇒ 拼接消息的 finish_reason（此处来自
+        # primary）不得落进 model/completed —— 「有 finish_reason」只能代表**无
+        # fallback 的干净终结**。primary 的收尾事实已由 model/fallback 携带，
+        # 答案层不得把它冒充成"整条拼接流说完了"（M10-3 症状面）。
+        assert "finish_reason" not in completed[0].data
+
         # 最终消息与 run/completed.final_text 一致（fallback 新块与最终消息配对）
         finals = _events(session, RUN_COMPLETED)
         assert len(finals) == 1

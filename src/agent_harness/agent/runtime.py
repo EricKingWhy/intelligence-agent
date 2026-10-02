@@ -228,6 +228,37 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     return usage or None
 
 
+def _accumulate_usage(
+    total: dict[str, int | None], usage: dict[str, int] | None,
+) -> None:
+    """把一次响应的 usage 并入 run 级聚合账（`#552` C1）。
+
+    与 session 侧**同口径**（`storage/delegation_tree.py::record_session_model_requests`
+    的 `total if total <= INT64_MAX else None`）：**合法值相加溢出 int64** ⇒ 该维
+    转未知（`None`，**粘性**）——不 clamp、不记 0（`11 §6.1`：不可得 ≠ 0）。
+    此前 run 级用 Python bigint 裸加（不溢出）⇒ 两步各 `2**62` 会停在 `2**63`，
+    而同输入下 session 账为 `None`，两本账永久分裂（#552 BUG-R4-02 同一症状）。
+
+    表示选了「该维整维置 `None`（粘性）」而非「从 `usage_total` 省略」：run 级
+    聚合账的既有读法就是"该维存在、值不可知 = `None`"——见 `BudgetConsumed`
+    （`run_budget.py`：`total_tokens: int | None`、`with_usage` 让 `None` 粘住、
+    `as_projection` 仍落该键），与 session 的 `NULL`（列存在、值未知）逐字对齐。
+    省略会让下一轮 `get(key, 0)` 把已未知的维**重新从 0 起算**（少算成假账），
+    且与"没有这个维度"混淆——那不叫收口。
+
+    粘性：某维一旦未知，后面再精确的加数也补不回缺的那一块（同
+    `_RunFinalizer.add_cost` 的 `None` 粘性与 `BudgetConsumed.with_usage`）。
+    """
+    if not usage:
+        return
+    for key, value in usage.items():
+        current = total.get(key, 0)
+        if current is None:
+            continue  # 已转未知：粘住，绝不再从 0 起算
+        level = current + value
+        total[key] = level if level <= INT64_MAX else None
+
+
 def _model_name_from_response(ai: Any) -> str | None:
     """从响应元数据取本次推理的模型名；拿不到就 None，不猜不编。"""
     meta = getattr(ai, "response_metadata", None) or {}
@@ -372,7 +403,7 @@ class _RunFinalizer:
     usage_total 是 _drive 聚合 dict 的引用（不复制）：终结时快照当时账目。
     """
 
-    def __init__(self, session: Session, usage_total: dict[str, int]) -> None:
+    def __init__(self, session: Session, usage_total: dict[str, int | None]) -> None:
         self._session = session
         self._usage_total = usage_total
         self.run_id: str | None = None
@@ -815,7 +846,8 @@ class _TerminalArms:
 
     session: Session
     terminal: _RunFinalizer
-    usage_total: dict[str, int]
+    #: 值 `None` = 该维累加溢出 int64 后转未知（`#552` C1，粘性）——见 `_accumulate_usage`。
+    usage_total: dict[str, int | None]
     model_coord: ModelFallbackCoordinator
     result_holder: list[AgentRunResult]
     cancel_reason_supplier: Callable[[], str] | None
@@ -1221,8 +1253,9 @@ class AgentRuntime:
         # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
         # begin_run 之前异常 = 没有可记账的 run，保持 None。
         streamer: BlockStreamer | None = None
-        # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
-        usage_total: dict[str, int] = {}
+        # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加；该维累加溢出
+        # int64 ⇒ 值转 `None`（未知，粘性，`_accumulate_usage`）。
+        usage_total: dict[str, int | None] = {}
         # 终态簿记 owner（批次 B 候选 2）：model 在途标记 + 单终态不变量 +
         # usage 记账收拢一处，取消臂/异常臂只做调用。
         terminal = _RunFinalizer(session, usage_total)
@@ -1552,9 +1585,7 @@ class AgentRuntime:
                 # "被接纳"分支里累加，被拒的那一轮 usage 直接丢账。
                 model_name = _model_name_from_response(ai)
                 usage = _usage_from_response(ai)
-                if usage:
-                    for key, value in usage.items():
-                        usage_total[key] = usage_total.get(key, 0) + value
+                _accumulate_usage(usage_total, usage)
                 model_cost = cost_usd_from_response(ai)
                 terminal.add_cost(model_cost)
                 # 每一次**实际**请求恰落一条 durable `model/request`（`model_requests`
@@ -1655,15 +1686,28 @@ class AgentRuntime:
                 if usage:
                     # usage / model_name 在上面的记账块里已抽好（同一份事实，不重抽）。
                     model_data["usage"] = usage
-                # 终结形态一等的诚实字段（#551 M10-2）：有 finish_reason 就落键
-                # （下游据此区分"模型说完了"）；缺失则**只标注**"流在没有
-                # finish_reason 的情况下结束"——不臆断截断、不删内容、不去重
-                # （#506 的"finish_reason 缺失回落中性"决策不推翻）。
-                finish_reason = _finish_reason_from_response(ai)
-                if finish_reason:
-                    model_data["finish_reason"] = finish_reason
-                else:
-                    model_data["stream_terminated_without_finish_reason"] = True
+                # C2（#552 配对）：本步**发生过 fallback 切换**时（`fallback_transitions`
+                # 非空），`ai` 是 primary + fallback 的**拼接体**，而
+                # `_finish_reason_from_response` 读到的 finish_reason 来自 primary
+                # （langchain 合并 response_metadata 时 fallback 无该键 ⇒ 左值胜出）——
+                # 它描述的不是这条拼接流。落进 model/completed 会让只读答案层的消费者
+                # 把"primary 卡流 + fallback 重答"误读成"模型正常说完"（M10-3 症状面）。
+                # 故这一支**不落该键**：「有 finish_reason」从此只代表**无 fallback 的
+                # 干净终结**。primary 的收尾事实不丢——已由同一步的 `model/fallback`
+                # （`primary_finish_reason` / `primary_content_chars`）承载，那才是它该挂
+                # 的 attempt 边界。**不**落 `stream_terminated_without_finish_reason`：该键
+                # 的既有语义是"流**没有** finish_reason"（R3），此处流里是有的、只是属于
+                # primary——落它 = 用解释覆盖事实；边界由 model/fallback 标记。
+                # 无 fallback 时保持 #551 M10-2 的既有诚实口径：有 finish_reason 就落键
+                # （下游据此区分"模型说完了"）；缺失则**只标注**"流在没有 finish_reason
+                # 的情况下结束"——不臆断截断、不删内容、不去重（#506 的"缺失回落中性"
+                # 决策不推翻）。
+                if not fallback_transitions:
+                    finish_reason = _finish_reason_from_response(ai)
+                    if finish_reason:
+                        model_data["finish_reason"] = finish_reason
+                    else:
+                        model_data["stream_terminated_without_finish_reason"] = True
                 # llm_call 诊断日志带模型归因 + 时延 + 用量（与 cli.py 对齐，spec 02 §7/§10
                 # 要求每步可在 Diagnostic Log 定位到具体 provider/model）。
                 llm_log_fields: dict[str, Any] = {
@@ -2657,9 +2701,8 @@ class AgentRuntime:
             usage=usage, cost=cost, model=_model_name_from_response(response),
         )
         # closeout 的 usage 也要进本执行的 token 账（原来只有主循环的响应入账）。
-        if usage:
-            for key, value in usage.items():
-                arms.usage_total[key] = arms.usage_total.get(key, 0) + value
+        # 同口径收口（`#552` C1）与主循环累加点共用 `_accumulate_usage`。
+        _accumulate_usage(arms.usage_total, usage)
         arms.terminal.add_cost(cost)
         parsed = _parse_closeout_json(_extract_text(response.content))
         normalized = normalize_continuation(parsed)

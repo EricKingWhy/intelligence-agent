@@ -28,6 +28,7 @@ import pytest
 from agent_harness.agent.run_budget import (
     TRIGGER_SESSION_REQUESTS,
     TRIGGER_SESSION_TURNS,
+    BudgetRejection,
     SessionConsumed,
     SessionLimits,
 )
@@ -438,15 +439,16 @@ async def test_ensure_session_budget_accepts_int64_max_boundary(tmp_path, memory
 async def test_ensure_session_budget_rejects_ceiling_above_int64(
     tmp_path, memory, oversize,
 ):
-    """C2：超过 int64 的 ceiling 在**绑定前**被拒（ValueError），不得炸 OverflowError。
+    """C2：超过 int64 的 ceiling 在**绑定前**被拒，不得炸 OverflowError。
 
-    当前 RED：Sqlite 抛 `OverflowError: Python int too large to convert to SQLite
-    INTEGER`；InMemory 直接接受越界值（两实现分歧）。拒绝必须零落盘（行不存在）。
+    兜底抛的是**域错误** `BudgetRejection`（越界 = 422 语义；`web/domain_errors.py`
+    的单一映射据此落 422，不是一个裸 `ValueError` 的未分类 500，见 #552 C4）。
+    拒绝必须零落盘（行不存在）。
     """
     ledger = _ledger(tmp_path, memory=memory)
     await ledger.initialize()
     key = "sess-ceil-over"
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(BudgetRejection) as excinfo:
         await ledger.ensure_session_budget(
             key, root_session_id=key,
             limits=SessionLimits(max_total_tokens=oversize),

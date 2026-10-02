@@ -150,7 +150,8 @@ TRIGGER_RUN_DEADLINE = "run.deadline_at"
 TRIGGER_MAX_CONTEXT_TOKENS = "max_context_tokens"
 
 #: 整数 ceiling / usage 的**存储上限**：SQLite INTEGER 是 64 位有符号
-#: （`-2**63 .. 2**63-1`；`10 §5.1` 的 `session_budgets` 列）。外部数值（请求 ceiling、
+#: （`-2**63 .. 2**63-1`；约束来源是代码里的 `storage/delegation_tree.py` 的
+#: `session_budgets` 表 `INTEGER` 列——规格目录无此表定义）。外部数值（请求 ceiling、
 #: provider 自报 usage）入库前必须按此上限校验 / 收敛——超过它的值一旦进 SQL 绑定即
 #: `OverflowError`（#552 BUG-R4-02/03）。run 与 session 两个作用域**共用**这一常量与
 #: 同一条校验分支（`11 §6.1`：同一语义字段在各入口一致收敛）。
@@ -164,7 +165,8 @@ def _positive_int64_or_none(value: Any, *, dimension: str) -> int | None:
     是**类型**：pydantic 默认 lax 会把 `True→1`、`"100"→100` 强转（#552 F4），所以领域
     层（CLI / WS / 内部调用方也走这里）必须做 `type(x) is int` 级判定——`bool` /
     字符串 / 浮点都不接受，`1.5` 更不得静默截断成 1。上界是 `INT64_MAX`：越过它入库
-    即 `OverflowError`（`10 §5.1` 的 SQLite INTEGER 列），所以**先校验、后持久化**。
+    即 `OverflowError`（约束来源是 `storage/delegation_tree.py` 的 `session_budgets`
+    `INTEGER` 列），所以**先校验、后持久化**。
 
     `None` = 该维没配 ceiling（不是 0）。任何一维非法都拒绝整个请求（`BudgetRejection`
     → 422），不静默丢弃那一维（ADR-0044 D1/D8）。

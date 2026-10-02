@@ -26,6 +26,7 @@ from agent_harness.agent.guards import GuardLevel, GuardSignal
 from agent_harness.agent.run_budget import (
     INT64_MAX,
     BudgetConflict,
+    BudgetRejection,
     SessionAdmission,
     SessionBudgetSnapshot,
     SessionConsumed,
@@ -213,7 +214,10 @@ def _reject_out_of_int64_ceilings(limits: SessionLimits) -> None:
 
     领域层 `session_limits_from_request` 已经先校验过一次（正常调用路径）——这一层是
     防未来新调用方绕过领域层：越界整数的 SQL 绑定会抛未分类的 `OverflowError`（事务
-    回滚但错误不可识别）。这里提前给出可读的 `ValueError`。`None` = 无 ceiling，放行。
+    回滚但错误不可识别）。这里提前抛出**域错误** `BudgetRejection`：越界本就是
+    "形状非法"（422）语义，与领域层 `_positive_int64_or_none` 同判；因此它经
+    `web/domain_errors.py` 的单一映射落 422，而不是裸 `ValueError` 的未分类 500。
+    `None` = 无 ceiling，放行。
     """
     for dimension, value in (
         ("max_agent_turns_total", limits.max_agent_turns_total),
@@ -222,7 +226,7 @@ def _reject_out_of_int64_ceilings(limits: SessionLimits) -> None:
         ("max_delegations", limits.max_delegations),
     ):
         if value is not None and value > INT64_MAX:
-            raise ValueError(
+            raise BudgetRejection(
                 f"session ceiling {dimension} 超过 int64 上限 {INT64_MAX}：{value!r}"
             )
 

@@ -212,3 +212,52 @@ async def test_oversize_usage_is_omitted_from_run_ledger_never_fabricated(tmp_pa
     finished = _events_of_type(session, RUN_COMPLETED)[0]
     assert finished.data["usage_total"] == {"prompt_tokens": 100, "completion_tokens": 10}
     assert "total_tokens" not in finished.data["usage_total"]
+
+
+@pytest.mark.asyncio
+async def test_accumulated_usage_overflowing_int64_is_unknown_not_clamped(tmp_path):
+    """#552（C1）：两步**各自合法**的 usage 相加溢出 int64 ⇒ 该维转未知。
+
+    与 `storage/delegation_tree.py::record_session_model_requests`（`total if
+    total <= INT64_MAX else None`）同口径：合法值相加溢出 ⇒ 该维转未知（`None`，
+    粘性），**不 clamp、不记 0**。此前 run 级累加点用 Python bigint 无溢出，
+    `usage_total["total_tokens"]` 会永久停在 `2**63` 而 session 账为 `None`
+    ——两本账分裂，正是 #552 BUG-R4-02 的同一症状（单步用例覆盖不到）。
+    """
+    # 每步：total_tokens=2**62（< INT64_MAX ⇒ 单值合法），两步相加 = 2**63 越界。
+    # 形状与审查方探针一致：只有 total_tokens 巨大，input/output 保持小值
+    # （否则巨量 prompt_tokens 会先撞上无关的 context 收口路径）。
+    def _big() -> dict:
+        return {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2**62}
+
+    round1 = AIMessage(
+        content="",
+        response_metadata={"model_name": "qwen-plus-0911"},
+        usage_metadata=_big(),
+        tool_calls=[{"name": "add", "args": {"first_number": 1, "second_number": 2},
+                     "id": "call_o1", "type": "tool_call"}],
+    )
+    round2 = AIMessage(
+        content="",
+        response_metadata={"model_name": "qwen-plus-0911"},
+        usage_metadata=_big(),
+        tool_calls=[{"name": "add", "args": {"first_number": 3, "second_number": 4},
+                     "id": "call_o2", "type": "tool_call"}],
+    )
+    round3 = AIMessage(
+        content="1 + 2 = 3", response_metadata={"model_name": "qwen-plus-0911"},
+        usage_metadata=_usage(5, 5),
+    )
+    session = make_session(tmp_path)
+    await _runtime(ScriptedModel([round1, round2, round3])).run(session, "计算")
+
+    finished = _events_of_type(session, RUN_COMPLETED)[0]
+    total = finished.data["usage_total"]
+    # 越界维转未知（`is None`——同时排除 记 0 / clamp 到 INT64_MAX / 不收口留 2**63）
+    assert total["total_tokens"] is None
+    # 未越界的维照常精确累加（1+1+5 = 7）
+    assert total["prompt_tokens"] == 7
+    assert total["completion_tokens"] == 7
+    # 粘性：转未知后第 3 次的合法加数 10 **补不回来**（非粘性会回归成 10 ——
+    # 一个"少算但看着正常"的假账）
+    assert total["total_tokens"] is None
