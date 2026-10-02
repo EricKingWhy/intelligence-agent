@@ -201,6 +201,17 @@
 
 ---
 
+## 工具与预算加固批：#519（BUG-09 重复 tool_call_id 杀 run + BUG-12 工具结果零 framing）+ #518（BUG-10 账目未知/enforcement 误导 + BUG-11 launch=false 预算静默丢弃）（2026-10-02 交付：分支 `fix/t519-t518-tool-budget-hardening`，基点 `5b830d46`，代码终笔 `c2a6f1e8`；两票已关单 + 摘标签；push/PR/merge 三跳获批执行中）
+
+- **来源与授权**：用户指名 2 票 P2 加固批 + 五步认领协议（前置检查 → CLAIM ×2 + in-progress 标签 ×2 先于代码 → 收口关单摘标签）；「质量唯一，不许偷懒」。主工作树被 #515/Codex 线占用 ⇒ 全程 worktree `D:/intelligence-agent-backend-t519-t518`，主工作树零触碰。
+- **交付**（3 代码笔）：`a5ea2032`（#519）——BUG-09：executor 主路径 + cancel 级联窄捕获 `sqlite3.IntegrityError(UNIQUE)` ⇒ `REPEATED_TOOL_CALL`（04 §4 建议码表；retryable=False、增量显式记 0、quota 槽位归还、首行状态不被改写）；BUG-12：`frame:untrusted_tool_output` 注册（共用 `frame:untrusted_data` 9000 槽位）+ bash/read/edit/read_artifact/inspect_artifact 共 7 个 success 组装点挂 frame + PRD 三处同步。`06c18c0d`（#518）——BUG-10：`accounting_unknown_pause_dimensions` 纯函数 + `build_pause_data` 落 `accounting_unknown` 键（缺席≠空值）+ `project_budget` degraded 合成（仅「已发请求且读数 None」降级，usage 正常/未发请求不降）；BUG-11：launch=false 且声明 configured ⇒ 创建路径当场 `ensure_session_budget` 钉死账行（未声明保持 #318 惰性；行不存在=首次钉死无版本竞争）。`2fcc4bfb`（审查处置）——P1 配额槽位归还（幽灵占位会挤掉同批合法调用）+ 测试加固（budget_delta 记 0 / 行状态正向 SUCCEEDED / accounting_unknown 两作用域单测）+ 判定喂触发时刻读数 + degraded 第三值登记于 accounting.py docstring。
+- **审查**：独立 subagent 全维（双轴 PASS + 1×P1 配额槽位泄漏）→ 处置后 code-review 双轴：Standards **PASS-with-notes**（executor 重复构造 / UNIQUE 文本匹配 2 个 judgement call 登记票外）；Spec **PASS-with-notes**（framing 覆盖边界与 BUG-10 单步 fail-open 均票面已精确化，degraded 词表扩张登记）。**二轮终态复审（5b830d46...538aca93 含合并增量）**：Spec 轴 **PASS**（四验收锚点终树逐条满足、BUG-12 机械锚点 grep 计 10、59 文件无 scope creep）；Standards 轴 **PASS-with-notes** 2×P3——P3-1 配额归还分支缺红绿锚 ⇒ 处置 `c2a6f1e8`（真实 ToolQuotaWindow 端到端钉幽灵占位后果；隔离副本变异「删 release 行」实测 1 failed 证锚有效，处置经原审查者复核 **CLOSED**）；P3-2 degraded 判据仅看 run 侧 model_requests ⇒ 登记不修（session 作用域由 accounting_unknown 覆盖）；合并 740e8c08 接壤区无互扰、一轮处置终树逐项存活。
+- **门禁**：受影响面 pytest 全绿（合并树复跑：budget/pause/framing/prompt 310P + session/archive 547P；web 全套 463P、agent 788P、tooling 187P 先行全绿）+ ruff 全仓 clean；覆盖闸门 exit 0（台账 `t519-t518-tool-budget-hardening-5b830d46-2fcc4bfb.tsv` + `t519-t518-sync-merge-2fcc4bfb-740e8c08.tsv` + `t519-t518-second-review-p3-anchor-538aca93-c2a6f1e8.tsv`）；gate0 裸全量 6/6（读数 `docs/gate/<sha>.json`）。
+- **机制要点（BUG-10 诊断记录）**：票面复现形态 = 多步 run——第一轮准入放行时行读数是「空和」0（`11 §6.1`），第一轮无 usage 请求落账使行转 NULL 粘住（`record_session_model_requests`），第二轮准入 fail-closed（`_session_dimension_reached` 的 `is None` 判据）⇒ run/paused 带 accounting_unknown。单步 run 无第二准入点 = 票面已精确化的预期 fail-open，缓解靠投影 degraded。
+- **遗留**：①push/PR/merge 三跳已获批（2026-10-02 用户指令「再次 code-review 确保万无一失再 push → 开 PR → 合并」，二轮条件已满足），执行中；②票外跟进未开票：git/grep/apply_patch 同类暴露挂 frame、failure 路径（bash 超时 metadata 携带外部输出）、executor 两处 ToolExecution 构造重复、ledger 端口缺约束冲突异常类型（sqlite3 耦合）；③BUG-10 单步 run fail-open（票面精确化形态，degraded 投影缓解）+ 二轮 P3-2 degraded 判据仅看 run 侧（登记不修）。明细见 `docs/phase_status/2026-10.md` 本批节。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过

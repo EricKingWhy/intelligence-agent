@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
@@ -167,10 +168,41 @@ def test_session_cas_missing_version_422_and_stale_version_409(tmp_path):
     assert _events(client, session_id) == before, "被拒请求不得落任何事件"
 
 
+def test_launch_false_session_declaration_is_persisted(tmp_path):
+    """#518 BUG-11：launch=false 建会话时 `budget.session.*` 必须持久化。
+
+    修复前：声明只活在本次请求的 handle 里——账行等首 run 惰性建出，而只建会话
+    没有 run；下一个 run 的 handle 拿不到创建时声明，建行落成全 None ⇒
+    「200 但丢弃」（票面实测：GET /budget 读回 limits 全 NULL）。
+    修复后：声明显式存在 ⇒ 创建时立即钉死账行（行不存在 = 首次钉死，无版本
+    可竞争，与 resume 路径同款）；未声明保持 #318 惰性语义不变。
+    """
+    app, client = _web(tmp_path)
+    resp = client.post(
+        "/api/sessions",
+        params={"launch": "false"},
+        json={"budget": {"session": {"max_total_tokens": 100}}},
+    )
+    assert resp.status_code == 200, resp.text
+    session_id = resp.json()["session_id"]
+
+    budget = _budget(client, session_id)
+    session_view = budget["session"]
+    assert session_view["limits"]["max_total_tokens"] == 100, session_view
+
+    # 账行确实存在（投影读的是 durable 行，不是请求内存）。
+    row = asyncio.run(
+        app.state.agent.stores.delegation_tree_ledger.get_session_budget(session_id)
+    )
+    assert row is not None
+    assert row.limits.max_total_tokens == 100
+
+
 def test_create_rejects_session_expected_version_and_accepts_declaration(tmp_path):
     """新建会话不可能有账行 ⇒ session CAS 版本是矛盾请求（422）；
 
-    不带版本的 session 声明照常接受（launch=false 只建会话，行等首个 run 才建出）。
+    不带版本的 session 声明照常接受（`#518` 起：声明显式存在 ⇒ 创建时立即
+    建行持久化；未声明时行仍等首个 run 才建出）。
     """
     app, client = _web(tmp_path)
     with _ScriptedProbe() as probe:
@@ -189,11 +221,66 @@ def test_create_rejects_session_expected_version_and_accepts_declaration(tmp_pat
             json={"budget": {"session": {"max_agent_turns_total": 5}}},
         )
         assert accepted.status_code == 200, accepted.text
-    assert asyncio.run(
+    row = asyncio.run(
         app.state.agent.stores.delegation_tree_ledger.get_session_budget(
             accepted.json()["session_id"]
         )
-    ) is None, "launch=false 不建账行（首个 run 的首次准入才钉死）"
+    )
+    assert row is not None, "显式声明必须持久化（#518：不再有「200 但丢弃」）"
+    assert row.limits.max_agent_turns_total == 5
+
+
+def _read_call() -> AIMessage:
+    """第一轮的**工具调用**决策（票面复现形态：多步 run 的第一步）。
+
+    read 一个不存在的文件——工具失败照样产生 ToolResult、循环照样进第二轮，
+    本用例关心的是"存在第二轮准入点"，不是工具成败。
+    """
+    return AIMessage(content="", tool_calls=[{
+        "id": "tc-unknown-1", "name": "read",
+        "args": {"path": "does-not-exist.txt"}, "type": "tool_call",
+    }])
+
+
+def test_unknown_accounting_pause_carries_evidence(tmp_path):
+    """#518 BUG-10：由**账目未知**触发的 fail-closed 暂停带 `accounting_unknown` 依据。
+
+    票面复现形态：多步 run（工具调用后第二轮）+ 模型不返回 usage（`_done()`
+    不带 usage_metadata）。第一轮准入放行时行读数是"空和" 0（`11 §6.1`：只有
+    一个请求都没有的空和才是 0）；第一轮请求落账后行转 NULL 粘住（未知）⇒
+    第二轮准入 fail-closed 拦截——载荷必须显式说明"这次暂停是未知触发"，
+    否则 "budget_exhausted + consumed:null" 运维无法解释。
+    """
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ScriptedProbe([_read_call(), _done()])
+
+    with probe:
+        resp = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "开始", "budget": {"session": {"max_total_tokens": 100}}},
+        )
+        assert resp.status_code == 200, resp.text
+
+    # fail-closed 暂停落在**下一个准入点**（票面实测：第二轮准入），SSE 流可能在
+    # 它之前收束 ⇒ 轮询事件存储等落盘，而不是断言流文本。
+    paused_event: dict | None = None
+    for _ in range(100):
+        matched = [e for e in _events(client, session_id) if e["type"] == "run/paused"]
+        if matched:
+            paused_event = matched[0]
+            break
+        time.sleep(0.1)
+    assert paused_event is not None, "无 usage 模型配 token ceiling ⇒ 第二轮准入必暂停"
+    data = paused_event["data"]
+    assert data["reason"] == "budget_exhausted"
+    assert data["trigger_dimension"] == "session.max_total_tokens"
+    assert data["consumed"]["total_tokens"] is None
+    assert data["accounting_unknown"] == ["session.max_total_tokens"]
+    # 机制锚：暂停的根源是 durable 行被第一轮无 usage 请求写成 NULL 粘住
+    # （存储层与事件派生同一未知语义）——不是行读数 0 被 fail-closed 误判。
+    row = _session_row(app, session_id)
+    assert row.consumed.total_tokens is None
 
 
 def test_session_consumption_aggregates_across_runs(tmp_path):

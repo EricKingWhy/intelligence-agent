@@ -155,7 +155,7 @@ ContextBuilder
  3000  aux:compaction
  3100  aux:memory_extraction
  3200  aux:fork_tail
- 9000  frame:untrusted_data           （槽位：knowledge / websearch 共用）
+ 9000  frame:untrusted_data           （槽位：knowledge / websearch / tool_output 共用）
  9100  corrective:tool_failure_guard
  9200  frame:recovery_skipped
  9500  runtime:context_snapshot      （meta_user 目标）
@@ -381,7 +381,7 @@ class Target(str, Enum):
 - `aux:compaction` / `aux:memory_extraction` → `SYSTEM`（现状即 `SystemMessage`）；
 - `aux:fork_tail` → `META_USER`（现状即 `HumanMessage`，T4 首个消费者）；
 - `runtime:context_snapshot` → `META_USER`（T7，唯一带"不落盘"额外约束的 section）；
-- `frame:untrusted_*` / `corrective:tool_failure_guard` / `frame:recovery_skipped` → `FRAGMENT`（T8）。这三类文本**不是消息**：分别嵌进工具结果内容（`knowledge/tools.py`、`websearch/tools.py`）、注入的会话事件内容（`agent/runtime.py` 纠偏）、合成 ToolResult（`recovery/coordinator.py`）。给它们标 `SYSTEM`/`META_USER` 是假信息——调用方据此去装 SystemMessage/HumanMessage 就会装错。
+- `frame:untrusted_*` / `corrective:tool_failure_guard` / `frame:recovery_skipped` → `FRAGMENT`（T8）。这三类文本**不是消息**：分别嵌进工具结果内容（`knowledge/tools.py`、`websearch/tools.py`；`#519` 起工具执行结果同样嵌入——`tools/bash.py`、`tools/read.py`、`tools/edit.py`、artifact 读取类，共用 `frame:untrusted_tool_output`）、注入的会话事件内容（`agent/runtime.py` 纠偏）、合成 ToolResult（`recovery/coordinator.py`）。给它们标 `SYSTEM`/`META_USER` 是假信息——调用方据此去装 SystemMessage/HumanMessage 就会装错。
 
 **`FRAGMENT` 的消费者用 `.fragment_text`**（与 `.system_text` / `.meta_user_text` 并列）。`FRAGMENT` section 受同样的 R1/R2/R3 校验，scope 照样参与筛选与启动自检；`"*"` 同样不匹配非 `profile:` scope，所以 persona / 工具 guidance **不会**漏进这些片段。
 
@@ -397,7 +397,7 @@ SECTION_ORDERS: dict[str, int] = {
     "aux:compaction": 3000,
     "aux:memory_extraction": 3100,
     "aux:fork_tail": 3200,
-    "frame:untrusted_data": 9000,       # 槽位：knowledge / websearch 两条 frame section 共用
+    "frame:untrusted_data": 9000,       # 槽位：knowledge / websearch / tool_output 三条 frame section 共用
     "corrective:tool_failure_guard": 9100,
     "frame:recovery_skipped": 9200,     # T8：恢复期"未启动即跳过"的合成 ToolResult 文案
     "runtime:context_snapshot": 9500,
