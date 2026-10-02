@@ -1,0 +1,6 @@
+{
+  "raw_sha256": "c33d1e3021d7519dcb57bb1276b07fcd1229e779d86cf98637bd438b7d8a6b56",
+  "raw_bytes": 254,
+  "encoding": "utf-8",
+  "text": "\r\n RUN  v5.0.0 C:/Users/王浩宇/.codex/worktrees/agents-rules-release/intelligence-agent/web\r\n\r\n\r\n Test Files  1 passed (1)\r\n      Tests  6 passed (6)\r\n   Start at  01:41:42\r\n   Duration  4.87s (environment 47%, tests 31%, import 13%, transform 8%)\r\n\r\n"
+}
