@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -141,10 +142,25 @@ _SECRET_PATTERNS: tuple[tuple[SecretKind, re.Pattern[str]], ...] = (
     (SecretKind.JWT, re.compile(
         r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")),
     (SecretKind.BEARER_TOKEN, re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{16,}")),
+    # ASCII 关键词的密码赋值。两点与 #558 相关的扩展：
+    #   边界——用 ASCII 词字符 lookaround 取代 `\b`：CJK 属于 Unicode `\w`，
+    #   「我的password=…」里 `\b` 在 `的|password` 处永不成立，混排整类漏检；
+    #   lookaround 只挡 ASCII 词字符，纯 ASCII 文本的行为与 `\b` 逐字一致。
+    #   连接符——加全角冒号与「是」：「我的token是 …」是票面点名的漏检句式；
+    #   裸 `token` 是工具描述「令牌永不保存」的承诺词面（gitleaks generic-api-key
+    #   的关键词表同含 token/password/secret，其误报靠熵+停用词，本仓按 R7 不做熵，
+    #   以更窄的赋值形状 + 最小值长替代）。
     (SecretKind.PASSWORD_ASSIGNMENT, re.compile(
-        r"(?i)\b(?:password|passwd|pwd|passphrase|secret|api[_\- ]?key|"
-        r"access[_\- ]?token|auth[_\- ]?token|client[_\- ]?secret|private[_\- ]?key)\b"
-        r"\s*[:=]\s*\S{4,}")),
+        r"(?i)(?<![a-z0-9_])(?:password|passwd|pwd|passphrase|secret|"
+        r"api[_\- ]?key|access[_\- ]?token|auth[_\- ]?token|client[_\- ]?secret|"
+        r"private[_\- ]?key|token)(?![a-z0-9_])"
+        r"\s*[:=：是]\s*\S{4,}")),
+    # 中文关键词分支（#558）：密码/密钥/口令/令牌 + [:=：是] + 值。确定性扩展，
+    # 不引入熵启发式；不设 ASCII `\b`（CJK 相邻处 `\b` 不成立，理由见上）。
+    # 「是」作连接符在赋值句（密码是 X）与普通陈述（密码是常见问题）之间无法用
+    # 句法区分——误报方向是拒掉一条合法记忆，与 R7「宁可少记」同向。
+    (SecretKind.PASSWORD_ASSIGNMENT, re.compile(
+        r"(?:密码|密钥|口令|令牌)\s*[:=：是]\s*\S{4,}")),
 )
 
 
@@ -153,6 +169,11 @@ def find_secret(*texts: str) -> SecretKind | None:
 
     接受多段文本（内容 / payload 字段 / 证据摘录）是为了一次扫完一条候选——
     逐面各扫一次会让"某个面忘了扫"变成一条静默的绕过路径（T4 组装模型输入时同样用它）。
+
+    每段文本扫两遍：原串一遍；含兼容等价变体（全角 / 连字等，#558）的文本再在
+    **NFKC 归一化副本**上扫一遍（UAX#15：匹配前归一化是官方姿势，`is_normalized`
+    是零拷贝快路径——绝大多数文本原生即 NFKC）。归一化只用于**检测**：副本索引
+    因 NFKC 变长映射不回原文，定位语义见 `cut_at_secret`。
     """
     for text in texts:
         if not text:
@@ -160,6 +181,11 @@ def find_secret(*texts: str) -> SecretKind | None:
         for kind, pattern in _SECRET_PATTERNS:
             if pattern.search(text):
                 return kind
+        if not unicodedata.is_normalized("NFKC", text):
+            normalized = unicodedata.normalize("NFKC", text)
+            for kind, pattern in _SECRET_PATTERNS:
+                if pattern.search(normalized):
+                    return kind
     return None
 
 
@@ -174,7 +200,16 @@ def cut_at_secret(text: str) -> tuple[str, SecretKind | None]:
 
     多个模式各自 `search` 后取**最早**的起点：某个模式先命中但位置更靠后时，
     只处理它就会把另一个更早的秘密留在前缀里。
+
+    NFKC 变体（#558）：文本**不是**原生 NFKC 且归一化副本命中时，副本索引因 NFKC
+    变长映射不回原文——无法证明任何前缀干净 ⇒ **整体拒绝**（返回空前缀）。宁丢
+    前缀，不漏秘密。原生 NFKC 的文本（绝大多数）副本与原串逐字相同，切点语义不变。
     """
+    if not unicodedata.is_normalized("NFKC", text):
+        normalized = unicodedata.normalize("NFKC", text)
+        for kind, pattern in _SECRET_PATTERNS:
+            if pattern.search(normalized):
+                return "", kind
     earliest: int | None = None
     hit: SecretKind | None = None
     for kind, pattern in _SECRET_PATTERNS:

@@ -43,6 +43,7 @@ from agent_harness.memory.v2.policy import (
     PolicyRejection,
     SecretKind,
     ToolOutcome,
+    cut_at_secret,
     durable_value,
     find_secret,
     read_tool_result,
@@ -227,6 +228,81 @@ def test_ordinary_text_is_not_flagged_as_a_secret(text: str) -> None:
     assert find_secret(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 票面 #558 的原始漏检句式：中文关键词 + 中文连接符。
+        "我的密码是 SuperSecret123!",
+        "密码：SuperSecret123",
+        "密钥是 hunter2secret",
+        "口令：hunter2secret",
+        # 英文关键词 + 中文连接符的混排（"我的token是 …" 同为票面点名漏检）。
+        "我的token是 hunter2secret",
+        # 中文前缀 + ASCII 关键词：`\b` 在 CJK 相邻处永不成立（CJK 属 Unicode `\w`），
+        # 边界必须按 ASCII 词字符判，否则混排整类漏检。
+        "我的password=SuperSecret123",
+        # 兼容等价变体（全角）：原始串不命中，NFKC 归一化副本命中（UAX#15）。
+        "ｐａｓｓｗｏｒｄ：Ｓｕｐｅｒ123",
+        "ＡＰＩ＿ＫＥＹ：live123456",
+    ],
+)
+def test_multilingual_password_assignments_are_caught(text: str) -> None:
+    """中文「密码/密钥是…」句式与全角变体同样是密码赋值（#558）。
+
+    工具描述承诺「密钥、令牌、密码和私钥永不保存」对中文用户同样生效；这是确定性
+    关键词扩展，不引入熵启发式（R7 既有取舍不变）。
+    """
+    assert find_secret(text) is SecretKind.PASSWORD_ASSIGNMENT
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "密码策略要求定期更换",
+        "他忘记了密码",
+        "令牌桶算法在限制请求速率",
+        "password policy requires periodic rotation",
+        "这个 key insight 来自 README",
+    ],
+)
+def test_chinese_ordinary_text_is_still_not_flagged(text: str) -> None:
+    """中文反控：没有「关键词 + 连接符 + 值」形状的正常陈述不报警。"""
+    assert find_secret(text) is None
+
+
+def test_chinese_secret_cut_preserves_the_exact_raw_prefix() -> None:
+    """原文命中时切点是**原文**索引——归一化副本只用于检测，不用于定位（#558）。"""
+    prefix, kind = cut_at_secret("正常前缀。密码是abc12345")
+    assert kind is SecretKind.PASSWORD_ASSIGNMENT
+    assert prefix == "正常前缀。"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 仅归一化副本命中：NFKC 变长，副本索引映射不回原文。
+        "前缀 ｐａｓｓｗｏｒｄ：Ｓｕｐｅｒ123",
+        # 原文命中与归一化副本命中并存：无法证明 raw 切点之前没有变体秘密，
+        # 同样整体拒绝。
+        "password=abc12345 ｐａｓｓｗｏｒｄ：ｘｙｚ",
+    ],
+)
+def test_normalization_only_hits_reject_the_whole_text(text: str) -> None:
+    """NFKC 会改变长度：归一化副本里的命中点无法映射回原文 ⇒ 整体拒绝（fail-closed）。
+
+    宁丢前缀，不漏秘密（AC9 优先于保留无害前缀）。
+    """
+    prefix, kind = cut_at_secret(text)
+    assert kind is SecretKind.PASSWORD_ASSIGNMENT
+    assert prefix == ""
+
+
+def test_normalized_clean_text_keeps_exact_cut_semantics() -> None:
+    """原生 NFKC 文本走原文扫描：无命中原样返回，切点语义与既有行为逐字一致。"""
+    assert cut_at_secret("正常文本，没有秘密") == ("正常文本，没有秘密", None)
+    assert cut_at_secret("先 password=abc12345 后") == ("先 ", SecretKind.PASSWORD_ASSIGNMENT)
+
+
 # --------------------------------------------------------------------------------------
 # 第 2 组：秘密候选一律拒绝，且**不看**模型自陈（R7 / AC3）
 # --------------------------------------------------------------------------------------
@@ -238,8 +314,10 @@ def test_ordinary_text_is_not_flagged_as_a_secret(text: str) -> None:
         {"content": "用户的 token 是 sk-abcdefghijklmnopqrstuv"},
         {"payload": _payload(fact="npm token: ghp_0123456789abcdefghijklmnop")},
         {"evidence": [_evidence("u:1", "user", "password = correct-horse-battery")]},
+        {"content": "我的密码是 SuperSecret123!"},
+        {"payload": _payload(fact="密钥是 hunter2secret")},
     ],
-    ids=["in content", "in payload", "in evidence excerpt"],
+    ids=["in content", "in payload", "in evidence excerpt", "in chinese content", "in chinese payload"],
 )
 def test_a_secret_anywhere_in_a_candidate_rejects_it(overrides: dict) -> None:
     outcome = _select([_candidate(**overrides)])
