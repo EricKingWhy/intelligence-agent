@@ -23,6 +23,7 @@ import os
 import shutil
 import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -91,6 +92,23 @@ class SessionSummaryStats:
     archived: bool = False
 
 
+#: #516：目录扫描 stat 批次的共享线程池（懒建）。stat 在 syscall 期间释放 GIL，
+#: 分块并行把 4000 文件的现读 mtime 从 ~200ms 压到几十 ms；worker 数再往上调
+#: 实测不再改善（NTFS 元数据吞吐饱和），8 是占用与收益的平衡点。
+_STAT_POOL_LOCK = threading.Lock()
+_STAT_POOL: ThreadPoolExecutor | None = None
+
+
+def _stat_pool() -> ThreadPoolExecutor:
+    global _STAT_POOL
+    with _STAT_POOL_LOCK:
+        if _STAT_POOL is None:
+            _STAT_POOL = ThreadPoolExecutor(
+                max_workers=8, thread_name_prefix="session-list-stat"
+            )
+        return _STAT_POOL
+
+
 class JsonlSessionStore:
     """JSONL append-only 事件存储。
 
@@ -120,6 +138,13 @@ class JsonlSessionStore:
         # 进程重启即归零。它**不落盘、不可恢复**，因此不是 ADR-0029 D1 反对的"墓碑"
         # （那条反对的是"已删但还在"的半状态）。
         self._deleted_ids: set[str] = set()
+        # 列表页摘要缓存（#516）：{session_id: ((size, mtime_ns), 摘要)}。4000 会话的
+        # 列表页每刷一次都重扫全部文件太贵——戳未变直接复用上次结果。与 _last_seq
+        # 同款纪律：戳变化 = 本实例之外的写者动过文件 → 以磁盘为准重扫；结构由
+        # _state_guard 保护（读侧 .get 不加锁：dict 单键读取原子，脏读最坏多扫一次）。
+        self._summary_cache: dict[
+            str, tuple[tuple[int, int], SessionSummaryStats]
+        ] = {}
         self._state_guard = threading.Lock()
 
     def _session_dir(self, session_id: str) -> Path:
@@ -270,12 +295,52 @@ class JsonlSessionStore:
         return events
 
     def read_session_summary(self, session_id: str) -> SessionSummaryStats | None:
-        """列表页快路径：单趟流式扫描，只解析头部 + 末行。
+        """列表页快路径：单趟流式扫描 + 文件戳缓存（#516）。
 
         GET /api/sessions 曾对每个会话做全量 JSON 解析（30 会话 × 2000 事件
         ≈ 秒级串行阻塞），而列表页只需要：首条 user 消息（头部早退）、首末
         事件时间（首行 + 末行）、事件数（行计数）。本方法把解析量从 O(全部
         事件) 压到 O(头部上限 + 1)。
+
+        缓存契约（#516）：文件戳 `(size, mtime_ns)` 未变 → 返回上次结果（同一
+        对象，不再扫盘）；戳变化（外部写者追加，size 必变）→ 以磁盘为准重扫。
+        与 `_last_seq` 同款纪律：缓存只服务本实例的重复读，跨实例/跨进程一致性
+        以戳为准。写缓存前再取一次戳、与扫描前一致才入——与扫描并发的外部追加
+        不会被误标为已缓存（否则「旧内容 + 新戳」会静默钉住旧结果）。
+        """
+        path = self._events_path(session_id)
+        if not path.exists():
+            return None
+        cached = self._summary_cache.get(session_id)
+        if cached is not None and self._summary_stamp(path) == cached[0]:
+            return cached[1]
+        stamp_before = self._summary_stamp(path)
+        stats = self._scan_session_summary(session_id, path)
+        if stamp_before == self._summary_stamp(path):
+            with self._state_guard:
+                self._summary_cache[session_id] = (stamp_before, stats)
+        return stats
+
+    def read_session_summaries(
+        self, session_ids: list[str]
+    ) -> list[SessionSummaryStats | None]:
+        """批量摘要（#516）：同一批 id 在**一次** to_thread 卸载里读完。
+
+        逐 id `run_sync(read_session_summary, sid)` 在突发并发下每个 id 都要排一次
+        线程池队列（100 并发 × 50 行 = 5000 次 hop），延迟被排队放大；批量化后每
+        请求只剩一次 hop。语义与逐条调用逐位一致（复用同一缓存与回退路径）。
+        """
+        return [self.read_session_summary(session_id) for session_id in session_ids]
+
+    @staticmethod
+    def _summary_stamp(path: Path) -> tuple[int, int]:
+        stat = path.stat()
+        return (stat.st_size, stat.st_mtime_ns)
+
+    def _scan_session_summary(
+        self, session_id: str, path: Path
+    ) -> SessionSummaryStats:
+        """摘要单趟扫描本体（无缓存，read_session_summary 的实现细节）。
 
         精确性契约：扫描路径上发现任何损坏行 → 整体回退 read_events 全量
         解析（列表语义与全量严格一致，只是慢）。未扫描到的中段损坏行会让
@@ -283,9 +348,6 @@ class JsonlSessionStore:
         集中在末行，已覆盖），属显示级字段的已知取舍；resume 恢复仍走
         read_events 全量容错，不受影响。
         """
-        path = self._events_path(session_id)
-        if not path.exists():
-            return None
 
         event_count = 0
         first_time: str | None = None
@@ -404,21 +466,44 @@ class JsonlSessionStore:
         """列出 root 下所有有 events.jsonl 的 session_id，按最近修改倒序。
 
         Phase 9 / Web UI 用：GET /sessions 的基础。空 root 返回空列表。
+
+        #516：`os.scandir` 的 dirent 自带 is_dir（不再额外 stat），`events.jsonl`
+        的存在性与 mtime 用**单次** `os.stat` 合并判定（异常代替 exists 预检）；
+        stat 批次在线程池里并行执行——`os.stat` 在 syscall 期间释放 GIL，4000
+        文件从 ~200ms 串行压到几十 ms（AC 的 100 并发列表场景下这是瓶颈大头）。
+        顺序语义不变：mtime **每次请求现读**，外部 utime / 外部写者下一眼生效
+        （`test_list_by_workspace_follows_ledger_order_not_activity` 钉死），线程
+        池只是同一批 stat 的并行执行，不引入任何缓存。
         """
         if not self._root.exists():
             return []
+        root_str = str(self._root)
+        with os.scandir(root_str) as entries:
+            candidates = [
+                (entry.name, entry.path) for entry in entries if entry.is_dir()
+            ]
+
+        def _stat_chunk(chunk: list[tuple[str, str]]) -> list[tuple[str, float]]:
+            out: list[tuple[str, float]] = []
+            for name, dir_path in chunk:
+                try:
+                    mtime = os.stat(os.path.join(dir_path, "events.jsonl")).st_mtime
+                except OSError:
+                    continue
+                out.append((name, mtime))
+            return out
+
         ids: list[tuple[str, float]] = []
-        for entry in self._root.iterdir():
-            if not entry.is_dir():
-                continue
-            events_path = entry / "events.jsonl"
-            if not events_path.exists():
-                continue
-            try:
-                mtime = events_path.stat().st_mtime
-            except OSError:
-                continue
-            ids.append((entry.name, mtime))
+        pool = _stat_pool()
+        # 按块提交：块序 = scandir 序，拼接后与原串行循环的收集顺序逐位一致
+        # （同为 scandir 序），mtime 平局时的稳定序不变。
+        step = 256
+        futures = [
+            pool.submit(_stat_chunk, candidates[i : i + step])
+            for i in range(0, len(candidates), step)
+        ]
+        for future in futures:
+            ids.extend(future.result())
         # 按修改时间倒序（最近在前）
         ids.sort(key=lambda x: x[1], reverse=True)
         return [sid for sid, _ in ids]

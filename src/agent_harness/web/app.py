@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -1302,7 +1309,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/sessions")
     async def list_sessions(
-        workspace_id: str | None = None, include_archived: bool = False
+        workspace_id: str | None = None,
+        include_archived: bool = False,
+        limit: int | None = Query(default=None, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
     ) -> list[SessionSummary]:
         """列历史 session。
 
@@ -1312,17 +1322,25 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         - `?include_archived=true`（#171）：把已归档的会话也列出来（前端"显示已归档"
           开关）。**默认 false 即不列**；两条路径（默认列表 / 项目视图）同一规则。
           非布尔值 → 422（FastAPI 的 bool query 语义，不自造一套）。
+        - `?limit=N&offset=M`（#516）：分页窗口——N 是行数上限（1–500），M 是起点。
+          校验交给 FastAPI Query（ge/le），非法值 422。切片发生在读摘要之前，所以
+          limit=1 是 O(1)；归档过滤先行，已归档行不占 limit 预算；不传 limit 保持
+          全量语义（既有调用方零迁移）。
         每行都带 `workspace`（`null` = 未分组）与 `archived`（徽标真值）。
 
         列表页只需摘要字段——store.read_session_summary 单趟流式扫描
         （头部早退 + 末行），不再全量解析每个 JSONL（30 会话 × 2000 事件
-        曾需秒级串行解析，现约几十 ms）。损坏行走 store 内全量回退，摘要
+        曾需秒级串行解析，现约几十 ms）；#516 起同会话重复读由文件戳缓存兜住，
+        翻页/刷新不再重扫未变化的文件。损坏行走 store 内全量回退，摘要
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
         service = session_service(app.state.agent)
         try:
             summaries = await service.list_sessions(
-                workspace_id=workspace_id, include_archived=include_archived
+                workspace_id=workspace_id,
+                include_archived=include_archived,
+                limit=limit,
+                offset=offset,
             )
         except WorkspaceNotFound as e:
             raise http_error(e) from e

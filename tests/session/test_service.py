@@ -246,3 +246,31 @@ class TestWorkspaceNameValidation:
         """workspace=None → 返回 None（向后兼容）。"""
         service = session_service(app_state)
         assert service._validate_workspace_name(None) is None
+
+
+@pytest.mark.asyncio
+async def test_list_without_workspace_index_rows_ungrouped(
+    make_session_service, tmp_path
+) -> None:
+    """#516 回归（原 tests/web 私有断言迁移）：装配里没有 workspace 索引
+    （CLI / 无 header 的 RecoveryStores）→ 列表行全部未分组（workspace=None）。
+
+    这不是"查不到"，而是**根本没有查的地方**——refs 构建分支在 index 为 None
+    时直接给空映射，绝不伪造。
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from agent_harness.session import JsonlSessionStore, Session
+
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    Session.start(store)
+    service = make_session_service(
+        store=store,
+        session_meta_store=SimpleNamespace(list_all=AsyncMock(return_value=[])),
+    )
+
+    result = await service.list_sessions()
+
+    assert len(result) == 1
+    assert result[0].workspace is None

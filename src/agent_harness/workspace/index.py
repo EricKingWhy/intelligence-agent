@@ -225,6 +225,37 @@ class WorkspaceIndex:
                 return self._view(self._records[workspace_id])
         return None
 
+    def workspace_refs_of_sessions(
+        self, session_ids: list[str]
+    ) -> dict[str, Workspace]:
+        """批量成员资格判定（#516 分页路径）：{session_id: 所属项目}，只判给定 id。
+
+        与逐 id 调 `workspace_of_session` 相比：那会把每个项目的账本候选重扫
+        |ids| 次（每次都读候选的 header）；本方法对每个项目只过滤「账本候选 ∩
+        给定 id」，header 读的上限是 min(|ids|, 候选数) × 项目数，**不随全库
+        会话数走**——4000 会话 + 默认项目时全量映射每请求要读 4000 个 header
+        （实测秒级），这是 GET /api/sessions?limit=50 p95<1s 的最后一块。
+
+        成员资格与 `_visible_ids` 同源（`_filter_visible` 三道闸：有 header +
+        cwd 逐字符相等 + 非内部子会话）。同一 id 属于多个项目时以**注册表序
+        最后一个**为准——与全量映射（按 `_order` 顺序逐项覆盖赋值）的语义一致。
+        返回的是 record 本体（`session_ids` 字段不保证新鲜）；调用方只取
+        id / title，不消费成员列表——成员列表的权威口径仍是 `_visible_ids`。
+        """
+        self._require_initialized()
+        wanted = set(session_ids)
+        refs: dict[str, Workspace] = {}
+        for workspace_id in self._order:
+            record = self._records[workspace_id]
+            candidates = [
+                sid
+                for sid in self._ledger.get(workspace_id, [])
+                if sid in wanted
+            ]
+            for sid in self._filter_visible(record, candidates):
+                refs[sid] = record
+        return refs
+
     # —— 实体写入 ——
 
     async def create(self, path: str | Path, title: str | None = None) -> Workspace:

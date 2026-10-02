@@ -582,7 +582,12 @@ class SessionService:
     # ── 只读操作 ─────────────────────────────────────────────────────
 
     async def list_sessions(
-        self, *, workspace_id: str | None = None, include_archived: bool = False
+        self,
+        *,
+        workspace_id: str | None = None,
+        include_archived: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[SessionSummaryStats]:
         """列出 session 摘要。
 
@@ -594,6 +599,11 @@ class SessionService:
         - **`include_archived=False`（默认）**：#171 起**不返回**已归档会话；置 true 时
           照常返回（前端"显示已归档"开关用）。两条路径（默认列表 / 项目视图）用**同一
           规则**，避免"侧栏藏了、项目里还露着"。
+        - **`limit` / `offset`（#516）**：分页窗口。切片发生在归档过滤**之后**（已归档
+          的行不占 limit 预算，否则翻页出现"幽灵缺口"）、摘要扫描**之前**（每行摘要
+          是一次磁盘扫描——缓存未命中时，limit=1 若扫全部会话就不是 O(1)）。
+          `limit=None`（不传）保持全量语义，既有调用方零迁移。offset 越界 → 空列表
+          （Python 切片语义）。
 
         每行回填 `workspace`（AC1/AC2）：未分组 → `None`，绝不伪造。项目归属只来自
         `WorkspaceIndex`（账本 ∩ header cwd），**不读** sandbox 的 `WorkspaceRegistry`
@@ -631,13 +641,8 @@ class SessionService:
         else:
             ids = await anyio.to_thread.run_sync(store.list_session_ids)
             fixed_ref = None
-            # 一次 list() 建出全量 {session_id: 项目引用} 映射：逐行调
-            # `workspace_of_session` 会是 O(行数 × 项目数 × 账本长度)。`list()` 每条
-            # 账本只读一次 header，且 session_ids 已过成员资格过滤。
-            # `run_sync` 只接位置参数；读 header 同样是同步 I/O，一并卸载。
-            refs = await anyio.to_thread.run_sync(
-                self._workspace_refs_by_session, index
-            )
+            # refs 在切片之后构建（见下方 #516 注释）；此处先占位。
+            refs: dict[str, WorkspaceRef] | None = None
 
         # #171：归档标记在 DB、列表在文件系统 ⇒ join 两边。一次 `list_all()` 建出
         # {已归档 id}（逐行 `get()` 是 O(行数) 次 DB 往返）；**无 meta 行的会话不在
@@ -647,9 +652,34 @@ class SessionService:
         if not include_archived:
             ids = [sid for sid in ids if sid not in archived_ids]
 
+        # #516：切片先于摘要扫描（结构性 O(limit)，见 docstring）；归档过滤已先行，
+        # 已归档的行不占 limit 预算。
+        if limit is not None:
+            ids = ids[offset : offset + limit]
+        elif offset:
+            ids = ids[offset:]
+
+        # #516：refs 回填在切片之后——分页窗口只需要**被返回行**的项目归属。
+        # 旧路径在切片前用 index.list() 建全量映射，要读每个账本候选的 header
+        # （4000 会话 + 默认项目实测每请求秒级），limit=50 p95<1s 因此不可能达成。
+        # 窗口化的 `workspace_refs_of_sessions` 只对窗口 id 判成员资格（header 读
+        # 上限 = min(窗口, 候选数) × 项目数）；limit=None（全量）时窗口 = 全部 id，
+        # 过滤候选集与旧全量路径相同，成本与结果逐字段一致。同步 I/O 走 run_sync
+        # 卸载（与列表页其余磁盘读一致）。
+        if refs is None:
+            refs = (
+                await anyio.to_thread.run_sync(index.workspace_refs_of_sessions, ids)
+                if index is not None
+                else {}
+            )
+
         summaries: list[SessionSummaryStats] = []
-        for sid in ids:
-            stats = await anyio.to_thread.run_sync(store.read_session_summary, sid)
+        # #516：批量读（一次 to_thread 卸载）——逐 id hop 在并发突发下被线程池
+        # 排队放大延迟（100 并发 × 50 行 = 5000 次排队）。
+        stats_list = await anyio.to_thread.run_sync(
+            store.read_session_summaries, ids
+        )
+        for sid, stats in zip(ids, stats_list):
             if stats is None or stats.event_count == 0:
                 continue
             backfill: dict[str, Any] = {"archived": sid in archived_ids}
@@ -667,20 +697,6 @@ class SessionService:
         """
         metas = await self._session_meta_store.list_all()
         return {meta.session_id for meta in metas if meta.archived}
-
-    @staticmethod
-    def _workspace_refs_by_session(
-        index: WorkspaceIndex | None,
-    ) -> dict[str, WorkspaceRef]:
-        """`{session_id: 项目引用}`（`index` 为 None → 空映射 = 全部未分组）。"""
-        if index is None:
-            return {}
-        refs: dict[str, WorkspaceRef] = {}
-        for workspace in index.list():
-            ref = WorkspaceRef(id=workspace.id, title=workspace.title)
-            for session_id in workspace.session_ids:
-                refs[session_id] = ref
-        return refs
 
     async def get_events(self, session_id: str) -> list:
         """读取 session 的完整事件历史（只读，不 mutate）。
