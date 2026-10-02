@@ -6853,3 +6853,12 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **读数**：红读数实现前实测（decisions 忽略→409、detail 无清单、非法值静默）；修复后 web+recovery+session 全套 1175P 绿；`ruff check .` 绿；既有 409 形状钉 2 处 + #566 文案滞留钉 1 处按新合同更新。
 - **台账**：`docs/review_ledger.d/t547-recover-decisions-contract-5cc42015-99743ba9.tsv`（唯一写全处）。
 - **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。#549 四子票拆分已获批准，开子票待 §9.1.1 再批；#549-c 方向已定 (ii) 文档化 DEFER。
+## 2026-10-03 · A 线 #549 Sandbox 边界三切片（分支 `fix/t547-t566-sandbox-recovery`，base `4e8cb79e`）
+
+- **拆分（用户批准 2026-10-03）**：#549 按「进程树回收 / 资源配额 / 错误映射 / 权限默认值」拆四片；前三片本批交付，权限默认值（-d）移交 #358（W-14）不在本批扩票；在 GitHub 开四张子票待 §9.1.1 再批。
+- **代码笔 `a7d72ad8`（-a 进程树回收，SB-01/SB-03）**：POSIX 正常返回路径幂等 killpg（_reclaim_process_group，join 前未超时未取消时调用）；Windows Job Object KILL_ON_JOB_CLOSE 兜底本就在；setsid 脱组盲区如实记录（ADR-0050 D2）。3 跨平台单测 + POSIX 集成探针 skipif nt（Windows 上诚实跳过，POSIX 绿待 CI/xval）。
+- **代码笔 `2d27e020`（-b 错误映射，SB-07/L-12）**：WriteTool 目录/父路径形态错误从裸 OSError→PERMISSION_DENIED 改映射既有 ErrorCode.INVALID_ARGUMENT + 可行动 message；真权限错保持 PERMISSION_DENIED。3 新增用例。
+- **代码笔 `bdf20a14`（-c 配额文档化，SB-04）**：ADR-0050 落盘四项决定（D1 回收 / D2 盲区 / D3 配额 DEFER 用户裁决 (ii) / D4 移交 #358）+ local.py docstring 声明无内存/CPU/外联配额、不可信负载走 DockerSandbox。
+- **读数**：每片各自 focused tests + ruff check . 绿（-a/-c 沙盒 56P；-b coding tools 全套）。
+- **台账**：`docs/review_ledger.d/t549-sandbox-boundary-4e8cb79e-bdf20a14.tsv`（唯一写全处，三行对应三笔）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。四子票在 GitHub 的开票动作待用户 §9.1.1 批准。
