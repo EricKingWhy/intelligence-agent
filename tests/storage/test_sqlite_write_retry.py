@@ -164,12 +164,16 @@ async def test_workspace_store_retries_through_transient_lock(
 
     代表性取 `set_meta`（projects 路由的真实写路径）；装饰器是同一份实现，
     一条行为测试 + 全量包装在场断言即覆盖新三张 Store。
+    patch 目标是 workspace/store.py 的**本模块**常量（修后重审 P3-C：此前
+    patch 了 storage.sqlite 的同名常量，首尝试的 10s busy_timeout 直接把
+    0.5s 锁等穿——测试空转绿，剥掉装饰器也不红）。hold=0.3s 落在
+    busy_timeout(50ms) 首试超时之后、重试梯子（~0.7s）之内，重试真实发生。
     """
-    monkeypatch.setattr("agent_harness.storage.sqlite._BUSY_TIMEOUT_MS", 50)
+    monkeypatch.setattr("agent_harness.workspace.store._BUSY_TIMEOUT_MS", 50)
     store = SqliteWorkspaceStore(tmp_path / "state.db")
     await store.initialize()
 
-    holder = _LockHolder(tmp_path / "state.db", hold_seconds=0.5)
+    holder = _LockHolder(tmp_path / "state.db", hold_seconds=0.3)
     holder.start()
     try:
         await store.set_meta("k", "v")

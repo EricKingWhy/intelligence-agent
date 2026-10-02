@@ -201,6 +201,14 @@ def test_openapi_documents_503_on_newly_guaranteed_endpoints(
         ("/api/sessions/{session_id}/messages", "post"),
         ("/api/sessions/{session_id}/queue/flush", "post"),
         ("/api/sessions", "post"),
+        # projects 族写端点（修后重审 P2-A）：_translated() 的 StorageBusyError
+        # 臂包住全部项目写操作——resolve/list/get 是读，不在其中。
+        ("/api/projects", "post"),
+        ("/api/projects/{project_id}", "patch"),
+        ("/api/projects/{project_id}", "delete"),
+        ("/api/projects/{project_id}/sessions", "post"),
+        ("/api/projects/{project_id}/sessions/{session_id}", "delete"),
+        ("/api/projects/{project_id}/sessions/{session_id}/order", "post"),
     }
     for path, method in expectations:
         op = api["paths"][path][method]
@@ -284,3 +292,37 @@ def test_unexpected_exception_returns_json_500(tmp_path: Path) -> None:
     assert resp.status_code == 500
     assert resp.headers["content-type"].startswith("application/json")
     assert resp.json() == {"detail": "Internal Server Error"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "service_method", "kwargs"),
+    [
+        ("post", "/api/sessions?launch=true", "create_and_launch",
+         {"json": {"task": "hi", "budget": {"local": {"max_agent_turns": 1}}}}),
+        ("post", "/api/sessions/abc123/resume", "resume_and_launch",
+         {"json": {"task": "hi"}}),
+        ("post", "/api/sessions/abc123/messages", "send_message",
+         {"json": {"content": "hi", "mode": "steer"}}),
+        ("post", "/api/sessions/abc123/queue/flush", "deliver_next_undelivered", {}),
+    ],
+)
+def test_launch_arms_map_storage_busy_to_503(
+    tmp_path: Path, method: str, path: str, service_method: str, kwargs: dict
+) -> None:
+    """修后重审（Standards P3-2）：create/resume/messages/flush 四个新
+    `StorageBusyError` 臂的行为红证——launch 路径写锁耗尽是 503，不裸 500。
+
+    在 service 边界 patch（异常映射是路由层契约；真实重试链由
+    test_sqlite_write_retry 的行为测试证明）。
+    """
+    from agent_harness.storage.sqlite import StorageBusyError
+
+    client = _client(tmp_path)
+    with patch(
+        f"agent_harness.session.service.SessionService.{service_method}",
+        new_callable=AsyncMock,
+        side_effect=StorageBusyError("SQLite 写锁竞争重试后仍超时"),
+    ):
+        resp = getattr(client, method)(path, **kwargs)
+    assert resp.status_code == 503, resp.text
+    assert "写锁" in resp.json()["detail"]
