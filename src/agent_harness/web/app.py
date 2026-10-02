@@ -506,7 +506,12 @@ class ApproveRequest(BaseModel):
     approval_id: str | None = None
     approved: bool = True
     decision: str | None = None
-    reason: str = ""
+    # #562 F6：reason 逐字写入 permission/resolved 事件日志，自由文本无上限 =
+    # 每次授权可重复放大（实测 50KB 原样入库）。上限 2000 **字符**（pydantic
+    # ``max_length`` 计的是 Python ``str`` 码点数，不是 UTF-8 字节——2000 个中文
+    # = 6000 字节仍合法）。超限经安全 422 出口拒绝，不回显原文（recon 核查：
+    # 前端 ``postApproval`` 根本不发 ``reason`` ⇒ 零误伤）。
+    reason: str = Field(default="", max_length=2000)
 
 
 class ResumeRequest(_AmendValueValidators):
@@ -1251,7 +1256,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # lone surrogate / `inf` / 深嵌套三种被判非法的输入都会让**错误处理器自己**
     # 抛异常 → 500（「正确地拒绝」退化成「拒绝时崩溃」）。位置紧挨 OpenAPI 对齐：
     # 两者都是「错误面」的护栏，且本函数不改任何真实成功响应的形状。
-    from agent_harness.web.wire_safety import install_wire_safety
+    from agent_harness.web.wire_safety import (
+        BodyDepthGuardMiddleware,
+        install_wire_safety,
+    )
 
     install_wire_safety(app)
 
@@ -1306,8 +1314,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
     _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
 
-    # 纯 ASGI 中间件（见类 docstring）：先 csp（内层）后 auth（外层），与
-    # 旧 BaseHTTPMiddleware 版注册顺序逐层一致；CORS 仍最后添加 = 最外层。
+    # 纯 ASGI 中间件（见类 docstring）：body 深度守卫最先添加 = 最内层，落点
+    # **在认证内层**——未认证请求先被 401 挡下，不做无谓的 body 扫描；先 csp
+    # （内层）后 auth（外层），与旧 BaseHTTPMiddleware 版注册顺序逐层一致；
+    # CORS 仍最后添加 = 最外层。
+    app.add_middleware(BodyDepthGuardMiddleware)
     app.add_middleware(CSPHeaderMiddleware)
     app.add_middleware(AuthSeamMiddleware, settings=settings)
 

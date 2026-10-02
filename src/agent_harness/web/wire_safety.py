@@ -30,13 +30,17 @@
 **入口拒绝 + 无副作用**。不做 U+FFFD 替换（替换会丢用户数据），不做全仓
 ``safe_dumps`` 重构；``ensure_ascii=False`` 对合法中文/emoji 本身正确，不是消灭目标。
 
-## 本模块只做两件事
+## 本模块做三件事
 
 - `lone_surrogate_path`：在 JSON 解码后的结构里定位第一个 lone surrogate，**只回
   位置不回值**（错误响应不得回显原始秘密）。WS 入口用它做帧级拒绝。
 - `install_wire_safety`：把 422 的 ``detail`` 投影成 ``{type, loc, msg}``。丢掉
   ``input`` / ``ctx`` / ``url`` 从根上掐断「回显原文」这条路——OpenAPI 的
   ``HTTPValidationError`` 只把这三个键列为 required，故**契约无需改动**。
+- `BodyDepthGuardMiddleware` + `json_container_depth`（#562 RL-04）：请求体 JSON
+  嵌套**深度配额**，落在解析**之前**的纯 ASGI 层。FastAPI 对超深 body 在
+  ``routing.py`` 的 ``json.loads`` 处 ``RecursionError``、被归成**裸 400**，
+  ``RequestValidationError`` 出口**结构性够不到**；配额必须比解析器更早独立判定。
 """
 
 from __future__ import annotations
@@ -172,3 +176,108 @@ async def _request_validation_error_response(
 def install_wire_safety(app: FastAPI) -> None:
     """把 422 校验错误出口换成上面的安全实现（在 ``create_app`` 里一行调用）。"""
     app.add_exception_handler(RequestValidationError, _request_validation_error_response)
+
+
+# ── #562 RL-04：请求体 JSON 嵌套深度配额 ─────────────────────────────────────
+
+#: 深度配额 422 的**固定字符串**信封（audit：错误响应不得回显原始秘密或递归结构）。
+#: 与 ``http_error`` 的业务 422 同形（``ErrorEnvelope``），OpenAPI 422 已声明
+#: oneOf 覆盖数组/字符串两种形态。
+BODY_TOO_DEEP_DETAIL = "request body nesting too deep"
+
+#: 请求体 JSON 容器嵌套深度上限（用户 2026-10-03 拍板 100，对齐 protobuf 默认值）。
+#: 深度定义：最深路径上的容器（object + array）层数，**最外层 body 容器记 1**。
+BODY_MAX_DEPTH = 100
+
+_OPEN_BYTES = frozenset(b"{[")
+_CLOSE_BYTES = frozenset(b"}]")
+
+
+def json_container_depth(raw: bytes) -> int:
+    """一次性、非递归、字符串感知地数出 JSON 容器（object/array）的最大嵌套深度。
+
+    - 最外层 body 容器记 1：``{"a":1}`` → 1；``{"a":{"b":1}}`` → 2；
+      ``{"n":[[0]]}`` → 3；空 body / 标量 → 0。
+    - 字符串内与反斜杠转义后的字符不计：``{"a":"[{["}`` → 1。
+    - 不配对的多余闭合不计成负（``{"a":}}}`` → 1）。
+
+    **不做 JSON 解析、不递归**——对任意输入都是全函数，绝不 ``RecursionError``。
+    这正是「解析前的配额判定」：解析器自己会在深输入上爆栈，配额必须比它更早。
+    """
+    depth = 0
+    deepest = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # double quote
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in _OPEN_BYTES:
+            depth += 1
+            deepest = max(deepest, depth)
+        elif byte in _CLOSE_BYTES and depth > 0:
+            depth -= 1
+    return deepest
+
+
+class BodyDepthGuardMiddleware:
+    """纯 ASGI 中间件：请求体 JSON 嵌套深度配额（#562 RL-04）。
+
+    **为什么必须在解析前的 ASGI 层**（recon562 §1.3）：FastAPI 深嵌套 body 在
+    ``fastapi/routing.py`` 的 ``json.loads`` 处抛 ``RecursionError``，被该模块的
+    ``except Exception`` 归成**裸 400** ``There was an error parsing the body``——
+    它到不了 ``RequestValidationError`` 出口，HTTP 错误处理器**结构性够不到**；
+    且等到 handler 触发时，解析代价（爆栈风险）已经付过。先在原始字节上数深度、
+    超限即回固定字符串 422，语义是「显式配额拒绝，而非拒绝时崩溃」。
+
+    与既有 CSP/Auth 同款「纯 ASGI、不经 BaseHTTPMiddleware」：读原始 body → 回放
+    给下游 → 只读不写、除缓冲外无副作用。
+    """
+
+    def __init__(self, app: Any, *, max_depth: int = BODY_MAX_DEPTH) -> None:
+        self.app = app
+        self.max_depth = max_depth
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        body = b""
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                # http.disconnect：客户端已断开，无法也不需再回包。
+                return
+            body += message.get("body", b"")
+            if not message.get("more_body", False):
+                break
+
+        if json_container_depth(body) > self.max_depth:
+            response = JSONResponse(
+                status_code=422, content={"detail": BODY_TOO_DEEP_DETAIL}
+            )
+            await response(scope, receive, send)
+            return
+
+        delivered = False
+
+        async def replay_receive() -> dict[str, Any]:
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            # 后续 receive **委托原始通道**：SSE 路由会再调 receive 探测客户端
+            # 断连，若这里伪造 http.disconnect，会把仍在线的客户端误判为断连、
+            # 让流式响应半途而废（实测：`ASGI callable returned without
+            # completing response`）。
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
