@@ -61,8 +61,15 @@ describe('#381（W-27）：PlanList 渲染', () => {
 
   it('四件套③④完成项划线+勾、未完成空心圆；完成组默认收起（zcode 同构）', () => {
     act(() => root.render(createElement(PlanList, { items: threeState })));
-    expect(container.querySelector('[data-plan-id="a"]')?.hasAttribute('hidden')).toBe(true);
+    const done = container.querySelector('[data-plan-id="a"]');
+    expect(done?.hasAttribute('hidden')).toBe(true);
+    // 折叠的执行层断言：hidden 的 UA 规则会被 `.plan-list-item{display:flex}`
+    // 盖过（真机第三次踩到，2026-10-02）——内联 display:none 才是跨样式表生效的
+    // 保证，且 jsdom 断言得到（workspace-panel/detail-peek 两次只有属性断言，
+    // CSS 侧回归全盲）。
+    expect(done?.getAttribute('style')).toContain('display: none');
     expect(container.querySelector('[data-plan-id="c"]')?.hasAttribute('hidden')).toBe(false);
+    expect(container.querySelector('[data-plan-id="c"]')?.getAttribute('style') ?? '').not.toContain('display: none');
     expect(container.querySelector('[data-plan-id="c"]')?.textContent).toContain('○');
     const toggle = container.querySelector<HTMLButtonElement>('.plan-list-toggle');
     expect(toggle?.getAttribute('aria-expanded')).toBe('false');
@@ -70,8 +77,9 @@ describe('#381（W-27）：PlanList 渲染', () => {
       toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(toggle?.getAttribute('aria-expanded')).toBe('true');
-    const done = container.querySelector('[data-plan-id="a"]');
     expect(done?.hasAttribute('hidden')).toBe(false);
+    // 展开后 style 属性被 React 清成空串（不一定是删除）——断言语义「不再隐藏」。
+    expect(done?.getAttribute('style') ?? '').not.toContain('display: none');
     expect(done?.className).toContain('plan-list-item-done');
     expect(done?.querySelector('svg')).not.toBeNull();
     expect(done?.textContent).toContain('任务 a');

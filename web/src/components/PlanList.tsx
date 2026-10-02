@@ -37,6 +37,11 @@ function PlanRow({ item, current, collapsed }: { item: PlanItem; current: boolea
       // 完成组折叠用 hidden 属性而非卸载/拆列表：节点留在同一父 <ul> 里，
       // key 对齐的 reconcile 跨状态翻转与折叠切换都不断（票面「不重新挂载」）。
       hidden={collapsed}
+      // 内联 display:none 是折叠的**执行层**：hidden 的 UA 规则会被作者样式
+      // `.plan-list-item { display: flex }` 盖过（workspace-panel / detail-peek
+      // 注释守卫各漏过一次后，2026-10-02 真机第三次踩到）——inline style 胜过
+      // 任何作者样式表，且 jsdom 断言得到，测试不再是盲区。
+      style={collapsed ? { display: 'none' } : undefined}
     >
       <span className="plan-list-marker">
         {done ? <Check size={13} strokeWidth={2.5} /> : current ? '→' : '○'}
