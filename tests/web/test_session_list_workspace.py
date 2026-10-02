@@ -28,7 +28,6 @@ from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from agent_harness.config import Settings
-from agent_harness.session.service import SessionService
 from agent_harness.web.app import SessionSummary, create_app
 from tests.scripted_model import ScriptedModel
 
