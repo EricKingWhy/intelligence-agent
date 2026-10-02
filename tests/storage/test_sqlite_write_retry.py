@@ -1,0 +1,491 @@
+"""#515 BUG-01：SQLite 共享库写路径锁竞争重试（TDD 红→绿）。
+
+soak 实测（#515 票面）：共享同一 harness.db 的各 Store 在持续写竞争下
+`busy_timeout=10s` 仍会超时，`sqlite3.OperationalError: database is locked`
+原样逃逸，`POST /api/sessions/{id}/archive` 在 480s 内打出 123×500。
+
+本文件钉住两层契约：
+
+1. **应用层重试**：锁超时形态的 OperationalError 按退避梯子做有限次重试。
+   重试安全的依据是锁语义本身——OperationalError 抛出时事务未提交，写方法
+   都是单语句原子写，整块重跑等价于首次执行。
+2. **不碰非锁错误**：坏路径等非锁 OperationalError 原样上抛（一次都不重试）；
+   IntegrityError 等约束冲突有自己的语义（#519 的域），不进本票的重试范围。
+
+锁竞争的制造方式：独立连接 `BEGIN IMMEDIATE` 持有写锁（WAL 下读者不受影响、
+写者阻塞），与 soak 的竞争形态一致；`_BUSY_TIMEOUT_MS` 调小让每次尝试快速
+失败，避免真实 10s 等待拖垮测试墙钟。
+
+覆盖面（审查 P2-3 修正）：票面根因 2 是「同一模式存在于共享 harness.db 的
+**所有** Store」——装饰覆盖从最初的 3 张（meta/checkpoint/operation）扩到
+共享同一库的全部 6 张（+ delegation_tree / workspace / transport）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+import threading
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import pytest
+
+import agent_harness.storage.sqlite as storage_sqlite
+from agent_harness.agent.run_budget import SessionLimits
+from agent_harness.storage import (
+    SessionMeta,
+    SqliteCheckpointStore,
+    SqliteOperationLedger,
+    SqliteSessionMetaStore,
+)
+from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.storage.operation import Operation, OperationState
+from agent_harness.storage.sqlite import StorageBusyError
+from agent_harness.transport import SqliteTransportLedger
+from agent_harness.workspace.store import SqliteWorkspaceStore
+
+
+class _LockHolder:
+    """独立连接持有写锁（BEGIN IMMEDIATE），模拟并发写者占住 harness.db。
+
+    `hold_seconds` 后自行释放（模拟瞬时竞争窗口）；不传则一直持有到 stop()，
+    用于制造"竞争持续超过重试预算"的耗尽场景。
+    """
+
+    def __init__(self, database_path: Path, *, hold_seconds: float = 10.0) -> None:
+        self._path = database_path
+        self._hold_seconds = hold_seconds
+        self._acquired = threading.Event()
+        self._release = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        con = sqlite3.connect(self._path, timeout=2.0)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            self._acquired.set()
+            self._release.wait(timeout=self._hold_seconds)
+        finally:
+            con.rollback()
+            con.close()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        assert self._acquired.wait(timeout=10.0), "锁持有线程没能拿到写锁"
+
+    def stop(self) -> None:
+        self._release.set()
+        assert self._thread is not None
+        self._thread.join(timeout=10.0)
+
+
+def _meta_store(tmp_path: Path, monkeypatch) -> SqliteSessionMetaStore:
+    monkeypatch.setattr("agent_harness.storage.sqlite._BUSY_TIMEOUT_MS", 50)
+    store = SqliteSessionMetaStore(tmp_path / "state.db")
+    return store
+
+
+@pytest.mark.asyncio
+async def test_set_archived_retries_through_transient_lock(tmp_path, monkeypatch) -> None:
+    """锁被短暂占用（< 重试预算）→ 退避梯子内锁释放 → 写成功。
+
+    这是 soak 里 123×500 的直接解法：archive 端点的 meta 写在瞬时竞争窗口内
+    自愈，不再把 OperationalError 打到 HTTP 面。
+    """
+    store = _meta_store(tmp_path, monkeypatch)
+    await store.initialize()
+    await store.upsert(
+        SessionMeta(session_id="s1", created_at="2026-10-02T00:00:00+00:00", agent_id="default")
+    )
+
+    holder = _LockHolder(tmp_path / "state.db", hold_seconds=0.5)
+    holder.start()
+    try:
+        await store.set_archived("s1", True)
+    finally:
+        holder.stop()
+
+    meta = await store.get("s1")
+    assert meta is not None and meta.archived is True
+
+
+@pytest.mark.asyncio
+async def test_set_archived_exhaustion_raises_storage_busy(tmp_path, monkeypatch) -> None:
+    """锁持续占用超过重试预算 → StorageBusyError，cause 保留末次 OperationalError。
+
+    耗尽必须是**显式新类型**而不是继续抛裸 OperationalError：web 层要按类型
+    把它映射成结构化 503（可重试的暂时故障），500 会把它伪装成服务端 bug。
+    """
+    store = _meta_store(tmp_path, monkeypatch)
+    await store.initialize()
+    await store.upsert(
+        SessionMeta(session_id="s1", created_at="2026-10-02T00:00:00+00:00", agent_id="default")
+    )
+
+    holder = _LockHolder(tmp_path / "state.db")
+    holder.start()
+    try:
+        with pytest.raises(StorageBusyError) as excinfo:
+            await store.set_archived("s1", True)
+    finally:
+        holder.stop()
+
+    assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+
+
+@pytest.mark.asyncio
+async def test_non_lock_operational_error_is_not_retried(tmp_path, monkeypatch) -> None:
+    """非锁 OperationalError（坏路径等）原样上抛，一次都不重试。
+
+    用「目录当 DB 路径」制造 `unable to open database file`——这不是锁竞争，
+    重试只会白等。断言重试的 sleep 一次都没被调过。
+    """
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async def _spy_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _spy_sleep)
+
+    store = SqliteSessionMetaStore(tmp_path)  # 目录，不是文件
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        await store.set_archived("s1", True)
+
+    assert not isinstance(excinfo.value, StorageBusyError)
+    assert "locked" not in str(excinfo.value).lower()
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_store_retries_through_transient_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """新覆盖的 workspace store 行为抽检：瞬时锁窗口内自愈（不止包装在场）。
+
+    代表性取 `set_meta`（projects 路由的真实写路径）；装饰器是同一份实现，
+    一条行为测试 + 全量包装在场断言即覆盖新三张 Store。
+    patch 目标是 workspace/store.py 的**本模块**常量（修后重审 P3-C：此前
+    patch 了 storage.sqlite 的同名常量，首尝试的 10s busy_timeout 直接把
+    0.5s 锁等穿——测试空转绿，剥掉装饰器也不红）。hold=0.3s 落在
+    busy_timeout(50ms) 首试超时之后、重试梯子（~0.7s）之内，重试真实发生。
+    """
+    monkeypatch.setattr("agent_harness.workspace.store._BUSY_TIMEOUT_MS", 50)
+    store = SqliteWorkspaceStore(tmp_path / "state.db")
+    await store.initialize()
+
+    holder = _LockHolder(tmp_path / "state.db", hold_seconds=0.3)
+    holder.start()
+    try:
+        await store.set_meta("k", "v")
+    finally:
+        holder.stop()
+
+    assert await store.get_meta("k") == "v"
+
+
+@pytest.mark.parametrize(
+    ("store_cls", "method_names"),
+    [
+        (
+            SqliteOperationLedger,
+            ("create", "update_state", "delete_for_session"),
+        ),
+        (SqliteCheckpointStore, ("save", "delete_for_session")),
+        (
+            SqliteSessionMetaStore,
+            (
+                "upsert",
+                "set_archived",
+                "update_last_checkpoint_seq",
+                "clear_delegation_parent",
+                "cleanup",
+            ),
+        ),
+        (
+            SqliteDelegationTreeLedger,
+            (
+                "initialize",
+                "reserve",
+                "observe_result",
+                "ensure_session_budget",
+                "admit_session_step",
+                "refund_session_turn",
+                "refund_session_step",
+                "record_session_model_requests",
+                "record_session_tools",
+                "update_session_limits",
+                "consume_session_delegation",
+                "refund_session_delegation",
+            ),
+        ),
+        (
+            SqliteWorkspaceStore,
+            (
+                "initialize",
+                "begin_change",
+                "write_record",
+                "prepend_record",
+                "append_record",
+                "drop_record",
+                "drop_order",
+                "drop_sessions",
+                "set_title",
+                "touch",
+                "replace_session_order",
+                "replace_workspace_order",
+                "set_meta",
+            ),
+        ),
+        (
+            SqliteTransportLedger,
+            ("initialize", "append", "delete_for_session"),
+        ),
+    ],
+)
+def test_write_methods_are_retry_wrapped(store_cls, method_names) -> None:
+    """共享 harness.db 的全部六张 Store 的全部写方法都必须挂上重试包装。
+
+    读方法（get / list / latest）不在范围内：WAL 下读者不被写者阻塞，没有
+    同样的失败形态。用 `__wrapped__`（functools.wraps 产物）证明包装真的在。
+    内存实现（delegation_tree 的 InMemory 类）不共享文件锁，不装饰——
+    恰好验证本断言只对 Sqlite 类生效。
+    """
+    for name in method_names:
+        method = getattr(store_cls, name)
+        assert getattr(method, "__wrapped__", None) is not None, (
+            f"{store_cls.__name__}.{name} 未挂锁竞争重试（#515 BUG-01）"
+        )
+
+
+@pytest.mark.asyncio
+async def test_admit_session_step_retry_does_not_double_reserve(tmp_path, monkeypatch) -> None:
+    """P2-B：admit 的 commit 后快照读撞锁 → 整方法重跑不得二次预留。
+
+    装饰器「整块重跑等价于首次执行」的前提是 OperationalError 抛出时事务未
+    提交；`admit_session_step` 在 `commit()` 之后还有一次 `_session_snapshot`
+    读——该读撞锁时，已提交的 turns/requests +1 已是持久账，重跑会把预留
+    再执行一遍（双计数，调用方却只拿到一次准入，refund 也只退一格）。
+
+    毒化第 2 次 `_session_snapshot` 读：修复前它位于 commit 之后（毒窗内，
+    回滚救不了已提交的 +1，重跑后账面 = 2）；修复后它位于事务内 commit 之前
+    （命中即整体回滚，重跑从干净账面重新预留，账面 = 1）。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    key = "sess-p2b"
+    await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=10, max_delegations=4),
+    )
+
+    original = SqliteDelegationTreeLedger._session_snapshot
+    calls = {"n": 0}
+
+    async def poisoned_second_read(self, connection, budget_key):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return await original(self, connection, budget_key)
+
+    monkeypatch.setattr(SqliteDelegationTreeLedger, "_session_snapshot", poisoned_second_read)
+
+    admission = await ledger.admit_session_step(key)
+    assert admission.accepted is True
+
+    con = sqlite3.connect(ledger.database_path)
+    try:
+        row = con.execute(
+            "SELECT agent_turns, model_requests FROM session_budgets WHERE budget_key = ?",
+            (key,),
+        ).fetchone()
+        admitted_events = con.execute(
+            "SELECT COUNT(*) FROM session_budget_events"
+            " WHERE budget_key = ? AND kind = 'step_admitted'",
+            (key,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert row == (1, 1), f"账面必须恰好一次预留，实际 {row}"
+    assert admission.snapshot.consumed.agent_turns == 1
+    assert admitted_events == 1, f"step_admitted 事件恰好一条，实际 {admitted_events}"
+
+
+@pytest.mark.asyncio
+async def test_update_session_limits_retry_does_not_fake_409(
+    tmp_path, monkeypatch,
+) -> None:
+    """#544 ①：update_session_limits 的 commit 后快照读撞锁 → 重跑不得伪 409。
+
+    与 P2-B 同型：CAS 更新在 commit 之后还有一次 `_session_snapshot` 读，该读
+    撞锁时 version 已 +1 并持久化，整方法重跑撞自己的 CAS（expected_version
+    失配）抛 BudgetConflict——调用方拿到伪 409，但账其实已改（非零副作用）。
+
+    毒化第 1 次 `_session_snapshot` 读：修复前位于 commit 之后（毒窗内，重跑
+    撞 CAS ⇒ BudgetConflict）；修复后位于事务内 commit 之前（命中即整体回滚，
+    重跑从旧 version 重新走完整 CAS 路径，正常返回）。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    key = "sess-i544-limits"
+    await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=10, max_delegations=4),
+    )
+
+    original = SqliteDelegationTreeLedger._session_snapshot
+    calls = {"n": 0}
+
+    async def poisoned_first_read(self, connection, budget_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return await original(self, connection, budget_key)
+
+    monkeypatch.setattr(SqliteDelegationTreeLedger, "_session_snapshot", poisoned_first_read)
+
+    snapshot = await ledger.update_session_limits(
+        key, expected_version=1,
+        limits=SessionLimits(max_agent_turns_total=5, max_delegations=2),
+    )
+    assert snapshot.version == 2
+    assert snapshot.limits.max_agent_turns_total == 5
+    assert snapshot.limits.max_delegations == 2
+
+    con = sqlite3.connect(ledger.database_path)
+    try:
+        row = con.execute(
+            "SELECT version, max_agent_turns_total, max_delegations"
+            " FROM session_budgets WHERE budget_key = ?",
+            (key,),
+        ).fetchone()
+        updated_events = con.execute(
+            "SELECT COUNT(*) FROM session_budget_events"
+            " WHERE budget_key = ? AND kind = 'limits_updated'",
+            (key,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert row == (2, 5, 2), f"账面必须恰好一次更新，实际 {row}"
+    assert updated_events == 1, f"limits_updated 事件恰好一条，实际 {updated_events}"
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_budget_retry_converges_without_duplicate_event(
+    tmp_path, monkeypatch,
+) -> None:
+    """#544 ②：ensure_session_budget 的 commit 后快照读撞锁 → 重跑收敛为钉。
+
+    与 ① 同型，但本方法重跑本身幂等（INSERT OR IGNORE + 重跑时 `changed=False`
+    不再落事件），无行为级缺陷——本测试**钉住收敛性质**（毒化读后恰好一条
+    `limits_tightened` 事件、version 不动、收窄生效），防将来把 ensure 改成
+    非幂等；修复本身是结构统一（快照读移入事务内 commit 前），不改变可观察
+    行为，故本测试修复前后都绿（pin，非红→绿）。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    key = "sess-i544-ensure"
+    await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=10, max_delegations=4),
+    )
+
+    original = SqliteDelegationTreeLedger._session_snapshot
+    calls = {"n": 0}
+
+    async def poisoned_first_read(self, connection, budget_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return await original(self, connection, budget_key)
+
+    monkeypatch.setattr(SqliteDelegationTreeLedger, "_session_snapshot", poisoned_first_read)
+
+    snapshot = await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=5, max_delegations=4),
+    )
+    assert snapshot.limits.max_agent_turns_total == 5
+
+    con = sqlite3.connect(ledger.database_path)
+    try:
+        row = con.execute(
+            "SELECT version, max_agent_turns_total FROM session_budgets"
+            " WHERE budget_key = ?",
+            (key,),
+        ).fetchone()
+        tightened_events = con.execute(
+            "SELECT COUNT(*) FROM session_budget_events"
+            " WHERE budget_key = ? AND kind = 'limits_tightened'",
+            (key,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert row == (1, 5), f"ensure 不得动 version，收窄须生效，实际 {row}"
+    assert tightened_events == 1, f"limits_tightened 事件恰好一条，实际 {tightened_events}"
+
+
+@pytest.mark.asyncio
+async def test_update_state_retry_rereads_from_clean_state(tmp_path, monkeypatch) -> None:
+    """#544 ③：update_state 的 commit 后回读撞锁 → 重跑不得撞状态机抛 ValueError。
+
+    与 P2-B 同型的第三处：CAS 写在 commit 之后还有 rowcount 检查 + 回读
+    SELECT，回读撞锁时 UPDATE 已持久化，整方法重跑会读到已迁移的状态——
+    PENDING→RUNNING 已发生，重跑校验 RUNNING→RUNNING 不在
+    `_ALLOWED_TRANSITIONS[RUNNING]` 里，对外抛 ValueError（账已改却报错）。
+
+    毒化第 2 次 `SELECT * FROM operations`：修复前它是 commit 之后的回读（毒窗
+    内，重跑撞状态机 ⇒ ValueError）；修复后回读与 rowcount 检查全部移到
+    commit 之前（命中即整体回滚，重跑从 PENDING 重新走 CAS，正常返回）。
+    毒化计数跨连接累计（重试每次新开连接），只毒首尝试的回读。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    store = SqliteOperationLedger(tmp_path / "harness.db")
+    await store.initialize()
+    await store.create(Operation(
+        session_id="s-i544", tool_call_id="call_1", tool_name="demo",
+        args_identity="{}", state=OperationState.PENDING,
+    ))
+
+    real_connect = storage_sqlite._connect
+    selects = {"n": 0}
+
+    @asynccontextmanager
+    async def poisoned_connect(database_path):
+        async with real_connect(database_path) as connection:
+            original_execute = connection.execute
+
+            async def execute(sql, *args, **kwargs):
+                if "SELECT * FROM operations" in sql:
+                    selects["n"] += 1
+                    if selects["n"] == 2:
+                        raise sqlite3.OperationalError("database is locked")
+                return await original_execute(sql, *args, **kwargs)
+
+            connection.execute = execute
+            yield connection
+
+    monkeypatch.setattr("agent_harness.storage.sqlite._connect", poisoned_connect)
+
+    updated = await store.update_state("s-i544", "call_1", OperationState.RUNNING)
+    assert updated.state is OperationState.RUNNING
+
+    con = sqlite3.connect(tmp_path / "harness.db")
+    try:
+        row = con.execute(
+            "SELECT state FROM operations WHERE session_id = ? AND tool_call_id = ?",
+            ("s-i544", "call_1"),
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert row == ("RUNNING",), f"状态必须恰好迁移一次，实际 {row}"

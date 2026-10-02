@@ -1,0 +1,1 @@
+2026-10-03	AGENTS-RULES 发布发现审查；fixed point=1226f4bb；Standards NEEDS-FIX（P2×2：证据包范围/历史状态需明示；P3×1：HTML final 图例仍称v10，登记保留）；Spec 有保留接受（P2×1：原始证据定位需明示）。两轴实际阅读34文件diff、HTML JS、12快照/manifest及正文引用；未导入执行脚本。规则与前轮双轴终态字节一致。证据：docs/agents/agents-md-release-integration-2026-10-03.md；TodoWrite OPEN。	1226f4bb5f0efd9325c45bf495b1dded72eb44c3..3c6afef6f2930a12bd540e918277b47738f3294a

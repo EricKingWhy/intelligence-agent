@@ -1,0 +1,132 @@
+{
+  "frozen_sha": "3c6afef6f2930a12bd540e918277b47738f3294a",
+  "frozen_tree": "df838be926aac602733df923f0f5fbb7a65559f2",
+  "lanes": [
+    {
+      "lane": "pytest",
+      "path": "docs/gate/agents-rules-release-2026-10-03/pytest.json",
+      "sha256": "64b350047d1870c2845cab784a2f987bf04974e354f071c2f5a45d1a60a54979",
+      "summary_lines": [
+        "2026-10-01  机械归属（本行只做机械归属，不是对内容的审查主张）：528cea74 = 先回后正合并（Merge origin/main 3cfdf1c7 into fix/448-compaction-usage-anchor，strict 要求），父一 14db87a1（本线 #448 tip）、父二 3cfdf1c7（origin/main = PR #492 merge），merge-base 809f4410。合并前两侧 diff 名单 comm -12 = 空集 ⇒ 零两侧同改；ort 零冲突、零冲突裁决。两侧存活逐 blob 核对：528cea74 相对父一恰为父二侧 30 文件（CI workflows ×5 新增 + gate0.yml + pyproject/uv.lock 依赖抬升 langchain-core 1.6.6 等 + src git.py + 三处测试 + web 依赖 + 台账/gate 存证），相对父二恰为本线 7 文件（builder.py/锚测试/tracker/归档/台账行/gate json ×2）——两集合不相交，纯并集。本线触达面（src/agent_harness/context、tests/context）在 528cea74 与 14db87a1 间 diff 为空 ⇒ 锚 9/9 与 context 171 绑树有效；合并树全量 4685P+2S（3 deselected，#483 已被父二修复；唯一红 = 真实台账测试的预期瞬态——本合并未归属，本行入库即消）。三树互异（919f1eab/ba26adc5/a258eea4）⇒ fail-closed 形状，故补本行。 14db87a1..528cea74",
+        "2026-10-01  机械归属（本行只做机械归属，不是对内容的审查主张）：6cde3f3a = 与 origin/main 334d99d4（PR #471 merge）的先回后正同步合并（strict 要求），父一 901aacef、父二 334d99d4，merge-base bd8b31a9。ort 零冲突；git show --cc --name-only 空表且合并树 c5604c1c 与父一树 4c0f675b、父二树 bfa72e27 三者互不相等 ⇒ 覆盖闸门刻意 fail-closed 形状，故补本行。两侧存活逐 blob 核对：相对父一 8 文件（#337 侧）全部等于父二 blob、相对父二恰 4 文件（#449 侧）全部等于父一 blob（两 diff 集合不相交，零两侧同改、零冲突裁决）；#449 触达面（src/agent_harness/agent、src/agent_harness/tooling、tests/agent）在 6cde3f3a 与 901aacef 间 diff 为空 ⇒ 939 passed 重车道读数绑树继续有效。 901aacef..6cde3f3a",
+        "2026-10-02  #506/#507 Standards 轴补审收口（解除 §8.3.4 待补审残余）。平台恢复后独立 Standards 轴重审 2cfb01f1..aba991b9：PASS-WITH-FINDINGS P0:0 P1:0 P2:0 P3:4，无硬违规。复现：git diff --check exit 0 / ruff 三文件 clean / focused 11 passed。红线全过：文案只进 task_failed 诊断日志未升格为事件（OBS-008 保持）、append-only 无改动、凭证零泄漏。4×P3 全为注释精度/一致性观察，登记不修（①新测试文件直连 src 而非 tests.scripted_model shim，与同目录 24 处约定不一致；②两处注释「OpenAI/Anthropic 官方枚举同口径」对 Anthropic 略过度声明——langchain_anthropic 只产 stop_reason=max_tokens，今日无实际影响；③_task_failed_errors 跨文件逐字双份，待 conftest 授权批合并；④else 分支注释「模型格式坏」对 content_filter 收窄不足）。结论：替代期结论（Spec 轴 + 独立 7 维 + 作者红证）与补审一致，无新引入 P0/P1，本批审查闭合。 2cfb01f1..aba991b9",
+        "2026-10-02  #508（sandbox exec_hardening 流式用例调度敏感假红）审查归属。事件驱动等待 + 足够上界：_SCHED_GRACE_SECONDS=10 统一 5 处线程启动窗（Event 已置 wait 立即返回、零正常路径耗时）；命名红刺激窗 0.1→5.0；两个 late-result 用例收割轮询条件扩到 kill∧wait（相邻 mock 调用间可被调度打断）；4 条真进程杀树用例 delay→10.0、观察窗→15.0（窗>delay 保住杀失败必被发现语义，绿路径零墙钟）。kill/reap/部分输出断言逐字保留。压力脚本落盘（票面 AC）+ 差量复审 REQUEST_CHANGES 单项已修：燃烧器孤儿进程（trap 原只杀父 PID，SIGTERM 绕过 atexit ⇒ 每跑完泄漏 N 个满核孤儿）——_burn 自带同燃烧时长硬 TTL + trap 杀树，双路径实证零孤儿（正常退出扫描 0；kill -9 父后 TTL 到期复扫 0）。读数：修复后 committed 脚本 3×31 绿（37.95/41.33/33.90s < 2×基线 54.6s）；tests/sandbox/ 134 passed；ruff clean。bash 死循环极限形状物理不可存活结论登记进脚本头，不作验收形状。审查：独立 7 维 + 双轴 APPROVE + 差量复审修复后复核 APPROVE（98759e3a commit message 载明细）。 2cfb01f1..98759e3a",
+        "2026-10-02  #515+#516+#517 QA 加固批（storage/web/session/workspace/transport，6 笔代码：99de6d6e / 8bdb4dd0 / dd73de2e / 6dd8e4b7 / 2fcc7506 / d84d7358）。#515 BUG-01/02：`retry_on_busy` 写锁竞争有限退避（耗尽→`StorageBusyError`→web 第五张映射表 503）覆盖共享 harness.db 全部 6 张 Store；checkpoint 保存失败进程级计数 + `/api/health` 暴露 + 稳定 outcome 落 JSONL（不进 SessionEvent，ADR-0004 Round 5 守住）。#516 BUG-03/04/08：列表分页（limit 1–500/offset，Query ge/le→422）、摘要 (st_size,st_mtime_ns) 双戳缓存、窗口化 `workspace_refs_of_sessions`（kills 4000-header 全量映射热点）、scandir+并行 stat（4.6s→~50ms）；顺序实测 cold 135ms / warm p95 167ms / limit=1 105ms；**AC 偏差**：100 并发 p95≈13s（100% 完成）——外部 utime 重排契约（承重测试钉住）禁止缓存 id 列表 ⇒ 每请求 4000 fresh stat 与 NTFS 元数据吞吐结构性冲突，§9.1.1 已登记交用户裁决（修后重审独立核实论证链成立）。#517 BUG-05/06/07：`ModelClientConstructionError`（构造=纯本地操作，cause 保留 + outcome=model_client_construction_failed）→ create/resume/messages/flush 四臂 503；`SESSION_KEY_PATTERN`{1,128}（两平台 255 文件名上限内，结构性关闭 errno36/404 分叉）；/lineage 补 InvalidSessionId→422；`error_contract.py` openapi 后处理（422 oneOf / SSE CT / 500 全声明 / 503 逐端点 15 项）+ 全局 Exception→JSON 500 handler（只换表示）。审查：发现轮@6dd8e4b7 双轴独立（Correctness P2:3 P3:4 + Standards P2:1 P3:3，均 PASS-WITH-FINDINGS 无 P0/P1；变异 M1-M3 三检查点失败集合互不相交）；处置笔 2fcc7506（P2-1 flush 第 4 构造点臂 / P2-2 SSE+503 声明面 / P2-3 六张 Store+projects 与 launch 路径臂 / P3 文案·注解·WorkspaceRef 投影）；修后重审@2fcc7506 双轴各 1 轮（Correctness P2:2 P3:1 + Standards P3:3，上轮 5 项全闭合，M1/M2 变异+红证）；机械处置 d84d7358（P2-A projects 族 503 声明 6 端点 / P3-C 行为测试 monkeypatch 目标修正+作者红证：PYTHONPATH 副本剥 set_meta 装饰器→OperationalError 裸逃逸红 / 四臂行为测试补齐）。登记不修/残余：修后重审 P2-B admit_session_step commit 后读路径锁错重试理论双计数（窗口极窄、方向保守，语义修复无重审预算，交用户裁决）；分页短行语义（0 事件/硬删竞态行占 limit 预算，O(limit) 结构性代价）；provider `except Exception` 边界（编程错误也洗成 503，cause 保留）；未处理异常双写日志（ServerErrorMiddleware 固有噪音）；`_summary_cache` 无淘汰（量级有界）。门禁：全量 pytest@6dd8e4b7 5112 passed 唯一红=覆盖闸门自指（本行落盘前形状）；Gate-0 派单前 5/6（唯一红=coverage，❌ 集合⊆本批代码笔，docs/gate/6dd8e4b7….json）。 d7f87597..d84d7358",
+        "2026-10-02  #516 并发 AC 收口（用户 §9.1.1 裁决第五选项：request coalescing / single-flight，§6.1 双源核实 nginx proxy_cache_lock + Go singleflight，ADAPT；决策评论 issuecomment-5944870769）。代码 2 笔：b6d0196b（store.py `_ScanCohort`/`_ScanGate` 单飞闸门——只合并时间上重叠的调用、扫描结束即清不跨请求缓存（mtime 现读契约钉 test_gate_does_not_cache_across_requests）、waiter 拿副本（别名钉 burst 测试）、leader 异常同批传播且闸门不残留；service.py `_LIST_SYNC_LIMITER=anyio.CapacityLimiter(100)` 限默认列表路径三卸载点——anyio 默认 40 线程把 100 并发突发切 ~3 波每波各扫一次，cap100 后每突发恒 1 扫）+ 027820f5（审查处置：F1 非重入/F2 异常共享取舍/F4 调用方边界钉 docstring，F5 恢复断言锐化，F3 异步异常窗口登记不修）。测试 +4（限流器容量钉 / Barrier 对齐突发共享 1 扫+副本断言 / 不跨请求缓存+utime 可见 / 失败传播+恢复计数证实）。读数（4000 会话真实入口）：顺序 cold 118ms / warm p95 128ms / limit=1 103ms（基线 135/167/105ms 不回归）；100 并发 p95 672–1035ms（修复前 ≈13s）、扫描数恒 1。变异：M1 摘闸门 2 红 / M2 加跨请求缓存 1 红 / M3 摘副本 1 红，失败集互不相交（§8.1.6 副本 + PYTHONPATH 解析证明）。审查：独立两轴发现轮 Correctness/Spec PASS-WITH-FINDINGS P3:5 + Standards CLEAN（无 P0-P2；代理自证重入死锁探针 + 共享异常对象探针 + 复跑 M1/M2/M3 一致）；修后重审双轴 CLEAN、5 项全闭合（F5 判别力经 R1 不重置闸门 + R1c 静默陈旧返回双变异证实）。focused tests/session+tests/web 1029P/0F；全量 5128 passed / 9 skipped / 0 failed（800.52s）；ruff 全仓绿；git diff --check 绿。 2d7c09d2..027820f5",
+        "2026-10-02  #519/#518 二轮终态复审归属（范围含先回后正 merge 740e8c08 与 docs aa9ec91f/538aca93）。Spec 轴 PASS：四验收锚点终树逐条满足（BUG-12 机械锚点 grep 计 10 ≥ 4、BUG-09/10/11 断言在树、59 文件逐文件归属无 scope creep）。Standards 轴 PASS-with-notes 2×P3：P3-1 配额归还分支无红绿锚 ⇒ 处置 c2a6f1e8 补 test_duplicate_id_returns_the_reserved_quota_slot（真实 ToolQuotaWindow limits=2 端到端钉幽灵占位后果：REPEATED 拒绝后 used 回落 1、同批合法调用仍被接纳、计数器 2），隔离副本变异（删 release 行）实测 1 failed（used 2==1）证锚有效，focused 31 passed；P3-2 degraded 判据仅看 run 侧 model_requests ⇒ 登记不修（session 作用域由暂停载荷 accounting_unknown 覆盖，与已登记的单步 fail-open 同源）。合并增量复审：runtime.py/service.py 接壤区无语义互扰，一轮处置在终树逐项真实存活。 538aca93..c2a6f1e8",
+        "1 failed, 5132 passed, 21 skipped, 51 deselected, 12 warnings in 801.08s (0:13:21)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "vitest",
+      "path": "docs/gate/agents-rules-release-2026-10-03/vitest.json",
+      "sha256": "28ab06b3c12e3408cc6b022e76b9ccc3838621809e6611a891132a363663daf3",
+      "summary_lines": [
+        "❯ src/components/StepDetail.window.test.tsx (6 tests | 1 failed) 15986ms",
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed | 86 passed (87)",
+        "Tests  1 failed | 1307 passed (1308)",
+        "Start at  01:27:53",
+        "Duration  76.19s (environment 79%, import 9%, transform 7%, tests 5%)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "playwright",
+      "path": "docs/gate/agents-rules-release-2026-10-03/playwright.json",
+      "sha256": "f93e0634a63ca194f51f713bb6250c944239d045d30cddafab5f2a5a2c672f22",
+      "summary_lines": [
+        "10 failed",
+        "470 passed (10.9m)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "pristine-e2e",
+      "path": "docs/gate/agents-rules-release-2026-10-03/pristine-e2e.json",
+      "sha256": "408ca47f924653c2d571ab7f2bdccece6a3208d6dc57a74b343f93277bbd85a7",
+      "summary_lines": [
+        "2 failed"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "vitest-flake-1",
+      "path": "docs/gate/agents-rules-release-2026-10-03/vitest-flake-1.json",
+      "sha256": "efca628a89d7a33211a71bf8d917a9a1096da63a8b99eae85c8610b88121edb3",
+      "summary_lines": [
+        "Test Files  1 passed (1)",
+        "Tests  6 passed (6)",
+        "Start at  01:30:29",
+        "Duration  9.82s (environment 52%, tests 31%, import 10%, transform 8%)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "vitest-flake-2",
+      "path": "docs/gate/agents-rules-release-2026-10-03/vitest-flake-2.json",
+      "sha256": "ebebf4a9adbd5b2c10740c867deb679924ce2349075dffa9694ed4ea4fab4a3f",
+      "summary_lines": [
+        "❯ src/components/StepDetail.window.test.tsx (6 tests | 1 failed) 6827ms",
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  1 failed | 5 passed (6)",
+        "Start at  01:30:39",
+        "Duration  14.57s (tests 48%, environment 39%, import 7%, transform 6%)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "vitest-flake-3",
+      "path": "docs/gate/agents-rules-release-2026-10-03/vitest-flake-3.json",
+      "sha256": "8828c0b7c66fa9f6ac1bb679d9693d597b9f4a62e7d4696f14e9ed6aae01394e",
+      "summary_lines": [
+        "❯ src/components/StepDetail.window.test.tsx (6 tests | 1 failed) 12996ms",
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  1 failed | 5 passed (6)",
+        "Start at  01:33:25",
+        "Duration  24.69s (tests 53%, environment 35%, import 6%, transform 5%)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "vitest-quiet-1",
+      "path": "docs/gate/agents-rules-release-2026-10-03/vitest-quiet-1.json",
+      "sha256": "662031e225ea0db8501110186d6102f744f91c2e6f9e7148b4580d621cf82809",
+      "summary_lines": [
+        "Test Files  1 passed (1)",
+        "Tests  6 passed (6)",
+        "Start at  01:41:37",
+        "Duration  4.61s (environment 44%, tests 31%, import 17%, transform 8%)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "vitest-quiet-2",
+      "path": "docs/gate/agents-rules-release-2026-10-03/vitest-quiet-2.json",
+      "sha256": "c33d1e3021d7519dcb57bb1276b07fcd1229e779d86cf98637bd438b7d8a6b56",
+      "summary_lines": [
+        "Test Files  1 passed (1)",
+        "Tests  6 passed (6)",
+        "Start at  01:41:42",
+        "Duration  4.87s (environment 47%, tests 31%, import 13%, transform 8%)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    },
+    {
+      "lane": "vitest-quiet-3",
+      "path": "docs/gate/agents-rules-release-2026-10-03/vitest-quiet-3.json",
+      "sha256": "1607afcbf9bddb57913d57d0c294bc7afce8336e022641b0e4f261686bf50658",
+      "summary_lines": [
+        "Test Files  1 passed (1)",
+        "Tests  6 passed (6)",
+        "Start at  01:41:47",
+        "Duration  4.60s (environment 44%, tests 32%, import 15%, transform 9%)"
+      ],
+      "storage": "JSON text field; reconstruct UTF-8 bytes for raw hash verification"
+    }
+  ],
+  "gui_models_rerun": false
+}

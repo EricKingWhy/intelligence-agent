@@ -1,0 +1,137 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-02T19:43:00+08:00",
+  "sha": "166ae34c64b3521499527d7a709295a3722253bb",
+  "tree": "6c47aef50d63c4057a4dd0d819f19f48182aac2b",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 5,
+  "total": 6,
+  "failed": [
+    "coverage"
+  ],
+  "wall_seconds": 15.16,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "Python 3.13.5",
+    "ruff": "ruff 0.16.3",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.81.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.03,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.06,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/ruff.exe",
+        "check",
+        "."
+      ],
+      "command": "./.venv/Scripts/ruff.exe check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.17,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 6.53,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 7.85,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 0.52,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py",
+      "output_tail": [
+        "❌ 台账 range 不是 `base..tip` 两段: 'a538c5fe'（#536/#537 施工归属（自审双轴，范围 a538c5fe 全部 18 文件：web/ 前端纯改动，零后端零 API）。Spec 轴 PASS：#536 五项决策逐条落地（单入口 popover/§2.3、tokens 档位四档+自定义/§2.1 零换算、deadline 时长档+datetime 高级路径/§2.2、预览行+过期 --danger 仅前置提示、§2.5 placeholder 表达）；wire 契约逐字节不变（既有六维参数化零回归+新增 500000 档断言）；e2e budget-entry 改走单入口但 wire 断言逐字未动，双视口 4/4。#537：徽标只出设 ceiling 维、取数与 pauseFacts 的 dimensionFact 同族（对拍单测逐字锁定）、80% 预警交叉相乘整数判定（常数非配置）、数据源=run/started 回显+run/resumed 恢复链（零 fetch）、PausedPanel 链路未动。Standards 轴 PASS（自审修复 3 项）：P2 投影 tokens 判定 Number.isFinite+trunc 与后端 isinstance(int) 分叉（100.5 会被截断成事实）⇒ 改 Number.isInteger 粘性 None 同口径；P3 budgetSummary 两次 resolveDeadlineDraft+as 断言收敛单次；P3 档位图标语义化 Coins/Timer。gate0 tsc 车道抓到 vitest 盲区（useSession.test 手搓 ConversationState 字面量缺新字段，esbuild 不查类型）⇒ amend 补齐——受影响面 tsc 验证必须用 gate0 同款 tsc -b 口径。截图证据 3 张（面板/徽标/warning 态）D:/t536_t537_logs/。）"
+      ]
+    }
+  ]
+}

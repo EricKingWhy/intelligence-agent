@@ -28,7 +28,6 @@ from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from agent_harness.config import Settings
-from agent_harness.session.service import SessionService
 from agent_harness.web.app import SessionSummary, create_app
 from tests.scripted_model import ScriptedModel
 
@@ -114,12 +113,37 @@ def test_rows_carry_real_workspace_and_ungrouped_is_null(tmp_path: Path) -> None
     assert [(p.id, p.title) for p in projects] == [(linked["id"], "proj")]
 
 
-def test_workspace_is_null_when_no_index_is_wired() -> None:
-    """装配里没有 workspace 索引（CLI / 无 header 的 RecoveryStores）→ 全部未分组。
+def test_windowed_refs_stay_accurate_under_limit(tmp_path: Path) -> None:
+    """#516：`?limit=` 的分页窗口里，每行的 workspace 仍报**自己**的项目。
 
-    这是 AC1 的"未分组"分支里最容易漏的一种：不是"查不到"，而是**根本没有查的地方**。
+    refs 回填从"切片前的全量映射"改成了"切片后按窗口 id 判成员资格"
+    （`WorkspaceIndex.workspace_refs_of_sessions`）。跨项目串台是那块改动最危险的
+    回归（票 #153 同款构造：两个项目 + 一个未分组会话），这里在**分页窗口**下重演：
+    窗口内行必须各自报对项目，未分组仍是 null，limit=None 全量与窗口逐行一致。
+    （"装配里没有索引 → 全部未分组"的 CLI 分支回归在 tests/session/test_service.py。）
     """
-    assert SessionService._workspace_refs_by_session(None) == {}
+    app = _app(tmp_path)
+    client = TestClient(app)
+
+    first = _create(client, workspace="proj")
+    second = _create(client, workspace="other-proj")
+    third = _create(client)  # 未命名 workspace → 未分组
+
+    full_rows = {row["session_id"]: row["workspace"] for row in _rows(client)}
+    assert full_rows[first] is not None
+    assert full_rows[second] is not None
+    assert full_rows[first]["id"] != full_rows[second]["id"]
+    assert full_rows[third] is None
+
+    # 窗口 = 全部 id（limit ≥ 总数）：与全量逐行一致
+    windowed = {row["session_id"]: row["workspace"] for row in _rows(client, limit="10")}
+    assert windowed == full_rows
+
+    # 窗口裁剪到单行：该项目归属仍正确（不许因为窗口小就串台/丢失）
+    single = _rows(client, limit="1")
+    assert len(single) == 1
+    assert single[0]["session_id"] in full_rows
+    assert single[0]["workspace"] == full_rows[single[0]["session_id"]]
 
 
 # ── AC4：按项目列会话，顺序 = 账本手工序 ──
@@ -195,9 +219,12 @@ def test_workspace_index_reads_run_off_the_event_loop(tmp_path: Path) -> None:
     def _here() -> tuple[str, int]:
         return (threading.current_thread().name, threading.get_ident())
 
+    # #516：默认路径的项目引用从全量 `index.list()` 换成了窗口化的
+    # `workspace_refs_of_sessions`（切片后只判被返回行）——两版都是"逐候选读
+    # header"的同步磁盘 I/O，本测试钉的正是它们都必须离开事件循环。
     real_ensure, real_list, real_get = (
         state.ensure_stores,
-        index.list,
+        index.workspace_refs_of_sessions,
         index.get,
     )
 
@@ -205,9 +232,9 @@ def test_workspace_index_reads_run_off_the_event_loop(tmp_path: Path) -> None:
         loop_thread.append(_here())
         return await real_ensure()
 
-    def _spy_list():
+    def _spy_list(session_ids: list[str]):
         list_threads.append(_here())
-        return real_list()
+        return real_list(session_ids)
 
     def _spy_get(workspace_id: str):
         get_threads.append(_here())
@@ -215,19 +242,19 @@ def test_workspace_index_reads_run_off_the_event_loop(tmp_path: Path) -> None:
 
     with (
         patch.object(state, "ensure_stores", _spy_ensure),
-        patch.object(index, "list", _spy_list),
+        patch.object(index, "workspace_refs_of_sessions", _spy_list),
         patch.object(index, "get", _spy_get),
     ):
-        _rows(client)  # 默认路径 → index.list()
+        _rows(client)  # 默认路径 → workspace_refs_of_sessions（窗口化项目引用）
         _rows(client, workspace_id=project_id)  # 项目路径 → index.get()
 
     assert loop_thread, "前置条件：列表路径必须调用 ensure_stores（事件循环线程）"
-    assert list_threads, "默认列表路径必须经 index.list() 取项目引用"
+    assert list_threads, "默认列表路径必须经 workspace_refs_of_sessions 取项目引用"
     assert get_threads, "项目视图必须经 index.get() 校验项目存在"
     off_loop = set(list_threads) | set(get_threads)
     assert not (off_loop & set(loop_thread)), (
         "索引读与事件循环同线程 —— 必须 anyio.to_thread.run_sync 卸载："
-        f"loop={loop_thread} list={list_threads} get={get_threads}"
+        f"loop={loop_thread} refs={list_threads} get={get_threads}"
     )
 
 

@@ -1,0 +1,29 @@
+{
+  "frozen_sha": "3c6afef6f2930a12bd540e918277b47738f3294a",
+  "target_sha": "d28337c94b24ac6b3d5b3d23cabe55cbcd139869",
+  "name_status_output": [
+    "M\tdocs/SDD_TICKET_TRACKER.md",
+    "M\tdocs/agents/agents-md-eval-2026-10/README.md",
+    "M\tdocs/agents/agents-md-eval-2026-10/desktop-gui-2026-10-02/todowrite-blocked-completion-defect.md",
+    "M\tdocs/agents/agents-md-eval-2026-10/desktop-gui-session-test-report-2026-10-02.md",
+    "M\tdocs/agents/agents-md-eval-2026-10/final-closeout-and-v10-review-2026-10-03.md",
+    "A\tdocs/agents/agents-md-release-integration-2026-10-03.md",
+    "A\tdocs/gate/3c6afef6f2930a12bd540e918277b47738f3294a.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/playwright.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/pristine-e2e.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/pytest.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/summary.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/vitest-flake-1.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/vitest-flake-2.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/vitest-flake-3.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/vitest-quiet-1.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/vitest-quiet-2.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/vitest-quiet-3.json",
+    "A\tdocs/gate/agents-rules-release-2026-10-03/vitest.json",
+    "A\tdocs/review_ledger.d/agents-rules-release-1226f4bb-3c6afef6.tsv"
+  ],
+  "doc_pattern": "^(docs/.*\\.(md|txt|rst|tsv|json|jsonl|ya?ml)$|AGENTS\\.md|CLAUDE\\.md|CONTEXT\\.md|[^/]*\\.md)$",
+  "all_added_or_modified_docs": true,
+  "worktree_status_at_evidence_append": "M docs/agents/agents-md-eval-2026-10/desktop-gui-2026-10-02/todowrite-blocked-completion-defect.md\n M docs/agents/agents-md-release-integration-2026-10-03.md\n?? docs/gate/agents-rules-release-2026-10-03/coverage-recheck.json\n?? docs/gate/d28337c94b24ac6b3d5b3d23cabe55cbcd139869.json",
+  "note": "Status contains only pending documentation and evidence additions; final clean status checked before publication."
+}

@@ -68,6 +68,7 @@ from agent_harness.agent.run_budget import (
     SessionBudgetPort,
     SessionBudgetSnapshot,
     _decimal_or_none,
+    accounting_unknown_pause_dimensions,
     add_consumed,
     apply_blocked_by,
     as_run_started_budget,
@@ -158,6 +159,7 @@ from agent_harness.storage import (
     SessionMeta,
     needs_reconcile,
 )
+from agent_harness.storage.checkpoint import note_checkpoint_save_failure
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
 from agent_harness.tooling.quota import ToolQuotaWindow
 
@@ -219,6 +221,17 @@ def _model_name_from_response(ai: Any) -> str | None:
     meta = getattr(ai, "response_metadata", None) or {}
     name = meta.get("model_name") or meta.get("model")
     return name if isinstance(name, str) and name else None
+
+
+def _finish_reason_from_response(ai: Any) -> str | None:
+    """从响应元数据取 finish_reason；键缺失返回 None，语义交调用方回落。
+
+    刻意不做 ``isinstance``/空串归一：这里必须与 R6-2 守卫的原 inline 读取
+    （``.get("finish_reason")`` 原样返回）逐值等价——空串等异常值按原样落到
+    守卫的 catch-all 分支，行为零变化由 verbatim 钉住测试背书。
+    """
+    meta = getattr(ai, "response_metadata", None) or {}
+    return meta.get("finish_reason")
 
 
 def _extract_text(content: Any) -> str:
@@ -1558,35 +1571,39 @@ class AgentRuntime:
                 # #479：双空但 invalid_tool_calls 有货（#449 的 C 形态——本轮发起过
                 # 工具调用，args 被 salvage 也解析不了）时，消息必须区分形态，
                 # 否则"empty response"会把排查者引向内容过滤/上游失败。#506：截断
-                # 推测只属于 length 收尾（langchain finish_reason 口径下的截断信号，
-                # Pi/deepseek-harness/官方枚举同口径）——stop 等非截断收尾点名
-                # malformed（模型格式坏），finish_reason 缺失回落中性、不臆断截断。
+                # 推测只属于 length 收尾（langchain finish_reason 口径下的截断信号；
+                # Pi 只认 length、DSH 只对 stop+零内容块触发 EMPTY_RESPONSE 且
+                # max-tokens 保留截断语义——同向。实测 langchain_anthropic 写的是
+                # stop_reason 键而非 finish_reason ⇒ Anthropic 线不命中 length
+                # 分支、走中性回落）——stop 等非截断收尾只断言 salvage 后仍解析
+                # 不了，不臆断成因；finish_reason 缺失回落中性、不臆断截断。
                 # 消息按 OBS-008 只进诊断日志（事件侧仍只有类型名），归因与失败
                 # 兜底语义各分支完全一致。
                 extracted_content = _extract_text(ai.content)
                 if not extracted_content and not ai.tool_calls:
                     invalid_calls = getattr(ai, "invalid_tool_calls", None)
                     if invalid_calls:
-                        finish_reason = (getattr(ai, "response_metadata", None) or {}).get(
-                            "finish_reason"
+                        finish_reason = _finish_reason_from_response(ai)
+                        prefix = (
+                            f"model returned an empty response; "
+                            f"{len(invalid_calls)} "
                         )
                         if finish_reason == "length":
-                            raise RuntimeError(
-                                f"model returned an empty response; "
-                                f"{len(invalid_calls)} unparsable tool_call_chunks present"
+                            tail = (
+                                "unparsable tool_call_chunks present"
                                 " (likely truncated — none were executed)"
                             )
-                        if finish_reason is None:
-                            raise RuntimeError(
-                                f"model returned an empty response; "
-                                f"{len(invalid_calls)} unparsable tool_call_chunks present"
+                        elif finish_reason is None:
+                            tail = (
+                                "unparsable tool_call_chunks present"
                                 " (none were executed)"
                             )
-                        raise RuntimeError(
-                            f"model returned an empty response; "
-                            f"{len(invalid_calls)} malformed tool_call arguments"
-                            " (unparsable after salvage — none were executed)"
-                        )
+                        else:
+                            tail = (
+                                "malformed tool_call arguments"
+                                " (unparsable after salvage — none were executed)"
+                            )
+                        raise RuntimeError(prefix + tail)
                     raise RuntimeError(
                         "model returned an empty response (no content, no tool calls)"
                     )
@@ -2443,6 +2460,16 @@ class AgentRuntime:
                 stuck_resume_requirements(stuck_payload) if stuck is not None else ()
             ),
             stuck=stuck_payload,
+            # `#518` BUG-10：由**账目未知**（fail-closed）触发的暂停显式带依据，
+            # 否则 "budget_exhausted + consumed:null" 运维无法解释。判定喂
+            # `consumed_before`（触发那一刻的读数），不是下面 closeout 后的重读
+            # ——两者今天必然相等（未知维配了 ceiling ⇒ closeout 无容量），但
+            # 判据语义上属于触发时刻，不依赖那条容量政策不变量。
+            accounting_unknown=accounting_unknown_pause_dimensions(
+                trigger_dimension=trigger_dimension,
+                consumed=consumed_before,
+                session_snapshot=session_snapshot,
+            ),
             # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，
             # 用户从事件就能找到那一段 trace。run 未终结 ⇒ 这不是 run 的 trace；
             # trace_url 此刻还不存在（只在终态回调里合成，见 build_pause_data）。
@@ -3017,11 +3044,27 @@ class AgentRuntime:
                     )
         except Exception:
             # 宽捕获理由：checkpoint 是恢复辅助，任何存储侧故障都不属于 run 语义。
+            note_checkpoint_save_failure()
             logger.exception(
                 "checkpoint 保存失败（boundary=%s, session=%s）：不影响 run 结果",
                 boundary_type.value,
                 session.session_id,
             )
+            # 机器可检索信号（#515 BUG-02）：logger.exception 只进人类日志，稳定的
+            # outcome 让 JSONL / 健康面能回答"这次恢复为什么回到更旧的稳定边界"。
+            # 不发 SessionEvent——checkpoint 失败不是会话真相（ADR-0004 Round 5）。
+            if logger.hasHandlers():
+                log_event(
+                    logger,
+                    "system_log",
+                    "checkpoint 保存失败：恢复辅助降级",
+                    level="error",
+                    exc_info=True,
+                    component="checkpoint",
+                    outcome="checkpoint_save_failed",
+                    boundary=boundary_type.value,
+                    session_id=session.session_id,
+                )
 
     def _log(self, event_type: str, message: str, *, exc_info: bool = False,
              **fields: Any) -> None:

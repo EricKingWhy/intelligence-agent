@@ -14,6 +14,7 @@ import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
+import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
 
 /** #283：升到这一档要在 pill 浮层里给一次显式确认（ADR-0041 D1——后端**不加**强制标志位，
@@ -61,17 +62,17 @@ interface Props {
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
   onReasoningEffortChange?: (id: string | null) => void;
-  // ── #426：新建会话的预算入口（常用三项：turns / total_tokens / deadline_at）──
-  /** 各维草稿（输入框原样字符串，判形在映射层 `toCreateBudget` 一处）。
-   *  **仅新建会话态显示**（`permissionInSession=false`）：预算属于启动 run 的
-   *  请求（#422），续聊 /messages 不带 budget（#308）。没接 onChange 的维不渲染
-   *  输入框（不渲染吞输入的死框）。 */
+  // ── #426/#536：新建会话的预算入口（turns / total_tokens / deadline_at，单入口
+  //    popover——BudgetPicker）。各维草稿是输入原样字符串，判形/换算在映射层
+  //    `toCreateBudget` 一处。**仅新建会话态显示**（`permissionInSession=false`）：
+  //    预算属于启动 run 的请求（#422），续聊 /messages 不带 budget（#308）。
   budgetRunTurns?: string;
   onBudgetRunTurnsChange?: (value: string) => void;
   /** `budget.run.max_total_tokens` 的草稿。 */
   budgetRunTokens?: string;
   onBudgetRunTokensChange?: (value: string) => void;
-  /** `budget.run.deadline_at` 的草稿（`datetime-local` 原始值；映射层换算 RFC 3339 UTC）。 */
+  /** `budget.run.deadline_at` 的草稿——#536 起双形态：时长 token（`"2h"` 等）
+   *  或 `datetime-local` 原始值（高级路径）；换算在 `amend.resolveDeadlineDraft`。 */
   budgetRunDeadline?: string;
   onBudgetRunDeadlineChange?: (value: string) => void;
   // ── ADR-0030 §5.2 队列条（#195）──
@@ -527,54 +528,23 @@ export const Composer = memo(function Composer({
               placeholder="推理"
               disabled={locked}
             />
-            {/* #426：新建会话的预算入口（常用三项：turns / total_tokens / deadline_at）。
+            {/* #536：预算三项收敛为单入口 popover（设计稿 §2.3，替换 #426 三平铺）。
                 会话内不显示——budget.run 属于**启动 run** 的请求（#422），续聊不带
                 budget（#308）。留空 = 后端默认（不发键）；到顶/到点自动暂停，恢复
-                面板抬高后继续。deadline 是 datetime-local 本地读数，映射层换算 UTC。 */}
-            {!permissionInSession && onBudgetRunTurnsChange !== undefined && (
-              <label className="composer-budget" title="本次 run 的 Agent turn 绝对上限；留空 = 后端默认。到顶自动暂停，可在恢复面板抬高后继续。">
-                <span className="composer-budget-label">turns 上限</span>
-                <input
-                  type="number"
-                  min={1}
-                  inputMode="numeric"
-                  className="composer-budget-input"
-                  value={budgetRunTurns ?? ''}
-                  onChange={(e) => onBudgetRunTurnsChange(e.target.value)}
-                  placeholder="默认"
-                  disabled={locked}
-                  aria-label="预算上限（Agent turns，留空为默认）"
-                />
-              </label>
-            )}
-            {!permissionInSession && onBudgetRunTokensChange !== undefined && (
-              <label className="composer-budget" title="本次 run 的总 token 绝对上限；留空 = 不设。到顶自动暂停，可在恢复面板抬高后继续。">
-                <span className="composer-budget-label">tokens 上限</span>
-                <input
-                  type="number"
-                  min={1}
-                  inputMode="numeric"
-                  className="composer-budget-input"
-                  value={budgetRunTokens ?? ''}
-                  onChange={(e) => onBudgetRunTokensChange(e.target.value)}
-                  placeholder="默认"
-                  disabled={locked}
-                  aria-label="预算上限（总 tokens，留空为默认）"
-                />
-              </label>
-            )}
-            {!permissionInSession && onBudgetRunDeadlineChange !== undefined && (
-              <label className="composer-budget" title="本次 run 的绝对截止时刻（按本机时区输入，提交换算为 UTC）；留空 = 不设。到点自动暂停，可在恢复面板调整后继续。">
-                <span className="composer-budget-label">截止时间</span>
-                <input
-                  type="datetime-local"
-                  className="composer-budget-input composer-budget-input--datetime"
-                  value={budgetRunDeadline ?? ''}
-                  onChange={(e) => onBudgetRunDeadlineChange(e.target.value)}
-                  disabled={locked}
-                  aria-label="预算截止时间（留空为不设）"
-                />
-              </label>
+                面板抬高后继续。判形/换算唯一执行点在 lib/amend.ts（映射层）。 */}
+            {!permissionInSession &&
+              (onBudgetRunTurnsChange !== undefined ||
+                onBudgetRunTokensChange !== undefined ||
+                onBudgetRunDeadlineChange !== undefined) && (
+              <BudgetPicker
+                turns={budgetRunTurns ?? ''}
+                onTurnsChange={onBudgetRunTurnsChange}
+                tokens={budgetRunTokens ?? ''}
+                onTokensChange={onBudgetRunTokensChange}
+                deadline={budgetRunDeadline ?? ''}
+                onDeadlineChange={onBudgetRunDeadlineChange}
+                disabled={locked}
+              />
             )}
           </div>
         )}

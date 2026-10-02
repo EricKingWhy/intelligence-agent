@@ -1,0 +1,151 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-02T19:39:02+08:00",
+  "sha": "f1d7f8f863798bae5e9249676f9f2779ca5e7fd7",
+  "tree": "936171dcff27ab23b895b1041c5e3f442528e363",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 4,
+  "total": 6,
+  "failed": [
+    "tsc",
+    "coverage"
+  ],
+  "wall_seconds": 29.77,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "Python 3.13.5",
+    "ruff": "ruff 0.16.3",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.81.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.03,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.89,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/ruff.exe",
+        "check",
+        "."
+      ],
+      "command": "./.venv/Scripts/ruff.exe check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.29,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "FAIL",
+      "rc": 2,
+      "seconds": 17.23,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b",
+      "output_tail": [
+        "src/hooks/useSession.test.ts(165,37): error TS2345: Argument of type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is not assignable to parameter of type 'ConversationState'.",
+        "  Type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is missing the following properties from type 'ConversationState': run_budget_ceilings, run_budget_consumed",
+        "src/hooks/useSession.test.ts(173,37): error TS2345: Argument of type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is not assignable to parameter of type 'ConversationState'.",
+        "  Type '{ session_id: string; turns: never[]; active_step_id: null; run_status: \"completed\"; run_cancelled: boolean; compactions: never[]; reconcile_queue: never[]; pending_approvals: never[]; approval_decisions: never[]; ... 20 more ...; plan: null; }' is missing the following properties from type 'ConversationState': run_budget_ceilings, run_budget_consumed"
+      ]
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 6.39,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 4.94,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py",
+      "output_tail": [
+        "✅ docs-only（按路径自动归属）: f47e6c22  docs(review-ledger): 二轮终态复审归属行 + tracker/PHASE_STATUS/月档记二轮双轴结论（P3-1 红绿锚处置 CLOSED、P3-2 登记不修） — docs/PHASE_STATUS.md + docs/SDD_TICKET_TRACKER.md + docs/phase_status/2026-10.md + docs/review_ledger.d/t519-t518-second-review-p3-anchor-538aca93-c2a6f1e8.tsv",
+        "✅ 零新增内容（树 b55894044205ac225835e44f570b08fa75d7a15f == 父 cd06025b210ef01dd03be0e5a7373579ef93c242 的树）: ff20b89d  Merge pull request #511 from EricKingWhy/fix/t509-t510-e2e-stability",
+        "闸门失败。处置（不要改台账蒙过去）：",
+        "  · 这些 commit 动了代码 ⇒ **补一次审查**（两轴 /code-review，范围写进台账的新行）；",
+        "  · 若确认只是文档改动 ⇒ 归属**本该自动**（脚本按路径机械判定）；仍失败说明它的改动文件",
+        "    **核对不了**（合并提交的 `--cc` 空表）或含非文档文件。⚠ **别写 `[whitelist]`**：那一支",
+        "    自 2026-09-23 起已不再放行任何提交（写进去只会得到一个 ⚠ 未用到，见协议 §7 第 8 条）。",
+        "  协议原文与全部例外条款：docs/SDD_WORKFLOW_PROTOCOL.md §7 第 8 条。"
+      ]
+    }
+  ]
+}

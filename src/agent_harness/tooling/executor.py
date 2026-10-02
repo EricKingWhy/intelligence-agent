@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
@@ -432,13 +433,40 @@ class ToolExecutor:
         if self._operation_ledger is not None:
             assert operation_context is not None
             session_id = operation_context.session_id
-            await self._create_pending_operation(
-                tool_call_id=tool_call_id,
-                name=name,
-                raw_args=raw_args,
-                operation_context=operation_context,
-                tool=tool,
-            )
+            # `#519`：ledger 主键 `(session_id, tool_call_id)` 冲突 = 模型在本会话
+            # 重复返回了同一 tool_call_id。唯一性约束在这里把调用拒下，分类成
+            # REPEATED_TOOL_CALL 的错误结果回灌对话（模型换新 ID 自纠）——UNIQUE
+            # 冲突不再冒泡成 run 级致命失败（`04 §4` 建议码表的语义：约束冲突 →
+            # 可恢复工具错误）；非 UNIQUE 的 IntegrityError（CHECK / NOT NULL 等）
+            # 照旧 re-raise，fail-loud 不吞。
+            try:
+                await self._create_pending_operation(
+                    tool_call_id=tool_call_id,
+                    name=name,
+                    raw_args=raw_args,
+                    operation_context=operation_context,
+                    tool=tool,
+                )
+            except sqlite3.IntegrityError as error:
+                if "UNIQUE" not in str(error):
+                    raise
+                # 占了配额槽位却没被真实接纳（审批拒绝路径同款归还）：重复 ID
+                # 常成串出现，不归还会用幽灵占位挤掉同批同工具的合法调用。
+                if tool_quota is not None:
+                    tool_quota.release(name)
+                return ToolExecution(
+                    tool_call_id=tool_call_id,
+                    result=ToolResult.failure(
+                        message=(
+                            f"tool_call_id '{tool_call_id}' 在本会话已存在对应的工具"
+                            "调用记录（模型重复返回了同一 ID），本次调用未执行。"
+                            "请换一个新的、本会话未使用过的 tool_call_id 重新提交。"
+                        ),
+                        error_code=ErrorCode.REPEATED_TOOL_CALL,
+                        retryable=False,  # 同一 ID 再提交还是撞同一个主键
+                    ),
+                    budget_delta=_rejected_delta(name),
+                )
             self._maybe_kill("pending", tool_call_id)
             await self._operation_ledger.update_state(
                 session_id, tool_call_id, OperationState.RUNNING
@@ -961,12 +989,33 @@ class ToolExecutor:
 
         if self._operation_ledger is not None:
             assert operation_context is not None
-            await self._create_pending_operation(
-                tool_call_id=tool_call_id,
-                name=name,
-                raw_args=raw_args,
-                operation_context=operation_context,
-            )
+            # `#519`：同 ID 行已存在 ⇒ 这条级联调用没有自己的行，也**不能**把
+            # 别人的行改写成 CANCELLED（状态机 SUCCEEDED→CANCELLED 本就非法，
+            # 会以 ValueError 冒泡成第二个未分类异常）。返回与主路径同款的
+            # REPEATED_TOOL_CALL 错误结果，首行原样保留。
+            try:
+                await self._create_pending_operation(
+                    tool_call_id=tool_call_id,
+                    name=name,
+                    raw_args=raw_args,
+                    operation_context=operation_context,
+                )
+            except sqlite3.IntegrityError as error:
+                if "UNIQUE" not in str(error):
+                    raise
+                return ToolExecution(
+                    tool_call_id=tool_call_id,
+                    result=ToolResult.failure(
+                        message=(
+                            f"tool_call_id '{tool_call_id}' 在本会话已存在对应的工具"
+                            "调用记录（模型重复返回了同一 ID），本次调用未执行。"
+                            "请换一个新的、本会话未使用过的 tool_call_id 重新提交。"
+                        ),
+                        error_code=ErrorCode.REPEATED_TOOL_CALL,
+                        retryable=False,
+                    ),
+                    budget_delta=_rejected_delta(name),
+                )
             await self._operation_ledger.update_state(
                 operation_context.session_id, tool_call_id,
                 OperationState.CANCELLED,

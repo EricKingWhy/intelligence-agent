@@ -78,6 +78,17 @@ class ReasoningChatOpenAI(ChatOpenAI):
         return generation_chunk
 
 
+class ModelClientConstructionError(RuntimeError):
+    """模型 client 构造失败（#517 BUG-05）。
+
+    `create_chat_model` 的构造是**纯本地操作**（字段校验 + SDK client 初始化），
+    此处的失败来自配置/环境而非网络调用——典型如 corporate/k8s 代理变量
+    （`NO_PROXY` 里的 `[::1]`）让 httpx 的代理映射解析在构造期抛 `InvalidURL`。
+    显式类型让 web 层按类型映射成结构化 503（环境/配置暂时不可用，可修好重试），
+    而不是把它当服务端 bug 打成裸 500。`__cause__` 保留原始异常。
+    """
+
+
 def create_chat_model(
     config: ModelConfig, *, reasoning_effort: str | None = None,
     request_timeout: float = 300.0,
@@ -129,4 +140,21 @@ def create_chat_model(
             )
         else:
             kwargs["reasoning_effort"] = wire
-    return ReasoningChatOpenAI(**kwargs)
+    try:
+        return ReasoningChatOpenAI(**kwargs)
+    except Exception as error:
+        # 构造期失败（#517 BUG-05）：代理 URL 解析坏、key 形态非法等。稳定
+        # outcome 让 JSONL 能按 outcome 直接捞出这条——与上面
+        # reasoning_effort_not_injected 同一排障原则。
+        log_event(
+            logger, "system_log",
+            "模型 client 构造失败",
+            level="error",
+            exc_info=True,
+            component="model_provider",
+            outcome="model_client_construction_failed",
+            model=config.model_name,
+        )
+        raise ModelClientConstructionError(
+            f"模型 client 构造失败（代理/网络环境或配置）：{error}"
+        ) from error

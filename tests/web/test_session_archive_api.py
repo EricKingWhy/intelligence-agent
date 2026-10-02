@@ -38,7 +38,7 @@ import logging
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,6 +48,7 @@ from pydantic import ValidationError
 from agent_harness.config import Settings
 from agent_harness.session.event import EVENT_TYPES as SESSION_EVENT_TYPES
 from agent_harness.session.runmanager import RunManager
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.app import SessionSummary, create_app
 from tests.scripted_model import ScriptedModel
 
@@ -394,3 +395,45 @@ def test_audit_records_id_and_action_without_session_content(
     # 归档不是会话真相：SessionEvent 词汇表里不许有它（有人将来想加，会先撞红这里）
     forbidden = [t for t in SESSION_EVENT_TYPES if "archiv" in t.lower()]
     assert forbidden == []
+
+
+# ── #515 BUG-01：写锁重试耗尽 → 结构化 503 ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("http_method", "path_template", "service_attr", "payload"),
+    [
+        ("post", "/api/sessions/{sid}/archive", "set_archived", None),
+        ("delete", "/api/sessions/{sid}/archive", "set_archived", None),
+        ("delete", "/api/sessions/{sid}", "delete_session", None),
+        (
+            "post",
+            "/api/sessions/{sid}/permission",
+            "change_permission_mode",
+            {"permission_mode": "default", "auto_approve": False},
+        ),
+    ],
+)
+def test_storage_busy_writes_surface_as_structured_503(
+    tmp_path: Path,
+    http_method: str,
+    path_template: str,
+    service_attr: str,
+    payload: dict | None,
+) -> None:
+    """写锁重试耗尽（`StorageBusyError`）→ 结构化 503 JSON，不再裸 500 逃逸。
+
+    参数化覆盖四个真实写端点（归档 / 取消归档 / 硬删 / 改权限档）——它们的 service
+    调用都落到共享 harness.db 的写方法。Mock 在 service 边界抛 `StorageBusyError`，
+    这里只验证 web 层的翻译臂；storage 层的重试与耗尽语义见
+    `tests/storage/test_sqlite_write_retry.py`。
+    """
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    target = f"agent_harness.session.service.SessionService.{service_attr}"
+    with patch(target, new_callable=AsyncMock, side_effect=StorageBusyError("db busy")):
+        request = {"json": payload} if payload is not None else {}
+        resp = getattr(client, http_method)(path_template.format(sid=sid), **request)
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json() == {"detail": "db busy"}

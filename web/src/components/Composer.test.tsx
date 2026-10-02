@@ -147,11 +147,14 @@ describe('Composer 权限 pill（#283）', () => {
   });
 });
 
-// ── #426：新建会话的预算入口（常用三项：turns / total_tokens / deadline_at）──
+// ── #536：预算三项收敛为单入口 popover（替换 #426 三平铺）──
 // 预算属于**启动 run** 的请求（#422 裁决）：仅新建会话态渲染；会话内（续聊
-// /messages 不带 budget，#308）不显示。判形在映射层 toCreateBudget（lib/amend.ts）。
+// /messages 不带 budget，#308）不显示。判形/换算在映射层 toCreateBudget /
+// resolveDeadlineDraft（lib/amend.ts）。面板是 Radix Portal 内容，SSR 不可见
+// （同权限 pill 分工）——面板内三维控件的逐项断言在 BudgetPicker.test.tsx
+// （Panel 独立渲染）与 e2e/budget-entry.spec.ts（交互+wire）锁。
 
-describe('Composer 预算入口（#426）', () => {
+describe('Composer 预算入口（#536 单入口 popover）', () => {
   const budgetProps = {
     budgetRunTurns: '',
     onBudgetRunTurnsChange: noop,
@@ -161,34 +164,48 @@ describe('Composer 预算入口（#426）', () => {
     onBudgetRunDeadlineChange: noop,
   };
 
-  it('新会话态：三项入口在场（turns 数值框 / tokens 数值框 / deadline datetime 输入）', () => {
+  it('新会话态：单入口 trigger 在场（aria-label="预算"），全空摘要「默认」', () => {
     const html = renderToString(
       createElement(Composer, { ...base, ...budgetProps }),
     ).replaceAll('<!-- -->', '');
-    expect(html).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
-    expect(html).toContain('aria-label="预算上限（总 tokens，留空为默认）"');
-    expect(html).toContain('aria-label="预算截止时间（留空为不设）"');
-    expect(html).toContain('type="datetime-local"');
+    expect(html).toContain('aria-label="预算"');
+    expect(html).toContain('>默认<');
+    // 三平铺已收敛：面板外不再有常驻的预算字段行。
+    expect(html).not.toContain('composer-budget-label');
+  });
+
+  it('草稿有值 → trigger 摘要随 drafts 变化（turns 5 · 500k · 2h）', () => {
+    const html = renderToString(
+      createElement(Composer, {
+        ...base,
+        budgetRunTurns: '5',
+        onBudgetRunTurnsChange: noop,
+        budgetRunTokens: '500000',
+        onBudgetRunTokensChange: noop,
+        budgetRunDeadline: '2h',
+        onBudgetRunDeadlineChange: noop,
+      }),
+    ).replaceAll('<!-- -->', '');
+    expect(html).toContain('>turns 5 · 500k · 2h<');
   });
 
   it('会话内（permissionInSession）→ 预算入口不渲染（续聊不带 budget，#308）', () => {
     const html = renderToString(
       createElement(Composer, { ...base, permissionInSession: true, ...budgetProps }),
     ).replaceAll('<!-- -->', '');
-    expect(html).not.toContain('预算上限');
-    expect(html).not.toContain('预算截止时间');
+    expect(html).not.toContain('aria-label="预算"');
   });
 
-  it('未接 onChange 的维不渲染输入框（不渲染吞输入的死框）', () => {
-    const html = renderToString(
+  it('未接任何预算 onChange → 入口不渲染；只接一维 → 入口在场（面板内只出该维）', () => {
+    const none = renderToString(createElement(Composer, base)).replaceAll('<!-- -->', '');
+    expect(none).not.toContain('aria-label="预算"');
+    const onlyTurns = renderToString(
       createElement(Composer, {
         ...base,
         budgetRunTurns: '',
         onBudgetRunTurnsChange: noop,
       }),
     ).replaceAll('<!-- -->', '');
-    expect(html).toContain('aria-label="预算上限（Agent turns，留空为默认）"');
-    expect(html).not.toContain('aria-label="预算上限（总 tokens，留空为默认）"');
-    expect(html).not.toContain('aria-label="预算截止时间（留空为不设）"');
+    expect(onlyTurns).toContain('aria-label="预算"');
   });
 });

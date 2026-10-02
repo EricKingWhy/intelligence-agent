@@ -20,6 +20,7 @@ import threading
 
 from pydantic import BaseModel, Field
 
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.sandbox import Sandbox, ShellFamily
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
@@ -225,7 +226,9 @@ class BashTool(Tool):
         # 关键映射（ADR-0002）：命令业务失败（exit_code!=0）→ ok=True，
         # exit_code/stdout/stderr 在 data 里供模型读取。
         return ToolResult.success(
-            message=f"命令已执行，exit_code={result.exit_code}。",
+            # `#519` BUG-12：命令输出是最高频的 prompt 注入载体，逐条不可信标注。
+            message=f"{DEFAULT_REGISTRY.assemble('frame:untrusted_tool_output').fragment_text}"
+                    f"命令已执行，exit_code={result.exit_code}。",
             data={
                 "exit_code": result.exit_code,
                 "stdout": result.stdout,

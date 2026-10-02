@@ -33,6 +33,11 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.logging import setup_logging
+from agent_harness.storage import (
+    OperationContext,
+    OperationState,
+    SqliteOperationLedger,
+)
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
@@ -42,6 +47,7 @@ from agent_harness.tooling import (
     ToolSideEffect,
 )
 from agent_harness.tooling.executor import MAX_ATTEMPTS, _ToolFailure
+from agent_harness.tooling.quota import ToolQuotaWindow
 from tests.scripted_model import ScriptedModel
 
 # ============================================================================
@@ -1050,3 +1056,127 @@ class TestToolFailureMapping:
         assert (result.error_code, result.retryable, result.message) == (
             failure.error_code, failure.retryable, failure.message,
         )
+
+
+# ============================================================================
+# #519 BUG-09：重复 tool_call_id —— 可恢复工具错误，不是 run 级 IntegrityError
+# ============================================================================
+
+
+class TestDuplicateToolCallId:
+    """模型偶发重复返回同一 tool_call_id（来源报告 brutal-test-r3 V9 实测）。
+
+    `operations` 表主键 `(session_id, tool_call_id)`：第二次接纳同一 ID 时
+    `ledger.create` 撞主键。修复前 IntegrityError 未分类冒泡到 runtime 失败
+    兜底 → 整个 run `run/failed(IntegrityError)`——模型一次口误升级成 run 级
+    致命失败。规格 `04 §4` 的 REPEATED_TOOL_CALL 错误码就是为这类
+    「约束冲突 → 可恢复工具错误（回模型自纠）」准备的。
+    """
+
+    @pytest.mark.asyncio
+    async def test_duplicate_id_returns_repeated_error_not_fatal(self, tmp_path: Path):
+        registry = ToolRegistry()
+        counting = CountingTool()
+        registry.register(counting)
+        ledger = SqliteOperationLedger(tmp_path / "state.db")
+        await ledger.initialize()
+        executor = ToolExecutor(registry, operation_ledger=ledger)
+        context = OperationContext(session_id="session-1", run_id="run-1")
+
+        first = await executor.execute(
+            {"id": "call-dup-0001", "name": "count", "args": {"value": 1}},
+            operation_context=context,
+        )
+        assert first.result.ok is True
+
+        second = await executor.execute(
+            {"id": "call-dup-0001", "name": "count", "args": {"value": 2}},
+            operation_context=context,
+        )
+
+        # 修复前：sqlite3.IntegrityError 从这里冒泡（run 级致命）。
+        assert second.result.ok is False
+        assert second.result.error_code == ErrorCode.REPEATED_TOOL_CALL
+        assert second.result.retryable is False
+        # 票面验收点："准入前被拒"族显式记 0——不消耗配额。
+        assert second.budget_delta == {
+            "tool_name": "count", "tool_calls": 0, "tool_attempts": 0,
+        }
+        assert counting.call_count == 1  # 工具不被重复执行
+        # ledger 首行不被第二次调用改写（仍是第一次的终态，正向断言钉死）。
+        row = await ledger.get("session-1", "call-dup-0001")
+        assert row is not None
+        assert row.state is OperationState.SUCCEEDED
+
+    @pytest.mark.asyncio
+    async def test_duplicate_id_returns_the_reserved_quota_slot(self, tmp_path: Path):
+        """REPEATED 返回路径必须归还预留的配额槽位（二轮 Standards P3-1 红绿锚）。
+
+        幽灵占位的后果被端到端钉住：limits=2 的窗口里，重复 ID 撞主键被拒后
+        槽位必须回到 1，同批下一条合法调用才收得下；删掉 executor 的
+        release 行，本用例在 used 断言与第三条调用两处同时变红。
+        """
+        registry = ToolRegistry()
+        counting = CountingTool()
+        registry.register(counting)
+        ledger = SqliteOperationLedger(tmp_path / "state.db")
+        await ledger.initialize()
+        executor = ToolExecutor(registry, operation_ledger=ledger)
+        context = OperationContext(session_id="session-1", run_id="run-1")
+        window = ToolQuotaWindow(limits={"count": 2}, consumed={})
+
+        first = await executor.execute(
+            {"id": "call-dup-0003", "name": "count", "args": {"value": 1}},
+            operation_context=context,
+            tool_quota=window,
+        )
+        assert first.result.ok is True
+        assert window.used("count") == 1
+
+        second = await executor.execute(
+            {"id": "call-dup-0003", "name": "count", "args": {"value": 2}},
+            operation_context=context,
+            tool_quota=window,
+        )
+        assert second.result.error_code == ErrorCode.REPEATED_TOOL_CALL
+        # 变异（删 release 行）下幽灵占位把 used 顶到 2，回不去。
+        assert window.used("count") == 1
+
+        third = await executor.execute(
+            {"id": "call-dup-0004", "name": "count", "args": {"value": 3}},
+            operation_context=context,
+            tool_quota=window,
+        )
+        # 幽灵占位的真实代价：同批同工具的合法调用被挤掉（BUDGET_EXHAUSTED）。
+        assert third.result.ok is True
+        assert third.budget_delta["tool_calls"] == 1
+        assert counting.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_duplicate_id_in_cancelled_cascade_is_classified(self, tmp_path: Path):
+        """串行级联取消路径同 ID 撞主键：同样分类化，不污染首行、不冒泡。"""
+        registry = ToolRegistry()
+        counting = CountingTool()
+        registry.register(counting)
+        ledger = SqliteOperationLedger(tmp_path / "state.db")
+        await ledger.initialize()
+        executor = ToolExecutor(registry, operation_ledger=ledger)
+        context = OperationContext(session_id="session-1", run_id="run-1")
+
+        first = await executor.execute(
+            {"id": "call-dup-0002", "name": "count", "args": {"value": 1}},
+            operation_context=context,
+        )
+        assert first.result.ok is True
+
+        cancelled = await executor._cancel_without_execution(
+            {"id": "call-dup-0002", "name": "count", "args": {"value": 9}},
+            operation_context=context,
+        )
+
+        assert cancelled.result.ok is False
+        assert cancelled.result.error_code == ErrorCode.REPEATED_TOOL_CALL
+        # 首行保持第一次调用的终态，不被改写成 CANCELLED（正向断言钉死）。
+        row = await ledger.get("session-1", "call-dup-0002")
+        assert row is not None
+        assert row.state is OperationState.SUCCEEDED

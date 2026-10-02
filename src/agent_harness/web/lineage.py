@@ -33,8 +33,9 @@ from agent_harness.session.service import (
     InvalidSessionId,
     SessionNotFound,
 )
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.app import session_service
-from agent_harness.web.domain_errors import http_error
+from agent_harness.web.domain_errors import http_error, storage_http_error
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -56,7 +57,12 @@ def register_lineage_routes(
 
     @app.get("/api/sessions/{session_id}/lineage")
     async def get_session_lineage(session_id: str) -> dict:
-        validate_session_id(session_id)
+        # #517 BUG-07：/events、/budget 对同一非法 id 都给 422，这里曾漏映射——
+        # `InvalidSessionId` 逃逸成 500（同类输入三种结果）。与其余端点对齐。
+        try:
+            validate_session_id(session_id)
+        except InvalidSessionId as e:
+            raise http_error(e) from e
         state = app.state.agent
         await state.ensure_stores()
         metas = await build_lineage_index(state.store, state.session_meta_store)
@@ -129,6 +135,10 @@ def register_lineage_routes(
             InvalidForkBoundary,
         ) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：fork 要给 child 补 session_meta 行（共享 harness.db 写），锁竞争
+            # 重试耗尽报 503——child 未创建，客户端稍后重试即可。
+            raise storage_http_error(e) from e
         return {"session_id": child_id, "from_seq": req.from_seq}
 
 

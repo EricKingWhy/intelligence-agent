@@ -10,6 +10,7 @@ PostgreSQL 实现本 Phase 只留 ABC 替换边界，不实装。
 from __future__ import annotations
 
 import json
+import threading
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from enum import Enum
@@ -23,6 +24,38 @@ if TYPE_CHECKING:
 
 def _default_created_at() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+# ── checkpoint 维护失败的进程级可见计数（#515 BUG-02）────────────────────
+#
+# checkpoint 是恢复辅助：保存失败被 Runtime 宽捕获、不影响 run 结果，但"静默不毒化"
+# 不等于"不可见"——失败发生后 resume 只能回到更旧的稳定边界，这个事实必须有一个
+# 机器可读的对外口径。有意模块级：OnStableBoundary 每次 build_runtime 都是新实例、
+# AgentRuntime 随 run 生灭，会话间真正共享的只有本模块状态——计数挂在实例上会被
+# 装配生命周期切碎。对外出口是 /api/health 的 `checkpoint_save_failures` 字段；
+# 不进 SessionEvent（checkpoint 事件被 ADR-0004 Round 5 冻结排除）。
+_checkpoint_failure_lock = threading.Lock()
+_checkpoint_save_failures = 0
+
+
+def note_checkpoint_save_failure() -> None:
+    """记录一次 checkpoint 维护失败（帧保存或 last_checkpoint_seq 回写）。"""
+    global _checkpoint_save_failures
+    with _checkpoint_failure_lock:
+        _checkpoint_save_failures += 1
+
+
+def checkpoint_save_failure_count() -> int:
+    """当前进程累计的 checkpoint 维护失败次数（/api/health 的数据源）。"""
+    with _checkpoint_failure_lock:
+        return _checkpoint_save_failures
+
+
+def reset_checkpoint_save_failure_count() -> None:
+    """清零计数。仅测试隔离用；生产进程只在重启时归零。"""
+    global _checkpoint_save_failures
+    with _checkpoint_failure_lock:
+        _checkpoint_save_failures = 0
 
 
 class CheckpointBoundary(str, Enum):

@@ -92,6 +92,7 @@ def test_declared_scopes_covers_every_non_wildcard_scope() -> None:
         "frame:context_pressure",
         "frame:recovery_skipped",
         "frame:untrusted_knowledge",
+        "frame:untrusted_tool_output",
         "frame:untrusted_websearch",
         "profile:coding",
         "profile:main",

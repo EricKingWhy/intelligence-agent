@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
@@ -93,7 +94,11 @@ class ReadTool(Tool):
             # offset 守卫在此之上，默认 offset=1 对 0 行文件会误报越界
             # （厂商行为一致：pi-mono / Claude Code 对空文件返回空内容）。
             return ToolResult.success(
-                message=f"已读取 '{args.path}'（空文件）。",
+                # `#519` BUG-12：文件内容是最高频的 prompt 注入载体（恶意 README、
+                # 被投毒的脚本输出），逐条不可信标注。framing 是纵深防御，不替代
+                # Sandbox / Permission（不变量 11）。
+                message=f"{DEFAULT_REGISTRY.assemble('frame:untrusted_tool_output').fragment_text}"
+                        f"已读取 '{args.path}'（空文件）。",
                 data={"path": args.path, "content": "", "total_lines": 0},
             )
         start = args.offset
@@ -129,7 +134,8 @@ class ReadTool(Tool):
         if not truncated and start == 1:
             # 未截断且从头读：原样返回（字节级保真，不因窗口化改写行尾）。
             return ToolResult.success(
-                message=f"已读取 '{args.path}'（{len(content)} 字符）。",
+                message=f"{DEFAULT_REGISTRY.assemble('frame:untrusted_tool_output').fragment_text}"
+                        f"已读取 '{args.path}'（{len(content)} 字符）。",
                 data={"path": args.path, "content": content},
             )
         text = "\n".join(kept)
@@ -154,6 +160,7 @@ class ReadTool(Tool):
             )
         return ToolResult.success(
             message=(
+                f"{DEFAULT_REGISTRY.assemble('frame:untrusted_tool_output').fragment_text}"
                 f"已读取 '{args.path}' 行 {start}-{end_line}（共 {total_lines} 行）。"
             ),
             data={"path": args.path, "content": text, "total_lines": total_lines},
