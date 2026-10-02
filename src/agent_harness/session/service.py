@@ -229,6 +229,14 @@ _SESSION_ID_PATTERN = SESSION_KEY_PATTERN
 #: （真机现场是双击产生的两个请求），持续竞争则把 SeqConflict 抛给上层。
 _WRITE_CONFLICT_ATTEMPTS = 3
 
+#: #516 列表路径专用的 to_thread 限流器（模块级单例：SessionService 每次调用现造，
+#: 实例字段挂不住跨请求状态）。anyio 默认 40 线程会把 100 并发突发切成 ~3 波——
+#: store 的单飞闸门只能把每波各坍缩成 1 次扫描（每突发 3 次）；容量 100 让整批
+#: 突发同拍过闸 → **每突发 1 次扫描**（4000 会话实测 p95 914–1131ms → 719–776ms，
+#: AC <1s 由贴线转为有裕度）。只作用于默认列表路径的三个卸载点（id 现扫 / 窗口
+#: refs / 批量摘要），全局默认限流器不动——其他 to_thread 消费者行为零变化。
+_LIST_SYNC_LIMITER = anyio.CapacityLimiter(100)
+
 
 def validate_session_id(session_id: str) -> str:
     """校验 session_id 是否为单个安全名字段。
@@ -642,7 +650,11 @@ class SessionService:
             fixed_ref = WorkspaceRef(id=workspace.id, title=workspace.title)
             refs: dict[str, WorkspaceRef] = {}
         else:
-            ids = await anyio.to_thread.run_sync(store.list_session_ids)
+            # `limiter`（#516）：走列表专用限流器，让并发突发整批同拍到达 store 的
+            # 单飞闸门（见 `_LIST_SYNC_LIMITER`）。
+            ids = await anyio.to_thread.run_sync(
+                store.list_session_ids, limiter=_LIST_SYNC_LIMITER
+            )
             fixed_ref = None
             # refs 在切片之后构建（见下方 #516 注释）；此处先占位。
             refs: dict[str, WorkspaceRef] | None = None
@@ -671,7 +683,9 @@ class SessionService:
         # 卸载（与列表页其余磁盘读一致）。
         if refs is None:
             refs = (
-                await anyio.to_thread.run_sync(index.workspace_refs_of_sessions, ids)
+                await anyio.to_thread.run_sync(
+                    index.workspace_refs_of_sessions, ids, limiter=_LIST_SYNC_LIMITER
+                )
                 if index is not None
                 else {}
             )
@@ -680,7 +694,7 @@ class SessionService:
         # #516：批量读（一次 to_thread 卸载）——逐 id hop 在并发突发下被线程池
         # 排队放大延迟（100 并发 × 50 行 = 5000 次排队）。
         stats_list = await anyio.to_thread.run_sync(
-            store.read_session_summaries, ids
+            store.read_session_summaries, ids, limiter=_LIST_SYNC_LIMITER
         )
         for sid, stats in zip(ids, stats_list):
             if stats is None or stats.event_count == 0:

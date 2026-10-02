@@ -11,12 +11,17 @@ AC（票面）：
 1. 切片先于摘要扫描：`read_session_summary` 的调用次数 = 返回行数 ≤ limit。
    若先扫全部摘要再切片，limit=1 也得扫 4000 个文件，O(1) 在结构上不成立；
 2. 归档过滤先行：已归档的行不占 limit 预算（否则翻页出现"幽灵缺口"）；
-3. limit/offset 的校验交给 FastAPI Query（ge/le），不自造一套。
+3. limit/offset 的校验交给 FastAPI Query（ge/le），不自造一套；
+4. 并发突发共享同一次目录扫描（single-flight，用户裁决第五选项）——但**不跨请求
+   缓存**（mtime 现读契约的闸门侧钉子，见文件末两条测试）。
 """
 
 from __future__ import annotations
 
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -150,3 +155,143 @@ async def test_limit_none_keeps_full_list_semantics(tmp_path: Path) -> None:
 
     result = await service.list_sessions()
     assert len(result) == 12
+
+
+# —— #516 并发 AC：扫描合并（single-flight；用户裁决第五选项，2026-10-02）——
+
+
+def _burst_list(store, workers: int = 100) -> list[list[str]]:
+    """真 workers 线程**同拍**调 `store.list_session_ids`。
+
+    两个要点（缺一就在满载车道上假红）：
+    - 绕开 `anyio.to_thread` 的默认 40 线程限流（否则 100 个调用分 ~3 批，闸门
+      各批各扫一次，`== 1` 的机制断言不成立）；
+    - `threading.Barrier` 先把 workers 个线程对齐到同一瞬间再放行——不设闸，
+      机器满载时线程起飞能错开超过 leader 的持窗时长，会有迟到者自成新批。
+    """
+    barrier = threading.Barrier(workers)
+
+    def aligned() -> list[str]:
+        barrier.wait()
+        return store.list_session_ids()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(aligned) for _ in range(workers)]
+        return [f.result() for f in futures]
+
+
+def test_list_sync_limiter_capacity_fits_ac_burst() -> None:
+    """列表专用 to_thread 限流器容量 ≥ AC 的 100 并发（承重常数，#508 先例钉住）。
+
+    容量不足会把突发切回多波：单飞闸门只能每波各坍缩成 1 次扫描（cap 40 实测
+    4000 会话 p95 914–1131ms 贴 1s 线；cap 100 单波单扫 719–776ms）。
+    """
+    from agent_harness.session.service import _LIST_SYNC_LIMITER
+
+    assert _LIST_SYNC_LIMITER.total_tokens >= 100
+
+
+def test_concurrent_burst_coalesces_to_one_scan(tmp_path: Path, monkeypatch) -> None:
+    """并发突发共享同一次目录扫描（AC「100 并发 p95<1s」的结构性证明）。
+
+    墙钟不进 CI 断言（抖动假红，收票用一次性脚本对真实入口取证）；这里钉机制：
+    100 线程同拍调用，leader 真扫一次、其余共享 in-flight 结果（nginx
+    `proxy_cache_lock` / Go singleflight 同型）。无闸门时 scan_count == 100（红）。
+    """
+    state = AppState(
+        Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
+    )
+    ids = _seed_sessions(state, 20)
+    store = state.store
+    scans: list[int] = []
+    original = store._list_session_ids_uncached
+
+    def slow_counting_scan():
+        scans.append(1)
+        time.sleep(0.5)  # 撑住 in-flight 窗口（Barrier 已对齐起飞，0.5s 是满载裕度）
+        return original()
+
+    monkeypatch.setattr(store, "_list_session_ids_uncached", slow_counting_scan)
+
+    results = _burst_list(store)
+
+    assert len(scans) == 1, f"100 并发只应真扫 1 次，实际 {len(scans)} 次"
+    expected = list(reversed(ids))
+    for result in results:
+        assert result == expected, "共享方必须拿到与 leader 一致的最近活动倒序"
+    assert len({id(r) for r in results}) == len(results), (
+        "共享不得产生别名：waiter 必须拿到副本，互不影响调用方的后续 mutation"
+    )
+
+
+def test_gate_does_not_cache_across_requests(tmp_path: Path, monkeypatch) -> None:
+    """扫描结束即散、不跨请求缓存（mtime 现读契约的闸门侧钉子）。
+
+    两次串行请求 = 两次真扫；中间外部 `os.utime` 抬旧会话 → 第二次立即看到新序。
+    `test_list_by_workspace_follows_ledger_order_not_activity` 钉的是项目视图，
+    这里钉默认列表路径。若有人日后给闸门加 TTL 缓存，本测试转红。
+    """
+    state = AppState(
+        Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
+    )
+    ids = _seed_sessions(state, 5)
+    store = state.store
+    scans: list[int] = []
+    original = store._list_session_ids_uncached
+
+    def counting_scan():
+        scans.append(1)
+        return original()
+
+    monkeypatch.setattr(store, "_list_session_ids_uncached", counting_scan)
+
+    assert store.list_session_ids() == list(reversed(ids))
+    # 外部 utime：把最旧（base_epoch）的会话抬到最新
+    os.utime(store._events_path(ids[0]), (2_000_000_000.0, 2_000_000_000.0))
+    assert store.list_session_ids()[0] == ids[0]
+    assert len(scans) == 2, "闸门不得跨请求缓存扫描结果"
+
+
+def test_leader_scan_failure_propagates_and_gate_recovers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """leader 扫描异常 → 同批 waiter 收到同一异常；闸门不残留，下一请求正常新扫。"""
+    state = AppState(
+        Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
+    )
+    _seed_sessions(state, 5)
+    store = state.store
+    scans: list[int] = []
+    original = store._list_session_ids_uncached
+
+    def failing_scan():
+        scans.append(1)
+        time.sleep(0.5)
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(store, "_list_session_ids_uncached", failing_scan)
+
+    outcomes: list[str] = []
+    with ThreadPoolExecutor(max_workers=100) as pool:
+        barrier = threading.Barrier(100)
+
+        def aligned() -> list[str]:
+            barrier.wait()
+            return store.list_session_ids()
+
+        futures = [pool.submit(aligned) for _ in range(100)]
+        for future in futures:
+            try:
+                future.result()
+                outcomes.append("ok")
+            except OSError:
+                outcomes.append("OSError")
+
+    assert len(scans) == 1, f"失败的一批也只应真扫 1 次，实际 {len(scans)} 次"
+    assert outcomes == ["OSError"] * 100, "同批 waiter 必须收到 leader 的异常"
+
+    # 闸门不残留：恢复真扫描后下一请求成功（失败不再重放）
+    monkeypatch.setattr(store, "_list_session_ids_uncached", original)
+    recovered = store.list_session_ids()
+    assert isinstance(recovered, list)
+    assert len(scans) == 1, "恢复后的请求应走真扫描而非重放失败批"

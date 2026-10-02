@@ -22,7 +22,7 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,6 +112,70 @@ def _stat_pool() -> ThreadPoolExecutor:
         return _STAT_POOL
 
 
+class _ScanCohort:
+    """一次 in-flight 扫描的共享记录：同批 waiter 等 `done` 后取 `result`/`error`。"""
+
+    __slots__ = ("done", "error", "result")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: list[str] | None = None
+        self.error: BaseException | None = None
+
+
+class _ScanGate:
+    """#516 目录扫描的单飞闸（request coalescing，nginx `proxy_cache_lock` /
+    Go singleflight 同型）：并发突发只放行 leader 真扫一次，其余共享 in-flight 结果。
+
+    契约边界（**保序前提**，`test_gate_does_not_cache_across_requests` 钉住）：
+    只合并**时间上重叠**的调用——扫描结束后闸门即清，下一请求照旧现扫，外部
+    utime / 外部写者下一眼可见，「mtime 每次请求现读」的语义不变，闸门不引入
+    任何跨请求缓存。waiter 拿结果**副本**，共享不产生别名；leader 扫描异常时
+    同批 waiter 收到同一异常，闸门随批清空不残留（`_inflight is cohort` 的
+    同一性检查保证新批不受旧批影响）。
+
+    为什么是线程原语：扫描方法体是同步 I/O，调用方经 `to_thread.run_sync`
+    下放到工作线程——同拍的 100 个调用在不同的线程里，asyncio 层的 future
+    共享够不着它们。leader 的扫描**不持锁执行**（只持 `_lock` 的瞬间做登记/
+    清场），waiter 阻塞在 `cohort.done` 上，不占任何锁。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._inflight: _ScanCohort | None = None
+
+    def run(self, scan: Callable[[], list[str]]) -> list[str]:
+        with self._lock:
+            cohort = self._inflight
+            if cohort is None:
+                cohort = _ScanCohort()
+                self._inflight = cohort
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            cohort.done.wait()
+            if cohort.error is not None:
+                raise cohort.error
+            assert cohort.result is not None
+            return list(cohort.result)
+        try:
+            result = scan()
+        except BaseException as error:
+            cohort.error = error
+            with self._lock:
+                if self._inflight is cohort:
+                    self._inflight = None
+            cohort.done.set()
+            raise
+        cohort.result = result
+        with self._lock:
+            if self._inflight is cohort:
+                self._inflight = None
+        cohort.done.set()
+        return result
+
+
 class JsonlSessionStore:
     """JSONL append-only 事件存储。
 
@@ -149,6 +213,8 @@ class JsonlSessionStore:
             str, tuple[tuple[int, int], SessionSummaryStats]
         ] = {}
         self._state_guard = threading.Lock()
+        # #516 并发列表的单飞闸（用户裁决第五选项）：见 _ScanGate 的契约边界。
+        self._scan_gate = _ScanGate()
 
     def _session_dir(self, session_id: str) -> Path:
         return self._root / session_id
@@ -473,11 +539,21 @@ class JsonlSessionStore:
         #516：`os.scandir` 的 dirent 自带 is_dir（不再额外 stat），`events.jsonl`
         的存在性与 mtime 用**单次** `os.stat` 合并判定（异常代替 exists 预检）；
         stat 批次在线程池里并行执行——`os.stat` 在 syscall 期间释放 GIL，4000
-        文件从 ~200ms 串行压到几十 ms（AC 的 100 并发列表场景下这是瓶颈大头）。
-        顺序语义不变：mtime **每次请求现读**，外部 utime / 外部写者下一眼生效
+        文件从 ~200ms 串行压到几十 ms。顺序语义不变：mtime **每次请求现读**，
+        外部 utime / 外部写者下一眼生效
         （`test_list_by_workspace_follows_ledger_order_not_activity` 钉死），线程
         池只是同一批 stat 的并行执行，不引入任何缓存。
+
+        #516 并发 AC（用户裁决第五选项）：方法体经 `_ScanGate` 单飞——并发突发
+        （100 并发同拍列表）只让 leader 真扫一次，其余共享 in-flight 结果，40 万
+        stat 突发坍缩为 1 次扫描的成本；扫描结束闸门即清，**不跨请求缓存**，串行
+        路径语义与无闸门时逐字一致。waiter 拿副本；调用方不得假设多次调用共享
+        同一 list 对象（副本语义是有意的）。
         """
+        return self._scan_gate.run(self._list_session_ids_uncached)
+
+    def _list_session_ids_uncached(self) -> list[str]:
+        """无闸门的一次现扫（`list_session_ids` 的实体；测试经此缝计数）。"""
         if not self._root.exists():
             return []
         root_str = str(self._root)
