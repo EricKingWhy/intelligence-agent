@@ -2460,10 +2460,13 @@ class AgentRuntime:
             ),
             stuck=stuck_payload,
             # `#518` BUG-10：由**账目未知**（fail-closed）触发的暂停显式带依据，
-            # 否则 "budget_exhausted + consumed:null" 运维无法解释。
+            # 否则 "budget_exhausted + consumed:null" 运维无法解释。判定喂
+            # `consumed_before`（触发那一刻的读数），不是下面 closeout 后的重读
+            # ——两者今天必然相等（未知维配了 ceiling ⇒ closeout 无容量），但
+            # 判据语义上属于触发时刻，不依赖那条容量政策不变量。
             accounting_unknown=accounting_unknown_pause_dimensions(
                 trigger_dimension=trigger_dimension,
-                consumed=consumed,
+                consumed=consumed_before,
                 session_snapshot=session_snapshot,
             ),
             # 与各终结臂同源（ADR-0033 的归因面）：暂停也是本次执行的收口，

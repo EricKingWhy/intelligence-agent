@@ -1097,11 +1097,15 @@ class TestDuplicateToolCallId:
         assert second.result.ok is False
         assert second.result.error_code == ErrorCode.REPEATED_TOOL_CALL
         assert second.result.retryable is False
+        # 票面验收点："准入前被拒"族显式记 0——不消耗配额。
+        assert second.budget_delta == {
+            "tool_name": "count", "tool_calls": 0, "tool_attempts": 0,
+        }
         assert counting.call_count == 1  # 工具不被重复执行
-        # ledger 首行不被第二次调用改写（仍是第一次的终态）。
+        # ledger 首行不被第二次调用改写（仍是第一次的终态，正向断言钉死）。
         row = await ledger.get("session-1", "call-dup-0001")
         assert row is not None
-        assert row.state is not OperationState.PENDING
+        assert row.state is OperationState.SUCCEEDED
 
     @pytest.mark.asyncio
     async def test_duplicate_id_in_cancelled_cascade_is_classified(self, tmp_path: Path):
@@ -1127,7 +1131,7 @@ class TestDuplicateToolCallId:
 
         assert cancelled.result.ok is False
         assert cancelled.result.error_code == ErrorCode.REPEATED_TOOL_CALL
-        # 首行保持第一次调用的 SUCCEEDED，不被改写成 CANCELLED。
+        # 首行保持第一次调用的终态，不被改写成 CANCELLED（正向断言钉死）。
         row = await ledger.get("session-1", "call-dup-0002")
         assert row is not None
-        assert row.state is not OperationState.CANCELLED
+        assert row.state is OperationState.SUCCEEDED

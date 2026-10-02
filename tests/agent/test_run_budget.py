@@ -53,10 +53,15 @@ from agent_harness.agent.run_budget import (
     TRIGGER_RUN_REQUESTS,
     TRIGGER_RUN_TOKENS,
     TRIGGER_RUN_TURNS,
+    TRIGGER_SESSION_TOKENS,
     BudgetConsumed,
     LaunchRunBudget,
     RunBudgetState,
     RunLimits,
+    SessionBudgetSnapshot,
+    SessionConsumed,
+    SessionLimits,
+    accounting_unknown_pause_dimensions,
     add_consumed,
     as_run_started_budget,
     build_limits_snapshot,
@@ -1021,6 +1026,75 @@ def test_project_budget_degrades_enforcement_when_requests_have_no_usage() -> No
     assert project_budget(fresh, accounting=USAGE_ONLY, local_fuse=FUSE)[
         "enforcement"
     ]["max_total_tokens"] == "enforceable"
+
+
+def test_accounting_unknown_pause_dimensions_covers_both_scopes() -> None:
+    """`#518` BUG-10：未知触发维的判定——run / session 两作用域 + 数值到顶互斥。
+
+    判据必须与 `_session_dimension_reached`（及 run 侧同款）的 fail-closed 侧
+    严格互斥于"数值到顶"：同一维，读数 None ⇒ 落名；读数有数（哪怕到顶）⇒
+    不落——否则数值到顶的暂停会被误标成"账目未知触发"。
+    """
+    unknown_tokens = BudgetConsumed(agent_turns=1, total_tokens=None)
+    assert accounting_unknown_pause_dimensions(
+        trigger_dimension=TRIGGER_RUN_TOKENS, consumed=unknown_tokens,
+    ) == (TRIGGER_RUN_TOKENS,)
+    # 数值到顶：同一触发维、读数有数 ⇒ 空（运行时对空元组不落键）。
+    reached_tokens = BudgetConsumed(agent_turns=1, total_tokens=500)
+    assert accounting_unknown_pause_dimensions(
+        trigger_dimension=TRIGGER_RUN_TOKENS, consumed=reached_tokens,
+    ) == ()
+    # 非触发维的未知不落名（cost 未知但触发的是 tokens）。
+    assert accounting_unknown_pause_dimensions(
+        trigger_dimension=TRIGGER_RUN_TOKENS,
+        consumed=BudgetConsumed(total_tokens=None, cost_usd=None),
+    ) == (TRIGGER_RUN_TOKENS,)
+
+    snapshot = SessionBudgetSnapshot(
+        limits=SessionLimits(max_total_tokens=100),
+        consumed=SessionConsumed(total_tokens=None),
+        version=1,
+    )
+    assert accounting_unknown_pause_dimensions(
+        trigger_dimension=TRIGGER_SESSION_TOKENS,
+        consumed=unknown_tokens, session_snapshot=snapshot,
+    ) == (TRIGGER_SESSION_TOKENS,)
+    # session 维数值到顶互斥：行读数有数（哪怕 ≥ ceiling）⇒ 不落。
+    reached_snapshot = SessionBudgetSnapshot(
+        limits=SessionLimits(max_total_tokens=100),
+        consumed=SessionConsumed(total_tokens=200),
+        version=1,
+    )
+    assert accounting_unknown_pause_dimensions(
+        trigger_dimension=TRIGGER_SESSION_TOKENS,
+        consumed=unknown_tokens, session_snapshot=reached_snapshot,
+    ) == ()
+    # run 维触发时 snapshot 不掺入（触发维决定看哪一作用域）。
+    assert accounting_unknown_pause_dimensions(
+        trigger_dimension=TRIGGER_RUN_TOKENS,
+        consumed=unknown_tokens, session_snapshot=snapshot,
+    ) == (TRIGGER_RUN_TOKENS,)
+
+
+def test_build_pause_data_omits_accounting_unknown_when_numeric() -> None:
+    """缺席 ≠ 空值（`03 §3.4` 同一条纪律）：数值到顶的暂停**不落**该键。"""
+    data = build_pause_data(
+        reason=REASON_BUDGET_EXHAUSTED,
+        trigger_dimension=TRIGGER_RUN_TOKENS,
+        version=1,
+        consumed=BudgetConsumed(agent_turns=1, total_tokens=500),
+        limits=build_limits_snapshot(
+            run_limits=RunLimits(max_total_tokens=100), local_fuse=FUSE,
+        ),
+        continuation=deterministic_continuation(
+            events=[], run_id=RUN_ID, trigger_dimension=TRIGGER_RUN_TOKENS,
+            limits=RunLimits(max_total_tokens=100),
+            consumed=BudgetConsumed(agent_turns=1, total_tokens=500),
+        ),
+        closeout_source=CLOSEOUT_DETERMINISTIC,
+        accounting_unknown=(),
+    )
+    assert "accounting_unknown" not in data
 
 
 def test_a_terminal_event_after_a_pause_supersedes_it() -> None:

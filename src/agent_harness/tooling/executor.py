@@ -435,9 +435,10 @@ class ToolExecutor:
             session_id = operation_context.session_id
             # `#519`：ledger 主键 `(session_id, tool_call_id)` 冲突 = 模型在本会话
             # 重复返回了同一 tool_call_id。唯一性约束在这里把调用拒下，分类成
-            # REPEATED_TOOL_CALL 的错误结果回灌对话（模型换新 ID 自纠）——绝不
-            # 冒泡 IntegrityError 把一次模型口误升级成 run 级致命失败（`04 §4`
-            # 建议码表的语义：约束冲突 → 可恢复工具错误）。
+            # REPEATED_TOOL_CALL 的错误结果回灌对话（模型换新 ID 自纠）——UNIQUE
+            # 冲突不再冒泡成 run 级致命失败（`04 §4` 建议码表的语义：约束冲突 →
+            # 可恢复工具错误）；非 UNIQUE 的 IntegrityError（CHECK / NOT NULL 等）
+            # 照旧 re-raise，fail-loud 不吞。
             try:
                 await self._create_pending_operation(
                     tool_call_id=tool_call_id,
@@ -449,6 +450,10 @@ class ToolExecutor:
             except sqlite3.IntegrityError as error:
                 if "UNIQUE" not in str(error):
                     raise
+                # 占了配额槽位却没被真实接纳（审批拒绝路径同款归还）：重复 ID
+                # 常成串出现，不归还会用幽灵占位挤掉同批同工具的合法调用。
+                if tool_quota is not None:
+                    tool_quota.release(name)
                 return ToolExecution(
                     tool_call_id=tool_call_id,
                     result=ToolResult.failure(

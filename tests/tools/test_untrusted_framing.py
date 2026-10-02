@@ -8,6 +8,14 @@
 
 边界声明：framing 是**纵深防御**，不替代 Sandbox / Permission（`AGENTS.md`
 §7 不变量 11：边界是 Runtime 事实，不是提示词）。
+
+挂点边界（本批只挂票面点名的 5 工具 / 7 个 success 组装点）：
+- `write` 不挂——确认文案是 harness 自己的话，不含外部世界内容；
+- `git` / `grep` 的 success 结果同样携带命令输出 / 文件内容（与 bash 同类
+  暴露），本批未挂、也未在票面内——同类工具的补挂是明确的票外跟进项；
+- failure 路径不挂：失败文案由 harness 生成；已知例外是 bash 超时把
+  stdout/stderr 裁剪后放进 `metadata`（message 指向它），该暴露面随
+  票外跟进一并处置。
 """
 
 from __future__ import annotations
