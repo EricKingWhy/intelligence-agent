@@ -52,6 +52,11 @@ class ErrorCode(str, Enum):
     # 参数可能不完整或被流式 salvage 凭空补全 → 整批判错、绝不执行（错误即消息，
     # 重发由模型决定）。同族："准入**前**被拒"的可审计理由，不消耗配额（记 0）。
     ARGS_TRUNCATED = "ARGS_TRUNCATED"
+    # `#519`：本会话已存在同一 tool_call_id 的 Operation（模型重复返回同一 ID，
+    # `operations` 表主键冲突）。规格 `04 §4` 建议码表的 REPEATED_TOOL_CALL。
+    # 同族："准入**前**被拒"的可审计理由，不消耗配额（记 0）。不重试——同一个
+    # ID 再提交一次还是撞同一个主键；自纠方式是换一个新 ID 重新提交。
+    REPEATED_TOOL_CALL = "REPEATED_TOOL_CALL"
 
 
 class ToolRuntimeSignal(BaseModel):

@@ -1863,6 +1863,7 @@ def build_pause_data(
     resume_requirements: Iterable[str] = (),
     trace_id: str | None = None,
     stuck: Mapping[str, Any] | None = None,
+    accounting_unknown: Iterable[str] = (),
 ) -> dict[str, Any]:
     """`run/paused` 的 data（`03 §3.4`：reason / trigger_dimension / version /
     consumed / limits / continuation / closeout_source / resume_requirements）。
@@ -1876,6 +1877,10 @@ def build_pause_data(
 
     `stuck`（`#317`）只在 `reason=stuck` 时给出（调用方保证），**缺席**而不是 `null`
     ——旧形状（预算 / deadline 暂停）的载荷逐字不变（ADR-0048 D6）。
+
+    `accounting_unknown`（`#518` BUG-10）：因**账目未知**而 fail-closed 触发的
+    维度清单（`accounting_unknown_pause_dimensions` 的产出）。空 ⇒ 不落键（缺席
+    vs 空值口径）：数值到顶的普通暂停不带这一格，载荷形状不变。
     """
     data = {
         "reason": reason,
@@ -1890,6 +1895,8 @@ def build_pause_data(
     }
     if stuck is not None:
         data["stuck"] = dict(stuck)
+    if accounting_unknown:
+        data["accounting_unknown"] = sorted(accounting_unknown)
     return data
 
 
@@ -2005,7 +2012,22 @@ def project_budget(
         # 出现，欠账照样看得见。
         if state.resumable:
             projection["state"] = STATE_NEEDS_RECONCILE
-    projection["enforcement"] = accounting.as_projection()
+    # `#518` BUG-10：`enforcement` 是**部署能力**（as_projection 的静态声明），
+    # 但"声明能强制"≠"本 run 真的收到过账目"。已发过请求却仍无读数的维度实际
+    # 没通电，呈现 degraded 而不是 enforceable——"enforceable + consumed:null"
+    # 是运维无法解释的矛盾。run 刚建还没发请求时不降级：那时读数未知是正常的。
+    # cost 判据同款（本链 reports_cost=False 恒 unavailable，天然不受影响）。
+    enforcement = accounting.as_projection()
+    if (state.consumed.model_requests or 0) > 0:
+        if enforcement["max_total_tokens"] == "enforceable" and (
+            state.consumed.total_tokens is None
+        ):
+            enforcement = {**enforcement, "max_total_tokens": "degraded"}
+        if enforcement["max_cost_usd"] == "enforceable" and (
+            state.consumed.cost_usd is None
+        ):
+            enforcement = {**enforcement, "max_cost_usd": "degraded"}
+    projection["enforcement"] = enforcement
     return projection
 
 
@@ -2537,6 +2559,40 @@ def session_pause_trigger(
         if _session_dimension_reached(dimension, consumed=consumed, limits=session_limits):
             return dimension
     return None
+
+
+def accounting_unknown_pause_dimensions(
+    *,
+    trigger_dimension: str,
+    consumed: BudgetConsumed,
+    session_snapshot: SessionBudgetSnapshot | None = None,
+) -> tuple[str, ...]:
+    """因**账目未知**而 fail-closed 触发暂停的维度清单（`#518` BUG-10）。
+
+    判据与 `_session_dimension_reached`（及 run 侧同款）的"未知"一侧严格互斥于
+    "数值到顶"：触发维配置了 ceiling，且它的消耗读数是 `None`（未知 ≠ 0 的粘性，
+    `02 §5.1`）。暂停载荷把它显式带出——"budget_exhausted 且 consumed 为 null"
+    不是矛盾，而是"本次运行没收到 usage，fail-closed 拦在下一个准入点"；不显式
+    带，运维就得自己把两格字段对到一起才能解释。空元组 = 数值到顶的暂停
+    （调用方**不落键**：缺席 vs 空值是两件事）。
+    """
+    unknown: list[str] = []
+    if trigger_dimension == TRIGGER_RUN_TOKENS and consumed.total_tokens is None:
+        unknown.append(TRIGGER_RUN_TOKENS)
+    if trigger_dimension == TRIGGER_RUN_COST and consumed.cost_usd is None:
+        unknown.append(TRIGGER_RUN_COST)
+    if session_snapshot is not None:
+        if (
+            trigger_dimension == TRIGGER_SESSION_TOKENS
+            and session_snapshot.consumed.total_tokens is None
+        ):
+            unknown.append(TRIGGER_SESSION_TOKENS)
+        if (
+            trigger_dimension == TRIGGER_SESSION_COST
+            and session_snapshot.consumed.cost_usd is None
+        ):
+            unknown.append(TRIGGER_SESSION_COST)
+    return tuple(unknown)
 
 
 def _session_dimension_headroom(

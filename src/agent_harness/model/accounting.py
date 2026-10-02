@@ -69,6 +69,11 @@ class ProviderAccounting:
 
         只暴露"能不能强制"，不暴露"为什么"——理由进日志/文档，不进契约
         （客户端要据此决定"能不能配这个 ceiling"，多一个字段就多一处漂移面）。
+
+        本函数产出的词表是二值（enforceable / unavailable）；第三值
+        `degraded` 只由 `project_budget` 在运行时合成（`#518` BUG-10）：
+        部署声明可执行（enforceable），但本次 run 发过请求却没收到 usage
+        读数——能力在、证据缺，不能继续声称 enforceable。
         """
         return {
             "max_total_tokens": "enforceable" if self.reports_usage else "unavailable",

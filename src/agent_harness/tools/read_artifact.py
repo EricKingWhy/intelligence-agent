@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.storage.artifact import ArtifactStore
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
@@ -97,7 +98,9 @@ class ReadArtifactTool(Tool):
                 error_code=ErrorCode.INVALID_ARGUMENT,
             )
         return ToolResult.success(
-            message=f"读取外置产物 {args.artifact_ref}：返回 {result.returned_lines} 行"
+            # `#519` BUG-12：artifact 正文（data.lines）来自外部世界，逐条不可信标注。
+            message=f"{DEFAULT_REGISTRY.assemble('frame:untrusted_tool_output').fragment_text}"
+                    f"读取外置产物 {args.artifact_ref}：返回 {result.returned_lines} 行"
                     + ("（已截断）" if result.truncated else "")
                     + f"，共 {result.total_lines} 行。",
             data={

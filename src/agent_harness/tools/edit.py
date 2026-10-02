@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.sandbox import Sandbox
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.reconcile import ReconcileHint
@@ -111,7 +112,9 @@ class EditTool(Tool):
             )
 
         return ToolResult.success(
-            message=f"已在 '{args.path}' 中替换 {replacements} 处。",
+            # `#519` BUG-12：diff 片段携带文件内容（data.diff），逐条不可信标注。
+            message=f"{DEFAULT_REGISTRY.assemble('frame:untrusted_tool_output').fragment_text}"
+                    f"已在 '{args.path}' 中替换 {replacements} 处。",
             data={
                 "path": args.path,
                 "replacements": replacements,
