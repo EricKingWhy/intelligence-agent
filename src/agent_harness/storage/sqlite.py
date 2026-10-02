@@ -252,9 +252,12 @@ class SqliteOperationLedger(OperationLedger):
         artifact_ref: str | None = None,
         reconcile_meta: str | None = None,
     ) -> Operation:
-        # 单连接内完成「读 → 校验 → CAS 写 → 读回」：对外语义不变，只把 3 次
-        # _connect 收成 1 次。CAS 仍由 UPDATE 的 `WHERE ... AND state = ?` 加
+        # 单连接内完成「读 → 校验 → CAS 写 → 校验 → 读回 → 提交」：对外语义不变，
+        # 只把 3 次 _connect 收成 1 次。CAS 仍由 UPDATE 的 `WHERE ... AND state = ?` 加
         # rowcount 检查保证——不引入显式事务，不加行锁（票面 R3）。
+        # rowcount 检查与回读必须在 commit 之前（同 delegation_tree 的 #515 P2-B 注）：
+        # commit 后的读撞锁会触发整方法重跑，而 UPDATE 已持久化，重跑会读到已迁移
+        # 的状态、撞状态机抛伪 ValueError（#544 ③）。
         async with _connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
@@ -300,7 +303,6 @@ class SqliteOperationLedger(OperationLedger):
                     current.state.value,
                 ),
             )
-            await connection.commit()
             if cursor.rowcount != 1:
                 raise RuntimeError(
                     f"Operation '{tool_call_id}' changed concurrently"
@@ -310,6 +312,7 @@ class SqliteOperationLedger(OperationLedger):
                 (session_id, tool_call_id),
             )
             updated_row = await cursor.fetchone()
+            await connection.commit()
         assert updated_row is not None
         return self._to_operation(updated_row)
 
