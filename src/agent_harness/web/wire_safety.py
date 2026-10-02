@@ -61,26 +61,41 @@ def _is_lone_surrogate(ch: str) -> bool:
     return _SURROGATE_LO <= ord(ch) <= _SURROGATE_HI
 
 
+def _has_lone_surrogate(text: str) -> bool:
+    return any(_is_lone_surrogate(ch) for ch in text)
+
+
 def lone_surrogate_path(value: Any, path: str = "$") -> str | None:
     """在 JSON 解码后的结构里找**第一个** lone surrogate，返回其位置，找不到返回 None。
 
-    只回位置（形如 ``$.content`` / ``$.protected_facts[0].value``）不回值：这是
-    「错误响应不得回显原始秘密」的直接体现，也避免把 5 万字符的原文再抄一遍。
+    只回位置不回**值**：用户正文一个字都不带出去——这是「错误响应不得回显原始秘密」
+    的直接体现。**键**是字段名，与 FastAPI/pydantic 的 ``loc`` 同一条口径（``loc``
+    本来就回显字段名），故保留原名；但它同样按「帧是否含畸形 Unicode」判，命中时
+    返回值里给**转义**形态——否则「安全」的返回值会把同一个不可编码字符原样带到
+    错误帧里（独立审查 P3-S3；顺带修掉旧实现只扫值、**整个漏掉坏键**的洞）。
+
+    **刻意写成迭代而不是递归**：WS 帧是唯一绕过 pydantic 的入口，深嵌套帧能让任何
+    递归扫描器自己 ``RecursionError``——那会把「守卫」变成新的失败面（实测 depth≈1000
+    即爆，而本机 ``json.loads`` 能吃到约 3000）。显式栈让本函数对任意深度都是全函数，
+    与它「不得再抛」的职责一致。
     """
-    if isinstance(value, str):
-        return path if any(_is_lone_surrogate(ch) for ch in value) else None
-    if isinstance(value, dict):
-        for key, item in value.items():
-            found = lone_surrogate_path(item, f"{path}.{key}")
-            if found is not None:
-                return found
-        return None
-    if isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            found = lone_surrogate_path(item, f"{path}[{index}]")
-            if found is not None:
-                return found
-        return None
+    stack: list[tuple[Any, str]] = [(value, path)]
+    while stack:
+        current, where = stack.pop()
+        if isinstance(current, str):
+            if _has_lone_surrogate(current):
+                return where
+        elif isinstance(current, dict):
+            items = list(current.items())
+            # 键先扫一遍（保文档序的「第一个」），再逆序入栈 ⇒ 弹出即文档顺序。
+            for key, _ in items:
+                if _has_lone_surrogate(str(key)):
+                    return f"{where}.{_safe_text(str(key))}"
+            for key, item in reversed(items):
+                stack.append((item, f"{where}.{_safe_text(str(key))}"))
+        elif isinstance(current, (list, tuple)):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append((current[index], f"{where}[{index}]"))
     return None
 
 

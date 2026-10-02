@@ -38,6 +38,7 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
 from agent_harness.web.app import create_app
+from agent_harness.web.wire_safety import lone_surrogate_path
 from tests.scripted_model import ScriptedModel
 
 JSON_HDR = {"content-type": "application/json"}
@@ -234,3 +235,33 @@ def test_ws_send_message_legal_cjk_emoji_still_launches(
         frame = json.loads(ws.receive_text())
 
     assert frame["type"] != "error", frame
+
+
+# ── 4. 守卫自身必须是全函数（独立审查 2026-10-03 发现的两条新失败面） ──────
+
+
+def test_lone_surrogate_path_is_total_on_deep_structures() -> None:
+    """深嵌套帧不得让**守卫自己**爆栈（审查 P3-C2：这是修复新引入的失败面）。
+
+    WS 是唯一绕过 pydantic 的入口，深嵌套帧能到达守卫；递归实现会在约 depth=1000
+    处 ``RecursionError``，被读循环的 ``except Exception`` 吞掉 ⇒ 守卫反而成了
+    新的静默丢帧点。深度取 5000（远高于本机 ``json.loads`` 上限）以钉住「迭代」。
+    """
+    deep: object = "a"
+    for _ in range(5000):
+        deep = [deep]
+    assert lone_surrogate_path(deep) is None  # 不抛即为通过
+
+
+def test_lone_surrogate_path_is_utf8_encodable_even_for_bad_key() -> None:
+    """键含 lone surrogate 必须**被检出**，且返回的位置串本身可 utf-8 编码。
+
+    两条都是审查（P3-S3）实测出来的洞：旧实现只扫**值**、整条漏掉坏键（返回 None）；
+    而路径一旦由键拼成，未转义的键又会把同一个不可编码字符带进错误帧。
+    """
+    found = lone_surrogate_path({"ok": 1, LONE_HIGH: "v"})
+    assert found is not None, "键里的 lone surrogate 必须被检出"
+    assert found.startswith("$.")
+    assert "ok" not in found  # 文档序：坏键排在 ok 之后，检出的是坏键那一条
+    found.encode("utf-8")  # 不可编码即抛 ⇒ 本行就是判据
+    assert not any(0xD800 <= ord(ch) <= 0xDFFF for ch in found)
