@@ -6830,3 +6830,13 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 ## AGENTS 规则发布（2026-10-03）
 
 用户授权四端同步；最终根/必读 Git 手册/HTML/原版快照已进入发布收口。审查、完整车道证据与范围见 `docs/agents/agents-md-release-integration-2026-10-03.md`。TodoWrite 阅读项错误完成仍 OPEN；最新 main 的 Composer 视觉用例（期望3控件、实际4）经原始基线复跑确认为既有红，待用户裁决是否另行修复，本任务不改产品/测试。状态以 Git/PR 实况为准，未据待执行动作宣称已发布。
+
+---
+
+## Capability 域安全线 D（#558/#557/#568/#546，2026-10-03 开工）
+
+> 四线并行批的 D 线小节（只 append 本线；基点 `22cd4d64` = origin/main；分支 `fix/t546-t568-capability-security`；集成区 clone，main 保持干净）。票面以 2026-10-03 audit 块为准；每票在当前 main 重建红测后再修（原票面复现基线 645477b5 已过期）。
+
+- **第零步 #546（P0，停在裁决层）**：隔离设计裁决包已发 issue 评论存证（issuecomment-5959642548）——现状核实（`skills/tool.py:85-88` framing 与正文同拼 `data.content`，同族 knowledge/websearch/BUG-12 七挂点均走注册表 section）、audit 纠偏后的安全 AC 口径、显式两案（案 A 最小一致化：新增 `frame:untrusted_skill` + framing 进 message/正文进 data；案 B 独立通道：合同级变更须修订 ADR-0011）。待用户拍板后实施；未施工。
+- **#558（P1，代码 `3ee20a35`，focused 绿）**：`policy.py` 秘密扫描器多语言硬化——ASCII 分支边界 `\b`→ASCII 词字符 lookaround（CJK 属 Unicode `\w`，「我的password=…」整类漏检根源；纯 ASCII 行为逐字不变）+ 连接符扩 `：`/`是` + 裸 `token`（工具承诺词面；gitleaks generic-api-key 关键词表同含，误报控制按 R7 不做熵、以赋值形状+最小值长替代）；新增中文关键词分支（密码/密钥/口令/令牌 + [:=：是] + \S{4,}）；NFKC 归一化副本检测兼容等价变体（UAX#15，`is_normalized` 快路径）；`cut_at_secret` 对「归一化副本命中但索引映射不回原文」整体拒绝（fail-closed，宁丢前缀不漏秘密）。诚实边界：确定性模式、无熵启发式（R7 不变）、TR39 同形字 DEFER（票面方案依据③）。红证：修复前树 15 failed（扫描矩阵/切点前缀/整体拒绝/候选 content+payload/投影召回）→ 修复后 focused 209P；tests/memory 全量 **981P/0F**；ruff clean。覆盖面核实：写路径 create/update/edit/create_in/update_in 全过 `_reject_secret`、召回过 `cut_at_secret`（outbox/版本行为随之覆盖）；扫描输出仅 kind/拒绝码、前缀按构造无秘密。**未关单**（集成后关）。
+
