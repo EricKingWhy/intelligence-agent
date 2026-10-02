@@ -497,10 +497,13 @@ class SqliteDelegationTreeLedger:
                     version=snapshot.version,
                     detail={"turns": snapshot.consumed.agent_turns + 1},
                 )
+                # 快照读必须在 commit 之前（事务内读自己的写）：commit 之后的读若
+                # 撞锁超时，retry_on_busy 会整块重跑，而已提交的 +1 预留无法回滚，
+                # 重跑即二次预留（#515 审查 P2-B 双计数）。同型读在 upsert 处无害
+                # （ON CONFLICT 幂等），此处是全库唯一非幂等增量写。
+                admitted_snapshot = await self._session_snapshot(connection, budget_key)
                 await connection.commit()
-                return SessionAdmission(
-                    True, None, await self._session_snapshot(connection, budget_key),
-                )
+                return SessionAdmission(True, None, admitted_snapshot)
             except BaseException:
                 await connection.rollback()
                 raise
