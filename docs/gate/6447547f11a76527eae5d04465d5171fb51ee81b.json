@@ -1,0 +1,141 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-03T07:06:23+08:00",
+  "sha": "6447547f11a76527eae5d04465d5171fb51ee81b",
+  "tree": "9f4f3f2a748ff071853ffde9235a4b1880c8c5b2",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 5,
+  "total": 6,
+  "failed": [
+    "coverage"
+  ],
+  "wall_seconds": 20.78,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "Python 3.13.5",
+    "ruff": "ruff 0.16.3",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.81.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.04,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.09,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/ruff.exe",
+        "check",
+        "."
+      ],
+      "command": "./.venv/Scripts/ruff.exe check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.68,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 10.54,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 5.76,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider"
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 3.67,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py",
+      "output_tail": [
+        "  2026-10-02  机械归属+合并内容核对（非新审查主张）：740e8c08 = 先回后正合并（Merge origin/main ed5a0dd6 into fix/t519-t518-tool-budget-hardening，gate0 前同步），父一 2fcc4bfb（本线 #519/#518 tip，双轴 PASS 已入台账），父二 ed5a0dd6（origin/main，携 PR #541 QA 加固批 / PR #539 Standards 修复批，各自随线审查）。merge-tree 预演零冲突，实际树与预演一致；--cc 空表 = 纯不相交并集；双侧共改 2 文件逐 blob 存活核对：runtime.py 合并 blob 异于双亲且同时含双侧标记（accounting_unknown_pause_dimensions 与 _finish_reason_from_response 都在），service.py 同（本线 BUG-11 建行 hunk + 对侧 91 行变更行均在）；合并树受影响面复跑：budget/pause/framing/prompt 310P + session/archive 547P，ruff 全仓绿。 2fcc4bfb..740e8c08",
+        "  2026-10-02  #519/#518 工具与预算加固审查归属。BUG-09 重复 tool_call_id：executor 主路径与 cancel 级联窄捕获 UNIQUE 冲突 ⇒ REPEATED_TOOL_CALL 可恢复错误（retryable=False、增量显式记 0、quota 槽位归还、首行状态正向断言）；BUG-12 frame:untrusted_tool_output 注册共用 9000 槽位，bash/read/edit/read_artifact/inspect_artifact 共 7 个 success 挂点 + PRD 三处同步；BUG-10 无 usage 请求使账行 NULL 粘住、下一准入点 fail-closed，投影 enforcement 降级 degraded（仅已发请求且读数 None），暂停载荷 accounting_unknown 喂触发时刻读数；BUG-11 launch=false 的 session 声明当场建行（未声明保持 #318 惰性）。读数：受影响面 pytest 全绿（web 463、agent 788、tooling 187、framing 5、prompt 全套），ruff check 干净。审查：独立 subagent 全维（1×P1 配额泄漏已修、P2 测试加固落 2fcc4bfb）+ code-review 双轴 Standards/Spec 均 PASS-with-notes。票外跟进已留档：git/grep/apply_patch 同类暴露与 failure 路径未挂 frame、BUG-10 单步 run 无第二准入点仍 fail-open（票面已精确化）、degraded 词表第三值登记于 accounting.py。 5b830d46..2fcc4bfb",
+        "  2026-10-02  #536/#537 施工归属（自审双轴，范围 7b701554..a538c5fe 全部 18 文件：web/ 前端纯改动，零后端零 API）。Spec 轴 PASS：#536 五项决策逐条落地（单入口 popover/§2.3、tokens 档位四档+自定义/§2.1 零换算、deadline 时长档+datetime 高级路径/§2.2、预览行+过期 --danger 仅前置提示、§2.5 placeholder 表达）；wire 契约逐字节不变（既有六维参数化零回归+新增 500000 档断言）；e2e budget-entry 改走单入口但 wire 断言逐字未动，双视口 4/4。#537：徽标只出设 ceiling 维、取数与 pauseFacts 的 dimensionFact 同族（对拍单测逐字锁定）、80% 预警交叉相乘整数判定（常数非配置）、数据源=run/started 回显+run/resumed 恢复链（零 fetch）、PausedPanel 链路未动。Standards 轴 PASS（自审修复 3 项）：P2 投影 tokens 判定 Number.isFinite+trunc 与后端 isinstance(int) 分叉（100.5 会被截断成事实）⇒ 改 Number.isInteger 粘性 None 同口径；P3 budgetSummary 两次 resolveDeadlineDraft+as 断言收敛单次；P3 档位图标语义化 Coins/Timer。gate0 tsc 车道抓到 vitest 盲区（useSession.test 手搓 ConversationState 字面量缺新字段，esbuild 不查类型）⇒ amend 补齐——受影响面 tsc 验证必须用 gate0 同款 tsc -b 口径。截图证据 3 张（面板/徽标/warning 态）D:/t536_t537_logs/。 7b701554..a538c5fe",
+        "  2026-10-02  预算 UI 批先回后正机械归属（merge 605b2dc4 吸收 origin/main 5bc59666 = PR #542 #515-P2-B 批 + PR #571 #544 批共 12 笔）。冲突仅两份 docs 记账文件（docs/phase_status/2026-10.md + docs/PHASE_STATUS.md），代码侧 web/ 与 src/ 零交集（merge-tree 预演即示）。解决 = §14.7 并集裁决：双侧批次节全保、重叠状态各取较新（#519/#518 用本侧「三跳已执行完」、QA/#516 用主侧「已随 PR #541 集成」）、主侧新增 #515 P2-B 节并入；零新语义内容，逐节保真核对无覆盖。来侧 12 笔已由来侧台账覆盖（t544-retry-read-family-d7e03e5f-2ddf5417.tsv 等），本行归属合并 authored 的 docs 并集文本。 513839eb..605b2dc4",
+        "  2026-10-02  #544 同族潜伏项修复（#515 P2-B 全库扫描遗留三项，用户指派认领施工）：@retry_on_busy 整方法重跑的前提「OperationalError 抛出时事务未提交」被三处 commit 后同连接读违反。修复 a7f30359：① update_session_limits commit 后快照读撞锁 → 重跑撞自身 CAS（version 已 +1 持久化）→ 伪 409（账已改却报冲突，违反 11 §6.1 零副作用前提）；② ensure_session_budget 同型，重跑幂等（INSERT OR IGNORE + changed=False 不重复落事件）无行为缺陷，结构统一消除毒窗；③ sqlite.update_state commit 后 rowcount 检查 + 回读撞锁 → 重跑读到已迁移状态撞状态机 RUNNING→RUNNING → 伪 ValueError——三处读均移入事务内 commit 前（照 24d7cc26 先例，事务内读自己的写，毒化命中整体回滚、重跑从干净账面重走）。TDD 毒化红→绿（tests/storage/test_sqlite_write_retry.py）：① 红证 BudgetConflict(expected_version=1 vs 2)、③ 红证 ValueError(RUNNING->RUNNING)、② 收敛钉前后均绿（pin 幂等性质，票面 informational 定位）；变异判别力：PYTHONPATH 影子树（import resolved 指向副本已证）回退 d7e03e5f 两源文件，①③ 复红、② 豁免（无行为缺陷则无可判别变异）。审查：Correctness 轴 APPROVE-with-findings 3×P4（P2-B 注收族过期 / rowcount 等价性无专测钉 / 闭包重复）+ Standards 轴 APPROVE-with-findings（F-1 P3 ② 处注释照抄 ① 误写「撞自身 CAS」——该方法无 CAS；F-2 P4 03 §3.4 引用宽于 11 §6.1 措辞、基线已有；F-3 P4 主 message 未附证据行）；处置 2ddf5417（F-1 注释改结构统一口径 + admit_session_step P2-B 注收族更新 + 处置 message 补 TDD/变异证据，纯注释零行为；F-2 与其余 P4 登记不修 Scope Lock）；修后重审双轴 CLEAN。同族收口：delegation_tree/sqlite 两文件 commit 后同连接读清零，剩余 commit 后读走新连接且绝对 SET 幂等（upsert/set_archived/update_last_checkpoint_seq）。 d7e03e5f..2ddf5417",
+        "  2026-10-03  #547 POST /recover 用户裁决合同（audit RL-03/H-07，A 线批内票，用户拍板方向 1 + 四裁决合同三点确认）：修复前 kill -9 落在工具执行中 → Ledger 留 UNKNOWN → /recover、/resume、/messages 三入口 409 死锁，ReconcileCallback 只能编程注入（web 层零接线，session/service.py 构造 coordinator 不传 callback），唯一逃生 fork 丢历史——主打可恢复性的产品在崩溃时机差几毫秒就永久失去会话。fail-closed 本身正确（不变量 #14），缺的是用户可达裁决通道。修复复用既有恢复合同不造新机制：① 服务端裁决合同 = POST /api/sessions/{id}/recover 接受 decisions=[{tool_call_id, verdict}]，verdict 复用 recovery/reconcile.py 的 ReconcileVerdict 四值且与真实 Ledger 状态分别定义（CONFIRM_SUCCESS→SUCCEEDED / CONFIRM_FAILURE→FAILED / RETRY→原调用 CANCELLED 终止+模型重新发起新 tool_call（非服务端盲重跑）/ ABANDON→CANCELLED），_verdict_outcome 映射原样复用；② 新增 DecisionsReconcileCallback（coordinator.py）：请求裁决接进既有 ReconcileCallback 契约，提交走既有 RecoveryAdjudicationToken token-CAS 复核链（reconcile_meta 记裁决原文+时间戳，operation/reconciled 落审计事件），预检后待裁决集合变化的竞态窗口缺裁决 → ReconcileRequired fail-closed；③ service.recover 开工前预检（先查账后开工，被拒请求零写入）：非法裁决值（ValueError→InvalidDecision 422）、目标不存在或已结清（InvalidDecision 422 并回报当前账面状态）、同请求重复提交（InvalidDecision 422）、待裁决行未被全部覆盖（RecoveryConflict 409）；④ 409 detail 升级为 {message, pending_decisions} 结构体：pending_decisions 由 _reconcile_pending 生成（集合与 coordinator reconcile 分流精确一致：悬空只认 RUNNING/UNKNOWN/NEED_RECONCILE，终态+未证标记悬空行走确定性合成；非悬空按 needs_reconcile 全量 #315），resume/messages 闸门经同一 service.recover 路径统一受益，message 指引先 POST /recover 结清并明示裁决前先核查外部事实（用户裁决≠副作用证据——Airflow mark 成功与 MCP elicitation 三态都不是副作用证明）；⑤ web/app.py RecoverDecisionRequest/RecoverRequest 模型（verdict 字符串承载、领域层校验单一规则源，与 PermissionChangeRequest 同纪律），domain_errors.http_error 结构化 detail 分支 + 端点翻译表 recover 行补 InvalidDecision。成熟产品证据（裁决包一手核实）：Airflow mark success/failed/cleared、Camunda incident resolve、GitHub Actions re-run failed jobs、Temporal 恰好一次观察+signal 人工通道、RabbitMQ ack=application decision≠副作用证明、LangGraph time-travel replay/fork（分支回滚在成熟产品都是并存路径而非唯一逃生）。TDD：红读数实现前实测（decisions 被 HTTP 层忽略→仍 409；409 detail 纯文本无清单；非法裁决值静默放过）；既有钉更新 3 处（web multiturn 409 形状、resume 闸门 409 形状、test_web_api 的 #566 文案滞留旧钉→未执行文案）+ 新增 8（409 机器可读清单/主链路结清+幂等/三裁决矩阵/422 三态+零写入/部分覆盖 409/coordinator 回调 fail-closed+透传）。验证：web+recovery+session 全套 1175P 绿，ruff check . 绿。审查：待批次收口双轴（§8.2–8.3）。 5cc42015..99743ba9",
+        "  2026-10-03  #549-a Local Sandbox 进程树正常返回路径回收（audit SB-01/SB-03，A 线批内票，#549 拆分获批后第一片）：平台事实先行核实——Windows 侧 CREATE_SUSPENDED+Job Object KILL_ON_JOB_CLOSE 已让后代自动继承终止域、超时/取消路径 _kill_process_tree 已整树击杀（taskkill /T /F 回退 Job Terminate），泄漏只在 POSIX 正常返回路径：shell=True 壳正常退出后，子 shell 级后台（sleep 30 & echo done；cmd.exe 无 shell 级后台所以 SB-01 本就是 POSIX-only）成孤儿继续持有捕获管道写端——reader.join(5) 被拖满 5 秒、进程已死输出还会迟到。修复幂等 killpg：exec() 在 join 前、未超时未取消时调用新增 _reclaim_process_group（os.killpg(pid, SIGKILL-or-fallback)，ProcessLookupError/PermissionError 静默——组已空/已是别人组无须再动）；超时/取消路径已有整树击杀不重复打。已知盲区如实记录不追平：setsid 脱组进程不在任何组，killpg 天然不可达（容器运行时职责，ADR-0050 D2）。验证：3 个跨平台单测（killpg 参数/组空静默/权限拒绝静默，monkeypatch os.killpg raising=False——Windows os 无 killpg）+ POSIX 集成探针 skipif nt（Windows 上诚实跳过，POSIX 绿待 CI/xval，commit message 明示）；Windows 侧沙盒全套 56P 绿，ruff check . 绿。 4e8cb79e..a7d72ad8",
+        "❌ 台账 base 不是 tip 的祖先: a7d72ad8..2d27e020（#549-b WriteTool 写目标形态错误映射 INVALID_ARGUMENT + 可行动 message（audit SB-07/L-12，A 线批内票）：修复前把目录当文件写、父路径中段被同名文件占用这类形态错误被裸 OSError 捕获统一吞成 PERMISSION_DENIED——语义错位（形态错≠权限错，模型照权限被拒自纠会去改权限而不是改路径）且 message 无可行动信息。修复复用既有 ErrorCode.INVALID_ARGUMENT 词表不造新词（gRPC INVALID_ARGUMENT 官方语义=客户端参数形态错误，与 PERMISSION_DENIED 是正交轴）；execute() PermissionError 臂先用新 _target_is_directory 探针（resolve_within_workspace().is_dir()，OSError→False，非 OSError 解析故障是编程错误让它照常暴露）分流：目录→INVALID_ARGUMENT「写入失败：'{path}' 是目录，不能作为文件写入（请改用文件路径）」；IsADirectoryError 同映射；NotADirectoryError/FileExistsError→INVALID_ARGUMENT「父路径中有某一段不是目录（请检查中间路径是否被同名文件占用）」；真 PermissionError（探针后仍抛）保持 PERMISSION_DENIED 不被探针误吞。验证：3 新增用例（写目录/父是文件/真权限错不被探针吞）+ coding tools 全套绿，ruff check . 绿。）"
+      ]
+    }
+  ]
+}
