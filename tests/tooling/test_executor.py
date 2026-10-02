@@ -47,6 +47,7 @@ from agent_harness.tooling import (
     ToolSideEffect,
 )
 from agent_harness.tooling.executor import MAX_ATTEMPTS, _ToolFailure
+from agent_harness.tooling.quota import ToolQuotaWindow
 from tests.scripted_model import ScriptedModel
 
 # ============================================================================
@@ -1106,6 +1107,50 @@ class TestDuplicateToolCallId:
         row = await ledger.get("session-1", "call-dup-0001")
         assert row is not None
         assert row.state is OperationState.SUCCEEDED
+
+    @pytest.mark.asyncio
+    async def test_duplicate_id_returns_the_reserved_quota_slot(self, tmp_path: Path):
+        """REPEATED 返回路径必须归还预留的配额槽位（二轮 Standards P3-1 红绿锚）。
+
+        幽灵占位的后果被端到端钉住：limits=2 的窗口里，重复 ID 撞主键被拒后
+        槽位必须回到 1，同批下一条合法调用才收得下；删掉 executor 的
+        release 行，本用例在 used 断言与第三条调用两处同时变红。
+        """
+        registry = ToolRegistry()
+        counting = CountingTool()
+        registry.register(counting)
+        ledger = SqliteOperationLedger(tmp_path / "state.db")
+        await ledger.initialize()
+        executor = ToolExecutor(registry, operation_ledger=ledger)
+        context = OperationContext(session_id="session-1", run_id="run-1")
+        window = ToolQuotaWindow(limits={"count": 2}, consumed={})
+
+        first = await executor.execute(
+            {"id": "call-dup-0003", "name": "count", "args": {"value": 1}},
+            operation_context=context,
+            tool_quota=window,
+        )
+        assert first.result.ok is True
+        assert window.used("count") == 1
+
+        second = await executor.execute(
+            {"id": "call-dup-0003", "name": "count", "args": {"value": 2}},
+            operation_context=context,
+            tool_quota=window,
+        )
+        assert second.result.error_code == ErrorCode.REPEATED_TOOL_CALL
+        # 变异（删 release 行）下幽灵占位把 used 顶到 2，回不去。
+        assert window.used("count") == 1
+
+        third = await executor.execute(
+            {"id": "call-dup-0004", "name": "count", "args": {"value": 3}},
+            operation_context=context,
+            tool_quota=window,
+        )
+        # 幽灵占位的真实代价：同批同工具的合法调用被挤掉（BUDGET_EXHAUSTED）。
+        assert third.result.ok is True
+        assert third.budget_delta["tool_calls"] == 1
+        assert counting.call_count == 2
 
     @pytest.mark.asyncio
     async def test_duplicate_id_in_cancelled_cascade_is_classified(self, tmp_path: Path):
