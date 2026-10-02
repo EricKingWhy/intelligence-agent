@@ -1451,6 +1451,10 @@ class SessionService:
                     # （interactive 路由），与创建路径同判据，不在这里发明第二套判定。
                     # （#423 之前这里复原的是 deny 路由——"每一步问我"被降级成
                     # "全部拒绝"，同样不兑现承诺。）
+                    # #545：这里构建了 holder 就必须同步置外层 interactive——
+                    # service 尾部的 bind_session 与审批队列 GC 都只认这个标志，
+                    # 漏置 ⇒ 回调 _session 恒 None，/messages 一遇审批即 RuntimeError。
+                    interactive = True
                     approval_callback = await self._build_approval_callback(
                         interactive=True,
                         auto_approve_explicit=True,
