@@ -138,6 +138,18 @@ class _ScanGate:
     下放到工作线程——同拍的 100 个调用在不同的线程里，asyncio 层的 future
     共享够不着它们。leader 的扫描**不持锁执行**（只持 `_lock` 的瞬间做登记/
     清场），waiter 阻塞在 `cohort.done` 上，不占任何锁。
+
+    非重入边界（独立审查 F1）：`scan` 回调内不得再进入本闸门——重入者会在锁内
+    看到 `_inflight` 非空、成为等自己 cohort 的 waiter 自锁。当前
+    `_list_session_ids_uncached` 及其全部调用方均无重入路径。闸门作用于
+    `list_session_ids` 的所有调用方（含 lineage / workspace header 收集两处
+    事件循环线程上的同步直调，审查 F4）：与工作线程扫描重叠时至多等一次扫描
+    时长，无死锁——leader 是纯磁盘 I/O + `_stat_pool`，不需要事件循环。
+
+    异常共享取舍（独立审查 F2）：leader 扫描失败时同批 waiter re-raise **同一
+    异常实例**（`concurrent.futures.Future` 同款语义）——类型/消息/errno 不受
+    影响，代价是 `__traceback__` 被并发 re-raise 改写、帧跨线程交错；磁盘
+    OSError 属罕见路径，不为其加异常拷贝。
     """
 
     def __init__(self) -> None:

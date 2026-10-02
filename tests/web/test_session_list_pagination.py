@@ -290,8 +290,16 @@ def test_leader_scan_failure_propagates_and_gate_recovers(
     assert len(scans) == 1, f"失败的一批也只应真扫 1 次，实际 {len(scans)} 次"
     assert outcomes == ["OSError"] * 100, "同批 waiter 必须收到 leader 的异常"
 
-    # 闸门不残留：恢复真扫描后下一请求成功（失败不再重放）
-    monkeypatch.setattr(store, "_list_session_ids_uncached", original)
+    # 闸门不残留：恢复真扫描后下一请求成功（失败不再重放）——重新包一层计数
+    # 包装，让「走了新扫」本身被计数证实而非仅靠未抛错（独立审查 F5）。
+    recovered_scans: list[int] = []
+
+    def counting_recovered():
+        recovered_scans.append(1)
+        return original()
+
+    monkeypatch.setattr(store, "_list_session_ids_uncached", counting_recovered)
     recovered = store.list_session_ids()
-    assert isinstance(recovered, list)
-    assert len(scans) == 1, "恢复后的请求应走真扫描而非重放失败批"
+    assert isinstance(recovered, list) and recovered
+    assert len(recovered_scans) == 1, "恢复后的请求应走一次新扫描而非重放失败批"
+    assert len(scans) == 1
