@@ -91,12 +91,18 @@ uv run agent-harness replay <id>     # replay a session
 **HTTP (streams events over SSE):**
 
 ```bash
+# With a task, the run starts by default
 curl -N -X POST http://127.0.0.1:8000/api/sessions \
   -H 'Content-Type: application/json' \
   -d '{"task": "List the files in the current directory"}'
+
+# Create a session without starting a run: omit task and add ?launch=false (task and launch=false are mutually exclusive, otherwise 422)
+curl -N -X POST 'http://127.0.0.1:8000/api/sessions?launch=false' \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 ```
 
-Add `?launch=false` to create a session without starting a run. Resume a live event stream from any point with `GET /api/sessions/{id}/stream?after_seq=<n>`.
+Resume a live event stream from any point with `GET /api/sessions/{id}/stream?after_seq=<n>`.
 
 ## Core concepts
 
