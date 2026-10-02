@@ -1,0 +1,9 @@
+{
+  "changes": [
+    {
+      "path": "docs/review_ledger.d/372-9bb16e64-39a7ee97.tsv",
+      "marker": "#346 W-02 final review",
+      "text": "2026-09-29\t#346 W-02 final review: range 9bb16e6486f923efb60d38457db822e8891df90c..39a7ee97580ea9bc2a86865ef3bb191afe347c18; independent Spec + Standards reviews PASS, 0 remaining P0/P1/P2 (state-order P2 fixed with regression, API field-drop gap fixed; §16.1 duplication consolidated); final tree 0a6fae730d9dd59bab4ac461a00d7a5ed0e3f3d8; pytest 4802 passed / 2 skipped / 51 deselected.\t9bb16e6486f923efb60d38457db822e8891df90c..39a7ee97580ea9bc2a86865ef3bb191afe347c18"
+    }
+  ]
+}
