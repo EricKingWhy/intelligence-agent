@@ -27,6 +27,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from agent_harness.storage.sqlite import retry_on_busy
 from agent_harness.workspace.models import Workspace
 
 _BUSY_TIMEOUT_MS = 10_000
@@ -91,6 +92,7 @@ class SqliteWorkspaceStore:
         finally:
             await connection.close()
 
+    @retry_on_busy
     async def initialize(self) -> None:
         """幂等建表（WAL 只在这里设一次）。"""
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +193,7 @@ class SqliteWorkspaceStore:
             rows = await cursor.fetchall()
         return [(row["change_id"], row["kind"], row["workspace_id"]) for row in rows]
 
+    @retry_on_busy
     async def begin_change(self, kind: str, workspace_id: str, now: str) -> int:
         """第一次写入：持久写标记并提交（此后崩溃可被 `resolve_pending_change` 看见）。"""
         async with self._connect() as connection:
@@ -204,6 +207,7 @@ class SqliteWorkspaceStore:
             await connection.commit()
         return change_id
 
+    @retry_on_busy
     async def write_record(self, workspace: Workspace) -> None:
         """第二次写入之一：记录行（与顺序行分属两个事务，见模块 docstring）。
 
@@ -230,6 +234,7 @@ class SqliteWorkspaceStore:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def prepend_record(self, workspace_id: str, change_id: int) -> None:
         """第二次写入之二：顺序行前插 + **同事务**清掉标记（关键，见 ADR D5）。"""
         async with self._connect() as connection:
@@ -240,6 +245,7 @@ class SqliteWorkspaceStore:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def append_record(self, workspace_id: str, change_id: int) -> None:
         """bootstrap 用：顺序行**追加到尾部** + 同事务清标记（初始顺序即最终顺序）。"""
         async with self._connect() as connection:
@@ -258,6 +264,7 @@ class SqliteWorkspaceStore:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def drop_record(self, workspace_id: str) -> None:
         """删除的记录行（第二写入之一；回滚 create 时也可用，幂等）。"""
         async with self._connect() as connection:
@@ -267,6 +274,7 @@ class SqliteWorkspaceStore:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def drop_order(self, workspace_id: str, change_id: int | None = None) -> None:
         """删除顺序行（+ 可选同事务清标记）。"""
         async with self._connect() as connection:
@@ -280,6 +288,7 @@ class SqliteWorkspaceStore:
                 )
             await connection.commit()
 
+    @retry_on_busy
     async def drop_sessions(self, workspace_id: str) -> None:
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
@@ -290,6 +299,7 @@ class SqliteWorkspaceStore:
 
     # —— 语义写入（顺序/标题/会话账本）——
 
+    @retry_on_busy
     async def set_title(self, workspace_id: str, title: str, now: str) -> None:
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
@@ -299,6 +309,7 @@ class SqliteWorkspaceStore:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def touch(self, workspace_id: str, now: str) -> None:
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
@@ -308,6 +319,7 @@ class SqliteWorkspaceStore:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def replace_session_order(
         self, workspace_id: str, session_ids: Sequence[str]
     ) -> None:
@@ -325,6 +337,7 @@ class SqliteWorkspaceStore:
                 )
             await connection.commit()
 
+    @retry_on_busy
     async def replace_workspace_order(self, workspace_ids: Sequence[str]) -> None:
         """整表重写注册表顺序（bootstrap 收尾用：顺序是新→旧的**纯函数**）。
 
@@ -344,6 +357,7 @@ class SqliteWorkspaceStore:
                 )
             await connection.commit()
 
+    @retry_on_busy
     async def set_meta(self, key: str, value: str) -> None:
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")

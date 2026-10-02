@@ -74,13 +74,17 @@ def _is_lock_timeout(error: sqlite3.OperationalError) -> bool:
     return any(sig in message for sig in _LOCK_TIMEOUT_SIGNATURES)
 
 
-def _retry_on_busy(method):
+def retry_on_busy(method):
     """共享 DB 写方法的锁竞争重试装饰器（#515 BUG-01）。
 
     重试安全的依据是锁语义本身：OperationalError 抛出时事务未提交，被包装的
     写方法都是单语句原子写，整块重跑等价于首次执行。只重试「锁超时」形态的
     OperationalError（有限次退避，耗尽 → StorageBusyError）；非锁错误原样上抛，
     IntegrityError 等约束冲突有自己的语义（#519 的域），不进这条路径。
+
+    公开名（无下划线）：共享 harness.db 的不止本模块的三个 Store——
+    delegation_tree / workspace / transport 的写方法同样挂它（审查 P2-3，
+    #515 根因 2「同一模式存在于共享 harness.db 的所有 Store」）。
     """
 
     @functools.wraps(method)
@@ -94,8 +98,8 @@ def _retry_on_busy(method):
                     raise
                 if attempt >= len(_WRITE_RETRY_DELAYS_S):
                     raise StorageBusyError(
-                        "SQLite 写锁竞争重试 "
-                        f"{len(_WRITE_RETRY_DELAYS_S) + 1} 次仍超时"
+                        f"SQLite 写锁竞争在 {len(_WRITE_RETRY_DELAYS_S)} 次重试"
+                        f"（共 {len(_WRITE_RETRY_DELAYS_S) + 1} 次尝试）后仍超时"
                         "（写竞争持续超过 busy_timeout × 重试预算）"
                     ) from error
                 await asyncio.sleep(_WRITE_RETRY_DELAYS_S[attempt])
@@ -192,7 +196,7 @@ class SqliteOperationLedger(OperationLedger):
                 "（Ledger 是可重建的恢复辅助状态；事件 JSONL 不受影响）。"
             )
 
-    @_retry_on_busy
+    @retry_on_busy
     async def create(self, operation: Operation) -> None:
         if operation.state is not OperationState.PENDING:
             raise ValueError("A new Operation must start in PENDING")
@@ -237,7 +241,7 @@ class SqliteOperationLedger(OperationLedger):
             row = await cursor.fetchone()
         return self._to_operation(row) if row is not None else None
 
-    @_retry_on_busy
+    @retry_on_busy
     async def update_state(
         self,
         session_id: str,
@@ -323,7 +327,7 @@ class SqliteOperationLedger(OperationLedger):
             rows = await cursor.fetchall()
         return [self._to_operation(row) for row in rows]
 
-    @_retry_on_busy
+    @retry_on_busy
     async def delete_for_session(self, session_id: str) -> int:
         async with _connect(self.database_path) as connection:
             cursor = await connection.execute(
@@ -396,7 +400,7 @@ class SqliteCheckpointStore(CheckpointStore):
             )
             await connection.commit()
 
-    @_retry_on_busy
+    @retry_on_busy
     async def save(self, checkpoint: Checkpoint) -> None:
         async with _connect(self.database_path) as connection:
             await connection.execute(
@@ -429,7 +433,7 @@ class SqliteCheckpointStore(CheckpointStore):
             rows = await cursor.fetchall()
         return [self._to_checkpoint(row) for row in rows]
 
-    @_retry_on_busy
+    @retry_on_busy
     async def delete_for_session(self, session_id: str) -> int:
         async with _connect(self.database_path) as connection:
             cursor = await connection.execute(
@@ -489,7 +493,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
                     f"ALTER TABLE session_meta ADD COLUMN {name} {col_type}"
                 )
 
-    @_retry_on_busy
+    @retry_on_busy
     async def upsert(self, meta: SessionMeta) -> SessionMeta:
         async with _connect(self.database_path) as connection:
             await connection.execute(
@@ -541,7 +545,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
             rows = await cursor.fetchall()
         return [self._to_meta(row) for row in rows]
 
-    @_retry_on_busy
+    @retry_on_busy
     async def set_archived(self, session_id: str, archived: bool = True) -> SessionMeta:
         async with _connect(self.database_path) as connection:
             cursor = await connection.execute(
@@ -555,7 +559,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
         assert loaded is not None
         return loaded
 
-    @_retry_on_busy
+    @retry_on_busy
     async def update_last_checkpoint_seq(
         self, session_id: str, event_seq: int
     ) -> SessionMeta:
@@ -571,7 +575,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
         assert loaded is not None
         return loaded
 
-    @_retry_on_busy
+    @retry_on_busy
     async def clear_delegation_parent(self, parent_session_id: str) -> int:
         """见 `SessionMetaStore.clear_delegation_parent`（#172 / ADR-0029 D5）。"""
         async with _connect(self.database_path) as connection:
@@ -587,7 +591,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
             await connection.commit()
         return repaired
 
-    @_retry_on_busy
+    @retry_on_busy
     async def cleanup(self, session_id: str) -> None:
         async with _connect(self.database_path) as connection:
             await connection.execute(

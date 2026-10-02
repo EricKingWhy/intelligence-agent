@@ -95,6 +95,9 @@ class SessionSummaryStats:
 #: #516：目录扫描 stat 批次的共享线程池（懒建）。stat 在 syscall 期间释放 GIL，
 #: 分块并行把 4000 文件的现读 mtime 从 ~200ms 压到几十 ms；worker 数再往上调
 #: 实测不再改善（NTFS 元数据吞吐饱和），8 是占用与收益的平衡点。
+#: 两个声明（审查 P3 补记）：① 池是**模块级单例**——所有 JsonlSessionStore 实例
+#: 共享（批次任务无状态，只有排队争用，无正确性风险）；② 进程生命周期常驻
+#: （8 条非 daemon 线程，CPython atexit 回收），不随 store 关闭销毁。
 _STAT_POOL_LOCK = threading.Lock()
 _STAT_POOL: ThreadPoolExecutor | None = None
 

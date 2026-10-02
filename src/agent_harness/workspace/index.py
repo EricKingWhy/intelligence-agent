@@ -22,6 +22,7 @@ from uuid import uuid4
 import anyio
 
 from agent_harness.sandbox.paths import canonical_workspace_path
+from agent_harness.session.store import WorkspaceRef
 from agent_harness.workspace.models import StartedHeader, Workspace
 from agent_harness.workspace.store import (
     CHANGE_CREATE,
@@ -239,12 +240,14 @@ class WorkspaceIndex:
         成员资格与 `_visible_ids` 同源（`_filter_visible` 三道闸：有 header +
         cwd 逐字符相等 + 非内部子会话）。同一 id 属于多个项目时以**注册表序
         最后一个**为准——与全量映射（按 `_order` 顺序逐项覆盖赋值）的语义一致。
-        返回的是 record 本体（`session_ids` 字段不保证新鲜）；调用方只取
-        id / title，不消费成员列表——成员列表的权威口径仍是 `_visible_ids`。
+        返回 `WorkspaceRef` 投影（id/title，与旧全量路径写入摘要的字段同形；
+        审查 P3：此前直接塞 record 本体，靠鸭子属性碰巧符合 `WorkspaceRef` 契约
+        ——record 的 `session_ids` 不保证新鲜，投影同时把"调用方只取 id/title"
+        从注释约定升级为类型事实）。
         """
         self._require_initialized()
         wanted = set(session_ids)
-        refs: dict[str, Workspace] = {}
+        refs: dict[str, WorkspaceRef] = {}
         for workspace_id in self._order:
             record = self._records[workspace_id]
             candidates = [
@@ -253,7 +256,7 @@ class WorkspaceIndex:
                 if sid in wanted
             ]
             for sid in self._filter_visible(record, candidates):
-                refs[sid] = record
+                refs[sid] = WorkspaceRef(id=record.id, title=record.title)
         return refs
 
     # —— 实体写入 ——

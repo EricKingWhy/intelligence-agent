@@ -1,6 +1,6 @@
 """#515 BUG-01：SQLite 共享库写路径锁竞争重试（TDD 红→绿）。
 
-soak 实测（#515 票面）：三个 Store 共享同一 harness.db，持续写竞争下
+soak 实测（#515 票面）：共享同一 harness.db 的各 Store 在持续写竞争下
 `busy_timeout=10s` 仍会超时，`sqlite3.OperationalError: database is locked`
 原样逃逸，`POST /api/sessions/{id}/archive` 在 480s 内打出 123×500。
 
@@ -15,6 +15,10 @@ soak 实测（#515 票面）：三个 Store 共享同一 harness.db，持续写�
 锁竞争的制造方式：独立连接 `BEGIN IMMEDIATE` 持有写锁（WAL 下读者不受影响、
 写者阻塞），与 soak 的竞争形态一致；`_BUSY_TIMEOUT_MS` 调小让每次尝试快速
 失败，避免真实 10s 等待拖垮测试墙钟。
+
+覆盖面（审查 P2-3 修正）：票面根因 2 是「同一模式存在于共享 harness.db 的
+**所有** Store」——装饰覆盖从最初的 3 张（meta/checkpoint/operation）扩到
+共享同一库的全部 6 张（+ delegation_tree / workspace / transport）。
 """
 
 from __future__ import annotations
@@ -32,7 +36,10 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.storage.sqlite import StorageBusyError
+from agent_harness.transport import SqliteTransportLedger
+from agent_harness.workspace.store import SqliteWorkspaceStore
 
 
 class _LockHolder:
@@ -149,6 +156,29 @@ async def test_non_lock_operational_error_is_not_retried(tmp_path, monkeypatch) 
     assert sleeps == []
 
 
+@pytest.mark.asyncio
+async def test_workspace_store_retries_through_transient_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """新覆盖的 workspace store 行为抽检：瞬时锁窗口内自愈（不止包装在场）。
+
+    代表性取 `set_meta`（projects 路由的真实写路径）；装饰器是同一份实现，
+    一条行为测试 + 全量包装在场断言即覆盖新三张 Store。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._BUSY_TIMEOUT_MS", 50)
+    store = SqliteWorkspaceStore(tmp_path / "state.db")
+    await store.initialize()
+
+    holder = _LockHolder(tmp_path / "state.db", hold_seconds=0.5)
+    holder.start()
+    try:
+        await store.set_meta("k", "v")
+    finally:
+        holder.stop()
+
+    assert await store.get_meta("k") == "v"
+
+
 @pytest.mark.parametrize(
     ("store_cls", "method_names"),
     [
@@ -167,13 +197,54 @@ async def test_non_lock_operational_error_is_not_retried(tmp_path, monkeypatch) 
                 "cleanup",
             ),
         ),
+        (
+            SqliteDelegationTreeLedger,
+            (
+                "initialize",
+                "reserve",
+                "observe_result",
+                "ensure_session_budget",
+                "admit_session_step",
+                "refund_session_turn",
+                "refund_session_step",
+                "record_session_model_requests",
+                "record_session_tools",
+                "update_session_limits",
+                "consume_session_delegation",
+                "refund_session_delegation",
+            ),
+        ),
+        (
+            SqliteWorkspaceStore,
+            (
+                "initialize",
+                "begin_change",
+                "write_record",
+                "prepend_record",
+                "append_record",
+                "drop_record",
+                "drop_order",
+                "drop_sessions",
+                "set_title",
+                "touch",
+                "replace_session_order",
+                "replace_workspace_order",
+                "set_meta",
+            ),
+        ),
+        (
+            SqliteTransportLedger,
+            ("initialize", "append", "delete_for_session"),
+        ),
     ],
 )
 def test_write_methods_are_retry_wrapped(store_cls, method_names) -> None:
-    """#515 票面点名的三张 Store 的全部写方法都必须挂上重试包装。
+    """共享 harness.db 的全部六张 Store 的全部写方法都必须挂上重试包装。
 
     读方法（get / list / latest）不在范围内：WAL 下读者不被写者阻塞，没有
     同样的失败形态。用 `__wrapped__`（functools.wraps 产物）证明包装真的在。
+    内存实现（delegation_tree 的 InMemory 类）不共享文件锁，不装饰——
+    恰好验证本断言只对 Sqlite 类生效。
     """
     for name in method_names:
         method = getattr(store_cls, name)

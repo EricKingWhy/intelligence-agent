@@ -30,8 +30,8 @@ BUG-06 的修法是**如实声明**，不是改形状：业务 4xx 仍是 detail
 
 - 不给没声明 422 的操作补 422：哪些操作会出业务 422 由各 handler 的
   except 元组决定，静态后处理推断不了，硬补是二次谎报。
-- 503 只声明在真实会出现的 6 个端点上（#515 的存储写锁耗尽 5 处 +
-  #517 的模型构造失败 1 处），不全局撒。
+- 503 只声明在真实会出现的端点上（#515 的存储写锁耗尽 + #517 的模型
+  构造失败两条根因各自武装的 9 个端点），不全局撒。
 """
 
 from __future__ import annotations
@@ -55,8 +55,10 @@ _HTTP_METHODS = frozenset(
 )
 
 #: (path, method) → 该操作真实可能返回 503 的声明清单。
-#: #515：存储写重试耗尽（`StorageBusyError` → 503）已武装的 5 个写端点；
-#: #517：`POST /api/sessions` 的模型 client 构造失败（503）。
+#: #515：存储写重试耗尽（`StorageBusyError` → 503）已武装的写端点；
+#: #517：会构造模型 client 的端点（`ModelClientConstructionError` → 503）。
+#: 修正（审查 P2-2）：resume / messages / flush 的 launched 路径同样会构造
+#: client、同样有 `StorageBusyError` 臂——此前漏声明是 BUG-06 残留。
 _503_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
     {
         ("/api/sessions/{session_id}/archive", "post"),
@@ -64,6 +66,9 @@ _503_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
         ("/api/sessions/{session_id}", "delete"),
         ("/api/sessions/{session_id}/permission", "post"),
         ("/api/sessions/{session_id}/forks", "post"),
+        ("/api/sessions/{session_id}/resume", "post"),
+        ("/api/sessions/{session_id}/messages", "post"),
+        ("/api/sessions/{session_id}/queue/flush", "post"),
         ("/api/sessions", "post"),
     }
 )
@@ -74,6 +79,9 @@ _SSE_200_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
     {
         ("/api/sessions", "post"),
         ("/api/sessions/{session_id}/stream", "get"),
+        ("/api/sessions/{session_id}/resume", "post"),
+        ("/api/sessions/{session_id}/messages", "post"),
+        ("/api/sessions/{session_id}/queue/flush", "post"),
     }
 )
 

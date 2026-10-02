@@ -185,7 +185,11 @@ def test_openapi_documents_500_on_api_operations(tmp_path: Path) -> None:
 def test_openapi_documents_503_on_newly_guaranteed_endpoints(
     tmp_path: Path,
 ) -> None:
-    """#515 存储写重试耗尽与 #517 构造失败的 503 必须如实声明。"""
+    """#515 存储写重试耗尽与 #517 构造失败的 503 必须如实声明。
+
+    审查 P2-2 修正：resume / messages / flush 的 launched 路径同样武装了两类
+    503 臂——声明面必须与臂同步，否则又是"Undocumented status"残留。
+    """
     api = _openapi(_client(tmp_path))
     expectations = {
         ("/api/sessions/{session_id}/archive", "post"),
@@ -193,6 +197,9 @@ def test_openapi_documents_503_on_newly_guaranteed_endpoints(
         ("/api/sessions/{session_id}", "delete"),
         ("/api/sessions/{session_id}/permission", "post"),
         ("/api/sessions/{session_id}/forks", "post"),
+        ("/api/sessions/{session_id}/resume", "post"),
+        ("/api/sessions/{session_id}/messages", "post"),
+        ("/api/sessions/{session_id}/queue/flush", "post"),
         ("/api/sessions", "post"),
     }
     for path, method in expectations:
@@ -202,6 +209,67 @@ def test_openapi_documents_503_on_newly_guaranteed_endpoints(
         assert schema.get("$ref", "").endswith("ErrorEnvelope"), (
             f"{method.upper()} {path} 的 503 schema：{schema}"
         )
+
+
+def test_openapi_declares_event_stream_on_flush_resume_messages(tmp_path: Path) -> None:
+    """审查 P2-2：resume / messages / flush 的 launched 路径回 SSE，必须声明。"""
+    api = _openapi(_client(tmp_path))
+    for path, method in (
+        ("/api/sessions/{session_id}/resume", "post"),
+        ("/api/sessions/{session_id}/messages", "post"),
+        ("/api/sessions/{session_id}/queue/flush", "post"),
+    ):
+        op = api["paths"][path][method]
+        assert "text/event-stream" in op["responses"]["200"]["content"], (
+            f"{method.upper()} {path} 200 未声明 text/event-stream"
+        )
+
+
+def test_flush_route_maps_construction_failure_to_503(tmp_path: Path) -> None:
+    """审查 P2-1：flush 在 idle 时走 resume_and_launch 构造 client——BUG-05
+    的第 4 个构造调用点。代理坏环境下投递排队消息不再裸 500。
+
+    直接 patch service 方法（真实构造链已由 create 的 503 测试端到端证明）：
+    会话不存在时会先 404，测不到本臂。
+    """
+    client = _client(tmp_path)
+    with patch(
+        "agent_harness.session.service.SessionService.deliver_next_undelivered",
+        new_callable=AsyncMock,
+        side_effect=ModelClientConstructionError(
+            "模型 client 构造失败（代理/网络环境）：Invalid port: ':1]'"
+        ),
+    ):
+        resp = client.post("/api/sessions/abc123/queue/flush")
+    assert resp.status_code == 503, resp.text
+    assert "Invalid port" in resp.json()["detail"]
+
+
+def test_project_write_maps_storage_busy_to_503(tmp_path: Path) -> None:
+    """审查 P2-3：workspace store 写锁耗尽 → 503（projects 路由面同款映射）。
+
+    rename 的写路径是 `index.set_title → store.set_title`（无 begin_change，
+    那是 create/delete 的崩溃标记协议）；patch 它让锁竞争在第一个写操作
+    就耗尽，验证 `_translated()` 的新臂。
+    """
+    from agent_harness.storage.sqlite import StorageBusyError
+
+    client = _client(tmp_path)
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    created = client.post("/api/projects", json={"path": str(proj_dir)})
+    assert created.status_code == 200, created.text
+
+    with patch(
+        "agent_harness.workspace.store.SqliteWorkspaceStore.set_title",
+        new_callable=AsyncMock,
+        side_effect=StorageBusyError("SQLite 写锁竞争重试后仍超时"),
+    ):
+        resp = client.patch(
+            f"/api/projects/{created.json()['id']}", json={"title": "renamed"}
+        )
+    assert resp.status_code == 503, resp.text
+    assert "写锁" in resp.json()["detail"]
 
 
 def test_unexpected_exception_returns_json_500(tmp_path: Path) -> None:

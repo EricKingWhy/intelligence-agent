@@ -1346,9 +1346,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
           开关）。**默认 false 即不列**；两条路径（默认列表 / 项目视图）同一规则。
           非布尔值 → 422（FastAPI 的 bool query 语义，不自造一套）。
         - `?limit=N&offset=M`（#516）：分页窗口——N 是行数上限（1–500），M 是起点。
-          校验交给 FastAPI Query（ge/le），非法值 422。切片发生在读摘要之前，所以
-          limit=1 是 O(1)；归档过滤先行，已归档行不占 limit 预算；不传 limit 保持
-          全量语义（既有调用方零迁移）。
+          校验交给 FastAPI Query（ge/le），非法值 422。切片在读摘要之前 ⇒ 摘要扫描
+          是 O(limit)；归档过滤先行，已归档行不占 limit 预算；不传 limit 保持
+          全量语义（既有调用方零迁移）。**id 枚举仍是每请求 O(N) 文件 stat**——
+          mtime 倒序契约会响应外部 utime 重排（承重测试钉住）⇒ id 列表不可缓存，
+          4000 会话下这是并发 p95 的主项（§9.1.1 已登记待裁决）。
         每行都带 `workspace`（`null` = 未分组）与 `archived`（徽标真值）。
 
         列表页只需摘要字段——store.read_session_summary 单趟流式扫描
@@ -1488,6 +1490,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except ModelClientConstructionError as e:
             # #517 BUG-05：client 构造期失败（代理环境/配置问题）→ 503。
             raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：launch 路径的 transport/delegation 写锁耗尽 → 503。
+            raise storage_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
@@ -1637,6 +1642,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except ModelClientConstructionError as e:
             # #517 BUG-05：同 create——构造期失败 → 503，不冒充 500。
             raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：同 create——launch 路径写锁耗尽 → 503。
+            raise storage_http_error(e) from e
 
         session_id = result.session.session_id
         return _run_stream_response(
@@ -2125,6 +2133,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except ModelClientConstructionError as e:
             # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
             raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：同 create——launched 分支的写锁耗尽 → 503。
+            raise storage_http_error(e) from e
 
         if result.status == "launched":
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
@@ -2208,6 +2219,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             WorkspaceBindingConflict,
         ) as e:
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05（审查 P2-1）：flush 在 idle 时走 resume_and_launch 构造
+            # client——BUG-05 的第 4 个构造调用点，同 create/resume/messages → 503。
+            raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：投递路径的写锁耗尽 → 503。
+            raise storage_http_error(e) from e
         if launched is None:
             return {"status": "idle"}
         # 与 `/messages` 的 launched 分支**同一投影**（同一段响应组装）：重投的 run 也消费

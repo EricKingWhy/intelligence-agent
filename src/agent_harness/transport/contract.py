@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_harness.redaction import redact_secret_values
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
+from agent_harness.storage.sqlite import retry_on_busy
 
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9._:-]+")
 _LEGACY_SESSION_ID = "legacy-transport"
@@ -150,6 +151,7 @@ class SqliteTransportLedger:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
 
+    @retry_on_busy
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         async with _connect(self.database_path) as connection:
@@ -181,6 +183,7 @@ class SqliteTransportLedger:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def append(self, entry: TransportLedgerEntry) -> None:
         async with _connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
@@ -227,6 +230,7 @@ class SqliteTransportLedger:
             )
             await connection.commit()
 
+    @retry_on_busy
     async def delete_for_session(self, session_id: str) -> int:
         async with _connect(self.database_path) as connection:
             cursor = await connection.execute(
