@@ -333,6 +333,23 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         WorkspaceBindingConflict,
                     )
                     from agent_harness.web.app import session_service, ws_budget_claims
+                    from agent_harness.web.wire_safety import lone_surrogate_path
+
+                    # #548：WS 是**唯一不做 pydantic 校验**的写入口（HTTP 三条
+                    # 续聊入口都在模型边界拦下 lone surrogate）。这里不拦的后果
+                    # 不是 500 而是**静默丢数据**：帧被收下、回 `launched`，后台
+                    # run 在 `store.append_event` 的 `fh.write` 抛
+                    # UnicodeEncodeError，被本循环的 `except Exception` 吞成
+                    # debug 日志——客户端只看到「已启动」。裁决语义是入口拒绝，
+                    # 故与下面 budget 形状错误同一形态：回 error 帧、连接存活、
+                    # 零副作用。只回位置不回值（不得回显原文）。
+                    bad_unicode = lone_surrogate_path(msg)
+                    if bad_unicode is not None:
+                        await _send_json({
+                            "type": "error",
+                            "message": f"ill-formed unicode (lone surrogate) at {bad_unicode}",
+                        })
+                        continue
 
                     sid = msg.get("session_id", "")
                     content = msg.get("content", "")

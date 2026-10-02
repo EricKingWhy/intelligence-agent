@@ -1246,6 +1246,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     apply_error_contract(app)
 
+    # #548 / #562：422 校验错误出口换成不回显原文的安全实现。默认的
+    # `jsonable_encoder(exc.errors())` 会把攻击者原文（`input`）带进响应体，
+    # lone surrogate / `inf` / 深嵌套三种被判非法的输入都会让**错误处理器自己**
+    # 抛异常 → 500（「正确地拒绝」退化成「拒绝时崩溃」）。位置紧挨 OpenAPI 对齐：
+    # 两者都是「错误面」的护栏，且本函数不改任何真实成功响应的形状。
+    from agent_harness.web.wire_safety import install_wire_safety
+
+    install_wire_safety(app)
+
     # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
     from agent_harness.web.lineage import register_lineage_routes
 
