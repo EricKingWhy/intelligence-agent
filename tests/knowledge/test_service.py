@@ -4,6 +4,9 @@
 防呆上限、回读上下文）全部在本文件对 fake store + 真 SQLite 注册表钉死。
 """
 
+from dataclasses import replace
+from hashlib import sha256
+
 import pytest
 import pytest_asyncio
 
@@ -304,3 +307,152 @@ async def test_as_retrieval_provider_k_clamped_and_gl_hl_ignored(service):
     finally:
         identity_context_var.reset(token)
     assert hits and len(hits) <= 20
+
+
+# ── #568：幂等跳过不是免检通行证——skip 前逐块对账向量库 ──
+
+
+class _LaggingStore:
+    """读可见性延迟替身：settle() 前 get_chunk 一律 None（写后非立即可见）。"""
+
+    def __init__(self, delegate: FakeKnowledgeVectorStore) -> None:
+        self.delegate = delegate
+        self._lagging = True
+
+    def settle(self) -> None:
+        self._lagging = False
+
+    async def upsert_chunks(self, chunks, identity) -> None:
+        await self.delegate.upsert_chunks(chunks, identity)
+
+    async def delete_source(self, source_id, identity) -> int:
+        return await self.delegate.delete_source(source_id, identity)
+
+    async def search(self, query, identity, *, limit, source_id=None):
+        return await self.delegate.search(query, identity, limit=limit, source_id=source_id)
+
+    async def get_chunk(self, source_id, chunk_index, identity):
+        if self._lagging:
+            return None
+        return await self.delegate.get_chunk(source_id, chunk_index, identity)
+
+
+class _FailingUpsertStore:
+    """部分失败替身：先写入 fail_after 个 chunk 再抛错（半写状态）。"""
+
+    def __init__(self, delegate: FakeKnowledgeVectorStore, fail_after: int) -> None:
+        self.delegate = delegate
+        self.fail_after: int | None = fail_after
+
+    async def upsert_chunks(self, chunks, identity) -> None:
+        if self.fail_after is not None:
+            for chunk in chunks[: self.fail_after]:
+                await self.delegate.upsert_chunks([chunk], identity)
+            raise RuntimeError("upsert 爆点：写入部分 chunk 后失败")
+        await self.delegate.upsert_chunks(chunks, identity)
+
+    async def delete_source(self, source_id, identity) -> int:
+        return await self.delegate.delete_source(source_id, identity)
+
+    async def search(self, query, identity, *, limit, source_id=None):
+        return await self.delegate.search(query, identity, limit=limit, source_id=source_id)
+
+    async def get_chunk(self, source_id, chunk_index, identity):
+        return await self.delegate.get_chunk(source_id, chunk_index, identity)
+
+
+@pytest.mark.asyncio
+async def test_reingest_with_wiped_vector_store_rebuilds_not_silent_skip(service):
+    """KB-01 核心：registry 完好 + 向量库整库丢失 → re-ingest 重建（不再静默
+    skipped），检索可命中；恢复通道 = 携原文重摄入（无原文不承诺重建）。"""
+    source_id = await _ingest_python_doc(service)
+
+    service._store = FakeKnowledgeVectorStore()  # 模拟 collection 丢失/重建
+    result = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE,
+    )
+    assert result.status == "rebuilt", "向量库丢失必须重建，不得静默 skipped"
+    assert result.source_id == source_id, "重建保持稳定 source_id（citation 不失效）"
+
+    search = await service.retrieve(query="python typing 语言特性", identity=ALICE)
+    assert search.hits, "重建后检索可命中（不再是无告警的 0 命中静默态）"
+
+
+@pytest.mark.asyncio
+async def test_same_count_wrong_content_still_rebuilds(service):
+    """chunk_count 相等不构成完整性证明（审计纠偏）：同数错内容也必须重建。"""
+    await _ingest_python_doc(service)
+    victim = service._store.all_chunks("acme")[0]
+    tampered_text = "完全无关的篡改内容：攻击者写入的段落。"
+    service._store._chunks[(
+        "acme", f"{victim.source_id}:{victim.chunk_index}",
+    )] = replace(
+        victim, content=tampered_text,
+        content_hash=sha256(tampered_text.encode()).hexdigest(),
+    )
+
+    result = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE,
+    )
+    assert result.status == "rebuilt", "同数错内容必须按对账失败重建"
+    chunks = {c.chunk_index: c for c in service._store.all_chunks("acme")}
+    assert "篡改" not in chunks[0].content, "重建后篡改内容被正确数据覆盖"
+
+
+@pytest.mark.asyncio
+async def test_visibility_delayed_store_rebuilds_then_skips_once_settled(service):
+    """读可见性延迟（真 Milvus 异步一致性替身）：对账失败 → 一次幂等重建，
+    不死循环；可见性落定后恢复正确幂等跳过。"""
+    await _ingest_python_doc(service)
+    lagging = _LaggingStore(FakeKnowledgeVectorStore())
+    service._store = lagging
+
+    first = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE)
+    assert first.status == "rebuilt", "可见性延迟期对账失败 → 重建（fail-safe），不是跳过"
+    upserts_after_rebuild = lagging.delegate.upsert_calls
+
+    lagging.settle()
+    second = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE)
+    assert second.status == "skipped", "可见性落定后恢复幂等跳过"
+    assert lagging.delegate.upsert_calls == upserts_after_rebuild, "落定后不再反复重建"
+
+
+@pytest.mark.asyncio
+async def test_partial_rebuild_failure_is_loud_and_reconciles_on_retry(service):
+    """部分重建失败：响亮抛错（不静默成功）；registry hash 提交点最后写 →
+    运维修复向量库后，下次摄入按对账失败自动重建收敛。"""
+    await _ingest_python_doc(service)
+    broken = _FailingUpsertStore(FakeKnowledgeVectorStore(), fail_after=1)
+    service._store = broken
+
+    with pytest.raises(RuntimeError, match="upsert 爆点"):
+        await service.ingest(text=LONG_TEXT, source_name="python-guide", identity=ALICE)
+
+    source = await service._registry.get_by_name("acme", "python-guide")
+    assert source is not None and source.chunk_count >= 2, "失败不留半提交的 registry 行"
+
+    broken.fail_after = None  # 运维修复了向量库
+    healed = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE)
+    assert healed.status == "rebuilt", "对账失败 → 自动重建收敛"
+    again = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE)
+    assert again.status == "skipped", "收敛后恢复幂等跳过"
+
+
+@pytest.mark.asyncio
+async def test_intact_store_skip_verifies_readonly_without_writes(service):
+    """回归钉：对账是只读前置——完好库上跳过仍零写（upsert/delete 不动），
+    幂等跳过的便宜性不回退。"""
+    await _ingest_python_doc(service)
+    store = service._store
+    upserts_before, deletes_before = store.upsert_calls, store.delete_calls
+
+    result = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE,
+    )
+    assert result.status == "skipped"
+    assert store.upsert_calls == upserts_before, "完好库跳过不得重写向量库"
+    assert store.delete_calls == deletes_before, "完好库跳过不得删除 chunk"
