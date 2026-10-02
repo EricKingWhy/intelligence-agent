@@ -29,7 +29,7 @@
  *  格），`attempts` 含 ToolExecutor 的 retry——报告成一对数字，是因为它们本来就不是
  *  同一个量（`02 §5.1`）。 */
 
-import type { RunPausedInfo } from '../types';
+import type { RunBudgetConsumedFacts, RunLimitsFacts, RunPausedInfo } from '../types';
 
 /** 后端暂停判据里的两个常量（**只做展示口径，判定权威在后端**）。
  *
@@ -399,6 +399,16 @@ function addDecimal(raw: string | number, extra: number): string | null {
   return formatDecimalText({ units: left + right, scale: parsed.scale });
 }
 
+/** 两个十进制文本的精确相加（#537：投影折叠 cost 账与 `minResumeValue` 消费**同一
+ *  份**十进制实现——前端不许出现第二套小数运算）。形状不合 ⇒ null（粘性不可得）。 */
+export function addDecimalTexts(left: string, right: string): string | null {
+  const a = parseDecimalText(left);
+  const b = parseDecimalText(right);
+  if (a === null || b === null) return null;
+  const [x, y, scale] = alignDecimal(a, b);
+  return formatDecimalText({ units: x + y, scale });
+}
+
 /** `max(ceiling − consumed, 0)`：整数维返回 number，十进制维返回字符串。
  *
  *  cost 走十进制字符串（wire 上就是字符串），整数维走 number。任一侧不可得 / 形状
@@ -633,6 +643,82 @@ export function resumeInputHint(facts: PauseFacts): string {
     ? `须严格大于已消耗 ${fact?.consumedText ?? 'unavailable'}（默认给到 ${String(minimum)}）`
     : `至少 ${String(minimum)}`;
   return `抬的是 ${spec.resumeField}（CLI: ${resumeTargetCliFlag(target)}，${requirement}）；已消耗不重置，恢复沿用同一 run_id`;
+}
+
+// ── #537：TopBar「已用 / 上限」徽标 ──
+// 与暂停面板是**同一份真值的两种排版**：取数走同一张 RUN_DIMENSIONS 表、同一套
+// 文本规则（缺失 = unavailable，永不写 0）；对拍由 runBudget.test 逐字锁定。
+// 只出**设了 ceiling** 的维（票面：只在设了上限的维显示）。
+
+/** 80% 预警阈值——常数非配置（票面 §2.4 明示）。判定用交叉相乘的整数比较，
+ *  不走浮点除法（cost 十进制对齐后同法），边界行为可复现。 */
+export const BUDGET_WARNING_RATIO_NUM = 4;
+export const BUDGET_WARNING_RATIO_DEN = 5;
+
+/** 徽标上的计量单位（display-only；与暂停面板的长标签不同，徽标只有一格宽）。 */
+export const BUDGET_BADGE_UNITS: Record<RunScalarConsumedKey, string> = {
+  agent_turns: 'turns',
+  model_requests: 'req',
+  total_tokens: 'tok',
+  cost_usd: '$',
+};
+
+export interface BudgetBadgeFact {
+  spec: RunDimensionSpec;
+  /** 消耗读数；粘性不可得 ⇒ null（渲染 unavailable，与暂停面板同规则）。 */
+  consumed: number | string | null;
+  ceiling: number | string;
+  /** 与 `dimensionFact` 同一规则构造的文本（同源对拍的锚点）。 */
+  consumedText: string;
+  ceilingText: string;
+  /** consumed/ceiling ≥ 80%（整数交叉相乘判定）；消耗不可得 ⇒ false（不猜）。 */
+  warning: boolean;
+}
+
+/** 该维是否到达预警线：`consumed / ceiling ≥ 4/5`，交叉相乘避开浮点。
+ *  十进制维先按小数位对齐成整数再乘。任一侧不可得 ⇒ false。 */
+function badgeWarning(consumed: number | string | null, ceiling: number | string, decimal: boolean): boolean {
+  if (consumed === null) return false;
+  let c: bigint;
+  let b: bigint;
+  if (decimal) {
+    const left = parseDecimalText(ceiling);
+    const right = parseDecimalText(consumed);
+    if (left === null || right === null) return false;
+    const [x, y] = alignDecimal(left, right);
+    b = x;
+    c = y;
+  } else {
+    if (typeof consumed !== 'number' || typeof ceiling !== 'number') return false;
+    if (!Number.isSafeInteger(consumed) || !Number.isSafeInteger(ceiling) || ceiling <= 0) return false;
+    b = BigInt(ceiling);
+    c = BigInt(consumed);
+  }
+  // 比较 consumed/ceiling ≥ 4/5 ⇔ consumed·5 ≥ ceiling·4。
+  return c * BigInt(BUDGET_WARNING_RATIO_DEN) >= b * BigInt(BUDGET_WARNING_RATIO_NUM);
+}
+
+/** TopBar 徽标条目：只出 ceiling 已配置的维，顺序沿用 RUN_DIMENSIONS（turns 最先）。 */
+export function budgetBadgeFacts(
+  ceilings: RunLimitsFacts | null,
+  consumed: RunBudgetConsumedFacts | null,
+): BudgetBadgeFact[] {
+  if (!ceilings) return [];
+  const badges: BudgetBadgeFact[] = [];
+  for (const spec of RUN_DIMENSIONS) {
+    const ceiling = ceilings[spec.ceilingKey];
+    if (ceiling === null || ceiling === undefined) continue;
+    const value = consumed ? consumed[spec.consumedKey] : null;
+    badges.push({
+      spec,
+      consumed: value,
+      ceiling,
+      consumedText: value === null || value === undefined ? 'unavailable' : String(value),
+      ceilingText: String(ceiling),
+      warning: badgeWarning(value, ceiling, spec.decimal),
+    });
+  }
+  return badges;
 }
 
 export function pauseFacts(paused: RunPausedInfo): PauseFacts {

@@ -118,3 +118,35 @@ describe('toCreateBudget — 预算三项草稿 → budget.run 声明（#426）'
     });
   });
 });
+
+// ── #536：deadline 草稿新增时长档形态（"30m"/"2h"/自定义分钟），换算唯一执行点
+//    resolveDeadlineDraft（提交时刻与预览时刻消费同一实现，避免两套换算漂移）。
+//    datetime-local 保留为高级路径，原语义逐字节不变（上一条 describe 锁定）。──
+
+describe('toCreateBudget — deadline 时长档（#536 §2.2）', () => {
+  it('时长 token → 提交时刻换算的绝对 deadline_at（RFC 3339 UTC），其余维键序不变', () => {
+    const before = Date.now();
+    const budget = toCreateBudget({ turns: '3', totalTokens: '500000', deadlineAt: '2h' });
+    const after = Date.now();
+    expect(budget?.run?.max_agent_turns_total).toBe(3);
+    expect(budget?.run?.max_total_tokens).toBe(500000);
+    const deadline = budget?.run?.deadline_at;
+    expect(typeof deadline).toBe('string');
+    expect(deadline).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/);
+    const parsed = new Date(deadline ?? '').getTime();
+    // now + 2h（提交时刻换算；区间断言容忍测试执行耗时）。
+    expect(parsed).toBeGreaterThanOrEqual(before + 2 * 3600_000);
+    expect(parsed).toBeLessThanOrEqual(after + 2 * 3600_000);
+  });
+
+  it('0 时长 / 非法时长 → 该维不发键（ge=1 语义与 turns/tokens 一致）', () => {
+    expect(toCreateBudget({ turns: null, totalTokens: null, deadlineAt: '0m' })).toBeUndefined();
+    expect(toCreateBudget({ turns: null, totalTokens: null, deadlineAt: '2x' })).toBeUndefined();
+  });
+
+  it('档位值 500000 → max_total_tokens: 500000（票面验收 wire 断言）', () => {
+    expect(toCreateBudget({ turns: null, totalTokens: '500000', deadlineAt: null })).toEqual({
+      run: { max_total_tokens: 500000 },
+    });
+  });
+});

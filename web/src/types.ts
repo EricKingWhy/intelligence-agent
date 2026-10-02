@@ -543,8 +543,26 @@ export interface RunLimitsFacts {
   tool_call_limits: Record<string, number> | null;
 }
 
-/** `run/paused` 的折叠结果（`#312` T4）：一个**非终态**的暂停事实。
+/** #537：run 作用域四维消耗的**运行中镜像**（前端从事件流折叠；TopBar 徽标数据源）。
  *
+ *  派生口径与后端 `run_budget.consumed_from_events` 逐条对齐（同一事件、同一计数点）：
+ *  - `agent_turns` = MODEL_COMPLETED 计数；
+ *  - `model_requests` = MODEL_REQUEST 计数；
+ *  - `total_tokens` = MODEL_REQUEST `data.usage.total_tokens` 累加，某请求缺 ⇒ 粘性
+ *    null（后端同口径：不可得 ≠ 0，绝不写 0 冒充）;
+ *  - `cost_usd` = MODEL_REQUEST `data.cost_usd` **十进制字符串**累加（wire 上是文本，
+ *    绝不 float 化），粘性 null 同上。
+ *
+ *  与暂停面板的 `consumed_dimensions`（后端权威快照）不是两套账：前者是同一派生
+ *  规则在前端的连续折叠，两者经 `runBudget.budgetBadgeFacts` 同源对拍。 */
+export interface RunBudgetConsumedFacts {
+  agent_turns: number;
+  model_requests: number;
+  total_tokens: number | null;
+  cost_usd: string | null;
+}
+
+/** `run/paused` 的折叠结果（`#312` T4）：一个**非终态**的暂停事实。
  *  语义边界（`#305` PRD / `03 §5`）：暂停只收口**当前这段执行区间**，逻辑 run 仍在场
  *  ——所以它不是 completed / failed / interrupted / NEED_RECONCILE 中的任何一个，
  *  UI 必须能单独认出来（本字段存在 + `run_status === 'paused'`）。
@@ -715,6 +733,13 @@ export interface ConversationState {
   /** T9 #139：当前 run 的轮次索引（1-based）。来自 RUN_STARTED.data.turn_index。
    *  null = 尚未收到 RUN_STARTED 或字段缺失。UI 可据此显示「第 N 轮」。 */
   turn_index: number | null;
+  /** #537：**最近一个 run** 的 run 作用域 ceiling 回显（run/started.data.budget.run
+   *  解析；run/resumed.data.limits.run 在恢复后更新）。null = 该 run 没配 run 预算
+   *  （徽标整段不渲染）。失效规则与 `requested_model` 同：新 run/started 重置。 */
+  run_budget_ceilings: RunLimitsFacts | null;
+  /** #537：**最近一个 run** 的运行中消耗账（派生口径见 `RunBudgetConsumedFacts`；
+   *  run/started 重置为零账，run/resumed 不清账——后端恢复保留 consumed）。 */
+  run_budget_consumed: RunBudgetConsumedFacts | null;
   /** #226：本轮**请求侧**模型标识（来自 RUN_STARTED.data.model；run/started 是
    *  持久事件 ⇒ 刷新/重放后仍在）。与 `model` 的分工：`model` 是 provider 在
    *  响应里**回显**的名字（`model/completed.data.model`，对方不回显就没有），

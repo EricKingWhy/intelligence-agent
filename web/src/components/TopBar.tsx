@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
+import { BUDGET_BADGE_UNITS, budgetBadgeFacts } from '../lib/runBudget';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
 import { awaitingApproval as hasLiveApproval } from '../lib/projection';
 import type { ConversationState } from '../types';
@@ -135,6 +136,21 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           {conversation?.usage_total && (
             <span className="num"> · {conversation.usage_total.total_tokens.toLocaleString()} tok</span>
           )}
+          {/* #537：run 预算徽标「已用 / 上限」——只出设了 ceiling 的维；数据源是
+              投影的 run 预算镜像（run/started 回显 + run/resumed 更新），文本经
+              budgetBadgeFacts 与暂停面板同源（同一张 RUN_DIMENSIONS 表、同一套
+              文本规则），禁两套数字。≥80% 转静止预警色（常数非配置）。 */}
+          {(conversation?.run_budget_ceilings
+            ? budgetBadgeFacts(conversation.run_budget_ceilings, conversation.run_budget_consumed)
+            : []
+          ).map((fact) => (
+            <span
+              key={fact.spec.dimension}
+              className={`num budget-badge${fact.warning ? ' budget-badge--warning' : ''}`}
+            >
+              {` · ${fact.consumedText} / ${fact.ceilingText} ${BUDGET_BADGE_UNITS[fact.spec.consumedKey]}`}
+            </span>
+          ))}
         </span>
         {waiting && <WaitingHint idleSec={idleSec} awaitingApproval={awaitingApproval} />}
       </div>

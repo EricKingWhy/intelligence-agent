@@ -29,6 +29,9 @@ describe('initConversation', () => {
       undelivered: [],
       // #381（W-27）：进度清单初值（未出现过清单）——投影的必填字段，形状断言跟着长。
       plan: null,
+      // #537：run 预算镜像初值（无回显、无账）——投影的必填字段，形状断言跟着长。
+      run_budget_ceilings: null,
+      run_budget_consumed: null,
     });
   });
 });
@@ -2548,5 +2551,100 @@ describe('#226 requested_model — 请求侧模型标识（run/started，ADR-003
     expect(s.requested_model).toBe('B');
     expect(s.model_run_id).toBe('r1');
     expect(s.run_id).toBe('r2');
+  });
+});
+
+// ── #537：run 预算镜像——run/started 回显 ceilings + 前端按后端 consumed_from_events
+//    同一口径折叠 run 作用域消耗（TopBar 徽标的数据源；暂停面板的
+//    consumed_dimensions 是后端权威快照，两者经 runBudget.budgetBadgeFacts 同源对拍）。
+
+describe('run 预算镜像（#537）', () => {
+  const BUDGET_ECHO = {
+    run: {
+      max_agent_turns_total: null,
+      max_model_requests: null,
+      max_total_tokens: 500000,
+      max_cost_usd: null,
+      deadline_at: null,
+      tool_call_limits: {},
+    },
+  };
+
+  it('RUN_STARTED 带 budget 回显 → ceilings 投影 + 消耗零账（token=0 / cost="0"）', () => {
+    const s = applyEvent(initConversation('s'), ev({
+      type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1',
+    }));
+    expect(s.run_budget_ceilings?.max_total_tokens).toBe(500000);
+    expect(s.run_budget_ceilings?.max_agent_turns_total).toBeNull();
+    expect(s.run_budget_consumed).toEqual({ agent_turns: 0, model_requests: 0, total_tokens: 0, cost_usd: '0' });
+  });
+
+  it('RUN_STARTED 不带 budget 键（没配 run 预算）→ ceilings 为 null，消耗照常计数', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, run_id: 'r1' }));
+    expect(s.run_budget_ceilings).toBeNull();
+    s = applyEvent(s, ev({ type: EventType.MODEL_REQUEST, data: { usage: { total_tokens: 5 } }, run_id: 'r1', step_id: 1 }));
+    expect(s.run_budget_consumed?.model_requests).toBe(1);
+    expect(s.run_budget_consumed?.total_tokens).toBe(5);
+  });
+
+  it('MODEL_REQUEST 折叠：requests +1、tokens 累加、cost 十进制字符串累加（绝不 float 化）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1' }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_REQUEST, data: { usage: { total_tokens: 100 }, cost_usd: '0.10' }, run_id: 'r1', step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_REQUEST, data: { usage: { total_tokens: 23 }, cost_usd: '0.25' }, run_id: 'r1', step_id: 1 }));
+    expect(s.run_budget_consumed).toEqual({ agent_turns: 0, model_requests: 2, total_tokens: 123, cost_usd: '0.35' });
+  });
+
+  it('粘性 None（后端同口径）：某请求缺 usage / cost ⇒ 该维从这一刻起不可得（null），不是 0', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1' }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_REQUEST, data: { usage: { total_tokens: 100 }, cost_usd: '0.10' }, run_id: 'r1', step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_REQUEST, data: {}, run_id: 'r1', step_id: 1 }));
+    expect(s.run_budget_consumed?.model_requests).toBe(2);
+    expect(s.run_budget_consumed?.total_tokens).toBeNull();
+    expect(s.run_budget_consumed?.cost_usd).toBeNull();
+  });
+
+  it('MODEL_COMPLETED → agent_turns +1（后端 turns 的计数点）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1' }));
+    s = applyEvent(s, ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, run_id: 'r1', step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: 'x' }, run_id: 'r1', step_id: 1 }));
+    expect(s.run_budget_consumed?.agent_turns).toBe(1);
+  });
+
+  it('新 RUN_STARTED → 账本重置为零账（徽标是「最近一个 run」的事实，与 requested_model 同失效规则）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1' }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_REQUEST, data: { usage: { total_tokens: 100 } }, run_id: 'r1', step_id: 1 }));
+    s = applyEvent(s, ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r2' }));
+    expect(s.run_budget_consumed).toEqual({ agent_turns: 0, model_requests: 0, total_tokens: 0, cost_usd: '0' });
+  });
+
+  it('RUN_RESUMED 带 limits.run → ceilings 更新为恢复后的新 ceiling（恢复链消费同一事件）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1' }));
+    expect(s.run_budget_ceilings?.max_total_tokens).toBe(500000);
+    s = applyEvent(s, ev({
+      type: EventType.RUN_RESUMED,
+      data: { limits: { run: { ...BUDGET_ECHO.run, max_total_tokens: 999999 }, local: null } },
+      run_id: 'r1',
+    }));
+    expect(s.run_budget_ceilings?.max_total_tokens).toBe(999999);
+    // 恢复不清账：已消耗沿用（后端恢复保留 consumed）。
+    expect(s.run_budget_consumed?.model_requests).toBe(0);
+  });
+
+  it('RUN_RESUMED 不带 limits（旧载荷）→ ceilings 原样保留（键缺席 ≠ 没配，零伪造）', () => {
+    let s = applyEvent(initConversation('s'), ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1' }));
+    s = applyEvent(s, ev({ type: EventType.RUN_RESUMED, data: {}, run_id: 'r1' }));
+    expect(s.run_budget_ceilings?.max_total_tokens).toBe(500000);
+  });
+
+  it('历史重放（projectHistory）与逐事件折叠同结果——徽标在重载后仍与暂停面板同源', () => {
+    const events: AgentEvent[] = [
+      ev({ type: EventType.RUN_STARTED, data: { budget: BUDGET_ECHO }, run_id: 'r1', seq: 1 }),
+      ev({ type: EventType.USER_MESSAGE, data: { content: 'hi' }, run_id: 'r1', step_id: 1, seq: 2 }),
+      ev({ type: EventType.MODEL_REQUEST, data: { usage: { total_tokens: 100 }, cost_usd: '0.10' }, run_id: 'r1', step_id: 1, seq: 3 }),
+      ev({ type: EventType.MODEL_COMPLETED, data: { content: 'x' }, run_id: 'r1', step_id: 1, seq: 4 }),
+    ];
+    const replayed = projectHistory('s', events);
+    expect(replayed.run_budget_ceilings?.max_total_tokens).toBe(500000);
+    expect(replayed.run_budget_consumed).toEqual({ agent_turns: 1, model_requests: 1, total_tokens: 100, cost_usd: '0.10' });
   });
 });

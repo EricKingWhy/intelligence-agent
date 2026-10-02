@@ -10,6 +10,7 @@ import { EventType } from '../types';
 import type { AgentEvent, RunPausedInfo } from '../types';
 import { deriveRunPulse, deriveRunSummary, hasUnterminatedRun, isRecoverableRun } from './runState';
 import {
+  budgetBadgeFacts,
   ceilingDraftError,
   ceilingDraftValue,
   deadlineDraftError,
@@ -508,5 +509,88 @@ describe('deadline 暂停（`#315` T7）—— 判的是时刻，不是"consumed
     expect(facts.deadlinePause).toBe(true);
     expect(resumeInputHint(facts)).toContain('没有时刻');
     expect(deadlineDraftError(bumped, '2026-01-01T00:00:00Z')).toContain('未来');
+  });
+});
+
+// ── #537：TopBar 徽标 facts——**只出设了 ceiling 的维**；取数与 pauseFacts 的
+//    dimensionFact 同一族（RUN_DIMENSIONS spec + 同一套文本规则），徽标与暂停
+//    面板是同一份真值的两种排版——对拍断言逐字锁死这条同源。
+
+describe('budgetBadgeFacts — 徽标同源取数（#537）', () => {
+  const CEILINGS = {
+    max_agent_turns_total: 10,
+    max_model_requests: null,
+    max_total_tokens: 500000,
+    max_cost_usd: '1.00',
+    deadline_at: null,
+    tool_call_limits: {},
+  };
+  const CONSUMED = { agent_turns: 4, model_requests: 8, total_tokens: 28000, cost_usd: '0.80' };
+  // dimensionFact 消费的是完整快照形状——补齐工具两维后喂 pauseFacts 对拍。
+  const PAUSED = {
+    run_id: 'run-1',
+    version: 1,
+    pause_seq: 9,
+    reason: 'budget_exhausted',
+    trigger_dimension: '',
+    consumed_agent_turns: CONSUMED.agent_turns,
+    run_limit: CEILINGS.max_agent_turns_total,
+    consumed_dimensions: { ...CONSUMED, tool_calls: 0, tool_attempts: 0, tool_calls_by_tool: {}, tool_attempts_by_tool: {} },
+    run_limits: CEILINGS,
+    local_fuse: null,
+    continuation: null,
+    closeout_source: 'model',
+    resume_requirements: [],
+    trace_id: null,
+  } as RunPausedInfo;
+
+  it('只出设了 ceiling 的维（max_model_requests 没配 → 徽标没有这一维）', () => {
+    const badges = budgetBadgeFacts(CEILINGS, CONSUMED);
+    expect(badges.map((f) => f.spec.dimension)).toEqual([
+      'run.max_agent_turns_total',
+      'run.max_total_tokens',
+      'run.max_cost_usd',
+    ]);
+  });
+
+  it('同源对拍：每个徽标的 consumedText / ceilingText 与 pauseFacts 的 dimensionFact 逐字相同', () => {
+    const badges = budgetBadgeFacts(CEILINGS, CONSUMED);
+    const pausedDimensions = pauseFacts(PAUSED).dimensions;
+    for (const badge of badges) {
+      const row = pausedDimensions.find((d) => d.spec.dimension === badge.spec.dimension);
+      expect(row, badge.spec.dimension).toBeDefined();
+      expect(badge.consumedText).toBe(row?.consumedText);
+      expect(badge.ceilingText).toBe(row?.ceilingText);
+    }
+  });
+
+  it('80% 预警（整数维交叉相乘判定，常数 0.8 非配置）：恰好 80% 亮、79% 不亮、100% 亮', () => {
+    const at = budgetBadgeFacts({ ...CEILINGS, max_total_tokens: 10 }, { ...CONSUMED, total_tokens: 8 });
+    const below = budgetBadgeFacts({ ...CEILINGS, max_total_tokens: 100 }, { ...CONSUMED, total_tokens: 79 });
+    const full = budgetBadgeFacts({ ...CEILINGS, max_total_tokens: 10 }, { ...CONSUMED, total_tokens: 10 });
+    expect(at.find((f) => f.spec.dimension === 'run.max_total_tokens')?.warning).toBe(true);
+    expect(below.find((f) => f.spec.dimension === 'run.max_total_tokens')?.warning).toBe(false);
+    expect(full.find((f) => f.spec.dimension === 'run.max_total_tokens')?.warning).toBe(true);
+  });
+
+  it('cost 十进制维的 80% 判定走对齐整数（0.80 / 1.00 亮；0.79 / 1.00 不亮），不 float 化', () => {
+    const at = budgetBadgeFacts(CEILINGS, CONSUMED);
+    const below = budgetBadgeFacts(CEILINGS, { ...CONSUMED, cost_usd: '0.79' });
+    expect(at.find((f) => f.spec.dimension === 'run.max_cost_usd')?.warning).toBe(true);
+    expect(below.find((f) => f.spec.dimension === 'run.max_cost_usd')?.warning).toBe(false);
+  });
+
+  it('消耗不可得（粘性 null）→ consumedText = unavailable（与暂停面板同规则，永不写 0）、不预警', () => {
+    const badges = budgetBadgeFacts(CEILINGS, { agent_turns: 4, model_requests: 8, total_tokens: null, cost_usd: null });
+    const tokens = badges.find((f) => f.spec.dimension === 'run.max_total_tokens');
+    const cost = badges.find((f) => f.spec.dimension === 'run.max_cost_usd');
+    expect(tokens?.consumedText).toBe('unavailable');
+    expect(tokens?.warning).toBe(false);
+    expect(cost?.consumedText).toBe('unavailable');
+    expect(cost?.warning).toBe(false);
+  });
+
+  it('没配 run 预算（ceilings null）→ 空数组（徽标整段不渲染）', () => {
+    expect(budgetBadgeFacts(null, CONSUMED)).toEqual([]);
   });
 });
