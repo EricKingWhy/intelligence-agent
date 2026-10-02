@@ -14,21 +14,13 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentRuntime
-from agent_harness.model.scripted import ScriptedModel
 from agent_harness.session import MODEL_COMPLETED, MODEL_FAILED, RUN_FAILED
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
+from tests.scripted_model import ScriptedModel
+from tests.task_failed_errors import task_failed_errors
 
 EXPECTED_MESSAGE = "model returned an empty response (no content, no tool calls)"
-
-
-def _task_failed_errors(caplog) -> list[str]:
-    """提取 task_failed 诊断日志承载的 error 原文（OBS-008：文案只进日志）。"""
-    return [
-        str(getattr(r, "error", ""))
-        for r in caplog.records
-        if r.name == "agent_harness.agent" and getattr(r, "event_type", "") == "task_failed"
-    ]
 
 
 @pytest.mark.asyncio
@@ -51,5 +43,5 @@ async def test_pure_empty_response_message_pinned(tmp_path, caplog) -> None:
     assert MODEL_FAILED in types
     assert types[-1] == RUN_FAILED
     assert not [e for e in session.events if e.type == MODEL_COMPLETED]
-    logged = _task_failed_errors(caplog)
+    logged = task_failed_errors(caplog)
     assert any(e == EXPECTED_MESSAGE for e in logged), logged

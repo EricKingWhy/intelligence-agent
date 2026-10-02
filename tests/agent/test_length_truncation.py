@@ -35,6 +35,7 @@ from agent_harness.session import (
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
+from tests.task_failed_errors import task_failed_errors
 
 TRUNCATED_CALL_ID = "call_truncated_1"
 
@@ -354,11 +355,7 @@ async def test_c_form_empty_content_error_names_unparsable_chunks(tmp_path, capl
     assert not [e for e in session.events if e.type == MODEL_COMPLETED]
     # 错误消息区分形态：点名 unparsable tool_call_chunks（数量 + likely truncated）。
     # task_failed 生命周期日志按项目约定走 INFO 级（outcome=error 字段承载严重度）。
-    logged_errors = [
-        str(getattr(r, "error", ""))
-        for r in caplog.records
-        if r.name == "agent_harness.agent" and getattr(r, "event_type", "") == "task_failed"
-    ]
+    logged_errors = task_failed_errors(caplog)
     assert any(
         "1 unparsable tool_call_chunks" in e and "likely truncated" in e
         for e in logged_errors
@@ -368,18 +365,10 @@ async def test_c_form_empty_content_error_names_unparsable_chunks(tmp_path, capl
 # --------------------------------------------------------------------------------------
 # §#506：守卫按 finish_reason 精确化——截断推测只属于 length 收尾（Pi
 # agent-loop.ts:264-269 只认 length、deepseek-harness EMPTY_RESPONSE 限 stop+零内容块
-# 且 max-tokens 保留截断语义、OpenAI/Anthropic 官方枚举同口径）；stop 等非截断收尾
-# 点名 malformed（格式坏），finish_reason 缺失回落中性（不臆断截断）。
+# 且 max-tokens 保留截断语义；langchain finish_reason 口径——实测 langchain_anthropic
+# 写 stop_reason 键，Anthropic 线不命中 length 分支、走中性回落）；stop 等非截断
+# 收尾点名 salvage 后仍解析不了，finish_reason 缺失回落中性（不臆断截断）。
 # --------------------------------------------------------------------------------------
-
-
-def _task_failed_errors(caplog) -> list[str]:
-    """提取 task_failed 诊断日志承载的 error 原文（OBS-008：文案只进日志）。"""
-    return [
-        str(getattr(r, "error", ""))
-        for r in caplog.records
-        if r.name == "agent_harness.agent" and getattr(r, "event_type", "") == "task_failed"
-    ]
 
 
 def _c_form_script(finish_reason: str | None) -> list[list[AIMessageChunk]]:
@@ -421,7 +410,7 @@ async def test_c_form_stop_finish_reason_gets_malformed_wording(tmp_path, caplog
             pass
 
     assert tool.executed_args == []
-    logged = _task_failed_errors(caplog)
+    logged = task_failed_errors(caplog)
     assert any(
         e == "model returned an empty response; "
         "1 malformed tool_call arguments"
@@ -442,7 +431,7 @@ async def test_c_form_length_finish_reason_wording_verbatim(tmp_path, caplog) ->
         async for _ in runtime.run_stream(session, "hi"):
             pass
 
-    logged = _task_failed_errors(caplog)
+    logged = task_failed_errors(caplog)
     assert any(
         e == "model returned an empty response; "
         "1 unparsable tool_call_chunks present"
@@ -464,7 +453,7 @@ async def test_c_form_missing_finish_reason_gets_neutral_wording(tmp_path, caplo
         async for _ in runtime.run_stream(session, "hi"):
             pass
 
-    logged = _task_failed_errors(caplog)
+    logged = task_failed_errors(caplog)
     assert any(
         e == "model returned an empty response; "
         "1 unparsable tool_call_chunks present"
