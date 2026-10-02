@@ -6830,3 +6830,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 ## AGENTS 规则发布（2026-10-03）
 
 用户授权四端同步；最终根/必读 Git 手册/HTML/原版快照已进入发布收口。审查、完整车道证据与范围见 `docs/agents/agents-md-release-integration-2026-10-03.md`。TodoWrite 阅读项错误完成仍 OPEN；最新 main 的 Composer 视觉用例（期望3控件、实际4）经原始基线复跑确认为既有红，待用户裁决是否另行修复，本任务不改产品/测试。状态以 Git/PR 实况为准，未据待执行动作宣称已发布。
+
+
+## 2026-10-03 · A 线 #555 fork 分阶段可见性（分支 `fix/t547-t566-sandbox-recovery`，base `22cd4d64`）
+
+- **代码笔 `a7dff703`**：意图标记 fork/in-progress + 暂存/同卷 rename 发布 + 栈内补偿 + 启动扫描 scan_unfinished_forks + 续聊对账 fork 专属 409 文案 + lineage W5 fork 边回填；事件词汇两份生成物再生成 + projection.ts 登记。
+- **读数**：focused 661P（session/recovery/multiagent/cli-fork/生成守卫/web 错误映射）绿；`ruff check .` 绿；`tsc -b --force` 绿；main 症状级复现 + 真崩溃集成测试（os._exit(9)）绿。
+- **台账**：`docs/review_ledger.d/t555-fork-phase-visibility-22cd4d64-a7dff703.tsv`（唯一写全处）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。同批 #566/#547/#549 待续。
