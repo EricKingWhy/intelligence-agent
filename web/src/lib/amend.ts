@@ -68,7 +68,9 @@ export interface CreateBudgetDrafts {
   turns: string | null;
   /** `budget.run.max_total_tokens` 草稿。 */
   totalTokens: string | null;
-  /** `budget.run.deadline_at` 草稿（`datetime-local` 原始值，如 `2026-10-01T12:30`）。 */
+  /** `budget.run.deadline_at` 草稿——#536 起双形态：时长 token（`"30m"` / `"2h"` /
+   *  自定义分钟 `"90m"`，提交时刻换算为绝对时刻）**或** `datetime-local` 原始值
+   *  （如 `2026-10-01T12:30`，高级路径）。两形态天然互斥（regex 判形）。 */
   deadlineAt: string | null;
 }
 
@@ -93,10 +95,39 @@ function parseDeadlineDraft(draft: string | null): string | undefined {
   return date.toISOString();
 }
 
+/** 时长 token 判形（#536 §2.2）：`"30m"` / `"2h"` / 自定义分钟 `"90m"` → 分钟数。
+ *  与 turns/tokens 同一判形语义：0 / 半截 / 非法 / datetime-local 原始值 → null
+ *  （视同"不是时长"，走高级路径或视同未设置——由调用方决定）。 */
+export function parseDurationToken(draft: string | null | undefined): number | null {
+  const match = /^(\d+)(m|h)$/.exec(draft?.trim() ?? '');
+  if (!match) return null;
+  const amount = Number.parseInt(match[1] ?? '', 10);
+  if (amount < 1) return null;
+  return match[2] === 'h' ? amount * 60 : amount;
+}
+
+/** deadline 草稿 → 绝对时刻（RFC 3339 UTC）——#536 的**换算唯一执行点**：
+ *  提交时刻（`toCreateBudget`）与预览渲染时刻（`budgetUi.deadlinePreview`）消费
+ *  同一实现，时长档与 datetime 档的换算不可能漂移成两套。
+ *  - 时长 token（`/^(\d+)(m|h)$/`）→ `now + 时长`（`now` 缺省取当前时刻）；
+ *  - 其余 → datetime-local 原路径（语义逐字节不变）；
+ *  - 空 / 0 时长 / 非法 → undefined（不发键）。 */
+export function resolveDeadlineDraft(
+  draft: string | null | undefined,
+  now: Date = new Date(),
+): string | undefined {
+  const minutes = parseDurationToken(draft);
+  if (minutes !== null) {
+    return new Date(now.getTime() + minutes * 60_000).toISOString();
+  }
+  return parseDeadlineDraft(draft ?? null);
+}
+
 export function toCreateBudget(drafts: CreateBudgetDrafts): StartSessionPayload['budget'] {
   const turns = parsePositiveIntDraft(drafts.turns);
   const totalTokens = parsePositiveIntDraft(drafts.totalTokens);
-  const deadlineAt = parseDeadlineDraft(drafts.deadlineAt);
+  // #536：换算唯一执行点（时长档 + datetime 高级路径同一实现，预览侧复用）。
+  const deadlineAt = resolveDeadlineDraft(drafts.deadlineAt);
   if (turns === undefined && totalTokens === undefined && deadlineAt === undefined) {
     return undefined;
   }

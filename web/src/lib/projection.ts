@@ -8,6 +8,7 @@
 
 import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
+import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
 import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
 import { parseArtifactMarker } from './toolShapes';
@@ -182,9 +183,12 @@ export function initConversation(session_id: string): ConversationState {
     turn_index: null,
     requested_model: null,
     model_run_id: null,
-    seenSeqs: new Set(),
-    undelivered: [],
-  };
+      seenSeqs: new Set(),
+      undelivered: [],
+      // #537：run 预算镜像初值（无回显、无账）。
+      run_budget_ceilings: null,
+      run_budget_consumed: null,
+    };
 }
 
 function newTurn(step_id: number): Turn {
@@ -413,6 +417,15 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   const requested = event.data.model;
   state.requested_model =
     typeof requested === 'string' && requested ? requested : null;
+  // #537：run 预算镜像——run/started 是「最近一个 run」账本的**重置点**：
+  // ceilings 从 data.budget.run 回显解析（后端 as_run_started_budget 只在配置了
+  // run ceiling 时落键 → 没配 = null = 徽标整段不渲染）；消耗账无条件归零
+  // （计数不依赖有没有 ceiling，徽标只在有 ceiling 时消费它）。
+  const budgetEcho = isRecord(event.data.budget) && isRecord(event.data.budget.run)
+    ? event.data.budget.run
+    : null;
+  state.run_budget_ceilings = budgetEcho ? parseRunLimitFacts(budgetEcho) : null;
+  state.run_budget_consumed = { agent_turns: 0, model_requests: 0, total_tokens: 0, cost_usd: '0' };
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -497,6 +510,44 @@ function projectModelCompleted(state: ConversationState, event: AgentEvent): voi
         }
       : usage;
   }
+  // #537：turns 的计数点与后端 `consumed_from_events` 同一事件（MODEL_COMPLETED）。
+  const consumed = state.run_budget_consumed;
+  if (consumed) {
+    state.run_budget_consumed = { ...consumed, agent_turns: consumed.agent_turns + 1 };
+  }
+}
+
+/** #537：MODEL_REQUEST 是 requests / tokens / cost 三个维的计数点（后端
+ *  `consumed_from_events` 同一事件、同一口径）。此前本事件在投影里是 no-op——
+ *  徽标需要 run 作用域账，而 `usage_total` 是**会话级**聚合（跨 run 累计、且
+ *  cost 不在内），不能拿来当 run 徽标的消耗。
+ *
+ *  粘性 None（后端同语义）：某请求缺 `usage.total_tokens` / `cost_usd` ⇒ 该维从
+ *  这一刻起不可得（null），**不是** 0；cost 是十进制**字符串**累加（复用
+ *  runBudget 的唯一十进制实现，绝不 float 化）。 */
+function projectModelRequest(state: ConversationState, event: AgentEvent): void {
+  const consumed = state.run_budget_consumed;
+  if (!consumed) return;
+  const usage = isRecord(event.data.usage) ? event.data.usage : null;
+  const reportedTokens = usage?.total_tokens;
+  // 整数判定与后端 `isinstance(int) and not bool` 同口径：非整数 usage 不是
+  // "截断后可用"，而是粘性不可得（null）——Math.trunc 会把 100.5 累加成 100，
+  // 那是后端账本里不存在的事实。
+  const tokens =
+    typeof reportedTokens === 'number' && Number.isInteger(reportedTokens)
+      ? reportedTokens
+      : null;
+  const reportedCost = typeof event.data.cost_usd === 'string' ? event.data.cost_usd : null;
+  state.run_budget_consumed = {
+    agent_turns: consumed.agent_turns,
+    model_requests: consumed.model_requests + 1,
+    total_tokens:
+      consumed.total_tokens === null || tokens === null ? null : consumed.total_tokens + tokens,
+    cost_usd:
+      consumed.cost_usd === null || reportedCost === null
+        ? null
+        : addDecimalTexts(consumed.cost_usd, reportedCost),
+  };
 }
 
 function projectToolCall(state: ConversationState, event: AgentEvent): void {
@@ -827,9 +878,20 @@ function projectRunPaused(state: ConversationState, event: AgentEvent): void {
  *  它**不是**新的 `run/started`（后端不变量：同一逻辑 run 里只有一条），所以这里
  *  只做两件事：收起暂停事实、把 run 状态放回 running。turn 级状态不动——新执行的
  *  事件会自己建新轮（`step_base+1`），`finalizeRun('paused')` 已经 settle 过旧轮。 */
-function projectRunResumed(state: ConversationState, _event: AgentEvent): void {
+function projectRunResumed(state: ConversationState, event: AgentEvent): void {
   state.run_paused = null;
   state.run_status = 'running';
+  // #537：恢复后的 ceilings 用**恢复事件自带的新快照**更新（run/resumed 载荷的
+  // data.limits.run 与 run/paused 同形，值是恢复生效后的 effective limits）——
+  // 徽标与暂停面板消费同一条恢复链，不 fetch 第二份。载荷没带 limits（旧会话
+  // 的恢复事件）⇒ 原样保留：键缺席 ≠ 没配（零伪造）。消耗账不动（后端恢复
+  // 保留 consumed，前端折叠本来就连续）。
+  const runScope = isRecord(event.data.limits) && isRecord(event.data.limits.run)
+    ? event.data.limits.run
+    : null;
+  if (runScope) {
+    state.run_budget_ceilings = parseRunLimitFacts(runScope);
+  }
 }
 
 /** Large tool output offloaded to ArtifactStore (Phase 5, spec 06 §15).
@@ -1373,7 +1435,8 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // `unhandledProjection` 那条兜底路径，别把两者混说）；
   // 不登记则 `Record<EventTypeValue, EventSemantics>` 的穷尽性被破坏，`tsc` 直接红
   // （`event-types.ts` 是生成物，加类型就必须在这里登记）。
-  [EventType.MODEL_REQUEST]: { apply: noopProjection, summarize: emptySummary },
+  // #537：不再是 no-op——requests/tokens/cost 的 run 作用域计数点（徽标数据源）。
+  [EventType.MODEL_REQUEST]: { apply: projectModelRequest, summarize: emptySummary },
   [EventType.TOOL_CALL]: { apply: projectToolCall, summarize: summarizeToolCall },
   [EventType.TOOL_RESULT]: { apply: projectToolResult, summarize: summarizeToolResult },
   [EventType.OPERATION_RECONCILE_REQUIRED]: {
