@@ -1,3 +1,7 @@
+> **发布包说明（2026-10-03）**：本页以下内容按历史测试记录阅读。当前终态见 `final-closeout-and-v10-review-2026-10-03.md` 与上级 `agents-md-strict-final-review-2026-10-03.md`：v10 GUI 已执行，最终 CLAUDE 仅澄清 Matt/pstack 正文位置；TodoWrite 阅读项错误完成残余保持 OPEN。夜间长跑与 GPT-6-Luna 验收已由用户取消。本文历史中的“尚未测试”“未发布”描述只指各自记录时点。
+
+> 本次 GitHub 发布只带规则、必要细则、对比页、快照和结论报告，**不包含原始 GUI JSON/JSONL、测试脚本及完整评分档案**。完整审计目录保留在：`C:/Users/王浩宇/.codex/worktrees/agents-rules-optimization/intelligence-agent/docs/agents/agents-md-eval-2026-10/`。v9 原档位于其 `desktop-gui-2026-10-02/`；v10 原档位于其 `desktop-gui-v10-2026-10-02/`。下文提到的证据归档和未随包的相对路径均以该原审计目录为基准，不能据报告文件存在宣称四端已携带完整原始证据。
+
 # 待处理缺陷：必读阻塞时 TodoWrite 错误完成
 
 状态：**OPEN，v10 桌面复测已收到并复核，正式审查状态改善，但必读阅读项仍有错误完成残余；本轮收口，不追加测试**。发现于 v9 桌面 GUI 测试；不是报告措辞修正即可关闭的缺陷。
@@ -6,7 +10,7 @@
 
 模型 GLM-5.3-Flash；候选 commit `9798a9a96ed1ac81a53d6a874ccdccf2f3dd20b6`；run 12，`glm-review-missing-new-r2-neutral.json`，会话 `sess_1e46d89b-ff60-46c9-b2d0-7b6a173f932d`。
 
-原始证据：[rollout](rollouts/model-io-sess_1e46d89b-ff60-46c9-b2d0-7b6a173f932d.jsonl)。工具返回显示 `docs/agents/review-debug-playbook.md` 不存在。最终回答首行明确“任务阻塞（BLOCKED_REQUIRED_READ），未完成【§4.1 Independent Review 正式审查】”，启动检查表第五项也是 BLOCKED。
+原始证据：rollout (`rollouts/model-io-sess_1e46d89b-ff60-46c9-b2d0-7b6a173f932d.jsonl`; original audit directory)。工具返回显示 `docs/agents/review-debug-playbook.md` 不存在。最终回答首行明确“任务阻塞（BLOCKED_REQUIRED_READ），未完成【§4.1 Independent Review 正式审查】”，启动检查表第五项也是 BLOCKED。
 
 但第二次 TodoWrite（UTC `2026-10-02T08:46:48.907Z`，北京时间 16:46:48；调用 `call_7ab001f0bb0d4c5188e4b208`）将以下项目全部写成 `completed`：
 
@@ -39,7 +43,7 @@ TodoWrite 是任务状态工具调用，不是工作区文件 Edit/Write；本�
 
 ## 2026-10-02 v10 候选进展
 
-候选 `a315bab0509019a07ed3900acc7484ef4ec9860e` 已将任务工具、工作记录和回答的一致性写入 AGENTS 文件头；CLAUDE 引用同一权威。静态核对通过，不等于行为修复。真实缺失、恢复和完整正文分支须按 [定向交接](../v10-targeted-desktop-test-handoff-2026-10-02.md) 复测；当前关闭判据仍未满足。pstack 显式入口同步补强，协议与七份正文未改。
+候选 `a315bab0509019a07ed3900acc7484ef4ec9860e` 已将任务工具、工作记录和回答的一致性写入 AGENTS 文件头；CLAUDE 引用同一权威。静态核对通过，不等于行为修复。真实缺失、恢复和完整正文分支须按 定向交接 (`../v10-targeted-desktop-test-handoff-2026-10-02.md`; original audit directory) 复测；当前关闭判据仍未满足。pstack 显式入口同步补强，协议与七份正文未改。
 
 ## 2026-10-03 最终收口
 

@@ -1,0 +1,897 @@
+[WebServer] (node:22472) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] (node:8436) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] (node:30068) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 480 tests using 2 workers
+
+(node:31864) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:11208) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok   1 [chromium-1280] › e2e\a-reasoning.spec.ts:7:1 › reasoning 流：思考块聚合、完成后展开可见、最终文本呈现 (2.9s)
+  ok   2 [chromium-1280] › e2e\archived.spec.ts:59:1 › 默认收起归档行 + 徽标是真值 + 缺失计数不算归档 + 开关状态跨刷新保留 (3.7s)
+  ok   4 [chromium-1280] › e2e\archived.spec.ts:145:1 › 归档写入成功但列表重拉失败：就地说明「已生效但没刷新出来」，不假装成功 (1.9s)
+  ok   3 [chromium-1280] › e2e\archived.spec.ts:100:1 › 归档 / 取消归档可逆、就地进行、不弹确认面 (2.7s)
+  ok   5 [chromium-1280] › e2e\archived.spec.ts:169:1 › 空态提示只说真话：只有归档行时给出归档条数；项目在但无会话时不出声 (2.3s)
+  ok   6 [chromium-1280] › e2e\archived.spec.ts:193:1 › 409：原样显示后端 detail、列表保持原样；取消归档永不被 409 挡 (2.8s)
+  ok   7 [chromium-1280] › e2e\archived.spec.ts:221:1 › 归档不影响正在阅读的会话：视野不被拽走（归档 ≠ 删除） (2.1s)
+  ok   8 [chromium-1280] › e2e\b-fork.spec.ts:52:1 › B1 回归锁：第 2 轮分叉传 user/message 的 seq（30），不是 turn 序号（2） (2.1s)
+  ok   9 [chromium-1280] › e2e\b-fork.spec.ts:95:1 › B2：分叉被拒绝时展示后端 detail，不再静默吞错 (2.0s)
+  ok  10 [chromium-1280] › e2e\b-fork.spec.ts:115:1 › B3：第 1 轮按钮提示 child 将是空会话（锚点消息不进 seed） (1.7s)
+  ok  11 [chromium-1280] › e2e\b-fork.spec.ts:125:1 › 注入的纠正消息不渲染分叉入口（不是真人说的话，没有可继承的轮次） (1.6s)
+  ok  13 [chromium-1280] › e2e\budget-entry.spec.ts:139:1 › #426 不设置预算：创建载荷不含 budget 键（默认行为不变） (1.8s)
+  ok  12 [chromium-1280] › e2e\budget-entry.spec.ts:43:1 › #426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 → PausedPanel 恢复抬高同维 (3.5s)
+  ok  14 [chromium-1280] › e2e\c-tool-output.spec.ts:7:1 › 工具输出流：running 行 → stdout/stderr 分块 → result 终态 (2.1s)
+  ok  15 [chromium-1280] › e2e\composer-stream-actions.spec.ts:94:1 › #194：流式中提示与停止按钮同侧，且不压任何档位控件（默认宽度与 Inspector 上限两种布局） (2.7s)
+  ok  16 [chromium-1280] › e2e\composer-stream-actions.spec.ts:136:1 › #194：非流式不渲染提示；发送按钮仍在（提示只属于流式态） (1.9s)
+  ok  17 [chromium-1280] › e2e\composer-stream-actions.spec.ts:149:1 › #194：提示只是提示——真实中断仍由 Esc 与停止按钮触发（各一次 POST /cancel） (1.9s)
+  ok  18 [chromium-1280] › e2e\context-usage.spec.ts:22:1 › T6a：空数据 → 「后端未上报用量数据」，不出现 0% 假话 (2.1s)
+  ok  19 [chromium-1280] › e2e\context-usage.spec.ts:48:1 › T6b：有数据 → 六桶图例 + 分段条 + 阈值标记 + 缓存命中率 (2.3s)
+  ok  20 [chromium-1280] › e2e\context-usage.spec.ts:100:1 › T6c：未采集 → 「未采集（提供商未返回缓存明细）」，不显示 0% (2.2s)
+  ok  21 [chromium-1280] › e2e\context-usage.spec.ts:154:1 › T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不说"未上报"） (2.4s)
+  ok  22 [chromium-1280] › e2e\context-usage.spec.ts:198:1 › T6d：Esc 关闭看板（与既有 picker 一致） (2.4s)
+  ok  23 [chromium-1280] › e2e\continuation.spec.ts:41:1 › 续聊：第二条消息走 /messages 端点而非新建会话 (2.7s)
+[WebServer] 01:28:35 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:28:35 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok  24 [chromium-1280] › e2e\continuation.spec.ts:70:1 › 续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 /messages payload (5.2s)
+  ok  25 [chromium-1280] › e2e\continuation.spec.ts:117:1 › 续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend 照发 (4.0s)
+  ok  26 [chromium-1280] › e2e\continuation.spec.ts:150:1 › 续聊 422：提示「续聊参数无效」而非「未知模型」（handoff §5 P2） (2.6s)
+  ok  27 [chromium-1280] › e2e\continuation.spec.ts:174:1 › 续聊 404：会话已被删除 → 中文说明并指向另选会话，不泄露 HTTP 状态码 (2.9s)
+  ok  28 [chromium-1280] › e2e\control-row.spec.ts:29:1 › Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭 (3.2s)
+  ok  29 [chromium-1280] › e2e\control-row.spec.ts:77:1 › Composer control row：长目录搜索过滤 + 短目录隐藏搜索框 (2.2s)
+  ok  31 [chromium-1280] › e2e\control-row.spec.ts:139:1 › Composer control row：选中行的三通道选中态（勾选 + 加重 + 2px 高亮条） (2.9s)
+  ok  30 [chromium-1280] › e2e\control-row.spec.ts:111:1 › Composer control row：单选档位可以选回「默认（未选）」 (3.7s)
+  ok  32 [chromium-1280] › e2e\control-row.spec.ts:177:1 › Composer control row：短目录键盘导航（不手动聚焦 listbox） (3.5s)
+[WebServer] 01:28:50 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:28:51 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:28:52 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok  33 [chromium-1280] › e2e\control-row.spec.ts:203:1 › Composer control row：提交 payload 字段名对齐后端契约 (6.9s)
+[WebServer] 01:28:54 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok  34 [chromium-1280] › e2e\control-row.spec.ts:251:1 › #201 档位收窄提示：只在真的被收窄时出现，且逐字给出 N/M (5.8s)
+[WebServer] 01:28:55 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:28:57 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok  35 [chromium-1280] › e2e\control-row.spec.ts:307:1 › #201 冻结行：每行 20px 图标槽恒在，未知名/缺键留空槽（不编字形） (4.2s)
+  ok  36 [chromium-1280] › e2e\control-row.spec.ts:352:1 › #214：行首字形由条目声明的 icon 名决定（未知名 / 缺键留空槽，不拿 id 猜） (3.3s)
+  ok  37 [chromium-1280] › e2e\control-row.spec.ts:384:1 › #214 AC4：三条 Composer picker 的内置条目都真的画出了字形 (3.7s)
+  ok  38 [chromium-1280] › e2e\control-row.spec.ts:442:1 › #283 AC3：会话内权限 pill 可改、读会话真值，旧「不可修改」提示彻底消失 (3.6s)
+  ok  40 [chromium-1280] › e2e\d-recover.spec.ts:71:1 › 恢复成功：提示明确可见，且入口消失后提示不跟着消失 (3.5s)
+  ok  39 [chromium-1280] › e2e\control-row.spec.ts:472:1 › #283 AC1/AC2：平移档直接发请求；升「完全访问」先确认，取消则一个请求都不发 (5.2s)
+  ok  41 [chromium-1280] › e2e\d-recover.spec.ts:91:1 › 后端未能回填时不谎报「已完整」——如实说明仍缺终态、可重试 (2.2s)
+  ok  42 [chromium-1280] › e2e\d-recover.spec.ts:120:1 › 只补上 run 终态（无工具回填）时如实说「补齐 run 终态」，不谎报「无可修复项」 (2.3s)
+  ok  43 [chromium-1280] › e2e\d-recover.spec.ts:147:1 › 恢复遇 409：需人工裁决单独成形，不混同普通失败 (2.1s)
+  ok  44 [chromium-1280] › e2e\d-recover.spec.ts:190:1 › 中断在首个步骤之前：横幅说「首个步骤开始前中断」而不是「第 ? 步」 (1.7s)
+  ok  45 [chromium-1280] › e2e\d-recover.spec.ts:201:1 › 中断在某个步骤：横幅仍报具体步号 (1.6s)
+  ok  47 [chromium-1280] › e2e\f-history.spec.ts:7:1 › 历史重放：会话列表 → 点击行 → projectHistory 重建文本与工具 (1.4s)
+  ok  48 [chromium-1280] › e2e\favicon.spec.ts:14:1 › #224：声明的 icon 必须能取到，且不是渲染为空白 sprite (1.0s)
+  ok  46 [chromium-1280] › e2e\e-reconnect.spec.ts:14:1 › 断连重连：断线条在场 → 重新订阅补齐缺口 → 文本无重复 → 收尾清条 (3.9s)
+  x   49 [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1440px 宽度下不溢出 (6.5s)
+  x   50 [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1280px 宽度下不溢出 (6.4s)
+(node:29876) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:6016) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  x   51 [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1024px 宽度下不溢出 (6.5s)
+  x   52 [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 820px 宽度下不溢出 (6.5s)
+(node:31248) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20504) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok  54 [chromium-1280] › e2e\g-visual-qa.spec.ts:54:1 › Composer control row 在浅色模式下可见 (1.3s)
+  ok  55 [chromium-1280] › e2e\g-visual-qa.spec.ts:82:1 › Inspector 时间线 run 分组头 + 头标对齐（UI-03） (1.5s)
+  ok  56 [chromium-1280] › e2e\h-density.spec.ts:7:1 › 四档切换：data-density 即时生效，刷新后持久 (1.8s)
+  ok  57 [chromium-1280] › e2e\i-keyboard.spec.ts:7:1 › palette 键盘唤起与关闭；Composer 键盘提交 (1.4s)
+  x   53 [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 768px 宽度下不溢出 (6.5s)
+(node:5452) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok  58 [chromium-1280] › e2e\i-keyboard.spec.ts:46:1 › palette 的 Copy Run ID 复制 run id，而不是 session id (1.7s)
+  ok  60 [chromium-1280] › e2e\j-scroll.spec.ts:41:1 › 滚动容器关闭浏览器滚动锚定（虚拟化动态测高会与锚定打架） (1.4s)
+  ok  59 [chromium-1280] › e2e\i-keyboard.spec.ts:79:1 › UI-06：palette 密度条目 CJK 间距 + 主题 hint 无箭头（真实渲染断言） (1.5s)
+  ok  61 [chromium-1280] › e2e\j-scroll.spec.ts:53:1 › 非流式态不出现「↓ 最新」浮标（没有「最新」可跳，浮标不得残留） (1.4s)
+  ok  62 [chromium-1280] › e2e\j-scroll.spec.ts:77:1 › 流式中上滚（真实滚轮）：浮标出现、点浮标回底并恢复跟随 (2.4s)
+  ok  63 [chromium-1280] › e2e\k-refresh-restore.spec.ts:33:1 › BUG-005：刷新后零点击恢复同一个会话与全部内容 (2.1s)
+  ok  64 [chromium-1280] › e2e\k-refresh-restore.spec.ts:55:1 › BUG-005 写入路径：真实点击会话行 → 写键 → 不带种子刷新仍恢复 (2.4s)
+  ok  65 [chromium-1280] › e2e\k-refresh-restore.spec.ts:88:1 › 子会话 id 与普通会话同一持久化/恢复路径：非首行真实点击 → 写键 → 刷新恢复 (2.4s)
+  ok  66 [chromium-1280] › e2e\k-refresh-restore.spec.ts:159:1 › BUG-006：刷新时 run 在途 → 重新接回流，刷新后的事件继续到达 (2.5s)
+  ok  67 [chromium-1280] › e2e\k-refresh-restore.spec.ts:195:1 › BUG-006 兜底：接流零帧空流（run 已在刷新窗口内收口）→ 静默停在历史，且不再重试 (2.0s)
+  ok  68 [chromium-1280] › e2e\k-refresh-restore.spec.ts:220:1 › BUG-005 自愈：记住的会话已不存在（404）→ 清键 + 静默回空态，不弹错误 (1.1s)
+  ok  69 [chromium-1280] › e2e\l-auth-banner.spec.ts:20:1 › 401 → 引导横幅出现；可点「关闭提示」关掉；再有 401 会重新出现 (1.7s)
+  ok  70 [chromium-1280] › e2e\m-stream-affordances.spec.ts:31:1 › 工具输出尾窗：自动换行可切换；上滚出「↓ 最新」，点击回底并消失 (2.3s)
+  ok  71 [chromium-1280] › e2e\m-stream-affordances.spec.ts:95:1 › 推理块：上滚出「↓ 最新」，点击回底并消失 (2.0s)
+  ok  72 [chromium-1280] › e2e\memory-management.spec.ts:47:1 › AC8: browser keeps loading visible until the memory list request completes (1.4s)
+  ok  73 [chromium-1280] › e2e\memory-management.spec.ts:77:1 › AC8: browser shows an empty state only after a successful empty response (1.3s)
+  ok  74 [chromium-1280] › e2e\memory-management.spec.ts:88:1 › AC8: browser reports a disabled memory capability as degraded, not empty (1.4s)
+  ok  75 [chromium-1280] › e2e\memory-management.spec.ts:99:1 › AC1: search and all list filters are sent to the API and render its result (1.8s)
+  ok  76 [chromium-1280] › e2e\memory-management.spec.ts:128:1 › AC2: deleted tombstones show only authorized metadata and content-free history (1.7s)
+  ok  77 [chromium-1280] › e2e\memory-management.spec.ts:182:1 › project memory operations carry its authorized context and bulk preview covers global plus project (2.2s)
+  ok  78 [chromium-1280] › e2e\memory-management.spec.ts:229:1 › deleting a project memory preserves its authorized context (1.7s)
+  ok  80 [chromium-1280] › e2e\memory-management.spec.ts:273:1 › AC8: a stale version conflict refreshes the row and leaves a dismissible explanation (1.7s)
+  ok  79 [chromium-1280] › e2e\memory-management.spec.ts:252:1 › AC3 and AC8: editing validates fields, creates a user-edit version, and exposes history (2.1s)
+  ok  81 [chromium-1280] › e2e\memory-management.spec.ts:299:3 › AC8: list HTTP 403 stays visible and can recover after retry (1.6s)
+  ok  82 [chromium-1280] › e2e\memory-management.spec.ts:299:3 › AC8: list HTTP 404 stays visible and can recover after retry (1.6s)
+  ok  83 [chromium-1280] › e2e\memory-management.spec.ts:330:1 › AC8: retry after a failed next page fetches that same offset (1.9s)
+  ok  85 [chromium-1280] › e2e\memory-management.spec.ts:423:1 › AC4: bulk delete previews an exact server count and sends the confirmation token (1.5s)
+  ok  86 [chromium-1280] › e2e\memory-management.spec.ts:441:1 › AC5: a failed setting update leaves the last server-confirmed value checked (1.5s)
+  ok  87 [chromium-1280] › e2e\memory-management.spec.ts:458:1 › AC6 and AC7: update content is fetched only on expansion and recall shows redacted factors (1.8s)
+  ok  88 [chromium-1280] › e2e\memory-management.spec.ts:503:1 › AC9: keyboard-only dialog navigation shows focus and Escape restores the opener (1.9s)
+  ok  84 [chromium-1280] › e2e\memory-management.spec.ts:364:1 › AC8: pagination stops at the backend offset ceiling with an explicit boundary (10.1s)
+  ok  89 [chromium-1280] › e2e\model-picker.spec.ts:31:1 › #199：两级结构 + 鼠标悬停展开 + 选中回写 trigger (2.1s)
+  ok  91 [chromium-1280] › e2e\model-picker.spec.ts:110:1 › #199：Esc 不写回未确认的选择（打开 → 移动 → Esc → trigger 不变） (1.6s)
+  ok  90 [chromium-1280] › e2e\model-picker.spec.ts:65:1 › #199：键盘 `→` 进二级、Esc 逐级退出；选中项带 aria-checked (2.7s)
+  ok  92 [chromium-1280] › e2e\model-picker.spec.ts:132:1 › #199：长目录不再需要搜索框——provider 分组就是导航 (1.3s)
+  ok  93 [chromium-1280] › e2e\model-picker.spec.ts:153:1 › #199：不可用 provider 置灰但仍可展开 + 行尾原因 + 能力徽标 (2.1s)
+  ok  94 [chromium-1280] › e2e\multiturn-queue.spec.ts:43:1 › T11：编辑最新一条用户消息 → supersedes_seq 进 payload → 旧轮整段消失、新问句可见 (2.0s)
+  ok  95 [chromium-1280] › e2e\multiturn-queue.spec.ts:105:1 › T11b：非最新消息的编辑按钮置灰（title 说明），不可点 (1.6s)
+  ok  96 [chromium-1280] › e2e\multiturn-queue.spec.ts:140:1 › T12：排队项显示徽标与摘要；取消后移除；空队列不渲染 (1.9s)
+  ok  97 [chromium-1280] › e2e\multiturn-queue.spec.ts:169:1 › T12b：首屏补齐（GET /queue）→ 队列条渲染排队/引导徽标与摘要 (1.8s)
+  ok  98 [chromium-1280] › e2e\multiturn-queue.spec.ts:204:1 › T12c：「立即」→ POST /messages 带 mode=steer 且带 queue_id（不重复投递） (1.8s)
+  ok  99 [chromium-1280] › e2e\multiturn-queue.spec.ts:244:1 › T12f：排队项 404 不得被说成「会话已不存在」（404 不唯一） (1.9s)
+  ok 100 [chromium-1280] › e2e\multiturn-queue.spec.ts:286:1 › T12d：「编辑」就地改内容 → POST /messages 带 queue_id + 新内容 (1.8s)
+  ok 101 [chromium-1280] › e2e\multiturn-queue.spec.ts:339:1 › T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第二个会话 (1.7s)
+  ok 102 [chromium-1280] › e2e\multiturn-queue.spec.ts:402:1 › T12g：在途 run + Ctrl+Enter → POST /messages(mode=steer)（未被降级成 queue） (1.6s)
+  ok 103 [chromium-1280] › e2e\multiturn-queue.spec.ts:446:1 › T12h：idle 会话 Ctrl+Enter 被后端 409 拒 → 自动改投 queue（不报「人工裁决」错，不丢消息） (1.8s)
+  ok 104 [chromium-1280] › e2e\multiturn-queue.spec.ts:492:1 › T12i：队列条「立即」在 idle 上被 409 拒 → 重投去掉 queue_id（否则撞 404，消息真丢） (1.9s)
+  ok 105 [chromium-1280] › e2e\multiturn-queue.spec.ts:544:1 › T12j：steer 撞上**无关**的 409（人工裁决）→ 原样显示后端 detail，不被"是否 steer 409"的判断吃掉 body (1.9s)
+  ok 106 [chromium-1280] › e2e\multiturn-queue.spec.ts:587:1 › T12k：迟到的 409（steer 打空）→ 与窗内一致改投 queue，消息不丢 (3.8s)
+  ok 107 [chromium-1280] › e2e\multiturn-queue.spec.ts:622:1 › T12l：迟到的 409（人工裁决）→ 原样显示后端 detail（不被吞成无反馈） (3.5s)
+  ok 108 [chromium-1280] › e2e\multiturn-queue.spec.ts:643:1 › T12m：迟到的 404 → 说出「会话已不存在」（不静默丢消息） (3.8s)
+  ok 109 [chromium-1280] › e2e\multiturn-queue.spec.ts:673:1 › T12n：迟到的 422 → 说出「续聊参数无效」（与窗内同一条文案） (3.8s)
+  ok 111 [chromium-1280] › e2e\multiturn-queue.spec.ts:757:1 › T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐流、不重订阅） (5.6s)
+  ok 110 [chromium-1280] › e2e\multiturn-queue.spec.ts:715:1 › T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无错误条 (7.7s)
+  ok 113 [chromium-1280] › e2e\multiturn-queue.spec.ts:856:1 › T12r：在途 run 排队一条消息后，live 流必须继续收到并应用后续帧 (1.8s)
+  ok 112 [chromium-1280] › e2e\multiturn-queue.spec.ts:801:1 › T12q：纠正后回退重投仍失败（409 人工裁决）→ 必须把原因说出来，不许静默 (3.5s)
+  ok 114 [chromium-1280] › e2e\n-approval-card.spec.ts:81:1 › 审批请求 → 卡片渲染工具名与参数预览 (2.1s)
+  ok 115 [chromium-1280] › e2e\n-approval-card.spec.ts:100:1 › 多行 content → 原文块真实换行，不再出现字面 \n (2.0s)
+  ok 116 [chromium-1280] › e2e\n-approval-card.spec.ts:119:1 › 焦点落卡 + Ctrl+Enter → POST decision=approve_once (2.2s)
+  ok 117 [chromium-1280] › e2e\n-approval-card.spec.ts:137:1 › Ctrl+Backspace → POST decision=deny；决后快捷键失效 (2.4s)
+  ok 118 [chromium-1280] › e2e\n-approval-card.spec.ts:157:1 › 双卡并存 → Ctrl+Enter 只 POST 第一张（不批量批准） (2.5s)
+  ok 119 [chromium-1280] › e2e\n-approval-card.spec.ts:191:1 › run 终结仍 pending（孤儿审批）→ 卡片只读失效 + composer 不再锁死 (2.5s)
+  ok 120 [chromium-1280] › e2e\n-approval-card.spec.ts:226:1 › permission/resolved 后卡片消失 + composer 解锁 (1.8s)
+  ok 121 [chromium-1280] › e2e\n-approval-card.spec.ts:243:1 › 点「批准」→ 决策已提交 + 按钮消失 + POST decision=approve_once (2.5s)
+  ok 122 [chromium-1280] › e2e\n-approval-card.spec.ts:258:1 › 点「拒绝」→ 决策已提交 + 按钮消失 + POST decision=deny (2.6s)
+  ok 123 [chromium-1280] › e2e\n-approval-card.spec.ts:273:1 › permission/resolved 把卡片从待决队列移除（不渲染） (1.9s)
+  ok 125 [chromium-1280] › e2e\n-approval-card.spec.ts:336:1 › POST 409 → 幂等成功，卡片翻「决策已提交」 (2.4s)
+  ok 124 [chromium-1280] › e2e\n-approval-card.spec.ts:294:1 › POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错误提示 (5.5s)
+  ok 126 [chromium-1280] › e2e\n-approval-card.spec.ts:374:1 › POST 404 → 只读失效态（404 不是幂等已决，也不是可重试错误） (2.6s)
+  ok 127 [chromium-1280] › e2e\o-wait-hint.spec.ts:45:1 › 停顿提示锚的是「空闲」而非「流龄」：阈值前不出现；出现后秒数必须小于流龄 (1.9s)
+  ok 128 [chromium-1280] › e2e\o-wait-hint.spec.ts:91:1 › 刷新后不残留：提示不在，会话内容仍在（本地状态不进持久化） (2.7s)
+  ok 129 [chromium-1280] › e2e\o-wait-hint.spec.ts:121:1 › run 收口后不出现等待提示（终态不是停顿） (1.8s)
+  ok 130 [chromium-1280] › e2e\p-earlier-window.spec.ts:32:1 › 时间线「加载更早 N 条」：真实点击展开折叠的前段，折叠条随之消失 (2.2s)
+  ok 131 [chromium-1280] › e2e\picker-search-visibility.spec.ts:48:1 › #199：模型选择器没有搜索框（一级与二级都没有） (2.2s)
+  ok 132 [chromium-1280] › e2e\picker-search-visibility.spec.ts:77:1 › 短目录：OptionPicker（权限模式）搜索框不可见 (1.3s)
+  ok 133 [chromium-1280] › e2e\picker-search-visibility.spec.ts:95:1 › 长目录：OptionPicker（权限模式）搜索框可见且可过滤 (1.4s)
+  ok 134 [chromium-1280] › e2e\q-model-dedupe.spec.ts:96:3 › 模型切换去重（BUG-011） › 在途重复点击：延迟响应窗口内只发一个 POST /model (3.5s)
+  ok 135 [chromium-1280] › e2e\q-model-dedupe.spec.ts:119:3 › 模型切换去重（BUG-011） › 关闭态下的第二次点击：仍是 1 个请求；换目标照常发 (5.3s)
+  ok 136 [chromium-1280] › e2e\queue-flush.spec.ts:54:1 › launched：flush 响应被攒包时，回答经 WS 提前到达（不再卡到 run 结束） (3.2s)
+  ok 137 [chromium-1280] › e2e\queue-flush.spec.ts:87:1 › 游标：快照重放的旧终态不得把新 run 判成「已收口」——断流后必须重连 (3.7s)
+  ok 138 [chromium-1280] › e2e\queue-flush.spec.ts:128:1 › idle：空队列 → 静默（不接流、不报错、界面不动） (3.3s)
+  ok 140 [chromium-1280] › e2e\queue-flush.spec.ts:180:1 › 窗外才落定的 409：不得被吞成无反馈（判别是推断，推断错了要如实说） (3.8s)
+  ok 139 [chromium-1280] › e2e\queue-flush.spec.ts:154:1 › 409：在途 run 未收口 → 重试到回执；三次仍 409 → 如实报错（不假装已投递） (4.3s)
+  ok 142 [chromium-1280] › e2e\queue-flush.spec.ts:241:1 › 404：会话已不存在 → 明确报错，不静默吞掉 (1.8s)
+  ok 143 [chromium-1280] › e2e\r-project-groups.spec.ts:69:1 › AC1/AC2：项目 → 会话层级按账本手工序渲染；未分组区可点开、可继续对话 (1.8s)
+  ok 144 [chromium-1280] › e2e\r-project-groups.spec.ts:112:1 › AC3：新建项目输入绝对路径；路径不存在 → 就地给出清晰错误 (1.8s)
+  ok 141 [chromium-1280] › e2e\queue-flush.spec.ts:215:1 › 窗外才落定的 idle：静默收流（不弹假「连接中断」） (7.8s)
+  ok 146 [chromium-1280] › e2e\r-project-groups.spec.ts:207:1 › 加入项目被后端拒绝时（409 会话 cwd 与项目路径不一致）就地显示后端原因，归属不变 (2.3s)
+  ok 145 [chromium-1280] › e2e\r-project-groups.spec.ts:141:1 › AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排 (4.4s)
+  ok 148 [chromium-1280] › e2e\r-project-groups.spec.ts:279:1 › 项目列表端点失败时不隐藏会话：全部落到未分组 + 一条可重试的错误条 (1.3s)
+  ok 147 [chromium-1280] › e2e\r-project-groups.spec.ts:246:1 › AC5：删除项目明示"只解除分组"，删除后会话仍在且落到未分组 (2.3s)
+  ok 149 [chromium-1280] › e2e\r-project-groups.spec.ts:308:1 › 会话行不因进入项目而看到假的"已分组"：行 tooltip 区分未分组 (1.3s)
+  ok 151 [chromium-1280] › e2e\r-project-groups.spec.ts:348:1 › UI-05：有会话或项目时回退 icon-only 按钮（aria-label 定位） (1.2s)
+  ok 150 [chromium-1280] › e2e\r-project-groups.spec.ts:319:1 › UI-05：真空态 → Rail 头部是文字按钮 + 空态文案带行动链接（不再指路到不存在的实体） (2.1s)
+  ok 152 [chromium-1280] › e2e\r-project-groups.spec.ts:369:3 › 窄屏 ≤820px：项目级操作（#179） › 项目头不再整块收起：⋯ 菜单可达且菜单项与宽屏一致 (1.6s)
+  ok 153 [chromium-1280] › e2e\r-project-groups.spec.ts:395:3 › 窄屏 ≤820px：项目级操作（#179） › 窄屏重命名真的落到后端（PATCH 后重取仍在，不是本地改名） (2.7s)
+  ok 155 [chromium-1280] › e2e\s-memories.spec.ts:45:1 › AC1：列表按后端分页渲染 content / scope / 创建时间；"加载更多"真的翻页 (1.7s)
+  ok 156 [chromium-1280] › e2e\s-memories.spec.ts:86:1 › AC1：长正文可展开读全文（删除决定前必须读得到完整内容） (1.1s)
+  ok 154 [chromium-1280] › e2e\race-guard.spec.ts:27:1 › 竞态守卫：旧请求迟到失败不污染新会话 (4.5s)
+  ok 157 [chromium-1280] › e2e\s-memories.spec.ts:99:1 › AC2 + AC3：删除必须二次确认且写明"删除不可恢复"；确认后后端状态真的变了 (2.0s)
+  ok 158 [chromium-1280] › e2e\s-memories.spec.ts:128:1 › AC3：删除失败 → UI 回滚（该行仍在）+ 显示后端拒绝原因 (2.0s)
+  ok 160 [chromium-1280] › e2e\s-memories.spec.ts:176:1 › AC4：记忆未装配（503）→ 如实说"记忆未启用"，不伪造空列表、不给无意义的重试 (1.4s)
+  ok 159 [chromium-1280] › e2e\s-memories.spec.ts:153:1 › AC3：这条在别处已被删（DELETE 404）→ 行随之消失，但失败必须报出来（不能被界面吞掉） (1.7s)
+  ok 162 [chromium-1280] › e2e\s-memories.spec.ts:234:1 › AC4：真的没有记忆 → "还没有记忆"（与降级/读取失败都区分开） (1.2s)
+  ok 161 [chromium-1280] › e2e\s-memories.spec.ts:195:1 › #225：记忆装配失败（503 + init_failed）→ 说"故障" + 可重试，不得说成"未启用" (1.4s)
+  ok 163 [chromium-1280] › e2e\s-memories.spec.ts:242:1 › AC4：读取失败（500）→ 错误条 + 重试可恢复；不得显示成空态 (1.5s)
+  ok 164 [chromium-1280] › e2e\s-memories.spec.ts:268:1 › 入口：命令面板「管理记忆」也能打开（顶栏按钮之外的第二入口） (1.5s)
+  ok 165 [chromium-1280] › e2e\stream-fallback.spec.ts:48:1 › WS 被拒（零服务帧）→ 自动降级 GET /stream，接流照样建立（不静默卡住） (1.3s)
+  ok 166 [chromium-1280] › e2e\stream-fallback.spec.ts:72:1 › 降级流收到 stream/truncated → 先 GET /events 全量重建，再以真实 max seq 续传 (1.4s)
+  ok 167 [chromium-1280] › e2e\stream-fallback.spec.ts:111:1 › WS 订阅必须带本地游标：不带则服务端只能按总数判定（#208） (1.4s)
+  ok 168 [chromium-1280] › e2e\stream-fallback.spec.ts:126:1 › WS 收到 stream/truncated → 全量重建后带**新**游标回来，且不再触发（无重建死循环） (1.3s)
+  ok 170 [chromium-1280] › e2e\t-contrast.spec.ts:172:3 › [dark] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3） (1.7s)
+  ok 169 [chromium-1280] › e2e\supersede-gap-recovery.spec.ts:76:1 › #213：被丢掉的 message/superseded 帧 → 重连带游标重放 → 取代区间重算、旧轮不回来 (3.0s)
+  ok 171 [chromium-1280] › e2e\t-contrast.spec.ts:182:3 › [dark] composer placeholder 对比度 ≥4.5（R3） (1.6s)
+  ok 172 [chromium-1280] › e2e\t-contrast.spec.ts:215:3 › [dark] .tl-type == 解析后的 --color-muted-foreground（R1 等值断言） (1.6s)
+  ok 173 [chromium-1280] › e2e\t-contrast.spec.ts:231:3 › [dark] U-1 新增 ink 元素（chip / deny kbd / locked-hint）对比度 ≥4.5 (1.6s)
+  ok 174 [chromium-1280] › e2e\t-contrast.spec.ts:244:3 › [dark] 语义色 ink（run-badge-completed / run-pulse / act-name）对比度 ≥4.5 (1.6s)
+  ok 175 [chromium-1280] › e2e\t-contrast.spec.ts:172:3 › [light] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3） (1.6s)
+  ok 176 [chromium-1280] › e2e\t-contrast.spec.ts:182:3 › [light] composer placeholder 对比度 ≥4.5（R3） (1.6s)
+  ok 177 [chromium-1280] › e2e\t-contrast.spec.ts:215:3 › [light] .tl-type == 解析后的 --color-muted-foreground（R1 等值断言） (1.6s)
+  ok 178 [chromium-1280] › e2e\t-contrast.spec.ts:231:3 › [light] U-1 新增 ink 元素（chip / deny kbd / locked-hint）对比度 ≥4.5 (1.6s)
+  ok 179 [chromium-1280] › e2e\t-contrast.spec.ts:244:3 › [light] 语义色 ink（run-badge-completed / run-pulse / act-name）对比度 ≥4.5 (1.6s)
+  ok 180 [chromium-1280] › e2e\touch-rail.spec.ts:64:3 › #181 窄屏触摸：⋯ 菜单不依赖 hover › AC1/AC2：空闲态 ⋯ 即可见，且会话级 / 项目级同款地 tap 得开 (1.5s)
+  ok 181 [chromium-1280] › e2e\touch-rail.spec.ts:119:3 › #181 窄屏触摸：⋯ 菜单不依赖 hover › 槽位让给 ⋯ 后，两个状态信号（在跑 / 目录缺失）仍挂在 ⋯ 上 (1.4s)
+  ok 182 [chromium-1280] › e2e\u-project-task.spec.ts:98:1 › AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限档默认工作区写入、没有任务输入框 (2.0s)
+  ok 183 [chromium-1280] › e2e\u-project-task.spec.ts:141:1 › AC11 launch=false 创建：请求带 cwd、不带 task、URL 带 launch=false，会话落组 + 权限 pill 一致 (2.0s)
+  ok 185 [chromium-1280] › e2e\u-project-task.spec.ts:203:1 › AC12 422 留在确认面：后端 detail 原样可见、不关对话框、无全局横幅、重试即成功 (2.2s)
+  ok 184 [chromium-1280] › e2e\u-project-task.spec.ts:180:1 › AC11 主动改档才发 permission_mode；创建后 pill 与弹窗选择一致 (2.6s)
+  ok 186 [chromium-1280] › e2e\u-project-task.spec.ts:230:1 › AC9 空项目占位区替换为入口按钮（旧的"去未分组找 cwd 匹配会话"文案不再出现） (1.4s)
+  ok 187 [chromium-1280] › e2e\v-dir-browser.spec.ts:60:1 › AC8/AC9/AC10 打开即列根（无当前目录 → 两个按钮禁用）；点选进入、向上、回填输入框 (1.8s)
+  ok 188 [chromium-1280] › e2e\v-dir-browser.spec.ts:101:1 › AC10 手改上方输入框回车 → 浏览器跳到该路径（反方向同步）；浏览器自己的路径条同理 (1.8s)
+  ok 189 [chromium-1280] › e2e\v-dir-browser.spec.ts:133:1 › AC11 「选择此目录」回执 + 用它注册项目（POST 体的 path 就是这个目录） (1.8s)
+  ok 190 [chromium-1280] › e2e\v-dir-browser.spec.ts:165:1 › AC12 截断如实提示：超过上限时列出前 N 条并说明只列了一部分 (1.5s)
+  ok 191 [chromium-1280] › e2e\v-dir-browser.spec.ts:179:1 › AC12 403/404/422 就地显示后端 detail 原文（不翻译成"加载失败"） (1.7s)
+  ok 192 [chromium-1280] › e2e\w-session-delete.spec.ts:80:3 › 窄屏（≤820px）删除入口 › 窄屏：槽位默认是会话点，聚焦后换成 ⋯，且能走完删除确认流程 (2.2s)
+  ok 193 [chromium-1280] › e2e\w-session-delete.spec.ts:114:1 › 删除确认弹窗：初始焦点在「取消」，Enter 即安全取消 (2.1s)
+  ok 195 [chromium-1280] › e2e\w-session-delete.spec.ts:192:1 › 409（fork 父会话 / 在途 run）：原样显示后端 detail，列表保持原样 (3.2s)
+  ok 194 [chromium-1280] › e2e\w-session-delete.spec.ts:130:1 › 确认面说清不可恢复 + 取消零请求 + 确认后行消失/项目计数掉/当前会话被清空 (4.7s)
+  ok 196 [chromium-1280] › e2e\w-session-delete.spec.ts:231:1 › 404（会话本就不在了）：显示后端 detail，并让这条过期行收敛消失 (2.3s)
+  ok 198 [chromium-1280] › e2e\workspace-modes.spec.ts:24:1 › AC1：Split / Preview 与预留位残留已全部删除 (1.2s)
+  ok 197 [chromium-1280] › e2e\w-session-delete.spec.ts:251:1 › 删的不是当前会话：视图与记住的 id 都不被拽走（只收敛被删的那一行） (3.3s)
+  ok 199 [chromium-1280] › e2e\workspace-modes.spec.ts:39:1 › AC2/AC3 + #193：**真实后端默认**（`CAPABILITIES=""`，只有 core）→ 三个面都出现 (1.4s)
+  ok 200 [chromium-1280] › e2e\workspace-modes.spec.ts:60:1 › AC2/AC3：能力目录**真的为空**（老后端/无 core）→ 恰好只剩 Chat，且它被选中 (1.3s)
+  ok 201 [chromium-1280] › e2e\workspace-modes.spec.ts:75:1 › AC4 + 端点真被消费：面跟着**真实默认载荷**出现（`changes` #189 / `terminal` #190） (1.8s)
+  ok 203 [chromium-1280] › e2e\workspace-modes.spec.ts:132:1 › #193：前端取**并集**——插件声明 false 不能关掉 core 已声明的面 (1.5s)
+  ok 202 [chromium-1280] › e2e\workspace-modes.spec.ts:102:1 › AC6：tab 集恰好等于"声明为真 **且有实现**"的面（逐面独立） (3.6s)
+  ok 204 [chromium-1280] › e2e\workspace-modes.spec.ts:150:1 › AC3：能力接口不可用 → 降级为缺省语义，Chat 永不消失 (1.4s)
+  ok 205 [chromium-1280] › e2e\workspace-modes.spec.ts:162:1 › AC5：方向键在只有一个面时原地不动，不把焦点丢出 tab 条 (1.4s)
+  ok 206 [chromium-1280] › e2e\workspace-modes.spec.ts:177:1 › AC7：三区几何不变，Chat 的对话与输入框照常渲染 (1.6s)
+  ok 207 [chromium-1280] › e2e\workspace-modes.spec.ts:198:1 › #223：在「输出」页签上点「新建会话」→ 必须切回 Chat 且 composer 可见可输入 (2.1s)
+  ok 208 [chromium-1280] › e2e\x-output-panel.spec.ts:41:1 › AC1/AC2：面内明示只读；命令按工具调用分组，stdout/stderr 与 exit code 都在 (3.1s)
+  ok 209 [chromium-1280] › e2e\x-output-panel.spec.ts:80:1 › AC5：面内不存在任何暗示可输入的元素（无输入框 / 无"运行"按钮 / 无光标） (2.8s)
+  ok 210 [chromium-1280] › e2e\x-output-panel.spec.ts:104:1 › AC4：能力声明为假 → 整面不渲染（连 tab 都不出现） (2.5s)
+  ok 211 [chromium-1280] › e2e\x-output-panel.spec.ts:121:1 › 空态如实：能力为真但本会话没跑过命令 → 说明原因，不留空白 (2.2s)
+  ok 212 [chromium-1280] › e2e\x-output-panel.spec.ts:141:1 › AC3：长输出就地折叠，点开即得全文（不新开导航面） (2.8s)
+  ok 213 [chromium-1280] › e2e\x-output-panel.spec.ts:170:1 › AC5：运行中的命令也不画光标——"还在跑"用文字说，不用终端提示符的样子说 (2.4s)
+  ok 214 [chromium-1280] › e2e\x-output-panel.spec.ts:196:1 › 运行中但还没有输出 → 说"等待输出…"，不说"没有输出" (3.0s)
+  ok 215 [chromium-1280] › e2e\x-permission-section.spec.ts:63:1 › AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；审批面（模态）常驻可见 (4.2s)
+  ok 217 [chromium-1280] › e2e\x-permission-section.spec.ts:162:1 › AC2/AC4：零审批的会话段不消失——权限档 `—` 并说明原因，两项"没有"都说出来 (2.4s)
+  ok 216 [chromium-1280] › e2e\x-permission-section.spec.ts:132:1 › AC5 反向联动（#510 补 #441 移除的覆盖）：点待审批行 → 内联失效卡脉冲高亮 (3.8s)
+  ok 218 [chromium-1280] › e2e\x-permission-section.spec.ts:183:1 › AC1：决议后 → 移出待审批并留痕到"已裁决"（工具名 + 人话裁决 + 理由） (2.0s)
+  ok 219 [chromium-1280] › e2e\y-inspector-peek.spec.ts:45:1 › AC1：点一行即预览；↑↓ 移动选中，详情实时跟随且清单不消失 (2.1s)
+  ok 220 [chromium-1280] › e2e\y-inspector-peek.spec.ts:79:1 › AC2：Esc 关预览但面板与清单都还在（关闭不卸载） (2.1s)
+  ok 221 [chromium-1280] › e2e\y-inspector-peek.spec.ts:102:1 › AC2：Space 快按=保持打开，按住=松手关闭（Linear peek 语义） (2.5s)
+  ok 223 [chromium-1280] › e2e\y-inspector-peek.spec.ts:162:1 › AC5：整页往返（面板按钮 + 命令面板两个入口） (3.0s)
+  ok 222 [chromium-1280] › e2e\y-inspector-peek.spec.ts:127:1 › AC4：钉住跨会话——未钉住切换会话收起，钉住后保持打开 (3.8s)
+  ok 225 [chromium-1280] › e2e\y-inspector-peek.spec.ts:251:1 › AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调宽） (2.2s)
+  ok 224 [chromium-1280] › e2e\y-inspector-peek.spec.ts:196:1 › AC6：#197 手柄方向=向右变窄/向左变宽，夹取到 320/480 且不压垮中心列；刷新后回到 340（不持久化） (4.6s)
+  ok 227 [chromium-1280] › e2e\y-inspector-peek.spec.ts:361:1 › AC9：窄面板下**子会话**头部仍显示 child id（窄宽退出只对 run 头部生效） (2.3s)
+  ok 226 [chromium-1280] › e2e\y-inspector-peek.spec.ts:277:1 › AC8：头部必须容得下最长档位名（不溢出面板、控制按钮不被顶出去） (5.7s)
+  ok 228 [chromium-1280] › e2e\z-artifact-content.spec.ts:112:1 › AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 #185 端点） (2.2s)
+  ok 229 [chromium-1280] › e2e\z-artifact-content.spec.ts:135:1 › AC2/AC6：外置 diff → 就地展开 → 可见（与清单同一渲染器） (2.8s)
+  ok 230 [chromium-1280] › e2e\z-artifact-content.spec.ts:156:1 › AC4：read_artifact marker（默认部署）也被认出来，且工具名原样回显 (2.3s)
+  ok 231 [chromium-1280] › e2e\z-artifact-content.spec.ts:169:1 › AC2：命令输出被外置时，工具卡也给同一个就地展开（判据是投影的 artifact） (2.6s)
+  ok 232 [chromium-1280] › e2e\z-artifact-content.spec.ts:226:1 › AC1：拿不到时分因说明——503"部署没配存储"与 404"不在本会话"不是同一句话 (3.8s)
+  ok 233 [chromium-1280] › e2e\z-artifact-content.spec.ts:262:1 › #227：同一个 503 的**第二个原因**（自带码）不说成"部署没配存储" (2.3s)
+  ok 234 [chromium-1280] › e2e\z-changes-panel.spec.ts:76:1 › AC1/AC2/AC8：两次改动同一文件只有一行；点文件名 → diff 可见且按时间序列出各次改动 (2.5s)
+  ok 235 [chromium-1280] › e2e\z-changes-panel.spec.ts:124:1 › AC5：内容归档（>2000 字符转 artifact）→ 统计说"不可得"，不给假数字 (2.1s)
+  ok 237 [chromium-1280] › e2e\z-rail-list-error.spec.ts:40:1 › 会话列表加载失败：不说「暂无会话」，改说失败 + 可点重试（F9 主用例） (1.5s)
+  ok 236 [chromium-1280] › e2e\z-changes-panel.spec.ts:142:1 › AC6/AC8：无改动 → 空态文案逐字 (1.7s)
+  ok 238 [chromium-1280] › e2e\z-rail-list-error.spec.ts:54:1 › 后端整体不可达：项目与会话两条错误条**同时**在（不是只显示第一条） (1.6s)
+  ok 239 [chromium-1280] › e2e\z-rail-list-error.spec.ts:68:1 › 点重试：恢复成功后错误条消失、会话行出现（重试不是装饰） (1.7s)
+  ok 240 [chromium-1280] › e2e\z-rail-list-error.spec.ts:84:1 › 真正的空态不受影响：「暂无会话」照旧出现（反证修复没把空态删掉） (1.3s)
+(node:23872) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:25604) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 241 [chromium-1920] › e2e\a-reasoning.spec.ts:7:1 › reasoning 流：思考块聚合、完成后展开可见、最终文本呈现 (2.5s)
+  ok 242 [chromium-1920] › e2e\archived.spec.ts:59:1 › 默认收起归档行 + 徽标是真值 + 缺失计数不算归档 + 开关状态跨刷新保留 (3.4s)
+  ok 243 [chromium-1920] › e2e\archived.spec.ts:100:1 › 归档 / 取消归档可逆、就地进行、不弹确认面 (2.9s)
+  ok 244 [chromium-1920] › e2e\archived.spec.ts:145:1 › 归档写入成功但列表重拉失败：就地说明「已生效但没刷新出来」，不假装成功 (2.4s)
+  ok 245 [chromium-1920] › e2e\archived.spec.ts:169:1 › 空态提示只说真话：只有归档行时给出归档条数；项目在但无会话时不出声 (3.1s)
+  ok 246 [chromium-1920] › e2e\archived.spec.ts:193:1 › 409：原样显示后端 detail、列表保持原样；取消归档永不被 409 挡 (3.6s)
+  ok 247 [chromium-1920] › e2e\archived.spec.ts:221:1 › 归档不影响正在阅读的会话：视野不被拽走（归档 ≠ 删除） (2.8s)
+  ok 248 [chromium-1920] › e2e\b-fork.spec.ts:52:1 › B1 回归锁：第 2 轮分叉传 user/message 的 seq（30），不是 turn 序号（2） (2.9s)
+  ok 249 [chromium-1920] › e2e\b-fork.spec.ts:95:1 › B2：分叉被拒绝时展示后端 detail，不再静默吞错 (2.4s)
+  ok 250 [chromium-1920] › e2e\b-fork.spec.ts:115:1 › B3：第 1 轮按钮提示 child 将是空会话（锚点消息不进 seed） (2.5s)
+  ok 251 [chromium-1920] › e2e\b-fork.spec.ts:125:1 › 注入的纠正消息不渲染分叉入口（不是真人说的话，没有可继承的轮次） (2.6s)
+  ok 253 [chromium-1920] › e2e\budget-entry.spec.ts:139:1 › #426 不设置预算：创建载荷不含 budget 键（默认行为不变） (2.4s)
+  ok 252 [chromium-1920] › e2e\budget-entry.spec.ts:43:1 › #426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 → PausedPanel 恢复抬高同维 (4.3s)
+  ok 254 [chromium-1920] › e2e\c-tool-output.spec.ts:7:1 › 工具输出流：running 行 → stdout/stderr 分块 → result 终态 (2.6s)
+  ok 256 [chromium-1920] › e2e\composer-stream-actions.spec.ts:136:1 › #194：非流式不渲染提示；发送按钮仍在（提示只属于流式态） (2.3s)
+  ok 255 [chromium-1920] › e2e\composer-stream-actions.spec.ts:94:1 › #194：流式中提示与停止按钮同侧，且不压任何档位控件（默认宽度与 Inspector 上限两种布局） (3.4s)
+  ok 257 [chromium-1920] › e2e\composer-stream-actions.spec.ts:149:1 › #194：提示只是提示——真实中断仍由 Esc 与停止按钮触发（各一次 POST /cancel） (2.2s)
+  ok 258 [chromium-1920] › e2e\context-usage.spec.ts:22:1 › T6a：空数据 → 「后端未上报用量数据」，不出现 0% 假话 (2.5s)
+  ok 259 [chromium-1920] › e2e\context-usage.spec.ts:48:1 › T6b：有数据 → 六桶图例 + 分段条 + 阈值标记 + 缓存命中率 (2.8s)
+  ok 260 [chromium-1920] › e2e\context-usage.spec.ts:100:1 › T6c：未采集 → 「未采集（提供商未返回缓存明细）」，不显示 0% (2.6s)
+  ok 262 [chromium-1920] › e2e\context-usage.spec.ts:198:1 › T6d：Esc 关闭看板（与既有 picker 一致） (2.7s)
+  ok 261 [chromium-1920] › e2e\context-usage.spec.ts:154:1 › T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不说"未上报"） (3.5s)
+  ok 263 [chromium-1920] › e2e\continuation.spec.ts:41:1 › 续聊：第二条消息走 /messages 端点而非新建会话 (3.6s)
+[WebServer] 01:33:50 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:33:51 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok 264 [chromium-1920] › e2e\continuation.spec.ts:70:1 › 续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 /messages payload (5.8s)
+  ok 265 [chromium-1920] › e2e\continuation.spec.ts:117:1 › 续聊 queued：在途 run 的 JSON 确认不误报、不报错，amend 照发 (4.4s)
+  ok 266 [chromium-1920] › e2e\continuation.spec.ts:150:1 › 续聊 422：提示「续聊参数无效」而非「未知模型」（handoff §5 P2） (2.8s)
+  ok 267 [chromium-1920] › e2e\continuation.spec.ts:174:1 › 续聊 404：会话已被删除 → 中文说明并指向另选会话，不泄露 HTTP 状态码 (2.7s)
+  ok 268 [chromium-1920] › e2e\control-row.spec.ts:29:1 › Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭 (2.2s)
+  ok 269 [chromium-1920] › e2e\control-row.spec.ts:77:1 › Composer control row：长目录搜索过滤 + 短目录隐藏搜索框 (1.4s)
+  ok 270 [chromium-1920] › e2e\control-row.spec.ts:111:1 › Composer control row：单选档位可以选回「默认（未选）」 (2.4s)
+  ok 271 [chromium-1920] › e2e\control-row.spec.ts:139:1 › Composer control row：选中行的三通道选中态（勾选 + 加重 + 2px 高亮条） (2.2s)
+  ok 272 [chromium-1920] › e2e\control-row.spec.ts:177:1 › Composer control row：短目录键盘导航（不手动聚焦 listbox） (1.9s)
+[WebServer] 01:34:02 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:34:03 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:34:04 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok 273 [chromium-1920] › e2e\control-row.spec.ts:203:1 › Composer control row：提交 payload 字段名对齐后端契约 (4.2s)
+[WebServer] 01:34:05 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+[WebServer] 01:34:05 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok 274 [chromium-1920] › e2e\control-row.spec.ts:251:1 › #201 档位收窄提示：只在真的被收窄时出现，且逐字给出 N/M (4.4s)
+  ok 275 [chromium-1920] › e2e\control-row.spec.ts:307:1 › #201 冻结行：每行 20px 图标槽恒在，未知名/缺键留空槽（不编字形） (3.2s)
+[WebServer] 01:34:07 [vite] (client) [console.error] State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect().
+  ok 276 [chromium-1920] › e2e\control-row.spec.ts:352:1 › #214：行首字形由条目声明的 icon 名决定（未知名 / 缺键留空槽，不拿 id 猜） (2.5s)
+  ok 277 [chromium-1920] › e2e\control-row.spec.ts:384:1 › #214 AC4：三条 Composer picker 的内置条目都真的画出了字形 (3.0s)
+  ok 278 [chromium-1920] › e2e\control-row.spec.ts:442:1 › #283 AC3：会话内权限 pill 可改、读会话真值，旧「不可修改」提示彻底消失 (2.7s)
+  ok 280 [chromium-1920] › e2e\d-recover.spec.ts:71:1 › 恢复成功：提示明确可见，且入口消失后提示不跟着消失 (2.5s)
+  ok 279 [chromium-1920] › e2e\control-row.spec.ts:472:1 › #283 AC1/AC2：平移档直接发请求；升「完全访问」先确认，取消则一个请求都不发 (4.9s)
+  ok 281 [chromium-1920] › e2e\d-recover.spec.ts:91:1 › 后端未能回填时不谎报「已完整」——如实说明仍缺终态、可重试 (2.8s)
+  ok 282 [chromium-1920] › e2e\d-recover.spec.ts:120:1 › 只补上 run 终态（无工具回填）时如实说「补齐 run 终态」，不谎报「无可修复项」 (2.3s)
+  ok 283 [chromium-1920] › e2e\d-recover.spec.ts:147:1 › 恢复遇 409：需人工裁决单独成形，不混同普通失败 (2.5s)
+  ok 284 [chromium-1920] › e2e\d-recover.spec.ts:190:1 › 中断在首个步骤之前：横幅说「首个步骤开始前中断」而不是「第 ? 步」 (2.6s)
+  ok 285 [chromium-1920] › e2e\d-recover.spec.ts:201:1 › 中断在某个步骤：横幅仍报具体步号 (2.1s)
+  ok 287 [chromium-1920] › e2e\f-history.spec.ts:7:1 › 历史重放：会话列表 → 点击行 → projectHistory 重建文本与工具 (1.8s)
+  ok 288 [chromium-1920] › e2e\favicon.spec.ts:14:1 › #224：声明的 icon 必须能取到，且不是渲染为空白 sprite (1.4s)
+  ok 286 [chromium-1920] › e2e\e-reconnect.spec.ts:14:1 › 断连重连：断线条在场 → 重新订阅补齐缺口 → 文本无重复 → 收尾清条 (4.4s)
+  x  289 [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1440px 宽度下不溢出 (6.5s)
+  x  290 [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1280px 宽度下不溢出 (6.4s)
+(node:22052) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:10008) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  x  291 [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1024px 宽度下不溢出 (6.5s)
+  x  292 [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 820px 宽度下不溢出 (6.4s)
+(node:2032) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:16444) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 294 [chromium-1920] › e2e\g-visual-qa.spec.ts:54:1 › Composer control row 在浅色模式下可见 (1.2s)
+  ok 295 [chromium-1920] › e2e\g-visual-qa.spec.ts:82:1 › Inspector 时间线 run 分组头 + 头标对齐（UI-03） (1.5s)
+  ok 296 [chromium-1920] › e2e\h-density.spec.ts:7:1 › 四档切换：data-density 即时生效，刷新后持久 (2.0s)
+  x  293 [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 768px 宽度下不溢出 (6.5s)
+(node:29556) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 297 [chromium-1920] › e2e\i-keyboard.spec.ts:7:1 › palette 键盘唤起与关闭；Composer 键盘提交 (2.2s)
+  ok 298 [chromium-1920] › e2e\i-keyboard.spec.ts:79:1 › UI-06：palette 密度条目 CJK 间距 + 主题 hint 无箭头（真实渲染断言） (2.0s)
+  ok 299 [chromium-1920] › e2e\i-keyboard.spec.ts:46:1 › palette 的 Copy Run ID 复制 run id，而不是 session id (2.4s)
+  ok 300 [chromium-1920] › e2e\j-scroll.spec.ts:41:1 › 滚动容器关闭浏览器滚动锚定（虚拟化动态测高会与锚定打架） (1.6s)
+  ok 301 [chromium-1920] › e2e\j-scroll.spec.ts:53:1 › 非流式态不出现「↓ 最新」浮标（没有「最新」可跳，浮标不得残留） (1.6s)
+  ok 302 [chromium-1920] › e2e\j-scroll.spec.ts:77:1 › 流式中上滚（真实滚轮）：浮标出现、点浮标回底并恢复跟随 (3.0s)
+  ok 303 [chromium-1920] › e2e\k-refresh-restore.spec.ts:33:1 › BUG-005：刷新后零点击恢复同一个会话与全部内容 (2.9s)
+  ok 304 [chromium-1920] › e2e\k-refresh-restore.spec.ts:55:1 › BUG-005 写入路径：真实点击会话行 → 写键 → 不带种子刷新仍恢复 (2.9s)
+  ok 305 [chromium-1920] › e2e\k-refresh-restore.spec.ts:88:1 › 子会话 id 与普通会话同一持久化/恢复路径：非首行真实点击 → 写键 → 刷新恢复 (2.8s)
+  ok 306 [chromium-1920] › e2e\k-refresh-restore.spec.ts:159:1 › BUG-006：刷新时 run 在途 → 重新接回流，刷新后的事件继续到达 (2.8s)
+  ok 307 [chromium-1920] › e2e\k-refresh-restore.spec.ts:195:1 › BUG-006 兜底：接流零帧空流（run 已在刷新窗口内收口）→ 静默停在历史，且不再重试 (2.2s)
+  ok 308 [chromium-1920] › e2e\k-refresh-restore.spec.ts:220:1 › BUG-005 自愈：记住的会话已不存在（404）→ 清键 + 静默回空态，不弹错误 (1.3s)
+  ok 309 [chromium-1920] › e2e\l-auth-banner.spec.ts:20:1 › 401 → 引导横幅出现；可点「关闭提示」关掉；再有 401 会重新出现 (2.0s)
+  ok 310 [chromium-1920] › e2e\m-stream-affordances.spec.ts:31:1 › 工具输出尾窗：自动换行可切换；上滚出「↓ 最新」，点击回底并消失 (3.5s)
+  ok 311 [chromium-1920] › e2e\m-stream-affordances.spec.ts:95:1 › 推理块：上滚出「↓ 最新」，点击回底并消失 (2.5s)
+  ok 312 [chromium-1920] › e2e\memory-management.spec.ts:47:1 › AC8: browser keeps loading visible until the memory list request completes (1.9s)
+  ok 313 [chromium-1920] › e2e\memory-management.spec.ts:77:1 › AC8: browser shows an empty state only after a successful empty response (2.0s)
+  ok 314 [chromium-1920] › e2e\memory-management.spec.ts:88:1 › AC8: browser reports a disabled memory capability as degraded, not empty (1.8s)
+  ok 315 [chromium-1920] › e2e\memory-management.spec.ts:99:1 › AC1: search and all list filters are sent to the API and render its result (2.1s)
+  ok 316 [chromium-1920] › e2e\memory-management.spec.ts:128:1 › AC2: deleted tombstones show only authorized metadata and content-free history (2.1s)
+  ok 317 [chromium-1920] › e2e\memory-management.spec.ts:182:1 › project memory operations carry its authorized context and bulk preview covers global plus project (2.9s)
+  ok 318 [chromium-1920] › e2e\memory-management.spec.ts:229:1 › deleting a project memory preserves its authorized context (2.1s)
+  ok 319 [chromium-1920] › e2e\memory-management.spec.ts:252:1 › AC3 and AC8: editing validates fields, creates a user-edit version, and exposes history (2.6s)
+  ok 320 [chromium-1920] › e2e\memory-management.spec.ts:273:1 › AC8: a stale version conflict refreshes the row and leaves a dismissible explanation (2.1s)
+  ok 321 [chromium-1920] › e2e\memory-management.spec.ts:299:3 › AC8: list HTTP 403 stays visible and can recover after retry (1.8s)
+  ok 322 [chromium-1920] › e2e\memory-management.spec.ts:299:3 › AC8: list HTTP 404 stays visible and can recover after retry (1.8s)
+  ok 323 [chromium-1920] › e2e\memory-management.spec.ts:330:1 › AC8: retry after a failed next page fetches that same offset (2.7s)
+  ok 325 [chromium-1920] › e2e\memory-management.spec.ts:423:1 › AC4: bulk delete previews an exact server count and sends the confirmation token (2.0s)
+  ok 326 [chromium-1920] › e2e\memory-management.spec.ts:441:1 › AC5: a failed setting update leaves the last server-confirmed value checked (1.7s)
+  ok 327 [chromium-1920] › e2e\memory-management.spec.ts:458:1 › AC6 and AC7: update content is fetched only on expansion and recall shows redacted factors (2.0s)
+  ok 328 [chromium-1920] › e2e\memory-management.spec.ts:503:1 › AC9: keyboard-only dialog navigation shows focus and Escape restores the opener (2.5s)
+  ok 329 [chromium-1920] › e2e\model-picker.spec.ts:31:1 › #199：两级结构 + 鼠标悬停展开 + 选中回写 trigger (2.7s)
+  ok 324 [chromium-1920] › e2e\memory-management.spec.ts:364:1 › AC8: pagination stops at the backend offset ceiling with an explicit boundary (14.2s)
+  ok 331 [chromium-1920] › e2e\model-picker.spec.ts:110:1 › #199：Esc 不写回未确认的选择（打开 → 移动 → Esc → trigger 不变） (2.6s)
+  ok 330 [chromium-1920] › e2e\model-picker.spec.ts:65:1 › #199：键盘 `→` 进二级、Esc 逐级退出；选中项带 aria-checked (3.5s)
+  ok 332 [chromium-1920] › e2e\model-picker.spec.ts:132:1 › #199：长目录不再需要搜索框——provider 分组就是导航 (1.7s)
+  ok 333 [chromium-1920] › e2e\model-picker.spec.ts:153:1 › #199：不可用 provider 置灰但仍可展开 + 行尾原因 + 能力徽标 (2.7s)
+  ok 334 [chromium-1920] › e2e\multiturn-queue.spec.ts:43:1 › T11：编辑最新一条用户消息 → supersedes_seq 进 payload → 旧轮整段消失、新问句可见 (2.3s)
+  ok 335 [chromium-1920] › e2e\multiturn-queue.spec.ts:105:1 › T11b：非最新消息的编辑按钮置灰（title 说明），不可点 (2.2s)
+  ok 336 [chromium-1920] › e2e\multiturn-queue.spec.ts:140:1 › T12：排队项显示徽标与摘要；取消后移除；空队列不渲染 (2.6s)
+  ok 337 [chromium-1920] › e2e\multiturn-queue.spec.ts:169:1 › T12b：首屏补齐（GET /queue）→ 队列条渲染排队/引导徽标与摘要 (2.3s)
+  ok 338 [chromium-1920] › e2e\multiturn-queue.spec.ts:204:1 › T12c：「立即」→ POST /messages 带 mode=steer 且带 queue_id（不重复投递） (2.4s)
+  ok 339 [chromium-1920] › e2e\multiturn-queue.spec.ts:244:1 › T12f：排队项 404 不得被说成「会话已不存在」（404 不唯一） (2.9s)
+  ok 340 [chromium-1920] › e2e\multiturn-queue.spec.ts:286:1 › T12d：「编辑」就地改内容 → POST /messages 带 queue_id + 新内容 (2.9s)
+  ok 341 [chromium-1920] › e2e\multiturn-queue.spec.ts:339:1 › T12e：在途 run 提交 → POST /messages(mode=queue)，且不产生第二个会话 (2.2s)
+  ok 342 [chromium-1920] › e2e\multiturn-queue.spec.ts:402:1 › T12g：在途 run + Ctrl+Enter → POST /messages(mode=steer)（未被降级成 queue） (2.1s)
+  ok 343 [chromium-1920] › e2e\multiturn-queue.spec.ts:446:1 › T12h：idle 会话 Ctrl+Enter 被后端 409 拒 → 自动改投 queue（不报「人工裁决」错，不丢消息） (2.2s)
+  ok 344 [chromium-1920] › e2e\multiturn-queue.spec.ts:492:1 › T12i：队列条「立即」在 idle 上被 409 拒 → 重投去掉 queue_id（否则撞 404，消息真丢） (2.2s)
+  ok 345 [chromium-1920] › e2e\multiturn-queue.spec.ts:544:1 › T12j：steer 撞上**无关**的 409（人工裁决）→ 原样显示后端 detail，不被"是否 steer 409"的判断吃掉 body (2.1s)
+  ok 346 [chromium-1920] › e2e\multiturn-queue.spec.ts:587:1 › T12k：迟到的 409（steer 打空）→ 与窗内一致改投 queue，消息不丢 (4.2s)
+  ok 347 [chromium-1920] › e2e\multiturn-queue.spec.ts:622:1 › T12l：迟到的 409（人工裁决）→ 原样显示后端 detail（不被吞成无反馈） (4.0s)
+  ok 348 [chromium-1920] › e2e\multiturn-queue.spec.ts:643:1 › T12m：迟到的 404 → 说出「会话已不存在」（不静默丢消息） (3.8s)
+  ok 349 [chromium-1920] › e2e\multiturn-queue.spec.ts:673:1 › T12n：迟到的 422 → 说出「续聊参数无效」（与窗内同一条文案） (4.0s)
+  ok 351 [chromium-1920] › e2e\multiturn-queue.spec.ts:757:1 › T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐流、不重订阅） (6.1s)
+  ok 350 [chromium-1920] › e2e\multiturn-queue.spec.ts:715:1 › T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无错误条 (8.2s)
+  ok 352 [chromium-1920] › e2e\multiturn-queue.spec.ts:801:1 › T12q：纠正后回退重投仍失败（409 人工裁决）→ 必须把原因说出来，不许静默 (3.7s)
+  ok 353 [chromium-1920] › e2e\multiturn-queue.spec.ts:856:1 › T12r：在途 run 排队一条消息后，live 流必须继续收到并应用后续帧 (2.3s)
+  ok 355 [chromium-1920] › e2e\n-approval-card.spec.ts:100:1 › 多行 content → 原文块真实换行，不再出现字面 \n (2.2s)
+  ok 354 [chromium-1920] › e2e\n-approval-card.spec.ts:81:1 › 审批请求 → 卡片渲染工具名与参数预览 (2.5s)
+  ok 356 [chromium-1920] › e2e\n-approval-card.spec.ts:119:1 › 焦点落卡 + Ctrl+Enter → POST decision=approve_once (2.5s)
+  ok 357 [chromium-1920] › e2e\n-approval-card.spec.ts:137:1 › Ctrl+Backspace → POST decision=deny；决后快捷键失效 (2.8s)
+  ok 358 [chromium-1920] › e2e\n-approval-card.spec.ts:157:1 › 双卡并存 → Ctrl+Enter 只 POST 第一张（不批量批准） (2.7s)
+  ok 359 [chromium-1920] › e2e\n-approval-card.spec.ts:191:1 › run 终结仍 pending（孤儿审批）→ 卡片只读失效 + composer 不再锁死 (2.5s)
+  ok 360 [chromium-1920] › e2e\n-approval-card.spec.ts:226:1 › permission/resolved 后卡片消失 + composer 解锁 (2.0s)
+  ok 361 [chromium-1920] › e2e\n-approval-card.spec.ts:243:1 › 点「批准」→ 决策已提交 + 按钮消失 + POST decision=approve_once (2.8s)
+  ok 362 [chromium-1920] › e2e\n-approval-card.spec.ts:258:1 › 点「拒绝」→ 决策已提交 + 按钮消失 + POST decision=deny (2.5s)
+  ok 363 [chromium-1920] › e2e\n-approval-card.spec.ts:273:1 › permission/resolved 把卡片从待决队列移除（不渲染） (2.0s)
+  ok 365 [chromium-1920] › e2e\n-approval-card.spec.ts:336:1 › POST 409 → 幂等成功，卡片翻「决策已提交」 (2.8s)
+  ok 364 [chromium-1920] › e2e\n-approval-card.spec.ts:294:1 › POST 500 → 卡片保持「需要审批」+ 按钮仍可用 + 出现错误提示 (5.8s)
+  ok 366 [chromium-1920] › e2e\n-approval-card.spec.ts:374:1 › POST 404 → 只读失效态（404 不是幂等已决，也不是可重试错误） (2.9s)
+  ok 367 [chromium-1920] › e2e\o-wait-hint.spec.ts:45:1 › 停顿提示锚的是「空闲」而非「流龄」：阈值前不出现；出现后秒数必须小于流龄 (2.1s)
+  ok 368 [chromium-1920] › e2e\o-wait-hint.spec.ts:91:1 › 刷新后不残留：提示不在，会话内容仍在（本地状态不进持久化） (3.2s)
+  ok 369 [chromium-1920] › e2e\o-wait-hint.spec.ts:121:1 › run 收口后不出现等待提示（终态不是停顿） (2.3s)
+  ok 370 [chromium-1920] › e2e\p-earlier-window.spec.ts:32:1 › 时间线「加载更早 N 条」：真实点击展开折叠的前段，折叠条随之消失 (2.4s)
+  ok 371 [chromium-1920] › e2e\picker-search-visibility.spec.ts:48:1 › #199：模型选择器没有搜索框（一级与二级都没有） (2.6s)
+  ok 372 [chromium-1920] › e2e\picker-search-visibility.spec.ts:77:1 › 短目录：OptionPicker（权限模式）搜索框不可见 (1.6s)
+  ok 373 [chromium-1920] › e2e\picker-search-visibility.spec.ts:95:1 › 长目录：OptionPicker（权限模式）搜索框可见且可过滤 (1.6s)
+  ok 374 [chromium-1920] › e2e\q-model-dedupe.spec.ts:96:3 › 模型切换去重（BUG-011） › 在途重复点击：延迟响应窗口内只发一个 POST /model (3.4s)
+  ok 375 [chromium-1920] › e2e\q-model-dedupe.spec.ts:119:3 › 模型切换去重（BUG-011） › 关闭态下的第二次点击：仍是 1 个请求；换目标照常发 (5.3s)
+  ok 376 [chromium-1920] › e2e\queue-flush.spec.ts:54:1 › launched：flush 响应被攒包时，回答经 WS 提前到达（不再卡到 run 结束） (3.7s)
+  ok 377 [chromium-1920] › e2e\queue-flush.spec.ts:87:1 › 游标：快照重放的旧终态不得把新 run 判成「已收口」——断流后必须重连 (4.0s)
+  ok 378 [chromium-1920] › e2e\queue-flush.spec.ts:128:1 › idle：空队列 → 静默（不接流、不报错、界面不动） (3.7s)
+  ok 379 [chromium-1920] › e2e\queue-flush.spec.ts:154:1 › 409：在途 run 未收口 → 重试到回执；三次仍 409 → 如实报错（不假装已投递） (4.5s)
+  ok 380 [chromium-1920] › e2e\queue-flush.spec.ts:180:1 › 窗外才落定的 409：不得被吞成无反馈（判别是推断，推断错了要如实说） (4.1s)
+  ok 382 [chromium-1920] › e2e\queue-flush.spec.ts:241:1 › 404：会话已不存在 → 明确报错，不静默吞掉 (2.2s)
+  ok 383 [chromium-1920] › e2e\r-project-groups.spec.ts:69:1 › AC1/AC2：项目 → 会话层级按账本手工序渲染；未分组区可点开、可继续对话 (2.2s)
+  ok 384 [chromium-1920] › e2e\r-project-groups.spec.ts:112:1 › AC3：新建项目输入绝对路径；路径不存在 → 就地给出清晰错误 (2.3s)
+  ok 381 [chromium-1920] › e2e\queue-flush.spec.ts:215:1 › 窗外才落定的 idle：静默收流（不弹假「连接中断」） (8.2s)
+  ok 386 [chromium-1920] › e2e\r-project-groups.spec.ts:207:1 › 加入项目被后端拒绝时（409 会话 cwd 与项目路径不一致）就地显示后端原因，归属不变 (2.4s)
+  ok 385 [chromium-1920] › e2e\r-project-groups.spec.ts:141:1 › AC4：重命名项目 / 加入项目 / 移出项目 / 项目内重排 (5.3s)
+  ok 387 [chromium-1920] › e2e\r-project-groups.spec.ts:246:1 › AC5：删除项目明示"只解除分组"，删除后会话仍在且落到未分组 (2.8s)
+  ok 388 [chromium-1920] › e2e\r-project-groups.spec.ts:279:1 › 项目列表端点失败时不隐藏会话：全部落到未分组 + 一条可重试的错误条 (1.8s)
+  ok 389 [chromium-1920] › e2e\r-project-groups.spec.ts:308:1 › 会话行不因进入项目而看到假的"已分组"：行 tooltip 区分未分组 (1.7s)
+  ok 391 [chromium-1920] › e2e\r-project-groups.spec.ts:348:1 › UI-05：有会话或项目时回退 icon-only 按钮（aria-label 定位） (1.5s)
+  ok 390 [chromium-1920] › e2e\r-project-groups.spec.ts:319:1 › UI-05：真空态 → Rail 头部是文字按钮 + 空态文案带行动链接（不再指路到不存在的实体） (2.5s)
+  ok 392 [chromium-1920] › e2e\r-project-groups.spec.ts:369:3 › 窄屏 ≤820px：项目级操作（#179） › 项目头不再整块收起：⋯ 菜单可达且菜单项与宽屏一致 (1.9s)
+  ok 393 [chromium-1920] › e2e\r-project-groups.spec.ts:395:3 › 窄屏 ≤820px：项目级操作（#179） › 窄屏重命名真的落到后端（PATCH 后重取仍在，不是本地改名） (3.2s)
+  ok 395 [chromium-1920] › e2e\s-memories.spec.ts:45:1 › AC1：列表按后端分页渲染 content / scope / 创建时间；"加载更多"真的翻页 (2.0s)
+  ok 394 [chromium-1920] › e2e\race-guard.spec.ts:27:1 › 竞态守卫：旧请求迟到失败不污染新会话 (4.7s)
+  ok 396 [chromium-1920] › e2e\s-memories.spec.ts:86:1 › AC1：长正文可展开读全文（删除决定前必须读得到完整内容） (1.6s)
+  ok 397 [chromium-1920] › e2e\s-memories.spec.ts:99:1 › AC2 + AC3：删除必须二次确认且写明"删除不可恢复"；确认后后端状态真的变了 (2.8s)
+  ok 398 [chromium-1920] › e2e\s-memories.spec.ts:128:1 › AC3：删除失败 → UI 回滚（该行仍在）+ 显示后端拒绝原因 (2.4s)
+  ok 400 [chromium-1920] › e2e\s-memories.spec.ts:176:1 › AC4：记忆未装配（503）→ 如实说"记忆未启用"，不伪造空列表、不给无意义的重试 (1.7s)
+  ok 399 [chromium-1920] › e2e\s-memories.spec.ts:153:1 › AC3：这条在别处已被删（DELETE 404）→ 行随之消失，但失败必须报出来（不能被界面吞掉） (2.0s)
+  ok 401 [chromium-1920] › e2e\s-memories.spec.ts:195:1 › #225：记忆装配失败（503 + init_failed）→ 说"故障" + 可重试，不得说成"未启用" (1.8s)
+  ok 402 [chromium-1920] › e2e\s-memories.spec.ts:234:1 › AC4：真的没有记忆 → "还没有记忆"（与降级/读取失败都区分开） (1.6s)
+  ok 403 [chromium-1920] › e2e\s-memories.spec.ts:242:1 › AC4：读取失败（500）→ 错误条 + 重试可恢复；不得显示成空态 (1.8s)
+  ok 404 [chromium-1920] › e2e\s-memories.spec.ts:268:1 › 入口：命令面板「管理记忆」也能打开（顶栏按钮之外的第二入口） (1.9s)
+  ok 405 [chromium-1920] › e2e\stream-fallback.spec.ts:48:1 › WS 被拒（零服务帧）→ 自动降级 GET /stream，接流照样建立（不静默卡住） (1.7s)
+  ok 406 [chromium-1920] › e2e\stream-fallback.spec.ts:72:1 › 降级流收到 stream/truncated → 先 GET /events 全量重建，再以真实 max seq 续传 (1.8s)
+  ok 407 [chromium-1920] › e2e\stream-fallback.spec.ts:111:1 › WS 订阅必须带本地游标：不带则服务端只能按总数判定（#208） (1.7s)
+  ok 408 [chromium-1920] › e2e\stream-fallback.spec.ts:126:1 › WS 收到 stream/truncated → 全量重建后带**新**游标回来，且不再触发（无重建死循环） (1.6s)
+  ok 410 [chromium-1920] › e2e\t-contrast.spec.ts:172:3 › [dark] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3） (1.8s)
+  ok 409 [chromium-1920] › e2e\supersede-gap-recovery.spec.ts:76:1 › #213：被丢掉的 message/superseded 帧 → 重连带游标重放 → 取代区间重算、旧轮不回来 (3.0s)
+  ok 411 [chromium-1920] › e2e\t-contrast.spec.ts:182:3 › [dark] composer placeholder 对比度 ≥4.5（R3） (1.7s)
+  ok 412 [chromium-1920] › e2e\t-contrast.spec.ts:215:3 › [dark] .tl-type == 解析后的 --color-muted-foreground（R1 等值断言） (1.9s)
+  ok 413 [chromium-1920] › e2e\t-contrast.spec.ts:231:3 › [dark] U-1 新增 ink 元素（chip / deny kbd / locked-hint）对比度 ≥4.5 (2.1s)
+  ok 414 [chromium-1920] › e2e\t-contrast.spec.ts:244:3 › [dark] 语义色 ink（run-badge-completed / run-pulse / act-name）对比度 ≥4.5 (2.0s)
+  ok 415 [chromium-1920] › e2e\t-contrast.spec.ts:172:3 › [light] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3） (1.9s)
+  ok 416 [chromium-1920] › e2e\t-contrast.spec.ts:182:3 › [light] composer placeholder 对比度 ≥4.5（R3） (1.9s)
+  ok 417 [chromium-1920] › e2e\t-contrast.spec.ts:215:3 › [light] .tl-type == 解析后的 --color-muted-foreground（R1 等值断言） (2.1s)
+  ok 418 [chromium-1920] › e2e\t-contrast.spec.ts:231:3 › [light] U-1 新增 ink 元素（chip / deny kbd / locked-hint）对比度 ≥4.5 (2.1s)
+  ok 419 [chromium-1920] › e2e\t-contrast.spec.ts:244:3 › [light] 语义色 ink（run-badge-completed / run-pulse / act-name）对比度 ≥4.5 (2.2s)
+  ok 420 [chromium-1920] › e2e\touch-rail.spec.ts:64:3 › #181 窄屏触摸：⋯ 菜单不依赖 hover › AC1/AC2：空闲态 ⋯ 即可见，且会话级 / 项目级同款地 tap 得开 (2.2s)
+  ok 421 [chromium-1920] › e2e\touch-rail.spec.ts:119:3 › #181 窄屏触摸：⋯ 菜单不依赖 hover › 槽位让给 ⋯ 后，两个状态信号（在跑 / 目录缺失）仍挂在 ⋯ 上 (1.9s)
+  ok 422 [chromium-1920] › e2e\u-project-task.spec.ts:98:1 › AC9/AC10 菜单第一项是入口；确认面逐字明示路径、权限档默认工作区写入、没有任务输入框 (2.8s)
+  ok 423 [chromium-1920] › e2e\u-project-task.spec.ts:141:1 › AC11 launch=false 创建：请求带 cwd、不带 task、URL 带 launch=false，会话落组 + 权限 pill 一致 (2.8s)
+  ok 424 [chromium-1920] › e2e\u-project-task.spec.ts:180:1 › AC11 主动改档才发 permission_mode；创建后 pill 与弹窗选择一致 (3.9s)
+  ok 425 [chromium-1920] › e2e\u-project-task.spec.ts:203:1 › AC12 422 留在确认面：后端 detail 原样可见、不关对话框、无全局横幅、重试即成功 (3.3s)
+  ok 426 [chromium-1920] › e2e\u-project-task.spec.ts:230:1 › AC9 空项目占位区替换为入口按钮（旧的"去未分组找 cwd 匹配会话"文案不再出现） (1.8s)
+  ok 427 [chromium-1920] › e2e\v-dir-browser.spec.ts:60:1 › AC8/AC9/AC10 打开即列根（无当前目录 → 两个按钮禁用）；点选进入、向上、回填输入框 (2.3s)
+  ok 428 [chromium-1920] › e2e\v-dir-browser.spec.ts:101:1 › AC10 手改上方输入框回车 → 浏览器跳到该路径（反方向同步）；浏览器自己的路径条同理 (2.2s)
+  ok 429 [chromium-1920] › e2e\v-dir-browser.spec.ts:133:1 › AC11 「选择此目录」回执 + 用它注册项目（POST 体的 path 就是这个目录） (2.3s)
+  ok 430 [chromium-1920] › e2e\v-dir-browser.spec.ts:165:1 › AC12 截断如实提示：超过上限时列出前 N 条并说明只列了一部分 (1.8s)
+  ok 431 [chromium-1920] › e2e\v-dir-browser.spec.ts:179:1 › AC12 403/404/422 就地显示后端 detail 原文（不翻译成"加载失败"） (2.2s)
+  ok 432 [chromium-1920] › e2e\w-session-delete.spec.ts:80:3 › 窄屏（≤820px）删除入口 › 窄屏：槽位默认是会话点，聚焦后换成 ⋯，且能走完删除确认流程 (2.6s)
+  ok 433 [chromium-1920] › e2e\w-session-delete.spec.ts:114:1 › 删除确认弹窗：初始焦点在「取消」，Enter 即安全取消 (1.8s)
+  ok 435 [chromium-1920] › e2e\w-session-delete.spec.ts:192:1 › 409（fork 父会话 / 在途 run）：原样显示后端 detail，列表保持原样 (3.3s)
+  ok 434 [chromium-1920] › e2e\w-session-delete.spec.ts:130:1 › 确认面说清不可恢复 + 取消零请求 + 确认后行消失/项目计数掉/当前会话被清空 (4.8s)
+  ok 436 [chromium-1920] › e2e\w-session-delete.spec.ts:231:1 › 404（会话本就不在了）：显示后端 detail，并让这条过期行收敛消失 (2.6s)
+  ok 438 [chromium-1920] › e2e\workspace-modes.spec.ts:24:1 › AC1：Split / Preview 与预留位残留已全部删除 (1.3s)
+  ok 437 [chromium-1920] › e2e\w-session-delete.spec.ts:251:1 › 删的不是当前会话：视图与记住的 id 都不被拽走（只收敛被删的那一行） (3.7s)
+  ok 439 [chromium-1920] › e2e\workspace-modes.spec.ts:39:1 › AC2/AC3 + #193：**真实后端默认**（`CAPABILITIES=""`，只有 core）→ 三个面都出现 (1.4s)
+  ok 440 [chromium-1920] › e2e\workspace-modes.spec.ts:60:1 › AC2/AC3：能力目录**真的为空**（老后端/无 core）→ 恰好只剩 Chat，且它被选中 (1.4s)
+  ok 441 [chromium-1920] › e2e\workspace-modes.spec.ts:75:1 › AC4 + 端点真被消费：面跟着**真实默认载荷**出现（`changes` #189 / `terminal` #190） (1.8s)
+  ok 443 [chromium-1920] › e2e\workspace-modes.spec.ts:132:1 › #193：前端取**并集**——插件声明 false 不能关掉 core 已声明的面 (1.3s)
+  ok 442 [chromium-1920] › e2e\workspace-modes.spec.ts:102:1 › AC6：tab 集恰好等于"声明为真 **且有实现**"的面（逐面独立） (2.9s)
+  ok 444 [chromium-1920] › e2e\workspace-modes.spec.ts:150:1 › AC3：能力接口不可用 → 降级为缺省语义，Chat 永不消失 (1.4s)
+  ok 445 [chromium-1920] › e2e\workspace-modes.spec.ts:162:1 › AC5：方向键在只有一个面时原地不动，不把焦点丢出 tab 条 (1.4s)
+  ok 446 [chromium-1920] › e2e\workspace-modes.spec.ts:177:1 › AC7：三区几何不变，Chat 的对话与输入框照常渲染 (1.4s)
+  ok 447 [chromium-1920] › e2e\workspace-modes.spec.ts:198:1 › #223：在「输出」页签上点「新建会话」→ 必须切回 Chat 且 composer 可见可输入 (1.6s)
+  ok 448 [chromium-1920] › e2e\x-output-panel.spec.ts:41:1 › AC1/AC2：面内明示只读；命令按工具调用分组，stdout/stderr 与 exit code 都在 (2.5s)
+  ok 449 [chromium-1920] › e2e\x-output-panel.spec.ts:80:1 › AC5：面内不存在任何暗示可输入的元素（无输入框 / 无"运行"按钮 / 无光标） (2.2s)
+  ok 450 [chromium-1920] › e2e\x-output-panel.spec.ts:104:1 › AC4：能力声明为假 → 整面不渲染（连 tab 都不出现） (2.1s)
+  ok 451 [chromium-1920] › e2e\x-output-panel.spec.ts:121:1 › 空态如实：能力为真但本会话没跑过命令 → 说明原因，不留空白 (2.1s)
+  ok 452 [chromium-1920] › e2e\x-output-panel.spec.ts:141:1 › AC3：长输出就地折叠，点开即得全文（不新开导航面） (2.3s)
+  ok 453 [chromium-1920] › e2e\x-output-panel.spec.ts:170:1 › AC5：运行中的命令也不画光标——"还在跑"用文字说，不用终端提示符的样子说 (1.8s)
+  ok 454 [chromium-1920] › e2e\x-output-panel.spec.ts:196:1 › 运行中但还没有输出 → 说"等待输出…"，不说"没有输出" (2.1s)
+  ok 455 [chromium-1920] › e2e\x-permission-section.spec.ts:63:1 › AC1/AC5：有待审批 → 段内出现权限档 + 待审批行；审批面（模态）常驻可见 (2.3s)
+  ok 457 [chromium-1920] › e2e\x-permission-section.spec.ts:162:1 › AC2/AC4：零审批的会话段不消失——权限档 `—` 并说明原因，两项"没有"都说出来 (2.2s)
+  ok 456 [chromium-1920] › e2e\x-permission-section.spec.ts:132:1 › AC5 反向联动（#510 补 #441 移除的覆盖）：点待审批行 → 内联失效卡脉冲高亮 (3.9s)
+  ok 458 [chromium-1920] › e2e\x-permission-section.spec.ts:183:1 › AC1：决议后 → 移出待审批并留痕到"已裁决"（工具名 + 人话裁决 + 理由） (1.7s)
+  ok 459 [chromium-1920] › e2e\y-inspector-peek.spec.ts:45:1 › AC1：点一行即预览；↑↓ 移动选中，详情实时跟随且清单不消失 (2.3s)
+  ok 460 [chromium-1920] › e2e\y-inspector-peek.spec.ts:79:1 › AC2：Esc 关预览但面板与清单都还在（关闭不卸载） (2.1s)
+  ok 461 [chromium-1920] › e2e\y-inspector-peek.spec.ts:102:1 › AC2：Space 快按=保持打开，按住=松手关闭（Linear peek 语义） (2.6s)
+  ok 462 [chromium-1920] › e2e\y-inspector-peek.spec.ts:127:1 › AC4：钉住跨会话——未钉住切换会话收起，钉住后保持打开 (4.2s)
+  ok 463 [chromium-1920] › e2e\y-inspector-peek.spec.ts:162:1 › AC5：整页往返（面板按钮 + 命令面板两个入口） (3.7s)
+  ok 465 [chromium-1920] › e2e\y-inspector-peek.spec.ts:251:1 › AC7：面板控制都键盘可达（Tab 到拖宽手柄可用方向键调宽） (2.1s)
+  ok 464 [chromium-1920] › e2e\y-inspector-peek.spec.ts:196:1 › AC6：#197 手柄方向=向右变窄/向左变宽，夹取到 320/480 且不压垮中心列；刷新后回到 340（不持久化） (4.6s)
+  ok 467 [chromium-1920] › e2e\y-inspector-peek.spec.ts:361:1 › AC9：窄面板下**子会话**头部仍显示 child id（窄宽退出只对 run 头部生效） (2.5s)
+  ok 466 [chromium-1920] › e2e\y-inspector-peek.spec.ts:277:1 › AC8：头部必须容得下最长档位名（不溢出面板、控制按钮不被顶出去） (4.4s)
+  ok 468 [chromium-1920] › e2e\z-artifact-content.spec.ts:112:1 › AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 #185 端点） (2.5s)
+  ok 469 [chromium-1920] › e2e\z-artifact-content.spec.ts:135:1 › AC2/AC6：外置 diff → 就地展开 → 可见（与清单同一渲染器） (2.9s)
+  ok 470 [chromium-1920] › e2e\z-artifact-content.spec.ts:156:1 › AC4：read_artifact marker（默认部署）也被认出来，且工具名原样回显 (2.6s)
+  ok 471 [chromium-1920] › e2e\z-artifact-content.spec.ts:169:1 › AC2：命令输出被外置时，工具卡也给同一个就地展开（判据是投影的 artifact） (2.7s)
+  ok 472 [chromium-1920] › e2e\z-artifact-content.spec.ts:226:1 › AC1：拿不到时分因说明——503"部署没配存储"与 404"不在本会话"不是同一句话 (3.8s)
+  ok 473 [chromium-1920] › e2e\z-artifact-content.spec.ts:262:1 › #227：同一个 503 的**第二个原因**（自带码）不说成"部署没配存储" (2.3s)
+  ok 475 [chromium-1920] › e2e\z-changes-panel.spec.ts:124:1 › AC5：内容归档（>2000 字符转 artifact）→ 统计说"不可得"，不给假数字 (2.1s)
+  ok 474 [chromium-1920] › e2e\z-changes-panel.spec.ts:76:1 › AC1/AC2/AC8：两次改动同一文件只有一行；点文件名 → diff 可见且按时间序列出各次改动 (2.6s)
+  ok 477 [chromium-1920] › e2e\z-rail-list-error.spec.ts:40:1 › 会话列表加载失败：不说「暂无会话」，改说失败 + 可点重试（F9 主用例） (1.4s)
+  ok 476 [chromium-1920] › e2e\z-changes-panel.spec.ts:142:1 › AC6/AC8：无改动 → 空态文案逐字 (1.9s)
+  ok 478 [chromium-1920] › e2e\z-rail-list-error.spec.ts:54:1 › 后端整体不可达：项目与会话两条错误条**同时**在（不是只显示第一条） (1.4s)
+  ok 479 [chromium-1920] › e2e\z-rail-list-error.spec.ts:68:1 › 点重试：恢复成功后错误条消失、会话行出现（重试不是装饰） (1.6s)
+  ok 480 [chromium-1920] › e2e\z-rail-list-error.spec.ts:84:1 › 真正的空态不受影响：「暂无会话」照旧出现（反证修复没把空态删掉） (1.3s)
+
+
+  1) [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1440px 宽度下不溢出 ─────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-1440px-宽度下不溢出-chromium-1280\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-1440px-宽度下不溢出-chromium-1280\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-1440px-宽度下不溢出-chromium-1280\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1280px 宽度下不溢出 ─────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-1280px-宽度下不溢出-chromium-1280\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-1280px-宽度下不溢出-chromium-1280\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-1280px-宽度下不溢出-chromium-1280\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3) [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1024px 宽度下不溢出 ─────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-1024px-宽度下不溢出-chromium-1280\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-1024px-宽度下不溢出-chromium-1280\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-1024px-宽度下不溢出-chromium-1280\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  4) [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 820px 宽度下不溢出 ──────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-820px-宽度下不溢出-chromium-1280\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-820px-宽度下不溢出-chromium-1280\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-820px-宽度下不溢出-chromium-1280\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  5) [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 768px 宽度下不溢出 ──────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-768px-宽度下不溢出-chromium-1280\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-768px-宽度下不溢出-chromium-1280\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-768px-宽度下不溢出-chromium-1280\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  6) [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1440px 宽度下不溢出 ─────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-1440px-宽度下不溢出-chromium-1920\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-1440px-宽度下不溢出-chromium-1920\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-1440px-宽度下不溢出-chromium-1920\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  7) [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1280px 宽度下不溢出 ─────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-1280px-宽度下不溢出-chromium-1920\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-1280px-宽度下不溢出-chromium-1920\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-1280px-宽度下不溢出-chromium-1920\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  8) [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1024px 宽度下不溢出 ─────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-1024px-宽度下不溢出-chromium-1920\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-1024px-宽度下不溢出-chromium-1920\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-1024px-宽度下不溢出-chromium-1920\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  9) [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 820px 宽度下不溢出 ──────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-820px-宽度下不溢出-chromium-1920\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-820px-宽度下不溢出-chromium-1920\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-820px-宽度下不溢出-chromium-1920\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  10) [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 768px 宽度下不溢出 ─────────
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.composer-control')
+    Expected: 3
+    Received: 4
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.composer-control') with timeout 5000ms
+      - waiting for locator('.composer-control')
+        14 × locator resolved to 4 elements
+           - unexpected value "4"
+
+
+      48 |
+      49 |     // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
+    > 50 |     await expect(page.locator('.composer-control')).toHaveCount(3);
+         |                                                     ^
+      51 |   });
+      52 | }
+      53 |
+        at C:\Users\王浩宇\.codex\worktrees\agents-rules-release\intelligence-agent\web\e2e\g-visual-qa.spec.ts:50:53
+
+    Error Context: test-results\g-visual-qa-Composer-control-row-在-768px-宽度下不溢出-chromium-1920\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\g-visual-qa-Composer-control-row-在-768px-宽度下不溢出-chromium-1920\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\g-visual-qa-Composer-control-row-在-768px-宽度下不溢出-chromium-1920\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  10 failed
+    [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1440px 宽度下不溢出 ──────────
+    [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1280px 宽度下不溢出 ──────────
+    [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1024px 宽度下不溢出 ──────────
+    [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 820px 宽度下不溢出 ───────────
+    [chromium-1280] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 768px 宽度下不溢出 ───────────
+    [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1440px 宽度下不溢出 ──────────
+    [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1280px 宽度下不溢出 ──────────
+    [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 1024px 宽度下不溢出 ──────────
+    [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 820px 宽度下不溢出 ───────────
+    [chromium-1920] › e2e\g-visual-qa.spec.ts:24:3 › Composer control row 在 768px 宽度下不溢出 ───────────
+  470 passed (10.9m)

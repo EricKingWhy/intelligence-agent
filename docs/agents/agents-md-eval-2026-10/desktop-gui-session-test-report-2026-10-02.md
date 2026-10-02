@@ -1,10 +1,14 @@
+> **发布包说明（2026-10-03）**：本页以下内容按历史测试记录阅读。当前终态见 `final-closeout-and-v10-review-2026-10-03.md` 与上级 `agents-md-strict-final-review-2026-10-03.md`：v10 GUI 已执行，最终 CLAUDE 仅澄清 Matt/pstack 正文位置；TodoWrite 阅读项错误完成残余保持 OPEN。夜间长跑与 GPT-6-Luna 验收已由用户取消。本文历史中的“尚未测试”“未发布”描述只指各自记录时点。
+
+> 本次 GitHub 发布只带规则、必要细则、对比页、快照和结论报告，**不包含原始 GUI JSON/JSONL、测试脚本及完整评分档案**。完整审计目录保留在：`C:/Users/王浩宇/.codex/worktrees/agents-rules-optimization/intelligence-agent/docs/agents/agents-md-eval-2026-10/`。v9 原档位于其 `desktop-gui-2026-10-02/`；v10 原档位于其 `desktop-gui-v10-2026-10-02/`。下文提到的证据归档和未随包的相对路径均以该原审计目录为基准，不能据报告文件存在宣称四端已携带完整原始证据。
+
 # 桌面 GUI 真实会话测试报告 — AGENTS/CLAUDE v9 候选（2026-10-02）
 
 **复核结论：真正桌面 GUI 执行有证据支持；v9 有改善，但尚不能判为无硬失败或整体验收通过。** 18 次有效会话的相关条款实读结果为：新根 spec-route **6/6**，旧基线 **3/6**；review-missing 的最终回答停止正式审查为新根 **3/3**、旧根 **0/3**。新版 GLM run 12 的实际 TodoWrite 却把被阻塞的正式审查标为 completed，须单列待处理，不能由最终回答的阻塞声明抵消。
 
 2026-10-02 用户决定：接受限流后的人工“继续”续跑；不再验证夜间长跑与 Codex GPT-6-Luna，这两项从本轮验收要求中撤销，状态是未执行、非通过。DeepSeek 六个会话中五个含人工续跑，共八条“继续”，没有追加预期答案。18 个主会话及 run 9 两个子 Agent 的工具记录中，未发现工作区文件写尝试；TodoWrite 状态写入另行记录，不能混同于文件 Edit/Write。
 
-本文件为 Codex 只读独立审查后的纠正版。收到的原报告逐字保存在 [原报告](desktop-gui-session-test-report-original-2026-10-02.md)；原始证据 JSON 和台账不回改，评分修正见 [复核索引](desktop-gui-2026-10-02/review-index.json)，缺陷见 [TodoWrite 待处理项](desktop-gui-2026-10-02/todowrite-blocked-completion-defect.md)。
+本文件为 Codex 只读独立审查后的纠正版。收到的原报告逐字保存在 [原报告](desktop-gui-session-test-report-original-2026-10-02.md)；原始证据 JSON 和台账不回改，评分修正见 复核索引 (`desktop-gui-2026-10-02/review-index.json`; original audit directory)，缺陷见 [TodoWrite 待处理项](desktop-gui-2026-10-02/todowrite-blocked-completion-defect.md)。
 
 证据归档：`desktop-gui-2026-10-02/`——收到的 18 份有效 JSON、2 份事故 JSON、原台账及脚本；`rollouts/` 共 23 个原始文件（18 个有效主会话、3 个排除主会话、run 9 两个子 Agent）。额外的排除会话 `sess_03c0b0a3` 在本次补档，原始文件不改变。GUI 操作的组织者记录按调用抽取至 `gui-operations.jsonl`，来源哈希和所有归档文件哈希在 `review-index.json`；抽取记录不是组织者完整会话副本，也不替代被测 rollout。
 

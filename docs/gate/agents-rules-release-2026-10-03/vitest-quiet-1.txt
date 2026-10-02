@@ -1,0 +1,9 @@
+
+ RUN  v5.0.0 C:/Users/王浩宇/.codex/worktrees/agents-rules-release/intelligence-agent/web
+
+
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+   Start at  01:41:37
+   Duration  4.61s (environment 44%, tests 31%, import 17%, transform 8%)
+

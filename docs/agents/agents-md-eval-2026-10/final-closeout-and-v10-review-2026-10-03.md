@@ -1,3 +1,7 @@
+> **发布包说明（2026-10-03）**：本页以下内容按历史测试记录阅读。当前终态见 `final-closeout-and-v10-review-2026-10-03.md` 与上级 `agents-md-strict-final-review-2026-10-03.md`：v10 GUI 已执行，最终 CLAUDE 仅澄清 Matt/pstack 正文位置；TodoWrite 阅读项错误完成残余保持 OPEN。夜间长跑与 GPT-6-Luna 验收已由用户取消。本文历史中的“尚未测试”“未发布”描述只指各自记录时点。
+
+> 本次 GitHub 发布只带规则、必要细则、对比页、快照和结论报告，**不包含原始 GUI JSON/JSONL、测试脚本及完整评分档案**。完整审计目录保留在：`C:/Users/王浩宇/.codex/worktrees/agents-rules-optimization/intelligence-agent/docs/agents/agents-md-eval-2026-10/`。v9 原档位于其 `desktop-gui-2026-10-02/`；v10 原档位于其 `desktop-gui-v10-2026-10-02/`。下文提到的证据归档和未随包的相对路径均以该原审计目录为基准，不能据报告文件存在宣称四端已携带完整原始证据。
+
 # AGENTS 优化最终交付与 v10 报告复核（2026-10-03）
 
 本轮规则编辑收口，最终规则树为 `a315bab0509019a07ed3900acc7484ef4ec9860e`；不再追加版本或桌面测试。未 push、未合并。用户要求控制时间与 token 成本，剩余行为问题如实保留，不扩大优化任务。

@@ -1,0 +1,31 @@
+
+ RUN  v5.0.0 C:/Users/王浩宇/.codex/worktrees/agents-rules-release/intelligence-agent/web
+
+ ❯ src/components/StepDetail.window.test.tsx (6 tests | 1 failed) 15986ms
+   ❯ F5 尾窗：出口能到达全部条目（AC4） (2)
+     × DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N 10011ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/StepDetail.window.test.tsx > F5 尾窗：出口能到达全部条目（AC4） > DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/components/StepDetail.window.test.tsx:132:3
+    130|   });
+    131|
+    132|   it('DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N', () => {
+       |   ^
+    133|     render(<ChangesTab tools={mkTools(N, 'diff')} sessionId="f5" />);
+    134|     const beforeDiffs = rows('.detail-section');
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 86 passed (87)
+      Tests  1 failed | 1307 passed (1308)
+   Start at  01:27:53
+   Duration  76.19s (environment 79%, import 9%, transform 7%, tests 5%)
+
+    Isolate  87 workers spawned · ~9.96s startup each (spawn + environment, per file)
+             at least ~47.79s faster with isolate: false — reuses workers across files instead of one per file
+

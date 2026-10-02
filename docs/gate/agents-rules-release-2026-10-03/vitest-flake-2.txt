@@ -1,0 +1,28 @@
+
+ RUN  v5.0.0 C:/Users/王浩宇/.codex/worktrees/agents-rules-release/intelligence-agent/web
+
+ ❯ src/components/StepDetail.window.test.tsx (6 tests | 1 failed) 6827ms
+   ❯ F5 尾窗：出口能到达全部条目（AC4） (2)
+     × DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N 5090ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/StepDetail.window.test.tsx > F5 尾窗：出口能到达全部条目（AC4） > DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/components/StepDetail.window.test.tsx:132:3
+    130|   });
+    131|
+    132|   it('DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N', () => {
+       |   ^
+    133|     render(<ChangesTab tools={mkTools(N, 'diff')} sessionId="f5" />);
+    134|     const beforeDiffs = rows('.detail-section');
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 5 passed (6)
+   Start at  01:30:39
+   Duration  14.57s (tests 48%, environment 39%, import 7%, transform 6%)
+
