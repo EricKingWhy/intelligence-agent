@@ -8,7 +8,8 @@
   校验权威；schema 复杂/不支持时回退 permissive 模型（不猜、不丢字段）。
 - 输出预算：MAX_OUTPUT_CHARS 截断 + 标记（与 read 工具同一哲学）。
 - MCP isError → ToolResult.failure（retryable=False，业务错误交模型自纠）；
-  transport 死亡 → failure（retryable=False，重连由 connection 在下次调用处理）。
+  transport 死亡 / 协议违规 → failure（retryable=False：前者重连由 connection
+  在下次调用处理，后者是确定性违规，重试毫无意义）。
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from agent_harness.mcp.client import (
     MCPCallError,
+    MCPProtocolError,
     MCPServerConnection,
     MCPServerDownError,
 )
@@ -191,6 +193,12 @@ class MCPTool(Tool):
         except MCPServerDownError as error:
             return ToolResult.failure(
                 message=f"MCP server 不可用：{error}",
+                error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+                retryable=False,
+            )
+        except MCPProtocolError as error:
+            return ToolResult.failure(
+                message=f"MCP 协议违规：{error}",
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
                 retryable=False,
             )

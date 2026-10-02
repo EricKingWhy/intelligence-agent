@@ -67,8 +67,9 @@ class KnowledgeService:
     ) -> KnowledgeIngestResult:
         """摄入/更新一个 source；返回 created / rebuilt / skipped。
 
-        增量语义（决策 7）：hash 未变整篇跳过；变更 = 删旧 chunk → 插新 chunk
-        → registry hash 提交（最后一步，崩溃自愈：hash 未提交则下次重做）。
+        增量语义（决策 7）：hash 未变且向量库对账通过 → 整篇跳过；变更或对账
+        失败 = 删旧 chunk → 插新 chunk → registry hash 提交（最后一步，崩溃
+        自愈：hash 未提交则下次重做；对账失败重走同一路径，#568）。
         """
         name = self._validate_source_name(source_name)
         if not text or not text.strip():
@@ -81,13 +82,21 @@ class KnowledgeService:
 
         content_hash = sha256(text.encode("utf-8")).hexdigest()
         existing = await self._registry.get_by_name(identity.tenant_id, name)
+        pieces: list[str] | None = None
         if existing is not None and existing.content_hash == content_hash:
-            return KnowledgeIngestResult(
-                source_id=existing.source_id, source_name=name,
-                chunk_count=existing.chunk_count, status="skipped",
-            )
-
-        pieces = split_text(text, chunk_size=self._chunk_size, overlap=self._overlap)
+            # 幂等跳过不是免检通行证（#568）：registry hash 相等不构成完整性
+            # 证明——向量库可能整库丢失/重建/部分损坏（count 相等也不够，同数
+            # 错内容照样拦）。跳过前逐块点查对账：存在 + content_hash 相符。
+            # 对账失败落回下方重建路径（pieces 复用，不重复切分）；真 Milvus
+            # 的读可见性延迟最多多触发一次幂等重建，收敛无害。
+            pieces = split_text(text, chunk_size=self._chunk_size, overlap=self._overlap)
+            if await self._chunks_intact(existing.source_id, pieces, identity):
+                return KnowledgeIngestResult(
+                    source_id=existing.source_id, source_name=name,
+                    chunk_count=existing.chunk_count, status="skipped",
+                )
+        if pieces is None:
+            pieces = split_text(text, chunk_size=self._chunk_size, overlap=self._overlap)
         if len(pieces) > self._max_chunks:
             raise KnowledgeError(
                 f"切分出 {len(pieces)} 个 chunk，超出单 source 上限 {self._max_chunks}"
@@ -118,6 +127,24 @@ class KnowledgeService:
             source_id=source_id, source_name=name, chunk_count=len(chunks),
             status="rebuilt" if existing is not None else "created",
         )
+
+    async def _chunks_intact(
+        self, source_id: str, pieces: list[str], identity: IdentityContext,
+    ) -> bool:
+        """向量库对账（#568）：每个预期索引存在且 content_hash 与当前切分相符。
+
+        只用冻结协议的 get_chunk 点查（ADR-0013 决策 4 不动协议）；逐块 hash
+        比对是审计纠偏的"IDs 校验"——count 相等不足以证明完整性。成本 O(chunk
+        数) 点查，有单 source 2000 块上限兜底；重建路径先 delete_source，遗留
+        多余索引（如切分参数变更后的旧尾部块）一并清理。
+        """
+        for index, piece in enumerate(pieces):
+            chunk = await self._store.get_chunk(source_id, index, identity)
+            if chunk is None:
+                return False
+            if chunk.content_hash != sha256(piece.encode("utf-8")).hexdigest():
+                return False
+        return True
 
     async def retrieve(
         self,

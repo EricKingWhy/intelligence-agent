@@ -6,7 +6,10 @@
 - 重连只恢复连接、不隐式重执行（Gate 2）：调用中 transport 死亡 → 本次调用
   失败；下次模型主动发起的调用先重连再执行（新调用 ≠ 重放旧调用）。
 - 失败语义（Q10）：连接失败向 wiring 抛 MCPServerDownError（降级缺席）；
-  协议层错误（MCPError）连接仍然存活，原样上抛。
+  协议层错误（未知工具/非法参数等 MCPError）连接仍然存活，包成 MCPCallError
+  上抛；其中 CONNECTION_CLOSED 是 transport 死亡形态，按断开处理（#557：
+  server 是死了，不是拒绝）。读循环检出畸形协议消息 → 快速失败
+  MCPProtocolError（retryable=False），不烧通用超时×重试窗。
 - stdio 启动环境 = OS 必需项白名单 + 配置 env（第三方 server 不可信，
   不继承全量进程 env——C2 同款泄漏防线）。
 - **owner-task 模式**（真实 server 验收抓到的修复）：stdio_client 等传输 CM
@@ -29,6 +32,7 @@ from typing import Any
 import httpx2
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.shared.exceptions import MCPError
+from mcp.types import CONNECTION_CLOSED
 
 try:  # HTTP transport（SDK 2.x）
     from mcp.client.streamable_http import streamable_http_client
@@ -64,6 +68,11 @@ class MCPServerDownError(RuntimeError):
 
 class MCPCallError(RuntimeError):
     """协议层错误（server 拒绝：未知工具 / 非法参数等）——连接仍然存活。"""
+
+
+class MCPProtocolError(RuntimeError):
+    """对端协议违规（读循环检出畸形 JSON-RPC）：连接完整性已破——快速失败
+    （retryable=False），不进通用超时×重试；连接标记断开，下次调用先重连。"""
 
 
 def build_stdio_launch_env(config: MCPServerConfig) -> dict[str, str]:
@@ -104,6 +113,10 @@ class MCPServerConnection:
         self._ready = asyncio.Event()
         self._stop = asyncio.Event()
         self._setup_error: BaseException | None = None
+        # 协议违规通道（#557）：SDK 读循环检出的畸形输入经 message_handler 到达；
+        # 等待中的 call_tool 与 fault 事件赛跑，命中即快速失败（不烧超时窗）。
+        self._protocol_fault: BaseException | None = None
+        self._protocol_fault_event = asyncio.Event()
         self.connected = False
         # lifecycle 串行锁：connect / reconnect / aclose 的 停止→重建 序列必须
         # 原子——并发交叉（READ_ONLY gather 下 transport 死亡是自然场景）会产出
@@ -126,6 +139,9 @@ class MCPServerConnection:
         self._ready = asyncio.Event()
         self._stop = asyncio.Event()
         self._setup_error = None
+        # 协议违规状态随新连接重置：重连即新会话，旧 fault 不污染后续调用。
+        self._protocol_fault = None
+        self._protocol_fault_event = asyncio.Event()
         self._owner_task = asyncio.create_task(
             self._run_owner(), name=f"mcp-owner-{self._config.name}"
         )
@@ -156,6 +172,11 @@ class MCPServerConnection:
             ) from self._setup_error
         self.connected = True
 
+    def _open_session(self, read: Any, write: Any) -> ClientSession:
+        """真实 transport 的会话构造统一入口：message_handler 接到连接级协议
+        违规通道（SDK 把读循环检出的畸形输入以 Exception 项送达该钩子）。"""
+        return ClientSession(read, write, message_handler=self._on_protocol_message)
+
     async def _run_owner(self) -> None:
         """owner task：进入传输 CM → initialize → 待命；stop 置位后统一退出。
 
@@ -175,7 +196,7 @@ class MCPServerConnection:
                         cwd=self._config.cwd,
                     )
                     read, write = await stack.enter_async_context(stdio_client(params))  # type: ignore[misc]
-                    session = await stack.enter_async_context(ClientSession(read, write))
+                    session = await stack.enter_async_context(self._open_session(read, write))
                 else:
                     assert self._config.url is not None
                     if streamable_http_client is None:  # pragma: no cover
@@ -185,7 +206,7 @@ class MCPServerConnection:
                     read, write = await stack.enter_async_context(
                         streamable_http_client(self._config.url, http_client=http_client)  # type: ignore[misc]
                     )
-                    session = await stack.enter_async_context(ClientSession(read, write))
+                    session = await stack.enter_async_context(self._open_session(read, write))
                 await session.initialize()
                 self._session = session
                 self._ready.set()
@@ -245,21 +266,70 @@ class MCPServerConnection:
         session = self._require_session()
         return (await session.list_tools()).tools
 
+    async def _on_protocol_message(self, message: Any) -> None:
+        """ClientSession message_handler（官方钩子，不另写 read loop）。
+
+        server notification 原样忽略（SDK 默认即 no-op tee）；Exception 项 =
+        读循环检出的畸形 JSON-RPC——确定性协议违规：连接标记断开 + 置 fault
+        事件，等待中的 call_tool 快速失败。未知 id 的响应不经本钩子（SDK 内部
+        丢弃并 debug 日志），且与取消/超时迟到响应不可区分，按 #557 审计纠偏
+        不在此定性——那类调用自然走到 Executor 统一超时（TIMEOUT 语义不变）。
+        """
+        if isinstance(message, BaseException):
+            self._protocol_fault = message
+            self.connected = False
+            self._protocol_fault_event.set()
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         """执行远程工具；transport 死亡 → 标记断开 + MCPServerDownError。
 
-        协议层 MCPError（未知工具/非法参数）连接仍存活，包成 MCPCallError 上抛。
-        下次调用若已断开（或处于会话丢失的楔死态）：先重连（恢复连接），再执行
-        本次模型主动发起的调用。
+        协议层 MCPError（未知工具/非法参数）连接仍存活，包成 MCPCallError 上抛；
+        其中 CONNECTION_CLOSED 是 transport 死亡形态（EOF fan-out / 写入断裂 /
+        对端显式 -32000），按断开处理——server 是死了，不是拒绝（#557 MCP-F4）。
+        调用等待期间读到畸形协议消息 → 快速失败 MCPProtocolError（retryable=
+        False），不进通用超时×重试（#557 MCP-F2）。下次调用若已断开：先重连
+        （恢复连接，不重执行旧调用），再执行本次模型主动发起的调用。
         """
         if not self.connected or self._session is None:
             await self.reconnect()
         session = self._require_session()
+        call_task = asyncio.ensure_future(session.call_tool(name, arguments or {}))
+        fault_task = asyncio.ensure_future(self._protocol_fault_event.wait())
         try:
-            return await session.call_tool(name, arguments or {})
+            done, _undone = await asyncio.wait(
+                {call_task, fault_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            # 外部取消等异常路径：两个子任务都不留悬挂
+            call_task.cancel()
+            fault_task.cancel()
+            await asyncio.gather(call_task, fault_task, return_exceptions=True)
+            raise
+        if fault_task in done and call_task not in done:
+            # 确定性协议违规：本次调用快速失败，连接标记断开（完整性已破，
+            # 后续关联不可信）；下次调用先重连，不隐式重执行。
+            call_task.cancel()
+            await asyncio.gather(call_task, return_exceptions=True)
+            self.connected = False
+            fault = self._protocol_fault
+            raise MCPProtocolError(
+                f"server '{self._config.name}' 在调用 {name!r} 期间返回畸形协议消息"
+                f"（{type(fault).__name__ if fault is not None else 'unknown'}）；"
+                f"连接已标记断开"
+            ) from fault
+        fault_task.cancel()
+        await asyncio.gather(fault_task, return_exceptions=True)
+        try:
+            return call_task.result()
         except asyncio.CancelledError:
             raise
         except MCPError as error:
+            if error.code == CONNECTION_CLOSED:
+                self.connected = False
+                raise MCPServerDownError(
+                    f"server '{self._config.name}' 连接已断开（CONNECTION_CLOSED），"
+                    f"调用 {name!r} 未完成"
+                ) from error
             raise MCPCallError(
                 f"server '{self._config.name}' 拒绝调用 {name!r}: {error}"
             ) from error
