@@ -223,7 +223,7 @@
 
 ---
 
-## 预算 UI 批：#536（A 输入形态）+ #537（B 用量呈现）（2026-10-02 交付：分支 `feat/t536-t537-budget-ui`，基点 `7b701554`，施工终笔 `a538c5fe`；已 CLAIM、未 push/PR——§14.4 待批）
+## 预算 UI 批：#536（A 输入形态）+ #537（B 用量呈现）（2026-10-02 交付并当日集成：分支 `feat/t536-t537-budget-ui`，基点 `7b701554`，施工终笔 `a538c5fe`；**PR #573 → merge `0c42f1de`，两票已关单 + 摘标签**）
 
 - **来源与授权**：用户指令「你接票 #536/#537」+ 五步认领协议（前置检查干净 → CLAIM ×2 issuecomment-5950281516/5950282234 + in-progress 标签先于代码）；「质量唯一，不许偷懒」。工作树 `D:/intelligence-agent-backend-t519-t518`（劫持事故后恢复验证过的同一棵树），主工作树零触碰。
 - **交付 #536**（预算输入单入口，TDD）：`web/src/lib/budgetUi.ts`（tokens 档位 100k/250k/500k/1M/自定义 + 时长档 30m/1h/2h/4h/自定义 + 摘要 + 预览纯函数）+ `amend.resolveDeadlineDraft`（**换算唯一执行点**：时长 regex `/^(\d+)(m|h)$/` 提交时刻换算，datetime-local 高级路径语义逐字节不变，toCreateBudget wire 契约键序/空语义零回归）+ `BudgetPicker`（Radix Popover 单入口 + trigger 摘要「turns 5 · 500k · 2h」/「默认」；Panel 独立导出——本仓无 jsdom，Portal 内容 SSR 断不了，抽纯 props 组件直锁）+ OptionPicker 嵌套档位（自定义档 onChange 返 false 不关面板、输入框挂 footer）+ 预览行「≈ MM-DD HH:mm 截止（2 小时后）」过期 → `--danger`「已过期」仅前置提示 + CSS 复用既有 token 零新增 :root（§15）。面板内 aria-label 沿用 #426 旧名 → e2e 资产不作废。
@@ -231,7 +231,7 @@
 - **测试**：新增 49 用例（budgetUi 21 + BudgetPicker 13 + 投影镜像 9 + 徽标对拍 6 + TopBar 徽标 4）+ amend 时长档 3 用例；受影响面 7 文件 **331/331 绿**；全量 vitest **1307/1308**（唯一红 = 在册 StepDetail flake，隔离 6/6 绿）；tsc **-b** 口径干净（gate0 抓出 useSession.test 手搓 ConversationState 字面量缺新字段——vitest/esbuild 不查类型的盲区，amend 补齐）；e2e `budget-entry.spec` 交互改走单入口、**wire 断言逐字未动**，双视口 **4/4 绿**。
 - **审查**：自审双轴（范围 `7b701554..a538c5fe` 全 18 文件）——Spec 轴 PASS（两票票面逐条对照，见台账）；Standards 轴 PASS，自审修复 3 项（P2 tokens 非整数口径 + 2×P3 summary 收敛/图标语义化），台账行 `t536-t537-budget-ui-7b701554-a538c5fe.tsv`（初稿 range 漏 base 端被覆盖闸门打回，已补——range 必须 `base..tip` 两段不可变 SHA）。
 - **验收截图**（playwright mock 全链，请求全由界面发出；临时脚本跑完即删）：`D:/t536_t537_logs/t536-budget-panel-open.png`（面板 + 档位选中态 + 预览行「≈ 10-02 21:30 截止（2 小时后）」）、`t537-topbar-badges.png`（「已完成 · 1 / 10 turns · 28000 / 500000 tok · 0.05 / 2.00 $」）、`t537-topbar-badges-warning.png`（tok/cost 两维 ≥80% 琥珀色、turns 维正常——预警精确到维）。
-- **遗留**：①push / 开 PR / merge 待用户批准（§14.4 逐跳）；②批准后关票附证据评论 + 摘 in-progress 标签（协议收口）。明细见 `docs/phase_status/2026-10.md`「预算 UI 批」节。
+- **集成与收口（获批后当日执行）**：先回后正两轮——`605b2dc4` 吸收 origin/main `5bc59666`（PR #542 #515-P2-B 批 + PR #571 #544 批共 12 笔；冲突仅两份 docs 记账文件，§14.7 并集裁决，sync-merge 归属行 `t536-t537-sync-merge-513839eb-605b2dc4.tsv`）+ `32a9a59a` 吸收 PR #572（#544 落账批 3 笔纯 docs，零冲突零新增内容）；每轮合并树 web 全量 1307/1308（唯一红 = 在册 StepDetail flake，隔离 6/6）+ Gate-0 裸全量 6/6（`docs/gate/f551878d….json` / `32a9a59a….json`）；push（sha 直推 `b7ac2f94`→`ffa5cf74`）→ PR #573 CI gate0 36s 绿 → **merge `0c42f1de`**；#536/#537 关单附证据评论（issuecomment-5951970475 / 5951974847）+ 摘 in-progress 标签。远端分支删除与本落账笔经用户批准执行。明细见 `docs/phase_status/2026-10.md`「预算 UI 批」节。
 
 ---
 
