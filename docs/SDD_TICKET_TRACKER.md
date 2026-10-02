@@ -6845,3 +6845,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **读数**：红读数两截（修复前树上收集 ImportError 机制红 + stash 探针窗口 A 合成旧文案「工具执行被中断，结果未知」症状红）；修复后分类 10 用例 + coordinator 23 用例绿，recovery+session 全套 634P 绿；`ruff check .` 绿；真崩溃集成窗口 A（复用 _approval_kill_child.py）+ 窗口 B（新增 _approval_admitted_kill_child.py）绿。
 - **台账**：`docs/review_ledger.d/t566-dangling-classification-a7dff703-50a406ba.tsv`（唯一写全处）。
 - **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。同批 #547/#549 待用户裁决包后施工。
+
+## 2026-10-03 · A 线 #547 POST /recover 裁决合同（分支 `fix/t547-t566-sandbox-recovery`，base `5cc42015`）
+
+- **代码笔 `99743ba9`**：服务端 Reconcile 裁决合同（decisions=[{tool_call_id, verdict}]，四值复用 ReconcileVerdict）+ DecisionsReconcileCallback 接进既有 token-CAS 提交链 + service.recover 开工前预检（422 非法值/非法目标/重复提交，409 覆盖不全，零写入）+ 409 detail 结构化（{message, pending_decisions} 机器可读清单，三入口统一）+ domain_errors 结构化分支。
+- **裁决依据（用户拍板 2026-10-03）**：方向 1（裁决端点）；四裁决合同三点确认（词表复用/RETRY=用户背书的新尝试非盲跑/裁决≠副作用证据+范围=合同+最小接线，页面 UX 归 #357 W-13）。
+- **读数**：红读数实现前实测（decisions 忽略→409、detail 无清单、非法值静默）；修复后 web+recovery+session 全套 1175P 绿；`ruff check .` 绿；既有 409 形状钉 2 处 + #566 文案滞留钉 1 处按新合同更新。
+- **台账**：`docs/review_ledger.d/t547-recover-decisions-contract-5cc42015-99743ba9.tsv`（唯一写全处）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。#549 四子票拆分已获批准，开子票待 §9.1.1 再批；#549-c 方向已定 (ii) 文档化 DEFER。
