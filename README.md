@@ -91,12 +91,18 @@ uv run agent-harness replay <id>     # 重放会话
 **HTTP（SSE 事件流）：**
 
 ```bash
+# 带 task，默认直接启动 run
 curl -N -X POST http://127.0.0.1:8000/api/sessions \
   -H 'Content-Type: application/json' \
   -d '{"task": "列出当前目录的文件"}'
+
+# 只建会话不启动 run：省略 task，加 ?launch=false（task 与 launch=false 互斥，否则 422）
+curl -N -X POST 'http://127.0.0.1:8000/api/sessions?launch=false' \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 ```
 
-加 `?launch=false` 可以只建会话不启动 run。用 `GET /api/sessions/{id}/stream?after_seq=<n>` 从任意位置续订事件流。
+用 `GET /api/sessions/{id}/stream?after_seq=<n>` 从任意位置续订事件流。
 
 ## 核心概念
 
