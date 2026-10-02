@@ -460,8 +460,11 @@ class SqliteDelegationTreeLedger:
                         version=int(row["version"]),
                         detail={column: effective[column] for column in sorted(effective)},
                     )
+                # 快照读必须在 commit 之前（同 admit_session_step 的 #515 P2-B 注）：
+                # commit 后读撞锁会触发整方法重跑，此处重跑撞自身 CAS 抛伪 409。
+                updated_snapshot = await self._session_snapshot(connection, budget_key)
                 await connection.commit()
-                return await self._session_snapshot(connection, budget_key)
+                return updated_snapshot
             except BaseException:
                 await connection.rollback()
                 raise
@@ -810,8 +813,11 @@ class SqliteDelegationTreeLedger:
                     connection, budget_key, "limits_updated", version=new_version,
                     detail={column: effective[column] for column in sorted(effective)},
                 )
+                # 快照读必须在 commit 之前（同 admit_session_step 的 #515 P2-B 注）：
+                # commit 后读撞锁会触发整方法重跑，此处重跑撞自身 CAS 抛伪 409。
+                updated_snapshot = await self._session_snapshot(connection, budget_key)
                 await connection.commit()
-                return await self._session_snapshot(connection, budget_key)
+                return updated_snapshot
             except BaseException:
                 await connection.rollback()
                 raise
