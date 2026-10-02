@@ -456,3 +456,23 @@ async def test_intact_store_skip_verifies_readonly_without_writes(service):
     assert result.status == "skipped"
     assert store.upsert_calls == upserts_before, "完好库跳过不得重写向量库"
     assert store.delete_calls == deletes_before, "完好库跳过不得删除 chunk"
+
+
+@pytest.mark.asyncio
+async def test_single_missing_chunk_rebuilds_not_skips(service):
+    """audit 点名矩阵项「缺一个 chunk」：部分缺失（非整库丢失、非内容篡改）
+    同样过不了逐块对账——点查 None 即落回重建，残缺库不得被幂等跳过放行。"""
+    source_id = await _ingest_python_doc(service)
+    del service._store._chunks[("acme", f"{source_id}:1")]
+
+    result = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE,
+    )
+    assert result.status == "rebuilt", "部分缺失必须重建，不得静默 skipped"
+    assert result.source_id == source_id, "重建保持稳定 source_id（citation 不失效）"
+    indices = {c.chunk_index for c in service._store.all_chunks("acme")}
+    assert 1 in indices, "缺失块被重建补齐"
+    settled = await service.ingest(
+        text=LONG_TEXT, source_name="python-guide", identity=ALICE,
+    )
+    assert settled.status == "skipped", "补齐后恢复幂等跳过"
