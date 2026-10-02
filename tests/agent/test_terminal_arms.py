@@ -173,6 +173,10 @@ class _PendingCoordinator:
         self.drains = 0
         self.request_drains = 0
 
+    #: #551 M10-8 起终结臂会读它（双挂时两级错误类型名）；替身默认无双挂。
+    #: 真实 coordinator 的同一属性见 `model/fallback.py::double_failure_errors`。
+    double_failure_errors: tuple[str, str] | None = None
+
     def drain_transitions(self) -> list[FallbackTransition]:
         self.drains += 1
         out, self._pending = self._pending, []

@@ -653,6 +653,8 @@ class Session:
         trace_url: str | None = None,
         reason: str | None = None,
         message: str | None = None,
+        primary_error: str | None = None,
+        fallback_error: str | None = None,
     ) -> SessionEvent:
         """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
 
@@ -688,6 +690,13 @@ class Session:
             data["reason"] = reason
         if status != "completed" and message:
             data["message"] = message
+        # #551 M10-8：同一决策里 primary 与 fallback 都失败时保留两级错误**类型名**
+        # （首因不再只存在于 model/fallback 事件里）。只带类型名、不带正文——
+        # 与 FallbackTransition.reason 同一脱敏边界。仅在给值时才落键。
+        if status != "completed" and primary_error:
+            data["primary_error"] = primary_error
+        if status != "completed" and fallback_error:
+            data["fallback_error"] = fallback_error
         return self.append(
             event_type,
             data,

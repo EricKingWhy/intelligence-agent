@@ -441,14 +441,16 @@ class _RunFinalizer:
         self, *, steps: int, reason: str | None = None,
         message: str | None = None, trace_id: str | None = None,
         trace_url: str | None = None,
+        primary_error: str | None = None, fallback_error: str | None = None,
     ) -> SessionEvent | None:
         """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。
 
         reason 落事件 data（如 identical_tool_failure_loop）——消费者区分失败
         原因，与取消臂的 reason=cancelled 同一语义层。message 是固定可读文案
         （reason+message 成对，与上下文超限路径的 RUN_FAILED 形状一致）。
-        本方法不替调用方编原因（两个入参缺省即不落键）；运行期每条失败路径都
-        必须带 reason 这件事由**逐路径用例**守，清单见
+        `primary_error` / `fallback_error` 只在**同一决策两级都失败**时给（#551
+        M10-8），同样是类型名、不带正文。本方法不替调用方编原因（两个入参缺省即
+        不落键）；运行期每条失败路径都必须带 reason 这件事由**逐路径用例**守，清单见
         docs/adr/0033-run-failure-attribution-surface.md §2.4。
         """
         if self.run_id is None or self._terminal_written:
@@ -460,6 +462,8 @@ class _RunFinalizer:
             message=message,
             trace_id=trace_id,
             trace_url=trace_url,
+            primary_error=primary_error,
+            fallback_error=fallback_error,
         )
         self._terminal_written = True
         return event
@@ -730,9 +734,7 @@ class _TerminalContext:
         for transition in self.model_coord.drain_transitions():
             events.append(self.session.append(
                 MODEL_FALLBACK,
-                {"from_model": transition.from_model,
-                 "to_model": transition.to_model,
-                 "reason": transition.reason},
+                transition.event_data(),
                 run_id=self.run_id, step_id=self.steps + 1,
             ))
         # `#313`：调用失败/取消时，**已经发出去**的请求同样要落账——它们占
@@ -1641,6 +1643,15 @@ class AgentRuntime:
                 if usage:
                     # usage / model_name 在上面的记账块里已抽好（同一份事实，不重抽）。
                     model_data["usage"] = usage
+                # 终结形态一等的诚实字段（#551 M10-2）：有 finish_reason 就落键
+                # （下游据此区分"模型说完了"）；缺失则**只标注**"流在没有
+                # finish_reason 的情况下结束"——不臆断截断、不删内容、不去重
+                # （#506 的"finish_reason 缺失回落中性"决策不推翻）。
+                finish_reason = _finish_reason_from_response(ai)
+                if finish_reason:
+                    model_data["finish_reason"] = finish_reason
+                else:
+                    model_data["stream_terminated_without_finish_reason"] = True
                 # llm_call 诊断日志带模型归因 + 时延 + 用量（与 cli.py 对齐，spec 02 §7/§10
                 # 要求每步可在 Diagnostic Log 定位到具体 provider/model）。
                 llm_log_fields: dict[str, Any] = {
@@ -1661,9 +1672,7 @@ class AgentRuntime:
                     for transition in fallback_transitions:
                         fallback_event = session.append(
                             MODEL_FALLBACK,
-                            {"from_model": transition.from_model,
-                             "to_model": transition.to_model,
-                             "reason": transition.reason,
+                            {**transition.event_data(),
                              **({"usage": usage} if usage else {})},
                             run_id=run_id, step_id=step_base + steps + 1,
                         )
@@ -2901,12 +2910,17 @@ class AgentRuntime:
             yield to_agent_event(streamed)
         # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
         # 已写入的事件保持原样，失败只能由日志承载。
+        # #551 M10-8：同一决策里 primary 与 fallback 都失败时，两级错误**类型名**
+        # 一并进 run/failed（首因不再只存在于 model/fallback 事件里）。
+        double_failure = ctx.model_coord.double_failure_errors
         end_event = arms.terminal.failure_terminal(
             steps=arms.envelope_step(steps),
             reason=provider_reason or type(error).__name__,
             message=terminal_message,
             trace_id=arms.telemetry.trace_id,
             trace_url=arms.telemetry.trace_url,
+            primary_error=double_failure[0] if double_failure else None,
+            fallback_error=double_failure[1] if double_failure else None,
         )
         if end_event is not None:
             yield to_agent_event(end_event)
