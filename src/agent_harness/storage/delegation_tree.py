@@ -37,6 +37,7 @@ from agent_harness.agent.run_budget import (
     session_resume_headroom_ok,
     utc_now,
 )
+from agent_harness.storage.sqlite import retry_on_busy
 
 
 @dataclass(frozen=True)
@@ -227,11 +228,13 @@ class SqliteDelegationTreeLedger:
         finally:
             await connection.close()
 
+    @retry_on_busy
     async def initialize(self) -> None:
         async with self._connect() as connection:
             await connection.executescript(_SCHEMA)
             await connection.commit()
 
+    @retry_on_busy
     async def reserve(
         self, tree_id: str, *, root_session_id: str,
         max_delegations: int, max_depth: int,
@@ -261,6 +264,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def observe_result(
         self, tree_id: str, fingerprint: str, *, ok: bool,
         soft_threshold: int = 3, hard_threshold: int = 3,
@@ -371,6 +375,7 @@ class SqliteDelegationTreeLedger:
             version=int(row["version"]),
         )
 
+    @retry_on_busy
     async def ensure_session_budget(
         self, budget_key: str, *, root_session_id: str, limits: SessionLimits,
     ) -> SessionBudgetSnapshot:
@@ -461,6 +466,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def admit_session_step(self, budget_key: str) -> SessionAdmission:
         """原子准入：判到顶就拒绝（账不变），否则**预留** turns / requests 各一格。
 
@@ -499,6 +505,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def refund_session_turn(self, budget_key: str) -> None:
         """退回预留的 turns 一格（决策未被接纳；下限 0，不为负）。"""
         async with self._connect() as connection:
@@ -524,6 +531,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def refund_session_step(self, budget_key: str) -> None:
         """退回预留的两格 turns / requests（整步未发生：模型在本轮从未被调用）。"""
         async with self._connect() as connection:
@@ -551,6 +559,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def record_session_model_requests(
         self, budget_key: str, *, count: int, usage: dict[str, int] | None,
         cost: Decimal | None,
@@ -602,6 +611,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def record_session_tools(
         self, budget_key: str, *, calls: Mapping[str, int], attempts: Mapping[str, int],
     ) -> None:
@@ -640,6 +650,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def update_session_limits(
         self, budget_key: str, *, expected_version: int, limits: SessionLimits,
     ) -> SessionBudgetSnapshot:
@@ -814,6 +825,7 @@ class SqliteDelegationTreeLedger:
                 version=int(row["version"]),
             )
 
+    @retry_on_busy
     async def consume_session_delegation(
         self, budget_key: str, *, root_session_id: str, max_delegations: int,
     ) -> DelegationReservation:
@@ -868,6 +880,7 @@ class SqliteDelegationTreeLedger:
                 await connection.rollback()
                 raise
 
+    @retry_on_busy
     async def refund_session_delegation(self, budget_key: str) -> None:
         """退回 session 委派预留（树 reserve 被拒时的配对退回；下限 0）。"""
         async with self._connect() as connection:

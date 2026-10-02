@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -40,6 +47,7 @@ from agent_harness.identity import (
 from agent_harness.instance_lock import InstanceLock
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
@@ -78,14 +86,20 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.storage.checkpoint import checkpoint_save_failure_count
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
 from agent_harness.web import catalog as catalog_router
 from agent_harness.web.context_usage import build_context_usage_payload
-from agent_harness.web.domain_errors import http_error
+from agent_harness.web.domain_errors import (
+    http_error,
+    model_http_error,
+    storage_http_error,
+)
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
@@ -1214,6 +1228,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
 
+    # #517 BUG-06：未捕获异常的全局兜底。Starlette 默认给 text/plain 的
+    # "Internal Server Error"（TestClient 则直接 re-raise），前端按 JSON 解析
+    # 错误体时拿到纯文本。注册 Exception handler 后换回 JSON 信封——状态码
+    # 仍是诚实的 500，这层只换**表示**，不把任何意外异常洗成 4xx。
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_to_json(request: Any, exc: Exception):
+        logging.getLogger("agent_harness.web").exception(
+            "未处理异常：%s %s", request.method, request.url.path
+        )
+        return JSONResponse(
+            status_code=500, content={"detail": "Internal Server Error"}
+        )
+
+    # #517 BUG-06：OpenAPI 错误面对齐（422 oneOf / SSE CT / 500+503 声明）。
+    from agent_harness.web.error_contract import apply_error_contract
+
+    apply_error_contract(app)
+
     # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
     from agent_harness.web.lineage import register_lineage_routes
 
@@ -1286,12 +1318,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # ── 路由 ──
 
     @app.get("/api/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, object]:
+        """存活探针 + durability 观测（#515）。
+
+        `checkpoint_save_failures` 是进程级累计的 checkpoint 维护失败次数（重启归零）：
+        非零说明有 checkpoint 帧丢失，之后的 resume 可能回到更旧的稳定边界——这是
+        ADR-0004 Round 5 之下 checkpoint 故障唯一的对外口径（不进 SessionEvent）。
+        """
+        return {
+            "status": "ok",
+            "checkpoint_save_failures": checkpoint_save_failure_count(),
+        }
 
     @app.get("/api/sessions")
     async def list_sessions(
-        workspace_id: str | None = None, include_archived: bool = False
+        workspace_id: str | None = None,
+        include_archived: bool = False,
+        limit: int | None = Query(default=None, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
     ) -> list[SessionSummary]:
         """列历史 session。
 
@@ -1301,17 +1345,27 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         - `?include_archived=true`（#171）：把已归档的会话也列出来（前端"显示已归档"
           开关）。**默认 false 即不列**；两条路径（默认列表 / 项目视图）同一规则。
           非布尔值 → 422（FastAPI 的 bool query 语义，不自造一套）。
+        - `?limit=N&offset=M`（#516）：分页窗口——N 是行数上限（1–500），M 是起点。
+          校验交给 FastAPI Query（ge/le），非法值 422。切片在读摘要之前 ⇒ 摘要扫描
+          是 O(limit)；归档过滤先行，已归档行不占 limit 预算；不传 limit 保持
+          全量语义（既有调用方零迁移）。**id 枚举仍是每请求 O(N) 文件 stat**——
+          mtime 倒序契约会响应外部 utime 重排（承重测试钉住）⇒ id 列表不可缓存，
+          4000 会话下这是并发 p95 的主项（§9.1.1 已登记待裁决）。
         每行都带 `workspace`（`null` = 未分组）与 `archived`（徽标真值）。
 
         列表页只需摘要字段——store.read_session_summary 单趟流式扫描
         （头部早退 + 末行），不再全量解析每个 JSONL（30 会话 × 2000 事件
-        曾需秒级串行解析，现约几十 ms）。损坏行走 store 内全量回退，摘要
+        曾需秒级串行解析，现约几十 ms）；#516 起同会话重复读由文件戳缓存兜住，
+        翻页/刷新不再重扫未变化的文件。损坏行走 store 内全量回退，摘要
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
         service = session_service(app.state.agent)
         try:
             summaries = await service.list_sessions(
-                workspace_id=workspace_id, include_archived=include_archived
+                workspace_id=workspace_id,
+                include_archived=include_archived,
+                limit=limit,
+                offset=offset,
             )
         except WorkspaceNotFound as e:
             raise http_error(e) from e
@@ -1433,6 +1487,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             )
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05：client 构造期失败（代理环境/配置问题）→ 503。
+            raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：launch 路径的 transport/delegation 写锁耗尽 → 503。
+            raise storage_http_error(e) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
@@ -1579,6 +1639,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # ceiling 没真提高 / 有在途 run——请求形状合法但状态对不上，且
             # **零副作用**（判定在任何落盘之前，见 `validate_resume`）。
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05：同 create——构造期失败 → 503，不冒充 500。
+            raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：同 create——launch 路径写锁耗尽 → 503。
+            raise storage_http_error(e) from e
 
         session_id = result.session.session_id
         return _run_stream_response(
@@ -1653,6 +1719,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             )
         except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：共享 harness.db 写锁重试耗尽——暂时性故障报 503，不伪装成 500。
+            raise storage_http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
 
     @app.delete("/api/sessions/{session_id}/archive")
@@ -1672,6 +1741,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             )
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
 
     @app.get("/api/sessions/{session_id}/context-usage")
@@ -1751,6 +1822,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionHasChildren,
         ) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：硬删要写多张共享表（ledger/checkpoint/meta/工件），锁竞争重试
+            # 耗尽时报 503——删除未开始，客户端稍后重试即可。
+            raise storage_http_error(e) from e
         return SessionDeleted(
             id=stats.session_id,
             events=stats.events,
@@ -1974,6 +2049,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SeqConflict,
         ) as e:
             raise http_error(e) from e
+        except StorageBusyError as e:
+            # #515：改档要持久化权限设置（session_meta 写），锁竞争重试耗尽报 503。
+            raise storage_http_error(e) from e
         # 回传**改后**的当下生效值（service 解析出的档位），前端按回执对齐即可，不必
         # 本地推导（不引入乐观状态；见 F18-B）。
         return {
@@ -2052,6 +2130,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # WorkspaceBindingConflict → 409（#266）：idle 分支会走 resume_and_launch，
             # 工作目录归属冲突同样拒绝静默选边。
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
+            raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：同 create——launched 分支的写锁耗尽 → 503。
+            raise storage_http_error(e) from e
 
         if result.status == "launched":
             # 与创建端点同形：SSE 直驱 run（ADR-0016 detached-run）。
@@ -2135,6 +2219,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             WorkspaceBindingConflict,
         ) as e:
             raise http_error(e) from e
+        except ModelClientConstructionError as e:
+            # #517 BUG-05（审查 P2-1）：flush 在 idle 时走 resume_and_launch 构造
+            # client——BUG-05 的第 4 个构造调用点，同 create/resume/messages → 503。
+            raise model_http_error(e) from e
+        except StorageBusyError as e:
+            # #515（审查 P2-3）：投递路径的写锁耗尽 → 503。
+            raise storage_http_error(e) from e
         if launched is None:
             return {"status": "idle"}
         # 与 `/messages` 的 launched 分支**同一投影**（同一段响应组装）：重投的 run 也消费

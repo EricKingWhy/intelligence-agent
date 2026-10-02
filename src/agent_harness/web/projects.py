@@ -45,8 +45,13 @@ from pydantic import BaseModel, Field, field_validator
 from agent_harness.sandbox.paths import is_absolute_path
 from agent_harness.session.errors import SessionServiceError
 from agent_harness.session.projects import ProjectService
+from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.app import project_service
-from agent_harness.web.domain_errors import http_error, workspace_http_error
+from agent_harness.web.domain_errors import (
+    http_error,
+    storage_http_error,
+    workspace_http_error,
+)
 from agent_harness.workspace import Workspace, WorkspaceError
 
 if TYPE_CHECKING:
@@ -223,6 +228,10 @@ async def _translated() -> AsyncIterator[None]:
         raise http_error(error) from error
     except (WorkspaceError, OSError) as error:
         raise workspace_http_error(error) from error
+    except StorageBusyError as error:
+        # #515：workspace store 写锁竞争在重试预算内未缓解 → 503（与 archive 等
+        # 端点同款；审查 P2-3 补齐——本模块此前漏映射，裸 500）。
+        raise storage_http_error(error) from error
 
 
 def _project(workspace: Workspace) -> Project:

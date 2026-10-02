@@ -22,6 +22,7 @@ from uuid import uuid4
 import anyio
 
 from agent_harness.sandbox.paths import canonical_workspace_path
+from agent_harness.session.store import WorkspaceRef
 from agent_harness.workspace.models import StartedHeader, Workspace
 from agent_harness.workspace.store import (
     CHANGE_CREATE,
@@ -224,6 +225,39 @@ class WorkspaceIndex:
             if session_id in self._visible_ids(workspace_id):
                 return self._view(self._records[workspace_id])
         return None
+
+    def workspace_refs_of_sessions(
+        self, session_ids: list[str]
+    ) -> dict[str, Workspace]:
+        """批量成员资格判定（#516 分页路径）：{session_id: 所属项目}，只判给定 id。
+
+        与逐 id 调 `workspace_of_session` 相比：那会把每个项目的账本候选重扫
+        |ids| 次（每次都读候选的 header）；本方法对每个项目只过滤「账本候选 ∩
+        给定 id」，header 读的上限是 min(|ids|, 候选数) × 项目数，**不随全库
+        会话数走**——4000 会话 + 默认项目时全量映射每请求要读 4000 个 header
+        （实测秒级），这是 GET /api/sessions?limit=50 p95<1s 的最后一块。
+
+        成员资格与 `_visible_ids` 同源（`_filter_visible` 三道闸：有 header +
+        cwd 逐字符相等 + 非内部子会话）。同一 id 属于多个项目时以**注册表序
+        最后一个**为准——与全量映射（按 `_order` 顺序逐项覆盖赋值）的语义一致。
+        返回 `WorkspaceRef` 投影（id/title，与旧全量路径写入摘要的字段同形；
+        审查 P3：此前直接塞 record 本体，靠鸭子属性碰巧符合 `WorkspaceRef` 契约
+        ——record 的 `session_ids` 不保证新鲜，投影同时把"调用方只取 id/title"
+        从注释约定升级为类型事实）。
+        """
+        self._require_initialized()
+        wanted = set(session_ids)
+        refs: dict[str, WorkspaceRef] = {}
+        for workspace_id in self._order:
+            record = self._records[workspace_id]
+            candidates = [
+                sid
+                for sid in self._ledger.get(workspace_id, [])
+                if sid in wanted
+            ]
+            for sid in self._filter_visible(record, candidates):
+                refs[sid] = WorkspaceRef(id=record.id, title=record.title)
+        return refs
 
     # —— 实体写入 ——
 
