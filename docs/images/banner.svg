@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-label="intelligence-agent banner">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0e17"/>
+      <stop offset="0.55" stop-color="#101527"/>
+      <stop offset="1" stop-color="#160f22"/>
+    </linearGradient>
+    <linearGradient id="stream" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff5c8a" stop-opacity="0.05"/>
+      <stop offset="0.5" stop-color="#ff5c8a" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#ff5c8a" stop-opacity="0.05"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff7aa8" stop-opacity="0.9"/>
+      <stop offset="0.4" stop-color="#ff5c8a" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#ff5c8a" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="360" fill="url(#bg)"/>
+
+  <!-- ambient glows -->
+  <circle cx="240" cy="80" r="130" fill="url(#glow)" opacity="0.35" filter="url(#soft)"/>
+  <circle cx="980" cy="300" r="150" fill="url(#glow)" opacity="0.28" filter="url(#soft)"/>
+
+  <!-- faint grid dots -->
+  <g fill="#ffffff" opacity="0.05">
+    <circle cx="80" cy="60" r="2"/><circle cx="200" cy="60" r="2"/><circle cx="320" cy="60" r="2"/>
+    <circle cx="440" cy="60" r="2"/><circle cx="560" cy="60" r="2"/><circle cx="680" cy="60" r="2"/>
+    <circle cx="800" cy="60" r="2"/><circle cx="920" cy="60" r="2"/><circle cx="1040" cy="60" r="2"/>
+    <circle cx="80" cy="310" r="2"/><circle cx="200" cy="310" r="2"/><circle cx="320" cy="310" r="2"/>
+    <circle cx="440" cy="310" r="2"/><circle cx="560" cy="310" r="2"/><circle cx="680" cy="310" r="2"/>
+    <circle cx="800" cy="310" r="2"/><circle cx="920" cy="310" r="2"/><circle cx="1040" cy="310" r="2"/>
+  </g>
+
+  <!-- event stream backbone -->
+  <line x1="60" y1="252" x2="1140" y2="252" stroke="url(#stream)" stroke-width="3" stroke-linecap="round"/>
+  <line x1="60" y1="252" x2="1140" y2="252" stroke="#ff5c8a" stroke-width="10" opacity="0.12" filter="url(#soft)"/>
+
+  <!-- event nodes -->
+  <g>
+    <circle cx="180" cy="252" r="26" fill="url(#glow)" opacity="0.5"/>
+    <circle cx="180" cy="252" r="9" fill="#0b0e17" stroke="#ff5c8a" stroke-width="3"/>
+    <circle cx="400" cy="252" r="34" fill="url(#glow)" opacity="0.5"/>
+    <circle cx="400" cy="252" r="12" fill="#0b0e17" stroke="#ff7aa8" stroke-width="3"/>
+    <circle cx="640" cy="252" r="46" fill="url(#glow)" opacity="0.65"/>
+    <circle cx="640" cy="252" r="16" fill="#ff5c8a"/>
+    <circle cx="640" cy="252" r="16" fill="none" stroke="#ffd3e2" stroke-width="2" opacity="0.8"/>
+    <circle cx="880" cy="252" r="34" fill="url(#glow)" opacity="0.5"/>
+    <circle cx="880" cy="252" r="12" fill="#0b0e17" stroke="#ff7aa8" stroke-width="3"/>
+    <circle cx="1060" cy="252" r="26" fill="url(#glow)" opacity="0.5"/>
+    <circle cx="1060" cy="252" r="9" fill="#0b0e17" stroke="#ff5c8a" stroke-width="3"/>
+  </g>
+
+  <!-- branch-off sparks -->
+  <g stroke="#ff8fb3" stroke-width="2" opacity="0.7" fill="none" stroke-linecap="round">
+    <path d="M400 240 C 380 200, 360 190, 340 170"/>
+    <path d="M880 240 C 900 205, 920 195, 945 175"/>
+    <path d="M640 236 C 640 210, 660 200, 680 185"/>
+  </g>
+  <g fill="#ff8fb3" opacity="0.9">
+    <circle cx="340" cy="170" r="4"/>
+    <circle cx="945" cy="175" r="4"/>
+    <circle cx="680" cy="185" r="4"/>
+  </g>
+
+  <!-- title -->
+  <text x="600" y="120" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-size="64" font-weight="700" fill="#f5f7fa" letter-spacing="1">intelligence-agent</text>
+  <text x="600" y="162" text-anchor="middle" font-family="system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        font-size="22" fill="#a7b0c2" letter-spacing="6">可观测 · 可恢复 · 可扩展的轻量 Agent Harness</text>
+
+  <!-- sequence ticks under stream -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="13" fill="#67708a">
+    <text x="180" y="292" text-anchor="middle">seq 41</text>
+    <text x="400" y="292" text-anchor="middle">seq 42</text>
+    <text x="640" y="292" text-anchor="middle">seq 43</text>
+    <text x="880" y="292" text-anchor="middle">seq 44</text>
+    <text x="1060" y="292" text-anchor="middle">seq 45</text>
+  </g>
+</svg>
