@@ -1,0 +1,2 @@
+# Preserve version snapshots as exact Git-blob bytes across checkouts.
+* -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

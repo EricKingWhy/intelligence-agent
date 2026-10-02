@@ -1,7 +1,7 @@
 # Independent Review / Debug Playbook
 
 > 本文承接 `AGENTS.md` §4.1–§4.2 的按需检查清单。只有进入独立审查或疑难 Bug 调查分支时读取；
-> 角色边界、Runtime 安全检查和施工授权仍以 `AGENTS.md` §4 为准。
+> 角色边界、凭证红线和施工授权仍以 `AGENTS.md` §4 为准。
 
 ## Independent Review
 

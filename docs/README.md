@@ -9,7 +9,8 @@
 | --- | --- |
 | 正式 Engineering Specification 在哪里？ | `goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/` |
 | 当前 Phase 状态和工作焦点是什么？ | `docs/PHASE_STATUS.md` |
-| 当前 SDD / review / 集成流程是什么？ | `docs/SDD_WORKFLOW_PROTOCOL.md` |
+| 当前 SDD / review / 验证流程是什么？ | `docs/SDD_WORKFLOW_PROTOCOL.md` |
+| 同步、merge、push、PR merge、冲突或关单怎么执行？ | `docs/agents/git-workflow.md`（先读对应步骤；授权见根 AGENTS §14.4） |
 | Ticket、验证证据、review coverage 和残余是什么？ | `docs/SDD_TICKET_TRACKER.md` |
 | 已冻结的机制或设计决议是什么？ | 对应的 `docs/adr/` 文件 |
 
