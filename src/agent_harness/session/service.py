@@ -1529,7 +1529,25 @@ class SessionService:
                 port=stuck_evidence,
                 runtime_builder=build_resume_runtime,
             )
-        else:
+            return self._bind_and_launch(
+                session=session, runtime=runtime, task=task,
+                user_input_metadata=user_input_metadata,
+                interactive=interactive, approval_callback=approval_callback,
+                fuse=fuse, launch_budget=launch_budget,
+            )
+        # #560-B：新任务 launch 的 CAS 临界区（锁 owner = RunManager，跨请求共存）。
+        # "判 idle → 启动"必须是**一个**原子判定：上方那次 get_active 只是快速
+        # 预检，锁内复查才是唯一权威 CAS 点——输家在这里拿 ActiveRunConflict
+        # （send_message 的 idle 分支据此回退入队），而不是两个赢家各自 launch
+        # 出两个并发驱动同一会话的 run：两个聚合从同一磁盘快照各自推算 seq，
+        # begin_run 撞号被 store fail-closed 拒绝（#560-B 的"排队消息的 run
+        # 必败"）。锁内重读聚合与 `_commit_paused_resume` 同一条纪律：
+        # `Session.resume` 读到的那枚聚合就是交给 runtime 的一枚，seq 计数器
+        # 不可能落后于任何已落盘事件。锁不跨 run 生命周期：launch 只创建 task，
+        # run 本身由 _drive 独立驱动（`session_lock` 的既有边界）。
+        async with self._resume_lock(session_id):
+            if self._run_manager.get_active(session_id) is not None:
+                raise ActiveRunConflict("session has an active run")
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
                 # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
@@ -1540,6 +1558,25 @@ class SessionService:
                     session_id,
                     workspace_registry=self._workspace_registry,
                 )
+            return self._bind_and_launch(
+                session=session, runtime=runtime, task=task,
+                user_input_metadata=user_input_metadata,
+                interactive=interactive, approval_callback=approval_callback,
+                fuse=fuse, launch_budget=launch_budget,
+            )
+
+    def _bind_and_launch(
+        self, *, session: Session, runtime: Any, task: str | None,
+        user_input_metadata: dict[str, Any] | None,
+        interactive: bool,
+        approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder,
+        fuse: LocalFuse, launch_budget: LaunchRunBudget,
+    ) -> LaunchResult:
+        """绑定审批回调 → launch → 审批队列 GC（同 run / 新任务两条路径共用）。
+
+        launch 是"开 run"的提交点：调用方决定它落在哪个互斥域内（新任务在
+        `_resume_lock` 临界区内，同 run 续跑在 `_commit_paused_resume` 返回后）。
+        """
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
         run, subscriber = self._run_manager.launch(
@@ -1547,7 +1584,7 @@ class SessionService:
         )
         # run 终结时 GC approval_queue（与创建路径同一条防泄漏路径）。
         if interactive:
-            self._attach_approval_queue_gc(run, session_id)
+            self._attach_approval_queue_gc(run, session.session_id)
         return LaunchResult(
             session=session, run=run, subscriber=subscriber, local_fuse=fuse,
             run_budget=launch_budget,
@@ -1883,6 +1920,35 @@ class SessionService:
             return
         Session.append_event(self._store, session_id, event_type, dict(data))
 
+    async def _queue_incoming_message(
+        self, *, session_id: str, content: str,
+        revoke_fact_id: str | None,
+        refutes_event_id: str | None,
+        protected_facts: list[dict[str, Any]] | None,
+        remember_as_procedural_rule: bool,
+        user_input_metadata: dict[str, Any],
+    ) -> QueuedMessage:
+        """入队（FIFO）+ 写 MESSAGE_QUEUED——活跃 run 分支与 #560-A 竞态回退共用。
+
+        两条路径到达时 run 都已在途：append 经 `_append_session_event` 优先走
+        live 聚合（旁路追加自算 seq 会与 run 的内存计数器撞号，见
+        `_live_session` 的注释），事件实时广播给在途订阅者。
+        """
+        queued = await self._message_queues.enqueue(
+            session_id=session_id, content=content, created_at=_utc_now_iso(),
+            revoke_fact_id=revoke_fact_id,
+            refutes_event_id=refutes_event_id,
+            protected_facts=protected_facts,
+            remember_as_procedural_rule=remember_as_procedural_rule,
+        )
+        self._append_session_event(
+            session_id, MESSAGE_QUEUED,
+            queue_id=queued.queue_id,
+            content=content,
+            **user_input_metadata,
+        )
+        return queued
+
     async def send_message(
         self,
         *,
@@ -2067,51 +2133,65 @@ class SessionService:
             )
             result = SendMessageResult(status="steered", steer_request=steer_req)
         elif active_run is None:
-            # idle → 直接拉起新 run（同 resume 路径）。
-            launched = await self.resume_and_launch(
-                session_id=session_id, task=content,
-                user_input_metadata=user_input_metadata or None,
-                local_max_agent_turns=local_max_agent_turns,
-                amend=amend,
-                run_max_agent_turns_total=run_max_agent_turns_total,
-                run_max_model_requests=run_max_model_requests,
-                run_max_total_tokens=run_max_total_tokens,
-                run_max_cost_usd=run_max_cost_usd,
-                run_deadline_at=run_deadline_at,
-                run_tool_call_limits=run_tool_call_limits,
-                # `#318`：session 作用域与 run 作用域同一纪律——只有 idle → launched
-                # 才消费；但 session 账行跨 run 存续，点名 = 对 durable 行的 CAS 更新
-                # （session_expected_version 必带，判定在 resume_and_launch）。
-                session_max_agent_turns_total=session_max_agent_turns_total,
-                session_max_model_requests=session_max_model_requests,
-                session_max_total_tokens=session_max_total_tokens,
-                session_max_cost_usd=session_max_cost_usd,
-                session_deadline_at=session_deadline_at,
-                session_tool_call_limits=session_tool_call_limits,
-                session_max_delegations=session_max_delegations,
-                session_expected_version=session_expected_version,
-            )
-            result = SendMessageResult(
-                status="launched",
-                session=launched.session,
-                run=launched.run,
-                subscriber=launched.subscriber,
-                local_fuse=launched.local_fuse,
-            )
+            # idle → 直接拉起新 run（同 resume 路径）。判 idle（上方 get_active）
+            # 与 launch 之间没有互斥（#560-A TOCTOU）：另一入口（并发 /messages、
+            # 终态接力、flush）可能刚把会话变忙——输家捕获 ActiveRunConflict 后
+            # 回退入队，而不是 409 丢正文（"活跃 run → 入队"才是 queue 语义的
+            # 承诺，调用方无法区分"真忙"和"差几微秒没抢赢"；与 ADR-0030 §4.7
+            # 终态驱动侧同一模式）。此刻 run 已在途，入队经 `_append_session_event`
+            # 优先走 live 聚合（seq 计数器一致）。回退即 queued 语义：本次请求的
+            # budget/run 作用域生效值照纪律丢弃（只有 idle → launched 才消费）。
+            try:
+                launched = await self.resume_and_launch(
+                    session_id=session_id, task=content,
+                    user_input_metadata=user_input_metadata or None,
+                    local_max_agent_turns=local_max_agent_turns,
+                    amend=amend,
+                    run_max_agent_turns_total=run_max_agent_turns_total,
+                    run_max_model_requests=run_max_model_requests,
+                    run_max_total_tokens=run_max_total_tokens,
+                    run_max_cost_usd=run_max_cost_usd,
+                    run_deadline_at=run_deadline_at,
+                    run_tool_call_limits=run_tool_call_limits,
+                    # `#318`：session 作用域与 run 作用域同一纪律——只有 idle → launched
+                    # 才消费；但 session 账行跨 run 存续，点名 = 对 durable 行的 CAS 更新
+                    # （session_expected_version 必带，判定在 resume_and_launch）。
+                    session_max_agent_turns_total=session_max_agent_turns_total,
+                    session_max_model_requests=session_max_model_requests,
+                    session_max_total_tokens=session_max_total_tokens,
+                    session_max_cost_usd=session_max_cost_usd,
+                    session_deadline_at=session_deadline_at,
+                    session_tool_call_limits=session_tool_call_limits,
+                    session_max_delegations=session_max_delegations,
+                    session_expected_version=session_expected_version,
+                )
+            except ActiveRunConflict:
+                queued = await self._queue_incoming_message(
+                    session_id=session_id, content=content,
+                    revoke_fact_id=revoke_fact_id,
+                    refutes_event_id=refutes_event_id,
+                    protected_facts=normalized_protected_facts or None,
+                    remember_as_procedural_rule=remember_as_procedural_rule,
+                    user_input_metadata=user_input_metadata,
+                )
+                result = SendMessageResult(status="queued", queued_message=queued)
+            else:
+                result = SendMessageResult(
+                    status="launched",
+                    session=launched.session,
+                    run=launched.run,
+                    subscriber=launched.subscriber,
+                    local_fuse=launched.local_fuse,
+                )
         else:
             # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
-            queued = await self._message_queues.enqueue(
-                session_id=session_id, content=content, created_at=_utc_now_iso(),
+            queued = await self._queue_incoming_message(
+                session_id=session_id, content=content,
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
                 remember_as_procedural_rule=remember_as_procedural_rule,
-            )
-            self._append_session_event(
-                session_id, MESSAGE_QUEUED,
-                queue_id=queued.queue_id,
-                content=content,
-                **user_input_metadata,
+                user_input_metadata=user_input_metadata,
             )
             result = SendMessageResult(status="queued", queued_message=queued)
 
