@@ -1171,3 +1171,68 @@ def test_docker_timeout_escalates_when_term_is_ignored():
     assert len(signal_commands) >= 2
     assert signal_commands[0][-1] == "TERM"
     assert signal_commands[-1][-1] == "KILL"
+
+
+# ── #549-a / SB-01 + SB-03：正常返回路径的进程组回收 ─────────────────────
+
+
+def test_reclaim_process_group_kills_group_once(tmp_path, monkeypatch):
+    """回收 = 对 pgid(==pid) 的一次 SIGKILL；组已空/已消失被幂等吞掉。"""
+    calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid, sig):
+        calls.append((pgid, sig))
+
+    monkeypatch.setattr(local_module.os, "killpg", fake_killpg, raising=False)
+    process = Mock()
+    process.pid = 4242
+    LocalSubprocessSandbox._reclaim_process_group(process)
+    expected_sig = getattr(local_module.signal, "SIGKILL",
+                           local_module.signal.SIGTERM)
+    assert calls == [(4242, expected_sig)]
+
+
+def test_reclaim_process_group_suppresses_empty_group(tmp_path, monkeypatch):
+    """组已空（正常命令树已空）→ ProcessLookupError 幂等无害；其他 OSError 同样不冒泡。"""
+
+    def empty_group(pgid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(local_module.os, "killpg", empty_group, raising=False)
+    LocalSubprocessSandbox._reclaim_process_group(Mock(pid=1))  # 不抛即通过
+
+
+def test_reclaim_process_group_suppresses_permission_error(tmp_path, monkeypatch):
+    def denied(pgid, sig):
+        raise PermissionError(1, "operation not permitted")
+
+    monkeypatch.setattr(local_module.os, "killpg", denied, raising=False)
+    LocalSubprocessSandbox._reclaim_process_group(Mock(pid=1))  # 不抛即通过
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="SB-01 是 POSIX 形态（xval 实锤）；Windows 无 shell 级后台，"
+    "Job Object KILL_ON_JOB_CLOSE 已兜底整树终止",
+)
+def test_normal_exit_reclaims_background_orphans_and_returns_promptly(tmp_path):
+    """有界探针：`sleep 30 & echo done` 正常退出后无残留孤儿、exec 及时返回。
+
+    修复前：shell 退出后 sleep 30 被 init 收养永久泄漏（xval H-08），并攥住
+    管道写端让 exec 晚 ~2×join(5)（≈10s，SB-03）才返回。修复后 killpg 整组
+    回收 → reader 立刻 EOF。绝不用 fork 炸弹做探针（audit 约束）。
+    """
+    sandbox = LocalSubprocessSandbox(tmp_path)
+    result = sandbox.exec("sleep 30 & echo done", timeout=15)
+
+    assert result.exit_code == 0, result.stderr
+    assert "done" in result.stdout
+    assert result.duration_ms < 5000, (
+        f"exec 返回延迟 {result.duration_ms}ms——管道写端被孤儿攥住（SB-03 回归）"
+    )
+    probe = subprocess.run(
+        ["pgrep", "-f", "sleep 30"], capture_output=True, text=True, check=False
+    )
+    assert probe.returncode == 1 and not probe.stdout.strip(), (
+        f"正常退出后仍有残留孤儿：{probe.stdout}"
+    )

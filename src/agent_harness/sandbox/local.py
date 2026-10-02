@@ -324,6 +324,16 @@ class LocalSubprocessSandbox(Sandbox):
                         except subprocess.TimeoutExpired:  # pragma: no cover
                             exit_code = -1
                         break
+        # ── SB-01/#549-a：正常返回路径的幂等整组回收 ─────────────────────
+        # 超时/取消分支已经整树击杀；正常 wait() 返回后 POSIX 上从不回收——
+        # shell 退出后其后台孙进程（`sleep 78 & echo done` 形态）被 init 收养、
+        # 永久泄漏，还攥着管道写端让 exec 晚 ~2×join(5) 才返回（SB-03）。
+        # 正常命令此时树已空：killpg 打在空组上是 ProcessLookupError（幂等
+        # 无害）；有残留则整组 SIGKILL，reader 立刻见到 EOF。Windows 正常路径
+        # 不需要它：cmd 无 shell 级后台（`&` 是顺序执行），且 Job Object
+        # KILL_ON_JOB_CLOSE 在句柄关闭时兜底整树终止（见 _create_windows_job）。
+        if os.name == "posix" and not timed_out and not cancelled:
+            self._reclaim_process_group(process)
         for reader in readers:
             reader.join(5)
         if windows_job is not None:
@@ -458,6 +468,21 @@ class LocalSubprocessSandbox(Sandbox):
             return bool(kernel32.TerminateJobObject(job, _WINDOWS_TERMINATE_EXIT_CODE))
         except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
             return False
+
+    @staticmethod
+    def _reclaim_process_group(process: subprocess.Popen) -> None:
+        """正常返回后的幂等整组回收（SB-01/#549-a）。
+
+        只在 POSIX 正常退出路径调用（超时/取消走 _kill_process_tree；Windows
+        由 Job Object KILL_ON_JOB_CLOSE 兜底）。子进程经 start_new_session
+        自成进程组（pgid == pid），组内残留被 SIGKILL；组已空时
+        ProcessLookupError 被 suppress——幂等、无害。SIGKILL 经 getattr 解析：
+        Windows 的 signal 模块没有它，本方法在 Windows 上仅被单测直呼
+        （call site 有 os.name 守卫），fallback 值不参与生产语义。
+        """
+        sig = getattr(signal, "SIGKILL", signal.SIGTERM)
+        with suppress(OSError):
+            os.killpg(process.pid, sig)
 
     @staticmethod
     def _kill_process_tree(process: subprocess.Popen) -> None:
