@@ -33,6 +33,11 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.logging import setup_logging
+from agent_harness.storage import (
+    OperationContext,
+    OperationState,
+    SqliteOperationLedger,
+)
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
@@ -1050,3 +1055,79 @@ class TestToolFailureMapping:
         assert (result.error_code, result.retryable, result.message) == (
             failure.error_code, failure.retryable, failure.message,
         )
+
+
+# ============================================================================
+# #519 BUG-09：重复 tool_call_id —— 可恢复工具错误，不是 run 级 IntegrityError
+# ============================================================================
+
+
+class TestDuplicateToolCallId:
+    """模型偶发重复返回同一 tool_call_id（来源报告 brutal-test-r3 V9 实测）。
+
+    `operations` 表主键 `(session_id, tool_call_id)`：第二次接纳同一 ID 时
+    `ledger.create` 撞主键。修复前 IntegrityError 未分类冒泡到 runtime 失败
+    兜底 → 整个 run `run/failed(IntegrityError)`——模型一次口误升级成 run 级
+    致命失败。规格 `04 §4` 的 REPEATED_TOOL_CALL 错误码就是为这类
+    「约束冲突 → 可恢复工具错误（回模型自纠）」准备的。
+    """
+
+    @pytest.mark.asyncio
+    async def test_duplicate_id_returns_repeated_error_not_fatal(self, tmp_path: Path):
+        registry = ToolRegistry()
+        counting = CountingTool()
+        registry.register(counting)
+        ledger = SqliteOperationLedger(tmp_path / "state.db")
+        await ledger.initialize()
+        executor = ToolExecutor(registry, operation_ledger=ledger)
+        context = OperationContext(session_id="session-1", run_id="run-1")
+
+        first = await executor.execute(
+            {"id": "call-dup-0001", "name": "count", "args": {"value": 1}},
+            operation_context=context,
+        )
+        assert first.result.ok is True
+
+        second = await executor.execute(
+            {"id": "call-dup-0001", "name": "count", "args": {"value": 2}},
+            operation_context=context,
+        )
+
+        # 修复前：sqlite3.IntegrityError 从这里冒泡（run 级致命）。
+        assert second.result.ok is False
+        assert second.result.error_code == ErrorCode.REPEATED_TOOL_CALL
+        assert second.result.retryable is False
+        assert counting.call_count == 1  # 工具不被重复执行
+        # ledger 首行不被第二次调用改写（仍是第一次的终态）。
+        row = await ledger.get("session-1", "call-dup-0001")
+        assert row is not None
+        assert row.state is not OperationState.PENDING
+
+    @pytest.mark.asyncio
+    async def test_duplicate_id_in_cancelled_cascade_is_classified(self, tmp_path: Path):
+        """串行级联取消路径同 ID 撞主键：同样分类化，不污染首行、不冒泡。"""
+        registry = ToolRegistry()
+        counting = CountingTool()
+        registry.register(counting)
+        ledger = SqliteOperationLedger(tmp_path / "state.db")
+        await ledger.initialize()
+        executor = ToolExecutor(registry, operation_ledger=ledger)
+        context = OperationContext(session_id="session-1", run_id="run-1")
+
+        first = await executor.execute(
+            {"id": "call-dup-0002", "name": "count", "args": {"value": 1}},
+            operation_context=context,
+        )
+        assert first.result.ok is True
+
+        cancelled = await executor._cancel_without_execution(
+            {"id": "call-dup-0002", "name": "count", "args": {"value": 9}},
+            operation_context=context,
+        )
+
+        assert cancelled.result.ok is False
+        assert cancelled.result.error_code == ErrorCode.REPEATED_TOOL_CALL
+        # 首行保持第一次调用的 SUCCEEDED，不被改写成 CANCELLED。
+        row = await ledger.get("session-1", "call-dup-0002")
+        assert row is not None
+        assert row.state is not OperationState.CANCELLED
