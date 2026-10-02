@@ -33,6 +33,7 @@ from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
 from agent_harness.agent.budget import BudgetConflict, BudgetRejection
+from agent_harness.agent.run_budget import INT64_MAX
 from agent_harness.assembly import RecoveryStores, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
@@ -201,9 +202,9 @@ class RunBudgetRequest(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    max_agent_turns_total: int | None = Field(default=None, ge=1)
-    max_model_requests: int | None = Field(default=None, ge=1)
-    max_total_tokens: int | None = Field(default=None, ge=1)
+    max_agent_turns_total: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_model_requests: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     #: 成本 ceiling：非负十进制（`11 §6.1`）。wire 上字符串最稳、数也收——
     #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
     #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
@@ -248,13 +249,13 @@ class SessionBudgetRequest(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    max_agent_turns_total: int | None = Field(default=None, ge=1)
-    max_model_requests: int | None = Field(default=None, ge=1)
-    max_total_tokens: int | None = Field(default=None, ge=1)
+    max_agent_turns_total: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_model_requests: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
     tool_call_limits: dict[str, int] | None = None
     deadline_at: str | None = None
-    max_delegations: int | None = Field(default=None, ge=1)
+    max_delegations: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     expected_version: int | None = Field(default=None, ge=1)
 
 

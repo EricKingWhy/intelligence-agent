@@ -159,3 +159,56 @@ async def test_negative_usage_values_are_dropped_not_aggregated(tmp_path):
     assert finished.data["usage_total"] == {"completion_tokens": 12,
                                             "prompt_tokens": 10,
                                             "total_tokens": 15}
+
+
+# ── #552：越界（> 2**63-1）usage 必须转未知，不得 clamp / 记 0 / 让 run 炸 ──
+
+INT64_MAX = 2**63 - 1
+
+
+def test_usage_extraction_accepts_int64_max_boundary():
+    """锚：恰好 `2**63-1` 仍是可记账的合法值（存储上限，不得误伤）。"""
+    from types import SimpleNamespace
+
+    from agent_harness.agent.runtime import _usage_from_response
+
+    ai = SimpleNamespace(usage_metadata={"total_tokens": INT64_MAX})
+    assert _usage_from_response(ai) == {"total_tokens": INT64_MAX}
+
+
+def test_usage_extraction_drops_oversize_dimension_to_unknown():
+    """越界的 token 维不产出（省略 = 未知），同响应的合法维照常保留；不 clamp、不记 0。"""
+    from types import SimpleNamespace
+
+    from agent_harness.agent.runtime import _usage_from_response
+
+    ai = SimpleNamespace(usage_metadata={
+        "input_tokens": 5, "output_tokens": 7, "total_tokens": 10**30,
+    })
+    usage = _usage_from_response(ai)
+    assert usage == {"prompt_tokens": 5, "completion_tokens": 7}
+    assert "total_tokens" not in usage
+
+    # 全是越界值 ⇒ 整份 usage 无法证明，省略（None），绝不编出 total_tokens
+    ai_only = SimpleNamespace(usage_metadata={"total_tokens": 10**30})
+    assert _usage_from_response(ai_only) is None
+
+
+@pytest.mark.asyncio
+async def test_oversize_usage_is_omitted_from_run_ledger_never_fabricated(tmp_path):
+    """run 级聚合：越界的 `total_tokens` 不得出现（既非 10**30 也非 0）。"""
+    scripted = ScriptedModel([AIMessage(
+        content="完成",
+        response_metadata={"model_name": "qwen-plus-0911"},
+        usage_metadata={"input_tokens": 100, "output_tokens": 10, "total_tokens": 10**30},
+    )])
+    session = make_session(tmp_path)
+    await _runtime(scripted).run(session, "hi")
+
+    completed = _events_of_type(session, MODEL_COMPLETED)[0]
+    assert completed.data["usage"] == {"prompt_tokens": 100, "completion_tokens": 10}
+    assert "total_tokens" not in completed.data["usage"]
+
+    finished = _events_of_type(session, RUN_COMPLETED)[0]
+    assert finished.data["usage_total"] == {"prompt_tokens": 100, "completion_tokens": 10}
+    assert "total_tokens" not in finished.data["usage_total"]

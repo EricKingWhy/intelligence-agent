@@ -59,6 +59,7 @@ from agent_harness.agent.resume_evidence import StuckEvidencePort, steer_applies
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
+    INT64_MAX,
     REASON_STUCK,
     TRIGGER_MAX_CONTEXT_TOKENS,
     BudgetConsumed,
@@ -188,6 +189,11 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     丢弃遵循"缺失/无效时省略"语义，不是伪造；非数值形状已被 AIMessage 自身
     校验挡在构造期（归因 model 失败，语义正确），到不了这里。
 
+    **越界（> `INT64_MAX`）同样丢弃（#552）**：session 账落 SQLite INTEGER 列，
+    越界值入库即 `OverflowError`（BUG-R4-02）。该维转**未知**（省略）而非 clamp /
+    记 0——`11 §6.1`「不可得 ≠ 0」，audit 明令 MUST NOT clamp。run 级 `usage_total`
+    与 session 投影因此**同为未知**，不再 10³⁰ vs 0 分裂。
+
     缓存读取（#200，SDD 03 §162 已声明的 ``cached_tokens`` 兑现）：从
     ``input_token_details`` 取缓存读取量；字段缺失/非数值/负值 ⇒ 键省略
     （**不写 0**——0 会被命中率算成 0% 假话，not_collected 语义才是诚实口径）。
@@ -204,14 +210,20 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
                                     "output_tokens": "completion_tokens",
                                     "total_tokens": "total_tokens"}).items():
         value = meta.get(source_key)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        if (
+            isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value <= INT64_MAX
+        ):
             usage[target_key] = value
     details = meta.get("input_token_details")
     if isinstance(details, dict):
         cached = details.get("cache_read")
         if cached is None:
             cached = details.get("cached_tokens")
-        if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+        if (
+            isinstance(cached, int) and not isinstance(cached, bool)
+            and 0 <= cached <= INT64_MAX
+        ):
             usage["cached_tokens"] = cached
     return usage or None
 
