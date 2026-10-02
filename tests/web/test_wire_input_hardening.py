@@ -31,6 +31,8 @@ B 节「``detail`` 保持字符串契约」实现，故断言**字符串信封**
 
 from __future__ import annotations
 
+import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,7 @@ from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
 from agent_harness.web.app import create_app
+from agent_harness.web.wire_safety import BODY_MAX_DEPTH
 
 JSON_HDR = {"content-type": "application/json"}
 
@@ -232,3 +235,196 @@ def test_legal_existing_requests_are_not_harmed(tmp_path: Path) -> None:
     # approve：既有合法短 reason（approval_id=None seam ⇒ 200）
     approved = _approve(client, "approved by test")
     assert approved.status_code == 200, approved.text
+
+
+# ── 6. WS 帧级深度守卫（#562 RL-04；用户 2026-10-03 拍板覆盖 WS）────────────
+#
+# 为什么 WS 也必须覆盖（与 HTTP body 守卫同源，但后果更坏）：
+#   ``/api/ws`` 的 ``send_message`` 帧是本仓**唯一绕过 pydantic** 的写入口。
+#   深帧在 ``websocket.py`` 的 ``json.loads(raw)`` 处抛 ``RecursionError``；该处
+#   **只 catch ``json.JSONDecodeError``**，于是 ``RecursionError`` 逃到读循环末尾的
+#   ``except Exception: logger.debug``——读循环静默死掉 ⇒ **客户端无任何帧、连接
+#   静默断开**（比 HTTP 的裸 400 更难诊断）。
+#
+# 修法与 HTTP 同源：在 ``json.loads`` **之前**用 ``json_container_depth`` 判深度，
+# 超限回 ``{"type": "error", "message": BODY_TOO_DEEP_DETAIL}`` 帧并 ``continue``
+# ——与 #548 的 lone-surrogate 帧级拒绝同一形态（连接存活、零副作用）。
+#
+# 与 #548 守卫的**顺序**：深度守卫在 ``json.loads`` 之前（解析前、原始文本层）；
+# #548 的 ``lone_surrogate_path`` 在解析后的 ``send_message`` 分支。深度问题会在
+# ``json.loads`` 内部先爆栈，**结构上够不到**解析后的那道守卫，故必须让它更早。
+#
+# 判别式（两态互斥，可独立复核）：
+#   命中 ⇒ ``{"type": "error", "message": == BODY_TOO_DEEP_DETAIL}``；
+#   放行 ⇒ 到达原分支（pong / snapshot / cancelled / 业务 error），message ≠ 配额串。
+#
+# 深度口径与 HTTP 完全一致（最外层容器记 1）——``_ws_deep_frame`` 里由
+# ``json_container_depth`` 亲自对账，避免手算漂移。
+
+
+def _ws_deep_frame(
+    depth: int,
+    *,
+    msg_type: str = "ping",
+    session_id: str | None = None,
+    content: str | None = None,
+) -> str:
+    """构造总容器深度恰为 ``depth`` 的 WS 文本帧。
+
+    depth = 1（外层对象）+ ``depth - 1`` 层数组（放进 ``pad`` 字段）。手工拼串
+    （而非先建深 Python 对象再 ``json.dumps``）——后者在深输入上会自己爆栈。
+    """
+    assert depth >= 1
+    inner = depth - 1
+    fields = ['"type": ' + json.dumps(msg_type)]
+    if session_id is not None:
+        fields.append('"session_id": ' + json.dumps(session_id))
+    if content is not None:
+        fields.append('"content": ' + json.dumps(content))
+    fields.append('"pad": ' + "[" * inner + "0" + "]" * inner)
+    frame = "{" + ", ".join(fields) + "}"
+    # 自证：夹具产出的深度必须等于请求值（手算错了这里当场红，而非静默改判据）。
+    from agent_harness.web.wire_safety import json_container_depth
+
+    assert json_container_depth(frame.encode("utf-8")) == depth, frame[:80]
+    return frame
+
+
+def _recv_ws_frame(ws) -> dict:
+    """收一帧业务帧，跳过服务端心跳 ``server_ping``（默认 2s 一次，正常不出现）。"""
+    for _ in range(10):
+        frame = json.loads(ws.receive_text())
+        if frame.get("type") != "server_ping":
+            return frame
+    raise AssertionError("连续多帧都是 server_ping，未收到业务帧")
+
+
+def _seed_session(client: TestClient) -> str:
+    created = client.post("/api/sessions?launch=false", json={})
+    assert created.status_code == 200, created.text
+    return created.json()["session_id"]
+
+
+def test_ws_deep_send_message_frame_refused_with_no_side_effects(tmp_path: Path) -> None:
+    """depth=101 的 ``send_message`` 帧 ⇒ 配额 error 帧 + 零副作用 + 连接存活。
+
+    ``content`` 故意留空：改前（无守卫）帧能穿过 ``json.loads``，落到
+    ``send_message`` 分支的「missing session_id or content」——**不触发 run**，
+    使改前读数可在不挂死的前提下取得（判别式落在 message 上，而非是否回帧）。
+    有守卫后走的是配额分支，与业务分支互斥。
+    """
+    client = _client(tmp_path)
+    sid = _seed_session(client)
+    events = tmp_path / "sessions" / sid / "events.jsonl"
+    before = events.read_bytes()
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(_ws_deep_frame(101, msg_type="send_message", session_id=sid))
+        frame = _recv_ws_frame(ws)
+        # 连接必须存活：随后一条合法 ping 仍能拿到 pong。
+        ws.send_text(json.dumps({"type": "ping"}))
+        alive = _recv_ws_frame(ws)
+
+    assert frame.get("type") == "error", frame
+    assert frame.get("message") == _EXPECTED_QUOTA_DETAIL, frame
+    assert alive.get("type") == "pong", alive
+    assert events.read_bytes() == before, "被拒深帧不得留下任何副作用（events.jsonl 逐字节不变）"
+
+
+def test_ws_depth_boundary_limit_passes_plus_one_refused(tmp_path: Path) -> None:
+    """边界：depth == ``BODY_MAX_DEPTH``（100）放行、``+1``（101）拒绝。"""
+    client = _client(tmp_path)
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(_ws_deep_frame(BODY_MAX_DEPTH))
+        allowed = _recv_ws_frame(ws)
+        ws.send_text(_ws_deep_frame(BODY_MAX_DEPTH + 1))
+        refused = _recv_ws_frame(ws)
+        ws.send_text(json.dumps({"type": "ping"}))
+        alive = _recv_ws_frame(ws)
+
+    # 100 放行 ⇒ 走到 ping 分支 ⇒ pong（不是 error 帧）
+    assert allowed.get("type") == "pong", allowed
+    assert allowed.get("message") != _EXPECTED_QUOTA_DETAIL, allowed
+    # 101 拒绝 ⇒ 配额 error 帧
+    assert refused.get("type") == "error", refused
+    assert refused.get("message") == _EXPECTED_QUOTA_DETAIL, refused
+    assert alive.get("type") == "pong", alive
+
+
+def test_ws_depth_guard_runs_before_json_parse(tmp_path: Path) -> None:
+    """守卫必须**先于** ``json.loads(raw)``（判据可独立复核）。
+
+    同一段**非法 JSON** 文本，只变容器深度：深（101）⇒ 配额 error；浅（3）⇒
+    走原解析路径的 ``JSONDecodeError`` ⇒ ``"invalid JSON"``。既然浅的那条确实
+    触发了 ``json.loads`` 的失败分支，而深的那条**没有**，唯一变量是深度 ⇒
+    深度判定发生在解析之前。把守卫移到 ``json.loads`` 之后，本例如期变红
+    （深的那条会变成 ``"invalid JSON"``）。
+
+    深度取 101 而非数千：数千会让改前的 ``json.loads`` 抛 ``RecursionError``、
+    读循环静默死掉 ⇒ 客户端无帧、本用例**挂死**（recon562 §8 实测坑），
+    取 101 既越界又不触发解析器爆栈，改前读数稳定可得。
+    """
+    client = _client(tmp_path)
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text("[" * 101 + "not-json")
+        deep = _recv_ws_frame(ws)
+        ws.send_text("[" * 3 + "not-json")
+        shallow = _recv_ws_frame(ws)
+
+    assert deep.get("type") == "error", deep
+    assert deep.get("message") == _EXPECTED_QUOTA_DETAIL, deep
+    assert shallow.get("type") == "error", shallow
+    assert shallow.get("message") == "invalid JSON", shallow
+
+
+def test_ws_depth_guard_call_precedes_json_loads_in_source(tmp_path: Path) -> None:
+    """接线守卫（结构证明）：源码里守卫调用位于 ``json.loads(raw)`` **之前**。
+
+    与 ``test_web_ws_snapshot_offload`` 的接线守卫同法——深度守卫最可能被
+    "顺手挪到解析之后"而静默失效（测试仍能过一部分）。直接读 handler 源码
+    比对两个调用的偏移，任何人重排都能复核。
+    """
+    del tmp_path  # 纯源码断言，不需要夹具
+    from agent_harness.web import websocket as wsmod
+
+    source = inspect.getsource(wsmod.handle_websocket)
+    assert "json_container_depth(" in source, "深度守卫调用不在 handler 里"
+    assert "BODY_MAX_DEPTH" in source, "深度上限常量没被引用"
+    guard_at = source.index("json_container_depth(")
+    parse_at = source.index("json.loads(raw)")
+    assert guard_at < parse_at, (
+        "深度守卫必须落在 json.loads(raw) 之前，否则深帧会先在解析处爆栈（守卫够不到）"
+    )
+
+
+def test_ws_legal_frame_shapes_are_not_harmed(tmp_path: Path) -> None:
+    """反向锚：四种既有合法帧的真实形状（深度 1–3）不得被深度守卫误伤。
+
+    - ``ping`` ⇒ ``pong``；
+    - ``subscribe``（真 session）⇒ ``snapshot``；
+    - ``send_message``（不存在的 session，避免起真 run）⇒ 业务 error，非配额；
+    - ``cancel``（真 session）⇒ ``cancelled`` / 业务 error，非配额。
+    """
+    client = _client(tmp_path)
+    sid = _seed_session(client)
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(json.dumps({"type": "ping"}))
+        pong = _recv_ws_frame(ws)
+
+        ws.send_text(json.dumps({"type": "subscribe", "session_id": sid}))
+        snapshot = _recv_ws_frame(ws)
+
+        ws.send_text(json.dumps({
+            "type": "send_message", "session_id": "no-such-session", "content": "hi",
+        }))
+        msg_err = _recv_ws_frame(ws)
+
+        ws.send_text(json.dumps({"type": "cancel", "session_id": sid}))
+        cancel = _recv_ws_frame(ws)
+
+    assert pong.get("type") == "pong", pong
+    assert snapshot.get("type") == "snapshot", snapshot
+    assert snapshot.get("session_id") == sid, snapshot
+    for got in (msg_err, cancel):
+        # 放行的判据：拿到的是业务回声，而不是深度配额串（误伤会回配额串）。
+        assert got.get("message") != _EXPECTED_QUOTA_DETAIL, got

@@ -28,6 +28,11 @@ import anyio
 from fastapi import WebSocket, WebSocketDisconnect
 
 from agent_harness.web.serialization import build_event_payload
+from agent_harness.web.wire_safety import (
+    BODY_MAX_DEPTH,
+    BODY_TOO_DEEP_DETAIL,
+    json_container_depth,
+)
 
 if TYPE_CHECKING:
     from agent_harness.session.runmanager import RunManager
@@ -295,6 +300,30 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             while True:
                 raw = await websocket.receive_text()
                 last_received[0] = time.monotonic()
+
+                # #562 RL-04：WS 帧的 JSON 嵌套深度配额——必须落在下面
+                # ``json.loads`` **之前**。WS 是唯一绕过 pydantic 的写入口，深帧会让
+                # ``json.loads`` 抛 ``RecursionError``；那里**只 catch
+                # ``JSONDecodeError``**，于是它逃到本函数的 ``except Exception``
+                # （仅 ``logger.debug``）⇒ 客户端收不到任何帧、连接**静默断开**
+                # （比 HTTP 的裸 400 更难诊断）。判据/常量/文案与 HTTP body 守卫**同一
+                # 套**（``wire_safety``）：入口拒绝 + 零副作用，与 #548 的 lone
+                # surrogate 帧级拒绝同形。
+                #
+                # 与 #548 守卫的顺序：此处是**解析前**的原始文本层，#548 的
+                # ``lone_surrogate_path`` 在解析后的 ``send_message`` 分支。深度问题
+                # 在 ``json.loads`` 内部先爆栈，**结构上到不了**解析后的那道守卫，
+                # 故深度守卫必须更早；两者互不冲突（合法深度的帧照常走到 #548）。
+                #
+                # ``surrogatepass`` 只为让 ``encode`` 成为全函数：lone surrogate 编出
+                # 的字节均 ≥ 0x80，不参与 ``{ [ } ]`` 计数，既不影响深度、也不新增
+                # 失败面（正常帧本就可 utf-8 编码）。
+                frame_depth = json_container_depth(
+                    raw.encode("utf-8", "surrogatepass")
+                )
+                if frame_depth > BODY_MAX_DEPTH:
+                    await _send_json({"type": "error", "message": BODY_TOO_DEEP_DETAIL})
+                    continue
 
                 try:
                     msg = json.loads(raw)
