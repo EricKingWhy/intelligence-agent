@@ -39,6 +39,8 @@
 > 两票在 GitHub 上仍为 OPEN（未集成未关单）。`#298` 的逐票记录见文末
 > 「MEM-V2-2（`#298`）T1–T6b 施工记录」段。
 
+> **当前状态（2026-10-02，QA 加固批 #515/#516/#517 已交付待集成）**：分支 `fix/i515-i517-qa-hardening`（基点 `d7f87597` = origin/main）tip `d84d7358`，6 commits：#515 `99de6d6e` → #516 `8bdb4dd0` → #517 `dd73de2e` → F401 `6dd8e4b7` → 双轴处置 `2fcc7506` → 修后重审机械处置 `d84d7358`；三票均 CLAIM + in-progress 标签。#515 = `retry_on_busy` 写重试覆盖全部 6 张 Store（P2-3 扩面 delegation_tree/workspace/transport）+ `_STORAGE_ERROR_STATUS`→503（projects 族 `_translated()` 一臂 9 端点 + sessions 族 create/resume/messages/flush 四 launch 臂）+ checkpoint 失败进程级计数 + `/api/health` 字段 + JSONL 落点；#516 = 分页 `limit(1–500)/offset`（422）+ 摘要 `(st_size, st_mtime_ns)` 双戳缓存 + `workspace_refs_of_sessions` 窗口化 + scandir 单 stat 并行列表（顺序 AC 全达：cold 135ms / warm limit=50 p95 167ms / limit=1 105ms；**100 并发 p95≈13s 偏离 AC<1s——mtime 倒序契约禁止缓存 id 列表，每请求 4000 fresh stat 与 NTFS 吞吐结构性冲突，§9.1.1 待用户裁决**）；#517 = `ModelClientConstructionError` 四臂 503（`__cause__` 保留）+ 新增 `web/error_contract.py` openapi 声明面（503×15 端点 / 500 全 /api 操作 / SSE additive / 既有 422 oneOf）+ `SESSION_KEY_PATTERN`{1,128} 单源 + `/lineage` 补 422。审查：两轴发现@`6dd8e4b7`（P2:4 P3:7，无 P0/P1；变异 M1/M2/M3 失败集合互不相交）→ 处置 `2fcc7506` → 双轴修后重审@`2fcc7506`（旧 5 项全闭合；新 P2-A/P2-B/P3-C）→ 机械处置 `d84d7358`（P2-A 声明补齐 + P3-C monkeypatch 目标修正 + 作者红证按 §8.1.6 PYTHONPATH 副本重做成立 + 四臂行为测试）。门禁：Gate-0 派单前裸跑@`6dd8e4b7` **5/6**（❌⊆本批代码笔，json 落 `docs/gate/`）；覆盖闸门 exit 0（台账行 `t515-t517-qa-hardening-d7f87597-d84d7358.tsv`）；终树全量 **5124 passed / 9 skipped / 51 deselected / 0 failed（724.97s）**；终态 Gate-0 记账后 clean 树补跑落盘。**残余待用户裁决**：修后重审 P2-B（`admit_session_step` commit 后读路径重试理论双计数，窗口极窄方向保守）、#516 并发 AC 偏差（四选项）。**待批（§14.4）**：push / 开 PR / merge；#515/#517 证据评论+关单+摘标签按认领协议收口，#516 保持 open 待裁决。明细见本文件本批节 + 2026-10 归档「QA 加固批」节。
+
 > **当前状态（2026-10-02，#506/#507 已集成并关单）**：分支 `fix/t506-t507-r62-precision`（基点 `2cfb01f1`）→ 先回后正并入 origin/main `ff20b89d`（merge `eb2aa301`，tree `373c9f62`；月档 EOF 冲突按并集裁决）→ **PR #514 CI gate0 绿（35s）+ gitleaks 绿 → merge `645477b5`**（main tree `fd2c28d3` = 分支 tip 树，逐字相同）→ **#506 关单（issuecomment-5938538793）/ #507 关单（issuecomment-5938549306）**；本地 main ff 对齐 `645477b5`；临时 worktree `/tmp/t506-gate-wt` 已清理（已获批）。读数：Gate-0 裸全量 **6/6**（51.0s，`docs/gate/eb2aa301…json`）；全量 pytest（合并树）**5076P+2S+51D，唯一红 = `test_web_batch51_spec_contract.py::test_approval_queue_gc_after_run_completes` 在册既有顺序 flake（隔离 3× 全绿，pre-existing，tracker :3903 先例）**；覆盖闸门 exit 0；ruff clean。审查：独立 7 维发现+修后重审双 APPROVE；双轴发现 PASS-WITH-FINDINGS P0:0 P1:0；Spec 修后重审 FAITHFUL P0:0；**Standards 轴修后重审 3 次基础设施失败 ⇒ §8.3.4 单轴有界替代 + 待补审残余**。变异 M1=2红 / M2=1红 / M3=1红。**残余**：Standards 轴修后重审待补（下批/平台恢复后）。明细见本文件本批节 + 2026-10 归档「#506/#507」节。
 
 > **当前状态（2026-09-25）**：`#297`–`#301` 已集成并 CLOSED；#299 AC10 的冻结语料 Recall@6=0.95、真实 Milvus hybrid 检索及证据已随 `fbb8a98c` 集成，GitHub issue 已关闭。`#302` / `#303` 已解除阻塞，`#304` 仍等后二票。逐票历史记录保留在下文。
@@ -141,6 +143,18 @@
 - **gate0（两项环境发现待裁决）**：--no-record 裸跑 diff-check/oxlint/tsc/guards 绿——guards 须 `PYTHONPATH=<本仓>/src`（**发现①**：本仓 .venv 的 .pth 把 `agent_harness` 解析到 codex 遗留 worktree `issue-378-e2e-flakes`，guards expected 侧量错树）；ruff 2 错 + 落盘拒绝均由 4 个非本批未跟踪用户文件（`codex_issue346_write.py` 等）造成（**发现②**；tracked 树单独 All checks passed）⇒ **裸全量读数落盘被阻断，待用户裁决**（不代提交/不代删用户文件）。coverage FAIL = 本笔无审查行的预期形状（台账行入库后闭合）。
 - **台账**：`t509-t510-e2e-stability-2cfb01f1-c22e4275.tsv`（774 字符）。
 - **遗留**：①gate0 落盘与两项环境发现待用户裁决；②push/开 PR（描述携带机理+依据+读数）/合并待批；③红证副本 `D:/tmp-t510-red` 用毕待删。明细见 `docs/phase_status/2026-10.md` 本批节。
+
+---
+
+## QA 加固批：#515 SQLite 写重试+checkpoint 可见 / #516 列表分页+性能 / #517 错误面一致性（2026-10-02 交付：分支 `fix/i515-i517-qa-hardening`，基点 `d7f87597`，tip `d84d7358`；已 CLAIM、未 push/PR——§14.4 待批）
+
+- **来源与授权**：用户指令「你认领3张issue去做吧」+ 五步认领协议（CLAIM 评论固定格式 + in-progress 标签 FBCA04 + 收口关单摘标签）；push/PR/合并需用户逐项批准。三票前置检查干净后逐票 CLAIM（开工点 `d7f87597`）。
+- **交付**（6 commits，全程 TDD 红→绿）：#515 `99de6d6e`（`retry_on_busy` 装饰器 0.05/0.15/0.3s 梯子 + `StorageBusyError`→503 + checkpoint 失败计数/health/JSONL）+ 处置扩面 `2fcc7506`（全部 6 张 Store + projects `_translated()` + 四 launch 臂）；#516 `8bdb4dd0`（limit/offset 422 + 双戳摘要缓存 + 窗口化 refs + scandir 并行）+ `6dd8e4b7`（F401）；#517 `dd73de2e`（构造错误四臂 503 + error_contract.py 声明面 + SESSION_KEY {1,128} + lineage 422）。
+- **读数**：#516 顺序 cold 135ms / warm p95 167ms / limit=1 105ms（AC 全达）；100 并发 p95≈13s（100/100 完成）**偏离 AC<1s**，根因 = mtime 倒序契约（承重测试钉住）禁止缓存 id 列表 ⇒ 每请求 4000 fresh stat 撞 NTFS 元数据吞吐；修后重审独立核实论证链。**§9.1.1 四选项待用户裁决**（fs-watch 失效缓存 / 契约修订 / 接受现状 / 换平台验证）。
+- **审查**：两轴发现@`6dd8e4b7`（Correctness/Spec P2:3 P3:4 + Standards P2:1 P3:3，无 P0/P1；变异 M1 缓存守卫 / M2 锁识别 / M3 长度上限 失败集合互不相交）→ 处置 `2fcc7506` → 双轴修后重审各 1 轮@`2fcc7506`（旧 5 项全闭合；新 P2-A projects 族 503 未声明 / P2-B admit commit 后读 / P3-C workspace 行为测试空转绿）→ 机械处置 `d84d7358`（P2-A 声明补齐 + P3-C 修正 `_BUSY_TIMEOUT_MS` 目标 + 作者红证 PYTHONPATH 副本重做 + 四臂行为测试）。全程只读主树、变异均在 §8.1.6 副本。
+- **门禁**：Gate-0 派单前@`6dd8e4b7` **5/6**（唯一红=coverage，❌⊆本批 4 代码笔；首轮 dd73de2e ruff F401 修于 `6dd8e4b7`，两份读数 json 均落 `docs/gate/`）；覆盖闸门 exit 0（台账 `t515-t517-qa-hardening-d7f87597-d84d7358.tsv`）；终树全量 **5124P+9S+51D / 0 failed（724.97s）**；终态 Gate-0 记账后 clean 树补跑 6/6 落盘。
+- **残余待裁决**：①修后重审 P2-B：`admit_session_step`（delegation_tree.py:500-502）commit 后读路径，锁错整方法重试理论可双计数 turns/requests——窗口极窄（WAL 读锁饥饿须超整个重试预算）且方向保守（预算早停）；②#516 并发 AC（上述）。登记不修：分页短行占预算（O(limit) 结构性）、provider `except Exception` 边界、未处理异常双写日志、`_summary_cache` 无淘汰。
+- **遗留**：①push / 开 PR / merge 待批；②#515/#517 证据评论+关单+摘标签（协议收口）；③#516 保持 open 待裁决。明细见 `docs/phase_status/2026-10.md`「QA 加固批」节。
 
 ---
 
