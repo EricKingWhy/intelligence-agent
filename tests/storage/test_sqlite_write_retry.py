@@ -26,10 +26,12 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
+import agent_harness.storage.sqlite as storage_sqlite
 from agent_harness.agent.run_budget import SessionLimits
 from agent_harness.storage import (
     SessionMeta,
@@ -38,6 +40,7 @@ from agent_harness.storage import (
     SqliteSessionMetaStore,
 )
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.storage.operation import Operation, OperationState
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.workspace.store import SqliteWorkspaceStore
@@ -311,3 +314,178 @@ async def test_admit_session_step_retry_does_not_double_reserve(tmp_path, monkey
     assert row == (1, 1), f"账面必须恰好一次预留，实际 {row}"
     assert admission.snapshot.consumed.agent_turns == 1
     assert admitted_events == 1, f"step_admitted 事件恰好一条，实际 {admitted_events}"
+
+
+@pytest.mark.asyncio
+async def test_update_session_limits_retry_does_not_fake_409(
+    tmp_path, monkeypatch,
+) -> None:
+    """#544 ①：update_session_limits 的 commit 后快照读撞锁 → 重跑不得伪 409。
+
+    与 P2-B 同型：CAS 更新在 commit 之后还有一次 `_session_snapshot` 读，该读
+    撞锁时 version 已 +1 并持久化，整方法重跑撞自己的 CAS（expected_version
+    失配）抛 BudgetConflict——调用方拿到伪 409，但账其实已改（非零副作用）。
+
+    毒化第 1 次 `_session_snapshot` 读：修复前位于 commit 之后（毒窗内，重跑
+    撞 CAS ⇒ BudgetConflict）；修复后位于事务内 commit 之前（命中即整体回滚，
+    重跑从旧 version 重新走完整 CAS 路径，正常返回）。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    key = "sess-i544-limits"
+    await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=10, max_delegations=4),
+    )
+
+    original = SqliteDelegationTreeLedger._session_snapshot
+    calls = {"n": 0}
+
+    async def poisoned_first_read(self, connection, budget_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return await original(self, connection, budget_key)
+
+    monkeypatch.setattr(SqliteDelegationTreeLedger, "_session_snapshot", poisoned_first_read)
+
+    snapshot = await ledger.update_session_limits(
+        key, expected_version=1,
+        limits=SessionLimits(max_agent_turns_total=5, max_delegations=2),
+    )
+    assert snapshot.version == 2
+    assert snapshot.limits.max_agent_turns_total == 5
+    assert snapshot.limits.max_delegations == 2
+
+    con = sqlite3.connect(ledger.database_path)
+    try:
+        row = con.execute(
+            "SELECT version, max_agent_turns_total, max_delegations"
+            " FROM session_budgets WHERE budget_key = ?",
+            (key,),
+        ).fetchone()
+        updated_events = con.execute(
+            "SELECT COUNT(*) FROM session_budget_events"
+            " WHERE budget_key = ? AND kind = 'limits_updated'",
+            (key,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert row == (2, 5, 2), f"账面必须恰好一次更新，实际 {row}"
+    assert updated_events == 1, f"limits_updated 事件恰好一条，实际 {updated_events}"
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_budget_retry_converges_without_duplicate_event(
+    tmp_path, monkeypatch,
+) -> None:
+    """#544 ②：ensure_session_budget 的 commit 后快照读撞锁 → 重跑收敛为钉。
+
+    与 ① 同型，但本方法重跑本身幂等（INSERT OR IGNORE + 重跑时 `changed=False`
+    不再落事件），无行为级缺陷——本测试**钉住收敛性质**（毒化读后恰好一条
+    `limits_tightened` 事件、version 不动、收窄生效），防将来把 ensure 改成
+    非幂等；修复本身是结构统一（快照读移入事务内 commit 前），不改变可观察
+    行为，故本测试修复前后都绿（pin，非红→绿）。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    key = "sess-i544-ensure"
+    await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=10, max_delegations=4),
+    )
+
+    original = SqliteDelegationTreeLedger._session_snapshot
+    calls = {"n": 0}
+
+    async def poisoned_first_read(self, connection, budget_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return await original(self, connection, budget_key)
+
+    monkeypatch.setattr(SqliteDelegationTreeLedger, "_session_snapshot", poisoned_first_read)
+
+    snapshot = await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_agent_turns_total=5, max_delegations=4),
+    )
+    assert snapshot.limits.max_agent_turns_total == 5
+
+    con = sqlite3.connect(ledger.database_path)
+    try:
+        row = con.execute(
+            "SELECT version, max_agent_turns_total FROM session_budgets"
+            " WHERE budget_key = ?",
+            (key,),
+        ).fetchone()
+        tightened_events = con.execute(
+            "SELECT COUNT(*) FROM session_budget_events"
+            " WHERE budget_key = ? AND kind = 'limits_tightened'",
+            (key,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert row == (1, 5), f"ensure 不得动 version，收窄须生效，实际 {row}"
+    assert tightened_events == 1, f"limits_tightened 事件恰好一条，实际 {tightened_events}"
+
+
+@pytest.mark.asyncio
+async def test_update_state_retry_rereads_from_clean_state(tmp_path, monkeypatch) -> None:
+    """#544 ③：update_state 的 commit 后回读撞锁 → 重跑不得撞状态机抛 ValueError。
+
+    与 P2-B 同型的第三处：CAS 写在 commit 之后还有 rowcount 检查 + 回读
+    SELECT，回读撞锁时 UPDATE 已持久化，整方法重跑会读到已迁移的状态——
+    PENDING→RUNNING 已发生，重跑校验 RUNNING→RUNNING 不在
+    `_ALLOWED_TRANSITIONS[RUNNING]` 里，对外抛 ValueError（账已改却报错）。
+
+    毒化第 2 次 `SELECT * FROM operations`：修复前它是 commit 之后的回读（毒窗
+    内，重跑撞状态机 ⇒ ValueError）；修复后回读与 rowcount 检查全部移到
+    commit 之前（命中即整体回滚，重跑从 PENDING 重新走 CAS，正常返回）。
+    毒化计数跨连接累计（重试每次新开连接），只毒首尝试的回读。
+    """
+    monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
+    store = SqliteOperationLedger(tmp_path / "harness.db")
+    await store.initialize()
+    await store.create(Operation(
+        session_id="s-i544", tool_call_id="call_1", tool_name="demo",
+        args_identity="{}", state=OperationState.PENDING,
+    ))
+
+    real_connect = storage_sqlite._connect
+    selects = {"n": 0}
+
+    @asynccontextmanager
+    async def poisoned_connect(database_path):
+        async with real_connect(database_path) as connection:
+            original_execute = connection.execute
+
+            async def execute(sql, *args, **kwargs):
+                if "SELECT * FROM operations" in sql:
+                    selects["n"] += 1
+                    if selects["n"] == 2:
+                        raise sqlite3.OperationalError("database is locked")
+                return await original_execute(sql, *args, **kwargs)
+
+            connection.execute = execute
+            yield connection
+
+    monkeypatch.setattr("agent_harness.storage.sqlite._connect", poisoned_connect)
+
+    updated = await store.update_state("s-i544", "call_1", OperationState.RUNNING)
+    assert updated.state is OperationState.RUNNING
+
+    con = sqlite3.connect(tmp_path / "harness.db")
+    try:
+        row = con.execute(
+            "SELECT state FROM operations WHERE session_id = ? AND tool_call_id = ?",
+            ("s-i544", "call_1"),
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert row == ("RUNNING",), f"状态必须恰好迁移一次，实际 {row}"
