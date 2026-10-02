@@ -454,3 +454,75 @@ async def test_real_client_session_wires_protocol_fault_handler():
         read, write = client_streams
         session = conn._open_session(read, write)
     assert session._message_handler == conn._on_protocol_message
+
+
+async def _mini_mcp_server(read_end, write_end):
+    """最小真协议 server：只应答 initialize（真实握手），其余请求沉默——
+    等待响应的在途调用正是要被 F2 fault 打断的对象（remote hang 形态）。"""
+    from mcp import types
+    from mcp.shared.message import SessionMessage
+
+    async for item in read_end:
+        msg = getattr(item, "message", None)
+        if isinstance(msg, types.JSONRPCRequest) and msg.method == "initialize":
+            result = types.InitializeResult(
+                protocolVersion="2025-06-18",
+                capabilities=types.ServerCapabilities(),
+                serverInfo=types.Implementation(name="mini", version="0"),
+            ).model_dump(by_alias=True)
+            await write_end.send(SessionMessage(
+                message=types.JSONRPCResponse(jsonrpc="2.0", id=msg.id, result=result),
+            ))
+        # 其余请求沉默：永不响应
+
+
+@pytest.mark.asyncio
+async def test_real_dispatch_loop_delivers_malformed_item_and_call_fails_fast():
+    """端到端闭合 F2 的「真实 SDK 读循环」段（Spec 轴审查缺口）：内存流 +
+    真实 ClientSession + 真实 JSONRPCDispatcher 接收循环 + 真实 initialize
+    握手，把 stdio _parse_line 对畸形行的产物形状（Exception 项）注入传输
+    边界——经官方 on_stream_exception → message_handler（连接级 fault）→
+    在途调用快速失败（MCPProtocolError），连接标记断开。
+    残余边界：stdio 行解析（_parse_line → Exception 项）是 SDK 拥有的一步，
+    由 SDK 2.1.1 源码实读背书（tracker 已记录），本测试不重复它。"""
+    import time
+
+    from mcp.shared.memory import create_client_server_memory_streams
+
+    from agent_harness.mcp.client import MCPProtocolError
+
+    injection = {}
+
+    @asynccontextmanager
+    async def real_memory_factory():
+        async with create_client_server_memory_streams() as (client_streams, server_streams):
+            server_read, server_write = server_streams
+            injection["send"] = server_write
+            server_task = asyncio.create_task(_mini_mcp_server(server_read, server_write))
+            try:
+                async with conn._open_session(*client_streams) as session:
+                    yield session
+            finally:
+                server_task.cancel()
+                try:
+                    await server_task
+                except asyncio.CancelledError:
+                    pass
+
+    conn = MCPServerConnection(_config(), session_factory=real_memory_factory)
+    await conn.connect()
+    assert conn.connected is True
+
+    call_task = asyncio.create_task(conn.call_tool("echo", {"text": "hi"}))
+    await asyncio.sleep(0.05)  # 请求已进入写流，调用在途等待响应
+    started = time.monotonic()
+    fault = ValueError('malformed payload: {"jsonrpc":"2.0"}（无 id）')
+    await injection["send"].send(fault)
+
+    with pytest.raises(MCPProtocolError, match="畸形"):
+        await asyncio.wait_for(call_task, timeout=5)
+    assert time.monotonic() - started < 5, "真实读循环送达的 fault 同样快速失败，不烧超时窗"
+    assert conn._protocol_fault is fault, "Exception 项经官方钩子原样抵达连接级 fault"
+    assert conn.connected is False
+
+    await conn.aclose()  # 回收 owner（内存流 CM 在 owner 任务内统一退出）
