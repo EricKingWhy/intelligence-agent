@@ -235,6 +235,16 @@
 
 ---
 
+## 会话交互可靠性批（C 线）：#545 + #561 + #560 + #550（2026-10-03 开工：分支 `fix/t545-t561-session-interaction`，基点 `22cd4d64` = origin/main；未 push/PR——§14.4 待批）
+
+- **来源与授权**：用户 C 线开工指令——工作上述 4 票（#545 P0 + #561/#560/#550 P1），逐票循环（读票面 → 认领 → 当前 main 复现建红测 → 最小修复 → focused 验证 → commit → 更新本 Tracker → 领下一张）；票面 2026-10-03 audit 块覆盖事实层冲突；只做 4 票，范围外只报告。push 分支 / 开 PR / PR merge 各自单独批准。
+- **开工偏差（已核实非破坏）**：本地 main 领先 origin/main 2 笔纯 docs（`40529196` #381 记账 + `9c9101b6` merge sync，`git cherry` 证实未被远端吸收），而 origin/main 已前进到 `22cd4d64`（PR #576 audit docs）。按指令「从最新 origin/main 建分支」执行：工作分支自 `22cd4d64` 建立，本地 main 未做任何 merge/rebase/push（无批准动作）；两条 docs 线的汇合留待集成阶段按 §14.6/§14.7 处理。
+- **既有环境项（非本批引入，stash-proof 证实）**：`tests/session/test_launch_false.py` 4 例红——`ConfigError: 未知 provider: 'shrimp'`（config.py:378）。根因 = 本仓未跟踪的用户本地 `.env:7` `FALLBACK_MODEL_PROVIDER=shrimp`，该测试文件 Settings 未传 `_env_file=None` 而 config.py 的 model_config 读仓库根 `.env`。`git stash` 后在洁净 `22cd4d64` 树复跑同样 4 红 ⇒ 既有环境红，不属本批 Scope，登记待用户裁决（修法属 #517 同族的测试隔离问题，不动）。
+- **#545（P0）已完成（commit `450bc362`，2 文件）**：/messages 与 /resume 续聊路径的交互式审批回调绑定 Session。红证：uvicorn 真服务三腿回归（首启健康对照 → idle messages 弹审批 → resume 弹审批）在 main 上腿 2 抛 `RuntimeError: interactive callback invoked before Session.start`（approval.py:75）。根因与 audit 块一致：`build_resume_runtime`（service.py:1445）`#423` 分支（默认档 + auto_approve=false）构建了 `_InteractiveCallbackHolder` 却漏置外层 `interactive=True`，尾部 `bind_session`（:1539）与审批队列 GC（:1545）都只认这个标志。修复一行 + 注释；新测试 `tests/web/test_web_messages_interactive_binding.py` 338 行两用例全绿（含 ADR-0041 D5 pending 禁改档 409 + cancel 后 fail-closed deny 结清的断言）。focused 回归绿（`test_launch_false.py` 4 环境红除外）；ruff clean。
+- **待办**：#561 施工中（认领完成）；#560/#550 未开工；批次收口（全量门禁 + Gate-0 + 覆盖闸门 + 两轴审查）在 4 票全绿后。
+
+---
+
 ## 历史记录：流程切换 + 批次记录（V2 批量审查循环）
 
 > **自愈条款**：不确定当前在循环哪一步 / 不记得 fixed point 或批次边界 / 上下文刚被压缩过
