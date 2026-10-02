@@ -222,6 +222,17 @@ def _model_name_from_response(ai: Any) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
+def _finish_reason_from_response(ai: Any) -> str | None:
+    """从响应元数据取 finish_reason；键缺失返回 None，语义交调用方回落。
+
+    刻意不做 ``isinstance``/空串归一：这里必须与 R6-2 守卫的原 inline 读取
+    （``.get("finish_reason")`` 原样返回）逐值等价——空串等异常值按原样落到
+    守卫的 catch-all 分支，行为零变化由 verbatim 钉住测试背书。
+    """
+    meta = getattr(ai, "response_metadata", None) or {}
+    return meta.get("finish_reason")
+
+
 def _extract_text(content: Any) -> str:
     """从模型 content 抽纯文本：str 直通；list（Anthropic 风格块）只拼 type=text 的块。
 
@@ -1559,35 +1570,39 @@ class AgentRuntime:
                 # #479：双空但 invalid_tool_calls 有货（#449 的 C 形态——本轮发起过
                 # 工具调用，args 被 salvage 也解析不了）时，消息必须区分形态，
                 # 否则"empty response"会把排查者引向内容过滤/上游失败。#506：截断
-                # 推测只属于 length 收尾（langchain finish_reason 口径下的截断信号，
-                # Pi/deepseek-harness/官方枚举同口径）——stop 等非截断收尾点名
-                # malformed（模型格式坏），finish_reason 缺失回落中性、不臆断截断。
+                # 推测只属于 length 收尾（langchain finish_reason 口径下的截断信号；
+                # Pi 只认 length、DSH 只对 stop+零内容块触发 EMPTY_RESPONSE 且
+                # max-tokens 保留截断语义——同向。实测 langchain_anthropic 写的是
+                # stop_reason 键而非 finish_reason ⇒ Anthropic 线不命中 length
+                # 分支、走中性回落）——stop 等非截断收尾只断言 salvage 后仍解析
+                # 不了，不臆断成因；finish_reason 缺失回落中性、不臆断截断。
                 # 消息按 OBS-008 只进诊断日志（事件侧仍只有类型名），归因与失败
                 # 兜底语义各分支完全一致。
                 extracted_content = _extract_text(ai.content)
                 if not extracted_content and not ai.tool_calls:
                     invalid_calls = getattr(ai, "invalid_tool_calls", None)
                     if invalid_calls:
-                        finish_reason = (getattr(ai, "response_metadata", None) or {}).get(
-                            "finish_reason"
+                        finish_reason = _finish_reason_from_response(ai)
+                        prefix = (
+                            f"model returned an empty response; "
+                            f"{len(invalid_calls)} "
                         )
                         if finish_reason == "length":
-                            raise RuntimeError(
-                                f"model returned an empty response; "
-                                f"{len(invalid_calls)} unparsable tool_call_chunks present"
+                            tail = (
+                                "unparsable tool_call_chunks present"
                                 " (likely truncated — none were executed)"
                             )
-                        if finish_reason is None:
-                            raise RuntimeError(
-                                f"model returned an empty response; "
-                                f"{len(invalid_calls)} unparsable tool_call_chunks present"
+                        elif finish_reason is None:
+                            tail = (
+                                "unparsable tool_call_chunks present"
                                 " (none were executed)"
                             )
-                        raise RuntimeError(
-                            f"model returned an empty response; "
-                            f"{len(invalid_calls)} malformed tool_call arguments"
-                            " (unparsable after salvage — none were executed)"
-                        )
+                        else:
+                            tail = (
+                                "malformed tool_call arguments"
+                                " (unparsable after salvage — none were executed)"
+                            )
+                        raise RuntimeError(prefix + tail)
                     raise RuntimeError(
                         "model returned an empty response (no content, no tool calls)"
                     )

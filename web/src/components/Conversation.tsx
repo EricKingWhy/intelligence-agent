@@ -29,6 +29,7 @@ import { renderMarkdown } from '../lib/markdown';
 import { ToolCard } from './ToolCard';
 import { DelegationNode } from './DelegationNode';
 import { ReasoningBlockView, type ReasoningDisclosureApi } from './ReasoningBlock';
+import { PlanList } from './PlanList';
 import { CopyButton } from './CopyButton';
 import { ApprovalCard } from './ApprovalCard';
 import { ApprovalEchoCard } from './ApprovalEchoCard';
@@ -386,6 +387,11 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
 
   return (
     <div className="conversation">
+      {/* #381（W-27）：进度清单钉在滚动区上方、虚拟化行之外——虚拟器只量 turn 行，
+          外挂块不参与 measureElement（PRD 长任务 §7.5；无清单会话不渲染）。 */}
+      {conversation.plan !== null && conversation.plan.length > 0 && (
+        <PlanList items={conversation.plan} />
+      )}
       {/* key 换 session 时整组 turn remount，触发 fade-in = 切换 crossfade 感 */}
       <div className="conversation-scroll" key={conversation.session_id} ref={setScrollNode}>
         {/* 虚拟化：绝对定位行 + 动态测高（PRD §20.2）。只有窗口内 turn 参与 DOM。 */}

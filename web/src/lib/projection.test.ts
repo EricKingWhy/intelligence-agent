@@ -27,6 +27,8 @@ describe('initConversation', () => {
       model_run_id: null,
       seenSeqs: new Set(),
       undelivered: [],
+      // #381（W-27）：进度清单初值（未出现过清单）——投影的必填字段，形状断言跟着长。
+      plan: null,
     });
   });
 });

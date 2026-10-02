@@ -1,0 +1,1 @@
+2026-10-02	#513 README 配图审查：d905e50b 新增 docs/images/banner.svg（README hero 横幅，手写 SVG：暗色渐变底 + 粉色事件流节点 + seq 刻度；无 script/事件处理器/foreignObject，纯静态矢量图）。王浩宇本人审查通过。分支其余 4 提交均为根目录 markdown，命中 docs-only 自动归属，无需审查。	d905e50b~1..d905e50b

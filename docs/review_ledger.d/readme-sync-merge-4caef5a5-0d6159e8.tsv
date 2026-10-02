@@ -1,0 +1,1 @@
+2026-10-02	机械归属（本行只做机械归属，不是对内容的审查主张）：0d6159e8 = 先回后正合并（Merge origin/main 645477b5 into docs/readme-bilingual，服务端 strict 要求），父一 4caef5a5（本线 #513 tip：README 双语 + 配图 + d905e50b 审查台账行）、父二 645477b5（origin/main = PR #514 merge，携 #506/#507 R6-2 空响应守卫批次 6 笔；main 侧各笔已有归属行，本行不主张）。ort 零冲突；git show --cc --name-only 空表；合并内容面零手工裁决。	4caef5a5..0d6159e8

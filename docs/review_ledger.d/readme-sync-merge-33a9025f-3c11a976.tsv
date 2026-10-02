@@ -1,0 +1,1 @@
+2026-10-02	机械归属（本行只做机械归属，不是对内容的审查主张）：3c11a976 = 先回后正合并（Merge origin/main d7f87597 into docs/readme-bilingual，服务端 strict 要求），父一 33a9025f（本线 #513 tip：README 双语 + 配图 + 两条台账行）、父二 d7f87597（origin/main = PR #531 merge，#506/#507 收口关单 2 笔；main 侧各笔已有归属行，本行不主张）。ort 零冲突；git show --cc --name-only 空表；合并内容面零手工裁决。	33a9025f..3c11a976
