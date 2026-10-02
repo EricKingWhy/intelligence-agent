@@ -271,7 +271,6 @@ async def test_admit_session_step_retry_does_not_double_reserve(tmp_path, monkey
     回滚救不了已提交的 +1，重跑后账面 = 2）；修复后它位于事务内 commit 之前
     （命中即整体回滚，重跑从干净账面重新预留，账面 = 1）。
     """
-    monkeypatch.setattr("agent_harness.storage.sqlite._BUSY_TIMEOUT_MS", 50)
     monkeypatch.setattr("agent_harness.storage.sqlite._WRITE_RETRY_DELAYS_S", (0.0,))
     ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
     await ledger.initialize()
