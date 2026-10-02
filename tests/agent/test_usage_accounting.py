@@ -261,3 +261,69 @@ async def test_accumulated_usage_overflowing_int64_is_unknown_not_clamped(tmp_pa
     # 粘性：转未知后第 3 次的合法加数 10 **补不回来**（非粘性会回归成 10 ——
     # 一个"少算但看着正常"的假账）
     assert total["total_tokens"] is None
+
+
+# ── #552 C6：本次**缺席**某维 ⇒ run 级该维转未知（与 session 侧同口径）───
+
+
+def test_accumulate_usage_missing_dim_becomes_unknown():
+    """本次响应不带某维 ⇒ 该维**总计不再可知**（`None`），不是"不动这一维"。
+
+    与 session 侧同一规则（`storage/delegation_tree.py::record_session_model_requests`
+    的 `usage is None or "total_tokens" not in usage ⇒ 该列 NULL`）。改前 run 级会把
+    已知的**旧值**当成完整总计报出去——一个少算的假精确数：run 账停在旧值、session
+    账转 `NULL`，两本账**值级**分裂（#552 C6；不是"形状不同"）。
+    """
+    from agent_harness.agent.runtime import _accumulate_usage
+
+    total: dict[str, int | None] = {}
+    _accumulate_usage(total, {"total_tokens": 100, "prompt_tokens": 90})
+    assert total == {"total_tokens": 100, "prompt_tokens": 90}
+
+    # 第 2 次不报 total_tokens：该维转未知；本次报的 prompt_tokens 照常累加
+    _accumulate_usage(total, {"prompt_tokens": 7})
+    assert total == {"total_tokens": None, "prompt_tokens": 97}
+
+    # 粘性：第 3 次重新报上该维也补不回缺的那一块
+    _accumulate_usage(total, {"total_tokens": 3, "prompt_tokens": 1})
+    assert total == {"total_tokens": None, "prompt_tokens": 98}
+
+
+def test_accumulate_usage_absent_usage_poisons_tracked_dims_only():
+    """整份 usage 缺席 ⇒ 已跟踪维全部转未知；**不**凭空造出 provider 没报过的维。"""
+    from agent_harness.agent.runtime import _accumulate_usage
+
+    total: dict[str, int | None] = {"total_tokens": 110}
+    _accumulate_usage(total, None)
+    assert total == {"total_tokens": None}
+
+    fresh: dict[str, int | None] = {}
+    _accumulate_usage(fresh, None)
+    assert fresh == {}  # 从未跟踪过任何维 ⇒ 也不该长出一个 None 维
+
+
+@pytest.mark.asyncio
+async def test_absent_usage_in_later_response_turns_run_total_unknown(tmp_path):
+    """端到端：第 2 轮响应**整份 usage 缺席** ⇒ run 账已跟踪维全部转 `None`。
+
+    改前 RED：`usage_total` 停在第 1 轮的值 `{"prompt_tokens": 100,
+    "completion_tokens": 10, "total_tokens": 110}` —— 一个少算的假精确数，而 session
+    树账同一步已转 `NULL`（两本账值级分裂，正是 #552 BUG-R4-02 的同一症状）。
+    与 `tests/web/test_budget_int64_bounds_api.py::test_dim_missing_in_later_response_
+    keeps_two_ledgers_consistent`（某维**被丢弃**，只毒该维）互补：这里走"整份缺席"支。
+    """
+    round1 = AIMessage(
+        content="",
+        response_metadata={"model_name": "qwen-plus-0911"},
+        usage_metadata=_usage(100, 10),
+        tool_calls=[{"name": "add", "args": {"first_number": 1, "second_number": 2},
+                     "id": "call_c6", "type": "tool_call"}],
+    )
+    round2 = AIMessage(content="1 + 2 = 3")  # provider 一个字都没报
+    session = make_session(tmp_path)
+    await _runtime(ScriptedModel([round1, round2])).run(session, "计算")
+
+    finished = _events_of_type(session, RUN_COMPLETED)[0]
+    assert finished.data["usage_total"] == {
+        "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+    }

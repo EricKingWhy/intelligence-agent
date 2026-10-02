@@ -248,7 +248,19 @@ def _accumulate_usage(
 
     粘性：某维一旦未知，后面再精确的加数也补不回缺的那一块（同
     `_RunFinalizer.add_cost` 的 `None` 粘性与 `BudgetConsumed.with_usage`）。
+
+    **本次缺席 ⇒ 已跟踪的该维也转未知（`#552` C6）**：与 session 侧同一规则
+    （`record_session_model_requests`：`usage is None or "total_tokens" not in usage`
+    ⇒ 该列置 `NULL`）。provider 第 2 次不报某维时，run 级若"不动这一维"，就会把
+    已知的**旧值**当成**完整的**总计报出去——一个少算的假精确数：run 账停在
+    `100`、session 账转 `NULL`，两本账**值级**分裂（不是"形状不同"）。
+    只毒**本次之前已跟踪**的维：从未出现过的维不在此凭空创建（缺席 ≠ 造一个
+    未知维，否则 `usage_total` 会长出 provider 从没报过的维度）。
     """
+    reported = usage or {}
+    for key in total:
+        if key not in reported:
+            total[key] = None
     if not usage:
         return
     for key, value in usage.items():
@@ -593,7 +605,7 @@ class _Telemetry:
         self.tracer.run_started()
 
     def run_completed(
-        self, final_text: str, usage_total: dict[str, int] | None = None,
+        self, final_text: str, usage_total: dict[str, int | None] | None = None,
     ) -> None:
         self.tracer.run_completed(final_text, usage_total=usage_total)
 
@@ -1686,23 +1698,33 @@ class AgentRuntime:
                 if usage:
                     # usage / model_name 在上面的记账块里已抽好（同一份事实，不重抽）。
                     model_data["usage"] = usage
-                # C2（#552 配对）：本步**发生过 fallback 切换**时（`fallback_transitions`
-                # 非空），`ai` 是 primary + fallback 的**拼接体**，而
-                # `_finish_reason_from_response` 读到的 finish_reason 来自 primary
-                # （langchain 合并 response_metadata 时 fallback 无该键 ⇒ 左值胜出）——
+                # C2（#552 配对）：只有**primary 对本条流有贡献**时，拼接体的
+                # finish_reason 才不可信——`ai` 是 primary + fallback 的**拼接体**，而
+                # `_finish_reason_from_response` 读到的那个值来自 primary
+                # （langchain 合并 response_metadata 时 fallback 无该键 ⇒ 左值胜出），
                 # 它描述的不是这条拼接流。落进 model/completed 会让只读答案层的消费者
                 # 把"primary 卡流 + fallback 重答"误读成"模型正常说完"（M10-3 症状面）。
-                # 故这一支**不落该键**：「有 finish_reason」从此只代表**无 fallback 的
-                # 干净终结**。primary 的收尾事实不丢——已由同一步的 `model/fallback`
-                # （`primary_finish_reason` / `primary_content_chars`）承载，那才是它该挂
-                # 的 attempt 边界。**不**落 `stream_terminated_without_finish_reason`：该键
-                # 的既有语义是"流**没有** finish_reason"（R3），此处流里是有的、只是属于
-                # primary——落它 = 用解释覆盖事实；边界由 model/fallback 标记。
-                # 无 fallback 时保持 #551 M10-2 的既有诚实口径：有 finish_reason 就落键
+                # 判据 = `primary_content_chars or primary_finish_reason`（零产出且未报
+                # 收尾 ⇒ 无贡献）：R1（修后重审）指出原判据「有任一 fallback 就压制」
+                # **过度**——ainvoke 入口（primary 抛异常、从未产出）与流式 primary 连
+                # 一个 chunk 都没吐时，`ai` 就是 fallback **单独**的响应，它的
+                # finish_reason 是权威事实，压制等于凭空丢事实。
+                # 有贡献时**两键皆不落**：`finish_reason` 会冒充整条流说完；而
+                # `stream_terminated_without_finish_reason` 的既有语义是"流**没有**
+                # finish_reason"（R3），此处流里是有的、只是属于 primary——落它 = 用
+                # 解释覆盖事实。primary 的收尾事实不丢：已由同一步的 `model/fallback`
+                # （`primary_content_chars` / `primary_finish_reason`）承载，那才是它该挂
+                # 的 attempt 边界；**两键皆无** 即该第三态的读法（契约见
+                # `docs/BACKEND_CONTRACT_STREAMING_UI.md`）。
+                # 无贡献时保持 #551 M10-2 的既有诚实口径：有 finish_reason 就落键
                 # （下游据此区分"模型说完了"）；缺失则**只标注**"流在没有 finish_reason
                 # 的情况下结束"——不臆断截断、不删内容、不去重（#506 的"缺失回落中性"
                 # 决策不推翻）。
-                if not fallback_transitions:
+                primary_contributed = any(
+                    t.primary_content_chars > 0 or bool(t.primary_finish_reason)
+                    for t in fallback_transitions
+                )
+                if not primary_contributed:
                     finish_reason = _finish_reason_from_response(ai)
                     if finish_reason:
                         model_data["finish_reason"] = finish_reason

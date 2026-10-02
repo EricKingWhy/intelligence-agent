@@ -263,11 +263,11 @@ class _ArmsKit:
         streamer: Any = None, coord: Any = None,
         tracer: _RecordingTracer | None = None,
         cancel_reason_supplier: Any = None,
-        usage_total: dict[str, int] | None = None,
+        usage_total: dict[str, int | None] | None = None,
     ) -> None:
         self.runtime = runtime
         self.session = session
-        self.usage_total: dict[str, int] = {} if usage_total is None else usage_total
+        self.usage_total: dict[str, int | None] = {} if usage_total is None else usage_total
         self.tracer = tracer or _RecordingTracer()
         self.coord = coord if coord is not None else _PendingCoordinator()
         self.result_holder: list[AgentRunResult] = []

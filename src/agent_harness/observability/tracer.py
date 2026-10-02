@@ -259,7 +259,7 @@ class RunTracer:
         ))
         self._quiet("model_call_end", generation.end)
 
-    def run_completed(self, final_text: str, usage_total: dict[str, int] | None = None) -> None:
+    def run_completed(self, final_text: str, usage_total: dict[str, int | None] | None = None) -> None:
         if self._root is None:
             return
         self._quiet("run_completed", lambda: self._root.update(

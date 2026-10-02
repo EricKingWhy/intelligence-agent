@@ -222,3 +222,53 @@ def test_ws_rejects_oversize_session_ceiling_without_budget_write(tmp_path):
     assert payload["type"] == "error", payload
     assert _events(client, session_id) == before
     assert _session_row(app, session_id) is None
+
+
+# ── usage 维缺席（C6）：run 级与 session 级必须**同判** ─────────────────
+
+
+def test_dim_missing_in_later_response_keeps_two_ledgers_consistent(tmp_path):
+    """C6：第 2 轮的 `total_tokens` **不可采信（被丢弃）** ⇒ 两本账值级一致（都未知）。
+
+    形状：多步 run（第 1 轮 tool_call）+ 第 2 轮 `total_tokens` 越界被丢。
+    `AIMessage.usage_metadata` 三字段在 langchain 层必填，所以"某维缺席"在模型侧
+    的真实入口是**值不可采信**（越界 / 负数 ⇒ `_usage_from_response` 省略该维，
+    与既有 `test_negative_usage_values_are_dropped_not_aggregated` 同形）。
+    session 侧早就是「该维缺席 ⇒ `NULL`」；改前 run 级 `usage_total.total_tokens`
+    停在第 1 轮的旧值 110（少算的假精确数）——两本账值级分裂。改后两处同为未知。
+    """
+    _, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ScriptedProbe([
+        # 第 1 轮**必须带正文**：`ScriptedModel.astream` 在纯 tool_call 轮（content 空）
+        # 不附带 usage_metadata ⇒ 那一轮的 usage 整个缺席，本用例就退化成"从未跟踪
+        # 过 total_tokens"，测不到"缺席 ⇒ 转未知"。真实 provider 的 content 与
+        # tool_calls 也常并存。
+        AIMessage(
+            content="先看一眼文件。",
+            response_metadata={"model_name": "qwen-plus-0911"},
+            usage_metadata={"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+            tool_calls=[{
+                "id": "tc-c6-1", "name": "read",
+                "args": {"path": "does-not-exist.txt"}, "type": "tool_call",
+            }],
+        ),
+        AIMessage(
+            content="完成",
+            usage_metadata={"input_tokens": 7, "output_tokens": 3, "total_tokens": OVERSIZE},
+        ),
+    ])
+
+    with probe:
+        resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "hi"})
+        assert resp.status_code == 200, resp.text
+
+    usage_total = _one(_events(client, session_id), "run/completed")["data"]["usage_total"]
+    assert usage_total["total_tokens"] is None, (
+        f"run 级该维必须转未知（改前停在第 1 轮旧值 110）：{usage_total}"
+    )
+    assert usage_total["prompt_tokens"] == 107       # 100 + 7：本轮可采信的维照常累加
+    assert usage_total["completion_tokens"] == 13    # 10 + 3
+
+    consumed = _budget(client, session_id)["session"]["consumed"]
+    assert consumed["total_tokens"] is None, "session 账同一步已转 NULL——两本账必须同判"

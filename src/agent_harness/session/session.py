@@ -647,7 +647,7 @@ class Session:
         *,
         status: str,
         final_text: str = "",
-        usage_total: dict | None = None,
+        usage_total: dict[str, int | None] | None = None,
         cost_usd: Decimal | str | None = None,
         trace_id: str | None = None,
         trace_url: str | None = None,

@@ -239,6 +239,66 @@ class TestFallbackReanswerBoundary:
 
 
 # ---------------------------------------------------------------------------
+# C2 负例（R1/R2，修后重审）：primary 零产出 ⇒ fallback 的 finish_reason 必须落
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackWithoutPrimaryOutput:
+    """原判据「有任一 fallback 就压制 finish_reason」**过度**（R1/R2 修后重审）。
+
+    primary 零产出即失败（流式连一个 chunk 都没吐 / ainvoke 入口从未产生响应）时，
+    `model/completed` 的 `ai` 就是 fallback **单独**的响应——它的 `finish_reason`
+    是权威事实。压制等于凭空丢掉"这一次模型确实正常说完了"的信号，并把"零贡献"
+    与"有贡献"两种形状混为一谈。两个入口各一遍：任一路丢键都判红。
+    """
+
+    @pytest.mark.asyncio
+    async def test_stream_entry_zero_primary_output_records_fallback_finish_reason(
+        self, tmp_path,
+    ):
+        """流式入口：primary 零 chunk 即失败 ⇒ `ai` 全属 fallback，finish_reason 照落。"""
+        primary = _AlwaysFailingModel(_http_500())
+        fallback = _CleanEofWithFinishReasonModel("fallback 的回答。", "stop")
+        runtime = _runtime(primary, fallback)
+        session = make_session(tmp_path)
+
+        async for _ in runtime.run_stream(session, "你好"):
+            pass
+
+        completed = _events(session, MODEL_COMPLETED)
+        assert len(completed) == 1
+        data = completed[0].data
+        assert data["content"] == "fallback 的回答。"
+        assert data.get("finish_reason") == "stop"
+        assert data.get("stream_terminated_without_finish_reason") is not True
+
+        # 切换事实照记，零贡献的边界字段按"非平凡才落"省略（`event_data` 口径）
+        fallbacks = _events(session, MODEL_FALLBACK)
+        assert len(fallbacks) == 1
+        assert "primary_content_chars" not in fallbacks[0].data
+        assert "primary_finish_reason" not in fallbacks[0].data
+
+    @pytest.mark.asyncio
+    async def test_invoke_entry_zero_primary_output_records_fallback_finish_reason(
+        self, tmp_path,
+    ):
+        """ainvoke 入口（`run`）：primary 抛异常从未产出 ⇒ 照落（原判据丢事实最明显）。"""
+        primary = _AlwaysFailingModel(_http_500())
+        fallback = ScriptedModel([AIMessage(
+            content="fallback 的答案", response_metadata={"finish_reason": "stop"},
+        )])
+        runtime = _runtime(primary, fallback)
+        session = make_session(tmp_path)
+
+        await runtime.run(session, "你好")
+
+        completed = _events(session, MODEL_COMPLETED)
+        assert len(completed) == 1
+        assert completed[0].data["content"] == "fallback 的答案"
+        assert completed[0].data.get("finish_reason") == "stop"
+
+
+# ---------------------------------------------------------------------------
 # R2 / R3（M10-2）：缺 [DONE] 的两条路径必须语义不同
 # ---------------------------------------------------------------------------
 
