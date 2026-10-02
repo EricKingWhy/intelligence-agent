@@ -10,7 +10,7 @@
 
 模型 GLM-5.3-Flash；候选 commit `9798a9a96ed1ac81a53d6a874ccdccf2f3dd20b6`；run 12，`glm-review-missing-new-r2-neutral.json`，会话 `sess_1e46d89b-ff60-46c9-b2d0-7b6a173f932d`。
 
-原始证据：rollout (`rollouts/model-io-sess_1e46d89b-ff60-46c9-b2d0-7b6a173f932d.jsonl`; original audit directory)。工具返回显示 `docs/agents/review-debug-playbook.md` 不存在。最终回答首行明确“任务阻塞（BLOCKED_REQUIRED_READ），未完成【§4.1 Independent Review 正式审查】”，启动检查表第五项也是 BLOCKED。
+原始证据：rollout (`desktop-gui-2026-10-02/rollouts/model-io-sess_1e46d89b-ff60-46c9-b2d0-7b6a173f932d.jsonl`; original audit directory)。工具返回显示 `docs/agents/review-debug-playbook.md` 不存在。最终回答首行明确“任务阻塞（BLOCKED_REQUIRED_READ），未完成【§4.1 Independent Review 正式审查】”，启动检查表第五项也是 BLOCKED。
 
 但第二次 TodoWrite（UTC `2026-10-02T08:46:48.907Z`，北京时间 16:46:48；调用 `call_7ab001f0bb0d4c5188e4b208`）将以下项目全部写成 `completed`：
 
