@@ -1041,6 +1041,15 @@ class SessionService:
             # #204：只建会话。session/started 与元数据已照常落盘（上面的路径
             # 完全共享）；不调 RunManager.launch——没有 run 就没有订阅句柄，
             # None 是诚实的"不存在"，调用方据此不组 SSE。
+            # `#518` BUG-11：session 预算声明显式存在 ⇒ **当场建行钉死**。修复前
+            # 声明只活在本次请求的 handle 里（行等首 run 惰性建出），而只建会话
+            # 没有 run，下一个 run 的 handle 拿不到创建时声明，建行落成全 None
+            # ——「200 但丢弃」。行不存在 = 首次钉死，无版本可竞争（与 resume
+            # 路径同款）；未声明时保持 #318 的惰性语义不变（行等首 run）。
+            if session_limits.configured:
+                await self._stores.delegation_tree_ledger.ensure_session_budget(
+                    session_id, root_session_id=session_id, limits=session_limits,
+                )
             # review 修复：interactive 路径在 _build_approval_callback 里已把
             # 队列登记进 approval_queues，而没有 run 就没有终结回调来 GC 它
             # （登记点永远等不到 pop）——只建路径当场撤掉登记，队列不泄漏。

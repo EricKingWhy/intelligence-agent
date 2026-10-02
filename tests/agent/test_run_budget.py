@@ -990,6 +990,39 @@ def test_project_budget_running_state_carries_the_enforcement_projection() -> No
     assert "reason" not in projection, "没有暂停原因时不落恒为 null 的键（缺席 ≠ 空值）"
 
 
+def test_project_budget_degrades_enforcement_when_requests_have_no_usage() -> None:
+    """`#518` BUG-10：已发过请求却从未收到 usage ⇒ token 维度呈现 degraded。
+
+    enforcement 是部署能力（静态声明），但"声明能强制"≠"本 run 真的收到过
+    账目"——enforceable 与 consumed:null 同时出现是运维无法解释的矛盾。三个
+    对照面：无 usage 的已发请求 ⇒ degraded；带 usage 的请求 ⇒ 保持 enforceable
+    （回归）；还没发过任何请求 ⇒ 保持 enforceable（读数未知是正常态，不降级）。
+    """
+    no_usage = derive_run_budget(
+        [_started(), _request(2), _ev(3, MODEL_COMPLETED)], RUN_ID,
+    )
+    assert no_usage.consumed.model_requests == 1
+    assert no_usage.consumed.total_tokens is None, "未知 ≠ 0（02 §5.1）"
+    projection = project_budget(no_usage, accounting=USAGE_ONLY, local_fuse=FUSE)
+    assert projection["enforcement"] == {
+        "max_total_tokens": "degraded", "max_cost_usd": "unavailable",
+    }
+
+    with_usage = derive_run_budget(
+        [_started(), _request(2, tokens=10), _ev(3, MODEL_COMPLETED)], RUN_ID,
+    )
+    assert with_usage.consumed.total_tokens is not None
+    assert project_budget(with_usage, accounting=USAGE_ONLY, local_fuse=FUSE)[
+        "enforcement"
+    ]["max_total_tokens"] == "enforceable"
+
+    fresh = derive_run_budget([_started()], RUN_ID)
+    assert (fresh.consumed.model_requests or 0) == 0
+    assert project_budget(fresh, accounting=USAGE_ONLY, local_fuse=FUSE)[
+        "enforcement"
+    ]["max_total_tokens"] == "enforceable"
+
+
 def test_a_terminal_event_after_a_pause_supersedes_it() -> None:
     """终态**压过**暂停：`run/paused` 之后又落了终态 ⇒ 这个 run 已经结束。
 
