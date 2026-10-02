@@ -4,6 +4,15 @@
 一个真实目录，命令通过 subprocess.run 执行，文件读写用标准 pathlib。
 
 生产环境隔离请用 DockerSandbox；本后端不做进程级隔离。
+
+进程/资源边界（ADR-0050，#549 拆分裁决）：
+- 进程树：三条退出路径都整组回收——超时/取消走 _kill_process_tree，正常返回
+  走 _reclaim_process_group（POSIX 幂等 killpg；Windows Job Object
+  KILL_ON_JOB_CLOSE 兜底）。已知盲区：setsid 脱组进程不在任何组内，killpg
+  天然不可达——那是容器运行时的职责，不在 Host 上追平。
+- 资源配额：**没有**——内存、CPU 时间、网络外联均无上限（_CappedCapture 只防
+  输出 OOM）。这是已声明的边界而非缺陷；资源不可信的工作负载必须走
+  DockerSandbox（--memory/--cpus/--pids-limit 由容器运行时强制）。
 """
 
 from __future__ import annotations
