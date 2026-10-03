@@ -57,6 +57,12 @@ _NUMBER_PATTERN = re.compile(
 )
 _PATH_FIELDS = {"path", "file", "filename", "filepath", "file_path", "source_file"}
 _EXACT_FIELDS = {"command", "cmd", "shell", "error", "error_message"}
+#: #556 裁决 C（分流承载）：程序化标识/文件节的**有界**投影上限——无界累积的
+#: 唯一事实源。保留**最后** N 条（encounter 顺序的尾部 = 偏向最近：继承的旧摘要在
+#: 前、当前窗口在后，截尾淘汰最旧），与 Anthropic Context Editing 的 keep-N 同形。
+_PROG_SECTION_MAX_ENTRIES = 50
+#: 单条 entry 字符上限：错误全文等巨串不再撑爆节（截断 + 省略号，确定性纯函数）。
+_PROG_SECTION_MAX_ENTRY_CHARS = 200
 
 
 #: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
@@ -408,14 +414,62 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     return contents
 
 
+def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
+    """#556 裁决 C：目标节只保留**当前生效目标**（+ 归档计数行）。
+
+    「当前生效目标」的判定与保护事实通道**同源**：`derive_protected_facts` 从
+    全量 SessionEvent 确定性地划出 user_goal sources（首条 + 每次 supersede 前
+    最近一条，`tests/session/test_derive_supersede.py`），取 `source_seq` 最大的
+    一条 = 最后一次目标声明——纯函数、重放逐字节稳定。值以 JSON 字符串编码
+    （旧 [0] 即 JSON，形状延续；防节边界伪造与 strip 失配），本身走 #430 的
+    2000 字符投影上限（超长自带截断标记 + source_event_id 回读指针）：大首消息
+    折叠为引用 + 回读 ref，原文活在事件流；历史 goal 不再逐字累积，一行归档
+    计数指回 SessionEvent 持久历史（不变量 #6：完整保存 ≠ 完整注入）。
+    """
+    goals = [
+        fact for fact in (protected_facts or [])
+        if fact.type == "user_goal"
+    ]
+    if not goals:
+        return "(none)"
+    current = max(goals, key=lambda fact: fact.source_seq)
+    # JSON 字符串编码（旧 [0] 即 JSON，形状延续）：节内容回读时有外层 strip
+    #（`_parse_summary_sections`），裸文本的尾随空白/换行会破坏精确比对；
+    # 编码同时隔离 goal 正文里 heading 样式的行（防伪造节边界）。
+    body = json.dumps(current.value, ensure_ascii=False)
+    archived = len(goals) - 1
+    if archived > 0:
+        body += (
+            f"\n（更早 {archived} 条历史目标已归档："
+            "原文可由 SessionEvent 持久历史回读）"
+        )
+    return body
+
+
+def _capped_entries(entries: list[str]) -> list[str]:
+    """确定性窗口：每条截到 `_PROG_SECTION_MAX_ENTRY_CHARS`，保留最后 N 条。"""
+    trimmed = [
+        entry if len(entry) <= _PROG_SECTION_MAX_ENTRY_CHARS
+        else entry[:_PROG_SECTION_MAX_ENTRY_CHARS] + "…"
+        for entry in entries
+    ]
+    return trimmed[-_PROG_SECTION_MAX_ENTRIES:]
+
+
 def _programmatic_summary_sections(
     messages: list[AnyMessage],
     protected_facts: list[ProtectedFact] | None = None,
 ) -> dict[str, str]:
-    user_messages: list[str] = []
-    identifiers: list[str] = []
-    file_paths: list[str] = []
-    protected_facts_body = "(none)"
+    """四个程序化节（#556 裁决 C：全部**有界**，规则为确定性纯函数）。
+
+    - 目标节：当前生效目标原文（`_current_goal_body`）——叙述性历史用户消息
+      **不再**逐字进节（旧实现 `extend` 无界是 F-COMP-1 的根因）；跨窗口刚性
+      读回走 ProtectedFact 通道（§1 独立预算）与 SessionEvent 持久历史。
+    - 标识/文件节：继承 + 提取逻辑不变，套确定性窗口（`_capped_entries`，
+      保留最近 N 条 + 单条截断）——同票消除 `:477-481` 的同构无界。
+    - 保护事实节：`serialize_protected_facts` 契约不动（sort_keys 逐字节稳定、
+      独立预算 8192）。
+    """
 
     def add_once(target: list[str], value: str) -> None:
         if value and value not in target:
@@ -428,6 +482,10 @@ def _programmatic_summary_sections(
         if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
             raise ValueError("Previous summary programmatic section is not a string list")
         return parsed
+
+    identifiers: list[str] = []
+    file_paths: list[str] = []
+    protected_facts_body = "(none)"
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -469,24 +527,21 @@ def _programmatic_summary_sections(
             and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")
         ):
             previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
-            previous_users = decode_summary_values(previous[0])
             if protected_facts is None:
                 protected_facts_body = previous[1]
             previous_identifiers = decode_summary_values(previous[6])
             previous_paths = decode_summary_values(previous[7])
-            user_messages.extend(previous_users)
             for value in previous_identifiers:
                 add_once(identifiers, value)
             for value in previous_paths:
                 add_once(file_paths, value)
             continue
-        if isinstance(message, HumanMessage):
-            user_messages.append(message.content)
+        # #556 裁决 C：HumanMessage 原文不再逐字进任何程序化节——目标走
+        # `_current_goal_body`（protected_facts 通道），叙述性历史靠 Event 回读。
         visit(message.model_dump(mode="json"))
 
     return {
-        _SUMMARY_HEADINGS[0]: json.dumps(user_messages, ensure_ascii=False)
-        if user_messages else "(none)",
+        _SUMMARY_HEADINGS[0]: _current_goal_body(protected_facts),
         _SUMMARY_HEADINGS[1]: (
             serialize_protected_facts(protected_facts)
             if protected_facts
@@ -494,10 +549,12 @@ def _programmatic_summary_sections(
             if protected_facts is not None
             else protected_facts_body
         ),
-        _SUMMARY_HEADINGS[6]: json.dumps(identifiers, ensure_ascii=False)
-        if identifiers else "(none)",
-        _SUMMARY_HEADINGS[7]: json.dumps(file_paths, ensure_ascii=False)
-        if file_paths else "(none)",
+        _SUMMARY_HEADINGS[6]: json.dumps(
+            _capped_entries(identifiers), ensure_ascii=False,
+        ) if identifiers else "(none)",
+        _SUMMARY_HEADINGS[7]: json.dumps(
+            _capped_entries(file_paths), ensure_ascii=False,
+        ) if file_paths else "(none)",
     }
 
 
