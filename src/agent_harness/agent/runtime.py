@@ -979,7 +979,7 @@ async def _model_stream_items(
     """Yield request lifecycle events as soon as they are durable, alongside chunks."""
     iterator = stream.__aiter__()
     chunk_task: asyncio.Task[AIMessageChunk] | None = None
-    event_task: asyncio.Task[bool] | None = None
+    event_task: asyncio.Task[SessionEvent] | None = None
     try:
         while True:
             if chunk_task is None:
