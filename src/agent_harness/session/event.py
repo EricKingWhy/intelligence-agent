@@ -90,6 +90,26 @@ CONTEXT_PROTECTED_FACTS_EXCEEDED = "context/protected_facts_exceeded"
 # 清单投影（W-27/W-28）。handler 硬校验住在 `session/plan.py`（PRD §7.2 四条，
 # 任一违反 → 不产生事件、带原因 + 当前清单整表拒绝）。
 TASK_PLAN_UPDATED = "task/plan_updated"
+# ── W-07 (#351)：Task / Run / 验证 / 接受四种事实分开 ────────────────────────
+# Task 身份 = Session ID（一 Task 多 Run）。三条事实轴**分别追加、分别投影**
+# （票面「状态契约」；handler 与投影住在 `session/task.py`，与 plan.py 同构）：
+#   * 定义轴   task/defined + task/acceptance-revised：原始目标 / 工作目录 /
+#              读写意图 / 验收清单（缺项可由 Agent 提出，未确认标记）。变更 AC
+#              只追加事件，source_event_ids 指向上一版定义/修订（保留旧版来源）。
+#   * 验证轴   verification/updated：逐验收项 last-wins 的观察事实（未开始/
+#              进行中/通过/失败/受阻/未完成 + evidence ref）。可被后续 run 重估
+#              覆盖（回归是真实语义），旧值留痕于更早事件。
+#   * 接受轴   task/accepted + task/acceptance-released：用户裁决（未接受/
+#              已接受/带缺项接受 + reason）。带 expected_version CAS；重复
+#              请求明确 409，不能双写。
+# run/completed 只说明 Runtime 收口（#305 完成闸门零写入契约原样），MUST NOT
+# 自动写验证值或接受状态——产品四态（执行中/待验证/可交付/已接受）是三轴的
+# 纯投影（derive_task_state），刷新/重启从事件流重建同一结果。
+TASK_DEFINED = "task/defined"
+TASK_ACCEPTANCE_REVISED = "task/acceptance-revised"
+VERIFICATION_UPDATED = "verification/updated"
+TASK_ACCEPTED = "task/accepted"
+TASK_ACCEPTANCE_RELEASED = "task/acceptance-released"
 MEMORY_DEGRADED = "memory/degraded"
 # #298 / MEM-V2-2（PRD §6.5）：一次**已提交**的记忆变更。只带计数、memory id、
 # action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
@@ -211,6 +231,12 @@ EVENT_TYPES: frozenset[str] = frozenset(
         CONTEXT_PROTECTED_FACTS_EXCEEDED,
         # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息）
         TASK_PLAN_UPDATED,
+        # W-07 (#351)：Task / 验证 / 接受三轴事实（状态事件，不投影成消息）
+        TASK_DEFINED,
+        TASK_ACCEPTANCE_REVISED,
+        VERIFICATION_UPDATED,
+        TASK_ACCEPTED,
+        TASK_ACCEPTANCE_RELEASED,
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,
