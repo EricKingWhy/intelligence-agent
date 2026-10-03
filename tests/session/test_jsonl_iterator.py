@@ -61,7 +61,7 @@ def test_store_scanners_share_one_line_iterator(
 
     def recording_iterator(
         event_path: Path, limit: int | None = None
-    ) -> Iterator[tuple[int, str]]:
+    ) -> Iterator[tuple[int, int, bytes]]:
         calls.append((event_path, limit))
         yield from original(event_path, limit)
 
@@ -82,10 +82,24 @@ def test_line_iterator_limit_counts_physical_lines(
     first = _event_line(session_id, 0, SESSION_STARTED)
     _write_log(store, session_id, [first, "", _event_line(session_id, 1, USER_MESSAGE)])
 
+    # 期望字节从磁盘原件切出（`_write_log` 是文本模式，Windows 会写 CRLF）——
+    # 迭代器契约是「原字节 + 偏移」，期望值必须以磁盘为准，不能钉死 \n。
+    on_disk = store._events_path(session_id).read_bytes()
+    chunks: list[bytes] = []
+    start = 0
+    while True:
+        idx = on_disk.find(b"\n", start)
+        if idx == -1:
+            chunks.append(on_disk[start:])
+            break
+        idx += 1
+        chunks.append(on_disk[start:idx])
+        start = idx
+
     iterator = store._iter_event_lines(store._events_path(session_id), limit=2)
 
-    assert next(iterator) == (1, first + "\n")
-    assert next(iterator) == (2, "\n")
+    assert next(iterator) == (1, 0, chunks[0])
+    assert next(iterator) == (2, len(chunks[0]), chunks[1])
     with pytest.raises(StopIteration):
         next(iterator)
 

@@ -112,6 +112,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
@@ -168,6 +169,7 @@ from agent_harness.session.model_switch import (
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
+    EventLogIntegrity,
     JsonlSessionStore,
     SessionSummaryStats,
     WorkspaceRef,
@@ -525,6 +527,38 @@ class RecoveryStoreBundle(Protocol):
     workspace_index: WorkspaceIndex | None
 
 
+@runtime_checkable
+class SessionDeclarationValidator(Protocol):
+    """`#564` 裁决 (a)：session 请求声明注册名校验的**领域端口**。
+
+    判据需要**根 registry**（树级语义），而名字集的计算是组合层
+    （`assembly.root_registry_tool_names`，零副作用投影）的事——领域层 import
+    组合层类型会被 import 边界守卫（`tests/session/test_service_collaborators.py`）
+    拦下，所以同 `RecoveryStoreBundle` 一样由组合根注入实现
+    （`web/app.py::session_service` 唯一适配点）。实现方用与 `build_runtime`
+    **同源**的名字集计算（一致性由 `tests/test_assembly_root_registry_names.py`
+    三方对账钉住；**不得**改回完整 `_build_tooling`——那会构造 sandbox 并在
+    归属对账前 mkdir workspace，审查 P2-1），内部走
+    `validate_tool_call_limits_registered(..., scope="session")`，坏名抛
+    `BudgetRejection`（422）。
+
+    调用时机：resume 通道 eager CAS **之前**（先于任何账行写入；`_ensure_stores`
+    的幂等建表不算会话工作）——坏名永不触碰账行（修复前 merge-only 的 CAS 先
+    并入坏名再 422，一次打错的请求把会话毒成不可恢复态）。未注入（直构
+    `SessionService` 的调用方）⇒ 跳过前置校验，由 build_runtime 的声明 422
+    兜底；web / CLI 两条组合根路径都已注入。
+    """
+
+    async def __call__(
+        self,
+        limits: SessionLimits,
+        *,
+        session_id: str,
+        workspace: Path,
+        agent_profile: str | None,
+    ) -> None: ...
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -556,6 +590,7 @@ class SessionService:
         stores: RecoveryStoreBundle,
         ensure_stores: Callable[[], Awaitable[None]],
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+        validate_session_declaration: SessionDeclarationValidator | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -573,6 +608,7 @@ class SessionService:
         self._stores = stores
         self._ensure_stores = ensure_stores
         self._get_wiring = get_wiring
+        self._validate_session_declaration = validate_session_declaration
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -1044,6 +1080,9 @@ class SessionService:
             # `#318`：session 作用域账（跨 run 持久；子会话经 multiagent/provider 的
             # `session_budget_port` 接到同一行）。
             session_budget=session_budget,
+            # `#564`：本次请求点名的声明（create 通道 = 请求声明本身；注册名 422
+            # 的无副作用拒绝点在 build_runtime，账行由 handle 惰性建出、零行写入）。
+            session_declared_limits=session_limits,
             local_fuse_source=fuse.source,
             **amend_kwargs(amend),
             # `#317`：stuck 暂停要在 `run/paused` 里记下**停下那一刻**的环境 revision
@@ -1261,6 +1300,14 @@ class SessionService:
         session_row = await self._stores.delegation_tree_ledger.get_session_budget(
             budget_key
         )
+        # 工作目录路径（**只读**：`session_cwd` 是纯事件读，不建目录、不写映射表）——
+        # `#317` 的 stuck 证据与 `#564` 的 pre-CAS 校验都要用它，所以提到 session 账
+        # 处理之前；真正的归属对账 / mkdir / is_dir 仍在下面（那里的顺序契约不变）。
+        persisted_cwd = session_cwd(existing)
+        evidence_workspace = (
+            Path(persisted_cwd) if persisted_cwd is not None
+            else self._workspaces_root / session_id
+        )
         # 点名任一 session 维 ⇒ 账行 CAS 更新（绝对 ceiling + 乐观锁 + headroom，
         # 判定全在账本单事务里 ⇒ 409 零改动）。行不存在 = 首次钉死，无版本可竞争。
         session_limits = _session_limits(
@@ -1272,6 +1319,22 @@ class SessionService:
             tool_call_limits=session_tool_call_limits,
             max_delegations=session_max_delegations,
         )
+        # `#564` 裁决 (a)：**校验前置**——session 请求声明的注册名校验提到 eager
+        # CAS **之前**（`_ensure_stores` 的幂等建表在其前执行，但那不是会话工作）。
+        # 修复前 merge-only 的 CAS 先把坏名并入账行再 422，一次打错的请求就把
+        # 会话毒成不可恢复态（普通 resume 恒 422）。判据需要根 registry（树级
+        # 语义，裁决 (b) 口径），构造归组合层 ⇒ 走注入端口
+        # （`SessionDeclarationValidator`，见其 docstring）。
+        if (
+            session_limits.tool_call_limits
+            and self._validate_session_declaration is not None
+        ):
+            await self._validate_session_declaration(
+                session_limits,
+                session_id=session_id,
+                workspace=evidence_workspace,
+                agent_profile=(amend.agent_profile if amend is not None else None),
+            )
         if session_limits.configured:
             if session_row is not None:
                 if session_expected_version is None:
@@ -1309,14 +1372,8 @@ class SessionService:
         amend = _amend_with_session_model(amend, existing, self._settings)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
-        # 工作目录路径（**只读**：`session_cwd` 是纯事件读，不建目录、不写映射表）——
-        # 位置提前是为了让阶段一的 stuck 恢复依据能观测工作区（`#317`）；真正的
-        # 归属对账 / mkdir / is_dir 仍在下面（那里的顺序契约不变）。
-        persisted_cwd = session_cwd(existing)
-        evidence_workspace = (
-            Path(persisted_cwd) if persisted_cwd is not None
-            else self._workspaces_root / session_id
-        )
+        # （persisted_cwd / evidence_workspace 已在 session 账处理前算好——`#564`
+        # 的 pre-CAS 校验与这里的 stuck 证据用同一份派生，不重复读事件。）
         # 会话级权限档（事件派生；未声明 = 默认档）——同样提前：它既是下面装配点的
         # 入参，也是 stuck 证据端口里"策略版本"的一维（两处必须同一个值）。
         effective_mode = _effective_permission_mode(existing)
@@ -1375,7 +1432,7 @@ class SessionService:
         # `registry.get()`，而实例化 Sandbox 时会 mkdir 工作目录：外部 cwd 被用户删掉
         # 之后会被凭空建回来，"目录没了"从此看不见（旧用例用 MagicMock registry，
         # 正好绕开了这个 mkdir）。对账只读注册表的登记事实，不实例化任何 Sandbox。
-        persisted_cwd = session_cwd(existing)
+        # （persisted_cwd 上面已读，沿用同一份。）
         if persisted_cwd is None:
             # 历史遗留（无 cwd 锚）：兼容语义逐字不变——默认目录 + 确保它存在。
             workspace = self._workspaces_root / session_id
@@ -1513,6 +1570,9 @@ class SessionService:
                 run_budget=budget,
                 # `#318`：session 作用域账（跨 run 持久；声明 = 账行现值，见上方装配）。
                 session_budget=session_budget,
+                # `#564`：本次请求点名的声明（resume 通道已在 eager CAS 前核过同一
+                # 份，此处是防御性二道闸；账行现值的陈旧名在装配层降告警）。
+                session_declared_limits=session_limits,
                 # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
                 # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
                 local_fuse_source=fuse.source,
@@ -1736,7 +1796,10 @@ class SessionService:
     ) -> LaunchRunBudget:
         """阶段一（锁内只读）：校验恢复声明并算出续跑账本，**不写任何东西**。"""
         async with self._resume_lock(session_id):
-            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            events, integrity = await anyio.to_thread.run_sync(
+                self._store.read_events_report, session_id
+            )
+            self._raise_if_event_log_corrupt(session_id, integrity)
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, _ = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
@@ -1776,7 +1839,10 @@ class SessionService:
         把同一枚聚合交给 runtime。
         """
         async with self._resume_lock(session_id):
-            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            events, integrity = await anyio.to_thread.run_sync(
+                self._store.read_events_report, session_id
+            )
+            self._raise_if_event_log_corrupt(session_id, integrity)
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, evidence = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
@@ -2726,6 +2792,41 @@ class SessionService:
 
     # ── 恢复 ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _raise_if_event_log_corrupt(session_id: str, integrity: EventLogIntegrity) -> None:
+        """#565：events.jsonl 完整性闸门——恢复入口对损坏日志拒绝继续。
+
+        三类（`EventLogCorruptError` docstring）：完整坏行 / seq 断层 / seq 重复。
+        文案带**脱敏定位**（行号 / 字节偏移 / 长度 / sha256 / reason，不含行内容）；
+        原字节保留在文件里未动，修复是人工动作。本错误**不可重试**：重读同一
+        文件无用——与写时 `SeqConflict`（可重读快照重试）在语义上分开。
+        """
+        if integrity.healthy:
+            return
+        parts: list[str] = []
+        for record in integrity.corrupt_lines:
+            parts.append(
+                f"损坏行 lineno={record.lineno} offset={record.byte_offset} "
+                f"len={record.byte_length} sha256={record.line_sha256} "
+                f"reason={record.reason}"
+            )
+        for lo, hi in integrity.seq_gaps:
+            parts.append(f"seq 断层 {lo}-{hi}" if lo != hi else f"seq 缺号 {lo}")
+        for seq in integrity.seq_duplicates:
+            parts.append(f"seq 重复 {seq}")
+        # 文案封顶（P3 残余修复）：千行全坏的文件会把无界拼接变成数十 KB 的
+        # 409 detail（撑爆错误弹窗、进不了日志检索）。文案只带前 cap 条 +
+        # 总条数——完整定位记录本就在 store WARNING 日志里，一条不少。
+        cap = 5
+        detail = "；".join(parts[:cap])
+        if len(parts) > cap:
+            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志与完整性报告）"
+        raise EventLogCorruptError(
+            f"Session '{session_id}' 事件日志损坏，恢复已拒绝：{detail}。"
+            "请按 store WARNING 日志的定位记录核对原字节后人工修复文件；修复前"
+            "恢复入口保持拒绝（本错误不可重试）"
+        )
+
     async def recover(
         self,
         session_id: str,
@@ -2752,11 +2853,15 @@ class SessionService:
 
         self._validate_session_id(session_id)
         await self._ensure_stores()
-        existing = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        if not existing:
+        if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # 全坏日志（零可解析事件 + 有损坏行）报 409 损坏而非 404（P3 残余修复，
+        # BUG-011 同型）：「存在但全坏」不是「没有这个会话」，404 会把事实丢失
+        # 掩蔽成不存在，引导重建而不是修复。真 404（文件不存在 / 空文件零损坏）不变。
+        self._raise_if_event_log_corrupt(session_id, integrity)
 
         # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
         normalized: dict[str, ReconcileVerdict] = {}
@@ -3096,11 +3201,16 @@ class SessionService:
         from agent_harness.session.fork import ForkBoundaryError, fork_session
 
         self._validate_session_id(session_id)
-        existing = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        if not existing:
+        if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # fork 是状态物化入口（P3 残余修复）：seed 逐字成为 child 的 durable
+        # 历史（child 自包含、不依赖父存活），前缀坏行的事实缺口会被**永久
+        # 物化**——与 recover/resume 同一闸门。replay/显示路径不装闸门是
+        # #565 既定设计（容错读不 brick 显示，损坏有 WARNING 信号）。
+        self._raise_if_event_log_corrupt(session_id, integrity)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run; fork needs settled history")
         await self._ensure_stores()
