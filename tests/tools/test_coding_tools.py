@@ -258,8 +258,11 @@ class TestWriteTool:
 
         #610 同族第二形态：Linux 上 ``open('file.txt/child.txt')`` 报
         NotADirectoryError（Windows 报 FileNotFoundError，旧元组接得住）——
-        不被 before-read 吞掉就会逃逸成 TOOL_EXECUTION_ERROR。修复后 Windows 走
-        FileExistsError 分支、Linux 走 NotADirectoryError 分支，message 同源。
+        不被 before-read 吞掉就会逃逸成 TOOL_EXECUTION_ERROR。修复后两平台写
+        路径均落 FileExistsError 分支（父 mkdir 对已存在普通文件报 EEXIST，
+        message 同源）；Linux before-read 的 NotADirectoryError 正是本修吞掉
+        的形态（审查 P3 勘误：原 docstring 误记 Linux 走写侧 NotADirectoryError
+        分支——那需更深层如 a.txt/b/c.txt 才可达）。
         """
         sandbox.write_text("file.txt", "occupied")
 

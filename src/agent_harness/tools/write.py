@@ -65,7 +65,9 @@ class WriteTool(Tool):
         # #610：POSIX 上「写目标是目录」的 before-read 抛 IsADirectoryError、
         # 「父路径是文件」抛 NotADirectoryError（Windows 分别报 PermissionError/
         # FileNotFoundError）。只捕后两者会让前两者逃逸 execute() 被包装成
-        # TOOL_EXECUTION_ERROR，下面 73-117 的形态映射分支在 Linux 上永远走不到。
+        # TOOL_EXECUTION_ERROR，下方 write_text 的四分支形态映射
+        # （PermissionError/IsADirectoryError/NotADirectoryError/FileExistsError）
+        # 在 Linux 上永远走不到。
         before = ""
         try:
             before = self._sandbox.read_text(args.path)
