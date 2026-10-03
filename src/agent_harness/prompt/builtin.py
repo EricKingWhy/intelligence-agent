@@ -244,8 +244,8 @@ _FRAME_RECOVERY_SKIPPED = (
 #: 框架消息 / 纠偏文案（T8 / ADR-0023 D4）。
 #: 七条全部是 `Target.FRAGMENT`——它们的产物**不是消息**，而是嵌进别处的内容：
 #: 前四条进 `ToolResult.message`（knowledge / websearch / tool_output / skill），
-#: 第四、五条进 runtime 注入的 user/message 的 content，
-#: 第六条进恢复期合成的 ToolResult.message。装成 SYSTEM / META_USER 会让调用方
+#: 第五、六条进 runtime 注入的 user/message 的 content，
+#: 第七条进恢复期合成的 ToolResult.message。装成 SYSTEM / META_USER 会让调用方
 #: 拿到空串（组装分区互不混装），运行时就会注入空文案。
 #: scope = 自身 section 名（**不是 `"*"`**——`*` 只匹配 `profile:<name>`，
 #: 写成 `*` 会让 `assemble("frame:…")` 抛 `empty_assembly`）。

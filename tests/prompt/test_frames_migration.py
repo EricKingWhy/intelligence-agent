@@ -1,8 +1,9 @@
 """T8 框架 / 纠偏消息迁移到注册表（ADR-0023 D4）。
 
-四条全部是 `Target.FRAGMENT`：产物**不是消息**，而是嵌进别处的内容——
-前两条进 `ToolResult.message`，第三条进 runtime 注入的 user/message 的 content，
-第四条进恢复期合成的 ToolResult.message。
+`FRAGMENT_SCOPES` 全部是 `Target.FRAGMENT`：产物**不是消息**，而是嵌进别处的内容——
+knowledge / websearch 进 `ToolResult.message`（T8 迁移的两条），corrective:tool_failure_guard
+进 runtime 注入的 user/message 的 content，frame:recovery_skipped 进恢复期合成的
+ToolResult.message；#546 起补入 skill（同族第四条 frame，同嵌 `ToolResult.message`）。
 
 逐字节断言是迁移的判据：正文与迁移前内联/常量版本**一字不差**。
 """
@@ -88,7 +89,7 @@ def test_corrective_quotes_come_from_template_not_variable() -> None:
 
 # —— section 元数据 ——
 
-def test_all_four_are_fragment_target() -> None:
+def test_all_fragment_scopes_are_fragment_target() -> None:
     inputs = {
         "corrective:tool_failure_guard": {"tool_name": "t", "consecutive_failures": "1"},
         "frame:recovery_skipped": {"tool_name": "t"},
