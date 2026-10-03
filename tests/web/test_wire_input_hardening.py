@@ -48,6 +48,7 @@ JSON_HDR = {"content-type": "application/json"}
 #: 深度配额 422 的 ``detail`` **字符串契约**（字面量钉在这里，另由
 #: ``test_quota_detail_string_is_stable`` 与实现常量对账，杜绝两侧漂移）。
 _EXPECTED_QUOTA_DETAIL = "request body nesting too deep"
+_EXPECTED_WS_TOO_LARGE_DETAIL = "websocket message too large (limit 1048576 bytes)"
 
 #: 合法最大嵌套：`budget.session.tool_call_limits`（depth=4，实测当前树 200）。
 _LEGAL_MAX_DEPTH_BODY = {"budget": {"session": {"tool_call_limits": {"bash": 3}}}}
@@ -300,6 +301,17 @@ def _recv_ws_frame(ws) -> dict:
     raise AssertionError("连续多帧都是 server_ping，未收到业务帧")
 
 
+def _ws_ping_frame(size_bytes: int) -> str:
+    """Build a valid ASCII ping message whose UTF-8 encoding is exactly size_bytes."""
+    prefix = '{"type":"ping","pad":"'
+    suffix = '"}'
+    filler_size = size_bytes - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
+    assert filler_size >= 0
+    frame = prefix + "a" * filler_size + suffix
+    assert len(frame.encode("utf-8")) == size_bytes
+    return frame
+
+
 def _seed_session(client: TestClient) -> str:
     created = client.post("/api/sessions?launch=false", json={})
     assert created.status_code == 200, created.text
@@ -429,6 +441,60 @@ def test_ws_legal_frame_shapes_are_not_harmed(tmp_path: Path) -> None:
     for got in (msg_err, cancel):
         # 放行的判据：拿到的是业务回声，而不是深度配额串（误伤会回配额串）。
         assert got.get("message") != _EXPECTED_QUOTA_DETAIL, got
+
+
+def test_ws_oversized_message_is_refused_and_connection_stays_alive(tmp_path: Path) -> None:
+    from agent_harness.web.wire_safety import (
+        BODY_MAX_BYTES,
+        WS_MESSAGE_TOO_LARGE_DETAIL,
+    )
+
+    assert WS_MESSAGE_TOO_LARGE_DETAIL == _EXPECTED_WS_TOO_LARGE_DETAIL
+
+    client = _client(tmp_path)
+    sid = _seed_session(client)
+    events = tmp_path / "sessions" / sid / "events.jsonl"
+    before = events.read_bytes()
+    oversized = _ws_ping_frame(BODY_MAX_BYTES + 1)
+    assert json.loads(oversized)["type"] == "ping"
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(oversized)
+        refused = _recv_ws_frame(ws)
+        ws.send_text(json.dumps({"type": "ping"}))
+        alive = _recv_ws_frame(ws)
+
+    assert refused == {"type": "error", "message": _EXPECTED_WS_TOO_LARGE_DETAIL}
+    assert alive.get("type") == "pong", alive
+    assert events.read_bytes() == before
+
+
+def test_ws_message_at_byte_limit_is_accepted(tmp_path: Path) -> None:
+    from agent_harness.web.wire_safety import BODY_MAX_BYTES
+
+    client = _client(tmp_path)
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(_ws_ping_frame(BODY_MAX_BYTES))
+        accepted = _recv_ws_frame(ws)
+
+    assert accepted.get("type") == "pong", accepted
+
+
+def test_ws_message_size_guard_counts_utf8_bytes(tmp_path: Path) -> None:
+    from agent_harness.web.wire_safety import BODY_MAX_BYTES
+
+    client = _client(tmp_path)
+    prefix = '{"type":"ping","pad":"'
+    suffix = '"}'
+    frame = prefix + "中" * 350_000 + suffix
+    frame_bytes = frame.encode("utf-8")
+    assert len(frame) < BODY_MAX_BYTES < len(frame_bytes)
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(frame)
+        refused = _recv_ws_frame(ws)
+
+    assert refused == {"type": "error", "message": _EXPECTED_WS_TOO_LARGE_DETAIL}
 
 
 # ── 7. HTTP body **体积**配额：1 MiB ⇒ 超限 413（#562 残余；用户 2026-10-03 拍板）─

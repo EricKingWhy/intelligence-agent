@@ -29,8 +29,10 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from agent_harness.web.serialization import build_event_payload
 from agent_harness.web.wire_safety import (
+    BODY_MAX_BYTES,
     BODY_MAX_DEPTH,
     BODY_TOO_DEEP_DETAIL,
+    WS_MESSAGE_TOO_LARGE_DETAIL,
     json_container_depth,
 )
 
@@ -300,6 +302,11 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
             while True:
                 raw = await websocket.receive_text()
                 last_received[0] = time.monotonic()
+                # ASGI delivers a complete message here; bound app work before parsing.
+                raw_bytes = raw.encode("utf-8", "surrogatepass")
+                if len(raw_bytes) > BODY_MAX_BYTES:
+                    await _send_json({"type": "error", "message": WS_MESSAGE_TOO_LARGE_DETAIL})
+                    continue
 
                 # #562 RL-04：WS 帧的 JSON 嵌套深度配额——必须落在下面
                 # ``json.loads`` **之前**。WS 是唯一绕过 pydantic 的写入口，深帧会让
@@ -318,9 +325,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                 # ``surrogatepass`` 只为让 ``encode`` 成为全函数：lone surrogate 编出
                 # 的字节均 ≥ 0x80，不参与 ``{ [ } ]`` 计数，既不影响深度、也不新增
                 # 失败面（正常帧本就可 utf-8 编码）。
-                frame_depth = json_container_depth(
-                    raw.encode("utf-8", "surrogatepass")
-                )
+                frame_depth = json_container_depth(raw_bytes)
                 if frame_depth > BODY_MAX_DEPTH:
                     await _send_json({"type": "error", "message": BODY_TOO_DEEP_DETAIL})
                     continue

@@ -199,6 +199,8 @@ BODY_MAX_BYTES = 1024 * 1024
 #: —— 两条判别式必须互不串味（测试依赖固定串）。上限写进文案，便于调用方自纠。
 BODY_TOO_LARGE_DETAIL = f"request body too large (limit {BODY_MAX_BYTES} bytes)"
 
+WS_MESSAGE_TOO_LARGE_DETAIL = f"websocket message too large (limit {BODY_MAX_BYTES} bytes)"
+
 _OPEN_BYTES = frozenset(b"{[")
 _CLOSE_BYTES = frozenset(b"}]")
 

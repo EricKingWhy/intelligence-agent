@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
+
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from pathlib import Path
@@ -118,12 +120,14 @@ from agent_harness.web.domain_errors import (
     http_error,
     model_http_error,
     storage_http_error,
+    storage_http_status,
 )
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
     build_truncated_control,
 )
+from agent_harness.web.wire_safety import _safe_text
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 
 # Read-only catalog facts live with their router. Re-export them here for the
@@ -1209,16 +1213,16 @@ def _run_stream_response(
 
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
     """AgentEvent → SSE 帧（信封构建在 web/serialization.py，SSE/WS 共用）。"""
-    return {"data": json.dumps(
+    return {"data": _safe_text(json.dumps(
         build_event_payload(event, session_id), ensure_ascii=False
-    )}
+    ))}
 
 
 def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str, str]:
     """SessionEvent → SSE 帧（重放通道，信封构建在 web/serialization.py）。"""
-    return {"data": json.dumps(
+    return {"data": _safe_text(json.dumps(
         build_session_event_payload(event, session_id), ensure_ascii=False
-    )}
+    ))}
 
 
 #: CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
@@ -2125,10 +2129,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         内阻塞的 callback。
 
         语义：
-          成功 resolve → 200 ok（run 在 callback 处继续；resolved 事件由 callback 写入）
+          成功 resolve → resolved 事件先 durable append，再返回 200 并唤醒 run
           decision 不在 requested 事件的 allowed_decisions 内 → 422（违反契约）
-          approval_id 已 resolved → 409（防重复决策；幂等性拒绝）
-          approval_id 不存在 → 404（前端过期事件或非本 session 的 id）
+          approval_id 已 resolved 或请求已失效 → 409（防重复/过期决策）
+          approval_id 不存在于 durable 请求事件 → 404（非本 session 的 id）
           无 approval_id（旧 seam 调用）→ 200 received（向后兼容）
           session 不存在 → 404
         """
@@ -2340,6 +2344,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise model_http_error(e) from e
         except StorageBusyError as e:
             # #515（审查 P2-3）：同 create——launched 分支的写锁耗尽 → 503。
+            raise storage_http_error(e) from e
+        except (OSError, sqlite3.Error) as e:
+            # #569：只把明确的容量 / SQLite I/O 错误翻译为 storage 503；坏路径、
+            # 约束冲突和没有原生 SQLite 错误码的 OperationalError 继续走 500。
+            if storage_http_status(e) is None:
+                raise
             raise storage_http_error(e) from e
 
         if result.status == "launched":

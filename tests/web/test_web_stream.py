@@ -252,3 +252,60 @@ async def test_truncated_branch_leaves_no_subscriber(tmp_path, monkeypatch):
             "截断分支不得留下订阅者——没人消费这些队列，且孤儿计时不会回收它"
     finally:
         await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_replay_stream_escapes_surrogates_without_changing_valid_unicode(
+    tmp_path, monkeypatch,
+):
+    from pathlib import Path
+
+    from agent_harness.session import SessionEvent
+    from agent_harness.web.serialization import build_session_event_payload
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, SlowStreamModel)
+    session_id = "sse-surrogate"
+    valid = SessionEvent(
+        type="user/message", session_id=session_id, seq=0,
+        data={"text": "中文 😀"},
+    )
+    legacy = SessionEvent(
+        type="user/message", session_id=session_id, seq=1,
+        data={"text": "bad\ud800 text"},
+    )
+    events_path = Path(app.state.agent.sessions_root) / session_id / "events.jsonl"
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(
+        "\n".join(json.dumps(event.to_dict(), ensure_ascii=True)
+                  for event in (valid, legacy)) + "\n",
+        encoding="ascii",
+    )
+
+    import httpx2
+
+    try:
+        async with httpx2.AsyncClient(timeout=5) as client, client.stream(
+            "GET", f"http://127.0.0.1:{port}/api/sessions/{session_id}/stream",
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            body = await response.aread()
+
+        expected_valid = (
+            b"data: "
+            + json.dumps(
+                build_session_event_payload(valid, session_id), ensure_ascii=False,
+            ).encode("utf-8")
+            + b"\r\n\r\n"
+        )
+        assert body.startswith(expected_valid)
+        text = body.decode("utf-8")
+        frames = [line[5:].strip() for line in text.splitlines()
+                  if line.startswith("data:")]
+        assert len(frames) == 2
+        replayed = json.loads(frames[1])
+        assert replayed["data"]["text"] == "bad\ud800 text"
+        assert replayed["seq"] == 1
+    finally:
+        await _shutdown(server, serve_task)
