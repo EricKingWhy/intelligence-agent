@@ -6,6 +6,8 @@ MUTATING 副作用：改变外部状态，批次调度时整批串行执行。
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field
 
 from agent_harness.sandbox import Sandbox
@@ -127,9 +129,14 @@ class WriteTool(Tool):
 
         只服务 PermissionError 分支的成因区分；探测失败（路径越界等，均为
         OSError 族）按 False 处理——保持旧的 PERMISSION_DENIED 行为，不新增
-        误报。非 OSError 的解析故障是编程错误，让它照常暴露。
+        误报。base 契约声明返回 ``Path``，但 DockerSandbox 覆写返回
+        ``PurePosixPath``（无 ``.is_dir()``）：形态不是实 ``Path`` 时同样按
+        False 处理，让沙盒的真实 PermissionError 原样映射成 PERMISSION_DENIED，
+        而不是被逃逸的 AttributeError 搅成笼统执行错误（批次收口 Standards 轴
+        P3）。其余非 OSError 的解析故障仍是编程错误，让它照常暴露。
         """
         try:
-            return self._sandbox.resolve_within_workspace(path).is_dir()
+            resolved = self._sandbox.resolve_within_workspace(path)
+            return isinstance(resolved, Path) and resolved.is_dir()
         except OSError:
             return False
