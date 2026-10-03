@@ -90,7 +90,7 @@ def test_acceptance_revision_appends_and_keeps_history(tmp_path) -> None:
     outcome = apply_acceptance_revision(
         session,
         criteria=[
-            {"text": "新判据一", "origin": "agent", "confirmed": False},
+            {"text": "新判据一", "origin": "agent"},  # 缺 confirmed：Agent 提出的生来未确认
             {"text": "新判据二"},
         ],
     )
@@ -102,6 +102,7 @@ def test_acceptance_revision_appends_and_keeps_history(tmp_path) -> None:
     state = derive_task_state(session.events)
     assert [c.text for c in state.criteria] == ["新判据一", "新判据二"]
     assert state.criteria[0].confirmed is False, "agent 提出的清单默认未确认"
+    assert state.criteria[1].confirmed is True, "user 清单默认已确认"
     # 旧版事实原样留在事件流里（append-only，不删除不改写）
     assert any(
         e.type == TASK_DEFINED and e.event_id == first_event.event_id

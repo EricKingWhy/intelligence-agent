@@ -171,13 +171,17 @@ def _failure(state: TaskState, error_kind: str, reason: str) -> TaskOutcome:
 
 
 def _parse_criteria(
-    raw_items: object, *, generate_ids: bool
+    raw_items: object, *, write_side: bool
 ) -> tuple[tuple[TaskCriterion, ...], str | None]:
-    """验收清单行级校验。``generate_ids=False``（投影侧）拒绝缺 id 的行。
+    """验收清单行级校验。``write_side=False``（投影侧）拒绝缺 id / 缺 confirmed 的行。
 
     刻意**不做缺省补全**（plan.py 同判据）：投影侧给缺 id 行现场生成 id 会让
     两次 derive 得到不同结果，重放确定性就没了。``criteria=None``（定义时缺项）
     是合法的空清单——票面允许 Agent 稍后提出清单。
+
+    写侧缺省（只发生在写侧，落盘前即具体化）：item_id 自动补 ``ac-`` 前缀；
+    confirmed 默认 = (origin == "user")——票面「普通低风险可推进并标记清单未
+    确认」，Agent 提出的清单生来未确认，用户的生来已确认。
     """
     if raw_items is None:
         return (), None
@@ -194,12 +198,14 @@ def _parse_criteria(
         origin = raw.get("origin", "user")
         if origin not in CRITERIA_ORIGINS:
             return (), f"origin 非法：{origin!r}（合法值 {list(CRITERIA_ORIGINS)}）"
-        confirmed = raw.get("confirmed", True)
+        confirmed = raw.get("confirmed", origin == "user" if write_side else None)
         if not isinstance(confirmed, bool):
-            return (), f"confirmed 必须是布尔值，得到 {confirmed!r}"
+            if write_side:
+                return (), f"confirmed 必须是布尔值，得到 {confirmed!r}"
+            return (), f"验收项缺 confirmed（投影侧不做缺省补全）：{text!r}"
         item_id = raw.get("item_id")
         if item_id is None:
-            if not generate_ids:
+            if not write_side:
                 return (), f"验收项缺 item_id（投影侧不做缺省补全）：{text!r}"
             item_id = f"ac-{uuid4().hex[:12]}"
         if not isinstance(item_id, str) or not item_id.strip():
@@ -224,7 +230,7 @@ def _definition_payload(
     read_write_intent = data.get("read_write_intent")
     if read_write_intent is not None and not isinstance(read_write_intent, str):
         return None
-    criteria, error = _parse_criteria(data.get("criteria"), generate_ids=False)
+    criteria, error = _parse_criteria(data.get("criteria"), write_side=False)
     if error is not None:
         return None
     return task_text, read_write_intent, criteria
@@ -261,7 +267,7 @@ def derive_task_state(events: list[SessionEvent]) -> TaskState:
         elif etype == TASK_ACCEPTANCE_REVISED:
             data = event.data if isinstance(event.data, dict) else None
             parsed, error = _parse_criteria(
-                data.get("criteria") if data else None, generate_ids=False
+                data.get("criteria") if data else None, write_side=False
             )
             if error is not None:
                 logger.warning(
@@ -351,7 +357,7 @@ def apply_task_definition(
             current, "shape",
             f"read_write_intent 必须是非空字符串或 None，得到 {read_write_intent!r}",
         )
-    parsed, error = _parse_criteria(criteria, generate_ids=True)
+    parsed, error = _parse_criteria(criteria, write_side=True)
     if error is not None:
         return _failure(current, "shape", error)
     data: dict = {"task_text": task_text, "criteria": [item.to_payload() for item in parsed]}
@@ -372,7 +378,7 @@ def apply_acceptance_revision(
     current = derive_task_state(session.events)
     if not current.defined:
         return _failure(current, "conflict", "尚无任务定义，无可修订的验收清单")
-    parsed, error = _parse_criteria(criteria, generate_ids=True)
+    parsed, error = _parse_criteria(criteria, write_side=True)
     if error is not None:
         return _failure(current, "shape", error)
     previous_id = next(

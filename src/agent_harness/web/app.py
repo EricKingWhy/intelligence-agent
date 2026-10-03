@@ -1452,6 +1452,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
 
+    # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
+    # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
+    from agent_harness.web.task_delivery import register_task_routes
+
+    register_task_routes(app, validate_session_id=validate_session_id)
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
     # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
