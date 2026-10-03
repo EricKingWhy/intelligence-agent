@@ -23,6 +23,7 @@ from agent_harness.config import Settings
 from agent_harness.model.scripted import RequestSnapshot, ScriptedModel
 from agent_harness.session import (
     RUN_COMPLETED,
+    RUN_FAILED,
     RUN_PAUSED,
     RUN_STARTED,
     USER_MESSAGE,
@@ -38,6 +39,7 @@ from agent_harness.session.event import (
     STEER_REQUESTED,
 )
 from agent_harness.session.queue import QueuedMessage
+from agent_harness.session.session import validate_event_seq
 from agent_harness.web.app import AppState, session_service
 
 
@@ -810,3 +812,97 @@ async def test_rejected_queue_edit_keeps_the_old_queued_item(tmp_path, monkeypat
         lambda: harness.of_type(session_id, QUEUE_CONSUMED),
         what="旧排队项仍被接力消费",
     )
+
+
+# ── #560（RL-02）：突发并发 mode=queue 不丢消息 ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_burst_queue_on_idle_session_keeps_every_input(tmp_path, monkeypatch):
+    """8 路并发 mode=queue 打空闲会话：0 条 409 丢消息（1 launched + 7 queued）。
+
+    #560（RL-02）的两个病灶都在"判 idle → 启动"这段无锁窗口里：
+
+    - A（TOCTOU 丢消息）：``send_message`` 判 idle 之后、``resume_and_launch``
+      内部再查之前，另一个入口可能刚拉起 run——输家拿到 409，正文不落盘
+      （无 user/message、无 queue 项），调用方无法区分"真忙"和"差几微秒没抢赢"。
+    - B（SeqConflict 炸 run）：多个赢家同时穿过再查时各自 launch，两个
+      Session 聚合从同一磁盘快照各自推算 seq，``begin_run`` 撞号被 store
+      fail-closed 拒绝 → 该 run 直接 task_failed。
+
+    修复后契约：输家自动转入队（与 ADR-0030 §4.7 终态驱动侧同一模式），launch
+    在 per-session 锁内做 CAS（``_commit_paused_resume`` 已验证的"锁内重读聚合
+    再提交"纪律）。断言全部走外部可观察行为：恰好 1 个 launched、其余 queued、
+    每个输入恰落盘一次、seq 全程唯一、队列按到达顺序 FIFO 排泄、重启后按事件流
+    可重建（D5）。
+    """
+    gate = asyncio.Event()
+    harness = _build_harness(
+        tmp_path, monkeypatch, [AIMessage(content="答")], gate=gate,
+    )
+    service = harness.service
+    # 造一个 idle 会话：预热 run 放行跑完，会话回到无在途状态。
+    warmup = await service.create_and_launch(task="预热")
+    session_id = warmup.session.session_id
+    gate.set()
+    await harness.wait_for(
+        lambda: service._run_manager.get_active(session_id) is None,
+        what="预热 run 收口（会话 idle）",
+    )
+
+    # burst 窗口内首 run 必须钉在模型调用上（gate 复位）——否则快模型先跑完，
+    # "多个 launched"就未必是缺陷（票面 2026-10-03 审计的判据）。
+    gate.clear()
+    contents = [f"burst-msg-{i}" for i in range(1, 9)]
+    results = list(await asyncio.gather(
+        *(service.send_message(session_id=session_id, content=c, mode="queue")
+          for c in contents),
+        return_exceptions=True,
+    ))
+    errors = [r for r in results if isinstance(r, BaseException)]
+    assert not errors, f"并发 send_message 不应抛异常（409 丢消息形态）: {errors!r}"
+    statuses = [r.status for r in results]
+    assert statuses.count("launched") == 1, statuses
+    assert statuses.count("queued") == 7, statuses
+
+    # 每个输家都落了 durable 事实（正文各一次），且内存镜像与事件流一致。
+    queued_events = harness.of_type(session_id, MESSAGE_QUEUED)
+    assert sorted(e.data["content"] for e in queued_events) == sorted(
+        c for c, r in zip(contents, results) if r.status == "queued"
+    )
+    queued_order = [e.data["content"] for e in queued_events]
+
+    # D5：重启后按事件流重建（fresh service + 同一 store），待投递集合与顺序一致。
+    # ⚠ monkeypatch 是"最后一次覆盖生效"：fresh harness 的 factory 会接管后续
+    # create_chat_model——必须给同样的剧本且 gate=None（drain 阶段的 run 不再阻塞），
+    # 否则接力 run 全部"剧本耗尽"。
+    fresh = _build_harness(tmp_path, monkeypatch, [AIMessage(content="答")], gate=None)
+    assert await fresh.service.rebuild_message_queues() >= 1
+    pending = await fresh.service.list_undelivered_inputs(session_id)
+    assert [p.content for p in pending] == queued_order
+
+    # 放行：首 run 终态后队列按 FIFO 排泄，7 条各成一次 run。
+    gate.set()
+    await harness.wait_for(
+        lambda: (
+            service._run_manager.get_active(session_id) is None
+            and len(harness.of_type(session_id, QUEUE_CONSUMED)) == 7
+        ),
+        what="7 条排队输入全部接力消费",
+    )
+
+    events = harness.events(session_id)
+    # 输入各一次：8 条 burst 正文 + 预热，恰好都在 user/message 里（无注入消息）。
+    user_contents = [
+        e.data["content"] for e in events
+        if e.type == USER_MESSAGE and not e.data.get("injected_by")
+    ]
+    assert sorted(user_contents) == sorted(["预热", *contents])
+    # FIFO：queue/consumed 的消费顺序 = message/queued 的到达顺序。
+    consumed_ids = [
+        e.data["queue_id"] for e in harness.of_type(session_id, QUEUE_CONSUMED)
+    ]
+    assert consumed_ids == [e.data["queue_id"] for e in queued_events]
+    # seq 全程唯一（双聚合撞号的 fail-closed 底线没被踩到）、没有任何 run 被炸。
+    validate_event_seq(session_id, events)
+    assert not harness.of_type(session_id, RUN_FAILED)

@@ -188,12 +188,33 @@ def test_a_non_string_content_does_not_break_the_projection() -> None:
         f"我的 key 是 {FAKE_KEY} 请记下",
         f"token={FAKE_JWT}",
         f"这是私钥：\n{FAKE_PRIVATE_KEY}\n完",
+        # #558：中文「密码是…」赋值句式同样必须被切除。
+        "我的密码是 SuperSecret123!",
     ],
 )
 def test_a_secret_is_cut_off_at_its_first_byte(text: str) -> None:
     (message,) = _payload(run_events=[_user(text)])["current_run"]
     assert find_secret(message["text"]) is None
     assert message["text"].endswith(SECRET_PLACEHOLDER)
+
+
+def test_the_chinese_secret_cut_keeps_the_harmless_prefix() -> None:
+    """中文命中同样只砍命中点之后：前缀是原文索引切出来的（#558）。"""
+    (message,) = _payload(
+        run_events=[_user("我用 pnpm。我的密码是 SuperSecret123!")]
+    )["current_run"]
+    assert "SuperSecret123" not in message["text"]
+    assert message["text"] == f"我用 pnpm。我的{SECRET_PLACEHOLDER}"
+
+
+def test_a_fullwidth_secret_is_removed_whole_not_partial() -> None:
+    """全角变体只在 NFKC 归一化副本里命中：副本索引映射不回原文，无法证明任何
+    前缀干净 ⇒ 整段移除，一个字都不留（fail-closed，宁丢前缀不漏秘密）。"""
+    (message,) = _payload(
+        run_events=[_user("前缀 ｐａｓｓｗｏｒｄ：Ｓｕｐｅｒ123")]
+    )["current_run"]
+    assert message["text"] == SECRET_PLACEHOLDER
+    assert "Ｓｕｐｅｒ" not in message["text"]
 
 
 def test_the_harmless_prefix_before_a_secret_survives() -> None:
