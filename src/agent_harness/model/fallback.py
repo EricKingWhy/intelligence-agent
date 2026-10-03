@@ -249,6 +249,7 @@ class ModelFallbackCoordinator:
     async def ainvoke(
         self, messages: list[AnyMessage], *,
         on_request_started: Callable[[str, str], None] | None = None,
+        on_request_failed: Callable[[str, str], None] | None = None,
     ) -> Any:
         """非流式调用：primary 瞬时失败 → 切 fallback 重试一次。
 
@@ -270,11 +271,13 @@ class ModelFallbackCoordinator:
         except BaseException as error:
             if request_id is None:
                 raise
-            self._record_request(role, REQUEST_OUTCOME_FAILED, request_id)
+            self._record_failed_request(role, request_id, on_request_failed)
             if not isinstance(error, Exception) or not self._try_switch(error):
                 raise
             try:
-                return await self._ainvoke_once(messages, on_request_started)
+                return await self._ainvoke_once(
+                    messages, on_request_started, on_request_failed,
+                )
             except BaseException as retry_error:
                 if isinstance(retry_error, Exception):
                     self._double_failure = (
@@ -287,6 +290,7 @@ class ModelFallbackCoordinator:
     async def _ainvoke_once(
         self, messages: list[AnyMessage],
         on_request_started: Callable[[str, str], None] | None,
+        on_request_failed: Callable[[str, str], None] | None,
     ) -> Any:
         """切换后的那一次重试（**不再**切换：never 切回、只重试一次）。"""
         role = self._current_role()
@@ -298,7 +302,7 @@ class ModelFallbackCoordinator:
         except BaseException:
             if request_id is None:
                 raise
-            self._record_request(role, REQUEST_OUTCOME_FAILED, request_id)
+            self._record_failed_request(role, request_id, on_request_failed)
             raise
         self._record_request(role, REQUEST_OUTCOME_COMPLETED, request_id)
         return result
@@ -306,6 +310,7 @@ class ModelFallbackCoordinator:
     async def astream(
         self, messages: list[AnyMessage], *,
         on_request_started: Callable[[str, str], None] | None = None,
+        on_request_failed: Callable[[str, str], None] | None = None,
     ) -> AsyncIterator[Any]:
         """流式调用：流中途瞬时失败（含卡流）→ 切 fallback 继续产出。
 
@@ -336,7 +341,7 @@ class ModelFallbackCoordinator:
         except BaseException as error:
             if request_id is None:
                 raise
-            self._record_request(role, REQUEST_OUTCOME_FAILED, request_id)
+            self._record_failed_request(role, request_id, on_request_failed)
             if not isinstance(error, Exception) or not self._try_switch(
                 error,
                 primary_content_chars=primary_content_chars,
@@ -355,8 +360,8 @@ class ModelFallbackCoordinator:
             except BaseException as retry_error:
                 if retry_request_id is None:
                     raise
-                self._record_request(
-                    retry_role, REQUEST_OUTCOME_FAILED, retry_request_id,
+                self._record_failed_request(
+                    retry_role, retry_request_id, on_request_failed,
                 )
                 # 只把"两级都真的失败"记成双挂；消费方断连（GeneratorExit /
                 # CancelledError）走同一分支但**不是**模型级双挂。
@@ -421,6 +426,14 @@ class ModelFallbackCoordinator:
         self._requests.append(ModelRequestAttempt(
             role=role, outcome=outcome, request_id=request_id,
         ))
+
+    def _record_failed_request(
+        self, role: str, request_id: str,
+        callback: Callable[[str, str], None] | None,
+    ) -> None:
+        self._record_request(role, REQUEST_OUTCOME_FAILED, request_id)
+        if callback is not None:
+            callback(role, request_id)
 
     def _try_switch(
         self, error: BaseException, *,

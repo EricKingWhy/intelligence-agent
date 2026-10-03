@@ -401,17 +401,24 @@ class TestInFlightVisibility:
         primary = _BlockedStreamModel()
         session = make_session(tmp_path)
         emitted: list[Any] = []
+        request_started_emitted = asyncio.Event()
 
         async def drain() -> None:
             async for frame in _runtime(primary, None).run_stream(session, "你好"):
                 emitted.append(frame)
+                if frame.type == MODEL_REQUEST_STARTED:
+                    request_started_emitted.set()
 
         task = asyncio.create_task(drain())
         try:
             await asyncio.wait_for(primary.entered.wait(), timeout=2)
+            await asyncio.wait_for(request_started_emitted.wait(), timeout=2)
             in_flight = session._store.read_events(session.session_id)
             starts = [event for event in in_flight if event.type == MODEL_REQUEST_STARTED]
             assert len(starts) == 1, "Provider 在途时必须已有 durable 开始事件"
+            assert any(frame.type == MODEL_REQUEST_STARTED for frame in emitted), (
+                "直接 run_stream 迭代器也必须在 Provider 首个 chunk 前镜像开始事件"
+            )
             assert not _events(session, MODEL_REQUEST), "响应结算前不能伪造结算事件"
             assert not _events(session, TEXT_DELTA), "barrier 释放前 Provider 未产出响应"
             assert consumed_from_events(in_flight).model_requests == 0, (
@@ -435,6 +442,52 @@ class TestInFlightVisibility:
             primary.release.set()
             if not task.done():
                 await task
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_is_settled_before_blocked_fallback(self, tmp_path):
+        """fallback 在途时，已知失败的 primary 必须先有 durable 结算。"""
+        primary = _AlwaysFailingModel(_http_500())
+        fallback = _BlockedStreamModel()
+        session = make_session(tmp_path)
+        emitted: list[Any] = []
+        fallback_start_emitted = asyncio.Event()
+
+        async def drain() -> None:
+            async for frame in _runtime(primary, fallback).run_stream(session, "你好"):
+                emitted.append(frame)
+                if (
+                    frame.type == MODEL_REQUEST_STARTED
+                    and frame.data.get("role") == "fallback"
+                ):
+                    fallback_start_emitted.set()
+
+        task = asyncio.create_task(drain())
+        try:
+            await asyncio.wait_for(fallback.entered.wait(), timeout=2)
+            await asyncio.wait_for(fallback_start_emitted.wait(), timeout=2)
+            in_flight = session._store.read_events(session.session_id)
+            starts = [event for event in in_flight if event.type == MODEL_REQUEST_STARTED]
+            requests = [event for event in in_flight if event.type == MODEL_REQUEST]
+            assert [event.data["role"] for event in starts] == ["primary", "fallback"]
+            assert len(requests) == 1, "primary 失败须在 fallback 启动前结算"
+            assert requests[0].data["role"] == "primary"
+            assert requests[0].data["outcome"] == "failed"
+            assert starts[0].data["request_id"] == requests[0].data["request_id"]
+            assert starts[0].seq < requests[0].seq < starts[1].seq
+            emitted_lifecycle = [
+                (frame.type, frame.data.get("role"), frame.data.get("outcome"))
+                for frame in emitted
+                if frame.type in (MODEL_REQUEST_STARTED, MODEL_REQUEST)
+            ]
+            assert emitted_lifecycle == [
+                (MODEL_REQUEST_STARTED, "primary", None),
+                (MODEL_REQUEST, "primary", "failed"),
+                (MODEL_REQUEST_STARTED, "fallback", None),
+            ]
+        finally:
+            fallback.release.set()
+            if not task.done():
+                await asyncio.wait_for(task, timeout=2)
 
     @pytest.mark.asyncio
     async def test_provider_failure_pairs_started_and_failed_request(self, tmp_path):

@@ -18,6 +18,8 @@ from langchain_core.messages import AIMessage
 from agent_harness.agent import AgentRuntime
 from agent_harness.session import (
     MODEL_COMPLETED,
+    MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     MODEL_STARTED,
     RUN_COMPLETED,
     RUN_STARTED,
@@ -176,8 +178,29 @@ async def test_run_stream_and_run_produce_same_session_events(tmp_path):
                          "reasoning/completed", "reasoning/interrupted"}
 
     def shape(session: Session):
-        return [(e.type, e.data) for e in session.events
-                if e.type not in stream_fact_types]
+        shaped = []
+        for event in session.events:
+            if event.type in stream_fact_types:
+                continue
+            data = dict(event.data)
+            if event.type in (MODEL_REQUEST_STARTED, MODEL_REQUEST):
+                data.pop("request_id", None)
+            shaped.append((event.type, data))
+        return shaped
+
+    def assert_request_pairs(session: Session) -> None:
+        starts = [e for e in session.events if e.type == MODEL_REQUEST_STARTED]
+        requests = [e for e in session.events if e.type == MODEL_REQUEST]
+        assert len(starts) == len(requests)
+        assert [e.data["request_id"] for e in starts] == [
+            e.data["request_id"] for e in requests
+        ]
+        assert [e.data["role"] for e in starts] == [
+            e.data["role"] for e in requests
+        ]
+        assert all(start.seq < request.seq for start, request in zip(starts, requests))
 
     assert shape(session_stream) == shape(session_invoke), \
         "run_stream 和 run 的非流式 SessionEvent 事实源应该一致"
+    assert_request_pairs(session_stream)
+    assert_request_pairs(session_invoke)

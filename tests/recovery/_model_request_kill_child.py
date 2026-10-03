@@ -9,11 +9,32 @@ import sys
 from pathlib import Path
 
 from agent_harness.agent.runtime import AgentRuntime
+from agent_harness.model.fallback import TwoLevelFallbackPolicy
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 
 
 class _BlockedModel:
+    def __init__(self, marker: Path, label: str = "called") -> None:
+        self._marker = marker
+        self._label = label
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        with self._marker.open("a", encoding="utf-8") as marker:
+            marker.write(f"{self._label}\n")
+            marker.flush()
+            os.fsync(marker.fileno())
+        await asyncio.Future()
+
+    async def astream(self, messages, **kwargs):
+        raise AssertionError("本测试使用 AgentRuntime.run 的 invoke 路径")
+        yield
+
+
+class _FailingModel:
     def __init__(self, marker: Path) -> None:
         self._marker = marker
 
@@ -22,10 +43,10 @@ class _BlockedModel:
 
     async def ainvoke(self, messages, **kwargs):
         with self._marker.open("a", encoding="utf-8") as marker:
-            marker.write("called\n")
+            marker.write("primary-called\n")
             marker.flush()
             os.fsync(marker.fileno())
-        await asyncio.Future()
+        raise TimeoutError("primary unavailable")
 
     async def astream(self, messages, **kwargs):
         raise AssertionError("本测试使用 AgentRuntime.run 的 invoke 路径")
@@ -40,11 +61,19 @@ async def main() -> None:
         session_id=config["session_id"],
     )
     registry = ToolRegistry()
+    marker = Path(config["provider_marker"])
+    with_fallback = config.get("with_fallback", False)
     runtime = AgentRuntime(
-        model=_BlockedModel(Path(config["provider_marker"])),
+        model=_FailingModel(marker) if with_fallback else _BlockedModel(marker),
         registry=registry,
         executor=ToolExecutor(registry),
         max_agent_turns=1,
+        fallback_model=(
+            _BlockedModel(marker, "fallback-called") if with_fallback else None
+        ),
+        fallback_policy=TwoLevelFallbackPolicy() if with_fallback else None,
+        primary_model_name="primary-model",
+        fallback_model_name="fallback-model",
     )
     await runtime.run(session, "在途请求硬杀测试")
 
