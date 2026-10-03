@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import sqlite3
-
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from pathlib import Path
