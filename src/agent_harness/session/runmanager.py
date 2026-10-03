@@ -234,11 +234,21 @@ class ManagedRun:
             # 离开事件」不双写（闸门只在循环顶被读，而那个循环已经结束）。
             if self.runtime is not None:
                 self.runtime.client_presence.mark_absent()
-            logger.info(
-                "产品客户端缺席成立（session=%s，零订阅者超过 %.0fs）——"
-                "交 runtime 准入点以 client_absent 暂停收口",
-                self.session.session_id, self._manager.disconnect_grace_seconds,
-            )
+                logger.info(
+                    "产品客户端缺席成立（session=%s，零订阅者超过 %.0fs）——"
+                    "交 runtime 准入点以 client_absent 暂停收口",
+                    self.session.session_id, self._manager.disconnect_grace_seconds,
+                )
+            else:
+                # 审查（C 轴 P3，2026-10-04）：run 已收口（paused / terminal 后
+                # runtime 已释放）时循环已结束、没有准入点会再读闸门——缺席
+                # 置位是 no-op。此时 log 只能记录这个事实，不得沿用「交准入点
+                # 暂停收口」的措辞（那句话在已收口 run 上与事实不符）。
+                logger.info(
+                    "产品客户端缺席成立（session=%s，零订阅者超过 %.0fs）——"
+                    "run 已收口，缺席置位 no-op（已 paused 不双写，已终态不翻写）",
+                    self.session.session_id, self._manager.disconnect_grace_seconds,
+                )
             return
         logger.warning(
             "run 孤儿回收（session=%s，零订阅者超过 %.0fs）",
