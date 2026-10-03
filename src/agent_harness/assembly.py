@@ -405,6 +405,16 @@ async def build_runtime(
         validate_tool_call_limits_registered(
             run_budget.limits, registered=[tool.name for tool in registry.list()],
         )
+    # session 作用域的同一条判据（#564 / BUG-R4-04）：session 预算横跨会话树，
+    # 而 child registry ⊆ 根 registry（factory.create 的 source_registry 就是
+    # 本 registry），所以"整棵树调得到"与"这里已注册"是同一个集合——delegation
+    # -only 工具（如 delegate）只要在根上注册就合法，不会被子 profile 误杀。
+    # 位置同上：无副作用、不落任何消耗预算的事件；resume 重启路径拿同一份声明
+    # 重新装配时按**当前** registry 再核一遍（能力被禁用后旧配额名响亮拒绝）。
+    if session_budget is not None:
+        validate_tool_call_limits_registered(
+            session_budget.limits, registered=[tool.name for tool in registry.list()],
+        )
 
     # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
     # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。

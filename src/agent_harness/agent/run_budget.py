@@ -2789,7 +2789,15 @@ class SessionBudgetPort(Protocol):
       只随产出响应的那一次给）。closeout 也是一次真实请求，走同一方法。
     - `record_tools`：把工具账随 `tool/result` 的 `budget_delta` 落进树账。
     - `snapshot`：只读读数（投影与 continuation 用）。
+
+    `limits`（`#564`）：本端口绑定的**请求侧声明**。注册表是装配层的产物
+    （`validate_tool_call_limits_registered` 的判据落点），而声明经端口传入
+    runtime——装配层要在 registry 定型处核对 session 配额里的工具名，就必须
+    能从端口读到这份声明（唯一实现 `SessionBudgetHandle` 以字段承载）。
     """
+
+    @property
+    def limits(self) -> SessionLimits: ...
 
     async def snapshot(self) -> SessionBudgetSnapshot: ...
 

@@ -26,7 +26,14 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import PydanticCustomError
 from sse_starlette.sse import EventSourceResponse
 from starlette.datastructures import Headers, MutableHeaders
@@ -211,8 +218,11 @@ class RunBudgetRequest(BaseModel):
     #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
     #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
-    #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`）。`{}` = 没配。
-    tool_call_limits: dict[str, int] | None = None
+    #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`；`#564`：两作用域口径统一）。
+    #: 值用 `StrictInt`：pydantic 2.13 的 `Field(strict=True)` 只约束 dict 本身、
+    #: **不级联到值类型**（"3"→3 / true→1 仍被 lax 强制），StrictInt 才逐值拒绝
+    #: 字符串与布尔——与领域层 `parse_tool_call_limits` 同口径（对齐 #548 C3）。
+    tool_call_limits: dict[str, StrictInt] | None = Field(default=None, strict=True)
     #: 绝对截止时刻（`#315` / `11 §6.1`）：RFC 3339 UTC 文本或 `null`（= 不设）。
     #: 声明为 `str`：wire 上的时刻是文本，解析与归一化到 UTC 由领域层
     #: `parse_deadline_at` 一处完成（朴素时间 / 空串 / 非字符串在那里 422）。
@@ -284,7 +294,11 @@ class SessionBudgetRequest(BaseModel):
     max_model_requests: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
-    tool_call_limits: dict[str, int] | None = None
+    #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`；`#564`：两作用域口径统一）。
+    #: 值用 `StrictInt`：pydantic 2.13 的 `Field(strict=True)` 只约束 dict 本身、
+    #: **不级联到值类型**（"3"→3 / true→1 仍被 lax 强制），StrictInt 才逐值拒绝
+    #: 字符串与布尔——与领域层 `parse_tool_call_limits` 同口径（对齐 #548 C3）。
+    tool_call_limits: dict[str, StrictInt] | None = Field(default=None, strict=True)
     deadline_at: str | None = None
     max_delegations: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     expected_version: int | None = Field(default=None, ge=1)
