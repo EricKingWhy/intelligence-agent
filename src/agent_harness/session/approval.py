@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from agent_harness.session.event import (
@@ -341,6 +342,68 @@ def unresolved_approval_ids(events: list[SessionEvent]) -> list[str]:
         elif event.type == PERMISSION_RESOLVED:
             resolved.add(approval_id)
     return [approval_id for approval_id in requested if approval_id not in resolved]
+
+
+class ApprovalOutcome(str, Enum):
+    """单个 tool_call 的 durable 审批结局（#566 封闭词表）。
+
+    状态值封闭：消费方（恢复合成 / resume 修复）只认这四个枚举值，不给
+    自由文本漂移空间（票面 §1.3 的 enum 判据）。
+    """
+
+    NOT_REQUESTED = "not_requested"
+    UNRESOLVED = "unresolved"
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
+#: 接纳放行的决策族（per-call scoping 只兑现 approve_once，其余留给后续批次）。
+_APPROVE_DECISIONS = frozenset(
+    {
+        PermissionDecision.APPROVE_ONCE.value,
+        PermissionDecision.APPROVE_SESSION.value,
+        PermissionDecision.APPROVE_POLICY.value,
+    }
+)
+
+
+def approval_outcome_for_call(
+    events: list[SessionEvent], tool_call_id: str
+) -> ApprovalOutcome:
+    """读 durable 流上**该 tool_call** 的审批结局（配对键 ``approval_id``）。
+
+    与 `unresolved_approval_ids` 同一把尺子（requested / resolved 同键配对），
+    只是把视角从 approval_id 换到 tool_call_id。执行域顺序是审批闸门 →
+    接纳点（Ledger PENDING，`04 §9.1`）→ execute：「审批未通过 / 已批准 /
+    未请求审批」都说明控制流停在**接纳点之前**——与「Ledger 无账行」组合
+    即可证明工具从未运行（#566 的证明结构，不是"缺 tool/result 就推定"）。
+
+    本函数只产审批侧一半的真相；「Ledger 有没有行」由调用方（持有 Ledger 的
+    恢复层）判定——没有账面的读数（如裸 `Session.resume`）不得据此断言未执行。
+    """
+    requested_ids: list[str] = []
+    decisions: dict[str, str] = {}
+    for event in events:
+        approval_id = event.data.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            continue
+        if event.type == TOOL_APPROVAL_REQUESTED:
+            if event.data.get("tool_call_id") == tool_call_id:
+                requested_ids.append(approval_id)
+        elif event.type == PERMISSION_RESOLVED:
+            decisions[approval_id] = str(event.data.get("decision", ""))
+    if not requested_ids:
+        return ApprovalOutcome.NOT_REQUESTED
+    for requested_id in requested_ids:
+        if requested_id not in decisions:
+            return ApprovalOutcome.UNRESOLVED
+    decision = decisions[requested_ids[-1]]
+    if decision in _APPROVE_DECISIONS:
+        return ApprovalOutcome.APPROVED
+    if decision == PermissionDecision.DENY.value:
+        return ApprovalOutcome.DENIED
+    # 未知决策值：不能证明批准放行过 → 按未结清处理（fail-closed 诚实）。
+    return ApprovalOutcome.UNRESOLVED
 
 
 def append_permission_change(session: Session, change: PermissionChange) -> PermissionChange:

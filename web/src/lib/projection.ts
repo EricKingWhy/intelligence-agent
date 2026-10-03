@@ -1416,6 +1416,10 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.SESSION_RESUMED]: { apply: noopProjection, summarize: emptySummary },
   // session/forked：单行语义 = 已分叉（UI-04 定案；child 指针进详情，不做截断 id）。
   [EventType.SESSION_FORKED]: { apply: noopProjection, summarize: summarizeForked },
+  // #555：fork 意图标记（未完成 fork 的 durable 可见性事实）——不是时间线条目，
+  // 与 SESSION_RESUMED 同形登记为 no-op（不进 unknown_events）。未完成 fork 的
+  // UI 呈现属续聊对账的产品面，另行接线。
+  [EventType.FORK_IN_PROGRESS]: { apply: noopProjection, summarize: emptySummary },
   [EventType.RUN_STARTED]: { apply: projectRunStarted, summarize: emptySummary },
   [EventType.RUN_COMPLETED]: { apply: projectRunCompleted, summarize: summarizeRunCompleted },
   [EventType.RUN_FAILED]: { apply: projectRunFailed, summarize: summarizeRunFailed },

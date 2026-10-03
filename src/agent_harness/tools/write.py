@@ -69,9 +69,49 @@ class WriteTool(Tool):
         try:
             self._sandbox.write_text(args.path, args.content)
         except PermissionError as e:
+            # #549-b / SB-07：Windows 的 os.replace 语义把"目标是目录"也报成
+            # PermissionError [WinError 5]（POSIX 是 IsADirectoryError）。用磁盘
+            # 事实区分两种成因：目录形态映射成模型可自纠的 INVALID_ARGUMENT
+            # （可行动 message），真正的权限拒绝保持 PERMISSION_DENIED。
+            if self._target_is_directory(args.path):
+                return ToolResult.failure(
+                    message=(
+                        f"写入失败：'{args.path}' 是目录，不能作为文件写入"
+                        "（请改用文件路径）"
+                    ),
+                    error_code=ErrorCode.INVALID_ARGUMENT,
+                )
             return ToolResult.failure(
                 message=str(e),
                 error_code=ErrorCode.PERMISSION_DENIED,
+            )
+        except IsADirectoryError:
+            # POSIX 形态的"目标是目录"（Windows 走上面的 PermissionError 分支）。
+            return ToolResult.failure(
+                message=(
+                    f"写入失败：'{args.path}' 是目录，不能作为文件写入"
+                    "（请改用文件路径）"
+                ),
+                error_code=ErrorCode.INVALID_ARGUMENT,
+            )
+        except NotADirectoryError:
+            # 路径中某一段不是目录（POSIX：父路径是文件）。Windows 同形态报
+            # FileExistsError [WinError 183]，落在下面的分支。
+            return ToolResult.failure(
+                message=(
+                    f"写入失败：'{args.path}' 的父路径中有某一段不是目录"
+                    "（请检查中间路径是否被同名文件占用）"
+                ),
+                error_code=ErrorCode.INVALID_ARGUMENT,
+            )
+        except FileExistsError:
+            # Windows 形态的"父路径是文件"（[WinError 183] ERROR_ALREADY_EXISTS）。
+            return ToolResult.failure(
+                message=(
+                    f"写入失败：'{args.path}' 的父路径中有某一段不是目录"
+                    "（请检查中间路径是否被同名文件占用）"
+                ),
+                error_code=ErrorCode.INVALID_ARGUMENT,
             )
         return ToolResult.success(
             message=f"已写入 '{args.path}'（{len(args.content)} 字符）。",
@@ -81,3 +121,15 @@ class WriteTool(Tool):
                 **diff_data(before, args.content),
             },
         )
+
+    def _target_is_directory(self, path: str) -> bool:
+        """探测写目标在磁盘上是否是目录（#549-b 的 Windows 语义甄别）。
+
+        只服务 PermissionError 分支的成因区分；探测失败（路径越界等，均为
+        OSError 族）按 False 处理——保持旧的 PERMISSION_DENIED 行为，不新增
+        误报。非 OSError 的解析故障是编程错误，让它照常暴露。
+        """
+        try:
+            return self._sandbox.resolve_within_workspace(path).is_dir()
+        except OSError:
+            return False

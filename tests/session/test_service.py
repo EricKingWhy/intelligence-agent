@@ -274,3 +274,63 @@ async def test_list_without_workspace_index_rows_ungrouped(
 
     assert len(result) == 1
     assert result[0].workspace is None
+
+
+class TestApprovalQueueGcIdentity:
+    """#545 review（A 轴 P1）：run 收尾 GC 只许删**本 run 自己注册**的队列。
+
+    接力（ADR-0030 §4.7）/ 立即续聊路径会在旧 run 的 done-callback 触发**之前**，
+    为下一个 run 注册新队列（共享同一 session_id 键）——无条件按键 pop 会把
+    下一个 run 的队列误删，其审批决策从此 404（ApprovalQueueMissing），拖到
+    fail-closed 超时 deny：human-in-the-loop 系统性失效。
+
+    确定性：GC 是否已执行不可直接观察，故在同一 task 上**后挂**一个探针
+    done-callback（asyncio 按注册序执行）——探针置位即证明 GC 回调已跑，
+    断言不靠 sleep 猜时序。
+    """
+
+    @staticmethod
+    def _run_with_gc(service, session_id):
+        import asyncio
+        from types import SimpleNamespace
+
+        gc_ran = asyncio.Event()
+
+        async def _body():
+            await asyncio.sleep(0)
+
+        task = asyncio.create_task(_body())
+
+        def _probe(_t):
+            gc_ran.set()
+
+        service._attach_approval_queue_gc(SimpleNamespace(task=task), session_id)
+        task.add_done_callback(_probe)
+        return task, gc_ran
+
+    @pytest.mark.asyncio
+    async def test_gc_does_not_delete_the_next_runs_queue(self, app_state):
+        service = session_service(app_state)
+        session_id = "gc-identity-session"
+        own_queue, next_queue = object(), object()
+
+        service.approval_queues[session_id] = own_queue
+        task, gc_ran = self._run_with_gc(service, session_id)
+        # 旧 run 收尾前，下一个 run 已经注册了自己的队列（接力路径的时序）。
+        service.approval_queues[session_id] = next_queue
+        await task
+        await gc_ran.wait()
+        assert service.approval_queues.get(session_id) is next_queue, (
+            "旧 run 的 GC 不得误删下一个 run 的审批队列"
+        )
+
+    @pytest.mark.asyncio
+    async def test_gc_still_removes_its_own_queue(self, app_state):
+        service = session_service(app_state)
+        session_id = "gc-own-session"
+
+        service.approval_queues[session_id] = object()
+        task, gc_ran = self._run_with_gc(service, session_id)
+        await task
+        await gc_ran.wait()
+        assert session_id not in service.approval_queues, "防泄漏语义必须保留"

@@ -66,6 +66,15 @@ logger = logging.getLogger("agent_harness.session.derive")
 #: 合成 dangling ToolMessage 的固定内容（模型可见，引导自主决策）
 DANGLING_TOOL_CONTENT = "工具执行被中断，结果未知"
 
+#: #566：审批门前悬空调用的诚实合成文案（封闭词表，绑定系统实际掌握的事实）。
+#: 执行域顺序（`04 §9.1`）是审批闸门 → 接纳点（Ledger PENDING）→ execute——
+#: 「审批未通过 / 已批准未执行」与 Ledger 无账行组合即可证明工具**从未运行**，
+#: 不能再说"结果未知"夸大不确定性。保守方向不变：无法证明未执行的场合
+#: （执行可能已开始）仍然只说 DANGLING_TOOL_CONTENT。
+DANGLING_NOT_EXECUTED_DENIED = "工具未执行（审批未通过）"
+DANGLING_NOT_EXECUTED_APPROVED = "工具未执行（已批准，但尚未开始执行）"
+DANGLING_NOT_EXECUTED = "工具未执行（尚未开始执行）"
+
 #: 「修改文件」写工具语义（W-31.5 #417）——唯一权威定义。
 #: 消费方：`multiagent/provider.py` 的 changed_files（SubAgentResult 字段，
 #: 只活在 delegate 回传里）与本模块 `derive_modified_file_paths`（PRD §4.6
