@@ -6849,6 +6849,50 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 用户授权四端同步；最终根/必读 Git 手册/HTML/原版快照已进入发布收口。审查、完整车道证据与范围见 `docs/agents/agents-md-release-integration-2026-10-03.md`。TodoWrite 阅读项错误完成仍 OPEN；最新 main 的 Composer 视觉用例（期望3控件、实际4）经原始基线复跑确认为既有红，待用户裁决是否另行修复，本任务不改产品/测试。状态以 Git/PR 实况为准，未据待执行动作宣称已发布。
 
+
+## 2026-10-03 · A 线 #555 fork 分阶段可见性（分支 `fix/t547-t566-sandbox-recovery`，base `22cd4d64`）
+
+- **代码笔 `a7dff703`**：意图标记 fork/in-progress + 暂存/同卷 rename 发布 + 栈内补偿 + 启动扫描 scan_unfinished_forks + 续聊对账 fork 专属 409 文案 + lineage W5 fork 边回填；事件词汇两份生成物再生成 + projection.ts 登记。
+- **读数**：focused 661P（session/recovery/multiagent/cli-fork/生成守卫/web 错误映射）绿；`ruff check .` 绿；`tsc -b --force` 绿；main 症状级复现 + 真崩溃集成测试（os._exit(9)）绿。
+- **台账**：`docs/review_ledger.d/t555-fork-phase-visibility-22cd4d64-a7dff703.tsv`（唯一写全处）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。同批 #566/#547/#549 待续。
+
+## 2026-10-03 · A 线 #566 悬空 tool_call 诚实分类（分支 `fix/t547-t566-sandbox-recovery`，base `a7dff703`）
+
+- **代码笔 `50a406ba`**：approval_outcome_for_call 封闭枚举（NOT_REQUESTED/UNRESOLVED/APPROVED/DENIED，未知值 fail-closed）+ coordinator._decide 无账分类（审批门前 UNRESOLVED/DENIED→未执行（审批未通过）、APPROVED→未执行（已批准未开始）、无审批→未执行（尚未开始））+ Session.resume 仅 UNRESOLVED 升级、其余保守「结果未知」+ Ledger 行在场语义不变（PENDING skip / RUNNING+UNKNOWN→ReconcileRequired，不变量 #14）。
+- **读数**：红读数两截（修复前树上收集 ImportError 机制红 + stash 探针窗口 A 合成旧文案「工具执行被中断，结果未知」症状红）；修复后分类 10 用例 + coordinator 23 用例绿，recovery+session 全套 634P 绿；`ruff check .` 绿；真崩溃集成窗口 A（复用 _approval_kill_child.py）+ 窗口 B（新增 _approval_admitted_kill_child.py）绿。
+- **台账**：`docs/review_ledger.d/t566-dangling-classification-a7dff703-50a406ba.tsv`（唯一写全处）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。同批 #547/#549 待用户裁决包后施工。
+
+## 2026-10-03 · A 线 #547 POST /recover 裁决合同（分支 `fix/t547-t566-sandbox-recovery`，base `5cc42015`）
+
+- **代码笔 `99743ba9`**：服务端 Reconcile 裁决合同（decisions=[{tool_call_id, verdict}]，四值复用 ReconcileVerdict）+ DecisionsReconcileCallback 接进既有 token-CAS 提交链 + service.recover 开工前预检（422 非法值/非法目标/重复提交，409 覆盖不全，零写入）+ 409 detail 结构化（{message, pending_decisions} 机器可读清单，三入口统一）+ domain_errors 结构化分支。
+- **裁决依据（用户拍板 2026-10-03）**：方向 1（裁决端点）；四裁决合同三点确认（词表复用/RETRY=用户背书的新尝试非盲跑/裁决≠副作用证据+范围=合同+最小接线，页面 UX 归 #357 W-13）。
+- **读数**：红读数实现前实测（decisions 忽略→409、detail 无清单、非法值静默）；修复后 web+recovery+session 全套 1175P 绿；`ruff check .` 绿；既有 409 形状钉 2 处 + #566 文案滞留钉 1 处按新合同更新。
+- **台账**：`docs/review_ledger.d/t547-recover-decisions-contract-5cc42015-99743ba9.tsv`（唯一写全处）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。#549 四子票拆分已获批准，开子票待 §9.1.1 再批；#549-c 方向已定 (ii) 文档化 DEFER。
+## 2026-10-03 · A 线 #549 Sandbox 边界三切片（分支 `fix/t547-t566-sandbox-recovery`，base `4e8cb79e`）
+
+- **拆分（用户批准 2026-10-03）**：#549 按「进程树回收 / 资源配额 / 错误映射 / 权限默认值」拆四片；前三片本批交付，权限默认值（-d）移交 #358（W-14）不在本批扩票；在 GitHub 开四张子票待 §9.1.1 再批。
+- **代码笔 `a7d72ad8`（-a 进程树回收，SB-01/SB-03）**：POSIX 正常返回路径幂等 killpg（_reclaim_process_group，join 前未超时未取消时调用）；Windows Job Object KILL_ON_JOB_CLOSE 兜底本就在；setsid 脱组盲区如实记录（ADR-0050 D2）。3 跨平台单测 + POSIX 集成探针 skipif nt（Windows 上诚实跳过，POSIX 绿待 CI/xval）。
+- **代码笔 `2d27e020`（-b 错误映射，SB-07/L-12）**：WriteTool 目录/父路径形态错误从裸 OSError→PERMISSION_DENIED 改映射既有 ErrorCode.INVALID_ARGUMENT + 可行动 message；真权限错保持 PERMISSION_DENIED。3 新增用例。
+- **代码笔 `bdf20a14`（-c 配额文档化，SB-04）**：ADR-0050 落盘四项决定（D1 回收 / D2 盲区 / D3 配额 DEFER 用户裁决 (ii) / D4 移交 #358）+ local.py docstring 声明无内存/CPU/外联配额、不可信负载走 DockerSandbox。
+- **读数**：每片各自 focused tests + ruff check . 绿（-a/-c 沙盒 56P；-b coding tools 全套）。
+- **台账**：`docs/review_ledger.d/t549-sandbox-boundary-4e8cb79e-bdf20a14.tsv`（唯一写全处，三行对应三笔）。
+- **状态**：代码交付；双轴审查待批次收口（§8.2–8.3）；push/PR 未申请（§14.4）。四子票在 GitHub 的开票动作待用户 §9.1.1 批准。
+## 2026-10-03 · A 线四票批次收口（#555/#566/#547/#549 · 双轴审查 + 全量门禁 + Gate-0）
+
+本节解除上述四节状态行中「双轴审查待批次收口（§8.2–8.3）」的待办（其余不变）。
+
+- **冻结树与 Gate-0（§8.2 第 4 条派单前机械清零）**：Gate-0 于 `94887f7d` 裸全量 **6/6 PASS**（读数 `docs/gate/94887f7d09c745075aca0d6d56f76f510756c30f.json`，墙钟 16.5s）；随后仅追加 `docs/gate/*.json` 读数提交，§8.1-3 读数传递双判据核实（① `git diff --name-status --no-renames 94887f7d..c68de101` = 2×A 且路径全命中 docs-only；② status clean），终冻结 tip **`c68de101`**（tree `d1377d8257f6b8b0e2d3879eed6a8da4d9cf5672`）。首跑 5/6 FAIL 读数如实保留（`docs/gate/6447547f11a76527eae5d04465d5171fb51ee81b.json`）：coverage 车道以 base-必须是-tip-祖先判据抓住台账手误——`git log` 按提交时间倒序显示，误把 #549-a 排在 #549-b 前，实际 DAG 拓扑序为 `4e8cb79e → 2d27e020(-b) → a7d72ad8(-a) → bdf20a14(-c)`；区间订正（`94887f7d`）后复跑绿。coverage 闸门 exit 0（`089524a~1..HEAD` 每条 commit 均有归属）。
+- **全量门禁（冻结树单次，§8.1）**：`PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly` @ `c68de101`（tree `d1377d82…`）= **5171 passed / 22 skipped / 0 failed / 0 errors**（632.15s，exit 0）；较上批基线 5128P（027820f5）净增 43 用例全绿（本批 #555/#566/#547/#549 新增），零失败零新 flake。`ruff check .` 绿（Gate-0 车道①同口径）。
+- **双轴独立审查（发现阶段，窗口 `22cd4d64..c68de101`，均为只读 subagent、副本内变异、收尾 status 核验干净）**：
+  - **Spec 轴：PASS-WITH-FINDINGS P0:0 P1:0 P2:0 P3:4**。四票 AC 逐条满足：#555 四机制在码（durable fork/in-progress 先行、同卷 os.replace 暂存发布、栈内补偿、启动扫描接 web lifespan）；#566 封闭枚举 + 无账分类 + resume 仅 UNRESOLVED 升级 + 账行在场语义未动；#547 方向 1 + 三点确认全落地、RETRY 走 CANCELLED+模型重发起（不变量 #14 守住）、预检先于写入、resume/messages 同路继承结构化 409；#549 三片落地面正确、-d 缺席=已批准边界（移交 #358）、**无 #554 代码混入**（#555 的 fork 预算块为 #318 既有语义纯缩进）。Scope Lock 干净。4×P3 登记：① fork `_copy_workspace` 非默认 workspace 形态（named/docker）中途击杀残留不在启动扫描白名单（文档化边界，票面复现为默认形态）② #555 AC「无僵尸 child 或标记 failed 可清理」按可读事实精神满足（保留 + fork 专属 409 + 删除重建指引，无字面 failed 标记）③ `service.py` `_reconcile_pending` 内联镜像 coordinator 终态集合而非经既有懒导入通道复用，漂移仅集成测试守护 ④ lineage W5 fork 边回填超 #555 票面正文（同代码区 fork-lineage 完整性，台账/Tracker 有「附带 W5」声明，票级授权靠该记账主张）。
+  - **Standards 轴：PASS-WITH-FINDINGS P0:0 P1:0 P2:0 P3:1 P4:3**。逐 commit diff 全读 + executor 准入点（审批门→PENDING→RUNNING→execute，证实 #566「无账行⇒未执行」的证明结构成立）+ `_reconcile_workspace_binding`/derive_messages 反泄漏面核实；副本变异 2 探针均有鉴别力（M1 `_decide` APPROVED 误分类→`test_dangling_classification` 2/10 红；M2 摘 `_detect_unfinished_forks` 的 SESSION_FORKED 守卫→fork 扫描破坏性回收路径保护测试红）。P3：`tools/write.py` `_target_is_directory` 假定 `resolve_within_workspace` 返回实 Path——DockerSandbox 返回 `PurePosixPath`（无 `.is_dir()`），若某 sandbox 形态在解析成功后 write 抛 PermissionError，探针会把映射错误替换为逃逸 AttributeError（今日 latent：Docker 写路径抛 APIError/RuntimeError 非 PermissionError；#549-b 合同测试只钉 local 形态）——**登记不修，归属下一批沙盒接触面或 #358**。P4×3 登记不修：① coordinator UNRESOLVED 合成（步骤 6）与 #337 否决结清之间的崩溃窗文案先行（自愈方向、窄窗）② `Session.resume` 升级 UNRESOLVED 未结清审批单——durable 文案「审批未通过」与审批单仍开放的审计可读性张力（无重执行风险）③ 并发 `/recover` 败者按胜者裁决成功返回无信号（fail-closed 永不落错态，纯可观察性缺口）。
+  - **findings 处置**：8 项全为信息级（0×P0/P1/P2），全部登记不修——修复将重开冻结树并触发 §8.3-4 重审预算；唯一可行动 P3（write.py 形态假设）显式归属下一批/#358，其余为文档化边界或审计可读性观察，随本节记录在案。
+  - **基础设施故障记录（§8.3 诚实条款）**：Standards 轴前两次派单 <1s 失败，原始错误「user concurrency limit exceeded」（与 Spec 轴并发撞额度）；第 3 次派单成功取到结论行，无替代、无跳轴、无有界收口。
+- **三路并行核验（§8.2 第 3 条守卫）**：全量 pytest、双轴审查三方收尾 `git status --short` 均为空（审查者变异全部发生在 `%TEMP%` 副本、用后即删；主工作树零污染）。
+- **状态**：**branch-ready**——12+1 笔 commit 于 `fix/t547-t566-sandbox-recovery`（base `22cd4d64`），完整门禁绿 + 双轴发现阶段双结论齐。push 分支 / 开 PR / PR merge 三个动作均未申请、待用户逐项批准（§14.4）；开 #549 四张 GitHub 子票待用户 §9.1.1 再批。
 ---
 
 ## Capability 域安全线 D（#558/#557/#568/#546，2026-10-03 开工）

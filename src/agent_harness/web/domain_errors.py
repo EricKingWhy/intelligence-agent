@@ -15,7 +15,7 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/approve` | InvalidSessionId, SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, InvalidDecision, ApprovalAlreadyResolved |
-| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, RecoveryConflict, SeqConflict |
+| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict |
 | `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
 | `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
@@ -367,12 +367,23 @@ def model_http_error(exc: Exception) -> HTTPException:
 def http_error(exc: SessionServiceError) -> HTTPException:
     """领域异常 → `HTTPException`；状态码取自 `_DOMAIN_ERROR_STATUS` 单一映射源。
 
-    `detail` 仍是 `str(exc)`——各端点的错误文案契约不变。调用方保持
+    `detail` 默认仍是 `str(exc)`——各端点的错误文案契约不变。调用方保持
     `raise http_error(e) from e` 以保留异常链。
+
+    **#547 追加**：异常携带 `pending_decisions`（机器可读的待裁决 Operation
+    清单）时，`detail` 升级为 `{"message", "pending_decisions"}` 结构——目前只有
+    `POST /recover` 的裁决预检分支（`RecoveryConflict`）构造这种异常；其余
+    异常 detail 类型不变，既有客户端不受影响。
 
     直接索引（不 `.get` 回退）：未登记类型是**编码错误**，且已被
     `test_status_map_covers_every_domain_exception` 挡住；此处再兜一层只会掩盖它。
     """
+    pending = getattr(exc, "pending_decisions", None)
+    if pending:
+        return HTTPException(
+            status_code=_DOMAIN_ERROR_STATUS[type(exc)],
+            detail={"message": str(exc), "pending_decisions": pending},
+        )
     return HTTPException(
         status_code=_DOMAIN_ERROR_STATUS[type(exc)], detail=str(exc)
     )
