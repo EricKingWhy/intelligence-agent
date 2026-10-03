@@ -135,6 +135,7 @@ from agent_harness.session.event import (
     FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
+    PERMISSION_RESOLVED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
     RUN_RESUMED,
@@ -2654,11 +2655,6 @@ class SessionService:
             raise SessionNotFound(f"session '{session_id}' not found")
 
         queue = self._approval_queues.get(session_id)
-        if queue is None:
-            raise ApprovalQueueMissing(
-                f"session '{session_id}' has no interactive approval queue "
-                "(permission_mode not interactive, or run already terminated)"
-            )
 
         requested = next(
             (
@@ -2669,9 +2665,28 @@ class SessionService:
             ),
             None,
         )
+        if requested is None and queue is None:
+            raise ApprovalQueueMissing(
+                f"session '{session_id}' has no interactive approval queue "
+                "(permission_mode not interactive, or run already terminated)"
+            )
         if requested is None:
             raise ApprovalRequestMissing(
                 f"approval_id '{approval_id}' not found in session '{session_id}'"
+            )
+
+        if any(
+            event.type == PERMISSION_RESOLVED
+            and event.data.get("approval_id") == approval_id
+            for event in existing
+        ):
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' already resolved"
+            )
+        if queue is None:
+            # A durable request without a live resolver is stale state, not an unknown id.
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' is stale; its queue is no longer active"
             )
 
         allowed = requested.data.get("allowed_decisions", [])
@@ -2704,8 +2719,8 @@ class SessionService:
                 f"approval_id '{approval_id}' already resolved"
             ) from None
         if not ok:
-            raise ApprovalRequestMissing(
-                f"approval_id '{approval_id}' not found in queue"
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' is no longer pending in its queue"
             )
         return ApprovalDecision(decision=perm_decision, response=response)
 

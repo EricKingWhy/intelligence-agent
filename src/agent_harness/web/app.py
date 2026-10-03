@@ -2050,10 +2050,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         内阻塞的 callback。
 
         语义：
-          成功 resolve → 200 ok（run 在 callback 处继续；resolved 事件由 callback 写入）
+          成功 resolve → resolved 事件先 durable append，再返回 200 并唤醒 run
           decision 不在 requested 事件的 allowed_decisions 内 → 422（违反契约）
-          approval_id 已 resolved → 409（防重复决策；幂等性拒绝）
-          approval_id 不存在 → 404（前端过期事件或非本 session 的 id）
+          approval_id 已 resolved 或请求已失效 → 409（防重复/过期决策）
+          approval_id 不存在于 durable 请求事件 → 404（非本 session 的 id）
           无 approval_id（旧 seam 调用）→ 200 received（向后兼容）
           session 不存在 → 404
         """
