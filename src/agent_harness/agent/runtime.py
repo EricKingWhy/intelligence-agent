@@ -854,6 +854,14 @@ class _TerminalContext:
         return events
 
 
+@dataclass(frozen=True)
+class _SessionRequestAccounting:
+    accounting_id: str
+    after_seq: int
+    step_id: int
+    reserved_requests: int
+
+
 @dataclass
 class _TerminalArms:
     """一次 run 的终结臂上下文（#264 / T11 第一切片）：六个终结点共享的收尾输入收成一个对象。
@@ -896,7 +904,7 @@ class _TerminalArms:
     )
     settled_request_events: dict[str, SessionEvent] = field(default_factory=dict)
     completed_model_response: Any | None = None
-    session_request_accounting: tuple[str, int, int, int] | None = None
+    session_request_accounting: _SessionRequestAccounting | None = None
 
     @property
     def run_id(self) -> str | None:
@@ -1624,11 +1632,11 @@ class AgentRuntime:
                         return
                     session_step_reserved = True
                     if session_admission.accounting_id is not None:
-                        arms.session_request_accounting = (
-                            session_admission.accounting_id,
-                            accounting_after_seq,
-                            arms.envelope_step(steps + 1),
-                            1,
+                        arms.session_request_accounting = _SessionRequestAccounting(
+                            accounting_id=session_admission.accounting_id,
+                            after_seq=accounting_after_seq,
+                            step_id=arms.envelope_step(steps + 1),
+                            reserved_requests=1,
                         )
 
                 # 第 0 步（ADR-0030 D2）：steer 注入。位置固定在 ContextBuilder
@@ -1652,7 +1660,7 @@ class AgentRuntime:
                     if session_step_reserved:
                         session_step_reserved = False
                         accounting_id = (
-                            arms.session_request_accounting[0]
+                            arms.session_request_accounting.accounting_id
                             if arms.session_request_accounting is not None else None
                         )
                         await self._session_budget.refund_step(
@@ -2314,7 +2322,9 @@ class AgentRuntime:
                             arms.session_request_accounting is not None
                             and not self._session_accounting_has_attempt(arms)
                         ):
-                            accounting_id = arms.session_request_accounting[0]
+                            accounting_id = (
+                                arms.session_request_accounting.accounting_id
+                            )
                             await asyncio.shield(self._session_budget.refund_step(
                                 accounting_id=accounting_id,
                             ))
@@ -2368,7 +2378,7 @@ class AgentRuntime:
                         arms.session_request_accounting is not None
                         and not self._session_accounting_has_attempt(arms)
                     ):
-                        accounting_id = arms.session_request_accounting[0]
+                        accounting_id = arms.session_request_accounting.accounting_id
                         await asyncio.shield(self._session_budget.refund_step(
                             accounting_id=accounting_id,
                         ))
@@ -2541,7 +2551,8 @@ class AgentRuntime:
         accounting = arms.session_request_accounting
         if accounting is None or arms.run_id is None:
             return False
-        _, after_seq, step_id, _ = accounting
+        after_seq = accounting.after_seq
+        step_id = accounting.step_id
         return any(
             event.seq is not None and event.seq >= after_seq
             and event.run_id == arms.run_id and event.step_id == step_id
@@ -2555,7 +2566,10 @@ class AgentRuntime:
         accounting = arms.session_request_accounting
         if self._session_budget is None or accounting is None or arms.run_id is None:
             return
-        accounting_id, after_seq, step_id, reserved_requests = accounting
+        accounting_id = accounting.accounting_id
+        after_seq = accounting.after_seq
+        step_id = accounting.step_id
+        reserved_requests = accounting.reserved_requests
         requests = [
             event for event in arms.session.events
             if event.type == MODEL_REQUEST and event.seq is not None
@@ -3031,8 +3045,11 @@ class AgentRuntime:
                 step_id=step_id,
                 after_seq=accounting_after_seq,
             )
-            arms.session_request_accounting = (
-                accounting_id, accounting_after_seq, step_id, 0,
+            arms.session_request_accounting = _SessionRequestAccounting(
+                accounting_id=accounting_id,
+                after_seq=accounting_after_seq,
+                step_id=step_id,
+                reserved_requests=0,
             )
         request_started_event = arms.record_request_started(
             PROVIDER_ROLE_CLOSEOUT, request_id, step_id=step_id,
