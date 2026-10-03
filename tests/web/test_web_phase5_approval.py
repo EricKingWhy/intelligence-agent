@@ -20,6 +20,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.session import JsonlSessionStore
+from agent_harness.session.event import TOOL_CALL, TOOL_RESULT
 
 
 class _BashThenTextImpl:
@@ -224,9 +225,26 @@ async def test_approve_already_resolved_409(tmp_path, monkeypatch):
             # 第二次 → 409
             r2 = await c.post(
                 f"http://127.0.0.1:{port}/api/sessions/{session_id}/approve",
-                json={"approval_id": approval_id, "approved": True},
+                json={"approval_id": approval_id, "approved": False},
             )
             assert r2.status_code == 409
+        store = JsonlSessionStore(tmp_path / "sessions")
+        async with asyncio.timeout(8.0):
+            while True:
+                events = store.read_events(session_id)
+                if any(event.type == TOOL_RESULT for event in events):
+                    break
+                await asyncio.sleep(0.05)
+        resolved = [
+            event for event in events
+            if event.type == "permission/resolved"
+            and event.data.get("approval_id") == approval_id
+        ]
+        calls = [event for event in events if event.type == TOOL_CALL]
+        results = [event for event in events if event.type == TOOL_RESULT]
+        assert len(resolved) == 1
+        assert resolved[0].data["decision"] == "approve_once"
+        assert len(calls) == len(results) == 1
     finally:
         await _shutdown(server, serve_task)
 
