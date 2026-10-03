@@ -272,3 +272,41 @@ def test_dim_missing_in_later_response_keeps_two_ledgers_consistent(tmp_path):
 
     consumed = _budget(client, session_id)["session"]["consumed"]
     assert consumed["total_tokens"] is None, "session 账同一步已转 NULL——两本账必须同判"
+
+
+# ── C3（用户 2026-10-03 裁决）：`strict` 语义不变，只把拒绝文案说清 ──────────
+
+
+@pytest.mark.parametrize("model", [RunBudgetRequest, SessionBudgetRequest])
+@pytest.mark.parametrize("bad", [100.0, 1.5, "100", True])
+def test_non_integer_ceiling_error_message_is_actionable(model, bad):
+    """F4/C3：四类非法输入都给出**说清「要求整数」**的文案，且机器可读位**不变**。
+
+    判据三段：
+    ① ``type`` 仍是 ``int_type`` —— wire 契约的机器可读位逐字不变（本票只改 ``msg``）；
+    ② ``msg`` 明说要整数（改前是英文 ``Input should be a valid integer``）；
+    ③ ``msg`` 不带 pydantic 的 ``"Value error, "`` 前缀（否则文案被污染）。
+    """
+    with pytest.raises(ValidationError) as exc:
+        model.model_validate({"max_total_tokens": bad})
+    (err,) = exc.value.errors()
+    assert err["type"] == "int_type", err
+    assert "整数" in err["msg"], err
+    assert not err["msg"].startswith("Value error"), err
+
+
+def test_non_integer_ceiling_422_body_carries_actionable_message(tmp_path):
+    """端到端：`POST /api/sessions` 传浮点 ceiling ⇒ 422 且响应体里带「整数」文案。
+
+    `strict=True` 从未放松（浮点依旧被拒），变的只是**这句话说不说得清**。
+    """
+    _, client = _web(tmp_path)
+    resp = client.post(
+        "/api/sessions",
+        params={"launch": "false"},
+        json={"budget": {"session": {"max_total_tokens": 100.0}}},
+    )
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert isinstance(detail, list), detail
+    assert any("整数" in item.get("msg", "") for item in detail), detail
