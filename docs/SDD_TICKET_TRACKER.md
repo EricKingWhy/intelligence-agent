@@ -6885,6 +6885,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 - **待批准（§14.4）→ 已授权**：push 本分支 / 开 PR / PR merge 已由用户 2026-10-03 裁决⑦**批准**（先回后正），本批收口后执行；PR 正文首行 `Closes #…` ⇒ merge 时 #548/#551/#562/#552 随之自动关闭（reason=completed），关单前按本仓惯例补 `gh issue comment` 交付读数。**存量红登记口径**（用户未单独裁决，按推荐执行 = 只登记不另开票）：全量 24 条失败中 22 条为环境面既有红（两棵树同中招、`aiosqlite` readonly），差集 2 条经 3 轮 × 两棵树定性为环境面 flake（同上），**均非本线回归**。**登记新票**：#590（输出侧 SSE well-formed 化）、#591（WS 帧体积上限）已按裁决③与审查建议开票（`bug`+`P1`+`ready-for-agent`）。
 
+- **B 线先回后正同步复核（2026-10-03）**：在隔离 clone 将 `fix/t548-t552-wire-stream-hardening` 的 `28f1aee` 合入最新 `origin/main=91cac896`，同步 merge `222642ec`（父一 B / 父二 main）。唯一冲突是本 Tracker，按用户批准保留双方正文；`session.py`、`web/app.py`、`projection.ts` 自动合并。机械归属见 `docs/review_ledger.d/b-wire-sync-merge-28f1aee-222642ec.tsv`。完整读数与继承自 main 的 E2E 已知红见当月归档；Gate-0 于 `b46232e9` 6/6，证据 `docs/gate/b46232e9f4b6648f03ce07f5855b6e7a92019454.json`。PR #597 已创建，推送/CI/merge 状态以 GitHub 实况为准。
 ## 2026-10-03 · A 线 #555 fork 分阶段可见性（分支 `fix/t547-t566-sandbox-recovery`，base `22cd4d64`）
 
 - **代码笔 `a7dff703`**：意图标记 fork/in-progress + 暂存/同卷 rename 发布 + 栈内补偿 + 启动扫描 scan_unfinished_forks + 续聊对账 fork 专属 409 文案 + lineage W5 fork 边回填；事件词汇两份生成物再生成 + projection.ts 登记。
