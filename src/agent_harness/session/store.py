@@ -81,7 +81,8 @@ class EventLogIntegrity:
     - `seq_gaps` / `seq_duplicates`：解析后事件序列的断层与重复。持久化写入
       全部经 `Session.append`（max+1，store 守卫拒重号），**持久化 seq 连续是
       写入侧不变量**——文件里的断层只可能来自坏行跳过或整行丢失（手工编辑 /
-      磁盘异常），两者都意味着 permission/tool 事实可能缺失。
+      磁盘异常），两者都意味着 permission/tool 事实可能缺失。断层检测锚定
+      seq=0（head-seq 锚定）：首事件 seq≠0 即头部整行丢失，同样报 gap。
     """
 
     corrupt_lines: tuple[CorruptLine, ...] = ()
@@ -395,9 +396,9 @@ class JsonlSessionStore:
         进程刚落盘完整行」的主动删除面（前置条件罕见：撕裂尾段存在 + 跨
         进程同时 append），这是对既有声明的忠实披露而非新增安全声明。
 
-        稳态成本 O(1)：干净尾（空 / \\n 结尾）只做一次 seek+1 字节读；
-        仅尾字节非 \\n 时才反向分块找边界，不整读文件（append 热路径，
-        审查 P2-1）。
+        稳态成本 O(1)——常数次 syscall，不随文件大小增长：空文件 = seek+tell
+        零字节读；\\n 结尾 = 2 次 seek + 1 次 tell + 1 字节读。仅尾字节非 \\n
+        时才反向 4096 分块找边界，也不整读文件（append 热路径，审查 P2-1）。
         """
         tail_offset = 0
         tail = b""
@@ -428,7 +429,7 @@ class JsonlSessionStore:
             return  # 首次 append：文件尚不存在，无撕裂可言
         event, _corrupt, _partial = self._classify_event_line(
             tail, path_name=path.name, lineno=0, byte_offset=tail_offset,
-            log_corrupt=False,  # 探测模式：随后可能截断/封印同一字节
+            log_findings=False,  # 探测模式：全静默，随后可能截断/封印同一字节
         )
         if event is not None:
             with path.open("ab") as fh:
@@ -509,13 +510,15 @@ class JsonlSessionStore:
     @staticmethod
     def _classify_event_line(
         raw: bytes, *, path_name: str, lineno: int, byte_offset: int,
-        log_corrupt: bool = True,
+        log_findings: bool = True,
     ) -> tuple[SessionEvent | None, CorruptLine | None, bool]:
         """读路径单行分类（#565）：事件 / 损坏（带脱敏定位记录）/ 未写完整的末尾片段。
 
-        `log_corrupt=False` 是写侧探测模式（`_neutralize_torn_tail` 用）：只取
-        分类判定、不发损坏 WARNING——探测之后可能紧跟着截断/封印同一字节，
-        若仍按读侧口径记「原字节保留在文件中未改动」就会日志撒谎。
+        `log_findings=False` 是写侧探测模式（`_neutralize_torn_tail` 用）：只取
+        分类判定，**全部日志静默**（损坏 WARNING 与 partial DEBUG 都不发）——
+        探测之后可能紧跟着截断/封印同一字节，若仍按读侧口径记「原字节保留在
+        文件中未改动 / 按写入中断跳过」就会日志撒谎；且探测传的 lineno 是
+        哨兵值，不得出现在任何日志里（真实定位由修复动作自己的 WARNING 提供）。
 
         `_parse_event_line` 的容错语义保留给摘要 / header 快路径；本方法服务
         read_events 全量扫描，新增 audit 增强块要求的两条判别：
@@ -538,7 +541,7 @@ class JsonlSessionStore:
                 line_sha256=hashlib.sha256(raw).hexdigest(),
                 reason=reason,
             )
-            if log_corrupt:
+            if log_findings:
                 logger.warning(
                     "损坏行 %s:%d offset=%d len=%d sha256=%s reason=%s"
                     "（原字节保留在文件中未改动，恢复将拒绝）",
@@ -552,10 +555,11 @@ class JsonlSessionStore:
         except UnicodeDecodeError:
             if not ends_with_newline:
                 # 断在多字节字符中间且无换行：写入中断的预期形状
-                logger.debug(
-                    "末段未写完整 %s:%d（无效 UTF-8 半行，按写入中断跳过）",
-                    path_name, lineno,
-                )
+                if log_findings:
+                    logger.debug(
+                        "末段未写完整 %s:%d（无效 UTF-8 半行，按写入中断跳过）",
+                        path_name, lineno,
+                    )
                 return None, None, True
             return _corrupt("invalid_utf8")
         stripped = text.strip()
@@ -565,9 +569,10 @@ class JsonlSessionStore:
             parsed: Any = json.loads(stripped)
         except json.JSONDecodeError:
             if not ends_with_newline:
-                logger.debug(
-                    "末段未写完整 %s:%d（半行，按写入中断跳过）", path_name, lineno,
-                )
+                if log_findings:
+                    logger.debug(
+                        "末段未写完整 %s:%d（半行，按写入中断跳过）", path_name, lineno,
+                    )
                 return None, None, True
             return _corrupt("bad_json")
         if not isinstance(parsed, dict):
@@ -613,7 +618,14 @@ class JsonlSessionStore:
             if event.seq in seen:
                 duplicates.append(event.seq)
                 continue
-            if prev is not None and event.seq > prev + 1:
+            if prev is None:
+                # head-seq 锚定（P3 残余修复）：持久化 seq 从 0 起连续是写入侧
+                # 不变量（Session.start=0 + append max+1；fork child 经
+                # adopt_history 重编 seq 同样从 0 起）⇒ 首事件 seq≠0 即头部
+                # 整行丢失，没有坏行也必须报 gap，不能沉默。
+                if event.seq > 0:
+                    gaps.append((0, event.seq - 1))
+            elif event.seq > prev + 1:
                 gaps.append((prev + 1, event.seq - 1))
             seen.add(event.seq)
             prev = event.seq

@@ -183,8 +183,10 @@ def test_structurally_invalid_tail_truncates(
     assert not [r for r in caplog.records if "损坏行" in r.getMessage()]
 
 
-def test_multibyte_broken_tail_truncates(store: JsonlSessionStore) -> None:
-    """断在多字节字符中间的尾段：无效 UTF-8 半行 → 截断支。"""
+def test_multibyte_broken_tail_truncates(
+    store: JsonlSessionStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """断在多字节字符中间的尾段：无效 UTF-8 半行 → 截断支，探测全程静默。"""
     session_id = "tail-multibyte"
     path = _seed(store, session_id, 2)
     on_disk = path.read_bytes()
@@ -194,13 +196,18 @@ def test_multibyte_broken_tail_truncates(store: JsonlSessionStore) -> None:
     with path.open("ab") as fh:
         fh.write(torn)
 
-    store.append_event(session_id, _event(session_id, 2, "tool/result", {"ok": 1}))
+    with caplog.at_level(logging.DEBUG, logger="agent_harness.session.store"):
+        store.append_event(session_id, _event(session_id, 2, "tool/result", {"ok": 1}))
 
     events, integrity = store.read_events_report(session_id)
     assert [e.seq for e in events] == [0, 1, 2]
     assert integrity.healthy
     assert path.read_bytes().startswith(on_disk)
     assert torn not in path.read_bytes()[len(on_disk):]
+    # 探测模式全静默钉（remediation 审查 P3-1）：partial DEBUG 也不得出自修复
+    # 路径——它带 lineno=0 哨兵且「按写入中断跳过」是读侧口径，对随后被截断
+    # 的字节失准；真实定位由截断 WARNING 的 offset/len/sha256 提供
+    assert not [r for r in caplog.records if "末段未写完整" in r.getMessage()]
 
 
 def test_append_with_stale_seq_after_seal_conflicts(

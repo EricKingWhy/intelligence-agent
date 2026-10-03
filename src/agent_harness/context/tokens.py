@@ -22,6 +22,7 @@ registry 内嵌 sha256 校验，坏缓存自动删除并重取——真离线时
 from __future__ import annotations
 
 import logging
+import threading
 
 import tiktoken
 from langchain_core.messages import AnyMessage
@@ -35,6 +36,11 @@ logger = logging.getLogger("agent_harness.context.tokens")
 #: 重启进程即恢复精确计数。
 _ENCODING_UNAVAILABLE: Exception | None = None
 
+#: latch 的 check-set-warn 互斥（P3 残余修复）：并发首用时 N 个线程都先看到
+#: ``_ENCODING_UNAVAILABLE is None`` 再各自失败——无锁时同一次断网被报 N 条
+#: WARNING。锁只包失败路径的判定与置位；成功路径（含下载耗时）不持锁。
+_LATCH_LOCK = threading.Lock()
+
 
 def _load_encoding():
     """返回 cl100k_base 编码；加载失败锁定并抛原始异常（estimate_tokens 捕获回退）。"""
@@ -44,14 +50,18 @@ def _load_encoding():
     try:
         return tiktoken.get_encoding("cl100k_base")
     except Exception as error:  # 缺缓存/损坏/断网统一按「加载不可用」处置（再抛由调用方回退）
-        _ENCODING_UNAVAILABLE = error
-        logger.warning(
-            "cl100k_base 编码加载失败（%s: %s），token 估算降级为 UTF-8 字节数"
-            "上界（仅保守方向偏离）；离线部署请预置 TIKTOKEN_CACHE_DIR 指向预热"
-            "的编码缓存",
-            type(error).__name__,
-            error,
-        )
+        with _LATCH_LOCK:
+            first_failure = _ENCODING_UNAVAILABLE is None
+            if first_failure:
+                _ENCODING_UNAVAILABLE = error
+        if first_failure:
+            logger.warning(
+                "cl100k_base 编码加载失败（%s: %s），token 估算降级为 UTF-8 字节数"
+                "上界（仅保守方向偏离）；离线部署请预置 TIKTOKEN_CACHE_DIR 指向预热"
+                "的编码缓存",
+                type(error).__name__,
+                error,
+            )
         raise
 
 

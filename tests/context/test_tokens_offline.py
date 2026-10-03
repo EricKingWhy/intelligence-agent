@@ -189,3 +189,31 @@ def test_message_estimation_stays_bounded_under_fallback(
     assert estimate_message_tokens([message]) == len(
         message.model_dump_json().encode("utf-8")
     )
+
+
+def test_concurrent_first_failure_warns_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """latch 竞态钉：并发首用失败恰好一条 WARNING（P3 残余：无锁双告警）。
+
+    无锁时 N 个线程都通过 `_ENCODING_UNAVAILABLE is None` 检查、各自失败各自
+    告警——同一次断网被报 N 次。修复后 check-set-warn 在锁内，恰好一次；
+    所有调用仍拿到上界回退值（行为不变，只是告警去重）。
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _slow_fail(name: str):
+        time.sleep(0.05)  # 撑开检查-设置窗口，让无锁实现必然双告警
+        raise ConnectionError("offline race probe")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", _slow_fail)
+
+    with caplog.at_level(logging.WARNING, logger=_STORE_LOGGER), ThreadPoolExecutor(
+        max_workers=8
+    ) as pool:
+        results = list(pool.map(lambda _: estimate_tokens("text"), range(8)))
+
+    assert results == [len(b"text")] * 8
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, f"并发首用失败必须恰好一条 WARNING，实得 {len(warnings)}"

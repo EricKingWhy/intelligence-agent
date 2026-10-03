@@ -53,8 +53,13 @@ export class ApprovalGoneError extends Error {}
 
 /** 恢复链路 409 的机器可读待裁决清单条目（#596 / 后端 #547）。
  *
- *  键固定为 `tool_call_id` / `tool_name` / `state`，`state` ⊆ Ledger 非终态集合
- *  `{RUNNING, UNKNOWN, NEED_RECONCILE}`（`session/service.py::_reconcile_pending` 冻结）。
+ *  键固定为 `tool_call_id` / `tool_name` / `state`。`state` **通常** ⊆ Ledger 非终态
+ *  集合 `{RUNNING, UNKNOWN, NEED_RECONCILE}`（悬空调用只认非终态）；但后端
+ *  `session/service.py::_reconcile_pending` 有第二判据——非悬空行按
+ *  `storage.needs_reconcile` 全量收录（#315「终态 + 副作用未证」形态），理论上可
+ *  携带终态值（当前部署现实不可达）。越出三态时 `parsePendingDecisions` 整组回落
+ *  undefined → 调用方展示 `message` 文案，这是任何后端版本下都正确的下限；刻意
+ *  **不做 per-entry 过滤**——不制造半真半假的清单。
  *  裁决载荷即 `decisions: [{tool_call_id, verdict}]`，verdict ∈
  *  `{CONFIRM_SUCCESS, CONFIRM_FAILURE, RETRY, ABANDON}`（POST /recover 请求体）。 */
 export interface PendingDecision {

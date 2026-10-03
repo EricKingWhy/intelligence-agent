@@ -368,3 +368,88 @@ def test_recover_missing_session_still_not_found(
 
     with pytest.raises(SessionNotFound):
         asyncio.run(service.recover("truly-missing-session"))
+
+# ── P3 残余修复（2026-10-04 用户指令：登记残余全部修复）─────────────
+
+
+def test_head_line_loss_is_reported_as_leading_gap(store: JsonlSessionStore) -> None:
+    """head-seq 锚定：首事件 seq≠0（头部整行丢失、无坏行）必须报 gap (0, first-1)。
+
+    持久化 seq 从 0 连续是写入侧不变量（Session.start=0 + append max+1，fork
+    child 经 adopt_history 重编也从 0 起）；头部整行丢失此前不产生任何信号。
+    """
+    session_id = "head-anchor"
+    _write(
+        store,
+        session_id,
+        _line(session_id, 2, USER_MESSAGE, {"content": "orphan head"})
+        + _line(session_id, 3, "run/completed", {"final_text": "done"}),
+    )
+
+    events, integrity = store.read_events_report(session_id)
+
+    assert [event.seq for event in events] == [2, 3]
+    assert integrity.corrupt_lines == ()
+    assert integrity.seq_gaps == ((0, 1),), "头部丢失必须锚定到 0 报 gap"
+    assert not integrity.healthy
+
+
+def test_recover_all_corrupt_log_raises_corrupt_not_404(
+    tmp_path: Path, make_session_service
+) -> None:
+    """全坏日志（零可解析事件 + 有损坏行）：recover 报 409 损坏，不被 404 掩蔽。
+
+    BUG-011 同型：404「不存在」会把「存在但全坏」说成「没有这个会话」，
+    引导用户重建而不是修复——事实丢失被措辞掩盖。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session_id = "all-corrupt"
+    _write(store, session_id, b"garbage-one\n" + b'{"broken":\n')
+    service = make_session_service(store=store)
+
+    with pytest.raises(EventLogCorruptError):
+        asyncio.run(service.recover(session_id))
+
+
+def test_fork_refuses_corrupt_log_readonly(
+    tmp_path: Path, make_session_service
+) -> None:
+    """fork 是状态物化入口（seed 成为 child 的 durable 历史）：损坏父必须拒绝。
+
+    容错读 + 无闸门时 fork 会把前缀坏行的事实缺口**永久物化**进 child 文件
+    （child 自包含、不依赖父存活）——比显示路径的临时缺口严重一级。
+    拒绝是只读的：父文件一字不动。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session_id = "fork-refuses-corrupt"
+    _corrupt_session(store, session_id)
+    before = store._events_path(session_id).read_bytes()
+    service = make_session_service(store=store)
+
+    with pytest.raises(EventLogCorruptError):
+        asyncio.run(service.fork(session_id=session_id, from_seq=1))
+    assert store._events_path(session_id).read_bytes() == before
+
+
+def test_refusal_message_caps_detail_parts(store: JsonlSessionStore) -> None:
+    """拒绝文案封顶：细节只进前 N 条 + 总条数；完整定位在 store WARNING 日志。
+
+    parts 无界拼接时，一个千行全坏的文件会产生数十 KB 的 HTTP 409 detail
+    （文案进不了日志检索，还撑爆错误弹窗）；封顶后文案可行动、全量可对账。
+    """
+    session_id = "cap-parts"
+    payload = b"".join(
+        [_line(session_id, 0, SESSION_STARTED)]
+        + [f"bad-line-{i}\n".encode() for i in range(10)]
+        + [_line(session_id, 20, USER_MESSAGE, {"content": "tail"})]
+    )
+    _write(store, session_id, payload)
+    integrity = store.read_events_report(session_id)[1]
+
+    with pytest.raises(EventLogCorruptError) as excinfo:
+        SessionService._raise_if_event_log_corrupt(session_id, integrity)
+
+    message = str(excinfo.value)
+    assert message.count("损坏行 lineno=") == 5, "细节封顶在前 5 条"
+    assert "共 11 条" in message, "总条数必须在场（10 坏行 + 1 gap）"
+    assert _REFUSAL_MARKER in message
