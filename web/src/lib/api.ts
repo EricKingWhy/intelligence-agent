@@ -51,10 +51,44 @@ export class AlreadyResolvedError extends Error {}
  *  也不是可重试错误：重试多少次都是 404。 */
 export class ApprovalGoneError extends Error {}
 
+/** 恢复链路 409 的机器可读待裁决清单条目（#596 / 后端 #547）。
+ *
+ *  键固定为 `tool_call_id` / `tool_name` / `state`。`state` **通常** ⊆ Ledger 非终态
+ *  集合 `{RUNNING, UNKNOWN, NEED_RECONCILE}`（悬空调用只认非终态）；但后端
+ *  `session/service.py::_reconcile_pending` 有第二判据——非悬空行按
+ *  `storage.needs_reconcile` 全量收录（#315「终态 + 副作用未证」形态），理论上可
+ *  携带终态值（当前部署现实不可达）。越出三态时 `parsePendingDecisions` 整组回落
+ *  undefined → 调用方展示 `message` 文案，这是任何后端版本下都正确的下限；刻意
+ *  **不做 per-entry 过滤**——不制造半真半假的清单。
+ *  裁决载荷即 `decisions: [{tool_call_id, verdict}]`，verdict ∈
+ *  `{CONFIRM_SUCCESS, CONFIRM_FAILURE, RETRY, ABANDON}`（POST /recover 请求体）。 */
+export interface PendingDecision {
+  tool_call_id: string;
+  tool_name: string;
+  state: 'RUNNING' | 'UNKNOWN' | 'NEED_RECONCILE';
+}
+
+/** `pending_decisions` 的形状防御：整组合法才返回，任何一条键缺失 / 类型不对 /
+ *  state 越出非终态集合 ⇒ 整个字段按"没给"处理（undefined）。调用方拿 undefined
+ *  时回落到 `message` 文案展示——那在任何后端版本下都是正确的下限，不存在
+ *  半真半假的清单。 */
+function parsePendingDecisions(raw: unknown): PendingDecision[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: PendingDecision[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) return undefined;
+    const { tool_call_id, tool_name, state } = item as Record<string, unknown>;
+    if (typeof tool_call_id !== 'string' || typeof tool_name !== 'string') return undefined;
+    if (state !== 'RUNNING' && state !== 'UNKNOWN' && state !== 'NEED_RECONCILE') return undefined;
+    out.push({ tool_call_id, tool_name, state });
+  }
+  return out;
+}
+
 /** FastAPI 错误体 `{detail}` 读取：形状不符或 JSON 解析失败返回 ''——
  *  错误处理路径自身不再产生新错误（多处 401/409/4xx 消费共享的单一实现）。
  *
- *  `detail` 有**三种合法形状**，都要认：
+ *  `detail` 有**四种合法形状**，都要认：
  *  - `string`：端点自己 `raise HTTPException(detail=…)` —— 后端的可行动中文原因；
  *  - `Array<{loc, msg, type}>`：Pydantic 请求体校验失败的固定形状（422）。不认它
  *    就会把"path 必须是绝对路径"降级成"注册项目失败（422）"，把最该看懂的一条
@@ -64,6 +98,11 @@ export class ApprovalGoneError extends Error {}
  *    "没配"与"配了但装配失败"必须分流，判别走 `code` 而不是匹配中文——文案会改，
  *    码不会）。`code` 由同一次读取里的 `readErrorBody` 取出（响应体只能读一次），
  *    这里只认 `message` 那个给人看的串。
+ *  - `{message, pending_decisions}`：**恢复链路 409 的结构化载荷**（#596 / 后端
+ *    #547：RecoveryConflict 带 `pending_decisions` 时 detail 升级为对象）。渲染取
+ *    `message`（与字符串分支同一条下游），`pending_decisions` 经形状防御后随
+ *    `readErrorBody` 透出（recover / resume 两路挂在错误对象上），避免直接
+ *    `String(detail)` 显示成 `[object Object]`。
  */
 export async function readErrorDetail(res: Response): Promise<string> {
   return (await readErrorBody(res)).message;
@@ -81,7 +120,7 @@ export async function readErrorDetail(res: Response): Promise<string> {
  */
 async function readErrorBody(
   res: Response,
-): Promise<{ message: string; code: string | null; objectDetail: boolean }> {
+): Promise<{ message: string; code: string | null; objectDetail: boolean; pendingDecisions?: PendingDecision[] }> {
   try {
     const j = (await res.json()) as { detail?: unknown } | null;
     const detail = j?.detail;
@@ -96,11 +135,16 @@ async function readErrorBody(
       return { message, code: null, objectDetail: false };
     }
     if (typeof detail === 'object' && detail !== null) {
-      const { message, code } = detail as { message?: unknown; code?: unknown };
+      const { message, code, pending_decisions } = detail as {
+        message?: unknown;
+        code?: unknown;
+        pending_decisions?: unknown;
+      };
       return {
         message: typeof message === 'string' ? message : '',
         code: typeof code === 'string' && code ? code : null,
         objectDetail: true,
+        pendingDecisions: parsePendingDecisions(pending_decisions),
       };
     }
     return { message: '', code: null, objectDetail: false };
@@ -1176,12 +1220,16 @@ export function describeSessionError(error: unknown, fallback: string): string {
 // ── Recover（后端新端点，df4f7d8 §1.1）──
 
 /** 恢复失败的可区分错误：status 404 = 会话不存在；409 = 存在需人工裁决的高风险
- *  操作（detail 说明原因，本期只展示，不做裁决交互——不变量 #14 不盲跑）。 */
+ *  操作（detail 说明原因，本期只展示，不做裁决交互——不变量 #14 不盲跑）。
+ *  #596：后端 detail 为结构化对象时，`message` 只承载给人看的那句话，
+ *  `pending_decisions` 经形状防御后挂在 `pendingDecisions`（缺省/畸形 = undefined）。 */
 export class RecoverError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly pendingDecisions?: PendingDecision[];
+  constructor(status: number, message: string, pendingDecisions?: PendingDecision[]) {
     super(message);
     this.status = status;
+    this.pendingDecisions = pendingDecisions;
   }
 }
 
@@ -1195,8 +1243,12 @@ export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
   });
   if (res.status === 404) throw new RecoverError(404, '会话不存在');
   if (res.status === 409) {
-    const detail = await readErrorDetail(res);
-    throw new RecoverError(409, detail || '存在需要人工裁决的高风险操作');
+    const body = await readErrorBody(res);
+    throw new RecoverError(
+      409,
+      body.message || '存在需要人工裁决的高风险操作',
+      body.pendingDecisions,
+    );
   }
   if (!res.ok) throw new RecoverError(res.status, `恢复失败（${res.status}）`);
   return res.json();
@@ -1266,9 +1318,11 @@ export function resumeRunLimitsBody(target: ResumePausedRunTarget): ResumeRunLim
  *  422 是请求形状问题（改参数重试即可），两者对用户的下一步动作不同。 */
 export class ResumeRejectionError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly pendingDecisions?: PendingDecision[];
+  constructor(status: number, message: string, pendingDecisions?: PendingDecision[]) {
     super(message);
     this.status = status;
+    this.pendingDecisions = pendingDecisions;
   }
 }
 
@@ -1289,10 +1343,11 @@ export async function resumeSession(
     body: JSON.stringify(payload),
   });
   if (res.status === 409 || res.status === 422) {
-    const detail = await readErrorDetail(res);
+    const body = await readErrorBody(res);
     throw new ResumeRejectionError(
       res.status,
-      detail || (res.status === 409 ? '恢复被拒绝（状态已变化）' : '恢复请求无效'),
+      body.message || (res.status === 409 ? '恢复被拒绝（状态已变化）' : '恢复请求无效'),
+      body.pendingDecisions,
     );
   }
   if (res.status === 404) throw new ResumeRejectionError(404, '会话不存在');

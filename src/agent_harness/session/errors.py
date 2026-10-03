@@ -82,6 +82,24 @@ class RecoveryConflict(SessionServiceError):
         self.pending_decisions = pending_decisions
 
 
+class EventLogCorruptError(SessionServiceError):
+    """events.jsonl 存在无法安全跳过的损坏，恢复入口拒绝继续（#565）。
+
+    覆盖三类（audit 增强块的判别）：
+
+    - **完整坏行**：换行结尾的坏 JSON / 非事件字典 / 非法 seq / 坏字段 / 无效
+      UTF-8——含坏尾行；换行说明写入已完成，内容坏不是"还没写完"；
+    - **seq 断层**：持久化 seq 连续是写入侧不变量（全部经 ``Session.append``
+      max+1），文件里的断层只可能来自坏行跳过或整行丢失；
+    - **seq 重复**：同 SeqConflict 的读时冲突面，恢复入口先拦下。
+
+    与 `SeqConflict`（写时冲突可重试）不同，本错误**不可重试**：重读同一文件
+    无用，需要人工按定位记录（行号 / 字节偏移 / sha256，由 store 的 WARNING
+    日志与报告携带，不含行内容）核对原字节后修复文件。409 而非 500：不是
+    服务端 bug，是 durable 资源当前状态与"继续恢复"这个请求冲突。
+    """
+
+
 class SeqConflict(SessionServiceError):
     """事件 seq 与已落盘日志冲突（重复 / 回退），或日志本身已不满足单调性。
 
