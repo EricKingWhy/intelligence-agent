@@ -53,6 +53,7 @@ from agent_harness.agent.run_budget import (
     latest_paused_run,
 )
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
+from agent_harness.model.accounting import PROVIDER_ROLE_CLOSEOUT
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
@@ -1074,8 +1075,9 @@ async def test_explicit_cancel_stays_terminal_and_is_not_rewritten_into_a_pause(
 async def test_session_admission_pauses_before_the_model_is_invoked(tmp_path) -> None:
     """session 准入在**任何模型工作之前**判（`02 §5.1`）：到线 ⇒ 0 次模型调用收口。
 
-    预留语义让 ceiling=1 一个产出轮都放不下（`0 + 1 >= 1`）；closeout 走模型
-    （requests 维未配 ceiling ⇒ 有余量），那一格请求落进 durable 行。
+    预留语义让 ceiling=1 一个产出轮都放不下（`0 + 1 >= 1`）；`#567` 裁决 B：
+    零进展执行不发 closeout（树账上没有 closeout 的那次请求——A1 的"最小有效
+    ceiling 是 2"在此的读数就是零工作 + 零消耗 + 确定性收口）。
     """
     from agent_harness.agent.run_budget import SessionLimits
     from agent_harness.storage.delegation_tree import (
@@ -1088,7 +1090,7 @@ async def test_session_admission_pauses_before_the_model_is_invoked(tmp_path) ->
         ledger, budget_key="root-s", root_session_id="root-s",
         limits=SessionLimits(max_agent_turns_total=1),
     )
-    scripted = ScriptedModel([_continuation_json()])
+    scripted = ScriptedModel([])
     runtime = _runtime(scripted, ceiling=None, session_budget=handle)
     session = make_session(tmp_path)
 
@@ -1097,12 +1099,17 @@ async def test_session_admission_pauses_before_the_model_is_invoked(tmp_path) ->
     assert result.status == STATUS_PAUSED
     paused = next(e for e in session.events if e.type == RUN_PAUSED)
     assert paused.data["trigger_dimension"] == "session.max_agent_turns_total"
+    assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC
     row = await ledger.get_session_budget("root-s")
     assert row.consumed.agent_turns == 0, "零产出轮：准入在模型工作前拒绝"
-    assert row.consumed.model_requests == 1, "closeout 的那次真实请求落进树账"
+    assert row.consumed.model_requests == 0, (
+        "#567 B：零进展不发 closeout，树账零请求（旧实现会烧 1 次）"
+    )
     # 自包含暂停（`#318`）：CAS 版本 + 最新 consumed 直接可读
     assert paused.data["session"]["version"] == 1
-    assert paused.data["session"]["consumed"]["model_requests"] == 1
+    assert paused.data["session"]["consumed"]["model_requests"] == 0, (
+        "#567 B：暂停快照与树账同源——零请求"
+    )
 
 
 @pytest.mark.asyncio
@@ -1146,3 +1153,37 @@ async def test_context_exceeded_refunds_the_session_step_reservation(tmp_path) -
     row = await ledger.get_session_budget("root-s")
     assert row.consumed.agent_turns == 0
     assert row.consumed.model_requests == 0, "预留整步退回，不留幻影"
+
+
+@pytest.mark.asyncio
+async def test_zero_progress_pause_skips_model_closeout_entirely(tmp_path):
+    """#567 裁决 B：零进展执行（`consumed.agent_turns == 0`）不烧 closeout 请求。
+
+    ceiling=1 连一个产出轮都放行不了（判定含预留：`0 + 1 >= 1`）——旧实现仍为
+    这次"无工作可总结"的收口发一条真实 Provider 请求（失败形态还落一条
+    REQUEST_OUTCOME_FAILED 的 model/request）。A1 的承诺是"最小有效 ceiling 是
+    2"：N=1 的暂停就该是零工作 + 零消耗 + 确定性收口，确定性 fallback 本就是
+    无工作场景的诚实表达（事件流里没有任何可总结的产出轮）。
+    """
+    scripted = ScriptedModel([])
+    runtime = _runtime(scripted, ceiling=1)
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "一步都还跑不了")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["trigger_dimension"] == TRIGGER_RUN_TURNS
+    assert paused.data["closeout_source"] == CLOSEOUT_DETERMINISTIC, (
+        "零进展 ⇒ 不发模型 closeout（#567 B）"
+    )
+    assert paused.data["consumed"]["agent_turns"] == 0
+    assert paused.data["consumed"]["model_requests"] == 0, (
+        "closeout 那条请求也不存在（旧实现会烧掉 1 次）"
+    )
+    closeout_requests = [
+        e for e in session.events
+        if e.type == MODEL_REQUEST and e.data.get("role") == PROVIDER_ROLE_CLOSEOUT
+    ]
+    assert closeout_requests == [], "事件流里不得有 closeout 的 model/request"
+    assert len(scripted.snapshots) == 0, "模型一次都没被调用"

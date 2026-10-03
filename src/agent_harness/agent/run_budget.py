@@ -372,12 +372,18 @@ def describe_resume_requirements(stuck: Mapping[str, Any] | None) -> str:
 #: ticket R2「closeout work accounted inside the configured ceiling」）。
 #: **只对 run ceiling 生效**（fuse 的临界点为什么不预留，见 `pause_trigger`）。
 #: 取 1 = 一次有界机会；`#305` 未固定数字，故这里是本实现的常量并如实投影。
+#: `#567` A1：预留只对**有工作可总结**的暂停有意义——ceiling=1 时暂停点是
+#: 零进展（`0 + 1 >= 1` 挡下第一轮），B 裁决让零进展执行干脆跳过模型 closeout
+#: （零请求零消耗、确定性收口）；ceiling 的**最小有效值是 2**（1 个产出轮 +
+#: 1 格 closeout 容量），N=1 的账面读数恒为零进展暂停。
 RESERVED_CLOSEOUT_TURNS = 1
 
 #: 同一条预留，落在 `model_requests` 维度上（`#313` T5）。closeout 本身**就是**一次
 #: Provider 请求（`02 §5.1` 把 closeout 与 primary/fallback 并列），所以 requests
 #: 的 ceiling 必须像 turns 那样给它留一格 —— 否则"closeout 在预算之内"这句话在
 #: requests 维度上会变成假话（暂停时 requests 已用满，closeout 只能越线）。
+#: `#567` A1：零进展执行（`agent_turns == 0`）不发 closeout ⇒ 这格预留在该场景
+#: 只是准入闸（挡住第一轮），不会被 closeout 实际消耗。
 RESERVED_CLOSEOUT_REQUESTS = 1
 
 #: continuation 的四个键（`03 §3.4`：已完成 / 剩余 / 阻塞 / 下一步安全动作）。

@@ -2695,6 +2695,15 @@ class AgentRuntime:
             trigger_dimension=trigger_dimension, limits=limits, consumed=consumed,
             blocked_by=blocked_by, reason=reason, stuck=stuck,
         )
+        # `#567` 裁决 B：**零进展执行跳过模型 closeout**。`agent_turns == 0` =
+        # 本次执行连一个产出轮都没有（如 ceiling=1 的暂停：判定含预留，
+        # `0 + 1 >= 1` 当场挡下）——事件流里没有任何可总结的工作，为一次
+        # "什么都没发生"的收口再烧一条真实 Provider 请求是纯浪费（A1：最小
+        # 有效 ceiling 是 2）。确定性 fallback 本就是无工作场景的诚实收口，
+        # 零请求零消耗（旧实现还会落一条 REQUEST_OUTCOME_FAILED 的
+        # model/request，把账行污染成"有一次失败请求"的假象）。
+        if consumed.agent_turns == 0:
+            return fallback, CLOSEOUT_DETERMINISTIC, []
         # 到点后**连 closeout 也不发**：它是真实 Provider 请求，`04 §9.1` /
         # ADR-0044 D4 把"deadline 过后不启动任何新工作"写死（`closeout_capacity`
         # 里那一句是判据本身，这里只是把"现在"传进去）。

@@ -70,7 +70,8 @@ def test_session_ceiling_pauses_then_session_raise_resumes(tmp_path):
     """
     _, client = _web(tmp_path)
     session_id = _create_idle_session(client)
-    probe = _ScriptedProbe([_continuation_json()], [_done()])
+    # `#567` B：暂停阶段零模型调用 ⇒ 第一份剧本留空（旧实现这里发 closeout）。
+    probe = _ScriptedProbe([], [_done()])
 
     with probe:
         resp = client.post(
@@ -88,9 +89,9 @@ def test_session_ceiling_pauses_then_session_raise_resumes(tmp_path):
         assert data["limits"]["session"]["max_agent_turns_total"] == 1
         assert data["session"]["version"] == 1
         assert data["session"]["consumed"]["agent_turns"] == 0
-        # closeout 那次真实请求记进了 session 行（`02 §5.1` 把 closeout 与 primary
-        # / fallback 并列）；本剧本不带 usage ⇒ tokens / cost 保持未知（None 粘性）。
-        assert data["session"]["consumed"]["model_requests"] == 1
+        # `#567` 裁决 B：零进展暂停不发 closeout ⇒ session 行零请求（旧实现会把
+        # closeout 那次请求记进行）；行保持准入建行时的初值（token / cost = 0）。
+        assert data["session"]["consumed"]["model_requests"] == 0
 
         resume = client.post(
             f"/api/sessions/{session_id}/resume",
@@ -291,13 +292,14 @@ def test_unknown_accounting_pause_carries_evidence(tmp_path):
 def test_session_consumption_aggregates_across_runs(tmp_path):
     """run 账每 run 清零、session 账跨 run 累计（`02 §5.1` 的分层语义）。
 
-    run 1 的 run turns ceiling=1 当场暂停（零产出轮），closeout 那一次请求落进
-    session 行；run 2 自己只发一次请求、走一个产出轮——但 durable 行里
-    `model_requests == 2`：前一个 run 的 closeout 也在树账上。
+    run 1 的 run turns ceiling=1 当场暂停（零产出轮）；`#567` 裁决 B 后零进展
+    暂停不发 closeout ⇒ run 1 在树账上零请求。run 2 自己发一次请求、走一个产出轮
+    ——durable 行里 `model_requests == 1`：行跨 run 持久，读数是两个 run 之和。
     """
     app, client = _web(tmp_path)
     session_id = _create_idle_session(client)
-    probe = _ScriptedProbe([_continuation_json()], [_done()])
+    # `#567` B：暂停阶段零模型调用 ⇒ 第一份剧本留空（旧实现这里发 closeout）。
+    probe = _ScriptedProbe([], [_done()])
 
     with probe:
         first = client.post(
@@ -327,9 +329,10 @@ def test_session_consumption_aggregates_across_runs(tmp_path):
 
     row = _session_row(app, session_id)
     assert row.limits.max_agent_turns_total == 2
-    # 跨 run 累计：run 2 自己只有 1 请求 + 1 轮，run 1 的 closeout 请求在同一行上
+    # 跨 run 累计：run 1 零进展暂停 ⇒ `#567` B 不发 closeout，树账零请求零轮；
+    # run 2 自己 1 请求 + 1 轮——行读数是跨 run 的和（本场景恰好全部来自 run 2）。
     assert row.consumed.agent_turns == 1
-    assert row.consumed.model_requests == 2
+    assert row.consumed.model_requests == 1
     assert row.version == 1, "本场景没有点名 session 维 ⇒ 账行版本不 bump"
 
 

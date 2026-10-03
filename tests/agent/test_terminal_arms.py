@@ -711,9 +711,10 @@ async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> 
     """模型从未被调用 ⇒ 没有可抽取的对话内容，跳过 writeback（0 次是证据）。
 
     #348 起：收口是**非终态** `run/paused`（reason 经 `reason_for_dimension` 自动
-    = budget_exhausted，trigger_dimension = max_context_tokens）。closeout 尝试一次
-    模型调用（本 kit 的 model 是 `object()` ⇒ 失败）——那次失败请求照样记
-    `model_requests`（与预算暂停臂同一形状）。
+    = budget_exhausted，trigger_dimension = max_context_tokens）。`#567` 裁决 B：
+    这条臂的暂停是**零进展**（`agent_turns == 0`，模型从未被调用）⇒ 不再尝试
+    closeout 模型调用（旧实现会发一次注定失败的请求并记 `model_requests`）——
+    收口就是一条干净的 `run/paused`，零请求零消耗。
     """
     memory = _MemorySpy()
     kit = _kit(session, memory_writer=memory)
@@ -725,7 +726,9 @@ async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> 
         ),
     )
 
-    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    assert [e.type for e in emitted] == [RUN_PAUSED], (
+        "#567 B：零进展 ⇒ 无 closeout 的 model/request（旧实现还有一条失败请求）"
+    )
     paused = session.events[-1]
     assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED
     assert paused.data["trigger_dimension"] == TRIGGER_MAX_CONTEXT_TOKENS
@@ -771,7 +774,9 @@ async def test_context_exceeded_arm_closes_and_clears_the_handle(session: Sessio
         ),
     )
 
-    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    assert [e.type for e in emitted] == [RUN_PAUSED], (
+        "#567 B：超限臂零进展 ⇒ 无 closeout 请求事件"
+    )
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"]
     # 收口即清口（与成功路径同形）
     assert kit.arms.telemetry.ctx_span is None
