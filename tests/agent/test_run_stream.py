@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -204,3 +206,58 @@ async def test_run_stream_and_run_produce_same_session_events(tmp_path):
         "run_stream 和 run 的非流式 SessionEvent 事实源应该一致"
     assert_request_pairs(session_stream)
     assert_request_pairs(session_invoke)
+
+
+@pytest.mark.asyncio
+async def test_invoke_response_accounting_survives_close_after_start(tmp_path):
+    """Closing after the durable start must preserve an already returned response."""
+    response = AIMessage(
+        content="answer",
+        response_metadata={"model_name": "test-model", "cost": "0.0012"},
+        usage_metadata={
+            "input_tokens": 7, "output_tokens": 3, "total_tokens": 10,
+        },
+    )
+
+    class _CompletedModel(ScriptedModel):
+        def __init__(self, responses: list[AIMessage]) -> None:
+            super().__init__(responses)
+            self.returned = asyncio.Event()
+
+        async def ainvoke(self, messages, **kwargs) -> AIMessage:
+            result = await super().ainvoke(messages, **kwargs)
+            self.returned.set()
+            return result
+
+    model = _CompletedModel([response])
+    runtime = _build_runtime(model, tmp_path)
+    session = make_session(tmp_path)
+    drive = runtime._drive(session, "hi", stream=False)
+
+    async for event in drive:
+        if event.type == MODEL_REQUEST_STARTED:
+            started = event
+            break
+    else:
+        pytest.fail("invoke path did not emit model/request-started")
+
+    # Wait until the Provider returned while the consumer is paused on the start event.
+    await model.returned.wait()
+    await drive.aclose()
+
+    settlements = [event for event in session.events if event.type == MODEL_REQUEST]
+    assert len(settlements) == 1
+    settled = settlements[0]
+    assert started.seq < settled.seq
+    assert settled.data == {
+        "role": "primary",
+        "outcome": "completed",
+        "request_id": started.data["request_id"],
+        "model": "test-model",
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+        },
+        "cost_usd": "0.0012",
+    }
