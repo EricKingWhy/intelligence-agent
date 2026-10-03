@@ -210,6 +210,12 @@ class ManagedRun:
     def _reap_if_orphaned(self) -> None:
         if self.subscribers or self.terminal or self.task is None:
             return
+        if self.cancel_requested:
+            # #550 review（A 轴 P3）：用户取消已在途（取消臂收尾中）——reaper
+            # 不得二次注入：终态会被 #550 的运行时侧防线兜住，但收尾时读到的
+            # `reap_requested` 会把 reason 翻成 orphaned（实为用户取消），且
+            # 违背"重复取消不得再注入"不变量。run 正在收尾，回收也无必要。
+            return
         logger.warning(
             "run 孤儿回收（session=%s，零订阅者超过 %.0fs）",
             self.session.session_id, self._manager.disconnect_grace_seconds,
@@ -282,8 +288,10 @@ class RunManager:
 
         调用方可在恢复计划校验与最终提交期间持有它；最终提交会覆盖 CAS 重验、
         必要的恢复/对账、运行时装配及恢复事件写入，确保 CAS 输家不会先留下恢复事件
-        或构造模型。不要跨 `RunManager.launch` 或整个 run 生命周期持有——提交后的并发启动由
-        `get_active` 的 409 负责。
+        或构造模型。锁内**可以**执行 launch（`#560` 起 `resume_and_launch` 的新任务
+        路径刻意如此：锁内 `get_active` 复查 CAS + 装配 + launch，锁只串行化
+        "判忙 → 启动"决策点，不跨 run 生命周期——launch 只创建 task 不等待它）；
+        但不要把锁扩到整个 run 的收尾/等待。
         """
         lock = self._session_locks.get(session_id)
         if lock is None:

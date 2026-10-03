@@ -2041,8 +2041,10 @@ class AgentRuntime:
             if self._session_budget is not None and session_step_reserved:
                 session_step_reserved = False
                 try:
-                    # shield 与取消臂同口径（#550）：收尾期间被取消不能让账目
-                    # 退回半途而废；再注入的取消在下面被吞掉，run/failed 照写。
+                    # shield 与取消臂同口径（#550）：**本 await** 期间被取消不能
+                    # 让账目退回半途而废；再注入的取消在此处被吞掉，退回完成后
+                    # 继续失败收尾（后续 `async for` 的 yield 点仍是既有"消费者
+                    # 断连窗口"，不在本防护面内）。
                     await asyncio.shield(self._session_budget.refund_turn())
                 except (asyncio.CancelledError, GeneratorExit):
                     self._log("task_failed", "失败收尾期间被取消（继续收尾）",

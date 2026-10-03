@@ -3087,11 +3087,20 @@ class SessionService:
         )
 
     def _attach_approval_queue_gc(self, run: ManagedRun, session_id: str) -> None:
-        """run 终结时 GC approval_queue（防长期泄漏）。"""
+        """run 终结时 GC approval_queue（防长期泄漏）。
+
+        #545 review（A 轴 P1）身份校验：attach 时机在 build 之后，此刻 dict 里
+        若有一份就是**本 run** 的队列；回调按对象身份比对后才 pop——接力
+        （ADR-0030 §4.7）与立即续聊会在旧 run 的 done-callback 触发**之前**给
+        下一个 run 注册新队列（共享同一 session_id 键），无条件按键 pop 会把
+        下一个 run 的队列误删，其审批决策从此 404 直到 fail-closed 超时 deny。
+        """
         _task = run.task
+        own_queue = self._approval_queues.get(session_id)
 
         def _gc_approval_queue(_t):
-            self._approval_queues.pop(session_id, None)
+            if self._approval_queues.get(session_id) is own_queue:
+                self._approval_queues.pop(session_id, None)
 
         if _task is not None:
             _task.add_done_callback(_gc_approval_queue)
