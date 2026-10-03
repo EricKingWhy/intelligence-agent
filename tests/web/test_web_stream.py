@@ -10,7 +10,7 @@ import json
 import pytest
 from langchain_core.messages import AIMessageChunk
 
-from agent_harness.session import JsonlSessionStore
+from agent_harness.session import MODEL_REQUEST_STARTED, JsonlSessionStore
 
 
 class SlowStreamModel:
@@ -23,6 +23,20 @@ class SlowStreamModel:
         for i in range(25):
             await asyncio.sleep(0.08)
             yield AIMessageChunk(content=f"chunk{i} ")
+
+
+class _BlockedStreamModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def astream(self, messages, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        yield AIMessageChunk(content="完成")
 
 
 async def _start_server(tmp_path, monkeypatch, model):
@@ -167,6 +181,61 @@ async def test_reconnect_after_terminal_replays_to_end(tmp_path, monkeypatch):
             "重放覆盖 (after_seq, latest]，按 seq 序"
         assert frames_b[-1]["type"] == "run/completed"
     finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_in_flight_request_started_is_live_durable_and_replayed(
+    tmp_path, monkeypatch,
+):
+    """在 Provider barrier 期间，开始事件已可由 live SSE 与 GET /events 读取。"""
+    model = _BlockedStreamModel()
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, lambda: model,
+    )
+    try:
+        live = await _collect(
+            port, "/api/sessions", {"task": "验证在途模型请求"},
+            stop_types={MODEL_REQUEST_STARTED},
+        )
+        started = [frame for frame in live if frame.get("type") == MODEL_REQUEST_STARTED]
+        assert len(started) == 1
+        session_id = started[0]["session_id"]
+        start_seq = started[0]["seq"]
+        await asyncio.wait_for(model.entered.wait(), timeout=2)
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=5) as client:
+            response = await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events",
+            )
+        assert response.status_code == 200
+        persisted = response.json()
+        durable = [event for event in persisted if event["type"] == MODEL_REQUEST_STARTED]
+        assert len(durable) == 1
+        assert durable[0]["seq"] == start_seq
+        assert not any(event["type"] == "model/request" for event in persisted)
+
+        model.release.set()
+        store = JsonlSessionStore(app.state.agent.sessions_root)
+        await _wait_terminal(store, session_id)
+        replay = await _collect(
+            port,
+            f"/api/sessions/{session_id}/stream?after_seq={start_seq - 1}",
+            None,
+            stop_types={"run/completed", "run/failed"},
+        )
+        replayed_starts = [
+            frame for frame in replay if frame.get("type") == MODEL_REQUEST_STARTED
+        ]
+        requests = [frame for frame in replay if frame.get("type") == "model/request"]
+        assert len(replayed_starts) == len(requests) == 1
+        assert replayed_starts[0]["seq"] == start_seq
+        assert replayed_starts[0]["data"]["request_id"] == requests[0]["data"]["request_id"]
+        assert replayed_starts[0]["seq"] < requests[0]["seq"]
+    finally:
+        model.release.set()
         await _shutdown(server, serve_task)
 
 

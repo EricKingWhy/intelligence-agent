@@ -56,6 +56,7 @@ from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -258,6 +259,17 @@ async def test_model_closeout_is_a_model_request_not_an_accepted_turn(tmp_path) 
     assert [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)] == []
     # closeout 真的过了一次模型（有界机会），但那不是被接纳的一轮：模型侧调用 3 次
     assert len(scripted.snapshots) == 3
+    closeout_start = next(
+        event for event in session.events
+        if event.type == MODEL_REQUEST_STARTED
+        and event.data["role"] == "closeout"
+    )
+    closeout_request = next(
+        event for event in session.events
+        if event.type == MODEL_REQUEST and event.data["role"] == "closeout"
+    )
+    assert closeout_start.data["request_id"] == closeout_request.data["request_id"]
+    assert closeout_start.seq < closeout_request.seq
 
     state = derive_run_budget(session.events, _run_id_of(session))
     assert state.version == 1
@@ -455,9 +467,11 @@ async def test_same_run_resume_completes_without_resetting_accounting(tmp_path) 
     assert [e.type for e in new_events].count(RUN_RESUMED) == 0, (
         "run/resumed 由 SessionService 在 launch 之前落盘（这里直接驱动 runtime）"
     )
-    assert new_events[0].type == MODEL_REQUEST, (
-        "续跑第一次请求就落账（`#313` 起请求有自己的计数点）"
+    assert new_events[0].type == MODEL_REQUEST_STARTED
+    assert new_events[1].type == MODEL_REQUEST, (
+        "续跑先记录 attempt 开始，再用 `model/request` 作为唯一计数点"
     )
+    assert new_events[0].data["request_id"] == new_events[1].data["request_id"]
     assert new_events[-1].type == RUN_COMPLETED
     # run 身份单一：恢复沿用同一逻辑 run——没有第二条 run/started、也没有新 user/message
     assert [e.type for e in session.events].count(RUN_STARTED) == 1

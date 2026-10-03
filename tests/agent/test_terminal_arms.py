@@ -65,6 +65,7 @@ from agent_harness.session import (
     MODEL_FAILED,
     MODEL_FALLBACK,
     MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     REASONING_INTERRUPTED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -657,7 +658,9 @@ async def test_pause_arm_is_nonterminal_and_closes_the_execution(
         ),
     )
 
-    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    assert [e.type for e in emitted] == [
+        MODEL_REQUEST_STARTED, MODEL_REQUEST, RUN_PAUSED,
+    ]
     paused = kit.since(mark)[-1]
     assert paused.run_id == RUN_ID
     # `#314`：工具维恒在快照里（本用例不执行任何工具 ⇒ 0 / 空表，不是缺键）
@@ -725,7 +728,9 @@ async def test_context_exceeded_arm_skips_memory_writeback(session: Session) -> 
         ),
     )
 
-    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    assert [e.type for e in emitted] == [
+        MODEL_REQUEST_STARTED, MODEL_REQUEST, RUN_PAUSED,
+    ]
     paused = session.events[-1]
     assert paused.data["reason"] == REASON_BUDGET_EXHAUSTED
     assert paused.data["trigger_dimension"] == TRIGGER_MAX_CONTEXT_TOKENS
@@ -771,7 +776,9 @@ async def test_context_exceeded_arm_closes_and_clears_the_handle(session: Sessio
         ),
     )
 
-    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    assert [e.type for e in emitted] == [
+        MODEL_REQUEST_STARTED, MODEL_REQUEST, RUN_PAUSED,
+    ]
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"]
     # 收口即清口（与成功路径同形）
     assert kit.arms.telemetry.ctx_span is None
