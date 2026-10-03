@@ -133,7 +133,7 @@ def test_env_verdict_line_all_env_hits():
 
 
 def test_env_verdict_line_mixed_is_none():
-    results = [(_lane("guards"), 3221225794, 0.1, "boom"), (_lane("ruff"), 1, "assert x")]
+    results = [(_lane("guards"), 3221225794, 0.1, "boom"), (_lane("ruff"), 1, 0.1, "assert x")]
     assert gate0.env_verdict_line(results) is None         # 真红优先于归因
 
 
