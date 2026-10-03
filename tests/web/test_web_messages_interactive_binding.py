@@ -31,6 +31,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from agent_harness.session import JsonlSessionStore
+from agent_harness.session.event import RUN_STARTED
 
 _CALL_SEQ = itertools.count(1)
 
@@ -129,12 +130,23 @@ async def _approve(client, base: str, session_id: str, approval_id: str) -> dict
     return resp.json()
 
 
-async def _wait_terminal(store, session_id: str, deadline_seconds: float = 20.0):
-    """轮询事件流直到出现 run 终态（completed / failed），返回最后一条终态事件。"""
+async def _wait_terminal(
+    store, session_id: str, deadline_seconds: float = 20.0,
+):
+    """轮询当前 run 的事件流直到出现终态（completed / failed）。"""
     async with asyncio.timeout(deadline_seconds):
         while True:
             events = store.read_events(session_id)
-            terminals = [e for e in events if e.type in ("run/completed", "run/failed")]
+            current_run_id = next(
+                (event.run_id for event in reversed(events) if event.type == RUN_STARTED),
+                None,
+            )
+            terminals = [
+                event for event in events
+                if current_run_id is not None
+                and event.run_id == current_run_id
+                and event.type in ("run/completed", "run/failed")
+            ]
             if terminals:
                 return terminals[-1]
             await asyncio.sleep(0.05)

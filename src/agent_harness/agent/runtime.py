@@ -3281,7 +3281,7 @@ class AgentRuntime:
         )
 
     async def _terminal_cancelled(self, arms: _TerminalArms, *, steps: int) -> None:
-        """取消臂收尾（纯同步、不 yield——生成器关闭中禁止再产出）。
+        """取消臂异步收尾（不产出事件——生成器关闭中禁止再 yield）。
 
         与异常臂的唯一差异是"收尾事件丢弃"：两臂共用 `_TerminalContext` 的收尾
         序列，本臂把返回值直接丢掉。reason 的解析点（supplier 调用）保持在

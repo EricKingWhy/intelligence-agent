@@ -33,6 +33,7 @@ from agent_harness.session import (
 from agent_harness.session.derive import derive_protected_facts
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
+    MODEL_REQUEST_STARTED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
     STEER_APPLIED,
@@ -711,7 +712,11 @@ async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatc
     session_id = launched.session.session_id
     await harness.wait_for(
         lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
-        what="run 起跑（gate 把它钉在模型调用上）",
+        what="run 起跑",
+    )
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, MODEL_REQUEST_STARTED)) == 1,
+        what="Provider attempt 开始已落盘（gate 把它钉在模型调用上）",
     )
     before = [e.type for e in harness.events(session_id)]
 
