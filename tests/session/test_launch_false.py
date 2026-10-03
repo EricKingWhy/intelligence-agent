@@ -123,7 +123,7 @@ def test_launch_false_session_metadata_matches_launch_true(tmp_path):
 
 
 def _web_client(tmp_path):
-    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
     return app, TestClient(app)
 
