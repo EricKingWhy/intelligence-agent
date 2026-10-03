@@ -975,6 +975,43 @@ def consumed_from_events(events: Iterable[SessionEvent]) -> BudgetConsumed:
     )
 
 
+def session_model_request_accounting(
+    events: Iterable[SessionEvent],
+) -> tuple[tuple[str, ...], dict[str, int] | None, Decimal | None]:
+    """Return unique settlement IDs and aggregate metrics for durable requests."""
+    requests = [event for event in events if event.type == MODEL_REQUEST]
+    if not requests:
+        return (), None, None
+
+    request_ids = tuple(event.data.get("request_id") for event in requests)
+    if (
+        any(not isinstance(request_id, str) or not request_id for request_id in request_ids)
+        or len(set(request_ids)) != len(request_ids)
+    ):
+        raise ValueError("model request settlements require unique request IDs")
+
+    # consumed_from_events is the single aggregation rule. Keep malformed negative
+    # and boolean token values unknown for the storage ledger too.
+    metrics = consumed_from_events(requests)
+    token_values_valid = True
+    for event in requests:
+        usage = event.data.get("usage")
+        reported_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if (
+            isinstance(reported_tokens, bool)
+            or not isinstance(reported_tokens, int)
+            or reported_tokens < 0
+        ):
+            token_values_valid = False
+            break
+
+    usage = (
+        {"total_tokens": metrics.total_tokens}
+        if token_values_valid and metrics.total_tokens is not None else None
+    )
+    return request_ids, usage, metrics.cost_usd
+
+
 def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetState:
     """从 append-only 事件派生该逻辑 run 的账本（纯函数，无 IO、无缓存）。
 
@@ -2821,14 +2858,22 @@ class SessionBudgetPort(Protocol):
 
     async def snapshot(self) -> SessionBudgetSnapshot: ...
 
-    async def admit_step(self) -> SessionAdmission: ...
+    async def admit_step(
+        self, *, session_id: str | None = None, run_id: str | None = None,
+        step_id: int | None = None, after_seq: int | None = None,
+    ) -> SessionAdmission: ...
 
     async def refund_turn(self) -> None: ...
 
-    async def refund_step(self) -> None: ...
+    async def refund_step(self, *, accounting_id: str | None = None) -> None: ...
+
+    async def begin_model_request_accounting(
+        self, *, session_id: str, run_id: str, step_id: int, after_seq: int,
+    ) -> str: ...
 
     async def record_model_requests(
         self, *, count: int, usage: dict[str, int] | None, cost: Decimal | None,
+        accounting_id: str | None = None, request_ids: tuple[str, ...] = (),
     ) -> None: ...
 
     async def record_tools(self, *, calls: Mapping[str, int], attempts: Mapping[str, int]) -> None: ...
@@ -2860,3 +2905,4 @@ class SessionAdmission:
     accepted: bool
     trigger_dimension: str | None
     snapshot: SessionBudgetSnapshot
+    accounting_id: str | None = None

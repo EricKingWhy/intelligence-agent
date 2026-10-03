@@ -69,7 +69,6 @@ from agent_harness.agent.run_budget import (
     SessionAdmission,
     SessionBudgetPort,
     SessionBudgetSnapshot,
-    _decimal_or_none,
     accounting_unknown_pause_dimensions,
     add_consumed,
     apply_blocked_by,
@@ -84,6 +83,7 @@ from agent_harness.agent.run_budget import (
     pause_trigger,
     reason_for_dimension,
     session_closeout_capacity,
+    session_model_request_accounting,
     stuck_resume_requirements,
     utc_now,
 )
@@ -896,6 +896,7 @@ class _TerminalArms:
     )
     settled_request_events: dict[str, SessionEvent] = field(default_factory=dict)
     completed_model_response: Any | None = None
+    session_request_accounting: tuple[str, int, int, int] | None = None
 
     @property
     def run_id(self) -> str | None:
@@ -1598,7 +1599,13 @@ class AgentRuntime:
                 # 收口（trigger_dimension = `session.*` 配置字段路径）。
                 session_admission: SessionAdmission | None = None
                 if self._session_budget is not None:
-                    session_admission = await self._session_budget.admit_step()
+                    accounting_after_seq = session.next_seq
+                    session_admission = await self._session_budget.admit_step(
+                        session_id=session.session_id,
+                        run_id=run_id,
+                        step_id=arms.envelope_step(steps + 1),
+                        after_seq=accounting_after_seq,
+                    )
                     if not session_admission.accepted:
                         self._log(
                             "agent_decision", "session 预算到顶，run 暂停（非终态）",
@@ -1616,6 +1623,13 @@ class AgentRuntime:
                             yield streamed
                         return
                     session_step_reserved = True
+                    if session_admission.accounting_id is not None:
+                        arms.session_request_accounting = (
+                            session_admission.accounting_id,
+                            accounting_after_seq,
+                            arms.envelope_step(steps + 1),
+                            1,
+                        )
 
                 # 第 0 步（ADR-0030 D2）：steer 注入。位置固定在 ContextBuilder
                 # 之前——那是模型可见投影的唯一入口，注入必须发生在投影之前才
@@ -1637,7 +1651,14 @@ class AgentRuntime:
                     # 本轮从未被调用"——turns / requests 的预留都没变成真账。
                     if session_step_reserved:
                         session_step_reserved = False
-                        await self._session_budget.refund_step()
+                        accounting_id = (
+                            arms.session_request_accounting[0]
+                            if arms.session_request_accounting is not None else None
+                        )
+                        await self._session_budget.refund_step(
+                            accounting_id=accounting_id,
+                        )
+                        arms.session_request_accounting = None
                     async for streamed in self._terminal_context_exceeded(
                         arms, launch=launch_budget, steps=steps, error=error,
                     ):
@@ -1821,10 +1842,7 @@ class AgentRuntime:
                 # usage / cost 仍随产出响应的那一次给，count=0 也要落——tokens / cost
                 # 的树级计数点只有这里（缺席 = 该维转未知，`None` 粘性）。
                 if self._session_budget is not None and request_events:
-                    await self._session_budget.record_model_requests(
-                        count=max(len(request_events) - 1, 0), usage=usage,
-                        cost=model_cost,
-                    )
+                    await self._record_active_session_model_requests(arms)
                 # R6-2（用户拍板）：空响应不是成功——content 与 tool_calls 双空
                 # 意味着模型没有产出任何决策（内容过滤/上游静默失败）。在途标记
                 # 仍开着时抛出，走统一失败兜底（model/failed + run/failed），
@@ -2292,7 +2310,17 @@ class AgentRuntime:
                 if self._session_budget is not None and session_step_reserved:
                     session_step_reserved = False
                     try:
-                        await asyncio.shield(self._session_budget.refund_turn())
+                        if (
+                            arms.session_request_accounting is not None
+                            and not self._session_accounting_has_attempt(arms)
+                        ):
+                            accounting_id = arms.session_request_accounting[0]
+                            await asyncio.shield(self._session_budget.refund_step(
+                                accounting_id=accounting_id,
+                            ))
+                            arms.session_request_accounting = None
+                        else:
+                            await asyncio.shield(self._session_budget.refund_turn())
                     except (asyncio.CancelledError, GeneratorExit):
                         # #550：收尾期间被再次取消（重复 /cancel、reap、关停等
                         # 旁路 task.cancel()）——shield 只保护内层退回不被打断，
@@ -2308,7 +2336,7 @@ class AgentRuntime:
                                   span_id=run_span, outcome="error")
                 # 收尾事件一律丢弃不 yield（生成器关闭中禁止产出）——这正是本臂
                 # 与异常臂的唯一差异，由 _terminal_cancelled 单点执行。
-                self._terminal_cancelled(arms, steps=steps)
+                await self._terminal_cancelled(arms, steps=steps)
             except Exception as terminal_error:  # noqa: BLE001
                 self._log("task_failed", "取消收尾事件写入失败（存储故障？）",
                           span_id=run_span, outcome="error",
@@ -2336,7 +2364,17 @@ class AgentRuntime:
                     # 让账目退回半途而废；再注入的取消在此处被吞掉，退回完成后
                     # 继续失败收尾（后续 `async for` 的 yield 点仍是既有"消费者
                     # 断连窗口"，不在本防护面内）。
-                    await asyncio.shield(self._session_budget.refund_turn())
+                    if (
+                        arms.session_request_accounting is not None
+                        and not self._session_accounting_has_attempt(arms)
+                    ):
+                        accounting_id = arms.session_request_accounting[0]
+                        await asyncio.shield(self._session_budget.refund_step(
+                            accounting_id=accounting_id,
+                        ))
+                        arms.session_request_accounting = None
+                    else:
+                        await asyncio.shield(self._session_budget.refund_turn())
                 except (asyncio.CancelledError, GeneratorExit):
                     self._log("task_failed", "失败收尾期间被取消（继续收尾）",
                               span_id=run_span, outcome="cancelled")
@@ -2498,6 +2536,46 @@ class AgentRuntime:
         `#313` 的"计数点唯一"就落在这句话上。
         """
         return add_consumed(launch.consumed, consumed_from_events(session.since(start)))
+
+    def _session_accounting_has_attempt(self, arms: _TerminalArms) -> bool:
+        accounting = arms.session_request_accounting
+        if accounting is None or arms.run_id is None:
+            return False
+        _, after_seq, step_id, _ = accounting
+        return any(
+            event.seq is not None and event.seq >= after_seq
+            and event.run_id == arms.run_id and event.step_id == step_id
+            and event.type in {MODEL_REQUEST_STARTED, MODEL_REQUEST}
+            for event in arms.session.events
+        )
+
+    async def _record_active_session_model_requests(
+        self, arms: _TerminalArms,
+    ) -> None:
+        accounting = arms.session_request_accounting
+        if self._session_budget is None or accounting is None or arms.run_id is None:
+            return
+        accounting_id, after_seq, step_id, reserved_requests = accounting
+        requests = [
+            event for event in arms.session.events
+            if event.type == MODEL_REQUEST and event.seq is not None
+            and event.seq >= after_seq and event.run_id == arms.run_id
+            and event.step_id == step_id
+        ]
+        if not requests:
+            if self._session_accounting_has_attempt(arms):
+                await self._session_budget.resolve_unsettled_model_request_accounting(
+                    accounting_id,
+                )
+                arms.session_request_accounting = None
+            return
+        request_ids, usage, cost = session_model_request_accounting(requests)
+        await self._session_budget.record_model_requests(
+            count=max(len(requests) - reserved_requests, 0),
+            usage=usage, cost=cost, accounting_id=accounting_id,
+            request_ids=request_ids,
+        )
+        arms.session_request_accounting = None
 
     def _pause_trigger(
         self, launch: LaunchRunBudget, *, steps: int, consumed: BudgetConsumed,
@@ -2729,20 +2807,7 @@ class AgentRuntime:
         # （`02 §5.1` 把 closeout 与 primary / fallback 并列）；usage / cost 从
         # 产出响应的那格事件取（缺席 = 该维转未知，None 粘性）。
         if self._session_budget is not None and closeout_events:
-            closeout_requests = [
-                event for event in closeout_events if event.type == MODEL_REQUEST
-            ]
-            if closeout_requests:
-                completed = closeout_requests[-1]
-                closeout_usage = completed.data.get("usage")
-                closeout_usage = (
-                    closeout_usage if isinstance(closeout_usage, dict) else None
-                )
-                await self._session_budget.record_model_requests(
-                    count=len(closeout_requests),
-                    usage=closeout_usage,
-                    cost=_decimal_or_none(completed.data.get("cost_usd")),
-                )
+            await self._record_active_session_model_requests(arms)
         # 先镜像对账事件、再镜像 closeout：三条都是 durable，顺序与落盘顺序一致
         # （流帧必须是落盘日志的前缀，见 golden）。顺序本身也有语义：客户端先读到
         # "某个操作进入 NEED_RECONCILE"，再读到"本次执行暂停"——与 `03 §5`
@@ -2958,6 +3023,17 @@ class AgentRuntime:
             )
             return fallback, CLOSEOUT_DETERMINISTIC, []
         request_id = str(uuid4())
+        accounting_after_seq = arms.session.next_seq
+        if self._session_budget is not None:
+            accounting_id = await self._session_budget.begin_model_request_accounting(
+                session_id=arms.session.session_id,
+                run_id=arms.run_id or "",
+                step_id=step_id,
+                after_seq=accounting_after_seq,
+            )
+            arms.session_request_accounting = (
+                accounting_id, accounting_after_seq, step_id, 0,
+            )
         request_started_event = arms.record_request_started(
             PROVIDER_ROLE_CLOSEOUT, request_id, step_id=step_id,
         )
@@ -3187,7 +3263,7 @@ class AgentRuntime:
             AgentRunResult(status=reason, final_text="", steps=steps),
         )
 
-    def _terminal_cancelled(self, arms: _TerminalArms, *, steps: int) -> None:
+    async def _terminal_cancelled(self, arms: _TerminalArms, *, steps: int) -> None:
         """取消臂收尾（纯同步、不 yield——生成器关闭中禁止再产出）。
 
         与异常臂的唯一差异是"收尾事件丢弃"：两臂共用 `_TerminalContext` 的收尾
@@ -3204,6 +3280,14 @@ class AgentRuntime:
         ctx = arms.context(steps)
         stages = _TerminalStages()
         stages.run("interrupt_streams", ctx.interrupt_streams)
+        try:
+            await asyncio.shield(self._record_active_session_model_requests(arms))
+        except (asyncio.CancelledError, GeneratorExit):
+            self._log("task_failed", "取消期间 session model request 记账被再次取消",
+                      span_id=new_span_id(), outcome="cancelled")
+        except Exception:  # noqa: BLE001 - durable marker lets startup reconcile
+            self._log("task_failed", "取消收尾期间 session model request 记账失败",
+                      span_id=new_span_id(), outcome="error", exc_info=True)
         reason = arms.cancel_reason()
         stages.run(
             "close_observability",
@@ -3252,8 +3336,17 @@ class AgentRuntime:
             or UNCLASSIFIED_FAILURE_MESSAGE.format(error_type=type(error).__name__)
         )
         stages = _TerminalStages()
-        for streamed in stages.run("interrupt_streams", ctx.interrupt_streams):
+        interrupted_events = stages.run("interrupt_streams", ctx.interrupt_streams)
+        for streamed in interrupted_events:
             yield to_agent_event(streamed)
+        try:
+            await asyncio.shield(self._record_active_session_model_requests(arms))
+        except (asyncio.CancelledError, GeneratorExit):
+            self._log("task_failed", "失败收尾 session model request 记账被取消",
+                      span_id=new_span_id(), outcome="cancelled")
+        except Exception:  # noqa: BLE001 - durable marker lets startup reconcile
+            self._log("task_failed", "失败收尾期间 session model request 记账失败",
+                      span_id=new_span_id(), outcome="error", exc_info=True)
         for streamed in stages.run(
             "close_observability",
             lambda: ctx.close_observability(
