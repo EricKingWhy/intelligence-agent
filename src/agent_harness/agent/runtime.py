@@ -1058,6 +1058,10 @@ class AgentRuntime:
             )
         self._context_builder = context_builder or ContextBuilder(
             model, context_providers=context_providers, system_prompt=system_prompt,
+            # #559：兜底内建 builder 与调用方注入的 builder 同待遇——摘要调用必须
+            # 走同一进程级闸（child 路径 factory 只传 gate 不传 builder，漏这行
+            # 会让 child 摘要绕过「进程级在飞 ≤N」）。
+            model_call_gate=model_call_gate,
         )
         if context_builder is not None and context_providers:
             # 双入口注入按身份去重：同一 provider 实例已在 builder 列表里时跳过

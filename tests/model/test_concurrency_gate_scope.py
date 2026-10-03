@@ -195,6 +195,11 @@ async def test_child_factory_and_fallback_coordinator_share_gate(tmp_path):
         grantable={tool.name for tool in runtime.registry.list()},
     )
     assert child._model_call_gate is gate, "child runtime 与根共享同一闸"
+    # child 的内建 ContextBuilder（factory 未注入 context_builder 时走 runtime
+    # 兜底构造）也必须接同一闸——否则 child 摘要绕过进程级在飞上限。
+    assert child._context_builder.model_call_gate is gate, (
+        "child 内建 ContextBuilder 与根共享同一闸"
+    )
     assert runtime._new_coordinator()._gate is gate, "per-run coordinator 与根共享同一闸"
 
 
