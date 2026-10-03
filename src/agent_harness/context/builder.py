@@ -246,6 +246,7 @@ class ContextBuilder:
         artifact_read_tool_name: str | None = None,
         summary_model: Any | None = None,
         plan_reinject_every_messages: int = 6,
+        model_call_gate: Any | None = None,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
@@ -258,6 +259,9 @@ class ContextBuilder:
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（既有行为逐字节等价）；
         # 档位选择留配置面（后续票），本层只透传给 compactor。
         self.summary_model = summary_model
+        # #559：摘要调用与主循环同闸（进程级在飞 ≤N）；None = 不过闸（既有
+        # 行为逐字节等价），只透传给 compactor。
+        self.model_call_gate = model_call_gate
         self.max_context_tokens = max_context_tokens
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
@@ -488,6 +492,7 @@ class ContextBuilder:
             auto_compact_threshold=self.auto_compact_threshold,
             hard_guard_threshold=self.hard_guard_threshold,
             summary_model=self.summary_model,
+            model_call_gate=self.model_call_gate,
         )
         try:
             result = await compactor.compact(

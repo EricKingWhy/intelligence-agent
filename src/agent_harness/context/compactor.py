@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
@@ -18,6 +19,7 @@ from langchain_core.messages import (
 )
 
 from agent_harness.context.tokens import estimate_message_tokens
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.derive import (
     COMPACTION_SUMMARY_MESSAGE_NAME,
@@ -152,7 +154,8 @@ class ContextCompactor:
                  hard_guard_threshold: float = 0.85,
                  keep_recent_tokens: int = 20_000,
                  summary_timeout_seconds: float = 30.0,
-                 summary_model: Any | None = None) -> None:
+                 summary_model: Any | None = None,
+                 model_call_gate: ModelCallGate | None = None) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("invalid context budget")
         if summary_timeout_seconds <= 0:
@@ -160,6 +163,10 @@ class ContextCompactor:
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（装配前的既有行为逐字节
         # 等价）。便宜档选择本身留在配置面（后续票），本层只负责"用谁摘要"。
         self._model = summary_model if summary_model is not None else model_provider
+        # #559：摘要调用与主循环同闸（进程级在飞 ≤N）。None = 不过闸（既有行为
+        # 逐字节等价）。槽位在 timeout **外面**取——排队等闸的时间不计入摘要
+        # 预算，与主循环"闸包在看门狗外面"同一原则（model/concurrency.py）。
+        self._gate = model_call_gate
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
         self.keep_recent_tokens = keep_recent_tokens
@@ -168,6 +175,15 @@ class ContextCompactor:
         self._summary_timeout = summary_timeout_seconds
         self._max_context_tokens = max_context_tokens
         self.reserve = max(int(max_context_tokens * 0.15), 16384)
+
+    def _slot(self):
+        """取一个**新**的摘要槽位（每次尝试各取一次；None = 不过闸）。
+
+        `ModelCallGate.slot()` 是 `@asynccontextmanager` 产物，**一次性**（同
+        fallback coordinator 的教训，见 model/fallback.py `_slot`）；取消路径
+        由 slot 的 finally 归还 permit。
+        """
+        return self._gate.slot() if self._gate is not None else nullcontext(None)
 
     async def compact(
         self,
@@ -229,7 +245,9 @@ class ContextCompactor:
         compacted: list[AnyMessage] | None = None
         for attempt in (1, 2):
             try:
-                async with asyncio.timeout(self._summary_timeout):
+                # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（30s 是
+                # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
+                async with self._slot(), asyncio.timeout(self._summary_timeout):
                     response = await self._model.ainvoke(request)
                 if not isinstance(response, AIMessage) or response.tool_calls:
                     raise _SummaryRejected(

@@ -23,6 +23,7 @@ from agent_harness.capability.base import (
 )
 from agent_harness.capability.config import ProviderConfig
 from agent_harness.config import Settings
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.sandbox import WorkspaceRegistry
 
 if TYPE_CHECKING:
@@ -65,6 +66,13 @@ class CapabilityWiring:
     memory_formation: Any | None = None
     #: Shared V2 authority/index service for recall, commands, and governance routes.
     memory_v2: Any | None = None
+    #: 进程级模型并发闸（#89 / #559 修复）：闸的语义是「全局在飞模型调用数」，
+    #: 归属**装配生命周期**（wiring 是一次装配的产物与 lifecycle owner）——同一
+    #: 进程内 web / CLI 各自装配一次，所有 build_runtime（跨 Session / child /
+    #: fallback / 摘要）经这里共享同一实例。由 `wire_capabilities` 建一次；
+    #: 手搓 `CapabilityWiring()`（无装配生命周期）时保持 None，build_runtime
+    #: 退回每次新建（历史行为）。
+    model_call_gate: ModelCallGate | None = None
     # 通用生命周期对象（提供 aclose()）：如 MCP 连接管理（Phase 8）；由 aclose 关闭。
     lifecycle: list[Any] = field(default_factory=list)
     # Multi-Agent（Phase 13，ADR-0015）：delegate 工具已进 tools，但其依赖
@@ -651,6 +659,9 @@ async def wire_capabilities(
     `get_wiring` / `assemble_wiring`）各自把手上的 store 传进来。
     """
     wiring = CapabilityWiring()
+    # 进程级模型并发闸（#89 / #559）：与 capability 配置无关、恒创建——闸是
+    # 装配生命周期的成员，不是某个 capability 的产物；limit 来自同一份 settings。
+    wiring.model_call_gate = ModelCallGate(settings.model_max_concurrency)
     for name, cfg in config.items():
         entry = _BUILTIN_WIRING.get(name)
         if entry is None:

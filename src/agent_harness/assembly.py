@@ -281,9 +281,13 @@ async def build_runtime(
         fallback_model = create_chat_model(
             config.fallback, reasoning_effort=reasoning_effort,
         )
-    # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
-    # 同一实例（全局在飞模型调用数的语义）。
-    model_call_gate = ModelCallGate(settings.model_max_concurrency)
+    # 进程级模型并发闸（#89 / #559 修复）：闸实例归 wiring（装配生命周期）所有，
+    # 同一进程内所有 build_runtime 共享同一实例（全局在飞模型调用数的语义——
+    # 跨 Session / child / fallback / 摘要一致）。手搓 wiring（直接
+    # CapabilityWiring()，无装配生命周期）保持 None ⇒ 退回每次新建，行为同历史。
+    model_call_gate = wiring.model_call_gate
+    if model_call_gate is None:
+        model_call_gate = ModelCallGate(settings.model_max_concurrency)
 
     # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
     # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
@@ -488,6 +492,8 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            # #559：摘要调用与主循环同闸（进程级在飞 ≤N 的语义，见上）。
+            model_call_gate=model_call_gate,
             # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
             plan_reinject_every_messages=settings.plan_reinject_every_messages,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选
