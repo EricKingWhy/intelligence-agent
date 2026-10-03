@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,26 @@ import yaml
 #: 超大文件会在 wiring 期打爆内存——tool 层的 64K 正文截断发生在完整读盘之后，
 #: 拦不住读入阶段。
 SKILL_FILE_MAX_BYTES = 1_000_000
+
+#: name 白名单（#588）：小写字母/数字开头，其后可含连字符/下划线（对齐本仓已注册
+#: 工具名惯例：load_skill / retrieve_knowledge；MCP `_NAME_PATTERN` 同族），换行、
+#: 控制符、空白、大写全在集合外。64 上限与 Pi（skills.ts MAX_NAME_LENGTH）和
+#: Agent Skills 规范一致。方案依据：#588 issue 评论（协议 §1.3，Pi + agentskills.io）。
+SKILL_NAME_MAX_LENGTH = 64
+_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-_]*")
+
+#: 目录行 / ToolResult message 是**单行声明面**（#588 兜底层）。
+_LINE_BREAKERS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def single_line(text: str) -> str:
+    """把换行与控制符压成空格，保证插值点不被字段内容拉成多行。
+
+    入口白名单只覆盖 name（解析期拒绝）；description / when_to_use 是自由文本，
+    load_skill 失败路的 `args.name` 更是**模型原始输入**（未名即失败、不经
+    discovery）——插值前在此单行化。是兜底，不替代入口校验。
+    """
+    return _LINE_BREAKERS.sub(" ", text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +124,14 @@ def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str
     when_to_use = meta.pop("when_to_use", None)
     if not isinstance(name, str) or not name.strip():
         errors.append(f"{path}: frontmatter requires non-empty 'name'")
+    elif not _NAME_PATTERN.fullmatch(name) or len(name) > SKILL_NAME_MAX_LENGTH:
+        # #588：多行/控制符 name 会插值进 ToolResult message 与 catalog 目录行，
+        # 把单行声明拉成多行、可伪造后续行的"系统语气"——入口整体拒绝，进 errors
+        # 可观察（ADR-0011 Q1 同款通道）。repr 转义保证错误行自身仍是单行。
+        errors.append(
+            f"{path}: invalid skill name (must match ^[a-z0-9][a-z0-9-_]*$, "
+            f"max {SKILL_NAME_MAX_LENGTH} chars, single line; got {name!r})"
+        )
     if not isinstance(description, str) or not description.strip():
         errors.append(f"{path}: frontmatter requires non-empty 'description'")
     if errors:

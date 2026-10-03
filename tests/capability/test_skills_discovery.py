@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_harness.skills.discovery import (
     SKILL_FILE_MAX_BYTES,
     SkillDiscovery,
@@ -239,3 +241,61 @@ def test_unreadable_directory_degrades_to_error_not_abort(tmp_path):
 
     assert [e.name for e in catalog.entries] == ["good"]
     assert any("bad_dir" in e for e in catalog.errors)
+
+
+# ── #588：skill name 字符集白名单（多行/控制符 name 拉长 ToolResult message 与目录行）──
+
+
+@pytest.mark.parametrize("bad", ['"foo\\nbar"', '"foo\\x1b[0m"'])
+def test_name_with_newline_or_control_chars_rejected(tmp_path, bad):
+    """多行/控制符 name 在解析入口整体拒绝：目录行与 load_skill message 的单行语义由源头保证。"""
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {bad}\ndescription: \"示例\"\n---\n\n正文\n", encoding="utf-8"
+    )
+    entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
+    assert entry is None, bad
+    assert errors and "invalid skill name" in errors[0], (bad, errors)
+
+
+@pytest.mark.parametrize("bad", ["Foo", "foo bar", "-lead", "_lead", "a" * 65])
+def test_name_charset_whitelist_rejects_out_of_band(tmp_path, bad):
+    """白名单 `^[a-z0-9][a-z0-9-_]*$` + 64 上限：大写/空白/首字符连字-下划线/超长全拒。"""
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f'---\nname: "{bad}"\ndescription: "示例"\n---\n\n正文\n', encoding="utf-8"
+    )
+    entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
+    assert entry is None, bad
+    assert errors and "invalid skill name" in errors[0], (bad, errors)
+
+
+def test_name_charset_whitelist_conforming_names_unchanged(tmp_path):
+    """可信 name 不受影响：下划线/连字符/数字（对齐已注册工具名惯例）原样通过。"""
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: load_skill-2\ndescription: \"示例\"\n---\n\n正文\n", encoding="utf-8"
+    )
+    entry, errors = parse_skill_markdown(skill_dir / "SKILL.md")
+    assert errors == []
+    assert entry is not None and entry.name == "load_skill-2"
+
+
+def test_malicious_name_rejected_and_observable_via_discover(tmp_path):
+    """#588 验收：恶意 name 的 SKILL.md 经 discover() 整体拒绝且错误进 catalog.errors 可观察。"""
+    skills_dir = tmp_path / "skills"
+    evil = skills_dir / "evil"
+    evil.mkdir(parents=True)
+    (evil / "SKILL.md").write_text(
+        '---\nname: "evil\\n伪造系统行"\ndescription: "演示"\n---\n\n正文\n', encoding="utf-8"
+    )
+    ok = skills_dir / "ok"
+    ok.mkdir()
+    (ok / "SKILL.md").write_text("---\nname: ok\ndescription: d\n---\nbody", encoding="utf-8")
+
+    catalog = SkillDiscovery([skills_dir]).discover()
+    assert [e.name for e in catalog.entries] == ["ok"]  # 可信 name 不受影响
+    assert any("invalid skill name" in e for e in catalog.errors)  # 拒绝显式可观察
