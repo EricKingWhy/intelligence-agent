@@ -74,6 +74,12 @@ class ManagedRun:
         # "逻辑 run 还没完，只是让位给 ceiling"（决定要不要接力投递下一条排队输入）。
         self.paused = False
         self.reap_requested = False
+        # W-22（#366）：本 run 是否纳入产品客户端在场协议（launch 时定，单向）。
+        # True ⇒ 孤儿回收计时器到期不再取消（那会走 run/failed(orphaned)），而是
+        # 置 runtime 的缺席闸门，由循环顶准入点以 run/paused(client_absent) 收口
+        # （`02 §5.2.1`）。False（默认）⇒ 旧语义逐字不变（`11 §6.2`：协议只接管
+        # 明确登记的 Task；登记入口属 W-12 的注册协议）。
+        self.presence_managed = False
         # #550：已有取消请求在途（公开 cancel / 孤儿回收 / 关停任一来源置位）。
         # 重复 cancel 不得再 task.cancel()——第二次注入会把 CancelledError 重新
         # 抛进第一次取消正在进行的收尾臂（shield 不消除 caller 收到的取消），
@@ -216,6 +222,24 @@ class ManagedRun:
             # `reap_requested` 会把 reason 翻成 orphaned（实为用户取消），且
             # 违背"重复取消不得再注入"不变量。run 正在收尾，回收也无必要。
             return
+        if self.presence_managed:
+            # W-22（#366）：在场管理 run 的宽限到期**不取消**——取消会把
+            # CancelledError 注进在途 Tool（盲中止副作用），并走
+            # run/failed(orphaned) 旧路径。这里只置缺席闸门：runtime 在下一个
+            # 循环顶准入点阻止新的 model/tool/child 步骤，在途 Tool 按现有
+            # Operation Ledger 收口后，以 run/paused(client_absent) 停在稳定
+            # 边界（`02 §5.2.1`；UNKNOWN 时 reconcile 闸门优先，见
+            # `_terminal_paused`）。已收口的 run（runtime 已在 `_drive` 收尾
+            # 释放 / task 已 done）上这是无害 no-op——「已经 paused 时又收到
+            # 离开事件」不双写（闸门只在循环顶被读，而那个循环已经结束）。
+            if self.runtime is not None:
+                self.runtime.client_presence.mark_absent()
+            logger.info(
+                "产品客户端缺席成立（session=%s，零订阅者超过 %.0fs）——"
+                "交 runtime 准入点以 client_absent 暂停收口",
+                self.session.session_id, self._manager.disconnect_grace_seconds,
+            )
+            return
         logger.warning(
             "run 孤儿回收（session=%s，零订阅者超过 %.0fs）",
             self.session.session_id, self._manager.disconnect_grace_seconds,
@@ -302,6 +326,7 @@ class RunManager:
     def launch(
         self, session: Session, runtime: AgentRuntime, user_input: str | None,
         user_input_metadata: dict[str, Any] | None = None,
+        presence_managed: bool = False,
     ) -> tuple[ManagedRun, Subscriber]:
         """启动 detached run 并返回（run, 首个订阅者）。
 
@@ -311,6 +336,11 @@ class RunManager:
 
         ``user_input=None``（`#312` 同 run 续跑，无新任务文本）原样透传：
         由 runtime 决定"不落 user/message"——本层不替它编文案。
+
+        ``presence_managed=True``（W-22 `#366`）：把本 run 纳入产品客户端在场
+        协议——登记 runtime 的在场闸门，孤儿回收改走 client_absent 暂停（见
+        `_reap_if_orphaned`）。生产装配里今天没有调用方传 True（登记协议与
+        30s 宽限配置属 W-12）；默认 False = 旧语义逐字不变。
         """
         # #341：关停窗口内拒绝开新 run——进程马上没了，新 run 只会被半个
         # 生命周期地拖死（与 `_notify_run_terminal` 的 `_closing` 跳同一口径）。
@@ -321,6 +351,9 @@ class RunManager:
         # builder 读最近一次 build 快照（launch 时刻 builder 还没 build 过，
         # _token_estimate_total=0 是诚实的"未 build"信号）。
         run.runtime = runtime
+        run.presence_managed = presence_managed
+        if presence_managed:
+            runtime.client_presence.enroll()
         self._runs[session.session_id] = run
         run.task = asyncio.create_task(
             self._drive(run, runtime, user_input, user_input_metadata),
