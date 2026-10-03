@@ -6973,3 +6973,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **红→绿**：JSONL 注入含 lone surrogate 的 legacy 事件。修复前 GET `/api/sessions/{id}/stream` 返回 200 / `text/event-stream`，随后 `UnicodeEncodeError` 令 chunked body 中断；修复后 body 完整、严格 UTF-8 解码成功、两帧结构和 seq 保留，中文/emoji 首帧字节与旧序列化逐字节一致；live helper 的 surrogate 单测也通过。
 - **读数**：`tests/web/test_web_stream.py` + `tests/web/test_event_envelope.py`：18 passed；三处改动文件 `ruff check` 通过；`git diff --check` 通过。
 - **状态**：#590 代码与 focused 验收完成；批次冻结后的双轴审查和全量门禁待执行；未 push / PR / merge。
+
+## 2026-10-03 · 第二条线 #591 WS 消息字节上限（分支 `fix/i590-i591-i569-i553-wire-errors`，base `e25828aa`）
+
+- **方案依据与裁决**：双源机制、契合点、REUSE 判定及 A/B/C 比较见 #591 issuecomment-5968194467；用户选择 A，裁决记录见 issuecomment-5968233034。应用层复用 HTTP `BODY_MAX_BYTES`（1 MiB），在 ASGI 交付完整消息后、深度扫描与 JSON 解析前拒绝；server 组装消息的内存边界不属于本票验收。
+- **代码笔 `192c1362f1968ef18841bea5abbf7cd1c46df197`**：`websocket.py` 在 `receive_text()` 后将 UTF-8 字节编码复用给字节上限与既有深度守卫；超限发固定 WS error 并继续读下一消息；`wire_safety.py` 增加共享上限对应的固定错误文案。
+- **红→绿**：修前 `limit+1` 合法 ASCII ping 和字符数低于上限但 UTF-8 字节超限的中文 ping 均被解析并回 `pong`（2 failed）；恰好 1 MiB 边界用例修前已放行。修后两类超限帧都回固定 error，连接继续 ping→pong，`events.jsonl` 字节不变，恰好 1 MiB 仍回 `pong`。
+- **读数**：`tests/web/test_wire_input_hardening.py`：31 passed；三处变更文件 ruff clean；`git diff --check` 通过。
+- **状态**：#591 代码与 focused 验收完成；批次冻结后的双轴 code review 和全量门禁待执行；未 push / PR / merge。
