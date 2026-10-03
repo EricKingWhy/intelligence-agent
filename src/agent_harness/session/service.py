@@ -112,6 +112,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
@@ -168,6 +169,7 @@ from agent_harness.session.model_switch import (
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
+    EventLogIntegrity,
     JsonlSessionStore,
     SessionSummaryStats,
     WorkspaceRef,
@@ -1794,7 +1796,10 @@ class SessionService:
     ) -> LaunchRunBudget:
         """阶段一（锁内只读）：校验恢复声明并算出续跑账本，**不写任何东西**。"""
         async with self._resume_lock(session_id):
-            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            events, integrity = await anyio.to_thread.run_sync(
+                self._store.read_events_report, session_id
+            )
+            self._raise_if_event_log_corrupt(session_id, integrity)
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, _ = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
@@ -1834,7 +1839,10 @@ class SessionService:
         把同一枚聚合交给 runtime。
         """
         async with self._resume_lock(session_id):
-            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            events, integrity = await anyio.to_thread.run_sync(
+                self._store.read_events_report, session_id
+            )
+            self._raise_if_event_log_corrupt(session_id, integrity)
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, evidence = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
@@ -2784,6 +2792,41 @@ class SessionService:
 
     # ── 恢复 ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _raise_if_event_log_corrupt(session_id: str, integrity: EventLogIntegrity) -> None:
+        """#565：events.jsonl 完整性闸门——恢复入口对损坏日志拒绝继续。
+
+        三类（`EventLogCorruptError` docstring）：完整坏行 / seq 断层 / seq 重复。
+        文案带**脱敏定位**（行号 / 字节偏移 / 长度 / sha256 / reason，不含行内容）；
+        原字节保留在文件里未动，修复是人工动作。本错误**不可重试**：重读同一
+        文件无用——与写时 `SeqConflict`（可重读快照重试）在语义上分开。
+        """
+        if integrity.healthy:
+            return
+        parts: list[str] = []
+        for record in integrity.corrupt_lines:
+            parts.append(
+                f"损坏行 lineno={record.lineno} offset={record.byte_offset} "
+                f"len={record.byte_length} sha256={record.line_sha256} "
+                f"reason={record.reason}"
+            )
+        for lo, hi in integrity.seq_gaps:
+            parts.append(f"seq 断层 {lo}-{hi}" if lo != hi else f"seq 缺号 {lo}")
+        for seq in integrity.seq_duplicates:
+            parts.append(f"seq 重复 {seq}")
+        # 文案封顶（P3 残余修复）：千行全坏的文件会把无界拼接变成数十 KB 的
+        # 409 detail（撑爆错误弹窗、进不了日志检索）。文案只带前 cap 条 +
+        # 总条数——完整定位记录本就在 store WARNING 日志里，一条不少。
+        cap = 5
+        detail = "；".join(parts[:cap])
+        if len(parts) > cap:
+            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志与完整性报告）"
+        raise EventLogCorruptError(
+            f"Session '{session_id}' 事件日志损坏，恢复已拒绝：{detail}。"
+            "请按 store WARNING 日志的定位记录核对原字节后人工修复文件；修复前"
+            "恢复入口保持拒绝（本错误不可重试）"
+        )
+
     async def recover(
         self,
         session_id: str,
@@ -2810,11 +2853,15 @@ class SessionService:
 
         self._validate_session_id(session_id)
         await self._ensure_stores()
-        existing = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        if not existing:
+        if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # 全坏日志（零可解析事件 + 有损坏行）报 409 损坏而非 404（P3 残余修复，
+        # BUG-011 同型）：「存在但全坏」不是「没有这个会话」，404 会把事实丢失
+        # 掩蔽成不存在，引导重建而不是修复。真 404（文件不存在 / 空文件零损坏）不变。
+        self._raise_if_event_log_corrupt(session_id, integrity)
 
         # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
         normalized: dict[str, ReconcileVerdict] = {}
@@ -3154,11 +3201,16 @@ class SessionService:
         from agent_harness.session.fork import ForkBoundaryError, fork_session
 
         self._validate_session_id(session_id)
-        existing = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        if not existing:
+        if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # fork 是状态物化入口（P3 残余修复）：seed 逐字成为 child 的 durable
+        # 历史（child 自包含、不依赖父存活），前缀坏行的事实缺口会被**永久
+        # 物化**——与 recover/resume 同一闸门。replay/显示路径不装闸门是
+        # #565 既定设计（容错读不 brick 显示，损坏有 WARNING 信号）。
+        self._raise_if_event_log_corrupt(session_id, integrity)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run; fork needs settled history")
         await self._ensure_stores()
