@@ -428,3 +428,113 @@ def test_ws_legal_frame_shapes_are_not_harmed(tmp_path: Path) -> None:
     for got in (msg_err, cancel):
         # 放行的判据：拿到的是业务回声，而不是深度配额串（误伤会回配额串）。
         assert got.get("message") != _EXPECTED_QUOTA_DETAIL, got
+
+
+# ── 7. HTTP body **体积**配额：1 MiB ⇒ 超限 413（#562 残余；用户 2026-10-03 拍板）─
+#
+# 取值依据（成熟产品默认值）：nginx ``client_max_body_size`` 默认 ``1m`` —— 当前最广
+# 部署的入站体积默认值；同族对照 Express body-parser **100kb** / gRPC **4MB** /
+# AWS API Gateway **10MB** / ASP.NET Kestrel **~30MB** ⇒ 取其中最保守的 1 MiB。
+#
+# 为什么是 **413** 而不是 422：422 在本仓的语义是「*能解析、但内容不合契约」"
+# （pydantic 出口 + 深度配额）。体积越界根本不该进解析，语义是 HTTP 标准的
+# `413 Content Too Large`。两条 detail 字符串**必须不同**，否则两条判别式会串味。
+#
+# 与深度守卫同一条中间件、同一种信封形状：**解析前**在原始字节上判，回固定字符串。
+
+_EXPECTED_TOO_LARGE_DETAIL = "request body too large (limit 1048576 bytes)"
+_BODY_MAX_BYTES = 1024 * 1024
+
+
+def _big_body(size: int) -> bytes:
+    """构造总字节数**恰为** ``size`` 的 body（合法 JSON 外壳 + 填充）。"""
+    assert size >= 8
+    body = b'{"n":"' + b"a" * (size - 8) + b'"}'
+    # 自证：夹具产出的字节数必须等于请求值（手工算错当场红，而非静默改判据）。
+    assert len(body) == size, len(body)
+    return body
+
+
+def _is_quota_413(resp) -> bool:
+    """体积守卫命中的判别式：413 + ``detail`` 是等于配额的**字符串**信封。"""
+    return (
+        resp.status_code == 413
+        and resp.json().get("detail") == _EXPECTED_TOO_LARGE_DETAIL
+    )
+
+
+def test_too_large_detail_string_is_stable() -> None:
+    """实现常量必须等于测试钉住的字符串契约 + 字节上限（单边改名/改值 ⇒ 此例红）。"""
+    from agent_harness.web.wire_safety import BODY_MAX_BYTES, BODY_TOO_LARGE_DETAIL
+
+    assert BODY_MAX_BYTES == _BODY_MAX_BYTES
+    assert BODY_TOO_LARGE_DETAIL == _EXPECTED_TOO_LARGE_DETAIL
+
+
+@pytest.mark.parametrize("size", [_BODY_MAX_BYTES + 1, 4 * _BODY_MAX_BYTES])
+def test_body_over_limit_is_413_quota(tmp_path: Path, size: int) -> None:
+    """``limit+1`` 与 ``4×limit`` 都必须 **413**（不是 400 / 422 / 500），且是配额信封。"""
+    client = _client(tmp_path)
+    resp = _post_raw(client, "/api/sessions?launch=false", _big_body(size))
+    assert resp.status_code == 413, f"size={size} {resp.status_code} {resp.text[:200]}"
+    assert _is_quota_413(resp), f"size={size} {resp.text[:200]}"
+
+
+def test_body_at_limit_passes_size_guard(tmp_path: Path) -> None:
+    """恰为 ``limit`` 的 body **不得**被体积守卫拒：落到 pydantic ⇒ ``detail`` 是数组。
+
+    口径 = 「``> limit`` 拒、``== limit`` 放行」，与深度口径（≤100 放行）一致。
+    """
+    client = _client(tmp_path)
+    resp = _post_raw(client, "/api/sessions?launch=false", _big_body(_BODY_MAX_BYTES))
+    assert resp.status_code == 422, f"{resp.status_code} {resp.text[:200]}"
+    assert isinstance(resp.json()["detail"], list), resp.text[:200]
+
+
+def test_body_size_rejection_has_no_side_effects(tmp_path: Path) -> None:
+    """超限 body 被拒 ⇒ 不得建会话目录（入口拒绝且无副作用）。"""
+    client = _client(tmp_path)
+    before = _session_dirs(tmp_path)
+    resp = _post_raw(client, "/api/sessions?launch=false", _big_body(_BODY_MAX_BYTES + 1))
+    assert _is_quota_413(resp), resp.text[:200]
+    assert _session_dirs(tmp_path) == before
+
+
+def test_body_size_guard_counts_accumulated_bytes_not_content_length() -> None:
+    """**无任何 header**（故无 ``Content-Length``）的分块 body 同样被拒 —— 判据是累计字节数。
+
+    直接驱动 ASGI 中间件：``headers`` 为空、body 分 20 块送（共 1.25 MiB）。若实现改成
+    只看 ``Content-Length``，本例如期变红（无 header ⇒ 恒放行）。顺带钉住**短路**：下游
+    app 被调到即断言失败 ⇒ 超限必须在到达应用之前回包。
+    """
+    import asyncio
+
+    from agent_harness.web.wire_safety import BodyDepthGuardMiddleware
+
+    async def downstream(scope, receive, send):  # pragma: no cover - 不应被调到
+        raise AssertionError("超限必须在下游应用之前短路")
+
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    chunk = b"a" * 65536
+    chunks = iter([chunk] * 20)  # 20 × 64 KiB = 1.25 MiB > 1 MiB，且无 Content-Length
+
+    async def receive() -> dict:
+        try:
+            piece = next(chunks)
+        except StopIteration:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": piece, "more_body": True}
+
+    middleware = BodyDepthGuardMiddleware(downstream)
+    scope = {"type": "http", "method": "POST", "path": "/x", "headers": []}
+    asyncio.run(middleware(scope, receive, send))
+
+    start = sent[0]
+    assert start["type"] == "http.response.start", sent
+    assert start["status"] == 413, start
+    payload = b"".join(m["body"] for m in sent if m["type"] == "http.response.body")
+    assert _EXPECTED_TOO_LARGE_DETAIL.encode("utf-8") in payload, payload

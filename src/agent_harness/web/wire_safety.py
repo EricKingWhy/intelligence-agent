@@ -189,6 +189,16 @@ BODY_TOO_DEEP_DETAIL = "request body nesting too deep"
 #: 深度定义：最深路径上的容器（object + array）层数，**最外层 body 容器记 1**。
 BODY_MAX_DEPTH = 100
 
+#: 请求体**字节**上限（#562 残余；用户 2026-10-03 拍板 1 MiB）。取值依据是成熟产品的
+#: 入站体积默认值：nginx ``client_max_body_size`` 默认 ``1m``（当前最广部署的默认值），
+#: 同族对照 Express body-parser **100kb** / gRPC **4MB** / AWS API Gateway **10MB** /
+#: ASP.NET Kestrel **~30MB** ⇒ 取其中最保守的 1 MiB。
+BODY_MAX_BYTES = 1024 * 1024
+
+#: 体积配额 413 的**固定字符串**信封。与 ``BODY_TOO_DEEP_DETAIL`` 形状同、**串不同**
+#: —— 两条判别式必须互不串味（测试依赖固定串）。上限写进文案，便于调用方自纠。
+BODY_TOO_LARGE_DETAIL = f"request body too large (limit {BODY_MAX_BYTES} bytes)"
+
 _OPEN_BYTES = frozenset(b"{[")
 _CLOSE_BYTES = frozenset(b"}]")
 
@@ -228,7 +238,7 @@ def json_container_depth(raw: bytes) -> int:
 
 
 class BodyDepthGuardMiddleware:
-    """纯 ASGI 中间件：请求体 JSON 嵌套深度配额（#562 RL-04）。
+    """纯 ASGI 中间件：请求体**两个**配额 —— 嵌套深度（#562 RL-04）与字节体积（#562 残余）。
 
     **为什么必须在解析前的 ASGI 层**（recon562 §1.3）：FastAPI 深嵌套 body 在
     ``fastapi/routing.py`` 的 ``json.loads`` 处抛 ``RecursionError``，被该模块的
@@ -237,13 +247,28 @@ class BodyDepthGuardMiddleware:
     且等到 handler 触发时，解析代价（爆栈风险）已经付过。先在原始字节上数深度、
     超限即回固定字符串 422，语义是「显式配额拒绝，而非拒绝时崩溃」。
 
+    两个配额同一条中间件、同一种信封形状，但**语义与状态码不同**：
+
+    - **深度**越界 ⇒ ``422``：请求*能*解析，只是内容不合契约（与 pydantic 出口同码）。
+    - **体积**越界 ⇒ ``413``（HTTP 标准的 ``Content Too Large``）：根本不该进解析。
+
+    体积判据是**累计字节数**，不是 ``Content-Length``——该头可缺失、可撒谎（分块
+    传输尤其如此），且累计判能在越界处**即时停读**，不会把整个超大 body 缓冲完。
+
     与既有 CSP/Auth 同款「纯 ASGI、不经 BaseHTTPMiddleware」：读原始 body → 回放
     给下游 → 只读不写、除缓冲外无副作用。
     """
 
-    def __init__(self, app: Any, *, max_depth: int = BODY_MAX_DEPTH) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        max_depth: int = BODY_MAX_DEPTH,
+        max_bytes: int = BODY_MAX_BYTES,
+    ) -> None:
         self.app = app
         self.max_depth = max_depth
+        self.max_bytes = max_bytes
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -257,6 +282,13 @@ class BodyDepthGuardMiddleware:
                 # http.disconnect：客户端已断开，无法也不需再回包。
                 return
             body += message.get("body", b"")
+            if len(body) > self.max_bytes:
+                # 体积先于深度：早停读更省，且超大 body 不该先做一次全量扫描。
+                response = JSONResponse(
+                    status_code=413, content={"detail": BODY_TOO_LARGE_DETAIL}
+                )
+                await response(scope, receive, send)
+                return
             if not message.get("more_body", False):
                 break
 
