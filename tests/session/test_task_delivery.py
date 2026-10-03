@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session.event import (
     RUN_COMPLETED,
@@ -17,7 +19,9 @@ from agent_harness.session.event import (
     TASK_ACCEPTANCE_REVISED,
     TASK_ACCEPTED,
     TASK_DEFINED,
+    USER_MESSAGE,
 )
+from agent_harness.session.fork import fork_session
 from agent_harness.session.task import (
     apply_acceptance,
     apply_acceptance_release,
@@ -26,6 +30,7 @@ from agent_harness.session.task import (
     apply_verification,
     derive_task_state,
 )
+from agent_harness.storage.sqlite import SqliteSessionMetaStore
 
 
 def _session(tmp_path) -> Session:
@@ -247,3 +252,37 @@ def test_session_without_task_definition_has_no_task_state(tmp_path) -> None:
     state = derive_task_state(session.events)
     assert not state.defined
     assert state.product_state == ""  # 未定义任务：无交付状态可言（REST 404 语义）
+
+# ── Fork：接受事实随事件前缀继承，fork 后父子独立（票面 AC「Fork 独立接受」）──
+
+
+@pytest.mark.asyncio
+async def test_fork_independent_acceptance(tmp_path) -> None:
+    store = JsonlSessionStore(root=tmp_path)
+    parent = Session.start(store, session_id="parent", cwd=str(tmp_path))
+    apply_task_definition(parent, task_text="T", criteria=[{"text": "A"}])
+    item_id = _criteria(derive_task_state(parent.events))[0]
+    apply_verification(parent, item_id, "passed")
+    # fork 边界必须是用户消息（fork 契约）：验证事实之后用户要求分叉重试
+    parent.append(USER_MESSAGE, {"content": "分一条支线重试"})
+    anchor = parent.events[-1].seq
+
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    child = await fork_session(
+        store, meta, "parent", boundary_user_message_seq=anchor,
+        child_session_id="child",
+    )
+
+    # child 的 seed 里有同一份定义/验证事实（重放重建成立）
+    child_state = derive_task_state(child.events)
+    assert child_state.defined and child_state.acceptance is None
+    assert child_state.verification[item_id].value == "passed"
+    # child 里接受：只写 child 的事件流
+    assert apply_acceptance(child, "accepted", expected_version=0).ok
+    assert derive_task_state(child.events).product_state == "accepted"
+    # 父零写入（spec 03 §7：fork 后父子独立）
+    parent_state = derive_task_state(store.read_events("parent"))
+    assert parent_state.acceptance is None
+    assert parent_state.version == 0
+    assert parent_state.product_state == "deliverable"

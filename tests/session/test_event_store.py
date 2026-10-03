@@ -74,6 +74,13 @@ class TestSessionEventDTO:
             # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
             # 硬校验在 session/plan.py）。
             "task/plan_updated",
+            # W-07 (#351)：Task / 验证 / 接受三轴事实（状态事件，不投影成消息；
+            # handler 硬校验与投影在 session/task.py）。
+            "task/defined",
+            "task/acceptance-revised",
+            "verification/updated",
+            "task/accepted",
+            "task/acceptance-released",
             "memory/degraded",
             "tool/failure-guard",
             "model/fallback",

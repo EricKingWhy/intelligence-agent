@@ -1120,6 +1120,18 @@ class SessionService:
             cwd=workspace,
         )
 
+        # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
+        # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
+        # （session/started 已有单源锚）；验收清单缺省为空，Agent 稍后经
+        # task/acceptance-revised 提出。空白任务维持既有行为照常起跑，只是没有
+        # 可定义的任务——定义缺失由投影如实可见（GET /task → 404）。
+        task_outcome = apply_task_definition(session, task_text=task)
+        if not task_outcome.ok:
+            logger.warning(
+                "create_and_launch：task 文本未通过 task/defined 形状校验（%s），"
+                "跳过任务定义，会话照常启动",
+                task_outcome.reason,
+            )
         # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
         # "先建会话再 attach"）。只对**显式选定了目录**的会话做：未命名/未给 cwd 时目录是
         # workspaces_root/<session_id>（"用户没选项目"的实现痕迹），把它注册成项目会

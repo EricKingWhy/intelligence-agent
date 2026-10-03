@@ -30,6 +30,8 @@ def client(tmp_path, monkeypatch):
 
     from agent_harness.session.runmanager import RunManager, Subscriber
 
+    launched: list = []
+
     class _FakeRun:
         task = None
 
@@ -37,6 +39,7 @@ def client(tmp_path, monkeypatch):
             pass
 
     def _fake_launch(self, session, runtime, user_input, user_input_metadata=None):
+        launched.append(session)
         sub = Subscriber()
         sub.queue.put_nowait(self.DONE)
         return _FakeRun(), sub
@@ -50,6 +53,7 @@ def client(tmp_path, monkeypatch):
         enable_cors=False,
     )
     app = create_app(settings, enable_cors=False)
+    app.state._launched_sessions = launched
     return TestClient(app), app
 
 
@@ -304,3 +308,35 @@ class TestGetTaskRebuildsFromEvents:
         second = client.get(f"/api/sessions/{session_id}/task").json()
         assert first == second
         assert first["task"]["product_state"] == "accepted"
+
+class TestCreationPathWiring:
+    def test_create_with_task_appends_definition(self, client):
+        """票面 AC「真实现有 run 接入」：创建带任务的会话 → task/defined 落盘，
+        Task 身份 = Session ID（一 Task 多 Run 的第一根锚）。"""
+        client, app = client
+        resp = client.post("/api/sessions", json={"task": "把登录页修好"})
+        assert resp.status_code == 200, resp.text
+        session = app.state._launched_sessions[0]
+        events = app.state.agent.store.read_events(session.session_id)
+        defined = [e for e in events if e.type == "task/defined"]
+        assert len(defined) == 1
+        assert defined[0].data["task_text"] == "把登录页修好"
+        got = client.get(f"/api/sessions/{session.session_id}/task")
+        assert got.status_code == 200, got.text
+        payload = got.json()["task"]
+        assert payload["task_text"] == "把登录页修好"
+        assert payload["criteria"] == [], "验收清单缺省为空，Agent 稍后提出"
+        assert payload["product_state"] == "pending_verification"
+        assert payload["version"] == 0
+
+    def test_blank_task_skips_definition_but_session_still_launches(self, client):
+        """空白任务维持既有行为照常起跑；定义缺失如实可见（GET /task → 404）。"""
+        client, app = client
+        resp = client.post("/api/sessions", json={"task": "   "})
+        assert resp.status_code == 200, resp.text
+        session = app.state._launched_sessions[0]
+        events = app.state.agent.store.read_events(session.session_id)
+        assert not [e for e in events if e.type == "task/defined"]
+        got = client.get(f"/api/sessions/{session.session_id}/task")
+        assert got.status_code == 404
+
