@@ -836,6 +836,43 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
     expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   });
 
+  it('RUN_COMPLETED 权威覆盖携带维级 null：按权威值转未知，不得用旧累计复活', () => {
+    // 权威覆盖是**整体替换**（parseUsage 结果 ?? 旧累计）：后端发的权威值里某维
+    // 就是未知 ⇒ 覆盖后该维未知。若实现退化成「逐维择优」（旧值非 null 就保留），
+    // 会把后端明确宣告的未知复活成假精确数——本例钉住整体替换语义（修后重审 P2）。
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+
+    s = applyEvent(s, ev({
+      type: EventType.RUN_COMPLETED,
+      data: { usage_total: { prompt_tokens: 20, completion_tokens: null, total_tokens: 30 } },
+    }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 20, completion_tokens: null, total_tokens: 30 });
+  });
+
+  it('usage 为空对象 {} → 三维皆 null（外层 null=未携带 与 空对象=携带但全缺席 正交）', () => {
+    // parseUsage({}) 是对象 ⇒ 逐维解析（三维全缺席 ⇒ 全 null，不是外层 null）；
+    // addUsage 与它累加 ⇒ 粘性生效全部转未知。与后端 _accumulate_usage 同判
+    // （修后重审 P2：`usage: {}` 不该走「未携带」分支保留旧值）。
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'y', usage: {} },
+      step_id: 2,
+    }));
+    expect(s.usage_total).toEqual({
+      prompt_tokens: null, completion_tokens: null, total_tokens: null,
+    });
+  });
+
   it('cost_usd 为显式 null 或非有限数 → null（费率表未定义的预期降级）', () => {
     for (const cost of [null, Number.NaN]) {
       const s = applyEvent(initConversation('s'), ev({

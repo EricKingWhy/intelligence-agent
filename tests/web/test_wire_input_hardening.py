@@ -1,9 +1,10 @@
 """#562（RL-04 深度 / F6 reason 长度）：wire 层请求体输入加固——红测。
 
-两个已拍板数值合同（用户 2026-10-03）：
+三个已拍板数值合同（用户 2026-10-03）：
 
 * **请求体 JSON 嵌套深度上限 = 100**（FUZZ-01 同族的 RL-04：深嵌套 ``RecursionError``）。
 * ``POST /api/sessions/{id}/approve`` 的 ``reason`` 上限 = **2000 字符**（不是字节）。
+* **请求体字节体积上限 = 1 MiB**（#562 残余：超限 **413**，见第 7 节）。
 
 ## 深度判据（与实现同一口径）
 
@@ -538,3 +539,33 @@ def test_body_size_guard_counts_accumulated_bytes_not_content_length() -> None:
     assert start["status"] == 413, start
     payload = b"".join(m["body"] for m in sent if m["type"] == "http.response.body")
     assert _EXPECTED_TOO_LARGE_DETAIL.encode("utf-8") in payload, payload
+
+
+def test_size_guard_precedes_depth_guard(tmp_path: Path) -> None:
+    """既超体积又超深的 body ⇒ **413**，不是 422 —— 体积判定先于深度判定。
+
+    构造：深嵌套外壳（depth = 150 ≫ 100）+ 大字符串填充（总字节 > 1 MiB）。
+    两个前提当场自证（深度、字节数），再断言拿到的是**体积**配额信封——若实现
+    把深度判定挪到体积之前，本例如期变红（会拿到 ``BODY_TOO_DEEP_DETAIL`` 的
+    422）。优先级不是纸面声明，由本例行为钉住（修后重审 P3 采纳）。
+    """
+    from agent_harness.web.wire_safety import BODY_MAX_DEPTH, json_container_depth
+
+    client = _client(tmp_path)
+    inner = 149
+    body = (
+        b'{"n": '
+        + b"[" * inner
+        + b'"'
+        + b"a" * _BODY_MAX_BYTES
+        + b'"'
+        + b"]" * inner
+        + b"}"
+    )
+    # 前提自证：两个配额同时越界（夹具算错当场红，而非静默改判据）。
+    assert json_container_depth(body) > BODY_MAX_DEPTH, json_container_depth(body)
+    assert len(body) > _BODY_MAX_BYTES, len(body)
+
+    resp = _post_raw(client, "/api/sessions?launch=false", body)
+    assert resp.status_code == 413, f"{resp.status_code} {resp.text[:200]}"
+    assert _is_quota_413(resp), resp.text[:200]

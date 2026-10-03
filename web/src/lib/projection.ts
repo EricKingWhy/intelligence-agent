@@ -1992,7 +1992,9 @@ function parseUsage(value: unknown): UsageStats | null {
 
 /** 逐维累加 usage（run/completed 到达前的运行中视图）：未知**粘性**——任一侧为
  *  `null`（该维未知）⇒ 结果该维 `null`，绝不从 0 或另一维的旧值起算（与后端
- *  `_accumulate_usage` 同语义）。`a` 为空（尚无累计）时即取 `b`。 */
+ *  `_accumulate_usage` 同语义；「值不可采信」——INT64 越界/负数——由后端先转
+ *  null 再发，前端只做粘性不做数值护栏/溢出 clamping，不伪造精度）。
+ *  `a` 为空（尚无累计）时即取 `b`。 */
 function addUsage(a: UsageStats | null, b: UsageStats): UsageStats {
   if (!a) return b;
   const sum = (x: number | null, y: number | null): number | null =>

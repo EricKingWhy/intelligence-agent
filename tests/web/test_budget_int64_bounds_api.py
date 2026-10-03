@@ -277,18 +277,47 @@ def test_dim_missing_in_later_response_keeps_two_ledgers_consistent(tmp_path):
 # ── C3（用户 2026-10-03 裁决）：`strict` 语义不变，只把拒绝文案说清 ──────────
 
 
-@pytest.mark.parametrize("model", [RunBudgetRequest, SessionBudgetRequest])
-@pytest.mark.parametrize("bad", [100.0, 1.5, "100", True])
-def test_non_integer_ceiling_error_message_is_actionable(model, bad):
-    """F4/C3：四类非法输入都给出**说清「要求整数」**的文案，且机器可读位**不变**。
+#: 各模型的整数 ceiling 字段全集（`_ceiling_must_be_integer` 的挂载面）。
+#: 漂移防护按**字段维**参数化：任何字段被从校验器挂载列表里挪走 ⇒ 此处红。
+_INT_CEILING_FIELDS: dict[type, tuple[str, ...]] = {
+    RunBudgetRequest: ("max_agent_turns_total", "max_model_requests", "max_total_tokens"),
+    SessionBudgetRequest: (
+        "max_agent_turns_total",
+        "max_model_requests",
+        "max_total_tokens",
+        "max_delegations",
+    ),
+}
+
+
+def _int_ceiling_cases() -> list:
+    cases = []
+    for model, fields in _INT_CEILING_FIELDS.items():
+        for field in fields:
+            for bad in (100.0, 1.5, "100", True):
+                cases.append(
+                    pytest.param(
+                        model, field, bad, id=f"{model.__name__}-{field}-{bad!r}"
+                    )
+                )
+    return cases
+
+
+@pytest.mark.parametrize(("model", "field", "bad"), _int_ceiling_cases())
+def test_non_integer_ceiling_error_message_is_actionable(model, field, bad):
+    """F4/C3：**全部 7 个** ceiling 字段 × 四类非法输入都说清「要求整数」。
 
     判据三段：
     ① ``type`` 仍是 ``int_type`` —— wire 契约的机器可读位逐字不变（本票只改 ``msg``）；
     ② ``msg`` 明说要整数（改前是英文 ``Input should be a valid integer``）；
     ③ ``msg`` 不带 pydantic 的 ``"Value error, "`` 前缀（否则文案被污染）。
+
+    字段维全覆盖（修后重审 P2）：只钉 ``max_total_tokens`` 一个字段的版本测不到
+    「某个字段被从校验器挂载列表里挪走」的漂移——那会让该字段退回 lax 强转或
+    英文默认文案，而其余用例全绿。
     """
     with pytest.raises(ValidationError) as exc:
-        model.model_validate({"max_total_tokens": bad})
+        model.model_validate({field: bad})
     (err,) = exc.value.errors()
     assert err["type"] == "int_type", err
     assert "整数" in err["msg"], err
