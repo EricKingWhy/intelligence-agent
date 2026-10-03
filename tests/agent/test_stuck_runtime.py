@@ -33,7 +33,7 @@ from agent_harness.agent.guards import (
     worst_stuck_signal,
 )
 from agent_harness.agent.profiles import AgentSpec
-from agent_harness.agent.resume_evidence import evidence_port
+from agent_harness.agent.resume_evidence import digest_policy_inputs, evidence_port
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CONTINUATION_ACTION_KEY,
@@ -131,23 +131,29 @@ def _run_id_of(session: Session) -> str:
     )
 
 
-# ── 委派子 run：不假装观测过它拿不到的东西（#317 三轮审查 P2 / 残余 15、16）──
+# ── 委派子 run：记录**它自己的**生效策略面（#370 / ADR-0048 残余 15）────────
 
 
-class TestDelegatedChildEvidence:
-    """子会话的 stuck 暂停：**不注入证据端口**，依据清单只列判据不会恒拒的那条。
+class TestDelegatedChildPolicyFace:
+    """子会话 stuck 暂停记录 child **自身**的策略面，不是父的面照抄一份。
 
-    子会话是 durable 且列得出来的、`run/paused` 是非终态，所以载荷层面不许出现"列出来的
-    依据必然 409"（`03 §5` / ADR-0044 D4）。而子会话今天连恢复入口都走不通：
-    `resume_and_launch` 在 `build_runtime` 里按 `create()` 重写工作区映射，而子会话的映射
-    是父级 alias，注册表拒绝改写（`WorkspaceBindingError`，`#288` 的既有行为，见 ADR-0048
-    残余 16 与它指向的 follow-up 票）。因此这里钉的是**诚实面**：不假装观测过（两格
-    `None`）、只列 `relevant_steer`（快照缺席时唯一不会被判据恒拒的一条）；恢复入口修好
-    之后再按 D8 给环境那一半。
+    恢复入口已修好（#372：alias get 语义 + 按 session/started 的 agent_id 重建档位），
+    本票把快照的策略那一半补上。四个答案收敛在
+    `resume_evidence.delegated_child_evidence_port`（唯一口径），这里从**暂停载荷**侧核对：
+
+    - `permission_mode` = 默认档：child 会话事件流没有 permission 声明，恢复侧
+      `_effective_permission_mode` 派生 None 后回落**同一个**默认档。父级 launch 的档位
+      经 executor 闭包对 child 生效（决策 11），但那是父的策略面流经执行器——child 没声明
+      过它，记父档会让恢复侧重算（只能算出默认档）必然对不上："什么都没变"也算变了
+      （fail-open，核查块：不能照抄 parent 未生效策略）；
+    - `model` / `reasoning_effort` / `context_providers` = None：子层无独立声明（模型链
+      继承，Factory 决策 14）——省略恢复请求字段不算策略变更，显式声明才算；
+    - `agent_profile` = spec.name：child 授权由它自己的 AgentSpec 决定（#372 强制同档）；
+    - 环境格仍缺席（端口不喂 workspace）——环境那一半是后续票（AC4）。
     """
 
     @pytest.mark.asyncio
-    async def test_a_child_pause_claims_no_evidence_it_does_not_have(self, tmp_path) -> None:
+    async def test_child_pause_records_its_own_policy_face(self, tmp_path) -> None:
         spec = AgentSpec(
             name="child", description="d", system_prompt="s",
             tool_scope=frozenset({"fail"}),
@@ -165,15 +171,23 @@ class TestDelegatedChildEvidence:
         assert result.status == STATUS_PAUSED
         pause_event = _events(session, RUN_PAUSED)[0]
         stuck = pause_event.data["stuck"]
-        assert stuck["environment_revision"] is None      # 没观测过就不假装观测过
-        assert stuck["policy_version"] is None
-        assert stuck["policy_inputs"] is None
-        # 快照无关的那条之外一条都不列：另外两条的判据都要比快照
-        # （`recorded_environment_revision` / `recorded_policy_inputs`），列出去就是恒 409。
-        assert pause_event.data["resume_requirements"] == [RESUME_BASIS_RELEVANT_STEER]
-        action = pause_event.data["continuation"][CONTINUATION_ACTION_KEY]
-        assert RESUME_BASIS_ENVIRONMENT_CHANGE not in action
-        assert RESUME_BASIS_POLICY_CHANGE not in action
+        # 环境格：本票只落策略格（残余 15 的环境半仍在后头）。
+        assert stuck["environment_revision"] is None
+        # 策略格：child 自己的面，逐维值与摘要同源（重算比对，不手抄摘要）。
+        recorded = stuck["policy_inputs"]
+        assert recorded == {
+            "permission_mode": "workspace-write",
+            "model": None,
+            "agent_profile": "child",
+            "reasoning_effort": None,
+            "context_providers": None,
+        }
+        assert stuck["policy_version"] == digest_policy_inputs(recorded)
+        # 策略格齐 ⇒ policy_change 进入可用依据清单（此前恒 409 的那条不再列空话）；
+        # 环境格缺席 ⇒ environment_change 仍不得列。
+        assert pause_event.data["resume_requirements"] == [
+            RESUME_BASIS_RELEVANT_STEER, RESUME_BASIS_POLICY_CHANGE,
+        ]
 
 
 # ── ① 的接线：一条纠正 + 一次暂停 ─────────────────────────────────────────

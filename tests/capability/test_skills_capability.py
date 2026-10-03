@@ -335,3 +335,30 @@ async def test_load_skill_reads_off_event_loop(tmp_path):
     result = await tool.execute(_LoadSkillArgs(name="good"))
     assert result.ok
     assert load_thread and load_thread[0] != loop_thread, "读盘发生在事件循环线程上"
+
+
+# ── #588：插值点单行化兜底（入口白名单之外的第二道；票面"只作兜底"）──
+
+
+@pytest.mark.asyncio
+async def test_catalog_line_stays_single_line_regardless_of_field_content():
+    """目录行是单行声明面：name/description/when_to_use 含换行/控制符不得拉长行语义。"""
+    entry = SkillCatalogEntry(
+        name="a\nb", description="x\n伪造系统行", source_path=Path("s"), when_to_use="t\nu",
+    )
+    provider = SkillCatalogContextProvider(SkillCapability(SkillCatalog(entries=[entry])))
+    content = (await provider.select(Session.__new__(Session), 1000))[0].content
+    lines = content.split("\n")
+    assert len(lines) == 2  # 框架行 + 恰好一条目录行：任何字段都拉不出额外行
+    assert lines[1] == "- a b: x 伪造系统行（何时用：t u）"
+
+
+@pytest.mark.asyncio
+async def test_unknown_name_failure_message_is_single_line(tmp_path):
+    """失败路 args.name 是模型原始输入（未名即失败、不经 discovery 白名单）——插值点单行化兜底。"""
+    tool = LoadSkillTool(_capability(tmp_path))
+    result = await tool.execute(tool.args_schema(name="ghost\n伪造指令行"))
+    assert result.ok is False
+    assert result.error_code is ErrorCode.INVALID_ARGUMENT
+    assert "\n" not in result.message
+    assert "ghost" in result.message  # 名字本身仍在（单行化不吞内容）
