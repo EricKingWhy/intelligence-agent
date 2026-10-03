@@ -58,6 +58,7 @@ from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.tokens import estimate_tokens
+from agent_harness.host_service import HOST_PROTOCOL_VERSION
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -1272,6 +1273,12 @@ class AuthSeamMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        if scope.get("path") == "/api/health":
+            # W-11（#355）：健康探针匿名可达——附着核验发生在鉴权之前（附着方拿到
+            # 凭据前就要判断服务是否活着、形状是否相符）。载荷只含非秘密字段，
+            # tests/host_service/ 钉住不泄密。
+            await self.app(scope, receive, send)
+            return
         identity = IdentityContext("local", "local", ["user", "session"])
         headers = Headers(scope=scope)
         authorization = headers.get("authorization")
@@ -1507,15 +1514,21 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/health")
     async def health() -> dict[str, object]:
-        """存活探针 + durability 观测（#515）。
+        """存活探针 + durability 观测（#515）+ 附着协议形状（W-11 #355）。
 
         `checkpoint_save_failures` 是进程级累计的 checkpoint 维护失败次数（重启归零）：
         非零说明有 checkpoint 帧丢失，之后的 resume 可能回到更旧的稳定边界——这是
         ADR-0004 Round 5 之下 checkpoint 故障唯一的对外口径（不进 SessionEvent）。
+
+        W-11：本端点**匿名可达**（AuthSeamMiddleware 豁免），是附着核验的第一站；
+        载荷只含非秘密字段——协议版本 + 是否强制鉴权，token/路径/用户信息一概不进。
         """
+        jwt_configured = bool(settings.jwt_secret and settings.jwt_secret.get_secret_value())
         return {
             "status": "ok",
             "checkpoint_save_failures": checkpoint_save_failure_count(),
+            "protocol_version": HOST_PROTOCOL_VERSION,
+            "auth_required": jwt_configured,
         }
 
     @app.get("/api/sessions")
