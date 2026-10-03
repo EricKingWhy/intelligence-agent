@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from contextlib import nullcontext
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
@@ -176,7 +176,7 @@ class ContextCompactor:
         self._max_context_tokens = max_context_tokens
         self.reserve = max(int(max_context_tokens * 0.15), 16384)
 
-    def _slot(self):
+    def _slot(self) -> AbstractAsyncContextManager[None]:
         """取一个**新**的摘要槽位（每次尝试各取一次；None = 不过闸）。
 
         `ModelCallGate.slot()` 是 `@asynccontextmanager` 产物，**一次性**（同
