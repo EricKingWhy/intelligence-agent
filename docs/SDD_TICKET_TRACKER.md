@@ -7058,3 +7058,47 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **§14.9 回补通知**：本线已集成进 main（`2ef11b73`）；任何在途线下次开工前按手册 §2 获取新基准 `2ef11b73`，勿以旧缓存为基准。
 - **关单（§14.12，手册 §5）**：#589/#588/#370/#338 四票关闭（证据评论 issuecomment-5970571437 / 5970572079 / 5970572803 / 5970573441）；#338 维持「未知红、不生效」诚实登记关闭（矩阵报告 issuecomment-5969769848；未来任何全量读数出现该用例带签名 ⇒ stop-line 回 #338）。
 - **残余**：远端分支 `fix/i588-i589-i370-i338-capability-docs` 已删（用户批准；双条件核验：tip `8bec6e1c` 为 main 祖先 + PR #603 MERGED）；#588 F2（U+0085/U+2028/U+2029）/F3（裸 `{path}` 插值）、#370 环境半 follow-up 登记不修；gate0 `env_failures` 结构化字段（0xC0000142 风暴签名归因）建议另开码面票，本线不扩范围。
+
+## #604（P2，在途模型请求缺少 durable 开始事件；分支 `fix/i604-model-request-started`）
+
+- **票面范围与关联**：2026-10-04 用户裁决把预算 AC 限定为本逻辑 run 的 `RunBudget.model_requests`；开始事件不计数，每条已结算 `model/request` 计一次。`SessionBudget` fallback 失败/取消补记独立登记为 #619，不属于本票。
+- **实现**：`4891b28` 为真实 Provider attempt 在 invoke/astream 前 durable append `model/request-started`，以稳定 `request_id` 配对 settlement；`41b408f`/`a1134c7` 收敛 fallback 与 stream 时序；`6808fe7` 保留断连收尾时已有响应的 usage/cost；`9038d517` 将 MemoryWriteback 测试改为顺序无关断言。零进展路径按已批准处理只期待 `RUN_PAUSED`，保留 #567 跳过 closeout 与 #604 仅真实 Provider attempt 发开始事件。
+- **红绿 / focused**：首轮全量为 5438P/3S/51D/2F；其中 coverage 自检因审查台账行尚未写入而红，行写入后该节点 1P。MemoryWriteback 旧断言在本分支隔离复现 6/6 失败，显式指向 origin/main 的源码副本 6/6 通过；原因是测试假设不同后台 task 的捕获顺序有 FIFO 保证，而规格未定义该保证。按批准修正后节点通过。最新 main 同步后的相关 focused 集合 470P/67.28s。
+- **双轴 Review**：审查范围 `2e8fa23c0f4e26deb40a1a0480fb47eacb0f0488..e227872b52ec75c06116b491d9bf2f23cd986171`；Spec/Correctness PASS，Standards PASS；0 个未关闭硬性 finding。Standards 轴留 P4 备注：`runtime.py` 两处重复组装 `model/request` payload，按最小范围登记、不改代码。台账见 `docs/review_ledger.d/i604-model-request-started-2e8fa23c-e227872b.tsv`。
+- **最终门禁 / 读数传递**：冻结代码/测试点 SHA `bbe0bb14adea2ca09fa37d688e42ef6d20dfe60d` / tree `ccfe2f4e6b53cb1ee2e0324e3e22b9e7309b6924`；全部 32 个冻结路径 blob 哈希见上。唯一最终全量运行于 docs-only 后继 `0f92b19672a9e4c3dd716c18a25357bc3ed1c3d8`（freeze→run 仅 Tracker 修改、运行前 clean）：`scripts/run_tests_clean.sh tests/` = 5482 passed / 3 skipped / 51 deselected / 0 failed（718.04s，exit 0）；`ruff check .` All checks passed。裸 Gate-0 在该 SHA/tree 执行 6/6 PASS（16.29s），收据 `docs/gate/0f92b19672a9e4c3dd716c18a25357bc3ed1c3d8.json`。standalone `scripts/check_review_coverage.py` 于 docs-only readout tip `0f9c628181b670c6b051a6031dd6e480f445871a` exit 0。§8.1 冻结点→该 tip 的 name-status 原文：`M docs/PHASE_STATUS.md`、`M docs/SDD_TICKET_TRACKER.md`、`A docs/gate/0f92b19672a9e4c3dd716c18a25357bc3ed1c3d8.json`、`M docs/phase_status/2026-10.md`；全为 A/M 且命中 DOC_PATTERN，运行后 `git status --short` 为空。
+
+- **冻结点**：commit `bbe0bb14adea2ca09fa37d688e42ef6d20dfe60d`，tree `ccfe2f4e6b53cb1ee2e0324e3e22b9e7309b6924`（相对 `origin/main` 改动 32 个路径）；以下为该 commit 中全部改动路径的 Git blob SHA，以 `git hash-object --path=<path> <path>` 在 clean worktree 实测：
+  - `docs/BACKEND_CONTRACT_STREAMING_UI.md` = `4a4abd5154bc8fc5e004417a7fc447ba0578a755`
+  - `docs/EVENT_VOCABULARY.md` = `342f8401fe25b368b77cbd8cba0fddeff0462865`
+  - `docs/PHASE_STATUS.md` = `d74dabb14f44d7939c6c0523f064f78f09e4efb4`
+  - `docs/SDD_TICKET_TRACKER.md` = `1d9895ba92cf4aad4c7a454c410ba11a8de1811a`
+  - `docs/gate/41b408f63237734f6e38a060d6efcb6276607545.json` = `1e84a5171be3542a8cef10d7b0e3a1a335661959`
+  - `docs/gate/4891b28a6d0a8c4c0d0f8dcc6148080035a8a012.json` = `8ab667436a57355c3f540211474fbb51f1427f52`
+  - `docs/gate/d9cff84e9b542a7605fd1826f1e6dd80ff3542b2.json` = `51c0b21c1323d71f2f902e2a5944b25e90234987`
+  - `docs/phase_status/2026-10.md` = `ce6ee78695729c486b7f73f4f49883ddc6511739`
+  - `docs/review_ledger.d/i604-model-request-started-2e8fa23c-e227872b.tsv` = `c01cac230e17a3721160dbf0ca6f127c923cf0e3`
+  - `src/agent_harness/agent/runtime.py` = `9c44b64da511dc7256162629adcdfc56bae8c0e5`
+  - `src/agent_harness/model/fallback.py` = `1786d2b0aabe57a878284bc1cce479313a2bbccd`
+  - `src/agent_harness/session/__init__.py` = `7515339b24332a67042eb74b151a52a76ebc2b17`
+  - `src/agent_harness/session/event.py` = `e0e904938ff353e5afc9045af972275d1908efc9`
+  - `tests/agent/test_checkpoint_runtime.py` = `0922c64dfe0e365a5870b83cf70cf9993ab2eaeb`
+  - `tests/agent/test_event_sequence_golden.py` = `07fcdde05022286499e5e725a9914790ba9e4205`
+  - `tests/agent/test_model_fallback_runtime.py` = `906e938780272f3b6ed18e5ab136e3bd9d5f76b8`
+  - `tests/agent/test_run_pause_resume.py` = `548448557230535e0fef14df1ab10fbfe830519e`
+  - `tests/agent/test_run_stream.py` = `e019a4eabfd774f3945b0e1f93f059d506be5b4e`
+  - `tests/agent/test_stream_chunk_aggregation.py` = `f5ce73113d07ba3e2a9560f4cc7b4075e40e5426`
+  - `tests/agent/test_stream_terminal_semantics.py` = `77177fd5e02739470df97a75ab3783eef581f68e`
+  - `tests/agent/test_terminal_arms.py` = `1ecdca408769c7281275192f6a4bdf954a8d0492`
+  - `tests/memory/test_context_provider.py` = `cb51022aacec42078098ba4439fd664d429e94d7`
+  - `tests/observability/test_tracer_port.py` = `4eee12c1afd86d11d15f4304a1b32f312a1be20b`
+  - `tests/recovery/_model_request_kill_child.py` = `ae57c74fe33a7dae51f5b7cbc02a91af9d2641aa`
+  - `tests/recovery/test_model_request_started_kill.py` = `82147f3f31eef3fc481c90c8c56cd89980bc080c`
+  - `tests/session/test_event_store.py` = `6f5a2d7170c04b92a9d76842cb11f221804d8f9e`
+  - `tests/session/test_streaming_vocabulary.py` = `f50709f00c3fcaa8a7d12489e87187427b6c790a`
+  - `tests/test_cli.py` = `d2ee1e58d2f819fd3e5ed8d9c319c73e62977db0`
+  - `tests/test_migrate_legacy_step_id.py` = `51fdeb4390249a9afe5b979949327aa6273f6bba`
+  - `tests/web/test_web_stream.py` = `7eb59e2776606e5fdb8eab9a223b2a1803dd8f0d`
+  - `web/src/generated/event-types.ts` = `3d18d590d928c700769f245ddf58269c9faac3d1`
+  - `web/src/lib/projection.ts` = `5446581e6ac07f9c88babefcdda31289ed7c1b60`
+
+- **本地 pre-push hook 环境故障**：普通 `git push` 被 Gate-0 hook 拦下；guards 中两条临时 Git 仓库用例因 `git add -A` 报 “this operation must be run in a work tree”。失败后发现 backend shared config 的 `core.bare=true`，worktree 状态查询同时失效；恢复为 `false` 后复核 HEAD/index 未变、10 个 worktree 均为非 bare。普通进程环境对 exact tip `8236a741` 重跑完整 `gate0.py --no-record` 为 6/6 PASS（11.3s）；同型本地 hook 失败已有 PR #600 收口记录。

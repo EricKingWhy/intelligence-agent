@@ -32,7 +32,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel
 
 from agent_harness.agent import AgentRuntime
@@ -57,6 +57,7 @@ from agent_harness.model.accounting import PROVIDER_ROLE_CLOSEOUT
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -213,6 +214,31 @@ class _ForbiddenModel:
         yield AIMessage(content="")
 
 
+class _BlockedCloseoutModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.stream_calls = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        self.entered.set()
+        await self.release.wait()
+        return AIMessage(content="not a continuation")
+
+    async def astream(self, messages: list, **kwargs):
+        self.stream_calls += 1
+        if self.stream_calls > 1:
+            raise AssertionError("closeout 屏障前只允许一条真实模型轮次")
+        yield AIMessageChunk(content="", tool_calls=[{
+            "id": f"{TOOL_ID}_closeout",
+            "name": "echo",
+            "args": {"text": "progress"},
+        }])
+
+
 def _run_id_of(session: Session) -> str:
     return next(e.run_id for e in session.events if e.type == RUN_STARTED and e.run_id)
 
@@ -259,12 +285,74 @@ async def test_model_closeout_is_a_model_request_not_an_accepted_turn(tmp_path) 
     assert [e.type for e in session.events if e.type in (RUN_COMPLETED, RUN_FAILED)] == []
     # closeout 真的过了一次模型（有界机会），但那不是被接纳的一轮：模型侧调用 3 次
     assert len(scripted.snapshots) == 3
+    closeout_start = next(
+        event for event in session.events
+        if event.type == MODEL_REQUEST_STARTED
+        and event.data["role"] == "closeout"
+    )
+    closeout_request = next(
+        event for event in session.events
+        if event.type == MODEL_REQUEST and event.data["role"] == "closeout"
+    )
+    assert closeout_start.data["request_id"] == closeout_request.data["request_id"]
+    assert closeout_start.seq < closeout_request.seq
 
     state = derive_run_budget(session.events, _run_id_of(session))
     assert state.version == 1
     assert state.consumed_turns == 2, "派生账本 = 事件说的事实（closeout 不进计数）"
     assert state.paused is not None
     assert state.resumable is True
+
+
+@pytest.mark.asyncio
+async def test_closeout_request_started_is_yielded_before_provider_settles(tmp_path) -> None:
+    model = _BlockedCloseoutModel()
+    runtime = _runtime(model, ceiling=2)
+    session = make_session(tmp_path)
+    frames: asyncio.Queue = asyncio.Queue()
+
+    async def collect() -> None:
+        async for frame in runtime.run_stream(session, "等待 closeout 在途事件"):
+            await frames.put(frame)
+
+    consumer = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(model.entered.wait(), timeout=2)
+        async with asyncio.timeout(2):
+            while True:
+                frame = await frames.get()
+                if (
+                    frame.type == MODEL_REQUEST_STARTED
+                    and frame.data["role"] == "closeout"
+                ):
+                    break
+
+        assert frame.data["role"] == "closeout"
+        started = next(
+            event for event in session.events
+            if event.type == MODEL_REQUEST_STARTED
+            and event.data["request_id"] == frame.data["request_id"]
+        )
+        assert not any(
+            event.type == MODEL_REQUEST and event.data.get("role") == "closeout"
+            for event in session.events
+        )
+        model.release.set()
+        await consumer
+
+        settled = next(
+            event for event in session.events
+            if event.type == MODEL_REQUEST
+            and event.data.get("role") == "closeout"
+        )
+        assert started.seq < settled.seq
+        assert started.data["request_id"] == settled.data["request_id"]
+    finally:
+        model.release.set()
+        if not consumer.done():
+            consumer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer
 
 
 @pytest.mark.asyncio
@@ -456,9 +544,11 @@ async def test_same_run_resume_completes_without_resetting_accounting(tmp_path) 
     assert [e.type for e in new_events].count(RUN_RESUMED) == 0, (
         "run/resumed 由 SessionService 在 launch 之前落盘（这里直接驱动 runtime）"
     )
-    assert new_events[0].type == MODEL_REQUEST, (
-        "续跑第一次请求就落账（`#313` 起请求有自己的计数点）"
+    assert new_events[0].type == MODEL_REQUEST_STARTED
+    assert new_events[1].type == MODEL_REQUEST, (
+        "续跑先记录 attempt 开始，再用 `model/request` 作为唯一计数点"
     )
+    assert new_events[0].data["request_id"] == new_events[1].data["request_id"]
     assert new_events[-1].type == RUN_COMPLETED
     # run 身份单一：恢复沿用同一逻辑 run——没有第二条 run/started、也没有新 user/message
     assert [e.type for e in session.events].count(RUN_STARTED) == 1
