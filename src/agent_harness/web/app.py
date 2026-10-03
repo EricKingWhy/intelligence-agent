@@ -108,6 +108,7 @@ from agent_harness.web.serialization import (
     build_session_event_payload,
     build_truncated_control,
 )
+from agent_harness.web.wire_safety import _safe_text
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 
 # Read-only catalog facts live with their router. Re-export them here for the
@@ -1136,16 +1137,16 @@ def _run_stream_response(
 
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
     """AgentEvent → SSE 帧（信封构建在 web/serialization.py，SSE/WS 共用）。"""
-    return {"data": json.dumps(
+    return {"data": _safe_text(json.dumps(
         build_event_payload(event, session_id), ensure_ascii=False
-    )}
+    ))}
 
 
 def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str, str]:
     """SessionEvent → SSE 帧（重放通道，信封构建在 web/serialization.py）。"""
-    return {"data": json.dumps(
+    return {"data": _safe_text(json.dumps(
         build_session_event_payload(event, session_id), ensure_ascii=False
-    )}
+    ))}
 
 
 #: CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
