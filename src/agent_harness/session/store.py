@@ -59,8 +59,10 @@ class CorruptLine:
     """一条损坏行的**脱敏定位记录**（#565 audit 增强块）。
 
     只带定位元数据，**不带行内容**——events.jsonl 是 durable 事实，诊断记录
-    （日志 / 报告）不得把它未脱敏地复制进第二条通道；原字节保留在文件里
-    （append-only，本层从不改写），按 `byte_offset` / `sha256` 可人工定位核对。
+    （日志 / 报告）不得把它未脱敏地复制进第二条通道；完整行原字节保留在文件
+    里（append-only），按 `byte_offset` / `sha256` 可人工定位核对。无换行
+    撕裂尾段由 append 前的 `_neutralize_torn_tail` 处置（截断/封印），是
+    「本层不改写 durable 行」的唯一例外。
     """
 
     lineno: int
@@ -377,22 +379,56 @@ class JsonlSessionStore:
 
         处置分两支（「截到最后**有效**记录」而非「截到上一个记录」）：
         尾段可解析为完整事件（只缺终止符，如写到 ``\\r`` 后断）→ 补终止符
-        封印保留；不可解析 → 截断到最后换行边界，脱敏指纹（offset/len/sha256，
-        不含内容）进诊断日志。原字节不保留在主日志——保留撕裂形状的正是本
-        修复要消除的故障面（Redis/etcd/SQLite 均不保存撕裂字节）。必须在
-        会话写锁内调用（并发 append 各自先中立化会互相打架）。
+        **封印**保留；其余（JSON 半行 / 多字节断裂 / 合法 JSON 非事件字典 /
+        bad_seq——后两者不可能来自本 writer 的崩溃，只可能来自外部篡改，
+        封印会产生闸门永久拒绝的完整坏行，截断是三选一的正解）→ 截断到
+        最后换行边界。封印支是**本项目判据下的扩展**：四来源对内容完整但
+        缺终止符的记录均为丢弃（帧校验过不了），本仓 JSONL 无帧校验、内容
+        完整性可由 json+from_dict 等价验证，且读侧本就把无换行完整事件计为
+        有效事件——封印只是物理规范化，零语义翻转。撕裂原字节不保留在主
+        日志（保留撕裂形状的正是本修复要消除的故障面，四来源同），脱敏
+        指纹（offset/len/sha256，不含内容）进诊断日志供事后对账。
+
+        必须在会话写锁内调用（并发 append 各自先中立化会互相打架）。跨进程
+        边界见 ``__init__``：无文件锁下两个进程同时 append 仍可能各自通过
+        检查；本方法的截断支在该边界内多了一个「按陈旧 boundary 截掉另一
+        进程刚落盘完整行」的主动删除面（前置条件罕见：撕裂尾段存在 + 跨
+        进程同时 append），这是对既有声明的忠实披露而非新增安全声明。
+
+        稳态成本 O(1)：干净尾（空 / \\n 结尾）只做一次 seek+1 字节读；
+        仅尾字节非 \\n 时才反向分块找边界，不整读文件（append 热路径，
+        审查 P2-1）。
         """
+        tail_offset = 0
+        tail = b""
         try:
-            data = path.read_bytes()
+            with path.open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                if size == 0:
+                    return
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) == b"\n":
+                    return
+                # 尾字节非 \n：撕裂尾段在场，反向分块找最后一条完整行边界
+                chunk_size = 4096
+                pos = size
+                while pos > 0:
+                    step = min(chunk_size, pos)
+                    pos -= step
+                    fh.seek(pos)
+                    chunk = fh.read(step)
+                    idx = chunk.rfind(b"\n")
+                    if idx != -1:
+                        tail_offset = pos + idx + 1
+                        break
+                fh.seek(tail_offset)
+                tail = fh.read()
         except FileNotFoundError:
-            return
-        if not data or data.endswith(b"\n"):
-            return
-        boundary = data.rfind(b"\n") + 1
-        tail = data[boundary:]
+            return  # 首次 append：文件尚不存在，无撕裂可言
         event, _corrupt, _partial = self._classify_event_line(
-            tail, path_name=path.name, lineno=data.count(b"\n") + 1,
-            byte_offset=boundary,
+            tail, path_name=path.name, lineno=0, byte_offset=tail_offset,
+            log_corrupt=False,  # 探测模式：随后可能截断/封印同一字节
         )
         if event is not None:
             with path.open("ab") as fh:
@@ -401,18 +437,18 @@ class JsonlSessionStore:
                 os.fsync(fh.fileno())
             logger.warning(
                 "补齐撕裂尾段终止符 %s offset=%d len=%d（完整事件缺换行，封印保留）",
-                path.name, boundary, len(tail),
+                path.name, tail_offset, len(tail),
             )
             return
         with path.open("r+b") as fh:
-            fh.truncate(boundary)
+            fh.truncate(tail_offset)
             fh.flush()
             os.fsync(fh.fileno())
         logger.warning(
             "截断撕裂尾段 %s offset=%d len=%d sha256=%s"
             "（写入中断的未完成记录，截断后 append 从记录边界续写；"
             "原字节不保留，指纹供事后对账）",
-            path.name, boundary, len(tail), hashlib.sha256(tail).hexdigest(),
+            path.name, tail_offset, len(tail), hashlib.sha256(tail).hexdigest(),
         )
 
     @staticmethod
@@ -473,8 +509,13 @@ class JsonlSessionStore:
     @staticmethod
     def _classify_event_line(
         raw: bytes, *, path_name: str, lineno: int, byte_offset: int,
+        log_corrupt: bool = True,
     ) -> tuple[SessionEvent | None, CorruptLine | None, bool]:
         """读路径单行分类（#565）：事件 / 损坏（带脱敏定位记录）/ 未写完整的末尾片段。
+
+        `log_corrupt=False` 是写侧探测模式（`_neutralize_torn_tail` 用）：只取
+        分类判定、不发损坏 WARNING——探测之后可能紧跟着截断/封印同一字节，
+        若仍按读侧口径记「原字节保留在文件中未改动」就会日志撒谎。
 
         `_parse_event_line` 的容错语义保留给摘要 / header 快路径；本方法服务
         read_events 全量扫描，新增 audit 增强块要求的两条判别：
@@ -497,11 +538,12 @@ class JsonlSessionStore:
                 line_sha256=hashlib.sha256(raw).hexdigest(),
                 reason=reason,
             )
-            logger.warning(
-                "损坏行 %s:%d offset=%d len=%d sha256=%s reason=%s"
-                "（原字节保留在文件中未改动，恢复将拒绝）",
-                path_name, lineno, byte_offset, len(raw), record.line_sha256, reason,
-            )
+            if log_corrupt:
+                logger.warning(
+                    "损坏行 %s:%d offset=%d len=%d sha256=%s reason=%s"
+                    "（原字节保留在文件中未改动，恢复将拒绝）",
+                    path_name, lineno, byte_offset, len(raw), record.line_sha256, reason,
+                )
             return None, record, False
 
         ends_with_newline = raw.endswith(b"\n")
