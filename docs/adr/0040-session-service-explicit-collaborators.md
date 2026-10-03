@@ -118,6 +118,7 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 | 14 | `stores: RecoveryStoreBundle`（领域端口，见 §4 R2） | `stores` property | 传给恢复接线（`stores=` 两处） | 3 |
 | 15 | `ensure_stores: Callable[[], Awaitable[None]]` | `ensure_stores()` 方法 | 8 个入口的惰性初始化（兼容不走 lifespan 的测试路径） | 9 |
 | 16 | `get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]]` | `get_wiring()` 方法 | 审批回调与模型变更需要真实装配集 | 3 |
+| 17 | `validate_session_declaration: SessionDeclarationValidator \| None`（领域端口，`#564` 2026-10-03 增补） | 构造注入 | resume 通道 eager CAS **前**的 session 声明注册名校验（坏名永不触碰账行）；实现 = 组合根用 `assembly.root_registry_tool_names`（零副作用名字集投影，与 `build_runtime` 同源）判定。`None`（直构 service 的调用方）= 跳过前置、由 build_runtime 的声明 422 兜底；web / CLI 组合根两条路径都注入 | 1 |
 
 `ProjectService`（`session/projects.py`，计数命令同形）：`store`=2、`workspace_index`=2、
 `ensure_stores`=2——`store.read_started_header` 读会话头部、索引做项目 CRUD、`ensure_stores()`

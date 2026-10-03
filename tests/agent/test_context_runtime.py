@@ -60,9 +60,11 @@ async def test_runtime_pauses_when_context_exceeds_guard(tmp_path, stream):
 async def test_runtime_context_exceeded_with_double_summary_failure_pauses(tmp_path):
     """W-04 (#348)：双次摘要失败 + 估值越硬护栏 ⇒ run/paused（不是 run/failed）。
 
-    有完整早期轮 ⇒ 摘要尝试真实发生：主 build 两次尝试各留一条失败事件；暂停
-    closeout 里的二次 build 再走一轮重试（再两条）——有界噪声（至多 4 条 + 4 次
-    摘要调用），随后确定性 continuation 收口。用户消息逐字保留（调研 B6）。
+    有完整早期轮 ⇒ 摘要尝试真实发生：主 build 两次尝试各留一条失败事件。
+    `#567` 裁决 B：本轮零进展（模型从未成功产出 ⇒ agent_turns == 0）⇒ closeout
+    直接确定性收口，不再发起 closeout 的二次 build（旧实现会再走一轮重试、再添
+    两条失败事件）。失败事件有界且可数（2 条 + 2 次摘要调用）。用户消息逐字保留
+    （调研 B6）。
     """
     class FailingSummary:
         calls = 0
@@ -87,12 +89,12 @@ async def test_runtime_context_exceeded_with_double_summary_failure_pauses(tmp_p
     types = [e.type for e in session.events[before:]]
     assert types[-1] == "run/paused"
     assert "run/failed" not in types
-    assert types.count("context/compaction_failed") == 4, (
-        "主 build 与 closeout 各两次尝试：失败事件有界且可数"
+    assert types.count("context/compaction_failed") == 2, (
+        "#567 B：只有主 build 的两次尝试——零进展执行没有 closeout 的二次 build"
     )
     attempts = [e.data["attempt"] for e in session.events[before:]
                 if e.type == "context/compaction_failed"]
-    assert attempts == [1, 2, 1, 2]
+    assert attempts == [1, 2]
     paused = session.events[-1]
     assert paused.data["reason"] == "budget_exhausted"
     assert paused.data["trigger_dimension"] == "max_context_tokens"
@@ -102,7 +104,7 @@ async def test_runtime_context_exceeded_with_double_summary_failure_pauses(tmp_p
     assert [e.data["content"] for e in user_events] == [
         exact_user_words, "huge " * 1200,
     ]
-    assert model.calls == 4
+    assert model.calls == 2, "#567 B：closeout 不再烧摘要调用"
 
 
 @pytest.mark.asyncio

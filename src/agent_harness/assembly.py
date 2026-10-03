@@ -27,6 +27,7 @@ from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
     SessionBudgetPort,
+    SessionLimits,
     validate_tool_call_limits_registered,
 )
 
@@ -182,6 +183,166 @@ def _select_context_providers(
     return [p for p in wired if getattr(p, "name", None) in wanted]
 
 
+@dataclass(frozen=True)
+class _RootTooling:
+    """`_build_tooling` 的产物束：registry 与与它配对的旁路依赖。"""
+
+    registry: ToolRegistry
+    overflow_handler: ArtifactOverflowHandler | None
+    context_artifact_store: Any | None
+    context_read_tool_name: str | None
+    runtime_multiagent_provider: Any | None
+
+
+def _build_tooling(
+    settings: Settings,
+    wiring: CapabilityWiring,
+    *,
+    session_id: str,
+    workspace: Path,
+    workspace_registry: WorkspaceRegistry,
+    session_store: JsonlSessionStore | None,
+    agent_profile: str | None,
+) -> _RootTooling:
+    """sandbox 绑定 + **根 registry**（收窄前）构造——唯一的工具面事实源。
+
+    为什么独立成函数（#564 裁决 (a)）：service 层的 session 注册名校验必须发生在
+    eager CAS **之前**，彼时 build_runtime 还没有跑，"哪些工具已注册"只能从同一份
+    构造逻辑取。build_runtime 调本函数；pre-CAS 校验用的是本函数的**零副作用**
+    名字集投影 `root_registry_tool_names`（不实例化 sandbox，审查 P2-1）——新增
+    工具来源必须同时落在两处（漏落 = `tests/test_assembly_root_registry_names.py`
+    的三方对账红灯）。
+    """
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+
+    # #286：根委派配额来自档位声明（与 build_runtime 的 root_max_delegations 同源）。
+    root_max_delegations = (
+        BUILTIN_PROFILES[agent_profile or "main"]
+    ).max_delegations
+    # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
+    # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
+    # create() 对它响亮拒绝（防改写属主绑定，tests/sandbox/test_workspace_registry.py
+    # 钉住），恢复路径不该撞它。无映射 = 新会话，照旧 create。注意：工具面收窄
+    # （agent_profile → registry.filtered）在 build_runtime 下游与 sandbox 解析无关，
+    # 恢复入口的授权重建由调用方（service.resume_and_launch）按子会话 AgentSpec 传
+    # agent_profile 兑现——只放开这一半会放大子会话工具面，两条必须一起成立。
+    if workspace_registry.exists(session_id):
+        sandbox = workspace_registry.get(session_id)
+    else:
+        sandbox = workspace_registry.create(session_id, workspace_root=workspace)
+    registry = ToolRegistry()
+    for tool_cls in BUILTIN_LOCAL_TOOLS:
+        # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
+        # Settings，装配层是唯一的接线点；接不上就成死键（tests/test_assembly_bash_budget.py）。
+        kwargs = (
+            {"timeout_seconds": settings.bash_timeout_seconds}
+            if tool_cls is BashTool
+            else {}
+        )
+        registry.register(tool_cls(sandbox, **kwargs))
+
+    # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
+    # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
+    # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
+    registry.register(UpdatePlanTool())
+
+    # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
+    # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
+    # 选择口径（优先级 + 半配置判定）收敛在 `storage/artifact_select.py`，读路径
+    # （`web/artifacts.py`）用同一个函数——两处各写一遍 if 级联就等于给漂移留门
+    # （#192 批 1 审查发现）。
+    overflow_handler = None
+    context_artifact_store = None
+    context_read_tool_name: str | None = None
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        read_tool = selection.read_tool(selection.store)
+        registry.register(read_tool)
+        # 摘要里的读回提示点名**这个**工具（#186 AC4）：S3 配 `inspect_artifact`，
+        # MinIO / Local 配 `read_artifact`。名字从选择器**实例化出来的那个工具**上取，
+        # 不在这里再填一个字面量——那样等于把"配对关系"这份知识写了第二遍。
+        overflow_handler = ArtifactOverflowHandler(
+            selection.store,
+            settings.artifact_overflow_chars,
+            read_tool_name=read_tool.name,
+        )
+        # W-03 (#347)：ContextBuilder 的旧 Tool Result 裁剪与 overflow 共用同一个
+        # store 与同一个真实读回工具名——骨架行的回读提示必须指向**确实配对**的
+        # 工具（名字不得写死）。store 未选中（None）→ builder 裁剪整体关闭。
+        context_artifact_store = selection.store
+        context_read_tool_name = read_tool.name
+
+    runtime_multiagent_provider = None
+    if wiring.multiagent_provider is not None and session_store is not None:
+        # CapabilityWiring is cached across requests; activation state is not.
+        # Give each root Runtime its own provider and DelegateTool while descendants
+        # inherit that same registry/provider through AgentFactory.
+        runtime_multiagent_provider = wiring.multiagent_provider.new_runtime_instance()
+
+    for capability_tool in wiring.tools:
+        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席
+        # （不注册 delegate，单代理照常），与 optional capability 语义一致。
+        if isinstance(capability_tool, DelegateTool) and session_store is None:
+            logger.warning(
+                "multiagent 已启用但未提供 session_store，delegate 工具降级缺席"
+            )
+            continue
+        if isinstance(capability_tool, DelegateTool) and runtime_multiagent_provider is not None:
+            # 结论 ref 化（W-31.3 / #415）：注入**同一个** context_artifact_store
+            #（上面选出，ContextBuilder 共用）——不得新建第二个 store，否则
+            # 出现"写进 A、从 B 读"的静默错配。未选中 store（None）= fail-open
+            # 不外置，与 W-03 整体关闭语义同口径。
+            capability_tool = DelegateTool(
+                runtime_multiagent_provider, max_delegations=root_max_delegations,
+                artifact_store=context_artifact_store,
+                summary_overflow_tokens=settings.subagent_summary_overflow_tokens,
+            )
+        registry.register(capability_tool)
+
+    return _RootTooling(
+        registry=registry,
+        overflow_handler=overflow_handler,
+        context_artifact_store=context_artifact_store,
+        context_read_tool_name=context_read_tool_name,
+        runtime_multiagent_provider=runtime_multiagent_provider,
+    )
+
+
+def root_registry_tool_names(
+    settings: Settings,
+    wiring: CapabilityWiring,
+    *,
+    session_id: str,
+    session_store: JsonlSessionStore | None,
+) -> frozenset[str]:
+    """根 registry 名字集的**零副作用**计算——pre-CAS session 名字校验专用。
+
+    #564 审查 P2-1：validator 若走完整 `_build_tooling`，`LocalSubprocessSandbox
+    .__init__` 会对 workspace `mkdir`，发生在 service 的归属对账（#266
+    `WorkspaceNotFound` 守卫）**之前** ⇒ 坏名 422 会把已删 cwd 凭空重建、合法名
+    resume 掩蔽守卫。名字集不依赖 sandbox 实例：本地工具"构造器只存依赖"（既有
+    判定，`tests/agent/test_tool_scope_reconciliation.py` 传 None 读 `.name`）；
+    读回工具名只由 Provider 选择决定（store 构造无副作用，mkdir 在写路径）；
+    capability 工具在 wiring 里已是实例。`_build_tooling` 与本函数必须同源一致
+    ——`tests/test_assembly_root_registry_names.py` 三方对账（真实装配 /
+    `_build_tooling` / 本函数），漂移即红灯。
+    """
+    names: set[str] = {tool_cls(None).name for tool_cls in BUILTIN_LOCAL_TOOLS}
+    # W-26（#380）：`update_plan` 无条件注册（与 `_build_tooling` 同一句判定）。
+    names.add(UpdatePlanTool().name)
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
+        names.add(selection.read_tool(None).name)
+    for capability_tool in wiring.tools:
+        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
+        # 与 `_build_tooling` 的同名分支逐字同判（名字在不在，两边必须一致）。
+        if isinstance(capability_tool, DelegateTool) and session_store is None:
+            continue
+        names.add(capability_tool.name)
+    return frozenset(names)
+
+
 async def build_runtime(
     *,
     settings: Settings,
@@ -204,6 +365,7 @@ async def build_runtime(
     local_fuse_source: str = SOURCE_DEPLOYMENT,
     stuck_evidence: StuckEvidencePort | None = None,
     session_budget: SessionBudgetPort | None = None,
+    session_declared_limits: SessionLimits | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -233,6 +395,11 @@ async def build_runtime(
     服务层——它才掌握"本次生效策略"的全部输入，且恢复侧要用**同一份函数**现算再
     比较（ADR-0048 D8）。默认 None ⇒ 不观测（那两条依据届时按"无快照可比"409，
     "相关 steer"那条不受影响），CLI / 单测的既有路径逐字不变。
+
+    `session_declared_limits`（`#564`）：本次请求**点名**的 session 声明（区别于
+    `session_budget.limits` 的账行现值——恢复通道两者可以不同）。非 None 时按
+    **根 registry** 判注册名 422（树级语义）；账行现值里的陈旧名降告警不拒绝，
+    见校验块内注释。
     """
     # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
     # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
@@ -281,9 +448,13 @@ async def build_runtime(
         fallback_model = create_chat_model(
             config.fallback, reasoning_effort=reasoning_effort,
         )
-    # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
-    # 同一实例（全局在飞模型调用数的语义）。
-    model_call_gate = ModelCallGate(settings.model_max_concurrency)
+    # 进程级模型并发闸（#89 / #559 修复）：闸实例归 wiring（装配生命周期）所有，
+    # 同一进程内所有 build_runtime 共享同一实例（全局在飞模型调用数的语义——
+    # 跨 Session / child / fallback / 摘要一致）。手搓 wiring（直接
+    # CapabilityWiring()，无装配生命周期）保持 None ⇒ 退回每次新建，行为同历史。
+    model_call_gate = wiring.model_call_gate
+    if model_call_gate is None:
+        model_call_gate = ModelCallGate(settings.model_max_concurrency)
 
     # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
     # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
@@ -292,51 +463,23 @@ async def build_runtime(
     # （agent_profile → registry.filtered）在本函数下游与 sandbox 解析无关，恢复
     # 入口的授权重建由调用方（service.resume_and_launch）按子会话 AgentSpec 传
     # agent_profile 兑现——只放开这一半会放大子会话工具面，两条必须一起成立。
-    if workspace_registry.exists(session_id):
-        sandbox = workspace_registry.get(session_id)
-    else:
-        sandbox = workspace_registry.create(session_id, workspace_root=workspace)
-    registry = ToolRegistry()
-    for tool_cls in BUILTIN_LOCAL_TOOLS:
-        # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
-        # Settings，装配层是唯一的接线点；接不上就成死键（tests/test_assembly_bash_budget.py）。
-        kwargs = (
-            {"timeout_seconds": settings.bash_timeout_seconds}
-            if tool_cls is BashTool
-            else {}
-        )
-        registry.register(tool_cls(sandbox, **kwargs))
-
-    # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
-    # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
-    # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
-    registry.register(UpdatePlanTool())
-
-    # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
-    # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
-    # 选择口径（优先级 + 半配置判定）收敛在 `storage/artifact_select.py`，读路径
-    # （`web/artifacts.py`）用同一个函数——两处各写一遍 if 级联就等于给漂移留门
-    # （#192 批 1 审查发现）。
-    overflow_handler = None
-    context_artifact_store = None
-    context_read_tool_name: str | None = None
-    selection = select_artifact_store(settings, session_id)
-    if selection is not None:
-        read_tool = selection.read_tool(selection.store)
-        registry.register(read_tool)
-        # 摘要里的读回提示点名**这个**工具（#186 AC4）：S3 配 `inspect_artifact`，
-        # MinIO / Local 配 `read_artifact`。名字从选择器**实例化出来的那个工具**上取，
-        # 不在这里再填一个字面量——那样等于把"配对关系"这份知识写了第二遍。
-        overflow_handler = ArtifactOverflowHandler(
-            selection.store,
-            settings.artifact_overflow_chars,
-            read_tool_name=read_tool.name,
-        )
-        # W-03 (#347)：ContextBuilder 的旧 Tool Result 裁剪与 overflow 共用同一个
-        # store 与同一个真实读回工具名——骨架行的回读提示必须指向**确实配对**的
-        # 工具（名字不得写死）。store 未选中（None）→ builder 裁剪整体关闭。
-        context_artifact_store = selection.store
-        context_read_tool_name = read_tool.name
+    # （sandbox 规则与 registry 构造在 `_build_tooling`——与 #564 的 pre-CAS 校验
+    # 同一事实源，见其 docstring。）
+    tooling = _build_tooling(
+        settings, wiring,
+        session_id=session_id, workspace=workspace,
+        workspace_registry=workspace_registry, session_store=session_store,
+        agent_profile=agent_profile,
+    )
+    registry = tooling.registry
+    overflow_handler = tooling.overflow_handler
+    context_artifact_store = tooling.context_artifact_store
+    context_read_tool_name = tooling.context_read_tool_name
+    runtime_multiagent_provider = tooling.runtime_multiagent_provider
+    # 根 registry（收窄前）的名字集：session 作用域判据的依据（#564 裁决的树级
+    # 语义——session 预算横跨会话树，"整棵树调得到"以根为准，不看本 runtime 的
+    # 收窄面）。在收窄**前**取，一旦错过就无从对比。
+    root_registry_names = frozenset(tool.name for tool in registry.list())
 
     # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
     # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
@@ -352,33 +495,6 @@ async def build_runtime(
     elif approval_callback is None:
         async def approval_callback(_req):  # type: ignore[no-redef]
             return ApprovalResponse(approved=True, reason="auto-approve")
-
-    runtime_multiagent_provider = None
-    if wiring.multiagent_provider is not None and session_store is not None:
-        # CapabilityWiring is cached across requests; activation state is not.
-        # Give each root Runtime its own provider and DelegateTool while descendants
-        # inherit that same registry/provider through AgentFactory.
-        runtime_multiagent_provider = wiring.multiagent_provider.new_runtime_instance()
-
-    for capability_tool in wiring.tools:
-        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席
-        # （不注册 delegate，单代理照常），与 optional capability 语义一致。
-        if isinstance(capability_tool, DelegateTool) and session_store is None:
-            logger.warning(
-                "multiagent 已启用但未提供 session_store，delegate 工具降级缺席"
-            )
-            continue
-        if isinstance(capability_tool, DelegateTool) and runtime_multiagent_provider is not None:
-            # 结论 ref 化（W-31.3 / #415）：注入**同一个** context_artifact_store
-            #（:311-328 选出，ContextBuilder 共用）——不得新建第二个 store，否则
-            # 出现"写进 A、从 B 读"的静默错配。未选中 store（None）= fail-open
-            # 不外置，与 W-03 整体关闭语义同口径。
-            capability_tool = DelegateTool(
-                runtime_multiagent_provider, max_delegations=root_max_delegations,
-                artifact_store=context_artifact_store,
-                summary_overflow_tokens=settings.subagent_summary_overflow_tokens,
-            )
-        registry.register(capability_tool)
 
     # agent_profile tool_scope 收窄（ADR-0020a）：仅在非 main profile 时过滤——
     # main 的 _MAIN_TOOLS 是全量的超集，filter 等价不过滤，但若未来新增了一个
@@ -401,6 +517,33 @@ async def build_runtime(
         validate_tool_call_limits_registered(
             run_budget.limits, registered=[tool.name for tool in registry.list()],
         )
+    # session 作用域（#564 裁决 (a)+(b)）——两个不同的对象、两条不同的处置：
+    # - **请求声明**（session_declared_limits，本次请求点名的那份）：422，判据 =
+    #   **根 registry**（树级语义）。session 预算横跨会话树，本 runtime 收窄掉的
+    #   工具树根仍调得到（child registry ⊆ 根 registry），按收窄面判会误杀合法
+    #   委派配额。service 层的 resume 通道已在 eager CAS **之前**核过同一份声明
+    #   （坏名永不触碰账行），这里是 create 等其余通道的无副作用拒绝点。
+    # - **账行现值**（session_budget.limits，可能含历史合法名）：陈旧名（能力下线、
+    #   工件 store 切换）**降告警不拒绝**——修复前按收窄面重核 422，会让一次打错的
+    #   请求或一次能力下线把会话毒成不可恢复态（K8s 对事后悬空引用、AWS IAM 对
+    #   悬空 ARN 都是"响亮暴露但不 brick"同型）。配额对陈旧名不再生效。
+    if session_declared_limits is not None:
+        validate_tool_call_limits_registered(
+            session_declared_limits, registered=sorted(root_registry_names),
+            scope="session",
+        )
+    if session_budget is not None:
+        stale_names = sorted(
+            name for name in session_budget.limits.tool_call_limits
+            if name not in root_registry_names
+        )
+        if stale_names:
+            logger.warning(
+                "session 账行含当前 registry 不存在的配额名 %s（能力下线 / 工件 "
+                "store 切换等历史原因）：配额对该工具不再生效；按 #564 裁决 (b) "
+                "告警不拒绝，422 只属于请求声明",
+                stale_names,
+            )
 
     # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
     # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。
@@ -488,6 +631,8 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            # #559：摘要调用与主循环同闸（进程级在飞 ≤N 的语义，见上）。
+            model_call_gate=model_call_gate,
             # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
             plan_reinject_every_messages=settings.plan_reinject_every_messages,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选

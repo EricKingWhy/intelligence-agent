@@ -26,7 +26,7 @@ from agent_harness.session.derive import (
     derive_protected_facts,
     serialize_protected_facts,
 )
-from agent_harness.session.event import RUN_PAUSED
+from agent_harness.session.event import RUN_PAUSED, SessionEvent
 from agent_harness.session.fork import fork_session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
@@ -110,17 +110,28 @@ async def test_fact_registry_does_not_duplicate_every_user_turn(tmp_path):
     ] == [initial_goal, later_instruction]
 
 
-def test_compaction_keeps_raw_user_turns_in_section_one_and_registry_minimal():
+def test_compaction_target_section_rides_protected_fact_channel_not_raw_turns():
+    """#556 裁决 C：原始用户轮次不再逐字进目标节——目标走 protected_facts 通道。
+
+    旧契约（F-COMP-1 根因）把每条 HumanMessage 逐字 extend 进 §1；C 之后 §1 只
+    承载**当前生效目标**（facts 里 source_seq 最大的 user_goal），叙述性补充
+    靠 SessionEvent 回读；保护事实节仍按 facts 在场与否如实投影。
+    """
     first = "完成 W-02，保留 ID ORD-84721。"
     second = "后来补充：先跑测试。"
+    facts = derive_protected_facts([
+        SessionEvent(seq=1, type=USER_MESSAGE, session_id="s",
+                     data={"content": first}),
+    ])
     sections = _programmatic_summary_sections(
-        [HumanMessage(content=first), HumanMessage(content=second)]
+        [HumanMessage(content=first), HumanMessage(content=second)], facts,
     )
 
-    raw_user_turns = json.loads(sections["## 原始目标与用户约束"])
-
-    assert raw_user_turns == [first, second]
-    assert sections["## 保护事实表"] == "(none)"
+    target = sections["## 原始目标与用户约束"]
+    assert first in target, "当前生效目标（facts 通道）逐字在场"
+    assert second not in target, "叙述性补充不再逐字进目标节"
+    assert "已归档" not in target, "单一 goal ⇒ 无历史可归档"
+    assert sections["## 保护事实表"] != "(none)", "goal fact 在场 ⇒ 事实表如实投影"
 
 
 @pytest.mark.asyncio
