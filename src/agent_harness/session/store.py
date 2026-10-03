@@ -340,6 +340,7 @@ class JsonlSessionStore:
                     f"Session '{session_id}' 已被硬删，拒绝重建事件日志"
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._neutralize_torn_tail(path)
             last = self._last_seq_on_disk(session_id)
             if event.seq <= last:
                 raise SeqConflict(
@@ -355,6 +356,64 @@ class JsonlSessionStore:
                 self._last_seq[session_id] = (
                     event.seq, stat.st_size, stat.st_mtime_ns,
                 )
+
+    def _neutralize_torn_tail(self, path: Path) -> None:
+        """append 前中立化「无换行撕裂尾段」（#565 双轴收敛 P2 加固）。
+
+        崩溃可能把 append 撕成两截：line+\\n 只落了前缀。#565 读侧把这种
+        尾段按「写入中断预期形状」宽容，但写侧若不处置就追加，新记录会拼进
+        尾段字节——宽容的预期形状变成完整坏行，事件从读投影消失且该会话
+        此后所有恢复入口被永久拒绝（etcd WAL 对同型问题的注释：目的即防止
+        后续 append 产生帧错误）。
+
+        成熟产品语义（§6.1 方案依据，四独立来源收敛——撕裂尾段是崩溃预期
+        形状，中立化后才能续写，有效前缀保留）：
+
+        - Redis AOF：载入丢弃最后一个不完整命令，记
+          ``Truncating the AOF at offset N``（aof-load-truncated yes 默认保可用）；
+        - etcd WAL：``ReadAll`` 写模式 seek 到最后有效记录偏移 ``ZeroToEnd``；
+        - SQLite WAL：恢复停在最后有效校验帧（mxFrame），坏尾被无视后安全覆写；
+        - LevelDB：损坏→跳块，writer 只写完整 record。
+
+        处置分两支（「截到最后**有效**记录」而非「截到上一个记录」）：
+        尾段可解析为完整事件（只缺终止符，如写到 ``\\r`` 后断）→ 补终止符
+        封印保留；不可解析 → 截断到最后换行边界，脱敏指纹（offset/len/sha256，
+        不含内容）进诊断日志。原字节不保留在主日志——保留撕裂形状的正是本
+        修复要消除的故障面（Redis/etcd/SQLite 均不保存撕裂字节）。必须在
+        会话写锁内调用（并发 append 各自先中立化会互相打架）。
+        """
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return
+        if not data or data.endswith(b"\n"):
+            return
+        boundary = data.rfind(b"\n") + 1
+        tail = data[boundary:]
+        event, _corrupt, _partial = self._classify_event_line(
+            tail, path_name=path.name, lineno=data.count(b"\n") + 1,
+            byte_offset=boundary,
+        )
+        if event is not None:
+            with path.open("ab") as fh:
+                fh.write(b"\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            logger.warning(
+                "补齐撕裂尾段终止符 %s offset=%d len=%d（完整事件缺换行，封印保留）",
+                path.name, boundary, len(tail),
+            )
+            return
+        with path.open("r+b") as fh:
+            fh.truncate(boundary)
+            fh.flush()
+            os.fsync(fh.fileno())
+        logger.warning(
+            "截断撕裂尾段 %s offset=%d len=%d sha256=%s"
+            "（写入中断的未完成记录，截断后 append 从记录边界续写；"
+            "原字节不保留，指纹供事后对账）",
+            path.name, boundary, len(tail), hashlib.sha256(tail).hexdigest(),
+        )
 
     @staticmethod
     def _iter_event_lines(
