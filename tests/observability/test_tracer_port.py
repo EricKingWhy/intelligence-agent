@@ -26,6 +26,8 @@ from agent_harness.observability import LangfuseSink
 from agent_harness.observability.port import NullSpan, NullTracer, Span, Tracer
 from agent_harness.session import (
     CONTEXT_COMPACTED,
+    MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     MODEL_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -353,12 +355,30 @@ async def test_exploding_sink_leaves_run_events_identical_to_no_sink(tmp_path):
     assert [e.type for e in exploding_session.events] == [
         e.type for e in baseline_session.events
     ]
+
+    def normalized_event_data(event):
+        data = _timing_normalized(event.data)
+        if event.type in (MODEL_REQUEST_STARTED, MODEL_REQUEST):
+            data.pop("request_id", None)
+        return data
+
+    def assert_request_pairs(session):
+        starts = [e for e in session.events if e.type == MODEL_REQUEST_STARTED]
+        requests = [e for e in session.events if e.type == MODEL_REQUEST]
+        assert len(starts) == len(requests)
+        assert [e.data["request_id"] for e in starts] == [
+            e.data["request_id"] for e in requests
+        ]
+        assert all(start.seq < request.seq for start, request in zip(starts, requests))
+
     # 逐字段比较：含 tool/result 的 ToolResult 序列化（重试链 attempt/metadata
     # 在内）与 run 终态——旁路故障不得改变任何 durable 事实（不变量 #21）。
     # 唯一豁免：计时字段（同一逻辑跑两次必然不同，非确定性，不属 durable 事实）。
-    assert [_timing_normalized(e.data) for e in exploding_session.events] == [
-        _timing_normalized(e.data) for e in baseline_session.events
+    assert [normalized_event_data(e) for e in exploding_session.events] == [
+        normalized_event_data(e) for e in baseline_session.events
     ]
+    assert_request_pairs(exploding_session)
+    assert_request_pairs(baseline_session)
 
 
 @pytest.mark.asyncio
