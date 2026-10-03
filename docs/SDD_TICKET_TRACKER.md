@@ -6965,3 +6965,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **双轴 bounded re-review（§8.3-4）**：Spec 轴 **PASS-WITH-FINDINGS P0:0 P1:0 P2:0 P3:0 P4:2**（登记不修：①ADR-0047 §4 第 5 条措辞在重排后仍真、可再精确一行 ②_reconcile_pending 直测缺口既存、被 Fix B 源头消解）；Standards 轴 **PASS-WITH-FINDINGS P0:0 P1:1 P2:0 P3:0 P4:0**（P1=环境异常非代码缺陷：core.bare=true 审查窗口内第二次被外部进程改写，审查者实证探针无嫌疑、树完好；本会话两次修复，成因待用户排查）。变异探针 M1/M2（副本内）全红证判别力。台账行 `docs/review_ledger.d/a-line-findings-fix-91cac896-e4ae5289.tsv`；覆盖闸门 exit 0。
 - **批准链执行完毕（2026-10-03，用户批准后执行）**：push → **PR #598** → CI gate0 32s 绿 + gitleaks 绿 → **merge `33fff438`**；本地 main 已 ff 对齐。本节补记随 docs PR 送达 main（用户批准；先例 #578/#594/#595），补记落 main 后远端分支 `fix/batch-findings-write-shape-recovery-order` 删除（用户批准；双条件核验：tip 为 main 祖先 + PR MERGED）。
 - **§14.9 回补通知**：A 线 findings 修复线已集成进 main（`33fff438`）；任何在途线下次开工前按手册 §2 获取新基准 `33fff438`，勿以旧缓存为基准。
+
+---
+
+### 2026-10-03 · 集成区 capability/docs 批（#589 → #588 → #370 → #338，一次一票）
+
+> 分支 `fix/i588-i589-i370-i338-capability-docs` 自 main `e25828aa`（本 clone = 集成线，施工走短分支，main 不动）。票面顺序按用户工单；逐票 commit + Tracker 登记。
+
+- **#589（P3 documentation，纯文档勘误，已交付）**：ADR-0011 Q4 补「2026-10-03 案 A 实施勘误」注记——「前缀」措辞更正为：声明句（`_FRAME_UNTRUSTED_SKILL`）是注册表 section `frame:untrusted_skill`（`src/agent_harness/prompt/builtin.py`，与 knowledge/websearch/tool_output 同族同槽位）的 fragment，组装进 ToolResult `message`，技能正文独占 `data["content"]`（message/data 字段级 + section 级隔离）；声明句文本与 Q4 引号内逐字节一致（已实读核实），合同实质不变。改动仅 `docs/adr/0011-skills-progressive-disclosure.md`（+2 行），零代码零测试；纯文档豁免方案依据块（协议 §1.3）。
