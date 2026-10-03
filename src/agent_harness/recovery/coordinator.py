@@ -150,7 +150,7 @@ _RECONCILE_STATES = frozenset(
 )
 
 #: Ledger 终态：result_json 就是准确的恢复事实来源（07 §6）。
-_TERMINAL_STATES = frozenset(
+TERMINAL_STATES = frozenset(
     {
         OperationState.SUCCEEDED,
         OperationState.FAILED,
@@ -357,6 +357,29 @@ class RecoveryCoordinator:
                     "高风险副作用（不变量 #14）。注入 ReconcileCallback 后可重试 recover()。"
                 )
 
+            # #337：陈旧审批的 fail-closed 结清。操作约束：这是恢复链里唯一且幂等的
+            # 结清入口——判据只读 durable 流（与完成闸门谓词 2 同一份
+            # unresolved_approval_ids），只为仍无配对的 id 各落一条 deny（先写入者胜，
+            # 与取消路径 session/approval.py 的 expire 同一把尺子）；绝不结清成批准，
+            # 绝不因此重跑工具调用（副作用处置仍走 Ledger 终态 / 人工裁决路径，
+            # 不变量 #14）。成因与机制叙述见
+            # docs/adr/0047-completion-quiescence-and-completion-policy.md §4 第 5 条。
+            # 位置约束（批次收口 Standards 轴 P4-1）：必须在步骤 6 合成**之前**——
+            # UNRESOLVED 悬空的合成文案「审批未通过」以 deny 结清为 durable 依据，
+            # 结清后落账会在"恢复中途被杀"的窗口里留下先于依据的文案；先结清则
+            # 窗口反转为「依据已落、文案未落」，下一次 recover 重新合成即自愈
+            # （规格 07 §9 的顺序也是 reconcile → restore consistency）。
+            # 放在 ReconcileRequired 整体拒绝之后：被拒绝的 recover 仍然零写入。
+            for approval_id in unresolved_approval_ids(session.events):
+                session.append(
+                    PERMISSION_RESOLVED,
+                    {
+                        "approval_id": approval_id,
+                        "decision": PermissionDecision.DENY.value,
+                        "reason": RECOVERY_STALE_APPROVAL_REASON,
+                    },
+                )
+
             # 步骤 6（写入阶段）：按决策 append 合成事件，restore 一致性。
             for item in plan:
                 if item.needs_call_event:
@@ -426,22 +449,8 @@ class RecoveryCoordinator:
                         result_json=item.content,
                     )
 
-            # #337：陈旧审批的 fail-closed 结清。操作约束：这是恢复链里唯一且幂等的
-            # 结清入口——判据只读 durable 流（与完成闸门谓词 2 同一份
-            # unresolved_approval_ids），只为仍无配对的 id 各落一条 deny（先写入者胜，
-            # 与取消路径 session/approval.py 的 expire 同一把尺子）；绝不结清成批准，
-            # 绝不因此重跑工具调用（副作用处置仍走 Ledger 终态 / 人工裁决路径，
-            # 不变量 #14）。成因与机制叙述见
-            # docs/adr/0047-completion-quiescence-and-completion-policy.md §4 第 5 条。
-            for approval_id in unresolved_approval_ids(session.events):
-                session.append(
-                    PERMISSION_RESOLVED,
-                    {
-                        "approval_id": approval_id,
-                        "decision": PermissionDecision.DENY.value,
-                        "reason": RECOVERY_STALE_APPROVAL_REASON,
-                    },
-                )
+            # #337 结清已在步骤 6 之前落账（见其位置约束注释）：UNRESOLVED 悬空
+            # 合成的「审批未通过」文案在此处落账时，durable 依据已先行在场。
 
             # 人工裁决只推进到 NEED_RECONCILE 并记录事实；callback 在锁外等待。
             reconciled_tool_call_ids = {
@@ -597,8 +606,9 @@ class RecoveryCoordinator:
                     agent_id=None,
                 )
             if approval_outcome is ApprovalOutcome.UNRESOLVED:
-                # kill 时审批无决议——本 recover() 内 #337 会把它结清为 deny
-                # （先于会话投影被消费），"审批未通过"是结清后的 durable 事实。
+                # kill 时审批无决议——#337 结清在本 recover() 内先于本合成落账
+                # （见 recover() 的位置约束注释），"审批未通过"落账时依据已
+                # durable 在场。
                 content = DANGLING_NOT_EXECUTED_DENIED
             elif approval_outcome is ApprovalOutcome.APPROVED:
                 # 批准已落盘、接纳点未到：kill 落在 resolved → Ledger 建账的窗口。
@@ -620,7 +630,7 @@ class RecoveryCoordinator:
         # 让 derive_messages 投出的 AIMessage.tool_calls 带真实入参而非空字典。
         args = _args_from_identity(operation.args_identity)
 
-        if operation.state in _TERMINAL_STATES:
+        if operation.state in TERMINAL_STATES:
             return _Synthesis(
                 tool_call_id=tool_call_id,
                 tool_name=operation.tool_name,

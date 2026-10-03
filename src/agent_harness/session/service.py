@@ -174,7 +174,7 @@ from agent_harness.session.store import (
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.local_artifact import discard_local_artifacts
-from agent_harness.storage.operation import OperationState, needs_reconcile
+from agent_harness.storage.operation import needs_reconcile
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -2812,9 +2812,11 @@ class SessionService:
         （该分流是其唯一规则源）：悬空调用只认 RUNNING/UNKNOWN/NEED_RECONCILE
         （终态 + "副作用未证"标记的悬空行由协调器按 result_json 确定性合成，不需
         要裁决）；非悬空行按 ``storage.needs_reconcile`` 全量（#315 的未证形态）。
-        终态三元组在此内联镜像协调器的 ``_TERMINAL_STATES``——Ledger 状态机里
-        终态就这三个，漂移会被 recover 覆盖性预检的集成测试挡住。
+        终态三元组经既有懒导入通道复用协调器的 ``TERMINAL_STATES``（批次收口
+        Spec 轴 P3-3 单源化：不再内联镜像，漂移在源头不可能发生）。
         """
+        from agent_harness.recovery.coordinator import TERMINAL_STATES
+
         dangling_ids, _ = collect_dangling(events)
         operations = await self._operation_ledger.list_for_session(session_id)
         pending: list[dict] = []
@@ -2823,12 +2825,7 @@ class SessionService:
                 continue
             if (
                 operation.tool_call_id in dangling_ids
-                and operation.state
-                in {
-                    OperationState.SUCCEEDED,
-                    OperationState.FAILED,
-                    OperationState.CANCELLED,
-                }
+                and operation.state in TERMINAL_STATES
             ):
                 continue
             pending.append(

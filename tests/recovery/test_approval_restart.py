@@ -37,7 +37,7 @@ from agent_harness.session import (
     detect_dangling,
 )
 from agent_harness.session.approval import unresolved_approval_ids
-from agent_harness.session.event import PERMISSION_RESOLVED
+from agent_harness.session.event import PERMISSION_RESOLVED, TOOL_RESULT
 from agent_harness.storage import SqliteOperationLedger
 from agent_harness.tooling import (
     Tool,
@@ -196,3 +196,34 @@ async def test_kill_during_approval_wait_recovers_and_next_run_completes(
         "结清后下一次 run 必须能完成（不放宽谓词的证明：结清前谓词 2 为真）"
     )
     assert counter.calls == 0, "复活路径同样不重跑旧调用"
+
+
+@pytest.mark.asyncio
+async def test_stale_approval_settlement_lands_before_synthesis(
+    tmp_path: Path,
+) -> None:
+    """#337 deny 结清必须先于 UNRESOLVED 悬空合成的 tool/result 落账。
+
+    合成文案「工具未执行（审批未通过）」以 deny 结清为 durable 依据——结清
+    事件后落的话，恢复中途被杀的崩溃窗内投影先有文案、依据未落（批次收口
+    Standards 轴 P4-1）。正向顺序下窗口反转成「依据已落、文案未落」，下一次
+    recover 重新合成即自愈；规格 07 §9 的顺序也是 reconcile → restore
+    consistency。结清集合与决策输入不变，只换 append 顺序。
+    """
+    _crash(tmp_path)
+    store, ledger = await _open(tmp_path)
+
+    recovered = await _coordinator(store, ledger, tmp_path).recover(SESSION_ID)
+
+    events = recovered.events
+    settlement_idx = next(
+        i for i, e in enumerate(events) if e.type == PERMISSION_RESOLVED
+    )
+    synthesized_idx = next(
+        i
+        for i, e in enumerate(events)
+        if e.type == TOOL_RESULT and e.data.get("tool_call_id") == CALL_ID
+    )
+    assert settlement_idx < synthesized_idx, (
+        "deny 结清事件必须先于「审批未通过」合成 tool/result 落账"
+    )

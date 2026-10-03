@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -210,6 +210,38 @@ class TestWriteTool:
         monkeypatch.setattr(
             executor._registry._tools["write"]._sandbox, "write_text", boom
         )
+        result = await executor.execute(
+            _tool_call("write", {"path": "locked.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+
+    @pytest.mark.asyncio
+    async def test_write_permission_probe_survives_nonpath_sandbox_shape(
+        self, executor: ToolExecutor, monkeypatch
+    ):
+        """沙盒解析返回非实 Path 形态（DockerSandbox → PurePosixPath）时探针不炸。
+
+        `_target_is_directory` 假定 `resolve_within_workspace` 返回实 Path 才有
+        `.is_dir()`——DockerSandbox 覆写返回 PurePosixPath（无 `.is_dir()`，
+        AttributeError 不是 OSError），会从 PermissionError 分支逃逸，把本应
+        如实返回的 PERMISSION_DENIED 搅成崩溃（批次收口 Standards 轴 P3）。
+        形态不是实 Path ⇒ 探测按 False 处理——docstring 既有语义（探测失败
+        保持 PERMISSION_DENIED 旧行为），沙盒真实错误原样上抛。
+        """
+        sandbox = executor._registry._tools["write"]._sandbox
+        monkeypatch.setattr(
+            sandbox,
+            "resolve_within_workspace",
+            lambda path: PurePosixPath(path),
+        )
+
+        def boom(path: str, content: str) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(sandbox, "write_text", boom)
+
         result = await executor.execute(
             _tool_call("write", {"path": "locked.txt", "content": "x"})
         )
