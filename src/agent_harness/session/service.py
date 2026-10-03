@@ -2747,7 +2747,7 @@ class SessionService:
         cap = 5
         detail = "；".join(parts[:cap])
         if len(parts) > cap:
-            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志）"
+            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志与完整性报告）"
         raise EventLogCorruptError(
             f"Session '{session_id}' 事件日志损坏，恢复已拒绝：{detail}。"
             "请按 store WARNING 日志的定位记录核对原字节后人工修复文件；修复前"

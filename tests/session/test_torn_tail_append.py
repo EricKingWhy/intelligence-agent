@@ -179,7 +179,7 @@ def test_structurally_invalid_tail_truncates(
     assert tail not in after, "结构非法尾段字节不得留在主日志"
     assert hashlib.sha256(tail).hexdigest() in "\n".join(_repair_warnings(caplog))
     # P2-2 钉：探测分类不得发「损坏行」WARNING——尾段随后就被本方法截断/封印，
-    # 「原字节保留在文件中未改动」的文案对探测模式是假话（log_corrupt=False）
+    # 「原字节保留在文件中未改动」的文案对探测模式是假话（log_findings=False）
     assert not [r for r in caplog.records if "损坏行" in r.getMessage()]
 
 
