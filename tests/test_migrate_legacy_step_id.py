@@ -14,7 +14,13 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentRuntime
-from agent_harness.session import MODEL_COMPLETED, RUN_FAILED, RUN_STARTED, USER_MESSAGE
+from agent_harness.session import (
+    MODEL_COMPLETED,
+    MODEL_REQUEST_STARTED,
+    RUN_FAILED,
+    RUN_STARTED,
+    USER_MESSAGE,
+)
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from scripts.migrate_legacy_step_id import (
@@ -240,11 +246,11 @@ class TestAlignsWithFixedRuntime:
         await runtime.run(session, "你好")
         await runtime.run(session, "我是谁")
         real = [e.to_dict() for e in session.events]
+        assert sum(e.get("type") == MODEL_REQUEST_STARTED for e in real) == 2
 
-        # 退化成旧后端语义：每个 run 的 step_id 从 1 重数。旧后端一个 model 步只落
-        # **一条**带号事件，所以退化按「步」而不是按「事件」编号——`#313` 起同一个
-        # model 步有两事件（`model/request` 请求账目 + `model/completed` 决策），
-        # 它们共享同一个步号，不能各占一号（那会造出一份旧后端从未产出过的数据）。
+        # 退化成旧后端语义：每个 run 的 step_id 从 1 重数。按「步」而不是按
+        # 「事件」编号：`#604` 的 started、`#313` 的 request 与 completed 都属于
+        # 同一个 model attempt，共享同一个步号。
         legacy, step_of_counter, next_step = [], {}, 0
         for event in real:
             etype = event.get("type")
@@ -260,6 +266,6 @@ class TestAlignsWithFixedRuntime:
 
         # 前提检查：两轮各自从 1 起算（同一 session 内 step_id 重叠 —— 迁移要治的就是它）
         assert [e.get("step_id") for e in legacy
-                if e.get("step_id") is not None] == [1, 1, 1, 1]
+                if e.get("step_id") is not None] == [1, 1, 1, 1, 1, 1]
         migrated_ids, _, _ = normalize_step_ids(legacy)
         assert migrated_ids == [e.get("step_id") for e in real]

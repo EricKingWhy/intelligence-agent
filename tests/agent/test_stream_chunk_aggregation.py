@@ -28,7 +28,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage
 
 from agent_harness.agent import AgentRuntime
-from agent_harness.session import MODEL_COMPLETED, Session
+from agent_harness.session import MODEL_COMPLETED, MODEL_REQUEST_STARTED, Session
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from tests.conftest import make_session
 
@@ -272,7 +272,8 @@ async def test_empty_stream_is_reported_as_empty_response(tmp_path):
     events = [e async for e in runtime.run_stream(session, "hi")]
 
     assert [e.type for e in events] == [
-        "user/message", "run/started", "model/started", "model/request",
+        "user/message", "run/started", "model/started", MODEL_REQUEST_STARTED,
+        "model/request",
         "model/failed", "run/failed",
     ]
     assert all(e.type != MODEL_COMPLETED for e in session.events)
@@ -282,7 +283,8 @@ async def test_empty_stream_is_reported_as_empty_response(tmp_path):
     runtime_b = _build_runtime(_ChunkScriptModel([[AIMessageChunk(content="")]]))
     events_b = [e async for e in runtime_b.run_stream(session_b, "hi")]
     assert [e.type for e in events_b] == [
-        "user/message", "run/started", "model/started", "model/request",
+        "user/message", "run/started", "model/started", MODEL_REQUEST_STARTED,
+        "model/request",
         "model/failed", "run/failed",
     ]
 
