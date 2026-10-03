@@ -36,7 +36,7 @@ _DATA_PREFIX = "data:"
 
 
 def _app(tmp_path: Path):
-    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     return create_app(settings, enable_cors=False)
 
 
