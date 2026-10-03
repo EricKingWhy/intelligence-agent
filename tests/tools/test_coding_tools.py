@@ -217,6 +217,64 @@ class TestWriteTool:
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.PERMISSION_DENIED
 
+    # ── #610：before-read 必须吞掉 POSIX 形态，形态映射分支才可达 ──
+
+    @pytest.mark.asyncio
+    async def test_write_before_read_survives_posix_directory_form(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox, monkeypatch
+    ):
+        """write 目标是目录 + before-read 抛 POSIX IsADirectoryError → INVALID_ARGUMENT。
+
+        #610（gate1 ubuntu 红，`6c9ca07e` 起）：Windows 上「写目标是目录」在
+        before-read 报 PermissionError（旧元组接得住）⇒ 本地绿；Linux 报
+        IsADirectoryError——旧 except 元组 ``(FileNotFoundError, PermissionError)``
+        接不住 ⇒ 异常逃逸 ``execute()`` 被 ToolExecutor 包装成 TOOL_EXECUTION_ERROR，
+        73-117 行的 INVALID_ARGUMENT 映射分支永远走不到。本测在 ``sandbox.read_text``
+        缝上注入 POSIX 异常类，把 Linux 语义跨平台确定性复现（本机无 Linux/WSL，
+        修复后由 ubuntu CI 做原生平台确认）；红 = TOOL_EXECUTION_ERROR（Linux 症状
+        逐字），绿 = 写路径既有分支映射 INVALID_ARGUMENT（Windows 走 PermissionError
+        分支、Linux 走 IsADirectoryError 分支，两分支 message 同源）。
+        """
+        (sandbox.workspace_root / "sub").mkdir()
+
+        def boom(path: str) -> str:
+            raise IsADirectoryError(21, "Is a directory (POSIX form injected)")
+
+        monkeypatch.setattr(sandbox, "read_text", boom)
+        result = await executor.execute(
+            _tool_call("write", {"path": "sub", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "目录" in result.result.message
+        assert "sub" in result.result.message
+
+    @pytest.mark.asyncio
+    async def test_write_before_read_survives_posix_notdir_form(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox, monkeypatch
+    ):
+        """父路径是文件 + before-read 抛 POSIX NotADirectoryError → INVALID_ARGUMENT。
+
+        #610 同族第二形态：Linux 上 ``open('file.txt/child.txt')`` 报
+        NotADirectoryError（Windows 报 FileNotFoundError，旧元组接得住）——
+        不被 before-read 吞掉就会逃逸成 TOOL_EXECUTION_ERROR。修复后 Windows 走
+        FileExistsError 分支、Linux 走 NotADirectoryError 分支，message 同源。
+        """
+        sandbox.write_text("file.txt", "occupied")
+
+        def boom(path: str) -> str:
+            raise NotADirectoryError(20, "Not a directory (POSIX form injected)")
+
+        monkeypatch.setattr(sandbox, "read_text", boom)
+        result = await executor.execute(
+            _tool_call("write", {"path": "file.txt/child.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "file.txt/child.txt" in result.result.message
+
     @pytest.mark.asyncio
     async def test_write_permission_probe_survives_nonpath_sandbox_shape(
         self, executor: ToolExecutor, monkeypatch
