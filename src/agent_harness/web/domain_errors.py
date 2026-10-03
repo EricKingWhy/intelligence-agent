@@ -12,10 +12,10 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `GET /api/sessions/{id}/events` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions` | WorkspaceNameInvalid（含子类 WorkspacePathInvalid）, InvalidDecision |
 | `GET /api/sessions/{id}/stream` | InvalidSessionId, SessionNotFound |
-| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict |
+| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/approve` | InvalidSessionId, SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, InvalidDecision, ApprovalAlreadyResolved |
-| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict |
+| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
 | `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
@@ -114,6 +114,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
@@ -188,6 +189,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # BUG-011：seq 冲突是「资源当前状态与请求冲突」，**不是**「资源不存在」——
     # 旧行为把它翻成 404（`send_message` 的 `Send failed: 404`），掩盖了日志损坏。
     SeqConflict: 409,
+    # #565：events.jsonl 完整性闸门（完整坏行 / seq 断层 / seq 重复）——恢复入口
+    # 拒绝继续。与 SeqConflict 同为 409 但**不可重试**：重读同一文件无用，需按
+    # 脱敏定位记录人工修复；文案里已带该指引。
+    EventLogCorruptError: 409,
 }
 
 #: workspace 包 / 文件系统异常 → HTTP status 的第二张表（WS-4 / #154）。

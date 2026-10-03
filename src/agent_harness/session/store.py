@@ -17,6 +17,7 @@ seq **分配**仍是 Session 聚合根的职责（``_next_seq``）；本层负�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -43,6 +44,51 @@ logger = logging.getLogger("agent_harness.session.store")
 #: 会话最初几条事件里；超过此数仍未找到则放弃（返回 None，前端有
 #: events 扫描降级路径）。只约束"解析几条"，不约束行计数（O(1)/行）。
 _SUMMARY_HEAD_PARSE_LIMIT = 200
+
+#: 损坏行原因词表（#565）：`invalid_utf8`（完整行字节流无效）/ `bad_json`（完整
+#: 换行结尾的坏 JSON 行，含坏尾行）/ `not_event_dict`（合法 JSON 非事件字典）/
+#: `bad_seq`（seq 缺失、类型非法或为负）/ `bad_event_fields`（事件字段解析失败）。
+#: 词表消费方是恢复入口的拒绝文案与测试锚点，只增不改义。
+CORRUPT_LINE_REASONS: frozenset[str] = frozenset(
+    {"invalid_utf8", "bad_json", "not_event_dict", "bad_seq", "bad_event_fields"}
+)
+
+
+@dataclass(frozen=True)
+class CorruptLine:
+    """一条损坏行的**脱敏定位记录**（#565 audit 增强块）。
+
+    只带定位元数据，**不带行内容**——events.jsonl 是 durable 事实，诊断记录
+    （日志 / 报告）不得把它未脱敏地复制进第二条通道；原字节保留在文件里
+    （append-only，本层从不改写），按 `byte_offset` / `sha256` 可人工定位核对。
+    """
+
+    lineno: int
+    byte_offset: int
+    byte_length: int
+    line_sha256: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class EventLogIntegrity:
+    """一次全量扫描的完整性报告（#565）。
+
+    - `corrupt_lines`：完整坏行（含坏尾行）——不是"未写完整的末尾片段"，不能
+      静默丢弃；恢复入口据此拒绝。
+    - `seq_gaps` / `seq_duplicates`：解析后事件序列的断层与重复。持久化写入
+      全部经 `Session.append`（max+1，store 守卫拒重号），**持久化 seq 连续是
+      写入侧不变量**——文件里的断层只可能来自坏行跳过或整行丢失（手工编辑 /
+      磁盘异常），两者都意味着 permission/tool 事实可能缺失。
+    """
+
+    corrupt_lines: tuple[CorruptLine, ...] = ()
+    seq_gaps: tuple[tuple[int, int], ...] = ()
+    seq_duplicates: tuple[int, ...] = ()
+
+    @property
+    def healthy(self) -> bool:
+        return not (self.corrupt_lines or self.seq_gaps or self.seq_duplicates)
 
 
 @dataclass(frozen=True)
@@ -313,18 +359,25 @@ class JsonlSessionStore:
     @staticmethod
     def _iter_event_lines(
         path: Path, limit: int | None = None
-    ) -> Iterator[tuple[int, str]]:
-        """Yield physical lines lazily; ``limit`` caps physical lines, not events.
+    ) -> Iterator[tuple[int, int, bytes]]:
+        """Yield ``(lineno, byte_offset, raw_bytes)`` lazily; ``limit`` caps physical lines.
 
         All Store readers share this one file-open/line-enumeration path. Parsing stays
-        in ``_parse_event_line`` so summary can count the whole file while parsing only
+        in the per-caller layer so summary can count the whole file while parsing only
         its bounded head and final non-empty line.
+
+        **二进制**遍历（#565）：损坏记录要保留**原字节**的偏移与摘要；文本模式
+        `errors="replace"` 会先把坏字节改写成 U+FFFD，事后算的 hash 就对不上磁盘。
+        行切分语义与文本模式一致（按 ``\\n``；最后一个物理段可无换行结尾——那是
+        写入中断的预期形状）。解析所需的 str 由调用方按需 decode。
         """
         if limit is not None and limit <= 0:
             return
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for lineno, raw_line in enumerate(handle, start=1):
-                yield lineno, raw_line
+        with path.open("rb") as handle:
+            offset = 0
+            for lineno, raw in enumerate(handle, start=1):
+                yield lineno, offset, raw
+                offset += len(raw)
                 if limit is not None and lineno >= limit:
                     break
 
@@ -358,22 +411,126 @@ class JsonlSessionStore:
             )
             return None
 
-    def read_events(self, session_id: str) -> list[SessionEvent]:
-        """读取 Session 的全部有效事件，跳过无法解析的损坏行。
+    @staticmethod
+    def _classify_event_line(
+        raw: bytes, *, path_name: str, lineno: int, byte_offset: int,
+    ) -> tuple[SessionEvent | None, CorruptLine | None, bool]:
+        """读路径单行分类（#565）：事件 / 损坏（带脱敏定位记录）/ 未写完整的末尾片段。
 
-        容错范围见 _parse_event_line——一行坏数据只损失该行，不得 brick
-        整个 session 的恢复。
+        `_parse_event_line` 的容错语义保留给摘要 / header 快路径；本方法服务
+        read_events 全量扫描，新增 audit 增强块要求的两条判别：
+
+        - **partial tail**（返回第三位 True）：最后一个物理段**没有换行结尾**
+          且自身解析不出来（JSON 语法坏 / 字节断在多字节字符中间）——写入中断
+          的预期形状，按恢复预期容错跳过（DEBUG，不算损坏）；
+        - **损坏**（返回 CorruptLine）：其余一切解析失败——完整换行结尾的坏
+          JSON 行（**含坏尾行**：换行说明写入已完成，内容坏是磁盘/编辑问题，
+          不是"还没写完"）、合法 JSON 非事件字典、seq 非法、事件字段非法、
+          完整行的无效 UTF-8。这类行会造成 seq 断层或丢 permission/tool 事实，
+          记 WARNING 并进报告，恢复入口据此拒绝。
+        """
+
+        def _corrupt(reason: str) -> tuple[SessionEvent | None, CorruptLine, bool]:
+            record = CorruptLine(
+                lineno=lineno,
+                byte_offset=byte_offset,
+                byte_length=len(raw),
+                line_sha256=hashlib.sha256(raw).hexdigest(),
+                reason=reason,
+            )
+            logger.warning(
+                "损坏行 %s:%d offset=%d len=%d sha256=%s reason=%s"
+                "（原字节保留在文件中未改动，恢复将拒绝）",
+                path_name, lineno, byte_offset, len(raw), record.line_sha256, reason,
+            )
+            return None, record, False
+
+        ends_with_newline = raw.endswith(b"\n")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if not ends_with_newline:
+                # 断在多字节字符中间且无换行：写入中断的预期形状
+                logger.debug(
+                    "末段未写完整 %s:%d（无效 UTF-8 半行，按写入中断跳过）",
+                    path_name, lineno,
+                )
+                return None, None, True
+            return _corrupt("invalid_utf8")
+        stripped = text.strip()
+        if not stripped:
+            return None, None, False
+        try:
+            parsed: Any = json.loads(stripped)
+        except json.JSONDecodeError:
+            if not ends_with_newline:
+                logger.debug(
+                    "末段未写完整 %s:%d（半行，按写入中断跳过）", path_name, lineno,
+                )
+                return None, None, True
+            return _corrupt("bad_json")
+        if not isinstance(parsed, dict):
+            return _corrupt("not_event_dict")
+        seq = parsed.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            return _corrupt("bad_seq")
+        try:
+            return SessionEvent.from_dict(parsed), None, False
+        except Exception:  # noqa: BLE001 — 事件字段损坏只损失该行（容错兜底，但记入报告）
+            return _corrupt("bad_event_fields")
+
+    def read_events_report(
+        self, session_id: str
+    ) -> tuple[list[SessionEvent], EventLogIntegrity]:
+        """读取全部有效事件 + 完整性报告（#565）。
+
+        `read_events` 的容错语义不变（一行坏数据只损失该行，不 brick 显示路径）；
+        差别只在多返回一份**脱敏完整性报告**：完整坏行（定位记录）+ 解析后序列的
+        seq 断层 / 重复。恢复入口据此拒绝——对有洞的投影做恢复裁决，等于把丢失的
+        permission/tool 事实当不存在（不变量 #14 的反面就是这类沉默）。
         """
         path = self._events_path(session_id)
         if not path.exists():
-            return []
+            return [], EventLogIntegrity()
 
         events: list[SessionEvent] = []
-        for lineno, raw_line in self._iter_event_lines(path):
-            event = self._parse_event_line(raw_line, path.name, lineno)
+        corrupt: list[CorruptLine] = []
+        for lineno, offset, raw in self._iter_event_lines(path):
+            event, record, _partial = self._classify_event_line(
+                raw, path_name=path.name, lineno=lineno, byte_offset=offset,
+            )
             if event is not None:
                 events.append(event)
-        return events
+            elif record is not None:
+                corrupt.append(record)
+
+        seen: set[int] = set()
+        duplicates: list[int] = []
+        gaps: list[tuple[int, int]] = []
+        prev: int | None = None
+        for event in events:
+            if event.seq in seen:
+                duplicates.append(event.seq)
+                continue
+            if prev is not None and event.seq > prev + 1:
+                gaps.append((prev + 1, event.seq - 1))
+            seen.add(event.seq)
+            prev = event.seq
+        return events, EventLogIntegrity(
+            corrupt_lines=tuple(corrupt),
+            seq_gaps=tuple(gaps),
+            seq_duplicates=tuple(duplicates),
+        )
+
+    def read_events(self, session_id: str) -> list[SessionEvent]:
+        """读取 Session 的全部有效事件，跳过无法解析的损坏行。
+
+        容错范围见 `_classify_event_line`——一行坏数据只损失该行，不得 brick
+        整个 session 的显示路径；恢复入口不走本方法（走 `read_events_report`
+        的完整性闸门，#565）。跳过行为有信号：完整坏行记 WARNING（脱敏定位），
+        未写完整的末尾片段按恢复预期 DEBUG。
+        """
+        return self.read_events_report(session_id)[0]
 
     def read_session_summary(self, session_id: str) -> SessionSummaryStats | None:
         """列表页快路径：单趟流式扫描 + 文件戳缓存（#516）。
@@ -440,7 +597,8 @@ class JsonlSessionStore:
         # （见下方守卫），所以不存在「改用前一行」的分支。
         last_line: tuple[int, str] | None = None
 
-        for lineno, raw_line in self._iter_event_lines(path):
+        for lineno, _offset, raw in self._iter_event_lines(path):
+            raw_line = raw.decode("utf-8", errors="replace")
             stripped = raw_line.strip()
             if not stripped:
                 continue
@@ -642,7 +800,8 @@ class JsonlSessionStore:
         path = self._events_path(session_id)
         if not path.exists():
             return None
-        for lineno, raw_line in self._iter_event_lines(path):
+        for lineno, _offset, raw in self._iter_event_lines(path):
+            raw_line = raw.decode("utf-8", errors="replace")
             if not raw_line.strip():
                 continue
             event = self._parse_event_line(raw_line, path.name, lineno)
