@@ -6981,3 +6981,12 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **红→绿**：修前 `limit+1` 合法 ASCII ping 和字符数低于上限但 UTF-8 字节超限的中文 ping 均被解析并回 `pong`（2 failed）；恰好 1 MiB 边界用例修前已放行。修后两类超限帧都回固定 error，连接继续 ping→pong，`events.jsonl` 字节不变，恰好 1 MiB 仍回 `pong`。
 - **读数**：`tests/web/test_wire_input_hardening.py`：31 passed；三处变更文件 ruff clean；`git diff --check` 通过。
 - **状态**：#591 代码与 focused 验收完成；批次冻结后的双轴 code review 和全量门禁待执行；未 push / PR / merge。
+
+## 2026-10-03 · 第二条线 #569 POST /messages 存储容量/I/O 错误契约
+
+- **修前实证**：当前树在 `get_session_budget` 精确逃逸点注入 `sqlite3.OperationalError("disk I/O error")`，3/3 返回 JSON 500；调用一次、模型未构造、events.jsonl 与 Operation Ledger 不变。首轮注入未附 SQLite 原生错误码，分类回归已收紧为带 errno / sqlite_errorcode 的独立用例。
+- **实现 `f6770d51`**：仅在 `/messages` 翻译 `EFBIG` / `ENOSPC` 与 SQLite `SQLITE_FULL` / `SQLITE_IOERR` 主码（含扩展码）为 503 JSON；其它 OperationalError 保持 JSON 500。固定 detail 不暴露 OS 路径；未改 `retry_on_busy` 与提交语义。
+- **修后 focused**：`tests/web/test_error_contract.py` + `tests/web/test_domain_error_mapping.py`：47 passed；四个指定错误族及扩展 `SQLITE_IOERR_WRITE` 分别注入，未知 OperationalError 反向锚保持 500。失败发生于事件追加 / 模型构造前，events.jsonl 字节、Operation Ledger、session budget 行与审计事件均逐项不变，模型工厂调用 0。
+- **Lint / diff**：四个改动文件 `ruff check` 通过，`git diff --check` 通过。
+- **验证边界**：Windows 本机未做物理满盘注入；EFBIG / ENOSPC 按真实 errno、SQLite 错误按原生错误码在精确路由逃逸点注入。历史 `prlimit --fsize` 不作为满盘实证。
+- **状态**：#569 代码与 focused 验收完成；批次冻结后的双轴 code review 与 Gate-0 / 全量门禁待执行；未 push / PR / merge。下一票 #553。
