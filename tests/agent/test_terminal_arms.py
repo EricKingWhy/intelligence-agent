@@ -173,6 +173,10 @@ class _PendingCoordinator:
         self.drains = 0
         self.request_drains = 0
 
+    #: #551 M10-8 起终结臂会读它（双挂时两级错误类型名）；替身默认无双挂。
+    #: 真实 coordinator 的同一属性见 `model/fallback.py::double_failure_errors`。
+    double_failure_errors: tuple[str, str] | None = None
+
     def drain_transitions(self) -> list[FallbackTransition]:
         self.drains += 1
         out, self._pending = self._pending, []
@@ -259,11 +263,11 @@ class _ArmsKit:
         streamer: Any = None, coord: Any = None,
         tracer: _RecordingTracer | None = None,
         cancel_reason_supplier: Any = None,
-        usage_total: dict[str, int] | None = None,
+        usage_total: dict[str, int | None] | None = None,
     ) -> None:
         self.runtime = runtime
         self.session = session
-        self.usage_total: dict[str, int] = {} if usage_total is None else usage_total
+        self.usage_total: dict[str, int | None] = {} if usage_total is None else usage_total
         self.tracer = tracer or _RecordingTracer()
         self.coord = coord if coord is not None else _PendingCoordinator()
         self.result_holder: list[AgentRunResult] = []

@@ -502,13 +502,9 @@ function projectModelCompleted(state: ConversationState, event: AgentEvent): voi
   const usage = parseUsage(data.usage);
   if (usage) {
     // run/completed 权威聚合到达前，累计各次推理 usage 作为运行中视图。
-    state.usage_total = state.usage_total
-      ? {
-          prompt_tokens: state.usage_total.prompt_tokens + usage.prompt_tokens,
-          completion_tokens: state.usage_total.completion_tokens + usage.completion_tokens,
-          total_tokens: state.usage_total.total_tokens + usage.total_tokens,
-        }
-      : usage;
+    // C6 口径：usage 逐维可空，累加走 addUsage 保证**未知粘性**——某维一旦转
+    // `null`，不再从 0 或旧值起算（与后端 `_accumulate_usage` 同语义）。
+    state.usage_total = addUsage(state.usage_total, usage);
   }
   // #537：turns 的计数点与后端 `consumed_from_events` 同一事件（MODEL_COMPLETED）。
   const consumed = state.run_budget_consumed;
@@ -1251,10 +1247,12 @@ function summarizeModelCompleted(event: AgentEvent): string {
   const d = event.data;
   const usage = parseUsage(d.usage);
   const model = typeof d.model === 'string' && d.model ? d.model : null;
-  if (model || usage) {
-    return [model, usage ? `${usage.total_tokens} tok` : null]
-      .filter((p): p is string => p !== null)
-      .join(' · ');
+  // 逐维可空（C6）：total_tokens 未知 ⇒ 该维不展示（绝不打印 "null tok"）；
+  // 模型与 tokens 全都拿不到时回落内容长度，避免产出空摘要。
+  const tokens =
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null;
+  if (model || tokens) {
+    return [model, tokens].filter((p): p is string => p !== null).join(' · ');
   }
   return `${String(d.content ?? '').length} 字符`;
 }
@@ -1324,7 +1322,7 @@ function summarizeRunCompleted(event: AgentEvent): string {
   const d = event.data;
   const usage = parseUsage(d.usage_total);
   const parts = [
-    usage ? `${usage.total_tokens} tok` : null,
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null,
     typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) ? `$${d.cost_usd}` : null,
   ].filter((p): p is string => p !== null);
   return parts.join(' · ');
@@ -1978,21 +1976,38 @@ function tryParseContent(content: unknown): Record<string, unknown> | null {
 }
 
 /**
- * 窄化解析 usage 形状（后端 Gap 1 契约，见 types.ts UsageStats）：三字段必须
- * 全为有限数，否则返回 null——缺失/畸形整体按「—」处理，绝不部分伪造或补零。
+ * 窄化解析 usage 形状（后端 Gap 1 契约，见 types.ts UsageStats）：**逐维独立**
+ * 解析——某一维缺席 / 非数 / 非有限（`Infinity` / `NaN`）⇒ 该维 `null`（未知），
+ * 其余维照常取整数，一维损坏**不连坐**另外两维（C6 口径）。
+ *
+ * 返回 `null` 仅当入参**根本没给对象**（无 usage 载荷）——此时调用方按「未携带」
+ * 处理（RUN_COMPLETED 保留先前累计值）；一旦是对象就返回逐维可空的 UsageStats，
+ * 绝不部分伪造、不补 0。逐维未知的**粘性**由累计处（`addUsage`）保证。
  */
 function parseUsage(value: unknown): UsageStats | null {
   if (typeof value !== 'object' || value === null) return null;
   const v = value as Record<string, unknown>;
-  const { prompt_tokens, completion_tokens, total_tokens } = v;
-  const ok =
-    typeof prompt_tokens === 'number' &&
-    typeof completion_tokens === 'number' &&
-    typeof total_tokens === 'number' &&
-    Number.isFinite(prompt_tokens) &&
-    Number.isFinite(completion_tokens) &&
-    Number.isFinite(total_tokens);
-  return ok ? { prompt_tokens, completion_tokens, total_tokens } : null;
+  return {
+    prompt_tokens: numberOf(v.prompt_tokens) ?? null,
+    completion_tokens: numberOf(v.completion_tokens) ?? null,
+    total_tokens: numberOf(v.total_tokens) ?? null,
+  };
+}
+
+/** 逐维累加 usage（run/completed 到达前的运行中视图）：未知**粘性**——任一侧为
+ *  `null`（该维未知）⇒ 结果该维 `null`，绝不从 0 或另一维的旧值起算（与后端
+ *  `_accumulate_usage` 同语义；「值不可采信」——INT64 越界/负数——由后端先转
+ *  null 再发，前端只做粘性不做数值护栏/溢出 clamping，不伪造精度）。
+ *  `a` 为空（尚无累计）时即取 `b`。 */
+function addUsage(a: UsageStats | null, b: UsageStats): UsageStats {
+  if (!a) return b;
+  const sum = (x: number | null, y: number | null): number | null =>
+    x !== null && y !== null ? x + y : null;
+  return {
+    prompt_tokens: sum(a.prompt_tokens, b.prompt_tokens),
+    completion_tokens: sum(a.completion_tokens, b.completion_tokens),
+    total_tokens: sum(a.total_tokens, b.total_tokens),
+  };
 }
 
 // ── `#312` run/paused 载荷的小工具（放在投影只读路径上，一律"缺失即缺席"）──

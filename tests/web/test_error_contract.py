@@ -182,6 +182,32 @@ def test_openapi_documents_500_on_api_operations(tmp_path: Path) -> None:
             )
 
 
+def test_openapi_documents_413_on_body_bearing_operations(tmp_path: Path) -> None:
+    """#562 残余（1 MiB body 上限）：带体方法族必须声明 413，信封同 ErrorEnvelope。
+
+    `BodyDepthGuardMiddleware` 全局挂载（`app.add_middleware`），任何带体请求都
+    可能超限——机制可机械判定，与 503（靠 handler 逻辑、不全局撒）不同。反向锚：
+    GET 语义上不带体，声明面收缩到 POST/PUT/PATCH/DELETE（抽查钉住口径）。
+    """
+    api = _openapi(_client(tmp_path))
+    body_bearing = {"post", "put", "patch", "delete"}
+    for path, item in api["paths"].items():
+        if not path.startswith("/api/"):
+            continue
+        for method, op in item.items():
+            if method not in body_bearing:
+                continue
+            responses = op["responses"]
+            assert "413" in responses, f"{method.upper()} {path} 未声明 413"
+            schema = responses["413"]["content"]["application/json"]["schema"]
+            assert schema.get("$ref", "").endswith("ErrorEnvelope"), (
+                f"{method.upper()} {path} 的 413 schema：{schema}"
+            )
+    # 反向锚（抽查）：GET 不声明 413（本仓不消费 GET 请求体，不全局撒）。
+    stream = api["paths"]["/api/sessions/{session_id}/stream"]["get"]
+    assert "413" not in stream["responses"]
+
+
 def test_openapi_documents_503_on_newly_guaranteed_endpoints(
     tmp_path: Path,
 ) -> None:

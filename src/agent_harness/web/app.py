@@ -27,12 +27,14 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 from sse_starlette.sse import EventSourceResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
 from agent_harness.agent.budget import BudgetConflict, BudgetRejection
+from agent_harness.agent.run_budget import INT64_MAX
 from agent_harness.assembly import RecoveryStores, initialize_stores
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
@@ -202,9 +204,9 @@ class RunBudgetRequest(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    max_agent_turns_total: int | None = Field(default=None, ge=1)
-    max_model_requests: int | None = Field(default=None, ge=1)
-    max_total_tokens: int | None = Field(default=None, ge=1)
+    max_agent_turns_total: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_model_requests: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     #: 成本 ceiling：非负十进制（`11 §6.1`）。wire 上字符串最稳、数也收——
     #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
     #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
@@ -217,6 +219,35 @@ class RunBudgetRequest(BaseModel):
     deadline_at: str | None = None
     # `max_tool_calls`：`null`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
     max_tool_calls: int | None = None
+
+    @field_validator(
+        "max_agent_turns_total",
+        "max_model_requests",
+        "max_total_tokens",
+        mode="before",
+    )
+    @classmethod
+    def _ceiling_must_be_integer(cls, value: Any) -> Any:
+        """`#548` C3 裁决（2026-10-03）：`strict=True` **不放松**，只把拒绝文案说清。
+
+        判据必须是「整数」而不是「能转成整数的数」：JSON 里 `100.0` 与 `100` 是两种
+        输入，`strict` 只收后者。改前浮点落的是英文 `Input should be a valid integer`，
+        调用方看不出该传什么。
+
+        用 ``PydanticCustomError("int_type", …)`` 而非 ``ValueError``：**保住 wire 上的
+        `type` 值**（仍是 `int_type`）且不带 pydantic 的 ``"Value error, "`` 前缀
+        ⇒ 对调用方而言只有 `msg` 变、其余字段逐字不变。`None` 照常放行（"不设上限"）。
+
+        与 `SessionBudgetRequest` 的同名校验器**规则必须逐字一致**；
+        `tests/web/test_budget_int64_bounds_api.py` 以 `parametrize` 把两个模型钉在
+        同一组期望上 ⇒ 单边漂移当场变红。
+        """
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise PydanticCustomError(
+            "int_type",
+            'ceiling 必须是整数（不接受小数 100.0 / 布尔 / 字符串 "100"），请传 100',
+        )
 
     @model_validator(mode="after")
     def _reject_unimplemented_dimensions(self) -> RunBudgetRequest:
@@ -249,14 +280,36 @@ class SessionBudgetRequest(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    max_agent_turns_total: int | None = Field(default=None, ge=1)
-    max_model_requests: int | None = Field(default=None, ge=1)
-    max_total_tokens: int | None = Field(default=None, ge=1)
+    max_agent_turns_total: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_model_requests: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
     tool_call_limits: dict[str, int] | None = None
     deadline_at: str | None = None
-    max_delegations: int | None = Field(default=None, ge=1)
+    max_delegations: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     expected_version: int | None = Field(default=None, ge=1)
+
+    @field_validator(
+        "max_agent_turns_total",
+        "max_model_requests",
+        "max_total_tokens",
+        "max_delegations",
+        mode="before",
+    )
+    @classmethod
+    def _ceiling_must_be_integer(cls, value: Any) -> Any:
+        """C3 裁决：与 `RunBudgetRequest._ceiling_must_be_integer` **规则逐字一致**。
+
+        多一个字段名（`max_delegations`，F3 已定「与其余整数 ceiling 同一上界」），
+        规则本身不重述第二遍。两处一致性由 `tests/web/test_budget_int64_bounds_api.py`
+        的 `parametrize` 钉住。
+        """
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise PydanticCustomError(
+            "int_type",
+            'ceiling 必须是整数（不接受小数 100.0 / 布尔 / 字符串 "100"），请传 100',
+        )
 
 
 class BudgetRequest(BaseModel):
@@ -529,7 +582,12 @@ class ApproveRequest(BaseModel):
     approval_id: str | None = None
     approved: bool = True
     decision: str | None = None
-    reason: str = ""
+    # #562 F6：reason 逐字写入 permission/resolved 事件日志，自由文本无上限 =
+    # 每次授权可重复放大（实测 50KB 原样入库）。上限 2000 **字符**（pydantic
+    # ``max_length`` 计的是 Python ``str`` 码点数，不是 UTF-8 字节——2000 个中文
+    # = 6000 字节仍合法）。超限经安全 422 出口拒绝，不回显原文（recon 核查：
+    # 前端 ``postApproval`` 根本不发 ``reason`` ⇒ 零误伤）。
+    reason: str = Field(default="", max_length=2000)
 
 
 class ResumeRequest(_AmendValueValidators):
@@ -1284,6 +1342,18 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     apply_error_contract(app)
 
+    # #548 / #562：422 校验错误出口换成不回显原文的安全实现。默认的
+    # `jsonable_encoder(exc.errors())` 会把攻击者原文（`input`）带进响应体，
+    # lone surrogate / `inf` / 深嵌套三种被判非法的输入都会让**错误处理器自己**
+    # 抛异常 → 500（「正确地拒绝」退化成「拒绝时崩溃」）。位置紧挨 OpenAPI 对齐：
+    # 两者都是「错误面」的护栏，且本函数不改任何真实成功响应的形状。
+    from agent_harness.web.wire_safety import (
+        BodyDepthGuardMiddleware,
+        install_wire_safety,
+    )
+
+    install_wire_safety(app)
+
     # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
     from agent_harness.web.lineage import register_lineage_routes
 
@@ -1335,8 +1405,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
     _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
 
-    # 纯 ASGI 中间件（见类 docstring）：先 csp（内层）后 auth（外层），与
-    # 旧 BaseHTTPMiddleware 版注册顺序逐层一致；CORS 仍最后添加 = 最外层。
+    # 纯 ASGI 中间件（见类 docstring）：body 配额守卫（嵌套深度 + 字节体积）最先
+    # 添加 = 最内层，落点**在认证内层**——未认证请求先被 401 挡下，不做无谓的
+    # body 扫描；先 csp（内层）后 auth（外层），与旧 BaseHTTPMiddleware 版注册
+    # 顺序逐层一致；CORS 仍最后添加 = 最外层。
+    app.add_middleware(BodyDepthGuardMiddleware)
     app.add_middleware(CSPHeaderMiddleware)
     app.add_middleware(AuthSeamMiddleware, settings=settings)
 

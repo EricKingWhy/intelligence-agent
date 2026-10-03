@@ -59,6 +59,7 @@ from agent_harness.agent.resume_evidence import StuckEvidencePort, steer_applies
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
+    INT64_MAX,
     REASON_STUCK,
     TRIGGER_MAX_CONTEXT_TOKENS,
     BudgetConsumed,
@@ -188,6 +189,11 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     丢弃遵循"缺失/无效时省略"语义，不是伪造；非数值形状已被 AIMessage 自身
     校验挡在构造期（归因 model 失败，语义正确），到不了这里。
 
+    **越界（> `INT64_MAX`）同样丢弃（#552）**：session 账落 SQLite INTEGER 列，
+    越界值入库即 `OverflowError`（BUG-R4-02）。该维转**未知**（省略）而非 clamp /
+    记 0——`11 §6.1`「不可得 ≠ 0」，audit 明令 MUST NOT clamp。run 级 `usage_total`
+    与 session 投影因此**同为未知**，不再 10³⁰ vs 0 分裂。
+
     缓存读取（#200，SDD 03 §162 已声明的 ``cached_tokens`` 兑现）：从
     ``input_token_details`` 取缓存读取量；字段缺失/非数值/负值 ⇒ 键省略
     （**不写 0**——0 会被命中率算成 0% 假话，not_collected 语义才是诚实口径）。
@@ -204,16 +210,65 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
                                     "output_tokens": "completion_tokens",
                                     "total_tokens": "total_tokens"}).items():
         value = meta.get(source_key)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        if (
+            isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value <= INT64_MAX
+        ):
             usage[target_key] = value
     details = meta.get("input_token_details")
     if isinstance(details, dict):
         cached = details.get("cache_read")
         if cached is None:
             cached = details.get("cached_tokens")
-        if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+        if (
+            isinstance(cached, int) and not isinstance(cached, bool)
+            and 0 <= cached <= INT64_MAX
+        ):
             usage["cached_tokens"] = cached
     return usage or None
+
+
+def _accumulate_usage(
+    total: dict[str, int | None], usage: dict[str, int] | None,
+) -> None:
+    """把一次响应的 usage 并入 run 级聚合账（`#552` C1）。
+
+    与 session 侧**同口径**（`storage/delegation_tree.py::record_session_model_requests`
+    的 `total if total <= INT64_MAX else None`）：**合法值相加溢出 int64** ⇒ 该维
+    转未知（`None`，**粘性**）——不 clamp、不记 0（`11 §6.1`：不可得 ≠ 0）。
+    此前 run 级用 Python bigint 裸加（不溢出）⇒ 两步各 `2**62` 会停在 `2**63`，
+    而同输入下 session 账为 `None`，两本账永久分裂（#552 BUG-R4-02 同一症状）。
+
+    表示选了「该维整维置 `None`（粘性）」而非「从 `usage_total` 省略」：run 级
+    聚合账的既有读法就是"该维存在、值不可知 = `None`"——见 `BudgetConsumed`
+    （`run_budget.py`：`total_tokens: int | None`、`with_usage` 让 `None` 粘住、
+    `as_projection` 仍落该键），与 session 的 `NULL`（列存在、值未知）逐字对齐。
+    省略会让下一轮 `get(key, 0)` 把已未知的维**重新从 0 起算**（少算成假账），
+    且与"没有这个维度"混淆——那不叫收口。
+
+    粘性：某维一旦未知，后面再精确的加数也补不回缺的那一块（同
+    `_RunFinalizer.add_cost` 的 `None` 粘性与 `BudgetConsumed.with_usage`）。
+
+    **本次缺席 ⇒ 已跟踪的该维也转未知（`#552` C6）**：与 session 侧同一规则
+    （`record_session_model_requests`：`usage is None or "total_tokens" not in usage`
+    ⇒ 该列置 `NULL`）。provider 第 2 次不报某维时，run 级若"不动这一维"，就会把
+    已知的**旧值**当成**完整的**总计报出去——一个少算的假精确数：run 账停在
+    `100`、session 账转 `NULL`，两本账**值级**分裂（不是"形状不同"）。
+    只毒**本次之前已跟踪**的维：从未出现过的维不在此凭空创建（缺席 ≠ 造一个
+    未知维，否则 `usage_total` 会长出 provider 从没报过的维度）。
+    """
+    reported = usage or {}
+    for key in total:
+        if key not in reported:
+            total[key] = None
+    if not usage:
+        return
+    for key, value in usage.items():
+        current = total.get(key, 0)
+        if current is None:
+            continue  # 已转未知：粘住，绝不再从 0 起算
+        level = current + value
+        total[key] = level if level <= INT64_MAX else None
 
 
 def _model_name_from_response(ai: Any) -> str | None:
@@ -360,7 +415,7 @@ class _RunFinalizer:
     usage_total 是 _drive 聚合 dict 的引用（不复制）：终结时快照当时账目。
     """
 
-    def __init__(self, session: Session, usage_total: dict[str, int]) -> None:
+    def __init__(self, session: Session, usage_total: dict[str, int | None]) -> None:
         self._session = session
         self._usage_total = usage_total
         self.run_id: str | None = None
@@ -441,14 +496,16 @@ class _RunFinalizer:
         self, *, steps: int, reason: str | None = None,
         message: str | None = None, trace_id: str | None = None,
         trace_url: str | None = None,
+        primary_error: str | None = None, fallback_error: str | None = None,
     ) -> SessionEvent | None:
         """异常臂收尾 → run/failed（usage 如实，无数据省略）。单终态约束同上。
 
         reason 落事件 data（如 identical_tool_failure_loop）——消费者区分失败
         原因，与取消臂的 reason=cancelled 同一语义层。message 是固定可读文案
         （reason+message 成对，与上下文超限路径的 RUN_FAILED 形状一致）。
-        本方法不替调用方编原因（两个入参缺省即不落键）；运行期每条失败路径都
-        必须带 reason 这件事由**逐路径用例**守，清单见
+        `primary_error` / `fallback_error` 只在**同一决策两级都失败**时给（#551
+        M10-8），同样是类型名、不带正文。本方法不替调用方编原因（两个入参缺省即
+        不落键）；运行期每条失败路径都必须带 reason 这件事由**逐路径用例**守，清单见
         docs/adr/0033-run-failure-attribution-surface.md §2.4。
         """
         if self.run_id is None or self._terminal_written:
@@ -460,6 +517,8 @@ class _RunFinalizer:
             message=message,
             trace_id=trace_id,
             trace_url=trace_url,
+            primary_error=primary_error,
+            fallback_error=fallback_error,
         )
         self._terminal_written = True
         return event
@@ -546,7 +605,7 @@ class _Telemetry:
         self.tracer.run_started()
 
     def run_completed(
-        self, final_text: str, usage_total: dict[str, int] | None = None,
+        self, final_text: str, usage_total: dict[str, int | None] | None = None,
     ) -> None:
         self.tracer.run_completed(final_text, usage_total=usage_total)
 
@@ -730,9 +789,7 @@ class _TerminalContext:
         for transition in self.model_coord.drain_transitions():
             events.append(self.session.append(
                 MODEL_FALLBACK,
-                {"from_model": transition.from_model,
-                 "to_model": transition.to_model,
-                 "reason": transition.reason},
+                transition.event_data(),
                 run_id=self.run_id, step_id=self.steps + 1,
             ))
         # `#313`：调用失败/取消时，**已经发出去**的请求同样要落账——它们占
@@ -801,7 +858,8 @@ class _TerminalArms:
 
     session: Session
     terminal: _RunFinalizer
-    usage_total: dict[str, int]
+    #: 值 `None` = 该维累加溢出 int64 后转未知（`#552` C1，粘性）——见 `_accumulate_usage`。
+    usage_total: dict[str, int | None]
     model_coord: ModelFallbackCoordinator
     result_holder: list[AgentRunResult]
     cancel_reason_supplier: Callable[[], str] | None
@@ -1207,8 +1265,9 @@ class AgentRuntime:
         # 流式块记账（ADR-0016 §3.3）：思考/文本合帧落盘 + reasoning 块生命周期。
         # begin_run 之前异常 = 没有可记账的 run，保持 None。
         streamer: BlockStreamer | None = None
-        # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加，无数据则省略。
-        usage_total: dict[str, int] = {}
+        # 本轮 run 的 token 消耗聚合（Gap 1）：各轮 usage 如实累加；该维累加溢出
+        # int64 ⇒ 值转 `None`（未知，粘性，`_accumulate_usage`）。
+        usage_total: dict[str, int | None] = {}
         # 终态簿记 owner（批次 B 候选 2）：model 在途标记 + 单终态不变量 +
         # usage 记账收拢一处，取消臂/异常臂只做调用。
         terminal = _RunFinalizer(session, usage_total)
@@ -1538,9 +1597,7 @@ class AgentRuntime:
                 # "被接纳"分支里累加，被拒的那一轮 usage 直接丢账。
                 model_name = _model_name_from_response(ai)
                 usage = _usage_from_response(ai)
-                if usage:
-                    for key, value in usage.items():
-                        usage_total[key] = usage_total.get(key, 0) + value
+                _accumulate_usage(usage_total, usage)
                 model_cost = cost_usd_from_response(ai)
                 terminal.add_cost(model_cost)
                 # 每一次**实际**请求恰落一条 durable `model/request`（`model_requests`
@@ -1641,6 +1698,38 @@ class AgentRuntime:
                 if usage:
                     # usage / model_name 在上面的记账块里已抽好（同一份事实，不重抽）。
                     model_data["usage"] = usage
+                # C2（#552 配对）：只有**primary 对本条流有贡献**时，拼接体的
+                # finish_reason 才不可信——`ai` 是 primary + fallback 的**拼接体**，而
+                # `_finish_reason_from_response` 读到的那个值来自 primary
+                # （langchain 合并 response_metadata 时 fallback 无该键 ⇒ 左值胜出），
+                # 它描述的不是这条拼接流。落进 model/completed 会让只读答案层的消费者
+                # 把"primary 卡流 + fallback 重答"误读成"模型正常说完"（M10-3 症状面）。
+                # 判据 = `primary_content_chars or primary_finish_reason`（零产出且未报
+                # 收尾 ⇒ 无贡献）：R1（修后重审）指出原判据「有任一 fallback 就压制」
+                # **过度**——ainvoke 入口（primary 抛异常、从未产出）与流式 primary 连
+                # 一个 chunk 都没吐时，`ai` 就是 fallback **单独**的响应，它的
+                # finish_reason 是权威事实，压制等于凭空丢事实。
+                # 有贡献时**两键皆不落**：`finish_reason` 会冒充整条流说完；而
+                # `stream_terminated_without_finish_reason` 的既有语义是"流**没有**
+                # finish_reason"（R3），此处流里是有的、只是属于 primary——落它 = 用
+                # 解释覆盖事实。primary 的收尾事实不丢：已由同一步的 `model/fallback`
+                # （`primary_content_chars` / `primary_finish_reason`）承载，那才是它该挂
+                # 的 attempt 边界；**两键皆无** 即该第三态的读法（契约见
+                # `docs/BACKEND_CONTRACT_STREAMING_UI.md`）。
+                # 无贡献时保持 #551 M10-2 的既有诚实口径：有 finish_reason 就落键
+                # （下游据此区分"模型说完了"）；缺失则**只标注**"流在没有 finish_reason
+                # 的情况下结束"——不臆断截断、不删内容、不去重（#506 的"缺失回落中性"
+                # 决策不推翻）。
+                primary_contributed = any(
+                    t.primary_content_chars > 0 or bool(t.primary_finish_reason)
+                    for t in fallback_transitions
+                )
+                if not primary_contributed:
+                    finish_reason = _finish_reason_from_response(ai)
+                    if finish_reason:
+                        model_data["finish_reason"] = finish_reason
+                    else:
+                        model_data["stream_terminated_without_finish_reason"] = True
                 # llm_call 诊断日志带模型归因 + 时延 + 用量（与 cli.py 对齐，spec 02 §7/§10
                 # 要求每步可在 Diagnostic Log 定位到具体 provider/model）。
                 llm_log_fields: dict[str, Any] = {
@@ -1661,9 +1750,7 @@ class AgentRuntime:
                     for transition in fallback_transitions:
                         fallback_event = session.append(
                             MODEL_FALLBACK,
-                            {"from_model": transition.from_model,
-                             "to_model": transition.to_model,
-                             "reason": transition.reason,
+                            {**transition.event_data(),
                              **({"usage": usage} if usage else {})},
                             run_id=run_id, step_id=step_base + steps + 1,
                         )
@@ -2653,9 +2740,8 @@ class AgentRuntime:
             usage=usage, cost=cost, model=_model_name_from_response(response),
         )
         # closeout 的 usage 也要进本执行的 token 账（原来只有主循环的响应入账）。
-        if usage:
-            for key, value in usage.items():
-                arms.usage_total[key] = arms.usage_total.get(key, 0) + value
+        # 同口径收口（`#552` C1）与主循环累加点共用 `_accumulate_usage`。
+        _accumulate_usage(arms.usage_total, usage)
         arms.terminal.add_cost(cost)
         parsed = _parse_closeout_json(_extract_text(response.content))
         normalized = normalize_continuation(parsed)
@@ -2918,12 +3004,17 @@ class AgentRuntime:
             yield to_agent_event(streamed)
         # run_id 为 None 说明异常发生在 begin_run 之前：没有 run 可终结，
         # 已写入的事件保持原样，失败只能由日志承载。
+        # #551 M10-8：同一决策里 primary 与 fallback 都失败时，两级错误**类型名**
+        # 一并进 run/failed（首因不再只存在于 model/fallback 事件里）。
+        double_failure = ctx.model_coord.double_failure_errors
         end_event = arms.terminal.failure_terminal(
             steps=arms.envelope_step(steps),
             reason=provider_reason or type(error).__name__,
             message=terminal_message,
             trace_id=arms.telemetry.trace_id,
             trace_url=arms.telemetry.trace_url,
+            primary_error=double_failure[0] if double_failure else None,
+            fallback_error=double_failure[1] if double_failure else None,
         )
         if end_event is not None:
             yield to_agent_event(end_event)

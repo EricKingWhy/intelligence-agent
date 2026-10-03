@@ -149,6 +149,40 @@ TRIGGER_RUN_DEADLINE = "run.deadline_at"
 #: 见 `validate_resume`。
 TRIGGER_MAX_CONTEXT_TOKENS = "max_context_tokens"
 
+#: 整数 ceiling / usage 的**存储上限**：SQLite INTEGER 是 64 位有符号
+#: （`-2**63 .. 2**63-1`；约束来源是代码里的 `storage/delegation_tree.py` 的
+#: `session_budgets` 表 `INTEGER` 列——规格目录无此表定义）。外部数值（请求 ceiling、
+#: provider 自报 usage）入库前必须按此上限校验 / 收敛——超过它的值一旦进 SQL 绑定即
+#: `OverflowError`（#552 BUG-R4-02/03）。run 与 session 两个作用域**共用**这一常量与
+#: 同一条校验分支（`11 §6.1`：同一语义字段在各入口一致收敛）。
+INT64_MAX = 2**63 - 1
+
+
+def _positive_int64_or_none(value: Any, *, dimension: str) -> int | None:
+    """整数 ceiling 的**值域闸门**：正整数且 ≤ `INT64_MAX`，否则拒绝整个请求。
+
+    `11 §6.1` 冻结"整数 ceiling 是正整数或 null"。这里比 wire 的 pydantic 更严的一层
+    是**类型**：pydantic 默认 lax 会把 `True→1`、`"100"→100` 强转（#552 F4），所以领域
+    层（CLI / WS / 内部调用方也走这里）必须做 `type(x) is int` 级判定——`bool` /
+    字符串 / 浮点都不接受，`1.5` 更不得静默截断成 1。上界是 `INT64_MAX`：越过它入库
+    即 `OverflowError`（约束来源是 `storage/delegation_tree.py` 的 `session_budgets`
+    `INTEGER` 列），所以**先校验、后持久化**。
+
+    `None` = 该维没配 ceiling（不是 0）。任何一维非法都拒绝整个请求（`BudgetRejection`
+    → 422），不静默丢弃那一维（ADR-0044 D1/D8）。
+    """
+    if value is None:
+        return None
+    if type(value) is not int or value < 1:
+        raise BudgetRejection(
+            f"{dimension} 必须是正整数（布尔 / 浮点 / 字符串都非法）：{value!r}"
+        )
+    if value > INT64_MAX:
+        raise BudgetRejection(
+            f"{dimension} 超过存储上限 {INT64_MAX}（SQLite 64 位有符号整数）：{value!r}"
+        )
+    return value
+
 
 def utc_now() -> datetime:
     """本模块的时间源（**唯一一处**读挂钟）。
@@ -1503,11 +1537,18 @@ def run_limits_from_request(
     `validate_tool_call_limits_registered` 补上，见那里的 docstring。deadline **不**
     受"可执行性"约束（它由 Runtime 自己在接纳点判，不依赖 Provider 链的能力），
     所以只过 `parse_deadline_at` 的形状判定。
+
+    三个整数维（turns / model_requests / total_tokens）过 `_positive_int64_or_none`：
+    正整数、拒 bool / 浮点 / 字符串、≤ `INT64_MAX`（#552：与 SQLite INTEGER 对齐；
+    越界入库会 `OverflowError`）。run 与 session 两个作用域共用这一条分支。
     """
     limits = RunLimits(
-        max_agent_turns_total=max_agent_turns_total,
-        max_model_requests=max_model_requests,
-        max_total_tokens=max_total_tokens,
+        max_agent_turns_total=_positive_int64_or_none(
+            max_agent_turns_total, dimension="budget.run.max_agent_turns_total"),
+        max_model_requests=_positive_int64_or_none(
+            max_model_requests, dimension="budget.run.max_model_requests"),
+        max_total_tokens=_positive_int64_or_none(
+            max_total_tokens, dimension="budget.run.max_total_tokens"),
         max_cost_usd=parse_cost_ceiling(max_cost_usd),
         deadline_at=parse_deadline_at(deadline_at),
         tool_call_limits=parse_tool_call_limits(tool_call_limits),
@@ -2708,15 +2749,17 @@ def session_limits_from_request(
     的通道（收窄到 0 应该用 profile 的 `max_delegations` 收窄路径，#287 的语义）。
     """
     limits = SessionLimits(
-        max_agent_turns_total=max_agent_turns_total,
-        max_model_requests=max_model_requests,
-        max_total_tokens=max_total_tokens,
+        max_agent_turns_total=_positive_int64_or_none(
+            max_agent_turns_total, dimension="budget.session.max_agent_turns_total"),
+        max_model_requests=_positive_int64_or_none(
+            max_model_requests, dimension="budget.session.max_model_requests"),
+        max_total_tokens=_positive_int64_or_none(
+            max_total_tokens, dimension="budget.session.max_total_tokens"),
         max_cost_usd=parse_cost_ceiling(max_cost_usd),
         deadline_at=parse_deadline_at(deadline_at),
         tool_call_limits=parse_tool_call_limits(tool_call_limits),
-        max_delegations=(
-            None if max_delegations is None else _positive_delegations(max_delegations)
-        ),
+        max_delegations=_positive_int64_or_none(
+            max_delegations, dimension="budget.session.max_delegations"),
     )
     validate_ceiling_enforceability(
         RunLimits(
@@ -2726,13 +2769,6 @@ def session_limits_from_request(
         accounting,
     )
     return limits
-
-
-def _positive_delegations(value: Any) -> int:
-    """`max_delegations` 的形状闸门：正整数（`11 §6.1` 冻结的 ceiling 值域）。"""
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise BudgetRejection(f"budget.session.max_delegations 必须是正整数：{value!r}")
-    return value
 
 
 class SessionBudgetPort(Protocol):

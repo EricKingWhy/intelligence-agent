@@ -778,19 +778,99 @@ describe('applyEvent — Run 观测字段投影（后端 Gap 1/2）', () => {
     expect(s2.trace_url).toBeNull();
   });
 
-  it('畸形 usage（字段缺失/类型错误/非有限数）整体按 null 处理——绝不部分伪造', () => {
-    for (const bad of [
-      { prompt_tokens: 1 },                                  // 缺字段
-      { prompt_tokens: '1', completion_tokens: 2, total_tokens: 3 }, // 类型错
-      { prompt_tokens: 1, completion_tokens: 2, total_tokens: Number.NaN }, // 非有限
-    ]) {
+  it('畸形 usage 逐维解析（C6 口径）：坏维 ⇒ 该维 null，好维照常保留——一维坏不连坐', () => {
+    // 后端 `_accumulate_usage` 同口径：某维缺席 / 非数 / 非有限（±Infinity / NaN）
+    // ⇒ **就那一维**未知；其余维照常是整数。绝不部分伪造、不补 0。
+    const cases: Array<[unknown, unknown]> = [
+      [
+        { prompt_tokens: 1 },
+        { prompt_tokens: 1, completion_tokens: null, total_tokens: null },
+      ],
+      [
+        { prompt_tokens: '1', completion_tokens: 2, total_tokens: 3 },
+        { prompt_tokens: null, completion_tokens: 2, total_tokens: 3 },
+      ],
+      [
+        { prompt_tokens: 1, completion_tokens: 2, total_tokens: Number.NaN },
+        { prompt_tokens: 1, completion_tokens: 2, total_tokens: null },
+      ],
+      [
+        { prompt_tokens: 1, completion_tokens: 2, total_tokens: Number.POSITIVE_INFINITY },
+        { prompt_tokens: 1, completion_tokens: 2, total_tokens: null },
+      ],
+    ];
+    for (const [bad, expected] of cases) {
       const s = applyEvent(initConversation('s'), ev({
         type: EventType.MODEL_COMPLETED,
         data: { content: 'x', usage: bad },
         step_id: 1,
       }));
-      expect(s.usage_total).toBeNull();
+      expect(s.usage_total).toEqual(expected);
     }
+  });
+
+  it('usage 未知维粘性（C6 同语义）：某维转 null 后，后续好轮次不得把它复活成数字', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: Number.NaN } },
+      step_id: 1,
+    }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: null });
+
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'y', usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } },
+      step_id: 2,
+    }));
+    // total_tokens 已转未知 ⇒ 粘住（不得从 0 重算出 10）；可采信的维照常累加。
+    expect(s.usage_total).toEqual({ prompt_tokens: 17, completion_tokens: 8, total_tokens: null });
+  });
+
+  it('usage 载荷整体缺失（非对象）→ 外层 null：保留先前累计值，不清零', () => {
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({ type: EventType.MODEL_COMPLETED, data: { content: 'y' }, step_id: 2 }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  });
+
+  it('RUN_COMPLETED 权威覆盖携带维级 null：按权威值转未知，不得用旧累计复活', () => {
+    // 权威覆盖是**整体替换**（parseUsage 结果 ?? 旧累计）：后端发的权威值里某维
+    // 就是未知 ⇒ 覆盖后该维未知。若实现退化成「逐维择优」（旧值非 null 就保留），
+    // 会把后端明确宣告的未知复活成假精确数——本例钉住整体替换语义（修后重审 P2）。
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+
+    s = applyEvent(s, ev({
+      type: EventType.RUN_COMPLETED,
+      data: { usage_total: { prompt_tokens: 20, completion_tokens: null, total_tokens: 30 } },
+    }));
+    expect(s.usage_total).toEqual({ prompt_tokens: 20, completion_tokens: null, total_tokens: 30 });
+  });
+
+  it('usage 为空对象 {} → 三维皆 null（外层 null=未携带 与 空对象=携带但全缺席 正交）', () => {
+    // parseUsage({}) 是对象 ⇒ 逐维解析（三维全缺席 ⇒ 全 null，不是外层 null）；
+    // addUsage 与它累加 ⇒ 粘性生效全部转未知。与后端 _accumulate_usage 同判
+    // （修后重审 P2：`usage: {}` 不该走「未携带」分支保留旧值）。
+    let s = applyEvent(initConversation('s'), ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'x', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      step_id: 1,
+    }));
+    s = applyEvent(s, ev({
+      type: EventType.MODEL_COMPLETED,
+      data: { content: 'y', usage: {} },
+      step_id: 2,
+    }));
+    expect(s.usage_total).toEqual({
+      prompt_tokens: null, completion_tokens: null, total_tokens: null,
+    });
   });
 
   it('cost_usd 为显式 null 或非有限数 → null（费率表未定义的预期降级）', () => {

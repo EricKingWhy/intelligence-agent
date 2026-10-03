@@ -24,7 +24,9 @@ import aiosqlite
 
 from agent_harness.agent.guards import GuardLevel, GuardSignal
 from agent_harness.agent.run_budget import (
+    INT64_MAX,
     BudgetConflict,
+    BudgetRejection,
     SessionAdmission,
     SessionBudgetSnapshot,
     SessionConsumed,
@@ -207,6 +209,41 @@ def _tighten_ceiling(current: Any, requested: Any) -> Any:
     return min(current, requested)
 
 
+def _reject_out_of_int64_ceilings(limits: SessionLimits) -> None:
+    """存储层兜底（#552 B7）：绑定前拒绝超过 int64 的 ceiling。
+
+    领域层 `session_limits_from_request` 已经先校验过一次（正常调用路径）——这一层是
+    防未来新调用方绕过领域层：越界整数的 SQL 绑定会抛未分类的 `OverflowError`（事务
+    回滚但错误不可识别）。这里提前抛出**域错误** `BudgetRejection`：越界本就是
+    "形状非法"（422）语义，与领域层 `_positive_int64_or_none` 同判；因此它经
+    `web/domain_errors.py` 的单一映射落 422，而不是裸 `ValueError` 的未分类 500。
+    `None` = 无 ceiling，放行。
+    """
+    for dimension, value in (
+        ("max_agent_turns_total", limits.max_agent_turns_total),
+        ("max_model_requests", limits.max_model_requests),
+        ("max_total_tokens", limits.max_total_tokens),
+        ("max_delegations", limits.max_delegations),
+    ):
+        if value is not None and value > INT64_MAX:
+            raise BudgetRejection(
+                f"session ceiling {dimension} 超过 int64 上限 {INT64_MAX}：{value!r}"
+            )
+
+
+def _coerce_token_usage(value: Any) -> int | None:
+    """usage 的 `total_tokens` → 可入账整数或 `None`（未知）。
+
+    #552：provider 自报的数值**不可信**——越界（> int64）/ 负数 / 布尔 / 浮点 /
+    字符串一律**不** `int()` 强转（`True→1`、`1.5→1`、`"100"→100` 都是伪造账目），
+    也不 clamp 到上限（audit 明令 MUST NOT clamp），按 `11 §6.1`「不可得 ≠ 0」转
+    **未知**（`None`，粘性）。合法值原样返回。
+    """
+    if type(value) is not int or value < 0 or value > INT64_MAX:
+        return None
+    return value
+
+
 class SqliteDelegationTreeLedger:
     """SQLite ledger with serialized budget reservations and append-only audit rows.
 
@@ -385,6 +422,7 @@ class SqliteDelegationTreeLedger:
         不动 `version`——CAS 版本只属于恢复路径的显式更新
         （`update_session_limits`），装配路径的静默收窄不制造"版本过期"假象。
         """
+        _reject_out_of_int64_ceilings(limits)
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
@@ -598,7 +636,14 @@ class SqliteDelegationTreeLedger:
                     if usage is None or "total_tokens" not in usage:
                         tokens = None
                     else:
-                        tokens = int(tokens) + int(usage["total_tokens"])
+                        delta = _coerce_token_usage(usage["total_tokens"])
+                        if delta is None:
+                            # 越界 / 负数 / bool / 浮点 / 字符串 ⇒ 该维转未知（不 clamp、不记 0）
+                            tokens = None
+                        else:
+                            total = int(tokens) + delta
+                            # 合法值相加溢出 int64：存储无法表达 ⇒ 转未知（不 clamp）
+                            tokens = total if total <= INT64_MAX else None
                 current_cost = _decimal_or_none(row["cost_usd"])
                 if current_cost is None or cost is None:
                     new_cost = None
@@ -674,6 +719,7 @@ class SqliteDelegationTreeLedger:
         `session_resume_headroom_ok`）：409 必须零副作用，拆到调用方就会先改账
         再拒绝（`03 §3.4` / `11 §6.1`）。
         """
+        _reject_out_of_int64_ceilings(limits)
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1083,6 +1129,7 @@ class InMemoryDelegationTreeLedger:
         self, budget_key: str, *, root_session_id: str, limits: SessionLimits,
     ) -> SessionBudgetSnapshot:
         async with self._lock:
+            _reject_out_of_int64_ceilings(limits)
             state = self._budget(budget_key, root_session_id)
             state["max_agent_turns_total"] = _tighten_ceiling(
                 state["max_agent_turns_total"], limits.max_agent_turns_total)
@@ -1148,7 +1195,13 @@ class InMemoryDelegationTreeLedger:
                 if usage is None or "total_tokens" not in usage:
                     tokens = None
                 else:
-                    tokens = int(tokens) + int(usage["total_tokens"])
+                    delta = _coerce_token_usage(usage["total_tokens"])
+                    if delta is None:
+                        # 越界 / 负数 / bool / 浮点 / 字符串 ⇒ 转未知（不 clamp、不记 0）
+                        tokens = None
+                    else:
+                        total = int(tokens) + delta
+                        tokens = total if total <= INT64_MAX else None
             state["total_tokens"] = tokens
             current_cost = _decimal_or_none(state["cost_usd"])
             if current_cost is None:
@@ -1178,6 +1231,7 @@ class InMemoryDelegationTreeLedger:
         self, budget_key: str, *, expected_version: int, limits: SessionLimits,
     ) -> SessionBudgetSnapshot:
         async with self._lock:
+            _reject_out_of_int64_ceilings(limits)
             state = self._budgets[budget_key]
             if expected_version != int(state["version"]):
                 raise BudgetConflict(
