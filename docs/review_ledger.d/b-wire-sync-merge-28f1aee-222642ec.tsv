@@ -1,0 +1,1 @@
+2026-10-03	B 线同步 main 归属（仅机械归属，不主张本行审查新内容）：222642ec 合并 origin/main 91cac896；父一 28f1aee（B 四票此前审查覆盖），父二 91cac896（A/main 提交沿来源台账覆盖）。merge-tree 唯一冲突为 Tracker；按用户批准保留两线正文；session.py、web/app.py、projection.ts 自动合并。来源两侧既有提交由各自台账归属，本行只覆盖同步 merge commit。	28f1aee..222642ec
