@@ -9,6 +9,7 @@ create_app() 是单一入口——传入 Settings，返回装配好的 FastAPI�
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import sqlite3
@@ -53,7 +54,7 @@ from agent_harness.assembly import (
     initialize_stores,
     root_registry_tool_names,
 )
-from agent_harness.capability.base import CapabilityRegistry
+from agent_harness.capability.base import CapabilityError, CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
@@ -1322,6 +1323,14 @@ class AuthSeamMiddleware:
             identity_context_var.reset(token)
 
 
+def _package_version() -> str:
+    """服务版本（health/version/capability 统一面，W-11 #355）。只读元数据，无副作用。"""
+    try:
+        return importlib.metadata.version("intelligence-agent")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
     """装配 FastAPI 应用。测试可注入 test settings；生产默认从 .env 读。"""
     if settings is None:
@@ -1521,13 +1530,21 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         ADR-0004 Round 5 之下 checkpoint 故障唯一的对外口径（不进 SessionEvent）。
 
         W-11：本端点**匿名可达**（AuthSeamMiddleware 豁免），是附着核验的第一站；
-        载荷只含非秘密字段——协议版本 + 是否强制鉴权，token/路径/用户信息一概不进。
+        载荷只含非秘密字段——协议版本 / 服务版本 / capability 名称（静态配置名，
+        非秘密）+ 是否强制鉴权，token/路径/用户信息一概不进。
         """
         jwt_configured = bool(settings.jwt_secret and settings.jwt_secret.get_secret_value())
+        try:
+            capability_names: list[str] = sorted(parse_capabilities_config(settings.capabilities))
+        except CapabilityError:
+            # 配置非法由装配路径显式报错（init_failed）；健康面不能因此塌掉。
+            capability_names = []
         return {
             "status": "ok",
             "checkpoint_save_failures": checkpoint_save_failure_count(),
             "protocol_version": HOST_PROTOCOL_VERSION,
+            "version": _package_version(),
+            "capabilities": capability_names,
             "auth_required": jwt_configured,
         }
 

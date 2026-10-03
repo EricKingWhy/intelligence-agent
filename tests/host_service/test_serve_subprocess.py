@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -159,11 +160,15 @@ def test_serve_publishes_attachable_endpoint(workspace: Path, tmp_path: Path) ->
         result = _wait_attachable(workspace, tokfile)
         assert result.endpoint is not None and result.endpoint.port == endpoint.port
 
-        # 健康面：匿名可达、形状符合协议、不含秘密字段。
+        # 健康面：匿名可达、统一形状（health/version/capability，W-11 工作指令 3）、
+        # 不含秘密字段。
         status, payload = _http_get(f"http://127.0.0.1:{endpoint.port}/api/health")
         assert status == 200
         assert payload["status"] == "ok"
         assert payload["protocol_version"] == 1
+        assert payload["version"]
+        assert isinstance(payload["capabilities"], list)
+        assert payload["auth_required"] is True
         payload_text = json.dumps(payload).lower()
         assert "token" not in payload_text and "secret" not in payload_text
 
@@ -317,3 +322,115 @@ def test_ensure_service_cold_start_and_attach(workspace: Path, tmp_path: Path) -
     assert endpoint_again is not None and endpoint_again.port == endpoint.port
     assert len(spawns) == 1
     _terminate(spawns[0])
+
+
+# ── S5：默认只绑 loopback——LAN 地址连不上 ───────────────────────────────────
+
+
+def _non_loopback_ipv4() -> list[str]:
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    return sorted(
+        {
+            info[4][0]
+            for info in infos
+            if not info[4][0].startswith("127.")
+        }
+    )
+
+
+def test_serve_binds_loopback_only(workspace: Path, tmp_path: Path) -> None:
+    lan_addresses = _non_loopback_ipv4()
+    if not lan_addresses:
+        pytest.skip("本机无非回环 IPv4 地址，LAN 隔离无法实测")
+    tokfile = tmp_path / "tokens.json"
+    proc = _spawn_serve(workspace, tokfile)
+    try:
+        endpoint = _wait_attachable(workspace, tokfile).endpoint
+        assert endpoint is not None
+        # 服务绑定 127.0.0.1：从任意非回环本机地址连同一端口必须失败——
+        # 个人桌面服务不暴露 LAN（W-11 目标行为）。
+        for address in lan_addresses:
+            with pytest.raises(OSError):
+                socket.create_connection((address, endpoint.port), timeout=2).close()
+    finally:
+        _terminate(proc)
+
+
+# ── S6：旧数据原位复用——无迁移、无删除（#303 禁删项） ────────────────────────
+
+
+def _snapshot_files(root: Path) -> set[str]:
+    return {
+        p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()
+    }
+
+
+def test_serve_reuses_old_data_root_in_place(workspace: Path, tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    import jwt as pyjwt
+    from fastapi.testclient import TestClient
+
+    from agent_harness.config import Settings
+    from agent_harness.web.app import create_app
+
+    # 1) 服务未引入任何新面之前，用既有 API 在该数据根上造「旧数据」：
+    #    一个 launch=false 会话（不跑 run、不碰模型）。
+    secret = "test-signing-secret-at-least-32-characters"
+    app = create_app(
+        Settings(
+            _env_file=None,
+            workspace_dir=str(workspace),
+            jwt_secret=secret,
+            model_api_key="sk-test",
+        ),
+        enable_cors=False,
+    )
+    with TestClient(app) as client:
+        old_token = pyjwt.encode(
+            {
+                "tenant_id": "acme",
+                "user_id": "alice",
+                "exp": int(datetime.now(UTC).timestamp()) + 600,
+            },
+            secret,
+        )
+        created = client.post(
+            "/api/sessions",
+            json={},
+            params={"launch": "false"},
+            headers={"Authorization": f"Bearer {old_token}"},
+        )
+        assert created.status_code == 200, created.text
+        old_session_id = created.json()["session_id"]
+
+    before = _snapshot_files(workspace)
+    assert any(p.startswith("sessions/") for p in before)
+
+    # 2) serve 子进程在**同一数据根**上启动：不迁移、不换根、不空白冒充。
+    tokfile = tmp_path / "tokens.json"
+    proc = _spawn_serve(workspace, tokfile)
+    try:
+        endpoint = _wait_attachable(workspace, tokfile).endpoint
+        assert endpoint is not None
+        token = HostTokenStore(FileCredentialStore(tokfile)).get_token(workspace)
+        assert token
+        base = f"http://127.0.0.1:{endpoint.port}"
+        status, sessions = _http_get(f"{base}/api/sessions?limit=50", token=token)
+        assert status == 200
+        assert any(row["session_id"] == old_session_id for row in sessions)
+        status, events = _http_get(
+            f"{base}/api/sessions/{old_session_id}/events", token=token
+        )
+        assert status == 200
+        assert events
+    finally:
+        _terminate(proc)
+
+    # 3) 服务往返后：旧文件一个不少（#303 禁删项的文件系统级证明）。
+    after = _snapshot_files(workspace)
+    missing = before - after
+    assert not missing, f"服务启动/停机删除了既有数据：{sorted(missing)[:5]}"
