@@ -27,8 +27,6 @@ from agent_harness.session.event import (
 )
 from agent_harness.session.store import JsonlSessionStore
 
-pytestmark = pytest.mark.asyncio
-
 
 def _session_with_tools(tmp_path: Path) -> Session:
     store = JsonlSessionStore(root=tmp_path / "sessions")
@@ -41,6 +39,7 @@ def _session_with_tools(tmp_path: Path) -> Session:
     return s
 
 
+@pytest.mark.asyncio
 async def test_replay_renders_frozen_history(tmp_path: Path) -> None:
     _session_with_tools(tmp_path)
     out = await replay_command("hist", workspace_dir=str(tmp_path))
@@ -50,6 +49,7 @@ async def test_replay_renders_frozen_history(tmp_path: Path) -> None:
     assert "a.txt" in out  # 冻结终态的 tool result 可见
 
 
+@pytest.mark.asyncio
 async def test_replay_zero_side_effects(tmp_path: Path) -> None:
     """回放后：事件一字不变、无 workspace 写、无模型调用（结构保证）。"""
     store = JsonlSessionStore(root=tmp_path / "sessions")
@@ -63,6 +63,7 @@ async def test_replay_zero_side_effects(tmp_path: Path) -> None:
     assert after == before  # 连 session/resumed 都没有追加
 
 
+@pytest.mark.asyncio
 async def test_replay_missing_session(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="不存在"):
         await replay_command("ghost", workspace_dir=str(tmp_path))
