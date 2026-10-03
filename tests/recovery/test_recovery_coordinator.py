@@ -774,10 +774,11 @@ async def test_stale_approval_settled_fail_closed_exactly_once(
         e.type for e in before
     ], "恢复不改写崩溃前的事件"
     assert [e.type for e in recovered.events][len(before):] == [
-        TOOL_RESULT,  # 悬空调用的 Phase 1 占位（既有语义不变）
         PERMISSION_RESOLVED,
+        TOOL_RESULT,  # 悬空调用的 Phase 1 占位（既有语义不变）
         SESSION_RESUMED,
-    ], "新增事件的顺序：占位 → 审批结清 → session/resumed"
+    ], "新增事件的顺序：审批结清 → 占位 → session/resumed（#337 结清先于合成："
+    "「审批未通过」文案的 durable 依据必须先行在场，P4-1 崩溃窗反转）"
 
 
 @pytest.mark.asyncio
