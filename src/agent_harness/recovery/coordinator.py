@@ -63,8 +63,18 @@ from agent_harness.session import (
     JsonlSessionStore,
     Session,
 )
-from agent_harness.session.approval import unresolved_approval_ids
-from agent_harness.session.derive import DANGLING_TOOL_CONTENT, collect_dangling
+from agent_harness.session.approval import (
+    ApprovalOutcome,
+    approval_outcome_for_call,
+    unresolved_approval_ids,
+)
+from agent_harness.session.derive import (
+    DANGLING_NOT_EXECUTED,
+    DANGLING_NOT_EXECUTED_APPROVED,
+    DANGLING_NOT_EXECUTED_DENIED,
+    DANGLING_TOOL_CONTENT,
+    collect_dangling,
+)
 from agent_harness.session.event import PERMISSION_RESOLVED, SessionEvent
 from agent_harness.storage import (
     Operation,
@@ -161,6 +171,32 @@ class ReconcileRequired(RecoveryError):
     """
 
 
+class DecisionsReconcileCallback(ReconcileCallback):
+    """把 /recover 请求携带的显式用户裁决接到 ``ReconcileCallback`` 契约上（#547）。
+
+    四裁决词表就是 ``ReconcileVerdict``——不造第二套词汇（07 §6/§7）。目标合法性与
+    覆盖性由 ``SessionService.recover`` 的**开工前预检**保证（未覆盖 → 409 附机器
+    可读清单；目标不存在/已结清 → 422），本类只做最后的 fail-closed 兜底：预检后
+    待裁决集合变化的竞态窗口里缺裁决 → ``ReconcileRequired``，绝不猜测、绝不自动
+    重跑（不变量 #14）。防重复提交由两层共同保证：预检拒绝非 pending 目标 + 提交
+    时 ``RecoveryAdjudicationToken`` 的 CAS 复核。
+    """
+
+    def __init__(self, decisions: dict[str, ReconcileVerdict]) -> None:
+        self._decisions = dict(decisions)
+
+    async def resolve(
+        self, operation: Operation, hint: ReconcileHint
+    ) -> ReconcileVerdict:
+        verdict = self._decisions.get(operation.tool_call_id)
+        if verdict is None:
+            raise ReconcileRequired(
+                f"Operation '{operation.tool_call_id}' 没有对应的用户裁决"
+                "（预检后待裁决集合发生变化）——拒绝恢复，避免伪造结果或盲目重跑"
+            )
+        return verdict
+
+
 class PendingPolicy(ABC):
     """PENDING Operation 的恢复策略 seam（ADR-0004 Round 3 §Q13）。
 
@@ -191,7 +227,8 @@ class _Synthesis:
     """一条已决策待写入的恢复结果（决策与写入分离的载体）。
 
     content 是 tool/result 事件的最终载荷文本：Ledger 终态 / PENDING 路径是
-    ToolResult JSON；Ledger 无记录的占位路径与 Phase 1 逐字一致（原始文本）。
+    ToolResult JSON；Ledger 无记录的路径是原始文本（#566 起按审批结局区分，
+    不再与 Phase 1 占位逐字一致；无账部署保留 Phase 1 原文）。
     """
 
     tool_call_id: str
@@ -290,6 +327,9 @@ class RecoveryCoordinator:
                     tool_call_id,
                     operation,
                     needs_call_event=tool_call_id not in call_event_ids,
+                    approval_outcome=approval_outcome_for_call(
+                        session.events, tool_call_id
+                    ),
                 )
                 if synthesis is not None:
                     plan.append(synthesis)
@@ -530,12 +570,15 @@ class RecoveryCoordinator:
         operation: Operation | None,
         *,
         needs_call_event: bool,
+        approval_outcome: ApprovalOutcome = ApprovalOutcome.NOT_REQUESTED,
     ) -> _Synthesis | None:
         """对一个 dangling tool_call 做【确定性】恢复决策（纯决策，不写任何状态）。
 
         - Ledger 终态 → 用 result_json 精确合成；
         - PENDING → PendingPolicy 决策（默认 skip）；
-        - Ledger 无记录 → Phase 1 占位（不留 dangling call）。
+        - Ledger 无记录 → 接纳点未到的证明（审批闸门 → Ledger PENDING →
+          execute 的顺序，`04 §9.1`）——按 durable 审批结局给诚实文案（#566），
+          不再说"结果未知"；无账部署（Ledger 缺席）无法证明，保留保守占位。
         RUNNING/UNKNOWN/NEED_RECONCILE 不进本方法——recover() 已把它们
         分流到人工裁决路径（_prepare_reconcile，#30/#254）。
         """
@@ -543,11 +586,31 @@ class RecoveryCoordinator:
         agent_id = operation.agent_id if operation else None
 
         if operation is None:
-            # Phase 1 占位语义：Session.resume 的 content 就是 DANGLING_TOOL_CONTENT 原文。
+            if self._operation_ledger is None:
+                # 无账部署：没有"接纳点未到"的账面证据，保守占位不夸大确定性。
+                return _Synthesis(
+                    tool_call_id=tool_call_id,
+                    tool_name="unknown",
+                    content=DANGLING_TOOL_CONTENT,
+                    needs_call_event=needs_call_event,
+                    run_id=None,
+                    agent_id=None,
+                )
+            if approval_outcome is ApprovalOutcome.UNRESOLVED:
+                # kill 时审批无决议——本 recover() 内 #337 会把它结清为 deny
+                # （先于会话投影被消费），"审批未通过"是结清后的 durable 事实。
+                content = DANGLING_NOT_EXECUTED_DENIED
+            elif approval_outcome is ApprovalOutcome.APPROVED:
+                # 批准已落盘、接纳点未到：kill 落在 resolved → Ledger 建账的窗口。
+                content = DANGLING_NOT_EXECUTED_APPROVED
+            elif approval_outcome is ApprovalOutcome.DENIED:
+                content = DANGLING_NOT_EXECUTED_DENIED
+            else:
+                content = DANGLING_NOT_EXECUTED
             return _Synthesis(
                 tool_call_id=tool_call_id,
                 tool_name="unknown",
-                content=DANGLING_TOOL_CONTENT,
+                content=content,
                 needs_call_event=needs_call_event,
                 run_id=None,
                 agent_id=None,

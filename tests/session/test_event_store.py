@@ -45,6 +45,8 @@ class TestSessionEventDTO:
             "session/started",
             "session/resumed",
             "session/forked",
+            # #555：fork 意图标记（未完成 fork 的 durable 可见性事实）
+            "fork/in-progress",
             "run/started",
             "run/completed",
             "run/failed",

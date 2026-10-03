@@ -1033,11 +1033,16 @@ def test_resume_is_blocked_while_an_unreconciled_side_effect_remains(tmp_path):
         )
 
     assert resp.status_code == 409, resp.text
+    # #547：409 detail 升级为结构体（message + pending_decisions 机器可读清单），
+    # 文案事实不变：仍点名那条调用与 fail-closed 立场
     detail = resp.json()["detail"]
-    assert "write_file" in detail and "call-1" in detail, (
+    assert "write_file" in detail["message"] and "call-1" in detail["message"], (
         "拒绝理由必须点名那条调用（人要知道该对账的是哪一个副作用）"
     )
-    assert "ReconcileCallback" in detail
+    assert "ReconcileCallback" in detail["message"] or "decisions" in detail["message"]
+    assert any(
+        p["tool_call_id"] == "call-1" for p in detail["pending_decisions"]
+    )
     assert len(probe.calls) == calls_before, "被拒的恢复没有装配第二次执行"
     _assert_no_new_work(client, session_id, before)
 

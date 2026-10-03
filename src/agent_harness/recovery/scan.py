@@ -28,11 +28,17 @@
 会再次进入 reconcile（Ledger reconcile 可安全重试），因此不会永久卡死。
 同步 JSONL 读写（含 fsync）统一用 ``anyio.to_thread.run_sync`` 下放线程，
 不阻塞事件循环。
+
+#555 在同一 lifespan 里并列第二条扫描：``scan_unfinished_forks``——fork 是
+多步物理过程（child 文件 → workspace 拷贝 → seed 移植 → provenance → 索引），
+进程 kill 留下的「有 ``fork/in-progress`` 标记、无 ``session/forked``」现场
+由它回收（只回收 harness 自建工件，见函数 docstring）。单进程假设相同。
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -46,7 +52,11 @@ from agent_harness.recovery.coordinator import (
 )
 from agent_harness.recovery.reconcile import ReconcileCallback
 from agent_harness.sandbox.registry import WorkspaceRegistry
-from agent_harness.session.event import RUN_INTERRUPTED
+from agent_harness.session.event import (
+    FORK_IN_PROGRESS,
+    RUN_INTERRUPTED,
+    SESSION_FORKED,
+)
 from agent_harness.session.interrupt import InterruptedRun, detect_unterminated_runs
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
@@ -170,3 +180,127 @@ def _mark_interrupted(
             step_id=run.step_id,
         )
     return interrupted
+
+
+@dataclass(frozen=True)
+class ForkScanResult:
+    """一个未完成 fork（child）的扫描结论。
+
+    ``reclaimed`` = 本次是否执行了工件回收；``detail`` 仅在扫描/回收失败时有值。
+    """
+
+    session_id: str
+    reclaimed: bool = False
+    detail: str | None = None
+
+
+async def scan_unfinished_forks(
+    *,
+    session_store: JsonlSessionStore,
+    workspace_registry: WorkspaceRegistry | None,
+) -> list[ForkScanResult]:
+    """启动时按 ``fork/in-progress`` 标记回收未完成 fork 的残留（#555）。
+
+    判定（durable、以 child 文件为准）：child 事件含 ``fork/in-progress`` 且
+    无 ``session/forked``——fork 多步物理过程被打断的充分条件（标记在 workspace
+    拷贝之前 fsync，拷贝不可能在标记缺席时启动；``session/forked`` 是终点）。
+
+    回收范围**只有 harness 自建工件**：
+
+    - ``<root>/.fork-tmp/``（fork 暂存根整体清空——单进程假设下启动时无在途
+      fork，残留即垃圾；放 registry 根直下正是为了让"整体清空"安全，不会碰到
+      用户命名 workspace）；
+    - 每个未完成 child 的**默认形态**工作区（``<root>/workspaces/<sid>``——
+      构造规则白名单，与 ``discard_session_artifacts`` 同源，映射指向用户
+      目录时绝不碰）。
+
+    child 的 JSONL（含标记）与映射文件**保留**——「fork 未完成」是可读事实，
+    续聊对账（``_reconcile_workspace_binding``）按它给 fork 专属提示；父会话
+    文件零改动。回收幂等（重复扫描不会重复增长残留）；未完成 child 本身持续
+    可见（直到用户删除该会话），不是扫描的错误。
+
+    与 ``scan_interrupted_sessions`` 相同的单进程假设：只在持有会话的进程
+    启动时执行（web lifespan），不在与长驻服务并发的短命命令里跑。单个
+    child 读取失败不阻断整轮（FAIL 细节如实在 ``ForkScanResult.detail``）。
+    """
+    unfinished, failures = await anyio.to_thread.run_sync(
+        _detect_unfinished_forks, session_store
+    )
+    results = [
+        ForkScanResult(session_id=sid, reclaimed=False, detail=detail)
+        for sid, detail in failures
+    ]
+    for sid in unfinished:
+        logger.warning(
+            "启动扫描：session=%s 是未完成的 fork（fork/in-progress 无 session/forked）",
+            sid,
+        )
+    if workspace_registry is not None:
+        reclaimed = await anyio.to_thread.run_sync(
+            _reclaim_fork_residue, workspace_registry, unfinished
+        )
+        for sid in unfinished:
+            if reclaimed:
+                logger.warning(
+                    "启动扫描：未完成 fork child=%s 的暂存/工作区残留已回收", sid
+                )
+                results.append(ForkScanResult(session_id=sid, reclaimed=True))
+            else:
+                results.append(ForkScanResult(session_id=sid, reclaimed=False))
+    else:
+        # 无注册表（纯事件层部署）：只报告可见性，无工件可回收。
+        results.extend(ForkScanResult(session_id=sid) for sid in unfinished)
+    return results
+
+
+def _detect_unfinished_forks(
+    session_store: JsonlSessionStore,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """同步块：逐 child 读事件，判「有 fork/in-progress 无 session/forked」。
+
+    返回（未完成 child 列表, 读取失败 [(sid, detail)]）；单文件失败不阻断其余。
+    """
+    unfinished: list[str] = []
+    failures: list[tuple[str, str]] = []
+    for sid in session_store.list_session_ids():
+        try:
+            events = session_store.read_events(sid)
+        except Exception as error:
+            logger.warning(
+                "启动 fork 扫描：child=%s 事件读取失败", sid, exc_info=True
+            )
+            failures.append((sid, str(error)))
+            continue
+        has_intent = any(e.type == FORK_IN_PROGRESS for e in events)
+        if not has_intent:
+            continue
+        if any(e.type == SESSION_FORKED for e in events):
+            continue
+        unfinished.append(sid)
+    return unfinished, failures
+
+
+def _reclaim_fork_residue(
+    registry: WorkspaceRegistry, unfinished: list[str]
+) -> bool:
+    """同步块：清空暂存根 + 回收未完成 child 的默认形态工作区（幂等，best-effort）。
+
+    任一步失败只记日志不抛——启动路径的回收失败留给下一次启动重试（标记仍在）。
+    返回是否至少尝试了回收。
+    """
+    try:
+        staging_root = registry.fork_staging_root()
+        if staging_root.is_dir():
+            shutil.rmtree(staging_root, ignore_errors=True)
+    except Exception:
+        logger.warning("启动扫描：fork 暂存根清空失败", exc_info=True)
+    for sid in unfinished:
+        try:
+            default_workspace = registry.default_workspace_root(sid)
+            if default_workspace.is_dir():
+                shutil.rmtree(default_workspace, ignore_errors=True)
+        except Exception:
+            logger.warning(
+                "启动扫描：未完成 fork child=%s 工作区回收失败", sid, exc_info=True
+            )
+    return True
