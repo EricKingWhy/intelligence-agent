@@ -38,8 +38,6 @@ from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from tests.scripted_model import ScriptedModel
 from tests.session.store_fixtures import FailingFromStore
 
-pytestmark = pytest.mark.asyncio
-
 
 def _store(tmp_path) -> JsonlSessionStore:
     return JsonlSessionStore(tmp_path / "sessions")
@@ -93,6 +91,7 @@ def _build_parent(store: JsonlSessionStore) -> Session:
     return s
 
 
+@pytest.mark.asyncio
 async def test_fork_seeds_prefix_and_records_provenance(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -131,6 +130,7 @@ async def test_fork_seeds_prefix_and_records_provenance(tmp_path) -> None:
     assert forked.data["fork_point_seq"] == parent_events[4].seq
 
 
+@pytest.mark.asyncio
 async def test_fork_child_resumable_and_parent_untouched(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -157,6 +157,7 @@ async def test_fork_child_resumable_and_parent_untouched(tmp_path) -> None:
     assert human == ["第一条"]
 
 
+@pytest.mark.asyncio
 async def test_fork_at_first_message_yields_empty_seed(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -174,6 +175,7 @@ async def test_fork_at_first_message_yields_empty_seed(tmp_path) -> None:
     assert child.events[-1].data["fork_point_seq"] is None
 
 
+@pytest.mark.asyncio
 async def test_fork_boundary_errors(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -202,6 +204,7 @@ async def test_fork_boundary_errors(tmp_path) -> None:
         )
 
 
+@pytest.mark.asyncio
 async def test_fork_writes_meta_index(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -220,6 +223,7 @@ async def test_fork_writes_meta_index(tmp_path) -> None:
     assert row.fork_point_seq == parent.events[4].seq
 
 
+@pytest.mark.asyncio
 async def test_failed_fork_leaves_no_child_artifacts(tmp_path) -> None:
     """fork 失败（boundary 非法）不得留下 child JSONL / meta 行（无孤儿）。"""
     store = _store(tmp_path)
@@ -244,6 +248,7 @@ def test_find_fork_boundaries_lists_user_message_seqs(tmp_path) -> None:
     assert boundaries == [parent.events[1].seq, parent.events[-1].seq]
 
 
+@pytest.mark.asyncio
 async def test_fork_from_failed_run_prefix(tmp_path) -> None:
     """run/failed 同样是终态：失败轮之后的消息也是合法边界。"""
     store = _store(tmp_path)
@@ -264,6 +269,7 @@ async def test_fork_from_failed_run_prefix(tmp_path) -> None:
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 
+@pytest.mark.asyncio
 async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
     """T8 #138：run/interrupted 也是 run 终态——被中断轮之后的消息仍是合法边界。
 
@@ -292,6 +298,7 @@ async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 
+@pytest.mark.asyncio
 async def test_fork_from_paused_run_prefix(tmp_path) -> None:
     """`#312`：尾部 `run/paused` 的 run 也算「已收口」——它之后的消息是合法 fork 锚点。
 
@@ -319,6 +326,7 @@ async def test_fork_from_paused_run_prefix(tmp_path) -> None:
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 
+@pytest.mark.asyncio
 async def test_fork_prefix_with_resumed_run_is_rejected(tmp_path) -> None:
     """`run/resumed` 把 run 重新计入未收口 ⇒ 悬空前缀仍被拒（暂停不是免检通道）。
 
@@ -349,6 +357,7 @@ async def test_fork_prefix_with_resumed_run_is_rejected(tmp_path) -> None:
 # ── T3 copy-on-fork（#109, ADR-0017 决策 5）─────────────────────────────────
 
 
+@pytest.mark.asyncio
 async def test_fork_copies_parent_workspace_to_child(tmp_path) -> None:
     """fork 点世界快照：父 workspace 全部文件复制给 child。"""
     from agent_harness.sandbox import WorkspaceRegistry
@@ -375,6 +384,7 @@ async def test_fork_copies_parent_workspace_to_child(tmp_path) -> None:
     assert child.sandbox.read_text("sub/nested.txt") == "nested"
 
 
+@pytest.mark.asyncio
 async def test_fork_workspace_isolation_bidirectional(tmp_path) -> None:
     """双向隔离：child 写不伤父；fork 后父写不进 child。"""
     from agent_harness.sandbox import WorkspaceRegistry
@@ -403,6 +413,7 @@ async def test_fork_workspace_isolation_bidirectional(tmp_path) -> None:
     assert parent.sandbox.read_text("a.txt") == "v1"
 
 
+@pytest.mark.asyncio
 async def test_fork_without_parent_workspace_degrades(tmp_path) -> None:
     """父从未绑定 workspace：child 得到空 workspace，不崩溃。"""
     from agent_harness.sandbox import WorkspaceRegistry
@@ -453,6 +464,7 @@ def _parent_with_tail(store: JsonlSessionStore) -> Session:
     return s
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_attached_when_summarizer_given(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -473,6 +485,7 @@ async def test_tail_summary_attached_when_summarizer_given(tmp_path) -> None:
     assert "方案A" in fake.calls[0]
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_can_be_disabled(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -489,6 +502,7 @@ async def test_tail_summary_can_be_disabled(tmp_path) -> None:
     assert "tail_summary" not in child.events[-1].data
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_degrades_on_failure(tmp_path) -> None:
     """摘要失败 = 降级不挂接：fork 照常完成，无字段，meta 照写。"""
     store = _store(tmp_path)
@@ -508,6 +522,7 @@ async def test_tail_summary_degrades_on_failure(tmp_path) -> None:
     Session.resume(store, "degrade")  # child 完整可用
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_skipped_when_tail_empty(tmp_path) -> None:
     """锚点是最后一条事件：无 tail，不调用摘要器。"""
     store = _store(tmp_path)
@@ -525,6 +540,7 @@ async def test_tail_summary_skipped_when_tail_empty(tmp_path) -> None:
     assert "tail_summary" not in child.events[-1].data
 
 
+@pytest.mark.asyncio
 async def test_tail_summarizer_uses_scripted_model(tmp_path) -> None:
     """真实 TailSummarizer 类：任何 ainvoke 模型可用（ScriptedModel 实测）。"""
     from agent_harness.session.fork import TailSummarizer
@@ -541,6 +557,7 @@ async def test_tail_summarizer_uses_scripted_model(tmp_path) -> None:
 # ── F15 #234：权限决策是会话属性，fork 必须显式继承 ─────────────────
 
 
+@pytest.mark.asyncio
 async def test_fork_inherits_parent_permission_decisions(tmp_path) -> None:
     """父会话显式声明的权限决策（档位 + auto_approve）必须进 child 的 session/started。
 
@@ -574,6 +591,7 @@ async def test_fork_inherits_parent_permission_decisions(tmp_path) -> None:
     assert all(e.type != SESSION_STARTED for e in child.events[1:])
 
 
+@pytest.mark.asyncio
 async def test_fork_of_undeclared_parent_writes_no_permission_keys(tmp_path) -> None:
     """父未声明权限决策 → child 也不写键（历史会话 fork 出的子树语义一致）。"""
     store = _store(tmp_path)
@@ -592,6 +610,7 @@ async def test_fork_of_undeclared_parent_writes_no_permission_keys(tmp_path) -> 
     assert "auto_approve" not in started.data
 
 
+@pytest.mark.asyncio
 async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None:
     """seed 写盘中途失败：父日志逐字节不变，child 只留下已落盘的前缀。
 
@@ -627,6 +646,7 @@ async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None
     assert await meta.get("partial_child") is None
 
 
+@pytest.mark.asyncio
 async def test_fork_does_not_touch_parent_log_bytes(tmp_path) -> None:
     """成功 fork 同样是只读父：父日志逐字节不变（不含 seq / mtime 之外的任何痕迹）。"""
     store = _store(tmp_path)
@@ -662,6 +682,7 @@ def _build_parent_with_workspace(store, registry) -> Session:
     return parent
 
 
+@pytest.mark.asyncio
 async def test_fork_publishes_workspace_via_staging(tmp_path) -> None:
     """默认形态工作区走暂存 + 同卷 rename 发布：成功后副本完整、暂存无残留。
 
@@ -695,6 +716,7 @@ async def test_fork_publishes_workspace_via_staging(tmp_path) -> None:
     assert not staging.exists() or not any(staging.iterdir())
 
 
+@pytest.mark.asyncio
 async def test_fork_grandchild_seed_excludes_intent_marker(tmp_path) -> None:
     """意图标记是会话级状态：孙代 seed 不携带（孙的 fork 流程写自己的标记）。"""
     store = _store(tmp_path)
@@ -721,6 +743,7 @@ async def test_fork_grandchild_seed_excludes_intent_marker(tmp_path) -> None:
     assert grandchild.events[1].data["parent_session_id"] == "child"
 
 
+@pytest.mark.asyncio
 async def test_fork_copy_failure_compensates_and_leaves_marked_child(
     tmp_path, monkeypatch
 ) -> None:
