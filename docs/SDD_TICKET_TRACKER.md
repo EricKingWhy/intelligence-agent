@@ -7102,3 +7102,19 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   - `web/src/lib/projection.ts` = `5446581e6ac07f9c88babefcdda31289ed7c1b60`
 
 - **本地 pre-push hook 环境故障**：普通 `git push` 被 Gate-0 hook 拦下；guards 中两条临时 Git 仓库用例因 `git add -A` 报 “this operation must be run in a work tree”。失败后发现 backend shared config 的 `core.bare=true`，worktree 状态查询同时失效；恢复为 `false` 后复核 HEAD/index 未变、10 个 worktree 均为非 bare。普通进程环境对 exact tip `8236a741` 重跑完整 `gate0.py --no-record` 为 6/6 PASS（11.3s）；同型本地 hook 失败已有 PR #600 收口记录。
+
+## #619（SessionBudget model-request 结算与启动恢复；分支 `fix/i619-sessionbudget-fallback-settlement`）
+
+- **范围**：#619 从 #604 拆出，补齐 `SessionBudget` 对 fallback 失败/取消的 durable request settlement；不改变 #604 的 run-scoped `RunBudget.model_requests` 口径。
+- **实现与提交**：`07e50702` 建立原子 reservation/marker 与 settlement/recovery；`8f35f6e6` 将 accounting tuple 改为命名状态；`71a3a652` 统一 marker payload 写入；`ecddd03f` 修复全量实测暴露的测试等待/调用问题。详细机制与逐轮结果见 `docs/phase_status/2026-10.md` 的 #619 小节。
+- **Recovery 与行为证据**：SQLite 子进程 kill/restart 测试证明已记录请求只结算一次，重复扫描幂等且预算上限仍生效；start-only 明确记为 unsettled、不合成请求或重跑；畸形 marker fail closed。InMemory/SQLite replay payload 匹配，process owner 使用 PID+nonce。
+- **修复前全量红与处置**：`77959c5d` 首轮全量为 8 failed / 5482 passed / 3 skipped / 51 deselected / 7 warnings（1006.36s）。六个 terminal-arm 失败源于 async cleanup 调用未 await；multiturn 测试在 `MODEL_REQUEST_STARTED` 前抓事件快照；web helper 命中前一 run 的历史 terminal。修复及根因证据见 10 月归档。
+- **复验**：最终 focused 集合 262 passed（36.76s）；全仓 Ruff 通过；最终 `run_tests_clean.sh tests/` 读数 5490 passed / 3 skipped / 51 deselected / 0 failed（688.38s，exit 0）；裸 Gate-0 在 `270d2448` / tree `2c18409b` 六车道 PASS（13.7s），收据 `docs/gate/270d24486b5e654a5cfeb7bd9c329bdc24f86439.json`；review coverage exit 0。
+- **Gate-0 docs-only 读数传递（§8.1）**：裸 Gate-0 tip `270d24486b5e654a5cfeb7bd9c329bdc24f86439` / tree `2c18409beaa90c0f772f984a2d3f475c0884ca50` 到本次预备落账树的 `git diff --cached --name-status --no-renames` 输出仅为 `M docs/PHASE_STATUS.md`、`M docs/SDD_TICKET_TRACKER.md`、`A docs/gate/270d24486b5e654a5cfeb7bd9c329bdc24f86439.json`、`M docs/phase_status/2026-10.md`；落账前 `git status --short` 四行均为上述路径（`M  ` / `A  ` 状态），所有路径命中 DOC_PATTERN；落账后复核工作树 clean。`git diff --check 431fa4ec` exit 0。
+- **双轴审查**：发现/处置范围 `431fa4ec..71a3a652` 已双轴复审通过，Standards 初轮 P3 重复 marker payload 已在 `71a3a652` 修复；修后新 diff `71a3a652..ecddd03f` 的 Spec 与 Standards 均 PASS、P0–P4=0。台账行分别见 `t619-session-budget-accounting-431fa4ec-71a3a652.tsv` 与 `t619-session-budget-accounting-71a3a652-ecddd03f.tsv`。
+- **冻结点与 blob 核对**：代码/测试冻结提交 `ecddd03f720d94a2267618b6512b1522572debf5`，tree `ee30ec7668c7cdb7ca5a5f3a3eacb32fd8ac03f5`。12 个改动代码/测试文件的冻结 blob OID：
+  - `src/agent_harness/agent/run_budget.py` `d35282b7b168cec6e56cbc659149028164d6f302`；`src/agent_harness/agent/runtime.py` `de2f7f2f689cdd67fd2c01414f1d4c4ae0db8875`；`src/agent_harness/recovery/scan.py` `4bc74ec00b867dc34528ad2c70ce827c225b76fe`。
+  - `src/agent_harness/session/service.py` `686a074399dc89b4976327524c9433efd30c0987`；`src/agent_harness/storage/delegation_tree.py` `c0b7f7b582ee256094a50a4e6b486f7cf925bad8`。
+  - `tests/agent/test_model_fallback_runtime.py` `8a93640841071d284f7bf5076a4648a01b0593f5`；`tests/agent/test_terminal_arms.py` `46d690dde724ec60b020e5ac65ccae7344852621`；`tests/multiagent/test_session_budget_ledger.py` `a704fa09cfd712b7bb5320b63320d9e5744c1e85`。
+  - `tests/recovery/_session_budget_request_kill_child.py` `60e5b791fa780dcbcff4214c9e524bf29f6e62b6`；`tests/recovery/test_session_budget_request_recovery.py` `f641ca4823003a2623b1fc11e3d0c6582b183946`；`tests/session/test_multiturn_delivery.py` `96f9f5506131f903d594d22a2d8c0b79054cbcd9`；`tests/web/test_web_messages_interactive_binding.py` `7c4129be5d104cc2e3cdda8791ef766ee4b8055f`。
+- **状态**：本地 branch-ready；本轮未执行 push、PR、merge 或关票。发布前仍须依流程同步最新 `origin/main` 并核对跨线重叠。
