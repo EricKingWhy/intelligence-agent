@@ -7058,3 +7058,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **§14.9 回补通知**：本线已集成进 main（`2ef11b73`）；任何在途线下次开工前按手册 §2 获取新基准 `2ef11b73`，勿以旧缓存为基准。
 - **关单（§14.12，手册 §5）**：#589/#588/#370/#338 四票关闭（证据评论 issuecomment-5970571437 / 5970572079 / 5970572803 / 5970573441）；#338 维持「未知红、不生效」诚实登记关闭（矩阵报告 issuecomment-5969769848；未来任何全量读数出现该用例带签名 ⇒ stop-line 回 #338）。
 - **残余**：远端分支 `fix/i588-i589-i370-i338-capability-docs` 已删（用户批准；双条件核验：tip `8bec6e1c` 为 main 祖先 + PR #603 MERGED）；#588 F2（U+0085/U+2028/U+2029）/F3（裸 `{path}` 插值）、#370 环境半 follow-up 登记不修；gate0 `env_failures` 结构化字段（0xC0000142 风暴签名归因）建议另开码面票，本线不扩范围。
+
+## #604（P2，在途模型请求缺少 durable 开始事件；分支 `fix/i604-model-request-started`）
+
+- **票面范围与关联**：2026-10-04 用户裁决把预算 AC 限定为本逻辑 run 的 `RunBudget.model_requests`；开始事件不计数，每条已结算 `model/request` 计一次。`SessionBudget` fallback 失败/取消补记独立登记为 #619，不属于本票。
+- **实现**：`4891b28` 为真实 Provider attempt 在 invoke/astream 前 durable append `model/request-started`，以稳定 `request_id` 配对 settlement；`41b408f`/`a1134c7` 收敛 fallback 与 stream 时序；`6808fe7` 保留断连收尾时已有响应的 usage/cost；`9038d517` 将 MemoryWriteback 测试改为顺序无关断言。零进展路径按已批准处理只期待 `RUN_PAUSED`，保留 #567 跳过 closeout 与 #604 仅真实 Provider attempt 发开始事件。
+- **红绿 / focused**：首轮全量为 5438P/3S/51D/2F；其中 coverage 自检因审查台账行尚未写入而红，行写入后该节点 1P。MemoryWriteback 旧断言在本分支隔离复现 6/6 失败，显式指向 origin/main 的源码副本 6/6 通过；原因是测试假设不同后台 task 的捕获顺序有 FIFO 保证，而规格未定义该保证。按批准修正后节点通过。最新 main 同步后的相关 focused 集合 470P/67.28s。
+- **双轴 Review**：审查范围 `2e8fa23c0f4e26deb40a1a0480fb47eacb0f0488..e227872b52ec75c06116b491d9bf2f23cd986171`；Spec/Correctness PASS，Standards PASS；0 个未关闭硬性 finding。Standards 轴留 P4 备注：`runtime.py` 两处重复组装 `model/request` payload，按最小范围登记、不改代码。台账见 `docs/review_ledger.d/i604-model-request-started-2e8fa23c-e227872b.tsv`。
+- **状态**：focused 与两轴 Review 已过；最终冻结树全量、ruff、裸 Gate-0、review coverage 与收据读数仍待执行，完成后再更新本节。
