@@ -2700,8 +2700,9 @@ class AgentRuntime:
         # `0 + 1 >= 1` 当场挡下）——事件流里没有任何可总结的工作，为一次
         # "什么都没发生"的收口再烧一条真实 Provider 请求是纯浪费（A1：最小
         # 有效 ceiling 是 2）。确定性 fallback 本就是无工作场景的诚实收口，
-        # 零请求零消耗（旧实现还会落一条 REQUEST_OUTCOME_FAILED 的
-        # model/request，把账行污染成"有一次失败请求"的假象）。
+        # 零请求零消耗（旧实现无论 closeout 成败都白花：成功形态把一次真实请求
+        # + usage 记进账，失败形态再落一条 REQUEST_OUTCOME_FAILED 的
+        # model/request——两种都是"为零工作付账"）。
         if consumed.agent_turns == 0:
             return fallback, CLOSEOUT_DETERMINISTIC, []
         # 到点后**连 closeout 也不发**：它是真实 Provider 请求，`04 §9.1` /
