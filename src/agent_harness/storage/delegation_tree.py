@@ -448,6 +448,24 @@ class SqliteDelegationTreeLedger:
         )
         return event_id
 
+    async def _append_model_request_accounting_started(
+        self, connection: aiosqlite.Connection, budget_key: str, *,
+        version: int, session_id: str, run_id: str, step_id: int,
+        after_seq: int, reserved_requests: int,
+    ) -> str:
+        return await self._append_session_event(
+            connection, budget_key, "model_request_accounting_started",
+            version=version,
+            detail={
+                "session_id": session_id,
+                "run_id": run_id,
+                "step_id": step_id,
+                "after_seq": after_seq,
+                "reserved_requests": reserved_requests,
+                "owner_id": _session_budget_process_id(),
+            },
+        )
+
     async def _pending_model_request_accountings(
         self, connection: aiosqlite.Connection, budget_key: str,
     ) -> list[SessionModelRequestAccounting]:
@@ -698,19 +716,15 @@ class SqliteDelegationTreeLedger:
                     detail={"turns": snapshot.consumed.agent_turns + 1},
                 )
                 if session_id is not None:
-                    accounting_id = str(uuid4())
-                    await self._append_session_event(
-                        connection, budget_key, "model_request_accounting_started",
+                    assert run_id is not None and step_id is not None and after_seq is not None
+                    accounting_id = await self._append_model_request_accounting_started(
+                        connection, budget_key,
                         version=snapshot.version,
-                        detail={
-                            "session_id": session_id,
-                            "run_id": run_id,
-                            "step_id": step_id,
-                            "after_seq": after_seq,
-                            "reserved_requests": 1,
-                            "owner_id": _session_budget_process_id(),
-                        },
-                        event_id=accounting_id,
+                        session_id=session_id,
+                        run_id=run_id,
+                        step_id=step_id,
+                        after_seq=after_seq,
+                        reserved_requests=1,
                     )
                 # 快照读必须在 commit 之前（事务内读自己的写）：commit 之后的读若
                 # 撞锁超时，retry_on_busy 会整块重跑，而已提交的 +1 预留无法回滚，
@@ -781,19 +795,14 @@ class SqliteDelegationTreeLedger:
                 row = await cursor.fetchone()
                 if row is None:
                     raise KeyError(f"unknown session budget: {budget_key}")
-                accounting_id = str(uuid4())
-                await self._append_session_event(
-                    connection, budget_key, "model_request_accounting_started",
+                accounting_id = await self._append_model_request_accounting_started(
+                    connection, budget_key,
                     version=int(row["version"]),
-                    detail={
-                        "session_id": session_id,
-                        "run_id": run_id,
-                        "step_id": step_id,
-                        "after_seq": after_seq,
-                        "reserved_requests": 0,
-                        "owner_id": _session_budget_process_id(),
-                    },
-                    event_id=accounting_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    step_id=step_id,
+                    after_seq=after_seq,
+                    reserved_requests=0,
                 )
                 await connection.commit()
                 return accounting_id
