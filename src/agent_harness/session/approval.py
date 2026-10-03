@@ -64,6 +64,7 @@ class InteractiveCallbackHolder:
     def __init__(self, *, queue: PendingApprovalQueue, timeout_seconds: float) -> None:
         self._queue = queue
         self._session: Session | None = None
+        self._persisted_approval_ids: set[str] = set()
         #: ≤0 → None（无限等待，旧行为）；>0 → fail-closed 超时（PRD T6 §2.2 C）。
         #: 无默认值：审批等待是安全边界，超时值必须由调用方（Settings）显式给出。
         self._timeout: float | None = timeout_seconds if timeout_seconds > 0 else None
@@ -76,7 +77,7 @@ class InteractiveCallbackHolder:
             raise RuntimeError(
                 "interactive callback invoked before Session.start"
             )
-        approval_id = self._queue.register(req)
+        approval_id = self._queue.register(req, on_resolve=self._persist_resolution)
         allowed_decisions = [
             PermissionDecision.DENY.value,
             PermissionDecision.APPROVE_ONCE.value,
@@ -134,14 +135,7 @@ class InteractiveCallbackHolder:
                 else self._queue.resolved_response(approval_id) or fallback
             )
             try:
-                self._session.append(
-                    "permission/resolved",
-                    {
-                        "approval_id": approval_id,
-                        "decision": settled.decision.value,
-                        "reason": settled.reason,
-                    },
-                )
+                self._persist_resolution(approval_id, settled)
             except Exception:
                 # 结清写入自己失败（存储故障）时**不能**顶掉原异常：这条 except 分支
                 # 在取消 / 退出的栈上，换掉它会让 runtime 的取消臂不匹配、run 被记成
@@ -153,15 +147,26 @@ class InteractiveCallbackHolder:
                     approval_id,
                 )
             raise
+        self._persist_resolution(approval_id, response)
+        return response
+
+    def _persist_resolution(
+        self, approval_id: str, response: ApprovalResponse,
+    ) -> None:
+        """Append each approval decision once through the run's live Session."""
+        if approval_id in self._persisted_approval_ids:
+            return
+        if self._session is None:
+            raise RuntimeError("interactive callback has no bound Session")
         self._session.append(
-            "permission/resolved",
+            PERMISSION_RESOLVED,
             {
                 "approval_id": approval_id,
                 "decision": response.decision.value,
                 "reason": response.reason,
             },
         )
-        return response
+        self._persisted_approval_ids.add(approval_id)
 
 
 def declared_permission_mode(events: list[SessionEvent]) -> PermissionPolicy | None:

@@ -11,7 +11,7 @@
 
 外部（前端）调 POST /api/sessions/{id}/approve {approval_id, approved, reason?}
   → queue.resolve(approval_id, ApprovalResponse(...))
-  → 唤醒上面 wait_for 的 Future
+  → 同步调用 registered on_resolve 持久化决策，再唤醒上面 wait_for 的 Future
 
 超时（fail-closed）：等待方用 wait_for(approval_id, timeout) 设上限，超时后由
   queue.expire(approval_id, ApprovalResponse(deny)) 写入默认拒绝（不默认放行）。
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from agent_harness.tooling.approval import ApprovalRequest, ApprovalResponse
@@ -38,6 +39,7 @@ class _Pending:
     future: asyncio.Future[ApprovalResponse] = field(
         default_factory=lambda: asyncio.get_event_loop().create_future()
     )
+    on_resolve: Callable[[str, ApprovalResponse], None] | None = None
 
 
 class PendingApprovalQueue:
@@ -50,10 +52,17 @@ class PendingApprovalQueue:
         self._pending: dict[str, _Pending] = {}
         self._resolved: dict[str, ApprovalResponse] = {}  # approval_id → response
 
-    def register(self, request: ApprovalRequest) -> str:
-        """登记一个待审批请求，返回 approval_id（外部 /approve 引用）。"""
+    def register(
+        self,
+        request: ApprovalRequest,
+        *,
+        on_resolve: Callable[[str, ApprovalResponse], None] | None = None,
+    ) -> str:
+        """登记请求与可选的持久化回调，返回外部 /approve 引用。"""
         approval_id = uuid.uuid4().hex
-        self._pending[approval_id] = _Pending(approval_id=approval_id, request=request)
+        self._pending[approval_id] = _Pending(
+            approval_id=approval_id, request=request, on_resolve=on_resolve,
+        )
         return approval_id
 
     async def wait_for(self, approval_id: str, timeout: float | None = None) -> ApprovalResponse:
@@ -73,7 +82,7 @@ class PendingApprovalQueue:
         return await pending.future
 
     def resolve(self, approval_id: str, response: ApprovalResponse) -> bool:
-        """外部 /approve 调用：写入决策，唤醒 wait_for 的 Future。
+        """外部 /approve 调用：先持久化决策，再写入队列并唤醒 Future。
 
         返回：
           True → 成功 resolve（pending 存在，第一次解）
@@ -84,7 +93,13 @@ class PendingApprovalQueue:
             if approval_id in self._resolved:
                 raise KeyError(f"approval_id {approval_id} already resolved")
             return False  # 404
-        self._settle(self._pending.pop(approval_id), response)
+        pending = self._pending[approval_id]
+        # Persist the decision before changing queue state or waking the tool waiter;
+        # otherwise the HTTP resolver could acknowledge a decision still only in RAM.
+        if pending.on_resolve is not None:
+            pending.on_resolve(approval_id, response)
+        self._pending.pop(approval_id)
+        self._settle(pending, response)
         return True
 
     def expire(self, approval_id: str, response: ApprovalResponse) -> bool:
