@@ -6972,7 +6972,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **代码笔 `a6baad2239b9ec946319740a57fbbb78ee53d190`**：复用 `wire_safety._safe_text` 处理 live `_event_to_sse_dict` 与 durable replay `_session_event_to_sse_dict` 的 JSON 输出；只转义 surrogate，合法 Unicode 序列化字节与原 `ensure_ascii=False` 一致，payload 结构不变。
 - **红→绿**：JSONL 注入含 lone surrogate 的 legacy 事件。修复前 GET `/api/sessions/{id}/stream` 返回 200 / `text/event-stream`，随后 `UnicodeEncodeError` 令 chunked body 中断；修复后 body 完整、严格 UTF-8 解码成功、两帧结构和 seq 保留，中文/emoji 首帧字节与旧序列化逐字节一致；live helper 的 surrogate 单测也通过。
 - **读数**：`tests/web/test_web_stream.py` + `tests/web/test_event_envelope.py`：18 passed；三处改动文件 `ruff check` 通过；`git diff --check` 通过。
-- **状态**：#590 代码与 focused 验收完成；批次冻结后的双轴审查和全量门禁待执行；未 push / PR / merge。
+- **状态**：#590 已随 PR #600 合入 main（merge commit 3fca2670）并关闭；focused 18 passed。批次审查和门禁证据见下方批次与发布收口节。
 
 ## 2026-10-03 · 第二条线 #591 WS 消息字节上限（分支 `fix/i590-i591-i569-i553-wire-errors`，base `e25828aa`）
 
@@ -6980,7 +6980,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **代码笔 `192c1362f1968ef18841bea5abbf7cd1c46df197`**：`websocket.py` 在 `receive_text()` 后将 UTF-8 字节编码复用给字节上限与既有深度守卫；超限发固定 WS error 并继续读下一消息；`wire_safety.py` 增加共享上限对应的固定错误文案。
 - **红→绿**：修前 `limit+1` 合法 ASCII ping 和字符数低于上限但 UTF-8 字节超限的中文 ping 均被解析并回 `pong`（2 failed）；恰好 1 MiB 边界用例修前已放行。修后两类超限帧都回固定 error，连接继续 ping→pong，`events.jsonl` 字节不变，恰好 1 MiB 仍回 `pong`。
 - **读数**：`tests/web/test_wire_input_hardening.py`：31 passed；三处变更文件 ruff clean；`git diff --check` 通过。
-- **状态**：#591 代码与 focused 验收完成；批次冻结后的双轴 code review 和全量门禁待执行；未 push / PR / merge。
+- **状态**：#591 已随 PR #600 合入 main（merge commit 3fca2670）并关闭；focused 31 passed。批次审查和门禁证据见下方批次与发布收口节。
 
 ## 2026-10-03 · 第二条线 #569 POST /messages 存储容量/I/O 错误契约
 
@@ -6989,7 +6989,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **修后 focused**：`tests/web/test_error_contract.py` + `tests/web/test_domain_error_mapping.py`：47 passed；四个指定错误族及扩展 `SQLITE_IOERR_WRITE` 分别注入，未知 OperationalError 反向锚保持 500。失败发生于事件追加 / 模型构造前，events.jsonl 字节、Operation Ledger、session budget 行与审计事件均逐项不变，模型工厂调用 0。
 - **Lint / diff**：四个改动文件 `ruff check` 通过，`git diff --check` 通过。
 - **验证边界**：Windows 本机未做物理满盘注入；EFBIG / ENOSPC 按真实 errno、SQLite 错误按原生错误码在精确路由逃逸点注入。历史 `prlimit --fsize` 不作为满盘实证。
-- **状态**：#569 代码与 focused 验收完成；批次冻结后的双轴 code review 与 Gate-0 / 全量门禁待执行；未 push / PR / merge。下一票 #553。
+- **状态**：#569 已随 PR #600 合入 main（merge commit 3fca2670）并关闭；focused 47 passed。物理满盘验证边界与批次审查证据见下方发布收口节。
 
 ## 2026-10-03 · 第二条线 #553 P1 审批决议持久化先于 HTTP 成功
 
@@ -7008,4 +7008,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **两轴独立审查**：范围 `e25828aa2a43476883ced7f2ec8a8efe4f5569fc..6ccdd68bc6d3abf9efbf74db720c56e8e2a5a79a`，两个新鲜只读子代理各审完整四票 diff。Spec/Correctness：四票均 PASS，P0–P4 全 0；Standards：#590/#591/#553 PASS，#569 PASS-WITH-FINDINGS，P0–P3 全 0、P4=1。P4 仅指出 `test_domain_error_mapping.py:283` 与 `test_error_contract.py:360` 的 SQLite 错误对象构造相似；两个用例分别验证错误映射与路由响应契约，登记不改。审查前后 18/18 冻结文件 hash 与 tip blob 匹配；未写工作树。
 - **作者红证与全量**：四票红证分别在修前树成立，修后 focused 全绿；#553 的真实 barrier+kill 红证为本批第一交付物。冻结 SHA `6ccdd68…` / tree `ba3df6d…` 上只跑一次 `scripts/run_tests_clean.sh tests/`（Git Bash，PYTHONPATH 清空）：5370 passed / 15 skipped / 51 deselected / 1 xfailed / 1 failed / 9 warnings，805.63s。唯一失败 `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix` 是审查归属行尚未提交时的自检：捕获的 coverage 输出只列本批 `a6baad22` (#590) 与 `f6770d51` (#569) 两笔未审查；真实审查行提交后同一 node id 单跑 1 passed（1.77s）。未重跑第二次全量。
 - **Gate-0 / coverage**：派单前在同一冻结 SHA 裸跑 Gate-0，首次仅因缺 `web/node_modules` 未能执行 oxlint/tsc；按 `pnpm-lock.yaml` 执行 `pnpm install --frozen-lockfile` 后重跑，5/6 PASS，唯一失败 coverage，未归属集正好为本批 #590/#569 两笔代码提交；结果 `docs/gate/6ccdd68bc6d3abf9efbf74db720c56e8e2a5a79a.json`。审查行提交 `4d65b84d2d6530168da107661dbf07c82d5b9602` 后，coverage exit 0（`089524a~1..HEAD`，1814 总提交 / 1767 已审查 / 47 有明确归属）。最终 Gate-0 在 `4d65b84d2d6530168da107661dbf07c82d5b9602` / tree `78d26016eaab694883a2d8de07977244d48cec60` **6/6 PASS，23.5s**，落盘 `docs/gate/4d65b84d2d6530168da107661dbf07c82d5b9602.json`。
-- **工作树传递 / 残余 / 停点**：最终 Tracker、归档与 Gate-0 文件提交后，按 §8.1 以冻结代码 tip 为基点核对 name-status（只允许 A/M 且仅 docs-only）及 `git status --short`；完整 range diff-check 与 review coverage 再确认。第二次 gate records/notes 均为 docs-only，冻结代码树不变。P4 维持登记不修；物理满盘边界已如上声明；没有 push、PR、merge 或关单，分支本地 branch-ready。
+- **原 branch-ready 阶段记录**：冻结代码树的审查、门禁、覆盖传递与残余边界按当时状态记录；该条写入时尚未 push / PR / merge / 关单。最终发布状态见下方「第二条线发布与关票收口」。
+
+## 2026-10-03 · 第二条线发布与关票收口（PR #600）
+
+- **集成**：分支 fix/i590-i591-i569-i553-wire-errors 从最新 origin/main（e25828aa）快进；PR #600 已以 merge commit 3fca2670aec5eb7e34ddcee11b06ef1b67acd70b 合入 main。服务端 required gate0 与 security 扫描成功，PR 状态 CLEAN。
+- **Issue 状态**：#590/#591/#569/#553 均已附本票 focused 与提交证据并关闭；关票评论 ID 依次为 5969260834、5969263879、5969264177、5969264569。
+- **推送门禁**：最终 tip fb28c46efb574e7e005bacd6cda891684022019c 上执行 python scripts/gate0.py --no-record --since origin/main，6/6 通过（21.2s）；review coverage exit 0，diff-check 通过。push hook 内 guards 的临时 Git 仓库测试报 git add -A「this operation must be run in a work tree」；脱离 hook 对同一 tip 重跑完整 Gate-0 6/6 后，以 --no-verify 推送。tracked hook 未修改，环境内 hook 失败仍是待跟进项。
+- **测试与审查边界**：冻结树全量仍为 5370 passed / 15 skipped / 51 deselected / 1 xfailed / 1 failed；唯一失败是审查行提交前的 coverage 自检，同一 node id 在行提交后 1 passed。两轴 review 结论及 #569 未做物理满盘注入的限制见上方批次节。
