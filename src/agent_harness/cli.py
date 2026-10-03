@@ -744,6 +744,20 @@ async def run(
             deployment=settings.local_max_agent_turns,
             profile=declared_turn_ceiling(None),
         )
+        # `#318`：session 作用域账（--session-* 旗标 → durable 账行的首用声明；
+        # 恒接线，账从本会话第一个 run 起就有持久读数，与 Web 创建路径同一条规则）。
+        # `#564` 审查 P2-2：同一份声明同时喂 pre-CAS 注册名校验——CLI create 的
+        # 坏名同样"任何工作开始前拒绝"（04 §9.1），不能静默进 durable 账行。
+        session_limits = session_limits_from_request(
+            max_agent_turns_total=session_turns_total,
+            max_model_requests=session_model_requests,
+            max_total_tokens=session_total_tokens,
+            max_cost_usd=session_cost_usd,
+            deadline_at=session_deadline_at,
+            tool_call_limits=session_tool_limits,
+            max_delegations=session_max_delegations,
+            accounting=HARNESS_MODEL_ACCOUNTING,
+        )
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
@@ -768,23 +782,15 @@ async def run(
                     accounting=HARNESS_MODEL_ACCOUNTING,
                 ),
             ),
-            # `#318`：session 作用域账（--session-* 旗标 → durable 账行的首用声明；
-            # 恒接线，账从本会话第一个 run 起就有持久读数，与 Web 创建路径同一条规则）。
             session_budget=SessionBudgetHandle(
                 stores.delegation_tree_ledger,
                 budget_key=session_id,
                 root_session_id=session_id,
-                limits=session_limits_from_request(
-                    max_agent_turns_total=session_turns_total,
-                    max_model_requests=session_model_requests,
-                    max_total_tokens=session_total_tokens,
-                    max_cost_usd=session_cost_usd,
-                    deadline_at=session_deadline_at,
-                    tool_call_limits=session_tool_limits,
-                    max_delegations=session_max_delegations,
-                    accounting=HARNESS_MODEL_ACCOUNTING,
-                ),
+                limits=session_limits,
             ),
+            # 同一份声明（上面 hoist）：pre-CAS 校验与 durable 账行的首用声明
+            # 是**一个**输入，不是两份各写一遍的配置。
+            session_declared_limits=session_limits,
             auto_approve=True,
             session_store=store,
             # `#317`：`run` 是"创建 + 第一条消息"入口，第一次开跑就可能卡循环 ⇒ 它建的

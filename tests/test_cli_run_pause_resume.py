@@ -548,25 +548,19 @@ async def test_cli_stops_and_resumes_on_a_non_turn_dimension(monkeypatch, tmp_pa
     """真链路：请求维 ceiling 停下 run → 抬高它 → 同一 run 完成（turn 维没参与）。
 
     这条证明 CLI 的四个开关**真的接到了账本上**（不是只被 argparse 收下）：
-    `--run-model-requests 1` 当场暂停并如实报出命中维度与那一维的读数；恢复那一次把
-    requests 抬到位（上限从 1 → 3），`--run-total-tokens 2000` 则把**未到线**的 token
-    ceiling 一起抬高；两段摘要里的 token 行都来自 durable 快照（closeout 自报的 usage）。
+    `--run-model-requests 1` 当场暂停并如实报出命中维度与那一维的读数；`#567` 裁决 B：
+    零进展暂停不发 closeout ⇒ 暂停块里 requests 是 0、token 维真实为 0（无请求；
+    旧实现这里会烧一条 closeout 请求并自报 20 token 进账）；恢复那一次把 requests
+    抬到位（上限从 1 → 3），`--run-total-tokens 2000` 则把**未到线**的 token
+    ceiling 一起抬高。
     """
     settings = _settings(tmp_path)
     monkeypatch.setattr(cli, "Settings", lambda: settings)
 
-    def _usage_answer(content: str, total_tokens: int) -> AIMessage:
-        return AIMessage(
-            content=content,
-            usage_metadata={"input_tokens": total_tokens - 3, "output_tokens": 3,
-                            "total_tokens": total_tokens},
-        )
-
     monkeypatch.setattr(
         "agent_harness.assembly.create_chat_model",
-        lambda config, **kw: ScriptedModel(responses=[
-            _usage_answer(_continuation_json().content, 20),
-        ]),
+        # `#567` 裁决 B：暂停阶段零模型调用 ⇒ 剧本留空（旧实现这里烧一条 closeout）。
+        lambda config, **kw: ScriptedModel(responses=[]),
     )
     printed: list[str] = []
     outcome = await cli.run(
@@ -576,10 +570,11 @@ async def test_cli_stops_and_resumes_on_a_non_turn_dimension(monkeypatch, tmp_pa
     assert outcome.paused is True, "撞到请求维 ceiling ⇒ 暂停（不是失败，也不是空回答）"
     text = "".join(printed)
     assert "dimension=run.max_model_requests" in text
-    # 请求维含 closeout 预留 ⇒ ceiling=1 连一次普通请求都放行不了：turns 计数是 0，
-    # 而 closeout 那一次请求与它自报的 20 token 都在账上。
-    assert "model_requests: consumed 1 / limit 1 (remaining 0)" in text
-    assert "total_tokens: consumed 20 / limit 500 (remaining 480)" in text
+    # 请求维含 closeout 预留 ⇒ ceiling=1 连一次普通请求都放行不了；#567 裁决 B：
+    # 零进展暂停不发 closeout ⇒ requests 停在 0，token 维无请求 ⇒ 真实为 0
+    # （不是 unavailable——"没花过"是可数事实，`11 §6.1` 的不可得 ≠ 0 仍成立）。
+    assert "model_requests: consumed 0 / limit 1 (remaining 1)" in text
+    assert "total_tokens: consumed 0 / limit 500 (remaining 500)" in text
     assert "--run-model-requests N" in text, "恢复指令给的是被命中那一维的开关"
 
     session_id = _only_session_id(settings)
@@ -601,8 +596,8 @@ async def test_cli_stops_and_resumes_on_a_non_turn_dimension(monkeypatch, tmp_pa
     assert resumed.paused is False and resumed.final_text == "A 已改完"
     text_again = "".join(printed_again)
     assert "[run resumed]" in text_again
-    assert "model_requests: carried consumed 1 / limit 3 (remaining 2)" in text_again
-    assert "total_tokens: carried consumed 20 / limit 2000 (remaining 1980)" in text_again
+    assert "model_requests: carried consumed 0 / limit 3 (remaining 3)" in text_again
+    assert "total_tokens: carried consumed 0 / limit 2000 (remaining 2000)" in text_again
 
     events = store.read_events(session_id)
     types = [e.type for e in events]

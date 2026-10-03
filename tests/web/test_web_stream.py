@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -58,8 +59,11 @@ class _BlockedInvokeModel:
         return AIMessage(content="not a continuation")
 
     async def astream(self, messages, **kwargs):
-        raise AssertionError("本用例应在预算暂停时只调用 closeout ainvoke")
-        yield
+        yield AIMessageChunk(content="", tool_calls=[{
+            "id": "glob-before-closeout",
+            "name": "glob",
+            "args": {"pattern": "*"},
+        }])
 
 
 async def _start_server(tmp_path, monkeypatch, model):
@@ -102,7 +106,8 @@ def _parse_frame(line: str) -> dict:
 
 async def _collect(port: int, path: str, body: dict | None,
                    stop_types: set[str] | None = None,
-                   max_frames: int | None = None) -> list[dict]:
+                   max_frames: int | None = None,
+                   stop_if: Callable[[dict], bool] | None = None) -> list[dict]:
     """读 SSE 流；stop_types 命中 / 流结束 / max_frames 到达即返回（断开）。"""
     import httpx2
 
@@ -120,8 +125,11 @@ async def _collect(port: int, path: str, body: dict | None,
                     continue
                 frame = _parse_frame(line)
                 frames.append(frame)
-                if (stop_types and frame.get("type") in stop_types) or (
-                        max_frames is not None and len(frames) >= max_frames):
+                if (
+                    (stop_types and frame.get("type") in stop_types)
+                    or (stop_if is not None and stop_if(frame))
+                    or (max_frames is not None and len(frames) >= max_frames)
+                ):
                     break
     finally:
         await client.aclose()
@@ -275,12 +283,18 @@ async def test_closeout_request_started_is_live_before_provider_settles(
         live = await _collect(
             port,
             "/api/sessions",
-            {"task": "验证 closeout 在途可见", "budget": {"run": {"max_model_requests": 1}}},
-            stop_types={MODEL_REQUEST_STARTED},
+            {"task": "验证 closeout 在途可见", "budget": {"run": {"max_model_requests": 2}}},
+            stop_if=lambda frame: (
+                frame.get("type") == MODEL_REQUEST_STARTED
+                and frame.get("data", {}).get("role") == "closeout"
+            ),
         )
-        started = [frame for frame in live if frame.get("type") == MODEL_REQUEST_STARTED]
+        started = [
+            frame for frame in live
+            if frame.get("type") == MODEL_REQUEST_STARTED
+            and frame.get("data", {}).get("role") == "closeout"
+        ]
         assert len(started) == 1
-        assert started[0]["data"]["role"] == "closeout"
         session_id = started[0]["session_id"]
         await asyncio.wait_for(model.entered.wait(), timeout=2)
 
@@ -293,10 +307,27 @@ async def test_closeout_request_started_is_live_before_provider_settles(
         assert response.status_code == 200
         events = response.json()
         durable_start = next(
-            event for event in events if event["type"] == MODEL_REQUEST_STARTED
+            event for event in events
+            if event["type"] == MODEL_REQUEST_STARTED
+            and event["data"]["request_id"] == started[0]["data"]["request_id"]
         )
         assert durable_start["seq"] == started[0]["seq"]
-        assert not any(event["type"] == MODEL_REQUEST for event in events)
+        assert not any(
+            event["type"] == MODEL_REQUEST
+            and event["data"].get("role") == "closeout"
+            for event in events
+        )
+        primary_start = next(
+            frame for frame in live
+            if frame.get("type") == MODEL_REQUEST_STARTED
+            and frame.get("data", {}).get("role") != "closeout"
+        )
+        assert any(
+            frame.get("type") == MODEL_REQUEST
+            and frame.get("data", {}).get("request_id")
+            == primary_start["data"]["request_id"]
+            for frame in live
+        ), "closeout 前必须有一条已结算的真实 Provider attempt"
 
         model.release.set()
         store = JsonlSessionStore(app.state.agent.sessions_root)
@@ -306,11 +337,13 @@ async def test_closeout_request_started_is_live_before_provider_settles(
                 if events and events[-1].type == RUN_PAUSED:
                     break
                 await asyncio.sleep(0.02)
-        requests = [event for event in events if event.type == MODEL_REQUEST]
-        assert len(requests) == 1
-        assert requests[0].data["role"] == "closeout"
-        assert requests[0].data["request_id"] == durable_start["data"]["request_id"]
-        assert durable_start["seq"] < requests[0].seq
+        closeout_requests = [
+            event for event in events
+            if event.type == MODEL_REQUEST and event.data.get("role") == "closeout"
+        ]
+        assert len(closeout_requests) == 1
+        assert closeout_requests[0].data["request_id"] == durable_start["data"]["request_id"]
+        assert durable_start["seq"] < closeout_requests[0].seq
     finally:
         model.release.set()
         await _shutdown(server, serve_task)

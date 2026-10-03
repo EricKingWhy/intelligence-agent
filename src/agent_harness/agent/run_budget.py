@@ -71,7 +71,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from agent_harness.agent.budget import (
     BudgetConflict,
@@ -372,12 +372,18 @@ def describe_resume_requirements(stuck: Mapping[str, Any] | None) -> str:
 #: ticket R2「closeout work accounted inside the configured ceiling」）。
 #: **只对 run ceiling 生效**（fuse 的临界点为什么不预留，见 `pause_trigger`）。
 #: 取 1 = 一次有界机会；`#305` 未固定数字，故这里是本实现的常量并如实投影。
+#: `#567` A1：预留只对**有工作可总结**的暂停有意义——ceiling=1 时暂停点是
+#: 零进展（`0 + 1 >= 1` 挡下第一轮），B 裁决让零进展执行干脆跳过模型 closeout
+#: （零请求零消耗、确定性收口）；ceiling 的**最小有效值是 2**（1 个产出轮 +
+#: 1 格 closeout 容量），N=1 的账面读数恒为零进展暂停。
 RESERVED_CLOSEOUT_TURNS = 1
 
 #: 同一条预留，落在 `model_requests` 维度上（`#313` T5）。closeout 本身**就是**一次
 #: Provider 请求（`02 §5.1` 把 closeout 与 primary/fallback 并列），所以 requests
 #: 的 ceiling 必须像 turns 那样给它留一格 —— 否则"closeout 在预算之内"这句话在
 #: requests 维度上会变成假话（暂停时 requests 已用满，closeout 只能越线）。
+#: `#567` A1：零进展执行（`agent_turns == 0`）不发 closeout ⇒ 这格预留在该场景
+#: 只是准入闸（挡住第一轮），不会被 closeout 实际消耗。
 RESERVED_CLOSEOUT_REQUESTS = 1
 
 #: continuation 的四个键（`03 §3.4`：已完成 / 剩余 / 阻塞 / 下一步安全动作）。
@@ -1489,29 +1495,43 @@ def parse_deadline_at(raw: Any) -> datetime | None:
 
 
 def validate_tool_call_limits_registered(
-    limits: RunLimits, *, registered: Iterable[str],
+    limits: RunLimits | SessionLimits, *, registered: Iterable[str],
+    scope: Literal["run", "session"] = "run",
 ) -> None:
-    """`budget.run.tool_call_limits` 里的名字必须在**本 runtime 的注册表**里（**422**）。
+    """配额里的工具名必须在 registry 里（**422**）；两作用域同一判据、各自报名。
 
     判据是"已注册"（`04 §9.1` 明文）：配额的意义是"该工具被真实使用的次数到顶"，给一个
     根本调不到的名字配配额是**请求本身**有问题（客户端以为它在限制什么），不是运行期
     再忽略——所以拒绝整个请求，与"不静默截断"同一条纪律（ADR-0044 D1/D8）。
 
-    **判定落点为什么在装配层**：注册表是 `build_runtime` 的产物（内置工具 + artifact store
-    选出的读回工具 + capability tools，最后按 agent_profile 的 tool_scope 收窄），在那之前
-    "哪些工具已注册"根本没有事实可言。该落点仍然满足 `11 §6.1` 的"无副作用"：它在任何
-    model / tool / child 工作之前，也不写任何消耗预算的事件。判据用**收窄之后**的注册表：
-    被 profile 剔除的工具本次 run 调不到，给它配 ceiling 等于配一个永远不触发的上限
-    （理由同 `validate_ceiling_enforceability`）。
+    `scope` 决定文案指名谁（`#564` P3：session 拒绝不得冒充 run 的字段名）与语义注解：
+
+    - ``"run"``（默认）：`budget.run.tool_call_limits`，判据用**收窄后** registry——
+      run 账只管**本** runtime，被 profile 剔除的工具本次 run 调不到，给它配 ceiling
+      等于配一个永远不触发的上限（理由同 `validate_ceiling_enforceability`）。
+      判定落点在装配层（注册表是 `build_runtime` 的产物），仍满足 `11 §6.1` 的
+      "无副作用"：在任何 model / tool / child 工作之前，不写任何消耗预算的事件。
+    - ``"session"``：`budget.session.tool_call_limits`，判据用**根 registry**——
+      session 预算横跨会话树，"整棵树调得到"以根为准（child registry ⊆ 根
+      registry），本 runtime 收窄掉的工具树根仍调得到。判定点有二（`#564` 裁决
+      (a)：resume 通道在 service 层 eager CAS **之前**；其余通道在 build_runtime），
+      两处传的都是根 registry 名字集（一致性由
+      `tests/test_assembly_root_registry_names.py` 钉住）。账行**现值**里的陈旧名
+      不走本判定（降告警，见 assembly 校验块）。
     """
     if not limits.tool_call_limits:
         return
+    scope_key = (
+        "budget.run.tool_call_limits" if scope == "run"
+        else "budget.session.tool_call_limits"
+    )
+    scope_label = "本 run" if scope == "run" else "本会话（整棵会话树）"
     known = set(registered)
     unknown = sorted(name for name in limits.tool_call_limits if name not in known)
     if unknown:
         raise BudgetRejection(
-            f"budget.run.tool_call_limits 含未注册的工具名 {unknown}；"
-            f"本 run 已注册的工具名是 {sorted(known)}。"
+            f"{scope_key} 含未注册的工具名 {unknown}；"
+            f"{scope_label}已注册的工具名是 {sorted(known)}。"
             f"（04 §9.1：显式配额只接受已注册工具名）"
         )
 
@@ -2789,7 +2809,15 @@ class SessionBudgetPort(Protocol):
       只随产出响应的那一次给）。closeout 也是一次真实请求，走同一方法。
     - `record_tools`：把工具账随 `tool/result` 的 `budget_delta` 落进树账。
     - `snapshot`：只读读数（投影与 continuation 用）。
+
+    `limits`（`#564`）：本端口绑定的**请求侧声明**。注册表是装配层的产物
+    （`validate_tool_call_limits_registered` 的判据落点），而声明经端口传入
+    runtime——装配层要在 registry 定型处核对 session 配额里的工具名，就必须
+    能从端口读到这份声明（唯一实现 `SessionBudgetHandle` 以字段承载）。
     """
+
+    @property
+    def limits(self) -> SessionLimits: ...
 
     async def snapshot(self) -> SessionBudgetSnapshot: ...
 

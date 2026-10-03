@@ -1180,6 +1180,10 @@ class AgentRuntime:
             )
         self._context_builder = context_builder or ContextBuilder(
             model, context_providers=context_providers, system_prompt=system_prompt,
+            # #559：兜底内建 builder 与调用方注入的 builder 同待遇——摘要调用必须
+            # 走同一进程级闸（child 路径 factory 只传 gate 不传 builder，漏这行
+            # 会让 child 摘要绕过「进程级在飞 ≤N」）。
+            model_call_gate=model_call_gate,
         )
         if context_builder is not None and context_providers:
             # 双入口注入按身份去重：同一 provider 实例已在 builder 列表里时跳过
@@ -2896,6 +2900,16 @@ class AgentRuntime:
             trigger_dimension=trigger_dimension, limits=limits, consumed=consumed,
             blocked_by=blocked_by, reason=reason, stuck=stuck,
         )
+        # `#567` 裁决 B：**零进展执行跳过模型 closeout**。`agent_turns == 0` =
+        # 本次执行连一个产出轮都没有（如 ceiling=1 的暂停：判定含预留，
+        # `0 + 1 >= 1` 当场挡下）——事件流里没有任何可总结的工作，为一次
+        # "什么都没发生"的收口再烧一条真实 Provider 请求是纯浪费（A1：最小
+        # 有效 ceiling 是 2）。确定性 fallback 本就是无工作场景的诚实收口，
+        # 零请求零消耗（旧实现无论 closeout 成败都白花：成功形态把一次真实请求
+        # + usage 记进账，失败形态再落一条 REQUEST_OUTCOME_FAILED 的
+        # model/request——两种都是"为零工作付账"）。
+        if consumed.agent_turns == 0:
+            return fallback, CLOSEOUT_DETERMINISTIC, []
         # 到点后**连 closeout 也不发**：它是真实 Provider 请求，`04 §9.1` /
         # ADR-0044 D4 把"deadline 过后不启动任何新工作"写死（`closeout_capacity`
         # 里那一句是判据本身，这里只是把"现在"传进去）。

@@ -170,8 +170,9 @@ def serialize_protected_facts(facts: list[ProtectedFact]) -> str:
 #: 逐字全文进注册表投影会让保护事实注入体单独击穿独立预算（fail-closed 无
 #: 自愈）。上限取 2000 = Pi 序列化截断（TOOL_RESULT_MAX_CHARS）同源、#415
 #: 子代理结论 1500 字符头同家族。fact_id 仍按全文内容寻址（截断只改投影值，
-#: 不改注册表身份，已持久化的 supersedes 引用不断链）；全文逐字活在转录与
-#: 摘要 §1（冻结），source_event_id 即指针。
+#: 不改注册表身份，已持久化的 supersedes 引用不断链）；全文逐字活在转录；
+#: ≤2000 的值经 #556 裁决 C 进摘要 §1（当前生效目标），超长的由本截断标记
+#: 自带 source_event_id 回读指针（摘要 §1 不再承载超长全文）。
 _USER_GOAL_VALUE_MAX_CHARS = 2000
 
 
