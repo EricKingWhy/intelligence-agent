@@ -6965,3 +6965,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **双轴 bounded re-review（§8.3-4）**：Spec 轴 **PASS-WITH-FINDINGS P0:0 P1:0 P2:0 P3:0 P4:2**（登记不修：①ADR-0047 §4 第 5 条措辞在重排后仍真、可再精确一行 ②_reconcile_pending 直测缺口既存、被 Fix B 源头消解）；Standards 轴 **PASS-WITH-FINDINGS P0:0 P1:1 P2:0 P3:0 P4:0**（P1=环境异常非代码缺陷：core.bare=true 审查窗口内第二次被外部进程改写，审查者实证探针无嫌疑、树完好；本会话两次修复，成因待用户排查）。变异探针 M1/M2（副本内）全红证判别力。台账行 `docs/review_ledger.d/a-line-findings-fix-91cac896-e4ae5289.tsv`；覆盖闸门 exit 0。
 - **批准链执行完毕（2026-10-03，用户批准后执行）**：push → **PR #598** → CI gate0 32s 绿 + gitleaks 绿 → **merge `33fff438`**；本地 main 已 ff 对齐。本节补记随 docs PR 送达 main（用户批准；先例 #578/#594/#595），补记落 main 后远端分支 `fix/batch-findings-write-shape-recovery-order` 删除（用户批准；双条件核验：tip 为 main 祖先 + PR MERGED）。
 - **§14.9 回补通知**：A 线 findings 修复线已集成进 main（`33fff438`）；任何在途线下次开工前按手册 §2 获取新基准 `33fff438`，勿以旧缓存为基准。
+
+## 2026-10-03 · 第二条线 #590 SSE 输出 UTF-8 安全（分支 `fix/i590-i591-i569-i553-wire-errors`，base `e25828aa`）
+
+- **方案裁决**：用户选择 A（只转义 lone surrogate）；双源依据与 A/B/C 对比见 #590 issuecomment-5967994575。
+- **代码笔 `a6baad2239b9ec946319740a57fbbb78ee53d190`**：复用 `wire_safety._safe_text` 处理 live `_event_to_sse_dict` 与 durable replay `_session_event_to_sse_dict` 的 JSON 输出；只转义 surrogate，合法 Unicode 序列化字节与原 `ensure_ascii=False` 一致，payload 结构不变。
+- **红→绿**：JSONL 注入含 lone surrogate 的 legacy 事件。修复前 GET `/api/sessions/{id}/stream` 返回 200 / `text/event-stream`，随后 `UnicodeEncodeError` 令 chunked body 中断；修复后 body 完整、严格 UTF-8 解码成功、两帧结构和 seq 保留，中文/emoji 首帧字节与旧序列化逐字节一致；live helper 的 surrogate 单测也通过。
+- **读数**：`tests/web/test_web_stream.py` + `tests/web/test_event_envelope.py`：18 passed；三处改动文件 `ruff check` 通过；`git diff --check` 通过。
+- **状态**：#590 代码与 focused 验收完成；批次冻结后的双轴审查和全量门禁待执行；未 push / PR / merge。
