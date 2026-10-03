@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -102,6 +103,7 @@ from agent_harness.web.domain_errors import (
     http_error,
     model_http_error,
     storage_http_error,
+    storage_http_status,
 )
 from agent_harness.web.serialization import (
     build_event_payload,
@@ -2263,6 +2265,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise model_http_error(e) from e
         except StorageBusyError as e:
             # #515（审查 P2-3）：同 create——launched 分支的写锁耗尽 → 503。
+            raise storage_http_error(e) from e
+        except (OSError, sqlite3.Error) as e:
+            # #569：只把明确的容量 / SQLite I/O 错误翻译为 storage 503；坏路径、
+            # 约束冲突和没有原生 SQLite 错误码的 OperationalError 继续走 500。
+            if storage_http_status(e) is None:
+                raise
             raise storage_http_error(e) from e
 
         if result.status == "launched":

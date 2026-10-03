@@ -7,6 +7,9 @@ except 臂。本测试把「审计结论」钉成契约：状态码只允许在
 
 from __future__ import annotations
 
+import errno
+import sqlite3
+
 import pytest
 
 from agent_harness.memory.errors import MemoryDomainError, MemoryNotFound
@@ -20,6 +23,7 @@ from agent_harness.web.domain_errors import (
     http_error,
     memory_http_error,
     storage_http_error,
+    storage_http_status,
     workspace_http_error,
 )
 from agent_harness.workspace import (
@@ -271,10 +275,40 @@ def test_memory_http_error_preserves_detail_and_rejects_unregistered_types():
 def test_storage_map_is_the_audited_contract():
     """写锁重试耗尽 = 「服务端暂时不可用」→ 503（可重试），不是 500（服务端 bug）。
 
-    表刻意只含这一项：`storage/sqlite` 的其余异常里，非锁 `OperationalError` 继续
-    500（真正的意外故障），`IntegrityError` 等约束冲突有自己的语义（#519 的域）。
+    具体 errno / SQLite 错误码在下方按主码验证；未登记类型仍不进固定类型表。
     """
     assert _STORAGE_ERROR_STATUS == {StorageBusyError: 503}
+
+
+def _sqlite_storage_error(code: int, name: str) -> sqlite3.Error:
+    error = sqlite3.OperationalError(name)
+    error.sqlite_errorcode = code
+    error.sqlite_errorname = name
+    return error
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        OSError(errno.EFBIG, "File too large"),
+        OSError(errno.ENOSPC, "No space left on device"),
+        _sqlite_storage_error(sqlite3.SQLITE_FULL, "SQLITE_FULL"),
+        _sqlite_storage_error(sqlite3.SQLITE_IOERR, "SQLITE_IOERR"),
+        _sqlite_storage_error(sqlite3.SQLITE_IOERR_WRITE, "SQLITE_IOERR_WRITE"),
+    ],
+    ids=["efbig", "enospc", "sqlite-full", "sqlite-ioerr", "sqlite-ioerr-write"],
+)
+def test_storage_capacity_and_io_errors_map_to_safe_503(exc: Exception):
+    error = storage_http_error(exc)
+    assert error.status_code == 503
+    assert error.detail == "Persistent storage is unavailable"
+
+
+def test_unclassified_operational_error_has_no_storage_status():
+    exc = sqlite3.OperationalError("database is malformed")
+    assert storage_http_status(exc) is None
+    with pytest.raises(KeyError):
+        storage_http_error(exc)
 
 
 def test_storage_busy_maps_to_503_with_detail():
