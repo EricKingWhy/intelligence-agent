@@ -14,6 +14,7 @@ from agent_harness.capability.base import (
 )
 from agent_harness.capability.wiring import wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
 from agent_harness.skills.capability import SkillCapability
 from agent_harness.skills.context_provider import SkillCatalogContextProvider
@@ -128,12 +129,20 @@ class TestLoadSkillTool:
         assert tool.side_effect is ToolSideEffect.READ_ONLY
 
     @pytest.mark.asyncio
-    async def test_known_skill_returns_body_with_data_frame(self, tmp_path):
+    async def test_known_skill_body_is_structurally_isolated(self, tmp_path):
+        """#546 案 A：framing 是注册表 fragment 进 `message`，正文独占 `data["content"]`。
+
+        结构隔离 = JSON 字段级（message/data 分离）+ 注册表 section 级
+        （`frame:untrusted_skill`，与 knowledge/websearch/tool_output 同族同槽位），
+        不再是"同 content 字段一句话前缀"。framing 是纵深防御，不替代 Runtime 权限。
+        """
         tool = LoadSkillTool(_capability(tmp_path))
         result = await tool.execute(tool.args_schema(name="pdf-export"))
         assert result.ok is True
-        assert BODY in result.data["content"]
-        assert "数据" in result.data["content"]
+        frame = DEFAULT_REGISTRY.assemble("frame:untrusted_skill").fragment_text
+        assert frame in result.message  # 系统声明走 message 通道
+        assert result.data["content"] == BODY  # 正文原样独占 data 字段，零前缀拼接
+        assert frame not in result.data["content"]
 
     @pytest.mark.asyncio
     async def test_small_body_is_not_truncated(self, tmp_path):
@@ -151,7 +160,7 @@ class TestLoadSkillTool:
         result = await tool.execute(tool.args_schema(name="big"))
         assert result.ok is True
         content = result.data["content"]
-        assert len(content) < 64_000 + 200  # 有界：截断正文 + 前缀 + 标记
+        assert len(content) < 64_000 + 200  # 有界：截断正文 + 标记
         assert "A" * 64_000 in content  # 前 64k 字符完整保留
         assert "B" not in content  # 上限之后的正文绝不出现
         assert "已截断" in content and "100000" in content  # 诚实标记，不伪造"文档结束"

@@ -37,7 +37,7 @@ SECTION_ORDERS: dict[str, int] = {
     "aux:compaction": 3000,
     "aux:memory_extraction": 3100,
     "aux:fork_tail": 3200,
-    "frame:untrusted_data": 9000,  # 槽位：knowledge / websearch 两条 frame section 共用
+    "frame:untrusted_data": 9000,  # 槽位：knowledge / websearch / tool_output / skill 四条 frame section 共用
     "corrective:tool_failure_guard": 9100,
     # `#317`：stuck 检测（②–⑤）的纠正性 replan 片段。与上一条同在"纠正"带里（都在
     # 工具回填之后、下一轮模型请求之前注入），顺序值只要求与其它纠正片段互相可辨。
