@@ -19,20 +19,36 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
 from agent_harness.agent import AgentRuntime
-from agent_harness.agent.run_budget import LaunchRunBudget, RunLimits
+from agent_harness.agent.run_budget import (
+    LaunchRunBudget,
+    RunLimits,
+    derive_run_budget,
+    project_budget,
+)
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_PAUSED
-from agent_harness.model.accounting import PROVIDER_ROLE_CLOSEOUT
+from agent_harness.model.accounting import (
+    HARNESS_MODEL_ACCOUNTING,
+    PROVIDER_ROLE_CLOSEOUT,
+)
 from agent_harness.session import (
     MODEL_REQUEST,
+    OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
     RUN_PAUSED,
+    RUN_STARTED,
     TOOL_RESULT,
+)
+from agent_harness.storage import (
+    OperationState,
+    SqliteOperationLedger,
+    has_unproven_side_effect,
 )
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
+from tests.tooling.test_deadline_admission import _SlowMutatingTool
 
 
 class _TextArgs(BaseModel):
@@ -67,13 +83,15 @@ class _CommittingTool(Tool):
 
 def _runtime(
     model, *, tools: Sequence[Tool] = (), ceiling: int | None = None,
+    operation_ledger: SqliteOperationLedger | None = None,
 ) -> AgentRuntime:
     registry = ToolRegistry()
     for tool in tools:
         registry.register(tool)
     return AgentRuntime(
         model=model, registry=registry,
-        executor=ToolExecutor(registry), max_agent_turns=5,
+        executor=ToolExecutor(registry, operation_ledger=operation_ledger),
+        max_agent_turns=5,
         run_budget=LaunchRunBudget(limits=RunLimits(max_agent_turns_total=ceiling)),
     )
 
@@ -183,3 +201,84 @@ async def test_budget_trigger_is_not_masked_by_presence(tmp_path) -> None:
     paused = next(e for e in session.events if e.type == RUN_PAUSED)
     assert paused.data["reason"] == "budget_exhausted"
     assert paused.data["trigger_dimension"] == "run.max_agent_turns_total"
+
+
+class _LeavingSlowWrite(_SlowMutatingTool):
+    """「最后客户端退出时 Tool 正在提交」的慢写工具：execute 开头置缺席闸门，
+    随后照旧被自身 `timeout_seconds` 掐断 ⇒ MUTATING 超时 = 副作用未证（UNKNOWN，
+    `07 §7`）。缺席与超时在同一次提交里叠加，正是 AC 要钉的那个现场。"""
+
+    def __init__(self, holder: list[AgentRuntime]) -> None:
+        super().__init__()
+        self._holder = holder
+
+    async def execute(self, args):
+        self._holder[0].client_presence.mark_absent()
+        return await super().execute(args)
+
+
+@pytest.mark.asyncio
+async def test_unproven_mutation_takes_priority_over_client_absent_pause(tmp_path) -> None:
+    """AC「UNKNOWN 先 NEED_RECONCILE」：提交中超时的 MUTATING 调用（副作用未证）
+    遇上客户端缺席 ⇒ 对账闸门**无条件**先于暂停收口跑（`02 §5.2.1`：
+    UNKNOWN / NEED_RECONCILE 优先于 paused），continuation 不得暗示可安全续跑，
+    投影把状态词覆盖成 needs_reconcile（原因照旧可读，`03 §5`）。"""
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    holder: list[AgentRuntime] = []
+    scripted = ScriptedModel([
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "call_w22_unk", "name": "slow_write", "args": {}}],
+        ),
+        AIMessage(content="不该走到这里"),
+    ])
+    runtime = _runtime(
+        scripted, tools=[_LeavingSlowWrite(holder)], operation_ledger=ledger,
+    )
+    holder.append(runtime)
+    runtime.client_presence.enroll()
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "改配置，客户端中途离开")
+
+    assert result.status == STATUS_PAUSED
+    paused = next(e for e in session.events if e.type == RUN_PAUSED)
+    assert paused.data["reason"] == "client_absent"
+    assert paused.data["closeout_source"] == "deterministic"
+    assert len(scripted.snapshots) == 1, "离开后零模型请求（收口也不发）"
+
+    # 未证行升 NEED_RECONCILE（RUNNING → UNKNOWN → NEED_RECONCILE，`07 §4`）
+    operation = await ledger.get(session.session_id, "call_w22_unk")
+    assert operation is not None
+    assert has_unproven_side_effect(operation) is True
+    assert operation.state is OperationState.NEED_RECONCILE
+
+    reconcile_events = [
+        e for e in session.events if e.type == OPERATION_RECONCILE_REQUIRED
+    ]
+    assert len(reconcile_events) == 1
+    assert reconcile_events[0].run_id == paused.run_id
+    types = [e.type for e in session.events]
+    assert types.index(OPERATION_RECONCILE_REQUIRED) < types.index(RUN_PAUSED), (
+        "顺序：先'某操作进入 NEED_RECONCILE'，再'本次执行暂停'"
+    )
+
+    # continuation 被 blocked_by 改写：不再指"客户端回归后恢复"，先指对账
+    continuation = paused.data["continuation"]
+    action = continuation["next_safe_action"]
+    assert action.startswith("先 reconcile")
+    assert "client_return" not in action, "对账未结清前不得指恢复那条路（必被 409）"
+    assert any("NEED_RECONCILE" in b for b in continuation["blockers"])
+
+    # 投影：needs_reconcile 覆盖 paused（覆盖而非替换——reason 照旧可读）
+    run_id = next(
+        e.run_id for e in session.events if e.type == RUN_STARTED and e.run_id
+    )
+    state = derive_run_budget(session.events, run_id)
+    projection = project_budget(
+        state, accounting=HARNESS_MODEL_ACCOUNTING,
+        reconcile_pending=["call_w22_unk"],
+    )
+    assert projection["state"] == "needs_reconcile"
+    assert projection["reason"] == "client_absent"
