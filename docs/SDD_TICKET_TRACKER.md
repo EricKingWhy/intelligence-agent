@@ -7027,3 +7027,13 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **Issue 状态**：#590/#591/#569/#553 均已附本票 focused 与提交证据并关闭；关票评论 ID 依次为 5969260834、5969263879、5969264177、5969264569。
 - **推送门禁**：最终 tip fb28c46efb574e7e005bacd6cda891684022019c 上执行 python scripts/gate0.py --no-record --since origin/main，6/6 通过（21.2s）；review coverage exit 0，diff-check 通过。push hook 内 guards 的临时 Git 仓库测试报 git add -A「this operation must be run in a work tree」；脱离 hook 对同一 tip 重跑完整 Gate-0 6/6 后，以 --no-verify 推送。tracked hook 未修改，环境内 hook 失败仍是待跟进项。
 - **测试与审查边界**：冻结树全量仍为 5370 passed / 15 skipped / 51 deselected / 1 xfailed / 1 failed；唯一失败是审查行提交前的 coverage 自检，同一 node id 在行提交后 1 passed。两轴 review 结论及 #569 未做物理满盘注入的限制见上方批次节。
+
+## 2026-10-03 · 集成区 capability/docs 批集成落账（PR #603 → merge 2ef11b73）
+
+- **发布链**：branch-ready（`a1289441`）→ push（用户批准）→ PR #603 → CI gate0 绿但 mergeStateStatus=BEHIND（asyncio 线 PR #602 合入，main `cb586bbc`→`0569e7ca`）→ 第二次先回后正合并 `6caa00ab`（**零冲突**；文件交集为空——asyncio 线只动 `tests/session/test_fork.py` 等 4 测试文件 + docs）→ merge 机械归属行 `d2e84611`（`i588-batch-merge-6caa00ab-ci-sync.tsv`）→ Gate-0 6/6 落盘 → 读数提交 `8bec6e1c` → push → CI gate0 绿（29s）+ gitleaks 绿 + CLEAN → **PR merge `2ef11b73`**（用户批准，merge commit 方式）。首次先回后正 `a1739f19`（携 wire 批 PR #600/#601）唯一冲突 = tracker EOF 追加撞车，按 §14.7 九项报告后两侧内容原样保留、零删除。
+- **读数**：两棵合并树全量（`run_tests_clean.sh tests/`）各一次——`a1739f19`：**5384 passed / 15 skipped / 51 deselected / 1 xfailed**（664.46s，exit 0）；round-2 `d2e84611`：同型（658.42s，exit 0）。Gate-0 读数 `docs/gate/a1739f191073185a096bccd976d0d69975bcb6be.json` + `docs/gate/d2e8461191dc3ed0b72f6becc422478c34985f2a.json` 均 **6/6 PASS**；coverage 闸门 exit 0（两次合并各有机械归属行）；`git diff --check` 绿（含 CI 口径 `0569e7ca..HEAD`）。#338 目标用例逐字读数（两棵合并树单跑均 `PASSED tests/web/test_memory_api.py::test_v2_list_filters_detail_versions_edit_stale_version_and_identity`，不计作全绿表述）。
+- **树一致性（手册 §3.2）**：服务端 merge 树 `c1e60de9` = 已验证 tip `8bec6e1c` 的 tree **逐字相同**（零新增内容正向证明，两条独立 git 通路）⇒ 门禁读数直接传递，不重跑。
+- **本地 main**：`0569e7ca` → `2ef11b73` 快进（用户授权；在持有 main 的 linked worktree `D:\intelligence-agent-wire-integration` 内执行 `merge --ff-only origin/main`，worktree clean、tree 核对一致）。
+- **§14.9 回补通知**：本线已集成进 main（`2ef11b73`）；任何在途线下次开工前按手册 §2 获取新基准 `2ef11b73`，勿以旧缓存为基准。
+- **关单（§14.12，手册 §5）**：#589/#588/#370/#338 四票关闭（证据评论 issuecomment-5970571437 / 5970572079 / 5970572803 / 5970573441）；#338 维持「未知红、不生效」诚实登记关闭（矩阵报告 issuecomment-5969769848；未来任何全量读数出现该用例带签名 ⇒ stop-line 回 #338）。
+- **残余**：远端分支 `fix/i588-i589-i370-i338-capability-docs` 已删（用户批准；双条件核验：tip `8bec6e1c` 为 main 祖先 + PR #603 MERGED）；#588 F2（U+0085/U+2028/U+2029）/F3（裸 `{path}` 插值）、#370 环境半 follow-up 登记不修；gate0 `env_failures` 结构化字段（0xC0000142 风暴签名归因）建议另开码面票，本线不扩范围。
