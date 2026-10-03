@@ -1,0 +1,1 @@
+2026-10-03	B 线二次同步 main 归属（仅机械归属，不主张本行审查新内容）：cc0f127b 合并 origin/main 041e51f6；父一 e541ec27（B 线四票及首次同步），父二 041e51f6（A 线 findings 修复 PR #599，各提交沿来源台账覆盖）。merge-tree 预演无冲突；实际自动合并，--cc 仅 Tracker；来源两侧既有提交由各自台账归属，本行仅覆盖本次 sync merge commit。	e541ec27..cc0f127b
