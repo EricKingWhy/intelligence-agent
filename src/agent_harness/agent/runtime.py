@@ -37,6 +37,7 @@ from agent_harness.agent.budget import (
     SOURCE_DEPLOYMENT,
     LocalFuse,
 )
+from agent_harness.agent.client_presence import ClientPresenceGate
 from agent_harness.agent.completion import (
     BLOCK_SOURCE_POLICY,
     BLOCK_SOURCE_QUIESCENCE,
@@ -60,7 +61,9 @@ from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CLOSEOUT_MODEL,
     INT64_MAX,
+    REASON_CLIENT_ABSENT,
     REASON_STUCK,
+    TRIGGER_CLIENT_PRESENCE,
     TRIGGER_MAX_CONTEXT_TOKENS,
     BudgetConsumed,
     LaunchRunBudget,
@@ -1038,6 +1041,12 @@ class AgentRuntime:
         # `None` = 本执行没接 session 账（行为与 `#317` 收口时逐字相同——绝大多数
         # 单测与 CLI 直连路径）。准入 / 退回 / 记账的语义见 run_budget 的 Protocol。
         self._session_budget = session_budget
+        # 产品客户端在场闸门（W-22 #366；`02 §5.2.1` / `11 §6.2` / ADR-0046）：
+        # 默认**惰性**（未登记 ⇒ `absent` 恒 False，行为与 W-22 之前逐字相同——
+        # CLI / 旧 Web 不走这条闸门）。登记（enroll）由 RunManager 的在场管理
+        # 接缝做，缺席（mark_absent）由它的孤儿回收计时器到期时置位；循环顶的
+        # 唯一准入点在预算判定之后、session 预留之前读它（见 while True 顶部）。
+        self._client_presence = ClientPresenceGate()
         # 完成闸门的策略 seam（`#316` / `02 §5.4`）：Core 只提供一个默认实现（静止后
         # 接受最终响应），域策略由嵌入方注入。**不是**配置项：完成规则不该由部署方
         # 之外的第三处（config / API）替它决定（`02 §9`）。
@@ -1108,6 +1117,16 @@ class AgentRuntime:
     def dropped_tools(self) -> tuple[str, ...]:
         """被 tool_scope 剔除的工具名（#198）：测试断言装配层接线用。"""
         return self._dropped_tools
+
+    @property
+    def client_presence(self) -> ClientPresenceGate:
+        """本 run 的客户端在场闸门（W-22 #366）。
+
+        RunManager 经它登记 / 置缺席（`launch(presence_managed=True)` 与孤儿回收
+        的在场分支）；循环顶准入点经它读"最后一个产品客户端是否已离开"。闸门是
+        本执行段私有的——恢复是新的执行段（新 Runtime / 新闸门），缺席状态不跨段
+        延续（`11 §6.2`：重连不自动恢复，恢复走显式 client_return）。"""
+        return self._client_presence
 
     async def _inject_steers(
         self, session: Session, run_id: str, step_id: int,
@@ -1450,6 +1469,28 @@ class AgentRuntime:
                     async for streamed in self._terminal_paused(
                         arms, launch=launch_budget, steps=steps,
                         trigger_dimension=trigger_dimension,
+                    ):
+                        yield streamed
+                    return
+
+                # 客户端在场准入（W-22 #366；`02 §5.2.1`）：预算判定**之后**——
+                # 两个事实同时成立时先报账本事实（budget_exhausted 不被缺席遮蔽，
+                # 维度不可互相替代的同一方向）；session 预留**之前**——缺席时不再
+                # 预留 turns/requests 格位（没有要退回的预留）。已登记的 run 在最后
+                # 产品客户端明确退出 / 断线宽限到期后不再接纳任何新的 model / tool /
+                # child 步骤；本次执行以 run/paused(reason=client_absent) 收口，
+                # closeout 恒为 deterministic（暂停时不得再发"总结用"模型请求，
+                # 见 `_closeout_continuation` 的早退分支）。
+                if self._client_presence.absent:
+                    self._log("agent_decision", "产品客户端缺席，run 暂停（非终态）",
+                              span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                              decision="client_absent_paused", remaining_steps=0,
+                              reason="命中 client_presence：最后一个产品客户端已退出 / "
+                                     "断线宽限到期，本次执行以 run/paused(client_absent) 收口",
+                              outcome="success")
+                    async for streamed in self._terminal_paused(
+                        arms, launch=launch_budget, steps=steps,
+                        trigger_dimension=TRIGGER_CLIENT_PRESENCE,
                     ):
                         yield streamed
                     return
@@ -2695,6 +2736,12 @@ class AgentRuntime:
             trigger_dimension=trigger_dimension, limits=limits, consumed=consumed,
             blocked_by=blocked_by, reason=reason, stuck=stuck,
         )
+        # W-22（#366）：client_absent 的收口**恒为确定性**（`02 §5.2.1`：确认无未
+        # 结清副作用后落一条 paused，期间 MUST NOT 再发"礼貌性收口"模型请求）。
+        # 本分支在所有容量判定之前：有没有预算都一样——客户端不在场，总结给谁看；
+        # 烧一次真实 Provider 请求是纯浪费，还会让"离开后新请求数 0"的验收失真。
+        if reason == REASON_CLIENT_ABSENT:
+            return fallback, CLOSEOUT_DETERMINISTIC, []
         # `#567` 裁决 B：**零进展执行跳过模型 closeout**。`agent_turns == 0` =
         # 本次执行连一个产出轮都没有（如 ceiling=1 的暂停：判定含预留，
         # `0 + 1 >= 1` 当场挡下）——事件流里没有任何可总结的工作，为一次
