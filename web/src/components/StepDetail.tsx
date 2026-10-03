@@ -668,7 +668,7 @@ export function ChatTab({
         <div className="detail-row">
           <span className="detail-key">tokens</span>
           <span className="detail-val num">
-            {conversation.usage_total
+            {conversation.usage_total && conversation.usage_total.total_tokens !== null
               ? conversation.usage_total.total_tokens.toLocaleString()
               : <span className="detail-val-muted">—</span>}
           </span>
@@ -885,7 +885,7 @@ export function ChatTab({
             <span className="detail-key">用量</span>
             <span className="detail-val">
               {conversation.usage_total
-                ? `${conversation.usage_total.total_tokens.toLocaleString()} tok（${conversation.usage_total.prompt_tokens.toLocaleString()} + ${conversation.usage_total.completion_tokens.toLocaleString()}）`
+                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} tok（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
                 : '—'}
             </span>
           </div>
