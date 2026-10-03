@@ -626,6 +626,79 @@ def test_session_tool_call_limits_accepts_delegate_when_multiagent_enabled(tmp_p
     assert resp.status_code == 200, resp.text
 
 
+def test_session_declaration_judged_against_root_registry(tmp_path):
+    """session 作用域判据 = **根 registry**（树级语义），不是本 runtime 的收窄面。
+
+    session 预算横跨会话树：coding 档位的**本** runtime 调不到 delegate，但树的
+    根（main）调得到——给 delegate 配 session 配额合法。修复前按收窄后 registry
+    判 422，与 assembly 注释里"child registry ⊆ 根 registry，不误杀"的声明自相矛盾。
+    （对照：run 作用域是 per-runtime 判据，收窄后 registry 判 422 的行为不动。）
+    """
+    overrides: dict[str, Any] = {
+        "_env_file": None,
+        "workspace_dir": str(tmp_path),
+        "model_api_key": "sk-test",
+        "enable_cors": False,
+        "capabilities": json.dumps(
+            {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
+        ),
+    }
+    client = TestClient(create_app(Settings(**overrides), enable_cors=False))
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "agent_profile": "coding",
+                "budget": {"session": {"tool_call_limits": {"delegate": 1}}},
+            },
+        )
+    assert resp.status_code == 200, resp.text
+
+
+def test_run_declaration_still_judged_against_narrowed_registry(tmp_path):
+    """run 作用域对照（不随 #564 改变）：coding 档位本 run 配 delegate ⇒ 422。
+
+    run 账只管**本** runtime，收窄后 registry 才是"本次调得到"的事实——被剔除的
+    工具配 ceiling = 配一个永远不触发的上限，响亮拒绝（04 §9.1 / ADR-0044）。
+    """
+    overrides: dict[str, Any] = {
+        "_env_file": None,
+        "workspace_dir": str(tmp_path),
+        "model_api_key": "sk-test",
+        "enable_cors": False,
+        "capabilities": json.dumps(
+            {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
+        ),
+    }
+    client = TestClient(create_app(Settings(**overrides), enable_cors=False))
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "agent_profile": "coding",
+                "budget": {"run": {"tool_call_limits": {"delegate": 1}}},
+            },
+        )
+    assert resp.status_code == 422, resp.text
+
+
+def test_session_scope_rejection_message_names_session_path(tmp_path):
+    """P3：session 作用域的拒绝文案指名 `budget.session.tool_call_limits`，不冒充 run。"""
+    _, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"session": {"tool_call_limits": {"nope_tool": 1}}}},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "budget.session.tool_call_limits" in resp.text, resp.text
+
+
 def test_rejected_session_budget_resume_appends_nothing(tmp_path):
     """resume 通道同一条 session 注册名校验：422 且不追加任何会话事件。"""
     _, client = _web(tmp_path)

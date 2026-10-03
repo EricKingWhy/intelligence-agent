@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -41,8 +42,16 @@ from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
 from agent_harness.agent.budget import BudgetConflict, BudgetRejection
-from agent_harness.agent.run_budget import INT64_MAX
-from agent_harness.assembly import RecoveryStores, initialize_stores
+from agent_harness.agent.run_budget import (
+    INT64_MAX,
+    SessionLimits,
+    validate_tool_call_limits_registered,
+)
+from agent_harness.assembly import (
+    RecoveryStores,
+    initialize_stores,
+    root_registry_tool_names,
+)
 from agent_harness.capability.base import CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
@@ -872,6 +881,15 @@ class AppState:
         # 测试可经 patch 换 MemoryCredentialStore。
         self.provider_store = ProviderStore.for_settings(settings)
         self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
+        # `#564` 裁决 (a)：session 声明的 pre-CAS 校验端口。组合根负责判据的
+        # 同源装配（`root_registry_tool_names` 零副作用取根 registry 名字集，
+        # 审查 P2-1：不实例化 sandbox），`session_service()` 把它与其他
+        # collaborator 一样原样搬进领域层。
+        self.validate_session_declaration = _session_declaration_validator(
+            settings=settings,
+            store=self.store,
+            get_wiring=self.get_wiring,
+        )
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -974,6 +992,46 @@ class AppState:
 # 构造后替换 `state.run_manager` 等打桩仍然生效。
 
 
+def _session_declaration_validator(
+    *,
+    settings: Settings,
+    store: JsonlSessionStore,
+    get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+) -> Any:
+    """组合根适配：`#564` 裁决 (a) 的 pre-CAS 校验端口（`SessionDeclarationValidator`）。
+
+    判据 = **根 registry**（树级语义）：名字集由 `root_registry_tool_names`
+    **零副作用**计算，与 `build_runtime` 的真实装配同源（漂移由
+    `tests/test_assembly_root_registry_names.py` 三方对账钉住），喂给
+    `validate_tool_call_limits_registered(scope="session")`。审查 P2-1：validator
+    不得构造 sandbox——那会在 #266 归属对账之前对 workspace `mkdir`（坏名 422
+    重建已删 cwd、合法名 resume 掩蔽守卫），所以这里不碰 `_build_tooling` /
+    workspace_registry。存为 `AppState.validate_session_declaration` 成员——
+    `session_service()` 与其他 collaborator 一样**原样搬入**领域层（AC4：没有
+    静默丢字段、没有派生转换）。CLI 侧复用同一容器，两条入口同一校验。
+    """
+
+    async def _validate(
+        limits: SessionLimits,
+        *,
+        session_id: str,
+        workspace: Any,
+        agent_profile: str | None,
+    ) -> None:
+        # workspace / agent_profile 不参与判定（前者 = P2-1 零副作用要求；后者
+        # 只影响 delegate 的配额值，不影响名字集）：参数保留是端口形状（Protocol）。
+        _, wiring = await get_wiring()
+        validate_tool_call_limits_registered(
+            limits,
+            registered=sorted(root_registry_tool_names(
+                settings, wiring, session_id=session_id, session_store=store,
+            )),
+            scope="session",
+        )
+
+    return _validate
+
+
 def session_service(state: AppState) -> SessionService:
     """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
     return SessionService(
@@ -993,6 +1051,7 @@ def session_service(state: AppState) -> SessionService:
         stores=state.stores,
         ensure_stores=state.ensure_stores,
         get_wiring=state.get_wiring,
+        validate_session_declaration=state.validate_session_declaration,
     )
 
 
@@ -1753,6 +1812,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             RecoveryConflict,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
             BudgetRejection,
             BudgetConflict,
         ) as e:
@@ -1760,6 +1820,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # tool_call，不伪造结果（不变量 #14）。
             # WorkspaceBindingConflict → 409（#266）：cwd 锚与沙箱映射互相矛盾，
             # 拒绝静默选边（判定见 `service._reconcile_workspace_binding`）。
+            # WorkspaceNotFound → 404（中央映射既有条目）：#266 守卫对 cwd 已删
+            # 的会话在 resume 路径本来就在抛，#564 审查 P2-1 修复前它被 validator
+            # 的 sandbox mkdir 掩蔽（守卫赶不上 mkdir），修复后真正可见——补进
+            # 元组让既存映射生效，不再以裸 500 呈现。
             # BudgetConflict → 409（#312）：CAS 版本过期 / 不是暂停的那个 run /
             # ceiling 没真提高 / 有在途 run——请求形状合法但状态对不上，且
             # **零副作用**（判定在任何落盘之前，见 `validate_resume`）。

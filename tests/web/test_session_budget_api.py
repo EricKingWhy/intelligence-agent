@@ -24,13 +24,18 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
 from agent_harness.cli import replay_command
-from tests.web.test_budget_local_fuse_api import _create_idle_session, _web
+from tests.web.test_budget_local_fuse_api import (
+    _create_idle_session,
+    _ModelProbe,
+    _web,
+)
 from tests.web.test_run_pause_resume_api import (
     _continuation_json,
     _events,
@@ -385,3 +390,177 @@ def test_replay_consumes_nothing_from_session_budget(tmp_path):
 
     after = _session_row(app, session_id)
     assert after.as_projection() == before_projection, "回放不得写 session 账"
+
+
+# ── #564 裁决 (a)+(b)：注册名校验前置 + 行陈旧名降告警 ──────────────────────
+
+
+def test_resume_bad_session_tool_name_leaves_row_untouched(tmp_path):
+    """(a)：resume 点名坏名 ⇒ 422，且**账行零改动**（eager CAS 之前就拒绝）。
+
+    回归锚：修复前 eager CAS/ensure（merge-only）先并入 `nope_tool` 再 422——
+    一次打错的请求把账行毒化（后续普通 resume 恒 422，会话不可恢复）。
+    """
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                "task": "继续",
+                "budget": {"session": {"tool_call_limits": {"nope_tool": 1}}},
+            },
+        )
+    assert resp.status_code == 422, resp.text
+    assert probe.calls == [], "校验前置 ⇒ 422 时模型不得被构造"
+    assert _session_row(app, session_id) is None, "坏名不得触碰账行（建行也算触碰）"
+
+
+def test_plain_messages_after_rejected_budget_resume_works(tmp_path):
+    """(a) 主害回归：坏名 resume 被拒后，**不带 budget 的普通续聊必须照常 200**。"""
+    _app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    with _ModelProbe():
+        bad = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                "task": "继续",
+                "budget": {"session": {"tool_call_limits": {"nope_tool": 1}}},
+            },
+        )
+    assert bad.status_code == 422, bad.text
+
+    probe = _ScriptedProbe([_done()])
+    with probe:
+        resp = client.post(
+            f"/api/sessions/{session_id}/messages", json={"content": "继续"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert "run/completed" in resp.text, resp.text[:400]
+
+
+def test_resume_bad_name_with_prior_row_leaves_row_intact(tmp_path):
+    """(a)：既有账行 + 坏名 resume ⇒ 422 且行内容与 CAS 版本都原样。"""
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    probe = _ScriptedProbe([_done()])
+    with probe:
+        first = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "开始",
+                "budget": {"session": {"tool_call_limits": {"read": 2}}},
+            },
+        )
+    assert first.status_code == 200, first.text
+    row = _session_row(app, session_id)
+    assert row is not None and row.limits.tool_call_limits == {"read": 2}
+    version = row.version
+
+    with _ModelProbe():
+        bad = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": "继续",
+                "budget": {
+                    "session": {
+                        "tool_call_limits": {"nope_tool": 1},
+                        "expected_version": version,
+                    },
+                },
+            },
+        )
+    assert bad.status_code == 422, bad.text
+    after = _session_row(app, session_id)
+    assert after.limits.tool_call_limits == {"read": 2}, "坏名不得并入既有账行"
+    assert after.version == version, "被拒请求不得推进账行 CAS 版本"
+
+
+def test_stale_row_name_warns_and_session_still_resumes(tmp_path, caplog):
+    """(b)：账行陈旧名（能力下线 / 工件 store 切换所致的历史合法名）⇒ **告警不拒绝**。
+
+    回归锚：修复前 build_runtime 对账行现值按收窄 registry 重核 422——行里一个
+    事后悬空的名字永久卡死会话。422 只属于**请求声明**（另测）；行值降为可观测告警。
+    """
+    import logging
+
+    from agent_harness.agent.run_budget import SessionLimits
+
+    app, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    ledger = app.state.agent.stores.delegation_tree_ledger
+    asyncio.run(
+        ledger.ensure_session_budget(
+            session_id, root_session_id=session_id,
+            limits=SessionLimits(tool_call_limits={"legacy_tool": 1}),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="agent_harness.assembly"):
+        probe = _ScriptedProbe([_done()])
+        with probe:
+            resp = client.post(
+                f"/api/sessions/{session_id}/messages", json={"content": "继续"},
+            )
+    assert resp.status_code == 200, resp.text
+    assert "run/completed" in resp.text, resp.text[:400]
+    assert any(
+        "legacy_tool" in record.getMessage() for record in caplog.records
+    ), "陈旧名必须响亮告警（不是静默忽略）"
+
+
+def test_bad_name_resume_does_not_recreate_deleted_workspace(tmp_path):
+    """P2-1（独立审查）：422 拒绝路径**零文件系统副作用**——已删的外部 cwd 不得被重建。
+
+    修复前 validator 走完整 `_build_tooling` ⇒ `LocalSubprocessSandbox.__init__`
+    对 workspace `mkdir`，发生在 #266 归属对账之前：坏名 422 会把用户删掉的
+    cwd 凭空建回来。只有重启形态（全新 AppState，进程内 sandbox 缓存为空）才暴露。
+    """
+    _app, client = _web(tmp_path)
+    external = tmp_path / "user-repo"
+    external.mkdir()
+    resp = client.post(
+        "/api/sessions", json={"cwd": str(external)}, params={"launch": "false"},
+    )
+    assert resp.status_code == 200, resp.text
+    session_id = resp.json()["session_id"]
+    shutil.rmtree(external)
+
+    # 重启形态：同一 tmp_path（会话行在磁盘上），全新 AppState ⇒ registry 空。
+    _app2, client2 = _web(tmp_path)
+    with _ModelProbe():
+        bad = client2.post(
+            f"/api/sessions/{session_id}/resume",
+            json={"task": "继续",
+                  "budget": {"session": {"tool_call_limits": {"nope_tool": 1}}}},
+        )
+    assert bad.status_code == 422, bad.text
+    assert not external.exists(), "被拒请求不得重建已删除的 cwd（422 零副作用）"
+
+
+def test_valid_name_resume_still_404_when_workspace_deleted(tmp_path):
+    """P2-1（独立审查）：#266 守卫不被"点名 session 账"的请求掩蔽——cwd 已删 ⇒ 404。
+
+    修复前同名 validator 先实例化 Sandbox 并 mkdir ⇒ `workspace.is_dir()` 被
+    抢先满足，会话在静默重建的空目录里继续跑（本该 404）。
+    """
+    _app, client = _web(tmp_path)
+    external = tmp_path / "user-repo-2"
+    external.mkdir()
+    resp = client.post(
+        "/api/sessions", json={"cwd": str(external)}, params={"launch": "false"},
+    )
+    assert resp.status_code == 200, resp.text
+    session_id = resp.json()["session_id"]
+    shutil.rmtree(external)
+
+    _app2, client2 = _web(tmp_path)
+    with _ModelProbe():
+        ok = client2.post(
+            f"/api/sessions/{session_id}/resume",
+            json={"task": "继续",
+                  "budget": {"session": {"tool_call_limits": {"read": 2}}}},
+        )
+    assert ok.status_code == 404, ok.text
+    assert not external.exists(), "守卫路径不得静默重建 cwd"
