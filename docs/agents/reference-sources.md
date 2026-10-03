@@ -69,6 +69,15 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 | Milvus 官方文档 | 向量索引适配器行为依据 | [Upsert Entities](https://milvus.io/docs/upsert-entities.md) 的主键插入/更新语义；[Consistency](https://milvus.io/docs/consistency.md) 的可见性级别 |
 | SQLite 官方文档 | 权威本地存储与备份语义 | [Online Backup API](https://www.sqlite.org/backup.html)：一致快照及在线备份边界 |
 
+### WebSocket / ASGI transport
+
+| Source | What it is | What to check |
+|---|---|---|
+| [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html) | IETF WebSocket standard | §§5.2/5.4 payload length and fragmentation; §7.4.1 close code 1009; §10.4 resource limits. |
+| [ASGI HTTP+WebSocket specification](https://asgi.readthedocs.io/en/latest/specs/www.html) | Application/server protocol | `websocket.receive` delivers a text or binary message to the app; the ASGI app boundary does not expose wire-frame fragments. |
+| [Uvicorn settings](https://www.uvicorn.org/settings/) | ASGI server configuration | `--ws-max-size` and `--ws` backend applicability; compare transport-level bounds with app-level checks. |
+| [websockets memory guide](https://websockets.readthedocs.io/en/stable/topics/memory.html) | WebSocket implementation behavior | `max_size` / `max_queue` bound queued message memory; implementation-specific message-size handling. |
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；
