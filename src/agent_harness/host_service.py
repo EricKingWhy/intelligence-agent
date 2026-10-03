@@ -414,6 +414,7 @@ def serve_once(
     *,
     credentials: Credentials | None = None,
     host: str = "127.0.0.1",
+    stop_when: Callable[[], bool] | None = None,
 ) -> ServeOutcome:
     """单机服务的冷启动闭环（阻塞直到停机）。
 
@@ -424,8 +425,11 @@ def serve_once(
 
     拿到锁后：绑定 `127.0.0.1` 随机端口（`port=0` 受管）→ 生成/沿用 jwt 密钥 →
     签发限权身份 token 进凭据通道 → 发布端点文件 → 用与附着方**同一条探针**做
-    启动自验 → 就绪行打到 stdout（只含端口，无 token）。停机清端点与 token。
+    启动自验 → 就绪行打到 stdout（只含端口，无 token）。**拿到锁之后的每一段
+    都在 try/finally 里**：任何启动/运行异常都会清端点 + 清 token + 放锁
+    （审查 P3 修复：此前装配段在 try 外，异常靠进程退出兜底）。
 
+    `stop_when` 是轮询停机谓词（嵌入方/测试用；CLI 传 None 靠 KeyboardInterrupt）。
     本机个人服务不开宽松 CORS（`enable_cors=False`）：本地 UI 同源/桌面壳加载，
     Vite dev 直连属显式开发配置，走 `create_app` 直调路径。
     """
@@ -456,6 +460,7 @@ def serve_once(
 
     from agent_harness.web.app import create_app
 
+    endpoint: HostEndpointInfo | None = None
     configured = settings.jwt_secret.get_secret_value() if settings.jwt_secret else ""
     secret = configured if configured.strip() else secrets_module.token_hex(32)
     effective = settings.model_copy(update={"jwt_secret": SecretStr(secret)})
@@ -482,8 +487,8 @@ def serve_once(
         )
     )
     thread = threading.Thread(target=server.run, name="agent-harness-host-service", daemon=True)
-    thread.start()
     try:
+        thread.start()
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
             if not thread.is_alive():
@@ -507,7 +512,11 @@ def serve_once(
                 raise RuntimeError(f"启动自验失败：{probe.detail}")
             time.sleep(0.1)
         print(f"HOST_SERVICE_READY http://127.0.0.1:{port}", flush=True)
-        while not server.should_exit and thread.is_alive():
+        while (
+            not server.should_exit
+            and thread.is_alive()
+            and not (stop_when is not None and stop_when())
+        ):
             time.sleep(0.2)
     finally:
         clear_endpoint(root)

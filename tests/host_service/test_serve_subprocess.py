@@ -369,26 +369,34 @@ def _snapshot_files(root: Path) -> set[str]:
 
 
 def test_serve_reuses_old_data_root_in_place(workspace: Path, tmp_path: Path) -> None:
+    import asyncio
     from datetime import UTC, datetime
 
     import jwt as pyjwt
     from fastapi.testclient import TestClient
 
     from agent_harness.config import Settings
+    from agent_harness.model.provider_store import MemoryCredentialStore, ProviderStore
+    from agent_harness.storage.local_artifact import LocalArtifactStore
     from agent_harness.web.app import create_app
 
-    # 1) 服务未引入任何新面之前，用既有 API 在该数据根上造「旧数据」：
-    #    一个 launch=false 会话（不跑 run、不碰模型）。
+    # 供应商与 artifact 的存储位都显式指进 tmp（provider_store_path 默认锚用户
+    # 主目录、artifact_dir 默认相对 CWD——都不能让测试污染真实用户目录）。
+    provfile = tmp_path / "model-providers.json"
+    artdir = tmp_path / "artifacts"
     secret = "test-signing-secret-at-least-32-characters"
-    app = create_app(
-        Settings(
-            _env_file=None,
-            workspace_dir=str(workspace),
-            jwt_secret=secret,
-            model_api_key="sk-test",
-        ),
-        enable_cors=False,
+    pre_settings = Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        jwt_secret=secret,
+        model_api_key="sk-test",
+        provider_store_path=str(provfile),
+        artifact_dir=str(artdir),
     )
+
+    # 1) 服务未引入任何新面之前，用既有入口在该数据根上造「旧数据」：
+    #    launch=false 会话（不跑 run、不碰模型）+ 自定义供应商 + artifact。
+    app = create_app(pre_settings, enable_cors=False)
     with TestClient(app) as client:
         old_token = pyjwt.encode(
             {
@@ -407,12 +415,37 @@ def test_serve_reuses_old_data_root_in_place(workspace: Path, tmp_path: Path) ->
         assert created.status_code == 200, created.text
         old_session_id = created.json()["session_id"]
 
+    provider = ProviderStore.for_settings(pre_settings, MemoryCredentialStore()).create(
+        {
+            "id": "old-prov",
+            "label": "旧供应商",
+            "base_url": "https://api.example.test/v1",
+            "models": [{"model_id": "m-1"}],
+        }
+    )
+    assert provider["id"] == "old-prov"
+    old_artifact = asyncio.run(
+        LocalArtifactStore(pre_settings, session_id=old_session_id).save(
+            old_session_id,
+            "旧数据大输出原文：服务换代后必须仍可逐字读回。",
+            mime_type="text/plain",
+            source_tool="bash",
+            tool_call_id="call-old",
+        )
+    )
+
     before = _snapshot_files(workspace)
     assert any(p.startswith("sessions/") for p in before)
 
-    # 2) serve 子进程在**同一数据根**上启动：不迁移、不换根、不空白冒充。
+    # 2) serve 子进程在**同一数据根 + 同一供应商/artifact 存储**上启动：
+    #    不迁移、不换根、不空白冒充。
     tokfile = tmp_path / "tokens.json"
-    proc = _spawn_serve(workspace, tokfile)
+    proc = _spawn_serve(
+        workspace,
+        tokfile,
+        PROVIDER_STORE_PATH=str(provfile),
+        ARTIFACT_DIR=str(artdir),
+    )
     try:
         endpoint = _wait_attachable(workspace, tokfile).endpoint
         assert endpoint is not None
@@ -427,6 +460,22 @@ def test_serve_reuses_old_data_root_in_place(workspace: Path, tmp_path: Path) ->
         )
         assert status == 200
         assert events
+        # 模型配置同样原位可读（#355 AC：服务沿用既有 provider 存储，不另立配置面）。
+        status, providers = _http_get(f"{base}/api/model-providers", token=token)
+        assert status == 200
+        assert any(
+            row["id"] == "old-prov" and row["label"] == "旧供应商"
+            for row in providers["providers"]
+        )
+        # Artifact 原位可读（#355 AC + 不变量 #15 的读路径）。
+        status, slice_payload = _http_get(
+            f"{base}/api/sessions/{old_session_id}/artifacts/{old_artifact.artifact_id}",
+            token=token,
+        )
+        assert status == 200
+        assert any(
+            "旧数据大输出原文" in str(line) for line in slice_payload["lines"]
+        )
     finally:
         _terminate(proc)
 

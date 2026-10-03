@@ -874,8 +874,9 @@ def main() -> None:
 def _main_serve(argv: list[str]) -> None:
     """W-11（#355）：单机服务冷启动闭环（附着 → 否则竞争启动 → 二次检查）。
 
-    本机个人服务固定默认 127.0.0.1 + 随机受管端口；远程/LAN 部署保持既有显式
-    配置入口（`create_prod_app` + 显式 jwt_secret），不经本命令。
+    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 127.0.0.1 /
+    localhost，个人桌面服务不暴露 LAN）；远程/LAN 部署保持既有显式配置入口
+    （`create_prod_app` + 显式 jwt_secret），不经本命令。
     """
     from agent_harness.host_service import HostServiceError, serve_once
 
@@ -886,7 +887,8 @@ def _main_serve(argv: list[str]) -> None:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        help="绑定地址；缺省 127.0.0.1（个人服务不暴露 LAN）",
+        choices=["127.0.0.1", "localhost"],
+        help="绑定地址；只允许 loopback（W-11：个人服务不暴露 LAN，远程部署走显式配置入口）",
     )
     args = parser.parse_args(argv)
     settings = Settings()

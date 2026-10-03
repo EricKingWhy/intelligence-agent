@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -208,3 +209,69 @@ def test_attach_probe_auth_required_without_token_is_auth_failed(
     publish_endpoint(root, HostEndpointInfo(pid=1, port=stub_service.port))
     result = attach_probe(root, credentials=MemoryCredentialStore())
     assert result.status is AttachStatus.AUTH_FAILED
+
+
+# ── serve_once 优雅停机（审查修复轮 P2-1：此前 finally 清理只被崩溃路径间接覆盖） ──
+
+
+def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(tmp_path: Path) -> None:
+    """进程内走一次完整「就绪 → 停机」闭环（`stop_when` 接缝），钉住 finally 三件
+    清理：端点文件、host token、实例锁。此前没有任何测试覆盖优雅停机路径——
+    子进程测试全部以 kill 收尾（非优雅路径），删掉 finally 里的清理依旧全绿。"""
+    from agent_harness.config import Settings
+    from agent_harness.host_service import serve_once
+    from agent_harness.instance_lock import InstanceLock, InstanceLockError
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    backend = MemoryCredentialStore()
+    settings = Settings(
+        _env_file=None, workspace_dir=str(root), model_api_key="sk-test"
+    )
+    stop = threading.Event()
+    outcomes: list[object] = []
+    errors: list[Exception] = []
+
+    def _run() -> None:
+        try:
+            outcomes.append(
+                serve_once(settings, credentials=backend, stop_when=stop.is_set)
+            )
+        except Exception as error:  # noqa: BLE001 — 线程边界：失败带回主线程断言，不静默
+            errors.append(error)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if errors or outcomes:
+                pytest.fail("服务线程在达到 ATTACHABLE 前就结束了（见 errors/outcomes）")
+            if not thread.is_alive():
+                pytest.fail("服务线程在未产出结论时退出且未留下异常（见 stderr）")
+            probe = attach_probe(root, credentials=backend)
+            if probe.status is AttachStatus.ATTACHABLE:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("60s 内未达到 ATTACHABLE")
+
+        # 就绪面：端点已发布、token 已入限权通道。
+        assert read_endpoint(root) is not None
+        assert HostTokenStore(backend).get_token(root)
+
+        stop.set()
+    finally:
+        thread.join(timeout=30)
+
+    assert not errors, f"serve_once 在停机路径上抛错：{errors!r}"
+    assert not thread.is_alive(), "stop_when 触发后 30s 未完成停机"
+    assert outcomes and outcomes[0].served is True
+
+    # finally 三件清理：端点、token、锁。
+    assert read_endpoint(root) is None
+    assert HostTokenStore(backend).get_token(root) is None
+    try:
+        InstanceLock(root).acquire().release()
+    except InstanceLockError as error:  # 拿不到锁 = 服务没放锁（M3 逃脱的回归红）
+        pytest.fail(f"服务停机后实例锁仍被占用（finally 未放锁）：{error}")
