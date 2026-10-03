@@ -74,6 +74,11 @@ class ManagedRun:
         # "逻辑 run 还没完，只是让位给 ceiling"（决定要不要接力投递下一条排队输入）。
         self.paused = False
         self.reap_requested = False
+        # #550：已有取消请求在途（公开 cancel / 孤儿回收 / 关停任一来源置位）。
+        # 重复 cancel 不得再 task.cancel()——第二次注入会把 CancelledError 重新
+        # 抛进第一次取消正在进行的收尾臂（shield 不消除 caller 收到的取消），
+        # 终态事件因此丢失。
+        self.cancel_requested = False
         self._orphan_handle: asyncio.TimerHandle | None = None
         # run/started 落盘后填上（ADR-0030 §4.7）：服务层要用它写
         # `steer/requested.run_id` 与 `queue/consumed.run_id`——那两个字段的语义是
@@ -205,6 +210,12 @@ class ManagedRun:
     def _reap_if_orphaned(self) -> None:
         if self.subscribers or self.terminal or self.task is None:
             return
+        if self.cancel_requested:
+            # #550 review（A 轴 P3）：用户取消已在途（取消臂收尾中）——reaper
+            # 不得二次注入：终态会被 #550 的运行时侧防线兜住，但收尾时读到的
+            # `reap_requested` 会把 reason 翻成 orphaned（实为用户取消），且
+            # 违背"重复取消不得再注入"不变量。run 正在收尾，回收也无必要。
+            return
         logger.warning(
             "run 孤儿回收（session=%s，零订阅者超过 %.0fs）",
             self.session.session_id, self._manager.disconnect_grace_seconds,
@@ -277,8 +288,10 @@ class RunManager:
 
         调用方可在恢复计划校验与最终提交期间持有它；最终提交会覆盖 CAS 重验、
         必要的恢复/对账、运行时装配及恢复事件写入，确保 CAS 输家不会先留下恢复事件
-        或构造模型。不要跨 `RunManager.launch` 或整个 run 生命周期持有——提交后的并发启动由
-        `get_active` 的 409 负责。
+        或构造模型。锁内**可以**执行 launch（`#560` 起 `resume_and_launch` 的新任务
+        路径刻意如此：锁内 `get_active` 复查 CAS + 装配 + launch，锁只串行化
+        "判忙 → 启动"决策点，不跨 run 生命周期——launch 只创建 task 不等待它）；
+        但不要把锁扩到整个 run 的收尾/等待。
         """
         lock = self._session_locks.get(session_id)
         if lock is None:
@@ -428,10 +441,18 @@ class RunManager:
         return task is None or not task.done()
 
     def cancel(self, session_id: str) -> bool:
-        """显式取消：有在途 run → task.cancel()（取消臂收尾）；否则 False。"""
+        """显式取消：有在途 run → task.cancel()（取消臂收尾）；否则 False。
+
+        #550 幂等：已有取消在途（本方法重复调用，或孤儿回收/关停已置位）时
+        返回 True 但**不再** task.cancel()——取消臂正在收尾时再注入取消会打断
+        收尾本身（见 ManagedRun.cancel_requested 注释），终态事件随之丢失。
+        """
         run = self.get_active(session_id)
         if run is None or run.task is None:
             return False
+        if run.cancel_requested or run.reap_requested:
+            return True
+        run.cancel_requested = True
         run.task.cancel()
         return True
 
@@ -444,6 +465,9 @@ class RunManager:
         for task in tasks:
             task.cancel()
         for run in self._runs.values():
+            # #550：关停也是取消来源——置位幂等旗标，收尾期间用户 /cancel 不得
+            # 再向同一个 task 注入取消。
+            run.cancel_requested = True
             run.finish()
         if tasks:
             with contextlib.suppress(asyncio.CancelledError):

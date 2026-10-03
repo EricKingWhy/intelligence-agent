@@ -2002,6 +2002,16 @@ class AgentRuntime:
                     session_step_reserved = False
                     try:
                         await asyncio.shield(self._session_budget.refund_turn())
+                    except (asyncio.CancelledError, GeneratorExit):
+                        # #550：收尾期间被再次取消（重复 /cancel、reap、关停等
+                        # 旁路 task.cancel()）——shield 只保护内层退回不被打断，
+                        # 不消除 caller 收到的取消；CancelledError 是
+                        # BaseException，下面的 except Exception 接不住，会跳过
+                        # _terminal_cancelled 让 run 永久悬空无终态。吞掉这次
+                        # 再注入继续收尾：直到 raise 全是同步代码，没有再被
+                        # 注入的挂起点；最后 raise 的是第一次取消本身。
+                        self._log("task_failed", "取消收尾期间被再次取消（继续收尾）",
+                                  span_id=run_span, outcome="cancelled")
                     except Exception:  # noqa: BLE001 - 存储故障不打断取消收尾
                         self._log("task_failed", "session 预算退回失败（存储故障？）",
                                   span_id=run_span, outcome="error")
@@ -2031,7 +2041,14 @@ class AgentRuntime:
             if self._session_budget is not None and session_step_reserved:
                 session_step_reserved = False
                 try:
-                    await self._session_budget.refund_turn()
+                    # shield 与取消臂同口径（#550）：**本 await** 期间被取消不能
+                    # 让账目退回半途而废；再注入的取消在此处被吞掉，退回完成后
+                    # 继续失败收尾（后续 `async for` 的 yield 点仍是既有"消费者
+                    # 断连窗口"，不在本防护面内）。
+                    await asyncio.shield(self._session_budget.refund_turn())
+                except (asyncio.CancelledError, GeneratorExit):
+                    self._log("task_failed", "失败收尾期间被取消（继续收尾）",
+                              span_id=run_span, outcome="cancelled")
                 except Exception:  # noqa: BLE001 - 收尾优先
                     self._log("task_failed", "session 预算退回失败（存储故障？）",
                               span_id=run_span, outcome="error")
