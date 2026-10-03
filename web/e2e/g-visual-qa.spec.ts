@@ -46,8 +46,13 @@ for (const width of WIDTHS) {
     expect(controlsBox!.x).toBeGreaterThanOrEqual(dockBox!.x);
     expect(controlsBox!.x + controlsBox!.width).toBeLessThanOrEqual(dockBox!.x + dockBox!.width + 1);
 
-    // 四个控件 trigger 在场（ModelPicker 空 → 不渲染；三个 ControlPicker 在场）
-    await expect(page.locator('.composer-control')).toHaveCount(3);
+    // 控件 trigger 在场：ModelPicker 空（/api/models 默认 []）→ 不渲染；
+    // 权限/Profile/Effort 三个 OptionPicker + 预算触发器（#536/#537 `a538c5fe`
+    // 引入 `.composer-budget-trigger`）= 4。任何新增 `.composer-control` 都必须
+    // 同步本断言与注释——计数是防「行内静默加成员」的绊线（#611：未同步曾使
+    // nightly 10 例恒红，被排除的正是上方 overflow 断言的被测整行）。
+    await expect(page.locator('.composer-control')).toHaveCount(4);
+    await expect(page.locator('.composer-budget-trigger')).toHaveCount(1);
   });
 }
 
