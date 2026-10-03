@@ -364,18 +364,19 @@ async def _cancel_while_blocked(runtime: AgentRuntime, session: Session) -> list
     """模型挂起时取消消费者 → CancelledError 打进 `_drive` 的 await 点。"""
     agen = runtime.run_stream(session, PROMPT)
     seen: list[AgentEvent] = []
+    request_started = asyncio.Event()
 
     async def consume() -> None:
         async for frame in agen:
             seen.append(frame)
+            if frame.type == MODEL_REQUEST_STARTED:
+                request_started.set()
 
     consumer = asyncio.create_task(consume())
-    for _ in range(300):  # 等三帧出齐（user/message, run/started, model/started）
-        await asyncio.sleep(0.01)
-        if len(seen) >= 3:
-            break
-    if len(seen) < 3:  # 轮询没等到 → 取消点会比基线早，错误信息必须指名道姓
-        pytest.fail(f"取消前只等到 {len(seen)} 帧（需 3 帧），本场景的基线不成立")
+    try:
+        await asyncio.wait_for(request_started.wait(), timeout=3)
+    except TimeoutError:
+        pytest.fail("取消前未收到 durable model/request-started 帧")
     consumer.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await consumer
@@ -566,22 +567,22 @@ def _scenarios() -> tuple[Scenario, ...]:
                 memory_writer=w.memory,
             ),
             drive=_drive_full,
-            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST_STARTED,
-                     MODEL_REQUEST_STARTED, TEXT_DELTA, MODEL_REQUEST, MODEL_REQUEST,
+            durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST_STARTED, MODEL_REQUEST,
+                     MODEL_REQUEST_STARTED, TEXT_DELTA, MODEL_REQUEST,
                      MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),
             emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST_STARTED,
-                     MODEL_REQUEST_STARTED, TEXT_DELTA, MODEL_REQUEST, MODEL_REQUEST,
+                     MODEL_REQUEST, MODEL_REQUEST_STARTED, TEXT_DELTA, MODEL_REQUEST,
                      MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),
             terminal=RUN_COMPLETED,
             terminal_payload={"final_text": "fallback 的回答", "cost_usd": None,
                               "trace_id": None, "trace_url": None},
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None),
-                   (MODEL_REQUEST_STARTED, 2), (MODEL_REQUEST_STARTED, 2),
-                   (TEXT_DELTA, 2), (MODEL_REQUEST, 2), (MODEL_REQUEST, 2),
+                   (MODEL_REQUEST_STARTED, 2), (MODEL_REQUEST, 2),
+                   (MODEL_REQUEST_STARTED, 2), (TEXT_DELTA, 2), (MODEL_REQUEST, 2),
                    (MODEL_FALLBACK, 2),
                    (MODEL_COMPLETED, 2), (RUN_COMPLETED, None)),
             memory_submits=((USER_MESSAGE, RUN_STARTED, MODEL_REQUEST_STARTED,
-                             MODEL_REQUEST_STARTED, MODEL_REQUEST, MODEL_REQUEST,
+                             MODEL_REQUEST, MODEL_REQUEST_STARTED, MODEL_REQUEST,
                              MODEL_FALLBACK, MODEL_COMPLETED, RUN_COMPLETED),),
         ),
         Scenario(
@@ -749,19 +750,19 @@ def _scenarios() -> tuple[Scenario, ...]:
         ),
         Scenario(
             name="cancel_while_blocked",
-            note="模型在途被取消：在途模型调用补 model/failed，两段都不进流",
+            note="模型在途被取消：开始帧先出流，失败结算与终态不再 yield",
             build=lambda w: _runtime(_BlockingModel(), memory_writer=w.memory),
             drive=_cancel_while_blocked,
             durable=(USER_MESSAGE, RUN_STARTED, MODEL_REQUEST_STARTED, MODEL_REQUEST,
                      MODEL_FAILED, RUN_FAILED),
-            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED),
+            emitted=(USER_MESSAGE, RUN_STARTED, MODEL_STARTED, MODEL_REQUEST_STARTED),
             terminal=RUN_FAILED,
             terminal_payload={"reason": CANCEL_REASON, "trace_id": None, "trace_url": None},
             terminal_step_id=0,
             turn2=((USER_MESSAGE, None), (RUN_STARTED, None),
                    (MODEL_REQUEST_STARTED, 2), (MODEL_REQUEST, 2),
                    (MODEL_FAILED, 2), (RUN_FAILED, 1)),
-            discarded=(MODEL_REQUEST_STARTED, MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
+            discarded=(MODEL_REQUEST, MODEL_FAILED, RUN_FAILED),
             run_twin=False,
         ),
         Scenario(

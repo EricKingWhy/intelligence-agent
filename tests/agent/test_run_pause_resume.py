@@ -213,6 +213,21 @@ class _ForbiddenModel:
         yield AIMessage(content="")
 
 
+class _BlockedCloseoutModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def ainvoke(self, messages: list, **kwargs) -> AIMessage:
+        self.entered.set()
+        await self.release.wait()
+        return AIMessage(content="not a continuation")
+
+    async def astream(self, messages: list, **kwargs):
+        raise AssertionError("预算暂停应只调用 closeout ainvoke")
+        yield AIMessage(content="")
+
+
 def _run_id_of(session: Session) -> str:
     return next(e.run_id for e in session.events if e.type == RUN_STARTED and e.run_id)
 
@@ -276,6 +291,54 @@ async def test_model_closeout_is_a_model_request_not_an_accepted_turn(tmp_path) 
     assert state.consumed_turns == 2, "派生账本 = 事件说的事实（closeout 不进计数）"
     assert state.paused is not None
     assert state.resumable is True
+
+
+@pytest.mark.asyncio
+async def test_closeout_request_started_is_yielded_before_provider_settles(tmp_path) -> None:
+    model = _BlockedCloseoutModel()
+    runtime = _runtime(model, ceiling=1)
+    session = make_session(tmp_path)
+    frames: asyncio.Queue = asyncio.Queue()
+
+    async def collect() -> None:
+        async for frame in runtime.run_stream(session, "等待 closeout 在途事件"):
+            await frames.put(frame)
+
+    consumer = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(model.entered.wait(), timeout=2)
+        async with asyncio.timeout(2):
+            while True:
+                frame = await frames.get()
+                if frame.type == MODEL_REQUEST_STARTED:
+                    break
+
+        assert frame.data["role"] == "closeout"
+        started = next(
+            event for event in session.events
+            if event.type == MODEL_REQUEST_STARTED
+            and event.data["request_id"] == frame.data["request_id"]
+        )
+        assert not any(
+            event.type == MODEL_REQUEST and event.data.get("role") == "closeout"
+            for event in session.events
+        )
+        model.release.set()
+        await consumer
+
+        settled = next(
+            event for event in session.events
+            if event.type == MODEL_REQUEST
+            and event.data.get("role") == "closeout"
+        )
+        assert started.seq < settled.seq
+        assert started.data["request_id"] == settled.data["request_id"]
+    finally:
+        model.release.set()
+        if not consumer.done():
+            consumer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer
 
 
 @pytest.mark.asyncio

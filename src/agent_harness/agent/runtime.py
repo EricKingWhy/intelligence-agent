@@ -1011,6 +1011,23 @@ async def _model_stream_items(
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _wait_for_request_events_or_task(
+    task: asyncio.Task[Any], arms: _TerminalArms,
+) -> list[SessionEvent]:
+    """Wait until the operation settles or a durable request event is ready."""
+    while not task.done() and not arms.pending_model_request_events:
+        event_task = asyncio.create_task(arms.request_events_ready.wait())
+        try:
+            await asyncio.wait(
+                (task, event_task), return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not event_task.done():
+                event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
+    return arms.drain_model_request_events()
+
+
 class _GuardedTracer:
     """端口实现的外层保护（#249）：实现违约抛异常时，观测故障绝不改写 run 语义。
 
@@ -1722,10 +1739,23 @@ class AgentRuntime:
                     else:
                         ai = AIMessage(content="")
                 else:
-                    ai = await model_coord.ainvoke(
+                    invoke_task = asyncio.create_task(model_coord.ainvoke(
                         messages, on_request_started=record_request_started,
                         on_request_failed=record_request_failed,
-                    )
+                    ))
+                    try:
+                        while not invoke_task.done():
+                            for request_event in await _wait_for_request_events_or_task(
+                                invoke_task, arms,
+                            ):
+                                if request_event.seq is not None:
+                                    mirrored_request_event_seqs.add(request_event.seq)
+                                yield to_agent_event(request_event)
+                        ai = invoke_task.result()
+                    finally:
+                        if not invoke_task.done():
+                            invoke_task.cancel()
+                        await asyncio.gather(invoke_task, return_exceptions=True)
                 # ainvoke 与空流没有 chunk 作为镜像锚点；将尚未镜像的请求事实按
                 # append 顺序补出。流式分支通常已在 Provider 等待期间逐条镜像。
                 for request_event in arms.drain_model_request_events():
@@ -2643,12 +2673,30 @@ class AgentRuntime:
                 session_snapshot = session_admission.snapshot
             else:
                 session_snapshot = await self._session_budget.snapshot()
-        continuation, closeout_source, closeout_events = await self._closeout_continuation(
+        closeout_task = asyncio.create_task(self._closeout_continuation(
             arms, trigger_dimension=trigger_dimension,
             consumed=consumed_before, limits=launch.limits, step_id=envelope_step,
             blocked_by=blocked_by, reason=reason, stuck=stuck_payload,
             session_snapshot=session_snapshot,
-        )
+        ))
+        mirrored_closeout_event_seqs: set[int] = set()
+        try:
+            while not closeout_task.done():
+                for request_event in await _wait_for_request_events_or_task(
+                    closeout_task, arms,
+                ):
+                    if request_event.seq is not None:
+                        mirrored_closeout_event_seqs.add(request_event.seq)
+                    yield to_agent_event(request_event)
+            continuation, closeout_source, closeout_events = closeout_task.result()
+            for request_event in arms.drain_model_request_events():
+                if request_event.seq is not None:
+                    mirrored_closeout_event_seqs.add(request_event.seq)
+                yield to_agent_event(request_event)
+        finally:
+            if not closeout_task.done():
+                closeout_task.cancel()
+            await asyncio.gather(closeout_task, return_exceptions=True)
         # closeout 的请求落进 session 树账（`#318`）：它也是一次真实请求
         # （`02 §5.1` 把 closeout 与 primary / fallback 并列）；usage / cost 从
         # 产出响应的那格事件取（缺席 = 该维转未知，None 粘性）。
@@ -2677,6 +2725,8 @@ class AgentRuntime:
         # closeout 的 `model/request` 先镜像再落 `run/paused`：两条都是 durable，
         # 顺序与落盘顺序一致（流帧必须是落盘日志的前缀，见 golden）。
         for closeout_event in closeout_events:
+            if closeout_event.seq in mirrored_closeout_event_seqs:
+                continue
             yield to_agent_event(closeout_event)
         # closeout 那次请求已经落账（`_closeout_continuation` 里 append）⇒ 重新算一次
         # 快照，让它包含进去。两次都从事件读，所以这是"再读一次真相"，不是累加。
@@ -2875,6 +2925,7 @@ class AgentRuntime:
             {"role": PROVIDER_ROLE_CLOSEOUT, "request_id": request_id},
             run_id=arms.run_id, step_id=step_id,
         )
+        arms._queue_model_request_event(request_started_event)
         try:
             response = await self._raw_model.ainvoke(
                 [*messages, HumanMessage(content=_closeout_instruction(

@@ -8,9 +8,14 @@ import asyncio
 import json
 
 import pytest
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk
 
-from agent_harness.session import MODEL_REQUEST_STARTED, JsonlSessionStore
+from agent_harness.session import (
+    MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
+    RUN_PAUSED,
+    JsonlSessionStore,
+)
 
 
 class SlowStreamModel:
@@ -37,6 +42,24 @@ class _BlockedStreamModel:
         self.entered.set()
         await self.release.wait()
         yield AIMessageChunk(content="完成")
+
+
+class _BlockedInvokeModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        return AIMessage(content="not a continuation")
+
+    async def astream(self, messages, **kwargs):
+        raise AssertionError("本用例应在预算暂停时只调用 closeout ainvoke")
+        yield
 
 
 async def _start_server(tmp_path, monkeypatch, model):
@@ -234,6 +257,60 @@ async def test_in_flight_request_started_is_live_durable_and_replayed(
         assert replayed_starts[0]["seq"] == start_seq
         assert replayed_starts[0]["data"]["request_id"] == requests[0]["data"]["request_id"]
         assert replayed_starts[0]["seq"] < requests[0]["seq"]
+    finally:
+        model.release.set()
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_closeout_request_started_is_live_before_provider_settles(
+    tmp_path, monkeypatch,
+):
+    """closeout start 通过 session listener 在 Provider 阻塞期间送达 SSE。"""
+    model = _BlockedInvokeModel()
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, lambda: model,
+    )
+    try:
+        live = await _collect(
+            port,
+            "/api/sessions",
+            {"task": "验证 closeout 在途可见", "budget": {"run": {"max_model_requests": 1}}},
+            stop_types={MODEL_REQUEST_STARTED},
+        )
+        started = [frame for frame in live if frame.get("type") == MODEL_REQUEST_STARTED]
+        assert len(started) == 1
+        assert started[0]["data"]["role"] == "closeout"
+        session_id = started[0]["session_id"]
+        await asyncio.wait_for(model.entered.wait(), timeout=2)
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=5) as client:
+            response = await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events",
+            )
+        assert response.status_code == 200
+        events = response.json()
+        durable_start = next(
+            event for event in events if event["type"] == MODEL_REQUEST_STARTED
+        )
+        assert durable_start["seq"] == started[0]["seq"]
+        assert not any(event["type"] == MODEL_REQUEST for event in events)
+
+        model.release.set()
+        store = JsonlSessionStore(app.state.agent.sessions_root)
+        async with asyncio.timeout(5):
+            while True:
+                events = store.read_events(session_id)
+                if events and events[-1].type == RUN_PAUSED:
+                    break
+                await asyncio.sleep(0.02)
+        requests = [event for event in events if event.type == MODEL_REQUEST]
+        assert len(requests) == 1
+        assert requests[0].data["role"] == "closeout"
+        assert requests[0].data["request_id"] == durable_start["data"]["request_id"]
+        assert durable_start["seq"] < requests[0].seq
     finally:
         model.release.set()
         await _shutdown(server, serve_task)
