@@ -21,7 +21,11 @@ from agent_harness.sandbox.paths import canonical_workspace_path
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.errors import WorkspaceBindingConflict, WorkspaceNotFound
-from agent_harness.session.event import SESSION_FORKED, USER_MESSAGE
+from agent_harness.session.event import (
+    FORK_IN_PROGRESS,
+    SESSION_FORKED,
+    USER_MESSAGE,
+)
 from agent_harness.session.service import AmendOptions, SessionService
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
@@ -177,6 +181,25 @@ class TestResumeWorkspace:
 
         assert self._started_count(state, "test-sid") == 1
         assert not (state.workspaces_root / "test-sid").exists()
+
+    def test_unfinished_fork_conflict_names_the_fork_remediation(self, tmp_path):
+        """#555：未完成 fork（有 fork/in-progress、无 session/forked）的绑定冲突
+        给 fork 专属处置指引——这是 fork 中断的后续状态，修复方向是删除后重新
+        fork，不是让用户去核对/修改映射。"""
+        state = self._real_state(tmp_path)
+        cwd = tmp_path / "project-a"
+        cwd.mkdir()
+        other = tmp_path / "project-b"
+        other.mkdir()
+        session = self._start_with_cwd(state, "test-sid", cwd)
+        session.append(FORK_IN_PROGRESS, {
+            "parent_session_id": "parent", "boundary_user_message_seq": 1,
+        })
+        rewrite_workspace_mapping(state.workspaces_root, "test-sid", other)
+        state.workspace_registry = WorkspaceRegistry(root=tmp_path)  # 新实例，cache 空
+
+        with pytest.raises(WorkspaceBindingConflict, match="未完成的 fork"):
+            self._resume(state, "test-sid")
 
     def test_conflict_is_detected_before_any_sandbox_instantiation(self, tmp_path):
         """对账必须在**任何 Sandbox 实例化之前**（#266 的核心性质，不只是"会拒绝"）。

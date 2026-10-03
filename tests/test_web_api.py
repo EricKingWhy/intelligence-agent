@@ -30,6 +30,7 @@ from agent_harness.config import Settings
 from agent_harness.session import (
     RUN_STARTED,
     SESSION_STARTED,
+    TOOL_CALL,
     USER_MESSAGE,
     Session,
 )
@@ -788,8 +789,9 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
     repaired = [e for e in events if e["type"] == "tool/result"
                 and e["data"].get("tool_call_id") == "call-x"]
     assert repaired, "dangling tool_call 未被合成结果"
-    from agent_harness.session import DANGLING_TOOL_CONTENT
-    assert repaired[0]["data"]["content"] == DANGLING_TOOL_CONTENT
+    # #566：无账（接纳点未到）+ 无审批 → 「未执行（尚未开始执行）」，不再谎称「结果未知」
+    from agent_harness.session.derive import DANGLING_NOT_EXECUTED
+    assert repaired[0]["data"]["content"] == DANGLING_NOT_EXECUTED
 
     # 幂等：再次 recover 不再新增合成
     resp2 = client.post(f"/api/sessions/{session.session_id}/recover")
@@ -797,6 +799,193 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
 
     # 未知 session → 404
     assert client.post("/api/sessions/nonexistent-id-123/recover").status_code == 404
+
+
+# ── #547：POST /recover 的用户裁决合同（方向 1，用户拍板 2026-10-03）──────
+
+
+async def _seed_reconcile_window(state, call_ids: list[str]):
+    """制造「执行中 kill」的持久现场：tool/call 悬空 + Ledger 行 UNKNOWN。
+
+    状态机两步链（#30）：PENDING → RUNNING → UNKNOWN，不许跳步直达。
+    """
+    from agent_harness.storage import Operation, OperationState
+
+    ledger = state.stores.operation_ledger
+    await ledger.initialize()
+    session = Session.start(state.store)
+    run_id, _ = session.begin_run()
+    for call_id in call_ids:
+        session.append(
+            TOOL_CALL,
+            {"tool_call_id": call_id, "tool_name": "bash", "args": {}},
+            run_id=run_id,
+        )
+        await ledger.create(
+            Operation(
+                tool_call_id=call_id,
+                session_id=session.session_id,
+                run_id=run_id,
+                agent_id=None,
+                tool_name="bash",
+                args_identity="{}",
+                state=OperationState.PENDING,
+                started_at="2026-10-03T00:00:00Z",
+            )
+        )
+        await ledger.update_state(session.session_id, call_id, OperationState.RUNNING)
+        await ledger.update_state(session.session_id, call_id, OperationState.UNKNOWN)
+    return session
+
+
+def test_recover_without_decisions_returns_machine_readable_409(client):
+    """UNKNOWN 行 + 无裁决 → 409 detail 携带机器可读 pending_decisions 清单。"""
+    import asyncio
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-409"]))
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    pending = detail["pending_decisions"]
+    assert [p["tool_call_id"] for p in pending] == ["call-409"]
+    assert pending[0]["tool_name"] == "bash"
+    assert pending[0]["state"] == "UNKNOWN"
+    assert "CONFIRM_SUCCESS" in detail["message"], "409 文案必须指引四裁决合同"
+
+
+def test_recover_with_decision_settles_operation_and_resumes(client):
+    """主链路：CONFIRM_SUCCESS → 行进 SUCCEEDED + operation/reconciled 落盘，
+    幂等二次恢复，resume 闸门重开（无未结清账）。"""
+    import asyncio
+
+    from agent_harness.storage import OperationState
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-ok"]))
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-ok", "verdict": "CONFIRM_SUCCESS"}]},
+    )
+    assert resp.status_code == 200, resp.json()
+    events = resp.json()
+    assert any(e["type"] == "session/resumed" for e in events)
+    reconciled = [e for e in events if e["type"] == "operation/reconciled"]
+    assert reconciled, "裁决必须落 operation/reconciled 审计事件"
+    assert reconciled[0]["data"]["verdict"] == "CONFIRM_SUCCESS"
+    results = [
+        e for e in events
+        if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-ok"
+    ]
+    assert results and "人工 reconcile" in results[0]["data"]["content"]
+
+    async def _row_state():
+        op = await state.stores.operation_ledger.get(session.session_id, "call-ok")
+        return op.state
+
+    assert asyncio.run(_row_state()) is OperationState.SUCCEEDED
+    # 幂等：结清后再次 recover 200（无 pending）
+    assert client.post(f"/api/sessions/{session.session_id}/recover").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "verdict,expected_state,needle",
+    [
+        ("CONFIRM_FAILURE", "FAILED", "确认失败"),
+        ("RETRY", "CANCELLED", "重新发起"),
+        ("ABANDON", "CANCELLED", "不再重跑"),
+    ],
+)
+def test_recover_decision_matrix(client, verdict, expected_state, needle):
+    """四裁决 → Ledger 状态映射（07 §6/§7，复用 ReconcileVerdict，不造第二套）。"""
+    import asyncio
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-m"]))
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-m", "verdict": verdict}]},
+    )
+    assert resp.status_code == 200, resp.json()
+
+    async def _row():
+        return await state.stores.operation_ledger.get(session.session_id, "call-m")
+
+    op = asyncio.run(_row())
+    assert op.state.value == expected_state
+    if needle is not None:
+        results = [
+            e for e in resp.json()
+            if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-m"
+        ]
+        assert results and needle in results[0]["data"]["content"]
+
+
+def test_recover_decisions_reject_malformed_requests(client):
+    """预检全部在任何写入之前：未知目标 / 非法裁决值 / 重复提交 → 422，零写入。"""
+    import asyncio
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-x"]))
+    base = f"/api/sessions/{session.session_id}/recover"
+
+    resp = client.post(
+        base,
+        json={"decisions": [{"tool_call_id": "nope", "verdict": "CONFIRM_SUCCESS"}]},
+    )
+    assert resp.status_code == 422, "账上不存在的裁决目标必须 422"
+
+    resp = client.post(
+        base,
+        json={"decisions": [{"tool_call_id": "call-x", "verdict": "MAYBE"}]},
+    )
+    assert resp.status_code == 422, "非法裁决值必须 422"
+
+    resp = client.post(
+        base,
+        json={"decisions": [
+            {"tool_call_id": "call-x", "verdict": "CONFIRM_SUCCESS"},
+            {"tool_call_id": "call-x", "verdict": "ABANDON"},
+        ]},
+    )
+    assert resp.status_code == 422, "同一调用两条裁决（重复提交）必须 422"
+
+    async def _row_state():
+        op = await state.stores.operation_ledger.get(session.session_id, "call-x")
+        return op.state.value
+
+    assert asyncio.run(_row_state()) == "UNKNOWN", "被拒请求必须零写入"
+
+
+def test_recover_partial_coverage_returns_409_with_pending_list(client):
+    """只裁决一部分：409 + 清单仍列出全部待裁决行（开工前覆盖性预检，零写入）。"""
+    import asyncio
+
+    from agent_harness.storage import OperationState
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-a", "call-b"]))
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-a", "verdict": "ABANDON"}]},
+    )
+    assert resp.status_code == 409
+    pending = resp.json()["detail"]["pending_decisions"]
+    assert {p["tool_call_id"] for p in pending} == {"call-a", "call-b"}
+
+    async def _row_states():
+        states = []
+        for call_id in ("call-a", "call-b"):
+            op = await state.stores.operation_ledger.get(session.session_id, call_id)
+            states.append(op.state)
+        return states
+
+    assert all(s is OperationState.UNKNOWN for s in asyncio.run(_row_states()))
 
 
 # ── 集成 AI 移交：HTML 响应 CSP 头（纵深防御，INTEGRATION_NOTES §4.1）──

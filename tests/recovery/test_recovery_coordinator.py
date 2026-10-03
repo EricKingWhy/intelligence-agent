@@ -35,7 +35,10 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.approval import unresolved_approval_ids
-from agent_harness.session.derive import DANGLING_TOOL_CONTENT
+from agent_harness.session.derive import (
+    DANGLING_NOT_EXECUTED,
+    DANGLING_TOOL_CONTENT,
+)
 from agent_harness.session.event import PERMISSION_RESOLVED, TOOL_APPROVAL_REQUESTED
 from agent_harness.storage import (
     Operation,
@@ -367,13 +370,13 @@ async def test_recovery_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dangling_without_ledger_op_gets_phase1_placeholder(
+async def test_dangling_without_ledger_op_reports_not_executed(
     tmp_path: Path,
 ) -> None:
-    """Ledger 不知道的 dangling call（如 validation 失败未建 Operation）
-    退回 Phase 1 占位语义，保证投影一致。"""
+    """Ledger 不知道的 dangling call（接纳点未到：无审批请求 + 无账行）
+    ⇒ 诚实合成「未开始执行」，不再说"结果未知"（#566）。"""
     store = JsonlSessionStore(tmp_path / "sessions")
-    crashed = _make_crashed_session(store)  # call-1 无 Ledger 记录
+    crashed = _make_crashed_session(store)  # call-1 无 Ledger 记录、无审批事件
     ledger = SqliteOperationLedger(tmp_path / "state.db")
     await ledger.initialize()
 
@@ -381,7 +384,8 @@ async def test_dangling_without_ledger_op_gets_phase1_placeholder(
     recovered = await coordinator.recover(crashed.session_id)
 
     results = _result_events(recovered)
-    assert results["call-1"] == DANGLING_TOOL_CONTENT
+    assert results["call-1"] == DANGLING_NOT_EXECUTED
+    assert DANGLING_TOOL_CONTENT not in str(recovered.events)
 
 
 @pytest.mark.asyncio
@@ -857,3 +861,41 @@ async def test_refusal_with_stale_approval_still_writes_nothing(
         "拒绝零写入：陈旧审批也未被结清（结清只发生在恢复真正推进时）"
     )
     assert unresolved_approval_ids(events_before) == ["appr-1"]
+
+
+# ── #547：DecisionsReconcileCallback——HTTP 裁决进契约的最后一道 fail-closed ──
+
+
+def _operation_for(tool_call_id: str) -> Operation:
+    return Operation(
+        tool_call_id=tool_call_id,
+        session_id="s",
+        run_id="run-1",
+        agent_id=None,
+        tool_name="bash",
+        args_identity="{}",
+        state=OperationState.NEED_RECONCILE,
+        started_at="2026-10-03T00:00:00Z",
+    )
+
+
+def test_decisions_callback_returns_verdict_for_known_target() -> None:
+    from agent_harness.recovery.coordinator import DecisionsReconcileCallback
+    from agent_harness.recovery.reconcile import ReconcileVerdict
+
+    callback = DecisionsReconcileCallback({"call-1": ReconcileVerdict.ABANDON})
+    verdict = asyncio.run(callback.resolve(_operation_for("call-1"), None))
+    assert verdict is ReconcileVerdict.ABANDON
+
+
+def test_decisions_callback_missing_decision_fails_closed() -> None:
+    """预检后待裁决集合变化的竞态窗口：缺裁决 → ReconcileRequired，绝不猜测。"""
+    from agent_harness.recovery.coordinator import (
+        DecisionsReconcileCallback,
+        ReconcileRequired,
+    )
+    from agent_harness.recovery.reconcile import ReconcileVerdict
+
+    callback = DecisionsReconcileCallback({"call-1": ReconcileVerdict.ABANDON})
+    with pytest.raises(ReconcileRequired):
+        asyncio.run(callback.resolve(_operation_for("call-other"), None))

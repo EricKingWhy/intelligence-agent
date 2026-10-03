@@ -158,6 +158,65 @@ class TestWriteTool:
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.PERMISSION_DENIED
 
+    # ── #549-b / SB-07：写目标形态错误的异常映射（合同级断言，双平台可跑）──
+
+    @pytest.mark.asyncio
+    async def test_write_target_is_directory_maps_invalid_argument(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """write 目标是已存在目录 → INVALID_ARGUMENT + 可行动 message。
+
+        POSIX 抛 IsADirectoryError；Windows 的 os.replace 语义报 PermissionError
+        [WinError 5]——两种形态都必须映射成模型可自纠的 INVALID_ARGUMENT，
+        不再让模型看到裸 WinError 或含糊的 PERMISSION_DENIED（本机 L-12 复现）。
+        """
+        (sandbox.workspace_root / "sub").mkdir()
+
+        result = await executor.execute(
+            _tool_call("write", {"path": "sub", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "目录" in result.result.message
+        assert "sub" in result.result.message
+
+    @pytest.mark.asyncio
+    async def test_write_parent_path_is_file_maps_invalid_argument(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """父路径是文件 → INVALID_ARGUMENT + 可行动 message。
+
+        Windows [WinError 183] → FileExistsError；POSIX → NotADirectoryError。
+        """
+        sandbox.write_text("file.txt", "occupied")
+
+        result = await executor.execute(
+            _tool_call("write", {"path": "file.txt/child.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "file.txt/child.txt" in result.result.message
+
+    @pytest.mark.asyncio
+    async def test_write_genuine_permission_error_stays_permission_denied(
+        self, executor: ToolExecutor, monkeypatch
+    ):
+        """真正的权限拒绝（非目录形态误报）保持 PERMISSION_DENIED 不变。"""
+        def boom(path: str, content: str) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(
+            executor._registry._tools["write"]._sandbox, "write_text", boom
+        )
+        result = await executor.execute(
+            _tool_call("write", {"path": "locked.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+
 
 # ============================================================================
 # BashTool（核心：ADR-0002 不变量）

@@ -19,6 +19,12 @@ SESSION_STARTED = "session/started"
 SESSION_RESUMED = "session/resumed"
 # Phase 14（ADR-0017 决策 8）：只落 child 文件的 provenance 事件
 SESSION_FORKED = "session/forked"
+# #555：fork 意图标记（SQLite 提交日志同型）。child 文件里 session/started 之后、
+# 工作区拷贝之前落一条 durable 事实，data = parent_session_id / boundary_user_message_seq。
+# 「有它无 session/forked」= fork 未完成：启动扫描按它回收暂存/子工作区（recovery/scan.py），
+# 续聊对账（service._reconcile_workspace_binding）给 fork 专属提示。种子排除集必须含它
+# （会话级状态不进孙代种子，与 session/started 同理）。
+FORK_IN_PROGRESS = "fork/in-progress"
 RUN_STARTED = "run/started"
 RUN_COMPLETED = "run/completed"
 RUN_FAILED = "run/failed"
@@ -175,6 +181,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         SESSION_STARTED,
         SESSION_RESUMED,
         SESSION_FORKED,
+        # #555：fork 意图标记（未完成 fork 的可见性事实；见 FORK_IN_PROGRESS 注释）
+        FORK_IN_PROGRESS,
         RUN_STARTED,
         RUN_COMPLETED,
         RUN_FAILED,
