@@ -38,15 +38,23 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage
 
+from agent_harness.agent.budget import BudgetConflict
 from agent_harness.agent.factory import AgentFactory
+from agent_harness.agent.resume_evidence import digest_policy_inputs
+from agent_harness.agent.run_budget import (
+    REASON_STUCK,
+    RESUME_BASIS_POLICY_CHANGE,
+    latest_paused_run,
+)
 from agent_harness.assembly import BUILTIN_LOCAL_TOOLS
 from agent_harness.config import Settings
 from agent_harness.model.config import ConfigError
 from agent_harness.model.scripted import ScriptedModel
 from agent_harness.multiagent.provider import InProcessSubagentProvider
 from agent_harness.multiagent.tools import DelegateTool
-from agent_harness.session import RUN_COMPLETED, RUN_FAILED, Session
+from agent_harness.session import RUN_COMPLETED, RUN_FAILED, RUN_PAUSED, Session
 from agent_harness.session.amend import AmendOptions
+from agent_harness.session.model_switch import ModelTarget, append_model_change
 from agent_harness.session.service import WorkspaceBindingConflict
 from agent_harness.tooling import ToolExecutor, ToolRegistry
 from agent_harness.tools import BashTool, GlobTool, GrepTool, ReadTool, WriteTool
@@ -115,12 +123,16 @@ async def _spawn_child(
     parent_cwd: Path | None,
     target: str = "research_review",
     spawned_registries: list[ToolRegistry] | None = None,
+    child_model: ScriptedModel | None = None,
+    expect_ok: bool = True,
 ) -> str:
     """走生产 spawn 路径（DelegateTool → provider → AgentFactory）造一个真实子会话。
 
     `parent_cwd` 给定 = 有 cwd 锚的父（生产常态）；None = 无 cwd 锚的父（AC5 腿）。
     source registry 按生产 main 父装配（BUILTIN_LOCAL_TOOLS + update_plan + delegate），
     保证 spawn 时的收窄面 = spec.tool_scope ∩ 生产可注册集。
+    `child_model`（#370）：给 child 换剧本（如必然 stuck 的失败循环）；子代理非
+    completed ⇒ delegate 返回 failure，用 `expect_ok=False` 放行该形状。
     """
     state = harness.state
     registry = state.workspace_registry
@@ -148,7 +160,7 @@ async def _spawn_child(
 
     provider_impl.activate(
         factory=AgentFactory(
-            model=ScriptedModel([AIMessage(content="child done")]),
+            model=child_model or ScriptedModel([AIMessage(content="child done")]),
             primary_model_name="main-model",
             executor_factory=_executor_factory,
         ),
@@ -159,7 +171,8 @@ async def _spawn_child(
     )
 
     result = await delegate.execute(_args(target, "child task"))
-    assert result.ok, f"spawn 失败：{result.message}"
+    if expect_ok:
+        assert result.ok, f"spawn 失败：{result.message}"
     # child_session_id 不在 tool result payload 里（走 pending_events）；provider
     # 的公开观测挂点（provider.py `last_child_sessions`）是测试取它的既定入口。
     return provider_impl.last_child_sessions[-1].session_id
@@ -362,3 +375,128 @@ async def test_child_resume_with_unresolvable_agent_id_refuses_full_surface(
         await harness.service.resume_and_launch(session_id=child_id, task="继续")
     # 响亮失败且零副作用：不落 session/resumed、不建 run、不改注册表。
     assert harness.types(child_id) == types_before
+
+
+# ── #370（ADR-0048 残余 15）：child stuck 暂停带**它自己的**生效策略面 ──────
+#
+# #372 修好了恢复入口（alias get + 按 AgentSpec 重建档位），本票把快照的策略那一半
+# 补上：`AgentFactory.create` 经 `delegated_child_evidence_port`（唯一口径）给 child
+# 注入证据端口。下面用 #372 的交付入口验证票面 AC：
+# - AC1：child 暂停载荷的 policy 格 = child 自己的面（默认档 + spec 档位 +
+#   无独立模型/effort/providers 声明），逐维值与摘要同源；
+# - AC2：`policy_change` 恢复——什么都不声明（字段省略不是变更）⇒ 409「相同」；
+#   声明 child 自己的一维 ⇒ 依据成立，恢复腿真按新档跑（第二次暂停的快照记着新值）；
+# - AC3：**父**会话的策略漂移（模型切换）打不开 child 的 `policy_change`。
+# （AC4 环境格继续缺席的钉子在 tests/agent/test_stuck_runtime.py 的策略面测试里。）
+
+
+def _failing_round(index: int) -> AIMessage:
+    """同一个未注册工具、同一份参数：动作指纹恒定 ⇒ 连续失败累积（同 CLI 用例）。"""
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "id": f"call_{index:04d}", "name": "no_such_tool", "args": {"command": "ls"},
+        }],
+    )
+
+
+def _stuck_child_model() -> ScriptedModel:
+    """必然撞满 stuck 阈值的 child 剧本；closeout 由确定性 continuation 兜底。"""
+    return ScriptedModel(responses=[_failing_round(index) for index in range(6)])
+
+
+def _paused_runs(harness: _Harness, session_id: str) -> list:
+    return [e for e in harness.events(session_id) if e.type == RUN_PAUSED]
+
+
+async def _wait_paused_runs(harness: _Harness, session_id: str, *,
+                            count: int, timeout: float = 15.0) -> None:
+    """等第 count 次 `run/paused` 落盘（ScriptedModel 毫秒级；轮询避免猜时序）。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while len(_paused_runs(harness, session_id)) < count:
+        if loop.time() >= deadline:
+            raise AssertionError(
+                f"超时 {timeout}s：run/paused 未到 {count} 条"
+                f"（{harness.types(session_id)[-6:]}）"
+            )
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+async def test_child_policy_change_resume_gated_by_its_own_face(
+    tmp_path: Path, monkeypatch,
+):
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project",
+        child_model=_stuck_child_model(), expect_ok=False,
+    )
+    paused = latest_paused_run(harness.events(child_id))
+    assert paused is not None and paused.reason == REASON_STUCK
+
+    # AC1：child 自己的面（不是父的面照抄一份），逐维值与摘要同源。
+    recorded = (paused.stuck or {})["policy_inputs"]
+    assert recorded == {
+        "permission_mode": "workspace-write",
+        "model": None,
+        "agent_profile": "research_review",
+        "reasoning_effort": None,
+        "context_providers": None,
+    }
+    assert (paused.stuck or {})["policy_version"] == digest_policy_inputs(recorded)
+
+    # AC2b：什么都不声明 ⇒ 恢复侧还原快照再比 ⇒ 409「相同」，零副作用。
+    types_before = harness.types(child_id)
+    with pytest.raises(BudgetConflict, match="相同"):
+        await harness.service.resume_and_launch(
+            session_id=child_id, task=None, resume_run_id=paused.run_id,
+            resume_basis=RESUME_BASIS_POLICY_CHANGE, expected_version=paused.version,
+        )
+    assert harness.types(child_id) == types_before
+
+    # AC2a：声明 child 自己的一维（reasoning_effort）⇒ 依据成立；恢复腿撞上同一个
+    # 循环再次暂停，第二次快照记着新档——"采纳"的机械证据（不是只把闸门放开）。
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(
+            responses=[_failing_round(index) for index in range(6, 12)],
+        ),
+    )
+    resumed = await harness.service.resume_and_launch(
+        session_id=child_id, task=None, resume_run_id=paused.run_id,
+        resume_basis=RESUME_BASIS_POLICY_CHANGE, expected_version=paused.version,
+        amend=AmendOptions(reasoning_effort="deep"),
+    )
+    await resumed.run.task
+    await _wait_paused_runs(harness, child_id, count=2)
+    second = latest_paused_run(harness.events(child_id))
+    assert second.run_id == paused.run_id  # 同 run 续跑：同一条逻辑 run
+    assert second.stuck["policy_inputs"]["reasoning_effort"] == "deep"
+
+
+@pytest.mark.asyncio
+async def test_parent_face_drift_does_not_open_child_policy_change(
+    tmp_path: Path, monkeypatch,
+):
+    harness = _build_harness(tmp_path, monkeypatch)
+    child_id = await _spawn_child(
+        harness, parent_cwd=tmp_path / "project",
+        child_model=_stuck_child_model(), expect_ok=False,
+    )
+    paused = latest_paused_run(harness.events(child_id))
+    assert paused is not None and paused.reason == REASON_STUCK
+
+    # 父会话真实的策略漂移（MODEL_CHANGED 唯一写入口）：父切了模型。
+    parent = Session.load(harness.state.store, PARENT_ID)
+    append_model_change(parent, ModelTarget(
+        provider="deepseek", model_id="other-model", effective_model_id="other-model",
+    ))
+
+    # 父的面变了 ≠ child 的依据：恢复侧重算只读 child 自己的事件流 +
+    # 强制的 child 档位，父级漂移到不了 child 的摘要 ⇒ 仍然 409「相同」。
+    with pytest.raises(BudgetConflict, match="相同"):
+        await harness.service.resume_and_launch(
+            session_id=child_id, task=None, resume_run_id=paused.run_id,
+            resume_basis=RESUME_BASIS_POLICY_CHANGE, expected_version=paused.version,
+        )

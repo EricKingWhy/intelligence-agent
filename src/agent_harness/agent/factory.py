@@ -23,6 +23,7 @@ from typing import Any
 
 from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS, resolve_local_fuse
 from agent_harness.agent.profiles import AgentSpec
+from agent_harness.agent.resume_evidence import delegated_child_evidence_port
 from agent_harness.agent.run_budget import SessionBudgetPort
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.prompt import PersonaConfig, compose_agent_prompt, join_guidance
@@ -149,4 +150,9 @@ class AgentFactory:
                 spec.system_prompt, self._persona, guidance_text,
             ),
             session_budget=session_budget,
+            # #370（ADR-0048 残余 15）：child stuck 暂停记录**它自己的**生效策略面
+            # （默认档 + spec 档位 + 无独立模型/effort/providers 声明；环境格不在范围）。
+            # 唯一口径在 resume_evidence.delegated_child_evidence_port——恢复侧
+            # （service.resume_and_launch）对 child 会话重算出同一套值，两格同源。
+            stuck_evidence=delegated_child_evidence_port(spec.name),
         )
