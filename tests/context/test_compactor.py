@@ -26,7 +26,12 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import derive_protected_facts
-from agent_harness.session.event import MESSAGE_SUPERSEDED, SessionEvent
+from agent_harness.session.event import (
+    MESSAGE_QUEUED,
+    MESSAGE_SUPERSEDED,
+    QUEUE_CANCELLED,
+    SessionEvent,
+)
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -608,3 +613,43 @@ def test_target_section_none_without_goal_facts():
         [HumanMessage(content="普通消息，不是任何事实源")], [],
     )
     assert sections["## 原始目标与用户约束"] == "(none)"
+
+
+def test_cancelled_queued_replacement_keeps_sections_consistent():
+    """#614①：取消的替换 ⇒ 标记作废 ⇒ §1（目标节）与 §2（保护事实表）同判。
+
+    S2 序列（修复前实测矛盾）：USER → MESSAGE_QUEUED(新任务) →
+    MESSAGE_SUPERSEDED → QUEUE_CANCELLED。修复前 §1 把旧任务当当前生效目标，
+    §2 却把旧任务标 superseded——两节自相矛盾且 §2 丢失唯一 active 目标。
+    修复后：标记作废，旧目标保持 active，两节一致；被取消的替换既不进
+    目标节也不进保护事实节。
+    """
+    events = [
+        SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1",
+                     data={"content": "旧任务 ORD-100。"}),
+        SessionEvent(seq=2, type=MESSAGE_QUEUED, session_id="s1",
+                     data={"queue_id": "queued-1", "content": "新任务 ORD-200。"}),
+        SessionEvent(seq=3, type=MESSAGE_SUPERSEDED, session_id="s1",
+                     data={"superseded_seq": 1}),
+        SessionEvent(seq=4, type=QUEUE_CANCELLED, session_id="s1",
+                     data={"queue_id": "queued-1"}),
+    ]
+    facts = derive_protected_facts(events)
+    sections = _programmatic_summary_sections(
+        [HumanMessage(content="旧任务 ORD-100。")], facts,
+    )
+
+    target = sections["## 原始目标与用户约束"]
+    assert "旧任务 ORD-100。" in target, "取消替换 ⇒ 原目标仍是当前生效目标（§1）"
+    assert "新任务 ORD-200。" not in target, "被取消的替换不得进目标节"
+
+    protected = json.loads(sections["## 保护事实表"])
+    assert protected, "§2 不得为空：原目标必须仍以 active 投影"
+    original = next(
+        fact for fact in protected if fact["value"] == "旧任务 ORD-100。"
+    )
+    assert original["status"] == "active", "§2 与 §1 同判：原目标 active"
+    assert all(fact["value"] != "新任务 ORD-200。" for fact in protected), (
+        "被取消的替换不得以 active 投影"
+    )
+
