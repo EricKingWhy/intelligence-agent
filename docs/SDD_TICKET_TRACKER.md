@@ -7100,3 +7100,5 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   - `tests/web/test_web_stream.py` = `7eb59e2776606e5fdb8eab9a223b2a1803dd8f0d`
   - `web/src/generated/event-types.ts` = `3d18d590d928c700769f245ddf58269c9faac3d1`
   - `web/src/lib/projection.ts` = `5446581e6ac07f9c88babefcdda31289ed7c1b60`
+
+- **本地 pre-push hook 环境故障**：普通 `git push` 被 Gate-0 hook 拦下；guards 中两条临时 Git 仓库用例因 `git add -A` 报 “this operation must be run in a work tree”。失败后发现 backend shared config 的 `core.bare=true`，worktree 状态查询同时失效；恢复为 `false` 后复核 HEAD/index 未变、10 个 worktree 均为非 bare。普通进程环境对 exact tip `8236a741` 重跑完整 `gate0.py --no-record` 为 6/6 PASS（11.3s）；同型本地 hook 失败已有 PR #600 收口记录。
