@@ -35,7 +35,7 @@ from agent_harness.session import (
     Session,
     SessionEvent,
 )
-from agent_harness.session.derive import derive_messages
+from agent_harness.session.derive import derive_messages, derive_protected_facts
 from agent_harness.storage.artifact import FakeArtifactStore
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
 from agent_harness.tooling.result import ToolResult
@@ -226,6 +226,11 @@ class TestCompactorBracketMetadata:
     async def test_compact_returns_bracket_id_and_summary(self):
         """compact 返回 bracket_id 和 summary。"""
         model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+        # #556 裁决 C：目标节由 protected_facts 通道承载（与 builder 同一通路）。
+        facts = derive_protected_facts([
+            SessionEvent(seq=1, type=USER_MESSAGE, session_id="s",
+                         data={"content": "读取 old.txt 后继续。"}),
+        ])
         messages = [
             HumanMessage(content="读取 old.txt 后继续。"),
             AIMessage(content="old analysis " * 600),
@@ -233,7 +238,7 @@ class TestCompactorBracketMetadata:
         ]
         result = await ContextCompactor(
             model, max_context_tokens=8000,
-        ).compact(messages, estimate_message_tokens(messages))
+        ).compact(messages, estimate_message_tokens(messages), protected_facts=facts)
         assert result.bracket_id is not None
         assert result.summary is not None
         assert result.summary.startswith("## 原始目标与用户约束\n")
@@ -443,9 +448,13 @@ class TestBuilderWritesBracket:
 
         assert len(summaries) == 1
         assert messages[-1].content == "second current request"
-        assert json.loads(sections["## 原始目标与用户约束"]) == [
-            original_user, "first current request",
-        ]
+        # #556 裁决 C：目标节 = 当前生效目标（builder 从全量 events 重建的
+        # facts 通道），叙述性用户轮次不再跨压缩逐字合并——跨压缩的**继承**
+        # 语义由标识节承担（下方 R-042 / 4096 断言：第一次压缩的提取结果
+        # 经旧摘要继承进第二次压缩的节，且受确定性上限收敛）。
+        assert sections["## 原始目标与用户约束"] == json.dumps(
+            original_user, ensure_ascii=False,
+        )
         exact_identifiers = json.loads(sections["## 精确标识清单"])
         assert "R-042" in exact_identifiers
         assert "4096" in exact_identifiers

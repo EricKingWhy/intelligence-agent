@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from agent_harness.capability.base import CapabilityError
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.skills.capability import SkillCapability
+from agent_harness.skills.discovery import single_line
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.result import ErrorCode
@@ -83,7 +84,9 @@ class LoadSkillTool(Tool):
                 else ErrorCode.TOOL_EXECUTION_ERROR
             )
             return ToolResult.failure(
-                message=f"技能 '{args.name}' 加载失败：{error}",
+                # args.name 是模型原始输入（未名即失败、不经 discovery 白名单）——
+                # message 是单行声明面，插值前单行化（#588 兜底）。
+                message=single_line(f"技能 '{args.name}' 加载失败：{error}"),
                 error_code=error_code,
                 retryable=False,
             )

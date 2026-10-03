@@ -100,6 +100,9 @@ Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上�
 
 from __future__ import annotations
 
+import errno
+import sqlite3
+
 from fastapi import HTTPException
 
 from agent_harness.agent.budget import (
@@ -321,29 +324,55 @@ def memory_http_error(exc: Exception) -> HTTPException:
     )
 
 
-#: storage 共享库写锁词汇 → HTTP status 的第四张表（#515）。
+#: storage 共享库错误 → HTTP status 的第四张表（#515 / #569）。
 #:
 #: 为什么单独一张：`StorageBusyError` 是 storage 适配层的词汇（三个 Store 共享
 #: 同一 harness.db 的写锁竞争在重试预算内仍未缓解），既不是 `SessionServiceError`
 #: 子类，也不是 workspace / memory 词汇——一个包一张表，键域各自自洽。
 #:
-#: **刻意只登记这一项**：非锁 `OperationalError`（坏路径等）继续 500——那是真正的
-#: 意外故障；`IntegrityError` 等约束冲突有自己的语义（#519 的域）。重试耗尽是唯一
-#: 「诚实状态码不是 500」的 storage 异常：它是暂时性故障，客户端稍后重试大概率
-#: 成功，500 会把它伪装成服务端 bug。
+#: 错误码族在 `storage_http_status` 中按 errno / SQLite primary code 精确识别；其它
+#: `OperationalError`（坏路径等）仍是 500。此映射只负责 HTTP 翻译，不扩大 #515
+#: 的锁重试，也不改变存储提交语义。
 _STORAGE_ERROR_STATUS: dict[type[Exception], int] = {
     StorageBusyError: 503,
 }
 
 
-def storage_http_error(exc: Exception) -> HTTPException:
-    """storage 共享库写锁异常 → `HTTPException`；状态码取自 `_STORAGE_ERROR_STATUS`。
+def storage_http_status(exc: Exception) -> int | None:
+    """只识别可归因的存储空间 / I/O 错误；未知 OperationalError 保持 500。"""
+    status = _STORAGE_ERROR_STATUS.get(type(exc))
+    if status is not None:
+        return status
 
-    与另外三张表同款：直接索引（不 `.get` 回退），未登记类型是编码错误，由
-    `tests/web/test_domain_error_mapping.py` 的覆盖测试先红挡住。
+    if isinstance(exc, OSError) and exc.errno in {errno.EFBIG, errno.ENOSPC}:
+        return 503
+
+    if isinstance(exc, sqlite3.Error):
+        code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(code, int) and (code & 0xFF) in {
+            sqlite3.SQLITE_FULL,
+            sqlite3.SQLITE_IOERR,
+        }:
+            return 503
+
+    return None
+
+
+def storage_http_error(exc: Exception) -> HTTPException:
+    """已识别的 storage 错误 → `HTTPException`；未知类型仍是编码错误。
+
+    容量 / I/O 异常统一用固定 detail，避免把 OS 路径等内部信息返回给 API 调用者。
     """
+    status = storage_http_status(exc)
+    if status is None:
+        raise KeyError(type(exc))
     return HTTPException(
-        status_code=_STORAGE_ERROR_STATUS[type(exc)], detail=str(exc)
+        status_code=status,
+        detail=(
+            str(exc)
+            if type(exc) is StorageBusyError
+            else "Persistent storage is unavailable"
+        ),
     )
 
 

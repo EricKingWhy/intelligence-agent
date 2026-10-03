@@ -290,6 +290,46 @@ class TestQueueExpire:
 
         asyncio.run(_run())
 
+    def test_resolve_persists_before_removing_pending_or_waking_waiter(self):
+        async def _run() -> None:
+            queue = PendingApprovalQueue()
+            observations = []
+
+            def persist(resolved_id, response):
+                observations.append((
+                    resolved_id,
+                    response,
+                    queue.pending_ids(),
+                    queue.resolved_response(resolved_id),
+                ))
+
+            approval_id = queue.register(_request(), on_resolve=persist)
+            decision = ApprovalResponse(approved=True, reason="human")
+            queue.resolve(approval_id, decision)
+
+            assert observations == [(approval_id, decision, [approval_id], None)]
+            assert queue.pending_ids() == []
+            assert await queue.wait_for(approval_id) is decision
+
+        asyncio.run(_run())
+
+    def test_resolve_write_failure_does_not_remove_or_settle_pending(self):
+        async def _run() -> None:
+            queue = PendingApprovalQueue()
+
+            def fail_persist(_approval_id, _response):
+                raise OSError("disk full")
+
+            approval_id = queue.register(_request(), on_resolve=fail_persist)
+
+            with pytest.raises(OSError, match="disk full"):
+                queue.resolve(approval_id, ApprovalResponse(approved=True))
+
+            assert queue.pending_ids() == [approval_id]
+            assert queue.resolved_response(approval_id) is None
+
+        asyncio.run(_run())
+
 
 class TestTimeoutConfig:
     """配置接线：默认 fail-closed + `_build_approval_callback` 真的用上它。"""

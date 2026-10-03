@@ -136,6 +136,7 @@ from agent_harness.session.event import (
     FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
+    PERMISSION_RESOLVED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
     RUN_RESUMED,
@@ -526,6 +527,38 @@ class RecoveryStoreBundle(Protocol):
     workspace_index: WorkspaceIndex | None
 
 
+@runtime_checkable
+class SessionDeclarationValidator(Protocol):
+    """`#564` 裁决 (a)：session 请求声明注册名校验的**领域端口**。
+
+    判据需要**根 registry**（树级语义），而名字集的计算是组合层
+    （`assembly.root_registry_tool_names`，零副作用投影）的事——领域层 import
+    组合层类型会被 import 边界守卫（`tests/session/test_service_collaborators.py`）
+    拦下，所以同 `RecoveryStoreBundle` 一样由组合根注入实现
+    （`web/app.py::session_service` 唯一适配点）。实现方用与 `build_runtime`
+    **同源**的名字集计算（一致性由 `tests/test_assembly_root_registry_names.py`
+    三方对账钉住；**不得**改回完整 `_build_tooling`——那会构造 sandbox 并在
+    归属对账前 mkdir workspace，审查 P2-1），内部走
+    `validate_tool_call_limits_registered(..., scope="session")`，坏名抛
+    `BudgetRejection`（422）。
+
+    调用时机：resume 通道 eager CAS **之前**（先于任何账行写入；`_ensure_stores`
+    的幂等建表不算会话工作）——坏名永不触碰账行（修复前 merge-only 的 CAS 先
+    并入坏名再 422，一次打错的请求把会话毒成不可恢复态）。未注入（直构
+    `SessionService` 的调用方）⇒ 跳过前置校验，由 build_runtime 的声明 422
+    兜底；web / CLI 两条组合根路径都已注入。
+    """
+
+    async def __call__(
+        self,
+        limits: SessionLimits,
+        *,
+        session_id: str,
+        workspace: Path,
+        agent_profile: str | None,
+    ) -> None: ...
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -557,6 +590,7 @@ class SessionService:
         stores: RecoveryStoreBundle,
         ensure_stores: Callable[[], Awaitable[None]],
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+        validate_session_declaration: SessionDeclarationValidator | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -574,6 +608,7 @@ class SessionService:
         self._stores = stores
         self._ensure_stores = ensure_stores
         self._get_wiring = get_wiring
+        self._validate_session_declaration = validate_session_declaration
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -1045,6 +1080,9 @@ class SessionService:
             # `#318`：session 作用域账（跨 run 持久；子会话经 multiagent/provider 的
             # `session_budget_port` 接到同一行）。
             session_budget=session_budget,
+            # `#564`：本次请求点名的声明（create 通道 = 请求声明本身；注册名 422
+            # 的无副作用拒绝点在 build_runtime，账行由 handle 惰性建出、零行写入）。
+            session_declared_limits=session_limits,
             local_fuse_source=fuse.source,
             **amend_kwargs(amend),
             # `#317`：stuck 暂停要在 `run/paused` 里记下**停下那一刻**的环境 revision
@@ -1262,6 +1300,14 @@ class SessionService:
         session_row = await self._stores.delegation_tree_ledger.get_session_budget(
             budget_key
         )
+        # 工作目录路径（**只读**：`session_cwd` 是纯事件读，不建目录、不写映射表）——
+        # `#317` 的 stuck 证据与 `#564` 的 pre-CAS 校验都要用它，所以提到 session 账
+        # 处理之前；真正的归属对账 / mkdir / is_dir 仍在下面（那里的顺序契约不变）。
+        persisted_cwd = session_cwd(existing)
+        evidence_workspace = (
+            Path(persisted_cwd) if persisted_cwd is not None
+            else self._workspaces_root / session_id
+        )
         # 点名任一 session 维 ⇒ 账行 CAS 更新（绝对 ceiling + 乐观锁 + headroom，
         # 判定全在账本单事务里 ⇒ 409 零改动）。行不存在 = 首次钉死，无版本可竞争。
         session_limits = _session_limits(
@@ -1273,6 +1319,22 @@ class SessionService:
             tool_call_limits=session_tool_call_limits,
             max_delegations=session_max_delegations,
         )
+        # `#564` 裁决 (a)：**校验前置**——session 请求声明的注册名校验提到 eager
+        # CAS **之前**（`_ensure_stores` 的幂等建表在其前执行，但那不是会话工作）。
+        # 修复前 merge-only 的 CAS 先把坏名并入账行再 422，一次打错的请求就把
+        # 会话毒成不可恢复态（普通 resume 恒 422）。判据需要根 registry（树级
+        # 语义，裁决 (b) 口径），构造归组合层 ⇒ 走注入端口
+        # （`SessionDeclarationValidator`，见其 docstring）。
+        if (
+            session_limits.tool_call_limits
+            and self._validate_session_declaration is not None
+        ):
+            await self._validate_session_declaration(
+                session_limits,
+                session_id=session_id,
+                workspace=evidence_workspace,
+                agent_profile=(amend.agent_profile if amend is not None else None),
+            )
         if session_limits.configured:
             if session_row is not None:
                 if session_expected_version is None:
@@ -1310,14 +1372,8 @@ class SessionService:
         amend = _amend_with_session_model(amend, existing, self._settings)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
-        # 工作目录路径（**只读**：`session_cwd` 是纯事件读，不建目录、不写映射表）——
-        # 位置提前是为了让阶段一的 stuck 恢复依据能观测工作区（`#317`）；真正的
-        # 归属对账 / mkdir / is_dir 仍在下面（那里的顺序契约不变）。
-        persisted_cwd = session_cwd(existing)
-        evidence_workspace = (
-            Path(persisted_cwd) if persisted_cwd is not None
-            else self._workspaces_root / session_id
-        )
+        # （persisted_cwd / evidence_workspace 已在 session 账处理前算好——`#564`
+        # 的 pre-CAS 校验与这里的 stuck 证据用同一份派生，不重复读事件。）
         # 会话级权限档（事件派生；未声明 = 默认档）——同样提前：它既是下面装配点的
         # 入参，也是 stuck 证据端口里"策略版本"的一维（两处必须同一个值）。
         effective_mode = _effective_permission_mode(existing)
@@ -1376,7 +1432,7 @@ class SessionService:
         # `registry.get()`，而实例化 Sandbox 时会 mkdir 工作目录：外部 cwd 被用户删掉
         # 之后会被凭空建回来，"目录没了"从此看不见（旧用例用 MagicMock registry，
         # 正好绕开了这个 mkdir）。对账只读注册表的登记事实，不实例化任何 Sandbox。
-        persisted_cwd = session_cwd(existing)
+        # （persisted_cwd 上面已读，沿用同一份。）
         if persisted_cwd is None:
             # 历史遗留（无 cwd 锚）：兼容语义逐字不变——默认目录 + 确保它存在。
             workspace = self._workspaces_root / session_id
@@ -1514,6 +1570,9 @@ class SessionService:
                 run_budget=budget,
                 # `#318`：session 作用域账（跨 run 持久；声明 = 账行现值，见上方装配）。
                 session_budget=session_budget,
+                # `#564`：本次请求点名的声明（resume 通道已在 eager CAS 前核过同一
+                # 份，此处是防御性二道闸；账行现值的陈旧名在装配层降告警）。
+                session_declared_limits=session_limits,
                 # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
                 # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
                 local_fuse_source=fuse.source,
@@ -2662,11 +2721,6 @@ class SessionService:
             raise SessionNotFound(f"session '{session_id}' not found")
 
         queue = self._approval_queues.get(session_id)
-        if queue is None:
-            raise ApprovalQueueMissing(
-                f"session '{session_id}' has no interactive approval queue "
-                "(permission_mode not interactive, or run already terminated)"
-            )
 
         requested = next(
             (
@@ -2677,9 +2731,28 @@ class SessionService:
             ),
             None,
         )
+        if requested is None and queue is None:
+            raise ApprovalQueueMissing(
+                f"session '{session_id}' has no interactive approval queue "
+                "(permission_mode not interactive, or run already terminated)"
+            )
         if requested is None:
             raise ApprovalRequestMissing(
                 f"approval_id '{approval_id}' not found in session '{session_id}'"
+            )
+
+        if any(
+            event.type == PERMISSION_RESOLVED
+            and event.data.get("approval_id") == approval_id
+            for event in existing
+        ):
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' already resolved"
+            )
+        if queue is None:
+            # A durable request without a live resolver is stale state, not an unknown id.
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' is stale; its queue is no longer active"
             )
 
         allowed = requested.data.get("allowed_decisions", [])
@@ -2712,8 +2785,8 @@ class SessionService:
                 f"approval_id '{approval_id}' already resolved"
             ) from None
         if not ok:
-            raise ApprovalRequestMissing(
-                f"approval_id '{approval_id}' not found in queue"
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' is no longer pending in its queue"
             )
         return ApprovalDecision(decision=perm_decision, response=response)
 

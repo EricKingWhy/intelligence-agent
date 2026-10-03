@@ -161,3 +161,31 @@ async def test_cli_run_failed_returns_empty_final_text(tmp_path, monkeypatch):
     assert outcome.final_text == ""
     assert outcome.paused is False
     assert "[run failed]" in "".join(out)
+
+
+@pytest.mark.asyncio
+async def test_cli_create_rejects_unregistered_session_tool_name_before_any_work(
+    tmp_path, monkeypatch
+):
+    """P2-2（独立审查）：CLI create 的 session 坏名必须"任何工作开始前拒绝"（04 §9.1）。
+
+    #564 把校验移到 pre-CAS（`session_declared_limits`）后，CLI create 漏接线
+    曾让坏名静默进入 durable 账行——本用例钉住该通道与 Web 同一条 MUST。
+    """
+    from agent_harness.agent.budget import BudgetRejection
+    from agent_harness.config import Settings
+
+    monkeypatch.setattr(
+        "agent_harness.cli.Settings",
+        lambda: Settings(model_api_key="sk-test", workspace_dir=str(tmp_path),
+                         _env_file=None),
+    )
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel([AIMessage(content="不应到达")]),
+    )
+    with pytest.raises(BudgetRejection) as exc_info:
+        await run("任务", session_tool_limits={"nope_tool": 1})
+    assert "nope_tool" in str(exc_info.value)
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    assert store.list_session_ids() == [], "被拒请求零工作：不得落任何会话"

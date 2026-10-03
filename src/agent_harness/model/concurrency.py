@@ -23,8 +23,9 @@ from typing import Any
 class ModelCallGate:
     """模型调用并发闸：asyncio.Semaphore 的包装（支持 limit≤0 关闭）。
 
-    进程内共享一个实例（assembly 创建、runtime 与所有 child factory 传递
-    同一引用）——闸的语义是「全局在飞模型调用数」，不是每 runtime 一个。
+    进程内共享一个实例（装配 `wire_capabilities` 创建，build_runtime 与
+    所有 child factory 传递同一引用）——闸的语义是「全局在飞模型调用数」，
+    不是每 runtime 一个。
     """
 
     def __init__(self, limit: int) -> None:

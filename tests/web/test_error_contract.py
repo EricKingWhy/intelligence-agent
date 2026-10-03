@@ -20,9 +20,12 @@
 
 from __future__ import annotations
 
+import errno
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -352,3 +355,90 @@ def test_launch_arms_map_storage_busy_to_503(
         resp = getattr(client, method)(path, **kwargs)
     assert resp.status_code == 503, resp.text
     assert "写锁" in resp.json()["detail"]
+
+
+def _sqlite_storage_error(code: int, name: str, message: str) -> sqlite3.Error:
+    error = sqlite3.OperationalError(message)
+    error.sqlite_errorcode = code
+    error.sqlite_errorname = name
+    return error
+
+
+@pytest.mark.parametrize(
+    "storage_error",
+    [
+        OSError(errno.EFBIG, "File too large", "private/backend/path"),
+        OSError(errno.ENOSPC, "No space left on device", "private/backend/path"),
+        _sqlite_storage_error(
+            sqlite3.SQLITE_FULL, "SQLITE_FULL", "database or disk is full"
+        ),
+        _sqlite_storage_error(sqlite3.SQLITE_IOERR, "SQLITE_IOERR", "disk I/O error"),
+        _sqlite_storage_error(
+            sqlite3.SQLITE_IOERR_WRITE, "SQLITE_IOERR_WRITE", "disk I/O error"
+        ),
+    ],
+    ids=["efbig", "enospc", "sqlite-full", "sqlite-ioerr", "sqlite-ioerr-write"],
+)
+def test_messages_storage_errors_map_to_503_before_side_effects(
+    tmp_path: Path, storage_error: Exception
+) -> None:
+    """#569：错误族在真实逃逸点做分类注入；不是物理满盘模拟。"""
+    from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+
+    client = _client(tmp_path, raise_server_exceptions=False)
+    created = client.post("/api/sessions?launch=false", json={})
+    assert created.status_code == 200, created.text
+    session_id = created.json()["session_id"]
+    events = tmp_path / "sessions" / session_id / "events.jsonl"
+    events_before = events.read_bytes()
+    operation_ledger = client.app.state.agent.operation_ledger
+    operations_before = anyio.run(operation_ledger.list_for_session, session_id)
+    budget_ledger = client.app.state.agent.stores.delegation_tree_ledger
+    budget_before = anyio.run(budget_ledger.get_session_budget, session_id)
+    budget_events_before = anyio.run(budget_ledger.session_event_kinds, session_id)
+
+    with (
+        patch.object(
+            SqliteDelegationTreeLedger,
+            "get_session_budget",
+            new_callable=AsyncMock,
+            side_effect=storage_error,
+        ) as budget_read,
+        patch("agent_harness.assembly.create_chat_model") as model_factory,
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", json={"content": "continue"}
+        )
+
+    assert budget_read.await_count == 1
+    assert model_factory.call_count == 0
+    assert events.read_bytes() == events_before
+    assert anyio.run(operation_ledger.list_for_session, session_id) == operations_before
+    assert anyio.run(budget_ledger.get_session_budget, session_id) == budget_before
+    assert anyio.run(budget_ledger.session_event_kinds, session_id) == budget_events_before
+    assert response.status_code == 503, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Persistent storage is unavailable"}
+
+
+def test_messages_unclassified_operational_error_remains_500(tmp_path: Path) -> None:
+    from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+
+    client = _client(tmp_path, raise_server_exceptions=False)
+    created = client.post("/api/sessions?launch=false", json={})
+    assert created.status_code == 200, created.text
+    session_id = created.json()["session_id"]
+
+    with patch.object(
+        SqliteDelegationTreeLedger,
+        "get_session_budget",
+        new_callable=AsyncMock,
+        side_effect=sqlite3.OperationalError("no such table: broken_path"),
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", json={"content": "continue"}
+        )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Internal Server Error"}

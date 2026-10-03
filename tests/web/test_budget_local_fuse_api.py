@@ -23,6 +23,7 @@ WS 帧（第四个续聊入口）单独覆盖：形状错误与语义拒绝都�
 
 from __future__ import annotations
 
+import json
 from typing import Any, Self
 from unittest.mock import patch
 
@@ -535,6 +536,210 @@ def test_tool_call_limits_requires_registered_names(tmp_path):
         )
     assert ok.status_code == 200, ok.text
     assert probe.calls, "合法请求必须真的构造模型"
+
+
+def test_session_tool_call_limits_requires_registered_names(tmp_path):
+    """`budget.session.tool_call_limits` 走**同一条**「已注册」判据（#564 / `11 §6.1`）。
+
+    session 域漏调 `validate_tool_call_limits_registered` 时 `{"nope_tool": 1}`
+    静默 200 并持久化——客户端以为限制了什么，实际永不触发（BUG-R4-04）。
+    判定落点与 run 侧同一处（装配层 registry 定型后，session_budget 端口携带
+    请求侧声明）；session 预算横跨会话树而 child registry ⊆ 根 registry
+    （factory.create 的 source_registry 就是根 registry），所以"整棵树调得到"
+    与"根已注册"是同一个集合。
+    """
+    app, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "budget": {"session": {"tool_call_limits": {"nope_tool": 1}}},
+            },
+        )
+    assert resp.status_code == 422, resp.text
+    assert "未注册" in resp.text, resp.text
+    # 注册名判定在装配层（registry 定型处）——比形状级拒绝"松一档"（ADR-0045）：
+    # 模型对象此时已存在（不是 Provider 请求），但 session 不得落盘。
+    assert list(app.state.agent.sessions_root.iterdir()) == [], "不得落盘 session"
+
+    # 正控：已注册名在 session 作用域同样接受
+    with probe:
+        ok = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"session": {"tool_call_limits": {"read": 3}}}},
+        )
+    assert ok.status_code == 200, ok.text
+    assert probe.calls, "合法请求必须真的构造模型"
+
+
+def test_session_tool_call_limits_case_mismatch_rejected(tmp_path):
+    """名字大小写敏感、不做归一化：`Read` ≠ `read`（parse 层同一条纪律）。"""
+    _, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"session": {"tool_call_limits": {"Read": 3}}}},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "未注册" in resp.text, resp.text
+
+
+def test_session_tool_call_limits_disabled_capability_rejected(tmp_path):
+    """能力未启用 ⇒ delegate 未注册 ⇒ 配额名被拒（"已禁用"维度）。"""
+    _, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"session": {"tool_call_limits": {"delegate": 5}}}},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "未注册" in resp.text, resp.text
+
+
+def test_session_tool_call_limits_accepts_delegate_when_multiagent_enabled(tmp_path):
+    """合法 delegation-only 工具按预算 scope 定义处理（audit 块）。
+
+    multiagent 启用 ⇒ delegate 在根 registry 上注册 ⇒ session 配额接受——
+    不得因为它是"委派通道"而按别处的 profile 收窄误杀。
+    """
+    overrides: dict[str, Any] = {
+        "_env_file": None,
+        "workspace_dir": str(tmp_path),
+        "model_api_key": "sk-test",
+        "enable_cors": False,
+        "capabilities": json.dumps(
+            {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
+        ),
+    }
+    app = create_app(Settings(**overrides), enable_cors=False)
+    client = TestClient(app)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"session": {"tool_call_limits": {"delegate": 5}}}},
+        )
+    assert resp.status_code == 200, resp.text
+
+
+def test_session_declaration_judged_against_root_registry(tmp_path):
+    """session 作用域判据 = **根 registry**（树级语义），不是本 runtime 的收窄面。
+
+    session 预算横跨会话树：coding 档位的**本** runtime 调不到 delegate，但树的
+    根（main）调得到——给 delegate 配 session 配额合法。修复前按收窄后 registry
+    判 422，与 assembly 注释里"child registry ⊆ 根 registry，不误杀"的声明自相矛盾。
+    （对照：run 作用域是 per-runtime 判据，收窄后 registry 判 422 的行为不动。）
+    """
+    overrides: dict[str, Any] = {
+        "_env_file": None,
+        "workspace_dir": str(tmp_path),
+        "model_api_key": "sk-test",
+        "enable_cors": False,
+        "capabilities": json.dumps(
+            {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
+        ),
+    }
+    client = TestClient(create_app(Settings(**overrides), enable_cors=False))
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "agent_profile": "coding",
+                "budget": {"session": {"tool_call_limits": {"delegate": 1}}},
+            },
+        )
+    assert resp.status_code == 200, resp.text
+
+
+def test_run_declaration_still_judged_against_narrowed_registry(tmp_path):
+    """run 作用域对照（不随 #564 改变）：coding 档位本 run 配 delegate ⇒ 422。
+
+    run 账只管**本** runtime，收窄后 registry 才是"本次调得到"的事实——被剔除的
+    工具配 ceiling = 配一个永远不触发的上限，响亮拒绝（04 §9.1 / ADR-0044）。
+    """
+    overrides: dict[str, Any] = {
+        "_env_file": None,
+        "workspace_dir": str(tmp_path),
+        "model_api_key": "sk-test",
+        "enable_cors": False,
+        "capabilities": json.dumps(
+            {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
+        ),
+    }
+    client = TestClient(create_app(Settings(**overrides), enable_cors=False))
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "agent_profile": "coding",
+                "budget": {"run": {"tool_call_limits": {"delegate": 1}}},
+            },
+        )
+    assert resp.status_code == 422, resp.text
+
+
+def test_session_scope_rejection_message_names_session_path(tmp_path):
+    """P3：session 作用域的拒绝文案指名 `budget.session.tool_call_limits`，不冒充 run。"""
+    _, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={"task": "hi", "budget": {"session": {"tool_call_limits": {"nope_tool": 1}}}},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "budget.session.tool_call_limits" in resp.text, resp.text
+
+
+def test_rejected_session_budget_resume_appends_nothing(tmp_path):
+    """resume 通道同一条 session 注册名校验：422 且不追加任何会话事件。"""
+    _, client = _web(tmp_path)
+    session_id = _create_idle_session(client)
+    before = [e["type"] for e in client.get(f"/api/sessions/{session_id}/events").json()]
+
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                "task": "继续",
+                "budget": {"session": {"tool_call_limits": {"nope_tool": 1}}},
+            },
+        )
+    assert resp.status_code == 422, resp.text
+    assert "未注册" in resp.text, resp.text
+    after = [e["type"] for e in client.get(f"/api/sessions/{session_id}/events").json()]
+    assert after == before, "被拒请求不得改动会话历史"
+
+
+@pytest.mark.parametrize("scope", ["run", "session"])
+@pytest.mark.parametrize("bad_value", ["3", True], ids=["string", "bool"])
+def test_tool_call_limits_value_type_strict(tmp_path, scope, bad_value):
+    """值类型口径两作用域统一：字符串 / 布尔都不收（#564；#548 C3 先例）。
+
+    领域层 `parse_tool_call_limits` 本来就显式拒绝非整数与布尔；wire 层的 lax
+    强制（"3"→3、true→1）会在领域校验之前把坏输入洗白成合法配额。两层同口径。
+    """
+    _, client = _web(tmp_path)
+    probe = _ModelProbe()
+    with probe:
+        resp = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "budget": {scope: {"tool_call_limits": {"bash": bad_value}}},
+            },
+        )
+    assert resp.status_code == 422, resp.text
+    assert probe.calls == []
 
 
 # ── resume / messages：同一条通道 ──
