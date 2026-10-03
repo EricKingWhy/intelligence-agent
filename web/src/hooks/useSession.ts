@@ -323,6 +323,16 @@ export function raceEarlyResponse(
   ]);
 }
 
+/** #561（UI-01）：viewing 态外部 run 发现轮询的间隔（毫秒）。
+ *
+ * Inspector 只在「选中瞬间」检查过一次 `hasUnterminatedRun`（历史装载 effect）；
+ * 选中**之后**经外部启动（POST /messages / CLI / 另一标签页）的 run 没有任何
+ * 订阅者——实时流、审批弹窗、错误态全不出现。轮询是唯一能发现「自己不知道的
+ * 消息」的机制（事件入口收不到没人订阅的事件）。间隔取 5s：外部 run 的审批卡
+ * 最晚延迟一个间隔出现（后端 fail-closed 超时默认 300s，余量充足），而后台
+ * 标签页整段不轮询（tick 里看 visibilityState，spec 03 §18.3 同款纪律）。 */
+export const EXTERNAL_RUN_POLL_INTERVAL_MS = 5000;
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   /** 首屏即从 localStorage 恢复上次选中的会话（BUG-005）。
@@ -1057,6 +1067,86 @@ export function useSession() {
   // 镜像给上方历史装载 effect 用（跨区块调用，与 stallCheckRef 同一手法）。
   // 放在 effect 里赋值而不是 render 期：refs 规则禁止 render 期读写 ref，
   // 而这里没有时序风险——历史装载的 .then 在 fetch 之后才跑，远晚于本 effect。
+
+  // #561（UI-01）：viewing 态常驻外部 run 发现——挂载期持续、卸载清理的订阅式
+  // Effect（React「与外部系统持续同步」的合法职责；方案依据：失效驱动的持续刷新
+  // 取代单次检查 + 本仓不变量 #22，ADAPT 不引状态库/长轮询 API/新端点）。
+  //
+  // 外部启动的 run（另一标签页 / CLI / POST /messages）在 UI 没有订阅者时也往
+  // durable log 追加事实——事件入口收不到自己不知道的消息，只有周期性对账能发现。
+  // 发现新事实后的两条出路全是既有机器：
+  //   - 在途 run（hasUnterminatedRun）→ resumeLiveStream 接管（BUG-006 刷新恢复的
+  //     同一条路）：其 resumeAttemptedRef 同游标去重顺带挡住「崩溃遗留悬空 run」的
+  //     无限重接管，代际自增 + 旧流 cancel 保证订阅数 ≤1；
+  //   - 新事实全部已收口（外部 run 在两次轮询之间跑完 =「快速完成」）→ 按 live
+  //     同一条 applyEvent 增量投影补落后的那一截，不整体替换 conversation——
+  //     队列快照叠加与恢复面板状态原样保留。
+  useEffect(() => {
+    let stopped = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (stopped || inFlight) return;
+      // 只在 viewing 态找外部 run：live 已持有唯一订阅（轮询再接就是第二条）；
+      // idle 无会话可言。后台标签页不轮询（T7 §18.3 同款纪律），回前台立即补一次。
+      if (modeRef.current.kind !== 'viewing') return;
+      if (document.visibilityState !== 'visible') return;
+      const sid = modeRef.current.sessionId;
+      // 历史装载未落地（conversation 为 null 或还是别的会话）时不动：装载 effect
+      // 完成时会对同一份事件做接管判定，这里抢跑只会与它竞争同一个视图。
+      const convNow = conversationRef.current;
+      if (!convNow || convNow.session_id !== sid) return;
+      inFlight = true;
+      try {
+        const events = await getSessionEvents(sid);
+        if (stopped) return;
+        // await 期间可能已切走 / 取消 / 接管：以**当下**的 mode 为准，且只认
+        // 「仍在查看同一个会话」——错接别的会话比晚一拍接管更糟（不变量 #22
+        // 的 stale-write 纪律，与 shouldApplyStreamFrame / shouldApplyRecoverResult 同族）。
+        const now = modeRef.current;
+        if (now.kind !== 'viewing' || now.sessionId !== sid) return;
+        const cur = conversationRef.current;
+        if (!cur || cur.session_id !== sid) return;
+        const localMax = maxEventSeq(cur.events);
+        const freshMax = maxEventSeq(events);
+        if (freshMax <= localMax) return; // 没有新事实（含两边皆空：-1 <= -1）
+        if (hasUnterminatedRun(events)) {
+          // 外部启动且仍在途：按既有恢复路径接管（BUG-006 刷新恢复的同一条路）。
+          // 与历史装载 effect 同序：先把刚读到的事件全量重建**落进视图**，再交
+          // resumeLiveStream 接管——live 流的 conv 累积器只在帧到达时提交，不先
+          // setConversation 的话，接管后的视图会一直停在旧真相直到首帧。
+          // 同游标去重在 resumeLiveStream 内部生效：零帧结论仍成立时这是 no-op
+          // （视图已刷新，无副作用），不翻 mode。
+          const projected = projectHistory(sid, events);
+          setConversation(projected);
+          resumeLiveStream(sid, freshMax, projected);
+          return;
+        }
+        // 新事实全部已收口：增量追赶。applyEvent 自带 T1 校验与 seq 去重，
+        // 只补 seq 大于本地游标的那一截（与 live 帧同一投影路径，无第二套真相）。
+        let next = cur;
+        for (const event of events) {
+          if (event.seq !== null && event.seq > localMax) next = applyEvent(next, event);
+        }
+        if (next !== cur) setConversation(next);
+      } catch {
+        // 轮询失败静默，下个 tick 再试：网络抖动不该把查看中的会话打出错误横幅；
+        // 404（会话已被外部删除）的清键与回空态由历史装载路径收敛，不在这里抢方向盘。
+      } finally {
+        inFlight = false;
+      }
+    };
+    const run = () => void tick();
+    const timer = setInterval(run, EXTERNAL_RUN_POLL_INTERVAL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') run();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [resumeLiveStream]);
 
   /** #420 AC2：审批决策提交成功后的事件必达路径。
    *
