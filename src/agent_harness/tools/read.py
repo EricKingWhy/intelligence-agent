@@ -100,7 +100,8 @@ class ReadTool(Tool):
         if self._project_instructions_loader is not None:
             try:
                 target = self._sandbox.resolve_within_workspace(args.path)
-                self._project_instructions_loader(target)
+                relative_target = target.relative_to(self._sandbox.workspace_root)
+                self._project_instructions_loader(Path(*relative_target.parts))
             except (OSError, ValueError):
                 logger.warning(
                     "project instructions could not be loaded for a read target",

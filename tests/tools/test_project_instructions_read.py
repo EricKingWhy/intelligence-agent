@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -26,7 +26,7 @@ async def test_read_loads_instruction_files_for_the_target_directory(
     tool = ReadTool(
         sandbox,
         project_instructions_loader=lambda path: store.load_for_path(
-            "session-1", cwd, path,
+            "session-1", cwd, cwd / path,
         ),
     )
 
@@ -34,3 +34,30 @@ async def test_read_loads_instruction_files_for_the_target_directory(
 
     assert result.ok
     assert str(instruction_file) in store.status_for_session("session-1")["source_paths"]
+
+
+@pytest.mark.asyncio
+async def test_read_passes_workspace_relative_paths_from_container_sandboxes() -> None:
+    workspace_root = PurePosixPath("/workspace")
+    loaded_paths: list[Path] = []
+
+    class _ContainerSandbox:
+        @property
+        def workspace_root(self) -> PurePosixPath:
+            return workspace_root
+
+        def read_text(self, path: str) -> str:
+            return "value = 1"
+
+        def resolve_within_workspace(self, path: str) -> PurePosixPath:
+            return workspace_root / path
+
+    tool = ReadTool(
+        _ContainerSandbox(),  # type: ignore[arg-type]
+        project_instructions_loader=loaded_paths.append,
+    )
+
+    result = await tool.execute(tool.args_schema(path="src/module.py"))
+
+    assert result.ok
+    assert loaded_paths == [Path("src/module.py")]

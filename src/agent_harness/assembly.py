@@ -269,8 +269,8 @@ def _build_tooling(
             kwargs["timeout_seconds"] = settings.bash_timeout_seconds
         elif tool_cls is ReadTool:
             kwargs["project_instructions_loader"] = (
-                lambda path: project_instructions.load_for_path(
-                    session_id, workspace, path,
+                lambda relative_path: project_instructions.load_for_path(
+                    session_id, workspace, workspace / relative_path,
                 )
             )
         registry.register(tool_cls(sandbox, **kwargs))
