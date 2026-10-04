@@ -1,0 +1,1 @@
+2026-10-04	#619 synchronized merge review; fixed point 0a1aabcc; Correctness/Spec PASS P0-P4=0; Standards PASS P0-P4=0 after resolving post-sync evidence and explicit merge attribution; reviewers: i619_sync_correctness_review, i619_sync_standards_review; evidence: Tracker #619 / 2026-10 archive	0a1aabcca29ac9139aad303f88ad83a9ad1fce80..a00550aa111d1f0b5cc5b8bd3038db3e2b53e215
