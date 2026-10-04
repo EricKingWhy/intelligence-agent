@@ -126,6 +126,8 @@ class TestSessionEventDTO:
             # level=paused 收口）。① 的 replan 复用既有 tool/failure-guard 形状，
             # 所以这一条只在 ②–⑤ 与所有暂停上出现（ADR-0048 D2/D5）。
             "guard/stuck",
+            # #524：完成门证据策略拒绝的结构化事实（纠正以紧随的 user/message 落地）。
+            "completion/evidence-blocked",
         }
         assert EVENT_TYPES == expected
 

@@ -211,8 +211,25 @@ class CompletionPolicy(ABC):
     @abstractmethod
     async def decide(
         self, *, report: QuiescenceReport, final_text: str, run_id: str,
+        events: Sequence[SessionEvent] | None = None,
     ) -> CompletionDecision:
-        """对"这次最终响应能不能收口这个 run"给出结论。"""
+        """对"这次最终响应能不能收口这个 run"给出结论。
+
+        `events`（`#524`）：本会话已落盘的 SessionEvent，供证据型策略读 durable
+        事实（`tool/result` 等）；keyword 带默认值——不读事件的策略（含既有实现）
+        不受影响。`None` = 调用方没给；证据型策略对"拿不到事实"必须拒绝而不是
+        放行（与"不可得 ≠ 0"同一纪律：不猜）。
+        """
+
+    def correction_feedback(self, decision: CompletionDecision) -> str | None:
+        """策略拒绝时的纠正反馈文本（`#524`）；`None` = 走既有 blocked 臂。
+
+        默认 `None`：拒绝语义维持 `#316`/ADR-0047 D3 的零写入臂不变。只有显式
+        覆写本方法的策略（如 `EvidenceCompletionPolicy`）被拒绝时，runtime 才注
+        入纠正消息并继续循环——装配开关就是策略类型本身，Core 不 import 具体
+        策略类。
+        """
+        return None
 
 
 class DefaultCompletionPolicy(CompletionPolicy):
@@ -225,6 +242,7 @@ class DefaultCompletionPolicy(CompletionPolicy):
 
     async def decide(
         self, *, report: QuiescenceReport, final_text: str, run_id: str,
+        events: Sequence[SessionEvent] | None = None,
     ) -> CompletionDecision:
         if not report.quiescent:
             return CompletionDecision(

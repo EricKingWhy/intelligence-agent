@@ -40,8 +40,9 @@
 
 纠偏臂动作（复用 `_stuck_replan_arm` 的双事件先例，:2624-2681）：
 
-- 结构化事件 `completion/evidence-blocked`：data = `{policy, reason, rule_id?}`
-  （无主张原文、无参数值——ADR-0047 D3 纪律：诊断面不是泄漏通道）；
+- 结构化事件 `completion/evidence-blocked`：data = `{policy, reason}`（实现定稿：
+  `rule_id` 不单列键——runtime 侧只有稳定 reason 串可传，`evidence_missing:<rule_id>`
+  已把它载于 reason；无主张原文、无参数值——ADR-0047 D3 纪律：诊断面不是泄漏通道）；
 - 纠正 `USER_MESSAGE`：`{content, injected_by: "completion_evidence_policy"}`——
   非真实用户发言的既有标记纪律自动生效（memory/extractor.py 按非空
   `injected_by` 单点过滤；derive.py 同源判定），消息文本来自 prompt 片段注册表

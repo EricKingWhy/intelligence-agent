@@ -42,6 +42,7 @@ from agent_harness.agent.client_presence import ClientPresenceGate
 from agent_harness.agent.completion import (
     BLOCK_SOURCE_POLICY,
     BLOCK_SOURCE_QUIESCENCE,
+    CompletionDecision,
     CompletionPolicy,
     DefaultCompletionPolicy,
     QuiescenceReport,
@@ -130,6 +131,7 @@ from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.observability.tracer import RunTracer
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import (
+    COMPLETION_EVIDENCE_BLOCKED,
     CONTEXT_COMPACTED,
     GUARD_STUCK,
     MODEL_COMPLETED,
@@ -2149,9 +2151,11 @@ class AgentRuntime:
                     report = await self._quiescence_report(arms)
                     blocked_source = BLOCK_SOURCE_QUIESCENCE
                     blocked_reason = report.refusal_reason()
+                    decision: CompletionDecision | None = None
                     if report.quiescent:
                         decision = await self._completion_policy.decide(
                             report=report, final_text=final, run_id=arms.run_id or "",
+                            events=arms.session.events,
                         )
                         if decision.accepted:
                             self._log("agent_decision", "模型给出最终回答，Agent Loop 完成",
@@ -2192,6 +2196,23 @@ class AgentRuntime:
                         # 必然看见它）⇒ 回循环顶部重问一次。有界：每个模式**恰好一次**
                         # （检测器里的 `*_replanned` 闩），且循环顶部的预算准入照常先判
                         # ——暂停边界上不会多出一次模型调用。
+                        continue
+                    # `#524` 纠偏臂：策略拒绝**且**策略声明了纠正反馈 ⇒ 注入反馈继续
+                    # 循环（有界性 = 既有预算 + stuck 检测器照常逐轮 advance）。
+                    # 走不到这里的三种形态全部维持原状：quiescence 拒绝（decision 为
+                    # None）、stuck 信号命中（上面已 continue/return）、策略拒绝但
+                    # `correction_feedback()` 返回 None（blocked 臂零写入契约不变）。
+                    correction = (
+                        self._completion_policy.correction_feedback(decision)
+                        if decision is not None else None
+                    )
+                    if correction is not None:
+                        for correction_event in self._completion_correction_arm(
+                            arms, steps=steps, step_id=step_base + steps,
+                            source=blocked_source, reason=blocked_reason,
+                            feedback=correction, run_span=run_span,
+                        ):
+                            yield to_agent_event(correction_event)
                         continue
                     await self._terminal_quiescence_blocked(
                         arms, steps=steps, report=report,
@@ -2679,6 +2700,44 @@ class AgentRuntime:
                   decision=decision, pattern=signal.pattern, count=signal.count,
                   tool_name=signal.tool_name, outcome="success")
         return [event, corrective]
+
+    def _completion_correction_arm(
+        self, arms: _TerminalArms, *, steps: int, step_id: int,
+        source: str, reason: str, feedback: str, run_span: str,
+    ) -> list[SessionEvent]:
+        """`#524` 纠偏臂的落盘侧：证据策略拒绝 + 声明反馈 ⇒ 注入并继续。
+
+        形状复用 `_stuck_replan_arm` 的双事件先例：①结构化 `completion/
+        evidence-blocked`（"为什么被拒"的可审计事实；data 只含 policy 类名与稳定
+        reason 串，无主张原文、无参数值——ADR-0047 D3）；②纠正 USER_MESSAGE 带
+        `injected_by=completion_evidence_policy`（非真实用户发言的既有标记纪律：
+        前端投影区分 + 记忆抽取单点过滤；文本由策略给出、片段注册表归 policy 模块）。
+
+        有界性（裁决：不造第二台 stuck 机器）：本臂**不**带计数器/闩——回循环顶部
+        后预算准入照判，stuck 检测器逐轮 `advance`，重复形态达阈值走既有
+        replan-once / paused 分级。blocked 臂（`_terminal_quiescence_blocked`）的
+        零写入契约不受影响：本臂只被显式覆写了 `correction_feedback` 的策略触达。
+
+        **返回值必须由调用方按序镜像**给流消费者（与 stuck replan 同契约）。
+        """
+        session = arms.session
+        blocked_event = session.append(
+            COMPLETION_EVIDENCE_BLOCKED,
+            {"policy": type(self._completion_policy).__name__, "reason": reason},
+            run_id=arms.run_id, step_id=step_id,
+        )
+        corrective = session.append(
+            USER_MESSAGE,
+            {"content": feedback, "injected_by": "completion_evidence_policy"},
+            run_id=arms.run_id, step_id=step_id,
+        )
+        self._log(
+            "agent_decision", "完成策略拒绝：注入纠正反馈并继续",
+            span_id=new_span_id(), parent_span_id=run_span, step=steps,
+            decision="completion_correction", outcome="blocked",
+            source=source, reason=reason,
+        )
+        return [blocked_event, corrective]
 
     async def _stuck_pause_arm(
         self, arms: _TerminalArms, *, signal: StuckSignal,

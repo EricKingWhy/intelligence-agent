@@ -1520,6 +1520,12 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // 与 `MODEL_REQUEST` / `MEMORY_UPDATED` 同形：登记为 no-op ⇒ 已知类型、不进
   // `unknown_events`；护栏卡面的展示面归后续票，本行只负责 `Record` 的穷尽性。
   [EventType.GUARD_STUCK]: { apply: noopProjection, summarize: emptySummary },
+  // #524：`completion/evidence-blocked` 是完成门证据策略拒绝的结构化事实，**它自己
+  // 不带来新的投影状态**——纠正以紧随其后的 `user/message`
+  // （`injected_by='completion_evidence_policy'`）落地，渲染层照 projectUserMessage
+  // 的既有标记显示为系统提示条。与 GUARD_STUCK 同形登记为 no-op ⇒ 已知类型、不进
+  // `unknown_events`；结构化卡面的展示面归后续票，本行只负责 `Record` 的穷尽性。
+  [EventType.COMPLETION_EVIDENCE_BLOCKED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.MODEL_FALLBACK]: { apply: projectModelFallback, summarize: summarizeModelFallback },
   [EventType.MODEL_CHANGED]: { apply: projectModelChanged, summarize: summarizeModelChanged },
   // F18-B（#283）：会话内改档落真投影——「最后一条 permission/changed 胜」（ADR-0041 D3）。
