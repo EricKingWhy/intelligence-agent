@@ -623,6 +623,77 @@ async def test_get_queue_unknown_session_404(tmp_path, monkeypatch):
         await _shutdown(server, serve_task)
 
 
+# ── #615①：cwd 被删后续聊 / 投递走 404（WorkspaceNotFound 中央映射），不是 500 ──
+
+
+async def _empty_session_with_cwd(port: int, cwd: str) -> str:
+    """建一个 launch=false 的空会话，cwd 锚在**外部目录**（#266 durable 锚）。"""
+    import httpx2
+
+    async with httpx2.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"http://127.0.0.1:{port}/api/sessions?launch=false",
+            json={"cwd": cwd},
+        )
+    assert response.status_code == 200, response.text
+    return response.json()["session_id"]
+
+
+@pytest.mark.asyncio
+async def test_messages_deleted_cwd_is_404_not_500(tmp_path, monkeypatch):
+    """idle 续聊撞上被删的外部 cwd → 404（WorkspaceNotFound），不是 500。
+
+    POST /resume 的 except 元组早已翻译 WorkspaceNotFound（中央映射既有条目，
+    404）；/messages 的 idle 分支走的是同一个 ``resume_and_launch``（cwd 守卫
+    在 service 层），却漏了这条翻译——外部目录在两次请求之间被删（服务没跑时
+    删掉也是同一形态）时客户端收到 500。修法 = 元组补上既有关注册类型，
+    不新增状态码语义。
+    """
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        external = tmp_path / "removed-project"
+        external.mkdir()
+        sid = await _empty_session_with_cwd(port, str(external))
+        external.rmdir()
+        code, payload = await _post(
+            port, f"/api/sessions/{sid}/messages", {"content": "继续"}
+        )
+        assert code == 404, (code, payload)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_flush_deleted_cwd_is_404_not_500(tmp_path, monkeypatch):
+    """flush 投递撞上被删的外部 cwd → 404，不是 500。
+
+    与 /messages 同一泄漏点：``deliver_next_undelivered`` →
+    ``resume_and_launch`` 的 cwd 守卫抛 WorkspaceNotFound，端点元组缺这条
+    翻译。排队事实先于删除写入（等价「重启后目录没了」的崩溃窗口）；
+    ``has_session`` 只看默认目录下的 events.jsonl，不受外部目录删除影响，
+    所以 404 必须来自 WorkspaceNotFound 的翻译而不是 SessionNotFound。
+    """
+    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    try:
+        external = tmp_path / "removed-project"
+        external.mkdir()
+        sid = await _empty_session_with_cwd(port, str(external))
+        import pathlib
+
+        from agent_harness.session import Session
+        from agent_harness.session.event import MESSAGE_QUEUED
+        from agent_harness.session.store import JsonlSessionStore
+        store = JsonlSessionStore(root=pathlib.Path(tmp_path) / "sessions")
+        Session.append_event(store, sid, MESSAGE_QUEUED, {
+            "queue_id": "q-dead-cwd", "content": "重启前的消息",
+        })
+        external.rmdir()
+        code, payload = await _post(port, f"/api/sessions/{sid}/queue/flush")
+        assert code == 404, (code, payload)
+    finally:
+        await _shutdown(server, serve_task)
+
+
 @pytest.mark.asyncio
 async def test_edit_queued_item_cancel_old_then_queue_new(tmp_path, monkeypatch):
     """编辑排队项 = queue_id 语义：旧项 cancelled + 新项 queued。

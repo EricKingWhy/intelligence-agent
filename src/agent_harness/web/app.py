@@ -2352,6 +2352,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
             BudgetRejection,
             BudgetConflict,
         ) as e:
@@ -2362,6 +2363,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # SupersedeTargetInvalid → 409（ADR-0030 §4.6）：目标不对，不是会话不存在。
             # WorkspaceBindingConflict → 409（#266）：idle 分支会走 resume_and_launch，
             # 工作目录归属冲突同样拒绝静默选边。
+            # WorkspaceNotFound → 404（#615①）：同样经 resume_and_launch——外部 cwd
+            # 在两次请求之间被删时中央映射既有条目本就要接住，/resume 元组同款
+            # （#564 审查 P2-1），不新增状态码语义。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
@@ -2457,7 +2461,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             EventLogCorruptError,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
         ) as e:
+            # WorkspaceNotFound → 404（#615①）：投递走 resume_and_launch，外部 cwd
+            # 在排队之后被删 → 中央映射既有条目，与 /messages、/resume 同口径。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05（审查 P2-1）：flush 在 idle 时走 resume_and_launch 构造

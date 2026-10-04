@@ -367,6 +367,32 @@ def test_cancelled_queued_replacement_is_not_projected_as_goal(tmp_path):
     assert all(fact.source_event_id != queued.event_id for fact in goals)
 
 
+def test_cancelled_queued_replacement_restores_the_original_goal(tmp_path):
+    """#614①：替换被取消 ⇒ supersede 标记作废，原目标保持 active。
+
+    修复前实测角落：§1 的选取口径（user_goal_sources 排除已取消替换）仍把
+    原目标当"当前生效目标"，§2 的 status 判定（superseded_sources 收集）
+    却不知道替换已取消——原目标被标 superseded，保护事实表对当前生效目标
+    呈现为空，两节自相矛盾；压缩后跨窗口刚性通道丢掉唯一 active 目标。
+    """
+    session = _session(tmp_path)
+    original = session.append(USER_MESSAGE, {"content": "旧任务 ORD-100。"})
+    queued = session.append(
+        MESSAGE_QUEUED,
+        {"queue_id": "queued-1", "content": "新任务 ORD-200。"},
+    )
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": original.seq})
+    session.append(QUEUE_CANCELLED, {"queue_id": "queued-1"})
+
+    goals = [fact for fact in derive_protected_facts(session.events) if fact.type == "user_goal"]
+
+    original_goal = next(
+        fact for fact in goals if fact.source_event_id == original.event_id
+    )
+    assert original_goal.status == "active", "取消替换 ⇒ 原目标仍是当前生效目标"
+    assert all(fact.source_event_id != queued.event_id for fact in goals)
+
+
 def test_malformed_queue_id_does_not_break_protected_fact_projection(tmp_path):
     session = _session(tmp_path)
     original = session.append(USER_MESSAGE, {"content": "用户任务 ORD-100。"})
