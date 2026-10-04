@@ -126,6 +126,7 @@ from agent_harness.session.errors import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionCwdUnavailable,
     SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
@@ -163,6 +164,12 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     ApprovalRequestMissing: 404,
     QueueItemNotFound: 404,
     WorkspaceNotFound: 404,
+    # #266 cwd 守卫的专属子型（P3 跟进批）：「会话 cwd 没了/不是目录」从父类的
+    # 「workspace_id 未注册」语义里拆出（errors.py 类 docstring 与本文件 #266 注释
+    # 曾对同一类型描述矛盾）。HTTP 层同一 404（detail 文案区分），handler 的
+    # `except WorkspaceNotFound` 天然覆盖（同 WorkspacePathInvalid 先例）；本表是
+    # 精确类型索引，子类必须自己登记。
+    SessionCwdUnavailable: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立——expected_version

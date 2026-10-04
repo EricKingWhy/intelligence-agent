@@ -121,6 +121,7 @@ from agent_harness.session.errors import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionCwdUnavailable,
     SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
@@ -1441,7 +1442,7 @@ class SessionService:
             workspace = Path(persisted_cwd)
             self._reconcile_workspace_binding(session_id, persisted_cwd, existing)
             if not workspace.is_dir():
-                raise WorkspaceNotFound(
+                raise SessionCwdUnavailable(
                     f"session '{session_id}' 的 cwd 不存在或不是目录: {workspace}"
                 )
 
@@ -2474,9 +2475,11 @@ class SessionService:
         except SessionNotFound:
             logger.warning("终态驱动：session=%s 不存在，跳过接力", session_id)
         except WorkspaceNotFound as e:
-            # #624-1：cwd 在 run 期间被外部删除（#615① 同形）。与 SessionNotFound
-            # 同款"留待下次"口径（outbox：投递失败不丢消息）；不是 HTTP 调用方
-            # 路径，deliver_next_undelivered 的 409/404 翻译契约不受影响。
+            # #624-1：cwd 在 run 期间被外部删除（#615① 同形；P3 跟进批后由子型
+            # SessionCwdUnavailable 携带，此处刻意捕父类——「未注册」形态到达时
+            # 同款跳过语义也成立）。与 SessionNotFound 同款"留待下次"口径
+            # （outbox：投递失败不丢消息）；不是 HTTP 调用方路径，
+            # deliver_next_undelivered 的 409/404 翻译契约不受影响。
             logger.warning("终态驱动：session=%s 的 cwd 不可用，跳过接力：%s", session_id, e)
 
     # ── 取消 ─────────────────────────────────────────────────────────
