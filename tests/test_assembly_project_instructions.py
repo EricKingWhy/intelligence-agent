@@ -24,7 +24,13 @@ class _ModelFactory:
         yield AIMessageChunk(content="ok")
 
 
-async def _build(tmp_path: Path, workspace: Path, session_id: str):
+async def _build(
+    tmp_path: Path,
+    workspace: Path,
+    session_id: str,
+    *,
+    workspace_as_sandbox: bool = False,
+):
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path / "harness"),
@@ -36,16 +42,22 @@ async def _build(tmp_path: Path, workspace: Path, session_id: str):
     session_store = JsonlSessionStore(root=tmp_path / "sessions")
     session = Session.start(session_store, session_id=session_id, cwd=workspace)
     session.append(USER_MESSAGE, {"content": "inspect the source"})
+    workspace_registry = WorkspaceRegistry(
+        root=tmp_path / "harness", backend="local",
+    )
+    runtime_workspace = (
+        workspace_registry.create(session_id, workspace_root=workspace)
+        if workspace_as_sandbox
+        else workspace
+    )
     with patch("agent_harness.assembly.create_chat_model", return_value=_ModelFactory()):
         runtime = await build_runtime(
             settings=settings,
             wiring=CapabilityWiring(),
             stores=stores,
-            workspace_registry=WorkspaceRegistry(
-                root=tmp_path / "harness", backend="local",
-            ),
+            workspace_registry=workspace_registry,
             session_id=session_id,
-            workspace=workspace,
+            workspace=runtime_workspace,
             max_agent_turns=10,
         )
     return runtime, session
@@ -107,3 +119,22 @@ async def test_runtime_injects_root_rules_then_lazily_loaded_nested_rules(
     assert str(root_rules) in first_text and "root instruction" in first_text
     assert str(nested_rules) not in first_text
     assert str(nested_rules) in second_text and "nested instruction" in second_text
+
+
+@pytest.mark.asyncio
+async def test_runtime_accepts_an_existing_sandbox_as_workspace_input(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    (repository / "AGENTS.md").write_text("root instruction", encoding="utf-8")
+    workspace = repository / "workspace"
+    workspace.mkdir()
+
+    runtime, session = await _build(
+        tmp_path, workspace, "session-sandbox-workspace",
+        workspace_as_sandbox=True,
+    )
+    messages = await runtime._context_builder.build(session)
+
+    assert "root instruction" in "\n".join(str(message.content) for message in messages)

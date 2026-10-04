@@ -60,7 +60,7 @@ from agent_harness.prompt import (
     parse_persona_config,
     tool_guidance_sections,
 )
-from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.sandbox import Sandbox, WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
     OnStableBoundary,
@@ -342,6 +342,31 @@ def _build_tooling(
     )
 
 
+def _project_instruction_cwd(
+    workspace: Path | Sandbox,
+    workspace_registry: WorkspaceRegistry,
+    session_id: str,
+) -> Path:
+    """Resolve the host workspace path used to discover repository instructions."""
+    if isinstance(workspace, Path):
+        return workspace
+
+    recorded_roots = workspace_registry.recorded_workspace_roots(session_id)
+    sandbox_root = workspace.workspace_root
+    if isinstance(sandbox_root, Path):
+        resolved_root = sandbox_root.resolve()
+        if not recorded_roots or str(resolved_root) in recorded_roots:
+            return resolved_root
+        raise ValueError(
+            "sandbox workspace root does not match its recorded workspace roots"
+        )
+    if len(recorded_roots) == 1:
+        return Path(recorded_roots[0])
+    raise ValueError(
+        "cannot resolve a host workspace path for project instructions"
+    )
+
+
 def root_registry_tool_names(
     settings: Settings,
     wiring: CapabilityWiring,
@@ -385,7 +410,7 @@ async def build_runtime(
     stores: RecoveryStores,
     workspace_registry: WorkspaceRegistry,
     session_id: str,
-    workspace: Path,
+    workspace: Path | Sandbox,
     max_agent_turns: int,
     permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
     auto_approve: bool | None = None,
@@ -447,9 +472,12 @@ async def build_runtime(
     profile_spec = None
     if agent_profile is not None:
         profile_spec = BUILTIN_PROFILES[agent_profile]
+    instruction_cwd = _project_instruction_cwd(
+        workspace, workspace_registry, session_id,
+    )
     project_instructions = project_instruction_store(settings)
     await asyncio.to_thread(
-        project_instructions.load_for_session, session_id, workspace,
+        project_instructions.load_for_session, session_id, instruction_cwd,
     )
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
     # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
@@ -506,7 +534,7 @@ async def build_runtime(
     # 同一事实源，见其 docstring。）
     tooling = _build_tooling(
         settings, wiring,
-        session_id=session_id, workspace=workspace,
+        session_id=session_id, workspace=instruction_cwd,
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=agent_profile,
         project_instructions=project_instructions,
@@ -658,7 +686,7 @@ async def build_runtime(
             "date": date.today().isoformat(),  # noqa: DTZ011
         }).meta_user_text
         return project_instructions.load_for_session(
-            session_id, workspace,
+            session_id, instruction_cwd,
         ).with_runtime_context(runtime_context)
 
     return AgentRuntime(
