@@ -486,8 +486,10 @@ class InProcessSubagentProvider:
             # None（未激活）= 旧行为。
             session_budget=self.session_budget_port(),
             # #608（ADR-0048 D8 环境半）：child 证据端口的环境格锚 = 父 cwd 锚——
-            # 与下面子 SESSION_STARTED 的 cwd 字段**同一个值**（缓存读，同步、无额外
-            # 挂起点），恢复侧读回同一事件字段 ⇒ 暂停/恢复两侧同源是构造保证。
+            # 稳态下与下面子 SESSION_STARTED 的 cwd 字段同一个值（缓存读，同步、无额外
+            # 挂起点），恢复侧读回同一事件字段 ⇒ 暂停/恢复两侧同源。
+            # 读**失败**不缓存：本值与 cwd 各取一次，恰在两次之间失败则本值缺席而 cwd
+            # 仍落在会话上——两侧缺口方向都是 fail-closed（环境格缺席 ⇒ 不做变更判定）。
             # 父无锚 ⇒ None ⇒ 环境格如实缺席（fail-closed）。
             workspace=self._parent_cwd(),
         )
