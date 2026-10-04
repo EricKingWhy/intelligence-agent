@@ -83,6 +83,25 @@ class TestRuleValidation:
                 EvidenceRule(rule_id="r", claim_pattern="b", required_tool_name="bash"),
             ))
 
+    def test_iterator_rules_are_materialized(self) -> None:
+        """两轴审查 P3 修复钉：生成器规则表不得被去重消费清空（静默变零规则
+        = fail-open 陷阱）。"""
+        def gen():
+            yield EvidenceRule(
+                rule_id="r", claim_pattern="a", required_tool_name="probe",
+            )
+
+        policy = EvidenceCompletionPolicy(rules=gen())
+        assert len(policy.rules) == 1
+
+    def test_non_string_pattern_rejected_as_config_error(self) -> None:
+        """非字符串 pattern 抛 ConfigError（异常类型纪律），不是裸 TypeError。"""
+        with pytest.raises(ConfigError, match="claim_pattern"):
+            EvidenceRule(
+                rule_id="r", claim_pattern=None,  # type: ignore[arg-type]
+                required_tool_name="probe",
+            )
+
 
 class TestDecide:
     @pytest.mark.asyncio

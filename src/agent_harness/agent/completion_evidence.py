@@ -65,6 +65,10 @@ class EvidenceRule:
             raise ConfigError(
                 f"evidence 规则 {self.rule_id} 的 required_tool_name 不能为空"
             )
+        if not isinstance(self.claim_pattern, str):
+            raise ConfigError(
+                f"evidence 规则 {self.rule_id} 的 claim_pattern 必须是正则字符串"
+            )
         try:
             re.compile(self.claim_pattern)
         except re.error as error:
@@ -108,12 +112,15 @@ class EvidenceCompletionPolicy(CompletionPolicy):
     """
 
     def __init__(self, rules: Sequence[EvidenceRule]) -> None:
+        # 先物化为 tuple：dedup 循环会消费一次迭代器，直接迭代两次会把生成器
+        # 规则表静默清空成"零规则"（= 行为等同 default 的 fail-open 陷阱）。
+        materialized = tuple(rules)
         seen: set[str] = set()
-        for rule in rules:
+        for rule in materialized:
             if rule.rule_id in seen:
                 raise ConfigError(f"evidence rule_id 重复：{rule.rule_id}")
             seen.add(rule.rule_id)
-        self._rules = tuple(rules)
+        self._rules = materialized
 
     @property
     def rules(self) -> tuple[EvidenceRule, ...]:

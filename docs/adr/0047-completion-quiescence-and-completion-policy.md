@@ -282,3 +282,6 @@ class CompletionDecision:
    模型自主发起的重复调用仍由既有 Permission/Approval 闸门治理（不变量 #11）。
 5. **词表面**：新事件 `completion/evidence-blocked`（持久化）；纠正片段
    `corrective:completion_evidence`（order 9160，纠正带内）。
+6. **已接受的边界（登记）**：claim_pattern 对 `final_text` 的正则匹配没有
+   ReDoS 防护——模式是受信的装配期配置，输入是模型可控文本。V1 接受
+   （编程装配、非用户输入面）；防护属后续票（设计定稿 §7 第 5 条）。

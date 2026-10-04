@@ -29,6 +29,10 @@ from agent_harness.agent.completion import (
     CompletionPolicy,
     QuiescenceReport,
 )
+from agent_harness.agent.completion_evidence import (
+    EvidenceCompletionPolicy,
+    EvidenceRule,
+)
 from agent_harness.agent.types import STATUS_COMPLETED, STATUS_QUIESCENCE_BLOCKED
 from agent_harness.session.event import (
     RUN_COMPLETED,
@@ -196,3 +200,95 @@ async def test_plain_rejecting_policy_still_ends_blocked_without_injection(
         event.type == "completion/evidence-blocked" for event in session.events
     )
     assert not any(event.type == RUN_COMPLETED for event in session.events)
+
+
+@pytest.mark.asyncio
+async def test_real_evidence_policy_gates_and_completes(tmp_path: Path):
+    """真 EvidenceCompletionPolicy 过 runtime 全链（两轴审查 P3：设计 §8 的
+    红/绿构成必须是真策略，不能只有替身各半覆盖）：主张先行被拒 → 纠正注入 →
+    probe 留 durable 证据 → 第二次 decide 看到新落盘的 tool/result 接受 ⇒
+    run/completed。"""
+    policy = EvidenceCompletionPolicy(
+        rules=(EvidenceRule(
+            rule_id="demo", claim_pattern="全部完成", required_tool_name="probe",
+        ),)
+    )
+    runtime = _runtime(policy, [
+        AIMessage(content="全部完成"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "call-1", "name": "probe", "args": {}}],
+        ),
+        AIMessage(content="全部完成（probe ok）"),
+    ])
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "把事情做完")
+
+    assert result.status == STATUS_COMPLETED
+    assert any(event.type == RUN_COMPLETED for event in session.events)
+    blocked = [
+        event for event in session.events
+        if event.type == "completion/evidence-blocked"
+    ]
+    assert len(blocked) == 1
+    assert blocked[0].data["reason"] == "evidence_missing:demo"
+    injected = _injected_messages(session)
+    assert len(injected) == 1
+    assert "demo" in injected[0].data["content"]
+    assert "probe" in injected[0].data["content"]
+
+
+@pytest.mark.asyncio
+async def test_stuck_replan_takes_precedence_over_correction_arm(tmp_path: Path):
+    """stuck 臂照旧优先（两轴审查 P3：设计 §8 / ADR-0047 §5 第 3 条的排序契约）。
+
+    反馈型策略在场 + 同内容独白达阈值（monologue threshold=3）：第 3 轮走
+    stuck replan（guard/stuck + stuck_guard 注入），纠偏臂该轮**不**触达；
+    第 4 轮签名变化重置计数，策略接受，run 正常完成。
+    """
+
+    class _FeedbackThresholdPolicy(CompletionPolicy):
+        def __init__(self) -> None:
+            self.decide_calls = 0
+
+        async def decide(
+            self, *, report: QuiescenceReport, final_text: str, run_id: str,
+            events: Sequence[SessionEvent] | None = None,
+        ) -> CompletionDecision:
+            self.decide_calls += 1
+            if self.decide_calls < 4:
+                return CompletionDecision(
+                    accepted=False, reason="evidence_missing:demo"
+                )
+            return CompletionDecision(accepted=True)
+
+        def correction_feedback(self, decision: CompletionDecision) -> str | None:
+            if decision.accepted:
+                return None
+            return "缺少 demo 证据：请引用既有结果。"
+
+    policy = _FeedbackThresholdPolicy()
+    runtime = _runtime(policy, [
+        AIMessage(content="还差一点"),
+        AIMessage(content="还差一点"),
+        AIMessage(content="还差一点"),
+        AIMessage(content="好了，这次真的写完了"),
+    ])
+    session = make_session(tmp_path)
+
+    result = await runtime.run(session, "把事情做完")
+
+    assert result.status == STATUS_COMPLETED
+    assert policy.decide_calls == 4
+    stuck = [
+        event for event in session.events if event.type == "guard/stuck"
+    ]
+    assert len(stuck) == 1
+    assert stuck[0].data["level"] == "replan"
+    injected = _injected_messages(session)
+    by_source = [event.data["injected_by"] for event in injected]
+    assert by_source.count("stuck_guard") == 1
+    assert by_source.count("completion_evidence_policy") == 2, (
+        "stuck replan 轮纠偏臂不得触达（注入只能来自前两轮）"
+    )

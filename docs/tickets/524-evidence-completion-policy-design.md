@@ -2,7 +2,8 @@
 
 > 状态：设计定稿（2026-10-05）。依据 = 票面 2026-10-05 用户裁决（选项 A）+ 方案依据块
 > （issuecomment-5983721507，Pi / Claude Code / Aider / Codex / TTSR 五源核实）。
-> 实现基线：分支 `zcode/T520-imp01-cache-usage` @ `d34862ae`（#520 已分支就绪）。
+> 实现基线：分支 `zcode/T520-imp01-cache-usage`（设计定稿时 tip `d34862ae`，实现提交
+> `8720bae8` 落在其后的 `29589c1b` 设计稿提交之上——两轴审查 P4 已核对为唯一漂移）。
 
 ## 1. 机制定位（裁决逐条对照）
 
@@ -67,9 +68,11 @@ class EvidenceRule:
   1. 非静止报告 → 拒绝（`report.refusal_reason()`，与 Default 同款防御：第三方
      绕过 runtime 直调不得顺带绕过六谓词）；
   2. 对每条规则：`re.search(claim_pattern, final_text)` 命中 且 events 中**不存在**
-     `tool/result`（`data.tool_name == required_tool_name`，outcome=success）→
-     拒绝，`reason = "evidence_missing:<rule_id>"`（复用
-     `POLICY_REJECTED_PREFIX` 稳定理由家族，缺省兜底照旧）；
+     该工具的成功执行配对（实现定稿，随两轴审查 P4 措辞修正：`tool/result` 的
+     data 只有 `{tool_call_id, content}`，无 tool_name 键——配对以 `tool/call`
+     的 `tool_name` + 同 `call_id` 的 `tool/result` content JSON `ok=true` 为准，
+     与生产 executor 落盘形状一致）→ 拒绝，`reason = "evidence_missing:<rule_id>"`
+     （自有稳定前缀；`POLICY_REJECTED_PREFIX` 仍只是"拒绝但没给理由"的缺省兜底）；
   3. 全部满足 / 无命中 → `accepted=True`。
 - 证据 scope = **会话**（与 quiescence 谓词同 scope，ADR-0047 D1 推导一致）；
   新鲜度窗口（如「最近一条真实用户消息之后」）是 V2 精化，登记不做的理由：scope
@@ -112,6 +115,10 @@ correction_feedback 默认方法、纠偏臂插入点（stuck 判定后 / blocke
 2. 证据新鲜度窗口（见 §3 scope 说明）。
 3. 规则表的 settings/HTTP 配置化。
 4. 服务端证据轴（W-07/W-08 辖区）。
+5. **claim_pattern 回溯灾难（ReDoS）防护**（两轴审查 P3 登记）：pattern 是受信的
+   装配期配置，但匹配输入 `final_text` 是模型可控文本，劣质模式（如 `(a+)+$`）
+   理论上可挂起事件循环。V1 接受该风险（模式来自编程装配、非用户/模型输入），
+   长度上限 / 安全正则引擎 / 匹配超时是后续票的判定面；登记为本策略的已知边界。
 
 ## 8. 测试面（红先行）
 
