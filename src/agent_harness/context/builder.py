@@ -529,6 +529,10 @@ class ContextBuilder:
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
                 "bracket_id": bracket_id,
+                "summary_model_id": result.summary_model_id,
+                "duration_ms": result.duration_ms,
+                "request_token_estimate": result.request_token_estimate,
+                "request_budget_tokens": result.request_budget_tokens,
             })
             session.append(COMPACTION_END, {
                 "bracket_id": bracket_id,

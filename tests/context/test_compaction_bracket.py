@@ -386,6 +386,42 @@ class TestBuilderWritesBracket:
         assert "summary" in compacted_event.data
 
     @pytest.mark.asyncio
+    async def test_bracket_records_summary_model_duration_and_request_budget(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class ObservedSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-reported-summary-model"},
+                )
+
+        ticks = iter((100.0, 100.125))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=ObservedSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "provider-reported-summary-model"
+        assert event.data["duration_ms"] == 125
+        assert event.data["request_token_estimate"] > 0
+        assert event.data["request_budget_tokens"] == 8500
+
+    @pytest.mark.asyncio
     async def test_second_build_after_bracket_skips_shadowed(self, tmp_path):
         """第一次压缩写 bracket 后，第二次 build 的 derive_messages 跳过 shadowed 段。"""
         session = make_session(tmp_path)

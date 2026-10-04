@@ -463,6 +463,21 @@ async def build_runtime(
         except ConfigError as error:
             raise error from None
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
+    summary_model = None
+    summary_model_name = (settings.summary_model or "").strip()
+    if summary_model_name:
+        try:
+            from agent_harness.model.provider_store import ProviderStore
+
+            summary_store = ProviderStore.for_settings(settings)
+            summary_config = ModelConfig.resolve_selection(
+                settings, summary_model_name, summary_store,
+            )
+        except ConfigError as error:
+            raise error from None
+        # Summary generation uses the selected model without inheriting the
+        # primary model's reasoning-effort setting.
+        summary_model = create_chat_model(summary_config)
     # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
     # 的 per-run coordinator 负责（见 agent/fallback 接线）。
@@ -654,6 +669,7 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            summary_model=summary_model,
             # #559：摘要调用与主循环同闸（进程级在飞 ≤N 的语义，见上）。
             model_call_gate=model_call_gate,
             # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。

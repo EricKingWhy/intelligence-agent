@@ -207,6 +207,30 @@ async def test_summary_failure_keeps_original_projection(failure):
 
 
 @pytest.mark.asyncio
+async def test_configured_summary_failure_keeps_protected_facts(tmp_path):
+    class FailingSummaryModel:
+        async def ainvoke(self, _messages):
+            raise TimeoutError("summary timed out")
+
+    session = make_session(tmp_path)
+    protected_fact = "不得删除 old_rows；精确 ID 是 R-042"
+    session.append(USER_MESSAGE, {"content": protected_fact})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    session.append(USER_MESSAGE, {"content": "继续处理。"})
+
+    messages = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=100_000,
+        auto_compact_threshold=0.05, summary_model=FailingSummaryModel(),
+    ).build(session)
+
+    assert any(
+        isinstance(message, HumanMessage) and protected_fact in str(message.content)
+        for message in messages
+    )
+    assert not any(event.type == CONTEXT_COMPACTED for event in session.events)
+
+
+@pytest.mark.asyncio
 async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_path, monkeypatch):
     session = make_session(tmp_path)
     constraint = "不得删除 old_rows；精确 ID 是 R-042"

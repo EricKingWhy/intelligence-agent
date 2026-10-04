@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # 脱敏为 **********，避免任何把 Settings 转储进日志/调试器/异常页的路径泄漏 live key。
     model_api_key: SecretStr = SecretStr("")
     model_base_url: str = ""
+    # Optional AGENT_MODELS / provider selection for context summaries; None keeps
+    # the existing primary-model behavior.
+    summary_model: str | None = None
 
     temperature: float = 0.2
     # 流式守卫（秒，逐项 ≤0 关闭）：idle = N 秒无新 chunk（死连接）；

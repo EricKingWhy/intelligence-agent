@@ -7,6 +7,7 @@ import re
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -145,6 +146,10 @@ class CompactionResult:
     source_seq_end: int | None = None
     bracket_id: str | None = None
     summary: str | None = None
+    summary_model_id: str | None = None
+    duration_ms: int | None = None
+    request_token_estimate: int | None = None
+    request_budget_tokens: int | None = None
     # W-04 (#348)：本次 compact 里失败过的摘要尝试（成功尝试之前的都在内；
     # 双失败安全继续时是两条）。调用方（builder）负责把它们落成任务可见状态。
     failures: list[CompactionFailure] = dataclass_field(default_factory=list)
@@ -229,8 +234,9 @@ class ContextCompactor:
             [message.model_dump(mode="json") for message in early], ensure_ascii=False,
         ))
         request = [prompt, transcript]
+        request_token_estimate = estimate_message_tokens(request)
         # Preflight rejection is not a summary attempt and therefore emits no failure event.
-        if estimate_message_tokens(request) > self._hard_limit:
+        if request_token_estimate > self._hard_limit:
             logger.warning(
                 "Context compaction rejected; summary request exceeds hard guard",
             )
@@ -249,12 +255,15 @@ class ContextCompactor:
         failures: list[CompactionFailure] = []
         summary_text = ""
         compacted: list[AnyMessage] | None = None
+        summary_started_at = monotonic()
+        summary_model_id: str | None = None
         for attempt in (1, 2):
             try:
                 # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（30s 是
                 # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
                 async with self._slot(), asyncio.timeout(self._summary_timeout):
                     response = await self._model.ainvoke(request)
+                summary_model_id = _summary_model_id(self._model, response)
                 if not isinstance(response, AIMessage) or response.tool_calls:
                     raise _SummaryRejected(
                         "tool_calls_in_response",
@@ -384,6 +393,10 @@ class ContextCompactor:
             source_seq_end=source_seq_end,
             bracket_id=str(uuid4()),
             summary=summary_text,
+            summary_model_id=summary_model_id,
+            duration_ms=max(round((monotonic() - summary_started_at) * 1000), 0),
+            request_token_estimate=request_token_estimate,
+            request_budget_tokens=int(self._hard_limit),
             # W-29 (#383) 补课：成功前的失败尝试也要带给调用方落任务可见状态——
             # CompactionResult.failures 的契约（"成功尝试之前的都在内"）与冻结
             # PRD §4.5（"每次失败留诊断与任务可见状态"）都要求这一条；此前成功
@@ -391,6 +404,21 @@ class ContextCompactor:
             # 该路径成为常态，判据测试暴露）。
             failures=failures,
         )
+
+
+def _summary_model_id(model: Any, response: Any) -> str | None:
+    """Prefer the provider-reported model id, then the configured client id."""
+    metadata = getattr(response, "response_metadata", None)
+    if isinstance(metadata, dict):
+        for key in ("model_name", "model", "model_id"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for attribute in ("model_name", "model"):
+        value = getattr(model, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
