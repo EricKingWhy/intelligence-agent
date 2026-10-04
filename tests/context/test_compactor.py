@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.compactor import (
+    _PROG_SECTION_MAX_ENTRY_CHARS,
     ContextCompactor,
     ContextWindowExceededError,
     _programmatic_summary_sections,
@@ -651,5 +652,26 @@ def test_cancelled_queued_replacement_keeps_sections_consistent():
     assert original["status"] == "active", "§2 与 §1 同判：原目标 active"
     assert all(fact["value"] != "新任务 ORD-200。" for fact in protected), (
         "被取消的替换不得以 active 投影"
+    )
+
+
+def test_trimmed_same_prefix_entries_dedup_after_truncation():
+    """#614②：去重必须发生在截断**之后**——同前缀超长条目不得以截断值重复。
+
+    旧实现先按全文 `add_once` 去重、后截断：两条仅在 200 字符之后分叉的
+    超长条目全文不同、双双入列，截断后收敛为同一个值 ⇒ §6/§7 投影出现
+    重复条目。修复：先截断、再按截断值去重（保留最后出现者，与窗口的
+    「最近偏置」一致）、最后套数量上限。
+    """
+    prefix = "同一前缀" + "很长的细节" * 40  # 前 200 字符完全一致
+    assert len(prefix) >= _PROG_SECTION_MAX_ENTRY_CHARS
+    messages = [
+        ToolMessage(content=prefix + "TAIL-A-777", tool_call_id="call-a", status="error"),
+        ToolMessage(content=prefix + "TAIL-B-888", tool_call_id="call-b", status="error"),
+    ]
+    sections = _programmatic_summary_sections(messages, [])
+    identifiers = json.loads(sections["## 精确标识清单"])
+    assert len(identifiers) == len(set(identifiers)), (
+        "截断后同值的条目不得在投影中重复（#614②）"
     )
 

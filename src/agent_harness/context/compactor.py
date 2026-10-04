@@ -447,13 +447,26 @@ def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
 
 
 def _capped_entries(entries: list[str]) -> list[str]:
-    """确定性窗口：每条截到 `_PROG_SECTION_MAX_ENTRY_CHARS`，保留最后 N 条。"""
+    """确定性窗口：先截断、再按截断值去重（保留最后出现者）、最后保留最近 N 条。
+
+    #614②：去重必须发生在截断**之后**——`add_once` 只按全文去重，两条仅在
+    第 200 字符之后分叉的超长条目全文不同、双双入列，截断后收敛为同一值，
+    投影里出现重复条目。本函数先截断再按截断值去重，与窗口的「最近偏置」
+    一致：同值重复保留最后出现的那条。
+    """
     trimmed = [
         entry if len(entry) <= _PROG_SECTION_MAX_ENTRY_CHARS
         else entry[:_PROG_SECTION_MAX_ENTRY_CHARS] + "…"
         for entry in entries
     ]
-    return trimmed[-_PROG_SECTION_MAX_ENTRIES:]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(trimmed):
+        if entry not in seen:
+            seen.add(entry)
+            deduped.append(entry)
+    deduped.reverse()
+    return deduped[-_PROG_SECTION_MAX_ENTRIES:]
 
 
 def _programmatic_summary_sections(
