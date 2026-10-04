@@ -333,7 +333,9 @@ def evidence_port(
     )
 
 
-def delegated_child_evidence_port(spec_name: str) -> StuckEvidencePort:
+def delegated_child_evidence_port(
+    spec_name: str, *, workspace: Path | str | None = None,
+) -> StuckEvidencePort:
     """委派子 run 的**自身**生效策略面端口（ADR-0048 残余 15 / #370）——唯一口径。
 
     子 run 暂停时记的是 child 自己的策略面，四个答案只在这里写一遍；恢复侧
@@ -351,11 +353,15 @@ def delegated_child_evidence_port(spec_name: str) -> StuckEvidencePort:
     - `agent_profile` = spec.name：child 授权由它自己的 AgentSpec 决定（#372 的
       恢复入口按 session/started 的 agent_id 强制同一档位）。
 
-    `workspace=None`：环境 revision 不在本票范围（残余 15 的环境半，follow-up）——
-    端口只让 policy 格落地，environment 格保持 None（fail-closed：该依据不可用）。
+    `workspace`（#608，残余 15 的环境半）：委派方传**父会话的 cwd 锚**
+    （`provider._parent_cwd()`）——与写进子 SESSION_STARTED 的 cwd 字段、恢复侧
+    `Path(persisted_cwd)` 读回的是**同一事件字段**（child 与父共用同一棵
+    Session-scoped workspace，spec 10 §9），两侧同源是构造保证不是数值巧合。
+    父无锚 ⇒ None ⇒ 环境格如实缺席，`environment_change` 判据 fail-closed
+    （无快照可比 ⇒ 409，判据零改动）。
     """
     return evidence_port(
-        workspace=None,
+        workspace=Path(workspace) if workspace is not None else None,
         permission_mode=PermissionPolicy.WORKSPACE_WRITE,
         model=None,
         agent_profile=spec_name,

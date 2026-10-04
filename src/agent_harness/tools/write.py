@@ -62,10 +62,27 @@ class WriteTool(Tool):
         """调 sandbox.write_text；路径越界映射成 PERMISSION_DENIED。"""
         # 读旧内容供前端 diff（文件不存在 → before 为空，表示这是新建）。
         # 读失败不阻塞写入——write 本就是覆盖语义，diff 是辅助视图不是契约。
+        # #610：POSIX 上「写目标是目录」的 before-read 抛 IsADirectoryError、
+        # 「父路径是文件」抛 NotADirectoryError（Windows 分别报 PermissionError/
+        # FileNotFoundError）。只捕后两者会让前两者逃逸 execute() 被包装成
+        # TOOL_EXECUTION_ERROR，下方 write_text 的四分支形态映射
+        # （PermissionError/IsADirectoryError/NotADirectoryError/FileExistsError）
+        # 在 Linux 上永远走不到。
+        # #623：目标内容非 UTF-8 时 read_text 抛 UnicodeDecodeError（ValueError
+        # 族，不是 OSError）。覆盖写不需要读懂旧内容（spec 05 §5：content-
+        # absolute 覆盖语义，写入合法性不依赖旧内容可读）——与 OSError 同款
+        # 降级：diff before 置空，写入照常。git 对不可解码文件显示 "Binary
+        # files differ"、aider 直接 "Dropping ... from the chat."，同口径。
         before = ""
         try:
             before = self._sandbox.read_text(args.path)
-        except (FileNotFoundError, PermissionError):
+        except (
+            FileNotFoundError,
+            PermissionError,
+            IsADirectoryError,
+            NotADirectoryError,
+            UnicodeDecodeError,
+        ):
             pass
 
         try:

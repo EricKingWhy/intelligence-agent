@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
@@ -135,6 +136,7 @@ from agent_harness.session import (
     MODEL_FAILED,
     MODEL_FALLBACK,
     MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     MODEL_STARTED,
     OPERATION_RECONCILE_REQUIRED,
     RUN_FAILED,
@@ -776,16 +778,19 @@ class _TerminalContext:
     terminal: _RunFinalizer
     streamer: BlockStreamer | None
     model_coord: ModelFallbackCoordinator
+    drain_request_events: Callable[[], list[SessionEvent]]
+    settled_request_events: dict[str, SessionEvent]
+    completed_model_response: Any | None
     #: 观测收口用的**快照**（见 `_Telemetry.snapshot`）：收尾上下文不持活值。
     telemetry: _Telemetry
 
     def interrupt_streams(self) -> list[SessionEvent]:
         """流式块收口 + 切换事实与请求账目落盘（取消臂与异常臂同一不变量）。
 
-        顺序固定：interrupted（块级部分内容保留）先于 model/fallback 与 model/request
-        （调用级归因）先于 model/failed；drain 幂等——成功路径已取走则此处为空。
+        先镜像尚未消费的请求开始/结算事件，再关闭流式块；之后持久化切换事实与
+        尚未结算的请求，最后由调用方写 model/failed。所有已有事件按 append 顺序返回。
         """
-        events: list[SessionEvent] = []
+        events = self.drain_request_events()
         if self.streamer is not None:
             # 取消臂忽略返回值（生成器关闭中禁止 yield）；异常臂逐条镜像。
             events.extend(self.streamer.interrupt(step=self.steps + 1))
@@ -799,11 +804,30 @@ class _TerminalContext:
         # `model_requests` 一席（`02 §5.1`），只是没有产出决策（不增 agent_turns）。
         # 成功路径在这里 drain 到空（上面已取走并落盘），所以本循环是幂等的。
         for request in self.model_coord.drain_requests():
-            events.append(self.session.append(
+            if request.request_id in self.settled_request_events:
+                continue
+            data = {"role": request.role, "outcome": request.outcome}
+            if request.request_id is not None:
+                data["request_id"] = request.request_id
+            response = self.completed_model_response
+            if request.outcome == REQUEST_OUTCOME_COMPLETED and response is not None:
+                model = _model_name_from_response(response)
+                usage = _usage_from_response(response)
+                cost = cost_usd_from_response(response)
+                if model:
+                    data["model"] = model
+                if usage:
+                    data["usage"] = usage
+                if cost is not None:
+                    data["cost_usd"] = format(cost, "f")
+            event = self.session.append(
                 MODEL_REQUEST,
-                {"role": request.role, "outcome": request.outcome},
+                data,
                 run_id=self.run_id, step_id=self.steps + 1,
-            ))
+            )
+            if request.request_id is not None:
+                self.settled_request_events[request.request_id] = event
+            events.append(event)
         return events
 
     def close_observability(
@@ -870,6 +894,11 @@ class _TerminalArms:
     memory_event_start: int = 0
     telemetry: _Telemetry = field(default_factory=_Telemetry)
     streamer: BlockStreamer | None = None
+    model_request_events: asyncio.Queue[SessionEvent] = field(
+        default_factory=asyncio.Queue,
+    )
+    settled_request_events: dict[str, SessionEvent] = field(default_factory=dict)
+    completed_model_response: Any | None = None
 
     @property
     def run_id(self) -> str | None:
@@ -901,12 +930,120 @@ class _TerminalArms:
             session=self.session, run_id=self.run_id,
             steps=self.envelope_step(steps), terminal=self.terminal,
             streamer=self.streamer, model_coord=self.model_coord,
+            drain_request_events=self.drain_model_request_events,
+            settled_request_events=self.settled_request_events,
+            completed_model_response=self.completed_model_response,
             telemetry=self.telemetry.snapshot(),
         )
+
+    def record_request_started(
+        self, role: str, request_id: str, *, step_id: int,
+    ) -> SessionEvent:
+        """Persist and queue the attempt start for the run stream mirror."""
+        event = self.session.append(
+            MODEL_REQUEST_STARTED,
+            {"role": role, "request_id": request_id},
+            run_id=self.run_id, step_id=step_id,
+        )
+        self._queue_model_request_event(event)
+        return event
+
+    def record_request_failed(
+        self, role: str, request_id: str, *, step_id: int,
+    ) -> SessionEvent:
+        """Persist a known failed attempt before fallback can start."""
+        event = self.session.append(
+            MODEL_REQUEST,
+            {"role": role, "outcome": REQUEST_OUTCOME_FAILED,
+             "request_id": request_id},
+            run_id=self.run_id, step_id=step_id,
+        )
+        self.settled_request_events[request_id] = event
+        self._queue_model_request_event(event)
+        return event
+
+    def _queue_model_request_event(self, event: SessionEvent) -> None:
+        self.model_request_events.put_nowait(event)
+
+    def drain_model_request_events(self) -> list[SessionEvent]:
+        events: list[SessionEvent] = []
+        while not self.model_request_events.empty():
+            events.append(self.model_request_events.get_nowait())
+        return events
 
     def cancel_reason(self) -> str:
         """取消臂的 reason（ADR-0016 §2.1）：宿主据此区分 cancelled / orphaned。"""
         return self.cancel_reason_supplier() if self.cancel_reason_supplier else "cancelled"
+
+
+async def _model_stream_items(
+    stream: AsyncIterator[AIMessageChunk], arms: _TerminalArms,
+) -> AsyncIterator[SessionEvent | AIMessageChunk]:
+    """Yield request lifecycle events as soon as they are durable, alongside chunks."""
+    iterator = stream.__aiter__()
+    chunk_task: asyncio.Task[AIMessageChunk] | None = None
+    event_task: asyncio.Task[SessionEvent] | None = None
+    try:
+        while True:
+            if chunk_task is None:
+                chunk_task = asyncio.create_task(anext(iterator))
+            if not arms.model_request_events.empty():
+                for event in arms.drain_model_request_events():
+                    yield event
+                continue
+
+            event_task = asyncio.create_task(arms.model_request_events.get())
+            await asyncio.wait(
+                (chunk_task, event_task), return_when=asyncio.FIRST_COMPLETED,
+            )
+            if event_task.done():
+                event = event_task.result()
+                event_task = None
+                yield event
+                for queued_event in arms.drain_model_request_events():
+                    yield queued_event
+                continue
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
+            event_task = None
+
+            ready_chunk = chunk_task
+            chunk_task = None
+            try:
+                yield ready_chunk.result()
+            except StopAsyncIteration:
+                return
+    finally:
+        tasks = [task for task in (event_task, chunk_task) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _wait_for_request_events_or_task(
+    task: asyncio.Task[Any], arms: _TerminalArms,
+) -> list[SessionEvent]:
+    """Wait until the operation settles or a durable request event is ready."""
+    event_task: asyncio.Task[SessionEvent] | None = None
+    if not task.done() and arms.model_request_events.empty():
+        event_task = asyncio.create_task(arms.model_request_events.get())
+        try:
+            await asyncio.wait(
+                (task, event_task), return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not event_task.done():
+                event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
+    events = (
+        [event_task.result()]
+        if event_task is not None and event_task.done() and not event_task.cancelled()
+        else []
+    )
+    events.extend(arms.drain_model_request_events())
+    return events
 
 
 class _GuardedTracer:
@@ -1333,6 +1470,7 @@ class AgentRuntime:
             result_holder=result_holder, cancel_reason_supplier=cancel_reason_supplier,
             telemetry=telemetry,
         )
+        mirrored_request_event_seqs: set[int] = set()
         try:
             # 写入 user 消息事件
             arms.memory_event_start = session.mark()
@@ -1574,6 +1712,22 @@ class AgentRuntime:
                 # coordinator 统一编排（含 stall 看门狗）：瞬时失败内部切换
                 # 重试，非瞬时/无 fallback 时异常照常上抛走统一失败兜底。
                 terminal.model_call_open = True
+                arms.completed_model_response = None
+
+                def record_request_started(
+                    role: str, request_id: str, step: int = steps + 1,
+                ) -> None:
+                    arms.record_request_started(
+                        role, request_id, step_id=arms.envelope_step(step),
+                    )
+
+                def record_request_failed(
+                    role: str, request_id: str, step: int = steps + 1,
+                ) -> None:
+                    arms.record_request_failed(
+                        role, request_id, step_id=arms.envelope_step(step),
+                    )
+
                 if stream:
                     # 流式：思考/文本 chunk 经 BlockStreamer 合帧落盘（S19），
                     # 聚合回完整 AIMessage。思考块（reasoning/*）与文本 delta
@@ -1592,9 +1746,19 @@ class AgentRuntime:
                     # `model_requests` 数的是**实际发出去**的请求）。先关流、再收尾
                     # 的顺序由本 finally 保证：它与 with 语句同一语义，只是不能写成
                     # with（异步发生器没有 `__aenter__`）。
-                    model_stream = model_coord.astream(messages)
+                    model_stream = model_coord.astream(
+                        messages, on_request_started=record_request_started,
+                        on_request_failed=record_request_failed,
+                    )
+                    stream_items = _model_stream_items(model_stream, arms)
                     try:
-                        async for chunk in model_stream:
+                        async for item in stream_items:
+                            if isinstance(item, SessionEvent):
+                                if item.seq is not None:
+                                    mirrored_request_event_seqs.add(item.seq)
+                                yield to_agent_event(item)
+                                continue
+                            chunk = item
                             collected.append(chunk)
                             reasoning_text = _extract_reasoning(chunk)
                             if reasoning_text:
@@ -1609,12 +1773,12 @@ class AgentRuntime:
                                 ):
                                     yield to_agent_event(streamed)
                     finally:
-                        # 已耗尽时是 no-op；在途时抛 GeneratorExit 进 `astream`，
-                        # 由它记下那一格（outcome=failed）后再把 GeneratorExit 吞掉。
-                        await model_stream.aclose()
-                    # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
-                    for streamed in streamer.end_step(step=step_base + steps + 1):
-                        yield to_agent_event(streamed)
+                        # 先停掉正在拉取的单个 Provider next，再关闭 coordinator，
+                        # 避免并发 aclose 与 anext 争用同一个 async generator。
+                        try:
+                            await stream_items.aclose()
+                        finally:
+                            await model_stream.aclose()
                     # 聚合 chunks 成完整 AIMessage：用 reduce 风格 + 累加。
                     # 空流（模型没吐任何 chunk）退化成空 content。
                     if collected:
@@ -1634,8 +1798,39 @@ class AgentRuntime:
                             ai = AIMessage(content=ai.content, tool_calls=ai.tool_calls)  # type: ignore[arg-type]
                     else:
                         ai = AIMessage(content="")
+                    arms.completed_model_response = ai
+                    # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
+                    for streamed in streamer.end_step(step=step_base + steps + 1):
+                        yield to_agent_event(streamed)
                 else:
-                    ai = await model_coord.ainvoke(messages)
+                    invoke_task = asyncio.create_task(model_coord.ainvoke(
+                        messages, on_request_started=record_request_started,
+                        on_request_failed=record_request_failed,
+                    ))
+                    try:
+                        while not invoke_task.done():
+                            for request_event in await _wait_for_request_events_or_task(
+                                invoke_task, arms,
+                            ):
+                                if request_event.seq is not None:
+                                    mirrored_request_event_seqs.add(request_event.seq)
+                                yield to_agent_event(request_event)
+                        ai = invoke_task.result()
+                    finally:
+                        if not invoke_task.done():
+                            invoke_task.cancel()
+                        await asyncio.gather(invoke_task, return_exceptions=True)
+                        if (
+                            not invoke_task.cancelled()
+                            and invoke_task.exception() is None
+                        ):
+                            arms.completed_model_response = invoke_task.result()
+                # ainvoke 与空流没有 chunk 作为镜像锚点；将尚未镜像的请求事实按
+                # append 顺序补出。流式分支通常已在 Provider 等待期间逐条镜像。
+                for request_event in arms.drain_model_request_events():
+                    if request_event.seq is not None:
+                        mirrored_request_event_seqs.add(request_event.seq)
+                    yield to_agent_event(request_event)
                 # `#313`（T5）：响应一拿到就**先记账**，早于下面任何接纳判定——
                 # 空响应 / DSML 泄漏 / 后续任何拒绝都**不**退回这一次请求的消耗
                 # （请求真的发出去了、Provider 也真的计了费）。此前 usage 只在
@@ -1652,8 +1847,13 @@ class AgentRuntime:
                 request_events = self._record_model_requests(
                     session, model_coord, run_id=run_id, step=step_base + steps + 1,
                     usage=usage, cost=model_cost, model=model_name,
+                    settled_request_events=arms.settled_request_events,
                 )
                 for request_event in request_events:
+                    if request_event.seq in mirrored_request_event_seqs:
+                        continue
+                    if request_event.seq is not None:
+                        mirrored_request_event_seqs.add(request_event.seq)
                     yield to_agent_event(request_event)
                 # session 树账的 requests / tokens / cost 计数点（`#318`）：与本步的
                 # `model/request` 事件一一对应——**减一**：本步准入已在 `admit_session_step`
@@ -2241,6 +2441,7 @@ class AgentRuntime:
         self, session: Session, coord: ModelFallbackCoordinator, *,
         run_id: str | None, step: int, usage: dict[str, int] | None,
         cost: Decimal | None, model: str | None,
+        settled_request_events: Mapping[str, SessionEvent],
     ) -> list[SessionEvent]:
         """把本步的每一次**实际**请求落成 durable `model/request` 并返回（供镜像）。
 
@@ -2252,6 +2453,10 @@ class AgentRuntime:
         attempts = coord.drain_requests()
         events: list[SessionEvent] = []
         for index, attempt in enumerate(attempts):
+            settled = settled_request_events.get(attempt.request_id or "")
+            if settled is not None:
+                events.append(settled)
+                continue
             produced_response = (
                 index == len(attempts) - 1
                 and attempt.outcome == REQUEST_OUTCOME_COMPLETED
@@ -2259,6 +2464,7 @@ class AgentRuntime:
             events.append(self._append_model_request(
                 session, role=attempt.role, outcome=attempt.outcome,
                 run_id=run_id, step=step,
+                request_id=attempt.request_id,
                 usage=usage if produced_response else None,
                 cost=cost if produced_response else None,
                 model=model if produced_response else None,
@@ -2269,6 +2475,7 @@ class AgentRuntime:
         self, session: Session, *, role: str, outcome: str,
         run_id: str | None, step: int, usage: dict[str, int] | None = None,
         cost: Decimal | None = None, model: str | None = None,
+        request_id: str | None = None,
     ) -> SessionEvent:
         """落一条 `model/request`（`model_requests` 的唯一计数点，`02 §5.1`）。
 
@@ -2277,6 +2484,8 @@ class AgentRuntime:
         引入与 wire 不等价的二进制近似（`11 §6.1`：二进制浮点相等不是契约）。
         """
         data: dict[str, Any] = {"role": role, "outcome": outcome}
+        if request_id is not None:
+            data["request_id"] = request_id
         if model:
             data["model"] = model
         if usage:
@@ -2533,12 +2742,30 @@ class AgentRuntime:
                 session_snapshot = session_admission.snapshot
             else:
                 session_snapshot = await self._session_budget.snapshot()
-        continuation, closeout_source, closeout_events = await self._closeout_continuation(
+        closeout_task = asyncio.create_task(self._closeout_continuation(
             arms, trigger_dimension=trigger_dimension,
             consumed=consumed_before, limits=launch.limits, step_id=envelope_step,
             blocked_by=blocked_by, reason=reason, stuck=stuck_payload,
             session_snapshot=session_snapshot,
-        )
+        ))
+        mirrored_closeout_event_seqs: set[int] = set()
+        try:
+            while not closeout_task.done():
+                for request_event in await _wait_for_request_events_or_task(
+                    closeout_task, arms,
+                ):
+                    if request_event.seq is not None:
+                        mirrored_closeout_event_seqs.add(request_event.seq)
+                    yield to_agent_event(request_event)
+            continuation, closeout_source, closeout_events = closeout_task.result()
+            for request_event in arms.drain_model_request_events():
+                if request_event.seq is not None:
+                    mirrored_closeout_event_seqs.add(request_event.seq)
+                yield to_agent_event(request_event)
+        finally:
+            if not closeout_task.done():
+                closeout_task.cancel()
+            await asyncio.gather(closeout_task, return_exceptions=True)
         # closeout 的请求落进 session 树账（`#318`）：它也是一次真实请求
         # （`02 §5.1` 把 closeout 与 primary / fallback 并列）；usage / cost 从
         # 产出响应的那格事件取（缺席 = 该维转未知，None 粘性）。
@@ -2567,6 +2794,8 @@ class AgentRuntime:
         # closeout 的 `model/request` 先镜像再落 `run/paused`：两条都是 durable，
         # 顺序与落盘顺序一致（流帧必须是落盘日志的前缀，见 golden）。
         for closeout_event in closeout_events:
+            if closeout_event.seq in mirrored_closeout_event_seqs:
+                continue
             yield to_agent_event(closeout_event)
         # closeout 那次请求已经落账（`_closeout_continuation` 里 append）⇒ 重新算一次
         # 快照，让它包含进去。两次都从事件读，所以这是"再读一次真相"，不是累加。
@@ -2775,6 +3004,10 @@ class AgentRuntime:
                 type(error).__name__,
             )
             return fallback, CLOSEOUT_DETERMINISTIC, []
+        request_id = str(uuid4())
+        request_started_event = arms.record_request_started(
+            PROVIDER_ROLE_CLOSEOUT, request_id, step_id=step_id,
+        )
         try:
             response = await self._raw_model.ainvoke(
                 [*messages, HumanMessage(content=_closeout_instruction(
@@ -2782,6 +3015,13 @@ class AgentRuntime:
                     reason=reason, stuck=stuck,
                 ))],
             )
+        except asyncio.CancelledError:
+            self._append_model_request(
+                arms.session, role=PROVIDER_ROLE_CLOSEOUT,
+                outcome=REQUEST_OUTCOME_FAILED, run_id=arms.run_id,
+                step=step_id, request_id=request_id,
+            )
+            raise
         except Exception as error:  # noqa: BLE001 - 同上：模型 closeout 不可用不是失败
             logger.warning(
                 "closeout 模型调用失败（%s）——回落确定性 continuation",
@@ -2789,16 +3029,21 @@ class AgentRuntime:
             )
             # 请求发出去过（只是没拿到响应）⇒ 照样落账，usage / cost 缺席
             # （`11 §6.1`：不可得 ≠ 0）。
-            return fallback, CLOSEOUT_DETERMINISTIC, [self._append_model_request(
+            failed_event = self._append_model_request(
                 arms.session, role=PROVIDER_ROLE_CLOSEOUT,
                 outcome=REQUEST_OUTCOME_FAILED, run_id=arms.run_id, step=step_id,
-            )]
+                request_id=request_id,
+            )
+            return fallback, CLOSEOUT_DETERMINISTIC, [
+                request_started_event, failed_event,
+            ]
         usage = _usage_from_response(response)
         cost = cost_usd_from_response(response)
         request_event = self._append_model_request(
             arms.session, role=PROVIDER_ROLE_CLOSEOUT,
             outcome=REQUEST_OUTCOME_COMPLETED, run_id=arms.run_id, step=step_id,
             usage=usage, cost=cost, model=_model_name_from_response(response),
+            request_id=request_id,
         )
         # closeout 的 usage 也要进本执行的 token 账（原来只有主循环的响应入账）。
         # 同口径收口（`#552` C1）与主循环累加点共用 `_accumulate_usage`。
@@ -2808,7 +3053,9 @@ class AgentRuntime:
         normalized = normalize_continuation(parsed)
         if normalized is None:
             logger.warning("closeout 产出不合契约——回落确定性 continuation")
-            return fallback, CLOSEOUT_DETERMINISTIC, [request_event]
+            return fallback, CLOSEOUT_DETERMINISTIC, [
+                request_started_event, request_event,
+            ]
         # 模型给的 continuation 也过 `apply_blocked_by`（`#315`；2026-09-26 两轴审查
         # 那个 P1 的后半）。**为什么不能在模型分支上省掉**：`blocked_by` 是已确证的事实
         # （Ledger 行 + 事件都已落盘），而预算暂停的 closeout 走的是**这一支**
@@ -2817,7 +3064,8 @@ class AgentRuntime:
         # 而那次恢复必被开工前的 409 挡死——`03 §5` / ADR-0044 D4 禁止的
         # "暗示可安全续跑"。
         return (
-            apply_blocked_by(normalized, blocked_by), CLOSEOUT_MODEL, [request_event],
+            apply_blocked_by(normalized, blocked_by), CLOSEOUT_MODEL,
+            [request_started_event, request_event],
         )
 
     async def _terminal_context_exceeded(

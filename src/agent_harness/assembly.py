@@ -19,7 +19,7 @@ import platform
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
@@ -42,6 +42,11 @@ from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
+
+if TYPE_CHECKING:
+    # profiles 模块在函数体内延迟导入（与 BUILTIN_PROFILES 取用点同款）；这里
+    # 只为 `_root_profile_spec` 的返回值注解服务。
+    from agent_harness.agent.profiles import AgentSpec
 from agent_harness.prompt import (
     DEFAULT_REGISTRY,
     build_registry,
@@ -194,6 +199,27 @@ class _RootTooling:
     runtime_multiagent_provider: Any | None
 
 
+def _root_profile_spec(agent_profile: str | None) -> AgentSpec:
+    """根档位声明的唯一取用点（#615②）：根配额 depth / delegations 同源。
+
+    `_build_tooling`（DelegateTool 的树配额）与 `build_runtime`（multiagent
+    provider.activate 的树账）此前**各写一遍**取用式（`agent_profile or "main"`
+    vs `is not None` 分支）——漂移 = 工具面文案里的"整棵委派树最多 N 次"与树账
+    的 max_delegations 各说各话；"" 边界还一处静默落 main、一处 KeyError
+    （Web 边界已 422 掉空串，属死输入潜伏分叉，统一后两侧同形）。
+    注意："无档位"语义（根 system_prompt 走文本包裹、registry 不收窄）仍以
+    `profile_spec is not None` 判定，**不**经过本函数——那两处的 None 是
+    有意义的状态，不是配额缺省。
+    """
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+
+    return (
+        BUILTIN_PROFILES[agent_profile]
+        if agent_profile is not None
+        else BUILTIN_PROFILES["main"]
+    )
+
+
 def _build_tooling(
     settings: Settings,
     wiring: CapabilityWiring,
@@ -213,12 +239,8 @@ def _build_tooling(
     工具来源必须同时落在两处（漏落 = `tests/test_assembly_root_registry_names.py`
     的三方对账红灯）。
     """
-    from agent_harness.agent.profiles import BUILTIN_PROFILES
-
-    # #286：根委派配额来自档位声明（与 build_runtime 的 root_max_delegations 同源）。
-    root_max_delegations = (
-        BUILTIN_PROFILES[agent_profile or "main"]
-    ).max_delegations
+    # #286：根委派配额来自档位声明（与 build_runtime 的树账同一取用点）。
+    root_max_delegations = _root_profile_spec(agent_profile).max_delegations
     # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
     # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
     # create() 对它响亮拒绝（防改写属主绑定，tests/sandbox/test_workspace_registry.py
@@ -413,10 +435,10 @@ async def build_runtime(
     if agent_profile is not None:
         profile_spec = BUILTIN_PROFILES[agent_profile]
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
-    root_max_depth = (profile_spec if profile_spec is not None
-                      else BUILTIN_PROFILES["main"]).max_depth
-    root_max_delegations = (profile_spec if profile_spec is not None
-                            else BUILTIN_PROFILES["main"]).max_delegations
+    # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
+    root_profile = _root_profile_spec(agent_profile)
+    root_max_depth = root_profile.max_depth
+    root_max_delegations = root_profile.max_delegations
 
     # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
     # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。

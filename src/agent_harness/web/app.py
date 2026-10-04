@@ -82,6 +82,7 @@ from agent_harness.session.service import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    EventLogCorruptError,
     InvalidDecision,
     InvalidSessionId,
     PendingApprovalConflict,
@@ -121,6 +122,7 @@ from agent_harness.web.domain_errors import (
     storage_http_error,
     storage_http_status,
 )
+from agent_harness.web.metrics import METRICS_CONTENT_TYPE, collect_process_metrics
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
@@ -1517,6 +1519,20 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             "checkpoint_save_failures": checkpoint_save_failure_count(),
         }
 
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """进程健康观测面（#612）：RSS / gc 堆 / 存活 task / uptime。
+
+        Prometheus 文本暴露格式（v0.0.4）；Diagnostic 层，Event≠Log，不进
+        SessionEvent。读取零副作用（gc 扫描在 worker 线程），单项采集失败
+        ⇒ 该指标整行缺席（缺席≠占位值），不影响任何业务路径（不变量 #21）。
+        默认无鉴权——与 /api/health 同一口径（AC5，不引入开关）。
+        """
+        return Response(
+            content=await collect_process_metrics(),
+            media_type=METRICS_CONTENT_TYPE,
+        )
+
     @app.get("/api/sessions")
     async def list_sessions(
         workspace_id: str | None = None,
@@ -1813,6 +1829,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             ActiveRunConflict,
             RecoveryConflict,
+            EventLogCorruptError,
             SeqConflict,
             WorkspaceBindingConflict,
             WorkspaceNotFound,
@@ -1821,6 +1838,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留需人工裁决的 UNKNOWN
             # tool_call，不伪造结果（不变量 #14）。
+            # EventLogCorruptError → 409（#565）：events.jsonl 完整性闸门拒绝——
+            # 完整坏行 / seq 断层 / seq 重复，不可重试，需人工修复。
             # WorkspaceBindingConflict → 409（#266）：cwd 锚与沙箱映射互相矛盾，
             # 拒绝静默选边（判定见 `service._reconcile_workspace_binding`）。
             # WorkspaceNotFound → 404（中央映射既有条目）：#266 守卫对 cwd 已删
@@ -2193,12 +2212,15 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             InvalidDecision,
             RecoveryConflict,
+            EventLogCorruptError,
             SeqConflict,
         ) as e:
             # RecoveryConflict → 409：RUNNING/UNKNOWN 需人工裁决，不伪造不盲跑
             # （不变量 #14）；#547 起该分支 detail 附 pending_decisions 清单。
             # InvalidDecision → 422：裁决值/目标/重复提交非法（#547 预检）。
             # SeqConflict → 409：日志 seq 冲突（BUG-011）。
+            # EventLogCorruptError → 409（#565）：完整性闸门（完整坏行 / seq
+            # 断层 / seq 重复），不可重试，需按定位记录人工修复。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 
@@ -2323,20 +2345,27 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             ActiveRunConflict,
             RecoveryConflict,
+            EventLogCorruptError,
             QueueItemNotFound,
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
             BudgetRejection,
             BudgetConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
+            # EventLogCorruptError → 409（#565）：idle→launched 会按需走
+            # self.recover，完整性闸门拒绝损坏日志（不可重试）。
             # SupersedeTargetInvalid → 409（ADR-0030 §4.6）：目标不对，不是会话不存在。
             # WorkspaceBindingConflict → 409（#266）：idle 分支会走 resume_and_launch，
             # 工作目录归属冲突同样拒绝静默选边。
+            # WorkspaceNotFound → 404（#615①）：同样经 resume_and_launch——外部 cwd
+            # 在两次请求之间被删时中央映射既有条目本就要接住，/resume 元组同款
+            # （#564 审查 P2-1），不新增状态码语义。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
@@ -2429,9 +2458,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             ActiveRunConflict,
             RecoveryConflict,
+            EventLogCorruptError,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
         ) as e:
+            # WorkspaceNotFound → 404（#615①）：投递走 resume_and_launch，外部 cwd
+            # 在排队之后被删 → 中央映射既有条目，与 /messages、/resume 同口径。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05（审查 P2-1）：flush 在 idle 时走 resume_and_launch 构造

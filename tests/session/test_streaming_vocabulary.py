@@ -15,6 +15,7 @@ import json
 from agent_harness.session import (
     EVENT_TYPES,
     MODEL_DELTA,
+    MODEL_REQUEST_STARTED,
     MODEL_STARTED,
     STREAM_ONLY_TYPES,
     TEXT_DELTA,
@@ -48,6 +49,11 @@ class TestStreamingVocabulary:
         assert TOOL_OUTPUT_DELTA == "tool/output_delta"
         assert TOOL_OUTPUT_DELTA in EVENT_TYPES
         assert TOOL_OUTPUT_DELTA not in STREAM_ONLY_TYPES
+
+    def test_model_request_started_is_durable_not_stream_only(self):
+        assert MODEL_REQUEST_STARTED == "model/request-started"
+        assert MODEL_REQUEST_STARTED in EVENT_TYPES
+        assert MODEL_REQUEST_STARTED not in STREAM_ONLY_TYPES
 
     def test_text_delta_is_durable_model_delta_stays_stream_only(self):
         """ADR-0016 §3.1：合帧文本增量 = 新类型 text/delta（durable）；

@@ -421,6 +421,72 @@ def run_lane(lane: Lane) -> tuple[int, float, str]:
         return 127, time.time() - started, f"⚠ 无法执行：{exc}"
 
 
+# --------------------------------------------------------------------------- #
+# 环境失败签名（#609，协议 §8.6 机械化口径）
+# --------------------------------------------------------------------------- #
+#: V1 只收**已有留档证据**的两条同一事件形态（#338 轮 7 孵化风暴，tracker 2026-10-03
+#: 节：0xC0000142 ×133，沙箱孵化 / git 外调 / gate0 探针 / instance_lock 全同因；同窗
+#: 并发全量、同树 6 轮全绿 ⇒ 结构上无法归因代码）。**新签名须另走新票**——窄进纪律
+#: 同 §8.6 已知 flake 表：签名必须机械可复核，防「把真失败洗成环境项」的通道扩张。
+#: 方案依据（协议 §1.3 三源）：pytest exit-codes（runner 内部错误 ≠ 测试失败，分立
+#: 信号）、Buildbot EXCEPTION（infra 自身失败独立成态、绝不洗绿）、MS WinError.h
+#: ERROR_DLL_INIT_FAILED=1114(0x45A) + NTSTATUS STATUS_DLL_INIT_FAILED=0xC0000142
+#: （本地实测 3221225794 == 0xC0000142）。
+ENV_SIGNATURES: tuple[dict, ...] = (
+    {
+        "id": "exit-0xc0000142",
+        "rc": 3221225794,  # NTSTATUS STATUS_DLL_INIT_FAILED 作为进程退出码
+        "output_contains": None,  # rc 本身即签名（风暴期实测留档形态）
+        "evidence": "STATUS_DLL_INIT_FAILED (0xC0000142)：DLL 初始化失败——"
+                    "进程孵化风暴形态（#338 轮 7 ×133 留档）",
+    },
+    {
+        "id": "winerror-1114",
+        "rc": 127,  # run_lane 的 OSError 兜底（解释器/可执行文件起不来）
+        "output_contains": "WinError 1114",  # ERROR_DLL_INIT_FAILED
+        "evidence": "WinError 1114 (ERROR_DLL_INIT_FAILED): A dynamic link library "
+                    "(DLL) initialization routine failed.",
+    },
+)
+
+
+def classify_env_failure(rc: int, output: str) -> dict | None:
+    """对**失败**车道按环境项签名表分类；不命中返回 None。
+
+    只认 **rc 形态锚定**：输出里出现签名字样但 rc 不在表内 ⇒ 不命中（普通断言红
+    rc=1 可以原样引用环境签名文本——纯文本匹配放行就是洗绿通道）；rc=124（超时）
+    另有语义不入本表；rc=0 不分类。命中返回签名条目（id + evidence），供读数与
+    打印面取值。
+    """
+    if rc == 0:
+        return None
+    for sig in ENV_SIGNATURES:
+        if rc != sig["rc"]:
+            continue
+        needle = sig["output_contains"]
+        if needle is not None and needle not in (output or ""):
+            continue
+        return sig
+    return None
+
+
+def env_verdict_line(results: list[tuple[Lane, int, float, str]]) -> str | None:
+    """§8.6 口径行（#609）：失败车道**全部**命中环境签名才返回，否则 None。
+
+    归因 ≠ 通过：本行不改变判定/退出码（风暴期读数仍非绿证据，环境恢复后重跑取
+    干净读数）；混合（env + 真红）不打——真红永远优先于归因。
+    """
+    failed = [(rc, out) for _lane, rc, _s, out in results if rc != 0]
+    if not failed:
+        return None
+    sigs = [classify_env_failure(rc, out) for rc, out in failed]
+    if any(sig is None for sig in sigs):
+        return None
+    ids = "、".join(sorted({sig["id"] for sig in sigs}))
+    return (f"环境项之外 0 失败（{len(sigs)}/{len(sigs)} 命中签名 {ids}）⇒ 非代码归因，"
+            "重跑取干净读数（判定仍 FAIL，不洗绿）")
+
+
 def surface_report(since: str) -> str:
     """改动面（**信息展示**，不影响跑什么）。
 
@@ -581,8 +647,18 @@ def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
             tail = [ln for ln in out.split("\n") if ln.strip()][-8:]
             if tail:
                 entry["output_tail"] = tail
+            # #609：环境项归因（additive；status / result / 退出码全不变，不洗绿）。
+            sig = classify_env_failure(rc, out)
+            if sig is not None:
+                entry["env_signature"] = {"id": sig["id"], "evidence": sig["evidence"][:200]}
         lanes.append(entry)
     failed = [e["name"] for e in lanes if e["status"] != "PASS"]
+    # §8.6 结构化环境项（#609）：恒在（干净运行 = 空列表）；命中签名的车道逐条记。
+    env_failures = [
+        {"lane": e["name"], "rc": e["rc"],
+         "signature": e["env_signature"]["id"], "evidence": e["env_signature"]["evidence"]}
+        for e in lanes if "env_signature" in e
+    ]
     return {
         "schema": 1,
         "gate": "gate0",
@@ -594,6 +670,9 @@ def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
         "passed": len(lanes) - len(failed),
         "total": len(lanes),
         "failed": failed,
+        # #609（§8.6）：环境项结构化字段——additive、不 bump schema（消费面已核：
+        # CI gate0.yml 只消费退出码；--replay 只比车道名集合 + 每车道 status）。
+        "env_failures": env_failures,
         "wall_seconds": round(wall, 2),
         "budget_seconds": GATE0_BUDGET,
         "lane_timeout_seconds": LANE_TIMEOUT,
@@ -1000,6 +1079,11 @@ def main(argv: list[str]) -> int:
     if failed:
         print(f"Gate-0 FAIL：{len(results) - len(failed)}/{len(results)} 通过，墙钟 {wall:.1f}s")
         print(f"失败车道：{'、'.join(failed)}")
+        # #609（§8.6）：失败车道**全部**命中环境签名才打口径行——归因展示，判定与
+        # 退出码不变（混合不打，真红优先；详见 env_verdict_line docstring）。
+        env_line = env_verdict_line(results)
+        if env_line is not None:
+            print(env_line)
         print(f"增量验证：修好后只重跑那一条即可，例如  python scripts/gate0.py --only {failed[0]}")
         return 1
     print(f"Gate-0 PASS：{len(results)}/{len(results)} 通过，墙钟 {wall:.1f}s")
