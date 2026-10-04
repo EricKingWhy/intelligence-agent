@@ -233,15 +233,22 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
 _STUB_LANE_NAMES = ("diff-check", "ruff", "oxlint", "tsc", "guards", "coverage")
 
 
-def _stub_lanes():
+def _stub_lanes(missing: str | None = None):
     return [
-        gate0.Lane(name, f"{name} 车道（桩）", [sys.executable, "-c", "pass"], gate0.REPO_ROOT)
+        gate0.Lane(name, f"{name} 车道（桩）",
+                   None if name == missing else [sys.executable, "-c", "pass"],
+                   gate0.REPO_ROOT,
+                   blocked="找不到 node" if name == missing else "")
         for name in _STUB_LANE_NAMES
     ]
 
 
-def _patch_main_io(monkeypatch, outcomes):
-    """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。"""
+def _patch_main_io(monkeypatch, outcomes, missing: str | None = None):
+    """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。
+
+    `missing` 指定一条车道模拟「工具缺失」（argv=None）——该分支的语义（fail-closed：
+    不得被 env 归类洗绿）同样要有钉，见 `test_main_tool_missing_lane_is_not_env_classified`。
+    """
 
     def fake_run_lane(lane):
         rc, out = outcomes[lane.name]
@@ -250,7 +257,7 @@ def _patch_main_io(monkeypatch, outcomes):
     class _Proc:
         stdout = "a" * 40 + "\n"
 
-    monkeypatch.setattr(gate0, "build_lanes", lambda since="": _stub_lanes())
+    monkeypatch.setattr(gate0, "build_lanes", lambda since="": _stub_lanes(missing))
     monkeypatch.setattr(gate0, "run_lane", fake_run_lane)
     monkeypatch.setattr(gate0, "git", lambda *args: _Proc)
     monkeypatch.setattr(gate0, "surface_report", lambda since: "")
@@ -280,3 +287,22 @@ def test_main_fail_branch_omits_env_verdict_line_on_mixed_red(monkeypatch, capsy
     assert rc == 1
     assert "Gate-0 FAIL" in out
     assert "环境项之外 0 失败" not in out  # 混合真红 ⇒ 口径行缺席（真红优先）
+
+
+def test_main_tool_missing_lane_is_not_env_classified(monkeypatch, capsys):
+    """工具缺失（argv=None）不得被当成环境项：rc=1、FAIL 且口径行缺席（fail-closed）。
+
+    #636 的机制就是这个分支：CI 上 oxlint/tsc 因缺 `web/node_modules` 走 argv=None ⇒
+    main 记 rc=1「工具缺失」混入 ⇒ 口径行按语义（混合不打）缺席。车道清单固定成桩后，
+    这条分支会失去（原先只是偶然的）覆盖，故独立钉住其语义：
+    「工具缺失」是 fail-closed 的真实失败，不得被 env 归因洗绿。
+    """
+    names = list(_STUB_LANE_NAMES)
+    outcomes = {n: (3221225794, "boom") for n in names}
+    _patch_main_io(monkeypatch, outcomes, missing=names[0])
+    rc = gate0.main(["--no-record"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Gate-0 FAIL" in out
+    assert "工具缺失" in out
+    assert "环境项之外 0 失败" not in out

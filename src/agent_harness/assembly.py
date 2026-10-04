@@ -341,7 +341,8 @@ def root_registry_tool_names(
 
     #564 审查 P2-1：validator 若走完整 `_build_tooling`，`LocalSubprocessSandbox
     .__init__` 会对 workspace `mkdir`，发生在 service 的归属对账（#266
-    `WorkspaceNotFound` 守卫）**之前** ⇒ 坏名 422 会把已删 cwd 凭空重建、合法名
+    `SessionCwdUnavailable` 守卫，`WorkspaceNotFound` 子型）**之前** ⇒ 坏名 422
+    会把已删 cwd 凭空重建、合法名
     resume 掩蔽守卫。名字集不依赖 sandbox 实例：本地工具"构造器只存依赖"（既有
     判定，`tests/agent/test_tool_scope_reconciliation.py` 传 None 读 `.name`）；
     读回工具名只由 Provider 选择决定（store 构造无副作用，mkdir 在写路径）；
