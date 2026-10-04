@@ -243,6 +243,9 @@ class TestCompactorBracketMetadata:
         assert result.summary is not None
         assert result.summary.startswith("## 原始目标与用户约束\n")
         assert "读取 old.txt 后继续。" in result.summary
+        assert result.compacted_turn_count == 1
+        assert not result.failures
+        assert len(model.snapshots) == 1
 
     @pytest.mark.asyncio
     async def test_compact_summary_is_eight_section(self):

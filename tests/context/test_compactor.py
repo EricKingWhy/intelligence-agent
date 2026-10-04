@@ -263,49 +263,17 @@ async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_pat
     )
 
 
-@pytest.mark.asyncio
-async def test_failed_second_summary_attempt_does_not_accept_rejected_candidate():
-    class TwoResponseModel:
-        def __init__(self):
-            self.responses = [
-                AIMessage(content=MODEL_SECTIONS),
-                AIMessage(content=[{"type": "text", "text": "bad"}]),
-            ]
-            self.calls = 0
-
-        async def ainvoke(self, messages):
-            response = self.responses[self.calls]
-            self.calls += 1
-            return response
-
-    messages = [
-        HumanMessage(content="goal"),
-        AIMessage(content="history " * 4000),
-        HumanMessage(content="next"),
-    ]
-    model = TwoResponseModel()
-    result = await ContextCompactor(
-        model, max_context_tokens=100_000, auto_compact_threshold=0.30,
-    ).compact(
-        messages, estimate_message_tokens(messages), reserved_tokens=30_000,
-    )
-
-    assert model.calls == 2
-    assert [failure.error_class for failure in result.failures] == [
-        "target_not_reached", "non_text",
-    ]
-    assert result.compacted_turn_count == 0
-    assert result.summary is None
-    assert result.bracket_id is None
-    assert result.messages == messages
-
-
 @pytest.mark.parametrize(
     ("second_failure", "expected_class"),
-    [("timeout", "timeout"), ("provider", "transport_error")],
+    [
+        ("non_text", "non_text"),
+        ("timeout", "timeout"),
+        ("provider", "transport_error"),
+        ("target", "target_not_reached"),
+    ],
 )
 @pytest.mark.asyncio
-async def test_rejected_candidate_is_not_used_when_retry_raises(
+async def test_rejected_candidate_is_not_used_when_retry_fails(
     second_failure, expected_class,
 ):
     class TwoResponseModel:
@@ -318,7 +286,11 @@ async def test_rejected_candidate_is_not_used_when_retry_raises(
                 return AIMessage(content=MODEL_SECTIONS)
             if second_failure == "timeout":
                 raise TimeoutError("summary timed out")
-            raise ConnectionError("provider unavailable")
+            if second_failure == "provider":
+                raise ConnectionError("provider unavailable")
+            if second_failure == "target":
+                return AIMessage(content=MODEL_SECTIONS)
+            return AIMessage(content=[{"type": "text", "text": "bad"}])
 
     messages = [
         HumanMessage(content="goal"),
@@ -366,10 +338,11 @@ async def test_rejected_first_candidate_is_not_used_when_retry_succeeds():
         HumanMessage(content="next"),
     ]
     model = TwoResponseModel()
+    reserved_tokens = 29_000
     result = await ContextCompactor(
         model, max_context_tokens=100_000, auto_compact_threshold=0.30,
     ).compact(
-        messages, estimate_message_tokens(messages), reserved_tokens=29_000,
+        messages, estimate_message_tokens(messages), reserved_tokens=reserved_tokens,
     )
 
     assert model.calls == 2
@@ -381,6 +354,7 @@ async def test_rejected_first_candidate_is_not_used_when_retry_succeeds():
     assert "细节" not in result.summary
     assert "已完成读取历史记录，并选择直接展示内容。" in result.summary
     assert result.bracket_id is not None
+    assert estimate_message_tokens(result.messages) + reserved_tokens < 30_000
 
 
 @pytest.mark.asyncio
@@ -418,6 +392,59 @@ async def test_failed_summaries_over_hard_guard_raise_with_both_failures():
     assert messages == [
         HumanMessage(content="goal"),
         AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("token_estimate", "should_raise"),
+    [(84_999, False), (85_000, False), (85_001, True)],
+)
+@pytest.mark.asyncio
+async def test_failed_summaries_keep_inclusive_hard_guard_boundary(
+    token_estimate, should_raise,
+):
+    class FailingModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            raise ConnectionError("provider unavailable")
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history"),
+        HumanMessage(content="next"),
+    ]
+    model = FailingModel()
+    compactor = ContextCompactor(
+        model,
+        max_context_tokens=100_000,
+        auto_compact_threshold=0.30,
+        hard_guard_threshold=0.85,
+    )
+
+    if should_raise:
+        with pytest.raises(ContextWindowExceededError) as error:
+            await compactor.compact(messages, token_estimate)
+        assert [failure.error_class for failure in error.value.failures] == [
+            "transport_error", "transport_error",
+        ]
+    else:
+        result = await compactor.compact(messages, token_estimate)
+        assert result.compacted_turn_count == 0
+        assert result.summary is None
+        assert result.bracket_id is None
+        assert result.messages == messages
+        assert [failure.error_class for failure in result.failures] == [
+            "transport_error", "transport_error",
+        ]
+
+    assert model.calls == 2
+    assert messages == [
+        HumanMessage(content="goal"),
+        AIMessage(content="history"),
         HumanMessage(content="next"),
     ]
 
