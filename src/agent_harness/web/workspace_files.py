@@ -105,6 +105,7 @@ from agent_harness.observability import get_observability_sink
 from agent_harness.observability.tracer import RunTracer
 from agent_harness.session import Session
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
+from agent_harness.session.progress import PROGRESS_DIRNAME
 from agent_harness.storage.artifact import slice_lines
 from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.storage.operation import OperationContext
@@ -225,8 +226,16 @@ def _list_files(sandbox: Sandbox, pattern: str, limit: int) -> WorkspaceFileList
 
     `total` 是匹配总数、`truncated` 是"有没被 limit 截掉"——两者都来自同一份匹配结果，
     不存在"报 500 条其实有 300 条"的可能。
+
+    harness 内部状态目录（W-05 进度文件投影 `agent-progress/<session-id>/`）不出现在
+    浏览面：它是派生物不是用户工作产物，混进文件清单既是噪音也诱导经 Web 编辑出
+    第二真相。文件本身仍在工作区里（git 可见、模型可读），这里只过滤**浏览**口径，
+    在 API 层做而不是 Sandbox 层——两种 Sandbox 后端共用同一过滤，且不动模型侧视野。
     """
-    matched = sandbox.list_files(pattern)
+    matched = [
+        rel for rel in sandbox.list_files(pattern)
+        if rel.split("/", 1)[0] != PROGRESS_DIRNAME
+    ]
     return WorkspaceFileList(
         files=matched[:limit],
         total=len(matched),

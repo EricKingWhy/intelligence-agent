@@ -12,12 +12,19 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
+from pydantic import BaseModel
 
 from agent_harness.agent import AgentRuntime
-from agent_harness.session import RUN_COMPLETED, RUN_STARTED, Session
+from agent_harness.session import (
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_PAUSED,
+    RUN_STARTED,
+    Session,
+)
 from agent_harness.session.runmanager import RunManager
 from agent_harness.session.store import JsonlSessionStore
-from agent_harness.tooling import ToolExecutor, ToolRegistry
+from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.scripted_model import ScriptedModel
 
 
@@ -25,10 +32,13 @@ def _make_session(tmp_path: Path) -> Session:
     return Session.start(JsonlSessionStore(root=tmp_path / "sessions"))
 
 
-def _runtime(model) -> AgentRuntime:
+def _runtime(model, tools=()) -> AgentRuntime:
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register(tool)
     return AgentRuntime(
-        model=model, registry=ToolRegistry(),
-        executor=ToolExecutor(ToolRegistry()), max_agent_turns=5,
+        model=model, registry=registry,
+        executor=ToolExecutor(registry), max_agent_turns=5,
     )
 
 
@@ -183,3 +193,161 @@ class TestRunManager:
         await manager.aclose()
         assert run.task is not None and run.task.done()
         assert run.task.cancelled()
+
+
+# ── W-22（#366）：在场管理 run 的孤儿回收 = client_absent 暂停，不是取消 ──
+
+
+class _GateArgs(BaseModel):
+    text: str = "x"
+
+
+class _GateTool(Tool):
+    """在途 Tool 探针：execute 中段挂起，等测试放行（模拟"最后客户端退出时
+    Tool 正在提交"）。执行次数进 `calls`——钉"不盲重试、恰好一次"。"""
+
+    def __init__(self, released: asyncio.Event, calls: list[int]) -> None:
+        self._released = released
+        self._calls = calls
+
+    @property
+    def name(self) -> str:
+        return "gate"
+
+    @property
+    def description(self) -> str:
+        return "挂起直到测试放行。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _GateArgs
+
+    async def execute(self, args: _GateArgs) -> ToolResult:
+        self._calls.append(1)
+        await self._released.wait()
+        return ToolResult.success(message=args.text)
+
+
+def _gate_round() -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"id": "call_w22", "name": "gate", "args": {"text": "g"}}],
+    )
+
+
+class TestPresenceManagedRuns:
+    """`02 §5.2.1` / `11 §6.2`：已纳入在场协议的 run，零订阅者超过宽限后
+    **不**走「取消 ⇒ run/failed(orphaned)」，而是置缺席闸门，由 runtime 在
+    下一个循环顶准入点以 run/paused(client_absent) 收口。未登记的 run（旧
+    Web / CLI）维持既有孤儿回收语义（上方 `test_orphan_run_reclaimed_after_grace`
+    钉住的那条，本类不改它）。"""
+
+    @pytest.mark.asyncio
+    async def test_launch_enrolls_gate_only_when_presence_managed(self, tmp_path):
+        session = _make_session(tmp_path)
+        runtime = _runtime(ScriptedModel([AIMessage(content="done")]))
+        manager = RunManager(disconnect_grace_seconds=60.0)
+        try:
+            run, _sub = manager.launch(session, runtime, "hi", presence_managed=True)
+            assert runtime.client_presence.managed is True
+            assert run.presence_managed is True
+        finally:
+            await manager.aclose()
+
+        # 未登记对照面：另起一个 manager（上一个已 aclose，关停后拒绝 launch）。
+        session2 = _make_session(tmp_path)
+        runtime2 = _runtime(ScriptedModel([AIMessage(content="done")]))
+        manager2 = RunManager(disconnect_grace_seconds=60.0)
+        try:
+            _run2, _sub2 = manager2.launch(session2, runtime2, "hi")
+            assert runtime2.client_presence.managed is False, "默认未登记：行为逐字不变"
+        finally:
+            await manager2.aclose()
+
+    @pytest.mark.asyncio
+    async def test_grace_expiry_pauses_client_absent_instead_of_orphan_cancel(
+        self, tmp_path,
+    ):
+        """宽限到期时 Tool 正在提交：不取消（盲中止副作用）、不重试；工具照常
+        收口后，run 以恰好一条 run/paused(client_absent) 停下，无 run/failed。"""
+        store = JsonlSessionStore(root=tmp_path / "sessions")
+        session = _make_session(tmp_path)
+        released = asyncio.Event()
+        calls: list[int] = []
+        runtime = _runtime(
+            ScriptedModel([_gate_round(), AIMessage(content="done")]),
+            tools=[_GateTool(released, calls)],
+        )
+        manager = RunManager(disconnect_grace_seconds=0.2)
+        try:
+            run, subscriber = manager.launch(
+                session, runtime, "hi", presence_managed=True,
+            )
+            for _ in range(500):
+                if calls:
+                    break
+                await asyncio.sleep(0.01)
+            assert calls == [1], "工具已开始执行（在途中）"
+
+            run.unsubscribe(subscriber)  # 最后一个客户端离开 → 宽限计时
+            await asyncio.sleep(0.4)     # 0.2s 宽限到期 → 置缺席（不是取消）
+            assert run.task is not None and not run.task.done(), (
+                "在途 Tool 未被取消：缺席只挡下一次准入，不中止进行中的提交"
+            )
+            assert not run.reap_requested, "在场管理 run 不走 orphaned 取消臂"
+
+            released.set()               # 在途工具按现有路径收口
+            await asyncio.wait_for(run.task, timeout=5)
+
+            events = store.read_events(session.session_id)
+            types = [e.type for e in events]
+            assert types.count(RUN_PAUSED) == 1, "恰好一条 run/paused"
+            assert RUN_FAILED not in types, "不得再走 run/failed(orphaned) 旧路径"
+            paused = next(e for e in events if e.type == RUN_PAUSED)
+            assert paused.data["reason"] == "client_absent"
+            assert paused.data["trigger_dimension"] == "client_presence"
+            assert calls == [1], "工具恰好执行一次（不盲重试）"
+            assert not run.task.cancelled()
+            assert run.paused is True
+        finally:
+            await manager.aclose()
+
+    @pytest.mark.asyncio
+    async def test_leave_after_pause_does_not_double_write(self, tmp_path):
+        """「已经 paused 时又收到离开事件」：暂停后再订阅再离开（再触发一次
+        回收计时），不得写第二条 run/paused，也不得翻成 run/failed——暂停
+        run 的 task 已收口、runtime 引用已释放，回收分支必须无害跳过。"""
+        store = JsonlSessionStore(root=tmp_path / "sessions")
+        session = _make_session(tmp_path)
+        released = asyncio.Event()
+        calls: list[int] = []
+        runtime = _runtime(
+            ScriptedModel([_gate_round(), AIMessage(content="done")]),
+            tools=[_GateTool(released, calls)],
+        )
+        manager = RunManager(disconnect_grace_seconds=0.2)
+        try:
+            run, subscriber = manager.launch(
+                session, runtime, "hi", presence_managed=True,
+            )
+            for _ in range(500):
+                if calls:
+                    break
+                await asyncio.sleep(0.01)
+            run.unsubscribe(subscriber)
+            await asyncio.sleep(0.4)
+            released.set()
+            await asyncio.wait_for(run.task, timeout=5)
+            assert run.paused is True
+
+            # 已经 paused 之后的"又一次离开"：新订阅者接入又离开 → 计时再起。
+            late = run.subscribe()
+            run.unsubscribe(late)
+            await asyncio.sleep(0.4)
+
+            events = store.read_events(session.session_id)
+            types = [e.type for e in events]
+            assert types.count(RUN_PAUSED) == 1, "不得双写 run/paused"
+            assert RUN_FAILED not in types
+        finally:
+            await manager.aclose()

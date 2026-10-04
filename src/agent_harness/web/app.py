@@ -9,6 +9,7 @@ create_app() 是单一入口——传入 Settings，返回装配好的 FastAPI�
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import sqlite3
@@ -53,11 +54,12 @@ from agent_harness.assembly import (
     initialize_stores,
     root_registry_tool_names,
 )
-from agent_harness.capability.base import CapabilityRegistry
+from agent_harness.capability.base import CapabilityError, CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.tokens import estimate_tokens
+from agent_harness.host_service import HOST_PROTOCOL_VERSION
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -1273,6 +1275,12 @@ class AuthSeamMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        if scope.get("path") == "/api/health":
+            # W-11（#355）：健康探针匿名可达——附着核验发生在鉴权之前（附着方拿到
+            # 凭据前就要判断服务是否活着、形状是否相符）。载荷只含非秘密字段，
+            # tests/host_service/ 钉住不泄密。
+            await self.app(scope, receive, send)
+            return
         identity = IdentityContext("local", "local", ["user", "session"])
         headers = Headers(scope=scope)
         authorization = headers.get("authorization")
@@ -1314,6 +1322,14 @@ class AuthSeamMiddleware:
             await self.app(scope, receive, send)
         finally:
             identity_context_var.reset(token)
+
+
+def _package_version() -> str:
+    """服务版本（health/version/capability 统一面，W-11 #355）。只读元数据，无副作用。"""
+    try:
+        return importlib.metadata.version("intelligence-agent")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
@@ -1437,6 +1453,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
 
+    # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
+    # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
+    from agent_harness.web.task_delivery import register_task_routes
+
+    register_task_routes(app, validate_session_id=validate_session_id)
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
     # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
@@ -1508,15 +1530,29 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/health")
     async def health() -> dict[str, object]:
-        """存活探针 + durability 观测（#515）。
+        """存活探针 + durability 观测（#515）+ 附着协议形状（W-11 #355）。
 
         `checkpoint_save_failures` 是进程级累计的 checkpoint 维护失败次数（重启归零）：
         非零说明有 checkpoint 帧丢失，之后的 resume 可能回到更旧的稳定边界——这是
         ADR-0004 Round 5 之下 checkpoint 故障唯一的对外口径（不进 SessionEvent）。
+
+        W-11：本端点**匿名可达**（AuthSeamMiddleware 豁免），是附着核验的第一站；
+        载荷只含非秘密字段——协议版本 / 服务版本 / capability 名称（静态配置名，
+        非秘密）+ 是否强制鉴权，token/路径/用户信息一概不进。
         """
+        jwt_configured = bool(settings.jwt_secret and settings.jwt_secret.get_secret_value())
+        try:
+            capability_names: list[str] = sorted(parse_capabilities_config(settings.capabilities))
+        except CapabilityError:
+            # 配置非法由装配路径显式报错（init_failed）；健康面不能因此塌掉。
+            capability_names = []
         return {
             "status": "ok",
             "checkpoint_save_failures": checkpoint_save_failure_count(),
+            "protocol_version": HOST_PROTOCOL_VERSION,
+            "version": _package_version(),
+            "capabilities": capability_names,
+            "auth_required": jwt_configured,
         }
 
     @app.get("/metrics")

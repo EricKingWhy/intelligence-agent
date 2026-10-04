@@ -1,0 +1,3 @@
+# W-11 host token 通道测试的 JWT 签名密钥 fixture（test-signing-secret-*，非真实凭据；
+# 真实凭据按约束永不入库——附录 C 红线）。
+cffeac94767f4213a3f14bf136a23056a434d8ba:tests/host_service/test_serve_subprocess.py:generic-api-key:382

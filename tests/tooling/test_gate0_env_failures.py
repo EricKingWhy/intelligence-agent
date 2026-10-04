@@ -226,6 +226,20 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
 # main(['--no-record']) 全链路，用 capsys 断言口径行的在场/缺席。
 
 
+# 车道清单是**本机环境**的函数：node / `web/node_modules` 缺席时 oxlint、tsc 的
+# `argv=None` ⇒ main 走"工具缺失"分支（rc=1 但**非** env 签名）⇒ 口径行缺席。
+# 本组钉只针对 main() FAIL 分支的接线，故把清单固定成桩——断言不随本机装没装前端
+# 工具而变（否则无 node 的环境跑全量会假红）。
+_STUB_LANE_NAMES = ("diff-check", "ruff", "oxlint", "tsc", "guards", "coverage")
+
+
+def _stub_lanes():
+    return [
+        gate0.Lane(name, f"{name} 车道（桩）", [sys.executable, "-c", "pass"], gate0.REPO_ROOT)
+        for name in _STUB_LANE_NAMES
+    ]
+
+
 def _patch_main_io(monkeypatch, outcomes):
     """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。"""
 
@@ -236,6 +250,7 @@ def _patch_main_io(monkeypatch, outcomes):
     class _Proc:
         stdout = "a" * 40 + "\n"
 
+    monkeypatch.setattr(gate0, "build_lanes", lambda since="": _stub_lanes())
     monkeypatch.setattr(gate0, "run_lane", fake_run_lane)
     monkeypatch.setattr(gate0, "git", lambda *args: _Proc)
     monkeypatch.setattr(gate0, "surface_report", lambda since: "")
@@ -243,7 +258,7 @@ def _patch_main_io(monkeypatch, outcomes):
 
 
 def test_main_fail_branch_prints_env_verdict_line_when_all_env(monkeypatch, capsys):
-    names = [ln.name for ln in gate0.build_lanes("")]
+    names = list(_STUB_LANE_NAMES)
     outcomes = {n: (3221225794, "boom") for n in names}
     _patch_main_io(monkeypatch, outcomes)
     rc = gate0.main(["--no-record"])
@@ -256,7 +271,7 @@ def test_main_fail_branch_prints_env_verdict_line_when_all_env(monkeypatch, caps
 
 
 def test_main_fail_branch_omits_env_verdict_line_on_mixed_red(monkeypatch, capsys):
-    names = [ln.name for ln in gate0.build_lanes("")]
+    names = list(_STUB_LANE_NAMES)
     outcomes = {n: (1, "assert x == y") for n in names}
     outcomes[names[0]] = (3221225794, "boom")
     _patch_main_io(monkeypatch, outcomes)
