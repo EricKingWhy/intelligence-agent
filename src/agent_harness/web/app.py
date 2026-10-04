@@ -58,6 +58,10 @@ from agent_harness.capability.base import CapabilityError, CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.context.project_instructions import (
+    project_instruction_store,
+    release_project_instruction_store,
+)
 from agent_harness.context.tokens import estimate_tokens
 from agent_harness.host_service import HOST_PROTOCOL_VERSION
 from agent_harness.identity import (
@@ -73,6 +77,7 @@ from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import validate_user_protected_fact_annotations
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
@@ -982,6 +987,7 @@ class AppState:
         # lifecycle 通道逐项隔离关闭，web 层不再懂每种 capability 的关闭姿势。
         if wiring is not None:
             await wiring.aclose()
+        release_project_instruction_store(self.settings)
 
 
 # ── 领域服务的组合根适配（#248）──────────────────────────────────────
@@ -1643,6 +1649,48 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 
+    @app.get("/api/sessions/{session_id}/project-instructions")
+    async def get_project_instructions_status(
+        session_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict[str, object]:
+        """Report which repository instruction files were loaded for this session."""
+        service = session_service(app.state.agent)
+        try:
+            await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as error:
+            raise http_error(error) from error
+        return project_instruction_store(
+            app.state.agent.settings,
+        ).status_for_session(session_id)
+
+    @app.post("/api/sessions/{session_id}/project-instructions/reload")
+    async def reload_project_instructions(
+        session_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict[str, object]:
+        """Explicitly reload repository instructions for subsequent model requests."""
+        service = session_service(app.state.agent)
+        try:
+            events = await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as error:
+            raise http_error(error) from error
+        cwd = session_cwd(events)
+        if cwd is None:
+            return {
+                "status": "no_cwd",
+                "project_root": None,
+                "session_cwd": None,
+                "source_paths": [],
+                "searched_directories": [],
+                "unreadable_sources": [],
+                "truncated_sources": [],
+                "total_included_bytes": 0,
+            }
+        store = project_instruction_store(app.state.agent.settings)
+        await asyncio.to_thread(store.reload_for_session, session_id, cwd)
+        return store.status_for_session(session_id)
+
     # Read-only model/profile catalogs use a narrow dependency seam and are
     # registered as one explicit router instead of being captured by this factory.
     register_catalog_routes(app)
@@ -2073,6 +2121,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # #515：硬删要写多张共享表（ledger/checkpoint/meta/工件），锁竞争重试
             # 耗尽时报 503——删除未开始，客户端稍后重试即可。
             raise storage_http_error(e) from e
+        project_instruction_store(app.state.agent.settings).forget_session(session_id)
         return SessionDeleted(
             id=stats.session_id,
             events=stats.events,

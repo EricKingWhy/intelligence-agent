@@ -14,6 +14,7 @@ web 与 CLI 是它的两个 adapter（两个 adapter = 真实 seam）；capabili
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import platform
 from dataclasses import dataclass
@@ -37,6 +38,10 @@ from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
+from agent_harness.context.project_instructions import (
+    ProjectInstructionStore,
+    project_instruction_store,
+)
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import create_chat_model
@@ -229,6 +234,7 @@ def _build_tooling(
     workspace_registry: WorkspaceRegistry,
     session_store: JsonlSessionStore | None,
     agent_profile: str | None,
+    project_instructions: ProjectInstructionStore | None = None,
 ) -> _RootTooling:
     """sandbox 绑定 + **根 registry**（收窄前）构造——唯一的工具面事实源。
 
@@ -252,15 +258,21 @@ def _build_tooling(
         sandbox = workspace_registry.get(session_id)
     else:
         sandbox = workspace_registry.create(session_id, workspace_root=workspace)
+    if project_instructions is None:
+        project_instructions = project_instruction_store(settings)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
         # Settings，装配层是唯一的接线点；接不上就成死键（tests/test_assembly_bash_budget.py）。
-        kwargs = (
-            {"timeout_seconds": settings.bash_timeout_seconds}
-            if tool_cls is BashTool
-            else {}
-        )
+        kwargs = {}
+        if tool_cls is BashTool:
+            kwargs["timeout_seconds"] = settings.bash_timeout_seconds
+        elif tool_cls is ReadTool:
+            kwargs["project_instructions_loader"] = (
+                lambda path: project_instructions.load_for_path(
+                    session_id, workspace, path,
+                )
+            )
         registry.register(tool_cls(sandbox, **kwargs))
 
     # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
@@ -435,6 +447,10 @@ async def build_runtime(
     profile_spec = None
     if agent_profile is not None:
         profile_spec = BUILTIN_PROFILES[agent_profile]
+    project_instructions = project_instruction_store(settings)
+    await asyncio.to_thread(
+        project_instructions.load_for_session, session_id, workspace,
+    )
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
     # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
     root_profile = _root_profile_spec(agent_profile)
@@ -493,6 +509,7 @@ async def build_runtime(
         session_id=session_id, workspace=workspace,
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=agent_profile,
+        project_instructions=project_instructions,
     )
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
@@ -633,13 +650,16 @@ async def build_runtime(
 
         产物落 `meta_user`：快照是 user-role 消息，不是 system-role。
         """
-        return DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
+        runtime_context = DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
             "cwd": str(Path.cwd()),
             "os": f"{platform.system()} {platform.release()}",
             # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
         }).meta_user_text
+        return project_instructions.load_for_session(
+            session_id, workspace,
+        ).with_runtime_context(runtime_context)
 
     return AgentRuntime(
         model=model,
