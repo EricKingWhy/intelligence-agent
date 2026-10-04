@@ -19,6 +19,12 @@ SESSION_STARTED = "session/started"
 SESSION_RESUMED = "session/resumed"
 # Phase 14（ADR-0017 决策 8）：只落 child 文件的 provenance 事件
 SESSION_FORKED = "session/forked"
+# #555：fork 意图标记（SQLite 提交日志同型）。child 文件里 session/started 之后、
+# 工作区拷贝之前落一条 durable 事实，data = parent_session_id / boundary_user_message_seq。
+# 「有它无 session/forked」= fork 未完成：启动扫描按它回收暂存/子工作区（recovery/scan.py），
+# 续聊对账（service._reconcile_workspace_binding）给 fork 专属提示。种子排除集必须含它
+# （会话级状态不进孙代种子，与 session/started 同理）。
+FORK_IN_PROGRESS = "fork/in-progress"
 RUN_STARTED = "run/started"
 RUN_COMPLETED = "run/completed"
 RUN_FAILED = "run/failed"
@@ -51,6 +57,8 @@ MODEL_FAILED = "model/failed"
 # ——primary / fallback / closeout 各记一条，被拒绝或传输失败的请求也**在**其中
 # （它们不增 agent_turns，但确实发生过）。usage / cost_usd 只在该次响应自报时落键。
 MODEL_REQUEST = "model/request"
+# #604：durable 的 attempt 开始事实；不承载结算或预算计数语义。
+MODEL_REQUEST_STARTED = "model/request-started"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
@@ -84,6 +92,27 @@ CONTEXT_PROTECTED_FACTS_EXCEEDED = "context/protected_facts_exceeded"
 # 清单投影（W-27/W-28）。handler 硬校验住在 `session/plan.py`（PRD §7.2 四条，
 # 任一违反 → 不产生事件、带原因 + 当前清单整表拒绝）。
 TASK_PLAN_UPDATED = "task/plan_updated"
+# ── W-07 (#351)：Task / Run / 验证 / 接受四种事实分开 ────────────────────────
+# Task 身份 = Session ID（一 Task 多 Run）。三条事实轴**分别追加、分别投影**
+# （票面「状态契约」；handler 与投影住在 `session/task.py`，与 plan.py 同构）：
+#   * 定义轴   task/defined + task/acceptance-revised：原始目标 / 读写意图 /
+#              验收清单（缺项可由 Agent 提出，未确认标记）。cwd 不进本事件
+#              ——走 session/started 单源锚，复制第二份即两个真相。变更 AC
+#              只追加事件，source_event_ids 指向上一版定义/修订（保留旧版来源）。
+#   * 验证轴   verification/updated：逐验收项 last-wins 的观察事实（未开始/
+#              进行中/通过/失败/受阻/未完成 + evidence ref）。可被后续 run 重估
+#              覆盖（回归是真实语义），旧值留痕于更早事件。
+#   * 接受轴   task/accepted + task/acceptance-released：用户裁决（未接受/
+#              已接受/带缺项接受 + reason）。带 expected_version CAS；重复
+#              请求明确 409，不能双写。
+# run/completed 只说明 Runtime 收口（#305 完成闸门零写入契约原样），MUST NOT
+# 自动写验证值或接受状态——产品四态（执行中/待验证/可交付/已接受）是三轴的
+# 纯投影（derive_task_state），刷新/重启从事件流重建同一结果。
+TASK_DEFINED = "task/defined"
+TASK_ACCEPTANCE_REVISED = "task/acceptance-revised"
+VERIFICATION_UPDATED = "verification/updated"
+TASK_ACCEPTED = "task/accepted"
+TASK_ACCEPTANCE_RELEASED = "task/acceptance-released"
 MEMORY_DEGRADED = "memory/degraded"
 # #298 / MEM-V2-2（PRD §6.5）：一次**已提交**的记忆变更。只带计数、memory id、
 # action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
@@ -175,6 +204,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         SESSION_STARTED,
         SESSION_RESUMED,
         SESSION_FORKED,
+        # #555：fork 意图标记（未完成 fork 的可见性事实；见 FORK_IN_PROGRESS 注释）
+        FORK_IN_PROGRESS,
         RUN_STARTED,
         RUN_COMPLETED,
         RUN_FAILED,
@@ -187,6 +218,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_FAILED,
         # #313 T5：每次实际 Provider 请求的账目记录（model_requests 的唯一计数点）
         MODEL_REQUEST,
+        # #604：开始事件仅用于在途可见性，不进入预算计数。
+        MODEL_REQUEST_STARTED,
         TOOL_CALL,
         TOOL_RESULT,
         TOOL_OUTPUT_DELTA,
@@ -203,6 +236,12 @@ EVENT_TYPES: frozenset[str] = frozenset(
         CONTEXT_PROTECTED_FACTS_EXCEEDED,
         # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息）
         TASK_PLAN_UPDATED,
+        # W-07 (#351)：Task / 验证 / 接受三轴事实（状态事件，不投影成消息）
+        TASK_DEFINED,
+        TASK_ACCEPTANCE_REVISED,
+        VERIFICATION_UPDATED,
+        TASK_ACCEPTED,
+        TASK_ACCEPTANCE_RELEASED,
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,

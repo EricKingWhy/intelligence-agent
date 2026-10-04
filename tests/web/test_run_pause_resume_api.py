@@ -130,13 +130,16 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
     """AC 主线：ceiling=1 当场暂停 → ceiling=4 恢复 → 同一个 run 完成并接上真实工作。
 
     账（`02 §5.1` 的七个 counter 互不混同）：`ceiling=1` 连一个产出轮都放行不了
-    （判定含预留：`0 + 1 >= 1`），所以暂停时 `consumed.agent_turns == 0`；closeout
-    那一次模型调用是 `model_requests`，**不**进这个 counter（它的位置由预留表达）。
-    恢复要求 `ceiling > consumed + 预留`，所以 4 是合法起点，恢复后的执行才真正产出。
+    （判定含预留：`0 + 1 >= 1`），所以暂停时 `consumed.agent_turns == 0`。`#567`
+    裁决 B：零进展暂停**不发 closeout**（事件流里没有任何可总结的工作）⇒
+    `model_requests` 同样停在 0，收口是确定性 continuation（旧实现还会烧一条
+    closeout 请求并把它记进 `model_requests`）。恢复要求 `ceiling > consumed + 预留`，
+    所以 4 是合法起点，恢复后的执行才真正产出。
     """
     _, client = _web(tmp_path)
     session_id = _create_idle_session(client)
-    probe = _ScriptedProbe([_continuation_json()], [AIMessage(content="A 已改完")])
+    # `#567` B：暂停阶段零模型调用 ⇒ 第一份剧本留空（旧实现这里发 closeout）。
+    probe = _ScriptedProbe([], [AIMessage(content="A 已改完")])
 
     with probe:
         paused = _pause_the_run(client, session_id)
@@ -152,10 +155,11 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
             "reason": "budget_exhausted",
             "trigger_dimension": "run.max_agent_turns_total",
             "budget_version": 1,
-            # `#313` 起快照是**四维**的：0 个被接纳的轮 + 1 次真实请求（closeout 那次，
-            # 它没报 usage / cost ⇒ 那两个维度是"未知"而不是 0，`11 §6.1`）
-            "consumed": {"agent_turns": 0, "model_requests": 1,
-                         "total_tokens": None, "cost_usd": None,
+            # `#313` 起快照是**四维**的；`#567` 裁决 B：零进展暂停不发 closeout ⇒
+            # requests 也是 0——本 run 确实一次请求都没发过，0 是事实不是占位
+            # （token / cost 同理：无请求 ⇒ 真实花了 0）。
+            "consumed": {"agent_turns": 0, "model_requests": 0,
+                         "total_tokens": 0, "cost_usd": "0",
                          # `#314`：工具维同快照在场（本场景一个工具都没跑 ⇒ 0 / 空表）
                          "tool_calls": 0, "tool_attempts": 0,
                          "tool_calls_by_tool": {}, "tool_attempts_by_tool": {}},
@@ -172,24 +176,36 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
                             "deadline_at": None, "tool_call_limits": {},
                             "max_delegations": None},
             },
-            # `#318`：session **账行**的 CAS 版本 + consumed（closeout 之后的最新读数
-            # ——closeout 那一次真实请求记进了 session 行；本剧本不带 usage ⇒ None 粘性）。
+            # `#318`：session **账行**的 CAS 版本 + consumed（closeout 之后的最新读数；
+            # `#567` B 后 closeout 不发 ⇒ 账行零写入，读数就是准入建行时的初值）。
             # session 触发的暂停，客户端靠这两格组"抬哪个维 + expected_version"。
             "session": {
                 "version": 1,
-                "consumed": {"agent_turns": 0, "model_requests": 1,
-                             "total_tokens": None, "cost_usd": None,
+                "consumed": {"agent_turns": 0, "model_requests": 0,
+                             "total_tokens": 0, "cost_usd": "0",
                              "tool_calls": 0, "tool_attempts": 0,
                              "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
                              "delegations": 0},
             },
+            # `#567` B：确定性 continuation 只说已持久化事实（计数 + 到顶那一维），
+            # 待办由恢复后的模型从历史自己看见（`02 §5.2`）。
             "continuation": {
-                "completed": ["已读完配置"],
-                "remaining": ["还要改 A", "再跑测试"],
-                "blockers": [],
-                "next_safe_action": "先改 A",
+                "completed": [
+                    "本逻辑 run 已消耗 0 个 agent turn、0 次 Provider 请求",
+                    "累计 token：0；累计成本（USD）：0",
+                    "已接纳 0 个工具调用（0 次实际尝试）；已落 0 条工具结果",
+                ],
+                "remaining": [
+                    "暂停发生在下一轮模型决策之前：恢复后由模型从会话历史继续",
+                ],
+                "blockers": ["run.max_agent_turns_total 到顶：consumed=0, ceiling=1"],
+                "next_safe_action": (
+                    "提高绝对 ceiling（run.max_agent_turns_total）后以同一 run_id 恢复："
+                    "当前 consumed=0，ceiling=1；"
+                    "恢复请求需带 expected_version 与 resume_basis=budget_increase"
+                ),
             },
-            "closeout_source": "model",
+            "closeout_source": "deterministic",
             "resume_requirements": [],
         }
 
@@ -211,6 +227,9 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
         assert "run/completed" in resp.text, resp.text[:400]
 
     assert len(probe.calls) == 2, "恰好两次执行：暂停那次 + 续跑那次（不多构造模型）"
+    assert probe.models[0].snapshots == [], (
+        "#567 B：暂停阶段构造了模型但零请求（closeout 不发）"
+    )
 
     events = _events(client, session_id)
     types = _types(events)
@@ -229,9 +248,10 @@ def test_low_ceiling_pauses_then_raised_ceiling_completes_the_same_run(tmp_path)
         "from_pause_seq": paused["seq"],
         "previous_budget_version": 1,
         "budget_version": 2,
-        # 恢复**不重置**消耗：快照等于暂停那一刻的账（新工作之后由 model/completed 累加）
-        "consumed": {"agent_turns": 0, "model_requests": 1,
-                     "total_tokens": None, "cost_usd": None,
+        # 恢复**不重置**消耗：快照等于暂停那一刻的账（`#567` B 后零请求 ⇒ 全 0；
+        # 新工作之后由 model/completed 累加）
+        "consumed": {"agent_turns": 0, "model_requests": 0,
+                     "total_tokens": 0, "cost_usd": "0",
                      # `#314`：工具维沿用暂停快照（未点名的维度不重置，与四维同一规则）
                      "tool_calls": 0, "tool_attempts": 0,
                      "tool_calls_by_tool": {}, "tool_attempts_by_tool": {}},
@@ -488,13 +508,14 @@ def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
     - token 维在本链路**端到端撞线**的证明属 Live Gate（真模型真 usage）。
 
     请求维的临界点含预留（`RESERVED_CLOSEOUT_REQUESTS=1`）：ceiling=1 连一次普通请求都
-    放行不了，于是当场暂停、`consumed.agent_turns == 0`；closeout 仍有一次容量
-    （`consumed < ceiling`）⇒ 那次暂停是 `closeout_source=model`，它自报的 usage 进账。
+    放行不了，于是当场暂停、`consumed.agent_turns == 0`。`#567` 裁决 B：零进展暂停
+    **不发 closeout** ⇒ `closeout_source=deterministic`，requests 停在 0（无请求 ⇒
+    token / cost 真实为 0；旧实现会烧一条 closeout 请求并让它自报的 20 token 进账）。
     """
     _, client = _web(tmp_path)
     session_id = _create_idle_session(client)
-    probe = _ScriptedProbe([_usage_answer(_continuation_json().content, 20)],
-                           [AIMessage(content="收尾完成")])
+    # `#567` B：暂停阶段零模型调用 ⇒ 第一份剧本留空（旧实现这里发 closeout）。
+    probe = _ScriptedProbe([], [AIMessage(content="收尾完成")])
 
     with probe:
         resp = client.post(
@@ -509,13 +530,13 @@ def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
         events = _events(client, session_id)
         paused = _one(events, "run/paused")
         assert paused["data"]["trigger_dimension"] == "run.max_model_requests"
-        assert paused["data"]["closeout_source"] == "model"
+        assert paused["data"]["closeout_source"] == "deterministic"
         assert paused["data"]["consumed"] == {
-            "agent_turns": 0, "model_requests": 1, "total_tokens": 20, "cost_usd": None,
+            "agent_turns": 0, "model_requests": 0, "total_tokens": 0, "cost_usd": "0",
             # `#314`：本场景没有工具调用 ⇒ 工具维 0 / 空表（键必须在场）
             "tool_calls": 0, "tool_attempts": 0,
             "tool_calls_by_tool": {}, "tool_attempts_by_tool": {},
-        }, "0 个被接纳的轮 + 1 次 closeout 请求（它自报的 20 token 进了账）"
+        }, "#567 B：0 轮 + 0 请求（closeout 不发）；无请求 ⇒ token/cost 真实为 0"
         assert paused["data"]["limits"]["run"] == {
             "max_agent_turns_total": None, "max_model_requests": 1,
             "max_total_tokens": 500, "max_cost_usd": None,
@@ -531,8 +552,9 @@ def test_new_request_dimension_stops_the_run_and_survives_the_resume(tmp_path):
         }, "启动快照落盘 ⇒ 重启后能重建客户端配的 ceiling"
 
         before = _events(client, session_id)
-        # 只抬 token：真正卡住 run 的是 requests（它继承了暂停时的 1，仍不含余量）
-        # ⇒ 409。接受它等于让客户端拿到"恢复成功但立刻又停"的假象。
+        # 只抬 token：真正卡住 run 的是 requests——ceiling=1 没动，含 closeout 预留的
+        # 准入判据（`0 + 1 >= 1`）照样放不下一轮产出 ⇒ 409。接受它等于让客户端拿到
+        # "恢复成功但立刻又停"的假象。
         resp = client.post(
             f"/api/sessions/{session_id}/resume",
             json={RUN_ID_KEY: paused[RUN_ID_KEY], "resume_basis": "budget_increase",
@@ -1033,11 +1055,16 @@ def test_resume_is_blocked_while_an_unreconciled_side_effect_remains(tmp_path):
         )
 
     assert resp.status_code == 409, resp.text
+    # #547：409 detail 升级为结构体（message + pending_decisions 机器可读清单），
+    # 文案事实不变：仍点名那条调用与 fail-closed 立场
     detail = resp.json()["detail"]
-    assert "write_file" in detail and "call-1" in detail, (
+    assert "write_file" in detail["message"] and "call-1" in detail["message"], (
         "拒绝理由必须点名那条调用（人要知道该对账的是哪一个副作用）"
     )
-    assert "ReconcileCallback" in detail
+    assert "ReconcileCallback" in detail["message"] or "decisions" in detail["message"]
+    assert any(
+        p["tool_call_id"] == "call-1" for p in detail["pending_decisions"]
+    )
     assert len(probe.calls) == calls_before, "被拒的恢复没有装配第二次执行"
     _assert_no_new_work(client, session_id, before)
 

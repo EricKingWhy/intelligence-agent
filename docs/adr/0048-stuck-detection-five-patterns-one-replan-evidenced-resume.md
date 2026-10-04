@@ -248,11 +248,29 @@ ADR-0014 的护栏只覆盖一个模式：**同一工具 + 同一参数连续失
 workspace 就是父的同一棵树"给 child 注入环境那一半，看起来是真的——但那一半**今天用不上**：
 子会话的恢复入口本身走不通（`resume_and_launch` → `build_runtime` 按 `create()` 重写工作区
 映射，子会话的映射是父级 alias，注册表拒绝改写；残余 16 与它指向的 follow-up 票 **#372**），而且
-`AgentFactory` 收不到 child 的生效策略面（profile / effort / context providers / 模型名），
-照抄父级那份等于给 child 记一个它没跑过的面 ⇒ 恢复侧会拿"跨进 child 的假变更"放行
-（fail-open）。所以 child runtime 拿到的证据端口是 `None`：快照两格如实"没观测到"，
-`resume_requirements` 因此只列 `relevant_steer`（判据不会恒拒的那一条）。等恢复入口修好、
-且 child 的策略面有了自己的定义（残余 15），再按上面这条规则给环境那一半。
+   `AgentFactory` 收不到 child 的生效策略面（profile / effort / context providers / 模型名），
+   照抄父级那份等于给 child 记一个它没跑过的面 ⇒ 恢复侧会拿"跨进 child 的假变更"放行
+   （fail-open）。所以 child runtime 拿到的证据端口是 `None`：快照两格如实"没观测到"，
+   `resume_requirements` 因此只列 `relevant_steer`（判据不会恒拒的那一条）。等恢复入口修好、
+   且 child 的策略面有了自己的定义（残余 15），再按上面这条规则给环境那一半。
+
+   > **勘误（2026-10-03，#370 交付后）**：上文"child runtime 拿到的证据端口是 `None`"已过时。
+   #372 修好恢复入口后，#370 按本节规则给 child 注入**它自己的**策略面端口：
+   `AgentFactory.create` 经 `resume_evidence.delegated_child_evidence_port(spec_name)`
+   （唯一口径：默认权限档 + spec 档位 + 无独立模型/effort/providers 声明，恢复侧对 child
+   会话重算出同一套值）。"记父档 = fail-open"的论证照旧成立——正因如此记的是 child 自己的面
+   而不是父档。环境那一半仍未注入（端口 `workspace=None` ⇒ 环境格如实缺席），留给后续票。
+   本段其余论证（注入而非内建、两格同源靠唯一构造点）不因此改动。
+
+   > **勘误二（2026-10-04，#608 交付后）**：环境那一半已按上文预写规则注入——
+   > `AgentFactory.create` 收 `workspace`（委派方传 `provider._parent_cwd()`），
+   > `delegated_child_evidence_port` 透传给 `evidence_port`。同源是构造保证：该值与
+   > 写进子 SESSION_STARTED 的 cwd 字段同一个，恢复侧 `Path(persisted_cwd)` 读回的是
+   > 同一事件字段（child 与父共用同一棵 Session-scoped workspace，spec 10 §9）。
+   > 父无锚 ⇒ 端口 `workspace=None` ⇒ 环境格如实缺席、`environment_change` 判据
+   > fail-closed（判据零改动）。钉子：factory 腿 `tests/agent/test_stuck_runtime.py`
+   > （TestDelegatedChildPolicyFace）与端到端 `tests/multiagent/test_child_session_resume.py`
+   > （#608 节：环境格点亮 + 同源双向 + 无锚臂）。
 
 **摘要输入集**（`policy_version_of` 的实参，两侧同源）：权限档、模型、agent profile、
 reasoning effort、context providers（排序后）。两个**刻意排除**项，都是 fail-open 的防线：
@@ -449,6 +467,12 @@ D8 这一侧只多两条操作事实：还原的落点是 `session/model_switch.
    让恢复侧拿"跨进 child 的假变更"放行，那是 fail-open）。记在这里的两件事：① 子 run 的暂停
    载荷**不再列**策略依据；② 若将来要让子 run 支持 `policy_change`，落点是"给 child runtime
    定义并传入它自己的策略面"，不是"父的面照抄一份"。follow-up 票 #370（含要回答的四个问题）。
+   > **勘误（2026-10-03，#370 交付）**：本条已闭合——四个答案收敛在
+   `resume_evidence.delegated_child_evidence_port`（唯一口径），`AgentFactory.create` 注入；
+   AC（子面记录 + digest 同源 + policy_change 无声明 409 / 声明采纳 / 父面漂移不放行）由
+   `tests/agent/test_stuck_runtime.py::TestDelegatedChildPolicyFace` 与
+   `tests/multiagent/test_child_session_resume.py` 两条端到端钉住（后者经 #372 交付入口）。
+   环境那一半（child 端口的 workspace / 环境格）仍开放，属新的 follow-up（后续状态见 D8 段勘误二）。
 16. **委派子会话今天无法恢复，所以子 run 的 stuck 暂停没有任何可用依据**（T9 三轮审查定论，
    Correctness P2）：`resume_and_launch` → `build_runtime` 无条件调
    `workspace_registry.create(session_id, …)`（`assembly.py`），而子会话的映射是父级

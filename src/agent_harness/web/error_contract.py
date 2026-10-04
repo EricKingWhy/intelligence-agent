@@ -1,6 +1,6 @@
 """#517 BUG-06：OpenAPI 错误面对齐现实（`apply_error_contract`）。
 
-FastAPI 的自动 schema 有三处与真实响应体不符：
+FastAPI 的自动 schema 有四处与真实响应体不符：
 
 1. **422 形态**：一律声明成 `HTTPValidationError`（`detail` 是**数组**），但
    业务路径经 `http_error` 抛出的 422 是 `{"detail": "<字符串>"}` 信封——
@@ -11,6 +11,11 @@ FastAPI 的自动 schema 有三处与真实响应体不符：
 3. **500 缺声明**：/api 操作一个 500 都不声明，而任何 handler 都可能漏出
    未映射异常（全局 handler 兜底成 JSON 信封）——未声明的 500 让客户端按
    "永不出错"写解析。另把 #515/#517 已保证的 503 逐端点补上。
+4. **413 缺声明**（#562 残余）：`BodyDepthGuardMiddleware` 经 `add_middleware`
+   全局挂载，对每个请求累计 body 字节，任何带体请求都可能超 1 MiB 回 413——
+   未声明的 413 让客户端按"体积永不越界"写解析。与 503（依赖 handler 的
+   except 元组、静态后处理推断不了）不同，413 的声明面**可机械判定**：方法族
+   语义上携带请求体（POST/PUT/PATCH/DELETE）的 /api 操作全部如实补上。
 
 ## 为什么是 openapi 后处理而不是逐路由 responses={}
 
@@ -53,6 +58,11 @@ _ENVELOPE = {"$ref": _ENVELOPE_REF}
 _HTTP_METHODS = frozenset(
     {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
 )
+
+#: 语义上携带请求体的方法族——413 的声明面。`BodyDepthGuardMiddleware` 对每个
+#: HTTP 请求累计 body 字节（全局挂载，机制可机械判定），这些方法的 /api 操作
+#: 都可能超 1 MiB 回 413；GET/HEAD 等本仓不消费请求体，不撒网。
+_BODY_BEARING_METHODS = frozenset({"post", "put", "patch", "delete"})
 
 #: (path, method) → 该操作真实可能返回 503 的声明清单。
 #: #515：存储写重试耗尽（`StorageBusyError` → 503）已武装的写端点——
@@ -115,6 +125,12 @@ def _post_process(schema: dict[str, Any]) -> dict[str, Any]:
             responses.setdefault(
                 "500", _json_envelope_response("Internal Server Error")
             )
+            # 413（#562 残余）：体积守卫中间件全局挂载，带体方法族如实声明
+            # （detail 是固定字符串，与 ErrorEnvelope 同形）。
+            if method in _BODY_BEARING_METHODS:
+                responses.setdefault(
+                    "413", _json_envelope_response("Request Body Too Large")
+                )
             if (path, method) in _503_OPERATIONS:
                 responses.setdefault(
                     "503", _json_envelope_response("Service Unavailable")

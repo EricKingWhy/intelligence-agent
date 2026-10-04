@@ -7,11 +7,16 @@ file-per-lineage：fork = 新 session 文件 + seed 前缀逐字复制（重编 
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import pytest
 
+from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session import Session
 from agent_harness.session.errors import SessionNotFound
 from agent_harness.session.event import (
+    FORK_IN_PROGRESS,
     MODEL_COMPLETED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -32,8 +37,6 @@ from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from tests.scripted_model import ScriptedModel
 from tests.session.store_fixtures import FailingFromStore
-
-pytestmark = pytest.mark.asyncio
 
 
 def _store(tmp_path) -> JsonlSessionStore:
@@ -88,6 +91,7 @@ def _build_parent(store: JsonlSessionStore) -> Session:
     return s
 
 
+@pytest.mark.asyncio
 async def test_fork_seeds_prefix_and_records_provenance(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -101,25 +105,32 @@ async def test_fork_seeds_prefix_and_records_provenance(tmp_path) -> None:
     )
 
     types = [e.type for e in child.events]
-    # child 自己的 started + seed（不含父的 started）+ forked 事件
+    # child 自己的 started + 意图标记（#555，先于一切拷贝动作）+ seed（不含
+    # 父的 started）+ forked 事件
     assert types == [
-        SESSION_STARTED, USER_MESSAGE, RUN_STARTED, MODEL_COMPLETED,
-        RUN_COMPLETED, SESSION_FORKED,
+        SESSION_STARTED, FORK_IN_PROGRESS, USER_MESSAGE, RUN_STARTED,
+        MODEL_COMPLETED, RUN_COMPLETED, SESSION_FORKED,
     ]
+    intent = child.events[1]
+    assert intent.data == {
+        "parent_session_id": "parent",
+        "boundary_user_message_seq": anchor,
+    }
     # seed 逐字复制：event_id / time / data 保留，seq 重编为 child 局部单调
     parent_events = parent.events
     # seq 重编为 child 局部单调（0 起头，与 Session 既有约定一致）
-    assert child.events[1].event_id == parent_events[1].event_id
-    assert child.events[1].time == parent_events[1].time
-    assert child.events[1].data == parent_events[1].data
-    assert child.events[1].session_id == "child"
-    assert [e.seq for e in child.events] == [0, 1, 2, 3, 4, 5]
+    assert child.events[2].event_id == parent_events[1].event_id
+    assert child.events[2].time == parent_events[1].time
+    assert child.events[2].data == parent_events[1].data
+    assert child.events[2].session_id == "child"
+    assert [e.seq for e in child.events] == [0, 1, 2, 3, 4, 5, 6]
     forked = child.events[-1]
     assert forked.data["parent_session_id"] == "parent"
     assert forked.data["boundary_user_message_seq"] == anchor
     assert forked.data["fork_point_seq"] == parent_events[4].seq
 
 
+@pytest.mark.asyncio
 async def test_fork_child_resumable_and_parent_untouched(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -146,6 +157,7 @@ async def test_fork_child_resumable_and_parent_untouched(tmp_path) -> None:
     assert human == ["第一条"]
 
 
+@pytest.mark.asyncio
 async def test_fork_at_first_message_yields_empty_seed(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -157,12 +169,13 @@ async def test_fork_at_first_message_yields_empty_seed(tmp_path) -> None:
         store, meta, "parent", boundary_user_message_seq=first_user_seq,
         child_session_id="fresh",
     )
-    # seed 为空：child = 自己的 started + forked；fork_point_seq 无
+    # seed 为空：child = 自己的 started + 意图标记（#555）+ forked；fork_point_seq 无
     types = [e.type for e in child.events]
-    assert types == [SESSION_STARTED, SESSION_FORKED]
+    assert types == [SESSION_STARTED, FORK_IN_PROGRESS, SESSION_FORKED]
     assert child.events[-1].data["fork_point_seq"] is None
 
 
+@pytest.mark.asyncio
 async def test_fork_boundary_errors(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -191,6 +204,7 @@ async def test_fork_boundary_errors(tmp_path) -> None:
         )
 
 
+@pytest.mark.asyncio
 async def test_fork_writes_meta_index(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -209,6 +223,7 @@ async def test_fork_writes_meta_index(tmp_path) -> None:
     assert row.fork_point_seq == parent.events[4].seq
 
 
+@pytest.mark.asyncio
 async def test_failed_fork_leaves_no_child_artifacts(tmp_path) -> None:
     """fork 失败（boundary 非法）不得留下 child JSONL / meta 行（无孤儿）。"""
     store = _store(tmp_path)
@@ -233,6 +248,7 @@ def test_find_fork_boundaries_lists_user_message_seqs(tmp_path) -> None:
     assert boundaries == [parent.events[1].seq, parent.events[-1].seq]
 
 
+@pytest.mark.asyncio
 async def test_fork_from_failed_run_prefix(tmp_path) -> None:
     """run/failed 同样是终态：失败轮之后的消息也是合法边界。"""
     store = _store(tmp_path)
@@ -253,6 +269,7 @@ async def test_fork_from_failed_run_prefix(tmp_path) -> None:
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 
+@pytest.mark.asyncio
 async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
     """T8 #138：run/interrupted 也是 run 终态——被中断轮之后的消息仍是合法边界。
 
@@ -281,6 +298,7 @@ async def test_fork_from_interrupted_run_prefix(tmp_path) -> None:
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 
+@pytest.mark.asyncio
 async def test_fork_from_paused_run_prefix(tmp_path) -> None:
     """`#312`：尾部 `run/paused` 的 run 也算「已收口」——它之后的消息是合法 fork 锚点。
 
@@ -308,6 +326,7 @@ async def test_fork_from_paused_run_prefix(tmp_path) -> None:
     assert [e.type for e in child.events][-1] == SESSION_FORKED
 
 
+@pytest.mark.asyncio
 async def test_fork_prefix_with_resumed_run_is_rejected(tmp_path) -> None:
     """`run/resumed` 把 run 重新计入未收口 ⇒ 悬空前缀仍被拒（暂停不是免检通道）。
 
@@ -338,6 +357,7 @@ async def test_fork_prefix_with_resumed_run_is_rejected(tmp_path) -> None:
 # ── T3 copy-on-fork（#109, ADR-0017 决策 5）─────────────────────────────────
 
 
+@pytest.mark.asyncio
 async def test_fork_copies_parent_workspace_to_child(tmp_path) -> None:
     """fork 点世界快照：父 workspace 全部文件复制给 child。"""
     from agent_harness.sandbox import WorkspaceRegistry
@@ -364,6 +384,7 @@ async def test_fork_copies_parent_workspace_to_child(tmp_path) -> None:
     assert child.sandbox.read_text("sub/nested.txt") == "nested"
 
 
+@pytest.mark.asyncio
 async def test_fork_workspace_isolation_bidirectional(tmp_path) -> None:
     """双向隔离：child 写不伤父；fork 后父写不进 child。"""
     from agent_harness.sandbox import WorkspaceRegistry
@@ -392,6 +413,7 @@ async def test_fork_workspace_isolation_bidirectional(tmp_path) -> None:
     assert parent.sandbox.read_text("a.txt") == "v1"
 
 
+@pytest.mark.asyncio
 async def test_fork_without_parent_workspace_degrades(tmp_path) -> None:
     """父从未绑定 workspace：child 得到空 workspace，不崩溃。"""
     from agent_harness.sandbox import WorkspaceRegistry
@@ -442,6 +464,7 @@ def _parent_with_tail(store: JsonlSessionStore) -> Session:
     return s
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_attached_when_summarizer_given(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -462,6 +485,7 @@ async def test_tail_summary_attached_when_summarizer_given(tmp_path) -> None:
     assert "方案A" in fake.calls[0]
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_can_be_disabled(tmp_path) -> None:
     store = _store(tmp_path)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -478,6 +502,7 @@ async def test_tail_summary_can_be_disabled(tmp_path) -> None:
     assert "tail_summary" not in child.events[-1].data
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_degrades_on_failure(tmp_path) -> None:
     """摘要失败 = 降级不挂接：fork 照常完成，无字段，meta 照写。"""
     store = _store(tmp_path)
@@ -497,6 +522,7 @@ async def test_tail_summary_degrades_on_failure(tmp_path) -> None:
     Session.resume(store, "degrade")  # child 完整可用
 
 
+@pytest.mark.asyncio
 async def test_tail_summary_skipped_when_tail_empty(tmp_path) -> None:
     """锚点是最后一条事件：无 tail，不调用摘要器。"""
     store = _store(tmp_path)
@@ -514,6 +540,7 @@ async def test_tail_summary_skipped_when_tail_empty(tmp_path) -> None:
     assert "tail_summary" not in child.events[-1].data
 
 
+@pytest.mark.asyncio
 async def test_tail_summarizer_uses_scripted_model(tmp_path) -> None:
     """真实 TailSummarizer 类：任何 ainvoke 模型可用（ScriptedModel 实测）。"""
     from agent_harness.session.fork import TailSummarizer
@@ -530,6 +557,7 @@ async def test_tail_summarizer_uses_scripted_model(tmp_path) -> None:
 # ── F15 #234：权限决策是会话属性，fork 必须显式继承 ─────────────────
 
 
+@pytest.mark.asyncio
 async def test_fork_inherits_parent_permission_decisions(tmp_path) -> None:
     """父会话显式声明的权限决策（档位 + auto_approve）必须进 child 的 session/started。
 
@@ -563,6 +591,7 @@ async def test_fork_inherits_parent_permission_decisions(tmp_path) -> None:
     assert all(e.type != SESSION_STARTED for e in child.events[1:])
 
 
+@pytest.mark.asyncio
 async def test_fork_of_undeclared_parent_writes_no_permission_keys(tmp_path) -> None:
     """父未声明权限决策 → child 也不写键（历史会话 fork 出的子树语义一致）。"""
     store = _store(tmp_path)
@@ -581,6 +610,7 @@ async def test_fork_of_undeclared_parent_writes_no_permission_keys(tmp_path) -> 
     assert "auto_approve" not in started.data
 
 
+@pytest.mark.asyncio
 async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None:
     """seed 写盘中途失败：父日志逐字节不变，child 只留下已落盘的前缀。
 
@@ -594,7 +624,8 @@ async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None
     parent_path = base._events_path("parent")
     parent_bytes_before = parent_path.read_bytes()
 
-    # 第 3 次写 = child 的 seed 第二项（1=session/started, 2=seed[0]）
+    # 第 3 次写 = child 的 seed 首项（1=session/started, 2=fork/in-progress,
+    # 3=seed[0]——#555 起意图标记先于拷贝/移植落盘）
     failing = FailingFromStore(root, fail_from=3)
     meta = SqliteSessionMetaStore(tmp_path / "harness.db")
     await meta.initialize()
@@ -608,12 +639,14 @@ async def test_fork_mid_write_failure_leaves_partial_child_log(tmp_path) -> None
 
     # ① 父日志逐字节不变（§7 父不可改）
     assert parent_path.read_bytes() == parent_bytes_before
-    # ② child 只留下已落盘的前缀（无 session/forked、无 meta 行）
+    # ② child 只留下已落盘的前缀（started + 意图标记；无 session/forked、
+    # 无 meta 行——失败清理在 fork 主流程的补偿里做，见 #555 测试）
     durable = base.read_events("partial_child")
-    assert [e.type for e in durable] == [SESSION_STARTED, USER_MESSAGE]
+    assert [e.type for e in durable] == [SESSION_STARTED, FORK_IN_PROGRESS]
     assert await meta.get("partial_child") is None
 
 
+@pytest.mark.asyncio
 async def test_fork_does_not_touch_parent_log_bytes(tmp_path) -> None:
     """成功 fork 同样是只读父：父日志逐字节不变（不含 seq / mtime 之外的任何痕迹）。"""
     store = _store(tmp_path)
@@ -630,3 +663,131 @@ async def test_fork_does_not_touch_parent_log_bytes(tmp_path) -> None:
     )
 
     assert parent_path.read_bytes() == before
+
+
+# ── #555：分阶段可见性（意图标记 / 暂存发布 / 失败补偿） ──────────────────
+
+
+def _build_parent_with_workspace(store, registry) -> Session:
+    """两轮对话 + 带资产的父会话（workspace 写一个文件）。"""
+    parent = Session.start(store, session_id="parent", workspace_registry=registry)
+    parent.append(USER_MESSAGE, {"content": "第一条"})
+    parent.append(RUN_STARTED, {})
+    parent.append(MODEL_COMPLETED, {"content": "好的"})
+    parent.append(RUN_COMPLETED, {})
+    parent.append(USER_MESSAGE, {"content": "第二条"})
+    (registry.default_workspace_root("parent") / "keep.txt").write_text(
+        "父资产", encoding="utf-8"
+    )
+    return parent
+
+
+@pytest.mark.asyncio
+async def test_fork_publishes_workspace_via_staging(tmp_path) -> None:
+    """默认形态工作区走暂存 + 同卷 rename 发布：成功后副本完整、暂存无残留。
+
+    #555：观察者要么看到空 child workspace、要么看到完整副本——半份拷贝
+    永远不出现在 child 的登记路径上。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    registry = WorkspaceRegistry(root=tmp_path / "sandbox", backend="local")
+    parent = _build_parent_with_workspace(store, registry)
+
+    child = await fork_session(
+        store, meta, "parent",
+        boundary_user_message_seq=parent.events[-1].seq,
+        child_session_id="child", workspace_registry=registry,
+    )
+
+    # 意图标记先于一切拷贝动作落盘，data 可溯源
+    intent = child.events[1]
+    assert intent.type == FORK_IN_PROGRESS
+    assert intent.data == {
+        "parent_session_id": "parent",
+        "boundary_user_message_seq": parent.events[-1].seq,
+    }
+    # 发布结果：child workspace 是父的完整副本
+    child_root = registry.default_workspace_root(child.session_id)
+    assert (child_root / "keep.txt").read_text(encoding="utf-8") == "父资产"
+    # 暂存无残留（整个暂存目录被 rename 搬走）
+    staging = registry.fork_staging_root()
+    assert not staging.exists() or not any(staging.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_fork_grandchild_seed_excludes_intent_marker(tmp_path) -> None:
+    """意图标记是会话级状态：孙代 seed 不携带（孙的 fork 流程写自己的标记）。"""
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    registry = WorkspaceRegistry(root=tmp_path / "sandbox", backend="local")
+    parent = _build_parent_with_workspace(store, registry)
+    child = await fork_session(
+        store, meta, "parent",
+        boundary_user_message_seq=parent.events[-1].seq,
+        child_session_id="child", workspace_registry=registry,
+    )
+
+    grandchild = await fork_session(
+        store, meta, "child",
+        boundary_user_message_seq=child.events[2].seq,  # child 的首条用户消息
+        child_session_id="grandchild", workspace_registry=registry,
+    )
+
+    types = [e.type for e in grandchild.events]
+    assert types.count(FORK_IN_PROGRESS) == 1  # 只有它自己写的那条
+    assert types[1] == FORK_IN_PROGRESS
+    # 各代自证：孙代标记指向 child，不指向 parent
+    assert grandchild.events[1].data["parent_session_id"] == "child"
+
+
+@pytest.mark.asyncio
+async def test_fork_copy_failure_compensates_and_leaves_marked_child(
+    tmp_path, monkeypatch
+) -> None:
+    """workspace 拷贝中途失败：原错误上抛，child 有标记、无 forked、无残留。
+
+    修复前（audit CHAOS-01）：child 是无标记僵尸——半份拷贝直接留在 child
+    workspace、启动扫描无从判定、HTTP 500 之后现场静默存在。
+    """
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    registry = WorkspaceRegistry(root=tmp_path / "sandbox", backend="local")
+    parent = _build_parent_with_workspace(store, registry)
+    parent_bytes = store._events_path("parent").read_bytes()
+
+    def _half_copy_then_explode(src, dst, **kwargs):
+        # 模拟"拷到一半磁盘故障"：目标目录里有半份内容后抛错
+        dst_path = Path(dst)
+        dst_path.mkdir(parents=True, exist_ok=True)
+        (dst_path / "half.txt").write_text("半份", encoding="utf-8")
+        raise RuntimeError("copy boom")
+
+    monkeypatch.setattr(shutil, "copytree", _half_copy_then_explode)
+
+    with pytest.raises(RuntimeError, match="copy boom"):
+        await fork_session(
+            store, meta, "parent",
+            boundary_user_message_seq=parent.events[-1].seq,
+            child_session_id="child", workspace_registry=registry,
+        )
+
+    # child：意图标记在场、无 session/forked——「fork 未完成」可判定
+    durable = store.read_events("child")
+    assert [e.type for e in durable] == [SESSION_STARTED, FORK_IN_PROGRESS]
+    assert durable[1].data["parent_session_id"] == "parent"
+    # 残留回收：暂存与默认形态子工作区都被清掉
+    staging = registry.fork_staging_root()
+    assert not staging.exists() or not any(staging.iterdir())
+    assert not registry.default_workspace_root("child").exists()
+    # 映射保留（可见性事实）；meta 行没有（fork 未完成）
+    assert registry.exists("child")
+    assert await meta.get("child") is None
+    # 父侧逐字节不变、资产完好
+    assert store._events_path("parent").read_bytes() == parent_bytes
+    assert (
+        registry.default_workspace_root("parent") / "keep.txt"
+    ).read_text(encoding="utf-8") == "父资产"

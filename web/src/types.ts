@@ -193,13 +193,15 @@ export interface SessionDeleted {
 /**
  * Token 用量形状——model/completed.data.usage 与 run/completed.data.usage_total
  * （后端 Gap 1）。AgentEvent.data 是宽松 Record<string, unknown>，此接口是
- * projection 边界窄化解析的契约文档：三字段必须全为有限数，否则整体按 null
- * 处理（UI 显示「—」，绝不部分伪造或补零）。
+ * projection 边界窄化解析的契约文档：**逐维可空**——某一维缺席 / 非数 / 非有限
+ * （`Infinity` / `NaN`）时该维为 `null`（= 该维未知 / 不可采信），UI 显示「—」；
+ * 其余维照常是整数。**绝不部分伪造、不补 0**。未知逐维**粘性**：某维一旦转 `null`，
+ * 后续累计不得再从 0 或旧值起算（与后端 `_accumulate_usage` 同语义）。
  */
 export interface UsageStats {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
 }
 
 // ── View-models (projection output) ──
@@ -696,7 +698,9 @@ export interface ConversationState {
    *  UI 显示「—」/「未追踪」，绝不伪造 0：
    *  - model：最新携带 data.model 的 model/completed；
    *  - usage_total：run/completed.data.usage_total（权威聚合）覆盖前端对
-   *    model/completed.usage 的累计值（运行中视图）；
+   *    model/completed.usage 的累计值（运行中视图）。**外层 null** = 事件未携带
+   *    usage 载荷（保留先前累计值）；**非 null 时各维仍可单独为 null**（该维未知 /
+   *    不可采信，见 UsageStats）——外层可空与维可空相互正交，别把二者混为一谈；
    *  - cost_usd / trace_id / trace_url：run/completed 与 run/failed 对称携带
    *    （契约 2d7f87a——失败 run 也有可见 trace）；未启用 Langfuse 恒 null。 */
   model: string | null;

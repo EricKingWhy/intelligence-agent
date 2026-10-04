@@ -1,0 +1,6 @@
+{
+  "command": ".venv/Scripts/python.exe -m pytest tests/tooling/test_review_coverage_immutable_ref.py -q -p no:randomly -p no:cacheprovider",
+  "exit_code": 0,
+  "raw_sha256": "70527891f5532dd84d2bbeb9358dc2a3a31d5df5ee0a9b69becceaa42194db74",
+  "text": "....                                                                     [100%]\r\n4 passed in 1.29s\r\n"
+}

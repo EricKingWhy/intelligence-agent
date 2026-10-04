@@ -27,10 +27,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+from uuid import uuid4
 
 import httpx
 from langchain_core.messages import AnyMessage
@@ -52,6 +53,27 @@ _TRANSIENT_ERROR_NAMES = frozenset({
     "TimeoutError",          # 内建 / asyncio 超时（3.11+ 同一类）
     "ConnectionError",       # 内建 socket 连接失败
 })
+
+
+def _chunk_text_length(chunk: Any) -> int:
+    """chunk.content 的字符数（str 直通；非 str 记 0）——attempt 边界标记用。
+
+    不做内容抽取（那是 Runtime 的 `_extract_text` 责任）：这里只要一个"primary
+    切换前产出了多少"的**数量**，多算少算都不改正文，只影响边界提示的粒度。
+    """
+    content = getattr(chunk, "content", "")
+    return len(content) if isinstance(content, str) else 0
+
+
+def _chunk_finish_reason(chunk: Any) -> str | None:
+    """chunk 自报的 finish_reason（缺失 / 非 str 记 None，不臆断）。
+
+    与 Runtime 的 `_finish_reason_from_response` 同口径，只是作用在**单个 chunk**
+    上：用来判"primary 在切换前是否已经给出收尾信号"（#551 M10-3）。
+    """
+    meta = getattr(chunk, "response_metadata", None) or {}
+    value = meta.get("finish_reason")
+    return value if isinstance(value, str) and value else None
 
 
 def is_transient_model_error(error: BaseException) -> bool:
@@ -86,11 +108,36 @@ class FallbackTransition:
 
     reason 只带异常类型名不带消息——异常消息可能含 Provider 回显的敏感
     文本，与 model/failed 事件同一脱敏不变量。
+
+    `primary_content_chars` / `primary_finish_reason` 是 **attempt 边界**事实
+    （#551 M10-3）：切到 fallback 之前 primary 已产出的文本量与它自报的
+    finish_reason。它们只带数量/枚举、不带任何正文，用来让下游区分"fallback
+    在续写 primary 的前缀"与"primary 其实已经答完，fallback 只是重答了一遍"
+    ——后者是旧 docstring 假设失效的形状，静默拼接会给出重复答案。
     """
 
     from_model: str
     to_model: str
     reason: str
+    primary_content_chars: int = 0
+    primary_finish_reason: str | None = None
+
+    def event_data(self) -> dict[str, Any]:
+        """model/fallback 事件的共用载荷（成功路径与终态路径同源）。
+
+        边界字段只在**非平凡**时落键（0 / None 省略）：primary 未产出内容时形状
+        与旧事件逐字一致，不给既有基线和消费者造无意义的 churn。
+        """
+        data: dict[str, Any] = {
+            "from_model": self.from_model,
+            "to_model": self.to_model,
+            "reason": self.reason,
+        }
+        if self.primary_content_chars:
+            data["primary_content_chars"] = self.primary_content_chars
+        if self.primary_finish_reason:
+            data["primary_finish_reason"] = self.primary_finish_reason
+        return data
 
 
 @dataclass(frozen=True)
@@ -109,6 +156,7 @@ class ModelRequestAttempt:
 
     role: str
     outcome: str
+    request_id: str | None = None
 
 
 @runtime_checkable
@@ -171,12 +219,12 @@ class ModelFallbackCoordinator:
         self.current = primary
         self._transitions: list[FallbackTransition] = []
         self._requests: list[ModelRequestAttempt] = []
+        #: 同一决策里 primary 与 fallback **都失败**时记下 (primary类型名, fallback
+        #: 类型名)；只在那一刻设置，异常上抛后 Run 随即终结，故不会被后续步骤污染。
+        self._double_failure: tuple[str, str] | None = None
 
     def _guarded_stream(self, model: Any, messages: list[AnyMessage]) -> AsyncIterator[Any]:
-        """单次流式尝试（按需包双守卫 + 并发闸；fallback 重试同样受保护）。
-
-        包裹顺序 = 闸(看门狗(原始流))：先拿到槽位，看门狗才开始计时。
-        """
+        """单次流式尝试按需包双守卫；调用方已持有并发槽位。"""
         stream = model.astream(messages)
         if (self._idle_timeout and self._idle_timeout > 0) or (
             self._total_timeout and self._total_timeout > 0
@@ -185,8 +233,6 @@ class ModelFallbackCoordinator:
                 stream, idle_timeout=self._idle_timeout,
                 total_timeout=self._total_timeout,
             )
-        if self._gate is not None:
-            stream = self._gate.wrap(stream)
         return stream
 
     def _slot(self) -> AbstractAsyncContextManager[None]:
@@ -200,7 +246,11 @@ class ModelFallbackCoordinator:
         """
         return self._gate.slot() if self._gate is not None else nullcontext(None)
 
-    async def ainvoke(self, messages: list[AnyMessage]) -> Any:
+    async def ainvoke(
+        self, messages: list[AnyMessage], *,
+        on_request_started: Callable[[str, str], None] | None = None,
+        on_request_failed: Callable[[str, str], None] | None = None,
+    ) -> Any:
         """非流式调用：primary 瞬时失败 → 切 fallback 重试一次。
 
         V1 看门狗不覆盖 ainvoke（总时限会误杀合法长推理）——socket 级
@@ -213,59 +263,118 @@ class ModelFallbackCoordinator:
         `except Exception`：后者会让取消/断连这类"请求已发出但未完成"从账上消失。
         """
         role = self._current_role()
+        request_id: str | None = None
         try:
             async with self._slot():
+                request_id = self._start_request(role, on_request_started)
                 result = await self.current.ainvoke(messages)
         except BaseException as error:
-            self._record_request(role, REQUEST_OUTCOME_FAILED)
+            if request_id is None:
+                raise
+            self._record_failed_request(role, request_id, on_request_failed)
             if not isinstance(error, Exception) or not self._try_switch(error):
                 raise
-            return await self._ainvoke_once(messages)
-        self._record_request(role, REQUEST_OUTCOME_COMPLETED)
+            try:
+                return await self._ainvoke_once(
+                    messages, on_request_started, on_request_failed,
+                )
+            except BaseException as retry_error:
+                if isinstance(retry_error, Exception):
+                    self._double_failure = (
+                        type(error).__name__, type(retry_error).__name__,
+                    )
+                raise
+        self._record_request(role, REQUEST_OUTCOME_COMPLETED, request_id)
         return result
 
-    async def _ainvoke_once(self, messages: list[AnyMessage]) -> Any:
+    async def _ainvoke_once(
+        self, messages: list[AnyMessage],
+        on_request_started: Callable[[str, str], None] | None,
+        on_request_failed: Callable[[str, str], None] | None,
+    ) -> Any:
         """切换后的那一次重试（**不再**切换：never 切回、只重试一次）。"""
         role = self._current_role()
+        request_id: str | None = None
         try:
             async with self._slot():
+                request_id = self._start_request(role, on_request_started)
                 result = await self.current.ainvoke(messages)
         except BaseException:
-            self._record_request(role, REQUEST_OUTCOME_FAILED)
+            if request_id is None:
+                raise
+            self._record_failed_request(role, request_id, on_request_failed)
             raise
-        self._record_request(role, REQUEST_OUTCOME_COMPLETED)
+        self._record_request(role, REQUEST_OUTCOME_COMPLETED, request_id)
         return result
 
     async def astream(
-        self, messages: list[AnyMessage]
+        self, messages: list[AnyMessage], *,
+        on_request_started: Callable[[str, str], None] | None = None,
+        on_request_failed: Callable[[str, str], None] | None = None,
     ) -> AsyncIterator[Any]:
         """流式调用：流中途瞬时失败（含卡流）→ 切 fallback 继续产出。
 
         已产出的 chunk 由消费者聚合（前缀 + fallback 续写）——SSE 客户端
         看到的是一段连续流；完整聚合结果由 model/completed 持久化。
 
+        切换事实带上 attempt 边界（#551 M10-3）：primary 切走前产出的字符数与
+        它自报的 finish_reason 记进 FallbackTransition，让下游能区分"续写前缀"
+        与"primary 已答完、fallback 重答"——不删内容、不去重。
+
         记账同 `ainvoke`：每次尝试恰一格，且**流被半途关闭**（消费者断连 →
         `GeneratorExit`）也算一次失败的请求——那一格在第一段 `except
         BaseException` 里记，`yield` 型生成器关闭时同样会走到。
         """
         role = self._current_role()
+        primary_content_chars = 0
+        primary_finish_reason: str | None = None
+        request_id: str | None = None
         try:
-            async for chunk in self._guarded_stream(self.current, messages):
-                yield chunk
+            async with self._slot():
+                request_id = self._start_request(role, on_request_started)
+                async for chunk in self._guarded_stream(self.current, messages):
+                    primary_content_chars += _chunk_text_length(chunk)
+                    finish = _chunk_finish_reason(chunk)
+                    if finish is not None:
+                        primary_finish_reason = finish
+                    yield chunk
         except BaseException as error:
-            self._record_request(role, REQUEST_OUTCOME_FAILED)
-            if not isinstance(error, Exception) or not self._try_switch(error):
+            if request_id is None:
+                raise
+            self._record_failed_request(role, request_id, on_request_failed)
+            if not isinstance(error, Exception) or not self._try_switch(
+                error,
+                primary_content_chars=primary_content_chars,
+                primary_finish_reason=primary_finish_reason,
+            ):
                 raise
             retry_role = self._current_role()
+            retry_request_id: str | None = None
             try:
-                async for chunk in self._guarded_stream(self.current, messages):
-                    yield chunk
-            except BaseException:
-                self._record_request(retry_role, REQUEST_OUTCOME_FAILED)
+                async with self._slot():
+                    retry_request_id = self._start_request(
+                        retry_role, on_request_started,
+                    )
+                    async for chunk in self._guarded_stream(self.current, messages):
+                        yield chunk
+            except BaseException as retry_error:
+                if retry_request_id is None:
+                    raise
+                self._record_failed_request(
+                    retry_role, retry_request_id, on_request_failed,
+                )
+                # 只把"两级都真的失败"记成双挂；消费方断连（GeneratorExit /
+                # CancelledError）走同一分支但**不是**模型级双挂。
+                if isinstance(retry_error, Exception):
+                    self._double_failure = (
+                        type(error).__name__, type(retry_error).__name__,
+                    )
                 raise
-            self._record_request(retry_role, REQUEST_OUTCOME_COMPLETED)
+            self._record_request(
+                retry_role, REQUEST_OUTCOME_COMPLETED, retry_request_id,
+            )
             return
-        self._record_request(role, REQUEST_OUTCOME_COMPLETED)
+        self._record_request(role, REQUEST_OUTCOME_COMPLETED, request_id)
 
     def drain_transitions(self) -> list[FallbackTransition]:
         """取走自上次 drain 以来的切换事实（Runtime 逐调用持久化用）。"""
@@ -284,6 +393,16 @@ class ModelFallbackCoordinator:
         self._requests = []
         return out
 
+    @property
+    def double_failure_errors(self) -> tuple[str, str] | None:
+        """同一决策里 primary 与 fallback **都失败**时的 (primary, fallback) 类型名。
+
+        只在那一刻有值；Run 的异常臂据此把两级错误类型名一并落进 `run/failed`
+        （#551 M10-8：首因不得只存在于 model/fallback 事件里）。只带类型名、
+        不带正文，脱敏边界与 FallbackTransition.reason 相同。
+        """
+        return self._double_failure
+
     def _current_role(self) -> str:
         """此刻的调用角色：`self.current` 指向 fallback 就是 fallback，否则 primary。
 
@@ -294,11 +413,37 @@ class ModelFallbackCoordinator:
             return PROVIDER_ROLE_FALLBACK
         return PROVIDER_ROLE_PRIMARY
 
-    def _record_request(self, role: str, outcome: str) -> None:
-        self._requests.append(ModelRequestAttempt(role=role, outcome=outcome))
+    @staticmethod
+    def _start_request(
+        role: str, callback: Callable[[str, str], None] | None,
+    ) -> str:
+        request_id = str(uuid4())
+        if callback is not None:
+            callback(role, request_id)
+        return request_id
 
-    def _try_switch(self, error: BaseException) -> bool:
-        """错误值得切且还没切过 → 切换并记录事实；否则 False（上抛原异常）。"""
+    def _record_request(self, role: str, outcome: str, request_id: str) -> None:
+        self._requests.append(ModelRequestAttempt(
+            role=role, outcome=outcome, request_id=request_id,
+        ))
+
+    def _record_failed_request(
+        self, role: str, request_id: str,
+        callback: Callable[[str, str], None] | None,
+    ) -> None:
+        self._record_request(role, REQUEST_OUTCOME_FAILED, request_id)
+        if callback is not None:
+            callback(role, request_id)
+
+    def _try_switch(
+        self, error: BaseException, *,
+        primary_content_chars: int = 0, primary_finish_reason: str | None = None,
+    ) -> bool:
+        """错误值得切且还没切过 → 切换并记录事实；否则 False（上抛原异常）。
+
+        `primary_content_chars` / `primary_finish_reason` 是切走前 primary 已产出的
+        量与它自报的 finish_reason（#551 M10-3 的 attempt 边界事实）。
+        """
         if self._fallback is None or self.current is self._fallback:
             return False
         if not self._policy.should_fallback(error):
@@ -307,6 +452,8 @@ class ModelFallbackCoordinator:
             from_model=self._primary_name,
             to_model=self._fallback_name,
             reason=type(error).__name__,
+            primary_content_chars=primary_content_chars,
+            primary_finish_reason=primary_finish_reason,
         ))
         self.current = self._fallback
         return True

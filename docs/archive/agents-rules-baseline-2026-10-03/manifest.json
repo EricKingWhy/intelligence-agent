@@ -1,0 +1,2536 @@
+{
+  "baseline": "aefffe6f8cb54a15953ff8c04f810b781d7f708f",
+  "v9": "9798a9a96ed1ac81a53d6a874ccdccf2f3dd20b6",
+  "tested_v10": "a315bab0509019a07ed3900acc7484ef4ec9860e",
+  "final": "18bc317934ec53bbe013621369f899d93c155331",
+  "files": [
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/AGENTS.original.md",
+      "source_path": "AGENTS.md",
+      "source_commit": "aefffe6f8cb54a15953ff8c04f810b781d7f708f",
+      "bytes": 40932,
+      "sha256": "dd74046eb3066cdd66e8c5f24645159a8887b131bcf734513e44e190e4224336"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/CLAUDE.original.md",
+      "source_path": "CLAUDE.md",
+      "source_commit": "aefffe6f8cb54a15953ff8c04f810b781d7f708f",
+      "bytes": 7786,
+      "sha256": "7d8a1c425b8f23f51b91acaafa2ebe792886b278e43d9120fd420aa2d6010503"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/AGENTS.v9.md",
+      "source_path": "AGENTS.md",
+      "source_commit": "9798a9a96ed1ac81a53d6a874ccdccf2f3dd20b6",
+      "bytes": 32200,
+      "sha256": "92859eaaff24c8e1d3336f8acc1c3850a4e9467e8aa1ca451b9b31f2932581ca"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/CLAUDE.v9.md",
+      "source_path": "CLAUDE.md",
+      "source_commit": "9798a9a96ed1ac81a53d6a874ccdccf2f3dd20b6",
+      "bytes": 1193,
+      "sha256": "19dfd707ff800ba70bfb94d88a399bb802c993b3f896f91ca78452647da461c3"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/AGENTS.v10.md",
+      "source_path": "AGENTS.md",
+      "source_commit": "a315bab0509019a07ed3900acc7484ef4ec9860e",
+      "bytes": 33333,
+      "sha256": "1f663ebe6194a3cf938a7d7565cc48ae234d7c922328cafdcf25f2bc9c3e7963"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/CLAUDE.v10.md",
+      "source_path": "CLAUDE.md",
+      "source_commit": "a315bab0509019a07ed3900acc7484ef4ec9860e",
+      "bytes": 1377,
+      "sha256": "4d96d7ab8a3e1834fb71d1c342c4e80ef6bebfcde60037ac01a5d368e3db0cab"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/AGENTS.final.md",
+      "source_path": "AGENTS.md",
+      "source_commit": "18bc317934ec53bbe013621369f899d93c155331",
+      "bytes": 33333,
+      "sha256": "1f663ebe6194a3cf938a7d7565cc48ae234d7c922328cafdcf25f2bc9c3e7963"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/CLAUDE.final.md",
+      "source_path": "CLAUDE.md",
+      "source_commit": "18bc317934ec53bbe013621369f899d93c155331",
+      "bytes": 1450,
+      "sha256": "c33eeb26bb42d62e37f76284ab5eef26dccb6d0e58e9b32124977dd86140a25f"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/SDD_WORKFLOW_PROTOCOL.original.md",
+      "source_path": "docs/SDD_WORKFLOW_PROTOCOL.md",
+      "source_commit": "aefffe6f8cb54a15953ff8c04f810b781d7f708f",
+      "bytes": 93078,
+      "sha256": "5e673dd91757e249f5c8dbae8f2238d6cb4ebabdd51cad7fc735470bd3ff92e5"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/SDD_WORKFLOW_PROTOCOL.v10.md",
+      "source_path": "docs/SDD_WORKFLOW_PROTOCOL.md",
+      "source_commit": "a315bab0509019a07ed3900acc7484ef4ec9860e",
+      "bytes": 93328,
+      "sha256": "def7146fa3caa57c91ca6206cc3af7dc4835f23bd25042ec7ac06dc02b63d51d"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/review-debug-playbook.original.md",
+      "source_path": "docs/agents/review-debug-playbook.md",
+      "source_commit": "aefffe6f8cb54a15953ff8c04f810b781d7f708f",
+      "bytes": 1654,
+      "sha256": "88333b4e61dab3c9acc5e583848400a42c87d0042f15a763df1b054662b0a249"
+    },
+    {
+      "path": "docs/archive/agents-rules-baseline-2026-10-03/review-debug-playbook.v10.md",
+      "source_path": "docs/agents/review-debug-playbook.md",
+      "source_commit": "a315bab0509019a07ed3900acc7484ef4ec9860e",
+      "bytes": 1662,
+      "sha256": "59f73be3bf2bb741148eaf3159ab4d5fbea068c060a80af552ccdd04b6e99312"
+    }
+  ],
+  "migration_rows": 485,
+  "source_coverage": {
+    "AGENTS.md": {
+      "nonempty_lines": 665,
+      "unmapped": [],
+      "overlap": []
+    },
+    "CLAUDE.md": {
+      "nonempty_lines": 110,
+      "unmapped": [],
+      "overlap": []
+    }
+  },
+  "source_block_hash_matches": 485,
+  "source_block_hash_total": 485,
+  "hash_checks": [
+    {
+      "source": "AGENTS.md",
+      "lines": "1-1",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "3-8",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "10-10",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "12-12",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "14-14",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "16-18",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "20-21",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "23-27",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "29-29",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "31-31",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "33-33",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "35-35",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "36-36",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "37-37",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "38-38",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "39-39",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "40-40",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "41-41",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "42-42",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "43-43",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "45-45",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "47-47",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "49-49",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "51-51",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "53-53",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "54-54",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "55-55",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "56-56",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "57-57",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "59-59",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "61-61",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "62-62",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "63-63",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "64-64",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "65-65",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "66-66",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "67-67",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "69-69",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "71-71",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "73-73",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "75-75",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "77-84",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "86-86",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "88-88",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "90-90",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "92-92",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "94-94",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "95-95",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "96-96",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "97-97",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "98-98",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "99-99",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "101-101",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "103-103",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "105-117",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "119-119",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "121-121",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "123-124",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "126-126",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "128-129",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "131-131",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "133-135",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "137-137",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "139-142",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "144-144",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "146-148",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "149-149",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "150-150",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "151-151",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "152-152",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "153-153",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "154-154",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "155-155",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "156-156",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "157-157",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "159-159",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "161-161",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "163-163",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "165-165",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "167-167",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "169-169",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "171-171",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "172-172",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "173-173",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "175-175",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "177-177",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "178-178",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "179-179",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "180-180",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "181-181",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "182-182",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "184-184",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "186-186",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "188-188",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "190-190",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "192-192",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "194-194",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "196-196",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "198-198",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "199-199",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "200-200",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "201-201",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "202-202",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "204-204",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "206-206",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "207-207",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "209-209",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "211-211",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "213-213",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "214-214",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "215-215",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "216-216",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "217-217",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "219-219",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "221-221",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "223-223",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "225-225",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "226-227",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "228-230",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "231-231",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "233-233",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "235-235",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "237-237",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "239-239",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "240-240",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "241-241",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "242-242",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "243-243",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "244-244",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "245-245",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "246-246",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "247-247",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "248-248",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "249-249",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "250-250",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "251-251",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "252-252",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "253-253",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "254-254",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "255-255",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "256-256",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "257-257",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "258-258",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "259-259",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "260-260",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "262-262",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "264-264",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "266-266",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "268-268",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "270-270",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "271-271",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "272-272",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "273-273",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "274-274",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "275-275",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "276-276",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "278-278",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "280-280",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "282-282",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "284-284",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "286-286",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "288-288",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "289-289",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "290-290",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "291-291",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "292-292",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "294-294",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "296-296",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "297-297",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "298-298",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "299-299",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "300-300",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "301-301",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "302-302",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "304-304",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "306-308",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "310-310",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "311-311",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "312-312",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "313-313",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "315-318",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "320-320",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "322-322",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "323-323",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "324-324",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "325-325",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "326-326",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "328-328",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "330-330",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "331-331",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "332-332",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "333-333",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "334-334",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "336-336",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "338-338",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "340-340",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "341-341",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "342-342",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "343-343",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "344-344",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "345-345",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "347-347",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "349-349",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "351-351",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "352-352",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "353-353",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "354-354",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "355-355",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "356-356",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "357-357",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "359-361",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "363-363",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "365-366",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "368-368",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "370-370",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "372-374",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "376-376",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "378-384",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "386-386",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "388-388",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "389-389",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "390-390",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "392-392",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "394-394",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "396-396",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "397-397",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "398-398",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "399-399",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "400-400",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "401-401",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "402-402",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "403-403",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "404-404",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "405-405",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "406-406",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "408-408",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "410-410",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "412-412",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "414-414",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "416-416",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "418-418",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "420-420",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "422-426",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "428-428",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "430-431",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "433-433",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "435-435",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "436-439",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "440-441",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "443-444",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "446-446",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "448-448",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "449-449",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "450-450",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "451-452",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "453-454",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "456-456",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "458-463",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "465-465",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "467-469",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "471-476",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "478-479",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "481-481",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "483-483",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "485-490",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "492-493",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "495-495",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "497-497",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "499-517",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "519-521",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "523-524",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "526-526",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "528-528",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "530-532",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "534-534",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "536-536",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "538-538",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "540-540",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "542-542",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "544-545",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "546-546",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "547-548",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "550-550",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "552-552",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "554-554",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "555-555",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "556-556",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "558-558",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "560-560",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "561-561",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "562-562",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "564-564",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "566-569",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "571-572",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "574-574",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "576-578",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "580-580",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "582-582",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "584-597",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "599-599",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "601-601",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "603-606",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "608-610",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "612-612",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "614-614",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "616-616",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "618-625",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "627-630",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "632-632",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "634-636",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "637-640",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "641-641",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "643-643",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "645-646",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "648-651",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "653-653",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "655-655",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "656-656",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "657-657",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "659-659",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "661-669",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "671-674",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "676-676",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "678-684",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "686-686",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "688-688",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "690-691",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "692-692",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "693-694",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "696-696",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "698-698",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "700-708",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "710-712",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "714-714",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "716-716",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "718-718",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "720-720",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "721-721",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "722-722",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "723-723",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "724-724",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "725-725",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "726-726",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "727-727",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "728-728",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "730-730",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "732-732",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "733-733",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "734-734",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "736-736",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "738-738",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "740-740",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "742-744",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "746-746",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "748-748",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "750-750",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "752-756",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "758-759",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "761-761",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "763-764",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "766-766",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "768-768",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "769-770",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "771-771",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "773-773",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "775-775",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "777-777",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "779-779",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "780-780",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "781-781",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "782-782",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "783-783",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "784-784",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "785-785",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "786-790",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "791-798",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "799-808",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "809-809",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "810-810",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "811-811",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "813-813",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "815-815",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "817-819",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "821-821",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "823-823",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "825-825",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "827-829",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "831-831",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "832-832",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "833-833",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "834-834",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "836-836",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "838-838",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "840-842",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "844-844",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "846-849",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "851-851",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "853-853",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "855-857",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "859-859",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "861-865",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "867-867",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "869-871",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "874-874",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "876-876",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "878-878",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "880-880",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "882-882",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "883-883",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "885-885",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "887-887",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "889-889",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "891-897",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "899-903",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "905-905",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "907-907",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "909-913",
+      "matches": true
+    },
+    {
+      "source": "AGENTS.md",
+      "lines": "915-915",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "1-1",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "3-10",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "12-12",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "14-14",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "16-18",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "20-23",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "25-26",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "28-28",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "30-30",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "32-35",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "37-37",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "39-39",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "40-40",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "41-41",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "42-42",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "43-43",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "45-45",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "47-47",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "49-50",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "52-54",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "55-59",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "60-62",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "63-64",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "65-66",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "67-70",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "71-76",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "78-78",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "80-80",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "82-84",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "86-87",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "89-90",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "92-92",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "94-94",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "95-95",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "96-96",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "98-99",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "101-103",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "105-105",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "107-107",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "109-109",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "111-111",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "112-112",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "113-113",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "114-114",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "116-116",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "118-118",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "120-120",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "122-122",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "123-123",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "124-124",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "125-125",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "126-126",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "127-127",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "128-128",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "129-129",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "130-130",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "132-132",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "134-134",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "136-136",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "137-137",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "138-139",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "140-140",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "141-141",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "143-143",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "145-145",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "147-147",
+      "matches": true
+    },
+    {
+      "source": "CLAUDE.md",
+      "lines": "149-149",
+      "matches": true
+    }
+  ],
+  "hash_normalization": "Join stripped original lines with one space; preserve internal spacing.",
+  "meaning": "Original snapshots preserve Git blob bytes. Full source coverage is mechanical; semantics reviewed separately."
+}

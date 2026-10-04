@@ -41,6 +41,7 @@ class _FakeMemoryProvider:
 def app_and_client(tmp_path):
     """创建隔离的 FastAPI app + TestClient（catalog + memory provider 就位）。"""
     settings = Settings(
+        _env_file=None,
         workspace_dir=str(tmp_path),
         model_api_key="test-key",
         model_name="test-model",

@@ -144,6 +144,24 @@ async def test_output_budget_caps_long_results():
 
 
 @pytest.mark.asyncio
+async def test_execute_maps_protocol_violation_to_nonretryable_failure():
+    """MCP-F2：协议违规错误 → 明确"协议违规"文案 + retryable=False（快速失败，
+    交上层按不可重试处理，而不是混入通用 TIMEOUT×重试）。"""
+    from agent_harness.mcp.client import MCPProtocolError
+
+    class _RaisingConnection:
+        async def call_tool(self, name, arguments):
+            raise MCPProtocolError("server 'x' 在调用期间返回畸形协议消息")
+
+    tool = MCPTool(_RaisingConnection(), _config(), make_fake_tool("echo"))
+    result = await tool.execute(tool.args_schema.model_validate({"text": "x"}))
+    assert result.ok is False
+    assert result.retryable is False
+    assert result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+    assert "MCP 协议违规" in result.message
+
+
+@pytest.mark.asyncio
 async def test_description_declares_budget_and_server():
     server = FakeMCPServer(tools=[make_fake_tool("echo")])
     async with _built_tools(_config(), server) as tools:

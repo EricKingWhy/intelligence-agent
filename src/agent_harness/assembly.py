@@ -19,7 +19,7 @@ import platform
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
@@ -27,6 +27,7 @@ from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
     SessionBudgetPort,
+    SessionLimits,
     validate_tool_call_limits_registered,
 )
 
@@ -41,6 +42,11 @@ from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
+
+if TYPE_CHECKING:
+    # profiles 模块在函数体内延迟导入（与 BUILTIN_PROFILES 取用点同款）；这里
+    # 只为 `_root_profile_spec` 的返回值注解服务。
+    from agent_harness.agent.profiles import AgentSpec
 from agent_harness.prompt import (
     DEFAULT_REGISTRY,
     build_registry,
@@ -182,115 +188,65 @@ def _select_context_providers(
     return [p for p in wired if getattr(p, "name", None) in wanted]
 
 
-async def build_runtime(
-    *,
-    settings: Settings,
-    wiring: CapabilityWiring,
-    stores: RecoveryStores,
-    workspace_registry: WorkspaceRegistry,
-    session_id: str,
-    workspace: Path,
-    max_agent_turns: int,
-    permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
-    auto_approve: bool | None = None,
-    approval_callback: ApprovalCallback | None = None,
-    session_store: JsonlSessionStore | None = None,
-    model_name: str | None = None,
-    reasoning_effort: str | None = None,
-    agent_profile: str | None = None,
-    context_providers: list[str] | None = None,
-    steer_source: Any | None = None,
-    run_budget: LaunchRunBudget | None = None,
-    local_fuse_source: str = SOURCE_DEPLOYMENT,
-    stuck_evidence: StuckEvidencePort | None = None,
-    session_budget: SessionBudgetPort | None = None,
-) -> AgentRuntime:
-    """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
+@dataclass(frozen=True)
+class _RootTooling:
+    """`_build_tooling` 的产物束：registry 与与它配对的旁路依赖。"""
 
-    模型经 create_chat_model(settings) 构造（测试替身注入点）；sandbox 由
-    WorkspaceRegistry 统一创建并持久化映射（恢复时按映射还原）。
-    model_name（ADR-0016 §5）：None = 默认链；catalog 名 = 会话级选择
-    （未知名字在 web 层已 422，这里 resolve 再响亮失败一次）。
+    registry: ToolRegistry
+    overflow_handler: ArtifactOverflowHandler | None
+    context_artifact_store: Any | None
+    context_read_tool_name: str | None
+    runtime_multiagent_provider: Any | None
 
-    permission_mode（Phase 5）：会话级 PermissionPolicy 上限（审批阈值，不是
-    硬墙——policy 决定哪些工具 needs_approval，审批结果仍由 callback 决定）。
-    approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
-    式审批 callback（见 web 层 PendingApprovalQueue）。
-    steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
-    MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
 
-    `max_agent_turns`（#308）：**已解析的** local fuse 生效值，本函数只消费结果。刻意
-    **不**在这里解析：装配点只有一个输入，而不是"再判一次策略"（解析点见
-    `agent.budget.resolve_local_fuse`）。
+def _root_profile_spec(agent_profile: str | None) -> AgentSpec:
+    """根档位声明的唯一取用点（#615②）：根配额 depth / delegations 同源。
 
-    `run_budget` / `local_fuse_source`（`#312`）：run 作用域账本上下文与 local fuse 的
-    **来源标识**，两者都只是**透传**给 AgentRuntime（判定与解析都在服务层与
-    `agent/run_budget.py`）。默认 None / deployment ⇒ 既有调用方（CLI、单测、
-    delegate 子 runtime）逐字不变：新 run、无 run ceiling、fuse 来源记 deployment。
-
-    `stuck_evidence`（`#317`）：stuck 暂停的三类恢复依据里"环境 / 策略"两条的
-    **观测端口**，同样只是透传（`AgentRuntime` 只在暂停那一刻读一次）。构造方是
-    服务层——它才掌握"本次生效策略"的全部输入，且恢复侧要用**同一份函数**现算再
-    比较（ADR-0048 D8）。默认 None ⇒ 不观测（那两条依据届时按"无快照可比"409，
-    "相关 steer"那条不受影响），CLI / 单测的既有路径逐字不变。
+    `_build_tooling`（DelegateTool 的树配额）与 `build_runtime`（multiagent
+    provider.activate 的树账）此前**各写一遍**取用式（`agent_profile or "main"`
+    vs `is not None` 分支）——漂移 = 工具面文案里的"整棵委派树最多 N 次"与树账
+    的 max_delegations 各说各话；"" 边界还一处静默落 main、一处 KeyError
+    （Web 边界已 422 掉空串，属死输入潜伏分叉，统一后两侧同形）。
+    注意："无档位"语义（根 system_prompt 走文本包裹、registry 不收窄）仍以
+    `profile_spec is not None` 判定，**不**经过本函数——那两处的 None 是
+    有意义的状态，不是配额缺省。
     """
-    # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
-    # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
-    # coding/research_review 收窄 registry 到 spec.tool_scope + 注入 spec.system_prompt。
-    # 未知名字 web 层已 422，这里 KeyError 再响亮失败一次（防御性，不应发生）。
-    # #286：main 也是**根委派配额**的来源——即便 agent_profile=None（= 出厂
-    # main），根 max_depth 也要从这里取，所以 import 提到分支外。
     from agent_harness.agent.profiles import BUILTIN_PROFILES
 
-    profile_spec = None
-    if agent_profile is not None:
-        profile_spec = BUILTIN_PROFILES[agent_profile]
-    # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
-    root_max_depth = (profile_spec if profile_spec is not None
-                      else BUILTIN_PROFILES["main"]).max_depth
-    root_max_delegations = (profile_spec if profile_spec is not None
-                            else BUILTIN_PROFILES["main"]).max_delegations
+    return (
+        BUILTIN_PROFILES[agent_profile]
+        if agent_profile is not None
+        else BUILTIN_PROFILES["main"]
+    )
 
-    # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
-    # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
-    # DEFAULT_REGISTRY 不读环境（§4.4），所以这里显式按 settings 构建一次。
-    persona = parse_persona_config(settings.agent_persona)
 
-    # #203 / ADR-0032 D8：模型解析收敛——统一解析点 resolve_selection（catalog
-    # 名优先 + 自定义供应商 `<provider>:<model_id>` 命名空间 fallback）；两者都
-    # 未命中才响亮失败。被删 provider **不静默 fallback**（D9：明确错误含
-    # provider id）。终审 P2 修复：不再裸 model_id 跨 provider 匹配——两个自定义
-    # provider 注册同一 model_id 时此前的循环取文件序第一个（顺序依赖的静默选择）；
-    # 现在 catalog 名精确命中 + composite id（provider:model）精确解析，无歧义。
-    if model_name is None:
-        config = ModelConfig.from_settings(settings)
-    else:
-        try:
-            from agent_harness.model.provider_store import ProviderStore
+def _build_tooling(
+    settings: Settings,
+    wiring: CapabilityWiring,
+    *,
+    session_id: str,
+    workspace: Path,
+    workspace_registry: WorkspaceRegistry,
+    session_store: JsonlSessionStore | None,
+    agent_profile: str | None,
+) -> _RootTooling:
+    """sandbox 绑定 + **根 registry**（收窄前）构造——唯一的工具面事实源。
 
-            store = ProviderStore.for_settings(settings)
-            config = ModelConfig.resolve_selection(settings, model_name, store)
-        except ConfigError as error:
-            raise error from None
-    model = create_chat_model(config, reasoning_effort=reasoning_effort)
-    # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
-    # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
-    # 的 per-run coordinator 负责（见 agent/fallback 接线）。
-    fallback_model = None
-    if config.fallback is not None:
-        fallback_model = create_chat_model(
-            config.fallback, reasoning_effort=reasoning_effort,
-        )
-    # 进程级模型并发闸（#89）：本次 build_runtime 与其派生的所有 child 共享
-    # 同一实例（全局在飞模型调用数的语义）。
-    model_call_gate = ModelCallGate(settings.model_max_concurrency)
-
+    为什么独立成函数（#564 裁决 (a)）：service 层的 session 注册名校验必须发生在
+    eager CAS **之前**，彼时 build_runtime 还没有跑，"哪些工具已注册"只能从同一份
+    构造逻辑取。build_runtime 调本函数；pre-CAS 校验用的是本函数的**零副作用**
+    名字集投影 `root_registry_tool_names`（不实例化 sandbox，审查 P2-1）——新增
+    工具来源必须同时落在两处（漏落 = `tests/test_assembly_root_registry_names.py`
+    的三方对账红灯）。
+    """
+    # #286：根委派配额来自档位声明（与 build_runtime 的树账同一取用点）。
+    root_max_delegations = _root_profile_spec(agent_profile).max_delegations
     # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
     # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
     # create() 对它响亮拒绝（防改写属主绑定，tests/sandbox/test_workspace_registry.py
     # 钉住），恢复路径不该撞它。无映射 = 新会话，照旧 create。注意：工具面收窄
-    # （agent_profile → registry.filtered）在本函数下游与 sandbox 解析无关，恢复
-    # 入口的授权重建由调用方（service.resume_and_launch）按子会话 AgentSpec 传
+    # （agent_profile → registry.filtered）在 build_runtime 下游与 sandbox 解析无关，
+    # 恢复入口的授权重建由调用方（service.resume_and_launch）按子会话 AgentSpec 传
     # agent_profile 兑现——只放开这一半会放大子会话工具面，两条必须一起成立。
     if workspace_registry.exists(session_id):
         sandbox = workspace_registry.get(session_id)
@@ -338,21 +294,6 @@ async def build_runtime(
         context_artifact_store = selection.store
         context_read_tool_name = read_tool.name
 
-    # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
-    # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
-    # 切片 B：ApprovalCallback 已 async 化（外部 /approve 交互式审批需要 run 暂停）。
-    policy = permission_mode
-    if auto_approve is False and approval_callback is None:
-        async def approval_callback(_req):  # type: ignore[no-redef]
-            # #423：用户向措辞（原 "manual approval not yet wired" 已退役，见 CHANGELOG）。
-            return ApprovalResponse(
-                approved=False,
-                reason="自动批准未开启，且当前会话没有可用的审批通道；已按 fail-closed 拒绝本次工具执行",
-            )
-    elif approval_callback is None:
-        async def approval_callback(_req):  # type: ignore[no-redef]
-            return ApprovalResponse(approved=True, reason="auto-approve")
-
     runtime_multiagent_provider = None
     if wiring.multiagent_provider is not None and session_store is not None:
         # CapabilityWiring is cached across requests; activation state is not.
@@ -370,7 +311,7 @@ async def build_runtime(
             continue
         if isinstance(capability_tool, DelegateTool) and runtime_multiagent_provider is not None:
             # 结论 ref 化（W-31.3 / #415）：注入**同一个** context_artifact_store
-            #（:311-328 选出，ContextBuilder 共用）——不得新建第二个 store，否则
+            #（上面选出，ContextBuilder 共用）——不得新建第二个 store，否则
             # 出现"写进 A、从 B 读"的静默错配。未选中 store（None）= fail-open
             # 不外置，与 W-03 整体关闭语义同口径。
             capability_tool = DelegateTool(
@@ -379,6 +320,204 @@ async def build_runtime(
                 summary_overflow_tokens=settings.subagent_summary_overflow_tokens,
             )
         registry.register(capability_tool)
+
+    return _RootTooling(
+        registry=registry,
+        overflow_handler=overflow_handler,
+        context_artifact_store=context_artifact_store,
+        context_read_tool_name=context_read_tool_name,
+        runtime_multiagent_provider=runtime_multiagent_provider,
+    )
+
+
+def root_registry_tool_names(
+    settings: Settings,
+    wiring: CapabilityWiring,
+    *,
+    session_id: str,
+    session_store: JsonlSessionStore | None,
+) -> frozenset[str]:
+    """根 registry 名字集的**零副作用**计算——pre-CAS session 名字校验专用。
+
+    #564 审查 P2-1：validator 若走完整 `_build_tooling`，`LocalSubprocessSandbox
+    .__init__` 会对 workspace `mkdir`，发生在 service 的归属对账（#266
+    `SessionCwdUnavailable` 守卫，`WorkspaceNotFound` 子型）**之前** ⇒ 坏名 422
+    会把已删 cwd 凭空重建、合法名
+    resume 掩蔽守卫。名字集不依赖 sandbox 实例：本地工具"构造器只存依赖"（既有
+    判定，`tests/agent/test_tool_scope_reconciliation.py` 传 None 读 `.name`）；
+    读回工具名只由 Provider 选择决定（store 构造无副作用，mkdir 在写路径）；
+    capability 工具在 wiring 里已是实例。`_build_tooling` 与本函数必须同源一致
+    ——`tests/test_assembly_root_registry_names.py` 三方对账（真实装配 /
+    `_build_tooling` / 本函数），漂移即红灯。
+    """
+    names: set[str] = {tool_cls(None).name for tool_cls in BUILTIN_LOCAL_TOOLS}
+    # W-26（#380）：`update_plan` 无条件注册（与 `_build_tooling` 同一句判定）。
+    names.add(UpdatePlanTool().name)
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
+        names.add(selection.read_tool(None).name)
+    for capability_tool in wiring.tools:
+        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
+        # 与 `_build_tooling` 的同名分支逐字同判（名字在不在，两边必须一致）。
+        if isinstance(capability_tool, DelegateTool) and session_store is None:
+            continue
+        names.add(capability_tool.name)
+    return frozenset(names)
+
+
+async def build_runtime(
+    *,
+    settings: Settings,
+    wiring: CapabilityWiring,
+    stores: RecoveryStores,
+    workspace_registry: WorkspaceRegistry,
+    session_id: str,
+    workspace: Path,
+    max_agent_turns: int,
+    permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
+    auto_approve: bool | None = None,
+    approval_callback: ApprovalCallback | None = None,
+    session_store: JsonlSessionStore | None = None,
+    model_name: str | None = None,
+    reasoning_effort: str | None = None,
+    agent_profile: str | None = None,
+    context_providers: list[str] | None = None,
+    steer_source: Any | None = None,
+    run_budget: LaunchRunBudget | None = None,
+    local_fuse_source: str = SOURCE_DEPLOYMENT,
+    stuck_evidence: StuckEvidencePort | None = None,
+    session_budget: SessionBudgetPort | None = None,
+    session_declared_limits: SessionLimits | None = None,
+) -> AgentRuntime:
+    """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
+
+    模型经 create_chat_model(settings) 构造（测试替身注入点）；sandbox 由
+    WorkspaceRegistry 统一创建并持久化映射（恢复时按映射还原）。
+    model_name（ADR-0016 §5）：None = 默认链；catalog 名 = 会话级选择
+    （未知名字在 web 层已 422，这里 resolve 再响亮失败一次）。
+
+    permission_mode（Phase 5）：会话级 PermissionPolicy 上限（审批阈值，不是
+    硬墙——policy 决定哪些工具 needs_approval，审批结果仍由 callback 决定）。
+    approval_callback：None → 安全默认（auto-approve 全批），调用方也可注入交互
+    式审批 callback（见 web 层 PendingApprovalQueue）。
+    steer_source（ADR-0030 §4.3）：待注入 steer 的读取端口（Web 层传
+    MessageQueueManager 的内存镜像）；None = 不注入，CLI 与既有单测逐字不变。
+
+    `max_agent_turns`（#308）：**已解析的** local fuse 生效值，本函数只消费结果。刻意
+    **不**在这里解析：装配点只有一个输入，而不是"再判一次策略"（解析点见
+    `agent.budget.resolve_local_fuse`）。
+
+    `run_budget` / `local_fuse_source`（`#312`）：run 作用域账本上下文与 local fuse 的
+    **来源标识**，两者都只是**透传**给 AgentRuntime（判定与解析都在服务层与
+    `agent/run_budget.py`）。默认 None / deployment ⇒ 既有调用方（CLI、单测、
+    delegate 子 runtime）逐字不变：新 run、无 run ceiling、fuse 来源记 deployment。
+
+    `stuck_evidence`（`#317`）：stuck 暂停的三类恢复依据里"环境 / 策略"两条的
+    **观测端口**，同样只是透传（`AgentRuntime` 只在暂停那一刻读一次）。构造方是
+    服务层——它才掌握"本次生效策略"的全部输入，且恢复侧要用**同一份函数**现算再
+    比较（ADR-0048 D8）。默认 None ⇒ 不观测（那两条依据届时按"无快照可比"409，
+    "相关 steer"那条不受影响），CLI / 单测的既有路径逐字不变。
+
+    `session_declared_limits`（`#564`）：本次请求**点名**的 session 声明（区别于
+    `session_budget.limits` 的账行现值——恢复通道两者可以不同）。非 None 时按
+    **根 registry** 判注册名 422（树级语义）；账行现值里的陈旧名降告警不拒绝，
+    见校验块内注释。
+    """
+    # agent_profile 运行时消费（ADR-0020a，RUNTIME 子批次）：查 BUILTIN_PROFILES
+    # 拿 AgentSpec——main/None 走原路径（registry 全量、无 system_prompt 注入），
+    # coding/research_review 收窄 registry 到 spec.tool_scope + 注入 spec.system_prompt。
+    # 未知名字 web 层已 422，这里 KeyError 再响亮失败一次（防御性，不应发生）。
+    # #286：main 也是**根委派配额**的来源——即便 agent_profile=None（= 出厂
+    # main），根 max_depth 也要从这里取，所以 import 提到分支外。
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+
+    profile_spec = None
+    if agent_profile is not None:
+        profile_spec = BUILTIN_PROFILES[agent_profile]
+    # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
+    # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
+    root_profile = _root_profile_spec(agent_profile)
+    root_max_depth = root_profile.max_depth
+    root_max_delegations = root_profile.max_delegations
+
+    # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
+    # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
+    # DEFAULT_REGISTRY 不读环境（§4.4），所以这里显式按 settings 构建一次。
+    persona = parse_persona_config(settings.agent_persona)
+
+    # #203 / ADR-0032 D8：模型解析收敛——统一解析点 resolve_selection（catalog
+    # 名优先 + 自定义供应商 `<provider>:<model_id>` 命名空间 fallback）；两者都
+    # 未命中才响亮失败。被删 provider **不静默 fallback**（D9：明确错误含
+    # provider id）。终审 P2 修复：不再裸 model_id 跨 provider 匹配——两个自定义
+    # provider 注册同一 model_id 时此前的循环取文件序第一个（顺序依赖的静默选择）；
+    # 现在 catalog 名精确命中 + composite id（provider:model）精确解析，无歧义。
+    if model_name is None:
+        config = ModelConfig.from_settings(settings)
+    else:
+        try:
+            from agent_harness.model.provider_store import ProviderStore
+
+            store = ProviderStore.for_settings(settings)
+            config = ModelConfig.resolve_selection(settings, model_name, store)
+        except ConfigError as error:
+            raise error from None
+    model = create_chat_model(config, reasoning_effort=reasoning_effort)
+    # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
+    # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
+    # 的 per-run coordinator 负责（见 agent/fallback 接线）。
+    fallback_model = None
+    if config.fallback is not None:
+        fallback_model = create_chat_model(
+            config.fallback, reasoning_effort=reasoning_effort,
+        )
+    # 进程级模型并发闸（#89 / #559 修复）：闸实例归 wiring（装配生命周期）所有，
+    # 同一进程内所有 build_runtime 共享同一实例（全局在飞模型调用数的语义——
+    # 跨 Session / child / fallback / 摘要一致）。手搓 wiring（直接
+    # CapabilityWiring()，无装配生命周期）保持 None ⇒ 退回每次新建，行为同历史。
+    model_call_gate = wiring.model_call_gate
+    if model_call_gate is None:
+        model_call_gate = ModelCallGate(settings.model_max_concurrency)
+
+    # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
+    # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
+    # create() 对它响亮拒绝（防改写属主绑定，tests/sandbox/test_workspace_registry.py
+    # 钉住），恢复路径不该撞它。无映射 = 新会话，照旧 create。注意：工具面收窄
+    # （agent_profile → registry.filtered）在本函数下游与 sandbox 解析无关，恢复
+    # 入口的授权重建由调用方（service.resume_and_launch）按子会话 AgentSpec 传
+    # agent_profile 兑现——只放开这一半会放大子会话工具面，两条必须一起成立。
+    # （sandbox 规则与 registry 构造在 `_build_tooling`——与 #564 的 pre-CAS 校验
+    # 同一事实源，见其 docstring。）
+    tooling = _build_tooling(
+        settings, wiring,
+        session_id=session_id, workspace=workspace,
+        workspace_registry=workspace_registry, session_store=session_store,
+        agent_profile=agent_profile,
+    )
+    registry = tooling.registry
+    overflow_handler = tooling.overflow_handler
+    context_artifact_store = tooling.context_artifact_store
+    context_read_tool_name = tooling.context_read_tool_name
+    runtime_multiagent_provider = tooling.runtime_multiagent_provider
+    # 根 registry（收窄前）的名字集：session 作用域判据的依据（#564 裁决的树级
+    # 语义——session 预算横跨会话树，"整棵树调得到"以根为准，不看本 runtime 的
+    # 收窄面）。在收窄**前**取，一旦错过就无从对比。
+    root_registry_names = frozenset(tool.name for tool in registry.list())
+
+    # Phase 5：permission_mode 是会话级 PermissionPolicy 上限（审批阈值）。
+    # approval_callback 由调用方决定：None → 安全默认（全批），注入 → 交互审批。
+    # 切片 B：ApprovalCallback 已 async 化（外部 /approve 交互式审批需要 run 暂停）。
+    policy = permission_mode
+    if auto_approve is False and approval_callback is None:
+        async def approval_callback(_req):  # type: ignore[no-redef]
+            # #423：用户向措辞（原 "manual approval not yet wired" 已退役，见 CHANGELOG）。
+            return ApprovalResponse(
+                approved=False,
+                reason="自动批准未开启，且当前会话没有可用的审批通道；已按 fail-closed 拒绝本次工具执行",
+            )
+    elif approval_callback is None:
+        async def approval_callback(_req):  # type: ignore[no-redef]
+            return ApprovalResponse(approved=True, reason="auto-approve")
 
     # agent_profile tool_scope 收窄（ADR-0020a）：仅在非 main profile 时过滤——
     # main 的 _MAIN_TOOLS 是全量的超集，filter 等价不过滤，但若未来新增了一个
@@ -401,6 +540,33 @@ async def build_runtime(
         validate_tool_call_limits_registered(
             run_budget.limits, registered=[tool.name for tool in registry.list()],
         )
+    # session 作用域（#564 裁决 (a)+(b)）——两个不同的对象、两条不同的处置：
+    # - **请求声明**（session_declared_limits，本次请求点名的那份）：422，判据 =
+    #   **根 registry**（树级语义）。session 预算横跨会话树，本 runtime 收窄掉的
+    #   工具树根仍调得到（child registry ⊆ 根 registry），按收窄面判会误杀合法
+    #   委派配额。service 层的 resume 通道已在 eager CAS **之前**核过同一份声明
+    #   （坏名永不触碰账行），这里是 create 等其余通道的无副作用拒绝点。
+    # - **账行现值**（session_budget.limits，可能含历史合法名）：陈旧名（能力下线、
+    #   工件 store 切换）**降告警不拒绝**——修复前按收窄面重核 422，会让一次打错的
+    #   请求或一次能力下线把会话毒成不可恢复态（K8s 对事后悬空引用、AWS IAM 对
+    #   悬空 ARN 都是"响亮暴露但不 brick"同型）。配额对陈旧名不再生效。
+    if session_declared_limits is not None:
+        validate_tool_call_limits_registered(
+            session_declared_limits, registered=sorted(root_registry_names),
+            scope="session",
+        )
+    if session_budget is not None:
+        stale_names = sorted(
+            name for name in session_budget.limits.tool_call_limits
+            if name not in root_registry_names
+        )
+        if stale_names:
+            logger.warning(
+                "session 账行含当前 registry 不存在的配额名 %s（能力下线 / 工件 "
+                "store 切换等历史原因）：配额对该工具不再生效；按 #564 裁决 (b) "
+                "告警不拒绝，422 只属于请求声明",
+                stale_names,
+            )
 
     # T6 工具 guidance（ADR-0023 D11）：把**收窄后** registry 里各工具自带的
     # `prompt_guidance` 注册成 `tool:<name>` section（order 2000，scope `{"*"}`）。
@@ -488,6 +654,8 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            # #559：摘要调用与主循环同闸（进程级在飞 ≤N 的语义，见上）。
+            model_call_gate=model_call_gate,
             # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
             plan_reinject_every_messages=settings.plan_reinject_every_messages,
             # context_providers 运行时消费（ADR-0020b）：会话请求字段按 name 筛选

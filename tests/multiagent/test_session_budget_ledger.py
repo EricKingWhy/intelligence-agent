@@ -28,6 +28,7 @@ import pytest
 from agent_harness.agent.run_budget import (
     TRIGGER_SESSION_REQUESTS,
     TRIGGER_SESSION_TURNS,
+    BudgetRejection,
     SessionConsumed,
     SessionLimits,
 )
@@ -406,3 +407,127 @@ async def test_deadline_headroom_is_strict_future(tmp_path):
             key, expected_version=1,
             limits=SessionLimits(deadline_at=past),
         )
+
+
+# ── #552：整数 ceiling / usage 的 int64 值域（BUG-R4-02 / BUG-R4-03）──────────
+# 存储层是 SQLite INTEGER（64 位有符号）。外部数值（provider usage / 请求 ceiling）
+# 进账本前必须按此上限校验，而不是等绑定爆炸成未分类的 OverflowError。InMemory 是
+# Sqlite 的孪生实现，两者必须给出**同一读数**（recon552 §A5/A8 的分歧要消除）。
+
+INT64_MAX = 2**63 - 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory", [False, True])
+async def test_ensure_session_budget_accepts_int64_max_boundary(tmp_path, memory):
+    """锚（C1）：`2**63-1` 是 SQLite INTEGER 上限，必须原样接受、原样读回。"""
+    ledger = _ledger(tmp_path, memory=memory)
+    await ledger.initialize()
+    key = "sess-int64-max"
+    snap = await ledger.ensure_session_budget(
+        key, root_session_id=key,
+        limits=SessionLimits(max_total_tokens=INT64_MAX),
+    )
+    assert snap.limits.max_total_tokens == INT64_MAX
+    reread = await ledger.get_session_budget(key)
+    assert reread.limits.max_total_tokens == INT64_MAX
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory", [False, True])
+@pytest.mark.parametrize("oversize", [2**63, 10**30])
+async def test_ensure_session_budget_rejects_ceiling_above_int64(
+    tmp_path, memory, oversize,
+):
+    """C2：超过 int64 的 ceiling 在**绑定前**被拒，不得炸 OverflowError。
+
+    兜底抛的是**域错误** `BudgetRejection`（越界 = 422 语义；`web/domain_errors.py`
+    的单一映射据此落 422，不是一个裸 `ValueError` 的未分类 500，见 #552 C4）。
+    拒绝必须零落盘（行不存在）。
+    """
+    ledger = _ledger(tmp_path, memory=memory)
+    await ledger.initialize()
+    key = "sess-ceil-over"
+    with pytest.raises(BudgetRejection) as excinfo:
+        await ledger.ensure_session_budget(
+            key, root_session_id=key,
+            limits=SessionLimits(max_total_tokens=oversize),
+        )
+    assert not isinstance(excinfo.value, OverflowError)
+    assert await ledger.get_session_budget(key) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory", [False, True])
+@pytest.mark.parametrize("bad", [10**30, 2**63, -5, True, 1.5, "100"])
+async def test_record_usage_out_of_contract_becomes_unknown_not_coerced(
+    tmp_path, memory, bad,
+):
+    """C3/C5/C6/C7：越界 / 负数 / bool / float / 字符串一律**不入账**——该维转未知。
+
+    绝不 `int()` 强转（`True→1`、`1.5→1`、`"100"→100` 都是伪造账目），也绝不 clamp
+    到 int64 上限（audit 明令 MUST NOT clamp）、不记 0。Sqlite 与 InMemory 同判。
+    当前 RED：Sqlite 对 10**30/2**63 抛 OverflowError，其余把 −5/1/1/100 直存。
+    """
+    ledger = _ledger(tmp_path, memory=memory)
+    await ledger.initialize()
+    key = "sess-usage-bad"
+    await ledger.ensure_session_budget(key, root_session_id=key, limits=SessionLimits())
+
+    await ledger.record_session_model_requests(
+        key, count=1, usage={"total_tokens": bad}, cost=None,
+    )
+    snap = await ledger.get_session_budget(key)
+    assert snap.consumed.total_tokens is None
+    assert snap.consumed.model_requests == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory", [False, True])
+async def test_two_legal_usages_summing_over_int64_has_defined_outcome(
+    tmp_path, memory,
+):
+    """C4：两个**各自合法**的 usage 相加溢出 int64 ⇒ 无半写、行为已定义（转未知）。
+
+    当前 RED：Sqlite 第二次 record 抛 OverflowError、快照停在第一次的 2**62；
+    InMemory 存下 2**63。修复后第二次整体落账、该维转未知（不可表达 ≠ 0）。
+    """
+    ledger = _ledger(tmp_path, memory=memory)
+    await ledger.initialize()
+    key = "sess-usage-sum"
+    await ledger.ensure_session_budget(key, root_session_id=key, limits=SessionLimits())
+
+    await ledger.record_session_model_requests(
+        key, count=1, usage={"total_tokens": 2**62}, cost=None,
+    )
+    first = await ledger.get_session_budget(key)
+    assert first.consumed.total_tokens == 2**62  # 第一次整体落账
+
+    await ledger.record_session_model_requests(
+        key, count=1, usage={"total_tokens": 2**62}, cost=None,
+    )
+    second = await ledger.get_session_budget(key)
+    assert second.consumed.total_tokens is None
+    assert second.consumed.model_requests == 2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_and_inmemory_agree_on_oversize_usage(tmp_path):
+    """C8：同一越界输入，两种实现给出**同一读数**（此前 Sqlite 炸、InMemory 存 10**30）。"""
+    sqlite = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    memory = InMemoryDelegationTreeLedger()
+    await sqlite.initialize()
+    await memory.initialize()
+
+    readings = []
+    for ledger in (sqlite, memory):
+        await ledger.ensure_session_budget(
+            "sess-parity", root_session_id="sess-parity", limits=SessionLimits(),
+        )
+        await ledger.record_session_model_requests(
+            "sess-parity", count=1, usage={"total_tokens": 10**30}, cost=None,
+        )
+        snap = await ledger.get_session_budget("sess-parity")
+        readings.append((snap.consumed.total_tokens, snap.consumed.model_requests))
+
+    assert readings[0] == readings[1] == (None, 1)

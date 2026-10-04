@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.compactor import (
+    _PROG_SECTION_MAX_ENTRY_CHARS,
     ContextCompactor,
     ContextWindowExceededError,
     _programmatic_summary_sections,
@@ -26,6 +27,12 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import derive_protected_facts
+from agent_harness.session.event import (
+    MESSAGE_QUEUED,
+    MESSAGE_SUPERSEDED,
+    QUEUE_CANCELLED,
+    SessionEvent,
+)
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -81,10 +88,18 @@ async def test_builder_compacts_old_turn_and_preserves_persistent_history(tmp_pa
 
 
 def test_user_message_that_looks_like_summary_is_kept_as_user_content():
-    content = "## 原始目标与用户约束\n用户提供的普通文本"
-    sections = _programmatic_summary_sections([HumanMessage(content=content)])
+    """长得像摘要头部的用户消息不得被当旧摘要 decode（双重形态识别的边界）。
 
-    assert json.loads(sections["## 原始目标与用户约束"]) == [content]
+    #556 裁决 C 后 [0] 不再逐字携带用户消息——"保留为用户内容"的可观测面变为：
+    消息仍经 `visit()` 提取（标识符进 [6]），且目标节不因此出现幽灵内容。
+    """
+    content = "## 原始目标与用户约束\n用户提供的普通文本 R-042"
+    sections = _programmatic_summary_sections([HumanMessage(content=content)], [])
+
+    assert sections["## 原始目标与用户约束"] == "(none)", "无事实源 ⇒ 目标节空"
+    assert "R-042" in json.loads(sections["## 精确标识清单"]), (
+        "消息仍作为内容被 visit（没有被当摘要吞掉）"
+    )
 
 
 @pytest.mark.asyncio
@@ -436,6 +451,12 @@ async def test_eight_section_summary_passes_shrink_validation(monkeypatch):
         compactor_module, "estimate_message_tokens", track_shrink_candidate,
     )
     model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+    # #556 裁决 C：目标节内容由 protected_facts 通道承载（与 builder 同一通路：
+    # 全量 events 派生）；直连 compactor 的用例显式传入同一份产物。
+    facts = derive_protected_facts([
+        SessionEvent(seq=1, type=USER_MESSAGE, session_id="s",
+                     data={"content": "不得删除 old_rows；精确 ID 是 R-042"}),
+    ])
     messages = [
         HumanMessage(content="不得删除 old_rows；精确 ID 是 R-042"),
         AIMessage(content="old analysis " * 600),
@@ -443,7 +464,7 @@ async def test_eight_section_summary_passes_shrink_validation(monkeypatch):
     ]
     result = await ContextCompactor(
         model, max_context_tokens=8000,
-    ).compact(messages, estimate_message_tokens(messages))
+    ).compact(messages, estimate_message_tokens(messages), protected_facts=facts)
     assert not result.fallback_used
     assert result.compacted_turn_count == 1
     assert result.summary is not None
@@ -472,12 +493,12 @@ def test_programmatic_sections_preserve_exact_command_error_and_path():
         ToolMessage(content=error, tool_call_id="call-r-042", status="error"),
     ]
 
-    sections = _programmatic_summary_sections(messages)
+    sections = _programmatic_summary_sections(messages, [])
     identifiers = json.loads(sections["## 精确标识清单"])
 
-    assert json.loads(sections["## 原始目标与用户约束"]) == [
-        f"{constraint}；预算为 4096 tokens",
-    ]
+    # #556 裁决 C：用户消息原文不再逐字进目标节（该节由 protected_facts 承载，
+    # 无事实源时 (none)）；命令/错误/路径的精确读回仍由标识节（有界）承担。
+    assert sections["## 原始目标与用户约束"] == "(none)"
     assert command in identifiers
     assert path in identifiers
     assert "call-r-042" in identifiers
@@ -516,3 +537,140 @@ def test_summary_validator_rejects_tampered_programmatic_sections():
         )
         with pytest.raises(ValueError, match="Programmatic summary section"):
             _validate_summary(tampered, messages)
+
+
+# ── #556 裁决 C（分流承载）：程序化节的确定性有界化 ─────────────────────────
+
+
+def _goal_events():
+    """两条 distinct 目标 + supersede：goal sources = 首条 + supersede 前最近一条。"""
+    return [
+        SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1",
+                     data={"content": "目标：把 A 改成 B"}),
+        SessionEvent(seq=2, type=USER_MESSAGE, session_id="s1",
+                     data={"content": "改目标：把 A 改成 C，其余不变"}),
+        SessionEvent(seq=3, type=MESSAGE_SUPERSEDED, session_id="s1",
+                     data={"superseded_seq": 1}),
+    ]
+
+
+def test_target_section_carries_only_current_effective_goal():
+    """C：目标节只保留**当前生效目标**原文 + 归档计数行，历史逐字不再累积。
+
+    旧实现把全部 HumanMessage 逐字 extend（无界）；C 之后历史目标靠
+    SessionEvent 回读，叙述性消息不再逐字进程序化节。
+    """
+    facts = derive_protected_facts(_goal_events())
+    sections = _programmatic_summary_sections(
+        [HumanMessage(content="改目标：把 A 改成 C，其余不变")], facts,
+    )
+    target = sections["## 原始目标与用户约束"]
+    assert "把 A 改成 C" in target, "当前生效目标必须逐字在场"
+    assert "把 A 改成 B" not in target, "历史目标逐字不得再进目标节"
+    assert "更早 1 条历史目标已归档" in target, "归档计数行必须在场（回读指针）"
+
+
+def test_large_first_goal_folds_to_readback_pointer():
+    """C 矩阵「大首消息」：超长目标不再逐字撑爆目标节，靠 #430 截断标记回读。"""
+    huge = "目标头" + "很长的正文" * 399 + "尾缀SENTINEL-981"  # > 2000 字符
+    events = [SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1",
+                           data={"content": huge})]
+    facts = derive_protected_facts(events)
+    sections = _programmatic_summary_sections([HumanMessage(content=huge)], facts)
+    target = sections["## 原始目标与用户约束"]
+    assert "source_event_id=" in target, "截断标记必须携带回读指针"
+    assert "尾缀SENTINEL-981" not in target, "目标节不得逐字携带全文尾部"
+
+
+def test_identifier_section_converges_under_cap():
+    """C 同票处理：标识清单加确定性上限（保留最近 N 条），不再无界累积。"""
+    messages = [
+        AIMessage(content=f"处理 TSK-{i:04d} 号任务") for i in range(60)
+    ]
+    sections = _programmatic_summary_sections(messages, [])
+    identifiers = json.loads(sections["## 精确标识清单"])
+    assert len(identifiers) == 50, "必须收敛到上限而不是无界增长"
+    assert "TSK-0000" not in identifiers, "最旧的标识被窗口淘汰"
+    assert "TSK-0059" in identifiers, "最新的标识保留（最近偏置）"
+
+
+def test_long_error_entry_is_truncated_per_entry():
+    """C：单条巨串（如全文错误）不再撑爆标识节——逐条截断 + 省略号。"""
+    huge_error = "FileNotFoundError: " + "细节" * 1500
+    messages = [
+        AIMessage(content="", tool_calls=[{
+            "id": "call-huge", "name": "run", "args": {"command": "ls"},
+        }]),
+        ToolMessage(content=huge_error, tool_call_id="call-huge", status="error"),
+    ]
+    sections = _programmatic_summary_sections(messages, [])
+    identifiers = json.loads(sections["## 精确标识清单"])
+    assert max(len(entry) for entry in identifiers) <= 201, "单条上限 200 字符 + 省略号"
+
+
+def test_target_section_none_without_goal_facts():
+    """无 user_goal facts ⇒ 目标节 (none)——与八节摘要的空节约定一致。"""
+    sections = _programmatic_summary_sections(
+        [HumanMessage(content="普通消息，不是任何事实源")], [],
+    )
+    assert sections["## 原始目标与用户约束"] == "(none)"
+
+
+def test_cancelled_queued_replacement_keeps_sections_consistent():
+    """#614①：取消的替换 ⇒ 标记作废 ⇒ §1（目标节）与 §2（保护事实表）同判。
+
+    S2 序列（修复前实测矛盾）：USER → MESSAGE_QUEUED(新任务) →
+    MESSAGE_SUPERSEDED → QUEUE_CANCELLED。修复前 §1 把旧任务当当前生效目标，
+    §2 却把旧任务标 superseded——两节自相矛盾且 §2 丢失唯一 active 目标。
+    修复后：标记作废，旧目标保持 active，两节一致；被取消的替换既不进
+    目标节也不进保护事实节。
+    """
+    events = [
+        SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1",
+                     data={"content": "旧任务 ORD-100。"}),
+        SessionEvent(seq=2, type=MESSAGE_QUEUED, session_id="s1",
+                     data={"queue_id": "queued-1", "content": "新任务 ORD-200。"}),
+        SessionEvent(seq=3, type=MESSAGE_SUPERSEDED, session_id="s1",
+                     data={"superseded_seq": 1}),
+        SessionEvent(seq=4, type=QUEUE_CANCELLED, session_id="s1",
+                     data={"queue_id": "queued-1"}),
+    ]
+    facts = derive_protected_facts(events)
+    sections = _programmatic_summary_sections(
+        [HumanMessage(content="旧任务 ORD-100。")], facts,
+    )
+
+    target = sections["## 原始目标与用户约束"]
+    assert "旧任务 ORD-100。" in target, "取消替换 ⇒ 原目标仍是当前生效目标（§1）"
+    assert "新任务 ORD-200。" not in target, "被取消的替换不得进目标节"
+
+    protected = json.loads(sections["## 保护事实表"])
+    assert protected, "§2 不得为空：原目标必须仍以 active 投影"
+    original = next(
+        fact for fact in protected if fact["value"] == "旧任务 ORD-100。"
+    )
+    assert original["status"] == "active", "§2 与 §1 同判：原目标 active"
+    assert all(fact["value"] != "新任务 ORD-200。" for fact in protected), (
+        "被取消的替换不得以 active 投影"
+    )
+
+
+def test_trimmed_same_prefix_entries_dedup_after_truncation():
+    """#614②：去重必须发生在截断**之后**——同前缀超长条目不得以截断值重复。
+
+    旧实现先按全文 `add_once` 去重、后截断：两条仅在 200 字符之后分叉的
+    超长条目全文不同、双双入列，截断后收敛为同一个值 ⇒ §6/§7 投影出现
+    重复条目。修复：先截断、再按截断值去重（保留最后出现者，与窗口的
+    「最近偏置」一致）、最后套数量上限。
+    """
+    prefix = "同一前缀" + "很长的细节" * 40  # 前 200 字符完全一致
+    assert len(prefix) >= _PROG_SECTION_MAX_ENTRY_CHARS
+    messages = [
+        ToolMessage(content=prefix + "TAIL-A-777", tool_call_id="call-a", status="error"),
+        ToolMessage(content=prefix + "TAIL-B-888", tool_call_id="call-b", status="error"),
+    ]
+    sections = _programmatic_summary_sections(messages, [])
+    identifiers = json.loads(sections["## 精确标识清单"])
+    assert len(identifiers) == len(set(identifiers)), (
+        "截断后同值的条目不得在投影中重复（#614②）"
+    )

@@ -16,3 +16,13 @@ Task 身份 = Session ID；Run 是一次执行。同一 Task 可多 Run。产品
 **验收**：模拟 `run/completed` 但无测试、测试失败、证据齐全但未接受、带原因接受失败、Fork 独立接受、两客户端同时接受；逐项断言展示及 durable Event，重启相同。focused event/API tests + 真实现有 run 接入。**不做**：复刻 V3.1-lite Ticket gate、修改 #305 完成语义、UI 组件。
 
 **成熟参考/复用**：[Codex app](https://openai.com/index/introducing-the-codex-app/)将执行与人审阅分成不同步骤；[Anthropic 长任务实验](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)用功能清单判断完成。`PORT DESIGN`；本仓 SessionEvent `REUSE`。
+
+## 方案依据（§6.1/§1.3 五字段，2026-10-04 核实）
+
+- **来源（≥2 独立）**：
+  1. OpenAI Codex app 介绍页（票面自带，2026-10-04 WebFetch HTTP 200）：执行与人审阅分离——"you can review the agent's changes in the thread, comment on the diff, and even open it in your editor"；Automations "the results land in a review queue so you can jump back in and continue working"；"Each agent works on an isolated copy of your code"——先执行、人审阅、再采纳。
+  2. Anthropic 工程博客 Effective harnesses for long-running agents（票面自带，2026-10-04 WebFetch HTTP 200）：功能清单判完成——"we prompted the initializer agent to write a comprehensive file of feature requirements"、"These features were all initially marked as 'failing'"、"Only mark features as 'passing' after careful testing"，且禁删改测试。诚实记录：该页只有通过/失败二态、未提人审分离；三态交付语义与四态产品显示来自票面本位。
+- **机制摘要**：Codex = 执行（隔离副本）→ 产物进 review queue → 人审 diff → 采纳，完成不由执行者自宣；Anthropic = 预写可执行验收清单作客观完成判据，初始全「未通过」，测试通过才标「通过」，清单不可被执行方改写。
+- **契合点**：run/completed 只说明 Runtime 收口 ↔ 执行者不自宣完成；验收项验证值六态 ↔ feature list 逐项状态；用户接受（可带原因接受缺项）↔ review queue 人审采纳；三轴事实分轴追加 ↔ 执行/验证/接受事实互不覆盖、各自留痕。
+- **判定**：交付状态机**语义** = PORT DESIGN（只借「执行者不自宣完成 + 客观验收清单判据 + 人审采纳」三原则；不借 Codex review queue 产品形态、不借 Anthropic JSON 文件清单载体）。实现 = REUSE 本仓 SessionEvent append-only 契约（spec 03，事件常量唯一事实源 + 词汇表/前端类型生成物再生成 + 守卫测试）、spec 11 §6.1 CAS/422/409 状态码口径、#305 §6 run 状态集合与完成闸门零写入契约（runtime.py:1850-1854）、#342 并发锁与 domain_errors 409 单一映射惯例、fork 既有谱系机制；BUILD 仅限三轴事实的事件类型与校验（session/task.py）、task 状态纯投影、最小 REST（GET task / POST verification / POST acceptance(+release)）与创建路径 task/defined 接入。
+- **License**：两来源为公开网页参考（无代码复制）；本票零新依赖。

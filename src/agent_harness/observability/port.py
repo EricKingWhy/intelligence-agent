@@ -60,7 +60,7 @@ class Tracer(Protocol):
     def model_call_failed(self, generation: Span | None, *, error_type: str) -> None: ...
 
     def run_completed(
-        self, final_text: str, usage_total: dict[str, int] | None = None,
+        self, final_text: str, usage_total: dict[str, int | None] | None = None,
     ) -> None: ...
 
     def run_failed(self, reason: str) -> None: ...
@@ -125,7 +125,7 @@ class NullTracer:
         return None
 
     def run_completed(
-        self, final_text: str, usage_total: dict[str, int] | None = None,
+        self, final_text: str, usage_total: dict[str, int | None] | None = None,
     ) -> None:
         return None
 

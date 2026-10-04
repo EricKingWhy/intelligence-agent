@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_harness.session.event import RUN_PAUSED, STEER_REQUESTED, SessionEvent
+from agent_harness.tooling.contract import PermissionPolicy
 
 #: 单次 walk 采集的最大条目数（防超大目录把暂停拖住；见模块 docstring 的口径 3）。
 MAX_REVISION_ENTRIES = 20000
@@ -329,6 +330,43 @@ def evidence_port(
         workspace=workspace,
         policy_version=digest_policy_inputs(inputs),
         policy_inputs=inputs,
+    )
+
+
+def delegated_child_evidence_port(
+    spec_name: str, *, workspace: Path | str | None = None,
+) -> StuckEvidencePort:
+    """委派子 run 的**自身**生效策略面端口（ADR-0048 残余 15 / #370）——唯一口径。
+
+    子 run 暂停时记的是 child 自己的策略面，四个答案只在这里写一遍；恢复侧
+    （`service.resume_and_launch`：`_effective_permission_mode` 派生档位 + #372 强制
+    `agent_profile` = 子 spec + 快照还原四维）对 child 会话**必然重算出同一套值**：
+
+    - `permission_mode` = 默认档：child 会话事件流没有 permission 声明，恢复侧派生
+      None 后回落**同一个**默认档。父级 launch 的档位经 executor 闭包对 child 生效
+      （决策 11 权限传递），但那是父的策略面流经执行器——child 没声明过它，记父档
+      会让恢复侧重算（只能算出默认档）必然对不上："什么都没变"也算变了 = fail-open。
+    - `model` / `reasoning_effort` / `context_providers` = None：子层无独立声明
+      （模型链继承父级，Factory 决策 14；委派不写 `model/changed`，那是 fork 的
+      `inherit_parent_model` 语义）。省略恢复请求字段不算策略变更；显式声明任一维
+      才构成 child 自己的 `policy_change`。
+    - `agent_profile` = spec.name：child 授权由它自己的 AgentSpec 决定（#372 的
+      恢复入口按 session/started 的 agent_id 强制同一档位）。
+
+    `workspace`（#608，残余 15 的环境半）：委派方传**父会话的 cwd 锚**
+    （`provider._parent_cwd()`）——与写进子 SESSION_STARTED 的 cwd 字段、恢复侧
+    `Path(persisted_cwd)` 读回的是**同一事件字段**（child 与父共用同一棵
+    Session-scoped workspace，spec 10 §9），两侧同源是构造保证不是数值巧合。
+    父无锚 ⇒ None ⇒ 环境格如实缺席，`environment_change` 判据 fail-closed
+    （无快照可比 ⇒ 409，判据零改动）。
+    """
+    return evidence_port(
+        workspace=Path(workspace) if workspace is not None else None,
+        permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+        model=None,
+        agent_profile=spec_name,
+        reasoning_effort=None,
+        context_providers=None,
     )
 
 

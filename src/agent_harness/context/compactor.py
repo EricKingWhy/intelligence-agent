@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
@@ -18,6 +19,7 @@ from langchain_core.messages import (
 )
 
 from agent_harness.context.tokens import estimate_message_tokens
+from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.derive import (
     COMPACTION_SUMMARY_MESSAGE_NAME,
@@ -55,6 +57,12 @@ _NUMBER_PATTERN = re.compile(
 )
 _PATH_FIELDS = {"path", "file", "filename", "filepath", "file_path", "source_file"}
 _EXACT_FIELDS = {"command", "cmd", "shell", "error", "error_message"}
+#: #556 裁决 C（分流承载）：程序化标识/文件节的**有界**投影上限——无界累积的
+#: 唯一事实源。保留**最后** N 条（encounter 顺序的尾部 = 偏向最近：继承的旧摘要在
+#: 前、当前窗口在后，截尾淘汰最旧），与 Anthropic Context Editing 的 keep-N 同形。
+_PROG_SECTION_MAX_ENTRIES = 50
+#: 单条 entry 字符上限：错误全文等巨串不再撑爆节（截断 + 省略号，确定性纯函数）。
+_PROG_SECTION_MAX_ENTRY_CHARS = 200
 
 
 #: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
@@ -152,7 +160,8 @@ class ContextCompactor:
                  hard_guard_threshold: float = 0.85,
                  keep_recent_tokens: int = 20_000,
                  summary_timeout_seconds: float = 30.0,
-                 summary_model: Any | None = None) -> None:
+                 summary_model: Any | None = None,
+                 model_call_gate: ModelCallGate | None = None) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("invalid context budget")
         if summary_timeout_seconds <= 0:
@@ -160,6 +169,10 @@ class ContextCompactor:
         # W-04 (#348)：摘要模型接缝——None 缺省 = 主模型（装配前的既有行为逐字节
         # 等价）。便宜档选择本身留在配置面（后续票），本层只负责"用谁摘要"。
         self._model = summary_model if summary_model is not None else model_provider
+        # #559：摘要调用与主循环同闸（进程级在飞 ≤N）。None = 不过闸（既有行为
+        # 逐字节等价）。槽位在 timeout **外面**取——排队等闸的时间不计入摘要
+        # 预算，与主循环"闸包在看门狗外面"同一原则（model/concurrency.py）。
+        self._gate = model_call_gate
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
         self.keep_recent_tokens = keep_recent_tokens
@@ -168,6 +181,15 @@ class ContextCompactor:
         self._summary_timeout = summary_timeout_seconds
         self._max_context_tokens = max_context_tokens
         self.reserve = max(int(max_context_tokens * 0.15), 16384)
+
+    def _slot(self) -> AbstractAsyncContextManager[None]:
+        """取一个**新**的摘要槽位（每次尝试各取一次；None = 不过闸）。
+
+        `ModelCallGate.slot()` 是 `@asynccontextmanager` 产物，**一次性**（同
+        fallback coordinator 的教训，见 model/fallback.py `_slot`）；取消路径
+        由 slot 的 finally 归还 permit。
+        """
+        return self._gate.slot() if self._gate is not None else nullcontext(None)
 
     async def compact(
         self,
@@ -229,7 +251,9 @@ class ContextCompactor:
         compacted: list[AnyMessage] | None = None
         for attempt in (1, 2):
             try:
-                async with asyncio.timeout(self._summary_timeout):
+                # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（30s 是
+                # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
+                async with self._slot(), asyncio.timeout(self._summary_timeout):
                     response = await self._model.ainvoke(request)
                 if not isinstance(response, AIMessage) or response.tool_calls:
                     raise _SummaryRejected(
@@ -390,14 +414,75 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     return contents
 
 
+def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
+    """#556 裁决 C：目标节只保留**当前生效目标**（+ 归档计数行）。
+
+    「当前生效目标」的判定与保护事实通道**同源**：`derive_protected_facts` 从
+    全量 SessionEvent 确定性地划出 user_goal sources（首条 + 每次 supersede 前
+    最近一条，`tests/session/test_derive_supersede.py`），取 `source_seq` 最大的
+    一条 = 最后一次目标声明——纯函数、重放逐字节稳定。值以 JSON 字符串编码
+    （旧 [0] 即 JSON，形状延续；防节边界伪造与 strip 失配），本身走 #430 的
+    2000 字符投影上限（超长自带截断标记 + source_event_id 回读指针）：大首消息
+    折叠为引用 + 回读 ref，原文活在事件流；历史 goal 不再逐字累积，一行归档
+    计数指回 SessionEvent 持久历史（不变量 #6：完整保存 ≠ 完整注入）。
+    """
+    goals = [
+        fact for fact in (protected_facts or [])
+        if fact.type == "user_goal"
+    ]
+    if not goals:
+        return "(none)"
+    current = max(goals, key=lambda fact: fact.source_seq)
+    # JSON 字符串编码（旧 [0] 即 JSON，形状延续）：节内容回读时有外层 strip
+    #（`_parse_summary_sections`），裸文本的尾随空白/换行会破坏精确比对；
+    # 编码同时隔离 goal 正文里 heading 样式的行（防伪造节边界）。
+    body = json.dumps(current.value, ensure_ascii=False)
+    archived = len(goals) - 1
+    if archived > 0:
+        body += (
+            f"\n（更早 {archived} 条历史目标已归档："
+            "原文可由 SessionEvent 持久历史回读）"
+        )
+    return body
+
+
+def _capped_entries(entries: list[str]) -> list[str]:
+    """确定性窗口：先截断、再按截断值去重（保留最后出现者）、最后保留最近 N 条。
+
+    #614②：去重必须发生在截断**之后**——`add_once` 只按全文去重，两条仅在
+    第 200 字符之后分叉的超长条目全文不同、双双入列，截断后收敛为同一值，
+    投影里出现重复条目。本函数先截断再按截断值去重，与窗口的「最近偏置」
+    一致：同值重复保留最后出现的那条。
+    """
+    trimmed = [
+        entry if len(entry) <= _PROG_SECTION_MAX_ENTRY_CHARS
+        else entry[:_PROG_SECTION_MAX_ENTRY_CHARS] + "…"
+        for entry in entries
+    ]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(trimmed):
+        if entry not in seen:
+            seen.add(entry)
+            deduped.append(entry)
+    deduped.reverse()
+    return deduped[-_PROG_SECTION_MAX_ENTRIES:]
+
+
 def _programmatic_summary_sections(
     messages: list[AnyMessage],
     protected_facts: list[ProtectedFact] | None = None,
 ) -> dict[str, str]:
-    user_messages: list[str] = []
-    identifiers: list[str] = []
-    file_paths: list[str] = []
-    protected_facts_body = "(none)"
+    """四个程序化节（#556 裁决 C：全部**有界**，规则为确定性纯函数）。
+
+    - 目标节：当前生效目标原文（`_current_goal_body`）——叙述性历史用户消息
+      **不再**逐字进节（旧实现 `extend` 无界是 F-COMP-1 的根因）；跨窗口刚性
+      读回走 ProtectedFact 通道（§1 独立预算）与 SessionEvent 持久历史。
+    - 标识/文件节：继承 + 提取逻辑不变，套确定性窗口（`_capped_entries`，
+      保留最近 N 条 + 单条截断）——同票消除 `:477-481` 的同构无界。
+    - 保护事实节：`serialize_protected_facts` 契约不动（sort_keys 逐字节稳定、
+      独立预算 8192）。
+    """
 
     def add_once(target: list[str], value: str) -> None:
         if value and value not in target:
@@ -410,6 +495,10 @@ def _programmatic_summary_sections(
         if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
             raise ValueError("Previous summary programmatic section is not a string list")
         return parsed
+
+    identifiers: list[str] = []
+    file_paths: list[str] = []
+    protected_facts_body = "(none)"
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -451,24 +540,21 @@ def _programmatic_summary_sections(
             and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")
         ):
             previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
-            previous_users = decode_summary_values(previous[0])
             if protected_facts is None:
                 protected_facts_body = previous[1]
             previous_identifiers = decode_summary_values(previous[6])
             previous_paths = decode_summary_values(previous[7])
-            user_messages.extend(previous_users)
             for value in previous_identifiers:
                 add_once(identifiers, value)
             for value in previous_paths:
                 add_once(file_paths, value)
             continue
-        if isinstance(message, HumanMessage):
-            user_messages.append(message.content)
+        # #556 裁决 C：HumanMessage 原文不再逐字进任何程序化节——目标走
+        # `_current_goal_body`（protected_facts 通道），叙述性历史靠 Event 回读。
         visit(message.model_dump(mode="json"))
 
     return {
-        _SUMMARY_HEADINGS[0]: json.dumps(user_messages, ensure_ascii=False)
-        if user_messages else "(none)",
+        _SUMMARY_HEADINGS[0]: _current_goal_body(protected_facts),
         _SUMMARY_HEADINGS[1]: (
             serialize_protected_facts(protected_facts)
             if protected_facts
@@ -476,10 +562,12 @@ def _programmatic_summary_sections(
             if protected_facts is not None
             else protected_facts_body
         ),
-        _SUMMARY_HEADINGS[6]: json.dumps(identifiers, ensure_ascii=False)
-        if identifiers else "(none)",
-        _SUMMARY_HEADINGS[7]: json.dumps(file_paths, ensure_ascii=False)
-        if file_paths else "(none)",
+        _SUMMARY_HEADINGS[6]: json.dumps(
+            _capped_entries(identifiers), ensure_ascii=False,
+        ) if identifiers else "(none)",
+        _SUMMARY_HEADINGS[7]: json.dumps(
+            _capped_entries(file_paths), ensure_ascii=False,
+        ) if file_paths else "(none)",
     }
 
 

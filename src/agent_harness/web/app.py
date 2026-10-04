@@ -9,8 +9,11 @@ create_app() 是单一入口——传入 Settings，返回装配好的 FastAPI�
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
+import sqlite3
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -26,19 +29,37 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import PydanticCustomError
 from sse_starlette.sse import EventSourceResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, Response
 
 from agent_harness.agent import AgentEvent
 from agent_harness.agent.budget import BudgetConflict, BudgetRejection
-from agent_harness.assembly import RecoveryStores, initialize_stores
-from agent_harness.capability.base import CapabilityRegistry
+from agent_harness.agent.run_budget import (
+    INT64_MAX,
+    SessionLimits,
+    validate_tool_call_limits_registered,
+)
+from agent_harness.assembly import (
+    RecoveryStores,
+    initialize_stores,
+    root_registry_tool_names,
+)
+from agent_harness.capability.base import CapabilityError, CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.tokens import estimate_tokens
+from agent_harness.host_service import HOST_PROTOCOL_VERSION
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -63,11 +84,13 @@ from agent_harness.session.service import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    EventLogCorruptError,
     InvalidDecision,
     InvalidSessionId,
     PendingApprovalConflict,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
+    ReconcileDecision,
     RecoveryConflict,
     SeqConflict,
     SessionHasChildren,
@@ -99,12 +122,15 @@ from agent_harness.web.domain_errors import (
     http_error,
     model_http_error,
     storage_http_error,
+    storage_http_status,
 )
+from agent_harness.web.metrics import METRICS_CONTENT_TYPE, collect_process_metrics
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
     build_truncated_control,
 )
+from agent_harness.web.wire_safety import _safe_text
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 
 # Read-only catalog facts live with their router. Re-export them here for the
@@ -201,21 +227,53 @@ class RunBudgetRequest(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    max_agent_turns_total: int | None = Field(default=None, ge=1)
-    max_model_requests: int | None = Field(default=None, ge=1)
-    max_total_tokens: int | None = Field(default=None, ge=1)
+    max_agent_turns_total: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_model_requests: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     #: 成本 ceiling：非负十进制（`11 §6.1`）。wire 上字符串最稳、数也收——
     #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
     #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
-    #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`）。`{}` = 没配。
-    tool_call_limits: dict[str, int] | None = None
+    #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`；`#564`：两作用域口径统一）。
+    #: 值用 `StrictInt`：pydantic 2.13 的 `Field(strict=True)` 只约束 dict 本身、
+    #: **不级联到值类型**（"3"→3 / true→1 仍被 lax 强制），StrictInt 才逐值拒绝
+    #: 字符串与布尔——与领域层 `parse_tool_call_limits` 同口径（对齐 #548 C3）。
+    tool_call_limits: dict[str, StrictInt] | None = Field(default=None, strict=True)
     #: 绝对截止时刻（`#315` / `11 §6.1`）：RFC 3339 UTC 文本或 `null`（= 不设）。
     #: 声明为 `str`：wire 上的时刻是文本，解析与归一化到 UTC 由领域层
     #: `parse_deadline_at` 一处完成（朴素时间 / 空串 / 非字符串在那里 422）。
     deadline_at: str | None = None
     # `max_tool_calls`：`null`（PRD 的"没设"字面量）合法但无效，非空 ⇒ 422。
     max_tool_calls: int | None = None
+
+    @field_validator(
+        "max_agent_turns_total",
+        "max_model_requests",
+        "max_total_tokens",
+        mode="before",
+    )
+    @classmethod
+    def _ceiling_must_be_integer(cls, value: Any) -> Any:
+        """`#548` C3 裁决（2026-10-03）：`strict=True` **不放松**，只把拒绝文案说清。
+
+        判据必须是「整数」而不是「能转成整数的数」：JSON 里 `100.0` 与 `100` 是两种
+        输入，`strict` 只收后者。改前浮点落的是英文 `Input should be a valid integer`，
+        调用方看不出该传什么。
+
+        用 ``PydanticCustomError("int_type", …)`` 而非 ``ValueError``：**保住 wire 上的
+        `type` 值**（仍是 `int_type`）且不带 pydantic 的 ``"Value error, "`` 前缀
+        ⇒ 对调用方而言只有 `msg` 变、其余字段逐字不变。`None` 照常放行（"不设上限"）。
+
+        与 `SessionBudgetRequest` 的同名校验器**规则必须逐字一致**；
+        `tests/web/test_budget_int64_bounds_api.py` 以 `parametrize` 把两个模型钉在
+        同一组期望上 ⇒ 单边漂移当场变红。
+        """
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise PydanticCustomError(
+            "int_type",
+            'ceiling 必须是整数（不接受小数 100.0 / 布尔 / 字符串 "100"），请传 100',
+        )
 
     @model_validator(mode="after")
     def _reject_unimplemented_dimensions(self) -> RunBudgetRequest:
@@ -248,14 +306,40 @@ class SessionBudgetRequest(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    max_agent_turns_total: int | None = Field(default=None, ge=1)
-    max_model_requests: int | None = Field(default=None, ge=1)
-    max_total_tokens: int | None = Field(default=None, ge=1)
+    max_agent_turns_total: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_model_requests: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
+    max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
-    tool_call_limits: dict[str, int] | None = None
+    #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`；`#564`：两作用域口径统一）。
+    #: 值用 `StrictInt`：pydantic 2.13 的 `Field(strict=True)` 只约束 dict 本身、
+    #: **不级联到值类型**（"3"→3 / true→1 仍被 lax 强制），StrictInt 才逐值拒绝
+    #: 字符串与布尔——与领域层 `parse_tool_call_limits` 同口径（对齐 #548 C3）。
+    tool_call_limits: dict[str, StrictInt] | None = Field(default=None, strict=True)
     deadline_at: str | None = None
-    max_delegations: int | None = Field(default=None, ge=1)
+    max_delegations: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     expected_version: int | None = Field(default=None, ge=1)
+
+    @field_validator(
+        "max_agent_turns_total",
+        "max_model_requests",
+        "max_total_tokens",
+        "max_delegations",
+        mode="before",
+    )
+    @classmethod
+    def _ceiling_must_be_integer(cls, value: Any) -> Any:
+        """C3 裁决：与 `RunBudgetRequest._ceiling_must_be_integer` **规则逐字一致**。
+
+        多一个字段名（`max_delegations`，F3 已定「与其余整数 ceiling 同一上界」），
+        规则本身不重述第二遍。两处一致性由 `tests/web/test_budget_int64_bounds_api.py`
+        的 `parametrize` 钉住。
+        """
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise PydanticCustomError(
+            "int_type",
+            'ceiling 必须是整数（不接受小数 100.0 / 布尔 / 字符串 "100"），请传 100',
+        )
 
 
 class BudgetRequest(BaseModel):
@@ -495,6 +579,28 @@ class PermissionChangeRequest(BaseModel):
     auto_approve: bool
 
 
+class RecoverDecisionRequest(BaseModel):
+    """POST /api/sessions/{id}/recover 的单条用户裁决（#547 四裁决合同）。
+
+    ``verdict`` 用字符串承载，合法值由领域层校验（``InvalidDecision`` 422）——
+    与 PermissionChangeRequest 同一条纪律：规则单一来源，传输层不复述。
+    """
+
+    tool_call_id: str = Field(min_length=1)
+    verdict: str = Field(min_length=1)
+
+
+class RecoverRequest(BaseModel):
+    """POST /api/sessions/{id}/recover 的可选请求体（#547 裁决合同）。
+
+    省略 body（或空 ``decisions``）＝纯恢复尝试：有 UNKNOWN 行时 409，
+    ``detail`` 附机器可读 ``pending_decisions`` 清单指引裁决；携带覆盖全部待
+    裁决行的 ``decisions`` 才开工（预检在领域层，被拒请求零写入）。
+    """
+
+    decisions: list[RecoverDecisionRequest] = Field(default_factory=list)
+
+
 class ApproveRequest(BaseModel):
     """POST /api/sessions/{id}/approve 的请求体（Phase 5 + Batch 5.1）。
 
@@ -506,7 +612,12 @@ class ApproveRequest(BaseModel):
     approval_id: str | None = None
     approved: bool = True
     decision: str | None = None
-    reason: str = ""
+    # #562 F6：reason 逐字写入 permission/resolved 事件日志，自由文本无上限 =
+    # 每次授权可重复放大（实测 50KB 原样入库）。上限 2000 **字符**（pydantic
+    # ``max_length`` 计的是 Python ``str`` 码点数，不是 UTF-8 字节——2000 个中文
+    # = 6000 字节仍合法）。超限经安全 422 出口拒绝，不回显原文（recon 核查：
+    # 前端 ``postApproval`` 根本不发 ``reason`` ⇒ 零误伤）。
+    reason: str = Field(default="", max_length=2000)
 
 
 class ResumeRequest(_AmendValueValidators):
@@ -777,6 +888,15 @@ class AppState:
         # 测试可经 patch 换 MemoryCredentialStore。
         self.provider_store = ProviderStore.for_settings(settings)
         self._closed = False  # shutdown 后置位：get_wiring 拒绝在关停后新装配
+        # `#564` 裁决 (a)：session 声明的 pre-CAS 校验端口。组合根负责判据的
+        # 同源装配（`root_registry_tool_names` 零副作用取根 registry 名字集，
+        # 审查 P2-1：不实例化 sandbox），`session_service()` 把它与其他
+        # collaborator 一样原样搬进领域层。
+        self.validate_session_declaration = _session_declaration_validator(
+            settings=settings,
+            store=self.store,
+            get_wiring=self.get_wiring,
+        )
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -879,6 +999,46 @@ class AppState:
 # 构造后替换 `state.run_manager` 等打桩仍然生效。
 
 
+def _session_declaration_validator(
+    *,
+    settings: Settings,
+    store: JsonlSessionStore,
+    get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+) -> Any:
+    """组合根适配：`#564` 裁决 (a) 的 pre-CAS 校验端口（`SessionDeclarationValidator`）。
+
+    判据 = **根 registry**（树级语义）：名字集由 `root_registry_tool_names`
+    **零副作用**计算，与 `build_runtime` 的真实装配同源（漂移由
+    `tests/test_assembly_root_registry_names.py` 三方对账钉住），喂给
+    `validate_tool_call_limits_registered(scope="session")`。审查 P2-1：validator
+    不得构造 sandbox——那会在 #266 归属对账之前对 workspace `mkdir`（坏名 422
+    重建已删 cwd、合法名 resume 掩蔽守卫），所以这里不碰 `_build_tooling` /
+    workspace_registry。存为 `AppState.validate_session_declaration` 成员——
+    `session_service()` 与其他 collaborator 一样**原样搬入**领域层（AC4：没有
+    静默丢字段、没有派生转换）。CLI 侧复用同一容器，两条入口同一校验。
+    """
+
+    async def _validate(
+        limits: SessionLimits,
+        *,
+        session_id: str,
+        workspace: Any,
+        agent_profile: str | None,
+    ) -> None:
+        # workspace / agent_profile 不参与判定（前者 = P2-1 零副作用要求；后者
+        # 只影响 delegate 的配额值，不影响名字集）：参数保留是端口形状（Protocol）。
+        _, wiring = await get_wiring()
+        validate_tool_call_limits_registered(
+            limits,
+            registered=sorted(root_registry_tool_names(
+                settings, wiring, session_id=session_id, session_store=store,
+            )),
+            scope="session",
+        )
+
+    return _validate
+
+
 def session_service(state: AppState) -> SessionService:
     """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
     return SessionService(
@@ -898,6 +1058,7 @@ def session_service(state: AppState) -> SessionService:
         stores=state.stores,
         ensure_stores=state.ensure_stores,
         get_wiring=state.get_wiring,
+        validate_session_declaration=state.validate_session_declaration,
     )
 
 
@@ -1055,16 +1216,16 @@ def _run_stream_response(
 
 def _event_to_sse_dict(event: AgentEvent, session_id: str) -> dict[str, str]:
     """AgentEvent → SSE 帧（信封构建在 web/serialization.py，SSE/WS 共用）。"""
-    return {"data": json.dumps(
+    return {"data": _safe_text(json.dumps(
         build_event_payload(event, session_id), ensure_ascii=False
-    )}
+    ))}
 
 
 def _session_event_to_sse_dict(event: SessionEvent, session_id: str) -> dict[str, str]:
     """SessionEvent → SSE 帧（重放通道，信封构建在 web/serialization.py）。"""
-    return {"data": json.dumps(
+    return {"data": _safe_text(json.dumps(
         build_session_event_payload(event, session_id), ensure_ascii=False
-    )}
+    ))}
 
 
 #: CSP（集成 AI 移交，INTEGRATION_NOTES §4.1）：静态 HTML 的纵深防御——
@@ -1114,6 +1275,12 @@ class AuthSeamMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        if scope.get("path") == "/api/health":
+            # W-11（#355）：健康探针匿名可达——附着核验发生在鉴权之前（附着方拿到
+            # 凭据前就要判断服务是否活着、形状是否相符）。载荷只含非秘密字段，
+            # tests/host_service/ 钉住不泄密。
+            await self.app(scope, receive, send)
+            return
         identity = IdentityContext("local", "local", ["user", "session"])
         headers = Headers(scope=scope)
         authorization = headers.get("authorization")
@@ -1157,6 +1324,14 @@ class AuthSeamMiddleware:
             identity_context_var.reset(token)
 
 
+def _package_version() -> str:
+    """服务版本（health/version/capability 统一面，W-11 #355）。只读元数据，无副作用。"""
+    try:
+        return importlib.metadata.version("intelligence-agent")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
     """装配 FastAPI 应用。测试可注入 test settings；生产默认从 .env 读。"""
     if settings is None:
@@ -1196,6 +1371,21 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             except Exception:
                 logging.getLogger("agent_harness.web").exception(
                     "启动崩溃扫描失败（不阻塞启动）"
+                )
+            # #555：未完成 fork 扫描——`fork/in-progress` 无 `session/forked` 的
+            # child，回收 harness 自建工件（暂存根 + 默认形态工作区），JSONL/
+            # 映射保留作可读事实。与崩溃扫描同序：失败不阻塞启动，但响亮落日志。
+            try:
+
+                fork_results = await session_service(state).scan_unfinished_forks()
+                for result in fork_results:
+                    logging.getLogger("agent_harness.web").warning(
+                        "启动 fork 扫描：child=%s reclaimed=%s detail=%s",
+                        result.session_id, result.reclaimed, result.detail,
+                    )
+            except Exception:
+                logging.getLogger("agent_harness.web").exception(
+                    "启动 fork 扫描失败（不阻塞启动）"
                 )
             # Phase Multiturn（ADR-0030 §4.8 / D5）：按事件流重建"未投递输入"的
             # 内存镜像。**不自动起 run**：刚启动没有订阅者，起了会被 orphan 回收，
@@ -1246,10 +1436,28 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     apply_error_contract(app)
 
+    # #548 / #562：422 校验错误出口换成不回显原文的安全实现。默认的
+    # `jsonable_encoder(exc.errors())` 会把攻击者原文（`input`）带进响应体，
+    # lone surrogate / `inf` / 深嵌套三种被判非法的输入都会让**错误处理器自己**
+    # 抛异常 → 500（「正确地拒绝」退化成「拒绝时崩溃」）。位置紧挨 OpenAPI 对齐：
+    # 两者都是「错误面」的护栏，且本函数不改任何真实成功响应的形状。
+    from agent_harness.web.wire_safety import (
+        BodyDepthGuardMiddleware,
+        install_wire_safety,
+    )
+
+    install_wire_safety(app)
+
     # Phase 14 lineage 路由（独立 router 文件——流式改造重刀 app.py 时的最小接入面）
     from agent_harness.web.lineage import register_lineage_routes
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
+
+    # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
+    # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
+    from agent_harness.web.task_delivery import register_task_routes
+
+    register_task_routes(app, validate_session_id=validate_session_id)
 
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
@@ -1297,8 +1505,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # 仅对 HTML 文档执行，JSON 响应带此头无害），避免漏掉任何静态入口。
     _CSP_POLICY = "default-src 'self'; img-src 'self' data:"
 
-    # 纯 ASGI 中间件（见类 docstring）：先 csp（内层）后 auth（外层），与
-    # 旧 BaseHTTPMiddleware 版注册顺序逐层一致；CORS 仍最后添加 = 最外层。
+    # 纯 ASGI 中间件（见类 docstring）：body 配额守卫（嵌套深度 + 字节体积）最先
+    # 添加 = 最内层，落点**在认证内层**——未认证请求先被 401 挡下，不做无谓的
+    # body 扫描；先 csp（内层）后 auth（外层），与旧 BaseHTTPMiddleware 版注册
+    # 顺序逐层一致；CORS 仍最后添加 = 最外层。
+    app.add_middleware(BodyDepthGuardMiddleware)
     app.add_middleware(CSPHeaderMiddleware)
     app.add_middleware(AuthSeamMiddleware, settings=settings)
 
@@ -1319,16 +1530,44 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/health")
     async def health() -> dict[str, object]:
-        """存活探针 + durability 观测（#515）。
+        """存活探针 + durability 观测（#515）+ 附着协议形状（W-11 #355）。
 
         `checkpoint_save_failures` 是进程级累计的 checkpoint 维护失败次数（重启归零）：
         非零说明有 checkpoint 帧丢失，之后的 resume 可能回到更旧的稳定边界——这是
         ADR-0004 Round 5 之下 checkpoint 故障唯一的对外口径（不进 SessionEvent）。
+
+        W-11：本端点**匿名可达**（AuthSeamMiddleware 豁免），是附着核验的第一站；
+        载荷只含非秘密字段——协议版本 / 服务版本 / capability 名称（静态配置名，
+        非秘密）+ 是否强制鉴权，token/路径/用户信息一概不进。
         """
+        jwt_configured = bool(settings.jwt_secret and settings.jwt_secret.get_secret_value())
+        try:
+            capability_names: list[str] = sorted(parse_capabilities_config(settings.capabilities))
+        except CapabilityError:
+            # 配置非法由装配路径显式报错（init_failed）；健康面不能因此塌掉。
+            capability_names = []
         return {
             "status": "ok",
             "checkpoint_save_failures": checkpoint_save_failure_count(),
+            "protocol_version": HOST_PROTOCOL_VERSION,
+            "version": _package_version(),
+            "capabilities": capability_names,
+            "auth_required": jwt_configured,
         }
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """进程健康观测面（#612）：RSS / gc 堆 / 存活 task / uptime。
+
+        Prometheus 文本暴露格式（v0.0.4）；Diagnostic 层，Event≠Log，不进
+        SessionEvent。读取零副作用（gc 扫描在 worker 线程），单项采集失败
+        ⇒ 该指标整行缺席（缺席≠占位值），不影响任何业务路径（不变量 #21）。
+        默认无鉴权——与 /api/health 同一口径（AC5，不引入开关）。
+        """
+        return Response(
+            content=await collect_process_metrics(),
+            media_type=METRICS_CONTENT_TYPE,
+        )
 
     @app.get("/api/sessions")
     async def list_sessions(
@@ -1626,15 +1865,23 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             ActiveRunConflict,
             RecoveryConflict,
+            EventLogCorruptError,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
             BudgetRejection,
             BudgetConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留需人工裁决的 UNKNOWN
             # tool_call，不伪造结果（不变量 #14）。
+            # EventLogCorruptError → 409（#565）：events.jsonl 完整性闸门拒绝——
+            # 完整坏行 / seq 断层 / seq 重复，不可重试，需人工修复。
             # WorkspaceBindingConflict → 409（#266）：cwd 锚与沙箱映射互相矛盾，
             # 拒绝静默选边（判定见 `service._reconcile_workspace_binding`）。
+            # WorkspaceNotFound → 404（中央映射既有条目）：#266 守卫对 cwd 已删
+            # 的会话在 resume 路径本来就在抛，#564 审查 P2-1 修复前它被 validator
+            # 的 sandbox mkdir 掩蔽（守卫赶不上 mkdir），修复后真正可见——补进
+            # 元组让既存映射生效，不再以裸 500 呈现。
             # BudgetConflict → 409（#312）：CAS 版本过期 / 不是暂停的那个 run /
             # ceiling 没真提高 / 有在途 run——请求形状合法但状态对不上，且
             # **零副作用**（判定在任何落盘之前，见 `validate_resume`）。
@@ -1936,10 +2183,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         内阻塞的 callback。
 
         语义：
-          成功 resolve → 200 ok（run 在 callback 处继续；resolved 事件由 callback 写入）
+          成功 resolve → resolved 事件先 durable append，再返回 200 并唤醒 run
           decision 不在 requested 事件的 allowed_decisions 内 → 422（违反契约）
-          approval_id 已 resolved → 409（防重复决策；幂等性拒绝）
-          approval_id 不存在 → 404（前端过期事件或非本 session 的 id）
+          approval_id 已 resolved 或请求已失效 → 409（防重复/过期决策）
+          approval_id 不存在于 durable 请求事件 → 404（非本 session 的 id）
           无 approval_id（旧 seam 调用）→ 200 received（向后兼容）
           session 不存在 → 404
         """
@@ -1978,19 +2225,38 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         }
 
     @app.post("/api/sessions/{session_id}/recover")
-    async def recover_session(session_id: str) -> list[dict]:
+    async def recover_session(
+        session_id: str, req: RecoverRequest | None = None
+    ) -> list[dict]:
         """恢复崩溃 session（R8-1 接线）：RecoveryCoordinator 唯一入口（07 §9）。
 
         修复 dangling tool_call（配对合成）、按 Ledger 终态精确回填结果、
-        PENDING 默认 skip；RUNNING/UNKNOWN 需要人工裁决时返回 409（不伪造、
-        不盲跑，不变量 #14）。幂等：重复调用靠事件配对自然跳过已修复项。
+        PENDING 默认 skip。#547 裁决合同：RUNNING/UNKNOWN 需要人工裁决时，
+        无裁决 → 409（detail 附机器可读 ``pending_decisions`` 清单）；携带覆盖
+        全部待裁决行的 ``decisions`` → 用户显式裁决结清后继续（四值词表，
+        不伪造、不盲跑，不变量 #14）。幂等：重复调用靠事件配对自然跳过已修复项。
         """
         service = session_service(app.state.agent)
+        decisions = [
+            ReconcileDecision(tool_call_id=d.tool_call_id, verdict=d.verdict)
+            for d in (req.decisions if req is not None else [])
+        ]
         try:
-            events = await service.recover(session_id)
-        except (InvalidSessionId, SessionNotFound, RecoveryConflict, SeqConflict) as e:
+            events = await service.recover(session_id, decisions=decisions)
+        except (
+            InvalidSessionId,
+            SessionNotFound,
+            InvalidDecision,
+            RecoveryConflict,
+            EventLogCorruptError,
+            SeqConflict,
+        ) as e:
             # RecoveryConflict → 409：RUNNING/UNKNOWN 需人工裁决，不伪造不盲跑
-            # （不变量 #14）。SeqConflict → 409：日志 seq 冲突（BUG-011）。
+            # （不变量 #14）；#547 起该分支 detail 附 pending_decisions 清单。
+            # InvalidDecision → 422：裁决值/目标/重复提交非法（#547 预检）。
+            # SeqConflict → 409：日志 seq 冲突（BUG-011）。
+            # EventLogCorruptError → 409（#565）：完整性闸门（完整坏行 / seq
+            # 断层 / seq 重复），不可重试，需按定位记录人工修复。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 
@@ -2115,26 +2381,39 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             ActiveRunConflict,
             RecoveryConflict,
+            EventLogCorruptError,
             QueueItemNotFound,
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
             BudgetRejection,
             BudgetConflict,
         ) as e:
             # RecoveryConflict → 409（T8 #138）：崩溃遗留（UNKNOWN 高风险
             # tool_call）需人工裁决——拒绝续跑而不是伪造「结果未知」（不变量 #14）。
+            # EventLogCorruptError → 409（#565）：idle→launched 会按需走
+            # self.recover，完整性闸门拒绝损坏日志（不可重试）。
             # SupersedeTargetInvalid → 409（ADR-0030 §4.6）：目标不对，不是会话不存在。
             # WorkspaceBindingConflict → 409（#266）：idle 分支会走 resume_and_launch，
             # 工作目录归属冲突同样拒绝静默选边。
+            # WorkspaceNotFound → 404（#615①）：同样经 resume_and_launch——外部 cwd
+            # 在两次请求之间被删时中央映射既有条目本就要接住，/resume 元组同款
+            # （#564 审查 P2-1），不新增状态码语义。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
             raise model_http_error(e) from e
         except StorageBusyError as e:
             # #515（审查 P2-3）：同 create——launched 分支的写锁耗尽 → 503。
+            raise storage_http_error(e) from e
+        except (OSError, sqlite3.Error) as e:
+            # #569：只把明确的容量 / SQLite I/O 错误翻译为 storage 503；坏路径、
+            # 约束冲突和没有原生 SQLite 错误码的 OperationalError 继续走 500。
+            if storage_http_status(e) is None:
+                raise
             raise storage_http_error(e) from e
 
         if result.status == "launched":
@@ -2215,9 +2494,13 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SessionNotFound,
             ActiveRunConflict,
             RecoveryConflict,
+            EventLogCorruptError,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
         ) as e:
+            # WorkspaceNotFound → 404（#615①）：投递走 resume_and_launch，外部 cwd
+            # 在排队之后被删 → 中央映射既有条目，与 /messages、/resume 同口径。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05（审查 P2-1）：flush 在 idle 时走 resume_and_launch 构造

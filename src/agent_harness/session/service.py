@@ -31,6 +31,7 @@ import logging
 import os
 import stat
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path, PureWindowsPath
@@ -100,6 +101,7 @@ from agent_harness.session.derive import (
     KIND_QUEUE,
     KIND_STEER,
     UndeliveredInput,
+    collect_dangling,
     derive_protected_facts,
     detect_dangling,
     undelivered_inputs,
@@ -111,6 +113,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
@@ -119,6 +122,7 @@ from agent_harness.session.errors import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionCwdUnavailable,
     SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
@@ -131,8 +135,10 @@ from agent_harness.session.errors import (
     WorkspacePathInvalid,
 )
 from agent_harness.session.event import (
+    FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
+    PERMISSION_RESOLVED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
     RUN_RESUMED,
@@ -162,12 +168,24 @@ from agent_harness.session.model_switch import (
 from agent_harness.session.model_switch import (
     restore_policy_inputs as _restore_policy_inputs,
 )
+from agent_harness.session.progress import ProgressWriteOutcome, write_progress_file
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
+    EventLogIntegrity,
     JsonlSessionStore,
     SessionSummaryStats,
     WorkspaceRef,
+)
+from agent_harness.session.task import (
+    TaskOutcome,
+    TaskState,
+    apply_acceptance,
+    apply_acceptance_release,
+    apply_acceptance_revision,
+    apply_task_definition,
+    apply_verification,
+    derive_task_state,
 )
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
@@ -183,12 +201,12 @@ from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from agent_harness.capability.base import CapabilityRegistry
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
-    from agent_harness.recovery.scan import InterruptionScanResult
+    from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
     from agent_harness.session.runmanager import ManagedRun, RunManager, Subscriber
@@ -474,6 +492,18 @@ class SendMessageResult:
 
 
 @dataclass(frozen=True)
+class ReconcileDecision:
+    """一条用户显式裁决（#547 四裁决合同）：tool_call_id + ``ReconcileVerdict`` 值。
+
+    verdict 用字符串承载（HTTP/CLI 传输词汇），合法性在 `recover` 预检里统一
+    校验（``InvalidDecision`` 422）——规则单一来源，不在传输层复述。
+    """
+
+    tool_call_id: str
+    verdict: str
+
+
+@dataclass(frozen=True)
 class SessionDeletionStats:
     """`delete_session` 的结果束（#172 / ADR-0029）：删了什么，可核对。
 
@@ -510,6 +540,38 @@ class RecoveryStoreBundle(Protocol):
     workspace_index: WorkspaceIndex | None
 
 
+@runtime_checkable
+class SessionDeclarationValidator(Protocol):
+    """`#564` 裁决 (a)：session 请求声明注册名校验的**领域端口**。
+
+    判据需要**根 registry**（树级语义），而名字集的计算是组合层
+    （`assembly.root_registry_tool_names`，零副作用投影）的事——领域层 import
+    组合层类型会被 import 边界守卫（`tests/session/test_service_collaborators.py`）
+    拦下，所以同 `RecoveryStoreBundle` 一样由组合根注入实现
+    （`web/app.py::session_service` 唯一适配点）。实现方用与 `build_runtime`
+    **同源**的名字集计算（一致性由 `tests/test_assembly_root_registry_names.py`
+    三方对账钉住；**不得**改回完整 `_build_tooling`——那会构造 sandbox 并在
+    归属对账前 mkdir workspace，审查 P2-1），内部走
+    `validate_tool_call_limits_registered(..., scope="session")`，坏名抛
+    `BudgetRejection`（422）。
+
+    调用时机：resume 通道 eager CAS **之前**（先于任何账行写入；`_ensure_stores`
+    的幂等建表不算会话工作）——坏名永不触碰账行（修复前 merge-only 的 CAS 先
+    并入坏名再 422，一次打错的请求把会话毒成不可恢复态）。未注入（直构
+    `SessionService` 的调用方）⇒ 跳过前置校验，由 build_runtime 的声明 422
+    兜底；web / CLI 两条组合根路径都已注入。
+    """
+
+    async def __call__(
+        self,
+        limits: SessionLimits,
+        *,
+        session_id: str,
+        workspace: Path,
+        agent_profile: str | None,
+    ) -> None: ...
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -541,6 +603,7 @@ class SessionService:
         stores: RecoveryStoreBundle,
         ensure_stores: Callable[[], Awaitable[None]],
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+        validate_session_declaration: SessionDeclarationValidator | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -558,6 +621,7 @@ class SessionService:
         self._stores = stores
         self._ensure_stores = ensure_stores
         self._get_wiring = get_wiring
+        self._validate_session_declaration = validate_session_declaration
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -1029,6 +1093,9 @@ class SessionService:
             # `#318`：session 作用域账（跨 run 持久；子会话经 multiagent/provider 的
             # `session_budget_port` 接到同一行）。
             session_budget=session_budget,
+            # `#564`：本次请求点名的声明（create 通道 = 请求声明本身；注册名 422
+            # 的无副作用拒绝点在 build_runtime，账行由 handle 惰性建出、零行写入）。
+            session_declared_limits=session_limits,
             local_fuse_source=fuse.source,
             **amend_kwargs(amend),
             # `#317`：stuck 暂停要在 `run/paused` 里记下**停下那一刻**的环境 revision
@@ -1055,6 +1122,23 @@ class SessionService:
             cwd=workspace,
         )
 
+        # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
+        # run 接入」）。原始目标 = 本次请求的 task 文本；cwd 不复制第二份
+        # （session/started 已有单源锚）；验收清单缺省为空，Agent 稍后经
+        # task/acceptance-revised 提出。空白任务维持既有行为照常起跑，只是没有
+        # 可定义的任务——定义缺失由投影如实可见（GET /task → 404）。
+        task_outcome = apply_task_definition(session, task_text=task)
+        if not task_outcome.ok:
+            logger.warning(
+                "create_and_launch：task 文本未通过 task/defined 形状校验（%s），"
+                "跳过任务定义，会话照常启动",
+                task_outcome.reason,
+            )
+        else:
+            # W-05（#349）：目标/约束确认后首次创建进度文件（票面工作指令 1）。
+            # 不预判 cwd 形态：refresh 内部按 session_cwd 单源锚解析，无锚静默
+            # 跳过——workspace_name 会话与显式 cwd 会话同口径收敛（审查 P3-3）。
+            await self.refresh_progress_file(session_id)
         # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
         # "先建会话再 attach"）。只对**显式选定了目录**的会话做：未命名/未给 cwd 时目录是
         # workspaces_root/<session_id>（"用户没选项目"的实现痕迹），把它注册成项目会
@@ -1246,6 +1330,14 @@ class SessionService:
         session_row = await self._stores.delegation_tree_ledger.get_session_budget(
             budget_key
         )
+        # 工作目录路径（**只读**：`session_cwd` 是纯事件读，不建目录、不写映射表）——
+        # `#317` 的 stuck 证据与 `#564` 的 pre-CAS 校验都要用它，所以提到 session 账
+        # 处理之前；真正的归属对账 / mkdir / is_dir 仍在下面（那里的顺序契约不变）。
+        persisted_cwd = session_cwd(existing)
+        evidence_workspace = (
+            Path(persisted_cwd) if persisted_cwd is not None
+            else self._workspaces_root / session_id
+        )
         # 点名任一 session 维 ⇒ 账行 CAS 更新（绝对 ceiling + 乐观锁 + headroom，
         # 判定全在账本单事务里 ⇒ 409 零改动）。行不存在 = 首次钉死，无版本可竞争。
         session_limits = _session_limits(
@@ -1257,6 +1349,22 @@ class SessionService:
             tool_call_limits=session_tool_call_limits,
             max_delegations=session_max_delegations,
         )
+        # `#564` 裁决 (a)：**校验前置**——session 请求声明的注册名校验提到 eager
+        # CAS **之前**（`_ensure_stores` 的幂等建表在其前执行，但那不是会话工作）。
+        # 修复前 merge-only 的 CAS 先把坏名并入账行再 422，一次打错的请求就把
+        # 会话毒成不可恢复态（普通 resume 恒 422）。判据需要根 registry（树级
+        # 语义，裁决 (b) 口径），构造归组合层 ⇒ 走注入端口
+        # （`SessionDeclarationValidator`，见其 docstring）。
+        if (
+            session_limits.tool_call_limits
+            and self._validate_session_declaration is not None
+        ):
+            await self._validate_session_declaration(
+                session_limits,
+                session_id=session_id,
+                workspace=evidence_workspace,
+                agent_profile=(amend.agent_profile if amend is not None else None),
+            )
         if session_limits.configured:
             if session_row is not None:
                 if session_expected_version is None:
@@ -1294,14 +1402,8 @@ class SessionService:
         amend = _amend_with_session_model(amend, existing, self._settings)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run")
-        # 工作目录路径（**只读**：`session_cwd` 是纯事件读，不建目录、不写映射表）——
-        # 位置提前是为了让阶段一的 stuck 恢复依据能观测工作区（`#317`）；真正的
-        # 归属对账 / mkdir / is_dir 仍在下面（那里的顺序契约不变）。
-        persisted_cwd = session_cwd(existing)
-        evidence_workspace = (
-            Path(persisted_cwd) if persisted_cwd is not None
-            else self._workspaces_root / session_id
-        )
+        # （persisted_cwd / evidence_workspace 已在 session 账处理前算好——`#564`
+        # 的 pre-CAS 校验与这里的 stuck 证据用同一份派生，不重复读事件。）
         # 会话级权限档（事件派生；未声明 = 默认档）——同样提前：它既是下面装配点的
         # 入参，也是 stuck 证据端口里"策略版本"的一维（两处必须同一个值）。
         effective_mode = _effective_permission_mode(existing)
@@ -1360,7 +1462,7 @@ class SessionService:
         # `registry.get()`，而实例化 Sandbox 时会 mkdir 工作目录：外部 cwd 被用户删掉
         # 之后会被凭空建回来，"目录没了"从此看不见（旧用例用 MagicMock registry，
         # 正好绕开了这个 mkdir）。对账只读注册表的登记事实，不实例化任何 Sandbox。
-        persisted_cwd = session_cwd(existing)
+        # （persisted_cwd 上面已读，沿用同一份。）
         if persisted_cwd is None:
             # 历史遗留（无 cwd 锚）：兼容语义逐字不变——默认目录 + 确保它存在。
             workspace = self._workspaces_root / session_id
@@ -1369,7 +1471,7 @@ class SessionService:
             workspace = Path(persisted_cwd)
             self._reconcile_workspace_binding(session_id, persisted_cwd, existing)
             if not workspace.is_dir():
-                raise WorkspaceNotFound(
+                raise SessionCwdUnavailable(
                     f"session '{session_id}' 的 cwd 不存在或不是目录: {workspace}"
                 )
 
@@ -1451,6 +1553,10 @@ class SessionService:
                     # （interactive 路由），与创建路径同判据，不在这里发明第二套判定。
                     # （#423 之前这里复原的是 deny 路由——"每一步问我"被降级成
                     # "全部拒绝"，同样不兑现承诺。）
+                    # #545：这里构建了 holder 就必须同步置外层 interactive——
+                    # service 尾部的 bind_session 与审批队列 GC 都只认这个标志，
+                    # 漏置 ⇒ 回调 _session 恒 None，/messages 一遇审批即 RuntimeError。
+                    interactive = True
                     approval_callback = await self._build_approval_callback(
                         interactive=True,
                         auto_approve_explicit=True,
@@ -1494,6 +1600,9 @@ class SessionService:
                 run_budget=budget,
                 # `#318`：session 作用域账（跨 run 持久；声明 = 账行现值，见上方装配）。
                 session_budget=session_budget,
+                # `#564`：本次请求点名的声明（resume 通道已在 eager CAS 前核过同一
+                # 份，此处是防御性二道闸；账行现值的陈旧名在装配层降告警）。
+                session_declared_limits=session_limits,
                 # 生效 fuse 的**来源**也是投影事实（`11 §6.1` 的可执行性口径）：
                 # 装配层不重判策略，只把它传给 run/paused 的 limits 快照。
                 local_fuse_source=fuse.source,
@@ -1525,7 +1634,25 @@ class SessionService:
                 port=stuck_evidence,
                 runtime_builder=build_resume_runtime,
             )
-        else:
+            return self._bind_and_launch(
+                session=session, runtime=runtime, task=task,
+                user_input_metadata=user_input_metadata,
+                interactive=interactive, approval_callback=approval_callback,
+                fuse=fuse, launch_budget=launch_budget,
+            )
+        # #560-B：新任务 launch 的 CAS 临界区（锁 owner = RunManager，跨请求共存）。
+        # "判 idle → 启动"必须是**一个**原子判定：上方那次 get_active 只是快速
+        # 预检，锁内复查才是唯一权威 CAS 点——输家在这里拿 ActiveRunConflict
+        # （send_message 的 idle 分支据此回退入队），而不是两个赢家各自 launch
+        # 出两个并发驱动同一会话的 run：两个聚合从同一磁盘快照各自推算 seq，
+        # begin_run 撞号被 store fail-closed 拒绝（#560-B 的"排队消息的 run
+        # 必败"）。锁内重读聚合与 `_commit_paused_resume` 同一条纪律：
+        # `Session.resume` 读到的那枚聚合就是交给 runtime 的一枚，seq 计数器
+        # 不可能落后于任何已落盘事件。锁不跨 run 生命周期：launch 只创建 task，
+        # run 本身由 _drive 独立驱动（`session_lock` 的既有边界）。
+        async with self._resume_lock(session_id):
+            if self._run_manager.get_active(session_id) is not None:
+                raise ActiveRunConflict("session has an active run")
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
                 # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
@@ -1536,6 +1663,25 @@ class SessionService:
                     session_id,
                     workspace_registry=self._workspace_registry,
                 )
+            return self._bind_and_launch(
+                session=session, runtime=runtime, task=task,
+                user_input_metadata=user_input_metadata,
+                interactive=interactive, approval_callback=approval_callback,
+                fuse=fuse, launch_budget=launch_budget,
+            )
+
+    def _bind_and_launch(
+        self, *, session: Session, runtime: Any, task: str | None,
+        user_input_metadata: dict[str, Any] | None,
+        interactive: bool,
+        approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder,
+        fuse: LocalFuse, launch_budget: LaunchRunBudget,
+    ) -> LaunchResult:
+        """绑定审批回调 → launch → 审批队列 GC（同 run / 新任务两条路径共用）。
+
+        launch 是"开 run"的提交点：调用方决定它落在哪个互斥域内（新任务在
+        `_resume_lock` 临界区内，同 run 续跑在 `_commit_paused_resume` 返回后）。
+        """
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
         run, subscriber = self._run_manager.launch(
@@ -1543,7 +1689,7 @@ class SessionService:
         )
         # run 终结时 GC approval_queue（与创建路径同一条防泄漏路径）。
         if interactive:
-            self._attach_approval_queue_gc(run, session_id)
+            self._attach_approval_queue_gc(run, session.session_id)
         return LaunchResult(
             session=session, run=run, subscriber=subscriber, local_fuse=fuse,
             run_budget=launch_budget,
@@ -1680,7 +1826,10 @@ class SessionService:
     ) -> LaunchRunBudget:
         """阶段一（锁内只读）：校验恢复声明并算出续跑账本，**不写任何东西**。"""
         async with self._resume_lock(session_id):
-            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            events, integrity = await anyio.to_thread.run_sync(
+                self._store.read_events_report, session_id
+            )
+            self._raise_if_event_log_corrupt(session_id, integrity)
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, _ = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
@@ -1720,7 +1869,10 @@ class SessionService:
         把同一枚聚合交给 runtime。
         """
         async with self._resume_lock(session_id):
-            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            events, integrity = await anyio.to_thread.run_sync(
+                self._store.read_events_report, session_id
+            )
+            self._raise_if_event_log_corrupt(session_id, integrity)
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, evidence = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
@@ -1831,6 +1983,8 @@ class SessionService:
         - fork 子会话：cwd 锚记的是**项目归属**（父的目录），映射是 copy-on-fork 的
           副本目录（ADR-0017 决策 5 / `test_session_cwd.py::TestForkInheritance`）。
           真机上 3 条 fork 子会话正是这个形状——判成冲突等于让它们再也无法续聊。
+          未完成的 fork（`fork/in-progress` 无 `session/forked`，#555）不豁免：
+          冲突是 fork 中断的后续状态，类型化失败里给 fork 专属处置指引。
 
         冲突为什么必须类型化失败（不静默选边）单点在 `WorkspaceBindingConflict` 的
         docstring，这里不重复（§16.1）。
@@ -1847,6 +2001,18 @@ class SessionService:
             return
         if any(event.type == SESSION_FORKED for event in events):
             return
+        if any(event.type == FORK_IN_PROGRESS for event in events):
+            # #555：有意图标记、无 session/forked = 一次没完成的 fork（启动扫描
+            # 已回收其暂存/工作区残留）。这不是"绑定漂移"，是 fork 中断的后续
+            # 状态——child 没有可用历史，修复方向是删除后从父会话重新 fork，
+            # 不是让用户去改映射。
+            raise WorkspaceBindingConflict(
+                f"session '{session_id}' 是一次未完成的 fork"
+                f"（有 fork/in-progress 标记、无 session/forked，"
+                f"session/started.cwd={persisted_cwd}，"
+                f"沙箱登记={', '.join(disagreeing)}）。"
+                "该会话没有可用历史、不能续聊——请删除该会话后从父会话重新 fork。"
+            )
         raise WorkspaceBindingConflict(
             f"session '{session_id}' 的工作目录绑定冲突："
             f"session/started.cwd={persisted_cwd}，"
@@ -1878,6 +2044,35 @@ class SessionService:
             live.append(event_type, dict(data))
             return
         Session.append_event(self._store, session_id, event_type, dict(data))
+
+    async def _queue_incoming_message(
+        self, *, session_id: str, content: str,
+        revoke_fact_id: str | None,
+        refutes_event_id: str | None,
+        protected_facts: list[dict[str, Any]] | None,
+        remember_as_procedural_rule: bool,
+        user_input_metadata: dict[str, Any],
+    ) -> QueuedMessage:
+        """入队（FIFO）+ 写 MESSAGE_QUEUED——活跃 run 分支与 #560-A 竞态回退共用。
+
+        两条路径到达时 run 都已在途：append 经 `_append_session_event` 优先走
+        live 聚合（旁路追加自算 seq 会与 run 的内存计数器撞号，见
+        `_live_session` 的注释），事件实时广播给在途订阅者。
+        """
+        queued = await self._message_queues.enqueue(
+            session_id=session_id, content=content, created_at=_utc_now_iso(),
+            revoke_fact_id=revoke_fact_id,
+            refutes_event_id=refutes_event_id,
+            protected_facts=protected_facts,
+            remember_as_procedural_rule=remember_as_procedural_rule,
+        )
+        self._append_session_event(
+            session_id, MESSAGE_QUEUED,
+            queue_id=queued.queue_id,
+            content=content,
+            **user_input_metadata,
+        )
+        return queued
 
     async def send_message(
         self,
@@ -2063,51 +2258,65 @@ class SessionService:
             )
             result = SendMessageResult(status="steered", steer_request=steer_req)
         elif active_run is None:
-            # idle → 直接拉起新 run（同 resume 路径）。
-            launched = await self.resume_and_launch(
-                session_id=session_id, task=content,
-                user_input_metadata=user_input_metadata or None,
-                local_max_agent_turns=local_max_agent_turns,
-                amend=amend,
-                run_max_agent_turns_total=run_max_agent_turns_total,
-                run_max_model_requests=run_max_model_requests,
-                run_max_total_tokens=run_max_total_tokens,
-                run_max_cost_usd=run_max_cost_usd,
-                run_deadline_at=run_deadline_at,
-                run_tool_call_limits=run_tool_call_limits,
-                # `#318`：session 作用域与 run 作用域同一纪律——只有 idle → launched
-                # 才消费；但 session 账行跨 run 存续，点名 = 对 durable 行的 CAS 更新
-                # （session_expected_version 必带，判定在 resume_and_launch）。
-                session_max_agent_turns_total=session_max_agent_turns_total,
-                session_max_model_requests=session_max_model_requests,
-                session_max_total_tokens=session_max_total_tokens,
-                session_max_cost_usd=session_max_cost_usd,
-                session_deadline_at=session_deadline_at,
-                session_tool_call_limits=session_tool_call_limits,
-                session_max_delegations=session_max_delegations,
-                session_expected_version=session_expected_version,
-            )
-            result = SendMessageResult(
-                status="launched",
-                session=launched.session,
-                run=launched.run,
-                subscriber=launched.subscriber,
-                local_fuse=launched.local_fuse,
-            )
+            # idle → 直接拉起新 run（同 resume 路径）。判 idle（上方 get_active）
+            # 与 launch 之间没有互斥（#560-A TOCTOU）：另一入口（并发 /messages、
+            # 终态接力、flush）可能刚把会话变忙——输家捕获 ActiveRunConflict 后
+            # 回退入队，而不是 409 丢正文（"活跃 run → 入队"才是 queue 语义的
+            # 承诺，调用方无法区分"真忙"和"差几微秒没抢赢"；与 ADR-0030 §4.7
+            # 终态驱动侧同一模式）。此刻 run 已在途，入队经 `_append_session_event`
+            # 优先走 live 聚合（seq 计数器一致）。回退即 queued 语义：本次请求的
+            # budget/run 作用域生效值照纪律丢弃（只有 idle → launched 才消费）。
+            try:
+                launched = await self.resume_and_launch(
+                    session_id=session_id, task=content,
+                    user_input_metadata=user_input_metadata or None,
+                    local_max_agent_turns=local_max_agent_turns,
+                    amend=amend,
+                    run_max_agent_turns_total=run_max_agent_turns_total,
+                    run_max_model_requests=run_max_model_requests,
+                    run_max_total_tokens=run_max_total_tokens,
+                    run_max_cost_usd=run_max_cost_usd,
+                    run_deadline_at=run_deadline_at,
+                    run_tool_call_limits=run_tool_call_limits,
+                    # `#318`：session 作用域与 run 作用域同一纪律——只有 idle → launched
+                    # 才消费；但 session 账行跨 run 存续，点名 = 对 durable 行的 CAS 更新
+                    # （session_expected_version 必带，判定在 resume_and_launch）。
+                    session_max_agent_turns_total=session_max_agent_turns_total,
+                    session_max_model_requests=session_max_model_requests,
+                    session_max_total_tokens=session_max_total_tokens,
+                    session_max_cost_usd=session_max_cost_usd,
+                    session_deadline_at=session_deadline_at,
+                    session_tool_call_limits=session_tool_call_limits,
+                    session_max_delegations=session_max_delegations,
+                    session_expected_version=session_expected_version,
+                )
+            except ActiveRunConflict:
+                queued = await self._queue_incoming_message(
+                    session_id=session_id, content=content,
+                    revoke_fact_id=revoke_fact_id,
+                    refutes_event_id=refutes_event_id,
+                    protected_facts=normalized_protected_facts or None,
+                    remember_as_procedural_rule=remember_as_procedural_rule,
+                    user_input_metadata=user_input_metadata,
+                )
+                result = SendMessageResult(status="queued", queued_message=queued)
+            else:
+                result = SendMessageResult(
+                    status="launched",
+                    session=launched.session,
+                    run=launched.run,
+                    subscriber=launched.subscriber,
+                    local_fuse=launched.local_fuse,
+                )
         else:
             # 活跃 run → 入队（FIFO）+ 写 MESSAGE_QUEUED。
-            queued = await self._message_queues.enqueue(
-                session_id=session_id, content=content, created_at=_utc_now_iso(),
+            queued = await self._queue_incoming_message(
+                session_id=session_id, content=content,
                 revoke_fact_id=revoke_fact_id,
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
                 remember_as_procedural_rule=remember_as_procedural_rule,
-            )
-            self._append_session_event(
-                session_id, MESSAGE_QUEUED,
-                queue_id=queued.queue_id,
-                content=content,
-                **user_input_metadata,
+                user_input_metadata=user_input_metadata,
             )
             result = SendMessageResult(status="queued", queued_message=queued)
 
@@ -2280,6 +2489,7 @@ class SessionService:
         由 `RunManager` 在 run 收口后调用（Web 层接线）；CLI 未接线时本方法
         不被调用，行为与接线前一致。
         """
+        await self.refresh_progress_file(session_id)  # W-05：里程碑/失败结论边界
         if self._run_manager.get_active(session_id) is not None:
             return  # 已有在途 run（用户手动开了）：不要双驱
         try:
@@ -2294,6 +2504,13 @@ class SessionService:
             )
         except SessionNotFound:
             logger.warning("终态驱动：session=%s 不存在，跳过接力", session_id)
+        except WorkspaceNotFound as e:
+            # #624-1：cwd 在 run 期间被外部删除（#615① 同形；P3 跟进批后由子型
+            # SessionCwdUnavailable 携带，此处刻意捕父类——「未注册」形态到达时
+            # 同款跳过语义也成立）。与 SessionNotFound 同款"留待下次"口径
+            # （outbox：投递失败不丢消息）；不是 HTTP 调用方路径，
+            # deliver_next_undelivered 的 409/404 翻译契约不受影响。
+            logger.warning("终态驱动：session=%s 的 cwd 不可用，跳过接力：%s", session_id, e)
 
     # ── 取消 ─────────────────────────────────────────────────────────
 
@@ -2542,11 +2759,6 @@ class SessionService:
             raise SessionNotFound(f"session '{session_id}' not found")
 
         queue = self._approval_queues.get(session_id)
-        if queue is None:
-            raise ApprovalQueueMissing(
-                f"session '{session_id}' has no interactive approval queue "
-                "(permission_mode not interactive, or run already terminated)"
-            )
 
         requested = next(
             (
@@ -2557,9 +2769,28 @@ class SessionService:
             ),
             None,
         )
+        if requested is None and queue is None:
+            raise ApprovalQueueMissing(
+                f"session '{session_id}' has no interactive approval queue "
+                "(permission_mode not interactive, or run already terminated)"
+            )
         if requested is None:
             raise ApprovalRequestMissing(
                 f"approval_id '{approval_id}' not found in session '{session_id}'"
+            )
+
+        if any(
+            event.type == PERMISSION_RESOLVED
+            and event.data.get("approval_id") == approval_id
+            for event in existing
+        ):
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' already resolved"
+            )
+        if queue is None:
+            # A durable request without a live resolver is stale state, not an unknown id.
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' is stale; its queue is no longer active"
             )
 
         allowed = requested.data.get("allowed_decisions", [])
@@ -2592,43 +2823,177 @@ class SessionService:
                 f"approval_id '{approval_id}' already resolved"
             ) from None
         if not ok:
-            raise ApprovalRequestMissing(
-                f"approval_id '{approval_id}' not found in queue"
+            raise ApprovalAlreadyResolved(
+                f"approval_id '{approval_id}' is no longer pending in its queue"
             )
         return ApprovalDecision(decision=perm_decision, response=response)
 
     # ── 恢复 ─────────────────────────────────────────────────────────
 
-    async def recover(self, session_id: str) -> list:
+    @staticmethod
+    def _raise_if_event_log_corrupt(session_id: str, integrity: EventLogIntegrity) -> None:
+        """#565：events.jsonl 完整性闸门——恢复入口对损坏日志拒绝继续。
+
+        三类（`EventLogCorruptError` docstring）：完整坏行 / seq 断层 / seq 重复。
+        文案带**脱敏定位**（行号 / 字节偏移 / 长度 / sha256 / reason，不含行内容）；
+        原字节保留在文件里未动，修复是人工动作。本错误**不可重试**：重读同一
+        文件无用——与写时 `SeqConflict`（可重读快照重试）在语义上分开。
+        """
+        if integrity.healthy:
+            return
+        parts: list[str] = []
+        for record in integrity.corrupt_lines:
+            parts.append(
+                f"损坏行 lineno={record.lineno} offset={record.byte_offset} "
+                f"len={record.byte_length} sha256={record.line_sha256} "
+                f"reason={record.reason}"
+            )
+        for lo, hi in integrity.seq_gaps:
+            parts.append(f"seq 断层 {lo}-{hi}" if lo != hi else f"seq 缺号 {lo}")
+        for seq in integrity.seq_duplicates:
+            parts.append(f"seq 重复 {seq}")
+        # 文案封顶（P3 残余修复）：千行全坏的文件会把无界拼接变成数十 KB 的
+        # 409 detail（撑爆错误弹窗、进不了日志检索）。文案只带前 cap 条 +
+        # 总条数——完整定位记录本就在 store WARNING 日志里，一条不少。
+        cap = 5
+        detail = "；".join(parts[:cap])
+        if len(parts) > cap:
+            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志与完整性报告）"
+        raise EventLogCorruptError(
+            f"Session '{session_id}' 事件日志损坏，恢复已拒绝：{detail}。"
+            "请按 store WARNING 日志的定位记录核对原字节后人工修复文件；修复前"
+            "恢复入口保持拒绝（本错误不可重试）"
+        )
+
+    async def recover(
+        self,
+        session_id: str,
+        decisions: Sequence[ReconcileDecision] | None = None,
+    ) -> list:
         """崩溃恢复（原 POST /recover）：RecoveryCoordinator 唯一入口。
 
-        修复 dangling tool_call、按 Ledger 终态回填结果；
-        RUNNING/UNKNOWN 需要人工裁决 → RecoveryConflict（不变量 #14）。
+        修复 dangling tool_call、按 Ledger 终态回填结果；RUNNING/UNKNOWN 需要
+        人工裁决 → 无裁决时 RecoveryConflict（不变量 #14，不伪造、不盲跑）。
+        ``decisions``（#547 裁决合同，用户拍板 2026-10-03）是用户对 UNKNOWN
+        Operation 的显式裁决：四值词表（ReconcileVerdict，CONFIRM_SUCCESS /
+        CONFIRM_FAILURE / RETRY / ABANDON，复用既有词汇不造第二套）。目标合法性、
+        防重复提交与覆盖性在**任何写入之前**预检完毕，被拒请求零副作用；裁决经
+        ``DecisionsReconcileCallback`` 进入协调器既有的 token-CAS 提交链
+        （reconcile_meta 记裁决原文，operation/reconciled 落审计事件）。用户裁决
+        ≠副作用证据：外部事实核查由 UI 引导（#357 W-13 恢复页复用同一合同）。
         """
         from agent_harness.recovery.coordinator import (
+            DecisionsReconcileCallback,
+            ReconcileVerdict,
             RecoveryCoordinator,
             RecoveryError,
         )
 
         self._validate_session_id(session_id)
         await self._ensure_stores()
-        existing = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        if not existing:
+        if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # 全坏日志（零可解析事件 + 有损坏行）报 409 损坏而非 404（P3 残余修复，
+        # BUG-011 同型）：「存在但全坏」不是「没有这个会话」，404 会把事实丢失
+        # 掩蔽成不存在，引导重建而不是修复。真 404（文件不存在 / 空文件零损坏）不变。
+        self._raise_if_event_log_corrupt(session_id, integrity)
+
+        # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
+        normalized: dict[str, ReconcileVerdict] = {}
+        for decision in decisions or ():
+            try:
+                verdict = ReconcileVerdict(decision.verdict)
+            except ValueError:
+                raise InvalidDecision(
+                    f"裁决值 '{decision.verdict}' 不合法（tool_call_id="
+                    f"{decision.tool_call_id}）：合法值 CONFIRM_SUCCESS / "
+                    "CONFIRM_FAILURE / RETRY / ABANDON"
+                ) from None
+            if decision.tool_call_id in normalized:
+                raise InvalidDecision(
+                    f"同一 tool_call_id 出现多条裁决（{decision.tool_call_id}）——"
+                    "一次恢复里每个调用只能裁决一次（防重复提交）"
+                )
+            normalized[decision.tool_call_id] = verdict
+
+        pending = await self._reconcile_pending(session_id, existing)
+        pending_ids = {item["tool_call_id"] for item in pending}
+        for tool_call_id in normalized:
+            if tool_call_id not in pending_ids:
+                operation = await self._operation_ledger.get(session_id, tool_call_id)
+                where = (
+                    f"当前账面状态 {operation.state.value}"
+                    if operation is not None
+                    else "没有 Ledger 记录"
+                )
+                raise InvalidDecision(
+                    f"裁决目标 '{tool_call_id}' 不是本会话待裁决的 Operation"
+                    f"（{where}，可能已被其他恢复方结清）"
+                )
+        if pending and not all(
+            item["tool_call_id"] in normalized for item in pending
+        ):
+            detail = ", ".join(
+                f"{item['tool_name']}(tool_call_id={item['tool_call_id']})"
+                for item in pending
+            )
+            raise RecoveryConflict(
+                f"存在需要人工裁决的 UNKNOWN Operation（{detail}）：先 POST "
+                "/api/sessions/{id}/recover 携带 decisions=[{tool_call_id, "
+                "verdict}] 结清（verdict ∈ CONFIRM_SUCCESS / CONFIRM_FAILURE / "
+                "RETRY / ABANDON）；裁决前请先核查该调用的外部事实",
+                pending_decisions=pending,
+            )
 
         coordinator = RecoveryCoordinator(
             session_store=self._store,
             workspace_registry=self._workspace_registry,
             operation_ledger=self._operation_ledger,
             database_path=self._harness_db,
+            reconcile_callback=(
+                DecisionsReconcileCallback(normalized) if normalized else None
+            ),
         )
         try:
             recovered = await coordinator.recover(session_id)
         except RecoveryError as error:
             raise RecoveryConflict(str(error)) from error
         return recovered.events
+
+    async def _reconcile_pending(self, session_id: str, events: list) -> list[dict]:
+        """待人工裁决的 Operation 清单（#547 的机器可读 409 载荷）。
+
+        集合必须与 ``RecoveryCoordinator.recover`` 的 reconcile 分流**精确一致**
+        （该分流是其唯一规则源）：悬空调用只认 RUNNING/UNKNOWN/NEED_RECONCILE
+        （终态 + "副作用未证"标记的悬空行由协调器按 result_json 确定性合成，不需
+        要裁决）；非悬空行按 ``storage.needs_reconcile`` 全量（#315 的未证形态）。
+        终态三元组经既有懒导入通道复用协调器的 ``TERMINAL_STATES``（批次收口
+        Spec 轴 P3-3 单源化：不再内联镜像，漂移在源头不可能发生）。
+        """
+        from agent_harness.recovery.coordinator import TERMINAL_STATES
+
+        dangling_ids, _ = collect_dangling(events)
+        operations = await self._operation_ledger.list_for_session(session_id)
+        pending: list[dict] = []
+        for operation in operations:
+            if not needs_reconcile(operation):
+                continue
+            if (
+                operation.tool_call_id in dangling_ids
+                and operation.state in TERMINAL_STATES
+            ):
+                continue
+            pending.append(
+                {
+                    "tool_call_id": operation.tool_call_id,
+                    "tool_name": operation.tool_name,
+                    "state": operation.state.value,
+                }
+            )
+        return pending
 
     async def scan_interrupted(self) -> list[InterruptionScanResult]:
         """进程启动扫描（T8 #138）：无终态 run 补记 ``run/interrupted`` + 强制 reconcile。
@@ -2646,6 +3011,20 @@ class SessionService:
             database_path=self._harness_db,
         )
         return results
+
+    async def scan_unfinished_forks(self) -> list[ForkScanResult]:
+        """进程启动扫描（#555）：按 ``fork/in-progress`` 标记回收未完成 fork 残留。
+
+        与 ``scan_interrupted`` 同一 lifespan、同一单进程假设；只回收 harness
+        自建工件（暂存根 + 默认形态子工作区），child 的 JSONL/映射保留。
+        """
+        from agent_harness.recovery.scan import scan_unfinished_forks
+
+        await self._ensure_stores()
+        return await scan_unfinished_forks(
+            session_store=self._store,
+            workspace_registry=self._workspace_registry,
+        )
 
     async def rebuild_message_queues(self) -> int:
         """按事件流重建内存队列镜像（ADR-0030 §4.8，D5）。返回重建的会话数。
@@ -2844,6 +3223,177 @@ class SessionService:
                     self._store.read_events, session_id
                 )
 
+    # ── W-07（#351）：Task 交付状态命令/查询面 ─────────────────────────────
+    # 校验与落盘判据住在 `session/task.py`（handler 硬校验，拒绝零事件；接受/
+    # 释放走 expected_version CAS）；本类只做它职责内的两件事：会话存在性 +
+    # store 写入路径（在途 run 挂 live 聚合，否则读快照 + seq 冲突重试——
+    # 与 change_model/change_permission_mode 同款，语义单点见 BUG-011 注释）。
+    # 错误以 TaskOutcome 返回（error_kind: shape/conflict），不抛领域异常——
+    # HTTP 翻译在 web 层按 kind 走 422/409（spec 11 §6.1 口径）。
+
+    async def refresh_progress_file(self, session_id: str) -> ProgressWriteOutcome | None:
+        """W-05（#349）：项目可见进度文件 best-effort 刷新。
+
+        progress.md 是 SessionEvent 的确定性投影（``session/progress.py``）——
+        本方法只搬运：读事件 → ``session_cwd`` 单源锚取项目根 → 原子写。
+        「写失败在任务状态可见」的解释性口径（审查 P3-1 钉住）：进度文件的
+        **currency 自报**在文件头 ``source_event_seq``（消费方据它判新旧，不靠
+        wall clock）；失败经 ``ProgressWriteOutcome.error_kind/reason`` 返回给
+        编程调用方 + ``logger.warning`` 落日志，绝不污染调用点主流程（不变量 21
+        同款容错）。无 cwd 锚（session/started 缺失）或空会话返回 None。
+
+        调用点：create_and_launch（首次创建）、``_apply_task_and_refresh``
+        （task 五命令成功后）、``on_run_terminal``（run 收口：里程碑/失败结论）。
+        暂停前/压缩前触发点归 W-06/W-12（票面分工），届时复用本方法。
+        """
+        try:
+            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            if not events:
+                return None
+            cwd = session_cwd(events)
+            if not cwd:
+                return None
+            if not Path(cwd).is_dir():
+                # cwd 已被外部删除：进度文件无处可落，静默跳过——写入器的
+                # mkdir(parents=True) 会把项目根一并复活，击败 #615/#624-1 的
+                # WorkspaceNotFound 守卫（删除的 cwd 必须让下游如实报 404，
+                # 不能被进度写入器悄悄重建；test_resume_amend 钉过的同款假绿）。
+                return None
+            return await anyio.to_thread.run_sync(
+                write_progress_file, cwd, session_id, events
+            )
+        except SessionNotFound:
+            return None
+        except Exception:
+            logger.warning(
+                "进度文件刷新失败（session=%s）——文件保持上一版本，写失败可由"
+                "下次触发点重试；不把旧文件说成最新",
+                session_id,
+                exc_info=True,
+            )
+            return None
+
+    async def _apply_task_handler(
+        self,
+        session_id: str,
+        handler: Callable[..., TaskOutcome],
+        **kwargs,
+    ) -> TaskOutcome:
+        """把一个 task handler 套上「存在性 + live 聚合 + seq 重试」的写入路径。
+
+        handler 在非 live 快照路径上可能因并发写者抢先落盘而抛 SeqConflict：
+        重读快照重跑整个 handler（derive + 版本判定随之基于新快照，CAS 语义不
+        因重试而放松）。live 路径由事件循环串行化，不重试。
+
+        存在性校验放在**循环内**、append 的 try 之外（与 change_model
+        / change_permission_mode 逐字同款）：重试期间会话可能消失（→404）或
+        日志暴露损坏（→409）。校验抛出的 SeqConflict 是**终态**（日志已损坏、
+        重读同一文件无用），不能被下面的 except 当成可重试的写时冲突吞掉。
+        """
+        self._validate_session_id(session_id)
+        existing = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        attempts_left = _WRITE_CONFLICT_ATTEMPTS
+        while True:
+            attempts_left -= 1
+            live = self._live_session(session_id)
+            if live is not None:
+                return handler(live, **kwargs)
+            if not existing:
+                raise SessionNotFound(f"session '{session_id}' not found")
+            validate_event_seq(session_id, existing)  # 判据 owner：session 模块
+            try:
+                return handler(Session(session_id, self._store, existing), **kwargs)
+            except SeqConflict:
+                if attempts_left <= 0:
+                    raise
+                existing = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id
+                )
+
+    async def _apply_task_and_refresh(
+        self, session_id: str, handler: Callable[..., TaskOutcome], **kwargs
+    ) -> TaskOutcome:
+        """task 命令成功后刷新进度文件（W-05 触发点：五命令共用一个钩子）。
+
+        拒绝（零事件）不刷新——投影没变，写了也是同内容幂等跳过，省一次 I/O。
+        """
+        outcome = await self._apply_task_handler(session_id, handler, **kwargs)
+        if outcome.ok:
+            await self.refresh_progress_file(session_id)
+        return outcome
+
+    async def task_state(self, session_id: str) -> TaskState | None:
+        """只读投影（`11 §6.1` 同类：不启动任何工作、零副作用）。
+
+        未定义任务返回 None（web 层 404，不伪装成空状态）。
+        """
+        self._validate_session_id(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        state = derive_task_state(events)
+        return state if state.defined else None
+
+    async def task_definition(
+        self,
+        session_id: str,
+        *,
+        task_text: object,
+        read_write_intent: object = None,
+        criteria: object = None,
+    ) -> TaskOutcome:
+        return await self._apply_task_and_refresh(
+            session_id,
+            apply_task_definition,
+            task_text=task_text,
+            read_write_intent=read_write_intent,
+            criteria=criteria,
+        )
+
+    async def task_acceptance_revision(
+        self, session_id: str, *, criteria: object
+    ) -> TaskOutcome:
+        return await self._apply_task_and_refresh(
+            session_id, apply_acceptance_revision, criteria=criteria
+        )
+
+    async def task_verification(
+        self, session_id: str, *, item_id: object, value: object, evidence: object = None
+    ) -> TaskOutcome:
+        return await self._apply_task_and_refresh(
+            session_id,
+            apply_verification,
+            item_id=item_id,
+            value=value,
+            evidence=evidence,
+        )
+
+    async def task_acceptance(
+        self,
+        session_id: str,
+        *,
+        decision: object,
+        reason: object = None,
+        expected_version: int,
+    ) -> TaskOutcome:
+        return await self._apply_task_and_refresh(
+            session_id,
+            apply_acceptance,
+            decision=decision,
+            reason=reason,
+            expected_version=expected_version,
+        )
+
+    async def task_acceptance_release(
+        self, session_id: str, *, reason: object = None, expected_version: int
+    ) -> TaskOutcome:
+        return await self._apply_task_and_refresh(
+            session_id,
+            apply_acceptance_release,
+            reason=reason,
+            expected_version=expected_version,
+        )
+
     async def fork(
         self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
     ) -> str:
@@ -2860,11 +3410,16 @@ class SessionService:
         from agent_harness.session.fork import ForkBoundaryError, fork_session
 
         self._validate_session_id(session_id)
-        existing = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        existing, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        if not existing:
+        if not existing and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # fork 是状态物化入口（P3 残余修复）：seed 逐字成为 child 的 durable
+        # 历史（child 自包含、不依赖父存活），前缀坏行的事实缺口会被**永久
+        # 物化**——与 recover/resume 同一闸门。replay/显示路径不装闸门是
+        # #565 既定设计（容错读不 brick 显示，损坏有 WARNING 信号）。
+        self._raise_if_event_log_corrupt(session_id, integrity)
         if self._run_manager.get_active(session_id) is not None:
             raise ActiveRunConflict("session has an active run; fork needs settled history")
         await self._ensure_stores()
@@ -3003,11 +3558,20 @@ class SessionService:
         )
 
     def _attach_approval_queue_gc(self, run: ManagedRun, session_id: str) -> None:
-        """run 终结时 GC approval_queue（防长期泄漏）。"""
+        """run 终结时 GC approval_queue（防长期泄漏）。
+
+        #545 review（A 轴 P1）身份校验：attach 时机在 build 之后，此刻 dict 里
+        若有一份就是**本 run** 的队列；回调按对象身份比对后才 pop——接力
+        （ADR-0030 §4.7）与立即续聊会在旧 run 的 done-callback 触发**之前**给
+        下一个 run 注册新队列（共享同一 session_id 键），无条件按键 pop 会把
+        下一个 run 的队列误删，其审批决策从此 404 直到 fail-closed 超时 deny。
+        """
         _task = run.task
+        own_queue = self._approval_queues.get(session_id)
 
         def _gc_approval_queue(_t):
-            self._approval_queues.pop(session_id, None)
+            if self._approval_queues.get(session_id) is own_queue:
+                self._approval_queues.pop(session_id, None)
 
         if _task is not None:
             _task.add_done_callback(_gc_approval_queue)

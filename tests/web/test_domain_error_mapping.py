@@ -7,6 +7,9 @@ except 臂。本测试把「审计结论」钉成契约：状态码只允许在
 
 from __future__ import annotations
 
+import errno
+import sqlite3
+
 import pytest
 
 from agent_harness.memory.errors import MemoryDomainError, MemoryNotFound
@@ -20,6 +23,7 @@ from agent_harness.web.domain_errors import (
     http_error,
     memory_http_error,
     storage_http_error,
+    storage_http_status,
     workspace_http_error,
 )
 from agent_harness.workspace import (
@@ -78,12 +82,21 @@ def test_status_map_is_the_audited_contract():
         # WS-3 / #153：按项目列会话时未注册的 workspace_id——与「项目存在但没有会话」
         # 必须可区分，所以是 404 而不是「空列表」（不变量 #21 同族：缺席不造假）。
         "WorkspaceNotFound": 404,
+        # #266 cwd 守卫的专属子型（P3 跟进批）：「会话 cwd 没了/不是目录」从父类的
+        # 「workspace_id 未注册」语义里拆出——HTTP 层同一 404（detail 文案区分），
+        # handler 的 `except WorkspaceNotFound` 天然覆盖（同 WorkspacePathInvalid
+        # 先例）。本表是精确类型索引，子类必须自己登记。
+        "SessionCwdUnavailable": 404,
         # WS-4 / #154：会话↔项目的移动在当前状态下不成立（无 cwd 锚 / cwd 不属于该项目 /
         # 重排目标不在该项目账本里）——状态冲突而非入参非法，与 422 分开。
         "WorkspaceMoveInvalid": 409,
         # BUG-011：seq 冲突（并发写者抢先落盘 / 日志已损坏）——冲突不是「不存在」，
         # 必须与 SessionNotFound 的 404 区分开（旧行为把它翻成 404 掩蔽了日志损坏）。
         "SeqConflict": 409,
+        # #565：events.jsonl 完整性闸门（完整坏行 / seq 断层或重复）拒绝恢复——与
+        # SeqConflict 同为 409 但**不可重试**（损坏不因重试消失，detail 带脱敏定位
+        # 记录引导人工修复）；沿用 BUG-011 同一逻辑：损坏不是「不存在」，404 会掩盖。
+        "EventLogCorruptError": 409,
         # #172 / ADR-0029：会话是别的会话的 fork 父——不级联（删掉用户没选中的子会话）、
         # 不 orphan（留悬空来源链接），所以只有 409 诚实：请求形态没错、父也确实存在。
         "SessionHasChildren": 409,
@@ -271,10 +284,40 @@ def test_memory_http_error_preserves_detail_and_rejects_unregistered_types():
 def test_storage_map_is_the_audited_contract():
     """写锁重试耗尽 = 「服务端暂时不可用」→ 503（可重试），不是 500（服务端 bug）。
 
-    表刻意只含这一项：`storage/sqlite` 的其余异常里，非锁 `OperationalError` 继续
-    500（真正的意外故障），`IntegrityError` 等约束冲突有自己的语义（#519 的域）。
+    具体 errno / SQLite 错误码在下方按主码验证；未登记类型仍不进固定类型表。
     """
     assert _STORAGE_ERROR_STATUS == {StorageBusyError: 503}
+
+
+def _sqlite_storage_error(code: int, name: str) -> sqlite3.Error:
+    error = sqlite3.OperationalError(name)
+    error.sqlite_errorcode = code
+    error.sqlite_errorname = name
+    return error
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        OSError(errno.EFBIG, "File too large"),
+        OSError(errno.ENOSPC, "No space left on device"),
+        _sqlite_storage_error(sqlite3.SQLITE_FULL, "SQLITE_FULL"),
+        _sqlite_storage_error(sqlite3.SQLITE_IOERR, "SQLITE_IOERR"),
+        _sqlite_storage_error(sqlite3.SQLITE_IOERR_WRITE, "SQLITE_IOERR_WRITE"),
+    ],
+    ids=["efbig", "enospc", "sqlite-full", "sqlite-ioerr", "sqlite-ioerr-write"],
+)
+def test_storage_capacity_and_io_errors_map_to_safe_503(exc: Exception):
+    error = storage_http_error(exc)
+    assert error.status_code == 503
+    assert error.detail == "Persistent storage is unavailable"
+
+
+def test_unclassified_operational_error_has_no_storage_status():
+    exc = sqlite3.OperationalError("database is malformed")
+    assert storage_http_status(exc) is None
+    with pytest.raises(KeyError):
+        storage_http_error(exc)
 
 
 def test_storage_busy_maps_to_503_with_detail():

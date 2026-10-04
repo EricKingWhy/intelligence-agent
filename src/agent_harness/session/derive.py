@@ -66,6 +66,15 @@ logger = logging.getLogger("agent_harness.session.derive")
 #: 合成 dangling ToolMessage 的固定内容（模型可见，引导自主决策）
 DANGLING_TOOL_CONTENT = "工具执行被中断，结果未知"
 
+#: #566：审批门前悬空调用的诚实合成文案（封闭词表，绑定系统实际掌握的事实）。
+#: 执行域顺序（`04 §9.1`）是审批闸门 → 接纳点（Ledger PENDING）→ execute——
+#: 「审批未通过 / 已批准未执行」与 Ledger 无账行组合即可证明工具**从未运行**，
+#: 不能再说"结果未知"夸大不确定性。保守方向不变：无法证明未执行的场合
+#: （执行可能已开始）仍然只说 DANGLING_TOOL_CONTENT。
+DANGLING_NOT_EXECUTED_DENIED = "工具未执行（审批未通过）"
+DANGLING_NOT_EXECUTED_APPROVED = "工具未执行（已批准，但尚未开始执行）"
+DANGLING_NOT_EXECUTED = "工具未执行（尚未开始执行）"
+
 #: 「修改文件」写工具语义（W-31.5 #417）——唯一权威定义。
 #: 消费方：`multiagent/provider.py` 的 changed_files（SubAgentResult 字段，
 #: 只活在 delegate 回传里）与本模块 `derive_modified_file_paths`（PRD §4.6
@@ -161,8 +170,9 @@ def serialize_protected_facts(facts: list[ProtectedFact]) -> str:
 #: 逐字全文进注册表投影会让保护事实注入体单独击穿独立预算（fail-closed 无
 #: 自愈）。上限取 2000 = Pi 序列化截断（TOOL_RESULT_MAX_CHARS）同源、#415
 #: 子代理结论 1500 字符头同家族。fact_id 仍按全文内容寻址（截断只改投影值，
-#: 不改注册表身份，已持久化的 supersedes 引用不断链）；全文逐字活在转录与
-#: 摘要 §1（冻结），source_event_id 即指针。
+#: 不改注册表身份，已持久化的 supersedes 引用不断链）；全文逐字活在转录；
+#: ≤2000 的值经 #556 裁决 C 进摘要 §1（当前生效目标），超长的由本截断标记
+#: 自带 source_event_id 回读指针（摘要 §1 不再承载超长全文）。
 _USER_GOAL_VALUE_MAX_CHARS = 2000
 
 
@@ -653,18 +663,11 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     """Rebuild protected task facts from the immutable event prefix."""
     event_by_seq = {event.seq: event for event in events}
     event_by_id = {event.event_id: event for event in events}
-    superseded_sources = {
-        source.event_id
-        for event in events
-        if event.type == MESSAGE_SUPERSEDED
-        and isinstance(event.data.get("superseded_seq"), int)
-        and not isinstance(event.data.get("superseded_seq"), bool)
-        and (source := event_by_seq.get(event.data["superseded_seq"])) is not None
-        and event.seq > source.seq
-        and source.session_id == event.session_id
-        and source.type in _USER_SOURCE_TYPES
-        and not source.data.get("injected_by")
-    }
+    # supersede 标记的目标收集**并入下方合并遍历**（#614①）：标记是否成立
+    # 取决于"目标与标记之间有没有**未被取消**的活跃用户事件"（替换槽），
+    # 那需要 direct_user_events 先就位。这里只先放取消队列的来源——它们
+    # 无条件算 superseded（来源事件本身被取消，其事实不再受保护）。
+    superseded_sources: set[str] = set()
     cancelled_queue_ids = {
         event.data.get("queue_id")
         for event in events
@@ -736,7 +739,7 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         target = event_by_seq.get(target_seq)
         if (
             target is None
-            or target.type != USER_MESSAGE
+            or target.type not in _USER_SOURCE_TYPES
             or target.data.get("injected_by")
             or event.seq <= target.seq
             or event.session_id != target.session_id
@@ -744,7 +747,17 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
             continue
         replacement_index = bisect_right(direct_user_seqs, target.seq)
         replacement_end = bisect_left(direct_user_seqs, event.seq)
-        if replacement_end > replacement_index:
+        if replacement_end <= replacement_index:
+            # 替换槽空（#614①）：目标与标记之间没有**未被取消**的活跃用户
+            # 事件——这次 supersede 实际没有发生过（替换排队后被取消是
+            # 可达形态：MESSAGE_QUEUED → MESSAGE_SUPERSEDED → QUEUE_CANCELLED）。
+            # 标记作废：目标保持 active。§1 的选取口径本来就是"取消的替换
+            # 不进 sources"（S2 实测 §1 仍取目标），§2 的 status 必须同判，
+            # 否则目标节说"目标仍生效"、保护事实表却把它标成 superseded，
+            # 两节自相矛盾且丢失唯一 active 目标。
+            continue
+        superseded_sources.add(target.event_id)
+        if target.type == USER_MESSAGE:
             user_goal_sources.add(
                 direct_user_events[replacement_end - 1].event_id
             )

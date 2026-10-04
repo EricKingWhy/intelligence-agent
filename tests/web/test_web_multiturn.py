@@ -390,7 +390,13 @@ class TestCrashReconcileGuard:
         )
 
         assert response.status_code == 409
-        assert "UNKNOWN" in response.json()["detail"]
+        # #547：409 detail 统一为结构体——message 点名 UNKNOWN Operation，
+        # pending_decisions 是机器可读的待裁决清单（UI 据此引导裁决）
+        detail = response.json()["detail"]
+        assert "UNKNOWN" in detail["message"]
+        assert any(
+            p["tool_call_id"] == "call-1" for p in detail["pending_decisions"]
+        )
         # 拒绝即零伪造：没有合成 tool/result，也没有假的恢复完成标记
         events = app.state.agent.store.read_events(session_id)
         assert not any(e.type == "tool/result" for e in events)

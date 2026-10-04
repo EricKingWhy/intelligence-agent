@@ -124,6 +124,21 @@ class TestSseEnvelope:
         assert "capability" not in _sse_payload(_event_to_sse_dict(ae, "s1"))
         assert "capability" not in _sse_payload(_session_event_to_sse_dict(se, "s1"))
 
+    def test_live_frame_escapes_surrogates_and_preserves_valid_unicode_bytes(self):
+        from agent_harness.agent import AgentEvent
+        from agent_harness.web.serialization import build_event_payload
+
+        valid = AgentEvent(type="model/completed", seq=1, data={"text": "中文 😀"})
+        expected = json.dumps(
+            build_event_payload(valid, "s1"), ensure_ascii=False,
+        ).encode("utf-8")
+        assert _event_to_sse_dict(valid, "s1")["data"].encode("utf-8") == expected
+
+        malformed = AgentEvent(type="model/completed", seq=2, data={"text": "bad\ud800"})
+        data = _event_to_sse_dict(malformed, "s1")["data"].encode("utf-8")
+        assert b"bad\\ud800" in data
+        assert json.loads(data.decode("utf-8"))["data"]["text"] == "bad\ud800"
+
 
 # ── 端到端：真实 POST /api/sessions 流里每帧带信封 ──
 

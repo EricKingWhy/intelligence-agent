@@ -12,12 +12,12 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `GET /api/sessions/{id}/events` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions` | WorkspaceNameInvalid（含子类 WorkspacePathInvalid）, InvalidDecision |
 | `GET /api/sessions/{id}/stream` | InvalidSessionId, SessionNotFound |
-| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict |
+| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/approve` | InvalidSessionId, SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, InvalidDecision, ApprovalAlreadyResolved |
-| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, RecoveryConflict, SeqConflict |
+| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
-| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict |
+| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict, EventLogCorruptError（#565 追加） |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
 | `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary |
 | `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
@@ -100,6 +100,9 @@ Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上�
 
 from __future__ import annotations
 
+import errno
+import sqlite3
+
 from fastapi import HTTPException
 
 from agent_harness.agent.budget import (
@@ -114,6 +117,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
@@ -122,6 +126,7 @@ from agent_harness.session.errors import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionCwdUnavailable,
     SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
@@ -159,6 +164,12 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     ApprovalRequestMissing: 404,
     QueueItemNotFound: 404,
     WorkspaceNotFound: 404,
+    # #266 cwd 守卫的专属子型（P3 跟进批）：「会话 cwd 没了/不是目录」从父类的
+    # 「workspace_id 未注册」语义里拆出（errors.py 类 docstring 与本文件 #266 注释
+    # 曾对同一类型描述矛盾）。HTTP 层同一 404（detail 文案区分），handler 的
+    # `except WorkspaceNotFound` 天然覆盖（同 WorkspacePathInvalid 先例）；本表是
+    # 精确类型索引，子类必须自己登记。
+    SessionCwdUnavailable: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立——expected_version
@@ -182,12 +193,17 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 重排目标不在该项目账本里）。是"请求合法但状态不允许"，与 422 的名字形态非法分开。
     WorkspaceMoveInvalid: 409,
     # #266：durable `session/started.cwd` 与沙箱映射/进程内 cache 指向不同目录——
-    # 续聊拒绝静默选边（也不覆盖映射）。与 404 的 `WorkspaceNotFound` 刻意分开：
-    # 那条是"目录没了"，这条是两侧目录可能都在、**归属事实**互相矛盾。
+    # 续聊拒绝静默选边（也不覆盖映射）。与 404 的 `SessionCwdUnavailable`
+    # （`WorkspaceNotFound` 子型）刻意分开：那条是"目录没了"，这条是两侧目录
+    # 可能都在、**归属事实**互相矛盾。
     WorkspaceBindingConflict: 409,
     # BUG-011：seq 冲突是「资源当前状态与请求冲突」，**不是**「资源不存在」——
     # 旧行为把它翻成 404（`send_message` 的 `Send failed: 404`），掩盖了日志损坏。
     SeqConflict: 409,
+    # #565：events.jsonl 完整性闸门（完整坏行 / seq 断层 / seq 重复）——恢复入口
+    # 拒绝继续。与 SeqConflict 同为 409 但**不可重试**：重读同一文件无用，需按
+    # 脱敏定位记录人工修复；文案里已带该指引。
+    EventLogCorruptError: 409,
 }
 
 #: workspace 包 / 文件系统异常 → HTTP status 的第二张表（WS-4 / #154）。
@@ -316,29 +332,55 @@ def memory_http_error(exc: Exception) -> HTTPException:
     )
 
 
-#: storage 共享库写锁词汇 → HTTP status 的第四张表（#515）。
+#: storage 共享库错误 → HTTP status 的第四张表（#515 / #569）。
 #:
 #: 为什么单独一张：`StorageBusyError` 是 storage 适配层的词汇（三个 Store 共享
 #: 同一 harness.db 的写锁竞争在重试预算内仍未缓解），既不是 `SessionServiceError`
 #: 子类，也不是 workspace / memory 词汇——一个包一张表，键域各自自洽。
 #:
-#: **刻意只登记这一项**：非锁 `OperationalError`（坏路径等）继续 500——那是真正的
-#: 意外故障；`IntegrityError` 等约束冲突有自己的语义（#519 的域）。重试耗尽是唯一
-#: 「诚实状态码不是 500」的 storage 异常：它是暂时性故障，客户端稍后重试大概率
-#: 成功，500 会把它伪装成服务端 bug。
+#: 错误码族在 `storage_http_status` 中按 errno / SQLite primary code 精确识别；其它
+#: `OperationalError`（坏路径等）仍是 500。此映射只负责 HTTP 翻译，不扩大 #515
+#: 的锁重试，也不改变存储提交语义。
 _STORAGE_ERROR_STATUS: dict[type[Exception], int] = {
     StorageBusyError: 503,
 }
 
 
-def storage_http_error(exc: Exception) -> HTTPException:
-    """storage 共享库写锁异常 → `HTTPException`；状态码取自 `_STORAGE_ERROR_STATUS`。
+def storage_http_status(exc: Exception) -> int | None:
+    """只识别可归因的存储空间 / I/O 错误；未知 OperationalError 保持 500。"""
+    status = _STORAGE_ERROR_STATUS.get(type(exc))
+    if status is not None:
+        return status
 
-    与另外三张表同款：直接索引（不 `.get` 回退），未登记类型是编码错误，由
-    `tests/web/test_domain_error_mapping.py` 的覆盖测试先红挡住。
+    if isinstance(exc, OSError) and exc.errno in {errno.EFBIG, errno.ENOSPC}:
+        return 503
+
+    if isinstance(exc, sqlite3.Error):
+        code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(code, int) and (code & 0xFF) in {
+            sqlite3.SQLITE_FULL,
+            sqlite3.SQLITE_IOERR,
+        }:
+            return 503
+
+    return None
+
+
+def storage_http_error(exc: Exception) -> HTTPException:
+    """已识别的 storage 错误 → `HTTPException`；未知类型仍是编码错误。
+
+    容量 / I/O 异常统一用固定 detail，避免把 OS 路径等内部信息返回给 API 调用者。
     """
+    status = storage_http_status(exc)
+    if status is None:
+        raise KeyError(type(exc))
     return HTTPException(
-        status_code=_STORAGE_ERROR_STATUS[type(exc)], detail=str(exc)
+        status_code=status,
+        detail=(
+            str(exc)
+            if type(exc) is StorageBusyError
+            else "Persistent storage is unavailable"
+        ),
     )
 
 
@@ -367,12 +409,23 @@ def model_http_error(exc: Exception) -> HTTPException:
 def http_error(exc: SessionServiceError) -> HTTPException:
     """领域异常 → `HTTPException`；状态码取自 `_DOMAIN_ERROR_STATUS` 单一映射源。
 
-    `detail` 仍是 `str(exc)`——各端点的错误文案契约不变。调用方保持
+    `detail` 默认仍是 `str(exc)`——各端点的错误文案契约不变。调用方保持
     `raise http_error(e) from e` 以保留异常链。
+
+    **#547 追加**：异常携带 `pending_decisions`（机器可读的待裁决 Operation
+    清单）时，`detail` 升级为 `{"message", "pending_decisions"}` 结构——目前只有
+    `POST /recover` 的裁决预检分支（`RecoveryConflict`）构造这种异常；其余
+    异常 detail 类型不变，既有客户端不受影响。
 
     直接索引（不 `.get` 回退）：未登记类型是**编码错误**，且已被
     `test_status_map_covers_every_domain_exception` 挡住；此处再兜一层只会掩盖它。
     """
+    pending = getattr(exc, "pending_decisions", None)
+    if pending:
+        return HTTPException(
+            status_code=_DOMAIN_ERROR_STATUS[type(exc)],
+            detail={"message": str(exc), "pending_decisions": pending},
+        )
     return HTTPException(
         status_code=_DOMAIN_ERROR_STATUS[type(exc)], detail=str(exc)
     )

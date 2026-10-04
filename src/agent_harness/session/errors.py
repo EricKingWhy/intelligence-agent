@@ -64,7 +64,40 @@ class InvalidDecision(SessionServiceError):
 
 
 class RecoveryConflict(SessionServiceError):
-    """恢复需要人工裁决（UNKNOWN 工具状态）。"""
+    """恢复需要人工裁决（UNKNOWN 工具状态）。
+
+    ``pending_decisions``（#547）是可选的机器可读载荷：HTTP 层把它附进 409
+    响应体（``detail`` 升级为 ``{"message", "pending_decisions"}``），UI 据此
+    渲染裁决表单。只在 recover 的裁决预检分支携带；其余构造点（resume/messages
+    闸门、协调器 ``RecoveryError`` 转译）保持纯文本 ``detail`` 不变。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        pending_decisions: list[dict] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.pending_decisions = pending_decisions
+
+
+class EventLogCorruptError(SessionServiceError):
+    """events.jsonl 存在无法安全跳过的损坏，恢复入口拒绝继续（#565）。
+
+    覆盖三类（audit 增强块的判别）：
+
+    - **完整坏行**：换行结尾的坏 JSON / 非事件字典 / 非法 seq / 坏字段 / 无效
+      UTF-8——含坏尾行；换行说明写入已完成，内容坏不是"还没写完"；
+    - **seq 断层**：持久化 seq 连续是写入侧不变量（全部经 ``Session.append``
+      max+1），文件里的断层只可能来自坏行跳过或整行丢失；
+    - **seq 重复**：同 SeqConflict 的读时冲突面，恢复入口先拦下。
+
+    与 `SeqConflict`（写时冲突可重试）不同，本错误**不可重试**：重读同一文件
+    无用，需要人工按定位记录（行号 / 字节偏移 / sha256，由 store 的 WARNING
+    日志与报告携带，不含行内容）核对原字节后修复文件。409 而非 500：不是
+    服务端 bug，是 durable 资源当前状态与"继续恢复"这个请求冲突。
+    """
 
 
 class SeqConflict(SessionServiceError):
@@ -105,6 +138,25 @@ class WorkspaceNotFound(SessionServiceError):
     `SessionService.list_sessions` 把 workspace 层的 `UnknownWorkspace` 翻成本异常
     （同一套"下层异常翻译成本层词汇"的既有做法，见 `ForkBoundaryError` →
     `InvalidForkBoundary`）。
+
+    「会话 cwd 没了/不是目录」形态已拆出子型 `SessionCwdUnavailable`（见下）——
+    本类型只承载「未注册」语义。
+    """
+
+
+class SessionCwdUnavailable(WorkspaceNotFound):
+    """会话的 durable cwd 不存在或不是目录（#266 守卫；#615① / #624-1 同形）。
+
+    拆分动因：父类一个类型曾同时承载「workspace_id 未注册」（`projects.py` /
+    `list_sessions`）与「cwd 没了」（`resume_and_launch` 守卫）两种语义——本文件
+    父类 docstring 与 `web/domain_errors.py` 的 #266 注释（"那条是'目录没了'"）
+    对同一类型的描述互相矛盾。沿用仓内 `WorkspacePathInvalid(WorkspaceNameInvalid)`
+    先例：继承父类 ⇒ HTTP 层同一 404 语义（detail 文案区分）、handler 的
+    `except WorkspaceNotFound` 天然覆盖（app.py 各元组与 `on_run_terminal` 零改动）。
+    **不能**只靠父类——领域错误表是精确类型索引，子类必须自己登记
+    （`web/domain_errors.py`）。成熟产品同型：stdlib `NotADirectoryError`→`OSError`、
+    httpx `ConnectError`→…→`HTTPError`、sqlite3 `IntegrityError`→`DatabaseError`
+    ——父类 catch 覆盖 + 子类携精确语义。
     """
 
 

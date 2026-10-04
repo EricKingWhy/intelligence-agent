@@ -150,6 +150,29 @@ class WorkspaceRegistry:
         """检查 session 是否有映射记录。"""
         return self._mapping_path(session_id).exists()
 
+    def default_workspace_root(self, session_id: str) -> Path:
+        """本注册表为 session 拼出的**默认形态**工作目录：`<root>/workspaces/<sid>`。
+
+        这条路径**就是**默认形态的定义（`discard_session_artifacts` 同源的构造
+        规则，#172）：只有 harness 会往里写，用户自己的目录永不在此前缀下。
+        fork（#555）用它判定 staging+rename 发布是否适用、以及失败补偿可回收
+        什么；返回的是**路径事实**，不读映射、不建目录。
+        """
+        return self._workspaces_dir / session_id
+
+    def fork_staging_root(self) -> Path:
+        """fork 工作区拷贝的暂存根：`<root>/.fork-tmp`（#555）。
+
+        放注册表根直下（`workspaces/` 的**兄弟**）而不是里面：命名 workspace
+        的合法名字是任意单段目录名（`_validate_workspace_name` 只拒路径形态，
+        `.fork-tmp` 本身是合法名字）——暂存根若在 `workspaces/` 内，就存在与
+        用户命名 workspace 撞名、扫描回收误删用户目录的形态风险（#172 同类）。
+        registry root 整层由 harness 自建自有（sessions/、workspaces/、
+        harness.db 同级），无用户内容，可整体清空。目录名 `<child_id>-<rand>`，
+        fork 补偿按 child 前缀回收。
+        """
+        return self._root / ".fork-tmp"
+
     def recorded_workspace_roots(self, session_id: str) -> list[str]:
         """本注册表为该 session 登记的**全部**工作目录（持久映射 + 进程内 cache）。
 

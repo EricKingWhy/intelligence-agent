@@ -32,10 +32,14 @@ import {
   ArtifactContentError,
   getArtifactContent,
   postApproval,
+  readErrorDetail,
+  recoverSession,
   renameProject,
   reorderProjectSession,
   resumeRunLimitsBody,
   resumeSession,
+  RecoverError,
+  ResumeRejectionError,
   sendMessage,
   startSession,
   createEmptySession,
@@ -1359,5 +1363,87 @@ describe('resumeSession — 同 run 恢复的 ceiling 形状（`#313` / `#314`�
     // 工具就抬哪个，未点名的保留——所以这里只带那一个键，剩下的由后端沿用。
     expect(body.budget.run).toEqual({ tool_call_limits: { glob: 5 } });
     expect(body.budget.run).not.toHaveProperty('max_agent_turns_total');
+  });
+});
+
+describe('恢复链路 409 detail 结构化（#596 / 后端 #547：{message, pending_decisions}）', () => {
+  /** 票面「形状对照」的变更后载荷（键与 state 取值域为后端冻结契约）。 */
+  const STRUCTURED_409 = {
+    detail: {
+      message:
+        '存在需要人工裁决的 UNKNOWN Operation（write_file(tool_call_id=call_1)）：先 POST /api/sessions/{id}/recover 携带 decisions=[...] 结清',
+      pending_decisions: [
+        { tool_call_id: 'call_1', tool_name: 'write_file', state: 'UNKNOWN' },
+        { tool_call_id: 'call_2', tool_name: 'bash', state: 'NEED_RECONCILE' },
+      ],
+    },
+  };
+
+  it('recover 路径：RecoverError.message 取结构化 message（不得 [object Object]），pendingDecisions 随错误透出', async () => {
+    captureFetch(409, STRUCTURED_409);
+    const err = await recoverSession('s1').then(
+      () => { throw new Error('should have thrown'); },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RecoverError);
+    const re = err as RecoverError;
+    expect(re.status).toBe(409);
+    expect(re.message).toContain('存在需要人工裁决的 UNKNOWN Operation');
+    expect(re.message).not.toContain('[object Object]');
+    expect(re.pendingDecisions).toEqual([
+      { tool_call_id: 'call_1', tool_name: 'write_file', state: 'UNKNOWN' },
+      { tool_call_id: 'call_2', tool_name: 'bash', state: 'NEED_RECONCILE' },
+    ]);
+  });
+
+  it('recover 路径形状防御：任一条目畸形 ⇒ 整组丢弃（undefined），message 照常展示', async () => {
+    captureFetch(409, {
+      detail: {
+        message: '存在需要人工裁决的 UNKNOWN Operation',
+        pending_decisions: [{ tool_call_id: 'call_1', tool_name: 'write_file', state: 'WEIRD' }],
+      },
+    });
+    const err = (await recoverSession('s1').then(
+      () => { throw new Error('should have thrown'); },
+      (e: unknown) => e,
+    )) as RecoverError;
+    expect(err).toBeInstanceOf(RecoverError);
+    expect(err.message).toBe('存在需要人工裁决的 UNKNOWN Operation');
+    expect(err.pendingDecisions).toBeUndefined();
+  });
+
+  it('resume 路径：ResumeRejectionError 同款透出（三端点同走裁决预检）', async () => {
+    captureFetch(409, STRUCTURED_409);
+    const err = await resumeSession('s1', {
+      run_id: 'run-1',
+      resume_basis: 'budget_increase',
+      budget: { expected_version: 3, run: {} },
+    }).then(
+      () => { throw new Error('should have thrown'); },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ResumeRejectionError);
+    const rre = err as ResumeRejectionError;
+    expect(rre.status).toBe(409);
+    expect(rre.message).toContain('存在需要人工裁决的 UNKNOWN Operation');
+    expect(rre.pendingDecisions).toHaveLength(2);
+  });
+
+  it('messages 路径共享缝：readErrorDetail 从结构化 detail 取 message（settle 只认这一个串）', async () => {
+    const res = new Response(JSON.stringify(STRUCTURED_409), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    });
+    await expect(readErrorDetail(res)).resolves.toContain('存在需要人工裁决的 UNKNOWN Operation');
+  });
+
+  it('回归下限：纯字符串 detail（其余 409：InvalidSessionId 等）行为逐字不变', async () => {
+    captureFetch(409, { detail: '会话 id 非法' });
+    const err = (await recoverSession('s1').then(
+      () => { throw new Error('should have thrown'); },
+      (e: unknown) => e,
+    )) as RecoverError;
+    expect(err.message).toBe('会话 id 非法');
+    expect(err.pendingDecisions).toBeUndefined();
   });
 });

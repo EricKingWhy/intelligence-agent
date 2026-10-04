@@ -47,6 +47,16 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 
 （DeepSeek Harness 的核查链接已在 Reuse Matrix §3 / §7，此处不重复。）
 
+### Coding Agent 工具链 / 执行期检查
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| [ZCode Hooks 官方文档](https://zcode.z.ai/en/docs/hooks) | ZCode CLI 事件钩子规范 | `PreToolUse` 拒绝、`PostToolUse` 工具结果、`Stop`、Hook 启用和配置作用域；确认当前版本的项目配置是否执行 |
+| [腾讯云 CodeBuddy Code Hooks](https://cloud.tencent.com/document/product/1831/137030) | WorkBuddy 随附 CodeBuddy Code CLI 官方 Hook 规范；文档标注 Beta | `PreToolUse`／`PostToolUse`／`Stop`、转录路径、权限行为、配置作用域、错误与超时；区分 CLI 能力与 WorkBuddy 桌面实际接线 |
+| [CodeBuddy CLI 设置](https://www.workbuddy.ai/docs/cli/settings)；[WorkBuddy v2.48.0 配置分离说明](https://www.workbuddy.ai/docs/cli/release-notes/v2.48.0) | CLI 分层配置与 WorkBuddy 独立 `.workbuddy/` 路径的一手依据 | CLI 通用 `.codebuddy/` 配置和 WorkBuddy 桌面配置不能互相推定；核实具体应用的运行器与 Hook 接线 |
+
+以上是一手工具文档，不表示本项目已启用或验收。调研结论与边界见 `docs/agents/agent-tool-read-gates-research-2026-10.md`。
+
 ### Memory
 
 | 来源 | 是什么 | 看什么 |
@@ -58,6 +68,15 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 | AWS Prescriptive Guidance | 官方架构模式文档 | [Transactional outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)：双写原子性、重复投递与幂等消费者 |
 | Milvus 官方文档 | 向量索引适配器行为依据 | [Upsert Entities](https://milvus.io/docs/upsert-entities.md) 的主键插入/更新语义；[Consistency](https://milvus.io/docs/consistency.md) 的可见性级别 |
 | SQLite 官方文档 | 权威本地存储与备份语义 | [Online Backup API](https://www.sqlite.org/backup.html)：一致快照及在线备份边界 |
+
+### WebSocket / ASGI transport
+
+| Source | What it is | What to check |
+|---|---|---|
+| [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html) | IETF WebSocket standard | §§5.2/5.4 payload length and fragmentation; §7.4.1 close code 1009; §10.4 resource limits. |
+| [ASGI HTTP+WebSocket specification](https://asgi.readthedocs.io/en/latest/specs/www.html) | Application/server protocol | `websocket.receive` delivers a text or binary message to the app; the ASGI app boundary does not expose wire-frame fragments. |
+| [Uvicorn settings](https://www.uvicorn.org/settings/) | ASGI server configuration | `--ws-max-size` and `--ws` backend applicability; compare transport-level bounds with app-level checks. |
+| [websockets memory guide](https://websockets.readthedocs.io/en/stable/topics/memory.html) | WebSocket implementation behavior | `max_size` / `max_queue` bound queued message memory; implementation-specific message-size handling. |
 
 ## 3. 怎么用（与流程的挂钩）
 

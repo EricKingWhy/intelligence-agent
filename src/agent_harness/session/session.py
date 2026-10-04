@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 from agent_harness.session.cwd import cwd_event_data
 from agent_harness.session.derive import (
+    DANGLING_NOT_EXECUTED_DENIED,
     DANGLING_TOOL_CONTENT,
     build_protected_fact_data,
     derive_messages,
@@ -265,15 +266,31 @@ class Session:
         """
         session = cls.load(store, session_id, workspace_registry=workspace_registry)
 
-        # 修复 dangling tool_call：为每个未解决的 tool_call 追加合成 tool/result
+        # 修复 dangling tool_call：为每个未解决的 tool_call 追加合成 tool/result。
+        # #566：resume 没有 Ledger 读数，只有「审批无决议」这一半可以从事件流证明
+        # （审批闸门在接纳点之前，无决议 ⇒ 接纳点未到 ⇒ 未执行）；其余形态
+        # （已批准 / 无审批请求）无法排除"执行已开始、结果丢失"，保留保守占位。
+        # 方法内导入：session.approval → tooling 包 → executor → session 包，
+        # 模块顶层会成环（与 service.py 的 fork 延迟导入同一纪律）。
+        from agent_harness.session.approval import (
+            ApprovalOutcome,
+            approval_outcome_for_call,
+        )
+
         dangling_ids = detect_dangling(session._events)
         for tc_id in dangling_ids:
+            if approval_outcome_for_call(session._events, tc_id) is (
+                ApprovalOutcome.UNRESOLVED
+            ):
+                content = DANGLING_NOT_EXECUTED_DENIED
+            else:
+                content = DANGLING_TOOL_CONTENT
             logger.warning(
                 "Resume 修复 dangling tool_call_id=%s，追加合成 tool/result", tc_id
             )
             session.append(
                 TOOL_RESULT,
-                {"tool_call_id": tc_id, "content": DANGLING_TOOL_CONTENT},
+                {"tool_call_id": tc_id, "content": content},
                 source_event_ids=[tc_id],
                 _mark_dangling=True,
             )
@@ -647,12 +664,14 @@ class Session:
         *,
         status: str,
         final_text: str = "",
-        usage_total: dict | None = None,
+        usage_total: dict[str, int | None] | None = None,
         cost_usd: Decimal | str | None = None,
         trace_id: str | None = None,
         trace_url: str | None = None,
         reason: str | None = None,
         message: str | None = None,
+        primary_error: str | None = None,
+        fallback_error: str | None = None,
     ) -> SessionEvent:
         """append run/completed 或 run/failed，返回该事件（Phase 9 让流式层镜像它）。
 
@@ -688,6 +707,13 @@ class Session:
             data["reason"] = reason
         if status != "completed" and message:
             data["message"] = message
+        # #551 M10-8：同一决策里 primary 与 fallback 都失败时保留两级错误**类型名**
+        # （首因不再只存在于 model/fallback 事件里）。只带类型名、不带正文——
+        # 与 FallbackTransition.reason 同一脱敏边界。仅在给值时才落键。
+        if status != "completed" and primary_error:
+            data["primary_error"] = primary_error
+        if status != "completed" and fallback_error:
+            data["fallback_error"] = fallback_error
         return self.append(
             event_type,
             data,

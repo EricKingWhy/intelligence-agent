@@ -485,6 +485,13 @@ class InProcessSubagentProvider:
             # `#318`：child 消费**同一份** session 树账（根 / 子 / 孙一个 owner）；
             # None（未激活）= 旧行为。
             session_budget=self.session_budget_port(),
+            # #608（ADR-0048 D8 环境半）：child 证据端口的环境格锚 = 父 cwd 锚——
+            # 稳态下与下面子 SESSION_STARTED 的 cwd 字段同一个值（缓存读，同步、无额外
+            # 挂起点），恢复侧读回同一事件字段 ⇒ 暂停/恢复两侧同源。
+            # 读**失败**不缓存：本值与 cwd 各取一次，恰在两次之间失败则本值缺席而 cwd
+            # 仍落在会话上——两侧缺口方向都是 fail-closed（环境格缺席 ⇒ 不做变更判定）。
+            # 父无锚 ⇒ None ⇒ 环境格如实缺席（fail-closed）。
+            workspace=self._parent_cwd(),
         )
         # child workspace = 父的同一 canonical owner（spec §9：coding 的改动
         # review 直接可见）；先 durable bind，保证 child Session 一旦落盘，恢复

@@ -186,6 +186,37 @@ def test_limit_truncates_and_returns_the_sorted_prefix(tmp_path: Path) -> None:
     assert body["truncated"] is True
 
 
+def test_progress_internal_dir_is_not_a_workspace_listing_item(tmp_path: Path) -> None:
+    """W-05 进度文件（`agent-progress/<sid>/`）是 harness 内部投影，不入浏览面。
+
+    会话真实创建后 writer 就会在 workspace 里落 `agent-progress/<sid>/progress.md`
+    （首条 task 定义即触发）——列表若把它当用户工作产物回显，既是噪音也诱导经
+    Web 编辑出第二真相。文件本身仍在磁盘上（git 可见、模型可读），这里只钉
+    **浏览口径**：不进清单、不计 total、pattern 也捞不出。
+    """
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root = _root(client, sid)
+    _seed(root, "inside.txt", "in\n")
+    progress_dir = root / "agent-progress" / sid
+    assert (progress_dir / "progress.md").exists(), "前提：writer 已在工作区落进度文件"
+    _seed(root, "agent-progress/other-sid/progress.md", "stale\n")
+
+    resp = client.get(_url(sid, "/files"))
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["files"] == ["inside.txt"]
+    assert body["total"] == 1
+
+    resp = client.get(_url(sid, "/files"), params={"pattern": "agent-progress/**"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["files"] == []
+
+    assert (progress_dir / "progress.md").read_text(encoding="utf-8"), \
+        "过滤只作用于浏览口径：文件本身不被移动或删除"
+
+
 def test_pattern_cannot_reach_outside_the_workspace(tmp_path: Path) -> None:
     """`pattern` 只是过滤器：穿越型模式也变不出 workspace 之外的文件。"""
     client = _client(tmp_path)

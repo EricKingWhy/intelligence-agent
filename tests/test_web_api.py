@@ -30,9 +30,11 @@ from agent_harness.config import Settings
 from agent_harness.session import (
     RUN_STARTED,
     SESSION_STARTED,
+    TOOL_CALL,
     USER_MESSAGE,
     Session,
 )
+from agent_harness.session.event import TASK_DEFINED
 from agent_harness.storage.checkpoint import (
     note_checkpoint_save_failure,
     reset_checkpoint_save_failure_count,
@@ -47,7 +49,7 @@ def app(tmp_path):
 
     model_api_key 提供占位值：装配走真实 factory（批次 A），ModelConfig
     需要 key 才能构造（模型调用本身由测试替换替身）。"""
-    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     return create_app(settings, enable_cors=False)
 
 
@@ -96,7 +98,7 @@ def test_list_sessions_empty(client):
 
 def test_list_sessions_returns_existing(tmp_path):
     """先往 store 写一个 session，列表应返回。"""
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
     session = Session.start(store)
@@ -113,7 +115,7 @@ def test_list_sessions_returns_existing(tmp_path):
 def test_list_sessions_carries_first_user_message(tmp_path):
     """Gap 3 (P0)：列表 payload 每行带首条 user/message content（截断 128），
     前端零额外请求渲染标题；无 user message 返回 null。"""
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
     long_text = "帮我写一个 Python 函数" * 30  # 330 字符，应被截断到 128
@@ -137,7 +139,7 @@ def test_list_sessions_carries_terminal_trace_id(tmp_path):
 
     run 在途（末事件非终结）时为 null——前端据此显示「未追踪」，不伪造。
     """
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
 
@@ -164,7 +166,7 @@ def test_list_sessions_carries_terminal_trace_url(tmp_path):
     本用例断言**值**（不只看键存在）：Pydantic 的默认值会让键恒在，所以只有
     「有终结 trace 的行拿到真实 URL」才能抓住漏映射。
     """
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
 
@@ -203,7 +205,7 @@ def test_get_events_404(client):
 
 
 def test_get_events_ok(tmp_path):
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
     session = Session.start(store)
@@ -269,7 +271,7 @@ def _assert_rejection_left_no_trace(app: Any) -> None:
 
 def test_create_session_rejects_absolute_workspace_path(tmp_path):
     """绝对路径（workspaces_root 外 / 盘符路径）→ 422，且任何位置都不建目录。"""
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
     outside_abs = str(tmp_path / "outside-abs")  # workspace_dir 内、workspaces_root 外
@@ -325,7 +327,7 @@ def test_create_session_rejects_empty_task(tmp_path):
     不启动 run"），但**空串/空白语义不变**——显式传了 task 就必须给出内容，
     `min_length=1` 校验保留；launch=true（默认）时缺 task 也在 handler 层 422
     （tests/session/test_launch_false.py 锁新契约）。"""
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
     resp = client.post("/api/sessions", json={"task": ""})
@@ -336,7 +338,7 @@ def test_create_session_rejects_empty_task(tmp_path):
 def test_create_session_rejects_missing_task_on_launch(tmp_path):
     """#204：launch=true（默认）时缺 task → 422（既有"task 必填"契约不变，
     只是校验点从 pydantic min_length 移到 handler 的互斥分支），不留落盘痕迹。"""
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
     resp = client.post("/api/sessions", json={})
@@ -356,7 +358,7 @@ def test_create_session_rejects_invalid_local_fuse(tmp_path):
     `tests/web/test_budget_local_fuse_api.py`；退役 alias `max_steps` 的未知字段
     422 也在那个文件（#320：`extra="forbid"`）。
     """
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
     for turns in (0, 1000):
@@ -381,7 +383,7 @@ async def test_shutdown_closes_in_flight_wiring_exactly_once(tmp_path, monkeypat
     """shutdown 与在途 get_wiring 竞争：在途调用 RuntimeError，wiring 仍被关闭。"""
     import agent_harness.web.app as web_app
 
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     state = web_app.AppState(settings)
 
     close_calls: list[str] = []
@@ -432,7 +434,7 @@ async def test_get_wiring_after_shutdown_raises(tmp_path):
     """直接用例：shutdown 之后再 get_wiring → RuntimeError（绝不新装配）。"""
     from agent_harness.web.app import AppState
 
-    state = AppState(Settings(workspace_dir=str(tmp_path)))
+    state = AppState(Settings(_env_file=None, workspace_dir=str(tmp_path)))
     await state.shutdown()
     with pytest.raises(RuntimeError, match="AppState is shut down"):
         await state.get_wiring()
@@ -447,7 +449,7 @@ async def test_get_wiring_after_shutdown_raises(tmp_path):
 
 def test_read_endpoints_with_multi_event_session(tmp_path):
     """回归锚：多事件 session 下两个读端点仍 200 且响应形状不变。"""
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
     session = Session.start(store)
@@ -470,7 +472,7 @@ def test_read_endpoints_offload_store_reads_off_event_loop(tmp_path, monkeypatch
     RuntimeError（没有 running loop）；若在事件循环线程内联调用，它会成功——
     以此区分「卸载了」和「没卸载」。
     """
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     store = app.state.agent.store
     session = Session.start(store)
@@ -624,7 +626,7 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
             finally:
                 self.cancelled.set()
 
-    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
 
     scope = {
@@ -665,10 +667,11 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
 
     # 断言 4（不变量 #22）：断连/取消不破坏 Session 一致性——已落盘的事实
     # 完整可读、可重建，收尾路径不得增删改持久化事件。
-    # 2 条 = Session.start 的 session/started 初始事实 + stub 落盘的 run/started。
+    # 3 条 = Session.start 的 session/started + task/defined（W-07 #351：创建即
+    # 定义原始目标）+ stub 落盘的 run/started。
     events = app.state.agent.store.read_events(hanging.persisted_session_id)
-    assert len(events) == 2, f"收尾后 session 事实应恰好 2 条，实际 {len(events)}"
-    assert [e.type for e in events] == [SESSION_STARTED, RUN_STARTED]
+    assert len(events) == 3, f"收尾后 session 事实应恰好 3 条，实际 {len(events)}"
+    assert [e.type for e in events] == [SESSION_STARTED, TASK_DEFINED, RUN_STARTED]
 
 
 # ── session_id 路径穿越防御（Round 7 安全加固）──
@@ -682,7 +685,7 @@ def test_get_events_rejects_path_traversal(tmp_path):
     替换基路径，形成任意 events.jsonl 读取 oracle。与 workspace 校验
     （_validate_workspace_name）同一安全边界，session_id 同样是名字不是路径。
     """
-    settings = Settings(workspace_dir=str(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
     app = create_app(settings, enable_cors=False)
     client = TestClient(app)
     # 注：裸 ".." / "." 会被 httpx 客户端在 URL 归一化阶段消解、到不了 app；
@@ -788,8 +791,9 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
     repaired = [e for e in events if e["type"] == "tool/result"
                 and e["data"].get("tool_call_id") == "call-x"]
     assert repaired, "dangling tool_call 未被合成结果"
-    from agent_harness.session import DANGLING_TOOL_CONTENT
-    assert repaired[0]["data"]["content"] == DANGLING_TOOL_CONTENT
+    # #566：无账（接纳点未到）+ 无审批 → 「未执行（尚未开始执行）」，不再谎称「结果未知」
+    from agent_harness.session.derive import DANGLING_NOT_EXECUTED
+    assert repaired[0]["data"]["content"] == DANGLING_NOT_EXECUTED
 
     # 幂等：再次 recover 不再新增合成
     resp2 = client.post(f"/api/sessions/{session.session_id}/recover")
@@ -797,6 +801,193 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
 
     # 未知 session → 404
     assert client.post("/api/sessions/nonexistent-id-123/recover").status_code == 404
+
+
+# ── #547：POST /recover 的用户裁决合同（方向 1，用户拍板 2026-10-03）──────
+
+
+async def _seed_reconcile_window(state, call_ids: list[str]):
+    """制造「执行中 kill」的持久现场：tool/call 悬空 + Ledger 行 UNKNOWN。
+
+    状态机两步链（#30）：PENDING → RUNNING → UNKNOWN，不许跳步直达。
+    """
+    from agent_harness.storage import Operation, OperationState
+
+    ledger = state.stores.operation_ledger
+    await ledger.initialize()
+    session = Session.start(state.store)
+    run_id, _ = session.begin_run()
+    for call_id in call_ids:
+        session.append(
+            TOOL_CALL,
+            {"tool_call_id": call_id, "tool_name": "bash", "args": {}},
+            run_id=run_id,
+        )
+        await ledger.create(
+            Operation(
+                tool_call_id=call_id,
+                session_id=session.session_id,
+                run_id=run_id,
+                agent_id=None,
+                tool_name="bash",
+                args_identity="{}",
+                state=OperationState.PENDING,
+                started_at="2026-10-03T00:00:00Z",
+            )
+        )
+        await ledger.update_state(session.session_id, call_id, OperationState.RUNNING)
+        await ledger.update_state(session.session_id, call_id, OperationState.UNKNOWN)
+    return session
+
+
+def test_recover_without_decisions_returns_machine_readable_409(client):
+    """UNKNOWN 行 + 无裁决 → 409 detail 携带机器可读 pending_decisions 清单。"""
+    import asyncio
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-409"]))
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    pending = detail["pending_decisions"]
+    assert [p["tool_call_id"] for p in pending] == ["call-409"]
+    assert pending[0]["tool_name"] == "bash"
+    assert pending[0]["state"] == "UNKNOWN"
+    assert "CONFIRM_SUCCESS" in detail["message"], "409 文案必须指引四裁决合同"
+
+
+def test_recover_with_decision_settles_operation_and_resumes(client):
+    """主链路：CONFIRM_SUCCESS → 行进 SUCCEEDED + operation/reconciled 落盘，
+    幂等二次恢复，resume 闸门重开（无未结清账）。"""
+    import asyncio
+
+    from agent_harness.storage import OperationState
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-ok"]))
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-ok", "verdict": "CONFIRM_SUCCESS"}]},
+    )
+    assert resp.status_code == 200, resp.json()
+    events = resp.json()
+    assert any(e["type"] == "session/resumed" for e in events)
+    reconciled = [e for e in events if e["type"] == "operation/reconciled"]
+    assert reconciled, "裁决必须落 operation/reconciled 审计事件"
+    assert reconciled[0]["data"]["verdict"] == "CONFIRM_SUCCESS"
+    results = [
+        e for e in events
+        if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-ok"
+    ]
+    assert results and "人工 reconcile" in results[0]["data"]["content"]
+
+    async def _row_state():
+        op = await state.stores.operation_ledger.get(session.session_id, "call-ok")
+        return op.state
+
+    assert asyncio.run(_row_state()) is OperationState.SUCCEEDED
+    # 幂等：结清后再次 recover 200（无 pending）
+    assert client.post(f"/api/sessions/{session.session_id}/recover").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "verdict,expected_state,needle",
+    [
+        ("CONFIRM_FAILURE", "FAILED", "确认失败"),
+        ("RETRY", "CANCELLED", "重新发起"),
+        ("ABANDON", "CANCELLED", "不再重跑"),
+    ],
+)
+def test_recover_decision_matrix(client, verdict, expected_state, needle):
+    """四裁决 → Ledger 状态映射（07 §6/§7，复用 ReconcileVerdict，不造第二套）。"""
+    import asyncio
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-m"]))
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-m", "verdict": verdict}]},
+    )
+    assert resp.status_code == 200, resp.json()
+
+    async def _row():
+        return await state.stores.operation_ledger.get(session.session_id, "call-m")
+
+    op = asyncio.run(_row())
+    assert op.state.value == expected_state
+    if needle is not None:
+        results = [
+            e for e in resp.json()
+            if e["type"] == "tool/result" and e["data"].get("tool_call_id") == "call-m"
+        ]
+        assert results and needle in results[0]["data"]["content"]
+
+
+def test_recover_decisions_reject_malformed_requests(client):
+    """预检全部在任何写入之前：未知目标 / 非法裁决值 / 重复提交 → 422，零写入。"""
+    import asyncio
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-x"]))
+    base = f"/api/sessions/{session.session_id}/recover"
+
+    resp = client.post(
+        base,
+        json={"decisions": [{"tool_call_id": "nope", "verdict": "CONFIRM_SUCCESS"}]},
+    )
+    assert resp.status_code == 422, "账上不存在的裁决目标必须 422"
+
+    resp = client.post(
+        base,
+        json={"decisions": [{"tool_call_id": "call-x", "verdict": "MAYBE"}]},
+    )
+    assert resp.status_code == 422, "非法裁决值必须 422"
+
+    resp = client.post(
+        base,
+        json={"decisions": [
+            {"tool_call_id": "call-x", "verdict": "CONFIRM_SUCCESS"},
+            {"tool_call_id": "call-x", "verdict": "ABANDON"},
+        ]},
+    )
+    assert resp.status_code == 422, "同一调用两条裁决（重复提交）必须 422"
+
+    async def _row_state():
+        op = await state.stores.operation_ledger.get(session.session_id, "call-x")
+        return op.state.value
+
+    assert asyncio.run(_row_state()) == "UNKNOWN", "被拒请求必须零写入"
+
+
+def test_recover_partial_coverage_returns_409_with_pending_list(client):
+    """只裁决一部分：409 + 清单仍列出全部待裁决行（开工前覆盖性预检，零写入）。"""
+    import asyncio
+
+    from agent_harness.storage import OperationState
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-a", "call-b"]))
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [{"tool_call_id": "call-a", "verdict": "ABANDON"}]},
+    )
+    assert resp.status_code == 409
+    pending = resp.json()["detail"]["pending_decisions"]
+    assert {p["tool_call_id"] for p in pending} == {"call-a", "call-b"}
+
+    async def _row_states():
+        states = []
+        for call_id in ("call-a", "call-b"):
+            op = await state.stores.operation_ledger.get(session.session_id, call_id)
+            states.append(op.state)
+        return states
+
+    assert all(s is OperationState.UNKNOWN for s in asyncio.run(_row_states()))
 
 
 # ── 集成 AI 移交：HTML 响应 CSP 头（纵深防御，INTEGRATION_NOTES §4.1）──

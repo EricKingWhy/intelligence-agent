@@ -45,6 +45,8 @@ class TestSessionEventDTO:
             "session/started",
             "session/resumed",
             "session/forked",
+            # #555：fork 意图标记（未完成 fork 的 durable 可见性事实）
+            "fork/in-progress",
             "run/started",
             "run/completed",
             "run/failed",
@@ -72,6 +74,13 @@ class TestSessionEventDTO:
             # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
             # 硬校验在 session/plan.py）。
             "task/plan_updated",
+            # W-07 (#351)：Task / 验证 / 接受三轴事实（状态事件，不投影成消息；
+            # handler 硬校验与投影在 session/task.py）。
+            "task/defined",
+            "task/acceptance-revised",
+            "verification/updated",
+            "task/accepted",
+            "task/acceptance-released",
             "memory/degraded",
             "tool/failure-guard",
             "model/fallback",
@@ -111,6 +120,8 @@ class TestSessionEventDTO:
             # `model_requests` / `total_tokens` / `cost_usd` 三个 counter 的**唯一**
             # 计数点——`model/completed` 只数被接纳进 loop 的决策（= agent_turns）。
             "model/request",
+            # #604：durable attempt 开始事实，不参与预算计数。
+            "model/request-started",
             # #317 T9：五模式 stuck 检测的结构化信号（level=replan 恰一次 /
             # level=paused 收口）。① 的 replan 复用既有 tool/failure-guard 形状，
             # 所以这一条只在 ②–⑤ 与所有暂停上出现（ADR-0048 D2/D5）。

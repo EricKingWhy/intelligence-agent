@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -157,6 +157,246 @@ class TestWriteTool:
 
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+
+    # ── #549-b / SB-07：写目标形态错误的异常映射（合同级断言，双平台可跑）──
+
+    @pytest.mark.asyncio
+    async def test_write_target_is_directory_maps_invalid_argument(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """write 目标是已存在目录 → INVALID_ARGUMENT + 可行动 message。
+
+        POSIX 抛 IsADirectoryError；Windows 的 os.replace 语义报 PermissionError
+        [WinError 5]——两种形态都必须映射成模型可自纠的 INVALID_ARGUMENT，
+        不再让模型看到裸 WinError 或含糊的 PERMISSION_DENIED（本机 L-12 复现）。
+        """
+        (sandbox.workspace_root / "sub").mkdir()
+
+        result = await executor.execute(
+            _tool_call("write", {"path": "sub", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "目录" in result.result.message
+        assert "sub" in result.result.message
+
+    @pytest.mark.asyncio
+    async def test_write_parent_path_is_file_maps_invalid_argument(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """父路径是文件 → INVALID_ARGUMENT + 可行动 message。
+
+        Windows [WinError 183] → FileExistsError；POSIX → NotADirectoryError。
+        """
+        sandbox.write_text("file.txt", "occupied")
+
+        result = await executor.execute(
+            _tool_call("write", {"path": "file.txt/child.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "file.txt/child.txt" in result.result.message
+
+    @pytest.mark.asyncio
+    async def test_write_genuine_permission_error_stays_permission_denied(
+        self, executor: ToolExecutor, monkeypatch
+    ):
+        """真正的权限拒绝（非目录形态误报）保持 PERMISSION_DENIED 不变。"""
+        def boom(path: str, content: str) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(
+            executor._registry._tools["write"]._sandbox, "write_text", boom
+        )
+        result = await executor.execute(
+            _tool_call("write", {"path": "locked.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+
+    # ── #610：before-read 必须吞掉 POSIX 形态，形态映射分支才可达 ──
+
+    @pytest.mark.asyncio
+    async def test_write_before_read_survives_posix_directory_form(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox, monkeypatch
+    ):
+        """write 目标是目录 + before-read 抛 POSIX IsADirectoryError → INVALID_ARGUMENT。
+
+        #610（gate1 ubuntu 红，`6c9ca07e` 起）：Windows 上「写目标是目录」在
+        before-read 报 PermissionError（旧元组接得住）⇒ 本地绿；Linux 报
+        IsADirectoryError——旧 except 元组 ``(FileNotFoundError, PermissionError)``
+        接不住 ⇒ 异常逃逸 ``execute()`` 被 ToolExecutor 包装成 TOOL_EXECUTION_ERROR，
+        73-117 行的 INVALID_ARGUMENT 映射分支永远走不到。本测在 ``sandbox.read_text``
+        缝上注入 POSIX 异常类，把 Linux 语义跨平台确定性复现（本机无 Linux/WSL，
+        修复后由 ubuntu CI 做原生平台确认）；红 = TOOL_EXECUTION_ERROR（Linux 症状
+        逐字），绿 = 写路径既有分支映射 INVALID_ARGUMENT（Windows 走 PermissionError
+        分支、Linux 走 IsADirectoryError 分支，两分支 message 同源）。
+        """
+        (sandbox.workspace_root / "sub").mkdir()
+
+        def boom(path: str) -> str:
+            raise IsADirectoryError(21, "Is a directory (POSIX form injected)")
+
+        monkeypatch.setattr(sandbox, "read_text", boom)
+        result = await executor.execute(
+            _tool_call("write", {"path": "sub", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "目录" in result.result.message
+        assert "sub" in result.result.message
+
+    @pytest.mark.asyncio
+    async def test_write_before_read_survives_posix_notdir_form(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox, monkeypatch
+    ):
+        """父路径是文件 + before-read 抛 POSIX NotADirectoryError → INVALID_ARGUMENT。
+
+        #610 同族第二形态：Linux 上 ``open('file.txt/child.txt')`` 报
+        NotADirectoryError（Windows 报 FileNotFoundError，旧元组接得住）——
+        不被 before-read 吞掉就会逃逸成 TOOL_EXECUTION_ERROR。修复后两平台写
+        路径均落 FileExistsError 分支（父 mkdir 对已存在普通文件报 EEXIST，
+        message 同源）；Linux before-read 的 NotADirectoryError 正是本修吞掉
+        的形态（审查 P3 勘误：原 docstring 误记 Linux 走写侧 NotADirectoryError
+        分支——那需更深层如 a.txt/b/c.txt 才可达）。
+        """
+        sandbox.write_text("file.txt", "occupied")
+
+        def boom(path: str) -> str:
+            raise NotADirectoryError(20, "Not a directory (POSIX form injected)")
+
+        monkeypatch.setattr(sandbox, "read_text", boom)
+        result = await executor.execute(
+            _tool_call("write", {"path": "file.txt/child.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert "file.txt/child.txt" in result.result.message
+
+    @pytest.mark.asyncio
+    async def test_write_permission_probe_survives_nonpath_sandbox_shape(
+        self, executor: ToolExecutor, monkeypatch
+    ):
+        """沙盒解析返回非实 Path 形态（DockerSandbox → PurePosixPath）时探针不炸。
+
+        `_target_is_directory` 假定 `resolve_within_workspace` 返回实 Path 才有
+        `.is_dir()`——DockerSandbox 覆写返回 PurePosixPath（无 `.is_dir()`，
+        AttributeError 不是 OSError），会从 PermissionError 分支逃逸，把本应
+        如实返回的 PERMISSION_DENIED 搅成崩溃（批次收口 Standards 轴 P3）。
+        形态不是实 Path ⇒ 探测按 False 处理——docstring 既有语义（探测失败
+        保持 PERMISSION_DENIED 旧行为），沙盒真实错误原样上抛。
+        """
+        sandbox = executor._registry._tools["write"]._sandbox
+        monkeypatch.setattr(
+            sandbox,
+            "resolve_within_workspace",
+            lambda path: PurePosixPath(path),
+        )
+
+        def boom(path: str, content: str) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(sandbox, "write_text", boom)
+
+        result = await executor.execute(
+            _tool_call("write", {"path": "locked.txt", "content": "x"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+
+    # ── #623：before-read 读不出 ⇒ 降级不阻断（diff before 置空）──
+
+    @pytest.mark.asyncio
+    async def test_write_overwrites_non_utf8_target_degrades_diff(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """非 UTF-8 目标覆盖写 → ok=True，diff 降级（#623①）。
+
+        before-read 走 UTF-8 解码（local.py ``open(..., encoding="utf-8")``），
+        目标内容非 UTF-8 时抛 UnicodeDecodeError（ValueError 族，不是 OSError）
+        ——旧 except 元组接不住 ⇒ 逃逸 execute() 被包装成 TOOL_EXECUTION_ERROR，
+        尽管覆盖写本身完全合法：write 是 content-absolute 覆盖语义（spec 05 §5），
+        写入合法性不依赖旧内容可读。成熟产品同口径：git 对判定为二进制的文件显示
+        "Binary files differ"（判定口径是内容含 NUL 字节，不是 UTF-8 可解码性；
+        任何仓库对含 NUL 的文件跑 git diff 即可复现）、aider 输出
+        "Dropping {fname} from the chat."（aider/coders/base_coder.py 的
+        `get_abs_fnames_content`，公开源码）——读不出 ≠ 操作非法，展示层降级；
+        OpenHands ACI 的 binary 阻断是 content-relative str_replace 的正确性
+        要求，不适用于覆盖写。红 = TOOL_EXECUTION_ERROR，绿 = 写入成功且
+        diff before 置空（同新文件口径）。
+        """
+        (sandbox.workspace_root / "blob.dat").write_bytes(b"hello\x00\xff\xfe")
+
+        result = await executor.execute(
+            _tool_call("write", {"path": "blob.dat", "content": "now text"})
+        )
+
+        assert result.result.ok is True, result.result.message
+        assert sandbox.read_text("blob.dat") == "now text"
+        assert result.result.data["before"] == ""
+        assert result.result.data["after"] == "now text"
+        assert result.result.data["truncated"] is False
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            FileNotFoundError(2, "injected"),
+            PermissionError(13, "injected"),
+            IsADirectoryError(21, "injected"),
+            NotADirectoryError(20, "injected"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "injected"),
+            # P3 跟进（#623 批审查登记项）：枚举外 OSError 形态（EINVAL 为例）。
+            # before-read 只做 diff 展示，任何读失败都只降级、不得逃逸成
+            # TOOL_EXECUTION_ERROR——红 = 旧枚举元组接不住本形态。
+            OSError(22, "injected"),
+        ],
+        ids=[
+            "file-not-found",
+            "permission",
+            "is-a-directory",
+            "not-a-directory",
+            "unicode-decode",
+            "generic-oserror",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_write_before_read_degrades_on_injected_forms(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox, monkeypatch, exc
+    ):
+        """#623②：before-read 各形态（OSError 族 + 非 UTF-8）注入 ⇒ 全部静默降级。
+
+        #610 的红/绿用例依赖 POSIX 天然形态（IsADirectoryError/NotADirectoryError
+        在 Windows 原生不触发），before-read 阶段的降级语义缺平台无关回归防线。
+        本测在 ``sandbox.read_text`` 缝上直接注入：目标/父路径均为合法文件形态，
+        降级后写入必须照常成功（diff before 置空）；「写目标是目录/父路径是
+        文件」的形态甄别仍由 write_text 分支独占，已由 #610 的两个用例在
+        同一缝上钉住，此处不重复。P3 跟进批把 except 从枚举五形态放宽为
+        ``(OSError, UnicodeDecodeError)``：读侧枚举永远追不全平台形态
+        （EINVAL/ENOSPC/EBUSY…），而 before-read 是展示辅助非契约（write.py
+        既有注释），宽捕降级才是该缝的正确语义；写侧失败仍由 write_text
+        四分支精确映射，职责不变。
+        """
+        sandbox.write_text("doc.txt", "old")
+
+        def boom(path: str) -> str:
+            raise exc
+
+        monkeypatch.setattr(sandbox, "read_text", boom)
+        result = await executor.execute(
+            _tool_call("write", {"path": "doc.txt", "content": "new"})
+        )
+
+        assert result.result.ok is True, result.result.message
+        assert (sandbox.workspace_root / "doc.txt").read_text(
+            encoding="utf-8"
+        ) == "new"
+        assert result.result.data["before"] == ""
 
 
 # ============================================================================

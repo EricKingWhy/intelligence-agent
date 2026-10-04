@@ -6,11 +6,17 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 
 import pytest
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk
 
-from agent_harness.session import JsonlSessionStore
+from agent_harness.session import (
+    MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
+    RUN_PAUSED,
+    JsonlSessionStore,
+)
 
 
 class SlowStreamModel:
@@ -23,6 +29,41 @@ class SlowStreamModel:
         for i in range(25):
             await asyncio.sleep(0.08)
             yield AIMessageChunk(content=f"chunk{i} ")
+
+
+class _BlockedStreamModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def astream(self, messages, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        yield AIMessageChunk(content="完成")
+
+
+class _BlockedInvokeModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        return AIMessage(content="not a continuation")
+
+    async def astream(self, messages, **kwargs):
+        yield AIMessageChunk(content="", tool_calls=[{
+            "id": "glob-before-closeout",
+            "name": "glob",
+            "args": {"pattern": "*"},
+        }])
 
 
 async def _start_server(tmp_path, monkeypatch, model):
@@ -65,7 +106,8 @@ def _parse_frame(line: str) -> dict:
 
 async def _collect(port: int, path: str, body: dict | None,
                    stop_types: set[str] | None = None,
-                   max_frames: int | None = None) -> list[dict]:
+                   max_frames: int | None = None,
+                   stop_if: Callable[[dict], bool] | None = None) -> list[dict]:
     """读 SSE 流；stop_types 命中 / 流结束 / max_frames 到达即返回（断开）。"""
     import httpx2
 
@@ -83,8 +125,11 @@ async def _collect(port: int, path: str, body: dict | None,
                     continue
                 frame = _parse_frame(line)
                 frames.append(frame)
-                if (stop_types and frame.get("type") in stop_types) or (
-                        max_frames is not None and len(frames) >= max_frames):
+                if (
+                    (stop_types and frame.get("type") in stop_types)
+                    or (stop_if is not None and stop_if(frame))
+                    or (max_frames is not None and len(frames) >= max_frames)
+                ):
                     break
     finally:
         await client.aclose()
@@ -171,6 +216,140 @@ async def test_reconnect_after_terminal_replays_to_end(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_in_flight_request_started_is_live_durable_and_replayed(
+    tmp_path, monkeypatch,
+):
+    """在 Provider barrier 期间，开始事件已可由 live SSE 与 GET /events 读取。"""
+    model = _BlockedStreamModel()
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, lambda: model,
+    )
+    try:
+        live = await _collect(
+            port, "/api/sessions", {"task": "验证在途模型请求"},
+            stop_types={MODEL_REQUEST_STARTED},
+        )
+        started = [frame for frame in live if frame.get("type") == MODEL_REQUEST_STARTED]
+        assert len(started) == 1
+        session_id = started[0]["session_id"]
+        start_seq = started[0]["seq"]
+        await asyncio.wait_for(model.entered.wait(), timeout=2)
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=5) as client:
+            response = await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events",
+            )
+        assert response.status_code == 200
+        persisted = response.json()
+        durable = [event for event in persisted if event["type"] == MODEL_REQUEST_STARTED]
+        assert len(durable) == 1
+        assert durable[0]["seq"] == start_seq
+        assert not any(event["type"] == "model/request" for event in persisted)
+
+        model.release.set()
+        store = JsonlSessionStore(app.state.agent.sessions_root)
+        await _wait_terminal(store, session_id)
+        replay = await _collect(
+            port,
+            f"/api/sessions/{session_id}/stream?after_seq={start_seq - 1}",
+            None,
+            stop_types={"run/completed", "run/failed"},
+        )
+        replayed_starts = [
+            frame for frame in replay if frame.get("type") == MODEL_REQUEST_STARTED
+        ]
+        requests = [frame for frame in replay if frame.get("type") == "model/request"]
+        assert len(replayed_starts) == len(requests) == 1
+        assert replayed_starts[0]["seq"] == start_seq
+        assert replayed_starts[0]["data"]["request_id"] == requests[0]["data"]["request_id"]
+        assert replayed_starts[0]["seq"] < requests[0]["seq"]
+    finally:
+        model.release.set()
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_closeout_request_started_is_live_before_provider_settles(
+    tmp_path, monkeypatch,
+):
+    """closeout start 通过 session listener 在 Provider 阻塞期间送达 SSE。"""
+    model = _BlockedInvokeModel()
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, lambda: model,
+    )
+    try:
+        live = await _collect(
+            port,
+            "/api/sessions",
+            {"task": "验证 closeout 在途可见", "budget": {"run": {"max_model_requests": 2}}},
+            stop_if=lambda frame: (
+                frame.get("type") == MODEL_REQUEST_STARTED
+                and frame.get("data", {}).get("role") == "closeout"
+            ),
+        )
+        started = [
+            frame for frame in live
+            if frame.get("type") == MODEL_REQUEST_STARTED
+            and frame.get("data", {}).get("role") == "closeout"
+        ]
+        assert len(started) == 1
+        session_id = started[0]["session_id"]
+        await asyncio.wait_for(model.entered.wait(), timeout=2)
+
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=5) as client:
+            response = await client.get(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events",
+            )
+        assert response.status_code == 200
+        events = response.json()
+        durable_start = next(
+            event for event in events
+            if event["type"] == MODEL_REQUEST_STARTED
+            and event["data"]["request_id"] == started[0]["data"]["request_id"]
+        )
+        assert durable_start["seq"] == started[0]["seq"]
+        assert not any(
+            event["type"] == MODEL_REQUEST
+            and event["data"].get("role") == "closeout"
+            for event in events
+        )
+        primary_start = next(
+            frame for frame in live
+            if frame.get("type") == MODEL_REQUEST_STARTED
+            and frame.get("data", {}).get("role") != "closeout"
+        )
+        assert any(
+            frame.get("type") == MODEL_REQUEST
+            and frame.get("data", {}).get("request_id")
+            == primary_start["data"]["request_id"]
+            for frame in live
+        ), "closeout 前必须有一条已结算的真实 Provider attempt"
+
+        model.release.set()
+        store = JsonlSessionStore(app.state.agent.sessions_root)
+        async with asyncio.timeout(5):
+            while True:
+                events = store.read_events(session_id)
+                if events and events[-1].type == RUN_PAUSED:
+                    break
+                await asyncio.sleep(0.02)
+        closeout_requests = [
+            event for event in events
+            if event.type == MODEL_REQUEST and event.data.get("role") == "closeout"
+        ]
+        assert len(closeout_requests) == 1
+        assert closeout_requests[0].data["request_id"] == durable_start["data"]["request_id"]
+        assert durable_start["seq"] < closeout_requests[0].seq
+    finally:
+        model.release.set()
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
 async def test_replay_backlog_threshold_emits_control_frame(tmp_path, monkeypatch):
     """backlog 超阈值 → 单帧 stream/truncated 控制事件后收流（客户端走全量重建）。"""
     from agent_harness import web as web_module
@@ -250,5 +429,62 @@ async def test_truncated_branch_leaves_no_subscriber(tmp_path, monkeypatch):
         assert run is not None, "前提：收完控制帧后 run 仍在途"
         assert run.subscribers == {}, \
             "截断分支不得留下订阅者——没人消费这些队列，且孤儿计时不会回收它"
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_replay_stream_escapes_surrogates_without_changing_valid_unicode(
+    tmp_path, monkeypatch,
+):
+    from pathlib import Path
+
+    from agent_harness.session import SessionEvent
+    from agent_harness.web.serialization import build_session_event_payload
+
+    server, serve_task, port, app = await _start_server(
+        tmp_path, monkeypatch, SlowStreamModel)
+    session_id = "sse-surrogate"
+    valid = SessionEvent(
+        type="user/message", session_id=session_id, seq=0,
+        data={"text": "中文 😀"},
+    )
+    legacy = SessionEvent(
+        type="user/message", session_id=session_id, seq=1,
+        data={"text": "bad\ud800 text"},
+    )
+    events_path = Path(app.state.agent.sessions_root) / session_id / "events.jsonl"
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(
+        "\n".join(json.dumps(event.to_dict(), ensure_ascii=True)
+                  for event in (valid, legacy)) + "\n",
+        encoding="ascii",
+    )
+
+    import httpx2
+
+    try:
+        async with httpx2.AsyncClient(timeout=5) as client, client.stream(
+            "GET", f"http://127.0.0.1:{port}/api/sessions/{session_id}/stream",
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            body = await response.aread()
+
+        expected_valid = (
+            b"data: "
+            + json.dumps(
+                build_session_event_payload(valid, session_id), ensure_ascii=False,
+            ).encode("utf-8")
+            + b"\r\n\r\n"
+        )
+        assert body.startswith(expected_valid)
+        text = body.decode("utf-8")
+        frames = [line[5:].strip() for line in text.splitlines()
+                  if line.startswith("data:")]
+        assert len(frames) == 2
+        replayed = json.loads(frames[1])
+        assert replayed["data"]["text"] == "bad\ud800 text"
+        assert replayed["seq"] == 1
     finally:
         await _shutdown(server, serve_task)

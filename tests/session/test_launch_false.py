@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
 from agent_harness.session import SESSION_STARTED, Session
+from agent_harness.session.event import TASK_DEFINED
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.web.app import create_app, session_service
 from tests.scripted_model import ScriptedModel
@@ -76,8 +77,10 @@ def test_launch_false_does_not_start_run(tmp_path):
 
     events = state.store.read_events(result.session.session_id)
     assert events[0].type == SESSION_STARTED
-    # 只有 session/started：没有 user/message、没有 run 事件。
-    assert len(events) == 1
+    # session/started + task/defined（W-07 #351：创建即定义原始目标——launch 与
+    # 否不影响「Task 身份 = Session ID」的定义事实）；没有 user/message、没有
+    # run 事件——launch=False 仍不启动任何 run。
+    assert [e.type for e in events] == [SESSION_STARTED, TASK_DEFINED]
 
 
 def test_launch_false_with_explicit_workspace(tmp_path):
@@ -94,8 +97,7 @@ def test_launch_false_with_explicit_workspace(tmp_path):
 
     assert (tmp_path / "proj-a").is_dir()
     events = state.store.read_events(result.session.session_id)
-    assert len(events) == 1
-    assert events[0].type == SESSION_STARTED
+    assert [e.type for e in events] == [SESSION_STARTED, TASK_DEFINED]
 
 
 def test_launch_false_session_metadata_matches_launch_true(tmp_path):
@@ -123,7 +125,7 @@ def test_launch_false_session_metadata_matches_launch_true(tmp_path):
 
 
 def _web_client(tmp_path):
-    settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
+    settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
     app = create_app(settings, enable_cors=False)
     return app, TestClient(app)
 

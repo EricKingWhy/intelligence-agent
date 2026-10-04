@@ -16,8 +16,6 @@ from agent_harness.session import Session
 from agent_harness.session.event import USER_MESSAGE
 from agent_harness.session.store import JsonlSessionStore
 
-pytestmark = pytest.mark.asyncio
-
 
 def _prepare(tmp_path: Path) -> JsonlSessionStore:
     store = JsonlSessionStore(root=tmp_path / "sessions")
@@ -27,6 +25,7 @@ def _prepare(tmp_path: Path) -> JsonlSessionStore:
     return store
 
 
+@pytest.mark.asyncio
 async def test_fork_command_end_to_end(tmp_path: Path) -> None:
     store = _prepare(tmp_path)
     child_id = await fork_command(
@@ -42,6 +41,7 @@ async def test_fork_command_end_to_end(tmp_path: Path) -> None:
     # —— child_id 即返回值，resume 成功本身就是端到端证明
 
 
+@pytest.mark.asyncio
 async def test_fork_command_copies_workspace(tmp_path: Path) -> None:
     from agent_harness.sandbox import WorkspaceRegistry
 
@@ -62,6 +62,7 @@ async def test_fork_command_copies_workspace(tmp_path: Path) -> None:
     assert child_sandbox.read_text("hello.txt") == "world"
 
 
+@pytest.mark.asyncio
 async def test_fork_command_bad_boundary_raises(tmp_path: Path) -> None:
     """命令核心抛领域错误；SystemExit 转换在 _main_fork（CLI 边界）。"""
     _prepare(tmp_path)
@@ -74,6 +75,7 @@ async def test_fork_command_bad_boundary_raises(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.asyncio
 async def test_fork_command_child_inherits_parent_model(tmp_path: Path) -> None:
     """T7 #137：CLI fork 的 child 继承父当前模型（与 Web / demo 同语义）。"""
     from agent_harness.session.service import current_model_selection
@@ -116,6 +118,7 @@ def _prepare_with_gap(tmp_path: Path) -> JsonlSessionStore:
     return store
 
 
+@pytest.mark.asyncio
 async def test_from_message_is_ordinal_not_seq(tmp_path: Path) -> None:
     """--from-message 2 = 第 2 条用户消息（seq 3），不是事件 seq 2。
 
@@ -138,6 +141,7 @@ async def test_from_message_is_ordinal_not_seq(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.asyncio
 async def test_from_message_out_of_range_error_is_dual_annotated(
     tmp_path: Path,
 ) -> None:
@@ -163,6 +167,7 @@ async def test_from_message_out_of_range_error_is_dual_annotated(
 # （会话不在 / 一条事件都没有）都该按本来面目报，而不是伪装成越界。
 
 
+@pytest.mark.asyncio
 async def test_fork_command_missing_session_reports_not_found(
     tmp_path: Path,
 ) -> None:
@@ -176,6 +181,7 @@ async def test_fork_command_missing_session_reports_not_found(
         )
 
 
+@pytest.mark.asyncio
 async def test_fork_command_empty_session_same_message(
     tmp_path: Path,
 ) -> None:

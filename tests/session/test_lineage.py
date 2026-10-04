@@ -16,6 +16,7 @@ from agent_harness.session import Session
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
     AGENT_DELEGATION_STARTED,
+    SESSION_FORKED,
     USER_MESSAGE,
 )
 from agent_harness.session.lineage import (
@@ -27,8 +28,6 @@ from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 
-pytestmark = pytest.mark.asyncio
-
 
 def _meta(sid: str, **overrides: object) -> SessionMeta:
     fields: dict = {"session_id": sid, "created_at": "2026-09-06T00:00:00Z"}
@@ -36,6 +35,7 @@ def _meta(sid: str, **overrides: object) -> SessionMeta:
     return SessionMeta(**fields)
 
 
+@pytest.mark.asyncio
 async def test_build_lineage_index_backfills_delegation_children(tmp_path: Path) -> None:
     """存量 delegation child（有事件无 meta 行 / NULL origin 行）回填为 delegation 边。"""
     store = JsonlSessionStore(tmp_path / "sessions")
@@ -74,6 +74,7 @@ async def test_build_lineage_index_backfills_delegation_children(tmp_path: Path)
     assert (by_id2["c1"].origin, by_id2["c1"].parent_session_id) == ("delegation", "p")
 
 
+@pytest.mark.asyncio
 async def test_build_lineage_index_never_overwrites_fork_origin(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path / "sessions")
     meta_store = SqliteSessionMetaStore(tmp_path / "harness.db")
@@ -138,6 +139,7 @@ def test_render_lineage_tree_marks_origins() -> None:
     assert "f1" in text and "d1" in text
 
 
+@pytest.mark.asyncio
 async def test_sessions_command_tree(tmp_path: Path) -> None:
     """CLI sessions --tree：真实 store + meta 走一遍端到端渲染。"""
     from agent_harness.cli import sessions_command
@@ -155,3 +157,82 @@ async def test_sessions_command_tree(tmp_path: Path) -> None:
     assert "cliroot" in out
     assert "clichild" in out
     assert "[delegation]" in out
+
+
+# ── #555 W5：fork 边的惰性回填（此前回填只扫 delegation 边，fork child 被按
+#    root 建行，树把 fork 线断成多个假 root） ──────────────────────────────
+
+
+def _append_forked(session: Session, parent_id: str, fork_point_seq: int | None) -> None:
+    session.append(SESSION_FORKED, {
+        "parent_session_id": parent_id,
+        "boundary_user_message_seq": 1,
+        "fork_point_seq": fork_point_seq,
+    })
+
+
+@pytest.mark.asyncio
+async def test_build_lineage_index_backfills_fork_edges_from_child_events(
+    tmp_path: Path,
+) -> None:
+    """有事件无 meta 行的 fork child：按 child 自己文件里的 session/forked 回填。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta_store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta_store.initialize()
+
+    Session.start(store, session_id="fp")
+    child = Session.start(store, session_id="fc")
+    _append_forked(child, "fp", 0)
+
+    metas = await build_lineage_index(store, meta_store)
+    by_id = {m.session_id: m for m in metas}
+
+    assert by_id["fc"].origin == "fork"
+    assert by_id["fc"].parent_session_id == "fp"
+    assert by_id["fc"].fork_point_seq == 0
+    # 幂等：二次回填不改变结果
+    again = await build_lineage_index(store, meta_store)
+    by_id2 = {m.session_id: m for m in again}
+    assert (by_id2["fc"].origin, by_id2["fc"].parent_session_id,
+            by_id2["fc"].fork_point_seq) == ("fork", "fp", 0)
+
+
+@pytest.mark.asyncio
+async def test_build_lineage_index_upgrades_null_row_to_fork(tmp_path: Path) -> None:
+    """checkpoint 时代存量（origin/parent 全 NULL）+ forked 事件 → 升级为 fork 边。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta_store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta_store.initialize()
+    await meta_store.upsert(_meta("legacy-fork"))
+    Session.start(store, session_id="forkp")
+    child = Session.start(store, session_id="legacy-fork")
+    _append_forked(child, "forkp", None)
+
+    metas = await build_lineage_index(store, meta_store)
+    by_id = {m.session_id: m for m in metas}
+    assert by_id["legacy-fork"].origin == "fork"
+    assert by_id["legacy-fork"].parent_session_id == "forkp"
+    assert by_id["legacy-fork"].fork_point_seq is None
+    assert by_id["forkp"].origin is None  # 父是 root
+
+
+@pytest.mark.asyncio
+async def test_fork_edge_takes_precedence_over_delegation_edge(tmp_path: Path) -> None:
+    """同 child 两条边都存在：child 自证的 forked 事件优先（自证 provenance）。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    meta_store = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta_store.initialize()
+
+    delegator = Session.start(store, session_id="delegator")
+    delegator.append(AGENT_DELEGATION_STARTED, {
+        "target": "coding", "task": "t", "child_session_id": "dual",
+    })
+    Session.start(store, session_id="forkp")
+    dual = Session.start(store, session_id="dual")
+    _append_forked(dual, "forkp", 5)
+
+    metas = await build_lineage_index(store, meta_store)
+    by_id = {m.session_id: m for m in metas}
+    assert by_id["dual"].origin == "fork"
+    assert by_id["dual"].parent_session_id == "forkp"
+    assert by_id["dual"].fork_point_seq == 5

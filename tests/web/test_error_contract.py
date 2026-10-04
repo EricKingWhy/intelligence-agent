@@ -20,9 +20,12 @@
 
 from __future__ import annotations
 
+import errno
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -182,6 +185,32 @@ def test_openapi_documents_500_on_api_operations(tmp_path: Path) -> None:
             )
 
 
+def test_openapi_documents_413_on_body_bearing_operations(tmp_path: Path) -> None:
+    """#562 残余（1 MiB body 上限）：带体方法族必须声明 413，信封同 ErrorEnvelope。
+
+    `BodyDepthGuardMiddleware` 全局挂载（`app.add_middleware`），任何带体请求都
+    可能超限——机制可机械判定，与 503（靠 handler 逻辑、不全局撒）不同。反向锚：
+    GET 语义上不带体，声明面收缩到 POST/PUT/PATCH/DELETE（抽查钉住口径）。
+    """
+    api = _openapi(_client(tmp_path))
+    body_bearing = {"post", "put", "patch", "delete"}
+    for path, item in api["paths"].items():
+        if not path.startswith("/api/"):
+            continue
+        for method, op in item.items():
+            if method not in body_bearing:
+                continue
+            responses = op["responses"]
+            assert "413" in responses, f"{method.upper()} {path} 未声明 413"
+            schema = responses["413"]["content"]["application/json"]["schema"]
+            assert schema.get("$ref", "").endswith("ErrorEnvelope"), (
+                f"{method.upper()} {path} 的 413 schema：{schema}"
+            )
+    # 反向锚（抽查）：GET 不声明 413（本仓不消费 GET 请求体，不全局撒）。
+    stream = api["paths"]["/api/sessions/{session_id}/stream"]["get"]
+    assert "413" not in stream["responses"]
+
+
 def test_openapi_documents_503_on_newly_guaranteed_endpoints(
     tmp_path: Path,
 ) -> None:
@@ -326,3 +355,90 @@ def test_launch_arms_map_storage_busy_to_503(
         resp = getattr(client, method)(path, **kwargs)
     assert resp.status_code == 503, resp.text
     assert "写锁" in resp.json()["detail"]
+
+
+def _sqlite_storage_error(code: int, name: str, message: str) -> sqlite3.Error:
+    error = sqlite3.OperationalError(message)
+    error.sqlite_errorcode = code
+    error.sqlite_errorname = name
+    return error
+
+
+@pytest.mark.parametrize(
+    "storage_error",
+    [
+        OSError(errno.EFBIG, "File too large", "private/backend/path"),
+        OSError(errno.ENOSPC, "No space left on device", "private/backend/path"),
+        _sqlite_storage_error(
+            sqlite3.SQLITE_FULL, "SQLITE_FULL", "database or disk is full"
+        ),
+        _sqlite_storage_error(sqlite3.SQLITE_IOERR, "SQLITE_IOERR", "disk I/O error"),
+        _sqlite_storage_error(
+            sqlite3.SQLITE_IOERR_WRITE, "SQLITE_IOERR_WRITE", "disk I/O error"
+        ),
+    ],
+    ids=["efbig", "enospc", "sqlite-full", "sqlite-ioerr", "sqlite-ioerr-write"],
+)
+def test_messages_storage_errors_map_to_503_before_side_effects(
+    tmp_path: Path, storage_error: Exception
+) -> None:
+    """#569：错误族在真实逃逸点做分类注入；不是物理满盘模拟。"""
+    from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+
+    client = _client(tmp_path, raise_server_exceptions=False)
+    created = client.post("/api/sessions?launch=false", json={})
+    assert created.status_code == 200, created.text
+    session_id = created.json()["session_id"]
+    events = tmp_path / "sessions" / session_id / "events.jsonl"
+    events_before = events.read_bytes()
+    operation_ledger = client.app.state.agent.operation_ledger
+    operations_before = anyio.run(operation_ledger.list_for_session, session_id)
+    budget_ledger = client.app.state.agent.stores.delegation_tree_ledger
+    budget_before = anyio.run(budget_ledger.get_session_budget, session_id)
+    budget_events_before = anyio.run(budget_ledger.session_event_kinds, session_id)
+
+    with (
+        patch.object(
+            SqliteDelegationTreeLedger,
+            "get_session_budget",
+            new_callable=AsyncMock,
+            side_effect=storage_error,
+        ) as budget_read,
+        patch("agent_harness.assembly.create_chat_model") as model_factory,
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", json={"content": "continue"}
+        )
+
+    assert budget_read.await_count == 1
+    assert model_factory.call_count == 0
+    assert events.read_bytes() == events_before
+    assert anyio.run(operation_ledger.list_for_session, session_id) == operations_before
+    assert anyio.run(budget_ledger.get_session_budget, session_id) == budget_before
+    assert anyio.run(budget_ledger.session_event_kinds, session_id) == budget_events_before
+    assert response.status_code == 503, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Persistent storage is unavailable"}
+
+
+def test_messages_unclassified_operational_error_remains_500(tmp_path: Path) -> None:
+    from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+
+    client = _client(tmp_path, raise_server_exceptions=False)
+    created = client.post("/api/sessions?launch=false", json={})
+    assert created.status_code == 200, created.text
+    session_id = created.json()["session_id"]
+
+    with patch.object(
+        SqliteDelegationTreeLedger,
+        "get_session_budget",
+        new_callable=AsyncMock,
+        side_effect=sqlite3.OperationalError("no such table: broken_path"),
+    ):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", json={"content": "continue"}
+        )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Internal Server Error"}

@@ -744,6 +744,20 @@ async def run(
             deployment=settings.local_max_agent_turns,
             profile=declared_turn_ceiling(None),
         )
+        # `#318`：session 作用域账（--session-* 旗标 → durable 账行的首用声明；
+        # 恒接线，账从本会话第一个 run 起就有持久读数，与 Web 创建路径同一条规则）。
+        # `#564` 审查 P2-2：同一份声明同时喂 pre-CAS 注册名校验——CLI create 的
+        # 坏名同样"任何工作开始前拒绝"（04 §9.1），不能静默进 durable 账行。
+        session_limits = session_limits_from_request(
+            max_agent_turns_total=session_turns_total,
+            max_model_requests=session_model_requests,
+            max_total_tokens=session_total_tokens,
+            max_cost_usd=session_cost_usd,
+            deadline_at=session_deadline_at,
+            tool_call_limits=session_tool_limits,
+            max_delegations=session_max_delegations,
+            accounting=HARNESS_MODEL_ACCOUNTING,
+        )
         runtime = await build_runtime(
             settings=settings, wiring=wiring, stores=stores,
             workspace_registry=workspace_registry,
@@ -768,23 +782,15 @@ async def run(
                     accounting=HARNESS_MODEL_ACCOUNTING,
                 ),
             ),
-            # `#318`：session 作用域账（--session-* 旗标 → durable 账行的首用声明；
-            # 恒接线，账从本会话第一个 run 起就有持久读数，与 Web 创建路径同一条规则）。
             session_budget=SessionBudgetHandle(
                 stores.delegation_tree_ledger,
                 budget_key=session_id,
                 root_session_id=session_id,
-                limits=session_limits_from_request(
-                    max_agent_turns_total=session_turns_total,
-                    max_model_requests=session_model_requests,
-                    max_total_tokens=session_total_tokens,
-                    max_cost_usd=session_cost_usd,
-                    deadline_at=session_deadline_at,
-                    tool_call_limits=session_tool_limits,
-                    max_delegations=session_max_delegations,
-                    accounting=HARNESS_MODEL_ACCOUNTING,
-                ),
+                limits=session_limits,
             ),
+            # 同一份声明（上面 hoist）：pre-CAS 校验与 durable 账行的首用声明
+            # 是**一个**输入，不是两份各写一遍的配置。
+            session_declared_limits=session_limits,
             auto_approve=True,
             session_store=store,
             # `#317`：`run` 是"创建 + 第一条消息"入口，第一次开跑就可能卡循环 ⇒ 它建的
@@ -823,6 +829,15 @@ async def run(
 
 
 def main() -> None:
+    # W-11（#355）：`serve` 是唯一的冷启动闭环入口——自己竞争 InstanceLock、失败时
+    # 二次检查附着既有服务，因此必须绕开下面的外层锁（否则 serve 永远死在
+    # "第二个写者"的报错上）。与 --help 同级的早分发。
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        try:
+            _main_serve(sys.argv[2:])
+        finally:
+            flush_process_sink()
+        return
     # ARCH-7（#150）：CLI 与 Web 并发使用同一 session root 被**有意拒绝**——
     # 无保护的跨进程多写者会产出重复 seq / 交错写，且 run 归属共识只在进程内
     # 有效。这里不吞异常：响亮失败 + 明确错误信息（锁路径 / 占用者 / 逃生门）。
@@ -841,7 +856,11 @@ def main() -> None:
     try:
         lock = InstanceLock(settings.workspace_dir).acquire()
     except InstanceLockError as error:
-        print(error, file=sys.stderr)
+        # W-11（#355）：锁报错先做附着感知——活服务在运行时把它的地址指给用户，
+        # 而不是留下「锁被占用」的旧话术诱发启动者另开第二个实例。
+        from agent_harness.host_service import describe_lock_error_with_attach
+
+        print(describe_lock_error_with_attach(settings.workspace_dir, error), file=sys.stderr)
         raise SystemExit(2) from error
     try:
         _main_dispatch()
@@ -850,6 +869,45 @@ def main() -> None:
         # 旁路收尾（ADR-0018 D3）：任何退出路径（正常/异常/SystemExit）都尽力
         # 发送剩余 Langfuse span；未配置/未装配时零开销 no-op。
         flush_process_sink()
+
+
+def _main_serve(argv: list[str]) -> None:
+    """W-11（#355）：单机服务冷启动闭环（附着 → 否则竞争启动 → 二次检查）。
+
+    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 127.0.0.1 /
+    localhost，个人桌面服务不暴露 LAN）；远程/LAN 部署保持既有显式配置入口
+    （`create_prod_app` + 显式 jwt_secret），不经本命令。
+    """
+    from agent_harness.host_service import HostServiceError, serve_once
+
+    parser = argparse.ArgumentParser(
+        prog="agent-harness serve",
+        description="启动本机唯一 Agent Harness 服务（已运行则附着既有服务后退出）",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        choices=["127.0.0.1", "localhost"],
+        help="绑定地址；只允许 loopback（W-11：个人服务不暴露 LAN，远程部署走显式配置入口）",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        outcome = serve_once(settings, host=args.host)
+    except (HostServiceError, InstanceLockError) as error:
+        # HostServiceError = 活服务但凭据不可用（exit 3）；InstanceLockError =
+        # 二次检查窗口内无服务可附着、锁在非服务写者手里（exit 2，原报错原样出）。
+        print(error, file=sys.stderr)
+        raise SystemExit(3 if isinstance(error, HostServiceError) else 2) from error
+    except KeyboardInterrupt:
+        print("服务已停止")
+        return
+    if not outcome.served and outcome.endpoint is not None:
+        print(
+            f"已有本机服务在运行：http://127.0.0.1:{outcome.endpoint.port}"
+            "（已附着，本进程退出）"
+        )
 
 
 def _main_dispatch() -> None:

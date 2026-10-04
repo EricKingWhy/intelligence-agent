@@ -1,0 +1,1 @@
+2026-10-03	B 线先回后正合并归属行：926a6239 = 并入 origin/main（70559baa）的机械合并（merge-tree 预演唯一冲突 = tracker，git merge-file --union 按各线 append 小节做并集，ours = 本线 B 线小节 8 段、theirs = main 前进 35 笔的各线小节；代码面 runtime.py/app.py hunk 区间全不重叠自动合并）。来侧 35 笔的归属由来侧各自台账覆盖，本行只归属合并提交本身的树变化。46d1a748（台账自身）与 2a4a8cbb（收口笔 docs）按路径自动归属。	09914533..926a6239
