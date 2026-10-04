@@ -14,6 +14,7 @@ test_context_usage.py 同：真实 ASGI 服务器（uvicorn port=0）+ 可控请
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -170,12 +171,21 @@ async def test_metrics_slow_resampling_does_not_block_event_loop(
 ):
     """重采样在 worker 线程：慢堆扫描进行中，事件循环仍能响应 /api/health。
 
-    把线程侧堆扫描换成 1.5s 慢函数 ⇒ /metrics 至少耗 1.5s，而并发发出的
-    /api/health 必须远早于它返回——若实现在事件循环上同步扫描，health 会被
-    顶到 metrics 之后（elapsed >= 1.5s），本钉即红。
+    把线程侧堆扫描换成 1.5s 慢函数，并做**确定性编排**（审查 P3-1：/api/health
+    handler 全同步单步完成，若先发 health，变异成循环内同步扫描时 health 早已
+    返回、钉会漏——所以必须先发 /metrics 并确认扫描确实已开始，再发 health，
+    两条断言共用同一时间轴 t0）：
+    - 轮询 threading.Event 直到慢扫描开跑（正确实现：worker 线程 ~立即置位，
+      循环空闲，轮询 ~50ms 内通过；变异实现：扫描占住循环，轮询直到 1.5s 后才醒）；
+    - 再发 /api/health：正确实现 ~0.2s 内返回（health_elapsed < 0.8 保持绿）；
+      变异实现此时循环仍被扫描占住 ⇒ health ≥ 1.5s，确定性红。
+    metrics_elapsed ≥ 1.4 证明慢扫描真的拖住了 /metrics 响应（钉有区分度）。
     """
 
+    scan_started = threading.Event()
+
     def _slow_scan() -> int:
+        scan_started.set()
         time.sleep(1.5)
         return 7
 
@@ -184,9 +194,11 @@ async def test_metrics_slow_resampling_does_not_block_event_loop(
     server, serve_task, port = await _start_server(tmp_path, monkeypatch)
     try:
         started = time.monotonic()
-        health_task = asyncio.create_task(_get_raw(port, "/api/health"))
         metrics_task = asyncio.create_task(_get_raw(port, "/metrics"))
-        health_status, _h, _t = await health_task
+        while not scan_started.is_set():
+            await asyncio.sleep(0.05)
+        assert time.monotonic() - started < 5.0, "扫描 5s 内没开始（服务器没接住请求）"
+        health_status, _h, _t = await _get_raw(port, "/api/health")
         health_elapsed = time.monotonic() - started
         metrics_status, _h, _t = await metrics_task
         metrics_elapsed = time.monotonic() - started
@@ -197,5 +209,5 @@ async def test_metrics_slow_resampling_does_not_block_event_loop(
     assert metrics_status == 200
     assert metrics_elapsed >= 1.4, "慢采集应真的拖住 /metrics（否则钉无区分度）"
     assert health_elapsed < 0.8, (
-        f"/api/health 用了 {health_elapsed:.2f}s——事件循环被慢采集阻塞了"
+        f"/api/health 在扫描开始后 {health_elapsed:.2f}s 才返回——事件循环被慢采集阻塞了"
     )
