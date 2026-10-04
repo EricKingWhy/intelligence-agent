@@ -216,15 +216,22 @@ class TestDeriveProgressDocument:
 
     def test_evidence_refs_from_artifact_events(self, tmp_path) -> None:
         session = _session(tmp_path)
+        # 生产 payload 形状（tooling/overflow.py append 侧），不用想象键
         session.append(
             ARTIFACT_EXTERNALIZED,
-            {"artifact_id": "art-1", "size": 4096, "name": "trace.jsonl",
-             "ref": "artifacts/art-1"},
+            {"artifact_id": "art-1", "session_id": session.session_id,
+             "source_tool": "write_file", "tool_call_id": "tc-7",
+             "size": 4096, "mime_type": "text/plain"},
         )
         doc = derive_progress_document(session.events, session_id=session.session_id)
         assert doc.evidence[0]["artifact_id"] == "art-1"
-        assert doc.evidence[0]["ref"] == "artifacts/art-1"
+        assert doc.evidence[0]["size"] == 4096
+        assert doc.evidence[0]["source_tool"] == "write_file"
         assert doc.evidence[0]["source_seq"] > 0
+        body = render_progress_markdown(
+            doc, generated_at="2026-10-04T12:00:00+00:00"
+        )
+        assert "artifact_id=art-1" in body, "artifact_id 即 read_artifact 的 ref"
 
     def test_blockers_from_open_and_paused_runs(self, tmp_path) -> None:
         session = _session(tmp_path)
@@ -268,6 +275,18 @@ class TestRenderAndSanitize:
         a = render_progress_markdown(doc, generated_at="2026-10-04T12:00:00+00:00")
         b = render_progress_markdown(doc, generated_at="2026-10-04T12:00:00+00:00")
         assert a == b
+
+    def test_render_shows_parent_and_fork_lines(self, tmp_path) -> None:
+        session = _session(tmp_path)
+        session.append(
+            SESSION_FORKED, {"parent_session_id": "parent-1", "fork_point_seq": 7}
+        )
+        body = render_progress_markdown(
+            derive_progress_document(session.events, session_id=session.session_id),
+            generated_at="2026-10-04T12:00:00+00:00",
+        )
+        assert "parent_session_id: parent-1" in body
+        assert "fork_point_seq: 7" in body
 
     def test_env_and_cookie_and_bearer_redacted_from_body(self, tmp_path) -> None:
         session = _session(tmp_path)
@@ -343,7 +362,6 @@ class TestAtomicWrite:
         apply_task_definition(session, task_text="第一版目标")
         first = _write(tmp_path, session)
         old_meta = _meta(tmp_path, session.session_id)
-        apply_task_definition  # noqa: B018  定义轴已占，走用户消息推进 source seq
         session.append(USER_MESSAGE, {"content": "推进到第二步"})
         second = _write(tmp_path, session)
         assert second.ok and not second.skipped
@@ -375,7 +393,7 @@ class TestAtomicWrite:
         session.append(USER_MESSAGE, {"content": "推进"})
         with open(target, "r+", encoding="utf-8") as _fh:  # 句柄存活即 Windows 锁
             outcome = _write(tmp_path, session)
-            assert not outcome.ok, "外部锁定 → 明确失败，不静默吞"
+            assert not outcome.ok, "外部锁定：明确失败，不静默吞"
             assert outcome.error_kind in ("locked", "env")
             assert outcome.reason
         assert target.read_bytes() == old_bytes, "失败后旧文件原样（不谎报最新）"
@@ -447,6 +465,37 @@ class TestAtomicWrite:
         normalized = re.sub(r"(?m)^- generated_at: .*$", "- generated_at: -", body)
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         assert meta["content_sha256"] == digest
+
+    def test_deleted_body_is_rebuilt_not_fake_skipped(self, tmp_path) -> None:
+        """正文被外部删除（meta 还在）⇒ 重建，不假跳过（审查 P2-1 回归钉）。"""
+        session = _session(tmp_path)
+        apply_task_definition(session, task_text="T")
+        assert _write(tmp_path, session).ok
+        paths = progress_paths(tmp_path, session.session_id)
+        paths.markdown.unlink()
+        again = _write(tmp_path, session)
+        assert again.ok and not again.skipped, "缺文件不得说成最新"
+        assert "session_id:" in paths.markdown.read_text(encoding="utf-8")
+
+    def test_meta_write_failure_reports_and_self_heals(self, tmp_path, monkeypatch) -> None:
+        """meta 落盘失败 = 明确失败；下一次写自愈（审查 P3-6 补覆盖）。"""
+        session = _session(tmp_path)
+        apply_task_definition(session, task_text="T")
+
+        import agent_harness.session.progress as pm
+
+        real = pm._write_meta_atomic
+
+        def boom(meta_path, payload):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(pm, "_write_meta_atomic", boom)
+        outcome = _write(tmp_path, session)
+        assert not outcome.ok and outcome.error_kind == "env"
+        assert "meta" in outcome.reason
+        monkeypatch.setattr(pm, "_write_meta_atomic", real)
+        second = _write(tmp_path, session)
+        assert second.ok and not second.skipped, "meta 失败下次写自愈"
 
 
 # ── kill / 真实文件系统 / Git 可见面 ────────────────────────────────────────
@@ -608,7 +657,8 @@ class TestServiceWiring:
 
         rejected = asyncio.run(run())
         assert not rejected.ok and rejected.error_kind == "conflict"
-        assert not (tmp_path / "agent-progress" / "sid" / "progress.md").exists(),             "拒绝零事件 → 不写文件"
+        assert not (tmp_path / "agent-progress" / "sid" / "progress.md").exists(), \
+            "拒绝零事件：不写文件"
 
     def test_refresh_without_cwd_anchor_is_silent_skip(self, tmp_path) -> None:
         state = _svc_state(tmp_path)
@@ -651,4 +701,3 @@ class TestServiceWiring:
         monkeypatch.setattr("agent_harness.session.service.write_progress_file", boom)
         asyncio.run(run())  # 不上抛——主流程不被文件失败污染
         assert any("进度文件刷新失败" in r.message for r in caplog.records)
-

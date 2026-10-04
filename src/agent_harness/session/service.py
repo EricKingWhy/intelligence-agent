@@ -167,7 +167,7 @@ from agent_harness.session.model_switch import (
 from agent_harness.session.model_switch import (
     restore_policy_inputs as _restore_policy_inputs,
 )
-from agent_harness.session.progress import write_progress_file
+from agent_harness.session.progress import ProgressWriteOutcome, write_progress_file
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
@@ -1133,8 +1133,10 @@ class SessionService:
                 "跳过任务定义，会话照常启动",
                 task_outcome.reason,
             )
-        elif cwd:
+        else:
             # W-05（#349）：目标/约束确认后首次创建进度文件（票面工作指令 1）。
+            # 不预判 cwd 形态：refresh 内部按 session_cwd 单源锚解析，无锚静默
+            # 跳过——workspace_name 会话与显式 cwd 会话同口径收敛（审查 P3-3）。
             await self.refresh_progress_file(session_id)
         # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
         # "先建会话再 attach"）。只对**显式选定了目录**的会话做：未命名/未给 cwd 时目录是
@@ -3221,27 +3223,33 @@ class SessionService:
     # 错误以 TaskOutcome 返回（error_kind: shape/conflict），不抛领域异常——
     # HTTP 翻译在 web 层按 kind 走 422/409（spec 11 §6.1 口径）。
 
-    async def refresh_progress_file(self, session_id: str) -> None:
-        """W-05（#349）：项目可见进度文件 best-effort 刷新（调用点见下）。
+    async def refresh_progress_file(self, session_id: str) -> ProgressWriteOutcome | None:
+        """W-05（#349）：项目可见进度文件 best-effort 刷新。
 
         progress.md 是 SessionEvent 的确定性投影（``session/progress.py``）——
-        本方法只搬运：读事件 → ``session_cwd`` 单源锚取项目根 → 原子写。失败只记
-        日志、绝不污染调用点主流程（不变量 21 同款容错；文件内容与日志都不含
-        未脱敏值）。文件头 ``source_event_seq`` 记录投影时点，消费方据它判新旧，
-        不靠 wall clock。无 cwd 锚（session/started 缺失）或空会话即静默跳过。
+        本方法只搬运：读事件 → ``session_cwd`` 单源锚取项目根 → 原子写。
+        「写失败在任务状态可见」的解释性口径（审查 P3-1 钉住）：进度文件的
+        **currency 自报**在文件头 ``source_event_seq``（消费方据它判新旧，不靠
+        wall clock）；失败经 ``ProgressWriteOutcome.error_kind/reason`` 返回给
+        编程调用方 + ``logger.warning`` 落日志，绝不污染调用点主流程（不变量 21
+        同款容错）。无 cwd 锚（session/started 缺失）或空会话返回 None。
+
+        调用点：create_and_launch（首次创建）、``_apply_task_and_refresh``
+        （task 五命令成功后）、``on_run_terminal``（run 收口：里程碑/失败结论）。
+        暂停前/压缩前触发点归 W-06/W-12（票面分工），届时复用本方法。
         """
         try:
             events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
             if not events:
-                return
+                return None
             cwd = session_cwd(events)
             if not cwd:
-                return
-            await anyio.to_thread.run_sync(
+                return None
+            return await anyio.to_thread.run_sync(
                 write_progress_file, cwd, session_id, events
             )
         except SessionNotFound:
-            return
+            return None
         except Exception:
             logger.warning(
                 "进度文件刷新失败（session=%s）——文件保持上一版本，写失败可由"
@@ -3249,6 +3257,7 @@ class SessionService:
                 session_id,
                 exc_info=True,
             )
+            return None
 
     async def _apply_task_handler(
         self,

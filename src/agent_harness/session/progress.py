@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -59,7 +60,7 @@ from agent_harness.session.event import (
 from agent_harness.session.plan import derive_plan
 from agent_harness.session.task import derive_task_state
 
-logger = __import__("logging").getLogger("agent_harness.session.progress")
+logger = logging.getLogger("agent_harness.session.progress")
 
 PROGRESS_SCHEMA_VERSION = "1"
 _PROGRESS_DIRNAME = "agent-progress"
@@ -143,11 +144,12 @@ def _scan_run_lifecycle(
     paused_reason: dict[str, Any] = {}
     for event in events:
         run_id = event.run_id
+        data = event.data if isinstance(event.data, dict) else {}
         if event.type == RUN_STARTED and run_id is not None:
             state[run_id] = "open"
         elif event.type == RUN_PAUSED and run_id is not None:
             state[run_id] = "paused"
-            paused_reason[run_id] = event.data.get("reason")
+            paused_reason[run_id] = data.get("reason")
         elif event.type == RUN_RESUMED and run_id is not None:
             state[run_id] = "open"
             paused_reason.pop(run_id, None)
@@ -162,7 +164,7 @@ def _scan_run_lifecycle(
                 failures.append({
                     "kind": "run_failed",
                     "run_id": run_id,
-                    "reason": event.data.get("reason"),
+                    "reason": data.get("reason"),
                 })
     blockers = [
         {"kind": "run_paused", "run_id": run_id, "reason": paused_reason.get(run_id)}
@@ -275,10 +277,13 @@ def derive_progress_document(events, *, session_id: str) -> ProgressDocument:
         elif event.type == OPERATION_RECONCILED:
             pending.pop(data.get("tool_call_id"), None)
         elif event.type in (ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED):
+            # 生产 payload 形状（tooling/overflow.py / multiagent/tools.py）：
+            # artifact_id/session_id/source_tool/tool_call_id/size/mime_type——
+            # artifact_id 即 read_artifact 的 ref，name/ref 键生产者不写。
             evidence.append({
                 "artifact_id": data.get("artifact_id"),
-                "name": data.get("name"),
-                "ref": data.get("ref"),
+                "size": data.get("size"),
+                "source_tool": data.get("source_tool"),
                 "source_seq": event.seq,
             })
 
@@ -286,8 +291,9 @@ def derive_progress_document(events, *, session_id: str) -> ProgressDocument:
     fork_point_seq: int | None = None
     for event in events:
         if event.type == SESSION_FORKED:
-            parent = event.data.get("parent_session_id")
-            point = event.data.get("fork_point_seq")
+            data = event.data if isinstance(event.data, dict) else {}
+            parent = data.get("parent_session_id")
+            point = data.get("fork_point_seq")
             parent_session_id = parent if isinstance(parent, str) else None
             fork_point_seq = point if isinstance(point, int) and not isinstance(point, bool) else None
 
@@ -377,7 +383,7 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
     lines: list[str] = ["# 会话进度（progress.md）", ""]
     lines.append(f"- schema_version: {doc.schema_version}")
     lines.append(f"- session_id: {doc.session_id}")
-    lines.append(f"- parent_session_id: {doc.parent_session_id or '-'}")
+    lines.append(f"- parent_session_id: {_v(doc.parent_session_id)}")
     lines.append(f"- fork_point_seq: {doc.fork_point_seq if doc.fork_point_seq is not None else '-'}")
     lines.append(f"- source_event_seq: {doc.source_event_seq}")
     lines.append(f"- generated_at: {generated_at}")
@@ -407,7 +413,8 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
         verification = item["verification_value"] or "未验证"
         evidence = f"（证据：{_v(item['evidence'])}）" if item["evidence"] else ""
         lines.append(
-            f"- [{item['item_id']}] {_v(item['text'])}（origin={item['origin']}，"
+            f"- [{_v(item['item_id'])}] {_v(item['text'])}"
+            f"（origin={_v(item['origin'])}，"
             f"confirmed={item['confirmed']}）— 验证：{verification}{evidence}"
         )
     if not acceptance["criteria"]:
@@ -415,7 +422,9 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
     if acceptance["acceptance"]:
         acc = acceptance["acceptance"]
         reason = f"，原因：{_v(acc['reason'])}" if acc["reason"] else ""
-        lines.append(f"- 接受状态：{acc['decision']}{reason}（version {acceptance['version']}）")
+        lines.append(
+            f"- 接受状态：{_v(acc['decision'])}{reason}（version {acceptance['version']}）"
+        )
     else:
         lines.append(f"- 接受状态：未接受（version {acceptance['version']}）")
     lines.append("")
@@ -424,11 +433,13 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
     for milestone in doc.milestones:
         if milestone["kind"] == "verification_passed":
             evidence = f"（证据：{_v(milestone['evidence'])}）" if milestone["evidence"] else ""
-            lines.append(f"- 验证通过 [{milestone['item_id']}]{evidence}")
+            lines.append(f"- 验证通过 [{_v(milestone['item_id'])}]{evidence}")
         elif milestone["kind"] == "plan_step_completed":
-            lines.append(f"- 清单完成 [{milestone['item_id']}] {_v(milestone['content'])}")
+            lines.append(
+                f"- 清单完成 [{_v(milestone['item_id'])}] {_v(milestone['content'])}"
+            )
         elif milestone["kind"] == "run_completed":
-            lines.append(f"- Run 完成 run_id={milestone['run_id']}")
+            lines.append(f"- Run 完成 run_id={_v(milestone['run_id'])}")
     if not doc.milestones:
         lines.append(f"- {_NONE_LINE}")
     lines.append("")
@@ -438,7 +449,7 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
         if decision["kind"] == "accepted":
             reason = f"，原因：{_v(decision['reason'])}" if decision["reason"] else ""
             lines.append(
-                f"- 接受裁决：{decision['decision']}{reason}"
+                f"- 接受裁决：{_v(decision['decision'])}{reason}"
                 f"（来源 seq {decision['source_seq']}）"
             )
         else:
@@ -451,12 +462,14 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
     lines.append("## 失败尝试与坑点")
     for failure in doc.failures:
         if failure["kind"] == "run_failed":
-            lines.append(f"- Run 失败 run_id={failure['run_id']}，原因：{_v(failure['reason'])}")
+            lines.append(
+                f"- Run 失败 run_id={_v(failure['run_id'])}，原因：{_v(failure['reason'])}"
+            )
         elif failure["kind"] == "compaction_failed":
-            lines.append(f"- 压缩失败 error_class={failure['error_class']}"
+            lines.append(f"- 压缩失败 error_class={_v(failure['error_class'])}"
                          f"（来源 seq {failure['source_seq']}）")
         elif failure["kind"] == "guard_stuck":
-            lines.append(f"- 循环护栏 level={failure['level']}"
+            lines.append(f"- 循环护栏 level={_v(failure['level'])}"
                          f"（来源 seq {failure['source_seq']}）")
     if not doc.failures:
         lines.append(f"- {_NONE_LINE}")
@@ -465,8 +478,8 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
     lines.append("## 未决 Operation")
     for operation in doc.pending_operations:
         lines.append(
-            f"- tool_call_id={operation['tool_call_id']} "
-            f"tool={operation['tool_name']}"
+            f"- tool_call_id={_v(operation['tool_call_id'])} "
+            f"tool={_v(operation['tool_name'])}"
             f"（来源 seq {operation['source_seq']}，NEED_RECONCILE 待对账）"
         )
     if not doc.pending_operations:
@@ -478,10 +491,10 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
         parts = [f"来源 seq {artifact['source_seq']}"]
         if artifact["artifact_id"]:
             parts.append(f"artifact_id={_v(artifact['artifact_id'])}")
-        if artifact["name"]:
-            parts.append(f"name={_v(artifact['name'])}")
-        if artifact["ref"]:
-            parts.append(f"ref={_v(artifact['ref'])}")
+        if artifact["size"] is not None:
+            parts.append(f"size={artifact['size']}")
+        if artifact["source_tool"]:
+            parts.append(f"tool={_v(artifact['source_tool'])}")
         lines.append("- " + "，".join(parts))
     if not doc.evidence:
         lines.append(f"- {_NONE_LINE}")
@@ -491,10 +504,10 @@ def render_progress_markdown(doc: ProgressDocument, *, generated_at: str) -> str
     for blocker in doc.blockers:
         if blocker["kind"] == "run_paused":
             lines.append(
-                f"- Run 暂停 run_id={blocker['run_id']}，原因：{_v(blocker['reason'])}"
+                f"- Run 暂停 run_id={_v(blocker['run_id'])}，原因：{_v(blocker['reason'])}"
             )
         else:
-            lines.append(f"- Run 在途 run_id={blocker['run_id']}")
+            lines.append(f"- Run 在途 run_id={_v(blocker['run_id'])}")
     if not doc.blockers:
         lines.append(f"- {_NONE_LINE}")
     lines.append("")
@@ -518,8 +531,13 @@ class ProgressWriteOutcome:
     reason: str | None = None
 
 
-def _normalized_digest(body: str) -> str:
-    """内容哈希把 generated_at 归一成占位——同源事件重复写 ⇒ 幂等跳过。"""
+def progress_content_digest(body: str) -> str:
+    """进度文件内容哈希（幂等跳过与 W-06 reader 对账的**公共契约**）。
+
+    ``generated_at`` 行归一成占位后取 sha256——同源事件 ⇒ 同哈希，与写入时刻
+    无关。任何消费方判断"文件是否与事件流一致"MUST 复用本函数，不得自算
+    第二种归一化（两套哈希 = 第二真相）。
+    """
     normalized = re.sub(r"(?m)^- generated_at: .*$", "- generated_at: -", body)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
@@ -550,10 +568,9 @@ def _write_meta_atomic(meta_path: Path, payload: dict) -> None:
 
 
 def _cleanup_stale_tmp(directory: Path) -> None:
-    # 同前缀孤儿临时文件全清（历次版本的后缀形态可能不同；本目录为 writer 专用）
+    # 同前缀孤儿临时文件全清（历次版本的后缀形态可能不同；本目录为 writer 专用，
+    # glob `progress.md.*` 不可能命中 progress.md / progress.meta.json / progress.prev.md）
     for stale in directory.glob(_TMP_PREFIX + "*"):
-        if stale.name in (_MD_NAME, _META_NAME, _PREV_NAME):
-            continue
         try:
             stale.unlink()
         except OSError:
@@ -590,7 +607,7 @@ def write_progress_file(
     doc = derive_progress_document(events, session_id=session_id)
     stamp = now or datetime.now(UTC).isoformat(timespec="seconds")
     body = render_progress_markdown(doc, generated_at=stamp)
-    digest = _normalized_digest(body)
+    digest = progress_content_digest(body)
 
     def fail(kind: str, reason: str) -> ProgressWriteOutcome:
         logger.warning("progress 写入失败（session=%s, kind=%s）：%s",
@@ -608,6 +625,7 @@ def write_progress_file(
     old_meta = _read_meta(paths.meta)
     if (
         old_meta is not None
+        and paths.markdown.exists()  # 正文被外部删掉 ⇒ 重建，不假跳过（审查 P2-1）
         and old_meta.get("source_event_seq") == doc.source_event_seq
         and old_meta.get("content_sha256") == digest
     ):
