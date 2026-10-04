@@ -532,6 +532,7 @@ class TestSendMessageIdlePassthrough:
         assert mock_resume.call_args.kwargs["task"] == "继续"
         assert mock_resume.call_args.kwargs["amend"] is amend
 
+
 class TestSessionDeclarationValidatorNonePort:
     """`validate_session_declaration=None` 兜底直测（#615③，#564 裁决 (a) 残余）。
 
@@ -566,6 +567,14 @@ class TestSessionDeclarationValidatorNonePort:
         state.stores.delegation_tree_ledger.ensure_session_budget = AsyncMock()
         mock_build = self._launch(state, tmp_path, limits={"no-such-tool": 3})
         assert mock_build.call_count == 1, "跳过校验不等于放弃 launch"
+        # #624-3：坏名到达 build_runtime 的 session_declared_limits（装配层
+        # validate_tool_call_limits_registered(scope="session") 的输入）——
+        # "流到装配层拒绝点"在本测内钉面。装配层的真拒绝另由
+        # tests/test_cli.py::test_cli_create_rejects_unregistered_session_tool_name_before_any_work
+        # 端到端钉住（validator 缺位通道走真实 build_runtime → BudgetRejection，
+        # 零会话落盘）。
+        declared = mock_build.call_args.kwargs["session_declared_limits"]
+        assert declared.tool_call_limits == {"no-such-tool": 3}
 
     def test_no_session_limits_never_touches_the_port(self, tmp_path):
         """声明没带 tool_call_limits ⇒ 连端口都不调用（is not None 短路之外的第一道闸）。"""

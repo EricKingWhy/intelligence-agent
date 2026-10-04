@@ -43,8 +43,11 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
         assert any(e["type"] == "artifact/externalized" for e in live)
         assert any(tool["name"] == "inspect_artifact" for tool in model.bound_tools)
         refreshed = client.get(f"/api/sessions/{configured_sessions[0]}/events").json()
+        # refreshed 前两条是 run 开始**之前**落盘的会话事实（session/started +
+        # task/defined，W-07 #351 创建即定义），不在 run 的 SSE 流里——刷新重建
+        # 与 live 流的对齐从第三条开始。
         assert [(e["seq"], e["type"], e["data"]) for e in live if e["seq"] is not None] == [
-            (e["seq"], e["type"], e.get("data", {})) for e in refreshed[1:]
+            (e["seq"], e["type"], e.get("data", {})) for e in refreshed[2:]
         ]
 
 
