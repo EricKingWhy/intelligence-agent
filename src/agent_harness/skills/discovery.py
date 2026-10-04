@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -45,7 +46,7 @@ def single_line(text: str) -> str:
     return _LINE_BREAKERS.sub(" ", text)
 
 
-def _spath(path: Any) -> str:
+def _spath(path: str | os.PathLike[str]) -> str:
     """路径插值单行化（#607/F3）：POSIX 文件名可合法含换行/控制符，错误串不得
     被路径内容拉成多行（Pi skills.ts 对 filePath 同样做 escapeXml 纪律）。"""
     return single_line(str(path))
