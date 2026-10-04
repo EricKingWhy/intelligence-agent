@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import asdict
@@ -58,22 +59,52 @@ def test_read_events_bad_line_and_diagnostic_golden(
     store: JsonlSessionStore, caplog: pytest.LogCaptureFixture
 ) -> None:
     session_id = "reader-diagnostics"
-    payload = b"".join(
-        [
-            _event_line(session_id, 0, SESSION_STARTED, timestamp="t0"),
-            b"null\n",
-            b'{"type":"user/message","session_id":"reader-diagnostics"}\n',
-            b'{"seq":true,"type":"user/message","session_id":"reader-diagnostics"}\n',
-            b'{"seq":"1","type":"user/message","session_id":"reader-diagnostics"}\n',
-            b'{"seq":-1,"type":"user/message","session_id":"reader-diagnostics"}\n',
-            b"\xff\n",
-            _event_line(
-                session_id, 1, USER_MESSAGE, timestamp="t1", data={"content": "kept"}
-            ),
-            b'{"seq":2,"type":"user/message"',  # incomplete final line; no newline
-        ]
-    )
+    # 逐物理行建 payload（#565）：损坏诊断现在带 offset/len/sha256，期望值必须
+    # 从同一批原字节算出，否则会钉死 SessionEvent.to_dict 的序列化形状。
+    raw_lines = [
+        _event_line(session_id, 0, SESSION_STARTED, timestamp="t0"),
+        b"null\n",
+        b'{"type":"user/message","session_id":"reader-diagnostics"}\n',
+        b'{"seq":true,"type":"user/message","session_id":"reader-diagnostics"}\n',
+        b'{"seq":"1","type":"user/message","session_id":"reader-diagnostics"}\n',
+        b'{"seq":-1,"type":"user/message","session_id":"reader-diagnostics"}\n',
+        b"\xff\n",
+        _event_line(
+            session_id, 1, USER_MESSAGE, timestamp="t1", data={"content": "kept"}
+        ),
+        b'{"seq":2,"type":"user/message"',  # incomplete final line; no newline
+    ]
+    payload = b"".join(raw_lines)
     _write_events(store, session_id, payload)
+
+    # 期望诊断：行 2–7 是**完整坏行**（WARNING，带脱敏定位），行 9 是无换行结尾的
+    # 未写完整片段（DEBUG，容错跳过，不进 WARNING 列表）。reason 逐行钉死。
+    offsets: list[int] = []
+    running = 0
+    for raw in raw_lines:
+        offsets.append(running)
+        running += len(raw)
+    corrupt_reasons = {
+        2: "not_event_dict",
+        3: "bad_seq",
+        4: "bad_seq",
+        5: "bad_seq",
+        6: "bad_seq",
+        7: "invalid_utf8",
+    }
+    expected_warnings = [
+        (
+            _STORE_LOGGER,
+            logging.WARNING,
+            (
+                f"损坏行 events.jsonl:{lineno} offset={offsets[lineno - 1]} "
+                f"len={len(raw_lines[lineno - 1])} "
+                f"sha256={hashlib.sha256(raw_lines[lineno - 1]).hexdigest()} "
+                f"reason={reason}（原字节保留在文件中未改动，恢复将拒绝）"
+            ),
+        )
+        for lineno, reason in corrupt_reasons.items()
+    ]
 
     caplog.set_level(logging.WARNING, logger=_STORE_LOGGER)
     events = store.read_events(session_id)
@@ -92,15 +123,7 @@ def test_read_events_bad_line_and_diagnostic_golden(
     assert [
         (record.name, record.levelno, record.getMessage())
         for record in caplog.records
-    ] == [
-        (_STORE_LOGGER, logging.WARNING, "跳过损坏行 events.jsonl:2（合法 JSON 但非事件字典）"),
-        (_STORE_LOGGER, logging.WARNING, "跳过损坏行 events.jsonl:3（seq 缺失、类型非法或为负）"),
-        (_STORE_LOGGER, logging.WARNING, "跳过损坏行 events.jsonl:4（seq 缺失、类型非法或为负）"),
-        (_STORE_LOGGER, logging.WARNING, "跳过损坏行 events.jsonl:5（seq 缺失、类型非法或为负）"),
-        (_STORE_LOGGER, logging.WARNING, "跳过损坏行 events.jsonl:6（seq 缺失、类型非法或为负）"),
-        (_STORE_LOGGER, logging.WARNING, "跳过损坏行 events.jsonl:7（半行或写入中断）"),
-        (_STORE_LOGGER, logging.WARNING, "跳过损坏行 events.jsonl:9（半行或写入中断）"),
-    ]
+    ] == expected_warnings
 
 
 def test_missing_and_empty_jsonl_return_shapes(store: JsonlSessionStore) -> None:

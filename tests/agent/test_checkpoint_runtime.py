@@ -144,6 +144,7 @@ async def test_checkpoint_does_not_emit_session_event(tmp_path: Path) -> None:
             "session/started",
             "user/message",
             "run/started",
+            "model/request-started",
             "model/request",
             "model/completed",
             "tool/call",

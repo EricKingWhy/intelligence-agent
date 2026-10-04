@@ -62,16 +62,21 @@ class WriteTool(Tool):
         """调 sandbox.write_text；路径越界映射成 PERMISSION_DENIED。"""
         # 读旧内容供前端 diff（文件不存在 → before 为空，表示这是新建）。
         # 读失败不阻塞写入——write 本就是覆盖语义，diff 是辅助视图不是契约。
-        # except 面 = OSError 全族（#610）：目标形态错误在两平台抛出不同子类
-        # （POSIX：目标是目录 → IsADirectoryError、父路径是文件 → NotADirectoryError；
-        # Windows：分别落在 PermissionError / FileNotFoundError），窄元组会让 POSIX
-        # 形态从 before-read 逃逸成 TOOL_EXECUTION_ERROR，走不到下方 write_text 的
-        # INVALID_ARGUMENT 映射分支。形态甄别是 write_text 分支的唯一职责，
-        # before-read 只负责"能读到就拿 diff 底稿，读不到就算了"。
+        # #610：POSIX 上「写目标是目录」的 before-read 抛 IsADirectoryError、
+        # 「父路径是文件」抛 NotADirectoryError（Windows 分别报 PermissionError/
+        # FileNotFoundError）。只捕后两者会让前两者逃逸 execute() 被包装成
+        # TOOL_EXECUTION_ERROR，下方 write_text 的四分支形态映射
+        # （PermissionError/IsADirectoryError/NotADirectoryError/FileExistsError）
+        # 在 Linux 上永远走不到。
         before = ""
         try:
             before = self._sandbox.read_text(args.path)
-        except OSError:
+        except (
+            FileNotFoundError,
+            PermissionError,
+            IsADirectoryError,
+            NotADirectoryError,
+        ):
             pass
 
         try:
