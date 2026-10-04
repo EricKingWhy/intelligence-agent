@@ -122,6 +122,7 @@ from agent_harness.web.domain_errors import (
     storage_http_error,
     storage_http_status,
 )
+from agent_harness.web.metrics import METRICS_CONTENT_TYPE, collect_process_metrics
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
@@ -1517,6 +1518,20 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             "status": "ok",
             "checkpoint_save_failures": checkpoint_save_failure_count(),
         }
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """进程健康观测面（#612）：RSS / gc 堆 / 存活 task / uptime。
+
+        Prometheus 文本暴露格式（v0.0.4）；Diagnostic 层，Event≠Log，不进
+        SessionEvent。读取零副作用（gc 扫描在 worker 线程），单项采集失败
+        ⇒ 该指标整行缺席（缺席≠占位值），不影响任何业务路径（不变量 #21）。
+        默认无鉴权——与 /api/health 同一口径（AC5，不引入开关）。
+        """
+        return Response(
+            content=await collect_process_metrics(),
+            media_type=METRICS_CONTENT_TYPE,
+        )
 
     @app.get("/api/sessions")
     async def list_sessions(
