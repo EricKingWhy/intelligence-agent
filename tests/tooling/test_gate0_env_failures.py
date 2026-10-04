@@ -216,3 +216,52 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
         path.write_text(json.dumps(make_doc(with_env)), encoding="utf-8")
         verdicts.append(gate0.replay_reading(str(path)))
     assert verdicts == [0, 0], "env 字段不得影响 replay 判定（两份都必须一致通过）"
+
+
+# ── P3（#609 批审查登记）：口径行的 main() 调用点钉 ──
+#
+# AC3 三臂只钉 env_verdict_line 纯函数本身；main() FAIL 分支的接线
+# （`env_line = env_verdict_line(results); if env_line is not None: print(env_line)`）
+# 无钉——接线断了（例如调用被误删）纯函数钉不红。此处 mock run_lane 走
+# main(['--no-record']) 全链路，用 capsys 断言口径行的在场/缺席。
+
+
+def _patch_main_io(monkeypatch, outcomes):
+    """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。"""
+
+    def fake_run_lane(lane):
+        rc, out = outcomes[lane.name]
+        return rc, 0.1, out
+
+    class _Proc:
+        stdout = "a" * 40 + "\n"
+
+    monkeypatch.setattr(gate0, "run_lane", fake_run_lane)
+    monkeypatch.setattr(gate0, "git", lambda *args: _Proc)
+    monkeypatch.setattr(gate0, "surface_report", lambda since: "")
+    monkeypatch.setattr(gate0, "_utf8_stdio", lambda: None)
+
+
+def test_main_fail_branch_prints_env_verdict_line_when_all_env(monkeypatch, capsys):
+    names = [ln.name for ln in gate0.build_lanes("")]
+    outcomes = {n: (3221225794, "boom") for n in names}
+    _patch_main_io(monkeypatch, outcomes)
+    rc = gate0.main(["--no-record"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Gate-0 FAIL" in out
+    lines = [ln for ln in out.splitlines() if "环境项之外 0 失败" in ln]
+    assert len(lines) == 1
+    assert f"{len(names)}/{len(names)}" in lines[0]
+
+
+def test_main_fail_branch_omits_env_verdict_line_on_mixed_red(monkeypatch, capsys):
+    names = [ln.name for ln in gate0.build_lanes("")]
+    outcomes = {n: (1, "assert x == y") for n in names}
+    outcomes[names[0]] = (3221225794, "boom")
+    _patch_main_io(monkeypatch, outcomes)
+    rc = gate0.main(["--no-record"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Gate-0 FAIL" in out
+    assert "环境项之外 0 失败" not in out  # 混合真红 ⇒ 口径行缺席（真红优先）

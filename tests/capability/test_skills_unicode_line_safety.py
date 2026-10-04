@@ -26,6 +26,7 @@ from agent_harness.session import Session
 from agent_harness.skills.capability import SkillCapability
 from agent_harness.skills.context_provider import SkillCatalogContextProvider
 from agent_harness.skills.discovery import (
+    SKILL_FILE_MAX_BYTES,
     SkillCatalog,
     SkillCatalogEntry,
     SkillDiscovery,
@@ -103,3 +104,40 @@ async def test_load_failure_message_single_line_for_unicode_boundary():
     assert result.error_code is ErrorCode.INVALID_ARGUMENT
     assert len(result.message.splitlines()) == 1
     assert "ghost" in result.message
+
+
+# ── P3（#608 批审查登记）：load_body 两条 OSError 消息同守单行纪律 ──
+#
+# 越界（TOCTOU 防线触发）与超大（尺寸上限）两条失败路的 f-string 消息都插值
+# _spath——与 F3 同一威胁模型（路径内容可含换行/类换行字符），消息进
+# SkillCapability.errors() 面前必须单行。修复前缺钉：#607 三变异只护
+# discovery / 目录行 / load_skill 失败 message 面，load_body 两分支裸奔。
+
+
+def test_load_body_boundary_escape_message_stays_single_line(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    # 越界条目：source_path resolve 后在 scanned_root 外（TOCTOU 场景不需要
+    # 文件存在——边界检查先于 stat，见 load_body 分支顺序）。
+    outside = tmp_path / "outside\u2028evil.md"
+    entry = SkillCatalogEntry(name="esc", description="d", source_path=outside, scanned_root=root)
+    with pytest.raises(OSError, match="resolves outside") as excinfo:
+        entry.load_body()
+    msg = str(excinfo.value)
+    assert len(msg.splitlines()) == 1
+    assert "outside" in msg and "evil" in msg  # 单行化不吞内容
+    assert "refusing to read" in msg
+
+
+def test_load_body_oversize_message_stays_single_line(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    big = root / "big\u2028skill.md"
+    big.write_bytes(b"x" * (SKILL_FILE_MAX_BYTES + 1))
+    entry = SkillCatalogEntry(name="big", description="d", source_path=big, scanned_root=root)
+    with pytest.raises(OSError, match="too large") as excinfo:
+        entry.load_body()
+    msg = str(excinfo.value)
+    assert len(msg.splitlines()) == 1
+    assert "big" in msg and "skill" in msg
+    assert str(SKILL_FILE_MAX_BYTES) in msg
