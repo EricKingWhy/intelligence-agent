@@ -674,4 +674,3 @@ def test_trimmed_same_prefix_entries_dedup_after_truncation():
     assert len(identifiers) == len(set(identifiers)), (
         "截断后同值的条目不得在投影中重复（#614②）"
     )
-
