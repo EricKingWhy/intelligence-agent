@@ -20,7 +20,12 @@ from pydantic import BaseModel, Field
 from agent_harness.agent.run_budget import consumed_from_events
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
-from agent_harness.session import MODEL_FAILED, MODEL_FALLBACK, MODEL_REQUEST
+from agent_harness.session import (
+    MODEL_FAILED,
+    MODEL_FALLBACK,
+    MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
+)
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -389,6 +394,13 @@ class TestRequestAccounting:
         assert [(e.data["role"], e.data["outcome"]) for e in requests] == [
             ("primary", "failed"), ("fallback", "completed"),
         ]
+        starts = [e for e in session._events if e.type == MODEL_REQUEST_STARTED]
+        assert [event.data["role"] for event in starts] == ["primary", "fallback"]
+        assert [event.data["request_id"] for event in starts] == [
+            event.data["request_id"] for event in requests
+        ]
+        assert len({event.data["request_id"] for event in starts}) == 2
+        assert all(start.seq < request.seq for start, request in zip(starts, requests))
         consumed = consumed_from_events(session._events)
         assert consumed.model_requests == 2, "一次决策 = 两次真实请求"
         assert consumed.agent_turns == 1, "只有被接纳的那一次算轮"

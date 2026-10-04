@@ -65,6 +65,7 @@ from agent_harness.session import (
     MODEL_FAILED,
     MODEL_FALLBACK,
     MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     REASONING_INTERRUPTED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -640,13 +641,22 @@ async def test_pause_arm_is_nonterminal_and_closes_the_execution(
     紧随其后的任何终结臂都必须被单终态不变量拦住（否则一次暂停会追加一条假失败）。
 
     closeout：`LaunchRunBudget()` 无 run ceiling ⇒ 四维都还有余量（`closeout_capacity`）
-    ⇒ 会尝试一次模型 closeout，但本 kit 的 model 是 `object()`（无 `ainvoke`）⇒ 回落
-    确定性 continuation。**这次失败调用照样记 `model_requests`**（`#313`：请求发出去过
+    ⇒ 会尝试一次模型 closeout；fake Provider 确实进入 `ainvoke` 后失败，回落确定性
+    continuation。**这次失败调用照样记 `model_requests`**（`#313`：请求发出去过
     就是请求，失败只是没有产出决策 ⇒ 不增 `agent_turns`），而它没报 usage / cost
     ⇒ 那两个维度记**未知**而不是 0（`11 §6.1`：不可得 ≠ 0）。
     """
+    class _FailingCloseoutModel:
+        calls = 0
+
+        async def ainvoke(self, messages: list, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise RuntimeError("closeout Provider failed")
+
+    model = _FailingCloseoutModel()
     memory = _MemorySpy()
     kit = _kit(session, memory_writer=memory)
+    kit.runtime._raw_model = model
     mark = len(session.events)
     launch = LaunchRunBudget(consumed=BudgetConsumed(agent_turns=2))
 
@@ -657,7 +667,10 @@ async def test_pause_arm_is_nonterminal_and_closes_the_execution(
         ),
     )
 
-    assert [e.type for e in emitted] == [MODEL_REQUEST, RUN_PAUSED]
+    assert [e.type for e in emitted] == [
+        MODEL_REQUEST_STARTED, MODEL_REQUEST, RUN_PAUSED,
+    ]
+    assert model.calls == 1, "开始事件必须对应已进入的 Provider 方法调用"
     paused = kit.since(mark)[-1]
     assert paused.run_id == RUN_ID
     # `#314`：工具维恒在快照里（本用例不执行任何工具 ⇒ 0 / 空表，不是缺键）

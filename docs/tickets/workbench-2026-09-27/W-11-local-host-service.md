@@ -25,4 +25,3 @@
 - **契合点**：与 W-11 目标行为逐条同形——默认 `127.0.0.1` 受管端口 ↔ `ServerApp.ip='localhost'`；token/握手材料只走限权本机通道 ↔ token 只进启动用户终端/凭据面，不进 URL/日志；「普通网页无法仅猜端口控制会话」↔ token 鉴权 on by default；启动者验证健康端点与鉴权 ↔ 客户端先认证再使用；三方附着同一服务 ↔ DSH 单 Host 模型。
 - **判定**：附着/发现/冷启动竞态闭环的**语义** = PORT DESIGN（只借「默认 loopback + 鉴权默认启用 + 本机通道交付」，不复制代码；**不借** token-in-URL 便利路径——票面明令 token 不进 URL；不借 cookie 粘性会话模型）。实现 = REUSE `InstanceLock`（OS advisory 锁做竞争仲裁 + 进程内幂等计数，已覆盖「进程死锁自释放」）、`Credentials` seam（ADR-0032 §5 keyring 凭据管理器，测试可注入内存后端）、`AuthSeamMiddleware`（JWT HS256 fail-closed + exp 强制，401 形状已有测试钉住）、FastAPI/uvicorn 与既有 `/api/health`；BUILD 仅限本仓没有的面：服务端点发现状态文件、附着核验分类（ABSENT/STALE/AUTH_FAILED/ATTACHABLE）、`serve` 冷启动二次检查闭环、CLI `serve` 子命令。远程部署入口保持既有显式配置路径不变（`create_prod_app` + 显式 jwt_secret），不与个人桌面服务混线。
 - **License**：DSH=MIT（本票不复制其代码）；Jupyter Server 文档为官方文档参考（Jupyter 项目 BSD，无代码复制）；keyring=MIT（既有依赖，不新增第三方依赖）。
-

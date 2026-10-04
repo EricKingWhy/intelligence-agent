@@ -99,3 +99,57 @@ async def test_pre_cas_name_set_matches_real_root_registry(tmp_path, multiagent)
         assert "delegate" in helper_names
     else:
         assert "delegate" not in helper_names
+
+
+def test_root_profile_spec_resolves_the_declared_profile():
+    """#615②：根配额取用点的判定表——None/main 落 main，具名档位返回自身。"""
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+    from agent_harness.assembly import _root_profile_spec
+
+    assert _root_profile_spec(None) is BUILTIN_PROFILES["main"]
+    assert _root_profile_spec("main") is BUILTIN_PROFILES["main"]
+    assert _root_profile_spec("coding") is BUILTIN_PROFILES["coding"]
+
+
+@pytest.mark.asyncio
+async def test_delegate_tree_quotas_are_single_sourced(tmp_path):
+    """#615②：DelegateTool 树配额 == provider.activate 树账 == 档位声明。
+
+    此前 `_build_tooling` 与 `build_runtime` 各写一遍取用式（双算）：漂移时
+    工具面文案里的"整棵委派树最多 N 次"与树账的 max_delegations 各说各话，
+    没有任何测试会红。双方现在都从 `_root_profile_spec` 取；本测试在真实装配
+    上同时钉住两条消费面（`agent_profile=None` ⇒ main 档位）。
+    """
+    settings = _settings(tmp_path, multiagent=True)
+    _, wiring = await assemble_wiring(settings)
+    stores = recovery_stores(tmp_path / "harness.db")
+    await initialize_stores(stores)
+    workspace_registry = WorkspaceRegistry(root=tmp_path, backend="local")
+    session_id = "sess-quotas"
+    workspace = tmp_path / "workspaces" / session_id
+    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModelFactory()):
+        runtime = await build_runtime(
+            settings=settings,
+            wiring=wiring,
+            stores=stores,
+            workspace_registry=workspace_registry,
+            session_id=session_id,
+            workspace=workspace,
+            session_store=session_store,
+            max_agent_turns=10,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+        )
+
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+    from agent_harness.multiagent.tools import DelegateTool
+
+    expected = BUILTIN_PROFILES["main"].max_delegations
+    delegate = next(
+        tool for tool in runtime.registry.list() if isinstance(tool, DelegateTool)
+    )
+    # 工具面消费点（_build_tooling）：工具描述里的"整棵委派树最多 N 次"。
+    assert delegate._max_delegations == expected
+    # 树账消费点（build_runtime → provider.activate）：委派计数判超的那份。
+    assert delegate._provider._max_delegations == expected

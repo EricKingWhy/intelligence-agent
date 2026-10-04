@@ -57,6 +57,8 @@ MODEL_FAILED = "model/failed"
 # ——primary / fallback / closeout 各记一条，被拒绝或传输失败的请求也**在**其中
 # （它们不增 agent_turns，但确实发生过）。usage / cost_usd 只在该次响应自报时落键。
 MODEL_REQUEST = "model/request"
+# #604：durable 的 attempt 开始事实；不承载结算或预算计数语义。
+MODEL_REQUEST_STARTED = "model/request-started"
 TOOL_CALL = "tool/call"
 TOOL_RESULT = "tool/result"
 OPERATION_RECONCILE_REQUIRED = "operation/reconcile-required"
@@ -216,6 +218,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MODEL_FAILED,
         # #313 T5：每次实际 Provider 请求的账目记录（model_requests 的唯一计数点）
         MODEL_REQUEST,
+        # #604：开始事件仅用于在途可见性，不进入预算计数。
+        MODEL_REQUEST_STARTED,
         TOOL_CALL,
         TOOL_RESULT,
         TOOL_OUTPUT_DELTA,

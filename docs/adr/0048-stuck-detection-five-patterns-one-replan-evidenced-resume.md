@@ -262,6 +262,16 @@ workspace 就是父的同一棵树"给 child 注入环境那一半，看起来�
    而不是父档。环境那一半仍未注入（端口 `workspace=None` ⇒ 环境格如实缺席），留给后续票。
    本段其余论证（注入而非内建、两格同源靠唯一构造点）不因此改动。
 
+   > **勘误二（2026-10-04，#608 交付后）**：环境那一半已按上文预写规则注入——
+   > `AgentFactory.create` 收 `workspace`（委派方传 `provider._parent_cwd()`），
+   > `delegated_child_evidence_port` 透传给 `evidence_port`。同源是构造保证：该值与
+   > 写进子 SESSION_STARTED 的 cwd 字段同一个，恢复侧 `Path(persisted_cwd)` 读回的是
+   > 同一事件字段（child 与父共用同一棵 Session-scoped workspace，spec 10 §9）。
+   > 父无锚 ⇒ 端口 `workspace=None` ⇒ 环境格如实缺席、`environment_change` 判据
+   > fail-closed（判据零改动）。钉子：factory 腿 `tests/agent/test_stuck_runtime.py`
+   > （TestDelegatedChildPolicyFace）与端到端 `tests/multiagent/test_child_session_resume.py`
+   > （#608 节：环境格点亮 + 同源双向 + 无锚臂）。
+
 **摘要输入集**（`policy_version_of` 的实参，两侧同源）：权限档、模型、agent profile、
 reasoning effort、context providers（排序后）。两个**刻意排除**项，都是 fail-open 的防线：
 
