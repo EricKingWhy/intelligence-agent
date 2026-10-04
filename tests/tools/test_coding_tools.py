@@ -323,8 +323,9 @@ class TestWriteTool:
         ——旧 except 元组接不住 ⇒ 逃逸 execute() 被包装成 TOOL_EXECUTION_ERROR，
         尽管覆盖写本身完全合法：write 是 content-absolute 覆盖语义（spec 05 §5），
         写入合法性不依赖旧内容可读。成熟产品同口径：git 对不可解码文件显示
-        "Binary files differ"（本地 demo 57d6903 实证）、aider 输出
-        "Dropping {fname} from the chat."——读不出 ≠ 操作非法，展示层降级；
+        "Binary files differ"（任何仓库对非 UTF-8/二进制文件跑 git diff 即可
+        复现）、aider 输出 "Dropping {fname} from the chat."（aider/coders.py
+        公开源码）——读不出 ≠ 操作非法，展示层降级；
         OpenHands ACI 的 binary 阻断是 content-relative str_replace 的正确性
         要求，不适用于覆盖写。红 = TOOL_EXECUTION_ERROR，绿 = 写入成功且
         diff before 置空（同新文件口径）。
@@ -349,6 +350,10 @@ class TestWriteTool:
             IsADirectoryError(21, "injected"),
             NotADirectoryError(20, "injected"),
             UnicodeDecodeError("utf-8", b"\xff", 0, 1, "injected"),
+            # P3 跟进（#623 批审查登记项）：枚举外 OSError 形态（EINVAL 为例）。
+            # before-read 只做 diff 展示，任何读失败都只降级、不得逃逸成
+            # TOOL_EXECUTION_ERROR——红 = 旧枚举元组接不住本形态。
+            OSError(22, "injected"),
         ],
         ids=[
             "file-not-found",
@@ -356,6 +361,7 @@ class TestWriteTool:
             "is-a-directory",
             "not-a-directory",
             "unicode-decode",
+            "generic-oserror",
         ],
     )
     @pytest.mark.asyncio
@@ -369,7 +375,11 @@ class TestWriteTool:
         本测在 ``sandbox.read_text`` 缝上直接注入：目标/父路径均为合法文件形态，
         降级后写入必须照常成功（diff before 置空）；「写目标是目录/父路径是
         文件」的形态甄别仍由 write_text 分支独占，已由 #610 的两个用例在
-        同一缝上钉住，此处不重复。
+        同一缝上钉住，此处不重复。P3 跟进批把 except 从枚举五形态放宽为
+        ``(OSError, UnicodeDecodeError)``：读侧枚举永远追不全平台形态
+        （EINVAL/ENOSPC/EBUSY…），而 before-read 是展示辅助非契约（write.py
+        既有注释），宽捕降级才是该缝的正确语义；写侧失败仍由 write_text
+        四分支精确映射，职责不变。
         """
         sandbox.write_text("doc.txt", "old")
 
