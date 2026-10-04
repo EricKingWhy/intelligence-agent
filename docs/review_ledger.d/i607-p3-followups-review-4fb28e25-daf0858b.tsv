@@ -1,0 +1,1 @@
+2026-10-04	#607 批 P3×6 修复批修后重审：两轴独立只读子代理各审全 diff（Standards 轴 + Correctness/Spec 轴），均 PASS-WITH-FINDINGS（P0/P1/P2=0）；六项闭合判定逐项证实（ADR 时点语义/_spath 类型/混合臂登记制/load_body 两钉/env 调用点钉/父 cwd 读失败两腿），变异三钉承重核验吻合（7红/1红/1红→还原）；新 findings 4×P3 观察级全部登记处置不修（缓存命中断言非独立证据/main 钉环境耦合/fake git 保真度/瞬时腿私有缝——非缺陷，不扩 scope），明细见 2026-10 归档「#607 批 P3 残余修复批」节。	4fb28e25..daf0858b

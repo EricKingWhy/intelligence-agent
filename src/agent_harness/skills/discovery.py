@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -30,7 +31,9 @@ SKILL_NAME_MAX_LENGTH = 64
 _NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-_]*")
 
 #: 目录行 / ToolResult message 是**单行声明面**（#588 兜底层）。
-_LINE_BREAKERS = re.compile(r"[\x00-\x1f\x7f]+")
+#: #607/F2：补 U+0085 NEL / U+2028 LS / U+2029 PS——str.splitlines() 识别集的
+#: 这三成员（CPython 文档全集，本机 3.13.5 实测）漏掉则「单行」输出仍被撕成多行。
+_LINE_BREAKERS = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")
 
 
 def single_line(text: str) -> str:
@@ -41,6 +44,12 @@ def single_line(text: str) -> str:
     discovery）——插值前在此单行化。是兜底，不替代入口校验。
     """
     return _LINE_BREAKERS.sub(" ", text)
+
+
+def _spath(path: str | os.PathLike[str]) -> str:
+    """路径插值单行化（#607/F3）：POSIX 文件名可合法含换行/控制符，错误串不得
+    被路径内容拉成多行（Pi skills.ts 对 filePath 同样做 escapeXml 纪律）。"""
+    return single_line(str(path))
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,13 +71,13 @@ class SkillCatalogEntry:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
         if self.scanned_root is not None and not resolve_within(self.source_path, self.scanned_root):
             raise OSError(
-                f"{self.source_path}: resolves outside scanned skill directory "
-                f"{self.scanned_root} (boundary changed after discovery, refusing to read)"
+                f"{_spath(self.source_path)}: resolves outside scanned skill directory "
+                f"{_spath(self.scanned_root)} (boundary changed after discovery, refusing to read)"
             )
         # 尺寸上限在 load 侧同样生效：发现后文件可被 workspace-write 换成超大内容，
         # "读入阶段有界"必须覆盖模型触发的加载路径（与发现同一威胁模型）。
         if self.source_path.stat().st_size > SKILL_FILE_MAX_BYTES:
-            raise OSError(f"{self.source_path}: too large (> {SKILL_FILE_MAX_BYTES} bytes)")
+            raise OSError(f"{_spath(self.source_path)}: too large (> {SKILL_FILE_MAX_BYTES} bytes)")
         # utf-8-sig：Windows 记事本等默认写 BOM，残留 \ufeff 会让首行 '---' 校验失败。
         # 非 UTF-8 字节抛 UnicodeDecodeError（ValueError 子类）——让调用方明确看到
         # 读盘失败，而不是吞回空字符串（吞空会让 load_skill 工具返回空内容）。
@@ -102,38 +111,38 @@ def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str
     try:
         # 尺寸上限先于 read（stat 一次 vs 全量读入）：读入阶段就有界。
         if path.stat().st_size > SKILL_FILE_MAX_BYTES:
-            return None, [f"{path}: too large (> {SKILL_FILE_MAX_BYTES} bytes)"]
+            return None, [f"{_spath(path)}: too large (> {SKILL_FILE_MAX_BYTES} bytes)"]
         # utf-8-sig：兼容 BOM 前缀（Windows 记事本默认），无 BOM 时行为与 utf-8 一致。
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as error:
         # UnicodeDecodeError 是 ValueError 子类，不是 OSError——非 UTF-8（GBK/Latin-1
         # 等）字节会从这里抛；捕获它才不违背"解析失败进 errors，绝不中断扫描"的契约。
-        return None, [f"{path}: unreadable ({type(error).__name__})"]
+        return None, [f"{_spath(path)}: unreadable ({type(error).__name__})"]
     frontmatter, _body = _split_frontmatter(text)
     if frontmatter is None:
-        return None, [f"{path}: missing '---' frontmatter fence"]
+        return None, [f"{_spath(path)}: missing '---' frontmatter fence"]
     try:
         meta = yaml.safe_load(frontmatter)
     except yaml.YAMLError as error:
-        return None, [f"{path}: invalid YAML frontmatter ({type(error).__name__})"]
+        return None, [f"{_spath(path)}: invalid YAML frontmatter ({type(error).__name__})"]
     if not isinstance(meta, dict):
-        return None, [f"{path}: frontmatter must be a mapping"]
+        return None, [f"{_spath(path)}: frontmatter must be a mapping"]
     meta = dict(meta)
     name = meta.pop("name", None)
     description = meta.pop("description", None)
     when_to_use = meta.pop("when_to_use", None)
     if not isinstance(name, str) or not name.strip():
-        errors.append(f"{path}: frontmatter requires non-empty 'name'")
+        errors.append(f"{_spath(path)}: frontmatter requires non-empty 'name'")
     elif not _NAME_PATTERN.fullmatch(name) or len(name) > SKILL_NAME_MAX_LENGTH:
         # #588：多行/控制符 name 会插值进 ToolResult message 与 catalog 目录行，
         # 把单行声明拉成多行、可伪造后续行的"系统语气"——入口整体拒绝，进 errors
-        # 可观察（ADR-0011 Q1 同款通道）。repr 转义保证错误行自身仍是单行。
+        # 可观察（ADR-0011 Q1 同款通道）。name 走 repr、path 走 _spath 单行化，错误行自身保持单行。
         errors.append(
-            f"{path}: invalid skill name (must match ^[a-z0-9][a-z0-9-_]*$, "
+            f"{_spath(path)}: invalid skill name (must match ^[a-z0-9][a-z0-9-_]*$, "
             f"max {SKILL_NAME_MAX_LENGTH} chars, single line; got {name!r})"
         )
     if not isinstance(description, str) or not description.strip():
-        errors.append(f"{path}: frontmatter requires non-empty 'description'")
+        errors.append(f"{_spath(path)}: frontmatter requires non-empty 'description'")
     if errors:
         return None, errors
     when_to_use = when_to_use.strip() if isinstance(when_to_use, str) and when_to_use.strip() else ""
@@ -166,7 +175,7 @@ class SkillDiscovery:
                 return
             if root is not None and not resolve_within(path, root):
                 catalog.errors.append(
-                    f"[{origin}] {path}: resolves outside scanned skill directory {root}"
+                    f"[{origin}] {_spath(path)}: resolves outside scanned skill directory {_spath(root)}"
                 )
                 return
             if root is not None:
@@ -175,7 +184,7 @@ class SkillDiscovery:
             if entry.name in seen:
                 # 同名先到先得，冲突显式可见（spec 08 §5 精神：不允许静默忽略）。
                 catalog.conflicts.append(
-                    f"skill '{entry.name}' from {path} shadowed by {seen[entry.name]}"
+                    f"skill '{entry.name}' from {_spath(path)} shadowed by {_spath(seen[entry.name])}"
                 )
                 return
             seen[entry.name] = path
@@ -185,14 +194,14 @@ class SkillDiscovery:
             if not directory.exists():
                 continue  # 目录不存在 → 空 catalog，不是错误（OPTIONAL 语义）
             if not directory.is_dir():
-                catalog.errors.append(f"[directory] {directory}: not a directory")
+                catalog.errors.append(f"[directory] {_spath(directory)}: not a directory")
                 continue
             try:
                 skill_dirs = sorted(directory.iterdir())
             except OSError as error:
                 # 目录级 IO 错误（权限/死挂载）只损失该目录：与逐条解析失败同一
                 # 容错契约，绝不中断整个扫描（否则一个坏目录让所有技能消失）。
-                catalog.errors.append(f"[directory] {directory}: unreadable ({error})")
+                catalog.errors.append(f"[directory] {_spath(directory)}: unreadable ({error})")
                 continue
             for skill_dir in skill_dirs:
                 skill_file = skill_dir / "SKILL.md"
@@ -203,5 +212,5 @@ class SkillDiscovery:
             if manual.is_file():
                 _consider(manual, "manual", None)
             else:
-                catalog.errors.append(f"[manual] {manual}: not a file")
+                catalog.errors.append(f"[manual] {_spath(manual)}: not a file")
         return catalog

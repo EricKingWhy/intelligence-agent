@@ -33,7 +33,11 @@ from agent_harness.agent.guards import (
     worst_stuck_signal,
 )
 from agent_harness.agent.profiles import AgentSpec
-from agent_harness.agent.resume_evidence import digest_policy_inputs, evidence_port
+from agent_harness.agent.resume_evidence import (
+    digest_policy_inputs,
+    environment_revision,
+    evidence_port,
+)
 from agent_harness.agent.run_budget import (
     CLOSEOUT_DETERMINISTIC,
     CONTINUATION_ACTION_KEY,
@@ -149,7 +153,8 @@ class TestDelegatedChildPolicyFace:
     - `model` / `reasoning_effort` / `context_providers` = None：子层无独立声明（模型链
       继承，Factory 决策 14）——省略恢复请求字段不算策略变更，显式声明才算；
     - `agent_profile` = spec.name：child 授权由它自己的 AgentSpec 决定（#372 强制同档）；
-    - 环境格仍缺席（端口不喂 workspace）——环境那一半是后续票（AC4）。
+    - 环境格：**无锚臂**（create 不传 workspace = 父无 cwd 锚的形状）⇒ 如实缺席；
+      带锚点亮 = #608（残余 15 环境半）的测试在下面。
     """
 
     @pytest.mark.asyncio
@@ -171,7 +176,7 @@ class TestDelegatedChildPolicyFace:
         assert result.status == STATUS_PAUSED
         pause_event = _events(session, RUN_PAUSED)[0]
         stuck = pause_event.data["stuck"]
-        # 环境格：本票只落策略格（残余 15 的环境半仍在后头）。
+        # 环境格：无锚 ⇒ 如实缺席（#608 fail-closed 臂；带锚点亮见下一测试）。
         assert stuck["environment_revision"] is None
         # 策略格：child 自己的面，逐维值与摘要同源（重算比对，不手抄摘要）。
         recorded = stuck["policy_inputs"]
@@ -187,6 +192,44 @@ class TestDelegatedChildPolicyFace:
         # 环境格缺席 ⇒ environment_change 仍不得列。
         assert pause_event.data["resume_requirements"] == [
             RESUME_BASIS_RELEVANT_STEER, RESUME_BASIS_POLICY_CHANGE,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_child_pause_lights_environment_cell_from_parent_anchor(
+        self, tmp_path,
+    ) -> None:
+        """#608（残余 15 环境半）：create 带 workspace（= 父 cwd 锚）⇒ 环境格点亮。
+
+        同源链的 factory 腿：provider 把 `_parent_cwd()` 传进 `create(workspace=…)`，
+        端口在暂停那一刻现算 `environment_revision`。失败剧本不触盘 ⇒ 锚目录内容在
+        run 期间不变 ⇒ 快照值 == 事后对同一目录的现算值；`environment_change` 进入
+        可用依据清单（顺序 = `stuck_resume_requirements` 的清单序）。
+        """
+        anchor = tmp_path / "project"
+        anchor.mkdir()
+        spec = AgentSpec(
+            name="child", description="d", system_prompt="s",
+            tool_scope=frozenset({"fail"}),
+        )
+        factory = AgentFactory(
+            model=ScriptedModel([_round(index) for index in range(6)]),
+        )
+        child = factory.create(
+            spec, source_registry=_registry(), grantable=frozenset({"fail"}),
+            workspace=str(anchor),
+        )
+        session = make_session(tmp_path)
+
+        result = await child.run(session, "反复试同一个失败命令")
+
+        assert result.status == STATUS_PAUSED
+        pause_event = _events(session, RUN_PAUSED)[0]
+        stuck = pause_event.data["stuck"]
+        assert stuck["environment_revision"] is not None
+        assert stuck["environment_revision"] == environment_revision(anchor)
+        assert pause_event.data["resume_requirements"] == [
+            RESUME_BASIS_RELEVANT_STEER, RESUME_BASIS_ENVIRONMENT_CHANGE,
+            RESUME_BASIS_POLICY_CHANGE,
         ]
 
 

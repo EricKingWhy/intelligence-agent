@@ -20,6 +20,7 @@ export const EventType = {
   MODEL_COMPLETED: 'model/completed',
   MODEL_FAILED: 'model/failed',
   MODEL_REQUEST: 'model/request',
+  MODEL_REQUEST_STARTED: 'model/request-started',
   TOOL_CALL: 'tool/call',
   TOOL_RESULT: 'tool/result',
   OPERATION_RECONCILE_REQUIRED: 'operation/reconcile-required',

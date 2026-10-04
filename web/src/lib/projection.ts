@@ -1439,6 +1439,8 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // （`event-types.ts` 是生成物，加类型就必须在这里登记）。
   // #537：不再是 no-op——requests/tokens/cost 的 run 作用域计数点（徽标数据源）。
   [EventType.MODEL_REQUEST]: { apply: projectModelRequest, summarize: emptySummary },
+  // #604：attempt 开始事实供重放读取，不计预算且不改变对话投影。
+  [EventType.MODEL_REQUEST_STARTED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.TOOL_CALL]: { apply: projectToolCall, summarize: summarizeToolCall },
   [EventType.TOOL_RESULT]: { apply: projectToolResult, summarize: summarizeToolResult },
   [EventType.OPERATION_RECONCILE_REQUIRED]: {
