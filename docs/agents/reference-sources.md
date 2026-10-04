@@ -78,6 +78,19 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 | [Uvicorn settings](https://www.uvicorn.org/settings/) | ASGI server configuration | `--ws-max-size` and `--ws` backend applicability; compare transport-level bounds with app-level checks. |
 | [websockets memory guide](https://websockets.readthedocs.io/en/stable/topics/memory.html) | WebSocket implementation behavior | `max_size` / `max_queue` bound queued message memory; implementation-specific message-size handling. |
 
+### Workbench 桌面 / 宿主 / 在场 / 发布（2026-10-04 补强批次）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| [Microsoft Windows Sandbox overview](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview) | 官方文档（2026-10-04 读取） | 显式启用的可选功能与版本前提（Home 不支持）、"doesn't allow multiple instances to run simultaneously"、网络默认开启且可用配置文件关闭 → W-19 显式选择与缺依赖提示 |
+| [ReFS overview（block cloning）](https://learn.microsoft.com/en-us/windows-server/storage/refs/refs-overview) | 官方文档（2026-10-04 读取） | block cloning / file-level snapshots 为 ReFS 独有、NTFS 不支持 → #527 工作区快照 / CoW 判定（用户目录通常 NTFS ⇒ DEFER 至验证） |
+| [GitHub Codespaces idle timeout](https://docs.github.com/en/codespaces/setting-your-user-preferences/setting-your-timeout-period-for-github-codespaces) | 官方文档（2026-10-04 读取） | 不活动一段时间后停止；个人交互 / 终端活动重置 idle → W-22 在场/缺席语义类比（resume 契约仍以已批准 Spec 变更为准） |
+| [Codex app 介绍](https://openai.com/index/introducing-the-codex-app/) | 官方博客（2026-10-04 读取） | threads 按项目组织、隔离代码副本、后台执行汇入 review queue、线程内 diff 审阅 → W-23 创建入口与队列、W-09 审阅分离 |
+| [Cline CLI README](https://github.com/cline/cline/blob/main/apps/cli/README.md) | 上游仓库（2026-10-04 读取） | OpenTUI 流式 TUI、plan/act 切换、markdown / 语法高亮 diff / 可滚动聊天 → W-28 / W-17 TUI 渲染形态佐证 |
+| [FastAPI handling-errors](https://fastapi.tiangolo.com/tutorial/handling-errors/) | 官方文档（2026-10-04 读取） | HTTPException detail 接受任意 JSON-able 值、自定义 handler 定义错误体 → #596 409 detail 结构化 |
+
+**待核实候选（2026-10-04 WebFetch 超时 / 404 未取到正文；按 §6.1 核实完成前不得作为方案依据引用，不得编造读取日期）**：Jupyter Server security（loopback 默认 + token 鉴权）、Docker Desktop architecture（单后端附着）、Electron `app.requestSingleInstanceLock`、systemd `journalctl --verify` / SEQNUM、`git fsck` 连通性校验、RFC 7807 problem details、Podman Desktop Windows 前提、Devin / Cursor background agent 入口。`pg_waldump` 同日实测**不适用**（文档明示无 gap / 损坏段处理描述），不得引用。
+
 ### 原子文件写 / 跨平台文件锁（2026-10-04 新增，i660 调研）
 
 | 来源 | 是什么 | 看什么 |
