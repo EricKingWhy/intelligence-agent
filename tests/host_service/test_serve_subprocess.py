@@ -41,6 +41,20 @@ def _serve_env(root: Path, tokfile: Path, **overrides: str) -> dict[str, str]:
             "AGENT_HARNESS_HOST_CREDENTIALS": f"file:{tokfile}",
             "AGENT_HARNESS_ATTACH_WAIT_SECONDS": "15",
             "JWT_SECRET": "",  # 显式空 = 覆盖 .env，让 serve 走「生成随机密钥」路径
+            # 同法中和 artifact store 配置面：Settings 的 env_file 锚在 _REPO_ROOT/.env，
+            # 真实部署的 .env 若配了 ARTIFACT_STORE_* / MINIO_*，artifact_select 的
+            # _s3_configured / _minio_configured 是 any() 判据，任一非空即选中远端
+            # store ⇒ serve 读不到测试写进本地 artifact_dir 的 fixture ⇒ 404。
+            # 显式空串让两条 any() 全 False ⇒ 落回与 save 侧同域的本地 store。
+            "ARTIFACT_STORE_ENDPOINT": "",
+            "ARTIFACT_STORE_BUCKET": "",
+            "ARTIFACT_STORE_ACCESS_KEY": "",
+            "ARTIFACT_STORE_SECRET_KEY": "",
+            "ARTIFACT_STORE_REGION": "",
+            "MINIO_ENDPOINT": "",
+            "MINIO_BUCKET": "",
+            "MINIO_ACCESS_KEY": "",
+            "MINIO_SECRET_KEY": "",
             "PYTHONUTF8": "1",
         }
     )
