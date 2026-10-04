@@ -531,3 +531,46 @@ class TestSendMessageIdlePassthrough:
         assert result.status == "launched"
         assert mock_resume.call_args.kwargs["task"] == "继续"
         assert mock_resume.call_args.kwargs["amend"] is amend
+
+class TestSessionDeclarationValidatorNonePort:
+    """`validate_session_declaration=None` 兜底直测（#615③，#564 裁决 (a) 残余）。
+
+    生产装配（web 组合根）永远接线 validator（AppState 构造即建，接线判定
+    另有 HTTP 级钉面：tests/web/test_budget_local_fuse_api.py 的
+    test_session_declaration_judged_against_root_registry）；None 只出现在
+    直接构造 SessionService 的场合（测试 / 未来非 Web 宿主）。None 的语义
+    此前从未被直接钉过：**跳过 pre-CAS 校验**（不是崩、也不是默认全拒）——
+    坏名放行到 build_runtime，由装配层的无副作用拒绝点兜底（assembly 的
+    `validate_tool_call_limits_registered(scope="session")` → BudgetRejection）。
+    """
+
+    def _launch(self, state, tmp_path, *, limits):
+        external = tmp_path / f"ext-{limits is not None}"
+        external.mkdir()
+        TestResumeWorkspace._start_with_cwd(state, "test-sid", external)
+        with patch(
+            "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
+        ) as mock_build:
+            asyncio.run(
+                session_service(state).resume_and_launch(
+                    session_id="test-sid", task="hello",
+                    session_tool_call_limits=limits,
+                )
+            )
+        return mock_build
+
+    def test_none_skips_pre_cas_check_and_launch_proceeds(self, tmp_path):
+        """None + 未注册名 ⇒ 这里不 422，launch 照常（兜底在装配层）。"""
+        state = TestResumeWorkspace._real_state(self, tmp_path)
+        state.validate_session_declaration = None
+        state.stores.delegation_tree_ledger.ensure_session_budget = AsyncMock()
+        mock_build = self._launch(state, tmp_path, limits={"no-such-tool": 3})
+        assert mock_build.call_count == 1, "跳过校验不等于放弃 launch"
+
+    def test_no_session_limits_never_touches_the_port(self, tmp_path):
+        """声明没带 tool_call_limits ⇒ 连端口都不调用（is not None 短路之外的第一道闸）。"""
+        state = TestResumeWorkspace._real_state(self, tmp_path)
+        validator = AsyncMock()
+        state.validate_session_declaration = validator
+        self._launch(state, tmp_path, limits=None)
+        validator.assert_not_awaited()
