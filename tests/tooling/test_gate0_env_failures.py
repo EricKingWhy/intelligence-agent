@@ -227,7 +227,14 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
 
 
 def _patch_main_io(monkeypatch, outcomes):
-    """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。"""
+    """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。
+
+    车道集合**同属 I/O 面**：`build_lanes` 探测 `.venv` / `node` / `web/node_modules`
+    这些宿主条件，而 gate1 的 backend 作业只 `uv sync`、不装前端依赖 ⇒ oxlint/tsc 的
+    `argv=None`，main() 把它们记成「工具缺失」rc=1，与 mock 的 env rc 混成混合红、
+    口径行按语义缺席——本钉于是变成「宿主装了什么」的函数（CI 实测红；本地装了前端
+    依赖故不红）。这里把 argv 固定为恒可用的解释器，让本钉只钉接线。
+    """
 
     def fake_run_lane(lane):
         rc, out = outcomes[lane.name]
@@ -236,6 +243,12 @@ def _patch_main_io(monkeypatch, outcomes):
     class _Proc:
         stdout = "a" * 40 + "\n"
 
+    lanes = [
+        gate0.Lane(ln.name, ln.desc, gate0._portable_argv([sys.executable, "-c", "pass"]),
+                   ln.cwd, env=ln.env, blocked=ln.blocked)
+        for ln in gate0.build_lanes("")
+    ]
+    monkeypatch.setattr(gate0, "build_lanes", lambda since: lanes)
     monkeypatch.setattr(gate0, "run_lane", fake_run_lane)
     monkeypatch.setattr(gate0, "git", lambda *args: _Proc)
     monkeypatch.setattr(gate0, "surface_report", lambda since: "")
