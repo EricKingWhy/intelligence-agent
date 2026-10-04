@@ -82,6 +82,11 @@ def test_status_map_is_the_audited_contract():
         # WS-3 / #153：按项目列会话时未注册的 workspace_id——与「项目存在但没有会话」
         # 必须可区分，所以是 404 而不是「空列表」（不变量 #21 同族：缺席不造假）。
         "WorkspaceNotFound": 404,
+        # #266 cwd 守卫的专属子型（P3 跟进批）：「会话 cwd 没了/不是目录」从父类的
+        # 「workspace_id 未注册」语义里拆出——HTTP 层同一 404（detail 文案区分），
+        # handler 的 `except WorkspaceNotFound` 天然覆盖（同 WorkspacePathInvalid
+        # 先例）。本表是精确类型索引，子类必须自己登记。
+        "SessionCwdUnavailable": 404,
         # WS-4 / #154：会话↔项目的移动在当前状态下不成立（无 cwd 锚 / cwd 不属于该项目 /
         # 重排目标不在该项目账本里）——状态冲突而非入参非法，与 422 分开。
         "WorkspaceMoveInvalid": 409,
