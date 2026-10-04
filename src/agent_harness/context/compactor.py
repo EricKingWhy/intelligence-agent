@@ -85,6 +85,7 @@ _SUMMARY_ERROR_CLASSES = (
 
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
 _FAILURE_MESSAGE_LIMIT = 300
+_SUMMARY_MODEL_ID_LIMIT = 256
 
 
 @dataclass(frozen=True)
@@ -424,11 +425,15 @@ def _summary_model_id(model: Any, response: Any) -> str | None:
         for key in ("model_name", "model", "model_id"):
             value = metadata.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                candidate = value.strip()
+                if len(candidate) <= _SUMMARY_MODEL_ID_LIMIT:
+                    return candidate
     for attribute in ("model_name", "model"):
         value = getattr(model, attribute, None)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            candidate = value.strip()
+            if len(candidate) <= _SUMMARY_MODEL_ID_LIMIT:
+                return candidate
     return None
 
 

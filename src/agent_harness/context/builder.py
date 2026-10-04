@@ -663,8 +663,9 @@ class ContextBuilder:
     ) -> None:
         """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
 
-        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 进入压缩时
-        的估算）；`message` 已在 compactor 侧按"只装自家文案或类型名"脱敏。失败
+        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 压缩前估算 /
+        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
+        `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
         """
         for failure in failures:

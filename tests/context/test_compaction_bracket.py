@@ -423,6 +423,32 @@ class TestBuilderWritesBracket:
         assert event.data["request_budget_tokens"] == 8500
 
     @pytest.mark.asyncio
+    async def test_bracket_ignores_oversized_provider_summary_model_id(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class OversizedModelIdSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-model" * 30},
+                )
+
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=OversizedModelIdSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "configured-summary-model"
+        assert len(event.data["summary_model_id"]) <= 256
+
+    @pytest.mark.asyncio
     async def test_failed_summary_events_record_request_metadata_without_provider_echo(
         self, tmp_path, monkeypatch,
     ):
