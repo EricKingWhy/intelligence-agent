@@ -3227,17 +3227,22 @@ class SessionService:
         handler 在非 live 快照路径上可能因并发写者抢先落盘而抛 SeqConflict：
         重读快照重跑整个 handler（derive + 版本判定随之基于新快照，CAS 语义不
         因重试而放松）。live 路径由事件循环串行化，不重试。
+
+        存在性校验放在**循环内**、append 的 try 之外（与 change_model
+        / change_permission_mode 逐字同款）：重试期间会话可能消失（→404）或
+        日志暴露损坏（→409）。校验抛出的 SeqConflict 是**终态**（日志已损坏、
+        重读同一文件无用），不能被下面的 except 当成可重试的写时冲突吞掉。
         """
         self._validate_session_id(session_id)
         existing = await anyio.to_thread.run_sync(self._store.read_events, session_id)
-        if not existing:
-            raise SessionNotFound(f"session '{session_id}' not found")
         attempts_left = _WRITE_CONFLICT_ATTEMPTS
         while True:
             attempts_left -= 1
             live = self._live_session(session_id)
             if live is not None:
                 return handler(live, **kwargs)
+            if not existing:
+                raise SessionNotFound(f"session '{session_id}' not found")
             validate_event_seq(session_id, existing)  # 判据 owner：session 模块
             try:
                 return handler(Session(session_id, self._store, existing), **kwargs)

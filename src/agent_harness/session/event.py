@@ -93,8 +93,9 @@ TASK_PLAN_UPDATED = "task/plan_updated"
 # ── W-07 (#351)：Task / Run / 验证 / 接受四种事实分开 ────────────────────────
 # Task 身份 = Session ID（一 Task 多 Run）。三条事实轴**分别追加、分别投影**
 # （票面「状态契约」；handler 与投影住在 `session/task.py`，与 plan.py 同构）：
-#   * 定义轴   task/defined + task/acceptance-revised：原始目标 / 工作目录 /
-#              读写意图 / 验收清单（缺项可由 Agent 提出，未确认标记）。变更 AC
+#   * 定义轴   task/defined + task/acceptance-revised：原始目标 / 读写意图 /
+#              验收清单（缺项可由 Agent 提出，未确认标记）。cwd 不进本事件
+#              ——走 session/started 单源锚，复制第二份即两个真相。变更 AC
 #              只追加事件，source_event_ids 指向上一版定义/修订（保留旧版来源）。
 #   * 验证轴   verification/updated：逐验收项 last-wins 的观察事实（未开始/
 #              进行中/通过/失败/受阻/未完成 + evidence ref）。可被后续 run 重估

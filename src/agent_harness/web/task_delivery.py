@@ -70,11 +70,17 @@ class AcceptanceReleaseRequest(BaseModel):
     expected_version: int = Field(ge=0)
 
 
+#: TaskOutcome.error_kind → HTTP status 的显式映射（本面唯一的 kind 翻译点）。
+#: 直接索引不回退（domain_errors 同哲学）：未来新增 kind 而忘了登记，就让它
+#: 在这里 KeyError 炸出来，而不是静默归进 422 说谎。
+_TASK_OUTCOME_STATUS = {"shape": 422, "conflict": 409}
+
+
 def _task_http_error(outcome: TaskOutcome) -> None:
-    """TaskOutcome → HTTP（形状 422 / 冲突 409；本面唯一的 kind 翻译点）。"""
+    """TaskOutcome → HTTP（形状 422 / 冲突 409，spec 11 §6.1 口径）。"""
     if outcome.ok:
         return
-    status = 409 if outcome.error_kind == "conflict" else 422
+    status = _TASK_OUTCOME_STATUS[outcome.error_kind]
     raise HTTPException(status_code=status, detail=outcome.reason)
 
 

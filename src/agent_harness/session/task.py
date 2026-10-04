@@ -64,6 +64,14 @@ ACCEPTANCE_DECISIONS = ("accepted", "accepted_with_gaps")
 #: 产品四态（票面：执行中/待验证/可交付/已接受）。未定义任务无交付状态（""）。
 PRODUCT_STATES = ("executing", "pending_verification", "deliverable", "accepted")
 
+#: 逐字持久化字段的长度封顶（先例：创建路径 task 100_000、permission reason
+#: 2000——自由文本无上限 = 每次调用可重复放大 append-only JSONL，实测 50KB
+#: 原样入库的先例见 web/app.py 的 reason 注释）。这里与 pydantic ``max_length``
+#: 同口径：计 Python ``str`` 码点数，不是 UTF-8 字节。超限错误**不回显原文**
+#: （错误 detail 会进 HTTP 响应，回显即放大）。
+TASK_TEXT_MAX_LENGTH = 100_000
+TASK_FIELD_MAX_LENGTH = 2000
+
 
 @dataclass(frozen=True)
 class TaskCriterion:
@@ -195,6 +203,11 @@ def _parse_criteria(
         text = raw.get("text")
         if not isinstance(text, str) or not text.strip():
             return (), f"text 必须是非空字符串（可执行判据），得到 {text!r}"
+        if len(text) > TASK_FIELD_MAX_LENGTH:
+            return (), (
+                f"text 超过长度上限 {TASK_FIELD_MAX_LENGTH} 字符"
+                "（逐字持久化字段，原文不回显）"
+            )
         origin = raw.get("origin", "user")
         if origin not in CRITERIA_ORIGINS:
             return (), f"origin 非法：{origin!r}（合法值 {list(CRITERIA_ORIGINS)}）"
@@ -266,9 +279,15 @@ def derive_task_state(events: list[SessionEvent]) -> TaskState:
             defined = True
         elif etype == TASK_ACCEPTANCE_REVISED:
             data = event.data if isinstance(event.data, dict) else None
-            parsed, error = _parse_criteria(
-                data.get("criteria") if data else None, write_side=False
-            )
+            if not isinstance(data, dict) or "criteria" not in data:
+                # 缺 criteria 键 ≠ 空清单：整表替换语义下把"没给"当成 [] 会静默
+                # 清空验收项（写侧 handler 已拒 None，这里防的是手写/污染 JSONL）。
+                logger.warning(
+                    "task/acceptance-revised (seq=%s) 缺 criteria 键，投影跳过该事件",
+                    getattr(event, "seq", None),
+                )
+                continue
+            parsed, error = _parse_criteria(data.get("criteria"), write_side=False)
             if error is not None:
                 logger.warning(
                     "task/acceptance-revised (seq=%s) payload 非法（%s），投影跳过该事件",
@@ -350,12 +369,23 @@ def apply_task_definition(
         return _failure(
             current, "shape", f"task_text 必须是非空字符串（原始目标），得到 {task_text!r}"
         )
+    if len(task_text) > TASK_TEXT_MAX_LENGTH:
+        return _failure(
+            current, "shape",
+            f"task_text 超过长度上限 {TASK_TEXT_MAX_LENGTH} 字符"
+            "（逐字持久化字段，先例 = 创建路径 task 同款封顶；原文不回显）",
+        )
     if read_write_intent is not None and (
         not isinstance(read_write_intent, str) or not read_write_intent.strip()
     ):
         return _failure(
             current, "shape",
             f"read_write_intent 必须是非空字符串或 None，得到 {read_write_intent!r}",
+        )
+    if isinstance(read_write_intent, str) and len(read_write_intent) > TASK_TEXT_MAX_LENGTH:
+        return _failure(
+            current, "shape",
+            f"read_write_intent 超过长度上限 {TASK_TEXT_MAX_LENGTH} 字符（原文不回显）",
         )
     parsed, error = _parse_criteria(criteria, write_side=True)
     if error is not None:
@@ -374,10 +404,18 @@ def apply_acceptance_revision(
 
     变更 AC 只追加事件；``source_event_ids`` 指向上一版定义/修订（票面：
     「保留旧版来源」——旧版事实原样留在事件流里，append-only 不删除不改写）。
+    ``criteria=None``（REST 漏发字段）被拒为 shape：整表替换语义下"没给"静默
+    落成空清单等于不可逆清空验收项；要清空必须显式传 ``[]``。
     """
     current = derive_task_state(session.events)
     if not current.defined:
         return _failure(current, "conflict", "尚无任务定义，无可修订的验收清单")
+    if criteria is None:
+        return _failure(
+            current, "shape",
+            "criteria 必须显式给出（整表替换）：漏发字段按 422 拒绝，"
+            "不静默清空验收项；要清空传 []",
+        )
     parsed, error = _parse_criteria(criteria, write_side=True)
     if error is not None:
         return _failure(current, "shape", error)
@@ -422,6 +460,12 @@ def apply_verification(
         return _failure(
             current, "shape", f"evidence 必须是非空字符串或 None，得到 {evidence!r}"
         )
+    if isinstance(evidence, str) and len(evidence) > TASK_FIELD_MAX_LENGTH:
+        return _failure(
+            current, "shape",
+            f"evidence 超过长度上限 {TASK_FIELD_MAX_LENGTH} 字符"
+            "（逐字持久化字段；大原文走 Artifact ref，原文不回显）",
+        )
     if all(item.item_id != item_id for item in current.criteria):
         return _failure(current, "shape", f"验收项 {item_id!r} 不在当前清单里")
     data: dict = {"item_id": item_id, "value": value}
@@ -454,6 +498,12 @@ def apply_acceptance(
         )
     if reason is not None and (not isinstance(reason, str) or not reason.strip()):
         return _failure(current, "shape", f"reason 必须是非空字符串或 None，得到 {reason!r}")
+    if isinstance(reason, str) and len(reason) > TASK_FIELD_MAX_LENGTH:
+        return _failure(
+            current, "shape",
+            f"reason 超过长度上限 {TASK_FIELD_MAX_LENGTH} 字符"
+            "（逐字持久化字段，先例 = permission/resolved reason 同款封顶；原文不回显）",
+        )
     if decision == "accepted_with_gaps" and (not isinstance(reason, str) or not reason.strip()):
         return _failure(current, "shape", "带缺项接受（accepted_with_gaps）必须给出 reason")
     if current.version != expected_version:
@@ -489,6 +539,12 @@ def apply_acceptance_release(
     current = derive_task_state(session.events)
     if reason is not None and (not isinstance(reason, str) or not reason.strip()):
         return _failure(current, "shape", f"reason 必须是非空字符串或 None，得到 {reason!r}")
+    if isinstance(reason, str) and len(reason) > TASK_FIELD_MAX_LENGTH:
+        return _failure(
+            current, "shape",
+            f"reason 超过长度上限 {TASK_FIELD_MAX_LENGTH} 字符"
+            "（逐字持久化字段，先例 = permission/resolved reason 同款封顶；原文不回显）",
+        )
     if current.acceptance is None:
         return _failure(current, "conflict", "从未接受过，没有可释放的接受事实")
     if current.version != expected_version:

@@ -163,6 +163,18 @@ class TestAcceptanceRevisionCommand:
         )
         assert resp.status_code == 409, resp.text
 
+    def test_422_when_criteria_field_omitted(self, client):
+        """漏发 criteria ≠ 显式空清单：整表替换语义下静默清空不可逆，按 422 拒。"""
+        client, app = client
+        session_id = _create_session(client, app)
+        assert _define(client, session_id).status_code == 200
+        events_before = len(app.state.agent.store.read_events(session_id))
+        resp = client.post(
+            f"/api/sessions/{session_id}/task/acceptance-revision", json={}
+        )
+        assert resp.status_code == 422, resp.text
+        assert len(app.state.agent.store.read_events(session_id)) == events_before
+
 
 class TestVerificationCommand:
     def test_200_appends_and_projects(self, client):

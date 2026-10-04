@@ -10,9 +10,13 @@
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from agent_harness.session import JsonlSessionStore, Session
+from agent_harness.session.errors import SeqConflict
 from agent_harness.session.event import (
     RUN_COMPLETED,
     RUN_STARTED,
@@ -286,3 +290,155 @@ async def test_fork_independent_acceptance(tmp_path) -> None:
     assert parent_state.acceptance is None
     assert parent_state.version == 0
     assert parent_state.product_state == "deliverable"
+
+# ── 服务层写入路径（票面 AC「两客户端同时接受」：并发恰一生效 + 重试有界）──────
+# 测试移植自 test_model_change.py 的两条先例（frozen 首快照 + asyncio.gather；
+# 持续冲突断言尝试次数）——_apply_task_handler 逐字复制了那条重试机制，测试随迁。
+
+
+def _svc_state(tmp_path):
+    """与 test_model_change.py::_state 同构的隔离 AppState 替身（只测写入路径）。"""
+    from agent_harness.config import Settings
+    from tests.session.ledger_doubles import idle_operation_ledger
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+    )
+    state = MagicMock()
+    state.settings = settings
+    state.store = JsonlSessionStore(root=tmp_path / "sessions")
+    state.workspaces_root = tmp_path
+    state.workspace_registry = None
+    state.workspace_index = None
+    state.run_manager = MagicMock()
+    state.run_manager.get_active = MagicMock(return_value=None)
+    state.get_wiring = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    state.operation_ledger = idle_operation_ledger()
+    state.ensure_stores = AsyncMock()
+    state.stores = MagicMock()
+    state.stores.delegation_tree_ledger.get_session_budget = AsyncMock(return_value=None)
+    return state
+
+
+def _service(state):
+    from agent_harness.web.app import session_service
+
+    return session_service(state)
+
+
+def _seed_defined_task(state) -> Session:
+    session = Session.start(state.store, session_id="sid")
+    assert apply_task_definition(session, task_text="T", criteria=[{"text": "A"}]).ok
+    return session
+
+
+def test_parallel_acceptance_exactly_one_wins(tmp_path, monkeypatch) -> None:
+    """两个客户端同时接受（同 CAS 版本）：恰一生效，另一个 409——不能双写。"""
+    state = _svc_state(tmp_path)
+    _seed_defined_task(state)
+    real_read = state.store.read_events
+    frozen = real_read("sid")
+    reads: list[int] = []
+
+    def read_with_frozen_first_snapshot(session_id: str):
+        if len(reads) < 2:  # 两个并发写者各读到一次「接受前」快照
+            reads.append(1)
+            return list(frozen)
+        return real_read(session_id)
+
+    monkeypatch.setattr(state.store, "read_events", read_with_frozen_first_snapshot)
+
+    async def run_both():
+        service = _service(state)
+        return await asyncio.gather(
+            service.task_acceptance(
+                session_id="sid", decision="accepted", expected_version=0
+            ),
+            service.task_acceptance(
+                session_id="sid", decision="accepted", expected_version=0
+            ),
+        )
+
+    outcomes = asyncio.run(run_both())
+    events = real_read("sid")
+    accepted = [e for e in events if e.type == TASK_ACCEPTED]
+    assert len(accepted) == 1, "接受事件全流恰一条（不能双写）"
+    assert [o.ok for o in outcomes].count(True) == 1
+    rejected = next(o for o in outcomes if not o.ok)
+    assert rejected.error_kind == "conflict"
+    # seq 严格单调（并发写者不撞号）
+    seqs = [e.seq for e in events]
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
+
+
+def test_task_command_retry_is_bounded_and_surfaces_persistent_conflict(
+    tmp_path, monkeypatch
+) -> None:
+    """持续冲突（重试用尽）→ 冒泡 SeqConflict，且重试次数有界。
+
+    断言尝试次数而不是只断言异常类型：否则「零重试」的实现也能通过（假绿）。
+    """
+    state = _svc_state(tmp_path)
+    _seed_defined_task(state)
+    attempts: list[int] = []
+
+    def always_conflict(session_id: str, event):
+        attempts.append(1)
+        raise SeqConflict("注入：持续冲突")
+
+    monkeypatch.setattr(state.store, "append_event", always_conflict)
+
+    with pytest.raises(SeqConflict):
+        asyncio.run(
+            _service(state).task_acceptance(
+                session_id="sid", decision="accepted", expected_version=0
+            )
+        )
+    assert len(attempts) == 3, f"重试次数应为 3（有界），实际 {len(attempts)}"
+
+
+# ── 审查修复轮补充：修订拒 None、逐字持久化字段封顶、污染日志严格投影 ────────
+
+
+def test_acceptance_revision_rejects_missing_criteria(tmp_path) -> None:
+    """漏发 criteria 字段 ≠ 显式空清单：整表替换语义下静默清空不可逆，按 shape 拒。"""
+    session = _session(tmp_path)
+    apply_task_definition(session, task_text="T", criteria=[{"text": "A"}])
+    before = len(session.events)
+    outcome = apply_acceptance_revision(session, None)
+    assert not outcome.ok and outcome.error_kind == "shape"
+    assert len(session.events) == before
+
+
+def test_persistent_text_fields_are_capped(tmp_path) -> None:
+    """逐字持久化字段写侧封顶（先例：task 100_000 / reason、evidence、清单 text 2000）；
+    超限错误不回显原文。"""
+    session = _session(tmp_path)
+    outcome = apply_task_definition(session, task_text="长" * 100_001)
+    assert not outcome.ok and outcome.error_kind == "shape"
+    assert "长" * 50 not in outcome.reason, "超限错误不得回显原文"
+    assert apply_task_definition(session, task_text="T", criteria=[{"text": "A"}]).ok
+    item_a = _criteria(derive_task_state(session.events))[0]
+    before = len(session.events)
+    assert not apply_verification(
+        session, item_a, "passed", evidence="证" * 2001
+    ).ok
+    assert not apply_acceptance(
+        session, "accepted", reason="理" * 2001, expected_version=0
+    ).ok
+    assert not apply_acceptance_revision(
+        session, [{"text": "判" * 2001}]
+    ).ok
+    assert len(session.events) == before
+
+
+def test_derive_skips_revised_event_without_criteria_key(tmp_path) -> None:
+    """手写/污染 JSONL 里缺 criteria 键的 revised 事件被投影跳过，不当成空清单。"""
+    session = _session(tmp_path)
+    apply_task_definition(session, task_text="T", criteria=[{"text": "A"}])
+    session.append(TASK_ACCEPTANCE_REVISED, {})
+    state = derive_task_state(session.events)
+    assert [c.text for c in state.criteria] == ["A"], "缺键事件不应用为空清单"
+
