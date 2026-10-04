@@ -7119,4 +7119,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   - `src/agent_harness/session/service.py` `686a074399dc89b4976327524c9433efd30c0987`；`src/agent_harness/storage/delegation_tree.py` `c0b7f7b582ee256094a50a4e6b486f7cf925bad8`。
   - `tests/agent/test_model_fallback_runtime.py` `8a93640841071d284f7bf5076a4648a01b0593f5`；`tests/agent/test_terminal_arms.py` `46d690dde724ec60b020e5ac65ccae7344852621`；`tests/multiagent/test_session_budget_ledger.py` `a704fa09cfd712b7bb5320b63320d9e5744c1e85`。
   - `tests/recovery/_session_budget_request_kill_child.py` `60e5b791fa780dcbcff4214c9e524bf29f6e62b6`；`tests/recovery/test_session_budget_request_recovery.py` `f641ca4823003a2623b1fc11e3d0c6582b183946`；`tests/session/test_multiturn_delivery.py` `96f9f5506131f903d594d22a2d8c0b79054cbcd9`；`tests/web/test_web_messages_interactive_binding.py` `7c4129be5d104cc2e3cdda8791ef766ee4b8055f`。
-- **状态**：本地 branch-ready；本轮未执行 push、PR、merge 或关票。发布前仍须依流程同步最新 `origin/main` 并核对跨线重叠。
+- **先回后正同步**：分支 `0a1aabcc` 合入当时最新 `origin/main` `88a2f3b7`（共同基线 `431fa4ec`），merge commit `0f62c0fe`，ort 自动合并、无冲突；合并树 `423098050e9f6fd08907de0525fa21732ab619d9`。两线路径交集仅 Tracker；导入的 #610/#611 代码与第二父 `88a2f3b7` blob 一致。
+- **合并树复验**：冻结 tip `0f62c0fecdb417f64fe8b2ed15f058da1f0b3a79` / tree `423098050e9f6fd08907de0525fa21732ab619d9` 上 `scripts/run_tests_clean.sh tests/` = 5492 passed / 3 skipped / 51 deselected / 0 failed（1070.82s，exit 0）；全仓 Ruff 通过；裸 Gate-0 6/6 PASS（41.0s），收据 `docs/gate/0f62c0fecdb417f64fe8b2ed15f058da1f0b3a79.json`。
+- **合并审查收口**：范围 `0a1aabcca29ac9139aad303f88ad83a9ad1fce80..0f62c0fecdb417f64fe8b2ed15f058da1f0b3a79` 的双轴审查初轮未发现代码回归；Tracker 同步状态与合并提交归属 findings 正在本次 docs 落账后复核。最终结论及台账路径随后补入。
+- **状态**：已同步最新 `origin/main` 并完成合并树验证；本地分支具备发布条件，push / PR merge / 关票待本次发布流程执行。
