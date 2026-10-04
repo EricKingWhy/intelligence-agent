@@ -3250,6 +3250,12 @@ class SessionService:
             cwd = session_cwd(events)
             if not cwd:
                 return None
+            if not Path(cwd).is_dir():
+                # cwd 已被外部删除：进度文件无处可落，静默跳过——写入器的
+                # mkdir(parents=True) 会把项目根一并复活，击败 #615/#624-1 的
+                # WorkspaceNotFound 守卫（删除的 cwd 必须让下游如实报 404，
+                # 不能被进度写入器悄悄重建；test_resume_amend 钉过的同款假绿）。
+                return None
             return await anyio.to_thread.run_sync(
                 write_progress_file, cwd, session_id, events
             )

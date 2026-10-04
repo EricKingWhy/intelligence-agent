@@ -14,6 +14,7 @@ run 钉在"在途"状态）。
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 import pytest
@@ -668,7 +669,9 @@ async def test_on_run_terminal_swallows_deleted_cwd_not_found(tmp_path, monkeypa
         harness.state.store, session_id, MESSAGE_QUEUED,
         {"queue_id": "q-dead-cwd", "content": "重启前的消息"},
     )
-    external.rmdir()
+    # W-05（#349）：create_and_launch 带有效 task 即在 cwd 落 agent-progress/ ⇒
+    # 目录非空，rmdir 失效；rmtree 保持「外部删除 cwd」的场景语义不变。
+    shutil.rmtree(external)
 
     await harness.service.on_run_terminal(session_id)
 
