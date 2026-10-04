@@ -167,6 +167,7 @@ from agent_harness.session.model_switch import (
 from agent_harness.session.model_switch import (
     restore_policy_inputs as _restore_policy_inputs,
 )
+from agent_harness.session.progress import write_progress_file
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
@@ -1132,6 +1133,9 @@ class SessionService:
                 "跳过任务定义，会话照常启动",
                 task_outcome.reason,
             )
+        elif cwd:
+            # W-05（#349）：目标/约束确认后首次创建进度文件（票面工作指令 1）。
+            await self.refresh_progress_file(session_id)
         # WS-2 / #152 AC5/AC6/AC16：会话**落盘之后**才 attach 到项目（顺序即 AC6 的
         # "先建会话再 attach"）。只对**显式选定了目录**的会话做：未命名/未给 cwd 时目录是
         # workspaces_root/<session_id>（"用户没选项目"的实现痕迹），把它注册成项目会
@@ -2482,6 +2486,7 @@ class SessionService:
         由 `RunManager` 在 run 收口后调用（Web 层接线）；CLI 未接线时本方法
         不被调用，行为与接线前一致。
         """
+        await self.refresh_progress_file(session_id)  # W-05：里程碑/失败结论边界
         if self._run_manager.get_active(session_id) is not None:
             return  # 已有在途 run（用户手动开了）：不要双驱
         try:
@@ -3216,6 +3221,35 @@ class SessionService:
     # 错误以 TaskOutcome 返回（error_kind: shape/conflict），不抛领域异常——
     # HTTP 翻译在 web 层按 kind 走 422/409（spec 11 §6.1 口径）。
 
+    async def refresh_progress_file(self, session_id: str) -> None:
+        """W-05（#349）：项目可见进度文件 best-effort 刷新（调用点见下）。
+
+        progress.md 是 SessionEvent 的确定性投影（``session/progress.py``）——
+        本方法只搬运：读事件 → ``session_cwd`` 单源锚取项目根 → 原子写。失败只记
+        日志、绝不污染调用点主流程（不变量 21 同款容错；文件内容与日志都不含
+        未脱敏值）。文件头 ``source_event_seq`` 记录投影时点，消费方据它判新旧，
+        不靠 wall clock。无 cwd 锚（session/started 缺失）或空会话即静默跳过。
+        """
+        try:
+            events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+            if not events:
+                return
+            cwd = session_cwd(events)
+            if not cwd:
+                return
+            await anyio.to_thread.run_sync(
+                write_progress_file, cwd, session_id, events
+            )
+        except SessionNotFound:
+            return
+        except Exception:
+            logger.warning(
+                "进度文件刷新失败（session=%s）——文件保持上一版本，写失败可由"
+                "下次触发点重试；不把旧文件说成最新",
+                session_id,
+                exc_info=True,
+            )
+
     async def _apply_task_handler(
         self,
         session_id: str,
@@ -3253,6 +3287,18 @@ class SessionService:
                     self._store.read_events, session_id
                 )
 
+    async def _apply_task_and_refresh(
+        self, session_id: str, handler: Callable[..., TaskOutcome], **kwargs
+    ) -> TaskOutcome:
+        """task 命令成功后刷新进度文件（W-05 触发点：五命令共用一个钩子）。
+
+        拒绝（零事件）不刷新——投影没变，写了也是同内容幂等跳过，省一次 I/O。
+        """
+        outcome = await self._apply_task_handler(session_id, handler, **kwargs)
+        if outcome.ok:
+            await self.refresh_progress_file(session_id)
+        return outcome
+
     async def task_state(self, session_id: str) -> TaskState | None:
         """只读投影（`11 §6.1` 同类：不启动任何工作、零副作用）。
 
@@ -3273,7 +3319,7 @@ class SessionService:
         read_write_intent: object = None,
         criteria: object = None,
     ) -> TaskOutcome:
-        return await self._apply_task_handler(
+        return await self._apply_task_and_refresh(
             session_id,
             apply_task_definition,
             task_text=task_text,
@@ -3284,14 +3330,14 @@ class SessionService:
     async def task_acceptance_revision(
         self, session_id: str, *, criteria: object
     ) -> TaskOutcome:
-        return await self._apply_task_handler(
+        return await self._apply_task_and_refresh(
             session_id, apply_acceptance_revision, criteria=criteria
         )
 
     async def task_verification(
         self, session_id: str, *, item_id: object, value: object, evidence: object = None
     ) -> TaskOutcome:
-        return await self._apply_task_handler(
+        return await self._apply_task_and_refresh(
             session_id,
             apply_verification,
             item_id=item_id,
@@ -3307,7 +3353,7 @@ class SessionService:
         reason: object = None,
         expected_version: int,
     ) -> TaskOutcome:
-        return await self._apply_task_handler(
+        return await self._apply_task_and_refresh(
             session_id,
             apply_acceptance,
             decision=decision,
@@ -3318,7 +3364,7 @@ class SessionService:
     async def task_acceptance_release(
         self, session_id: str, *, reason: object = None, expected_version: int
     ) -> TaskOutcome:
-        return await self._apply_task_handler(
+        return await self._apply_task_and_refresh(
             session_id,
             apply_acceptance_release,
             reason=reason,

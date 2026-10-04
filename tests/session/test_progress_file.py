@@ -12,6 +12,7 @@ diff 但系统不 ``git add``；写失败明确报错，不把旧文件说成最
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -537,3 +538,117 @@ class TestGitVisibility:
 
         source = Path(progress_module.__file__).read_text(encoding="utf-8")
         assert "subprocess" not in source, "writer 不碰进程：git diff 可见性是天然事实"
+
+# ── 服务层接线（S2）：task 命令成功 / run 终态 → best-effort 刷新 ───────────
+
+
+def _svc_state(tmp_path):
+    """与 test_task_delivery.py::_svc_state 同构的隔离 AppState 替身。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from agent_harness.config import Settings
+    from tests.session.ledger_doubles import idle_operation_ledger
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+    )
+    state = MagicMock()
+    state.settings = settings
+    state.store = JsonlSessionStore(root=tmp_path / "sessions")
+    state.workspaces_root = tmp_path
+    state.workspace_registry = None
+    state.workspace_index = None
+    state.run_manager = MagicMock()
+    state.run_manager.get_active = MagicMock(return_value=None)
+    state.get_wiring = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    state.operation_ledger = idle_operation_ledger()
+    state.ensure_stores = AsyncMock()
+    state.stores = MagicMock()
+    state.stores.delegation_tree_ledger.get_session_budget = AsyncMock(return_value=None)
+    return state
+
+
+class TestServiceWiring:
+    def _seed(self, tmp_path) -> None:
+        state = _svc_state(tmp_path)
+        session = Session.start(state.store, session_id="sid", cwd=str(tmp_path))
+        assert apply_task_definition(
+            session, task_text="接线目标", criteria=[{"text": "A"}]
+        ).ok
+        return state, session
+
+    def test_acceptance_command_refreshes_progress_file(self, tmp_path) -> None:
+        state, _session = self._seed(tmp_path)
+
+        async def run():
+            from agent_harness.web.app import session_service
+
+            service = session_service(state)
+            return await service.task_acceptance(
+                session_id="sid", decision="accepted", expected_version=0
+            )
+
+        outcome = asyncio.run(run())
+        assert outcome.ok
+        body = _body(tmp_path, "sid")
+        assert "接线目标" in body
+        assert "接受裁决：accepted" in body, "task 命令成功 → 进度文件同步刷新"
+
+    def test_rejected_command_does_not_touch_file(self, tmp_path) -> None:
+        state, session = self._seed(tmp_path)
+        session.append(TASK_ACCEPTED, {"decision": "accepted", "reason": None})
+        from agent_harness.web.app import session_service
+
+        async def run():
+            return await session_service(state).task_acceptance(
+                session_id="sid", decision="accepted", expected_version=1
+            )
+
+        rejected = asyncio.run(run())
+        assert not rejected.ok and rejected.error_kind == "conflict"
+        assert not (tmp_path / "agent-progress" / "sid" / "progress.md").exists(),             "拒绝零事件 → 不写文件"
+
+    def test_refresh_without_cwd_anchor_is_silent_skip(self, tmp_path) -> None:
+        state = _svc_state(tmp_path)
+        Session.start(state.store, session_id="sid")  # 无 cwd 锚
+
+        async def run():
+            from agent_harness.web.app import session_service
+
+            await session_service(state).refresh_progress_file("sid")
+
+        asyncio.run(run())  # 不抛即过：无处可写是合法跳过
+        assert not (tmp_path / "agent-progress").exists()
+
+    def test_on_run_terminal_refreshes_progress_file(self, tmp_path) -> None:
+        state, session = self._seed(tmp_path)
+        session.append(RUN_STARTED, {}, run_id="run-1")
+        session.append(RUN_COMPLETED, {"summary": "收口"}, run_id="run-1")
+
+        async def run():
+            from agent_harness.web.app import session_service
+
+            await session_service(state).on_run_terminal("sid")
+
+        asyncio.run(run())
+        body = _body(tmp_path, "sid")
+        assert "Run 完成 run_id=run-1" in body, "run 终态边界刷新（里程碑）"
+
+    def test_refresh_failure_is_swallowed_and_logged(self, tmp_path, monkeypatch, caplog) -> None:
+        state, _session = self._seed(tmp_path)
+
+        async def run():
+            from agent_harness.web.app import session_service
+
+            await session_service(state).refresh_progress_file("sid")
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        # 服务持有自己的 from-import 引用——打点必须落在 service 模块的绑定名上
+        monkeypatch.setattr("agent_harness.session.service.write_progress_file", boom)
+        asyncio.run(run())  # 不上抛——主流程不被文件失败污染
+        assert any("进度文件刷新失败" in r.message for r in caplog.records)
+
