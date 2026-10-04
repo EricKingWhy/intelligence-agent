@@ -34,6 +34,7 @@ from agent_harness.session import (
     USER_MESSAGE,
     Session,
 )
+from agent_harness.session.event import TASK_DEFINED
 from agent_harness.storage.checkpoint import (
     note_checkpoint_save_failure,
     reset_checkpoint_save_failure_count,
@@ -666,10 +667,11 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
 
     # 断言 4（不变量 #22）：断连/取消不破坏 Session 一致性——已落盘的事实
     # 完整可读、可重建，收尾路径不得增删改持久化事件。
-    # 2 条 = Session.start 的 session/started 初始事实 + stub 落盘的 run/started。
+    # 3 条 = Session.start 的 session/started + task/defined（W-07 #351：创建即
+    # 定义原始目标）+ stub 落盘的 run/started。
     events = app.state.agent.store.read_events(hanging.persisted_session_id)
-    assert len(events) == 2, f"收尾后 session 事实应恰好 2 条，实际 {len(events)}"
-    assert [e.type for e in events] == [SESSION_STARTED, RUN_STARTED]
+    assert len(events) == 3, f"收尾后 session 事实应恰好 3 条，实际 {len(events)}"
+    assert [e.type for e in events] == [SESSION_STARTED, TASK_DEFINED, RUN_STARTED]
 
 
 # ── session_id 路径穿越防御（Round 7 安全加固）──

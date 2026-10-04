@@ -14,6 +14,8 @@ run 钉在"在途"状态）。
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,7 @@ from agent_harness.session import (
 from agent_harness.session.derive import derive_protected_facts
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
+    MODEL_REQUEST_STARTED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
     STEER_APPLIED,
@@ -645,16 +648,23 @@ async def test_on_run_terminal_is_noop_without_pending_input(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_on_run_terminal_swallows_deleted_cwd_not_found(tmp_path, monkeypatch):
+async def test_on_run_terminal_swallows_deleted_cwd_not_found(
+    tmp_path, monkeypatch, caplog
+):
     """cwd 被外部删除时终态驱动不裸抛，待投递输入留待下次（#624-1）。
 
     `deliver_next_undelivered` → `resume_and_launch` 的 cwd 守卫抛
-    WorkspaceNotFound（#615① 同形：run 期间外部目录被删）。`on_run_terminal`
+    WorkspaceNotFound（#615① 同形：run 期间外部目录被删；P3 跟进批后由其
+    子型 SessionCwdUnavailable 携带，父类 catch 面不变）。`on_run_terminal`
     现只翻译 SessionNotFound、吞 ActiveRunConflict——WorkspaceNotFound 裸抛到
     RunManager 的 ``logger.exception`` 兜底。今天无害（输入留在事件流可重试），
     但任何**不带**该兜底的新调用方会重新打开裸异常泄漏。事务性 outbox 口径
     （投递失败不丢消息、留待下次重试）要求终态驱动侧自己消化——与
     SessionNotFound 同款 warning 记日志，不改变 deliver 的 409 契约。
+
+    P3 跟进（#624 批审查登记项）：warning 日志本身入钉——「留待下次」口径的
+    可观察面不止事件流；投递跳过是诊断事实，落 logger 不落 SessionEvent
+    （不变量 #4：Event ≠ Diagnostic Log）。
     """
     harness = _build_harness(tmp_path, monkeypatch, [AIMessage(content="答")])
     external = tmp_path / "removed-project"
@@ -667,12 +677,20 @@ async def test_on_run_terminal_swallows_deleted_cwd_not_found(tmp_path, monkeypa
         harness.state.store, session_id, MESSAGE_QUEUED,
         {"queue_id": "q-dead-cwd", "content": "重启前的消息"},
     )
-    external.rmdir()
+    # W-05（#349）：create_and_launch 带有效 task 即在 cwd 落 agent-progress/ ⇒
+    # 目录非空，rmdir 失效；rmtree 保持「外部删除 cwd」的场景语义不变。
+    shutil.rmtree(external)
 
-    await harness.service.on_run_terminal(session_id)
+    with caplog.at_level(logging.WARNING, logger="agent_harness.session.service"):
+        await harness.service.on_run_terminal(session_id)
 
     assert not harness.of_type(session_id, QUEUE_CONSUMED)
     assert harness.of_type(session_id, MESSAGE_QUEUED), "输入留在事件流待下次"
+    assert any(
+        "cwd 不可用" in record.getMessage()
+        and record.levelno == logging.WARNING
+        for record in caplog.records
+    ), "终态驱动跳过接力必须留 warning 诊断痕"
 
 
 # ── T10：steer 参与记忆抽取（injected_by 为空）────────────────────────
@@ -746,6 +764,13 @@ async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatc
     await harness.wait_for(
         lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
         what="run 起跑（gate 把它钉在模型调用上）",
+    )
+    # #604 的 model/request-started 在 run 起跑与 gate 阻塞之间**异步**落盘；快照前必须
+    # 等它就位，否则下面"被拒请求零副作用"的逐条比对会与该落盘竞态（合并树全量实测
+    # 偶发多出一条 model/request-started，focused 复跑稳定绿——窗口是调度的，不是语义的）。
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, MODEL_REQUEST_STARTED)) == 1,
+        what="首个模型请求开账落盘（#604）",
     )
     before = [e.type for e in harness.events(session_id)]
 
