@@ -33,6 +33,7 @@ from agent_harness.session import (
 from agent_harness.session.derive import derive_protected_facts
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
+    MODEL_REQUEST_STARTED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
     STEER_APPLIED,
@@ -746,6 +747,13 @@ async def test_in_flight_input_still_judges_the_budget_body(tmp_path, monkeypatc
     await harness.wait_for(
         lambda: len(harness.of_type(session_id, RUN_STARTED)) == 1,
         what="run 起跑（gate 把它钉在模型调用上）",
+    )
+    # #604 的 model/request-started 在 run 起跑与 gate 阻塞之间**异步**落盘；快照前必须
+    # 等它就位，否则下面"被拒请求零副作用"的逐条比对会与该落盘竞态（合并树全量实测
+    # 偶发多出一条 model/request-started，focused 复跑稳定绿——窗口是调度的，不是语义的）。
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, MODEL_REQUEST_STARTED)) == 1,
+        what="首个模型请求开账落盘（#604）",
     )
     before = [e.type for e in harness.events(session_id)]
 
