@@ -829,6 +829,15 @@ async def run(
 
 
 def main() -> None:
+    # W-11（#355）：`serve` 是唯一的冷启动闭环入口——自己竞争 InstanceLock、失败时
+    # 二次检查附着既有服务，因此必须绕开下面的外层锁（否则 serve 永远死在
+    # "第二个写者"的报错上）。与 --help 同级的早分发。
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        try:
+            _main_serve(sys.argv[2:])
+        finally:
+            flush_process_sink()
+        return
     # ARCH-7（#150）：CLI 与 Web 并发使用同一 session root 被**有意拒绝**——
     # 无保护的跨进程多写者会产出重复 seq / 交错写，且 run 归属共识只在进程内
     # 有效。这里不吞异常：响亮失败 + 明确错误信息（锁路径 / 占用者 / 逃生门）。
@@ -847,7 +856,11 @@ def main() -> None:
     try:
         lock = InstanceLock(settings.workspace_dir).acquire()
     except InstanceLockError as error:
-        print(error, file=sys.stderr)
+        # W-11（#355）：锁报错先做附着感知——活服务在运行时把它的地址指给用户，
+        # 而不是留下「锁被占用」的旧话术诱发启动者另开第二个实例。
+        from agent_harness.host_service import describe_lock_error_with_attach
+
+        print(describe_lock_error_with_attach(settings.workspace_dir, error), file=sys.stderr)
         raise SystemExit(2) from error
     try:
         _main_dispatch()
@@ -856,6 +869,45 @@ def main() -> None:
         # 旁路收尾（ADR-0018 D3）：任何退出路径（正常/异常/SystemExit）都尽力
         # 发送剩余 Langfuse span；未配置/未装配时零开销 no-op。
         flush_process_sink()
+
+
+def _main_serve(argv: list[str]) -> None:
+    """W-11（#355）：单机服务冷启动闭环（附着 → 否则竞争启动 → 二次检查）。
+
+    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 127.0.0.1 /
+    localhost，个人桌面服务不暴露 LAN）；远程/LAN 部署保持既有显式配置入口
+    （`create_prod_app` + 显式 jwt_secret），不经本命令。
+    """
+    from agent_harness.host_service import HostServiceError, serve_once
+
+    parser = argparse.ArgumentParser(
+        prog="agent-harness serve",
+        description="启动本机唯一 Agent Harness 服务（已运行则附着既有服务后退出）",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        choices=["127.0.0.1", "localhost"],
+        help="绑定地址；只允许 loopback（W-11：个人服务不暴露 LAN，远程部署走显式配置入口）",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        outcome = serve_once(settings, host=args.host)
+    except (HostServiceError, InstanceLockError) as error:
+        # HostServiceError = 活服务但凭据不可用（exit 3）；InstanceLockError =
+        # 二次检查窗口内无服务可附着、锁在非服务写者手里（exit 2，原报错原样出）。
+        print(error, file=sys.stderr)
+        raise SystemExit(3 if isinstance(error, HostServiceError) else 2) from error
+    except KeyboardInterrupt:
+        print("服务已停止")
+        return
+    if not outcome.served and outcome.endpoint is not None:
+        print(
+            f"已有本机服务在运行：http://127.0.0.1:{outcome.endpoint.port}"
+            "（已附着，本进程退出）"
+        )
 
 
 def _main_dispatch() -> None:

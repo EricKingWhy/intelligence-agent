@@ -68,6 +68,11 @@ class WriteTool(Tool):
         # TOOL_EXECUTION_ERROR，下方 write_text 的四分支形态映射
         # （PermissionError/IsADirectoryError/NotADirectoryError/FileExistsError）
         # 在 Linux 上永远走不到。
+        # #623：目标内容非 UTF-8 时 read_text 抛 UnicodeDecodeError（ValueError
+        # 族，不是 OSError）。覆盖写不需要读懂旧内容（spec 05 §5：content-
+        # absolute 覆盖语义，写入合法性不依赖旧内容可读）——与 OSError 同款
+        # 降级：diff before 置空，写入照常。git 对不可解码文件显示 "Binary
+        # files differ"、aider 直接 "Dropping ... from the chat."，同口径。
         before = ""
         try:
             before = self._sandbox.read_text(args.path)
@@ -76,6 +81,7 @@ class WriteTool(Tool):
             PermissionError,
             IsADirectoryError,
             NotADirectoryError,
+            UnicodeDecodeError,
         ):
             pass
 
