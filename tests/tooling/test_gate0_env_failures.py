@@ -226,8 +226,11 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
 # main(['--no-record']) 全链路，用 capsys 断言口径行的在场/缺席。
 
 
-def _patch_main_io(monkeypatch, outcomes):
+def _patch_main_io(monkeypatch, outcomes, missing: str | None = None):
     """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。
+
+    `missing` 指定一条车道模拟「工具缺失」（argv=None）——该分支的语义（fail-closed：
+    不得被 env 归类洗绿）同样要有钉，见 `test_main_tool_missing_lane_is_not_env_classified`。
 
     车道集合**同属 I/O 面**：`build_lanes` 探测 `.venv` / `node` / `web/node_modules`
     这些宿主条件，而 gate1 的 backend 作业只 `uv sync`、不装前端依赖 ⇒ oxlint/tsc 的
@@ -244,8 +247,11 @@ def _patch_main_io(monkeypatch, outcomes):
         stdout = "a" * 40 + "\n"
 
     lanes = [
-        gate0.Lane(ln.name, ln.desc, gate0._portable_argv([sys.executable, "-c", "pass"]),
-                   ln.cwd, env=ln.env, blocked=ln.blocked)
+        gate0.Lane(ln.name, ln.desc,
+                   None if ln.name == missing else
+                   gate0._portable_argv([sys.executable, "-c", "pass"]),
+                   ln.cwd, env=ln.env,
+                   blocked="找不到 node" if ln.name == missing else ln.blocked)
         for ln in gate0.build_lanes("")
     ]
     monkeypatch.setattr(gate0, "build_lanes", lambda since: lanes)
@@ -278,3 +284,22 @@ def test_main_fail_branch_omits_env_verdict_line_on_mixed_red(monkeypatch, capsy
     assert rc == 1
     assert "Gate-0 FAIL" in out
     assert "环境项之外 0 失败" not in out  # 混合真红 ⇒ 口径行缺席（真红优先）
+
+
+def test_main_tool_missing_lane_is_not_env_classified(monkeypatch, capsys):
+    """工具缺失（argv=None）不得被当成环境项：rc=1、FAIL 且口径行缺席（fail-closed）。
+
+    #636 的机制就是这个分支：CI 上 oxlint/tsc 因缺 `web/node_modules` 走 argv=None ⇒
+    main 记 rc=1「工具缺失」混入 ⇒ 口径行按语义（混合不打）缺席。上面的宿主解耦修复把
+    车道 argv 固定后，这条分支会失去（原先只是偶然的）覆盖，故独立钉住其语义：
+    「工具缺失」是 fail-closed 的真实失败，不得被 env 归因洗绿。
+    """
+    names = [ln.name for ln in gate0.build_lanes("")]
+    outcomes = {n: (3221225794, "boom") for n in names}
+    _patch_main_io(monkeypatch, outcomes, missing=names[0])
+    rc = gate0.main(["--no-record"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Gate-0 FAIL" in out
+    assert "工具缺失" in out
+    assert "环境项之外 0 失败" not in out
