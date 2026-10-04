@@ -675,6 +675,10 @@ class ContextBuilder:
                 "auto_limit": failure.auto_limit,
                 "hard_limit": failure.hard_limit,
                 "token_estimate": failure.token_estimate,
+                "summary_model_id": failure.summary_model_id,
+                "duration_ms": failure.duration_ms,
+                "request_token_estimate": failure.request_token_estimate,
+                "request_budget_tokens": failure.request_budget_tokens,
             })
 
     def _reproject(self, session: Session) -> list[AnyMessage]:

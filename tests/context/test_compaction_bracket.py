@@ -27,6 +27,7 @@ from agent_harness.session import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -405,7 +406,7 @@ class TestBuilderWritesBracket:
                     response_metadata={"model_name": "provider-reported-summary-model"},
                 )
 
-        ticks = iter((100.0, 100.125))
+        ticks = iter((100.0, 100.05, 100.125))
         monkeypatch.setattr(
             compactor_module, "monotonic", lambda: next(ticks), raising=False,
         )
@@ -420,6 +421,46 @@ class TestBuilderWritesBracket:
         assert event.data["duration_ms"] == 125
         assert event.data["request_token_estimate"] > 0
         assert event.data["request_budget_tokens"] == 8500
+
+    @pytest.mark.asyncio
+    async def test_failed_summary_events_record_request_metadata_without_provider_echo(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class FailingSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                raise ConnectionError("api_key=do-not-persist")
+
+        ticks = iter((100.0, 100.0, 100.125, 100.2, 100.575))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=FailingSummaryModel(),
+        )
+        await builder.build(session)
+
+        failures = [
+            event for event in session.events
+            if event.type == CONTEXT_COMPACTION_FAILED
+        ]
+        assert len(failures) == 2
+        assert [event.data["summary_model_id"] for event in failures] == [
+            "configured-summary-model", "configured-summary-model",
+        ]
+        assert [event.data["duration_ms"] for event in failures] == [125, 375]
+        assert all(event.data["request_token_estimate"] > 0 for event in failures)
+        assert all(event.data["request_budget_tokens"] == 8500 for event in failures)
+        assert "api_key=do-not-persist" not in repr([event.data for event in failures])
 
     @pytest.mark.asyncio
     async def test_second_build_after_bracket_skips_shadowed(self, tmp_path):

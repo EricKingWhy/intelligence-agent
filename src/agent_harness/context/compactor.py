@@ -102,6 +102,10 @@ class CompactionFailure:
     auto_limit: int
     hard_limit: int
     token_estimate: int
+    summary_model_id: str | None
+    duration_ms: int
+    request_token_estimate: int
+    request_budget_tokens: int
 
 
 class _SummaryRejected(ValueError):
@@ -258,12 +262,15 @@ class ContextCompactor:
         summary_started_at = monotonic()
         summary_model_id: str | None = None
         for attempt in (1, 2):
+            attempt_started_at = monotonic()
+            attempt_model_id = _summary_model_id(self._model, None)
             try:
                 # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（30s 是
                 # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
                 async with self._slot(), asyncio.timeout(self._summary_timeout):
                     response = await self._model.ainvoke(request)
-                summary_model_id = _summary_model_id(self._model, response)
+                attempt_model_id = _summary_model_id(self._model, response)
+                summary_model_id = attempt_model_id
                 if not isinstance(response, AIMessage) or response.tool_calls:
                     raise _SummaryRejected(
                         "tool_calls_in_response",
@@ -308,6 +315,10 @@ class ContextCompactor:
                 # CancelledError 不在这里吞（上面显式重抛）。
                 failures.append(_record_failure(
                     attempt, exc, token_estimate, self._auto_limit, self._hard_limit,
+                    summary_model_id=attempt_model_id,
+                    duration_ms=max(round((monotonic() - attempt_started_at) * 1000), 0),
+                    request_token_estimate=request_token_estimate,
+                    request_budget_tokens=int(self._hard_limit),
                 ))
                 logger.warning(
                     "Context compaction attempt %s rejected (%s)",
@@ -725,6 +736,8 @@ def _classify_failure(exc: BaseException) -> str:
 def _record_failure(
     attempt: int, exc: BaseException, token_estimate: int,
     auto_limit: float, hard_limit: float,
+    *, summary_model_id: str | None, duration_ms: int,
+    request_token_estimate: int, request_budget_tokens: int,
 ) -> CompactionFailure:
     """一次尝试的异常 → 有界 CompactionFailure。
 
@@ -742,4 +755,8 @@ def _record_failure(
         auto_limit=int(auto_limit),
         hard_limit=int(hard_limit),
         token_estimate=token_estimate,
+        summary_model_id=summary_model_id,
+        duration_ms=duration_ms,
+        request_token_estimate=request_token_estimate,
+        request_budget_tokens=request_budget_tokens,
     )
