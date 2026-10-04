@@ -351,4 +351,3 @@ class TestCreationPathWiring:
         assert not [e for e in events if e.type == "task/defined"]
         got = client.get(f"/api/sessions/{session.session_id}/task")
         assert got.status_code == 404
-

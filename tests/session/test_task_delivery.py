@@ -441,4 +441,3 @@ def test_derive_skips_revised_event_without_criteria_key(tmp_path) -> None:
     session.append(TASK_ACCEPTANCE_REVISED, {})
     state = derive_task_state(session.events)
     assert [c.text for c in state.criteria] == ["A"], "缺键事件不应用为空清单"
-
