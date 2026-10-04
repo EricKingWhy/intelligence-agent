@@ -149,6 +149,35 @@ class TestResumeWorkspace:
 
         assert not external.exists()
 
+    def test_missing_persisted_cwd_raises_the_cwd_specific_type(self, tmp_path):
+        """#266 cwd 守卫抛 cwd 专属子型，不再是双语义重载的 WorkspaceNotFound 本型。
+
+        父类一个类型承载「workspace_id 未注册」（projects.py / list_sessions）与
+        「会话 cwd 没了」（本守卫）两种语义——errors.py 类 docstring（"workspace_id
+        不存在"）与 web/domain_errors.py 的 #266 注释（"那条是'目录没了'"）对同一
+        类型的描述互相矛盾。拆分沿用仓内 WorkspacePathInvalid(WorkspaceNameInvalid)
+        先例：子类共享父类 404 语义、handler 的 except WorkspaceNotFound 天然覆盖、
+        精确类型索引要求子类自登记（domain_errors + 映射双向钉）。成熟产品同型
+        （本机实测）：stdlib NotADirectoryError→OSError、httpx ConnectError→
+        NetworkError→TransportError→RequestError→HTTPError、sqlite3
+        IntegrityError→DatabaseError→Error——父类 catch 覆盖 + 子类携精确语义。
+        """
+        state = self._real_state(tmp_path)
+        external = tmp_path / "removed-project-typed"
+        external.mkdir()
+        self._start_with_cwd(state, "test-sid", external)
+        external.rmdir()
+        # 同上条：进程重启形态（cache 空）才走服务层 is_dir() 守卫。
+        state.workspace_registry = WorkspaceRegistry(root=tmp_path)
+
+        with pytest.raises(WorkspaceNotFound) as ei:
+            self._resume(state, "test-sid")
+
+        # 精确子型（红 = 拆分前本型 WorkspaceNotFound）；父类 catch 面不破。
+        assert type(ei.value).__name__ == "SessionCwdUnavailable"
+        assert isinstance(ei.value, WorkspaceNotFound)
+        assert not external.exists()
+
     def test_legacy_session_without_cwd_keeps_default_workspace(self, tmp_path):
         """历史遗留（无 cwd 锚）：兼容语义逐字不变——用默认目录，且可续聊。"""
         state = self._real_state(tmp_path)

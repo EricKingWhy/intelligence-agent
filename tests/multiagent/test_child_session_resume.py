@@ -599,16 +599,22 @@ async def test_child_without_parent_anchor_keeps_env_cell_fail_closed(
 
 
 def test_parent_cwd_transient_failure_is_not_cached(tmp_path: Path, monkeypatch):
+    """失败不缓存 ⇒ 下一次调用必须**重读**（不能把 None 钉死）；成功后恢复缓存语义。
+
+    断言落在可观察的**读取次数**上，不依赖 provider 的私有缓存旗标。
+    """
     harness = _build_harness(tmp_path, monkeypatch)
     anchor = tmp_path / "project"
     Session.start(harness.state.store, session_id=PARENT_ID, cwd=anchor)
     real_read = harness.state.store.read_events
-    fired = {"done": False}
+    reads = {"n": 0, "failed_once": False}
 
     def flaky(session_id, *args, **kwargs):
-        if session_id == PARENT_ID and not fired["done"]:
-            fired["done"] = True
-            raise OSError("transient store failure")
+        if session_id == PARENT_ID:
+            reads["n"] += 1
+            if not reads["failed_once"]:
+                reads["failed_once"] = True
+                raise OSError("transient store failure")
         return real_read(session_id, *args, **kwargs)
 
     monkeypatch.setattr(harness.state.store, "read_events", flaky)
@@ -616,12 +622,13 @@ def test_parent_cwd_transient_failure_is_not_cached(tmp_path: Path, monkeypatch)
     provider._session_store = harness.state.store
     provider._parent_session_id = PARENT_ID
 
-    assert provider._parent_cwd() is None        # 失败 → None（按未分组处理）
-    assert provider._parent_cwd_loaded is False  # 失败不缓存（换一次再试）
-    value = provider._parent_cwd()               # 重读成功
+    assert provider._parent_cwd() is None    # 失败 → None（按未分组处理）
+    assert reads["n"] == 1                   # 失败没有被缓存
+    value = provider._parent_cwd()           # 重读成功（不是拿缓存的 None）
+    assert reads["n"] == 2
     assert value is not None and Path(value).resolve() == anchor.resolve()
-    assert provider._parent_cwd_loaded is True   # 成功后恢复缓存语义
-    assert provider._parent_cwd() == value       # 缓存命中不再重读
+    assert provider._parent_cwd() == value   # 缓存命中
+    assert reads["n"] == 2                   # 成功后才缓存：不再重读
 
 
 @pytest.mark.asyncio
