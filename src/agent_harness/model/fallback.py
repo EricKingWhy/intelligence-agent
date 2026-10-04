@@ -280,10 +280,12 @@ class ModelFallbackCoordinator:
         与 drain 路径同源。
         """
         role = self._current_role()
-        started_ns = time.monotonic_ns()
         request_id: str | None = None
         try:
             async with self._slot():
+                # 计时起点在槽位拿到之后：闸争用的排队等待不算请求耗时
+                # （两轴审查 P2 修复；request_id 未绑定即未开计时，取消不记账）。
+                started_ns = time.monotonic_ns()
                 request_id = self._start_request(role, on_request_started)
                 result = await self.current.ainvoke(messages)
         except BaseException as error:
@@ -318,10 +320,10 @@ class ModelFallbackCoordinator:
     ) -> Any:
         """切换后的那一次重试（**不再**切换：never 切回、只重试一次）。"""
         role = self._current_role()
-        started_ns = time.monotonic_ns()
         request_id: str | None = None
         try:
             async with self._slot():
+                started_ns = time.monotonic_ns()
                 request_id = self._start_request(role, on_request_started)
                 result = await self.current.ainvoke(messages)
         except BaseException:
@@ -360,10 +362,10 @@ class ModelFallbackCoordinator:
         role = self._current_role()
         primary_content_chars = 0
         primary_finish_reason: str | None = None
-        started_ns = time.monotonic_ns()
         request_id: str | None = None
         try:
             async with self._slot():
+                started_ns = time.monotonic_ns()
                 request_id = self._start_request(role, on_request_started)
                 async for chunk in self._guarded_stream(self.current, messages):
                     primary_content_chars += _chunk_text_length(chunk)
@@ -385,10 +387,10 @@ class ModelFallbackCoordinator:
             ):
                 raise
             retry_role = self._current_role()
-            retry_started_ns = time.monotonic_ns()
             retry_request_id: str | None = None
             try:
                 async with self._slot():
+                    retry_started_ns = time.monotonic_ns()
                     retry_request_id = self._start_request(
                         retry_role, on_request_started,
                     )

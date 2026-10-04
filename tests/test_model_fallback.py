@@ -322,6 +322,51 @@ class TestCoordinatorAstream:
                 pass
 
 
+class TestRequestDurationExcludesQueueWait:
+    """#520 两轴审查 P2：`duration_ms` 的计时起点在并发槽**获取之后**。
+
+    口径（`fallback.py` 模块 docstring 与 `ModelRequestAttempt.duration_ms`
+    字段注释一致声明）：闸争用的排队等待不计入请求耗时，与 stall 看门狗
+    「排队不计 idle」同源。占住唯一槽位再发请求：若计时退回「槽位获取前」
+    起点，读数会把排队窗（本用例 300ms）算进去，判据必红。
+    """
+
+    @pytest.mark.asyncio
+    async def test_ainvoke_duration_ms_measures_invoke_not_queueing(self):
+        gate = ModelCallGate(limit=1)
+        invoked = asyncio.Event()
+
+        class _SlowModel:
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+            async def ainvoke(self, messages, **kwargs):
+                invoked.set()
+                await asyncio.sleep(0.05)
+                return AIMessage(content="ok")
+
+        held = gate.slot()
+        await held.__aenter__()  # 占住唯一槽位：请求只能在闸外排队
+        coordinator = ModelFallbackCoordinator(
+            primary=_SlowModel(), primary_name="primary-model", gate=gate,
+        )
+        task = asyncio.create_task(coordinator.ainvoke([]))
+        try:
+            await asyncio.sleep(0.3)
+            assert not invoked.is_set(), "槽位被占时请求应仍在排队"
+        finally:
+            await held.__aexit__(None, None, None)
+        async with asyncio.timeout(2):
+            ai = await task
+        assert ai.content == "ok"
+        attempts = coordinator.drain_requests()
+        assert len(attempts) == 1
+        duration = attempts[0].duration_ms
+        assert isinstance(duration, int) and duration >= 0
+        # 模型自身 ~50ms；排队窗 300ms 不计入 ⇒ 读数远小于排队窗。
+        assert duration < 300
+
+
 class TestFallbackTransition:
     def test_is_frozen(self):
         import dataclasses

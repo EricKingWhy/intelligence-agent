@@ -3061,16 +3061,17 @@ class AgentRuntime:
             )
             return fallback, CLOSEOUT_DETERMINISTIC, []
         request_id = str(uuid4())
+        request_started_event = arms.record_request_started(
+            PROVIDER_ROLE_CLOSEOUT, request_id, step_id=step_id,
+        )
         started_ns = time.monotonic_ns()
 
         def _request_duration() -> int:
             # closeout 绕过 coordinator，计时由本调用点自带（#520）：口径与
-            # `model/fallback.py::_elapsed_ms` 一致——单调钟、整数毫秒、≥0。
+            # `model/fallback.py::_elapsed_ms` 一致——单调钟、整数毫秒、≥0，
+            # 起点在请求发出前一刻（started 事件的落盘不计时）。
             return max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
 
-        request_started_event = arms.record_request_started(
-            PROVIDER_ROLE_CLOSEOUT, request_id, step_id=step_id,
-        )
         try:
             response = await self._raw_model.ainvoke(
                 [*messages, HumanMessage(content=_closeout_instruction(

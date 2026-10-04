@@ -139,8 +139,12 @@ class TestPromptCacheCapabilityDeclaration:
         assert PROVIDER_PRESETS["deepseek"]["prompt_cache"] == "automatic"
 
     def test_unverified_providers_do_not_declare(self):
-        for provider in ("qwen", "mimo", "senseaudio", "Cline"):
-            assert "prompt_cache" not in PROVIDER_PRESETS[provider]
+        # 遍历全部 preset 而非硬编码清单（两轴审查 P3）：将来新增的 provider
+        # 默认不声明，只有带上官方文档依据才单独加钉——「not guessed」契约。
+        for name, preset in PROVIDER_PRESETS.items():
+            if name == "deepseek":
+                continue
+            assert "prompt_cache" not in preset, name
 
     def test_pick_capabilities_passes_the_field_through(self):
         picked = _pick_capabilities({"prompt_cache": "automatic", "unknown": "x"})
