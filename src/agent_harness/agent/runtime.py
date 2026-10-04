@@ -187,6 +187,16 @@ _MEMORY_EXCLUDED_EVENT_TYPES = frozenset({
 })
 
 
+def _valid_count(value: Any) -> int | None:
+    """token 计数字段的有效性闸：非负 int（bool 不算）且不越 int64。"""
+    if (
+        isinstance(value, int) and not isinstance(value, bool)
+        and 0 <= value <= INT64_MAX
+    ):
+        return value
+    return None
+
+
 def _usage_from_response(ai: Any) -> dict[str, int] | None:
     """从模型响应如实抽取 token usage；响应没带就返回 None（绝不伪造）。
 
@@ -206,6 +216,19 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     **两个键名都要认**：provider 线走 langchain 归一化后是 ``cache_read``，不走
     归一化的路径才是原始名 ``cached_tokens``；成因与取证见
     `docs/design/CONTEXT_CAPACITY_DASHBOARD.md` §3.1。
+
+    **DeepSeek 原生回退源（#520）**：``prompt_cache_hit_tokens`` 只存在于
+    ``response_metadata["token_usage"]``（langchain 把原生 usage 原样放这里，
+    归一化只映射 ``prompt_tokens_details.cached_tokens``）——归一化子对象缺席时
+    以原生字段兜底，让 DeepSeek 线的缓存命中不因文档版本漂移而不可见。
+
+    **uncached 成对字段（#520）**：``prompt_cache_miss_tokens`` 显式值优先
+    （DeepSeek 官方恒等式 ``prompt_tokens = hit + miss``）；否则按**含入口径**
+    派生 ``prompt_tokens - cached_tokens``（两值已知且差 ≥ 0 才写）。含入口径 =
+    cached ⊆ prompt（OpenAI/DeepSeek 官方 usage 与 langchain ``usage_metadata``
+    同一口径）；互斥桶阵营（Langfuse / pi 的汇总层把 input 归一化为 uncached）
+    与此的差异**不进**本仓记录层——`prompt_tokens` 记 provider 原始含入值（wire
+    事实），避免对已归一化 metadata 做二次转换。
     """
     meta = getattr(ai, "usage_metadata", None)
     if not isinstance(meta, dict):
@@ -214,22 +237,38 @@ def _usage_from_response(ai: Any) -> dict[str, int] | None:
     for source_key, target_key in ({"input_tokens": "prompt_tokens",
                                     "output_tokens": "completion_tokens",
                                     "total_tokens": "total_tokens"}).items():
-        value = meta.get(source_key)
-        if (
-            isinstance(value, int) and not isinstance(value, bool)
-            and 0 <= value <= INT64_MAX
-        ):
+        value = _valid_count(meta.get(source_key))
+        if value is not None:
             usage[target_key] = value
     details = meta.get("input_token_details")
+    token_usage: dict[str, Any] = (
+        (getattr(ai, "response_metadata", None) or {}).get("token_usage") or {}
+    )
+    cached: int | None = None
     if isinstance(details, dict):
-        cached = details.get("cache_read")
+        cached = _valid_count(details.get("cache_read"))
         if cached is None:
-            cached = details.get("cached_tokens")
-        if (
-            isinstance(cached, int) and not isinstance(cached, bool)
-            and 0 <= cached <= INT64_MAX
-        ):
-            usage["cached_tokens"] = cached
+            cached = _valid_count(details.get("cached_tokens"))
+    if cached is None:
+        cached = _valid_count(
+            token_usage.get("prompt_cache_hit_tokens")
+            if isinstance(token_usage, dict) else None,
+        )
+    if cached is not None:
+        usage["cached_tokens"] = cached
+    uncached: int | None = None
+    miss = _valid_count(
+        token_usage.get("prompt_cache_miss_tokens")
+        if isinstance(token_usage, dict) else None,
+    )
+    if miss is not None:
+        uncached = miss
+    else:
+        prompt = usage.get("prompt_tokens")
+        if cached is not None and prompt is not None and prompt - cached >= 0:
+            uncached = prompt - cached
+    if uncached is not None:
+        usage["uncached_tokens"] = uncached
     return usage or None
 
 
@@ -809,6 +848,8 @@ class _TerminalContext:
             data = {"role": request.role, "outcome": request.outcome}
             if request.request_id is not None:
                 data["request_id"] = request.request_id
+            if request.duration_ms is not None:
+                data["duration_ms"] = request.duration_ms
             response = self.completed_model_response
             if request.outcome == REQUEST_OUTCOME_COMPLETED and response is not None:
                 model = _model_name_from_response(response)
@@ -950,12 +991,18 @@ class _TerminalArms:
 
     def record_request_failed(
         self, role: str, request_id: str, *, step_id: int,
+        duration_ms: int | None = None,
     ) -> SessionEvent:
         """Persist a known failed attempt before fallback can start."""
+        data: dict[str, Any] = {
+            "role": role, "outcome": REQUEST_OUTCOME_FAILED,
+            "request_id": request_id,
+        }
+        if duration_ms is not None:
+            data["duration_ms"] = duration_ms
         event = self.session.append(
             MODEL_REQUEST,
-            {"role": role, "outcome": REQUEST_OUTCOME_FAILED,
-             "request_id": request_id},
+            data,
             run_id=self.run_id, step_id=step_id,
         )
         self.settled_request_events[request_id] = event
@@ -1722,10 +1769,14 @@ class AgentRuntime:
                     )
 
                 def record_request_failed(
-                    role: str, request_id: str, step: int = steps + 1,
+                    role: str, request_id: str,
+                    duration_ms: int | None = None, step: int = steps + 1,
                 ) -> None:
+                    # 第三参 duration_ms 由 coordinator 回调按位传入（#520）：
+                    # 失败事件与 drain 路径共用同一格测得的耗时。
                     arms.record_request_failed(
                         role, request_id, step_id=arms.envelope_step(step),
+                        duration_ms=duration_ms,
                     )
 
                 if stream:
@@ -2468,6 +2519,7 @@ class AgentRuntime:
                 usage=usage if produced_response else None,
                 cost=cost if produced_response else None,
                 model=model if produced_response else None,
+                duration_ms=attempt.duration_ms,
             ))
         return events
 
@@ -2475,11 +2527,13 @@ class AgentRuntime:
         self, session: Session, *, role: str, outcome: str,
         run_id: str | None, step: int, usage: dict[str, int] | None = None,
         cost: Decimal | None = None, model: str | None = None,
-        request_id: str | None = None,
+        request_id: str | None = None, duration_ms: int | None = None,
     ) -> SessionEvent:
         """落一条 `model/request`（`model_requests` 的唯一计数点，`02 §5.1`）。
 
         只写**知道**的键：usage / cost / model 缺席就不落键（不可得 ≠ 0）。
+        `duration_ms`（#520）由请求编排层（coordinator / closeout 调用点）以
+        单调钟实测——测不到（理论上：记录发生在测量之后）就不落键，同样不编 0。
         `cost_usd` 是十进制**字符串**：`Decimal` 进 `json.dumps` 会炸，而 `float()`
         引入与 wire 不等价的二进制近似（`11 §6.1`：二进制浮点相等不是契约）。
         """
@@ -2492,6 +2546,8 @@ class AgentRuntime:
             data["usage"] = usage
         if cost is not None:
             data["cost_usd"] = format(cost, "f")
+        if duration_ms is not None:
+            data["duration_ms"] = duration_ms
         return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
 
     async def _record_session_tool_deltas(self, events: list[SessionEvent]) -> None:
@@ -3005,6 +3061,13 @@ class AgentRuntime:
             )
             return fallback, CLOSEOUT_DETERMINISTIC, []
         request_id = str(uuid4())
+        started_ns = time.monotonic_ns()
+
+        def _request_duration() -> int:
+            # closeout 绕过 coordinator，计时由本调用点自带（#520）：口径与
+            # `model/fallback.py::_elapsed_ms` 一致——单调钟、整数毫秒、≥0。
+            return max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
+
         request_started_event = arms.record_request_started(
             PROVIDER_ROLE_CLOSEOUT, request_id, step_id=step_id,
         )
@@ -3020,6 +3083,7 @@ class AgentRuntime:
                 arms.session, role=PROVIDER_ROLE_CLOSEOUT,
                 outcome=REQUEST_OUTCOME_FAILED, run_id=arms.run_id,
                 step=step_id, request_id=request_id,
+                duration_ms=_request_duration(),
             )
             raise
         except Exception as error:  # noqa: BLE001 - 同上：模型 closeout 不可用不是失败
@@ -3032,7 +3096,7 @@ class AgentRuntime:
             failed_event = self._append_model_request(
                 arms.session, role=PROVIDER_ROLE_CLOSEOUT,
                 outcome=REQUEST_OUTCOME_FAILED, run_id=arms.run_id, step=step_id,
-                request_id=request_id,
+                request_id=request_id, duration_ms=_request_duration(),
             )
             return fallback, CLOSEOUT_DETERMINISTIC, [
                 request_started_event, failed_event,
@@ -3043,7 +3107,7 @@ class AgentRuntime:
             arms.session, role=PROVIDER_ROLE_CLOSEOUT,
             outcome=REQUEST_OUTCOME_COMPLETED, run_id=arms.run_id, step=step_id,
             usage=usage, cost=cost, model=_model_name_from_response(response),
-            request_id=request_id,
+            request_id=request_id, duration_ms=_request_duration(),
         )
         # closeout 的 usage 也要进本执行的 token 账（原来只有主循环的响应入账）。
         # 同口径收口（`#552` C1）与主循环累加点共用 `_accumulate_usage`。

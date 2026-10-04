@@ -819,7 +819,12 @@ def _stable_data(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
     if event_type in (MODEL_REQUEST_STARTED, MODEL_REQUEST):
         # 每个真实 Provider attempt 都有自己的 UUID；两次独立运行不共用 ID，
         # 配对由各自事件流中的 request_id 断言，跨入口只比其它 durable 事实。
-        return {key: value for key, value in data.items() if key != "request_id"}
+        # `duration_ms`（#520）同理：per-request 单调钟实测是环境事实，不是
+        # 契约——键的存在性由 focused 用例断言，这里只比非测量字段。
+        return {
+            key: value for key, value in data.items()
+            if key not in ("request_id", "duration_ms")
+        }
     if event_type != TOOL_RESULT:
         return data
     content = json.loads(data["content"])

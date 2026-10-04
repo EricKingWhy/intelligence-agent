@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
@@ -53,6 +54,16 @@ _TRANSIENT_ERROR_NAMES = frozenset({
     "TimeoutError",          # 内建 / asyncio 超时（3.11+ 同一类）
     "ConnectionError",       # 内建 socket 连接失败
 })
+
+
+def _elapsed_ms(started_ns: int) -> int:
+    """monotonic 起点（`time.monotonic_ns()`）到现在的整数毫秒（≥0）。
+
+    #520：per-request 耗时用单调钟——wall clock 会被 NTP/夏令时拨动，跨两次
+    读取的差值在拨动下可为负或虚高。起点在并发槽获取**之后**（排队等待不计，
+    与 stall 看门狗「排队不计 idle」同口径），终点是拿到响应 / 失败那一刻。
+    """
+    return max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
 
 
 def _chunk_text_length(chunk: Any) -> int:
@@ -150,6 +161,9 @@ class ModelRequestAttempt:
       ——那条路径**绕过**本协调器（见 `_closeout_continuation`）。
     - `outcome`：拿到响应（completed）或没拿到（failed：瞬时故障、非瞬时错误、
       取消、断连）。没拿到的**照样算一次请求**：它真的发出去了。
+    - `duration_ms`（#520）：这次请求从发出（并发槽获取后）到拿到响应/失败的
+      单调钟整数毫秒。测量在本层，因为「一次请求」的边界只有编排层知道（与
+      role/outcome 同理）；落盘见 `agent/runtime.py::_append_model_request`。
     - usage / cost **不在这里**：那是**响应**的属性，而流式路径的响应由 Runtime
       聚合（本层只见 chunk），落盘见 `agent/runtime.py::_append_model_request`。
     """
@@ -157,6 +171,7 @@ class ModelRequestAttempt:
     role: str
     outcome: str
     request_id: str | None = None
+    duration_ms: int | None = None
 
 
 @runtime_checkable
@@ -249,7 +264,7 @@ class ModelFallbackCoordinator:
     async def ainvoke(
         self, messages: list[AnyMessage], *,
         on_request_started: Callable[[str, str], None] | None = None,
-        on_request_failed: Callable[[str, str], None] | None = None,
+        on_request_failed: Callable[[str, str, int | None], None] | None = None,
     ) -> Any:
         """非流式调用：primary 瞬时失败 → 切 fallback 重试一次。
 
@@ -261,8 +276,11 @@ class ModelFallbackCoordinator:
         取消 / 断连（`BaseException`，如 `CancelledError`）也记——请求发出去了就
         发生过，只是没拿到响应。记录走 `except BaseException` 而不是
         `except Exception`：后者会让取消/断连这类"请求已发出但未完成"从账上消失。
+        耗时（`#520`）在**同一格**带上：失败回调拿到它，让同步落盘的失败事件
+        与 drain 路径同源。
         """
         role = self._current_role()
+        started_ns = time.monotonic_ns()
         request_id: str | None = None
         try:
             async with self._slot():
@@ -271,7 +289,10 @@ class ModelFallbackCoordinator:
         except BaseException as error:
             if request_id is None:
                 raise
-            self._record_failed_request(role, request_id, on_request_failed)
+            self._record_failed_request(
+                role, request_id, on_request_failed,
+                duration_ms=_elapsed_ms(started_ns),
+            )
             if not isinstance(error, Exception) or not self._try_switch(error):
                 raise
             try:
@@ -284,16 +305,20 @@ class ModelFallbackCoordinator:
                         type(error).__name__, type(retry_error).__name__,
                     )
                 raise
-        self._record_request(role, REQUEST_OUTCOME_COMPLETED, request_id)
+        self._record_request(
+            role, REQUEST_OUTCOME_COMPLETED, request_id,
+            duration_ms=_elapsed_ms(started_ns),
+        )
         return result
 
     async def _ainvoke_once(
         self, messages: list[AnyMessage],
         on_request_started: Callable[[str, str], None] | None,
-        on_request_failed: Callable[[str, str], None] | None,
+        on_request_failed: Callable[[str, str, int | None], None] | None,
     ) -> Any:
         """切换后的那一次重试（**不再**切换：never 切回、只重试一次）。"""
         role = self._current_role()
+        started_ns = time.monotonic_ns()
         request_id: str | None = None
         try:
             async with self._slot():
@@ -302,15 +327,21 @@ class ModelFallbackCoordinator:
         except BaseException:
             if request_id is None:
                 raise
-            self._record_failed_request(role, request_id, on_request_failed)
+            self._record_failed_request(
+                role, request_id, on_request_failed,
+                duration_ms=_elapsed_ms(started_ns),
+            )
             raise
-        self._record_request(role, REQUEST_OUTCOME_COMPLETED, request_id)
+        self._record_request(
+            role, REQUEST_OUTCOME_COMPLETED, request_id,
+            duration_ms=_elapsed_ms(started_ns),
+        )
         return result
 
     async def astream(
         self, messages: list[AnyMessage], *,
         on_request_started: Callable[[str, str], None] | None = None,
-        on_request_failed: Callable[[str, str], None] | None = None,
+        on_request_failed: Callable[[str, str, int | None], None] | None = None,
     ) -> AsyncIterator[Any]:
         """流式调用：流中途瞬时失败（含卡流）→ 切 fallback 继续产出。
 
@@ -323,11 +354,13 @@ class ModelFallbackCoordinator:
 
         记账同 `ainvoke`：每次尝试恰一格，且**流被半途关闭**（消费者断连 →
         `GeneratorExit`）也算一次失败的请求——那一格在第一段 `except
-        BaseException` 里记，`yield` 型生成器关闭时同样会走到。
+        BaseException` 里记，`yield` 型生成器关闭时同样会走到。耗时刻度（`#520`）
+        同理：失败/被关闭的那一刻就是终点。
         """
         role = self._current_role()
         primary_content_chars = 0
         primary_finish_reason: str | None = None
+        started_ns = time.monotonic_ns()
         request_id: str | None = None
         try:
             async with self._slot():
@@ -341,7 +374,10 @@ class ModelFallbackCoordinator:
         except BaseException as error:
             if request_id is None:
                 raise
-            self._record_failed_request(role, request_id, on_request_failed)
+            self._record_failed_request(
+                role, request_id, on_request_failed,
+                duration_ms=_elapsed_ms(started_ns),
+            )
             if not isinstance(error, Exception) or not self._try_switch(
                 error,
                 primary_content_chars=primary_content_chars,
@@ -349,6 +385,7 @@ class ModelFallbackCoordinator:
             ):
                 raise
             retry_role = self._current_role()
+            retry_started_ns = time.monotonic_ns()
             retry_request_id: str | None = None
             try:
                 async with self._slot():
@@ -362,6 +399,7 @@ class ModelFallbackCoordinator:
                     raise
                 self._record_failed_request(
                     retry_role, retry_request_id, on_request_failed,
+                    duration_ms=_elapsed_ms(retry_started_ns),
                 )
                 # 只把"两级都真的失败"记成双挂；消费方断连（GeneratorExit /
                 # CancelledError）走同一分支但**不是**模型级双挂。
@@ -372,9 +410,13 @@ class ModelFallbackCoordinator:
                 raise
             self._record_request(
                 retry_role, REQUEST_OUTCOME_COMPLETED, retry_request_id,
+                duration_ms=_elapsed_ms(retry_started_ns),
             )
             return
-        self._record_request(role, REQUEST_OUTCOME_COMPLETED, request_id)
+        self._record_request(
+            role, REQUEST_OUTCOME_COMPLETED, request_id,
+            duration_ms=_elapsed_ms(started_ns),
+        )
 
     def drain_transitions(self) -> list[FallbackTransition]:
         """取走自上次 drain 以来的切换事实（Runtime 逐调用持久化用）。"""
@@ -422,18 +464,25 @@ class ModelFallbackCoordinator:
             callback(role, request_id)
         return request_id
 
-    def _record_request(self, role: str, outcome: str, request_id: str) -> None:
+    def _record_request(
+        self, role: str, outcome: str, request_id: str, *,
+        duration_ms: int | None = None,
+    ) -> None:
         self._requests.append(ModelRequestAttempt(
             role=role, outcome=outcome, request_id=request_id,
+            duration_ms=duration_ms,
         ))
 
     def _record_failed_request(
         self, role: str, request_id: str,
-        callback: Callable[[str, str], None] | None,
+        callback: Callable[[str, str, int | None], None] | None, *,
+        duration_ms: int | None = None,
     ) -> None:
-        self._record_request(role, REQUEST_OUTCOME_FAILED, request_id)
+        self._record_request(
+            role, REQUEST_OUTCOME_FAILED, request_id, duration_ms=duration_ms,
+        )
         if callback is not None:
-            callback(role, request_id)
+            callback(role, request_id, duration_ms)
 
     def _try_switch(
         self, error: BaseException, *,

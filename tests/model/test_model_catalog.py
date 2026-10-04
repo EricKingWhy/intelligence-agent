@@ -12,8 +12,10 @@ import pytest
 
 from agent_harness.config import Settings
 from agent_harness.model.config import (
+    PROVIDER_PRESETS,
     ConfigError,
     ModelConfig,
+    _pick_capabilities,
     find_catalog_entry,
     parse_model_catalog,
 )
@@ -123,3 +125,39 @@ class TestFindCatalogEntry:
         ])
         entry = find_catalog_entry(_settings(catalog), "deepseek", "beta")
         assert entry is not None and entry.name == "beta"
+
+
+class TestPromptCacheCapabilityDeclaration:
+    """#520 一期：`prompt_cache` 能力位（declarative only，无行为分支）。
+
+    只给有官方文档依据的 provider 声明（deepseek = 自动前缀缓存，无标记参数）；
+    未声明的键省略——「not guessed」契约。取值词汇：`automatic`（无标记、稳定前缀
+    自动命中）| `explicit_breakpoints`（Anthropic 式 cache_control）。
+    """
+
+    def test_deepseek_preset_declares_automatic_caching(self):
+        assert PROVIDER_PRESETS["deepseek"]["prompt_cache"] == "automatic"
+
+    def test_unverified_providers_do_not_declare(self):
+        for provider in ("qwen", "mimo", "senseaudio", "Cline"):
+            assert "prompt_cache" not in PROVIDER_PRESETS[provider]
+
+    def test_pick_capabilities_passes_the_field_through(self):
+        picked = _pick_capabilities({"prompt_cache": "automatic", "unknown": "x"})
+        assert picked == {"prompt_cache": "automatic"}
+
+    def test_catalog_entry_may_declare(self):
+        entries = parse_model_catalog(_settings(json.dumps([
+            {"name": "claude-x", "provider": "deepseek", "model_name": "m",
+             "prompt_cache": "explicit_breakpoints"},
+        ])))
+        assert entries[0].declared_capabilities()["prompt_cache"] == (
+            "explicit_breakpoints"
+        )
+
+    def test_catalog_entry_rejects_non_string(self):
+        with pytest.raises(ConfigError):
+            parse_model_catalog(_settings(json.dumps([
+                {"name": "bad", "provider": "deepseek", "model_name": "m",
+                 "prompt_cache": 123},
+            ])))
