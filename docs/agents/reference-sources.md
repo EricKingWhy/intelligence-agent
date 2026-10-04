@@ -91,6 +91,16 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 
 **待核实候选（2026-10-04 WebFetch 超时 / 404 未取到正文；按 §6.1 核实完成前不得作为方案依据引用，不得编造读取日期）**：Jupyter Server security（loopback 默认 + token 鉴权）、Docker Desktop architecture（单后端附着）、Electron `app.requestSingleInstanceLock`、systemd `journalctl --verify` / SEQNUM、`git fsck` 连通性校验、RFC 7807 problem details、Podman Desktop Windows 前提、Devin / Cursor background agent 入口。`pg_waldump` 同日实测**不适用**（文档明示无 gap / 损坏段处理描述），不得引用。
 
+### 原子文件写 / 跨平台文件锁（2026-10-04 新增，i660 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| POSIX man pages（man7.org：`rename(2)` / `flock(2)`） | 内核语义权威 | rename 只查目录权限（不查目标文件位/句柄）；flock 为 advisory、进程退出自动释放 |
+| `filelock`（tox-dev/py-filelock） | Python 跨平台文件锁事实标准 | lockfile + flock/msvcrt 平台分支、超时/计数语义 |
+| 本仓 `src/agent_harness/instance_lock.py` | 已有跨平台 advisory 锁协议（#150） | `_take_os_lock` 双平台分支、advisory 边界声明——仓内先例 |
+
+（2026-10-04 i660 调研首查时本领域缺失，按本文件 §3.1 规则补录；外部来源当时因宿主权限未实读核实，判定与核实状态见 `docs/research/i660-posix-guard-research.md` §4。）
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；

@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -72,6 +73,13 @@ _PREV_NAME = "progress.prev.md"
 _TMP_PREFIX = _MD_NAME + "."
 _TMP_SUFFIX = ".tmp"
 _END_MARKER = "<!-- agent-progress:end -->"
+# 写锁文件（#660，协议形态 Port 自 instance_lock.py L101-124）。命名必须避开
+# `_TMP_PREFIX`（"progress.md.*"）清理 glob——否则下一次写入会误删外部持有的锁文件，
+# 架空整个协议（tests/session/test_progress_file.py 有回归钉）。
+_LOCK_NAME = ".progress.md.lock"
+# Windows 区间锁偏移必须远离载荷区（msvcrt 区间锁是 mandatory 的，锁 byte 0 会让
+# 锁文件内容再也读不出来）；POSIX 用 flock 整文件 advisory，无此问题。
+_WIN_LOCK_OFFSET = 1 << 20
 
 _MISSING = "（缺项：无任务定义）"
 _BLOCKED = "（该段包含无法安全呈现的内容，已整段省略——缺项）"
@@ -593,6 +601,51 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+def _take_write_lock(fd: int) -> None:
+    """非阻塞取 OS 级排他写锁；已被占用时抛 OSError。
+
+    协议形态 Port 自 ``instance_lock.py::_take_os_lock``（#660）：POSIX
+    ``fcntl.flock(LOCK_EX | LOCK_NB)`` / Windows ``msvcrt.locking(LK_NBLCK)``
+    （1 字节区间锁，偏移 ``_WIN_LOCK_OFFSET`` 远离载荷区）。advisory 边界同
+    instance_lock.py：只约束遵守本协议的进程，进程崩溃/退出由 OS 自动释放，
+    无陈旧锁路径。同进程内独立 ``open()`` 的 fd 属不同 file description，
+    flock 互斥同样成立（测试据此在同进程内模拟外部锁定）。
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _release_write_lock(fd: int) -> None:
+    """显式解锁（close 也会释放，双保险）。"""
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _acquire_write_lock(directory: Path) -> int | None:
+    """写前取 progress 目录写锁；被占用返回 None（fail-fast，不重试不等待）。"""
+    fd = os.open(directory / _LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        _take_write_lock(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def write_progress_file(
     root: Path | str,
     session_id: str,
@@ -602,6 +655,9 @@ def write_progress_file(
 ) -> ProgressWriteOutcome:
     """派生 → 渲染 → 脱敏 → 原子落盘；幂等；失败明确报错不谎报最新。
 
+    写前对同目录锁文件（``.progress.md.lock``）取非阻塞 OS 排他写锁（#660，
+    advisory，被占用 ⇒ ``fail("locked")``，不重试不等待）；目标只读先行检查
+    明确失败。锁进程退出由 OS 兜底释放。
     只派生与写文件，不追加任何事件、不调 git；调用方负责在既有触发点
     （创建/交付/cancel/run 终态等）以 best-effort 方式调用。
     """
@@ -634,6 +690,21 @@ def write_progress_file(
         return ProgressWriteOutcome(ok=True, skipped=True, path=paths.markdown,
                                     source_event_seq=doc.source_event_seq)
 
+    # 只读前置检查（#660）：POSIX 的 rename(2) 不查目标文件权限位，覆写只读目标
+    # 必须由 writer 主动检查（root 绕过权限位时 os.access 恒真 ⇒ 自动放行不误伤）。
+    # Windows 只读位同样在此拦截；下方 PermissionError 路径保留为第二道防线。
+    if paths.markdown.exists() and not os.access(paths.markdown, os.W_OK):
+        return fail("locked", "目标文件只读，不可覆写")
+
+    # 锁文件自身的 os.open 也可能抛 OSError（只读目录、目录中途被删），必须收敛为
+    # 明确失败——此前同场景由 mkstemp 在 try 内接住，不能让本次改动退化成抛异常逃逸。
+    try:
+        lock_fd = _acquire_write_lock(paths.directory)
+    except OSError as exc:
+        return fail("env", f"写锁文件不可创建：{exc.strerror or exc}")
+    if lock_fd is None:
+        return fail("locked", "目标进度文件被另一写入方锁定（advisory 写锁）")
+
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=_TMP_PREFIX, suffix=_TMP_SUFFIX,
                                         dir=paths.directory)
@@ -658,6 +729,12 @@ def write_progress_file(
         return fail("locked", f"目标被占用或只读：{exc.strerror or exc}")
     except OSError as exc:
         return fail("env", f"写入失败：{exc.strerror or exc}")
+    finally:
+        try:
+            _release_write_lock(lock_fd)
+            os.close(lock_fd)
+        except OSError:
+            pass
     _fsync_directory(paths.directory)
 
     new_meta = {
