@@ -1483,6 +1483,18 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectPlanUpdated,
     summarize: emptySummary,
   },
+  // #351（W-07）：Task 交付状态三轴事实（定义 task/defined + task/acceptance-revised、
+  // 验证 verification/updated、接受 task/accepted + task/acceptance-released）——
+  // 会话级交付事实，不是对话时间线项；权威投影在后端 `derive_task_state`（GET
+  // /api/sessions/{sid}/task 单源），前端不在本地再造第二套任务状态（不变量 #22）。
+  // 与 SESSION_RESUMED / MEMORY_UPDATED 同形登记为 no-op ⇒ 已知类型、不进
+  // `unknown_events`；任务状态 UI 呈现面归后续前端票，本组只负责 `Record` 的穷尽性
+  // （生成物 `event-types.ts` 新增类型时 tsc 失败直到登记）。
+  [EventType.TASK_DEFINED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.TASK_ACCEPTANCE_REVISED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.VERIFICATION_UPDATED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.TASK_ACCEPTED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.TASK_ACCEPTANCE_RELEASED]: { apply: noopProjection, summarize: emptySummary },
   [EventType.MEMORY_DEGRADED]: { apply: noopProjection, summarize: emptySummary },
   // #298（T6 引入 `memory/updated`，T8 补登记）：与 MEMORY_DEGRADED 同形——提交型记忆变更，
   // 载荷只有 count / memory IDs / action counts / job ID，**不带内容**（PRD V2 §6.5）。
