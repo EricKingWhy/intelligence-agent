@@ -126,6 +126,7 @@ from agent_harness.session.errors import (
     QueueItemNotFound,
     RecoveryConflict,
     SeqConflict,
+    SessionCwdUnavailable,
     SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
@@ -163,6 +164,12 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     ApprovalRequestMissing: 404,
     QueueItemNotFound: 404,
     WorkspaceNotFound: 404,
+    # #266 cwd 守卫的专属子型（P3 跟进批）：「会话 cwd 没了/不是目录」从父类的
+    # 「workspace_id 未注册」语义里拆出（errors.py 类 docstring 与本文件 #266 注释
+    # 曾对同一类型描述矛盾）。HTTP 层同一 404（detail 文案区分），handler 的
+    # `except WorkspaceNotFound` 天然覆盖（同 WorkspacePathInvalid 先例）；本表是
+    # 精确类型索引，子类必须自己登记。
+    SessionCwdUnavailable: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
     # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立——expected_version
@@ -186,8 +193,9 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 重排目标不在该项目账本里）。是"请求合法但状态不允许"，与 422 的名字形态非法分开。
     WorkspaceMoveInvalid: 409,
     # #266：durable `session/started.cwd` 与沙箱映射/进程内 cache 指向不同目录——
-    # 续聊拒绝静默选边（也不覆盖映射）。与 404 的 `WorkspaceNotFound` 刻意分开：
-    # 那条是"目录没了"，这条是两侧目录可能都在、**归属事实**互相矛盾。
+    # 续聊拒绝静默选边（也不覆盖映射）。与 404 的 `SessionCwdUnavailable`
+    # （`WorkspaceNotFound` 子型）刻意分开：那条是"目录没了"，这条是两侧目录
+    # 可能都在、**归属事实**互相矛盾。
     WorkspaceBindingConflict: 409,
     # BUG-011：seq 冲突是「资源当前状态与请求冲突」，**不是**「资源不存在」——
     # 旧行为把它翻成 404（`send_message` 的 `Send failed: 404`），掩盖了日志损坏。

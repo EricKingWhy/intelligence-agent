@@ -138,6 +138,25 @@ class WorkspaceNotFound(SessionServiceError):
     `SessionService.list_sessions` 把 workspace 层的 `UnknownWorkspace` 翻成本异常
     （同一套"下层异常翻译成本层词汇"的既有做法，见 `ForkBoundaryError` →
     `InvalidForkBoundary`）。
+
+    「会话 cwd 没了/不是目录」形态已拆出子型 `SessionCwdUnavailable`（见下）——
+    本类型只承载「未注册」语义。
+    """
+
+
+class SessionCwdUnavailable(WorkspaceNotFound):
+    """会话的 durable cwd 不存在或不是目录（#266 守卫；#615① / #624-1 同形）。
+
+    拆分动因：父类一个类型曾同时承载「workspace_id 未注册」（`projects.py` /
+    `list_sessions`）与「cwd 没了」（`resume_and_launch` 守卫）两种语义——本文件
+    父类 docstring 与 `web/domain_errors.py` 的 #266 注释（"那条是'目录没了'"）
+    对同一类型的描述互相矛盾。沿用仓内 `WorkspacePathInvalid(WorkspaceNameInvalid)`
+    先例：继承父类 ⇒ HTTP 层同一 404 语义（detail 文案区分）、handler 的
+    `except WorkspaceNotFound` 天然覆盖（app.py 各元组与 `on_run_terminal` 零改动）。
+    **不能**只靠父类——领域错误表是精确类型索引，子类必须自己登记
+    （`web/domain_errors.py`）。成熟产品同型：stdlib `NotADirectoryError`→`OSError`、
+    httpx `ConnectError`→…→`HTTPError`、sqlite3 `IntegrityError`→`DatabaseError`
+    ——父类 catch 覆盖 + 子类携精确语义。
     """
 
 

@@ -141,7 +141,11 @@ def test_auth_unset_secret_warns_loudly(tmp_path, caplog):
 def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
     """CORS 中间件必须在认证层外层：浏览器预检（OPTIONS）天然不携带 Bearer，
     预检 401 = 配置 JWT_SECRET 后 Vite dev 跨域模式整体失效。预检放行不削弱
-    认证——真实数据请求仍逐个过认证层（预检通过 ≠ 数据可匿名访问）。"""
+    认证——真实数据请求仍逐个过认证层（预检通过 ≠ 数据可匿名访问）。
+
+    W-11（#355）契约变更：`/api/health` 匿名可达（附着核验发生在拿到凭据之前，
+    载荷只含非秘密字段）；fail-closed 契约对**数据面**不变——匿名访问
+    `/api/sessions` 等业务端点依旧 401，identity 不因密钥配置而静默降级。"""
     from datetime import UTC, datetime
 
     secret = "test-signing-secret-at-least-32-characters"
@@ -157,8 +161,14 @@ def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
         )
         assert preflight.status_code == 200, "预检请求不得被认证层拦截"
         assert preflight.headers["access-control-allow-origin"] == "*"
-        # 数据面不受影响：匿名 GET 依然 401（fail-closed 契约不变）
-        assert client.get("/api/health").status_code == 401
+        # W-11：健康探针匿名 200，载荷含协议形状、不含秘密
+        health = client.get("/api/health")
+        assert health.status_code == 200
+        assert health.json()["protocol_version"] == 1
+        assert health.json()["auth_required"] is True
+        assert "token" not in health.text.lower() and "secret" not in health.text.lower()
+        # 数据面 fail-closed 契约不变：匿名 GET 业务端点依然 401
+        assert client.get("/api/sessions").status_code == 401
         live = jwt.encode({"tenant_id": "acme", "user_id": "alice",
                            "exp": int(datetime.now(UTC).timestamp()) + 600}, secret)
         assert client.get("/api/health",

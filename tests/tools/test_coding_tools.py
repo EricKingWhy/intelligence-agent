@@ -310,6 +310,94 @@ class TestWriteTool:
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.PERMISSION_DENIED
 
+    # ── #623：before-read 读不出 ⇒ 降级不阻断（diff before 置空）──
+
+    @pytest.mark.asyncio
+    async def test_write_overwrites_non_utf8_target_degrades_diff(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """非 UTF-8 目标覆盖写 → ok=True，diff 降级（#623①）。
+
+        before-read 走 UTF-8 解码（local.py ``open(..., encoding="utf-8")``），
+        目标内容非 UTF-8 时抛 UnicodeDecodeError（ValueError 族，不是 OSError）
+        ——旧 except 元组接不住 ⇒ 逃逸 execute() 被包装成 TOOL_EXECUTION_ERROR，
+        尽管覆盖写本身完全合法：write 是 content-absolute 覆盖语义（spec 05 §5），
+        写入合法性不依赖旧内容可读。成熟产品同口径：git 对判定为二进制的文件显示
+        "Binary files differ"（判定口径是内容含 NUL 字节，不是 UTF-8 可解码性；
+        任何仓库对含 NUL 的文件跑 git diff 即可复现）、aider 输出
+        "Dropping {fname} from the chat."（aider/coders/base_coder.py 的
+        `get_abs_fnames_content`，公开源码）——读不出 ≠ 操作非法，展示层降级；
+        OpenHands ACI 的 binary 阻断是 content-relative str_replace 的正确性
+        要求，不适用于覆盖写。红 = TOOL_EXECUTION_ERROR，绿 = 写入成功且
+        diff before 置空（同新文件口径）。
+        """
+        (sandbox.workspace_root / "blob.dat").write_bytes(b"hello\x00\xff\xfe")
+
+        result = await executor.execute(
+            _tool_call("write", {"path": "blob.dat", "content": "now text"})
+        )
+
+        assert result.result.ok is True, result.result.message
+        assert sandbox.read_text("blob.dat") == "now text"
+        assert result.result.data["before"] == ""
+        assert result.result.data["after"] == "now text"
+        assert result.result.data["truncated"] is False
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            FileNotFoundError(2, "injected"),
+            PermissionError(13, "injected"),
+            IsADirectoryError(21, "injected"),
+            NotADirectoryError(20, "injected"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "injected"),
+            # P3 跟进（#623 批审查登记项）：枚举外 OSError 形态（EINVAL 为例）。
+            # before-read 只做 diff 展示，任何读失败都只降级、不得逃逸成
+            # TOOL_EXECUTION_ERROR——红 = 旧枚举元组接不住本形态。
+            OSError(22, "injected"),
+        ],
+        ids=[
+            "file-not-found",
+            "permission",
+            "is-a-directory",
+            "not-a-directory",
+            "unicode-decode",
+            "generic-oserror",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_write_before_read_degrades_on_injected_forms(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox, monkeypatch, exc
+    ):
+        """#623②：before-read 各形态（OSError 族 + 非 UTF-8）注入 ⇒ 全部静默降级。
+
+        #610 的红/绿用例依赖 POSIX 天然形态（IsADirectoryError/NotADirectoryError
+        在 Windows 原生不触发），before-read 阶段的降级语义缺平台无关回归防线。
+        本测在 ``sandbox.read_text`` 缝上直接注入：目标/父路径均为合法文件形态，
+        降级后写入必须照常成功（diff before 置空）；「写目标是目录/父路径是
+        文件」的形态甄别仍由 write_text 分支独占，已由 #610 的两个用例在
+        同一缝上钉住，此处不重复。P3 跟进批把 except 从枚举五形态放宽为
+        ``(OSError, UnicodeDecodeError)``：读侧枚举永远追不全平台形态
+        （EINVAL/ENOSPC/EBUSY…），而 before-read 是展示辅助非契约（write.py
+        既有注释），宽捕降级才是该缝的正确语义；写侧失败仍由 write_text
+        四分支精确映射，职责不变。
+        """
+        sandbox.write_text("doc.txt", "old")
+
+        def boom(path: str) -> str:
+            raise exc
+
+        monkeypatch.setattr(sandbox, "read_text", boom)
+        result = await executor.execute(
+            _tool_call("write", {"path": "doc.txt", "content": "new"})
+        )
+
+        assert result.result.ok is True, result.result.message
+        assert (sandbox.workspace_root / "doc.txt").read_text(
+            encoding="utf-8"
+        ) == "new"
+        assert result.result.data["before"] == ""
+
 
 # ============================================================================
 # BashTool（核心：ADR-0002 不变量）
