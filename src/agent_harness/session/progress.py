@@ -63,7 +63,9 @@ from agent_harness.session.task import derive_task_state
 logger = logging.getLogger("agent_harness.session.progress")
 
 PROGRESS_SCHEMA_VERSION = "1"
-_PROGRESS_DIRNAME = "agent-progress"
+# 存储布局契约（票面 <项目根>/agent-progress/<session-id>/）：公开常量，
+# web 工作区浏览面（workspace_files）据同一名字过滤这份 harness 内部状态。
+PROGRESS_DIRNAME = "agent-progress"
 _MD_NAME = "progress.md"
 _META_NAME = "progress.meta.json"
 _PREV_NAME = "progress.prev.md"
@@ -91,7 +93,7 @@ class ProgressPaths:
 
 
 def progress_paths(root: Path | str, session_id: str) -> ProgressPaths:
-    directory = Path(root) / _PROGRESS_DIRNAME / session_id
+    directory = Path(root) / PROGRESS_DIRNAME / session_id
     return ProgressPaths(
         directory=directory,
         markdown=directory / _MD_NAME,
