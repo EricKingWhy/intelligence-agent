@@ -71,8 +71,9 @@ class WriteTool(Tool):
         # #623：目标内容非 UTF-8 时 read_text 抛 UnicodeDecodeError（ValueError
         # 族，不是 OSError）。覆盖写不需要读懂旧内容（spec 05 §5：content-
         # absolute 覆盖语义，写入合法性不依赖旧内容可读）——与 OSError 同款
-        # 降级：diff before 置空，写入照常。git 对不可解码文件显示 "Binary
-        # files differ"、aider 直接 "Dropping ... from the chat."，同口径。
+        # 降级：diff before 置空，写入照常。成熟产品同口径：git 对二进制文件显示
+        # "Binary files differ"（判定口径是内容含 NUL 字节，不是 UTF-8 可解码
+        # 性）、aider 直接 "Dropping ... from the chat."。
         # P3 跟进（#623 批审查登记项）：except 从枚举五形态放宽为 OSError 全族
         # +UnicodeDecodeError——before-read 是展示辅助非契约（见上），读侧枚举
         # 追不全平台形态（EINVAL/ENOSPC/EBUSY…），枚举外形态逃逸会把合法覆盖写

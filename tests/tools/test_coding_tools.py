@@ -322,10 +322,11 @@ class TestWriteTool:
         目标内容非 UTF-8 时抛 UnicodeDecodeError（ValueError 族，不是 OSError）
         ——旧 except 元组接不住 ⇒ 逃逸 execute() 被包装成 TOOL_EXECUTION_ERROR，
         尽管覆盖写本身完全合法：write 是 content-absolute 覆盖语义（spec 05 §5），
-        写入合法性不依赖旧内容可读。成熟产品同口径：git 对不可解码文件显示
-        "Binary files differ"（任何仓库对非 UTF-8/二进制文件跑 git diff 即可
-        复现）、aider 输出 "Dropping {fname} from the chat."（aider/coders.py
-        公开源码）——读不出 ≠ 操作非法，展示层降级；
+        写入合法性不依赖旧内容可读。成熟产品同口径：git 对判定为二进制的文件显示
+        "Binary files differ"（判定口径是内容含 NUL 字节，不是 UTF-8 可解码性；
+        任何仓库对含 NUL 的文件跑 git diff 即可复现）、aider 输出
+        "Dropping {fname} from the chat."（aider/coders/base_coder.py 的
+        `get_abs_fnames_content`，公开源码）——读不出 ≠ 操作非法，展示层降级；
         OpenHands ACI 的 binary 阻断是 content-relative str_replace 的正确性
         要求，不适用于覆盖写。红 = TOOL_EXECUTION_ERROR，绿 = 写入成功且
         diff before 置空（同新文件口径）。
