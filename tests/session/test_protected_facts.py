@@ -367,6 +367,32 @@ def test_cancelled_queued_replacement_is_not_projected_as_goal(tmp_path):
     assert all(fact.source_event_id != queued.event_id for fact in goals)
 
 
+def test_cancelled_queued_replacement_restores_the_original_goal(tmp_path):
+    """#614①：替换被取消 ⇒ supersede 标记作废，原目标保持 active。
+
+    修复前实测角落：§1 的选取口径（user_goal_sources 排除已取消替换）仍把
+    原目标当"当前生效目标"，§2 的 status 判定（superseded_sources 收集）
+    却不知道替换已取消——原目标被标 superseded，保护事实表对当前生效目标
+    呈现为空，两节自相矛盾；压缩后跨窗口刚性通道丢掉唯一 active 目标。
+    """
+    session = _session(tmp_path)
+    original = session.append(USER_MESSAGE, {"content": "旧任务 ORD-100。"})
+    queued = session.append(
+        MESSAGE_QUEUED,
+        {"queue_id": "queued-1", "content": "新任务 ORD-200。"},
+    )
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": original.seq})
+    session.append(QUEUE_CANCELLED, {"queue_id": "queued-1"})
+
+    goals = [fact for fact in derive_protected_facts(session.events) if fact.type == "user_goal"]
+
+    original_goal = next(
+        fact for fact in goals if fact.source_event_id == original.event_id
+    )
+    assert original_goal.status == "active", "取消替换 ⇒ 原目标仍是当前生效目标"
+    assert all(fact.source_event_id != queued.event_id for fact in goals)
+
+
 def test_malformed_queue_id_does_not_break_protected_fact_projection(tmp_path):
     session = _session(tmp_path)
     original = session.append(USER_MESSAGE, {"content": "用户任务 ORD-100。"})
@@ -657,6 +683,92 @@ def test_projection_ignores_a_forged_registration_in_a_corrupt_history(tmp_path)
 
     goal = next(fact for fact in facts if fact.fact_id == data["fact_id"])
     assert goal.value == "完成任务 W-02。"
+
+
+# ── #624-2：伪造 supersede 标记的 QUEUED/STEER 目标与非用户源类型闸 ──
+
+
+@pytest.mark.parametrize(
+    "target_type,target_data",
+    [
+        (MESSAGE_QUEUED, {"queue_id": "forged-q", "content": "排队目标"}),
+        (STEER_REQUESTED, {"steer_id": "forged-s", "content": "steer 目标"}),
+    ],
+    ids=["queued-target", "steer-target"],
+)
+def test_forged_supersede_marker_on_queued_or_steer_target_with_full_slot_takes_effect(
+    tmp_path, target_type, target_data
+):
+    """伪造标记 target=QUEUED/STEER + 替换槽非空 ⇒ 标记成立（#624-2）。
+
+    写侧 `_assert_supersedable` 只允许 USER_MESSAGE 目标（409 拦截），QUEUED/
+    STEER 作目标只能经损坏历史到达；e337b936 合并遍历放宽后投影侧按
+    `_USER_SOURCE_TYPES` 判定目标资格，两者都是合法成员。钉损坏历史口径：
+    投影不炸、槽位语义照走——目标 sourced 的 goal 事实转 superseded，但目标
+    非 USER_MESSAGE ⇒ 伪造标记不把替换消息拉进 user_goal 链。
+    """
+    session = _session(tmp_path)
+    target = session.append(target_type, target_data)
+    replacement = session.append(USER_MESSAGE, {"content": "替换后的新指令。"})
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": target.seq})
+
+    facts = derive_protected_facts(session.events)
+
+    target_goal = next(
+        fact for fact in facts if fact.source_event_id == target.event_id
+    )
+    assert target_goal.type == "user_goal"
+    assert target_goal.status == "superseded"
+    assert not any(
+        fact.source_event_id == replacement.event_id for fact in facts
+    ), "目标非 USER_MESSAGE：伪造标记不得改写 user_goal 锚定"
+
+
+@pytest.mark.parametrize(
+    "target_type,target_data",
+    [
+        (MESSAGE_QUEUED, {"queue_id": "forged-q", "content": "排队目标"}),
+        (STEER_REQUESTED, {"steer_id": "forged-s", "content": "steer 目标"}),
+    ],
+    ids=["queued-target", "steer-target"],
+)
+def test_forged_supersede_marker_on_queued_or_steer_target_with_empty_slot_is_void(
+    tmp_path, target_type, target_data
+):
+    """伪造标记替换槽为空 ⇒ 作废（#624-2：#614① 槽位判据对该类目标同样生效）。"""
+    session = _session(tmp_path)
+    target = session.append(target_type, target_data)
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": target.seq})
+
+    facts = derive_protected_facts(session.events)
+
+    target_goal = next(
+        fact for fact in facts if fact.source_event_id == target.event_id
+    )
+    assert target_goal.status == "active"
+
+
+def test_forged_supersede_marker_cannot_touch_a_non_user_source_fact(tmp_path):
+    """伪造标记 target=非用户源事件（permission）⇒ 作废（#624-2）。
+
+    合并遍历的 ``target.type not in _USER_SOURCE_TYPES`` 分支把"用户输入的
+    supersede"与系统事实隔开：此处替换槽非空（目标夹在两条用户消息之间，
+    槽位判据放行），若没有这条类型闸，授权事实会被伪造标记错误翻成
+    superseded——类型闸是唯一防线，本测钉住它。
+    """
+    session = _session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "任务 ORD-100。"})
+    grant = session.append(
+        PERMISSION_CHANGED,
+        {"permission_mode": "workspace-write", "auto_approve": False},
+    )
+    session.append(USER_MESSAGE, {"content": "新目标 ORD-200。"})
+    session.append(MESSAGE_SUPERSEDED, {"superseded_seq": grant.seq})
+
+    facts = derive_protected_facts(session.events)
+
+    auth = next(fact for fact in facts if fact.type == "authorization")
+    assert auth.status == "active"
 
 
 @pytest.mark.asyncio

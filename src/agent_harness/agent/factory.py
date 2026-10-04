@@ -83,6 +83,7 @@ class AgentFactory:
         source_registry: ToolRegistry,
         grantable: frozenset[str] | set[str],
         session_budget: SessionBudgetPort | None = None,
+        workspace: str | None = None,
     ) -> AgentRuntime:
         """按 spec 构造 child runtime（复用同一 Agent Loop，不变量 #19）。
 
@@ -94,6 +95,10 @@ class AgentFactory:
         `session_budget`（`#318`）：委派提供方把**共享**的树账端口交给 child
         （`10 §5.1`：根 / 子 / 孙消费同一份 SessionBudget；local fuse 不池化，
         session 账恰恰要池化——两者互不替代）。
+
+        `workspace`（`#608`）：child stuck 证据端口的环境格锚——委派方传父会话的
+        cwd 锚（与子 SESSION_STARTED 的 cwd 字段同源，spec 10 §9 共享树）；
+        None（父无锚 / 直接调用）= 环境格如实缺席，fail-closed。
         """
         source_names = {tool.name for tool in source_registry.list()}
         grantable_names = set(grantable)
@@ -151,8 +156,9 @@ class AgentFactory:
             ),
             session_budget=session_budget,
             # #370（ADR-0048 残余 15）：child stuck 暂停记录**它自己的**生效策略面
-            # （默认档 + spec 档位 + 无独立模型/effort/providers 声明；环境格不在范围）。
+            # （默认档 + spec 档位 + 无独立模型/effort/providers 声明）。#608 补环境半：
+            # workspace = 父 cwd 锚（与子 SESSION_STARTED 的 cwd 字段同源）；无锚如实缺席。
             # 唯一口径在 resume_evidence.delegated_child_evidence_port——恢复侧
             # （service.resume_and_launch）对 child 会话重算出同一套值，两格同源。
-            stuck_evidence=delegated_child_evidence_port(spec.name),
+            stuck_evidence=delegated_child_evidence_port(spec.name, workspace=workspace),
         )

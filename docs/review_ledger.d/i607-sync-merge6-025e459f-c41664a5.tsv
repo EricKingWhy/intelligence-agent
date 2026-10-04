@@ -1,0 +1,1 @@
+2026-10-04	#607 批 P3 修复批第六次先回后正（吸收 origin/main 3341bcc5 = PR #626 #612 /metrics 批，对方代码面 src/web/app.py+web/metrics.py+tests/web/test_metrics.py 与本批零交集）：merge-tree 预演零冲突 ⇒ §14.4 常设授权直接 merge（上批第四次零冲突先例同型）；ort 自动合并无人工介入。合并树代码面再变 ⇒ §14.10 重跑完整门禁（全量 + Gate-0），读数见 docs/gate/。	025e459f..c41664a5

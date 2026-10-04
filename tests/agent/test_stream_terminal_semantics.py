@@ -15,7 +15,7 @@ issue-audit（不得删除部分内容、不得按字符串去重、合法重复
   （必须有 attempt 边界标记），且最终消息与 run/completed.final_text 一致。
 - R2 干净 EOF、缺 [DONE]、有合法 finish_reason ⇒ 视为正常终结（不标中断）。
 - R3 缺 [DONE] 且无 finish_reason ⇒ 与 R2 语义不同：可观测标记 + 保留部分内容。
-- R4（comment 1，scope 待裁决）`model/request` 在途可见性——当前 RED，见用例 docstring。
+- R4（#604）Provider attempt 在途时 durable `model/request-started` 可见。
 - R5 primary + fallback 双挂 ⇒ run/failed.data 同时保留两级错误类型名。
 - 反向锚 G1/G2：合法重复文本原样保留、中断保留部分内容（不得回归）。
 """
@@ -30,12 +30,14 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
+from agent_harness.agent.run_budget import consumed_from_events
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_FALLBACK,
     MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     RUN_COMPLETED,
     RUN_FAILED,
     TEXT_DELTA,
@@ -114,6 +116,25 @@ class _StalledStreamModel:
         yield AIMessageChunk(content=self._first)
         await asyncio.sleep(self._stall)
         yield AIMessageChunk(content=" done")
+
+
+class _BlockedStreamModel:
+    """等测试显式释放后才产出，便于读取真实 JSONL 在途状态。"""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        raise NotImplementedError
+
+    async def astream(self, messages, **kwargs):
+        self.entered.set()
+        await self.release.wait()
+        yield AIMessageChunk(content="部分回答")
 
 
 class _FinishThenStallModel:
@@ -369,47 +390,151 @@ class TestEofTerminalHonesty:
 
 
 # ---------------------------------------------------------------------------
-# R4（comment 1，scope 待裁决）：model/request 在途不可见
+# #604：在途 Provider attempt 必须有 durable 开始事实
 # ---------------------------------------------------------------------------
 
 
-_ACTION_REQUIRED = (
-    "#551 comment 1：model/request 在响应完成后才落盘，在途调用不可见。"
-    "这是票面 comment 的附带观察，不在 M10-2/3/8 的三条 AC 内；是否并入本票 "
-    "需用户裁决。当前 tip 复现为 RED（text/delta 的 seq 早于 model/request）。"
-)
-
-
 class TestInFlightVisibility:
-    @pytest.mark.xfail(reason=_ACTION_REQUIRED, strict=False)
     @pytest.mark.asyncio
     async def test_model_request_is_visible_while_in_flight(self, tmp_path):
-        """R4：消费到第一个 text/delta（模型仍在途）时，model/request 应已落盘。
-
-        现状（复现 comment 1 / 侦察 CASE C）：`model/request` 在整条流拉完之后才
-        记账/落盘 ⇒ 此刻事件流里还没有"这次调用"。标记为 xfail 以记录缺口、
-        不污染 GREEN 计数；scope 归属见 `_ACTION_REQUIRED`。
-        """
-        primary = _StalledStreamModel(first_chunk="部分回答", stall_seconds=0.06)
+        """Provider 等待响应时，开始事件已在 JSONL，结算事件稍后配对。"""
+        primary = _BlockedStreamModel()
         session = make_session(tmp_path)
-        stream = _runtime(primary, None).run_stream(session, "你好")
+        emitted: list[Any] = []
+        request_started_emitted = asyncio.Event()
 
-        saw_delta = False
-        async for frame in stream:
-            if frame.type == TEXT_DELTA:
-                saw_delta = True
-                break
-        assert saw_delta, "没走到真·在途那一刻，本用例失去区分力"
+        async def drain() -> None:
+            async for frame in _runtime(primary, None).run_stream(session, "你好"):
+                emitted.append(frame)
+                if frame.type == MODEL_REQUEST_STARTED:
+                    request_started_emitted.set()
 
-        # 此刻模型流仍悬挂（尚未 aclose），检查 durable 流里的调用可见性
-        in_flight = _events(session, MODEL_REQUEST)
-        delta_seqs = [e.seq for e in _events(session, TEXT_DELTA)]
-        await stream.aclose()
+        task = asyncio.create_task(drain())
+        try:
+            await asyncio.wait_for(primary.entered.wait(), timeout=2)
+            await asyncio.wait_for(request_started_emitted.wait(), timeout=2)
+            in_flight = session._store.read_events(session.session_id)
+            starts = [event for event in in_flight if event.type == MODEL_REQUEST_STARTED]
+            assert len(starts) == 1, "Provider 在途时必须已有 durable 开始事件"
+            assert any(frame.type == MODEL_REQUEST_STARTED for frame in emitted), (
+                "直接 run_stream 迭代器也必须在 Provider 首个 chunk 前镜像开始事件"
+            )
+            assert not _events(session, MODEL_REQUEST), "响应结算前不能伪造结算事件"
+            assert not _events(session, TEXT_DELTA), "barrier 释放前 Provider 未产出响应"
+            assert consumed_from_events(in_flight).model_requests == 0, (
+                "开始事件不能提前占用结算请求的预算计数"
+            )
 
-        assert in_flight, "在途模型调用必须在 durable 事件流里可见"
-        assert in_flight[0].seq < delta_seqs[0], (
-            "model/request 应先于首个 text/delta 落盘（当前相反：text/delta 在前）"
-        )
+            primary.release.set()
+            await asyncio.wait_for(task, timeout=2)
+
+            settled = _events(session, MODEL_REQUEST)
+            assert len(settled) == 1
+            assert starts[0].data["request_id"] == settled[0].data["request_id"]
+            assert starts[0].data["role"] == "primary"
+            assert starts[0].seq < settled[0].seq
+            assert starts[0].seq < _events(session, TEXT_DELTA)[0].seq < settled[0].seq
+            assert sum(frame.type == MODEL_REQUEST_STARTED for frame in emitted) == 1
+            assert consumed_from_events(session._store.read_events(
+                session.session_id,
+            )).model_requests == 1
+        finally:
+            primary.release.set()
+            if not task.done():
+                await task
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_is_settled_before_blocked_fallback(self, tmp_path):
+        """fallback 在途时，已知失败的 primary 必须先有 durable 结算。"""
+        primary = _AlwaysFailingModel(_http_500())
+        fallback = _BlockedStreamModel()
+        session = make_session(tmp_path)
+        emitted: list[Any] = []
+        fallback_start_emitted = asyncio.Event()
+
+        async def drain() -> None:
+            async for frame in _runtime(primary, fallback).run_stream(session, "你好"):
+                emitted.append(frame)
+                if (
+                    frame.type == MODEL_REQUEST_STARTED
+                    and frame.data.get("role") == "fallback"
+                ):
+                    fallback_start_emitted.set()
+
+        task = asyncio.create_task(drain())
+        try:
+            await asyncio.wait_for(fallback.entered.wait(), timeout=2)
+            await asyncio.wait_for(fallback_start_emitted.wait(), timeout=2)
+            in_flight = session._store.read_events(session.session_id)
+            starts = [event for event in in_flight if event.type == MODEL_REQUEST_STARTED]
+            requests = [event for event in in_flight if event.type == MODEL_REQUEST]
+            assert [event.data["role"] for event in starts] == ["primary", "fallback"]
+            assert len(requests) == 1, "primary 失败须在 fallback 启动前结算"
+            assert requests[0].data["role"] == "primary"
+            assert requests[0].data["outcome"] == "failed"
+            assert starts[0].data["request_id"] == requests[0].data["request_id"]
+            assert starts[0].seq < requests[0].seq < starts[1].seq
+            emitted_lifecycle = [
+                (frame.type, frame.data.get("role"), frame.data.get("outcome"))
+                for frame in emitted
+                if frame.type in (MODEL_REQUEST_STARTED, MODEL_REQUEST)
+            ]
+            assert emitted_lifecycle == [
+                (MODEL_REQUEST_STARTED, "primary", None),
+                (MODEL_REQUEST, "primary", "failed"),
+                (MODEL_REQUEST_STARTED, "fallback", None),
+            ]
+        finally:
+            fallback.release.set()
+            if not task.done():
+                await asyncio.wait_for(task, timeout=2)
+
+    @pytest.mark.asyncio
+    async def test_provider_failure_pairs_started_and_failed_request(self, tmp_path):
+        primary = _AlwaysFailingModel(_http_500())
+        session = make_session(tmp_path)
+
+        async for _frame in _runtime(primary, None).run_stream(session, "你好"):
+            pass
+
+        starts = _events(session, MODEL_REQUEST_STARTED)
+        requests = _events(session, MODEL_REQUEST)
+        assert len(starts) == len(requests) == 1
+        assert starts[0].data["request_id"] == requests[0].data["request_id"]
+        assert requests[0].data["outcome"] == "failed"
+        assert starts[0].seq < requests[0].seq
+
+    @pytest.mark.asyncio
+    async def test_cancelled_provider_pairs_started_and_failed_request(self, tmp_path):
+        primary = _BlockedStreamModel()
+        session = make_session(tmp_path)
+
+        async def drain() -> None:
+            async for _frame in _runtime(primary, None).run_stream(session, "你好"):
+                pass
+
+        task = asyncio.create_task(drain())
+        try:
+            await asyncio.wait_for(primary.entered.wait(), timeout=2)
+            starts = session._store.read_events(session.session_id)
+            starts = [event for event in starts if event.type == MODEL_REQUEST_STARTED]
+            assert len(starts) == 1
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+
+            requests = _events(session, MODEL_REQUEST)
+            assert len(requests) == 1
+            assert requests[0].data["outcome"] == "failed"
+            assert starts[0].data["request_id"] == requests[0].data["request_id"]
+            assert starts[0].seq < requests[0].seq
+        finally:
+            primary.release.set()
+            if not task.done():
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
 
 
 # ---------------------------------------------------------------------------

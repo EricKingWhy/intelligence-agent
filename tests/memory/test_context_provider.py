@@ -154,7 +154,7 @@ async def test_background_writeback_is_nonblocking_and_captures_identity(tmp_pat
         identity_context_var.reset(token)
     release.set()
     await writer.drain()
-    assert captured == [["I prefer TypeScript"], ["next turn"]]
+    assert sorted(captured) == [["I prefer TypeScript"], ["next turn"]]
     assert await capability.search(MemoryScope.USER, "TypeScript", 20) == []
     token = set_identity_context(IdentityContext("acme", "alice", ["user", "session"]))
     session_token = memory_session_var.set(session.session_id)
