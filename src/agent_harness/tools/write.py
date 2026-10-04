@@ -62,10 +62,21 @@ class WriteTool(Tool):
         """调 sandbox.write_text；路径越界映射成 PERMISSION_DENIED。"""
         # 读旧内容供前端 diff（文件不存在 → before 为空，表示这是新建）。
         # 读失败不阻塞写入——write 本就是覆盖语义，diff 是辅助视图不是契约。
+        # #610：POSIX 上「写目标是目录」的 before-read 抛 IsADirectoryError、
+        # 「父路径是文件」抛 NotADirectoryError（Windows 分别报 PermissionError/
+        # FileNotFoundError）。只捕后两者会让前两者逃逸 execute() 被包装成
+        # TOOL_EXECUTION_ERROR，下方 write_text 的四分支形态映射
+        # （PermissionError/IsADirectoryError/NotADirectoryError/FileExistsError）
+        # 在 Linux 上永远走不到。
         before = ""
         try:
             before = self._sandbox.read_text(args.path)
-        except (FileNotFoundError, PermissionError):
+        except (
+            FileNotFoundError,
+            PermissionError,
+            IsADirectoryError,
+            NotADirectoryError,
+        ):
             pass
 
         try:
