@@ -7219,3 +7219,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - 验证：最终 focused `tests/context/test_compactor.py tests/context/test_prefix_stability.py` 64 passed；`tests/context` 在最后仅格式/变量名调整前 203 passed；改动文件 Ruff check 与 `git diff --check` 通过。无配置类型检查 lane，Pyright 不可用；全文件 `ruff format --check` 报既有文件级格式差异，未做范围外格式化。
 - 两轴独立审查 Correctness/Spec=CLEAN、Standards=CLEAN，0 findings；确切范围 `5432a4c37a3ba71ec701cd6446a12449daaba21b..b394e5df8f41266048de1c7f43cd74312a7ea2ed`，台账 `docs/review_ledger.d/i638-list-systemmessage-5432a4c3-b394e5df.tsv`。
 - GitHub #638 CLOSED（completed）；证据评论 [issuecomment-5982702131](https://github.com/EricKingWhy/intelligence-agent/issues/638#issuecomment-5982702131)，claim 评论 [issuecomment-5982451197](https://github.com/EricKingWhy/intelligence-agent/issues/638#issuecomment-5982451197)，`in-progress` 已移除。代码留在本地分支，未 push、未建 PR、未合入 main；集成负责人 EricKingWhy。详见 `docs/phase_status/2026-10.md` 的 #638 小节。
+
+## #641（P1，已完成并关单；分支未集成）
+
+- 分支 `codex/context-641`；fixed point `2c5d754e42228a2f7a34bad8b88193b82b7b743e`；实现提交 `07c1668e5ebe62960d2b57a4666ffa419b48327e`。ContextBuilder 的 token memo 绑定最近的 Session 实例；实例切换时清空 memo，同一实例保留增量复用。
+- AC：同 `session_id` / seq 的两个独立 Session 按 A→B→A 调用，结果逐次等于 `estimate_message_tokens`；同一 Session append 与重复 build 不重编码历史；pruning、compaction projection/计数变化、dangling 合成与恢复的缓存失效覆盖保留。
+- 验证：修复前真实红，B 错用 memo 得 68、正确估算为 4067；修复后缓存/pruning focused 13 passed，`tests/context` 204 passed；改动文件 Ruff 与 `git diff --check` 通过。仓库未配置 Python 类型检查 lane，本票未运行类型检查。
+- Correctness/Spec 与 Standards 独立审查均 CLEAN、P0–P3 发现为 0；固定范围 `2c5d754e42228a2f7a34bad8b88193b82b7b743e..07c1668e5ebe62960d2b57a4666ffa419b48327e`；机读范围见 `docs/review_ledger.d/i641-token-memo-session-instance-2c5d754e-07c1668e.tsv`。
+- GitHub #641 CLOSED（completed）；claim 评论 [issuecomment-5982753157](https://github.com/EricKingWhy/intelligence-agent/issues/641#issuecomment-5982753157)，交付证据 [issuecomment-5982949470](https://github.com/EricKingWhy/intelligence-agent/issues/641#issuecomment-5982949470)，`in-progress` 已移除。分支未 push、未建 PR、未进入 main；集成负责人 EricKingWhy。
