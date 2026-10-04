@@ -583,9 +583,9 @@ def _is_compaction_summary(message: AnyMessage) -> bool:
     """识别带内部标记的新摘要及旧版 SystemMessage 摘要。"""
     if isinstance(message, HumanMessage):
         return message.name == COMPACTION_SUMMARY_MESSAGE_NAME
-    return isinstance(message, SystemMessage) and message.content.startswith(
-        (f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n")
-    )
+    if not isinstance(message, SystemMessage) or not isinstance(message.content, str):
+        return False
+    return message.content.startswith((f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n"))
 
 
 def _assemble_summary(

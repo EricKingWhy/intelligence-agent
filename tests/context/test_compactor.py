@@ -522,6 +522,57 @@ async def test_invalid_summary_is_rejected_and_system_constraints_survive():
 
 
 @pytest.mark.asyncio
+async def test_compactor_keeps_list_system_prefix_with_a_valid_tool_pair():
+    system = SystemMessage(content=[{"type": "text", "text": "sys"}])
+    messages = [
+        system,
+        HumanMessage(content="historical request " * 1200),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "call-1", "name": "read_rows", "args": {"id": "R-042"},
+            }],
+        ),
+        ToolMessage(
+            content="historical tool result " * 1200,
+            tool_call_id="call-1",
+        ),
+        AIMessage(content="historical response " * 1200),
+        HumanMessage(content="current request"),
+    ]
+    token_estimate = estimate_message_tokens(messages)
+    assert 2000 < token_estimate < 17_000
+    model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+
+    result = await ContextCompactor(
+        model, max_context_tokens=20_000, auto_compact_threshold=0.1,
+    ).compact(messages, token_estimate)
+
+    assert result.compacted_turn_count == 1
+    assert result.messages[0] == system
+    assert isinstance(result.messages[1], HumanMessage)
+    assert result.messages[1].name == "context_compaction_summary"
+    assert result.messages[-1] == messages[-1]
+    assert result.token_estimate == estimate_message_tokens(result.messages)
+
+
+@pytest.mark.asyncio
+async def test_list_system_prefix_without_early_turn_still_hits_hard_guard():
+    messages = [
+        SystemMessage(content=[{"type": "text", "text": "sys"}]),
+        HumanMessage(content="current request " * 2500),
+    ]
+    token_estimate = estimate_message_tokens(messages)
+    assert token_estimate > 850
+
+    compactor = ContextCompactor(
+        None, max_context_tokens=1000, auto_compact_threshold=0.3,
+    )
+    with pytest.raises(ContextWindowExceededError, match="No complete early turn"):
+        await compactor.compact(messages, token_estimate)
+
+
+@pytest.mark.asyncio
 async def test_summary_request_over_budget_keeps_projection_without_events(tmp_path):
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "large " * 10000})
