@@ -7203,3 +7203,10 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **独立审查**：NEEDS-FIX（P2-1/P2-2/P2-3）→ 三项处置（`4eb42999`/`99df6996`/`ea7c07f5`）→ 有界重审 APPROVE-WITH-NOTES（0×P0–P2）；台账行 `docs/review_ledger.d/i636-gate1-host-dep-fix-6e098248-4eb42999.tsv`。门禁：冻结 tip 全量 5522P/0F；先回后正 ×3（`2f319bd6`/`2d2c08a5`/`d4fac9cb`）合并树全量 5609P/0F → 5647P/1F（#415 在册 flake 隔离 16/16 绿，后经 main `1ebde312` 根除）→ **5662P/0F（886.90s）**；Gate-0 6/6 收据 ×4 + 收据笔 `3ba78d0a`。
 - **集成与同题修复相遇**：#656 `1576c938`（静态桩方案）= 同题独立修复先行进 main（CI 实证 run 37203565358 起 env 钉转绿）；`d4fac9cb` 按 §14.7 并集融合 = 静态桩基座 ∪ 本线 missing 参数 + fail-closed 钉（补其工具缺失分支零覆盖），零删除、融合后 20/20 绿；机械归属行 `i636-sync-merge3-caab034b-d4fac9cb.tsv`。集成三跳：push → CI gate0 绿（run 37211474425）→ merge `b7aad181`（2026-10-04T15:03:01Z），Closes 自动关单。
 - **gate1 复核（run 37211548325 @`b7aad181`）**：2 failed / 5656 passed——env 钉 + fail-closed 钉全绿（#636 根因 CI 实证消除）；唯一残余红因 = W-05 `test_progress_file.py::TestAtomicWrite` 两用例 Windows 锁/只读语义 Linux CI 假绿（自 `567e14e6` 起即在，与本票无关），已开 #660（needs-triage 未认领）。§14.9 新基准 = `b7aad181`；远端分支 `fix/i628-gate1-env-pin-ci` 未删（需单独批准）。
+
+
+## 2026-10-05 · IMP B 线状态（#522 → #523）
+
+- **#522 IMP-03/15**：复审已通过；分支 `zcode/T522-imp03-summary-model`，代码 tip `59ab2b99862f2eed6935667c645a804016528479`（tree `0aa83bfdd0683ac9f488c845fb79fcddab8a2db7`），最终双轴复审范围 `756ffbf0..59ab2b99` APPROVE（P0/P1/P2/P3=0）；Gate-0 读数路径 `docs/gate/59ab2b99862f2eed6935667c645a804016528479.json`。待审查台账落盘及 clean-checkout coverage 验证后标记本地就绪。
+- **#523 IMP-06**：排队，待 #522 本地就绪后按批次顺序开工；计划分支 `zcode/T523-imp06-agents-md`。
+- **授权边界**：本线仅推进本地分支；push、PR、merge、close 均未执行，后续各动作需单独批准。详见本月归档。
