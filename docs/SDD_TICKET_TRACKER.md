@@ -7211,3 +7211,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - 验证：修复前真实红（原 non_text 回归断言 compacted_turn_count 期望 0、实为 1）；最终新增 AC focused 12 passed；tests/context 全套 197 passed；Ruff 三个改动文件通过；git diff --check 通过。仓库未配置 Python 类型检查车道；Pyright 1.1.414 定向检查三改动文件退出 1、20 项诊断均在本次未改行（含既有 list content startswith 类型问题），不记作通过。
 - 审查：代码/测试 Correctness/Spec 与 Standards 双轴均 CLEAN，累计审查范围 fb9dd40a3e9f00401aa350dcfa93b019b6c06eac..8e695607d120cc4dda15353b0b6abf31899e6f77；文档证据补正复审 dc155ae02cfaf14e7c0ebbbd05952505073d4736..3aee51476bb4dc335c97f9075986e2dbd25b1f93 双轴 CLEAN、0 未解决。此前发现的证据索引问题已修复；旧 fca shard 逐字节恢复，fb9..8e shard 未改。记录：docs/review_ledger.d/i637-context-atomicity-fb9dd40a-8e695607.tsv、docs/review_ledger.d/i637-evidence-followup-dc155ae0-3aee5147.tsv。
 - GitHub 收口：2026-10-04 issue CLOSED（completed），证据评论 [issuecomment-5980175738](https://github.com/EricKingWhy/intelligence-agent/issues/637#issuecomment-5980175738)；in-progress 已移除，剩余标签 bug/P0。分支 codex/context-637，最终本地 tip 431eb8ab77029b0680df090415ab61774db4ab37；未 push、未建 PR、未进入 main。集成负责人：EricKingWhy。
+
+## #638（P0，已完成并关单；分支未集成）
+
+- 分支 `codex/context-638`；同步基线 `5432a4c37a3ba71ec701cd6446a12449daaba21b`（含 `origin/main` `756ffbf0cc4f972dcc4ec0bf38cad24201bd2e0c`）；实现提交 `b394e5df8f41266048de1c7f43cd74312a7ea2ed`。`_is_compaction_summary` 对非字符串 SystemMessage content 返回 False，摘要前缀仍只检查文本；命名 Human 摘要与旧 System 字符串摘要契约保留。
+- AC：单块/多块/空 list 均不抛错且不识别为摘要；合法 tool pair、预算充足时 compact 保留系统前缀及当前消息并成功；无早期轮且超过 hard guard 仍抛 `ContextWindowExceededError`；普通 System 字符串及已有摘要行为不变。
+- 验证：最终 focused `tests/context/test_compactor.py tests/context/test_prefix_stability.py` 64 passed；`tests/context` 在最后仅格式/变量名调整前 203 passed；改动文件 Ruff check 与 `git diff --check` 通过。无配置类型检查 lane，Pyright 不可用；全文件 `ruff format --check` 报既有文件级格式差异，未做范围外格式化。
+- 两轴独立审查 Correctness/Spec=CLEAN、Standards=CLEAN，0 findings；确切范围 `5432a4c37a3ba71ec701cd6446a12449daaba21b..b394e5df8f41266048de1c7f43cd74312a7ea2ed`，台账 `docs/review_ledger.d/i638-list-systemmessage-5432a4c3-b394e5df.tsv`。
+- GitHub #638 CLOSED（completed）；证据评论 [issuecomment-5982702131](https://github.com/EricKingWhy/intelligence-agent/issues/638#issuecomment-5982702131)，claim 评论 [issuecomment-5982451197](https://github.com/EricKingWhy/intelligence-agent/issues/638#issuecomment-5982451197)，`in-progress` 已移除。代码留在本地分支，未 push、未建 PR、未合入 main；集成负责人 EricKingWhy。详见 `docs/phase_status/2026-10.md` 的 #638 小节。
