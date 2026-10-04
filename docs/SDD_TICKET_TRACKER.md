@@ -7207,6 +7207,6 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 
 ## 2026-10-05 · IMP B 线状态（#522 → #523）
 
-- **#522 IMP-03/15**：复审已通过；分支 `zcode/T522-imp03-summary-model`，代码 tip `59ab2b99862f2eed6935667c645a804016528479`（tree `0aa83bfdd0683ac9f488c845fb79fcddab8a2db7`），最终双轴复审范围 `756ffbf0..59ab2b99` APPROVE（P0/P1/P2/P3=0）；Gate-0 读数路径 `docs/gate/59ab2b99862f2eed6935667c645a804016528479.json`。待审查台账落盘及 clean-checkout coverage 验证后标记本地就绪。
+- **#522 IMP-03/15**：本地就绪；分支 `zcode/T522-imp03-summary-model`，代码 tip `59ab2b99862f2eed6935667c645a804016528479`（tree `0aa83bfdd0683ac9f488c845fb79fcddab8a2db7`），最终双轴复审范围 `756ffbf0..59ab2b99` APPROVE（P0/P1/P2/P3=0）；Gate-0 读数路径 `docs/gate/59ab2b99862f2eed6935667c645a804016528479.json`；clean-checkout coverage exit 0、覆盖自检 1 passed @`bd93be6f66eed814a7483e170ace4a6cfb0d27a1`。
 - **#523 IMP-06**：排队，待 #522 本地就绪后按批次顺序开工；计划分支 `zcode/T523-imp06-agents-md`。
 - **授权边界**：本线仅推进本地分支；push、PR、merge、close 均未执行，后续各动作需单独批准。详见本月归档。
