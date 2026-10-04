@@ -264,6 +264,203 @@ async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_failed_second_summary_attempt_does_not_accept_rejected_candidate():
+    class TwoResponseModel:
+        def __init__(self):
+            self.responses = [
+                AIMessage(content=MODEL_SECTIONS),
+                AIMessage(content=[{"type": "text", "text": "bad"}]),
+            ]
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            response = self.responses[self.calls]
+            self.calls += 1
+            return response
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4000),
+        HumanMessage(content="next"),
+    ]
+    model = TwoResponseModel()
+    result = await ContextCompactor(
+        model, max_context_tokens=100_000, auto_compact_threshold=0.30,
+    ).compact(
+        messages, estimate_message_tokens(messages), reserved_tokens=30_000,
+    )
+
+    assert model.calls == 2
+    assert [failure.error_class for failure in result.failures] == [
+        "target_not_reached", "non_text",
+    ]
+    assert result.compacted_turn_count == 0
+    assert result.summary is None
+    assert result.bracket_id is None
+    assert result.messages == messages
+
+
+@pytest.mark.parametrize(
+    ("second_failure", "expected_class"),
+    [("timeout", "timeout"), ("provider", "transport_error")],
+)
+@pytest.mark.asyncio
+async def test_rejected_candidate_is_not_used_when_retry_raises(
+    second_failure, expected_class,
+):
+    class TwoResponseModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content=MODEL_SECTIONS)
+            if second_failure == "timeout":
+                raise TimeoutError("summary timed out")
+            raise ConnectionError("provider unavailable")
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+    model = TwoResponseModel()
+    result = await ContextCompactor(
+        model, max_context_tokens=100_000, auto_compact_threshold=0.30,
+    ).compact(
+        messages, estimate_message_tokens(messages), reserved_tokens=30_000,
+    )
+
+    assert model.calls == 2
+    assert [failure.error_class for failure in result.failures] == [
+        "target_not_reached", expected_class,
+    ]
+    assert result.compacted_turn_count == 0
+    assert result.summary is None
+    assert result.bracket_id is None
+    assert result.messages == messages
+
+
+@pytest.mark.asyncio
+async def test_rejected_first_candidate_is_not_used_when_retry_succeeds():
+    class TwoResponseModel:
+        def __init__(self):
+            oversized = MODEL_SECTIONS.replace(
+                "已完成读取历史记录，并选择直接展示内容。",
+                "已完成读取历史记录。" + "细节 " * 500,
+            )
+            self.responses = [
+                AIMessage(content=oversized), AIMessage(content=MODEL_SECTIONS),
+            ]
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            response = self.responses[self.calls]
+            self.calls += 1
+            return response
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+    model = TwoResponseModel()
+    result = await ContextCompactor(
+        model, max_context_tokens=100_000, auto_compact_threshold=0.30,
+    ).compact(
+        messages, estimate_message_tokens(messages), reserved_tokens=29_000,
+    )
+
+    assert model.calls == 2
+    assert [failure.error_class for failure in result.failures] == [
+        "target_not_reached",
+    ]
+    assert result.compacted_turn_count == 1
+    assert result.summary is not None
+    assert "细节" not in result.summary
+    assert "已完成读取历史记录，并选择直接展示内容。" in result.summary
+    assert result.bracket_id is not None
+
+
+@pytest.mark.asyncio
+async def test_failed_summaries_over_hard_guard_raise_with_both_failures():
+    class TwoResponseModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content=MODEL_SECTIONS)
+            return AIMessage(content=[{"type": "text", "text": "bad"}])
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+    model = TwoResponseModel()
+    reserved_tokens = 90_000
+    token_estimate = estimate_message_tokens(messages) + reserved_tokens
+
+    with pytest.raises(ContextWindowExceededError) as error:
+        await ContextCompactor(
+            model, max_context_tokens=100_000, auto_compact_threshold=0.30,
+        ).compact(
+            messages, token_estimate, reserved_tokens=reserved_tokens,
+        )
+
+    assert model.calls == 2
+    assert [failure.error_class for failure in error.value.failures] == [
+        "target_not_reached", "non_text",
+    ]
+    assert messages == [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_builder_persists_only_failures_when_both_summary_attempts_fail(tmp_path):
+    store = JsonlSessionStore(root=tmp_path)
+    session = Session.start(store)
+    session.append(USER_MESSAGE, {"content": "goal"})
+    session.append(MODEL_COMPLETED, {"content": "history " * 4000})
+    session.append(USER_MESSAGE, {"content": "next"})
+    original_events = session.events
+    original_projection = session.derive_messages()
+    model = ScriptedModel([
+        AIMessage(content=MODEL_SECTIONS),
+        AIMessage(content=[{"type": "text", "text": "bad"}]),
+    ])
+
+    await ContextBuilder(
+        model,
+        max_context_tokens=20_000,
+        auto_compact_threshold=0.30,
+        system_prompt="context " * 6_000,
+    ).build(session)
+
+    assert len(model.snapshots) == 2
+    failures = [event for event in session.events
+                if event.type == CONTEXT_COMPACTION_FAILED]
+    assert [event.data["error_class"] for event in failures] == [
+        "target_not_reached", "non_text",
+    ]
+    assert not any(event.type in {
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    } for event in session.events)
+    persisted = store.read_events(session.session_id)
+    assert persisted[:len(original_events)] == original_events
+    assert [event.data["attempt"] for event in persisted
+            if event.type == CONTEXT_COMPACTION_FAILED] == [1, 2]
+    reloaded = Session.load(store, session.session_id)
+    assert reloaded.derive_messages() == original_projection
+
+
+@pytest.mark.asyncio
 async def test_hard_guard_rejects_when_recent_turn_cannot_fit(tmp_path):
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "old"})

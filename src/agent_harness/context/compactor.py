@@ -267,17 +267,21 @@ class ContextCompactor:
                 model_sections = _parse_summary_sections(
                     response.content, _MODEL_SUMMARY_HEADINGS,
                 )
-                summary_text = _assemble_summary(early, model_sections, protected_facts)
-                _validate_summary(summary_text, early, protected_facts)
+                candidate_summary_text = _assemble_summary(
+                    early, model_sections, protected_facts,
+                )
+                _validate_summary(candidate_summary_text, early, protected_facts)
                 # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
                 # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
                 # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
                 # 会话的行为逐字节等价。
                 if events is not None:
-                    _validate_plan_section(summary_text, derive_plan(events).items)
+                    _validate_plan_section(
+                        candidate_summary_text, derive_plan(events).items,
+                    )
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
-                    content=summary_text,
+                    content=candidate_summary_text,
                     name=COMPACTION_SUMMARY_MESSAGE_NAME,
                 )
                 summary_tokens = estimate_message_tokens([summary_message])
@@ -286,11 +290,15 @@ class ContextCompactor:
                         f"Summary ({summary_tokens} tokens) is not smaller than "
                         f"compressed segment ({early_tokens} tokens)"
                     )
-                compacted = [*prefix, summary_message, *recent]
-                if estimate_message_tokens(compacted) + reserved_tokens >= self._auto_limit:
+                candidate_messages = [*prefix, summary_message, *recent]
+                if estimate_message_tokens(candidate_messages) + reserved_tokens >= self._auto_limit:
                     raise ContextWindowExceededError(
                         "LLM summary does not reach compaction target"
                     )
+                # Commit candidate state only after every validation gate passes. A rejected
+                # first attempt must not leak into the result if the retry also fails.
+                summary_text = candidate_summary_text
+                compacted = candidate_messages
                 break
             except asyncio.CancelledError:
                 raise

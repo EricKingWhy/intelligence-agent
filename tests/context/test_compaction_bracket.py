@@ -523,11 +523,13 @@ class TestCompactionWithPrunedToolResults:
                 {"id": f"c{i}", "name": "read_file", "args": {"path": "big.txt"}},
             ]})
             await overflowed_read(f"c{i}")
+        session.append(MODEL_COMPLETED, {"content": "background " * 1_000})
         session.append(USER_MESSAGE, {"content": "当前请求"})
 
+        # 加入足够的普通历史，稳定触发压缩且仍给摘要留出空间。
         builder = ContextBuilder(
             ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
-            max_context_tokens=2000, auto_compact_threshold=0.3,
+            max_context_tokens=6000, auto_compact_threshold=0.4,
             artifact_store=store, artifact_read_tool_name="read_artifact",
             keep_recent_tool_results=0, clear_at_least_tokens=0,
         )
@@ -539,9 +541,9 @@ class TestCompactionWithPrunedToolResults:
         assert [e.type for e in session.events[-3:]] == [
             COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
         ]
-        # source 区间覆盖被压缩的原始事件（seq 1..13：user + 3×(model+call+artifact+result)）
+        # source 区间覆盖原始事件 seq 1..14：user + 3×(model/call/artifact/result) + model。
         assert starts[0].data["source_seq_start"] == 1
-        assert starts[0].data["source_seq_end"] == 13
+        assert starts[0].data["source_seq_end"] == 14
         # 压缩后的投影：摘要 + 当前请求（静态事实策略在摘要前）
         summary = next(
             message for message in messages
