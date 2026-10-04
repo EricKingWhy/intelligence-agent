@@ -1,8 +1,10 @@
+import os
 from pathlib import Path
 
 import pytest
 
 from agent_harness.config import Settings
+from agent_harness.context import project_instructions as project_instructions_module
 from agent_harness.context.project_instructions import ProjectInstructionStore
 
 
@@ -57,13 +59,14 @@ def test_single_and_aggregate_limits_mark_truncated_sources(tmp_path: Path) -> N
     nested_file.write_text("abcdefghi", encoding="utf-8")
 
     snapshot = ProjectInstructionStore(
-        max_file_bytes=7, max_total_bytes=10,
+        max_file_bytes=7, max_total_bytes=2048,
     ).load_for_session("session-3", cwd)
 
-    assert snapshot.total_included_bytes == 10
-    assert [source.included_bytes for source in snapshot.sources] == [7, 3]
+    assert snapshot.total_included_bytes == 14
+    assert [source.included_bytes for source in snapshot.sources] == [7, 7]
     assert all(source.truncated for source in snapshot.sources)
     assert "TRUNCATED" in (snapshot.prompt_text or "")
+    assert snapshot.total_prompt_bytes <= 2048
 
 
 def test_instruction_changes_require_explicit_reload(tmp_path: Path) -> None:
@@ -107,6 +110,104 @@ def test_reading_a_nested_path_lazily_adds_its_instructions(tmp_path: Path) -> N
     assert str(nested_file) in (loaded.prompt_text or "")
 
 
+def test_reload_refreshes_previously_loaded_nested_instructions(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    cwd = repository / "workspace"
+    nested = cwd / "src"
+    nested.mkdir(parents=True)
+    nested_file = nested / "AGENTS.md"
+    source_file = nested / "module.py"
+    nested_file.write_text("nested version one", encoding="utf-8")
+    source_file.write_text("value = 1", encoding="utf-8")
+    store = ProjectInstructionStore()
+    store.load_for_session("session-reload-nested", cwd)
+    store.load_for_path("session-reload-nested", cwd, source_file)
+
+    nested_file.write_text("nested version two", encoding="utf-8")
+    reloaded = store.reload_for_session("session-reload-nested", cwd)
+
+    assert nested_file in reloaded.source_paths
+    assert "nested version two" in (reloaded.prompt_text or "")
+    assert "nested version one" not in (reloaded.prompt_text or "")
+
+    nested_file.unlink()
+    reloaded_after_delete = store.reload_for_session("session-reload-nested", cwd)
+    assert nested_file not in reloaded_after_delete.source_paths
+
+
+def test_instruction_prompt_metadata_obeys_the_aggregate_byte_limit(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    cwd = repository / "workspace"
+    cwd.mkdir()
+    store = ProjectInstructionStore(max_total_bytes=1024)
+    store.load_for_session("session-metadata-limit", cwd)
+
+    for index in range(24):
+        nested = cwd / f"module_{index:02}"
+        nested.mkdir()
+        (nested / "AGENTS.md").write_text("", encoding="utf-8")
+        source_file = nested / "module.py"
+        source_file.write_text("value = 1", encoding="utf-8")
+        snapshot = store.load_for_path(
+            "session-metadata-limit", cwd, source_file,
+        )
+
+    prompt = snapshot.prompt_text or ""
+    assert len(prompt.encode("utf-8")) <= 1024
+    assert snapshot.total_prompt_bytes == len(("\n\n" + prompt).encode("utf-8"))
+    assert snapshot.total_prompt_bytes <= 1024
+    assert len(snapshot.source_paths) < 24
+    assert snapshot.as_status()["truncated_sources"]
+
+
+def test_instruction_open_rejects_a_path_replaced_during_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    instruction_file = repository / "AGENTS.md"
+    instruction_file.write_text("repository rules", encoding="utf-8")
+    outside_file = tmp_path / "outside.md"
+    outside_file.write_text("outside secret", encoding="utf-8")
+
+    real_path_open = Path.open
+
+    def racing_path_open(
+        path: Path, *args: object, **kwargs: object,
+    ):
+        if path == instruction_file:
+            path = outside_file
+        return real_path_open(path, *args, **kwargs)
+
+    real_os_open = os.open
+
+    def racing_os_open(
+        path: str | os.PathLike[str], flags: int, *args: object,
+        **kwargs: object,
+    ) -> int:
+        if Path(path) == instruction_file:
+            path = outside_file
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_path_open)
+    monkeypatch.setattr(
+        project_instructions_module, "os", os, raising=False,
+    )
+    monkeypatch.setattr(project_instructions_module.os, "open", racing_os_open)
+
+    snapshot = ProjectInstructionStore().load_for_session(
+        "session-open-race", repository,
+    )
+
+    assert "outside secret" not in (snapshot.prompt_text or "")
+    assert snapshot.as_status()["unreadable_sources"]
+
+
 def test_load_for_path_rejects_targets_outside_the_repository(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     (repository / ".git").mkdir(parents=True)
@@ -126,7 +227,7 @@ def test_status_reports_load_state_sources_and_truncation(tmp_path: Path) -> Non
     (repository / ".git").mkdir(parents=True)
     instruction_file = repository / "AGENTS.md"
     instruction_file.write_text("0123456789", encoding="utf-8")
-    store = ProjectInstructionStore(max_file_bytes=4, max_total_bytes=8)
+    store = ProjectInstructionStore(max_file_bytes=4, max_total_bytes=1024)
 
     assert store.status_for_session("session-6")["status"] == "not_loaded"
     store.load_for_session("session-6", repository)
@@ -136,6 +237,7 @@ def test_status_reports_load_state_sources_and_truncation(tmp_path: Path) -> Non
     assert status["source_paths"] == [str(instruction_file)]
     assert status["truncated_sources"] == [str(instruction_file)]
     assert status["total_included_bytes"] == 4
+    assert status["total_prompt_bytes"] <= 1024
 
 
 def test_missing_instructions_leave_runtime_context_byte_identical(tmp_path: Path) -> None:

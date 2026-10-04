@@ -59,6 +59,7 @@ from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.project_instructions import (
+    empty_project_instruction_status,
     project_instruction_store,
     release_project_instruction_store,
 )
@@ -1677,16 +1678,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(error) from error
         cwd = session_cwd(events)
         if cwd is None:
-            return {
-                "status": "no_cwd",
-                "project_root": None,
-                "session_cwd": None,
-                "source_paths": [],
-                "searched_directories": [],
-                "unreadable_sources": [],
-                "truncated_sources": [],
-                "total_included_bytes": 0,
-            }
+            return empty_project_instruction_status("no_cwd")
         store = project_instruction_store(app.state.agent.settings)
         await asyncio.to_thread(store.reload_for_session, session_id, cwd)
         return store.status_for_session(session_id)
