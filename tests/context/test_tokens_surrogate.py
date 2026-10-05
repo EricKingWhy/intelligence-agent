@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import pytest
 from langchain_core.messages import HumanMessage
+from pydantic_core import PydanticSerializationError
 
 from agent_harness.context.compactor import ContextWindowExceededError
 from agent_harness.context.tokens import estimate_message_tokens
@@ -46,6 +47,26 @@ class TestLoneSurrogateControlledRejection:
         with pytest.raises(ContextWindowExceededError) as excinfo:
             _message_tokens(marker)
         assert "SECRET-" not in str(excinfo.value)
+
+
+class TestNonSurrogateFailureNotConflated:
+    """审查 P3（双轴独立指出）：tokens.py「原样上抛」分支无回归钉。
+
+    只有「含孤立代理项」的序列化失败才映射成 ``ContextWindowExceededError``；
+    非 surrogate 原因（``additional_kwargs`` 携带 pydantic 无法 JSON 序列化的
+    对象）必须保持 ``PydanticSerializationError`` 原样上抛。若未来把所有序列
+    化失败一律映射成 CWE，现有 surrogate 用例仍全绿——本钉使混类回归变红
+    （CWE 是 RuntimeError，``pytest.raises(PydanticSerializationError)``
+    不会误捕）。
+    """
+
+    def test_unknown_type_failure_reraised_not_mapped(self):
+        message = HumanMessage(
+            content="clean text", additional_kwargs={"blob": object()}
+        )
+        with pytest.raises(PydanticSerializationError) as excinfo:
+            estimate_message_tokens([message])
+        assert not isinstance(excinfo.value, ContextWindowExceededError)
 
 
 class TestLegalScalarsStillCounted:

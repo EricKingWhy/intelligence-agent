@@ -90,6 +90,28 @@ class TestSurrogateWriteRejection:
         self._assert_controlled_rejection(excinfo)
         assert "SECRET-" not in str(excinfo.value)
 
+    def test_rejection_preserves_codec_error_as_cause(self, tmp_path):
+        """审查 P3 建议：``__cause__`` 保留 codec 异常，根因可追溯（诊断面）。"""
+        store = JsonlSessionStore(root=tmp_path)
+        with pytest.raises(ValueError) as excinfo:
+            store.append_event("s-cause", _user_event("s-cause", 0, chr(0xD800)))
+        self._assert_controlled_rejection(excinfo)
+        assert isinstance(excinfo.value.__cause__, UnicodeEncodeError)
+
+    def test_surrogate_in_dict_key_rejected_too(self, tmp_path):
+        """审查 P3 建议：键位 surrogate 同样被前置校验拦截（encode 对键值一视同仁）。"""
+        store = JsonlSessionStore(root=tmp_path)
+        event = SessionEvent(
+            type=USER_MESSAGE,
+            session_id="s-key",
+            seq=0,
+            data={chr(0xD800) + "-key": "value"},
+        )
+        with pytest.raises(ValueError) as excinfo:
+            store.append_event("s-key", event)
+        self._assert_controlled_rejection(excinfo)
+        assert not (tmp_path / "s-key").exists()
+
 
 class TestLegalUnicodeRoundTrip:
     """AC3 / AC4：合法内容（emoji、中文、换行控制转义）准确往返、不丢字符。"""
