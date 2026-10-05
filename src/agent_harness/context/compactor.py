@@ -841,7 +841,13 @@ def _programmatic_summary_sections(
             continue
         # #556 裁决 C：HumanMessage 原文不再逐字进任何程序化节——目标走
         # `_current_goal_body`（protected_facts 通道），叙述性历史靠 Event 回读。
-        visit(message.model_dump(mode="json"))
+        # 裁决 3（#642）：消息自身的内部 marker（`context_compaction_summary`，
+        # snake_case 恰好命中 `_IDENTIFIER_PATTERN`）不是用户真实标识——开采前
+        # 从消息 metadata 里剥掉，只去假阳性，正文开采语义不变。
+        dump = message.model_dump(mode="json")
+        if dump.get("name") == COMPACTION_SUMMARY_MESSAGE_NAME:
+            dump["name"] = None
+        visit(dump)
 
     return {
         _SUMMARY_HEADINGS[0]: _current_goal_body(protected_facts),

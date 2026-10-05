@@ -229,3 +229,42 @@ def _derive_pairs(events):
     from agent_harness.session.derive import derive_messages_with_source_ranges
 
     return derive_messages_with_source_ranges(events)
+
+
+# ── 裁决 3：marker 污染——消息自身的内部 marker 不进 [6] ─────────────────
+
+
+_LEGACY_SIX_SECTION = (
+    "## 目标\n旧目标 paraphrase。\n\n"
+    "## 约束\n- 保持中文回答\n\n"
+    "## 进展\n已读取 old.txt。\n\n"
+    "## 决策\n直接展示。\n\n"
+    "## 下一步\n等待。\n\n"
+    "## 关键上下文\n历史文件 6000 字。"
+)
+
+
+@pytest.mark.asyncio
+async def test_marker_name_not_mined_from_projected_legacy_summary():
+    """裁决 3 红证（evidence §2 `T12g.humanmsg.[6]`）：旧六节摘要经 bracket
+    投影为 HumanMessage(marker)、正文按普通文本开采时，消息自身的 marker
+    metadata（`context_compaction_summary`，snake_case 命中开采模式）不得被
+    当作用户真实标识采进 [6]。正文开采语义不变（old.txt 仍进 [7]）。"""
+    events = _bracket_events(_LEGACY_SIX_SECTION)
+    messages = derive_messages(events)
+    facts = derive_protected_facts(events)
+
+    result = await ContextCompactor(
+        ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]),
+        max_context_tokens=8000,
+    ).compact(
+        messages, estimate_message_tokens(messages),
+        events=events, protected_facts=facts,
+    )
+
+    assert result.compacted_turn_count == 1
+    identifiers, files = _result_sections(result)
+    assert COMPACTION_SUMMARY_MESSAGE_NAME not in identifiers, (
+        "消息自身的内部 marker 字符串不可能是用户标识，只去假阳性"
+    )
+    assert "old.txt" in files, "正文开采语义不变：旧摘要正文标识照常进节"
