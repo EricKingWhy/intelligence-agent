@@ -349,6 +349,21 @@ function summarizePermissionResolved(event: AgentEvent): string {
   return typeof decision === 'string' && decision ? `审批已决（${decision}）` : '审批已决';
 }
 
+// #526 A2：会话级审批授权的写/撤回——审计事件，不改变投影状态。
+function summarizeApprovalGranted(event: AgentEvent): string {
+  const tool = event.data.tool_name;
+  return typeof tool === 'string' && tool ? `已授予会话级审批（${tool}）` : '已授予会话级审批';
+}
+
+function summarizeApprovalRevoked(): string {
+  return '已撤回会话级审批';
+}
+
+// #526 B1：工作流档切换——审计事件，不改变投影状态。
+function summarizeWorkflowModeChanged(event: AgentEvent): string {
+  return event.data.mode === 'plan' ? '已切换到 Plan 模式' : '已切换到普通模式';
+}
+
 /** 增量类事件共用摘要（model/delta、text/delta、tool/output_delta、
  *  reasoning/delta 同一惯例：Timeline 行仍 verbatim 在场，摘要只记增量）。 */
 function summarizeDeltaChars(event: AgentEvent): string {
@@ -1558,6 +1573,10 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     summarize: summarizeApprovalRequested,
   },
   [EventType.PERMISSION_RESOLVED]: { apply: projectPermissionResolved, summarize: summarizePermissionResolved },
+  // #526 A2/B1：会话级审批授权写/撤回、工作流档切换——审计事件，投影 no-op。
+  [EventType.PERMISSION_GRANTED]: { apply: noopProjection, summarize: summarizeApprovalGranted },
+  [EventType.PERMISSION_REVOKED]: { apply: noopProjection, summarize: summarizeApprovalRevoked },
+  [EventType.WORKFLOW_MODE_CHANGED]: { apply: noopProjection, summarize: summarizeWorkflowModeChanged },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,

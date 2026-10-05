@@ -82,7 +82,9 @@ from agent_harness.session.approval import (
     SESSION_AUTO_APPROVE_KEY,
     SESSION_PERMISSION_MODE_KEY,
     PermissionChange,
+    append_approval_revoke,
     append_permission_change,
+    derive_approval_grants,
 )
 from agent_harness.session.approval import (
     InteractiveCallbackHolder as _InteractiveCallbackHolder,
@@ -186,6 +188,10 @@ from agent_harness.session.task import (
     apply_task_definition,
     apply_verification,
     derive_task_state,
+)
+from agent_harness.session.workflow import (
+    WorkflowMode,
+    append_workflow_mode_change,
 )
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.delegation_tree import (
@@ -3709,6 +3715,45 @@ class SessionService:
 
         if _task is not None:
             _task.add_done_callback(_gc_approval_queue)
+
+    # ── #526 A2/B1：会话级审批授权管理 + 工作流档切换 ──────────────────────
+    async def revoke_approval_grant(
+        self, session_id: str, approval_key: str
+    ) -> dict[str, Any]:
+        """撤回一条会话级审批授权（#526 A2）。
+
+        守卫复用 `_require_existing_session`（422 先于 404）。追加
+        `permission/approval-revoked`（last-wins，投影见 `derive_approval_grants`）；
+        key 不存在时仍 200（幂等 no-op，返回 revoked=False）。
+        """
+        await self._require_existing_session(session_id)
+        session = Session.load(
+            self._store,
+            session_id,
+            workspace_registry=self._workspace_registry,
+        )
+        grants = derive_approval_grants(session.events)
+        existed = approval_key in grants
+        append_approval_revoke(session, approval_key)
+        return {"id": session_id, "approval_key": approval_key, "revoked": existed}
+
+    async def set_workflow_mode(
+        self, session_id: str, mode: WorkflowMode
+    ) -> dict[str, Any]:
+        """切换会话工作流档（#526 B1）。
+
+        守卫复用 `_require_existing_session`（422 先于 404）。追加
+        `workflow/mode-changed`（last-wins）；Executor 每次调用现派生
+        `effective_workflow_mode`，切换立即生效，无需重建。
+        """
+        await self._require_existing_session(session_id)
+        session = Session.load(
+            self._store,
+            session_id,
+            workspace_registry=self._workspace_registry,
+        )
+        append_workflow_mode_change(session, mode)
+        return {"id": session_id, "mode": mode.value}
 
 
 # ── 公开符号重导出（候选 2 纯结构重构）────────────────────────────────

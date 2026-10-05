@@ -152,6 +152,11 @@ class Tool(ABC):
     #: 期间设置嵌套 trace 绑定——child run 的观测挂到同一 trace 下。
     is_subagent_dispatch: bool = False
 
+    #: #526 B1 Plan 模式豁免标记：True 的工具在 Plan 档下仍可执行。
+    #: 显式 Contract 标记，禁按工具名硬编码。仅授予「仅写会话状态、无外部资源
+    #: 副作用」的工具（如 update_plan 发布计划清单）。
+    plan_mode_exempt: bool = False
+
     # —— 必填字段（身份 + Schema + 行为） ——
     @property
     @abstractmethod

@@ -833,6 +833,41 @@ class SessionDeleted(BaseModel):
     detached_from_projects: int
 
 
+class ApprovalGrantRevoked(BaseModel):
+    """`POST /api/sessions/{id}/approvals/revoke` 的成功响应（#526 A2）。
+
+    形状就是领域动作本身：`{id, approval_key, revoked}`——`revoked` 是**动作后**
+    的真值（幂等：重复撤回仍 200，`revoked=False` 表示该 key 当时本就不存在）。
+    """
+
+    id: str
+    approval_key: str
+    revoked: bool
+
+
+class RevokeApprovalGrantRequest(BaseModel):
+    """撤回一条会话级审批授权的请求体（#526 A2）。"""
+
+    approval_key: str
+
+
+class WorkflowModeChanged(BaseModel):
+    """`POST /api/sessions/{id}/workflow-mode` 的成功响应（#526 B1）。
+
+    `mode` 是**动作后**的真值（幂等：重复切同档仍 200）。Executor 每次调用现派生
+    `effective_workflow_mode`，切换立即生效。
+    """
+
+    id: str
+    mode: str
+
+
+class SetWorkflowModeRequest(BaseModel):
+    """切换会话工作流档的请求体（#526 B1）。"""
+
+    mode: Literal["normal", "plan"]
+
+
 class AppState:
     """app 内部共享状态的薄容器——避免全局变量。
 
@@ -2126,6 +2161,65 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             rows=result.rows,
             version=result.version,
         )
+
+    @app.post("/api/sessions/{session_id}/approvals/revoke")
+    async def revoke_approval_grant(
+        session_id: str,
+        body: RevokeApprovalGrantRequest,
+        _: None = Depends(require_trusted_origin),
+    ) -> ApprovalGrantRevoked:
+        """撤回一条会话级审批授权（#526 A2）。
+
+        追加 `permission/approval-revoked`（last-wins）。语义：200 →
+        `{id, approval_key, revoked}`（**幂等**：重复撤回仍 200，`revoked=False`
+        表示该 key 当时本就不存在）；404 → 没有这个会话；422 → id 形态非法
+        （先于 404，路径穿越防线）。
+
+        来源闸（ADR-0025 D1）：授权撤回是宿主侧管理动作，只接受本机来源
+        （与 `archive` / `purge-stale-tools` 同一实现）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            result = await service.revoke_approval_grant(
+                session_id, body.approval_key
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return ApprovalGrantRevoked(
+            id=result["id"],
+            approval_key=result["approval_key"],
+            revoked=result["revoked"],
+        )
+
+    @app.post("/api/sessions/{session_id}/workflow-mode")
+    async def set_workflow_mode(
+        session_id: str,
+        body: SetWorkflowModeRequest,
+        _: None = Depends(require_trusted_origin),
+    ) -> WorkflowModeChanged:
+        """切换会话工作流档（#526 B1：normal/plan）。
+
+        追加 `workflow/mode-changed`（last-wins）；Executor 每次调用现派生
+        `effective_workflow_mode`，切换立即生效。语义：200 → `{id, mode}`
+        （**幂等**）；404 → 没有这个会话；422 → id 形态非法 / mode 非法
+        （先于 404）。
+
+        来源闸（ADR-0025 D1）：档位切换是宿主侧管理动作，只接受本机来源。
+        """
+        from agent_harness.session.workflow import WorkflowMode
+
+        service = session_service(app.state.agent)
+        try:
+            result = await service.set_workflow_mode(
+                session_id, WorkflowMode(body.mode)
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return WorkflowModeChanged(id=result["id"], mode=result["mode"])
 
     @app.get("/api/sessions/{session_id}/context-usage")
     async def get_context_usage(session_id: str):

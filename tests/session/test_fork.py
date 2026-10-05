@@ -791,3 +791,75 @@ async def test_fork_copy_failure_compensates_and_leaves_marked_child(
     assert (
         registry.default_workspace_root("parent") / "keep.txt"
     ).read_text(encoding="utf-8") == "父资产"
+
+
+@pytest.mark.asyncio
+async def test_fork_does_not_inherit_approval_grants_or_workflow_mode(tmp_path) -> None:
+    """#526：fork 不继承会话级审批授权与工作流档。
+
+    父会话有一条 approval grant + 一次 plan 档切换；fork 后 child 的 seed 里
+    不得含有 permission/approval-granted|revoked 与 workflow/mode-changed，
+    derive_approval_grants 为空、effective_workflow_mode 回落 NORMAL。
+    （#358 W-14 / F26：高风险权限不因 Fork 静默扩大。）
+    """
+    import time
+
+    from agent_harness.session.approval import (
+        append_approval_grant,
+        derive_approval_grants,
+    )
+    from agent_harness.session.event import (
+        PERMISSION_GRANTED,
+        PERMISSION_REVOKED,
+        WORKFLOW_MODE_CHANGED,
+    )
+    from agent_harness.session.workflow import (
+        WorkflowMode,
+        append_workflow_mode_change,
+        effective_workflow_mode,
+    )
+    from agent_harness.tooling.approval import (
+        ApprovalGrant,
+        ApprovalIdentity,
+    )
+    from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
+
+    store = _store(tmp_path)
+    meta = SqliteSessionMetaStore(tmp_path / "harness.db")
+    await meta.initialize()
+    parent = _build_parent(store)
+
+    grant = ApprovalGrant(
+        identity=ApprovalIdentity(
+            tool_name="bash",
+            kind="COMMAND",
+            canonical="echo hi",
+            args_hash="abc",
+            permission=ToolPermission.DANGER,
+            policy_at_approval=PermissionPolicy.READ_ONLY,
+        ),
+        expires_at=time.time() + 600,
+    )
+    append_approval_grant(parent, grant)
+    append_workflow_mode_change(parent, WorkflowMode.PLAN)
+    anchor = parent.events[-2].seq  # 第二条用户消息（grant/plan 事件在其后也无妨）
+    # 锚点取"第二条"用户消息：grant 与 mode 事件在锚点之前，确保进 seed 候选
+    anchor = next(
+        e.seq for e in parent.events
+        if e.type == USER_MESSAGE and e.data.get("content") == "第二条"
+    )
+
+    child = await fork_session(
+        store, meta, "parent", boundary_user_message_seq=anchor,
+        child_session_id="child",
+    )
+
+    child_types = [e.type for e in child.events]
+    assert PERMISSION_GRANTED not in child_types
+    assert PERMISSION_REVOKED not in child_types
+    assert WORKFLOW_MODE_CHANGED not in child_types
+    assert derive_approval_grants(child.events) == {}
+    assert effective_workflow_mode(child.events) is WorkflowMode.NORMAL
+    # 父不受影响
+    assert derive_approval_grants(parent.events) != {}
+    assert effective_workflow_mode(parent.events) is WorkflowMode.PLAN
