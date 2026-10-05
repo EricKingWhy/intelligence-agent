@@ -3009,6 +3009,7 @@ class SessionService:
             operation_ledger=self._operation_ledger,
             workspace_registry=self._workspace_registry,
             database_path=self._harness_db,
+            session_budget_ledger=self._stores.delegation_tree_ledger,
         )
         return results
 
