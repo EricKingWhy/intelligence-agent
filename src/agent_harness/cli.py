@@ -60,7 +60,7 @@ from agent_harness.instance_lock import InstanceLock, InstanceLockError
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
-from agent_harness.model.config import ModelConfig
+from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
@@ -88,7 +88,11 @@ from agent_harness.session import (
     Session,
     SessionEvent,
 )
-from agent_harness.session.errors import InvalidSessionId, SessionNotFound
+from agent_harness.session.errors import (
+    ActiveRunConflict,
+    InvalidSessionId,
+    SessionNotFound,
+)
 from agent_harness.session.fork import (
     ForkBoundaryError,
     TailSummarizer,
@@ -100,6 +104,7 @@ from agent_harness.session.lineage import (
     build_lineage_tree,
     render_lineage_tree,
 )
+from agent_harness.session.service import SessionContextCompaction
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from agent_harness.tooling.approve_policy import ApprovePolicyStore
@@ -111,6 +116,10 @@ _PREVIEW_LINES = 3
 #: 陈旧账行名清除通道（#616）的 CLI 入口标识，写进 `session_budget_events` 审计的
 #: `source` 字段（与 Web 的 `PURGE_ENTRY_API` 同款，只是入口不同）。
 PURGE_ENTRY_CLI = "cli"
+
+#: 手动上下文压缩通道（#635）的 CLI 入口标识，与 `COMPACT_ENTRY_API`（Web）同款、
+#: 值不同（`agent_harness/session/service.py` 的注释预告了这一对应关系）。
+COMPACT_ENTRY_CLI = "cli"
 
 
 class StreamRenderer:
@@ -928,6 +937,9 @@ def _main_dispatch() -> None:
         return
     if argv and argv[0] == "budgets":
         _main_budgets(argv[1:])
+        return
+    if argv and argv[0] == "compact":
+        _main_compact(argv[1:])
         return
     if argv and argv[0] == "approvals":
         _main_approvals(argv[1:])
@@ -1747,6 +1759,120 @@ async def budgets_clear_stale_tools_command(
     if dry_run:
         lines.append("加 --yes 执行清理。")
     return "\n".join(lines)
+
+
+def _main_compact(argv: list[str]) -> None:
+    """CLI compact 入口（#635）：手动触发一次上下文压缩。
+
+    **确认面 = 直接执行，不设 `--yes`**：命令本身即用户的显式动作，压缩 append-only
+    （旧事件 shadow 保留、可 replay），非破坏性；`--dry-run` 覆盖"先看后做"需求。
+    CLI 是同一个 `SessionService.compact_session_context` 方法的瘦客户端
+    （ADR-0045 D8）：判定与落盘在服务层，本层只做参数解析 / 渲染 / 退出码。
+
+    退出码：无会话 / id 非法 / 非法 `--model` / 在途 run（或压缩进行中）→ 1
+    （stderr 明确文案）；用法错 → 2（argparse）。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness compact")
+    parser.add_argument("--session", required=True, help="要压缩的会话 id")
+    parser.add_argument(
+        "--model", default=None, metavar="NAME",
+        help="摘要模型名（缺省 = settings.summary_model，再回退主模型）",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="只预览当前水位与可压缩窗口，零 LLM 调用、零写入",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        output = asyncio.run(
+            compact_command(
+                session=args.session, model=args.model, dry_run=args.dry_run,
+            )
+        )
+    except (InvalidSessionId, SessionNotFound) as error:
+        print(f"压缩失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ActiveRunConflict as error:
+        # 两种拒绝理由共用异常类型（在途 run / 压缩已在进行中）；服务层用不同
+        # detail 区分，这里翻成对应的中文回执（不吞掉"为什么被拒"）。
+        reason = (
+            "压缩已在进行中"
+            if "compaction in progress" in str(error)
+            else "在途 run 运行中"
+        )
+        print(f"压缩被拒绝：{reason}（零改动）", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ConfigError as error:
+        # 非法 --model：解析在零副作用前完成，未写入任何事件。
+        print(f"压缩失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(output)
+
+
+async def compact_command(
+    *, session: str, model: str | None, dry_run: bool,
+    workspace_dir: str | None = None,
+) -> str:
+    """`compact` 的可测核心：返回渲染文本（#616 式）。
+
+    CLI 是 API 的瘦客户端（ADR-0045 D8）：能否压缩 / 在途 run 判定 / 模型解析 /
+    bracket 落盘全在 `SessionService.compact_session_context`；本层只把 DTO
+    `SessionContextCompaction` 渲染成人能读的两三行，不重算任何压缩规则。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    service = await _cli_session_service(settings)
+    result = await service.compact_session_context(
+        session, model=model, entry_point=COMPACT_ENTRY_CLI, dry_run=dry_run,
+    )
+    return _render_compaction(session, result)
+
+
+def _format_grouped(count: int) -> str:
+    """token 数 → 带千位分隔的原始数字（本票渲染用；`_format_tokens` 的 K/M 压缩
+    是事件流尾注口径，这里是压缩前后对比，保留可逐位对账的原始量级）。"""
+    return f"{count:_}"
+
+
+def _render_compaction(session: str, result: SessionContextCompaction) -> str:
+    """DTO → CLI 渲染文本（成功 / 低水位 / dry-run 三种形态）。"""
+    if result.dry_run:
+        window = (
+            "有可压缩的早期轮"
+            if result.compacted_turn_count
+            else "无可压缩的早期轮（水位过低）"
+        )
+        return "\n".join(
+            [
+                f"会话 {session} 将压缩（dry-run，未改动）：",
+                f"  tokens: {_format_grouped(result.tokens_before)}（当前水位）",
+                f"  source: {window}",
+            ]
+        )
+    if not result.compacted_turn_count or result.bracket_id is None:
+        # 后端 floor：无可压缩早期轮（或校验闸门未过）时零写入返回 0。
+        return f"会话 {session} 水位过低，无需压缩（未改动）。"
+    before, after = result.tokens_before, result.tokens_after
+    saved = 0 if before <= 0 else round((before - after) / before * 100)
+    return "\n".join(
+        [
+            f"会话 {session} 压缩完成（bracket={result.bracket_id}）：",
+            (
+                f"  tokens: {_format_grouped(before)} → {_format_grouped(after)}"
+                f"（-{saved}%）"
+            ),
+            # schema 是压缩管线的固定形态（builder.py 写 CONTEXT_COMPACTED 时的
+            # 常量），CLI 只转述摘要来自哪一种结构，不自行生成摘要内容。
+            (
+                f"  source: seq {result.source_seq_start}..{result.source_seq_end}"
+                " → 摘要（8 节，schema=eight_section）"
+            ),
+        ]
+    )
 
 
 def _main_approvals(argv: list[str]) -> None:
