@@ -281,11 +281,14 @@ describe('F4 AC2 — 打开那一刻候选表是最新的', () => {
 });
 
 // ── AC4：打开态候选表 golden（id + 顺序 + 分组）────────────────────────────
-/** 改造前实测（2026-09-19，本文件在改造**前**跑出的打开态 items，共 110 项）——
+/** 改造前实测（2026-09-19，本文件在改造**前**跑出的打开态 items）——
  *  门控**不得**改变这张表。事件区是 `events.slice(-100).reverse()`：窗口末 100 条、
  *  最新在前，故 id 恰为 `event-121` 递减到 `event-22`（夹具共 122 条事件）。
- *  这里写成「显式前 10 项 + 公式化事件区」，是为了让守卫独立于实现，
- *  任何窗口大小 / 排序 / 分组的偏离都会让它失败。 */
+ *  这里写成「显式前 11 项 + 公式化事件区」，是为了让守卫独立于实现，
+ *  任何窗口大小 / 排序 / 分组的偏离都会让它失败。
+ *  基准重定（2026-10-05，#684/#685 审批持久规则）：`manage-approve-policy`
+ *  在 `manage-memories` 后新增（顶栏 Shield 与命令面板共用入口，同
+ *  `manage-memories` 模式），现共 111 项。功能加项须同步重定本表。 */
 const GOLDEN_OPEN_ITEMS: [string, string][] = [
   ['toggle-inspector', 'actions'],
   ['toggle-inspector-fullpage', 'actions'],
@@ -293,6 +296,7 @@ const GOLDEN_OPEN_ITEMS: [string, string][] = [
   ['toggle-theme', 'actions'],
   ['focus-composer', 'actions'],
   ['manage-memories', 'actions'],
+  ['manage-approve-policy', 'actions'],
   ['density-compact', 'density'],
   ['density-balanced', 'density'],
   ['density-detailed', 'density'],
