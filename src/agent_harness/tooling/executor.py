@@ -76,6 +76,7 @@ from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_si
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.quota import ToolQuotaWindow
 from agent_harness.tooling.registry import ToolRegistry
+from agent_harness.tooling.resource_locks import ResourceLockRegistry
 from agent_harness.tooling.result import ErrorCode, ToolResult
 
 logger = logging.getLogger("agent_harness.tooling.executor")
@@ -261,6 +262,7 @@ class ToolExecutor:
         operation_ledger: OperationLedger | None = None,
         kill_hook: Callable[[str, str], None] | None = None,
         overflow_handler: OverflowHandler | None = None,
+        resource_locks: ResourceLockRegistry | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
@@ -268,6 +270,7 @@ class ToolExecutor:
         self._operation_ledger = operation_ledger
         self._kill_hook = kill_hook
         self._overflow_handler = overflow_handler
+        self._resource_locks = resource_locks
 
     @property
     def tracks_operations(self) -> bool:
@@ -529,7 +532,7 @@ class ToolExecutor:
         # ToolResult / Ledger / 事件语义（异常原样传播）。
         try:
             try:
-                result = await self._execute_with_retry(
+                result = await self._execute_with_resource_locks(
                     tool_call_id, name, tool, validated, attempts=attempts,
                 )
             except asyncio.CancelledError:
@@ -1104,6 +1107,31 @@ class ToolExecutor:
             ),
             budget_delta=_rejected_delta(name),
         )
+
+    async def _execute_with_resource_locks(
+        self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
+        *, attempts: list[dict[str, Any]] | None = None,
+    ) -> ToolResult:
+        """#525 一期（IMP-14）：resource 锁消费点。
+
+        在【接纳点之后、Retry loop 之前】acquire declared resource keys：
+        - 被拒绝的调用（配额/审批/deadline/UNIQUE）不占锁；
+        - 锁覆盖整个 retry 链（重试的仍是同一份已校验参数、对同一段副作用窗口）。
+        无锁注册表或工具未声明 key → 零开销直通 _execute_with_retry。
+
+        asyncio.CancelledError 在本方法内透传：锁的 __aexit__ 会执行
+        （lock.acquire 抛 CancelledError 前会释放已持有的锁；asyncio.Lock
+        内部状态一致，不会把调用方遗留为锁的持有者）。
+        """
+        keys = tool.resource_keys(validated)
+        if not self._resource_locks or not keys:
+            return await self._execute_with_retry(
+                tool_call_id, name, tool, validated, attempts=attempts,
+            )
+        async with self._resource_locks.hold(keys):
+            return await self._execute_with_retry(
+                tool_call_id, name, tool, validated, attempts=attempts,
+            )
 
     async def _execute_with_retry(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,
