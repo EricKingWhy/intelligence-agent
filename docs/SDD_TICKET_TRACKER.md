@@ -7408,4 +7408,4 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **变异鉴别（§8.1，仓外副本）**：git archive @`0fe67421` 树外副本摘 `seen.add`（CRLF 探测 962 对、anchor 命中数 = 1、PYTHONPATH 指副本 src）⇒ 窗口边界钉**唯一转红**（1 failed / 12 passed）；未变异树 tests/context 302 passed。
 - **测试**：tests/context 全量 **302 passed**（24.45s）；`compactor.py` + 测试文件 ruff 0。
 - **台账**：`docs/review_ledger.d/t707-on2-identifier-dedup-cc4d92c6-0fe67421.tsv`（159 字符）；覆盖闸门 **exit 0**（`089524a~1..HEAD` 每条 commit 均有归属）；金丝雀 4 passed。
-- **集成状态**：Gate-0、双轴审查、先回后正、冻结树全量门禁待跑（读数后补记）；push / PR / merge 逐项待批（§14.4）。
+- **集成状态**：Gate-0 @`54288b40` **6/6**（11.4s，收据 `docs/gate/54288b40….json`）；双轴独立审查（Standards + Correctness 各一独立只读子代理，互不可见）均 **pass / must-fix 0** ⇒ 增量一轮 `2dbaca98`（保序钉输入改重复值末现晚于 TASK-2002 末现：M2 移末变异树外副本实测转红，docstring 声称与区分力对齐；调用点读数 12→13 修正）+ 归属行 `t707-increment-pin1-m2-0fe67421-2dbaca98.tsv`（覆盖闸门 exit 0、金丝雀 4 passed）。先回后正 = 空操作（origin/main 未前移，仍为基点 `cc4d92c6`）。冻结树全量 pytest **6033P / 1F / 22S / 51D（778.87s）**：唯一红 = `test_approve_rejects_disallowed_decision` = §8.6 在册既有红（#526/#683 使 approve_session 合法），本分支基点不含 #706 修复笔 ⇒ 失败集合与基点树一致、零新增；该红已由 #706 分支修复（其冻结树 6032P/0F 实证闭环）。分支就绪；push / PR / merge 逐项待批（§14.4）。
