@@ -14,7 +14,10 @@
   supervisor 都可读）；
 - child 全程不输出 JSON ⇒ missing_json 分类，同样走重试/耗尽路径；
 - 重试占预算：预算打满时第二次跑被拒 ⇒ 按"第二次失败"同口径
-  schema_retry_exhausted 诚实失败，不静默。
+  schema_retry_exhausted 诚实失败，不静默；attempts 如实为 1
+  （retry_started=False），child1 事件保持 failed_retry 不覆写；
+- child 未完成（status != completed）⇒ 不做 schema 校验、按既有 failure
+  语义返回，事件 schema_validation="not_validated"（两轴审查 P2 修复）。
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.agent.factory import AgentFactory
 from agent_harness.multiagent.provider import InProcessSubagentProvider
-from agent_harness.multiagent.tools import DelegateTool
+from agent_harness.multiagent.tools import DelegateTool, _DelegateArgs
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling import ToolRegistry
@@ -73,10 +76,10 @@ def _schema_tool(
     return tool, provider_impl
 
 
-def _args(target: str, task: str, output_schema: dict | None = None) -> object:
-    return type("_Args", (), {"target": target, "task": task,
-                              "constraints": [],
-                              "output_schema": output_schema})()
+def _args(target: str, task: str, output_schema: dict | None = None) -> _DelegateArgs:
+    # 走真实 pydantic 参数模型（审查 P3：不再用动态类绕过参数校验链）。
+    return _DelegateArgs(target=target, task=task, constraints=[],
+                         output_schema=output_schema)
 
 
 def _finished_events(result) -> list[dict]:
@@ -241,10 +244,71 @@ class TestMissingJson:
         assert result.metadata["attempts"] == 2
 
 
+class TestNonCompletedChild:
+    @pytest.mark.asyncio
+    async def test_non_completed_child_fails_without_schema_validation(self, tmp_path):
+        """审查 P2 修复：child 未完成 ⇒ 不做校验、不重试，按既有 failure 语义返回。
+
+        空剧本 ⇒ child run 内部模型调用抛错 ⇒ SubAgentResult.status="failed"。
+        """
+        tool, provider = _schema_tool(tmp_path, [])
+
+        result = await tool.execute(_args("coding", "给结论", output_schema=_SIMPLE_SCHEMA))
+
+        assert not result.ok
+        assert "未能完成" in result.message
+        assert len(provider.last_child_sessions) == 1, "未完成不触发 schema 重试"
+        payload = json.loads(result.metadata["output"])
+        assert "structured" not in payload
+        assert payload["status"] == "failed"
+        finished = _finished_events(result)
+        assert finished[0]["output_schema"] is True
+        assert finished[0]["schema_validation"] == "not_validated"
+
+
+class TestJsonExtractionFallback:
+    @pytest.mark.asyncio
+    async def test_invalid_fence_content_falls_through_to_missing_json(self, tmp_path):
+        """审查 P3 测试缺口：```json 围栏内容非法 ⇒ 兜底全文 json.loads 也失败
+        ⇒ 归类 missing_json 进重试（不崩溃）；第二次合法 ⇒ attempts=2 成功。"""
+        broken = "```json\n{answer: 42 不是合法 JSON\n```"
+        tool, provider = _schema_tool(
+            tmp_path, [AIMessage(content=broken), AIMessage(content=_VALID_JSON)],
+        )
+
+        result = await tool.execute(_args("coding", "给结论", output_schema=_SIMPLE_SCHEMA))
+
+        assert result.ok, f"第二次合法必须成功：{result.message}"
+        assert result.metadata["attempts"] == 2
+        assert len(provider.last_child_sessions) == 2
+        # 第一轮错误以 missing_json 归类（重试任务里带首次错误清单）
+        second_run = provider._factory._model.snapshots[1]
+        second_run_task = "\n".join(str(m.content) for m in second_run.messages)
+        assert "missing_json" in second_run_task
+        assert json.loads(result.data["output"])["structured"] == {"answer": 42}
+
+    @pytest.mark.asyncio
+    async def test_unserializable_schema_rejected_as_invalid_argument(self, tmp_path):
+        """审查 P3 修复：schema 含不可序列化值 ⇒ INVALID_ARGUMENT（不崩溃）。"""
+        tool, provider = _schema_tool(tmp_path, [AIMessage(content="不该被启动")])
+        unserializable = {"type": "object", "callback": object()}
+
+        result = await tool.execute(
+            _args("coding", "x", output_schema=unserializable),
+        )
+
+        assert not result.ok
+        assert result.error_code == ErrorCode.INVALID_ARGUMENT
+        assert provider.last_child_sessions == []
+
+
 class TestRetryConsumesBudget:
     @pytest.mark.asyncio
     async def test_budget_rejection_counts_as_second_failure(self, tmp_path):
-        """§5-7：重试占预算；预算打满时第二次被拒 ⇒ schema_retry_exhausted 诚实失败。"""
+        """§5-7：重试占预算；预算打满时第二次被拒 ⇒ schema_retry_exhausted 诚实失败。
+
+        attempts 如实为 1（第二次从未启动），child1 事件保持 failed_retry。
+        """
         tool, provider = _schema_tool(
             tmp_path, [AIMessage(content=_BAD_TYPE_JSON)], max_delegations=1,
         )
@@ -254,9 +318,11 @@ class TestRetryConsumesBudget:
         assert not result.ok
         assert len(provider.last_child_sessions) == 1, "第二次没跑起来：child 只有一个"
         assert result.metadata["code"] == "schema_retry_exhausted"
-        assert result.metadata["attempts"] == 2
+        assert result.metadata["attempts"] == 1, "第二次未启动，不得虚报 attempts"
+        assert result.metadata["retry_started"] is False
         errors = result.metadata["errors"]
         assert len(errors) >= 2
         assert any("预算" in e for e in errors), errors
         finished = _finished_events(result)
-        assert finished[0]["schema_validation"] == "retry_exhausted"
+        assert finished[0]["schema_validation"] == "failed_retry"
+        assert finished[0]["output_schema"] is True

@@ -45,7 +45,10 @@ def _check_output_schema(schema: Any) -> str | None:
     """output_schema 参数校验（零副作用，fuse 纪律）：非法 / 超 4KB → 错误消息。"""
     if not isinstance(schema, dict):
         return "output_schema 必须是 JSON Schema 对象（dict）"
-    serialized = json.dumps(schema, ensure_ascii=False)
+    try:
+        serialized = json.dumps(schema, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return "output_schema 无法序列化为 JSON（含不可序列化值）"
     size = len(serialized.encode("utf-8"))
     if size > _MAX_OUTPUT_SCHEMA_BYTES:
         return (f"output_schema 序列化后 {size} 字节，超过上限 "
@@ -330,6 +333,23 @@ class DelegateTool(Tool):
     ) -> ToolResult:
         """output_schema 非 None 的收尾：校验 → 不符则重试一次（同 reserve 路径
         占预算）→ 两次都不符按 schema_retry_exhausted 诚实失败（设计 §3.2/§3.6）。"""
+        if result.status != "completed":
+            # child 未完成 ⇒ schema 校验无从谈起（summary 不是任务结论），按既有
+            # failure 语义返回、不重试；事件如实标记 not_validated（两轴审查 P2）。
+            payload, pending_events = await self._assemble(
+                result, target=args.target, task=task,
+            )
+            failed = ToolResult.failure(
+                message=f"子代理 '{result.agent_id}' 未能完成（status={result.status}）："
+                        f"{result.summary[:200] or '（无输出）'}",
+                error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+                retryable=False,
+                metadata={"output": json.dumps(payload, ensure_ascii=False)},
+                pending_events=self._mark_finished_events(
+                    pending_events, "not_validated",
+                ),
+            )
+            return await self._with_tree_guard(failed, tree_id, fingerprint)
         obj, errors = _schema_errors(result.summary, output_schema)
         payload, pending_events = await self._assemble(
             result, target=args.target, task=task,
@@ -376,10 +396,11 @@ class DelegateTool(Tool):
             except RuntimeError as error:
                 budget_note = f"retry_not_started: {error}"
         if budget_note is not None:
-            # 预算/启动失败按"第二次失败"同口径（设计 §3.6）。
-            return await self._with_tree_guard(self._schema_exhausted(
-                errors + [budget_note], payload,
-                self._mark_finished_events(pending_events, "retry_exhausted"),
+            # 预算/启动失败按"第二次失败"同口径返回 schema_retry_exhausted
+            # （设计 §3.6）；但 attempts 如实记 1（第二次从未启动），child1 事件
+            # 保持 failed_retry 不覆写（两轴审查 P3：不虚报实际未发生的尝试）。
+            return await self._with_tree_guard(self._retry_not_started(
+                errors + [budget_note], payload, pending_events,
             ), tree_id, fingerprint)
         obj2, errors2 = _schema_errors(result2.summary, output_schema)
         payload2, pending_events2 = await self._assemble(
@@ -413,6 +434,30 @@ class DelegateTool(Tool):
         ]
 
     @staticmethod
+    def _retry_not_started(
+        errors: list[str],
+        payload: dict[str, Any],
+        pending_events: list[tuple[str, dict[str, Any]]],
+    ) -> ToolResult:
+        """第二次尝试未能启动（预算耗尽 / run 抛错）：attempts 如实为 1。"""
+        head = errors[0] if errors else ""
+        return ToolResult.failure(
+            message=(f"子代理输出不符合 output_schema，且第二次尝试未能启动"
+                     f"（attempts=1）：{head}"
+                     f"（共 {len(errors)} 条错误，见 metadata.errors）"),
+            error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+            retryable=False,
+            metadata={
+                "output": json.dumps(payload, ensure_ascii=False),
+                "code": "schema_retry_exhausted",
+                "attempts": 1,
+                "retry_started": False,
+                "errors": errors,
+            },
+            pending_events=pending_events,
+        )
+
+    @staticmethod
     def _schema_exhausted(
         errors: list[str],
         payload: dict[str, Any],
@@ -428,6 +473,7 @@ class DelegateTool(Tool):
                 "output": json.dumps(payload, ensure_ascii=False),
                 "code": "schema_retry_exhausted",
                 "attempts": 2,
+                "retry_started": True,
                 "errors": errors,
             },
             pending_events=pending_events,
