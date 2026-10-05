@@ -13,6 +13,8 @@ seq 纪律」，属会话领域、与传输层无关；基类名沿用历史命�
 
 from __future__ import annotations
 
+from typing import Literal
+
 
 class SessionServiceError(Exception):
     """SessionService 所有领域异常的基类。"""
@@ -55,7 +57,9 @@ class CompactionConcurrentWrite(ActiveRunConflict):
     - ``"event_drift"``：事件数与快照不符——压缩期间被并发写者改动，应重试。
     """
 
-    def __init__(self, message: str, *, reason: str) -> None:
+    def __init__(
+        self, message: str, *, reason: Literal["run_busy", "event_drift"],
+    ) -> None:
         super().__init__(message)
         self.reason = reason
 

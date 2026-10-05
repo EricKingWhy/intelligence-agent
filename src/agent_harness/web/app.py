@@ -2261,8 +2261,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         统一解析点抛错 → 422（detail 原样上抛）。
 
         状态码（顺序即服务层的校验顺序）：422 → id 形态非法（先于 404，路径穿越防线）；
-        404 → 没有这个会话；422 → 非法 `?model=`；409 → 在途 run 或该会话已有压缩在途
-        （`ActiveRunConflict`，零写入）；500 → bracket 已写入但复核未通过
+        404 → 没有这个会话；422 → 非法 `?model=`；409 → 在途 run（`ActiveRunConflict`，
+        零写入）/ 该会话已有压缩在途（`CompactionInProgress`，零写入）/ 落盘窗口并发
+        （`CompactionConcurrentWrite`：`run_busy`/`event_drift`，历史可能已变，非零写入）；
+        500 → bracket 已写入但复核未通过
         （`CompactionPostWriteError`，fail-closed；历史已多出 bracket，不谎报"未改动"）。
 
         **非严格幂等**：每次调用都是用户显式请求的一次新压缩，追加新 bracket；重复调用
