@@ -315,14 +315,19 @@ async def test_threshold_equality_stays_strict_for_new_entries(tmp_path):
 async def test_deeply_nested_payload_does_not_crash_and_stays_unexternalized(tmp_path):
     """深嵌套 dict 的 json.dumps 递归爆栈不得逃逸成摘要路径崩溃（双轴审查 P3）。
 
-    ~1000+ 层嵌套会让 json.dumps 抛 RecursionError；_payload_size 按"不可判定
+    深度必须超过**所有支持平台**的 C 递归上限才能稳定爆栈：CPython 3.13 的
+    ``Py_C_RECURSION_LIMIT`` 是编译期平台常量（Windows x64=3000、Linux/macOS
+    =10000），与 ``sys.setrecursionlimit`` 无关——3000 层在 Linux 3.13 上序列化
+    成功，33KB 载荷会按不变量 #15 合法外置（生产行为正确），断言反而失真；
+    取 100_000（≥10 倍余量）后各平台都走 RecursionError。
+    `_payload_size` 按"不可判定
     → 保持既有穿透行为"处理（与不可序列化对象同路），executor 的摘要链路
     不因此多出一条崩溃面。"""
     session = make_session(tmp_path)
     store = FakeArtifactStore()
     deep: dict = {}
     current = deep
-    for _ in range(3000):
+    for _ in range(100_000):
         current["child"] = {}
         current = current["child"]
     result = ToolResult.success("ok", data={"output": deep})
