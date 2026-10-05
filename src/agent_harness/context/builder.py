@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 
 from agent_harness.context.compactor import (
     CompactionFailure,
+    CompactionPostWriteError,
     CompactionResult,
     ContextCompactor,
     ContextWindowExceededError,
@@ -75,6 +76,19 @@ class ProtectedFactBudgetExceededError(ContextWindowExceededError):
 #: （每个此类事件恰好产出一条消息，顺序一致；dangling 合成注入是唯一例外，
 #: 由 _estimate_tokens_cached 的计数守卫回退处理）。
 _PROJECTING_EVENT_TYPES = frozenset({USER_MESSAGE, MODEL_COMPLETED, TOOL_RESULT})
+
+
+class _UnsetRuntimeContext:
+    """哨兵类型：区分「未渲染」与「渲染为空」（F4 #635）。
+
+    `compact_now` 的 `runtime_context` 缺省用 `_RUNTIME_CONTEXT_UNSET`——只有**未传**
+    时才自行渲染（手动路径）；`build()` 显式传入自己归一化后的值（可能为 None），
+    此时不再渲染，保证 `_runtime_context_provider` 每次 build 只被调用一次。
+    """
+
+
+#: 缺省哨兵见 `_UnsetRuntimeContext`。
+_RUNTIME_CONTEXT_UNSET = _UnsetRuntimeContext()
 
 
 def _insert_before_last_human(
@@ -564,8 +578,8 @@ class ContextBuilder:
         self,
         session: Session,
         *,
-        runtime_context: str | None = None,
-        write_guard: AbstractAsyncContextManager[None] | None = None,
+        runtime_context: str | None | _UnsetRuntimeContext = _RUNTIME_CONTEXT_UNSET,
+        write_guard: Callable[[int], AbstractAsyncContextManager[None]] | None = None,
     ) -> CompactionResult | None:
         """压缩 runtime 投影的**唯一实现**（自动路径与手动路径共用，#635 / 不变量 #22）。
 
@@ -583,12 +597,20 @@ class ContextBuilder:
         - `CompactionResult` = 已核验并落 bracket 的压缩结果。
 
         `runtime_context`：调用方（build）已渲染的运行时快照文本，原样用于 token
-        估算——保证 `_runtime_context_provider` 每次 build 只被调用一次的既有契约；
-        手动路径传 None，本方法自行渲染一次。
+        估算——保证 `_runtime_context_provider` 每次 build 只被调用一次的既有契约。
+        缺省是哨兵 `_RUNTIME_CONTEXT_UNSET`：手动路径不传 → 本方法自行渲染**一次**；
+        build 显式传入（含归一化后的 `None`）→ 本方法不再渲染（F4 #635）。`None`
+        表示"已渲染为空"，与哨兵"未渲染"语义不同。
 
-        `write_guard`：可选异步上下文管理器，**只包住 bracket 三事件的落盘窗口**
-        （LLM 调用期间不持有）。手动路径传"重拿 `session_lock` + 复验"的守卫
-        （`runmanager.py:320-329` 禁止持锁跨长耗时操作）；自动路径传 None。
+        `write_guard`：可选**工厂**，入参 = 本次自身已写的事件数，返回一个异步上下文
+        管理器，**只包住 bracket 三事件的落盘窗口**（LLM 调用期间不持有）。手动路径传
+        "重拿 `session_lock` + 复验"的守卫（`runmanager.py:320-329` 禁止持锁跨长耗时
+        操作）；自动路径传 None。
+
+        工厂化（F1 #635）：本方法在进 guard 前会无条件落 `len(result.failures)` 条
+        `context/compaction_failed`（失败记录与失败条目一一对应），守卫的并发复验必须
+        把这份**自身写入**计入基线——否则"首试失败、重试成功"会被误判成并发改动而
+        409。guard 调用点在失败记录已 append **之后**，故计数包含它们。
         """
         # ── 投影（与 build 同一口径；裁剪路径存在时重放裁剪决策）──────────
         source_ranges: list[tuple[int, int] | None] | None = None
@@ -650,8 +672,14 @@ class ContextBuilder:
         usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
         token_estimate = max(token_estimate, usage_anchor)
         token_estimate += protected_facts_tokens
-        if runtime_context is None and self._runtime_context_provider is not None:
-            raw_runtime_context = self._runtime_context_provider()
+        if runtime_context is _RUNTIME_CONTEXT_UNSET:
+            # 仅"未渲染"（手动路径）才自行渲染一次；build() 传自己归一化后的值
+            # （含 None）时不再调 provider，保证每次 build 只渲染一次（F4 #635）。
+            raw_runtime_context = (
+                self._runtime_context_provider()
+                if self._runtime_context_provider is not None
+                else None
+            )
             runtime_context = (
                 raw_runtime_context
                 if raw_runtime_context and raw_runtime_context.strip()
@@ -727,7 +755,12 @@ class ContextBuilder:
                 "Refusing to persist an unvalidated compaction summary"
             )
         bracket_id = result.bracket_id or ""
-        guard = write_guard if write_guard is not None else nullcontext()
+        # 失败记录已在上面无条件落盘，且与 failures 条目一一对应（每条一个事件）。
+        # 守卫复验的基线必须加上这份自身写入，否则重试成功会被误判为并发改动。
+        own_writes = len(result.failures)
+        guard = (
+            write_guard(own_writes) if write_guard is not None else nullcontext()
+        )
         async with guard:
             # T4 (#134)：写 4-event bracket 替代单个 CONTEXT_COMPACTED。
             # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
@@ -759,19 +792,29 @@ class ContextBuilder:
         # （历史不删除），但本次执行不得继续在未核验的投影上工作。
         projected = self._reproject(session)
         if projected != result.messages:
-            raise ContextWindowExceededError(
+            raise CompactionPostWriteError(
                 "Compaction bracket re-projection mismatch; refusing to "
-                "continue on an unverifiable projection"
+                "continue on an unverifiable projection",
+                bracket_id=bracket_id,
             )
         recheck = estimate_message_tokens(projected)
         # 复核式刻意不含 plan_tokens（P2-1 审查修正的注释声明）：本式守的是
         # **持久化压缩结果**是否越硬护栏（fail-closed 面）；清单锚块是 ephemeral
         # 注入，其成本已经从 provider remaining 里扣减，总量越界由下一 build 的
         # 阈值判定（含清单）自纠。
+        #
+        # F7 (#635)：与 build() 尾部公式（:534–541，`recheck =
+        # compacted_token_estimate + protected_facts_tokens`）的分工差异——build 侧
+        # 的 `recheck` 已含 protected_facts_tokens，本式不含：本方法把保护事实的
+        # 成本记在 `token_estimate`（调用方入参，仅用于压缩阈值判定），而复核对象是
+        # `projected`（纯投影 messages，保护事实是 build 末尾另行注入、不在投影内）；
+        # 若此处再减一次会重复计账。两侧共同守住"越硬护栏即 fail-closed"，口径按各自
+        # 持有的事实源各自成立，此注释防后续把两式当同一公式同步改动而漂移。
         if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
                 > self.max_context_tokens * self.hard_guard_threshold):
-            raise ContextWindowExceededError(
-                f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
+            raise CompactionPostWriteError(
+                f"Re-projected compaction still exceeds hard guard: {recheck} tokens",
+                bracket_id=bracket_id,
             )
         return result
 

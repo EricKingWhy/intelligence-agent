@@ -122,7 +122,12 @@ class _SummaryRejected(ValueError):
 
 
 class ContextWindowExceededError(RuntimeError):
-    """无法构造安全的模型上下文，调用方必须停止当前 run。"""
+    """无法构造安全的模型上下文，调用方必须停止当前 run。
+
+    语义上覆盖"写前"（预检 / 校验 / 源区间不可用）与"写后"（bracket 已落盘但复核
+    未过）两类；区分二者用子类 `CompactionPostWriteError`——只有"写前"失败才允许
+    被手动路径吞成"水位过低、未改动"，"写后"失败必须响亮（历史已多出 bracket）。
+    """
 
     def __init__(
         self, message: str, *,
@@ -132,6 +137,22 @@ class ContextWindowExceededError(RuntimeError):
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。预检类超限
         #: （tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录，保持为空表。
         self.failures = list(failures or [])
+
+
+class CompactionPostWriteError(ContextWindowExceededError):
+    """bracket 三事件**已落盘**之后的复核失败（F2 #635）。
+
+    两个抛点都在 `ContextBuilder.compact_now` 的 bracket 写入**之后**：重投影确认
+    不一致、或重投影仍越硬护栏。历史里已有 bracket（append-only，不删除），因此
+    这不是"未改动"——调用方**不得**把它吞成 below-floor DTO，必须响亮失败（Web
+    500 / CLI exit 1），否则会谎报"未改动"而历史实际已变。
+
+    `bracket_id` 指向已写入的那一对 bracket 事件，供调用方在回执/诊断里指认。
+    """
+
+    def __init__(self, message: str, *, bracket_id: str) -> None:
+        super().__init__(message)
+        self.bracket_id = bracket_id
 
 
 @dataclass
