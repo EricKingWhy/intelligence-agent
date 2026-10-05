@@ -583,6 +583,7 @@ class SessionDeclarationValidator(Protocol):
         session_id: str,
         workspace: Path,
         agent_profile: str | None,
+        include_constraint_resolution_tool: bool = True,
     ) -> None: ...
 
 
@@ -1614,6 +1615,7 @@ class SessionService:
                 session_id=session_id,
                 workspace=evidence_workspace,
                 agent_profile=(amend.agent_profile if amend is not None else None),
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
             )
         if session_limits.configured:
             if session_row is not None:

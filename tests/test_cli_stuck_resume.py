@@ -22,7 +22,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness import cli
-from agent_harness.agent.budget import BudgetConflict
+from agent_harness.agent.budget import BudgetConflict, BudgetRejection
 from agent_harness.agent.run_budget import (
     REASON_STUCK,
     RESUME_BASIS_BUDGET_INCREASE,
@@ -30,6 +30,7 @@ from agent_harness.agent.run_budget import (
     RESUME_BASIS_POLICY_CHANGE,
     RESUME_BASIS_RELEVANT_STEER,
     STUCK_RESUME_REQUIREMENTS,
+    SessionLimits,
     latest_paused_run,
 )
 from agent_harness.cli import resume_command
@@ -220,6 +221,43 @@ async def test_resume_with_a_relevant_steer_is_accepted_and_recorded(monkeypatch
     assert isinstance(evidence["steer_seq"], int)
     # 同一个逻辑 run：只有一个 run/started
     assert len([event for event in after if event.type == "run/started"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_cli_resume_rejects_hidden_tool_limit_before_session_budget_cas(
+    monkeypatch, tmp_path,
+):
+    """CLI pre-CAS validation must use the registry with clarification hidden."""
+    settings, session_id, events = await _run_to_stuck_pause(monkeypatch, tmp_path)
+    paused = latest_paused_run(events)
+    assert paused is not None
+    _append_steer(settings, session_id)
+
+    service = await cli._cli_session_service(settings)
+    await service._ensure_stores()
+    ledger = service._stores.delegation_tree_ledger
+    before_budget = await ledger.ensure_session_budget(
+        session_id,
+        root_session_id=session_id,
+        limits=SessionLimits(tool_call_limits={"register_constraint": 1}),
+    )
+    before_events = await service.get_events(session_id)
+
+    with pytest.raises(BudgetRejection, match="request_constraint_resolution"):
+        await resume_command(
+            session_id,
+            expected_version=paused.version,
+            basis=RESUME_BASIS_RELEVANT_STEER,
+            session_tool_limits={"request_constraint_resolution": 1},
+            session_expected_version=before_budget.version,
+            write=lambda _text: None,
+        )
+
+    after_budget = await ledger.get_session_budget(session_id)
+    assert after_budget is not None
+    assert after_budget.version == before_budget.version
+    assert after_budget.limits == before_budget.limits
+    assert await service.get_events(session_id) == before_events
 
 
 @pytest.mark.asyncio

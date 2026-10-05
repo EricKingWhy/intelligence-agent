@@ -1051,6 +1051,7 @@ def _session_declaration_validator(
         session_id: str,
         workspace: Any,
         agent_profile: str | None,
+        include_constraint_resolution_tool: bool = True,
     ) -> None:
         # workspace / agent_profile 不参与判定（前者 = P2-1 零副作用要求；后者
         # 只影响 delegate 的配额值，不影响名字集）：参数保留是端口形状（Protocol）。
@@ -1060,6 +1061,7 @@ def _session_declaration_validator(
             registered=sorted(root_registry_tool_names(
                 settings, wiring, session_id=session_id, session_store=store,
                 include_constraint_tools=True,
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
             )),
             scope="session",
         )
