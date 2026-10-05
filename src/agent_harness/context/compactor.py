@@ -456,10 +456,12 @@ def _summary_model_id(model: Any, response: Any) -> str | None:
 
 
 #: #649 结构隔离：正文里**逐字等于保留节标题**的行以反斜杠转义后落盘
-#: （与 CommonMark 0.31.2 的反斜杠转义同源），解析时解码回原值；正文里的
-#: **非保留** Markdown 标题（如 `## embedded heading`）与保留标题不同文，
-#: 不转义、原样保留。节边界只由「逐字等于某一保留标题、不在围栏代码块内、
-#: 且未被转义」的行定义——正文 Markdown 二级标题不再被误判为节边界。
+#: （与 CommonMark 0.31.2 的反斜杠转义同源），解析时解码回原值；#699 转义
+#: 碰撞：转义符本身也要转义（``\`` + 保留标题的行再加一层 ``\``），否则
+#: 原文自带的 ``\##`` 行会被误解码。正文里的**非保留** Markdown 标题
+#: （如 `## embedded heading`）与保留标题不同文，不转义、原样保留。
+#: 节边界只由「逐字等于某一保留标题、不在围栏代码块内、且未被转义」的行
+#: 定义——正文 Markdown 二级标题不再被误判为节边界。
 _HEADING_ESCAPE = "\\"
 _FENCE_CHARS = ("`", "~")
 
@@ -508,6 +510,11 @@ def _fenced_mask(lines: list[str]) -> list[bool]:
 def _escape_section_body(body: str, headings: tuple[str, ...]) -> str:
     """把正文中与保留标题同文的行转义，避免组装后被误当成节边界（#649）。
 
+    #699 转义碰撞：转义符本身也要转义（escape-the-escape，与 CommonMark
+    0.31.2 §6.1 / RFC 8259 §7 同源）。行满足 ``^(\\\\*)(## 保留标题)$``
+    （n≥0 个前导反斜杠 + 逐字等于保留标题）即在前面再加一层 ``\\``；
+    解析时逐层解回，round-trip 保真。
+
     只处理围栏代码块**之外**的行：围栏内的 ``##`` 行由 `_fenced_mask` 保护，
     改写会破坏代码原文，故不动。
     """
@@ -516,24 +523,38 @@ def _escape_section_body(body: str, headings: tuple[str, ...]) -> str:
     lines = body.split("\n")
     fenced = _fenced_mask(lines)
     reserved = set(headings)
-    return "\n".join(
-        _HEADING_ESCAPE + line if not fenced[index] and line in reserved else line
-        for index, line in enumerate(lines)
-    )
+    escaped = []
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            escaped.append(line)
+            continue
+        backslashes = len(line) - len(line.lstrip("\\"))
+        if line[backslashes:] in reserved:
+            escaped.append(_HEADING_ESCAPE + line)
+        else:
+            escaped.append(line)
+    return "\n".join(escaped)
 
 
 def _unescape_section_body(body: str, headings: tuple[str, ...]) -> str:
-    """把 `_escape_section_body` 的转义解码回原值（#649）。"""
+    """把 `_escape_section_body` 的转义解码回原值（#649；#699 转义碰撞）。
+
+    与组装侧互逆：``^(\\\\+)(## 保留标题)$`` 去掉一层前导 ``\\``。
+    """
     lines = body.split("\n")
     fenced = _fenced_mask(lines)
     reserved = set(headings)
-    return "\n".join(
-        line[1:]
-        if (not fenced[index] and line.startswith(_HEADING_ESCAPE)
-            and line[1:] in reserved)
-        else line
-        for index, line in enumerate(lines)
-    )
+    unescaped = []
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            unescaped.append(line)
+            continue
+        backslashes = len(line) - len(line.lstrip("\\"))
+        if backslashes >= 1 and line[backslashes:] in reserved:
+            unescaped.append(line[1:])
+        else:
+            unescaped.append(line)
+    return "\n".join(unescaped)
 
 
 def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
