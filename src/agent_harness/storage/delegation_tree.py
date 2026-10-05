@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -40,6 +41,13 @@ from agent_harness.agent.run_budget import (
     utc_now,
 )
 from agent_harness.storage.sqlite import retry_on_busy
+
+_SESSION_BUDGET_PROCESS_ID = str(uuid4())
+
+
+def _session_budget_process_id() -> str:
+    """Differentiate workers forked after this module was imported."""
+    return f"{os.getpid()}:{_SESSION_BUDGET_PROCESS_ID}"
 
 
 @dataclass(frozen=True)
@@ -75,6 +83,22 @@ class DelegationTreeState:
     fingerprint: str | None
     consecutive_failures: int
     soft_triggered: bool
+
+
+@dataclass(frozen=True)
+class SessionModelRequestAccounting:
+    accounting_id: str
+    session_id: str
+    run_id: str
+    step_id: int
+    after_seq: int
+    before_seq: int | None
+    reserved_requests: int
+    owner_id: str
+
+
+class SessionBudgetRecoveryRequired(RuntimeError):
+    """A previous process left a SessionBudget request marker unreconciled."""
 
 
 class DelegationTreeLedger(Protocol):
@@ -269,6 +293,7 @@ class SqliteDelegationTreeLedger:
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
+        self._blocked_model_request_accountings: set[tuple[str, str]] = set()
 
     @asynccontextmanager
     async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -393,6 +418,29 @@ class SqliteDelegationTreeLedger:
             rows = await cursor.fetchall()
         return [row[0] for row in rows]
 
+    async def pending_model_request_accountings(
+        self, budget_key: str, *, session_id: str,
+    ) -> list[SessionModelRequestAccounting]:
+        async with self._connect() as connection:
+            markers = await self._pending_model_request_accountings(
+                connection, budget_key,
+            )
+        return [
+            marker for marker in markers
+            if marker.session_id == session_id
+            and marker.owner_id != _session_budget_process_id()
+        ]
+
+    def block_model_request_accounting(
+        self, budget_key: str, accounting_id: str,
+    ) -> None:
+        self._blocked_model_request_accountings.add((budget_key, accounting_id))
+
+    def unblock_model_request_accounting(
+        self, budget_key: str, accounting_id: str,
+    ) -> None:
+        self._blocked_model_request_accountings.discard((budget_key, accounting_id))
+
     # ── SessionBudget（#318；`02 §5.1` / `10 §5.1`）──────────────────────
     #
     # 所有操作都在单个 BEGIN IMMEDIATE 事务里完成"判定 + 计数"：并发兄弟（同进程
@@ -404,14 +452,118 @@ class SqliteDelegationTreeLedger:
     async def _append_session_event(
         connection: aiosqlite.Connection, budget_key: str, kind: str,
         *, version: int, detail: dict[str, Any] | None = None,
-    ) -> None:
+        event_id: str | None = None,
+    ) -> str:
+        event_id = event_id or str(uuid4())
         await connection.execute(
             """INSERT INTO session_budget_events
                (event_id, budget_key, kind, version, detail)
                VALUES (?, ?, ?, ?, ?)""",
-            (str(uuid4()), budget_key, kind, version,
+            (event_id, budget_key, kind, version,
              json.dumps(detail, sort_keys=True) if detail else None),
         )
+        return event_id
+
+    async def _append_model_request_accounting_started(
+        self, connection: aiosqlite.Connection, budget_key: str, *,
+        version: int, session_id: str, run_id: str, step_id: int,
+        after_seq: int, reserved_requests: int,
+    ) -> str:
+        return await self._append_session_event(
+            connection, budget_key, "model_request_accounting_started",
+            version=version,
+            detail={
+                "session_id": session_id,
+                "run_id": run_id,
+                "step_id": step_id,
+                "after_seq": after_seq,
+                "reserved_requests": reserved_requests,
+                "owner_id": _session_budget_process_id(),
+            },
+        )
+
+    async def _pending_model_request_accountings(
+        self, connection: aiosqlite.Connection, budget_key: str,
+    ) -> list[SessionModelRequestAccounting]:
+        cursor = await connection.execute(
+            "SELECT event_id, kind, detail FROM session_budget_events "
+            "WHERE budget_key = ? ORDER BY rowid", (budget_key,),
+        )
+        rows = await cursor.fetchall()
+        markers: dict[str, dict[str, Any]] = {}
+        resolved: set[str] = set()
+        for row in rows:
+            try:
+                detail = json.loads(row["detail"] or "{}")
+            except (TypeError, ValueError):
+                if row["kind"] == "model_request_accounting_started":
+                    raise SessionBudgetRecoveryRequired(
+                        "SessionBudget has a malformed model request accounting marker"
+                    )
+                continue
+            if not isinstance(detail, dict):
+                if row["kind"] == "model_request_accounting_started":
+                    raise SessionBudgetRecoveryRequired(
+                        "SessionBudget has a malformed model request accounting marker"
+                    )
+                continue
+            if row["kind"] == "model_request_accounting_started":
+                markers[row["event_id"]] = detail
+            elif row["kind"] in {
+                "requests_recorded", "request_accounting_empty",
+                "request_accounting_unsettled",
+            }:
+                accounting_id = detail.get("accounting_id")
+                if isinstance(accounting_id, str):
+                    resolved.add(accounting_id)
+        parsed: list[SessionModelRequestAccounting] = []
+        for accounting_id, detail in markers.items():
+            session_id = detail.get("session_id")
+            run_id = detail.get("run_id")
+            step_id = detail.get("step_id")
+            after_seq = detail.get("after_seq")
+            reserved_requests = detail.get("reserved_requests")
+            owner_id = detail.get("owner_id")
+            if (
+                isinstance(session_id, str) and bool(session_id)
+                and isinstance(run_id, str) and bool(run_id)
+                and type(step_id) is int and step_id >= 0
+                and type(after_seq) is int and after_seq >= 0
+                and type(reserved_requests) is int and reserved_requests in (0, 1)
+                and isinstance(owner_id, str) and bool(owner_id)
+            ):
+                parsed.append(SessionModelRequestAccounting(
+                    accounting_id=accounting_id, session_id=session_id,
+                    run_id=run_id, step_id=step_id, after_seq=after_seq,
+                    before_seq=None,
+                    reserved_requests=reserved_requests, owner_id=owner_id,
+                ))
+            else:
+                raise SessionBudgetRecoveryRequired(
+                    "SessionBudget has an incomplete model request accounting marker"
+                )
+        pending: list[SessionModelRequestAccounting] = []
+        for marker in parsed:
+            later = [
+                item.after_seq for item in parsed
+                if item.session_id == marker.session_id
+                and item.run_id == marker.run_id
+                and item.step_id == marker.step_id
+                and item.after_seq > marker.after_seq
+            ]
+            bounded = SessionModelRequestAccounting(
+                accounting_id=marker.accounting_id,
+                session_id=marker.session_id,
+                run_id=marker.run_id,
+                step_id=marker.step_id,
+                after_seq=marker.after_seq,
+                before_seq=min(later) if later else None,
+                reserved_requests=marker.reserved_requests,
+                owner_id=marker.owner_id,
+            )
+            if marker.accounting_id not in resolved:
+                pending.append(bounded)
+        return pending
 
     async def _session_snapshot(
         self, connection: aiosqlite.Connection, budget_key: str,
@@ -526,7 +678,11 @@ class SqliteDelegationTreeLedger:
                 raise
 
     @retry_on_busy
-    async def admit_session_step(self, budget_key: str) -> SessionAdmission:
+    async def admit_session_step(
+        self, budget_key: str, *, session_id: str | None = None,
+        run_id: str | None = None, step_id: int | None = None,
+        after_seq: int | None = None,
+    ) -> SessionAdmission:
         """原子准入：判到顶就拒绝（账不变），否则**预留** turns / requests 各一格。
 
         预留语义（保持 `02 §5.1` 的计数定义）：这一格 turns 在决策被**接纳进 loop**
@@ -536,6 +692,24 @@ class SqliteDelegationTreeLedger:
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
+                pending = await self._pending_model_request_accountings(
+                    connection, budget_key,
+                )
+                blocked = [
+                    marker for marker in pending
+                    if marker.owner_id != _session_budget_process_id()
+                    or (budget_key, marker.accounting_id)
+                    in self._blocked_model_request_accountings
+                ]
+                if blocked:
+                    raise SessionBudgetRecoveryRequired(
+                        "SessionBudget has an unreconciled model request settlement"
+                    )
+                accounting_values = (session_id, run_id, step_id, after_seq)
+                if any(value is not None for value in accounting_values) and not all(
+                    value is not None for value in accounting_values
+                ):
+                    raise ValueError("model request accounting context must be complete")
                 snapshot = await self._session_snapshot(connection, budget_key)
                 trigger = session_pause_trigger(
                     consumed=snapshot.consumed, session_limits=snapshot.limits,
@@ -544,6 +718,7 @@ class SqliteDelegationTreeLedger:
                 if trigger is not None:
                     await connection.commit()
                     return SessionAdmission(False, trigger, snapshot)
+                accounting_id = None
                 await connection.execute(
                     """UPDATE session_budgets
                        SET agent_turns = agent_turns + 1,
@@ -556,6 +731,17 @@ class SqliteDelegationTreeLedger:
                     version=snapshot.version,
                     detail={"turns": snapshot.consumed.agent_turns + 1},
                 )
+                if session_id is not None:
+                    assert run_id is not None and step_id is not None and after_seq is not None
+                    accounting_id = await self._append_model_request_accounting_started(
+                        connection, budget_key,
+                        version=snapshot.version,
+                        session_id=session_id,
+                        run_id=run_id,
+                        step_id=step_id,
+                        after_seq=after_seq,
+                        reserved_requests=1,
+                    )
                 # 快照读必须在 commit 之前（事务内读自己的写）：commit 之后的读若
                 # 撞锁超时，retry_on_busy 会整块重跑，而已提交的 +1 预留无法回滚，
                 # 重跑即二次预留（#515 审查 P2-B 双计数）。「非幂等增量写 + commit
@@ -565,7 +751,9 @@ class SqliteDelegationTreeLedger:
                 # update_last_checkpoint_seq），重跑收敛无害。
                 admitted_snapshot = await self._session_snapshot(connection, budget_key)
                 await connection.commit()
-                return SessionAdmission(True, None, admitted_snapshot)
+                return SessionAdmission(
+                    True, None, admitted_snapshot, accounting_id=accounting_id,
+                )
             except BaseException:
                 await connection.rollback()
                 raise
@@ -597,7 +785,135 @@ class SqliteDelegationTreeLedger:
                 raise
 
     @retry_on_busy
-    async def refund_session_step(self, budget_key: str) -> None:
+    async def begin_session_model_request_accounting(
+        self, budget_key: str, *, session_id: str, run_id: str,
+        step_id: int, after_seq: int,
+    ) -> str:
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                pending = await self._pending_model_request_accountings(
+                    connection, budget_key,
+                )
+                if any(
+                    marker.owner_id != _session_budget_process_id()
+                    or (budget_key, marker.accounting_id)
+                    in self._blocked_model_request_accountings
+                    for marker in pending
+                ):
+                    raise SessionBudgetRecoveryRequired(
+                        "SessionBudget has an unreconciled model request settlement"
+                    )
+                cursor = await connection.execute(
+                    "SELECT version FROM session_budgets WHERE budget_key = ?",
+                    (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                accounting_id = await self._append_model_request_accounting_started(
+                    connection, budget_key,
+                    version=int(row["version"]),
+                    session_id=session_id,
+                    run_id=run_id,
+                    step_id=step_id,
+                    after_seq=after_seq,
+                    reserved_requests=0,
+                )
+                await connection.commit()
+                return accounting_id
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    @retry_on_busy
+    async def resolve_empty_session_model_request_accounting(
+        self, budget_key: str, accounting_id: str, *, refund_step: bool,
+    ) -> None:
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT version FROM session_budgets WHERE budget_key = ?",
+                    (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                markers = await self._pending_model_request_accountings(
+                    connection, budget_key,
+                )
+                marker = next(
+                    (item for item in markers if item.accounting_id == accounting_id),
+                    None,
+                )
+                if marker is None:
+                    await connection.commit()
+                    self.unblock_model_request_accounting(budget_key, accounting_id)
+                    return
+                if refund_step and marker.reserved_requests != 1:
+                    raise ValueError("only an admitted model step can refund its reservation")
+                if refund_step:
+                    await connection.execute(
+                        """UPDATE session_budgets
+                           SET agent_turns = MAX(agent_turns - 1, 0),
+                               model_requests = MAX(model_requests - 1, 0)
+                           WHERE budget_key = ?""",
+                        (budget_key,),
+                    )
+                    await self._append_session_event(
+                        connection, budget_key, "step_refunded",
+                        version=int(row["version"]),
+                    )
+                await self._append_session_event(
+                    connection, budget_key, "request_accounting_empty",
+                    version=int(row["version"]),
+                    detail={"accounting_id": accounting_id},
+                )
+                await connection.commit()
+                self.unblock_model_request_accounting(budget_key, accounting_id)
+            except BaseException:
+                await connection.rollback()
+                self.block_model_request_accounting(budget_key, accounting_id)
+                raise
+
+    @retry_on_busy
+    async def resolve_unsettled_session_model_request_accounting(
+        self, budget_key: str, accounting_id: str,
+    ) -> None:
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT version FROM session_budgets WHERE budget_key = ?",
+                    (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                markers = await self._pending_model_request_accountings(
+                    connection, budget_key,
+                )
+                if not any(item.accounting_id == accounting_id for item in markers):
+                    await connection.commit()
+                    self.unblock_model_request_accounting(budget_key, accounting_id)
+                    return
+                await self._append_session_event(
+                    connection, budget_key, "request_accounting_unsettled",
+                    version=int(row["version"]),
+                    detail={"accounting_id": accounting_id},
+                )
+                await connection.commit()
+                self.unblock_model_request_accounting(budget_key, accounting_id)
+            except BaseException:
+                await connection.rollback()
+                self.block_model_request_accounting(budget_key, accounting_id)
+                raise
+
+    @retry_on_busy
+    async def refund_session_step(
+        self, budget_key: str, *, accounting_id: str | None = None,
+    ) -> None:
         """退回预留的两格 turns / requests（整步未发生：模型在本轮从未被调用）。"""
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
@@ -619,15 +935,26 @@ class SqliteDelegationTreeLedger:
                 await self._append_session_event(
                     connection, budget_key, "step_refunded", version=int(row["version"]),
                 )
+                if accounting_id is not None:
+                    await self._append_session_event(
+                        connection, budget_key, "request_accounting_empty",
+                        version=int(row["version"]),
+                        detail={"accounting_id": accounting_id},
+                    )
                 await connection.commit()
+                if accounting_id is not None:
+                    self.unblock_model_request_accounting(budget_key, accounting_id)
             except BaseException:
                 await connection.rollback()
+                if accounting_id is not None:
+                    self.block_model_request_accounting(budget_key, accounting_id)
                 raise
 
     @retry_on_busy
     async def record_session_model_requests(
         self, budget_key: str, *, count: int, usage: dict[str, int] | None,
-        cost: Decimal | None,
+        cost: Decimal | None, accounting_id: str | None = None,
+        request_ids: tuple[str, ...] = (),
     ) -> None:
         """把实际发生的请求落账（`model_requests` 的树级计数点）。
 
@@ -638,6 +965,11 @@ class SqliteDelegationTreeLedger:
         """
         if count < 0:
             raise ValueError(f"request count 不能为负：{count}")
+        if accounting_id is not None and (
+            not request_ids or any(not isinstance(value, str) or not value for value in request_ids)
+            or len(set(request_ids)) != len(request_ids)
+        ):
+            raise ValueError("idempotent request accounting requires unique request ids")
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
@@ -647,6 +979,49 @@ class SqliteDelegationTreeLedger:
                 row = await cursor.fetchone()
                 if row is None:
                     raise KeyError(f"unknown session budget: {budget_key}")
+                if accounting_id is not None:
+                    marker_cursor = await connection.execute(
+                        "SELECT kind FROM session_budget_events "
+                        "WHERE event_id = ? AND budget_key = ?",
+                        (accounting_id, budget_key),
+                    )
+                    marker = await marker_cursor.fetchone()
+                    if marker is None or marker["kind"] != "model_request_accounting_started":
+                        raise KeyError(f"unknown model request accounting marker: {accounting_id}")
+                    events_cursor = await connection.execute(
+                        "SELECT kind, detail FROM session_budget_events "
+                        "WHERE budget_key = ? ORDER BY rowid", (budget_key,),
+                    )
+                    audit_rows = await events_cursor.fetchall()
+                    requested_ids = set(request_ids)
+                    for audit_row in audit_rows:
+                        try:
+                            detail = json.loads(audit_row["detail"] or "{}")
+                        except (TypeError, ValueError):
+                            continue
+                        if not isinstance(detail, dict):
+                            continue
+                        if detail.get("accounting_id") == accounting_id:
+                            if audit_row["kind"] != "requests_recorded":
+                                raise ValueError("empty model request accounting cannot be settled")
+                            same = (
+                                detail.get("request_ids") == list(request_ids)
+                                and detail.get("count") == count
+                                and detail.get("usage") == usage
+                                and detail.get("cost_delta_usd") == _decimal_text(cost)
+                            )
+                            if not same:
+                                raise ValueError("model request accounting replay differs from commit")
+                            await connection.commit()
+                            self.unblock_model_request_accounting(budget_key, accounting_id)
+                            return
+                        if audit_row["kind"] == "requests_recorded":
+                            previously_recorded = detail.get("request_ids")
+                            if (
+                                isinstance(previously_recorded, list)
+                                and requested_ids.intersection(previously_recorded)
+                            ):
+                                raise ValueError("model request id was already accounted")
                 tokens = row["total_tokens"]
                 if tokens is not None:
                     if usage is None or "total_tokens" not in usage:
@@ -676,11 +1051,21 @@ class SqliteDelegationTreeLedger:
                     connection, budget_key, "requests_recorded",
                     version=int(row["version"]),
                     detail={"count": count, "tokens": tokens,
-                            "cost_usd": _decimal_text(new_cost)},
+                            "cost_usd": _decimal_text(new_cost),
+                            **({
+                                "accounting_id": accounting_id,
+                                "request_ids": list(request_ids),
+                                "usage": usage,
+                                "cost_delta_usd": _decimal_text(cost),
+                            } if accounting_id is not None else {})},
                 )
                 await connection.commit()
+                if accounting_id is not None:
+                    self.unblock_model_request_accounting(budget_key, accounting_id)
             except BaseException:
                 await connection.rollback()
+                if accounting_id is not None:
+                    self.block_model_request_accounting(budget_key, accounting_id)
                 raise
 
     @retry_on_busy
@@ -1109,6 +1494,12 @@ class InMemoryDelegationTreeLedger:
         self._events: dict[str, list[str]] = {}
         self._budgets: dict[str, dict[str, object]] = {}
         self._lock = asyncio.Lock()
+        self._model_request_accountings: dict[str, dict[str, dict[str, Any]]] = {}
+        self._resolved_model_request_accountings: set[tuple[str, str]] = set()
+        self._recorded_model_request_ids: dict[str, set[str]] = {}
+        self._settled_model_request_accountings: dict[
+            tuple[str, str], dict[str, Any]
+        ] = {}
 
     async def initialize(self) -> None:
         return None
@@ -1239,7 +1630,11 @@ class InMemoryDelegationTreeLedger:
             state["tool_call_limits"] = _tool_map_json(current_tools)
             return self._budget_snapshot(budget_key)
 
-    async def admit_session_step(self, budget_key: str) -> SessionAdmission:
+    async def admit_session_step(
+        self, budget_key: str, *, session_id: str | None = None,
+        run_id: str | None = None, step_id: int | None = None,
+        after_seq: int | None = None,
+    ) -> SessionAdmission:
         async with self._lock:
             snapshot = self._budget_snapshot(budget_key)
             trigger = session_pause_trigger(
@@ -1251,24 +1646,102 @@ class InMemoryDelegationTreeLedger:
             state = self._budgets[budget_key]
             state["agent_turns"] = int(state["agent_turns"]) + 1
             state["model_requests"] = int(state["model_requests"]) + 1
-            return SessionAdmission(True, None, self._budget_snapshot(budget_key))
+            accounting_id = None
+            if session_id is not None and run_id is not None \
+                    and step_id is not None and after_seq is not None:
+                accounting_id = str(uuid4())
+                self._model_request_accountings.setdefault(budget_key, {})[
+                    accounting_id
+                ] = {
+                    "session_id": session_id, "run_id": run_id,
+                    "step_id": step_id, "after_seq": after_seq,
+                    "reserved_requests": 1,
+                }
+            return SessionAdmission(
+                True, None, self._budget_snapshot(budget_key),
+                accounting_id=accounting_id,
+            )
 
     async def refund_session_turn(self, budget_key: str) -> None:
         async with self._lock:
             state = self._budgets[budget_key]
             state["agent_turns"] = max(int(state["agent_turns"]) - 1, 0)
 
-    async def refund_session_step(self, budget_key: str) -> None:
+    async def refund_session_step(
+        self, budget_key: str, *, accounting_id: str | None = None,
+    ) -> None:
         async with self._lock:
             state = self._budgets[budget_key]
             state["agent_turns"] = max(int(state["agent_turns"]) - 1, 0)
             state["model_requests"] = max(int(state["model_requests"]) - 1, 0)
+            if accounting_id is not None:
+                self._resolved_model_request_accountings.add((budget_key, accounting_id))
+
+    async def begin_session_model_request_accounting(
+        self, budget_key: str, *, session_id: str, run_id: str,
+        step_id: int, after_seq: int,
+    ) -> str:
+        async with self._lock:
+            accounting_id = str(uuid4())
+            self._model_request_accountings.setdefault(budget_key, {})[accounting_id] = {
+                "session_id": session_id, "run_id": run_id,
+                "step_id": step_id, "after_seq": after_seq,
+                "reserved_requests": 0,
+            }
+            return accounting_id
+
+    async def resolve_empty_session_model_request_accounting(
+        self, budget_key: str, accounting_id: str, *, refund_step: bool,
+    ) -> None:
+        async with self._lock:
+            if refund_step:
+                state = self._budgets[budget_key]
+                state["agent_turns"] = max(int(state["agent_turns"]) - 1, 0)
+                state["model_requests"] = max(int(state["model_requests"]) - 1, 0)
+            self._resolved_model_request_accountings.add((budget_key, accounting_id))
+
+    async def resolve_unsettled_session_model_request_accounting(
+        self, budget_key: str, accounting_id: str,
+    ) -> None:
+        async with self._lock:
+            self._resolved_model_request_accountings.add((budget_key, accounting_id))
 
     async def record_session_model_requests(
         self, budget_key: str, *, count: int, usage: dict[str, int] | None,
-        cost: Decimal | None,
+        cost: Decimal | None, accounting_id: str | None = None,
+        request_ids: tuple[str, ...] = (),
     ) -> None:
+        if count < 0:
+            raise ValueError(f"request count 不能为负：{count}")
+        if accounting_id is not None and (
+            not request_ids
+            or any(not isinstance(value, str) or not value for value in request_ids)
+            or len(set(request_ids)) != len(request_ids)
+        ):
+            raise ValueError("idempotent request accounting requires unique request ids")
         async with self._lock:
+            if accounting_id is not None:
+                accounting_key = (budget_key, accounting_id)
+                payload = {
+                    "request_ids": list(request_ids),
+                    "count": count,
+                    "usage": usage,
+                    "cost_delta_usd": _decimal_text(cost),
+                }
+                if accounting_key in self._resolved_model_request_accountings:
+                    recorded_payload = self._settled_model_request_accountings.get(
+                        accounting_key
+                    )
+                    if recorded_payload is None:
+                        raise ValueError("empty model request accounting cannot be settled")
+                    if recorded_payload != payload:
+                        raise ValueError("model request accounting replay differs from commit")
+                    return
+                if accounting_id not in self._model_request_accountings.get(budget_key, {}):
+                    raise KeyError(f"unknown model request accounting marker: {accounting_id}")
+                recorded = self._recorded_model_request_ids.setdefault(budget_key, set())
+                if recorded.intersection(request_ids):
+                    raise ValueError("model request id was already accounted")
             state = self._budgets[budget_key]
             state["model_requests"] = int(state["model_requests"]) + count
             tokens = state["total_tokens"]
@@ -1291,6 +1764,11 @@ class InMemoryDelegationTreeLedger:
                 state["cost_usd"] = None
             else:
                 state["cost_usd"] = _decimal_text(current_cost + cost)
+            if accounting_id is not None:
+                self._recorded_model_request_ids[budget_key].update(request_ids)
+                accounting_key = (budget_key, accounting_id)
+                self._settled_model_request_accountings[accounting_key] = payload
+                self._resolved_model_request_accountings.add(accounting_key)
 
     async def record_session_tools(
         self, budget_key: str, *, calls: Mapping[str, int], attempts: Mapping[str, int],
@@ -1484,23 +1962,55 @@ class SessionBudgetHandle:
             )
         return snapshot
 
-    async def admit_step(self) -> SessionAdmission:
+    async def admit_step(
+        self, *, session_id: str | None = None, run_id: str | None = None,
+        step_id: int | None = None, after_seq: int | None = None,
+    ) -> SessionAdmission:
         await self.ledger.ensure_session_budget(
             self.budget_key, root_session_id=self.root_session_id, limits=self.limits,
         )
-        return await self.ledger.admit_session_step(self.budget_key)
+        return await self.ledger.admit_session_step(
+            self.budget_key, session_id=session_id, run_id=run_id,
+            step_id=step_id, after_seq=after_seq,
+        )
 
     async def refund_turn(self) -> None:
         await self.ledger.refund_session_turn(self.budget_key)
 
-    async def refund_step(self) -> None:
-        await self.ledger.refund_session_step(self.budget_key)
+    async def refund_step(self, *, accounting_id: str | None = None) -> None:
+        await self.ledger.refund_session_step(
+            self.budget_key, accounting_id=accounting_id,
+        )
+
+    async def begin_model_request_accounting(
+        self, *, session_id: str, run_id: str, step_id: int, after_seq: int,
+    ) -> str:
+        return await self.ledger.begin_session_model_request_accounting(
+            self.budget_key, session_id=session_id, run_id=run_id,
+            step_id=step_id, after_seq=after_seq,
+        )
+
+    async def resolve_empty_model_request_accounting(
+        self, accounting_id: str, *, refund_step: bool,
+    ) -> None:
+        await self.ledger.resolve_empty_session_model_request_accounting(
+            self.budget_key, accounting_id, refund_step=refund_step,
+        )
+
+    async def resolve_unsettled_model_request_accounting(
+        self, accounting_id: str,
+    ) -> None:
+        await self.ledger.resolve_unsettled_session_model_request_accounting(
+            self.budget_key, accounting_id,
+        )
 
     async def record_model_requests(
         self, *, count: int, usage: dict[str, int] | None, cost: Decimal | None,
+        accounting_id: str | None = None, request_ids: tuple[str, ...] = (),
     ) -> None:
         await self.ledger.record_session_model_requests(
             self.budget_key, count=count, usage=usage, cost=cost,
+            accounting_id=accounting_id, request_ids=request_ids,
         )
 
     async def record_tools(
