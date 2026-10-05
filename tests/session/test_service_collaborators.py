@@ -51,6 +51,7 @@ SESSION_SERVICE_COLLABORATORS = frozenset({
     "ensure_stores",
     "get_wiring",
     "validate_session_declaration",
+    "budget_recovery_failed_sessions",
 })
 
 PROJECT_SERVICE_COLLABORATORS = frozenset({
@@ -189,7 +190,7 @@ class TestConstructionContract:
 
     @pytest.mark.parametrize("cls", [SessionService, ProjectService])
     def test_all_collaborators_are_keyword_only(self, cls):
-        """16 个同形而不同实体的 collaborator 靠位置传参必然错位——只允许关键字。"""
+        """18 个同形而不同实体的 collaborator 靠位置传参必然错位——只允许关键字。"""
         kinds = {
             name: param.kind
             for name, param in inspect.signature(cls.__init__).parameters.items()

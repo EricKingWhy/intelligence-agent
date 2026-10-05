@@ -190,6 +190,17 @@ async def test_resume_with_a_relevant_steer_is_accepted_and_recorded(monkeypatch
         "agent_harness.assembly.create_chat_model",
         lambda config, **kw: ScriptedModel(responses=[AIMessage(content="这次换了个做法")]),
     )
+    import agent_harness.session.service as service_module
+
+    original_build_runtime = service_module.build_runtime
+    tool_names: set[str] = set()
+
+    async def capture_resume_tools(**kwargs):
+        runtime = await original_build_runtime(**kwargs)
+        tool_names.update(tool.name for tool in runtime.registry.list())
+        return runtime
+
+    monkeypatch.setattr(service_module, "build_runtime", capture_resume_tools)
     printed: list[str] = []
     outcome = await resume_command(
         session_id, expected_version=paused.version,
@@ -198,6 +209,8 @@ async def test_resume_with_a_relevant_steer_is_accepted_and_recorded(monkeypatch
 
     assert outcome.paused is False
     assert outcome.final_text == "这次换了个做法"
+    assert "register_constraint" in tool_names
+    assert "request_constraint_resolution" not in tool_names
     after = JsonlSessionStore(root=_sessions_root(settings)).read_events(session_id)
     resumed = [event for event in after if event.type == RUN_RESUMED]
     assert len(resumed) == 1

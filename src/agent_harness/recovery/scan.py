@@ -289,60 +289,38 @@ async def _record_constraint_tool_results(
     recorder: Callable[..., Awaitable[bool]],
 ) -> int:
     """Replay the protected-fact question tool's durable delta before pause projection."""
-    constraint_calls = {
-        event.data.get("tool_call_id")
-        for event in events
-        if event.type == TOOL_CALL
-        and event.data.get("tool_name") == "request_constraint_resolution"
-        and isinstance(event.data.get("tool_call_id"), str)
-        and event.data["tool_call_id"]
-    }
-    all_calls = {
-        event.data.get("tool_call_id")
-        for event in events
-        if event.type == TOOL_CALL
-        and isinstance(event.data.get("tool_call_id"), str)
-        and event.data["tool_call_id"]
-    }
-    constraint_call_contexts = {
-        (event.run_id, event.step_id)
-        for event in events
-        if event.type == TOOL_CALL
-        and event.data.get("tool_name") == "request_constraint_resolution"
-    }
+    candidates = _constraint_tool_result_candidates(events)
+    calls_by_id: dict[str, list[SessionEvent]] = {}
+    for event in events:
+        tool_call_id = event.data.get("tool_call_id")
+        if event.type == TOOL_CALL and isinstance(tool_call_id, str) and tool_call_id:
+            calls_by_id.setdefault(tool_call_id, []).append(event)
     seen_result_ids: set[str] = set()
     recorded = 0
-    for event in events:
-        if event.type != TOOL_RESULT:
-            continue
+    for event in candidates:
         tool_call_id = event.data.get("tool_call_id")
         delta = event.data.get("budget_delta")
-        is_constraint_result = (
-            isinstance(delta, dict)
-            and delta.get("tool_name") == "request_constraint_resolution"
-        )
-        matches_constraint_call = (
-            isinstance(tool_call_id, str) and tool_call_id in constraint_calls
-        )
-        matches_unidentified_constraint_call = (
-            (not isinstance(tool_call_id, str) or not tool_call_id)
-            and (event.run_id, event.step_id) in constraint_call_contexts
-        )
-        matches_orphan_constraint_result = (
-            isinstance(tool_call_id, str)
-            and bool(tool_call_id)
-            and tool_call_id not in all_calls
-            and (event.run_id, event.step_id) in constraint_call_contexts
-        )
-        if not (
-            is_constraint_result
-            or matches_constraint_call
-            or matches_unidentified_constraint_call
-            or matches_orphan_constraint_result
-        ):
-            continue
         if not isinstance(tool_call_id, str) or not tool_call_id:
             raise RecoveryError("澄清工具结果缺少有效 tool_call_id")
+        matching_calls = calls_by_id.get(tool_call_id, [])
+        if len(matching_calls) != 1:
+            raise RecoveryError(
+                "澄清工具结果必须匹配唯一的 tool_call"
+                f"（tool_call_id={tool_call_id}）"
+            )
+        call = matching_calls[0]
+        if (
+            call.data.get("tool_name") != "request_constraint_resolution"
+            or call.run_id != event.run_id
+            or (
+                event.step_id is not None
+                and call.step_id != event.step_id
+            )
+        ):
+            raise RecoveryError(
+                "澄清工具结果与 tool_call 的名称或运行位置不匹配"
+                f"（tool_call_id={tool_call_id}）"
+            )
         if tool_call_id in seen_result_ids:
             raise RecoveryError(
                 f"澄清工具结果重复（tool_call_id={tool_call_id}）"
@@ -352,7 +330,10 @@ async def _record_constraint_tool_results(
             raise RecoveryError(
                 f"澄清工具结果缺少有效 content（tool_call_id={tool_call_id}）"
             )
-        if not isinstance(delta, dict) or not is_constraint_result:
+        if (
+            not isinstance(delta, dict)
+            or delta.get("tool_name") != "request_constraint_resolution"
+        ):
             raise RecoveryError(
                 f"澄清工具结果缺少匹配的预算增量（tool_call_id={tool_call_id}）"
             )
@@ -374,6 +355,62 @@ async def _record_constraint_tool_results(
         )
         recorded += 1
     return recorded
+
+
+def _constraint_tool_result_candidates(
+    events: list[SessionEvent],
+) -> list[SessionEvent]:
+    """Identify result events that claim or could be a constraint tool result.
+
+    Pairing validation belongs to the replay path. This shared candidate predicate also
+    makes the no-recorder guard fail closed for malformed target deltas.
+    """
+    constraint_calls = [
+        event for event in events
+        if event.type == TOOL_CALL
+        and event.data.get("tool_name") == "request_constraint_resolution"
+    ]
+    constraint_ids = {
+        event.data.get("tool_call_id")
+        for event in constraint_calls
+        if isinstance(event.data.get("tool_call_id"), str)
+        and event.data["tool_call_id"]
+    }
+    constraint_contexts = {
+        (event.run_id, event.step_id) for event in constraint_calls
+    }
+    all_call_ids = {
+        event.data.get("tool_call_id")
+        for event in events
+        if event.type == TOOL_CALL
+        and isinstance(event.data.get("tool_call_id"), str)
+        and event.data["tool_call_id"]
+    }
+    candidates: list[SessionEvent] = []
+    for event in events:
+        if event.type != TOOL_RESULT:
+            continue
+        tool_call_id = event.data.get("tool_call_id")
+        delta = event.data.get("budget_delta")
+        claims_constraint_budget = (
+            isinstance(delta, dict)
+            and delta.get("tool_name") == "request_constraint_resolution"
+        )
+        matches_constraint_call = (
+            isinstance(tool_call_id, str) and tool_call_id in constraint_ids
+        )
+        is_unidentified_or_orphaned_in_constraint_step = (
+            (not isinstance(tool_call_id, str) or not tool_call_id
+             or tool_call_id not in all_call_ids)
+            and (event.run_id, event.step_id) in constraint_contexts
+        )
+        if (
+            claims_constraint_budget
+            or matches_constraint_call
+            or is_unidentified_or_orphaned_in_constraint_step
+        ):
+            candidates.append(event)
+    return candidates
 
 
 async def record_constraint_tool_results(
@@ -431,49 +468,7 @@ def _pending_unpaused_user_input(
 
 
 def _has_constraint_tool_result(events: list[SessionEvent]) -> bool:
-    constraint_calls = {
-        event.data.get("tool_call_id")
-        for event in events
-        if event.type == TOOL_CALL
-        and event.data.get("tool_name") == "request_constraint_resolution"
-        and isinstance(event.data.get("tool_call_id"), str)
-        and event.data["tool_call_id"]
-    }
-    all_calls = {
-        event.data.get("tool_call_id")
-        for event in events
-        if event.type == TOOL_CALL
-        and isinstance(event.data.get("tool_call_id"), str)
-        and event.data["tool_call_id"]
-    }
-    constraint_call_contexts = {
-        (event.run_id, event.step_id)
-        for event in events
-        if event.type == TOOL_CALL
-        and event.data.get("tool_name") == "request_constraint_resolution"
-    }
-    return any(
-        event.type == TOOL_RESULT
-        and (
-            (
-                isinstance(event.data.get("budget_delta"), dict)
-                and event.data["budget_delta"].get("tool_name")
-                == "request_constraint_resolution"
-            )
-            or event.data.get("tool_call_id") in constraint_calls
-            or (
-                not isinstance(event.data.get("tool_call_id"), str)
-                or not event.data.get("tool_call_id")
-            ) and (event.run_id, event.step_id) in constraint_call_contexts
-            or (
-                isinstance(event.data.get("tool_call_id"), str)
-                and bool(event.data.get("tool_call_id"))
-                and event.data.get("tool_call_id") not in all_calls
-                and (event.run_id, event.step_id) in constraint_call_contexts
-            )
-        )
-        for event in events
-    )
+    return bool(_constraint_tool_result_candidates(events))
 
 
 def _append_pending_user_input_pause(

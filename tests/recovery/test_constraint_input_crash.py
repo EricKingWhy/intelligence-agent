@@ -50,6 +50,16 @@ async def test_startup_replays_constraint_tool_budget_for_terminal_sessions(tmp_
     run_id, _ = session.begin_run()
     session.append(USER_MESSAGE, {"content": "Continue."}, run_id=run_id)
     session.append(
+        TOOL_CALL,
+        {
+            "tool_call_id": "constraint-call",
+            "tool_name": "request_constraint_resolution",
+            "args": {},
+        },
+        run_id=run_id,
+        step_id=1,
+    )
+    session.append(
         TOOL_RESULT,
         {
             "tool_call_id": "constraint-call",
@@ -61,6 +71,7 @@ async def test_startup_replays_constraint_tool_budget_for_terminal_sessions(tmp_
             },
         },
         run_id=run_id,
+        step_id=1,
     )
     session.append(RUN_FAILED, {"reason": "accounting failed"}, run_id=run_id)
 
@@ -105,6 +116,11 @@ async def test_startup_replays_constraint_tool_budget_for_terminal_sessions(tmp_
             "tool_name": "request_constraint_resolution",
             "tool_calls": 1,
             "tool_attempts": True,
+        }},
+        {"tool_call_id": "different-valid-id", "content": "{}", "budget_delta": {
+            "tool_name": "request_constraint_resolution",
+            "tool_calls": 1,
+            "tool_attempts": 1,
         }},
     ],
 )

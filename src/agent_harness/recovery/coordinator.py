@@ -385,7 +385,9 @@ class RecoveryCoordinator:
         )
         self._lock_timeout_seconds = lock_timeout_seconds
 
-    async def recover(self, session_id: str) -> Session:
+    async def recover(
+        self, session_id: str, *, defer_session_resumed: bool = False,
+    ) -> Session:
         """恢复一个 Session：8 步顺序执行，返回可直接交给 AgentRuntime 的 Session。"""
         callback = self._reconcile_callback
         reconcile_requests: list[_ReconcileRequest] = []
@@ -640,7 +642,8 @@ class RecoveryCoordinator:
 
             if not reconcile_requests:
                 # 无人工等待时，锁内完成最后的 session/resumed，保持原有单段语义。
-                session.append(SESSION_RESUMED, {})
+                if not defer_session_resumed:
+                    session.append(SESSION_RESUMED, {})
                 session.derive_messages()
                 return session
 
@@ -672,7 +675,8 @@ class RecoveryCoordinator:
         async with self._recovery_lock():
             events = self._session_store.read_events(session_id)
             session = self._session_from_events(session_id, events)
-            session.append(SESSION_RESUMED, {})
+            if not defer_session_resumed:
+                session.append(SESSION_RESUMED, {})
             session.derive_messages()
             return session
 

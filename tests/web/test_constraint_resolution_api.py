@@ -15,6 +15,7 @@ from agent_harness.session.derive import (
 )
 from agent_harness.session.event import (
     MESSAGE_QUEUED,
+    MODEL_REQUEST,
     QUEUE_CONSUMED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -651,6 +652,123 @@ def test_input_answer_rechecks_shared_session_budget_before_same_run_resume(tmp_
     assert len(probe.models) == 1
     after_answer = client.get(f"/api/sessions/{session_id}/events").json()
     assert after_answer == before_answer
+
+
+@pytest.mark.parametrize("interleave", ["recovery", "runtime_builder"])
+def test_input_answer_rechecks_budget_after_recovery_and_runtime_awaits(
+    tmp_path, monkeypatch, interleave,
+):
+    from agent_harness.session.event import SESSION_RESUMED
+    from agent_harness.session.service import SessionService
+
+    app, client = _web(tmp_path)
+    session_id = str(uuid4())
+    session = Session.start(app.state.agent.store, session_id=session_id)
+    old_source = session.append(USER_MESSAGE, {"content": "Use Python."})
+    old_fact = build_protected_fact_data(
+        session.events,
+        session_id=session_id,
+        fact_type="constraint",
+        value="Use Python.",
+        source_event_id=old_source.event_id,
+    )
+    session.append(TASK_PROTECTED_FACT, old_fact)
+    candidate = "For this task, use TypeScript."
+    probe = _ModelProbe([
+        [AIMessage(content="", tool_calls=[{
+            "id": f"ask-before-{interleave}",
+            "name": "request_constraint_resolution",
+            "args": {"fact_id": old_fact["fact_id"], "candidate": candidate},
+        }])],
+        [AIMessage(content="This response must not run.")],
+    ])
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": candidate,
+                "budget": {"session": {"max_model_requests": 3}},
+            },
+        )
+        assert started.status_code == 200, started.text
+        before_answer = client.get(f"/api/sessions/{session_id}/events").json()
+        request = next(
+            event for event in before_answer if event["type"] == USER_INPUT_REQUESTED
+        )
+        pause = next(event for event in before_answer if event["type"] == RUN_PAUSED)
+
+        async def spend_sibling_session_headroom():
+            await app.state.agent.delegation_tree_ledger.record_session_model_requests(
+                session_id,
+                count=1,
+                usage=None,
+                cost=None,
+            )
+
+        if interleave == "recovery":
+            original_recover = SessionService.recover
+
+            async def recover_then_spend(
+                service, sid, decisions=None, *, defer_session_resumed=False,
+            ):
+                result = await original_recover(
+                    service, sid, decisions,
+                    defer_session_resumed=defer_session_resumed,
+                )
+                await spend_sibling_session_headroom()
+                return result
+
+            async def needs_recovery(_service, _sid):
+                return True
+
+            monkeypatch.setattr(SessionService, "recover", recover_then_spend)
+            monkeypatch.setattr(
+                SessionService, "_has_unreconciled_operations", needs_recovery,
+            )
+        else:
+            import agent_harness.session.service as service_module
+
+            original_build_runtime = service_module.build_runtime
+
+            async def build_runtime_then_spend(**kwargs):
+                runtime = await original_build_runtime(**kwargs)
+                await spend_sibling_session_headroom()
+                return runtime
+
+            monkeypatch.setattr(
+                service_module, "build_runtime", build_runtime_then_spend,
+            )
+
+        rejected = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                "run_id": pause["run_id"],
+                "resume_basis": "user_input",
+                "budget": {"expected_version": pause["data"]["budget_version"], "run": {}},
+                "input_request": {
+                    "request_id": request["data"]["request_id"],
+                    "choice": "keep_existing",
+                },
+            },
+        )
+
+    assert rejected.status_code == 409, rejected.text
+    after_answer = client.get(f"/api/sessions/{session_id}/events").json()
+    assert not any(
+        event["type"] == USER_MESSAGE
+        and event["data"].get("input_request_id") == request["data"]["request_id"]
+        for event in after_answer
+    )
+    assert sum(event["type"] == RUN_RESUMED for event in after_answer) == sum(
+        event["type"] == RUN_RESUMED for event in before_answer
+    )
+    assert sum(event["type"] == SESSION_RESUMED for event in after_answer) == sum(
+        event["type"] == SESSION_RESUMED for event in before_answer
+    )
+    assert sum(event["type"] == MODEL_REQUEST for event in after_answer) == sum(
+        event["type"] == MODEL_REQUEST for event in before_answer
+    )
 
 
 def test_new_task_rechecks_pending_request_inside_resume_lock(tmp_path, monkeypatch):

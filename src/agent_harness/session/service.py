@@ -1428,6 +1428,7 @@ class SessionService:
         resume_run_id: str | None = None,
         resume_basis: str | None = None,
         input_request: Mapping[str, Any] | None = None,
+        include_constraint_resolution_tool: bool = True,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -1855,6 +1856,7 @@ class SessionService:
                 workspace=workspace,
                 max_agent_turns=fuse.max_agent_turns,
                 include_constraint_tools=True,
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
                 permission_mode=permission_mode,
                 approval_callback=approval_callback,
                 session_store=self._store,
@@ -2177,9 +2179,15 @@ class SessionService:
                 or await self._has_unreconciled_operations(session_id)
             )
             if needs_recovery:
-                # RecoveryCoordinator 会追加 session/resumed。只在本请求已通过锁内
-                # CAS 后执行，避免迟到输家占用 runtime 的下一个事件序号。
-                await self.recover(session_id)
+                # 用户输入续跑需等 runtime 装配后做最后一次共享预算检查，再提交
+                # session/resumed；否则恢复阶段会在预算拒绝前留下续跑事实。
+                if resume_basis == RESUME_BASIS_USER_INPUT:
+                    await self.recover(
+                        session_id, defer_session_resumed=True,
+                    )
+                else:
+                    # 其他恢复沿用 RecoveryCoordinator 的单段提交语义。
+                    await self.recover(session_id)
                 events = await anyio.to_thread.run_sync(
                     self._store.read_events, session_id,
                 )
@@ -2248,13 +2256,22 @@ class SessionService:
                 )
             launch_budget = self._launch_budget_from(paused, limits=effective)
             runtime, interactive, approval_callback = await runtime_builder(launch_budget)
+            # Runtime 装配也会 await；兄弟 run 可能在此前消耗共享额度。这个检查
+            # 必须紧邻答案与续跑事件提交，中间不再 await，保持“答题时重查”语义。
+            await self._assert_user_input_session_headroom(
+                session.events, session_id=session_id, resume_basis=resume_basis,
+            )
             answer_data, answer_already_recorded = _constraint_input_answer_data(
                 session.events, run_id=run_id, paused=paused, answer=input_request,
             )
             if answer_data is not None and not answer_already_recorded:
                 session.append(USER_MESSAGE, answer_data)
-            # Recovery 已写 SESSION_RESUMED；否则只让 CAS 胜者写这条恢复事实。
-            if not needs_recovery:
+            # 用户输入续跑的 Recovery 延迟 SESSION_RESUMED 到上述最终预算检查之后。
+            # 其他路径由 RecoveryCoordinator 写入；无 Recovery 时由 CAS 胜者写入。
+            if (
+                not needs_recovery
+                or resume_basis == RESUME_BASIS_USER_INPUT
+            ):
                 session.append(SESSION_RESUMED, {})
             session.append(
                 RUN_RESUMED,
@@ -3239,6 +3256,8 @@ class SessionService:
         self,
         session_id: str,
         decisions: Sequence[ReconcileDecision] | None = None,
+        *,
+        defer_session_resumed: bool = False,
     ) -> list:
         """崩溃恢复（原 POST /recover）：RecoveryCoordinator 唯一入口。
 
@@ -3328,7 +3347,10 @@ class SessionService:
             ),
         )
         try:
-            recovered = await coordinator.recover(session_id)
+            recovered = await coordinator.recover(
+                session_id,
+                defer_session_resumed=defer_session_resumed,
+            )
         except RecoveryError as error:
             raise RecoveryConflict(str(error)) from error
         return recovered.events

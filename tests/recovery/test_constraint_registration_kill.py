@@ -15,7 +15,13 @@ import pytest
 from agent_harness.recovery import ReconcileRequired, RecoveryCoordinator
 from agent_harness.recovery.reconcile import ReconcileVerdict
 from agent_harness.session import JsonlSessionStore
-from agent_harness.session.event import TASK_PROTECTED_FACT, TOOL_RESULT
+from agent_harness.session.derive import is_direct_user_input_event
+from agent_harness.session.event import (
+    OPERATION_RECONCILE_REQUIRED,
+    TASK_PROTECTED_FACT,
+    TOOL_RESULT,
+    USER_MESSAGE,
+)
 from agent_harness.storage import Operation, SqliteOperationLedger
 from agent_harness.tooling import ToolResult
 
@@ -92,17 +98,43 @@ async def test_fact_durable_before_ledger_terminal_requires_manual_reconcile(
     await ledger.initialize()
     events = store.read_events(_SESSION_ID)
     operation = await ledger.get(_SESSION_ID, _CALL_ID)
-    assert len(_registered_facts(events)) == 1
+    facts = _registered_facts(events)
+    assert len(facts) == 1
     assert operation is not None and operation.state.value == "RUNNING"
     assert not _tool_results(events)
+    fact = facts[0]
+    source_id = fact.data["source_event_id"]
+    source = next(event for event in events if event.event_id == source_id)
+    assert source.type == USER_MESSAGE
+    assert source.data["content"] == _CANDIDATE
+    assert fact.data["source_event_seq"] == source.seq
+    assert is_direct_user_input_event(events, source_id)
 
     coordinator = _coordinator(store, ledger, tmp_path / "state.db")
     with pytest.raises(ReconcileRequired):
         await coordinator.recover(_SESSION_ID)
+    required_events = [
+        event for event in store.read_events(_SESSION_ID)
+        if event.type == OPERATION_RECONCILE_REQUIRED
+        and event.data.get("tool_call_id") == _CALL_ID
+    ]
+    assert not required_events, "缺少裁决 callback 时整体拒绝且不写事件"
+    operation = await ledger.get(_SESSION_ID, _CALL_ID)
+    assert operation is not None and operation.state.value == "RUNNING"
 
     class _ConfirmSuccess:
         async def resolve(self, operation: Operation, hint) -> ReconcileVerdict:
             assert operation.tool_call_id == _CALL_ID
+            current_events = store.read_events(_SESSION_ID)
+            required = next(
+                event for event in current_events
+                if event.type == OPERATION_RECONCILE_REQUIRED
+                and event.data.get("tool_call_id") == _CALL_ID
+            )
+            assert required.data["state"] == "NEED_RECONCILE"
+            current_operation = await ledger.get(_SESSION_ID, _CALL_ID)
+            assert current_operation is not None
+            assert current_operation.state.value == "NEED_RECONCILE"
             return ReconcileVerdict.CONFIRM_SUCCESS
 
     coordinator = _coordinator(
@@ -115,11 +147,27 @@ async def test_fact_durable_before_ledger_terminal_requires_manual_reconcile(
     after_first_reconcile = store.read_events(_SESSION_ID)
     assert len(_registered_facts(after_first_reconcile)) == 1
     assert len(_tool_results(after_first_reconcile)) == 1
+    first_fact = _registered_facts(after_first_reconcile)[0]
+    first_source = next(
+        event for event in after_first_reconcile
+        if event.event_id == first_fact.data["source_event_id"]
+    )
+    assert first_fact.data["source_event_seq"] == first_source.seq
+    assert is_direct_user_input_event(
+        after_first_reconcile, first_source.event_id,
+    )
 
     await coordinator.recover(_SESSION_ID)
     after_repeat = store.read_events(_SESSION_ID)
     assert len(_registered_facts(after_repeat)) == 1
     assert len(_tool_results(after_repeat)) == 1
+    repeated_fact = _registered_facts(after_repeat)[0]
+    repeated_source = next(
+        event for event in after_repeat
+        if event.event_id == repeated_fact.data["source_event_id"]
+    )
+    assert repeated_fact.data["source_event_seq"] == repeated_source.seq
+    assert is_direct_user_input_event(after_repeat, repeated_source.event_id)
     terminal = await ledger.get(_SESSION_ID, _CALL_ID)
     assert terminal is not None and terminal.state.value == "SUCCEEDED"
 
