@@ -23,6 +23,7 @@ from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.derive import (
+    _USER_GOAL_VALUE_MAX_CHARS,
     COMPACTION_SUMMARY_MESSAGE_NAME,
     ProtectedFact,
     serialize_protected_facts,
@@ -290,31 +291,15 @@ class ContextCompactor:
             return CompactionResult(list(messages), 0, count, False)
         # C-6 #642：early 段每条消息的来源区间（提前到摘要尝试之前，与成功后
         # 的 source_seq 区间计算共用同一次推导；语义与原成功路径逐字一致）。
+        # #710 方向 C：同一份 early_ranges 同时供第 0 节承载位的来源指针
+        # （_assemble_summary/_validate_summary）复用。
         # W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
         # （ToolMessage.content 原位替换），但消息数与顺序不变——调用方
         # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
         # 长度不符视同区间不可用（走既有拒绝路径），不做静默截断。
-        early_ranges: list[tuple[int, int] | None] | None = None
-        if events is not None:
-            if source_ranges is not None:
-                early_ranges = (
-                    list(source_ranges[prefix_end:cut])
-                    if len(source_ranges) == len(messages) else None
-                )
-            else:
-                from agent_harness.session.derive import (
-                    derive_messages_with_source_ranges,
-                )
-
-                mapped = derive_messages_with_source_ranges(events)
-                aligned = len(mapped) == len(messages) and all(
-                    projected == supplied
-                    for (projected, _source_range), supplied in zip(mapped, messages)
-                )
-                early_ranges = (
-                    [source_range for _message, source_range in mapped[prefix_end:cut]]
-                    if aligned else None
-                )
+        early_ranges = _early_source_ranges(
+            messages, events, source_ranges, prefix_end, cut,
+        )
         trusted_summaries = _trusted_summary_indices(early, early_ranges, events)
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
@@ -370,10 +355,11 @@ class ContextCompactor:
                 )
                 candidate_summary_text = _assemble_summary(
                     early, model_sections, protected_facts, trusted_summaries,
+                    source_ranges=early_ranges,
                 )
                 _validate_summary(
                     candidate_summary_text, early, protected_facts,
-                    trusted_summaries,
+                    trusted_summaries, source_ranges=early_ranges,
                 )
                 # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
                 # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
@@ -656,6 +642,96 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     return contents
 
 
+def _early_source_ranges(
+    messages: list[AnyMessage],
+    events: list[SessionEvent] | None,
+    source_ranges: list[tuple[int, int] | None] | None,
+    prefix_end: int,
+    cut: int,
+) -> list[tuple[int, int] | None] | None:
+    """early 窗口（messages[prefix_end:cut]）的「消息 → 来源 seq range」对齐。
+
+    W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
+    （ToolMessage.content 原位替换），但消息数与顺序不变——调用方传来的
+    ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。长度不符视同
+    区间不可用（走既有拒绝路径），不做静默截断。未传 ranges 时从 events
+    重投影并逐条对齐，对齐失败同样视为不可用。
+    """
+    if events is None:
+        return None
+    if source_ranges is not None:
+        return (
+            list(source_ranges[prefix_end:cut])
+            if len(source_ranges) == len(messages)
+            else None
+        )
+    from agent_harness.session.derive import derive_messages_with_source_ranges
+
+    mapped = derive_messages_with_source_ranges(events)
+    aligned = len(mapped) == len(messages) and all(
+        projected == supplied
+        for (projected, _source_range), supplied in zip(mapped, messages)
+    )
+    return (
+        [source_range for _message, source_range in mapped[prefix_end:cut]]
+        if aligned
+        else None
+    )
+
+
+def _carrier_instruction_line(
+    messages: list[AnyMessage],
+    source_ranges: list[tuple[int, int] | None] | None,
+) -> str:
+    """#710 方向 C：第 0 节的「当前生效指令」承载位（确定性纯函数，可重放）。
+
+    选取：本压缩覆盖段（early 窗口）内**倒序第一条非摘要 HumanMessage**。
+    compact() 收到的 messages 是事件投影（builder 的注入发生在压缩之后），
+    因此投影里的 HumanMessage 非摘要即真实用户消息，这条规则是精确的——
+    触发压缩的当前轮仍在 recent 逐字保留，不会进入本窗口。
+
+    口径对齐 `_current_goal_body`：JSON 字符串编码（ensure_ascii=False）、
+    复用 `_USER_GOAL_VALUE_MAX_CHARS`（2000）截断上限 + 超长截断标记（含
+    来源 seq 回读指针）。选中消息时用同下标的 range 写指针（用户消息的
+    range 是 (seq, seq)，取 [0]）；range 为 None（来源区间不可用的直连调用
+    面）时不写指针行、只写 JSON。无候选用户消息（early 全是模型消息等退化
+    形态）写 ``(none)``，对齐八节摘要既有空值约定，不抛错。
+
+    已知边界（#710 §6 非目标，如实记录）：「活跃」按消息侧可判定的最大
+    口径 = 非摘要 HumanMessage；事件侧的 ``injected_by`` 等注入元数据在
+    消息投影上不可见，**不做语义过滤**——被注入的提示性用户消息同样可能
+    成为承载位；归档计数按本次压缩段计，不跨压缩累积。
+    """
+    carrier_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], HumanMessage)
+            and not _is_compaction_summary(messages[index])
+        ),
+        None,
+    )
+    if carrier_index is None:
+        return "当前生效指令：(none)"
+    raw = messages[carrier_index].content
+    raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+    source_range = source_ranges[carrier_index] if source_ranges is not None else None
+    content = raw_text
+    if len(raw_text) > _USER_GOAL_VALUE_MAX_CHARS:
+        pointer = (
+            f"，见来源事件 seq={source_range[0]}" if source_range is not None else ""
+        )
+        content = (
+            raw_text[:_USER_GOAL_VALUE_MAX_CHARS]
+            + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
+            + f"全文共{len(raw_text)}字符{pointer}］"
+        )
+    body = json.dumps(content, ensure_ascii=False)
+    if source_range is not None:
+        body += f"（来源事件 seq={source_range[0]}）"
+    return f"当前生效指令：{body}"
+
+
 def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
     """#556 裁决 C：目标节只保留**当前生效目标**（+ 归档计数行）。
 
@@ -756,17 +832,26 @@ def _trusted_summary_indices(
 def _programmatic_summary_sections(
     messages: list[AnyMessage],
     protected_facts: list[ProtectedFact] | None = None,
+    source_ranges: list[tuple[int, int] | None] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
 ) -> dict[str, str]:
     """四个程序化节（#556 裁决 C：全部**有界**，规则为确定性纯函数）。
 
-    - 目标节：当前生效目标原文（`_current_goal_body`）——叙述性历史用户消息
-      **不再**逐字进节（旧实现 `extend` 无界是 F-COMP-1 的根因）；跨窗口刚性
-      读回走 ProtectedFact 通道（§1 独立预算）与 SessionEvent 持久历史。
+    - 目标节（#710 方向 C 三段式）：第一行仍是当前生效目标原文
+      （`_current_goal_body`，protected_facts 通道，逐字节不动）；其后新增
+      「当前生效指令」承载位（`_carrier_instruction_line`——本压缩段内最新
+      活跃用户消息，确定性派生、不链式继承旧摘要文本）与更早用户指令的
+      归档计数行（原文由 SessionEvent 持久历史回读，不变量 #6：完整保存
+      ≠ 完整注入）。叙述性历史用户消息**不再**逐字进节（旧实现 `extend`
+      无界是 F-COMP-1 的根因）；跨窗口刚性读回走 ProtectedFact 通道
+      （§1 独立预算）与 SessionEvent 持久历史。
     - 标识/文件节：继承 + 提取逻辑不变，套确定性窗口（`_capped_entries`，
       保留最近 N 条 + 单条截断）——同票消除 `:477-481` 的同构无界。
     - 保护事实节：`serialize_protected_facts` 契约不动（sort_keys 逐字节稳定、
       独立预算 8192）。
+
+    `source_ranges` 与 `messages` 位置一一对应（缺省 None = 不写来源指针，
+    存量直接调用面行为不变）。
     """
 
     def add_once(target: list[str], value: str) -> None:
@@ -849,8 +934,29 @@ def _programmatic_summary_sections(
             dump["name"] = None
         visit(dump)
 
+    # #710 方向 C：第 0 节固定三段式——目标行（_current_goal_body 逐字节不动）
+    # + 当前生效指令承载位 + 条件归档计数行（仅本段内除承载位外的更早活跃
+    # 用户消息 > 0 时；按段计，不跨压缩累积，与"不链式继承"一致）。
+    section0 = (
+        f"{_current_goal_body(protected_facts)}\n"
+        f"{_carrier_instruction_line(messages, source_ranges)}"
+    )
+    archived_turns = (
+        sum(
+            1
+            for message in messages
+            if isinstance(message, HumanMessage) and not _is_compaction_summary(message)
+        )
+        - 1
+    )
+    if archived_turns > 0:
+        section0 += (
+            f"\n（更早 {archived_turns} 条用户指令已归档："
+            "原文可由 SessionEvent 持久历史回读）"
+        )
+
     return {
-        _SUMMARY_HEADINGS[0]: _current_goal_body(protected_facts),
+        _SUMMARY_HEADINGS[0]: section0,
         # 裁决 4（#642）：pf=None 与 pf=[] 同判——[1] 只承载 protected_facts
         # 通道，不再有任何"从先前摘要继承"的宽松分支（fail-closed）。
         _SUMMARY_HEADINGS[1]: (
@@ -880,9 +986,11 @@ def _assemble_summary(
     messages: list[AnyMessage], model_sections: list[str],
     protected_facts: list[ProtectedFact] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
+    source_ranges: list[tuple[int, int] | None] | None = None,
 ) -> str:
     programmatic = _programmatic_summary_sections(
-        messages, protected_facts, trusted_summaries,
+        messages, protected_facts,
+        source_ranges=source_ranges, trusted_summaries=trusted_summaries,
     )
     bodies = [programmatic.get(heading, "") for heading in _SUMMARY_HEADINGS]
     for index, body in enumerate(model_sections, start=2):
@@ -897,10 +1005,12 @@ def _validate_summary(
     summary: str, messages: list[AnyMessage],
     protected_facts: list[ProtectedFact] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
+    source_ranges: list[tuple[int, int] | None] | None = None,
 ) -> None:
     sections = _parse_summary_sections(summary, _SUMMARY_HEADINGS)
     expected = _programmatic_summary_sections(
-        messages, protected_facts, trusted_summaries,
+        messages, protected_facts,
+        source_ranges=source_ranges, trusted_summaries=trusted_summaries,
     )
     for index in _PROGRAMMATIC_SUMMARY_HEADINGS:
         if sections[index] != expected[_SUMMARY_HEADINGS[index]]:
