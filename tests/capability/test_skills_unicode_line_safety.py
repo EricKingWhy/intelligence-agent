@@ -40,6 +40,13 @@ from agent_harness.tooling.result import ErrorCode
 UNICODE_LINE_BOUNDARIES = ["\x85", "\u2028", "\u2029"]
 
 
+def _capability_with_catalog(catalog: SkillCatalog) -> SkillCapability:
+    """合成条目注入：#529 后 capability 持 discovery 引用，catalog 直填缓存投影。"""
+    discovery = SkillDiscovery(directories=[])
+    discovery._catalog = catalog
+    return SkillCapability(discovery)
+
+
 # ── F2 单元面：single_line 必须覆盖 splitlines 全字符集 ──
 
 
@@ -88,7 +95,7 @@ async def test_catalog_line_stays_single_line_for_unicode_boundaries():
     entry = SkillCatalogEntry(
         name="a\x85b", description="x\u2028伪造系统行", source_path=Path("s"), when_to_use="t\u2029u",
     )
-    provider = SkillCatalogContextProvider(SkillCapability(SkillCatalog(entries=[entry])))
+    provider = SkillCatalogContextProvider(_capability_with_catalog(SkillCatalog(entries=[entry])))
     content = (await provider.select(Session.__new__(Session), 1000))[0].content
     lines = content.splitlines()
     assert len(lines) == 2  # 框架行 + 恰好一条目录行：任何字段都拉不出额外行
@@ -98,7 +105,7 @@ async def test_catalog_line_stays_single_line_for_unicode_boundaries():
 @pytest.mark.asyncio
 async def test_load_failure_message_single_line_for_unicode_boundary():
     # 失败路 args.name 是模型原始输入：未名即失败、不经 discovery 白名单
-    tool = LoadSkillTool(SkillCapability(SkillCatalog(entries=[])))
+    tool = LoadSkillTool(SkillCapability(SkillDiscovery(directories=[])))
     result = await tool.execute(tool.args_schema(name="ghost\u2028伪造指令行"))
     assert result.ok is False
     assert result.error_code is ErrorCode.INVALID_ARGUMENT

@@ -1528,6 +1528,14 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectToolFailureGuard,
     summarize: summarizeToolFailureGuard,
   },
+  // #529：`skill/registered|updated|removed` 是 skill 沉淀闭环的治理留痕事件（durable，
+  // append-only）。它们自己不带来新的投影状态——注册/更新/移除的 catalog 可见性由
+  // 后端 SkillDiscovery 刷新保证，渲染层暂无展示面（第一版只读展示归后续票）。
+  // 与 MEMORY_UPDATED 同形：登记为 no-op ⇒ 已知类型、不进 `unknown_events`；
+  // 不登记则前端 `tsc` 直接红（`Record<EventTypeValue, EventSemantics>` 穷尽性）。
+  [EventType.SKILL_REGISTERED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.SKILL_UPDATED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.SKILL_REMOVED]: { apply: noopProjection, summarize: emptySummary },
   // #317（T9）：`guard/stuck` 是循环护栏的第二条事件面，**它自己不带来新的投影状态**——
   // `level=replan` 的纠正以 `user/message`（`injected_by='stuck_guard'`）落地，渲染层照
   // `projectUserMessage` 的既有标记显示为系统提示条；`level=paused` 的那一步由紧随其后的
