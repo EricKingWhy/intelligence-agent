@@ -278,15 +278,19 @@ async def _wire_skills(
     # 全局目录（spec 09 §2）+ 项目目录（workspace 级）+ options 扩展目录/手动路径。
     global_dir = Path(settings.skill_global_dir) if settings.skill_global_dir \
         else Path.home() / ".intelligence-agent" / "skills"
-    directories = [global_dir, Path(settings.workspace_dir) / "skills"]
+    project_dir = Path(settings.workspace_dir) / "skills"
+    directories = [global_dir, project_dir]
     directories.extend(_coerce_path_list(cfg, "directories"))
     manual_paths = _coerce_path_list(cfg, "paths")
-    catalog = SkillDiscovery(directories=directories, manual_paths=manual_paths).discover()
+    # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
+    # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
+    discovery = SkillDiscovery(directories=directories, manual_paths=manual_paths, project_dir=project_dir)
+    catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
     # SkillCapability.errors() 仍可编程读取。
     if catalog.errors:
         logger.warning("skill 发现阶段有 %d 个解析错误：%s", len(catalog.errors), catalog.errors)
-    capability = SkillCapability(catalog)
+    capability = SkillCapability(discovery)
     registry.register(
         CapabilityDescriptor(
             name="skills", version="1.0.0", provider_name=cfg.provider,

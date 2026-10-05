@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from agent_harness.capability.base import CapabilityError
-from agent_harness.skills.discovery import SkillCatalog, SkillCatalogEntry
+from agent_harness.skills.discovery import SkillCatalogEntry, SkillDiscovery
 
 
 class SkillCapability:
@@ -11,18 +11,22 @@ class SkillCapability:
 
     "加载动作"是模型可调用的工具：本类实现 ContributesTools，把 load_skill
     交给 wire_capabilities 统一收集进 ToolRegistry（零旁路）。
+
+    #529：本类持 SkillDiscovery **引用**（不再是装配期静态 catalog）——沉淀闭环
+    写入 skill 文件后由 discovery 内嵌刷新 registry，capability 的目录投影随
+    discover() 收敛，不存在"写了但不可见"的漂移态（oh-my-pi 教训，§6.1）。
     """
 
-    def __init__(self, catalog: SkillCatalog) -> None:
-        self._catalog = catalog
+    def __init__(self, discovery: SkillDiscovery) -> None:
+        self._discovery = discovery
 
     def catalog(self) -> list[SkillCatalogEntry]:
         """目录条目（只有 name/description/meta，不含正文）。"""
-        return list(self._catalog.entries)
+        return list(self._discovery.catalog().entries)
 
     def errors(self) -> list[str]:
         """发现阶段的解析/边界错误（可观察，不静默）。"""
-        return list(self._catalog.errors)
+        return list(self._discovery.catalog().errors)
 
     def load(self, name: str) -> str:
         """按名加载 skill 全文；未知名显式报错，不伪造内容。
@@ -33,7 +37,7 @@ class SkillCapability:
         UnicodeDecodeError（后者是 ValueError 子类——发现后文件被换成非 UTF-8
         字节正是本防线针对的漂移形态，与 discovery.py 的捕获面一致）。
         """
-        for entry in self._catalog.entries:
+        for entry in self._discovery.catalog().entries:
             if entry.name == name:
                 try:
                     return entry.load_body()
