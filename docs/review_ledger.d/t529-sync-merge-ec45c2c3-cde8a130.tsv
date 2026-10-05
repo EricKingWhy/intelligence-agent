@@ -1,1 +1,2 @@
 2026-10-06	#529 先回后正 sync 合并机械归属行：ec45c2c3（父一 cde8a130 = 本线审查台账笔；父二 cc4d92c6 = origin/main，来侧 #705 gate1 既有红回补由来侧台账覆盖）。纯并集机械核验：git show --cc --name-only 空表（零冲突解决内容），0 失配；本行只做机械归属，不是对来侧内容的审查主张。	cde8a130..ec45c2c3
+2026-10-06	机械归属（本行只做机械归属，不是对内容的审查主张）：a0d4330b = chore(security)：新增 .gitleaks.toml，allowlist 精确放行 #529 测试固件假 key 占位符 sk-live-abcdef123456（tests/capability/test_skills_promote.py:159 历史提交 0f9a650e 中的仿真格式，非真实凭证；重写历史会破坏已落盘审查台账的 SHA 引用，故用 allowlist 精确放行该单一假值）。配置类单文件变更，无产品代码改动；同批测试固件修复 5e54a957（API_KEY 仿真格式→中文占位符）属测试内聚改动，由本行一并覆盖。	5e54a957..a0d4330b
