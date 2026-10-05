@@ -314,3 +314,79 @@ async def test_anchor_wired_through_pruner_path(tmp_path):
     assert _has_bracket(session), (
         "pruner 路径下锚(4000)必须照常触发压缩；未触发 = ranges 没接进锚"
     )
+
+
+# ── #646：零 prompt_tokens 不是合法锚（T16b/B-6） ───────────────────
+
+
+@pytest.mark.parametrize(
+    ("usage_value", "shape"),
+    [
+        ({"prompt_tokens": 0}, "零（#646 病灶：0 被当合法锚）"),
+        ({"prompt_tokens": -1}, "负数"),
+        ({"prompt_tokens": True}, "bool"),
+        ({"prompt_tokens": 2.5}, "float"),
+        ({"prompt_tokens": None}, "prompt_tokens=None"),
+        ({}, "缺 prompt_tokens"),
+        (None, "usage 非 dict"),
+    ],
+)
+def test_anchor_invalid_usage_shapes_yield_zero(tmp_path, usage_value, shape):
+    """0/负/bool/float/None/缺失/非 dict usage 一律不可作锚 ⇒ helper 返回 0。
+
+    零 prompt_tokens 覆盖了实际存在的历史成本——收下它 = 只返回其响应增量，
+    历史真实开销全部丢失（#646）。返回 0 让调用点 max() 回落朴素估算。
+    """
+    session = make_session(tmp_path)
+    session.append(MODEL_COMPLETED, {"content": "历史分析" * 100, "usage": usage_value})
+
+    pairs = derive_messages_with_source_ranges(session.events)
+    messages = [m for m, _ in pairs]
+    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10000)
+
+    assert builder._usage_anchored_tokens(session, messages, [r for _, r in pairs]) == 0, (
+        f"{shape} 不是合法 usage 锚；锚必须 0（无可用锚）让调用点回落估算"
+    )
+
+
+def test_anchor_zero_walks_back_to_earlier_positive(tmp_path):
+    """最新 usage=0、更早有正数可定位锚 ⇒ 返回更早锚 + 其响应及之后全部增量。
+
+    事件序：completed#1(3000, 合法) → completed#2(prompt_tokens=0, 非法)。
+    期望锚 = #1 公式值（含 #2 响应消息与其后全部消息的增量——响应不遗漏）。
+    """
+    session = make_session(tmp_path)
+    session.append(MODEL_COMPLETED, {"content": "历史分析" * 100, "usage": _usage(3000)})
+    session.append(MODEL_COMPLETED, {"content": "ok", "usage": _usage(0)})
+
+    pairs = derive_messages_with_source_ranges(session.events)
+    messages = [m for m, _ in pairs]
+    builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10000)
+
+    assert builder._usage_anchored_tokens(session, messages, [r for _, r in pairs]) == (
+        _anchor_formula(3000, messages, 0)
+    ), "零锚必须被跳过、回溯到更早正数锚；收下 0 = 历史成本全丢（#646）"
+
+
+@pytest.mark.asyncio
+async def test_zero_usage_only_public_build_keeps_naive_estimate(tmp_path):
+    """公共 build 只有零 usage ⇒ 锚 0，max() 保朴素估算不下调成本（AC④）。
+
+    投影 + 保护事实 ~3228 > 阈值 3000 ⇒ 朴素估算路径照旧触发压缩；锚收到 0
+    后既不触发也绝不允许把预算往下拉（若 max 被覆盖或 0 锚注入垃圾值则破）。
+    """
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "旧记录 " * 123})
+    session.append(MODEL_COMPLETED, {"content": "历史分析" * 380, "usage": _usage(0)})
+    session.append(USER_MESSAGE, {"content": "current request"})
+
+    model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+    builder = ContextBuilder(
+        model, max_context_tokens=10000, auto_compact_threshold=0.3,
+    )
+    await builder.build(session)
+
+    assert _has_bracket(session), (
+        "零 usage 锚返回 0，max() 必须保住朴素估算路径照常触发；"
+        "未触发说明锚把预算往下拉了（AC④：公共 build 不下调成本）"
+    )

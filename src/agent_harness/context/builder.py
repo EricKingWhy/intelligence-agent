@@ -768,7 +768,8 @@ class ContextBuilder:
         「可定位」用 source_ranges 反查：model/completed 投影出的 AIMessage 区间是
         全局唯一的 `(seq, seq)`（derive.py 投影契约），据此 O(1) 找到该事件对应的
         消息位。被 bracket shadow 的旧 usage 事件反查不到 → 自动落到更早的可用锚
-        （旧锚的真实用量对当前投影只高不低——安全方向）；全部映射不上 ⇒ 0。
+        （旧锚的真实用量对当前投影只高不低——安全方向）；usage 非法（含零与
+        负数，#646）⇒ 继续回溯；全部映射不上或无正数读数 ⇒ 0。
         bracket 之后的新 usage 事件照常映射 ⇒ 锚跨压缩存活（这是不走
         「事件数 == 消息数」计数配对的原因：压缩后两者永久失配，锚会失效）。
         """
@@ -787,9 +788,12 @@ class ContextBuilder:
             if not isinstance(usage, dict):
                 continue
             prompt_tokens = usage.get("prompt_tokens")
+            # 0 不是合法锚：零成本会覆盖实际存在的历史成本，收下它 = 只返回
+            # 其响应增量（#646）。跳过后循环继续回溯更早的正数可定位锚；
+            # 全部不可用 ⇒ 0，调用点 max() 回落朴素估算（只抬高不降低）。
             if (not isinstance(prompt_tokens, int)
                     or isinstance(prompt_tokens, bool)
-                    or prompt_tokens < 0):
+                    or prompt_tokens <= 0):
                 continue
             anchor_index = index_by_seq.get(event.seq)
             if anchor_index is None:
