@@ -954,6 +954,45 @@ def test_cancelled_queued_replacement_keeps_sections_consistent():
     )
 
 
+@pytest.mark.asyncio
+async def test_compact_now_is_noop_below_floor_with_zero_writes(tmp_path):
+    """#635 T2：无可压缩早期轮 → 返回 None 且零 bracket 写入。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "only current"})
+    before = session.events
+
+    result = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=10_000,
+    ).compact_now(session)
+
+    assert result is None
+    assert session.events == before
+
+
+@pytest.mark.asyncio
+async def test_compact_now_writes_bracket_for_manual_path(tmp_path):
+    """#635 T2：手动路径无条件调 compact_now，走真实管线产出同一 bracket。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    session.append(USER_MESSAGE, {"content": "current request"})
+    before = session.events
+
+    result = await ContextBuilder(
+        ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
+        max_context_tokens=10_000, auto_compact_threshold=0.3,
+    ).compact_now(session)
+
+    assert result is not None
+    assert result.compacted_turn_count == 1
+    assert result.bracket_id
+    assert estimate_message_tokens(result.messages) == result.token_estimate
+    assert [event.type for event in session.events[len(before):]] == [
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    ]
+    assert session.events[:len(before)] == before
+
+
 def test_trimmed_same_prefix_entries_dedup_after_truncation():
     """#614②：去重必须发生在截断**之后**——同前缀超长条目不得以截断值重复。
 
@@ -973,3 +1012,31 @@ def test_trimmed_same_prefix_entries_dedup_after_truncation():
     assert len(identifiers) == len(set(identifiers)), (
         "截断后同值的条目不得在投影中重复（#614②）"
     )
+
+
+def test_compactable_early_window_shares_prefix_and_cut_rule():
+    """G3 (#635)：共享判据返回 `(prefix_end, cut)`，供 compact 与 dry-run 预览同源。
+
+    与 `ContextCompactor.compact` 的内联逻辑同源（本函数即从该处抽出）。断言用
+    独立真值（已知输入 → 期望输出对），不重算实现。
+    """
+    from agent_harness.context.compactor import compactable_early_window
+
+    # 前导非摘要 SystemMessage 是跳过前缀；cut = 最后一条 HumanMessage。
+    messages = [
+        SystemMessage(content="sys-1"),
+        SystemMessage(content="sys-2"),
+        HumanMessage(content="old turn"),
+        AIMessage(content="answer"),
+        HumanMessage(content="current"),
+    ]
+    assert compactable_early_window(messages) == (2, 4)
+
+    # 无 HumanMessage：cut 回落到 prefix_end（early 窗口为空）。
+    assert compactable_early_window([SystemMessage(content="sys")]) == (1, 1)
+
+    # 前导摘要 SystemMessage 是 early 窗口起点，不再被当前缀跳过（守卫在共享处）。
+    old_summary = SystemMessage(content="## 目标\n旧版压缩摘要")
+    assert compactable_early_window(
+        [old_summary, HumanMessage(content="current")]
+    ) == (0, 1)
