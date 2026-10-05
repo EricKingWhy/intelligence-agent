@@ -831,9 +831,11 @@ class SessionContextCompacted(BaseModel):
 
     形状是服务层结果 `SessionContextCompaction` 的字段透传（`dry_run` 不在 Web
     契约里——端点只走真实压缩）：`bracket_id` 指向新落的 bracket；低水位
-    （无可压缩早期轮 / 校验闸门未过）时 `bracket_id=null`、`compacted_turn_count=0`，
-    **仍 200 且零写入**（"没有可压的"不是错误）。`tokens_before/after` 是 messages-only
-    投影估算，同一口径可直接相减展示。
+    （无可压缩早期轮 / **写前**校验闸门未过）时 `bracket_id=null`、
+    `compacted_turn_count=0`，**仍 200 且零写入**（"没有可压的"不是错误）。
+    **写后**复核失败（bracket 已落盘）不返回该形状——服务层抛
+    `CompactionPostWriteError`，端点不捕获 → 500（fail-closed，不谎报"未改动"）。
+    `tokens_before/after` 是 messages-only 投影估算，同一口径可直接相减展示。
     """
 
     bracket_id: str | None

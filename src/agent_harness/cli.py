@@ -55,6 +55,7 @@ from agent_harness.assembly import (
     recovery_stores,
 )
 from agent_harness.config import Settings
+from agent_harness.context.compactor import CompactionPostWriteError
 from agent_harness.identity import IdentityContext
 from agent_harness.instance_lock import InstanceLock, InstanceLockError
 from agent_harness.logging import LogContext, log_context, setup_logging
@@ -90,6 +91,8 @@ from agent_harness.session import (
 )
 from agent_harness.session.errors import (
     ActiveRunConflict,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
     InvalidSessionId,
     SessionNotFound,
 )
@@ -1793,18 +1796,31 @@ def _main_compact(argv: list[str]) -> None:
                 session=args.session, model=args.model, dry_run=args.dry_run,
             )
         )
+    except CompactionPostWriteError as error:
+        # bracket 三事件已落盘、复核未过：历史已变，不得谎报"未改动"（F2 #635）。
+        # 给出可操作文案——会话本身可继续，提示用户检查该 bracket。
+        print(
+            "压缩失败：压缩 bracket 已写入但复核未通过"
+            f"（bracket={error.bracket_id}），会话可继续，请检查。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
     except (InvalidSessionId, SessionNotFound) as error:
         print(f"压缩失败：{error}", file=sys.stderr)
         raise SystemExit(1) from None
-    except ActiveRunConflict as error:
-        # 两种拒绝理由共用异常类型（在途 run / 压缩已在进行中）；服务层用不同
-        # detail 区分，这里翻成对应的中文回执（不吞掉"为什么被拒"）。
-        reason = (
-            "压缩已在进行中"
-            if "compaction in progress" in str(error)
-            else "在途 run 运行中"
+    except CompactionInProgress:
+        # 类型化拒绝理由（F6 #635）：不再靠错误字符串子串匹配。
+        print("压缩被拒绝：压缩已在进行中（零改动）", file=sys.stderr)
+        raise SystemExit(1) from None
+    except CompactionConcurrentWrite:
+        print(
+            "压缩被拒绝：会话在压缩期间被并发改动，请重试（零改动）",
+            file=sys.stderr,
         )
-        print(f"压缩被拒绝：{reason}（零改动）", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ActiveRunConflict:
+        # 在途 run（子类已在上方分别处理，这里是基类语义）。
+        print("压缩被拒绝：在途 run 运行中（零改动）", file=sys.stderr)
         raise SystemExit(1) from None
     except ConfigError as error:
         # 非法 --model：解析在零副作用前完成，未写入任何事件。
@@ -1836,8 +1852,12 @@ async def compact_command(
 
 def _format_grouped(count: int) -> str:
     """token 数 → 带千位分隔的原始数字（本票渲染用；`_format_tokens` 的 K/M 压缩
-    是事件流尾注口径，这里是压缩前后对比，保留可逐位对账的原始量级）。"""
-    return f"{count:_}"
+    是事件流尾注口径，这里是压缩前后对比，保留可逐位对账的原始量级）。
+
+    F9 (#635)：用逗号 `,` 而非下划线 `_`——这是**用户可见**的 CLI 输出，
+    182,400 一眼可读；下划线是本仓代码字面量的书写习惯，不该泄漏到界面文案。
+    """
+    return f"{count:,}"
 
 
 def _render_compaction(session: str, result: SessionContextCompaction) -> str:
