@@ -69,6 +69,7 @@ from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.resource_locks import ResourceLockRegistry
 from agent_harness.tools import (
     ApplyPatchTool,
     BashTool,
@@ -576,9 +577,14 @@ async def build_runtime(
         persona, tool_sections=tool_guidance_sections(registry.list()),
     )
 
+    # #525 一期（IMP-14）：父与并发 SubAgent 的 executor 共享同一 resource
+    # 锁注册表——同一 resource key（如 workspace-file 键）的执行跨批次/跨
+    # runtime 串行。锁是进程内同步原语，生命周期与本次 build 的 wiring 相同。
+    resource_locks = ResourceLockRegistry()
+
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
-    # 同一审批面（决策 11 权限传递）。
+    # 同一审批面（决策 11 权限传递）；resource 锁同源（#525 一期）。
     if runtime_multiagent_provider is not None:
         from agent_harness.agent.factory import AgentFactory
 
@@ -587,6 +593,7 @@ async def build_runtime(
                 child_registry, policy=policy, approval_callback=approval_callback,
                 overflow_handler=overflow_handler,
                 operation_ledger=stores.operation_ledger,
+                resource_locks=resource_locks,
             )
 
         runtime_multiagent_provider.activate(
@@ -646,7 +653,8 @@ async def build_runtime(
         registry=registry,
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
                               overflow_handler=overflow_handler,
-                              operation_ledger=stores.operation_ledger),
+                              operation_ledger=stores.operation_ledger,
+                              resource_locks=resource_locks),
         max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,

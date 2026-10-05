@@ -12,6 +12,8 @@ MUTATING 副作用：改文件，批次调度整批串行。
 
 from __future__ import annotations
 
+import posixpath
+
 from pydantic import BaseModel, Field
 
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -55,6 +57,14 @@ class EditTool(Tool):
     @property
     def side_effect(self) -> ToolSideEffect:
         return ToolSideEffect.MUTATING
+
+    def resource_keys(self, args: _EditArgs) -> list[str]:
+        """#525 一期（IMP-14）：同文件编辑跨批互斥。
+
+        每个 edit 调用声明它将触碰的 workspace 文件 key（规范路径去重 ./ 与 prefix/）。
+        执行域据此对相同 key 的并发调用串行化。
+        """
+        return [f"workspace-file:{posixpath.normpath(args.path)}"]
 
     @property
     def reconcile_hint(self) -> ReconcileHint:
