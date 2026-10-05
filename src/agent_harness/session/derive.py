@@ -1550,3 +1550,69 @@ def derive_modified_file_paths(events: list[SessionEvent]) -> list[str]:
             seen.add(path)
             paths.append(path)
     return paths
+
+
+def is_direct_user_input_event(
+    events: list[SessionEvent], event_id: str,
+) -> bool:
+    """Return whether an event is still an active direct user message."""
+    event = next((item for item in events if item.event_id == event_id), None)
+    if (
+        event is None
+        or event.type != USER_MESSAGE
+        or event.data.get("injected_by")
+        or not isinstance(event.data.get("content"), str)
+        or not event.data["content"].strip()
+    ):
+        return False
+    return any(
+        source_range == (event.seq, event.seq)
+        and isinstance(message, HumanMessage)
+        and message.content == event.data["content"]
+        for message, source_range in derive_messages_with_source_ranges(events)
+    )
+
+
+def latest_direct_user_input_event(
+    events: list[SessionEvent], model_messages: list[AnyMessage],
+) -> SessionEvent | None:
+    """Find the newest direct user message still present in model input."""
+    latest_direct_message = next(
+        (
+            event for event in reversed(events)
+            if event.type == USER_MESSAGE
+            and not event.data.get("injected_by")
+            and isinstance(event.data.get("content"), str)
+            and event.data["content"].strip()
+        ),
+        None,
+    )
+    # A resumed input-request answer is a decision about an existing question, not
+    # a source constraint. Never fall back to an older user message in this run.
+    if latest_direct_message is not None and isinstance(
+        latest_direct_message.data.get("input_request_id"), str
+    ):
+        return None
+
+    final_user_contents = {
+        message.content
+        for message in model_messages
+        if isinstance(message, HumanMessage) and isinstance(message.content, str)
+    }
+    candidates = [
+        event
+        for message, source_range in derive_messages_with_source_ranges(events)
+        if source_range is not None
+        and source_range[0] == source_range[1]
+        and isinstance(message, HumanMessage)
+        and isinstance(message.content, str)
+        and message.content in final_user_contents
+        for event in events
+        if event.seq == source_range[0]
+        and event.type == USER_MESSAGE
+        and not event.data.get("injected_by")
+        and isinstance(event.data.get("content"), str)
+        and event.data["content"].strip()
+        and event.data["content"] == message.content
+    ]
+    return max(candidates, key=lambda event: event.seq, default=None)

@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -1567,10 +1567,14 @@ export function useSession() {
   const resumePausedRun = useCallback(
     async (
       sessionId: string,
-      request: {
-        runId: string;
-        expectedVersion: number;
-      } & ResumePausedRunTarget,
+      request:
+        | ({ runId: string; expectedVersion: number } & ResumePausedRunTarget)
+        | {
+            runId: string;
+            expectedVersion: number;
+            kind: 'user_input';
+            inputRequest: ConstraintInputAnswerPayload;
+          },
     ): Promise<void> => {
       setError(null);
       // 与 sendFollowUp 入口同一套代际/流状态重置：这是一次新的在途执行。
@@ -1594,14 +1598,22 @@ export function useSession() {
       };
 
       try {
-        const pending = resumeSession(sessionId, {
-          run_id: request.runId,
-          resume_basis: 'budget_increase',
-          budget: {
-            expected_version: request.expectedVersion,
-            run: resumeRunLimitsBody(request),
-          },
-        });
+        const resumePayload = request.kind === 'user_input'
+          ? {
+              run_id: request.runId,
+              resume_basis: 'user_input' as const,
+              budget: { expected_version: request.expectedVersion, run: {} },
+              input_request: request.inputRequest,
+            }
+          : {
+              run_id: request.runId,
+              resume_basis: 'budget_increase' as const,
+              budget: {
+                expected_version: request.expectedVersion,
+                run: resumeRunLimitsBody(request),
+              },
+            };
+        const pending = resumeSession(sessionId, resumePayload);
         const res = await raceEarlyResponse(pending);
         if (res !== null) {
           if (!res.ok || !res.body) {

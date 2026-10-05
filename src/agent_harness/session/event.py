@@ -47,6 +47,8 @@ RUN_TERMINAL_TYPES: frozenset[str] = frozenset(
     {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED}
 )
 USER_MESSAGE = "user/message"
+# #663: durable question for a user-mediated protected-fact resolution.
+USER_INPUT_REQUESTED = "user/input-requested"
 MODEL_STARTED = "model/started"
 MODEL_DELTA = "model/delta"
 MODEL_COMPLETED = "model/completed"
@@ -219,6 +221,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         RUN_PAUSED,
         RUN_RESUMED,
         USER_MESSAGE,
+        USER_INPUT_REQUESTED,
         MODEL_COMPLETED,
         MODEL_FAILED,
         # #313 T5：每次实际 Provider 请求的账目记录（model_requests 的唯一计数点）

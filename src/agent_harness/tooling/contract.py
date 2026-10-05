@@ -201,6 +201,11 @@ class Tool(ABC):
         return ToolSideEffect.READ_ONLY
 
     @property
+    def batch_exclusive(self) -> bool:
+        """Whether this tool must run without executing any peer from its model batch."""
+        return False
+
+    @property
     def permission(self) -> ToolPermission:
         """授权级别。默认 WORKSPACE_WRITE（安全偏高，避免新工具默认 DANGER）。
 

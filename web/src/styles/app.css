@@ -3025,6 +3025,99 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   z-index: 51; /* 与 .palette-overlay(50)/.project-dialog(51) 同层族 */
   animation: project-dialog-in var(--dur-palette) var(--ease-apple);
 }
+
+.constraint-input-dialog {
+  width: min(680px, calc(100vw - 32px));
+}
+.constraint-input-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+.constraint-input-value {
+  min-width: 0;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.constraint-input-value h3 {
+  margin: 0 0 var(--space-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.constraint-input-value p,
+.constraint-input-custom p {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.constraint-input-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.constraint-input-choices legend {
+  margin-bottom: var(--space-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.constraint-input-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  cursor: pointer;
+}
+.constraint-input-choice.selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: var(--accent-soft);
+}
+.constraint-input-choice input {
+  flex: 0 0 auto;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.constraint-input-choices:disabled .constraint-input-choice {
+  cursor: default;
+  opacity: 0.7;
+}
+.constraint-input-custom {
+  padding-top: var(--space-xs);
+}
+.constraint-input-custom textarea {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.5;
+}
+.constraint-input-pending {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.constraint-input-pending .pause-panel-resume {
+  width: 100%;
+}
+@media (max-width: 560px) {
+  .constraint-input-values {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Radix 用 Title 命名 dialog（读屏名）；卡片头部已有可见标题，这里视觉隐藏。 */
 .approval-modal-title {
   position: absolute;

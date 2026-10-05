@@ -763,6 +763,7 @@ async def run(
             workspace_registry=workspace_registry,
             session_id=session_id, workspace=workspace,
             max_agent_turns=fuse.max_agent_turns,
+            include_constraint_tools=True,
             local_fuse_source=fuse.source,
             # 档位显式化：**与下面证据端口的摘要输入同源**。运行时实际生效的档位就是
             # 这一档（此前靠 `build_runtime` 的默认参数），若两处各写一次，暂停快照

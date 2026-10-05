@@ -25,7 +25,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -65,8 +65,10 @@ from agent_harness.agent.run_budget import (
     INT64_MAX,
     REASON_CLIENT_ABSENT,
     REASON_STUCK,
+    REASON_USER_INPUT,
     TRIGGER_CLIENT_PRESENCE,
     TRIGGER_MAX_CONTEXT_TOKENS,
+    TRIGGER_USER_INPUT,
     BudgetConsumed,
     LaunchRunBudget,
     RunLimits,
@@ -82,12 +84,15 @@ from agent_harness.agent.run_budget import (
     build_pause_data,
     closeout_capacity,
     consumed_from_events,
+    derive_run_budget,
     describe_resume_requirements,
     deterministic_continuation,
     normalize_continuation,
     pause_trigger,
     reason_for_dimension,
+    resume_headroom_ok,
     session_closeout_capacity,
+    session_resume_headroom_ok,
     stuck_resume_requirements,
     utc_now,
 )
@@ -152,10 +157,16 @@ from agent_harness.session import (
     memory_injected_ids_var,
     run_context_var,
 )
+from agent_harness.session.context import (
+    ConstraintToolContext,
+    current_constraint_tool_context_var,
+)
+from agent_harness.session.derive import latest_direct_user_input_event
 from agent_harness.session.event import (
     CONTEXT_PROTECTED_FACTS_EXCEEDED,
     STEER_APPLIED,
     TOOL_RESULT,
+    USER_INPUT_REQUESTED,
 )
 from agent_harness.session.queue import SteerRequest, SteerSource
 from agent_harness.storage import (
@@ -1497,6 +1508,8 @@ class AgentRuntime:
         # W-26（#380）：current_session_var 的 token，与上面两个 token 同一条
         # UnboundLocalError 纪律（set 之前生成器被关闭时 finally 不能炸）。
         session_token = None
+        constraint_context_token = None
+        tool_request_context: ConstraintToolContext | None = None
         # session 树账的预留状态（`#318`）：True = 当前步已原子预留（turns/requests
         # 各一格）而决策尚未被接纳——取消臂 / 异常臂 / context 超限臂据此退回。
         # 初始化在 try 之前（与两个 token 同一条 UnboundLocalError 纪律）。
@@ -1521,6 +1534,7 @@ class AgentRuntime:
         )
         mirrored_request_event_seqs: set[int] = set()
         try:
+            constraint_context_token = current_constraint_tool_context_var.set(None)
             # 写入 user 消息事件
             arms.memory_event_start = session.mark()
             # 本 run 的 step 基数 = 前端此刻已分配的 turn 数，取两者较大：
@@ -1733,6 +1747,22 @@ class AgentRuntime:
                     ):
                         yield streamed
                     return
+                source_event = latest_direct_user_input_event(session.events, messages)
+                if source_event is None or run_id is None:
+                    tool_request_context = None
+                else:
+                    tool_request_context = ConstraintToolContext(
+                        session_id=session.session_id,
+                        run_id=run_id,
+                        agent_id=self._agent_id,
+                        agent_profile=self._agent_profile,
+                        source_event_id=source_event.event_id,
+                        source_seq=source_event.seq,
+                        source_content=source_event.data["content"],
+                        protected_fact_token_budget=(
+                            self._context_builder.protected_fact_token_budget
+                        ),
+                    )
                 new_events = list(session.since(context_event_start))
                 compaction = next(
                     (e for e in new_events if e.type == CONTEXT_COMPACTED), None,
@@ -2252,6 +2282,20 @@ class AgentRuntime:
                     else None
                 )
                 tool_error = None
+                execution_constraint_context = tool_request_context
+                if any(
+                    call.name == "request_constraint_resolution" for call in calls
+                ):
+                    execution_constraint_context = (
+                        await self._constraint_request_context_for_execution(
+                            session,
+                            tool_request_context,
+                            deferred_model_event=defer_model_event,
+                        )
+                    )
+                tool_context_token = current_constraint_tool_context_var.set(
+                    execution_constraint_context
+                )
                 try:
                     executions = await self.executor.execute_batch(
                         calls,
@@ -2272,6 +2316,8 @@ class AgentRuntime:
                     )
                 except Exception as error:  # noqa: BLE001
                     tool_error = error
+                finally:
+                    current_constraint_tool_context_var.reset(tool_context_token)
                 # 执行期间追加的事件（tool/output_delta 等）镜像给流式消费者；
                 # web 订阅者经 session listener 实时收到（seq 幂等合并不重复）。
                 for event in session.since(tool_event_start):
@@ -2309,13 +2355,41 @@ class AgentRuntime:
                         run_id=run_id, step_id=step_base + steps,
                     ):
                         yield to_agent_event(persisted_event)
-                    yield to_agent_event(self.executor.emit_result_event(
+                    result_event = self.executor.emit_result_event(
                         session, tool_call_id=execution.tool_call_id,
                         content=content, run_id=run_id, step_id=step_base + steps,
                         # 预算增量由执行域算好（唯一计数点），这里只原样落盘：
                         # 0 增量（准入前被拒 / 未执行）同样如实落，账本据此求和。
                         budget_delta=execution.budget_delta,
-                    ))
+                    )
+                    if (
+                        self._session_budget is not None
+                        and call.name == "request_constraint_resolution"
+                        and isinstance(execution.budget_delta, dict)
+                    ):
+                        delta = execution.budget_delta
+                        calls = delta.get("tool_calls")
+                        attempts = delta.get("tool_attempts")
+                        if (
+                            isinstance(calls, int) and not isinstance(calls, bool)
+                            and isinstance(attempts, int) and not isinstance(attempts, bool)
+                            and delta.get("tool_name") == call.name
+                        ):
+                            try:
+                                await self._session_budget.record_tool_call(
+                                    tool_call_id=execution.tool_call_id,
+                                    tool_name=call.name,
+                                    calls=calls,
+                                    attempts=attempts,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "澄清工具结果已持久化，但 session 预算记账失败；"
+                                    "隔离该 session 并保留问题卡等待恢复："
+                                    "session_id=%s tool_call_id=%s",
+                                    session.session_id, execution.tool_call_id,
+                                )
+                    yield to_agent_event(result_event)
 
                     self._log("tool_operation", f"工具回复 {outcome}",
                               span_id=new_span_id(), parent_span_id=run_span, step=steps,
@@ -2331,6 +2405,39 @@ class AgentRuntime:
                 await self._save_checkpoint(
                     session, CheckpointBoundary.TOOL_BATCH_COMPLETED
                 )
+
+                answered_input_requests = {
+                    event.data.get("input_request_id")
+                    for event in session.events
+                    if event.type == USER_MESSAGE
+                    and isinstance(event.data.get("input_request_id"), str)
+                }
+                pending_input_request = next(
+                    (
+                        event for event in reversed(session.events)
+                        if event.type == USER_INPUT_REQUESTED
+                        and event.run_id == run_id
+                        and isinstance(event.data.get("request_id"), str)
+                        and event.data["request_id"] not in answered_input_requests
+                    ),
+                    None,
+                )
+                if pending_input_request is not None:
+                    request_id = pending_input_request.data["request_id"]
+                    self._log(
+                        "agent_decision", "等待用户处理保护事实冲突",
+                        span_id=new_span_id(), parent_span_id=run_span, step=steps,
+                        decision="user_input_paused", remaining_steps=0,
+                        reason=f"等待用户回答 input_request_id={request_id}",
+                        outcome="success",
+                    )
+                    async for streamed in self._terminal_paused(
+                        arms, launch=launch_budget, steps=steps,
+                        trigger_dimension=TRIGGER_USER_INPUT,
+                        input_request_id=request_id,
+                    ):
+                        yield streamed
+                    return
 
                 # ── 循环护栏（ADR-0014 的 #69 扩展为五模式：`#317` / ADR-0048）──
                 # 工具回填后、下一轮模型调用前：把新事件喂给**唯一**的检测器，取严重
@@ -2499,6 +2606,11 @@ class AgentRuntime:
                     current_session_var.reset(session_token)
                 except ValueError:
                     pass
+            if constraint_context_token is not None:
+                try:
+                    current_constraint_tool_context_var.reset(constraint_context_token)
+                except ValueError:
+                    pass
 
     # ─── 终结臂（#264 / T11 第一切片）────────────────────────────────────────
     # 六个终结点（context 超限 / completed / local fuse / 同错熔断硬触发 / 取消 /
@@ -2570,6 +2682,73 @@ class AgentRuntime:
         if duration_ms is not None:
             data["duration_ms"] = duration_ms
         return session.append(MODEL_REQUEST, data, run_id=run_id, step_id=step)
+
+    async def _constraint_request_context_for_execution(
+        self,
+        session: Session,
+        context: ConstraintToolContext | None,
+        *,
+        deferred_model_event: bool,
+    ) -> ConstraintToolContext | None:
+        """Reject a user-input request unless its same-run continuation is admissible."""
+        if context is None:
+            return None
+
+        run_state = derive_run_budget(session.events, context.run_id)
+        if run_state.limits.deadline_at is not None:
+            return replace(
+                context,
+                user_input_request_rejection_code="DEADLINE_CONFIGURED",
+            )
+
+        run_consumed = run_state.consumed
+        if deferred_model_event:
+            run_consumed = replace(
+                run_consumed, agent_turns=run_consumed.agent_turns + 1,
+            )
+        if run_consumed.tool_calls_by_tool is not None:
+            calls = dict(run_consumed.tool_calls_by_tool)
+            calls["request_constraint_resolution"] = (
+                calls.get("request_constraint_resolution", 0) + 1
+            )
+            run_consumed = replace(run_consumed, tool_calls_by_tool=calls)
+        if not resume_headroom_ok(
+            consumed=run_consumed,
+            limits=run_state.limits,
+            now=self._now(),
+        ):
+            return replace(
+                context,
+                user_input_request_rejection_code="RESUME_UNAVAILABLE",
+            )
+
+        if self._session_budget is not None:
+            snapshot = await self._session_budget.snapshot()
+            if snapshot.limits.deadline_at is not None:
+                return replace(
+                    context,
+                    user_input_request_rejection_code="DEADLINE_CONFIGURED",
+                )
+            session_consumed = snapshot.consumed
+            if session_consumed.tool_calls_by_tool is not None:
+                calls = dict(session_consumed.tool_calls_by_tool)
+                calls["request_constraint_resolution"] = (
+                    calls.get("request_constraint_resolution", 0) + 1
+                )
+                session_consumed = replace(
+                    session_consumed, tool_calls_by_tool=calls,
+                )
+            if not session_resume_headroom_ok(
+                consumed=session_consumed,
+                limits=snapshot.limits,
+                now=self._now(),
+            ):
+                return replace(
+                    context,
+                    user_input_request_rejection_code="RESUME_UNAVAILABLE",
+                )
+
+        return context
 
     async def _record_session_tool_deltas(self, events: list[SessionEvent]) -> None:
         """把一批事件里的 `budget_delta` 并进 session 树账（`#318`）。
@@ -2773,6 +2952,7 @@ class AgentRuntime:
         self, arms: _TerminalArms, *, launch: LaunchRunBudget, steps: int,
         trigger_dimension: str, stuck: StuckSignal | None = None,
         session_admission: SessionAdmission | None = None,
+        input_request_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """暂停臂（`#312` T4；`02 §5.2` / `03 §3.4` / ADR-0044 D3）。
 
@@ -2861,6 +3041,7 @@ class AgentRuntime:
             arms, trigger_dimension=trigger_dimension,
             consumed=consumed_before, limits=launch.limits, step_id=envelope_step,
             blocked_by=blocked_by, reason=reason, stuck=stuck_payload,
+            input_request_id=input_request_id,
             session_snapshot=session_snapshot,
         ))
         mirrored_closeout_event_seqs: set[int] = set()
@@ -2967,6 +3148,7 @@ class AgentRuntime:
             # 用户从事件就能找到那一段 trace。run 未终结 ⇒ 这不是 run 的 trace；
             # trace_url 此刻还不存在（只在终态回调里合成，见 build_pause_data）。
             trace_id=arms.telemetry.trace_id,
+            input_request_id=input_request_id,
         )
         if session_payload is not None:
             # `#318`：`session` 键在 `run/paused.data` 顶层（limits 里已有 session 的
@@ -3018,8 +3200,23 @@ class AgentRuntime:
         session = arms.session
         appended: list[SessionEvent] = []
         blockers: list[str] = []
+        durable_constraint_requests = {
+            event.data.get("tool_call_id")
+            for event in session.events
+            if event.type == USER_INPUT_REQUESTED
+            and event.run_id == run_id
+            and isinstance(event.data.get("tool_call_id"), str)
+            and event.data["tool_call_id"]
+        }
         for operation in await ledger.list_for_session(session.session_id):
             if operation.run_id != run_id or not needs_reconcile(operation):
+                continue
+            if (
+                operation.tool_name == "request_constraint_resolution"
+                and operation.tool_call_id in durable_constraint_requests
+            ):
+                # The durable question proves deterministic success; a failed
+                # Operation Ledger terminal write can be repaired before answer.
                 continue
             if operation.state is not OperationState.NEED_RECONCILE:
                 if operation.state is OperationState.RUNNING:
@@ -3059,6 +3256,7 @@ class AgentRuntime:
         consumed: BudgetConsumed, limits: RunLimits, step_id: int,
         blocked_by: tuple[str, ...] = (),
         reason: str | None = None, stuck: Mapping[str, Any] | None = None,
+        input_request_id: str | None = None,
         session_snapshot: SessionBudgetSnapshot | None = None,
     ) -> tuple[dict[str, Any], str, list[SessionEvent]]:
         """产出 continuation、它的来源（`model` / `deterministic`）与本次落盘的事件。
@@ -3079,12 +3277,13 @@ class AgentRuntime:
             events=arms.session.since(0), run_id=arms.run_id or "",
             trigger_dimension=trigger_dimension, limits=limits, consumed=consumed,
             blocked_by=blocked_by, reason=reason, stuck=stuck,
+            input_request_id=input_request_id,
         )
         # W-22（#366）：client_absent 的收口**恒为确定性**（`02 §5.2.1`：确认无未
         # 结清副作用后落一条 paused，期间 MUST NOT 再发"礼貌性收口"模型请求）。
         # 本分支在所有容量判定之前：有没有预算都一样——客户端不在场，总结给谁看；
         # 烧一次真实 Provider 请求是纯浪费，还会让"离开后新请求数 0"的验收失真。
-        if reason == REASON_CLIENT_ABSENT:
+        if reason in (REASON_CLIENT_ABSENT, REASON_USER_INPUT):
             return fallback, CLOSEOUT_DETERMINISTIC, []
         # `#567` 裁决 B：**零进展执行跳过模型 closeout**。`agent_turns == 0` =
         # 本次执行连一个产出轮都没有（如 ceiling=1 的暂停：判定含预留，

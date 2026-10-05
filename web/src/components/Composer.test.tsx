@@ -87,6 +87,18 @@ describe('Composer 队列条（ADR-0030 §5.2）', () => {
   });
 });
 
+describe('Composer pending constraint input lock', () => {
+  it('blocks new messages and explains that the pending question must be answered first', () => {
+    const html = renderToString(createElement(Composer, {
+      ...base,
+      constraintInputPending: true,
+    })).replaceAll('<!-- -->', '');
+    expect(html).toContain('请先回答当前约束澄清，再发送新消息');
+    expect(html).toContain('等待约束澄清回答…');
+    expect(html).toMatch(/<textarea[^>]*disabled=""/);
+  });
+});
+
 describe('Composer procedural rule signal (#298 R5)', () => {
   it('offers an explicit opt-in for reusable rules', () => {
     const html = renderToString(createElement(Composer, base)).replaceAll('<!-- -->', '');

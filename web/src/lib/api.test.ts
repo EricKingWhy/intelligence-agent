@@ -1364,6 +1364,30 @@ describe('resumeSession — 同 run 恢复的 ceiling 形状（`#313` / `#314`�
     expect(body.budget.run).toEqual({ tool_call_limits: { glob: 5 } });
     expect(body.budget.run).not.toHaveProperty('max_agent_turns_total');
   });
+
+  it('same-run user input resume sends the durable request answer without changing limits', async () => {
+    const cap = captureFetch();
+    await resumeSession('s1', {
+      run_id: 'run-1',
+      resume_basis: 'user_input',
+      budget: { expected_version: 4, run: {} },
+      input_request: {
+        request_id: 'request-1',
+        choice: 'custom',
+        custom_text: 'Keep the old rule outside this task.',
+      },
+    });
+    expect(cap.calls[0].body).toEqual({
+      run_id: 'run-1',
+      resume_basis: 'user_input',
+      budget: { expected_version: 4, run: {} },
+      input_request: {
+        request_id: 'request-1',
+        choice: 'custom',
+        custom_text: 'Keep the old rule outside this task.',
+      },
+    });
+  });
 });
 
 describe('恢复链路 409 detail 结构化（#596 / 后端 #547：{message, pending_decisions}）', () => {

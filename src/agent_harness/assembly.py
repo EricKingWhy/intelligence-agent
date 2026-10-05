@@ -82,6 +82,10 @@ from agent_harness.tools import (
     ReadTool,
     WriteTool,
 )
+from agent_harness.tools.register_constraint import RegisterConstraintTool
+from agent_harness.tools.request_constraint_resolution import (
+    RequestConstraintResolutionTool,
+)
 from agent_harness.tools.update_plan import UpdatePlanTool
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
 from agent_harness.workspace.index import SessionHeaders
@@ -231,6 +235,7 @@ def _build_tooling(
     workspace_registry: WorkspaceRegistry,
     session_store: JsonlSessionStore | None,
     agent_profile: str | None,
+    include_constraint_tools: bool = False,
 ) -> _RootTooling:
     """sandbox 绑定 + **根 registry**（收窄前）构造——唯一的工具面事实源。
 
@@ -269,6 +274,9 @@ def _build_tooling(
     # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
     # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
     registry.register(UpdatePlanTool())
+    if include_constraint_tools:
+        registry.register(RegisterConstraintTool())
+        registry.register(RequestConstraintResolutionTool())
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
@@ -338,6 +346,7 @@ def root_registry_tool_names(
     *,
     session_id: str,
     session_store: JsonlSessionStore | None,
+    include_constraint_tools: bool = False,
 ) -> frozenset[str]:
     """根 registry 名字集的**零副作用**计算——pre-CAS session 名字校验专用。
 
@@ -355,6 +364,9 @@ def root_registry_tool_names(
     names: set[str] = {tool_cls(None).name for tool_cls in BUILTIN_LOCAL_TOOLS}
     # W-26（#380）：`update_plan` 无条件注册（与 `_build_tooling` 同一句判定）。
     names.add(UpdatePlanTool().name)
+    if include_constraint_tools:
+        names.add(RegisterConstraintTool().name)
+        names.add(RequestConstraintResolutionTool().name)
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
         # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
@@ -384,6 +396,7 @@ async def build_runtime(
     model_name: str | None = None,
     reasoning_effort: str | None = None,
     agent_profile: str | None = None,
+    include_constraint_tools: bool = False,
     context_providers: list[str] | None = None,
     steer_source: Any | None = None,
     run_budget: LaunchRunBudget | None = None,
@@ -499,6 +512,7 @@ async def build_runtime(
         session_id=session_id, workspace=workspace,
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=agent_profile,
+        include_constraint_tools=include_constraint_tools,
     )
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
@@ -537,6 +551,14 @@ async def build_runtime(
         pre_filter_names = {tool.name for tool in registry.list()}
         registry = registry.filtered(profile_spec.tool_scope)
         dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
+    if agent_profile == "coding" and include_constraint_tools:
+        # These tools belong to a direct user-facing root coding session. They stay out
+        # of the shared coding tool_scope so AgentFactory cannot grant them to children.
+        registered_names = {tool.name for tool in registry.list()}
+        if RegisterConstraintTool().name not in registered_names:
+            registry.register(RegisterConstraintTool())
+        if RequestConstraintResolutionTool().name not in registered_names:
+            registry.register(RequestConstraintResolutionTool())
 
     # per-tool 配额的**注册名**校验（`#314` / `04 §9.1`）：判定点是这里，因为注册表
     # 到上一行为止才定型（内置 + artifact 读回 + capability，并按 profile 收窄）。

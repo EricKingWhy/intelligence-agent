@@ -50,7 +50,13 @@ from pydantic import BaseModel, ValidationError
 from agent_harness.logging import log_event
 from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.observability.tracer import TraceBinding, current_trace_binding
-from agent_harness.session import TOOL_CALL, TOOL_RESULT, Session, SessionEvent
+from agent_harness.session import (
+    TOOL_CALL,
+    TOOL_RESULT,
+    USER_INPUT_REQUESTED,
+    Session,
+    SessionEvent,
+)
 from agent_harness.storage import (
     Operation,
     OperationContext,
@@ -566,16 +572,64 @@ class ToolExecutor:
                     session, tool_call_id, name, result,
                 )
 
+            # A user-input request must be durable before the operation terminal
+            # state. Otherwise a process kill between the tool result and event
+            # emission loses the question that is supposed to pause this run.
+            durable_user_input_request = False
+            if (
+                session is not None
+                and self._operation_ledger is not None
+                and name == "request_constraint_resolution"
+                and result.ok
+                and isinstance(result.data, dict)
+                and result.data.get("status") == "requested"
+            ):
+                request_id = result.data.get("request_id")
+                matching = [
+                    (event_type, data)
+                    for event_type, data in result.pending_events
+                    if event_type == USER_INPUT_REQUESTED
+                    and isinstance(data, dict)
+                    and data.get("request_id") == request_id
+                    and isinstance(request_id, str)
+                ]
+                if len(matching) == 1:
+                    event_type, event_data = matching[0]
+                    persisted_data = {**event_data, "tool_call_id": tool_call_id}
+                    session.append(
+                        event_type,
+                        persisted_data,
+                        run_id=operation_context.run_id if operation_context else None,
+                        step_id=step_id,
+                    )
+                    durable_user_input_request = True
+                    result = result.model_copy(update={
+                        "pending_events": [
+                            item for item in result.pending_events if item not in matching
+                        ],
+                    })
+                    self._maybe_kill("user_input_requested", tool_call_id)
+
             if self._operation_ledger is not None:
                 terminal_state, reconcile_meta = self._settle_state(tool, result)
-                await self._operation_ledger.update_state(
-                    session_id, tool_call_id,
-                    terminal_state,
-                    result_json=result.model_dump_json(),
-                    artifact_ref=result.artifact_ref,
-                    reconcile_meta=reconcile_meta,
-                )
-                self._maybe_kill("terminal", tool_call_id)
+                try:
+                    await self._operation_ledger.update_state(
+                        session_id, tool_call_id,
+                        terminal_state,
+                        result_json=result.model_dump_json(),
+                        artifact_ref=result.artifact_ref,
+                        reconcile_meta=reconcile_meta,
+                    )
+                except Exception:
+                    if not durable_user_input_request:
+                        raise
+                    logger.exception(
+                        "澄清问题已持久化，但 Operation Ledger 收尾失败；"
+                        "保留等待态，由恢复链修复：session_id=%s tool_call_id=%s",
+                        session_id, tool_call_id,
+                    )
+                else:
+                    self._maybe_kill("terminal", tool_call_id)
         except asyncio.CancelledError:
             _close_span("cancelled")
             raise
@@ -708,6 +762,32 @@ class ToolExecutor:
         """
         if not tool_calls:
             return []
+
+        exclusive_index = next((
+            index for index, raw_call in enumerate(tool_calls)
+            if self._is_batch_exclusive(raw_call)
+        ), None)
+        if exclusive_index is not None:
+            # A blocking user-input tool ends the model's current authority to act.
+            # Pair all sibling calls as cancelled without admitting or executing them.
+            executions: list[ToolExecution] = []
+            for index, tool_call in enumerate(tool_calls):
+                if index == exclusive_index:
+                    executions.append(await self.execute(
+                        tool_call, operation_context=operation_context,
+                        session=session, step_id=step_id, tracer=tracer,
+                        tool_quota=tool_quota, run_deadline=run_deadline,
+                    ))
+                else:
+                    executions.append(await self._cancel_without_execution(
+                        tool_call,
+                        operation_context=operation_context,
+                        reason=(
+                            "同批次包含一个需要用户输入的阻塞请求；"
+                            "在用户回答前，本调用未执行。"
+                        ),
+                    ))
+            return executions
 
         mode = self._decide_mode(tool_calls)
 
@@ -972,6 +1052,7 @@ class ToolExecutor:
         tool_call: ToolCall | dict[str, Any],
         *,
         operation_context: OperationContext | None,
+        reason: str = "串行批次中的前序工具已永久失败。",
     ) -> ToolExecution:
         """Represent a serially cascaded call without invoking its Tool.
 
@@ -983,9 +1064,7 @@ class ToolExecutor:
         name = call.name
         raw_args = call.args
         result = ToolResult.failure(
-            message=(
-                f"工具 '{name}' 未执行：串行批次中的前序工具已永久失败。"
-            ),
+            message=f"工具 '{name}' 未执行：{reason}",
             error_code=ErrorCode.CANCELLED,
             retryable=False,
         )
@@ -1027,6 +1106,15 @@ class ToolExecutor:
 
         return ToolExecution(tool_call_id=tool_call_id, result=result,
                              budget_delta=_rejected_delta(name))
+
+    def _is_batch_exclusive(self, tool_call: ToolCall | dict[str, Any]) -> bool:
+        name = tool_call.name if isinstance(tool_call, ToolCall) else tool_call.get("name")
+        if not isinstance(name, str):
+            return False
+        try:
+            return self._registry.get(name).batch_exclusive
+        except KeyError:
+            return False
 
     def _decide_mode(self, tool_calls: list[ToolCall | dict[str, Any]]) -> str:
         """扫描批次，决定并发还是串行。

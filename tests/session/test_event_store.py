@@ -55,6 +55,7 @@ class TestSessionEventDTO:
             "run/paused",
             "run/resumed",
             "user/message",
+            "user/input-requested",
             "text/delta",
             "model/completed",
             "model/failed",

@@ -196,6 +196,41 @@ async def test_record_tools_merges_maps(tmp_path, memory):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("memory", [False, True])
+async def test_record_tool_call_is_idempotent_by_call_id(tmp_path, memory):
+    ledger = _ledger(tmp_path, memory=memory)
+    await ledger.initialize()
+    key = "sess-tool-call-idempotency"
+    await ledger.ensure_session_budget(
+        key,
+        root_session_id=key,
+        limits=SessionLimits(
+            tool_call_limits={"request_constraint_resolution": 2},
+        ),
+    )
+    values = {
+        "tool_call_id": "ask-1",
+        "tool_name": "request_constraint_resolution",
+        "calls": 1,
+        "attempts": 1,
+    }
+
+    assert await ledger.record_session_tool_call(key, **values) is True
+    assert await ledger.record_session_tool_call(key, **values) is False
+    snapshot = await ledger.get_session_budget(key)
+    assert snapshot is not None
+    assert snapshot.consumed.tool_calls_by_tool == {
+        "request_constraint_resolution": 1,
+    }
+    assert snapshot.consumed.tool_attempts_by_tool == {
+        "request_constraint_resolution": 1,
+    }
+
+    with pytest.raises(ValueError, match="different budget data"):
+        await ledger.record_session_tool_call(key, **{**values, "calls": 0})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory", [False, True])
 async def test_update_session_limits_cas_and_conflicts(tmp_path, memory):
     ledger = _ledger(tmp_path, memory=memory)
     await ledger.initialize()

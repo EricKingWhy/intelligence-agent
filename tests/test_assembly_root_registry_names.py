@@ -53,7 +53,10 @@ def _settings(tmp_path: Path, *, multiagent: bool) -> Settings:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("multiagent", [False, True], ids=["no-ma", "ma"])
-async def test_pre_cas_name_set_matches_real_root_registry(tmp_path, multiagent):
+@pytest.mark.parametrize("include_constraint_tools", [False, True])
+async def test_pre_cas_name_set_matches_real_root_registry(
+    tmp_path, multiagent, include_constraint_tools,
+):
     """三方对账：`root_registry_tool_names`（零副作用）== `_build_tooling` == 真实装配。"""
     settings = _settings(tmp_path, multiagent=multiagent)
     _, wiring = await assemble_wiring(settings)
@@ -76,6 +79,7 @@ async def test_pre_cas_name_set_matches_real_root_registry(tmp_path, multiagent)
             session_store=session_store,
             max_agent_turns=10,
             permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+            include_constraint_tools=include_constraint_tools,
         )
 
     tooling = _build_tooling(
@@ -83,6 +87,7 @@ async def test_pre_cas_name_set_matches_real_root_registry(tmp_path, multiagent)
         session_id=session_id, workspace=workspace,
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=None,
+        include_constraint_tools=include_constraint_tools,
     )
     helper_names = {tool.name for tool in tooling.registry.list()}
     runtime_names = {tool.name for tool in runtime.registry.list()}
@@ -91,6 +96,7 @@ async def test_pre_cas_name_set_matches_real_root_registry(tmp_path, multiagent)
     # 逐名一致——漂移 = 校验判据与真实工具面分叉。
     zeronames = root_registry_tool_names(
         settings, wiring, session_id=session_id, session_store=session_store,
+        include_constraint_tools=include_constraint_tools,
     )
     assert helper_names == runtime_names == zeronames, (
         "pre-CAS 校验的名字集与真实根 registry 漂移（main 档位不收窄，三方必须相等）"
@@ -99,6 +105,9 @@ async def test_pre_cas_name_set_matches_real_root_registry(tmp_path, multiagent)
         assert "delegate" in helper_names
     else:
         assert "delegate" not in helper_names
+    assert ({"register_constraint", "request_constraint_resolution"} <= helper_names) == (
+        include_constraint_tools
+    )
 
 
 def test_root_profile_spec_resolves_the_declared_profile():

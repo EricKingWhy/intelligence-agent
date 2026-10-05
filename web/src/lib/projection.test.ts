@@ -23,6 +23,7 @@ describe('initConversation', () => {
       run_interrupted: null, run_failure: null, turn_index: null,
       // #312：暂停事实的初值（无暂停）——投影的必填字段，形状断言跟着长。
       run_paused: null,
+      pending_constraint_input: null,
       requested_model: null,
       model_run_id: null,
       seenSeqs: new Set(),
@@ -37,6 +38,74 @@ describe('initConversation', () => {
 });
 
 describe('applyEvent — 折叠语义', () => {
+  it('projects a durable constraint question, committed answer, and same-run resume', () => {
+    const request = ev({
+      type: EventType.USER_INPUT_REQUESTED,
+      seq: 1,
+      run_id: 'run-1',
+      data: {
+        request_id: 'request-1',
+        kind: 'protected_fact_conflict',
+        run_id: 'run-1',
+        fact_id: 'fact-1',
+        old_value: 'Use Python',
+        candidate: 'Use TypeScript',
+        question: 'Choose how to resolve this conflict.',
+        source_event_id: 'source-1',
+        source_event_seq: 0,
+        choices: [
+          { id: 'replace_persistently', label: 'Replace persistently' },
+          { id: 'current_task_only', label: 'This task only' },
+          { id: 'keep_existing', label: 'Keep existing' },
+          { id: 'custom', label: 'Custom reply' },
+        ],
+      },
+    });
+    const pause = ev({
+      type: EventType.RUN_PAUSED,
+      seq: 2,
+      run_id: 'run-1',
+      time: '2026-10-05T00:00:00.000Z',
+      data: { reason: 'user_input', input_request_id: 'request-1' },
+    });
+    const answer = ev({
+      type: EventType.USER_MESSAGE,
+      seq: 3,
+      run_id: 'run-1',
+      data: {
+        step: 1,
+        content: 'Use TypeScript for this task only.',
+        input_request_id: 'request-1',
+        input_request_answer: { request_id: 'request-1', choice: 'current_task_only' },
+      },
+    });
+    const resumed = ev({
+      type: EventType.RUN_RESUMED,
+      seq: 4,
+      run_id: 'run-1',
+      data: { resume_basis: 'user_input' },
+    });
+
+    let state = projectHistory('s', [request, pause]);
+    expect(state.run_paused?.input_request_id).toBe('request-1');
+    expect(state.pending_constraint_input).toMatchObject({
+      request_id: 'request-1',
+      old_value: 'Use Python',
+      candidate: 'Use TypeScript',
+      answer: null,
+    });
+
+    state = applyEvent(state, answer);
+    expect(state.pending_constraint_input?.answer).toEqual({
+      request_id: 'request-1',
+      choice: 'current_task_only',
+    });
+    state = applyEvent(state, resumed);
+    expect(state.run_paused).toBeNull();
+    expect(state.pending_constraint_input).toBeNull();
+    expect(projectHistory('s', [request, pause, answer, resumed]).pending_constraint_input).toBeNull();
+  });
+
   it('USER_MESSAGE 按 data.step 创建轮次并写入用户消息', () => {
     const s = applyEvent(initConversation('s'), ev({
       type: EventType.USER_MESSAGE,
