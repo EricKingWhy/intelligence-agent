@@ -7265,3 +7265,9 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **审查循环**：双轴发现轮均 PASS-WITH-FINDINGS（0×P0/P1/P2；Correctness P3-1 message 键遮蔽 / P3-2 深嵌套 RecursionError 逃逸 / P4×4；Standards P2 message 键遮蔽 / P3 None+True 象限 / P3 不可序列化 shield / P4×2 措辞）→ 处置 `fe53811b`（RecursionError 入 except + 3000 层回归钉 / message 键例外注释如实声明 + 机制分离登记另案 / docstring 字符口径 + indent 体积校准 / tools/bash.py 过时枚举注释更新 / None+True 断言 + dict+1 阈值用例）→ 复验 22/22 + focused 221P/1F（金丝雀）+ ruff 绿 → delta 重审**双轴 APPROVE-WITH-NOTES**（0×P0/P1/P2；两轴条件项 = 台账行须实际登记三项残余防 `overflow.py:113` 注释悬空引用——记账行即其履行；预算 1 轮/轴用满）。台账行 `docs/review_ledger.d/i644-tool-result-overflow-budget-e8e36f60-fe53811b.tsv`。
 - **登记不修（另案）**：①data 自带 "message" 键被 result.message 覆盖不参与判定（同名合并语义限制；仓库内无生产者写该键；外部 MCP 工具产出该形态时另票做分离判定——机制修复需 mangle 组合 Artifact 键名或破坏既有格式，复杂度不成比例，两轴认可注释选项为最小修订）；②tuple 不在判定面（票面 AC 只要求 dict/list）；③dict 内单个不可 JSON 序列化成员使整个载荷判定返回 None（屏蔽效应，docstring 已声明；逐成员判定复杂度不成比例）。
 - **集成状态**：记账 + 收据笔落盘后，push 分支 / 开 PR / PR merge 三动作逐项待批（§14.4）。
+
+## 2026-10-05 · IMP B 线状态（#522 → #523）
+
+- **#522 IMP-03/15**：本地就绪；分支 `zcode/T522-imp03-summary-model`，代码 tip `59ab2b99862f2eed6935667c645a804016528479`（tree `0aa83bfdd0683ac9f488c845fb79fcddab8a2db7`），最终双轴复审范围 `756ffbf0..59ab2b99` APPROVE（P0/P1/P2/P3=0）；Gate-0 读数路径 `docs/gate/59ab2b99862f2eed6935667c645a804016528479.json`；clean-checkout coverage exit 0、覆盖自检 1 passed @`bd93be6f66eed814a7483e170ace4a6cfb0d27a1`。
+- **#523 IMP-06**：排队，待 #522 本地就绪后按批次顺序开工；计划分支 `zcode/T523-imp06-agents-md`。
+- **授权边界**：本线仅推进本地分支；push、PR、merge、close 均未执行，后续各动作需单独批准。详见本月归档。

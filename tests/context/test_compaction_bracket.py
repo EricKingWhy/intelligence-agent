@@ -27,6 +27,7 @@ from agent_harness.session import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -387,6 +388,108 @@ class TestBuilderWritesBracket:
         compacted_event = next(e for e in new_events if e.type == CONTEXT_COMPACTED)
         assert compacted_event.data["schema"] == "eight_section"
         assert "summary" in compacted_event.data
+
+    @pytest.mark.asyncio
+    async def test_bracket_records_summary_model_duration_and_request_budget(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class ObservedSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-reported-summary-model"},
+                )
+
+        ticks = iter((100.0, 100.05, 100.125))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=ObservedSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "provider-reported-summary-model"
+        assert event.data["duration_ms"] == 125
+        assert event.data["request_token_estimate"] > 0
+        assert event.data["request_budget_tokens"] == 8500
+
+    @pytest.mark.asyncio
+    async def test_bracket_ignores_oversized_provider_summary_model_id(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class OversizedModelIdSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-model" * 30},
+                )
+
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=OversizedModelIdSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "configured-summary-model"
+        assert len(event.data["summary_model_id"]) <= 256
+
+    @pytest.mark.asyncio
+    async def test_failed_summary_events_record_request_metadata_without_provider_echo(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class FailingSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                raise ConnectionError("api_key=do-not-persist")
+
+        ticks = iter((100.0, 100.0, 100.125, 100.2, 100.575))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=FailingSummaryModel(),
+        )
+        await builder.build(session)
+
+        failures = [
+            event for event in session.events
+            if event.type == CONTEXT_COMPACTION_FAILED
+        ]
+        assert len(failures) == 2
+        assert [event.data["summary_model_id"] for event in failures] == [
+            "configured-summary-model", "configured-summary-model",
+        ]
+        assert [event.data["duration_ms"] for event in failures] == [125, 375]
+        assert all(event.data["request_token_estimate"] > 0 for event in failures)
+        assert all(event.data["request_budget_tokens"] == 8500 for event in failures)
+        assert "api_key=do-not-persist" not in repr([event.data for event in failures])
 
     @pytest.mark.asyncio
     async def test_second_build_after_bracket_skips_shadowed(self, tmp_path):
