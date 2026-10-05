@@ -51,7 +51,7 @@ _IDENTIFIER_PATTERN = re.compile(
     r"[A-Za-z0-9-]*|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+"
     # #640（T2-X/Y）：标准 8-4-4-4-12 十六进制 UUID。数字开头的形态不满足前两个
     # 分支的首字符 A-Za-z：此前整条漏配、或只从第二段起截出尾部伪片段
-    # （`123e4567-e89b-…` → `e89b-12d3-a456-…`）。新分支排在既有两分支**之后**，
+    #（`123e4567-e89b-…` → `e89b-12d3-a456-…`）。新分支排在既有两分支**之后**，
     # 既有分支的命中起点优先权不变。数字开头的裸 UUID 与连字符尾缀（`…-extra`）
     # 由新分支整条命中、尾缀不再并入条目（字母开头的既有连字符贪婪形态不受影响，
     # 仍把 `…-extra1` 并入同一 token）；字母数字黏连（`…0000`）被尾 lookahead 挡下，
@@ -150,9 +150,7 @@ class ContextWindowExceededError(RuntimeError):
     """
 
     def __init__(
-        self,
-        message: str,
-        *,
+        self, message: str, *,
         failures: list[CompactionFailure] | None = None,
     ) -> None:
         super().__init__(message)
@@ -220,36 +218,24 @@ def compactable_early_window(messages: list[AnyMessage]) -> tuple[int, int]:
     共用本函数——判据只有一份，此前两处各抄一遍会漂移（G3 #635）。
     """
     prefix_end = 0
-    while (
-        prefix_end < len(messages)
-        and isinstance(messages[prefix_end], SystemMessage)
-        and not _is_compaction_summary(messages[prefix_end])
-    ):
+    while (prefix_end < len(messages)
+           and isinstance(messages[prefix_end], SystemMessage)
+           and not _is_compaction_summary(messages[prefix_end])):
         prefix_end += 1
-    cut = max(
-        (i for i, message in enumerate(messages) if isinstance(message, HumanMessage)),
-        default=prefix_end,
-    )
+    cut = max((i for i, message in enumerate(messages)
+               if isinstance(message, HumanMessage)), default=prefix_end)
     return prefix_end, cut
 
 
 class ContextCompactor:
-    def __init__(
-        self,
-        model_provider: Any,
-        *,
-        max_context_tokens: int = 200_000,
-        auto_compact_threshold: float = 0.70,
-        hard_guard_threshold: float = 0.85,
-        keep_recent_tokens: int = 20_000,
-        summary_timeout_seconds: float = 30.0,
-        summary_model: Any | None = None,
-        model_call_gate: ModelCallGate | None = None,
-    ) -> None:
-        if (
-            max_context_tokens <= 0
-            or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1
-        ):
+    def __init__(self, model_provider: Any, *, max_context_tokens: int = 200_000,
+                 auto_compact_threshold: float = 0.70,
+                 hard_guard_threshold: float = 0.85,
+                 keep_recent_tokens: int = 20_000,
+                 summary_timeout_seconds: float = 30.0,
+                 summary_model: Any | None = None,
+                 model_call_gate: ModelCallGate | None = None) -> None:
+        if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("invalid context budget")
         if summary_timeout_seconds <= 0:
             raise ValueError("summary_timeout_seconds must be positive")
@@ -301,9 +287,7 @@ class ContextCompactor:
             # 比对会在 (messages, 有效用量) 落入 (count≤hard<effective) 缝隙时
             # 放行越窗请求。
             if token_estimate > self._hard_limit:
-                raise ContextWindowExceededError(
-                    "No complete early turn can be compacted"
-                )
+                raise ContextWindowExceededError("No complete early turn can be compacted")
             return CompactionResult(list(messages), 0, count, False)
         # C-6 #642：early 段每条消息的来源区间（提前到摘要尝试之前，与成功后
         # 的 source_seq 区间计算共用同一次推导；语义与原成功路径逐字一致）。
@@ -314,22 +298,15 @@ class ContextCompactor:
         # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
         # 长度不符视同区间不可用（走既有拒绝路径），不做静默截断。
         early_ranges = _early_source_ranges(
-            messages,
-            events,
-            source_ranges,
-            prefix_end,
-            cut,
+            messages, events, source_ranges, prefix_end, cut,
         )
         trusted_summaries = _trusted_summary_indices(early, early_ranges, events)
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
         )
-        transcript = HumanMessage(
-            content=json.dumps(
-                [message.model_dump(mode="json") for message in early],
-                ensure_ascii=False,
-            )
-        )
+        transcript = HumanMessage(content=json.dumps(
+            [message.model_dump(mode="json") for message in early], ensure_ascii=False,
+        ))
         request = [prompt, transcript]
         request_token_estimate = estimate_message_tokens(request)
         # Preflight rejection is not a summary attempt and therefore emits no failure event.
@@ -344,10 +321,7 @@ class ContextCompactor:
             # P2-4：token_estimate 回传 messages-only（契约见 CompactionResult），
             # 不原样回传调用方入参（其已含 sys+rt+plan，builder 会再补一次）。
             return CompactionResult(
-                list(messages),
-                0,
-                estimate_message_tokens(messages),
-                False,
+                list(messages), 0, estimate_message_tokens(messages), False,
             )
         # W-04 (#348)：摘要生成至多两次尝试。一次尝试 = ainvoke → 解析 → 程序化组装
         # → 校验闸门 → shrink 全链；预检（上面与 tool 块检查）不计入。每次失败记一条
@@ -377,22 +351,15 @@ class ContextCompactor:
                 if not response.content.strip():
                     raise _SummaryRejected("empty_summary", "Summary must not be empty")
                 model_sections = _parse_summary_sections(
-                    response.content,
-                    _MODEL_SUMMARY_HEADINGS,
+                    response.content, _MODEL_SUMMARY_HEADINGS,
                 )
                 candidate_summary_text = _assemble_summary(
-                    early,
-                    model_sections,
-                    protected_facts,
-                    trusted_summaries=trusted_summaries,
+                    early, model_sections, protected_facts, trusted_summaries,
                     source_ranges=early_ranges,
                 )
                 _validate_summary(
-                    candidate_summary_text,
-                    early,
-                    protected_facts,
-                    trusted_summaries=trusted_summaries,
-                    source_ranges=early_ranges,
+                    candidate_summary_text, early, protected_facts,
+                    trusted_summaries, source_ranges=early_ranges,
                 )
                 # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
                 # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
@@ -400,8 +367,7 @@ class ContextCompactor:
                 # 会话的行为逐字节等价。
                 if events is not None:
                     _validate_plan_section(
-                        candidate_summary_text,
-                        derive_plan(events).items,
+                        candidate_summary_text, derive_plan(events).items,
                     )
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
@@ -415,10 +381,7 @@ class ContextCompactor:
                         f"compressed segment ({early_tokens} tokens)"
                     )
                 candidate_messages = [*prefix, summary_message, *recent]
-                if (
-                    estimate_message_tokens(candidate_messages) + reserved_tokens
-                    >= self._auto_limit
-                ):
+                if estimate_message_tokens(candidate_messages) + reserved_tokens >= self._auto_limit:
                     raise ContextWindowExceededError(
                         "LLM summary does not reach compaction target"
                     )
@@ -432,25 +395,16 @@ class ContextCompactor:
             except Exception as exc:  # noqa: BLE001
                 # 摘要失败不能把空摘要写入事件流；先记录、再决定重试或保留原投影。
                 # CancelledError 不在这里吞（上面显式重抛）。
-                failures.append(
-                    _record_failure(
-                        attempt,
-                        exc,
-                        token_estimate,
-                        self._auto_limit,
-                        self._hard_limit,
-                        summary_model_id=attempt_model_id,
-                        duration_ms=max(
-                            round((monotonic() - attempt_started_at) * 1000), 0
-                        ),
-                        request_token_estimate=request_token_estimate,
-                        request_budget_tokens=int(self._hard_limit),
-                    )
-                )
+                failures.append(_record_failure(
+                    attempt, exc, token_estimate, self._auto_limit, self._hard_limit,
+                    summary_model_id=attempt_model_id,
+                    duration_ms=max(round((monotonic() - attempt_started_at) * 1000), 0),
+                    request_token_estimate=request_token_estimate,
+                    request_budget_tokens=int(self._hard_limit),
+                ))
                 logger.warning(
                     "Context compaction attempt %s rejected (%s)",
-                    attempt,
-                    failures[-1].error_class,
+                    attempt, failures[-1].error_class,
                 )
         if compacted is None:
             # 两次尝试都失败：旧投影仍在硬护栏内则安全继续（下一稳定边界再评估）；
@@ -466,10 +420,7 @@ class ContextCompactor:
                 ) from None
             # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
             return CompactionResult(
-                list(messages),
-                0,
-                estimate_message_tokens(messages),
-                False,
+                list(messages), 0, estimate_message_tokens(messages), False,
                 failures=failures,
             )
         count = estimate_message_tokens(compacted)
@@ -479,15 +430,13 @@ class ContextCompactor:
                 f"{count + reserved_tokens} tokens; "
                 f"hard guard {self._hard_limit:g}"
             )
-        # T4 (#134)：从投影映射计算 source_seq 区间（区间推导已在摘要尝试前完成，
-        # 见上方 `early_ranges`）。旧摘要带有原 bracket 的完整来源范围，因此下一次
+        # T4 (#134)：从投影映射计算 source_seq 区间（区间推导已在压缩前完成，
+        # 见 `early_ranges`）。旧摘要带有原 bracket 的完整来源范围，因此下一次
         # 压缩可以覆盖并替代之前的摘要。
         source_seq_start: int | None = None
         source_seq_end: int | None = None
-        if (
-            events is not None
-            and early_ranges
-            and all(source_range is not None for source_range in early_ranges)
+        if events is not None and early_ranges and all(
+            source_range is not None for source_range in early_ranges
         ):
             source_seq_start = min(source_range[0] for source_range in early_ranges)
             source_seq_end = max(source_range[1] for source_range in early_ranges)
@@ -499,22 +448,18 @@ class ContextCompactor:
             # 但无 source event range 可持久化）——补一条有界失败记录，使调用方
             # 可区分"无须压缩"（预检 0 次尝试 ⇒ failures 空）与"生成后来源失配"。
             # attempt=0 标记"非摘要尝试"；不为此伪造第 3 次摘要尝试。
-            failures.append(
-                CompactionFailure(
-                    attempt=0,
-                    error_class="source_range_unavailable",
-                    message="Cannot persist compaction without a source event range",
-                    auto_limit=int(self._auto_limit),
-                    hard_limit=int(self._hard_limit),
-                    token_estimate=token_estimate,
-                    summary_model_id=summary_model_id,
-                    duration_ms=max(
-                        round((monotonic() - summary_started_at) * 1000), 0
-                    ),
-                    request_token_estimate=request_token_estimate,
-                    request_budget_tokens=int(self._hard_limit),
-                )
-            )
+            failures.append(CompactionFailure(
+                attempt=0,
+                error_class="source_range_unavailable",
+                message="Cannot persist compaction without a source event range",
+                auto_limit=int(self._auto_limit),
+                hard_limit=int(self._hard_limit),
+                token_estimate=token_estimate,
+                summary_model_id=summary_model_id,
+                duration_ms=max(round((monotonic() - summary_started_at) * 1000), 0),
+                request_token_estimate=request_token_estimate,
+                request_budget_tokens=int(self._hard_limit),
+            ))
             if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError(
                     "Cannot persist compaction without a source event range",
@@ -522,10 +467,7 @@ class ContextCompactor:
                 )
             # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
             return CompactionResult(
-                list(messages),
-                0,
-                estimate_message_tokens(messages),
-                False,
+                list(messages), 0, estimate_message_tokens(messages), False,
                 failures=failures,
             )
         return CompactionResult(
@@ -619,12 +561,8 @@ def _fenced_mask(lines: list[str]) -> list[bool]:
                 opened = (delimiter[0], delimiter[1])
         else:
             mask.append(True)
-            if (
-                delimiter is not None
-                and delimiter[0] == opened[0]
-                and delimiter[1] >= opened[1]
-                and not delimiter[2].strip()
-            ):
+            if (delimiter is not None and delimiter[0] == opened[0]
+                    and delimiter[1] >= opened[1] and not delimiter[2].strip()):
                 opened = None
     return mask
 
@@ -684,8 +622,7 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     fenced = _fenced_mask(lines)
     reserved = set(headings)
     heading_positions = [
-        index
-        for index, line in enumerate(lines)
+        index for index, line in enumerate(lines)
         if not fenced[index]
         and not line.startswith(_HEADING_ESCAPE)
         and line in reserved
@@ -696,12 +633,9 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
         raise ValueError("Summary contains text outside its sections")
     contents = []
     for position, line_number in enumerate(heading_positions):
-        end = (
-            heading_positions[position + 1]
-            if position + 1 < len(heading_positions)
-            else len(lines)
-        )
-        content = "\n".join(lines[line_number + 1 : end]).strip()
+        end = (heading_positions[position + 1]
+               if position + 1 < len(heading_positions) else len(lines))
+        content = "\n".join(lines[line_number + 1:end]).strip()
         if not content:
             raise ValueError("Empty summary section must use (none)")
         contents.append(_unescape_section_body(content, headings))
@@ -810,12 +744,15 @@ def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
     折叠为引用 + 回读 ref，原文活在事件流；历史 goal 不再逐字累积，一行归档
     计数指回 SessionEvent 持久历史（不变量 #6：完整保存 ≠ 完整注入）。
     """
-    goals = [fact for fact in (protected_facts or []) if fact.type == "user_goal"]
+    goals = [
+        fact for fact in (protected_facts or [])
+        if fact.type == "user_goal"
+    ]
     if not goals:
         return "(none)"
     current = max(goals, key=lambda fact: fact.source_seq)
     # JSON 字符串编码（旧 [0] 即 JSON，形状延续）：节内容回读时有外层 strip
-    # （`_parse_summary_sections`），裸文本的尾随空白/换行会破坏精确比对；
+    #（`_parse_summary_sections`），裸文本的尾随空白/换行会破坏精确比对；
     # 编码同时隔离 goal 正文里 heading 样式的行（防伪造节边界）。
     body = json.dumps(current.value, ensure_ascii=False)
     archived = len(goals) - 1
@@ -836,8 +773,7 @@ def _capped_entries(entries: list[str]) -> list[str]:
     一致：同值重复保留最后出现的那条。
     """
     trimmed = [
-        entry
-        if len(entry) <= _PROG_SECTION_MAX_ENTRY_CHARS
+        entry if len(entry) <= _PROG_SECTION_MAX_ENTRY_CHARS
         else entry[:_PROG_SECTION_MAX_ENTRY_CHARS] + "…"
         for entry in entries
     ]
@@ -882,16 +818,11 @@ def _trusted_summary_indices(
             continue
         start = event.data.get("source_seq_start")
         end = event.data.get("source_seq_end")
-        if (
-            isinstance(start, int)
-            and not isinstance(start, bool)
-            and isinstance(end, int)
-            and not isinstance(end, bool)
-        ):
+        if (isinstance(start, int) and not isinstance(start, bool)
+                and isinstance(end, int) and not isinstance(end, bool)):
             bracket_ranges.add((start, end))
     return frozenset(
-        index
-        for index, message in enumerate(early)
+        index for index, message in enumerate(early)
         if _is_compaction_summary(message)
         and early_ranges[index] is not None
         and (early_ranges[index][0], early_ranges[index][1]) in bracket_ranges
@@ -931,12 +862,8 @@ def _programmatic_summary_sections(
         if value == "(none)":
             return []
         parsed = json.loads(value)
-        if not isinstance(parsed, list) or not all(
-            isinstance(item, str) for item in parsed
-        ):
-            raise ValueError(
-                "Previous summary programmatic section is not a string list"
-            )
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError("Previous summary programmatic section is not a string list")
         return parsed
 
     identifiers: list[str] = []
@@ -951,11 +878,8 @@ def _programmatic_summary_sections(
                     if normalized in _PATH_FIELDS:
                         add_once(file_paths, child)
                         add_once(identifiers, child)
-                    if (
-                        normalized in _EXACT_FIELDS
-                        or normalized == "id"
-                        or normalized.endswith("_id")
-                    ):
+                    if (normalized in _EXACT_FIELDS or normalized == "id"
+                            or normalized.endswith("_id")):
                         add_once(identifiers, child)
                     for match in _NUMBER_PATTERN.finditer(child):
                         add_once(identifiers, match.group())
@@ -1036,20 +960,16 @@ def _programmatic_summary_sections(
         # 裁决 4（#642）：pf=None 与 pf=[] 同判——[1] 只承载 protected_facts
         # 通道，不再有任何"从先前摘要继承"的宽松分支（fail-closed）。
         _SUMMARY_HEADINGS[1]: (
-            serialize_protected_facts(protected_facts) if protected_facts else "(none)"
+            serialize_protected_facts(protected_facts)
+            if protected_facts
+            else "(none)"
         ),
         _SUMMARY_HEADINGS[6]: json.dumps(
-            _capped_entries(identifiers),
-            ensure_ascii=False,
-        )
-        if identifiers
-        else "(none)",
+            _capped_entries(identifiers), ensure_ascii=False,
+        ) if identifiers else "(none)",
         _SUMMARY_HEADINGS[7]: json.dumps(
-            _capped_entries(file_paths),
-            ensure_ascii=False,
-        )
-        if file_paths
-        else "(none)",
+            _capped_entries(file_paths), ensure_ascii=False,
+        ) if file_paths else "(none)",
     }
 
 
@@ -1063,17 +983,14 @@ def _is_compaction_summary(message: AnyMessage) -> bool:
 
 
 def _assemble_summary(
-    messages: list[AnyMessage],
-    model_sections: list[str],
+    messages: list[AnyMessage], model_sections: list[str],
     protected_facts: list[ProtectedFact] | None = None,
-    source_ranges: list[tuple[int, int] | None] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
+    source_ranges: list[tuple[int, int] | None] | None = None,
 ) -> str:
     programmatic = _programmatic_summary_sections(
-        messages,
-        protected_facts,
-        source_ranges=source_ranges,
-        trusted_summaries=trusted_summaries,
+        messages, protected_facts,
+        source_ranges=source_ranges, trusted_summaries=trusted_summaries,
     )
     bodies = [programmatic.get(heading, "") for heading in _SUMMARY_HEADINGS]
     for index, body in enumerate(model_sections, start=2):
@@ -1085,18 +1002,15 @@ def _assemble_summary(
 
 
 def _validate_summary(
-    summary: str,
-    messages: list[AnyMessage],
+    summary: str, messages: list[AnyMessage],
     protected_facts: list[ProtectedFact] | None = None,
-    source_ranges: list[tuple[int, int] | None] | None = None,
     trusted_summaries: frozenset[int] = frozenset(),
+    source_ranges: list[tuple[int, int] | None] | None = None,
 ) -> None:
     sections = _parse_summary_sections(summary, _SUMMARY_HEADINGS)
     expected = _programmatic_summary_sections(
-        messages,
-        protected_facts,
-        source_ranges=source_ranges,
-        trusted_summaries=trusted_summaries,
+        messages, protected_facts,
+        source_ranges=source_ranges, trusted_summaries=trusted_summaries,
     )
     for index in _PROGRAMMATIC_SUMMARY_HEADINGS:
         if sections[index] != expected[_SUMMARY_HEADINGS[index]]:
@@ -1106,8 +1020,7 @@ def _validate_summary(
 
 
 def _validate_plan_section(
-    summary: str,
-    plan_items: tuple[PlanItem, ...],
+    summary: str, plan_items: tuple[PlanItem, ...],
 ) -> None:
     """W-29 (#383)：摘要第 5 节 ↔ 进度清单 in_progress 项一致性闸门。
 
@@ -1133,8 +1046,7 @@ def _validate_plan_section(
             )
         return
     missing = [
-        item.id
-        for item in in_progress
+        item.id for item in in_progress
         if item.content not in section and item.active_form not in section
     ]
     if missing:
@@ -1157,11 +1069,8 @@ def _validate_tool_blocks(messages: list[AnyMessage]) -> None:
             while index < len(messages) and isinstance(messages[index], ToolMessage):
                 actual.append(messages[index].tool_call_id)
                 index += 1
-            if (
-                not all(expected)
-                or len(set(expected)) != len(expected)
-                or sorted(expected) != sorted(actual)
-            ):
+            if (not all(expected) or len(set(expected)) != len(expected)
+                    or sorted(expected) != sorted(actual)):
                 raise ContextWindowExceededError("Invalid tool call/result block")
         elif isinstance(message, ToolMessage):
             raise ContextWindowExceededError("Orphan tool result in context")
@@ -1191,25 +1100,18 @@ def _classify_failure(exc: BaseException) -> str:
         message = str(exc)
         if message.startswith("Empty summary section"):
             return "empty_section"
-        if "Programmatic summary section" in message or message.startswith(
-            "Previous summary"
-        ):
+        if ("Programmatic summary section" in message
+                or message.startswith("Previous summary")):
             return "programmatic_mismatch"
         return "heading_mismatch"
     return "transport_error"
 
 
 def _record_failure(
-    attempt: int,
-    exc: BaseException,
-    token_estimate: int,
-    auto_limit: float,
-    hard_limit: float,
-    *,
-    summary_model_id: str | None,
-    duration_ms: int,
-    request_token_estimate: int,
-    request_budget_tokens: int,
+    attempt: int, exc: BaseException, token_estimate: int,
+    auto_limit: float, hard_limit: float,
+    *, summary_model_id: str | None, duration_ms: int,
+    request_token_estimate: int, request_budget_tokens: int,
 ) -> CompactionFailure:
     """一次尝试的异常 → 有界 CompactionFailure。
 
