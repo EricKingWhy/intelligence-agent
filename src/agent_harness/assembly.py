@@ -478,8 +478,13 @@ async def build_runtime(
     profile_spec = None
     if agent_profile is not None:
         profile_spec = BUILTIN_PROFILES[agent_profile]
+    instruction_workspace = (
+        workspace_registry.get(session_id)
+        if workspace_registry.exists(session_id)
+        else workspace
+    )
     instruction_cwd = _project_instruction_cwd(
-        workspace, workspace_registry, session_id,
+        instruction_workspace, workspace_registry, session_id,
     )
     project_instructions = project_instruction_store(settings)
     await asyncio.to_thread(

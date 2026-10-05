@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import shutil
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,7 @@ async def _build(
     session_id: str,
     *,
     workspace_as_sandbox: bool = False,
+    sandbox_workspace_root: Path | None = None,
 ):
     settings = Settings(
         _env_file=None,
@@ -45,11 +47,18 @@ async def _build(
     workspace_registry = WorkspaceRegistry(
         root=tmp_path / "harness", backend="local",
     )
-    runtime_workspace = (
-        workspace_registry.create(session_id, workspace_root=workspace)
-        if workspace_as_sandbox
-        else workspace
-    )
+    if workspace_as_sandbox:
+        runtime_workspace = workspace_registry.create(
+            session_id,
+            workspace_root=sandbox_workspace_root or workspace,
+        )
+    else:
+        if sandbox_workspace_root is not None:
+            workspace_registry.create(
+                session_id,
+                workspace_root=sandbox_workspace_root,
+            )
+        runtime_workspace = workspace
     with patch("agent_harness.assembly.create_chat_model", return_value=_ModelFactory()):
         runtime = await build_runtime(
             settings=settings,
@@ -119,6 +128,46 @@ async def test_runtime_injects_root_rules_then_lazily_loaded_nested_rules(
     assert str(root_rules) in first_text and "root instruction" in first_text
     assert str(nested_rules) not in first_text
     assert str(nested_rules) in second_text and "nested instruction" in second_text
+
+
+@pytest.mark.asyncio
+async def test_fork_runtime_loads_instructions_from_its_workspace_snapshot(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    root_rules = repository / "AGENTS.md"
+    root_rules.write_text("root instruction at fork", encoding="utf-8")
+    nested = repository / "src"
+    nested.mkdir()
+    nested_rules = nested / "AGENTS.md"
+    nested_rules.write_text("nested instruction at fork", encoding="utf-8")
+    (nested / "module.py").write_text("value = 1", encoding="utf-8")
+
+    child_workspace = (
+        tmp_path / "harness" / "workspaces" / "session-fork-project-instructions"
+    )
+    child_workspace.parent.mkdir(parents=True)
+    shutil.copytree(repository, child_workspace)
+    root_rules.write_text("parent root changed after fork", encoding="utf-8")
+    nested_rules.write_text("parent nested changed after fork", encoding="utf-8")
+
+    runtime, session = await _build(
+        tmp_path,
+        repository,
+        "session-fork-project-instructions",
+        sandbox_workspace_root=child_workspace,
+    )
+    read_tool = next(tool for tool in runtime.registry.list() if tool.name == "read")
+    read_result = await read_tool.execute(read_tool.args_schema(path="src/module.py"))
+    messages = await runtime._context_builder.build(session)
+    prompt_text = "\n".join(str(message.content) for message in messages)
+
+    assert read_result.ok
+    assert "root instruction at fork" in prompt_text
+    assert "nested instruction at fork" in prompt_text
+    assert "parent root changed after fork" not in prompt_text
+    assert "parent nested changed after fork" not in prompt_text
 
 
 @pytest.mark.asyncio
