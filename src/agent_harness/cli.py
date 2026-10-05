@@ -107,6 +107,10 @@ from agent_harness.tooling.contract import PermissionPolicy
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 3
 
+#: 陈旧账行名清除通道（#616）的 CLI 入口标识，写进 `session_budget_events` 审计的
+#: `source` 字段（与 Web 的 `PURGE_ENTRY_API` 同款，只是入口不同）。
+PURGE_ENTRY_CLI = "cli"
+
 
 class StreamRenderer:
     """AgentEvent → 终端文本（事件流的纯函数；write 注入便于测试）。
@@ -921,6 +925,9 @@ def _main_dispatch() -> None:
     if argv and argv[0] == "sessions":
         _main_sessions(argv[1:])
         return
+    if argv and argv[0] == "budgets":
+        _main_budgets(argv[1:])
+        return
     if argv and argv[0] == "replay":
         _main_replay(argv[1:])
         return
@@ -1653,6 +1660,89 @@ async def sessions_command(
     if not roots:
         return "（暂无会话）"
     return render_lineage_tree(roots)
+
+
+def _main_budgets(argv: list[str]) -> None:
+    """CLI budgets 入口（#616）：陈旧账行名（`session_budgets.tool_call_limits`
+    里不在根 registry 的名字）的公开清除通道。
+
+    整会话重整（未点名 `--tool`）是唯一需要二次确认的形态：无 `--yes` 时本函数只打印
+    将清名单并 `SystemExit(2)` 拒绝执行（零改动）；`--tool` 单名收窄与 `--yes` 整会话
+    重整都真执行。CLI 是同一个 `SessionService` 方法的瘦客户端（ADR-0045 D8）。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness budgets")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    clear = subcommands.add_parser(
+        "clear-stale-tools",
+        help="清掉会话账行里不在根 registry 的陈旧工具名（#616）",
+    )
+    clear.add_argument("--session", required=True, help="要清理的会话 id")
+    clear.add_argument(
+        "--tool", default=None, metavar="NAME",
+        help="只清这一个工具名（收窄）；服务端仍按根 registry 判 stale",
+    )
+    clear.add_argument(
+        "--yes", action="store_true",
+        help="整会话重整的显式确认；缺省时只打印将清名单并拒绝执行",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    confirm_required = args.tool is None and not args.yes
+    try:
+        output = asyncio.run(
+            budgets_clear_stale_tools_command(
+                session=args.session, tool=args.tool, yes=args.yes,
+            )
+        )
+    except (InvalidSessionId, SessionNotFound) as error:
+        print(f"清理失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(output)
+    if confirm_required:
+        raise SystemExit(2)
+
+
+async def budgets_clear_stale_tools_command(
+    *, session: str, tool: str | None, yes: bool, workspace_dir: str | None = None,
+) -> str:
+    """`budgets clear-stale-tools` 的可测核心：返回渲染文本（#616）。
+
+    CLI 是 API 的瘦客户端（ADR-0045 D8）：判定（谁陈旧）与落盘全在
+    `SessionService.purge_stale_session_tool_limits`；本层只做参数解析 / 确认面 /
+    文本渲染，不重算规则。
+
+    确认面：整会话重整（`tool` 为空）默认只 `dry_run` 取将清名单、**零写入**，由
+    `_main_budgets` 打印后 `SystemExit(2)` 拒绝；`--yes` 或点名 `--tool`（单名收窄）
+    才真执行。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    service = await _cli_session_service(settings)
+    dry_run = tool is None and not yes
+    result = await service.purge_stale_session_tool_limits(
+        session, tool=tool, entry_point=PURGE_ENTRY_CLI, dry_run=dry_run,
+    )
+    if not result.purged:
+        scope = "将清名单" if dry_run else "清理结果"
+        return f"会话 {session} 无陈旧工具名，{scope}为空（未改动）。"
+    if dry_run:
+        lines = [f"会话 {session} 将清除以下陈旧工具名（未确认，未改动）："]
+    else:
+        lines = [
+            (
+                f"会话 {session} 已清除 {result.rows} 个陈旧工具名"
+                f"（version={result.version}）："
+            )
+        ]
+    lines.extend(
+        f"  {name} = {ceiling}" for name, ceiling in sorted(result.purged.items())
+    )
+    if dry_run:
+        lines.append("加 --yes 执行清理。")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

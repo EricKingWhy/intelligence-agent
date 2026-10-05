@@ -531,6 +531,10 @@ class ContextBuilder:
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
                 "bracket_id": bracket_id,
+                "summary_model_id": result.summary_model_id,
+                "duration_ms": result.duration_ms,
+                "request_token_estimate": result.request_token_estimate,
+                "request_budget_tokens": result.request_budget_tokens,
             })
             session.append(COMPACTION_END, {
                 "bracket_id": bracket_id,
@@ -661,8 +665,9 @@ class ContextBuilder:
     ) -> None:
         """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
 
-        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 进入压缩时
-        的估算）；`message` 已在 compactor 侧按"只装自家文案或类型名"脱敏。失败
+        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 压缩前估算 /
+        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
+        `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
         """
         for failure in failures:
@@ -673,6 +678,10 @@ class ContextBuilder:
                 "auto_limit": failure.auto_limit,
                 "hard_limit": failure.hard_limit,
                 "token_estimate": failure.token_estimate,
+                "summary_model_id": failure.summary_model_id,
+                "duration_ms": failure.duration_ms,
+                "request_token_estimate": failure.request_token_estimate,
+                "request_budget_tokens": failure.request_budget_tokens,
             })
 
     def _reproject(self, session: Session) -> list[AnyMessage]:

@@ -188,7 +188,10 @@ from agent_harness.session.task import (
     derive_task_state,
 )
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
-from agent_harness.storage.delegation_tree import SessionBudgetHandle
+from agent_harness.storage.delegation_tree import (
+    SessionBudgetHandle,
+    SessionToolLimitsPurge,
+)
 from agent_harness.storage.local_artifact import discard_local_artifacts
 from agent_harness.storage.operation import needs_reconcile
 from agent_harness.storage.session_meta import SessionMeta
@@ -228,6 +231,10 @@ logger = logging.getLogger(__name__)
 #: 字面量——审计格式只此一处定义，免得两个入口各写一套、迟早漂移成对不上账的记录
 #: （`memory/audit.py::ENTRY_*` 同款）。
 ARCHIVE_ENTRY_API = "api"
+
+#: 陈旧账行名清除通道（#616）的 API 入口标识，写进 `session_budget_events` 审计的
+#: `source` 字段。与 `ARCHIVE_ENTRY_API` 同一份定义/同款风格——Web 端点只引用这一处。
+PURGE_ENTRY_API = "api"
 
 
 # ── 领域异常 ──────────────────────────────────────────────────────────
@@ -572,6 +579,29 @@ class SessionDeclarationValidator(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class RegisteredToolNamesProvider(Protocol):
+    """`#616` 根 registry 名字集的**领域端口**（判据 = 根 registry 的树级语义）。
+
+    返回某会话视角下**根 registry** 当前注册的工具名集合；陈旧账行名的判定
+    （`session_budgets.tool_call_limits` 的键 ∉ 本集合）依赖它。名字集的计算是
+    组合层的事（`assembly.root_registry_tool_names`，零副作用投影；与
+    `build_runtime` 同源，一致性由 `tests/test_assembly_root_registry_names.py`
+    三方对账钉住）——领域层 import 组合层类型会被 import 边界守卫
+    （`tests/session/test_service_collaborators.py`）拦下，所以同
+    `SessionDeclarationValidator` 一样由组合根注入实现
+    （`web/app.py::session_service` 唯一适配点）。
+
+    **不得**改回完整 `_build_tooling`——那会构造 sandbox 并在归属对账前 mkdir
+    workspace（审查 P2-1）。
+
+    未注入（直构 `SessionService` 的调用方）⇒ 清除通道 **fail-closed**：拿空名字集
+    去算会把**全部** ceiling 误判为陈旧并清空，所以调用方必须显式注入。
+    """
+
+    async def __call__(self, session_id: str) -> frozenset[str]: ...
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -604,6 +634,7 @@ class SessionService:
         ensure_stores: Callable[[], Awaitable[None]],
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
         validate_session_declaration: SessionDeclarationValidator | None = None,
+        registered_tool_names: RegisteredToolNamesProvider | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -622,6 +653,7 @@ class SessionService:
         self._ensure_stores = ensure_stores
         self._get_wiring = get_wiring
         self._validate_session_declaration = validate_session_declaration
+        self._registered_tool_names = registered_tool_names
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -2602,6 +2634,107 @@ class SessionService:
         )
         return archived
 
+    # ── 陈旧账行名清除（#616）─────────────────────────────────────────
+
+    async def purge_stale_session_tool_limits(
+        self,
+        session_id: str,
+        *,
+        tool: str | None = None,
+        entry_point: str,
+        dry_run: bool = False,
+    ) -> SessionToolLimitsPurge:
+        """清掉 `session_budgets.tool_call_limits` 里**不在根 registry** 的陈旧名（#616）。
+
+        #564 裁决 (a) 之后，坏名不再被新请求写入账行，但存量坏名（一次打错请求留下的）
+        永久留存、每次 resume 重复告警。本方法是那条"存量陈旧账行的公开清除通道"：
+        服务端用**根 registry** 权威判 stale（树级语义，客户端不掌握），只删 ceiling
+        表里的陈旧键——**不动**消耗事实表 `tool_calls_by_tool` / `tool_attempts_by_tool`，
+        也**不落** typed SessionEvent（预算变更本就不进会话真相；不变量 #16/#22）。
+
+        守卫与语义：
+
+        1. 形态 + 存在性复用 `_require_existing_session`：422 `InvalidSessionId` 先于
+           404 `SessionNotFound`，与 `set_archived` / `delete_session` 同一套判据与文案
+           （清除**不是**在途 run 冲突，故无 409）。
+        2. 端口 `registered_tool_names` 未注入 ⇒ `RuntimeError` **fail-closed**：绝不
+           拿空名字集去算（那会把**全部** ceiling 误判为陈旧并清空）。
+        3. `tool` 未指定 ⇒ 整会话重整（清全部 stale 键）；`tool` 指定 ⇒ 仅当它落在
+           stale 集才清它，点名**正常注册名 / 从未存在名**都是零改动 no-op。
+        4. 判定在服务层（掌握根 registry），落盘在存储层单事务
+           （`purge_session_tool_limits`：删键 + `tool_limits_purged` 审计 + version+1）。
+           无 stale 键 ⇒ 直接返回空结果，不触碰账行、不碰审计、不 bump version。
+        5. 审计痕迹：与 `set_archived` ⑤ 同款取舍——只落结构化日志（不是会话真相），
+           只带 id / 动作 / 被清名，不带会话正文（已清名 → ceiling 的 durable 记录在
+           `session_budget_events`）。
+        6. `dry_run=True`（CLI 整会话重整的确认面）⇒ 照常算 stale 候选并返回
+           **将清**的 `purged`（名 → 原 ceiling）与清后的 `remaining`，但 `rows=0`、
+           `version` 为当前版本，**零写入**（不调存储写、不 INSERT 事件、不 bump）。
+           供 CLI 打印"将清名单"后决定是否真执行。
+        """
+        await self._require_existing_session(session_id)
+        budget_key, table, stale, version = await self._stale_tool_limit_candidates(
+            session_id, tool=tool
+        )
+        if not stale:
+            return SessionToolLimitsPurge(
+                purged={}, remaining=table, rows=0, version=version,
+            )
+        if dry_run:
+            return SessionToolLimitsPurge(
+                purged={name: table[name] for name in stale},
+                remaining={name: value for name, value in table.items() if name not in stale},
+                rows=0,
+                version=version,
+            )
+        result = await self._stores.delegation_tree_ledger.purge_session_tool_limits(
+            budget_key, names=stale, source=entry_point,
+        )
+        log_event(
+            logger,
+            "system_log",
+            f"session stale tool ceilings purged: {session_id}",
+            component="session_budget",
+            outcome="tool_limits_purged",
+            session_id=session_id,
+            entry_point=entry_point,
+            purged=sorted(result.purged),
+        )
+        return result
+
+    async def _stale_tool_limit_candidates(
+        self, session_id: str, *, tool: str | None,
+    ) -> tuple[str, dict[str, int], set[str], int]:
+        """算出 `(budget_key, ceiling 表, 陈旧候选名, 当前 version)`（#616）。
+
+        `purge_stale_session_tool_limits` 的真执行与 `dry_run` 共用本 helper——
+        判据（谁陈旧）只写一遍，免得两条路径各算一套迟早漂移。
+
+        fail-closed：端口 `registered_tool_names` 未注入 ⇒ `RuntimeError`，绝不拿
+        空名字集把**全部** ceiling 误判为陈旧。`tool` 未指定 ⇒ 整会话（清全部 stale
+        键）；`tool` 指定 ⇒ 仅当它落在 stale 集才收窄为它，点名正常/未知名 → 空集
+        （调用方据此走零改动 no-op）。
+        """
+        if self._registered_tool_names is None:
+            raise RuntimeError(
+                "registered_tool_names 端口未注入（组合根未适配）：拒绝以空名字集"
+                "清理——否则会把全部 ceiling 误判为陈旧并清空（fail-closed）"
+            )
+        registered = await self._registered_tool_names(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        budget_key = session_budget_key(events, session_id=session_id)
+        snapshot = await self._stores.delegation_tree_ledger.get_session_budget(
+            budget_key
+        )
+        table: dict[str, int] = (
+            dict(snapshot.limits.tool_call_limits) if snapshot is not None else {}
+        )
+        stale = {name for name in table if name not in registered}
+        if tool is not None:
+            stale = {tool} if tool in stale else set()
+        version = snapshot.version if snapshot is not None else 0
+        return budget_key, table, stale, version
+
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
     async def delete_session(self, session_id: str) -> SessionDeletionStats:
@@ -3009,6 +3142,7 @@ class SessionService:
             operation_ledger=self._operation_ledger,
             workspace_registry=self._workspace_registry,
             database_path=self._harness_db,
+            session_budget_ledger=self._stores.delegation_tree_ledger,
         )
         return results
 
