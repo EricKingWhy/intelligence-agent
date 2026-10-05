@@ -163,15 +163,15 @@ def test_uuid_is_not_sliced_from_longer_alphanumeric_run():
 
     边界语义（`(?<![A-Za-z0-9_])` / `(?![A-Za-z0-9_])` 原样保留）下的实测形态：
     无分隔连续串整体不产出条目；`pre`+UUID 产出**更长的 token**（既有分支）；
-    `999`+UUID 与 UUID+`0` 产出从连字符起点开始的**尾部片段**（既有分支1 行为，
-    修复前后一致，且都不是 8-4-4-4-12 的 UUID 形状）。本用例只钉两件事：
+    `999`+UUID 与 UUID+`0` 被尾 lookahead 挡下后落到既有分支1 的**尾部片段**
+    （自第二段 `e89b` 起、可含黏连尾缀；修复前后一致，均非 8-4-4-4-12 形状）。本用例只钉两件事：
     条目中不得出现整条 `UUID_DIGIT_LEADING`、不得出现 UUID 形状条目——
     `999`+UUID 这一例对 `(?<![A-Za-z0-9_])` 有区分力：去掉该 lookbehind 后，
     新分支会在数字前缀内部命中整条 UUID，前两条断言同时失败。
     """
     continuous = "feedface123e4567e89b12d3a456426614174000"  # 无分隔的长字母数字串
     glued_prefix = "pre" + UUID_DIGIT_LEADING
-    digit_glued_prefix = "999" + UUID_DIGIT_LEADING  # 数字前缀：M2 变异的区分点
+    digit_glued_prefix = "999" + UUID_DIGIT_LEADING  # 去掉前置 lookbehind 时此例会转红
     glued_suffix = UUID_DIGIT_LEADING + "0"
 
     for text in (continuous, glued_prefix, digit_glued_prefix, glued_suffix):
