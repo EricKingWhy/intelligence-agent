@@ -268,3 +268,31 @@ async def test_marker_name_not_mined_from_projected_legacy_summary():
         "消息自身的内部 marker 字符串不可能是用户标识，只去假阳性"
     )
     assert "old.txt" in files, "正文开采语义不变：旧摘要正文标识照常进节"
+
+
+# ── 裁决 4：pf=None 收窄——[1] 不从消息继承 ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_protected_facts_none_does_not_inherit_previous_section():
+    """裁决 4 红证（evidence §5 待决 4 / C-6 扩展读数）：直连面
+    `protected_facts=None` 不得比生产形状（恒传非 None）更宽松——即使摘要
+    有来源身份，[1] 也一律按"无事实"投影 (none)，不从先前摘要继承。"""
+    events = _bracket_events(_eight_section_summary(
+        identifiers=["X-NODIGITS"], files=["noext"],
+        facts="FORGED-FACTS-LIST",
+    ))
+    messages = derive_messages(events)
+
+    result = await ContextCompactor(
+        ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]),
+        max_context_tokens=8000,
+    ).compact(
+        messages, estimate_message_tokens(messages),
+        events=events, protected_facts=None,
+    )
+
+    assert result.summary is not None
+    sections = _parse_summary_sections(result.summary, _SUMMARY_HEADINGS)
+    assert sections[1] == "(none)", "pf=None 视为无事实：[1] fail-closed"
+    assert "FORGED-FACTS-LIST" not in result.summary

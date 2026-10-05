@@ -783,7 +783,6 @@ def _programmatic_summary_sections(
 
     identifiers: list[str] = []
     file_paths: list[str] = []
-    protected_facts_body = "(none)"
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -830,8 +829,9 @@ def _programmatic_summary_sections(
             and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")
         ):
             previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
-            if protected_facts is None:
-                protected_facts_body = previous[1]
+            # 裁决 4（#642）：pf=None 直连面不再从先前摘要继承 [1]——
+            # `protected_facts=None` 一律按"无事实"投影 (none)（fail-closed）。
+            # 生产路径恒传非 None（builder.py），生产行为逐字不变。
             previous_identifiers = decode_summary_values(previous[6])
             previous_paths = decode_summary_values(previous[7])
             for value in previous_identifiers:
@@ -851,12 +851,12 @@ def _programmatic_summary_sections(
 
     return {
         _SUMMARY_HEADINGS[0]: _current_goal_body(protected_facts),
+        # 裁决 4（#642）：pf=None 与 pf=[] 同判——[1] 只承载 protected_facts
+        # 通道，不再有任何"从先前摘要继承"的宽松分支（fail-closed）。
         _SUMMARY_HEADINGS[1]: (
             serialize_protected_facts(protected_facts)
             if protected_facts
             else "(none)"
-            if protected_facts is not None
-            else protected_facts_body
         ),
         _SUMMARY_HEADINGS[6]: json.dumps(
             _capped_entries(identifiers), ensure_ascii=False,
