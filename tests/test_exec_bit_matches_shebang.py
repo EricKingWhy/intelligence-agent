@@ -222,9 +222,14 @@ def test_read_blob_heads_marks_a_missing_object_as_unreadable(mod, index_snapsho
     assert len(heads[real_sha] or b"") == 2, f"头必须是 2 字节，实得 {heads[real_sha]!r}"
 
 
+def _clean_git_env() -> dict[str, str]:
+    """剥掉继承的 GIT_*：hook 上下文注入的 GIT_DIR 会把 tmp 仓库操作劫持到外层仓库（#668）。"""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git(cwd: Path, *args: str) -> str:
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", check=False)
+                          encoding="utf-8", check=False, env=_clean_git_env())
     assert proc.returncode == 0, f"git {' '.join(args)} 失败：{proc.stderr}"
     return proc.stdout
 
@@ -232,7 +237,7 @@ def _git(cwd: Path, *args: str) -> str:
 def _git_allow_fail(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """与 `_git` 同形，但**不**要求 rc=0 —— 造冲突必须用它（`git merge` 冲突时必然非 0）。"""
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", check=False)
+                          encoding="utf-8", check=False, env=_clean_git_env())
 
 
 def test_cli_flags_the_incident_shape_in_a_real_repo(tmp_path, mod):

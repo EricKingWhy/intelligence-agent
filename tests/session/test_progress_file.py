@@ -598,16 +598,18 @@ class TestKillMidWriteWindows:
 class TestGitVisibility:
     @pytest.mark.skipif(shutil.which("git") is None, reason="需要 git")
     def test_file_visible_in_status_index_untouched(self, tmp_path) -> None:
+        # 剥掉继承的 GIT_*：hook 注入的 GIT_DIR 会把 tmp 仓库操作劫持到外层仓库（#668）。
+        git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         for args in (
             ["init"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
         ):
             subprocess.run(["git", "-C", str(tmp_path), *args], check=True,
-                           capture_output=True)
+                           capture_output=True, env=git_env)
         (tmp_path / "seed.txt").write_text("seed", encoding="utf-8")
         subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True,
-                       capture_output=True)
+                       capture_output=True, env=git_env)
         subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "seed"], check=True,
-                       capture_output=True)
+                       capture_output=True, env=git_env)
         session = _session(tmp_path / ".store")
         apply_task_definition(session, task_text="T")
         outcome = write_progress_file(

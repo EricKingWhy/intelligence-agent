@@ -191,7 +191,7 @@ def test_resolve_trees_rejects_a_line_that_is_not_a_tree(gate, tmp_path, monkeyp
 def _git(repo: Path, *args: str) -> str:
     """在合成仓库里跑 git。**屏蔽全局/系统 config**：否则 `core.hooksPath` / `autocrlf` /
     `commit.gpgsign` 这些本机设置会让测试结果依赖跑测试的那台机器。"""
-    env = dict(os.environ)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update({
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_SYSTEM": os.devnull,
