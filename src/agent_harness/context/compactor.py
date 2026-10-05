@@ -185,6 +185,28 @@ class CompactionResult:
 #: （section `aux:compaction`）——改文案开那一个文件。
 
 
+def compactable_early_window(messages: list[AnyMessage]) -> tuple[int, int]:
+    """early 压缩窗口的判据：返回 `(prefix_end, cut)`。
+
+    - `prefix_end`：跳过的前导 **非摘要** `SystemMessage` 数。前导摘要
+      （`_is_compaction_summary`，含旧版 SystemMessage 形态）是 early 窗口的**起点**，
+      不是可跳过的前缀——遇它即停。
+    - `cut`：最后一条 `HumanMessage` 的下标（无 HumanMessage 时回落到 `prefix_end`）。
+
+    `[prefix_end:cut]` 即待摘要的 early 段、`[cut:]` 是保留的 recent 段。
+    `ContextCompactor.compact`（自动路径）与 dry-run 预览（`_has_compactable_early_turn`）
+    共用本函数——判据只有一份，此前两处各抄一遍会漂移（G3 #635）。
+    """
+    prefix_end = 0
+    while (prefix_end < len(messages)
+           and isinstance(messages[prefix_end], SystemMessage)
+           and not _is_compaction_summary(messages[prefix_end])):
+        prefix_end += 1
+    cut = max((i for i, message in enumerate(messages)
+               if isinstance(message, HumanMessage)), default=prefix_end)
+    return prefix_end, cut
+
+
 class ContextCompactor:
     def __init__(self, model_provider: Any, *, max_context_tokens: int = 200_000,
                  auto_compact_threshold: float = 0.70,
@@ -235,14 +257,8 @@ class ContextCompactor:
         if reserved_tokens < 0:
             raise ValueError("reserved_tokens must be non-negative")
         _validate_tool_blocks(messages)
-        prefix_end = 0
-        while (prefix_end < len(messages)
-               and isinstance(messages[prefix_end], SystemMessage)
-               and not _is_compaction_summary(messages[prefix_end])):
-            prefix_end += 1
+        prefix_end, cut = compactable_early_window(messages)
         prefix = messages[:prefix_end]
-        cut = max((i for i, message in enumerate(messages)
-                   if isinstance(message, HumanMessage)), default=prefix_end)
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)
