@@ -132,7 +132,12 @@ class _SummaryRejected(ValueError):
 
 
 class ContextWindowExceededError(RuntimeError):
-    """无法构造安全的模型上下文，调用方必须停止当前 run。"""
+    """无法构造安全的模型上下文，调用方必须停止当前 run。
+
+    语义上覆盖"写前"（预检 / 校验 / 源区间不可用）与"写后"（bracket 已落盘但复核
+    未过）两类；区分二者用子类 `CompactionPostWriteError`——只有"写前"失败才允许
+    被手动路径吞成"水位过低、未改动"，"写后"失败必须响亮（历史已多出 bracket）。
+    """
 
     def __init__(
         self, message: str, *,
@@ -142,6 +147,22 @@ class ContextWindowExceededError(RuntimeError):
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。预检类超限
         #: （tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录，保持为空表。
         self.failures = list(failures or [])
+
+
+class CompactionPostWriteError(ContextWindowExceededError):
+    """bracket 三事件**已落盘**之后的复核失败（F2 #635）。
+
+    两个抛点都在 `ContextBuilder.compact_now` 的 bracket 写入**之后**：重投影确认
+    不一致、或重投影仍越硬护栏。历史里已有 bracket（append-only，不删除），因此
+    这不是"未改动"——调用方**不得**把它吞成 below-floor DTO，必须响亮失败（Web
+    500 / CLI exit 1），否则会谎报"未改动"而历史实际已变。
+
+    `bracket_id` 指向已写入的那一对 bracket 事件，供调用方在回执/诊断里指认。
+    """
+
+    def __init__(self, message: str, *, bracket_id: str) -> None:
+        super().__init__(message)
+        self.bracket_id = bracket_id
 
 
 @dataclass
@@ -172,6 +193,28 @@ class CompactionResult:
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
 #: （section `aux:compaction`）——改文案开那一个文件。
+
+
+def compactable_early_window(messages: list[AnyMessage]) -> tuple[int, int]:
+    """early 压缩窗口的判据：返回 `(prefix_end, cut)`。
+
+    - `prefix_end`：跳过的前导 **非摘要** `SystemMessage` 数。前导摘要
+      （`_is_compaction_summary`，含旧版 SystemMessage 形态）是 early 窗口的**起点**，
+      不是可跳过的前缀——遇它即停。
+    - `cut`：最后一条 `HumanMessage` 的下标（无 HumanMessage 时回落到 `prefix_end`）。
+
+    `[prefix_end:cut]` 即待摘要的 early 段、`[cut:]` 是保留的 recent 段。
+    `ContextCompactor.compact`（自动路径）与 dry-run 预览（`_has_compactable_early_turn`）
+    共用本函数——判据只有一份，此前两处各抄一遍会漂移（G3 #635）。
+    """
+    prefix_end = 0
+    while (prefix_end < len(messages)
+           and isinstance(messages[prefix_end], SystemMessage)
+           and not _is_compaction_summary(messages[prefix_end])):
+        prefix_end += 1
+    cut = max((i for i, message in enumerate(messages)
+               if isinstance(message, HumanMessage)), default=prefix_end)
+    return prefix_end, cut
 
 
 class ContextCompactor:
@@ -224,14 +267,8 @@ class ContextCompactor:
         if reserved_tokens < 0:
             raise ValueError("reserved_tokens must be non-negative")
         _validate_tool_blocks(messages)
-        prefix_end = 0
-        while (prefix_end < len(messages)
-               and isinstance(messages[prefix_end], SystemMessage)
-               and not _is_compaction_summary(messages[prefix_end])):
-            prefix_end += 1
+        prefix_end, cut = compactable_early_window(messages)
         prefix = messages[:prefix_end]
-        cut = max((i for i, message in enumerate(messages)
-                   if isinstance(message, HumanMessage)), default=prefix_end)
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)
@@ -455,24 +492,130 @@ def _summary_model_id(model: Any, response: Any) -> str | None:
     return None
 
 
+#: #649 结构隔离：正文里**逐字等于保留节标题**的行以反斜杠转义后落盘
+#: （与 CommonMark 0.31.2 的反斜杠转义同源），解析时解码回原值；#699 转义
+#: 碰撞：转义符本身也要转义（``\`` + 保留标题的行再加一层 ``\``），否则
+#: 原文自带的 ``\##`` 行会被误解码。正文里的**非保留** Markdown 标题
+#: （如 `## embedded heading`）与保留标题不同文，不转义、原样保留。
+#: 节边界只由「逐字等于某一保留标题、不在围栏代码块内、且未被转义」的行
+#: 定义——正文 Markdown 二级标题不再被误判为节边界。
+_HEADING_ESCAPE = "\\"
+_FENCE_CHARS = ("`", "~")
+
+
+def _fence_delimiter(line: str) -> tuple[str, int, str] | None:
+    """把一行识别为围栏代码块定界符，返回 (字符, 长度, 余下文本)。
+
+    对齐 CommonMark 0.31.2 §4.5 的最小子集：≤3 个前导空格后至少 3 个连续的
+    `` ` `` 或 ``~``；反引号围栏的 info string 不得再含反引号。纯确定性函数，
+    不依赖模型：围栏内（含定界行）的一律按字面正文处理，不参与节边界判定。
+    """
+    indent = len(line) - len(line.lstrip(" "))
+    if indent > 3:
+        return None
+    stripped = line[indent:]
+    if not stripped or stripped[0] not in _FENCE_CHARS:
+        return None
+    char = stripped[0]
+    length = len(stripped) - len(stripped.lstrip(char))
+    if length < 3:
+        return None
+    rest = stripped[length:]
+    if char == "`" and "`" in rest:
+        return None
+    return char, length, rest
+
+
+def _fenced_mask(lines: list[str]) -> list[bool]:
+    """逐行标记「是否处于围栏代码块内部」（含定界行本身），确定性纯函数。"""
+    mask: list[bool] = []
+    opened: tuple[str, int] | None = None
+    for line in lines:
+        delimiter = _fence_delimiter(line)
+        if opened is None:
+            mask.append(delimiter is not None)
+            if delimiter is not None:
+                opened = (delimiter[0], delimiter[1])
+        else:
+            mask.append(True)
+            if (delimiter is not None and delimiter[0] == opened[0]
+                    and delimiter[1] >= opened[1] and not delimiter[2].strip()):
+                opened = None
+    return mask
+
+
+def _escape_section_body(body: str, headings: tuple[str, ...]) -> str:
+    """把正文中与保留标题同文的行转义，避免组装后被误当成节边界（#649）。
+
+    #699 转义碰撞：转义符本身也要转义（escape-the-escape，与 CommonMark
+    0.31.2 §6.1 / RFC 8259 §7 同源）。行满足 ``^(\\\\*)(## 保留标题)$``
+    （n≥0 个前导反斜杠 + 逐字等于保留标题）即在前面再加一层 ``\\``；
+    解析时逐层解回，round-trip 保真。
+
+    只处理围栏代码块**之外**的行：围栏内的 ``##`` 行由 `_fenced_mask` 保护，
+    改写会破坏代码原文，故不动。
+    """
+    if not body:
+        return body
+    lines = body.split("\n")
+    fenced = _fenced_mask(lines)
+    reserved = set(headings)
+    escaped = []
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            escaped.append(line)
+            continue
+        backslashes = len(line) - len(line.lstrip("\\"))
+        if line[backslashes:] in reserved:
+            escaped.append(_HEADING_ESCAPE + line)
+        else:
+            escaped.append(line)
+    return "\n".join(escaped)
+
+
+def _unescape_section_body(body: str, headings: tuple[str, ...]) -> str:
+    """把 `_escape_section_body` 的转义解码回原值（#649；#699 转义碰撞）。
+
+    与组装侧互逆：``^(\\\\+)(## 保留标题)$`` 去掉一层前导 ``\\``。
+    """
+    lines = body.split("\n")
+    fenced = _fenced_mask(lines)
+    reserved = set(headings)
+    unescaped = []
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            unescaped.append(line)
+            continue
+        backslashes = len(line) - len(line.lstrip("\\"))
+        if backslashes >= 1 and line[backslashes:] in reserved:
+            unescaped.append(line[1:])
+        else:
+            unescaped.append(line)
+    return "\n".join(unescaped)
+
+
 def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     lines = text.strip().splitlines()
+    fenced = _fenced_mask(lines)
+    reserved = set(headings)
     heading_positions = [
-        (index, line) for index, line in enumerate(lines)
-        if line.startswith("## ")
+        index for index, line in enumerate(lines)
+        if not fenced[index]
+        and not line.startswith(_HEADING_ESCAPE)
+        and line in reserved
     ]
-    if tuple(line for _, line in heading_positions) != headings:
+    if tuple(lines[index] for index in heading_positions) != headings:
         raise ValueError("Summary section headings do not match the contract")
-    if not heading_positions or heading_positions[0][0] != 0:
+    if not heading_positions or heading_positions[0] != 0:
         raise ValueError("Summary contains text outside its sections")
     contents = []
-    for index, (line_number, _) in enumerate(heading_positions):
-        end = (heading_positions[index + 1][0]
-               if index + 1 < len(heading_positions) else len(lines))
+    for position, line_number in enumerate(heading_positions):
+        end = (heading_positions[position + 1]
+               if position + 1 < len(heading_positions) else len(lines))
         content = "\n".join(lines[line_number + 1:end]).strip()
         if not content:
             raise ValueError("Empty summary section must use (none)")
-        contents.append(content)
+        contents.append(_unescape_section_body(content, headings))
     return contents
 
 
@@ -651,7 +794,8 @@ def _assemble_summary(
     for index, body in enumerate(model_sections, start=2):
         bodies[index] = body
     return "\n\n".join(
-        f"{heading}\n{body}" for heading, body in zip(_SUMMARY_HEADINGS, bodies)
+        f"{heading}\n{_escape_section_body(body, _SUMMARY_HEADINGS)}"
+        for heading, body in zip(_SUMMARY_HEADINGS, bodies)
     )
 
 

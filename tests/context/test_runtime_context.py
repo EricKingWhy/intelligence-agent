@@ -273,6 +273,38 @@ async def test_runtime_context_rendered_per_build(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_context_provider_called_once_on_compaction_path_when_blank(
+    tmp_path,
+):
+    """空白快照归一为 None 后，压缩路径不得再调 provider 一次（F4 #635）。
+
+    每次 build 只渲染一次是对外契约（`_runtime_context_provider` 的调用次数）；
+    `build()` 把空白归一为 None 后传给 `compact_now`，后者若把 None 当"未渲染"
+    会二次渲染——本用例钉住自动路径的总调用次数恰为 1。
+    """
+    session = make_session(tmp_path)
+    for i in range(5):
+        session.append(USER_MESSAGE, {"content": f"第 {i} 条用户消息，内容稍长以触发压缩。"})
+        session.append(MODEL_COMPLETED, {"content": "历史内容 " * 100})
+
+    calls: list[int] = []
+
+    def provider() -> str:
+        calls.append(len(calls))
+        return "   "  # 纯空白 → 归一为 None
+
+    builder = ContextBuilder(
+        ScriptedModel([]), max_context_tokens=5000,
+        auto_compact_threshold=0.30, hard_guard_threshold=0.85,
+        runtime_context_provider=provider,
+    )
+
+    await builder.build(session)
+
+    assert len(calls) == 1, "自动路径（含压缩分支）provider 只应被调用一次"
+
+
+@pytest.mark.asyncio
 async def test_runtime_context_not_duplicated_across_builds(tmp_path):
     """连续 build 不累积（对比"若把快照 append 成事件"会出现的增长）。"""
     session = make_session(tmp_path)

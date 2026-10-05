@@ -13,7 +13,7 @@
 
 import { memo, useEffect, useState } from 'react';
 import { X } from 'lucide-react';
-import { getContextUsage, type ContextUsage } from '../lib/api';
+import { getContextUsage, compactSession, describeSessionError, type ContextUsage, type SessionContextCompacted } from '../lib/api';
 import { usageOnlyNote } from '../lib/contextUsageNote';
 
 /** 桶的展示元数据：key → 颜色 token + 中文名。顺序即图例顺序（与后端六桶一致）。 */
@@ -35,6 +35,20 @@ const BUCKETS: Array<{
  *  图例仍列出全部桶（不隐藏数据）。 */
 const MIN_SEGMENT_PCT = 1.5;
 
+/** 手动压缩按钮的**低水位启发式置灰**阈值（占用占窗口比例）。
+ *
+ *  **这是 UX 提示、不是硬闸**：真实水位是**轮次结构**（后端 `compacted_turn_count==0`
+ *  = 没有可压缩的早期轮），前端拿不到，也不为置灰多打一次 dry-run 预览。这里用
+ *  已有的 `getContextUsage` 百分比做保守估计——低于此值大概率没有可压缩窗口，
+ *  灰掉省得用户白等。真正的拒绝永远在后端（零写入返回"水位过低"）。
+ *  取 0.15，与设计稿 §8 的 floor 建议同量级；AC1 的 40% 水位仍可正常点击。 */
+const LOW_WATER_HINT_PCT = 0.15;
+
+/** 千位分隔（结果对比用；与后端渲染口径无关，纯展示）。 */
+function fmtTokens(count: number): string {
+  return count.toLocaleString();
+}
+
 function pctOf(value: number, used: number): number {
   if (used <= 0) return 0;
   return (value / used) * 100;
@@ -51,6 +65,11 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
 }) {
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 手动压缩（#635）：进行中 / 上次结果 / 就地错误（移植 SessionList 的 opError
+  // 模式——失败只显示后端 detail，不做乐观改写）。
+  const [compacting, setCompacting] = useState(false);
+  const [compactResult, setCompactResult] = useState<SessionContextCompacted | null>(null);
+  const [compactError, setCompactError] = useState<string | null>(null);
   // 刷新：打开时拉一次；会话有新 run 时不做实时轮询（设计稿 §5：避免无谓请求）。
   useEffect(() => {
     if (!open) return;
@@ -101,6 +120,33 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
             key: b.key, label: b.label, colorVar: b.colorVar, value: b.value(usage),
           }))
         : [{ key: 'unclassified', label: '未分类', colorVar: 'var(--text-tertiary)', value: usage.used_tokens }];
+
+  // 压缩按钮只在有水位读数（ok / usage_only）时可点；no_data / 未加载不显示。
+  const compactable = usage !== null && usage.state !== 'no_data';
+  const lowWater =
+    compactable && usage!.window_tokens > 0
+    && usage!.used_tokens / usage!.window_tokens < LOW_WATER_HINT_PCT;
+
+  /** 手动压缩：禁用 + spinner → 调后端 → 成功展示前后对比并重拉水位刷新；
+   *  失败就地显示后端 detail。 */
+  const handleCompact = async () => {
+    setCompacting(true);
+    setCompactError(null);
+    try {
+      const result = await compactSession(sessionId);
+      setCompactResult(result);
+      // 重拉水位（best-effort）：刷新失败不覆盖"压缩成功"这个事实。
+      try {
+        setUsage(await getContextUsage(sessionId));
+      } catch {
+        /* 保留旧水位：压缩本身已成功，不因刷新失败谎报失败。 */
+      }
+    } catch (e) {
+      setCompactError(describeSessionError(e, '压缩失败'));
+    } finally {
+      setCompacting(false);
+    }
+  };
 
   return (
     <div className="ctx-usage-overlay" onClick={onClose}>
@@ -232,6 +278,40 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                       : `${usage.cache.total_calls} 次调用全部带回明细`}{'）'} · 估算
                   </span>
                 </span>
+              )}
+            </div>
+
+            {/* 手动压缩（#635）：触发同一 ContextCompactor 真实管线（不是让模型
+                自己"总结"）。低水位时置灰 + 提示——那是 UX 启发式，硬闸在后端。 */}
+            <div className="ctx-usage-compact">
+              <button
+                className="ctx-usage-compact-btn"
+                onClick={handleCompact}
+                disabled={compacting || lowWater}
+                title={lowWater ? '水位过低无需压缩' : '手动触发一次上下文压缩'}
+              >
+                {compacting && <span className="ctx-usage-spinner" aria-hidden="true" />}
+                {compacting ? '压缩中…' : '手动压缩'}
+              </button>
+              {lowWater && !compacting && (
+                <span className="ctx-usage-compact-note">水位过低无需压缩</span>
+              )}
+              {compactError && (
+                <div className="ctx-usage-compact-error" role="alert">
+                  {compactError}
+                </div>
+              )}
+              {compactResult && (
+                <div className="ctx-usage-compact-result">
+                  {compactResult.compacted_turn_count > 0 ? (
+                    <>
+                      压缩完成：{fmtTokens(compactResult.tokens_before)} →{' '}
+                      {fmtTokens(compactResult.tokens_after)} tok
+                    </>
+                  ) : (
+                    '水位过低，无需压缩（未改动）。'
+                  )}
+                </div>
               )}
             </div>
           </>

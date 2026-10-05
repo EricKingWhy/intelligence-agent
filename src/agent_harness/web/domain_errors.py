@@ -117,6 +117,8 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
     EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
@@ -172,6 +174,12 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     SessionCwdUnavailable: 404,
     # 409：状态冲突（含幂等已决、需人工裁决的崩溃遗留、seq 冲突）
     ActiveRunConflict: 409,
+    # F6 / #635：手动压缩的两个类型化拒绝（in-flight 防重 / 落盘并发改动）。
+    # 继承 ActiveRunConflict ⇒ 同一 409 语义；本表是精确类型索引，子类必须自己
+    # 登记（与 WorkspacePathInvalid / SessionCwdUnavailable 同一条纪律）——
+    # handler 的 `except ActiveRunConflict` 天然覆盖，无需改动端点。
+    CompactionInProgress: 409,
+    CompactionConcurrentWrite: 409,
     # T4 / #312（ADR-0044 D9）：恢复暂停 run 的 CAS / ceiling 不成立——expected_version
     # 过期、run_id 不是被暂停的那个、没有暂停 run、ceiling 没真高于已消耗。请求形状
     # 合法（那是 422 的 T3 档），是**状态对不上**，且判定在任何落盘之前发生。
