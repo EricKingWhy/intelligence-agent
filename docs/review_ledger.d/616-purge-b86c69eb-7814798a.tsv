@@ -1,0 +1,1 @@
+2026-10-05	#616 两轴审查（codebuddy 施工、我独立复核）：19 新测试全过（TDD 红→绿）、相关回归 110 passed、gate0 本地 6/6 PASS；5 处偏离设计均有记录（最大：service 层 import 边界守卫，按 #564 前例新增 RegisteredToolNamesProvider 注入端口）；main 同步合并冲突（delegation_tree.py import 行）双保留已核实，合并后 19 测试重跑全过	b2a1ecc2ad1a6c941d7e949df094f6aa82d0c720..7814798a9f61d865d6b1fdb0e6adf86b1d1a5bfc
