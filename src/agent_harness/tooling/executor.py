@@ -43,8 +43,10 @@ from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
@@ -71,6 +73,11 @@ from agent_harness.tooling.approval import (
     approval_reason,
     grant_valid,
     needs_approval,
+)
+from agent_harness.tooling.approve_policy import (
+    ApprovePolicyRule,
+    ApprovePolicyStore,
+    PolicyGranularity,
 )
 from agent_harness.tooling.contract import (
     PermissionPolicy,
@@ -277,6 +284,9 @@ class ToolExecutor:
         overflow_handler: OverflowHandler | None = None,
         resource_locks: ResourceLockRegistry | None = None,
         decision_hook_runner: DecisionHookRunner | None = None,
+        # #684：项目根——持久审批规则存 `<project_root>/.agent-harness/approve-policy.json`。
+        # None 回落 `Path.cwd()`（执行域构造时求值）；测试 / 多项目可显式传。
+        project_root: Path | str | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
@@ -287,6 +297,8 @@ class ToolExecutor:
         self._overflow_handler = overflow_handler
         self._resource_locks = resource_locks
         self._decision_hook_runner = decision_hook_runner
+        self._project_root = Path(project_root) if project_root is not None else Path.cwd()
+        self._approve_policy_store = ApprovePolicyStore(self._project_root)
 
     @property
     def tracks_operations(self) -> bool:
@@ -1242,6 +1254,13 @@ class ToolExecutor:
             ):
                 return None
 
+        # #684：会话 grant 未命中后查**项目级持久规则**（无 TTL、跨会话）。
+        # 命中判定集中在 ApprovePolicyStore.find_match：exact 全等 / command 去
+        # args hash，且两档都重验 permission == permission_at_approval（防提权）。
+        # 不依赖 session：持久规则是项目配置，裸执行域（无会话）同样生效。
+        if identity is not None and self._approve_policy_store.find_match(identity) is not None:
+            return None
+
         reason = approval_reason(tool_perm, self._policy)
         request = ApprovalRequest(
             tool_name=name,
@@ -1284,6 +1303,13 @@ class ToolExecutor:
                         expires_at=time.time() + APPROVAL_GRANT_TTL_SECONDS,
                     ),
                 )
+            elif (
+                response.decision is PermissionDecision.APPROVE_POLICY
+                and identity is not None
+            ):
+                # #684：把这次人工「以后都允许」安装成项目级持久规则。规则内容由
+                # Runtime 从 identity 精确派生（用户只选粒度，不能手写规则文本）。
+                self._install_policy_rule(identity, response.policy_granularity)
             return None
 
         return ToolExecution(
@@ -1295,6 +1321,49 @@ class ToolExecutor:
             ),
             budget_delta=_rejected_delta(name),
         )
+
+    def _install_policy_rule(
+        self, identity, granularity: PolicyGranularity | None,
+    ) -> None:
+        """把一次 APPROVE_POLICY 决策安装成项目级持久规则（#684）。
+
+        规则 key 由 Runtime 从已校验参数派生的 ``identity`` 精确决定：
+        - exact 档 → ``identity.key()``（完整身份键，含 args hash）；
+        - command 档 → ``identity.canonical``（tool + command，不含 args hash）。
+
+        命令级 key 含换行符时 ``add_rule`` 抛 ``ValueError``（Codex 语义）——安装被
+        拒绝，但**本次调用的人工批准已生效**（调用方按 approve 放行），只是不落盘；
+        记 warning 供排查，绝不让一个非法规则把正在跑的 run 顶崩。落盘失败
+        （``OSError``：磁盘只读 / 权限 / 空间）同口径处理：本次批准仍生效，只记
+        warning——安装持久规则是「批准之后」的加固动作，绝不能反过来否掉已批准调用。
+        """
+        granularity = granularity or PolicyGranularity.EXACT
+        key = (
+            identity.key()
+            if granularity is PolicyGranularity.EXACT
+            else identity.canonical
+        )
+        rule = ApprovePolicyRule(
+            id=uuid4().hex,
+            tool=identity.tool_name,
+            key=key,
+            granularity=granularity,
+            permission_at_approval=identity.permission,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        try:
+            self._approve_policy_store.add_rule(rule)
+        except ValueError:
+            logger.warning(
+                "命令级审批规则含换行符，拒绝安装（本次调用仍按单次批准放行）："
+                "tool=%s",
+                identity.tool_name,
+            )
+        except OSError:
+            logger.warning(
+                "持久审批规则落盘失败（本次调用仍按单次批准放行）：tool=%s",
+                identity.tool_name,
+            )
 
     async def _execute_with_resource_locks(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,

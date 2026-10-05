@@ -77,6 +77,7 @@ function renderTopBar(conversation: ConversationState): void {
       onToggleTheme={() => {}}
       authRequired={false}
       onOpenMemories={() => {}}
+      onOpenApprovePolicy={() => {}}
       sessionId={null}
       onOpenContextUsage={() => {}}
     />

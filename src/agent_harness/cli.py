@@ -102,6 +102,7 @@ from agent_harness.session.lineage import (
 )
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
+from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
 
 _ARGS_LINE_LIMIT = 120
@@ -928,6 +929,9 @@ def _main_dispatch() -> None:
     if argv and argv[0] == "budgets":
         _main_budgets(argv[1:])
         return
+    if argv and argv[0] == "approvals":
+        _main_approvals(argv[1:])
+        return
     if argv and argv[0] == "replay":
         _main_replay(argv[1:])
         return
@@ -1743,6 +1747,105 @@ async def budgets_clear_stale_tools_command(
     if dry_run:
         lines.append("加 --yes 执行清理。")
     return "\n".join(lines)
+
+
+def _main_approvals(argv: list[str]) -> None:
+    """CLI approvals 入口（#684 Phase 2）：项目级持久审批规则的公开管理面。
+
+    - `approvals policy list`：列出本项目 `.agent-harness/approve-policy.json` 的规则；
+    - `approvals policy remove <id> [--yes]`：默认二次确认——无 `--yes` 且规则存在时，
+      只打印将删规则并 `SystemExit(2)` 拒绝执行（**零改动**）；`--yes` 真删；id 不存在
+      幂等成功（不报错）。
+
+    规则内容由 Runtime 在审批流里精确派生、只读展示，CLI **不提供创建入口**：唯一安装
+    路径是用户在审批卡上主动选「以后都允许」（F21：显式授权，禁止静默创建）。项目根 =
+    进程当前工作目录，与 `ToolExecutor` 的 `project_root` 回落口径一致——管理面与真正
+    读取规则的执行域指向同一份文件。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness approvals")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    policy = subcommands.add_parser("policy", help="项目级持久审批规则（#684）")
+    policy_sub = policy.add_subparsers(dest="policy_command", required=True)
+    policy_sub.add_parser("list", help="列出本项目持久审批规则")
+    remove = policy_sub.add_parser("remove", help="按 id 删除一条持久审批规则")
+    remove.add_argument("rule_id", metavar="ID", help="要删除的规则 id")
+    remove.add_argument(
+        "--yes", action="store_true",
+        help="显式确认删除；缺省且规则存在时只打印将删规则并拒绝执行（零改动）",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    if args.policy_command == "list":
+        print(approvals_policy_list_command())
+        return
+    output, confirm_required = approvals_policy_remove_command(
+        args.rule_id, yes=args.yes,
+    )
+    print(output)
+    if confirm_required:
+        raise SystemExit(2)
+
+
+def _approve_policy_store(project_root: Path | str | None = None) -> ApprovePolicyStore:
+    """本项目持久审批规则存储；`project_root` 缺省 = 进程当前工作目录。
+
+    与 `ToolExecutor.__init__` 的回落口径逐字一致（`Path.cwd()`），保证 CLI / Web 管理面
+    与执行域读写同一份 `.agent-harness/approve-policy.json`。
+    """
+    return ApprovePolicyStore(Path(project_root) if project_root is not None else Path.cwd())
+
+
+def approvals_policy_list_command(*, project_root: Path | str | None = None) -> str:
+    """`approvals policy list` 的可测核心：返回渲染文本（#684 Phase 2）。
+
+    无规则时给友好提示（不是空输出）——「没有配置」与「读取失败」在人类眼里都应先是
+    一句可读的话。坏文件由 `ApprovePolicyStore.load` fail-closed 成空列表，与无规则同形
+    （回调到默认逐调用审批，绝不臆造放行）。
+    """
+    rules = _approve_policy_store(project_root).load()
+    if not rules:
+        return "（暂无持久审批规则）"
+    lines = [f"本项目持久审批规则（{len(rules)} 条）："]
+    lines.extend(
+        f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
+        f"granularity={rule.granularity.value}  created_at={rule.created_at}"
+        for rule in rules
+    )
+    return "\n".join(lines)
+
+
+def approvals_policy_remove_command(
+    rule_id: str, *, yes: bool, project_root: Path | str | None = None,
+) -> tuple[str, bool]:
+    """`approvals policy remove <id> [--yes]` 的可测核心：返回 `(文本, 是否拒绝执行)`。
+
+    `confirm_required=True` 时调用方（`_main_approvals`）在打印后 `SystemExit(2)`，
+    且本函数**零改动**——默认二次确认是 F21 在 CLI 上的落点。
+
+    幂等（F21/F22 同源）：id 不存在就是成功，不报错、不改文件；不带 `--yes` 时那条
+    「不存在」本身也不是破坏性动作，故直接成功（无需确认一个不会发生的删除）。
+
+    带 `--yes` 时**直接以 `remove_rule` 的返回值判定结果**，不再「先 load 判存在、
+    再 remove_rule 二次 load」——两次读之间规则可能被另一进程删除/改动，那个窗口
+    会让「确认时还在」的规则到删除时已消失（本次批准仍报成功）。单次读-改-写由
+    `ApprovePolicyStore` 内部文件锁串行化（#684 P2-2）。
+    """
+    store = _approve_policy_store(project_root)
+    if yes:
+        if store.remove_rule(rule_id):
+            return (f"已删除持久审批规则 {rule_id}。", False)
+        return (f"持久审批规则 {rule_id} 不存在（幂等，未改动）。", False)
+    rule = next((item for item in store.load() if item.id == rule_id), None)
+    if rule is None:
+        return (f"持久审批规则 {rule_id} 不存在（幂等，未改动）。", False)
+    detail = (
+        "将删除持久审批规则（未确认，未改动）：\n"
+        f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
+        f"granularity={rule.granularity.value}  created_at={rule.created_at}\n"
+        "加 --yes 执行删除。"
+    )
+    return (detail, True)
 
 
 if __name__ == "__main__":

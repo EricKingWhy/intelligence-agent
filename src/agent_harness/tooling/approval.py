@@ -14,8 +14,15 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
+
+if TYPE_CHECKING:
+    # #684：approve_policy 依赖本模块的 ApprovalIdentity，顶层互相 import 会成环；
+    # 这里只做类型标注（from __future__ annotations 下运行时不求值），实例化时的
+    # 默认值归一走 __post_init__ 的惰性 import。
+    from agent_harness.tooling.approve_policy import PolicyGranularity
 
 
 class PermissionDecision(str, Enum):
@@ -62,6 +69,9 @@ class ApprovalResponse:
     approved: bool
     reason: str = ""
     decision: PermissionDecision | None = None
+    #: #684：APPROVE_POLICY 决策附带安装粒度（exact / command）；非 policy 决策忽略。
+    #: 用 None 作哨兵，__post_init__ 惰性导入枚举并归一为 EXACT（见类内注释）。
+    policy_granularity: PolicyGranularity | None = None
 
     def __post_init__(self) -> None:
         if self.decision is None:
@@ -70,6 +80,12 @@ class ApprovalResponse:
                 self, "decision",
                 PermissionDecision.APPROVE_ONCE if self.approved else PermissionDecision.DENY,
             )
+        if self.policy_granularity is None:
+            # #684：默认 exact。惰性 import 避免 approval ↔ approve_policy 顶层成环
+            # （approve_policy 需要本模块的 ApprovalIdentity）；此处模块已加载完毕。
+            from agent_harness.tooling.approve_policy import PolicyGranularity
+
+            object.__setattr__(self, "policy_granularity", PolicyGranularity.EXACT)
 
 
 #: 可插拔审批回调：接收 ApprovalRequest，返回 ApprovalResponse。
