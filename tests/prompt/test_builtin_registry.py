@@ -65,8 +65,9 @@ def test_default_registry_is_zero_config_baseline() -> None:
     ]
 
 
-def test_declared_variables_are_exactly_the_six_used() -> None:
-    """T4 `tail_text`；T7 快照三值（BUG-013 瘦身后 model/tools 已删）；T8 两值；T9 两值。
+def test_declared_variables_are_exactly_the_used_set() -> None:
+    """T4 `tail_text`；T7 快照三值（BUG-013 瘦身后 model/tools 已删）；T8 两值；T9 两值；
+    `#524` 两值。
 
     断言**精确集合**而不是 `"tail_text" in ...`：多声明一个没人用的变量说明
     `_DECLARED_VARIABLES` 被写脏了，值得红。BUG-013 删除快照的 model/tools 后，
@@ -77,6 +78,8 @@ def test_declared_variables_are_exactly_the_six_used() -> None:
             "tail_text", "cwd", "os", "date", "tool_name", "consecutive_failures",
             # T9 `corrective:stuck_pattern`：说的是"哪个模式、到第几次"（`#317`）
             "pattern_label", "pattern_count",
+            # `#524` `corrective:completion_evidence`：拒绝规则标识 + 要求的工具名
+            "rule_id", "required_tool_name",
         }
     )
 
@@ -87,6 +90,7 @@ def test_declared_scopes_covers_every_non_wildcard_scope() -> None:
         "aux:compaction",
         "aux:fork_tail",
         "aux:memory_extraction",
+        "corrective:completion_evidence",
         "corrective:stuck_pattern",
         "corrective:tool_failure_guard",
         "frame:context_pressure",

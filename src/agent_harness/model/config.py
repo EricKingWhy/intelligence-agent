@@ -34,6 +34,9 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         # 默认 preset 不带 reasoning_summary 能力位（诚实标注）。
         "context_window": 64000,
         "speed_tier": "fast",
+        # #520：DeepSeek context caching 无标记参数、稳定前缀自动命中（官方文档，
+        # 2026-10-05 批次核实）——声明事实，不改变任何请求行为。
+        "prompt_cache": "automatic",
     },
     "qwen": {
         "model_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -72,6 +75,12 @@ _CAPABILITY_FIELDS: dict[str, type] = {
     "supports_tools": bool,
     "supports_vision": bool,
     "supports_reasoning_summary": bool,
+    # #520 一期（IMP-01/04 裁决）：prompt caching 机制声明，仅描述事实、
+    # 无任何行为分支（主动标记缓存在本票明确放弃）。取值词汇：
+    # "automatic"（无标记参数，稳定前缀自动命中——OpenAI/DeepSeek 线）
+    # | "explicit_breakpoints"（Anthropic 式 cache_control 断点）。
+    # 未经核实的 provider 不声明——省略即「not guessed」。
+    "prompt_cache": str,
 }
 
 
@@ -104,6 +113,8 @@ class ModelCatalogEntry:
     supports_tools: bool | None = None
     supports_vision: bool | None = None
     supports_reasoning_summary: bool | None = None
+    # #520：prompt caching 机制声明（declarative only，见 _CAPABILITY_FIELDS 注）。
+    prompt_cache: str | None = None
 
     def declared_capabilities(self) -> dict[str, Any]:
         """返回本条目【显式声明】的能力位（None 的不计入）。"""
@@ -120,6 +131,8 @@ class ModelCatalogEntry:
             caps["supports_vision"] = self.supports_vision
         if self.supports_reasoning_summary is not None:
             caps["supports_reasoning_summary"] = self.supports_reasoning_summary
+        if self.prompt_cache is not None:
+            caps["prompt_cache"] = self.prompt_cache
         return caps
 
 

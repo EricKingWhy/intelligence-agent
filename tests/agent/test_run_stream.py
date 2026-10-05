@@ -186,7 +186,11 @@ async def test_run_stream_and_run_produce_same_session_events(tmp_path):
                 continue
             data = dict(event.data)
             if event.type in (MODEL_REQUEST_STARTED, MODEL_REQUEST):
+                # request_id 与 duration_ms（#520）都是 per-attempt 事实：前者是
+                # 每次attempt 的 UUID、后者是单调钟实测——跨入口比较前抹掉，
+                # 键的存在性与配对由 focused 用例另行断言。
                 data.pop("request_id", None)
+                data.pop("duration_ms", None)
             shaped.append((event.type, data))
         return shaped
 
@@ -249,7 +253,11 @@ async def test_invoke_response_accounting_survives_close_after_start(tmp_path):
     assert len(settlements) == 1
     settled = settlements[0]
     assert started.seq < settled.seq
-    assert settled.data == {
+    settled_data = dict(settled.data)
+    # duration_ms（#520）是单调钟实测的环境事实，不进逐字节契约断言；
+    # 它的存在性/形状由 tests/agent/test_model_request_observability.py 钉住。
+    settled_data.pop("duration_ms", None)
+    assert settled_data == {
         "role": "primary",
         "outcome": "completed",
         "request_id": started.data["request_id"],

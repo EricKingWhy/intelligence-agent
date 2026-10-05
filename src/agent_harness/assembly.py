@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
+from agent_harness.agent.completion import CompletionPolicy
 from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
@@ -74,6 +75,7 @@ from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.resource_locks import ResourceLockRegistry
 from agent_harness.tools import (
     ApplyPatchTool,
     BashTool,
@@ -426,6 +428,10 @@ async def build_runtime(
     stuck_evidence: StuckEvidencePort | None = None,
     session_budget: SessionBudgetPort | None = None,
     session_declared_limits: SessionLimits | None = None,
+    # `#524`：完成门可选域策略（默认 None = DefaultCompletionPolicy，行为零变化；
+    # 显式传入 EvidenceCompletionPolicy 即开启证据检查与纠正循环——装配开关就是
+    # 策略实例本身，无布尔旗标）。
+    completion_policy: CompletionPolicy | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -621,9 +627,14 @@ async def build_runtime(
         persona, tool_sections=tool_guidance_sections(registry.list()),
     )
 
+    # #525 一期（IMP-14）：父与并发 SubAgent 的 executor 共享同一 resource
+    # 锁注册表——同一 resource key（如 workspace-file 键）的执行跨批次/跨
+    # runtime 串行。锁是进程内同步原语，生命周期与本次 build 的 wiring 相同。
+    resource_locks = ResourceLockRegistry()
+
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
-    # 同一审批面（决策 11 权限传递）。
+    # 同一审批面（决策 11 权限传递）；resource 锁同源（#525 一期）。
     if runtime_multiagent_provider is not None:
         from agent_harness.agent.factory import AgentFactory
 
@@ -632,6 +643,7 @@ async def build_runtime(
                 child_registry, policy=policy, approval_callback=approval_callback,
                 overflow_handler=overflow_handler,
                 operation_ledger=stores.operation_ledger,
+                resource_locks=resource_locks,
             )
 
         runtime_multiagent_provider.activate(
@@ -653,6 +665,8 @@ async def build_runtime(
                 # child 的 local fuse 上限（#308）：档位声明（内置三档位是 None=继承）
                 # 只能收窄到 Deployment ceiling 之下，越界在 Factory.create 里被拒。
                 local_max_agent_turns=settings.local_max_agent_turns,
+                # `#524`：子与父同一完成门策略面（Factory 透传给 child runtime）。
+                completion_policy=completion_policy,
             ),
             source_registry=registry,
             session_store=session_store,
@@ -694,7 +708,8 @@ async def build_runtime(
         registry=registry,
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
                               overflow_handler=overflow_handler,
-                              operation_ledger=stores.operation_ledger),
+                              operation_ledger=stores.operation_ledger,
+                              resource_locks=resource_locks),
         max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,
@@ -759,4 +774,7 @@ async def build_runtime(
         # `#318`：session 树账端口（跨 run / 跨会话共享）。装配点只透传；构造方是
         # 服务层（它才知道预算 key 与请求声明）。None = 不接 session 账（旧行为）。
         session_budget=session_budget,
+        # `#524`：完成门可选域策略，装配点只透传（默认 None = 既有默认策略，
+        # CLI / 既有单测路径行为零变化）。
+        completion_policy=completion_policy,
     )
