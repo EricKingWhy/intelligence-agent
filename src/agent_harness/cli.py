@@ -1812,11 +1812,16 @@ def _main_compact(argv: list[str]) -> None:
         # 类型化拒绝理由（F6 #635）：不再靠错误字符串子串匹配。
         print("压缩被拒绝：压缩已在进行中（零改动）", file=sys.stderr)
         raise SystemExit(1) from None
-    except CompactionConcurrentWrite:
-        print(
-            "压缩被拒绝：会话在压缩期间被并发改动，请重试（零改动）",
-            file=sys.stderr,
-        )
+    except CompactionConcurrentWrite as error:
+        # G1 #635：按 reason 给诚实且可操作的文案，不再统一声称"零改动"——
+        # run_busy 的真实动作是"等 run 结束"（不是"重试"），且此前失败记录可能已落盘；
+        # event_drift 才是并发改动。CompactionInProgress / ActiveRunConflict 保留
+        # "零改动"（那两处确为零写入）。
+        if error.reason == "run_busy":
+            message = "压缩被拒绝：run 在收尾窗口，请等待 run 结束后重试"
+        else:
+            message = "压缩被拒绝：压缩期间会话被并发改动，请重试"
+        print(message, file=sys.stderr)
         raise SystemExit(1) from None
     except ActiveRunConflict:
         # 在途 run（子类已在上方分别处理，这里是基类语义）。

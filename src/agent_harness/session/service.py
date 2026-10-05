@@ -3047,14 +3047,16 @@ class SessionService:
                     if self._run_manager.is_busy(session_id):
                         raise CompactionConcurrentWrite(
                             f"session '{session_id}' has a run in flight; "
-                            "compact it after the run finishes"
+                            "compact it after the run finishes",
+                            reason="run_busy",
                         )
                     current = await anyio.to_thread.run_sync(
                         self._store.read_events, session_id
                     )
                     if len(current) != snapshot_event_count + own_writes:
                         raise CompactionConcurrentWrite(
-                            f"session '{session_id}' changed during compaction; retry"
+                            f"session '{session_id}' changed during compaction; retry",
+                            reason="event_drift",
                         )
                     yield
 
@@ -3066,29 +3068,16 @@ class SessionService:
     def _has_compactable_early_turn(session: Session) -> bool:
         """dry_run 预览：是否存在可压缩的早期轮（compactor `early` 窗口的**近似**判据）。
 
-        前缀规则与 `ContextCompactor.compact`（compactor.py:217–226）**对齐**：前导
-        SystemMessage 中，**摘要**（`_is_compaction_summary`，含旧版 SystemMessage 形态）
-        是 early 窗口的起点，不再被当前缀跳过；只有非摘要 SystemMessage 才算前缀。此前
-        缺少该守卫，dry-run 判据会与 compactor 漂移。
+        前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
+        `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
+        函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
 
         仍是近似：compactor 另以"early 中非摘要 HumanMessage 数 > 0"作为
         `compacted_turn_count` 闸门，本预览只判窗口是否非空。
         """
-        from langchain_core.messages import HumanMessage, SystemMessage
+        from agent_harness.context.compactor import compactable_early_window
 
-        from agent_harness.context.compactor import _is_compaction_summary
-
-        messages = session.derive_messages()
-        prefix_end = 0
-        while (prefix_end < len(messages)
-               and isinstance(messages[prefix_end], SystemMessage)
-               and not _is_compaction_summary(messages[prefix_end])):
-            prefix_end += 1
-        cut = max(
-            (index for index, message in enumerate(messages)
-             if isinstance(message, HumanMessage)),
-            default=prefix_end,
-        )
+        prefix_end, cut = compactable_early_window(session.derive_messages())
         return cut > prefix_end
 
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
