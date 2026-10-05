@@ -455,24 +455,109 @@ def _summary_model_id(model: Any, response: Any) -> str | None:
     return None
 
 
+#: #649 结构隔离：正文里**逐字等于保留节标题**的行以反斜杠转义后落盘
+#: （与 CommonMark 0.31.2 的反斜杠转义同源），解析时解码回原值；正文里的
+#: **非保留** Markdown 标题（如 `## embedded heading`）与保留标题不同文，
+#: 不转义、原样保留。节边界只由「逐字等于某一保留标题、不在围栏代码块内、
+#: 且未被转义」的行定义——正文 Markdown 二级标题不再被误判为节边界。
+_HEADING_ESCAPE = "\\"
+_FENCE_CHARS = ("`", "~")
+
+
+def _fence_delimiter(line: str) -> tuple[str, int, str] | None:
+    """把一行识别为围栏代码块定界符，返回 (字符, 长度, 余下文本)。
+
+    对齐 CommonMark 0.31.2 §4.5 的最小子集：≤3 个前导空格后至少 3 个连续的
+    `` ` `` 或 ``~``；反引号围栏的 info string 不得再含反引号。纯确定性函数，
+    不依赖模型：围栏内（含定界行）的一律按字面正文处理，不参与节边界判定。
+    """
+    indent = len(line) - len(line.lstrip(" "))
+    if indent > 3:
+        return None
+    stripped = line[indent:]
+    if not stripped or stripped[0] not in _FENCE_CHARS:
+        return None
+    char = stripped[0]
+    length = len(stripped) - len(stripped.lstrip(char))
+    if length < 3:
+        return None
+    rest = stripped[length:]
+    if char == "`" and "`" in rest:
+        return None
+    return char, length, rest
+
+
+def _fenced_mask(lines: list[str]) -> list[bool]:
+    """逐行标记「是否处于围栏代码块内部」（含定界行本身），确定性纯函数。"""
+    mask: list[bool] = []
+    opened: tuple[str, int] | None = None
+    for line in lines:
+        delimiter = _fence_delimiter(line)
+        if opened is None:
+            mask.append(delimiter is not None)
+            if delimiter is not None:
+                opened = (delimiter[0], delimiter[1])
+        else:
+            mask.append(True)
+            if (delimiter is not None and delimiter[0] == opened[0]
+                    and delimiter[1] >= opened[1] and not delimiter[2].strip()):
+                opened = None
+    return mask
+
+
+def _escape_section_body(body: str, headings: tuple[str, ...]) -> str:
+    """把正文中与保留标题同文的行转义，避免组装后被误当成节边界（#649）。
+
+    只处理围栏代码块**之外**的行：围栏内的 ``##`` 行由 `_fenced_mask` 保护，
+    改写会破坏代码原文，故不动。
+    """
+    if not body:
+        return body
+    lines = body.split("\n")
+    fenced = _fenced_mask(lines)
+    reserved = set(headings)
+    return "\n".join(
+        _HEADING_ESCAPE + line if not fenced[index] and line in reserved else line
+        for index, line in enumerate(lines)
+    )
+
+
+def _unescape_section_body(body: str, headings: tuple[str, ...]) -> str:
+    """把 `_escape_section_body` 的转义解码回原值（#649）。"""
+    lines = body.split("\n")
+    fenced = _fenced_mask(lines)
+    reserved = set(headings)
+    return "\n".join(
+        line[1:]
+        if (not fenced[index] and line.startswith(_HEADING_ESCAPE)
+            and line[1:] in reserved)
+        else line
+        for index, line in enumerate(lines)
+    )
+
+
 def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     lines = text.strip().splitlines()
+    fenced = _fenced_mask(lines)
+    reserved = set(headings)
     heading_positions = [
-        (index, line) for index, line in enumerate(lines)
-        if line.startswith("## ")
+        index for index, line in enumerate(lines)
+        if not fenced[index]
+        and not line.startswith(_HEADING_ESCAPE)
+        and line in reserved
     ]
-    if tuple(line for _, line in heading_positions) != headings:
+    if tuple(lines[index] for index in heading_positions) != headings:
         raise ValueError("Summary section headings do not match the contract")
-    if not heading_positions or heading_positions[0][0] != 0:
+    if not heading_positions or heading_positions[0] != 0:
         raise ValueError("Summary contains text outside its sections")
     contents = []
-    for index, (line_number, _) in enumerate(heading_positions):
-        end = (heading_positions[index + 1][0]
-               if index + 1 < len(heading_positions) else len(lines))
+    for position, line_number in enumerate(heading_positions):
+        end = (heading_positions[position + 1]
+               if position + 1 < len(heading_positions) else len(lines))
         content = "\n".join(lines[line_number + 1:end]).strip()
         if not content:
             raise ValueError("Empty summary section must use (none)")
-        contents.append(content)
+        contents.append(_unescape_section_body(content, headings))
     return contents
 
 
@@ -651,7 +736,8 @@ def _assemble_summary(
     for index, body in enumerate(model_sections, start=2):
         bodies[index] = body
     return "\n\n".join(
-        f"{heading}\n{body}" for heading, body in zip(_SUMMARY_HEADINGS, bodies)
+        f"{heading}\n{_escape_section_body(body, _SUMMARY_HEADINGS)}"
+        for heading, body in zip(_SUMMARY_HEADINGS, bodies)
     )
 
 
