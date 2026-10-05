@@ -7323,3 +7323,16 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **审查循环**：Correctness 轴发现轮 PASS-WITH-FINDINGS（仅 2×P4 无需行动：P4-1 build 级用例为合格定向守卫但病灶检测力由 helper 级两组承担——变异实证，建议不加更强断言因 builder 无公共 total-estimate 可观察值；P4-2 T16b/B-6 溯源提示）；Standards 轴发现轮 **CLEAN**（2×P3 信息性不要求处置）→ **发现轮即终态：零代码 findings、无处置 commit、无需 delta 轮**。台账行 `docs/review_ledger.d/i646-usage-zero-anchor-b2a1ecc2-7523c623.tsv`。证据澄清：红 2/18 系修前工作树**真实执行**（2 failed/16 passed，Edit 修复前运行），非由 diff 推导。
 - **登记不修（另案）**：①build 级 `test_zero_usage_only_public_build_keeps_naive_estimate` 无 #646 病灶检测力（变异实测两侧皆绿）——其定位是票面 AC②④ 要求的"公共 build 不下调成本"定向守卫，与既有 `test_anchor_never_lowers_below_estimate` 构成 max 双钉，病灶检测力由 helper 级两组变异恰好两红承担；②罕见 int 子类（IntEnum 等）仍会被收下作锚——既有行为非本票引入，无实际 provider 形态支撑；③T16b/B-6 报告编号溯源在 issue #646 正文，仓库文档不可直查（防与 tracker B-6 批次混淆，已在票面与方案注明）。
 - **集成状态**：记账 + 收据笔落盘后，push 分支 / 开 PR / PR merge 三动作逐项待批（§14.4）。
+
+## #649 结构化摘要解析区分保留节标题与正文 Markdown 标题（2026-10-05；分支 `codebuddy/649-heading-parse`，PR #697，基点 `8d43e786`）
+
+- **票面与方案**：来源 = 2026-10-04 上下文机制暴力测试 T13d（被测 `1226f4bb`）；`ISSUE-649.md` 四条 AC。纯 Bug 修复 + 施工前调研（非纯 docs，走协议 §1.3）——`docs/agents/649-research.md` 判 **ADAPT**（CommonMark 0.31.2 围栏感知 + 反斜杠转义、RFC 2046「保留定界符不得被正文伪造」原则）；**不**引入全量 Markdown 依赖、**不**改八节持久格式契约、**不**新增 LLM 调用。
+- **实现（`09a366c1`，改 `src/agent_harness/context/compactor.py`）**：新增确定性 `_fence_delimiter`/`_fenced_mask`/`_escape_section_body`/`_unescape_section_body`；`_parse_summary_sections` 的节边界从「任意 `## ` 行」收紧为「围栏外、未转义、逐字等于保留标题的行」；`_assemble_summary` 组装时把正文里逐字等于保留标题的行转义、解析时解码回原值。固定八节数量/顺序/非空验证、两次尝试上限、programmatic 精确比对、shrink/target 全部保持。
+- **红测/变异（隔离副本 `/tmp/rev649`，`PYTHONPATH=<副本>/src`）**：新增 `tests/context/test_compactor_section_parse.py` 13 项。红证 = 把副本 `compactor.py` 还原为基点 `8d43e786` 后 **7 failed / 6 passed**（6 通过者=五类非法结构拒绝 + 重试上限的防回归钉，修前修后同绿）。变异 M1（禁用围栏检测）2 红（两条 fenced 用例）、M2（禁用转义）1 红、M3（禁用解码）1 红；**M2 与 M3 失败集相同 ⇒ 共用失败面，互不构成鉴别力证据（已登记）**；M1 与 M2 失败集不相交。
+- **focused 验证**：`tests/context` **244 passed**；票面入口 `test_compactor.py` + `test_plan_reinjection.py` **62 passed**（本机无仓内 `.venv`，用兄弟 worktree venv 且 `PYTHONPATH` 钉本 worktree `src`，已核实 `agent_harness.__file__` 指向本 worktree）。
+- **两轴独立审查（范围 `8d43e786..09a366c1`）**：Correctness/Spec **PASS-WITH-FINDINGS**（P0-P2=0 / P3=1 / P4=1）、Standards **PASS-WITH-FINDINGS**（P0-P3=0 / P4=1）。findings 均登记不修（本票约束「不改产品代码除非 P0/P1」，且无 P0/P1）：
+  - P3-1（Correctness）：正文行 = `\` + 保留标题时往返丢掉一个前导反斜杠（probe：`\## 文件清单` → `## 文件清单`）。仅当模型输出「反斜杠前缀的保留标题行」时发生，无崩溃、无假拒绝；属所选转义字母表的固有碰撞，未在注释中登记。
+  - P4-1（Correctness/Spec）：调研文档 `docs/agents/649-research.md` §3「不改持久格式」措辞不精确——命中转义时持久化摘要字符串确实新增内部反斜杠（解析时解码回原值）。
+  - P4-2（Standards）：escape 与 unescape 两个检查点仅由同一条用例覆盖（M2=M3 共用失败面）。
+- **台账行**：`docs/review_ledger.d/t649-heading-parse-8d43e786-09a366c1.tsv`（749 字符 ≤ 800，无 lint 命中）；覆盖闸门 `scripts/check_review_coverage.py` **exit 0**（区间 `089524a~1..HEAD` 每条 commit 均有归属）。
+- **集成状态**：分支已 push（PR #697）；本轮补审台账后 gate0 coverage 车道应转绿；merge / 关单待用户单独批准（§14.4）。
