@@ -45,6 +45,10 @@ from pathlib import Path
 
 import anyio.to_thread
 
+from agent_harness.agent.run_budget import (
+    session_budget_key,
+    session_model_request_accounting,
+)
 from agent_harness.recovery.coordinator import (
     ReconcileRequired,
     RecoveryCoordinator,
@@ -54,12 +58,16 @@ from agent_harness.recovery.reconcile import ReconcileCallback
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.session.event import (
     FORK_IN_PROGRESS,
+    MODEL_REQUEST,
+    MODEL_REQUEST_STARTED,
     RUN_INTERRUPTED,
     SESSION_FORKED,
+    SessionEvent,
 )
 from agent_harness.session.interrupt import InterruptedRun, detect_unterminated_runs
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
+from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.storage.operation import OperationLedger
 
 logger = logging.getLogger("agent_harness.recovery.scan")
@@ -94,6 +102,7 @@ async def scan_interrupted_sessions(
     workspace_registry: WorkspaceRegistry | None,
     database_path: str | Path | None,
     reconcile_callback: ReconcileCallback | None = None,
+    session_budget_ledger: SqliteDelegationTreeLedger | None = None,
     lock_timeout_seconds: float = 5.0,
 ) -> list[InterruptionScanResult]:
     """扫描全部 session，标记中断并 reconcile；返回被处理 session 的结论。
@@ -108,7 +117,35 @@ async def scan_interrupted_sessions(
             interrupted = await anyio.to_thread.run_sync(
                 _mark_interrupted, session_store, session_id
             )
+            budget_error = None
+            if session_budget_ledger is not None:
+                events = await anyio.to_thread.run_sync(
+                    session_store.read_events, session_id,
+                )
+                try:
+                    await _recover_session_model_requests(
+                        session_id, events, session_budget_ledger,
+                    )
+                except Exception as error:  # per-marker failure remains fail-closed
+                    logger.exception(
+                        "启动扫描：session=%s SessionBudget model request reconcile failed",
+                        session_id,
+                    )
+                    budget_key = session_budget_key(events, session_id=session_id)
+                    markers = await session_budget_ledger.pending_model_request_accountings(
+                        budget_key, session_id=session_id,
+                    )
+                    for marker in markers:
+                        session_budget_ledger.block_model_request_accounting(
+                            budget_key, marker.accounting_id,
+                        )
+                    budget_error = str(error)
             if not interrupted:
+                if budget_error is not None:
+                    results.append(InterruptionScanResult(
+                        session_id=session_id, recovery=ScanRecovery.FAILED,
+                        detail=f"SessionBudget reconcile failed: {budget_error}",
+                    ))
                 continue
             logger.warning(
                 "启动扫描：session=%s 标记 %d 个中断 run（seq=%s）",
@@ -123,6 +160,8 @@ async def scan_interrupted_sessions(
                 database_path=database_path,
                 lock_timeout_seconds=lock_timeout_seconds,
             )
+            operation_recovery = ScanRecovery.RECOVERED
+            operation_detail = None
             try:
                 await coordinator.recover(session_id)
             except ReconcileRequired as error:
@@ -130,22 +169,26 @@ async def scan_interrupted_sessions(
                 logger.warning(
                     "启动扫描：session=%s 需人工 reconcile：%s", session_id, error
                 )
-                results.append(InterruptionScanResult(
-                    session_id=session_id, interrupted=interrupted,
-                    recovery=ScanRecovery.NEEDS_MANUAL_RECONCILE,
-                    detail=str(error),
-                ))
+                operation_recovery = ScanRecovery.NEEDS_MANUAL_RECONCILE
+                operation_detail = str(error)
             except RecoveryError as error:
                 logger.exception(
                     "启动扫描：session=%s reconcile 失败", session_id,
                 )
+                operation_recovery = ScanRecovery.FAILED
+                operation_detail = str(error)
+            if budget_error is not None:
                 results.append(InterruptionScanResult(
                     session_id=session_id, interrupted=interrupted,
-                    recovery=ScanRecovery.FAILED, detail=str(error),
+                    recovery=ScanRecovery.FAILED,
+                    detail=f"SessionBudget reconcile failed: {budget_error}; "
+                           f"operation recovery={operation_recovery.value}: "
+                           f"{operation_detail or 'ok'}",
                 ))
             else:
                 results.append(InterruptionScanResult(
                     session_id=session_id, interrupted=interrupted,
+                    recovery=operation_recovery, detail=operation_detail,
                 ))
         except Exception as error:  # 单会话失败不阻断整轮扫描
             logger.exception("启动扫描：session=%s 处理异常", session_id)
@@ -155,6 +198,56 @@ async def scan_interrupted_sessions(
                 detail=str(error),
             ))
     return results
+
+
+async def _recover_session_model_requests(
+    session_id: str, events: list[SessionEvent], ledger: SqliteDelegationTreeLedger,
+) -> None:
+    budget_key = session_budget_key(events, session_id=session_id)
+    markers = await ledger.pending_model_request_accountings(
+        budget_key, session_id=session_id,
+    )
+    for marker in markers:
+        def in_interval(
+            event, *, after_seq=marker.after_seq, before_seq=marker.before_seq,
+            run_id=marker.run_id, step_id=marker.step_id,
+        ) -> bool:
+            return (
+                event.seq is not None and event.seq >= after_seq
+                and (before_seq is None or event.seq < before_seq)
+                and event.run_id == run_id
+                and event.step_id == step_id
+            )
+
+        requests = [
+            event for event in events
+            if event.type == MODEL_REQUEST and in_interval(event)
+        ]
+        started = [
+            event for event in events
+            if event.type == MODEL_REQUEST_STARTED and in_interval(event)
+        ]
+        if not requests:
+            if started:
+                await ledger.resolve_unsettled_session_model_request_accounting(
+                    budget_key, marker.accounting_id,
+                )
+            else:
+                await ledger.resolve_empty_session_model_request_accounting(
+                    budget_key, marker.accounting_id,
+                    refund_step=marker.reserved_requests == 1,
+                )
+            continue
+
+        request_ids, usage, cost = session_model_request_accounting(requests)
+        await ledger.record_session_model_requests(
+            budget_key,
+            count=max(len(requests) - marker.reserved_requests, 0),
+            usage=usage,
+            cost=cost,
+            accounting_id=marker.accounting_id,
+            request_ids=request_ids,
+        )
 
 
 def _mark_interrupted(

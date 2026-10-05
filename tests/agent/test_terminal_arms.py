@@ -798,7 +798,7 @@ async def test_context_exceeded_arm_closes_and_clears_the_handle(session: Sessio
     # 取消臂（暂停帧之后断连）拿不到句柄 ⇒ **没有**第二次收口；
     # 单终态不变量 ⇒ 也不补第二条终结事件。
     before = len(session.events)
-    kit.runtime._terminal_cancelled(kit.arms, steps=3)
+    await kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     assert [name for name, _ in kit.tracer.calls] == [
         "context_build_completed", "run_failed",
@@ -877,7 +877,7 @@ async def test_cancelled_arm_discards_events_but_persists_them(session: Session)
     mark = len(session.events)
     envelope = kit.arms.envelope_step(3)
 
-    assert kit.runtime._terminal_cancelled(kit.arms, steps=3) is None
+    assert await kit.runtime._terminal_cancelled(kit.arms, steps=3) is None
 
     written = kit.since(mark)
     by_type = {e.type: e for e in written}
@@ -927,7 +927,7 @@ async def test_cancelled_arm_flushes_partial_text_with_the_interrupt_step(
     kit = _kit(session, streamer=streamer, step_base=2)
     kit.arms.terminal.model_call_open = True
 
-    kit.runtime._terminal_cancelled(kit.arms, steps=3)
+    await kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     delta = next(e for e in session.events if e.type == TEXT_DELTA)
     assert delta.data["delta"] == "答了一半"
@@ -941,7 +941,7 @@ async def test_cancelled_arm_never_begun_writes_nothing(session: Session) -> Non
     kit = _kit(session, streamer=streamer, run_id=None)
     mark = len(session.events)
 
-    kit.runtime._terminal_cancelled(kit.arms, steps=0)
+    await kit.runtime._terminal_cancelled(kit.arms, steps=0)
 
     assert session.events[mark:] == []
     assert kit.result_holder == []
@@ -1107,7 +1107,7 @@ async def test_cancelled_arm_keeps_everything_after_the_failing_stream_stage(
     mark = len(session.events)
 
     with pytest.raises(RuntimeError, match="streamer 收口炸了"):
-        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+        await kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     assert streamer.calls == [kit.arms.envelope_step(3) + 1]
     assert [name for name, _ in kit.tracer.calls] == [
@@ -1134,7 +1134,7 @@ async def test_cancelled_arm_still_writes_the_terminal_event_when_the_port_raise
     mark = len(session.events)
 
     with pytest.raises(RuntimeError, match="观测端口炸了"):
-        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+        await kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
         "抛错那一步之前仍执行过；它之后的 run_failed 没到（故障确实发生在段中间）"
@@ -1162,7 +1162,7 @@ async def test_both_stages_failing_re_raises_the_first_one_after_running_both(
     mark = len(session.events)
 
     with pytest.raises(RuntimeError, match="streamer 收口炸了"):
-        kit.runtime._terminal_cancelled(kit.arms, steps=3)
+        await kit.runtime._terminal_cancelled(kit.arms, steps=3)
 
     assert streamer.calls == [kit.arms.envelope_step(3) + 1], "第一段（流收口）跑过"
     assert [name for name, _ in kit.tracer.calls] == ["context_build_completed"], \
