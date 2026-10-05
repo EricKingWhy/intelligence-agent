@@ -954,6 +954,45 @@ def test_cancelled_queued_replacement_keeps_sections_consistent():
     )
 
 
+@pytest.mark.asyncio
+async def test_compact_now_is_noop_below_floor_with_zero_writes(tmp_path):
+    """#635 T2：无可压缩早期轮 → 返回 None 且零 bracket 写入。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "only current"})
+    before = session.events
+
+    result = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=10_000,
+    ).compact_now(session)
+
+    assert result is None
+    assert session.events == before
+
+
+@pytest.mark.asyncio
+async def test_compact_now_writes_bracket_for_manual_path(tmp_path):
+    """#635 T2：手动路径无条件调 compact_now，走真实管线产出同一 bracket。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    session.append(USER_MESSAGE, {"content": "current request"})
+    before = session.events
+
+    result = await ContextBuilder(
+        ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
+        max_context_tokens=10_000, auto_compact_threshold=0.3,
+    ).compact_now(session)
+
+    assert result is not None
+    assert result.compacted_turn_count == 1
+    assert result.bracket_id
+    assert estimate_message_tokens(result.messages) == result.token_estimate
+    assert [event.type for event in session.events[len(before):]] == [
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    ]
+    assert session.events[:len(before)] == before
+
+
 def test_trimmed_same_prefix_entries_dedup_after_truncation():
     """#614②：去重必须发生在截断**之后**——同前缀超长条目不得以截断值重复。
 
