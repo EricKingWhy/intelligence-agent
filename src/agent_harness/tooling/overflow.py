@@ -22,17 +22,18 @@ class ArtifactOverflowUnavailable(RuntimeError):
 def _payload_size(value: Any) -> int | None:
     """顶层字段参与溢出判定的载荷大小；``None`` = 无溢出可能或不参与。
 
-    str 按字符数；dict/list 按紧凑 JSON 序列化长度——与外置 content 同一编码，
-    判定时量到的就是 artifact 将要保存的字节数。其余标量与**不可 JSON 序列化**
-    的对象返回 None：后者原本也整体穿透，且无法产出可还原 JSON artifact（连
-    SessionEvent JSONL 都过不去，属非法载荷），保持原行为不在此处扩大范围。
+    str 按字符数；dict/list 按紧凑 JSON 序列化后的字符数（与 ``overflow_chars``
+    同一口径，非字节）。其余标量与**不可 JSON 序列化**或**序列化递归爆栈**
+    （深嵌套 dict/list 触发 RecursionError）的对象返回 None：保持既有穿透
+    行为，不在摘要路径上制造新崩溃面。多字段路径的 artifact 以 indent=2
+    落盘，保存体积略大于判定值——模型侧替身仍受 _summarize 预算约束。
     """
     if isinstance(value, str):
         return len(value)
     if isinstance(value, (dict, list)):
         try:
             return len(json.dumps(value, ensure_ascii=False))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             return None
     return None
 
@@ -101,12 +102,15 @@ class ArtifactOverflowHandler(OverflowHandler):
         self, session: Session, tool_call_id: str, tool_name: str, result: ToolResult,
     ) -> tuple[ToolResult, list[tuple[str, dict[str, Any]]]]:
         data = result.data or {}
-        # 溢出判定覆盖 data **全部顶层字段** + message（#644：T15b/O-1 + T8e）。
-        # 大小按序列化后载荷计（str 字符数 / dict/list 紧凑 JSON 长度）：
+        # 溢出判定覆盖 data 全部顶层字段 + message（#644：T15b/O-1 + T8e）。
+        # 大小按序列化后载荷计（str 字符数 / dict/list 紧凑 JSON 字符数）：
         # 此前只认 isinstance(value, str)，白名单六键（output/content/stdout/
         # stderr/before/after——Q12=B 的 diff 视图字段，各上限 _DIFF_MAX_BYTES=
         # 50KB）里装 50KB dict 直接穿透，白名单之外的字段（如 text）则完全
         # 零预算——两条都是回灌 Context 的旁路（不变量 #15）。
+        # 已知例外：data 自带 "message" 键会被下行 result.message 覆盖、不参与
+        # 判定（同名合并语义的限制；仓库内无生产者写该键，外部 MCP 工具若产出
+        # 该形态需另票分离判定，见 review_ledger 登记项）。
         outputs: dict[str, Any] = {**data, "message": result.message}
         oversized = {key: value for key, value in outputs.items()
                      if (size := _payload_size(value)) is not None

@@ -299,11 +299,37 @@ async def test_threshold_equality_stays_strict_for_new_entries(tmp_path):
         session, "call", "read", text_at_limit,
     )
     assert compact is text_at_limit and deferred == []
+    over_dict = ToolResult.success("ok", data={"output": {"p": pad + "x"}})
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "read", over_dict,
+    )
+    assert compact.artifact_ref and deferred
     over = ToolResult.success("ok", data={"text": "x" * 2001})
     compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
         session, "call", "read", over,
     )
     assert compact.artifact_ref and deferred
+
+
+@pytest.mark.asyncio
+async def test_deeply_nested_payload_does_not_crash_and_stays_unexternalized(tmp_path):
+    """深嵌套 dict 的 json.dumps 递归爆栈不得逃逸成摘要路径崩溃（双轴审查 P3）。
+
+    ~1000+ 层嵌套会让 json.dumps 抛 RecursionError；_payload_size 按"不可判定
+    → 保持既有穿透行为"处理（与不可序列化对象同路），executor 的摘要链路
+    不因此多出一条崩溃面。"""
+    session = make_session(tmp_path)
+    store = FakeArtifactStore()
+    deep: dict = {}
+    current = deep
+    for _ in range(3000):
+        current["child"] = {}
+        current = current["child"]
+    result = ToolResult.success("ok", data={"output": deep})
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "read", result,
+    )
+    assert compact is result and deferred == []
 
 
 @pytest.mark.asyncio
@@ -325,6 +351,13 @@ async def test_new_entries_preserve_fail_open_and_fail_closed(tmp_path, data):
         UnavailableStore(),
     ).maybe_overflow(session, "call", "read", result)
     assert compact is result and deferred == []           # fail-open：原文保留
+    assert compact.artifact_ref is None
+
+    # store=None + fail_open（默认 True）象限：同样保原文返回（AC4 四组合补全）。
+    compact, deferred = await ArtifactOverflowHandler(None).maybe_overflow(
+        session, "call", "read", result,
+    )
+    assert compact is result and deferred == []
     assert compact.artifact_ref is None
 
     with pytest.raises(ArtifactOverflowUnavailable, match="Artifact store failed"):
