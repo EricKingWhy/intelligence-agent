@@ -78,6 +78,9 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ("ForgetMemoryV2Tool", "agent_harness.memory.v2.tools"),
     ("WebSearchTool", "agent_harness.websearch.tools"),
     ("LoadSkillTool", "agent_harness.skills.tool"),
+    # #529 T-529-5：沉淀闭环工具（统一执行路径，不变量 #7）
+    ("PromoteSkillTool", "agent_harness.skills.promote_tool"),
+    ("RegisterSkillTool", "agent_harness.skills.promote_tool"),
     ("DelegateTool", "agent_harness.multiagent.tools"),
     ("TickTool", "agent_harness.capability.demo"),
 )
@@ -85,6 +88,9 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
 #: 静态枚举不到的 `Tool` 子类 → 理由。AST 覆盖闸用：命中的类**不**参与内置工具对账。
 _NOT_STATICALLY_ENUMERABLE: dict[str, str] = {
     "MCPTool": "名字来自 MCP 服务器的工具清单（运行时才知道），不属内置工具面",
+    # #529：promote_skill / register_skill 的共用基类（只是收敛 diff 留痕逻辑），
+    # 本身不单独注册进任何 registry——两个具体子类已在清单里。
+    "_PromotionBaseTool": "共用基类，不单独进 registry；对账看 PromoteSkillTool / RegisterSkillTool",
 }
 
 #: 未归属任何非-main 档位的**内置工具** → 理由（#238 的显式白名单）。
@@ -110,6 +116,14 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
     ),
     "load_skill": (
         "skills 能力工具（`skills/tool.py`），未在任何档位声明：技能包由 main 加载"
+    ),
+    "promote_skill": (
+        "#529 沉淀提议工具（`skills/promote_tool.py`），未在任何档位声明：只写 "
+        "staging 待审区，注册另经 register_skill 的 DANGER 审批闸门"
+    ),
+    "register_skill": (
+        "#529 沉淀注册工具（`skills/promote_tool.py`），未在任何档位声明：DANGER "
+        "级别，任何 policy 下执行前必经审批闸门（不变量 #11，人审确认）"
     ),
     "tick": (
         "Phase 7 Gate 的 demo 能力工具（`capability/demo.py` 自述无业务价值），"

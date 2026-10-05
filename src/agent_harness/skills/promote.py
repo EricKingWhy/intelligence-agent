@@ -31,7 +31,11 @@ from agent_harness.session.event import (
     TOOL_RESULT,
     SessionEvent,
 )
-from agent_harness.skills.discovery import SkillCatalogEntry, SkillDiscovery, parse_skill_markdown
+from agent_harness.skills.discovery import (
+    SkillCatalogEntry,
+    SkillDiscovery,
+    parse_skill_markdown,
+)
 from agent_harness.skills.lint import DANGEROUS_BODY_PATTERNS, LintResult, lint_skill
 
 # ── 状态机词汇（§4）──────────────────────────────────────────────────────────

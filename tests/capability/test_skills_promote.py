@@ -225,7 +225,7 @@ class TestStateMachine:
 
     def test_staging_dir_never_enter_catalog_even_after_refresh(self, tmp_path):
         """结构防线：.staging 嵌套路径不会被单层扫描误收（未确认草稿永不进 catalog）。"""
-        promoter, discovery, project_dir = _promoter(tmp_path)
+        promoter, discovery, _project_dir = _promoter(tmp_path)
         promoter.propose(DRAFT_TEXT, events=_run_events())
         discovery.discover()  # 外部任何刷新都不该把 staging 草稿捞进 catalog
         assert all(e.name != "pdf-export" for e in discovery.catalog().entries)
