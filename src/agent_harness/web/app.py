@@ -116,10 +116,12 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.checkpoint import checkpoint_save_failure_count
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
@@ -614,11 +616,18 @@ class ApproveRequest(BaseModel):
     decision 是 spec 契约（03 §9 PermissionDecision）；approved 是兼容字段。
     两者都传时 decision 优先；只传 approved 时从它推导（True→approve_once，
     False→deny）。decision 必须命中 requested 事件里 allowed_decisions。
+
+    `policy_granularity`（#684 第三档「以后都允许」）：仅当
+    ``decision=approve_policy`` 时有意义，取值 ``exact`` / ``command``；缺省
+    由领域层归一为 ``exact``。非法值 → 422（与非法 decision 同口径，不静默回落）。
     """
 
     approval_id: str | None = None
     approved: bool = True
     decision: str | None = None
+    # #684：第三档「以后都允许」的安装粒度（exact / command）。Shape-only——
+    # 合法性判定在领域层 `SessionService.resolve_approval`（单一规则来源）。
+    policy_granularity: str | None = None
     # #562 F6：reason 逐字写入 permission/resolved 事件日志，自由文本无上限 =
     # 每次授权可重复放大（实测 50KB 原样入库）。上限 2000 **字符**（pydantic
     # ``max_length`` 计的是 Python ``str`` 码点数，不是 UTF-8 字节——2000 个中文
@@ -866,6 +875,45 @@ class SetWorkflowModeRequest(BaseModel):
     """切换会话工作流档的请求体（#526 B1）。"""
 
     mode: Literal["normal", "plan"]
+
+
+class ApprovePolicyRuleOut(BaseModel):
+    """`GET /api/approve-policy/rules` 的一行（#684 Phase 2）。
+
+    形状 = `ApprovePolicyRule.to_dict()` 逐字段透传（规则是项目配置，字段即真相，
+    HTTP 层不裁剪、不重命名）：`id` / `tool` / `key` / `granularity`
+    （`exact`|`command`）/ `permission_at_approval`（命中时重验的权限）/ `created_at`。
+    """
+
+    id: str
+    tool: str
+    key: str
+    granularity: str
+    permission_at_approval: str
+    created_at: str
+
+
+class ApprovePolicyRules(BaseModel):
+    """`GET /api/approve-policy/rules` 的成功响应（#684 Phase 2）：本项目规则列表。
+
+    无规则 / 文件缺失 / 文件损坏都返回 `{"rules": []}`（`ApprovePolicyStore.load`
+    fail-closed 成空列表）——**不**用 404 表达"没有配置"：空列表是唯一真相，与
+    "规则不存在 ⇒ 撤销幂等成功"同一口径。
+    """
+
+    rules: list[ApprovePolicyRuleOut]
+
+
+class ApprovePolicyRuleRevoked(BaseModel):
+    """`POST /api/approve-policy/rules/{id}/revoke` 的成功响应（#684 Phase 2）。
+
+    `revoked` 是**动作后**的真值（幂等：重复撤销仍 200，`revoked=False` 表示该 id
+    当时本就不存在）。与 #526 `ApprovalGrantRevoked` 同形，只是作用域从会话级换成
+    项目级持久规则。
+    """
+
+    id: str
+    revoked: bool
 
 
 class AppState:
@@ -1154,6 +1202,17 @@ def session_service(state: AppState) -> SessionService:
         validate_session_declaration=state.validate_session_declaration,
         registered_tool_names=state.registered_tool_names,
     )
+
+
+def approve_policy_store() -> ApprovePolicyStore:
+    """本项目持久审批规则存储（#684 Phase 2 管理面）。
+
+    项目根 = 进程当前工作目录，与 `ToolExecutor.__init__` 的 `project_root` 回落口径
+    逐字一致（`project_root is None ⇒ Path.cwd()`）：管理面读写的必须正是执行域用来
+    命中规则的那份 `.agent-harness/approve-policy.json`——否则会出现"撤销了却还在
+    放行"这类两套真相（不变量 #22 同源）。
+    """
+    return ApprovePolicyStore(Path.cwd())
 
 
 def project_service(state: AppState) -> ProjectService:
@@ -2193,6 +2252,49 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             revoked=result["revoked"],
         )
 
+    @app.get("/api/approve-policy/rules")
+    async def list_approve_policy_rules(
+        _: None = Depends(require_trusted_origin),
+    ) -> ApprovePolicyRules:
+        """列出本项目持久审批规则（#684 Phase 2，管理面）。
+
+        数据源是项目根 `.agent-harness/approve-policy.json`（`ApprovePolicyStore`），
+        与执行域命中规则时读的是**同一份文件**。无规则 / 文件缺失 / 文件损坏都返回
+        `{"rules": []}`（fail-closed：读不动就当没有规则，绝不臆造放行）——空列表
+        不是 404，因为"没有配置"不是错误。
+
+        只读端点，无 422/404：路径无参数。来源闸（ADR-0025 D1）：规则含工具名 /
+        命令键 / 相对路径等宿主侧信息，只接受本机来源（与 `project-instructions` /
+        `host/dirs` 的 GET 同一实现）。
+        """
+        rules = approve_policy_store().load()
+        return ApprovePolicyRules(
+            rules=[ApprovePolicyRuleOut(**rule.to_dict()) for rule in rules]
+        )
+
+    @app.post("/api/approve-policy/rules/{rule_id}/revoke")
+    async def revoke_approve_policy_rule(
+        rule_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> ApprovePolicyRuleRevoked:
+        """撤销一条项目级持久审批规则（#684 Phase 2，管理面）。
+
+        语义：200 → `{id, revoked}`（**幂等**：重复撤销仍 200，`revoked=False` 表示
+        该 id 当时本就不存在）；422 → `rule_id` 形态非法（先于任何读写，路径穿越防线）。
+        **没有 404**：资源是项目级配置文件而非按 id 寻址的实体，规则缺席是幂等成功。
+        二次确认由前端做（与 #526 的 revoke 端点同一口径：POST 本体即显式动作）。
+
+        撤销只删规则、**不删审计**：规则是配置，git 历史即审计链（设计稿 §6）。
+        来源闸（ADR-0025 D1）：撤销是宿主侧管理动作，只接受本机来源。
+        """
+        if not SESSION_KEY_PATTERN.fullmatch(rule_id):
+            raise HTTPException(
+                status_code=422,
+                detail=f"rule_id 只接受单个安全名字段：{rule_id!r}",
+            )
+        removed = approve_policy_store().remove_rule(rule_id)
+        return ApprovePolicyRuleRevoked(id=rule_id, revoked=removed)
+
     @app.post("/api/sessions/{session_id}/workflow-mode")
     async def set_workflow_mode(
         session_id: str,
@@ -2435,6 +2537,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 approved=req.approved,
                 decision=req.decision,
                 reason=req.reason,
+                policy_granularity=req.policy_granularity,
             )
         except (
             InvalidSessionId,

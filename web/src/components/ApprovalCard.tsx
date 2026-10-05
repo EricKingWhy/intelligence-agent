@@ -36,7 +36,7 @@
  * 等投影说话——resolved 事件到达后审批离开 pending 队列，卡片由调用方
  * （内联位 / 模态）随投影卸载。 */
 import { useEffect, useRef, useState } from 'react';
-import { ShieldAlert, Check, X } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, Check, X } from 'lucide-react';
 import type { PendingApproval } from '../types';
 import { postApproval, AlreadyResolvedError, ApprovalGoneError } from '../lib/api';
 import { classifyPreviewArgs } from '../lib/approvalPreview';
@@ -70,8 +70,14 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #684 第三档：点「以后都允许」后展开粒度选择器（精确 / 命令级）。粒度是**用户
+  // 显式再选一次**才提交——不在展开时就默认某一档（F21 显式授权）。
+  const [policyOpen, setPolicyOpen] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
   const invalid = invalidProp;
+  // 第三档只在后端 requested 事件声明了 approve_policy 时才渲染（F21/F22：入口由
+  // Runtime 决定，前端不自己发明可选决策；不可缓存的工具身份后端不加它）。
+  const allowPolicy = approval.allowed_decisions?.includes('approve_policy') ?? false;
 
   // 挂载聚焦一次即可：决策后不抢回焦点（用户可能已在别处操作）。
   useEffect(() => {
@@ -79,12 +85,21 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const decide = async (approved: boolean) => {
+  const decide = async (
+    approved: boolean,
+    decision?: string,
+    granularity?: 'exact' | 'command',
+  ) => {
     if (busy || invalid || submitted) return;
     setBusy(true);
     setError(null);
     try {
-      await postApproval(sessionId, approval.approval_id, approved);
+      // 默认路径保持 3 参数调用（旧调用点逐字不变）；只有第三档才透传决策+粒度。
+      if (decision === undefined) {
+        await postApproval(sessionId, approval.approval_id, approved);
+      } else {
+        await postApproval(sessionId, approval.approval_id, approved, decision, granularity);
+      }
       setSubmitted(true);
       // 决策成功 ≠ 客户端已看到结果：上报调用方对账一次（#420 AC2——流活着
       // 时它是 no-op；give-up 落 viewing 后它就是唯一的消费路径）。
@@ -222,6 +237,40 @@ export function ApprovalCard({ sessionId, approval, autoFocus = false, invalid: 
             onClick={() => decide(false)}
           >
             <X size={14} /> 拒绝 {!invalid && <kbd className="approval-kbd">{mod}+⌫</kbd>}
+          </button>
+          {allowPolicy && (
+            <button
+              className="btn-ghost approval-allow-policy"
+              disabled={busy || invalid}
+              aria-expanded={policyOpen}
+              onClick={() => setPolicyOpen((open) => !open)}
+            >
+              <ShieldCheck size={14} /> 以后都允许
+            </button>
+          )}
+        </div>
+      )}
+      {/* #684 第三档：粒度由用户显式再选一次（精确 / 命令级），不默认、不猜测
+          （F22）；两个按钮都走同一 postApproval 透传 decision+policy_granularity。 */}
+      {!submitted && allowPolicy && policyOpen && (
+        <div
+          className="approval-actions approval-policy-granularity"
+          role="group"
+          aria-label="持久授权粒度"
+        >
+          <button
+            className="btn-ghost approval-policy-exact"
+            disabled={busy || invalid}
+            onClick={() => decide(true, 'approve_policy', 'exact')}
+          >
+            精确（含参数）
+          </button>
+          <button
+            className="btn-ghost approval-policy-command"
+            disabled={busy || invalid}
+            onClick={() => decide(true, 'approve_policy', 'command')}
+          >
+            命令级（不含参数）
           </button>
         </div>
       )}

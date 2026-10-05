@@ -6,7 +6,7 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, Brain, Gauge, KeyRound, Moon, PanelRight, Sun } from 'lucide-react';
+import { Activity, Brain, Gauge, KeyRound, Moon, PanelRight, ShieldCheck, Sun } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
@@ -31,13 +31,15 @@ interface Props {
   authRequired: boolean;
   /** 打开记忆管理浮层（MEM-5 / #160）。低频管理动作，放在 App Bar 右簇。 */
   onOpenMemories: () => void;
+  /** 打开持久审批规则管理浮层（#684 Phase 2）。与记忆管理同簇的低频管理动作。 */
+  onOpenApprovePolicy: () => void;
   /** #200：会话 id（context-usage 看板的数据源）；null = 无会话（按钮不渲染）。 */
   sessionId: string | null;
   /** 打开上下文容量看板（#200，设计稿 §5）。 */
   onOpenContextUsage: (sessionId: string) => void;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, sessionId, onOpenContextUsage }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, sessionId, onOpenContextUsage }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -210,6 +212,15 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
           title="记忆管理——查看并删除系统记住的长期事实"
         >
           <Brain size={16} />
+        </button>
+        {/* #684 Phase 2：持久审批规则管理入口。与记忆管理同簇——同为低频管理动作。 */}
+        <button
+          className="icon-btn"
+          onClick={onOpenApprovePolicy}
+          aria-label="持久审批规则"
+          title="持久审批规则——查看并撤销「以后都允许」的项目级授权"
+        >
+          <ShieldCheck size={16} />
         </button>
         <button
           className="icon-btn"

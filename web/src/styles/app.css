@@ -6915,3 +6915,115 @@ button.json-row {
   margin-top: 4px;
 }
 .picker-manage-item { border-top: 1px solid var(--border-subtle); }
+
+/* 持久审批规则管理浮层（#684 Phase 2）。浮层定位/材质走 .project-dialog 组
+ * （组件根类含 `project-dialog`），这里只写内容块——全部复用既有 token，
+ * 不新增主题变量（AGENTS §15 的双主题同步只约束新增/改动 token，此处一个都没动）。 */
+.approve-policy-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.approve-policy-count {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.approve-policy-refresh,
+.approve-policy-quiet,
+.approve-policy-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.approve-policy-refresh:hover,
+.approve-policy-quiet:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.approve-policy-danger {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--danger);
+}
+.approve-policy-danger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.approve-policy-error {
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
+.approve-policy-notice {
+  font-size: var(--text-xs);
+  color: var(--success);
+}
+.approve-policy-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.approve-policy-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.approve-policy-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.approve-policy-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.approve-policy-tool {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.approve-policy-granularity {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.approve-policy-key {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.approve-policy-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.approve-policy-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.approve-policy-actions {
+  display: flex;
+  justify-content: flex-end;
+}
