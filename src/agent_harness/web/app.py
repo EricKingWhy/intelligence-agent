@@ -1649,6 +1649,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_memory_routes(app)
 
+    # #529 T-529-5：skill 目录只读展示（catalog 列表 + 待审草稿；无管理按钮）
+    from agent_harness.web.skills import register_skill_routes
+
+    register_skill_routes(app)
+
     # WS-7 / #170 宿主只读目录列举（目录选择器的唯一可行路径，ADR-0028）
     from agent_harness.web.host_dirs import register_host_dir_routes
 

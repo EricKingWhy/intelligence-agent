@@ -23,6 +23,12 @@ import yaml
 #: 拦不住读入阶段。
 SKILL_FILE_MAX_BYTES = 1_000_000
 
+#: 写入侧单文件上限（#529 §5.1，PORT DESIGN 依据 B：oh-my-pi MAX_MANAGED_SKILL_BYTES）：
+#: register/update 序列化出的**整个** SKILL.md 字节上限。与发现侧 SKILL_FILE_MAX_BYTES
+#: 语义不同、不合并——那边是"读进来最多多大"（读入阶段有界性），这边是"写出去最多
+#: 多大"（沉淀产物有界，防单条 skill 吃掉整个 Context 预算）。
+MAX_SKILL_BYTES = 64_000
+
 #: name 白名单（#588）：小写字母/数字开头，其后可含连字符/下划线（对齐本仓已注册
 #: 工具名惯例：load_skill / retrieve_knowledge；MCP `_NAME_PATTERN` 同族），换行、
 #: 控制符、空白、大写全在集合外。64 上限与 Pi（skills.ts MAX_NAME_LENGTH）和
@@ -157,12 +163,51 @@ def resolve_within(candidate: Path, root: Path) -> bool:
     return resolved == root or root in resolved.parents
 
 
-class SkillDiscovery:
-    """扫描 skill 目录（只一层 `skills/<name>/SKILL.md`）+ 手动指定路径。"""
+def serialize_skill_markdown(entry: SkillCatalogEntry) -> str:
+    """把目录条目序列化回标准 SKILL.md（frontmatter + 正文）。
 
-    def __init__(self, directories: list[Path], manual_paths: list[Path] | None = None) -> None:
+    frontmatter 经 yaml.safe_dump 生成（meta 里的任意字段值可往返）；
+    正文取 entry.load_body()——源文件不可读时在此抛出，半字未写。
+    """
+    meta: dict[str, Any] = {"name": entry.name, "description": entry.description}
+    if entry.when_to_use:
+        meta["when_to_use"] = entry.when_to_use
+    meta.update(entry.meta)
+    frontmatter = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False)
+    return f"---\n{frontmatter}---\n\n{entry.load_body().strip()}\n"
+
+
+class SkillDiscovery:
+    """扫描 skill 目录（只一层 `skills/<name>/SKILL.md`）+ 手动指定路径。
+
+    #529：本类同时是闭环的写入面（register/update/remove）——只写 project
+    skill 目录（``<workspace>/skills/<name>/SKILL.md``）；global 目录仅由用户
+    手动维护，闭环写入显式拒绝（未配置 project_dir 即无写入面）。
+    """
+
+    def __init__(
+        self,
+        directories: list[Path],
+        manual_paths: list[Path] | None = None,
+        project_dir: Path | None = None,
+    ) -> None:
         self._directories = [Path(d) for d in directories]
         self._manual_paths = [Path(p) for p in (manual_paths or [])]
+        # 写入目标 = project skill 目录。None = 未配置写入面：register/update/remove
+        # 响亮拒绝，绝不落 global（避免污染用户全局）。
+        self._project_dir = Path(project_dir) if project_dir is not None else None
+        # 最近一次 discover() 结果的缓存：SkillCapability 持本类引用（不再是装配期
+        # 静态 catalog），写入方法刷新后 capability 的可见性随之收敛。
+        self._catalog: SkillCatalog | None = None
+
+    @property
+    def project_dir(self) -> Path | None:
+        """闭环写入面（project skill 目录）；None = 未配置写入面。
+
+        更新分支（§3-4/§10-5）需要用它判定"既有同名条目是否是闭环可更新的
+        合法目标"（global/manual 来源不可更新——闭环不写 global）。
+        """
+        return self._project_dir
 
     def discover(self) -> SkillCatalog:
         catalog = SkillCatalog()
@@ -213,4 +258,91 @@ class SkillDiscovery:
                 _consider(manual, "manual", None)
             else:
                 catalog.errors.append(f"[manual] {_spath(manual)}: not a file")
+        self._catalog = catalog
         return catalog
+
+    # ── #529：当前目录（缓存投影）+ 闭环写入路径 ──────────────────────────────
+
+    def catalog(self) -> SkillCatalog:
+        """最近一次发现结果；从未 discover 过时先扫一遍（wiring 装配即调用）。"""
+        if self._catalog is None:
+            return self.discover()
+        return self._catalog
+
+    def register(self, entry: SkillCatalogEntry) -> None:
+        """把草稿条目写入 project skill 目录并刷新 registry（#529 §6.1 一等接缝）。
+
+        写文件 + 重新 discover() 同事务：任一失败整体报错、已写文件回滚。
+        oh-my-pi 的血泪教训是 learn 提升不刷新 skill registry →"写了但不可见"；
+        这里把刷新内嵌进写入方法，调用方不存在"忘了刷"的分离调用面。
+        """
+        self._write_entry(entry)
+
+    def update(self, name: str, entry: SkillCatalogEntry) -> None:
+        """更新既有 skill：整文件重写（模型重写全文路线，#529 §10-5），语义同 register。"""
+        if name != entry.name:
+            raise ValueError(f"update name mismatch: {name!r} != entry name {entry.name!r}")
+        self._write_entry(entry)
+
+    def remove(self, name: str) -> None:
+        """删除 project 目录里的 skill 并刷新；global/手动路径来源的 skill 显式拒绝。"""
+        target = next((e for e in self.catalog().entries if e.name == name), None)
+        if target is None:
+            raise ValueError(f"skill '{name}' is not in the catalog")
+        if self._project_dir is None or not resolve_within(target.source_path, self._project_dir):
+            # 文件即真相：不是 project 目录里的文件，就不归闭环写路径管。
+            raise ValueError(
+                f"refusing to remove '{name}': source {_spath(target.source_path)} "
+                f"is outside project skill directory"
+            )
+        skill_file = target.source_path
+        skill_file.unlink()
+        try:
+            skill_file.parent.rmdir()  # 空目录顺手清掉；非空（用户放了别的文件）则保留
+        except OSError:
+            pass
+        self._refresh(skill_file)
+
+    def _write_entry(self, entry: SkillCatalogEntry) -> Path:
+        """序列化 + 落盘 + 刷新（同事务）。任何一步失败不留半写状态。"""
+        # 纵深防御（审查 P2）：entry.name 是磁盘路径的组成部分——解析期白名单
+        # （#588）在这里同样强制，公开写入 API 的任何调用方（不限于 promoter 的
+        # 解析路径）都不能让 `../x` 式 name 落到 project 目录之外。
+        if not _NAME_PATTERN.fullmatch(entry.name) or len(entry.name) > SKILL_NAME_MAX_LENGTH:
+            raise ValueError(
+                f"refusing to write: invalid skill name {entry.name!r} "
+                f"(must match ^[a-z0-9][a-z0-9-_]*$, max {SKILL_NAME_MAX_LENGTH} chars)"
+            )
+        if self._project_dir is None:
+            raise ValueError(
+                "refusing to write: no project skill directory configured "
+                "(global skill directory is user-maintained and never written by the loop)"
+            )
+        # 序列化先于任何落盘：源不可读 / 超限在此抛出，磁盘半字未动。
+        content = serialize_skill_markdown(entry)
+        if len(content.encode("utf-8")) > MAX_SKILL_BYTES:
+            raise ValueError(
+                f"skill '{entry.name}': serialized SKILL.md too large "
+                f"({len(content.encode('utf-8'))} > {MAX_SKILL_BYTES} bytes)"
+            )
+        skill_dir = self._project_dir / entry.name
+        created = not skill_dir.exists()
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        try:
+            skill_file.write_text(content, encoding="utf-8")
+        except OSError:
+            if created:
+                skill_dir.rmdir()  # 尽力清理本次新建的空壳目录（无半写）
+            raise
+        self._refresh(skill_file)
+        return skill_file
+
+    def _refresh(self, *written: Path) -> None:
+        """写入后刷新 catalog（重新 discover）；失败整体报错并回滚本次写入的文件。"""
+        try:
+            self.discover()
+        except BaseException:
+            for path in written:
+                path.unlink(missing_ok=True)
+            raise
