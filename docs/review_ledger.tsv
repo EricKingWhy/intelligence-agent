@@ -33,8 +33,6 @@
 # [whitelist] 段**没有**跟着拆（有意的遗留，不是漏做）：白名单行只在 `[whitelist]` 标记之后
 #   才被认作白名单（否则会被当成审查行），拆成一文件一条就得给每个文件塞一个标记行；
 #   而白名单是**低频**写入（审查行才是每批都加的那一类）⇒ 收益小于搬迁成本。
-b86c69eb6c42e74c8d3c613db8afec126f40d0a1	feat(#616) 陈旧账行清除通道：codebuddy 施工、我独立复核 —— 19 新测试全过（TDD 红→绿）、相关回归 110 passed、gate0 本地 6/6 PASS；5 处偏离设计均有记录（最大：service 层 import 边界守卫，按 #564 前例新增 RegisteredToolNamesProvider 注入端口）
-f3da3633033d939f0a0f46c739af4fc55f79ca03	merge origin/main 同步：唯一冲突为 delegation_tree.py import 行（main 加 import os、本分支加 Iterable），双保留已核实两处引用（os.getpid / Iterable[str]）；合并后 19 测试重跑全过
 [whitelist]
 84d4097	仅提交 Gate-0 6/6 PASS 机器读数 JSON（`docs/gate/475640e3c67d5642285854f6f36601fe86e731cd.json`），不含代码或测试变更，docs-only
 59192b9	保留首次 Gate-0 机器读数（对应合并提交 1887bfa，唯一失败为当时尚未登记的 coverage 白名单）；本提交只新增该 Gate JSON 与本台账 docs-only 声明，无代码或测试变更
