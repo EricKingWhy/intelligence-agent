@@ -618,13 +618,13 @@ class TestGitVisibility:
         assert outcome.ok
         status = subprocess.run(
             ["git", "-C", str(tmp_path), "status", "--porcelain"],
-            check=True, capture_output=True, text=True, encoding="utf-8",
+            check=True, capture_output=True, text=True, encoding="utf-8", env=git_env,
         ).stdout
         assert any(line.startswith("??") and "agent-progress" in line
                    for line in status.splitlines()), "文件在 git status 可见（未跟踪）"
         staged = subprocess.run(
             ["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"],
-            check=True, capture_output=True, text=True, encoding="utf-8",
+            check=True, capture_output=True, text=True, encoding="utf-8", env=git_env,
         ).stdout
         assert staged.strip() == "", "index 未被系统修改（不 git add）"
 

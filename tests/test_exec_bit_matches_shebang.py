@@ -295,7 +295,7 @@ def test_cli_flags_the_incident_shape_in_a_real_repo(tmp_path, mod):
 
     proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--repo", str(repo)],
                           capture_output=True, text=True, encoding="utf-8", check=False,
-                          env={**os.environ, "PYTHONIOENCODING": "gbk"})
+                          env={**_clean_git_env(), "PYTHONIOENCODING": "gbk"})
     assert proc.returncode == 1, f"事故形状必须判违例：\n{proc.stdout}\n{proc.stderr}"
     assert "bad.py" in proc.stdout, proc.stdout
     for ok in ("good.py", "plain.py", "tool.sh"):

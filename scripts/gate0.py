@@ -171,14 +171,14 @@ def _git_env_clean(env: dict | None) -> dict:
     pre-push hook 上下文里 git 会注入 GIT_DIR（linked worktree push 时是**绝对路径**）
     等变量；guards/focused 等车道里的嵌套 git 测试继承后会把 tmp 仓库操作劫持到外层
     仓库（#668：伪红 + 共享 config 被翻 core.bare + 分支被提交垃圾 commit）。剥离对
-    正常运行是恒等变换（无 GIT_* 可剥）；gate0 自身对真实仓库的探针不经此路径。
+    正常运行是恒等变换（无 GIT_* 可剥）；gate0 自身对真实仓库的 `git()` 探针不经此路径。
     """
     base = dict(os.environ if env is None else env)
     return {k: v for k, v in base.items() if not k.startswith("GIT_")}
 
 
 def _receipt_lane_env(extra: dict | None) -> dict:
-    """validate 复核路径的车道 env：落盘 env 叠在父环境上，同过 `_git_env_clean`。"""
+    """`--replay` 复核路径的车道 env：落盘 env 叠在父环境上，同过 `_git_env_clean`。"""
     return _git_env_clean(dict(os.environ, **(extra or {})))
 
 

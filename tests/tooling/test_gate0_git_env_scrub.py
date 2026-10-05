@@ -70,11 +70,12 @@ def test_run_lane_child_sees_no_git_env(monkeypatch):
     )
     rc, _elapsed, output = gate0.run_lane(lane)
     assert rc == 0, output
-    assert output.strip().endswith("0"), f"车道子进程仍看到 GIT_*：{output}"
+    assert output.strip() == "0", f"车道子进程仍看到 GIT_*：{output}"
 
 
-def test_receipt_lane_env_strips_git_keys():
-    """validate 复核路径与 run_lane 同源：落盘 env ∪ 父环境后仍要剥离 GIT_*。"""
-    merged = gate0._receipt_lane_env({"env": {"PYTHONUTF8": "1"}})
+def test_receipt_lane_env_strips_git_keys(monkeypatch):
+    """--replay 复核路径与 run_lane 同源：落盘 env（平铺 overrides）∪ 父环境后仍要剥离 GIT_*。"""
+    monkeypatch.setenv("GIT_DIR", "D:/hook/.git")
+    merged = gate0._receipt_lane_env({"PYTHONUTF8": "1"})
     assert "GIT_DIR" not in merged
     assert merged["PYTHONUTF8"] == "1"
