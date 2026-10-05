@@ -116,6 +116,8 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
     EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
@@ -213,10 +215,14 @@ from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from langchain_core.language_models import BaseChatModel
 
     from agent_harness.capability.base import CapabilityRegistry
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
+    from agent_harness.context.builder import ContextBuilder
     from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
@@ -280,8 +286,11 @@ class SessionContextCompaction:
     """手动上下文压缩（#635）的结果 DTO（Web / CLI 共用的渲染来源）。
 
     `bracket_id is None` / `compacted_turn_count == 0` 表示**水位过低无需压缩**
-    （无可压缩的早期轮）或校验闸门失败（失败记录已落 `context/compaction_failed`）
-    ——两种情况都**零 bracket 写入**。`tokens_before/after` 是 messages-only 投影
+    （无可压缩的早期轮）或**写前**校验闸门失败（失败记录已落
+    `context/compaction_failed`）——两种情况都**零 bracket 写入**。**写后**复核失败
+    （bracket 三事件已落盘、重投影确认不一致 / 仍越硬护栏）不在此 DTO 表达：服务层
+    抛 `CompactionPostWriteError` 响亮失败（F2 #635），因为历史已多出 bracket，谎报
+    "未改动"会与事实冲突。`tokens_before/after` 是 messages-only 投影
     估算（同一口径，可直接相减展示）。`dry_run=True` 时 `compacted_turn_count`
     是"将压缩"的预览（1 = 有可压缩窗口），`tokens_before == tokens_after`。
     """
@@ -2834,7 +2843,7 @@ class SessionService:
 
         # ④ per-session in-flight 防重
         if session_id in self._compact_in_flight:
-            raise ActiveRunConflict(
+            raise CompactionInProgress(
                 f"session '{session_id}' already has a compaction in progress"
             )
         self._compact_in_flight[session_id] = True
@@ -2875,7 +2884,10 @@ class SessionService:
                 )
 
             # ⑥ 真实管线；写 bracket 前由 write_guard 重拿锁 + 复验
-            from agent_harness.context.compactor import ContextWindowExceededError
+            from agent_harness.context.compactor import (
+                CompactionPostWriteError,
+                ContextWindowExceededError,
+            )
 
             builder = await self._compact_context_builder(session, summary_model)
             write_guard = self._compaction_write_guard(
@@ -2883,9 +2895,15 @@ class SessionService:
             )
             try:
                 result = await builder.compact_now(session, write_guard=write_guard)
+            except CompactionPostWriteError:
+                # bracket 三事件**已落盘**后的复核失败（重投影不一致 / 仍越硬护栏）：
+                # 历史已变，绝不能吞成 below-floor DTO 谎报"未改动"（F2 #635）。响亮
+                # 失败：Web 映射 500、CLI exit 1，由调用方给出可操作的文案。
+                raise
             except ContextWindowExceededError:
-                # 校验闸门失败：compact_now 已把失败记录落 `context/compaction_failed`；
-                # 无坏摘要、无 bracket，会话可继续（与自动路径"低估值安全继续"同一结果面）。
+                # **写前**校验闸门失败：compact_now 已把失败记录落
+                # `context/compaction_failed`；无坏摘要、无 bracket，会话可继续
+                # （与自动路径"低估值安全继续"同一结果面）。
                 result = None
             if result is None or not result.compacted_turn_count:
                 log_event(
@@ -2931,13 +2949,19 @@ class SessionService:
         finally:
             self._compact_in_flight.pop(session_id, None)
 
-    async def _resolve_compaction_summary_model(self, model: str | None) -> Any | None:
+    async def _resolve_compaction_summary_model(
+        self, model: str | None,
+    ) -> BaseChatModel | None:
         """解析摘要模型 client（#635）。优先级：显式 `model` > `settings.summary_model`
         > 主模型（None）。非法模型名经统一解析点 `ModelConfig.resolve_selection` 抛
         `ConfigError`；本方法无副作用（不读写会话）。"""
         name = model if model is not None else self._settings.summary_model
         if name is None or not name.strip():
             return None
+        # F10 (#635)：判空用 strip，传给统一解析点也用 **strip 后**的值——否则
+        # 带空白的显式名（`--model " x "`）会以原文去 catalog 查名而误报未知模型；
+        # 与自动路径（assembly.py:522）的 strip 口径一致。
+        name = name.strip()
         from agent_harness.model.config import ModelConfig
         from agent_harness.model.provider import create_chat_model
         from agent_harness.model.provider_store import ProviderStore
@@ -2947,9 +2971,9 @@ class SessionService:
         return create_chat_model(config)
 
     async def _compact_context_builder(
-        self, session: Session, summary_model: Any | None,
-    ) -> Any:
-        """为手动压缩装配一个轻量 `ContextBuilder`（#635）。
+        self, session: Session, summary_model: BaseChatModel | None,
+    ) -> ContextBuilder:
+        """为手动压缩装配一个 `ContextBuilder`（#635）。
 
         **不**走 `build_runtime`（那会建 sandbox / tooling / capability，对一个非破坏性
         压缩动作是过大的副作用面）；本 builder 只承载压缩管线所需的模型 + 预算 + 摘要
@@ -2957,13 +2981,40 @@ class SessionService:
         （自动路径的 build 装配带它们）——压缩语义（同一 `ContextCompactor` + 同一
         bracket + 同一重投影确认）不受影响，只有 target 闸门的保留量略小。组合根若要
         注入完整装配的 builder，可覆盖本方法（T4/T5 接缝）。
+
+        **F11 (#635) 诚实说明**：为取 `model_call_gate` 调用了 `self._get_wiring()`，
+        这会触发 **capability 惰性装配**（不是零副作用的轻量读取）——所以本方法并非
+        完全没有装配成本。之所以仍选此接缝：`model_call_gate` 是 #559 "摘要调用与主循环
+        同闸"的必需项，而更轻的独立接缝需要给 `SessionService` 增 collaborator / 改
+        ADR-0040 协作者契约（超本票范围）。改从更轻接缝取可作为后续票的优化。
         """
         from agent_harness.context.builder import ContextBuilder
         from agent_harness.model.config import ModelConfig
         from agent_harness.model.provider import create_chat_model
+        from agent_harness.session.model_switch import current_model_selection
 
         _, wiring = await self._get_wiring()
         config = ModelConfig.from_settings(self._settings)
+        # F3 (#635)：缺省摘要模型 = 主模型，必须跟随会话级模型覆盖（AC5："缺省 =
+        # 主模型逐字节等价"）。自动路径经 `amend_with_session_model` →
+        # `ModelConfig.resolve_selection` 解析会话模型；手动路径此前只看 settings，
+        # 会话切换被忽略。此处用同一解析点、同一回落口径（catalog 未命中记 warning
+        # 并回落默认链），保证两条路径对同一会话给出同一主模型。
+        provider, model_id = current_model_selection(session.events)
+        if model_id is not None:
+            from agent_harness.model.config import find_catalog_entry
+            from agent_harness.model.provider_store import ProviderStore
+
+            if find_catalog_entry(self._settings, provider or "", model_id) is None:
+                logger.warning(
+                    "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
+                    provider, model_id,
+                )
+            else:
+                config = ModelConfig.resolve_selection(
+                    self._settings, model_id,
+                    ProviderStore.for_settings(self._settings),
+                )
         main_model = create_chat_model(config)
         return ContextBuilder(
             main_model,
@@ -2979,40 +3030,59 @@ class SessionService:
 
     def _compaction_write_guard(
         self, session_id: str, *, lock: asyncio.Lock, snapshot_event_count: int,
-    ) -> Any:
-        """落盘守卫：重拿 `session_lock` + 复验（仍不 busy / 事件数未变）后再写 bracket。
+    ) -> Callable[[int], AbstractAsyncContextManager[None]]:
+        """落盘守卫**工厂**：重拿 `session_lock` + 复验（仍不 busy / 事件数未变）后写 bracket。
 
         LLM 调用期间锁已释放（见 `compact_session_context` ⑤）；本守卫只包住 bracket
         三事件的写入窗口——`runmanager.py:320-329` 禁止持锁跨长耗时操作。
-        """
-        @asynccontextmanager
-        async def guard():
-            async with lock:
-                if self._run_manager.is_busy(session_id):
-                    raise ActiveRunConflict(
-                        f"session '{session_id}' has a run in flight; "
-                        "compact it after the run finishes"
-                    )
-                current = await anyio.to_thread.run_sync(
-                    self._store.read_events, session_id
-                )
-                if len(current) != snapshot_event_count:
-                    raise ActiveRunConflict(
-                        f"session '{session_id}' changed during compaction; retry"
-                    )
-                yield
 
-        return guard()
+        工厂化（F1 #635）：`compact_now` 在进 guard 前会落 `own_writes` 条失败记录，
+        复验基线须为 `snapshot_event_count + own_writes`——把本次自身写入排除掉，否则
+        "首试失败、重试成功"会被误判成并发改动。工厂入参由 `compact_now` 传入。
+        """
+        def factory(own_writes: int) -> AbstractAsyncContextManager[None]:
+            @asynccontextmanager
+            async def guard():
+                async with lock:
+                    if self._run_manager.is_busy(session_id):
+                        raise CompactionConcurrentWrite(
+                            f"session '{session_id}' has a run in flight; "
+                            "compact it after the run finishes"
+                        )
+                    current = await anyio.to_thread.run_sync(
+                        self._store.read_events, session_id
+                    )
+                    if len(current) != snapshot_event_count + own_writes:
+                        raise CompactionConcurrentWrite(
+                            f"session '{session_id}' changed during compaction; retry"
+                        )
+                    yield
+
+            return guard()
+
+        return factory
 
     @staticmethod
     def _has_compactable_early_turn(session: Session) -> bool:
-        """dry_run 预览：是否存在可压缩的早期轮（与 compactor 的 `early` 判据同形）。"""
+        """dry_run 预览：是否存在可压缩的早期轮（compactor `early` 窗口的**近似**判据）。
+
+        前缀规则与 `ContextCompactor.compact`（compactor.py:217–226）**对齐**：前导
+        SystemMessage 中，**摘要**（`_is_compaction_summary`，含旧版 SystemMessage 形态）
+        是 early 窗口的起点，不再被当前缀跳过；只有非摘要 SystemMessage 才算前缀。此前
+        缺少该守卫，dry-run 判据会与 compactor 漂移。
+
+        仍是近似：compactor 另以"early 中非摘要 HumanMessage 数 > 0"作为
+        `compacted_turn_count` 闸门，本预览只判窗口是否非空。
+        """
         from langchain_core.messages import HumanMessage, SystemMessage
+
+        from agent_harness.context.compactor import _is_compaction_summary
 
         messages = session.derive_messages()
         prefix_end = 0
         while (prefix_end < len(messages)
-               and isinstance(messages[prefix_end], SystemMessage)):
+               and isinstance(messages[prefix_end], SystemMessage)
+               and not _is_compaction_summary(messages[prefix_end])):
             prefix_end += 1
         cut = max(
             (index for index, message in enumerate(messages)
@@ -4066,6 +4136,8 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalQueueMissing",
     "ApprovalRequestMissing",
+    "CompactionConcurrentWrite",
+    "CompactionInProgress",
     "InvalidDecision",
     "InvalidForkBoundary",
     "InvalidSessionId",

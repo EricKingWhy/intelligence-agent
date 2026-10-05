@@ -30,6 +30,25 @@ class ActiveRunConflict(SessionServiceError):
     """session 已有在途 run，不允许并发。"""
 
 
+class CompactionInProgress(ActiveRunConflict):
+    """该会话已有一个手动压缩在途（per-session in-flight 防重，F6 #635）。
+
+    与「在途 run」共用一个 HTTP 状态（409），但**类型可区分**：CLI 按类型映射
+    "压缩已在进行中" 文案，不再靠错误字符串子串匹配。继承 `ActiveRunConflict`
+    使 Web 的既有 `except ActiveRunConflict` 与领域错误表零改动即可覆盖子类
+    （同 `WorkspacePathInvalid(WorkspaceNameInvalid)` 先例）。
+    """
+
+
+class CompactionConcurrentWrite(ActiveRunConflict):
+    """手动压缩落盘窗口内检测到并发改动（write guard 复验失败，F6 #635）。
+
+    两种触发面：重拿 `session_lock` 后仍 `is_busy`（有 run 在收尾写日志）、或事件数
+    与快照（含本次自身失败记录）不符。同为 409，但类型化后 CLI 可给出"请重试"
+    这一条可操作文案。继承 `ActiveRunConflict` 的理由同 `CompactionInProgress`。
+    """
+
+
 class SessionHasChildren(SessionServiceError):
     """会话是别的会话的 fork 父，不能删（ADR-0029 D4）。
 
