@@ -27,6 +27,7 @@ from agent_harness.session import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -243,6 +244,9 @@ class TestCompactorBracketMetadata:
         assert result.summary is not None
         assert result.summary.startswith("## 原始目标与用户约束\n")
         assert "读取 old.txt 后继续。" in result.summary
+        assert result.compacted_turn_count == 1
+        assert not result.failures
+        assert len(model.snapshots) == 1
 
     @pytest.mark.asyncio
     async def test_compact_summary_is_eight_section(self):
@@ -386,6 +390,108 @@ class TestBuilderWritesBracket:
         assert "summary" in compacted_event.data
 
     @pytest.mark.asyncio
+    async def test_bracket_records_summary_model_duration_and_request_budget(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class ObservedSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-reported-summary-model"},
+                )
+
+        ticks = iter((100.0, 100.05, 100.125))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=ObservedSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "provider-reported-summary-model"
+        assert event.data["duration_ms"] == 125
+        assert event.data["request_token_estimate"] > 0
+        assert event.data["request_budget_tokens"] == 8500
+
+    @pytest.mark.asyncio
+    async def test_bracket_ignores_oversized_provider_summary_model_id(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class OversizedModelIdSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-model" * 30},
+                )
+
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=OversizedModelIdSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "configured-summary-model"
+        assert len(event.data["summary_model_id"]) <= 256
+
+    @pytest.mark.asyncio
+    async def test_failed_summary_events_record_request_metadata_without_provider_echo(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class FailingSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                raise ConnectionError("api_key=do-not-persist")
+
+        ticks = iter((100.0, 100.0, 100.125, 100.2, 100.575))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=FailingSummaryModel(),
+        )
+        await builder.build(session)
+
+        failures = [
+            event for event in session.events
+            if event.type == CONTEXT_COMPACTION_FAILED
+        ]
+        assert len(failures) == 2
+        assert [event.data["summary_model_id"] for event in failures] == [
+            "configured-summary-model", "configured-summary-model",
+        ]
+        assert [event.data["duration_ms"] for event in failures] == [125, 375]
+        assert all(event.data["request_token_estimate"] > 0 for event in failures)
+        assert all(event.data["request_budget_tokens"] == 8500 for event in failures)
+        assert "api_key=do-not-persist" not in repr([event.data for event in failures])
+
+    @pytest.mark.asyncio
     async def test_second_build_after_bracket_skips_shadowed(self, tmp_path):
         """第一次压缩写 bracket 后，第二次 build 的 derive_messages 跳过 shadowed 段。"""
         session = make_session(tmp_path)
@@ -523,11 +629,13 @@ class TestCompactionWithPrunedToolResults:
                 {"id": f"c{i}", "name": "read_file", "args": {"path": "big.txt"}},
             ]})
             await overflowed_read(f"c{i}")
+        session.append(MODEL_COMPLETED, {"content": "background " * 1_000})
         session.append(USER_MESSAGE, {"content": "当前请求"})
 
+        # 加入足够的普通历史，稳定触发压缩且仍给摘要留出空间。
         builder = ContextBuilder(
             ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
-            max_context_tokens=2000, auto_compact_threshold=0.3,
+            max_context_tokens=6000, auto_compact_threshold=0.4,
             artifact_store=store, artifact_read_tool_name="read_artifact",
             keep_recent_tool_results=0, clear_at_least_tokens=0,
         )
@@ -539,9 +647,9 @@ class TestCompactionWithPrunedToolResults:
         assert [e.type for e in session.events[-3:]] == [
             COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
         ]
-        # source 区间覆盖被压缩的原始事件（seq 1..13：user + 3×(model+call+artifact+result)）
+        # source 区间覆盖原始事件 seq 1..14：user + 3×(model/call/artifact/result) + model。
         assert starts[0].data["source_seq_start"] == 1
-        assert starts[0].data["source_seq_end"] == 13
+        assert starts[0].data["source_seq_end"] == 14
         # 压缩后的投影：摘要 + 当前请求（静态事实策略在摘要前）
         summary = next(
             message for message in messages

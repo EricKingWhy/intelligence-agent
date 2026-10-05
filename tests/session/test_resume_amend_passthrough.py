@@ -149,6 +149,35 @@ class TestResumeWorkspace:
 
         assert not external.exists()
 
+    def test_missing_persisted_cwd_raises_the_cwd_specific_type(self, tmp_path):
+        """#266 cwd 守卫抛 cwd 专属子型，不再是双语义重载的 WorkspaceNotFound 本型。
+
+        父类一个类型承载「workspace_id 未注册」（projects.py / list_sessions）与
+        「会话 cwd 没了」（本守卫）两种语义——errors.py 类 docstring（"workspace_id
+        不存在"）与 web/domain_errors.py 的 #266 注释（"那条是'目录没了'"）对同一
+        类型的描述互相矛盾。拆分沿用仓内 WorkspacePathInvalid(WorkspaceNameInvalid)
+        先例：子类共享父类 404 语义、handler 的 except WorkspaceNotFound 天然覆盖、
+        精确类型索引要求子类自登记（domain_errors + 映射双向钉）。成熟产品同型
+        （本机实测）：stdlib NotADirectoryError→OSError、httpx ConnectError→
+        NetworkError→TransportError→RequestError→HTTPError、sqlite3
+        IntegrityError→DatabaseError→Error——父类 catch 覆盖 + 子类携精确语义。
+        """
+        state = self._real_state(tmp_path)
+        external = tmp_path / "removed-project-typed"
+        external.mkdir()
+        self._start_with_cwd(state, "test-sid", external)
+        external.rmdir()
+        # 同上条：进程重启形态（cache 空）才走服务层 is_dir() 守卫。
+        state.workspace_registry = WorkspaceRegistry(root=tmp_path)
+
+        with pytest.raises(WorkspaceNotFound) as ei:
+            self._resume(state, "test-sid")
+
+        # 精确子型（红 = 拆分前本型 WorkspaceNotFound）；父类 catch 面不破。
+        assert type(ei.value).__name__ == "SessionCwdUnavailable"
+        assert isinstance(ei.value, WorkspaceNotFound)
+        assert not external.exists()
+
     def test_legacy_session_without_cwd_keeps_default_workspace(self, tmp_path):
         """历史遗留（无 cwd 锚）：兼容语义逐字不变——用默认目录，且可续聊。"""
         state = self._real_state(tmp_path)
@@ -531,3 +560,55 @@ class TestSendMessageIdlePassthrough:
         assert result.status == "launched"
         assert mock_resume.call_args.kwargs["task"] == "继续"
         assert mock_resume.call_args.kwargs["amend"] is amend
+
+
+class TestSessionDeclarationValidatorNonePort:
+    """`validate_session_declaration=None` 兜底直测（#615③，#564 裁决 (a) 残余）。
+
+    生产装配（web 组合根）永远接线 validator（AppState 构造即建，接线判定
+    另有 HTTP 级钉面：tests/web/test_budget_local_fuse_api.py 的
+    test_session_declaration_judged_against_root_registry）；None 只出现在
+    直接构造 SessionService 的场合（测试 / 未来非 Web 宿主）。None 的语义
+    此前从未被直接钉过：**跳过 pre-CAS 校验**（不是崩、也不是默认全拒）——
+    坏名放行到 build_runtime，由装配层的无副作用拒绝点兜底（assembly 的
+    `validate_tool_call_limits_registered(scope="session")` → BudgetRejection）。
+    """
+
+    def _launch(self, state, tmp_path, *, limits):
+        external = tmp_path / f"ext-{limits is not None}"
+        external.mkdir()
+        TestResumeWorkspace._start_with_cwd(state, "test-sid", external)
+        with patch(
+            "agent_harness.session.service.build_runtime", new_callable=AsyncMock,
+        ) as mock_build:
+            asyncio.run(
+                session_service(state).resume_and_launch(
+                    session_id="test-sid", task="hello",
+                    session_tool_call_limits=limits,
+                )
+            )
+        return mock_build
+
+    def test_none_skips_pre_cas_check_and_launch_proceeds(self, tmp_path):
+        """None + 未注册名 ⇒ 这里不 422，launch 照常（兜底在装配层）。"""
+        state = TestResumeWorkspace._real_state(self, tmp_path)
+        state.validate_session_declaration = None
+        state.stores.delegation_tree_ledger.ensure_session_budget = AsyncMock()
+        mock_build = self._launch(state, tmp_path, limits={"no-such-tool": 3})
+        assert mock_build.call_count == 1, "跳过校验不等于放弃 launch"
+        # #624-3：坏名到达 build_runtime 的 session_declared_limits（装配层
+        # validate_tool_call_limits_registered(scope="session") 的输入）——
+        # "流到装配层拒绝点"在本测内钉面。装配层的真拒绝另由
+        # tests/test_cli.py::test_cli_create_rejects_unregistered_session_tool_name_before_any_work
+        # 端到端钉住（validator 缺位通道走真实 build_runtime → BudgetRejection，
+        # 零会话落盘）。
+        declared = mock_build.call_args.kwargs["session_declared_limits"]
+        assert declared.tool_call_limits == {"no-such-tool": 3}
+
+    def test_no_session_limits_never_touches_the_port(self, tmp_path):
+        """声明没带 tool_call_limits ⇒ 连端口都不调用（is not None 短路之外的第一道闸）。"""
+        state = TestResumeWorkspace._real_state(self, tmp_path)
+        validator = AsyncMock()
+        state.validate_session_declaration = validator
+        self._launch(state, tmp_path, limits=None)
+        validator.assert_not_awaited()

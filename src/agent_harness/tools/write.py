@@ -68,15 +68,23 @@ class WriteTool(Tool):
         # TOOL_EXECUTION_ERROR，下方 write_text 的四分支形态映射
         # （PermissionError/IsADirectoryError/NotADirectoryError/FileExistsError）
         # 在 Linux 上永远走不到。
+        # #623：目标内容非 UTF-8 时 read_text 抛 UnicodeDecodeError（ValueError
+        # 族，不是 OSError）。覆盖写不需要读懂旧内容（spec 05 §5：content-
+        # absolute 覆盖语义，写入合法性不依赖旧内容可读）——与 OSError 同款
+        # 降级：diff before 置空，写入照常。成熟产品同口径：git 对二进制文件显示
+        # "Binary files differ"（判定口径是内容含 NUL 字节，不是 UTF-8 可解码
+        # 性）、aider 直接 "Dropping ... from the chat."。
+        # P3 跟进（#623 批审查登记项）：except 从枚举五形态放宽为 OSError 全族
+        # +UnicodeDecodeError——before-read 是展示辅助非契约（见上），读侧枚举
+        # 追不全平台形态（EINVAL/ENOSPC/EBUSY…），枚举外形态逃逸会把合法覆盖写
+        # 谎报成 TOOL_EXECUTION_ERROR。沙箱边界不受影响：路径越界/权限由下方
+        # write_text 在**写入时**强制执行（PERMISSION_DENIED），before-read 宽捕
+        # 只降级 diff 展示；#610 的形态甄别论证随宽捕自然成立（write_text 四分支
+        # 独占写侧失败映射，职责不变）。
         before = ""
         try:
             before = self._sandbox.read_text(args.path)
-        except (
-            FileNotFoundError,
-            PermissionError,
-            IsADirectoryError,
-            NotADirectoryError,
-        ):
+        except (OSError, UnicodeDecodeError):
             pass
 
         try:

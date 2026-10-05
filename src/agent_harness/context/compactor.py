@@ -7,6 +7,7 @@ import re
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -84,6 +85,7 @@ _SUMMARY_ERROR_CLASSES = (
 
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
 _FAILURE_MESSAGE_LIMIT = 300
+_SUMMARY_MODEL_ID_LIMIT = 256
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,10 @@ class CompactionFailure:
     auto_limit: int
     hard_limit: int
     token_estimate: int
+    summary_model_id: str | None
+    duration_ms: int
+    request_token_estimate: int
+    request_budget_tokens: int
 
 
 class _SummaryRejected(ValueError):
@@ -145,6 +151,10 @@ class CompactionResult:
     source_seq_end: int | None = None
     bracket_id: str | None = None
     summary: str | None = None
+    summary_model_id: str | None = None
+    duration_ms: int | None = None
+    request_token_estimate: int | None = None
+    request_budget_tokens: int | None = None
     # W-04 (#348)：本次 compact 里失败过的摘要尝试（成功尝试之前的都在内；
     # 双失败安全继续时是两条）。调用方（builder）负责把它们落成任务可见状态。
     failures: list[CompactionFailure] = dataclass_field(default_factory=list)
@@ -229,8 +239,9 @@ class ContextCompactor:
             [message.model_dump(mode="json") for message in early], ensure_ascii=False,
         ))
         request = [prompt, transcript]
+        request_token_estimate = estimate_message_tokens(request)
         # Preflight rejection is not a summary attempt and therefore emits no failure event.
-        if estimate_message_tokens(request) > self._hard_limit:
+        if request_token_estimate > self._hard_limit:
             logger.warning(
                 "Context compaction rejected; summary request exceeds hard guard",
             )
@@ -249,12 +260,18 @@ class ContextCompactor:
         failures: list[CompactionFailure] = []
         summary_text = ""
         compacted: list[AnyMessage] | None = None
+        summary_started_at = monotonic()
+        summary_model_id: str | None = None
         for attempt in (1, 2):
+            attempt_started_at = monotonic()
+            attempt_model_id = _summary_model_id(self._model, None)
             try:
                 # #559：槽位在 timeout 外面取——排队等闸不计入摘要预算（30s 是
                 # 单次调用的预算，不是排队的）；取消/失败由 slot 的 finally 归还。
                 async with self._slot(), asyncio.timeout(self._summary_timeout):
                     response = await self._model.ainvoke(request)
+                attempt_model_id = _summary_model_id(self._model, response)
+                summary_model_id = attempt_model_id
                 if not isinstance(response, AIMessage) or response.tool_calls:
                     raise _SummaryRejected(
                         "tool_calls_in_response",
@@ -267,17 +284,21 @@ class ContextCompactor:
                 model_sections = _parse_summary_sections(
                     response.content, _MODEL_SUMMARY_HEADINGS,
                 )
-                summary_text = _assemble_summary(early, model_sections, protected_facts)
-                _validate_summary(summary_text, early, protected_facts)
+                candidate_summary_text = _assemble_summary(
+                    early, model_sections, protected_facts,
+                )
+                _validate_summary(candidate_summary_text, early, protected_facts)
                 # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
                 # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
                 # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
                 # 会话的行为逐字节等价。
                 if events is not None:
-                    _validate_plan_section(summary_text, derive_plan(events).items)
+                    _validate_plan_section(
+                        candidate_summary_text, derive_plan(events).items,
+                    )
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
-                    content=summary_text,
+                    content=candidate_summary_text,
                     name=COMPACTION_SUMMARY_MESSAGE_NAME,
                 )
                 summary_tokens = estimate_message_tokens([summary_message])
@@ -286,11 +307,15 @@ class ContextCompactor:
                         f"Summary ({summary_tokens} tokens) is not smaller than "
                         f"compressed segment ({early_tokens} tokens)"
                     )
-                compacted = [*prefix, summary_message, *recent]
-                if estimate_message_tokens(compacted) + reserved_tokens >= self._auto_limit:
+                candidate_messages = [*prefix, summary_message, *recent]
+                if estimate_message_tokens(candidate_messages) + reserved_tokens >= self._auto_limit:
                     raise ContextWindowExceededError(
                         "LLM summary does not reach compaction target"
                     )
+                # Commit candidate state only after every validation gate passes. A rejected
+                # first attempt must not leak into the result if the retry also fails.
+                summary_text = candidate_summary_text
+                compacted = candidate_messages
                 break
             except asyncio.CancelledError:
                 raise
@@ -299,6 +324,10 @@ class ContextCompactor:
                 # CancelledError 不在这里吞（上面显式重抛）。
                 failures.append(_record_failure(
                     attempt, exc, token_estimate, self._auto_limit, self._hard_limit,
+                    summary_model_id=attempt_model_id,
+                    duration_ms=max(round((monotonic() - attempt_started_at) * 1000), 0),
+                    request_token_estimate=request_token_estimate,
+                    request_budget_tokens=int(self._hard_limit),
                 ))
                 logger.warning(
                     "Context compaction attempt %s rejected (%s)",
@@ -384,6 +413,10 @@ class ContextCompactor:
             source_seq_end=source_seq_end,
             bracket_id=str(uuid4()),
             summary=summary_text,
+            summary_model_id=summary_model_id,
+            duration_ms=max(round((monotonic() - summary_started_at) * 1000), 0),
+            request_token_estimate=request_token_estimate,
+            request_budget_tokens=int(self._hard_limit),
             # W-29 (#383) 补课：成功前的失败尝试也要带给调用方落任务可见状态——
             # CompactionResult.failures 的契约（"成功尝试之前的都在内"）与冻结
             # PRD §4.5（"每次失败留诊断与任务可见状态"）都要求这一条；此前成功
@@ -391,6 +424,25 @@ class ContextCompactor:
             # 该路径成为常态，判据测试暴露）。
             failures=failures,
         )
+
+
+def _summary_model_id(model: Any, response: Any) -> str | None:
+    """Prefer the provider-reported model id, then the configured client id."""
+    metadata = getattr(response, "response_metadata", None)
+    if isinstance(metadata, dict):
+        for key in ("model_name", "model", "model_id"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                candidate = value.strip()
+                if len(candidate) <= _SUMMARY_MODEL_ID_LIMIT:
+                    return candidate
+    for attribute in ("model_name", "model"):
+        value = getattr(model, attribute, None)
+        if isinstance(value, str) and value.strip():
+            candidate = value.strip()
+            if len(candidate) <= _SUMMARY_MODEL_ID_LIMIT:
+                return candidate
+    return None
 
 
 def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
@@ -447,13 +499,26 @@ def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
 
 
 def _capped_entries(entries: list[str]) -> list[str]:
-    """确定性窗口：每条截到 `_PROG_SECTION_MAX_ENTRY_CHARS`，保留最后 N 条。"""
+    """确定性窗口：先截断、再按截断值去重（保留最后出现者）、最后保留最近 N 条。
+
+    #614②：去重必须发生在截断**之后**——`add_once` 只按全文去重，两条仅在
+    第 200 字符之后分叉的超长条目全文不同、双双入列，截断后收敛为同一值，
+    投影里出现重复条目。本函数先截断再按截断值去重，与窗口的「最近偏置」
+    一致：同值重复保留最后出现的那条。
+    """
     trimmed = [
         entry if len(entry) <= _PROG_SECTION_MAX_ENTRY_CHARS
         else entry[:_PROG_SECTION_MAX_ENTRY_CHARS] + "…"
         for entry in entries
     ]
-    return trimmed[-_PROG_SECTION_MAX_ENTRIES:]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(trimmed):
+        if entry not in seen:
+            seen.add(entry)
+            deduped.append(entry)
+    deduped.reverse()
+    return deduped[-_PROG_SECTION_MAX_ENTRIES:]
 
 
 def _programmatic_summary_sections(
@@ -562,9 +627,9 @@ def _is_compaction_summary(message: AnyMessage) -> bool:
     """识别带内部标记的新摘要及旧版 SystemMessage 摘要。"""
     if isinstance(message, HumanMessage):
         return message.name == COMPACTION_SUMMARY_MESSAGE_NAME
-    return isinstance(message, SystemMessage) and message.content.startswith(
-        (f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n")
-    )
+    if not isinstance(message, SystemMessage) or not isinstance(message.content, str):
+        return False
+    return message.content.startswith((f"{_SUMMARY_HEADINGS[0]}\n", "## 目标\n"))
 
 
 def _assemble_summary(
@@ -684,6 +749,8 @@ def _classify_failure(exc: BaseException) -> str:
 def _record_failure(
     attempt: int, exc: BaseException, token_estimate: int,
     auto_limit: float, hard_limit: float,
+    *, summary_model_id: str | None, duration_ms: int,
+    request_token_estimate: int, request_budget_tokens: int,
 ) -> CompactionFailure:
     """一次尝试的异常 → 有界 CompactionFailure。
 
@@ -701,4 +768,8 @@ def _record_failure(
         auto_limit=int(auto_limit),
         hard_limit=int(hard_limit),
         token_estimate=token_estimate,
+        summary_model_id=summary_model_id,
+        duration_ms=duration_ms,
+        request_token_estimate=request_token_estimate,
+        request_budget_tokens=request_budget_tokens,
     )

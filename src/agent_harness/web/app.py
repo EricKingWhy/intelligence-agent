@@ -9,6 +9,7 @@ create_app() 是单一入口——传入 Settings，返回装配好的 FastAPI�
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import sqlite3
@@ -53,11 +54,17 @@ from agent_harness.assembly import (
     initialize_stores,
     root_registry_tool_names,
 )
-from agent_harness.capability.base import CapabilityRegistry
+from agent_harness.capability.base import CapabilityError, CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.context.project_instructions import (
+    empty_project_instruction_status,
+    project_instruction_store,
+    release_project_instruction_store,
+)
 from agent_harness.context.tokens import estimate_tokens
+from agent_harness.host_service import HOST_PROTOCOL_VERSION
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -71,6 +78,7 @@ from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import validate_user_protected_fact_annotations
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
@@ -122,6 +130,7 @@ from agent_harness.web.domain_errors import (
     storage_http_error,
     storage_http_status,
 )
+from agent_harness.web.metrics import METRICS_CONTENT_TYPE, collect_process_metrics
 from agent_harness.web.serialization import (
     build_event_payload,
     build_session_event_payload,
@@ -979,6 +988,7 @@ class AppState:
         # lifecycle 通道逐项隔离关闭，web 层不再懂每种 capability 的关闭姿势。
         if wiring is not None:
             await wiring.aclose()
+        release_project_instruction_store(self.settings)
 
 
 # ── 领域服务的组合根适配（#248）──────────────────────────────────────
@@ -1272,6 +1282,12 @@ class AuthSeamMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        if scope.get("path") == "/api/health":
+            # W-11（#355）：健康探针匿名可达——附着核验发生在鉴权之前（附着方拿到
+            # 凭据前就要判断服务是否活着、形状是否相符）。载荷只含非秘密字段，
+            # tests/host_service/ 钉住不泄密。
+            await self.app(scope, receive, send)
+            return
         identity = IdentityContext("local", "local", ["user", "session"])
         headers = Headers(scope=scope)
         authorization = headers.get("authorization")
@@ -1313,6 +1329,14 @@ class AuthSeamMiddleware:
             await self.app(scope, receive, send)
         finally:
             identity_context_var.reset(token)
+
+
+def _package_version() -> str:
+    """服务版本（health/version/capability 统一面，W-11 #355）。只读元数据，无副作用。"""
+    try:
+        return importlib.metadata.version("intelligence-agent")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
@@ -1436,6 +1460,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_lineage_routes(app, validate_session_id=validate_session_id)
 
+    # W-07 / #351 Task 交付状态路由（独立 router：查询 + 定义/修订/验证/接受/
+    # 释放命令；投影单源在 session/task.py，本模块只留一行接入面）
+    from agent_harness.web.task_delivery import register_task_routes
+
+    register_task_routes(app, validate_session_id=validate_session_id)
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
     # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
@@ -1507,16 +1537,44 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     @app.get("/api/health")
     async def health() -> dict[str, object]:
-        """存活探针 + durability 观测（#515）。
+        """存活探针 + durability 观测（#515）+ 附着协议形状（W-11 #355）。
 
         `checkpoint_save_failures` 是进程级累计的 checkpoint 维护失败次数（重启归零）：
         非零说明有 checkpoint 帧丢失，之后的 resume 可能回到更旧的稳定边界——这是
         ADR-0004 Round 5 之下 checkpoint 故障唯一的对外口径（不进 SessionEvent）。
+
+        W-11：本端点**匿名可达**（AuthSeamMiddleware 豁免），是附着核验的第一站；
+        载荷只含非秘密字段——协议版本 / 服务版本 / capability 名称（静态配置名，
+        非秘密）+ 是否强制鉴权，token/路径/用户信息一概不进。
         """
+        jwt_configured = bool(settings.jwt_secret and settings.jwt_secret.get_secret_value())
+        try:
+            capability_names: list[str] = sorted(parse_capabilities_config(settings.capabilities))
+        except CapabilityError:
+            # 配置非法由装配路径显式报错（init_failed）；健康面不能因此塌掉。
+            capability_names = []
         return {
             "status": "ok",
             "checkpoint_save_failures": checkpoint_save_failure_count(),
+            "protocol_version": HOST_PROTOCOL_VERSION,
+            "version": _package_version(),
+            "capabilities": capability_names,
+            "auth_required": jwt_configured,
         }
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """进程健康观测面（#612）：RSS / gc 堆 / 存活 task / uptime。
+
+        Prometheus 文本暴露格式（v0.0.4）；Diagnostic 层，Event≠Log，不进
+        SessionEvent。读取零副作用（gc 扫描在 worker 线程），单项采集失败
+        ⇒ 该指标整行缺席（缺席≠占位值），不影响任何业务路径（不变量 #21）。
+        默认无鉴权——与 /api/health 同一口径（AC5，不引入开关）。
+        """
+        return Response(
+            content=await collect_process_metrics(),
+            media_type=METRICS_CONTENT_TYPE,
+        )
 
     @app.get("/api/sessions")
     async def list_sessions(
@@ -1591,6 +1649,39 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
         return [e.to_dict() for e in events]
+
+    @app.get("/api/sessions/{session_id}/project-instructions")
+    async def get_project_instructions_status(
+        session_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict[str, object]:
+        """Report which repository instruction files were loaded for this session."""
+        service = session_service(app.state.agent)
+        try:
+            await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as error:
+            raise http_error(error) from error
+        return project_instruction_store(
+            app.state.agent.settings,
+        ).status_for_session(session_id)
+
+    @app.post("/api/sessions/{session_id}/project-instructions/reload")
+    async def reload_project_instructions(
+        session_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict[str, object]:
+        """Explicitly reload repository instructions for subsequent model requests."""
+        service = session_service(app.state.agent)
+        try:
+            events = await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as error:
+            raise http_error(error) from error
+        cwd = session_cwd(events)
+        if cwd is None:
+            return empty_project_instruction_status("no_cwd")
+        store = project_instruction_store(app.state.agent.settings)
+        await asyncio.to_thread(store.reload_for_session, session_id, cwd)
+        return store.status_for_session(session_id)
 
     # Read-only model/profile catalogs use a narrow dependency seam and are
     # registered as one explicit router instead of being captured by this factory.
@@ -2022,6 +2113,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # #515：硬删要写多张共享表（ledger/checkpoint/meta/工件），锁竞争重试
             # 耗尽时报 503——删除未开始，客户端稍后重试即可。
             raise storage_http_error(e) from e
+        project_instruction_store(app.state.agent.settings).forget_session(session_id)
         return SessionDeleted(
             id=stats.session_id,
             events=stats.events,
@@ -2337,6 +2429,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
             BudgetRejection,
             BudgetConflict,
         ) as e:
@@ -2347,6 +2440,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # SupersedeTargetInvalid → 409（ADR-0030 §4.6）：目标不对，不是会话不存在。
             # WorkspaceBindingConflict → 409（#266）：idle 分支会走 resume_and_launch，
             # 工作目录归属冲突同样拒绝静默选边。
+            # WorkspaceNotFound → 404（#615①）：同样经 resume_and_launch——外部 cwd
+            # 在两次请求之间被删时中央映射既有条目本就要接住，/resume 元组同款
+            # （#564 审查 P2-1），不新增状态码语义。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
@@ -2442,7 +2538,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             EventLogCorruptError,
             SeqConflict,
             WorkspaceBindingConflict,
+            WorkspaceNotFound,
         ) as e:
+            # WorkspaceNotFound → 404（#615①）：投递走 resume_and_launch，外部 cwd
+            # 在排队之后被删 → 中央映射既有条目，与 /messages、/resume 同口径。
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05（审查 P2-1）：flush 在 idle 时走 resume_and_launch 构造

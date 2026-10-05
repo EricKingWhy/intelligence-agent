@@ -1,0 +1,5 @@
+# W-11 host token 通道测试的 JWT 签名密钥 fixture（test-signing-secret-*，非真实凭据；
+# 真实凭据按约束永不入库——附录 C 红线）。
+cffeac94767f4213a3f14bf136a23056a434d8ba:tests/host_service/test_serve_subprocess.py:generic-api-key:382
+# #523 误报：经 git rev-parse 验证为测试文件 Git blob ID，不是凭证。
+7c9569e80031fbef59c2fc2ccdf8384d64c5d211:docs/SDD_TICKET_TRACKER.md:generic-api-key:7248

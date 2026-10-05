@@ -14,15 +14,17 @@ web 与 CLI 是它的两个 adapter（两个 adapter = 真实 seam）；capabili
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import platform
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
+from agent_harness.agent.completion import CompletionPolicy
 from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
@@ -37,11 +39,20 @@ from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
+from agent_harness.context.project_instructions import (
+    ProjectInstructionStore,
+    project_instruction_store,
+)
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
+
+if TYPE_CHECKING:
+    # profiles 模块在函数体内延迟导入（与 BUILTIN_PROFILES 取用点同款）；这里
+    # 只为 `_root_profile_spec` 的返回值注解服务。
+    from agent_harness.agent.profiles import AgentSpec
 from agent_harness.prompt import (
     DEFAULT_REGISTRY,
     build_registry,
@@ -50,7 +61,7 @@ from agent_harness.prompt import (
     parse_persona_config,
     tool_guidance_sections,
 )
-from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.sandbox import Sandbox, WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import (
     OnStableBoundary,
@@ -64,6 +75,7 @@ from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.resource_locks import ResourceLockRegistry
 from agent_harness.tools import (
     ApplyPatchTool,
     BashTool,
@@ -194,6 +206,27 @@ class _RootTooling:
     runtime_multiagent_provider: Any | None
 
 
+def _root_profile_spec(agent_profile: str | None) -> AgentSpec:
+    """根档位声明的唯一取用点（#615②）：根配额 depth / delegations 同源。
+
+    `_build_tooling`（DelegateTool 的树配额）与 `build_runtime`（multiagent
+    provider.activate 的树账）此前**各写一遍**取用式（`agent_profile or "main"`
+    vs `is not None` 分支）——漂移 = 工具面文案里的"整棵委派树最多 N 次"与树账
+    的 max_delegations 各说各话；"" 边界还一处静默落 main、一处 KeyError
+    （Web 边界已 422 掉空串，属死输入潜伏分叉，统一后两侧同形）。
+    注意："无档位"语义（根 system_prompt 走文本包裹、registry 不收窄）仍以
+    `profile_spec is not None` 判定，**不**经过本函数——那两处的 None 是
+    有意义的状态，不是配额缺省。
+    """
+    from agent_harness.agent.profiles import BUILTIN_PROFILES
+
+    return (
+        BUILTIN_PROFILES[agent_profile]
+        if agent_profile is not None
+        else BUILTIN_PROFILES["main"]
+    )
+
+
 def _build_tooling(
     settings: Settings,
     wiring: CapabilityWiring,
@@ -203,6 +236,7 @@ def _build_tooling(
     workspace_registry: WorkspaceRegistry,
     session_store: JsonlSessionStore | None,
     agent_profile: str | None,
+    project_instructions: ProjectInstructionStore | None = None,
 ) -> _RootTooling:
     """sandbox 绑定 + **根 registry**（收窄前）构造——唯一的工具面事实源。
 
@@ -213,12 +247,8 @@ def _build_tooling(
     工具来源必须同时落在两处（漏落 = `tests/test_assembly_root_registry_names.py`
     的三方对账红灯）。
     """
-    from agent_harness.agent.profiles import BUILTIN_PROFILES
-
-    # #286：根委派配额来自档位声明（与 build_runtime 的 root_max_delegations 同源）。
-    root_max_delegations = (
-        BUILTIN_PROFILES[agent_profile or "main"]
-    ).max_delegations
+    # #286：根委派配额来自档位声明（与 build_runtime 的树账同一取用点）。
+    root_max_delegations = _root_profile_spec(agent_profile).max_delegations
     # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
     # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
     # create() 对它响亮拒绝（防改写属主绑定，tests/sandbox/test_workspace_registry.py
@@ -230,15 +260,21 @@ def _build_tooling(
         sandbox = workspace_registry.get(session_id)
     else:
         sandbox = workspace_registry.create(session_id, workspace_root=workspace)
+    if project_instructions is None:
+        project_instructions = project_instruction_store(settings)
     registry = ToolRegistry()
     for tool_cls in BUILTIN_LOCAL_TOOLS:
         # #244 AC5：Bash 预算来自 Settings，其余工具类无参构造——工具自己不认识
         # Settings，装配层是唯一的接线点；接不上就成死键（tests/test_assembly_bash_budget.py）。
-        kwargs = (
-            {"timeout_seconds": settings.bash_timeout_seconds}
-            if tool_cls is BashTool
-            else {}
-        )
+        kwargs = {}
+        if tool_cls is BashTool:
+            kwargs["timeout_seconds"] = settings.bash_timeout_seconds
+        elif tool_cls is ReadTool:
+            kwargs["project_instructions_loader"] = (
+                lambda relative_path: project_instructions.load_for_path(
+                    session_id, workspace, workspace / relative_path,
+                )
+            )
         registry.register(tool_cls(sandbox, **kwargs))
 
     # W-26（#380）：`update_plan` 是会话域工具（事件写入，不碰 sandbox / 文件系统），
@@ -308,6 +344,31 @@ def _build_tooling(
     )
 
 
+def _project_instruction_cwd(
+    workspace: Path | Sandbox,
+    workspace_registry: WorkspaceRegistry,
+    session_id: str,
+) -> Path:
+    """Resolve the host workspace path used to discover repository instructions."""
+    if isinstance(workspace, Path):
+        return workspace
+
+    recorded_roots = workspace_registry.recorded_workspace_roots(session_id)
+    sandbox_root = workspace.workspace_root
+    if isinstance(sandbox_root, Path):
+        resolved_root = sandbox_root.resolve()
+        if not recorded_roots or str(resolved_root) in recorded_roots:
+            return resolved_root
+        raise ValueError(
+            "sandbox workspace root does not match its recorded workspace roots"
+        )
+    if len(recorded_roots) == 1:
+        return Path(recorded_roots[0])
+    raise ValueError(
+        "cannot resolve a host workspace path for project instructions"
+    )
+
+
 def root_registry_tool_names(
     settings: Settings,
     wiring: CapabilityWiring,
@@ -319,7 +380,8 @@ def root_registry_tool_names(
 
     #564 审查 P2-1：validator 若走完整 `_build_tooling`，`LocalSubprocessSandbox
     .__init__` 会对 workspace `mkdir`，发生在 service 的归属对账（#266
-    `WorkspaceNotFound` 守卫）**之前** ⇒ 坏名 422 会把已删 cwd 凭空重建、合法名
+    `SessionCwdUnavailable` 守卫，`WorkspaceNotFound` 子型）**之前** ⇒ 坏名 422
+    会把已删 cwd 凭空重建、合法名
     resume 掩蔽守卫。名字集不依赖 sandbox 实例：本地工具"构造器只存依赖"（既有
     判定，`tests/agent/test_tool_scope_reconciliation.py` 传 None 读 `.name`）；
     读回工具名只由 Provider 选择决定（store 构造无副作用，mkdir 在写路径）；
@@ -350,7 +412,7 @@ async def build_runtime(
     stores: RecoveryStores,
     workspace_registry: WorkspaceRegistry,
     session_id: str,
-    workspace: Path,
+    workspace: Path | Sandbox,
     max_agent_turns: int,
     permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
     auto_approve: bool | None = None,
@@ -366,6 +428,10 @@ async def build_runtime(
     stuck_evidence: StuckEvidencePort | None = None,
     session_budget: SessionBudgetPort | None = None,
     session_declared_limits: SessionLimits | None = None,
+    # `#524`：完成门可选域策略（默认 None = DefaultCompletionPolicy，行为零变化；
+    # 显式传入 EvidenceCompletionPolicy 即开启证据检查与纠正循环——装配开关就是
+    # 策略实例本身，无布尔旗标）。
+    completion_policy: CompletionPolicy | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -412,11 +478,23 @@ async def build_runtime(
     profile_spec = None
     if agent_profile is not None:
         profile_spec = BUILTIN_PROFILES[agent_profile]
+    instruction_workspace = (
+        workspace_registry.get(session_id)
+        if workspace_registry.exists(session_id)
+        else workspace
+    )
+    instruction_cwd = _project_instruction_cwd(
+        instruction_workspace, workspace_registry, session_id,
+    )
+    project_instructions = project_instruction_store(settings)
+    await asyncio.to_thread(
+        project_instructions.load_for_session, session_id, instruction_cwd,
+    )
     # 根配额（#286 冻结语义 1）：root depth=0 ⇒ max_depth 就是"还能往下几层"。
-    root_max_depth = (profile_spec if profile_spec is not None
-                      else BUILTIN_PROFILES["main"]).max_depth
-    root_max_delegations = (profile_spec if profile_spec is not None
-                            else BUILTIN_PROFILES["main"]).max_delegations
+    # 与 _build_tooling 的 DelegateTool 树配额同一取用点（#615②，双算已并一）。
+    root_profile = _root_profile_spec(agent_profile)
+    root_max_depth = root_profile.max_depth
+    root_max_delegations = root_profile.max_delegations
 
     # T5 persona（ADR-0023 D10）：env JSON → 前后缀 section。形制与
     # parse_capabilities_config 一致——坏配置装配期响亮失败，不静默降级。
@@ -440,6 +518,21 @@ async def build_runtime(
         except ConfigError as error:
             raise error from None
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
+    summary_model = None
+    summary_model_name = (settings.summary_model or "").strip()
+    if summary_model_name:
+        try:
+            from agent_harness.model.provider_store import ProviderStore
+
+            summary_store = ProviderStore.for_settings(settings)
+            summary_config = ModelConfig.resolve_selection(
+                settings, summary_model_name, summary_store,
+            )
+        except ConfigError as error:
+            raise error from None
+        # Summary generation uses the selected model without inheriting the
+        # primary model's reasoning-effort setting.
+        summary_model = create_chat_model(summary_config)
     # Model Fallback 两级链（ADR-0014 决策 14/16）：FALLBACK_MODEL_PROVIDER
     # 已配 → 构造 fallback 模型；切换决策在 FallbackPolicy，编排由 Runtime
     # 的 per-run coordinator 负责（见 agent/fallback 接线）。
@@ -467,9 +560,10 @@ async def build_runtime(
     # 同一事实源，见其 docstring。）
     tooling = _build_tooling(
         settings, wiring,
-        session_id=session_id, workspace=workspace,
+        session_id=session_id, workspace=instruction_cwd,
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=agent_profile,
+        project_instructions=project_instructions,
     )
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
@@ -553,9 +647,14 @@ async def build_runtime(
         persona, tool_sections=tool_guidance_sections(registry.list()),
     )
 
+    # #525 一期（IMP-14）：父与并发 SubAgent 的 executor 共享同一 resource
+    # 锁注册表——同一 resource key（如 workspace-file 键）的执行跨批次/跨
+    # runtime 串行。锁是进程内同步原语，生命周期与本次 build 的 wiring 相同。
+    resource_locks = ResourceLockRegistry()
+
     # multiagent 激活（ADR-0015）：模型链与 registry 已就绪，注入 child 的
     # 全部依赖。executor_factory 闭包捕获父级审批/策略/记账——child 与 parent
-    # 同一审批面（决策 11 权限传递）。
+    # 同一审批面（决策 11 权限传递）；resource 锁同源（#525 一期）。
     if runtime_multiagent_provider is not None:
         from agent_harness.agent.factory import AgentFactory
 
@@ -564,6 +663,7 @@ async def build_runtime(
                 child_registry, policy=policy, approval_callback=approval_callback,
                 overflow_handler=overflow_handler,
                 operation_ledger=stores.operation_ledger,
+                resource_locks=resource_locks,
             )
 
         runtime_multiagent_provider.activate(
@@ -585,6 +685,8 @@ async def build_runtime(
                 # child 的 local fuse 上限（#308）：档位声明（内置三档位是 None=继承）
                 # 只能收窄到 Deployment ceiling 之下，越界在 Factory.create 里被拒。
                 local_max_agent_turns=settings.local_max_agent_turns,
+                # `#524`：子与父同一完成门策略面（Factory 透传给 child runtime）。
+                completion_policy=completion_policy,
             ),
             source_registry=registry,
             session_store=session_store,
@@ -610,20 +712,24 @@ async def build_runtime(
 
         产物落 `meta_user`：快照是 user-role 消息，不是 system-role。
         """
-        return DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
+        runtime_context = DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
             "cwd": str(Path.cwd()),
             "os": f"{platform.system()} {platform.release()}",
             # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
             "date": date.today().isoformat(),  # noqa: DTZ011
         }).meta_user_text
+        return project_instructions.load_for_session(
+            session_id, instruction_cwd,
+        ).with_runtime_context(runtime_context)
 
     return AgentRuntime(
         model=model,
         registry=registry,
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
                               overflow_handler=overflow_handler,
-                              operation_ledger=stores.operation_ledger),
+                              operation_ledger=stores.operation_ledger,
+                              resource_locks=resource_locks),
         max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,
@@ -631,6 +737,7 @@ async def build_runtime(
             model, max_context_tokens=settings.max_context_tokens,
             auto_compact_threshold=settings.auto_compact_threshold,
             hard_guard_threshold=settings.hard_guard_threshold,
+            summary_model=summary_model,
             # #559：摘要调用与主循环同闸（进程级在飞 ≤N 的语义，见上）。
             model_call_gate=model_call_gate,
             # W-29 (#383)：清单兜底重注入周期（PRD §4.6 Cline 默认值，可配置）。
@@ -688,4 +795,7 @@ async def build_runtime(
         # `#318`：session 树账端口（跨 run / 跨会话共享）。装配点只透传；构造方是
         # 服务层（它才知道预算 key 与请求声明）。None = 不接 session 账（旧行为）。
         session_budget=session_budget,
+        # `#524`：完成门可选域策略，装配点只透传（默认 None = 既有默认策略，
+        # CLI / 既有单测路径行为零变化）。
+        completion_policy=completion_policy,
     )

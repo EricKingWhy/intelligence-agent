@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.compactor import (
+    _PROG_SECTION_MAX_ENTRY_CHARS,
     ContextCompactor,
     ContextWindowExceededError,
     _programmatic_summary_sections,
@@ -26,7 +27,12 @@ from agent_harness.session import (
     Session,
 )
 from agent_harness.session.derive import derive_protected_facts
-from agent_harness.session.event import MESSAGE_SUPERSEDED, SessionEvent
+from agent_harness.session.event import (
+    MESSAGE_QUEUED,
+    MESSAGE_SUPERSEDED,
+    QUEUE_CANCELLED,
+    SessionEvent,
+)
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -201,6 +207,30 @@ async def test_summary_failure_keeps_original_projection(failure):
 
 
 @pytest.mark.asyncio
+async def test_configured_summary_failure_keeps_protected_facts(tmp_path):
+    class FailingSummaryModel:
+        async def ainvoke(self, _messages):
+            raise TimeoutError("summary timed out")
+
+    session = make_session(tmp_path)
+    protected_fact = "不得删除 old_rows；精确 ID 是 R-042"
+    session.append(USER_MESSAGE, {"content": protected_fact})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    session.append(USER_MESSAGE, {"content": "继续处理。"})
+
+    messages = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=100_000,
+        auto_compact_threshold=0.05, summary_model=FailingSummaryModel(),
+    ).build(session)
+
+    assert any(
+        isinstance(message, HumanMessage) and protected_fact in str(message.content)
+        for message in messages
+    )
+    assert not any(event.type == CONTEXT_COMPACTED for event in session.events)
+
+
+@pytest.mark.asyncio
 async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_path, monkeypatch):
     session = make_session(tmp_path)
     constraint = "不得删除 old_rows；精确 ID 是 R-042"
@@ -257,6 +287,230 @@ async def test_persistence_failure_does_not_shadow_original_tool_context(tmp_pat
     )
 
 
+@pytest.mark.parametrize(
+    ("second_failure", "expected_class"),
+    [
+        ("non_text", "non_text"),
+        ("timeout", "timeout"),
+        ("provider", "transport_error"),
+        ("target", "target_not_reached"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rejected_candidate_is_not_used_when_retry_fails(
+    second_failure, expected_class,
+):
+    class TwoResponseModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content=MODEL_SECTIONS)
+            if second_failure == "timeout":
+                raise TimeoutError("summary timed out")
+            if second_failure == "provider":
+                raise ConnectionError("provider unavailable")
+            if second_failure == "target":
+                return AIMessage(content=MODEL_SECTIONS)
+            return AIMessage(content=[{"type": "text", "text": "bad"}])
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+    model = TwoResponseModel()
+    result = await ContextCompactor(
+        model, max_context_tokens=100_000, auto_compact_threshold=0.30,
+    ).compact(
+        messages, estimate_message_tokens(messages), reserved_tokens=30_000,
+    )
+
+    assert model.calls == 2
+    assert [failure.error_class for failure in result.failures] == [
+        "target_not_reached", expected_class,
+    ]
+    assert result.compacted_turn_count == 0
+    assert result.summary is None
+    assert result.bracket_id is None
+    assert result.messages == messages
+
+
+@pytest.mark.asyncio
+async def test_rejected_first_candidate_is_not_used_when_retry_succeeds():
+    class TwoResponseModel:
+        def __init__(self):
+            oversized = MODEL_SECTIONS.replace(
+                "已完成读取历史记录，并选择直接展示内容。",
+                "已完成读取历史记录。" + "细节 " * 500,
+            )
+            self.responses = [
+                AIMessage(content=oversized), AIMessage(content=MODEL_SECTIONS),
+            ]
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            response = self.responses[self.calls]
+            self.calls += 1
+            return response
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+    model = TwoResponseModel()
+    reserved_tokens = 29_000
+    result = await ContextCompactor(
+        model, max_context_tokens=100_000, auto_compact_threshold=0.30,
+    ).compact(
+        messages, estimate_message_tokens(messages), reserved_tokens=reserved_tokens,
+    )
+
+    assert model.calls == 2
+    assert [failure.error_class for failure in result.failures] == [
+        "target_not_reached",
+    ]
+    assert result.compacted_turn_count == 1
+    assert result.summary is not None
+    assert "细节" not in result.summary
+    assert "已完成读取历史记录，并选择直接展示内容。" in result.summary
+    assert result.bracket_id is not None
+    assert estimate_message_tokens(result.messages) + reserved_tokens < 30_000
+
+
+@pytest.mark.asyncio
+async def test_failed_summaries_over_hard_guard_raise_with_both_failures():
+    class TwoResponseModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content=MODEL_SECTIONS)
+            return AIMessage(content=[{"type": "text", "text": "bad"}])
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+    model = TwoResponseModel()
+    reserved_tokens = 90_000
+    token_estimate = estimate_message_tokens(messages) + reserved_tokens
+
+    with pytest.raises(ContextWindowExceededError) as error:
+        await ContextCompactor(
+            model, max_context_tokens=100_000, auto_compact_threshold=0.30,
+        ).compact(
+            messages, token_estimate, reserved_tokens=reserved_tokens,
+        )
+
+    assert model.calls == 2
+    assert [failure.error_class for failure in error.value.failures] == [
+        "target_not_reached", "non_text",
+    ]
+    assert messages == [
+        HumanMessage(content="goal"),
+        AIMessage(content="history " * 4_000),
+        HumanMessage(content="next"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("token_estimate", "should_raise"),
+    [(84_999, False), (85_000, False), (85_001, True)],
+)
+@pytest.mark.asyncio
+async def test_failed_summaries_keep_inclusive_hard_guard_boundary(
+    token_estimate, should_raise,
+):
+    class FailingModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            raise ConnectionError("provider unavailable")
+
+    messages = [
+        HumanMessage(content="goal"),
+        AIMessage(content="history"),
+        HumanMessage(content="next"),
+    ]
+    model = FailingModel()
+    compactor = ContextCompactor(
+        model,
+        max_context_tokens=100_000,
+        auto_compact_threshold=0.30,
+        hard_guard_threshold=0.85,
+    )
+
+    if should_raise:
+        with pytest.raises(ContextWindowExceededError) as error:
+            await compactor.compact(messages, token_estimate)
+        assert [failure.error_class for failure in error.value.failures] == [
+            "transport_error", "transport_error",
+        ]
+    else:
+        result = await compactor.compact(messages, token_estimate)
+        assert result.compacted_turn_count == 0
+        assert result.summary is None
+        assert result.bracket_id is None
+        assert result.messages == messages
+        assert [failure.error_class for failure in result.failures] == [
+            "transport_error", "transport_error",
+        ]
+
+    assert model.calls == 2
+    assert messages == [
+        HumanMessage(content="goal"),
+        AIMessage(content="history"),
+        HumanMessage(content="next"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_builder_persists_only_failures_when_both_summary_attempts_fail(tmp_path):
+    store = JsonlSessionStore(root=tmp_path)
+    session = Session.start(store)
+    session.append(USER_MESSAGE, {"content": "goal"})
+    session.append(MODEL_COMPLETED, {"content": "history " * 4000})
+    session.append(USER_MESSAGE, {"content": "next"})
+    original_events = session.events
+    original_projection = session.derive_messages()
+    model = ScriptedModel([
+        AIMessage(content=MODEL_SECTIONS),
+        AIMessage(content=[{"type": "text", "text": "bad"}]),
+    ])
+
+    await ContextBuilder(
+        model,
+        max_context_tokens=20_000,
+        auto_compact_threshold=0.30,
+        system_prompt="context " * 6_000,
+    ).build(session)
+
+    assert len(model.snapshots) == 2
+    failures = [event for event in session.events
+                if event.type == CONTEXT_COMPACTION_FAILED]
+    assert [event.data["error_class"] for event in failures] == [
+        "target_not_reached", "non_text",
+    ]
+    assert not any(event.type in {
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    } for event in session.events)
+    persisted = store.read_events(session.session_id)
+    assert persisted[:len(original_events)] == original_events
+    assert [event.data["attempt"] for event in persisted
+            if event.type == CONTEXT_COMPACTION_FAILED] == [1, 2]
+    reloaded = Session.load(store, session.session_id)
+    assert reloaded.derive_messages() == original_projection
+
+
 @pytest.mark.asyncio
 async def test_hard_guard_rejects_when_recent_turn_cannot_fit(tmp_path):
     session = make_session(tmp_path)
@@ -289,6 +543,57 @@ async def test_invalid_summary_is_rejected_and_system_constraints_survive():
     assert not result.fallback_used
     assert result.compacted_turn_count == 0
     assert result.messages == messages
+
+
+@pytest.mark.asyncio
+async def test_compactor_keeps_list_system_prefix_with_a_valid_tool_pair():
+    system = SystemMessage(content=[{"type": "text", "text": "sys"}])
+    messages = [
+        system,
+        HumanMessage(content="historical request " * 1200),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "call-1", "name": "read_rows", "args": {"id": "R-042"},
+            }],
+        ),
+        ToolMessage(
+            content="historical tool result " * 1200,
+            tool_call_id="call-1",
+        ),
+        AIMessage(content="historical response " * 1200),
+        HumanMessage(content="current request"),
+    ]
+    token_estimate = estimate_message_tokens(messages)
+    assert 2000 < token_estimate < 17_000
+    model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+
+    result = await ContextCompactor(
+        model, max_context_tokens=20_000, auto_compact_threshold=0.1,
+    ).compact(messages, token_estimate)
+
+    assert result.compacted_turn_count == 1
+    assert result.messages[0] == system
+    assert isinstance(result.messages[1], HumanMessage)
+    assert result.messages[1].name == "context_compaction_summary"
+    assert result.messages[-1] == messages[-1]
+    assert result.token_estimate == estimate_message_tokens(result.messages)
+
+
+@pytest.mark.asyncio
+async def test_list_system_prefix_without_early_turn_still_hits_hard_guard():
+    messages = [
+        SystemMessage(content=[{"type": "text", "text": "sys"}]),
+        HumanMessage(content="current request " * 2500),
+    ]
+    token_estimate = estimate_message_tokens(messages)
+    assert token_estimate > 850
+
+    compactor = ContextCompactor(
+        None, max_context_tokens=1000, auto_compact_threshold=0.3,
+    )
+    with pytest.raises(ContextWindowExceededError, match="No complete early turn"):
+        await compactor.compact(messages, token_estimate)
 
 
 @pytest.mark.asyncio
@@ -608,3 +913,63 @@ def test_target_section_none_without_goal_facts():
         [HumanMessage(content="普通消息，不是任何事实源")], [],
     )
     assert sections["## 原始目标与用户约束"] == "(none)"
+
+
+def test_cancelled_queued_replacement_keeps_sections_consistent():
+    """#614①：取消的替换 ⇒ 标记作废 ⇒ §1（目标节）与 §2（保护事实表）同判。
+
+    S2 序列（修复前实测矛盾）：USER → MESSAGE_QUEUED(新任务) →
+    MESSAGE_SUPERSEDED → QUEUE_CANCELLED。修复前 §1 把旧任务当当前生效目标，
+    §2 却把旧任务标 superseded——两节自相矛盾且 §2 丢失唯一 active 目标。
+    修复后：标记作废，旧目标保持 active，两节一致；被取消的替换既不进
+    目标节也不进保护事实节。
+    """
+    events = [
+        SessionEvent(seq=1, type=USER_MESSAGE, session_id="s1",
+                     data={"content": "旧任务 ORD-100。"}),
+        SessionEvent(seq=2, type=MESSAGE_QUEUED, session_id="s1",
+                     data={"queue_id": "queued-1", "content": "新任务 ORD-200。"}),
+        SessionEvent(seq=3, type=MESSAGE_SUPERSEDED, session_id="s1",
+                     data={"superseded_seq": 1}),
+        SessionEvent(seq=4, type=QUEUE_CANCELLED, session_id="s1",
+                     data={"queue_id": "queued-1"}),
+    ]
+    facts = derive_protected_facts(events)
+    sections = _programmatic_summary_sections(
+        [HumanMessage(content="旧任务 ORD-100。")], facts,
+    )
+
+    target = sections["## 原始目标与用户约束"]
+    assert "旧任务 ORD-100。" in target, "取消替换 ⇒ 原目标仍是当前生效目标（§1）"
+    assert "新任务 ORD-200。" not in target, "被取消的替换不得进目标节"
+
+    protected = json.loads(sections["## 保护事实表"])
+    assert protected, "§2 不得为空：原目标必须仍以 active 投影"
+    original = next(
+        fact for fact in protected if fact["value"] == "旧任务 ORD-100。"
+    )
+    assert original["status"] == "active", "§2 与 §1 同判：原目标 active"
+    assert all(fact["value"] != "新任务 ORD-200。" for fact in protected), (
+        "被取消的替换不得以 active 投影"
+    )
+
+
+def test_trimmed_same_prefix_entries_dedup_after_truncation():
+    """#614②：去重必须发生在截断**之后**——同前缀超长条目不得以截断值重复。
+
+    旧实现先按全文 `add_once` 去重、后截断：两条仅在 200 字符之后分叉的
+    超长条目全文不同、双双入列，截断后收敛为同一个值 ⇒ §6/§7 投影出现
+    重复条目。修复：先截断、再按截断值去重（保留最后出现者，与窗口的
+    「最近偏置」一致）、最后套数量上限。
+    """
+    prefix = "同一前缀" + "很长的细节" * 40  # 前 200 字符完全一致
+    assert len(prefix) >= _PROG_SECTION_MAX_ENTRY_CHARS
+    messages = [
+        ToolMessage(content=prefix + "TAIL-A-777", tool_call_id="call-a", status="error"),
+        ToolMessage(content=prefix + "TAIL-B-888", tool_call_id="call-b", status="error"),
+    ]
+    sections = _programmatic_summary_sections(messages, [])
+    identifiers = json.loads(sections["## 精确标识清单"])
+    assert len(identifiers) == len(set(identifiers)), (
+        "截断后同值的条目不得在投影中重复（#614②）"
+    )

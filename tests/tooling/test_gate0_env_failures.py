@@ -216,3 +216,93 @@ def test_replay_verdict_identical_with_and_without_env_fields(tmp_path, monkeypa
         path.write_text(json.dumps(make_doc(with_env)), encoding="utf-8")
         verdicts.append(gate0.replay_reading(str(path)))
     assert verdicts == [0, 0], "env 字段不得影响 replay 判定（两份都必须一致通过）"
+
+
+# ── P3（#609 批审查登记）：口径行的 main() 调用点钉 ──
+#
+# AC3 三臂只钉 env_verdict_line 纯函数本身；main() FAIL 分支的接线
+# （`env_line = env_verdict_line(results); if env_line is not None: print(env_line)`）
+# 无钉——接线断了（例如调用被误删）纯函数钉不红。此处 mock run_lane 走
+# main(['--no-record']) 全链路，用 capsys 断言口径行的在场/缺席。
+
+
+# 车道清单是**本机环境**的函数：node / `web/node_modules` 缺席时 oxlint、tsc 的
+# `argv=None` ⇒ main 走"工具缺失"分支（rc=1 但**非** env 签名）⇒ 口径行缺席。
+# 本组钉只针对 main() FAIL 分支的接线，故把清单固定成桩——断言不随本机装没装前端
+# 工具而变（否则无 node 的环境跑全量会假红）。
+_STUB_LANE_NAMES = ("diff-check", "ruff", "oxlint", "tsc", "guards", "coverage")
+
+
+def _stub_lanes(missing: str | None = None):
+    return [
+        gate0.Lane(name, f"{name} 车道（桩）",
+                   None if name == missing else [sys.executable, "-c", "pass"],
+                   gate0.REPO_ROOT,
+                   blocked="找不到 node" if name == missing else "")
+        for name in _STUB_LANE_NAMES
+    ]
+
+
+def _patch_main_io(monkeypatch, outcomes, missing: str | None = None):
+    """outcomes: lane_name -> (rc, output)；mock 掉全部 I/O 面，main 只剩纯调度。
+
+    `missing` 指定一条车道模拟「工具缺失」（argv=None）——该分支的语义（fail-closed：
+    不得被 env 归类洗绿）同样要有钉，见 `test_main_tool_missing_lane_is_not_env_classified`。
+    """
+
+    def fake_run_lane(lane):
+        rc, out = outcomes[lane.name]
+        return rc, 0.1, out
+
+    class _Proc:
+        stdout = "a" * 40 + "\n"
+
+    monkeypatch.setattr(gate0, "build_lanes", lambda since="": _stub_lanes(missing))
+    monkeypatch.setattr(gate0, "run_lane", fake_run_lane)
+    monkeypatch.setattr(gate0, "git", lambda *args: _Proc)
+    monkeypatch.setattr(gate0, "surface_report", lambda since: "")
+    monkeypatch.setattr(gate0, "_utf8_stdio", lambda: None)
+
+
+def test_main_fail_branch_prints_env_verdict_line_when_all_env(monkeypatch, capsys):
+    names = list(_STUB_LANE_NAMES)
+    outcomes = {n: (3221225794, "boom") for n in names}
+    _patch_main_io(monkeypatch, outcomes)
+    rc = gate0.main(["--no-record"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Gate-0 FAIL" in out
+    lines = [ln for ln in out.splitlines() if "环境项之外 0 失败" in ln]
+    assert len(lines) == 1
+    assert f"{len(names)}/{len(names)}" in lines[0]
+
+
+def test_main_fail_branch_omits_env_verdict_line_on_mixed_red(monkeypatch, capsys):
+    names = list(_STUB_LANE_NAMES)
+    outcomes = {n: (1, "assert x == y") for n in names}
+    outcomes[names[0]] = (3221225794, "boom")
+    _patch_main_io(monkeypatch, outcomes)
+    rc = gate0.main(["--no-record"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Gate-0 FAIL" in out
+    assert "环境项之外 0 失败" not in out  # 混合真红 ⇒ 口径行缺席（真红优先）
+
+
+def test_main_tool_missing_lane_is_not_env_classified(monkeypatch, capsys):
+    """工具缺失（argv=None）不得被当成环境项：rc=1、FAIL 且口径行缺席（fail-closed）。
+
+    #636 的机制就是这个分支：CI 上 oxlint/tsc 因缺 `web/node_modules` 走 argv=None ⇒
+    main 记 rc=1「工具缺失」混入 ⇒ 口径行按语义（混合不打）缺席。车道清单固定成桩后，
+    这条分支会失去（原先只是偶然的）覆盖，故独立钉住其语义：
+    「工具缺失」是 fail-closed 的真实失败，不得被 env 归因洗绿。
+    """
+    names = list(_STUB_LANE_NAMES)
+    outcomes = {n: (3221225794, "boom") for n in names}
+    _patch_main_io(monkeypatch, outcomes, missing=names[0])
+    rc = gate0.main(["--no-record"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Gate-0 FAIL" in out
+    assert "工具缺失" in out
+    assert "环境项之外 0 失败" not in out

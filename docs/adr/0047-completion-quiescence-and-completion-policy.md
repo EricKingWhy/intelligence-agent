@@ -253,3 +253,35 @@ class CompletionDecision:
    `run/paused(deadline)` + `operation/reconcile-required`。两条路都 fail-closed，但**优先级
    没有被任何规格写明**；先按"闸门在完成边界上、deadline 在循环顶上"实现，写在这里备查
    （若将来要反过来，改的是两个判据的先后，不是闸门本身）。
+
+## 5. 增补（2026-10-05，#524）：证据型 CompletionPolicy 与纠正反馈
+
+设计定稿见 `docs/tickets/524-evidence-completion-policy-design.md`（用户裁决：选项 A——
+可选 domain policy，默认关闭；装配传 `EvidenceCompletionPolicy` 实例即开启，无布尔旗标）。
+本节只记录对 D1–D3 决策面的**扩展**，其余裁决不变：
+
+1. **`decide` 签名扩展**：新增 keyword-only `events: Sequence[SessionEvent] | None = None`
+   （runtime 传本会话已落盘事件）。证据是 durable 事实，策略必须能读到它；带默认值
+   使不读事件的策略（含既有实现）声明面不变，但**调用面**统一携带——实现方因此
+   必须接受该参数。`None` = 拿不到事实，证据型策略必须拒绝而不是放行（与
+   "不可得 ≠ 0"同一纪律）。
+2. **`correction_feedback(decision) -> str | None` 默认方法**：默认 `None` = 拒绝语义
+   维持 D3 的零写入 blocked 臂不变。只有显式覆写的策略被拒绝时，runtime 才注入
+   纠正消息并继续循环——装配开关就是策略类型本身，Core 不 import 具体策略类。
+3. **纠偏臂插入点**：完成闸门内，**stuck 判定之后 / `_terminal_quiescence_blocked`
+   之前**。护栏不得越过完成闸门（D5 的既有裁定），所以 stuck 命中时纠偏臂不触达；
+   blocked 臂的零写入契约不受影响（走不到纠偏臂的三种形态全部维持原状）。
+   落盘形状复用 stuck replan 的双事件先例：结构化 `completion/evidence-blocked`
+   （data 只含 policy 类名与稳定 reason 串，无主张原文、无参数值——D3）+
+   纠正 USER_MESSAGE（`injected_by=completion_evidence_policy`，前端投影区分 +
+   记忆抽取单点过滤的既有标记纪律）。
+4. **有界性论证（不造第二台 stuck 机器）**：纠偏臂不带计数器 / 闩 / 暂停路径。
+   回循环顶部后预算准入照判（暂停边界不会多出模型调用）；stuck 检测器逐轮
+   `advance`，重复形态达阈值自然走既有 replan-once / paused 分级。证据判定接受
+   会话内已有 durable 结果，纠正从**机制上**不要求重跑已执行的 mutating tool；
+   模型自主发起的重复调用仍由既有 Permission/Approval 闸门治理（不变量 #11）。
+5. **词表面**：新事件 `completion/evidence-blocked`（持久化）；纠正片段
+   `corrective:completion_evidence`（order 9160，纠正带内）。
+6. **已接受的边界（登记）**：claim_pattern 对 `final_text` 的正则匹配没有
+   ReDoS 防护——模式是受信的装配期配置，输入是模型可控文本。V1 接受
+   （编程装配、非用户输入面）；防护属后续票（设计定稿 §7 第 5 条）。

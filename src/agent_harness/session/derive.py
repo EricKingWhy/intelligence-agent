@@ -663,18 +663,11 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     """Rebuild protected task facts from the immutable event prefix."""
     event_by_seq = {event.seq: event for event in events}
     event_by_id = {event.event_id: event for event in events}
-    superseded_sources = {
-        source.event_id
-        for event in events
-        if event.type == MESSAGE_SUPERSEDED
-        and isinstance(event.data.get("superseded_seq"), int)
-        and not isinstance(event.data.get("superseded_seq"), bool)
-        and (source := event_by_seq.get(event.data["superseded_seq"])) is not None
-        and event.seq > source.seq
-        and source.session_id == event.session_id
-        and source.type in _USER_SOURCE_TYPES
-        and not source.data.get("injected_by")
-    }
+    # supersede 标记的目标收集**并入下方合并遍历**（#614①）：标记是否成立
+    # 取决于"目标与标记之间有没有**未被取消**的活跃用户事件"（替换槽），
+    # 那需要 direct_user_events 先就位。这里只先放取消队列的来源——它们
+    # 无条件算 superseded（来源事件本身被取消，其事实不再受保护）。
+    superseded_sources: set[str] = set()
     cancelled_queue_ids = {
         event.data.get("queue_id")
         for event in events
@@ -746,7 +739,7 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         target = event_by_seq.get(target_seq)
         if (
             target is None
-            or target.type != USER_MESSAGE
+            or target.type not in _USER_SOURCE_TYPES
             or target.data.get("injected_by")
             or event.seq <= target.seq
             or event.session_id != target.session_id
@@ -754,7 +747,17 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
             continue
         replacement_index = bisect_right(direct_user_seqs, target.seq)
         replacement_end = bisect_left(direct_user_seqs, event.seq)
-        if replacement_end > replacement_index:
+        if replacement_end <= replacement_index:
+            # 替换槽空（#614①）：目标与标记之间没有**未被取消**的活跃用户
+            # 事件——这次 supersede 实际没有发生过（替换排队后被取消是
+            # 可达形态：MESSAGE_QUEUED → MESSAGE_SUPERSEDED → QUEUE_CANCELLED）。
+            # 标记作废：目标保持 active。§1 的选取口径本来就是"取消的替换
+            # 不进 sources"（S2 实测 §1 仍取目标），§2 的 status 必须同判，
+            # 否则目标节说"目标仍生效"、保护事实表却把它标成 superseded，
+            # 两节自相矛盾且丢失唯一 active 目标。
+            continue
+        superseded_sources.add(target.event_id)
+        if target.type == USER_MESSAGE:
             user_goal_sources.add(
                 direct_user_events[replacement_end - 1].event_id
             )

@@ -74,6 +74,13 @@ class TestSessionEventDTO:
             # W-26 (#380)：进度清单整表覆盖（状态事件，不投影成消息；handler
             # 硬校验在 session/plan.py）。
             "task/plan_updated",
+            # W-07 (#351)：Task / 验证 / 接受三轴事实（状态事件，不投影成消息；
+            # handler 硬校验与投影在 session/task.py）。
+            "task/defined",
+            "task/acceptance-revised",
+            "verification/updated",
+            "task/accepted",
+            "task/acceptance-released",
             "memory/degraded",
             "tool/failure-guard",
             "model/fallback",
@@ -119,6 +126,8 @@ class TestSessionEventDTO:
             # level=paused 收口）。① 的 replan 复用既有 tool/failure-guard 形状，
             # 所以这一条只在 ②–⑤ 与所有暂停上出现（ADR-0048 D2/D5）。
             "guard/stuck",
+            # #524：完成门证据策略拒绝的结构化事实（纠正以紧随的 user/message 落地）。
+            "completion/evidence-blocked",
         }
         assert EVENT_TYPES == expected
 

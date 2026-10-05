@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # 脱敏为 **********，避免任何把 Settings 转储进日志/调试器/异常页的路径泄漏 live key。
     model_api_key: SecretStr = SecretStr("")
     model_base_url: str = ""
+    # Optional AGENT_MODELS / provider selection for context summaries; None keeps
+    # the existing primary-model behavior.
+    summary_model: str | None = None
 
     temperature: float = 0.2
     # 流式守卫（秒，逐项 ≤0 关闭）：idle = N 秒无新 chunk（死连接）；
@@ -133,6 +136,13 @@ class Settings(BaseSettings):
     agent_persona: str = ""
     # Skills 全局目录（spec 09 §2）；项目目录是 <workspace>/skills/。
     skill_global_dir: str = ""
+    # Repository instruction context is read as untrusted, bounded model input.
+    project_instructions_file_max_bytes: int = Field(
+        default=32 * 1024, ge=1, le=1024 * 1024,
+    )
+    project_instructions_total_max_bytes: int = Field(
+        default=128 * 1024, ge=1, le=4 * 1024 * 1024,
+    )
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"

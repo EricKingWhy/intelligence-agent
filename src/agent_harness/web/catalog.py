@@ -126,6 +126,7 @@ def _render_model_option(
     for cap_key in (
         "context_window", "speed_tier", "supports_tools",
         "supports_vision", "supports_reasoning_summary",
+        "prompt_cache",
     ):
         if cap_key in capabilities:
             option[cap_key] = capabilities[cap_key]

@@ -15,6 +15,16 @@ def make_settings(**overrides) -> Settings:
     )
 
 
+def test_summary_model_is_opt_in_by_default():
+    assert make_settings().summary_model is None
+
+
+def test_summary_model_can_be_selected_from_environment(monkeypatch):
+    monkeypatch.setenv("SUMMARY_MODEL", "summary-small")
+
+    assert make_settings().summary_model == "summary-small"
+
+
 class TestModelConfigFromSettings:
     def test_deepseek_uses_preset(self):
         config = ModelConfig.from_settings(make_settings(model_provider="deepseek"))

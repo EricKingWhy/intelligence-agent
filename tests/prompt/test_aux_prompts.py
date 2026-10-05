@@ -130,8 +130,9 @@ def test_builtin_registry_has_expected_sections() -> None:
     """T3 的 3 条 profile + T4 的 3 条 aux + T7 的 1 条运行时快照
     + T8 的 4 条框架/纠偏 + T9 的 1 条 stuck 纠偏
     + W-04（#348）的 1 条接近硬护栏提醒（builder 注入，非持久化）
-    + #519 的 1 条工具结果不可信 frame + #546 的 1 条技能正文不可信 frame。"""
-    assert len(build_registry().available()) == 15
+    + #519 的 1 条工具结果不可信 frame + #546 的 1 条技能正文不可信 frame
+    + #524 的 1 条完成门证据策略纠偏。"""
+    assert len(build_registry().available()) == 16
 
 
 def test_tail_text_is_declared() -> None:

@@ -587,3 +587,84 @@ async def test_child_without_parent_anchor_keeps_env_cell_fail_closed(
             resume_basis=RESUME_BASIS_ENVIRONMENT_CHANGE,
             expected_version=paused.version,
         )
+
+
+
+# ── P3（#607 批审查登记）：父 cwd 读失败的两个失败臂 ──
+#
+# 点亮/无锚两臂只覆盖「读到 / 根本没有锚」；_read_parent_cwd 的**读失败路径**
+# （store 抛异常 → warning → (None, True)，失败不缓存「换一次 spawn 再试」）无钉。
+# 两腿分别钉：瞬时失败不缓存（provider 级契约）、持久失败不拖垮委派且恢复
+# fail-closed（spawn 级，与无锚臂同一收口——成因不同：有锚但读不到）。
+
+
+def test_parent_cwd_transient_failure_is_not_cached(tmp_path: Path, monkeypatch):
+    """失败不缓存 ⇒ 下一次调用必须**重读**（不能把 None 钉死）；成功后恢复缓存语义。
+
+    断言落在可观察的**读取次数**上，不依赖 provider 的私有缓存旗标。
+    """
+    harness = _build_harness(tmp_path, monkeypatch)
+    anchor = tmp_path / "project"
+    Session.start(harness.state.store, session_id=PARENT_ID, cwd=anchor)
+    real_read = harness.state.store.read_events
+    reads = {"n": 0, "failed_once": False}
+
+    def flaky(session_id, *args, **kwargs):
+        if session_id == PARENT_ID:
+            reads["n"] += 1
+            if not reads["failed_once"]:
+                reads["failed_once"] = True
+                raise OSError("transient store failure")
+        return real_read(session_id, *args, **kwargs)
+
+    monkeypatch.setattr(harness.state.store, "read_events", flaky)
+    provider = InProcessSubagentProvider()
+    provider._session_store = harness.state.store
+    provider._parent_session_id = PARENT_ID
+
+    assert provider._parent_cwd() is None    # 失败 → None（按未分组处理）
+    assert reads["n"] == 1                   # 失败没有被缓存
+    value = provider._parent_cwd()           # 重读成功（不是拿缓存的 None）
+    assert reads["n"] == 2
+    assert value is not None and Path(value).resolve() == anchor.resolve()
+    assert provider._parent_cwd() == value   # 缓存命中
+    assert reads["n"] == 2                   # 成功后才缓存：不再重读
+
+
+@pytest.mark.asyncio
+async def test_parent_store_unreadable_delegation_fails_closed_loudly(
+    tmp_path: Path, monkeypatch,
+):
+    """持久读失败臂：activate 预读（provider.py L256-307）也读不到 ⇒
+    _tree_metadata_error=True ⇒ reserve_delegation 响亮拒绝（不发新树预算），
+    不开幽灵子会话。父锚真实存在（有锚但读不到），成因与无锚臂不同。"""
+    harness = _build_harness(tmp_path, monkeypatch)
+    anchor = tmp_path / "project"
+    real_read = harness.state.store.read_events
+
+    def always_fail(session_id, *args, **kwargs):
+        if session_id == PARENT_ID:
+            raise OSError("transient store failure")
+        return real_read(session_id, *args, **kwargs)
+
+    monkeypatch.setattr(harness.state.store, "read_events", always_fail)
+    harness.state.workspace_registry.create(PARENT_ID, workspace_root=anchor)
+    Session.start(harness.state.store, session_id=PARENT_ID, cwd=anchor)
+
+    provider_impl = InProcessSubagentProvider()
+    provider_impl.activate(
+        factory=AgentFactory(
+            model=ScriptedModel([AIMessage(content="child done")]),
+            primary_model_name="main-model",
+            executor_factory=lambda child_registry: ToolExecutor(child_registry),
+        ),
+        source_registry=ToolRegistry(),
+        session_store=harness.state.store,
+        workspace_registry=harness.state.workspace_registry,
+        parent_session_id=PARENT_ID,
+    )
+    delegate = DelegateTool(provider_impl)
+    result = await delegate.execute(_args("research_review", "child task"))
+    assert result.ok is False
+    assert "无法确认委派树预算" in result.message  # DelegateTool 对 reserve 拒绝的包装语
+    assert provider_impl.last_child_sessions == []  # 无幽灵子会话

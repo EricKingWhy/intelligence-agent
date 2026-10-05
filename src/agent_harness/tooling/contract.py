@@ -220,6 +220,22 @@ class Tool(ABC):
         """
         return ReconcileHint(verifiable=False)
 
+    def resource_keys(self, args: BaseModel) -> list[str]:
+        """声明本次调用将触碰的共享 resource key（供跨批互斥使用）。
+
+        #525 一期（IMP-14）：
+        - 返回空列表（默认）= 该 Tool 不参与 resource 锁互斥（安全默认）；
+        - 非空列表 = 执行域在 execute() 入口按 key 升序 acquire 锁，
+          同一 key 的并发调用（跨批次 / 跨 SubAgent executor 实例）串行。
+        - Key 格式由 Tool 自行定义（推荐含命名空间如 "workspace-file:..."）；
+          Registry 只做字典排序，不解释 key 语义。
+        - 死锁防护：统一 key 升序 + 同一把锁不重复 acquire（set 去重）。
+
+        用法示例（EditTool）：
+            return [f"workspace-file:{posixpath.normpath(args.path)}"]
+        """
+        return []
+
     @property
     def prompt_guidance(self) -> str | None:
         """该工具希望进入 agent **system prompt** 的使用指引（ADR-0023 D11）。

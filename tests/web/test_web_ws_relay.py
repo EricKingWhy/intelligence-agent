@@ -54,6 +54,35 @@ class _SlowStreamModel:
             yield AIMessageChunk(content=f"chunk{i} ")
 
 
+class _BurstThenStallModel:
+    """先连发 N 个 chunk 再长停顿：run 保持 in-flight，但持久面在 burst 后静默。
+
+    供「阈值判据 = 持久 max」类测试使用：判据读 server 侧 `events[-1].seq`，
+    若 run 仍以固定节奏落盘，测试 GET /events 与 subscribe 之间任何一条新事件
+    都会抬高 latest_seq，把「差值 == 阈值 ⇒ 不截断」的构造前提打破——这是
+    判据用例历史偶发红的真实机理（测试与活 run 竞速，非判据回归）。burst 后
+    长停顿让持久面稳定，分叉只由测试显式构造（推高入队游标）；停顿足够长，
+    测试收尾时 run 仍在途，`_shutdown` 沿既有路径拆服务器。
+    """
+
+    def __init__(
+        self, burst: int = 4, burst_interval: float = 0.03, stall: float = 30.0,
+    ) -> None:
+        self._burst = burst
+        self._burst_interval = burst_interval
+        self._stall = stall
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def astream(self, messages, **kwargs):
+        for i in range(self._burst):
+            await asyncio.sleep(self._burst_interval)
+            yield AIMessageChunk(content=f"burst{i} ")
+        await asyncio.sleep(self._stall)
+        yield AIMessageChunk(content="tail")
+
+
 async def _start_server(tmp_path, monkeypatch, model_factory=None):
     """启动真实 uvicorn 服务器，返回 (server, serve_task, port, app)。
 
@@ -813,7 +842,7 @@ async def test_ws_truncation_criterion_is_persisted_max_not_enqueue_cursor(
 
     server, serve_task, port, app = await _start_server(
         tmp_path, monkeypatch,
-        model_factory=lambda config, **kw: _SlowStreamModel(chunks=30, interval=0.1),
+        model_factory=lambda config, **kw: _BurstThenStallModel(),
     )
     try:
         session_id = await _start_run_get_session_id(port, "慢任务")
@@ -831,11 +860,30 @@ async def test_ws_truncation_criterion_is_persisted_max_not_enqueue_cursor(
 
         import httpx2
 
+        # 等持久面静默（burst 结束、run 进入长停顿段）再取 persisted_max：
+        # 判据读 server 侧 `events[-1].seq`——若持久面仍在前进，GET 与 subscribe
+        # 之间新落盘的事件会抬高 latest_seq，把「latest_seq - after_seq == 阈值
+        # ⇒ 不截断」的前提打破（本用例历史偶发红的真实机理：测试与活 run 竞速）。
+        # 以连续两次一致的 GET max seq 为静默判据；分叉此后只由测试显式构造。
         async with httpx2.AsyncClient(timeout=15) as client:
-            events = (await client.get(
-                f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
-            )).json()
-        persisted_max = max(e["seq"] for e in events if e.get("seq") is not None)
+
+            async def _persisted_max() -> int:
+                payload = (await client.get(
+                    f"http://127.0.0.1:{port}/api/sessions/{session_id}/events"
+                )).json()
+                return max(e["seq"] for e in payload if e.get("seq") is not None)
+
+            persisted_max = await _persisted_max()
+            stable = 0
+            for _ in range(200):
+                await asyncio.sleep(0.1)
+                cur = await _persisted_max()
+                stable = stable + 1 if cur == persisted_max else 0
+                persisted_max = cur
+                if stable >= 2:
+                    break
+            else:
+                raise AssertionError("持久面持续前进，无法静默（burst 停顿段未到位）")
 
         # 构造分叉：入队游标 >> 持久 max。真实的"落盘先于入队"不变量被打破，但判据
         # 若取持久面，就**不该**受影响。

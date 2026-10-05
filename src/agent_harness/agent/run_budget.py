@@ -115,6 +115,15 @@ REASON_DEADLINE = "deadline"
 #: 上给出，本模块只承载它（暂停载荷 / 恢复前置 / continuation）。
 REASON_STUCK = "stuck"
 
+#: `run/paused.data.reason`：最后一个产品客户端明确退出或断线宽限到期（W-22 `#366`；
+#: `02 §5.2.1` / `03 §3.4` 扩展词表 / ADR-0046）。与前三个的分工：它缺的既不是额度
+#: （`budget_exhausted`）、不是时刻（`deadline`）、也不是外部变更的观测（`stuck`），
+#: 而是"客户端在场"这件事本身——所以恢复依据唯一是 `client_return`，且 closeout 恒为
+#: `deterministic`（暂停时不得再发"总结用"模型请求，`02 §5.2.1`）。
+#: **只对已纳入产品客户端在场协议的 Run 生效**：未纳入的 Run 维持既有
+#: `run/failed(reason=orphaned)` 孤儿回收语义（`11 §6.2`：协议只接管明确登记的 Task）。
+REASON_CLIENT_ABSENT = "client_absent"
+
 #: `03 §5` 冻结的 run 状态词表里**唯一**由对账（而非暂停 / 终态）给出的那一个（`#315` 起可产）。
 #: 它在投影里**覆盖** `paused`：`03 §5` 明写「`needs_reconcile` 同样 MUST 先 reconcile 才
 #: 允许恢复」，所以一条"暂停 + 欠着未对账副作用"的 run，其状态词是这一个——暂停原因
@@ -148,6 +157,14 @@ TRIGGER_RUN_DEADLINE = "run.deadline_at"
 #: budget_exhausted（`03 §3.4` 的词表里没有也不该有第二个名字）；恢复侧的窄豁免
 #: 见 `validate_resume`。
 TRIGGER_MAX_CONTEXT_TOKENS = "max_context_tokens"
+
+#: W-22（`#366`）：客户端缺席暂停的触发维度（`03 §3.4`：`trigger_dimension` 的值域 =
+#: 预算维的配置路径 / stuck 模式 / **client_presence**）。它不是配置字段路径——在场
+#: 不是账本维度，没有 ceiling 可抬；`reason_for_dimension` 把它映射成 `client_absent`。
+#: 判定源是 RunManager 的在场接缝（W-22 最小接缝；登记协议与宽限配置属 W-12），
+#: 闸门落在 runtime 循环顶——与预算判定同一处唯一准入点（`02 §5.2.1`：阻止新的
+#: Model / Tool / Child 接纳发生在任何新工作开始之前）。
+TRIGGER_CLIENT_PRESENCE = "client_presence"
 
 #: 整数 ceiling / usage 的**存储上限**：SQLite INTEGER 是 64 位有符号
 #: （`-2**63 .. 2**63-1`；约束来源是代码里的 `storage/delegation_tree.py` 的
@@ -261,15 +278,18 @@ def tool_dimensions(limits: RunLimits) -> tuple[str, ...]:
 
 
 def reason_for_dimension(dimension: str) -> str:
-    """命中的维度 → `run/paused.data.reason`（`03 §3.4` 的三值词表）。
+    """命中的维度 → `run/paused.data.reason`（`03 §3.4` 的三值基线 + client_absent 扩展）。
 
-    两个 deadline（run / session 作用域）落在 deadline 上；其余（四维计数 /
-    local fuse / per-tool 配额，两个作用域）都是预算类——它们的共同点是"把绝对值
-    抬高就能继续"。`stuck` **不由维度产生**（它是 guard 的判定，`#317`），所以这里
-    没有它的入口：映射表里不预置一个当下产不出的值，就不必在别处解释它为什么恒不出现。
+    两个 deadline（run / session 作用域）落在 deadline 上；`client_presence` 落在
+    `client_absent`（W-22 `#366`）；其余（四维计数 / local fuse / per-tool 配额，
+    两个作用域）都是预算类——它们的共同点是"把绝对值抬高就能继续"。`stuck`
+    **不由维度产生**（它是 guard 的判定，`#317`），所以这里没有它的入口：映射表里
+    不预置一个当下产不出的值，就不必在别处解释它为什么恒不出现。
     """
     if dimension in (TRIGGER_RUN_DEADLINE, TRIGGER_SESSION_DEADLINE):
         return REASON_DEADLINE
+    if dimension == TRIGGER_CLIENT_PRESENCE:
+        return REASON_CLIENT_ABSENT
     return REASON_BUDGET_EXHAUSTED
 
 
@@ -277,20 +297,24 @@ def reason_for_dimension(dimension: str) -> str:
 CLOSEOUT_MODEL = "model"
 CLOSEOUT_DETERMINISTIC = "deterministic"
 
-#: `run/resumed.data.resume_basis`（`03 §3.4` 的四值）。本模块只把它当**声明**收下；
-#: 哪一种暂停接受哪一条由 `validate_resume` 决定：预算 / deadline 只接受
-#: `budget_increase`，stuck 只接受后三者并且每一条都要**现场观测到**（`#317`；
-#: 证据算法在 `agent/resume_evidence.py`，判定在 `stuck_resume_evidence`）。
+#: `run/resumed.data.resume_basis`（`03 §3.4` 的四值基线 + client_return 扩展）。
+#: 本模块只把它当**声明**收下；哪一种暂停接受哪一条由 `validate_resume` 决定：
+#: 预算 / deadline 只接受 `budget_increase`，stuck 只接受中间三者并且每一条都要
+#: **现场观测到**（`#317`；证据算法在 `agent/resume_evidence.py`，判定在
+#: `stuck_resume_evidence`），client_absent 只接受 `client_return`（W-22 `#366`；
+#: `11 §6.2`：重连本身不自动恢复，显式请求就是那个显式动作）。
 RESUME_BASIS_BUDGET_INCREASE = "budget_increase"
 RESUME_BASIS_RELEVANT_STEER = "relevant_steer"
 RESUME_BASIS_ENVIRONMENT_CHANGE = "environment_change"
 RESUME_BASIS_POLICY_CHANGE = "policy_change"
+RESUME_BASIS_CLIENT_RETURN = "client_return"
 RESUME_BASIS_VALUES: frozenset[str] = frozenset(
     {
         RESUME_BASIS_BUDGET_INCREASE,
         RESUME_BASIS_RELEVANT_STEER,
         RESUME_BASIS_ENVIRONMENT_CHANGE,
         RESUME_BASIS_POLICY_CHANGE,
+        RESUME_BASIS_CLIENT_RETURN,
     }
 )
 
@@ -1796,16 +1820,22 @@ def validate_resume(
     "恢复成功但立刻再次暂停"的假象。**预算暂停**"一个维度都不点名"同样 409：`03 §5`
     要求恢复请求给出绝对 ceiling，"一个都不给"不是抬高。
 
-    哪种暂停接受哪条依据（`#317` 起三类暂停各有各的）：
+    哪种暂停接受哪条依据（`#317` 起每类暂停各有各的）：
 
     - **预算 / deadline**：只有 `budget_increase` 一条真实路径——预算靠抬高某个
-      ceiling、deadline 靠给一个新的未来时刻（见下）。另外三值的**证据判定**属 stuck
+      ceiling、deadline 靠给一个新的未来时刻（见下）。另外几值的**证据判定**属 stuck
       的地盘，用在这里等于假装校验过证据 ⇒ 409 明说"不接受"。
     - **stuck**：只接受 `relevant_steer` / `environment_change` / `policy_change`，
       且每一条都要在**请求这一刻**被观测到（`stuck_resume_evidence` 是唯一判据；
       观测值由 `agent/resume_evidence.py` 现算，`resume_evidence` 参数就是它）。
       `budget_increase` ⇒ 409；**不要求**点出绝对 ceiling（那不是它缺的东西），
       但"恢复了却立刻再停"照样在 `resume_headroom_ok` 被拒。
+    - **client_absent**（W-22 `#366`）：只接受 `client_return`——恢复的依据是
+      "客户端回来了"，不是任何账本变更（`11 §6.2`：重连本身不自动恢复，显式请求
+      就是那个显式动作；"确有 Task 客户端在场"的登记判据属 W-12 的注册协议，
+      本函数只判请求面）。**不要求**点名绝对 ceiling（预算没有被耗尽，"抬高绝对值"
+      对它是指错药方），但"恢复了却立刻再停"照样在 `_validated_resume_limits` 被拒。
+      `client_return` 对其余三类暂停一律 409（各自分支负责，见下）。
 
     **deadline 暂停（`#315`）走 `budget_increase` 同一路径**，理由：deadline 本身就是
     `budget.run` 作用域的一维（`11 §6.1` 的公开形状里它就在 `run` 对象内），恢复它给的
@@ -1846,10 +1876,25 @@ def validate_resume(
             paused, limits=limits, now=now,
             session_ceiling_raised=session_ceiling_raised,
         )
+    if paused.reason == REASON_CLIENT_ABSENT:
+        # W-22（#366）：client_absent 缺的不是额度也不是时刻，是"客户端在场"。
+        # 唯一依据 client_return；不要求点名 ceiling（预算没有被耗尽），但
+        # "恢复了却立刻再停"的 headroom / 基数未知判定照跑（豁免不豁免判定，
+        # 只豁免"必须抬高"这条形式——与 stuck / W-04 分支同一纪律）。
+        if resume_basis != RESUME_BASIS_CLIENT_RETURN:
+            raise BudgetConflict(
+                f"client_absent 暂停只接受 resume_basis={RESUME_BASIS_CLIENT_RETURN}"
+                f"（客户端回归）：{resume_basis} 的有效性需要账本变更或现场证据"
+                f"（预算 / stuck 的责任域），本路径不假装校验过它——未启动任何工作"
+            )
+        return _validated_resume_limits(
+            paused, limits=limits, now=now,
+            session_ceiling_raised=session_ceiling_raised,
+        )
     if paused.reason not in (REASON_BUDGET_EXHAUSTED, REASON_DEADLINE):
         raise BudgetConflict(
             f"未知暂停原因 reason={paused.reason}：本实现只认 "
-            f"{sorted((REASON_BUDGET_EXHAUSTED, REASON_DEADLINE, REASON_STUCK))}，"
+            f"{sorted((REASON_BUDGET_EXHAUSTED, REASON_DEADLINE, REASON_STUCK, REASON_CLIENT_ABSENT))}，"
             f"拒绝启动工作"
         )
     if resume_basis != RESUME_BASIS_BUDGET_INCREASE:
@@ -2200,6 +2245,8 @@ def deterministic_continuation(
 
     `reason=stuck`（`#317`）走另一支（`_stuck_continuation`）：stuck 没有"到顶的
     ceiling"可抬，照抄预算那句会指一条必被 409 挡死的路（ADR-0048 D6）。
+    `reason=client_absent`（W-22 `#366`）同理走 `_client_absent_continuation`：
+    它缺的是"客户端在场"，既没有 ceiling 可抬也没有证据可比。
 
     `blocked_by`（`#315`）交给 `apply_blocked_by` 统一改写——**模型给的 continuation
     走的是同一个改写**（见那里的理由）："已确证的阻塞项"是事实，不是某种 continuation
@@ -2208,6 +2255,10 @@ def deterministic_continuation(
     if reason == REASON_STUCK:
         return apply_blocked_by(
             _stuck_continuation(stuck=stuck, consumed=consumed), blocked_by,
+        )
+    if reason == REASON_CLIENT_ABSENT:
+        return apply_blocked_by(
+            _client_absent_continuation(consumed=consumed), blocked_by,
         )
     items = [event for event in events if event.run_id == run_id]
     tool_results = sum(1 for event in items if event.type == TOOL_RESULT)
@@ -2318,6 +2369,40 @@ def _stuck_continuation(
         CONTINUATION_ACTION_KEY: (
             f"{action}；"
             "或者改变做法本身——同一个动作不会因为再试一次而得到不同的结果"
+        ),
+    }
+
+
+def _client_absent_continuation(*, consumed: BudgetConsumed) -> dict[str, Any]:
+    """client_absent 暂停的确定性 continuation（W-22 `#366`；`02 §5.2.1` / ADR-0046）。
+
+    与 `_stuck_continuation` 同一条存在理由：client_absent 缺的**不是额度也不是
+    时刻**，文案里不能出现"提高 ceiling 后恢复"（那次恢复必被 `validate_resume`
+    409 挡死，`03 §5` / ADR-0044 D4 禁止"暗示可安全续跑"）。它缺的是"客户端在
+    场"，所以动作指向唯一恢复依据 `client_return`。`completed` 仍只列已确证的
+    消耗计数（"不可得 ≠ 0"的文案纪律同预算支，见 `_value_text` / `_decimal_text`）。
+    """
+    return {
+        "completed": [
+            (
+                f"本逻辑 run 已消耗 {consumed.agent_turns} 个 agent turn、"
+                f"{_value_text(consumed.model_requests)} 次 Provider 请求"
+            ),
+            (
+                f"累计 token：{_value_text(consumed.total_tokens)}；"
+                f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}"
+            ),
+        ],
+        "remaining": [
+            "暂停发生在下一轮模型决策之前：恢复后由模型从会话历史继续",
+        ],
+        "blockers": [
+            "最后一个产品客户端已明确退出或断线宽限到期：run 已停止接纳新的模型 / 工具 / 子 run 步骤",
+        ],
+        CONTINUATION_ACTION_KEY: (
+            f"待客户端回归在场后以同一 run_id 恢复：恢复请求需带 expected_version 与 "
+            f"resume_basis={RESUME_BASIS_CLIENT_RETURN}"
+            "（重连本身不自动恢复——11 §6.2；对账未结清时先 reconcile——03 §5）"
         ),
     }
 

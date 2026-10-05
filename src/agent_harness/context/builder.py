@@ -282,8 +282,10 @@ class ContextBuilder:
         # (session_id, seq) → 该事件投影消息的 token 成本。事件落盘后其投影
         # 消息内容终身不变，成本是常量——此前每步对全部历史重新 model_dump_json
         # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
-        # memo 终身 = builder 终身 = runtime 终身 = 单会话，无需淘汰。
+        # memo 仅属于最近传入的 Session 对象；同 id 的独立对象切换时清空，避免
+        # 把一个对象的 seq 成本用于另一个对象，同时保持单个对象内的增量缓存。
         self._token_memo: dict[tuple[str, int], int] = {}
+        self._token_memo_session: Session | None = None
         # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
         # **只含投影 messages**（_estimate_tokens_cached 的返回值）；system_prompt
         # 与 provider 注入另行记账，见 _last_provider_tokens_by_name /
@@ -529,6 +531,10 @@ class ContextBuilder:
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
                 "bracket_id": bracket_id,
+                "summary_model_id": result.summary_model_id,
+                "duration_ms": result.duration_ms,
+                "request_token_estimate": result.request_token_estimate,
+                "request_budget_tokens": result.request_budget_tokens,
             })
             session.append(COMPACTION_END, {
                 "bracket_id": bracket_id,
@@ -659,8 +665,9 @@ class ContextBuilder:
     ) -> None:
         """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
 
-        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 进入压缩时
-        的估算）；`message` 已在 compactor 侧按"只装自家文案或类型名"脱敏。失败
+        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 压缩前估算 /
+        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
+        `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
         """
         for failure in failures:
@@ -671,6 +678,10 @@ class ContextBuilder:
                 "auto_limit": failure.auto_limit,
                 "hard_limit": failure.hard_limit,
                 "token_estimate": failure.token_estimate,
+                "summary_model_id": failure.summary_model_id,
+                "duration_ms": failure.duration_ms,
+                "request_token_estimate": failure.request_token_estimate,
+                "request_budget_tokens": failure.request_budget_tokens,
             })
 
     def _reproject(self, session: Session) -> list[AnyMessage]:
@@ -815,6 +826,9 @@ class ContextBuilder:
         此时放弃增量假设整体重估（正确性优先；resume 已修复 dangling，
         运行内该路径罕见）。
         """
+        if self._token_memo_session is not session:
+            self._token_memo.clear()
+            self._token_memo_session = session
         projecting = [e for e in session.events
                       if e.type in _PROJECTING_EVENT_TYPES]
         if len(projecting) != len(messages):

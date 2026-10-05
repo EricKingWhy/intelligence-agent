@@ -472,7 +472,7 @@ D8 这一侧只多两条操作事实：还原的落点是 `session/model_switch.
    AC（子面记录 + digest 同源 + policy_change 无声明 409 / 声明采纳 / 父面漂移不放行）由
    `tests/agent/test_stuck_runtime.py::TestDelegatedChildPolicyFace` 与
    `tests/multiagent/test_child_session_resume.py` 两条端到端钉住（后者经 #372 交付入口）。
-   环境那一半（child 端口的 workspace / 环境格）已由 follow-up #608 收口（见 D8 段勘误二）。
+   环境那一半（child 端口的 workspace / 环境格）仍开放，属新的 follow-up（后续状态见 D8 段勘误二）。
 16. **委派子会话今天无法恢复，所以子 run 的 stuck 暂停没有任何可用依据**（T9 三轮审查定论，
    Correctness P2）：`resume_and_launch` → `build_runtime` 无条件调
    `workspace_registry.create(session_id, …)`（`assembly.py`），而子会话的映射是父级
