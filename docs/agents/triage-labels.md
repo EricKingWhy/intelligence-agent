@@ -13,3 +13,10 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
 Edit the right-hand column to match whatever vocabulary you actually use.
+
+## Lifecycle label (not a triage role)
+
+`in-progress` — an agent has claimed the issue and is actively working on it. Add on claim
+(`gh issue edit <n> --add-label in-progress`), remove on close or when the claim is released.
+This is how parallel agents stay distinguishable on the open-issue list; do not create
+synonyms (`running`, `doing`, ...). Full convention: `issue-tracker.md`.
