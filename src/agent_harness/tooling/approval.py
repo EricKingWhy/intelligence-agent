@@ -45,6 +45,8 @@ class ApprovalRequest:
     policy: PermissionPolicy
     reason: str
     tool_call_id: str | None = None
+    # #526 A2：可缓存身份的键（Runtime 从已校验参数派生；None = 不可缓存，回落逐调用）。
+    approval_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,3 +113,165 @@ def approval_reason(
     if policy == PermissionPolicy.READ_ONLY:
         return f"工具授权级别为 {tool_permission.value}，但当前策略为只读（{policy.value}），操作被拒绝。"
     return f"工具授权级别为 {tool_permission.value}，当前策略为 {policy.value}，此操作需要审批。"
+# ============================================================================
+# #526 A2: approval decision cache (session-scoped approval grant)
+#
+# Design: docs/agents/526-design-proposal.md section 4 (session-scoped, exact
+# operation identity, TTL, policy_at_approval binding, permission upper bound,
+# never bypass needs_approval).
+# The cache only replaces "the human's repeated decision"; it does not change
+# the needs_approval verdict nor relax Runtime boundaries.
+# ============================================================================
+
+# Default TTL (seconds) for a session-scoped approval grant = 30 minutes.
+# This is a DEFAULT and configurable (design doc section 4.5); callers may
+# override per session/source.
+# TTL semantics port the design of ZCode's "Allow for session" (session-scoped
+# grant) and OpenAI Codex's acceptForSession: one approval may be reused within
+# the session, but with a time bound, policy binding and permission upper bound.
+APPROVAL_GRANT_TTL_SECONDS = 1800
+
+# Permission rank (follows ToolPermission definition order/values in contract.py):
+# READ_ONLY < WORKSPACE_WRITE < DANGER. Used by grant_valid for the permission
+# upper-bound check -- a lower-level grant must not cover a higher-level call.
+_PERMISSION_RANK: dict[ToolPermission, int] = {
+    ToolPermission.READ_ONLY: 0,
+    ToolPermission.WORKSPACE_WRITE: 1,
+    ToolPermission.DANGER: 2,
+}
+
+
+@dataclass(frozen=True)
+class ApprovalIdentity:
+    """An exact cacheable operation identity.
+
+    canonical is the denoised canonical string of the operation
+    (bash = full command string stripped; write = workspace-relative POSIX
+    path); args_hash is the stable hash of all validated params. Together they
+    pin the cache granularity to "same tool + same exact operation" with no
+    prefix/wildcard relaxation.
+    """
+
+    tool_name: str
+    kind: str  # 'COMMAND' / 'PATH' / 'MCP' / 'RESOURCE'
+    canonical: str
+    args_hash: str
+    permission: ToolPermission
+    policy_at_approval: PermissionPolicy
+    contract_version: str = "v1"
+
+    def key(self) -> str:
+        """Stable cache key: same identity always yields the same key."""
+        return (
+            f"{self.tool_name}:{self.kind}:{self.canonical}:{self.args_hash}:"
+            f"{self.permission.value}:{self.policy_at_approval.value}:"
+            f"{self.contract_version}"
+        )
+
+
+@dataclass(frozen=True)
+class ApprovalGrant:
+    """One session-scoped grant: identity + absolute expiry (epoch seconds)."""
+
+    identity: ApprovalIdentity
+    expires_at: float
+    granted_at: float = 0.0
+
+
+def canonical_args_hash(validated: dict) -> str:
+    """sha256 hex of sorted-key JSON serialization of validated params.
+
+    Fixed sort_keys / separators / ensure_ascii so the same logical params
+    always hash identically regardless of dict insertion order (a precondition
+    for cache hits).
+    """
+    import hashlib
+    import json
+
+    payload = json.dumps(
+        dict(validated), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def grant_valid(
+    grant: ApprovalGrant,
+    *,
+    permission: ToolPermission,
+    policy: PermissionPolicy,
+    now: float,
+) -> bool:
+    """Whether a session grant is still valid for the current call.
+
+    Three gates (any failure -> False, caller falls back to per-call approval):
+    1. TTL: now > grant.expires_at;
+    2. policy binding: current policy != policy_at_approval (ADR-0041 D6);
+    3. permission upper bound: call's permission rank > grant's permission rank.
+    """
+    identity = grant.identity
+    if now > grant.expires_at:
+        return False
+    if policy != identity.policy_at_approval:
+        return False
+    return _PERMISSION_RANK[permission] <= _PERMISSION_RANK[identity.permission]
+
+
+def approval_identity(
+    tool,
+    validated_args,
+    sandbox,
+    *,
+    policy: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
+) -> ApprovalIdentity | None:
+    """Derive a cacheable identity for one validated call; None if not cacheable.
+
+    Tools that do not declare a cacheable identity (incl. MCP / RESOURCE) always
+    return None -> fall back to per-call approval.
+    The policy default (WORKSPACE_WRITE) only lets callers that merely want the
+    path-traversal check omit it; the normal approval path passes the current
+    Session policy explicitly from Runtime.
+
+    [Key MUST be generated by Runtime] canonical / args_hash may only be derived
+    by Runtime from validated params: the model must never submit, override or
+    reuse approval keys. This function is the single key-derivation entry point;
+    model-controlled input never serves as a key directly, preventing forged
+    cache hits.
+    """
+    name = tool.name  # string comparison to avoid circular imports of Tool classes
+
+    # The runtime main chain passes validated Pydantic instances
+    # (contract.py: model_validate -> execute); tolerate plain dicts too.
+    if isinstance(validated_args, dict):
+        args = validated_args
+    elif hasattr(validated_args, "model_dump"):
+        args = validated_args.model_dump()
+    else:
+        args = dict(validated_args)
+
+    if name == "bash":
+        # canonical = full exact command string (only strip() edge whitespace).
+        canonical = str(args["command"]).strip()
+        kind = "COMMAND"
+    elif name == "write":
+        from pathlib import Path
+
+        path = str(args["path"])
+        root = Path(sandbox.workspace_root).resolve()
+        target = (root / path).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("path escapes workspace")
+        # canonical = workspace-relative posix path (traversal rejected above).
+        canonical = target.relative_to(root).as_posix()
+        kind = "PATH"
+    else:
+        return None
+
+    return ApprovalIdentity(
+        tool_name=name,
+        kind=kind,
+        canonical=canonical,
+        args_hash=canonical_args_hash(args),
+        permission=tool.permission,
+        policy_at_approval=policy,
+        contract_version="v1",
+    )

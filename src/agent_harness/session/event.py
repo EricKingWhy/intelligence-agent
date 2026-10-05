@@ -153,6 +153,13 @@ REASONING_INTERRUPTED = "reasoning/interrupted"
 # 前端据 approval_id 把 requested 与 resolved 配对，JSONL 可回放完整决策历史。 ──
 TOOL_APPROVAL_REQUESTED = "tool/approval-requested"
 PERMISSION_RESOLVED = "permission/resolved"
+# ── #526 A2：会话级审批授权的写/撤回事件（append-only 审计；内存投影见
+# session/approval.py derive_approval_grants）。对标 ZCode "Allow for session"
+# 与 Codex acceptForSession 的会话授权语义。
+PERMISSION_GRANTED = "permission/approval-granted"
+PERMISSION_REVOKED = "permission/approval-revoked"
+# ── #526 B1：工作流档切换（normal/plan），Runtime 只读门禁的 durable 真相。
+WORKFLOW_MODE_CHANGED = "workflow/mode-changed"
 TOOL_OUTPUT_DELTA = "tool/output_delta"
 TEXT_DELTA = "text/delta"
 
@@ -264,6 +271,10 @@ EVENT_TYPES: frozenset[str] = frozenset(
         REASONING_INTERRUPTED,
         TOOL_APPROVAL_REQUESTED,
         PERMISSION_RESOLVED,
+        # #526 A2/B1：会话授权写/撤回、工作流档切换
+        PERMISSION_GRANTED,
+        PERMISSION_REVOKED,
+        WORKFLOW_MODE_CHANGED,
         # Phase Multiturn T2 (#132)：续聊队列 + steer 引导（PRD §6）
         MESSAGE_QUEUED,
         QUEUE_CANCELLED,

@@ -20,25 +20,31 @@ F18-A（#282）追加：
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from agent_harness.session.event import (
     PERMISSION_CHANGED,
+    PERMISSION_GRANTED,
     PERMISSION_RESOLVED,
+    PERMISSION_REVOKED,
     SESSION_STARTED,
     TOOL_APPROVAL_REQUESTED,
     SessionEvent,
 )
 from agent_harness.tooling.approval import (
+    APPROVAL_GRANT_TTL_SECONDS,
     ApprovalCallback,
+    ApprovalGrant,
+    ApprovalIdentity,
     ApprovalRequest,
     ApprovalResponse,
     PermissionDecision,
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
-from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
 
 if TYPE_CHECKING:
     from agent_harness.session.session import Session
@@ -82,6 +88,10 @@ class InteractiveCallbackHolder:
             PermissionDecision.DENY.value,
             PermissionDecision.APPROVE_ONCE.value,
         ]
+        if req.approval_key is not None:
+            # #526 A2：仅可缓存身份才提供「会话内批准」；Runtime 据此写
+            # permission/approval-granted，同身份后续调用命中缓存。
+            allowed_decisions.append(PermissionDecision.APPROVE_SESSION.value)
         self._session.append(
             TOOL_APPROVAL_REQUESTED,
             {
@@ -427,16 +437,139 @@ def append_permission_change(session: Session, change: PermissionChange) -> Perm
     return change
 
 
+
+
+def append_approval_grant(session: Session, grant: ApprovalGrant) -> ApprovalGrant:
+    """追加 ``permission/approval-granted``——会话级审批授予的唯一写入口（#526 A2）。
+
+    append-only 审计：把一次人工「会话内批准」的**可复用身份**落成 durable 事件，
+    不改变运行时判定；内存投影见 :func:`derive_approval_grants`。
+
+    不变量：data 只承载身份字段与时间戳，不含参数原文——缓存键由 Runtime 从已校验
+    参数派生（``tooling.approval.approval_identity``），模型输入永不直接充当 key；
+    写入 ``grant.identity.key()``，同一操作恒得同键，供撤回 last-wins。
+    """
+    identity = grant.identity
+    session.append(
+        PERMISSION_GRANTED,
+        {
+            "approval_key": identity.key(),
+            "tool_name": identity.tool_name,
+            "kind": identity.kind,
+            "canonical": identity.canonical,
+            "args_hash": identity.args_hash,
+            "permission": identity.permission.value,
+            "policy_at_approval": identity.policy_at_approval.value,
+            "granted_at": grant.granted_at,
+            "expires_at": grant.expires_at,
+        },
+    )
+    return grant
+
+
+def append_approval_revoke(session: Session, approval_key: str) -> None:
+    """追加 ``permission/approval-revoked``——会话级审批撤回的唯一写入口（#526 A2）。
+
+    last-wins：同键后续再次授予会覆盖本撤回（投影按事件正序重放）。append-only，
+    不产生 resume 副作用（不变量 #7）。
+    """
+    session.append(
+        PERMISSION_REVOKED,
+        {"approval_key": approval_key, "revoked_at": time.time()},
+    )
+
+
+def derive_approval_grants(events: list[SessionEvent]) -> dict[str, ApprovalGrant]:
+    """正序重放事件流，投影出**内存态**的会话级审批授予字典（#526 A2）。
+
+    ``permission/approval-granted`` → 以 ``approval_key`` 为键重建
+    :class:`ApprovalGrant`；``permission/approval-revoked`` → 删除该键（last-wins，
+    后写覆盖先写，与事件顺序一致）。
+
+    不变量 / 纪律：durable 事件才是真相，本 dict 只是投影，销毁无副作用。data 缺字段
+    或不可解析时跳过该事件并 ``logger.warning``——坏数据不猜（与
+    :func:`effective_permission_mode` 同一条尺子）。TTL / policy / permission 上下界
+    不在此预筛，交由 ``grant_valid`` 在使用时判定。
+    """
+    grants: dict[str, ApprovalGrant] = {}
+    for event in events:
+        if event.type == PERMISSION_REVOKED:
+            approval_key = event.data.get("approval_key")
+            if isinstance(approval_key, str) and approval_key:
+                grants.pop(approval_key, None)
+            continue
+        if event.type != PERMISSION_GRANTED:
+            continue
+        data = event.data
+        approval_key = data.get("approval_key")
+        try:
+            if not isinstance(approval_key, str) or not approval_key:
+                raise ValueError("approval_key 缺失或非字符串")
+            tool_name = data["tool_name"]
+            kind = data["kind"]
+            canonical = data["canonical"]
+            args_hash = data["args_hash"]
+            permission = data["permission"]
+            policy_at_approval = data["policy_at_approval"]
+            if not all(
+                isinstance(v, str) and v
+                for v in (tool_name, kind, canonical, args_hash,
+                          permission, policy_at_approval)
+            ):
+                raise ValueError("身份字段缺失或非字符串")
+            grant = ApprovalGrant(
+                identity=ApprovalIdentity(
+                    tool_name=tool_name,
+                    kind=kind,
+                    canonical=canonical,
+                    args_hash=args_hash,
+                    permission=ToolPermission(permission),
+                    policy_at_approval=PermissionPolicy(policy_at_approval),
+                ),
+                expires_at=float(data["expires_at"]),
+                granted_at=float(data.get("granted_at") or 0.0),
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "permission/approval-granted 事件 data 不可解析，跳过：approval_key=%r",
+                approval_key,
+            )
+            continue
+        grants[approval_key] = grant
+    return grants
+
+
+def revoked_keys(events: list[SessionEvent]) -> set[str]:
+    """返回事件流里所有被撤回的 ``approval_key`` 集合（#526 A2）。
+
+    只读投影，供调用方对账 / 排查；不含顺序与时间语义（last-wins 归
+    :func:`derive_approval_grants`）。缺 ``approval_key`` 的撤回事件跳过。
+    """
+    keys: set[str] = set()
+    for event in events:
+        if event.type != PERMISSION_REVOKED:
+            continue
+        approval_key = event.data.get("approval_key")
+        if isinstance(approval_key, str) and approval_key:
+            keys.add(approval_key)
+    return keys
+
+
 __all__ = [
+    "APPROVAL_GRANT_TTL_SECONDS",
     "SESSION_AUTO_APPROVE_KEY",
     "SESSION_PERMISSION_MODE_KEY",
     "InteractiveCallbackHolder",
     "PermissionChange",
+    "append_approval_grant",
+    "append_approval_revoke",
     "append_permission_change",
     "build_approval_callback",
     "declared_auto_approve",
     "declared_permission_mode",
+    "derive_approval_grants",
     "effective_auto_approve",
     "effective_permission_mode",
+    "revoked_keys",
     "unresolved_approval_ids",
 ]

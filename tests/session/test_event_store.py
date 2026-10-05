@@ -92,6 +92,10 @@ class TestSessionEventDTO:
             "reasoning/interrupted",
             "tool/approval-requested",
             "permission/resolved",
+            # #526 A2/B1：会话级审批授权写/撤回、工作流档切换
+            "permission/approval-granted",
+            "permission/approval-revoked",
+            "workflow/mode-changed",
             # Phase Multiturn T2 (#132)：续聊队列 + steer 引导（PRD §6）
             "message/queued",
             "queue/cancelled",
