@@ -22,6 +22,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from agent_harness.identity import IdentityContext
+from agent_harness.memory.fake_record_store import FakeMemoryRecordStore
+from agent_harness.memory.types import MemoryEntry, MemoryScope
 from agent_harness.session.context import current_session_var, run_context_var
 from agent_harness.session.event import SKILL_REGISTERED, SKILL_REMOVED, SKILL_UPDATED
 from agent_harness.session.session import Session
@@ -210,8 +213,16 @@ class TestEndToEnd:
             await _call(executor, "promote_skill", {"action": "lint", "name": "pdf-export"})
         finally:
             current_session_var.reset(token)
-        # memory consolidation 产出先行落库（§7：memory 先行）
-        memory_output = {"mem-1": "用户偏好：中文回复；本次 run 提炼：pandoc 导出流程"}
+        # memory consolidation 产出先行落库（§7：memory 先行）——用真实记录
+        # 存储替身落盘一条 consolidation 产出，失败后从持久层读回验证"保留"。
+        memory_store = FakeMemoryRecordStore()
+        await memory_store.initialize()
+        identity = IdentityContext("acme", "alice", ["user"])
+        await memory_store.store(
+            MemoryEntry(id="mem-1", content="用户偏好：中文回复；本次 run 提炼：pandoc 导出流程",
+                        created_at="2026-10-06T00:00:00+00:00", scope=MemoryScope.USER),
+            identity,
+        )
         project_dir = tmp_path / "project"
         target = project_dir / "pdf-export" / "SKILL.md"
         real_write = Path.write_text
@@ -228,7 +239,8 @@ class TestEndToEnd:
         finally:
             current_session_var.reset(token)
         assert result.ok is False
-        assert memory_output == {"mem-1": "用户偏好：中文回复；本次 run 提炼：pandoc 导出流程"}
+        assert (await memory_store.get("mem-1", identity)).content == \
+            "用户偏好：中文回复；本次 run 提炼：pandoc 导出流程"  # memory 产出未受 skill 写失败影响
         assert [e.name for e in capability.catalog()] == []
         assert promoter.status("pdf-export") == STATUS_DRAFT  # 回 draft，staging 保留
         assert (project_dir / ".staging" / "pdf-export" / "SKILL.md").is_file()
