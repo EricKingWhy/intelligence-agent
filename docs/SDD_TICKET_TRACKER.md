@@ -7398,3 +7398,14 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   - P4-2（Standards）：escape 与 unescape 两个检查点仅由同一条用例覆盖（M2=M3 共用失败面）。
 - **台账行**：`docs/review_ledger.d/t649-heading-parse-8d43e786-09a366c1.tsv`（749 字符 ≤ 800，无 lint 命中）；覆盖闸门 `scripts/check_review_coverage.py` **exit 0**（区间 `089524a~1..HEAD` 每条 commit 均有归属）。
 - **集成状态**：分支已 push（PR #697；`e5085f49` 审查归属 + `3247c484` 空 trigger 笔）。**CI 阻塞（待用户裁决，§9.1.1 / §14.7）**：origin/main 已前移（PR #696/#686 → `4a2c52f8`），与本分支在 `docs/SDD_TICKET_TRACKER.md` + `docs/phase_status/2026-10.md` **双侧追加同段冲突**（`git merge-tree --write-tree HEAD origin/main` 实测恰这 2 文件 CONFLICT，双侧均为末尾追加节；`compactor.py` ort 自动合并无冲突）。**GitHub 官方文档：PR 有 merge conflict 时 `pull_request` 工作流不运行**——两次 push（`e5085f49` / `3247c484`）实测零 gate0 run、check-suites 仅 push 侧 security ⇒ gate0 无法重跑。本地证据：台账行落盘后 `check_review_coverage.py` **exit 0**；上轮 CI gate0 **5/6、唯一红 = coverage**（即本行所修）。最小出路 = 经批准先回后正（merge origin/main 进分支，两 docs 文件按 §14.7 并集解决、零删除）；合并树需按 §14.10 重新验证（main 侧 #650 同动 `compactor.py`，auto-merge ≠ 语义无交互）。merge / 关单待用户单独批准（§14.4）。
+
+## #707 compaction 程序化节 add_once O(n²)→O(n)（2026-10-06；分支 `fix/i707-on2-identifier-dedup`，基点 `cc4d92c6` = origin/main；push/PR/merge 逐项待批）
+
+- **量化先行（票面顺序①，先于改码）**：仓外基准（零仓库写入）在基点树实测 `add_once` 病灶标度：distinct 标识 1000/5000/10000/30000 → 单次 `_programmatic_summary_sections` 墙钟中位 **0.011 / 0.246 / 0.936 / 8.837s**，各档增速 ≈ 规模平方比（5×→22×、2×→3.8×、3×→9.4×），O(n²) 标度成立 ⇒ 收益可感知，wontfix 逃生门不触发。
+- **修复（票面④，最小实现）**：`add_once` 由 list 线性扫描改为配对 seen 集合 O(1) 成员检查（`identifier_seen` / `file_path_seen` 与两个 list 平行），12 个调用点机械更新；首次出现顺序语义不变；`_capped_entries` / 裁剪 / 预算逻辑零触碰，src 只动 `compactor.py`。
+- **等价证据（票面③）**：修后 4 档 sha256 指纹与修前**逐字节一致**（`af5635d4…` / `014818b3…` / `7fd510e1…` / `dfc65184…`）；30000 档 8.837s→**0.060s**（147×），1000 档 5.5×。
+- **等价钉（新增 2 用例，`tests/context/test_compactor_identifiers.py`）**：①保序钉 = 首次出现顺序 + 重复值不移动不重复入列；②窗口边界钉 = `[TSK-0000..0059, TSK-0005 重复]` 去重流 60 条取末 50，TSK-0005 按首现位置被淘汰、不得被末尾重复值经 `_capped_entries` 保末去重"救回"窗口。
+- **变异鉴别（§8.1，仓外副本）**：git archive @`0fe67421` 树外副本摘 `seen.add`（CRLF 探测 962 对、anchor 命中数 = 1、PYTHONPATH 指副本 src）⇒ 窗口边界钉**唯一转红**（1 failed / 12 passed）；未变异树 tests/context 302 passed。
+- **测试**：tests/context 全量 **302 passed**（24.45s）；`compactor.py` + 测试文件 ruff 0。
+- **台账**：`docs/review_ledger.d/t707-on2-identifier-dedup-cc4d92c6-0fe67421.tsv`（159 字符）；覆盖闸门 **exit 0**（`089524a~1..HEAD` 每条 commit 均有归属）；金丝雀 4 passed。
+- **集成状态**：Gate-0、双轴审查、先回后正、冻结树全量门禁待跑（读数后补记）；push / PR / merge 逐项待批（§14.4）。
