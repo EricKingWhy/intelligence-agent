@@ -30,8 +30,8 @@ from agent_harness.tooling.result import ErrorCode
 DEFAULT_BASH_TIMEOUT_SECONDS = 60.0
 
 # 超时 payload 进 metadata 的显示预算（每通道）。**必须自带上限**：
-# `ArtifactOverflowHandler` 只扫 `data` 的 output/content/stdout/stderr/before/after
-# 与 `message`，**不扫 metadata**——不受它管的字段一旦放大幅文本，就等于绕过 Context
+# `ArtifactOverflowHandler` 外置 `data` 的全部顶层字段与 `message`（#644 起
+# 按序列化大小判定），**不扫 metadata**——不受它管的字段一旦放大幅文本，就等于绕过 Context
 # 预算（不变量 #15）：捕获上限默认 2 MB，一次高噪声命令超时即可原样灌进模型上下文。
 # 截断只减少"模型这一眼看到多少"；完整输出仍经 tool/output_delta 落进会话（ADR-0016）。
 _TIMEOUT_PAYLOAD_MAX_CHARS = 2000

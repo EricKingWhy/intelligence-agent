@@ -282,8 +282,10 @@ class ContextBuilder:
         # (session_id, seq) → 该事件投影消息的 token 成本。事件落盘后其投影
         # 消息内容终身不变，成本是常量——此前每步对全部历史重新 model_dump_json
         # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
-        # memo 终身 = builder 终身 = runtime 终身 = 单会话，无需淘汰。
+        # memo 仅属于最近传入的 Session 对象；同 id 的独立对象切换时清空，避免
+        # 把一个对象的 seq 成本用于另一个对象，同时保持单个对象内的增量缓存。
         self._token_memo: dict[tuple[str, int], int] = {}
+        self._token_memo_session: Session | None = None
         # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
         # **只含投影 messages**（_estimate_tokens_cached 的返回值）；system_prompt
         # 与 provider 注入另行记账，见 _last_provider_tokens_by_name /
@@ -824,6 +826,9 @@ class ContextBuilder:
         此时放弃增量假设整体重估（正确性优先；resume 已修复 dangling，
         运行内该路径罕见）。
         """
+        if self._token_memo_session is not session:
+            self._token_memo.clear()
+            self._token_memo_session = session
         projecting = [e for e in session.events
                       if e.type in _PROJECTING_EVENT_TYPES]
         if len(projecting) != len(messages):

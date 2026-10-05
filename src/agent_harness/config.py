@@ -136,6 +136,13 @@ class Settings(BaseSettings):
     agent_persona: str = ""
     # Skills 全局目录（spec 09 §2）；项目目录是 <workspace>/skills/。
     skill_global_dir: str = ""
+    # Repository instruction context is read as untrusted, bounded model input.
+    project_instructions_file_max_bytes: int = Field(
+        default=32 * 1024, ge=1, le=1024 * 1024,
+    )
+    project_instructions_total_max_bytes: int = Field(
+        default=128 * 1024, ge=1, le=4 * 1024 * 1024,
+    )
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"

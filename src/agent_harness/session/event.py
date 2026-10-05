@@ -130,6 +130,11 @@ TOOL_FAILURE_GUARD = "tool/failure-guard"
 # data：level / pattern / count / threshold / replan_count（+ 可选的 tool_name / fingerprint）。
 # **指纹只存截断摘要**（ADR-0048 D3）：凭证值不进指纹、不进持久化。
 GUARD_STUCK = "guard/stuck"
+# `#524`：完成门被证据策略拒绝、纠偏反馈已注入（可选 domain policy 的纠偏臂；
+# 机制权威 = ADR-0047 增补节 + `docs/tickets/524-evidence-completion-policy-design.md`）。
+# data：policy / reason（稳定串，rule_id 载于 reason 内；无主张原文、无参数值
+# ——ADR-0047 D3 纪律：诊断面不是泄漏通道）。
+COMPLETION_EVIDENCE_BLOCKED = "completion/evidence-blocked"
 MODEL_FALLBACK = "model/fallback"
 # ── + Phase 13 Multi-Agent（delegation 白盒事件，ADR-0015 决策 8） ──
 AGENT_DELEGATION_STARTED = "agent/delegation-started"
@@ -248,6 +253,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         TOOL_FAILURE_GUARD,
         # #317 T9：多模式 stuck 检测的 replan / paused 结构化 guard 事件
         GUARD_STUCK,
+        # #524：完成门证据策略拒绝 + 纠偏反馈注入（可选项，默认装配不产生）
+        COMPLETION_EVIDENCE_BLOCKED,
         MODEL_FALLBACK,
         AGENT_DELEGATION_STARTED,
         AGENT_DELEGATION_FINISHED,

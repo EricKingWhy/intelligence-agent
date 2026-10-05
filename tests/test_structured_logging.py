@@ -131,12 +131,15 @@ async def test_minimal_agent_success_chain(monkeypatch, tmp_path: Path):
     # #200 缓存明细：FakeModel 的末帧**确实**转发 input_token_details，形状是
     # langchain 归一化过的 ``cache_read``（真链路同形，见
     # `docs/FRONTEND_ISSUES_LOG.md` 第十五轮 M-01）⇒ 第 4 键 cached_tokens 必须出现。
+    # #520 一期补成对字段：uncached = input - cached（两值已知才派生）——
+    # 这是本票要求的行为变更（第 5 键），不是改测试迁就代码。
     # 缺失即省略、绝不写 0 的分支由 tests/web/test_context_usage.py 的 T1 用例锁住。
     assert llm_entry["token_usage(Token用量)"] == {
         "prompt_tokens": 4,
         "completion_tokens": 1,
         "total_tokens": 5,
         "cached_tokens": 2,
+        "uncached_tokens": 2,
     }
     assert llm_entry["outcome(结果)"] == "success"
     assert "duration_ms(耗时毫秒)" in llm_entry

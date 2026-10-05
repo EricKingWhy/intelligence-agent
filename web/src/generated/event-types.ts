@@ -42,6 +42,7 @@ export const EventType = {
   MEMORY_RECALLED: 'memory/recalled',
   TOOL_FAILURE_GUARD: 'tool/failure-guard',
   GUARD_STUCK: 'guard/stuck',
+  COMPLETION_EVIDENCE_BLOCKED: 'completion/evidence-blocked',
   MODEL_FALLBACK: 'model/fallback',
   AGENT_DELEGATION_STARTED: 'agent/delegation-started',
   AGENT_DELEGATION_FINISHED: 'agent/delegation-finished',

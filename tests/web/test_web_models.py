@@ -68,6 +68,8 @@ class TestModelsEndpoint:
         assert deepseek.get("supports_tools") is True
         assert deepseek.get("context_window") == 64000
         assert deepseek.get("speed_tier") == "fast"
+        # #520：官方文档证实的自动前缀缓存（无标记参数）随 preset 下发
+        assert deepseek.get("prompt_cache") == "automatic"
         # 未在 preset 声明的能力位必须不出现在响应里
         assert "supports_vision" not in deepseek, \
             "supports_vision 未在 deepseek preset 声明，不该被猜出来"
@@ -77,6 +79,8 @@ class TestModelsEndpoint:
         assert mimo["provider"] == "mimo"
         assert mimo.get("supports_tools") is True
         assert mimo["metadata_source"] == "provider_preset"
+        # mimo 未做缓存机制核实 ⇒ 不声明（不猜测）
+        assert "prompt_cache" not in mimo
 
     def test_models_catalog_entry_without_capabilities_falls_back_to_preset(self, catalog_client):
         """catalog 条目不声明能力位 → 回落 preset，metadata_source=provider_preset。"""

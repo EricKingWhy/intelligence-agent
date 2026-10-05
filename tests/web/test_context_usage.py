@@ -178,9 +178,11 @@ def test_t1_cache_capture_present():
             }
 
     usage = _usage_from_response(_AI())
+    # #520 一期行为变更：uncached 按含入口径派生（= prompt - cached），
+    # 与 cached_tokens 成对出现；缺失仍省略（下方 absent 用例不变）。
     assert usage == {
         "prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
-        "cached_tokens": 80,
+        "cached_tokens": 80, "uncached_tokens": 20,
     }
 
 
