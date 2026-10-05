@@ -315,6 +315,8 @@ class ProjectInstructionStore:
         omitted = list(existing.omitted_source_paths) if existing else []
         included_bytes = existing.total_included_bytes if existing else 0
         prompt_bytes = existing.total_prompt_bytes if existing else 0
+        separator_bytes = len(b"\n\n")
+        preamble_bytes = len(_PROJECT_INSTRUCTIONS_PREAMBLE.encode("utf-8"))
         searched_directories = (
             list(existing.searched_directories) if existing else []
         )
@@ -322,11 +324,9 @@ class ProjectInstructionStore:
             searched_directories.append(directory)
             for name in ("AGENTS.md", "CLAUDE.md"):
                 path = directory / name
-                prefix_bytes = len(b"\n\n")
+                prefix_bytes = separator_bytes
                 if not sources:
-                    prefix_bytes += len(b"\n\n") + len(
-                        _PROJECT_INSTRUCTIONS_PREAMBLE.encode("utf-8")
-                    )
+                    prefix_bytes += separator_bytes + preamble_bytes
                 try:
                     source, error = self._read_source(
                         path,
@@ -341,11 +341,18 @@ class ProjectInstructionStore:
                 if error is not None:
                     unreadable.append((path, error))
                 elif source is not None:
+                    section_bytes = len(_source_section(source).encode("utf-8"))
+                    if sources:
+                        prompt_bytes += separator_bytes + section_bytes
+                    else:
+                        prompt_bytes = (
+                            separator_bytes
+                            + preamble_bytes
+                            + separator_bytes
+                            + section_bytes
+                        )
                     sources.append(source)
                     included_bytes += source.included_bytes
-                    prompt = _render_prompt(sources)
-                    assert prompt is not None
-                    prompt_bytes = len(("\n\n" + prompt).encode("utf-8"))
                 else:
                     omitted.append(path)
         return ProjectInstructionsSnapshot(

@@ -1,11 +1,15 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from agent_harness.config import Settings
 from agent_harness.context import project_instructions as project_instructions_module
-from agent_harness.context.project_instructions import ProjectInstructionStore
+from agent_harness.context.project_instructions import (
+    ProjectInstructionSource,
+    ProjectInstructionStore,
+)
 
 
 def test_load_for_session_collects_repository_to_cwd_with_sources(tmp_path: Path) -> None:
@@ -164,6 +168,41 @@ def test_instruction_prompt_metadata_obeys_the_aggregate_byte_limit(
     assert snapshot.as_status()["truncated_sources"]
 
 
+def test_instruction_prompt_byte_count_does_not_rerender_existing_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    cwd = repository / "src" / "feature"
+    cwd.mkdir(parents=True)
+    (repository / "AGENTS.md").write_text("root rules", encoding="utf-8")
+    (cwd / "AGENTS.md").write_text("feature rules", encoding="utf-8")
+    (cwd / "CLAUDE.md").write_text("extra rules", encoding="utf-8")
+
+    rendered_source_counts: list[int] = []
+    render_prompt = project_instructions_module._render_prompt
+
+    def track_render_prompt(
+        sources: tuple[ProjectInstructionSource, ...]
+        | list[ProjectInstructionSource],
+    ) -> str | None:
+        rendered_source_counts.append(len(sources))
+        return render_prompt(sources)
+
+    monkeypatch.setattr(
+        project_instructions_module, "_render_prompt", track_render_prompt,
+    )
+    snapshot = ProjectInstructionStore().load_for_session(
+        "session-prompt-byte-count", cwd,
+    )
+
+    assert rendered_source_counts == []
+    prompt = snapshot.prompt_text or ""
+    assert rendered_source_counts == [3]
+    assert snapshot.total_prompt_bytes == len(("\n\n" + prompt).encode("utf-8"))
+
+
 def test_instruction_open_rejects_a_path_replaced_during_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -175,15 +214,6 @@ def test_instruction_open_rejects_a_path_replaced_during_open(
     outside_file = tmp_path / "outside.md"
     outside_file.write_text("outside secret", encoding="utf-8")
 
-    real_path_open = Path.open
-
-    def racing_path_open(
-        path: Path, *args: object, **kwargs: object,
-    ):
-        if path == instruction_file:
-            path = outside_file
-        return real_path_open(path, *args, **kwargs)
-
     real_os_open = os.open
 
     def racing_os_open(
@@ -194,16 +224,22 @@ def test_instruction_open_rejects_a_path_replaced_during_open(
             path = outside_file
         return real_os_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", racing_path_open)
-    monkeypatch.setattr(
-        project_instructions_module, "os", os, raising=False,
+    isolated_os = SimpleNamespace(
+        O_RDONLY=os.O_RDONLY,
+        O_BINARY=getattr(os, "O_BINARY", 0),
+        O_NOFOLLOW=getattr(os, "O_NOFOLLOW", 0),
+        open=racing_os_open,
+        fdopen=os.fdopen,
+        fstat=os.fstat,
+        close=os.close,
     )
-    monkeypatch.setattr(project_instructions_module.os, "open", racing_os_open)
+    monkeypatch.setattr(project_instructions_module, "os", isolated_os)
 
     snapshot = ProjectInstructionStore().load_for_session(
         "session-open-race", repository,
     )
 
+    assert os.open is real_os_open
     assert "outside secret" not in (snapshot.prompt_text or "")
     assert snapshot.as_status()["unreadable_sources"]
 
