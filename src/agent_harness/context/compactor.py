@@ -343,10 +343,13 @@ class ContextCompactor:
         # （#710：同一份 early_ranges 同时供承载位指针与 bracket 区间复用）。
         source_seq_start: int | None = None
         source_seq_end: int | None = None
-        if events is not None:
-            if early_ranges and all(source_range is not None for source_range in early_ranges):
-                source_seq_start = min(source_range[0] for source_range in early_ranges)
-                source_seq_end = max(source_range[1] for source_range in early_ranges)
+        if (
+            events is not None
+            and early_ranges
+            and all(source_range is not None for source_range in early_ranges)
+        ):
+            source_seq_start = min(source_range[0] for source_range in early_ranges)
+            source_seq_end = max(source_range[1] for source_range in early_ranges)
         if events is not None and (source_seq_start is None or source_seq_end is None):
             logger.warning(
                 "Context compaction rejected; source event range is unavailable",
