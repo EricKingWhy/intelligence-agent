@@ -33,8 +33,8 @@ from agent_harness.session.event import (
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.storage import Operation, SqliteOperationLedger
-from agent_harness.storage.operation import OperationState
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
+from agent_harness.storage.operation import OperationState
 from agent_harness.tooling import ToolResult
 from tests.scripted_model import ScriptedModel
 from tests.web.test_budget_local_fuse_api import _web
