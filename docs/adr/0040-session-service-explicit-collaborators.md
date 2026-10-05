@@ -119,6 +119,7 @@ git show 77b80eb:src/agent_harness/session/projects.py  | grep -c "self\._state\
 | 15 | `ensure_stores: Callable[[], Awaitable[None]]` | `ensure_stores()` 方法 | 8 个入口的惰性初始化（兼容不走 lifespan 的测试路径） | 9 |
 | 16 | `get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]]` | `get_wiring()` 方法 | 审批回调与模型变更需要真实装配集 | 3 |
 | 17 | `validate_session_declaration: SessionDeclarationValidator \| None`（领域端口，`#564` 2026-10-03 增补） | 构造注入 | resume 通道 eager CAS **前**的 session 声明注册名校验（坏名永不触碰账行）；实现 = 组合根用 `assembly.root_registry_tool_names`（零副作用名字集投影，与 `build_runtime` 同源）判定。`None`（直构 service 的调用方）= 跳过前置、由 build_runtime 的声明 422 兜底；web / CLI 组合根两条路径都注入 | 1 |
+| 18 | `registered_tool_names: RegisteredToolNamesProvider \| None`（领域端口，`#616` 2026-10-05 增补） | 构造注入 | 陈旧账行名清除通道 `purge_stale_session_tool_limits` 的根 registry 名字集判据：`session_budgets.tool_call_limits` 里 ∉ 名字集的键 = 陈旧名。实现 = 组合根用 `assembly.root_registry_tool_names`（与 #17 同源、同一条 P2-1 零副作用取舍）计算；`None`（直构 service 的调用方）⇒ 清除通道 **fail-closed** 抛 `RuntimeError`——绝不拿空集把全部 ceiling 误判为陈旧；web / CLI 组合根两条路径都注入 | 1 |
 
 `ProjectService`（`session/projects.py`，计数命令同形）：`store`=2、`workspace_index`=2、
 `ensure_stores`=2——`store.read_started_header` 读会话头部、索引做项目 CRUD、`ensure_stores()`
