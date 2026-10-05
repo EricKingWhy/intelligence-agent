@@ -72,6 +72,7 @@ from agent_harness.tooling.contract import (
     ToolSideEffect,
 )
 from agent_harness.tooling.deadline import tool_execution_deadline_var
+from agent_harness.tooling.decision_hooks import DecisionHookRunner, DecisionVerdict
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.quota import ToolQuotaWindow
@@ -263,6 +264,7 @@ class ToolExecutor:
         kill_hook: Callable[[str, str], None] | None = None,
         overflow_handler: OverflowHandler | None = None,
         resource_locks: ResourceLockRegistry | None = None,
+        decision_hook_runner: DecisionHookRunner | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
@@ -271,6 +273,7 @@ class ToolExecutor:
         self._kill_hook = kill_hook
         self._overflow_handler = overflow_handler
         self._resource_locks = resource_locks
+        self._decision_hook_runner = decision_hook_runner
 
     @property
     def tracks_operations(self) -> bool:
@@ -334,6 +337,50 @@ class ToolExecutor:
                 ),
                 budget_delta=_rejected_delta(name),
             )
+
+        # -- 阶段 1.5：before-tool 决策钩子（`#521` IMP-02）--
+        # 位置铁律（设计 §4.2）：lookup **之后**、validation **之前**。
+        # 为什么在这里：Hook 需要读工具的静态元数据（permission/side_effect），
+        # 而这些只有 lookup 成功后才存在；同时必须在 validation 之前，
+        # 这样 REWRITE 的新 args 才能重走 Validation（§4.3）。
+        # 零开销（AC-1）：未注册时只有一次属性判空，不 await、不分配、不落事件。
+        # after（工具已执行后）永远不得进 decision 管道——结果落盘即 append-only
+        # 事实，after 只读反馈走 notification 管道（#447 范围，本模块不管）。
+        decision_runner = self._decision_hook_runner
+        if decision_runner is not None and decision_runner.active:
+            resolution = await decision_runner.decide(
+                tool_call_id=tool_call_id,
+                tool_name=name,
+                raw_args=raw_args,
+                permission=tool.permission,
+                side_effect=tool.side_effect,
+            )
+            decision = resolution.decision
+            if decision.verdict is DecisionVerdict.DENY:
+                # 准入前拒绝（§4.2）：与 deadline/配额拒绝同族——零执行、
+                # 不占配额（budget_delta 记 0）、不重试。
+                # Hook 不能抬高权限（§4.3）：DENY 只拒绝，不改变任何授权状态。
+                return ToolExecution(
+                    tool_call_id=tool_call_id,
+                    result=ToolResult.failure(
+                        message=(
+                            f"before-tool 决策钩子拒绝了工具 '{name}' 的本次调用"
+                            + (f"：{decision.reason}" if decision.reason else "")
+                            + "（#521 decision hook，准入前拒绝，零执行）。"
+                        ),
+                        error_code=ErrorCode.PERMISSION_DENIED,
+                        retryable=False,
+                    ),
+                    budget_delta=_rejected_delta(name),
+                )
+            if decision.verdict is DecisionVerdict.REWRITE and decision.args is not None:
+                # 改写参数（§4.3）：拿 Hook 返回的 args 快照重走 Validation。
+                # 新 args 非法 → 走正常的 INVALID_ARGUMENT 路径（execute 次数=0）；
+                # permission/side_effect 仍是工具的静态元数据，Hook 无法抬高。
+                # 注：_normalize 已保证 REWRITE 必带 dict args，这里的
+                # `is not None` 是防御性分支——不用 assert，因为 -O 下 assert
+                # 会被剥离，不能用它维持不变量；万一为 None 则沿用原始参数。
+                raw_args = decision.args
 
         # -- 阶段 2：validation -- Validation-first 的核心位置。
         # 校验发生在 execute【之前】：参数非法 -> tool.execute 根本不被调用（execute 次数=0）。
@@ -1033,7 +1080,18 @@ class ToolExecutor:
 
         一条可解释规则：全 READ_ONLY 才并发；任一 MUTATING 整批串行。
         未注册的工具名按 READ_ONLY 算（不影响调度，让其走 execute 正常报错）。
+
+        #521 M-4：只要注册了 before-tool 决策钩子，整批保守串行。
+        Hook 可能 REWRITE 参数（改写是运行时的，静态无法证明不影响
+        resource_keys），在无法证明"无资源冲突"时回退串行——
+        守住不变量 #10（并发基于显式依赖与资源冲突）。
+        这是设计 §4.3 的 V1 最小实现。
         """
+        # 决策钩子存在即保守串行：hook 的改写行为是运行时的，
+        # 静态 side_effect 分类无法覆盖它可能引入的资源冲突。
+        runner = self._decision_hook_runner
+        if runner is not None and runner.active:
+            return "serial"
         for call in ToolCall.normalize_all(tool_calls):
             name = call.name
             try:
