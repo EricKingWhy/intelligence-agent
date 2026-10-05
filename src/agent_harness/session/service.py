@@ -32,10 +32,11 @@ import os
 import stat
 import time
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import anyio
 
@@ -115,6 +116,8 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
     EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
@@ -212,10 +215,14 @@ from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from langchain_core.language_models import BaseChatModel
 
     from agent_harness.capability.base import CapabilityRegistry
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
+    from agent_harness.context.builder import ContextBuilder
     from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
@@ -243,6 +250,10 @@ ARCHIVE_ENTRY_API = "api"
 #: `source` 字段。与 `ARCHIVE_ENTRY_API` 同一份定义/同款风格——Web 端点只引用这一处。
 PURGE_ENTRY_API = "api"
 
+#: 手动上下文压缩通道（#635）的 API 入口标识，与 `PURGE_ENTRY_API` 同款。CLI 侧
+#: 对应 `cli.py::COMPACT_ENTRY_CLI`（瘦触发器传入）。
+COMPACT_ENTRY_API = "api"
+
 
 # ── 领域异常 ──────────────────────────────────────────────────────────
 # 定义已移至 session/errors.py（候选 2 纯结构重构）；此处重新导出，
@@ -268,6 +279,30 @@ _WRITE_CONFLICT_ATTEMPTS = 3
 #: AC <1s 由贴线转为有裕度）。只作用于默认列表路径的三个卸载点（id 现扫 / 窗口
 #: refs / 批量摘要），全局默认限流器不动——其他 to_thread 消费者行为零变化。
 _LIST_SYNC_LIMITER = anyio.CapacityLimiter(100)
+
+
+@dataclass(frozen=True)
+class SessionContextCompaction:
+    """手动上下文压缩（#635）的结果 DTO（Web / CLI 共用的渲染来源）。
+
+    `bracket_id is None` / `compacted_turn_count == 0` 表示**水位过低无需压缩**
+    （无可压缩的早期轮）或**写前**校验闸门失败（失败记录已落
+    `context/compaction_failed`）——两种情况都**零 bracket 写入**。**写后**复核失败
+    （bracket 三事件已落盘、重投影确认不一致 / 仍越硬护栏）不在此 DTO 表达：服务层
+    抛 `CompactionPostWriteError` 响亮失败（F2 #635），因为历史已多出 bracket，谎报
+    "未改动"会与事实冲突。`tokens_before/after` 是 messages-only 投影
+    估算（同一口径，可直接相减展示）。`dry_run=True` 时 `compacted_turn_count`
+    是"将压缩"的预览（1 = 有可压缩窗口），`tokens_before == tokens_after`。
+    """
+
+    bracket_id: str | None
+    source_seq_start: int | None
+    source_seq_end: int | None
+    tokens_before: int
+    tokens_after: int
+    compacted_turn_count: int
+    summary_model: str | None
+    dry_run: bool
 
 
 def validate_session_id(session_id: str) -> str:
@@ -620,6 +655,14 @@ class SessionService:
     每个参数都是**真的在用**：字段清单与用途见
     `docs/adr/0040-session-service-explicit-collaborators.md`。
     """
+
+    # #635（Task B 修正）：per-session 手动压缩在途防重（防 Web 连点 / CLI 并发穿过
+    # `is_busy`）。**必须进程级共享**：`web/app.py::session_service()` 每个 HTTP 请求
+    # 都新建一个 `SessionService`，实例字段在请求间不共享 ⇒ 连点第二次会拿到全新空
+    # dict、防重失效（AC8 的"压缩已在进行中 → 409"跨请求不可达）。声明为类属性 =
+    # 与 RunManager 的每会话锁同一寿命（进程内共享，不落盘）；读改写只做原地
+    # set/pop（见 `compact_session_context` 的 finally），不会遮蔽共享字典。
+    _compact_in_flight: ClassVar[dict[str, bool]] = {}
 
     def __init__(
         self,
@@ -2742,6 +2785,301 @@ class SessionService:
         version = snapshot.version if snapshot is not None else 0
         return budget_key, table, stale, version
 
+    # ── 手动上下文压缩（#635）─────────────────────────────────────────
+
+    async def compact_session_context(
+        self,
+        session_id: str,
+        *,
+        model: str | None = None,
+        entry_point: str,
+        dry_run: bool = False,
+    ) -> SessionContextCompaction:
+        """手动触发一次上下文压缩（CLI / Web 共用的**唯一实现**，#635）。
+
+        顺序即契约（每步拒绝都早于产生可观察副作用）：
+
+        1. `_require_existing_session`：422 `InvalidSessionId` 先于 404
+           `SessionNotFound`（与 `set_archived` / `delete_session` 同一套判据）。
+        2. 解析摘要模型——**在任何副作用之前**完成（fuse 纪律）：优先级为显式
+           `model` > `settings.summary_model` > 主模型（None）。非法模型名经
+           `ModelConfig.resolve_selection` 抛 `ConfigError`（Web 映射 422 / CLI exit 1）。
+        3. `RunManager.is_busy` → `ActiveRunConflict`（Web 409 / CLI exit 1），**零写入**。
+        4. per-session in-flight 防重 guard（`_compact_in_flight`，`finally` 释放）：
+           防 Web 连点 / CLI 并发穿过 `is_busy`（压缩不是 run，`is_busy` 看不见它）。
+        5. `session_lock` **只覆盖"判忙 + 快照"短决策点**（`runmanager.py:320-329`
+           明令不得持锁跨长耗时操作：持锁 10–60s 会阻塞 `resume_and_launch` 的 CAS
+           临界区、暂停恢复两阶段与 run 终结接力）；LLM 调用期间锁已释放；落盘前由
+           `write_guard` 重拿锁并复验（事件数未被并发改动 / 仍不 busy）再写 bracket。
+        6. 调 `ContextBuilder.compact_now(session)`（T2 产物）走**真实管线**。若
+           `compacted_turn_count == 0`（无可压缩早期轮 / 校验闸门失败）→ **零写入**
+           返回"水位过低"。失败记录已由 compact_now 落 `context/compaction_failed`，
+           会话可继续（无坏摘要）。
+        7. `dry_run=True` → 只算当前水位并返回"将压缩"，**零 LLM 调用、零写入**。
+
+        为什么手动压缩用 `is_busy` 而不是 `get_active`（实质论证）：手动压缩要**写
+        会话事件日志**（bracket 三事件），与归档（只写正交的 `session_meta` 列、完全
+        不碰事件日志）不同，而与硬删同属"别人可能还在写日志"的资源。更具体地，run 的
+        finalizer 窗口存在 seq 竞态（#560-B）：`run.finish()` 置终态后，`_drive` 的
+        finally 仍可能经 `_notify_run_terminal` → `deliver_next_undelivered` →
+        `resume_and_launch` 追加事件并起新 run；压缩若在该窗口按自己读到的聚合追加
+        bracket，会撞上"两个聚合各自推算 seq"的竞态。`is_busy` 恰把这一收尾窗口视为忙
+        （见其 docstring），`get_active` 不视为忙。
+
+        `entry_point` 区分 CLI / API（审计日志用）。
+        """
+        # ① 形态 + 存在性
+        await self._require_existing_session(session_id)
+
+        # ② 摘要模型解析（零副作用前；非法名 → ConfigError）
+        summary_model = await self._resolve_compaction_summary_model(model)
+
+        # ③ 在途 run：响亮拒绝、零写入
+        if self._run_manager.is_busy(session_id):
+            raise ActiveRunConflict(
+                f"session '{session_id}' has a run in flight; "
+                "compact it after the run finishes"
+            )
+
+        # ④ per-session in-flight 防重
+        if session_id in self._compact_in_flight:
+            raise CompactionInProgress(
+                f"session '{session_id}' already has a compaction in progress"
+            )
+        self._compact_in_flight[session_id] = True
+        try:
+            # ⑤ 短持锁：判忙复验 + 事件快照（LLM 期间不持有）
+            lock = self._run_manager.session_lock(session_id)
+            async with lock:
+                if self._run_manager.is_busy(session_id):
+                    raise ActiveRunConflict(
+                        f"session '{session_id}' has a run in flight; "
+                        "compact it after the run finishes"
+                    )
+                events = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id
+                )
+                snapshot_event_count = len(events)
+
+            session = Session(session_id, self._store, list(events))
+            from agent_harness.context.tokens import estimate_message_tokens
+
+            tokens_before = estimate_message_tokens(session.derive_messages())
+            effective_summary_name = (
+                model if model is not None else self._settings.summary_model
+            )
+
+            # ⑦ dry_run：只算水位，零 LLM、零写入
+            if dry_run:
+                will_compact = self._has_compactable_early_turn(session)
+                return SessionContextCompaction(
+                    bracket_id=None,
+                    source_seq_start=None,
+                    source_seq_end=None,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_before,
+                    compacted_turn_count=1 if will_compact else 0,
+                    summary_model=effective_summary_name or None,
+                    dry_run=True,
+                )
+
+            # ⑥ 真实管线；写 bracket 前由 write_guard 重拿锁 + 复验
+            from agent_harness.context.compactor import (
+                CompactionPostWriteError,
+                ContextWindowExceededError,
+            )
+
+            builder = await self._compact_context_builder(session, summary_model)
+            write_guard = self._compaction_write_guard(
+                session_id, lock=lock, snapshot_event_count=snapshot_event_count,
+            )
+            try:
+                result = await builder.compact_now(session, write_guard=write_guard)
+            except CompactionPostWriteError:
+                # bracket 三事件**已落盘**后的复核失败（重投影不一致 / 仍越硬护栏）：
+                # 历史已变，绝不能吞成 below-floor DTO 谎报"未改动"（F2 #635）。响亮
+                # 失败：Web 映射 500、CLI exit 1，由调用方给出可操作的文案。
+                raise
+            except ContextWindowExceededError:
+                # **写前**校验闸门失败：compact_now 已把失败记录落
+                # `context/compaction_failed`；无坏摘要、无 bracket，会话可继续
+                # （与自动路径"低估值安全继续"同一结果面）。
+                result = None
+            if result is None or not result.compacted_turn_count:
+                log_event(
+                    logger,
+                    "system_log",
+                    f"session context compact below floor: {session_id}",
+                    component="session_context_compact",
+                    session_id=session_id,
+                    entry_point=entry_point,
+                    outcome="below_floor",
+                )
+                return SessionContextCompaction(
+                    bracket_id=None,
+                    source_seq_start=None,
+                    source_seq_end=None,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_before,
+                    compacted_turn_count=0,
+                    summary_model=effective_summary_name or None,
+                    dry_run=False,
+                )
+            log_event(
+                logger,
+                "system_log",
+                f"session context compacted: {session_id}",
+                component="session_context_compact",
+                session_id=session_id,
+                entry_point=entry_point,
+                outcome="compacted",
+                bracket_id=result.bracket_id,
+                compacted_turn_count=result.compacted_turn_count,
+            )
+            return SessionContextCompaction(
+                bracket_id=result.bracket_id,
+                source_seq_start=result.source_seq_start,
+                source_seq_end=result.source_seq_end,
+                tokens_before=tokens_before,
+                tokens_after=result.token_estimate,
+                compacted_turn_count=result.compacted_turn_count,
+                summary_model=result.summary_model_id or (effective_summary_name or None),
+                dry_run=False,
+            )
+        finally:
+            self._compact_in_flight.pop(session_id, None)
+
+    async def _resolve_compaction_summary_model(
+        self, model: str | None,
+    ) -> BaseChatModel | None:
+        """解析摘要模型 client（#635）。优先级：显式 `model` > `settings.summary_model`
+        > 主模型（None）。非法模型名经统一解析点 `ModelConfig.resolve_selection` 抛
+        `ConfigError`；本方法无副作用（不读写会话）。"""
+        name = model if model is not None else self._settings.summary_model
+        if name is None or not name.strip():
+            return None
+        # F10 (#635)：判空用 strip，传给统一解析点也用 **strip 后**的值——否则
+        # 带空白的显式名（`--model " x "`）会以原文去 catalog 查名而误报未知模型；
+        # 与自动路径（assembly.py:522）的 strip 口径一致。
+        name = name.strip()
+        from agent_harness.model.config import ModelConfig
+        from agent_harness.model.provider import create_chat_model
+        from agent_harness.model.provider_store import ProviderStore
+
+        store = ProviderStore.for_settings(self._settings)
+        config = ModelConfig.resolve_selection(self._settings, name, store)
+        return create_chat_model(config)
+
+    async def _compact_context_builder(
+        self, session: Session, summary_model: BaseChatModel | None,
+    ) -> ContextBuilder:
+        """为手动压缩装配一个 `ContextBuilder`（#635）。
+
+        **不**走 `build_runtime`（那会建 sandbox / tooling / capability，对一个非破坏性
+        压缩动作是过大的副作用面）；本 builder 只承载压缩管线所需的模型 + 预算 + 摘要
+        模型接缝。因此手动路径的 `reserved_tokens` 不含 system_prompt / 运行时快照
+        （自动路径的 build 装配带它们）——压缩语义（同一 `ContextCompactor` + 同一
+        bracket + 同一重投影确认）不受影响，只有 target 闸门的保留量略小。组合根若要
+        注入完整装配的 builder，可覆盖本方法（T4/T5 接缝）。
+
+        **F11 (#635) 诚实说明**：为取 `model_call_gate` 调用了 `self._get_wiring()`，
+        这会触发 **capability 惰性装配**（不是零副作用的轻量读取）——所以本方法并非
+        完全没有装配成本。之所以仍选此接缝：`model_call_gate` 是 #559 "摘要调用与主循环
+        同闸"的必需项，而更轻的独立接缝需要给 `SessionService` 增 collaborator / 改
+        ADR-0040 协作者契约（超本票范围）。改从更轻接缝取可作为后续票的优化。
+        """
+        from agent_harness.context.builder import ContextBuilder
+        from agent_harness.model.config import ModelConfig
+        from agent_harness.model.provider import create_chat_model
+        from agent_harness.session.model_switch import current_model_selection
+
+        _, wiring = await self._get_wiring()
+        config = ModelConfig.from_settings(self._settings)
+        # F3 (#635)：缺省摘要模型 = 主模型，必须跟随会话级模型覆盖（AC5："缺省 =
+        # 主模型逐字节等价"）。自动路径经 `amend_with_session_model` →
+        # `ModelConfig.resolve_selection` 解析会话模型；手动路径此前只看 settings，
+        # 会话切换被忽略。此处用同一解析点、同一回落口径（catalog 未命中记 warning
+        # 并回落默认链），保证两条路径对同一会话给出同一主模型。
+        provider, model_id = current_model_selection(session.events)
+        if model_id is not None:
+            from agent_harness.model.config import find_catalog_entry
+            from agent_harness.model.provider_store import ProviderStore
+
+            if find_catalog_entry(self._settings, provider or "", model_id) is None:
+                logger.warning(
+                    "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
+                    provider, model_id,
+                )
+            else:
+                config = ModelConfig.resolve_selection(
+                    self._settings, model_id,
+                    ProviderStore.for_settings(self._settings),
+                )
+        main_model = create_chat_model(config)
+        return ContextBuilder(
+            main_model,
+            max_context_tokens=self._settings.max_context_tokens,
+            auto_compact_threshold=self._settings.auto_compact_threshold,
+            hard_guard_threshold=self._settings.hard_guard_threshold,
+            summary_model=summary_model,
+            model_call_gate=getattr(wiring, "model_call_gate", None),
+            plan_reinject_every_messages=self._settings.plan_reinject_every_messages,
+            keep_recent_tool_results=self._settings.keep_recent_tool_results,
+            clear_at_least_tokens=self._settings.clear_at_least_tokens,
+        )
+
+    def _compaction_write_guard(
+        self, session_id: str, *, lock: asyncio.Lock, snapshot_event_count: int,
+    ) -> Callable[[int], AbstractAsyncContextManager[None]]:
+        """落盘守卫**工厂**：重拿 `session_lock` + 复验（仍不 busy / 事件数未变）后写 bracket。
+
+        LLM 调用期间锁已释放（见 `compact_session_context` ⑤）；本守卫只包住 bracket
+        三事件的写入窗口——`runmanager.py:320-329` 禁止持锁跨长耗时操作。
+
+        工厂化（F1 #635）：`compact_now` 在进 guard 前会落 `own_writes` 条失败记录，
+        复验基线须为 `snapshot_event_count + own_writes`——把本次自身写入排除掉，否则
+        "首试失败、重试成功"会被误判成并发改动。工厂入参由 `compact_now` 传入。
+        """
+        def factory(own_writes: int) -> AbstractAsyncContextManager[None]:
+            @asynccontextmanager
+            async def guard():
+                async with lock:
+                    if self._run_manager.is_busy(session_id):
+                        raise CompactionConcurrentWrite(
+                            f"session '{session_id}' has a run in flight; "
+                            "compact it after the run finishes",
+                            reason="run_busy",
+                        )
+                    current = await anyio.to_thread.run_sync(
+                        self._store.read_events, session_id
+                    )
+                    if len(current) != snapshot_event_count + own_writes:
+                        raise CompactionConcurrentWrite(
+                            f"session '{session_id}' changed during compaction; retry",
+                            reason="event_drift",
+                        )
+                    yield
+
+            return guard()
+
+        return factory
+
+    @staticmethod
+    def _has_compactable_early_turn(session: Session) -> bool:
+        """dry_run 预览：是否存在可压缩的早期轮（compactor `early` 窗口的**近似**判据）。
+
+        前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
+        `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
+        函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
+
+        仍是近似：compactor 另以"early 中非摘要 HumanMessage 数 > 0"作为
+        `compacted_turn_count` 闸门，本预览只判窗口是否非空。
+        """
+        from agent_harness.context.compactor import compactable_early_window
+
+        prefix_end, cut = compactable_early_window(session.derive_messages())
+        return cut > prefix_end
+
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
     async def delete_session(self, session_id: str) -> SessionDeletionStats:
@@ -3787,6 +4125,8 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalQueueMissing",
     "ApprovalRequestMissing",
+    "CompactionConcurrentWrite",
+    "CompactionInProgress",
     "InvalidDecision",
     "InvalidForkBoundary",
     "InvalidSessionId",

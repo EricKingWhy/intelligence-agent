@@ -132,7 +132,12 @@ class _SummaryRejected(ValueError):
 
 
 class ContextWindowExceededError(RuntimeError):
-    """无法构造安全的模型上下文，调用方必须停止当前 run。"""
+    """无法构造安全的模型上下文，调用方必须停止当前 run。
+
+    语义上覆盖"写前"（预检 / 校验 / 源区间不可用）与"写后"（bracket 已落盘但复核
+    未过）两类；区分二者用子类 `CompactionPostWriteError`——只有"写前"失败才允许
+    被手动路径吞成"水位过低、未改动"，"写后"失败必须响亮（历史已多出 bracket）。
+    """
 
     def __init__(
         self, message: str, *,
@@ -142,6 +147,22 @@ class ContextWindowExceededError(RuntimeError):
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。预检类超限
         #: （tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录，保持为空表。
         self.failures = list(failures or [])
+
+
+class CompactionPostWriteError(ContextWindowExceededError):
+    """bracket 三事件**已落盘**之后的复核失败（F2 #635）。
+
+    两个抛点都在 `ContextBuilder.compact_now` 的 bracket 写入**之后**：重投影确认
+    不一致、或重投影仍越硬护栏。历史里已有 bracket（append-only，不删除），因此
+    这不是"未改动"——调用方**不得**把它吞成 below-floor DTO，必须响亮失败（Web
+    500 / CLI exit 1），否则会谎报"未改动"而历史实际已变。
+
+    `bracket_id` 指向已写入的那一对 bracket 事件，供调用方在回执/诊断里指认。
+    """
+
+    def __init__(self, message: str, *, bracket_id: str) -> None:
+        super().__init__(message)
+        self.bracket_id = bracket_id
 
 
 @dataclass
@@ -172,6 +193,28 @@ class CompactionResult:
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
 #: （section `aux:compaction`）——改文案开那一个文件。
+
+
+def compactable_early_window(messages: list[AnyMessage]) -> tuple[int, int]:
+    """early 压缩窗口的判据：返回 `(prefix_end, cut)`。
+
+    - `prefix_end`：跳过的前导 **非摘要** `SystemMessage` 数。前导摘要
+      （`_is_compaction_summary`，含旧版 SystemMessage 形态）是 early 窗口的**起点**，
+      不是可跳过的前缀——遇它即停。
+    - `cut`：最后一条 `HumanMessage` 的下标（无 HumanMessage 时回落到 `prefix_end`）。
+
+    `[prefix_end:cut]` 即待摘要的 early 段、`[cut:]` 是保留的 recent 段。
+    `ContextCompactor.compact`（自动路径）与 dry-run 预览（`_has_compactable_early_turn`）
+    共用本函数——判据只有一份，此前两处各抄一遍会漂移（G3 #635）。
+    """
+    prefix_end = 0
+    while (prefix_end < len(messages)
+           and isinstance(messages[prefix_end], SystemMessage)
+           and not _is_compaction_summary(messages[prefix_end])):
+        prefix_end += 1
+    cut = max((i for i, message in enumerate(messages)
+               if isinstance(message, HumanMessage)), default=prefix_end)
+    return prefix_end, cut
 
 
 class ContextCompactor:
@@ -224,14 +267,8 @@ class ContextCompactor:
         if reserved_tokens < 0:
             raise ValueError("reserved_tokens must be non-negative")
         _validate_tool_blocks(messages)
-        prefix_end = 0
-        while (prefix_end < len(messages)
-               and isinstance(messages[prefix_end], SystemMessage)
-               and not _is_compaction_summary(messages[prefix_end])):
-            prefix_end += 1
+        prefix_end, cut = compactable_early_window(messages)
         prefix = messages[:prefix_end]
-        cut = max((i for i, message in enumerate(messages)
-                   if isinstance(message, HumanMessage)), default=prefix_end)
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)

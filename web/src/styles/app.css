@@ -6708,6 +6708,57 @@ button.json-row {
   color: var(--text-tertiary);
   line-height: 1.5;
 }
+/* #635：手动压缩按钮 + 结果/错误行。只用既有语义 token（accent/danger/
+   text-tertiary/border-subtle/color-hover），无新 token ⇒ §15 双份定义不涉及；
+   spinner 复用全局 @keyframes spin。 */
+.ctx-usage-compact {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.ctx-usage-compact-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 6px var(--space-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.ctx-usage-compact-btn:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+.ctx-usage-compact-btn:disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+.ctx-usage-compact-note {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.ctx-usage-compact-error {
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+.ctx-usage-compact-result {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.ctx-usage-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 
 /* ── #203：自定义供应商管理弹层（provider-dialog / 列表 / 表单）──
  *  全部语义 token（AGENTS §15：新增 token 必须双份——本块只复用既有 token，
