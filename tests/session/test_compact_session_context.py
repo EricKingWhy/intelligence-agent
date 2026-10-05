@@ -372,9 +372,55 @@ async def test_write_guard_raises_concurrent_write_on_event_drift(
     # 模拟并发写者：快照之后追加一条事件。
     session.append(USER_MESSAGE, {"content": "concurrent writer"})
 
-    with pytest.raises(CompactionConcurrentWrite):
+    with pytest.raises(CompactionConcurrentWrite) as excinfo:
         async with factory(0):
             pass
+
+    assert excinfo.value.reason == "event_drift"
+
+
+@pytest.mark.asyncio
+async def test_write_guard_run_busy_reason_is_typed(
+    make_session_service, tmp_path,
+):
+    """guard 内仍 `is_busy`（run 在收尾窗口）→ CompactionConcurrentWrite(reason="run_busy")。
+
+    步骤③ / ⑤ 判忙时 run 尚未收尾（False），到落盘窗口才转忙（True）——这一分支此前
+    无行为覆盖（Spec 轴变异实测），CLI 依赖其 reason 给出"等 run 结束"文案。
+    """
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    _seed_history(session)
+
+    class _LateBusyRunManager:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def is_busy(self, _session_id: str) -> bool:
+            self.calls += 1
+            return self.calls > 2  # ③、⑤ 不忙；guard 内（第 3 次）转忙
+
+        def session_lock(self, _session_id: str):
+            return asyncio.Lock()
+
+    service = make_session_service(
+        store=store, run_manager=_LateBusyRunManager(), settings=_settings(tmp_path),
+    )
+
+    class _GuardedBuilder:
+        async def compact_now(self, _session, *, write_guard=None):
+            async with write_guard(0):
+                pass
+
+    async def factory(_session, _summary_model):
+        return _GuardedBuilder()
+
+    service._compact_context_builder = factory
+
+    with pytest.raises(CompactionConcurrentWrite) as excinfo:
+        await service.compact_session_context(session.session_id, entry_point="cli")
+
+    assert excinfo.value.reason == "run_busy"
 
 
 # ── in-flight 防重 + finally 释放 ───────────────────────────────────

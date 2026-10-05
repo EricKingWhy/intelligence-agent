@@ -197,8 +197,11 @@ def test_dry_run_without_compactable_window(monkeypatch, tmp_path):
             "压缩已在进行中",
         ),
         (
-            CompactionConcurrentWrite("session 'x' changed during compaction; retry"),
-            "重试",
+            CompactionConcurrentWrite(
+                "session 'x' changed during compaction; retry",
+                reason="event_drift",
+            ),
+            "并发改动",
         ),
         (ConfigError("未知模型 'nope'"), "压缩失败"),
     ],
@@ -212,6 +215,33 @@ def test_error_matrix_exits_1_with_clear_message(
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert needle in captured.err
+
+
+@pytest.mark.parametrize(
+    "reason, needle",
+    [
+        ("run_busy", "等待 run 结束"),
+        ("event_drift", "并发改动"),
+    ],
+)
+def test_concurrent_write_text_is_reason_specific_and_claims_no_zero_change(
+    monkeypatch, tmp_path, capsys, reason, needle,
+):
+    """G1 (#635)：两种成因分别给可操作文案，且都不再声称"零改动"。
+
+    `run_busy` 的真实成因是 run 在收尾窗口（此前已落失败记录时更非零改动），所以
+    提示"等 run 结束"而非"重试"；`event_drift` 才是并发改动。两处都不许说"零改动"。
+    """
+    _install(
+        monkeypatch, tmp_path,
+        error=CompactionConcurrentWrite("session 'x' rejected", reason=reason),
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        _run_dispatch(monkeypatch, ["compact", "--session", "s1"])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert needle in captured.err
+    assert "零改动" not in captured.err
 
 
 def test_post_write_error_exits_1_with_clear_message(monkeypatch, tmp_path, capsys):
