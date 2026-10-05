@@ -36,7 +36,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import anyio
 
@@ -647,6 +647,14 @@ class SessionService:
     `docs/adr/0040-session-service-explicit-collaborators.md`。
     """
 
+    # #635（Task B 修正）：per-session 手动压缩在途防重（防 Web 连点 / CLI 并发穿过
+    # `is_busy`）。**必须进程级共享**：`web/app.py::session_service()` 每个 HTTP 请求
+    # 都新建一个 `SessionService`，实例字段在请求间不共享 ⇒ 连点第二次会拿到全新空
+    # dict、防重失效（AC8 的"压缩已在进行中 → 409"跨请求不可达）。声明为类属性 =
+    # 与 RunManager 的每会话锁同一寿命（进程内共享，不落盘）；读改写只做原地
+    # set/pop（见 `compact_session_context` 的 finally），不会遮蔽共享字典。
+    _compact_in_flight: ClassVar[dict[str, bool]] = {}
+
     def __init__(
         self,
         *,
@@ -687,9 +695,6 @@ class SessionService:
         self._get_wiring = get_wiring
         self._validate_session_declaration = validate_session_declaration
         self._registered_tool_names = registered_tool_names
-        # #635：per-session 手动压缩在途防重（防 Web 连点 / CLI 并发穿过 is_busy）。
-        # 内存态：与 RunManager 的每会话锁同寿命（进程内），不落盘。
-        self._compact_in_flight: dict[str, bool] = {}
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
