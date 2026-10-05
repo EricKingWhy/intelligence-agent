@@ -29,6 +29,7 @@ from agent_harness.context.pruner import (
     SKIP_PROTECTED_REFERENCE,
     ToolResultPruner,
 )
+from agent_harness.context.tokens import estimate_tokens
 from agent_harness.session import (
     COMPACTION_END,
     COMPACTION_START,
@@ -169,7 +170,11 @@ class TestShadowedSurvivor:
     async def test_shadowed_newest_is_not_survivor_for_visible_older_member(self):
         """AC①：唯一可见的旧成员不得因不可见的「survivor」被裁成骨架。"""
         store = FakeArtifactStore()
-        content_json = _content_json(await _seed_artifact(store))
+        ref = await _seed_artifact(store)
+        content_json = _content_json(ref)
+        # 前置（票面要求）：ref 确实可回读——若不可读，SKIP_UNREADABLE_REF 会让本用例
+        # 在修前也变绿，红测失效。
+        assert (await store.load(ref)).content == CONTENT
         events = [
             _user(1, "第一问"),
             *_read_turn(2, "c1", content_json),      # seq 2..4：旧成员（在投影里可见）
@@ -189,6 +194,8 @@ class TestShadowedSurvivor:
         assert visible_after == visible_before, "唯一可见原文被裁成骨架（T15/P-1）"
         assert visible_after["c1"] == content_json
         assert report.pruned_seqs == frozenset()
+        # 前置：空账目必须来自可见性规则本身，而不是某条豁免（如 ref 不可读）顶替。
+        assert report.skipped == ()
         assert [event.to_dict() for event in events] == snapshot
 
     @pytest.mark.asyncio
@@ -214,6 +221,81 @@ class TestShadowedSurvivor:
 
         assert _visible_tool_contents(messages, _ranges(pairs)) == visible_before
         assert report.pruned_seqs == frozenset()
+
+
+# ── 等价类只在可见成员上构建（≥3 成员：既不能全裁、也不能整组跳过）────
+
+
+class TestEquivalenceClassBuiltOnVisibleMembers:
+    @pytest.mark.asyncio
+    async def test_shadowed_newest_is_excluded_while_visible_older_still_pruned(self):
+        """三个同源成员、最新被 shadow ⇒ 等价类 = 可见的 c1/c2，survivor = c2，c1 照裁。
+
+        三重形态判别：修前（全量类、survivor 取不可见的 c3）会把 c1 与 c2 一起裁掉；
+        「survivor 不可见就整组跳过」的朴素 fallback 会一条不裁；只有「等价类只由当前
+        可见成员构成」同时满足「保住 c2 原文」与「保留对 c1 的既有裁剪收益」。
+        """
+        store = FakeArtifactStore()
+        ref = await _seed_artifact(store)
+        content_json = _content_json(ref)
+        assert (await store.load(ref)).content == CONTENT
+        events = [
+            _user(1, "第一问"),
+            *_read_turn(2, "c1", content_json),      # seq 4：可见旧成员（应被裁）
+            *_read_turn(5, "c2", content_json),      # seq 7：可见成员（应保留原文）
+            *_read_turn(8, "c3", content_json),      # seq 10：最新成员（落进 bracket）
+            *_bracket(11, 8, 10),
+            _user(14, "当前请求"),
+        ]
+        pairs = derive_messages_with_source_ranges(events)
+        visible_before = _visible_tool_contents([m for m, _ in pairs], _ranges(pairs))
+        assert set(visible_before) == {"c1", "c2"}
+        snapshot = [event.to_dict() for event in events]
+
+        messages, report = await _pruner(store).prune(pairs, events)
+
+        after = _visible_tool_contents(messages, _ranges(pairs))
+        assert after["c2"] == content_json, "最新可见成员的原文必须保留"
+        assert _is_skeleton(after["c1"]), "更早的可见成员仍按既有 R1 规则可裁"
+        assert [record.seq for record in report.pruned] == [4]
+        assert report.pruned[0].superseded_by_seq == 7
+        # 账目只计可见候选：被保留的 c2 与被 shadow 的 c3 都不得进收益读数。
+        assert report.planned_freed_tokens == (
+            estimate_tokens(content_json) - estimate_tokens(report.pruned[0].skeleton)
+        )
+        assert [event.to_dict() for event in events] == snapshot
+
+
+class TestShadowedMembersStayOutOfLedger:
+    @pytest.mark.asyncio
+    async def test_shadowed_member_is_not_pruned_and_frees_no_tokens(self):
+        """旧成员被 bracket shadow、最新成员可见 ⇒ 无可裁候选：不裁、收益读数恒 0。
+
+        修前该形态会为不可见的旧成员落下 planned 记录：收益读数 > 0、收益门可被幻影
+        收益满足，而投影里根本没有这条消息可替换（不变量 #5/#6：不进 Runtime Context
+        的内容没有裁剪收益可言）。
+        """
+        store = FakeArtifactStore()
+        ref = await _seed_artifact(store)
+        content_json = _content_json(ref)
+        assert (await store.load(ref)).content == CONTENT
+        events = [
+            _user(1, "第一问"),
+            *_read_turn(2, "c1", content_json),      # seq 4：旧成员（落进 bracket）
+            *_read_turn(5, "c2", content_json),      # seq 7：最新成员（可见）
+            *_bracket(8, 2, 4),
+            _user(11, "当前请求"),
+        ]
+        pairs = derive_messages_with_source_ranges(events)
+        assert set(_visible_tool_contents([m for m, _ in pairs], _ranges(pairs))) == {
+            "c2"}
+
+        messages, report = await _pruner(store).prune(pairs, events)
+
+        assert report.pruned_seqs == frozenset()
+        assert report.planned_freed_tokens == 0
+        assert [message.model_dump_json() for message in messages] == [
+            message.model_dump_json() for message, _range in pairs]
 
 
 # ── AC②：两成员都可见 ⇒ 保留最新可见成员，旧的仍按既有规则可裁 ──────
@@ -294,6 +376,35 @@ class TestBracketValidityMatchesDerive:
         assert [message.model_dump_json() for message in messages] == [
             message.model_dump_json() for message, _range in pairs]
 
+    @pytest.mark.asyncio
+    async def test_crossing_brackets_are_both_invalid_like_derive(self):
+        """AC③：交叉区间（b1=[1,5] 与 b2=[3,7]）被 derive 判为双双无效 ⇒ 两成员都可见。
+
+        朴素「区间并集」实现会把 [1,7] 当全 shadow 而一条不裁；本用例断言裁剪仍按
+        derive 的可见成员集进行，把「pruner 不写第二套区间算法」变成可证伪断言。
+        """
+        store = FakeArtifactStore()
+        ref = await _seed_artifact(store)
+        content_json = _content_json(ref)
+        events = [
+            _user(1, "第一问"),
+            *_read_turn(2, "c1", content_json),       # seq 2..4
+            *_read_turn(5, "c2", content_json),       # seq 5..7
+            *_bracket(8, 1, 5, "b1"),                 # 与 b2 交叉 ⇒ 两 bracket 皆无效
+            *_bracket(11, 3, 7, "b2"),
+            _user(14, "当前请求"),
+        ]
+        pairs = derive_messages_with_source_ranges(events)
+        assert set(_visible_tool_contents([m for m, _ in pairs], _ranges(pairs))) == {
+            "c1", "c2"}
+
+        messages, report = await _pruner(store).prune(pairs, events)
+
+        after = _visible_tool_contents(messages, _ranges(pairs))
+        assert after["c2"] == content_json
+        assert _is_skeleton(after["c1"])
+        assert [record.seq for record in report.pruned] == [4]
+
 
 # ── AC④：既有豁免不变（keep_recent 窗口 / protected reference）──────
 
@@ -301,7 +412,11 @@ class TestBracketValidityMatchesDerive:
 class TestExistingExemptionsUnchanged:
     @pytest.mark.asyncio
     async def test_keep_recent_window_still_counts_all_results(self):
-        """AC④：窗口按全量事件序计（含被 shadow 的结果占名额），只有可见成员进裁决。"""
+        """AC④：窗口按全量事件序计（K=2 时含被 shadow 的 seq 7 占名额），只有可见成员进裁决。
+
+        K 取 2 是判别性要求：窗口若改按「可见结果」计（={4, 10}），c1（seq 4）会被
+        recent_window 豁免而一条不裁；按全量事件序计（={7, 10}）则 c1 仍可裁。
+        """
         store = FakeArtifactStore()
         content_json = _content_json(await _seed_artifact(store))
         events = [
@@ -316,7 +431,7 @@ class TestExistingExemptionsUnchanged:
         assert set(_visible_tool_contents([m for m, _ in pairs], _ranges(pairs))) == {
             "c1", "c3"}
 
-        pruner = _pruner(store, keep_recent_tool_results=1)
+        pruner = _pruner(store, keep_recent_tool_results=2)
         messages, report = await pruner.prune(pairs, events)
 
         after = _visible_tool_contents(messages, _ranges(pairs))
@@ -326,7 +441,10 @@ class TestExistingExemptionsUnchanged:
 
     @pytest.mark.asyncio
     async def test_protected_reference_is_still_skipped(self):
-        """AC④：source_event_ids 引用的可见成员仍走 protected 豁免（W-02 接缝不变）。"""
+        """AC④：source_event_ids 引用的可见成员仍走 protected 豁免（W-02 接缝不变）。
+
+        输入为合成形态：main 上 `source_event_ids` 尚无生产写入者（W-02 落地前该集合
+        恒空），本用例是接缝护栏，不代表当前生产可达行为。"""
         store = FakeArtifactStore()
         content_json = _content_json(await _seed_artifact(store))
         first_turn = _read_turn(2, "c1", content_json)
