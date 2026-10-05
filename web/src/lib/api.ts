@@ -1868,6 +1868,60 @@ export async function getContextUsage(sessionId: string): Promise<ContextUsage> 
   return res.json();
 }
 
+/** 手动压缩回执（后端 `POST /api/sessions/{id}/context/compact`，`#635`）。
+ *
+ *  形状是服务层 DTO 的字段透传。`bracket_id` 指向新落的 bracket；低水位
+ *  （无可压缩早期轮 / 校验闸门未过）时 `bracket_id=null`、`compacted_turn_count=0`，
+ *  **仍 200 且零写入**——"没有可压的"不是错误。`tokens_before/after` 同一口径，
+ *  可直接相减展示。 */
+export interface SessionContextCompacted {
+  bracket_id: string | null;
+  source_seq_start: number | null;
+  source_seq_end: number | null;
+  tokens_before: number;
+  tokens_after: number;
+  compacted_turn_count: number;
+  summary_model: string | null;
+}
+
+/** 压缩是单次同步 POST，网关实测有 44s 送达延迟（`web/app.py` 注释），且不引入
+ *  SSE/轮询。给一个**显式**超时上限，把"永远转圈"变成一个明确的错误提示；正常
+ *  10–60s 远在阈值内。**不是**服务端超时——只是前端停止等待。 */
+const COMPACT_TIMEOUT_MS = 180_000;
+
+/** 手动触发一次上下文压缩（`#635`）：每次调用都是用户显式请求的一次**新**压缩，
+ *  追加新 bracket；重复调用安全但**非 no-op**（与 `purge-stale-tools` 的幂等不同）。
+ *
+ *  错误矩阵（后端 `web/app.py::compact_session_context`）：
+ *    404 —— 没有这个会话；
+ *    409 —— 在途 run 或该会话已有压缩在途（`detail` 原样上抛，不自己编文案）；
+ *    422 —— id 形态非法 / 非法 `?model=`（`detail` 原样上抛）；
+ *    403 —— 非本机来源（宿主侧管理动作只接受本机来源，ADR-0025 D1）。
+ *  超时 → 明确的 Error（前端不再无限等待）。 */
+export async function compactSession(
+  sessionId: string,
+  model?: string,
+): Promise<SessionContextCompacted> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMPACT_TIMEOUT_MS);
+  try {
+    const query = model ? `?model=${encodeURIComponent(model)}` : '';
+    const res = await apiFetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/context/compact${query}`,
+      { method: 'POST', signal: controller.signal },
+    );
+    if (!res.ok) throw await sessionError(res, '压缩会话上下文失败');
+    return res.json();
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error('压缩请求超时（180s）——仍可稍后在上下文容量面板查看结果');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 
 // ── 持久审批规则（#684 Phase 2）──
 

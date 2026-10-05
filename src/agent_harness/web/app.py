@@ -85,6 +85,7 @@ from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
+    COMPACT_ENTRY_API,
     PURGE_ENTRY_API,
     ActiveRunConflict,
     AmendOptions,
@@ -823,6 +824,27 @@ class SessionToolLimitsPurged(BaseModel):
     remaining: dict[str, int]
     rows: int
     version: int
+
+
+class SessionContextCompacted(BaseModel):
+    """`POST /api/sessions/{id}/context/compact` 的成功响应（#635）。
+
+    形状是服务层结果 `SessionContextCompaction` 的字段透传（`dry_run` 不在 Web
+    契约里——端点只走真实压缩）：`bracket_id` 指向新落的 bracket；低水位
+    （无可压缩早期轮 / **写前**校验闸门未过）时 `bracket_id=null`、
+    `compacted_turn_count=0`，**仍 200 且零写入**（"没有可压的"不是错误）。
+    **写后**复核失败（bracket 已落盘）不返回该形状——服务层抛
+    `CompactionPostWriteError`，端点不捕获 → 500（fail-closed，不谎报"未改动"）。
+    `tokens_before/after` 是 messages-only 投影估算，同一口径可直接相减展示。
+    """
+
+    bracket_id: str | None
+    source_seq_start: int | None
+    source_seq_end: int | None
+    tokens_before: int
+    tokens_after: int
+    compacted_turn_count: int
+    summary_model: str | None
 
 
 class SessionDeleted(BaseModel):
@@ -2219,6 +2241,59 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             remaining=result.remaining,
             rows=result.rows,
             version=result.version,
+        )
+
+    @app.post("/api/sessions/{session_id}/context/compact")
+    async def compact_session_context(
+        session_id: str,
+        model: str | None = None,
+        _: None = Depends(require_trusted_origin),
+    ) -> SessionContextCompacted:
+        """手动触发一次上下文压缩（#635）。
+
+        走**唯一实现** `SessionService.compact_session_context`（不变量 #22）：与自动
+        路径同一 `ContextCompactor` 管线、同一 bracket 三事件、同一重投影确认。压缩
+        append-only（旧事件 shadow 保留、可 replay），故本端点的 POST 本体即用户的
+        显式动作，**不设二次确认**。
+
+        可选 query `?model=<name>` 透传摘要模型（对标 CLI `--model`）：优先级为显式
+        参数 > `settings.summary_model` > 主模型；非法模型名在**任何副作用之前**经
+        统一解析点抛错 → 422（detail 原样上抛）。
+
+        状态码（顺序即服务层的校验顺序）：422 → id 形态非法（先于 404，路径穿越防线）；
+        404 → 没有这个会话；422 → 非法 `?model=`；409 → 在途 run（`ActiveRunConflict`，
+        零写入）/ 该会话已有压缩在途（`CompactionInProgress`，零写入）/ 落盘窗口并发
+        （`CompactionConcurrentWrite`：`run_busy`/`event_drift`，历史可能已变，非零写入）；
+        500 → bracket 已写入但复核未通过
+        （`CompactionPostWriteError`，fail-closed；历史已多出 bracket，不谎报"未改动"）。
+
+        **非严格幂等**：每次调用都是用户显式请求的一次新压缩，追加新 bracket；重复调用
+        安全但**非 no-op**（与 `purge-stale-tools` 的幂等不同——那是一次清理，这是一次
+        动作）。低水位时返回 `bracket_id=null`、`compacted_turn_count=0`，仍 200。
+
+        来源闸（ADR-0025 D1）：压缩会写会话事件日志，属宿主侧管理动作，只接受本机来源
+        （与 `archive` / `delete_session` 同一实现，ADR-0028）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            result = await service.compact_session_context(
+                session_id, model=model, entry_point=COMPACT_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
+            raise http_error(e) from e
+        except ConfigError as e:
+            # 非法摘要模型名（统一解析点抛出）：请求形状非法 → 422，detail 原样上抛。
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return SessionContextCompacted(
+            bracket_id=result.bracket_id,
+            source_seq_start=result.source_seq_start,
+            source_seq_end=result.source_seq_end,
+            tokens_before=result.tokens_before,
+            tokens_after=result.tokens_after,
+            compacted_turn_count=result.compacted_turn_count,
+            summary_model=result.summary_model,
         )
 
     @app.post("/api/sessions/{session_id}/approvals/revoke")

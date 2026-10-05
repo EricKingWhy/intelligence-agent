@@ -78,6 +78,9 @@ _PROG_SECTION_MAX_ENTRY_CHARS = 200
 
 #: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
 #: timeout / transport_error 覆盖调用面；其余八类逐一对应校验闸门与 shrink 的各条拒绝。
+#: T12h (#647) 追加的 `source_range_unavailable` 是唯一例外：它标记**生成后**的
+#: 来源拒绝（摘要已生成并过全部闸门，但无 source event range 可持久化），不是
+#: 摘要尝试失败——CompactionFailure 里以 attempt=0 区分。
 _SUMMARY_ERROR_CLASSES = (
     "timeout",
     "transport_error",
@@ -91,6 +94,10 @@ _SUMMARY_ERROR_CLASSES = (
     "plan_section_mismatch",
     "summary_not_smaller",
     "target_not_reached",
+    # T12h (#647)：来源区间不可用（生成后拒绝，非摘要尝试失败）——摘要已过全部
+    # 校验闸门但无 source event range 可持久化，弃用候选、保留原投影，拒绝原因
+    # 经既有有界失败通道落任务可见状态。保持有界：词表逐项对应一条拒绝面。
+    "source_range_unavailable",
 )
 
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
@@ -105,6 +112,8 @@ class CompactionFailure:
     `message` 只装本项目自己的拒绝文案或异常**类型名**——绝不透传 provider
     回显原文（与 ADR-0033 边界 1 同一条脱敏纪律）。`auto_limit` / `hard_limit`
     取触发时的整型阈值读数；`token_estimate` 是调用方进入压缩时的估算。
+    例外（T12h #647）：`attempt=0` 标记**非摘要尝试**的生成后来源拒绝
+    （`source_range_unavailable`）——摘要尝试是 1/2，预检 0 次尝试则不产生记录。
     """
 
     attempt: int
@@ -132,7 +141,12 @@ class _SummaryRejected(ValueError):
 
 
 class ContextWindowExceededError(RuntimeError):
-    """无法构造安全的模型上下文，调用方必须停止当前 run。"""
+    """无法构造安全的模型上下文，调用方必须停止当前 run。
+
+    语义上覆盖"写前"（预检 / 校验 / 源区间不可用）与"写后"（bracket 已落盘但复核
+    未过）两类；区分二者用子类 `CompactionPostWriteError`——只有"写前"失败才允许
+    被手动路径吞成"水位过低、未改动"，"写后"失败必须响亮（历史已多出 bracket）。
+    """
 
     def __init__(
         self, message: str, *,
@@ -142,6 +156,22 @@ class ContextWindowExceededError(RuntimeError):
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。预检类超限
         #: （tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录，保持为空表。
         self.failures = list(failures or [])
+
+
+class CompactionPostWriteError(ContextWindowExceededError):
+    """bracket 三事件**已落盘**之后的复核失败（F2 #635）。
+
+    两个抛点都在 `ContextBuilder.compact_now` 的 bracket 写入**之后**：重投影确认
+    不一致、或重投影仍越硬护栏。历史里已有 bracket（append-only，不删除），因此
+    这不是"未改动"——调用方**不得**把它吞成 below-floor DTO，必须响亮失败（Web
+    500 / CLI exit 1），否则会谎报"未改动"而历史实际已变。
+
+    `bracket_id` 指向已写入的那一对 bracket 事件，供调用方在回执/诊断里指认。
+    """
+
+    def __init__(self, message: str, *, bracket_id: str) -> None:
+        super().__init__(message)
+        self.bracket_id = bracket_id
 
 
 @dataclass
@@ -172,6 +202,28 @@ class CompactionResult:
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
 #: （section `aux:compaction`）——改文案开那一个文件。
+
+
+def compactable_early_window(messages: list[AnyMessage]) -> tuple[int, int]:
+    """early 压缩窗口的判据：返回 `(prefix_end, cut)`。
+
+    - `prefix_end`：跳过的前导 **非摘要** `SystemMessage` 数。前导摘要
+      （`_is_compaction_summary`，含旧版 SystemMessage 形态）是 early 窗口的**起点**，
+      不是可跳过的前缀——遇它即停。
+    - `cut`：最后一条 `HumanMessage` 的下标（无 HumanMessage 时回落到 `prefix_end`）。
+
+    `[prefix_end:cut]` 即待摘要的 early 段、`[cut:]` 是保留的 recent 段。
+    `ContextCompactor.compact`（自动路径）与 dry-run 预览（`_has_compactable_early_turn`）
+    共用本函数——判据只有一份，此前两处各抄一遍会漂移（G3 #635）。
+    """
+    prefix_end = 0
+    while (prefix_end < len(messages)
+           and isinstance(messages[prefix_end], SystemMessage)
+           and not _is_compaction_summary(messages[prefix_end])):
+        prefix_end += 1
+    cut = max((i for i, message in enumerate(messages)
+               if isinstance(message, HumanMessage)), default=prefix_end)
+    return prefix_end, cut
 
 
 class ContextCompactor:
@@ -224,14 +276,8 @@ class ContextCompactor:
         if reserved_tokens < 0:
             raise ValueError("reserved_tokens must be non-negative")
         _validate_tool_blocks(messages)
-        prefix_end = 0
-        while (prefix_end < len(messages)
-               and isinstance(messages[prefix_end], SystemMessage)
-               and not _is_compaction_summary(messages[prefix_end])):
-            prefix_end += 1
+        prefix_end, cut = compactable_early_window(messages)
         prefix = messages[:prefix_end]
-        cut = max((i for i, message in enumerate(messages)
-                   if isinstance(message, HumanMessage)), default=prefix_end)
         early, recent = messages[prefix_end:cut], messages[cut:]
         if not early:
             count = estimate_message_tokens(messages)
@@ -402,13 +448,31 @@ class ContextCompactor:
             logger.warning(
                 "Context compaction rejected; source event range is unavailable",
             )
+            # T12h (#647)：来源拒绝发生在摘要生成**之后**（候选已过全部校验闸门，
+            # 但无 source event range 可持久化）——补一条有界失败记录，使调用方
+            # 可区分"无须压缩"（预检 0 次尝试 ⇒ failures 空）与"生成后来源失配"。
+            # attempt=0 标记"非摘要尝试"；不为此伪造第 3 次摘要尝试。
+            failures.append(CompactionFailure(
+                attempt=0,
+                error_class="source_range_unavailable",
+                message="Cannot persist compaction without a source event range",
+                auto_limit=int(self._auto_limit),
+                hard_limit=int(self._hard_limit),
+                token_estimate=token_estimate,
+                summary_model_id=summary_model_id,
+                duration_ms=max(round((monotonic() - summary_started_at) * 1000), 0),
+                request_token_estimate=request_token_estimate,
+                request_budget_tokens=int(self._hard_limit),
+            ))
             if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError(
-                    "Cannot persist compaction without a source event range"
+                    "Cannot persist compaction without a source event range",
+                    failures=failures,
                 )
             # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
             return CompactionResult(
                 list(messages), 0, estimate_message_tokens(messages), False,
+                failures=failures,
             )
         return CompactionResult(
             compacted,
@@ -456,10 +520,12 @@ def _summary_model_id(model: Any, response: Any) -> str | None:
 
 
 #: #649 结构隔离：正文里**逐字等于保留节标题**的行以反斜杠转义后落盘
-#: （与 CommonMark 0.31.2 的反斜杠转义同源），解析时解码回原值；正文里的
-#: **非保留** Markdown 标题（如 `## embedded heading`）与保留标题不同文，
-#: 不转义、原样保留。节边界只由「逐字等于某一保留标题、不在围栏代码块内、
-#: 且未被转义」的行定义——正文 Markdown 二级标题不再被误判为节边界。
+#: （与 CommonMark 0.31.2 的反斜杠转义同源），解析时解码回原值；#699 转义
+#: 碰撞：转义符本身也要转义（``\`` + 保留标题的行再加一层 ``\``），否则
+#: 原文自带的 ``\##`` 行会被误解码。正文里的**非保留** Markdown 标题
+#: （如 `## embedded heading`）与保留标题不同文，不转义、原样保留。
+#: 节边界只由「逐字等于某一保留标题、不在围栏代码块内、且未被转义」的行
+#: 定义——正文 Markdown 二级标题不再被误判为节边界。
 _HEADING_ESCAPE = "\\"
 _FENCE_CHARS = ("`", "~")
 
@@ -508,6 +574,11 @@ def _fenced_mask(lines: list[str]) -> list[bool]:
 def _escape_section_body(body: str, headings: tuple[str, ...]) -> str:
     """把正文中与保留标题同文的行转义，避免组装后被误当成节边界（#649）。
 
+    #699 转义碰撞：转义符本身也要转义（escape-the-escape，与 CommonMark
+    0.31.2 §6.1 / RFC 8259 §7 同源）。行满足 ``^(\\\\*)(## 保留标题)$``
+    （n≥0 个前导反斜杠 + 逐字等于保留标题）即在前面再加一层 ``\\``；
+    解析时逐层解回，round-trip 保真。
+
     只处理围栏代码块**之外**的行：围栏内的 ``##`` 行由 `_fenced_mask` 保护，
     改写会破坏代码原文，故不动。
     """
@@ -516,24 +587,38 @@ def _escape_section_body(body: str, headings: tuple[str, ...]) -> str:
     lines = body.split("\n")
     fenced = _fenced_mask(lines)
     reserved = set(headings)
-    return "\n".join(
-        _HEADING_ESCAPE + line if not fenced[index] and line in reserved else line
-        for index, line in enumerate(lines)
-    )
+    escaped = []
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            escaped.append(line)
+            continue
+        backslashes = len(line) - len(line.lstrip("\\"))
+        if line[backslashes:] in reserved:
+            escaped.append(_HEADING_ESCAPE + line)
+        else:
+            escaped.append(line)
+    return "\n".join(escaped)
 
 
 def _unescape_section_body(body: str, headings: tuple[str, ...]) -> str:
-    """把 `_escape_section_body` 的转义解码回原值（#649）。"""
+    """把 `_escape_section_body` 的转义解码回原值（#649；#699 转义碰撞）。
+
+    与组装侧互逆：``^(\\\\+)(## 保留标题)$`` 去掉一层前导 ``\\``。
+    """
     lines = body.split("\n")
     fenced = _fenced_mask(lines)
     reserved = set(headings)
-    return "\n".join(
-        line[1:]
-        if (not fenced[index] and line.startswith(_HEADING_ESCAPE)
-            and line[1:] in reserved)
-        else line
-        for index, line in enumerate(lines)
-    )
+    unescaped = []
+    for index, line in enumerate(lines):
+        if fenced[index]:
+            unescaped.append(line)
+            continue
+        backslashes = len(line) - len(line.lstrip("\\"))
+        if backslashes >= 1 and line[backslashes:] in reserved:
+            unescaped.append(line[1:])
+        else:
+            unescaped.append(line)
+    return "\n".join(unescaped)
 
 
 def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
