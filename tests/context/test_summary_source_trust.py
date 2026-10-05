@@ -296,3 +296,64 @@ async def test_protected_facts_none_does_not_inherit_previous_section():
     sections = _parse_summary_sections(result.summary, _SUMMARY_HEADINGS)
     assert sections[1] == "(none)", "pf=None 视为无事实：[1] fail-closed"
     assert "FORGED-FACTS-LIST" not in result.summary
+
+
+# ── 裁决 2（T12g）：旧 six_section 摘要——识别保留、目标/约束不迁移 ────────
+
+
+@pytest.mark.asyncio
+async def test_legacy_six_section_recognized_but_goals_not_migrated():
+    """特征测试（裁决 2）：旧六节摘要（T4 #134 时代 fixture
+    `test_compaction_bracket.py::LEGACY_SUMMARY`）被 `_is_compaction_summary`
+    正确识别（early 窗口起点 + turn 计数排除），但其**目标/约束不进入**新摘要
+    [0]/[1]——[0] 的权威源是 SessionEvent（`derive_protected_facts` 重派生），
+    [1] 只承载 protected_facts 通道；LLM 旧 paraphrase 不回填权威槽位。
+    事件溯源纪律 + 用户裁决：不做字段级结构化迁移。"""
+    from agent_harness.context.compactor import (
+        _is_compaction_summary,
+        compactable_early_window,
+    )
+    from agent_harness.session.derive import serialize_protected_facts
+    from tests.context.test_compaction_bracket import LEGACY_SUMMARY
+
+    legacy = HumanMessage(
+        content=LEGACY_SUMMARY, name=COMPACTION_SUMMARY_MESSAGE_NAME,
+    )
+    # 识别面：marker 投影形态被认可为摘要；是 early 窗口**起点**（不是可跳过
+    # 的前缀 SystemMessage），且不计入 turn 计数。
+    assert _is_compaction_summary(legacy) is True
+    prefix_end, cut = compactable_early_window([
+        legacy,
+        HumanMessage(content="middle request"),
+        AIMessage(content="old analysis " * 600),
+        HumanMessage(content="current"),
+    ])
+    assert prefix_end == 0, "旧摘要是 early 窗口起点，不是可跳过前缀"
+    assert cut == 3
+
+    # 消费面：经 bracket 投影进入下一次压缩，目标/约束不迁移。
+    events = _bracket_events(LEGACY_SUMMARY)
+    messages = derive_messages(events)
+    facts = derive_protected_facts(events)
+
+    result = await ContextCompactor(
+        ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]),
+        max_context_tokens=8000,
+    ).compact(
+        messages, estimate_message_tokens(messages),
+        events=events, protected_facts=facts,
+    )
+
+    assert result.compacted_turn_count == 1, "旧摘要不计入 compacted_turn_count"
+    sections = _parse_summary_sections(result.summary, _SUMMARY_HEADINGS)
+    assert "用户要求读取文件并总结内容" not in sections[0], (
+        "旧六节的目标 paraphrase 不迁移进 [0]（权威源是 SessionEvent）"
+    )
+    assert sections[1] == serialize_protected_facts(facts), (
+        "[1] 与 protected_facts 通道同源，不从旧摘要文本继承约束"
+    )
+    assert "必须保持中文回答" not in sections[1]
+    assert "路径必须在 workspace 内" not in sections[1]
+    # 降级为普通文本开采的既有语义不变：旧摘要正文的标识/路径照常进节。
+    identifiers, files = _result_sections(result)
+    assert "old.txt" in files
