@@ -91,6 +91,36 @@ class ToolSideEffect(str, Enum):
     MUTATING = "MUTATING"  # 改外部状态 → 整批串行（Task 4）
 
 
+class ToolExposure(str, Enum):
+    """工具曝光级别（#528 / IMP-11）：控制模型**看得到什么**，不控制**能调用什么**。
+
+    - ``DIRECT``：进 ``export_model_definitions()`` 的模型菜单（默认，与 #528
+      之前行为逐字相同）。
+    - ``DEFERRED``：不进菜单；模型经内置 ``tool_search`` 按需发现后进入下一轮
+      定义集。注册即可调用（执行权边界仍是 Registry 成员资格 + Permission）。
+    - ``HIDDEN``：不进菜单、不可被搜索。注册但模型不可达（如纯内部编排工具）。
+
+    机制来源：Pi ``ToolExposure``（types.ts:509，MIT）的收缩版——V1 只取票面
+    最小集三档，``model-only`` / ``codemode`` 留给未来扩展。判定与来源核实见
+    ``docs/agents/528-research.md``。
+    """
+
+    DIRECT = "direct"
+    DEFERRED = "deferred"
+    HIDDEN = "hidden"
+
+
+def exposure_of(tool: object) -> ToolExposure:
+    """读工具的曝光级别（#528）；无该属性的对象按 DIRECT 处理。
+
+    Registry 的鸭子型工具（如测试替身，见 tests/multiagent EchoTool 注释）没有
+    ``exposure`` 属性——#528 的默认值判据必须等价于 #528 之前的行为（缺元数据
+    = direct = 照旧全量注入），所以在读取点兜底而不是要求所有工具面继承 Tool。
+    """
+    exposure = getattr(tool, "exposure", ToolExposure.DIRECT)
+    return exposure if isinstance(exposure, ToolExposure) else ToolExposure.DIRECT
+
+
 class PermissionPolicy(str, Enum):
     """Session 级权限策略——Agent 在这个 Session 里的最大权限边界。
 
@@ -152,6 +182,11 @@ class Tool(ABC):
     #: 期间设置嵌套 trace 绑定——child run 的观测挂到同一 trace 下。
     is_subagent_dispatch: bool = False
 
+    #: #526 B1 Plan 模式豁免标记：True 的工具在 Plan 档下仍可执行。
+    #: 显式 Contract 标记，禁按工具名硬编码。仅授予「仅写会话状态、无外部资源
+    #: 副作用」的工具（如 update_plan 发布计划清单）。
+    plan_mode_exempt: bool = False
+
     # —— 必填字段（身份 + Schema + 行为） ——
     @property
     @abstractmethod
@@ -210,6 +245,16 @@ class Tool(ABC):
         return ToolPermission.WORKSPACE_WRITE
 
     @property
+    def exposure(self) -> ToolExposure:
+        """曝光级别（#528）。默认 DIRECT = 全量注入，行为与 #528 之前逐字相同。
+
+        与 permission 正交：exposure 只影响模型菜单（定义集），执行授权仍由
+        Permission/Approval 与 Registry 成员资格决定——deferred 工具被搜索
+        "发现"不构成授权（审计备注：tool search 结果不能授予执行权）。
+        """
+        return ToolExposure.DIRECT
+
+    @property
     def reconcile_hint(self) -> ReconcileHint:
         """崩溃恢复时的可验证性提示。默认 unverifiable（安全默认即 NEED_RECONCILE）。
 
@@ -219,6 +264,22 @@ class Tool(ABC):
         不同，不允许统一假装可验证）。
         """
         return ReconcileHint(verifiable=False)
+
+    def resource_keys(self, args: BaseModel) -> list[str]:
+        """声明本次调用将触碰的共享 resource key（供跨批互斥使用）。
+
+        #525 一期（IMP-14）：
+        - 返回空列表（默认）= 该 Tool 不参与 resource 锁互斥（安全默认）；
+        - 非空列表 = 执行域在 execute() 入口按 key 升序 acquire 锁，
+          同一 key 的并发调用（跨批次 / 跨 SubAgent executor 实例）串行。
+        - Key 格式由 Tool 自行定义（推荐含命名空间如 "workspace-file:..."）；
+          Registry 只做字典排序，不解释 key 语义。
+        - 死锁防护：统一 key 升序 + 同一把锁不重复 acquire（set 去重）。
+
+        用法示例（EditTool）：
+            return [f"workspace-file:{posixpath.normpath(args.path)}"]
+        """
+        return []
 
     @property
     def prompt_guidance(self) -> str | None:

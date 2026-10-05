@@ -11,6 +11,14 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
+## Lifecycle label: `in-progress`
+
+Parallel agents claim tickets from the same issue tracker; the `in-progress` label is the single
+"which open issue is being worked on" signal (do not invent synonyms such as `running`).
+
+- **Claim**: add the label as part of the claim write, together with the assignee: `gh issue edit <n> --add-label in-progress`.
+- **Close / release**: remove it when the issue closes or the claim is dropped: `gh issue edit <n> --remove-label in-progress`.
+
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
 ## Pull requests as a triage surface

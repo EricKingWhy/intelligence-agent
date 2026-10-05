@@ -188,10 +188,16 @@ def test_resolve_trees_rejects_a_line_that_is_not_a_tree(gate, tmp_path, monkeyp
 # 端到端（合成仓库 —— 跑**真闸门**，于是接线错误也逃不掉）
 # =========================================================================== #
 
+def _clean_git_env() -> dict[str, str]:
+    """剥掉继承的 GIT_*（#668：hook 注入的 GIT_DIR 会把合成仓库操作劫持到外层仓库）。"""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git(repo: Path, *args: str) -> str:
     """在合成仓库里跑 git。**屏蔽全局/系统 config**：否则 `core.hooksPath` / `autocrlf` /
-    `commit.gpgsign` 这些本机设置会让测试结果依赖跑测试的那台机器。"""
-    env = dict(os.environ)
+    `commit.gpgsign` 这些本机设置会让测试结果依赖跑测试的那台机器；同时剥掉继承的
+    GIT_*（#668 hook 污染），受控键在下方确定性回写。"""
+    env = _clean_git_env()
     env.update({
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_SYSTEM": os.devnull,
@@ -215,12 +221,13 @@ def _commit(repo: Path, path: str, content: str, message: str) -> str:
 
 
 def _run_gate(repo: Path) -> subprocess.CompletedProcess:
-    """跑复制进合成仓库的那份闸门（其 `REPO_ROOT` = 合成仓库）。"""
+    """跑复制进合成仓库的那份闸门（其 `REPO_ROOT` = 合成仓库）。env 同 `_git` 剥 GIT_*。"""
     script = repo / "scripts" / "check_review_coverage.py"
     script.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(GATE_SRC, script)
     return subprocess.run([sys.executable, str(script)], cwd=repo, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", check=False)
+                          text=True, encoding="utf-8", errors="replace", check=False,
+                          env=_clean_git_env())
 
 
 class _Synth:

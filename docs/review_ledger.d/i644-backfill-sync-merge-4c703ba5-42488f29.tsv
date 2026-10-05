@@ -1,0 +1,1 @@
+2026-10-05	i644 线回补合并 42488f29 机械归属行（父一 4c703ba5 标签惯例笔 + 父二 b2a1ecc2 = origin/main PR #675/#644 集成；ort 自动合并，本分支 docs-only、来侧代码由 i644 线既有归属行全覆盖（i644-tool-result-overflow-budget 等在案），本行只归并笔本身；本行落账后 coverage 金丝雀转绿）	4c703ba5..42488f29

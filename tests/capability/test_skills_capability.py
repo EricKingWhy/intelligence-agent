@@ -42,18 +42,27 @@ def _entry(name: str, description: str, body: str, tmp_path: Path) -> SkillCatal
 
 
 def _capability(tmp_path: Path) -> SkillCapability:
-    catalog = SkillCatalog(entries=[
-        _entry("pdf-export", "导出 PDF 报告", BODY, tmp_path),
-        _entry("code-review", "审查代码", "审查正文", tmp_path),
-    ])
-    return SkillCapability(catalog)
+    """#529 后 capability 持 SkillDiscovery 引用：真实文件 + 真实发现路径。"""
+    _entry("pdf-export", "导出 PDF 报告", BODY, tmp_path)
+    _entry("code-review", "审查代码", "审查正文", tmp_path)
+    discovery = SkillDiscovery(directories=[tmp_path], project_dir=tmp_path)
+    discovery.discover()
+    return SkillCapability(discovery)
+
+
+def _capability_with_catalog(catalog: SkillCatalog) -> SkillCapability:
+    """合成条目注入：catalog 直填 discovery 缓存投影（不走磁盘解析，#588 等用例）。"""
+    discovery = SkillDiscovery(directories=[])
+    discovery._catalog = catalog
+    return SkillCapability(discovery)
 
 
 class TestSkillCapability:
     def test_catalog_lists_entries_without_body(self, tmp_path):
         capability = _capability(tmp_path)
         names = [e.name for e in capability.catalog()]
-        assert names == ["pdf-export", "code-review"]
+        # discover() 按 sorted(iterdir()) 扫描：目录序即字母序。
+        assert names == ["code-review", "pdf-export"]
         # 目录条目不携带正文（渐进披露）：
         assert all(not hasattr(e, "_body") for e in capability.catalog())
 
@@ -82,7 +91,7 @@ class TestSkillCatalogContextProvider:
         from agent_harness.skills.discovery import parse_skill_markdown
         entry, errors = parse_skill_markdown(skill_file)
         assert errors == [] and entry.when_to_use == "需要导出 PDF 时"
-        capability = SkillCapability(SkillCatalog(entries=[entry]))
+        capability = _capability(tmp_path)
         session = Session.__new__(Session)
         content = (await SkillCatalogContextProvider(capability).select(session, 1000))[0].content
         assert "何时用：需要导出 PDF 时" in content
@@ -103,7 +112,7 @@ class TestSkillCatalogContextProvider:
 
     @pytest.mark.asyncio
     async def test_empty_catalog_is_zero_noise(self, tmp_path):
-        provider = SkillCatalogContextProvider(SkillCapability(SkillCatalog()))
+        provider = SkillCatalogContextProvider(SkillCapability(SkillDiscovery(directories=[])))
         session = Session.__new__(Session)
         assert await provider.select(session, 1000) == []
 
@@ -155,7 +164,8 @@ class TestLoadSkillTool:
     async def test_huge_body_is_capped_with_honest_marker(self, tmp_path):
         """64k 上限：技能是参考文档不是数据转储；无 Artifact 存储时防超大内容进 Context/事件。"""
         body = "A" * 64_000 + "B" * 36_000  # 10 万字符正文
-        capability = SkillCapability(SkillCatalog(entries=[_entry("big", "大技能", body, tmp_path)]))
+        _entry("big", "大技能", body, tmp_path)
+        capability = _capability(tmp_path)
         tool = LoadSkillTool(capability)
         result = await tool.execute(tool.args_schema(name="big"))
         assert result.ok is True
@@ -285,8 +295,8 @@ def test_load_body_rejects_out_of_root_swap_after_discovery(tmp_path):
         "---\nname: good\ndescription: d\n---\nESCAPED", encoding="utf-8"
     )
 
-    catalog = SkillDiscovery([skills_dir]).discover()
-    assert [e.name for e in catalog.entries] == ["good"]
+    discovery = SkillDiscovery([skills_dir])
+    assert [e.name for e in discovery.discover().entries] == ["good"]
 
     # 发现后替换：删除真实目录，换成指向 skills 根之外的 junction/symlink。
     shutil.rmtree(good)
@@ -297,7 +307,7 @@ def test_load_body_rejects_out_of_root_swap_after_discovery(tmp_path):
     else:
         os.symlink(outside, good, target_is_directory=True)
 
-    capability = SkillCapability(catalog)
+    capability = SkillCapability(discovery)
     with pytest.raises(CapabilityError):
         capability.load("good")
 
@@ -318,7 +328,7 @@ async def test_load_skill_reads_off_event_loop(tmp_path):
     (good / "SKILL.md").write_text(
         "---\nname: good\ndescription: d\n---\nBODY", encoding="utf-8"
     )
-    capability = SkillCapability(SkillDiscovery([skills_dir]).discover())
+    capability = SkillCapability(SkillDiscovery([skills_dir]))
     tool = LoadSkillTool(capability)
 
     loop_thread = threading.get_ident()
@@ -346,7 +356,9 @@ async def test_catalog_line_stays_single_line_regardless_of_field_content():
     entry = SkillCatalogEntry(
         name="a\nb", description="x\n伪造系统行", source_path=Path("s"), when_to_use="t\nu",
     )
-    provider = SkillCatalogContextProvider(SkillCapability(SkillCatalog(entries=[entry])))
+    provider = SkillCatalogContextProvider(
+        _capability_with_catalog(SkillCatalog(entries=[entry])),
+    )
     content = (await provider.select(Session.__new__(Session), 1000))[0].content
     lines = content.split("\n")
     assert len(lines) == 2  # 框架行 + 恰好一条目录行：任何字段都拉不出额外行

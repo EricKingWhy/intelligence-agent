@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from agent_harness.session import USER_MESSAGE, Session
+from agent_harness.session.event import TOOL_APPROVAL_REQUESTED
 from agent_harness.session.service import (
     ActiveRunConflict,
     ApprovalQueueMissing,
@@ -28,6 +29,10 @@ from agent_harness.session.service import (
     WorkspaceNameInvalid,
 )
 from agent_harness.session.store import SessionSummaryStats
+from agent_harness.tooling.approval import ApprovalRequest
+from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.approve_policy import PolicyGranularity
+from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
 from agent_harness.web.app import session_service
 
 # ── 异常层级 ──────────────────────────────────────────────────────────
@@ -222,6 +227,79 @@ class TestResolveApproval:
                 session_id=existing_session,
                 approval_id="some-id",
             )
+
+    @pytest.mark.asyncio
+    async def test_policy_granularity_reaches_response(self, app_state):
+        """#684 P1-1：审批粒度经 resolve_approval 透传进 ApprovalResponse。
+
+        第三档「以后都允许」的粒度若不落到 response，ToolExecutor 就永远只能装
+        exact 档——本测试锁住这条生产链路。
+        """
+        sid, approval_id, _queue = _seed_pending_policy_approval(app_state)
+        service = session_service(app_state)
+        result = await service.resolve_approval(
+            session_id=sid,
+            approval_id=approval_id,
+            decision="approve_policy",
+            policy_granularity="command",
+        )
+        assert result.decision.value == "approve_policy"
+        assert result.response.policy_granularity is PolicyGranularity.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_policy_granularity_defaults_to_exact(self, app_state):
+        """#684：缺省粒度由 ApprovalResponse 归一为 exact（不猜 command）。"""
+        sid, approval_id, _queue = _seed_pending_policy_approval(app_state)
+        service = session_service(app_state)
+        result = await service.resolve_approval(
+            session_id=sid,
+            approval_id=approval_id,
+            decision="approve_policy",
+        )
+        assert result.response.policy_granularity is PolicyGranularity.EXACT
+
+    @pytest.mark.asyncio
+    async def test_invalid_policy_granularity_rejected(self, app_state):
+        """非法粒度 = 违反契约 → InvalidDecision（422），绝不静默回落（F22）。"""
+        sid, approval_id, _queue = _seed_pending_policy_approval(app_state)
+        service = session_service(app_state)
+        with pytest.raises(InvalidDecision):
+            await service.resolve_approval(
+                session_id=sid,
+                approval_id=approval_id,
+                decision="approve_policy",
+                policy_granularity="fuzzy",
+            )
+
+
+def _seed_pending_policy_approval(app_state):
+    """建一个 session + live queue + 一条允许 approve_policy 的待审批请求。
+
+    返回 `(session_id, approval_id, queue)`；`app_state.approval_queues` 是
+    `resolve_approval` 查找 live resolver 的唯一入口（同生产装配）。
+    """
+    session = Session.start(app_state.store)
+    queue = PendingApprovalQueue()
+    request = ApprovalRequest(
+        tool_name="bash",
+        args={"command": "echo hi"},
+        permission=ToolPermission.DANGER,
+        policy=PermissionPolicy.WORKSPACE_WRITE,
+        reason="r",
+        tool_call_id="c1",
+        approval_key="key-1",
+    )
+    approval_id = queue.register(request)
+    session.append(
+        TOOL_APPROVAL_REQUESTED,
+        {
+            "approval_id": approval_id,
+            "tool_name": "bash",
+            "allowed_decisions": ["approve_once", "deny", "approve_policy"],
+        },
+    )
+    app_state.approval_queues[session.session_id] = queue
+    return session.session_id, approval_id, queue
 
 
 # ── workspace name 校验 ──────────────────────────────────────────────

@@ -6708,6 +6708,57 @@ button.json-row {
   color: var(--text-tertiary);
   line-height: 1.5;
 }
+/* #635：手动压缩按钮 + 结果/错误行。只用既有语义 token（accent/danger/
+   text-tertiary/border-subtle/color-hover），无新 token ⇒ §15 双份定义不涉及；
+   spinner 复用全局 @keyframes spin。 */
+.ctx-usage-compact {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.ctx-usage-compact-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 6px var(--space-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.ctx-usage-compact-btn:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+.ctx-usage-compact-btn:disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+.ctx-usage-compact-note {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.ctx-usage-compact-error {
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+.ctx-usage-compact-result {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.ctx-usage-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 
 /* ── #203：自定义供应商管理弹层（provider-dialog / 列表 / 表单）──
  *  全部语义 token（AGENTS §15：新增 token 必须双份——本块只复用既有 token，
@@ -6915,3 +6966,115 @@ button.json-row {
   margin-top: 4px;
 }
 .picker-manage-item { border-top: 1px solid var(--border-subtle); }
+
+/* 持久审批规则管理浮层（#684 Phase 2）。浮层定位/材质走 .project-dialog 组
+ * （组件根类含 `project-dialog`），这里只写内容块——全部复用既有 token，
+ * 不新增主题变量（AGENTS §15 的双主题同步只约束新增/改动 token，此处一个都没动）。 */
+.approve-policy-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.approve-policy-count {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.approve-policy-refresh,
+.approve-policy-quiet,
+.approve-policy-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.approve-policy-refresh:hover,
+.approve-policy-quiet:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.approve-policy-danger {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--danger);
+}
+.approve-policy-danger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.approve-policy-error {
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
+.approve-policy-notice {
+  font-size: var(--text-xs);
+  color: var(--success);
+}
+.approve-policy-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+.approve-policy-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.approve-policy-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.approve-policy-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.approve-policy-tool {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.approve-policy-granularity {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.approve-policy-key {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.approve-policy-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.approve-policy-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.approve-policy-actions {
+  display: flex;
+  justify-content: flex-end;
+}

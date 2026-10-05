@@ -1,0 +1,1 @@
+2026-10-05	#520/#524 IMP batch A 第二次先回后正 9709a453 机械归属行（并 origin/main 1eaaeddf 携 #525 edit 同文件互斥一期；ort 零冲突，唯一代码交集 src/agent_harness/assembly.py 双侧语义独立并集零删除：本线 build_runtime/AgentFactory 增 completion_policy 装配参数 ∪ 来侧 resource_locks 装配；合并树全量 5714P/15S/51D/1F，唯一红=台账自检 test_real_ledger_passes_after_the_431_fix 落账前自指形态，本行落账后转绿）	65dbf641..9709a453

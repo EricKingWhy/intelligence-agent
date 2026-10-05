@@ -1,0 +1,1 @@
+2026-10-05	#668 先回后正 3472d23e 机械归属行（并 origin/main d64cda89 携 #527 fork 工作区纯整拷加固；ort 零冲突，相对首父 = 纯来侧内容 src/agent_harness/session/fork.py + tests/session/test_fork_workspace_copy.py + impC 收据/台账行，本线侧零删除零改写；来侧代码由同树落账行 docs/review_ledger.d/impC-i527-fork-copy-0dff7a98-344ca36f.tsv 全覆盖，本行只归并笔本身。合并树全量 5721P/15S/51D/0F 预期，唯一潜在红 = 台账自检金丝雀落账前自指形态，本行落账后转绿）	2d98a408..3472d23e

@@ -165,6 +165,23 @@ def git(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _git_env_clean(env: dict | None) -> dict:
+    """剥掉继承的 GIT_*：车道子进程的 git 一律靠 cwd 解析仓库，不需要任何继承值。
+
+    pre-push hook 上下文里 git 会注入 GIT_DIR（linked worktree push 时是**绝对路径**）
+    等变量；guards/focused 等车道里的嵌套 git 测试继承后会把 tmp 仓库操作劫持到外层
+    仓库（#668：伪红 + 共享 config 被翻 core.bare + 分支被提交垃圾 commit）。剥离对
+    正常运行是恒等变换（无 GIT_* 可剥）；gate0 自身对真实仓库的 `git()` 探针不经此路径。
+    """
+    base = dict(os.environ if env is None else env)
+    return {k: v for k, v in base.items() if not k.startswith("GIT_")}
+
+
+def _receipt_lane_env(extra: dict | None) -> dict:
+    """`--replay` 复核路径的车道 env：落盘 env 叠在父环境上，同过 `_git_env_clean`。"""
+    return _git_env_clean(dict(os.environ, **(extra or {})))
+
+
 class Lane:
     """一条车道：名字 + 说明 + 怎么跑。`argv is None` 表示"跑不了"（fail-closed）。"""
 
@@ -411,8 +428,8 @@ def run_lane(lane: Lane) -> tuple[int, float, str]:
     started = time.time()
     try:
         proc = subprocess.run(
-            lane.argv, cwd=lane.cwd, env=lane.env, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=LANE_TIMEOUT, check=False,
+            lane.argv, cwd=lane.cwd, env=_git_env_clean(lane.env), capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=LANE_TIMEOUT, check=False,
         )
         return proc.returncode, time.time() - started, (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
@@ -868,7 +885,7 @@ def replay_reading(path: str) -> int:
                   " ⇒ 复核不了就不放行")
             continue
         lane_argv = _expand_argv(recorded)
-        env = dict(os.environ, **(lane.get("env") or {}))
+        env = _receipt_lane_env(lane.get("env"))
         cwd = os.path.join(REPO_ROOT, lane.get("cwd") or ".")
         try:
             proc = subprocess.run(lane_argv, cwd=cwd, env=env, capture_output=True, text=True,

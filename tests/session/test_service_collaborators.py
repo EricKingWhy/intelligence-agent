@@ -51,6 +51,7 @@ SESSION_SERVICE_COLLABORATORS = frozenset({
     "ensure_stores",
     "get_wiring",
     "validate_session_declaration",
+    "registered_tool_names",
 })
 
 PROJECT_SERVICE_COLLABORATORS = frozenset({

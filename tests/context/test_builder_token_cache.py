@@ -15,7 +15,13 @@ import pytest
 from agent_harness.context import builder as builder_module
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.context.tokens import estimate_message_tokens
-from agent_harness.session import MODEL_COMPLETED, TOOL_RESULT, USER_MESSAGE
+from agent_harness.session import (
+    MODEL_COMPLETED,
+    TOOL_RESULT,
+    USER_MESSAGE,
+    JsonlSessionStore,
+    Session,
+)
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -79,6 +85,33 @@ class TestTokenMemoCorrectness:
         # 无新事件的重复 build：零新增编码
         await builder.build(session)
         assert calls["n"] == first_round + 3
+
+    def test_memo_does_not_cross_session_objects_with_same_id(self, tmp_path):
+        """A cache entry belongs to its Session object, even when ids/sequences match."""
+        session_a = Session.start(
+            JsonlSessionStore(root=tmp_path / "a"), session_id="same",
+        )
+        session_b = Session.start(
+            JsonlSessionStore(root=tmp_path / "b"), session_id="same",
+        )
+        session_a.append(USER_MESSAGE, {"content": "small"})
+        session_a.append(MODEL_COMPLETED, {"content": "ok"})
+        session_b.append(USER_MESSAGE, {"content": "big " * 4000})
+        session_b.append(MODEL_COMPLETED, {"content": "ok"})
+        messages_a = session_a.derive_messages()
+        messages_b = session_b.derive_messages()
+        builder = ContextBuilder(ScriptedModel([]))
+
+        assert [event.seq for event in session_a.events[1:]] == [
+            event.seq for event in session_b.events[1:]
+        ]
+        estimate_a = builder._estimate_tokens_cached(session_a, messages_a)
+        estimate_b = builder._estimate_tokens_cached(session_b, messages_b)
+        estimate_a_again = builder._estimate_tokens_cached(session_a, messages_a)
+
+        assert estimate_a == estimate_message_tokens(messages_a)
+        assert estimate_b == estimate_message_tokens(messages_b)
+        assert estimate_a_again == estimate_message_tokens(messages_a)
 
 
 class TestTokenMemoFallback:

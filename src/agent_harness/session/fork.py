@@ -22,6 +22,7 @@ append-only 线性 JSONL，树是 SessionMetaStore 索引层的元数据关系�
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import shutil
@@ -47,6 +48,8 @@ from agent_harness.session.event import (
     FORK_IN_PROGRESS,
     MODEL_COMPLETED,
     PERMISSION_CHANGED,
+    PERMISSION_GRANTED,
+    PERMISSION_REVOKED,
     RUN_FAILED,
     RUN_PAUSED,
     RUN_RESUMED,
@@ -57,6 +60,7 @@ from agent_harness.session.event import (
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
+    WORKFLOW_MODE_CHANGED,
     SessionEvent,
 )
 from agent_harness.session.session import Session
@@ -226,12 +230,23 @@ async def fork_session(
     # **更早**的那条（锚点之前），覆盖掉下面从父派生的**当下** effective 档，造成
     # 「父 fork 后又改过档、child 却继承旧档」。意图标记同理：它描述的是**这一条
     # fork 线**的构建过程，孙代 seed 不该携带（孙的 fork 流程写自己的标记）。
+    # #526：`permission/approval-granted|revoked`（会话级审批授权）与
+    # `workflow/mode-changed`（工作流档）同属会话级状态——fork **不继承授权**
+    # （#358 W-14 / F26：高风险权限不因 Fork 静默扩大；设计文档 §5 推荐默认值），
+    # 工作流档亦不继承（child 从 NORMAL 起，用户可一键重进 plan）。
     boundary_events = [event for event in parent_events if event.seq < anchor.seq]
     seed = [
         event
         for event in boundary_events
         if event.type
-        not in {SESSION_STARTED, PERMISSION_CHANGED, FORK_IN_PROGRESS}
+        not in {
+            SESSION_STARTED,
+            PERMISSION_CHANGED,
+            FORK_IN_PROGRESS,
+            PERMISSION_GRANTED,
+            PERMISSION_REVOKED,
+            WORKFLOW_MODE_CHANGED,
+        }
     ]
     _validate_run_complete(seed, parent_session_id)
 
@@ -262,7 +277,14 @@ async def fork_session(
         event.event_id
         for event in boundary_events
         if event.type
-        in {SESSION_STARTED, PERMISSION_CHANGED, FORK_IN_PROGRESS}
+        in {
+            SESSION_STARTED,
+            PERMISSION_CHANGED,
+            FORK_IN_PROGRESS,
+            PERMISSION_GRANTED,
+            PERMISSION_REVOKED,
+            WORKFLOW_MODE_CHANGED,
+        }
     }
     event_id_remap: dict[str, str | None] = {
         event_id: None for event_id in removed_state_event_ids
@@ -419,7 +441,10 @@ def _copy_workspace(
     注册表自建的 harness 自有路径）走 **暂存 + 同卷 rename 发布**——先把父
     目录整拷进 `<root>/.fork-tmp/<child_id>-<rand>`（拷贝中途崩溃只污染暂存，
     child 根目录保持空壳），成功后删空壳、单次 `os.replace`（同一 registry
-    根 ⇒ 同卷）到位。其余形态（docker 容器内路径、命名 workspace 指向的
+    根 ⇒ 同卷）到位。**跨卷降级（#527）时发布为非原子直拷**：`os.replace`
+    抛 EXDEV 则 `copytree(staging, child_root)`，此时观察者可能看到半份
+    child_root；失败由内层清理 + `_reclaim_failed_fork` 兜底。
+    其余形态（docker 容器内路径、命名 workspace 指向的
     用户目录）保持原位 copytree——rename 无法跨边界，其残余语义不变（由
     映射与事件层对账兜底）。拷贝失败 = 基础设施故障，暂存现场回收后原样
     上抛（fork 不带残缺快照继续）。
@@ -448,9 +473,22 @@ def _copy_workspace(
         raise
     # 发布：child 根目录预期是空壳（`ensure_started` 对 local 后端是 no-op，
     # 拷贝前无人写入），删壳后同卷 rename——观察者要么看到空目录、要么看到
-    # 完整副本，不存在半份拷贝。
+    # 完整副本，不存在半份拷贝。跨卷时 os.replace 抛 EXDEV，降级为直接整拷
+    #（纯整拷，不引入 CoW；#527 裁决 A）。
     shutil.rmtree(child_root, ignore_errors=True)
-    os.replace(staging, child_root)
+    try:
+        os.replace(staging, child_root)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        try:
+            shutil.copytree(staging, child_root)
+        except BaseException:
+            shutil.rmtree(child_root, ignore_errors=True)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _reclaim_failed_fork(registry, child_session_id: str) -> None:

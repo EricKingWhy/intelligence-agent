@@ -623,20 +623,33 @@ export async function streamSession(sessionId: string, afterSeq: number): Promis
  *    真已决的兜底不靠错误码：`permission/resolved` 投影事件会把卡片移出待决队列。
  *  Other non-ok = real failure (decision did NOT reach backend) → plain Error.
  *  OBS-015 fix: the caller must distinguish these two — flipping the card to
- *  "decided" on a network error is a dangerous false positive for security. */
+ *  "decided" on a network error is a dangerous false positive for security.
+ *
+ *  #684：`decision` / `policyGranularity` 可选。省略 `decision` 时按 `approved`
+ *  推导（True→approve_once，False→deny）——旧调用点逐字不变。第三档「以后都允许」
+ *  传 `decision='approve_policy'` + `policyGranularity='exact'|'command'`；
+ *  只有后端 requested 事件的 `allowed_decisions` 含该项时才该发（F21 显式授权）。 */
 export async function postApproval(
   sessionId: string,
   approvalId: string,
   approved: boolean,
+  decision?: string,
+  policyGranularity?: 'exact' | 'command',
 ): Promise<{ status: string; approval_id: string; decision: string }> {
+  const body: Record<string, unknown> = {
+    approval_id: approvalId,
+    approved,
+    decision: decision ?? (approved ? 'approve_once' : 'deny'),
+  };
+  // 只有显式给了粒度才带键：普通批准/拒绝不带 policy_granularity（后端忽略它，
+  // 但少一个键 = 请求体更接近旧契约，给中转/日志少一个可误读的字段）。
+  if (policyGranularity !== undefined) {
+    body.policy_granularity = policyGranularity;
+  }
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      approval_id: approvalId,
-      approved,
-      decision: approved ? 'approve_once' : 'deny',
-    }),
+    body: JSON.stringify(body),
   });
   if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
   if (res.status === 404) throw new ApprovalGoneError('该审批已失效（运行已中断或服务已重启）');
@@ -1853,4 +1866,138 @@ export async function getContextUsage(sessionId: string): Promise<ContextUsage> 
   if (res.status === 404) throw new NotFoundError('会话不存在');
   if (!res.ok) throw new Error(`context-usage ${res.status}`);
   return res.json();
+}
+
+/** 手动压缩回执（后端 `POST /api/sessions/{id}/context/compact`，`#635`）。
+ *
+ *  形状是服务层 DTO 的字段透传。`bracket_id` 指向新落的 bracket；低水位
+ *  （无可压缩早期轮 / 校验闸门未过）时 `bracket_id=null`、`compacted_turn_count=0`，
+ *  **仍 200 且零写入**——"没有可压的"不是错误。`tokens_before/after` 同一口径，
+ *  可直接相减展示。 */
+export interface SessionContextCompacted {
+  bracket_id: string | null;
+  source_seq_start: number | null;
+  source_seq_end: number | null;
+  tokens_before: number;
+  tokens_after: number;
+  compacted_turn_count: number;
+  summary_model: string | null;
+}
+
+/** 压缩是单次同步 POST，网关实测有 44s 送达延迟（`web/app.py` 注释），且不引入
+ *  SSE/轮询。给一个**显式**超时上限，把"永远转圈"变成一个明确的错误提示；正常
+ *  10–60s 远在阈值内。**不是**服务端超时——只是前端停止等待。 */
+const COMPACT_TIMEOUT_MS = 180_000;
+
+/** 手动触发一次上下文压缩（`#635`）：每次调用都是用户显式请求的一次**新**压缩，
+ *  追加新 bracket；重复调用安全但**非 no-op**（与 `purge-stale-tools` 的幂等不同）。
+ *
+ *  错误矩阵（后端 `web/app.py::compact_session_context`）：
+ *    404 —— 没有这个会话；
+ *    409 —— 在途 run 或该会话已有压缩在途（`detail` 原样上抛，不自己编文案）；
+ *    422 —— id 形态非法 / 非法 `?model=`（`detail` 原样上抛）；
+ *    403 —— 非本机来源（宿主侧管理动作只接受本机来源，ADR-0025 D1）。
+ *  超时 → 明确的 Error（前端不再无限等待）。 */
+export async function compactSession(
+  sessionId: string,
+  model?: string,
+): Promise<SessionContextCompacted> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMPACT_TIMEOUT_MS);
+  try {
+    const query = model ? `?model=${encodeURIComponent(model)}` : '';
+    const res = await apiFetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/context/compact${query}`,
+      { method: 'POST', signal: controller.signal },
+    );
+    if (!res.ok) throw await sessionError(res, '压缩会话上下文失败');
+    return res.json();
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error('压缩请求超时（180s）——仍可稍后在上下文容量面板查看结果');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
+// ── 持久审批规则（#684 Phase 2）──
+
+/** 一条项目级持久审批规则（后端 GET /api/approve-policy/rules）。
+ *
+ *  规则内容由 Runtime 在审批流里从已校验参数精确派生（用户只能选粒度，不能手写
+ *  规则文本）；前端只读展示与原样撤销，**不提供创建入口**——唯一安装路径是用户在
+ *  审批卡上主动选「以后都允许」（F21：禁止静默创建）。 */
+export interface ApprovePolicyRule {
+  id: string;
+  tool: string;
+  /** exact 档 = 完整身份键（含 args hash）；command 档 = 去 args hash 的命令串。 */
+  key: string;
+  granularity: 'exact' | 'command';
+  /** 批准时工具权限；命中时会重验（工具权限被抬高则旧规则失效，防提权）。 */
+  permission_at_approval: string;
+  created_at: string;
+}
+
+/** 撤销回执（POST /api/approve-policy/rules/{id}/revoke）。`revoked` 是**动作后**
+ *  的真值：幂等——重复撤销 / id 不存在仍 200，`revoked=false` 表示当时本就不存在。 */
+export interface ApprovePolicyRuleRevoked {
+  id: string;
+  revoked: boolean;
+}
+
+/** 白名单投影：契约字段必须在这里登记，否则静默丢弃（api.ts 的通用纪律）。
+ *  `granularity` 只认 exact / command 两档（F22：系统不猜第三档）。 */
+function parseApprovePolicyRule(raw: unknown): ApprovePolicyRule | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== 'string' || !r.id) return null;
+  if (typeof r.tool !== 'string') return null;
+  if (typeof r.key !== 'string') return null;
+  const granularity =
+    r.granularity === 'exact' || r.granularity === 'command' ? r.granularity : null;
+  if (granularity === null) return null;
+  if (typeof r.permission_at_approval !== 'string') return null;
+  if (typeof r.created_at !== 'string') return null;
+  return {
+    id: r.id,
+    tool: r.tool,
+    key: r.key,
+    granularity,
+    permission_at_approval: r.permission_at_approval,
+    created_at: r.created_at,
+  };
+}
+
+/** GET /api/approve-policy/rules —— 列出本项目持久审批规则（只读）。
+ *  无规则 / 文件缺失 / 文件损坏后端的 fail-closed 都是 `{"rules": []}`；非 2xx 抛 Error。 */
+export async function listApprovePolicyRules(): Promise<ApprovePolicyRule[]> {
+  const res = await apiFetch('/api/approve-policy/rules');
+  if (!res.ok) throw new Error(`approve-policy rules ${res.status}`);
+  const body = (await res.json().catch(() => null)) as { rules?: unknown } | null;
+  const raw = body && Array.isArray(body.rules) ? body.rules : [];
+  return raw.flatMap((entry) => {
+    const rule = parseApprovePolicyRule(entry);
+    return rule ? [rule] : [];
+  });
+}
+
+/** POST /api/approve-policy/rules/{id}/revoke —— 撤销一条持久规则（幂等）。
+ *  200 `{id, revoked}`；422 id 形态非法。调用方**必须先二次确认**（F21：持久
+ *  "always allow" 是全系统攻击面最大的单点，撤销是不可静默触发的显式动作）。 */
+export async function revokeApprovePolicyRule(
+  ruleId: string,
+): Promise<ApprovePolicyRuleRevoked> {
+  const res = await apiFetch(
+    `/api/approve-policy/rules/${encodeURIComponent(ruleId)}/revoke`,
+    { method: 'POST' },
+  );
+  if (!res.ok) throw new Error(`revoke approve-policy rule ${res.status}`);
+  const body = (await res.json().catch(() => null)) as Partial<ApprovePolicyRuleRevoked> | null;
+  return {
+    id: typeof body?.id === 'string' ? body.id : ruleId,
+    revoked: body?.revoked === true,
+  };
 }

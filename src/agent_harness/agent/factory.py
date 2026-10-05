@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from agent_harness.agent.budget import DEFAULT_MAX_AGENT_TURNS, resolve_local_fuse
+from agent_harness.agent.completion import CompletionPolicy
 from agent_harness.agent.profiles import AgentSpec
 from agent_harness.agent.resume_evidence import delegated_child_evidence_port
 from agent_harness.agent.run_budget import SessionBudgetPort
@@ -50,6 +51,9 @@ class AgentFactory:
         persona: PersonaConfig | None = None,
         include_tool_guidance: bool = False,
         local_max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS,
+        # `#524`：完成门策略透传（子与父同一策略面）；None = 既有默认
+        # （DefaultCompletionPolicy），装配不传时行为零变化。
+        completion_policy: CompletionPolicy | None = None,
     ) -> None:
         self._model = model
         self._fallback_model = fallback_model
@@ -75,6 +79,8 @@ class AgentFactory:
         # B2 契约（child.system_prompt == spec.system_prompt）的成立与"工具恰好没有
         # guidance"脱钩——否则有人给 ReadTool 加 guidance，B2 会莫名变红。
         self._include_tool_guidance = include_tool_guidance
+        # `#524`：完成门策略（可选域策略的透传面；None = 既有默认）。
+        self._completion_policy = completion_policy
 
     def create(
         self,
@@ -161,4 +167,6 @@ class AgentFactory:
             # 唯一口径在 resume_evidence.delegated_child_evidence_port——恢复侧
             # （service.resume_and_launch）对 child 会话重算出同一套值，两格同源。
             stuck_evidence=delegated_child_evidence_port(spec.name, workspace=workspace),
+            # `#524`：子与父同一完成门策略面（不变量 #19 的同一 Loop 语义）。
+            completion_policy=self._completion_policy,
         )

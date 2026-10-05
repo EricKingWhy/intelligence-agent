@@ -385,17 +385,27 @@ class TestAtomicWrite:
         assert s1.session_id != s2.session_id
 
     def test_locked_target_fails_explicitly_and_keeps_old_file(self, tmp_path) -> None:
+        import agent_harness.session.progress as progress_module
+
         session = _session(tmp_path)
         apply_task_definition(session, task_text="第一版")
         assert _write(tmp_path, session).ok
         target = progress_paths(tmp_path, session.session_id).markdown
         old_bytes = target.read_bytes()
         session.append(USER_MESSAGE, {"content": "推进"})
-        with open(target, "r+", encoding="utf-8") as _fh:  # 句柄存活即 Windows 锁
+        # 外部写入方经同一锁协议持锁（独立 fd ⇒ 不同 file description，
+        # flock 互斥在同进程内也成立——POSIX flock(2) 语义）
+        lock_path = target.parent / progress_module._LOCK_NAME
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            progress_module._take_write_lock(fd)
             outcome = _write(tmp_path, session)
             assert not outcome.ok, "外部锁定：明确失败，不静默吞"
             assert outcome.error_kind in ("locked", "env")
             assert outcome.reason
+        finally:
+            progress_module._release_write_lock(fd)
+            os.close(fd)
         assert target.read_bytes() == old_bytes, "失败后旧文件原样（不谎报最新）"
 
     def test_readonly_target_fails_explicitly(self, tmp_path) -> None:
@@ -454,6 +464,40 @@ class TestAtomicWrite:
         orphan.write_text("half-written", encoding="utf-8")
         assert _write(tmp_path, session).ok
         assert not orphan.exists(), "下一次写清理同模式孤儿临时文件"
+
+    def test_write_lock_file_survives_cleanup_glob(self, tmp_path) -> None:
+        """#660：锁文件命名避开 progress.md.* 清理 glob——下次写入不得误删
+        外部持有的锁文件，否则协议被架空（锁文件在 = 有写入方在协议内持锁）。"""
+        import agent_harness.session.progress as progress_module
+
+        session = _session(tmp_path)
+        apply_task_definition(session, task_text="T")
+        paths = progress_paths(tmp_path, session.session_id)
+        paths.directory.mkdir(parents=True, exist_ok=True)
+        lock_path = paths.directory / progress_module._LOCK_NAME
+        lock_path.write_text("", encoding="utf-8")
+        assert _write(tmp_path, session).ok
+        assert lock_path.exists(), "清理 glob 不得命中协议锁文件"
+
+    def test_write_lock_open_failure_fails_explicitly(self, tmp_path, monkeypatch) -> None:
+        """#660 回归：锁文件 os.open 抛 OSError（如只读目录）必须收敛为明确失败，
+        不得让异常逃逸出 write_progress_file（此前同场景由 mkstemp 在 try 内接住）。"""
+        import agent_harness.session.progress as progress_module
+
+        real_open = os.open
+
+        def _boom(path, flags, *args, **kwargs):
+            if os.fspath(path).endswith(progress_module._LOCK_NAME):
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", _boom)
+        session = _session(tmp_path)
+        apply_task_definition(session, task_text="T")
+        outcome = _write(tmp_path, session)
+        assert not outcome.ok, "锁文件建不出：明确失败，不抛异常逃逸"
+        assert outcome.error_kind == "env"
+        assert outcome.reason
 
     def test_source_seq_and_hash_in_meta_match_body(self, tmp_path) -> None:
         session = _session(tmp_path)
@@ -554,16 +598,18 @@ class TestKillMidWriteWindows:
 class TestGitVisibility:
     @pytest.mark.skipif(shutil.which("git") is None, reason="需要 git")
     def test_file_visible_in_status_index_untouched(self, tmp_path) -> None:
+        # 剥掉继承的 GIT_*：hook 注入的 GIT_DIR 会把 tmp 仓库操作劫持到外层仓库（#668）。
+        git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         for args in (
             ["init"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
         ):
             subprocess.run(["git", "-C", str(tmp_path), *args], check=True,
-                           capture_output=True)
+                           capture_output=True, env=git_env)
         (tmp_path / "seed.txt").write_text("seed", encoding="utf-8")
         subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True,
-                       capture_output=True)
+                       capture_output=True, env=git_env)
         subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "seed"], check=True,
-                       capture_output=True)
+                       capture_output=True, env=git_env)
         session = _session(tmp_path / ".store")
         apply_task_definition(session, task_text="T")
         outcome = write_progress_file(
@@ -572,13 +618,13 @@ class TestGitVisibility:
         assert outcome.ok
         status = subprocess.run(
             ["git", "-C", str(tmp_path), "status", "--porcelain"],
-            check=True, capture_output=True, text=True, encoding="utf-8",
+            check=True, capture_output=True, text=True, encoding="utf-8", env=git_env,
         ).stdout
         assert any(line.startswith("??") and "agent-progress" in line
                    for line in status.splitlines()), "文件在 git status 可见（未跟踪）"
         staged = subprocess.run(
             ["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"],
-            check=True, capture_output=True, text=True, encoding="utf-8",
+            check=True, capture_output=True, text=True, encoding="utf-8", env=git_env,
         ).stdout
         assert staged.strip() == "", "index 未被系统修改（不 git add）"
 

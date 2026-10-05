@@ -210,6 +210,43 @@ async def test_build_runtime_wires_model_fallback(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_runtime_wires_configured_summary_model(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+        agent_models=(
+            '[{"name":"summary-small","provider":"mimo",'
+            '"model_name":"mimo-v2.6-flash","api_key":"sk-summary"}]'
+        ),
+        summary_model="summary-small",
+    )
+    _, wiring = await assemble_wiring(settings)
+    stores = _stores(tmp_path)
+    await initialize_stores(stores)
+    created = []
+
+    def fake_create(config, *, reasoning_effort=None, **kw):
+        model = ScriptedModelFactory()
+        created.append((config, model))
+        return model
+
+    with patch("agent_harness.assembly.create_chat_model", side_effect=fake_create):
+        runtime = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+            session_id="summary-model", workspace=tmp_path / "summary-workspace",
+            max_agent_turns=5,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+        )
+
+    assert len(created) == 2
+    summary_config, summary_model = created[1]
+    assert summary_config.model_name == "mimo-v2.6-flash"
+    assert runtime._context_builder.summary_model is summary_model
+
+
+@pytest.mark.asyncio
 async def test_assemble_wiring_empty_config_is_inert(tmp_path):
     """CAPABILITIES 为空 → 零工具、零 provider、零生命周期对象（默认 opt-in）。"""
     _, wiring = await assemble_wiring(_settings(tmp_path))
