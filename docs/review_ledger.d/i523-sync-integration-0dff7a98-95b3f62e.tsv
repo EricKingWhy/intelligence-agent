@@ -1,0 +1,1 @@
+2026-10-05	#523 main-sync integration audit; base=origin/main 0dff7a98; reviewed the B-branch diff through the merge tip and checked assembly composition; no new findings (P0–P4=0; ticket dual-axis rows remain authoritative)	0dff7a987304dae13da593465b67eaf5148a5050..95b3f62e3f959af16228e3cdcf3041574a4b50ce
