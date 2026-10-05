@@ -448,13 +448,19 @@ class TestBuilderWritesBracket:
 
         assert len(summaries) == 1
         assert messages[-1].content == "second current request"
-        # #556 裁决 C：目标节 = 当前生效目标（builder 从全量 events 重建的
+        # #556 裁决 C：目标行 = 当前生效目标（builder 从全量 events 重建的
         # facts 通道），叙述性用户轮次不再跨压缩逐字合并——跨压缩的**继承**
         # 语义由标识节承担（下方 R-042 / 4096 断言：第一次压缩的提取结果
         # 经旧摘要继承进第二次压缩的节，且受确定性上限收敛）。
-        assert sections["## 原始目标与用户约束"] == json.dumps(
+        # #710 方向 C：段内最新活跃用户消息进「当前生效指令」承载位（确定性
+        # 重算，不链式继承旧摘要文本），来源 seq 指针可回读。
+        section0_lines = sections["## 原始目标与用户约束"].splitlines()
+        assert section0_lines[0] == json.dumps(
             original_user, ensure_ascii=False,
         )
+        assert '当前生效指令："first current request"' in sections[
+            "## 原始目标与用户约束"
+        ]
         exact_identifiers = json.loads(sections["## 精确标识清单"])
         assert "R-042" in exact_identifiers
         assert "4096" in exact_identifiers

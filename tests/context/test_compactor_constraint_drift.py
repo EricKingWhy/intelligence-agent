@@ -37,7 +37,7 @@ from agent_harness.context.compactor import (
 from agent_harness.session import MODEL_COMPLETED, USER_MESSAGE
 from agent_harness.session.derive import (
     COMPACTION_SUMMARY_MESSAGE_NAME,
-    derive_messages,
+    derive_messages_with_source_ranges,
     derive_protected_facts,
 )
 from tests.conftest import make_session
@@ -53,7 +53,12 @@ NEXT_MESSAGE = "接着来"
 # 在 tiktoken 精确计数与离线字节上界两种估算下都稳定触发压缩（实测 6196 tokens）。
 LONG_REPLY_CN = "好的。" + "爬" * 2000
 LONG_REPLY_JP = "わかりました。" + "日" * 2000
-LONG_REPLY_EN = "Sure." + "英" * 2000
+#: 红测 3 的第二轮专用：第一次压缩后 early 折叠为一条摘要（估算 ≈600 tokens），
+# 2000 字符轮只把第二次 build 推到 ≈2505 tokens，**低于** auto 限 3000——
+# "压缩 → 再压缩"几何上不触发（Phase 1 红测在此断言前已失败、未暴露）。
+# 放大到 6000 字符（估算 ≈6300 > 3000，且 < hard 限 8500）使再压缩真实发生；
+# 只改夹具尺寸让场景可执行，不放宽任何断言。
+LONG_REPLY_EN = "Sure." + "英" * 6000
 
 #: 现有 compactor 测试的模型撰写的四节；其余四节由程序化投影生成。
 MODEL_SECTIONS = """## 已完成工作与关键决策
@@ -175,7 +180,13 @@ async def test_red3_deterministic_replay_and_recompute_across_compactions(tmp_pa
     events_before_first = list(session.events)
     facts_first = derive_protected_facts(events_before_first)
     # compact() 的 cut = 最后一条 HumanMessage ⇒ early = 投影去掉最后一条。
-    early_first = derive_messages(events_before_first)[:-1]
+    # #710 补强：direct-call 路径必须用 derive_messages_with_source_ranges 取
+    # ranges 并传入，与 builder 路径同输入——否则承载位来源指针（票 §5.1
+    # 「来源可回读」硬要求）与「逐字节相等」在逻辑上不可兼得（Phase 1 已证：
+    # derive_messages 剥掉了来源区间，指针不可能是 (messages, facts) 的函数）。
+    pairs_first = derive_messages_with_source_ranges(events_before_first)
+    early_first = [message for message, _ in pairs_first][:-1]
+    early_ranges_first = [source_range for _, source_range in pairs_first][:-1]
 
     model = ScriptedModel([
         AIMessage(content=MODEL_SECTIONS),
@@ -188,8 +199,12 @@ async def test_red3_deterministic_replay_and_recompute_across_compactions(tmp_pa
     section0_first = _section0(_summary_message(messages_first).content)
 
     # 纯函数重放：同一事件流两次调用逐字节相等（_validate_summary 逐字节闸门的前提）。
-    replay_a = _programmatic_summary_sections(early_first, facts_first)
-    replay_b = _programmatic_summary_sections(early_first, facts_first)
+    replay_a = _programmatic_summary_sections(
+        early_first, facts_first, early_ranges_first,
+    )
+    replay_b = _programmatic_summary_sections(
+        early_first, facts_first, early_ranges_first,
+    )
     assert replay_a == replay_b
     # 承载位必须由该确定性纯函数产出（才能被程序化节逐字节校验覆盖）。
     assert JAPANESE_JSON in replay_a[HEADING_0], (
@@ -204,13 +219,19 @@ async def test_red3_deterministic_replay_and_recompute_across_compactions(tmp_pa
     session.append(USER_MESSAGE, {"content": NEXT_MESSAGE})
     events_before_second = list(session.events)
     facts_second = derive_protected_facts(events_before_second)
-    early_second = derive_messages(events_before_second)[:-1]
+    pairs_second = derive_messages_with_source_ranges(events_before_second)
+    early_second = [message for message, _ in pairs_second][:-1]
+    early_ranges_second = [source_range for _, source_range in pairs_second][:-1]
 
     messages_second = await builder.build(session)
     section0_second = _section0(_summary_message(messages_second).content)
 
-    replay_c = _programmatic_summary_sections(early_second, facts_second)
-    replay_d = _programmatic_summary_sections(early_second, facts_second)
+    replay_c = _programmatic_summary_sections(
+        early_second, facts_second, early_ranges_second,
+    )
+    replay_d = _programmatic_summary_sections(
+        early_second, facts_second, early_ranges_second,
+    )
     assert replay_c == replay_d
     assert ENGLISH_JSON in replay_c[HEADING_0], (
         "第二次压缩的承载位必须是压缩段内最新活跃用户消息（'改用英文回答。'），"
