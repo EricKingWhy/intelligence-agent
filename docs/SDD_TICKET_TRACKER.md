@@ -7204,6 +7204,29 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **集成与同题修复相遇**：#656 `1576c938`（静态桩方案）= 同题独立修复先行进 main（CI 实证 run 37203565358 起 env 钉转绿）；`d4fac9cb` 按 §14.7 并集融合 = 静态桩基座 ∪ 本线 missing 参数 + fail-closed 钉（补其工具缺失分支零覆盖），零删除、融合后 20/20 绿；机械归属行 `i636-sync-merge3-caab034b-d4fac9cb.tsv`。集成三跳：push → CI gate0 绿（run 37211474425）→ merge `b7aad181`（2026-10-04T15:03:01Z），Closes 自动关单。
 - **gate1 复核（run 37211548325 @`b7aad181`）**：2 failed / 5656 passed——env 钉 + fail-closed 钉全绿（#636 根因 CI 实证消除）；唯一残余红因 = W-05 `test_progress_file.py::TestAtomicWrite` 两用例 Windows 锁/只读语义 Linux CI 假绿（自 `567e14e6` 起即在，与本票无关），已开 #660（needs-triage 未认领）。§14.9 新基准 = `b7aad181`；远端分支 `fix/i628-gate1-env-pin-ci` 未删（需单独批准）。
 
+## #637（P0，branch-ready；本地完成待 GitHub 收口）
+
+- 分支 codex/context-637；基线 fb9dd40a3e9f00401aa350dcfa93b019b6c06eac；修复提交 fca534ca6e8aeddffc8ac97ed1fd0b9aa5c6a13a；票面边界测试提交 8e695607d120cc4dda15353b0b6abf31899e6f77。根因：target_not_reached 后候选先写入共享成功状态，重试失败时残留候选仍被返回。修复为候选先局部生成并通过全部现有校验，之后才原子接受；重试数、target/hard guard、失败降级契约不变。
+- AC 证据：target 拒绝→non_text/timeout/transport_error/再次 target 拒绝参数化：test_rejected_candidate_is_not_used_when_retry_fails；首次成功：TestCompactorBracketMetadata.test_compact_returns_bracket_id_and_summary；首次拒绝、第二次成功且结果严格低于 auto limit：test_rejected_first_candidate_is_not_used_when_retry_succeeds；hard guard 成本 84,999/85,000 保留原投影、85,001 抛异常：test_failed_summaries_keep_inclusive_hard_guard_boundary；双失败超 hard guard 并携失败记录：test_failed_summaries_over_hard_guard_raise_with_both_failures；builder 双失败事件/JSONL reload 且无成功 bracket：test_builder_persists_only_failures_when_both_summary_attempts_fail；Builder 双失败超 hard guard、保留原事件且无成功 bracket：test_hard_guard_rejects_when_recent_turn_cannot_fit；成功 bracket 写入：test_build_writes_four_event_bracket；成功摘要写入后 JSONL reload/rederive：test_second_compaction_merges_previous_summary_after_reload（build 内逐消息比较 _reproject(session) 与 result.messages，reload 后检查摘要、当前消息和原事件前缀）；取消传播：test_cancellation_is_not_swallowed_as_summary_failure。
+- 验证：修复前真实红（原 non_text 回归断言 compacted_turn_count 期望 0、实为 1）；最终新增 AC focused 12 passed；tests/context 全套 197 passed；Ruff 三个改动文件通过；git diff --check 通过。仓库未配置 Python 类型检查车道；Pyright 1.1.414 定向检查三改动文件退出 1、20 项诊断均在本次未改行（含既有 list content startswith 类型问题），不记作通过。
+- 审查：代码/测试 Correctness/Spec 与 Standards 双轴均 CLEAN，累计审查范围 fb9dd40a3e9f00401aa350dcfa93b019b6c06eac..8e695607d120cc4dda15353b0b6abf31899e6f77；文档证据补正复审 dc155ae02cfaf14e7c0ebbbd05952505073d4736..3aee51476bb4dc335c97f9075986e2dbd25b1f93 双轴 CLEAN、0 未解决。此前发现的证据索引问题已修复；旧 fca shard 逐字节恢复，fb9..8e shard 未改。记录：docs/review_ledger.d/i637-context-atomicity-fb9dd40a-8e695607.tsv、docs/review_ledger.d/i637-evidence-followup-dc155ae0-3aee5147.tsv。
+- GitHub 收口：2026-10-04 issue CLOSED（completed），证据评论 [issuecomment-5980175738](https://github.com/EricKingWhy/intelligence-agent/issues/637#issuecomment-5980175738)；in-progress 已移除，剩余标签 bug/P0。分支 codex/context-637，最终本地 tip 431eb8ab77029b0680df090415ab61774db4ab37；未 push、未建 PR、未进入 main。集成负责人：EricKingWhy。
+
+## #638（P0，已完成并关单；分支未集成）
+
+- 分支 `codex/context-638`；同步基线 `5432a4c37a3ba71ec701cd6446a12449daaba21b`（含 `origin/main` `756ffbf0cc4f972dcc4ec0bf38cad24201bd2e0c`）；实现提交 `b394e5df8f41266048de1c7f43cd74312a7ea2ed`。`_is_compaction_summary` 对非字符串 SystemMessage content 返回 False，摘要前缀仍只检查文本；命名 Human 摘要与旧 System 字符串摘要契约保留。
+- AC：单块/多块/空 list 均不抛错且不识别为摘要；合法 tool pair、预算充足时 compact 保留系统前缀及当前消息并成功；无早期轮且超过 hard guard 仍抛 `ContextWindowExceededError`；普通 System 字符串及已有摘要行为不变。
+- 验证：最终 focused `tests/context/test_compactor.py tests/context/test_prefix_stability.py` 64 passed；`tests/context` 在最后仅格式/变量名调整前 203 passed；改动文件 Ruff check 与 `git diff --check` 通过。无配置类型检查 lane，Pyright 不可用；全文件 `ruff format --check` 报既有文件级格式差异，未做范围外格式化。
+- 两轴独立审查 Correctness/Spec=CLEAN、Standards=CLEAN，0 findings；确切范围 `5432a4c37a3ba71ec701cd6446a12449daaba21b..b394e5df8f41266048de1c7f43cd74312a7ea2ed`，台账 `docs/review_ledger.d/i638-list-systemmessage-5432a4c3-b394e5df.tsv`。
+- GitHub #638 CLOSED（completed）；证据评论 [issuecomment-5982702131](https://github.com/EricKingWhy/intelligence-agent/issues/638#issuecomment-5982702131)，claim 评论 [issuecomment-5982451197](https://github.com/EricKingWhy/intelligence-agent/issues/638#issuecomment-5982451197)，`in-progress` 已移除。代码留在本地分支，未 push、未建 PR、未合入 main；集成负责人 EricKingWhy。详见 `docs/phase_status/2026-10.md` 的 #638 小节。
+
+## #641（P1，已完成并关单；分支未集成）
+
+- 分支 `codex/context-641`；fixed point `2c5d754e42228a2f7a34bad8b88193b82b7b743e`；实现提交 `07c1668e5ebe62960d2b57a4666ffa419b48327e`。ContextBuilder 的 token memo 绑定最近的 Session 实例；实例切换时清空 memo，同一实例保留增量复用。
+- AC：同 `session_id` / seq 的两个独立 Session 按 A→B→A 调用，结果逐次等于 `estimate_message_tokens`；同一 Session append 与重复 build 不重编码历史；pruning、compaction projection/计数变化、dangling 合成与恢复的缓存失效覆盖保留。
+- 验证：修复前真实红，B 错用 memo 得 68、正确估算为 4067；修复后缓存/pruning focused 13 passed，`tests/context` 204 passed；改动文件 Ruff 与 `git diff --check` 通过。仓库未配置 Python 类型检查 lane，本票未运行类型检查。
+- Correctness/Spec 与 Standards 独立审查均 CLEAN、P0–P3 发现为 0；固定范围 `2c5d754e42228a2f7a34bad8b88193b82b7b743e..07c1668e5ebe62960d2b57a4666ffa419b48327e`；机读范围见 `docs/review_ledger.d/i641-token-memo-session-instance-2c5d754e-07c1668e.tsv`。
+- GitHub #641 CLOSED（completed）；claim 评论 [issuecomment-5982753157](https://github.com/EricKingWhy/intelligence-agent/issues/641#issuecomment-5982753157)，交付证据 [issuecomment-5982949470](https://github.com/EricKingWhy/intelligence-agent/issues/641#issuecomment-5982949470)，`in-progress` 已移除。分支未 push、未建 PR、未进入 main；集成负责人 EricKingWhy。
 ## IMP 批 A 线单线施工（2026-10-05 起；#520/#524 已分支就绪，未 push/PR——§14.4 待批）
 
 - **批次框架**：用户批任务书 A 线顺序 #520 → #524；一次一票，「本地门禁全绿 + 分支就绪 + 记账落盘」后才领下一张。施工 worktree `D:/intelligence-agent-backend-wt-impA`（本地 `.venv` 经 `uv sync --frozen --all-extras` 就绪；`web/` 经 `pnpm install --frozen-lockfile` 补齐前端车道工具链）；push/开 PR/merge/关单每项单独请用户批准，本批默认不关单、只备关单 comment 草稿。集成顺序约定 C → B → A（B/C 线各在己方 worktree 施工，本线未触碰）。

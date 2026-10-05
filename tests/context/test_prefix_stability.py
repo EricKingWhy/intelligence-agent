@@ -302,6 +302,26 @@ async def test_compaction_summary_human_role_and_dual_form_recognition(tmp_path)
     assert out[2].content == "- [骨架行]（120 字符截断）"
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"type": "text", "text": "sys"}],
+        [
+            {"type": "text", "text": "sys"},
+            {"type": "text", "text": "additional block"},
+        ],
+        [],
+    ],
+)
+def test_list_content_system_message_is_not_compaction_summary(content):
+    assert _is_compaction_summary(SystemMessage(content=content)) is False
+
+
+def test_ordinary_system_string_is_not_compaction_summary():
+    message = SystemMessage(content="ordinary system instructions")
+    assert _is_compaction_summary(message) is False
+
+
 # ── #411 通道 1：_protected_facts_messages 两条消息 ───────────────────
 
 
