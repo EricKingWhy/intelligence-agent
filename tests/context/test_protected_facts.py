@@ -127,10 +127,19 @@ def test_compaction_target_section_rides_protected_fact_channel_not_raw_turns():
         [HumanMessage(content=first), HumanMessage(content=second)], facts,
     )
 
-    target = sections["## 原始目标与用户约束"]
-    assert first in target, "当前生效目标（facts 通道）逐字在场"
-    assert second not in target, "叙述性补充不再逐字进目标节"
-    assert "已归档" not in target, "单一 goal ⇒ 无历史可归档"
+    # #710 方向 C：§0 变三段式——目标行仍只承载当前生效目标（facts 通道）；
+    # 叙述性补充作为段内最新活跃用户消息进「当前生效指令」承载位（确定性
+    # 派生，非逐字堆进目标行），更早用户指令降级为归档计数行。
+    section0_lines = sections["## 原始目标与用户约束"].splitlines()
+    assert first in section0_lines[0], "当前生效目标（facts 通道）逐字在场"
+    assert second not in section0_lines[0], "叙述性补充不再逐字进目标行"
+    assert "已归档" not in section0_lines[0], "单一 goal ⇒ 无历史目标可归档"
+    assert (
+        f"当前生效指令：{json.dumps(second, ensure_ascii=False)}" in sections[
+            "## 原始目标与用户约束"
+        ]
+    ), "最新活跃用户消息进承载位（#710 方向 C）"
+    assert "（更早 1 条用户指令已归档" in sections["## 原始目标与用户约束"]
     assert sections["## 保护事实表"] != "(none)", "goal fact 在场 ⇒ 事实表如实投影"
 
 
