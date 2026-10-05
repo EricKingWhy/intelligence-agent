@@ -47,7 +47,13 @@ _MODEL_SUMMARY_HEADINGS = _SUMMARY_HEADINGS[2:6]
 _PROGRAMMATIC_SUMMARY_HEADINGS = (0, 1, 6, 7)
 _IDENTIFIER_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d+"
-    r"[A-Za-z0-9-]*|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(?![A-Za-z0-9_])"
+    r"[A-Za-z0-9-]*|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+"
+    # #640（T2-X/Y）：标准 8-4-4-4-12 十六进制 UUID——数字开头（0-9a-f）的形态
+    # 不满足前两个分支的首字符 A-Za-z，只会从第二段起截出尾部伪标识。该分支排在
+    # 既有两分支**之后**：既有匹配（含字母开头 UUID 的连字符贪婪形态）逐字不变，
+    # 边界沿用同一对 lookaround ⇒ 不把 UUID 从更长的连续字母数字串里切出来。
+    r"|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+    r")(?![A-Za-z0-9_])"
 )
 _FILE_PATH_PATTERN = re.compile(
     r"(?<![\w])(?:[A-Za-z]:[\\/]|/)?"
