@@ -214,3 +214,124 @@ async def test_summary_names_the_paired_read_tool(tmp_path, read_tool_name):
     # 另一个名字不得出现——两个名字都写进去等于没说清该调哪个
     other = "inspect_artifact" if read_tool_name == "read_artifact" else "read_artifact"
     assert other not in summary
+
+
+# ---------------------------------------------------------------------------
+# #644（T15b/O-1 + T8e）：结构化载荷与非白名单字段绕过溢出预算
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"payload": "x" * 50000},                        # 嵌套 dict（票面原始形态）
+    ["y" * 30000, {"z": "w" * 20000}],               # 嵌套 list/dict 混合
+])
+async def test_structured_whitelist_field_is_externalized_as_restorable_json(
+    tmp_path, payload,
+):
+    """T15b/O-1（#644）：白名单字段装大结构化载荷时必须外置且可完整还原。
+
+    此前 oversized 只认 ``isinstance(value, str)``，``data.output`` 装 50KB dict
+    直接穿透回灌 Context（不变量 #15：模型只拿 summary + ref）。修复后按紧凑
+    JSON 序列化大小参与判定，artifact 保存可还原 JSON，模型侧只见摘要。"""
+    session = make_session(tmp_path)
+    store = FakeArtifactStore()
+    result = ToolResult.success("ok", data={"output": payload})
+    before = result.model_dump()
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "read", result,
+    )
+    assert compact.artifact_ref
+    artifact = await store.load(compact.artifact_ref)
+    assert json.loads(artifact.content) == payload        # load 后还原原始对象
+    assert artifact.mime_type == "application/json"
+    assert len(compact.data["output"]) < 2000             # 模型侧不再携带原文
+    full = json.dumps(payload, ensure_ascii=False)
+    assert full not in json.dumps(compact.data, ensure_ascii=False)
+    assert compact.ok                                     # 结果语义不变
+    assert deferred and deferred[0][0] == "artifact/externalized"
+    assert not any(e.type == "artifact/externalized" for e in session.events)
+    assert result.model_dump() == before                  # 原 result 不被就地修改
+
+
+@pytest.mark.asyncio
+async def test_non_allowlist_large_string_is_externalized(tmp_path):
+    """T8e（#644）：非白名单顶层大字符串此前没有任何预算。
+
+    data 的非白名单顶层字段（``text``）统一按序列化大小参与判定；替换字段
+    指向可回读 artifact，白名单语义与其它小字段原样保留。"""
+    session = make_session(tmp_path)
+    store = FakeArtifactStore()
+    raw = "x" * 50000
+    result = ToolResult.success("ok", data={"text": raw, "exit_code": 0})
+    before = result.model_dump()
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "read", result,
+    )
+    assert compact.artifact_ref
+    artifact = await store.load(compact.artifact_ref)
+    assert artifact.content == raw                        # 原文完整可还原
+    assert len(compact.data["text"]) < 2000               # 模型侧只见摘要
+    assert compact.data["exit_code"] == 0                 # 小字段原样保留
+    assert all(not isinstance(value, str) or len(value) <= 2000
+               for value in compact.data.values())
+    assert compact.ok
+    assert deferred and deferred[0][0] == "artifact/externalized"
+    assert result.model_dump() == before
+
+
+@pytest.mark.asyncio
+async def test_threshold_equality_stays_strict_for_new_entries(tmp_path):
+    """AC3：既有严格比较符（> 阈值才外置）对新增两类入口同样成立。
+
+    紧凑 JSON 序列化长度恰等于 overflow_chars 的 dict 与恰等于阈值的非白名单
+    字符串都保持原样；各加 1 字符才触发外置；嵌套 list/dict 由序列化大小覆盖。"""
+    session = make_session(tmp_path)
+    store = FakeArtifactStore()
+    pad = "x" * (2000 - len(json.dumps({"p": ""})))       # 序列化后恰 2000 字符
+    at_limit = ToolResult.success("ok", data={"output": {"p": pad}})
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "read", at_limit,
+    )
+    assert compact is at_limit and deferred == []
+    text_at_limit = ToolResult.success("ok", data={"text": "x" * 2000})
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "read", text_at_limit,
+    )
+    assert compact is text_at_limit and deferred == []
+    over = ToolResult.success("ok", data={"text": "x" * 2001})
+    compact, deferred = await ArtifactOverflowHandler(store).maybe_overflow(
+        session, "call", "read", over,
+    )
+    assert compact.artifact_ref and deferred
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [
+    {"output": {"payload": "x" * 50000}},                # T15b/O-1 入口
+    {"text": "x" * 50000},                               # T8e 入口
+])
+async def test_new_entries_preserve_fail_open_and_fail_closed(tmp_path, data):
+    """AC4：新增两类入口沿用既有 fail-open（store 缺失/上传失败保原文返回）
+    与 fail-closed（审计路径抛 ArtifactOverflowUnavailable）契约，不伪造 ref。"""
+    session = make_session(tmp_path)
+
+    class UnavailableStore(FakeArtifactStore):
+        async def save(self, *args, **kwargs):
+            raise ConnectionError("unavailable")
+
+    result = ToolResult.success("ok", data=data)
+    compact, deferred = await ArtifactOverflowHandler(
+        UnavailableStore(),
+    ).maybe_overflow(session, "call", "read", result)
+    assert compact is result and deferred == []           # fail-open：原文保留
+    assert compact.artifact_ref is None
+
+    with pytest.raises(ArtifactOverflowUnavailable, match="Artifact store failed"):
+        await ArtifactOverflowHandler(
+            UnavailableStore(), fail_open=False,
+        ).maybe_overflow(session, "call", "read", ToolResult.success("ok", data=data))
+    with pytest.raises(ArtifactOverflowUnavailable, match="Artifact store is required"):
+        await ArtifactOverflowHandler(
+            None, fail_open=False,
+        ).maybe_overflow(session, "call", "read", ToolResult.success("ok", data=data))
