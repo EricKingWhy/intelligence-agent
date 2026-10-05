@@ -1,0 +1,1 @@
+2026-10-05	#525 IMP-08/14 edit 同文件编辑互斥两轴独立审查 + 机械归属（base 8ebf3a0b~1=d377b8e4..d7e3c22c=3 笔：efa473f3 实现、8ebf3a0b 先回后正 merge（零新增内容、tests/tools 单文件逐 blob 等于父）、d7e3c22c 处置笔）。两轴 Standards/Correctness 均 PASS-WITH-FINDINGS（P0=P1=0，P2×2/P3×2 每轴）；处置=补 multi-key 死锁测试+替身签名同形（d7e3c22c，10/10 绿）；变异红证在 /tmp 副本补做（M1/M2 失败集不相交）。覆盖范围含 d7e3c22c。	efa473f3~1..d7e3c22c
