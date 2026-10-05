@@ -35,9 +35,11 @@ from agent_harness.context.compactor import (
 from agent_harness.context.tokens import estimate_message_tokens
 from tests.scripted_model import ScriptedModel
 
-#: T2-X/Y 的两个最小形态：数字开头（标准 UUID 允许）与字母开头（既有分支已覆盖）。
+#: T2-X/Y 的最小形态：数字开头（标准 UUID 允许，此前整条漏配）与字母开头
+#: （既有分支已覆盖；`…-ALL-HEX` 型只有新分支能整条命中）。
 UUID_DIGIT_LEADING = "123e4567-e89b-12d3-a456-426614174000"
 UUID_LETTER_LEADING = "abc12345-e89b-12d3-a456-426614174000"
+UUID_LETTER_LEADING_ALL_HEX = "abcdefab-abcd-abcd-abcd-abcdefabcdef"
 
 #: 标准 8-4-4-4-12 形状（判 AC③ 用：任何条目都不该是"UUID 形状的伪标识"）。
 _UUID_SHAPE = re.compile(
@@ -46,6 +48,9 @@ _UUID_SHAPE = re.compile(
 
 #: T12a 的输入形态（票面原文）：n=30000 空格分隔数字文本。
 T12A_TEXT = " ".join(str(i) for i in range(30000))
+
+#: 显式传入的窗口配置：断言不依赖 `ContextCompactor` 默认值的漂移。
+MAX_CONTEXT_TOKENS = 200_000
 
 _MODEL_SECTIONS = """## 已完成工作与关键决策
 已完成读取历史记录，并选择直接展示内容。
@@ -95,12 +100,18 @@ async def test_t12a_full_compact_shrinks_and_reaches_target():
         AIMessage(content="old analysis"),
         HumanMessage(content="current request"),
     ]
-    compactor = ContextCompactor(ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]))
+    compactor = ContextCompactor(
+        ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]),
+        max_context_tokens=MAX_CONTEXT_TOKENS,
+    )
     before = estimate_message_tokens(messages)
 
     result = await compactor.compact(messages, before)
 
-    assert result.fallback_used is False, "压缩必须真实发生，不是保留原投影"
+    # AC④：成功路径必须**零失败尝试**。`fallback_used` 的全部构造点都是字面量
+    # False（看代码即知），单断言它是空断言；`failures` 才承载"本次有没有摘要
+    # 尝试失败过"，是 AC④"记录失败类别与最终开销"的可观测面。
+    assert result.failures == [], "成功压缩不得携带失败尝试记录"
     assert result.compacted_turn_count == 1
     assert result.summary is not None
     identifiers = json.loads(
@@ -108,7 +119,7 @@ async def test_t12a_full_compact_shrinks_and_reaches_target():
     )
     assert len(identifiers) <= _PROG_SECTION_MAX_ENTRIES
     after = estimate_message_tokens(result.messages)
-    auto_limit = compactor.auto_compact_threshold * 200_000
+    auto_limit = compactor.auto_compact_threshold * MAX_CONTEXT_TOKENS
     assert after < before, "shrink：压缩后的投影必须小于输入投影"
     assert after * 10 < before, (
         "shrink：数字密集文本的摘要开销必须显著小于原文（原报告症状是超过原文）"
@@ -119,7 +130,10 @@ async def test_t12a_full_compact_shrinks_and_reaches_target():
 # ── T2-X/Y：数字开头与字母开头 UUID 逐字完整 ────────────────────────────────
 
 
-@pytest.mark.parametrize("uuid", [UUID_DIGIT_LEADING, UUID_LETTER_LEADING])
+@pytest.mark.parametrize(
+    "uuid",
+    [UUID_DIGIT_LEADING, UUID_LETTER_LEADING, UUID_LETTER_LEADING_ALL_HEX],
+)
 def test_uuid_in_human_text_is_extracted_verbatim(uuid):
     """普通 Human 文本：UUID 必须逐字完整进入清单，且不得只截出尾部片段。"""
     identifiers = _identifiers([HumanMessage(content=f"请核对记录 {uuid} 后继续")])
@@ -129,7 +143,10 @@ def test_uuid_in_human_text_is_extracted_verbatim(uuid):
     assert fragments == [], "不得把 UUID 截成尾部伪标识（修复前的 e89b-… 形态）"
 
 
-@pytest.mark.parametrize("uuid", [UUID_DIGIT_LEADING, UUID_LETTER_LEADING])
+@pytest.mark.parametrize(
+    "uuid",
+    [UUID_DIGIT_LEADING, UUID_LETTER_LEADING, UUID_LETTER_LEADING_ALL_HEX],
+)
 def test_uuid_in_tool_text_is_extracted_verbatim(uuid):
     """Tool 文本同上（票面 AC 覆盖 Human / Tool 两个入口）。"""
     identifiers = _identifiers([
@@ -142,20 +159,25 @@ def test_uuid_in_tool_text_is_extracted_verbatim(uuid):
 
 
 def test_uuid_is_not_sliced_from_longer_alphanumeric_run():
-    """较长连续字母数字串中的 UUID 不得被截成伪标识（三种边界形态）。
+    """较长连续字母数字串中的 UUID 不得被当成**独立完整标识**切出来。
 
-    预期与既有边界语义一致（`(?<![A-Za-z0-9_])` / `(?![A-Za-z0-9_])` 原样保留）：
-    连续无分隔的嵌入串整体不产出条目；带前缀/尾缀黏连时产出的是**更长的 token**
-    （既有行为），而不是"UUID 形状的伪标识"。
+    边界语义（`(?<![A-Za-z0-9_])` / `(?![A-Za-z0-9_])` 原样保留）下的实测形态：
+    无分隔连续串整体不产出条目；`pre`+UUID 产出**更长的 token**（既有分支）；
+    `999`+UUID 与 UUID+`0` 产出从连字符起点开始的**尾部片段**（既有分支1 行为，
+    修复前后一致，且都不是 8-4-4-4-12 的 UUID 形状）。本用例只钉两件事：
+    条目中不得出现整条 `UUID_DIGIT_LEADING`、不得出现 UUID 形状条目——
+    `999`+UUID 这一例对 `(?<![A-Za-z0-9_])` 有区分力：去掉该 lookbehind 后，
+    新分支会在数字前缀内部命中整条 UUID，前两条断言同时失败。
     """
     continuous = "feedface123e4567e89b12d3a456426614174000"  # 无分隔的长字母数字串
     glued_prefix = "pre" + UUID_DIGIT_LEADING
+    digit_glued_prefix = "999" + UUID_DIGIT_LEADING  # 数字前缀：M2 变异的区分点
     glued_suffix = UUID_DIGIT_LEADING + "0"
 
-    for text in (continuous, glued_prefix, glued_suffix):
+    for text in (continuous, glued_prefix, digit_glued_prefix, glued_suffix):
         identifiers = _identifiers([HumanMessage(content=f"token {text} end")])
         assert UUID_DIGIT_LEADING not in identifiers, (
-            f"较长的黏连串里不得截出完整 UUID 伪标识：{text}"
+            f"较长的黏连串里不得切出完整 UUID 伪标识：{text} -> {identifiers}"
         )
         assert not any(_UUID_SHAPE.fullmatch(entry) for entry in identifiers), (
             f"不得产出 UUID 形状的伪标识：{text} -> {identifiers}"
