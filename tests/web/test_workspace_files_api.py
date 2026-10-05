@@ -693,13 +693,16 @@ def _nest_workspace_in_a_bigger_repo(client: TestClient, sid: str, tmp_path: Pat
     """
     root = _root(client, sid)
     repo = root.parent
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    # 剥掉继承的 GIT_*：hook 注入的 GIT_DIR 会让 `add -A` 把外层仓库 index 清空并提交
+    # 垃圾 commit（#668 事故里的 "base" 空树提交即此形状）。
+    git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=git_env)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True, env=git_env)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, env=git_env)
     secret = repo / "outside-secret.txt"
     secret.write_text("ORIGINAL\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=git_env)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True, env=git_env)
     secret.write_text("LEAKED-SECRET-BODY\n", encoding="utf-8")  # 制造一个仓库内的改动
     return repo
 
