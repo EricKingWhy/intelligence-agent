@@ -194,7 +194,8 @@ class TestShadowedSurvivor:
         assert visible_after == visible_before, "唯一可见原文被裁成骨架（T15/P-1）"
         assert visible_after["c1"] == content_json
         assert report.pruned_seqs == frozenset()
-        # 前置：空账目必须来自可见性规则本身，而不是某条豁免（如 ref 不可读）顶替。
+        # 前置：空账目必须来自可见性规则本身，而不是某条豁免（如 ref 不可读）顶替；
+        # 与上面「ref 可回读」前置断言配对生效（本 fixture 只有 1 条可见候选）。
         assert report.skipped == ()
         assert [event.to_dict() for event in events] == snapshot
 
@@ -229,7 +230,8 @@ class TestShadowedSurvivor:
 class TestEquivalenceClassBuiltOnVisibleMembers:
     @pytest.mark.asyncio
     async def test_shadowed_newest_is_excluded_while_visible_older_still_pruned(self):
-        """三个同源成员、最新被 shadow ⇒ 等价类 = 可见的 c1/c2，survivor = c2，c1 照裁。
+        """AC①+② 交叉正控（审查 F1）：三个同源成员、最新被 shadow ⇒ 等价类 = 可见的
+        c1/c2，survivor = c2，c1 照裁。
 
         三重形态判别：修前（全量类、survivor 取不可见的 c3）会把 c1 与 c2 一起裁掉；
         「survivor 不可见就整组跳过」的朴素 fallback 会一条不裁；只有「等价类只由当前
@@ -269,7 +271,8 @@ class TestEquivalenceClassBuiltOnVisibleMembers:
 class TestShadowedMembersStayOutOfLedger:
     @pytest.mark.asyncio
     async def test_shadowed_member_is_not_pruned_and_frees_no_tokens(self):
-        """旧成员被 bracket shadow、最新成员可见 ⇒ 无可裁候选：不裁、收益读数恒 0。
+        """AC① 账目侧（审查 F3）：旧成员被 bracket shadow、最新成员可见 ⇒ 无可裁候选：
+        不裁、收益读数恒 0。
 
         修前该形态会为不可见的旧成员落下 planned 记录：收益读数 > 0、收益门可被幻影
         收益满足，而投影里根本没有这条消息可替换（不变量 #5/#6：不进 Runtime Context
@@ -443,8 +446,11 @@ class TestExistingExemptionsUnchanged:
     async def test_protected_reference_is_still_skipped(self):
         """AC④：source_event_ids 引用的可见成员仍走 protected 豁免（W-02 接缝不变）。
 
-        输入为合成形态：main 上 `source_event_ids` 尚无生产写入者（W-02 落地前该集合
-        恒空），本用例是接缝护栏，不代表当前生产可达行为。"""
+        输入为合成形态：生产上的 `source_event_ids` 写入者（`session/task.py` 的
+        TASK_ACCEPTANCE_*、`recovery/coordinator.py` 的 OPERATION_RECONCILED、
+        `session.resume` 的 dangling 修复）都不引用 TOOL_RESULT 的 event_id（dangling
+        那笔写的是 tool_call_id），故该豁免在生产对 tool 候选恒不触发；本用例是 W-02
+        接缝护栏，不代表当前生产可达行为。"""
         store = FakeArtifactStore()
         content_json = _content_json(await _seed_artifact(store))
         first_turn = _read_turn(2, "c1", content_json)
