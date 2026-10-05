@@ -7,6 +7,10 @@ ToolResult.failure(error_code=PERMISSION_DENIED)。
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+from pathlib import Path
+
 from pydantic import BaseModel, Field
 
 from agent_harness.prompt import DEFAULT_REGISTRY
@@ -22,6 +26,7 @@ from agent_harness.tooling.result import ErrorCode
 #: 存储时接线，且不检查大文件本身）。
 _READ_MAX_LINES = 2000
 _READ_MAX_BYTES = 50 * 1024
+logger = logging.getLogger(__name__)
 
 
 class _ReadArgs(BaseModel):
@@ -35,8 +40,14 @@ class _ReadArgs(BaseModel):
 class ReadTool(Tool):
     """read 工具：读取 workspace 内文本文件内容。"""
 
-    def __init__(self, sandbox: Sandbox) -> None:
+    def __init__(
+        self,
+        sandbox: Sandbox,
+        *,
+        project_instructions_loader: Callable[[Path], object] | None = None,
+    ) -> None:
         self._sandbox = sandbox
+        self._project_instructions_loader = project_instructions_loader
 
     @property
     def name(self) -> str:
@@ -86,6 +97,16 @@ class ReadTool(Tool):
                 message=f"文件 '{args.path}' 不存在。",
                 error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
+        if self._project_instructions_loader is not None:
+            try:
+                target = self._sandbox.resolve_within_workspace(args.path)
+                relative_target = target.relative_to(self._sandbox.workspace_root)
+                self._project_instructions_loader(Path(*relative_target.parts))
+            except (OSError, ValueError):
+                logger.warning(
+                    "project instructions could not be loaded for a read target",
+                    exc_info=True,
+                )
         # 输出预算（R8-2）：行数/字节双帽，先到为准；截断时给可续读标记。
         lines = content.splitlines()
         total_lines = len(lines)

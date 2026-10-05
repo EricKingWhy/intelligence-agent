@@ -1,0 +1,1 @@
+2026-10-05	#523 初审双轴；P2 reload 丢失懒加载子目录规则；P2 打开竞态可读取仓外替换文件；P2 聚合限额遗漏元数据及空文件；P4 no_cwd/not_loaded 状态结构重复；结论 Correctness APPROVE_WITH_FINDINGS / Standards NEEDS-FIX	63c7ec216480f9644bafaf0e0573dbecd60e6e19..04207f34eef9d230e62c099c19c346ce69dff09c
