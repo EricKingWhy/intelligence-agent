@@ -121,6 +121,7 @@ class _RecordingPolicy(CompletionPolicy):
 
     async def decide(
         self, *, report: QuiescenceReport, final_text: str, run_id: str,
+        events: list[SessionEvent] | None = None,
     ) -> CompletionDecision:
         self.calls.append(report)
         return CompletionDecision(accepted=self._accepted, reason=self._reason)

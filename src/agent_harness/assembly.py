@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from agent_harness.agent import AgentRuntime
 from agent_harness.agent.budget import SOURCE_DEPLOYMENT
+from agent_harness.agent.completion import CompletionPolicy
 from agent_harness.agent.resume_evidence import StuckEvidencePort
 from agent_harness.agent.run_budget import (
     LaunchRunBudget,
@@ -390,6 +391,10 @@ async def build_runtime(
     stuck_evidence: StuckEvidencePort | None = None,
     session_budget: SessionBudgetPort | None = None,
     session_declared_limits: SessionLimits | None = None,
+    # `#524`：完成门可选域策略（默认 None = DefaultCompletionPolicy，行为零变化；
+    # 显式传入 EvidenceCompletionPolicy 即开启证据检查与纠正循环——装配开关就是
+    # 策略实例本身，无布尔旗标）。
+    completion_policy: CompletionPolicy | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -615,6 +620,8 @@ async def build_runtime(
                 # child 的 local fuse 上限（#308）：档位声明（内置三档位是 None=继承）
                 # 只能收窄到 Deployment ceiling 之下，越界在 Factory.create 里被拒。
                 local_max_agent_turns=settings.local_max_agent_turns,
+                # `#524`：子与父同一完成门策略面（Factory 透传给 child runtime）。
+                completion_policy=completion_policy,
             ),
             source_registry=registry,
             session_store=session_store,
@@ -719,4 +726,7 @@ async def build_runtime(
         # `#318`：session 树账端口（跨 run / 跨会话共享）。装配点只透传；构造方是
         # 服务层（它才知道预算 key 与请求声明）。None = 不接 session 账（旧行为）。
         session_budget=session_budget,
+        # `#524`：完成门可选域策略，装配点只透传（默认 None = 既有默认策略，
+        # CLI / 既有单测路径行为零变化）。
+        completion_policy=completion_policy,
     )

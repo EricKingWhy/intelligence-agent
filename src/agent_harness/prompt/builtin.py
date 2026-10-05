@@ -78,6 +78,10 @@ _DECLARED_VARIABLES: tuple[tuple[str, str], ...] = (
     # section 不自己判断"像不像打转"，只负责排版（同 §10.8 的分工）。
     ("pattern_label", "stuck 模式的人类可读名（用于纠正消息）"),
     ("pattern_count", "该模式已连续的次数（用作十进制字符串）"),
+    # `#524` 完成门证据策略的纠正文案：稳定拒绝标识（含 rule_id，形如
+    # `evidence_missing:demo`）与规则要求的工具名。
+    ("rule_id", "证据规则的稳定标识（用于完成门纠正消息）"),
+    ("required_tool_name", "证据规则要求的工具名（用于完成门纠正消息）"),
 )
 
 #: 会话压缩器的模型撰写部分；其余四节由 harness 从事件投影中精确生成。
@@ -234,6 +238,17 @@ _CORRECTIVE_STUCK_PATTERN = (
     "再换一条路：改参数、换工具、缩小目标，或者直接向用户说明卡在哪里。"
 )
 
+#: `#524` 完成门证据策略的纠正文案：拒绝时告诉模型缺哪条规则的哪种证据。
+#: 与 stuck 文案的分工：那一条治理"打转"，这一条治理"宣称完成但缺 durable 证据"。
+#: 防重跑指令是裁决要求（新反馈不得驱动重跑已执行的 mutating tool——证据判定
+#: 接受会话内已有的 durable 结果，模型只需引用，无需重做）。
+_CORRECTIVE_COMPLETION_EVIDENCE = (
+    "最终回答被证据检查拦下（规则 {{rule_id}}）：声称的结果缺少 durable 证据"
+    "——需要实际运行 {{required_tool_name}} 并拿到成功结果，再给出最终回答。"
+    "本会话里已经执行过的操作不需要重做：直接引用既有结果即可，不要重复执行"
+    "会改动状态的调用。"
+)
+
 #: 恢复期"未启动即跳过"的合成 ToolResult 文案（迁移前内联在
 #: `recovery/coordinator.py::SkipPendingPolicy.result_for`）。
 _FRAME_RECOVERY_SKIPPED = (
@@ -298,6 +313,14 @@ _FRAME_SECTIONS: tuple[PromptSection, ...] = (
         target=Target.FRAGMENT,
         text=_CORRECTIVE_STUCK_PATTERN,
         description="stuck 检测的纠偏消息（含 pattern_label / pattern_count）",
+    ),
+    PromptSection(
+        name="corrective:completion_evidence",
+        order=SECTION_ORDERS["corrective:completion_evidence"],
+        scopes=frozenset({"corrective:completion_evidence"}),
+        target=Target.FRAGMENT,
+        text=_CORRECTIVE_COMPLETION_EVIDENCE,
+        description="完成门证据策略的纠偏消息（含 rule_id / required_tool_name）",
     ),
     PromptSection(
         name="frame:recovery_skipped",
