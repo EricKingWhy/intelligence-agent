@@ -26,6 +26,7 @@ import threading
 
 import tiktoken
 from langchain_core.messages import AnyMessage
+from pydantic_core import PydanticSerializationError
 
 logger = logging.getLogger("agent_harness.context.tokens")
 
@@ -84,6 +85,51 @@ def estimate_tokens(text: str) -> int:
     return len(encoding.encode_ordinary(text))
 
 
+def _contains_lone_surrogate(value: object) -> bool:
+    """递归判定 JSON 兼容结构里是否含孤立代理项码点（U+D800–U+DFFF）。
+
+    Python ``str`` 把 astral 字符存为**单个码点**、不存成对代理项，故任何
+    落在代理区间的码点都是孤立的（AC3 正控：两段 surrogate 拼在一个 str
+    里仍判非法）。dict / list / tuple 之外的分支不含字符，直接 False。
+    """
+    if isinstance(value, str):
+        return any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_lone_surrogate(key) or _contains_lone_surrogate(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_lone_surrogate(item) for item in value)
+    return False
+
+
 def estimate_message_tokens(messages: list[AnyMessage]) -> int:
-    """计入消息结构和 tool_calls；与文本估算使用同一个编码。"""
-    return sum(estimate_tokens(message.model_dump_json()) for message in messages)
+    """计入消息结构和 tool_calls；与文本估算使用同一个编码。
+
+    #650：孤立 Unicode surrogate 能通过 Python 层校验、却无法编码进
+    JSON——``model_dump_json`` 裸抛 ``PydanticSerializationError``（未收敛）。
+    Context 预算边界把它映射为 ``ContextWindowExceededError``（spec 06 §8
+    hard guard：停止或交用户处理，不放行、不静默降级）。映射前先用
+    ``_contains_lone_surrogate`` 验证成因：非 surrogate 原因的序列化失败
+    原样上抛，不与非法 Unicode 混类。错误消息只装定位与码点区间，
+    不回显用户内容。
+    """
+    total = 0
+    for index, message in enumerate(messages):
+        try:
+            payload = message.model_dump_json()
+        except PydanticSerializationError as error:
+            if not _contains_lone_surrogate(message.model_dump()):
+                raise
+            # 惰性导入：compactor 模块级导入本模块，模块级反向导入成环；
+            # 调用时本模块已初始化完毕，取到与 builder/runtime 同一个类对象。
+            from agent_harness.context.compactor import ContextWindowExceededError
+
+            raise ContextWindowExceededError(
+                f"messages[{index}] ({type(message).__name__}) 含孤立 Unicode "
+                "代理项（U+D800–U+DFFF），无法序列化进 Context 预算；"
+                "按 hard guard 语义拒绝本轮估算"
+            ) from error
+        total += estimate_tokens(payload)
+    return total
