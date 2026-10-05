@@ -61,10 +61,12 @@ def _eight_section_summary(
     return "\n\n".join([
         f"## 原始目标与用户约束\n{goal}",
         f"## 保护事实表\n{facts}",
-        "## 已完成工作与关键决策\n已完成读取。\n\n"
-        "## 失败方案\n(none)\n\n"
-        "## 当前进行中状态\n已完成。\n\n"
-        "## Next Step\n等待继续。",
+        (
+            "## 已完成工作与关键决策\n已完成读取。\n\n"
+            "## 失败方案\n(none)\n\n"
+            "## 当前进行中状态\n已完成。\n\n"
+            "## Next Step\n等待继续。"
+        ),
         f"## 精确标识清单\n{json.dumps(identifiers, ensure_ascii=False)}",
         f"## 文件清单\n{json.dumps(files, ensure_ascii=False)}",
     ])
@@ -355,5 +357,5 @@ async def test_legacy_six_section_recognized_but_goals_not_migrated():
     assert "必须保持中文回答" not in sections[1]
     assert "路径必须在 workspace 内" not in sections[1]
     # 降级为普通文本开采的既有语义不变：旧摘要正文的标识/路径照常进节。
-    identifiers, files = _result_sections(result)
+    _identifiers, files = _result_sections(result)
     assert "old.txt" in files
