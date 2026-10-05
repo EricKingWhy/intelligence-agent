@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
 from agent_harness.context.builder import ContextBuilder
+from agent_harness.context.compactor import CompactionPostWriteError
 from agent_harness.model.config import ConfigError
 from agent_harness.session import (
     COMPACTION_END,
@@ -27,10 +28,13 @@ from agent_harness.session import (
 )
 from agent_harness.session.errors import (
     ActiveRunConflict,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
     InvalidSessionId,
     SessionNotFound,
 )
 from agent_harness.session.runmanager import RunManager
+from agent_harness.session.service import SessionService
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -231,6 +235,148 @@ async def test_token_counters_shrink_and_match_dto(make_session_service, tmp_pat
     assert outcome.tokens_after == compacted.data["token_estimate"]
 
 
+# ── write guard：自身失败记录不得被误判为并发改动（F1 #635）───────────
+
+@pytest.mark.asyncio
+async def test_retry_success_is_not_misread_as_concurrent_write(
+    make_session_service, tmp_path,
+):
+    """首试失败、重试成功：本次自身写的失败记录不算并发改动，压缩照常成功。"""
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    _seed_history(session)
+    service = make_session_service(
+        store=store, run_manager=RunManager(), settings=_settings(tmp_path),
+    )
+    # 第一次摘要返回非法结构（heading_mismatch），第二次返回合法摘要 → 重试成功。
+    service._compact_context_builder = _builder_factory(
+        responses=[
+            AIMessage(content="not a valid summary"),
+            AIMessage(content=MODEL_SECTIONS),
+        ],
+    )
+
+    outcome = await service.compact_session_context(session.session_id, entry_point="cli")
+
+    assert outcome.compacted_turn_count == 1, "重试成功必须产出合法压缩"
+    assert outcome.bracket_id
+    events = _events(store, session.session_id)
+    assert [event.type for event in events[-3:]] == [
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    ]
+    assert any(event.type == CONTEXT_COMPACTION_FAILED for event in events), \
+        "首试失败记录仍须落盘"
+
+
+# ── 缺省摘要模型跟随会话级模型覆盖（F3 #635）─────────────────────────
+
+@pytest.mark.asyncio
+async def test_default_main_model_follows_session_model_switch(
+    make_session_service, tmp_path, monkeypatch,
+):
+    """会话事件含 MODEL_CHANGED → builder 的主模型解析为切换后的 catalog 模型。"""
+    import json as _json
+
+    from agent_harness.session.model_switch import ModelTarget, append_model_change
+
+    catalog = _json.dumps([
+        {"name": "switched", "provider": "senseaudio", "model_name": "switched-upstream"},
+    ])
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path),
+        model_api_key="sk-test", agent_models=catalog,
+    )
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    _seed_history(session)
+    append_model_change(
+        session,
+        ModelTarget(provider="senseaudio", model_id="switched", effective_model_id="switched"),
+    )
+    service = make_session_service(
+        store=store, run_manager=RunManager(), settings=settings,
+    )
+
+    captured: dict = {}
+
+    def _capture(config):
+        captured["provider"] = config.provider
+        captured["model_name"] = config.model_name
+        return ScriptedModel([])
+
+    monkeypatch.setattr(
+        "agent_harness.model.provider.create_chat_model", _capture,
+    )
+
+    builder = await service._compact_context_builder(session, None)
+
+    assert captured["provider"] == "senseaudio"
+    assert captured["model_name"] == "switched-upstream", \
+        "缺省主模型必须跟随会话切换（AC5：与自动路径同一解析）"
+    assert builder.model_provider is not None
+
+
+# ── post-bracket 复核失败必须响亮，不得吞成 below-floor（F2 #635）────
+
+@pytest.mark.asyncio
+async def test_post_bracket_reprojection_mismatch_fails_loudly(
+    make_session_service, tmp_path,
+):
+    """bracket 已落盘后重投影不一致 → 抛 CompactionPostWriteError，不返回 below-floor。"""
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    _seed_history(session)
+    service = make_session_service(
+        store=store, run_manager=RunManager(), settings=_settings(tmp_path),
+    )
+
+    async def factory(_session, _summary_model):
+        main = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
+        main.model_name = "main-model"
+        builder = ContextBuilder(
+            main, max_context_tokens=10_000, auto_compact_threshold=0.3,
+            hard_guard_threshold=0.9,
+        )
+        # 模拟"落 bracket 后重投影与产物不一致"：复核失败发生在写入之后。
+        builder._reproject = lambda _session: [AIMessage(content="divergent projection")]
+        return builder
+
+    service._compact_context_builder = factory
+
+    with pytest.raises(CompactionPostWriteError) as excinfo:
+        await service.compact_session_context(session.session_id, entry_point="cli")
+
+    assert excinfo.value.bracket_id
+    events = _events(store, session.session_id)
+    assert [event.type for event in events[-3:]] == [
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    ], "响亮失败时 bracket 三事件已确实落盘"
+
+
+@pytest.mark.asyncio
+async def test_write_guard_raises_concurrent_write_on_event_drift(
+    make_session_service, tmp_path,
+):
+    """快照后事件数漂移 → CompactionConcurrentWrite（类型化，供 CLI 映射"重试"）。"""
+    store = JsonlSessionStore(root=tmp_path)
+    session = make_session(tmp_path)
+    _seed_history(session)
+    service = make_session_service(
+        store=store, run_manager=RunManager(), settings=_settings(tmp_path),
+    )
+    lock = asyncio.Lock()
+    factory = service._compaction_write_guard(
+        session.session_id, lock=lock,
+        snapshot_event_count=len(_events(store, session.session_id)),
+    )
+    # 模拟并发写者：快照之后追加一条事件。
+    session.append(USER_MESSAGE, {"content": "concurrent writer"})
+
+    with pytest.raises(CompactionConcurrentWrite):
+        async with factory(0):
+            pass
+
+
 # ── in-flight 防重 + finally 释放 ───────────────────────────────────
 
 @pytest.mark.asyncio
@@ -258,7 +404,7 @@ async def test_in_flight_guard_rejects_second_call(make_session_service, tmp_pat
     )
     await entered.wait()
 
-    with pytest.raises(ActiveRunConflict):
+    with pytest.raises(CompactionInProgress):
         await service.compact_session_context(session.session_id, entry_point="api")
 
     gate.set()
@@ -400,6 +546,62 @@ async def test_invalid_model_name_raises_config_error_with_zero_side_effects(
         )
     assert not builder_called, "非法模型必须在装配任何 builder 之前失败"
     assert _events(store, session.session_id) == before
+
+
+# ── 摘要模型名 strip 一致（F10 #635）────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_explicit_summary_model_name_is_stripped(
+    make_session_service, tmp_path, monkeypatch,
+):
+    """带空白的显式模型名判空后须以 strip 后的值解析（与自动路径 assembly.py:522 一致）。"""
+    import json as _json
+
+    catalog = _json.dumps([
+        {"name": "switched", "provider": "senseaudio", "model_name": "upstream-name"},
+    ])
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path),
+        model_api_key="sk-test", agent_models=catalog,
+    )
+    service = make_session_service(
+        store=JsonlSessionStore(root=tmp_path), run_manager=RunManager(),
+        settings=settings,
+    )
+    captured: dict = {}
+
+    def _capture(config):
+        captured["model_name"] = config.model_name
+        return ScriptedModel([])
+
+    monkeypatch.setattr("agent_harness.model.provider.create_chat_model", _capture)
+
+    result = await service._resolve_compaction_summary_model("  switched  ")
+
+    assert result is not None
+    assert captured["model_name"] == "upstream-name"
+
+
+# ── dry_run 前缀判据与 compactor early 窗口对齐（F5 #635）──────────
+
+def test_has_compactable_early_turn_stops_at_leading_summary_system_message():
+    """前导旧版摘要 SystemMessage 是 early 窗口起点，不作为可跳过前缀。
+
+    与 `ContextCompactor.compact` 的 early 窗口同一前缀判据（`_is_compaction_summary`
+    守卫，见 compactor.py:217–226）：`prefix_end` 遇摘要即停，而非一路跳过所有
+    SystemMessage。此前 dry-run 预览会把该摘要当前缀跳过 → 判据漂移。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    class _FakeSession:
+        def derive_messages(self):
+            return [
+                SystemMessage(content="## 目标\n旧版压缩摘要"),
+                SystemMessage(content="## 其他系统块"),
+                HumanMessage(content="current"),
+            ]
+
+    assert SessionService._has_compactable_early_turn(_FakeSession()) is True
 
 
 # ── dry_run ────────────────────────────────────────────────────────

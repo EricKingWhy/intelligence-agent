@@ -27,9 +27,12 @@ import pytest
 
 from agent_harness import cli
 from agent_harness.config import Settings
+from agent_harness.context.compactor import CompactionPostWriteError
 from agent_harness.model.config import ConfigError
 from agent_harness.session.errors import (
     ActiveRunConflict,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
     InvalidSessionId,
     SessionNotFound,
 )
@@ -96,7 +99,7 @@ def test_success_renders_token_comparison_and_source(monkeypatch, tmp_path):
 
     assert out == (
         "会话 s1 压缩完成（bracket=brk-1）：\n"
-        "  tokens: 182_400 → 41_200（-77%）\n"
+        "  tokens: 182,400 → 41,200（-77%）\n"
         "  source: seq 12..88 → 摘要（8 节，schema=eight_section）"
     )
     assert stub.calls == [
@@ -157,7 +160,7 @@ def test_dry_run_with_compactable_window(monkeypatch, tmp_path):
 
     assert "将压缩" in out
     assert "dry-run" in out
-    assert "5_000" in out
+    assert "5,000" in out
     assert "有可压缩的早期轮" in out
     assert stub.calls[0]["dry_run"] is True
 
@@ -190,8 +193,12 @@ def test_dry_run_without_compactable_window(monkeypatch, tmp_path):
             "在途 run",
         ),
         (
-            ActiveRunConflict("session 'x' already has a compaction in progress"),
+            CompactionInProgress("session 'x' already has a compaction in progress"),
             "压缩已在进行中",
+        ),
+        (
+            CompactionConcurrentWrite("session 'x' changed during compaction; retry"),
+            "重试",
         ),
         (ConfigError("未知模型 'nope'"), "压缩失败"),
     ],
@@ -205,6 +212,22 @@ def test_error_matrix_exits_1_with_clear_message(
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert needle in captured.err
+
+
+def test_post_write_error_exits_1_with_clear_message(monkeypatch, tmp_path, capsys):
+    """bracket 已写入但复核未过：exit 1 + 明确文案（不谎报"未改动"）。"""
+    _install(
+        monkeypatch, tmp_path,
+        error=CompactionPostWriteError(
+            "Compaction bracket re-projection mismatch", bracket_id="brk-9",
+        ),
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        _run_dispatch(monkeypatch, ["compact", "--session", "s1"])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "已写入" in captured.err or "复核" in captured.err
+    assert "brk-9" in captured.err
 
 
 def test_usage_error_exits_2(monkeypatch, tmp_path, capsys):

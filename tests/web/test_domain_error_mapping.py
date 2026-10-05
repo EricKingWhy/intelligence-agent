@@ -73,6 +73,10 @@ def test_status_map_is_the_audited_contract():
         "UnknownModel": 422,
         "InvalidForkBoundary": 422,
         "ActiveRunConflict": 409,
+        # F6 / #635：手动压缩的两个类型化拒绝——同 409，但类型可区分（CLI 据此
+        # 映射文案，不再靠错误字符串子串）。子类必须自己登记（精确类型索引）。
+        "CompactionInProgress": 409,
+        "CompactionConcurrentWrite": 409,
         "RecoveryConflict": 409,
         "ApprovalAlreadyResolved": 409,
         "SteerTargetNotFound": 409,

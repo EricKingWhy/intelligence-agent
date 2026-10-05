@@ -186,6 +186,38 @@ def test_second_call_while_compaction_in_flight_is_409(tmp_path):
     assert _events(client, sid) == before, "压缩进行中拒绝必须零写入"
 
 
+# ── 写后复核失败：500 fail-closed（不谎报"未改动"）（F2 #635）─────────
+
+
+def test_post_write_error_is_500_fail_closed(tmp_path, monkeypatch):
+    """bracket 已写入但重投影复核失败 → 500（而非 200 + bracket_id=null）。"""
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+    )
+    client = TestClient(
+        create_app(settings, enable_cors=False), raise_server_exceptions=False,
+    )
+    sid = _seed_history(client)
+
+    from agent_harness.context.builder import ContextBuilder
+
+    monkeypatch.setattr(
+        ContextBuilder, "_reproject",
+        lambda self, _session: [AIMessage(content="divergent projection")],
+    )
+    with patch(
+        "agent_harness.model.provider.create_chat_model",
+        return_value=_summary_model(),
+    ):
+        resp = _post(client, sid)
+
+    assert resp.status_code == 500, resp.text
+    # 历史已多出 bracket：失败必须是响亮的 500，不能返回"未改动"。
+    assert any(
+        e["type"] == "context/compacted" for e in _events(client, sid)
+    ), "post-bracket 失败时 bracket 三事件已确实落盘"
+
+
 # ── 非严格幂等：重复调用追加新 bracket ─────────────────────────────────
 
 
