@@ -14,7 +14,7 @@ Registry 的唯一职责：注册 / 查询 / 列出 / 导出模型定义。
 
 from __future__ import annotations
 
-from agent_harness.tooling.contract import Tool
+from agent_harness.tooling.contract import Tool, ToolExposure, exposure_of
 
 
 class ToolRegistry:
@@ -69,6 +69,10 @@ class ToolRegistry:
         （{"name":..,"description":..,"parameters":..}），
         模型菜单与 Runtime Tool 来自同一份 Contract。
 
+        曝光级别过滤（#528）：只导出 ``DIRECT`` 工具。默认全部 DIRECT ⇒
+        行为与 #528 之前逐字相同；``DEFERRED`` 经内置 tool_search 按需进入
+        定义集（见 exposure.py），``HIDDEN`` 不可达。
+
         为什么返回普通 dict 列表、不包成 Pydantic：
         - LangChain bind_tools 要的就是这个形状，包一层反而要再拆。
         - 薄层就好，避免抽象（Scope Lock：不拆 Adapter/Plugin 框架）。
@@ -80,4 +84,5 @@ class ToolRegistry:
                 "parameters": tool.args_schema.model_json_schema(),
             }
             for tool in self._tools.values()
+            if exposure_of(tool) is ToolExposure.DIRECT
         ]

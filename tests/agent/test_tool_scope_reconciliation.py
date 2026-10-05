@@ -83,6 +83,9 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     ("RegisterSkillTool", "agent_harness.skills.promote_tool"),
     ("DelegateTool", "agent_harness.multiagent.tools"),
     ("TickTool", "agent_harness.capability.demo"),
+    # #528（IMP-11）：内置工具发现工具——仅当 registry 存在 deferred 工具时由
+    # build_runtime 条件注册（全 direct 默认 ⇒ 不在场）
+    ("ToolSearchTool", "agent_harness.tooling.exposure"),
 )
 
 #: 静态枚举不到的 `Tool` 子类 → 理由。AST 覆盖闸用：命中的类**不**参与内置工具对账。
@@ -128,6 +131,11 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
     "tick": (
         "Phase 7 Gate 的 demo 能力工具（`capability/demo.py` 自述无业务价值），"
         "仅 `CAPABILITIES` 显式配 ticker 时存在"
+    ),
+    "tool_search": (
+        "#528 内置工具发现工具：仅当 registry 存在 deferred 工具时条件注册，"
+        "未进任何档位 scope——V1 无 deferred 工具 ⇒ 全部署不在场；deferred 进入"
+        "子代理面时子 runtime 需要自己的定义集控制器（#528 残余，登记在案）"
     ),
 }
 
