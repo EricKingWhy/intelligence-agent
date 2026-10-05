@@ -7323,3 +7323,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **审查循环**：Correctness 轴发现轮 PASS-WITH-FINDINGS（仅 2×P4 无需行动：P4-1 build 级用例为合格定向守卫但病灶检测力由 helper 级两组承担——变异实证，建议不加更强断言因 builder 无公共 total-estimate 可观察值；P4-2 T16b/B-6 溯源提示）；Standards 轴发现轮 **CLEAN**（2×P3 信息性不要求处置）→ **发现轮即终态：零代码 findings、无处置 commit、无需 delta 轮**。台账行 `docs/review_ledger.d/i646-usage-zero-anchor-b2a1ecc2-7523c623.tsv`。证据澄清：红 2/18 系修前工作树**真实执行**（2 failed/16 passed，Edit 修复前运行），非由 diff 推导。
 - **登记不修（另案）**：①build 级 `test_zero_usage_only_public_build_keeps_naive_estimate` 无 #646 病灶检测力（变异实测两侧皆绿）——其定位是票面 AC②④ 要求的"公共 build 不下调成本"定向守卫，与既有 `test_anchor_never_lowers_below_estimate` 构成 max 双钉，病灶检测力由 helper 级两组变异恰好两红承担；②罕见 int 子类（IntEnum 等）仍会被收下作锚——既有行为非本票引入，无实际 provider 形态支撑；③T16b/B-6 报告编号溯源在 issue #646 正文，仓库文档不可直查（防与 tracker B-6 批次混淆，已在票面与方案注明）。
 - **集成状态**：记账 + 收据笔落盘后，push 分支 / 开 PR / PR merge 三动作逐项待批（§14.4）。
+
+## #640 标识清单预算与标准 UUID 完整提取（2026-10-05；分支 `fix/i640-identifier-uuid-budget`，基点 `1b1d0fc7` = origin/main；push/PR/merge 三动作逐项待批）
+
+- **票面与范围**：T12a（`range(30000)` 数字密集文本的标识清单有界 = 已修覆盖的回归验证，不重造实现、不动 50/200 上限）+ T2-X/Y（数字开头与字母开头标准 8-4-4-4-12 UUID 在 Human/Tool 文本中逐字完整）。唯一行为改动 = `_IDENTIFIER_PATTERN` 增补第三分支并排在既有两分支**之后**；阈值/预算契约/原始历史未动（票面三禁令）。
+- **TDD 红绿读数**：新文件 `tests/context/test_compactor_identifiers.py`（票面允许的新文件）先红后绿——修前 `3 failed / 6 passed`（两处数字开头 UUID 参数化 + dedup，红集合与症状一致），最小修复后 9 passed；审查处置后又补 2 例 → 11 passed。T12a helper 与完整 `compact()` 两用例修前即绿（#556/#614 已修覆盖的回归钉，票面要求先验）。focused：`tests/context/` 242 passed；`ruff check .` 0。
+- **审查循环（两轮两轴，各一独立只读子代理；均 PASS-WITH-FINDINGS、P0/P1 = 0）**：发现轮 `1b1d0fc7..daaef279` P0-P4 = 0/0/1/3/6（P2 = AC③ 的 lookbehind 零判别力；余为注释失真/真空断言/硬编码常量/墙钟残余/tracker 待落）→ 处置 `92c09306`（补 `999`+UUID 区分例、断言改 `failures == []`、显式常量、all-hex 字母开头正覆盖）→ delta 轮 `daaef279..92c09306` P0-P4 = 0/0/0/2/3（全为注释措辞与实测不符）→ 文本处置 `ab834a12`（按两轴实测量改写；**无独立审查轮覆盖，如实登记**，§8.3 第 4 条 + §8.8.5 末条不开第三轮）。
+- **登记不修（另案/残余）**：①`add_once` 线性查重对 30000 互异数字 O(n²) ⇒ 该文件 ~30-40s 墙钟（既有成本，纯正则 0.01s，非本票新增）；②delta 轴 A 的变异 M2（删新分支）与 M3（`{12}`→`{11}`）失败集合逐条相同 ⇒ **共用失败面，不构成新分支量词的独立鉴别力证据**（登记）；③数字开头 UUID 的字母数字黏连（`…0000`）仍落到分支1 尾片段（既有 lookaround 语义，非本票目标）；④T12a 完整 compact 走 `ScriptedModel` 接缝，真实 provider 行为不在本票面。
+- **集成状态**：记账笔落盘；随后冻结树全量门禁 + Gate-0 收据笔 + 先回后正，push / PR / merge 三动作逐项待批（§14.4）。
