@@ -93,7 +93,7 @@ def _activated_tool(tmp_path: Path, child_model: ScriptedModel | None = None,
 
 def _args(target: str, task: str) -> object:
     return type("_Args", (), {"target": target, "task": task,
-                              "constraints": []})()
+                              "constraints": [], "output_schema": None})()
 
 
 class TestDelegateTool:
@@ -515,7 +515,9 @@ class TestSummaryRefExternalization:
         from agent_harness.tooling.reconcile import ReconcileHint
 
         tool, _, _, _ = _activated_tool(tmp_path)
-        assert set(tool.args_schema.model_fields) == {"target", "task", "constraints"}
+        assert set(tool.args_schema.model_fields) == {
+            "target", "task", "constraints", "output_schema",
+        }
         assert tool.side_effect is ToolSideEffect.MUTATING
         assert tool.permission is ToolPermission.WORKSPACE_WRITE
         assert tool.timeout_seconds == 1800.0

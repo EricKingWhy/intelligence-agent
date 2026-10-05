@@ -78,6 +78,9 @@ _PROG_SECTION_MAX_ENTRY_CHARS = 200
 
 #: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
 #: timeout / transport_error 覆盖调用面；其余八类逐一对应校验闸门与 shrink 的各条拒绝。
+#: T12h (#647) 追加的 `source_range_unavailable` 是唯一例外：它标记**生成后**的
+#: 来源拒绝（摘要已生成并过全部闸门，但无 source event range 可持久化），不是
+#: 摘要尝试失败——CompactionFailure 里以 attempt=0 区分。
 _SUMMARY_ERROR_CLASSES = (
     "timeout",
     "transport_error",
@@ -91,6 +94,10 @@ _SUMMARY_ERROR_CLASSES = (
     "plan_section_mismatch",
     "summary_not_smaller",
     "target_not_reached",
+    # T12h (#647)：来源区间不可用（生成后拒绝，非摘要尝试失败）——摘要已过全部
+    # 校验闸门但无 source event range 可持久化，弃用候选、保留原投影，拒绝原因
+    # 经既有有界失败通道落任务可见状态。保持有界：词表逐项对应一条拒绝面。
+    "source_range_unavailable",
 )
 
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
@@ -105,6 +112,8 @@ class CompactionFailure:
     `message` 只装本项目自己的拒绝文案或异常**类型名**——绝不透传 provider
     回显原文（与 ADR-0033 边界 1 同一条脱敏纪律）。`auto_limit` / `hard_limit`
     取触发时的整型阈值读数；`token_estimate` 是调用方进入压缩时的估算。
+    例外（T12h #647）：`attempt=0` 标记**非摘要尝试**的生成后来源拒绝
+    （`source_range_unavailable`）——摘要尝试是 1/2，预检 0 次尝试则不产生记录。
     """
 
     attempt: int
@@ -439,13 +448,31 @@ class ContextCompactor:
             logger.warning(
                 "Context compaction rejected; source event range is unavailable",
             )
+            # T12h (#647)：来源拒绝发生在摘要生成**之后**（候选已过全部校验闸门，
+            # 但无 source event range 可持久化）——补一条有界失败记录，使调用方
+            # 可区分"无须压缩"（预检 0 次尝试 ⇒ failures 空）与"生成后来源失配"。
+            # attempt=0 标记"非摘要尝试"；不为此伪造第 3 次摘要尝试。
+            failures.append(CompactionFailure(
+                attempt=0,
+                error_class="source_range_unavailable",
+                message="Cannot persist compaction without a source event range",
+                auto_limit=int(self._auto_limit),
+                hard_limit=int(self._hard_limit),
+                token_estimate=token_estimate,
+                summary_model_id=summary_model_id,
+                duration_ms=max(round((monotonic() - summary_started_at) * 1000), 0),
+                request_token_estimate=request_token_estimate,
+                request_budget_tokens=int(self._hard_limit),
+            ))
             if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError(
-                    "Cannot persist compaction without a source event range"
+                    "Cannot persist compaction without a source event range",
+                    failures=failures,
                 )
             # P2-4：messages-only（契约见 CompactionResult），不再原样回传入参。
             return CompactionResult(
                 list(messages), 0, estimate_message_tokens(messages), False,
+                failures=failures,
             )
         return CompactionResult(
             compacted,

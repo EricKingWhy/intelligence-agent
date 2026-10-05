@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
+from jsonschema import Draft202012Validator, SchemaError
 from pydantic import BaseModel, Field
 
 from agent_harness.context.tokens import estimate_tokens
@@ -35,6 +37,68 @@ from agent_harness.tooling.result import ErrorCode
 # 只作用于**超阈值外置**路径；未超阈值路径全文回传，不经此常量（逐字节不变）。
 _EXTERNALIZED_SUMMARY_HEAD_CHARS = 1500
 
+# output_schema（#530 IMP-17）：schema 进 child prompt、每次重试都复读，必须有界。
+_MAX_OUTPUT_SCHEMA_BYTES = 4096
+
+
+def _check_output_schema(schema: Any) -> str | None:
+    """output_schema 参数校验（零副作用，fuse 纪律）：非法 / 超 4KB → 错误消息。"""
+    if not isinstance(schema, dict):
+        return "output_schema 必须是 JSON Schema 对象（dict）"
+    try:
+        serialized = json.dumps(schema, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return "output_schema 无法序列化为 JSON（含不可序列化值）"
+    size = len(serialized.encode("utf-8"))
+    if size > _MAX_OUTPUT_SCHEMA_BYTES:
+        return (f"output_schema 序列化后 {size} 字节，超过上限 "
+                f"{_MAX_OUTPUT_SCHEMA_BYTES} 字节；请精简 schema 后重试。")
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as error:
+        return f"output_schema 不是合法的 JSON Schema（Draft 2020-12）：{error.message}"
+    return None
+
+
+def _schema_instruction(schema: dict[str, Any]) -> str:
+    """给 child 的输出指令（设计 §3.3 原文），拼接到 task。"""
+    schema_json = json.dumps(schema, ensure_ascii=False)
+    return (
+        "你的最终回答的末尾必须是且仅是一个 JSON 对象，符合以下 JSON Schema：\n"
+        f"{schema_json}\n"
+        "不要在 JSON 之外解释该对象（解释写在 JSON 之前）。"
+    )
+
+
+def _schema_errors(text: str, schema: dict[str, Any]) -> tuple[Any | None, list[str]]:
+    """从 child 最终回答提取并校验 JSON。
+
+    提取顺序：最后一个 ```json 围栏 → 全文 json.loads 兜底 → iter_errors。
+    返回 (对象, 错误列表)：对象非 None ⇒ 错误列表为空；提取失败归类
+    missing_json（PORT DESIGN←dotai missing_tool_call）。
+    """
+    obj: Any = None
+    fences = re.findall(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL)
+    if fences:
+        try:
+            obj = json.loads(fences[-1])
+        except ValueError:
+            obj = None
+    if obj is None:
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            obj = None
+    if obj is None:
+        return None, ["missing_json: 最终回答中未找到可解析的 JSON 对象"]
+    validator = Draft202012Validator(schema)
+    errors = [
+        f"schema 校验失败 {error.json_path}: {error.message}"
+        for error in sorted(validator.iter_errors(obj),
+                            key=lambda e: list(e.absolute_path))
+    ]
+    return (obj, []) if not errors else (None, errors)
+
 
 class _DelegateArgs(BaseModel):
     target: str = Field(
@@ -52,6 +116,14 @@ class _DelegateArgs(BaseModel):
     constraints: list[str] = Field(
         default_factory=list,
         description="可选约束清单（如：只改某目录、必须先写测试）",
+    )
+    output_schema: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "可选：要求子代理最终输出必须符合的 JSON Schema（dict）。"
+            "提供时，任务描述会自动追加输出格式指令；子代理结果经校验后回填，"
+            "不符则自动重试一次。缺省 None = 现有行为逐字节不变。"
+        ),
     )
 
 
@@ -134,6 +206,18 @@ class DelegateTool(Tool):
         )
 
     async def execute(self, args: _DelegateArgs) -> ToolResult:
+        # 零副作用参数校验（fuse 纪律）：schema 非法/超限时在 reserve 之前拒绝，
+        # 不占委派预算、不启动 child。
+        output_schema = args.output_schema
+        if output_schema is not None:
+            schema_error = _check_output_schema(output_schema)
+            if schema_error is not None:
+                return ToolResult.failure(
+                    message=schema_error, error_code=ErrorCode.INVALID_ARGUMENT,
+                )
+        task = args.task
+        if output_schema is not None:
+            task = task + "\n\n" + _schema_instruction(output_schema)
         tree_id = self._provider.tree_id()
         fingerprint = self._fingerprint(args.target, args.task, args.constraints)
         try:
@@ -157,7 +241,7 @@ class DelegateTool(Tool):
             )
         try:
             result = await self._provider.run(
-                target=args.target, task=args.task, constraints=args.constraints,
+                target=args.target, task=task, constraints=args.constraints,
             )
         except ValueError as error:
             failed = ToolResult.failure(
@@ -169,6 +253,40 @@ class DelegateTool(Tool):
                 message=str(error), error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             )
             return await self._with_tree_guard(failed, tree_id, fingerprint)
+        if output_schema is None:
+            # None = 现有路径逐字节不变（payload / 事件组装经 _assemble 共用）。
+            payload, pending_events = await self._assemble(
+                result, target=args.target, task=args.task,
+            )
+            if result.status == "completed":
+                completed = ToolResult.success(
+                    message=f"子代理 '{result.agent_id}' 完成：{result.summary[:200]}",
+                    data={"output": json.dumps(payload, ensure_ascii=False)},
+                    pending_events=pending_events,
+                )
+                return await self._with_tree_guard(completed, tree_id, fingerprint)
+            # failure 无 data 参数：结构化 payload 走 metadata（内容仍经
+            # model_dump_json 全量回灌给 supervisor 模型）。
+            failed = ToolResult.failure(
+                message=f"子代理 '{result.agent_id}' 未能完成（status={result.status}）："
+                        f"{result.summary[:200] or '（无输出）'}",
+                error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+                retryable=False,
+                metadata={"output": json.dumps(payload, ensure_ascii=False)},
+                pending_events=pending_events,
+            )
+            return await self._with_tree_guard(failed, tree_id, fingerprint)
+        return await self._finish_with_schema(
+            result, args, output_schema, task, tree_id, fingerprint,
+        )
+
+    async def _assemble(
+        self, result: Any, *, target: str, task: str,
+    ) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+        """payload 与 pending_events 组装（None 路径与 schema 路径共用）。
+
+        None 路径的输出与本特性引入前逐字节一致。
+        """
         payload: dict[str, Any] = {
             "agent_id": result.agent_id,
             "status": result.status,
@@ -189,11 +307,11 @@ class DelegateTool(Tool):
         # 都是委派完成时——阻塞串行模型下无观察者可见差。
         pending_events = [
             ("agent/delegation-started", {
-                "target": args.target, "task": args.task,
+                "target": target, "task": task,
                 "child_session_id": result.child_session_id,
             }),
             ("agent/delegation-finished", {
-                "target": args.target,
+                "target": target,
                 "child_session_id": result.child_session_id,
                 "status": result.status, "summary": result.summary,
             }),
@@ -202,24 +320,164 @@ class DelegateTool(Tool):
         # P2：web 工件面靠它可见）；未外置时为 None 不发。
         if externalize_event is not None:
             pending_events.append(externalize_event)
-        if result.status == "completed":
+        return payload, pending_events
+
+    async def _finish_with_schema(
+        self,
+        result: Any,
+        args: _DelegateArgs,
+        output_schema: dict[str, Any],
+        task: str,
+        tree_id: str,
+        fingerprint: str,
+    ) -> ToolResult:
+        """output_schema 非 None 的收尾：校验 → 不符则重试一次（同 reserve 路径
+        占预算）→ 两次都不符按 schema_retry_exhausted 诚实失败（设计 §3.2/§3.6）。"""
+        if result.status != "completed":
+            # child 未完成 ⇒ schema 校验无从谈起（summary 不是任务结论），按既有
+            # failure 语义返回、不重试；事件如实标记 not_validated（两轴审查 P2）。
+            payload, pending_events = await self._assemble(
+                result, target=args.target, task=task,
+            )
+            failed = ToolResult.failure(
+                message=f"子代理 '{result.agent_id}' 未能完成（status={result.status}）："
+                        f"{result.summary[:200] or '（无输出）'}",
+                error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+                retryable=False,
+                metadata={"output": json.dumps(payload, ensure_ascii=False)},
+                pending_events=self._mark_finished_events(
+                    pending_events, "not_validated",
+                ),
+            )
+            return await self._with_tree_guard(failed, tree_id, fingerprint)
+        obj, errors = _schema_errors(result.summary, output_schema)
+        payload, pending_events = await self._assemble(
+            result, target=args.target, task=task,
+        )
+        if obj is not None:
+            payload["structured"] = obj
             completed = ToolResult.success(
                 message=f"子代理 '{result.agent_id}' 完成：{result.summary[:200]}",
                 data={"output": json.dumps(payload, ensure_ascii=False)},
-                pending_events=pending_events,
+                metadata={"attempts": 1},
+                pending_events=self._mark_finished_events(pending_events, "passed"),
             )
             return await self._with_tree_guard(completed, tree_id, fingerprint)
-        # failure 无 data 参数：结构化 payload 走 metadata（内容仍经
-        # model_dump_json 全量回灌给 supervisor 模型）。
-        failed = ToolResult.failure(
-            message=f"子代理 '{result.agent_id}' 未能完成（status={result.status}）："
-                    f"{result.summary[:200] or '（无输出）'}",
+        # 第一次校验失败：重试 = 新 child（provider.run 每次开新 session），
+        # 走同一 reserve_delegation 路径占委派树预算（spec 10 §5.1）。
+        pending_events = self._mark_finished_events(pending_events, "failed_retry")
+        retry_task = (
+            task
+            + "\n\n上次输出不符合 schema，错误如下：\n"
+            + "\n".join(f"- {e}" for e in errors)
+            + "\n请只输出修正后的 JSON。"
+        )
+        budget_note: str | None = None
+        try:
+            reservation = await self._provider.reserve_delegation(
+                tree_id, max_delegations=self._max_delegations,
+            )
+            if not reservation.accepted:
+                budget_note = (
+                    "retry_not_started: delegation 预算耗尽"
+                    f"（已用 {reservation.used}/{reservation.limit}），"
+                    "第二次尝试未能启动"
+                )
+        except Exception:  # noqa: BLE001 - a missing durable reservation must fail closed
+            budget_note = "retry_not_started: 无法确认委派树预算，第二次尝试未能启动"
+        if budget_note is None:
+            try:
+                result2 = await self._provider.run(
+                    target=args.target, task=retry_task,
+                    constraints=args.constraints,
+                )
+            except ValueError as error:
+                budget_note = f"retry_not_started: {error}"
+            except RuntimeError as error:
+                budget_note = f"retry_not_started: {error}"
+        if budget_note is not None:
+            # 预算/启动失败按"第二次失败"同口径返回 schema_retry_exhausted
+            # （设计 §3.6）；但 attempts 如实记 1（第二次从未启动），child1 事件
+            # 保持 failed_retry 不覆写（两轴审查 P3：不虚报实际未发生的尝试）。
+            return await self._with_tree_guard(self._retry_not_started(
+                errors + [budget_note], payload, pending_events,
+            ), tree_id, fingerprint)
+        obj2, errors2 = _schema_errors(result2.summary, output_schema)
+        payload2, pending_events2 = await self._assemble(
+            result2, target=args.target, task=retry_task,
+        )
+        if obj2 is not None:
+            payload2["structured"] = obj2
+            completed = ToolResult.success(
+                message=f"子代理 '{result2.agent_id}' 完成：{result2.summary[:200]}",
+                data={"output": json.dumps(payload2, ensure_ascii=False)},
+                metadata={"attempts": 2},
+                pending_events=pending_events
+                + self._mark_finished_events(pending_events2, "passed"),
+            )
+            return await self._with_tree_guard(completed, tree_id, fingerprint)
+        return await self._with_tree_guard(self._schema_exhausted(
+            errors + errors2, payload2,
+            pending_events
+            + self._mark_finished_events(pending_events2, "retry_exhausted"),
+        ), tree_id, fingerprint)
+
+    @staticmethod
+    def _mark_finished_events(
+        pending_events: list[tuple[str, dict[str, Any]]], validation: str,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """delegation-finished 事件加 output_schema/schema_validation 字段（§3.5）。"""
+        return [
+            (event_type, {**data, "output_schema": True, "schema_validation": validation}
+             if event_type == "agent/delegation-finished" else data)
+            for event_type, data in pending_events
+        ]
+
+    @staticmethod
+    def _retry_not_started(
+        errors: list[str],
+        payload: dict[str, Any],
+        pending_events: list[tuple[str, dict[str, Any]]],
+    ) -> ToolResult:
+        """第二次尝试未能启动（预算耗尽 / run 抛错）：attempts 如实为 1。"""
+        head = errors[0] if errors else ""
+        return ToolResult.failure(
+            message=(f"子代理输出不符合 output_schema，且第二次尝试未能启动"
+                     f"（attempts=1）：{head}"
+                     f"（共 {len(errors)} 条错误，见 metadata.errors）"),
             error_code=ErrorCode.TOOL_EXECUTION_ERROR,
             retryable=False,
-            metadata={"output": json.dumps(payload, ensure_ascii=False)},
+            metadata={
+                "output": json.dumps(payload, ensure_ascii=False),
+                "code": "schema_retry_exhausted",
+                "attempts": 1,
+                "retry_started": False,
+                "errors": errors,
+            },
             pending_events=pending_events,
         )
-        return await self._with_tree_guard(failed, tree_id, fingerprint)
+
+    @staticmethod
+    def _schema_exhausted(
+        errors: list[str],
+        payload: dict[str, Any],
+        pending_events: list[tuple[str, dict[str, Any]]],
+    ) -> ToolResult:
+        head = errors[0] if errors else ""
+        return ToolResult.failure(
+            message=(f"子代理输出连续两次不符合 output_schema（attempts=2）：{head}"
+                     f"（共 {len(errors)} 条错误，见 metadata.errors）"),
+            error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+            retryable=False,
+            metadata={
+                "output": json.dumps(payload, ensure_ascii=False),
+                "code": "schema_retry_exhausted",
+                "attempts": 2,
+                "retry_started": True,
+                "errors": errors,
+            },
+            pending_events=pending_events,
+        )
 
     async def _externalize_summary_if_overflowed(
         self, result: Any, payload: dict[str, Any],
