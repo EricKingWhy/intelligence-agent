@@ -2309,7 +2309,11 @@ class SessionService:
         snapshot = await self._stores.delegation_tree_ledger.get_session_budget(
             session_budget_key(events, session_id=session_id)
         )
-        if snapshot is not None and not session_resume_headroom_ok(
+        if snapshot is None:
+            raise BudgetConflict(
+                "Shared session budget snapshot is unavailable; cannot resume this run."
+            )
+        if not session_resume_headroom_ok(
             consumed=snapshot.consumed, limits=snapshot.limits,
         ):
             raise BudgetConflict(

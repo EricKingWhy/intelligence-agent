@@ -34,6 +34,7 @@ from agent_harness.agent.run_budget import (
 )
 from agent_harness.storage.delegation_tree import (
     InMemoryDelegationTreeLedger,
+    SessionBudgetHandle,
     SqliteDelegationTreeLedger,
 )
 
@@ -227,6 +228,44 @@ async def test_record_tool_call_is_idempotent_by_call_id(tmp_path, memory):
 
     with pytest.raises(ValueError, match="different budget data"):
         await ledger.record_session_tool_call(key, **{**values, "calls": 0})
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tool_call_budget_write_marks_session_for_replay(monkeypatch):
+    ledger = InMemoryDelegationTreeLedger()
+    key = "root-cancelled-tool-call"
+    await ledger.ensure_session_budget(
+        key,
+        root_session_id=key,
+        limits=SessionLimits(),
+    )
+    recovery_required: list[str] = []
+    handle = SessionBudgetHandle(
+        ledger,
+        budget_key=key,
+        root_session_id=key,
+        on_tool_call_record_failure=lambda: recovery_required.append(key),
+    )
+    write_started = asyncio.Event()
+
+    async def wait_for_cancellation(*_args, **_kwargs):
+        write_started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(ledger, "record_session_tool_call", wait_for_cancellation)
+    write = asyncio.create_task(handle.record_tool_call(
+        tool_call_id="ask-cancelled",
+        tool_name="request_constraint_resolution",
+        calls=1,
+        attempts=1,
+    ))
+    await asyncio.wait_for(write_started.wait(), timeout=1.0)
+    write.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await write
+
+    assert recovery_required == [key]
 
 
 @pytest.mark.asyncio

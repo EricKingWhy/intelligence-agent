@@ -654,6 +654,72 @@ def test_input_answer_rechecks_shared_session_budget_before_same_run_resume(tmp_
     assert after_answer == before_answer
 
 
+def test_input_answer_fails_closed_when_shared_session_budget_snapshot_is_missing(
+    tmp_path, monkeypatch,
+):
+    app, client = _web(tmp_path)
+    session_id = str(uuid4())
+    session = Session.start(app.state.agent.store, session_id=session_id)
+    old_source = session.append(USER_MESSAGE, {"content": "Use Python."})
+    old_fact = build_protected_fact_data(
+        session.events,
+        session_id=session_id,
+        fact_type="constraint",
+        value="Use Python.",
+        source_event_id=old_source.event_id,
+    )
+    session.append(TASK_PROTECTED_FACT, old_fact)
+    candidate = "For this task, use TypeScript."
+    probe = _ModelProbe([
+        [AIMessage(content="", tool_calls=[{
+            "id": "ask-before-missing-budget-snapshot",
+            "name": "request_constraint_resolution",
+            "args": {"fact_id": old_fact["fact_id"], "candidate": candidate},
+        }])],
+        [AIMessage(content="This response must not run.")],
+    ])
+
+    with probe:
+        started = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={
+                "content": candidate,
+                "budget": {"session": {"max_model_requests": 5}},
+            },
+        )
+        assert started.status_code == 200, started.text
+        before_answer = client.get(f"/api/sessions/{session_id}/events").json()
+        request = next(
+            event for event in before_answer if event["type"] == USER_INPUT_REQUESTED
+        )
+        pause = next(event for event in before_answer if event["type"] == RUN_PAUSED)
+
+        async def missing_snapshot(_budget_key):
+            return None
+
+        monkeypatch.setattr(
+            app.state.agent.delegation_tree_ledger,
+            "get_session_budget",
+            missing_snapshot,
+        )
+        rejected = client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                "run_id": pause["run_id"],
+                "resume_basis": "user_input",
+                "budget": {"expected_version": pause["data"]["budget_version"], "run": {}},
+                "input_request": {
+                    "request_id": request["data"]["request_id"],
+                    "choice": "keep_existing",
+                },
+            },
+        )
+
+    assert rejected.status_code == 409, rejected.text
+    assert len(probe.models) == 1
+    assert client.get(f"/api/sessions/{session_id}/events").json() == before_answer
+
+
 @pytest.mark.parametrize("interleave", ["recovery", "runtime_builder"])
 def test_input_answer_rechecks_budget_after_recovery_and_runtime_awaits(
     tmp_path, monkeypatch, interleave,

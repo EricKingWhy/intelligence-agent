@@ -1554,6 +1554,10 @@ class SessionBudgetHandle:
                 calls=calls,
                 attempts=attempts,
             )
+        except asyncio.CancelledError:
+            if self.on_tool_call_record_failure is not None:
+                self.on_tool_call_record_failure()
+            raise
         except Exception:
             if self.on_tool_call_record_failure is not None:
                 self.on_tool_call_record_failure()
