@@ -7315,3 +7315,11 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **#527**：PR #670（`zcode/T527-imp05-fork-copy`）CI gate0 绿，merge commit `d64cda89` 已进 main；issue 已关闭（completed）。
 - 上方「IMP 批 C 线」节写于分支就绪时，其「执行中/未接票」为当时态；最终态以本补记为准。
 - 待办：Tracker「2026-10-05 · IMP 裁决批」节与 `docs/agents/reference-sources.md`「IMP 裁决调研批次（2026-10-05）」节仍待用户提供内容后补。
+
+## #646 拒绝零 prompt_tokens usage 锚并保留完整预算估算（2026-10-05；分支 `fix/i646-usage-zero-anchor`，基点 `b2a1ecc2` = origin/main；push/PR/merge 三动作逐项待批）
+
+- **票面与方案**：用户批准 #644+#646 顺序施工（SDD 一次一票，#644 已闭环 merge `b2a1ecc2`）。纯 Bug 修复（协议 §1.3 调研豁免；Pi Compaction = PORT DESIGN 已在矩阵，本票零新机制）。病灶 = `_usage_anchored_tokens` usage 校验只拒非 int/bool/负数，`prompt_tokens=0` 被当合法锚（0 成本覆盖实际历史成本，锚=0+响应增量）；票面 2026-10-04 复核已纠偏"196× 系统性低估"说法（build 有 max 保护，helper 41 vs 朴素 4067 最终取 4067）——196× 保留为原报告读数非验收阈值。T16b/B-6 为 issue 正文暴力测试报告编号（勿与 tracker B-6 批次混淆）。认领评论 issuecomment-5992271252。
+- **实现（`7523c623`）**：校验收紧 `< 0` → `<= 0`（1 处条件 + 注释/docstring 同步）；回溯走既有 reversed 循环 continue 自然完成——0 锚即使可定位也不收下，回溯到更早正数可定位锚（其响应及之后全部消息增量照算），全部不可用 ⇒ 0，调用点 `max()`（builder.py:407 只抬高不降低）回落朴素估算；max 覆盖方向/`_estimate_tokens_cached`/dangling/compaction 路径/比较符全部不动。TDD 红先行 3 组：7 形态逐形态参数化（零/负/bool/float/None/缺失/非 dict——恰零形态为病灶，其余为既有拒绝行为钉）、零锚回溯早锚（`_anchor_formula` 同口径）、build 级 max 保全定向守卫。**验收**：红 2/18 → 绿 24/24（票面 focused 入口）+ tests/context 227P + ruff 绿；变异核验 `<=0` 回退 `<0` 恰好两红（%TEMP% 副本，仓库零残留）。
+- **审查循环**：Correctness 轴发现轮 PASS-WITH-FINDINGS（仅 2×P4 无需行动：P4-1 build 级用例为合格定向守卫但病灶检测力由 helper 级两组承担——变异实证，建议不加更强断言因 builder 无公共 total-estimate 可观察值；P4-2 T16b/B-6 溯源提示）；Standards 轴发现轮 **CLEAN**（2×P3 信息性不要求处置）→ **发现轮即终态：零代码 findings、无处置 commit、无需 delta 轮**。台账行 `docs/review_ledger.d/i646-usage-zero-anchor-b2a1ecc2-7523c623.tsv`。证据澄清：红 2/18 系修前工作树**真实执行**（2 failed/16 passed，Edit 修复前运行），非由 diff 推导。
+- **登记不修（另案）**：①build 级 `test_zero_usage_only_public_build_keeps_naive_estimate` 无 #646 病灶检测力（变异实测两侧皆绿）——其定位是票面 AC②④ 要求的"公共 build 不下调成本"定向守卫，与既有 `test_anchor_never_lowers_below_estimate` 构成 max 双钉，病灶检测力由 helper 级两组变异恰好两红承担；②罕见 int 子类（IntEnum 等）仍会被收下作锚——既有行为非本票引入，无实际 provider 形态支撑；③T16b/B-6 报告编号溯源在 issue #646 正文，仓库文档不可直查（防与 tracker B-6 批次混淆，已在票面与方案注明）。
+- **集成状态**：记账 + 收据笔落盘后，push 分支 / 开 PR / PR merge 三动作逐项待批（§14.4）。
