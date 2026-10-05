@@ -7402,7 +7402,7 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 ## #707 compaction 程序化节 add_once O(n²)→O(n)（2026-10-06；分支 `fix/i707-on2-identifier-dedup`，基点 `cc4d92c6` = origin/main；push/PR/merge 逐项待批）
 
 - **量化先行（票面顺序①，先于改码）**：仓外基准（零仓库写入）在基点树实测 `add_once` 病灶标度：distinct 标识 1000/5000/10000/30000 → 单次 `_programmatic_summary_sections` 墙钟中位 **0.011 / 0.246 / 0.936 / 8.837s**，各档增速 ≈ 规模平方比（5×→22×、2×→3.8×、3×→9.4×），O(n²) 标度成立 ⇒ 收益可感知，wontfix 逃生门不触发。
-- **修复（票面④，最小实现）**：`add_once` 由 list 线性扫描改为配对 seen 集合 O(1) 成员检查（`identifier_seen` / `file_path_seen` 与两个 list 平行），12 个调用点机械更新；首次出现顺序语义不变；`_capped_entries` / 裁剪 / 预算逻辑零触碰，src 只动 `compactor.py`。
+- **修复（票面④，最小实现）**：`add_once` 由 list 线性扫描改为配对 seen 集合 O(1) 成员检查（`identifier_seen` / `file_path_seen` 与两个 list 平行），13 个调用点机械更新；首次出现顺序语义不变；`_capped_entries` / 裁剪 / 预算逻辑零触碰，src 只动 `compactor.py`。
 - **等价证据（票面③）**：修后 4 档 sha256 指纹与修前**逐字节一致**（`af5635d4…` / `014818b3…` / `7fd510e1…` / `dfc65184…`）；30000 档 8.837s→**0.060s**（147×），1000 档 5.5×。
 - **等价钉（新增 2 用例，`tests/context/test_compactor_identifiers.py`）**：①保序钉 = 首次出现顺序 + 重复值不移动不重复入列；②窗口边界钉 = `[TSK-0000..0059, TSK-0005 重复]` 去重流 60 条取末 50，TSK-0005 按首现位置被淘汰、不得被末尾重复值经 `_capped_entries` 保末去重"救回"窗口。
 - **变异鉴别（§8.1，仓外副本）**：git archive @`0fe67421` 树外副本摘 `seen.add`（CRLF 探测 962 对、anchor 命中数 = 1、PYTHONPATH 指副本 src）⇒ 窗口边界钉**唯一转红**（1 failed / 12 passed）；未变异树 tests/context 302 passed。

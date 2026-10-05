@@ -225,11 +225,12 @@ def test_identifier_first_occurrence_order_is_preserved():
     """add_once 去重 = 首次出现顺序：重复值不移动位置也不重复入列。
 
     #707 把 O(n²) 的 list 线性扫描换成 seen 集合 O(1) 检查，输出契约钉死为
-    首次出现顺序（含重复值出现时不得被"移到末尾"），与既有窗口淘汰
-    （`_capped_entries`，最近偏置）正交。
+    首次出现顺序。输入刻意让 TASK-1001 的**末次出现**晚于 TASK-2002 的末次
+    出现：若去重被改成"重复值移到末尾"（Standards 轴 M2 变异），TASK-1001
+    会落到 TASK-2002 之后，本用例转红。
     """
     text = (
-        "先 TASK-1001 与 TASK-2002，复核 TASK-1001、再提 TASK-2002，"
+        "先 TASK-1001 与 TASK-2002，再提 TASK-2002，复核 TASK-1001，"
         "新增 TASK-3003"
     )
     identifiers = _identifiers([HumanMessage(content=text)])
