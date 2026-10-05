@@ -156,7 +156,7 @@ class TestCriteria:
 
     def test_credential_in_draft_is_vetoed(self):
         """负面清单（§3-5）：草稿含凭证/密钥 → 一票否决。"""
-        text = DRAFT_TEXT.replace("2. 导出 PDF", '2. 设置 API_KEY="sk-live-abcdef123456"')
+        text = DRAFT_TEXT.replace("2. 导出 PDF", '2. 填写 password=测试占位符勿当真')  # 测试固件：中文占位符，不触发 gitleaks
         verdict = evaluate_criteria(_run_events(), text, name="x", description="d")
         assert verdict.ok is False
         assert any("凭证" in r or "credential" in r.lower() for r in verdict.failed)
