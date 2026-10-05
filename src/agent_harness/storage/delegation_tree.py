@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -48,6 +48,22 @@ _SESSION_BUDGET_PROCESS_ID = str(uuid4())
 def _session_budget_process_id() -> str:
     """Differentiate workers forked after this module was imported."""
     return f"{os.getpid()}:{_SESSION_BUDGET_PROCESS_ID}"
+
+
+@dataclass(frozen=True)
+class SessionToolLimitsPurge:
+    """`purge_session_tool_limits` 的结果（`#616` 陈旧账行名的清除通道）。
+
+    - `purged`：被清名 → 原 ceiling（点名且在账的键；无变更 = 空 dict）；
+    - `remaining`：清后的 `tool_call_limits` 表（正常名与其余 ceiling 原样保留）；
+    - `rows`：受影响账行数（无变更 = 0，不 bump version、不落审计）；
+    - `version`：清后的账行版本（无变更 = 清前版本，不制造假变更给 CAS/投影）。
+    """
+
+    purged: dict[str, int]
+    remaining: dict[str, int]
+    rows: int
+    version: int
 
 
 @dataclass(frozen=True)
@@ -1269,6 +1285,71 @@ class SqliteDelegationTreeLedger:
                 consumed=_row_session_consumed(row),
                 version=int(row["version"]),
             )
+
+    @retry_on_busy
+    async def purge_session_tool_limits(
+        self, budget_key: str, names: Iterable[str], *, source: str = "unknown",
+    ) -> SessionToolLimitsPurge:
+        """从 ceiling 表 `tool_call_limits` 摘掉点名的陈旧工具名（`#616`）。
+
+        待清对象是 **ceiling 表**，不是消耗事实表 `tool_calls_by_tool` /
+        `tool_attempts_by_tool`（历史事实，一个字节不改）；`session_budgets` 本就可
+        UPDATE（merge-only 是 `ensure_session_budget` 的并入策略，不是表不可改）。
+
+        单事务：只删**既在 `names` 又在账的**键 → 追加
+        `session_budget_events(kind="tool_limits_purged", version=新版本)` 审计 →
+        `version + 1` → commit。`names` 里其余名字（正常注册名 / 从未存在的名）一律
+        不动。**幂等**：无键可清 ⇒ 零写入（不 INSERT 事件、不 bump version）、
+        `rows=0`。未知 `budget_key` ⇒ `KeyError`（与 `update_session_limits` 同口径）。
+
+        判据（哪个名字陈旧）由调用方（服务层，掌握根 registry）给出；存储层只做
+        "点名且在账"的交集，不在本层重新解释 registry。
+        """
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                table = _tool_map_from_json(row["tool_call_limits"]) or {}
+                requested = set(names)
+                to_purge = {name: table[name] for name in requested if name in table}
+                if not to_purge:
+                    # 零写入：不落事件、不 bump version（否则 CAS/投影看到假变更）。
+                    await connection.commit()
+                    return SessionToolLimitsPurge(
+                        purged={}, remaining=table, rows=0,
+                        version=int(row["version"]),
+                    )
+                for name in to_purge:
+                    del table[name]
+                new_version = int(row["version"]) + 1
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET version = ?, tool_call_limits = ?
+                       WHERE budget_key = ?""",
+                    (new_version, _tool_map_json(table), budget_key),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "tool_limits_purged", version=new_version,
+                    detail={
+                        "purged": to_purge,
+                        "remaining": table,
+                        "stale_names": sorted(requested),
+                        "reason": "unregistered",
+                        "source": source,
+                    },
+                )
+                await connection.commit()
+                return SessionToolLimitsPurge(
+                    purged=to_purge, remaining=table, rows=1, version=new_version,
+                )
+            except BaseException:
+                await connection.rollback()
+                raise
 
     @retry_on_busy
     async def consume_session_delegation(

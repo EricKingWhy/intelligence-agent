@@ -85,6 +85,7 @@ from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
+    PURGE_ENTRY_API,
     ActiveRunConflict,
     AmendOptions,
     ApprovalAlreadyResolved,
@@ -800,6 +801,21 @@ class SessionArchived(BaseModel):
     archived: bool
 
 
+class SessionToolLimitsPurged(BaseModel):
+    """`POST /api/sessions/{id}/budget/purge-stale-tools` 的成功响应（#616）。
+
+    形状就是存储层结果 `SessionToolLimitsPurge` 的四字段透传：`purged`（被清名 →
+    原 ceiling）、`remaining`（清后的 `tool_call_limits` 表）、`rows`（受影响账行数，
+    无变更 = 0）、`version`（清后的账行版本，无变更 = 清前版本）。幂等：重跑无陈旧名
+    仍 200，`purged={}`、`rows=0`、`version` 不变。
+    """
+
+    purged: dict[str, int]
+    remaining: dict[str, int]
+    rows: int
+    version: int
+
+
 class SessionDeleted(BaseModel):
     """`DELETE /api/sessions/{id}` 的成功响应（#172 / ADR-0029）。
 
@@ -899,6 +915,15 @@ class AppState:
         # 审查 P2-1：不实例化 sandbox），`session_service()` 把它与其他
         # collaborator 一样原样搬进领域层。
         self.validate_session_declaration = _session_declaration_validator(
+            settings=settings,
+            store=self.store,
+            get_wiring=self.get_wiring,
+        )
+        # `#616`：陈旧账行名清除通道（`RegisteredToolNamesProvider`）的根 registry
+        # 名字集端口。与上面的 validator 同源装配（`root_registry_tool_names`
+        # 零副作用取根 registry 名字集，P2-1：不实例化 sandbox），`session_service()`
+        # 把它与其他 collaborator 一样原样搬进领域层。
+        self.registered_tool_names = _registered_tool_names_provider(
             settings=settings,
             store=self.store,
             get_wiring=self.get_wiring,
@@ -1046,6 +1071,32 @@ def _session_declaration_validator(
     return _validate
 
 
+def _registered_tool_names_provider(
+    *,
+    settings: Settings,
+    store: JsonlSessionStore,
+    get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+) -> Any:
+    """组合根适配：`#616` 根 registry 名字集端口（`RegisteredToolNamesProvider`）。
+
+    判据 = **根 registry**（树级语义）：名字集由 `root_registry_tool_names`
+    **零副作用**计算，与 `build_runtime` 的真实装配同源（漂移由
+    `tests/test_assembly_root_registry_names.py` 三方对账钉住）。与 `#564` 的
+    `_session_declaration_validator` 同源、同一条 P2-1 取舍：不碰 `_build_tooling`
+    / workspace_registry——否则会在归属对账之前对 workspace `mkdir`。
+    存为 `AppState.registered_tool_names` 成员——`session_service()` 与其他
+    collaborator 一样**原样搬入**领域层。CLI 侧复用同一容器，两条入口同一判据。
+    """
+
+    async def _names(session_id: str) -> frozenset[str]:
+        _, wiring = await get_wiring()
+        return root_registry_tool_names(
+            settings, wiring, session_id=session_id, session_store=store,
+        )
+
+    return _names
+
+
 def session_service(state: AppState) -> SessionService:
     """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
     return SessionService(
@@ -1066,6 +1117,7 @@ def session_service(state: AppState) -> SessionService:
         ensure_stores=state.ensure_stores,
         get_wiring=state.get_wiring,
         validate_session_declaration=state.validate_session_declaration,
+        registered_tool_names=state.registered_tool_names,
     )
 
 
@@ -2031,6 +2083,49 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except StorageBusyError as e:
             raise storage_http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
+
+    @app.post("/api/sessions/{session_id}/budget/purge-stale-tools")
+    async def purge_stale_tools(
+        session_id: str,
+        tool: str | None = None,
+        _: None = Depends(require_trusted_origin),
+    ) -> SessionToolLimitsPurged:
+        """清除陈旧工具 ceiling（#616）：摘掉 `session_budgets.tool_call_limits` 里
+        **不在根 registry** 的账行名。
+
+        陈旧性是 registry-relative 概念，只有服务端持有根 registry（树级语义），故
+        判据在 `SessionService.purge_stale_session_tool_limits`：它只删 ceiling 表里的
+        陈旧键，**不动**消耗事实表 `tool_calls_by_tool` / `tool_attempts_by_tool`，
+        也**不落** typed SessionEvent（预算变更本就不进会话真相，不变量 #16/#22）；清除
+        痕迹只落一条 `session_budget_events(kind="tool_limits_purged")` 审计并 bump version。
+
+        可选 query `?tool=<name>` 收窄到单名（对应 CLI `--tool`）：服务端仍按根 registry
+        权威判 stale，点名**正常注册名 / 从未存在名**都是安全 no-op，只有点名**确实陈旧**
+        的名字才真清。
+
+        语义：200 → `{purged, remaining, rows, version}` 回执（**幂等**：无陈旧名仍 200，
+        `purged={}`、`rows=0`、`version` 不变）；404 → 没有这个会话；422 → id 形态非法
+        （先于 404，路径穿越防线）。
+
+        确认面**不在 API**：本端点的 POST 本体即显式动作；整会话重整的二次确认只在
+        CLI（`--yes`）。来源闸（ADR-0025 D1）：账行写操作属宿主侧管理动作，只接受本机
+        来源（与 `archive` / `delete_session` 同一实现，ADR-0028）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            result = await service.purge_stale_session_tool_limits(
+                session_id, tool=tool, entry_point=PURGE_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return SessionToolLimitsPurged(
+            purged=result.purged,
+            remaining=result.remaining,
+            rows=result.rows,
+            version=result.version,
+        )
 
     @app.get("/api/sessions/{session_id}/context-usage")
     async def get_context_usage(session_id: str):
