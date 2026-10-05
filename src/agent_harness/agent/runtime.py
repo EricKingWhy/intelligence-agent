@@ -169,6 +169,7 @@ from agent_harness.storage import (
 )
 from agent_harness.storage.checkpoint import note_checkpoint_save_failure
 from agent_harness.tooling import ToolCall, ToolExecutor, ToolRegistry
+from agent_harness.tooling.exposure import ToolExposureController
 from agent_harness.tooling.quota import ToolQuotaWindow
 
 if TYPE_CHECKING:
@@ -1136,6 +1137,50 @@ class _GuardedTracer:
         return _guarded
 
 
+class _ExposureBoundModel:
+    """按曝光级别动态重绑定义集的模型包装（#528 / IMP-11）。
+
+    ToolExposureController 的激活集变化（模型上一轮调了 ``tool_search``）时，
+    下一次模型调用前重绑 ``bind_tools``——目标 deferred 工具因此进入"下一轮
+    请求"。未传控制器时不使用本类，绑定路径与 #528 之前逐字相同。
+
+    只代理协调器实际调用的两个入口（``astream(messages)`` / ``ainvoke(messages)``
+    ，签名见 model/fallback.py），其余属性经 ``__getattr__`` 透传给当前绑定对象。
+    """
+
+    def __init__(self, model: Any, controller: ToolExposureController) -> None:
+        self._raw = model
+        self._controller = controller
+        self._bound = self._bind(controller.current_definitions())
+        self._bound_key = controller.activated
+
+    def _bind(self, definitions: list[dict]) -> Any:
+        if definitions and hasattr(self._raw, "bind_tools"):
+            return self._raw.bind_tools(definitions)
+        return self._raw
+
+    def _ensure_current(self) -> None:
+        key = self._controller.activated
+        if key != self._bound_key:
+            self._bound = self._bind(self._controller.current_definitions())
+            self._bound_key = key
+
+    def astream(self, messages: list, **kwargs: Any) -> Any:
+        self._ensure_current()
+        return self._bound.astream(messages, **kwargs)
+
+    async def ainvoke(self, messages: list, **kwargs: Any) -> Any:
+        self._ensure_current()
+        return await self._bound.ainvoke(messages, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        # 下划线名直接拒绝：防止自身属性（如 _bound）未就绪时无限递归，
+        # 也避免把私有协议属性透传成隐式契约。
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._bound, name)
+
+
 class AgentRuntime:
     """最小透明 Agent Loop。
 
@@ -1176,6 +1221,7 @@ class AgentRuntime:
         agent_profile: str = "main",
         dropped_tools: tuple[str, ...] = (),
         run_budget: LaunchRunBudget | None = None,
+        tool_exposure: ToolExposureController | None = None,
         local_fuse_source: str = SOURCE_DEPLOYMENT,
         completion_policy: CompletionPolicy | None = None,
         stuck_evidence: StuckEvidencePort | None = None,
@@ -1289,8 +1335,16 @@ class AgentRuntime:
         # 见本构造器上方 system_prompt 注释）——否则 closeout 可能又产出一个
         # tool_call，而暂停点之后不执行任何工具。
         self._raw_model = model
-        definitions = registry.export_model_definitions()
-        if definitions and hasattr(model, "bind_tools"):
+        # 曝光级别定义集（#528）：注入控制器时绑定集 = direct + 已激活 deferred，
+        # 且模型调用前按激活集变化重绑（_ExposureBoundModel）；None = 现状默认，
+        # 走 registry.export_model_definitions() 的一次性静态绑定（行为逐字不变）。
+        self._tool_exposure = tool_exposure
+        definitions: list[dict] | None = (
+            None if tool_exposure is not None else registry.export_model_definitions()
+        )
+        if tool_exposure is not None:
+            self.model = _ExposureBoundModel(model, tool_exposure)
+        elif definitions and hasattr(model, "bind_tools"):
             self.model = model.bind_tools(definitions)
         else:
             self.model = model
@@ -1298,7 +1352,9 @@ class AgentRuntime:
         # 会话切到 fallback 后模型看不到工具，行为静默退化）。
         self._fallback_model: Any | None = None
         if fallback_model is not None:
-            if definitions and hasattr(fallback_model, "bind_tools"):
+            if tool_exposure is not None:
+                self._fallback_model = _ExposureBoundModel(fallback_model, tool_exposure)
+            elif definitions and hasattr(fallback_model, "bind_tools"):
                 self._fallback_model = fallback_model.bind_tools(definitions)
             else:
                 self._fallback_model = fallback_model

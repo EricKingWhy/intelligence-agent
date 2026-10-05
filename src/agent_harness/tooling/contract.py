@@ -91,6 +91,36 @@ class ToolSideEffect(str, Enum):
     MUTATING = "MUTATING"  # 改外部状态 → 整批串行（Task 4）
 
 
+class ToolExposure(str, Enum):
+    """工具曝光级别（#528 / IMP-11）：控制模型**看得到什么**，不控制**能调用什么**。
+
+    - ``DIRECT``：进 ``export_model_definitions()`` 的模型菜单（默认，与 #528
+      之前行为逐字相同）。
+    - ``DEFERRED``：不进菜单；模型经内置 ``tool_search`` 按需发现后进入下一轮
+      定义集。注册即可调用（执行权边界仍是 Registry 成员资格 + Permission）。
+    - ``HIDDEN``：不进菜单、不可被搜索。注册但模型不可达（如纯内部编排工具）。
+
+    机制来源：Pi ``ToolExposure``（types.ts:509，MIT）的收缩版——V1 只取票面
+    最小集三档，``model-only`` / ``codemode`` 留给未来扩展。判定与来源核实见
+    ``docs/agents/528-research.md``。
+    """
+
+    DIRECT = "direct"
+    DEFERRED = "deferred"
+    HIDDEN = "hidden"
+
+
+def exposure_of(tool: object) -> ToolExposure:
+    """读工具的曝光级别（#528）；无该属性的对象按 DIRECT 处理。
+
+    Registry 的鸭子型工具（如测试替身，见 tests/multiagent EchoTool 注释）没有
+    ``exposure`` 属性——#528 的默认值判据必须等价于 #528 之前的行为（缺元数据
+    = direct = 照旧全量注入），所以在读取点兜底而不是要求所有工具面继承 Tool。
+    """
+    exposure = getattr(tool, "exposure", ToolExposure.DIRECT)
+    return exposure if isinstance(exposure, ToolExposure) else ToolExposure.DIRECT
+
+
 class PermissionPolicy(str, Enum):
     """Session 级权限策略——Agent 在这个 Session 里的最大权限边界。
 
@@ -213,6 +243,16 @@ class Tool(ABC):
         permission 驱动授权关卡（ToolExecutor 的 approval gate）。
         """
         return ToolPermission.WORKSPACE_WRITE
+
+    @property
+    def exposure(self) -> ToolExposure:
+        """曝光级别（#528）。默认 DIRECT = 全量注入，行为与 #528 之前逐字相同。
+
+        与 permission 正交：exposure 只影响模型菜单（定义集），执行授权仍由
+        Permission/Approval 与 Registry 成员资格决定——deferred 工具被搜索
+        "发现"不构成授权（审计备注：tool search 结果不能授予执行权）。
+        """
+        return ToolExposure.DIRECT
 
     @property
     def reconcile_hint(self) -> ReconcileHint:
