@@ -1771,6 +1771,8 @@ def _main_compact(argv: list[str]) -> None:
 
     退出码：无会话 / id 非法 / 非法 `--model` / 在途 run（或压缩进行中）→ 1
     （stderr 明确文案）；用法错 → 2（argparse）。
+
+    `--dry-run` 形态为本仓 #616 惯例（非成熟产品对标）：只预览、零 LLM 调用、零写入。
     """
     parser = argparse.ArgumentParser(prog="agent-harness compact")
     parser.add_argument("--session", required=True, help="要压缩的会话 id")
