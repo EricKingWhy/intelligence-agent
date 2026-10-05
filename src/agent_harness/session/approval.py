@@ -92,6 +92,11 @@ class InteractiveCallbackHolder:
             # #526 A2：仅可缓存身份才提供「会话内批准」；Runtime 据此写
             # permission/approval-granted，同身份后续调用命中缓存。
             allowed_decisions.append(PermissionDecision.APPROVE_SESSION.value)
+            # #684 Phase 1：同一可缓存身份也提供「以后都允许（持久规则）」——
+            # Runtime 收到 APPROVE_POLICY 后按 response.policy_granularity 把
+            # 精确规则安装进项目级 approve-policy.json。入口唯一：只能从这次
+            # 显式审批创建，不另开创建通道（F21）。
+            allowed_decisions.append(PermissionDecision.APPROVE_POLICY.value)
         self._session.append(
             TOOL_APPROVAL_REQUESTED,
             {

@@ -207,6 +207,7 @@ from agent_harness.tooling.approval import (
     PermissionDecision,
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.approve_policy import PolicyGranularity
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
@@ -2883,8 +2884,13 @@ class SessionService:
         approved: bool = True,
         decision: str | None = None,
         reason: str = "",
+        policy_granularity: str | None = None,
     ) -> ApprovalDecision:
         """解析审批决策并唤醒 run 内阻塞的 callback（原 POST /approve）。
+
+        `policy_granularity` 仅对 ``decision=approve_policy``（#684 第三档
+        「以后都允许」）有意义，取值 ``exact`` / ``command``；缺省 ``None`` 由
+        ``ApprovalResponse`` 归一为 ``exact``。其它决策忽略该值（不据此放行/安装）。
 
         返回 ApprovalDecision(decision, response)。
         异常：SessionNotFound / ApprovalQueueMissing / ApprovalRequestMissing /
@@ -2950,10 +2956,24 @@ class SessionService:
                 f"decision '{perm_decision.value}' not in allowed_decisions {allowed}"
             )
 
+        # #684：粒度只认 exact / command 两档（F22 无模糊匹配）；非法值 = 违反契约，
+        # 与非法 decision 同口径 422，绝不静默回落。缺省 None 由 ApprovalResponse
+        # 归一为 exact。
+        granularity: PolicyGranularity | None = None
+        if policy_granularity is not None:
+            try:
+                granularity = PolicyGranularity(policy_granularity)
+            except ValueError:
+                raise InvalidDecision(
+                    f"policy_granularity '{policy_granularity}' is not a valid "
+                    "PolicyGranularity"
+                ) from None
+
         response = ApprovalResponse(
             approved=(perm_decision != PermissionDecision.DENY),
             reason=reason,
             decision=perm_decision,
+            policy_granularity=granularity,
         )
         try:
             ok = queue.resolve(approval_id, response)
