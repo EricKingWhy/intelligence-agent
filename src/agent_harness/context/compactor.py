@@ -47,7 +47,17 @@ _MODEL_SUMMARY_HEADINGS = _SUMMARY_HEADINGS[2:6]
 _PROGRAMMATIC_SUMMARY_HEADINGS = (0, 1, 6, 7)
 _IDENTIFIER_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d+"
-    r"[A-Za-z0-9-]*|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(?![A-Za-z0-9_])"
+    r"[A-Za-z0-9-]*|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+"
+    # #640（T2-X/Y）：标准 8-4-4-4-12 十六进制 UUID。数字开头的形态不满足前两个
+    # 分支的首字符 A-Za-z：此前整条漏配、或只从第二段起截出尾部伪片段
+    #（`123e4567-e89b-…` → `e89b-12d3-a456-…`）。新分支排在既有两分支**之后**，
+    # 既有分支的命中起点优先权不变。数字开头的裸 UUID 与连字符尾缀（`…-extra`）
+    # 由新分支整条命中、尾缀不再并入条目（字母开头的既有连字符贪婪形态不受影响，
+    # 仍把 `…-extra1` 并入同一 token）；字母数字黏连（`…0000`）被尾 lookahead 挡下，
+    # 仍按既有语义落到分支1 自第二段起的尾部片段（可含黏连尾缀，非 8-4-4-4-12 形状）。
+    # 边界沿用同一对 lookaround ⇒ 不从更长连续字母数字串里切出 UUID 形状伪标识。
+    r"|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+    r")(?![A-Za-z0-9_])"
 )
 _FILE_PATH_PATTERN = re.compile(
     r"(?<![\w])(?:[A-Za-z]:[\\/]|/)?"

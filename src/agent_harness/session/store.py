@@ -334,6 +334,20 @@ class JsonlSessionStore:
         抛异常而不是静默丢：拒写是事实，写者（如 ``MemoryWriteback``）自带降级兜底。
         """
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        # #650：UTF-8 可编码性验证**前置于**一切目录/文件变更与 seq 状态提交。
+        # 孤立 surrogate 能通过 json.dumps（ensure_ascii=False 原样保留进 str），
+        # 却到文本 write 的编码步骤才炸——彼时 mkdir 已执行、撕裂尾中立化可能
+        # 已改写文件，失败形状是裸 UnicodeEncodeError 而非受控拒绝。用显式
+        # ValueError 拒绝（票面指定；session/errors.py 不在本票文件边界内），
+        # ``__cause__`` 保留 codec 异常供诊断；消息只装定位，不回显用户内容。
+        try:
+            line.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                f"Session '{session_id}' 事件 seq={event.seq} 含无法以 UTF-8 "
+                "编码的孤立 Unicode 代理项（U+D800–U+DFFF），拒绝落盘"
+                "（校验先于任何目录/文件变更与 seq 状态提交）"
+            ) from error
         path = self._events_path(session_id)
         with self._lock_for(session_id):
             # 已删集合与建目录都在临界区内（ADR-0036）：迟到的 append 只可能看到
