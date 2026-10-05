@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,6 +37,7 @@ from agent_harness.skills.discovery import (
     SkillCatalogEntry,
     SkillDiscovery,
     parse_skill_markdown,
+    resolve_within,
 )
 from agent_harness.skills.lint import DANGEROUS_BODY_PATTERNS, LintResult, lint_skill
 
@@ -157,8 +160,9 @@ def find_duplicate(
     """判据 4（§3-4）去重：与既有 skill 的 name 或 description 重复 → 返回既有名。
 
     description 相似度取保守子集：规范化（casefold + 空白压缩）后相等或互为
-    包含才算——宁可漏判由 lint 规则 5 / 人审兜底，不误杀正当 skill。重复的
-    走"更新既有 skill"分支（§3-4），第一版 propose 直接拒绝并指引。
+    包含才算——宁可漏判由 lint 规则 5 / 人审兜底，不误杀正当 skill。调用方
+    （propose）据返回值分流：name 同名且 project 来源 = 更新分支入口（§10-5）；
+    其余重复拒绝并指引（§3-4）。
     """
     for existing_name, existing_description in existing:
         if name == existing_name:
@@ -320,16 +324,29 @@ class SkillPromoter:
         判据不过 → 拒绝且**零落盘**（连拒绝的草稿都不留残骸）；草稿本身解析
         不出合法 frontmatter（必备 name/description）同样拒绝——那是 lint 规则 1
         的前置形状，propose 不收连形状都不对的草稿。
+
+        更新分支（§3-4/§10-5，审查 P2 处置）：name 与既有 skill 相同**且其来源
+        在 project skill 目录** = 更新分支的合法入口（模型重写全文 + lint +
+        人审，与新建同流程，注册时发 skill/updated）；其余重复（description
+        相似、global/manual 来源同名）仍拒绝并指引。global 同名拒绝同时守住
+        §6.1——闭环不写 global，放行只会制造 shadow 全局技能的冲突条目。
         """
         entry, parse_errors = self._parse_draft(draft_text)
         if entry is None:
             return ProposeOutcome(accepted=False, reasons=list(parse_errors))
+        catalog_entries = self._discovery.catalog().entries
         if existing is None:
-            existing = [(e.name, e.description) for e in self._discovery.catalog().entries]
+            existing = [(e.name, e.description) for e in catalog_entries]
+        duplicate = find_duplicate(entry.name, entry.description, existing)
+        update_target = (
+            duplicate is not None and duplicate == entry.name
+            and self._project_owned(duplicate, catalog_entries)
+        )
         allowed_tools_declared = bool(entry.meta.get("allowed-tools"))
         verdict = evaluate_criteria(
             events, draft_text, name=entry.name, description=entry.description,
-            existing=existing, one_off=one_off, allowed_tools_declared=allowed_tools_declared,
+            existing=None if update_target else existing,
+            one_off=one_off, allowed_tools_declared=allowed_tools_declared,
         )
         if not verdict.ok:
             return ProposeOutcome(accepted=False, name=entry.name, reasons=verdict.failed)
@@ -344,10 +361,19 @@ class SkillPromoter:
                               staging_path=staging_dir / "SKILL.md")
 
     def run_lint(self, name: str) -> LintResult:
-        """draft → lint-pass；lint 失败回 draft（可改后重跑 lint，§4 状态机）。"""
+        """draft → lint-pass；lint 失败回 draft（可改后重跑 lint，§4 状态机）。
+
+        规则 5（name 冲突）只拦"不可更新"的同名——global/manual 来源（审查 P2
+        处置：project 同名是更新分支的合法目标 §10-5，不在 lint 处堵死，否则
+        设计 §3-4/§5.1 承诺的更新分支永远不可达，SKILL_UPDATED 成死路径）。
+        """
         record = self._require(name, STATUS_DRAFT, extra={STATUS_LINT_PASS})
-        existing_names = {e.name for e in self._discovery.catalog().entries}
-        result = lint_skill(self._staging_path(name), existing_names=existing_names)
+        project_dir = self._discovery.project_dir
+        blocked_names = {
+            e.name for e in self._discovery.catalog().entries
+            if project_dir is None or not resolve_within(e.source_path, project_dir)
+        }
+        result = lint_skill(self._staging_path(name), existing_names=blocked_names)
         record.lint = result
         record.status = STATUS_LINT_PASS if result.ok else STATUS_DRAFT
         return result
@@ -407,16 +433,32 @@ class SkillPromoter:
 
     # ── 内部 ──
 
+    def _project_owned(self, name: str, catalog_entries: list[SkillCatalogEntry]) -> bool:
+        """既有同名条目是否落在 project skill 目录（闭环可写的更新目标）。
+
+        global/manual 来源一律 False——闭环不写 global（§6.1），同名草稿只能
+        被拒绝而不是悄悄 shadow 全局技能（lint 规则 5 的 shadowed 语义）。
+        """
+        project_dir = self._discovery.project_dir
+        if project_dir is None:
+            return False
+        entry = next((e for e in catalog_entries if e.name == name), None)
+        return entry is not None and resolve_within(entry.source_path, project_dir)
+
     def _parse_draft(self, draft_text: str) -> tuple[SkillCatalogEntry | None, list[str]]:
         staging_dir = self._staging_root / ".pending-parse"
         staging_dir.mkdir(parents=True, exist_ok=True)
-        probe = staging_dir / "SKILL.md"
+        # 唯一探针名（审查 P2 处置）：固定 SKILL.md 在并发 propose 下写/读/删互踩，
+        # 且 finally 的 rmdir 会撞出 OSError 掩盖真实异常——探针名唯一 + rmdir
+        # 容错（空则顺手清，有并发探针则留下次清）。
+        probe = staging_dir / f"SKILL.{uuid.uuid4().hex}.md"
         try:
             probe.write_text(draft_text, encoding="utf-8")
             return parse_skill_markdown(probe)
         finally:
             probe.unlink(missing_ok=True)
-            staging_dir.rmdir()
+            with contextlib.suppress(OSError):
+                staging_dir.rmdir()
 
     def _staging_path(self, name: str) -> Path:
         return self._staging_root / name / "SKILL.md"

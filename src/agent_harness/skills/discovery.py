@@ -200,6 +200,15 @@ class SkillDiscovery:
         # 静态 catalog），写入方法刷新后 capability 的可见性随之收敛。
         self._catalog: SkillCatalog | None = None
 
+    @property
+    def project_dir(self) -> Path | None:
+        """闭环写入面（project skill 目录）；None = 未配置写入面。
+
+        更新分支（§3-4/§10-5）需要用它判定"既有同名条目是否是闭环可更新的
+        合法目标"（global/manual 来源不可更新——闭环不写 global）。
+        """
+        return self._project_dir
+
     def discover(self) -> SkillCatalog:
         catalog = SkillCatalog()
         seen: dict[str, Path] = {}
@@ -296,6 +305,14 @@ class SkillDiscovery:
 
     def _write_entry(self, entry: SkillCatalogEntry) -> Path:
         """序列化 + 落盘 + 刷新（同事务）。任何一步失败不留半写状态。"""
+        # 纵深防御（审查 P2）：entry.name 是磁盘路径的组成部分——解析期白名单
+        # （#588）在这里同样强制，公开写入 API 的任何调用方（不限于 promoter 的
+        # 解析路径）都不能让 `../x` 式 name 落到 project 目录之外。
+        if not _NAME_PATTERN.fullmatch(entry.name) or len(entry.name) > SKILL_NAME_MAX_LENGTH:
+            raise ValueError(
+                f"refusing to write: invalid skill name {entry.name!r} "
+                f"(must match ^[a-z0-9][a-z0-9-_]*$, max {SKILL_NAME_MAX_LENGTH} chars)"
+            )
         if self._project_dir is None:
             raise ValueError(
                 "refusing to write: no project skill directory configured "

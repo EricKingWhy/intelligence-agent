@@ -326,3 +326,45 @@ class TestStateMachine:
         entry, errors = parse_skill_markdown(project_dir / ".staging" / "pdf-export" / "SKILL.md")
         assert errors == []
         assert entry.name == "pdf-export"
+
+
+# ── 更新分支（§3-4/§5.1/§10-5，审查处置）─────────────────────────────────────
+
+
+class TestUpdateBranch:
+    """同名 project skill = 更新分支入口（模型重写全文 + lint + 人审，与新建同流程）；
+    global/manual 来源同名仍拒绝（闭环不写 global，不放行 shadow）。"""
+
+    def test_same_name_project_skill_routes_to_update_branch(self, tmp_path):
+        """§10-5：同名 project skill 的草稿不被去重判据/lint 规则 5 拒绝，
+        全链路走通后覆盖旧文件。"""
+        promoter, discovery, _project_dir = _promoter(tmp_path)
+        promoter.propose(DRAFT_TEXT, events=_run_events(), source_run_id="run-1")
+        promoter.run_lint("pdf-export")
+        promoter.approve("pdf-export", confirmed_by="user:wang")
+        promoter.register("pdf-export", confirmed_by="user:wang")
+
+        updated = DRAFT_TEXT.replace("1. 读取模板", "1. 读取新模板")
+        outcome = promoter.propose(updated, events=_run_events())
+        assert outcome.accepted is True  # 不再被判据 4（去重）拒绝
+        assert promoter.run_lint("pdf-export").ok is True  # 不再被 lint 规则 5 拒绝
+        promoter.approve("pdf-export", confirmed_by="user:wang")
+        entry = promoter.register("pdf-export", confirmed_by="user:wang")
+        assert "读取新模板" in entry.load_body()
+        assert [e.name for e in discovery.catalog().entries] == ["pdf-export"]
+
+    def test_same_name_global_skill_still_refused(self, tmp_path):
+        """同名但来源是 global 目录 → 仍拒绝并指引（§6.1：闭环不写 global）。"""
+        global_dir, project_dir = tmp_path / "global", tmp_path / "project"
+        (global_dir / "pdf-export").mkdir(parents=True)
+        (global_dir / "pdf-export" / "SKILL.md").write_text(DRAFT_TEXT, encoding="utf-8")
+        project_dir.mkdir()
+        discovery = SkillDiscovery(directories=[global_dir, project_dir],
+                                   project_dir=project_dir)
+        discovery.discover()
+        promoter = SkillPromoter(discovery, staging_root=project_dir / ".staging")
+
+        outcome = promoter.propose(DRAFT_TEXT, events=_run_events())
+        assert outcome.accepted is False
+        assert any("更新" in r for r in outcome.reasons)
+        assert promoter.status("pdf-export") is None  # 零落盘

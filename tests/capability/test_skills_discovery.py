@@ -446,3 +446,15 @@ class TestSkillWritePath:
         with pytest.raises(ValueError, match="too large"):
             discovery.register(entry)
         assert not (tmp_path / "project" / "big").exists()
+
+    def test_register_rejects_name_outside_whitelist_even_for_hand_built_entry(self, tmp_path):
+        """纵深防御（审查处置）：公开写入 API 对裸 entry 复验 name 白名单——
+        name 是磁盘路径的组成部分，`../escape` 式 name 不得落到 project 目录外。"""
+        discovery = self._discovery(tmp_path)
+        discovery.discover()
+        entry = SkillCatalogEntry(name="../escape", description="逃逸测试",
+                                  source_path=tmp_path / "draft" / "SKILL.md")
+        with pytest.raises(ValueError, match="invalid skill name"):
+            discovery.register(entry)
+        assert not (tmp_path / "escape").exists()
+        assert not (tmp_path / "project" / "escape").exists()

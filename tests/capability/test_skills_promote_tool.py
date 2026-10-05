@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent_harness.session.context import current_session_var, run_context_var
-from agent_harness.session.event import SKILL_REGISTERED, SKILL_REMOVED
+from agent_harness.session.event import SKILL_REGISTERED, SKILL_REMOVED, SKILL_UPDATED
 from agent_harness.session.session import Session
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.skills.capability import SkillCapability
@@ -305,3 +305,37 @@ def _async_pair(first, second):
     async def _get():
         return first, second
     return _get()
+
+
+class TestUpdateBranchEndToEnd:
+    """更新分支（§10-5，审查处置）：同名 project skill 经同一闭环重写——
+    register 时事件为 skill/updated（不再是死路径）。"""
+
+    @pytest.mark.asyncio
+    async def test_register_existing_project_skill_emits_skill_updated(self, tmp_path):
+        executor, capability, _promoter, session = _runtime(tmp_path, approval_callback=_Approve())
+        token = current_session_var.set(session)
+        run_token = run_context_var.set("run-9")
+        try:
+            for _round in range(2):
+                propose = (await _call(executor, "promote_skill", {
+                    "action": "propose", "draft": DRAFT_TEXT,
+                })).result
+                assert propose.ok is True, propose.message
+                lint = (await _call(executor, "promote_skill", {
+                    "action": "lint", "name": "pdf-export",
+                })).result
+                assert lint.ok is True, lint.message
+                register = (await _call(executor, "register_skill",
+                                        {"name": "pdf-export"})).result
+                assert register.ok is True, register.message
+        finally:
+            current_session_var.reset(token)
+            run_context_var.reset(run_token)
+        registered = [e for e in session.events if e.type == SKILL_REGISTERED]
+        updated = [e for e in session.events if e.type == SKILL_UPDATED]
+        assert len(registered) == 1
+        assert len(updated) == 1
+        assert updated[0].data["name"] == "pdf-export"
+        assert updated[0].data["confirmed_by"].startswith("user:")
+        assert [e.name for e in capability.catalog()] == ["pdf-export"]
