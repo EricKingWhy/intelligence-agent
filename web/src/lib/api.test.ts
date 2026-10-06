@@ -71,6 +71,18 @@ function captureFetch(
   return { calls };
 }
 
+import {
+  getTaskState,
+  getEvidenceState,
+  acceptTask,
+  releaseTaskAcceptance,
+  releaseTaskLease,
+  getWorkspaceGitStatus,
+  getWorkspaceGitDiff,
+  TaskNotDefinedError,
+  TaskReviewRequestError,
+} from './api';
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -1475,5 +1487,145 @@ describe('恢复链路 409 detail 结构化（#596 / 后端 #547：{message, pen
     )) as RecoverError;
     expect(err.message).toBe('会话 id 非法');
     expect(err.pendingDecisions).toBeUndefined();
+  });
+});
+
+/** #353 W-09：任务审阅数据层契约（GET /task、GET /evidence、三操作、workspace git）。
+ *  这些端点全部只做服务端投影搬运——前端不合并、不推断；契约测试钉住 URL、请求体
+ *  与错误码归类（404=未定义 / 409|422=TaskReviewRequestError 带原样 detail）。 */
+describe('#353 task review — task / evidence / lease / workspace-git 端点契约', () => {
+  it('getTaskState：GET /task，200 解析 product_state / criteria / version / open_run_ids', async () => {
+    const { calls } = captureFetch(200, {
+      task: {
+        defined: true,
+        task_text: '把 CSV 导入写对',
+        read_write_intent: '只读',
+        cwd: '/repo',
+        criteria: [{ item_id: 'ac-1', text: '导入去重', origin: 'user', confirmed: true }],
+        verification: { 'ac-1': { value: 'passed', evidence: 'pytest' } },
+        acceptance: null,
+        version: 2,
+        open_run_ids: [],
+        product_state: 'deliverable',
+      },
+    });
+    const state = await getTaskState('s1');
+    expect(calls[0].url).toBe('/api/sessions/s1/task');
+    expect(state.product_state).toBe('deliverable');
+    expect(state.criteria[0].item_id).toBe('ac-1');
+    expect(state.version).toBe(2);
+    expect(state.open_run_ids).toEqual([]);
+  });
+
+  it('getTaskState：404 → TaskNotDefinedError（未定义任务空态，不是加载失败）', async () => {
+    captureFetch(404, { detail: "session 's1' has no task definition" });
+    await expect(getTaskState('s1')).rejects.toBeInstanceOf(TaskNotDefinedError);
+  });
+
+  it('getEvidenceState：200 返回按 criterion_id 聚合的证据，freshness.reasons 原样透出', async () => {
+    const { calls } = captureFetch(200, {
+      evidence: {
+        'ac-1': [
+          {
+            evidence_id: 'ev-1',
+            criterion_id: 'ac-1',
+            kind: 'test',
+            result: 'pass',
+            captured_at: '2026-10-06T00:00:00Z',
+            command_or_action: 'pytest',
+            exit_code_or_observation: 0,
+            artifact_ref: null,
+            base_head: null,
+            source_event_seq: 12,
+            tool_call_id: null,
+            task_session_id: 's1',
+            run_id: 'r1',
+            workspace_manifest: { files: [], manifest_hash: 'a'.repeat(64), progress_md_sha256: null },
+            freshness: { status: 'stale', reasons: ['覆盖文件已变动：src/a.py'] },
+          },
+        ],
+      },
+    });
+    const evidence = await getEvidenceState('s1');
+    expect(calls[0].url).toBe('/api/sessions/s1/evidence');
+    expect(evidence['ac-1'][0].result).toBe('pass');
+    expect(evidence['ac-1'][0].freshness.status).toBe('stale');
+    expect(evidence['ac-1'][0].freshness.reasons).toEqual(['覆盖文件已变动：src/a.py']);
+  });
+
+  it('getEvidenceState：404 → TaskNotDefinedError', async () => {
+    captureFetch(404, { detail: 'no task definition' });
+    await expect(getEvidenceState('s1')).rejects.toBeInstanceOf(TaskNotDefinedError);
+  });
+
+  it('acceptTask：POST 带 decision + expected_version；无 reason 时不带该键', async () => {
+    const { calls } = captureFetch(200, { status: 'applied', task: { defined: true } });
+    await acceptTask('s1', { decision: 'accepted', expected_version: 3 });
+    expect(calls[0].url).toBe('/api/sessions/s1/task/acceptance');
+    expect(calls[0].body).toEqual({ decision: 'accepted', expected_version: 3 });
+  });
+
+  it('acceptTask：409（已接受过 / 版本冲突）→ TaskReviewRequestError(409)，detail 原样', async () => {
+    captureFetch(409, { detail: '已存在接受事实（不能双写）' });
+    const err = (await acceptTask('s1', { decision: 'accepted', expected_version: 3 }).then(
+      () => { throw new Error('should have thrown'); },
+      (e: unknown) => e,
+    )) as TaskReviewRequestError;
+    expect(err).toBeInstanceOf(TaskReviewRequestError);
+    expect(err.status).toBe(409);
+    expect(err.message).toBe('已存在接受事实（不能双写）');
+  });
+
+  it('acceptTask：422（形状非法）→ TaskReviewRequestError(422)，服务端 reason 原样', async () => {
+    captureFetch(422, { detail: '带缺项接受（accepted_with_gaps）必须给出 reason' });
+    const err = (await acceptTask('s1', {
+      decision: 'accepted_with_gaps',
+      reason: '  ',
+      expected_version: 1,
+    }).then(
+      () => { throw new Error('should have thrown'); },
+      (e: unknown) => e,
+    )) as TaskReviewRequestError;
+    expect(err.status).toBe(422);
+    expect(err.message).toContain('必须给出 reason');
+  });
+
+  it('releaseTaskAcceptance：POST /task/acceptance/release（CAS）', async () => {
+    const { calls } = captureFetch(200, { status: 'applied', task: { defined: true } });
+    await releaseTaskAcceptance('s1', { reason: '改错了', expected_version: 4 });
+    expect(calls[0].url).toBe('/api/sessions/s1/task/acceptance/release');
+    expect(calls[0].body).toEqual({ reason: '改错了', expected_version: 4 });
+  });
+
+  it('releaseTaskLease：POST /task/lease/release，200 透传 released / promoted_to（幂等）', async () => {
+    const { calls } = captureFetch(200, { released: false, promoted_to: 'other' });
+    const result = await releaseTaskLease('s1');
+    expect(calls[0].url).toBe('/api/sessions/s1/task/lease/release');
+    expect(result).toEqual({ released: false, promoted_to: 'other' });
+  });
+
+  it('getWorkspaceGitStatus：GET git/status（pathspec 选带），返回 exit_code/stdout/stderr', async () => {
+    const { calls } = captureFetch(200, {
+      exit_code: 0,
+      stdout: ' M src/a.py\n?? agent-progress/',
+      stderr: '',
+      artifact_ref: null,
+    });
+    const result = await getWorkspaceGitStatus('s1', 'src');
+    expect(calls[0].url).toBe('/api/sessions/s1/workspace/git/status?pathspec=src');
+    expect(result.exit_code).toBe(0);
+    expect(result.stdout).toContain('agent-progress/');
+  });
+
+  it('getWorkspaceGitDiff：GET git/diff（path + staged），返回 unified diff 正文', async () => {
+    const { calls } = captureFetch(200, {
+      exit_code: 0,
+      stdout: 'diff --git a/x b/x',
+      stderr: '',
+      artifact_ref: null,
+    });
+    const result = await getWorkspaceGitDiff('s1', { path: 'src/a.py', staged: true });
+    expect(calls[0].url).toBe('/api/sessions/s1/workspace/git/diff?path=src%2Fa.py&staged=true');
+    expect(result.stdout).toBe('diff --git a/x b/x');
   });
 });

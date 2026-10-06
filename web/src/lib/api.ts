@@ -2001,3 +2001,246 @@ export async function revokeApprovePolicyRule(
     revoked: body?.revoked === true,
   };
 }
+
+// ── #353 W-09 任务审阅：Task / Evidence / Lease / workspace-git 只读+命令面 ──
+//
+// 数据源全部是服务端投影（`session/task.py::derive_task_state`、
+// `session/evidence.py::derive_evidence_state` 的 REST 搬运）。前端**不**合并
+// `product_state` 与 `freshness`、不推断 UNKNOWN（不变量 #22）——只如实透传。
+
+/** GET /task、GET /evidence 回 404：**未定义任务**（后端契约：`state is None` → 404，
+ *  与"会话不存在"同码）。调用方据此渲染"未定义任务"空态，而不是加载失败横幅。 */
+export class TaskNotDefinedError extends Error {}
+
+/** 任务审阅相关命令的非 2xx（除 404 未定义）：`status` 保留原始 HTTP 码，
+ *  `message` = 服务端 `detail` 原文（409=已接受过/版本冲突，422=形状非法）。
+ *  与 `AlreadyResolvedError`（审批幂等）区分：task acceptance 的 409 语义由调用方
+ *  结合最新 `GET /task` 结果判定，不做字符串匹配。 */
+export class TaskReviewRequestError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** 逐项验证值六态（后端 `VERIFICATION_VALUES`；中文展示名由组件映射）。 */
+export type VerificationValue =
+  | 'not_started'
+  | 'in_progress'
+  | 'passed'
+  | 'failed'
+  | 'blocked'
+  | 'incomplete';
+
+/** 产品交付四态（后端 `PRODUCT_STATES`；未定义任务为 ""）。 */
+export type ProductState = 'executing' | 'pending_verification' | 'deliverable' | 'accepted' | '';
+
+export interface TaskCriterionPayload {
+  item_id: string;
+  text: string;
+  origin: 'user' | 'agent';
+  confirmed: boolean;
+}
+
+export interface TaskVerificationEntryPayload {
+  value: VerificationValue;
+  evidence: string | null;
+}
+
+export interface TaskAcceptancePayload {
+  decision: 'accepted' | 'accepted_with_gaps';
+  reason: string | null;
+}
+
+/** `GET /api/sessions/{id}/task` 的 `task` 对象（`TaskState.to_payload()` 逐字段透传）。 */
+export interface TaskState {
+  defined: boolean;
+  task_text: string | null;
+  read_write_intent: string | null;
+  cwd: string | null;
+  criteria: TaskCriterionPayload[];
+  verification: Record<string, TaskVerificationEntryPayload>;
+  acceptance: TaskAcceptancePayload | null;
+  version: number;
+  open_run_ids: string[];
+  product_state: ProductState;
+}
+
+export type EvidenceResult = 'pass' | 'fail' | 'blocked';
+
+export interface EvidenceManifestFile {
+  path: string;
+  sha256: string;
+}
+
+/** 记录时的覆盖清单（快照）：显式文件 + sha256；`progress.md` hash 独立单列。 */
+export interface EvidenceManifest {
+  files: EvidenceManifestFile[];
+  manifest_hash: string;
+  progress_md_sha256: string | null;
+}
+
+/** 一条结构化证据（票面 14 字段 + 服务端读取时求值的 `freshness`）。 */
+export interface EvidenceRecord {
+  evidence_id: string;
+  task_session_id: string;
+  run_id: string;
+  criterion_id: string;
+  kind: 'test' | 'ui' | 'diff' | 'external';
+  source_event_seq: number | null;
+  tool_call_id: string | null;
+  captured_at: string;
+  result: EvidenceResult;
+  command_or_action: string | null;
+  exit_code_or_observation: number | string | null;
+  artifact_ref: string | null;
+  base_head: string | null;
+  workspace_manifest: EvidenceManifest;
+  /** 服务端 fail-closed 新鲜度判定：`stale` 时 `reasons` 逐条列明过期原因。 */
+  freshness: { status: 'fresh' | 'stale'; reasons: string[] };
+}
+
+/** `GET /api/sessions/{id}/evidence` → `evidence`（criterion_id → 记录数组）。 */
+export type EvidenceByCriterion = Record<string, EvidenceRecord[]>;
+
+export interface LeaseReleaseResult {
+  released: boolean;
+  promoted_to: string | null;
+}
+
+/** 只读 git 命令结果（后端 `GitCommandResult`；`exit_code` 非零**不是** HTTP 错误）。 */
+export interface GitCommandResult {
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  artifact_ref: string | null;
+}
+
+async function taskReviewError(res: Response, fallback: string): Promise<TaskReviewRequestError> {
+  const detail = await readErrorDetail(res);
+  return new TaskReviewRequestError(res.status, detail || `${fallback}（${res.status}）`);
+}
+
+/** GET /api/sessions/{id}/task —— 任务交付状态投影（只读）。
+ *  404 = 未定义任务（TaskNotDefinedError）；其余非 2xx = TaskReviewRequestError。 */
+export async function getTaskState(sessionId: string): Promise<TaskState> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/task`);
+  if (res.status === 404) throw new TaskNotDefinedError('未定义任务');
+  if (!res.ok) throw await taskReviewError(res, '加载任务状态失败');
+  const body = (await res.json().catch(() => null)) as { task?: unknown } | null;
+  return (body?.task ?? null) as TaskState;
+}
+
+/** GET /api/sessions/{id}/evidence —— 证据投影 + 服务端新鲜度（只读）。
+ *  404 = 未定义任务（TaskNotDefinedError）；无证据 = `{}`。 */
+export async function getEvidenceState(sessionId: string): Promise<EvidenceByCriterion> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence`);
+  if (res.status === 404) throw new TaskNotDefinedError('未定义任务');
+  if (!res.ok) throw await taskReviewError(res, '加载证据失败');
+  const body = (await res.json().catch(() => null)) as { evidence?: unknown } | null;
+  const evidence = body?.evidence;
+  return (typeof evidence === 'object' && evidence !== null ? evidence : {}) as EvidenceByCriterion;
+}
+
+/** POST /api/sessions/{id}/task/acceptance —— 用户裁决（CAS：expected_version 必填）。
+ *  42x 原样上抛（调用方展示服务端 reason；409 由调用方对照最新投影判定语义）。 */
+export async function acceptTask(
+  sessionId: string,
+  body: { decision: 'accepted' | 'accepted_with_gaps'; reason?: string; expected_version: number },
+): Promise<TaskState> {
+  const payload: Record<string, unknown> = {
+    decision: body.decision,
+    expected_version: body.expected_version,
+  };
+  if (body.reason !== undefined) payload.reason = body.reason;
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/task/acceptance`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw await taskReviewError(res, '接受任务失败');
+  const result = (await res.json().catch(() => null)) as { task?: unknown } | null;
+  return (result?.task ?? null) as TaskState;
+}
+
+/** POST /api/sessions/{id}/task/acceptance/release —— 撤销裁决（同样 CAS）。 */
+export async function releaseTaskAcceptance(
+  sessionId: string,
+  body: { reason?: string; expected_version: number },
+): Promise<TaskState> {
+  const payload: Record<string, unknown> = { expected_version: body.expected_version };
+  if (body.reason !== undefined) payload.reason = body.reason;
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/task/acceptance/release`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw await taskReviewError(res, '撤销接受失败');
+  const result = (await res.json().catch(() => null)) as { task?: unknown } | null;
+  return (result?.task ?? null) as TaskState;
+}
+
+/** POST /api/sessions/{id}/task/lease/release —— 释放**目录写租约**（幂等）。
+ *  与"撤销接受"是两个不同事实（#353 §D）：`released:false` = 本会话非持有者，如实显示。 */
+export async function releaseTaskLease(sessionId: string): Promise<LeaseReleaseResult> {
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/task/lease/release`,
+    { method: 'POST' },
+  );
+  if (!res.ok) throw await taskReviewError(res, '释放目录失败');
+  const body = (await res.json().catch(() => null)) as
+    | { released?: unknown; promoted_to?: unknown }
+    | null;
+  return {
+    released: body?.released === true,
+    promoted_to: typeof body?.promoted_to === 'string' ? body.promoted_to : null,
+  };
+}
+
+function parseGitResult(raw: unknown): GitCommandResult {
+  const r = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    exit_code: typeof r.exit_code === 'number' ? r.exit_code : -1,
+    stdout: typeof r.stdout === 'string' ? r.stdout : '',
+    stderr: typeof r.stderr === 'string' ? r.stderr : '',
+    artifact_ref: typeof r.artifact_ref === 'string' ? r.artifact_ref : null,
+  };
+}
+
+/** GET /api/sessions/{id}/workspace/git/status —— `git status --porcelain`（只读）。
+ *  `pathspec` 非空才带查询串；非 2xx（403 越界 / 422 形态）→ TaskReviewRequestError。 */
+export async function getWorkspaceGitStatus(
+  sessionId: string,
+  pathspec?: string,
+): Promise<GitCommandResult> {
+  const query = pathspec ? `?pathspec=${encodeURIComponent(pathspec)}` : '';
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/workspace/git/status${query}`,
+  );
+  if (!res.ok) throw await taskReviewError(res, '加载 git 状态失败');
+  return parseGitResult(await res.json().catch(() => null));
+}
+
+/** GET /api/sessions/{id}/workspace/git/diff —— unified diff（只读，正文在 stdout）。
+ *  单文件 diff 传 `path`；`staged` 为真时看暂存区。 */
+export async function getWorkspaceGitDiff(
+  sessionId: string,
+  opts: { path?: string; staged?: boolean } = {},
+): Promise<GitCommandResult> {
+  const params = new URLSearchParams();
+  if (opts.path) params.set('path', opts.path);
+  if (opts.staged) params.set('staged', 'true');
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/workspace/git/diff${query}`,
+  );
+  if (!res.ok) throw await taskReviewError(res, '加载 git diff 失败');
+  return parseGitResult(await res.json().catch(() => null));
+}
