@@ -125,6 +125,22 @@ _PLAN_EVENT_DRIVEN_WINDOW = 1
 #: 摘要的消费方误判为同一来源。也避开 `_is_compaction_summary` 全部前缀。
 _MODIFIED_PATHS_BLOCK_HEADING = "## 最近修改文件"
 
+#: #639 阶段 B：3a 预检拒绝的诊断分类（与 `compactor._SUMMARY_ERROR_CLASSES` 里的同名
+#: 词条一致；`attempt=0` 标记非摘要尝试）。thrashing guard 只认这一类。
+_PREFLIGHT_REJECTION_ERROR_CLASS = "preflight_request_exceeds_hard_limit"
+#: #639 阶段 B：连续这么多轮"以预检拒绝收尾"后，不再静默保留旧投影，升级为任务可见
+#: 失败（Claude Code "stops auto-compacting after a few attempts and shows an error
+#: instead of looping"，PORT DESIGN）。
+_THRASHING_GUARD_THRESHOLD = 3
+#: #639 阶段 B：thrashing guard 的显式失败文案（附中文恢复指引，三条）。
+_THRASHING_GUARD_MESSAGE = (
+    "Context compaction is thrashing: the summary request exceeded the hard guard "
+    f"on {_THRASHING_GUARD_THRESHOLD} consecutive rounds without making progress. "
+    "恢复指引：① 手动执行 /compact（可指定更小范围）；"
+    "② 调大 max_context_tokens 或放宽 hard_guard_threshold；"
+    "③ 把任务转交 subagent 分段处理。"
+)
+
 
 def _should_inject_plan(
     events: list[SessionEvent], fallback_period: int,
@@ -347,6 +363,10 @@ class ContextBuilder:
             )
         self._prune_decisions: dict[str, dict[int, str]] = {}
         self._last_prune_report: PruneReport | None = None
+        # #639 阶段 B：每会话"连续以预检拒绝收尾"的轮计数（thrashing guard）。
+        # 本实例跨 build 轮次存活、可能服务多个会话，故按 `session.session_id` 分会话
+        # 记——跨会话串计数是错的。成功压缩后 pop（等价 0，避免无界增长）。
+        self._preflight_rejection_streaks: dict[str, int] = {}
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
@@ -766,8 +786,18 @@ class ContextBuilder:
             raise
         self._record_compaction_failures(session, result.failures)
         if not result.compacted_turn_count:
+            # #639 阶段 B：连续预检拒绝达阈值 ⇒ 不再静默保留旧投影，经 #348 既有
+            # 通道显式失败（failures 已由上一行落盘），run 走非终态暂停。未达阈值
+            # 的轮：行为与加 B 前逐字节一致（只增内部计数，不产生事件/不改返回）。
+            if self._note_preflight_rejection(session, result.failures):
+                raise ContextWindowExceededError(
+                    _THRASHING_GUARD_MESSAGE,
+                    failures=result.failures,
+                )
             # 低水位 / 无可压缩早期轮 / 双失败安全继续：**零 bracket 写入**。
             return None
+        # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
+        self._preflight_rejection_streaks.pop(session.session_id, None)
         if not result.summary or not result.bracket_id:
             raise ContextWindowExceededError(
                 "Refusing to persist an unvalidated compaction summary"
@@ -795,6 +825,9 @@ class ContextBuilder:
                 "compacted_turn_count": result.compacted_turn_count,
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
+                # #639 阶段 A：成功走缩小 early 段的 marker（默认 False ⇒ 既有路径
+                # 逐字节等价）。这是本次唯一新增的事件键。
+                "narrowed": result.narrowed,
                 "bracket_id": bracket_id,
                 "summary_model_id": result.summary_model_id,
                 "duration_ms": result.duration_ms,
@@ -898,7 +931,33 @@ class ContextBuilder:
                 "duration_ms": failure.duration_ms,
                 "request_token_estimate": failure.request_token_estimate,
                 "request_budget_tokens": failure.request_budget_tokens,
+                # #639：预检拒绝是否发生在缩小段判定（阶段 A）；其余诊断默认假值。
+                "narrowed": failure.narrowed,
             })
+
+    def _note_preflight_rejection(
+        self, session: Session, failures: list[CompactionFailure],
+    ) -> bool:
+        """#639 阶段 B：登记一次"以预检拒绝收尾"的轮，返回是否达 thrashing 阈值。
+
+        判据（一轮一次，不按诊断条目数计）：本轮 `failures` **全部**是 3a 预检诊断
+        （`attempt=0` + `preflight_request_exceeds_hard_limit`）——即有且仅有一次增。
+        A 的缩小重试也失败时该轮有两条诊断（全段 + 缩小段），仍只 +1。摘要尝试
+        失败的轮（双失败安全继续）`failures` 含 `attempt>=1` 条目，说明本轮并非停在
+        预检，不增不减。
+
+        达到阈值后**不清零**（调用方抛显式失败）：恢复后若下一轮仍拒绝，继续显式
+        失败，不再退回静默。
+        """
+        if not failures or not all(
+            failure.attempt == 0
+            and failure.error_class == _PREFLIGHT_REJECTION_ERROR_CLASS
+            for failure in failures
+        ):
+            return False
+        streak = self._preflight_rejection_streaks.get(session.session_id, 0) + 1
+        self._preflight_rejection_streaks[session.session_id] = streak
+        return streak >= _THRASHING_GUARD_THRESHOLD
 
     def _reproject(self, session: Session) -> list[AnyMessage]:
         """从已持久化的事件重算模型可见投影（W-04 重投影确认的读数来源）。

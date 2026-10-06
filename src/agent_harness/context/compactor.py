@@ -79,9 +79,9 @@ _PROG_SECTION_MAX_ENTRY_CHARS = 200
 
 #: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
 #: timeout / transport_error 覆盖调用面；其余八类逐一对应校验闸门与 shrink 的各条拒绝。
-#: T12h (#647) 追加的 `source_range_unavailable` 是唯一例外：它标记**生成后**的
-#: 来源拒绝（摘要已生成并过全部闸门，但无 source event range 可持久化），不是
-#: 摘要尝试失败——CompactionFailure 里以 attempt=0 区分。
+#: 以 `attempt=0` 标记的**非摘要尝试**记录有两条——T12h (#647) 的
+#: `source_range_unavailable`（**生成后**来源拒绝）与 #639 的
+#: `preflight_request_exceeds_hard_limit`（**尝试前**预检拒绝：摘要请求本身超 hard）。
 _SUMMARY_ERROR_CLASSES = (
     "timeout",
     "transport_error",
@@ -99,11 +99,22 @@ _SUMMARY_ERROR_CLASSES = (
     # 校验闸门但无 source event range 可持久化，弃用候选、保留原投影，拒绝原因
     # 经既有有界失败通道落任务可见状态。保持有界：词表逐项对应一条拒绝面。
     "source_range_unavailable",
+    # #639 阶段3a：摘要请求**本身**超 hard 的预检拒绝（尝试前，非摘要尝试失败）。
+    # 此前该分支静默（零事件零状态）；对标 #647 的 attempt=0 纪律，把"为什么拒绝、
+    # 差多少"（request_token_estimate vs hard_limit）落成任务可见诊断，不伪造摘要尝试。
+    "preflight_request_exceeds_hard_limit",
 )
 
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
 _FAILURE_MESSAGE_LIMIT = 300
 _SUMMARY_MODEL_ID_LIMIT = 256
+
+#: #639 阶段 A：preflight 超限时缩小 early 段的有界重试。从 early 段尾部向前累计
+#: `estimate_message_tokens`，保留尾部该比例的 recent（逐字留在投影、不摘要），
+#: 只对更小的前缀段重新发起摘要。照 deepseek-harness `selectCompactableRange` 的
+#: retainRatio=0.16（`refs/dsh` @ `5badb150`：`config.ts:25` 默认值、
+#: `region.ts:117-` 保留 priced recent 尾且不拆 tool pair）。PORT DESIGN。
+_RETAIN_RATIO = 0.16
 
 
 @dataclass(frozen=True)
@@ -113,8 +124,9 @@ class CompactionFailure:
     `message` 只装本项目自己的拒绝文案或异常**类型名**——绝不透传 provider
     回显原文（与 ADR-0033 边界 1 同一条脱敏纪律）。`auto_limit` / `hard_limit`
     取触发时的整型阈值读数；`token_estimate` 是调用方进入压缩时的估算。
-    例外（T12h #647）：`attempt=0` 标记**非摘要尝试**的生成后来源拒绝
-    （`source_range_unavailable`）——摘要尝试是 1/2，预检 0 次尝试则不产生记录。
+    例外（`attempt=0` 标记**非摘要尝试**，摘要尝试是 1/2）：T12h (#647) 的生成后
+    来源拒绝（`source_range_unavailable`）与 #639 的预检请求超限拒绝
+    （`preflight_request_exceeds_hard_limit`）——后者仍是 0 次尝试，不伪造摘要尝试。
     """
 
     attempt: int
@@ -127,6 +139,9 @@ class CompactionFailure:
     duration_ms: int
     request_token_estimate: int
     request_budget_tokens: int
+    #: #639 阶段 A：该诊断是否为**缩小段**判定（False = 全段预检）。仅预检拒绝
+    #: （attempt=0）会置位；其余诊断/摘要尝试失败保持默认假值。有界布尔，不撑载荷。
+    narrowed: bool = False
 
 
 class _SummaryRejected(ValueError):
@@ -154,8 +169,9 @@ class ContextWindowExceededError(RuntimeError):
         failures: list[CompactionFailure] | None = None,
     ) -> None:
         super().__init__(message)
-        #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。预检类超限
-        #: （tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录，保持为空表。
+        #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。tool 块 /
+        #: 无完整早期轮这类预检超限没有尝试记录，保持为空表；#639 的"摘要请求
+        #: 本身超限"预检拒绝是例外——携带一条 attempt=0 的诊断（非摘要尝试）。
         self.failures = list(failures or [])
 
 
@@ -199,6 +215,10 @@ class CompactionResult:
     # W-04 (#348)：本次 compact 里失败过的摘要尝试（成功尝试之前的都在内；
     # 双失败安全继续时是两条）。调用方（builder）负责把它们落成任务可见状态。
     failures: list[CompactionFailure] = dataclass_field(default_factory=list)
+    #: #639 阶段 A：本次压缩是否**缩小了 early 段**（preflight 超限后缩小重试成功）。
+    #: 成功走缩小段时置位，并在 `CONTEXT_COMPACTED` 事件里持久化；其余路径默认假值，
+    #: 逐字节等价。`source_seq_*` 与八节摘要此时只覆盖缩小段（非全 early 段）。
+    narrowed: bool = False
 
 
 #: T4 (#134)：摘要 prompt 的正文已迁到 `agent_harness.prompt.builtin`
@@ -225,6 +245,68 @@ def compactable_early_window(messages: list[AnyMessage]) -> tuple[int, int]:
     cut = max((i for i, message in enumerate(messages)
                if isinstance(message, HumanMessage)), default=prefix_end)
     return prefix_end, cut
+
+
+def _tool_block_boundaries(
+    messages: list[AnyMessage], start: int, end: int,
+) -> list[int]:
+    """`[start:end)` 内每个 tool 原子块 / 独立消息的**起点**下标（升序）。
+
+    块定义与 `_validate_tool_blocks` 同源：`AIMessage(tool_calls)` + 其后连续
+    `ToolMessage` 串为一个块；其余消息各自为一块。用于把缩小切点吸附到块边界。
+    """
+    boundaries: list[int] = []
+    index = start
+    while index < end:
+        boundaries.append(index)
+        message = messages[index]
+        if isinstance(message, AIMessage) and message.tool_calls:
+            index += 1
+            while index < end and isinstance(messages[index], ToolMessage):
+                index += 1
+        else:
+            index += 1
+    return boundaries
+
+
+def narrow_early_window(
+    messages: list[AnyMessage], prefix_end: int, cut: int,
+) -> int | None:
+    """preflight 超限时的缩小切点：返回缩小段右端 `narrow_cut`，或 `None`。
+
+    `compactable_early_window` 给出 `[prefix_end:cut]` 的 early 段后，本函数**只动
+    区间选择**：从 early 段尾部向前累计 `estimate_message_tokens`，保留尾部约
+    `_RETAIN_RATIO`（16%）的 recent（`[narrow_cut:cut]` 逐字留在投影、不摘要），
+    只把前缀段 `[prefix_end:narrow_cut]` 作为新摘要段。切点**吸附到 tool 块起点**
+    （`_tool_block_boundaries`），使缩小段与保留尾段各自都是完整 tool 块序列
+    （`_validate_tool_blocks` 可过）。
+
+    吸附方向选**向前吸附到块起点**（即只可能比 16% 切点更靠前）：它保证缩小段的
+    摘要请求只缩不增（单调不回退），这正是重试的目的——向后吸附会把半个块并入
+    摘要段、反而可能再次越 hard。
+
+    无可缩小段（`narrow_cut == prefix_end`，整个 early 都被保留）时返回 `None`，
+    调用方跳过重试、走既有两条出口——保证重试**最多一次**且不改判定式。
+    """
+    if cut <= prefix_end:
+        return None
+    early = messages[prefix_end:cut]
+    target = _RETAIN_RATIO * estimate_message_tokens(early)
+    accumulated = 0
+    narrow_cut = cut
+    for index in range(cut - 1, prefix_end - 1, -1):
+        accumulated += estimate_message_tokens([messages[index]])
+        narrow_cut = index
+        if accumulated >= target:
+            break
+    boundaries = _tool_block_boundaries(messages, prefix_end, cut)
+    boundary = max(
+        (candidate for candidate in boundaries if candidate <= narrow_cut),
+        default=None,
+    )
+    if boundary is None or boundary <= prefix_end or boundary >= cut:
+        return None
+    return boundary
 
 
 class ContextCompactor:
@@ -309,24 +391,73 @@ class ContextCompactor:
         ))
         request = [prompt, transcript]
         request_token_estimate = estimate_message_tokens(request)
-        # Preflight rejection is not a summary attempt and therefore emits no failure event.
+        # 摘要尝试的失败记录（W-04 #348；成功尝试之前的都在内）。预检拒绝的诊断
+        # （#639）也挂在这里——它在任何摘要尝试之前，但契约同样要求带给调用方。
+        failures: list[CompactionFailure] = []
+        narrowed = False
+        # Preflight rejection is not a summary attempt: it emits one bounded,
+        # task-visible failure record with attempt=0 (#639) and never calls the
+        # summary model. The `>` comparison and both exits below are unchanged.
         if request_token_estimate > self._hard_limit:
             logger.warning(
                 "Context compaction rejected; summary request exceeds hard guard",
             )
-            if token_estimate > self._hard_limit:
-                raise ContextWindowExceededError(
-                    "Summary validation failed and original context exceeds hard guard"
-                ) from None
-            # P2-4：token_estimate 回传 messages-only（契约见 CompactionResult），
-            # 不原样回传调用方入参（其已含 sys+rt+plan，builder 会再补一次）。
-            return CompactionResult(
-                list(messages), 0, estimate_message_tokens(messages), False,
-            )
+            # #639 阶段3a：预检拒绝也走 #348 有界失败通道（attempt=0 = 非摘要尝试），
+            # 把"为什么拒绝、差多少"（request_token_estimate vs hard_limit）落成
+            # 任务可见状态。**只加诊断**：判定式、两档阈值与两条出口语义一字不动。
+            failures.append(self._preflight_rejection(
+                narrowed=False, request_token_estimate=request_token_estimate,
+                token_estimate=token_estimate,
+            ))
+            # #639 阶段 A：走两条出口**之前**，只缩一次区间重试（有界）。照
+            # deepseek-harness `selectCompactableRange`（PORT DESIGN）：保留尾部
+            # 16% recent、不拆 tool pair。判定式一字不动——缩小段用**同一判定式**
+            # 重新 preflight 一次；通过则改用它走正常摘要流程，仍超则回落出口。
+            narrow_cut = narrow_early_window(messages, prefix_end, cut)
+            if narrow_cut is not None:
+                narrowed_early = messages[prefix_end:narrow_cut]
+                narrowed_request = [prompt, HumanMessage(content=json.dumps(
+                    [message.model_dump(mode="json") for message in narrowed_early],
+                    ensure_ascii=False,
+                ))]
+                narrowed_token_estimate = estimate_message_tokens(narrowed_request)
+                if narrowed_token_estimate > self._hard_limit:
+                    # 缩小后仍超限：补一条 narrowed 诊断，回落既有两条出口。
+                    failures.append(self._preflight_rejection(
+                        narrowed=True,
+                        request_token_estimate=narrowed_token_estimate,
+                        token_estimate=token_estimate,
+                    ))
+                else:
+                    # 缩小段放行：改用它重组摘要请求（attempt 1/2 语义不变），
+                    # 保留尾段 `[narrow_cut:]`（含原 recent）逐字留在投影里。
+                    early = narrowed_early
+                    early_ranges = (
+                        early_ranges[:narrow_cut - prefix_end]
+                        if early_ranges is not None else None
+                    )
+                    trusted_summaries = _trusted_summary_indices(
+                        early, early_ranges, events,
+                    )
+                    request = narrowed_request
+                    request_token_estimate = narrowed_token_estimate
+                    recent = messages[narrow_cut:]
+                    narrowed = True
+            if not narrowed:
+                if token_estimate > self._hard_limit:
+                    raise ContextWindowExceededError(
+                        "Summary validation failed and original context exceeds hard guard",
+                        failures=failures,
+                    ) from None
+                # P2-4：token_estimate 回传 messages-only（契约见 CompactionResult），
+                # 不原样回传调用方入参（其已含 sys+rt+plan，builder 会再补一次）。
+                return CompactionResult(
+                    list(messages), 0, estimate_message_tokens(messages), False,
+                    failures=failures,
+                )
         # W-04 (#348)：摘要生成至多两次尝试。一次尝试 = ainvoke → 解析 → 程序化组装
         # → 校验闸门 → shrink 全链；预检（上面与 tool 块检查）不计入。每次失败记一条
         # 有界 CompactionFailure，由调用方落成任务可见状态。
-        failures: list[CompactionFailure] = []
         summary_text = ""
         compacted: list[AnyMessage] | None = None
         summary_started_at = monotonic()
@@ -493,6 +624,31 @@ class ContextCompactor:
             # 路径漏传，首试被拒、重试成功时失败记录被静默丢弃（本票新闸门使
             # 该路径成为常态，判据测试暴露）。
             failures=failures,
+            # #639 阶段 A：成功走缩小段时置位（marker 落 CONTEXT_COMPACTED 事件）。
+            narrowed=narrowed,
+        )
+
+    def _preflight_rejection(
+        self, *, narrowed: bool, request_token_estimate: int, token_estimate: int,
+    ) -> CompactionFailure:
+        """#639：预检拒绝（任何摘要尝试之前）的有界诊断记录。
+
+        `narrowed` 标记该判定是否为**缩小段**（阶段 A）——False = 全段预检，
+        True = 缩小段仍超限。`attempt=0`（非摘要尝试）、`error_class` 收在既有
+        有界词表里，`request_token_estimate` 是本次判定用的请求令牌数（判别式左值）。
+        """
+        return CompactionFailure(
+            attempt=0,
+            error_class="preflight_request_exceeds_hard_limit",
+            message="Summary request exceeds hard guard before any summary attempt",
+            auto_limit=int(self._auto_limit),
+            hard_limit=int(self._hard_limit),
+            token_estimate=token_estimate,
+            summary_model_id=None,
+            duration_ms=0,
+            request_token_estimate=request_token_estimate,
+            request_budget_tokens=int(self._hard_limit),
+            narrowed=narrowed,
         )
 
 
