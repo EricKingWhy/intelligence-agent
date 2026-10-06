@@ -31,13 +31,43 @@ class MCPCapability:
         self._connections = connections
         self._tools = tools
         self.errors = errors
+        # #362 / W-18：server 名 → 连接（按 server 断开用；连接按配置顺序先到先得，
+        # 同名冲突的工具已在 build 时丢弃，连接本身保留首个）。
+        # getattr 防御：测试替身（StubConnection）可能没有 config_name。
+        self._by_name: dict[str, MCPServerConnection] = {}
+        for connection in connections:
+            name = getattr(connection, "config_name", None)
+            if name is not None:
+                self._by_name.setdefault(name, connection)
 
     def contributes_tools(self) -> list[Any]:
         return list(self._tools)
 
+    def server_names(self) -> list[str]:
+        """已连接的 server 名（#362 / W-18：状态查询用）。"""
+        return list(self._by_name)
+
+    def is_connected(self, name: str) -> bool:
+        """指定 server 是否仍连接（#362 / W-18）。"""
+        connection = self._by_name.get(name)
+        return connection is not None and connection.connected
+
+    async def disconnect_server(self, name: str) -> bool:
+        """断开指定 server（#362 / W-18：Chrome MCP 手动断开）。
+
+        关闭其连接并从名表中移除；该 server 的工具此后调用失败（连接已死，
+        按既有语义走 MCPServerDownError → 失败结果，不静默）。
+        返回 True=断开了一个连接；False=没有这个 server（幂等）。
+        """
+        connection = self._by_name.pop(name, None)
+        if connection is None:
+            return False
+        await _discard_connection(connection)
+        return True
+
     async def aclose(self) -> None:
         for connection in self._connections:
-            await connection.aclose()
+            await _discard_connection(connection)
 
 
 async def _discard_connection(connection: MCPServerConnection) -> None:

@@ -1863,13 +1863,55 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             ]
         }
 
+    # #362 / W-18：MCP server 状态与断开（Chrome DevTools MCP 可选 capability）。
+    # 来源闸与下方项目路由共用 `require_trusted_origin`（ADR-0025 D1），此处先导入。
+    from agent_harness.web.projects import require_trusted_origin
+
+    @app.get("/api/mcp/servers")
+    async def list_mcp_servers() -> dict:
+        """已装配的 MCP server + 连接状态（未装配时空列表，不 503——
+        "没配 MCP" 是缺省态，不是故障）。"""
+        from agent_harness.mcp.capability import MCPCapability
+
+        _, wiring = await state.get_wiring()
+        capability = next(
+            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
+        )
+        if capability is None:
+            return {"servers": []}
+        return {
+            "servers": [
+                {"name": name, "connected": capability.is_connected(name)}
+                for name in capability.server_names()
+            ],
+            "errors": list(capability.errors),
+        }
+
+    @app.post("/api/mcp/servers/{server_name}/disconnect")
+    async def disconnect_mcp_server(
+        server_name: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict:
+        """断开指定 MCP server（#362 / W-18：Chrome MCP 手动断开）。
+
+        关闭其连接；该 server 的工具此后调用按既有语义失败（不静默）。
+        语义：200 → `{name, disconnected}`（幂等，无此 server 也 200）；
+        来源闸（ADR-0025 D1）：连接管理是宿主侧动作，只接受本机来源。
+        """
+        from agent_harness.mcp.capability import MCPCapability
+
+        _, wiring = await state.get_wiring()
+        capability = next(
+            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
+        )
+        if capability is None:
+            return {"name": server_name, "disconnected": False}
+        disconnected = await capability.disconnect_server(server_name)
+        return {"name": server_name, "disconnected": disconnected}
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
-    # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
-    # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
-    from agent_harness.web.projects import (
-        register_project_routes,
-        require_trusted_origin,
-    )
+    # `require_trusted_origin` 已在上方 #362 处导入（ADR-0025 D1 共用来源闸）。
+    from agent_harness.web.projects import register_project_routes
 
     register_project_routes(app)
 
