@@ -1,0 +1,1 @@
+2026-10-07	sync-merge: #762（#735）同步 origin/main（来侧 #353/#746，cli.py 自动合并无冲突）；实现者自检：test_cli+test_cli_pending 52/52 通过，ruff 绿。	109b49407ee153e6b04b3fb7dc0eb2f2e6a83ce3..dd64f7ee560f234ab33abd2ca1186e2f08e2e5d4
