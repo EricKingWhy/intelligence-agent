@@ -195,20 +195,33 @@ def test_register_prompt_rejects_tentative_constraints_and_stops_without_work():
 def test_resolution_schema_and_guidance_require_exact_single_request():
     properties = RequestConstraintResolutionArgs.model_json_schema()["properties"]
     guidance = RequestConstraintResolutionTool().prompt_guidance.lower()
+    description = RequestConstraintResolutionTool().description.lower()
 
     assert "active protected constraint" in properties["fact_id"]["description"].lower()
+    assert "old active constraint id" in properties["fact_id"]["description"].lower()
     assert "verbatim contiguous text from the current direct user message" in properties["candidate"]["description"].lower()
+    assert "new proposed constraint" in properties["candidate"]["description"].lower()
+    assert "never use the old constraint as the candidate" in properties["candidate"]["description"].lower()
     assert "omit correction framing such as 'i correct this rule:'" in properties["candidate"]["description"].lower()
+    assert "persisted choice card" in description
+    assert "a prose question alone does not pause this run" in description
     assert "exactly once" in guidance
+    assert "fact_id is the old active constraint id" in guidance
+    assert "candidate is only the new proposed text" in guidance
     assert "wait for the user" in guidance
     assert "do not use another tool" in guidance
+    assert "substitute a prose question" in guidance
     assert "answer to this choice is not a new constraint" in guidance
 
 
 def test_constraint_guidance_distinguishes_save_confirmation_and_authorization():
     guidance = RegisterConstraintTool().prompt_guidance.lower()
+    description = RegisterConstraintTool().description.lower()
 
     assert guidance.startswith("classify the current direct user message before calling")
+    assert "budget_exceeded" in description
+    assert "nothing was saved" in description
+    assert "a matching rule in context is not proof" in description
     assert "rejected means nothing was saved" in guidance
     assert "never claim a rejected rule already exists from context or memory" in guidance
     assert "only data.status already_registered confirms a duplicate" in guidance

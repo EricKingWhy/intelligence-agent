@@ -44,15 +44,15 @@ class RequestConstraintResolutionArgs(BaseModel):
     fact_id: str = Field(
         ..., strict=True, min_length=1, max_length=128,
         description=(
-            "Copy the exact id of the active protected constraint being corrected, "
-            "as shown in the injected active protected constraints. Never guess or synthesize an id."
+            "Copy the exact old active constraint id being reconsidered, "
+            "from the injected active protected constraints; never use the new proposal here, or guess/synthesize an id."
         ),
     )
     candidate: str = Field(
         ..., strict=True, min_length=1, max_length=10_000,
         description=(
-            "Copy the complete proposed constraint as verbatim contiguous text from the "
-            "current direct user message. Do not paraphrase, combine it with the old constraint, "
+            "Copy only the new proposed constraint as verbatim contiguous text from the "
+            "current direct user message. Never use the old constraint as the candidate. Do not paraphrase or combine with the old constraint, "
             "or add text the user did not write. Omit correction framing such as 'I correct this "
             "rule:' or '我更正这条长期约束：'; include only the proposed rule itself."
         ),
@@ -77,9 +77,9 @@ class RequestConstraintResolutionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Pause this run to ask how an explicit correction or a possible material conflict with "
-            "an active protected constraint should apply. Use only when user intent or persistence "
-            "scope is unclear; ordinary conversation and non-conflicting additions do not need a card."
+            "Pause this run by creating a persisted choice card for an explicit correction or a "
+            "possible material conflict with an active protected constraint. Use only when intent or persistence "
+            "scope is unclear; ordinary conversation and non-conflicting additions do not need a card. The argument roles are fixed: fact_id is the old active constraint id; candidate is the new proposed text from the current direct user message. A prose question alone does not pause this run."
         )
 
     @property
@@ -106,10 +106,10 @@ class RequestConstraintResolutionTool(Tool):
             "is unclear. This includes 'this task may need...' even when the possible requirement is "
             "phrased as maybe or might; do not infer task-only scope from 'this task' phrasing alone "
             "and do not wait for the user to confirm the conflict. Copy the "
-            "exact active fact id and only the proposed rule from the direct message; omit correction "
+            "Keep argument roles distinct: fact_id is the old active constraint id; candidate is only the new proposed text from the direct message. Never swap them or put the old rule in candidate. Omit correction "
             "framing such as 'I correct this rule:'. Before the answer, do not register the candidate "
             "or do affected work. A pending card does not authorize the conflicting action: wait for "
-            "the user and do not use another tool until they answer. If rejected, do not guess or retry. "
+            "the user and do not use another tool until they answer. If rejected, do not guess, retry, or substitute a prose question; report that no card was created and stop before affected work. "
             "Apply only the selected scope; the answer to this choice is not a new constraint to register. "
             "If there is no concrete work request, acknowledge and stop."
         )
