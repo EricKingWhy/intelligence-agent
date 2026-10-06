@@ -7078,3 +7078,194 @@ button.json-row {
   display: flex;
   justify-content: flex-end;
 }
+
+/* ── #353 W-09 任务审阅面板 ──────────────────────────────────────────────
+   复用 .ctx-usage-overlay / .ctx-usage-popover 外壳（同一弹层惯例），只覆盖尺寸；
+   全部颜色走既有双主题 token（未新增 token ⇒ §15 双块同步规则自动成立）。
+   字号地板 12px（--text-xs），对比度沿用 token 已达标的值。 */
+.task-review-panel {
+  width: min(920px, calc(100vw - 48px));
+  max-height: min(86vh, 920px);
+  gap: var(--space-lg);
+}
+.task-review-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.task-review-h {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.task-review-task {
+  margin: 0;
+  padding: var(--space-sm);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.task-review-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px var(--space-md);
+  margin: 0;
+  font-size: var(--text-xs);
+}
+.task-review-meta dt { color: var(--text-tertiary); }
+.task-review-meta dd { margin: 0; color: var(--text-secondary); word-break: break-all; }
+.task-review-hint { font-size: var(--text-xs); color: var(--text-tertiary); }
+.task-review-empty { padding: var(--space-lg); color: var(--text-secondary); font-size: var(--text-sm); }
+.task-review-notice {
+  padding: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-radius: var(--radius-sm);
+}
+.task-review-error {
+  padding: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-radius: var(--radius-sm);
+}
+
+.task-review-criteria { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.task-review-criterion { display: flex; align-items: baseline; gap: var(--space-sm); font-size: var(--text-sm); color: var(--text-primary); }
+.task-review-criterion-text { flex: 1; word-break: break-word; }
+.task-review-tag {
+  font-size: var(--text-xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.task-review-tag.ok { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.task-review-tag.warn { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+
+.task-review-axes { display: flex; gap: var(--space-lg); flex-wrap: wrap; }
+.task-review-axis { display: flex; flex-direction: column; gap: 4px; min-width: 200px; flex: 1; }
+.task-review-axis-label { font-size: var(--text-xs); color: var(--text-tertiary); }
+.task-review-run-axis { font-size: var(--text-sm); color: var(--text-primary); }
+.task-review-run-axis.running { color: var(--info); }
+.task-review-run-axis.idle { color: var(--text-secondary); }
+.task-review-chip {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+}
+.task-review-chip.state-deliverable { color: var(--success); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
+.task-review-chip.state-accepted { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.task-review-chip.state-executing { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); }
+.task-review-chip.state-pending_verification { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
+
+.task-review-disambiguation {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-sm);
+}
+.task-review-disambiguation .task-review-hint { color: var(--text-secondary); }
+
+.task-review-result { display: flex; flex-direction: column; gap: 4px; padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-subtle); }
+.task-review-result:last-child { border-bottom: none; }
+.task-review-result-head { display: flex; align-items: baseline; gap: var(--space-sm); justify-content: space-between; }
+.task-review-verification { font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+.task-review-verification.v-passed { color: var(--success); }
+.task-review-verification.v-failed { color: var(--danger); }
+.task-review-verification.v-blocked { color: var(--warning); }
+.task-review-missing-evidence {
+  align-self: flex-start;
+  font-size: var(--text-xs);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+}
+.task-review-evidence { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.task-review-evidence-item { display: flex; align-items: baseline; gap: var(--space-sm); flex-wrap: wrap; font-size: var(--text-xs); }
+.task-review-result-tag.r-pass { color: var(--success); }
+.task-review-result-tag.r-fail { color: var(--danger); }
+.task-review-result-tag.r-blocked { color: var(--warning); }
+.task-review-freshness { color: var(--text-secondary); }
+.task-review-freshness.f-stale { color: var(--warning); }
+.task-review-evidence-action { color: var(--text-tertiary); word-break: break-all; }
+.task-review-freshness-reasons { list-style: none; margin: 0; padding: 0 0 0 var(--space-md); display: flex; flex-direction: column; gap: 2px; color: var(--warning); font-size: var(--text-xs); }
+
+.task-review-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--text-xs); color: var(--text-secondary); }
+.task-review-files code { color: var(--text-primary); word-break: break-all; }
+.task-review-diff {
+  margin: 0;
+  padding: var(--space-sm);
+  max-height: 260px;
+  overflow: auto;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: pre;
+}
+.task-review-diff .diff-add { color: var(--success); }
+.task-review-diff .diff-del { color: var(--danger); }
+.task-review-diff .diff-hunk { color: var(--info); }
+.task-review-snapshot { display: flex; gap: var(--space-lg); flex-wrap: wrap; }
+.task-review-snapshot-col { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 4px; }
+.task-review-sha { margin-left: var(--space-sm); color: var(--text-tertiary); font-family: var(--font-mono); }
+.task-review-consistency { display: flex; flex-direction: column; gap: 4px; }
+
+.task-review-unknown {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  padding: var(--space-sm);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.task-review-ops { display: flex; flex-direction: column; gap: var(--space-md); }
+.task-review-op { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.task-review-op-label { font-size: var(--text-xs); color: var(--text-secondary); }
+.task-review-op-consequence { margin: 0; font-size: var(--text-xs); color: var(--text-tertiary); }
+.task-review-reason {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-sm);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+
+/* App 接入：任务审阅入口按钮（独立于 TopBar，最小接入）。 */
+.task-review-entry {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-xs) var(--space-md);
+}

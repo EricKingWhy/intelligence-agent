@@ -30,6 +30,7 @@ import { PausedPanel } from './components/PausedPanel';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
+import { TaskReviewPanel } from './components/TaskReviewPanel';
 import {
   centerTabs,
   deriveSurfaces,
@@ -249,6 +250,9 @@ export default function App() {
 
   // #200 上下文容量看板：open 的 sid（null = 关闭）。必须在 Esc 中断 effect 之前声明（effect 读它）。
   const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
+  // #353 W-09：任务审阅浮层（独立入口——不占用 TopBar / capabilities 面，避免与并行票冲突）。
+  // 同样必须在 Esc 中断 effect 之前声明（看板同因）。
+  const [taskReviewOpen, setTaskReviewOpen] = useState(false);
   // Esc 中断（Claude Code "esc to interrupt" 语言）：流式中 Esc = 停止当前 run，
   // 与 Composer 停止按钮同走 cancelStream。dialog 打开时（palette/auth 面板）
   // Esc 优先归它们——target 在 dialog 内则不抢。target 可能是 window/document
@@ -263,11 +267,12 @@ export default function App() {
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
       if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
+      if (taskReviewOpen) return; // #353：审阅浮层在场，Esc 归浮层（非 Radix，closest 不命中）
       cancelStream();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [streaming, cancelStream, contextUsageOpen]);
+  }, [streaming, cancelStream, contextUsageOpen, taskReviewOpen]);
 
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
@@ -1202,6 +1207,14 @@ export default function App() {
               resuming={resumingRunId === paused.run_id}
             />
           )}
+          {/* #353 W-09：任务审阅入口（独立浮层，仅在有选中会话时出现）。 */}
+          {selectedId !== null && (
+            <div className="task-review-entry">
+              <button className="btn-ghost" onClick={() => setTaskReviewOpen(true)}>
+                任务审阅
+              </button>
+            </div>
+          )}
           {/* 中心列 tab 集（#182）：`Chat` 恒存在 + 能力声明为真的面（PRD §2.1）。
               Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏
               （BENCHMARK_SYNTHESIS 明确不采纳让步链三栏 shell）。面名统一由
@@ -1336,6 +1349,14 @@ export default function App() {
         open={contextUsageOpen !== null}
         onClose={() => setContextUsageOpen(null)}
       />
+      {/* #353 W-09：任务审阅浮层（服务端 Task/Evidence 投影驱动；会话切走即关闭）。 */}
+      {taskReviewOpen && selectedId !== null && (
+        <TaskReviewPanel
+          sessionId={selectedId}
+          open
+          onClose={() => setTaskReviewOpen(false)}
+        />
+      )}
     </div>
   );
 }
