@@ -264,7 +264,7 @@ class TestGate5ReplayFrozen:
                 parent_id, workspace_dir=str(tmp_path)
             )
             assert "replay-ok" in out  # 冻结终态的 tool result 可见
-            assert "[工具]" in out and "bash" in out
+            assert "[tool]" in out and "bash" in out
             after = [e.to_dict() for e in store.read_events(parent_id)]
             assert after == before  # 零副作用：连 resumed 都没追加
             return
