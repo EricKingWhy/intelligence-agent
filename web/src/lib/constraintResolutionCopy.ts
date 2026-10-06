@@ -1,0 +1,17 @@
+export const CONSTRAINT_RESOLUTION_COPY = {
+  title: '如何处理这条冲突？',
+  description: '请根据这次新要求与已有约束的关系选择处理方式。只有“永久替换”会更新保护事实。',
+  oldConstraint: '当前保护约束',
+  newConstraint: '本轮新增约束',
+  chooseResolution: '选择处理方式',
+  customLabel: '发给助手的自定义回复',
+  customPlaceholder: '写下你希望助手如何处理这条冲突',
+  answerSaved: '回答已保存，等待同一运行继续',
+  waitingForAnswer: '运行已暂停，等待处理这个约束冲突',
+  openQuestion: '处理冲突',
+  continue: '继续同一运行',
+  sameRunHint: '提交后会从暂停处继续当前运行。',
+  submit: '确认并继续',
+  resuming: '正在续跑…',
+  close: '暂时关闭',
+} as const;

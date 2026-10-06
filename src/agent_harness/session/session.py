@@ -157,6 +157,11 @@ class Session:
         workspace_registry: WorkspaceRegistry | None = None,
         started_data: dict | None = None,
         cwd: str | Path | None = None,
+        # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒
+        # registry 默认。选择记进 session/started（审计事实，抄 DSH `sandbox/mode`
+        # log-only 事件）；docker 不可用时 registry.create 抛 SandboxUnavailableError，
+        # 会话不创建（fail-fast，零副作用——与 local fuse 同一条"被拒不落事件"纪律）。
+        sandbox_backend: str | None = None,
     ) -> Session:
         """新建 Session：生成 id、创建 JSONL、append session/started。
 
@@ -176,9 +181,14 @@ class Session:
         session_id = session_id or str(uuid4())
         sandbox = None
         if workspace_registry is not None:
-            sandbox = workspace_registry.create(session_id)
+            sandbox = workspace_registry.create(session_id, backend=sandbox_backend)
         session = cls(session_id, store, sandbox=sandbox)
         data = dict(started_data) if started_data else {}
+        # #363 / W-19：sandbox 后端选择记进 session/started（审计事实）。
+        # 显式选择才写；None 表示"未显式选择，走部署默认"，不写（避免把"默认"
+        # 误记成"用户选了 local"——DSH 生效公式里 explicit 与 default 是两档）。
+        if sandbox_backend is not None:
+            data["sandbox_backend"] = sandbox_backend
         # cwd 只认显式参数：started_data 里夹带的同名键会**绕过**唯一一套规范化
         # （AC5），静默写出一个未规范化/相对的 cwd。删掉它，再按参数写入。
         if "cwd" in data:

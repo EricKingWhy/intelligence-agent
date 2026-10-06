@@ -180,6 +180,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* #367 P3：worktree 自动创建的信息横幅（app-error 同型，信息级配色，可关闭）。 */
+.app-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--info);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 /* ── App Bar：单帧顶条，嵌在 frame 内（不再是独立卡） ── */
 .appbar {
   display: flex;
@@ -1025,7 +1038,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 .project-dialog,
 .memory-panel,
-.provider-dialog {
+.provider-dialog,
+.recovery-list-panel {
   position: fixed;
   left: 50%;
   top: 50%;
@@ -1058,7 +1072,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
 .project-dialog[data-state='closed'],
-.memory-panel[data-state='closed'] {
+.memory-panel[data-state='closed'],
+.recovery-list-panel[data-state='closed'] {
   animation: palette-out var(--dur-out) var(--ease-apple);
 }
 .project-dialog-head {
@@ -1324,6 +1339,48 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .project-textarea::placeholder {
   color: var(--text-tertiary);
+}
+/* #367 / W-23 选项 A：三档自主度分段选择器（抄 Copilot Interactive/Plan/Autopilot
+ * 的三段式；键盘可达：role=radiogroup + 原生 button）。 */
+.segmented {
+  display: flex;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+.segmented-option {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  padding: 6px 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  cursor: pointer;
+  transition: background var(--dur-out) var(--ease-apple),
+    color var(--dur-out) var(--ease-apple);
+}
+.segmented-option:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+.segmented-option.selected {
+  background: var(--surface-3);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.segmented-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.segmented-option:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 1px;
+}
+.project-field-optional {
+  color: var(--text-tertiary);
+  font-weight: 400;
 }
 /* 权限选择器在对话框里是**表单字段**（不是 Composer 的紧凑 chip）：撑满宽度、
  *  左对齐，与旁边的 input/textarea 同一套视觉语法。 */
@@ -3025,6 +3082,99 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   z-index: 51; /* 与 .palette-overlay(50)/.project-dialog(51) 同层族 */
   animation: project-dialog-in var(--dur-palette) var(--ease-apple);
 }
+
+.constraint-input-dialog {
+  width: min(680px, calc(100vw - 32px));
+}
+.constraint-input-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+.constraint-input-value {
+  min-width: 0;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.constraint-input-value h3 {
+  margin: 0 0 var(--space-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.constraint-input-value p,
+.constraint-input-custom p {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.constraint-input-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.constraint-input-choices legend {
+  margin-bottom: var(--space-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.constraint-input-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  cursor: pointer;
+}
+.constraint-input-choice.selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: var(--accent-soft);
+}
+.constraint-input-choice input {
+  flex: 0 0 auto;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.constraint-input-choices:disabled .constraint-input-choice {
+  cursor: default;
+  opacity: 0.7;
+}
+.constraint-input-custom {
+  padding-top: var(--space-xs);
+}
+.constraint-input-custom textarea {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.5;
+}
+.constraint-input-pending {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.constraint-input-pending .pause-panel-resume {
+  width: 100%;
+}
+@media (max-width: 560px) {
+  .constraint-input-values {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Radix 用 Title 命名 dialog（读屏名）；卡片头部已有可见标题，这里视觉隐藏。 */
 .approval-modal-title {
   position: absolute;

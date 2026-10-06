@@ -11,11 +11,19 @@
 2. 未显式声明 → **不写键**，与历史会话逐字不可区分（既有行为不变）；
 3. 续聊：声明过 → `build_runtime` 收到该档 + 交互式审批回调（并登记队列）；
 4. 续聊：`danger-full-access` → 非交互（回调 None）；
-5. 续聊：未声明 → `workspace-write` + `None`（今天的行为逐字不变）；
+5. 续聊：未声明 → **v2 新默认** `workspace-write` + ask（交互式回调，#358 D2 翻转）；
 6. 纯函数 `declared_permission_mode` 的边界（无 started / 坏值 → None）；
 7. `auto_approve` 同病同修：显式声明才落键；续聊复原**审批路由**（交互式回调非
    None，#423）而不是退化成全自动批准；档位声明优先于它（与创建路径同一优先级）；
 8. 纯函数 `declared_auto_approve` 只认 bool，坏值按未声明处理。
+
+#358 / W-14（本文件新增，D2 默认翻转 + 旧 Session 迁移）：
+
+9. 新会话 `session/started` **恒写** `permission_defaults_version=2`；
+10. v2 新会话未声明档位 → 续聊 ask（interactive）；
+11. 旧会话（无 v2 标记、无 `permission/changed`、无声明）续聊 → **沿用旧默认**
+    （auto-approve）+ 一次性提示（`LaunchResult.warnings`）+ 落 `permission/changed`
+    迁移事件；二次续聊幂等（不再提示、仍旧默认）。
 """
 
 from __future__ import annotations
@@ -24,7 +32,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent_harness.config import Settings
-from agent_harness.session import SESSION_STARTED
+from agent_harness.session import PERMISSION_CHANGED, SESSION_STARTED
 from agent_harness.session.approval import (
     InteractiveCallbackHolder,
     declared_auto_approve,
@@ -122,6 +130,20 @@ def test_undeclared_permission_mode_writes_no_key(tmp_path):
     assert "permission_mode" not in started.data
 
 
+def test_new_session_always_writes_defaults_version(tmp_path):
+    """#358：新会话 `session/started` **恒写** `permission_defaults_version=2`。
+
+    档位 / auto_approve 的 keys 仍只在显式时写（上面两条用例），版本键是新契约。
+    """
+    state = _state(tmp_path)
+    _, patcher = _capture_build()
+    with patcher:
+        session_id = _create(session_service(state))
+
+    started = state.store.read_events(session_id)[0]
+    assert started.data["permission_defaults_version"] == 2
+
+
 # ── 3 / 4 / 5：续聊复原 ──────────────────────────────────────────────
 
 
@@ -135,6 +157,19 @@ def _resume(model_state: MagicMock, session_id: str) -> list[dict]:
             )
         )
     return captured
+
+
+def _resume_result(model_state: MagicMock, session_id: str):
+    """同 :func:`_resume`，但同时返回 LaunchResult（读 warnings，#358）。"""
+    captured, patcher = _capture_build()
+    with patcher:
+        service = session_service(model_state)
+        result = asyncio.run(
+            service.resume_and_launch(
+                session_id=session_id, task="再来一轮", amend=None
+            )
+        )
+    return captured, result
 
 
 def test_resume_restores_declared_mode_and_interactive_callback(tmp_path):
@@ -178,17 +213,24 @@ def test_resume_danger_full_access_stays_non_interactive(tmp_path):
     assert session_id not in state.approval_queues
 
 
-def test_resume_without_declared_mode_keeps_legacy_behavior(tmp_path):
-    """未声明档位的会话（含全部历史会话）续聊行为逐字不变。"""
+def test_resume_without_declared_mode_defaults_to_ask(tmp_path):
+    """#358（D2 默认翻转）：v2 新会话未声明档位 → 续聊 ask（交互式 holder）。
+
+    旧契约（"未声明 → workspace-write + None，行为逐字不变"）已被 #358 收紧取代：
+    新会话缺省是 workspace-write + ask。
+    """
     state = _state(tmp_path)
     _, patcher = _capture_build()
     with patcher:
         session_id = _create(session_service(state))
+    state.approval_queues.clear()
 
     captured = _resume(state, session_id)
 
     assert captured[0]["permission_mode"] is PermissionPolicy.WORKSPACE_WRITE
-    assert captured[0]["approval_callback"] is None
+    assert isinstance(captured[0]["approval_callback"], InteractiveCallbackHolder), (
+        "v2 新会话缺省应走 D2 新默认（ask），不再是 auto-approve"
+    )
 
 
 # ── 1b / 3b：deny 路由（auto_approve=false，未选档位）同病同修 ─────────
@@ -280,6 +322,63 @@ def test_declared_permission_mode_takes_priority_over_auto_approve(tmp_path):
 
     # 创建时走的是 interactive（第一支），续聊也必须回到同一条路。
     assert isinstance(captured[0]["approval_callback"], InteractiveCallbackHolder)
+
+
+# ── #358：旧 Session 迁移（mock 一次、幂等）─────────────────────────────
+
+
+def _create_legacy_session(state: MagicMock, tmp_path) -> str:
+    """构造一个"创建于 #358 默认权限收紧之前"的旧会话。
+
+    生产路径 `create_and_launch` 现在恒写 v2 标记，造不出旧会话；历史会话的对盘
+    形状就是"`session/started` 无版本键、无 `permission/changed`、无档位 / auto_approve
+    声明"，直接 `Session.start`（不传 started_data）即该形状。
+    """
+    from uuid import uuid4
+
+    from agent_harness.session.session import Session
+
+    session = Session.start(state.store, session_id=str(uuid4()), cwd=tmp_path)
+    return session.session_id
+
+
+def _migration_events(state: MagicMock, session_id: str) -> list:
+    return [
+        event for event in state.store.read_events(session_id)
+        if event.type == PERMISSION_CHANGED
+        and event.data.get("permission_migration") == "legacy-v1-defaults"
+    ]
+
+
+def test_legacy_session_resume_keeps_old_default_with_one_time_warning(tmp_path):
+    """#358：旧会话续聊 → 沿用旧默认（auto-approve）+ 一次性提示 + 迁移事件。"""
+    state = _state(tmp_path)
+    session_id = _create_legacy_session(state, tmp_path)
+
+    captured, result = _resume_result(state, session_id)
+
+    assert captured[0]["permission_mode"] is PermissionPolicy.WORKSPACE_WRITE
+    assert captured[0]["approval_callback"] is None, "旧会话沿用旧默认（自动批准）"
+    assert len(result.warnings) == 1, "一次性提示有且仅有一条"
+    assert "沿用旧默认" in result.warnings[0]
+
+    migrated = _migration_events(state, session_id)
+    assert len(migrated) == 1
+    assert migrated[0].data["permission_mode"] == "workspace-write"
+    assert migrated[0].data["auto_approve"] is True
+
+
+def test_legacy_session_second_resume_is_idempotent(tmp_path):
+    """#358：迁移事件在位后二次续聊 → 不再提示、仍旧默认（幂等，只落一次）。"""
+    state = _state(tmp_path)
+    session_id = _create_legacy_session(state, tmp_path)
+    _resume_result(state, session_id)  # 第一次：落迁移事件 + 一条警告
+
+    captured, result = _resume_result(state, session_id)
+
+    assert captured[0]["approval_callback"] is None
+    assert result.warnings == [], "二次续聊不再提示"
+    assert len(_migration_events(state, session_id)) == 1, "迁移事件只落一次"
 
 
 # ── 6：纯函数边界 ────────────────────────────────────────────────────

@@ -1,0 +1,1 @@
+2026-10-06	#360 merge 前同步合并（PR #756 up-to-date 要求）：merge 合 origin/main ba9edfa1（来侧 = PR #755 #736 tail 预览 + 台账，与本票 tui/ 域零文件交集）。merge 零冲突零手工解决；合并树 Gate-0 重采随补记落账。	ba9edfa1..fd08ef6c

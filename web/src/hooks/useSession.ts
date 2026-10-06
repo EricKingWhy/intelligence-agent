@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -75,6 +75,11 @@ export interface RecoverState {
    *  runState.recoverDoneMessage——压成一个布尔会把原因说错）。 */
   stillUnterminated: boolean;
   stillDangling: boolean;
+  /** 409（conflict）时携带的后端 `pending_decisions` 清单（#357 W-13 契约 2/4）；
+   *  非 409 恒为 null。**只来自后端**（不变量 #22：hook 不维护第二套裁决真相）——
+   *  每条默认 verdict 由 `defaultDecisionDrafts` 从后端 `default_action` 派生，
+   *  hook 不发明值。 */
+  pendingDecisions: PendingDecision[] | null;
 }
 
 /** Recover 的 idle 初值——两处复用（useState 初值 / mode 迁移重置）。
@@ -83,7 +88,18 @@ export interface RecoverState {
 const RECOVER_IDLE: RecoverState = {
   status: 'idle', message: null, conflict: false, repaired: 0,
   terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+  pendingDecisions: null,
 };
+
+/** 把后端 `pending_decisions` 映射为「全部按默认安全动作处理」的可提交载荷
+ *  （#357 修订 A §9.4-4 一键动作）：每条 verdict 逐字取自后端 `default_action`
+ *  （`'RETRY'` = 当作没生效、安全重做；`'DEFER'` = 先跳过、稍后再说），不带
+ *  `source`。纯函数；清单仍来自后端 409 载荷（#22）。 */
+export function defaultDecisionDrafts(
+  decisions: readonly PendingDecision[],
+): RecoverDecisionInput[] {
+  return decisions.map((d) => ({ tool_call_id: d.tool_call_id, verdict: d.default_action }));
+}
 
 /** Recover 响应落地守护（不变量 #22，shouldApplyStreamFrame 的姊妹契约）。
  *
@@ -913,7 +929,7 @@ export function useSession() {
   const submitTask = useCallback(
     async (
       payload: StartSessionPayload,
-      opts?: { ownError?: boolean },
+      opts?: { ownError?: boolean; onWorktreeCreated?: (path: string) => void },
     ): Promise<string | null> => {
       setError(null);
       setConversation(null);
@@ -946,6 +962,10 @@ export function useSession() {
             const detail = await startSessionErrorDetail(res);
             throw new Error(detail || `Start failed: ${res.status}`);
           }
+          // #367 P3：消费 X-Worktree-Path 头——目录冲突自动建 worktree 时告诉用户
+          // 任务实际跑在哪个隔离目录（降级态响应立即可得）。
+          const wtDegraded = worktreePathFromResponse(res);
+          if (wtDegraded) opts?.onWorktreeCreated?.(wtDegraded);
           attachLiveStream(res, gen, null);
           return null;
         }
@@ -959,6 +979,9 @@ export function useSession() {
             const detail = await startSessionErrorDetail(res);
             throw new Error(detail || `Start failed: ${res.status}`);
           }
+          // #367 P3：同上，短窗内落定的响应（422/短 JSON 确认）也消费该头。
+          const wtEarly = worktreePathFromResponse(res);
+          if (wtEarly) opts?.onWorktreeCreated?.(wtEarly);
           attachLiveStream(res, gen, null);
           return null;
         }
@@ -1479,6 +1502,11 @@ export function useSession() {
    *  会话真相）；404/409 → error（409 附裁决原因，conflict=true）。
    *  落地前先过 shouldApplyRecoverResult 守护：pending 期间切走即丢弃。
    *
+   *  #357 W-13（契约 4）：`decisions` 非空时作为裁决载荷随请求发出（用户显式
+   *  裁决）；409 载荷的 `pending_decisions` 落到 `recoverState.pendingDecisions`
+   *  供 UI 呈现与再提交（`submitDecisions` 即本函数的裁决入口）。pending 期间
+   *  **保留**上一次清单（提交过程中卡片不闪没），成功/其它失败落 null。
+   *
    *  成功落 `done` 而非回 `idle`：崩溃会话往往已被后端启动扫描修完，recover
    *  是一次真 no-op、投影逐字不变；回 idle 会让「修好了」与「按钮坏了」同形。
    *  `repaired` = 恢复前 dangling 的 tool_call 里、恢复后已配上的条数
@@ -1491,17 +1519,19 @@ export function useSession() {
    *  界面（同族的 stale-write）。同理 `unpairedBefore` 只在该响应确实属于当前视图
    *  时才用来算差集——否则它取自别的会话，`repaired` 就是个凭空造出来的数字。 */
   const recover = useCallback(
-    async (sid: string) => {
-      setRecoverState({
+    async (sid: string, decisions?: RecoverDecisionInput[]) => {
+      setRecoverState((prev) => ({
         status: 'pending', message: null, conflict: false, repaired: 0,
         terminalRepaired: false, stillUnterminated: false, stillDangling: false,
-      });
+        // 提交期间保留清单：卡片不闪没；权威值由随后 409/200 决定。
+        pendingDecisions: prev.pendingDecisions,
+      }));
       const viewed = conversationRef.current;
       const mineBefore = viewed?.session_id === sid ? viewed.events : null;
       const unpairedBefore = mineBefore === null ? null : unpairedToolCallIds(mineBefore);
       const unterminatedBefore = mineBefore === null ? false : hasUnterminatedRun(mineBefore);
       try {
-        const events = await recoverSession(sid);
+        const events = await recoverSession(sid, decisions);
         // 会话列表的计数要跟着更新，与"当前看的是哪个会话"无关。
         void refreshSessions();
         if (!shouldApplyRecoverResult(modeRef.current, sid)) return;
@@ -1516,6 +1546,7 @@ export function useSession() {
           // 原因分开算：isRecoverableRun 是 OR，压回一个布尔就会把原因说错。
           stillUnterminated: hasUnterminatedRun(events),
           stillDangling: unpairedAfter.size > 0,
+          pendingDecisions: null,
         });
       } catch (e) {
         if (!shouldApplyRecoverResult(modeRef.current, sid)) return;
@@ -1528,16 +1559,28 @@ export function useSession() {
             terminalRepaired: false,
             stillUnterminated: false,
             stillDangling: false,
+            // 409 只采信后端给出的清单；非 409 不残留（不变量 #22）。
+            pendingDecisions: e.status === 409 ? (e.pendingDecisions ?? null) : null,
           });
         } else {
           setRecoverState({
             status: 'error', message: (e as Error).message, conflict: false,
             repaired: 0, terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+            pendingDecisions: null,
           });
         }
       }
     },
     [refreshSessions],
+  );
+
+  /** 用户裁决提交（#357 W-13 契约 4）：复用 `recover` 的**同一链路与同一守护**——
+   *  非空 `decisions` 走请求体裁决结清；200 整表重建（同 recover 成功路径），
+   *  仍 409（未覆盖全/非法）则刷新权威 `pendingDecisions`；pending 期间切走即丢弃。
+   *  裁决清单只来自后端 409 载荷（#22）：本函数不合成、不缓存。 */
+  const submitDecisions = useCallback(
+    (sid: string, decisions: RecoverDecisionInput[]) => recover(sid, decisions),
+    [recover],
   );
 
   /** `#312` T4：同 run 恢复被预算暂停的逻辑 run（POST /resume，**不带 task**）。
@@ -1567,10 +1610,14 @@ export function useSession() {
   const resumePausedRun = useCallback(
     async (
       sessionId: string,
-      request: {
-        runId: string;
-        expectedVersion: number;
-      } & ResumePausedRunTarget,
+      request:
+        | ({ runId: string; expectedVersion: number } & ResumePausedRunTarget)
+        | {
+            runId: string;
+            expectedVersion: number;
+            kind: 'user_input';
+            inputRequest: ConstraintInputAnswerPayload;
+          },
     ): Promise<void> => {
       setError(null);
       // 与 sendFollowUp 入口同一套代际/流状态重置：这是一次新的在途执行。
@@ -1594,14 +1641,22 @@ export function useSession() {
       };
 
       try {
-        const pending = resumeSession(sessionId, {
-          run_id: request.runId,
-          resume_basis: 'budget_increase',
-          budget: {
-            expected_version: request.expectedVersion,
-            run: resumeRunLimitsBody(request),
-          },
-        });
+        const resumePayload = request.kind === 'user_input'
+          ? {
+              run_id: request.runId,
+              resume_basis: 'user_input' as const,
+              budget: { expected_version: request.expectedVersion, run: {} },
+              input_request: request.inputRequest,
+            }
+          : {
+              run_id: request.runId,
+              resume_basis: 'budget_increase' as const,
+              budget: {
+                expected_version: request.expectedVersion,
+                run: resumeRunLimitsBody(request),
+              },
+            };
+        const pending = resumeSession(sessionId, resumePayload);
         const res = await raceEarlyResponse(pending);
         if (res !== null) {
           if (!res.ok || !res.body) {
@@ -1846,6 +1901,7 @@ export function useSession() {
     removeSession,
     setArchived,
     recover,
+    submitDecisions,
     resumePausedRun,
     refreshSessions,
     changeModel,

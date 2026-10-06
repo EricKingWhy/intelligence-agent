@@ -9,6 +9,7 @@
 import type {
   AgentEvent,
   ArtifactSlice,
+  ConstraintInputChoice,
   HostDirsListing,
   MemoryDeleted,
   MemoryScope,
@@ -51,7 +52,7 @@ export class AlreadyResolvedError extends Error {}
  *  也不是可重试错误：重试多少次都是 404。 */
 export class ApprovalGoneError extends Error {}
 
-/** 恢复链路 409 的机器可读待裁决清单条目（#596 / 后端 #547）。
+/** 恢复链路 409 的机器可读待裁决清单条目（#596 / 后端 #547；#357 W-13 富化）。
  *
  *  键固定为 `tool_call_id` / `tool_name` / `state`。`state` **通常** ⊆ Ledger 非终态
  *  集合 `{RUNNING, UNKNOWN, NEED_RECONCILE}`（悬空调用只认非终态）；但后端
@@ -60,27 +61,49 @@ export class ApprovalGoneError extends Error {}
  *  携带终态值（当前部署现实不可达）。越出三态时 `parsePendingDecisions` 整组回落
  *  undefined → 调用方展示 `message` 文案，这是任何后端版本下都正确的下限；刻意
  *  **不做 per-entry 过滤**——不制造半真半假的清单。
- *  裁决载荷即 `decisions: [{tool_call_id, verdict}]`，verdict ∈
- *  `{CONFIRM_SUCCESS, CONFIRM_FAILURE, RETRY, ABANDON}`（POST /recover 请求体）。 */
+ *
+ *  #357 W-13（修订 A）增三个**只读展示字段**，驱动「默认选中最安全项」（契约 1/2/6）：
+ *  - `default_action`：由工具 `replay_safe` 决定——safe → `'RETRY'`（当作没生效，
+ *    安全重做）、unsafe → `'DEFER'`（先跳过，稍后再说）。**只有这两值**（#14 安全侧）；
+ *  - `risk_level`：safe → `'low'`、unsafe → `'high'`；
+ *  - `probe`：逐字取工具既有 `ReconcileHint`（`verifiable` + `suggested_action`），
+ *    是**建议**不是结论——前端不据此伪造「已查到/未查到」（那是用户核对后的自陈）。
+ *    未知工具 fail-closed：`DEFER`/`high` + `verifiable=false`。
+ *  裁决载荷即 `decisions: [{tool_call_id, verdict, source?}]`，verdict ∈
+ *  `{CONFIRM_SUCCESS, CONFIRM_FAILURE, RETRY, ABANDON, DEFER}`（POST /recover 请求体）。 */
 export interface PendingDecision {
   tool_call_id: string;
   tool_name: string;
   state: 'RUNNING' | 'UNKNOWN' | 'NEED_RECONCILE';
+  default_action: 'RETRY' | 'DEFER';
+  risk_level: 'low' | 'high';
+  probe: { verifiable: boolean; suggested_action: string | null };
 }
 
 /** `pending_decisions` 的形状防御：整组合法才返回，任何一条键缺失 / 类型不对 /
- *  state 越出非终态集合 ⇒ 整个字段按"没给"处理（undefined）。调用方拿 undefined
- *  时回落到 `message` 文案展示——那在任何后端版本下都是正确的下限，不存在
- *  半真半假的清单。 */
+ *  state 越出非终态集合 / 富化字段越枚举 ⇒ 整个字段按"没给"处理（undefined）。
+ *  调用方拿 undefined 时回落到 `message` 文案展示——那在任何后端版本下都是正确的
+ *  下限，不存在半真半假的清单。刻意**不做 per-entry 过滤**（一条坏行不返回其余）。 */
 function parsePendingDecisions(raw: unknown): PendingDecision[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const out: PendingDecision[] = [];
   for (const item of raw) {
     if (typeof item !== 'object' || item === null) return undefined;
-    const { tool_call_id, tool_name, state } = item as Record<string, unknown>;
+    const { tool_call_id, tool_name, state, default_action, risk_level, probe } =
+      item as Record<string, unknown>;
     if (typeof tool_call_id !== 'string' || typeof tool_name !== 'string') return undefined;
     if (state !== 'RUNNING' && state !== 'UNKNOWN' && state !== 'NEED_RECONCILE') return undefined;
-    out.push({ tool_call_id, tool_name, state });
+    if (default_action !== 'RETRY' && default_action !== 'DEFER') return undefined;
+    if (risk_level !== 'low' && risk_level !== 'high') return undefined;
+    if (typeof probe !== 'object' || probe === null) return undefined;
+    const { verifiable, suggested_action } = probe as Record<string, unknown>;
+    if (typeof verifiable !== 'boolean') return undefined;
+    // `suggested_action` 只认 string | null；缺省（undefined）与它类值一律整组回落。
+    if (suggested_action !== null && typeof suggested_action !== 'string') return undefined;
+    out.push({
+      tool_call_id, tool_name, state, default_action, risk_level,
+      probe: { verifiable, suggested_action },
+    });
   }
   return out;
 }
@@ -266,6 +289,15 @@ export interface StartSessionPayload {
   agent_profile?: string;
   reasoning_effort?: string;
   context_providers?: string[];
+  /** #367 / W-23 选项 A：三档自主度（抄 Copilot Interactive/Plan/Autopilot）。
+   *  不传 = 后端默认（沿用 auto_approve 既有语义）；显式声明优先于 auto_approve。
+   *  - ask：逐次问；plan：先计划后执行；auto：全自动。 */
+  autonomy?: 'ask' | 'plan' | 'auto';
+  /** #367 / W-23 选项 A：目录冲突策略。worktree（默认）：被占时自动建
+   *  worktree；queue：走既有租约排队（次选项）。不传 = 后端默认 worktree。 */
+  on_conflict?: 'worktree' | 'queue';
+  /** #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；不传 = 部署默认。 */
+  sandbox_backend?: string;
 }
 
 /** createEmptySession 的载荷（#204 裁定 §2）：只建会话、不启动 run。
@@ -321,6 +353,52 @@ export async function createEmptySession(
     throw new SessionError(res.status, 'create 会话回执缺少 session_id');
   }
   return { sessionId: r.session_id };
+}
+
+/** #367 / W-23 选项 A：GET /api/sandbox-backends —— 可用后端 + 探针结果。
+ *  不可用带 reason，前端据此置灰（不画饼）。 */
+export interface SandboxBackendEntry {
+  backend: string;
+  available: boolean;
+  reason: string | null;
+  details: Record<string, string>;
+}
+
+export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
+  const res = await apiFetch('/api/sandbox-backends');
+  if (!res.ok) return [];
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (!Array.isArray(r.backends)) return [];
+  return (r.backends as Record<string, unknown>[])
+    .filter((b) => typeof b.backend === 'string')
+    .map((b) => ({
+      backend: b.backend as string,
+      available: b.available === true,
+      reason: typeof b.reason === 'string' ? b.reason : null,
+      details: (typeof b.details === 'object' && b.details !== null
+        ? b.details : {}) as Record<string, string>,
+    }));
+}
+
+/** #367 / W-23 选项 A：POST /api/worktrees —— 为 git 仓库创建隔离 worktree。
+ *  响应 `{worktree_path}`。目录冲突默认走这个（六家共识），"排队等"作次选项。 */
+export async function createWorktree(repoPath: string): Promise<string> {
+  const res = await apiFetch('/api/worktrees', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo_path: repoPath }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `create worktree ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (typeof r.worktree_path !== 'string' || !r.worktree_path) {
+    throw new SessionError(res.status, 'create worktree 回执缺少 worktree_path');
+  }
+  return r.worktree_path;
 }
 
 /** B1 契约通用清单条目——{id, display_name, description}。
@@ -478,6 +556,9 @@ const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
   context_providers: (p) =>
     p.context_providers && p.context_providers.length > 0 ? ['context_providers', p.context_providers] : null,
+  autonomy: (p) => (p.autonomy ? ['autonomy', p.autonomy] : null),
+  on_conflict: (p) => (p.on_conflict ? ['on_conflict', p.on_conflict] : null),
+  sandbox_backend: (p) => (p.sandbox_backend ? ['sandbox_backend', p.sandbox_backend] : null),
 };
 
 /** POST a new session. Returns the raw Response — SSE stream is consumed by caller.
@@ -491,6 +572,14 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildBody(payload, START_SESSION_FIELDS)),
   });
+}
+
+/** #367 P3：从创建响应读 worktree 路径。后端 launch=true 走 SSE（无 JSON 体），
+ *  worktree 信息走 `X-Worktree-Path` 响应头（`X-Permission-Mode` 同型先例）；
+ *  launch=false 时走 JSON 体 `worktree_path`（由调用方直接读）。无头/空头 → null。 */
+export function worktreePathFromResponse(res: Response): string | null {
+  const v = res.headers.get('X-Worktree-Path');
+  return v && v.length > 0 ? v : null;
 }
 
 /** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
@@ -1246,25 +1335,205 @@ export class RecoverError extends Error {
   }
 }
 
+/** 用户对一条待裁决 Operation 的裁决值（#547 四值 + #357 W-13 修订 A §9.4-3 的
+ *  `DEFER` = 先跳过、稍后再说；Ledger 保持 `NEED_RECONCILE` 可稍后重裁）。
+ *  字面量与后端 `recovery/reconcile.py::ReconcileVerdict` 逐一对应。 */
+export type ReconcileVerdict =
+  | 'CONFIRM_SUCCESS'
+  | 'CONFIRM_FAILURE'
+  | 'RETRY'
+  | 'ABANDON'
+  | 'DEFER';
+
+/** 提交给 POST /recover 的单条裁决（wire 形状 `{tool_call_id, verdict, source?}`）。
+ *  `source`（#357 W-13 契约 3）是用户来源自陈（如「我查了外部系统」）——可选，
+ *  有值才逐字进后端 `reconcile_meta`，**绝不伪造自动验证字段**。 */
+export interface RecoverDecisionInput {
+  tool_call_id: string;
+  verdict: ReconcileVerdict;
+  source?: string;
+}
+
+/** `source` 上限（**字符**），与后端 `RecoverDecisionRequest.source` 的
+ *  `max_length=2000` 同口径。超限在**前端**抛错而不是截断——来源是审计留痕，
+ *  静默截断等于伪造（§9.6 诚实原则）。 */
+export const RECOVER_DECISION_SOURCE_MAX = 2000;
+
+/** 组装 POST /recover 的请求体：无 decisions（或空数组）⇒ `null`（旧行为：不发
+ *  body，纯恢复尝试）；有 decisions ⇒ `{decisions:[...]}`。`source` 超限在此抛错
+ *  （在发请求之前，被拒请求零副作用）。 */
+function buildRecoverBody(decisions?: RecoverDecisionInput[]): string | null {
+  if (!decisions || decisions.length === 0) return null;
+  for (const decision of decisions) {
+    if (decision.source !== undefined && decision.source.length > RECOVER_DECISION_SOURCE_MAX) {
+      throw new Error(
+        `裁决来源过长（${decision.source.length} 字符，上限 ${RECOVER_DECISION_SOURCE_MAX}）`,
+      );
+    }
+  }
+  return JSON.stringify({
+    decisions: decisions.map((d) => ({
+      tool_call_id: d.tool_call_id,
+      verdict: d.verdict,
+      source: d.source,
+    })),
+  });
+}
+
 /** POST /api/sessions/{id}/recover — 幂等。200 返回该 session 全量事件数组
  *  （与 GET events 同构），调用方直接走既有 projectHistory 重建管线（不变量 #22：
- *  不引入第二套会话真相）。 */
-export async function recoverSession(sessionId: string): Promise<AgentEvent[]> {
+ *  不引入第二套会话真相）。
+ *
+ *  #357 W-13（契约 4）：`decisions` 非空时发送 `{decisions:[{tool_call_id,verdict,
+ *  source?}]}`——用户显式裁决覆盖全部待裁决行后结清；无 `decisions` 保持旧行为
+ *  （空体）。409 载荷（`pending_decisions`）经 `RecoverError` 透出，供 UI 呈现
+ *  与再提交。 */
+export async function recoverSession(
+  sessionId: string,
+  decisions?: RecoverDecisionInput[],
+): Promise<AgentEvent[]> {
+  const body = buildRecoverBody(decisions);
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/recover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    ...(body === null ? {} : { body }),
   });
   if (res.status === 404) throw new RecoverError(404, '会话不存在');
   if (res.status === 409) {
-    const body = await readErrorBody(res);
+    const errBody = await readErrorBody(res);
     throw new RecoverError(
       409,
-      body.message || '存在需要人工裁决的高风险操作',
-      body.pendingDecisions,
+      errBody.message || '存在需要人工裁决的高风险操作',
+      errBody.pendingDecisions,
     );
   }
   if (!res.ok) throw new RecoverError(res.status, `恢复失败（${res.status}）`);
   return res.json();
+}
+
+// ── 恢复列表（#357 W-13 契约 5，只读端点）──
+
+/** GET /api/recovery/interrupted 的一行（后端 `interrupted_recovery_rows` 形状）。
+ *
+ *  逐字段按后端原样承载，**不改名、不补默认**。`session_cwd` 在上游 wire 上叫
+ *  `workspace_root`（进度文件与 session_cwd 同一锚）；进度文件版本嵌在 `progress`
+ *  里（两种互斥形状见 `InterruptedProgressVersion`）。 */
+export interface InterruptedRunSummary {
+  run_id: string | null;
+  interrupted_seq: number;
+  step_id: number | null;
+  agent_id: string | null;
+}
+
+/** 进度文件版本（`progress.py::read_progress_file_version` 的两种互斥形状）：
+ *  可读 ⇒ `{schema_version, source_event_seq}`；缺失/不可读/头非法 ⇒ `{status,
+ *  reason}`。**如实标注，不伪造"最新"**。 */
+export type InterruptedProgressVersion =
+  | { schema_version: string; source_event_seq: number }
+  | { status: 'missing' | 'unreadable' | 'invalid_schema'; reason: string };
+
+export interface InterruptedRecoveryItem {
+  session_id: string;
+  recovery: string;
+  detail: string | null;
+  interrupted_runs: InterruptedRunSummary[];
+  resume_available: boolean;
+  task: string | null;
+  workspace_root: string | null;
+  progress: InterruptedProgressVersion;
+}
+
+export interface InterruptedRecoveries {
+  snapshot_available: boolean;
+  items: InterruptedRecoveryItem[];
+}
+
+function isStringOrNull(v: unknown): v is string | null {
+  return v === null || typeof v === 'string';
+}
+
+function isNumberOrNull(v: unknown): v is number | null {
+  return v === null || typeof v === 'number';
+}
+
+function parseInterruptedProgress(raw: unknown): InterruptedProgressVersion | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.schema_version === 'string' && typeof p.source_event_seq === 'number') {
+    return { schema_version: p.schema_version, source_event_seq: p.source_event_seq };
+  }
+  if (
+    (p.status === 'missing' || p.status === 'unreadable' || p.status === 'invalid_schema') &&
+    typeof p.reason === 'string'
+  ) {
+    return { status: p.status, reason: p.reason };
+  }
+  return undefined;
+}
+
+/** 一行恢复列表的形状防御：任一字段类型不符 ⇒ 该行不合法（返回 undefined）。 */
+function parseInterruptedRecoveryItem(raw: unknown): InterruptedRecoveryItem | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.session_id !== 'string' || !r.session_id) return undefined;
+  if (typeof r.recovery !== 'string' || !r.recovery) return undefined;
+  if (!isStringOrNull(r.detail) || !isStringOrNull(r.task) || !isStringOrNull(r.workspace_root)) {
+    return undefined;
+  }
+  if (typeof r.resume_available !== 'boolean') return undefined;
+  if (!Array.isArray(r.interrupted_runs)) return undefined;
+  const runs: InterruptedRunSummary[] = [];
+  for (const run of r.interrupted_runs) {
+    if (typeof run !== 'object' || run === null) return undefined;
+    const rn = run as Record<string, unknown>;
+    if (!isStringOrNull(rn.run_id)) return undefined;
+    if (typeof rn.interrupted_seq !== 'number') return undefined;
+    if (!isNumberOrNull(rn.step_id) || !isStringOrNull(rn.agent_id)) return undefined;
+    runs.push({
+      run_id: rn.run_id,
+      interrupted_seq: rn.interrupted_seq,
+      step_id: rn.step_id,
+      agent_id: rn.agent_id,
+    });
+  }
+  const progress = parseInterruptedProgress(r.progress);
+  if (progress === undefined) return undefined;
+  return {
+    session_id: r.session_id,
+    recovery: r.recovery,
+    detail: r.detail,
+    interrupted_runs: runs,
+    resume_available: r.resume_available,
+    task: r.task,
+    workspace_root: r.workspace_root,
+    progress,
+  };
+}
+
+/** 恢复列表载荷的形状防御：信封不合法 / 任一条目不合法 ⇒ 整份回落 `undefined`
+ *  （与 `parsePendingDecisions` 同一条纪律——一条坏行不返回半真半假的清单）。 */
+function parseInterruptedRecoveries(raw: unknown): InterruptedRecoveries | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { snapshot_available, items } = raw as Record<string, unknown>;
+  if (typeof snapshot_available !== 'boolean' || !Array.isArray(items)) return undefined;
+  const out: InterruptedRecoveryItem[] = [];
+  for (const item of items) {
+    const parsed = parseInterruptedRecoveryItem(item);
+    if (parsed === undefined) return undefined;
+    out.push(parsed);
+  }
+  return { snapshot_available, items: out };
+}
+
+/** GET /api/recovery/interrupted — 只读恢复列表（快照 + 只读富化）。
+ *
+ *  非 2xx 抛错（不静默当空列表）；形状不合法返回 `undefined`（整组回落）——
+ *  调用方据此按"列表不可得"呈现，绝不据此点亮「继续」（`resume_available` 的
+ *  fail-safe 只在后端明确给出时采信）。#22：列表由后端单点驱动，前端不缓存。 */
+export async function listInterruptedRecoveries(): Promise<InterruptedRecoveries | undefined> {
+  const res = await apiFetch('/api/recovery/interrupted');
+  if (!res.ok) throw new Error(`list interrupted recoveries ${res.status}`);
+  return parseInterruptedRecoveries(await res.json());
 }
 
 // ── 同 run 恢复（`#312` T4，PRD §3 / `11 §6.1`）──
@@ -1298,14 +1567,24 @@ export interface ResumeRunLimitsBody extends Partial<Record<RunLimitField, numbe
   tool_call_limits?: Record<string, number>;
 }
 
-export interface ResumePausedRunPayload {
-  run_id: string;
-  resume_basis: 'budget_increase';
-  budget: {
-    expected_version: number;
-    run: ResumeRunLimitsBody;
-  };
+export interface ConstraintInputAnswerPayload {
+  request_id: string;
+  choice: ConstraintInputChoice;
+  custom_text?: string;
 }
+
+export type ResumePausedRunPayload =
+  | {
+      run_id: string;
+      resume_basis: 'budget_increase';
+      budget: { expected_version: number; run: ResumeRunLimitsBody };
+    }
+  | {
+      run_id: string;
+      resume_basis: 'user_input';
+      budget: { expected_version: number; run: ResumeRunLimitsBody };
+      input_request: ConstraintInputAnswerPayload;
+    };
 
 /** 恢复目标（`lib/runBudget.ts` 的 `pauseFacts().resumeTarget` 的 wire 形态）：run 维
  *  给字段名，工具配额给工具名。两种目标写进 `budget.run` 的键不同，所以由这里**一处**

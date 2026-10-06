@@ -27,6 +27,9 @@ import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
+import { RecoveryListPanel } from './components/RecoveryListPanel';
+import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
@@ -49,21 +52,24 @@ import { isRecoverableRun, recoverDoneMessage } from './lib/runState';
 import { ceilingDraftValue, defaultResumeDraft, resumeRequestTarget } from './lib/runBudget';
 import { onTokenChange, onUnauthorized } from './lib/auth';
 import {
-  createEmptySession,
   describeSessionError,
   getAgentProfiles,
   getCapabilities,
   getModels,
   getPermissionModes,
   getReasoningEfforts,
+  getSandboxBackends,
   type CatalogEntry,
   type ModelCatalogEntry,
+  type PendingDecision,
+  type SandboxBackendEntry,
+  type StartSessionPayload,
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type { ToolCall, PresetTask, AgentEvent, Project, UndeliveredInput } from './types';
+import type { ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
 const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
@@ -97,6 +103,9 @@ const COMPOSER_AUTO_APPROVE = true;
 export default function App() {
   // BUG-001 fix：fork 失败的本地错误状态（useSession 的 error 是流级通道）。
   const [forkError, setForkError] = useState<{ sessionId: string; message: string } | null>(null);
+  // #367 P3：目录冲突自动建 worktree 时的一次性提示（后端 X-Worktree-Path 头，
+  // 前端在响应可得的两条路径消费；用户关闭后不再出现）。
+  const [worktreeNotice, setWorktreeNotice] = useState<string | null>(null);
 
   const {
     sessions,
@@ -117,6 +126,7 @@ export default function App() {
     setArchived,
     recover,
     resumePausedRun,
+    submitDecisions,
     refreshSessions,
     changeModel,
     changePermission,
@@ -169,6 +179,17 @@ export default function App() {
       setModels(await getModels());
     } catch {
       setModels([]); // 降级隐藏入口——错误不打扰（非关键能力）
+    }
+  }, []);
+
+  // ── #367 / W-23 选项 A：sandbox 后端探针（GET /api/sandbox-backends）──
+  // 加载失败/端点缺席 → [] → 创建表单的运行位置选择器降级隐藏（不伪造列表）。
+  const [sandboxBackends, setSandboxBackends] = useState<SandboxBackendEntry[]>([]);
+  const fetchSandboxBackends = useCallback(async () => {
+    try {
+      setSandboxBackends(await getSandboxBackends());
+    } catch {
+      setSandboxBackends([]);
     }
   }, []);
 
@@ -458,7 +479,8 @@ export default function App() {
     void fetchModels();
     void fetchControlCatalogs();
     void fetchCapabilities();
-  }, [fetchModels, fetchControlCatalogs, fetchCapabilities]);
+    void fetchSandboxBackends(); // #367：运行位置选择器的数据源
+  }, [fetchModels, fetchControlCatalogs, fetchCapabilities, fetchSandboxBackends]);
 
   const handleModelChange = useCallback(
     (name: string | null) => {
@@ -576,54 +598,26 @@ export default function App() {
     [submitTask, sendMessage, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft],
   );
 
-  /** 「在此项目中新建任务」（WS-6 / #169 AC11）：以项目路径为 cwd 创建**空会话**
-   *  （#204 裁定 §1：launch=false，不启动 run）——会话出现，用户回主界面在 chat
-   *  输入框发第一条消息。不再走 submitTask 的 SSE 接线：launch=false 没有流可接，
-   *  submitTask 的"流已接上"语义对它不成立（也绝不进入 live 模式——空会话没有 run）。
+  /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口——
+   *  `TaskCreationDialog` 组装好的 `StartSessionPayload`（prompt 唯一必填 +
+   *  三档自主度 + 模型 + 运行位置），走 `submitTask` 的既有 SSE 接线创建并启动。
+   *  失败原因返回给确认面在浮层里就地显示（AC12），不打全局横幅。
    *
-   *  失败原因**返回给确认面**在浮层里就地显示（AC12），不打到 Workspace 区的全局
-   *  横幅上；422 不套用「未知模型」旧语义，后端 detail 原样出现。
-   *
-   *  `permissionMode === null`（默认档）→ 不进 payload → api 层不发键 → 后端
-   *  默认 workspace-write + auto-approve（见 StartTaskInProjectDialog 文件头）。 */
+   *  取代旧的"空会话"流程（#204 的"弹窗不该有任务内容"裁定被选项 A 取代）：
+   *  不再 `createEmptySession` + 回输入框发第一条消息——prompt 已在弹窗里，
+   *  创建即带任务启动。 */
   const handleStartTaskInProject = useCallback(
-    async (project: Project, permissionMode: string | null) => {
-      try {
-        const created = await createEmptySession({
-          cwd: project.path,
-          auto_approve: true,
-          ...(permissionMode ? { permission_mode: permissionMode } : {}),
-        });
-        // #236：这里**不再**用回执初始化 composer 权限 pill（#204 裁定 §3 的旧做法）。
-        // pill 现在读会话自己的投影（`session/started`，见 `displayedPermissionMode`）——
-        // 回执驱动的本地状态是第二套真相，而且有实际后果：它会让**下一次新建会话**凭空
-        // 继承这一档，而显式发 `permission_mode` 会把那个会话从"后端默认（自动批准）"
-        // 悄悄变成"交互式审批"（后端 `permission_mode_explicit` 只认"键在不在"）。
-        // 空会话创建后**选中它**（终审 P1 修复：不选中的话用户在 idle 态输入的
-        // 第一条消息会走 submitTask 另造一个**没有 cwd** 的新会话——弹窗请他
-        // "在输入框发第一条消息"的那个会话反而成了孤儿）。选中走既有
-        // selectSession（回 viewing + 记住会话 id），composer 的第一条消息即
-        // 落进这个会话（sendMessage 路径）。
-        selectSession(created.sessionId);
-        // 空会话创建后刷新列表（会话出现在该项目分组下）。
-        await refreshSessions();
-        // #223（同一缺陷的另一入口）：先切回 Chat 再聚焦——本函数下面是"焦点落到
-        // chat 输入框、用户立刻可以打字"，但 composer 只属于 Chat 面；停在
-        // 「文件/改动」/「输出」时 `#composer-input` 在 DOM 里存在却**不可见**，
-        // 那句 focus() 落在一个看不见的输入框上，用户看到的仍是"没反应"。
-        setSelectedSurface('chat');
-        // #204 裁定 §1：焦点落到 chat 输入框——用户立刻可以打字（弹窗关闭后的
-        // 下一步就是在那里发第一条消息）。放在浮层关闭之后（调用方 onOpenChange
-        // 先把 Radix 焦点还回来，这里再指到输入框，否则会被浮层的关闭焦点打断）。
-        document.getElementById('composer-input')?.focus();
-        return null;
-      } catch (e) {
-        // 前缀保留 AC12 旧语义（「提交失败：目录不存在：…」→「创建会话失败：…」）：
-        // 后端 detail 原样跟在前缀后面，确认面 toHaveText 整串相等锁住它。
-        return `创建会话失败：${describeSessionError(e, '请求失败')}`;
-      }
+    async (payload: StartSessionPayload): Promise<string | null> => {
+      // submitTask 自己处理 SSE 接线与错误文案；resolve null = 已接管。
+      // 失败文案（string）交回弹窗就地显示。
+      // #367 P3：worktree 自动创建时把隔离路径提示给用户（可关闭的一次性横幅）。
+      return submitTask(payload, {
+        ownError: true,
+        onWorktreeCreated: (path) =>
+          setWorktreeNotice(`目录被其他任务占用，已自动创建隔离 worktree 并在此运行：${path}`),
+      });
     },
-    [refreshSessions, selectSession],
+    [submitTask],
   );
 
   /* 归档 / 取消归档（#171 AC9）：把**失败原因**交回给 SessionList 就地显示，
@@ -819,8 +813,21 @@ export default function App() {
   /** 正在提交恢复的 run_id（null = 无在途请求）。按 run 记账的理由同草稿：切走后
    *  按钮不该被上一个 run 的在途请求永久禁用。 */
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
+  const [dismissedConstraintRequestId, setDismissedConstraintRequestId] = useState<string | null>(null);
+  const [resumingConstraintRequestId, setResumingConstraintRequestId] = useState<string | null>(null);
 
   const paused = conversation?.run_paused ?? null;
+  const pendingConstraintInput = conversation?.pending_constraint_input ?? null;
+  const constraintInputPending =
+    pendingConstraintInput !== null && pendingConstraintInput.answer === null;
+  const constraintRequest =
+    paused !== null &&
+    pendingConstraintInput !== null &&
+    paused.reason === 'user_input' &&
+    paused.input_request_id === pendingConstraintInput.request_id &&
+    paused.run_id === pendingConstraintInput.run_id
+      ? pendingConstraintInput
+      : null;
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
@@ -841,6 +848,31 @@ export default function App() {
   // live 流，那一小段窗口里 `run_paused` 可能还没被 run/resumed 清掉——那时露出
   // 一个"恢复"按钮等于给用户一个重复提交 CAS 的机会。
   const canResumePaused = paused !== null && selectedId !== null && !streaming;
+
+  const constraintDialogOpen =
+    constraintRequest !== null &&
+    selectedId !== null &&
+    !loadingHistory &&
+    dismissedConstraintRequestId !== constraintRequest.request_id;
+
+  const handleConstraintInputAnswer = useCallback((answer: ConstraintInputAnswer) => {
+    if (!constraintRequest || !paused || selectedId === null) return;
+    setResumingConstraintRequestId(constraintRequest.request_id);
+    void resumePausedRun(selectedId, {
+      runId: paused.run_id,
+      expectedVersion: paused.version,
+      kind: 'user_input',
+      inputRequest: answer,
+    }).finally(() => setResumingConstraintRequestId(null));
+  }, [constraintRequest, paused, selectedId, resumePausedRun]);
+
+  const handleConstraintDialogOpenChange = useCallback((open: boolean) => {
+    if (open) {
+      setDismissedConstraintRequestId(null);
+    } else if (constraintRequest) {
+      setDismissedConstraintRequestId(constraintRequest.request_id);
+    }
+  }, [constraintRequest]);
 
   const handleResumePaused = useCallback(() => {
     if (!paused || selectedId === null) return;
@@ -881,6 +913,16 @@ export default function App() {
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
+  // #357 W-13：恢复列表浮层（顶栏 历史 按钮入口；只读，先列后继续）。
+  const [recoveryListOpen, setRecoveryListOpen] = useState(false);
+  /** #357 W-13：用户收起裁决面板时记住**那一份**清单的引用（按引用判等，见下）。
+   *  新的 409 会带来新数组 ⇒ 面板重新弹出；同一份清单在提交失败后重渲时保持收起态。 */
+  const [dismissedDecisions, setDismissedDecisions] = useState<PendingDecision[] | null>(null);
+  // #357 W-13：裁决面板的可见性——只由后端 409 载荷驱动（不变量 #22）。用户 Esc/关闭
+  // 只收起**当前这一份**清单（按引用判等），新的 409 会带来新数组而重新弹出。
+  const pendingDecisions = recoverState.pendingDecisions;
+  const showDecisionPanel =
+    pendingDecisions !== null && pendingDecisions.length > 0 && pendingDecisions !== dismissedDecisions;
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1088,6 +1130,7 @@ export default function App() {
         authRequired={authRequired}
         onOpenMemories={() => setMemoriesOpen(true)}
         onOpenApprovePolicy={() => setApprovePolicyOpen(true)}
+        onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
       />
@@ -1115,7 +1158,8 @@ export default function App() {
           sessionsError={sessionsError}
           onRetryProjects={handleRetryProjects}
           onStartTask={handleStartTaskInProject}
-          permissionModes={permissionModes}
+          models={models}
+          sandboxBackends={sandboxBackends}
           /* 会话硬删（#172 / ADR-0029）：removeSession 自己负责成功/404 后的状态
              收敛（清视图 + 重拉列表），确认面只消费它的回执与异常。传引用稳定的
              hook 回调，SessionList 的 memo 才不会因它失效。 */
@@ -1141,6 +1185,19 @@ export default function App() {
             </div>
           )}
           {error && <div className="app-error">{error}</div>}
+          {/* #367 P3：worktree 自动创建的一次性提示（信息级，可关闭）。 */}
+          {worktreeNotice && (
+            <div className="app-notice" role="status">
+              <span>{worktreeNotice}</span>
+              <button
+                className="auth-banner-close"
+                onClick={() => setWorktreeNotice(null)}
+                aria-label="关闭提示"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           {/* 分叉失败提示带上它属于哪个会话：只属于发起它的那个会话，切走自然
               不再渲染（不用 effect 清空——那会多一次渲染，也会留下「清空」与
               「切会话」两份状态需要同步）。 */}
@@ -1196,6 +1253,22 @@ export default function App() {
               })}
             </div>
           )}
+          {/* #357 W-13：UNKNOWN 裁决面板（修订 A §9.4）——由后端 409 的
+              `pending_decisions` 驱动，提交走 useSession.submitDecisions（同一 #547
+              合同）。全部由后端载荷构成，App 不维护第二套裁决真相（不变量 #22）。
+              放在 canRecover 门**外**：裁决在途时入口仍应可见。 */}
+          {showDecisionPanel && pendingDecisions && (
+            <RecoveryDecisionPanel
+              key={pendingDecisions.map((d) => d.tool_call_id).join('|')}
+              decisions={pendingDecisions}
+              submitting={recoverState.status === 'pending'}
+              message={recoverState.message}
+              onSubmit={(payload) => {
+                if (selectedId) void submitDecisions(selectedId, payload);
+              }}
+              onClose={() => setDismissedDecisions(pendingDecisions)}
+            />
+          )}
           {conversation?.run_interrupted && !streaming && (
             <div className="interrupt-banner" role="status" aria-live="polite">
               {/* step_id 可能缺失/null，且这是**真值不是缺失**：进程在该 run 的第一个
@@ -1213,7 +1286,7 @@ export default function App() {
           {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
               出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
               暂停有（抬高绝对 ceiling → 同 run 恢复）。 */}
-          {canResumePaused && paused && (
+          {canResumePaused && paused && paused.reason !== 'user_input' && (
             <PausedPanel
               paused={paused}
               ceilingDraft={pauseCeilingDraft}
@@ -1229,6 +1302,20 @@ export default function App() {
                 任务审阅
               </button>
             </div>
+          )}
+          {constraintRequest && selectedId !== null && !loadingHistory && (
+            <ConstraintResolutionDialog
+              key={constraintRequest.request_id}
+              request={constraintRequest}
+              open={constraintDialogOpen}
+              canClose
+              resuming={
+                resumingConstraintRequestId === constraintRequest.request_id || streaming
+              }
+              errorMessage={error}
+              onOpenChange={handleConstraintDialogOpenChange}
+              onSubmit={handleConstraintInputAnswer}
+            />
           )}
           {/* 中心列 tab 集（#182）：`Chat` 恒存在 + 能力声明为真的面（PRD §2.1）。
               Split / Preview 两个模式名已删除——Brief 要的是 tabs 不是分屏
@@ -1271,6 +1358,7 @@ export default function App() {
                   />
                   <Composer
                     streaming={streaming}
+                    constraintInputPending={constraintInputPending}
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
@@ -1353,6 +1441,16 @@ export default function App() {
         }}
       />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #357 W-13：恢复列表浮层（顶栏 历史 入口）。只读列表；「继续」= 打开该会话，
+          恢复仍走会话内既有恢复链路（不新增恢复编排）。 */}
+      <RecoveryListPanel
+        open={recoveryListOpen}
+        onOpenChange={setRecoveryListOpen}
+        onResume={(sid) => {
+          setRecoveryListOpen(false);
+          void selectSession(sid);
+        }}
+      />
       {/* #684 Phase 2：持久审批规则管理（TopBar Shield 入口；只读 + 二次确认撤销）。 */}
       <ApprovePolicyPanel
         open={approvePolicyOpen}

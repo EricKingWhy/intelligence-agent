@@ -58,6 +58,11 @@ class GlobTool(Tool):
             suggested_action="重新执行同样的 glob 匹配，核对结果是否与预期一致（只读操作，重跑安全）。",
         )
 
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：重复同一 glob 匹配无外部副作用（#357 契约 7）。
+        return True
+
     async def execute(self, args: _GlobArgs) -> ToolResult:
         """调 sandbox.list_files(pattern) → 截断到 max_results。"""
         try:

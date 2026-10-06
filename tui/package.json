@@ -1,0 +1,25 @@
+{
+  "name": "@intelligence-agent/tui",
+  "version": "0.1.0",
+  "description": "Terminal client for intelligence-agent: projects the server SessionEvent stream onto Pi TUI components. No local session store, no agent runtime.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "ia-tui": "./dist/src/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "test": "node --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  }
+}

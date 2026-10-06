@@ -15,15 +15,18 @@ import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
+import anyio
 import jwt
 from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -52,6 +55,7 @@ from agent_harness.agent.run_budget import (
 from agent_harness.assembly import (
     RecoveryStores,
     initialize_stores,
+    root_registry_reconcile_info,
     root_registry_tool_names,
 )
 from agent_harness.capability.base import CapabilityError, CapabilityRegistry
@@ -76,7 +80,12 @@ from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
-from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.sandbox import (
+    SUPPORTED_BACKENDS,
+    SandboxUnavailableError,
+    WorkspaceRegistry,
+    probe_all_capabilities,
+)
 from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import validate_user_protected_fact_annotations
@@ -112,6 +121,7 @@ from agent_harness.session.service import (
     WorkspaceNotFound,
     validate_session_id,
 )
+from agent_harness.session.workflow import WorkflowMode
 from agent_harness.storage import (
     SqliteCheckpointStore,
     SqliteOperationLedger,
@@ -147,6 +157,11 @@ from agent_harness.workspace import (
     WorkspaceIndex,
     WorkspaceLeaseManager,
 )
+from agent_harness.workspace.lease_paths import (
+    LeasePathError,
+    normalize_dir_key,
+)
+from agent_harness.workspace.worktree import WorktreeError, create_worktree
 
 # Read-only catalog facts live with their router. Re-export them here for the
 # existing request validators and compatibility imports.
@@ -167,6 +182,16 @@ class _AmendValueValidators(BaseModel):
     未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
     （见 ``_validate_wired_context_providers``）。
     """
+
+    @field_validator("sandbox_backend", check_fields=False)
+    @classmethod
+    def _validate_sandbox_backend(cls, v: str | None) -> str | None:
+        # #363 / W-19：未知后端名在请求层响亮 422（registry 层 ValueError 是
+        # 第二道防线）。None = 未显式选择 ⇒ 部署默认。
+        if v is not None and v not in SUPPORTED_BACKENDS:
+            valid = ", ".join(SUPPORTED_BACKENDS)
+            raise ValueError(f"sandbox_backend must be one of: {valid}")
+        return v
 
     @field_validator("reasoning_effort", check_fields=False)
     @classmethod
@@ -548,10 +573,15 @@ class CreateSessionRequest(_AmendValueValidators):
     # 上限，审批本身仍走 ApprovalCallback（默认 auto-approve）。
     permission_mode: str = Field(default="workspace-write")
     # auto_approve 保留为 deprecated alias（向后兼容）：true ≡ workspace-write
-    # + auto-approve callback；false ≡ workspace-write + deny callback。两者同传
-    # 时 permission_mode 优先。两个字段都缺省 → workspace-write + auto-approve
-    # （现行为不变）。
-    auto_approve: bool = True
+    # + auto-approve callback；false ≡ workspace-write + 交互式审批（#423）。
+    # 两者同传时 permission_mode 优先。#358（W-14，D2 默认翻转）：缺省从 True 改为
+    # False——两个字段都缺省 → workspace-write + ask（读免问、写/Bash 逐次问）；
+    # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
+    auto_approve: bool = False
+    # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
+    # （当前 "local"，向后兼容）。未知值 → 422（字段校验器响亮拒绝）。
+    # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
+    sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort
     # / agent_profile / context_providers）
     reasoning_effort: str | None = None
@@ -561,6 +591,40 @@ class CreateSessionRequest(_AmendValueValidators):
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
     # 命名 = AGENT_MODELS catalog 条目，未知名字 422。fallback 链不受影响。
     model: str | None = None
+
+    # #367 / W-23 选项 A：三档自主度（抄 Copilot Interactive/Plan/Autopilot ≈
+    # Codex 三档 ≈ Claude Code modes）。None = 不声明（沿用 auto_approve /
+    # permission_mode 既有语义，向后兼容）；显式声明则优先于 auto_approve：
+    # - "ask"：逐次问（auto_approve=false 显式）
+    # - "plan"：先计划后执行（workflow_mode="plan"，创建后切换）
+    # - "auto"：全自动（auto_approve=true 显式）
+    autonomy: str | None = Field(default=None)
+    # #367 / W-23 选项 A：目录冲突策略（六家成熟产品共识：任务级排队不存在，
+    # 冲突→自动 worktree 并行隔离）。"worktree"（默认）：cwd 被占时自动建
+    # worktree 并用其路径建会话；"queue"：走既有租约排队（次选项）。
+    on_conflict: str = Field(default="worktree")
+
+    @field_validator("autonomy")
+    @classmethod
+    def _validate_autonomy(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        valid = {"ask", "plan", "auto"}
+        if v not in valid:
+            raise ValueError(
+                f"autonomy must be one of {sorted(valid)}; got {v!r}"
+            )
+        return v
+
+    @field_validator("on_conflict")
+    @classmethod
+    def _validate_on_conflict(cls, v: str) -> str:
+        valid = {"worktree", "queue"}
+        if v not in valid:
+            raise ValueError(
+                f"on_conflict must be one of {sorted(valid)}; got {v!r}"
+            )
+        return v
 
     @field_validator("permission_mode")
     @classmethod
@@ -599,10 +663,15 @@ class RecoverDecisionRequest(BaseModel):
 
     ``verdict`` 用字符串承载，合法值由领域层校验（``InvalidDecision`` 422）——
     与 PermissionChangeRequest 同一条纪律：规则单一来源，传输层不复述。
+
+    ``source``（#357 W-13 契约 3）：用户来源自陈（如「我查了外部系统」），
+    可选——省略 = 合法（#547 形状零迁移），有值时逐字进 ``reconcile_meta``。
+    上限 2000 **字符**，与 ``ApproveRequest.reason`` 同口径（防重复放大）。
     """
 
     tool_call_id: str = Field(min_length=1)
     verdict: str = Field(min_length=1)
+    source: str | None = Field(default=None, max_length=2000)
 
 
 class RecoverRequest(BaseModel):
@@ -642,6 +711,25 @@ class ApproveRequest(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class InputRequestAnswer(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    request_id: str = Field(min_length=1, max_length=200)
+    choice: Literal[
+        "replace_persistently", "current_task_only", "keep_existing", "custom",
+    ]
+    custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+    @model_validator(mode="after")
+    def validate_custom_text(self) -> InputRequestAnswer:
+        if self.choice == "custom":
+            if self.custom_text is None or not self.custom_text.strip():
+                raise ValueError("custom choice requires non-blank custom_text")
+        elif self.custom_text is not None:
+            raise ValueError("custom_text is only allowed for custom choice")
+        return self
+
+
 class ResumeRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/resume 的请求体。
 
@@ -666,6 +754,7 @@ class ResumeRequest(_AmendValueValidators):
     # `agent_harness.agent.run_budget.validate_resume`（单一规则来源）——这里只挡形状。
     run_id: str | None = Field(default=None, min_length=1)
     resume_basis: str | None = Field(default=None, min_length=1)
+    input_request: InputRequestAnswer | None = None
     # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。
     budget: BudgetRequest | None = None
     # staged amend 字段（可选，None = 默认行为）
@@ -682,6 +771,12 @@ class ResumeRequest(_AmendValueValidators):
             raise ValueError(
                 "remember_as_procedural_rule requires a non-blank new task, not same-run resume"
             )
+        if self.input_request is not None and (
+            self.task is not None or self.resume_basis != "user_input"
+        ):
+            raise ValueError("input_request requires same-run resume_basis=user_input")
+        if self.resume_basis == "user_input" and self.input_request is None:
+            raise ValueError("resume_basis=user_input requires input_request")
         return self
 
 
@@ -898,6 +993,20 @@ class WorkflowModeChanged(BaseModel):
     mode: str
 
 
+class ClientExitSignaled(BaseModel):
+    """`POST /api/sessions/{id}/client-exit` 的成功响应（#360 W-17 / W-12 #356）。
+
+    `status` 取 `ClientExitOutcome.status` 三值之一（`paused` /
+    `ignored_not_managed` / `ignored_already_settled`）；`detail` 为人类可读收口说明。
+    幂等：重复信号按 outcome 语义返回，不双写。
+    """
+
+    id: str
+    status: str
+    run_id: str | None = None
+    detail: str
+
+
 class SetWorkflowModeRequest(BaseModel):
     """切换会话工作流档的请求体（#526 B1）。"""
 
@@ -988,6 +1097,7 @@ class AppState:
         # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
         # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
         self.approval_queues: dict[str, PendingApprovalQueue] = {}
+        self.budget_recovery_failed_sessions: set[str] = set()
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -1042,6 +1152,18 @@ class AppState:
             store=self.store,
             get_wiring=self.get_wiring,
         )
+        # `#357` W-13（契约 1/6/7）：恢复裁决呈现元数据端口。与上面两个端口
+        # 同源装配（`root_registry_reconcile_info` 零副作用投影、与名字集投影
+        # 逐分支同构，P2-1：不实例化 sandbox），`session_service()` 原样搬入领域层。
+        self.reconcile_info = _reconcile_info_provider(
+            settings=settings,
+            store=self.store,
+            get_wiring=self.get_wiring,
+        )
+        # `#357` W-13（契约 5）：启动崩溃扫描的**快照**（lifespan 内只扫一次并
+        # 存这里；`GET /api/recovery/interrupted` 只读它，绝不重跑扫描——扫描
+        # 会写 run/interrupted + 跑 reconcile）。None = lifespan 未跑过。
+        self.interrupted_scan: list | None = None
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -1181,6 +1303,7 @@ def _session_declaration_validator(
         session_id: str,
         workspace: Any,
         agent_profile: str | None,
+        include_constraint_resolution_tool: bool = True,
     ) -> None:
         # workspace / agent_profile 不参与判定（前者 = P2-1 零副作用要求；后者
         # 只影响 delegate 的配额值，不影响名字集）：参数保留是端口形状（Protocol）。
@@ -1189,6 +1312,8 @@ def _session_declaration_validator(
             limits,
             registered=sorted(root_registry_tool_names(
                 settings, wiring, session_id=session_id, session_store=store,
+                include_constraint_tools=True,
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
             )),
             scope="session",
         )
@@ -1222,6 +1347,30 @@ def _registered_tool_names_provider(
     return _names
 
 
+def _reconcile_info_provider(
+    *,
+    settings: Settings,
+    store: JsonlSessionStore,
+    get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+) -> Any:
+    """组合根适配：恢复裁决呈现元数据端口（`ToolReconcileInfoProvider`，#357）。
+
+    判据 = **根 registry**（树级语义）：由 `root_registry_reconcile_info`
+    **零副作用**计算（读工具类元数据，不实例化 sandbox、不 mkdir——P2-1 同款
+    取舍），与 `root_registry_tool_names` 逐分支同构，一致性由
+    `tests/test_assembly_root_registry_names.py` 同型对账钉住。存为
+    `AppState.reconcile_info` 成员，`session_service()` 原样搬入领域层。
+    """
+
+    async def _info(session_id: str) -> dict[str, Any]:
+        _, wiring = await get_wiring()
+        return root_registry_reconcile_info(
+            settings, wiring, session_id=session_id, session_store=store,
+        )
+
+    return _info
+
+
 def session_service(state: AppState) -> SessionService:
     """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
     return SessionService(
@@ -1242,7 +1391,9 @@ def session_service(state: AppState) -> SessionService:
         ensure_stores=state.ensure_stores,
         get_wiring=state.get_wiring,
         validate_session_declaration=state.validate_session_declaration,
+        budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
         registered_tool_names=state.registered_tool_names,
+        reconcile_info=state.reconcile_info,
     )
 
 
@@ -1264,6 +1415,17 @@ def project_service(state: AppState) -> ProjectService:
         workspace_index=state.workspace_index,
         ensure_stores=state.ensure_stores,
     )
+
+
+async def _is_dir_locked(state: AppState, path: str) -> bool:
+    """`path` 是否被写租约占用（#367 / W-23 选项 A：目录冲突判定）。
+
+    用 `normalize_dir_key` 与活跃租约的 dir_key 比对（同一物理目录恒同键）；
+    路径非法 → LeasePathError，调用方按 422 处理（fail-closed）。
+    """
+    dir_key = normalize_dir_key(path)
+    leases = await state.lease_manager.leases()
+    return any(l.dir_key == dir_key for l in leases)
 
 
 async def _validate_wired_context_providers(
@@ -1558,6 +1720,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             try:
 
                 scan_results = await session_service(state).scan_interrupted()
+                # #357 W-13（契约 5）：快照存 state，供只读端点消费——端点绝不
+                # 重跑 scan_interrupted（后者写 run/interrupted + 跑 reconcile）。
+                state.interrupted_scan = scan_results
                 for result in scan_results:
                     logging.getLogger("agent_harness.web").warning(
                         "启动崩溃扫描：session=%s recovery=%s detail=%s",
@@ -1671,6 +1836,29 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_task_lease_routes(app, validate_session_id=validate_session_id)
 
+    # #367 / W-23 选项 A：git worktree 路由（独立 router：目录冲突默认自动
+    # worktree 并行隔离，"排队等"作次选项走既有租约 API）
+    from agent_harness.web.worktrees import register_worktree_routes
+
+    register_worktree_routes(app)
+
+    # #367 / W-23 选项 A：sandbox 后端列表（`probe_all_capabilities` 明确标注
+    # "给选择器 UI 用"；创建表单的"运行位置"选择器只显示探针真实结果，不画饼）
+    @app.get("/api/sandbox-backends")
+    async def list_sandbox_backends() -> dict:
+        """可用 sandbox 后端 + 探针结果（不可用带 reason，前端据此置灰）。"""
+        return {
+            "backends": [
+                {
+                    "backend": c.backend,
+                    "available": c.available,
+                    "reason": c.reason,
+                    "details": c.details,
+                }
+                for c in probe_all_capabilities()
+            ]
+        }
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
     # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
@@ -1744,6 +1932,27 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         )
 
     # ── 路由 ──
+
+    @app.get("/api/sandbox/capabilities")
+    async def sandbox_capabilities() -> dict[str, object]:
+        """#363 / W-19：Sandbox 后端能力探针（给选择器 UI 用）。
+
+        返回各后端可用性 + 不可用原因 + 修复提示。纯查询，无副作用
+        （不创建容器、不拉镜像）。前端据此渲染选择器：可用项可选，
+        不可用项**置灰保留并显示原因**（抄 Cline "rather than silently
+        disappearing"，不隐藏）。
+        """
+        return {
+            "backends": [
+                {
+                    "backend": c.backend,
+                    "available": c.available,
+                    "reason": c.reason,
+                    "details": c.details,
+                }
+                for c in probe_all_capabilities()
+            ],
+        }
 
     @app.get("/api/health")
     async def health() -> dict[str, object]:
@@ -1959,21 +2168,65 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         permission_mode_explicit = "permission_mode" in req.model_fields_set
         auto_approve_explicit = "auto_approve" in req.model_fields_set
 
+        # #367 / W-23 选项 A：三档自主度映射到底层（显式声明优先于 auto_approve）。
+        auto_approve = req.auto_approve
+        workflow_mode_plan = False
+        if req.autonomy == "ask":
+            auto_approve, auto_approve_explicit = False, True
+        elif req.autonomy == "auto":
+            auto_approve, auto_approve_explicit = True, True
+        elif req.autonomy == "plan":
+            # P2 修复（#367 审查）：plan 档声明 auto_approve=True。计划阶段变更
+            # 工具本来就被 Plan 档只读门禁拦截（executor 阶段 2.35b，先于审批
+            # 闸门 2.5），声明 True 不影响计划期安全；用户批完计划（PLAN→NORMAL）
+            # 后执行不再逐次问——"先计划后执行"档的语义就是"只审一次计划"。
+            auto_approve, auto_approve_explicit = True, True
+            workflow_mode_plan = True
+
+        # #367 / W-23 选项 A：目录冲突默认 worktree。cwd 被租约占用且
+        # on_conflict=worktree（默认）时，自动建 worktree 并用其路径建会话；
+        # on_conflict=queue 则走既有租约排队（次选项，本处不干预）。
+        # worktree 建不出（非 git 仓库等）→ 422 fail-closed：不静默回落到排队。
+        worktree_path: str | None = None
+        cwd = req.cwd
+        if cwd and req.on_conflict == "worktree":
+            await state.ensure_stores()
+            try:
+                dir_locked = await _is_dir_locked(state, cwd)
+            except LeasePathError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
+            if dir_locked:
+                try:
+                    wt = await anyio.to_thread.run_sync(
+                        partial(create_worktree, Path(cwd)))
+                except WorktreeError as e:
+                    raise HTTPException(
+                        status_code=422, detail=str(e)) from e
+                worktree_path = str(wt)
+                cwd = worktree_path
+
         try:
             result = await service.create_and_launch(
                 task=req.task,
                 workspace_name=req.workspace,
-                cwd=req.cwd,
+                cwd=cwd,
                 # `#318`：新建会话没有 session 账行 ⇒ session CAS 版本是矛盾请求。
                 **budget_claims(req.budget, create_surface=True),
                 permission_mode=permission_mode,
                 permission_mode_explicit=permission_mode_explicit,
                 auto_approve_explicit=auto_approve_explicit,
-                auto_approve=req.auto_approve,
+                auto_approve=auto_approve,
                 amend=AmendOptions.from_request(req),
                 launch=launch,
                 remember_as_procedural_rule=req.remember_as_procedural_rule,
+                # #363 / W-19：显式 sandbox 后端选择。
+                sandbox_backend=req.sandbox_backend,
             )
+            # #367 / W-23 选项 A："plan" 档：创建后切 workflow_mode=plan
+            #（计划闸门 W-07：先出计划、用户批准后执行）。
+            if workflow_mode_plan:
+                await service.set_workflow_mode(
+                    result.session.session_id, WorkflowMode.PLAN)
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
         except ModelClientConstructionError as e:
@@ -1982,6 +2235,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except StorageBusyError as e:
             # #515（审查 P2-3）：launch 路径的 transport/delegation 写锁耗尽 → 503。
             raise storage_http_error(e) from e
+        except SandboxUnavailableError as e:
+            # #363 / W-19：选定的后端不可用 → 409 + 结构化诊断（绝不静默降级）。
+            # detail 带 remediation 与可用后端列表，前端据此渲染"切换"动作。
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(e),
+                    "backend": e.backend,
+                    "reason": e.reason,
+                    "details": e.details,
+                    "remediation": e.remediation,
+                    "available_backends": [
+                        c.backend
+                        for c in probe_all_capabilities()
+                        if c.available
+                    ],
+                },
+            ) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 
@@ -1993,18 +2264,29 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # 重新解析）——回一个请求级数字当会话级 ceiling 是假事实。
         fuse_headers = _local_fuse_headers(result.local_fuse) if launch else {}
         headers = {"X-Permission-Mode": permission_mode.value, **fuse_headers}
+        # #367 / W-23 选项 A：launch=true 走 SSE（无 JSON 体）→ worktree 信息走
+        # 响应头（`X-Permission-Mode` 同型先例）。
+        if worktree_path is not None:
+            headers["X-Worktree-Path"] = worktree_path
 
         # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
         # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题
         # （那些是列表页的投影字段，这里没有数据来源）。
+        # #367 / W-23 选项 A：worktree 建出时回传路径 + 冲突策略（前端据此提示
+        # "已在 worktree 中创建"；不画饼——只报实际生效的）。
         if not launch:
+            content: dict[str, Any] = {
+                "session_id": session.session_id,
+                "permission_mode": permission_mode.value,
+                "on_conflict": req.on_conflict,
+            }
+            if worktree_path is not None:
+                content["worktree_path"] = worktree_path
+                content["cwd"] = worktree_path
             return JSONResponse(
                 status_code=200,
                 headers=headers,
-                content={
-                    "session_id": session.session_id,
-                    "permission_mode": permission_mode.value,
-                },
+                content=content,
             )
 
         return _run_stream_response(
@@ -2107,6 +2389,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 ),
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
+                input_request=(
+                    req.input_request.model_dump(exclude_none=True)
+                    if req.input_request is not None else None
+                ),
                 **budget_claims(req.budget, resume_surface=True),
                 amend=amend,
             )
@@ -2440,6 +2726,56 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise storage_http_error(e) from e
         return WorkflowModeChanged(id=result["id"], mode=result["mode"])
 
+    @app.post("/api/sessions/{session_id}/client-exit")
+    async def signal_client_exit(
+        session_id: str,
+        request: Request,
+        _: None = Depends(require_trusted_origin),
+    ) -> ClientExitSignaled:
+        """客户端明确退出信号（#360 W-17 / W-12 #356 选项 B 写侧）。
+
+        TUI/桌面客户端退出时调此端点声明"我走了"：服务端走
+        `RunManager.signal_client_exit` 权威硬信号——接受即承诺只走
+        `run/paused(reason=client_absent)`，永不在途杀 Tool（decision 5），
+        幂等（decision 7），fail-closed（decision 4：严格写失败抛 500，
+        run 维持原状）。
+
+        语义：200 → `{id, status, run_id, detail}`（幂等）；
+        404 → 没有这个会话；422 → id 形态非法（先于 404）；
+        500 → 严格 W-05 写失败（run 未被暂停，维持原状继续跑）。
+
+        来源闸（ADR-0025 D1）：在场信号是宿主侧管理动作，只接受本机来源。
+        """
+        from agent_harness.session.client_exit import ClientExitError
+        from agent_harness.session.service import InvalidSessionId
+
+        try:
+            validate_session_id(session_id)
+        except InvalidSessionId as e:
+            raise http_error(e) from e
+        # client_id 仅用于诊断/日志归因（W-12 decision：不构成在场登记）；
+        # body 缺失/非 JSON 时回落 "unknown"，不因此 422。
+        client_id = "unknown"
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and isinstance(body.get("client_id"), str):
+                client_id = body["client_id"][:64]
+        except Exception:  # noqa: BLE001, S110 — body 解析失败不是请求失败
+            pass
+        run_manager = app.state.agent.run_manager
+        try:
+            outcome = await run_manager.signal_client_exit(
+                session_id, client_id=client_id,
+            )
+        except ClientExitError as e:
+            raise HTTPException(status_code=500, detail=e.detail) from e
+        return ClientExitSignaled(
+            id=outcome.session_id,
+            status=outcome.status,
+            run_id=outcome.run_id,
+            detail=outcome.detail,
+        )
+
     @app.get("/api/sessions/{session_id}/context-usage")
     async def get_context_usage(session_id: str):
         """上下文容量看板数据面（#200）：只读端点，六桶分类 + 缓存命中率。
@@ -2688,7 +3024,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = session_service(app.state.agent)
         decisions = [
-            ReconcileDecision(tool_call_id=d.tool_call_id, verdict=d.verdict)
+            ReconcileDecision(
+                tool_call_id=d.tool_call_id, verdict=d.verdict, source=d.source,
+            )
             for d in (req.decisions if req is not None else [])
         ]
         try:
@@ -2709,6 +3047,25 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # 断层 / seq 重复），不可重试，需按定位记录人工修复。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
+
+    @app.get("/api/recovery/interrupted")
+    async def list_interrupted_recoveries() -> dict[str, Any]:
+        """恢复列表（#357 W-13 契约 5，**只读**）：启动扫描快照的四要素呈现。
+
+        lifespan 启动时跑过一次 ``scan_interrupted`` 并把结论快照存进
+        ``app.state``；本端点只读快照 + 只读富化（Task / 无终态 run / 工作目录
+        锚 / 进度文件版本），**绝不重跑扫描**——``scan_interrupted`` 会补写
+        ``run/interrupted`` 并跑 reconcile，有写副作用（07 §9 的恢复编排只属于
+        显式 recover / resume 入口）。lifespan 未跑 → ``snapshot_available=false``
+        + 空列表（不伪造扫描结论）。#22：列表由后端单点驱动，前端不维护第二套
+        真相。
+        """
+        state: AppState = app.state.agent
+        snapshot = state.interrupted_scan
+        if snapshot is None:
+            return {"snapshot_available": False, "items": []}
+        items = await session_service(state).interrupted_recovery_rows(snapshot)
+        return {"snapshot_available": True, "items": items}
 
     # ── 模型切换（T7 #137，PRD §2.3）───────────────────────────────────
     # fork 创建端点在 web/lineage.py（ADR-0017 决策 6 的独立 router 面）。
@@ -2948,6 +3305,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SeqConflict,
             WorkspaceBindingConflict,
             WorkspaceNotFound,
+            BudgetRejection,
+            BudgetConflict,
         ) as e:
             # WorkspaceNotFound → 404（#615①）：投递走 resume_and_launch，外部 cwd
             # 在排队之后被删 → 中央映射既有条目，与 /messages、/resume 同口径。

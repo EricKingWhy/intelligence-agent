@@ -11,8 +11,10 @@
 
 - **Windows 形态**（`PureWindowsPath(p).drive` 非空，含 UNC）：盘符 + 全路径
   **casefold**（NTFS 大小写不敏感）；`.`/`..`/尾分隔符/分隔符方向按词法归一。
-  在真实 Windows 宿主上调用方先经 `os.path.realpath`（junction 由 OS 解析），
-  本层再做词法归一与折叠；POSIX 宿主（测试）只有词法层，这是它的等价逻辑。
+  在真实 Windows 宿主上本层先经 `os.path.realpath`（junction 由 OS 解析，
+  解析异常与 POSIX 臂同款 fail-closed），并做同款存在性校验（缺失/非目录
+  fail-closed），再做词法归一与折叠；POSIX 宿主（测试）只有词法层，这是
+  它的等价逻辑。
 - **POSIX 形态**：`os.path.realpath` + 目标目录存在性校验——符号链接在此
   解析，链接环/不可解析、目标不存在/不是目录 → `LeasePathError`
   （fail-closed：不能安全解析的路径不能证明独立性，拒绝）。
@@ -68,10 +70,23 @@ def _lexical_windows_key(path: str) -> str:
     return display.casefold()
 
 
+def _require_existing_dir(resolved: str, original: str) -> None:
+    """解析结果必须存在且是目录（fail-closed），POSIX / Windows 两分支共用。"""
+    try:
+        st = os.stat(resolved)
+    except OSError as e:
+        # 目标不存在/不可达：租约没有可指向的目录 → fail-closed（ENOENT 等）。
+        raise LeasePathError(f"路径无法安全解析（{e}）：{original!r}") from e
+    if not stat.S_ISDIR(st.st_mode):
+        raise LeasePathError(f"路径不是目录（errno={errno.EINVAL}）：{original!r}")
+
+
 def normalize_dir_key(path: str) -> str:
     """→ 同一物理目录恒同键的租约比较键；不能安全解析 → `LeasePathError`。
 
-    Windows 形态返回 casefold 后的 `\\` 连接绝对形态；POSIX 形态返回
+    Windows 形态在真实 Windows 宿主上先 realpath 解析 junction/symlink 并校验
+    目录存在（缺失/非目录 → `LeasePathError`，与 POSIX 形态同 fail-closed），
+    返回 casefold 后的 `\\` 连接绝对形态；POSIX 形态返回
     `os.path.realpath(strict=True)` 的解析结果（符号链接/junction 由 OS
     解析，目录必须存在）。输入必须已是绝对形态。
     """
@@ -84,8 +99,17 @@ def normalize_dir_key(path: str) -> str:
             # is_absolute_path 的口径：歧义锚定直接拒绝，不猜。
             raise LeasePathError(f"Windows 路径不是绝对形态（缺根）：{path!r}")
         if os.name == "nt":
-            # 真实 Windows 宿主：junction/symlink 先由 OS 解析，再词法归一。
-            resolved = os.path.realpath(path)
+            # 真实 Windows 宿主：junction/symlink 先由 OS 解析；非 strict
+            # realpath 对缺失路径不抛（只做词法消解），存在性校验必须在本层
+            # 补上（与 POSIX 形态同 fail-closed），再词法归一。
+            try:
+                resolved = os.path.realpath(path)
+            except (OSError, ValueError) as e:
+                # 链接环 / 不可解析 / ntpath 异态（winerror≠0 的 reparse 解析
+                # 可抛 ValueError）：不能安全证明指向哪个目录 → 与 POSIX 臂
+                # 同款收敛为 LeasePathError，不逃逸成 API 500。
+                raise LeasePathError(f"路径无法安全解析（{e}）：{path!r}") from e
+            _require_existing_dir(resolved, path)
         else:
             resolved = path
         return _lexical_windows_key(resolved)
@@ -98,13 +122,7 @@ def normalize_dir_key(path: str) -> str:
     except OSError as e:
         # 链接环 / 不可解析：不能安全证明指向哪个目录 → fail-closed。
         raise LeasePathError(f"路径无法安全解析（{e}）：{path!r}") from e
-    try:
-        st = os.stat(resolved)
-    except OSError as e:
-        # 目标不存在/不可达：租约没有可指向的目录 → fail-closed（ENOENT 等）。
-        raise LeasePathError(f"路径无法安全解析（{e}）：{path!r}") from e
-    if not stat.S_ISDIR(st.st_mode):
-        raise LeasePathError(f"路径不是目录（errno={errno.EINVAL}）：{path!r}")
+    _require_existing_dir(resolved, path)
     return resolved
 
 

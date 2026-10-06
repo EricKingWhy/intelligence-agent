@@ -53,7 +53,13 @@ from pydantic import BaseModel, ValidationError
 from agent_harness.logging import log_event
 from agent_harness.observability.port import NullTracer, Span, Tracer
 from agent_harness.observability.tracer import TraceBinding, current_trace_binding
-from agent_harness.session import TOOL_CALL, TOOL_RESULT, Session, SessionEvent
+from agent_harness.session import (
+    TOOL_CALL,
+    TOOL_RESULT,
+    USER_INPUT_REQUESTED,
+    Session,
+    SessionEvent,
+)
 from agent_harness.session.workflow import WorkflowMode
 from agent_harness.storage import (
     Operation,
@@ -90,6 +96,7 @@ from agent_harness.tooling.deadline import tool_execution_deadline_var
 from agent_harness.tooling.decision_hooks import DecisionHookRunner, DecisionVerdict
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
+from agent_harness.tooling.permission_rules import PermissionRuleSet, RuleVerdict
 from agent_harness.tooling.quota import ToolQuotaWindow
 from agent_harness.tooling.registry import ToolRegistry
 from agent_harness.tooling.resource_locks import ResourceLockRegistry
@@ -287,6 +294,13 @@ class ToolExecutor:
         # #684：项目根——持久审批规则存 `<project_root>/.agent-harness/approve-policy.json`。
         # None 回落 `Path.cwd()`（执行域构造时求值）；测试 / 多项目可显式传。
         project_root: Path | str | None = None,
+        # #358 / W-14：审批层权限规则引擎（见 `tooling/permission_rules.py`）。
+        # **机制默认 = None ⇒ 不启用规则引擎**，逐字沿用既有 `needs_approval` 语义。
+        # 产品级默认矩阵由 composition root（`assembly.build_runtime`）显式注入
+        # `default_rule_set()`；裸构造（兜底 / 单测 / READ_ONLY 端点）不启用。
+        # `workspace_root` 供路径规则（R2）判越界；None ⇒ 跳过路径规则（防御性）。
+        permission_rules: PermissionRuleSet | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
@@ -299,6 +313,8 @@ class ToolExecutor:
         self._decision_hook_runner = decision_hook_runner
         self._project_root = Path(project_root) if project_root is not None else Path.cwd()
         self._approve_policy_store = ApprovePolicyStore(self._project_root)
+        self._permission_rules = permission_rules
+        self._workspace_root = workspace_root
 
     @property
     def tracks_operations(self) -> bool:
@@ -649,16 +665,64 @@ class ToolExecutor:
                     session, tool_call_id, name, result,
                 )
 
+            # A user-input request must be durable before the operation terminal
+            # state. Otherwise a process kill between the tool result and event
+            # emission loses the question that is supposed to pause this run.
+            durable_user_input_request = False
+            if (
+                session is not None
+                and self._operation_ledger is not None
+                and name == "request_constraint_resolution"
+                and result.ok
+                and isinstance(result.data, dict)
+                and result.data.get("status") == "requested"
+            ):
+                request_id = result.data.get("request_id")
+                matching = [
+                    (event_type, data)
+                    for event_type, data in result.pending_events
+                    if event_type == USER_INPUT_REQUESTED
+                    and isinstance(data, dict)
+                    and data.get("request_id") == request_id
+                    and isinstance(request_id, str)
+                ]
+                if len(matching) == 1:
+                    event_type, event_data = matching[0]
+                    persisted_data = {**event_data, "tool_call_id": tool_call_id}
+                    session.append(
+                        event_type,
+                        persisted_data,
+                        run_id=operation_context.run_id if operation_context else None,
+                        step_id=step_id,
+                    )
+                    durable_user_input_request = True
+                    result = result.model_copy(update={
+                        "pending_events": [
+                            item for item in result.pending_events if item not in matching
+                        ],
+                    })
+                    self._maybe_kill("user_input_requested", tool_call_id)
+
             if self._operation_ledger is not None:
                 terminal_state, reconcile_meta = self._settle_state(tool, result)
-                await self._operation_ledger.update_state(
-                    session_id, tool_call_id,
-                    terminal_state,
-                    result_json=result.model_dump_json(),
-                    artifact_ref=result.artifact_ref,
-                    reconcile_meta=reconcile_meta,
-                )
-                self._maybe_kill("terminal", tool_call_id)
+                try:
+                    await self._operation_ledger.update_state(
+                        session_id, tool_call_id,
+                        terminal_state,
+                        result_json=result.model_dump_json(),
+                        artifact_ref=result.artifact_ref,
+                        reconcile_meta=reconcile_meta,
+                    )
+                except Exception:
+                    if not durable_user_input_request:
+                        raise
+                    logger.exception(
+                        "澄清问题已持久化，但 Operation Ledger 收尾失败；"
+                        "保留等待态，由恢复链修复：session_id=%s tool_call_id=%s",
+                        session_id, tool_call_id,
+                    )
+                else:
+                    self._maybe_kill("terminal", tool_call_id)
         except asyncio.CancelledError:
             _close_span("cancelled")
             raise
@@ -791,6 +855,32 @@ class ToolExecutor:
         """
         if not tool_calls:
             return []
+
+        exclusive_index = next((
+            index for index, raw_call in enumerate(tool_calls)
+            if self._is_batch_exclusive(raw_call)
+        ), None)
+        if exclusive_index is not None:
+            # A blocking user-input tool ends the model's current authority to act.
+            # Pair all sibling calls as cancelled without admitting or executing them.
+            executions: list[ToolExecution] = []
+            for index, tool_call in enumerate(tool_calls):
+                if index == exclusive_index:
+                    executions.append(await self.execute(
+                        tool_call, operation_context=operation_context,
+                        session=session, step_id=step_id, tracer=tracer,
+                        tool_quota=tool_quota, run_deadline=run_deadline,
+                    ))
+                else:
+                    executions.append(await self._cancel_without_execution(
+                        tool_call,
+                        operation_context=operation_context,
+                        reason=(
+                            "同批次包含一个需要用户输入的阻塞请求；"
+                            "在用户回答前，本调用未执行。"
+                        ),
+                    ))
+            return executions
 
         mode = self._decide_mode(tool_calls)
 
@@ -1055,6 +1145,7 @@ class ToolExecutor:
         tool_call: ToolCall | dict[str, Any],
         *,
         operation_context: OperationContext | None,
+        reason: str = "串行批次中的前序工具已永久失败。",
     ) -> ToolExecution:
         """Represent a serially cascaded call without invoking its Tool.
 
@@ -1066,9 +1157,7 @@ class ToolExecutor:
         name = call.name
         raw_args = call.args
         result = ToolResult.failure(
-            message=(
-                f"工具 '{name}' 未执行：串行批次中的前序工具已永久失败。"
-            ),
+            message=f"工具 '{name}' 未执行：{reason}",
             error_code=ErrorCode.CANCELLED,
             retryable=False,
         )
@@ -1110,6 +1199,15 @@ class ToolExecutor:
 
         return ToolExecution(tool_call_id=tool_call_id, result=result,
                              budget_delta=_rejected_delta(name))
+
+    def _is_batch_exclusive(self, tool_call: ToolCall | dict[str, Any]) -> bool:
+        name = tool_call.name if isinstance(tool_call, ToolCall) else tool_call.get("name")
+        if not isinstance(name, str):
+            return False
+        try:
+            return self._registry.get(name).batch_exclusive
+        except KeyError:
+            return False
 
     def _decide_mode(self, tool_calls: list[ToolCall | dict[str, Any]]) -> str:
         """扫描批次，决定并发还是串行。
@@ -1214,9 +1312,46 @@ class ToolExecutor:
         - #526 A2：可缓存身份命中**会话级授权**（TTL / policy_at_approval / 权限上界
           三闸，`grant_valid`）时放行；该缓存只替代"人的重复决定"，不绕过
           `needs_approval`（每次调用仍重过）。
+
+        #358 / W-14：`self._permission_rules` 非 None 时，先跑**审批层规则引擎**
+        （三层 allow/ask/deny，deny 优先，见 `tooling/permission_rules.py`）：
+        - DENY → 直接 PERMISSION_DENIED（不调 callback；deny 不可被 allow 覆盖）；
+        - ALLOW → 放行（免审批）；
+        - ASK → 走既有审批流，reason 用规则文案；
+        - NO_MATCH → 回落既有 `needs_approval` 逻辑。
+        规则引擎只在非 danger-full-access 档生效——danger 是用户显式的"无需审批"档，
+        规则不把它降级成 ask/deny（否则一个显式选择会变成不可用）。这是**审批层**路由
+        启发式，不是 OS 隔离。
         """
         tool_perm = tool.permission
-        if not needs_approval(tool_perm, self._policy):
+
+        rule_verdict = RuleVerdict.NO_MATCH
+        rule_reason: str | None = None
+        if (
+            self._permission_rules is not None
+            and self._policy is not PermissionPolicy.DANGER_FULL_ACCESS
+        ):
+            rule_verdict, matched_reason, _rule_name = self._permission_rules.evaluate(
+                name, raw_args, workspace_root=self._workspace_root,
+            )
+            if rule_verdict is RuleVerdict.DENY:
+                # deny 不可被 allow 覆盖：不调 callback，直接拒绝（审批层规则，不是 OS 隔离）。
+                return ToolExecution(
+                    tool_call_id=tool_call_id,
+                    result=ToolResult.failure(
+                        message=f"工具 '{name}' 被权限规则拒绝：{matched_reason}",
+                        error_code=ErrorCode.PERMISSION_DENIED,
+                        retryable=False,
+                    ),
+                    budget_delta=_rejected_delta(name),
+                )
+            if rule_verdict is RuleVerdict.ALLOW:
+                return None
+            if rule_verdict is RuleVerdict.ASK:
+                rule_reason = matched_reason
+
+        needs = rule_verdict is RuleVerdict.ASK or needs_approval(tool_perm, self._policy)
+        if not needs:
             return None
 
         # 函数内惰性 import：session.approval 在模块顶层 import tooling 包
@@ -1261,7 +1396,9 @@ class ToolExecutor:
         if identity is not None and self._approve_policy_store.find_match(identity) is not None:
             return None
 
-        reason = approval_reason(tool_perm, self._policy)
+        reason = rule_reason if rule_reason is not None else approval_reason(
+            tool_perm, self._policy,
+        )
         request = ApprovalRequest(
             tool_name=name,
             args=raw_args,
