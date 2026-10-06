@@ -185,8 +185,10 @@ class TestWebWiringCoexistence:
         assert wiring.memory_formation is None
         # Without a session ledger, user-scoped recall/tools stay uninstalled; skills still work.
         assert len(wiring.context_providers) == 1  # SkillCatalogContextProvider
+        # #529 T-529-5：skills 装配了沉淀状态机，promote/register 工具随统一收集
+        # 循环贡献（注册仍需 DANGER 审批闸门，模型不能静默自助注册）。
         assert {tool.name for tool in wiring.tools} == {
-            "load_skill", "tick",
+            "load_skill", "promote_skill", "register_skill", "tick",
         }
         await wiring.aclose()
         assert vectors.closed

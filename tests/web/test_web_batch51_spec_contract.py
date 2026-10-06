@@ -215,6 +215,54 @@ async def test_approve_with_decision_field(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_approve_session_decision_resolved_for_cacheable_request(tmp_path, monkeypatch):
+    """G3（#526/#684 语义更新）：可缓存身份的审批 allowed_decisions 含全部四档，
+    `approve_session` 是合法决策 → 200。batch-51 原钉 422 的前提（allowed =
+    [deny, approve_once]）在 #526 给 bash 派生 approval_key 后消失；「合法枚举
+    但不在 allowed → 422」的失败关闭钉下沉到服务级
+    tests/session/test_service.py::TestResolveApproval。
+    """
+    import httpx2
+
+    server, serve_task, port, _app = await _start_server(
+        tmp_path, monkeypatch, BashThenTextModel)
+    try:
+        client = httpx2.AsyncClient(timeout=None)
+        session_id = None
+        approval_id = None
+        async with client.stream(
+            "POST", f"http://127.0.0.1:{port}/api/sessions",
+            json={"task": "跑 bash", "permission_mode": "workspace-write"},
+        ) as response:
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                frame = _parse(line)
+                if session_id is None:
+                    session_id = frame.get("session_id")
+                if frame.get("type") == "tool/approval-requested":
+                    approval_id = frame["data"]["approval_id"]
+                    break
+        await client.aclose()
+        assert approval_id
+
+        store = JsonlSessionStore(root=tmp_path / "sessions")
+        async with httpx2.AsyncClient(timeout=5) as ac:
+            resp = await ac.post(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/approve",
+                json={"approval_id": approval_id, "decision": "approve_session"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "resolved"
+            assert body["decision"] == "approve_session"
+
+        await _await_run_terminated(store, session_id)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
 async def test_approve_rejects_disallowed_decision(tmp_path, monkeypatch):
     """G3：decision 合法但不在 requested 事件的 allowed_decisions 内 → 422。
 
@@ -415,8 +463,14 @@ async def test_approval_queue_gc_after_run_completes(tmp_path, monkeypatch):
         await _await_run_terminated(store, session_id)
 
         # done_callback 在 task 终结后被事件循环调度，可能在 JSONL 落盘之后
-        # 才执行——给事件循环一小段宽限让它跑完。
-        await asyncio.sleep(0.1)
+        # 才执行——固定 0.1s 宽限在全量负载下会早读（在册 flake），改为轮询
+        # 等 GC 完成；超时后仍由下方断言报契约失败。
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while (
+            session_id in state.approval_queues
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.05)
 
         # run 终结后 queue 应被 GC（不泄漏）
         assert session_id not in state.approval_queues, \

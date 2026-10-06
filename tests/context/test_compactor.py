@@ -96,7 +96,13 @@ def test_user_message_that_looks_like_summary_is_kept_as_user_content():
     content = "## 原始目标与用户约束\n用户提供的普通文本 R-042"
     sections = _programmatic_summary_sections([HumanMessage(content=content)], [])
 
-    assert sections["## 原始目标与用户约束"] == "(none)", "无事实源 ⇒ 目标节空"
+    # #710 方向 C：目标行为 (none)（无事实源），承载位如实携带该消息（JSON 编码，
+    # heading 样式行不破坏节边界）；消息没有被当旧摘要 decode。
+    section0_lines = sections["## 原始目标与用户约束"].splitlines()
+    assert section0_lines[0] == "(none)", "无事实源 ⇒ 目标行空"
+    assert "用户提供的普通文本 R-042" in section0_lines[1], (
+        "消息作为最新用户消息进承载位（没有被当摘要吞掉）"
+    )
     assert "R-042" in json.loads(sections["## 精确标识清单"]), (
         "消息仍作为内容被 visit（没有被当摘要吞掉）"
     )
@@ -795,9 +801,12 @@ def test_programmatic_sections_preserve_exact_command_error_and_path():
     sections = _programmatic_summary_sections(messages, [])
     identifiers = json.loads(sections["## 精确标识清单"])
 
-    # #556 裁决 C：用户消息原文不再逐字进目标节（该节由 protected_facts 承载，
-    # 无事实源时 (none)）；命令/错误/路径的精确读回仍由标识节（有界）承担。
-    assert sections["## 原始目标与用户约束"] == "(none)"
+    # #556 裁决 C：用户消息原文不再逐字进目标行（该行由 protected_facts 承载，
+    # 无事实源时 (none)）；#710 方向 C：它作为最新活跃用户消息进承载位。
+    # 命令/错误/路径的精确读回仍由标识节（有界）承担。
+    section0_lines = sections["## 原始目标与用户约束"].splitlines()
+    assert section0_lines[0] == "(none)"
+    assert constraint in section0_lines[1]
     assert command in identifiers
     assert path in identifiers
     assert "call-r-042" in identifiers
@@ -908,11 +917,17 @@ def test_long_error_entry_is_truncated_per_entry():
 
 
 def test_target_section_none_without_goal_facts():
-    """无 user_goal facts ⇒ 目标节 (none)——与八节摘要的空节约定一致。"""
+    """无 user_goal facts ⇒ 目标行 (none)——与八节摘要的空节约定一致。
+
+    #710 方向 C：目标行 (none) 不再等于整节 (none)——同节新增的「当前生效
+    指令」承载位仍如实携带段内最新活跃用户消息（确定性派生）。
+    """
     sections = _programmatic_summary_sections(
         [HumanMessage(content="普通消息，不是任何事实源")], [],
     )
-    assert sections["## 原始目标与用户约束"] == "(none)"
+    section0_lines = sections["## 原始目标与用户约束"].splitlines()
+    assert section0_lines[0] == "(none)"
+    assert "普通消息，不是任何事实源" in section0_lines[1]
 
 
 def test_cancelled_queued_replacement_keeps_sections_consistent():

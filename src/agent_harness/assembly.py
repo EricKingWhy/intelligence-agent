@@ -73,7 +73,8 @@ from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
-from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tooling.contract import PermissionPolicy, ToolExposure, exposure_of
+from agent_harness.tooling.exposure import ToolExposureController, ToolSearchTool
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
 from agent_harness.tooling.resource_locks import ResourceLockRegistry
 from agent_harness.tools import (
@@ -603,6 +604,19 @@ async def build_runtime(
         registry = registry.filtered(profile_spec.tool_scope)
         dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
 
+    # 曝光级别接线（#528 / IMP-11）：Registry 定型（含上面的收窄）后，存在
+    # deferred 工具才注册内置 tool_search 并建立定义集控制器——全 direct
+    # （现状默认）时零新增工具、零行为变化。收窄后注册保证被权限剔除的工具
+    # 物理不在 tool_search 的搜索面上（发现不授予执行权）。注意：tool_search
+    # 不进 root_registry_names（上面已取）⇒ session 配额声明点名它会 422
+    # （fail-closed，V1 不支持对它配额）。
+    tool_exposure: ToolExposureController | None = None
+    if any(
+        exposure_of(tool) is ToolExposure.DEFERRED for tool in registry.list()
+    ):
+        tool_exposure = ToolExposureController(registry)
+        registry.register(ToolSearchTool(tool_exposure))
+
     # per-tool 配额的**注册名**校验（`#314` / `04 §9.1`）：判定点是这里，因为注册表
     # 到上一行为止才定型（内置 + artifact 读回 + capability，并按 profile 收窄）。
     # 位置仍然满足 `11 §6.1` 的"无副作用"：在任何 model / tool / child 工作之前，
@@ -788,6 +802,9 @@ async def build_runtime(
         # run_config 结构化日志与 run/started 事件的数据源。
         agent_profile=(agent_profile if agent_profile is not None else "main"),
         dropped_tools=dropped_tools,
+        # #528：曝光级别定义集控制器（registry 无 deferred 工具时为 None，
+        # 绑定路径与之前逐字相同）。
+        tool_exposure=tool_exposure,
         # `#317`：stuck 暂停的证据端口（环境 revision + 策略版本）。装配点只透传——
         # 构造方是服务层（它才有一份"本次生效策略"的完整输入，恢复侧也用同一份函数
         # 现算再比较；ADR-0048 D8）。None = 不观测（CLI / 单测的既有路径逐字不变）。

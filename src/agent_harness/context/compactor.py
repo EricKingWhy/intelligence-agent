@@ -23,11 +23,12 @@ from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.derive import (
+    _USER_GOAL_VALUE_MAX_CHARS,
     COMPACTION_SUMMARY_MESSAGE_NAME,
     ProtectedFact,
     serialize_protected_facts,
 )
-from agent_harness.session.event import SessionEvent
+from agent_harness.session.event import CONTEXT_COMPACTED, SessionEvent
 from agent_harness.session.plan import PlanItem, derive_plan
 
 logger = logging.getLogger("agent_harness.context.compactor")
@@ -288,6 +289,18 @@ class ContextCompactor:
             if token_estimate > self._hard_limit:
                 raise ContextWindowExceededError("No complete early turn can be compacted")
             return CompactionResult(list(messages), 0, count, False)
+        # C-6 #642：early 段每条消息的来源区间（提前到摘要尝试之前，与成功后
+        # 的 source_seq 区间计算共用同一次推导；语义与原成功路径逐字一致）。
+        # #710 方向 C：同一份 early_ranges 同时供第 0 节承载位的来源指针
+        # （_assemble_summary/_validate_summary）复用。
+        # W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
+        # （ToolMessage.content 原位替换），但消息数与顺序不变——调用方
+        # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
+        # 长度不符视同区间不可用（走既有拒绝路径），不做静默截断。
+        early_ranges = _early_source_ranges(
+            messages, events, source_ranges, prefix_end, cut,
+        )
+        trusted_summaries = _trusted_summary_indices(early, early_ranges, events)
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
         )
@@ -341,9 +354,13 @@ class ContextCompactor:
                     response.content, _MODEL_SUMMARY_HEADINGS,
                 )
                 candidate_summary_text = _assemble_summary(
-                    early, model_sections, protected_facts,
+                    early, model_sections, protected_facts, trusted_summaries,
+                    source_ranges=early_ranges,
                 )
-                _validate_summary(candidate_summary_text, early, protected_facts)
+                _validate_summary(
+                    candidate_summary_text, early, protected_facts,
+                    trusted_summaries, source_ranges=early_ranges,
+                )
                 # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
                 # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
                 # 既有调用面）或会话无清单时闸门不启用——空接缝语义保留，无清单
@@ -413,37 +430,16 @@ class ContextCompactor:
                 f"{count + reserved_tokens} tokens; "
                 f"hard guard {self._hard_limit:g}"
             )
-        # T4 (#134)：从投影映射计算 source_seq 区间。旧摘要带有原 bracket 的
-        # 完整来源范围，因此下一次压缩可以覆盖并替代之前的摘要。
+        # T4 (#134)：从投影映射计算 source_seq 区间（区间推导已在压缩前完成，
+        # 见 `early_ranges`）。旧摘要带有原 bracket 的完整来源范围，因此下一次
+        # 压缩可以覆盖并替代之前的摘要。
         source_seq_start: int | None = None
         source_seq_end: int | None = None
-        if events is not None:
-            if source_ranges is not None:
-                # W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
-                # （ToolMessage.content 原位替换），但消息数与顺序不变——调用方
-                # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
-                # 长度不符视同区间不可用（走既有拒绝路径），不做静默截断。
-                early_ranges = (
-                    list(source_ranges[prefix_end:cut])
-                    if len(source_ranges) == len(messages) else None
-                )
-            else:
-                from agent_harness.session.derive import (
-                    derive_messages_with_source_ranges,
-                )
-
-                mapped = derive_messages_with_source_ranges(events)
-                aligned = len(mapped) == len(messages) and all(
-                    projected == supplied
-                    for (projected, _source_range), supplied in zip(mapped, messages)
-                )
-                early_ranges = (
-                    [source_range for _message, source_range in mapped[prefix_end:cut]]
-                    if aligned else None
-                )
-            if early_ranges and all(source_range is not None for source_range in early_ranges):
-                source_seq_start = min(source_range[0] for source_range in early_ranges)
-                source_seq_end = max(source_range[1] for source_range in early_ranges)
+        if events is not None and early_ranges and all(
+            source_range is not None for source_range in early_ranges
+        ):
+            source_seq_start = min(source_range[0] for source_range in early_ranges)
+            source_seq_end = max(source_range[1] for source_range in early_ranges)
         if events is not None and (source_seq_start is None or source_seq_end is None):
             logger.warning(
                 "Context compaction rejected; source event range is unavailable",
@@ -646,6 +642,96 @@ def _parse_summary_sections(text: str, headings: tuple[str, ...]) -> list[str]:
     return contents
 
 
+def _early_source_ranges(
+    messages: list[AnyMessage],
+    events: list[SessionEvent] | None,
+    source_ranges: list[tuple[int, int] | None] | None,
+    prefix_end: int,
+    cut: int,
+) -> list[tuple[int, int] | None] | None:
+    """early 窗口（messages[prefix_end:cut]）的「消息 → 来源 seq range」对齐。
+
+    W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
+    （ToolMessage.content 原位替换），但消息数与顺序不变——调用方传来的
+    ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。长度不符视同
+    区间不可用（走既有拒绝路径），不做静默截断。未传 ranges 时从 events
+    重投影并逐条对齐，对齐失败同样视为不可用。
+    """
+    if events is None:
+        return None
+    if source_ranges is not None:
+        return (
+            list(source_ranges[prefix_end:cut])
+            if len(source_ranges) == len(messages)
+            else None
+        )
+    from agent_harness.session.derive import derive_messages_with_source_ranges
+
+    mapped = derive_messages_with_source_ranges(events)
+    aligned = len(mapped) == len(messages) and all(
+        projected == supplied
+        for (projected, _source_range), supplied in zip(mapped, messages)
+    )
+    return (
+        [source_range for _message, source_range in mapped[prefix_end:cut]]
+        if aligned
+        else None
+    )
+
+
+def _carrier_instruction_line(
+    messages: list[AnyMessage],
+    source_ranges: list[tuple[int, int] | None] | None,
+) -> str:
+    """#710 方向 C：第 0 节的「当前生效指令」承载位（确定性纯函数，可重放）。
+
+    选取：本压缩覆盖段（early 窗口）内**倒序第一条非摘要 HumanMessage**。
+    compact() 收到的 messages 是事件投影（builder 的注入发生在压缩之后），
+    因此投影里的 HumanMessage 非摘要即真实用户消息，这条规则是精确的——
+    触发压缩的当前轮仍在 recent 逐字保留，不会进入本窗口。
+
+    口径对齐 `_current_goal_body`：JSON 字符串编码（ensure_ascii=False）、
+    复用 `_USER_GOAL_VALUE_MAX_CHARS`（2000）截断上限 + 超长截断标记（含
+    来源 seq 回读指针）。选中消息时用同下标的 range 写指针（用户消息的
+    range 是 (seq, seq)，取 [0]）；range 为 None（来源区间不可用的直连调用
+    面）时不写指针行、只写 JSON。无候选用户消息（early 全是模型消息等退化
+    形态）写 ``(none)``，对齐八节摘要既有空值约定，不抛错。
+
+    已知边界（#710 §6 非目标，如实记录）：「活跃」按消息侧可判定的最大
+    口径 = 非摘要 HumanMessage；事件侧的 ``injected_by`` 等注入元数据在
+    消息投影上不可见，**不做语义过滤**——被注入的提示性用户消息同样可能
+    成为承载位；归档计数按本次压缩段计，不跨压缩累积。
+    """
+    carrier_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], HumanMessage)
+            and not _is_compaction_summary(messages[index])
+        ),
+        None,
+    )
+    if carrier_index is None:
+        return "当前生效指令：(none)"
+    raw = messages[carrier_index].content
+    raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+    source_range = source_ranges[carrier_index] if source_ranges is not None else None
+    content = raw_text
+    if len(raw_text) > _USER_GOAL_VALUE_MAX_CHARS:
+        pointer = (
+            f"，见来源事件 seq={source_range[0]}" if source_range is not None else ""
+        )
+        content = (
+            raw_text[:_USER_GOAL_VALUE_MAX_CHARS]
+            + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
+            + f"全文共{len(raw_text)}字符{pointer}］"
+        )
+    body = json.dumps(content, ensure_ascii=False)
+    if source_range is not None:
+        body += f"（来源事件 seq={source_range[0]}）"
+    return f"当前生效指令：{body}"
+
+
 def _current_goal_body(protected_facts: list[ProtectedFact] | None) -> str:
     """#556 裁决 C：目标节只保留**当前生效目标**（+ 归档计数行）。
 
@@ -701,23 +787,79 @@ def _capped_entries(entries: list[str]) -> list[str]:
     return deduped[-_PROG_SECTION_MAX_ENTRIES:]
 
 
+def _trusted_summary_indices(
+    early: list[AnyMessage],
+    early_ranges: list[tuple[int, int] | None] | None,
+    events: list[SessionEvent] | None,
+) -> frozenset[int]:
+    """C-6 #642：结构化继承的信任判据 = bracket 事件身份，不是文本前缀。
+
+    derive 投影的合法摘要在 `derive_messages_with_source_ranges` 输出里带被
+    替代段的完整来源区间（summary 投影到首个被 shadow 事件的原位置，range =
+    bracket 的 (source_seq_start, source_seq_end)）。据此，消息被授予结构化
+    继承特权当且仅当：
+
+    ① `events` 在场——无事件流的直连调用面没有可核对的来源；
+    ② 该消息的 source_range 非空且逐字命中 events 里某条 CONTEXT_COMPACTED
+       事件的 bracket 区间——该区间内的原始事件已被 shadow，投影中不存在
+       同区间的其他消息，因此命中即证明来源（区间外的消息不可能误中）；
+    ③ `_is_compaction_summary` 认可（marker name / 旧前缀——兼容层四个
+       消费点语义保留，见 `docs/agents/642-evidence.md` §3）。
+
+    文本前缀本身（`## 原始目标与用户约束\n` 开头）不再构成信任——与
+    X-Content-Type-Options: nosniff 同构：不从内容推断身份，身份只来自
+    结构化载体。方案依据与兼容策略见 `docs/agents/642-fix-research.md`。
+    """
+    if events is None or not early_ranges:
+        return frozenset()
+    bracket_ranges: set[tuple[int, int]] = set()
+    for event in events:
+        if event.type != CONTEXT_COMPACTED:
+            continue
+        start = event.data.get("source_seq_start")
+        end = event.data.get("source_seq_end")
+        if (isinstance(start, int) and not isinstance(start, bool)
+                and isinstance(end, int) and not isinstance(end, bool)):
+            bracket_ranges.add((start, end))
+    return frozenset(
+        index for index, message in enumerate(early)
+        if _is_compaction_summary(message)
+        and early_ranges[index] is not None
+        and (early_ranges[index][0], early_ranges[index][1]) in bracket_ranges
+    )
+
+
 def _programmatic_summary_sections(
     messages: list[AnyMessage],
     protected_facts: list[ProtectedFact] | None = None,
+    source_ranges: list[tuple[int, int] | None] | None = None,
+    trusted_summaries: frozenset[int] = frozenset(),
 ) -> dict[str, str]:
     """四个程序化节（#556 裁决 C：全部**有界**，规则为确定性纯函数）。
 
-    - 目标节：当前生效目标原文（`_current_goal_body`）——叙述性历史用户消息
-      **不再**逐字进节（旧实现 `extend` 无界是 F-COMP-1 的根因）；跨窗口刚性
-      读回走 ProtectedFact 通道（§1 独立预算）与 SessionEvent 持久历史。
+    - 目标节（#710 方向 C 三段式）：第一行仍是当前生效目标原文
+      （`_current_goal_body`，protected_facts 通道，逐字节不动）；其后新增
+      「当前生效指令」承载位（`_carrier_instruction_line`——本压缩段内最新
+      活跃用户消息，确定性派生、不链式继承旧摘要文本）与更早用户指令的
+      归档计数行（原文由 SessionEvent 持久历史回读，不变量 #6：完整保存
+      ≠ 完整注入）。叙述性历史用户消息**不再**逐字进节（旧实现 `extend`
+      无界是 F-COMP-1 的根因）；跨窗口刚性读回走 ProtectedFact 通道
+      （§1 独立预算）与 SessionEvent 持久历史。
     - 标识/文件节：继承 + 提取逻辑不变，套确定性窗口（`_capped_entries`，
       保留最近 N 条 + 单条截断）——同票消除 `:477-481` 的同构无界。
     - 保护事实节：`serialize_protected_facts` 契约不动（sort_keys 逐字节稳定、
       独立预算 8192）。
+
+    `source_ranges` 与 `messages` 位置一一对应（缺省 None = 不写来源指针，
+    存量直接调用面行为不变）。
     """
 
-    def add_once(target: list[str], value: str) -> None:
-        if value and value not in target:
+    # #707：`value not in target` 对 list 是 O(n) 扫描，visit 逐条调用即 O(n²)
+    # （30k 标识实测单次 build 8.8s）；配套 seen 集合做 O(1) 成员检查，
+    # 去重语义（首次出现顺序）不变。
+    def add_once(target: list[str], seen: set[str], value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
             target.append(value)
 
     def decode_summary_values(value: str) -> list[str]:
@@ -729,8 +871,9 @@ def _programmatic_summary_sections(
         return parsed
 
     identifiers: list[str] = []
+    identifier_seen: set[str] = set()
     file_paths: list[str] = []
-    protected_facts_body = "(none)"
+    file_path_seen: set[str] = set()
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -739,60 +882,93 @@ def _programmatic_summary_sections(
                 normalized = key.lower().replace("-", "_")
                 if isinstance(child, str):
                     if normalized in _PATH_FIELDS:
-                        add_once(file_paths, child)
-                        add_once(identifiers, child)
+                        add_once(file_paths, file_path_seen, child)
+                        add_once(identifiers, identifier_seen, child)
                     if (normalized in _EXACT_FIELDS or normalized == "id"
                             or normalized.endswith("_id")):
-                        add_once(identifiers, child)
+                        add_once(identifiers, identifier_seen, child)
                     for match in _NUMBER_PATTERN.finditer(child):
-                        add_once(identifiers, match.group())
+                        add_once(identifiers, identifier_seen, match.group())
                 elif isinstance(child, (int, float)) and not isinstance(child, bool):
-                    add_once(identifiers, str(child))
+                    add_once(identifiers, identifier_seen, str(child))
                 visit(child)
             error_content = value.get("content")
             if is_error and isinstance(error_content, str):
-                add_once(identifiers, error_content)
+                add_once(identifiers, identifier_seen, error_content)
         elif isinstance(value, list):
             for child in value:
                 visit(child)
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            add_once(identifiers, str(value))
+            add_once(identifiers, identifier_seen, str(value))
         elif isinstance(value, str):
             for match in _IDENTIFIER_PATTERN.finditer(value):
-                add_once(identifiers, match.group())
+                add_once(identifiers, identifier_seen, match.group())
             for match in _NUMBER_PATTERN.finditer(value):
-                add_once(identifiers, match.group())
+                add_once(identifiers, identifier_seen, match.group())
             for match in _FILE_PATH_PATTERN.finditer(value):
-                add_once(file_paths, match.group())
-                add_once(identifiers, match.group())
+                add_once(file_paths, file_path_seen, match.group())
+                add_once(identifiers, identifier_seen, match.group())
 
-    for message in messages:
+    for index, message in enumerate(messages):
+        # C-6 #642：结构化继承只对**有来源身份**的摘要开放（`trusted_summaries`
+        # 由 `_trusted_summary_indices` 从 bracket 事件身份算出）。无来源的
+        # 八节前缀消息降级为普通文本开采（不拒绝）；旧六节摘要因内容前缀不
+        # 满足解析契约，本就不走此分支（T12g 语义：只开采、不迁移）。
         if (
-            _is_compaction_summary(message)
+            index in trusted_summaries
+            and isinstance(message.content, str)
             and message.content.startswith(f"{_SUMMARY_HEADINGS[0]}\n")
         ):
             previous = _parse_summary_sections(message.content, _SUMMARY_HEADINGS)
-            if protected_facts is None:
-                protected_facts_body = previous[1]
+            # 裁决 4（#642）：pf=None 直连面不再从先前摘要继承 [1]——
+            # `protected_facts=None` 一律按"无事实"投影 (none)（fail-closed）。
+            # 生产路径恒传非 None（builder.py），生产行为逐字不变。
             previous_identifiers = decode_summary_values(previous[6])
             previous_paths = decode_summary_values(previous[7])
             for value in previous_identifiers:
-                add_once(identifiers, value)
+                add_once(identifiers, identifier_seen, value)
             for value in previous_paths:
-                add_once(file_paths, value)
+                add_once(file_paths, file_path_seen, value)
             continue
         # #556 裁决 C：HumanMessage 原文不再逐字进任何程序化节——目标走
         # `_current_goal_body`（protected_facts 通道），叙述性历史靠 Event 回读。
-        visit(message.model_dump(mode="json"))
+        # 裁决 3（#642）：消息自身的内部 marker（`context_compaction_summary`，
+        # snake_case 恰好命中 `_IDENTIFIER_PATTERN`）不是用户真实标识——开采前
+        # 从消息 metadata 里剥掉，只去假阳性，正文开采语义不变。
+        dump = message.model_dump(mode="json")
+        if dump.get("name") == COMPACTION_SUMMARY_MESSAGE_NAME:
+            dump["name"] = None
+        visit(dump)
+
+    # #710 方向 C：第 0 节固定三段式——目标行（_current_goal_body 逐字节不动）
+    # + 当前生效指令承载位 + 条件归档计数行（仅本段内除承载位外的更早活跃
+    # 用户消息 > 0 时；按段计，不跨压缩累积，与"不链式继承"一致）。
+    section0 = (
+        f"{_current_goal_body(protected_facts)}\n"
+        f"{_carrier_instruction_line(messages, source_ranges)}"
+    )
+    archived_turns = (
+        sum(
+            1
+            for message in messages
+            if isinstance(message, HumanMessage) and not _is_compaction_summary(message)
+        )
+        - 1
+    )
+    if archived_turns > 0:
+        section0 += (
+            f"\n（更早 {archived_turns} 条用户指令已归档："
+            "原文可由 SessionEvent 持久历史回读）"
+        )
 
     return {
-        _SUMMARY_HEADINGS[0]: _current_goal_body(protected_facts),
+        _SUMMARY_HEADINGS[0]: section0,
+        # 裁决 4（#642）：pf=None 与 pf=[] 同判——[1] 只承载 protected_facts
+        # 通道，不再有任何"从先前摘要继承"的宽松分支（fail-closed）。
         _SUMMARY_HEADINGS[1]: (
             serialize_protected_facts(protected_facts)
             if protected_facts
             else "(none)"
-            if protected_facts is not None
-            else protected_facts_body
         ),
         _SUMMARY_HEADINGS[6]: json.dumps(
             _capped_entries(identifiers), ensure_ascii=False,
@@ -815,8 +991,13 @@ def _is_compaction_summary(message: AnyMessage) -> bool:
 def _assemble_summary(
     messages: list[AnyMessage], model_sections: list[str],
     protected_facts: list[ProtectedFact] | None = None,
+    trusted_summaries: frozenset[int] = frozenset(),
+    source_ranges: list[tuple[int, int] | None] | None = None,
 ) -> str:
-    programmatic = _programmatic_summary_sections(messages, protected_facts)
+    programmatic = _programmatic_summary_sections(
+        messages, protected_facts,
+        source_ranges=source_ranges, trusted_summaries=trusted_summaries,
+    )
     bodies = [programmatic.get(heading, "") for heading in _SUMMARY_HEADINGS]
     for index, body in enumerate(model_sections, start=2):
         bodies[index] = body
@@ -829,9 +1010,14 @@ def _assemble_summary(
 def _validate_summary(
     summary: str, messages: list[AnyMessage],
     protected_facts: list[ProtectedFact] | None = None,
+    trusted_summaries: frozenset[int] = frozenset(),
+    source_ranges: list[tuple[int, int] | None] | None = None,
 ) -> None:
     sections = _parse_summary_sections(summary, _SUMMARY_HEADINGS)
-    expected = _programmatic_summary_sections(messages, protected_facts)
+    expected = _programmatic_summary_sections(
+        messages, protected_facts,
+        source_ranges=source_ranges, trusted_summaries=trusted_summaries,
+    )
     for index in _PROGRAMMATIC_SUMMARY_HEADINGS:
         if sections[index] != expected[_SUMMARY_HEADINGS[index]]:
             raise ValueError("Programmatic summary section failed exact comparison")
