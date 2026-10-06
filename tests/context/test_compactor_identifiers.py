@@ -216,3 +216,51 @@ def test_existing_identifier_extraction_is_unchanged():
     assert UUID_LETTER_LEADING + "-extra1" in _identifiers(
         [HumanMessage(content=UUID_LETTER_LEADING + "-extra1")]
     )
+
+
+# ── #707：保序去重等价钉（list 扫描 → set 成员检查，顺序契约不变） ───────────
+
+
+def test_identifier_first_occurrence_order_is_preserved():
+    """add_once 去重 = 首次出现顺序：重复值不移动位置也不重复入列。
+
+    #707 把 O(n²) 的 list 线性扫描换成 seen 集合 O(1) 检查，输出契约钉死为
+    首次出现顺序。输入刻意让 TASK-1001 的**末次出现**晚于 TASK-2002 的末次
+    出现：若去重被改成"重复值移到末尾"（Standards 轴 M2 变异），TASK-1001
+    会落到 TASK-2002 之后，本用例转红。
+    """
+    text = (
+        "先 TASK-1001 与 TASK-2002，再提 TASK-2002，复核 TASK-1001，"
+        "新增 TASK-3003"
+    )
+    identifiers = _identifiers([HumanMessage(content=text)])
+    positions = [identifiers.index(token) for token in (
+        "TASK-1001", "TASK-2002", "TASK-3003",
+    )]
+    assert positions == sorted(positions), (
+        f"必须保持首次出现顺序：{identifiers}"
+    )
+    for token in ("TASK-1001", "TASK-2002", "TASK-3003"):
+        assert identifiers.count(token) == 1, (
+            f"重复值只保留首次出现的那条：{token} -> {identifiers}"
+        )
+
+
+def test_first_occurrence_dedup_survives_window_boundary():
+    """变异钉：首现去重先于窗口 ⇒ 早期条目不被末尾重复值"救回"窗口。
+
+    [TSK-0000..0059, TSK-0005 重复]：去重后 distinct 流共 60 条，窗口取末 50
+    （TSK-0010..0059），TSK-0005 按首现位置被淘汰；若去重被摘除（#707 变异
+    M1），61 条原始流经 `_capped_entries` 的保末去重会把 TSK-0005 挪到队尾
+    并留在窗口内。
+    """
+    messages = [
+        *(AIMessage(content=f"处理 TSK-{i:04d} 号任务") for i in range(60)),
+        AIMessage(content="处理 TSK-0005 号任务"),
+    ]
+    identifiers = _identifiers(messages)
+    assert len(identifiers) == _PROG_SECTION_MAX_ENTRIES, "窗口规模不变"
+    assert "TSK-0059" in identifiers, "最近偏置不变"
+    assert "TSK-0005" not in identifiers, (
+        "早期条目按首现位置参与窗口竞争，不得被末尾重复值带回窗口"
+    )
