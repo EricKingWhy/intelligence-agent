@@ -128,9 +128,10 @@ export class ApiClient {
   }
 
   /**
-   * 客户端明确退出信号（ADR-0046 选项 B 写侧）。服务端接缝当前只有
-   * RunManager.signal_client_exit（进程内），web 层端点未开: 404/405 时
-   * 如实上报"接缝未开"，调用方降级为断线宽限基线，不伪造暂停成功。
+   * 客户端明确退出信号（ADR-0046 选项 B 写侧）。
+   * 服务端 `POST /api/sessions/{id}/client-exit`（#360 W-17 补的 web 接缝，
+   * 接 RunManager.signal_client_exit）：200 即送达；404/405 时如实上报，
+   * 调用方降级为断线宽限基线，不伪造暂停成功。
    */
   async signalClientExit(
     sessionId: string,
