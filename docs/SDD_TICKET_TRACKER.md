@@ -7410,4 +7410,5 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **变异鉴别（§8.1，仓外副本）**：git archive @`ace1481c`^（提交笔 8921bd44 内容同）树外副本把 usage_snapshot 重放决策表改为空（CRLF 探测 1148 对、anchor 命中 = 1）⇒ 钉用例转红（同路径 2 个既有 usage_snapshot 守卫同红，失败面归因明确）；未变异树 focused 60 passed。
 - **测试**：test_builder_prune + test_pruner + test_pruner_shadow_survivor + test_context_usage **60 passed**；三文件 ruff 0。
 - **台账**：`docs/review_ledger.d/t708-prune-replay-doc-6a79900b-ace1481c.tsv`（210 字符）；覆盖闸门 exit 0；金丝雀 4 passed。
-- **集成状态**：Gate-0、双轴审查、先回后正、冻结树全量门禁待跑（读数后补记）；push / PR / merge 逐项待批（§14.4）；关单时移除 in-progress（§14.12）。
+- **双轴独立审查与两轮增量**：Standards 轴 fail（must-fix 2：pruner 写入口径'均不引用 tool/result 事件 id'为假——failed_approach evidence 即失败 TOOL_RESULT 事件 id，改为核实不变量'候选必 ok=true 而被引用者恒失败 ⇒ 恒不碰撞'，写入者 6 处；builder '只在 build 末尾消费'被手动 compact 路径反证，改 compact_now 双入口表述）⇒ 增量 `4c6ac918`；Correctness 轴 fail（must-fix 1：上轮'下次压缩自纠'与每次 build 重录决策的行为及其钉用例 10M 夹具矛盾，改回'最近一次 build 或 compact_now 重算落下、下次 build 自纠'）⇒ 增量 `8c9b23ff`。两轴均确认零行为改动（剥离 docstring 后 AST 一致）、钉用例有效、变异声称成立（tip `4c6ac918` 复核 anchor 命中 1、钉用例转红；至 `8c9b23ff` 差量为纯注释行）。**勘误**：裁定请求评论中'写入者 4 处、均不引用 tool/result 事件 id'的清单不完整且依据有误，以增量后 pruner.py 注释口径为准。focused 60 passed、ruff 0；归属行 ×2、覆盖闸门 exit 0、金丝雀 4 passed。
+- **集成状态**：Gate-0、先回后正、冻结树全量门禁读数后补记；push / PR / merge 逐项待批（§14.4）；关单时移除 in-progress（§14.12）。
