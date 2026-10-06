@@ -198,6 +198,7 @@ def test_resolution_schema_and_guidance_require_exact_single_request():
 
     assert "active protected constraint" in properties["fact_id"]["description"].lower()
     assert "verbatim contiguous text from the current direct user message" in properties["candidate"]["description"].lower()
+    assert "omit correction framing such as 'i correct this rule:'" in properties["candidate"]["description"].lower()
     assert "exactly once" in guidance
     assert "wait for the user" in guidance
     assert "do not use another tool" in guidance
@@ -207,9 +208,7 @@ def test_resolution_schema_and_guidance_require_exact_single_request():
 def test_constraint_guidance_distinguishes_save_confirmation_and_authorization():
     guidance = RegisterConstraintTool().prompt_guidance.lower()
 
-    assert guidance.startswith(
-        "first distinguish a standing rule from a one-time authorization"
-    )
+    assert guidance.startswith("classify the current direct user message before calling")
     assert "only claim it was saved after data.status is registered or already_registered" in guidance
     assert "authorization is not a protected fact" in guidance
     assert "i approve you to push this branch" in guidance

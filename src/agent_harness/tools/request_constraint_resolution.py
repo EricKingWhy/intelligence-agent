@@ -53,7 +53,8 @@ class RequestConstraintResolutionArgs(BaseModel):
         description=(
             "Copy the complete proposed constraint as verbatim contiguous text from the "
             "current direct user message. Do not paraphrase, combine it with the old constraint, "
-            "or add text the user did not write."
+            "or add text the user did not write. Omit correction framing such as 'I correct this "
+            "rule:' or '我更正这条长期约束：'; include only the proposed rule itself."
         ),
     )
 
@@ -76,13 +77,9 @@ class RequestConstraintResolutionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Pause this run to ask how an explicit correction of an active protected constraint "
-            "should persist, even when the correction sounds clear. Also use for another material "
-            "constraint that may conflict with an active constraint when its persistence scope is "
-            "unclear. A possible task need that could violate the active rule can require this card "
-            "even when phrased as 'this task may need'. Do not use for ordinary conversation or "
-            "non-conflicting additions. This does "
-            "not detect conflicts automatically."
+            "Pause this run to ask how an explicit correction or a possible material conflict with "
+            "an active protected constraint should apply. Use only when user intent or persistence "
+            "scope is unclear; ordinary conversation and non-conflicting additions do not need a card."
         )
 
     @property
@@ -104,25 +101,17 @@ class RequestConstraintResolutionTool(Tool):
     @property
     def prompt_guidance(self) -> str:
         return (
-            "Use request_constraint_resolution whenever the current direct user message explicitly "
-            "corrects one active protected constraint, even if the wording sounds clear; let the "
-            "user choose whether it replaces the persistent rule or applies only to this task. "
-            "Also use it for another material constraint that may conflict with an active one only "
-            "when you cannot reliably infer its persistence scope. If the user raises a possible "
-            "requirement or exception that could violate an active constraint and you cannot tell "
-            "whether they mean a task-only exception or persistent correction, ask now even when "
-            "the possible requirement is phrased as maybe or might; do not wait for the user to "
-            "confirm the conflict. Do not infer task-only scope from 'this task' phrasing alone. "
-            "A pending card does not authorize the conflicting action. "
-            "Do not use it for ordinary "
-            "conversation or non-conflicting additions. Copy the exact active fact id from the "
-            "protected-constraints context and the complete candidate verbatim from the current "
-            "direct user message. Call this tool exactly once. Before asking, do not register the "
-            "opposite constraint or continue work affected by the conflict. After a requested result, "
-            "wait for the user; do not use another tool until they answer. If the request is rejected, "
-            "do not guess another id or retry with a synthesized candidate. After the user's answer, "
-            "apply only their selected scope; the answer to this choice is not a new constraint to "
-            "register. If they requested no concrete work, acknowledge it and stop."
+            "Call this tool exactly once for an explicit correction of an active constraint, or when "
+            "a possible material requirement conflicts with an active constraint and its intent/scope "
+            "is unclear. This includes 'this task may need...' even when the possible requirement is "
+            "phrased as maybe or might; do not infer task-only scope from 'this task' phrasing alone "
+            "and do not wait for the user to confirm the conflict. Copy the "
+            "exact active fact id and only the proposed rule from the direct message; omit correction "
+            "framing such as 'I correct this rule:'. Before the answer, do not register the candidate "
+            "or do affected work. A pending card does not authorize the conflicting action: wait for "
+            "the user and do not use another tool until they answer. If rejected, do not guess or retry. "
+            "Apply only the selected scope; the answer to this choice is not a new constraint to register. "
+            "If there is no concrete work request, acknowledge and stop."
         )
 
     @property
