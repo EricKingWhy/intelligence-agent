@@ -30,12 +30,16 @@ import asyncio
 import contextlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
 from agent_harness.agent import AgentRuntime
+from agent_harness.agent.run_budget import derive_run_budget, project_budget
+from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.session import (
     OPERATION_RECONCILE_REQUIRED,
     RUN_COMPLETED,
@@ -273,10 +277,10 @@ async def test_signal_after_client_absent_pause_does_not_double_write(tmp_path) 
 async def test_signal_race_settlement_between_awaits_is_not_reported_paused(
     tmp_path, monkeypatch,
 ) -> None:
-    """[W-12 race / decision 7] 幂等检查通过后、`mark_client_absent` 前还有两次
+    """[W-12 race / decision 7] 幂等检查通过后、第③步身份校验前还有两次
     await（只读 quit-inspection → 严格 W-05 写）。若 run 恰好在此间隙**自然收口**
-    （`_drive` 的 finally 释放 runtime），`mark_client_absent` 返回 False，outcome
-    必须如实报 `ignored_already_settled`——不得谎报 `paused` / "已立即置缺席"。
+    （`_drive` 的 finally 释放 runtime），身份校验的 `run.runtime is None` 命中，
+    outcome 必须如实报 `ignored_already_settled`——不得谎报 `paused` / "已立即置缺席"。
 
     竞态用**真实语义**制造：mock `inspect_exit_impact`，在其 await 期间放行在途
     工具并等 `run.task` 自然结束（走真实 `_drive` finally，不手造 terminal /
@@ -318,6 +322,59 @@ async def test_signal_race_settlement_between_awaits_is_not_reported_paused(
         await manager.aclose()
 
 
+# ── T2c：TOCTOU —— 旧 run 在途时被替换，不得错靶到新 run（B-P1 回归）────────
+
+
+@pytest.mark.asyncio
+async def test_signal_does_not_mark_replacement_run_absent(
+    tmp_path, monkeypatch,
+) -> None:
+    """[W-12 B-P1 回归 / TOCTOU] 旧 run R1 在途时发信号；在 `inspect_exit_impact`
+    的 await 间隙把 `_runs[session_id]` 换成已登记的新 run R2。信号必须做身份校验后
+    放弃置位（不对 R2 置缺席），返回 `ignored_already_settled` 且 R2 的 gate.absent
+    仍为 False（旧实现按 session_id 重查会把信号错靶到 R2 并置其缺席）。"""
+    session = _session(tmp_path, cwd=tmp_path)
+    released = asyncio.Event()
+    calls: list[int] = []
+    runtime = _runtime(
+        ScriptedModel([_gate_round(), AIMessage(content="never")]),
+        tools=[_GateTool(released, calls)],
+    )
+    runtime2 = _runtime(ScriptedModel([AIMessage(content="never")]))
+    runtime2.client_presence.enroll()
+    manager = runmanager.RunManager(disconnect_grace_seconds=60.0)
+    try:
+        _run, _sub = manager.launch(session, runtime, "hi", presence_managed=True)
+        assert await _wait_until(lambda: calls == [1]), "工具已在途"
+
+        original_inspect = manager.inspect_exit_impact
+
+        async def inspect_that_swaps(session_id: str):
+            # await 间隙：同会话登记一个新 run R2（旧 R1 仍在途）。R2 已纳入在场
+            # 协议，其 gate 可被观测——若信号错靶到它，R2.gate.absent 会被置真。
+            replacement = runmanager.ManagedRun(session, manager)
+            replacement.presence_managed = True
+            replacement.runtime = runtime2
+            manager._runs[session_id] = replacement
+            return await original_inspect(session_id)
+
+        monkeypatch.setattr(manager, "inspect_exit_impact", inspect_that_swaps)
+
+        outcome = await manager.signal_client_exit(
+            session.session_id, client_id="cli",
+        )
+
+        assert outcome.status == runmanager.CLIENT_EXIT_IGNORED_ALREADY_SETTLED, (
+            "await 间隙 run 已被替换——不得当作正常信号收口"
+        )
+        assert runtime2.client_presence.absent is False, (
+            "TOCTOU 修复：不得把退出信号错靶到新 run R2 并置其缺席"
+        )
+    finally:
+        released.set()
+        await manager.aclose()
+
+
 # ── T3：明确退出信号 → 恰好一条 run/paused(client_absent) ───────────────────
 
 
@@ -336,6 +393,13 @@ async def test_clear_exit_signal_pauses_with_client_absent_shape(tmp_path) -> No
         run, _sub = manager.launch(session, runtime, "hi", presence_managed=True)
         assert await _wait_until(lambda: calls == [1]), "工具已在途"
 
+        # A-P3-5：信号前记下 model / tool 两维的实际接纳计数。循环顶准入点对
+        # model / tool / child **三维同一处**闸门（`runtime.py` 只认
+        # `client_presence.absent`，不按维度分叉），故 child 维与 model / tool 共用
+        # 同一准入点，用这两维的实际计数即可钉"离开后零新增接纳"，不另造 child 探针。
+        calls_before = list(calls)
+        snapshots_before = len(scripted.snapshots)
+
         outcome = await _signal_while_releasing(
             manager, session.session_id, runtime, released,
         )
@@ -350,9 +414,11 @@ async def test_clear_exit_signal_pauses_with_client_absent_shape(tmp_path) -> No
         assert data["closeout_source"] == "deterministic"
         assert RUN_FAILED not in [e.type for e in session.events]
         assert outcome.run_id == paused_events[0].run_id, "收口在同一 run_id"
-        assert calls == [1], "在途工具恰好执行一次"
+        assert calls == calls_before == [1], (
+            "离开后零新增工具接纳（在途工具恰好执行一次、不重跑、不盲重试）"
+        )
         # AC「离开后新请求数 0」：缺席后再无模型步骤，收口也不发总结请求。
-        assert len(scripted.snapshots) == 1, "离开后零新增模型请求"
+        assert len(scripted.snapshots) == snapshots_before == 1, "离开后零新增模型请求"
     finally:
         await manager.aclose()
 
@@ -468,6 +534,49 @@ async def test_strict_progress_write_failure_raises_client_exit_error(
         released.set()
         await asyncio.wait_for(run.task, timeout=5)
         assert RUN_PAUSED not in [e.type for e in session.events]
+    finally:
+        await manager.aclose()
+
+
+# ── T6b：严格写抛非 outcome 异常 → 仍收敛为 ClientExitError（F2 回归）────────
+
+
+@pytest.mark.asyncio
+async def test_unexpected_progress_write_exception_raises_client_exit_error(
+    tmp_path, monkeypatch,
+) -> None:
+    """[W-12 F2 回归 / design §4.4] 严格写抛**非 outcome** 异常（RuntimeError）→
+    收敛为 `ClientExitError`（不是 RuntimeError），gate 未置缺席、run 继续跑；
+    `ClientExitError.progress` 如实带 `error_kind='unexpected_exception'`。"""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "agent_harness.session.runmanager.write_progress_file", boom, raising=False,
+    )
+    session = _session(tmp_path, cwd=tmp_path)
+    released = asyncio.Event()
+    calls: list[int] = []
+    runtime = _runtime(
+        ScriptedModel([_gate_round(), AIMessage(content="done")]),
+        tools=[_GateTool(released, calls)],
+    )
+    manager = runmanager.RunManager(disconnect_grace_seconds=60.0)
+    try:
+        run, _sub = manager.launch(session, runtime, "hi", presence_managed=True)
+        assert await _wait_until(lambda: calls == [1]), "工具已在途"
+
+        with pytest.raises(runmanager.ClientExitError) as excinfo:
+            await manager.signal_client_exit(session.session_id, client_id="cli")
+
+        assert excinfo.value.progress.ok is False
+        assert excinfo.value.progress.error_kind == "unexpected_exception"
+        assert "boom" in excinfo.value.progress.reason
+        assert runtime.client_presence.absent is False, "异常收敛后不得置缺席"
+        assert _paused_events(session) == [], "失败即中止，不暂停"
+
+        released.set()
+        await asyncio.wait_for(run.task, timeout=5)
     finally:
         await manager.aclose()
 
@@ -647,17 +756,12 @@ async def test_inflight_unknown_side_effect_becomes_needs_reconcile_before_pause
 
 @pytest.mark.asyncio
 async def test_exit_outcomes_distinguishable_at_event_level(tmp_path) -> None:
-    """[W-12 T9 / design T12] `paused` / `failed` / `needs_reconcile` 三态在事件
-    层面用 (type, reason, trigger_dimension) 可区分：信号路径只落
-    `run/paused(reason=client_absent, trigger=client_presence)`；旧孤儿路径落
-    `run/failed(reason=orphaned)`；对账走独立的 `operation/reconcile-required`
-    （T8 覆盖其产生场景，此处只钉三态标记两两可辨）。"""
-    # 三态事件类型两两不同。
-    assert len({
-        RUN_PAUSED, RUN_FAILED, OPERATION_RECONCILE_REQUIRED,
-    }) == 3
-
-    # 态一：明确退出 → run/paused(client_absent)。
+    """[W-12 T9 / design T12] `paused` / `failed` / `needs_reconcile` 三态可区分：
+    信号路径只落 `run/paused(reason=client_absent, trigger=client_presence)`；旧孤儿
+    路径落 `run/failed(reason=orphaned)`。T12 的真断言落在**投影**上（`03 §5`）：干净
+    信号暂停投影为 `paused`；同一暂停若账本欠对账则状态词被覆盖为 `needs_reconcile`
+    （原因照旧可读，覆盖而非替换）——不再只断言事件常量两两不同。"""
+    # 态一：明确退出 → run/paused(client_absent)，且投影如实报 paused。
     session = _session(tmp_path, cwd=tmp_path)
     released = asyncio.Event()
     calls: list[int] = []
@@ -676,6 +780,22 @@ async def test_exit_outcomes_distinguishable_at_event_level(tmp_path) -> None:
         paused = next(e for e in session.events if e.type == RUN_PAUSED)
         assert paused.data["reason"] == "client_absent"
         assert paused.data["trigger_dimension"] == "client_presence"
+
+        # 投影入口（`03 §5`，`project_budget` + `reconcile_pending`）：干净信号暂停
+        # → paused；带 UNKNOWN op 欠对账（reconcile_pending 非空）→ 同一暂停的 state
+        # 被覆盖为 needs_reconcile。这把"投影可区分"钉成真断言（T12 A-P2-4）。
+        state = derive_run_budget(session.events, paused.run_id)
+        clean = project_budget(state, accounting=HARNESS_MODEL_ACCOUNTING)
+        assert clean["state"] == "paused", "干净信号暂停投影为 paused"
+        assert clean["reason"] == "client_absent"
+        owing = project_budget(
+            state, accounting=HARNESS_MODEL_ACCOUNTING,
+            reconcile_pending=["call_exit_unk"],
+        )
+        assert owing["state"] == "needs_reconcile", (
+            "带 UNKNOWN op 的暂停投影为 needs_reconcile（不是 paused）"
+        )
+        assert owing["reason"] == "client_absent", "覆盖而非替换：暂停原因仍可读"
     finally:
         await manager.aclose()
 
@@ -810,5 +930,51 @@ async def test_reconnect_within_grace_cancels_orphan_timer(tmp_path) -> None:
         released.set()
         await asyncio.wait_for(run.task, timeout=5)
         assert RUN_COMPLETED in [e.type for e in session.events]
+    finally:
+        await manager.aclose()
+
+
+# ── 纯单元：ExitImpact 偏 busy（A-P3-3）+ quit-inspection 的 steer seam（A-P3-4）──
+
+
+def test_exit_impact_uncertain_alone_is_busy() -> None:
+    """[W-12 A-P3-3] 仅 `uncertain=True`（其余维全 False）时 `busy` 仍为 True——
+    "判不准一律按有活处理"的偏置不是空话。"""
+    impact = runmanager.ExitImpact(
+        session_id="s",
+        has_inflight_tool=False,
+        has_inflight_child=False,
+        has_pending_operation=False,
+        needs_reconcile=False,
+        has_queued_input=False,
+        uncertain=True,
+        detail=(),
+    )
+    assert impact.busy is True
+
+
+@pytest.mark.asyncio
+async def test_inspect_exit_impact_reads_steer_source_pending_count(tmp_path) -> None:
+    """[W-12 A-P3-4] `inspect_exit_impact` 经 `runtime._steer_source.pending_count`
+    只读 duck-type seam 统计排队输入：pending_count=2 ⇒ `has_queued_input is True`。
+    钉住这个私有 seam（rename 会让本用例变红），防止"有排队输入"这一维悄悄失效。"""
+    session = _session(tmp_path, cwd=tmp_path)
+    runtime = _runtime(ScriptedModel([AIMessage(content="never")]))
+    runtime._steer_source = SimpleNamespace(  # type: ignore[attr-defined]
+        pending_count=AsyncMock(return_value=2)
+    )
+    manager = runmanager.RunManager(disconnect_grace_seconds=60.0)
+    try:
+        run = runmanager.ManagedRun(session, manager)
+        run.presence_managed = True
+        run.runtime = runtime
+        manager._runs[session.session_id] = run
+
+        impact = await manager.inspect_exit_impact(session.session_id)
+
+        assert impact.has_queued_input is True
+        runtime._steer_source.pending_count.assert_awaited_once_with(
+            session.session_id
+        )
     finally:
         await manager.aclose()

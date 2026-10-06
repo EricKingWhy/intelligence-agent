@@ -123,7 +123,7 @@ class ExitImpact:
     has_inflight_tool: bool          # 有在途工具（Ledger RUNNING / 执行域在跑）
     has_inflight_child: bool         # 有活动或待恢复的子 Agent（不变量 #18/#19）
     has_pending_operation: bool      # Ledger 有未结清的行（非 settled）
-    needs_reconcile: bool            # Ledger 含 UNKNOWN / NEED_RECONCILE
+    needs_reconcile: bool            # 含 RUNNING（复用 needs_reconcile() 的未证即待对账语义）
     has_queued_input: bool           # 会话队列里有未投递输入
     uncertain: bool                  # 任一维读取失败 ⇒ 偏 busy
     detail: tuple[str, ...]          # 逐维如实记录（含失败原因），不谎报
@@ -160,9 +160,15 @@ class ClientExitOutcome:
     uncertain: bool                      # 是否带读不确定（decision 6）
     impact: ExitImpact | None            # quit-inspection 结果（未跑时为 None）
     progress: ProgressWriteOutcome | None  # W-05 严格写结果（N/A 时为 None）
-    paused_event_seq: int | None         # 那条 run/paused 的 seq（保证"单条"）
+    paused_event_seq: int | None         # 那条 run/paused 的 seq——**None-by-design**，见下方注
     detail: str                          # 人类可读收口说明（含 N/A / 幂等原因）
 ```
+
+> **`paused_event_seq` 的 None-by-design（A-P2-2）**：信号路径**不等待**暂停落盘
+> （decision 3：置缺席后由既有运行时链在稳定边界收口），故正常路径下 `paused_event_seq`
+> **恒为 `None`**——这不是缺陷。design 依赖的"恰好一条 `run/paused`"由两件事保证：
+> ① 闸门 `client_presence` 单向（`mark_absent` 只置真、不反转）；② `_terminal_paused`
+> 的**单次**收口语义（同一执行段只落一条暂停）。§8 T5 的相应验收点据此改口径。
 
 ```python
 class ClientExitError(Exception):
@@ -263,7 +269,8 @@ W-05 契约要求「写失败在任务状态可见，不得把旧文件说成最
 W-05 进度文件写在本 session 的**项目根锚**（`<项目根>/agent-progress/<session-id>/progress.md`，见 W-05 票面；`progress_paths(root, session_id)`）。
 
 - 若本 session **没有 cwd / 项目根锚**（例如纯对话 session、未绑定项目目录的运行）：**没有可写位置**，判为 **N/A（不适用）**——跳过写、**不**失败、**不**抛错，照常进入 `mark_absent`。
-- 记录：`ClientExitOutcome.progress = None`，`detail` 注明 `"无 cwd 锚，进度写 N/A"`。
+- 若本 session **有 cwd 锚，但该 cwd 目录已被外部删除**（A-P3-1，行为不变，补声明）：同样**没有可写位置**，判为 **N/A（不适用）**——跳过写、不失败、不抛错，照常进入 `mark_absent`（沿用 `service.refresh_progress_file` 的同一守卫，**不复活已删目录**）。
+- 记录：`ClientExitOutcome.progress = None`，`detail` 分别注明 `"无 cwd 锚，进度写 N/A"` 或 `"cwd 目录不存在，进度写 N/A"`。
 
 **MUST NOT** 把"无锚点"当成"写失败"：那会把一个正常可暂停的 run 错误地 fail-closed 掉。N/A 与失败是两种事实，必须分开记录。
 
@@ -316,6 +323,12 @@ W-22 已经落地的准入闸门、`_terminal_paused`、`_raise_reconcile_requir
 > 「最后一个托管该 Task 的客户端明确退出，**或意外断线经过有界重连宽限时**，Run MUST 停止接纳新的 Model/Tool/Child 工作……」
 
 其中"**或意外断线经过有界重连宽限时** ⇒ 停止接纳"这一条，是 W-22 按原票面落地的语义。**选项 B 有意不实现它**：无信号断线在宽限到期后**继续跑**，停止接纳只由明确退出信号触发。
+
+**第二处漂移事实（A-P2-1）**：`11 §6.2` 现行正文（`11_STREAMING_API_WEB_UI.md:169`）同样把"无信号断线"当成停收触发口：
+
+> 「最后一个托管客户端明确退出，**或意外断线超过有界宽限时**，服务先阻止该 Task 新的 Model/Tool/Child 接纳，再按 `02 §5.2.1` 与 `03 §3.4/§5` 持久化 `client_absent` 暂停或进入 NEED_RECONCILE。**宽限期间不发起新的模型步骤**。」
+
+按同一 decision 9，`11 §6.2` 的"意外断线超过有界宽限 ⇒ 停收 / 宽限期间不发新模型步骤"在选项 B 下**不生效**；其余（明确退出停收、`client_return` 显式恢复、重连不自恢复）照常生效。`11 §6.2` 与 `02 §5.2.1` 是**同一处**漂移的两个正文落点，一并登记、一并待用户批准修订。
 
 - 这是一处**真实的规格漂移**，不是实现惰性；
 - **本阶段不改** `02 §5.2.1`（也不改 `03` / `11` / ADR-0046 的任何正文）——规格是冻结的，修订需**用户另行批准**；
@@ -392,7 +405,7 @@ W-22 已经落地的准入闸门、`_terminal_paused`、`_raise_reconcile_requir
 | **T2** | 已终态（completed/failed 已落）：→ `ignored_already_settled`，不双写 | 新方法未实现 | 返回 `ignored_already_settled`；事件流中 `run/paused` 数不变（0） | decision 7 |
 | **T3** | 已 paused：→ `ignored_already_settled`，不双写 paused | 未实现 | 返回 `ignored_already_settled`；`run/paused` 恰好仍 1 条（不新增） | decision 7；W-22「已 paused 再收离开事件不双写」 |
 | **T4** | 已置缺席（重复信号）：→ `ignored_already_settled` | 未实现 | 第二次调用不重复置位、不新增事件 | decision 7 |
-| **T5** | 正常信号：三步顺序 → 恰好一条 `run/paused(reason=client_absent)` | 未实现 | `status=paused`；`run/paused` 恰好 1 条且 `reason=client_absent`、`trigger_dimension=client_presence`、`closeout_source=deterministic`；同 `run_id`；`paused_event_seq` 非空 | decision 1、3、5；`02 §5.2.1` |
+| **T5** | 正常信号：三步顺序 → 恰好一条 `run/paused(reason=client_absent)` | 未实现 | `status=paused`；`run/paused` 恰好 1 条且 `reason=client_absent`、`trigger_dimension=client_presence`、`closeout_source=deterministic`；同 `run_id`；`paused_event_seq` 设计已收敛为 `None`（信号不等暂停落盘，见 §2.3 注 A-P2-2） | decision 1、3、5；`02 §5.2.1` |
 | **T6** | 宽限到期（无信号）：presence_managed run **继续跑**，零 `paused`、零 `failed(orphaned)` | 旧 `_reap_if_orphaned` 会在到期 `mark_absent` → 出现 paused（红） | 到期后 run 未暂停、未失败；`gate.absent is False`；有"继续跑"日志 | decision 8 |
 | **T7** | 在途 Tool 不被取消：signal 后 `task.cancel` 未被调用，工具跑到稳定边界 | 若实现误用 cancel 会中断工具（红） | `task.cancel` 调用数为 0；工具按其 Ledger 收口；产出恰好 1 条 paused | decision 5 |
 | **T8** | 严格 W-05 写失败（只读目录 / 锁被占 / 外部编辑）→ 抛 `ClientExitError` | 未实现 fail-closed | 抛 `ClientExitError`；`gate.absent is False`；无 `run/paused`；run 继续跑 | decision 4；W-05 |

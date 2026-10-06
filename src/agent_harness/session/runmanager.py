@@ -510,19 +510,6 @@ class RunManager:
 
     # ── W-12（#356）选项 B：明确退出信号 → 安全暂停 ────────────────────────
 
-    def mark_client_absent(self, session_id: str) -> bool:
-        """置本 run 的客户端缺席闸门（W-12 写侧第③步）。
-
-        仅对**已登记且 runtime 尚在**的 run 生效：未登记 / 已收口（runtime 已
-        释放）的 run 返回 False 且不动任何状态。这是"明确退出信号"置缺席的唯一
-        入口——宽限计时器不再是 client_absent 的触发口（decision 5/8）。
-        """
-        run = self._runs.get(session_id)
-        if run is None or not run.presence_managed or run.runtime is None:
-            return False
-        run.runtime.client_presence.mark_absent()
-        return True
-
     async def signal_client_exit(
         self, session_id: str, *, client_id: str,
     ) -> ClientExitOutcome:
@@ -544,86 +531,96 @@ class RunManager:
 
         `client_id` 仅用于诊断/日志归因，不构成在场登记（选项 B 不建登记表）。
         """
-        run = self._runs.get(session_id)
-        if run is None or not run.presence_managed:
-            return ClientExitOutcome(
-                session_id=session_id,
-                status=CLIENT_EXIT_IGNORED_NOT_MANAGED,
-                run_id=run.run_id if run is not None else None,
-                uncertain=False,
-                impact=None,
-                progress=None,
-                paused_event_seq=None,
-                detail="run 未纳入产品客户端在场协议，信号零副作用（旧语义不变）",
-            )
+        # F3（B 轴 P3：并发重复信号）：整段信号处理串行化在本会话锁内——复用 #312 的
+        # 每会话锁，不新造锁。第二个并发信号会等待第一个完成，随后在幂等检查看到
+        # 已终态 / 已 paused / 已缺席（或已被替换）⇒ `ignored_already_settled`，不双写。
+        # **死锁前提**：信号路径内（inspect 的只读账本/队列读、严格写的 to_thread、
+        # mark_absent）没有任何 `session_lock` 获取点，当前也无其他持锁调用本方法的
+        # 调用方——若未来新增持锁调用点，必须重审此前提（否则自锁死）。
+        async with self.session_lock(session_id):
+            run = self._runs.get(session_id)
+            if run is None or not run.presence_managed:
+                return ClientExitOutcome(
+                    session_id=session_id,
+                    status=CLIENT_EXIT_IGNORED_NOT_MANAGED,
+                    run_id=run.run_id if run is not None else None,
+                    uncertain=False,
+                    impact=None,
+                    progress=None,
+                    paused_event_seq=None,
+                    detail="run 未纳入产品客户端在场协议，信号零副作用（旧语义不变）",
+                )
 
-        runtime = run.runtime
-        if (
-            run.terminal
-            or run.paused
-            or (runtime is not None and runtime.client_presence.absent)
-        ):
-            return ClientExitOutcome(
-                session_id=session_id,
-                status=CLIENT_EXIT_IGNORED_ALREADY_SETTLED,
-                run_id=run.run_id,
-                uncertain=False,
-                impact=None,
-                progress=None,
-                paused_event_seq=None,
-                detail=(
-                    "run 已终态 / 已 paused / 已置缺席——重复退出信号不双写"
-                    "（decision 7）"
+            runtime = run.runtime
+            if (
+                run.terminal
+                or run.paused
+                or (runtime is not None and runtime.client_presence.absent)
+            ):
+                return ClientExitOutcome(
+                    session_id=session_id,
+                    status=CLIENT_EXIT_IGNORED_ALREADY_SETTLED,
+                    run_id=run.run_id,
+                    uncertain=False,
+                    impact=None,
+                    progress=None,
+                    paused_event_seq=None,
+                    detail=(
+                        "run 已终态 / 已 paused / 已置缺席——重复退出信号不双写"
+                        "（decision 7）"
+                    ),
+                )
+
+            # ① 只读 quit-inspection（副作用为零）：先知道"会打断什么"。
+            impact = await self.inspect_exit_impact(session_id)
+            # ② 严格 W-05 写：失败即抛 ClientExitError（不置缺席、不暂停，decision 4）。
+            progress, progress_note = await self._strict_progress_write_for_exit(run)
+            # ③ 立即置缺席，不等宽限（decision 3；宽限只服务无信号断线）。
+            # 先做**身份校验**：两个 await 间隙里旧 run 可能已被替换（同会话 launch 了
+            # 已登记的新 run R2）或已收口。按 session_id 重查会把信号**错靶到新 run**
+            # （TOCTOU）——身份不符即不置位、如实报已收口，绝不双写（F1：合并修
+            # TOCTOU 错靶 + 旧 `mark_client_absent` 旁路缝；本分支同时覆盖原"置缺席时
+            # run 已收口"的竞态守卫，不留两套）。
+            current = self._runs.get(session_id)
+            if current is not run or run.runtime is None:
+                return ClientExitOutcome(
+                    session_id=session_id,
+                    status=CLIENT_EXIT_IGNORED_ALREADY_SETTLED,
+                    run_id=run.run_id,
+                    uncertain=impact.uncertain,
+                    impact=impact,
+                    progress=progress,
+                    paused_event_seq=None,
+                    detail=(
+                        "await 间隙 run 已被替换/收口——不对新 run 置缺席"
+                        "（TOCTOU 修复），不双写"
+                    ),
+                )
+            run.runtime.client_presence.mark_absent()
+
+            detail_parts = [
+                f"客户端明确退出信号已接受（client_id={client_id}）",
+                progress_note,
+                *impact.detail,
+                (
+                    "已立即置缺席；暂停由既有运行时链在稳定边界收口"
+                    "（不 task.cancel()，decision 5）"
                 ),
-            )
-
-        # ① 只读 quit-inspection（副作用为零）：先知道"会打断什么"。
-        impact = await self.inspect_exit_impact(session_id)
-        # ② 严格 W-05 写：失败即抛 ClientExitError（不置缺席、不暂停，decision 4）。
-        progress, progress_note = await self._strict_progress_write_for_exit(run)
-        # ③ 立即置缺席，不等宽限（decision 3；宽限只服务无信号断线）。
-        marked = self.mark_client_absent(session_id)
-        if not marked:
-            # 幂等检查后、置缺席前的两个 await（只读 inspect → 严格写）间隙里 run
-            # 恰好收口（finally 释放 runtime）⇒ 闸门未置、无 paused 可落。此时必须
-            # 如实报已收口，绝不谎报 paused / "已立即置缺席"（decision 7：不双写）。
+                (
+                    "paused_event_seq 在信号返回时未知——本信号不等待暂停落盘，"
+                    "实际 seq 以随后的 run/paused 事件为准"
+                ),
+            ]
             return ClientExitOutcome(
                 session_id=session_id,
-                status=CLIENT_EXIT_IGNORED_ALREADY_SETTLED,
+                status=CLIENT_EXIT_PAUSED,
                 run_id=run.run_id,
                 uncertain=impact.uncertain,
                 impact=impact,
                 progress=progress,
                 paused_event_seq=None,
-                detail=(
-                    "置缺席时 run 已收口（await 间隙竞态）——不双写、"
-                    "不谎报已置缺席"
-                ),
+                detail="；".join(detail_parts),
             )
-
-        detail_parts = [
-            f"客户端明确退出信号已接受（client_id={client_id}）",
-            progress_note,
-            *impact.detail,
-            (
-                "已立即置缺席；暂停由既有运行时链在稳定边界收口"
-                "（不 task.cancel()，decision 5）"
-            ),
-            (
-                "paused_event_seq 在信号返回时未知——本信号不等待暂停落盘，"
-                "实际 seq 以随后的 run/paused 事件为准"
-            ),
-        ]
-        return ClientExitOutcome(
-            session_id=session_id,
-            status=CLIENT_EXIT_PAUSED,
-            run_id=run.run_id,
-            uncertain=impact.uncertain,
-            impact=impact,
-            progress=progress,
-            paused_event_seq=None,
-            detail="；".join(detail_parts),
-        )
 
     async def inspect_exit_impact(self, session_id: str) -> ExitImpact:
         """只读 quit-inspection（decision 2/3/6）：绝不写盘、不改 Ledger / 闸门。
@@ -737,9 +734,29 @@ class RunManager:
             return None, "无 cwd 锚 → 进度写 N/A（不是失败，decision 4）"
         if not Path(cwd).is_dir():
             return None, "cwd 目录不存在 → 进度写 N/A（不复活已删目录，decision 4）"
-        outcome = await asyncio.to_thread(
-            write_progress_file, cwd, run.session.session_id, events,
-        )
+        try:
+            outcome = await asyncio.to_thread(
+                write_progress_file, cwd, run.session.session_id, events,
+            )
+        except Exception as exc:
+            # F2（B 轴 P2）：`write_progress_file` 正常契约返回 ProgressWriteOutcome，
+            # 但线程内意外异常（如 RuntimeError）也必须收敛——design §4.4 要求严格写
+            # 失败**一律**抛 ClientExitError。合成一个 ok=False 的结果如实记录；
+            # fail-closed 本身已成立（mark_absent 未到达），这里补的是 contract。
+            unexpected = ProgressWriteOutcome(
+                ok=False, skipped=False, path=Path(cwd) / "progress.md",
+                source_event_seq=-1, error_kind="unexpected_exception",
+                reason=repr(exc),
+            )
+            raise ClientExitError(
+                session_id=run.session.session_id,
+                run_id=run.run_id,
+                progress=unexpected,
+                detail=(
+                    f"严格 W-05 写抛非 outcome 异常（{exc!r}）——信号中止，run 维持"
+                    "原状继续跑（fail-closed，decision 4）"
+                ),
+            ) from exc
         if outcome.ok or outcome.skipped:
             return outcome, (
                 f"进度严格写通过（ok={outcome.ok}，skipped={outcome.skipped}，"
