@@ -323,6 +323,10 @@ class ContextBuilder:
         # W-31.5 (#417)：最近一次 build 实际注入的最近修改文件块成本（同清单
         # 锚块的记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
         self._last_modified_paths_tokens: int = 0
+        # W-04 (#348)：最近一次 build 实际注入的接近硬护栏 warning 文本成本
+        # （同清单锚块的记账口径：非持久化注入、独立记账口——warning 文本的
+        # token 成本先计入 provider_estimate 再注入，usage_snapshot 折进 "other"）。
+        self._last_pressure_warning_tokens: int = 0
         # 清单兜底重注入周期（PRD §4.6 Cline Focus Chain 默认值 6，配置可调）。
         self.plan_reinject_every_messages = plan_reinject_every_messages
         # W-03 (#347)：可回读 Artifact 前提下的旧 Tool Result 投影裁剪。
@@ -346,6 +350,9 @@ class ContextBuilder:
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
+        # W-04：warning 记账口先清零——builder 实例跨 build 复用，未压缩路径
+        # 不注入 warning，残值会把上一轮的成本错记到本轮看板（stale 账）。
+        self._last_pressure_warning_tokens = 0
         source_ranges: list[tuple[int, int] | None] | None = None
         pairs = derive_messages_with_source_ranges(session.events)
         if self._pruner is None:
@@ -554,6 +561,24 @@ class ContextBuilder:
                 f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
             )
         provider_estimate = compacted_token_estimate + reserved_tokens
+        # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
+        # （messages + system prompt + 运行时快照，与 :103 的看板口径同源）落
+        # [auto, hard) 带：有效用量 < auto 的健康路径不发；成功压缩的 messages
+        # 估算必然 < auto 线（compactor 的 target 闸门），但 system/快照可能把它
+        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。判据仍对**未
+        # 并入 warning 的 provider_estimate** 求值（现有判据行为不变）；判据成立
+        # 时先估算 warning 文本 tokens、记入独立记账口并并入 provider_estimate
+        # （先计入再注入，与 plan/paths 同口径——provider 的 remaining 预算
+        # 必须诚实），注入动作在下方各注入序列的末段执行。
+        pressure_text = DEFAULT_REGISTRY.assemble("frame:context_pressure").meta_user_text
+        pressure_tokens = 0
+        if (self.auto_compact_threshold * self.max_context_tokens <= provider_estimate
+                < self.hard_guard_threshold * self.max_context_tokens and pressure_text):
+            pressure_tokens = estimate_message_tokens(
+                [HumanMessage(content=pressure_text)]
+            )
+            self._last_pressure_warning_tokens = pressure_tokens
+            provider_estimate += pressure_tokens
         built = await self._with_providers(session, compacted_messages, provider_estimate)
         built = self._inject_protected_facts(built, protected_facts_messages)
         built = self._inject_runtime_context(built, runtime_context)
@@ -561,14 +586,7 @@ class ContextBuilder:
             built = _inject_plan_block(built, plan_text)
         if paths_text is not None:
             built = _inject_modified_paths(built, paths_text)
-        # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
-        # （messages + system prompt + 运行时快照，与 :103 的看板口径同源）落
-        # [auto, hard) 带：有效用量 < auto 的健康路径不发；成功压缩的 messages
-        # 估算必然 < auto 线（compactor 的 target 闸门），但 system/快照可能把它
-        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。
-        pressure_text = DEFAULT_REGISTRY.assemble("frame:context_pressure").meta_user_text
-        if (self.auto_compact_threshold * self.max_context_tokens <= provider_estimate
-                < self.hard_guard_threshold * self.max_context_tokens and pressure_text):
+        if pressure_tokens:
             built = _insert_before_last_human(
                 built, HumanMessage(content=pressure_text),
             )
@@ -1120,14 +1138,16 @@ class ContextBuilder:
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)
         # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
-        # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）。这是
+        # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）+
+        # 接近硬护栏 warning 文本（W-04 #348，先计入再注入）。这是
         # "其他"的定义性内容（未归类注入），不是"总量减各项"的残差——残差写法
         # 在总量只含 messages 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
         other = (sum(v for k, v in by_name.items() if k != "skills")
                  + self._last_runtime_context_tokens
                  + self._last_plan_tokens
                  + self._last_protected_fact_tokens
-                 + self._last_modified_paths_tokens)
+                 + self._last_modified_paths_tokens
+                 + self._last_pressure_warning_tokens)
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,
