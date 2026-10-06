@@ -120,6 +120,16 @@ MEMORY_DEGRADED = "memory/degraded"
 MEMORY_UPDATED = "memory/updated"
 # MEM-V2-3 recall explanation carries redacted IDs and ranking metadata, never content or evidence.
 MEMORY_RECALLED = "memory/recalled"
+# ── #529 §6.2：Skill 沉淀闭环的登记留痕（对标 memory/audit.py 先例） ──────
+# 成功 run 提议的候选 skill 经 lint + 人审后写入 project skill 目录，三条
+# durable 事件分别标记注册/更新/删除（append-only，不改历史事件）。data 载荷：
+#   * name         ：skill 名（与文件系统真相一一对应，不变量 #22）；
+#   * source_run_id：经验来源 run id（skill/removed 可省略）；
+#   * lint         ：lint 结果摘要（errors/warnings 列表，不装正文）；
+#   * confirmed_by ：确认者（人审门 §5.2——未经确认的草稿永不进 catalog）。
+SKILL_REGISTERED = "skill/registered"
+SKILL_UPDATED = "skill/updated"
+SKILL_REMOVED = "skill/removed"
 # ── + Phase 12 Reliability 信号（同错熔断 + 模型 fallback，ADR-0014） ──
 TOOL_FAILURE_GUARD = "tool/failure-guard"
 # `#317` T9：多模式 stuck 检测的结构化 guard 事件（`02 §5.3`「阈值首达 ⇒ 发一条结构化
@@ -257,6 +267,10 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,
+        # #529 §6.2：skill 沉淀登记留痕（register / update / remove）
+        SKILL_REGISTERED,
+        SKILL_UPDATED,
+        SKILL_REMOVED,
         TOOL_FAILURE_GUARD,
         # #317 T9：多模式 stuck 检测的 replan / paused 结构化 guard 事件
         GUARD_STUCK,

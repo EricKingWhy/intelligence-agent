@@ -188,9 +188,12 @@ async def test_approve_with_decision_field(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_approve_rejects_disallowed_decision(tmp_path, monkeypatch):
-    """G3：decision 不在 requested 事件的 allowed_decisions 内 → 422。
-    当前 allowed = [deny, approve_once]，传 approve_session → 422。
+async def test_approve_session_decision_resolved_for_cacheable_request(tmp_path, monkeypatch):
+    """G3（#526/#684 语义更新）：可缓存身份的审批 allowed_decisions 含全部四档，
+    `approve_session` 是合法决策 → 200。batch-51 原钉 422 的前提（allowed =
+    [deny, approve_once]）在 #526 给 bash 派生 approval_key 后消失；「合法枚举
+    但不在 allowed → 422」的失败关闭钉下沉到服务级
+    tests/session/test_service.py::TestResolveApproval。
     """
     import httpx2
 
@@ -216,20 +219,17 @@ async def test_approve_rejects_disallowed_decision(tmp_path, monkeypatch):
         await client.aclose()
         assert approval_id
 
+        store = JsonlSessionStore(root=tmp_path / "sessions")
         async with httpx2.AsyncClient(timeout=5) as ac:
             resp = await ac.post(
                 f"http://127.0.0.1:{port}/api/sessions/{session_id}/approve",
                 json={"approval_id": approval_id, "decision": "approve_session"},
             )
-            assert resp.status_code == 422
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "resolved"
+            assert body["decision"] == "approve_session"
 
-        # 清场：合法批准让 run 收尾
-        store = JsonlSessionStore(root=tmp_path / "sessions")
-        async with httpx2.AsyncClient(timeout=5) as ac:
-            await ac.post(
-                f"http://127.0.0.1:{port}/api/sessions/{session_id}/approve",
-                json={"approval_id": approval_id, "approved": True},
-            )
         await _await_run_terminated(store, session_id)
     finally:
         await _shutdown(server, serve_task)
@@ -374,8 +374,14 @@ async def test_approval_queue_gc_after_run_completes(tmp_path, monkeypatch):
         await _await_run_terminated(store, session_id)
 
         # done_callback 在 task 终结后被事件循环调度，可能在 JSONL 落盘之后
-        # 才执行——给事件循环一小段宽限让它跑完。
-        await asyncio.sleep(0.1)
+        # 才执行——固定 0.1s 宽限在全量负载下会早读（在册 flake），改为轮询
+        # 等 GC 完成；超时后仍由下方断言报契约失败。
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while (
+            session_id in state.approval_queues
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.05)
 
         # run 终结后 queue 应被 GC（不泄漏）
         assert session_id not in state.approval_queues, \
