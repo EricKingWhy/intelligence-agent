@@ -1,0 +1,1 @@
+2026-10-06	#367 merge 前同步合并（PR #747 up-to-date 要求）：merge 218509ff 合 origin/main 62066f8c（来侧 = PR #745 #733 CLI 主题——cli_theme.py + 测试 + 台账/收据，与本票 task-creation 域零文件交集）。merge 零冲突零手工解决；合并树 Gate-0 重采随补记落账。	57994efc..218509ff

@@ -75,6 +75,16 @@ def _quoted(value: str) -> str:
 # 不存在"路由那条忘了校验 shell 元字符"的可能。
 
 
+def git_head_command() -> list[str]:
+    """`git rev-parse HEAD`（argv 形态，供 subprocess 无 shell 直调）。
+
+    只读 HEAD 读取（W-08 #352 ``base_head``）：命令逐字固定、零插值、零 pathspec——
+    白名单纪律的最严形态（没有任何用户输入能进入命令）。执行方把 ``cwd`` 钉在
+    工作区目录（等价于 ``git -C <dir>``）；root 取会话 cwd 锚，不接客户端给的路径。
+    """
+    return ["git", "rev-parse", "HEAD"]
+
+
 def git_status_command(pathspec: str = "", *, scope: str = "") -> str:
     """`git status --porcelain=v1 [-- scope] [pathspec]`。pathspec 非法抛 ValueError。
 

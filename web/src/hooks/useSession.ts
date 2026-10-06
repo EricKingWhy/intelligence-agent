@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentEvent, ConversationState, SessionDeleted, SessionMode, SessionSummary } from '../types';
-import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type ConstraintInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import { wsStreamResponse, discoverNewSessionId, sessionIdBaseline, sessionExists } from '../lib/wsStream';
 import { initConversation, applyEvent, projectHistory, deriveSessionTitle, extractSessionTitle, restoreUndeliveredFromQueue } from '../lib/projection';
@@ -913,7 +913,7 @@ export function useSession() {
   const submitTask = useCallback(
     async (
       payload: StartSessionPayload,
-      opts?: { ownError?: boolean },
+      opts?: { ownError?: boolean; onWorktreeCreated?: (path: string) => void },
     ): Promise<string | null> => {
       setError(null);
       setConversation(null);
@@ -946,6 +946,10 @@ export function useSession() {
             const detail = await startSessionErrorDetail(res);
             throw new Error(detail || `Start failed: ${res.status}`);
           }
+          // #367 P3：消费 X-Worktree-Path 头——目录冲突自动建 worktree 时告诉用户
+          // 任务实际跑在哪个隔离目录（降级态响应立即可得）。
+          const wtDegraded = worktreePathFromResponse(res);
+          if (wtDegraded) opts?.onWorktreeCreated?.(wtDegraded);
           attachLiveStream(res, gen, null);
           return null;
         }
@@ -959,6 +963,9 @@ export function useSession() {
             const detail = await startSessionErrorDetail(res);
             throw new Error(detail || `Start failed: ${res.status}`);
           }
+          // #367 P3：同上，短窗内落定的响应（422/短 JSON 确认）也消费该头。
+          const wtEarly = worktreePathFromResponse(res);
+          if (wtEarly) opts?.onWorktreeCreated?.(wtEarly);
           attachLiveStream(res, gen, null);
           return null;
         }

@@ -26,6 +26,7 @@
 | `CONTEXT_COMPACTED` | `context/compacted` |
 | `CONTEXT_COMPACTION_FAILED` | `context/compaction_failed` |
 | `CONTEXT_PROTECTED_FACTS_EXCEEDED` | `context/protected_facts_exceeded` |
+| `EVIDENCE_RECORDED` | `evidence/recorded` |
 | `FORK_IN_PROGRESS` | `fork/in-progress` |
 | `GUARD_STUCK` | `guard/stuck` |
 | `MEMORY_DEGRADED` | `memory/degraded` |

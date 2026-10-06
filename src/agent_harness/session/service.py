@@ -30,10 +30,11 @@ import asyncio
 import logging
 import os
 import stat
+import subprocess
 import time
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import partial
 from pathlib import Path, PureWindowsPath
@@ -89,10 +90,15 @@ from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.sandbox.paths import canonical_workspace_path, is_absolute_path
 from agent_harness.session.amend import AmendOptions, amend_kwargs
 from agent_harness.session.approval import (
+    LEGACY_V1_DEFAULTS_MIGRATION,
+    LEGACY_V1_DEFAULTS_WARNING,
+    PERMISSION_DEFAULTS_VERSION,
+    PERMISSION_DEFAULTS_VERSION_KEY,
     SESSION_AUTO_APPROVE_KEY,
     SESSION_PERMISSION_MODE_KEY,
     PermissionChange,
     append_approval_revoke,
+    append_legacy_defaults_migration,
     append_permission_change,
     derive_approval_grants,
 )
@@ -154,6 +160,7 @@ from agent_harness.session.event import (
     FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
+    PERMISSION_CHANGED,
     PERMISSION_RESOLVED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
@@ -172,6 +179,14 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
     _utc_now_iso,
+)
+from agent_harness.session.evidence import (
+    EvidenceManifest,
+    EvidenceOutcome,
+    apply_evidence_recorded,
+    compute_evidence_manifest,
+    derive_evidence_state,
+    evaluate_evidence_freshness,
 )
 from agent_harness.session.interrupt import detect_unterminated_runs
 from agent_harness.session.model_switch import (
@@ -236,6 +251,7 @@ from agent_harness.tooling.approval import (
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import PolicyGranularity
 from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tools.git import git_head_command
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -503,6 +519,10 @@ class LaunchResult:
     ceiling + 暂停时的 consumed 快照）。它**不进响应头**：真源是 `run/started`
     与 `run/resumed` 事件，这个字段只让调用方（CLI / 测试 / Web 日志）核对
     "这次启动用的是哪个 run 账本"。
+
+    `warnings`（#358 / W-14）：本次启动产生的**用户向**一次性提示（如旧 Session
+    沿用旧默认权限矩阵）。空列表 = 无提示。Web 层目前没有现成的 warnings 透传
+    通道，此字段先留给调用方；不为它新造通道。
     """
 
     session: Session
@@ -510,6 +530,7 @@ class LaunchResult:
     subscriber: Subscriber | None
     local_fuse: LocalFuse | None = None
     run_budget: LaunchRunBudget | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1205,7 +1226,10 @@ class SessionService:
         permission_mode: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
         permission_mode_explicit: bool = False,
         auto_approve_explicit: bool = False,
-        auto_approve: bool = True,
+        # #358 / W-14（D2 默认翻转）：缺省从 True 改为 False——两个字段都缺省时
+        # 落到 workspace-write + ask（读免问、写/Bash 逐次问）。显式 auto_approve=true
+        # 仍走 auto-approve（向后兼容）；显式 false → interactive（#423）。
+        auto_approve: bool = False,
         amend: AmendOptions | None = None,
         launch: bool = True,
         remember_as_procedural_rule: bool = False,
@@ -1222,6 +1246,10 @@ class SessionService:
         session_deadline_at: Any = None,
         session_tool_call_limits: Mapping[str, Any] | None = None,
         session_max_delegations: int | None = None,
+        # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒
+        # 部署默认（当前 "local"）。docker 不可用时 registry.create 抛
+        # SandboxUnavailableError（fail-fast，零副作用），绝不静默回落。
+        sandbox_backend: str | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -1352,6 +1380,10 @@ class SessionService:
             session_start_data[SESSION_PERMISSION_MODE_KEY] = permission_mode.value
         if auto_approve_explicit:
             session_start_data[SESSION_AUTO_APPROVE_KEY] = auto_approve
+        # #358 / W-14：默认权限矩阵版本**恒写**（新会话一律 v2）——续聊据此区分
+        # "创建于收紧之前"的旧会话，决定沿用旧默认还是一起收紧。档位 / auto_approve
+        # 的 keys 仍只在显式时写（不动，避免扰动 effective_* 语义）。
+        session_start_data[PERMISSION_DEFAULTS_VERSION_KEY] = PERMISSION_DEFAULTS_VERSION
 
         _, wiring = await self._get_wiring()
         await self._ensure_stores()
@@ -1359,10 +1391,14 @@ class SessionService:
         # 审批路由（三种，保留向后兼容）。#423：显式声明 auto_approve=false（未选
         # 档位）也走 interactive——用户承诺的是"每一步问我"，deny（全部拒绝）不兑现
         # 承诺；danger 档仍是"无需审批"，优先于 auto_approve。
+        # #358 / W-14（D2 新默认）：两字段**都未声明** → interactive（workspace-write +
+        # ask，读免问、写/Bash 逐次问）。这是产品级默认矩阵收紧的落点：旧默认（全自动
+        # 批准）只在显式 auto_approve=true 或缺档位声明缺失时保留。
         interactive = (
             (
                 permission_mode_explicit
                 or (auto_approve_explicit and not auto_approve)
+                or (not permission_mode_explicit and not auto_approve_explicit)
             )
             and permission_mode != PermissionPolicy.DANGER_FULL_ACCESS
         )
@@ -1420,6 +1456,8 @@ class SessionService:
                 workspace=workspace, permission_mode=permission_mode,
                 amend=amend,
             ),
+            # #363 / W-19：显式 sandbox 后端选择（None ⇒ 部署默认）。
+            sandbox_backend=sandbox_backend,
         )
         session = Session.start(
             self._store, session_id=session_id,
@@ -1435,6 +1473,8 @@ class SessionService:
             # WS-2 的 attachSession 必须自己按会话 header 的规范 cwd 校验，不得
             # 反过来信任映射表。
             cwd=workspace,
+            # #363 / W-19：sandbox 后端选择记进 session/started（审计事实）。
+            sandbox_backend=sandbox_backend,
         )
 
         # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
@@ -1896,6 +1936,38 @@ class SessionService:
         effective_mode = _effective_permission_mode(existing)
         effective_auto = _effective_auto_approve(existing)
 
+        # #358 / W-14：默认权限矩阵版本 + 旧 Session 迁移判定（§3.5 / §3.6）。
+        # v2 标记（`session/started.permission_defaults_version == 2`）⇒ 新默认会话；
+        # 无标记、无 permission/changed、且未显式声明档位/auto_approve ⇒ "创建于收紧
+        # 之前"的旧会话：沿用旧默认 + 一次性提示 + 落迁移事件。
+        started_data = next(
+            (event.data for event in existing if event.type == SESSION_STARTED), None
+        )
+        defaults_v2 = (
+            started_data is not None
+            and started_data.get(PERMISSION_DEFAULTS_VERSION_KEY)
+            == PERMISSION_DEFAULTS_VERSION
+        )
+        changed_events = [
+            event for event in existing if event.type == PERMISSION_CHANGED
+        ]
+        # 迁移标记只认"当前生效的那条" permission/changed（最后一条）——迁移之后若
+        # 用户又显式改过档（ADR-0041），后写的 permission/changed 胜出，不能再用旧默认
+        # 覆盖用户的显式改动。
+        last_change = changed_events[-1] if changed_events else None
+        migrated = (
+            last_change is not None
+            and last_change.data.get("permission_migration")
+            == LEGACY_V1_DEFAULTS_MIGRATION
+        )
+        legacy_unmigrated = (
+            not defaults_v2
+            and not changed_events
+            and effective_mode is None
+            and effective_auto is None
+        )
+        resume_warnings: list[str] = []
+
         async def build_resume_runtime(
             budget: LaunchRunBudget,
         ) -> tuple[Any, bool, ApprovalCallback | None | _InteractiveCallbackHolder]:
@@ -1903,7 +1975,35 @@ class SessionService:
             await self._ensure_stores()
             interactive = False
             approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder
-            if effective_mode is None:
+            if migrated:
+                # #358：旧 Session 已迁移过（迁移事件在位）——沿用旧默认（auto-approve
+                # 回调 None），不再提示（幂等）。用户的显式历史选择原样兑现。
+                permission_mode = PermissionPolicy.WORKSPACE_WRITE
+                approval_callback = None
+            elif legacy_unmigrated:
+                # #358：迁移前创建的旧会话——沿用旧默认（不强制收紧），一次性提示
+                # （log + LaunchResult.warnings + 迁移事件三面）。
+                permission_mode = PermissionPolicy.WORKSPACE_WRITE
+                approval_callback = None
+                resume_warnings.append(LEGACY_V1_DEFAULTS_WARNING)
+                logger.warning(
+                    "会话 %s 创建于默认权限收紧（#358）之前，沿用旧默认 "
+                    "workspace-write + auto-approve；本次已落迁移事件（仅提示一次）",
+                    session_id,
+                )
+            elif defaults_v2 and effective_mode is None and effective_auto is None:
+                # #358（D2 新默认）：v2 新会话未显式声明 → workspace-write + ask
+                # （读免问、写/Bash 逐次问），与创建路径同一条 interactive 路由。
+                permission_mode = PermissionPolicy.WORKSPACE_WRITE
+                interactive = True
+                approval_callback = await self._build_approval_callback(
+                    interactive=True,
+                    auto_approve_explicit=False,
+                    permission_mode_explicit=False,
+                    auto_approve=False,
+                    session_id=session_id,
+                )
+            elif effective_mode is None:
                 permission_mode = PermissionPolicy.WORKSPACE_WRITE
                 if effective_auto is False:
                     # #423：创建时声明"不自动批准"（未选档位）→ 续聊同样弹审批卡
@@ -2004,6 +2104,7 @@ class SessionService:
                 user_input_metadata=user_input_metadata,
                 interactive=interactive, approval_callback=approval_callback,
                 fuse=fuse, launch_budget=launch_budget,
+                warnings=resume_warnings, legacy_migration=legacy_unmigrated,
             )
         # #560-B：新任务 launch 的 CAS 临界区（锁 owner = RunManager，跨请求共存）。
         # "判 idle → 启动"必须是**一个**原子判定：上方那次 get_active 只是快速
@@ -2044,6 +2145,7 @@ class SessionService:
                 user_input_metadata=user_input_metadata,
                 interactive=interactive, approval_callback=approval_callback,
                 fuse=fuse, launch_budget=launch_budget,
+                warnings=resume_warnings, legacy_migration=legacy_unmigrated,
             )
 
     def _bind_and_launch(
@@ -2052,12 +2154,20 @@ class SessionService:
         interactive: bool,
         approval_callback: ApprovalCallback | None | _InteractiveCallbackHolder,
         fuse: LocalFuse, launch_budget: LaunchRunBudget,
+        warnings: list[str] | None = None,
+        legacy_migration: bool = False,
     ) -> LaunchResult:
         """绑定审批回调 → launch → 审批队列 GC（同 run / 新任务两条路径共用）。
 
         launch 是"开 run"的提交点：调用方决定它落在哪个互斥域内（新任务在
         `_resume_lock` 临界区内，同 run 续跑在 `_commit_paused_resume` 返回后）。
+
+        `legacy_migration`（#358）：旧 Session 首次续聊时，在 launch **之前**落一条
+        `permission/changed` 迁移事件（复用 §3.6 的三面之一）。放在 launch 前是为了让
+        本次 run 的 `effective_*` 与落盘事实一致。
         """
+        if legacy_migration:
+            append_legacy_defaults_migration(session)
         if interactive and isinstance(approval_callback, _InteractiveCallbackHolder):
             approval_callback.bind_session(session)
         run, subscriber = self._run_manager.launch(
@@ -2069,6 +2179,7 @@ class SessionService:
         return LaunchResult(
             session=session, run=run, subscriber=subscriber, local_fuse=fuse,
             run_budget=launch_budget,
+            warnings=list(warnings) if warnings else [],
         )
 
     # ── 暂停 run 的同 run 恢复（`#312`）──────────────────────────────
@@ -4442,6 +4553,153 @@ class SessionService:
             reason=reason,
             expected_version=expected_version,
         )
+
+    async def record_evidence(
+        self, session_id: str, *, evidence: object
+    ) -> EvidenceOutcome:
+        """记录一条结构化证据（W-08 #352）：形状校验在 session/evidence.py handler。
+
+        走与 task 命令同一套「存在性 + live 聚合 + seq 重试」写入路径；拒绝零事件。
+        不刷新进度文件——progress 文档的 evidence 节只消费 artifact 事件，
+        W-05 触发点不变（Scope lock：只动必须动）。
+        """
+        return await self._apply_task_handler(
+            session_id, apply_evidence_recorded, evidence=evidence
+        )
+
+    async def evidence_state(self, session_id: str) -> dict | None:
+        """只读证据投影 + 读取时陈旧求值（W-08 #352；零副作用）。
+
+        未定义任务返回 None（web 层 404，不伪装成空状态）。只回服务端投影：
+        每条证据带 ``freshness``（fresh/stale + 明确过期原因），客户端不推断。
+        """
+        self._validate_session_id(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        if not derive_task_state(events).defined:
+            return None
+        state = derive_evidence_state(events)
+        if not state.by_criterion:
+            return {"by_criterion": {}}
+        root = session_cwd(events)
+        covered = sorted(
+            {
+                item.path
+                for records in state.by_criterion.values()
+                for record in records
+                for item in record.workspace_manifest.files
+            }
+        )
+        current_manifest = await self._current_evidence_manifest(root, covered)
+        # 懒惰求值（§9.5）：没有任何记录带 base_head 时不 spawn git 子进程——
+        # 读接口不引入不必要的宿主副作用与延迟。
+        needs_head = any(
+            record.base_head is not None
+            for records in state.by_criterion.values()
+            for record in records
+        )
+        current_head = await self._git_head(root) if needs_head else None
+        store = self._artifact_store_for(session_id)
+        by_criterion: dict[str, list[dict]] = {}
+        for criterion_id, records in state.by_criterion.items():
+            items = []
+            for record in records:
+                readable: bool | None = None
+                attribution_ok: bool | None = None
+                if record.artifact_ref:
+                    readable, attribution_ok = await self._check_evidence_artifact(
+                        store, record
+                    )
+                freshness = evaluate_evidence_freshness(
+                    record,
+                    current_manifest=current_manifest,
+                    current_head=current_head,
+                    artifact_readable=readable,
+                    artifact_attribution_ok=attribution_ok,
+                )
+                items.append(
+                    {
+                        **record.to_payload(),
+                        "freshness": {
+                            "status": freshness.status,
+                            "reasons": list(freshness.reasons),
+                        },
+                    }
+                )
+            by_criterion[criterion_id] = items
+        return {"by_criterion": by_criterion}
+
+    async def _current_evidence_manifest(
+        self, root: str | None, covered: list[str]
+    ) -> EvidenceManifest | None:
+        """当前工作区 manifest（容错：读不到 → None，fail-closed 判 stale）。
+
+        已删除的覆盖文件不在本次清单里——``evaluate_evidence_freshness`` 会把
+        "记录中有、当前缺失"报成明确的缺失原因（而不是笼统的"读不到"）。
+        """
+        if not root:
+            return None
+        base = Path(root)
+        existing = [path for path in covered if (base / path).is_file()]
+        try:
+            return await anyio.to_thread.run_sync(
+                compute_evidence_manifest, root, existing
+            )
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    async def _git_head(root: str | None) -> str | None:
+        """工作区仓库的当前 HEAD（只读；非 git 目录/执行失败 → None，如实）。
+
+        命令构造走 ``tools/git.py::git_head_command``（白名单纪律：逐字固定、
+        零插值、无 shell）；cwd 钉在工作区 root。
+        """
+        if not root:
+            return None
+
+        def _run() -> str | None:
+            try:
+                proc = subprocess.run(
+                    git_head_command(),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                    cwd=root,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
+            head = proc.stdout.strip()
+            return head if proc.returncode == 0 and head else None
+
+        return await anyio.to_thread.run_sync(_run)
+
+    @staticmethod
+    async def _check_evidence_artifact(
+        store, record
+    ) -> tuple[bool, bool | None]:
+        """证据 artifact 的可读回 + 显式归属/来源校验（票面"只引用权限受控的原件"）。
+
+        - 可读回：``store.load`` 成功（content-hash 自证在实现里；
+          KeyError/OSError → 不可读）。
+        - 归属：证据带 ``tool_call_id`` 时，必须与 artifact 旁挂元数据的
+          ``tool_call_id`` 一致；元数据缺失 → 无法确认（None，fail-closed）；
+          证据无 ``tool_call_id`` → 跳过该维度。
+        """
+        if store is None:
+            return False, None
+        try:
+            artifact = await store.load(record.artifact_ref)
+        except (KeyError, OSError):
+            return False, None
+        if not record.tool_call_id:
+            return True, True
+        meta_tcid = artifact.tool_call_id
+        if not meta_tcid:
+            return True, None
+        return True, meta_tcid == record.tool_call_id
 
     async def fork(
         self, *, session_id: str, from_seq: int, with_tail_summary: bool = False

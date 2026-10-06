@@ -13,8 +13,9 @@ argv[1] 是 JSON 配置：
 剧本首条让模型调 bash（真实子进程命令）；其后 5 条是「不该被消费」的哨兵——
 若缺席闸门失效，它们会被逐条烧掉，admission 计数（snapshots）当即超标。
 
-离场路径走 RunManager 真实孤儿计时臂（unsubscribe → 宽限到期 → 置缺席闸门，
-不是测试手工 mark_absent），即 W-12 未来要接的同一条缝。
+离场路径走 RunManager 真实**明确退出信号**（`signal_client_exit` → 立即置缺席闸门，
+不等宽限），即 W-12（#356）选项 B 落地的写侧入口——不是测试手工 mark_absent，也不是
+旧的"unsubscribe → 宽限到期 → 置缺席"孤儿计时臂（选项 B 已作废那条）。
 
 mode=pause 正常退出并打印一行 JSON 结果（ASCII）；mode=crash_before_pause 在
 缺席已置位、真实 bash 仍在执行时 os._exit(137)——run/paused 永远来不及落盘。
@@ -41,7 +42,7 @@ from agent_harness.config import Settings
 from agent_harness.model.scripted import ScriptedModel
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import TOOL_CALL, JsonlSessionStore, Session
-from agent_harness.session.runmanager import RunManager
+from agent_harness.session.runmanager import CLIENT_EXIT_PAUSED, RunManager
 
 GRACE_SECONDS = 0.2
 
@@ -83,7 +84,7 @@ async def main() -> None:
 
     manager = RunManager(disconnect_grace_seconds=GRACE_SECONDS)
     try:
-        run, subscriber = manager.launch(
+        run, _subscriber = manager.launch(
             session, runtime, "在客户端缺席前开始干活", presence_managed=True,
         )
         # 等真实 bash 调用进入在途（TOOL_CALL 落盘）——离开必须发生在工具执行中。
@@ -93,13 +94,24 @@ async def main() -> None:
             await asyncio.sleep(0.02)
         assert any(e.type == TOOL_CALL for e in session.events), "bash 未进入在途"
 
-        run.unsubscribe(subscriber)  # 产品客户端离开 → 真实宽限计时臂
-
         if mode == "crash_before_pause":
-            # 宽限到期（0.2s）置缺席后、真实 bash（sleep 3）仍在执行时硬崩：
+            # 明确退出信号置缺席后、真实 bash（sleep 10）仍在执行时硬崩：
             # run/paused 永远来不及写——父进程按既有 interrupted/reconcile 恢复。
-            await asyncio.sleep(0.4)
+            _signal_task = asyncio.create_task(
+                manager.signal_client_exit(session.session_id, client_id="tui")
+            )
+            for _ in range(500):
+                if runtime.client_presence.absent:
+                    break
+                await asyncio.sleep(0.01)
+            assert runtime.client_presence.absent, "退出信号未在崩溃前置缺席"
             os._exit(137)
+
+        # 产品客户端明确退出 → 立即置缺席（不等宽限）；在途 bash 收口后收暂停。
+        outcome = await manager.signal_client_exit(
+            session.session_id, client_id="tui"
+        )
+        assert outcome.status == CLIENT_EXIT_PAUSED, outcome.detail
 
         await asyncio.wait_for(run.task, timeout=15)
         assert run.paused is True, "run 应以暂停收口"

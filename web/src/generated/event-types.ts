@@ -38,6 +38,7 @@ export const EventType = {
   VERIFICATION_UPDATED: 'verification/updated',
   TASK_ACCEPTED: 'task/accepted',
   TASK_ACCEPTANCE_RELEASED: 'task/acceptance-released',
+  EVIDENCE_RECORDED: 'evidence/recorded',
   MEMORY_DEGRADED: 'memory/degraded',
   MEMORY_UPDATED: 'memory/updated',
   MEMORY_RECALLED: 'memory/recalled',

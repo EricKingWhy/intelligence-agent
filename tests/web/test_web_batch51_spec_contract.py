@@ -26,7 +26,7 @@ from agent_harness.session import JsonlSessionStore
 
 
 class _BashThenTextImpl:
-    """第一次出 bash tool_call（DANGER → 需审批）；第二次出纯文本收尾。"""
+    """第一次出 bash tool_call（非只读 → 命中 ASK 规则，需审批）；第二次出纯文本收尾。"""
 
     def bind_tools(self, tools, **kwargs):
         return self
@@ -34,8 +34,8 @@ class _BashThenTextImpl:
     async def astream(self, messages, **kwargs):
         if not any(getattr(m, "tool_calls", None) for m in messages):
             yield AIMessage(content="", tool_calls=[{
-                "name": "bash", "args": {"command": "echo hi"}, "id": "call1",
-                "type": "tool_call",
+                "name": "bash", "args": {"command": "touch approval_probe"},
+                "id": "call1", "type": "tool_call",
             }])
         else:
             yield AIMessageChunk(content="done")

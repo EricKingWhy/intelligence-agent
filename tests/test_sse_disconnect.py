@@ -99,14 +99,19 @@ async def _start_server(tmp_path, monkeypatch, model):
 
 
 async def _read_until(line_marker: str, port: int) -> None:
-    """读 SSE 流直到出现标记帧，然后立刻断开连接——不排空流。"""
+    """读 SSE 流直到出现标记帧，然后立刻断开连接——不排空流。
+
+    #358：默认权限矩阵收紧为 workspace-write + ask；本文件测的是 detached-run
+    语义（与权限无关），故显式 opt-in 旧默认 auto_approve=true，避免慢工具在
+    审批点上暂停而非在途。
+    """
     import httpx2
 
     client = httpx2.AsyncClient(timeout=None)
     try:
         async with client.stream(
             "POST", f"http://127.0.0.1:{port}/api/sessions",
-            json={"task": "慢任务"},
+            json={"task": "慢任务", "auto_approve": True},
         ) as response:
             assert response.status_code == 200
             async for line in response.aiter_lines():

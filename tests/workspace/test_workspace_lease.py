@@ -10,6 +10,7 @@ manager 实例。
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -21,13 +22,14 @@ from agent_harness.workspace.lease import (
     NoPresenceReader,
     WorkspaceLeaseManager,
 )
-from agent_harness.workspace.lease_paths import normalize_dir_key
+from agent_harness.workspace.lease_paths import LeasePathError, normalize_dir_key
 from agent_harness.workspace.lease_store import (
     LEASE_AWAITING_PRESENCE,
     LEASE_HELD,
     QUEUE_WAITING,
     SqliteLeaseStore,
 )
+from tests.symlink_capability import make_dir_link, needs_dir_link
 
 
 class FakePresence:
@@ -239,11 +241,15 @@ async def test_case_and_trailing_separator_cannot_bypass(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@needs_dir_link
 async def test_symlink_cannot_bypass(tmp_path) -> None:
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "link"
-    link.symlink_to(real)
+    # Windows 无特权宿主退回 junction（mklink /J）——realpath 同样解析到
+    # real，互斥绕过断言语义不变（#731，先例 tests/web/test_host_dirs_api.py）。
+    if not make_dir_link(link, real):
+        pytest.skip("宿主无法创建目录链接（探测与使用间能力变化）")
     manager = await new_manager(tmp_path)
     await manager.acquire("task-a", str(real))
     outcome = await manager.acquire("task-b", str(link))
@@ -267,6 +273,9 @@ async def test_parent_child_directory_rejected(tmp_path) -> None:
     assert outcome.holder == "task-a"
 
 
+# 真实 Windows 宿主上合成路径被 #726 存在性校验 fail-closed 拒绝；
+# Windows 形态词法等价只能由 POSIX 宿主等价层钉住（同 TestWindowsFormLexical）。
+@pytest.mark.skipif(os.name == "nt", reason="Windows 宿主路径需真实存在（#726 fail-closed），合成键词法等价在 POSIX 宿主钉住")
 @pytest.mark.asyncio
 async def test_windows_form_cannot_bypass(tmp_path) -> None:
     """盘符大小写 / 分隔符方向 / 尾分隔符 / .. 段 / UNC 写法同键。"""
@@ -290,6 +299,7 @@ async def test_windows_form_cannot_bypass(tmp_path) -> None:
         assert not outcome.granted, variant
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows 宿主路径需真实存在（#726 fail-closed），合成键词法等价在 POSIX 宿主钉住")
 @pytest.mark.asyncio
 async def test_windows_parent_child_rejected(tmp_path) -> None:
     manager = await new_manager(tmp_path)
@@ -299,15 +309,23 @@ async def test_windows_parent_child_rejected(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fail_closed_paths_rejected(tmp_path) -> None:
-    from agent_harness.workspace.lease_paths import LeasePathError
-
+async def test_fail_closed_missing_path_rejected(tmp_path) -> None:
+    """manager 级：缺失路径 fail-closed。不依赖链接能力，全宿主执行
+    （#731 拆分：原用例捆绑链接环半边，无特权宿主整测跳过丢失本覆盖）。"""
     manager = await new_manager(tmp_path)
     with pytest.raises(LeasePathError):
         await manager.acquire("task-a", str(tmp_path / "missing"))
+
+
+@pytest.mark.asyncio
+@needs_dir_link
+async def test_fail_closed_link_loop_rejected(tmp_path) -> None:
+    """manager 级：链接环 fail-closed（junction 环语义同 symlink 环，#731）。"""
+    manager = await new_manager(tmp_path)
     a, b = tmp_path / "a", tmp_path / "b"
-    a.symlink_to(b)
-    b.symlink_to(a)
+    # 悬空端构造：_dir_link_created 用 lstat 核验 reparse point，不依赖目标存在。
+    if not make_dir_link(a, b) or not make_dir_link(b, a):
+        pytest.skip("宿主无法创建目录链接（探测与使用间能力变化）")
     with pytest.raises(LeasePathError):
         await manager.acquire("task-a", str(a))
 
@@ -379,15 +397,18 @@ async def test_reconcile_detects_corrupt_awaiting_without_queue(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_unique_partial_index_blocks_duplicate_waiting(tmp_path) -> None:
+    """主体是 SQLite 部分唯一索引（平台无关）：用真实目录保持全宿主可跑。"""
+    real = tmp_path / "real"
+    real.mkdir()
     store = SqliteLeaseStore(tmp_path / "harness.db")
     manager = WorkspaceLeaseManager(store)
     await manager.initialize()
-    await manager.acquire("task-a", "D:\\code")
-    await manager.acquire("task-b", "D:\\code")
+    await manager.acquire("task-a", str(real))
+    await manager.acquire("task-b", str(real))  # 同键 → task-b 排队（waiting 行）
     import aiosqlite
 
     with pytest.raises(aiosqlite.IntegrityError):  # 部分唯一索引：同 session 只能有一个 waiting 行
-        await store.insert_waiting(normalize_dir_key("D:\\code"), "task-b", "now")
+        await store.insert_waiting(normalize_dir_key(str(real)), "task-b", "now")
 
 
 @pytest.mark.asyncio
