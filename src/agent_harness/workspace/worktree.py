@@ -86,29 +86,3 @@ def create_worktree(repo_path: Path, *, path: Path | None = None,
         )
     logger.info("worktree 已创建：%s（分支 %s）", path, branch)
     return path
-
-
-def remove_worktree(path: Path, *, force: bool = False) -> None:
-    """删除 worktree（`git worktree remove`）。不存在则静默通过。"""
-    path = Path(path)
-    if not path.exists() and not path.is_symlink():
-        return
-    # 找到它所属的仓库顶层
-    toplevel: Path | None = None
-    if is_git_repo(path):
-        try:
-            toplevel = _git_toplevel(path)
-        except WorktreeError:
-            toplevel = None
-    if toplevel is None or toplevel == path:
-        # 不是 worktree（或已孤立）：直接删目录是不安全的，只报错
-        raise WorktreeError(f"不是可识别的 worktree，不删除：{path}")
-    args = ["git", "-C", str(toplevel), "worktree", "remove"]
-    if force:
-        args.append("--force")
-    args.append(str(path))
-    proc = subprocess.run(args, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise WorktreeError(
-            f"git worktree remove 失败：{proc.stderr.strip() or proc.stdout.strip()}"
-        )
