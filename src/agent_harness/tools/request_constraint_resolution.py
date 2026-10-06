@@ -78,8 +78,12 @@ class RequestConstraintResolutionTool(Tool):
     def description(self) -> str:
         return (
             "Pause this run by creating a persisted choice card for an explicit correction or a "
-            "possible material conflict with an active protected constraint. Use only when intent or persistence "
-            "scope is unclear; ordinary conversation and non-conflicting additions do not need a card. The argument roles are fixed: fact_id is the old active constraint id; candidate is the new proposed text from the current direct user message. A prose question alone does not pause this run."
+            "possible material conflict with an active protected constraint. Use for every explicit "
+            "correction, even when its persistence scope is clear, and for possible conflicts whose "
+            "intent or persistence scope is unclear. Ordinary conversation and non-conflicting "
+            "additions do not need a card. The argument roles are fixed: fact_id is the old active "
+            "constraint id; candidate is the new proposed text from the current direct user message. "
+            "A prose question alone does not pause this run."
         )
 
     @property
@@ -105,8 +109,9 @@ class RequestConstraintResolutionTool(Tool):
             "a possible material requirement conflicts with an active constraint and its intent/scope "
             "is unclear. This includes 'this task may need...' even when the possible requirement is "
             "phrased as maybe or might; do not infer task-only scope from 'this task' phrasing alone "
-            "and do not wait for the user to confirm the conflict. Copy the "
-            "Keep argument roles distinct: fact_id is the old active constraint id; candidate is only the new proposed text from the direct message. Never swap them or put the old rule in candidate. Omit correction "
+            "and do not wait for the user to confirm the conflict. Keep argument roles distinct: "
+            "fact_id is the old active constraint id; candidate is only the new proposed text from "
+            "the direct message. Never swap them or put the old rule in candidate. Omit correction "
             "framing such as 'I correct this rule:'. Before the answer, do not register the candidate "
             "or do affected work. A pending card does not authorize the conflicting action: wait for "
             "the user and do not use another tool until they answer. If rejected, do not guess, retry, or substitute a prose question; report that no card was created and stop before affected work. "
