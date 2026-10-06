@@ -38,8 +38,8 @@ _CALL_SEQ = itertools.count(1)
 
 class _ContentTriggeredImpl:
     """内容触发词驱动的 fake 模型：最后一条消息是本轮新用户消息且含 "bash"
-    → 出 bash tool_call（DANGER → 需审批）；最后一条是本轮的 tool result
-    → 出纯文本收尾。无跨 run 状态，多 leg 回归链复用同一 monkeypatch。
+    → 出 bash tool_call（非只读 → 命中 ASK 规则，需审批）；最后一条是本轮的 tool
+    result → 出纯文本收尾。无跨 run 状态，多 leg 回归链复用同一 monkeypatch。
     """
 
     def bind_tools(self, tools, **kwargs):
@@ -52,7 +52,7 @@ class _ContentTriggeredImpl:
             return
         if "bash" in str(getattr(last, "content", "")):
             yield AIMessage(content="", tool_calls=[{
-                "name": "bash", "args": {"command": "echo hi"},
+                "name": "bash", "args": {"command": "touch approval_probe"},
                 "id": f"call{next(_CALL_SEQ)}", "type": "tool_call",
             }])
         else:
