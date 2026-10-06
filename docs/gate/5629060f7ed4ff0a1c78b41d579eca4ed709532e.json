@@ -1,19 +1,16 @@
 {
   "schema": 1,
   "gate": "gate0",
-  "recorded_at": "2026-10-06T15:38:31+00:00",
-  "sha": "a0df2e83fe704ec73cccaf53cd941f13efd798cd",
-  "tree": "1c6a7ba54ddb2c52adba6d441332cfe9bdfab635",
+  "recorded_at": "2026-10-06T16:24:47+00:00",
+  "sha": "5629060f7ed4ff0a1c78b41d579eca4ed709532e",
+  "tree": "a7b7fe8a1012698ae6e7346702580329deddffbe",
   "argv": [],
-  "result": "FAIL",
-  "passed": 4,
+  "result": "PASS",
+  "passed": 6,
   "total": 6,
-  "failed": [
-    "oxlint",
-    "tsc"
-  ],
+  "failed": [],
   "env_failures": [],
-  "wall_seconds": 40.19,
+  "wall_seconds": 83.93,
   "budget_seconds": 60.0,
   "lane_timeout_seconds": 300.0,
   "tool_versions": {
@@ -21,8 +18,8 @@
     "python": "Python 3.12.3",
     "ruff": "ruff 0.16.3",
     "node": "v24.20.0",
-    "oxlint": "missing",
-    "tsc": "missing"
+    "oxlint": "Version: 1.85.0",
+    "tsc": "Version 6.0.3"
   },
   "scope": {
     "covers": "gate0.py 的机械车道（见 lanes）",
@@ -35,9 +32,10 @@
   "worktree": {
     "tracked_matches_head": true,
     "untracked": [
-      ".venv"
+      ".venv",
+      "docs/gate/f6e27c4be47e361e93f30e4bafef429de6ecf64d.json"
     ],
-    "untracked_total": 1
+    "untracked_total": 2
   },
   "lanes": [
     {
@@ -45,7 +43,7 @@
       "desc": "git diff --check",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.07,
+      "seconds": 0.04,
       "cwd": ".",
       "argv": [
         "git",
@@ -59,7 +57,7 @@
       "desc": "ruff check .",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.73,
+      "seconds": 0.18,
       "cwd": ".",
       "argv": [
         "./.venv/bin/ruff",
@@ -71,37 +69,36 @@
     {
       "name": "oxlint",
       "desc": "oxlint（web/）",
-      "status": "FAIL",
-      "rc": 1,
-      "seconds": 0.0,
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 2.21,
       "cwd": "web",
-      "argv": null,
-      "command": null,
-      "blocked": "找不到 web/node_modules（先 `cd web && pnpm install`）",
-      "output_tail": [
-        "工具缺失：找不到 web/node_modules（先 `cd web && pnpm install`）"
-      ]
+      "argv": [
+        "/usr/bin/node",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "/usr/bin/node node_modules/oxlint/bin/oxlint"
     },
     {
       "name": "tsc",
       "desc": "tsc -b（web/，类型检查；不含 vite build）",
-      "status": "FAIL",
-      "rc": 1,
-      "seconds": 0.0,
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 62.77,
       "cwd": "web",
-      "argv": null,
-      "command": null,
-      "blocked": "找不到 web/node_modules（先 `cd web && pnpm install`）",
-      "output_tail": [
-        "工具缺失：找不到 web/node_modules（先 `cd web && pnpm install`）"
-      ]
+      "argv": [
+        "/usr/bin/node",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "/usr/bin/node node_modules/typescript/bin/tsc -b"
     },
     {
       "name": "guards",
       "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 30.66,
+      "seconds": 11.38,
       "cwd": ".",
       "argv": [
         "./.venv/bin/python",
@@ -128,7 +125,7 @@
       "desc": "覆盖闸门 check_review_coverage.py",
       "status": "PASS",
       "rc": 0,
-      "seconds": 8.73,
+      "seconds": 7.35,
       "cwd": ".",
       "argv": [
         "./.venv/bin/python",
