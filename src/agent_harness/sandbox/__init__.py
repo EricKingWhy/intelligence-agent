@@ -13,19 +13,33 @@ from agent_harness.sandbox.base import (
     ShellEnvironment,
     ShellFamily,
 )
+from agent_harness.sandbox.capabilities import (
+    SUPPORTED_BACKENDS,
+    SandboxCapabilities,
+    SandboxUnavailableError,
+    probe_all_capabilities,
+    probe_docker_capabilities,
+    probe_local_capabilities,
+)
 from agent_harness.sandbox.docker import DockerSandbox
 from agent_harness.sandbox.local import LocalSubprocessSandbox
 from agent_harness.sandbox.paths import canonical_workspace_path
 from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegistry
 
 __all__ = [
+    "SUPPORTED_BACKENDS",
     "DockerSandbox",
     "ExecResult",
     "LocalSubprocessSandbox",
     "Sandbox",
+    "SandboxCapabilities",
+    "SandboxUnavailableError",
     "ShellEnvironment",
     "ShellFamily",
     "WorkspaceBindingError",
     "WorkspaceRegistry",
     "canonical_workspace_path",
+    "probe_all_capabilities",
+    "probe_docker_capabilities",
+    "probe_local_capabilities",
 ]

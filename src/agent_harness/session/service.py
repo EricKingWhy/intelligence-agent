@@ -1027,6 +1027,10 @@ class SessionService:
         session_deadline_at: Any = None,
         session_tool_call_limits: Mapping[str, Any] | None = None,
         session_max_delegations: int | None = None,
+        # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒
+        # 部署默认（当前 "local"）。docker 不可用时 registry.create 抛
+        # SandboxUnavailableError（fail-fast，零副作用），绝不静默回落。
+        sandbox_backend: str | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -1229,6 +1233,8 @@ class SessionService:
                 workspace=workspace, permission_mode=permission_mode,
                 amend=amend,
             ),
+            # #363 / W-19：显式 sandbox 后端选择（None ⇒ 部署默认）。
+            sandbox_backend=sandbox_backend,
         )
         session = Session.start(
             self._store, session_id=session_id,
@@ -1244,6 +1250,8 @@ class SessionService:
             # WS-2 的 attachSession 必须自己按会话 header 的规范 cwd 校验，不得
             # 反过来信任映射表。
             cwd=workspace,
+            # #363 / W-19：sandbox 后端选择记进 session/started（审计事实）。
+            sandbox_backend=sandbox_backend,
         )
 
         # W-07（#351）：Task 身份 = Session ID——创建即定义（票面 AC「真实现有
