@@ -1,0 +1,1 @@
+2026-10-07	sync: merge origin/main（943c93ce，PR #769 fix/#764 CLI theme）into codebuddy/767-invalid-arg-guidance。来侧改动面：CLI theme/docs，无文件交集（本分支改动：src/agent_harness/tooling/executor.py + tests/tooling/test_executor_767.py），自动合并零冲突。	8db0d3376edcd8913cafd023bb0c974818cdbfb3..1da1da7081267dc5409d3bf09e5daa056ee4312b
