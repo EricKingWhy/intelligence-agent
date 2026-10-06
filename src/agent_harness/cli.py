@@ -173,8 +173,7 @@ class StreamRenderer:
             self._write("\n")
             usage = event.data.get("usage_total") or {}
             if usage:
-                self._write(f"tokens: in {_format_tokens(usage.get('prompt_tokens'))}, "
-                            f"out {_format_tokens(usage.get('completion_tokens'))}\n")
+                self._write(_render_footer(usage, theme=self._theme) + "\n")
         elif event.type == RUN_FAILED:
             self._end_delta()
             reason = event.data.get("reason")
@@ -242,14 +241,40 @@ def _collapse_args(args: dict, *, sep: str = " ") -> str:
 
 
 def _format_tokens(count: int | None) -> str:
-    """token 数 → 紧凑文本（借鉴 pi footer.ts formatTokens 的 K/M 压缩）。"""
-    if not isinstance(count, int) or count < 0:
+    """token 数 → 紧凑文本（Pi footer.ts formatTokens 逐字 port，见票面来源）。
+
+    五档阈值逐条对齐 Pi（`<1000` 原样；`<10000` 1 位小数 k；`<1000000` 整数 k；
+    `<10000000` 1 位小数 M；否则整数 M）。`bool` 显式排除（`True` 不是 token 数）；
+    `Math.round` 用 `int(x + 0.5)` 还原（正数域等价；Python round 是 banker's
+    rounding，不可直接用）。
+    """
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         return "?"
     if count < 1000:
         return str(count)
-    if count < 1_000_000:
+    if count < 10000:
         return f"{count / 1000:.1f}k"
-    return f"{count / 1_000_000:.1f}M"
+    if count < 1000000:
+        return f"{int(count / 1000 + 0.5)}k"
+    if count < 10000000:
+        return f"{count / 1000000:.1f}M"
+    return f"{int(count / 1000000 + 0.5)}M"
+
+
+def _render_footer(usage: dict, *, theme) -> str:
+    """run 结束页脚行（Pi footer.ts 语法 port，去右对齐版）。返回单行（不含换行）。
+
+    段：`↑{in} ↓{out}`（muted）。`None`/0 的段 drop（Pi L181-182 语义）；左对齐裸
+    打印单行。context% 段本票不渲染——事件流无该数据源（`run/completed` 的 data 只有
+    `final_text`/`usage_total`/`trace_id`/`trace_url`），MUST NOT 用
+    `prompt_tokens / max_context_tokens` 拼凑。
+    """
+    segments = []
+    if usage.get("prompt_tokens"):
+        segments.append("↑" + _format_tokens(usage["prompt_tokens"]))
+    if usage.get("completion_tokens"):
+        segments.append("↓" + _format_tokens(usage["completion_tokens"]))
+    return theme.paint("muted", " ".join(segments))
 
 
 # ── 暂停 / 恢复渲染（#312，PRD §11 CLI behavior）──────────────────────────
