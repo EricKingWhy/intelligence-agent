@@ -120,6 +120,21 @@ def test_render_replay_event_session_forked(tmp_path: Path) -> None:
     assert "[fork]" in line and "p" in line and "@3" in line
 
 
+def test_render_replay_event_tool_result_tail_preview(tmp_path: Path) -> None:
+    """`#736`：回放 TOOL_RESULT 预览取尾部 5 行；hint 在保留行之前（更早的行在上方）。
+
+    只改取行方向与截断文案：`│` 前缀与 `→ 结果（冻结）:` 外层保持不变（着色归 P0-8）。
+    """
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    s = Session.start(store, session_id="tp")
+    s.append(TOOL_RESULT, {"tool_call_id": "c1",
+                           "content": "\n".join(f"l{i}" for i in range(1, 9))})
+    event = store.read_events("tp")[-1]
+    line = render_replay_event(event)
+    assert line == ("  → 结果（冻结）:\n  │ … (3 earlier lines)\n"
+                    "  │ l4\n  │ l5\n  │ l6\n  │ l7\n  │ l8")
+
+
 def test_render_replay_event_ignores_lifecycle(tmp_path: Path) -> None:
 
     store = JsonlSessionStore(root=tmp_path / "sessions")
