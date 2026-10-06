@@ -207,6 +207,9 @@ def test_resolution_schema_and_guidance_require_exact_single_request():
 def test_constraint_guidance_distinguishes_save_confirmation_and_authorization():
     guidance = RegisterConstraintTool().prompt_guidance.lower()
 
+    assert guidance.startswith(
+        "first distinguish a standing rule from a one-time authorization"
+    )
     assert "only claim it was saved after data.status is registered or already_registered" in guidance
     assert "authorization is not a protected fact" in guidance
     assert "i approve you to push this branch" in guidance

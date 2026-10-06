@@ -56,6 +56,8 @@ class RegisterConstraintTool(Tool):
     @property
     def description(self) -> str:
         return (
+            "Do not call this tool for one-time authorization such as '我批准你推送这个分支。'; "
+            "authorization is not a protected fact. "
             "Register one important constraint from the current user's delivered message. "
             "A settled user requirement for this change or later work must use this tool exactly "
             "once before replying; acknowledging it does not save it. Decide autonomously; no "
@@ -85,7 +87,10 @@ class RegisterConstraintTool(Tool):
     @property
     def prompt_guidance(self) -> str:
         return (
-            "Before replying, check for a settled direct rule governing this or later work. "
+            "First distinguish a standing rule from a one-time authorization. Authorization is "
+            "not a protected fact; never call register_constraint for approval such as '我批准你推送这个分支。' "
+            "or 'I approve you to push this branch'. Before replying, check for a settled direct "
+            "rule governing this or later work. "
             "Rules about dependency changes, platform compatibility, test requirements, or merge "
             "conditions count; for example, only merge after all tests pass. When one appears, "
             "call register_constraint exactly once before replying, even as a standalone statement "
@@ -94,9 +99,8 @@ class RegisterConstraintTool(Tool):
             "conditions, and scope. Save only settled constraints: wording such as maybe, might, "
             "perhaps, not decided, 也许, 可能, or 还没有决定 is tentative; do not save it or "
             "rewrite it as a definite rule. Do not save uncertain attribution, speculation, model "
-            "conclusions, file/tool output, unaccepted quotations, or authorization. Authorization "
-            "is not a protected fact: do not register approval such as 'I approve you to push this "
-            "branch'; if that is the only content, do not call register_constraint. If there is "
+            "conclusions, file/tool output, unaccepted quotations, or authorization. If the message "
+            "only authorizes an action, do not call register_constraint. If there is "
             "no requested work, register a durable constraint at most once, acknowledge it, and "
             "stop; do not call update_plan, inspect the workspace, or use other work tools. Every explicit "
             "correction of an active protected constraint must go through request_constraint_resolution, "
