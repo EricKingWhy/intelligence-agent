@@ -11,6 +11,7 @@ Seam：`SqliteMemoryV2JobStore` 的公开方法（§8.1 第 2 个 approved seam 
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -63,6 +64,91 @@ async def test_enqueue_persists_a_queued_job_with_no_owner(
     assert (job.tenant_id, job.user_id, job.project_id) == ("tenant-a", "user-a", None)
     assert job.session_id == "session-1"
     assert await jobs.get(job.job_id) == job
+
+
+@pytest.mark.asyncio
+async def test_existing_job_table_migrates_protected_extraction_columns_in_place(
+    tmp_path,
+) -> None:
+    path = tmp_path / "legacy-memory-v2.db"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """CREATE TABLE memory_v2_jobs (
+                job_id TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                project_id TEXT,
+                session_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                state TEXT NOT NULL,
+                outcome TEXT,
+                reason TEXT,
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """INSERT INTO memory_v2_jobs
+               (job_id, idempotency_key, tenant_id, user_id, session_id,
+                stage, state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("legacy-job", "legacy-key", "tenant-a", "user-a", "session-1",
+             "queued", "{}", T0.isoformat(), T0.isoformat()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrated = SqliteMemoryV2JobStore(path)
+    await migrated.initialize()
+
+    job = await migrated.get("legacy-job")
+    assert job.run_id is None
+    assert job.protected_fact_token_budget is None
+    assert job.protected_fact_extraction_state.value == "pending"
+    assert job.protected_fact_extraction_candidates is None
+
+    await migrated.initialize()
+    assert await migrated.get("legacy-job") == job
+
+
+@pytest.mark.asyncio
+async def test_protected_extraction_state_and_candidates_are_durable_and_scrubbed(
+    jobs: SqliteMemoryV2JobStore,
+) -> None:
+    job = await _enqueue(jobs, "session-extraction-state")
+    await jobs.claim(worker_id="worker-1", now=T0)
+
+    started = await jobs.start_protected_fact_extraction(
+        job_id=job.job_id, worker_id="worker-1", now=T0,
+    )
+    assert started is not None
+    assert started.protected_fact_extraction_state.value == "started"
+    assert started.protected_fact_extraction_candidates is None
+
+    saved = await jobs.save_protected_fact_candidates(
+        job_id=job.job_id,
+        worker_id="worker-1",
+        candidates=[{"source": "u0", "value": "Use the checked-in formatter."}],
+        now=T0,
+    )
+    assert saved is not None
+    assert saved.protected_fact_extraction_state.value == "ready"
+    assert saved.protected_fact_extraction_candidates == [
+        {"source": "u0", "value": "Use the checked-in formatter."},
+    ]
+    assert await jobs.get(job.job_id) == saved
+
+    assert await jobs.finish_protected_fact_extraction(
+        job_id=job.job_id, worker_id="worker-1", now=T0,
+    )
+    finished = await jobs.get(job.job_id)
+    assert finished.protected_fact_extraction_state.value == "done"
+    assert finished.protected_fact_extraction_candidates is None
 
 
 @pytest.mark.asyncio

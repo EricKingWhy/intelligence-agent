@@ -1,0 +1,1 @@
+2026-10-06	#663 初始双轴审查：Correctness/Spec 在 D6 裁决后剩 AC16 P1；Standards NEEDS CHANGES（P1 取消/账本竞态、P2 预算快照 fail-open、P3 重复 pending 推导）；P1/P2 已由后续 8a326c3b 修复。	e8e36f60106f3aefb540210693ee34b5c6fb3ed0..6c32fde762efaac161dce1cdb5499715edaded64

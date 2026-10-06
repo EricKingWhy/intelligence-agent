@@ -337,6 +337,7 @@ class MemoryFormationNotifier(Protocol):
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,
         events: Sequence[SessionEvent],
+        protected_fact_token_budget: int | None = None,
     ) -> object | None: ...
 
 
@@ -406,6 +407,7 @@ class MemoryJobRunner:
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,
         events: Sequence[SessionEvent],
+        protected_fact_token_budget: int | None = None,
     ) -> MemoryFormationJob | None:
         """一次 run 终结：合格就落一个 job 并排进服务循环，不合格什么都不做（AC1）。
 
@@ -446,6 +448,7 @@ class MemoryJobRunner:
                 tenant_id=identity.tenant_id, user_id=identity.user_id, project_id=project_id,
             ),
             session_id=session_id, run_id=run_id,
+            protected_fact_token_budget=protected_fact_token_budget,
         )
         self._schedule()
         return job

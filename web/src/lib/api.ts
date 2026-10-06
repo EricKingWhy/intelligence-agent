@@ -9,6 +9,7 @@
 import type {
   AgentEvent,
   ArtifactSlice,
+  ConstraintInputChoice,
   HostDirsListing,
   MemoryDeleted,
   MemoryScope,
@@ -1364,14 +1365,24 @@ export interface ResumeRunLimitsBody extends Partial<Record<RunLimitField, numbe
   tool_call_limits?: Record<string, number>;
 }
 
-export interface ResumePausedRunPayload {
-  run_id: string;
-  resume_basis: 'budget_increase';
-  budget: {
-    expected_version: number;
-    run: ResumeRunLimitsBody;
-  };
+export interface ConstraintInputAnswerPayload {
+  request_id: string;
+  choice: ConstraintInputChoice;
+  custom_text?: string;
 }
+
+export type ResumePausedRunPayload =
+  | {
+      run_id: string;
+      resume_basis: 'budget_increase';
+      budget: { expected_version: number; run: ResumeRunLimitsBody };
+    }
+  | {
+      run_id: string;
+      resume_basis: 'user_input';
+      budget: { expected_version: number; run: ResumeRunLimitsBody };
+      input_request: ConstraintInputAnswerPayload;
+    };
 
 /** 恢复目标（`lib/runBudget.ts` 的 `pauseFacts().resumeTarget` 的 wire 形态）：run 维
  *  给字段名，工具配额给工具名。两种目标写进 `budget.run` 的键不同，所以由这里**一处**

@@ -705,6 +705,25 @@ class ApproveRequest(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class InputRequestAnswer(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    request_id: str = Field(min_length=1, max_length=200)
+    choice: Literal[
+        "replace_persistently", "current_task_only", "keep_existing", "custom",
+    ]
+    custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+    @model_validator(mode="after")
+    def validate_custom_text(self) -> InputRequestAnswer:
+        if self.choice == "custom":
+            if self.custom_text is None or not self.custom_text.strip():
+                raise ValueError("custom choice requires non-blank custom_text")
+        elif self.custom_text is not None:
+            raise ValueError("custom_text is only allowed for custom choice")
+        return self
+
+
 class ResumeRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/resume 的请求体。
 
@@ -729,6 +748,7 @@ class ResumeRequest(_AmendValueValidators):
     # `agent_harness.agent.run_budget.validate_resume`（单一规则来源）——这里只挡形状。
     run_id: str | None = Field(default=None, min_length=1)
     resume_basis: str | None = Field(default=None, min_length=1)
+    input_request: InputRequestAnswer | None = None
     # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。
     budget: BudgetRequest | None = None
     # staged amend 字段（可选，None = 默认行为）
@@ -745,6 +765,12 @@ class ResumeRequest(_AmendValueValidators):
             raise ValueError(
                 "remember_as_procedural_rule requires a non-blank new task, not same-run resume"
             )
+        if self.input_request is not None and (
+            self.task is not None or self.resume_basis != "user_input"
+        ):
+            raise ValueError("input_request requires same-run resume_basis=user_input")
+        if self.resume_basis == "user_input" and self.input_request is None:
+            raise ValueError("resume_basis=user_input requires input_request")
         return self
 
 
@@ -1065,6 +1091,7 @@ class AppState:
         # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
         # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
         self.approval_queues: dict[str, PendingApprovalQueue] = {}
+        self.budget_recovery_failed_sessions: set[str] = set()
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -1258,6 +1285,7 @@ def _session_declaration_validator(
         session_id: str,
         workspace: Any,
         agent_profile: str | None,
+        include_constraint_resolution_tool: bool = True,
     ) -> None:
         # workspace / agent_profile 不参与判定（前者 = P2-1 零副作用要求；后者
         # 只影响 delegate 的配额值，不影响名字集）：参数保留是端口形状（Protocol）。
@@ -1266,6 +1294,8 @@ def _session_declaration_validator(
             limits,
             registered=sorted(root_registry_tool_names(
                 settings, wiring, session_id=session_id, session_store=store,
+                include_constraint_tools=True,
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
             )),
             scope="session",
         )
@@ -1319,6 +1349,7 @@ def session_service(state: AppState) -> SessionService:
         ensure_stores=state.ensure_stores,
         get_wiring=state.get_wiring,
         validate_session_declaration=state.validate_session_declaration,
+        budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
         registered_tool_names=state.registered_tool_names,
     )
 
@@ -2312,6 +2343,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 ),
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
+                input_request=(
+                    req.input_request.model_dump(exclude_none=True)
+                    if req.input_request is not None else None
+                ),
                 **budget_claims(req.budget, resume_surface=True),
                 amend=amend,
             )
@@ -3203,6 +3238,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SeqConflict,
             WorkspaceBindingConflict,
             WorkspaceNotFound,
+            BudgetRejection,
+            BudgetConflict,
         ) as e:
             # WorkspaceNotFound → 404（#615①）：投递走 resume_and_launch，外部 cwd
             # 在排队之后被删 → 中央映射既有条目，与 /messages、/resume 同口径。

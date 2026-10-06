@@ -74,8 +74,15 @@ from agent_harness.session.derive import (
     DANGLING_NOT_EXECUTED_DENIED,
     DANGLING_TOOL_CONTENT,
     collect_dangling,
+    derive_protected_facts,
+    is_direct_user_input_event,
 )
-from agent_harness.session.event import PERMISSION_RESOLVED, SessionEvent
+from agent_harness.session.event import (
+    PERMISSION_RESOLVED,
+    USER_INPUT_REQUESTED,
+    USER_MESSAGE,
+    SessionEvent,
+)
 from agent_harness.storage import (
     Operation,
     OperationLedger,
@@ -123,6 +130,94 @@ def _try_parse_result_json(result_json: str, tool_name: str) -> ToolResult | Non
             exc_info=True,
         )
         return None
+
+
+def _constraint_request_result(
+    operation: Operation, events: list[SessionEvent],
+) -> ToolResult | None:
+    """Rebuild the known successful result from its matching durable request event."""
+    args = _args_from_identity(operation.args_identity)
+    if (
+        operation.tool_name != "request_constraint_resolution"
+        or operation.run_id is None
+        or args is None
+        or not isinstance(args.get("fact_id"), str)
+        or not isinstance(args.get("candidate"), str)
+    ):
+        return None
+    requests = [
+        event for event in events
+        if event.type == USER_INPUT_REQUESTED
+        and event.data.get("tool_call_id") == operation.tool_call_id
+    ]
+    if len(requests) != 1:
+        return None
+    request = requests[0]
+    data = request.data
+    request_id = data.get("request_id")
+    source_id = data.get("source_event_id")
+    source_seq = data.get("source_event_seq")
+    fact_id = data.get("fact_id")
+    candidate = data.get("candidate")
+    old_value = data.get("old_value")
+    source = next((event for event in events if event.event_id == source_id), None)
+    fact = next(
+        (
+            item for item in derive_protected_facts(events)
+            if item.fact_id == fact_id
+            and item.type == "constraint"
+            and item.status == "active"
+        ),
+        None,
+    )
+    if (
+        request.run_id != operation.run_id
+        or data.get("run_id") != operation.run_id
+        or data.get("kind") != "protected_fact_conflict"
+        or not isinstance(request_id, str)
+        or not request_id
+        or fact_id != args["fact_id"]
+        or candidate != args["candidate"]
+        or not isinstance(candidate, str)
+        or source is None
+        or source.type != USER_MESSAGE
+        or source.seq != source_seq
+        or not is_direct_user_input_event(events, source.event_id)
+        or not isinstance(source.data.get("content"), str)
+        or candidate not in source.data["content"]
+        or fact is None
+        or fact.value != old_value
+    ):
+        return None
+    if any(
+        event.type == USER_MESSAGE
+        and event.data.get("input_request_id") == request_id
+        for event in events
+    ):
+        return None
+    return ToolResult.success(
+        message="约束问题已保存；当前 run 将暂停，等待你的选择后继续。",
+        data={"status": "requested", "request_id": request_id},
+        metadata={"attempt": 1},
+    )
+
+
+def _tool_budget_delta(operation: Operation) -> dict | None:
+    """Preserve the one-call budget fact for recovered constraint prompts."""
+    if operation.tool_name != "request_constraint_resolution":
+        return None
+    attempts = 0
+    if operation.result_json:
+        result = _try_parse_result_json(operation.result_json, operation.tool_name)
+        if result is not None:
+            value = result.metadata.get("attempt")
+            if isinstance(value, int) and not isinstance(value, bool):
+                attempts = value
+    return {
+        "tool_name": operation.tool_name,
+        "tool_calls": 1,
+        "tool_attempts": attempts,
+    }
 
 
 def _args_from_identity(args_identity: str | None) -> dict | None:
@@ -238,6 +333,7 @@ class _Synthesis:
     run_id: str | None
     agent_id: str | None
     args: dict | None = None  # 合成 tool/call 的入参；None 表示无可用 args_identity
+    budget_delta: dict | None = None
 
     def call_event_args(self) -> dict:
         """tool/call 事件的 args 字段：有 args 用 args，否则空字典（不变量保持）。"""
@@ -289,7 +385,9 @@ class RecoveryCoordinator:
         )
         self._lock_timeout_seconds = lock_timeout_seconds
 
-    async def recover(self, session_id: str) -> Session:
+    async def recover(
+        self, session_id: str, *, defer_session_resumed: bool = False,
+    ) -> Session:
         """恢复一个 Session：8 步顺序执行，返回可直接交给 AgentRuntime 的 Session。"""
         callback = self._reconcile_callback
         reconcile_requests: list[_ReconcileRequest] = []
@@ -310,12 +408,40 @@ class RecoveryCoordinator:
             # 步骤 4：load Operation Ledger。
             operations = await self._operation_ledger.list_for_session(session_id)
             operations_by_call_id = {op.tool_call_id: op for op in operations}
+            dangling_ids, call_event_ids = collect_dangling(session.events)
+
+            # A durable request event proves this exact tool completed enough work to
+            # pause safely. If the process died before Ledger terminalization, restore
+            # the known success from that event rather than blindly rerunning or
+            # sending the question to manual reconcile.
+            request_repairs: dict[str, ToolResult] = {}
+            for operation in operations:
+                if (
+                    operation.state is not OperationState.RUNNING
+                    or operation.tool_name != "request_constraint_resolution"
+                ):
+                    continue
+                recovered = _constraint_request_result(operation, session.events)
+                if recovered is None:
+                    continue
+                request_repairs[operation.tool_call_id] = recovered
+                operations_by_call_id[operation.tool_call_id] = operation.model_copy(
+                    update={
+                        "state": OperationState.SUCCEEDED,
+                        "result_json": recovered.model_dump_json(),
+                        "artifact_ref": None,
+                        "reconcile_meta": None,
+                    },
+                )
+            operations = [
+                operations_by_call_id[operation.tool_call_id]
+                for operation in operations
+            ]
 
             # 步骤 5（决策阶段）：对每个 dangling tool_call 做确定性恢复决策。
             # 确定性决策（终态 / PENDING / 占位）全部完成前不写任何事件
             # （先决策后写结果）；需人工裁决的先收集——没有 ReconcileCallback
             # 时在这里整体安全拒绝，什么都不写（#30）。
-            dangling_ids, call_event_ids = collect_dangling(session.events)
             plan: list[_Synthesis] = []
             reconcile_required: list[tuple[str, Operation]] = []
             for tool_call_id in sorted(dangling_ids):
@@ -329,6 +455,10 @@ class RecoveryCoordinator:
                     needs_call_event=tool_call_id not in call_event_ids,
                     approval_outcome=approval_outcome_for_call(
                         session.events, tool_call_id
+                    ),
+                    budget_delta=(
+                        _tool_budget_delta(operation)
+                        if operation is not None else None
                     ),
                 )
                 if synthesis is not None:
@@ -355,6 +485,23 @@ class RecoveryCoordinator:
                     f"存在需要人工裁决的 UNKNOWN Operation（{detail}）："
                     "未提供 ReconcileCallback，拒绝恢复——避免伪造结果或盲目重跑"
                     "高风险副作用（不变量 #14）。注入 ReconcileCallback 后可重试 recover()。"
+                )
+
+            for tool_call_id, recovered in request_repairs.items():
+                current = await self._operation_ledger.get(session_id, tool_call_id)
+                if (
+                    current is None
+                    or current.state is not OperationState.RUNNING
+                    or current.tool_name != "request_constraint_resolution"
+                ):
+                    raise RecoveryError(
+                        "durable user-input request no longer matches its running operation"
+                    )
+                await self._operation_ledger.update_state(
+                    session_id,
+                    tool_call_id,
+                    OperationState.SUCCEEDED,
+                    result_json=recovered.model_dump_json(),
                 )
 
             # #337：陈旧审批的 fail-closed 结清。操作约束：这是恢复链里唯一且幂等的
@@ -431,9 +578,15 @@ class RecoveryCoordinator:
                             run_id=item.run_id,
                             agent_id=item.agent_id,
                         )
+                result_data = {
+                    "tool_call_id": item.tool_call_id,
+                    "content": item.content,
+                }
+                if item.budget_delta is not None:
+                    result_data["budget_delta"] = item.budget_delta
                 session.append(
                     TOOL_RESULT,
-                    {"tool_call_id": item.tool_call_id, "content": item.content},
+                    result_data,
                     run_id=item.run_id,
                     agent_id=item.agent_id,
                 )
@@ -489,7 +642,8 @@ class RecoveryCoordinator:
 
             if not reconcile_requests:
                 # 无人工等待时，锁内完成最后的 session/resumed，保持原有单段语义。
-                session.append(SESSION_RESUMED, {})
+                if not defer_session_resumed:
+                    session.append(SESSION_RESUMED, {})
                 session.derive_messages()
                 return session
 
@@ -521,7 +675,8 @@ class RecoveryCoordinator:
         async with self._recovery_lock():
             events = self._session_store.read_events(session_id)
             session = self._session_from_events(session_id, events)
-            session.append(SESSION_RESUMED, {})
+            if not defer_session_resumed:
+                session.append(SESSION_RESUMED, {})
             session.derive_messages()
             return session
 
@@ -580,6 +735,7 @@ class RecoveryCoordinator:
         *,
         needs_call_event: bool,
         approval_outcome: ApprovalOutcome = ApprovalOutcome.NOT_REQUESTED,
+        budget_delta: dict | None = None,
     ) -> _Synthesis | None:
         """对一个 dangling tool_call 做【确定性】恢复决策（纯决策，不写任何状态）。
 
@@ -639,6 +795,7 @@ class RecoveryCoordinator:
                 run_id=run_id,
                 agent_id=agent_id,
                 args=args,
+                budget_delta=budget_delta,
             )
 
         if operation.state is OperationState.PENDING:
