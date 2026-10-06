@@ -1,0 +1,166 @@
+/**
+ * REST 客户端（fetch）：后端 API 面以 src/agent_harness/web/app.py 为准。
+ * TUI 是纯客户端：所有真相向服务端查询，本地不写任何会话状态。
+ */
+import { asNumber, asString, isRecord, type EventEnvelope } from "./events.ts";
+import type { SessionSummaryView } from "./views/sessionselect.ts";
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly detail: string,
+  ) {
+    super(`HTTP ${status}: ${detail}`);
+    this.name = "ApiError";
+  }
+}
+
+export interface ResumeRequest {
+  run_id?: string;
+  resume_basis?: string;
+  budget?: { expected_version?: number };
+}
+
+export class ApiClient {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly fetchFn: typeof fetch = fetch,
+  ) {}
+
+  private url(path: string): string {
+    return `${this.baseUrl.replace(/\/$/, "")}${path}`;
+  }
+
+  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await this.fetchFn(this.url(path), {
+      ...init,
+      headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      let detail = text;
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (typeof parsed === "object" && parsed !== null && "detail" in parsed) {
+          detail = String((parsed as { detail: unknown }).detail);
+        }
+      } catch {
+        // 非 JSON 错误体：原样上抛
+      }
+      throw new ApiError(response.status, detail);
+    }
+    return (text ? JSON.parse(text) : null) as T;
+  }
+
+  listSessions(): Promise<SessionSummaryView[]> {
+    return this.request("/api/sessions");
+  }
+
+  async getEvents(sessionId: string): Promise<EventEnvelope[]> {
+    const raw = await this.request<unknown[]>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/events`,
+    );
+    return raw.map(parseEventRow);
+  }
+
+  /**
+   * 只建会话（launch=false，无 task）-> 返回会话 JSON；任务随后经
+   * /messages 投递（launch=true 与 task 组合的 SSE 响应对 TUI 无用，
+   * 事件统一走 GET /stream 订阅消费）。
+   */
+  createSession(): Promise<{ session_id?: string }> {
+    return this.request("/api/sessions?launch=false", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  sendMessage(sessionId: string, content: string): Promise<unknown> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content, mode: "queue" }),
+    });
+  }
+
+  approve(
+    sessionId: string,
+    approvalId: string,
+    approved: boolean,
+    decision?: string,
+  ): Promise<unknown> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({
+        approval_id: approvalId,
+        approved,
+        decision: decision ?? (approved ? "approve" : "deny"),
+      }),
+    });
+  }
+
+  cancel(sessionId: string): Promise<{ status: string }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  compact(sessionId: string): Promise<unknown> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/context/compact`,
+      { method: "POST" },
+    );
+  }
+
+  budget(sessionId: string): Promise<Record<string, unknown>> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/budget`);
+  }
+
+  progress(sessionId: string): Promise<unknown> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/progress`);
+  }
+
+  resume(sessionId: string, req: ResumeRequest): Promise<unknown> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * 客户端明确退出信号（ADR-0046 选项 B 写侧）。
+   * 服务端 `POST /api/sessions/{id}/client-exit`（#360 W-17 补的 web 接缝，
+   * 接 RunManager.signal_client_exit）：200 即送达；404/405 时如实上报，
+   * 调用方降级为断线宽限基线，不伪造暂停成功。
+   */
+  async signalClientExit(
+    sessionId: string,
+    clientId: string,
+  ): Promise<{ delivered: boolean; status: number }> {
+    const response = await this.fetchFn(
+      this.url(`/api/sessions/${encodeURIComponent(sessionId)}/client-exit`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_id: clientId }),
+      },
+    ).catch(() => null);
+    if (response === null) return { delivered: false, status: 0 };
+    return { delivered: response.ok, status: response.status };
+  }
+}
+
+/** GET /events 返回的是 to_dict() 行（含 event_id 等），收敛成信封形状。 */
+function parseEventRow(row: unknown): EventEnvelope {
+  const obj = (typeof row === "object" && row !== null ? row : {}) as Record<string, unknown>;
+  return {
+    type: asString(obj.type),
+    data: isRecord(obj.data) ? obj.data : {},
+    seq: asNumber(obj.seq),
+    run_id: typeof obj.run_id === "string" ? obj.run_id : null,
+    step_id: asNumber(obj.step_id),
+    session_id: asString(obj.session_id),
+    time: asString(obj.time),
+    durability: "durable",
+  };
+}
