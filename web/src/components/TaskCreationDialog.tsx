@@ -139,8 +139,8 @@ function TaskCreationForm({
     { value: 'auto', title: 'Auto', description: '默认模型链' },
     ...models.map((m) => ({
       value: m.name,
-      title: m.display_name || m.name,
-      description: m.description || undefined,
+      title: m.name,
+      description: m.provider ? `via ${m.provider}` : undefined,
     })),
   ];
 

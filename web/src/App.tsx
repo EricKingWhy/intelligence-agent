@@ -64,7 +64,7 @@ import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type { ToolCall, PresetTask, AgentEvent, Project, UndeliveredInput } from './types';
+import type { ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
 const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
