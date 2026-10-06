@@ -18,17 +18,42 @@ from agent_harness.workspace.index import (
     WorkspaceError,
     WorkspaceIndex,
 )
+from agent_harness.workspace.lease import (
+    AcquireOutcome,
+    LeaseAlreadyHeldElsewhere,
+    LeaseError,
+    LeasePathConflict,
+    LeaseStatus,
+    NoPresenceReader,
+    ReleaseOutcome,
+    TaskPresenceReader,
+    WorkspaceLeaseManager,
+)
+from agent_harness.workspace.lease_paths import LeasePathError, paths_conflict
+from agent_harness.workspace.lease_store import SqliteLeaseStore
 from agent_harness.workspace.models import StartedHeader, Workspace
 from agent_harness.workspace.store import SqliteWorkspaceStore, WorkspaceRegistryCorrupt
 
 __all__ = [
+    "AcquireOutcome",
+    "LeaseAlreadyHeldElsewhere",
+    "LeaseError",
+    "LeasePathConflict",
+    "LeasePathError",
+    "LeaseStatus",
+    "NoPresenceReader",
+    "ReleaseOutcome",
     "SessionHeaders",
+    "SqliteLeaseStore",
     "SqliteWorkspaceStore",
     "StartedHeader",
+    "TaskPresenceReader",
     "UnknownLedgerEntry",
     "UnknownWorkspace",
     "Workspace",
     "WorkspaceError",
     "WorkspaceIndex",
+    "WorkspaceLeaseManager",
     "WorkspaceRegistryCorrupt",
+    "paths_conflict",
 ]
