@@ -135,7 +135,7 @@ test('live: 六件事逐一呈现（真实投影形状）', async ({ page, reque
 
   // ⑥ 三操作：各自后果文案
   const s6 = dialog.locator('section[aria-label="操作"]');
-  await expect(s6.getByRole('button', { name: '接受' })).toBeVisible();
+  await expect(s6.getByRole('button', { name: '接受', exact: true })).toBeVisible();
   await expect(s6.getByRole('button', { name: '带原因接受' })).toBeVisible();
   await expect(s6.getByRole('button', { name: '释放目录' })).toBeVisible();
   await expect(s6.getByText(/这不是撤销接受/)).toBeVisible();
