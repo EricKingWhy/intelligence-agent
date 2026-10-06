@@ -9,10 +9,11 @@ fork seq（由 child 事件流的 ``session/forked`` 投影，derive 单源）�
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import create_autospec
 
 import pytest
 
+from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session.event import (
     MODEL_COMPLETED,
@@ -163,40 +164,19 @@ class TestForkChildProgressFile:
                 store, meta, "parent",
                 boundary_user_message_seq=_second_user_message_seq(parent),
                 child_session_id="child",
-                workspace_registry=_FailingRegistry(),
+                workspace_registry=_failing_registry(),
             )
         assert not progress_paths(tmp_path, "child").markdown.exists(), \
             "fork 失败不留 child 进度文件"
 
 
-class _FailingRegistry:
-    """基础设施故障的 registry 替身（fork 失败注入，原样上抛）。
+def _failing_registry():
+    """create() 入口即抛 OSError 的 WorkspaceRegistry 替身（fork 失败注入）。
 
-    create() 形参与生产 WorkspaceRegistry.create() 保持对齐（#363 起生产
-    调用点会传 backend=，更早还有 workspace_root=）：本替身在入口即抛
-    OSError、形参接受后不消费——签名失配会让 TypeError 抢在失败注入点
-    之前，把"基础设施故障"洗成"替身接口过期"。
+    签名由 create_autospec 从真实类运行时内省：生产 create() 演化形参时替身
+    构造性跟得上，不会重演 #746 的 TypeError 抢跑——签名失配会把"基础设施
+    故障"洗成"替身接口过期"。side_effect 在签名校验通过后注入，失败语义不变。
     """
-
-    def exists(self, session_id: str) -> bool:
-        return True
-
-    def get(self, session_id: str):
-        parent_ws = MagicMock()
-        parent_ws.workspace_root = Path("/nonexistent-parent-ws")
-        return parent_ws
-
-    def default_workspace_root(self, session_id: str) -> Path:
-        return Path("/nonexistent-child-ws")
-
-    def create(
-        self,
-        session_id: str,
-        *,
-        workspace_root: Path | None = None,
-        backend: str | None = None,
-    ):
-        raise OSError("staging unavailable")
-
-    def fork_staging_root(self) -> Path:
-        raise OSError("staging unavailable")
+    registry = create_autospec(WorkspaceRegistry, instance=True)
+    registry.create.side_effect = OSError("staging unavailable")
+    return registry
