@@ -253,6 +253,11 @@ export default function App() {
   // #353 W-09：任务审阅浮层（独立入口——不占用 TopBar / capabilities 面，避免与并行票冲突）。
   // 同样必须在 Esc 中断 effect 之前声明（看板同因）。
   const [taskReviewOpen, setTaskReviewOpen] = useState(false);
+  // #353：会话切走即关闭审阅浮层（面板内容按会话重建，不跨会话复用——否则会
+  // 在用户没点开的情况下展示另一个会话的审阅内容）。
+  useEffect(() => {
+    setTaskReviewOpen(false);
+  }, [selectedId]);
   // Esc 中断（Claude Code "esc to interrupt" 语言）：流式中 Esc = 停止当前 run，
   // 与 Composer 停止按钮同走 cancelStream。dialog 打开时（palette/auth 面板）
   // Esc 优先归它们——target 在 dialog 内则不抢。target 可能是 window/document
