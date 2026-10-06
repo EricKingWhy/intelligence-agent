@@ -76,6 +76,7 @@ from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
 from agent_harness.tooling.contract import PermissionPolicy, ToolExposure, exposure_of
 from agent_harness.tooling.exposure import ToolExposureController, ToolSearchTool
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
+from agent_harness.tooling.permission_rules import default_rule_set
 from agent_harness.tooling.resource_locks import ResourceLockRegistry
 from agent_harness.tools import (
     ApplyPatchTool,
@@ -678,6 +679,10 @@ async def build_runtime(
                 overflow_handler=overflow_handler,
                 operation_ledger=stores.operation_ledger,
                 resource_locks=resource_locks,
+                # #358 / W-14：子执行器与父同一审批面（决策 11 权限传递）——
+                # 显式注入产品级默认权限矩阵（规则引擎本体默认 None = 不启用）。
+                permission_rules=default_rule_set(),
+                workspace_root=instruction_cwd,
             )
 
         runtime_multiagent_provider.activate(
@@ -743,7 +748,11 @@ async def build_runtime(
         executor=ToolExecutor(registry, policy=policy, approval_callback=approval_callback,
                               overflow_handler=overflow_handler,
                               operation_ledger=stores.operation_ledger,
-                              resource_locks=resource_locks),
+                              resource_locks=resource_locks,
+                              # #358 / W-14：主执行器注入产品级默认权限矩阵
+                              # （规则引擎本体默认 None = 不启用；矩阵归 composition root）。
+                              permission_rules=default_rule_set(),
+                              workspace_root=instruction_cwd),
         max_agent_turns=max_agent_turns,
         checkpoint_policy=OnStableBoundary(stores.checkpoint_store),
         session_meta_store=stores.session_meta_store,
