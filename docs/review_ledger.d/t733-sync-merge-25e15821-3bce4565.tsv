@@ -1,0 +1,1 @@
+2026-10-06	#733 merge 前同步合并机械归属行（PR #745 分支保护要求 up-to-date）：merge 3bce4565 合 origin/main b04f164e（来侧 = PR #742 #731 lease-junction-fallback + #731 先回后正落账 docs，ort 零冲突，来侧 16 文件全在 workspace/lease + tests/workspace + docs，与本票 cli_theme.py/cli.py/tests/test_cli* 零文件交集）；本 commit 零手工改动，纯机械合并。	25e1582191844e56af7d0896207f84468eaefb28..3bce45658c9481d0680d5d8e5626eb0b9df068ac
