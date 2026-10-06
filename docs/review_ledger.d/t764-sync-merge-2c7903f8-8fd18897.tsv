@@ -1,0 +1,1 @@
+2026-10-07	#764 四轮先回后正同步合并（PR #769 merge 三试仍被拦「head not up to date」：origin/main 前移 1c5e5706→1b552055——PR #763 #362 chrome MCP 能力（src/mcp/*、web/app.py、tests/mcp、web/src/lib/api.ts 等 7 文件），与本票零交集；来侧各笔由其自带台账行覆盖）。merge-tree 预测 CLEAN、ort 实际零冲突零手工解决；合并树 ≠ 已验证树（来侧含代码笔）⇒ 合并树全量 pytest r4 + Gate-0 重采随补记落账	2c7903f827b3e5e5e36addb0ea04cdc7d2b66102..8fd1889707412e329be3b7639ba7443f3edd454c
