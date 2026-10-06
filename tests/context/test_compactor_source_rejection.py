@@ -145,7 +145,8 @@ async def test_valid_source_ranges_still_succeed():
         events=_events(), source_ranges=[(1, 1), (2, 2), (3, 3)],
     )
     assert result.compacted_turn_count == 1
-    assert result.bracket_id is not None
+    # #647 T11f：compactor 不铸造身份（有溯源也不在此铸造，由持久化方铸造）。
+    assert result.bracket_id is None
     assert result.summary is not None
     assert (result.source_seq_start, result.source_seq_end) == (1, 2)
     assert result.failures == []

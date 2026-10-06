@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from time import monotonic
 from typing import Any
-from uuid import uuid4
 
 from langchain_core.messages import (
     AIMessage,
@@ -204,6 +203,10 @@ class CompactionResult:
     token_estimate: int
     fallback_used: bool
     # T4 (#134)：bracket 元数据——被压缩段的 seq 区间 + 唯一 bracket_id。
+    # #647 T11f：bracket_id 是"持久化身份"——ContextCompactor.compact()
+    # 永不铸造（成功也返回 None，对标 Pi/DSH 的无 id 摘要结果）；只有
+    # ContextBuilder 在决定持久化时才铸造并回填。调用方不得把 compactor
+    # 直调结果（bracket_id 恒为 None）当作可持久化/可信任的 bracket。
     source_seq_start: int | None = None
     source_seq_end: int | None = None
     bracket_id: str | None = None
@@ -612,7 +615,18 @@ class ContextCompactor:
             False,
             source_seq_start=source_seq_start,
             source_seq_end=source_seq_end,
-            bracket_id=str(uuid4()),
+            # #647 T11f：身份不在此铸造（照搬成熟产品）——
+            # Pi（earendil-works/pi @28dcce2b）compaction.ts:104：
+            # "Result from compact() - SessionManager adds uuid/parentUuid when saving"，
+            # 身份只在 session-manager.ts appendCompaction（L1262-1288）持久化时
+            # 由 generateId（L277）铸造；
+            # DeepSeek Harness（@5badb150）summarizer.ts:87-106 的 SummaryResult
+            # 无 id 字段，compactionId 在 region.ts:204
+            # session.append('compaction/start') 前一刻铸造（types.ts:95：
+            # "Stable identity shared by this compaction's complete durable
+            # lifecycle."）。
+            # 无溯源 ⇒ 无身份；有溯源结果的身份也由持久化方（builder）铸造。
+            bracket_id=None,
             summary=summary_text,
             summary_model_id=summary_model_id,
             duration_ms=max(round((monotonic() - summary_started_at) * 1000), 0),
