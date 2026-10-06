@@ -13,6 +13,8 @@ seq 纪律」，属会话领域、与传输层无关；基类名沿用历史命�
 
 from __future__ import annotations
 
+from typing import Literal
+
 
 class SessionServiceError(Exception):
     """SessionService 所有领域异常的基类。"""
@@ -28,6 +30,38 @@ class InvalidSessionId(SessionServiceError):
 
 class ActiveRunConflict(SessionServiceError):
     """session 已有在途 run，不允许并发。"""
+
+
+class CompactionInProgress(ActiveRunConflict):
+    """该会话已有一个手动压缩在途（per-session in-flight 防重，F6 #635）。
+
+    与「在途 run」共用一个 HTTP 状态（409），但**类型可区分**：CLI 按类型映射
+    "压缩已在进行中" 文案，不再靠错误字符串子串匹配。继承 `ActiveRunConflict`
+    使 Web 的既有 `except ActiveRunConflict` 与领域错误表零改动即可覆盖子类
+    （同 `WorkspacePathInvalid(WorkspaceNameInvalid)` 先例）。
+    """
+
+
+class CompactionConcurrentWrite(ActiveRunConflict):
+    """手动压缩落盘窗口内检测到并发改动（write guard 复验失败，F6 #635）。
+
+    两种触发面：重拿 `session_lock` 后仍 `is_busy`（有 run 在收尾写日志）、或事件数
+    与快照（含本次自身失败记录）不符。同为 409，但类型化后 CLI 可给出可操作文案。
+    继承 `ActiveRunConflict` 的理由同 `CompactionInProgress`。
+
+    `reason` 区分两种成因，供调用方给**诚实且可操作**的文案（G1 #635）：
+
+    - ``"run_busy"``：重拿锁后仍 `is_busy`——run 在收尾窗口（finalizer 仍在写日志）。
+      真实动作是"等 run 结束"，不是"重试"；且此前的失败记录可能已落盘，故也不是
+      "零改动"。
+    - ``"event_drift"``：事件数与快照不符——压缩期间被并发写者改动，应重试。
+    """
+
+    def __init__(
+        self, message: str, *, reason: Literal["run_busy", "event_drift"],
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class SessionHasChildren(SessionServiceError):

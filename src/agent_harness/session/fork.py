@@ -48,6 +48,8 @@ from agent_harness.session.event import (
     FORK_IN_PROGRESS,
     MODEL_COMPLETED,
     PERMISSION_CHANGED,
+    PERMISSION_GRANTED,
+    PERMISSION_REVOKED,
     RUN_FAILED,
     RUN_PAUSED,
     RUN_RESUMED,
@@ -58,8 +60,10 @@ from agent_harness.session.event import (
     TOOL_CALL,
     TOOL_RESULT,
     USER_MESSAGE,
+    WORKFLOW_MODE_CHANGED,
     SessionEvent,
 )
+from agent_harness.session.progress import write_progress_file
 from agent_harness.session.session import Session
 from agent_harness.storage.session_meta import SessionMeta
 
@@ -227,12 +231,23 @@ async def fork_session(
     # **更早**的那条（锚点之前），覆盖掉下面从父派生的**当下** effective 档，造成
     # 「父 fork 后又改过档、child 却继承旧档」。意图标记同理：它描述的是**这一条
     # fork 线**的构建过程，孙代 seed 不该携带（孙的 fork 流程写自己的标记）。
+    # #526：`permission/approval-granted|revoked`（会话级审批授权）与
+    # `workflow/mode-changed`（工作流档）同属会话级状态——fork **不继承授权**
+    # （#358 W-14 / F26：高风险权限不因 Fork 静默扩大；设计文档 §5 推荐默认值），
+    # 工作流档亦不继承（child 从 NORMAL 起，用户可一键重进 plan）。
     boundary_events = [event for event in parent_events if event.seq < anchor.seq]
     seed = [
         event
         for event in boundary_events
         if event.type
-        not in {SESSION_STARTED, PERMISSION_CHANGED, FORK_IN_PROGRESS}
+        not in {
+            SESSION_STARTED,
+            PERMISSION_CHANGED,
+            FORK_IN_PROGRESS,
+            PERMISSION_GRANTED,
+            PERMISSION_REVOKED,
+            WORKFLOW_MODE_CHANGED,
+        }
     ]
     _validate_run_complete(seed, parent_session_id)
 
@@ -263,7 +278,14 @@ async def fork_session(
         event.event_id
         for event in boundary_events
         if event.type
-        in {SESSION_STARTED, PERMISSION_CHANGED, FORK_IN_PROGRESS}
+        in {
+            SESSION_STARTED,
+            PERMISSION_CHANGED,
+            FORK_IN_PROGRESS,
+            PERMISSION_GRANTED,
+            PERMISSION_REVOKED,
+            WORKFLOW_MODE_CHANGED,
+        }
     }
     event_id_remap: dict[str, str | None] = {
         event_id: None for event_id in removed_state_event_ids
@@ -404,6 +426,20 @@ async def fork_session(
             fork_point_seq=fork_point_seq,
         )
     )
+    # W-06（#350）：child 独立进度文件（agent-progress/<child-id>/progress.md，
+    # parent ID / fork seq 由 child 事件流里的 session/forked 投影而来——
+    # derive_progress_document 单源读取，不在此复制字段）。写在 fork **完全
+    # 完成**之后：半成品 child（fork/in-progress 无 session/forked）永远不
+    # 会有进度文件，误导性半成品不可能存在；写入是原子的，中途失败不留
+    # 半文件；失败 best-effort 只记警告（child 已是完整事实，fork 不回滚）。
+    child_cwd = session_cwd(child.events)
+    if child_cwd and Path(child_cwd).is_dir():
+        outcome = write_progress_file(child_cwd, child.session_id, child.events)
+        if not outcome.ok:
+            logger.warning(
+                "child 进度文件写入失败（child=%s, kind=%s）：%s",
+                child.session_id, outcome.error_kind, outcome.reason,
+            )
     return child
 
 

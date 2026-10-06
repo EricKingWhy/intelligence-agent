@@ -350,6 +350,21 @@ function summarizePermissionResolved(event: AgentEvent): string {
   return typeof decision === 'string' && decision ? `审批已决（${decision}）` : '审批已决';
 }
 
+// #526 A2：会话级审批授权的写/撤回——审计事件，不改变投影状态。
+function summarizeApprovalGranted(event: AgentEvent): string {
+  const tool = event.data.tool_name;
+  return typeof tool === 'string' && tool ? `已授予会话级审批（${tool}）` : '已授予会话级审批';
+}
+
+function summarizeApprovalRevoked(): string {
+  return '已撤回会话级审批';
+}
+
+// #526 B1：工作流档切换——审计事件，不改变投影状态。
+function summarizeWorkflowModeChanged(event: AgentEvent): string {
+  return event.data.mode === 'plan' ? '已切换到 Plan 模式' : '已切换到普通模式';
+}
+
 /** 增量类事件共用摘要（model/delta、text/delta、tool/output_delta、
  *  reasoning/delta 同一惯例：Timeline 行仍 verbatim 在场，摘要只记增量）。 */
 function summarizeDeltaChars(event: AgentEvent): string {
@@ -1612,6 +1627,14 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     apply: projectToolFailureGuard,
     summarize: summarizeToolFailureGuard,
   },
+  // #529：`skill/registered|updated|removed` 是 skill 沉淀闭环的治理留痕事件（durable，
+  // append-only）。它们自己不带来新的投影状态——注册/更新/移除的 catalog 可见性由
+  // 后端 SkillDiscovery 刷新保证，渲染层暂无展示面（第一版只读展示归后续票）。
+  // 与 MEMORY_UPDATED 同形：登记为 no-op ⇒ 已知类型、不进 `unknown_events`；
+  // 不登记则前端 `tsc` 直接红（`Record<EventTypeValue, EventSemantics>` 穷尽性）。
+  [EventType.SKILL_REGISTERED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.SKILL_UPDATED]: { apply: noopProjection, summarize: emptySummary },
+  [EventType.SKILL_REMOVED]: { apply: noopProjection, summarize: emptySummary },
   // #317（T9）：`guard/stuck` 是循环护栏的第二条事件面，**它自己不带来新的投影状态**——
   // `level=replan` 的纠正以 `user/message`（`injected_by='stuck_guard'`）落地，渲染层照
   // `projectUserMessage` 的既有标记显示为系统提示条；`level=paused` 的那一步由紧随其后的
@@ -1657,6 +1680,10 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
     summarize: summarizeApprovalRequested,
   },
   [EventType.PERMISSION_RESOLVED]: { apply: projectPermissionResolved, summarize: summarizePermissionResolved },
+  // #526 A2/B1：会话级审批授权写/撤回、工作流档切换——审计事件，投影 no-op。
+  [EventType.PERMISSION_GRANTED]: { apply: noopProjection, summarize: summarizeApprovalGranted },
+  [EventType.PERMISSION_REVOKED]: { apply: noopProjection, summarize: summarizeApprovalRevoked },
+  [EventType.WORKFLOW_MODE_CHANGED]: { apply: noopProjection, summarize: summarizeWorkflowModeChanged },
   [EventType.TOOL_OUTPUT_DELTA]: {
     apply: projectToolOutputDelta,
     summarize: summarizeDeltaChars,

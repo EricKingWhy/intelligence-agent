@@ -2,12 +2,18 @@
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
 from agent_harness.context.compactor import (
     CompactionFailure,
+    CompactionPostWriteError,
+    CompactionResult,
     ContextCompactor,
     ContextWindowExceededError,
     _is_compaction_summary,
@@ -17,6 +23,7 @@ from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     ProtectedFact,
     derive_messages_with_source_ranges,
@@ -36,6 +43,14 @@ from agent_harness.session.event import (
     SessionEvent,
 )
 from agent_harness.session.plan import PlanState, derive_plan
+from agent_harness.session.progress import (
+    PROGRESS_VERIFY_OK,
+    PROGRESS_VERIFY_STALE,
+    derive_progress_document,
+    render_progress_brief_lines,
+    verify_progress_file,
+    write_progress_file,
+)
 
 logger = logging.getLogger("agent_harness.context")
 
@@ -125,6 +140,19 @@ class ProtectedFactBudgetExceededError(ContextWindowExceededError):
 _PROJECTING_EVENT_TYPES = frozenset({USER_MESSAGE, MODEL_COMPLETED, TOOL_RESULT})
 
 
+class _UnsetRuntimeContext:
+    """哨兵类型：区分「未渲染」与「渲染为空」（F4 #635）。
+
+    `compact_now` 的 `runtime_context` 缺省用 `_RUNTIME_CONTEXT_UNSET`——只有**未传**
+    时才自行渲染（手动路径）；`build()` 显式传入自己归一化后的值（可能为 None），
+    此时不再渲染，保证 `_runtime_context_provider` 每次 build 只被调用一次。
+    """
+
+
+#: 缺省哨兵见 `_UnsetRuntimeContext`。
+_RUNTIME_CONTEXT_UNSET = _UnsetRuntimeContext()
+
+
 def _insert_before_last_human(
     messages: list[AnyMessage], message: AnyMessage,
 ) -> list[AnyMessage]:
@@ -158,6 +186,75 @@ _PLAN_EVENT_DRIVEN_WINDOW = 1
 #: `compactor._programmatic_summary_sections`），同名会让对照 build 产物与
 #: 摘要的消费方误判为同一来源。也避开 `_is_compaction_summary` 全部前缀。
 _MODIFIED_PATHS_BLOCK_HEADING = "## 最近修改文件"
+
+#: W-06（#350）：进度核对块标题。同样避开 `_is_compaction_summary` 全部前缀
+#: 与清单/文件块标题——ephemeral 块与持久化摘要绝不同形。
+_PROGRESS_BLOCK_HEADING = "## 任务进度核对（progress.md）"
+
+
+def _should_inject_progress(events: list[SessionEvent]) -> bool:
+    """W-06（#350）：进度核对块的注入判据——**纯事件推导**。
+
+    会话已发生过压缩（存在 COMPACTION_END）⇒ 注入：压缩接班后模型可见输入
+    必须含**经核对**的原目标/下一步（票面 AC「重启和压缩后」的耐久读法——
+    bracket 持久在事件流里，重启后重放同一判据成立，与 `_should_inject_plan`
+    的恒注入分支同构）。未经压缩的会话，原目标仍在完整投影历史里，不重复
+    注入（token 经济，同清单块的静默窗逻辑）。
+    """
+    return any(event.type == COMPACTION_END for event in events)
+
+
+def _render_progress_block(
+    doc, *, status: str,
+) -> str:
+    """进度核对块的确定性渲染——内容行逐字来自 `render_progress_brief_lines`。"""
+    lines = [_PROGRESS_BLOCK_HEADING]
+    if status == PROGRESS_VERIFY_OK:
+        lines.append(
+            "以下内容已与磁盘 progress.md 重读核对一致（经核对的原目标/下一步）："
+        )
+    else:
+        lines.append(
+            f"进度文件不可核对（{status}）；以下为 SessionEvent 投影，"
+            "不得凭记忆宣布任务完成："
+        )
+    lines.extend(render_progress_brief_lines(doc))
+    return "\n".join(lines)
+
+
+def _inject_progress_block(messages: list[AnyMessage], progress_text: str) -> list[AnyMessage]:
+    """把进度核对块作为一条 SystemMessage 注入（落点与清单块同形：第一条
+    压缩摘要之前；无摘要时开头连续 SystemMessage 之后）。只依赖 SystemMessage
+    分布，不会插进 AI(tool_calls)/ToolResult 配对中间。调用顺序在
+    `_inject_plan_block` 之后 ⇒ 最终顺序 = 清单 → 进度核对 → 摘要。"""
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
+            return [
+                *messages[:index], SystemMessage(content=progress_text),
+                *messages[index:],
+            ]
+    insertion = 0
+    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
+        insertion += 1
+    return [
+        *messages[:insertion], SystemMessage(content=progress_text),
+        *messages[insertion:],
+    ]
+#: #639 阶段 B：3a 预检拒绝的诊断分类（与 `compactor._SUMMARY_ERROR_CLASSES` 里的同名
+#: 词条一致；`attempt=0` 标记非摘要尝试）。thrashing guard 只认这一类。
+_PREFLIGHT_REJECTION_ERROR_CLASS = "preflight_request_exceeds_hard_limit"
+#: #639 阶段 B：连续这么多轮"以预检拒绝收尾"后，不再静默保留旧投影，升级为任务可见
+#: 失败（Claude Code "stops auto-compacting after a few attempts and shows an error
+#: instead of looping"，PORT DESIGN）。
+_THRASHING_GUARD_THRESHOLD = 3
+#: #639 阶段 B：thrashing guard 的显式失败文案（附中文恢复指引，三条）。
+_THRASHING_GUARD_MESSAGE = (
+    "Context compaction is thrashing: the summary request exceeded the hard guard "
+    f"on {_THRASHING_GUARD_THRESHOLD} consecutive rounds without making progress. "
+    "恢复指引：① 手动执行 /compact（可指定更小范围）；"
+    "② 调大 max_context_tokens 或放宽 hard_guard_threshold；"
+    "③ 把任务转交 subagent 分段处理。"
+)
 
 
 def _should_inject_plan(
@@ -357,6 +454,13 @@ class ContextBuilder:
         # W-31.5 (#417)：最近一次 build 实际注入的最近修改文件块成本（同清单
         # 锚块的记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
         self._last_modified_paths_tokens: int = 0
+        # W-06（#350）：最近一次 build 实际注入的进度核对块成本（同清单锚块的
+        # 记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
+        self._last_progress_tokens: int = 0
+        # W-04 (#348)：最近一次 build 实际注入的接近硬护栏 warning 文本成本
+        # （同清单锚块的记账口径：非持久化注入、独立记账口——warning 文本的
+        # token 成本先计入 provider_estimate 再注入，usage_snapshot 折进 "other"）。
+        self._last_pressure_warning_tokens: int = 0
         # 清单兜底重注入周期（PRD §4.6 Cline Focus Chain 默认值 6，配置可调）。
         self.plan_reinject_every_messages = plan_reinject_every_messages
         # W-03 (#347)：可回读 Artifact 前提下的旧 Tool Result 投影裁剪。
@@ -377,9 +481,56 @@ class ContextBuilder:
             )
         self._prune_decisions: dict[str, dict[int, str]] = {}
         self._last_prune_report: PruneReport | None = None
+        # #639 阶段 B：每会话"连续以预检拒绝收尾"的轮计数（thrashing guard）。
+        # 本实例跨 build 轮次存活、可能服务多个会话，故按 `session.session_id` 分会话
+        # 记——跨会话串计数是错的。成功压缩后 pop（等价 0，避免无界增长）。
+        self._preflight_rejection_streaks: dict[str, int] = {}
+
+    async def _resolve_progress_block(self, session: Session) -> tuple[str | None, int]:
+        """W-06（#350）：压缩后进度核对块（磁盘重读对账 + 落后自愈）。
+
+        判据纯事件推导（`_should_inject_progress`）；内容从磁盘 progress.md
+        **重读核对**后取投影——status=ok 时文件与投影逐字节一致，注入经核对
+        的原目标/下一步；否则注入"进度文件不可核对（原因）"+ SessionEvent
+        投影（模型不得凭记忆宣布完成）。无 cwd 锚（进度文件机制不适用）⇒
+        不注入。注入文本是 ephemeral 块：不落事件、不进 derive_messages。
+
+        「压缩之后」重读点的自愈语义：bracket 三事件落盘使事件流前进，文件
+        随即落后（stale = 服务端最后一次写入、只是没跟上，**不是**外部编辑
+        ——classify 已排除 external）。此时 best-effort 调 `write_progress_file`
+        从投影刷新（幂等原子写，不追加事件）再复核对账——刷新失败则如实
+        注入"不可核对"，绝不把 stale 文件说成已核对。
+        """
+        if not _should_inject_progress(session.events):
+            return None, 0
+        cwd = session_cwd(session.events)
+        if not cwd or not Path(cwd).is_dir():
+            return None, 0
+        doc = derive_progress_document(session.events, session_id=session.session_id)
+        verification = verify_progress_file(cwd, session.session_id, session.events)
+        if verification.status == PROGRESS_VERIFY_STALE:
+            try:
+                outcome = write_progress_file(
+                    cwd, session.session_id, session.events,
+                )
+            except Exception:
+                logger.warning(
+                    "压缩后进度文件刷新失败（session=%s）——按不可核对注入",
+                    session.session_id, exc_info=True,
+                )
+            else:
+                if outcome.ok:
+                    verification = verify_progress_file(
+                        cwd, session.session_id, session.events,
+                    )
+        text = _render_progress_block(doc, status=verification.status)
+        return text, estimate_message_tokens([SystemMessage(content=text)])
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
+        # W-04：warning 记账口先清零——builder 实例跨 build 复用，未压缩路径
+        # 不注入 warning，残值会把上一轮的成本错记到本轮看板（stale 账）。
+        self._last_pressure_warning_tokens = 0
         source_ranges: list[tuple[int, int] | None] | None = None
         pairs = derive_messages_with_source_ranges(session.events)
         if self._pruner is None:
@@ -498,6 +649,11 @@ class ContextBuilder:
         )
         token_estimate += paths_tokens
         self._last_modified_paths_tokens = paths_tokens
+        # W-06（#350）：进度核对块决策与成本（先计入再走阈值判定——注入了就
+        # 计数，不计数 = 系统性低估，同清单块教训）。
+        progress_text, progress_tokens = await self._resolve_progress_block(session)
+        token_estimate += progress_tokens
+        self._last_progress_tokens = progress_tokens
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
@@ -508,82 +664,26 @@ class ContextBuilder:
             built = self._inject_runtime_context(built, runtime_context)
             if plan_text is not None:
                 built = _inject_plan_block(built, plan_text)
+            if progress_text is not None:
+                built = _inject_progress_block(built, progress_text)
             if paths_text is not None:
                 built = _inject_modified_paths(built, paths_text)
             return self._prepend_system_prompt(built)
-        reserved_tokens = (
-            protected_facts_tokens
-            + (self._system_prompt_tokens or 0)
-            + runtime_context_tokens
-            + plan_tokens
-            + paths_tokens
-        )
-        compactor = ContextCompactor(
-            self.model_provider, max_context_tokens=self.max_context_tokens,
-            auto_compact_threshold=self.auto_compact_threshold,
-            hard_guard_threshold=self.hard_guard_threshold,
-            summary_model=self.summary_model,
-            model_call_gate=self.model_call_gate,
-        )
-        try:
-            result = await compactor.compact(
-                messages,
-                token_estimate,
-                events=session.events,
-                source_ranges=source_ranges,
-                protected_facts=protected_facts,
-                reserved_tokens=reserved_tokens,
-            )
-        except ContextWindowExceededError as error:
-            self._record_compaction_failures(session, error.failures)
-            raise
-        self._record_compaction_failures(session, result.failures)
-        if result.compacted_turn_count:
-            if not result.summary or not result.bracket_id:
-                raise ContextWindowExceededError(
-                    "Refusing to persist an unvalidated compaction summary"
-                )
-            # T4 (#134)：写 4-event bracket 替代单个 CONTEXT_COMPACTED。
-            # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
-            bracket_id = result.bracket_id or ""
-            session.append(COMPACTION_START, {
-                "bracket_id": bracket_id,
-                "source_seq_start": result.source_seq_start or 0,
-                "source_seq_end": result.source_seq_end or 0,
-            })
-            session.append(CONTEXT_COMPACTED, {
-                "schema": "eight_section",
-                "summary": result.summary,
-                "source_seq_start": result.source_seq_start or 0,
-                "source_seq_end": result.source_seq_end or 0,
-                "compacted_turn_count": result.compacted_turn_count,
-                "token_estimate": result.token_estimate,
-                "fallback_used": result.fallback_used,
-                "bracket_id": bracket_id,
-            })
-            session.append(COMPACTION_END, {
-                "bracket_id": bracket_id,
-            })
-            # W-04 (#348)：落 bracket 后重投影确认——从已持久化的事件重算"下一次
-            # build 会看到的投影"，与本次产物比对（裁剪路径重放本 build 的裁剪决策，
-            # 保证与 compact 输入同一视图）。不合即 fail-closed：bracket 已在 JSONL
-            # （历史不删除），但本次执行不得继续在未核验的投影上工作。
-            projected = self._reproject(session)
-            if projected != result.messages:
-                raise ContextWindowExceededError(
-                    "Compaction bracket re-projection mismatch; refusing to "
-                    "continue on an unverifiable projection"
-                )
-            recheck = estimate_message_tokens(projected)
-            # 复核式刻意不含 plan_tokens（P2-1 审查修正的注释声明）：本式守的是
-            # **持久化压缩结果**是否越硬护栏（fail-closed 面）；清单锚块是
-            # ephemeral 注入，其成本已经从 provider remaining 里扣减（见下
-            # provider_estimate），总量越界由下一 build 的阈值判定（含清单）自纠。
-            if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
-                    > self.max_context_tokens * self.hard_guard_threshold):
-                raise ContextWindowExceededError(
-                    f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
-                )
+        # T2 (#635)：阈值命中的压缩整段抽到 `compact_now`——手动路径（#635 T3）
+        # 复用**同一实现**（不变量 #22），本 build 只负责决定"该压了"。
+        # `runtime_context` 原样传入：runtime provider 每次 build 只调一次的既有
+        # 契约不变（否则会被 compact_now 再渲染一次）。
+        result = await self.compact_now(session, runtime_context=runtime_context)
+        if result is None:
+            # 低水位 / 无可压缩早期轮：零 bracket 写入。压缩未发生 ⇒ 沿用原投影
+            # （compactor 的 no-op 结果就是 messages-only 的原估算），继续走下方
+            # 与"已压缩"共用的收尾装配（含接近硬护栏 warning）——与抽取前
+            # `if result.compacted_turn_count:` 为假时的行为逐字节等价。
+            compacted_messages = messages
+            compacted_token_estimate = estimate_message_tokens(messages)
+        else:
+            compacted_messages = result.messages
+            compacted_token_estimate = result.token_estimate
         # W-29 (#383)：落 bracket 后重算清单决策——本次 build 可能恰好触发首次
         # 压缩，决策必须在 bracket 事件在场的前提下重估，才能进入"压缩后恒注入"
         # 状态（判据①：压缩后模型输入含完整清单）。
@@ -607,6 +707,11 @@ class ContextBuilder:
             if paths_text is not None else 0
         )
         self._last_modified_paths_tokens = paths_tokens
+        # W-06（#350）：落 bracket 后重估进度核对块——本次 build 可能恰好触发
+        # 首次压缩，判据必须在 bracket 事件在场的前提下重估（压缩后模型输入含
+        # 经核对的原目标/下一步）。
+        progress_text, progress_tokens = await self._resolve_progress_block(session)
+        self._last_progress_tokens = progress_tokens
         # 压缩后的 token_estimate 只含 messages；所有在 messages 之外的上下文
         # （system prompt、运行时快照、保护事实与计划锚块）在 provider 预算中各补回一次。
         reserved_tokens = (
@@ -615,35 +720,326 @@ class ContextBuilder:
             + runtime_context_tokens
             + plan_tokens
             + paths_tokens
+            + progress_tokens
         )
-        if result.compacted_turn_count:
-            recheck += protected_facts_tokens
-        if result.compacted_turn_count and (
+        # 硬护栏复核只对**确已压缩**的路径生效（no-op 沿用原投影，不在此拒）。
+        recheck = compacted_token_estimate + protected_facts_tokens
+        if result is not None and (
                 recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
                 > self.max_context_tokens * self.hard_guard_threshold):
             raise ContextWindowExceededError(
                 f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
             )
-        provider_estimate = result.token_estimate + reserved_tokens
-        built = await self._with_providers(session, result.messages, provider_estimate)
-        built = self._inject_protected_facts(built, protected_facts_messages)
-        built = self._inject_runtime_context(built, runtime_context)
-        if plan_text is not None:
-            built = _inject_plan_block(built, plan_text)
-        if paths_text is not None:
-            built = _inject_modified_paths(built, paths_text)
+        provider_estimate = compacted_token_estimate + reserved_tokens
         # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
         # （messages + system prompt + 运行时快照，与 :103 的看板口径同源）落
         # [auto, hard) 带：有效用量 < auto 的健康路径不发；成功压缩的 messages
         # 估算必然 < auto 线（compactor 的 target 闸门），但 system/快照可能把它
-        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。
+        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。判据仍对**未
+        # 并入 warning 的 provider_estimate** 求值（现有判据行为不变）；判据成立
+        # 时先估算 warning 文本 tokens、记入独立记账口并并入 provider_estimate
+        # （先计入再注入，与 plan/paths 同口径——provider 的 remaining 预算
+        # 必须诚实），注入动作在下方各注入序列的末段执行。
         pressure_text = DEFAULT_REGISTRY.assemble("frame:context_pressure").meta_user_text
+        pressure_tokens = 0
         if (self.auto_compact_threshold * self.max_context_tokens <= provider_estimate
                 < self.hard_guard_threshold * self.max_context_tokens and pressure_text):
+            pressure_tokens = estimate_message_tokens(
+                [HumanMessage(content=pressure_text)]
+            )
+            self._last_pressure_warning_tokens = pressure_tokens
+            provider_estimate += pressure_tokens
+        built = await self._with_providers(session, compacted_messages, provider_estimate)
+        built = self._inject_protected_facts(built, protected_facts_messages)
+        built = self._inject_runtime_context(built, runtime_context)
+        if plan_text is not None:
+            built = _inject_plan_block(built, plan_text)
+        if progress_text is not None:
+            built = _inject_progress_block(built, progress_text)
+        if paths_text is not None:
+            built = _inject_modified_paths(built, paths_text)
+        if pressure_tokens:
             built = _insert_before_last_human(
                 built, HumanMessage(content=pressure_text),
             )
         return self._prepend_system_prompt(built)
+
+    async def compact_now(
+        self,
+        session: Session,
+        *,
+        runtime_context: str | None | _UnsetRuntimeContext = _RUNTIME_CONTEXT_UNSET,
+        write_guard: Callable[[int], AbstractAsyncContextManager[None]] | None = None,
+    ) -> CompactionResult | None:
+        """压缩 runtime 投影的**唯一实现**（自动路径与手动路径共用，#635 / 不变量 #22）。
+
+        T2 (#635)：从 `build()` 抽出"压缩整段"——构造 `ContextCompactor` →
+        `compact()` → 失败记录 → bracket 三事件落盘 → 重投影确认 → 硬护栏复核。
+        `build()` 阈值命中时调它；`SessionService.compact_session_context`（手动
+        路径）无条件调它。**绝不**做成模型可见 Tool（不进 tool_scope）。
+
+        输入在本方法内从会话事件推导（`derive_messages_with_source_ranges` +
+        `estimate_message_tokens` 同一口径），不接收 build 的内部 locals。
+
+        返回：
+        - `None` = 低水位 / 无可压缩早期轮（`compacted_turn_count == 0`）：**零
+          bracket 写入**（失败记录若有仍已落盘），调用方走未压缩投影。
+        - `CompactionResult` = 已核验并落 bracket 的压缩结果。
+
+        `runtime_context`：调用方（build）已渲染的运行时快照文本，原样用于 token
+        估算——保证 `_runtime_context_provider` 每次 build 只被调用一次的既有契约。
+        缺省是哨兵 `_RUNTIME_CONTEXT_UNSET`：手动路径不传 → 本方法自行渲染**一次**；
+        build 显式传入（含归一化后的 `None`）→ 本方法不再渲染（F4 #635）。`None`
+        表示"已渲染为空"，与哨兵"未渲染"语义不同。
+
+        `write_guard`：可选**工厂**，入参 = 本次自身已写的事件数，返回一个异步上下文
+        管理器，**只包住 bracket 三事件的落盘窗口**（LLM 调用期间不持有）。手动路径传
+        "重拿 `session_lock` + 复验"的守卫（`runmanager.py:320-329` 禁止持锁跨长耗时
+        操作）；自动路径传 None。
+
+        工厂化（F1 #635）：本方法在进 guard 前会无条件落 `len(result.failures)` 条
+        `context/compaction_failed`（失败记录与失败条目一一对应），守卫的并发复验必须
+        把这份**自身写入**计入基线——否则"首试失败、重试成功"会被误判成并发改动而
+        409。guard 调用点在失败记录已 append **之后**，故计数包含它们。
+        """
+        # ── 投影（与 build 同一口径；裁剪路径存在时重放裁剪决策）──────────
+        source_ranges: list[tuple[int, int] | None] | None = None
+        pairs = derive_messages_with_source_ranges(session.events)
+        if self._pruner is None:
+            messages = [message for message, _source_range in pairs]
+            anchor_ranges = [source_range for _message, source_range in pairs]
+        else:
+            messages, source_ranges = await self._prune_projection(session, pairs)
+            anchor_ranges = source_ranges
+        # ── 保护事实（与 build 同一口径：只留最近一条 work_boundary）────────
+        all_protected_facts = derive_protected_facts(session.events)
+        latest_work_boundary = max(
+            (
+                fact for fact in all_protected_facts
+                if fact.type == "work_boundary"
+            ),
+            key=lambda fact: fact.source_seq,
+            default=None,
+        )
+        protected_facts = [
+            fact for fact in all_protected_facts
+            if fact.type != "work_boundary"
+            or fact.fact_id == (
+                latest_work_boundary.fact_id if latest_work_boundary else None
+            )
+        ]
+        protected_facts_messages = self._protected_facts_messages(protected_facts)
+        protected_facts_tokens = (
+            estimate_message_tokens(protected_facts_messages)
+            if protected_facts_messages
+            else 0
+        )
+        self._last_protected_fact_tokens = protected_facts_tokens
+        if protected_facts_tokens > self.protected_fact_token_budget:
+            active_facts = [
+                fact for fact in protected_facts
+                if fact.status == "active"
+            ]
+            fact_ids = ", ".join(fact.fact_id for fact in active_facts)
+            raise ProtectedFactBudgetExceededError(
+                "Protected facts exceed their dedicated token budget; "
+                f"facts withheld: {fact_ids}",
+                budget_tokens=self.protected_fact_token_budget,
+                estimated_tokens=protected_facts_tokens,
+                facts=[
+                    {
+                        "fact_id": fact.fact_id,
+                        "type": fact.type,
+                        "value_chars": len(fact.value)
+                        if isinstance(fact.value, str)
+                        else len(repr(fact.value)),
+                    }
+                    for fact in active_facts
+                ],
+            )
+        # ── token 估算（与 build 同序同式；口径见 build 内注释）────────────
+        token_estimate = self._estimate_tokens_cached(session, messages)
+        usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
+        token_estimate = max(token_estimate, usage_anchor)
+        token_estimate += protected_facts_tokens
+        if runtime_context is _RUNTIME_CONTEXT_UNSET:
+            # 仅"未渲染"（手动路径）才自行渲染一次；build() 传自己归一化后的值
+            # （含 None）时不再调 provider，保证每次 build 只渲染一次（F4 #635）。
+            raw_runtime_context = (
+                self._runtime_context_provider()
+                if self._runtime_context_provider is not None
+                else None
+            )
+            runtime_context = (
+                raw_runtime_context
+                if raw_runtime_context and raw_runtime_context.strip()
+                else None
+            )
+        runtime_context_tokens = 0
+        if runtime_context:
+            runtime_context_tokens = estimate_message_tokens(
+                [HumanMessage(content=runtime_context)]
+            )
+            token_estimate += runtime_context_tokens
+        self._last_runtime_context_tokens = runtime_context_tokens
+        if self.system_prompt:
+            if self._system_prompt_tokens is None:
+                self._system_prompt_tokens = estimate_message_tokens(
+                    [SystemMessage(content=self.system_prompt)]
+                )
+            token_estimate += self._system_prompt_tokens
+        plan_state = _should_inject_plan(
+            session.events, self.plan_reinject_every_messages,
+        )
+        plan_text = _render_plan_block(plan_state) if plan_state is not None else None
+        plan_tokens = (
+            estimate_message_tokens([SystemMessage(content=plan_text)])
+            if plan_text is not None else 0
+        )
+        token_estimate += plan_tokens
+        self._last_plan_tokens = plan_tokens
+        modified_paths = derive_modified_file_paths(session.events)
+        paths_text = (
+            _render_modified_paths_block(modified_paths)
+            if plan_text is not None and modified_paths else None
+        )
+        paths_tokens = (
+            estimate_message_tokens([SystemMessage(content=paths_text)])
+            if paths_text is not None else 0
+        )
+        token_estimate += paths_tokens
+        self._last_modified_paths_tokens = paths_tokens
+        reserved_tokens = (
+            protected_facts_tokens
+            + (self._system_prompt_tokens or 0)
+            + runtime_context_tokens
+            + plan_tokens
+            + paths_tokens
+        )
+        # ── 压缩（唯一管线；#22）────────────────────────────────────────
+        compactor = ContextCompactor(
+            self.model_provider, max_context_tokens=self.max_context_tokens,
+            auto_compact_threshold=self.auto_compact_threshold,
+            hard_guard_threshold=self.hard_guard_threshold,
+            summary_model=self.summary_model,
+            model_call_gate=self.model_call_gate,
+        )
+        try:
+            result = await compactor.compact(
+                messages,
+                token_estimate,
+                events=session.events,
+                source_ranges=source_ranges,
+                protected_facts=protected_facts,
+                reserved_tokens=reserved_tokens,
+            )
+        except ContextWindowExceededError as error:
+            self._record_compaction_failures(session, error.failures)
+            raise
+        self._record_compaction_failures(session, result.failures)
+        if not result.compacted_turn_count:
+            # #639 阶段 B：连续预检拒绝达阈值 ⇒ 不再静默保留旧投影，经 #348 既有
+            # 通道显式失败（failures 已由上一行落盘），run 走非终态暂停。未达阈值
+            # 的轮：行为与加 B 前逐字节一致（只增内部计数，不产生事件/不改返回）。
+            if self._note_preflight_rejection(session, result.failures):
+                raise ContextWindowExceededError(
+                    _THRASHING_GUARD_MESSAGE,
+                    failures=result.failures,
+                )
+            # 低水位 / 无可压缩早期轮 / 双失败安全继续：**零 bracket 写入**。
+            return None
+        # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
+        self._preflight_rejection_streaks.pop(session.session_id, None)
+        if not result.summary:
+            raise ContextWindowExceededError(
+                "Refusing to persist an unvalidated compaction summary"
+            )
+        if result.source_seq_start is None or result.source_seq_end is None:
+            # fail-closed：无来源区间不铸造身份。此前的 `or 0` 静默回退在此
+            # 被显式拒绝取代（compactor 的 T12h 路径本应已拦截，此处是持久化
+            # 边界的最后守卫）——无溯源 ⇒ 无身份。
+            raise ContextWindowExceededError(
+                "Refusing to persist compaction without source event range"
+            )
+        # #647 T11f：身份在持久化边界铸造（照搬成熟产品）——
+        # Pi（earendil-works/pi @28dcce2b）session-manager.ts appendCompaction
+        # （L1262-1288）：在同一函数内、_appendEntry 之前由 generateId（L277）铸造；
+        # DeepSeek Harness（@5badb150）region.ts:204：
+        # `const compactionId = CompactionId(randomUUID())`，随后即
+        # session.append('compaction/start', lifecycle)。
+        # 无持久化 ⇒ 无身份：compactor 直调结果永不携带可用身份。
+        bracket_id = str(uuid4())
+        # 失败记录已在上面无条件落盘，且与 failures 条目一一对应（每条一个事件）。
+        # 守卫复验的基线必须加上这份自身写入，否则重试成功会被误判为并发改动。
+        own_writes = len(result.failures)
+        guard = (
+            write_guard(own_writes) if write_guard is not None else nullcontext()
+        )
+        async with guard:
+            # T4 (#134)：写 4-event bracket 替代单个 CONTEXT_COMPACTED。
+            # 原始被压缩事件保留在 JSONL 里（shadowed），derive_messages 跳过。
+            session.append(COMPACTION_START, {
+                "bracket_id": bracket_id,
+                "source_seq_start": result.source_seq_start or 0,
+                "source_seq_end": result.source_seq_end or 0,
+            })
+            session.append(CONTEXT_COMPACTED, {
+                "schema": "eight_section",
+                "summary": result.summary,
+                "source_seq_start": result.source_seq_start or 0,
+                "source_seq_end": result.source_seq_end or 0,
+                "compacted_turn_count": result.compacted_turn_count,
+                "token_estimate": result.token_estimate,
+                "fallback_used": result.fallback_used,
+                # #639 阶段 A：成功走缩小 early 段的 marker（默认 False ⇒ 既有路径
+                # 逐字节等价）。这是本次唯一新增的事件键。
+                "narrowed": result.narrowed,
+                "bracket_id": bracket_id,
+                "summary_model_id": result.summary_model_id,
+                "duration_ms": result.duration_ms,
+                "request_token_estimate": result.request_token_estimate,
+                "request_budget_tokens": result.request_budget_tokens,
+            })
+            session.append(COMPACTION_END, {
+                "bracket_id": bracket_id,
+            })
+        # W-04 (#348)：落 bracket 后重投影确认——从已持久化的事件重算"下一次
+        # build 会看到的投影"，与本次产物比对（裁剪路径重放本次压缩刚落下的
+        # 裁剪决策，保证与 compact 输入同一视图）。决策与投影在同一次
+        # compact_now 调用内同源——决策重算先于本复核，自动路径（build 阈值
+        # 命中）与手动路径（compact_session_context）共用此出口（#708 裁决 B：
+        # 重放按落账时点决策、不做可见性复核），比对不存在跨 build 分歧窗口。
+        # 不合即 fail-closed：bracket 已在 JSONL（历史不删除），但本次执行不得
+        # 继续在未核验的投影上工作。
+        projected = self._reproject(session)
+        if projected != result.messages:
+            raise CompactionPostWriteError(
+                "Compaction bracket re-projection mismatch; refusing to "
+                "continue on an unverifiable projection",
+                bracket_id=bracket_id,
+            )
+        recheck = estimate_message_tokens(projected)
+        # 复核式刻意不含 plan_tokens（P2-1 审查修正的注释声明）：本式守的是
+        # **持久化压缩结果**是否越硬护栏（fail-closed 面）；清单锚块是 ephemeral
+        # 注入，其成本已经从 provider remaining 里扣减，总量越界由下一 build 的
+        # 阈值判定（含清单）自纠。
+        #
+        # F7 (#635)：与 build() 尾部公式（:534–541，`recheck =
+        # compacted_token_estimate + protected_facts_tokens`）的分工差异——build 侧
+        # 的 `recheck` 已含 protected_facts_tokens，本式不含：本方法把保护事实的
+        # 成本记在 `token_estimate`（调用方入参，仅用于压缩阈值判定），而复核对象是
+        # `projected`（纯投影 messages，保护事实是 build 末尾另行注入、不在投影内）；
+        # 若此处再减一次会重复计账。两侧共同守住"越硬护栏即 fail-closed"，口径按各自
+        # 持有的事实源各自成立，此注释防后续把两式当同一公式同步改动而漂移。
+        if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
+                > self.max_context_tokens * self.hard_guard_threshold):
+            raise CompactionPostWriteError(
+                f"Re-projected compaction still exceeds hard guard: {recheck} tokens",
+                bracket_id=bracket_id,
+            )
+        # 把持久化边界铸造的身份回填给调用方（对标 DSH compactRegion 返回携带
+        # compactionId 的 CompactionResult：service/web/CLI 仍能拿到可用身份）。
+        return replace(result, bracket_id=bracket_id)
 
     @staticmethod
     def _protected_facts_messages(facts: list[ProtectedFact]) -> list[AnyMessage]:
@@ -668,8 +1064,9 @@ class ContextBuilder:
     ) -> None:
         """W-04 (#348)：每次摘要尝试失败落一条 `context/compaction_failed`。
 
-        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 进入压缩时
-        的估算）；`message` 已在 compactor 侧按"只装自家文案或类型名"脱敏。失败
+        事件只带有界载荷（attempt / error_class / message / 两档阈值 / 压缩前估算 /
+        summary_model_id / duration_ms / request_token_estimate / request_budget_tokens）；
+        `summary_model_id` 在 compactor 侧限为 256 字符，`message` 按"只装自家文案或类型名"脱敏。失败
         不是压缩：不投影成消息、不 shadow 任何事件——derive 的投影集合不收它。
         """
         for failure in failures:
@@ -680,13 +1077,48 @@ class ContextBuilder:
                 "auto_limit": failure.auto_limit,
                 "hard_limit": failure.hard_limit,
                 "token_estimate": failure.token_estimate,
+                "summary_model_id": failure.summary_model_id,
+                "duration_ms": failure.duration_ms,
+                "request_token_estimate": failure.request_token_estimate,
+                "request_budget_tokens": failure.request_budget_tokens,
+                # #639：预检拒绝是否发生在缩小段判定（阶段 A）；其余诊断默认假值。
+                "narrowed": failure.narrowed,
             })
+
+    def _note_preflight_rejection(
+        self, session: Session, failures: list[CompactionFailure],
+    ) -> bool:
+        """#639 阶段 B：登记一次"以预检拒绝收尾"的轮，返回是否达 thrashing 阈值。
+
+        判据（一轮一次，不按诊断条目数计）：本轮 `failures` **全部**是 3a 预检诊断
+        （`attempt=0` + `preflight_request_exceeds_hard_limit`）——即有且仅有一次增。
+        A 的缩小重试也失败时该轮有两条诊断（全段 + 缩小段），仍只 +1。摘要尝试
+        失败的轮（双失败安全继续）`failures` 含 `attempt>=1` 条目，说明本轮并非停在
+        预检，不增不减。
+
+        达到阈值后**不清零**（调用方抛显式失败）：恢复后若下一轮仍拒绝，继续显式
+        失败，不再退回静默。
+        """
+        if not failures or not all(
+            failure.attempt == 0
+            and failure.error_class == _PREFLIGHT_REJECTION_ERROR_CLASS
+            for failure in failures
+        ):
+            return False
+        streak = self._preflight_rejection_streaks.get(session.session_id, 0) + 1
+        self._preflight_rejection_streaks[session.session_id] = streak
+        return streak >= _THRASHING_GUARD_THRESHOLD
 
     def _reproject(self, session: Session) -> list[AnyMessage]:
         """从已持久化的事件重算模型可见投影（W-04 重投影确认的读数来源）。
 
-        裁剪路径重放**本 build 刚落下的**裁剪决策（与 usage_snapshot 同一读法），
+        裁剪路径重放**本次压缩刚落下的**裁剪决策（与 usage_snapshot 同一读法），
         保证重算视图与 compact 的输入一致——否则被裁的骨架行会被当成失配。
+        重放语义＝按落账时点决策、不做当前可见性复核（#708 裁决 B）：唯一
+        消费点是 compact_now 尾部复核（自动路径 = build 阈值命中、手动路径 =
+        ``compact_session_context`` 共用），决策重算先于本调用、同一次调用内
+        同源，不存在跨 build 分歧窗口；跨 build 读（usage_snapshot）的漂移
+        口径在彼处文档化。
         """
         if self._pruner is None:
             return session.derive_messages()
@@ -775,7 +1207,8 @@ class ContextBuilder:
         「可定位」用 source_ranges 反查：model/completed 投影出的 AIMessage 区间是
         全局唯一的 `(seq, seq)`（derive.py 投影契约），据此 O(1) 找到该事件对应的
         消息位。被 bracket shadow 的旧 usage 事件反查不到 → 自动落到更早的可用锚
-        （旧锚的真实用量对当前投影只高不低——安全方向）；全部映射不上 ⇒ 0。
+        （旧锚的真实用量对当前投影只高不低——安全方向）；usage 非法（含零与
+        负数，#646）⇒ 继续回溯；全部映射不上或无正数读数 ⇒ 0。
         bracket 之后的新 usage 事件照常映射 ⇒ 锚跨压缩存活（这是不走
         「事件数 == 消息数」计数配对的原因：压缩后两者永久失配，锚会失效）。
         """
@@ -794,9 +1227,12 @@ class ContextBuilder:
             if not isinstance(usage, dict):
                 continue
             prompt_tokens = usage.get("prompt_tokens")
+            # 0 不是合法锚：零成本会覆盖实际存在的历史成本，收下它 = 只返回
+            # 其响应增量（#646）。跳过后循环继续回溯更早的正数可定位锚；
+            # 全部不可用 ⇒ 0，调用点 max() 回落朴素估算（只抬高不降低）。
             if (not isinstance(prompt_tokens, int)
                     or isinstance(prompt_tokens, bool)
-                    or prompt_tokens < 0):
+                    or prompt_tokens <= 0):
                 continue
             anchor_index = index_by_seq.get(event.seq)
             if anchor_index is None:
@@ -899,10 +1335,16 @@ class ContextBuilder:
 
         W-03 (#347)：pruner 装配时，messages 桶走与 build 同一条裁剪路径
         （地雷 2，#200 双视图教训）。本方法是同步读口而 store 校验是 async，
-        因此重放**最近一次 build 落下的决策**（seq → 骨架行）——同一 builder
-        实例上与 build 产物逐字节一致；build 之后新到达的结果尚未裁，
-        估值偏高（安全方向），下一次 build 收敛。在途 run 的看板读的正是
-        刚 build 过的同一个 builder 实例，常态下两者一致。
+        因此重放**最近一次 build 或 compact_now 重算落下的决策**（seq → 骨架
+        行；每次 build 的投影装配都重录决策，压缩路径在 compact_now 内重算）
+        ——同一 builder 实例上与该次产物逐字节一致。重放语义（#708 裁决 B）
+        ＝**按落账时点决策，不做当前可见性复核**：读数含义是"截至最近一次
+        决策落账的状态"，与当前 fresh 口径的偏差有界于一次 build 周期、在
+        下一次 build 重算决策时自纠——决策落账后新到达的重复成员使旧保留
+        成员在 fresh 口径下变为可裁而重放仍按旧决策保留 ⇒ 偏高（安全方向）；
+        投影在其后变化使旧决策与 fresh 口径分歧（如被裁 seq 的等价类可见
+        成员构成变化）⇒ 偏低。在途 run 的看板读的正是刚 build 过的同一个
+        builder 实例，常态下两者一致。
         """
         if self._pruner is None:
             messages_tokens = estimate_message_tokens(session.derive_messages())
@@ -916,14 +1358,17 @@ class ContextBuilder:
         by_name = self._last_provider_tokens_by_name
         skills_tokens = by_name.get("skills", 0)
         # "其他" = 非 skills 的 provider 注入（记忆等）+ 运行期快照 + 清单锚块
-        # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）。这是
+        # （W-29 #383）+ 保护事实（#346）+ 最近修改文件块（W-31.5 #417）+
+        # 接近硬护栏 warning 文本（W-04 #348，先计入再注入）。这是
         # "其他"的定义性内容（未归类注入），不是"总量减各项"的残差——残差写法
         # 在总量只含 messages 时会恒为 0，把记忆注入整块漏报（#200 首版即此 bug）。
         other = (sum(v for k, v in by_name.items() if k != "skills")
                  + self._last_runtime_context_tokens
                  + self._last_plan_tokens
                  + self._last_protected_fact_tokens
-                 + self._last_modified_paths_tokens)
+                 + self._last_modified_paths_tokens
+                 + self._last_pressure_warning_tokens
+                 + self._last_progress_tokens)
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,

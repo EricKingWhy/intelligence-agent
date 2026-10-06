@@ -23,6 +23,7 @@ import { Conversation } from './components/Conversation';
 import { Composer } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
+import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
@@ -897,6 +898,8 @@ export default function App() {
   const paletteAfterClose = useRef<(() => void) | null>(null);
   // 记忆管理浮层（MEM-5 / #160）：开合状态归 App（顶栏按钮与命令面板共用同一入口）。
   const [memoriesOpen, setMemoriesOpen] = useState(false);
+  // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
+  const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1029,6 +1032,14 @@ export default function App() {
         group: 'actions',
         run: () => setMemoriesOpen(true),
       },
+      {
+        id: 'manage-approve-policy',
+        label: '管理持久审批规则',
+        keywords: 'approval approve policy always allow persistent 审批 授权 持久 规则 撤销',
+        hint: '持久授权',
+        group: 'actions',
+        run: () => setApprovePolicyOpen(true),
+      },
     ];
     // trace_id 缺则 Copy Trace ID 不出现；trace_url 缺则 Open Trace 不出现
     // （Langfuse 未启用时两者都 null，两个命令都移除；启用时 Copy 恒在、Open 看 trace_url）。
@@ -1095,6 +1106,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         authRequired={authRequired}
         onOpenMemories={() => setMemoriesOpen(true)}
+        onOpenApprovePolicy={() => setApprovePolicyOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
       />
@@ -1367,6 +1379,11 @@ export default function App() {
         }}
       />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #684 Phase 2：持久审批规则管理（TopBar Shield 入口；只读 + 二次确认撤销）。 */}
+      <ApprovePolicyPanel
+        open={approvePolicyOpen}
+        onOpenChange={setApprovePolicyOpen}
+      />
       {/* #200：上下文容量看板（TopBar Gauge 入口；Esc / 点击遮罩关闭）。 */}
       <ContextUsagePanel
         sessionId={contextUsageOpen ?? ''}

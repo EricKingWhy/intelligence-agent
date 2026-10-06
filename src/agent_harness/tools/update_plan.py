@@ -71,6 +71,9 @@ class _UpdatePlanArgs(BaseModel):
 class UpdatePlanTool(Tool):
     """`update_plan`：提交进度清单全表（handler 硬校验，拒绝即整表不落）。"""
 
+    # #526 B1：Plan 模式豁免——仅写会话状态（进度清单），无外部资源副作用。
+    plan_mode_exempt: bool = True
+
     def __init__(self) -> None:
         # 零依赖：会话经 `current_session_var` 在执行期取得（context.py）。
         # 显式无参构造还有一层机械作用：对账测试的 `_name_of` 按签名枚举构造参数，

@@ -38,12 +38,15 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
@@ -57,6 +60,7 @@ from agent_harness.session import (
     Session,
     SessionEvent,
 )
+from agent_harness.session.workflow import WorkflowMode
 from agent_harness.storage import (
     Operation,
     OperationContext,
@@ -65,19 +69,31 @@ from agent_harness.storage import (
     unproven_meta,
 )
 from agent_harness.tooling.approval import (
+    APPROVAL_GRANT_TTL_SECONDS,
     ApprovalCallback,
+    ApprovalGrant,
     ApprovalRequest,
     ApprovalResponse,
+    PermissionDecision,
+    approval_identity,
     approval_reason,
+    grant_valid,
     needs_approval,
+)
+from agent_harness.tooling.approve_policy import (
+    ApprovePolicyRule,
+    ApprovePolicyStore,
+    PolicyGranularity,
 )
 from agent_harness.tooling.contract import (
     PermissionPolicy,
     Tool,
     ToolCall,
+    ToolPermission,
     ToolSideEffect,
 )
 from agent_harness.tooling.deadline import tool_execution_deadline_var
+from agent_harness.tooling.decision_hooks import DecisionHookRunner, DecisionVerdict
 from agent_harness.tooling.output_stream import ToolOutputStream, tool_output_sink_var
 from agent_harness.tooling.overflow import OverflowHandler
 from agent_harness.tooling.quota import ToolQuotaWindow
@@ -264,19 +280,31 @@ class ToolExecutor:
         registry: ToolRegistry,
         *,
         policy: PermissionPolicy = PermissionPolicy.WORKSPACE_WRITE,
+        # #526 B1：工作流档的**无会话回落值**（与 `policy` 同族语义）。有 session
+        # 的调用以会话 durable 事件（`workflow/mode-changed` last-wins）为准，
+        # 每次现派生；本快照只在 execute() 未传 session 时使用。
+        workflow_mode: WorkflowMode = WorkflowMode.NORMAL,
         approval_callback: ApprovalCallback | None = None,
         operation_ledger: OperationLedger | None = None,
         kill_hook: Callable[[str, str], None] | None = None,
         overflow_handler: OverflowHandler | None = None,
         resource_locks: ResourceLockRegistry | None = None,
+        decision_hook_runner: DecisionHookRunner | None = None,
+        # #684：项目根——持久审批规则存 `<project_root>/.agent-harness/approve-policy.json`。
+        # None 回落 `Path.cwd()`（执行域构造时求值）；测试 / 多项目可显式传。
+        project_root: Path | str | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
+        self._workflow_mode = workflow_mode
         self._approval_callback = approval_callback
         self._operation_ledger = operation_ledger
         self._kill_hook = kill_hook
         self._overflow_handler = overflow_handler
         self._resource_locks = resource_locks
+        self._decision_hook_runner = decision_hook_runner
+        self._project_root = Path(project_root) if project_root is not None else Path.cwd()
+        self._approve_policy_store = ApprovePolicyStore(self._project_root)
 
     @property
     def tracks_operations(self) -> bool:
@@ -341,6 +369,50 @@ class ToolExecutor:
                 budget_delta=_rejected_delta(name),
             )
 
+        # -- 阶段 1.5：before-tool 决策钩子（`#521` IMP-02）--
+        # 位置铁律（设计 §4.2）：lookup **之后**、validation **之前**。
+        # 为什么在这里：Hook 需要读工具的静态元数据（permission/side_effect），
+        # 而这些只有 lookup 成功后才存在；同时必须在 validation 之前，
+        # 这样 REWRITE 的新 args 才能重走 Validation（§4.3）。
+        # 零开销（AC-1）：未注册时只有一次属性判空，不 await、不分配、不落事件。
+        # after（工具已执行后）永远不得进 decision 管道——结果落盘即 append-only
+        # 事实，after 只读反馈走 notification 管道（#447 范围，本模块不管）。
+        decision_runner = self._decision_hook_runner
+        if decision_runner is not None and decision_runner.active:
+            resolution = await decision_runner.decide(
+                tool_call_id=tool_call_id,
+                tool_name=name,
+                raw_args=raw_args,
+                permission=tool.permission,
+                side_effect=tool.side_effect,
+            )
+            decision = resolution.decision
+            if decision.verdict is DecisionVerdict.DENY:
+                # 准入前拒绝（§4.2）：与 deadline/配额拒绝同族——零执行、
+                # 不占配额（budget_delta 记 0）、不重试。
+                # Hook 不能抬高权限（§4.3）：DENY 只拒绝，不改变任何授权状态。
+                return ToolExecution(
+                    tool_call_id=tool_call_id,
+                    result=ToolResult.failure(
+                        message=(
+                            f"before-tool 决策钩子拒绝了工具 '{name}' 的本次调用"
+                            + (f"：{decision.reason}" if decision.reason else "")
+                            + "（#521 decision hook，准入前拒绝，零执行）。"
+                        ),
+                        error_code=ErrorCode.PERMISSION_DENIED,
+                        retryable=False,
+                    ),
+                    budget_delta=_rejected_delta(name),
+                )
+            if decision.verdict is DecisionVerdict.REWRITE and decision.args is not None:
+                # 改写参数（§4.3）：拿 Hook 返回的 args 快照重走 Validation。
+                # 新 args 非法 → 走正常的 INVALID_ARGUMENT 路径（execute 次数=0）；
+                # permission/side_effect 仍是工具的静态元数据，Hook 无法抬高。
+                # 注：_normalize 已保证 REWRITE 必带 dict args，这里的
+                # `is not None` 是防御性分支——不用 assert，因为 -O 下 assert
+                # 会被剥离，不能用它维持不变量；万一为 None 则沿用原始参数。
+                raw_args = decision.args
+
         # -- 阶段 2：validation -- Validation-first 的核心位置。
         # 校验发生在 execute【之前】：参数非法 -> tool.execute 根本不被调用（execute 次数=0）。
         # 这条边界以后喂给所有 Tool（Local/Knowledge/MCP），是最锋利的一刀。
@@ -398,6 +470,14 @@ class ToolExecutor:
                 budget_delta=_rejected_delta(name),
             )
 
+        # -- 阶段 2.35b：Plan 档只读门禁（`#526` B1）--
+        # 位置与 deadline/配额闸门同族、同样在 approval **之前**：注定被 Plan 档拦下的
+        # 调用不该先弹一次人工审批。在 `take()` **之前**（同 deadline 闸门），所以
+        # **不占槽位**、失败无配对 release 义务；`budget_delta` 记 0（准入前被拒）。
+        denied = await self._check_plan_mode(tool_call_id, name, tool, session)
+        if denied is not None:
+            return denied
+
         # -- 阶段 2.4：per-tool 配额闸门（`#314` T6 / `04 §9.1`）--
         # 位置在 approval **之前**：一个注定被配额拒的调用不该先弹一次人工审批
         # （审批可能要等人一个回合）。槽位在这里**预留**（本批内并发只读调用靠
@@ -422,7 +502,10 @@ class ToolExecutor:
         # -- 阶段 2.5：approval gate -- 05_SANDBOX_CODING_TOOLS.md §6 的 REQUIRE_APPROVAL。
         # 在 validate 之后、execute 之前：参数已合法，但授权关卡决定是否能跑。
         # per-call scoping 由设计保证：每次 execute 独立检查，不存储"已批准"状态。
-        denied = await self._check_approval(tool_call_id, name, tool, raw_args)
+        denied = await self._check_approval(
+            tool_call_id, name, tool, raw_args,
+            validated=validated.model_dump(), session=session,
+        )
         if denied is not None:
             # 占了配额槽位却没被接纳 ⇒ 归还：账本此刻仍是 0 消耗，"被拒"与
             # "配额已尽"必须对得上（暂停判定读的是账本，不是这个窗口）。
@@ -1121,7 +1204,18 @@ class ToolExecutor:
 
         一条可解释规则：全 READ_ONLY 才并发；任一 MUTATING 整批串行。
         未注册的工具名按 READ_ONLY 算（不影响调度，让其走 execute 正常报错）。
+
+        #521 M-4：只要注册了 before-tool 决策钩子，整批保守串行。
+        Hook 可能 REWRITE 参数（改写是运行时的，静态无法证明不影响
+        resource_keys），在无法证明"无资源冲突"时回退串行——
+        守住不变量 #10（并发基于显式依赖与资源冲突）。
+        这是设计 §4.3 的 V1 最小实现。
         """
+        # 决策钩子存在即保守串行：hook 的改写行为是运行时的，
+        # 静态 side_effect 分类无法覆盖它可能引入的资源冲突。
+        runner = self._decision_hook_runner
+        if runner is not None and runner.active:
+            return "serial"
         for call in ToolCall.normalize_all(tool_calls):
             name = call.name
             try:
@@ -1139,12 +1233,63 @@ class ToolExecutor:
         # 全部扫完没命中 MUTATING → 全 READ_ONLY → 并发。
         return "parallel"
 
+    async def _check_plan_mode(
+        self, tool_call_id: str, name: str, tool: Tool,
+        session: Session | None,
+    ) -> ToolExecution | None:
+        """#526 B1：Runtime 只读门禁（Plan 档）。
+
+        位置在 approval 门**之前**：Plan 是工作流档，先于授权判定收窄可执行的工具集。
+        与 Sandbox 后端**正交**——这里只承诺 Runtime 门禁（禁可变副作用工具），
+        不承诺进程级只读（`05 §5`、不变量 #11）。返回 None 表示放行。
+
+        档位真相在会话 durable 事件里（``workflow/mode-changed``，last-wins），
+        每次调用现派生——Web 端点切换后立即生效，无需重建 executor。
+        无 session 时回落到构造期快照 ``self._workflow_mode``。
+
+        放行条件（任一满足即放行）：
+        - 非 PLAN 档；或
+        - ``tool.plan_mode_exempt`` 显式豁免（禁按工具名硬编码）；或
+        - 只读工具：``side_effect`` 非 MUTATING 且 ``permission`` 为 READ_ONLY
+          （Plan 档允许探索性只读，对标 Claude Code plan mode 的 Read-only）。
+        """
+        if session is not None:
+            # 函数内惰性 import：避 session↔tooling 循环（同 _check_approval）。
+            from agent_harness.session.workflow import effective_workflow_mode
+            mode = effective_workflow_mode(session.events)
+        else:
+            mode = self._workflow_mode
+        if mode is not WorkflowMode.PLAN:
+            return None
+        if tool.plan_mode_exempt:
+            return None
+        if (
+            tool.side_effect is not ToolSideEffect.MUTATING
+            and tool.permission is ToolPermission.READ_ONLY
+        ):
+            return None
+        return ToolExecution(
+            tool_call_id=tool_call_id,
+            result=ToolResult.failure(
+                message=(
+                    f"会话处于 Plan 模式（只读探索档）：工具 '{name}' 被拦截。"
+                    "切换回 normal 档后重试。"
+                ),
+                error_code=ErrorCode.PERMISSION_DENIED,
+                retryable=False,
+            ),
+            budget_delta=_rejected_delta(name),
+        )
+
     async def _check_approval(
         self,
         tool_call_id: str,
         name: str,
         tool: Tool,
         raw_args: dict[str, Any],
+        *,
+        validated: dict[str, Any],
+        session: Session | None,
     ) -> ToolExecution | None:
         """阶段 2.5：审批关卡。返回 None 表示放行，返回 ToolExecution 表示拒绝。
 
@@ -1154,9 +1299,54 @@ class ToolExecutor:
         - 超级别或 DANGER 在受限 policy 下 → 需要 approval：
           - 无 callback → PERMISSION_DENIED（安全默认）。
           - 有 callback → 调 callback；approved → 放行；denied → PERMISSION_DENIED。
+        - #526 A2：可缓存身份命中**会话级授权**（TTL / policy_at_approval / 权限上界
+          三闸，`grant_valid`）时放行；该缓存只替代"人的重复决定"，不绕过
+          `needs_approval`（每次调用仍重过）。
         """
         tool_perm = tool.permission
         if not needs_approval(tool_perm, self._policy):
+            return None
+
+        # 函数内惰性 import：session.approval 在模块顶层 import tooling 包
+        # （tooling/__init__ → executor），顶层回引会形成循环；调用时模块已就绪。
+        from agent_harness.session.approval import (
+            append_approval_grant,
+            derive_approval_grants,
+        )
+
+        # #526 A2：批准键必须由 Runtime 从**已校验参数**派生（`approval_identity`
+        # 是唯一入口；模型输入永不直接充当 key）。不可缓存身份 → None → 逐调用审批。
+        # 派生抛异常（沙盒缺失/路径越界等）→ 视为不可缓存，走逐调用审批（fail-closed
+        # 是"不缓存"，不是"不审批"：调用仍必须过 needs_approval + callback）。
+        try:
+            identity = approval_identity(
+                tool,
+                validated,
+                session.sandbox if session is not None else None,
+                policy=self._policy,
+            )
+        except (AttributeError, ValueError):
+            identity = None
+        approval_key = identity.key() if identity is not None else None
+
+        # 会话授权命中：仅替代"人的决定"，不改 needs_approval 结论，且绑定
+        # policy_at_approval（ADR-0041 D6）/ TTL / 权限上界。
+        if session is not None and approval_key is not None:
+            grants = derive_approval_grants(session.events)
+            grant = grants.get(approval_key)
+            if grant is not None and grant_valid(
+                grant,
+                permission=tool_perm,
+                policy=self._policy,
+                now=time.time(),
+            ):
+                return None
+
+        # #684：会话 grant 未命中后查**项目级持久规则**（无 TTL、跨会话）。
+        # 命中判定集中在 ApprovePolicyStore.find_match：exact 全等 / command 去
+        # args hash，且两档都重验 permission == permission_at_approval（防提权）。
+        # 不依赖 session：持久规则是项目配置，裸执行域（无会话）同样生效。
+        if identity is not None and self._approve_policy_store.find_match(identity) is not None:
             return None
 
         reason = approval_reason(tool_perm, self._policy)
@@ -1167,6 +1357,7 @@ class ToolExecutor:
             policy=self._policy,
             reason=reason,
             tool_call_id=tool_call_id,
+            approval_key=approval_key,
         )
 
         if self._approval_callback is None:
@@ -1183,7 +1374,30 @@ class ToolExecutor:
 
         response: ApprovalResponse = await self._approval_callback(request)
         if response.approved:
-            # per-call scoping：批准只对这次 execute 生效，不存状态。
+            # per-call scoping：APPROVE_ONCE 只对这次 execute 生效，不存状态。
+            if (
+                response.decision is PermissionDecision.APPROVE_SESSION
+                and approval_key is not None
+                and session is not None
+            ):
+                # APPROVE_SESSION：把这次人工「本会话允许此操作」落成 durable 事件；
+                # 同身份后续调用命中上面的 grant_valid 投影（append_approval_grant
+                # 是唯一写入口）。
+                assert identity is not None  # approval_key 非空 ⇒ identity 非空
+                append_approval_grant(
+                    session,
+                    ApprovalGrant(
+                        identity=identity,
+                        expires_at=time.time() + APPROVAL_GRANT_TTL_SECONDS,
+                    ),
+                )
+            elif (
+                response.decision is PermissionDecision.APPROVE_POLICY
+                and identity is not None
+            ):
+                # #684：把这次人工「以后都允许」安装成项目级持久规则。规则内容由
+                # Runtime 从 identity 精确派生（用户只选粒度，不能手写规则文本）。
+                self._install_policy_rule(identity, response.policy_granularity)
             return None
 
         return ToolExecution(
@@ -1195,6 +1409,49 @@ class ToolExecutor:
             ),
             budget_delta=_rejected_delta(name),
         )
+
+    def _install_policy_rule(
+        self, identity, granularity: PolicyGranularity | None,
+    ) -> None:
+        """把一次 APPROVE_POLICY 决策安装成项目级持久规则（#684）。
+
+        规则 key 由 Runtime 从已校验参数派生的 ``identity`` 精确决定：
+        - exact 档 → ``identity.key()``（完整身份键，含 args hash）；
+        - command 档 → ``identity.canonical``（tool + command，不含 args hash）。
+
+        命令级 key 含换行符时 ``add_rule`` 抛 ``ValueError``（Codex 语义）——安装被
+        拒绝，但**本次调用的人工批准已生效**（调用方按 approve 放行），只是不落盘；
+        记 warning 供排查，绝不让一个非法规则把正在跑的 run 顶崩。落盘失败
+        （``OSError``：磁盘只读 / 权限 / 空间）同口径处理：本次批准仍生效，只记
+        warning——安装持久规则是「批准之后」的加固动作，绝不能反过来否掉已批准调用。
+        """
+        granularity = granularity or PolicyGranularity.EXACT
+        key = (
+            identity.key()
+            if granularity is PolicyGranularity.EXACT
+            else identity.canonical
+        )
+        rule = ApprovePolicyRule(
+            id=uuid4().hex,
+            tool=identity.tool_name,
+            key=key,
+            granularity=granularity,
+            permission_at_approval=identity.permission,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        try:
+            self._approve_policy_store.add_rule(rule)
+        except ValueError:
+            logger.warning(
+                "命令级审批规则含换行符，拒绝安装（本次调用仍按单次批准放行）："
+                "tool=%s",
+                identity.tool_name,
+            )
+        except OSError:
+            logger.warning(
+                "持久审批规则落盘失败（本次调用仍按单次批准放行）：tool=%s",
+                identity.tool_name,
+            )
 
     async def _execute_with_resource_locks(
         self, tool_call_id: str, name: str, tool: Tool, validated: BaseModel,

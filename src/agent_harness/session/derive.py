@@ -97,6 +97,12 @@ _USER_FACT_TYPES = frozenset(
 )
 _USER_INPUT_FACT_TYPES = _USER_FACT_TYPES - {"authorization_revocation"}
 _USER_SOURCE_TYPES = frozenset({USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED})
+
+#: W-06（#350）：经 POST /progress/resolve 确认的手改指令所带的用户消息标记。
+#: derive_protected_facts 把带此标记的 USER_MESSAGE 也收为 user_goal 来源——
+#: "确认后才更新真相"要求确认指令在后续重读（重启/压缩后）中对模型可见。
+#: 只认事件上的 origin 标记，不认文件文本；不改变既有"首条用户消息"口径。
+PROGRESS_CONFIRM_ORIGIN = "progress_external_edit_confirm"
 _RUN_BOUNDARY_TYPES = frozenset(
     {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED, RUN_PAUSED}
 )
@@ -722,6 +728,16 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
         None,
     )
     user_goal_sources = {first_user_source.event_id} if first_user_source else set()
+    # W-06（#350）：确认过的外部编辑指令（见 PROGRESS_CONFIRM_ORIGIN）以
+    # user_goal 保护事实身份进入投影。首条用户消息口径保持不变；这里只是
+    # 追加来源，不改变 supersede/取消等既有判定。
+    for event in events:
+        if (
+            event.type == USER_MESSAGE
+            and event.data.get("origin") == PROGRESS_CONFIRM_ORIGIN
+            and is_active_user_source(event)
+        ):
+            user_goal_sources.add(event.event_id)
     direct_user_events = [
         event
         for event in events

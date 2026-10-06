@@ -93,6 +93,10 @@ class TestSessionEventDTO:
             "reasoning/interrupted",
             "tool/approval-requested",
             "permission/resolved",
+            # #526 A2/B1：会话级审批授权写/撤回、工作流档切换
+            "permission/approval-granted",
+            "permission/approval-revoked",
+            "workflow/mode-changed",
             # Phase Multiturn T2 (#132)：续聊队列 + steer 引导（PRD §6）
             "message/queued",
             "queue/cancelled",
@@ -129,6 +133,10 @@ class TestSessionEventDTO:
             "guard/stuck",
             # #524：完成门证据策略拒绝的结构化事实（纠正以紧随的 user/message 落地）。
             "completion/evidence-blocked",
+            # #529 §6.2：skill 沉淀登记留痕（register / update / remove）
+            "skill/registered",
+            "skill/updated",
+            "skill/removed",
         }
         assert EVENT_TYPES == expected
 

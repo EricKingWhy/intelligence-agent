@@ -14,8 +14,14 @@
 supersession 只设一条规则 **R1（同源重复）**，宁可窄而确定、无启发式：
 两条 tool/result 均 ok=true + tool_name 相同 + args JSON canonical 序列化相同
 + 内容指纹相同（外置结果即 artifact_ref = 原文 sha256）⇒ 较旧的可裁、保留最新。
-不裁清单全部确定性：指纹不同 / ok=false（失败诊断保留）/ 等价类最新一条 /
-被 ``source_event_ids`` 引用（W-02 保护事实接缝，main 上恒空）/ 无 artifact_ref
+等价类只在**当前投影可见**（未被 compaction bracket / ``message/superseded``
+shadow）的成员上构建（#643 T15/P-1）：可见性直接取自 derive 的有效投影输出，
+不在此另写区间算法——被 shadow 的事件本就不在 Runtime Context（不变量 #5/#6），
+对它们下裁决策既无投影效果、又会把收益门读数算进不存在于上下文的 token。
+不裁清单全部确定性：指纹不同 / ok=false（失败诊断保留）/ 等价类可见成员中最新一条 /
+被 ``source_event_ids`` 引用（W-02 保护事实接缝；main 上 tool 侧被引用的只有
+TOOL_CALL 事件 id 与失败 TOOL_RESULT 事件 id——failed_approach 的 evidence，
+而候选必 ok=true，故本豁免对候选恒不触发）/ 无 artifact_ref
 （已保存裁决 (A)：pruner 不现场 store.save，未外置结果不参与）/ ref 校验失败 /
 最近 K 条 tool 结果窗口内（#414 W-31.2 ``keep_recent_tool_results``）/
 一轮收益低于收益门（#414 W-31.2 ``clear_at_least_tokens``）。
@@ -59,7 +65,11 @@ __all__ = [
 _SUMMARY_MAX_CHARS = 120
 
 #: 豁免原因：候选结果被某事件的 ``source_event_ids`` 引用（W-02 保护事实接缝）。
-#: main 上该集合恒空（唯一写入者 session.resume 的 dangling 修复指向 tool_call_id），
+#: main 上该集合非空：写入者含 USER_MESSAGE 事实链接（可携 TOOL_CALL 事件 id）、
+#: TASK_PROTECTED_FACT（failed_approach 的 source=TOOL_CALL 事件 id、evidence=失败
+#: TOOL_RESULT 事件 id）、task 验收修订/释放、OPERATION_RECONCILED 及 fork 收养
+#: 重映射；resume dangling 修复写入的是 tool_call_id **字段值**（非事件 id）。
+#: 候选必 ok=true 而被引用的 TOOL_RESULT 恒为失败诊断 ⇒ 本豁免对候选恒不触发，
 #: 行为不受影响；W-02 落地后零改动生效。
 SKIP_PROTECTED_REFERENCE = "protected_reference"
 
@@ -186,8 +196,18 @@ class ToolResultPruner:
 
         ``pairs`` 是 ``derive_messages_with_source_ranges`` 的输出；裁剪只按
         source seq 原位替换 ToolMessage.content，消息数与顺序不变。
+
+        #643（T15/P-1）：带来源范围的 ToolMessage 即「当前投影可见」的
+        tool/result——被 bracket / supersede shadow 的事件在 ``pairs`` 里没有
+        对应消息，于是不进等价类。可见性口径因此与 derive 逐字同源（规则只有
+        derive 一处实现），pruner 不重写 bracket 有效性判断。
         """
-        skeleton_by_seq, report = await self._decide(events)
+        visible_seqs = frozenset(
+            source_range[0]
+            for message, source_range in pairs
+            if isinstance(message, ToolMessage) and source_range is not None
+        )
+        skeleton_by_seq, report = await self._decide(events, visible_seqs)
         return self.apply(pairs, skeleton_by_seq), report
 
     def apply(
@@ -216,12 +236,14 @@ class ToolResultPruner:
         return messages
 
     async def _decide(
-        self, events: list[SessionEvent],
+        self, events: list[SessionEvent], visible_seqs: frozenset[int],
     ) -> tuple[dict[int, str], PruneReport]:
         calls = _collect_calls(events)
         groups: dict[tuple[str, str, str], list[_Candidate]] = {}
         for event in events:
-            if event.type != TOOL_RESULT:
+            if event.type != TOOL_RESULT or event.seq not in visible_seqs:
+                # #643：只对当前投影可见的结果下决策——被 shadow 的成员不在
+                # Runtime Context 里，既不可能是 survivor，也不该进裁剪账目。
                 continue
             candidate = _candidate_from(event, calls)
             if candidate is None:
@@ -241,7 +263,7 @@ class ToolResultPruner:
         planned: list[tuple[_Candidate, PruneRecord]] = []
         skipped: list[PruneSkip] = []
         for members in groups.values():
-            # 等价类最新一条永远保留；较旧者逐条过豁免与校验。
+            # 等价类**可见**成员中最新一条永远保留；较旧者逐条过豁免与校验。
             survivor = members[-1]
             for candidate in members[:-1]:
                 if candidate.event_id in protected:

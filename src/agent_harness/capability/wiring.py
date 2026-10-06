@@ -80,6 +80,9 @@ class CapabilityWiring:
     # 此处是缓存 wiring 上的 provider prototype；build_runtime 为每个 root Runtime
     # 创建独立实例再激活，descendant runtimes 继承该实例。
     multiagent_provider: Any | None = None
+    #: Skill capability（#529 T-529-5）：Web 只读 catalog 展示面经 `get_wiring()`
+    #: 取用；未装配 skills 时为 None（路由层 503 如实降级）。
+    skills: Any | None = None
     #: capability 名 → 降级原因（`DegradeReason` 的**值**；写点一律取 `.value`——
     #: 存枚举成员的话，将来任何 `f"{reason}"` 会写出 `DegradeReason.X` 而不是码）。
     #: **只登记"非缺省"的原因**：
@@ -278,27 +281,39 @@ async def _wire_skills(
     # 全局目录（spec 09 §2）+ 项目目录（workspace 级）+ options 扩展目录/手动路径。
     global_dir = Path(settings.skill_global_dir) if settings.skill_global_dir \
         else Path.home() / ".intelligence-agent" / "skills"
-    directories = [global_dir, Path(settings.workspace_dir) / "skills"]
+    project_dir = Path(settings.workspace_dir) / "skills"
+    directories = [global_dir, project_dir]
     directories.extend(_coerce_path_list(cfg, "directories"))
     manual_paths = _coerce_path_list(cfg, "paths")
-    catalog = SkillDiscovery(directories=directories, manual_paths=manual_paths).discover()
+    # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
+    # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
+    discovery = SkillDiscovery(directories=directories, manual_paths=manual_paths, project_dir=project_dir)
+    catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
     # SkillCapability.errors() 仍可编程读取。
     if catalog.errors:
         logger.warning("skill 发现阶段有 %d 个解析错误：%s", len(catalog.errors), catalog.errors)
-    capability = SkillCapability(catalog)
+    # #529 T-529-5：沉淀状态机装配（staging 在 project skill 目录第二层，单层
+    # 扫描不可见——未确认草稿结构上进不了 catalog）。
+    from agent_harness.skills.promote import SkillPromoter
+
+    promoter = SkillPromoter(discovery, staging_root=project_dir / ".staging")
+    capability = SkillCapability(discovery, promoter=promoter)
     registry.register(
         CapabilityDescriptor(
-            name="skills", version="1.0.0", provider_name=cfg.provider,
-            capabilities=["catalog", "load"], risk="low",
+            name="skills", version="1.1.0", provider_name=cfg.provider,
+            capabilities=["catalog", "load", "promote"], risk="medium",
             supports_concurrency=True, supports_recovery=False, supports_streaming=False,
             degradation=Degradation.OPTIONAL_RUNTIME,
         ),
         capability,
     )
     wiring.context_providers.append(SkillCatalogContextProvider(capability))
-    # load_skill 不在这里 append：SkillCapability 实现 ContributesTools，
-    # 与其他工具贡献统一走 wire_capabilities 末尾的收集循环。
+    # #529 T-529-5：capability 挂到 wiring（Web 只读 catalog 展示面的取用口）。
+    wiring.skills = capability
+    # load_skill（及装配了 promoter 时的 promote_skill/register_skill）不在这里
+    # append：SkillCapability 实现 ContributesTools，与其他工具贡献统一走
+    # wire_capabilities 末尾的收集循环。
 
 
 async def _wire_mcp(

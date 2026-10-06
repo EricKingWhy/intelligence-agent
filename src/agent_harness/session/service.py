@@ -32,10 +32,12 @@ import os
 import stat
 import time
 from collections.abc import Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
+from functools import partial
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import anyio
 
@@ -90,7 +92,9 @@ from agent_harness.session.approval import (
     SESSION_AUTO_APPROVE_KEY,
     SESSION_PERMISSION_MODE_KEY,
     PermissionChange,
+    append_approval_revoke,
     append_permission_change,
+    derive_approval_grants,
 )
 from agent_harness.session.approval import (
     InteractiveCallbackHolder as _InteractiveCallbackHolder,
@@ -108,6 +112,7 @@ from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
     KIND_STEER,
+    PROGRESS_CONFIRM_ORIGIN,
     UndeliveredInput,
     collect_dangling,
     derive_protected_facts,
@@ -122,6 +127,8 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
     EventLogCorruptError,
     InvalidDecision,
     InvalidForkBoundary,
@@ -182,7 +189,15 @@ from agent_harness.session.model_switch import (
 from agent_harness.session.model_switch import (
     restore_policy_inputs as _restore_policy_inputs,
 )
-from agent_harness.session.progress import ProgressWriteOutcome, write_progress_file
+from agent_harness.session.progress import (
+    PROGRESS_VERIFY_EXTERNALLY_EDITED,
+    PROGRESS_VERIFY_OK,
+    ProgressVerification,
+    ProgressWriteOutcome,
+    render_external_edit_instruction,
+    verify_progress_file,
+    write_progress_file,
+)
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
@@ -201,8 +216,15 @@ from agent_harness.session.task import (
     apply_verification,
     derive_task_state,
 )
+from agent_harness.session.workflow import (
+    WorkflowMode,
+    append_workflow_mode_change,
+)
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN
-from agent_harness.storage.delegation_tree import SessionBudgetHandle
+from agent_harness.storage.delegation_tree import (
+    SessionBudgetHandle,
+    SessionToolLimitsPurge,
+)
 from agent_harness.storage.local_artifact import discard_local_artifacts
 from agent_harness.storage.operation import OperationState, needs_reconcile
 from agent_harness.storage.session_meta import SessionMeta
@@ -212,14 +234,19 @@ from agent_harness.tooling.approval import (
     PermissionDecision,
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.approve_policy import PolicyGranularity
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from langchain_core.language_models import BaseChatModel
 
     from agent_harness.capability.base import CapabilityRegistry
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
+    from agent_harness.context.builder import ContextBuilder
     from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
@@ -242,6 +269,14 @@ logger = logging.getLogger(__name__)
 #: 字面量——审计格式只此一处定义，免得两个入口各写一套、迟早漂移成对不上账的记录
 #: （`memory/audit.py::ENTRY_*` 同款）。
 ARCHIVE_ENTRY_API = "api"
+
+#: 陈旧账行名清除通道（#616）的 API 入口标识，写进 `session_budget_events` 审计的
+#: `source` 字段。与 `ARCHIVE_ENTRY_API` 同一份定义/同款风格——Web 端点只引用这一处。
+PURGE_ENTRY_API = "api"
+
+#: 手动上下文压缩通道（#635）的 API 入口标识，与 `PURGE_ENTRY_API` 同款。CLI 侧
+#: 对应 `cli.py::COMPACT_ENTRY_CLI`（瘦触发器传入）。
+COMPACT_ENTRY_API = "api"
 
 
 # ── 领域异常 ──────────────────────────────────────────────────────────
@@ -268,6 +303,30 @@ _WRITE_CONFLICT_ATTEMPTS = 3
 #: AC <1s 由贴线转为有裕度）。只作用于默认列表路径的三个卸载点（id 现扫 / 窗口
 #: refs / 批量摘要），全局默认限流器不动——其他 to_thread 消费者行为零变化。
 _LIST_SYNC_LIMITER = anyio.CapacityLimiter(100)
+
+
+@dataclass(frozen=True)
+class SessionContextCompaction:
+    """手动上下文压缩（#635）的结果 DTO（Web / CLI 共用的渲染来源）。
+
+    `bracket_id is None` / `compacted_turn_count == 0` 表示**水位过低无需压缩**
+    （无可压缩的早期轮）或**写前**校验闸门失败（失败记录已落
+    `context/compaction_failed`）——两种情况都**零 bracket 写入**。**写后**复核失败
+    （bracket 三事件已落盘、重投影确认不一致 / 仍越硬护栏）不在此 DTO 表达：服务层
+    抛 `CompactionPostWriteError` 响亮失败（F2 #635），因为历史已多出 bracket，谎报
+    "未改动"会与事实冲突。`tokens_before/after` 是 messages-only 投影
+    估算（同一口径，可直接相减展示）。`dry_run=True` 时 `compacted_turn_count`
+    是"将压缩"的预览（1 = 有可压缩窗口），`tokens_before == tokens_after`。
+    """
+
+    bracket_id: str | None
+    source_seq_start: int | None
+    source_seq_end: int | None
+    tokens_before: int
+    tokens_after: int
+    compacted_turn_count: int
+    summary_model: str | None
+    dry_run: bool
 
 
 def validate_session_id(session_id: str) -> str:
@@ -759,6 +818,27 @@ def _constraint_input_answer_data(
     if annotations:
         data["protected_facts"] = annotations
     return data, False
+@runtime_checkable
+class RegisteredToolNamesProvider(Protocol):
+    """`#616` 根 registry 名字集的**领域端口**（判据 = 根 registry 的树级语义）。
+
+    返回某会话视角下**根 registry** 当前注册的工具名集合；陈旧账行名的判定
+    （`session_budgets.tool_call_limits` 的键 ∉ 本集合）依赖它。名字集的计算是
+    组合层的事（`assembly.root_registry_tool_names`，零副作用投影；与
+    `build_runtime` 同源，一致性由 `tests/test_assembly_root_registry_names.py`
+    三方对账钉住）——领域层 import 组合层类型会被 import 边界守卫
+    （`tests/session/test_service_collaborators.py`）拦下，所以同
+    `SessionDeclarationValidator` 一样由组合根注入实现
+    （`web/app.py::session_service` 唯一适配点）。
+
+    **不得**改回完整 `_build_tooling`——那会构造 sandbox 并在归属对账前 mkdir
+    workspace（审查 P2-1）。
+
+    未注入（直构 `SessionService` 的调用方）⇒ 清除通道 **fail-closed**：拿空名字集
+    去算会把**全部** ceiling 误判为陈旧并清空，所以调用方必须显式注入。
+    """
+
+    async def __call__(self, session_id: str) -> frozenset[str]: ...
 
 
 class SessionService:
@@ -772,6 +852,14 @@ class SessionService:
     每个参数都是**真的在用**：字段清单与用途见
     `docs/adr/0040-session-service-explicit-collaborators.md`。
     """
+
+    # #635（Task B 修正）：per-session 手动压缩在途防重（防 Web 连点 / CLI 并发穿过
+    # `is_busy`）。**必须进程级共享**：`web/app.py::session_service()` 每个 HTTP 请求
+    # 都新建一个 `SessionService`，实例字段在请求间不共享 ⇒ 连点第二次会拿到全新空
+    # dict、防重失效（AC8 的"压缩已在进行中 → 409"跨请求不可达）。声明为类属性 =
+    # 与 RunManager 的每会话锁同一寿命（进程内共享，不落盘）；读改写只做原地
+    # set/pop（见 `compact_session_context` 的 finally），不会遮蔽共享字典。
+    _compact_in_flight: ClassVar[dict[str, bool]] = {}
 
     def __init__(
         self,
@@ -794,6 +882,7 @@ class SessionService:
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
         validate_session_declaration: SessionDeclarationValidator | None = None,
         budget_recovery_failed_sessions: set[str] | None = None,
+        registered_tool_names: RegisteredToolNamesProvider | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -816,6 +905,7 @@ class SessionService:
             budget_recovery_failed_sessions
             if budget_recovery_failed_sessions is not None else set()
         )
+        self._registered_tool_names = registered_tool_names
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -1905,6 +1995,10 @@ class SessionService:
                 port=stuck_evidence,
                 runtime_builder=build_resume_runtime,
             )
+            # W-06（#350）：服务重启/同 run 恢复的重读点——从磁盘重读并对账后
+            # 把文件刷成当前投影（外部编辑在场时 writer 守卫拒绝覆写，冲突经
+            # progress_file_status 呈现，绝不静默覆盖用户手改）。
+            await self.refresh_progress_file(session_id)
             return self._bind_and_launch(
                 session=session, runtime=runtime, task=task,
                 user_input_metadata=user_input_metadata,
@@ -1942,6 +2036,9 @@ class SessionService:
                     session_id,
                     workspace_registry=self._workspace_registry,
                 )
+            # W-06（#350）：服务重启/新任务恢复的重读点（与同 run 分支同口径；
+            # 外部编辑在场时 writer 守卫拒绝覆写，冲突经 progress_file_status 呈现）。
+            await self.refresh_progress_file(session_id)
             return self._bind_and_launch(
                 session=session, runtime=runtime, task=task,
                 user_input_metadata=user_input_metadata,
@@ -2995,6 +3092,402 @@ class SessionService:
         )
         return archived
 
+    # ── 陈旧账行名清除（#616）─────────────────────────────────────────
+
+    async def purge_stale_session_tool_limits(
+        self,
+        session_id: str,
+        *,
+        tool: str | None = None,
+        entry_point: str,
+        dry_run: bool = False,
+    ) -> SessionToolLimitsPurge:
+        """清掉 `session_budgets.tool_call_limits` 里**不在根 registry** 的陈旧名（#616）。
+
+        #564 裁决 (a) 之后，坏名不再被新请求写入账行，但存量坏名（一次打错请求留下的）
+        永久留存、每次 resume 重复告警。本方法是那条"存量陈旧账行的公开清除通道"：
+        服务端用**根 registry** 权威判 stale（树级语义，客户端不掌握），只删 ceiling
+        表里的陈旧键——**不动**消耗事实表 `tool_calls_by_tool` / `tool_attempts_by_tool`，
+        也**不落** typed SessionEvent（预算变更本就不进会话真相；不变量 #16/#22）。
+
+        守卫与语义：
+
+        1. 形态 + 存在性复用 `_require_existing_session`：422 `InvalidSessionId` 先于
+           404 `SessionNotFound`，与 `set_archived` / `delete_session` 同一套判据与文案
+           （清除**不是**在途 run 冲突，故无 409）。
+        2. 端口 `registered_tool_names` 未注入 ⇒ `RuntimeError` **fail-closed**：绝不
+           拿空名字集去算（那会把**全部** ceiling 误判为陈旧并清空）。
+        3. `tool` 未指定 ⇒ 整会话重整（清全部 stale 键）；`tool` 指定 ⇒ 仅当它落在
+           stale 集才清它，点名**正常注册名 / 从未存在名**都是零改动 no-op。
+        4. 判定在服务层（掌握根 registry），落盘在存储层单事务
+           （`purge_session_tool_limits`：删键 + `tool_limits_purged` 审计 + version+1）。
+           无 stale 键 ⇒ 直接返回空结果，不触碰账行、不碰审计、不 bump version。
+        5. 审计痕迹：与 `set_archived` ⑤ 同款取舍——只落结构化日志（不是会话真相），
+           只带 id / 动作 / 被清名，不带会话正文（已清名 → ceiling 的 durable 记录在
+           `session_budget_events`）。
+        6. `dry_run=True`（CLI 整会话重整的确认面）⇒ 照常算 stale 候选并返回
+           **将清**的 `purged`（名 → 原 ceiling）与清后的 `remaining`，但 `rows=0`、
+           `version` 为当前版本，**零写入**（不调存储写、不 INSERT 事件、不 bump）。
+           供 CLI 打印"将清名单"后决定是否真执行。
+        """
+        await self._require_existing_session(session_id)
+        budget_key, table, stale, version = await self._stale_tool_limit_candidates(
+            session_id, tool=tool
+        )
+        if not stale:
+            return SessionToolLimitsPurge(
+                purged={}, remaining=table, rows=0, version=version,
+            )
+        if dry_run:
+            return SessionToolLimitsPurge(
+                purged={name: table[name] for name in stale},
+                remaining={name: value for name, value in table.items() if name not in stale},
+                rows=0,
+                version=version,
+            )
+        result = await self._stores.delegation_tree_ledger.purge_session_tool_limits(
+            budget_key, names=stale, source=entry_point,
+        )
+        log_event(
+            logger,
+            "system_log",
+            f"session stale tool ceilings purged: {session_id}",
+            component="session_budget",
+            outcome="tool_limits_purged",
+            session_id=session_id,
+            entry_point=entry_point,
+            purged=sorted(result.purged),
+        )
+        return result
+
+    async def _stale_tool_limit_candidates(
+        self, session_id: str, *, tool: str | None,
+    ) -> tuple[str, dict[str, int], set[str], int]:
+        """算出 `(budget_key, ceiling 表, 陈旧候选名, 当前 version)`（#616）。
+
+        `purge_stale_session_tool_limits` 的真执行与 `dry_run` 共用本 helper——
+        判据（谁陈旧）只写一遍，免得两条路径各算一套迟早漂移。
+
+        fail-closed：端口 `registered_tool_names` 未注入 ⇒ `RuntimeError`，绝不拿
+        空名字集把**全部** ceiling 误判为陈旧。`tool` 未指定 ⇒ 整会话（清全部 stale
+        键）；`tool` 指定 ⇒ 仅当它落在 stale 集才收窄为它，点名正常/未知名 → 空集
+        （调用方据此走零改动 no-op）。
+        """
+        if self._registered_tool_names is None:
+            raise RuntimeError(
+                "registered_tool_names 端口未注入（组合根未适配）：拒绝以空名字集"
+                "清理——否则会把全部 ceiling 误判为陈旧并清空（fail-closed）"
+            )
+        registered = await self._registered_tool_names(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        budget_key = session_budget_key(events, session_id=session_id)
+        snapshot = await self._stores.delegation_tree_ledger.get_session_budget(
+            budget_key
+        )
+        table: dict[str, int] = (
+            dict(snapshot.limits.tool_call_limits) if snapshot is not None else {}
+        )
+        stale = {name for name in table if name not in registered}
+        if tool is not None:
+            stale = {tool} if tool in stale else set()
+        version = snapshot.version if snapshot is not None else 0
+        return budget_key, table, stale, version
+
+    # ── 手动上下文压缩（#635）─────────────────────────────────────────
+
+    async def compact_session_context(
+        self,
+        session_id: str,
+        *,
+        model: str | None = None,
+        entry_point: str,
+        dry_run: bool = False,
+    ) -> SessionContextCompaction:
+        """手动触发一次上下文压缩（CLI / Web 共用的**唯一实现**，#635）。
+
+        顺序即契约（每步拒绝都早于产生可观察副作用）：
+
+        1. `_require_existing_session`：422 `InvalidSessionId` 先于 404
+           `SessionNotFound`（与 `set_archived` / `delete_session` 同一套判据）。
+        2. 解析摘要模型——**在任何副作用之前**完成（fuse 纪律）：优先级为显式
+           `model` > `settings.summary_model` > 主模型（None）。非法模型名经
+           `ModelConfig.resolve_selection` 抛 `ConfigError`（Web 映射 422 / CLI exit 1）。
+        3. `RunManager.is_busy` → `ActiveRunConflict`（Web 409 / CLI exit 1），**零写入**。
+        4. per-session in-flight 防重 guard（`_compact_in_flight`，`finally` 释放）：
+           防 Web 连点 / CLI 并发穿过 `is_busy`（压缩不是 run，`is_busy` 看不见它）。
+        5. `session_lock` **只覆盖"判忙 + 快照"短决策点**（`runmanager.py:320-329`
+           明令不得持锁跨长耗时操作：持锁 10–60s 会阻塞 `resume_and_launch` 的 CAS
+           临界区、暂停恢复两阶段与 run 终结接力）；LLM 调用期间锁已释放；落盘前由
+           `write_guard` 重拿锁并复验（事件数未被并发改动 / 仍不 busy）再写 bracket。
+        6. 调 `ContextBuilder.compact_now(session)`（T2 产物）走**真实管线**。若
+           `compacted_turn_count == 0`（无可压缩早期轮 / 校验闸门失败）→ **零写入**
+           返回"水位过低"。失败记录已由 compact_now 落 `context/compaction_failed`，
+           会话可继续（无坏摘要）。
+        7. `dry_run=True` → 只算当前水位并返回"将压缩"，**零 LLM 调用、零写入**。
+
+        为什么手动压缩用 `is_busy` 而不是 `get_active`（实质论证）：手动压缩要**写
+        会话事件日志**（bracket 三事件），与归档（只写正交的 `session_meta` 列、完全
+        不碰事件日志）不同，而与硬删同属"别人可能还在写日志"的资源。更具体地，run 的
+        finalizer 窗口存在 seq 竞态（#560-B）：`run.finish()` 置终态后，`_drive` 的
+        finally 仍可能经 `_notify_run_terminal` → `deliver_next_undelivered` →
+        `resume_and_launch` 追加事件并起新 run；压缩若在该窗口按自己读到的聚合追加
+        bracket，会撞上"两个聚合各自推算 seq"的竞态。`is_busy` 恰把这一收尾窗口视为忙
+        （见其 docstring），`get_active` 不视为忙。
+
+        `entry_point` 区分 CLI / API（审计日志用）。
+        """
+        # ① 形态 + 存在性
+        await self._require_existing_session(session_id)
+
+        # ② 摘要模型解析（零副作用前；非法名 → ConfigError）
+        summary_model = await self._resolve_compaction_summary_model(model)
+
+        # ③ 在途 run：响亮拒绝、零写入
+        if self._run_manager.is_busy(session_id):
+            raise ActiveRunConflict(
+                f"session '{session_id}' has a run in flight; "
+                "compact it after the run finishes"
+            )
+
+        # ④ per-session in-flight 防重
+        if session_id in self._compact_in_flight:
+            raise CompactionInProgress(
+                f"session '{session_id}' already has a compaction in progress"
+            )
+        self._compact_in_flight[session_id] = True
+        try:
+            # ⑤ 短持锁：判忙复验 + 事件快照（LLM 期间不持有）
+            lock = self._run_manager.session_lock(session_id)
+            async with lock:
+                if self._run_manager.is_busy(session_id):
+                    raise ActiveRunConflict(
+                        f"session '{session_id}' has a run in flight; "
+                        "compact it after the run finishes"
+                    )
+                events = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id
+                )
+                snapshot_event_count = len(events)
+
+            session = Session(session_id, self._store, list(events))
+            from agent_harness.context.tokens import estimate_message_tokens
+
+            tokens_before = estimate_message_tokens(session.derive_messages())
+            effective_summary_name = (
+                model if model is not None else self._settings.summary_model
+            )
+
+            # ⑦ dry_run：只算水位，零 LLM、零写入
+            if dry_run:
+                will_compact = self._has_compactable_early_turn(session)
+                return SessionContextCompaction(
+                    bracket_id=None,
+                    source_seq_start=None,
+                    source_seq_end=None,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_before,
+                    compacted_turn_count=1 if will_compact else 0,
+                    summary_model=effective_summary_name or None,
+                    dry_run=True,
+                )
+
+            # ⑥ 真实管线；写 bracket 前由 write_guard 重拿锁 + 复验
+            from agent_harness.context.compactor import (
+                CompactionPostWriteError,
+                ContextWindowExceededError,
+            )
+
+            builder = await self._compact_context_builder(session, summary_model)
+            write_guard = self._compaction_write_guard(
+                session_id, lock=lock, snapshot_event_count=snapshot_event_count,
+            )
+            try:
+                result = await builder.compact_now(session, write_guard=write_guard)
+            except CompactionPostWriteError:
+                # bracket 三事件**已落盘**后的复核失败（重投影不一致 / 仍越硬护栏）：
+                # 历史已变，绝不能吞成 below-floor DTO 谎报"未改动"（F2 #635）。响亮
+                # 失败：Web 映射 500、CLI exit 1，由调用方给出可操作的文案。
+                raise
+            except ContextWindowExceededError:
+                # **写前**校验闸门失败：compact_now 已把失败记录落
+                # `context/compaction_failed`；无坏摘要、无 bracket，会话可继续
+                # （与自动路径"低估值安全继续"同一结果面）。
+                result = None
+            if result is None or not result.compacted_turn_count:
+                log_event(
+                    logger,
+                    "system_log",
+                    f"session context compact below floor: {session_id}",
+                    component="session_context_compact",
+                    session_id=session_id,
+                    entry_point=entry_point,
+                    outcome="below_floor",
+                )
+                return SessionContextCompaction(
+                    bracket_id=None,
+                    source_seq_start=None,
+                    source_seq_end=None,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_before,
+                    compacted_turn_count=0,
+                    summary_model=effective_summary_name or None,
+                    dry_run=False,
+                )
+            log_event(
+                logger,
+                "system_log",
+                f"session context compacted: {session_id}",
+                component="session_context_compact",
+                session_id=session_id,
+                entry_point=entry_point,
+                outcome="compacted",
+                bracket_id=result.bracket_id,
+                compacted_turn_count=result.compacted_turn_count,
+            )
+            return SessionContextCompaction(
+                bracket_id=result.bracket_id,
+                source_seq_start=result.source_seq_start,
+                source_seq_end=result.source_seq_end,
+                tokens_before=tokens_before,
+                tokens_after=result.token_estimate,
+                compacted_turn_count=result.compacted_turn_count,
+                summary_model=result.summary_model_id or (effective_summary_name or None),
+                dry_run=False,
+            )
+        finally:
+            self._compact_in_flight.pop(session_id, None)
+
+    async def _resolve_compaction_summary_model(
+        self, model: str | None,
+    ) -> BaseChatModel | None:
+        """解析摘要模型 client（#635）。优先级：显式 `model` > `settings.summary_model`
+        > 主模型（None）。非法模型名经统一解析点 `ModelConfig.resolve_selection` 抛
+        `ConfigError`；本方法无副作用（不读写会话）。"""
+        name = model if model is not None else self._settings.summary_model
+        if name is None or not name.strip():
+            return None
+        # F10 (#635)：判空用 strip，传给统一解析点也用 **strip 后**的值——否则
+        # 带空白的显式名（`--model " x "`）会以原文去 catalog 查名而误报未知模型；
+        # 与自动路径（assembly.py:522）的 strip 口径一致。
+        name = name.strip()
+        from agent_harness.model.config import ModelConfig
+        from agent_harness.model.provider import create_chat_model
+        from agent_harness.model.provider_store import ProviderStore
+
+        store = ProviderStore.for_settings(self._settings)
+        config = ModelConfig.resolve_selection(self._settings, name, store)
+        return create_chat_model(config)
+
+    async def _compact_context_builder(
+        self, session: Session, summary_model: BaseChatModel | None,
+    ) -> ContextBuilder:
+        """为手动压缩装配一个 `ContextBuilder`（#635）。
+
+        **不**走 `build_runtime`（那会建 sandbox / tooling / capability，对一个非破坏性
+        压缩动作是过大的副作用面）；本 builder 只承载压缩管线所需的模型 + 预算 + 摘要
+        模型接缝。因此手动路径的 `reserved_tokens` 不含 system_prompt / 运行时快照
+        （自动路径的 build 装配带它们）——压缩语义（同一 `ContextCompactor` + 同一
+        bracket + 同一重投影确认）不受影响，只有 target 闸门的保留量略小。组合根若要
+        注入完整装配的 builder，可覆盖本方法（T4/T5 接缝）。
+
+        **F11 (#635) 诚实说明**：为取 `model_call_gate` 调用了 `self._get_wiring()`，
+        这会触发 **capability 惰性装配**（不是零副作用的轻量读取）——所以本方法并非
+        完全没有装配成本。之所以仍选此接缝：`model_call_gate` 是 #559 "摘要调用与主循环
+        同闸"的必需项，而更轻的独立接缝需要给 `SessionService` 增 collaborator / 改
+        ADR-0040 协作者契约（超本票范围）。改从更轻接缝取可作为后续票的优化。
+        """
+        from agent_harness.context.builder import ContextBuilder
+        from agent_harness.model.config import ModelConfig
+        from agent_harness.model.provider import create_chat_model
+        from agent_harness.session.model_switch import current_model_selection
+
+        _, wiring = await self._get_wiring()
+        config = ModelConfig.from_settings(self._settings)
+        # F3 (#635)：缺省摘要模型 = 主模型，必须跟随会话级模型覆盖（AC5："缺省 =
+        # 主模型逐字节等价"）。自动路径经 `amend_with_session_model` →
+        # `ModelConfig.resolve_selection` 解析会话模型；手动路径此前只看 settings，
+        # 会话切换被忽略。此处用同一解析点、同一回落口径（catalog 未命中记 warning
+        # 并回落默认链），保证两条路径对同一会话给出同一主模型。
+        provider, model_id = current_model_selection(session.events)
+        if model_id is not None:
+            from agent_harness.model.config import find_catalog_entry
+            from agent_harness.model.provider_store import ProviderStore
+
+            if find_catalog_entry(self._settings, provider or "", model_id) is None:
+                logger.warning(
+                    "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
+                    provider, model_id,
+                )
+            else:
+                config = ModelConfig.resolve_selection(
+                    self._settings, model_id,
+                    ProviderStore.for_settings(self._settings),
+                )
+        main_model = create_chat_model(config)
+        return ContextBuilder(
+            main_model,
+            max_context_tokens=self._settings.max_context_tokens,
+            auto_compact_threshold=self._settings.auto_compact_threshold,
+            hard_guard_threshold=self._settings.hard_guard_threshold,
+            summary_model=summary_model,
+            model_call_gate=getattr(wiring, "model_call_gate", None),
+            plan_reinject_every_messages=self._settings.plan_reinject_every_messages,
+            keep_recent_tool_results=self._settings.keep_recent_tool_results,
+            clear_at_least_tokens=self._settings.clear_at_least_tokens,
+        )
+
+    def _compaction_write_guard(
+        self, session_id: str, *, lock: asyncio.Lock, snapshot_event_count: int,
+    ) -> Callable[[int], AbstractAsyncContextManager[None]]:
+        """落盘守卫**工厂**：重拿 `session_lock` + 复验（仍不 busy / 事件数未变）后写 bracket。
+
+        LLM 调用期间锁已释放（见 `compact_session_context` ⑤）；本守卫只包住 bracket
+        三事件的写入窗口——`runmanager.py:320-329` 禁止持锁跨长耗时操作。
+
+        工厂化（F1 #635）：`compact_now` 在进 guard 前会落 `own_writes` 条失败记录，
+        复验基线须为 `snapshot_event_count + own_writes`——把本次自身写入排除掉，否则
+        "首试失败、重试成功"会被误判成并发改动。工厂入参由 `compact_now` 传入。
+        """
+        def factory(own_writes: int) -> AbstractAsyncContextManager[None]:
+            @asynccontextmanager
+            async def guard():
+                async with lock:
+                    if self._run_manager.is_busy(session_id):
+                        raise CompactionConcurrentWrite(
+                            f"session '{session_id}' has a run in flight; "
+                            "compact it after the run finishes",
+                            reason="run_busy",
+                        )
+                    current = await anyio.to_thread.run_sync(
+                        self._store.read_events, session_id
+                    )
+                    if len(current) != snapshot_event_count + own_writes:
+                        raise CompactionConcurrentWrite(
+                            f"session '{session_id}' changed during compaction; retry",
+                            reason="event_drift",
+                        )
+                    yield
+
+            return guard()
+
+        return factory
+
+    @staticmethod
+    def _has_compactable_early_turn(session: Session) -> bool:
+        """dry_run 预览：是否存在可压缩的早期轮（compactor `early` 窗口的**近似**判据）。
+
+        前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
+        `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
+        函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
+
+        仍是近似：compactor 另以"early 中非摘要 HumanMessage 数 > 0"作为
+        `compacted_turn_count` 闸门，本预览只判窗口是否非空。
+        """
+        from agent_harness.context.compactor import compactable_early_window
+
+        prefix_end, cut = compactable_early_window(session.derive_messages())
+        return cut > prefix_end
+
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
     async def delete_session(self, session_id: str) -> SessionDeletionStats:
@@ -3137,8 +3630,13 @@ class SessionService:
         approved: bool = True,
         decision: str | None = None,
         reason: str = "",
+        policy_granularity: str | None = None,
     ) -> ApprovalDecision:
         """解析审批决策并唤醒 run 内阻塞的 callback（原 POST /approve）。
+
+        `policy_granularity` 仅对 ``decision=approve_policy``（#684 第三档
+        「以后都允许」）有意义，取值 ``exact`` / ``command``；缺省 ``None`` 由
+        ``ApprovalResponse`` 归一为 ``exact``。其它决策忽略该值（不据此放行/安装）。
 
         返回 ApprovalDecision(decision, response)。
         异常：SessionNotFound / ApprovalQueueMissing / ApprovalRequestMissing /
@@ -3204,10 +3702,24 @@ class SessionService:
                 f"decision '{perm_decision.value}' not in allowed_decisions {allowed}"
             )
 
+        # #684：粒度只认 exact / command 两档（F22 无模糊匹配）；非法值 = 违反契约，
+        # 与非法 decision 同口径 422，绝不静默回落。缺省 None 由 ApprovalResponse
+        # 归一为 exact。
+        granularity: PolicyGranularity | None = None
+        if policy_granularity is not None:
+            try:
+                granularity = PolicyGranularity(policy_granularity)
+            except ValueError:
+                raise InvalidDecision(
+                    f"policy_granularity '{policy_granularity}' is not a valid "
+                    "PolicyGranularity"
+                ) from None
+
         response = ApprovalResponse(
             approved=(perm_decision != PermissionDecision.DENY),
             reason=reason,
             decision=perm_decision,
+            policy_granularity=granularity,
         )
         try:
             ok = queue.resolve(approval_id, response)
@@ -3436,6 +3948,7 @@ class SessionService:
             session_tool_result_recorder=(
                 self._stores.delegation_tree_ledger.record_session_tool_call
             ),
+            session_budget_ledger=self._stores.delegation_tree_ledger,
         )
         self._budget_recovery_failed_sessions.update(
             result.session_id for result in results if result.budget_recovery_failed
@@ -3702,6 +4215,112 @@ class SessionService:
                 exc_info=True,
             )
             return None
+
+    # ── W-06（#350）：进度文件重读对账与外部编辑冲突 ─────────────────────
+
+    async def progress_file_status(
+        self, session_id: str,
+    ) -> ProgressVerification | None:
+        """从磁盘重读 progress.md 并与 SessionEvent 投影对账（只读，零副作用）。
+
+        返回 None = 无 cwd 锚（进度文件机制不适用于该会话）。外部编辑在场时
+        返回 ``externally_edited`` + 字段级差异——**只是展示，绝不采信**：文件
+        文本不进投影、不进权限（Runtime 权限只由 permission 事件决定）。
+        证据 refs 的可读回校验（票面"仅允许引用可读回的 Artifact"）在此处做：
+        store 按装配期同一选择器选取，读不到的 ref 记入
+        ``unreadable_artifacts``（verifiable=False）。
+        """
+        self._validate_session_id(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        cwd = session_cwd(events)
+        if not cwd or not Path(cwd).is_dir():
+            return None
+        verification = await anyio.to_thread.run_sync(
+            verify_progress_file, cwd, session_id, events
+        )
+        if verification.status != PROGRESS_VERIFY_OK:
+            return verification
+        artifact_store = self._artifact_store_for(session_id)
+        if artifact_store is None:
+            return verification
+        unreadable: list[str] = []
+        for artifact_id in verification.evidence_artifact_ids:
+            try:
+                await artifact_store.load(artifact_id)
+            except Exception:  # noqa: BLE001 — 任何读回失败都记为不可读（对账语义）
+                unreadable.append(artifact_id)
+        if unreadable:
+            verification = replace(
+                verification, unreadable_artifacts=tuple(unreadable),
+                artifact_check="performed",
+            )
+        return verification
+
+    def _artifact_store_for(self, session_id: str) -> Any | None:
+        """进度对账用的 artifact 读回判据（与读路径同一选择器，无配置 = None）。"""
+        from agent_harness.storage.artifact_select import select_artifact_store
+
+        selection = select_artifact_store(self._settings, session_id)
+        return selection.store if selection is not None else None
+
+    async def progress_resolve_external_edit(
+        self, session_id: str, *, action: str,
+    ) -> tuple[ProgressVerification | None, str | None]:
+        """解决外部编辑冲突（票面工作指令 2 的两个出口；HTTP 翻译在 web 层）。
+
+        - ``discard``：用户丢弃手改——文件从服务端投影重写（事件流零改动）。
+        - ``confirm``：用户把手改**确认为新用户指令**——先追加 USER_MESSAGE
+          （无副作用追加路径，不启动任何 run），再从服务端投影重写文件。
+          手改文本只以指令身份进事件流，绝不自动升格为授权/保护事实
+          （不变量 #11：Runtime 权限只由 permission 事件决定）。
+
+        返回 ``(verification, error_kind)``：error_kind 为 None = 成功；
+        ``"conflict"`` = 没有待处理的外部编辑；``"shape"`` = action 非法；
+        ``"no_anchor"`` = 无 cwd 锚。重写用 ``overwrite_external_edit=True``
+        ——这是该旁路的唯一两个合法调用点。
+        """
+        if action not in ("discard", "confirm"):
+            return None, "shape"
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        cwd = session_cwd(events)
+        if not cwd or not Path(cwd).is_dir():
+            return None, "no_anchor"
+        verification = await anyio.to_thread.run_sync(
+            verify_progress_file, cwd, session_id, events
+        )
+        if verification.status != PROGRESS_VERIFY_EXTERNALLY_EDITED:
+            return verification, "conflict"
+        if action == "confirm":
+            instruction = render_external_edit_instruction(verification)
+
+            def _append_instruction(session: Session) -> object:
+                # 无副作用追加（CONTEXT.md「无副作用追加」）：只落事件，不触发
+                # Resume 副作用、不启动 run。
+                return session.append(USER_MESSAGE, {
+                    "content": instruction,
+                    "origin": PROGRESS_CONFIRM_ORIGIN,
+                })
+
+            await self._apply_task_handler(session_id, _append_instruction)
+            events = await anyio.to_thread.run_sync(
+                self._store.read_events, session_id
+            )
+        await anyio.to_thread.run_sync(
+            partial(
+                write_progress_file, cwd, session_id, events,
+                overwrite_external_edit=True,
+            ),
+        )
+        return (
+            await anyio.to_thread.run_sync(
+                verify_progress_file, cwd, session_id, events
+            ),
+            None,
+        )
 
     async def _apply_task_handler(
         self,
@@ -4006,6 +4625,45 @@ class SessionService:
         if _task is not None:
             _task.add_done_callback(_gc_approval_queue)
 
+    # ── #526 A2/B1：会话级审批授权管理 + 工作流档切换 ──────────────────────
+    async def revoke_approval_grant(
+        self, session_id: str, approval_key: str
+    ) -> dict[str, Any]:
+        """撤回一条会话级审批授权（#526 A2）。
+
+        守卫复用 `_require_existing_session`（422 先于 404）。追加
+        `permission/approval-revoked`（last-wins，投影见 `derive_approval_grants`）；
+        key 不存在时仍 200（幂等 no-op，返回 revoked=False）。
+        """
+        await self._require_existing_session(session_id)
+        session = Session.load(
+            self._store,
+            session_id,
+            workspace_registry=self._workspace_registry,
+        )
+        grants = derive_approval_grants(session.events)
+        existed = approval_key in grants
+        append_approval_revoke(session, approval_key)
+        return {"id": session_id, "approval_key": approval_key, "revoked": existed}
+
+    async def set_workflow_mode(
+        self, session_id: str, mode: WorkflowMode
+    ) -> dict[str, Any]:
+        """切换会话工作流档（#526 B1）。
+
+        守卫复用 `_require_existing_session`（422 先于 404）。追加
+        `workflow/mode-changed`（last-wins）；Executor 每次调用现派生
+        `effective_workflow_mode`，切换立即生效，无需重建。
+        """
+        await self._require_existing_session(session_id)
+        session = Session.load(
+            self._store,
+            session_id,
+            workspace_registry=self._workspace_registry,
+        )
+        append_workflow_mode_change(session, mode)
+        return {"id": session_id, "mode": mode.value}
+
 
 # ── 公开符号重导出（候选 2 纯结构重构）────────────────────────────────
 # 异常 / 模型切换领域逻辑已移到兄弟模块，这里统一 re-export，
@@ -4018,6 +4676,8 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalQueueMissing",
     "ApprovalRequestMissing",
+    "CompactionConcurrentWrite",
+    "CompactionInProgress",
     "InvalidDecision",
     "InvalidForkBoundary",
     "InvalidSessionId",

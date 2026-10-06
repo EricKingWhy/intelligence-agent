@@ -46,6 +46,33 @@ class BashThenTextModel:
         return _BashThenTextImpl()
 
 
+class _PlanThenTextImpl:
+    """第一次出 update_plan tool_call；第二次出纯文本收尾。
+
+    #706：update_plan 在 read-only 档需审批（WORKSPACE_WRITE > READ_ONLY），
+    且 `approval_identity` 只认 bash/write → approval_key=None → 事件里的
+    allowed_decisions 恒为基础对 `[deny, approve_once]`——「合法但越权」的
+    decision（approve_session）才能被 allowed_decisions 成员臂单独拦下
+    （bash 请求在 #526/#683/#684 后 allowed 含全部四值，探不出成员臂）。
+    """
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def astream(self, messages, **kwargs):
+        if not any(getattr(m, "tool_calls", None) for m in messages):
+            yield AIMessage(content="", tool_calls=[{
+                "name": "update_plan",
+                "args": {"items": [{
+                    "id": "1", "content": "跑一步", "activeForm": "跑一步",
+                    "status": "pending", "source": "agent",
+                }]},
+                "id": "call1", "type": "tool_call",
+            }])
+        else:
+            yield AIMessageChunk(content="done")
+
+
 async def _start_server(tmp_path, monkeypatch, model_cls):
     import uvicorn
 
@@ -188,9 +215,12 @@ async def test_approve_with_decision_field(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_approve_rejects_disallowed_decision(tmp_path, monkeypatch):
-    """G3：decision 不在 requested 事件的 allowed_decisions 内 → 422。
-    当前 allowed = [deny, approve_once]，传 approve_session → 422。
+async def test_approve_session_decision_resolved_for_cacheable_request(tmp_path, monkeypatch):
+    """G3（#526/#684 语义更新）：可缓存身份的审批 allowed_decisions 含全部四档，
+    `approve_session` 是合法决策 → 200。batch-51 原钉 422 的前提（allowed =
+    [deny, approve_once]）在 #526 给 bash 派生 approval_key 后消失；「合法枚举
+    但不在 allowed → 422」的失败关闭钉下沉到服务级
+    tests/session/test_service.py::TestResolveApproval。
     """
     import httpx2
 
@@ -212,6 +242,65 @@ async def test_approve_rejects_disallowed_decision(tmp_path, monkeypatch):
                     session_id = frame.get("session_id")
                 if frame.get("type") == "tool/approval-requested":
                     approval_id = frame["data"]["approval_id"]
+                    break
+        await client.aclose()
+        assert approval_id
+
+        store = JsonlSessionStore(root=tmp_path / "sessions")
+        async with httpx2.AsyncClient(timeout=5) as ac:
+            resp = await ac.post(
+                f"http://127.0.0.1:{port}/api/sessions/{session_id}/approve",
+                json={"approval_id": approval_id, "decision": "approve_session"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "resolved"
+            assert body["decision"] == "approve_session"
+
+        await _await_run_terminated(store, session_id)
+    finally:
+        await _shutdown(server, serve_task)
+
+
+@pytest.mark.asyncio
+async def test_approve_rejects_disallowed_decision(tmp_path, monkeypatch):
+    """G3：decision 合法但不在 requested 事件的 allowed_decisions 内 → 422。
+
+    #706：bash 请求在 #526/#683/#684 后 allowed 含全部四个合法枚举值，原取值
+    `approve_session` 已合法（200）。改用 update_plan（read-only 档）请求审批：
+    其身份不可缓存 → allowed=`[deny, approve_once]`，`approve_session` 作为
+    「合法但越权」取值被 allowed_decisions 成员臂单独拦下；词表臂（非法字符串）
+    由 `test_approve_invalid_decision_string_422` 专属覆盖，两臂各有所护。
+    """
+    import httpx2
+
+    server, serve_task, port, _app = await _start_server(
+        tmp_path, monkeypatch, BashThenTextModel)
+    # 本用例专用替身：模型在会话构造时（build_runtime）才创建，这里在 POST
+    # 前覆写 _start_server 的全局 bash 替身即可生效。
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: _PlanThenTextImpl())
+    try:
+        client = httpx2.AsyncClient(timeout=None)
+        session_id = None
+        approval_id = None
+        async with client.stream(
+            "POST", f"http://127.0.0.1:{port}/api/sessions",
+            json={"task": "记个计划", "permission_mode": "read-only"},
+        ) as response:
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                frame = _parse(line)
+                if session_id is None:
+                    session_id = frame.get("session_id")
+                if frame.get("type") == "tool/approval-requested":
+                    approval_id = frame["data"]["approval_id"]
+                    # 自证 fixture：allowed 必须恰好是基础对，「合法但越权」
+                    # 的探针取值才成立；allowed 集再演进时这里响亮失败。
+                    assert frame["data"]["allowed_decisions"] == [
+                        "deny", "approve_once"]
                     break
         await client.aclose()
         assert approval_id
@@ -374,8 +463,14 @@ async def test_approval_queue_gc_after_run_completes(tmp_path, monkeypatch):
         await _await_run_terminated(store, session_id)
 
         # done_callback 在 task 终结后被事件循环调度，可能在 JSONL 落盘之后
-        # 才执行——给事件循环一小段宽限让它跑完。
-        await asyncio.sleep(0.1)
+        # 才执行——固定 0.1s 宽限在全量负载下会早读（在册 flake），改为轮询
+        # 等 GC 完成；超时后仍由下方断言报契约失败。
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while (
+            session_id in state.approval_queues
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.05)
 
         # run 终结后 queue 应被 GC（不泄漏）
         assert session_id not in state.approval_queues, \

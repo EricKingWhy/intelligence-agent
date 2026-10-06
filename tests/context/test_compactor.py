@@ -96,7 +96,13 @@ def test_user_message_that_looks_like_summary_is_kept_as_user_content():
     content = "## 原始目标与用户约束\n用户提供的普通文本 R-042"
     sections = _programmatic_summary_sections([HumanMessage(content=content)], [])
 
-    assert sections["## 原始目标与用户约束"] == "(none)", "无事实源 ⇒ 目标节空"
+    # #710 方向 C：目标行为 (none)（无事实源），承载位如实携带该消息（JSON 编码，
+    # heading 样式行不破坏节边界）；消息没有被当旧摘要 decode。
+    section0_lines = sections["## 原始目标与用户约束"].splitlines()
+    assert section0_lines[0] == "(none)", "无事实源 ⇒ 目标行空"
+    assert "用户提供的普通文本 R-042" in section0_lines[1], (
+        "消息作为最新用户消息进承载位（没有被当摘要吞掉）"
+    )
     assert "R-042" in json.loads(sections["## 精确标识清单"]), (
         "消息仍作为内容被 visit（没有被当摘要吞掉）"
     )
@@ -204,6 +210,30 @@ async def test_summary_failure_keeps_original_projection(failure):
     assert result.compacted_turn_count == 0
     assert result.summary is None
     assert result.messages == messages
+
+
+@pytest.mark.asyncio
+async def test_configured_summary_failure_keeps_protected_facts(tmp_path):
+    class FailingSummaryModel:
+        async def ainvoke(self, _messages):
+            raise TimeoutError("summary timed out")
+
+    session = make_session(tmp_path)
+    protected_fact = "不得删除 old_rows；精确 ID 是 R-042"
+    session.append(USER_MESSAGE, {"content": protected_fact})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    session.append(USER_MESSAGE, {"content": "继续处理。"})
+
+    messages = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=100_000,
+        auto_compact_threshold=0.05, summary_model=FailingSummaryModel(),
+    ).build(session)
+
+    assert any(
+        isinstance(message, HumanMessage) and protected_fact in str(message.content)
+        for message in messages
+    )
+    assert not any(event.type == CONTEXT_COMPACTED for event in session.events)
 
 
 @pytest.mark.asyncio
@@ -353,7 +383,8 @@ async def test_rejected_first_candidate_is_not_used_when_retry_succeeds():
     assert result.summary is not None
     assert "细节" not in result.summary
     assert "已完成读取历史记录，并选择直接展示内容。" in result.summary
-    assert result.bracket_id is not None
+    # #647 T11f：compactor 不铸造身份（无溯源 ⇒ 无身份）。
+    assert result.bracket_id is None
     assert estimate_message_tokens(result.messages) + reserved_tokens < 30_000
 
 
@@ -573,17 +604,33 @@ async def test_list_system_prefix_without_early_turn_still_hits_hard_guard():
 
 
 @pytest.mark.asyncio
-async def test_summary_request_over_budget_keeps_projection_without_events(tmp_path):
+async def test_summary_request_over_budget_keeps_projection_with_diagnostic(tmp_path):
+    """摘要请求本身超 hard（预检拒绝）⇒ 保留投影 + 一条有界诊断，零压缩事件。
+
+    #639 阶段3a：此前该路径零事件（原用例名 "..._without_events"）；现在按
+    #647 的 attempt=0 纪律落一条 `preflight_request_exceeds_hard_limit` 诊断——
+    **非投影事件**，模型可见投影逐字节不变，仍无任何 bracket。
+    """
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "large " * 10000})
     session.append(MODEL_COMPLETED, {"content": "done"})
     session.append(USER_MESSAGE, {"content": "current"})
     model = ScriptedModel([])
     before = list(session.events)
+    original_projection = session.derive_messages()
     with pytest.raises(ContextWindowExceededError):
         await ContextBuilder(model, max_context_tokens=1000).build(session)
     assert model.snapshots == []
-    assert session.events == before
+    # 既有事件前缀不动；唯一新增是一条 attempt=0 的预检诊断。
+    assert session.events[:len(before)] == before
+    added = session.events[len(before):]
+    assert [event.type for event in added] == [CONTEXT_COMPACTION_FAILED]
+    assert added[0].data["attempt"] == 0
+    assert added[0].data["error_class"] == "preflight_request_exceeds_hard_limit"
+    # 非投影事件：模型可见投影逐字节不变；零 bracket。
+    assert session.derive_messages() == original_projection
+    assert not any(event.type in {COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END}
+                   for event in session.events)
 
 
 @pytest.mark.asyncio
@@ -747,7 +794,8 @@ async def test_eight_section_summary_passes_shrink_validation(monkeypatch):
     assert "不得删除 old_rows；精确 ID 是 R-042" in result.summary
     assert "R-042" in result.summary
     assert "## 文件清单\n(none)" in result.summary
-    assert result.bracket_id is not None
+    # #647 T11f：compactor 不铸造身份（无溯源 ⇒ 无身份）。
+    assert result.bracket_id is None
     assert any(candidate is result.messages[0] for candidate in shrink_candidates)
 
 
@@ -771,9 +819,12 @@ def test_programmatic_sections_preserve_exact_command_error_and_path():
     sections = _programmatic_summary_sections(messages, [])
     identifiers = json.loads(sections["## 精确标识清单"])
 
-    # #556 裁决 C：用户消息原文不再逐字进目标节（该节由 protected_facts 承载，
-    # 无事实源时 (none)）；命令/错误/路径的精确读回仍由标识节（有界）承担。
-    assert sections["## 原始目标与用户约束"] == "(none)"
+    # #556 裁决 C：用户消息原文不再逐字进目标行（该行由 protected_facts 承载，
+    # 无事实源时 (none)）；#710 方向 C：它作为最新活跃用户消息进承载位。
+    # 命令/错误/路径的精确读回仍由标识节（有界）承担。
+    section0_lines = sections["## 原始目标与用户约束"].splitlines()
+    assert section0_lines[0] == "(none)"
+    assert constraint in section0_lines[1]
     assert command in identifiers
     assert path in identifiers
     assert "call-r-042" in identifiers
@@ -884,11 +935,17 @@ def test_long_error_entry_is_truncated_per_entry():
 
 
 def test_target_section_none_without_goal_facts():
-    """无 user_goal facts ⇒ 目标节 (none)——与八节摘要的空节约定一致。"""
+    """无 user_goal facts ⇒ 目标行 (none)——与八节摘要的空节约定一致。
+
+    #710 方向 C：目标行 (none) 不再等于整节 (none)——同节新增的「当前生效
+    指令」承载位仍如实携带段内最新活跃用户消息（确定性派生）。
+    """
     sections = _programmatic_summary_sections(
         [HumanMessage(content="普通消息，不是任何事实源")], [],
     )
-    assert sections["## 原始目标与用户约束"] == "(none)"
+    section0_lines = sections["## 原始目标与用户约束"].splitlines()
+    assert section0_lines[0] == "(none)"
+    assert "普通消息，不是任何事实源" in section0_lines[1]
 
 
 def test_cancelled_queued_replacement_keeps_sections_consistent():
@@ -930,6 +987,45 @@ def test_cancelled_queued_replacement_keeps_sections_consistent():
     )
 
 
+@pytest.mark.asyncio
+async def test_compact_now_is_noop_below_floor_with_zero_writes(tmp_path):
+    """#635 T2：无可压缩早期轮 → 返回 None 且零 bracket 写入。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "only current"})
+    before = session.events
+
+    result = await ContextBuilder(
+        ScriptedModel([]), max_context_tokens=10_000,
+    ).compact_now(session)
+
+    assert result is None
+    assert session.events == before
+
+
+@pytest.mark.asyncio
+async def test_compact_now_writes_bracket_for_manual_path(tmp_path):
+    """#635 T2：手动路径无条件调 compact_now，走真实管线产出同一 bracket。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    session.append(USER_MESSAGE, {"content": "current request"})
+    before = session.events
+
+    result = await ContextBuilder(
+        ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
+        max_context_tokens=10_000, auto_compact_threshold=0.3,
+    ).compact_now(session)
+
+    assert result is not None
+    assert result.compacted_turn_count == 1
+    assert result.bracket_id
+    assert estimate_message_tokens(result.messages) == result.token_estimate
+    assert [event.type for event in session.events[len(before):]] == [
+        COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END,
+    ]
+    assert session.events[:len(before)] == before
+
+
 def test_trimmed_same_prefix_entries_dedup_after_truncation():
     """#614②：去重必须发生在截断**之后**——同前缀超长条目不得以截断值重复。
 
@@ -949,3 +1045,31 @@ def test_trimmed_same_prefix_entries_dedup_after_truncation():
     assert len(identifiers) == len(set(identifiers)), (
         "截断后同值的条目不得在投影中重复（#614②）"
     )
+
+
+def test_compactable_early_window_shares_prefix_and_cut_rule():
+    """G3 (#635)：共享判据返回 `(prefix_end, cut)`，供 compact 与 dry-run 预览同源。
+
+    与 `ContextCompactor.compact` 的内联逻辑同源（本函数即从该处抽出）。断言用
+    独立真值（已知输入 → 期望输出对），不重算实现。
+    """
+    from agent_harness.context.compactor import compactable_early_window
+
+    # 前导非摘要 SystemMessage 是跳过前缀；cut = 最后一条 HumanMessage。
+    messages = [
+        SystemMessage(content="sys-1"),
+        SystemMessage(content="sys-2"),
+        HumanMessage(content="old turn"),
+        AIMessage(content="answer"),
+        HumanMessage(content="current"),
+    ]
+    assert compactable_early_window(messages) == (2, 4)
+
+    # 无 HumanMessage：cut 回落到 prefix_end（early 窗口为空）。
+    assert compactable_early_window([SystemMessage(content="sys")]) == (1, 1)
+
+    # 前导摘要 SystemMessage 是 early 窗口起点，不再被当前缀跳过（守卫在共享处）。
+    old_summary = SystemMessage(content="## 目标\n旧版压缩摘要")
+    assert compactable_early_window(
+        [old_summary, HumanMessage(content="current")]
+    ) == (0, 1)

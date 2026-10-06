@@ -74,7 +74,8 @@ class _ToolStub(Tool):
 
 
 def _delegate_args(target: str, task: str) -> object:
-    return type("_Args", (), {"target": target, "task": task, "constraints": []})()
+    return type("_Args", (), {"target": target, "task": task, "constraints": [],
+                              "output_schema": None})()
 
 
 def _spec(name: str, tools: set[str], max_depth: int = 1) -> AgentSpec:

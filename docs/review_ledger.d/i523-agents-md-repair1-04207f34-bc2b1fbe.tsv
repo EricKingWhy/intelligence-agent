@@ -1,0 +1,1 @@
+2026-10-05	#523 首轮修后双轴；初审问题已关闭；新增 P3 每来源重渲染累计提示导致 O(N²)，P4 Path.open 替身失效且 monkeypatch 进程级 os.open；结论 Correctness APPROVE / Standards APPROVE_WITH_FINDINGS	04207f34eef9d230e62c099c19c346ce69dff09c..bc2b1fbe1a5c7cdebeefbeacb3f4e1f733331fa9

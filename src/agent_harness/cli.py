@@ -55,12 +55,13 @@ from agent_harness.assembly import (
     recovery_stores,
 )
 from agent_harness.config import Settings
+from agent_harness.context.compactor import CompactionPostWriteError
 from agent_harness.identity import IdentityContext
 from agent_harness.instance_lock import InstanceLock, InstanceLockError
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
-from agent_harness.model.config import ModelConfig
+from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
@@ -88,7 +89,13 @@ from agent_harness.session import (
     Session,
     SessionEvent,
 )
-from agent_harness.session.errors import InvalidSessionId, SessionNotFound
+from agent_harness.session.errors import (
+    ActiveRunConflict,
+    CompactionConcurrentWrite,
+    CompactionInProgress,
+    InvalidSessionId,
+    SessionNotFound,
+)
 from agent_harness.session.fork import (
     ForkBoundaryError,
     TailSummarizer,
@@ -100,12 +107,22 @@ from agent_harness.session.lineage import (
     build_lineage_tree,
     render_lineage_tree,
 )
+from agent_harness.session.service import SessionContextCompaction
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
+from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 3
+
+#: 陈旧账行名清除通道（#616）的 CLI 入口标识，写进 `session_budget_events` 审计的
+#: `source` 字段（与 Web 的 `PURGE_ENTRY_API` 同款，只是入口不同）。
+PURGE_ENTRY_CLI = "cli"
+
+#: 手动上下文压缩通道（#635）的 CLI 入口标识，与 `COMPACT_ENTRY_API`（Web）同款、
+#: 值不同（`agent_harness/session/service.py` 的注释预告了这一对应关系）。
+COMPACT_ENTRY_CLI = "cli"
 
 
 class StreamRenderer:
@@ -925,6 +942,15 @@ def _main_dispatch() -> None:
     if argv and argv[0] == "sessions":
         _main_sessions(argv[1:])
         return
+    if argv and argv[0] == "budgets":
+        _main_budgets(argv[1:])
+        return
+    if argv and argv[0] == "compact":
+        _main_compact(argv[1:])
+        return
+    if argv and argv[0] == "approvals":
+        _main_approvals(argv[1:])
+        return
     if argv and argv[0] == "replay":
         _main_replay(argv[1:])
         return
@@ -1658,6 +1684,326 @@ async def sessions_command(
     if not roots:
         return "（暂无会话）"
     return render_lineage_tree(roots)
+
+
+def _main_budgets(argv: list[str]) -> None:
+    """CLI budgets 入口（#616）：陈旧账行名（`session_budgets.tool_call_limits`
+    里不在根 registry 的名字）的公开清除通道。
+
+    整会话重整（未点名 `--tool`）是唯一需要二次确认的形态：无 `--yes` 时本函数只打印
+    将清名单并 `SystemExit(2)` 拒绝执行（零改动）；`--tool` 单名收窄与 `--yes` 整会话
+    重整都真执行。CLI 是同一个 `SessionService` 方法的瘦客户端（ADR-0045 D8）。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness budgets")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    clear = subcommands.add_parser(
+        "clear-stale-tools",
+        help="清掉会话账行里不在根 registry 的陈旧工具名（#616）",
+    )
+    clear.add_argument("--session", required=True, help="要清理的会话 id")
+    clear.add_argument(
+        "--tool", default=None, metavar="NAME",
+        help="只清这一个工具名（收窄）；服务端仍按根 registry 判 stale",
+    )
+    clear.add_argument(
+        "--yes", action="store_true",
+        help="整会话重整的显式确认；缺省时只打印将清名单并拒绝执行",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    confirm_required = args.tool is None and not args.yes
+    try:
+        output = asyncio.run(
+            budgets_clear_stale_tools_command(
+                session=args.session, tool=args.tool, yes=args.yes,
+            )
+        )
+    except (InvalidSessionId, SessionNotFound) as error:
+        print(f"清理失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(output)
+    if confirm_required:
+        raise SystemExit(2)
+
+
+async def budgets_clear_stale_tools_command(
+    *, session: str, tool: str | None, yes: bool, workspace_dir: str | None = None,
+) -> str:
+    """`budgets clear-stale-tools` 的可测核心：返回渲染文本（#616）。
+
+    CLI 是 API 的瘦客户端（ADR-0045 D8）：判定（谁陈旧）与落盘全在
+    `SessionService.purge_stale_session_tool_limits`；本层只做参数解析 / 确认面 /
+    文本渲染，不重算规则。
+
+    确认面：整会话重整（`tool` 为空）默认只 `dry_run` 取将清名单、**零写入**，由
+    `_main_budgets` 打印后 `SystemExit(2)` 拒绝；`--yes` 或点名 `--tool`（单名收窄）
+    才真执行。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    service = await _cli_session_service(settings)
+    dry_run = tool is None and not yes
+    result = await service.purge_stale_session_tool_limits(
+        session, tool=tool, entry_point=PURGE_ENTRY_CLI, dry_run=dry_run,
+    )
+    if not result.purged:
+        scope = "将清名单" if dry_run else "清理结果"
+        return f"会话 {session} 无陈旧工具名，{scope}为空（未改动）。"
+    if dry_run:
+        lines = [f"会话 {session} 将清除以下陈旧工具名（未确认，未改动）："]
+    else:
+        lines = [
+            (
+                f"会话 {session} 已清除 {result.rows} 个陈旧工具名"
+                f"（version={result.version}）："
+            )
+        ]
+    lines.extend(
+        f"  {name} = {ceiling}" for name, ceiling in sorted(result.purged.items())
+    )
+    if dry_run:
+        lines.append("加 --yes 执行清理。")
+    return "\n".join(lines)
+
+
+def _main_compact(argv: list[str]) -> None:
+    """CLI compact 入口（#635）：手动触发一次上下文压缩。
+
+    **确认面 = 直接执行，不设 `--yes`**：命令本身即用户的显式动作，压缩 append-only
+    （旧事件 shadow 保留、可 replay），非破坏性；`--dry-run` 覆盖"先看后做"需求。
+    CLI 是同一个 `SessionService.compact_session_context` 方法的瘦客户端
+    （ADR-0045 D8）：判定与落盘在服务层，本层只做参数解析 / 渲染 / 退出码。
+
+    退出码：无会话 / id 非法 / 非法 `--model` / 在途 run（或压缩进行中）→ 1
+    （stderr 明确文案）；用法错 → 2（argparse）。
+
+    `--dry-run` 形态为本仓 #616 惯例（非成熟产品对标）：只预览、零 LLM 调用、零写入。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness compact")
+    parser.add_argument("--session", required=True, help="要压缩的会话 id")
+    parser.add_argument(
+        "--model", default=None, metavar="NAME",
+        help="摘要模型名（缺省 = settings.summary_model，再回退主模型）",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="只预览当前水位与可压缩窗口，零 LLM 调用、零写入",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    try:
+        output = asyncio.run(
+            compact_command(
+                session=args.session, model=args.model, dry_run=args.dry_run,
+            )
+        )
+    except CompactionPostWriteError as error:
+        # bracket 三事件已落盘、复核未过：历史已变，不得谎报"未改动"（F2 #635）。
+        # 给出可操作文案——会话本身可继续，提示用户检查该 bracket。
+        print(
+            "压缩失败：压缩 bracket 已写入但复核未通过"
+            f"（bracket={error.bracket_id}），会话可继续，请检查。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+    except (InvalidSessionId, SessionNotFound) as error:
+        print(f"压缩失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except CompactionInProgress:
+        # 类型化拒绝理由（F6 #635）：不再靠错误字符串子串匹配。
+        print("压缩被拒绝：压缩已在进行中（零改动）", file=sys.stderr)
+        raise SystemExit(1) from None
+    except CompactionConcurrentWrite as error:
+        # G1 #635：按 reason 给诚实且可操作的文案，不再统一声称"零改动"——
+        # run_busy 的真实动作是"等 run 结束"（不是"重试"），且此前失败记录可能已落盘；
+        # event_drift 才是并发改动。CompactionInProgress / ActiveRunConflict 保留
+        # "零改动"（那两处确为零写入）。
+        if error.reason == "run_busy":
+            message = "压缩被拒绝：run 在收尾窗口，请等待 run 结束后重试"
+        else:
+            message = "压缩被拒绝：压缩期间会话被并发改动，请重试"
+        print(message, file=sys.stderr)
+        raise SystemExit(1) from None
+    except ActiveRunConflict:
+        # 在途 run（子类已在上方分别处理，这里是基类语义）。
+        print("压缩被拒绝：在途 run 运行中（零改动）", file=sys.stderr)
+        raise SystemExit(1) from None
+    except ConfigError as error:
+        # 非法 --model：解析在零副作用前完成，未写入任何事件。
+        print(f"压缩失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(output)
+
+
+async def compact_command(
+    *, session: str, model: str | None, dry_run: bool,
+    workspace_dir: str | None = None,
+) -> str:
+    """`compact` 的可测核心：返回渲染文本（#616 式）。
+
+    CLI 是 API 的瘦客户端（ADR-0045 D8）：能否压缩 / 在途 run 判定 / 模型解析 /
+    bracket 落盘全在 `SessionService.compact_session_context`；本层只把 DTO
+    `SessionContextCompaction` 渲染成人能读的两三行，不重算任何压缩规则。
+    """
+    settings = Settings()
+    if workspace_dir is not None:
+        settings.workspace_dir = workspace_dir
+    setup_logging(settings.log_level, settings.workspace_dir)
+    service = await _cli_session_service(settings)
+    result = await service.compact_session_context(
+        session, model=model, entry_point=COMPACT_ENTRY_CLI, dry_run=dry_run,
+    )
+    return _render_compaction(session, result)
+
+
+def _format_grouped(count: int) -> str:
+    """token 数 → 带千位分隔的原始数字（本票渲染用；`_format_tokens` 的 K/M 压缩
+    是事件流尾注口径，这里是压缩前后对比，保留可逐位对账的原始量级）。
+
+    F9 (#635)：用逗号 `,` 而非下划线 `_`——这是**用户可见**的 CLI 输出，
+    182,400 一眼可读；下划线是本仓代码字面量的书写习惯，不该泄漏到界面文案。
+    """
+    return f"{count:,}"
+
+
+def _render_compaction(session: str, result: SessionContextCompaction) -> str:
+    """DTO → CLI 渲染文本（成功 / 低水位 / dry-run 三种形态）。"""
+    if result.dry_run:
+        window = (
+            "有可压缩的早期轮"
+            if result.compacted_turn_count
+            else "无可压缩的早期轮（水位过低）"
+        )
+        return "\n".join(
+            [
+                f"会话 {session} 将压缩（dry-run，未改动）：",
+                f"  tokens: {_format_grouped(result.tokens_before)}（当前水位）",
+                f"  source: {window}",
+            ]
+        )
+    if not result.compacted_turn_count or result.bracket_id is None:
+        # 后端 floor：无可压缩早期轮（或校验闸门未过）时零写入返回 0。
+        return f"会话 {session} 水位过低，无需压缩（未改动）。"
+    before, after = result.tokens_before, result.tokens_after
+    saved = 0 if before <= 0 else round((before - after) / before * 100)
+    return "\n".join(
+        [
+            f"会话 {session} 压缩完成（bracket={result.bracket_id}）：",
+            (
+                f"  tokens: {_format_grouped(before)} → {_format_grouped(after)}"
+                f"（-{saved}%）"
+            ),
+            # schema 是压缩管线的固定形态（builder.py 写 CONTEXT_COMPACTED 时的
+            # 常量），CLI 只转述摘要来自哪一种结构，不自行生成摘要内容。
+            (
+                f"  source: seq {result.source_seq_start}..{result.source_seq_end}"
+                " → 摘要（8 节，schema=eight_section）"
+            ),
+        ]
+    )
+
+
+def _main_approvals(argv: list[str]) -> None:
+    """CLI approvals 入口（#684 Phase 2）：项目级持久审批规则的公开管理面。
+
+    - `approvals policy list`：列出本项目 `.agent-harness/approve-policy.json` 的规则；
+    - `approvals policy remove <id> [--yes]`：默认二次确认——无 `--yes` 且规则存在时，
+      只打印将删规则并 `SystemExit(2)` 拒绝执行（**零改动**）；`--yes` 真删；id 不存在
+      幂等成功（不报错）。
+
+    规则内容由 Runtime 在审批流里精确派生、只读展示，CLI **不提供创建入口**：唯一安装
+    路径是用户在审批卡上主动选「以后都允许」（F21：显式授权，禁止静默创建）。项目根 =
+    进程当前工作目录，与 `ToolExecutor` 的 `project_root` 回落口径一致——管理面与真正
+    读取规则的执行域指向同一份文件。
+    """
+    parser = argparse.ArgumentParser(prog="agent-harness approvals")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    policy = subcommands.add_parser("policy", help="项目级持久审批规则（#684）")
+    policy_sub = policy.add_subparsers(dest="policy_command", required=True)
+    policy_sub.add_parser("list", help="列出本项目持久审批规则")
+    remove = policy_sub.add_parser("remove", help="按 id 删除一条持久审批规则")
+    remove.add_argument("rule_id", metavar="ID", help="要删除的规则 id")
+    remove.add_argument(
+        "--yes", action="store_true",
+        help="显式确认删除；缺省且规则存在时只打印将删规则并拒绝执行（零改动）",
+    )
+    args = parser.parse_args(argv)
+    settings = Settings()
+    setup_logging(settings.log_level, settings.workspace_dir)
+    if args.policy_command == "list":
+        print(approvals_policy_list_command())
+        return
+    output, confirm_required = approvals_policy_remove_command(
+        args.rule_id, yes=args.yes,
+    )
+    print(output)
+    if confirm_required:
+        raise SystemExit(2)
+
+
+def _approve_policy_store(project_root: Path | str | None = None) -> ApprovePolicyStore:
+    """本项目持久审批规则存储；`project_root` 缺省 = 进程当前工作目录。
+
+    与 `ToolExecutor.__init__` 的回落口径逐字一致（`Path.cwd()`），保证 CLI / Web 管理面
+    与执行域读写同一份 `.agent-harness/approve-policy.json`。
+    """
+    return ApprovePolicyStore(Path(project_root) if project_root is not None else Path.cwd())
+
+
+def approvals_policy_list_command(*, project_root: Path | str | None = None) -> str:
+    """`approvals policy list` 的可测核心：返回渲染文本（#684 Phase 2）。
+
+    无规则时给友好提示（不是空输出）——「没有配置」与「读取失败」在人类眼里都应先是
+    一句可读的话。坏文件由 `ApprovePolicyStore.load` fail-closed 成空列表，与无规则同形
+    （回调到默认逐调用审批，绝不臆造放行）。
+    """
+    rules = _approve_policy_store(project_root).load()
+    if not rules:
+        return "（暂无持久审批规则）"
+    lines = [f"本项目持久审批规则（{len(rules)} 条）："]
+    lines.extend(
+        f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
+        f"granularity={rule.granularity.value}  created_at={rule.created_at}"
+        for rule in rules
+    )
+    return "\n".join(lines)
+
+
+def approvals_policy_remove_command(
+    rule_id: str, *, yes: bool, project_root: Path | str | None = None,
+) -> tuple[str, bool]:
+    """`approvals policy remove <id> [--yes]` 的可测核心：返回 `(文本, 是否拒绝执行)`。
+
+    `confirm_required=True` 时调用方（`_main_approvals`）在打印后 `SystemExit(2)`，
+    且本函数**零改动**——默认二次确认是 F21 在 CLI 上的落点。
+
+    幂等（F21/F22 同源）：id 不存在就是成功，不报错、不改文件；不带 `--yes` 时那条
+    「不存在」本身也不是破坏性动作，故直接成功（无需确认一个不会发生的删除）。
+
+    带 `--yes` 时**直接以 `remove_rule` 的返回值判定结果**，不再「先 load 判存在、
+    再 remove_rule 二次 load」——两次读之间规则可能被另一进程删除/改动，那个窗口
+    会让「确认时还在」的规则到删除时已消失（本次批准仍报成功）。单次读-改-写由
+    `ApprovePolicyStore` 内部文件锁串行化（#684 P2-2）。
+    """
+    store = _approve_policy_store(project_root)
+    if yes:
+        if store.remove_rule(rule_id):
+            return (f"已删除持久审批规则 {rule_id}。", False)
+        return (f"持久审批规则 {rule_id} 不存在（幂等，未改动）。", False)
+    rule = next((item for item in store.load() if item.id == rule_id), None)
+    if rule is None:
+        return (f"持久审批规则 {rule_id} 不存在（幂等，未改动）。", False)
+    detail = (
+        "将删除持久审批规则（未确认，未改动）：\n"
+        f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
+        f"granularity={rule.granularity.value}  created_at={rule.created_at}\n"
+        "加 --yes 执行删除。"
+    )
+    return (detail, True)
 
 
 if __name__ == "__main__":

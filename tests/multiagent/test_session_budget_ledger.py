@@ -180,6 +180,36 @@ async def test_record_model_requests_is_none_sticky(tmp_path, memory):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("memory", [False, True])
+async def test_marker_request_replay_is_idempotent_and_payload_bound(tmp_path, memory):
+    ledger = _ledger(tmp_path, memory=memory)
+    await ledger.initialize()
+    key = "sess-request-replay"
+    await ledger.ensure_session_budget(key, root_session_id=key, limits=SessionLimits())
+    accounting_id = await ledger.begin_session_model_request_accounting(
+        key, session_id=key, run_id="run-1", step_id=1, after_seq=2,
+    )
+    settlement = {
+        "count": 1,
+        "usage": {"total_tokens": 5},
+        "cost": Decimal("0.03"),
+        "accounting_id": accounting_id,
+        "request_ids": ("request-1",),
+    }
+
+    await ledger.record_session_model_requests(key, **settlement)
+    first = await ledger.get_session_budget(key)
+    await ledger.record_session_model_requests(key, **settlement)
+    assert await ledger.get_session_budget(key) == first
+
+    with pytest.raises(ValueError, match="replay differs"):
+        await ledger.record_session_model_requests(
+            key, **{**settlement, "cost": Decimal("0.04")},
+        )
+    assert await ledger.get_session_budget(key) == first
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memory", [False, True])
 async def test_record_tools_merges_maps(tmp_path, memory):
     ledger = _ledger(tmp_path, memory=memory)
     await ledger.initialize()

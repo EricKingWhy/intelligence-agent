@@ -58,6 +58,11 @@ from agent_harness.capability.base import CapabilityError, CapabilityRegistry
 from agent_harness.capability.config import parse_capabilities_config
 from agent_harness.capability.wiring import CapabilityWiring, wire_capabilities
 from agent_harness.config import Settings
+from agent_harness.context.project_instructions import (
+    empty_project_instruction_status,
+    project_instruction_store,
+    release_project_instruction_store,
+)
 from agent_harness.context.tokens import estimate_tokens
 from agent_harness.host_service import HOST_PROTOCOL_VERSION
 from agent_harness.identity import (
@@ -73,12 +78,15 @@ from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import JsonlSessionStore, SessionEvent
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import validate_user_protected_fact_annotations
 from agent_harness.session.projects import ProjectService
 from agent_harness.session.queue import MessageQueueManager
 from agent_harness.session.runmanager import RunManager
 from agent_harness.session.service import (
     ARCHIVE_ENTRY_API,
+    COMPACT_ENTRY_API,
+    PURGE_ENTRY_API,
     ActiveRunConflict,
     AmendOptions,
     ApprovalAlreadyResolved,
@@ -109,10 +117,12 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
+from agent_harness.storage.artifact import SESSION_KEY_PATTERN
 from agent_harness.storage.checkpoint import checkpoint_save_failure_count
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
+from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
 from agent_harness.transport import SqliteTransportLedger
 from agent_harness.web import artifacts
@@ -131,7 +141,12 @@ from agent_harness.web.serialization import (
     build_truncated_control,
 )
 from agent_harness.web.wire_safety import _safe_text
-from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
+from agent_harness.workspace import (
+    SqliteLeaseStore,
+    SqliteWorkspaceStore,
+    WorkspaceIndex,
+    WorkspaceLeaseManager,
+)
 
 # Read-only catalog facts live with their router. Re-export them here for the
 # existing request validators and compatibility imports.
@@ -607,11 +622,18 @@ class ApproveRequest(BaseModel):
     decision 是 spec 契约（03 §9 PermissionDecision）；approved 是兼容字段。
     两者都传时 decision 优先；只传 approved 时从它推导（True→approve_once，
     False→deny）。decision 必须命中 requested 事件里 allowed_decisions。
+
+    `policy_granularity`（#684 第三档「以后都允许」）：仅当
+    ``decision=approve_policy`` 时有意义，取值 ``exact`` / ``command``；缺省
+    由领域层归一为 ``exact``。非法值 → 422（与非法 decision 同口径，不静默回落）。
     """
 
     approval_id: str | None = None
     approved: bool = True
     decision: str | None = None
+    # #684：第三档「以后都允许」的安装粒度（exact / command）。Shape-only——
+    # 合法性判定在领域层 `SessionService.resolve_approval`（单一规则来源）。
+    policy_granularity: str | None = None
     # #562 F6：reason 逐字写入 permission/resolved 事件日志，自由文本无上限 =
     # 每次授权可重复放大（实测 50KB 原样入库）。上限 2000 **字符**（pydantic
     # ``max_length`` 计的是 Python ``str`` 码点数，不是 UTF-8 字节——2000 个中文
@@ -820,6 +842,42 @@ class SessionArchived(BaseModel):
     archived: bool
 
 
+class SessionToolLimitsPurged(BaseModel):
+    """`POST /api/sessions/{id}/budget/purge-stale-tools` 的成功响应（#616）。
+
+    形状就是存储层结果 `SessionToolLimitsPurge` 的四字段透传：`purged`（被清名 →
+    原 ceiling）、`remaining`（清后的 `tool_call_limits` 表）、`rows`（受影响账行数，
+    无变更 = 0）、`version`（清后的账行版本，无变更 = 清前版本）。幂等：重跑无陈旧名
+    仍 200，`purged={}`、`rows=0`、`version` 不变。
+    """
+
+    purged: dict[str, int]
+    remaining: dict[str, int]
+    rows: int
+    version: int
+
+
+class SessionContextCompacted(BaseModel):
+    """`POST /api/sessions/{id}/context/compact` 的成功响应（#635）。
+
+    形状是服务层结果 `SessionContextCompaction` 的字段透传（`dry_run` 不在 Web
+    契约里——端点只走真实压缩）：`bracket_id` 指向新落的 bracket；低水位
+    （无可压缩早期轮 / **写前**校验闸门未过）时 `bracket_id=null`、
+    `compacted_turn_count=0`，**仍 200 且零写入**（"没有可压的"不是错误）。
+    **写后**复核失败（bracket 已落盘）不返回该形状——服务层抛
+    `CompactionPostWriteError`，端点不捕获 → 500（fail-closed，不谎报"未改动"）。
+    `tokens_before/after` 是 messages-only 投影估算，同一口径可直接相减展示。
+    """
+
+    bracket_id: str | None
+    source_seq_start: int | None
+    source_seq_end: int | None
+    tokens_before: int
+    tokens_after: int
+    compacted_turn_count: int
+    summary_model: str | None
+
+
 class SessionDeleted(BaseModel):
     """`DELETE /api/sessions/{id}` 的成功响应（#172 / ADR-0029）。
 
@@ -835,6 +893,80 @@ class SessionDeleted(BaseModel):
     events: int
     #: 本次从多少个项目的账本里摘掉了它（正常 0/1）。
     detached_from_projects: int
+
+
+class ApprovalGrantRevoked(BaseModel):
+    """`POST /api/sessions/{id}/approvals/revoke` 的成功响应（#526 A2）。
+
+    形状就是领域动作本身：`{id, approval_key, revoked}`——`revoked` 是**动作后**
+    的真值（幂等：重复撤回仍 200，`revoked=False` 表示该 key 当时本就不存在）。
+    """
+
+    id: str
+    approval_key: str
+    revoked: bool
+
+
+class RevokeApprovalGrantRequest(BaseModel):
+    """撤回一条会话级审批授权的请求体（#526 A2）。"""
+
+    approval_key: str
+
+
+class WorkflowModeChanged(BaseModel):
+    """`POST /api/sessions/{id}/workflow-mode` 的成功响应（#526 B1）。
+
+    `mode` 是**动作后**的真值（幂等：重复切同档仍 200）。Executor 每次调用现派生
+    `effective_workflow_mode`，切换立即生效。
+    """
+
+    id: str
+    mode: str
+
+
+class SetWorkflowModeRequest(BaseModel):
+    """切换会话工作流档的请求体（#526 B1）。"""
+
+    mode: Literal["normal", "plan"]
+
+
+class ApprovePolicyRuleOut(BaseModel):
+    """`GET /api/approve-policy/rules` 的一行（#684 Phase 2）。
+
+    形状 = `ApprovePolicyRule.to_dict()` 逐字段透传（规则是项目配置，字段即真相，
+    HTTP 层不裁剪、不重命名）：`id` / `tool` / `key` / `granularity`
+    （`exact`|`command`）/ `permission_at_approval`（命中时重验的权限）/ `created_at`。
+    """
+
+    id: str
+    tool: str
+    key: str
+    granularity: str
+    permission_at_approval: str
+    created_at: str
+
+
+class ApprovePolicyRules(BaseModel):
+    """`GET /api/approve-policy/rules` 的成功响应（#684 Phase 2）：本项目规则列表。
+
+    无规则 / 文件缺失 / 文件损坏都返回 `{"rules": []}`（`ApprovePolicyStore.load`
+    fail-closed 成空列表）——**不**用 404 表达"没有配置"：空列表是唯一真相，与
+    "规则不存在 ⇒ 撤销幂等成功"同一口径。
+    """
+
+    rules: list[ApprovePolicyRuleOut]
+
+
+class ApprovePolicyRuleRevoked(BaseModel):
+    """`POST /api/approve-policy/rules/{id}/revoke` 的成功响应（#684 Phase 2）。
+
+    `revoked` 是**动作后**的真值（幂等：重复撤销仍 200，`revoked=False` 表示该 id
+    当时本就不存在）。与 #526 `ApprovalGrantRevoked` 同形，只是作用域从会话级换成
+    项目级持久规则。
+    """
+
+    id: str
+    revoked: bool
 
 
 class AppState:
@@ -901,6 +1033,10 @@ class AppState:
         self.workspace_index = WorkspaceIndex(
             SqliteWorkspaceStore(self.harness_db), self.store
         )
+        # W-10（#354）：单目录写入租约 + 持久 FIFO 队列（同 harness.db 的另 2 张
+        # 表）。presence 只读合同缺省 NoPresenceReader——W-12 在场登记落地后
+        # 由装配处替换真实现，本层绝不反向登记（拆 W-10 ↔ W-12 依赖环）。
+        self.lease_manager = WorkspaceLeaseManager(SqliteLeaseStore(self.harness_db))
         self._stores_lock = asyncio.Lock()
         self._stores_ready = False
         # Capability 装配：只在首次使用时执行（含 Memory / Skills / demo 等）。
@@ -920,6 +1056,15 @@ class AppState:
         # 审查 P2-1：不实例化 sandbox），`session_service()` 把它与其他
         # collaborator 一样原样搬进领域层。
         self.validate_session_declaration = _session_declaration_validator(
+            settings=settings,
+            store=self.store,
+            get_wiring=self.get_wiring,
+        )
+        # `#616`：陈旧账行名清除通道（`RegisteredToolNamesProvider`）的根 registry
+        # 名字集端口。与上面的 validator 同源装配（`root_registry_tool_names`
+        # 零副作用取根 registry 名字集，P2-1：不实例化 sandbox），`session_service()`
+        # 把它与其他 collaborator 一样原样搬进领域层。
+        self.registered_tool_names = _registered_tool_names_provider(
             settings=settings,
             store=self.store,
             get_wiring=self.get_wiring,
@@ -944,6 +1089,17 @@ class AppState:
             if not self._stores_ready:
                 await initialize_stores(self.stores)
                 await self.transport_ledger.initialize()
+                # W-10：租约/队列表 + 重启对账（与 Session 状态对齐；有效会话
+                # 的持有租约原样保留——租约不因重启释放，PRD §3）。
+                await self.lease_manager.initialize()
+                dropped = await self.lease_manager.reconcile_on_restart(
+                    set(self.store.list_session_ids())
+                )
+                if dropped:
+                    logging.getLogger("agent_harness.web").info(
+                        "lease reconcile dropped %d row(s) for deleted sessions",
+                        dropped,
+                    )
                 self._stores_ready = True
 
     @property
@@ -1009,6 +1165,7 @@ class AppState:
         # lifecycle 通道逐项隔离关闭，web 层不再懂每种 capability 的关闭姿势。
         if wiring is not None:
             await wiring.aclose()
+        release_project_instruction_store(self.settings)
 
 
 # ── 领域服务的组合根适配（#248）──────────────────────────────────────
@@ -1069,6 +1226,32 @@ def _session_declaration_validator(
     return _validate
 
 
+def _registered_tool_names_provider(
+    *,
+    settings: Settings,
+    store: JsonlSessionStore,
+    get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+) -> Any:
+    """组合根适配：`#616` 根 registry 名字集端口（`RegisteredToolNamesProvider`）。
+
+    判据 = **根 registry**（树级语义）：名字集由 `root_registry_tool_names`
+    **零副作用**计算，与 `build_runtime` 的真实装配同源（漂移由
+    `tests/test_assembly_root_registry_names.py` 三方对账钉住）。与 `#564` 的
+    `_session_declaration_validator` 同源、同一条 P2-1 取舍：不碰 `_build_tooling`
+    / workspace_registry——否则会在归属对账之前对 workspace `mkdir`。
+    存为 `AppState.registered_tool_names` 成员——`session_service()` 与其他
+    collaborator 一样**原样搬入**领域层。CLI 侧复用同一容器，两条入口同一判据。
+    """
+
+    async def _names(session_id: str) -> frozenset[str]:
+        _, wiring = await get_wiring()
+        return root_registry_tool_names(
+            settings, wiring, session_id=session_id, session_store=store,
+        )
+
+    return _names
+
+
 def session_service(state: AppState) -> SessionService:
     """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
     return SessionService(
@@ -1090,7 +1273,19 @@ def session_service(state: AppState) -> SessionService:
         get_wiring=state.get_wiring,
         validate_session_declaration=state.validate_session_declaration,
         budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
+        registered_tool_names=state.registered_tool_names,
     )
+
+
+def approve_policy_store() -> ApprovePolicyStore:
+    """本项目持久审批规则存储（#684 Phase 2 管理面）。
+
+    项目根 = 进程当前工作目录，与 `ToolExecutor.__init__` 的 `project_root` 回落口径
+    逐字一致（`project_root is None ⇒ Path.cwd()`）：管理面读写的必须正是执行域用来
+    命中规则的那份 `.agent-harness/approve-policy.json`——否则会出现"撤销了却还在
+    放行"这类两套真相（不变量 #22 同源）。
+    """
+    return ApprovePolicyStore(Path.cwd())
 
 
 def project_service(state: AppState) -> ProjectService:
@@ -1490,6 +1685,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_task_routes(app, validate_session_id=validate_session_id)
 
+    # W-06 / #350 进度文件重读对账路由（独立 router：对账状态查询 + 外部编辑
+    # 冲突两出口；对账单源在 session/progress.py，本模块只留一行接入面）
+    from agent_harness.web.progress_status import register_progress_routes
+
+    register_progress_routes(app, validate_session_id=validate_session_id)
+    # W-10 / #354 单目录写入租约路由（独立 router：状态/取得/释放/排队撤销；
+    # 语义单源在 workspace/lease.py，本模块只留一行接入面）
+    from agent_harness.web.task_lease import register_task_lease_routes
+
+    register_task_lease_routes(app, validate_session_id=validate_session_id)
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
     # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
@@ -1504,6 +1710,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     from agent_harness.web.memory import register_memory_routes
 
     register_memory_routes(app)
+
+    # #529 T-529-5：skill 目录只读展示（catalog 列表 + 待审草稿；无管理按钮）
+    from agent_harness.web.skills import register_skill_routes
+
+    register_skill_routes(app)
 
     # WS-7 / #170 宿主只读目录列举（目录选择器的唯一可行路径，ADR-0028）
     from agent_harness.web.host_dirs import register_host_dir_routes
@@ -1673,6 +1884,39 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except (InvalidSessionId, SessionNotFound) as e:
             raise http_error(e) from e
         return [e.to_dict() for e in events]
+
+    @app.get("/api/sessions/{session_id}/project-instructions")
+    async def get_project_instructions_status(
+        session_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict[str, object]:
+        """Report which repository instruction files were loaded for this session."""
+        service = session_service(app.state.agent)
+        try:
+            await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as error:
+            raise http_error(error) from error
+        return project_instruction_store(
+            app.state.agent.settings,
+        ).status_for_session(session_id)
+
+    @app.post("/api/sessions/{session_id}/project-instructions/reload")
+    async def reload_project_instructions(
+        session_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict[str, object]:
+        """Explicitly reload repository instructions for subsequent model requests."""
+        service = session_service(app.state.agent)
+        try:
+            events = await service.get_events(session_id)
+        except (InvalidSessionId, SessionNotFound) as error:
+            raise http_error(error) from error
+        cwd = session_cwd(events)
+        if cwd is None:
+            return empty_project_instruction_status("no_cwd")
+        store = project_instruction_store(app.state.agent.settings)
+        await asyncio.to_thread(store.reload_for_session, session_id, cwd)
+        return store.status_for_session(session_id)
 
     # Read-only model/profile catalogs use a narrow dependency seam and are
     # registered as one explicit router instead of being captured by this factory.
@@ -2027,6 +2271,204 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise storage_http_error(e) from e
         return SessionArchived(id=session_id, archived=archived)
 
+    @app.post("/api/sessions/{session_id}/budget/purge-stale-tools")
+    async def purge_stale_tools(
+        session_id: str,
+        tool: str | None = None,
+        _: None = Depends(require_trusted_origin),
+    ) -> SessionToolLimitsPurged:
+        """清除陈旧工具 ceiling（#616）：摘掉 `session_budgets.tool_call_limits` 里
+        **不在根 registry** 的账行名。
+
+        陈旧性是 registry-relative 概念，只有服务端持有根 registry（树级语义），故
+        判据在 `SessionService.purge_stale_session_tool_limits`：它只删 ceiling 表里的
+        陈旧键，**不动**消耗事实表 `tool_calls_by_tool` / `tool_attempts_by_tool`，
+        也**不落** typed SessionEvent（预算变更本就不进会话真相，不变量 #16/#22）；清除
+        痕迹只落一条 `session_budget_events(kind="tool_limits_purged")` 审计并 bump version。
+
+        可选 query `?tool=<name>` 收窄到单名（对应 CLI `--tool`）：服务端仍按根 registry
+        权威判 stale，点名**正常注册名 / 从未存在名**都是安全 no-op，只有点名**确实陈旧**
+        的名字才真清。
+
+        语义：200 → `{purged, remaining, rows, version}` 回执（**幂等**：无陈旧名仍 200，
+        `purged={}`、`rows=0`、`version` 不变）；404 → 没有这个会话；422 → id 形态非法
+        （先于 404，路径穿越防线）。
+
+        确认面**不在 API**：本端点的 POST 本体即显式动作；整会话重整的二次确认只在
+        CLI（`--yes`）。来源闸（ADR-0025 D1）：账行写操作属宿主侧管理动作，只接受本机
+        来源（与 `archive` / `delete_session` 同一实现，ADR-0028）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            result = await service.purge_stale_session_tool_limits(
+                session_id, tool=tool, entry_point=PURGE_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return SessionToolLimitsPurged(
+            purged=result.purged,
+            remaining=result.remaining,
+            rows=result.rows,
+            version=result.version,
+        )
+
+    @app.post("/api/sessions/{session_id}/context/compact")
+    async def compact_session_context(
+        session_id: str,
+        model: str | None = None,
+        _: None = Depends(require_trusted_origin),
+    ) -> SessionContextCompacted:
+        """手动触发一次上下文压缩（#635）。
+
+        走**唯一实现** `SessionService.compact_session_context`（不变量 #22）：与自动
+        路径同一 `ContextCompactor` 管线、同一 bracket 三事件、同一重投影确认。压缩
+        append-only（旧事件 shadow 保留、可 replay），故本端点的 POST 本体即用户的
+        显式动作，**不设二次确认**。
+
+        可选 query `?model=<name>` 透传摘要模型（对标 CLI `--model`）：优先级为显式
+        参数 > `settings.summary_model` > 主模型；非法模型名在**任何副作用之前**经
+        统一解析点抛错 → 422（detail 原样上抛）。
+
+        状态码（顺序即服务层的校验顺序）：422 → id 形态非法（先于 404，路径穿越防线）；
+        404 → 没有这个会话；422 → 非法 `?model=`；409 → 在途 run（`ActiveRunConflict`，
+        零写入）/ 该会话已有压缩在途（`CompactionInProgress`，零写入）/ 落盘窗口并发
+        （`CompactionConcurrentWrite`：`run_busy`/`event_drift`，历史可能已变，非零写入）；
+        500 → bracket 已写入但复核未通过
+        （`CompactionPostWriteError`，fail-closed；历史已多出 bracket，不谎报"未改动"）。
+
+        **非严格幂等**：每次调用都是用户显式请求的一次新压缩，追加新 bracket；重复调用
+        安全但**非 no-op**（与 `purge-stale-tools` 的幂等不同——那是一次清理，这是一次
+        动作）。低水位时返回 `bracket_id=null`、`compacted_turn_count=0`，仍 200。
+
+        来源闸（ADR-0025 D1）：压缩会写会话事件日志，属宿主侧管理动作，只接受本机来源
+        （与 `archive` / `delete_session` 同一实现，ADR-0028）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            result = await service.compact_session_context(
+                session_id, model=model, entry_point=COMPACT_ENTRY_API
+            )
+        except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
+            raise http_error(e) from e
+        except ConfigError as e:
+            # 非法摘要模型名（统一解析点抛出）：请求形状非法 → 422，detail 原样上抛。
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return SessionContextCompacted(
+            bracket_id=result.bracket_id,
+            source_seq_start=result.source_seq_start,
+            source_seq_end=result.source_seq_end,
+            tokens_before=result.tokens_before,
+            tokens_after=result.tokens_after,
+            compacted_turn_count=result.compacted_turn_count,
+            summary_model=result.summary_model,
+        )
+
+    @app.post("/api/sessions/{session_id}/approvals/revoke")
+    async def revoke_approval_grant(
+        session_id: str,
+        body: RevokeApprovalGrantRequest,
+        _: None = Depends(require_trusted_origin),
+    ) -> ApprovalGrantRevoked:
+        """撤回一条会话级审批授权（#526 A2）。
+
+        追加 `permission/approval-revoked`（last-wins）。语义：200 →
+        `{id, approval_key, revoked}`（**幂等**：重复撤回仍 200，`revoked=False`
+        表示该 key 当时本就不存在）；404 → 没有这个会话；422 → id 形态非法
+        （先于 404，路径穿越防线）。
+
+        来源闸（ADR-0025 D1）：授权撤回是宿主侧管理动作，只接受本机来源
+        （与 `archive` / `purge-stale-tools` 同一实现）。
+        """
+        service = session_service(app.state.agent)
+        try:
+            result = await service.revoke_approval_grant(
+                session_id, body.approval_key
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return ApprovalGrantRevoked(
+            id=result["id"],
+            approval_key=result["approval_key"],
+            revoked=result["revoked"],
+        )
+
+    @app.get("/api/approve-policy/rules")
+    async def list_approve_policy_rules(
+        _: None = Depends(require_trusted_origin),
+    ) -> ApprovePolicyRules:
+        """列出本项目持久审批规则（#684 Phase 2，管理面）。
+
+        数据源是项目根 `.agent-harness/approve-policy.json`（`ApprovePolicyStore`），
+        与执行域命中规则时读的是**同一份文件**。无规则 / 文件缺失 / 文件损坏都返回
+        `{"rules": []}`（fail-closed：读不动就当没有规则，绝不臆造放行）——空列表
+        不是 404，因为"没有配置"不是错误。
+
+        只读端点，无 422/404：路径无参数。来源闸（ADR-0025 D1）：规则含工具名 /
+        命令键 / 相对路径等宿主侧信息，只接受本机来源（与 `project-instructions` /
+        `host/dirs` 的 GET 同一实现）。
+        """
+        rules = approve_policy_store().load()
+        return ApprovePolicyRules(
+            rules=[ApprovePolicyRuleOut(**rule.to_dict()) for rule in rules]
+        )
+
+    @app.post("/api/approve-policy/rules/{rule_id}/revoke")
+    async def revoke_approve_policy_rule(
+        rule_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> ApprovePolicyRuleRevoked:
+        """撤销一条项目级持久审批规则（#684 Phase 2，管理面）。
+
+        语义：200 → `{id, revoked}`（**幂等**：重复撤销仍 200，`revoked=False` 表示
+        该 id 当时本就不存在）；422 → `rule_id` 形态非法（先于任何读写，路径穿越防线）。
+        **没有 404**：资源是项目级配置文件而非按 id 寻址的实体，规则缺席是幂等成功。
+        二次确认由前端做（与 #526 的 revoke 端点同一口径：POST 本体即显式动作）。
+
+        撤销只删规则、**不删审计**：规则是配置，git 历史即审计链（设计稿 §6）。
+        来源闸（ADR-0025 D1）：撤销是宿主侧管理动作，只接受本机来源。
+        """
+        if not SESSION_KEY_PATTERN.fullmatch(rule_id):
+            raise HTTPException(
+                status_code=422,
+                detail=f"rule_id 只接受单个安全名字段：{rule_id!r}",
+            )
+        removed = approve_policy_store().remove_rule(rule_id)
+        return ApprovePolicyRuleRevoked(id=rule_id, revoked=removed)
+
+    @app.post("/api/sessions/{session_id}/workflow-mode")
+    async def set_workflow_mode(
+        session_id: str,
+        body: SetWorkflowModeRequest,
+        _: None = Depends(require_trusted_origin),
+    ) -> WorkflowModeChanged:
+        """切换会话工作流档（#526 B1：normal/plan）。
+
+        追加 `workflow/mode-changed`（last-wins）；Executor 每次调用现派生
+        `effective_workflow_mode`，切换立即生效。语义：200 → `{id, mode}`
+        （**幂等**）；404 → 没有这个会话；422 → id 形态非法 / mode 非法
+        （先于 404）。
+
+        来源闸（ADR-0025 D1）：档位切换是宿主侧管理动作，只接受本机来源。
+        """
+        from agent_harness.session.workflow import WorkflowMode
+
+        service = session_service(app.state.agent)
+        try:
+            result = await service.set_workflow_mode(
+                session_id, WorkflowMode(body.mode)
+            )
+        except (InvalidSessionId, SessionNotFound) as e:
+            raise http_error(e) from e
+        except StorageBusyError as e:
+            raise storage_http_error(e) from e
+        return WorkflowModeChanged(id=result["id"], mode=result["mode"])
+
     @app.get("/api/sessions/{session_id}/context-usage")
     async def get_context_usage(session_id: str):
         """上下文容量看板数据面（#200）：只读端点，六桶分类 + 缓存命中率。
@@ -2108,6 +2550,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # #515：硬删要写多张共享表（ledger/checkpoint/meta/工件），锁竞争重试
             # 耗尽时报 503——删除未开始，客户端稍后重试即可。
             raise storage_http_error(e) from e
+        project_instruction_store(app.state.agent.settings).forget_session(session_id)
         return SessionDeleted(
             id=stats.session_id,
             events=stats.events,
@@ -2240,6 +2683,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 approved=req.approved,
                 decision=req.decision,
                 reason=req.reason,
+                policy_granularity=req.policy_granularity,
             )
         except (
             InvalidSessionId,

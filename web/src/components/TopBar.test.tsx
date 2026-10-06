@@ -56,6 +56,7 @@ const baseProps = {
   onToggleTheme: () => {},
   authRequired: false,
   onOpenMemories: () => {},
+  onOpenApprovePolicy: () => {},
   sessionId: null,
   onOpenContextUsage: () => {},
 };

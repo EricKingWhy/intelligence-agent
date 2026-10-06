@@ -655,6 +655,36 @@ describe('postApproval — 404 失效审批（APR-01）', () => {
   });
 });
 
+/** #684：第三档「以后都允许」的 decision + policy_granularity 必须原样进 body。
+ *  旧调用点（省略 decision）逐字不变、不带 policy_granularity 键。 */
+describe('postApproval — approve_policy 粒度透传（#684）', () => {
+  it('decision=approve_policy + policy_granularity=command 原样进请求体', async () => {
+    const { calls } = captureFetch(200, {
+      status: 'resolved',
+      approval_id: 'ap-1',
+      decision: 'approve_policy',
+    });
+    await postApproval('s1', 'ap-1', true, 'approve_policy', 'command');
+    expect(calls[0].body).toMatchObject({
+      approval_id: 'ap-1',
+      approved: true,
+      decision: 'approve_policy',
+      policy_granularity: 'command',
+    });
+  });
+
+  it('省略 decision ⇒ 由 approved 推导且不带 policy_granularity 键', async () => {
+    const { calls } = captureFetch(200, {
+      status: 'resolved',
+      approval_id: 'ap-1',
+      decision: 'approve_once',
+    });
+    await postApproval('s1', 'ap-1', true);
+    expect(calls[0].body.decision).toBe('approve_once');
+    expect(calls[0].body).not.toHaveProperty('policy_granularity');
+  });
+});
+
 
 // ── Projects（WS-4 / #154 契约，WS-5 / #155 前端消费）──
 

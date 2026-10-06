@@ -1,0 +1,9 @@
+# gitleaks allowlist：已确认的测试固件误报（非真实凭证）。
+# 仓库安全红线（AGENTS.md 第 0 条）不变；此处仅放行下面列出的精确假值。
+
+[allowlist]
+description = "test fixtures with fake placeholder secrets (not real credentials)"
+regexes = [
+    # #529 tests/capability/test_skills_promote.py：凭证否决测试的假 API key 占位符
+    '''sk-live-abcdef123456''',
+]

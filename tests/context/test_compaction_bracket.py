@@ -27,6 +27,7 @@ from agent_harness.session import (
     COMPACTION_END,
     COMPACTION_START,
     CONTEXT_COMPACTED,
+    CONTEXT_COMPACTION_FAILED,
     MODEL_COMPLETED,
     TOOL_CALL,
     TOOL_RESULT,
@@ -223,8 +224,12 @@ class TestCompactorBracketMetadata:
     """ContextCompactor.compact() 返回 bracket 元数据。"""
 
     @pytest.mark.asyncio
-    async def test_compact_returns_bracket_id_and_summary(self):
-        """compact 返回 bracket_id 和 summary。"""
+    async def test_compact_returns_summary_without_bracket_id(self):
+        """compact 返回 summary；bracket_id 为 None（#647 T11f：无溯源 ⇒ 无身份）。
+
+        身份只在持久化边界由 builder 铸造（对标 Pi/DSH），compactor 直调结果
+        永不携带可用身份。
+        """
         model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
         # #556 裁决 C：目标节由 protected_facts 通道承载（与 builder 同一通路）。
         facts = derive_protected_facts([
@@ -239,7 +244,8 @@ class TestCompactorBracketMetadata:
         result = await ContextCompactor(
             model, max_context_tokens=8000,
         ).compact(messages, estimate_message_tokens(messages), protected_facts=facts)
-        assert result.bracket_id is not None
+        # #647 T11f：compactor 不铸造身份（无溯源 ⇒ 无身份）。
+        assert result.bracket_id is None
         assert result.summary is not None
         assert result.summary.startswith("## 原始目标与用户约束\n")
         assert "读取 old.txt 后继续。" in result.summary
@@ -389,6 +395,108 @@ class TestBuilderWritesBracket:
         assert "summary" in compacted_event.data
 
     @pytest.mark.asyncio
+    async def test_bracket_records_summary_model_duration_and_request_budget(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class ObservedSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-reported-summary-model"},
+                )
+
+        ticks = iter((100.0, 100.05, 100.125))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=ObservedSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "provider-reported-summary-model"
+        assert event.data["duration_ms"] == 125
+        assert event.data["request_token_estimate"] > 0
+        assert event.data["request_budget_tokens"] == 8500
+
+    @pytest.mark.asyncio
+    async def test_bracket_ignores_oversized_provider_summary_model_id(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class OversizedModelIdSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                return AIMessage(
+                    content=MODEL_SECTIONS,
+                    response_metadata={"model_name": "provider-model" * 30},
+                )
+
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=OversizedModelIdSummaryModel(),
+        )
+        await builder.build(session)
+
+        event = next(e for e in session.events if e.type == CONTEXT_COMPACTED)
+        assert event.data["summary_model_id"] == "configured-summary-model"
+        assert len(event.data["summary_model_id"]) <= 256
+
+    @pytest.mark.asyncio
+    async def test_failed_summary_events_record_request_metadata_without_provider_echo(
+        self, tmp_path, monkeypatch,
+    ):
+        import agent_harness.context.compactor as compactor_module
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+        session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+        session.append(USER_MESSAGE, {"content": "current request"})
+
+        class FailingSummaryModel:
+            model_name = "configured-summary-model"
+
+            async def ainvoke(self, _messages):
+                raise ConnectionError("api_key=do-not-persist")
+
+        ticks = iter((100.0, 100.0, 100.125, 100.2, 100.575))
+        monkeypatch.setattr(
+            compactor_module, "monotonic", lambda: next(ticks), raising=False,
+        )
+        builder = ContextBuilder(
+            ScriptedModel([]), max_context_tokens=10000,
+            auto_compact_threshold=0.3, summary_model=FailingSummaryModel(),
+        )
+        await builder.build(session)
+
+        failures = [
+            event for event in session.events
+            if event.type == CONTEXT_COMPACTION_FAILED
+        ]
+        assert len(failures) == 2
+        assert [event.data["summary_model_id"] for event in failures] == [
+            "configured-summary-model", "configured-summary-model",
+        ]
+        assert [event.data["duration_ms"] for event in failures] == [125, 375]
+        assert all(event.data["request_token_estimate"] > 0 for event in failures)
+        assert all(event.data["request_budget_tokens"] == 8500 for event in failures)
+        assert "api_key=do-not-persist" not in repr([event.data for event in failures])
+
+    @pytest.mark.asyncio
     async def test_second_build_after_bracket_skips_shadowed(self, tmp_path):
         """第一次压缩写 bracket 后，第二次 build 的 derive_messages 跳过 shadowed 段。"""
         session = make_session(tmp_path)
@@ -451,13 +559,19 @@ class TestBuilderWritesBracket:
 
         assert len(summaries) == 1
         assert messages[-1].content == "second current request"
-        # #556 裁决 C：目标节 = 当前生效目标（builder 从全量 events 重建的
+        # #556 裁决 C：目标行 = 当前生效目标（builder 从全量 events 重建的
         # facts 通道），叙述性用户轮次不再跨压缩逐字合并——跨压缩的**继承**
         # 语义由标识节承担（下方 R-042 / 4096 断言：第一次压缩的提取结果
         # 经旧摘要继承进第二次压缩的节，且受确定性上限收敛）。
-        assert sections["## 原始目标与用户约束"] == json.dumps(
+        # #710 方向 C：段内最新活跃用户消息进「当前生效指令」承载位（确定性
+        # 重算，不链式继承旧摘要文本），来源 seq 指针可回读。
+        section0_lines = sections["## 原始目标与用户约束"].splitlines()
+        assert section0_lines[0] == json.dumps(
             original_user, ensure_ascii=False,
         )
+        assert '当前生效指令："first current request"' in sections[
+            "## 原始目标与用户约束"
+        ]
         exact_identifiers = json.loads(sections["## 精确标识清单"])
         assert "R-042" in exact_identifiers
         assert "4096" in exact_identifiers

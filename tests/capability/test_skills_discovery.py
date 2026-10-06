@@ -8,6 +8,7 @@ import pytest
 
 from agent_harness.skills.discovery import (
     SKILL_FILE_MAX_BYTES,
+    SkillCatalogEntry,
     SkillDiscovery,
     parse_skill_markdown,
 )
@@ -299,3 +300,161 @@ def test_malicious_name_rejected_and_observable_via_discover(tmp_path):
     catalog = SkillDiscovery([skills_dir]).discover()
     assert [e.name for e in catalog.entries] == ["ok"]  # 可信 name 不受影响
     assert any("invalid skill name" in e for e in catalog.errors)  # 拒绝显式可观察
+
+
+# ── #529 T-529-1：写入路径（register / update / remove + 刷新一等接缝）──
+
+
+def _draft_entry(tmp_path: Path, name: str, description: str = "沉淀技能",
+                 when_to_use: str = "", body: str = "沉淀正文") -> SkillCatalogEntry:
+    """造一个"待注册草稿"：落盘在 staging 式临时目录，经真实解析路径产出条目。"""
+    draft_dir = tmp_path / f"draft-{name}"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    extra = f"\nwhen_to_use: {when_to_use}" if when_to_use else ""
+    skill_file = draft_dir / "SKILL.md"
+    skill_file.write_text(
+        f'---\nname: {name}\ndescription: "{description}"{extra}\n---\n\n{body}\n',
+        encoding="utf-8",
+    )
+    entry, errors = parse_skill_markdown(skill_file)
+    assert errors == []
+    assert entry is not None
+    return entry
+
+
+class TestSkillWritePath:
+    """#529 §6.1：闭环写 project 目录 + 刷新内嵌（oh-my-pi"写了但不可见"教训）。"""
+
+    def _discovery(self, tmp_path: Path) -> SkillDiscovery:
+        global_dir, project_dir = tmp_path / "global", tmp_path / "project"
+        _write_skill(global_dir, "global-skill", _fm("global-skill", "全局技能"))
+        project_dir.mkdir(exist_ok=True)
+        return SkillDiscovery(directories=[global_dir, project_dir], project_dir=project_dir)
+
+    def test_register_persists_file_and_refreshed_catalog_sees_and_loads(self, tmp_path):
+        """register → 落盘 → 刷新后 catalog 可见、load 可读（可见性来自刷新，不是写入）。"""
+        discovery = self._discovery(tmp_path)
+        discovery.discover()
+        entry = _draft_entry(tmp_path, "pdf-export", "导出 PDF 报告", when_to_use="导出报告时")
+
+        discovery.register(entry)
+
+        # 文件落盘在 project 目录（不是 global、不是草稿原地）。
+        skill_file = tmp_path / "project" / "pdf-export" / "SKILL.md"
+        assert skill_file.is_file()
+        # 刷新后的 catalog：新技能 + 既有 global 技能都在。
+        assert [e.name for e in discovery.catalog().entries] == ["global-skill", "pdf-export"]
+        # load 走同一 catalog：正文可读。
+        from agent_harness.skills.capability import SkillCapability
+
+        assert SkillCapability(discovery).load("pdf-export") == "沉淀正文"
+
+    def test_update_overwrites_and_refreshes(self, tmp_path):
+        discovery = self._discovery(tmp_path)
+        discovery.register(_draft_entry(tmp_path, "pdf-export", "旧描述"))
+
+        new_entry = _draft_entry(tmp_path, "pdf-export", "新描述", body="新正文")
+        discovery.update("pdf-export", new_entry)
+
+        assert [e.description for e in discovery.catalog().entries if e.name == "pdf-export"] == ["新描述"]
+        assert (tmp_path / "project" / "pdf-export" / "SKILL.md").read_text(encoding="utf-8").count("新描述") >= 1
+
+    def test_update_name_mismatch_refused(self, tmp_path):
+        discovery = self._discovery(tmp_path)
+        with pytest.raises(ValueError, match="mismatch"):
+            discovery.update("other", _draft_entry(tmp_path, "pdf-export"))
+
+    def test_remove_makes_skill_invisible_and_file_gone(self, tmp_path):
+        discovery = self._discovery(tmp_path)
+        discovery.register(_draft_entry(tmp_path, "pdf-export"))
+        assert any(e.name == "pdf-export" for e in discovery.catalog().entries)
+
+        discovery.remove("pdf-export")
+
+        assert [e.name for e in discovery.catalog().entries] == ["global-skill"]
+        assert not (tmp_path / "project" / "pdf-export" / "SKILL.md").exists()
+
+    def test_register_without_project_dir_refuses_global(self, tmp_path):
+        """未配置 project 写入目录 = 闭环无写入面：显式拒绝，绝不落 global 目录。"""
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        discovery = SkillDiscovery(directories=[global_dir])
+
+        with pytest.raises(ValueError, match="project"):
+            discovery.register(_draft_entry(tmp_path, "pdf-export"))
+
+        assert list(global_dir.iterdir()) == []  # global 一个字节都没多
+
+    def test_remove_skill_living_in_global_refused(self, tmp_path):
+        """global 来源的 skill 不归闭环删除（文件即真相，global 由用户手动维护）。"""
+        global_dir, project_dir = tmp_path / "global", tmp_path / "project"
+        global_skill = _write_skill(global_dir, "global-skill", _fm("global-skill", "全局技能"))
+        project_dir.mkdir()
+
+        discovery = SkillDiscovery(directories=[global_dir, project_dir], project_dir=project_dir)
+        with pytest.raises(ValueError, match="outside project"):
+            discovery.remove("global-skill")
+        assert global_skill.is_file()
+
+    def test_register_on_readonly_disk_raises_without_partial_write(self, tmp_path):
+        """写入失败（磁盘只读/权限拒绝）：响亮报错，project 目录无半写（无半截 SKILL.md / 无空壳目录）。
+
+        root 环境下 chmod 位不生效（只读模拟失效），与既有
+        test_unreadable_directory_degrades_to_error_not_abort 同款 selective mock。
+        """
+        from unittest import mock
+
+        global_dir, project_dir = tmp_path / "global", tmp_path / "project"
+        project_dir.mkdir()
+        discovery = SkillDiscovery(directories=[global_dir, project_dir], project_dir=project_dir)
+        entry = _draft_entry(tmp_path, "pdf-export")  # 草稿在 patch 之外落盘
+        skill_file = project_dir / "pdf-export" / "SKILL.md"
+
+        real_write_text = Path.write_text
+
+        def denied_write(self, *args, **kwargs):
+            if self == skill_file:
+                raise PermissionError(13, "Permission denied")
+            return real_write_text(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "write_text", denied_write), \
+             pytest.raises(OSError):
+            discovery.register(entry)
+        assert list(project_dir.rglob("*")) == []
+
+    def test_refresh_failure_rolls_back_write(self, tmp_path):
+        """刷新失败 = 整体报错 + 回滚已写文件（同事务语义，不留半写状态）。"""
+        from unittest import mock
+
+        discovery = self._discovery(tmp_path)
+        entry = _draft_entry(tmp_path, "pdf-export")
+        skill_file = tmp_path / "project" / "pdf-export" / "SKILL.md"
+
+        with mock.patch.object(discovery, "discover", side_effect=OSError("refresh exploded")), \
+             pytest.raises(OSError, match="refresh exploded"):
+            discovery.register(entry)
+        assert not skill_file.exists()  # 回滚：不留"写了但不可见"的漂移态
+
+    def test_register_oversized_content_rejected_before_write(self, tmp_path):
+        """64KB 写入上限（MAX_SKILL_BYTES，与发现侧 SKILL_FILE_MAX_BYTES 语义不同）：超限拒绝且无落盘。"""
+        from agent_harness.skills.discovery import MAX_SKILL_BYTES
+
+        assert MAX_SKILL_BYTES == 64_000
+        discovery = self._discovery(tmp_path)
+        entry = _draft_entry(tmp_path, "big", body="x" * (MAX_SKILL_BYTES + 1))
+
+        with pytest.raises(ValueError, match="too large"):
+            discovery.register(entry)
+        assert not (tmp_path / "project" / "big").exists()
+
+    def test_register_rejects_name_outside_whitelist_even_for_hand_built_entry(self, tmp_path):
+        """纵深防御（审查处置）：公开写入 API 对裸 entry 复验 name 白名单——
+        name 是磁盘路径的组成部分，`../escape` 式 name 不得落到 project 目录外。"""
+        discovery = self._discovery(tmp_path)
+        discovery.discover()
+        entry = SkillCatalogEntry(name="../escape", description="逃逸测试",
+                                  source_path=tmp_path / "draft" / "SKILL.md")
+        with pytest.raises(ValueError, match="invalid skill name"):
+            discovery.register(entry)
+        assert not (tmp_path / "escape").exists()
+        assert not (tmp_path / "project" / "escape").exists()

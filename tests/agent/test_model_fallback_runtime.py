@@ -17,7 +17,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, Field
 
-from agent_harness.agent.run_budget import consumed_from_events
+from agent_harness.agent.run_budget import SessionLimits, consumed_from_events
 from agent_harness.agent.runtime import AgentRuntime
 from agent_harness.model.fallback import TwoLevelFallbackPolicy
 from agent_harness.session import (
@@ -25,6 +25,10 @@ from agent_harness.session import (
     MODEL_FALLBACK,
     MODEL_REQUEST,
     MODEL_REQUEST_STARTED,
+)
+from agent_harness.storage.delegation_tree import (
+    SessionBudgetHandle,
+    SqliteDelegationTreeLedger,
 )
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry, ToolResult
 from tests.conftest import make_session
@@ -113,7 +117,9 @@ class FailOnceModel:
             yield chunk
 
 
-def _runtime(primary: Any, fallback: Any | None) -> AgentRuntime:
+def _runtime(
+    primary: Any, fallback: Any | None, *, session_budget: SessionBudgetHandle | None = None,
+) -> AgentRuntime:
     return AgentRuntime(
         model=primary, registry=_registry(), executor=ToolExecutor(_registry()),
         max_agent_turns=10,
@@ -121,7 +127,34 @@ def _runtime(primary: Any, fallback: Any | None) -> AgentRuntime:
         fallback_policy=TwoLevelFallbackPolicy(),
         primary_model_name="primary-model",
         fallback_model_name="fallback-model",
+        session_budget=session_budget,
     )
+
+
+class _BlockedStreamModel:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def ainvoke(self, messages, **kwargs):
+        raise AssertionError("本测试使用 stream 路径")
+
+    async def astream(self, messages, **kwargs):
+        self.entered.set()
+        await asyncio.Future()
+        yield AIMessageChunk(content="unreachable")
+
+
+async def _session_budget(tmp_path, session_id: str, *, max_model_requests: int = 10):
+    ledger = SqliteDelegationTreeLedger(tmp_path / "harness.db")
+    await ledger.initialize()
+    handle = SessionBudgetHandle(
+        ledger, budget_key=session_id, root_session_id=session_id,
+        limits=SessionLimits(max_model_requests=max_model_requests),
+    )
+    return ledger, handle
 
 
 class TestModelFallbackInLoop:
@@ -387,8 +420,9 @@ class TestRequestAccounting:
             usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
         )])
         session = make_session(tmp_path)
+        ledger, session_budget = await _session_budget(tmp_path, session.session_id)
 
-        await _runtime(primary, fallback).run(session, "你好")
+        await _runtime(primary, fallback, session_budget=session_budget).run(session, "你好")
 
         requests = [e for e in session._events if e.type == MODEL_REQUEST]
         assert [(e.data["role"], e.data["outcome"]) for e in requests] == [
@@ -404,6 +438,81 @@ class TestRequestAccounting:
         consumed = consumed_from_events(session._events)
         assert consumed.model_requests == 2, "一次决策 = 两次真实请求"
         assert consumed.agent_turns == 1, "只有被接纳的那一次算轮"
+        settled_budget = await ledger.get_session_budget(session.session_id)
+        assert settled_budget.consumed.model_requests == 2
+        assert settled_budget.consumed.agent_turns == 1
+        assert settled_budget.consumed.total_tokens is None
+        assert settled_budget.consumed.cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_primary_and_fallback_failure_both_settle_session_budget(self, tmp_path):
+        primary = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=1, error=TimeoutError("primary down"),
+        )
+        fallback = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=99, error=TimeoutError("fallback down"),
+        )
+        session = make_session(tmp_path)
+        ledger, session_budget = await _session_budget(tmp_path, session.session_id)
+        await ledger.ensure_session_budget(
+            session.session_id, root_session_id=session.session_id,
+            limits=session_budget.limits,
+        )
+        baseline = await session_budget.snapshot()
+
+        await _runtime(primary, fallback, session_budget=session_budget).run(session, "你好")
+
+        requests = [event for event in session.events if event.type == MODEL_REQUEST]
+        assert [(event.data["role"], event.data["outcome"]) for event in requests] == [
+            ("primary", "failed"), ("fallback", "failed"),
+        ]
+        assert len({event.data["request_id"] for event in requests}) == 2
+        assert consumed_from_events(session.events).model_requests == 2
+        settled = await ledger.get_session_budget(session.session_id)
+        assert settled.consumed.model_requests - baseline.consumed.model_requests == 2
+        assert settled.consumed.agent_turns == baseline.consumed.agent_turns
+        assert settled.consumed.total_tokens is None
+        assert settled.consumed.cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_fallback_settles_both_requests_without_a_turn(self, tmp_path):
+        primary = FailOnceModel(
+            ScriptedModel([AIMessage(content="unused")]),
+            fail_times=1, error=TimeoutError("primary down"),
+        )
+        fallback = _BlockedStreamModel()
+        session = make_session(tmp_path)
+        ledger, session_budget = await _session_budget(tmp_path, session.session_id)
+        await ledger.ensure_session_budget(
+            session.session_id, root_session_id=session.session_id,
+            limits=session_budget.limits,
+        )
+        baseline = await session_budget.snapshot()
+        runtime = _runtime(primary, fallback, session_budget=session_budget)
+
+        async def consume() -> None:
+            async for _event in runtime.run_stream(session, "你好"):
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(fallback.entered.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        requests = [event for event in session.events if event.type == MODEL_REQUEST]
+        assert [(event.data["role"], event.data["outcome"]) for event in requests] == [
+            ("primary", "failed"), ("fallback", "failed"),
+        ]
+        assert len({event.data["request_id"] for event in requests}) == 2
+        assert consumed_from_events(session.events).model_requests == 2
+        settled = await ledger.get_session_budget(session.session_id)
+        assert settled.consumed.model_requests - baseline.consumed.model_requests == 2
+        assert settled.consumed.agent_turns == baseline.consumed.agent_turns
+        assert settled.consumed.total_tokens is None
+        assert settled.consumed.cost_usd is None
 
     @pytest.mark.asyncio
     async def test_unreported_usage_makes_the_total_unknown_not_zero(self, tmp_path):
@@ -437,8 +546,9 @@ class TestRequestAccounting:
             fail_times=99, error=TimeoutError("primary down"),
         )
         session = make_session(tmp_path)
+        ledger, session_budget = await _session_budget(tmp_path, session.session_id)
 
-        await _runtime(primary, None).run(session, "你好")
+        await _runtime(primary, None, session_budget=session_budget).run(session, "你好")
 
         requests = [e for e in session._events if e.type == MODEL_REQUEST]
         assert [(e.data["role"], e.data["outcome"]) for e in requests] == [
@@ -446,6 +556,8 @@ class TestRequestAccounting:
         ]
         consumed = consumed_from_events(session._events)
         assert (consumed.model_requests, consumed.agent_turns) == (1, 0)
+        settled = await ledger.get_session_budget(session.session_id)
+        assert (settled.consumed.model_requests, settled.consumed.agent_turns) == (1, 0)
 
     @pytest.mark.asyncio
     async def test_consumer_stops_mid_flight_the_in_flight_request_is_still_counted(
