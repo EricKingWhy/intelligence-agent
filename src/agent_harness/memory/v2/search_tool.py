@@ -68,6 +68,11 @@ class RetrieveMemoryV2Tool(Tool):
     def permission(self) -> ToolPermission:
         return ToolPermission.READ_ONLY
 
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：重复搜索不改记忆（#357 契约 7）。
+        return True
+
     async def execute(self, args: _SearchArgs) -> ToolResult:
         session_id = memory_session_var.get() or ""
         try:

@@ -50,6 +50,7 @@ provider 响应或凭证——内容由 API 提供，事件流不是第二份记
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -60,7 +61,9 @@ from enum import Enum
 from typing import Any, Protocol
 
 import aiosqlite
+from pydantic import BaseModel, ConfigDict, Field
 
+from agent_harness.context.builder import preview_constraint_registration
 from agent_harness.context.tokens import estimate_tokens
 from agent_harness.memory.v2.budget import (
     DEFAULT_BUDGET_LIMITS,
@@ -87,6 +90,7 @@ from agent_harness.memory.v2.jobs import (
     MemoryFormationJob,
     MemoryJobOutcome,
     MemoryJobStage,
+    ProtectedFactExtractionState,
     SqliteMemoryV2JobStore,
 )
 from agent_harness.memory.v2.policy import select_candidates
@@ -111,8 +115,14 @@ from agent_harness.memory.v2.types import (
 )
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.fallback import is_transient_model_error
-from agent_harness.session import USER_MESSAGE, SessionEvent
+from agent_harness.session import RUN_COMPLETED, USER_MESSAGE, Session, SessionEvent
+from agent_harness.session.derive import (
+    build_protected_fact_data,
+    is_direct_user_input_event,
+)
+from agent_harness.session.errors import SeqConflict
 from agent_harness.session.event import MEMORY_DEGRADED, MEMORY_UPDATED
+from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -269,10 +279,84 @@ _ADJUDICATION_PROMPT = (
 
 
 class MemoryModelStage(str, Enum):
-    """记忆作业里的两次模型任务。字面量进观测，所以是稳定字符串。"""
+    """Memory job model stages; persisted observer names are stable values."""
 
     FORMATION = "formation"
     ADJUDICATION = "adjudication"
+    PROTECTED_FACT_EXTRACTION = "protected_fact_extraction"
+
+
+_PROTECTED_FACT_EXTRACTION_PROMPT = """Select only settled, direct user constraints that may
+change how later work should be done. A candidate must be copied exactly as one contiguous
+substring of one supplied user message, including its conditions and negation.
+
+Do not select greetings, one-off task requests, guesses, quoted or unaccepted text, tool/file
+content, credentials, or one-time authorization. Do not infer a constraint from an assistant
+message. If the user is correcting an earlier constraint, the new statement conflicts with an
+earlier constraint, or its lasting scope is unclear, omit it. Never resolve a conflict or replace
+an existing fact.
+
+Return exactly one JSON object with a candidates array. Each item has only source and value.
+source must be one supplied temporary alias. value must be copied exactly from that alias's user
+message. Return an empty array when there is no settled future-useful constraint. Do not return
+event ids, sequence numbers, fact types, evidence, authorization, or any extra fields."""
+
+_MAX_CONSTRAINT_EXTRACTION_MESSAGES = 8
+_MAX_CONSTRAINT_EXTRACTION_SOURCE_CHARS = 32_000
+_MAX_CONSTRAINT_EXTRACTION_INPUT_TOKENS = 12_000
+_MAX_CONSTRAINT_EXTRACTION_OUTPUT_TOKENS = 1_024
+_CONSTRAINT_EXTRACTION_TIMEOUT_SECONDS = 20.0
+
+
+class _ExtractedConstraint(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source: str = Field(min_length=2, max_length=8)
+    value: str = Field(min_length=1, max_length=10_000)
+
+
+class _ConstraintExtractionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    candidates: list[_ExtractedConstraint] = Field(max_length=8)
+
+
+def _run_completed(job: MemoryFormationJob, run_events: Sequence[SessionEvent]) -> bool:
+    return job.run_id is not None and any(
+        event.session_id == job.session_id
+        and event.run_id == job.run_id
+        and event.type == RUN_COMPLETED
+        for event in run_events
+    )
+
+
+def _constraint_extraction_sources(
+    job: MemoryFormationJob, *, run_events: Sequence[SessionEvent],
+    session_events: Sequence[SessionEvent],
+) -> list[tuple[str, SessionEvent]]:
+    if not _run_completed(job, run_events):
+        return []
+    current_by_id = {event.event_id: event for event in session_events}
+    sources: list[tuple[str, SessionEvent]] = []
+    for event in run_events:
+        content = event.data.get("content")
+        if (
+            event.session_id != job.session_id or event.type != USER_MESSAGE
+            or event.data.get("injected_by") or "input_request_id" in event.data
+            or not isinstance(content, str) or not content.strip()
+        ):
+            continue
+        current = current_by_id.get(event.event_id)
+        if (
+            current is None or current.seq != event.seq
+            or current.data.get("content") != content
+            or not is_direct_user_input_event(list(session_events), event.event_id)
+        ):
+            continue
+        sources.append((f"u{len(sources)}", current))
+        if len(sources) > _MAX_CONSTRAINT_EXTRACTION_MESSAGES:
+            return []
+    return sources
 
 
 class DegradedReason(str, Enum):
@@ -461,6 +545,7 @@ class MemoryJobExecutor:
     def __init__(
         self, *, jobs: SqliteMemoryV2JobStore, writer: MemoryRecordWriter,
         searcher: MemorySearcher, invoker: MemoryModelInvoker,
+        session_store: JsonlSessionStore | None = None,
         limits: MemoryBudgetLimits = DEFAULT_BUDGET_LIMITS,
         clock: Callable[[], float] = time.monotonic,
         observer: Callable[[str, dict[str, Any]], None] | None = None,
@@ -469,6 +554,7 @@ class MemoryJobExecutor:
         self._writer = writer
         self._searcher = searcher
         self._invoker = invoker
+        self._session_store = session_store
         self._limits = limits
         self._clock = clock
         self._observer = observer
@@ -515,6 +601,16 @@ class MemoryJobExecutor:
             return await self._degrade(job, worker_id=worker_id, run_id=run_id, sink=sink,
                                        state=state,
                                        reason=DegradedReason.RUN_EVENTS_UNAVAILABLE)
+        if self._session_store is not None and job.protected_fact_token_budget is not None:
+            try:
+                await self._extract_protected_constraints(
+                    job, worker_id=worker_id, run_events=run_events, model=roles.primary,
+                )
+            except Exception:
+                logger.exception(
+                    "Memory V2 job %s protected-constraint extraction failed",
+                    job.job_id,
+                )
         budget = MemoryJobBudget(limits=self._limits, clock=self._clock)
         try:
             advanced = await self._advance(job, worker_id=worker_id,
@@ -586,6 +682,179 @@ class MemoryJobExecutor:
         except _Degraded as failure:
             return await self._degrade(job, worker_id=worker_id, run_id=run_id, sink=sink,
                                        state=state, reason=failure.reason)
+
+    async def _extract_protected_constraints(
+        self, job: MemoryFormationJob, *, worker_id: str,
+        run_events: Sequence[SessionEvent], model: ModelConfig,
+    ) -> None:
+        assert self._session_store is not None
+        assert job.protected_fact_token_budget is not None
+        if job.run_id is None or job.protected_fact_token_budget <= 0:
+            return
+
+        previous_state = job.protected_fact_extraction_state
+        current = await self._jobs.start_protected_fact_extraction(
+            job_id=job.job_id, worker_id=worker_id,
+        )
+        if current is None or current.protected_fact_extraction_state is (
+            ProtectedFactExtractionState.DONE
+        ):
+            return
+
+        candidates: list[dict[str, str]]
+        if current.protected_fact_extraction_state is ProtectedFactExtractionState.READY:
+            candidates = current.protected_fact_extraction_candidates or []
+            events = await asyncio.to_thread(
+                self._session_store.read_events, job.session_id,
+            )
+            sources = _constraint_extraction_sources(
+                job, run_events=run_events, session_events=events,
+            )
+        elif (
+            current.protected_fact_extraction_state is ProtectedFactExtractionState.STARTED
+            and previous_state is ProtectedFactExtractionState.PENDING
+        ):
+            events = await asyncio.to_thread(
+                self._session_store.read_events, job.session_id,
+            )
+            sources = _constraint_extraction_sources(
+                job, run_events=run_events, session_events=events,
+            )
+            if not sources or sum(
+                len(event.data["content"]) for _, event in sources
+            ) > (
+                _MAX_CONSTRAINT_EXTRACTION_SOURCE_CHARS
+            ):
+                candidates = []
+            else:
+                payload = {
+                    "messages": [
+                        {"source": alias, "content": event.data["content"]}
+                        for alias, event in sources
+                    ],
+                }
+                call = MemoryModelCall(
+                    stage=MemoryModelStage.PROTECTED_FACT_EXTRACTION,
+                    role=MemoryModelRole.PRIMARY,
+                    attempt=1,
+                    model=model,
+                    system_prompt=_PROTECTED_FACT_EXTRACTION_PROMPT,
+                    payload=payload,
+                    max_output_tokens=_MAX_CONSTRAINT_EXTRACTION_OUTPUT_TOKENS,
+                    timeout_seconds=_CONSTRAINT_EXTRACTION_TIMEOUT_SECONDS,
+                )
+                if _estimate_input_tokens(call) > _MAX_CONSTRAINT_EXTRACTION_INPUT_TOKENS:
+                    candidates = []
+                else:
+                    try:
+                        output = await self._invoker(call)
+                        parsed = _ConstraintExtractionOutput.model_validate_json(output)
+                    except Exception:  # noqa: BLE001 — one bounded request, no repair/fallback.
+                        self._observe("protected_fact_extraction", {
+                            "job_id": job.job_id, "outcome": "model_error", "count": 0,
+                        })
+                        parsed = _ConstraintExtractionOutput(candidates=[])
+                    source_text = {alias: event.data["content"] for alias, event in sources}
+                    candidates = [
+                        item.model_dump()
+                        for item in parsed.candidates
+                        if item.source in source_text
+                        and item.value in source_text[item.source]
+                    ]
+                    source_order = {alias: index for index, (alias, _) in enumerate(sources)}
+                    candidates = [
+                        item for _, item in sorted(
+                            enumerate(candidates),
+                            key=lambda pair: (
+                                source_order[pair[1]["source"]], pair[0],
+                            ),
+                        )
+                    ]
+
+            saved = await self._jobs.save_protected_fact_candidates(
+                job_id=job.job_id, worker_id=worker_id, candidates=candidates,
+            )
+            if saved is None:
+                return
+            candidates = saved.protected_fact_extraction_candidates or []
+            sources = _constraint_extraction_sources(
+                job, run_events=run_events, session_events=events,
+            )
+        else:
+            # A started marker after recovery means the outcome of its one external request
+            # is unknown. Do not issue a second request; normal Memory V2 can still continue.
+            await self._jobs.finish_protected_fact_extraction(
+                job_id=job.job_id, worker_id=worker_id,
+            )
+            self._observe("protected_fact_extraction", {
+                "job_id": job.job_id, "outcome": "recovered_unknown", "count": 0,
+            })
+            return
+
+        self._observe("protected_fact_extraction", {
+            "job_id": job.job_id, "outcome": "candidates_ready", "count": len(candidates),
+        })
+        await self._register_protected_constraint_candidates(
+            job, candidates=candidates, sources=sources,
+        )
+        await self._jobs.finish_protected_fact_extraction(
+            job_id=job.job_id, worker_id=worker_id,
+        )
+
+    async def _register_protected_constraint_candidates(
+        self, job: MemoryFormationJob, *,
+        candidates: list[dict[str, str]], sources: list[tuple[str, SessionEvent]],
+    ) -> None:
+        assert self._session_store is not None
+        assert job.protected_fact_token_budget is not None
+        source_by_alias = dict(sources)
+        for candidate in candidates:
+            source = source_by_alias.get(candidate["source"])
+            if source is None or candidate["value"] not in source.data["content"]:
+                continue
+            for _ in range(3):
+                events = await asyncio.to_thread(
+                    self._session_store.read_events, job.session_id,
+                )
+                current = next(
+                    (event for event in events if event.event_id == source.event_id), None,
+                )
+                if (
+                    current is None or current.session_id != job.session_id
+                    or current.seq != source.seq or current.type != USER_MESSAGE
+                    or current.data.get("content") != source.data.get("content")
+                    or not is_direct_user_input_event(events, source.event_id)
+                    or candidate["value"] not in current.data["content"]
+                ):
+                    break
+                try:
+                    data = build_protected_fact_data(
+                        events, session_id=job.session_id, fact_type="constraint",
+                        value=candidate["value"], source_event_id=current.event_id,
+                    )
+                    preview = preview_constraint_registration(
+                        events, session_id=job.session_id, fact_data=data,
+                    )
+                    if (
+                        preview.duplicate is not None
+                        or preview.estimated_tokens_after > job.protected_fact_token_budget
+                    ):
+                        break
+                    Session(job.session_id, self._session_store, events).register_protected_fact(
+                        fact_type="constraint", value=candidate["value"],
+                        source_event_id=current.event_id,
+                    )
+                    break
+                except SeqConflict:
+                    continue
+                except (TypeError, ValueError):
+                    break
+                except Exception:
+                    logger.warning(
+                        "Memory V2 job %s could not register an extracted constraint",
+                        job.job_id, exc_info=True,
+                    )
+                    break
 
     # ----------------------------------------------------------------------------------
     # 两个模型阶段

@@ -55,6 +55,7 @@ from agent_harness.agent.run_budget import (
 from agent_harness.assembly import (
     RecoveryStores,
     initialize_stores,
+    root_registry_reconcile_info,
     root_registry_tool_names,
 )
 from agent_harness.capability.base import CapabilityError, CapabilityRegistry
@@ -662,10 +663,15 @@ class RecoverDecisionRequest(BaseModel):
 
     ``verdict`` 用字符串承载，合法值由领域层校验（``InvalidDecision`` 422）——
     与 PermissionChangeRequest 同一条纪律：规则单一来源，传输层不复述。
+
+    ``source``（#357 W-13 契约 3）：用户来源自陈（如「我查了外部系统」），
+    可选——省略 = 合法（#547 形状零迁移），有值时逐字进 ``reconcile_meta``。
+    上限 2000 **字符**，与 ``ApproveRequest.reason`` 同口径（防重复放大）。
     """
 
     tool_call_id: str = Field(min_length=1)
     verdict: str = Field(min_length=1)
+    source: str | None = Field(default=None, max_length=2000)
 
 
 class RecoverRequest(BaseModel):
@@ -705,6 +711,25 @@ class ApproveRequest(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class InputRequestAnswer(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    request_id: str = Field(min_length=1, max_length=200)
+    choice: Literal[
+        "replace_persistently", "current_task_only", "keep_existing", "custom",
+    ]
+    custom_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+    @model_validator(mode="after")
+    def validate_custom_text(self) -> InputRequestAnswer:
+        if self.choice == "custom":
+            if self.custom_text is None or not self.custom_text.strip():
+                raise ValueError("custom choice requires non-blank custom_text")
+        elif self.custom_text is not None:
+            raise ValueError("custom_text is only allowed for custom choice")
+        return self
+
+
 class ResumeRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/resume 的请求体。
 
@@ -729,6 +754,7 @@ class ResumeRequest(_AmendValueValidators):
     # `agent_harness.agent.run_budget.validate_resume`（单一规则来源）——这里只挡形状。
     run_id: str | None = Field(default=None, min_length=1)
     resume_basis: str | None = Field(default=None, min_length=1)
+    input_request: InputRequestAnswer | None = None
     # local fuse（#308 / `11 §6.1`：显式恢复也接受 budget）。
     budget: BudgetRequest | None = None
     # staged amend 字段（可选，None = 默认行为）
@@ -745,6 +771,12 @@ class ResumeRequest(_AmendValueValidators):
             raise ValueError(
                 "remember_as_procedural_rule requires a non-blank new task, not same-run resume"
             )
+        if self.input_request is not None and (
+            self.task is not None or self.resume_basis != "user_input"
+        ):
+            raise ValueError("input_request requires same-run resume_basis=user_input")
+        if self.resume_basis == "user_input" and self.input_request is None:
+            raise ValueError("resume_basis=user_input requires input_request")
         return self
 
 
@@ -1065,6 +1097,7 @@ class AppState:
         # 且 ToolExecutor 触发 needs_approval 时，callback 经此 queue 与前端 /approve
         # 对接。key 是 session_id；安全默认下（auto-approve）callback 不挂 queue。
         self.approval_queues: dict[str, PendingApprovalQueue] = {}
+        self.budget_recovery_failed_sessions: set[str] = set()
         # 恢复基础设施（R8-1，用户拍板接线）：三 Store 共享同一 SQLite 文件
         # （ADR-0004 布局），WorkspaceRegistry 持久化 session↔sandbox 映射。
         # initialize 是异步的 → 惰性执行（ensure_stores），兼容不走 lifespan
@@ -1119,6 +1152,18 @@ class AppState:
             store=self.store,
             get_wiring=self.get_wiring,
         )
+        # `#357` W-13（契约 1/6/7）：恢复裁决呈现元数据端口。与上面两个端口
+        # 同源装配（`root_registry_reconcile_info` 零副作用投影、与名字集投影
+        # 逐分支同构，P2-1：不实例化 sandbox），`session_service()` 原样搬入领域层。
+        self.reconcile_info = _reconcile_info_provider(
+            settings=settings,
+            store=self.store,
+            get_wiring=self.get_wiring,
+        )
+        # `#357` W-13（契约 5）：启动崩溃扫描的**快照**（lifespan 内只扫一次并
+        # 存这里；`GET /api/recovery/interrupted` 只读它，绝不重跑扫描——扫描
+        # 会写 run/interrupted + 跑 reconcile）。None = lifespan 未跑过。
+        self.interrupted_scan: list | None = None
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -1258,6 +1303,7 @@ def _session_declaration_validator(
         session_id: str,
         workspace: Any,
         agent_profile: str | None,
+        include_constraint_resolution_tool: bool = True,
     ) -> None:
         # workspace / agent_profile 不参与判定（前者 = P2-1 零副作用要求；后者
         # 只影响 delegate 的配额值，不影响名字集）：参数保留是端口形状（Protocol）。
@@ -1266,6 +1312,8 @@ def _session_declaration_validator(
             limits,
             registered=sorted(root_registry_tool_names(
                 settings, wiring, session_id=session_id, session_store=store,
+                include_constraint_tools=True,
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
             )),
             scope="session",
         )
@@ -1299,6 +1347,30 @@ def _registered_tool_names_provider(
     return _names
 
 
+def _reconcile_info_provider(
+    *,
+    settings: Settings,
+    store: JsonlSessionStore,
+    get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+) -> Any:
+    """组合根适配：恢复裁决呈现元数据端口（`ToolReconcileInfoProvider`，#357）。
+
+    判据 = **根 registry**（树级语义）：由 `root_registry_reconcile_info`
+    **零副作用**计算（读工具类元数据，不实例化 sandbox、不 mkdir——P2-1 同款
+    取舍），与 `root_registry_tool_names` 逐分支同构，一致性由
+    `tests/test_assembly_root_registry_names.py` 同型对账钉住。存为
+    `AppState.reconcile_info` 成员，`session_service()` 原样搬入领域层。
+    """
+
+    async def _info(session_id: str) -> dict[str, Any]:
+        _, wiring = await get_wiring()
+        return root_registry_reconcile_info(
+            settings, wiring, session_id=session_id, session_store=store,
+        )
+
+    return _info
+
+
 def session_service(state: AppState) -> SessionService:
     """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
     return SessionService(
@@ -1319,7 +1391,9 @@ def session_service(state: AppState) -> SessionService:
         ensure_stores=state.ensure_stores,
         get_wiring=state.get_wiring,
         validate_session_declaration=state.validate_session_declaration,
+        budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
         registered_tool_names=state.registered_tool_names,
+        reconcile_info=state.reconcile_info,
     )
 
 
@@ -1646,6 +1720,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             try:
 
                 scan_results = await session_service(state).scan_interrupted()
+                # #357 W-13（契约 5）：快照存 state，供只读端点消费——端点绝不
+                # 重跑 scan_interrupted（后者写 run/interrupted + 跑 reconcile）。
+                state.interrupted_scan = scan_results
                 for result in scan_results:
                     logging.getLogger("agent_harness.web").warning(
                         "启动崩溃扫描：session=%s recovery=%s detail=%s",
@@ -2312,6 +2389,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 ),
                 resume_run_id=req.run_id,
                 resume_basis=req.resume_basis,
+                input_request=(
+                    req.input_request.model_dump(exclude_none=True)
+                    if req.input_request is not None else None
+                ),
                 **budget_claims(req.budget, resume_surface=True),
                 amend=amend,
             )
@@ -2943,7 +3024,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = session_service(app.state.agent)
         decisions = [
-            ReconcileDecision(tool_call_id=d.tool_call_id, verdict=d.verdict)
+            ReconcileDecision(
+                tool_call_id=d.tool_call_id, verdict=d.verdict, source=d.source,
+            )
             for d in (req.decisions if req is not None else [])
         ]
         try:
@@ -2964,6 +3047,25 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # 断层 / seq 重复），不可重试，需按定位记录人工修复。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
+
+    @app.get("/api/recovery/interrupted")
+    async def list_interrupted_recoveries() -> dict[str, Any]:
+        """恢复列表（#357 W-13 契约 5，**只读**）：启动扫描快照的四要素呈现。
+
+        lifespan 启动时跑过一次 ``scan_interrupted`` 并把结论快照存进
+        ``app.state``；本端点只读快照 + 只读富化（Task / 无终态 run / 工作目录
+        锚 / 进度文件版本），**绝不重跑扫描**——``scan_interrupted`` 会补写
+        ``run/interrupted`` 并跑 reconcile，有写副作用（07 §9 的恢复编排只属于
+        显式 recover / resume 入口）。lifespan 未跑 → ``snapshot_available=false``
+        + 空列表（不伪造扫描结论）。#22：列表由后端单点驱动，前端不维护第二套
+        真相。
+        """
+        state: AppState = app.state.agent
+        snapshot = state.interrupted_scan
+        if snapshot is None:
+            return {"snapshot_available": False, "items": []}
+        items = await session_service(state).interrupted_recovery_rows(snapshot)
+        return {"snapshot_available": True, "items": items}
 
     # ── 模型切换（T7 #137，PRD §2.3）───────────────────────────────────
     # fork 创建端点在 web/lineage.py（ADR-0017 决策 6 的独立 router 面）。
@@ -3203,6 +3305,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             SeqConflict,
             WorkspaceBindingConflict,
             WorkspaceNotFound,
+            BudgetRejection,
+            BudgetConflict,
         ) as e:
             # WorkspaceNotFound → 404（#615①）：投递走 resume_and_launch，外部 cwd
             # 在排队之后被删 → 中央映射既有条目，与 /messages、/resume 同口径。

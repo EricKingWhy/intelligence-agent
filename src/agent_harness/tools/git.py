@@ -171,6 +171,11 @@ class GitStatusTool(Tool):
             suggested_action="重新运行 git status，核对工作区状态是否与预期一致（只读查询，重跑安全）。",
         )
 
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：git status 不改任何状态（#357 契约 7）。
+        return True
+
     async def execute(self, args: _GitStatusArgs) -> ToolResult:
         """exec 硬编码 git status；ADR-0002：exit_code 非零仍 ok=True。"""
         try:
@@ -233,6 +238,11 @@ class GitDiffTool(Tool):
             verifiable=True,
             suggested_action="重新运行 git diff，核对变更内容是否与预期一致（只读查询，重跑安全）。",
         )
+
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：git diff 不改任何状态（#357 契约 7）。
+        return True
 
     async def execute(self, args: _GitDiffArgs) -> ToolResult:
         """exec 硬编码 git diff；ADR-0002：exit_code 非零仍 ok=True。"""

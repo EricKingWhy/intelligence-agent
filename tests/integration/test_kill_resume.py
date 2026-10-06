@@ -30,6 +30,7 @@ from agent_harness.recovery import (
     ReconcileVerdict,
     RecoveryCoordinator,
 )
+from agent_harness.recovery.coordinator import DecisionsReconcileCallback
 from agent_harness.sandbox.local import LocalSubprocessSandbox
 from agent_harness.session import (
     OPERATION_RECONCILE_REQUIRED,
@@ -39,7 +40,7 @@ from agent_harness.session import (
     Session,
     detect_dangling,
 )
-from agent_harness.storage import OperationState, SqliteOperationLedger
+from agent_harness.storage import Operation, OperationState, SqliteOperationLedger
 from agent_harness.tooling import ErrorCode, ToolResult
 
 _CHILD = Path(__file__).with_name("_kill_child.py")
@@ -279,6 +280,121 @@ async def test_multi_tool_partial_completion_crash_recovers_all_pairings(
         len([e for e in recovered.events if e.type == OPERATION_RECONCILE_REQUIRED])
         == 1
     )
+
+
+# ── 场景 E（#357 W-13 R19）：终态写入后真实 Kill + UNKNOWN 窗口经用户裁决恢复 ──
+
+
+@pytest.mark.asyncio
+async def test_kill_after_terminal_write_recovers_via_user_decision_exactly_once(
+    tmp_path: Path, _forbid_side_effects
+) -> None:
+    """R19：真实 kill（SQLite 终态写入成功后、``tool/result`` append 前）+
+    ``decisions=[{tool_call_id, CONFIRM_SUCCESS, source}]`` 恢复，配对恰一次。
+
+    场景构成：call-a 是真实子进程 ``terminal`` 探针窗口（Ledger SUCCEEDED +
+    原始 result_json 已持久化、tool/result 未 append、副作用恰一份）；call-b
+    是同会话的 UNKNOWN 悬空窗口（确定性种子，同 ``test_web_api`` 的
+    ``_seed_reconcile_window`` 形态——终态悬空行不可能再接纳裁决，见 422 预检，
+    故裁决证据（``reconcile_meta``）必须由非终态窗口承载）。重启后**先查 DB**
+    （账行事实 + 恰一份副作用），再一次恢复同时结清两行。
+
+    证据：SessionEvent seq 单调、Operation ID、operations 行 state +
+    ``reconcile_meta``（verdict + source 逐字）；每调用配对恰一次（dangling=0）；
+    CONFIRM_SUCCESS 是用户断言不是重跑——恢复零副作用。
+    """
+    root = tmp_path / "root"
+    returncode = _run_child(
+        root,
+        {
+            "root": str(root),
+            "calls": [
+                {
+                    "id": "call-a",
+                    "name": "write",
+                    "args": {"path": "a.txt", "content": "written-by-child"},
+                }
+            ],
+            "kill_stage": "terminal",
+            "kill_call_id": "call-a",
+        },
+    )
+    assert returncode == 137
+    session_id = _discover_session_id(root)
+
+    # 父进程内确定性补一个 UNKNOWN 悬空窗口（同会话、新 run）。
+    store = JsonlSessionStore(root / "sessions")
+    session = Session(
+        session_id, store, events=store.read_events(session_id)
+    )
+    run_id, _ = session.begin_run()
+    session.append(
+        TOOL_CALL,
+        {"tool_call_id": "call-b", "tool_name": "write", "args": {}},
+        run_id=run_id,
+    )
+    ledger = SqliteOperationLedger(root / "state.db")
+    await ledger.initialize()
+    await ledger.create(
+        Operation(
+            tool_call_id="call-b",
+            session_id=session_id,
+            run_id=run_id,
+            agent_id="default",
+            tool_name="write",
+            args_identity="{}",
+            state=OperationState.PENDING,
+            started_at="2026-10-06T00:00:00Z",
+        )
+    )
+    await ledger.update_state(session_id, "call-b", OperationState.RUNNING)
+    await ledger.update_state(session_id, "call-b", OperationState.UNKNOWN)
+
+    # 重启后先查 DB（只依赖磁盘上的持久状态）：账行事实 + 恰一份副作用。
+    ledger, crashed_events = _crash_state(root, session_id)
+    op_a = await ledger.get(session_id, "call-a")
+    assert op_a is not None and op_a.state is OperationState.SUCCEEDED
+    assert op_a.result_json is not None, "终态行必须携带原 ToolResult"
+    op_b = await ledger.get(session_id, "call-b")
+    assert op_b is not None and op_b.state is OperationState.UNKNOWN
+    workspaces = root / "ws" / "workspaces" / session_id
+    assert (workspaces / "a.txt").read_text(encoding="utf-8") == "written-by-child"
+    assert not [e for e in crashed_events if e.type == TOOL_RESULT]
+
+    recovered = await _recover(
+        root,
+        session_id,
+        reconcile_callback=DecisionsReconcileCallback(
+            {"call-b": ReconcileVerdict.CONFIRM_SUCCESS},
+            sources={"call-b": "我查了文件/命令输出：a.txt 已落盘"},
+        ),
+    )
+
+    # 配对恰一次：每调用恰一条 tool/result，seq 严格递增，dangling = 0。
+    results = _result_events(recovered)
+    assert set(results) == {"call-a", "call-b"}
+    seqs = [e.seq for e in recovered.events if e.seq is not None]
+    assert seqs == sorted(seqs), "SessionEvent seq 必须单调"
+    assert detect_dangling(recovered.events) == []
+    # call-a 走 Ledger result_json 精确回填（原 ToolResult 恢复，07 §6）。
+    assert ToolResult.model_validate_json(results["call-a"]).ok is True
+    assert "已写入" in results["call-a"]
+    # call-b 经用户裁决结清：先有 reconcile-required 标记，配对恰一次。
+    required = [
+        e for e in recovered.events if e.type == OPERATION_RECONCILE_REQUIRED
+    ]
+    assert [e.data["tool_call_id"] for e in required] == ["call-b"]
+    assert "人工 reconcile" in results["call-b"]
+
+    # DB 证据：call-b SUCCEEDED + reconcile_meta（verdict + source 逐字）。
+    settled = await ledger.get(session_id, "call-b")
+    assert settled is not None and settled.state is OperationState.SUCCEEDED
+    meta = json.loads(settled.reconcile_meta)
+    assert meta["verdict"] == "CONFIRM_SUCCESS"
+    assert meta["source"] == "我查了文件/命令输出：a.txt 已落盘"
+    # CONFIRM_SUCCESS 不重跑工具：恢复零副作用（禁写哨兵未触发、无新文件）。
+    assert not (workspaces / "b.txt").exists()
+    assert (workspaces / "a.txt").read_text(encoding="utf-8") == "written-by-child"
 
 
 # ── 场景 D：Session Workspace 恢复到原映射 ──

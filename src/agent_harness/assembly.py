@@ -73,7 +73,12 @@ from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
-from agent_harness.tooling.contract import PermissionPolicy, ToolExposure, exposure_of
+from agent_harness.tooling.contract import (
+    PermissionPolicy,
+    ToolExposure,
+    ToolReconcileInfo,
+    exposure_of,
+)
 from agent_harness.tooling.exposure import ToolExposureController, ToolSearchTool
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
 from agent_harness.tooling.permission_rules import default_rule_set
@@ -88,6 +93,10 @@ from agent_harness.tools import (
     GrepTool,
     ReadTool,
     WriteTool,
+)
+from agent_harness.tools.register_constraint import RegisterConstraintTool
+from agent_harness.tools.request_constraint_resolution import (
+    RequestConstraintResolutionTool,
 )
 from agent_harness.tools.update_plan import UpdatePlanTool
 from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
@@ -238,6 +247,8 @@ def _build_tooling(
     workspace_registry: WorkspaceRegistry,
     session_store: JsonlSessionStore | None,
     agent_profile: str | None,
+    include_constraint_tools: bool = False,
+    include_constraint_resolution_tool: bool | None = None,
     project_instructions: ProjectInstructionStore | None = None,
     # #363 / W-19：显式选择的 sandbox 后端（None ⇒ registry 部署默认）。
     sandbox_backend: str | None = None,
@@ -253,6 +264,11 @@ def _build_tooling(
     """
     # #286：根委派配额来自档位声明（与 build_runtime 的树账同一取用点）。
     root_max_delegations = _root_profile_spec(agent_profile).max_delegations
+    include_resolution_tool = (
+        include_constraint_tools
+        if include_constraint_resolution_tool is None
+        else include_constraint_resolution_tool
+    )
     # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
     # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
     # create() 对它响亮拒绝（防改写属主绑定，tests/sandbox/test_workspace_registry.py
@@ -287,6 +303,10 @@ def _build_tooling(
     # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
     # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
     registry.register(UpdatePlanTool())
+    if include_constraint_tools:
+        registry.register(RegisterConstraintTool())
+    if include_resolution_tool:
+        registry.register(RequestConstraintResolutionTool())
 
     # 外置写入与模型侧读取**必须成对**：溢出处理器（唯一写入者）与读回工具指向
     # **同一个** store，否则会出现"东西写进了 A、模型从 B 读"的静默错配。
@@ -381,6 +401,8 @@ def root_registry_tool_names(
     *,
     session_id: str,
     session_store: JsonlSessionStore | None,
+    include_constraint_tools: bool = False,
+    include_constraint_resolution_tool: bool | None = None,
 ) -> frozenset[str]:
     """根 registry 名字集的**零副作用**计算——pre-CAS session 名字校验专用。
 
@@ -398,6 +420,15 @@ def root_registry_tool_names(
     names: set[str] = {tool_cls(None).name for tool_cls in BUILTIN_LOCAL_TOOLS}
     # W-26（#380）：`update_plan` 无条件注册（与 `_build_tooling` 同一句判定）。
     names.add(UpdatePlanTool().name)
+    include_resolution_tool = (
+        include_constraint_tools
+        if include_constraint_resolution_tool is None
+        else include_constraint_resolution_tool
+    )
+    if include_constraint_tools:
+        names.add(RegisterConstraintTool().name)
+    if include_resolution_tool:
+        names.add(RequestConstraintResolutionTool().name)
     selection = select_artifact_store(settings, session_id)
     if selection is not None:
         # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
@@ -409,6 +440,51 @@ def root_registry_tool_names(
             continue
         names.add(capability_tool.name)
     return frozenset(names)
+
+
+def _tool_reconcile_info(tool: Tool) -> ToolReconcileInfo:
+    """Tool 实例/裸构造 → 恢复裁决呈现元数据（属性逐字快照，不执行任何方法）。"""
+    hint = tool.reconcile_hint
+    return ToolReconcileInfo(
+        replay_safe=tool.replay_safe,
+        verifiable=hint.verifiable,
+        suggested_action=hint.suggested_action,
+    )
+
+
+def root_registry_reconcile_info(
+    settings: Settings,
+    wiring: CapabilityWiring,
+    *,
+    session_id: str,
+    session_store: JsonlSessionStore | None,
+) -> dict[str, ToolReconcileInfo]:
+    """根 registry 恢复裁决呈现元数据的**零副作用**计算（#357 W-13 §2.4）。
+
+    与 ``root_registry_tool_names`` 逐分支同构（名字集的对账测试同型钉住）：
+    本地工具"构造器只存依赖"（传 ``None`` 读类属性），capability 工具在
+    wiring 里已是实例——**不实例化 sandbox、不 mkdir**（审查 P2-1 同款取舍）。
+    消费点：``_reconcile_pending`` 产出 ``default_action/risk_level/probe``
+    只读展示字段；判据与真实工具面漂移即红灯
+    （``tests/test_assembly_root_registry_names.py``）。
+    """
+    info: dict[str, ToolReconcileInfo] = {}
+    for tool_cls in BUILTIN_LOCAL_TOOLS:
+        tool = tool_cls(None)
+        info[tool.name] = _tool_reconcile_info(tool)
+    update_plan = UpdatePlanTool()
+    info[update_plan.name] = _tool_reconcile_info(update_plan)
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        read_tool = selection.read_tool(None)
+        info[read_tool.name] = _tool_reconcile_info(read_tool)
+    for capability_tool in wiring.tools:
+        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
+        # 与 `root_registry_tool_names` 的同名分支逐字同判（两边必须一致）。
+        if isinstance(capability_tool, DelegateTool) and session_store is None:
+            continue
+        info[capability_tool.name] = _tool_reconcile_info(capability_tool)
+    return info
 
 
 async def build_runtime(
@@ -427,6 +503,8 @@ async def build_runtime(
     model_name: str | None = None,
     reasoning_effort: str | None = None,
     agent_profile: str | None = None,
+    include_constraint_tools: bool = False,
+    include_constraint_resolution_tool: bool | None = None,
     context_providers: list[str] | None = None,
     steer_source: Any | None = None,
     run_budget: LaunchRunBudget | None = None,
@@ -566,11 +644,18 @@ async def build_runtime(
     # agent_profile 兑现——只放开这一半会放大子会话工具面，两条必须一起成立。
     # （sandbox 规则与 registry 构造在 `_build_tooling`——与 #564 的 pre-CAS 校验
     # 同一事实源，见其 docstring。）
+    include_resolution_tool = (
+        include_constraint_tools
+        if include_constraint_resolution_tool is None
+        else include_constraint_resolution_tool
+    )
     tooling = _build_tooling(
         settings, wiring,
         session_id=session_id, workspace=instruction_cwd,
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=agent_profile,
+        include_constraint_tools=include_constraint_tools,
+        include_constraint_resolution_tool=include_resolution_tool,
         project_instructions=project_instructions,
         # #363 / W-19：显式 sandbox 后端选择。
         sandbox_backend=sandbox_backend,
@@ -612,6 +697,14 @@ async def build_runtime(
         pre_filter_names = {tool.name for tool in registry.list()}
         registry = registry.filtered(profile_spec.tool_scope)
         dropped_tools = tuple(sorted(pre_filter_names - {tool.name for tool in registry.list()}))
+    if agent_profile == "coding":
+        # These tools belong to a direct user-facing root coding session. They stay out
+        # of the shared coding tool_scope so AgentFactory cannot grant them to children.
+        registered_names = {tool.name for tool in registry.list()}
+        if include_constraint_tools and RegisterConstraintTool().name not in registered_names:
+            registry.register(RegisterConstraintTool())
+        if include_resolution_tool and RequestConstraintResolutionTool().name not in registered_names:
+            registry.register(RequestConstraintResolutionTool())
 
     # 曝光级别接线（#528 / IMP-11）：Registry 定型（含上面的收窄）后，存在
     # deferred 工具才注册内置 tool_search 并建立定义集控制器——全 direct

@@ -299,6 +299,7 @@ def test_render_footer_muted_truecolor():
 async def test_cli_run_streams_persists_session_and_returns_final_text(
     tmp_path, monkeypatch
 ):
+    import agent_harness.cli as cli_module
     from agent_harness.config import Settings
 
     monkeypatch.setattr(
@@ -310,11 +311,22 @@ async def test_cli_run_streams_persists_session_and_returns_final_text(
         "agent_harness.assembly.create_chat_model",
         lambda config, **kw: ScriptedModel([AIMessage(content="你好世界")], chunk_size=2),
     )
+    original_build_runtime = cli_module.build_runtime
+    tool_names: set[str] = set()
+
+    async def capture_cli_tools(**kwargs):
+        runtime = await original_build_runtime(**kwargs)
+        tool_names.update(tool.name for tool in runtime.registry.list())
+        return runtime
+
+    monkeypatch.setattr(cli_module, "build_runtime", capture_cli_tools)
     out: list[str] = []
     outcome = await run("打个招呼", write=out.append)
 
     assert outcome.final_text == "你好世界"
     assert outcome.paused is False, "正常完成不是暂停（#312：两者都可能没有回答，必须可区分）"
+    assert "register_constraint" in tool_names
+    assert "request_constraint_resolution" not in tool_names
     streamed = "".join(out)
     assert "你好" in streamed and "世界" in streamed, "回答经 delta 流式可见"
 

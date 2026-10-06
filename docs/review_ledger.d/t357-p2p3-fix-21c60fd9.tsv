@@ -1,0 +1,1 @@
+2026-10-07	#357 第一轮审查 P2/P3 修复（用户 2026-10-07 批准）：21c60fd9。P2：重试按钮并入 ghost 按钮族样式（recovery-batch-btn）；P3：来源输入框内 Esc 只收焦点不关面板（stopPropagation+blur）。回归测试 RecoveryDecisionPanel.test.tsx 12/12（含新增 Esc 用例）。纯前端样式/交互修复，无后端改动	2a918a3069f498ea64799957b449d514882016e8..21c60fd9e8e3bda52e3ff1a006ba57eb7fa0dc61

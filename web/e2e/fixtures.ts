@@ -239,6 +239,14 @@ export interface ApiMock {
   /** POST /api/sessions/{id}/recover（T8 #138 恢复；缺省 200 → 返回 mock.events）。
    *  真实语义：响应是与 GET events 同构的全量事件数组。 */
   onRecoverPost?: (route: Route) => Promise<void> | void;
+  /** GET /api/recovery/interrupted（#357 W-13 契约 5）——只读恢复列表快照。
+   *  缺省 = `{snapshot_available:true, items:[]}`（无中断会话）。
+   *  真实形状见 `web/src/lib/api.ts::InterruptedRecoveries`；spec 直接传后端
+   *  `interrupted_recovery_rows` 的原样载荷，避免两侧各自演化。 */
+  recoveryInterrupted?: unknown;
+  /** 列表响应延迟（毫秒）——用来撑开「先列后继续」的加载窗口，断言加载完成前
+   *  「继续」是 disabled 的。 */
+  recoveryInterruptedDelayMs?: number;
   /** POST /api/sessions/{id}/approve（#37 交互式审批决策；缺省 200 → {status,approval_id,decision}）。
    *  注入此回调即可断言请求体（回归锁：批准 → decision='approve_once'、拒绝 → 'deny'；
    *  形状与后端 `session/approval.py` 的 allowed_decisions 一致）。 */
@@ -828,6 +836,12 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
         }),
         contentType: 'application/json',
       });
+    }
+    if (path === '/api/recovery/interrupted' && req.method() === 'GET') {
+      if (mock.recoveryInterruptedDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, mock.recoveryInterruptedDelayMs));
+      }
+      return json(route, mock.recoveryInterrupted ?? { snapshot_available: true, items: [] });
     }
     if (/^\/api\/sessions\/[^/]+\/recover$/.test(path) && req.method() === 'POST') {
       if (mock.onRecoverPost) return mock.onRecoverPost(route);
