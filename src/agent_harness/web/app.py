@@ -1654,6 +1654,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_task_routes(app, validate_session_id=validate_session_id)
 
+    # W-06 / #350 进度文件重读对账路由（独立 router：对账状态查询 + 外部编辑
+    # 冲突两出口；对账单源在 session/progress.py，本模块只留一行接入面）
+    from agent_harness.web.progress_status import register_progress_routes
+
+    register_progress_routes(app, validate_session_id=validate_session_id)
     # W-10 / #354 单目录写入租约路由（独立 router：状态/取得/释放/排队撤销；
     # 语义单源在 workspace/lease.py，本模块只留一行接入面）
     from agent_harness.web.task_lease import register_task_lease_routes
