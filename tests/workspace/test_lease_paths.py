@@ -22,6 +22,7 @@ from agent_harness.workspace.lease_paths import (
     normalize_dir_key,
     paths_conflict,
 )
+from tests.symlink_capability import needs_symlink
 
 # —— POSIX 形态：realpath 解析 + fail-closed ——
 
@@ -36,6 +37,7 @@ def test_trailing_separator_and_dot_segments_converge(tmp_path: Path) -> None:
     assert key == normalize_dir_key(str(tmp_path / "other" / ".." / "proj"))
 
 
+@needs_symlink
 def test_symlink_resolves_to_same_key_as_target(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
@@ -49,6 +51,7 @@ def test_missing_path_fail_closed(tmp_path: Path) -> None:
         normalize_dir_key(str(tmp_path / "does-not-exist"))
 
 
+@needs_symlink
 def test_symlink_loop_fail_closed(tmp_path: Path) -> None:
     a = tmp_path / "a"
     b = tmp_path / "b"
@@ -129,11 +132,15 @@ class TestPathsConflict:
     def test_siblings_disjoint(self) -> None:
         assert not paths_conflict("/a/b", "/a/c")
 
+    # 真实 Windows 宿主上合成路径被 #726 存在性校验 fail-closed 拒绝；
+    # Windows 形态词法等价只能由 POSIX 宿主等价层钉住（同 TestWindowsFormLexical）。
+    @pytest.mark.skipif(os.name == "nt", reason="Windows 宿主路径需真实存在（#726 fail-closed），合成键词法等价在 POSIX 宿主钉住")
     def test_windows_form_parent_child(self) -> None:
         assert paths_conflict(
             normalize_dir_key("D:\\code"), normalize_dir_key("d:/code/proj")
         )
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows 宿主路径需真实存在（#726 fail-closed），合成键词法等价在 POSIX 宿主钉住")
     def test_windows_prefix_not_component_is_disjoint(self) -> None:
         assert not paths_conflict(
             normalize_dir_key("D:\\code\\b"), normalize_dir_key("D:\\code\\bc")
