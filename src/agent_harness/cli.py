@@ -7,7 +7,7 @@ JSONL；Diagnostic Log 由 runtime 的 _log 统一产出（CLI 只负责 setup_l
 
 渲染约定借鉴 pi-mono / oh-my-pi（均为 MIT License，设计级借用 + 小工具重实现）：
 - 状态行语法 `glyph 标题 折叠参数 · meta`（oh-my-pi tui/status-line.ts）
-- 参数折叠 key=value、结果尾部预览 + `... +N more lines`（pi renderers/bash.ts）
+- 参数折叠 key=value、结果尾部预览 + `… (N earlier lines)`（pi renderers/bash.ts）
 - 时长徽章、token 用量页脚 + K/M 压缩（pi footer.ts formatTokens/formatDuration）
 - ascii 符号路线（oh-my-pi theme/symbols.ts 的 ascii preset）——Windows GBK
   控制台对 ✔/⏳ 等 glyph 会抛 UnicodeEncodeError，ascii 永远可打印。
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -115,7 +116,7 @@ from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
 
 _ARGS_LINE_LIMIT = 120
-_PREVIEW_LINES = 3
+_PREVIEW_LINES = 5
 
 #: 陈旧账行名清除通道（#616）的 CLI 入口标识，写进 `session_budget_events` 审计的
 #: `source` 字段（与 Web 的 `PURGE_ENTRY_API` 同款，只是入口不同）。
@@ -124,6 +125,19 @@ PURGE_ENTRY_CLI = "cli"
 #: 手动上下文压缩通道（#635）的 CLI 入口标识，与 `COMPACT_ENTRY_API`（Web）同款、
 #: 值不同（`agent_harness/session/service.py` 的注释预告了这一对应关系）。
 COMPACT_ENTRY_CLI = "cli"
+
+
+def _preview_window(
+    lines: list[str], keep: int = _PREVIEW_LINES
+) -> tuple[list[str], int]:
+    """尾部预览窗口 → (可见行, 隐藏行数)。
+
+    策略照抄 Pi keep="end"（pi-mono bash.ts，MIT）：永远显示最后 keep 行，
+    隐藏的是"更早"的行（earlier lines），不是"更多"的行——让用户第一眼看到最新输出。
+    """
+    if len(lines) <= keep:
+        return lines, 0
+    return lines[len(lines) - keep:], len(lines) - keep
 
 
 class StreamRenderer:
@@ -145,9 +159,13 @@ class StreamRenderer:
             self._delta_open = True
         elif event.type == TOOL_CALL:
             self._end_delta()
-            args = _collapse_args(event.data.get("args") or {})
-            suffix = f" {args}" if args else ""
-            self._write(f"\n[tool] {event.data['tool_name']}{suffix}\n")
+            theme = self._theme
+            args = _collapse_args(event.data.get("args") or {}, sep=theme.sep())
+            line = ("\n" + theme.paint("accent", theme.glyph("pending"))
+                    + " " + theme.paint("accent", event.data["tool_name"]))
+            if args:
+                line += " " + theme.paint("muted", args)
+            self._write(line + "\n")
         elif event.type == TOOL_RESULT:
             self._render_result(event.data)
         elif event.type == RUN_COMPLETED:
@@ -183,10 +201,15 @@ class StreamRenderer:
         self._write(f"  {status}{suffix}\n")
         message = result.get("message") or ""
         lines = message.splitlines()
-        for line in lines[:_PREVIEW_LINES]:
-            self._write(f"  {line}\n")
-        if len(lines) > _PREVIEW_LINES:
-            self._write(f"  ... +{len(lines) - _PREVIEW_LINES} more lines\n")
+        visible, hidden = _preview_window(lines)
+        if hidden:
+            # hint 在保留行之前：隐藏的是"更早"的行（在上方），照抄 Pi keep="end"
+            # 的 [hint, ...lines] 顺序（pi-mono visual-truncate.ts，MIT）。
+            hint = (f"{self._theme.glyph('attach')} {self._theme.glyph('ellipsis')}"
+                    f" ({hidden} earlier lines)")
+            self._write("  " + self._theme.paint("muted", hint) + "\n")
+        for line in visible:
+            self._write("  " + self._theme.paint("muted", line) + "\n")
 
     def _end_delta(self) -> None:
         if self._delta_open:
@@ -194,22 +217,25 @@ class StreamRenderer:
             self._delta_open = False
 
 
-def _collapse_args(args: dict) -> str:
+def _collapse_args(args: dict, *, sep: str = " ") -> str:
     """一行折叠工具参数：key=value，字符串含空格才加引号；整体超限截断。
 
     折叠约定借鉴 oh-my-pi formatArgsInline（key=value 预算内联）；嵌套结构
     压成紧凑 JSON（本地快失败用不到嵌套语义，终端只要能认出调用形状）。
+    换行压平借鉴 oh-my-pi flattenForHeader（status-line.ts L28-32，MIT）：
+    调用方字段里的 \\r\\n|\\r|\\n 一律压成单个空格，保证状态行永远单行。
     """
     parts: list[str] = []
     for key, value in args.items():
         if isinstance(value, str):
-            text = f'"{value}"' if (" " in value or not value) else value
+            text = re.sub(r"\r\n?|\n", " ", value)  # flattenForHeader 思想（oh-my-pi，MIT）
+            text = f'"{text}"' if (" " in text or not text) else text
         elif isinstance(value, (dict, list)):
             text = json.dumps(value, ensure_ascii=False)
         else:
             text = str(value)
         parts.append(f"{key}={text}")
-    line = " ".join(parts)
+    line = sep.join(parts)
     if len(line) > _ARGS_LINE_LIMIT:
         line = line[:_ARGS_LINE_LIMIT] + "..."
     return line
@@ -1252,9 +1278,12 @@ def render_replay_event(event: SessionEvent) -> str | None:
     if event.type == TOOL_RESULT:
         content = str(data.get("content", ""))
         lines = content.splitlines() or [""]
-        preview = "\n".join(f"  │ {line}" for line in lines[:_PREVIEW_LINES])
-        more = "" if len(lines) <= _PREVIEW_LINES else f"\n  │ ... +{len(lines) - _PREVIEW_LINES} more lines"
-        return f"  → 结果（冻结）:\n{preview}{more}"
+        visible, hidden = _preview_window(lines)
+        preview = "\n".join(f"  │ {line}" for line in visible)
+        # hint 在前（隐藏的是更早的行，在上方；照抄 Pi keep="end" 的 [hint, ...lines]）。
+        # 本票只改取行方向与截断文案，`│` 前缀与外层标签及着色归 P0-8。
+        more = "" if not hidden else f"  │ … ({hidden} earlier lines)\n"
+        return f"  → 结果（冻结）:\n{more}{preview}"
     if event.type == RUN_FAILED:
         return f"[run 失败] {data.get('reason', 'unspecified')}"
     if event.type == RUN_PAUSED:
