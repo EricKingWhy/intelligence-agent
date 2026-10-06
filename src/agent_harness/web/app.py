@@ -2190,6 +2190,14 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         worktree_path: str | None = None
         cwd = req.cwd
         if cwd and req.on_conflict == "worktree":
+            # PRD WS6/WS7：cwd 格式校验先于租约检查，文案走 PRD 契约
+            # （`cwd 必须是绝对路径` / `目录不存在` / `不是目录`），不透传
+            # lease_paths 的通用文案。
+            from agent_harness.session.service import SessionService
+            try:
+                SessionService._resolve_cwd(cwd)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
             await state.ensure_stores()
             try:
                 dir_locked = await _is_dir_locked(state, cwd)
