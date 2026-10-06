@@ -77,6 +77,7 @@ from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import (
+    SUPPORTED_BACKENDS,
     SandboxUnavailableError,
     WorkspaceRegistry,
     probe_all_capabilities,
@@ -171,6 +172,16 @@ class _AmendValueValidators(BaseModel):
     未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
     （见 ``_validate_wired_context_providers``）。
     """
+
+    @field_validator("sandbox_backend", check_fields=False)
+    @classmethod
+    def _validate_sandbox_backend(cls, v: str | None) -> str | None:
+        # #363 / W-19：未知后端名在请求层响亮 422（registry 层 ValueError 是
+        # 第二道防线）。None = 未显式选择 ⇒ 部署默认。
+        if v is not None and v not in SUPPORTED_BACKENDS:
+            valid = ", ".join(SUPPORTED_BACKENDS)
+            raise ValueError(f"sandbox_backend must be one of: {valid}")
+        return v
 
     @field_validator("reasoning_effort", check_fields=False)
     @classmethod
@@ -558,7 +569,7 @@ class CreateSessionRequest(_AmendValueValidators):
     # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
     auto_approve: bool = False
     # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
-    # （当前 "local"，向后兼容）。未知值 → 422（registry 层响亮 ValueError）。
+    # （当前 "local"，向后兼容）。未知值 → 422（字段校验器响亮拒绝）。
     # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
     sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort

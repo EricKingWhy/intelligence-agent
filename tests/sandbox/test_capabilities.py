@@ -37,10 +37,21 @@ class TestSandboxBackendSelection:
         req = CreateSessionRequest(task="t")
         assert req.sandbox_backend is None
 
+    def test_request_rejects_unknown_backend_422(self):
+        """#363：未知后端名在请求层响亮 422（不漏到 registry 才炸）。"""
+        from pydantic import ValidationError
+
+        from agent_harness.web.app import CreateSessionRequest
+
+        with pytest.raises(ValidationError) as exc_info:
+            CreateSessionRequest(task="t", sandbox_backend="windows-sandbox")
+        assert "sandbox_backend must be one of" in str(exc_info.value)
+
     def test_request_rejects_unknown_field_still(self):
         """#363：extra=forbid 不变，未知字段仍响亮 422。"""
-        from agent_harness.web.app import CreateSessionRequest
         from pydantic import ValidationError
+
+        from agent_harness.web.app import CreateSessionRequest
 
         with pytest.raises(ValidationError):
             CreateSessionRequest(task="t", sandbox_backen="docker")  # typo
@@ -59,12 +70,11 @@ class TestProbeLocal:
 class TestProbeDocker:
     def test_docker_sdk_missing(self):
         """docker SDK 未安装 → 不可用，原因指明安装方式。"""
-        with patch.dict("sys.modules", {"docker": None}):
-            with patch(
-                "agent_harness.sandbox.capabilities._import_docker",
-                side_effect=ModuleNotFoundError("No module named 'docker'"),
-            ):
-                caps = probe_docker_capabilities()
+        with patch.dict("sys.modules", {"docker": None}), patch(
+            "agent_harness.sandbox.capabilities._import_docker",
+            side_effect=ModuleNotFoundError("No module named 'docker'"),
+        ):
+            caps = probe_docker_capabilities()
         assert caps.backend == "docker"
         assert caps.available is False
         assert caps.reason is not None and "SDK" in caps.reason
@@ -129,9 +139,8 @@ class TestRegistryBackendSelection:
         with patch(
             "agent_harness.sandbox.registry.probe_docker_capabilities",
             return_value=unavailable,
-        ):
-            with pytest.raises(SandboxUnavailableError) as exc_info:
-                registry.create("sess_4", backend="docker")
+        ), pytest.raises(SandboxUnavailableError) as exc_info:
+            registry.create("sess_4", backend="docker")
         # 关键断言：不是 LocalSubprocessSandbox，没有静默降级
         assert "docker" in str(exc_info.value).lower()
         assert not registry.exists("sess_4")
