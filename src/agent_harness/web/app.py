@@ -141,7 +141,12 @@ from agent_harness.web.serialization import (
     build_truncated_control,
 )
 from agent_harness.web.wire_safety import _safe_text
-from agent_harness.workspace import SqliteWorkspaceStore, WorkspaceIndex
+from agent_harness.workspace import (
+    SqliteLeaseStore,
+    SqliteWorkspaceStore,
+    WorkspaceIndex,
+    WorkspaceLeaseManager,
+)
 
 # Read-only catalog facts live with their router. Re-export them here for the
 # existing request validators and compatibility imports.
@@ -1001,6 +1006,10 @@ class AppState:
         self.workspace_index = WorkspaceIndex(
             SqliteWorkspaceStore(self.harness_db), self.store
         )
+        # W-10（#354）：单目录写入租约 + 持久 FIFO 队列（同 harness.db 的另 2 张
+        # 表）。presence 只读合同缺省 NoPresenceReader——W-12 在场登记落地后
+        # 由装配处替换真实现，本层绝不反向登记（拆 W-10 ↔ W-12 依赖环）。
+        self.lease_manager = WorkspaceLeaseManager(SqliteLeaseStore(self.harness_db))
         self._stores_lock = asyncio.Lock()
         self._stores_ready = False
         # Capability 装配：只在首次使用时执行（含 Memory / Skills / demo 等）。
@@ -1053,6 +1062,17 @@ class AppState:
             if not self._stores_ready:
                 await initialize_stores(self.stores)
                 await self.transport_ledger.initialize()
+                # W-10：租约/队列表 + 重启对账（与 Session 状态对齐；有效会话
+                # 的持有租约原样保留——租约不因重启释放，PRD §3）。
+                await self.lease_manager.initialize()
+                dropped = await self.lease_manager.reconcile_on_restart(
+                    set(self.store.list_session_ids())
+                )
+                if dropped:
+                    logging.getLogger("agent_harness.web").info(
+                        "lease reconcile dropped %d row(s) for deleted sessions",
+                        dropped,
+                    )
                 self._stores_ready = True
 
     @property
@@ -1633,6 +1653,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     from agent_harness.web.task_delivery import register_task_routes
 
     register_task_routes(app, validate_session_id=validate_session_id)
+
+    # W-06 / #350 进度文件重读对账路由（独立 router：对账状态查询 + 外部编辑
+    # 冲突两出口；对账单源在 session/progress.py，本模块只留一行接入面）
+    from agent_harness.web.progress_status import register_progress_routes
+
+    register_progress_routes(app, validate_session_id=validate_session_id)
+    # W-10 / #354 单目录写入租约路由（独立 router：状态/取得/释放/排队撤销；
+    # 语义单源在 workspace/lease.py，本模块只留一行接入面）
+    from agent_harness.web.task_lease import register_task_lease_routes
+
+    register_task_lease_routes(app, validate_session_id=validate_session_id)
 
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，

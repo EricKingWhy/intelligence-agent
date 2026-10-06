@@ -1,0 +1,1 @@
+2026-10-06	机械归属（先回后正）：e68d778e = Merge origin/main into codebuddy/354-w10-dir-lease，父一 aa5c653c（我方 #354 四笔，已有独立审查行）、父二 a1c3599e（main 侧 12 笔 = PR #721 #707 线，各有自己的归属行）。合并零冲突（12 笔全为 main 侧 docs/ledger 新增文件），我方代码零改动；合并树上 51 个 lease focused 测试全过。	aa5c653c..e68d778e

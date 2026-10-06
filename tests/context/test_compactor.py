@@ -603,17 +603,33 @@ async def test_list_system_prefix_without_early_turn_still_hits_hard_guard():
 
 
 @pytest.mark.asyncio
-async def test_summary_request_over_budget_keeps_projection_without_events(tmp_path):
+async def test_summary_request_over_budget_keeps_projection_with_diagnostic(tmp_path):
+    """摘要请求本身超 hard（预检拒绝）⇒ 保留投影 + 一条有界诊断，零压缩事件。
+
+    #639 阶段3a：此前该路径零事件（原用例名 "..._without_events"）；现在按
+    #647 的 attempt=0 纪律落一条 `preflight_request_exceeds_hard_limit` 诊断——
+    **非投影事件**，模型可见投影逐字节不变，仍无任何 bracket。
+    """
     session = make_session(tmp_path)
     session.append(USER_MESSAGE, {"content": "large " * 10000})
     session.append(MODEL_COMPLETED, {"content": "done"})
     session.append(USER_MESSAGE, {"content": "current"})
     model = ScriptedModel([])
     before = list(session.events)
+    original_projection = session.derive_messages()
     with pytest.raises(ContextWindowExceededError):
         await ContextBuilder(model, max_context_tokens=1000).build(session)
     assert model.snapshots == []
-    assert session.events == before
+    # 既有事件前缀不动；唯一新增是一条 attempt=0 的预检诊断。
+    assert session.events[:len(before)] == before
+    added = session.events[len(before):]
+    assert [event.type for event in added] == [CONTEXT_COMPACTION_FAILED]
+    assert added[0].data["attempt"] == 0
+    assert added[0].data["error_class"] == "preflight_request_exceeds_hard_limit"
+    # 非投影事件：模型可见投影逐字节不变；零 bracket。
+    assert session.derive_messages() == original_projection
+    assert not any(event.type in {COMPACTION_START, CONTEXT_COMPACTED, COMPACTION_END}
+                   for event in session.events)
 
 
 @pytest.mark.asyncio

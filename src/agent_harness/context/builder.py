@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
@@ -20,6 +21,7 @@ from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     ProtectedFact,
     derive_messages_with_source_ranges,
@@ -39,6 +41,14 @@ from agent_harness.session.event import (
     SessionEvent,
 )
 from agent_harness.session.plan import PlanState, derive_plan
+from agent_harness.session.progress import (
+    PROGRESS_VERIFY_OK,
+    PROGRESS_VERIFY_STALE,
+    derive_progress_document,
+    render_progress_brief_lines,
+    verify_progress_file,
+    write_progress_file,
+)
 
 logger = logging.getLogger("agent_harness.context")
 
@@ -124,6 +134,75 @@ _PLAN_EVENT_DRIVEN_WINDOW = 1
 #: `compactor._programmatic_summary_sections`），同名会让对照 build 产物与
 #: 摘要的消费方误判为同一来源。也避开 `_is_compaction_summary` 全部前缀。
 _MODIFIED_PATHS_BLOCK_HEADING = "## 最近修改文件"
+
+#: W-06（#350）：进度核对块标题。同样避开 `_is_compaction_summary` 全部前缀
+#: 与清单/文件块标题——ephemeral 块与持久化摘要绝不同形。
+_PROGRESS_BLOCK_HEADING = "## 任务进度核对（progress.md）"
+
+
+def _should_inject_progress(events: list[SessionEvent]) -> bool:
+    """W-06（#350）：进度核对块的注入判据——**纯事件推导**。
+
+    会话已发生过压缩（存在 COMPACTION_END）⇒ 注入：压缩接班后模型可见输入
+    必须含**经核对**的原目标/下一步（票面 AC「重启和压缩后」的耐久读法——
+    bracket 持久在事件流里，重启后重放同一判据成立，与 `_should_inject_plan`
+    的恒注入分支同构）。未经压缩的会话，原目标仍在完整投影历史里，不重复
+    注入（token 经济，同清单块的静默窗逻辑）。
+    """
+    return any(event.type == COMPACTION_END for event in events)
+
+
+def _render_progress_block(
+    doc, *, status: str,
+) -> str:
+    """进度核对块的确定性渲染——内容行逐字来自 `render_progress_brief_lines`。"""
+    lines = [_PROGRESS_BLOCK_HEADING]
+    if status == PROGRESS_VERIFY_OK:
+        lines.append(
+            "以下内容已与磁盘 progress.md 重读核对一致（经核对的原目标/下一步）："
+        )
+    else:
+        lines.append(
+            f"进度文件不可核对（{status}）；以下为 SessionEvent 投影，"
+            "不得凭记忆宣布任务完成："
+        )
+    lines.extend(render_progress_brief_lines(doc))
+    return "\n".join(lines)
+
+
+def _inject_progress_block(messages: list[AnyMessage], progress_text: str) -> list[AnyMessage]:
+    """把进度核对块作为一条 SystemMessage 注入（落点与清单块同形：第一条
+    压缩摘要之前；无摘要时开头连续 SystemMessage 之后）。只依赖 SystemMessage
+    分布，不会插进 AI(tool_calls)/ToolResult 配对中间。调用顺序在
+    `_inject_plan_block` 之后 ⇒ 最终顺序 = 清单 → 进度核对 → 摘要。"""
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
+            return [
+                *messages[:index], SystemMessage(content=progress_text),
+                *messages[index:],
+            ]
+    insertion = 0
+    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
+        insertion += 1
+    return [
+        *messages[:insertion], SystemMessage(content=progress_text),
+        *messages[insertion:],
+    ]
+#: #639 阶段 B：3a 预检拒绝的诊断分类（与 `compactor._SUMMARY_ERROR_CLASSES` 里的同名
+#: 词条一致；`attempt=0` 标记非摘要尝试）。thrashing guard 只认这一类。
+_PREFLIGHT_REJECTION_ERROR_CLASS = "preflight_request_exceeds_hard_limit"
+#: #639 阶段 B：连续这么多轮"以预检拒绝收尾"后，不再静默保留旧投影，升级为任务可见
+#: 失败（Claude Code "stops auto-compacting after a few attempts and shows an error
+#: instead of looping"，PORT DESIGN）。
+_THRASHING_GUARD_THRESHOLD = 3
+#: #639 阶段 B：thrashing guard 的显式失败文案（附中文恢复指引，三条）。
+_THRASHING_GUARD_MESSAGE = (
+    "Context compaction is thrashing: the summary request exceeded the hard guard "
+    f"on {_THRASHING_GUARD_THRESHOLD} consecutive rounds without making progress. "
+    "恢复指引：① 手动执行 /compact（可指定更小范围）；"
+    "② 调大 max_context_tokens 或放宽 hard_guard_threshold；"
+    "③ 把任务转交 subagent 分段处理。"
+)
 
 
 def _should_inject_plan(
@@ -323,6 +402,9 @@ class ContextBuilder:
         # W-31.5 (#417)：最近一次 build 实际注入的最近修改文件块成本（同清单
         # 锚块的记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
         self._last_modified_paths_tokens: int = 0
+        # W-06（#350）：最近一次 build 实际注入的进度核对块成本（同清单锚块的
+        # 记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
+        self._last_progress_tokens: int = 0
         # W-04 (#348)：最近一次 build 实际注入的接近硬护栏 warning 文本成本
         # （同清单锚块的记账口径：非持久化注入、独立记账口——warning 文本的
         # token 成本先计入 provider_estimate 再注入，usage_snapshot 折进 "other"）。
@@ -347,6 +429,50 @@ class ContextBuilder:
             )
         self._prune_decisions: dict[str, dict[int, str]] = {}
         self._last_prune_report: PruneReport | None = None
+        # #639 阶段 B：每会话"连续以预检拒绝收尾"的轮计数（thrashing guard）。
+        # 本实例跨 build 轮次存活、可能服务多个会话，故按 `session.session_id` 分会话
+        # 记——跨会话串计数是错的。成功压缩后 pop（等价 0，避免无界增长）。
+        self._preflight_rejection_streaks: dict[str, int] = {}
+
+    async def _resolve_progress_block(self, session: Session) -> tuple[str | None, int]:
+        """W-06（#350）：压缩后进度核对块（磁盘重读对账 + 落后自愈）。
+
+        判据纯事件推导（`_should_inject_progress`）；内容从磁盘 progress.md
+        **重读核对**后取投影——status=ok 时文件与投影逐字节一致，注入经核对
+        的原目标/下一步；否则注入"进度文件不可核对（原因）"+ SessionEvent
+        投影（模型不得凭记忆宣布完成）。无 cwd 锚（进度文件机制不适用）⇒
+        不注入。注入文本是 ephemeral 块：不落事件、不进 derive_messages。
+
+        「压缩之后」重读点的自愈语义：bracket 三事件落盘使事件流前进，文件
+        随即落后（stale = 服务端最后一次写入、只是没跟上，**不是**外部编辑
+        ——classify 已排除 external）。此时 best-effort 调 `write_progress_file`
+        从投影刷新（幂等原子写，不追加事件）再复核对账——刷新失败则如实
+        注入"不可核对"，绝不把 stale 文件说成已核对。
+        """
+        if not _should_inject_progress(session.events):
+            return None, 0
+        cwd = session_cwd(session.events)
+        if not cwd or not Path(cwd).is_dir():
+            return None, 0
+        doc = derive_progress_document(session.events, session_id=session.session_id)
+        verification = verify_progress_file(cwd, session.session_id, session.events)
+        if verification.status == PROGRESS_VERIFY_STALE:
+            try:
+                outcome = write_progress_file(
+                    cwd, session.session_id, session.events,
+                )
+            except Exception:
+                logger.warning(
+                    "压缩后进度文件刷新失败（session=%s）——按不可核对注入",
+                    session.session_id, exc_info=True,
+                )
+            else:
+                if outcome.ok:
+                    verification = verify_progress_file(
+                        cwd, session.session_id, session.events,
+                    )
+        text = _render_progress_block(doc, status=verification.status)
+        return text, estimate_message_tokens([SystemMessage(content=text)])
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
@@ -492,6 +618,11 @@ class ContextBuilder:
         )
         token_estimate += paths_tokens
         self._last_modified_paths_tokens = paths_tokens
+        # W-06（#350）：进度核对块决策与成本（先计入再走阈值判定——注入了就
+        # 计数，不计数 = 系统性低估，同清单块教训）。
+        progress_text, progress_tokens = await self._resolve_progress_block(session)
+        token_estimate += progress_tokens
+        self._last_progress_tokens = progress_tokens
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
@@ -502,6 +633,8 @@ class ContextBuilder:
             built = self._inject_runtime_context(built, runtime_context)
             if plan_text is not None:
                 built = _inject_plan_block(built, plan_text)
+            if progress_text is not None:
+                built = _inject_progress_block(built, progress_text)
             if paths_text is not None:
                 built = _inject_modified_paths(built, paths_text)
             return self._prepend_system_prompt(built)
@@ -543,6 +676,11 @@ class ContextBuilder:
             if paths_text is not None else 0
         )
         self._last_modified_paths_tokens = paths_tokens
+        # W-06（#350）：落 bracket 后重估进度核对块——本次 build 可能恰好触发
+        # 首次压缩，判据必须在 bracket 事件在场的前提下重估（压缩后模型输入含
+        # 经核对的原目标/下一步）。
+        progress_text, progress_tokens = await self._resolve_progress_block(session)
+        self._last_progress_tokens = progress_tokens
         # 压缩后的 token_estimate 只含 messages；所有在 messages 之外的上下文
         # （system prompt、运行时快照、保护事实与计划锚块）在 provider 预算中各补回一次。
         reserved_tokens = (
@@ -551,6 +689,7 @@ class ContextBuilder:
             + runtime_context_tokens
             + plan_tokens
             + paths_tokens
+            + progress_tokens
         )
         # 硬护栏复核只对**确已压缩**的路径生效（no-op 沿用原投影，不在此拒）。
         recheck = compacted_token_estimate + protected_facts_tokens
@@ -584,6 +723,8 @@ class ContextBuilder:
         built = self._inject_runtime_context(built, runtime_context)
         if plan_text is not None:
             built = _inject_plan_block(built, plan_text)
+        if progress_text is not None:
+            built = _inject_progress_block(built, progress_text)
         if paths_text is not None:
             built = _inject_modified_paths(built, paths_text)
         if pressure_tokens:
@@ -766,8 +907,18 @@ class ContextBuilder:
             raise
         self._record_compaction_failures(session, result.failures)
         if not result.compacted_turn_count:
+            # #639 阶段 B：连续预检拒绝达阈值 ⇒ 不再静默保留旧投影，经 #348 既有
+            # 通道显式失败（failures 已由上一行落盘），run 走非终态暂停。未达阈值
+            # 的轮：行为与加 B 前逐字节一致（只增内部计数，不产生事件/不改返回）。
+            if self._note_preflight_rejection(session, result.failures):
+                raise ContextWindowExceededError(
+                    _THRASHING_GUARD_MESSAGE,
+                    failures=result.failures,
+                )
             # 低水位 / 无可压缩早期轮 / 双失败安全继续：**零 bracket 写入**。
             return None
+        # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
+        self._preflight_rejection_streaks.pop(session.session_id, None)
         if not result.summary or not result.bracket_id:
             raise ContextWindowExceededError(
                 "Refusing to persist an unvalidated compaction summary"
@@ -795,6 +946,9 @@ class ContextBuilder:
                 "compacted_turn_count": result.compacted_turn_count,
                 "token_estimate": result.token_estimate,
                 "fallback_used": result.fallback_used,
+                # #639 阶段 A：成功走缩小 early 段的 marker（默认 False ⇒ 既有路径
+                # 逐字节等价）。这是本次唯一新增的事件键。
+                "narrowed": result.narrowed,
                 "bracket_id": bracket_id,
                 "summary_model_id": result.summary_model_id,
                 "duration_ms": result.duration_ms,
@@ -898,7 +1052,33 @@ class ContextBuilder:
                 "duration_ms": failure.duration_ms,
                 "request_token_estimate": failure.request_token_estimate,
                 "request_budget_tokens": failure.request_budget_tokens,
+                # #639：预检拒绝是否发生在缩小段判定（阶段 A）；其余诊断默认假值。
+                "narrowed": failure.narrowed,
             })
+
+    def _note_preflight_rejection(
+        self, session: Session, failures: list[CompactionFailure],
+    ) -> bool:
+        """#639 阶段 B：登记一次"以预检拒绝收尾"的轮，返回是否达 thrashing 阈值。
+
+        判据（一轮一次，不按诊断条目数计）：本轮 `failures` **全部**是 3a 预检诊断
+        （`attempt=0` + `preflight_request_exceeds_hard_limit`）——即有且仅有一次增。
+        A 的缩小重试也失败时该轮有两条诊断（全段 + 缩小段），仍只 +1。摘要尝试
+        失败的轮（双失败安全继续）`failures` 含 `attempt>=1` 条目，说明本轮并非停在
+        预检，不增不减。
+
+        达到阈值后**不清零**（调用方抛显式失败）：恢复后若下一轮仍拒绝，继续显式
+        失败，不再退回静默。
+        """
+        if not failures or not all(
+            failure.attempt == 0
+            and failure.error_class == _PREFLIGHT_REJECTION_ERROR_CLASS
+            for failure in failures
+        ):
+            return False
+        streak = self._preflight_rejection_streaks.get(session.session_id, 0) + 1
+        self._preflight_rejection_streaks[session.session_id] = streak
+        return streak >= _THRASHING_GUARD_THRESHOLD
 
     def _reproject(self, session: Session) -> list[AnyMessage]:
         """从已持久化的事件重算模型可见投影（W-04 重投影确认的读数来源）。
@@ -1147,7 +1327,8 @@ class ContextBuilder:
                  + self._last_plan_tokens
                  + self._last_protected_fact_tokens
                  + self._last_modified_paths_tokens
-                 + self._last_pressure_warning_tokens)
+                 + self._last_pressure_warning_tokens
+                 + self._last_progress_tokens)
         return {
             "messages": messages_tokens,
             "system_prompt": system_prompt_tokens,
