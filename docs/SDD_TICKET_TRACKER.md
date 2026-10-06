@@ -7400,3 +7400,14 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   - P4-2（Standards）：escape 与 unescape 两个检查点仅由同一条用例覆盖（M2=M3 共用失败面）。
 - **台账行**：`docs/review_ledger.d/t649-heading-parse-8d43e786-09a366c1.tsv`（749 字符 ≤ 800，无 lint 命中）；覆盖闸门 `scripts/check_review_coverage.py` **exit 0**（区间 `089524a~1..HEAD` 每条 commit 均有归属）。
 - **集成状态**：分支已 push（PR #697；`e5085f49` 审查归属 + `3247c484` 空 trigger 笔）。**CI 阻塞（待用户裁决，§9.1.1 / §14.7）**：origin/main 已前移（PR #696/#686 → `4a2c52f8`），与本分支在 `docs/SDD_TICKET_TRACKER.md` + `docs/phase_status/2026-10.md` **双侧追加同段冲突**（`git merge-tree --write-tree HEAD origin/main` 实测恰这 2 文件 CONFLICT，双侧均为末尾追加节；`compactor.py` ort 自动合并无冲突）。**GitHub 官方文档：PR 有 merge conflict 时 `pull_request` 工作流不运行**——两次 push（`e5085f49` / `3247c484`）实测零 gate0 run、check-suites 仅 push 侧 security ⇒ gate0 无法重跑。本地证据：台账行落盘后 `check_review_coverage.py` **exit 0**；上轮 CI gate0 **5/6、唯一红 = coverage**（即本行所修）。最小出路 = 经批准先回后正（merge origin/main 进分支，两 docs 文件按 §14.7 并集解决、零删除）；合并树需按 §14.10 重新验证（main 侧 #650 同动 `compactor.py`，auto-merge ≠ 语义无交互）。merge / 关单待用户单独批准（§14.4）。
+
+## #708 裁剪决策重放语义——裁决 B（文档化 + 钉语义）（2026-10-06；分支 `fix/i708-prune-replay-consistency`，基点 `6a79900b` = origin/main；用户裁定 B 后实施；push/PR/merge 逐项待批）
+
+- **裁定过程**：先只读 A/B 影响分析（票面 ready-for-human）→ 票上裁定请求（分歧机制精确化：唯一跨 build 消费者 = 看板 usage_snapshot；#348 比对同 build 同源不误报复核成立；推荐 B，OpenHands Condensation 重放按账为同构主流语义）→ **用户裁定 B**（票内确认评论，2026-10-06）。
+- **施工（`ace1481c`，注释口径 + 1 钉用例，零行为改动）**：builder 三处——#348 fail-closed 比对区补"决策与投影同 build 同源、比对不存在跨 build 分歧窗口"；`_reproject` docstring 补"重放 = 按落账时点决策、不做当前可见性复核；本方法只在 build 末尾消费"；`usage_snapshot` docstring 补"重放语义 = 按落账时点决策，读数含义 = 截至最近一次 build 的状态，偏差有界一个 build 周期、下次 build 重算自纠（新到未裁 ⇒ 偏高安全方向；投影变化使旧决策与 fresh 口径分歧 ⇒ 偏低）"。
+- **pruner 两处口径修正**（:22 模块 docstring 与 :65-67 SKIP_PROTECTED_REFERENCE）："main 上恒空 / 唯一写入者"改为实测口径——集合非空，写入者 4 处（resume dangling 修复指向 TOOL_CALL id、task 验收修订/接受、OPERATION_RECONCILED），均不引用 tool/result 事件 id ⇒ 对候选恒不触发。
+- **钉用例**（`tests/context/test_builder_prune.py::test_usage_snapshot_replays_recorded_decisions_until_next_build`）：build1 落决策（裁 c1）→ 追加 c3（fresh 口径该裁 c2）→ 下次 build 前读看板仍按 build1 决策重放（= `_expected_pruned_total` 对照、> fresh 口径）→ 下次 build 重算自纠（决策含 c2、读数收敛）。
+- **变异鉴别（§8.1，仓外副本）**：git archive @`ace1481c`^（提交笔 8921bd44 内容同）树外副本把 usage_snapshot 重放决策表改为空（CRLF 探测 1148 对、anchor 命中 = 1）⇒ 钉用例转红（同路径 2 个既有 usage_snapshot 守卫同红，失败面归因明确）；未变异树 focused 60 passed。
+- **测试**：test_builder_prune + test_pruner + test_pruner_shadow_survivor + test_context_usage **60 passed**；三文件 ruff 0。
+- **台账**：`docs/review_ledger.d/t708-prune-replay-doc-6a79900b-ace1481c.tsv`（210 字符）；覆盖闸门 exit 0；金丝雀 4 passed。
+- **集成状态**：Gate-0、双轴审查、先回后正、冻结树全量门禁待跑（读数后补记）；push / PR / merge 逐项待批（§14.4）；关单时移除 in-progress（§14.12）。
