@@ -230,17 +230,22 @@ def _check_manifest_shape(raw: object) -> str | None:
     return None
 
 
-def _parse_manifest(raw: dict) -> EvidenceManifest | None:
-    """投影侧 manifest 解析：非法 → None（投影跳过该事件）。"""
-    if _check_manifest_shape(raw) is not None:
-        return None
-    return EvidenceManifest(
-        files=tuple(
-            EvidenceFile(path=entry["path"], sha256=entry["sha256"])
-            for entry in raw["files"]
+def _parse_manifest(raw: object) -> tuple[EvidenceManifest | None, str | None]:
+    """投影侧 manifest 解析 → ``(manifest, None)``；非法 → ``(None, 具体原因)``。"""
+    error = _check_manifest_shape(raw)
+    if error is not None:
+        return None, error
+    assert isinstance(raw, dict)
+    return (
+        EvidenceManifest(
+            files=tuple(
+                EvidenceFile(path=entry["path"], sha256=entry["sha256"])
+                for entry in raw["files"]
+            ),
+            manifest_hash=raw["manifest_hash"],
+            progress_md_sha256=raw.get("progress_md_sha256"),
         ),
-        manifest_hash=raw["manifest_hash"],
-        progress_md_sha256=raw.get("progress_md_sha256"),
+        None,
     )
 
 
@@ -288,9 +293,9 @@ def _parse_record(data: dict | None) -> tuple[EvidenceRecord | None, str | None]
     base_head = data.get("base_head")
     if base_head is not None and not _is_hex(base_head, _BASE_HEAD_HEX_LEN):
         return None, "base_head 必须是 40 位 hex（git rev-parse HEAD）或 None"
-    manifest = _parse_manifest(data.get("workspace_manifest"))
+    manifest, manifest_error = _parse_manifest(data.get("workspace_manifest"))
     if manifest is None:
-        return None, _manifest_error(data.get("workspace_manifest"))
+        return None, manifest_error
     return EvidenceRecord(
         evidence_id=data["evidence_id"],
         task_session_id=data["task_session_id"],
@@ -309,23 +314,15 @@ def _parse_record(data: dict | None) -> tuple[EvidenceRecord | None, str | None]
     ), None
 
 
-def _manifest_error(raw: object) -> str:
-    """workspace_manifest 非法的具体原因（写侧"保存失败时显示缺项"）。"""
-    reason = _check_manifest_shape(raw)
-    return reason if reason is not None else "workspace_manifest 非法"
-
-
 def _check_shape(evidence: dict, session) -> str | None:
     """写侧形状校验：合法返回 None，否则返回拒绝原因（零事件）。
 
-    判据：未知顶层键拒绝（闭合 DTO，防调用方笔误静默持久化）；
+    判据：未知顶层键拒绝（闭合 DTO，防调用方笔误静默持久化——判据实现只在
+    ``_parse_record`` 一处，错误文案不写两份）；
     task_session_id 必须等于本会话 id（防跨会话证据污染）；
     criterion_id 必须在当前任务清单里（apply_verification 同判据）；
     manifest 复用同一套嵌套校验（含 progress.md 禁入覆盖集）。
     """
-    unknown = set(evidence) - _EVIDENCE_FIELD_NAMES
-    if unknown:
-        return f"未知字段：{sorted(unknown)}（14 字段 DTO 是闭合的）"
     _, error = _parse_record(evidence)
     if error is not None:
         return error

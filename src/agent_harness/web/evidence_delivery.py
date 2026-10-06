@@ -96,14 +96,19 @@ def register_evidence_routes(
             raise http_error(e) from e
         _evidence_http_error(outcome)
         # POST 与 GET 同口径：返回的 record 带 freshness（读取时求值），
-        # 客户端拿到的陈旧标识与刷新后一致。
+        # 客户端拿到的陈旧标识与刷新后一致。record 成功 ⇒ 任务已定义，
+        # evidence_state 不可能回 None（None 分支是 fail-closed 的 loud 处理）。
         projection = await service.evidence_state(session_id)
+        if projection is None:
+            raise HTTPException(
+                status_code=500,
+                detail="证据已记录但投影重建失败（内部不一致，请重试或上报）",
+            )
         recorded: dict = {}
-        if projection is not None:
-            for item in projection["by_criterion"].get(
-                req.evidence.get("criterion_id"), ()
-            ):
-                if item.get("evidence_id") == req.evidence.get("evidence_id"):
-                    recorded = item
-                    break
+        for item in projection["by_criterion"].get(
+            req.evidence.get("criterion_id"), ()
+        ):
+            if item.get("evidence_id") == req.evidence.get("evidence_id"):
+                recorded = item
+                break
         return {"status": "recorded", "record": recorded}
