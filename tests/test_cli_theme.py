@@ -42,6 +42,17 @@ def clean_env(monkeypatch):
     return monkeypatch
 
 
+@pytest.fixture
+def posix_env(clean_env, monkeypatch):
+    """钉 Unix 查表分支：os.name 必须钉——Windows 宿主上规则 6 按 build 号短路
+    返回 truecolor/color256，规则 7 的 TERM/COLORTERM 查表不可达（与
+    TestWindowsGrading.win_env 同理反向）。宿主 TERM（Git Bash 继承的
+    xterm-256color）一并清除，防泄漏进未显式 setenv 的参数化用例。"""
+    monkeypatch.setattr(os, "name", "posix")
+    clean_env.delenv("TERM", raising=False)
+    return clean_env
+
+
 class TestNoColor:
     def test_no_color_set_yields_nocolor(self, clean_env):
         clean_env.setenv("NO_COLOR", "1")
@@ -49,9 +60,9 @@ class TestNoColor:
         assert theme.color == "nocolor"
         assert Theme(color="nocolor").paint("err", "x") == "x"
 
-    def test_no_color_empty_string_does_not_trigger(self, clean_env):
-        clean_env.setenv("NO_COLOR", "")
-        clean_env.setenv("TERM", "xterm")
+    def test_no_color_empty_string_does_not_trigger(self, posix_env):
+        posix_env.setenv("NO_COLOR", "")
+        posix_env.setenv("TERM", "xterm")
         theme = detect_theme(_FakeStdout(tty=True))
         assert theme.color == "ansi16"
 
@@ -68,8 +79,8 @@ class TestNoColor:
 
 
 class TestGlyphSetAxis:
-    def test_ascii_encoding_probes_to_ascii_glyphs(self, clean_env):
-        clean_env.setenv("TERM", "xterm-256color")
+    def test_ascii_encoding_probes_to_ascii_glyphs(self, posix_env):
+        posix_env.setenv("TERM", "xterm-256color")
         theme = detect_theme(_FakeStdout(encoding="ascii", tty=True))
         assert theme.glyph_set == "ascii"
         assert theme.glyph("fail") == "[!!]"
@@ -97,9 +108,9 @@ class TestColorAxisPriority:
         assert theme.color == "nocolor"
 
     @pytest.mark.parametrize("term", ["dumb", ""])
-    def test_dumb_or_empty_term_yields_nocolor(self, clean_env, term):
+    def test_dumb_or_empty_term_yields_nocolor(self, posix_env, term):
         if term:
-            clean_env.setenv("TERM", term)
+            posix_env.setenv("TERM", term)
         theme = detect_theme(_FakeStdout(tty=True))
         assert theme.color == "nocolor"
 
@@ -112,22 +123,22 @@ class TestColorAxisPriority:
 class TestTermTable:
     """TERM/COLORTERM 查表分级（防"一律真彩"回归，2026-10-06 challenge 新增）。"""
 
-    def test_xterm_256color_yields_color256(self, clean_env):
-        clean_env.setenv("TERM", "xterm-256color")
+    def test_xterm_256color_yields_color256(self, posix_env):
+        posix_env.setenv("TERM", "xterm-256color")
         assert detect_theme(_FakeStdout(tty=True)).color == "color256"
 
-    def test_colorterm_truecolor_yields_truecolor(self, clean_env):
-        clean_env.setenv("TERM", "xterm")
-        clean_env.setenv("COLORTERM", "truecolor")
+    def test_colorterm_truecolor_yields_truecolor(self, posix_env):
+        posix_env.setenv("TERM", "xterm")
+        posix_env.setenv("COLORTERM", "truecolor")
         assert detect_theme(_FakeStdout(tty=True)).color == "truecolor"
 
-    def test_plain_xterm_yields_ansi16_not_truecolor(self, clean_env):
+    def test_plain_xterm_yields_ansi16_not_truecolor(self, posix_env):
         """TERM=xterm → ansi16（旧规则会给出 truecolor，此断言锁死新行为）。"""
-        clean_env.setenv("TERM", "xterm")
+        posix_env.setenv("TERM", "xterm")
         assert detect_theme(_FakeStdout(tty=True)).color == "ansi16"
 
-    def test_screen_256color_yields_color256(self, clean_env):
-        clean_env.setenv("TERM", "screen-256color")
+    def test_screen_256color_yields_color256(self, posix_env):
+        posix_env.setenv("TERM", "screen-256color")
         assert detect_theme(_FakeStdout(tty=True)).color == "color256"
 
 
