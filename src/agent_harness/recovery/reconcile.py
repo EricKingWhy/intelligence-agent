@@ -58,7 +58,7 @@ class RecoveryAdjudicationToken:
 
 
 class ReconcileVerdict(str, Enum):
-    """用户对 UNKNOWN Operation 的四种显式裁决（07 §6/§7）。
+    """用户对 UNKNOWN Operation 的五种显式裁决（07 §6/§7 + #357 W-13）。
 
     RETRY 只能来自用户裁决：协调器任何自动路径都不得产生 retryable=True 的
     恢复结果（不变量 #14——UNKNOWN 高风险副作用不盲重跑）。
@@ -68,6 +68,10 @@ class ReconcileVerdict(str, Enum):
     CONFIRM_FAILURE = "CONFIRM_FAILURE"  # 副作用已确认失败/未达预期 → FAILED
     RETRY = "RETRY"  # 用户知情选择重跑：原调用终止，模型重新发起新 tool_call
     ABANDON = "ABANDON"  # 用户放弃：显式取消，不重跑
+    # #357 W-13（修订 A §9.4-3）：用户暂缓决定。与 ABANDON 相反——不结束调用：
+    # Ledger 保持 NEED_RECONCILE（pending，可稍后重新裁决），只落 reconcile_meta
+    # 审计，不合成终态 tool/result。仍出现在后续 pending_decisions。
+    DEFER = "DEFER"
 
 
 class ReconcileCallback(ABC):
@@ -84,3 +88,12 @@ class ReconcileCallback(ABC):
         self, operation: Operation, hint: ReconcileHint
     ) -> ReconcileVerdict:
         """对一个 NEED_RECONCILE 的 Operation 返回用户的显式裁决。"""
+
+    def source_for(self, operation: Operation) -> str | None:
+        """本次裁决的用户来源自陈（#357 W-13 契约 3），默认 None。
+
+        非抽象可选端口（#547 合同只做加法）：只实现 ``resolve`` 的既有子类
+        零迁移。仅当用户给出来源时返回非 None——协调器把有值的来源写进
+        ``reconcile_meta``；绝不伪造自动验证字段。
+        """
+        return None

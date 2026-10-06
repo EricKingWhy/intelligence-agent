@@ -53,6 +53,7 @@ SESSION_SERVICE_COLLABORATORS = frozenset({
     "validate_session_declaration",
     "budget_recovery_failed_sessions",
     "registered_tool_names",
+    "reconcile_info",
 })
 
 PROJECT_SERVICE_COLLABORATORS = frozenset({

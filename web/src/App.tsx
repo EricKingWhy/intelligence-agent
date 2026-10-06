@@ -27,6 +27,8 @@ import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
+import { RecoveryListPanel } from './components/RecoveryListPanel';
 import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
@@ -58,6 +60,7 @@ import {
   getSandboxBackends,
   type CatalogEntry,
   type ModelCatalogEntry,
+  type PendingDecision,
   type SandboxBackendEntry,
   type StartSessionPayload,
 } from './lib/api';
@@ -122,6 +125,7 @@ export default function App() {
     setArchived,
     recover,
     resumePausedRun,
+    submitDecisions,
     refreshSessions,
     changeModel,
     changePermission,
@@ -889,6 +893,16 @@ export default function App() {
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
+  // #357 W-13：恢复列表浮层（顶栏 历史 按钮入口；只读，先列后继续）。
+  const [recoveryListOpen, setRecoveryListOpen] = useState(false);
+  /** #357 W-13：用户收起裁决面板时记住**那一份**清单的引用（按引用判等，见下）。
+   *  新的 409 会带来新数组 ⇒ 面板重新弹出；同一份清单在提交失败后重渲时保持收起态。 */
+  const [dismissedDecisions, setDismissedDecisions] = useState<PendingDecision[] | null>(null);
+  // #357 W-13：裁决面板的可见性——只由后端 409 载荷驱动（不变量 #22）。用户 Esc/关闭
+  // 只收起**当前这一份**清单（按引用判等），新的 409 会带来新数组而重新弹出。
+  const pendingDecisions = recoverState.pendingDecisions;
+  const showDecisionPanel =
+    pendingDecisions !== null && pendingDecisions.length > 0 && pendingDecisions !== dismissedDecisions;
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1096,6 +1110,7 @@ export default function App() {
         authRequired={authRequired}
         onOpenMemories={() => setMemoriesOpen(true)}
         onOpenApprovePolicy={() => setApprovePolicyOpen(true)}
+        onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
       />
@@ -1217,6 +1232,22 @@ export default function App() {
                 stillDangling: recoverState.stillDangling,
               })}
             </div>
+          )}
+          {/* #357 W-13：UNKNOWN 裁决面板（修订 A §9.4）——由后端 409 的
+              `pending_decisions` 驱动，提交走 useSession.submitDecisions（同一 #547
+              合同）。全部由后端载荷构成，App 不维护第二套裁决真相（不变量 #22）。
+              放在 canRecover 门**外**：裁决在途时入口仍应可见。 */}
+          {showDecisionPanel && pendingDecisions && (
+            <RecoveryDecisionPanel
+              key={pendingDecisions.map((d) => d.tool_call_id).join('|')}
+              decisions={pendingDecisions}
+              submitting={recoverState.status === 'pending'}
+              message={recoverState.message}
+              onSubmit={(payload) => {
+                if (selectedId) void submitDecisions(selectedId, payload);
+              }}
+              onClose={() => setDismissedDecisions(pendingDecisions)}
+            />
           )}
           {conversation?.run_interrupted && !streaming && (
             <div className="interrupt-banner" role="status" aria-live="polite">
@@ -1382,6 +1413,16 @@ export default function App() {
         }}
       />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #357 W-13：恢复列表浮层（顶栏 历史 入口）。只读列表；「继续」= 打开该会话，
+          恢复仍走会话内既有恢复链路（不新增恢复编排）。 */}
+      <RecoveryListPanel
+        open={recoveryListOpen}
+        onOpenChange={setRecoveryListOpen}
+        onResume={(sid) => {
+          setRecoveryListOpen(false);
+          void selectSession(sid);
+        }}
+      />
       {/* #684 Phase 2：持久审批规则管理（TopBar Shield 入口；只读 + 二次确认撤销）。 */}
       <ApprovePolicyPanel
         open={approvePolicyOpen}

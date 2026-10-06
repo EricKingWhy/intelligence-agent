@@ -82,6 +82,11 @@ class ReadArtifactTool(Tool):
             suggested_action="重新执行同样的 read_artifact 调用，核对返回的行内容是否一致（只读操作，重跑安全）。",
         )
 
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：重复回读同一产物无外部副作用（#357 契约 7）。
+        return True
+
     async def execute(self, args: _ReadArgs) -> ToolResult:
         try:
             result = await self._store.inspect(

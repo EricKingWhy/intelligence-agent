@@ -922,6 +922,46 @@ class ProgressFieldDiff:
     actual: str | None    # 磁盘文件侧；无法安全呈现时为 None（整段省略）
 
 
+def read_progress_file_version(
+    root: Path | str, session_id: str
+) -> dict[str, Any]:
+    """读 progress.md 头部版本（``schema_version`` + ``source_event_seq``）。
+
+    #357 W-13（契约 5 / R6）：恢复列表行的"进度文件版本"四要素之一——
+    **纯读、零副作用**，与 ``verify_progress_file`` 同源解析（``_parse_progress_body``）
+    但**不做**投影对账（恢复列表只回答"文件自报的版本"，不判新旧）。
+
+    返回两种互斥形状：
+    - 可读且头合法：``{"schema_version": str, "source_event_seq": int}``；
+    - 缺失/不可读/头非法：``{"status": "missing" | "unreadable" |
+      "invalid_schema", "reason": str}``——**如实标注，不伪造"最新"**。
+    """
+    paths = progress_paths(root, session_id)
+    try:
+        body = paths.markdown.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"status": "missing", "reason": "进度文件不存在"}
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"status": "unreadable", "reason": str(exc)}
+    header, _sections = _parse_progress_body(body)
+    if header.get("schema_version") != PROGRESS_SCHEMA_VERSION:
+        return {
+            "status": "invalid_schema",
+            "reason": f"schema_version 不匹配：{header.get('schema_version')!r}",
+        }
+    raw_seq = header.get("source_event_seq")
+    try:
+        file_seq = int(raw_seq) if raw_seq is not None else None
+    except ValueError:
+        file_seq = None
+    if file_seq is None:
+        return {
+            "status": "invalid_schema",
+            "reason": f"source_event_seq 缺失或非法：{raw_seq!r}",
+        }
+    return {"schema_version": PROGRESS_SCHEMA_VERSION, "source_event_seq": file_seq}
+
+
 @dataclass(frozen=True)
 class ProgressVerification:
     """verify_progress_file 的结果（确定状态机，见各 PROGRESS_VERIFY_* 常量）。"""

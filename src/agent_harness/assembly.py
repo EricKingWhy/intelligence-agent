@@ -73,7 +73,12 @@ from agent_harness.storage.artifact_select import select_artifact_store
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
-from agent_harness.tooling.contract import PermissionPolicy, ToolExposure, exposure_of
+from agent_harness.tooling.contract import (
+    PermissionPolicy,
+    ToolExposure,
+    ToolReconcileInfo,
+    exposure_of,
+)
 from agent_harness.tooling.exposure import ToolExposureController, ToolSearchTool
 from agent_harness.tooling.overflow import ArtifactOverflowHandler
 from agent_harness.tooling.permission_rules import default_rule_set
@@ -435,6 +440,51 @@ def root_registry_tool_names(
             continue
         names.add(capability_tool.name)
     return frozenset(names)
+
+
+def _tool_reconcile_info(tool: Tool) -> ToolReconcileInfo:
+    """Tool 实例/裸构造 → 恢复裁决呈现元数据（属性逐字快照，不执行任何方法）。"""
+    hint = tool.reconcile_hint
+    return ToolReconcileInfo(
+        replay_safe=tool.replay_safe,
+        verifiable=hint.verifiable,
+        suggested_action=hint.suggested_action,
+    )
+
+
+def root_registry_reconcile_info(
+    settings: Settings,
+    wiring: CapabilityWiring,
+    *,
+    session_id: str,
+    session_store: JsonlSessionStore | None,
+) -> dict[str, ToolReconcileInfo]:
+    """根 registry 恢复裁决呈现元数据的**零副作用**计算（#357 W-13 §2.4）。
+
+    与 ``root_registry_tool_names`` 逐分支同构（名字集的对账测试同型钉住）：
+    本地工具"构造器只存依赖"（传 ``None`` 读类属性），capability 工具在
+    wiring 里已是实例——**不实例化 sandbox、不 mkdir**（审查 P2-1 同款取舍）。
+    消费点：``_reconcile_pending`` 产出 ``default_action/risk_level/probe``
+    只读展示字段；判据与真实工具面漂移即红灯
+    （``tests/test_assembly_root_registry_names.py``）。
+    """
+    info: dict[str, ToolReconcileInfo] = {}
+    for tool_cls in BUILTIN_LOCAL_TOOLS:
+        tool = tool_cls(None)
+        info[tool.name] = _tool_reconcile_info(tool)
+    update_plan = UpdatePlanTool()
+    info[update_plan.name] = _tool_reconcile_info(update_plan)
+    selection = select_artifact_store(settings, session_id)
+    if selection is not None:
+        read_tool = selection.read_tool(None)
+        info[read_tool.name] = _tool_reconcile_info(read_tool)
+    for capability_tool in wiring.tools:
+        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
+        # 与 `root_registry_tool_names` 的同名分支逐字同判（两边必须一致）。
+        if isinstance(capability_tool, DelegateTool) and session_store is None:
+            continue
+        info[capability_tool.name] = _tool_reconcile_info(capability_tool)
+    return info
 
 
 async def build_runtime(

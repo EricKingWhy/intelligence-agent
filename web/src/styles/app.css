@@ -1038,7 +1038,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 
 .project-dialog,
 .memory-panel,
-.provider-dialog {
+.provider-dialog,
+.recovery-list-panel {
   position: fixed;
   left: 50%;
   top: 50%;
@@ -1071,7 +1072,8 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
 .project-dialog[data-state='closed'],
-.memory-panel[data-state='closed'] {
+.memory-panel[data-state='closed'],
+.recovery-list-panel[data-state='closed'] {
   animation: palette-out var(--dur-out) var(--ease-apple);
 }
 .project-dialog-head {

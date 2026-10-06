@@ -28,6 +28,21 @@ from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ToolResult
 
 
+class ToolReconcileInfo(BaseModel):
+    """一个工具名的恢复裁决呈现元数据——`Tool` 契约元数据的**零副作用投影**。
+
+    #357 W-13（契约 1/6/7）：恢复裁决 UI 的 ``default_action`` / ``probe``
+    只读展示字段由它驱动。字段是工具类属性的逐字快照（``replay_safe`` /
+    ``reconcile_hint``），不携带任何"已查到/未查到"的外部事实结论——那由
+    用户核对后如实自陈。组合根经 ``assembly.root_registry_reconcile_info``
+    计算（不实例化 sandbox），领域层经端口只读消费。
+    """
+
+    replay_safe: bool = False
+    verifiable: bool = False
+    suggested_action: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCall:
     """一次模型工具调用的值对象：id / name / args 的唯一形状。
@@ -269,6 +284,18 @@ class Tool(ABC):
         不同，不允许统一假装可验证）。
         """
         return ReconcileHint(verifiable=False)
+
+    @property
+    def replay_safe(self) -> bool:
+        """崩溃恢复时本工具被中断后「盲目重跑」是否安全。默认 False（unsafe）。
+
+        判据（True 的必要且充分条件）：``side_effect == READ_ONLY`` 且重执行
+        幂等、无任何外部副作用（含远程）。形制取自 Pi durable ``replay:"safe"``
+        （双 safe 才重跑）；与 reconcile_hint 正交——hint 只影响「可否外部核验」，
+        本属性只影响「可否安全重放」。不变量 #14 不变：协调器永不据此自动重跑，
+        本属性只驱动恢复裁决 UI 的默认方向（#357 W-13 契约 7）。
+        """
+        return False
 
     def resource_keys(self, args: BaseModel) -> list[str]:
         """声明本次调用将触碰的共享 resource key（供跨批互斥使用）。
