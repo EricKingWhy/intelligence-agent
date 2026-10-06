@@ -1,0 +1,1 @@
+2026-10-07	sync-merge: #362（W-18）merge 前同步 origin/main（来侧 #762/#735 pending spinner、#774/#353 W-09 review UI、#773/#357 W-13 recovery reconcile、#746 测试替身 _FailingRegistry.create() 签名对齐 fix；自动合并无冲突）；同步带入 #746 fix 后 test_progress_fork 红项解除（分支旧基线缺该 fix）。	3e3a8af8ddf680d5ceba7f425baa1c18f939db33..20a3b20007b6a691410a943a949ef2760491c073
