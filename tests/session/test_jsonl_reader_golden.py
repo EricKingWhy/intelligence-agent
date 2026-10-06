@@ -151,6 +151,7 @@ def test_missing_and_empty_jsonl_return_shapes(store: JsonlSessionStore) -> None
         "trace_url": None,
         "workspace": None,
         "archived": False,
+        "corrupted": False,
     }
 
 
@@ -273,6 +274,7 @@ def test_summary_corrupt_tail_fallback_shape_golden(
         "trace_url": "https://trace.example/golden",
         "workspace": None,
         "archived": False,
+        "corrupted": False,
     }
     assert caplog.records
     assert all(record.name == _STORE_LOGGER for record in caplog.records)

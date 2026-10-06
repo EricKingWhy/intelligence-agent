@@ -22,6 +22,7 @@ function session(
     trace_url: null,
     workspace,
     archived,
+    corrupted: false,
   };
 }
 

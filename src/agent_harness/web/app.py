@@ -897,6 +897,10 @@ class SessionSummary(BaseModel):
     # 时那些行必须能被认出来）。与 `workspace` 同样**刻意不给默认值**：默认 `False`
     # 会让漏映射的构造点把"已归档"谎报成未归档，徽标静默消失（假事实，不变量 #21 同族）。
     archived: bool
+    # #752：事件日志是否损坏（零可解析事件但有损坏行）。损坏是可观测状态，
+    # 不是"不存在"——前端据此渲染损坏徽标并引导至恢复入口。与 `archived`
+    # 同样刻意不给默认值，漏映射响亮失败。
+    corrupted: bool
 
 
 class SessionArchived(BaseModel):
@@ -2051,6 +2055,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     else None
                 ),
                 archived=s.archived,
+                corrupted=s.corrupted,
             )
             for s in summaries
         ]
@@ -2065,7 +2070,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         service = session_service(app.state.agent)
         try:
             events = await service.get_events(session_id)
-        except (InvalidSessionId, SessionNotFound) as e:
+        except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as e:
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 

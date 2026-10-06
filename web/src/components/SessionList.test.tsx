@@ -21,7 +21,7 @@ import { renderToString } from 'react-dom/server';
 import { SessionList } from './SessionList';
 import type { Project, SessionSummary } from '../types';
 
-function session(id: string, archived = false): SessionSummary {
+function session(id: string, archived = false, corrupted = false): SessionSummary {
   return {
     session_id: id,
     event_count: 3,
@@ -32,6 +32,7 @@ function session(id: string, archived = false): SessionSummary {
     trace_url: null,
     workspace: null,
     archived,
+    corrupted,
   };
 }
 
@@ -134,5 +135,16 @@ describe('会话列表加载失败（F9）', () => {
     expect(plain(html)).toContain('加载会话列表失败：get sessions 502');
     // 两侧都有重试入口（同一个回调，但两个区域各自要有可点的东西）
     expect((html.match(/>重试<\/button>/g) ?? []).length).toBe(2);
+  });
+
+  it('#752：损坏会话渲染"已损坏"徽标（而非静默消失）', () => {
+    const html = render({
+      sessions: [session('s-1'), session('s-2', false, true)],
+    });
+
+    expect(html).toContain('s-1');
+    expect(html).toContain('s-2');
+    expect(html).toContain('已损坏');
+    expect(html).toContain('session-item-corrupted');
   });
 });
