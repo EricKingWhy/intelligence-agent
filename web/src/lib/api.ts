@@ -551,6 +551,14 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
   });
 }
 
+/** #367 P3：从创建响应读 worktree 路径。后端 launch=true 走 SSE（无 JSON 体），
+ *  worktree 信息走 `X-Worktree-Path` 响应头（`X-Permission-Mode` 同型先例）；
+ *  launch=false 时走 JSON 体 `worktree_path`（由调用方直接读）。无头/空头 → null。 */
+export function worktreePathFromResponse(res: Response): string | null {
+  const v = res.headers.get('X-Worktree-Path');
+  return v && v.length > 0 ? v : null;
+}
+
 /** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
  *
  *  单独开这个缝的原因：「在此项目中新建任务」确认面（#169 AC12）要把后端 detail

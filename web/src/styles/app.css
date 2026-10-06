@@ -180,6 +180,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* #367 P3：worktree 自动创建的信息横幅（app-error 同型，信息级配色，可关闭）。 */
+.app-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--info);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 /* ── App Bar：单帧顶条，嵌在 frame 内（不再是独立卡） ── */
 .appbar {
   display: flex;

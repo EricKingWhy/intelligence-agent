@@ -2084,6 +2084,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         elif req.autonomy == "auto":
             auto_approve, auto_approve_explicit = True, True
         elif req.autonomy == "plan":
+            # P2 修复（#367 审查）：plan 档声明 auto_approve=True。计划阶段变更
+            # 工具本来就被 Plan 档只读门禁拦截（executor 阶段 2.35b，先于审批
+            # 闸门 2.5），声明 True 不影响计划期安全；用户批完计划（PLAN→NORMAL）
+            # 后执行不再逐次问——"先计划后执行"档的语义就是"只审一次计划"。
+            auto_approve, auto_approve_explicit = True, True
             workflow_mode_plan = True
 
         # #367 / W-23 选项 A：目录冲突默认 worktree。cwd 被租约占用且

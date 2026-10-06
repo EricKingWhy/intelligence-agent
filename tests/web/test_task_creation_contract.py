@@ -141,3 +141,40 @@ class TestWorktreeOnConflict:
             "cwd": str(git_repo), "on_conflict": "queue"})
         assert r.status_code == 200, r.text
         assert "worktree_path" not in r.json()
+
+
+class TestPlanAutonomyAutoApprove:
+    """P2 回归（#367 审查）：autonomy=plan 创建时声明 auto_approve=True。
+
+    计划阶段变更工具本来就被 Plan 档只读门禁拦截（executor 阶段 2.35b，
+    先于审批闸门），声明 True 不影响计划期安全；用户批完计划（PLAN→NORMAL）
+    后执行不再逐次问——"先计划后执行"档的语义就是"只审一次计划"。
+    """
+
+    def test_plan_declares_auto_approve_true(self, client, tmp_path: Path):
+        from agent_harness.session.approval import effective_auto_approve
+        from agent_harness.session.store import JsonlSessionStore
+
+        r = client.post("/api/sessions?launch=false", json={
+            "cwd": str(tmp_path),
+            "autonomy": "plan",
+        })
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+        store = JsonlSessionStore(root=tmp_path / "ws" / "sessions")
+        events = store.read_events(sid)
+        assert effective_auto_approve(events) is True
+
+    def test_ask_still_declares_auto_approve_false(self, client, tmp_path: Path):
+        from agent_harness.session.approval import effective_auto_approve
+        from agent_harness.session.store import JsonlSessionStore
+
+        r = client.post("/api/sessions?launch=false", json={
+            "cwd": str(tmp_path),
+            "autonomy": "ask",
+        })
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+        store = JsonlSessionStore(root=tmp_path / "ws" / "sessions")
+        events = store.read_events(sid)
+        assert effective_auto_approve(events) is False

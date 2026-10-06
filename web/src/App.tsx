@@ -98,6 +98,9 @@ const COMPOSER_AUTO_APPROVE = true;
 export default function App() {
   // BUG-001 fix：fork 失败的本地错误状态（useSession 的 error 是流级通道）。
   const [forkError, setForkError] = useState<{ sessionId: string; message: string } | null>(null);
+  // #367 P3：目录冲突自动建 worktree 时的一次性提示（后端 X-Worktree-Path 头，
+  // 前端在响应可得的两条路径消费；用户关闭后不再出现）。
+  const [worktreeNotice, setWorktreeNotice] = useState<string | null>(null);
 
   const {
     sessions,
@@ -582,7 +585,12 @@ export default function App() {
     async (payload: StartSessionPayload): Promise<string | null> => {
       // submitTask 自己处理 SSE 接线与错误文案；resolve null = 已接管。
       // 失败文案（string）交回弹窗就地显示。
-      return submitTask(payload, { ownError: true });
+      // #367 P3：worktree 自动创建时把隔离路径提示给用户（可关闭的一次性横幅）。
+      return submitTask(payload, {
+        ownError: true,
+        onWorktreeCreated: (path) =>
+          setWorktreeNotice(`目录被其他任务占用，已自动创建隔离 worktree 并在此运行：${path}`),
+      });
     },
     [submitTask],
   );
@@ -1103,6 +1111,19 @@ export default function App() {
             </div>
           )}
           {error && <div className="app-error">{error}</div>}
+          {/* #367 P3：worktree 自动创建的一次性提示（信息级，可关闭）。 */}
+          {worktreeNotice && (
+            <div className="app-notice" role="status">
+              <span>{worktreeNotice}</span>
+              <button
+                className="auth-banner-close"
+                onClick={() => setWorktreeNotice(null)}
+                aria-label="关闭提示"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           {/* 分叉失败提示带上它属于哪个会话：只属于发起它的那个会话，切走自然
               不再渲染（不用 effect 清空——那会多一次渲染，也会留下「清空」与
               「切会话」两份状态需要同步）。 */}
