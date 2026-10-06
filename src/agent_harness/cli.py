@@ -54,6 +54,7 @@ from agent_harness.assembly import (
     initialize_stores,
     recovery_stores,
 )
+from agent_harness.cli_theme import Theme, detect_theme
 from agent_harness.config import Settings
 from agent_harness.context.compactor import CompactionPostWriteError
 from agent_harness.identity import IdentityContext
@@ -133,8 +134,9 @@ class StreamRenderer:
     一律静默——终端不是第二份事件日志。
     """
 
-    def __init__(self, write: Callable[[str], None]) -> None:
+    def __init__(self, write: Callable[[str], None], theme: Theme | None = None) -> None:
         self._write = write
+        self._theme = theme if theme is not None else detect_theme()
         self._delta_open = False  # 流式正文输出中：工具行/终态行前先补换行
 
     def handle(self, event: AgentEvent) -> None:
