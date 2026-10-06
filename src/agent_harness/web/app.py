@@ -15,9 +15,11 @@ import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
+import anyio
 import jwt
 from fastapi import (
     Depends,
@@ -117,6 +119,7 @@ from agent_harness.session.service import (
     WorkspaceNotFound,
     validate_session_id,
 )
+from agent_harness.session.workflow import WorkflowMode
 from agent_harness.storage import (
     SqliteCheckpointStore,
     SqliteOperationLedger,
@@ -152,6 +155,11 @@ from agent_harness.workspace import (
     WorkspaceIndex,
     WorkspaceLeaseManager,
 )
+from agent_harness.workspace.lease_paths import (
+    LeasePathError,
+    normalize_dir_key,
+)
+from agent_harness.workspace.worktree import WorktreeError, create_worktree
 
 # Read-only catalog facts live with their router. Re-export them here for the
 # existing request validators and compatibility imports.
@@ -581,6 +589,40 @@ class CreateSessionRequest(_AmendValueValidators):
     # 会话级模型选择（ADR-0016 §5，C6）：None = 默认链（现行为不变）；
     # 命名 = AGENT_MODELS catalog 条目，未知名字 422。fallback 链不受影响。
     model: str | None = None
+
+    # #367 / W-23 选项 A：三档自主度（抄 Copilot Interactive/Plan/Autopilot ≈
+    # Codex 三档 ≈ Claude Code modes）。None = 不声明（沿用 auto_approve /
+    # permission_mode 既有语义，向后兼容）；显式声明则优先于 auto_approve：
+    # - "ask"：逐次问（auto_approve=false 显式）
+    # - "plan"：先计划后执行（workflow_mode="plan"，创建后切换）
+    # - "auto"：全自动（auto_approve=true 显式）
+    autonomy: str | None = Field(default=None)
+    # #367 / W-23 选项 A：目录冲突策略（六家成熟产品共识：任务级排队不存在，
+    # 冲突→自动 worktree 并行隔离）。"worktree"（默认）：cwd 被占时自动建
+    # worktree 并用其路径建会话；"queue"：走既有租约排队（次选项）。
+    on_conflict: str = Field(default="worktree")
+
+    @field_validator("autonomy")
+    @classmethod
+    def _validate_autonomy(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        valid = {"ask", "plan", "auto"}
+        if v not in valid:
+            raise ValueError(
+                f"autonomy must be one of {sorted(valid)}; got {v!r}"
+            )
+        return v
+
+    @field_validator("on_conflict")
+    @classmethod
+    def _validate_on_conflict(cls, v: str) -> str:
+        valid = {"worktree", "queue"}
+        if v not in valid:
+            raise ValueError(
+                f"on_conflict must be one of {sorted(valid)}; got {v!r}"
+            )
+        return v
 
     @field_validator("permission_mode")
     @classmethod
@@ -1286,6 +1328,17 @@ def project_service(state: AppState) -> ProjectService:
     )
 
 
+async def _is_dir_locked(state: AppState, path: str) -> bool:
+    """`path` 是否被写租约占用（#367 / W-23 选项 A：目录冲突判定）。
+
+    用 `normalize_dir_key` 与活跃租约的 dir_key 比对（同一物理目录恒同键）；
+    路径非法 → LeasePathError，调用方按 422 处理（fail-closed）。
+    """
+    dir_key = normalize_dir_key(path)
+    leases = await state.lease_manager.leases()
+    return any(l.dir_key == dir_key for l in leases)
+
+
 async def _validate_wired_context_providers(
     state: AppState, ids: list[str] | None
 ) -> None:
@@ -1691,6 +1744,29 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_task_lease_routes(app, validate_session_id=validate_session_id)
 
+    # #367 / W-23 选项 A：git worktree 路由（独立 router：目录冲突默认自动
+    # worktree 并行隔离，"排队等"作次选项走既有租约 API）
+    from agent_harness.web.worktrees import register_worktree_routes
+
+    register_worktree_routes(app)
+
+    # #367 / W-23 选项 A：sandbox 后端列表（`probe_all_capabilities` 明确标注
+    # "给选择器 UI 用"；创建表单的"运行位置"选择器只显示探针真实结果，不画饼）
+    @app.get("/api/sandbox-backends")
+    async def list_sandbox_backends() -> dict:
+        """可用 sandbox 后端 + 探针结果（不可用带 reason，前端据此置灰）。"""
+        return {
+            "backends": [
+                {
+                    "backend": c.backend,
+                    "available": c.available,
+                    "reason": c.reason,
+                    "details": c.details,
+                }
+                for c in probe_all_capabilities()
+            ]
+        }
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
     # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
@@ -2000,23 +2076,60 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         permission_mode_explicit = "permission_mode" in req.model_fields_set
         auto_approve_explicit = "auto_approve" in req.model_fields_set
 
+        # #367 / W-23 选项 A：三档自主度映射到底层（显式声明优先于 auto_approve）。
+        auto_approve = req.auto_approve
+        workflow_mode_plan = False
+        if req.autonomy == "ask":
+            auto_approve, auto_approve_explicit = False, True
+        elif req.autonomy == "auto":
+            auto_approve, auto_approve_explicit = True, True
+        elif req.autonomy == "plan":
+            workflow_mode_plan = True
+
+        # #367 / W-23 选项 A：目录冲突默认 worktree。cwd 被租约占用且
+        # on_conflict=worktree（默认）时，自动建 worktree 并用其路径建会话；
+        # on_conflict=queue 则走既有租约排队（次选项，本处不干预）。
+        # worktree 建不出（非 git 仓库等）→ 422 fail-closed：不静默回落到排队。
+        worktree_path: str | None = None
+        cwd = req.cwd
+        if cwd and req.on_conflict == "worktree":
+            await state.ensure_stores()
+            try:
+                dir_locked = await _is_dir_locked(state, cwd)
+            except LeasePathError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
+            if dir_locked:
+                try:
+                    wt = await anyio.to_thread.run_sync(
+                        partial(create_worktree, Path(cwd)))
+                except WorktreeError as e:
+                    raise HTTPException(
+                        status_code=422, detail=str(e)) from e
+                worktree_path = str(wt)
+                cwd = worktree_path
+
         try:
             result = await service.create_and_launch(
                 task=req.task,
                 workspace_name=req.workspace,
-                cwd=req.cwd,
+                cwd=cwd,
                 # `#318`：新建会话没有 session 账行 ⇒ session CAS 版本是矛盾请求。
                 **budget_claims(req.budget, create_surface=True),
                 permission_mode=permission_mode,
                 permission_mode_explicit=permission_mode_explicit,
                 auto_approve_explicit=auto_approve_explicit,
-                auto_approve=req.auto_approve,
+                auto_approve=auto_approve,
                 amend=AmendOptions.from_request(req),
                 launch=launch,
                 remember_as_procedural_rule=req.remember_as_procedural_rule,
                 # #363 / W-19：显式 sandbox 后端选择。
                 sandbox_backend=req.sandbox_backend,
             )
+            # #367 / W-23 选项 A："plan" 档：创建后切 workflow_mode=plan
+            #（计划闸门 W-07：先出计划、用户批准后执行）。
+            if workflow_mode_plan:
+                await service.set_workflow_mode(
+                    result.session.session_id, WorkflowMode.PLAN)
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
         except ModelClientConstructionError as e:
@@ -2054,18 +2167,29 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         # 重新解析）——回一个请求级数字当会话级 ceiling 是假事实。
         fuse_headers = _local_fuse_headers(result.local_fuse) if launch else {}
         headers = {"X-Permission-Mode": permission_mode.value, **fuse_headers}
+        # #367 / W-23 选项 A：launch=true 走 SSE（无 JSON 体）→ worktree 信息走
+        # 响应头（`X-Permission-Mode` 同型先例）。
+        if worktree_path is not None:
+            headers["X-Worktree-Path"] = worktree_path
 
         # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
         # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题
         # （那些是列表页的投影字段，这里没有数据来源）。
+        # #367 / W-23 选项 A：worktree 建出时回传路径 + 冲突策略（前端据此提示
+        # "已在 worktree 中创建"；不画饼——只报实际生效的）。
         if not launch:
+            content: dict[str, Any] = {
+                "session_id": session.session_id,
+                "permission_mode": permission_mode.value,
+                "on_conflict": req.on_conflict,
+            }
+            if worktree_path is not None:
+                content["worktree_path"] = worktree_path
+                content["cwd"] = worktree_path
             return JSONResponse(
                 status_code=200,
                 headers=headers,
-                content={
-                    "session_id": session.session_id,
-                    "permission_mode": permission_mode.value,
-                },
+                content=content,
             )
 
         return _run_stream_response(
