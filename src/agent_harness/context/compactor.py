@@ -77,10 +77,11 @@ _PROG_SECTION_MAX_ENTRY_CHARS = 200
 
 
 #: W-04 (#348)：一次摘要尝试失败的**有界** error_class 词表（诊断分类，不是新事件类型）。
-#: timeout / transport_error 覆盖调用面；其余八类逐一对应校验闸门与 shrink 的各条拒绝。
-#: 以 `attempt=0` 标记的**非摘要尝试**记录有两条——T12h (#647) 的
-#: `source_range_unavailable`（**生成后**来源拒绝）与 #639 的
-#: `preflight_request_exceeds_hard_limit`（**尝试前**预检拒绝：摘要请求本身超 hard）。
+#: timeout / transport_error 覆盖调用面；其余逐一对应校验闸门与各条拒绝。
+#: 以 `attempt=0` 标记的**非摘要尝试**记录有三条——T12h (#647) 的
+#: `source_range_unavailable`（**生成后**来源拒绝）、#639 的
+#: `preflight_request_exceeds_hard_limit`（**尝试前**预检拒绝：摘要请求本身超 hard）、
+#: #648 的 `no_compactable_early_turn`（**尝试前**预检拒绝：无可压缩完整早期轮）。
 _SUMMARY_ERROR_CLASSES = (
     "timeout",
     "transport_error",
@@ -102,6 +103,11 @@ _SUMMARY_ERROR_CLASSES = (
     # 此前该分支静默（零事件零状态）；对标 #647 的 attempt=0 纪律，把"为什么拒绝、
     # 差多少"（request_token_estimate vs hard_limit）落成任务可见诊断，不伪造摘要尝试。
     "preflight_request_exceeds_hard_limit",
+    # #648 选项 B（用户 2026-10-06 批准）：无可压缩完整早期轮的预检拒绝
+    # （尝试前，非摘要尝试失败）。此前该分支刻意"保持为空表"（见
+    # ContextWindowExceededError 注释），本次是用户批准的刻意反转——只加诊断：
+    # 对标 #639 阶段3a，attempt=0 + 有界词条 + 经 #348 落任务可见。
+    "no_compactable_early_turn",
 )
 
 #: 失败记录里 message 的长度上限（有界载荷；我们的拒绝文案远短于此，截断只是防御）。
@@ -115,6 +121,17 @@ _SUMMARY_MODEL_ID_LIMIT = 256
 #: `region.ts:117-` 保留 priced recent 尾且不拆 tool pair）。PORT DESIGN。
 _RETAIN_RATIO = 0.16
 
+#: #648 选项 B（用户 2026-10-06 批准）：无可压缩完整早期轮拒绝的显式失败文案
+#: （附中文恢复指引，对标 #639 阶段 B 的 thrashing guard 文案结构）。
+#: 英文首句与旧文案逐字一致（既有调用方按前缀匹配不受影响）；只加诊断，
+#: 判定式（`>`）与抛点语义一字不动。
+_NO_EARLY_TURN_MESSAGE = (
+    "No complete early turn can be compacted. "
+    "恢复指引：① 手动执行 /compact 检查当前窗口构成；"
+    "② 调大 max_context_tokens（硬上限随之放宽）；"
+    "③ 把任务转交 subagent 分段处理，避免单个原子工具块独占窗口。"
+)
+
 
 @dataclass(frozen=True)
 class CompactionFailure:
@@ -124,8 +141,9 @@ class CompactionFailure:
     回显原文（与 ADR-0033 边界 1 同一条脱敏纪律）。`auto_limit` / `hard_limit`
     取触发时的整型阈值读数；`token_estimate` 是调用方进入压缩时的估算。
     例外（`attempt=0` 标记**非摘要尝试**，摘要尝试是 1/2）：T12h (#647) 的生成后
-    来源拒绝（`source_range_unavailable`）与 #639 的预检请求超限拒绝
-    （`preflight_request_exceeds_hard_limit`）——后者仍是 0 次尝试，不伪造摘要尝试。
+    来源拒绝（`source_range_unavailable`）、#639 的预检请求超限拒绝
+    （`preflight_request_exceeds_hard_limit`）、#648 的无可压缩早期轮拒绝
+    （`no_compactable_early_turn`）——三者都是 0 次尝试，不伪造摘要尝试。
     """
 
     attempt: int
@@ -168,9 +186,11 @@ class ContextWindowExceededError(RuntimeError):
         failures: list[CompactionFailure] | None = None,
     ) -> None:
         super().__init__(message)
-        #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。tool 块 /
-        #: 无完整早期轮这类预检超限没有尝试记录，保持为空表；#639 的"摘要请求
-        #: 本身超限"预检拒绝是例外——携带一条 attempt=0 的诊断（非摘要尝试）。
+        #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。
+        #: #639 的"摘要请求本身超限"与 #648 的"无可压缩早期轮"两类预检超限是
+        #: 例外——各携带一条 attempt=0 的诊断（非摘要尝试），经抛错路径的
+        #: failures 由调用方落任务可见状态。#648 之前"保持为空表"是刻意设计，
+        #: 2026-10-06 用户批准选项 B 后刻意反转（只加诊断，判定与抛点不动）。
         self.failures = list(failures or [])
 
 
@@ -372,7 +392,17 @@ class ContextCompactor:
             # 比对会在 (messages, 有效用量) 落入 (count≤hard<effective) 缝隙时
             # 放行越窗请求。
             if token_estimate > self._hard_limit:
-                raise ContextWindowExceededError("No complete early turn can be compacted")
+                # #648 选项 B（用户 2026-10-06 批准）：本拒绝加 #639 同等诊断待遇。
+                # 此前"保持为空表"是刻意设计，本次是刻意的反转——**只加诊断**：
+                # 判定式（`>`）、抛点、异常类型一字不动；诊断挂异常的 failures 上，
+                # 由 builder 既有 except 经 #348 落任务可见状态。切分逻辑与 hard
+                # 行为不碰（票面铁律）。
+                raise ContextWindowExceededError(
+                    _NO_EARLY_TURN_MESSAGE,
+                    failures=[self._no_early_turn_rejection(
+                        token_estimate=token_estimate, atomic_tokens=count,
+                    )],
+                )
             return CompactionResult(list(messages), 0, count, False)
         # C-6 #642：early 段每条消息的来源区间（提前到摘要尝试之前，与成功后
         # 的 source_seq 区间计算共用同一次推导；语义与原成功路径逐字一致）。
@@ -640,6 +670,29 @@ class ContextCompactor:
             failures=failures,
             # #639 阶段 A：成功走缩小段时置位（marker 落 CONTEXT_COMPACTED 事件）。
             narrowed=narrowed,
+        )
+
+    def _no_early_turn_rejection(
+        self, *, token_estimate: int, atomic_tokens: int,
+    ) -> CompactionFailure:
+        """#648 选项 B：无可压缩完整早期轮拒绝的有界诊断记录。
+
+        照搬 #639 `_preflight_rejection` 的结构：`attempt=0`（非摘要尝试）、
+        `error_class` 收进既有有界词表。`request_token_estimate` 取卡住的原子块
+        自身 token 数（判别式左值语义：这是压不动的东西），`token_estimate` 取
+        调用方有效用量（与 hard 比对的左操作数，"差多少"从二者读出）。
+        """
+        return CompactionFailure(
+            attempt=0,
+            error_class="no_compactable_early_turn",
+            message="No complete early turn can be compacted",
+            auto_limit=int(self._auto_limit),
+            hard_limit=int(self._hard_limit),
+            token_estimate=token_estimate,
+            summary_model_id=None,
+            duration_ms=0,
+            request_token_estimate=atomic_tokens,
+            request_budget_tokens=int(self._hard_limit),
         )
 
     def _preflight_rejection(
