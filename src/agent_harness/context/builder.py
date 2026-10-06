@@ -1112,16 +1112,16 @@ class ContextBuilder:
 
         W-03 (#347)：pruner 装配时，messages 桶走与 build 同一条裁剪路径
         （地雷 2，#200 双视图教训）。本方法是同步读口而 store 校验是 async，
-        因此重放**最近一次压缩落下的决策**（seq → 骨架行；落账入口 = build
-        阈值命中或手动 ``compact_session_context``，共用同一次 compact_now）
-        ——同一 builder 实例上与该次压缩产物逐字节一致。重放语义（#708 裁决
-        B）＝**按落账时点决策，不做当前可见性复核**：读数含义是"截至最近一次
-        压缩的状态"，与当前 fresh 口径的偏差有界于一个压缩周期、在下一次
-        压缩重算决策时自纠——压缩后新到达的重复成员使旧保留成员在 fresh
-        口径下变为可裁而重放仍按旧决策保留 ⇒ 偏高（安全方向）；投影在其后
-        变化使旧决策与 fresh 口径分歧（如被裁 seq 的等价类可见成员构成变化）
-        ⇒ 偏低。在途 run 的看板读的正是刚压缩过的同一个 builder 实例，
-        常态下两者一致。
+        因此重放**最近一次 build 或 compact_now 重算落下的决策**（seq → 骨架
+        行；每次 build 的投影装配都重录决策，压缩路径在 compact_now 内重算）
+        ——同一 builder 实例上与该次产物逐字节一致。重放语义（#708 裁决 B）
+        ＝**按落账时点决策，不做当前可见性复核**：读数含义是"截至最近一次
+        决策落账的状态"，与当前 fresh 口径的偏差有界于一次 build 周期、在
+        下一次 build 重算决策时自纠——决策落账后新到达的重复成员使旧保留
+        成员在 fresh 口径下变为可裁而重放仍按旧决策保留 ⇒ 偏高（安全方向）；
+        投影在其后变化使旧决策与 fresh 口径分歧（如被裁 seq 的等价类可见
+        成员构成变化）⇒ 偏低。在途 run 的看板读的正是刚 build 过的同一个
+        builder 实例，常态下两者一致。
         """
         if self._pruner is None:
             messages_tokens = estimate_message_tokens(session.derive_messages())
