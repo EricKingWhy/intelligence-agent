@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Sequence
 
 from agent_harness.session.event import EVIDENCE_RECORDED
 from agent_harness.session.task import TASK_FIELD_MAX_LENGTH, derive_task_state
