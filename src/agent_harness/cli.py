@@ -1379,13 +1379,13 @@ def render_replay_event(
     """
     data = event.data
     if event.type == USER_MESSAGE:
-        return f"\n[用户] {data.get('content', '')}"
+        return f"\n[user] {data.get('content', '')}"
     if event.type == MODEL_COMPLETED:
         content = data.get("content", "")
         return f"[assistant] {content}" if content else None
     if event.type == TOOL_CALL:
         args = data.get("args", {})
-        return f"[工具] {data.get('tool_name', '')}({_collapse_args(args)})"
+        return f"[tool] {data.get('tool_name', '')}({_collapse_args(args)})"
     if event.type == TOOL_RESULT:
         content = str(data.get("content", ""))
         lines = content.splitlines() or [""]
@@ -1394,9 +1394,9 @@ def render_replay_event(
         # hint 在前（隐藏的是更早的行，在上方；照抄 Pi keep="end" 的 [hint, ...lines]）。
         # 本票只改取行方向与截断文案，`│` 前缀与外层标签及着色归 P0-8。
         more = "" if not hidden else f"  │ … ({hidden} earlier lines)\n"
-        return f"  → 结果（冻结）:\n{more}{preview}"
+        return f"  → result (frozen):\n{more}{preview}"
     if event.type == RUN_FAILED:
-        line = f"[run 失败] {data.get('reason', 'unspecified')}"
+        line = f"[run failed] {data.get('reason', 'unspecified')}"
         return theme.paint("err", line) if theme is not None else line
     if event.type == RUN_PAUSED:
         # `#312`：暂停是**非终态**收口（逻辑 run 未终结）——replay 必须如实重建它，
@@ -1408,10 +1408,10 @@ def render_replay_event(
     if event.type == RUN_RESUMED:
         return render_resume_block(data).lstrip("\n").rstrip("\n")
     if event.type == MODEL_FAILED:
-        line = f"[模型失败] {data.get('message', '')}"
+        line = f"[model failed] {data.get('message', '')}"
         return theme.paint("err", line) if theme is not None else line
     if event.type == TOOL_FAILURE_GUARD:
-        line = (f"[熔断] level={data.get('level', '')}"
+        line = (f"[guard] level={data.get('level', '')}"
                 f" consecutive_failures={data.get('consecutive_failures', '')}")
         return theme.paint("err", line) if theme is not None else line
     if event.type == GUARD_STUCK:
@@ -1424,23 +1424,23 @@ def render_replay_event(
         return (f"[fallback] {data.get('from_model', '')}→"
                 f"{data.get('to_model', '')} ({data.get('reason', '')})")
     if event.type == AGENT_DELEGATION_STARTED:
-        return (f"[委派→{data.get('target', '')}] "
+        return (f"[delegate→{data.get('target', '')}] "
                 f"child={data.get('child_session_id', '')}")
     if event.type == AGENT_DELEGATION_FINISHED:
         summary = str(data.get("summary", ""))[:200]
-        return (f"[委派完成→{data.get('target', '')}] "
+        return (f"[delegate done→{data.get('target', '')}] "
                 f"{data.get('status', '')}: {summary}")
     if event.type == ARTIFACT_CREATED:
         return f"[artifact] {str(data)[:120]}"
     if event.type == ARTIFACT_EXTERNALIZED:
-        return f"[外置产物] artifact_id={data.get('artifact_id', '')} size={data.get('size', 0)}"
+        return f"[artifact externalized] artifact_id={data.get('artifact_id', '')} size={data.get('size', 0)}"
     if event.type == SESSION_FORKED:
-        return (f"[fork] 来自 {data.get('parent_session_id', '')}"
+        return (f"[fork] from {data.get('parent_session_id', '')}"
                 f" @{data.get('fork_point_seq')}")
     if event.type == CONTEXT_COMPACTED:
-        return "[context 压缩]（早期历史已摘要，原文在 JSONL）"
+        return "[context compacted] (early history summarized, raw in JSONL)"
     if event.type == OPERATION_RECONCILE_REQUIRED:
-        return f"[需裁决] {str(data)[:120]}"
+        return f"[reconcile required] {str(data)[:120]}"
     # session/started, session/resumed, run/started, run/completed,
     # memory/degraded：生命周期噪音，不渲染
     return None
@@ -1469,7 +1469,7 @@ async def replay_command(
     theme = detect_theme()
     lines = [line for line in (render_replay_event(e, theme=theme) for e in events)
              if line]
-    output = "\n".join(lines) if lines else "（无可渲染内容）"
+    output = "\n".join(lines) if lines else "(no renderable content)"
     if write is not None:
         write(output + "\n")
     return output
