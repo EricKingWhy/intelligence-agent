@@ -40,6 +40,8 @@ export interface TaskReviewState {
   notDefined: boolean;
   task: TaskState | null;
   evidence: EvidenceByCriterion;
+  /** P1-1：证据加载失败的如实记录（不可得≠缺证据）；null = 证据可用。 */
+  evidenceError: string | null;
   gitStatus: GitCommandResult | null;
   gitDiff: GitCommandResult | null;
   refresh: () => Promise<void>;
