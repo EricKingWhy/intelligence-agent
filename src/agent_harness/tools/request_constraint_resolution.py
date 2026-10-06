@@ -113,7 +113,8 @@ class RequestConstraintResolutionTool(Tool):
             "opposite constraint or continue work affected by the conflict. After a requested result, "
             "wait for the user; do not use another tool until they answer. If the request is rejected, "
             "do not guess another id or retry with a synthesized candidate. After the user's answer, "
-            "apply only their selected scope; if they requested no concrete work, acknowledge it and stop."
+            "apply only their selected scope; the answer to this choice is not a new constraint to "
+            "register. If they requested no concrete work, acknowledge it and stop."
         )
 
     @property

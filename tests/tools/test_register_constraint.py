@@ -188,6 +188,8 @@ def test_register_prompt_rejects_tentative_constraints_and_stops_without_work():
     assert "no requested work" in guidance
     assert "stop" in guidance
     assert "not saved" in guidance
+    assert "exactly once before replying" in guidance
+    assert "acknowledging or repeating the rule does not save it" in guidance
 
 
 def test_resolution_schema_and_guidance_require_exact_single_request():
@@ -199,3 +201,4 @@ def test_resolution_schema_and_guidance_require_exact_single_request():
     assert "exactly once" in guidance
     assert "wait for the user" in guidance
     assert "do not use another tool" in guidance
+    assert "answer to this choice is not a new constraint" in guidance
