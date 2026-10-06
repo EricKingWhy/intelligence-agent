@@ -18,6 +18,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 import anyio
 import jwt
@@ -1544,6 +1545,28 @@ def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     }
 
 
+def _worktree_headers(worktree_path: str) -> dict[str, str]:
+    """worktree 回执头（`#367` / `X-Permission-Mode` 同型先例）。
+
+    为什么不能直接放裸值：HTTP 头字段值只能 latin-1（starlette `init_headers`
+    硬编码 `v.encode("latin-1")`），而 worktree 路径继承仓库位置
+    （`<toplevel-parent>/worktrees/<repo>-<hex>`）——仓库在中文用户名/中文
+    目录下（Windows 常态）会让裸值在响应构造期 `UnicodeEncodeError`，整个
+    创建请求 500（`#765` locked_dir 红）。latin-1 可编码时保持
+    `X-Worktree-Path` 裸值逐字节不变（既有消费者零影响）；否则改发
+    `X-Worktree-Path-Encoded`（RFC 5987 ext-value：`UTF-8''<percent-encoded>`，
+    `safe=''` 全量转义——裸 Windows 路径里合法的 `%` 会让"同一头名混装裸值
+    与编码值"产生歧义），前端 `worktreePathFromResponse` 按该约定兜底解码。
+    """
+    try:
+        worktree_path.encode("latin-1")
+    except UnicodeEncodeError:
+        return {
+            "X-Worktree-Path-Encoded": f"UTF-8''{quote(worktree_path, safe='')}"
+        }
+    return {"X-Worktree-Path": worktree_path}
+
+
 def _run_stream_response(
     state: Any, run: Any, subscriber: Any, session_id: str,
     *, headers: dict[str, str] | None = None,
@@ -2265,9 +2288,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         fuse_headers = _local_fuse_headers(result.local_fuse) if launch else {}
         headers = {"X-Permission-Mode": permission_mode.value, **fuse_headers}
         # #367 / W-23 选项 A：launch=true 走 SSE（无 JSON 体）→ worktree 信息走
-        # 响应头（`X-Permission-Mode` 同型先例）。
+        # 响应头（`X-Permission-Mode` 同型先例）；#765：非 latin-1 路径改发编码
+        # 伴随头（`_worktree_headers`），不在响应构造期 500。
         if worktree_path is not None:
-            headers["X-Worktree-Path"] = worktree_path
+            headers.update(_worktree_headers(worktree_path))
 
         # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
         # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题
