@@ -1010,8 +1010,12 @@ def _programmatic_summary_sections(
     存量直接调用面行为不变）。
     """
 
-    def add_once(target: list[str], value: str) -> None:
-        if value and value not in target:
+    # #707：`value not in target` 对 list 是 O(n) 扫描，visit 逐条调用即 O(n²)
+    # （30k 标识实测单次 build 8.8s）；配套 seen 集合做 O(1) 成员检查，
+    # 去重语义（首次出现顺序）不变。
+    def add_once(target: list[str], seen: set[str], value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
             target.append(value)
 
     def decode_summary_values(value: str) -> list[str]:
@@ -1023,7 +1027,9 @@ def _programmatic_summary_sections(
         return parsed
 
     identifiers: list[str] = []
+    identifier_seen: set[str] = set()
     file_paths: list[str] = []
+    file_path_seen: set[str] = set()
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -1032,32 +1038,32 @@ def _programmatic_summary_sections(
                 normalized = key.lower().replace("-", "_")
                 if isinstance(child, str):
                     if normalized in _PATH_FIELDS:
-                        add_once(file_paths, child)
-                        add_once(identifiers, child)
+                        add_once(file_paths, file_path_seen, child)
+                        add_once(identifiers, identifier_seen, child)
                     if (normalized in _EXACT_FIELDS or normalized == "id"
                             or normalized.endswith("_id")):
-                        add_once(identifiers, child)
+                        add_once(identifiers, identifier_seen, child)
                     for match in _NUMBER_PATTERN.finditer(child):
-                        add_once(identifiers, match.group())
+                        add_once(identifiers, identifier_seen, match.group())
                 elif isinstance(child, (int, float)) and not isinstance(child, bool):
-                    add_once(identifiers, str(child))
+                    add_once(identifiers, identifier_seen, str(child))
                 visit(child)
             error_content = value.get("content")
             if is_error and isinstance(error_content, str):
-                add_once(identifiers, error_content)
+                add_once(identifiers, identifier_seen, error_content)
         elif isinstance(value, list):
             for child in value:
                 visit(child)
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            add_once(identifiers, str(value))
+            add_once(identifiers, identifier_seen, str(value))
         elif isinstance(value, str):
             for match in _IDENTIFIER_PATTERN.finditer(value):
-                add_once(identifiers, match.group())
+                add_once(identifiers, identifier_seen, match.group())
             for match in _NUMBER_PATTERN.finditer(value):
-                add_once(identifiers, match.group())
+                add_once(identifiers, identifier_seen, match.group())
             for match in _FILE_PATH_PATTERN.finditer(value):
-                add_once(file_paths, match.group())
-                add_once(identifiers, match.group())
+                add_once(file_paths, file_path_seen, match.group())
+                add_once(identifiers, identifier_seen, match.group())
 
     for index, message in enumerate(messages):
         # C-6 #642：结构化继承只对**有来源身份**的摘要开放（`trusted_summaries`
@@ -1076,9 +1082,9 @@ def _programmatic_summary_sections(
             previous_identifiers = decode_summary_values(previous[6])
             previous_paths = decode_summary_values(previous[7])
             for value in previous_identifiers:
-                add_once(identifiers, value)
+                add_once(identifiers, identifier_seen, value)
             for value in previous_paths:
-                add_once(file_paths, value)
+                add_once(file_paths, file_path_seen, value)
             continue
         # #556 裁决 C：HumanMessage 原文不再逐字进任何程序化节——目标走
         # `_current_goal_body`（protected_facts 通道），叙述性历史靠 Event 回读。
