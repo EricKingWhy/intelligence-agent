@@ -14,8 +14,11 @@ run 与 HTTP 请求生命周期解耦：`POST /api/sessions` 经 launch() 把
   断线重连，after_seq 重放自愈，规格 02 §16.3）。
 
 孤儿回收：最后一个订阅者离开后启动宽限计时（Settings.run_disconnect_grace_seconds），
-到期仍零订阅者 → 取消 run task（取消臂收尾 run/failed(reason=orphaned)）；
-新订阅者接入即撤销计时。显式 POST /cancel 与孤儿回收是仅有的两个外部终止路径。
+新订阅者接入即撤销计时。**未登记**（`presence_managed=False`）的 run 到期仍零
+订阅者 → 取消 run task（取消臂收尾 run/failed(reason=orphaned)）；**已登记**的
+run 到期只记日志、继续跑（W-12 #356 选项 B，decision 8——零订阅者不是客户端离开
+的证据，只有明确退出信号才停；见 `_reap_if_orphaned`）。显式 POST /cancel 与孤儿
+回收是仅有的两个外部终止路径。
 
 run 终态驱动（ADR-0030 D4）：`_drive` 收口后调注入的 `on_run_terminal(session_id)`
 ——那是 queue/steer 接力投递的**唯一**触发点（Web / CLI 不各自实现）。回调由
@@ -30,6 +33,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from agent_harness.agent import AgentEvent, AgentRuntime
@@ -41,6 +45,25 @@ from agent_harness.session import (
     RUN_STARTED,
     Session,
 )
+
+# W-12（#356）：明确退出信号的类型/常量与 quit-inspection 结果（`session/client_exit.py`）。
+# 从本模块 re-export——调用方/测试经 `runmanager.CLIENT_EXIT_*` 取属性。
+from agent_harness.session.client_exit import (
+    CLIENT_EXIT_IGNORED_ALREADY_SETTLED,
+    CLIENT_EXIT_IGNORED_NOT_MANAGED,
+    CLIENT_EXIT_PAUSED,
+    SETTLED_OPERATION_STATES,
+    ClientExitError,
+    ClientExitOutcome,
+    ExitImpact,
+)
+from agent_harness.session.cwd import session_cwd
+from agent_harness.session.progress import (
+    ProgressWriteOutcome,
+    progress_paths,
+    write_progress_file,
+)
+from agent_harness.storage import OperationState, needs_reconcile
 
 logger = logging.getLogger("agent_harness.session.runmanager")
 
@@ -223,32 +246,22 @@ class ManagedRun:
             # 违背"重复取消不得再注入"不变量。run 正在收尾，回收也无必要。
             return
         if self.presence_managed:
-            # W-22（#366）：在场管理 run 的宽限到期**不取消**——取消会把
-            # CancelledError 注进在途 Tool（盲中止副作用），并走
-            # run/failed(orphaned) 旧路径。这里只置缺席闸门：runtime 在下一个
-            # 循环顶准入点阻止新的 model/tool/child 步骤，在途 Tool 按现有
-            # Operation Ledger 收口后，以 run/paused(client_absent) 停在稳定
-            # 边界（`02 §5.2.1`；UNKNOWN 时 reconcile 闸门优先，见
-            # `_terminal_paused`）。已收口的 run（runtime 已在 `_drive` 收尾
-            # 释放 / task 已 done）上这是无害 no-op——「已经 paused 时又收到
-            # 离开事件」不双写（闸门只在循环顶被读，而那个循环已经结束）。
-            if self.runtime is not None:
-                self.runtime.client_presence.mark_absent()
-                logger.info(
-                    "产品客户端缺席成立（session=%s，零订阅者超过 %.0fs）——"
-                    "交 runtime 准入点以 client_absent 暂停收口",
-                    self.session.session_id, self._manager.disconnect_grace_seconds,
-                )
-            else:
-                # 审查（C 轴 P3，2026-10-04）：run 已收口（paused / terminal 后
-                # runtime 已释放）时循环已结束、没有准入点会再读闸门——缺席
-                # 置位是 no-op。此时 log 只能记录这个事实，不得沿用「交准入点
-                # 暂停收口」的措辞（那句话在已收口 run 上与事实不符）。
-                logger.info(
-                    "产品客户端缺席成立（session=%s，零订阅者超过 %.0fs）——"
-                    "run 已收口，缺席置位 no-op（已 paused 不双写，已终态不翻写）",
-                    self.session.session_id, self._manager.disconnect_grace_seconds,
-                )
+            # W-12（#356）**选项 B**（design decision 8 / §5.1）：在场管理 run 的
+            # 宽限到期**不再置缺席**——"零订阅者"不是客户端离开的证据（一次网络
+            # 抖动 / 重连中的短暂断流，与"用户关掉了最后一个客户端"在服务端无法
+            # 区分）。只有**明确退出信号**（`signal_client_exit`）才是权威的离开
+            # 依据。这里只记日志、继续跑：run 照常推进，直到自然完成、显式
+            # cancel、或后续收到明确退出信号。
+            #
+            # （旧 W-22 行为——宽限到期 `mark_absent()` 交循环顶准入点以
+            # run/paused(client_absent) 收口——按其上覆盖的规格漂移声明作废；
+            # `02 §5.2.1` 正文尚未同步，修订需用户另批。未登记分支不受影响，
+            # 旧 orphaned 取消语义逐字不变。）
+            logger.info(
+                "产品客户端断线（session=%s，零订阅者超过 %.0fs）——无明确退出信号，"
+                "继续跑（选项 B），不置缺席、不暂停",
+                self.session.session_id, self._manager.disconnect_grace_seconds,
+            )
             return
         logger.warning(
             "run 孤儿回收（session=%s，零订阅者超过 %.0fs）",
@@ -498,6 +511,272 @@ class RunManager:
         run.cancel_requested = True
         run.task.cancel()
         return True
+
+    # ── W-12（#356）选项 B：明确退出信号 → 安全暂停 ────────────────────────
+
+    async def signal_client_exit(
+        self, session_id: str, *, client_id: str,
+    ) -> ClientExitOutcome:
+        """客户端明确退出信号的服务端唯一入口（选项 B 写侧）。
+
+        权威硬信号：接受即承诺只走 `run/paused(reason=client_absent)`，永不
+        `run/failed(orphaned)`（decision 1）。三步顺序固定：只读 inspect → 严格
+        W-05 写 → 立即 mark_absent（decision 3）；全程不调 `task.cancel()`
+        （decision 5：在途 Tool 跑到自然稳定边界，由既有运行时链收口）。
+
+        幂等（decision 7，判据只读持久化事实 `run.terminal` / `run.paused` /
+        `gate.absent`）：
+          未登记 run            → `ignored_not_managed`（旧语义逐字不变）
+          已终态/已 paused/已缺席 → `ignored_already_settled`（绝不双写）
+          正常                  → `paused`（恰好一条 `run/paused`，由既有链收口）
+
+        fail-closed（decision 4）：严格 W-05 写失败抛 `ClientExitError`——run 不被
+        置缺席、不被暂停，维持原状继续跑。
+
+        `client_id` 仅用于诊断/日志归因，不构成在场登记（选项 B 不建登记表）。
+        """
+        # F3（B 轴 P3：并发重复信号）：整段信号处理串行化在本会话锁内——复用 #312 的
+        # 每会话锁，不新造锁。第二个并发信号会等待第一个完成，随后在幂等检查看到
+        # 已终态 / 已 paused / 已缺席（或已被替换）⇒ `ignored_already_settled`，不双写。
+        # **死锁前提**：信号路径内（inspect 的只读账本/队列读、严格写的 to_thread、
+        # mark_absent）没有任何 `session_lock` 获取点，当前也无其他持锁调用本方法的
+        # 调用方——若未来新增持锁调用点，必须重审此前提（否则自锁死）。
+        async with self.session_lock(session_id):
+            run = self._runs.get(session_id)
+            if run is None or not run.presence_managed:
+                return ClientExitOutcome(
+                    session_id=session_id,
+                    status=CLIENT_EXIT_IGNORED_NOT_MANAGED,
+                    run_id=run.run_id if run is not None else None,
+                    uncertain=False,
+                    impact=None,
+                    progress=None,
+                    paused_event_seq=None,
+                    detail="run 未纳入产品客户端在场协议，信号零副作用（旧语义不变）",
+                )
+
+            runtime = run.runtime
+            if (
+                run.terminal
+                or run.paused
+                or (runtime is not None and runtime.client_presence.absent)
+            ):
+                return ClientExitOutcome(
+                    session_id=session_id,
+                    status=CLIENT_EXIT_IGNORED_ALREADY_SETTLED,
+                    run_id=run.run_id,
+                    uncertain=False,
+                    impact=None,
+                    progress=None,
+                    paused_event_seq=None,
+                    detail=(
+                        "run 已终态 / 已 paused / 已置缺席——重复退出信号不双写"
+                        "（decision 7）"
+                    ),
+                )
+
+            # ① 只读 quit-inspection（副作用为零）：先知道"会打断什么"。
+            impact = await self.inspect_exit_impact(session_id)
+            # ② 严格 W-05 写：失败即抛 ClientExitError（不置缺席、不暂停，decision 4）。
+            progress, progress_note = await self._strict_progress_write_for_exit(run)
+            # ③ 立即置缺席，不等宽限（decision 3；宽限只服务无信号断线）。
+            # 先做**身份校验**：两个 await 间隙里旧 run 可能已被替换（同会话 launch 了
+            # 已登记的新 run R2）或已收口。按 session_id 重查会把信号**错靶到新 run**
+            # （TOCTOU）——身份不符即不置位、如实报已收口，绝不双写（F1：合并修
+            # TOCTOU 错靶 + 旧 `mark_client_absent` 旁路缝；本分支同时覆盖原"置缺席时
+            # run 已收口"的竞态守卫，不留两套）。
+            current = self._runs.get(session_id)
+            if current is not run or run.runtime is None:
+                return ClientExitOutcome(
+                    session_id=session_id,
+                    status=CLIENT_EXIT_IGNORED_ALREADY_SETTLED,
+                    run_id=run.run_id,
+                    uncertain=impact.uncertain,
+                    impact=impact,
+                    progress=progress,
+                    paused_event_seq=None,
+                    detail=(
+                        "await 间隙 run 已被替换/收口——不对新 run 置缺席"
+                        "（TOCTOU 修复），不双写"
+                    ),
+                )
+            run.runtime.client_presence.mark_absent()
+
+            detail_parts = [
+                f"客户端明确退出信号已接受（client_id={client_id}）",
+                progress_note,
+                *impact.detail,
+                (
+                    "已立即置缺席；暂停由既有运行时链在稳定边界收口"
+                    "（不 task.cancel()，decision 5）"
+                ),
+                (
+                    "paused_event_seq 在信号返回时未知——本信号不等待暂停落盘，"
+                    "实际 seq 以随后的 run/paused 事件为准"
+                ),
+            ]
+            return ClientExitOutcome(
+                session_id=session_id,
+                status=CLIENT_EXIT_PAUSED,
+                run_id=run.run_id,
+                uncertain=impact.uncertain,
+                impact=impact,
+                progress=progress,
+                paused_event_seq=None,
+                detail="；".join(detail_parts),
+            )
+
+    async def inspect_exit_impact(self, session_id: str) -> ExitImpact:
+        """只读 quit-inspection（decision 2/3/6）：绝不写盘、不改 Ledger / 闸门。
+
+        维度（design §3.2，全部复用既有只读面）：
+          - 账本：`executor.operation_ledger.list_for_session` 的 RUNNING 行、非
+            settled 行，以及 `needs_reconcile(op)`；子代理维取同账本中 `agent_id`
+            与本 run 不同的非终态行（不变量 #18：子代理走同一 ToolExecutor →
+            同一账本）。
+          - 队列：`runtime._steer_source.pending_count(session_id)`（duck-typing；
+            无该属性/方法 → 该维 False，不算读失败）。
+
+        任读失败 ⇒ 该维按偏 busy 计、`uncertain=True`、`detail` 追加原因原文，
+        查询照常返回（decision 6）。账本句柄缺席 ⇒ 该维 False（缺信息 ≠ 读失败，
+        design §3.2）。
+        """
+        run = self._runs.get(session_id)
+        runtime = run.runtime if run is not None else None
+
+        detail: list[str] = []
+        uncertain = False
+        has_inflight_tool = False
+        has_inflight_child = False
+        has_pending_operation = False
+        impact_needs_reconcile = False
+        has_queued_input = False
+
+        ledger = runtime.executor.operation_ledger if runtime is not None else None
+        if ledger is None:
+            detail.append(
+                "operation_ledger 缺席：退出影响按无该维信息处理（缺信息≠读失败）"
+            )
+        else:
+            try:
+                operations = await ledger.list_for_session(session_id)
+            except Exception as exc:  # noqa: BLE001 — 只读查询读失败不得让信号失败
+                uncertain = True
+                has_inflight_tool = True
+                has_inflight_child = True
+                has_pending_operation = True
+                impact_needs_reconcile = True
+                detail.append(f"operation_ledger 读取失败：{exc!r}")
+            else:
+                agent_id = getattr(runtime, "_agent_id", None)
+                for operation in operations:
+                    if operation.state is OperationState.RUNNING:
+                        has_inflight_tool = True
+                    if operation.state not in SETTLED_OPERATION_STATES:
+                        has_pending_operation = True
+                        if agent_id is not None and operation.agent_id != agent_id:
+                            has_inflight_child = True
+                    if needs_reconcile(operation):
+                        impact_needs_reconcile = True
+                detail.append(
+                    f"operation_ledger：{len(operations)} 行"
+                    f"（RUNNING={has_inflight_tool}，未结清={has_pending_operation}，"
+                    f"待对账={impact_needs_reconcile}）"
+                )
+
+        steer_source = (
+            getattr(runtime, "_steer_source", None) if runtime is not None else None
+        )
+        pending_count = getattr(steer_source, "pending_count", None)
+        if steer_source is None:
+            detail.append("无 steer_source：排队输入维按无信息处理（该维 False）")
+        elif not callable(pending_count):
+            detail.append(
+                "steer_source 无 pending_count（duck-typing 失败）：该维 False"
+            )
+        else:
+            try:
+                count = await pending_count(session_id)
+            except Exception as exc:  # noqa: BLE001 — 同上：读失败只标不确定
+                uncertain = True
+                has_queued_input = True
+                detail.append(f"会话队列 pending_count 读取失败：{exc!r}")
+            else:
+                has_queued_input = count > 0
+                detail.append(f"会话队列未投递输入：{count}")
+
+        return ExitImpact(
+            session_id=session_id,
+            has_inflight_tool=has_inflight_tool,
+            has_inflight_child=has_inflight_child,
+            has_pending_operation=has_pending_operation,
+            needs_reconcile=impact_needs_reconcile,
+            has_queued_input=has_queued_input,
+            uncertain=uncertain,
+            detail=tuple(detail),
+        )
+
+    async def _strict_progress_write_for_exit(
+        self, run: ManagedRun,
+    ) -> tuple[ProgressWriteOutcome | None, str]:
+        """退出信号路径上的 W-05 **严格写**（design §4 / decision 4）。
+
+        与常规触发点的 best-effort 不同：有锚点时写不成功就不暂停（fail-closed）。
+        两类 N/A **不是失败**（没有可写位置，跳过、不抛错、照常进入 mark_absent）：
+        无 cwd 锚、cwd 目录已被外部删除（沿用 `service.refresh_progress_file` 的
+        同一守卫，不复活已删目录）。
+
+        返回 `(outcome_or_None, note)`；失败时抛 `ClientExitError`。
+        """
+        # 快照事件流：strict 写在 `asyncio.to_thread` 里迭代，而 runtime 可能在同一
+        # 事件循环里并发 append——对活列表的跨线程迭代不安全，取快照。
+        events = tuple(run.session.events)
+        if not events:
+            return None, "空事件流 → 进度写 N/A（decision 4）"
+        cwd = session_cwd(events)
+        if not cwd:
+            return None, "无 cwd 锚 → 进度写 N/A（不是失败，decision 4）"
+        if not Path(cwd).is_dir():
+            return None, "cwd 目录不存在 → 进度写 N/A（不复活已删目录，decision 4）"
+        try:
+            outcome = await asyncio.to_thread(
+                write_progress_file, cwd, run.session.session_id, events,
+            )
+        except Exception as exc:
+            # F2（B 轴 P2）：`write_progress_file` 正常契约返回 ProgressWriteOutcome，
+            # 但线程内意外异常（如 RuntimeError）也必须收敛——design §4.4 要求严格写
+            # 失败**一律**抛 ClientExitError。合成一个 ok=False 的结果如实记录；
+            # fail-closed 本身已成立（mark_absent 未到达），这里补的是 contract。
+            unexpected = ProgressWriteOutcome(
+                ok=False, skipped=False,
+                path=progress_paths(cwd, run.session.session_id).markdown,
+                source_event_seq=-1, error_kind="unexpected_exception",
+                reason=repr(exc),
+            )
+            raise ClientExitError(
+                session_id=run.session.session_id,
+                run_id=run.run_id,
+                progress=unexpected,
+                detail=(
+                    f"严格 W-05 写抛非 outcome 异常（{exc!r}）——信号中止，run 维持"
+                    "原状继续跑（fail-closed，decision 4）"
+                ),
+            ) from exc
+        if outcome.ok or outcome.skipped:
+            return outcome, (
+                f"进度严格写通过（ok={outcome.ok}，skipped={outcome.skipped}，"
+                f"source_event_seq={outcome.source_event_seq}）"
+            )
+        raise ClientExitError(
+            session_id=run.session.session_id,
+            run_id=run.run_id,
+            progress=outcome,
+            detail=(
+                f"严格 W-05 写失败（error_kind={outcome.error_kind}，"
+                f"reason={outcome.reason}）——信号中止，run 维持原状继续跑"
+                "（fail-closed，decision 4）"
+            ),
+        )
 
     async def aclose(self) -> None:
         """应用关停：取消全部在途 run 并等待收尾（幂等）。"""

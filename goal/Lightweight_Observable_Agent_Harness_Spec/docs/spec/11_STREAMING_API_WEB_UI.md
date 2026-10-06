@@ -164,9 +164,14 @@ MUST NOT 合成第二套客户端状态；暂停后当前直播流在暂停事�
 无依据的一键重试；409 冲突后 MUST 刷新权威状态并**保留用户未发送的输入**。
 `paused` / `completed` / `failed` / `NEED_RECONCILE` 四类 MUST 可区分。
 
-### 6.2 个人工作台客户端在场扩展（#305 原验收不变）
+### 6.2 个人工作台客户端在场扩展（#305 原验收不变；2026-10-06 按 #356 选项 B 修订）
 
-桌面窗口隐藏至托盘仍属于在场；TUI、桌面和本机 Web 的在场关系按 Task/Session 记录，不能用“有任意客户端在线”让无关 Task 消耗模型 token。最后一个托管客户端明确退出，或意外断线超过有界宽限时，服务先阻止该 Task 新的 Model/Tool/Child 接纳，再按 `02 §5.2.1` 与 `03 §3.4/§5` 持久化 `client_absent` 暂停或进入 NEED_RECONCILE。宽限期间不发起新的模型步骤。客户端返回时展示来源 seq、暂停原因、Ledger/进度文件状态；用户显式提交 `resume_basis=client_return` 与 `expected_version`，验证有在场客户端且 reconcile 已完成后，才用同一 `run_id` 恢复。单纯重连/刷新 MUST NOT 自动续跑。
+桌面窗口隐藏至托盘**不构成离开**；不建服务端按 Task 的在场登记表——“最后一个托管客户端”的判定由客户端主动发送的明确退出信号承担，不由服务端计数推断；不能用“有任意客户端在线”让无关 Task 消耗模型 token。
+
+- **明确退出信号到达时**：服务先阻止该 Task 新的 Model/Tool/Child 接纳，再按 `02 §5.2.1` 与 `03 §3.4/§5` 持久化 `client_absent` 暂停或进入 NEED_RECONCILE。
+- **意外断线（无明确退出信号）时**：服务 MUST NOT 阻止接纳，Run 继续跑；零订阅者宽限计时到期只记日志。宽限期内外的模型步骤接纳不受影响。
+
+客户端返回时展示来源 seq、暂停原因、Ledger/进度文件状态；用户显式提交 `resume_basis=client_return` 与 `expected_version`，reconcile 已完成后，才用同一 `run_id` 恢复。明确退出导致的暂停**不自动续跑**；单纯重连/刷新 MUST NOT 自动续跑。
 
 本协议只接管明确纳入个人工作台的 Task；旧入口零订阅者孤儿回收维持 `03 §5` 基线直到有迁移证据。直播流和重放仍由同一 SessionEvent 序列派生，不增客户端权威缓存或第二套 Runtime 状态。
 

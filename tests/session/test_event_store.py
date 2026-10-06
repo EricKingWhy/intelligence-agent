@@ -136,6 +136,9 @@ class TestSessionEventDTO:
             "skill/registered",
             "skill/updated",
             "skill/removed",
+            # #352：验收项与真实证据的服务端投影——append-only 证据记录
+            # （14 字段 DTO；重跑追加不覆盖；权威投影在后端 derive_evidence_state）。
+            "evidence/recorded",
         }
         assert EVENT_TYPES == expected
 

@@ -30,6 +30,7 @@ import asyncio
 import logging
 import os
 import stat
+import subprocess
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -159,6 +160,14 @@ from agent_harness.session.event import (
     SessionEvent,
     _utc_now_iso,
 )
+from agent_harness.session.evidence import (
+    EvidenceManifest,
+    EvidenceOutcome,
+    apply_evidence_recorded,
+    compute_evidence_manifest,
+    derive_evidence_state,
+    evaluate_evidence_freshness,
+)
 from agent_harness.session.interrupt import detect_unterminated_runs
 from agent_harness.session.model_switch import (
     ModelChange,
@@ -222,6 +231,7 @@ from agent_harness.tooling.approval import (
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import PolicyGranularity
 from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tools.git import git_head_command
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -4014,6 +4024,153 @@ class SessionService:
             reason=reason,
             expected_version=expected_version,
         )
+
+    async def record_evidence(
+        self, session_id: str, *, evidence: object
+    ) -> EvidenceOutcome:
+        """记录一条结构化证据（W-08 #352）：形状校验在 session/evidence.py handler。
+
+        走与 task 命令同一套「存在性 + live 聚合 + seq 重试」写入路径；拒绝零事件。
+        不刷新进度文件——progress 文档的 evidence 节只消费 artifact 事件，
+        W-05 触发点不变（Scope lock：只动必须动）。
+        """
+        return await self._apply_task_handler(
+            session_id, apply_evidence_recorded, evidence=evidence
+        )
+
+    async def evidence_state(self, session_id: str) -> dict | None:
+        """只读证据投影 + 读取时陈旧求值（W-08 #352；零副作用）。
+
+        未定义任务返回 None（web 层 404，不伪装成空状态）。只回服务端投影：
+        每条证据带 ``freshness``（fresh/stale + 明确过期原因），客户端不推断。
+        """
+        self._validate_session_id(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        if not derive_task_state(events).defined:
+            return None
+        state = derive_evidence_state(events)
+        if not state.by_criterion:
+            return {"by_criterion": {}}
+        root = session_cwd(events)
+        covered = sorted(
+            {
+                item.path
+                for records in state.by_criterion.values()
+                for record in records
+                for item in record.workspace_manifest.files
+            }
+        )
+        current_manifest = await self._current_evidence_manifest(root, covered)
+        # 懒惰求值（§9.5）：没有任何记录带 base_head 时不 spawn git 子进程——
+        # 读接口不引入不必要的宿主副作用与延迟。
+        needs_head = any(
+            record.base_head is not None
+            for records in state.by_criterion.values()
+            for record in records
+        )
+        current_head = await self._git_head(root) if needs_head else None
+        store = self._artifact_store_for(session_id)
+        by_criterion: dict[str, list[dict]] = {}
+        for criterion_id, records in state.by_criterion.items():
+            items = []
+            for record in records:
+                readable: bool | None = None
+                attribution_ok: bool | None = None
+                if record.artifact_ref:
+                    readable, attribution_ok = await self._check_evidence_artifact(
+                        store, record
+                    )
+                freshness = evaluate_evidence_freshness(
+                    record,
+                    current_manifest=current_manifest,
+                    current_head=current_head,
+                    artifact_readable=readable,
+                    artifact_attribution_ok=attribution_ok,
+                )
+                items.append(
+                    {
+                        **record.to_payload(),
+                        "freshness": {
+                            "status": freshness.status,
+                            "reasons": list(freshness.reasons),
+                        },
+                    }
+                )
+            by_criterion[criterion_id] = items
+        return {"by_criterion": by_criterion}
+
+    async def _current_evidence_manifest(
+        self, root: str | None, covered: list[str]
+    ) -> EvidenceManifest | None:
+        """当前工作区 manifest（容错：读不到 → None，fail-closed 判 stale）。
+
+        已删除的覆盖文件不在本次清单里——``evaluate_evidence_freshness`` 会把
+        "记录中有、当前缺失"报成明确的缺失原因（而不是笼统的"读不到"）。
+        """
+        if not root:
+            return None
+        base = Path(root)
+        existing = [path for path in covered if (base / path).is_file()]
+        try:
+            return await anyio.to_thread.run_sync(
+                compute_evidence_manifest, root, existing
+            )
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    async def _git_head(root: str | None) -> str | None:
+        """工作区仓库的当前 HEAD（只读；非 git 目录/执行失败 → None，如实）。
+
+        命令构造走 ``tools/git.py::git_head_command``（白名单纪律：逐字固定、
+        零插值、无 shell）；cwd 钉在工作区 root。
+        """
+        if not root:
+            return None
+
+        def _run() -> str | None:
+            try:
+                proc = subprocess.run(
+                    git_head_command(),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                    cwd=root,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
+            head = proc.stdout.strip()
+            return head if proc.returncode == 0 and head else None
+
+        return await anyio.to_thread.run_sync(_run)
+
+    @staticmethod
+    async def _check_evidence_artifact(
+        store, record
+    ) -> tuple[bool, bool | None]:
+        """证据 artifact 的可读回 + 显式归属/来源校验（票面"只引用权限受控的原件"）。
+
+        - 可读回：``store.load`` 成功（content-hash 自证在实现里；
+          KeyError/OSError → 不可读）。
+        - 归属：证据带 ``tool_call_id`` 时，必须与 artifact 旁挂元数据的
+          ``tool_call_id`` 一致；元数据缺失 → 无法确认（None，fail-closed）；
+          证据无 ``tool_call_id`` → 跳过该维度。
+        """
+        if store is None:
+            return False, None
+        try:
+            artifact = await store.load(record.artifact_ref)
+        except (KeyError, OSError):
+            return False, None
+        if not record.tool_call_id:
+            return True, True
+        meta_tcid = artifact.tool_call_id
+        if not meta_tcid:
+            return True, None
+        return True, meta_tcid == record.tool_call_id
 
     async def fork(
         self, *, session_id: str, from_seq: int, with_tail_summary: bool = False

@@ -113,6 +113,15 @@ TASK_ACCEPTANCE_REVISED = "task/acceptance-revised"
 VERIFICATION_UPDATED = "verification/updated"
 TASK_ACCEPTED = "task/accepted"
 TASK_ACCEPTANCE_RELEASED = "task/acceptance-released"
+# ── W-08 (#352)：验收项 ↔ 真实证据的服务端投影 ────────────────────────────────
+# 逐验收项的结构化证据事实（1 criterion ↔ N 证据，append-only：重跑追加新证据、
+# 不覆盖旧记录）。payload = 票面 14 字段 DTO（证据身份/会话/run/验收项/kind/
+# 来源事件或工具调用/采集时刻/结果/命令或观察/退出码或观察值/artifact 引用/
+# 基线 HEAD/工作区 manifest）。读侧 `derive_evidence_state` 纯投影按 criterion_id
+# 聚合；陈旧在读取时求值（manifest/base_head 对比，产出明确过期原因）。
+# `VerificationEntry.evidence`（str|None 人类摘要/指针）维持不变；#524
+# completion_evidence（Runtime 完成门）与本票严格区分。
+EVIDENCE_RECORDED = "evidence/recorded"
 MEMORY_DEGRADED = "memory/degraded"
 # #298 / MEM-V2-2（PRD §6.5）：一次**已提交**的记忆变更。只带计数、memory id、
 # action 计数与 job id，**不带内容**——内容由 API 提供，事件流不是第二份记忆真相
@@ -264,6 +273,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         VERIFICATION_UPDATED,
         TASK_ACCEPTED,
         TASK_ACCEPTANCE_RELEASED,
+        # W-08 (#352)：验收项结构化证据事实（状态事件，不投影成消息）
+        EVIDENCE_RECORDED,
         MEMORY_DEGRADED,
         MEMORY_UPDATED,
         MEMORY_RECALLED,
