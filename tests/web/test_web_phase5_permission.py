@@ -150,13 +150,25 @@ class TestPermissionModeRouting:
         assert calls[0]["permission_mode"] == PermissionPolicy.DANGER_FULL_ACCESS
 
     def test_default_when_neither_passed(self, captured_build):
-        """两个字段都缺省 → workspace-write + approval_callback=None（auto-approve）。"""
+        """#358（D2 默认翻转）：两字段都缺省 → workspace-write + ask。
+
+        旧行为是 auto-approve（approval_callback=None）；收紧后缺省走 interactive
+        路由（审批 holder），与显式选档位 / 显式 auto_approve=false 同一待遇。
+        """
         client, calls = captured_build
         with client.stream("POST", "/api/sessions", json={"task": "t"}) as resp:
             assert resp.status_code == 200
             _consume_sse(resp)
         assert calls[0]["permission_mode"] == PermissionPolicy.WORKSPACE_WRITE
-        assert calls[0]["approval_callback"] is None
+        assert isinstance(calls[0]["approval_callback"], InteractiveCallbackHolder), (
+            "两字段都缺省应走 D2 新默认（ask），而不是旧的 auto-approve"
+        )
+
+    def test_create_session_request_auto_approve_default_false(self):
+        """#358：CreateSessionRequest.auto_approve 缺省 = False（旧默认是 True）。"""
+        from agent_harness.web.app import CreateSessionRequest
+
+        assert CreateSessionRequest(task="t").auto_approve is False
 
     def test_invalid_permission_mode_422(self, captured_build):
         """非法 mode → 422（FastAPI 自动校验）。"""

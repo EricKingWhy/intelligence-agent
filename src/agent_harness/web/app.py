@@ -548,10 +548,11 @@ class CreateSessionRequest(_AmendValueValidators):
     # 上限，审批本身仍走 ApprovalCallback（默认 auto-approve）。
     permission_mode: str = Field(default="workspace-write")
     # auto_approve 保留为 deprecated alias（向后兼容）：true ≡ workspace-write
-    # + auto-approve callback；false ≡ workspace-write + deny callback。两者同传
-    # 时 permission_mode 优先。两个字段都缺省 → workspace-write + auto-approve
-    # （现行为不变）。
-    auto_approve: bool = True
+    # + auto-approve callback；false ≡ workspace-write + 交互式审批（#423）。
+    # 两者同传时 permission_mode 优先。#358（W-14，D2 默认翻转）：缺省从 True 改为
+    # False——两个字段都缺省 → workspace-write + ask（读免问、写/Bash 逐次问）；
+    # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
+    auto_approve: bool = False
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort
     # / agent_profile / context_providers）
     reasoning_effort: str | None = None

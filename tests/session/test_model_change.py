@@ -322,6 +322,8 @@ class TestRuntimeReadsSessionModel:
         assert mock_session_cls.start.call_args.kwargs["started_data"] == {
             "provider": "deepseek",
             "model_id": "gpt-4o",
+            # #358：新会话恒写默认权限矩阵版本。
+            "permission_defaults_version": 2,
         }
 
     def test_derived_model_gone_from_catalog_falls_back_to_default(self, tmp_path):

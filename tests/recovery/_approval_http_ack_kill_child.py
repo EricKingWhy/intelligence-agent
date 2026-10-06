@@ -60,7 +60,9 @@ class _ApprovalModel:
         if not any(getattr(message, "tool_calls", None) for message in messages):
             yield AIMessage(content="", tool_calls=[{
                 "name": "bash",
-                "args": {"command": "echo approval-barrier"},
+                # #358：bash 只读子集（echo 等）免审批；用非只读命令命中 ASK 规则、
+                # 真正触发审批闸。
+                "args": {"command": "touch approval-barrier"},
                 "id": "call-approval-http-ack",
                 "type": "tool_call",
             }])

@@ -56,6 +56,18 @@ SESSION_PERMISSION_MODE_KEY = "permission_mode"
 #: ``session/started`` 里承载会话级「是否自动批准」声明的键（F15 #234）。
 #: 与档位同一个病：创建期决策不落盘，续聊就只能猜（那里 ``None`` = 全自动批准）。
 SESSION_AUTO_APPROVE_KEY = "auto_approve"
+#: ``session/started`` 里承载「默认权限矩阵版本」的键（#358 / W-14）。新会话**恒写**。
+PERMISSION_DEFAULTS_VERSION_KEY = "permission_defaults_version"
+#: 当前默认权限矩阵版本：#358 D2 翻转后 = 2（v1 = 旧默认 workspace-write + auto-approve，
+#: v2 = workspace-write + ask）。续聊据此区分"创建于收紧之前"的旧会话。
+PERMISSION_DEFAULTS_VERSION = 2
+#: 旧 Session 迁移标记（``permission/changed.data.permission_migration`` 的取值，#358）。
+LEGACY_V1_DEFAULTS_MIGRATION = "legacy-v1-defaults"
+#: 旧 Session 一次性提示文案（用户向，中文；三面：log / LaunchResult.warnings / 迁移事件）。
+LEGACY_V1_DEFAULTS_WARNING = (
+    "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。"
+    "新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+)
 
 
 class InteractiveCallbackHolder:
@@ -442,6 +454,27 @@ def append_permission_change(session: Session, change: PermissionChange) -> Perm
     return change
 
 
+def append_legacy_defaults_migration(session: Session) -> None:
+    """追加旧 Session 的默认权限迁移事件（#358 / W-14；§3.6）。
+
+    这条 ``permission/changed`` 同时承担两件事：① 让 ``effective_*`` 显式化旧值
+    （WORKSPACE_WRITE + ``auto_approve=True``）——续聊行为与迁移前逐字一致；② 作为
+    "已提示"标记——下次续聊 ``migrated`` 守卫命中即不再提示（幂等）。
+
+    data 里带 ``permission_migration``（判据）与用户向 ``reason``（提示文案）。
+    旧默认**永久沿用、不强制翻成 ask**：迁移只加提示与显式化，不改写用户的历史选择。
+    """
+    session.append(
+        PERMISSION_CHANGED,
+        {
+            SESSION_PERMISSION_MODE_KEY: PermissionPolicy.WORKSPACE_WRITE.value,
+            SESSION_AUTO_APPROVE_KEY: True,
+            "permission_migration": LEGACY_V1_DEFAULTS_MIGRATION,
+            "reason": LEGACY_V1_DEFAULTS_WARNING,
+        },
+    )
+
+
 
 
 def append_approval_grant(session: Session, grant: ApprovalGrant) -> ApprovalGrant:
@@ -562,12 +595,17 @@ def revoked_keys(events: list[SessionEvent]) -> set[str]:
 
 __all__ = [
     "APPROVAL_GRANT_TTL_SECONDS",
+    "LEGACY_V1_DEFAULTS_MIGRATION",
+    "LEGACY_V1_DEFAULTS_WARNING",
+    "PERMISSION_DEFAULTS_VERSION",
+    "PERMISSION_DEFAULTS_VERSION_KEY",
     "SESSION_AUTO_APPROVE_KEY",
     "SESSION_PERMISSION_MODE_KEY",
     "InteractiveCallbackHolder",
     "PermissionChange",
     "append_approval_grant",
     "append_approval_revoke",
+    "append_legacy_defaults_migration",
     "append_permission_change",
     "build_approval_callback",
     "declared_auto_approve",
