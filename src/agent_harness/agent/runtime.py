@@ -3904,6 +3904,9 @@ class AgentRuntime:
                 run_id=arms.run_id,
                 terminal_status=terminal_status,
                 events=arms.session.since(arms.memory_event_start),
+                protected_fact_token_budget=getattr(
+                    self._context_builder, "protected_fact_token_budget", None,
+                ),
             )
         except Exception:
             # 旁路故障边界：见上——绝不毒化已落盘的 run 结果。

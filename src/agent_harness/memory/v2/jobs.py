@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS memory_v2_jobs (
     tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, project_id TEXT,
     session_id TEXT NOT NULL,
     run_id TEXT,
+    protected_fact_token_budget INTEGER,
+    protected_fact_extraction_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (protected_fact_extraction_state IN ('pending', 'started', 'ready', 'done')),
+    protected_fact_extraction_candidates TEXT,
     stage TEXT NOT NULL, state TEXT NOT NULL,
     outcome TEXT, reason TEXT,
     lease_owner TEXT, lease_expires_at TEXT,
@@ -124,6 +128,13 @@ class MemoryJobOutcome(str, Enum):
     NO_WRITE = "no_write"
 
 
+class ProtectedFactExtractionState(str, Enum):
+    PENDING = "pending"
+    STARTED = "started"
+    READY = "ready"
+    DONE = "done"
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryFormationJob:
     """一行 durable job 的完整视图。"""
@@ -152,6 +163,11 @@ class MemoryFormationJob:
     lease_expires_at: str | None
     created_at: str
     updated_at: str
+    protected_fact_token_budget: int | None = None
+    protected_fact_extraction_state: ProtectedFactExtractionState = (
+        ProtectedFactExtractionState.PENDING
+    )
+    protected_fact_extraction_candidates: list[dict[str, str]] | None = None
 
     @property
     def trusted(self) -> TrustedMemoryIdentity:
@@ -172,6 +188,7 @@ class SqliteMemoryV2JobStore:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.executescript(_JOB_SCHEMA)
             await self._migrate_run_id(connection)
+            await self._migrate_protected_fact_extraction(connection)
             await connection.commit()
 
     @staticmethod
@@ -194,13 +211,35 @@ class SqliteMemoryV2JobStore:
         if "run_id" not in columns:
             await connection.execute("ALTER TABLE memory_v2_jobs ADD COLUMN run_id TEXT")
 
+    @staticmethod
+    async def _migrate_protected_fact_extraction(
+        connection: aiosqlite.Connection,
+    ) -> None:
+        async with connection.execute("PRAGMA table_info(memory_v2_jobs)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "protected_fact_token_budget" not in columns:
+            await connection.execute(
+                "ALTER TABLE memory_v2_jobs ADD COLUMN protected_fact_token_budget INTEGER"
+            )
+        if "protected_fact_extraction_state" not in columns:
+            await connection.execute(
+                "ALTER TABLE memory_v2_jobs ADD COLUMN protected_fact_extraction_state "
+                "TEXT NOT NULL DEFAULT 'pending'"
+            )
+        if "protected_fact_extraction_candidates" not in columns:
+            await connection.execute(
+                "ALTER TABLE memory_v2_jobs ADD COLUMN protected_fact_extraction_candidates "
+                "TEXT"
+            )
+
     # ----------------------------------------------------------------------------------
     # 入队
     # ----------------------------------------------------------------------------------
 
     async def enqueue(
         self, *, idempotency_key: str, trusted: TrustedMemoryIdentity, session_id: str,
-        run_id: str | None = None, now: datetime | None = None,
+        run_id: str | None = None, protected_fact_token_budget: int | None = None,
+        now: datetime | None = None,
     ) -> MemoryFormationJob:
         """按幂等键入队；键已存在就返回**已有**那一行（含已终结的），不新建。
 
@@ -214,11 +253,11 @@ class SqliteMemoryV2JobStore:
             await connection.execute(
                 "INSERT OR IGNORE INTO memory_v2_jobs "
                 "(job_id, idempotency_key, tenant_id, user_id, project_id, session_id, "
-                " run_id, stage, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)",
+                " run_id, protected_fact_token_budget, stage, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)",
                 (str(uuid4()), idempotency_key, trusted.tenant_id, trusted.user_id,
-                 trusted.project_id, session_id, run_id, MemoryJobStage.QUEUED.value,
-                 moment, moment))
+                 trusted.project_id, session_id, run_id, protected_fact_token_budget,
+                 MemoryJobStage.QUEUED.value, moment, moment))
             cursor = await connection.execute(
                 "SELECT * FROM memory_v2_jobs WHERE idempotency_key=?", (idempotency_key,))
             row = await cursor.fetchone()
@@ -406,6 +445,82 @@ class SqliteMemoryV2JobStore:
             raise KeyError(job_id)
         return _to_job(row)
 
+    async def start_protected_fact_extraction(
+        self, *, job_id: str, worker_id: str, now: datetime | None = None,
+    ) -> MemoryFormationJob | None:
+        """Durably claim the job's single protected-fact model request."""
+        now_stamp = stamp(now if now is not None else datetime.now(UTC))
+        async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                f"SELECT * FROM memory_v2_jobs WHERE {_OWNED_AND_LIVE}",
+                (job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await connection.commit()
+                return None
+            if row["protected_fact_extraction_state"] == "pending":
+                await connection.execute(
+                    f"UPDATE memory_v2_jobs SET protected_fact_extraction_state='started', "
+                    f"protected_fact_extraction_candidates=NULL, updated_at=? "
+                    f"WHERE {_OWNED_AND_LIVE} AND protected_fact_extraction_state='pending'",
+                    (now_stamp, job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
+                )
+                cursor = await connection.execute(
+                    "SELECT * FROM memory_v2_jobs WHERE job_id=?", (job_id,),
+                )
+                row = await cursor.fetchone()
+            await connection.commit()
+        return _to_job(_require(row, job_id))
+
+    async def save_protected_fact_candidates(
+        self, *, job_id: str, worker_id: str, candidates: list[dict[str, str]],
+        now: datetime | None = None,
+    ) -> MemoryFormationJob | None:
+        """Persist extraction output so a recovered job need not make the call twice."""
+        if any(
+            set(candidate) != {"source", "value"}
+            or not isinstance(candidate.get("source"), str)
+            or not isinstance(candidate.get("value"), str)
+            for candidate in candidates
+        ):
+            raise ValueError("protected fact candidates must contain only source and value")
+        encoded = json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+        now_stamp = stamp(now if now is not None else datetime.now(UTC))
+        async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await connection.execute(
+                f"UPDATE memory_v2_jobs SET protected_fact_extraction_state='ready', "
+                f"protected_fact_extraction_candidates=?, updated_at=? "
+                f"WHERE {_OWNED_AND_LIVE} AND protected_fact_extraction_state='started'",
+                (encoded, now_stamp, job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
+            )
+            cursor = await connection.execute(
+                "SELECT * FROM memory_v2_jobs WHERE job_id=? AND lease_owner=?",
+                (job_id, worker_id),
+            )
+            row = await cursor.fetchone()
+            await connection.commit()
+        return _to_job(row) if row is not None else None
+
+    async def finish_protected_fact_extraction(
+        self, *, job_id: str, worker_id: str, now: datetime | None = None,
+    ) -> bool:
+        """Drop raw candidate text after idempotent registration has been attempted."""
+        now_stamp = stamp(now if now is not None else datetime.now(UTC))
+        async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                f"UPDATE memory_v2_jobs SET protected_fact_extraction_state='done', "
+                f"protected_fact_extraction_candidates=NULL, updated_at=? "
+                f"WHERE {_OWNED_AND_LIVE} AND protected_fact_extraction_state IN "
+                "('started', 'ready', 'pending')",
+                (now_stamp, job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
+            )
+            await connection.commit()
+        return cursor.rowcount == 1
+
 
 def _stage_assignment(
     *, stage: MemoryJobStage, state: dict[str, Any] | None,
@@ -429,7 +544,11 @@ def _stage_assignment(
         values.append(json.dumps(state, ensure_ascii=False, sort_keys=True))
     if stage.is_terminal:
         # 终结时释放 lease：终态 job 不该再占着"该用户的在途槽位"（R11）。
-        assignments.extend(["outcome=?", "reason=?", "lease_owner=NULL", "lease_expires_at=NULL"])
+        assignments.extend([
+            "outcome=?", "reason=?", "lease_owner=NULL", "lease_expires_at=NULL",
+            "protected_fact_extraction_state='done'",
+            "protected_fact_extraction_candidates=NULL",
+        ])
         values.extend([outcome.value if outcome is not None else None, reason])
     return assignments, values
 
@@ -442,6 +561,7 @@ def _require(row: Any, key: str) -> Any:
 
 
 def _to_job(row: Any) -> MemoryFormationJob:
+    raw_candidates = row["protected_fact_extraction_candidates"]
     return MemoryFormationJob(
         job_id=row["job_id"],
         idempotency_key=row["idempotency_key"],
@@ -458,4 +578,11 @@ def _to_job(row: Any) -> MemoryFormationJob:
         lease_expires_at=row["lease_expires_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        protected_fact_token_budget=row["protected_fact_token_budget"],
+        protected_fact_extraction_state=ProtectedFactExtractionState(
+            row["protected_fact_extraction_state"]
+        ),
+        protected_fact_extraction_candidates=(
+            json.loads(raw_candidates) if raw_candidates is not None else None
+        ),
     )

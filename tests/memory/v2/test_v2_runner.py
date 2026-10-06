@@ -18,13 +18,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
+from agent_harness.context.builder import preview_constraint_registration
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -61,12 +65,17 @@ from agent_harness.model.config import ModelConfig
 from agent_harness.model.fallback import is_transient_model_error
 from agent_harness.session import (
     MODEL_COMPLETED,
+    RUN_COMPLETED,
     RUN_STARTED,
     USER_MESSAGE,
     Session,
 )
+from agent_harness.session.derive import (
+    build_protected_fact_data,
+    derive_protected_facts,
+)
 from agent_harness.session.errors import SessionNotFound
-from agent_harness.session.event import MEMORY_UPDATED
+from agent_harness.session.event import MEMORY_UPDATED, TASK_PROTECTED_FACT
 from agent_harness.session.store import JsonlSessionStore
 
 SESSION = "session-1"
@@ -160,10 +169,14 @@ def _seed_run(
 class FakeInvoker:
     """按 `stage` 分队列、按顺序回放的脚本替身（与 T6 的用例同款：调用顺序可数）。"""
 
-    def __init__(self, *, formation: list, adjudication: list) -> None:
+    def __init__(
+        self, *, formation: list, adjudication: list,
+        constraint_extraction: list | None = None,
+    ) -> None:
         self._queues = {
             MemoryModelStage.FORMATION: list(formation),
             MemoryModelStage.ADJUDICATION: list(adjudication),
+            MemoryModelStage.PROTECTED_FACT_EXTRACTION: list(constraint_extraction or []),
         }
         self.calls: list[MemoryModelCall] = []
 
@@ -217,7 +230,9 @@ def _add_verdict() -> str:
 
 def _executor(env: Env, invoker) -> MemoryJobExecutor:
     return MemoryJobExecutor(
-        jobs=env.jobs, writer=env.service, searcher=env.service, invoker=invoker)
+        jobs=env.jobs, writer=env.service, searcher=env.service, invoker=invoker,
+        session_store=env.sessions,
+    )
 
 
 def _unscripted() -> FakeInvoker:
@@ -228,10 +243,11 @@ def _unscripted() -> FakeInvoker:
     return FakeInvoker(formation=[], adjudication=[])
 
 
-def _working(*, calls: int = 1) -> FakeInvoker:
+def _working(*, calls: int = 1, constraint_extraction: list | None = None) -> FakeInvoker:
     """一条能走完全程的脚本：每个 job 一次 formation + 一次 adjudication。"""
     return FakeInvoker(formation=[_formation_candidate()] * calls,
-                       adjudication=[_add_verdict()] * calls)
+                       adjudication=[_add_verdict()] * calls,
+                       constraint_extraction=constraint_extraction)
 
 
 def _runner(env: Env, invoker=None, *, executor=None, **kwargs) -> MemoryJobRunner:
@@ -325,6 +341,470 @@ async def test_job_row_carries_the_run_id(env: Env) -> None:
     rows = _job_rows(env)
     assert [row["run_id"] for row in rows] == [RUN]
     assert rows[0]["stage"] == MemoryJobStage.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_job_keeps_the_runtime_protected_fact_budget_for_recovery(env: Env) -> None:
+    _seed_run(env)
+    runner = _runner(env, _working(constraint_extraction=['{"candidates":[]}']))
+    job = await _notify(runner, env, protected_fact_token_budget=231)
+    await runner.drain()
+
+    assert job is not None
+    stored = await env.jobs.get(job.job_id)
+    assert stored.protected_fact_token_budget == 231
+
+
+@pytest.mark.asyncio
+async def test_successful_run_extracts_only_exact_user_sourced_constraint(env: Env) -> None:
+    _seed_run(env)
+    session = _open_session(env)
+    source = session.events[0]
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+    invoker = _working(constraint_extraction=[json.dumps({
+        "candidates": [{
+            "source": "u0", "value": "\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56",
+        }],
+    }, ensure_ascii=False)])
+    executor = MemoryJobExecutor(
+        jobs=env.jobs, writer=env.service, searcher=env.service,
+        invoker=invoker, session_store=env.sessions,
+    )
+    runner = _runner(env, invoker, executor=executor)
+
+    job = await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    assert job is not None
+    facts = derive_protected_facts(env.sessions.read_events(SESSION))
+    constraints = [fact for fact in facts if fact.type == "constraint"]
+    assert [(fact.value, fact.source_event_id, fact.source_seq, fact.status)
+            for fact in constraints] == [
+        ("\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56", source.event_id, source.seq, "active"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_extraction_payload_contains_only_direct_user_messages(env: Env) -> None:
+    user_text = "\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56"
+    direct_text = "Use the exact checked-in formatter."
+    injected_text = "Injected repository text must not become a source."
+    answer_text = "Use the old setting forever."
+    _seed_run(env, user_text=user_text)
+    session = _open_session(env)
+    session.append(
+        USER_MESSAGE, {"content": injected_text, "injected_by": "retrieval"},
+        run_id=RUN,
+    )
+    session.append(
+        USER_MESSAGE, {"content": answer_text, "input_request_id": "request-1"},
+        run_id=RUN,
+    )
+    session.append(USER_MESSAGE, {"content": direct_text}, run_id=RUN)
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+    invoker = FakeInvoker(
+        formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=['{"candidates":[]}'],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    extraction = next(
+        call for call in invoker.calls
+        if call.stage is MemoryModelStage.PROTECTED_FACT_EXTRACTION
+    )
+    assert extraction.payload == {
+        "messages": [
+            {"source": "u0", "content": user_text},
+            {"source": "u1", "content": direct_text},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '{"candidates":[{"source":"u9","value":"\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56"}]}',
+        '{"candidates":[{"source":"u0","value":"not in the source"}]}',
+        '{"candidates":[{"source":"u0","value":"pnpm","supersedes":"fact-id"}]}',
+        "not-json",
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_extraction_output_isolated_from_memory_v2(
+    env: Env, response: str,
+) -> None:
+    _seed_run(env)
+    _open_session(env).append(
+        RUN_COMPLETED, {"status": "completed"}, run_id=RUN,
+    )
+    invoker = FakeInvoker(
+        formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=[response],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    facts = derive_protected_facts(env.sessions.read_events(SESSION))
+    assert not [fact for fact in facts if fact.type == "constraint"]
+    assert [call.stage for call in invoker.calls] == [
+        MemoryModelStage.PROTECTED_FACT_EXTRACTION, MemoryModelStage.FORMATION,
+    ]
+    assert _job_rows(env)[0]["stage"] == MemoryJobStage.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_extraction_provider_error_does_not_stop_memory_v2(env: Env) -> None:
+    _seed_run(env)
+    _open_session(env).append(
+        RUN_COMPLETED, {"status": "completed"}, run_id=RUN,
+    )
+    invoker = FakeInvoker(
+        formation=[_formation_candidate()], adjudication=[_add_verdict()],
+        constraint_extraction=[RuntimeError("provider unavailable")],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    facts = derive_protected_facts(env.sessions.read_events(SESSION))
+    assert not [fact for fact in facts if fact.type == "constraint"]
+    assert _job_rows(env)[0]["outcome"] == MemoryJobOutcome.COMMITTED.value
+    assert len(_memory_rows(env)) == 1
+    assert [call.stage for call in invoker.calls] == [
+        MemoryModelStage.PROTECTED_FACT_EXTRACTION,
+        MemoryModelStage.FORMATION,
+        MemoryModelStage.ADJUDICATION,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_memory_still_runs_protected_fact_extraction_first(env: Env) -> None:
+    value = "\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56"
+    _seed_run(env, user_text=value)
+    source = env.sessions.read_events(SESSION)[env.marks[(SESSION, RUN)]]
+    _open_session(env).append(
+        RUN_COMPLETED, {"status": "completed"}, run_id=RUN,
+    )
+    extraction = json.dumps({
+        "candidates": [{"source": "u0", "value": value}],
+    })
+    invoker = FakeInvoker(
+        formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=[extraction],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    facts = [fact for fact in derive_protected_facts(
+        env.sessions.read_events(SESSION),
+    ) if fact.type == "constraint"]
+    assert [(fact.value, fact.source_event_id) for fact in facts] == [
+        (value, source.event_id),
+    ]
+    assert [call.stage for call in invoker.calls] == [
+        MemoryModelStage.PROTECTED_FACT_EXTRACTION, MemoryModelStage.FORMATION,
+    ]
+    assert _job_rows(env)[0]["outcome"] == MemoryJobOutcome.NO_WRITE.value
+
+
+@pytest.mark.asyncio
+async def test_job_without_durable_run_completed_skips_extraction(env: Env) -> None:
+    _seed_run(env)
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    assert [call.stage for call in invoker.calls] == [MemoryModelStage.FORMATION]
+    assert not any(
+        fact.type == "constraint"
+        for fact in derive_protected_facts(env.sessions.read_events(SESSION))
+    )
+
+
+@pytest.mark.parametrize("budget_delta", [0, -1], ids=["fits-exactly", "one-token-short"])
+@pytest.mark.asyncio
+async def test_extraction_uses_the_exact_protected_fact_budget(
+    env: Env, budget_delta: int,
+) -> None:
+    value = "\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56"
+    _seed_run(env, user_text=value)
+    session = _open_session(env)
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+    source = next(
+        event for event in env.sessions.read_events(SESSION)
+        if event.type == USER_MESSAGE and event.data.get("content") == value
+    )
+    events = env.sessions.read_events(SESSION)
+    fact_data = build_protected_fact_data(
+        events, session_id=SESSION, fact_type="constraint", value=value,
+        source_event_id=source.event_id,
+    )
+    tokens = preview_constraint_registration(
+        events, session_id=SESSION, fact_data=fact_data,
+    ).estimated_tokens_after
+    assert tokens > 0
+    invoker = FakeInvoker(
+        formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=[json.dumps({
+            "candidates": [{"source": "u0", "value": value}],
+        })],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(
+        runner, env, protected_fact_token_budget=tokens + budget_delta,
+    )
+    await runner.drain()
+
+    constraints = [
+        fact for fact in derive_protected_facts(env.sessions.read_events(SESSION))
+        if fact.type == "constraint"
+    ]
+    assert bool(constraints) is (budget_delta == 0)
+    assert _job_rows(env)[0]["stage"] == MemoryJobStage.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_exact_active_constraint_duplicate_adds_no_second_event(env: Env) -> None:
+    value = "\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56"
+    session = Session.start(env.sessions, session_id=SESSION)
+    old_source = session.append(USER_MESSAGE, {"content": value})
+    session.register_protected_fact(
+        fact_type="constraint", value=value, source_event_id=old_source.event_id,
+    )
+    mark = session.mark()
+    env.marks[(SESSION, RUN)] = mark
+    session.append(USER_MESSAGE, {"content": value})
+    session.append(RUN_STARTED, {"turn_index": 1}, run_id=RUN)
+    session.append(MODEL_COMPLETED, {"content": "Understood."}, run_id=RUN)
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+    fact_events_before = [
+        event for event in env.sessions.read_events(SESSION)
+        if event.type == TASK_PROTECTED_FACT
+    ]
+    invoker = FakeInvoker(
+        formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=[json.dumps({
+            "candidates": [{"source": "u0", "value": value}],
+        })],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    fact_events_after = [
+        event for event in env.sessions.read_events(SESSION)
+        if event.type == TASK_PROTECTED_FACT
+    ]
+    assert fact_events_after == fact_events_before
+
+
+@pytest.mark.asyncio
+async def test_seq_conflict_reloads_before_registering_extracted_constraint(
+    env: Env, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = "\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56"
+    _seed_run(env, user_text=value)
+    _open_session(env).append(
+        RUN_COMPLETED, {"status": "completed"}, run_id=RUN,
+    )
+    source = next(
+        event for event in env.sessions.read_events(SESSION)
+        if event.type == USER_MESSAGE and event.data.get("content") == value
+    )
+    invoker = FakeInvoker(
+        formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=[json.dumps({
+            "candidates": [{"source": "u0", "value": value}],
+        })],
+    )
+    original = Session.register_protected_fact
+    raced = False
+
+    def append_after_concurrent_input(session, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            Session.append_event(
+                env.sessions, SESSION, USER_MESSAGE,
+                {"content": "A new message arrived during registration."},
+            )
+        return original(session, **kwargs)
+
+    monkeypatch.setattr(Session, "register_protected_fact", append_after_concurrent_input)
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    events = env.sessions.read_events(SESSION)
+    constraints = [fact for fact in derive_protected_facts(events) if fact.type == "constraint"]
+    assert len(constraints) == 1
+    assert constraints[0].source_event_id == source.event_id
+    fact_event = next(
+        event for event in events
+        if event.type == TASK_PROTECTED_FACT
+        and event.data["fact_id"] == constraints[0].fact_id
+    )
+    assert fact_event.seq > max(event.seq for event in events if event.event_id != fact_event.event_id)
+    assert raced
+
+
+@pytest.mark.parametrize(
+    "kill_case",
+    ["after-candidates-saved", "after-fact-appended"],
+)
+@pytest.mark.asyncio
+async def test_hard_kill_recovery_reuses_saved_candidates_without_duplicate_facts(
+    tmp_path: Path, kill_case: str,
+) -> None:
+    session_id = f"protected-fact-recovery-{kill_case}"
+    run_id = "run-protected-fact-recovery"
+    database = tmp_path / "memory-v2.db"
+    sessions = JsonlSessionStore(tmp_path / "sessions")
+    session = Session.start(sessions, session_id=session_id)
+    user_text = "\u8bf7\u4ee5\u540e\u90fd\u7528 pnpm \u88c5\u4f9d\u8d56"
+    source = session.append(USER_MESSAGE, {"content": user_text})
+    session.append(RUN_STARTED, {"turn_index": 1}, run_id=run_id)
+    session.append(MODEL_COMPLETED, {"content": "Understood."}, run_id=run_id)
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=run_id)
+
+    records = SqliteMemoryV2Store(database)
+    await records.initialize()
+    jobs = SqliteMemoryV2JobStore(database)
+    await jobs.initialize()
+    job = await jobs.enqueue(
+        idempotency_key=f"memory-v2:{run_id}",
+        trusted=TrustedMemoryIdentity(tenant_id="local", user_id="local"),
+        session_id=session_id,
+        run_id=run_id,
+        protected_fact_token_budget=8_192,
+    )
+    child = Path(__file__).with_name("_protected_fact_extraction_kill_child.py")
+    child_env = dict(os.environ)
+    child_env["PYTHONUTF8"] = "1"
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(child),
+        str(tmp_path),
+        kill_case,
+        session_id,
+        cwd=Path(__file__).resolve().parents[3],
+        env=child_env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    barrier = "CANDIDATES_SAVED" if kill_case == "after-candidates-saved" else "FACT_APPENDED"
+    reached_barrier = False
+    output: list[bytes] = []
+    try:
+        deadline = asyncio.get_running_loop().time() + 30
+        while asyncio.get_running_loop().time() < deadline:
+            remaining = deadline - asyncio.get_running_loop().time()
+            try:
+                line = await asyncio.wait_for(
+                    process.stdout.readline(), timeout=remaining,
+                )
+            except TimeoutError:
+                break
+            if not line:
+                break
+            output.append(line)
+            if line.rstrip(b"\r\n") == barrier.encode():
+                reached_barrier = True
+                break
+        if not reached_barrier:
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.wait(), timeout=10)
+            stdout = await process.stdout.read()
+            stderr = await process.stderr.read()
+            raise AssertionError(
+                f"child did not reach {barrier}: rc={process.returncode}, "
+                f"output={output!r}, stdout={stdout!r}, stderr={stderr!r}"
+            )
+
+        facts_at_barrier = [
+            fact for fact in derive_protected_facts(sessions.read_events(session_id))
+            if fact.type == "constraint"
+        ]
+        if kill_case == "after-candidates-saved":
+            assert facts_at_barrier == []
+        else:
+            assert len(facts_at_barrier) == 1
+            assert facts_at_barrier[0].source_event_id == source.event_id
+
+        process.kill()
+        await asyncio.wait_for(process.wait(), timeout=10)
+        await process.stdout.read()
+        await process.stderr.read()
+        assert process.returncode not in (None, 0)
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await asyncio.wait_for(process.wait(), timeout=10)
+            await process.stdout.read()
+            await process.stderr.read()
+
+    restarted_jobs = SqliteMemoryV2JobStore(database)
+    await restarted_jobs.initialize()
+    recovered = await restarted_jobs.claim(
+        worker_id="recovery-worker",
+        now=datetime.now(UTC) + timedelta(hours=1),
+    )
+    assert recovered is not None and recovered.job_id == job.job_id
+
+    class RecoveryInvoker:
+        def __init__(self) -> None:
+            self.stages: list[MemoryModelStage] = []
+
+        async def __call__(self, call: MemoryModelCall) -> str:
+            self.stages.append(call.stage)
+            if call.stage is MemoryModelStage.PROTECTED_FACT_EXTRACTION:
+                raise AssertionError("ready extraction output must be reused")
+            if call.stage is MemoryModelStage.FORMATION:
+                return _formation_no_memory()
+            raise AssertionError(f"unexpected model stage: {call.stage.value}")
+
+    invoker = RecoveryInvoker()
+    service = MemoryV2Service(records, InMemoryMemoryV2Index())
+    executor = MemoryJobExecutor(
+        jobs=restarted_jobs,
+        writer=service,
+        searcher=service,
+        invoker=invoker,
+        session_store=sessions,
+    )
+    result = await executor.run(
+        recovered,
+        worker_id="recovery-worker",
+        run_events=sessions.read_events(session_id),
+        roles=_roles(),
+    )
+
+    facts = [
+        fact for fact in derive_protected_facts(sessions.read_events(session_id))
+        if fact.type == "constraint"
+    ]
+    assert len(facts) == 1
+    assert facts[0].value == user_text
+    assert facts[0].source_event_id == source.event_id
+    assert invoker.stages == [MemoryModelStage.FORMATION]
+    assert result is not None and result.stage is MemoryJobStage.COMPLETED
+    persisted = await restarted_jobs.get(job.job_id)
+    assert persisted.protected_fact_extraction_state.value == "done"
+    assert persisted.protected_fact_extraction_candidates is None
 
 
 @pytest.mark.asyncio

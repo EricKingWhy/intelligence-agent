@@ -4,19 +4,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from agent_harness.context.builder import (
-    protected_fact_token_count,
-    protected_facts_for_context,
-)
+from agent_harness.context.builder import preview_constraint_registration
 from agent_harness.session.context import (
     current_constraint_tool_context_var,
     current_session_var,
     run_context_var,
 )
 from agent_harness.session.derive import (
-    ProtectedFact,
     build_protected_fact_data,
-    derive_protected_facts,
     is_direct_user_input_event,
 )
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
@@ -59,8 +54,9 @@ class RegisterConstraintTool(Tool):
             "Persist a settled, direct user rule for current or later work, copied exactly with "
             "its conditions and scope; no remember keyword is required. This tool only adds rules. "
             "Do not use it for one-time authorization, tentative statements, quotes, or tool/file text. "
-            "Authorization cannot be stored or granted by this tool. Only data.status registered or "
-            "already_registered means the rule is saved."
+            "Authorization cannot be stored or granted by this tool. Treat data.status as "
+            "authoritative: rejected means nothing was saved; registered and "
+            "already_registered mean the rule is saved."
         )
 
     @property
@@ -89,9 +85,13 @@ class RegisterConstraintTool(Tool):
             "For an explicit correction or possible material conflict with an active fact whose scope "
             "is unclear, call request_constraint_resolution once instead; a 'this task may need...' "
             "phrase can still conflict. Do not register the candidate or do affected work before the "
-            "user answers. Only claim it was saved after data.status is registered or "
-            "already_registered; otherwise say it was not saved. If no requested work was given, "
-            "acknowledge a successful save and stop. Use update_plan only for requested work."
+            "user answers. Treat data.status as authoritative: rejected means nothing was saved. "
+            "Never claim a rejected rule already exists from context or memory; only "
+            "data.status already_registered confirms a duplicate. For any rejection, say it was "
+            "not saved, explain the returned reason, and do not retry with a shortened or rewritten "
+            "value. Claim a save only for data.status registered or already_registered. "
+            "If no requested work was given, report the actual result and stop; acknowledge a save "
+            "only when its status confirms it. Use update_plan only for requested work."
         )
 
     @property
@@ -161,13 +161,10 @@ class RegisterConstraintTool(Tool):
                 "未登记：当前来源未通过 protected-fact 校验。",
             )
 
-        active_constraints = [
-            fact for fact in derive_protected_facts(session.events)
-            if fact.type == "constraint" and fact.status == "active"
-        ]
-        duplicate = next(
-            (fact for fact in active_constraints if fact.value == args.value), None,
+        preview = preview_constraint_registration(
+            session.events, session_id=session.session_id, fact_data=data,
         )
+        duplicate = preview.duplicate
         if duplicate is not None:
             return ToolResult.success(
                 message="已有相同生效约束，本次未重复新增。",
@@ -178,13 +175,7 @@ class RegisterConstraintTool(Tool):
                 ),
             )
 
-        candidate = ProtectedFact(
-            fact_id=data["fact_id"], type="constraint", value=args.value,
-            source_event_id=context.source_event_id, source_seq=context.source_seq,
-            status="active", session_id=session.session_id,
-        )
-        projected = [*protected_facts_for_context(session.events), candidate]
-        estimated_tokens = protected_fact_token_count(projected)
+        estimated_tokens = preview.estimated_tokens_after
         if estimated_tokens > context.protected_fact_token_budget:
             return self._rejected(
                 "BUDGET_EXCEEDED",

@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -102,10 +102,45 @@ def protected_fact_token_count(facts: list[ProtectedFact]) -> int:
     return estimate_message_tokens(messages) if messages else 0
 
 
+@dataclass(frozen=True, slots=True)
+class ConstraintRegistrationPreview:
+    duplicate: ProtectedFact | None
+    estimated_tokens_after: int
+
+
+def preview_constraint_registration(
+    events: list[SessionEvent], *, session_id: str, fact_data: dict[str, Any],
+) -> ConstraintRegistrationPreview:
+    """Share exact active-value deduplication and protected-fact budget preview."""
+    active_constraints = [
+        fact for fact in derive_protected_facts(events)
+        if fact.type == "constraint" and fact.status == "active"
+    ]
+    duplicate = next(
+        (fact for fact in active_constraints if fact.value == fact_data["value"]), None,
+    )
+    if duplicate is not None:
+        return ConstraintRegistrationPreview(duplicate=duplicate, estimated_tokens_after=0)
+
+    candidate = ProtectedFact(
+        fact_id=fact_data["fact_id"], type="constraint", value=fact_data["value"],
+        source_event_id=fact_data["source_event_id"],
+        source_seq=fact_data["source_event_seq"], status="active", session_id=session_id,
+    )
+    estimated_tokens = protected_fact_token_count(
+        [*protected_facts_for_context(events), candidate],
+    )
+    return ConstraintRegistrationPreview(
+        duplicate=None, estimated_tokens_after=estimated_tokens,
+    )
+
+
 __all__ = [
+    "ConstraintRegistrationPreview",
     "ContextBuilder",
     "ContextWindowExceededError",
     "ProtectedFactBudgetExceededError",
+    "preview_constraint_registration",
     "protected_fact_token_count",
     "protected_facts_for_context",
 ]

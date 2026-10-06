@@ -209,7 +209,10 @@ def test_constraint_guidance_distinguishes_save_confirmation_and_authorization()
     guidance = RegisterConstraintTool().prompt_guidance.lower()
 
     assert guidance.startswith("classify the current direct user message before calling")
-    assert "only claim it was saved after data.status is registered or already_registered" in guidance
+    assert "rejected means nothing was saved" in guidance
+    assert "never claim a rejected rule already exists from context or memory" in guidance
+    assert "only data.status already_registered confirms a duplicate" in guidance
+    assert "do not retry with a shortened or rewritten value" in guidance
     assert "authorization is not a protected fact" in guidance
     assert "i approve you to push this branch" in guidance
     assert "only merge after all tests pass" in guidance
