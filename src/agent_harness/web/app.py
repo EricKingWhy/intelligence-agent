@@ -26,6 +26,7 @@ from fastapi import (
     FastAPI,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -958,6 +959,20 @@ class WorkflowModeChanged(BaseModel):
 
     id: str
     mode: str
+
+
+class ClientExitSignaled(BaseModel):
+    """`POST /api/sessions/{id}/client-exit` 的成功响应（#360 W-17 / W-12 #356）。
+
+    `status` 取 `ClientExitOutcome.status` 三值之一（`paused` /
+    `ignored_not_managed` / `ignored_already_settled`）；`detail` 为人类可读收口说明。
+    幂等：重复信号按 outcome 语义返回，不双写。
+    """
+
+    id: str
+    status: str
+    run_id: str | None = None
+    detail: str
 
 
 class SetWorkflowModeRequest(BaseModel):
@@ -2629,6 +2644,56 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except StorageBusyError as e:
             raise storage_http_error(e) from e
         return WorkflowModeChanged(id=result["id"], mode=result["mode"])
+
+    @app.post("/api/sessions/{session_id}/client-exit")
+    async def signal_client_exit(
+        session_id: str,
+        request: Request,
+        _: None = Depends(require_trusted_origin),
+    ) -> ClientExitSignaled:
+        """客户端明确退出信号（#360 W-17 / W-12 #356 选项 B 写侧）。
+
+        TUI/桌面客户端退出时调此端点声明"我走了"：服务端走
+        `RunManager.signal_client_exit` 权威硬信号——接受即承诺只走
+        `run/paused(reason=client_absent)`，永不在途杀 Tool（decision 5），
+        幂等（decision 7），fail-closed（decision 4：严格写失败抛 500，
+        run 维持原状）。
+
+        语义：200 → `{id, status, run_id, detail}`（幂等）；
+        404 → 没有这个会话；422 → id 形态非法（先于 404）；
+        500 → 严格 W-05 写失败（run 未被暂停，维持原状继续跑）。
+
+        来源闸（ADR-0025 D1）：在场信号是宿主侧管理动作，只接受本机来源。
+        """
+        from agent_harness.session.client_exit import ClientExitError
+        from agent_harness.session.service import InvalidSessionId
+
+        try:
+            validate_session_id(session_id)
+        except InvalidSessionId as e:
+            raise http_error(e) from e
+        # client_id 仅用于诊断/日志归因（W-12 decision：不构成在场登记）；
+        # body 缺失/非 JSON 时回落 "unknown"，不因此 422。
+        client_id = "unknown"
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and isinstance(body.get("client_id"), str):
+                client_id = body["client_id"][:64]
+        except Exception:  # noqa: BLE001, S110 — body 解析失败不是请求失败
+            pass
+        run_manager = app.state.agent.run_manager
+        try:
+            outcome = await run_manager.signal_client_exit(
+                session_id, client_id=client_id,
+            )
+        except ClientExitError as e:
+            raise HTTPException(status_code=500, detail=e.detail) from e
+        return ClientExitSignaled(
+            id=outcome.session_id,
+            status=outcome.status,
+            run_id=outcome.run_id,
+            detail=outcome.detail,
+        )
 
     @app.get("/api/sessions/{session_id}/context-usage")
     async def get_context_usage(session_id: str):
