@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -145,9 +146,13 @@ class StreamRenderer:
             self._delta_open = True
         elif event.type == TOOL_CALL:
             self._end_delta()
-            args = _collapse_args(event.data.get("args") or {})
-            suffix = f" {args}" if args else ""
-            self._write(f"\n[tool] {event.data['tool_name']}{suffix}\n")
+            theme = self._theme
+            args = _collapse_args(event.data.get("args") or {}, sep=theme.sep())
+            line = ("\n" + theme.paint("accent", theme.glyph("pending"))
+                    + " " + theme.paint("accent", event.data["tool_name"]))
+            if args:
+                line += " " + theme.paint("muted", args)
+            self._write(line + "\n")
         elif event.type == TOOL_RESULT:
             self._render_result(event.data)
         elif event.type == RUN_COMPLETED:
@@ -194,22 +199,25 @@ class StreamRenderer:
             self._delta_open = False
 
 
-def _collapse_args(args: dict) -> str:
+def _collapse_args(args: dict, *, sep: str = " ") -> str:
     """一行折叠工具参数：key=value，字符串含空格才加引号；整体超限截断。
 
     折叠约定借鉴 oh-my-pi formatArgsInline（key=value 预算内联）；嵌套结构
     压成紧凑 JSON（本地快失败用不到嵌套语义，终端只要能认出调用形状）。
+    换行压平借鉴 oh-my-pi flattenForHeader（status-line.ts L28-32，MIT）：
+    调用方字段里的 \\r\\n|\\r|\\n 一律压成单个空格，保证状态行永远单行。
     """
     parts: list[str] = []
     for key, value in args.items():
         if isinstance(value, str):
-            text = f'"{value}"' if (" " in value or not value) else value
+            text = re.sub(r"\r\n?|\n", " ", value)  # flattenForHeader 思想（oh-my-pi，MIT）
+            text = f'"{text}"' if (" " in text or not text) else text
         elif isinstance(value, (dict, list)):
             text = json.dumps(value, ensure_ascii=False)
         else:
             text = str(value)
         parts.append(f"{key}={text}")
-    line = " ".join(parts)
+    line = sep.join(parts)
     if len(line) > _ARGS_LINE_LIMIT:
         line = line[:_ARGS_LINE_LIMIT] + "..."
     return line
