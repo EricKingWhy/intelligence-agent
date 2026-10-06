@@ -9,8 +9,9 @@
   无需压缩（有界 `error_class`，attempt=0 标记非摘要尝试）。
 - 同一 fixture 在 `token_estimate > hard` 时受控异常携带可诊断来源拒绝；
   不写成功 bracket。
-- 合法 ranges 与"首次失败第二次成功"不受影响；预检（0 次尝试）保持空
-  failures。
+- 合法 ranges 与"首次失败第二次成功"不受影响；预检（0 次尝试）自 #639 阶段3a
+  起改为携带一条有界诊断（`preflight_request_exceeds_hard_limit`，attempt=0），
+  与来源失配、无须压缩仍凭 error_class 可区分。
 """
 
 import pytest
@@ -152,15 +153,23 @@ async def test_valid_source_ranges_still_succeed():
 
 
 @pytest.mark.asyncio
-async def test_preflight_rejection_keeps_zero_attempt_failures_empty():
-    """预检拒绝（0 次尝试）保持空 failures——与生成后来源失配可区分。"""
+async def test_preflight_rejection_is_observable_and_distinct_from_source_rejection():
+    """预检拒绝（0 次尝试）携带一条有界诊断，与来源失配/无须压缩可区分。
+
+    #639 阶段3a 起：预检拒绝不再静默——按 #647 的 attempt=0 纪律落一条
+    `preflight_request_exceeds_hard_limit`（有界 error_class + token 数字）。
+    调用方仍能凭 error_class 区分三种 0 次尝试形态：无须压缩=空 failures /
+    预检拒绝 / 生成后来源失配。
+    """
     model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
     # early 段足够大，使摘要请求转录超 hard（8000×0.85=6800）；
     # 调用方入参 token_estimate 在 hard 之内 ⇒ 预检安全继续路径。
+    # fixture 取**不可缩小**形态（巨型内容在首条消息）：阶段 A（#639）的缩小
+    # 重试被跳过，预检拒绝仍按 3a/647 语义立刻走出口（零摘要调用）。
     # （文本必须不可压缩：连串重复字符会被 BPE 高度合并，转录计不出超额。）
     messages = [
-        HumanMessage(content="goal"),
-        AIMessage(content="历史分析 " * 2000),
+        HumanMessage(content="历史分析 " * 2000),
+        AIMessage(content="ok"),
         HumanMessage(content="current"),
     ]
     result = await ContextCompactor(
@@ -170,6 +179,11 @@ async def test_preflight_rejection_keeps_zero_attempt_failures_empty():
         events=_events(), source_ranges=[(1, 1)],
     )
     assert result.compacted_turn_count == 0
-    assert result.failures == []
     assert result.bracket_id is None
     assert len(model.snapshots) == 0
+    # 预检拒绝：一条 attempt=0 的有界诊断（class 不同于来源拒绝）。
+    assert [failure.error_class for failure in result.failures] == [
+        "preflight_request_exceeds_hard_limit",
+    ]
+    assert result.failures[0].attempt == 0
+    assert result.failures[0].request_token_estimate > result.failures[0].hard_limit
