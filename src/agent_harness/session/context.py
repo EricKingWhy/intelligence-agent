@@ -8,6 +8,7 @@ agent；它们只需要"当前 run 是谁"。runtime 在 begin_run 之后设置�
 from __future__ import annotations
 
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,4 +34,24 @@ current_session_var: ContextVar[Session | None] = ContextVar(
 #: 不抛异常）。刻意不落 SessionEvent（不变量 #4：事件是运行事实非诊断明细）。
 memory_injected_ids_var: ContextVar[frozenset[str]] = ContextVar(
     "memory_injected_ids", default=frozenset(),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ConstraintToolContext:
+    """Immutable provenance for constraint tools in one model request."""
+
+    session_id: str
+    run_id: str
+    agent_id: str
+    agent_profile: str | None
+    source_event_id: str
+    source_seq: int
+    source_content: str
+    protected_fact_token_budget: int
+    user_input_request_rejection_code: str | None = None
+
+
+current_constraint_tool_context_var: ContextVar[ConstraintToolContext | None] = (
+    ContextVar("current_constraint_tool_context", default=None)
 )

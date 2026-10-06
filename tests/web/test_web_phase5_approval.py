@@ -1,14 +1,15 @@
 """Phase 5 切片 C：交互式审批 + /approve（SDD 06 Phase 5）。
 
 覆盖：
-- 显式 permission_mode=workspace-write（非 danger）+ DANGER 工具触发 →
+- 显式 permission_mode=workspace-write（非 danger）+ 需审批工具触发 →
   emit tool/approval-requested 事件 + run 暂停 + POST /approve 解决后 run 继续。
 - approval_id 已 resolved → 409；不存在 → 404；session 无 queue → 404。
-- 默认（不显式 permission_mode）→ 不挂 queue，auto-approve 走完。
+- 显式 auto_approve=true（旧客户端 opt-in）→ 不挂 queue，auto-approve 跑完。
 
 用 uvicorn 真服务器（不是 TestClient）：需要在 run 暂停时并发发 /approve。
-ScriptedModel 第一次出 tool_call(bash DANGER) → 触发审批；解决后第二次出
-text 收尾。
+ScriptedModel 第一次出 tool_call(bash) → 触发审批；解决后第二次出 text 收尾。#358 起
+bash 走审批层规则矩阵：只读子集（如 `echo`）免审批，故这里用**非只读**命令
+（`mkdir`）以命中 ASK 规则、真正触发审批。
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from agent_harness.session.event import TOOL_CALL, TOOL_RESULT
 
 
 class _BashThenTextImpl:
-    """实际模型实例：第一次出 bash tool_call（DANGER → 需审批）；第二次出纯文本。"""
+    """实际模型实例：第一次出 bash tool_call（非只读 → 命中 ASK 规则）；第二次出纯文本。"""
 
     def bind_tools(self, tools, **kwargs):
         return self
@@ -32,8 +33,8 @@ class _BashThenTextImpl:
     async def astream(self, messages, **kwargs):
         if not any(getattr(m, "tool_calls", None) for m in messages):
             yield AIMessage(content="", tool_calls=[{
-                "name": "bash", "args": {"command": "echo hi"}, "id": "call1",
-                "type": "tool_call",
+                "name": "bash", "args": {"command": "touch approval_probe"},
+                "id": "call1", "type": "tool_call",
             }])
         else:
             yield AIMessageChunk(content="done")
@@ -251,7 +252,10 @@ async def test_approve_already_resolved_409(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_auto_approve_mode_skips_queue(tmp_path, monkeypatch):
-    """不显式传 permission_mode（旧客户端）→ 不挂 queue，auto-approve 跑完。"""
+    """显式 auto_approve=true（旧客户端 opt-in）→ 不挂 queue，auto-approve 跑完。
+
+    #358 起两字段都缺省的默认已收紧为 ask；这里显式 opt-in 旧行为（向后兼容）。
+    """
     import httpx2
 
     server, serve_task, port, _app = await _start_server(
@@ -262,7 +266,7 @@ async def test_auto_approve_mode_skips_queue(tmp_path, monkeypatch):
         saw_approval_event = False
         async with client.stream(
             "POST", f"http://127.0.0.1:{port}/api/sessions",
-            json={"task": "跑 bash"},  # 无 permission_mode → 老路径
+            json={"task": "跑 bash", "auto_approve": True},  # 显式 opt-in auto-approve
         ) as response:
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
@@ -276,8 +280,6 @@ async def test_auto_approve_mode_skips_queue(tmp_path, monkeypatch):
                     break
         await client.aclose()
         assert session_id
-        assert not saw_approval_event, "无 permission_mode 时不应触发交互审批"
-        # 默认路径不注册交互 queue；run 已完成即可作为断言
-        assert not saw_approval_event
+        assert not saw_approval_event, "auto_approve=true 时不应触发交互审批"
     finally:
         await _shutdown(server, serve_task)

@@ -40,6 +40,9 @@ if TYPE_CHECKING:
 #: 编排类（dispatch）工具名：这些工具**存在**本身就是「还能再委派」这项能力，
 #: 所以剩余深度为 0 时必须从可授予集合里摘掉。将来出现第二个编排工具，加进这里。
 DISPATCH_TOOL_NAMES = frozenset({"delegate"})
+ROOT_ONLY_TOOL_NAMES = frozenset({
+    "register_constraint", "request_constraint_resolution",
+})
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,7 @@ def grantable_names(scope: SpawnScope, allowance: int) -> frozenset[str]:
     会走 `AgentFactory` 的显式拒绝路径，而不是被静默剔除。
     """
     names = {tool.name for tool in scope.registry.list()}
+    names -= ROOT_ONLY_TOOL_NAMES
     if allowance <= 0:
         names -= DISPATCH_TOOL_NAMES
     return frozenset(names)

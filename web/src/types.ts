@@ -616,6 +616,32 @@ export interface RunPausedInfo {
    *  时刻"，那是恢复请求自己的字段，不是额外证据（`#317` 的 stuck 才会有非空项）。 */
   resume_requirements: string[];
   trace_id: string | null;
+  input_request_id?: string | null;
+}
+
+export type ConstraintInputChoice =
+  | 'replace_persistently'
+  | 'current_task_only'
+  | 'keep_existing'
+  | 'custom';
+
+export interface ConstraintInputAnswer {
+  request_id: string;
+  choice: ConstraintInputChoice;
+  custom_text?: string;
+}
+
+export interface PendingConstraintInputRequest {
+  request_id: string;
+  run_id: string;
+  fact_id: string;
+  old_value: string;
+  candidate: string;
+  question: string;
+  source_event_id: string;
+  source_event_seq: number;
+  choices: Array<{ id: ConstraintInputChoice; label: string }>;
+  answer: ConstraintInputAnswer | null;
 }
 
 export interface ConversationState {
@@ -725,6 +751,8 @@ export interface ConversationState {
    *  与 `run_interrupted` 是**两个**事实，别合并：中断 = 进程重启打断（终态、
    *  不可恢复），暂停 = 预算到顶（非终态、可被同 run 恢复）。UI 必须分别呈现。 */
   run_paused: RunPausedInfo | null;
+  /** Durable protected-fact question and any answer already committed for it. */
+  pending_constraint_input: PendingConstraintInputRequest | null;
   /** #220：`run/failed.data` 的失败归因折叠。两个键**互相独立**（`session.end_run` 各自
    *  判空）：`reason` 是机器可读码——已分类故障给 `provider_*`，未分类给异常类型名
    *  （#222 起 reason 在运行期路径上**总有值**），`message` 是随附文案——已分类的供应商

@@ -1,0 +1,1 @@
+2026-10-06	#738 merge 前同步合并机械归属行（PR #757 分支保护要求 up-to-date）：merge 合 origin/main 58132f80（来侧 = #360 TUI client tui/ + tests/web/test_client_exit_api.py 等，来侧全在 tui/ + tests/web/ + docs/，与本票 src/agent_harness/cli.py/tests/test_cli.py 零文件交集）；本 commit 零手工改动，纯机械合并。	b4a22b8d2935ab2f2d5e67e9d5c12d067191bbc3..f4274d48aa1e00b271f562f10e7788c9661b06a2

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -46,6 +47,15 @@ from pathlib import Path
 import anyio.to_thread
 
 from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
+    REASON_USER_INPUT,
+    TRIGGER_USER_INPUT,
+    SessionBudgetSnapshot,
+    build_pause_data,
+    derive_run_budget,
+    deterministic_continuation,
+    latest_paused_run,
+    latest_run_id,
     session_budget_key,
     session_model_request_accounting,
 )
@@ -61,7 +71,12 @@ from agent_harness.session.event import (
     MODEL_REQUEST,
     MODEL_REQUEST_STARTED,
     RUN_INTERRUPTED,
+    RUN_PAUSED,
     SESSION_FORKED,
+    TOOL_CALL,
+    TOOL_RESULT,
+    USER_INPUT_REQUESTED,
+    USER_MESSAGE,
     SessionEvent,
 )
 from agent_harness.session.interrupt import InterruptedRun, detect_unterminated_runs
@@ -93,6 +108,7 @@ class InterruptionScanResult:
     interrupted: list[InterruptedRun] = field(default_factory=list)
     recovery: ScanRecovery = ScanRecovery.RECOVERED
     detail: str | None = None
+    budget_recovery_failed: bool = False
 
 
 async def scan_interrupted_sessions(
@@ -102,6 +118,9 @@ async def scan_interrupted_sessions(
     workspace_registry: WorkspaceRegistry | None,
     database_path: str | Path | None,
     reconcile_callback: ReconcileCallback | None = None,
+    session_budget_reader: Callable[[str], Awaitable[SessionBudgetSnapshot | None]]
+    | None = None,
+    session_tool_result_recorder: Callable[..., Awaitable[bool]] | None = None,
     session_budget_ledger: SqliteDelegationTreeLedger | None = None,
     lock_timeout_seconds: float = 5.0,
 ) -> list[InterruptionScanResult]:
@@ -111,9 +130,126 @@ async def scan_interrupted_sessions(
     重复扫描不会重复追加）。无中断的 session 不出现在返回值里。
     """
     results: list[InterruptionScanResult] = []
+    if session_budget_ledger is not None:
+        session_budget_reader = (
+            session_budget_reader or session_budget_ledger.get_session_budget
+        )
+        session_tool_result_recorder = (
+            session_tool_result_recorder
+            or session_budget_ledger.record_session_tool_call
+        )
     session_ids = await anyio.to_thread.run_sync(session_store.list_session_ids)
     for session_id in session_ids:
         try:
+            events = await anyio.to_thread.run_sync(
+                session_store.read_events, session_id,
+            )
+            budget_key = session_budget_key(events, session_id=session_id)
+            try:
+                await _replay_constraint_tool_budget(
+                    events,
+                    budget_key=budget_key,
+                    recorder=session_tool_result_recorder,
+                    reader_configured=session_budget_reader is not None,
+                )
+            except Exception as error:  # noqa: BLE001 - budget replay must fail closed
+                results.append(InterruptionScanResult(
+                    session_id=session_id,
+                    recovery=ScanRecovery.FAILED,
+                    detail=f"protected-constraint session budget replay failed: {error}",
+                    budget_recovery_failed=True,
+                ))
+                continue
+
+            pending_input = await anyio.to_thread.run_sync(
+                _pending_unpaused_user_input, events,
+            )
+            if pending_input is not None:
+                if session_budget_ledger is not None:
+                    try:
+                        await _recover_session_model_requests(
+                            session_id, events, session_budget_ledger,
+                        )
+                    except Exception as error:  # model accounting recovery is fail-closed
+                        logger.exception(
+                            "启动扫描：session=%s SessionBudget model request reconcile failed",
+                            session_id,
+                        )
+                        markers = await session_budget_ledger.pending_model_request_accountings(
+                            budget_key, session_id=session_id,
+                        )
+                        for marker in markers:
+                            session_budget_ledger.block_model_request_accounting(
+                                budget_key, marker.accounting_id,
+                            )
+                        results.append(InterruptionScanResult(
+                            session_id=session_id,
+                            recovery=ScanRecovery.FAILED,
+                            detail=f"SessionBudget reconcile failed: {error}",
+                            budget_recovery_failed=True,
+                        ))
+                        continue
+                coordinator = RecoveryCoordinator(
+                    session_store=session_store,
+                    workspace_registry=workspace_registry,
+                    operation_ledger=operation_ledger,
+                    reconcile_callback=reconcile_callback,
+                    database_path=database_path,
+                    lock_timeout_seconds=lock_timeout_seconds,
+                )
+                recovery_error: Exception | None = None
+                try:
+                    await coordinator.recover(session_id)
+                except (ReconcileRequired, RecoveryError) as error:
+                    recovery_error = error
+                try:
+                    events = await anyio.to_thread.run_sync(
+                        session_store.read_events, session_id,
+                    )
+                    await _replay_constraint_tool_budget(
+                        events,
+                        budget_key=budget_key,
+                        recorder=session_tool_result_recorder,
+                        reader_configured=session_budget_reader is not None,
+                    )
+                    session_budget = (
+                        await session_budget_reader(budget_key)
+                        if session_budget_reader is not None else None
+                    )
+                    if session_budget_reader is not None and session_budget is None:
+                        raise RecoveryError(
+                            "待处理用户问题缺少 session budget 快照；拒绝伪造暂停状态"
+                        )
+                except Exception as error:  # noqa: BLE001 - budget replay must fail closed
+                    results.append(InterruptionScanResult(
+                        session_id=session_id,
+                        recovery=ScanRecovery.FAILED,
+                        detail=str(error),
+                        budget_recovery_failed=True,
+                    ))
+                    continue
+                await anyio.to_thread.run_sync(
+                    _append_pending_user_input_pause,
+                    session_store, session_id, session_budget,
+                )
+                if isinstance(recovery_error, ReconcileRequired):
+                    results.append(InterruptionScanResult(
+                        session_id=session_id,
+                        recovery=ScanRecovery.NEEDS_MANUAL_RECONCILE,
+                        detail=str(recovery_error),
+                    ))
+                elif recovery_error is not None:
+                    results.append(InterruptionScanResult(
+                        session_id=session_id,
+                        recovery=ScanRecovery.FAILED,
+                        detail=str(recovery_error),
+                    ))
+                else:
+                    results.append(InterruptionScanResult(
+                        session_id=session_id,
+                        recovery=ScanRecovery.RECOVERED,
+                    ))
+                continue
             interrupted = await anyio.to_thread.run_sync(
                 _mark_interrupted, session_store, session_id
             )
@@ -186,6 +322,25 @@ async def scan_interrupted_sessions(
                            f"{operation_detail or 'ok'}",
                 ))
             else:
+                try:
+                    events = await anyio.to_thread.run_sync(
+                        session_store.read_events, session_id,
+                    )
+                    await _replay_constraint_tool_budget(
+                        events,
+                        budget_key=budget_key,
+                        recorder=session_tool_result_recorder,
+                        reader_configured=session_budget_reader is not None,
+                    )
+                except Exception as error:  # noqa: BLE001 - replay after recovery must fail closed
+                    results.append(InterruptionScanResult(
+                        session_id=session_id,
+                        interrupted=interrupted,
+                        recovery=ScanRecovery.FAILED,
+                        detail=f"protected-constraint session budget replay failed: {error}",
+                        budget_recovery_failed=True,
+                    ))
+                    continue
                 results.append(InterruptionScanResult(
                     session_id=session_id, interrupted=interrupted,
                     recovery=operation_recovery, detail=operation_detail,
@@ -198,6 +353,248 @@ async def scan_interrupted_sessions(
                 detail=str(error),
             ))
     return results
+
+
+async def _record_constraint_tool_results(
+    events: list[SessionEvent], *, budget_key: str,
+    recorder: Callable[..., Awaitable[bool]],
+) -> int:
+    """Replay the protected-fact question tool's durable delta before pause projection."""
+    candidates = _constraint_tool_result_candidates(events)
+    calls_by_id: dict[str, list[SessionEvent]] = {}
+    for event in events:
+        tool_call_id = event.data.get("tool_call_id")
+        if event.type == TOOL_CALL and isinstance(tool_call_id, str) and tool_call_id:
+            calls_by_id.setdefault(tool_call_id, []).append(event)
+    seen_result_ids: set[str] = set()
+    recorded = 0
+    for event in candidates:
+        tool_call_id = event.data.get("tool_call_id")
+        delta = event.data.get("budget_delta")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            raise RecoveryError("澄清工具结果缺少有效 tool_call_id")
+        matching_calls = calls_by_id.get(tool_call_id, [])
+        if len(matching_calls) != 1:
+            raise RecoveryError(
+                "澄清工具结果必须匹配唯一的 tool_call"
+                f"（tool_call_id={tool_call_id}）"
+            )
+        call = matching_calls[0]
+        if (
+            call.data.get("tool_name") != "request_constraint_resolution"
+            or call.run_id != event.run_id
+            or (
+                event.step_id is not None
+                and call.step_id != event.step_id
+            )
+        ):
+            raise RecoveryError(
+                "澄清工具结果与 tool_call 的名称或运行位置不匹配"
+                f"（tool_call_id={tool_call_id}）"
+            )
+        if tool_call_id in seen_result_ids:
+            raise RecoveryError(
+                f"澄清工具结果重复（tool_call_id={tool_call_id}）"
+            )
+        seen_result_ids.add(tool_call_id)
+        if not isinstance(event.data.get("content"), str):
+            raise RecoveryError(
+                f"澄清工具结果缺少有效 content（tool_call_id={tool_call_id}）"
+            )
+        if (
+            not isinstance(delta, dict)
+            or delta.get("tool_name") != "request_constraint_resolution"
+        ):
+            raise RecoveryError(
+                f"澄清工具结果缺少匹配的预算增量（tool_call_id={tool_call_id}）"
+            )
+        calls = delta.get("tool_calls")
+        attempts = delta.get("tool_attempts")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (calls, attempts)
+        ):
+            raise RecoveryError(
+                f"澄清工具结果的预算增量无效（tool_call_id={tool_call_id}）"
+            )
+        await recorder(
+            budget_key,
+            tool_call_id=tool_call_id,
+            tool_name="request_constraint_resolution",
+            calls=calls,
+            attempts=attempts,
+        )
+        recorded += 1
+    return recorded
+
+
+def _constraint_tool_result_candidates(
+    events: list[SessionEvent],
+) -> list[SessionEvent]:
+    """Identify result events that claim or could be a constraint tool result.
+
+    Pairing validation belongs to the replay path. This shared candidate predicate also
+    makes the no-recorder guard fail closed for malformed target deltas.
+    """
+    constraint_calls = [
+        event for event in events
+        if event.type == TOOL_CALL
+        and event.data.get("tool_name") == "request_constraint_resolution"
+    ]
+    constraint_ids = {
+        event.data.get("tool_call_id")
+        for event in constraint_calls
+        if isinstance(event.data.get("tool_call_id"), str)
+        and event.data["tool_call_id"]
+    }
+    constraint_contexts = {
+        (event.run_id, event.step_id) for event in constraint_calls
+    }
+    all_call_ids = {
+        event.data.get("tool_call_id")
+        for event in events
+        if event.type == TOOL_CALL
+        and isinstance(event.data.get("tool_call_id"), str)
+        and event.data["tool_call_id"]
+    }
+    candidates: list[SessionEvent] = []
+    for event in events:
+        if event.type != TOOL_RESULT:
+            continue
+        tool_call_id = event.data.get("tool_call_id")
+        delta = event.data.get("budget_delta")
+        claims_constraint_budget = (
+            isinstance(delta, dict)
+            and delta.get("tool_name") == "request_constraint_resolution"
+        )
+        matches_constraint_call = (
+            isinstance(tool_call_id, str) and tool_call_id in constraint_ids
+        )
+        is_unidentified_or_orphaned_in_constraint_step = (
+            (not isinstance(tool_call_id, str) or not tool_call_id
+             or tool_call_id not in all_call_ids)
+            and (event.run_id, event.step_id) in constraint_contexts
+        )
+        if (
+            claims_constraint_budget
+            or matches_constraint_call
+            or is_unidentified_or_orphaned_in_constraint_step
+        ):
+            candidates.append(event)
+    return candidates
+
+
+async def record_constraint_tool_results(
+    events: list[SessionEvent], *, budget_key: str,
+    recorder: Callable[..., Awaitable[bool]],
+) -> int:
+    """Public idempotent replay entry for durable protected-constraint results."""
+    return await _record_constraint_tool_results(
+        events, budget_key=budget_key, recorder=recorder,
+    )
+
+
+async def _replay_constraint_tool_budget(
+    events: list[SessionEvent],
+    *,
+    budget_key: str,
+    recorder: Callable[..., Awaitable[bool]] | None,
+    reader_configured: bool,
+) -> None:
+    if recorder is not None:
+        await _record_constraint_tool_results(
+            events, budget_key=budget_key, recorder=recorder,
+        )
+    elif reader_configured and _has_constraint_tool_result(events):
+        raise RecoveryError(
+            "constraint tool result has no idempotent session budget recorder"
+        )
+
+
+def _pending_unpaused_user_input(
+    events: list[SessionEvent],
+) -> str | None:
+    run_id = latest_run_id(events)
+    if run_id is None or latest_paused_run(events) is not None:
+        return None
+    if not any(item.run_id == run_id for item in detect_unterminated_runs(events)):
+        return None
+    answered = {
+        event.data.get("input_request_id")
+        for event in events
+        if event.type == USER_MESSAGE
+        and isinstance(event.data.get("input_request_id"), str)
+    }
+    request = next(
+        (
+            event for event in reversed(events)
+            if event.type == USER_INPUT_REQUESTED
+            and event.run_id == run_id
+            and isinstance(event.data.get("request_id"), str)
+            and event.data["request_id"] not in answered
+        ),
+        None,
+    )
+    return request.data["request_id"] if request is not None else None
+
+
+def _has_constraint_tool_result(events: list[SessionEvent]) -> bool:
+    return bool(_constraint_tool_result_candidates(events))
+
+
+def _append_pending_user_input_pause(
+    session_store: JsonlSessionStore,
+    session_id: str,
+    session_budget: SessionBudgetSnapshot | None = None,
+) -> None:
+    events = session_store.read_events(session_id)
+    run_id = latest_run_id(events)
+    if run_id is None or latest_paused_run(events) is not None:
+        return
+    answered = {
+        event.data.get("input_request_id")
+        for event in events
+        if event.type == USER_MESSAGE
+        and isinstance(event.data.get("input_request_id"), str)
+    }
+    request = next(
+        (
+            event for event in reversed(events)
+            if event.type == USER_INPUT_REQUESTED
+            and event.run_id == run_id
+            and isinstance(event.data.get("request_id"), str)
+            and event.data["request_id"] not in answered
+        ),
+        None,
+    )
+    if request is None:
+        return
+    state = derive_run_budget(events, run_id)
+    request_id = request.data["request_id"]
+    continuation = deterministic_continuation(
+        events=events, run_id=run_id, trigger_dimension=TRIGGER_USER_INPUT,
+        limits=state.limits, consumed=state.consumed,
+        reason=REASON_USER_INPUT, input_request_id=request_id,
+    )
+    limits = {"local": None, "run": state.limits.as_projection()}
+    if session_budget is not None:
+        limits["session"] = session_budget.limits.as_projection()
+    data = build_pause_data(
+        reason=REASON_USER_INPUT, trigger_dimension=TRIGGER_USER_INPUT,
+        version=state.version, consumed=state.consumed,
+        limits=limits,
+        continuation=continuation, closeout_source=CLOSEOUT_DETERMINISTIC,
+        input_request_id=request_id,
+    )
+    if session_budget is not None:
+        data["session"] = {
+            "version": session_budget.version,
+            "consumed": session_budget.consumed.as_projection(),
+        }
+    Session.append_event(
+        session_store, session_id, RUN_PAUSED, data,
+        run_id=run_id, step_id=request.step_id,
+    )
 
 
 async def _recover_session_model_requests(

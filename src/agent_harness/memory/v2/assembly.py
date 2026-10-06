@@ -126,6 +126,7 @@ async def build_memory_formation(
     observability = get_observability_sink(settings)
     executor = MemoryJobExecutor(
         jobs=jobs, writer=service, searcher=service, invoker=ChatModelInvoker(),
+        session_store=sessions,
         observer=(observability.memory_observation if observability.enabled else None),
     )
     # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每次终结通知时从
