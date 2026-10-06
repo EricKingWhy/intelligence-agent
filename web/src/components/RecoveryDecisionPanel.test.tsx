@@ -182,6 +182,22 @@ describe('RecoveryDecisionPanel', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('来源输入框内按 Esc 不关闭面板、不丢已输入内容', () => {
+    const { onClose } = render();
+    act(() => radio('call-a', 'CONFIRM_SUCCESS').click());
+    const custom = document.querySelector('.recovery-source-custom') as HTMLInputElement;
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      setter.call(custom, '看了 DB 表');
+      custom.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      custom.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(custom.value).toBe('看了 DB 表');
+  });
+
   it('提交中禁用提交按钮并显示进度文案', () => {
     render({ submitting: true });
     const submit = document.querySelector('.recovery-submit-btn') as HTMLButtonElement;

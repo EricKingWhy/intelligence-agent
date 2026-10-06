@@ -166,6 +166,13 @@ export function RecoveryDecisionPanel({ decisions, submitting, message, onSubmit
                       disabled={submitting}
                       placeholder="例如：查了数据库 / 文件 / 外部系统"
                       onChange={(event) => setSource(decision.tool_call_id, { sourceCustom: event.target.value })}
+                      onKeyDown={(event) => {
+                        // 输入框内按 Esc 只收起输入焦点，不关闭面板，避免丢掉已输入的来源说明
+                        if (event.key === 'Escape') {
+                          event.stopPropagation();
+                          event.currentTarget.blur();
+                        }
+                      }}
                     />
                   </label>
                   <p className="recovery-source-hint">最多 {RECOVERY_SOURCE_MAX} 个字符；来源可选，不写也不影响裁决。</p>

@@ -213,7 +213,8 @@
 }
 
 .recovery-batch-btn,
-.recovery-submit-btn {
+.recovery-submit-btn,
+.recovery-list-retry {
   font-size: var(--text-sm);
   border-radius: var(--radius-sm);
   padding: 6px 12px;
@@ -221,12 +222,14 @@
   border: 1px solid var(--border-strong);
 }
 
-.recovery-batch-btn {
+.recovery-batch-btn,
+.recovery-list-retry {
   background: transparent;
   color: var(--text-primary);
 }
 
-.recovery-batch-btn:hover:not(:disabled) {
+.recovery-batch-btn:hover:not(:disabled),
+.recovery-list-retry:hover {
   background: var(--surface-hover);
 }
 
@@ -241,6 +244,13 @@
 .recovery-submit-btn:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.recovery-list-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
 }
 
 /* ── 恢复列表面板（RecoveryListPanel） ── */
