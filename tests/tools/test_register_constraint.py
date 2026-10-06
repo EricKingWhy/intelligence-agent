@@ -202,3 +202,21 @@ def test_resolution_schema_and_guidance_require_exact_single_request():
     assert "wait for the user" in guidance
     assert "do not use another tool" in guidance
     assert "answer to this choice is not a new constraint" in guidance
+
+
+def test_constraint_guidance_distinguishes_save_confirmation_and_authorization():
+    guidance = RegisterConstraintTool().prompt_guidance.lower()
+
+    assert "only claim it was saved after data.status is registered or already_registered" in guidance
+    assert "authorization is not a protected fact" in guidance
+    assert "i approve you to push this branch" in guidance
+    assert "only merge after all tests pass" in guidance
+
+
+def test_possible_conflict_guidance_requests_clarification_without_deferring():
+    guidance = RequestConstraintResolutionTool().prompt_guidance.lower()
+
+    assert "even when the possible requirement is phrased as maybe or might" in guidance
+    assert "do not wait for the user to confirm the conflict" in guidance
+    assert "a pending card does not authorize the conflicting action" in guidance
+    assert "do not infer task-only scope from 'this task' phrasing alone" in guidance

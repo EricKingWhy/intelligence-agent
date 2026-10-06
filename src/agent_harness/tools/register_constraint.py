@@ -63,6 +63,7 @@ class RegisterConstraintTool(Tool):
             "constraint exactly, including negation, conditions, and scope. This tool only adds "
             "a constraint; it cannot replace or authorize anything. Do not register guesses, "
             "tentative or undecided statements, tool/file text, unaccepted quotes, or authorization. "
+            "Approval such as 'I approve you to push this branch' is authorization, not a protected fact. "
             "If the message contains no requested work, save a durable constraint once and stop; "
             "do not inspect files or use work-planning tools. Use update_plan only when the user "
             "actually requested work. Read data.status: only registered means newly saved; "
@@ -84,21 +85,26 @@ class RegisterConstraintTool(Tool):
     @property
     def prompt_guidance(self) -> str:
         return (
-            "When the delivered user message contains an important constraint that should "
-            "guide this or later work, call register_constraint exactly once before replying, "
-            "even when it is a standalone statement and has no remember keyword. Merely "
-            "acknowledging or repeating the rule does not save it. Preserve the full original wording, including negation, "
+            "Before replying, check for a settled direct rule governing this or later work. "
+            "Rules about dependency changes, platform compatibility, test requirements, or merge "
+            "conditions count; for example, only merge after all tests pass. When one appears, "
+            "call register_constraint exactly once before replying, even as a standalone statement "
+            "with no remember keyword. Merely acknowledging or repeating the rule does not save it. "
+            "Preserve the full original wording, including negation, "
             "conditions, and scope. Save only settled constraints: wording such as maybe, might, "
             "perhaps, not decided, 也许, 可能, or 还没有决定 is tentative; do not save it or "
             "rewrite it as a definite rule. Do not save uncertain attribution, speculation, model "
-            "conclusions, file/tool output, unaccepted quotations, or authorization. If there is "
+            "conclusions, file/tool output, unaccepted quotations, or authorization. Authorization "
+            "is not a protected fact: do not register approval such as 'I approve you to push this "
+            "branch'; if that is the only content, do not call register_constraint. If there is "
             "no requested work, register a durable constraint at most once, acknowledge it, and "
             "stop; do not call update_plan, inspect the workspace, or use other work tools. Every explicit "
             "correction of an active protected constraint must go through request_constraint_resolution, "
             "even when its wording sounds clear. For another material constraint that may conflict, "
             "use that tool only when persistence scope is unclear. Use update_plan for task status "
-            "only when the user requested work. A rejected result means the constraint was not saved; "
-            "say so clearly, do not claim success, and do not retry the same candidate unchanged."
+            "only when the user requested work. Only claim it was saved after data.status is "
+            "registered or already_registered; otherwise say it was not saved. A rejected result "
+            "means the constraint was not saved; do not claim success or retry the same candidate unchanged."
         )
 
     @property
