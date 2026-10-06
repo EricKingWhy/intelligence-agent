@@ -101,6 +101,55 @@ async def test_pre_cas_name_set_matches_real_root_registry(tmp_path, multiagent)
         assert "delegate" not in helper_names
 
 
+@pytest.mark.asyncio
+async def test_root_reconcile_info_projection_matches_real_root_registry(tmp_path):
+    """#357 W-13 R12-R14：`root_registry_reconcile_info`（零副作用）与真实装配对账。
+
+    恢复裁决展示字段（default_action/probe）的判据必须与真实根 registry 的
+    工具面同源——键集漂移 = 展示字段对真实工具说谎（fail-closed 伪装成已知）。
+    """
+    from agent_harness.assembly import root_registry_reconcile_info
+    from agent_harness.tooling.contract import ToolReconcileInfo
+    from agent_harness.tools.bash import BashTool
+    from agent_harness.tools.read import ReadTool
+
+    settings = _settings(tmp_path, multiagent=False)
+    _, wiring = await assemble_wiring(settings)
+    session_id = "sess-reconcile-info"
+    workspace = tmp_path / "workspaces" / session_id
+    session_store = JsonlSessionStore(tmp_path / "sessions")
+
+    tooling = _build_tooling(
+        settings, wiring,
+        session_id=session_id, workspace=workspace,
+        workspace_registry=WorkspaceRegistry(tmp_path, backend="local"),
+        session_store=session_store,
+        agent_profile=None,
+    )
+    helper_names = {tool.name for tool in tooling.registry.list()}
+
+    info = root_registry_reconcile_info(
+        settings, wiring, session_id=session_id, session_store=session_store,
+    )
+    assert set(info) == helper_names == root_registry_tool_names(
+        settings, wiring, session_id=session_id, session_store=session_store,
+    ), "reconcile info 投影与真实根 registry 漂移"
+
+    assert all(isinstance(v, ToolReconcileInfo) for v in info.values())
+    # R13/R14 判据逐字对账：read（replay_safe=True）与 bash（默认 unsafe）。
+    assert info[ReadTool(None).name].replay_safe is True
+    assert info[ReadTool(None).name].verifiable is (
+        ReadTool(None).reconcile_hint.verifiable
+    )
+    assert info[ReadTool(None).name].suggested_action == (
+        ReadTool(None).reconcile_hint.suggested_action
+    )
+    assert info[BashTool(None).name].replay_safe is False
+    assert info[BashTool(None).name].verifiable is (
+        BashTool(None).reconcile_hint.verifiable
+    )
+
+
 def test_root_profile_spec_resolves_the_declared_profile():
     """#615②：根配额取用点的判定表——None/main 落 main，具名档位返回自身。"""
     from agent_harness.agent.profiles import BUILTIN_PROFILES

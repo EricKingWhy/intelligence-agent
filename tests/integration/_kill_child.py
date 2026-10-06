@@ -44,12 +44,14 @@ async def main() -> None:
     config = json.loads(sys.argv[1])
     root = Path(config["root"])
     calls = config["calls"]
-    kill_stage = config["kill_stage"]
-    kill_call_id = config["kill_call_id"]
-    kill_delay = config.get("kill_delay_seconds", 0.0)
+    kill_stage = config.get("kill_stage")
+    kill_call_id = config.get("kill_call_id")
 
     store = JsonlSessionStore(root / "sessions")
-    ledger = SqliteOperationLedger(root / "state.db")
+    # #357 W-13（R20）：ledger 文件名可配——全环场景里 web 组合根的
+    # harness.db 固定为 <workspace_dir>/harness.db，子进程要写同一份账本，
+    # 启动扫描才看得到同一份 Ledger 事实。缺省保持 state.db（既有场景零迁移）。
+    ledger = SqliteOperationLedger(root / config.get("db", "state.db"))
     await ledger.initialize()
     # Phase 16 T4（ADR-0019 D4/D5）：默认 local，config 可选 backend="docker"
     # 支持 Docker sandbox kill/restore 分段。缺省走 local 不影响 Phase 4 调用方。
@@ -59,6 +61,10 @@ async def main() -> None:
     session = Session.start(store)
     sandbox = workspaces.create(session.session_id)  # 崩溃前创建 workspace 映射
     session.append(USER_MESSAGE, {"content": "do the work"})
+    # #357 W-13（R20）：真实会话的 run 一定有 run/started（Session.begin_run）。
+    # 此前手写 "run-1" 缺该事件，启动扫描的 detect_unterminated_runs 看不到
+    # 「开了没关」的 run——全环场景（启动扫描 → 恢复列表 → 409 → 裁决）需要它。
+    run_id, _ = session.begin_run()
     session.append(
         MODEL_COMPLETED,
         {
@@ -68,7 +74,7 @@ async def main() -> None:
                 for call in calls
             ],
         },
-        run_id="run-1",
+        run_id=run_id,
         step_id=1,
     )
     for call in calls:
@@ -79,18 +85,28 @@ async def main() -> None:
                 "tool_name": call["name"],
                 "args": call["args"],
             },
-            run_id="run-1",
+            run_id=run_id,
             step_id=1,
         )
 
+    # #357 W-13（R19）：多 kill 窗口（同一进程内不同 call 停在不同注入点）。
+    # 缺省回落单窗口旧形状（kill_stage/kill_call_id），既有场景零迁移。
+    kill_specs: list[dict] = config.get("kills") or [
+        {"stage": kill_stage, "call_id": kill_call_id,
+         "delay": config.get("kill_delay_seconds", 0.0)},
+    ]
+
     def kill_hook(stage: str, call_id: str) -> None:
-        if stage == kill_stage and call_id == kill_call_id:
-            if kill_delay:
+        for spec in kill_specs:
+            if spec["stage"] != stage or spec["call_id"] != call_id:
+                continue
+            delay = spec.get("delay", 0.0)
+            if delay:
                 # 延迟退出：hook 触发后工具继续真实执行，delay 秒后进程在
                 # 【执行中途】死亡——bash RUNNING 场景（#33）的 mid-flight 崩溃。
                 import threading
 
-                threading.Timer(kill_delay, os._exit, args=(137,)).start()
+                threading.Timer(delay, os._exit, args=(137,)).start()
             else:
                 os._exit(137)  # 真实崩溃：不跑清理、不 flush、直接终止进程
 

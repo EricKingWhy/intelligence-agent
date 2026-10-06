@@ -806,21 +806,26 @@ def test_recover_endpoint_repairs_dangling_tool_call(client):
 # ── #547：POST /recover 的用户裁决合同（方向 1，用户拍板 2026-10-03）──────
 
 
-async def _seed_reconcile_window(state, call_ids: list[str]):
+async def _seed_reconcile_window(
+    state, call_ids: list[str], tool_names: list[str] | None = None
+):
     """制造「执行中 kill」的持久现场：tool/call 悬空 + Ledger 行 UNKNOWN。
 
     状态机两步链（#30）：PENDING → RUNNING → UNKNOWN，不许跳步直达。
+    ``tool_names``（#357 W-13 R12-R14）：逐 call 指定账行的 tool_name（默认全
+    bash），供展示字段按工具元数据（replay_safe / reconcile_hint）分流断言。
     """
     from agent_harness.storage import Operation, OperationState
 
+    names = tool_names or ["bash"] * len(call_ids)
     ledger = state.stores.operation_ledger
     await ledger.initialize()
     session = Session.start(state.store)
     run_id, _ = session.begin_run()
-    for call_id in call_ids:
+    for call_id, tool_name in zip(call_ids, names):
         session.append(
             TOOL_CALL,
-            {"tool_call_id": call_id, "tool_name": "bash", "args": {}},
+            {"tool_call_id": call_id, "tool_name": tool_name, "args": {}},
             run_id=run_id,
         )
         await ledger.create(
@@ -829,7 +834,7 @@ async def _seed_reconcile_window(state, call_ids: list[str]):
                 session_id=session.session_id,
                 run_id=run_id,
                 agent_id=None,
-                tool_name="bash",
+                tool_name=tool_name,
                 args_identity="{}",
                 state=OperationState.PENDING,
                 started_at="2026-10-03T00:00:00Z",
@@ -1082,6 +1087,71 @@ def test_recover_decision_source_is_optional_and_capped(client):
     )
     marked = json.loads(_row("call-marked").reconcile_meta)
     assert marked["source"] == "我查了 git status，改动已落盘"
+
+
+def test_recover_409_pending_decisions_carry_recovery_display_fields(client):
+    """R12-R14（#357 W-13）：pending_decisions 每条增只读展示字段。
+
+    - R12：``default_action`` / ``risk_level`` / ``probe{verifiable,
+      suggested_action}`` 齐全，只读展示、不改 409 裁决合同语义；
+    - R13：默认动作由工具 ``replay_safe`` 决定——read（只读、已声明 safe）→
+      RETRY/low；bash（未声明）→ DEFER/high（#14 安全侧；Pi 双 safe 形状）；
+    - R14：probe 逐字取工具既有 ``ReconcileHint``，不伪造「已查到/未查到」结论；
+      账行工具名不在根 registry（未知工具）→ fail-closed：DEFER/high +
+      verifiable=false。
+    """
+    state = client.app.state.agent
+    session = asyncio.run(
+        _seed_reconcile_window(
+            state, ["call-read", "call-bash", "call-ghost"],
+            tool_names=["read", "bash", "no-such-tool"],
+        )
+    )
+
+    resp = client.post(f"/api/sessions/{session.session_id}/recover")
+
+    assert resp.status_code == 409
+    pending = {
+        p["tool_call_id"]: p for p in resp.json()["detail"]["pending_decisions"]
+    }
+    assert set(pending) == {"call-read", "call-bash", "call-ghost"}
+
+    from agent_harness.tools.read import ReadTool
+
+    hint = ReadTool(None).reconcile_hint
+
+    read_row = pending["call-read"]
+    assert read_row["tool_name"] == "read"
+    assert read_row["state"] == "UNKNOWN"
+    assert read_row["default_action"] == "RETRY"
+    assert read_row["risk_level"] == "low"
+    # R14：probe 逐字 = 工具声明的 ReconcileHint（单一事实源，不造第二份文案）。
+    assert read_row["probe"] == {
+        "verifiable": hint.verifiable,
+        "suggested_action": hint.suggested_action,
+    }
+
+    bash_row = pending["call-bash"]
+    assert bash_row["default_action"] == "DEFER"
+    assert bash_row["risk_level"] == "high"
+    # bash 未覆写 hint：默认 unverifiable（07 §7：各命令副作用彼此不同）。
+    assert bash_row["probe"] == {"verifiable": False, "suggested_action": None}
+
+    ghost_row = pending["call-ghost"]
+    assert ghost_row["default_action"] == "DEFER"
+    assert ghost_row["risk_level"] == "high"
+    assert ghost_row["probe"] == {"verifiable": False, "suggested_action": None}
+
+    # 展示字段是加法：带 decisions 的裁决合同照常工作（同一端点同一回调链）。
+    ok = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [
+            {"tool_call_id": "call-read", "verdict": "CONFIRM_SUCCESS"},
+            {"tool_call_id": "call-bash", "verdict": "DEFER"},
+            {"tool_call_id": "call-ghost", "verdict": "ABANDON"},
+        ]},
+    )
+    assert ok.status_code == 200, ok.json()
 
 
 def test_recover_duplicate_tool_call_id_rejected_without_writes(client):

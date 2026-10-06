@@ -189,6 +189,7 @@ from agent_harness.session.progress import (
     PROGRESS_VERIFY_OK,
     ProgressVerification,
     ProgressWriteOutcome,
+    read_progress_file_version,
     render_external_edit_instruction,
     verify_progress_file,
     write_progress_file,
@@ -230,7 +231,7 @@ from agent_harness.tooling.approval import (
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import PolicyGranularity
-from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tooling.contract import PermissionPolicy, ToolReconcileInfo
 from agent_harness.tools.git import git_head_command
 
 if TYPE_CHECKING:
@@ -668,6 +669,27 @@ class RegisteredToolNamesProvider(Protocol):
     async def __call__(self, session_id: str) -> frozenset[str]: ...
 
 
+@runtime_checkable
+class ToolReconcileInfoProvider(Protocol):
+    """恢复裁决呈现元数据的**领域端口**（#357 W-13 契约 1/6/7）。
+
+    返回某会话视角下根 registry 的 ``tool_name → ToolReconcileInfo`` 投影；
+    ``_reconcile_pending`` 据它为 409 载荷产出只读展示字段
+    （``default_action/risk_level/probe``）。计算是组合层的事
+    （``assembly.root_registry_reconcile_info``，零副作用投影、与
+    ``root_registry_tool_names`` 逐分支同构，一致性由
+    ``tests/test_assembly_root_registry_names.py`` 同型对账钉住），同
+    ``RegisteredToolNamesProvider`` 一样由组合根注入实现
+    （``web/app.py::session_service`` 唯一适配点）。
+
+    未注入（直构 ``SessionService`` 的调用方）⇒ 展示字段 **fail-closed**：
+    未知工具按"高风险不可核验"呈现（DEFER/high + verifiable=false），
+    绝不把未知工具渲染成可安全重试（不变量 #14 同向）。
+    """
+
+    async def __call__(self, session_id: str) -> dict[str, ToolReconcileInfo]: ...
+
+
 class SessionService:
     """会话领域服务：统一 Web 传输层的 session 生命周期操作。
 
@@ -709,6 +731,7 @@ class SessionService:
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
         validate_session_declaration: SessionDeclarationValidator | None = None,
         registered_tool_names: RegisteredToolNamesProvider | None = None,
+        reconcile_info: ToolReconcileInfoProvider | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -728,6 +751,7 @@ class SessionService:
         self._get_wiring = get_wiring
         self._validate_session_declaration = validate_session_declaration
         self._registered_tool_names = registered_tool_names
+        self._reconcile_info = reconcile_info
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -3506,8 +3530,20 @@ class SessionService:
         要裁决）；非悬空行按 ``storage.needs_reconcile`` 全量（#315 的未证形态）。
         终态三元组经既有懒导入通道复用协调器的 ``TERMINAL_STATES``（批次收口
         Spec 轴 P3-3 单源化：不再内联镜像，漂移在源头不可能发生）。
+
+        #357 W-13（契约 1/2/6，修订 A）：每条增**只读展示字段**——
+        ``default_action``（replay_safe 工具 → RETRY；否则 DEFER，#14 安全侧）、
+        ``risk_level``、``probe{verifiable, suggested_action}``（逐字取工具既有
+        ``ReconcileHint``）。展示不改裁决语义：仍是同一 409 载荷、同一
+        ``decisions`` 合同；probe 绝不携带"已查到/未查到"结论——那是 UI 层用户
+        核对后的如实自陈。端口未注入或工具名不在根 registry ⇒ fail-closed
+        （DEFER/high + verifiable=false），绝不把未知工具渲染成可安全重试。
         """
         from agent_harness.recovery.coordinator import TERMINAL_STATES
+
+        info_map: dict[str, ToolReconcileInfo] = {}
+        if self._reconcile_info is not None:
+            info_map = await self._reconcile_info(session_id)
 
         dangling_ids, _ = collect_dangling(events)
         operations = await self._operation_ledger.list_for_session(session_id)
@@ -3520,11 +3556,20 @@ class SessionService:
                 and operation.state in TERMINAL_STATES
             ):
                 continue
+            info = info_map.get(operation.tool_name)
             pending.append(
                 {
                     "tool_call_id": operation.tool_call_id,
                     "tool_name": operation.tool_name,
                     "state": operation.state.value,
+                    "default_action": "RETRY" if info and info.replay_safe else "DEFER",
+                    "risk_level": "low" if info and info.replay_safe else "high",
+                    "probe": {
+                        "verifiable": info.verifiable if info else False,
+                        "suggested_action": (
+                            info.suggested_action if info else None
+                        ),
+                    },
                 }
             )
         return pending
@@ -3546,6 +3591,81 @@ class SessionService:
             session_budget_ledger=self._stores.delegation_tree_ledger,
         )
         return results
+
+    async def interrupted_recovery_rows(
+        self, snapshot: list[InterruptionScanResult]
+    ) -> list[dict]:
+        """启动扫描快照 → 恢复列表行（#357 W-13 契约 5，只读富化，零写副作用）。
+
+        数据源只有两份 durable 事实：lifespan 存下的扫描快照（``run/interrupted``
+        已在扫描时落盘，本方法**绝不重跑** ``scan_interrupted``）+ 各 session 的
+        事件流/映射/进度文件（全部只读）。每行四要素：上次 Task
+        （``derive_task_state`` 口径，未定义时回落 ``first_user_message``）、
+        无终态 run、工作目录锚（``session_cwd``，与进度文件同一锚）、进度文件
+        版本（文件头 ``schema_version`` + ``source_event_seq``；缺失/不可读/
+        schema 不匹配如实标，不伪造"最新"）。
+
+        fail-safe（抄 Cline 默认亮 Resume）：快照行存在但状态读不出来（事件读
+        失败 / 进度文件不可读）→ 该行 ``resume_available=true``——状态不可读时
+        给安全侧 affordance，不做静默降级成"不可恢复"。
+        """
+        rows: list[dict] = []
+        for result in snapshot:
+            row: dict = {
+                "session_id": result.session_id,
+                "recovery": result.recovery.value,
+                "detail": result.detail,
+                "interrupted_runs": [
+                    {
+                        "run_id": run.run_id,
+                        "interrupted_seq": run.interrupted_seq,
+                        "step_id": run.step_id,
+                        "agent_id": run.agent_id,
+                    }
+                    for run in result.interrupted
+                ],
+                # fail-safe 默认：恢复列表的"继续"闸门在前端加载顺序（07 §9），
+                # 后端读不出状态时保持亮灯，绝不把"读不出"伪装成"不可恢复"。
+                "resume_available": True,
+            }
+            try:
+                events = await anyio.to_thread.run_sync(
+                    self._store.read_events, result.session_id
+                )
+                task_state = derive_task_state(events)
+                row["task"] = (
+                    task_state.task_text
+                    if task_state.defined and task_state.task_text
+                    else next(
+                        (
+                            e.data["content"].strip()[:128]
+                            for e in events
+                            if e.type == USER_MESSAGE
+                            and isinstance(e.data.get("content"), str)
+                            and e.data["content"].strip()
+                        ),
+                        None,
+                    )
+                )
+                cwd = session_cwd(events)
+                row["workspace_root"] = cwd
+                row["progress"] = (
+                    await anyio.to_thread.run_sync(
+                        read_progress_file_version, cwd, result.session_id
+                    )
+                    if cwd
+                    else {"status": "missing", "reason": "无 cwd 锚"}
+                )
+            except Exception as error:  # noqa: BLE001 — 单行失败不拖垮整表，fail-safe 亮灯
+                logger.warning(
+                    "恢复列表：session=%s 状态读取失败（%s），按 fail-safe 呈现",
+                    result.session_id, error,
+                )
+                row["task"] = None
+                row["workspace_root"] = None
+                row["progress"] = {"status": "unreadable", "reason": str(error)}
+            rows.append(row)
+        return rows
 
     async def scan_unfinished_forks(self) -> list[ForkScanResult]:
         """进程启动扫描（#555）：按 ``fork/in-progress`` 标记回收未完成 fork 残留。
