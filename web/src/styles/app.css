@@ -7205,6 +7205,26 @@ button.json-row {
 }
 .task-review-evidence { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .task-review-evidence-item { display: flex; align-items: baseline; gap: var(--space-sm); flex-wrap: wrap; font-size: var(--text-xs); }
+/* P1-1：证据不可得（≠缺证据），如实呈现。 */
+.task-review-evidence-unavailable {
+  font-size: var(--text-xs);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+}
+/* P1-2：来源事件 seq 跳转按钮。 */
+.task-review-evidence-seq {
+  font-size: var(--text-xs);
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.task-review-evidence-seq:hover { opacity: 0.8; }
 .task-review-result-tag.r-pass { color: var(--success); }
 .task-review-result-tag.r-fail { color: var(--danger); }
 .task-review-result-tag.r-blocked { color: var(--warning); }

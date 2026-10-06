@@ -61,6 +61,8 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
   const [notDefined, setNotDefined] = useState(false);
   const [task, setTask] = useState<TaskState | null>(null);
   const [evidence, setEvidence] = useState<EvidenceByCriterion>({});
+  // P1-1：证据加载失败必须如实呈现，不能静默吞成 {}（否则面板会把"不可得"渲染成"缺证据"）。
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<GitCommandResult | null>(null);
   const [gitDiff, setGitDiff] = useState<GitCommandResult | null>(null);
 
@@ -79,6 +81,7 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
     if (!sessionId) {
       setTask(null);
       setEvidence({});
+      setEvidenceError(null);
       setGitStatus(null);
       setGitDiff(null);
       setNotDefined(false);
@@ -91,14 +94,19 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
       setNotDefined(false);
       setTask(nextTask);
       setError(null);
-      // 证据与工作区 git 是 best-effort：拿不到就留空，不因此把整个面板判成加载失败
-      // （各自的不可得都在各自区块如实呈现）。
+      // 证据与工作区 git 是 best-effort：拿不到不把整个面板判成加载失败，
+      // 但证据失败必须记下来，各自区块如实呈现"不可得"，不能渲染成"缺证据"。
+      let evidenceErr: string | null = null;
       const [nextEvidence, status, diff] = await Promise.all([
-        getEvidenceState(sessionId).catch(() => ({} as EvidenceByCriterion)),
+        getEvidenceState(sessionId).catch((e) => {
+          evidenceErr = e instanceof Error ? e.message : '证据加载失败';
+          return {} as EvidenceByCriterion;
+        }),
         getWorkspaceGitStatus(sessionId).catch(() => null),
         getWorkspaceGitDiff(sessionId).catch(() => null),
       ]);
       setEvidence(nextEvidence);
+      setEvidenceError(evidenceErr);
       setGitStatus(status);
       setGitDiff(diff);
     } catch (e) {
@@ -106,6 +114,7 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
         setNotDefined(true);
         setTask(null);
         setEvidence({});
+        setEvidenceError(null);
         setGitStatus(null);
         setGitDiff(null);
         setError(null);
@@ -234,6 +243,7 @@ export function useTaskReview(sessionId: string | null): TaskReviewState {
     notDefined,
     task,
     evidence,
+    evidenceError,
     gitStatus,
     gitDiff,
     refresh: load,

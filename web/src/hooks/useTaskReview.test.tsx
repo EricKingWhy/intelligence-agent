@@ -201,3 +201,23 @@ describe('#353 useTaskReview — 三操作', () => {
     expect(current?.leaseNotice).toContain('s9');
   });
 });
+
+describe('#353 P1-1 — 证据加载失败如实呈现（不可得≠缺证据）', () => {
+  it('getEvidenceState 抛错 → evidenceError 非空，evidence 保持空对象', async () => {
+    getEvidenceState.mockRejectedValue(new Error('boom'));
+    await mount();
+    expect(current?.evidenceError).toContain('boom');
+    expect(current?.evidence).toEqual({});
+    // 任务本身加载成功，不判成整体加载失败
+    expect(current?.error).toBeNull();
+    expect(current?.task).not.toBeNull();
+  });
+
+  it('证据恢复成功后 evidenceError 清零', async () => {
+    getEvidenceState.mockRejectedValueOnce(new Error('boom'));
+    await mount();
+    expect(current?.evidenceError).toContain('boom');
+    await act(async () => { await current!.refresh(); });
+    expect(current?.evidenceError).toBeNull();
+  });
+});

@@ -283,3 +283,43 @@ describe('#353 TaskReviewPanel — 只读与关闭', () => {
     expect(onCloseCalls).toBeGreaterThan(0);
   });
 });
+
+describe('#353 P1-1 — 面板：证据不可得≠缺证据，不触发消歧', () => {
+  it('hook 报告 evidenceError → 渲染"证据不可得"，不渲染"缺证据"徽标', async () => {
+    // 直接让 hook 走失败分支：getEvidenceState 抛错
+    getEvidenceState.mockRejectedValue(new Error('evidence 500'));
+    await renderPanel();
+    expect(text()).toContain('证据不可得');
+    // "缺证据"徽标（.task-review-missing-evidence）不应出现；说明文案里的提及不算
+    expect(host.querySelector('.task-review-missing-evidence')).toBeNull();
+  });
+
+  it('证据不可得时 deliverable 不叠加消歧警示', async () => {
+    getEvidenceState.mockRejectedValue(new Error('evidence 500'));
+    await renderPanel();
+    // 消歧文案只在 stale/缺证据时出现；不可得时不应出现
+    expect(text()).not.toContain('存在缺证据项');
+  });
+});
+
+describe('#353 P1-2 — 证据来源事件 seq 可点跳转', () => {
+  it('source_event_seq 渲染为可点按钮，点击调用 onJumpToEvent(seq)', async () => {
+    getEvidenceState.mockResolvedValue({ 'ac-1': [evidenceRecord({ source_event_seq: 42 })] });
+    const jumps: number[] = [];
+    await act(async () => {
+      root.render(<TaskReviewPanel sessionId="s1" open onClose={onClose} onJumpToEvent={(s) => jumps.push(s)} />);
+    });
+    await act(async () => {});
+    const btn = host.querySelector('.task-review-evidence-seq');
+    expect(btn).not.toBeNull();
+    expect(btn!.textContent).toContain('42');
+    await act(async () => { (btn as HTMLButtonElement).click(); });
+    expect(jumps).toEqual([42]);
+  });
+
+  it('source_event_seq 为 null 时不渲染跳转按钮', async () => {
+    getEvidenceState.mockResolvedValue({ 'ac-1': [evidenceRecord({ source_event_seq: null })] });
+    await renderPanel();
+    expect(host.querySelector('.task-review-evidence-seq')).toBeNull();
+  });
+});

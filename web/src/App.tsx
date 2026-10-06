@@ -349,6 +349,16 @@ export default function App() {
   const jumpToApproval = useCallback((approvalId: string) => {
     setJumpRequest({ key: `approval:${approvalId}`, nonce: Date.now() });
   }, []);
+  /* #353 P1-2：任务审阅面板点证据"来源事件 #seq" → 关浮层 + 跳回原事件。
+   * 复用 jumpRequest 通道；seq 在已加载的 conversation.events 里找。 */
+  const jumpToEventSeq = useCallback((seq: number) => {
+    const ev = conversation?.events.find((e) => e.seq === seq);
+    if (!ev) return;
+    const key = streamKeyFromEvent(ev.data, ev.step_id);
+    if (!key) return;
+    setTaskReviewOpen(false);
+    setJumpRequest({ key, nonce: Date.now() });
+  }, [conversation]);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
   const onPresetTask = useCallback((text: string) => setPresetTask({ text, id: Date.now() }), []);
@@ -1360,6 +1370,7 @@ export default function App() {
           sessionId={selectedId}
           open
           onClose={() => setTaskReviewOpen(false)}
+          onJumpToEvent={jumpToEventSeq}
         />
       )}
     </div>

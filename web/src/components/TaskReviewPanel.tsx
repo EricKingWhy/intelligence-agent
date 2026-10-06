@@ -91,10 +91,13 @@ export function TaskReviewPanel({
   sessionId,
   open,
   onClose,
+  onJumpToEvent,
 }: {
   sessionId: string;
   open: boolean;
   onClose: () => void;
+  /** P1-2：票面①"点开可见原事件来源"——证据 source_event_seq 可点跳回原事件。 */
+  onJumpToEvent?: (seq: number) => void;
 }) {
   const review = useTaskReview(open ? sessionId : null);
   const [gapReason, setGapReason] = useState('');
@@ -135,9 +138,11 @@ export function TaskReviewPanel({
     task && task.product_state !== '' ? PRODUCT_LABEL[task.product_state] : null;
 
   // 消歧（选项 1-C）：chip 文案**不改**，只在证据 stale / 缺证据时叠加醒目警示与固定文案。
+  // P1-1：证据加载失败（不可得）时不计入缺证据/过期——不可得≠缺证据，不触发消歧。
+  const evidenceOk = !review.evidenceError;
   const missingEvidence =
-    task !== null && task.criteria.some((c) => !(review.evidence[c.item_id]?.length > 0));
-  const hasStale = records.some((r) => r.freshness.status === 'stale');
+    evidenceOk && task !== null && task.criteria.some((c) => !(review.evidence[c.item_id]?.length > 0));
+  const hasStale = evidenceOk && records.some((r) => r.freshness.status === 'stale');
   const disambiguate = task !== null && task.product_state === 'deliverable' && (hasStale || missingEvidence);
 
   const failedItems =
@@ -269,7 +274,11 @@ export function TaskReviewPanel({
             {/* ③ 逐项结果 */}
             <section className="task-review-section" aria-label="逐项结果">
               <h3 className="task-review-h">逐项结果</h3>
-              {task.criteria.length === 0 ? (
+              {review.evidenceError ? (
+                <div className="task-review-evidence-unavailable" role="alert">
+                  证据不可得：{review.evidenceError}。逐项证据暂无法展示，这不代表"缺证据"。
+                </div>
+              ) : task.criteria.length === 0 ? (
                 <div className="task-review-hint">无验收项，无可展示的逐项结果。</div>
               ) : (
                 task.criteria.map((c) => {
@@ -303,6 +312,16 @@ export function TaskReviewPanel({
                               </span>
                               {r.command_or_action && (
                                 <code className="task-review-evidence-action">{r.command_or_action}</code>
+                              )}
+                              {r.source_event_seq !== null && (
+                                <button
+                                  type="button"
+                                  className="task-review-evidence-seq"
+                                  title="跳转到原事件"
+                                  onClick={() => onJumpToEvent?.(r.source_event_seq as number)}
+                                >
+                                  来源事件 #{r.source_event_seq}
+                                </button>
                               )}
                               {r.freshness.reasons.length > 0 && (
                                 <ul className="task-review-freshness-reasons">
