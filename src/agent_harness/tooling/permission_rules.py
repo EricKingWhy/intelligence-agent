@@ -263,7 +263,7 @@ _DEFAULT_RULES = PermissionRuleSet(
         # R2：文件工具路径越出工作区 → ASK + 明确提示越界（DSH workspace-write 语义）。
         PermissionRule(
             name="ask-path-outside-workspace",
-            tools=frozenset({"read", "write", "edit", "grep", "apply_patch", "glob"}),
+            tools=frozenset({"read", "write", "edit", "grep", "apply_patch"}),
             verdict=RuleVerdict.ASK,
             reason=(
                 "⚠️ 路径越出工作区：'{path}' → '{resolved}'。"
