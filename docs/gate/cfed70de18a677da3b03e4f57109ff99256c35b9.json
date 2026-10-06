@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-06T12:01:11+00:00",
+  "sha": "cfed70de18a677da3b03e4f57109ff99256c35b9",
+  "tree": "cb39c0f48f9219608d9399a2e1c3a84655515208",
+  "argv": [],
+  "result": "PASS",
+  "passed": 6,
+  "total": 6,
+  "failed": [],
+  "env_failures": [],
+  "wall_seconds": 25.77,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.43.0",
+    "python": "Python 3.12.3",
+    "ruff": "ruff 0.16.3",
+    "node": "v24.20.0",
+    "oxlint": "Version: 1.85.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [
+      "docs/agents/447-design-proposal.md",
+      "docs/agents/530-imp17-design-proposal.md",
+      "docs/agents/635-design-proposal.md",
+      "docs/agents/635-research.md",
+      "docs/gate/09caf79897f5578cc93813d0286653d01c03dae8.json",
+      "docs/gate/0c22d42a11f0e028a8dfb43390bceeb063c6668c.json",
+      "docs/gate/29f7ba399f8c90e34d2890fa37cc59f59a4dccd9.json",
+      "docs/gate/2dbb0844c4beee762443aec556a556c1d7497121.json",
+      "docs/gate/3013ad1c40f7295f2b7e3feda2b4ba9861830a27.json",
+      "docs/gate/4812d895c2113f4a57d6436f038cde90edae449c.json",
+      "docs/gate/7674e66b1dbe1abb8592198caba9f318e9072f91.json",
+      "docs/gate/9c7370e306f6bb9f98dacc9b3c69e9b46f04fa33.json",
+      "docs/gate/b9483c932dccc1849df38e6620e106bb13babda7.json",
+      "docs/gate/ba2cf8adb93cd22d94823d5de0e5c867db501a05.json",
+      "docs/gate/c12563e1b45d878e7c75be6a39d5049f8c8b53b8.json",
+      "docs/gate/edc9e989c01aa3618768f992ec995381f9e5b795.json",
+      "docs/gate/efb51c326ff8cd7de8cfe858a92d4d6bace33201.json",
+      "docs/gate/f9bb90041de32b0e0723ece2a8667fa1bd5c9d57.json",
+      "docs/gate/ff134d7035828fcc47f99a409d991054cfcc5583.json"
+    ],
+    "untracked_total": 19
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.02,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.05,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/ruff",
+        "check",
+        "."
+      ],
+      "command": "./.venv/bin/ruff check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.89,
+      "cwd": "web",
+      "argv": [
+        "/usr/bin/node",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "/usr/bin/node node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 18.41,
+      "cwd": "web",
+      "argv": [
+        "/usr/bin/node",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "/usr/bin/node node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 3.94,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/python",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/bin/python -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 2.47,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/python",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/bin/python scripts/check_review_coverage.py"
+    }
+  ]
+}
