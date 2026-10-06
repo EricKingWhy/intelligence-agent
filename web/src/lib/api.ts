@@ -266,6 +266,15 @@ export interface StartSessionPayload {
   agent_profile?: string;
   reasoning_effort?: string;
   context_providers?: string[];
+  /** #367 / W-23 选项 A：三档自主度（抄 Copilot Interactive/Plan/Autopilot）。
+   *  不传 = 后端默认（沿用 auto_approve 既有语义）；显式声明优先于 auto_approve。
+   *  - ask：逐次问；plan：先计划后执行；auto：全自动。 */
+  autonomy?: 'ask' | 'plan' | 'auto';
+  /** #367 / W-23 选项 A：目录冲突策略。worktree（默认）：被占时自动建
+   *  worktree；queue：走既有租约排队（次选项）。不传 = 后端默认 worktree。 */
+  on_conflict?: 'worktree' | 'queue';
+  /** #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；不传 = 部署默认。 */
+  sandbox_backend?: string;
 }
 
 /** createEmptySession 的载荷（#204 裁定 §2）：只建会话、不启动 run。
@@ -321,6 +330,52 @@ export async function createEmptySession(
     throw new SessionError(res.status, 'create 会话回执缺少 session_id');
   }
   return { sessionId: r.session_id };
+}
+
+/** #367 / W-23 选项 A：GET /api/sandbox-backends —— 可用后端 + 探针结果。
+ *  不可用带 reason，前端据此置灰（不画饼）。 */
+export interface SandboxBackendEntry {
+  backend: string;
+  available: boolean;
+  reason: string | null;
+  details: Record<string, string>;
+}
+
+export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
+  const res = await apiFetch('/api/sandbox-backends');
+  if (!res.ok) return [];
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (!Array.isArray(r.backends)) return [];
+  return (r.backends as Record<string, unknown>[])
+    .filter((b) => typeof b.backend === 'string')
+    .map((b) => ({
+      backend: b.backend as string,
+      available: b.available === true,
+      reason: typeof b.reason === 'string' ? b.reason : null,
+      details: (typeof b.details === 'object' && b.details !== null
+        ? b.details : {}) as Record<string, string>,
+    }));
+}
+
+/** #367 / W-23 选项 A：POST /api/worktrees —— 为 git 仓库创建隔离 worktree。
+ *  响应 `{worktree_path}`。目录冲突默认走这个（六家共识），"排队等"作次选项。 */
+export async function createWorktree(repoPath: string): Promise<string> {
+  const res = await apiFetch('/api/worktrees', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo_path: repoPath }),
+  });
+  if (!res.ok) {
+    const detail = await readErrorDetail(res);
+    throw new SessionError(res.status, detail || `create worktree ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (typeof r.worktree_path !== 'string' || !r.worktree_path) {
+    throw new SessionError(res.status, 'create worktree 回执缺少 worktree_path');
+  }
+  return r.worktree_path;
 }
 
 /** B1 契约通用清单条目——{id, display_name, description}。
@@ -478,6 +533,9 @@ const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
   reasoning_effort: (p) => (p.reasoning_effort ? ['reasoning_effort', p.reasoning_effort] : null),
   context_providers: (p) =>
     p.context_providers && p.context_providers.length > 0 ? ['context_providers', p.context_providers] : null,
+  autonomy: (p) => (p.autonomy ? ['autonomy', p.autonomy] : null),
+  on_conflict: (p) => (p.on_conflict ? ['on_conflict', p.on_conflict] : null),
+  sandbox_backend: (p) => (p.sandbox_backend ? ['sandbox_backend', p.sandbox_backend] : null),
 };
 
 /** POST a new session. Returns the raw Response — SSE stream is consumed by caller.
@@ -491,6 +549,14 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildBody(payload, START_SESSION_FIELDS)),
   });
+}
+
+/** #367 P3：从创建响应读 worktree 路径。后端 launch=true 走 SSE（无 JSON 体），
+ *  worktree 信息走 `X-Worktree-Path` 响应头（`X-Permission-Mode` 同型先例）；
+ *  launch=false 时走 JSON 体 `worktree_path`（由调用方直接读）。无头/空头 → null。 */
+export function worktreePathFromResponse(res: Response): string | null {
+  const v = res.headers.get('X-Worktree-Path');
+  return v && v.length > 0 ? v : null;
 }
 
 /** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
