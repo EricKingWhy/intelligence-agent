@@ -353,7 +353,7 @@ def test_manifest_computes_per_file_sha256(tmp_path) -> None:
 def test_manifest_tracks_progress_md_separately(tmp_path) -> None:
     """审计红线：progress.md 不进覆盖集，其 hash 独立单列。"""
     _write(tmp_path, "src/a.py", b"x = 1\n")
-    _write(tmp_path, "progress.md", b"# 进度\n")
+    _write(tmp_path, "progress.md", "# 进度\n".encode())
     manifest = compute_evidence_manifest(tmp_path, ["src/a.py"])
     assert manifest.progress_md_sha256 == hashlib.sha256("# 进度\n".encode()).hexdigest()
     assert all(f["path"] != "progress.md" for f in manifest.to_payload()["files"])
@@ -365,7 +365,7 @@ def test_manifest_tracks_progress_md_separately(tmp_path) -> None:
 @pytest.mark.parametrize("bad", ["progress.md", "sub/progress.md"])
 def test_manifest_rejects_progress_md_in_covered_set(tmp_path, bad) -> None:
     """覆盖集里出现 progress.md → 拒绝（否则更新进度即自我过期）。"""
-    _write(tmp_path, bad, b"# 进度\n")
+    _write(tmp_path, bad, "# 进度\n".encode())
     with pytest.raises(ValueError):
         compute_evidence_manifest(tmp_path, [bad])
 
@@ -414,7 +414,7 @@ def test_fresh_when_nothing_changed(tmp_path) -> None:
 def test_stale_when_covered_file_changed(tmp_path) -> None:
     """票面验收：测试后改一行源码 → stale，明确列出变动文件。"""
     record, _, _ = _recorded_with_real_manifest(tmp_path)
-    _write(tmp_path, "src/auth.py", b"v2 // 改了一行\n")
+    _write(tmp_path, "src/auth.py", "v2 // 改了一行\n".encode())
     current = compute_evidence_manifest(tmp_path, ["src/auth.py"])
     freshness = evaluate_evidence_freshness(
         record, current_manifest=current, current_head=record.base_head,
@@ -448,7 +448,7 @@ def test_stale_when_base_head_changed(tmp_path) -> None:
 def test_progress_md_update_does_not_expire_evidence(tmp_path) -> None:
     """票面验收：进度文件元数据更新 → 证据不自我过期（hash 独立单列）。"""
     record, _, _ = _recorded_with_real_manifest(tmp_path)
-    _write(tmp_path, "progress.md", b"# p2：更新了进度\n")
+    _write(tmp_path, "progress.md", "# p2：更新了进度\n".encode())
     current = compute_evidence_manifest(tmp_path, ["src/auth.py"])
     assert current.progress_md_sha256 != record.workspace_manifest.progress_md_sha256
     freshness = evaluate_evidence_freshness(
