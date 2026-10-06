@@ -26,6 +26,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
+from agent_harness.sandbox.capabilities import (
+    SUPPORTED_BACKENDS,
+    probe_docker_capabilities,
+    require_available,
+)
 from agent_harness.sandbox.local import LocalSubprocessSandbox
 from agent_harness.sandbox.paths import canonical_workspace_path
 
@@ -48,13 +53,26 @@ class WorkspaceRegistry:
         #: 进程内缓存：session_id → Sandbox 实例（避免重复重建）。
         self._cache: dict[str, Sandbox] = {}
 
-    def create(self, session_id: str, *, workspace_root: Path | None = None) -> Sandbox:
+    def create(
+        self,
+        session_id: str,
+        *,
+        workspace_root: Path | None = None,
+        backend: str | None = None,
+    ) -> Sandbox:
         """为新 session 创建 Sandbox，持久化映射，返回已 ensure_started 的 Sandbox。
 
         如果映射已存在（同 session_id 再次 create），直接从缓存或重建返回已有 Sandbox。
         workspace_root 允许调用方指定实际工作目录（web 层的命名 workspace）；
         缺省用 <root>/workspaces/<session_id>。映射里记录真实目录——
         RecoveryCoordinator 据此恢复（R8-1）。
+
+        backend（#363 / W-19）：本次创建显式选择的后端（"local" | "docker"）；
+        None ⇒ 沿用 registry 构造时的默认（`self._backend`，当前 web 层为 "local"）。
+        解析优先级抄 DSH：显式选择 > 部署默认。
+        - 未知后端名：响亮 ValueError（DSH：typo 不静默改策略）。
+        - 选 docker 但探针不可用：抛 SandboxUnavailableError，**绝不静默回落
+          local**（DSH fail-closed："silent unconfined passthrough is forbidden"）。
 
         映射里的路径是**规范化后**的（`canonical_workspace_path`，WS-1 AC5）：
         先 mkdir 是这里原本的行为（确保 workspace 目录存在），随后按 `fs.realpath`
@@ -73,7 +91,7 @@ class WorkspaceRegistry:
         if session_id in self._cache:
             return self._cache[session_id]
 
-        mapping = self._build_mapping(session_id)
+        mapping = self._build_mapping(session_id, backend=backend)
         requested = (
             Path(workspace_root) if workspace_root is not None
             else Path(mapping["workspace_root"])
@@ -292,18 +310,27 @@ class WorkspaceRegistry:
 
     # —— 内部方法 ——
 
-    def _build_mapping(self, session_id: str) -> dict:
+    def _build_mapping(self, session_id: str, backend: str | None = None) -> dict:
         """构造新 session 的映射字典。"""
+        # #363 / W-19：显式选择 > 部署默认；未知名响亮失败。
+        resolved = backend if backend is not None else self._backend
+        if resolved not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"未知的 Sandbox 后端: {resolved!r}（支持：{', '.join(SUPPORTED_BACKENDS)}）"
+            )
+        if resolved == "docker":
+            # 探针先行：不可用就地阻断，绝不静默回落 local。
+            require_available(probe_docker_capabilities())
         workspace_root = self._workspaces_dir / session_id
         mapping = {
             "session_id": session_id,
-            "backend": self._backend,
+            "backend": resolved,
             "workspace_root": str(workspace_root),
             "container_name": None,
             "volume_name": None,
             "created_at": datetime.now(UTC).isoformat(),
         }
-        if self._backend == "docker":
+        if resolved == "docker":
             # 确定性命名：基于 session_id，进程重启后能按名字找回容器/volume。
             mapping["container_name"] = f"agent-harness-{session_id}"
             mapping["volume_name"] = f"agent-harness-{session_id}"
