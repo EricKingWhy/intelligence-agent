@@ -58,7 +58,11 @@ from agent_harness.session.client_exit import (
     ExitImpact,
 )
 from agent_harness.session.cwd import session_cwd
-from agent_harness.session.progress import ProgressWriteOutcome, write_progress_file
+from agent_harness.session.progress import (
+    ProgressWriteOutcome,
+    progress_paths,
+    write_progress_file,
+)
 from agent_harness.storage import OperationState, needs_reconcile
 
 logger = logging.getLogger("agent_harness.session.runmanager")
@@ -744,7 +748,8 @@ class RunManager:
             # 失败**一律**抛 ClientExitError。合成一个 ok=False 的结果如实记录；
             # fail-closed 本身已成立（mark_absent 未到达），这里补的是 contract。
             unexpected = ProgressWriteOutcome(
-                ok=False, skipped=False, path=Path(cwd) / "progress.md",
+                ok=False, skipped=False,
+                path=progress_paths(cwd, run.session.session_id).markdown,
                 source_event_seq=-1, error_kind="unexpected_exception",
                 reason=repr(exc),
             )
