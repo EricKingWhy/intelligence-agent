@@ -358,6 +358,38 @@ export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
     }));
 }
 
+/** #362 / W-18：GET /api/mcp/servers —— 已装配 MCP server + 连接状态。 */
+export interface McpServerEntry {
+  name: string;
+  connected: boolean;
+}
+
+export async function getMcpServers(): Promise<{ servers: McpServerEntry[]; errors: string[] }> {
+  const res = await apiFetch('/api/mcp/servers');
+  if (!res.ok) return { servers: [], errors: [] };
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  const servers = (Array.isArray(r.servers) ? r.servers : []) as Record<string, unknown>[];
+  const errors = (Array.isArray(r.errors) ? r.errors : []) as unknown[];
+  return {
+    servers: servers
+      .filter((s) => typeof s.name === 'string')
+      .map((s) => ({ name: s.name as string, connected: s.connected === true })),
+    errors: errors.filter((e): e is string => typeof e === 'string'),
+  };
+}
+
+/** #362 / W-18：POST /api/mcp/servers/{name}/disconnect —— 断开指定 server（幂等）。 */
+export async function disconnectMcpServer(name: string): Promise<boolean> {
+  const res = await apiFetch(`/api/mcp/servers/${encodeURIComponent(name)}/disconnect`, {
+    method: 'POST',
+  });
+  if (!res.ok) return false;
+  const body: unknown = await res.json().catch(() => ({}));
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  return r.disconnected === true;
+}
+
 /** #367 / W-23 选项 A：POST /api/worktrees —— 为 git 仓库创建隔离 worktree。
  *  响应 `{worktree_path}`。目录冲突默认走这个（六家共识），"排队等"作次选项。 */
 export async function createWorktree(repoPath: string): Promise<string> {
