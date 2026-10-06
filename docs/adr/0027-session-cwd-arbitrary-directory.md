@@ -8,6 +8,10 @@ issue #169（本决策的 ticket，WS-6）、grill 访谈 2026-09-12（用户逐
 **Supersedes**: ADR-0025 **D8 第 2 步的 `workspace_id` 白名单方案**（该方案只允许引用已注册项目；
 用户 2026-09-12 拍板走到更远的"任意已存在绝对路径"）。**Refines**: ADR-0001 的沙箱路径边界语义
 （见 Security：边界本来就是"软"的，本 ADR 把这一事实显式化）。
+**Superseded by**: ADR-0051（2026-10-06，用户 #358 裁决）：D2 默认权限档
+`workspace-write + auto-approve` → `workspace-write` + `ask`；Security"明确不新增的防护：
+写路径白名单 / 目录级 deny 清单"条款被审批层路径规则取代（诚实标注为审批层，非 OS 隔离）。
+D1/D3/D4 不变。
 
 ---
 
