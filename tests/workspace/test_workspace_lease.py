@@ -10,6 +10,7 @@ manager 实例。
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from agent_harness.workspace.lease_store import (
     QUEUE_WAITING,
     SqliteLeaseStore,
 )
+from tests.symlink_capability import needs_symlink
 
 
 class FakePresence:
@@ -239,6 +241,7 @@ async def test_case_and_trailing_separator_cannot_bypass(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@needs_symlink
 async def test_symlink_cannot_bypass(tmp_path) -> None:
     real = tmp_path / "real"
     real.mkdir()
@@ -267,6 +270,9 @@ async def test_parent_child_directory_rejected(tmp_path) -> None:
     assert outcome.holder == "task-a"
 
 
+# 真实 Windows 宿主上合成路径被 #726 存在性校验 fail-closed 拒绝；
+# Windows 形态词法等价只能由 POSIX 宿主等价层钉住（同 TestWindowsFormLexical）。
+@pytest.mark.skipif(os.name == "nt", reason="Windows 宿主路径需真实存在（#726 fail-closed），合成键词法等价在 POSIX 宿主钉住")
 @pytest.mark.asyncio
 async def test_windows_form_cannot_bypass(tmp_path) -> None:
     """盘符大小写 / 分隔符方向 / 尾分隔符 / .. 段 / UNC 写法同键。"""
@@ -290,6 +296,7 @@ async def test_windows_form_cannot_bypass(tmp_path) -> None:
         assert not outcome.granted, variant
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows 宿主路径需真实存在（#726 fail-closed），合成键词法等价在 POSIX 宿主钉住")
 @pytest.mark.asyncio
 async def test_windows_parent_child_rejected(tmp_path) -> None:
     manager = await new_manager(tmp_path)
@@ -299,6 +306,7 @@ async def test_windows_parent_child_rejected(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@needs_symlink
 async def test_fail_closed_paths_rejected(tmp_path) -> None:
     from agent_harness.workspace.lease_paths import LeasePathError
 
@@ -379,15 +387,18 @@ async def test_reconcile_detects_corrupt_awaiting_without_queue(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_unique_partial_index_blocks_duplicate_waiting(tmp_path) -> None:
+    """主体是 SQLite 部分唯一索引（平台无关）：用真实目录保持全宿主可跑。"""
+    real = tmp_path / "real"
+    real.mkdir()
     store = SqliteLeaseStore(tmp_path / "harness.db")
     manager = WorkspaceLeaseManager(store)
     await manager.initialize()
-    await manager.acquire("task-a", "D:\\code")
-    await manager.acquire("task-b", "D:\\code")
+    await manager.acquire("task-a", str(real))
+    await manager.acquire("task-b", str(real))  # 同键 → task-b 排队（waiting 行）
     import aiosqlite
 
     with pytest.raises(aiosqlite.IntegrityError):  # 部分唯一索引：同 session 只能有一个 waiting 行
-        await store.insert_waiting(normalize_dir_key("D:\\code"), "task-b", "now")
+        await store.insert_waiting(normalize_dir_key(str(real)), "task-b", "now")
 
 
 @pytest.mark.asyncio
