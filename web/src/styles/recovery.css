@@ -1,0 +1,351 @@
+/* #357 W-13 恢复 UI（裁决面板 / 恢复列表）。
+ *
+ * 只用既有主题 token（`index.css` 的 :root 与 :root[data-theme='light'] 两组都
+ * 已定义）——本文件不新增 token，因此无需双块同步（AGENTS.md §15）。文字一律
+ * ≥ --text-xs(12px)、用 AA 达标的 --text-* / --accent / --danger / --warning。 */
+
+.recovery-decision-panel {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  padding: var(--space-md);
+  margin: var(--space-sm) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.recovery-decision-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+}
+
+.recovery-decision-icon {
+  color: var(--warning);
+  flex: none;
+  margin-top: 2px;
+}
+
+.recovery-decision-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+  flex: 1;
+}
+
+.recovery-decision-close {
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.recovery-decision-close:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.recovery-decision-message {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.recovery-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.recovery-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-workspace);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.recovery-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.recovery-tool-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.recovery-card-state {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.recovery-args,
+.recovery-probe {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  align-items: baseline;
+}
+
+.recovery-args-value {
+  color: var(--text-tertiary);
+}
+
+.recovery-probe-state {
+  font-weight: 600;
+}
+
+.recovery-probe-state--found {
+  color: var(--success);
+}
+
+.recovery-probe-state--missing {
+  color: var(--text-tertiary);
+}
+
+.recovery-probe-detail {
+  color: var(--text-secondary);
+}
+
+.recovery-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.recovery-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: var(--space-xs);
+  border-radius: var(--radius-xs);
+}
+
+.recovery-option:hover {
+  background: var(--surface-hover);
+}
+
+.recovery-option input[type='radio'] {
+  margin-top: 3px;
+  flex: none;
+  accent-color: var(--accent-strong);
+}
+
+.recovery-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.recovery-option-label {
+  font-weight: 600;
+}
+
+.recovery-option-help {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.recovery-source {
+  border-top: 1px dashed var(--border-subtle);
+  padding-top: var(--space-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.recovery-source-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.recovery-source-choice,
+.recovery-source-custom {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+.recovery-source-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.recovery-decision-error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+
+.recovery-actions {
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+}
+
+.recovery-batch-btn,
+.recovery-submit-btn {
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+}
+
+.recovery-batch-btn {
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.recovery-batch-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.recovery-submit-btn {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.recovery-batch-btn:disabled,
+.recovery-submit-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ── 恢复列表面板（RecoveryListPanel） ── */
+.recovery-list-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  overflow-y: auto;
+}
+
+.recovery-list-loading,
+.recovery-list-degraded,
+.recovery-list-error,
+.recovery-list-empty {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  padding: var(--space-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.recovery-list-error {
+  color: var(--danger);
+}
+
+.recovery-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.recovery-list-item {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.recovery-list-task {
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.recovery-list-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-xs) var(--space-sm);
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.recovery-list-facts dt {
+  color: var(--text-secondary);
+}
+
+.recovery-list-facts dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.recovery-list-facts dd.recovery-fact-unknown {
+  color: var(--text-tertiary);
+}
+
+.recovery-run {
+  display: block;
+}
+
+.recovery-item-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.recovery-resume-btn {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  cursor: pointer;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.recovery-resume-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.recovery-gate-reason {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
