@@ -856,6 +856,14 @@ async def test_rejected_queue_edit_keeps_the_old_queued_item(tmp_path, monkeypat
     )
     assert queued.status == "queued"
     queue_id = queued.queued_message.queue_id
+    # #781：run 起跑与 gate 阻塞之间，`model/request-started` 由运行时**异步**
+    # 落账（`_start_request` 在并发闸之后调用，见 model/fallback.py）。不等它就位
+    # 就快照，下面"被拒请求零副作用"的逐条比对会与该落盘竞态——合并树
+    # 全量实测偶发多出一条，focused 复跑稳定绿（窗口是调度的，不是语义的）。
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, MODEL_REQUEST_STARTED)) == 1,
+        what="首个模型请求开账落盘（#781：快照前等它就位）",
+    )
     before = [e.type for e in harness.events(session_id)]
 
     # 拒绝成因换成越权 ceiling（#320：alias 冲突这一档已随迁移收口删除）；
