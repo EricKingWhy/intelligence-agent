@@ -180,6 +180,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* #367 P3：worktree 自动创建的信息横幅（app-error 同型，信息级配色，可关闭）。 */
+.app-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--info);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 /* ── App Bar：单帧顶条，嵌在 frame 内（不再是独立卡） ── */
 .appbar {
   display: flex;
@@ -1324,6 +1337,48 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .project-textarea::placeholder {
   color: var(--text-tertiary);
+}
+/* #367 / W-23 选项 A：三档自主度分段选择器（抄 Copilot Interactive/Plan/Autopilot
+ * 的三段式；键盘可达：role=radiogroup + 原生 button）。 */
+.segmented {
+  display: flex;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+.segmented-option {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  padding: 6px 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  cursor: pointer;
+  transition: background var(--dur-out) var(--ease-apple),
+    color var(--dur-out) var(--ease-apple);
+}
+.segmented-option:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+.segmented-option.selected {
+  background: var(--surface-3);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.segmented-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.segmented-option:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 1px;
+}
+.project-field-optional {
+  color: var(--text-tertiary);
+  font-weight: 400;
 }
 /* 权限选择器在对话框里是**表单字段**（不是 Composer 的紧凑 chip）：撑满宽度、
  *  左对齐，与旁边的 input/textarea 同一套视觉语法。 */

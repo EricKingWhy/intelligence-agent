@@ -40,7 +40,11 @@ import { buildRailModel, dropAnchor, moveAnchor } from '../lib/projects';
 import { readShowArchived, writeShowArchived } from '../lib/railArchive';
 import type { UngroupedRow } from '../lib/projects';
 import { describeProjectError } from '../lib/api';
-import type { CatalogEntry } from '../lib/api';
+import type {
+  ModelCatalogEntry,
+  SandboxBackendEntry,
+  StartSessionPayload,
+} from '../lib/api';
 import type { ProjectActions } from '../hooks/useProjects';
 import {
   AttachToProjectDialog,
@@ -49,7 +53,7 @@ import {
   InlineRename,
 } from './ProjectDialogs';
 import { DeleteSessionDialog, type DeleteSessionTarget } from './DeleteSessionDialog';
-import { StartTaskInProjectDialog } from './StartTaskInProjectDialog';
+import { TaskCreationDialog } from './TaskCreationDialog';
 
 interface Props {
   sessions: SessionSummary[];
@@ -73,15 +77,14 @@ interface Props {
    *  真机实测过：见 `docs/LIVE_BROWSER_TEST_20260917.md` §8.5）。 */
   sessionsError: string | null;
   onRetryProjects: () => void;
-  /** 「在此项目中新建任务」（WS-6 / #169；#204 起 launch=false 只建会话不启动 run）：
-   *  以项目目录为 cwd 创建空会话。resolve `null` = 已创建（#236 起权限 pill 由会话自己的
-   *  `session/started` 投影供值，不再依赖创建回执）；否则为**给用户看的原因**（留在确认面里）。 */
-  onStartTask: (
-    project: Project,
-    permissionMode: string | null,
-  ) => Promise<string | null>;
-  /** 权限档清单（GET /api/permission-modes）——确认面三选一的数据源。 */
-  permissionModes: CatalogEntry[];
+  /** 「在此项目中新建任务」（#367 [W-23] 选项 A）：统一创建入口，
+   *  prompt 唯一必填 + 三档自主度 + 模型 + 运行位置，创建即启动。
+   *  resolve `null` = 已创建；否则为**给用户看的原因**（留在确认面里）。 */
+  onStartTask: (payload: StartSessionPayload) => Promise<string | null>;
+  /** 模型目录（GET /api/models）——创建表单模型选择器的数据源。 */
+  models: ModelCatalogEntry[];
+  /** sandbox 后端探针（GET /api/sandbox-backends）——运行位置选择器的数据源。 */
+  sandboxBackends: SandboxBackendEntry[];
   /** 硬删一个会话（#172 / ADR-0029，**不可恢复**）：失败原因抛给确认面显示，
    *  成功后的状态收敛（清当前视图 / 重拉列表）由 useSession.removeSession 负责
    *  ——本组件不碰会话状态，只把用户点的那一行交出去。 */
@@ -108,7 +111,8 @@ export const SessionList = memo(function SessionList({
   sessionsError,
   onRetryProjects,
   onStartTask,
-  permissionModes,
+  models,
+  sandboxBackends,
   onDeleteSession,
   onSetArchived,
 }: Props) {
@@ -634,13 +638,14 @@ export const SessionList = memo(function SessionList({
           onSessionsChanged();
         }}
       />
-      <StartTaskInProjectDialog
+      <TaskCreationDialog
         project={startTaskFor}
-        permissionModes={permissionModes}
+        models={models}
+        sandboxBackends={sandboxBackends}
         onOpenChange={(open) => {
           if (!open) setStartTaskFor(null);
         }}
-        onCreateSession={onStartTask}
+        onCreateTask={onStartTask}
       />
     </aside>
   );

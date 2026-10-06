@@ -1,0 +1,1 @@
+2026-10-06	#367 审查 P2/P3 修复（用户批准 merge 前要求修完）：P2 plan 档声明 auto_approve=True（app.py，计划期 Plan 只读门禁先于审批闸门，声明 True 不影响安全；批完计划不再逐次问）+ 2 个回归测试；P3 前端消费 X-Worktree-Path 头（api.ts helper + useSession 回调 + App 横幅 + CSS）。TDD 回归 11 passed；ruff 绿；tsc 绿。	be165248b2d4abf6b19de2f8bdfaeca83a9bf13b^..be165248b2d4abf6b19de2f8bdfaeca83a9bf13b
