@@ -27,6 +27,7 @@ import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
@@ -64,7 +65,7 @@ import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type { ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
+import type { ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
 const EMPTY_UNDELIVERED: UndeliveredInput[] = [];
@@ -788,8 +789,21 @@ export default function App() {
   /** 正在提交恢复的 run_id（null = 无在途请求）。按 run 记账的理由同草稿：切走后
    *  按钮不该被上一个 run 的在途请求永久禁用。 */
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
+  const [dismissedConstraintRequestId, setDismissedConstraintRequestId] = useState<string | null>(null);
+  const [resumingConstraintRequestId, setResumingConstraintRequestId] = useState<string | null>(null);
 
   const paused = conversation?.run_paused ?? null;
+  const pendingConstraintInput = conversation?.pending_constraint_input ?? null;
+  const constraintInputPending =
+    pendingConstraintInput !== null && pendingConstraintInput.answer === null;
+  const constraintRequest =
+    paused !== null &&
+    pendingConstraintInput !== null &&
+    paused.reason === 'user_input' &&
+    paused.input_request_id === pendingConstraintInput.request_id &&
+    paused.run_id === pendingConstraintInput.run_id
+      ? pendingConstraintInput
+      : null;
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
@@ -810,6 +824,31 @@ export default function App() {
   // live 流，那一小段窗口里 `run_paused` 可能还没被 run/resumed 清掉——那时露出
   // 一个"恢复"按钮等于给用户一个重复提交 CAS 的机会。
   const canResumePaused = paused !== null && selectedId !== null && !streaming;
+
+  const constraintDialogOpen =
+    constraintRequest !== null &&
+    selectedId !== null &&
+    !loadingHistory &&
+    dismissedConstraintRequestId !== constraintRequest.request_id;
+
+  const handleConstraintInputAnswer = useCallback((answer: ConstraintInputAnswer) => {
+    if (!constraintRequest || !paused || selectedId === null) return;
+    setResumingConstraintRequestId(constraintRequest.request_id);
+    void resumePausedRun(selectedId, {
+      runId: paused.run_id,
+      expectedVersion: paused.version,
+      kind: 'user_input',
+      inputRequest: answer,
+    }).finally(() => setResumingConstraintRequestId(null));
+  }, [constraintRequest, paused, selectedId, resumePausedRun]);
+
+  const handleConstraintDialogOpenChange = useCallback((open: boolean) => {
+    if (open) {
+      setDismissedConstraintRequestId(null);
+    } else if (constraintRequest) {
+      setDismissedConstraintRequestId(constraintRequest.request_id);
+    }
+  }, [constraintRequest]);
 
   const handleResumePaused = useCallback(() => {
     if (!paused || selectedId === null) return;
@@ -1196,13 +1235,27 @@ export default function App() {
           {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
               出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
               暂停有（抬高绝对 ceiling → 同 run 恢复）。 */}
-          {canResumePaused && paused && (
+          {canResumePaused && paused && paused.reason !== 'user_input' && (
             <PausedPanel
               paused={paused}
               ceilingDraft={pauseCeilingDraft}
               onCeilingDraftChange={handlePauseCeilingChange}
               onResume={handleResumePaused}
               resuming={resumingRunId === paused.run_id}
+            />
+          )}
+          {constraintRequest && selectedId !== null && !loadingHistory && (
+            <ConstraintResolutionDialog
+              key={constraintRequest.request_id}
+              request={constraintRequest}
+              open={constraintDialogOpen}
+              canClose
+              resuming={
+                resumingConstraintRequestId === constraintRequest.request_id || streaming
+              }
+              errorMessage={error}
+              onOpenChange={handleConstraintDialogOpenChange}
+              onSubmit={handleConstraintInputAnswer}
             />
           )}
           {/* 中心列 tab 集（#182）：`Chat` 恒存在 + 能力声明为真的面（PRD §2.1）。
@@ -1246,6 +1299,7 @@ export default function App() {
                   />
                   <Composer
                     streaming={streaming}
+                    constraintInputPending={constraintInputPending}
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */

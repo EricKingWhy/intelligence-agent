@@ -28,6 +28,8 @@ interface Props {
   /** UI-01（D4-⑤）：存在待决审批时锁住 composer——运行被阻塞，新任务
    *  与审批互斥，不允许两条修复路径同时开放（评审 Riley 红旗）。 */
   approvalPending?: boolean;
+  /** 有待回答的约束澄清时锁住新消息，避免新 run 覆盖待恢复问题。 */
+  constraintInputPending?: boolean;
   onSubmit: (task: string, rememberAsProceduralRule: boolean) => void;
   /** steer 提交（ADR-0030 §5.1：同一份输入立即投递——Ctrl/Cmd+Enter）。
    *  缺席 = 回退到 onSubmit（queue），既有调用零改动。 */
@@ -94,6 +96,7 @@ interface Props {
 export const Composer = memo(function Composer({
   streaming,
   approvalPending = false,
+  constraintInputPending = false,
   onSubmit,
   onSteer,
   onCancel,
@@ -137,9 +140,15 @@ export const Composer = memo(function Composer({
   // 「streaming 表示本页有活流」被当成「服务端有在途 run」：跨客户端场景下
   // 输入框可用、消息却走 queue 分支静默丢失。现在流式期间发消息 = 显式选择
   // queue（Enter）/ steer（Ctrl/Cmd+Enter），两条通道都有后端消费。
-  const locked = approvalPending;
-  // 锁定提示只表达「审批阻塞」这一种原因；纯 streaming 有自己的 affordances（停止键/Esc 提示）。
-  const showLock = approvalPending && !streaming;
+  const locked = approvalPending || constraintInputPending;
+  // 纯 streaming 有自己的 affordances（停止键/Esc 提示）。
+  const showLock = locked && !streaming;
+  const lockHint = constraintInputPending
+    ? '请先回答当前约束澄清，再发送新消息'
+    : '等待审批决策后再继续';
+  const lockedPlaceholder = constraintInputPending
+    ? '等待约束澄清回答…'
+    : '等待审批决策…';
 
   // ── #283 权限 pill：会话内可改 + 升档确认 ──
   // 禁用只剩两个**操作性**原因（都不是「档位不可变」）：等审批（后端闸门会 409，
@@ -383,9 +392,11 @@ export const Composer = memo(function Composer({
                 <button
                   className="queue-item-btn"
                   onClick={() => onSteerItem?.(item)}
-                  disabled={!onSteerItem}
+                  disabled={!onSteerItem || constraintInputPending}
                   aria-label="立即发送"
-                  title="立即发送（注入当前运行）"
+                  title={constraintInputPending
+                    ? '请先回答当前约束澄清'
+                    : '立即发送（注入当前运行）'}
                 >
                   <Zap size={13} />
                 </button>
@@ -411,8 +422,11 @@ export const Composer = memo(function Composer({
             <button
               className="queue-item-btn queue-flush-btn"
               onClick={onFlush}
+              disabled={constraintInputPending}
               aria-label="立即发送全部"
-              title="立刻投递待发送输入（POST /queue/flush）"
+              title={constraintInputPending
+                ? '请先回答当前约束澄清'
+                : '立刻投递待发送输入（POST /queue/flush）'}
             >
               <Play size={13} />
               立即发送全部
@@ -422,13 +436,13 @@ export const Composer = memo(function Composer({
       )}
       <div className="composer-dock surface-floating">
         {/* UI-01：审批待决时给出锁定原因（置灰不是隐形）。 */}
-        {showLock && <div className="composer-locked-hint">等待审批决策后再继续</div>}
+        {showLock && <div className="composer-locked-hint">{lockHint}</div>}
         <textarea
           ref={inputRef}
           id="composer-input"
           name="task"
           className="composer"
-          placeholder={showLock ? '等待审批决策…' : `描述一个任务…（${modKey()}+Enter 发送）`}
+          placeholder={showLock ? lockedPlaceholder : `描述一个任务…（${modKey()}+Enter 发送）`}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}

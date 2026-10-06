@@ -855,6 +855,60 @@ def test_valid_resume_passes_and_returns_the_effective_ceilings() -> None:
     assert effective == RunLimits(max_agent_turns_total=4)
 
 
+def test_user_input_resume_keeps_existing_ceilings_and_consumed_counters() -> None:
+    limits = RunLimits(max_agent_turns_total=10)
+    consumed = BudgetConsumed(agent_turns=2, model_requests=3, total_tokens=120)
+    event = _ev(
+        2, RUN_PAUSED, run_id=RUN_ID,
+        **build_pause_data(
+            reason="user_input",
+            trigger_dimension="user_input",
+            version=1,
+            consumed=consumed,
+            limits=build_limits_snapshot(run_limits=limits, local_fuse=FUSE),
+            continuation={"completed": [], "remaining": [], "blockers": [],
+                          CONTINUATION_ACTION_KEY: "等待用户回答"},
+            closeout_source=CLOSEOUT_DETERMINISTIC,
+        ),
+    )
+    paused = derive_run_budget([_started(), event], RUN_ID).paused
+    assert paused is not None
+
+    effective = validate_resume(
+        paused, run_id=RUN_ID, expected_version=1, limits=RunLimits(),
+        resume_basis="user_input",
+    )
+
+    assert effective == limits
+    assert paused.consumed == consumed
+
+
+def test_user_input_resume_is_rejected_when_budget_has_no_headroom() -> None:
+    limits = RunLimits(max_agent_turns_total=2)
+    consumed = BudgetConsumed(agent_turns=2)
+    event = _ev(
+        2, RUN_PAUSED, run_id=RUN_ID,
+        **build_pause_data(
+            reason="user_input",
+            trigger_dimension="user_input",
+            version=1,
+            consumed=consumed,
+            limits=build_limits_snapshot(run_limits=limits, local_fuse=FUSE),
+            continuation={"completed": [], "remaining": [], "blockers": [],
+                          CONTINUATION_ACTION_KEY: "等待用户回答"},
+            closeout_source=CLOSEOUT_DETERMINISTIC,
+        ),
+    )
+    paused = derive_run_budget([_started(), event], RUN_ID).paused
+    assert paused is not None
+
+    with pytest.raises(BudgetConflict):
+        validate_resume(
+            paused, run_id=RUN_ID, expected_version=1, limits=RunLimits(),
+            resume_basis="user_input",
+        )
+
+
 def test_resume_ceilings_overlay_the_paused_run_never_clear_unnamed_dimensions() -> None:
     """未点名的维度**沿用**暂停时的 ceiling，不会被一次恢复清空。
 

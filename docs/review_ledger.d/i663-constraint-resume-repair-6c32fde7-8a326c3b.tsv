@@ -1,0 +1,1 @@
+2026-10-06	#663 delta 重审：Standards APPROVE、0 findings；Correctness/Spec 代码差异无 findings，但 AC16 缺 18 个 live provider case 仍阻断票面。ADR-0051 D6：deadline run 禁问，session 预算答复时重检且等待不预留。	6c32fde762efaac161dce1cdb5499715edaded64..8a326c3b08ed30fcf23bd07405d1f02d572bfed6

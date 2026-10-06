@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
+import type { AgentEvent, ConstraintInputAnswer, ConstraintInputChoice, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PendingConstraintInputRequest, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
@@ -179,6 +179,7 @@ export function initConversation(session_id: string): ConversationState {
     model_fallback: null,
     run_interrupted: null,
     run_paused: null,
+    pending_constraint_input: null,
     run_failure: null,
     turn_index: null,
     requested_model: null,
@@ -413,10 +414,91 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
       turn.injected_by = event.data.injected_by;
     }
   });
+
+  const request = state.pending_constraint_input;
+  const requestId = event.data.input_request_id;
+  const answer = parseConstraintInputAnswer(event.data.input_request_answer);
+  if (request && requestId === request.request_id && answer?.request_id === request.request_id) {
+    state.pending_constraint_input = { ...request, answer };
+  }
+}
+
+const CONSTRAINT_INPUT_CHOICES = new Set<ConstraintInputChoice>([
+  'replace_persistently',
+  'current_task_only',
+  'keep_existing',
+  'custom',
+]);
+
+function parseConstraintInputAnswer(raw: unknown): ConstraintInputAnswer | null {
+  if (!isRecord(raw)) return null;
+  const { request_id, choice, custom_text } = raw;
+  if (
+    typeof request_id !== 'string' ||
+    typeof choice !== 'string' ||
+    !CONSTRAINT_INPUT_CHOICES.has(choice as ConstraintInputChoice)
+  ) return null;
+  if (custom_text !== undefined && typeof custom_text !== 'string') return null;
+  return {
+    request_id,
+    choice: choice as ConstraintInputChoice,
+    ...(typeof custom_text === 'string' ? { custom_text } : {}),
+  };
+}
+
+function projectUserInputRequested(state: ConversationState, event: AgentEvent): void {
+  const data = event.data;
+  const rawChoices = Array.isArray(data.choices) ? data.choices : [];
+  const choices = rawChoices.flatMap((raw) => {
+    if (!isRecord(raw)) return [];
+    const { id, label } = raw;
+    if (
+      typeof id !== 'string' ||
+      !CONSTRAINT_INPUT_CHOICES.has(id as ConstraintInputChoice) ||
+      typeof label !== 'string' ||
+      !label.trim()
+    ) return [];
+    return [{ id: id as ConstraintInputChoice, label }];
+  });
+  const requestId = data.request_id;
+  const runId = event.run_id ?? data.run_id;
+  const factId = data.fact_id;
+  const oldValue = data.old_value;
+  const candidate = data.candidate;
+  const question = data.question;
+  const sourceEventId = data.source_event_id;
+  const sourceEventSeq = numberOf(data.source_event_seq);
+  if (
+    typeof requestId !== 'string' || !requestId ||
+    typeof runId !== 'string' || !runId ||
+    typeof factId !== 'string' || !factId ||
+    typeof oldValue !== 'string' ||
+    typeof candidate !== 'string' ||
+    typeof question !== 'string' ||
+    typeof sourceEventId !== 'string' || !sourceEventId ||
+    sourceEventSeq === undefined ||
+    choices.length === 0
+  ) return;
+  const request: PendingConstraintInputRequest = {
+    request_id: requestId,
+    run_id: runId,
+    fact_id: factId,
+    old_value: oldValue,
+    candidate,
+    question,
+    source_event_id: sourceEventId,
+    source_event_seq: sourceEventSeq,
+    choices,
+    answer: null,
+  };
+  state.pending_constraint_input = request;
 }
 
 function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   state.run_status = 'running';
+  if (state.pending_constraint_input?.run_id !== event.run_id) {
+    state.pending_constraint_input = null;
+  }
   // OBS-007：新 run 开始 = 用户已经接着往下跑了，「上次运行…中断」这条提示随之
   // 过期——不清掉的话它会挂到会话生命结束，与后续 run 的真实结局（比如绿色
   // 「已完成」）同屏打架。清空后 `run_interrupted` 的语义收窄为「**最近一个** run
@@ -687,6 +769,9 @@ function projectToolOutputDelta(state: ConversationState, event: AgentEvent): vo
 function projectRunCompleted(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
   state.run_cancelled = false;
+  if (state.pending_constraint_input?.run_id === event.run_id) {
+    state.pending_constraint_input = null;
+  }
   // #220：失败归因是「最近一个 run 的结局」，更晚的终态一到它就过期（同 run_cancelled 复位）。
   state.run_failure = null;
   state.usage_total = parseUsage(data.usage_total) ?? state.usage_total;
@@ -709,6 +794,9 @@ function projectRunCompleted(state: ConversationState, event: AgentEvent): void 
  *  可见 trace，跳转有排查价值；此前 failed 分支漏抽 trace_id 是 pre-existing bug）。 */
 function projectRunFailed(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
+  if (state.pending_constraint_input?.run_id === event.run_id) {
+    state.pending_constraint_input = null;
+  }
   state.run_cancelled = isCancelledRunFailure(data);
   // #220：折叠失败归因。要点三条（载荷形状与呈现口径见 ADR-0033 §2.2/2.3）：
   // 取消那支不记（取消 ≠ 错误，da394a9）；两个键互相独立、都可缺；都没给就整体 null
@@ -727,6 +815,9 @@ function projectRunFailed(state: ConversationState, event: AgentEvent): void {
  *  streaming 段 settle 为 done，running 工具标记 stopped（中断 ≠ 错误）。 */
 function projectRunInterrupted(state: ConversationState, event: AgentEvent): void {
   const data = event.data;
+  if (state.pending_constraint_input?.run_id === event.run_id) {
+    state.pending_constraint_input = null;
+  }
   state.run_interrupted = {
     step_id: event.step_id ?? null,
     interrupted_seq: typeof data.interrupted_seq === 'number' ? data.interrupted_seq : null,
@@ -866,6 +957,10 @@ function parsePausedInfo(event: AgentEvent): RunPausedInfo {
       typeof data.closeout_source === 'string' ? data.closeout_source : 'deterministic',
     resume_requirements: stringList(data.resume_requirements),
     trace_id: typeof data.trace_id === 'string' && data.trace_id ? data.trace_id : null,
+    input_request_id:
+      typeof data.input_request_id === 'string' && data.input_request_id
+        ? data.input_request_id
+        : null,
   };
 }
 
@@ -891,6 +986,9 @@ function projectRunPaused(state: ConversationState, event: AgentEvent): void {
  *  事件会自己建新轮（`step_base+1`），`finalizeRun('paused')` 已经 settle 过旧轮。 */
 function projectRunResumed(state: ConversationState, event: AgentEvent): void {
   state.run_paused = null;
+  if (state.pending_constraint_input?.run_id === event.run_id) {
+    state.pending_constraint_input = null;
+  }
   state.run_status = 'running';
   // #537：恢复后的 ceilings 用**恢复事件自带的新快照**更新（run/resumed 载荷的
   // data.limits.run 与 run/paused 同形，值是恢复生效后的 effective limits）——
@@ -1442,6 +1540,7 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.RUN_PAUSED]: { apply: projectRunPaused, summarize: summarizeRunPaused },
   [EventType.RUN_RESUMED]: { apply: projectRunResumed, summarize: summarizeRunResumed },
   [EventType.USER_MESSAGE]: { apply: projectUserMessage, summarize: summarizeUserMessage },
+  [EventType.USER_INPUT_REQUESTED]: { apply: projectUserInputRequested, summarize: emptySummary },
   [EventType.MODEL_STARTED]: { apply: projectModelStarted, summarize: emptySummary },
   [EventType.MODEL_DELTA]: { apply: projectTextDelta, summarize: summarizeDeltaChars },
   [EventType.MODEL_COMPLETED]: { apply: projectModelCompleted, summarize: summarizeModelCompleted },
