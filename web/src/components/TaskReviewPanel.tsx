@@ -148,6 +148,14 @@ export function TaskReviewPanel({
   const failedItems =
     task?.criteria.filter((c) => task.verification[c.item_id]?.value === 'failed') ?? [];
 
+  /** P2-3：下一步 = 未通过（failed）或缺证据的验收项（P1-1：证据不可得时不计入缺证据）。 */
+  const nextStepItems =
+    task?.criteria.filter((c) => {
+      if (task.verification[c.item_id]?.value === 'failed') return true;
+      if (evidenceOk && !(review.evidence[c.item_id]?.length > 0)) return true;
+      return false;
+    }) ?? [];
+
   const gitStatusOut = review.gitStatus;
   const gitStatusLines =
     gitStatusOut && gitStatusOut.stdout.trim()
@@ -209,6 +217,8 @@ export function TaskReviewPanel({
                 <dd>{task.read_write_intent ?? '—'}</dd>
                 <dt>工作目录</dt>
                 <dd>{task.cwd ?? '—'}</dd>
+                <dt>授权信息</dt>
+                <dd>服务端投影暂未提供</dd>
               </dl>
               <h3 className="task-review-h">验收项（{task.criteria.length}）</h3>
               {task.criteria.length === 0 ? (
@@ -433,6 +443,24 @@ export function TaskReviewPanel({
                   UNKNOWN / reconcile 属 Operation Ledger 域，本票不接入也不推断。
                 </span>
               </div>
+              <h3 className="task-review-h">下一步</h3>
+              {nextStepItems.length === 0 ? (
+                <div className="task-review-hint">暂无下一步建议（服务端未提供）。</div>
+              ) : (
+                <div>
+                  <div className="task-review-hint">处理以下未通过/缺证据项：</div>
+                  <ul className="task-review-files">
+                    {nextStepItems.map((c) => (
+                      <li key={c.item_id}>
+                        <code>{c.text}</code>
+                        <span className="task-review-tag warn">
+                          {task?.verification[c.item_id]?.value === 'failed' ? '未通过' : '缺证据'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </section>
 
             {/* ⑥ 三操作（各自后果分别说明；不与权限审批共用语义与文案） */}
