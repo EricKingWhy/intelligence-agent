@@ -1654,6 +1654,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_task_routes(app, validate_session_id=validate_session_id)
 
+    # W-08 / #352 证据投影路由（独立 router：记录 + 服务端投影查询；
+    # 投影单源在 session/evidence.py，本模块只留一行接入面）
+    from agent_harness.web.evidence_delivery import register_evidence_routes
+
+    register_evidence_routes(app, validate_session_id=validate_session_id)
+
     # W-06 / #350 进度文件重读对账路由（独立 router：对账状态查询 + 外部编辑
     # 冲突两出口；对账单源在 session/progress.py，本模块只留一行接入面）
     from agent_harness.web.progress_status import register_progress_routes
