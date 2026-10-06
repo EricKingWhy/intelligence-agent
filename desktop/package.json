@@ -1,0 +1,22 @@
+{
+  "name": "@intelligence-agent/desktop",
+  "version": "0.1.0",
+  "description": "Windows Electron thin host for intelligence-agent: single instance, tray, backend attach and a restricted security bridge. No React UI, no desktop GUI automation, no Node Agent Runtime.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/src/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "test": "node --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "electron": "^44.5.1",
+    "typescript": "^7.0.2"
+  }
+}
