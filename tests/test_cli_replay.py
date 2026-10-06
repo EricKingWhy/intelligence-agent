@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from agent_harness.cli import render_replay_event, replay_command
+from agent_harness.cli_theme import Theme
 from agent_harness.session import Session
 from agent_harness.session.event import (
     AGENT_DELEGATION_FINISHED,
@@ -219,3 +220,32 @@ def test_render_replay_event_labels_all_english(tmp_path: Path) -> None:
     assert not any(
         "\u4e00" <= ch <= "\u9fff" for line in lines if line for ch in line
     )
+
+
+def test_render_replay_event_failure_coloring(tmp_path: Path) -> None:
+    """P0-7（AC7）：失败三行（run/failed、model/failed、guard）可着 err 色；只着色不改文本。
+
+    `theme=None` ⇒ 纯文本（旧调用方零行为变化）；真彩含 err 转义 `215;95;95`；
+    `[stuck]` / `[fallback]` 不染（非失败语义，#317/#312 纪律）。
+    """
+    store = JsonlSessionStore(root=tmp_path / "sessions")
+    s = Session.start(store, session_id="fc")
+    s.append(RUN_FAILED, {"reason": "cancelled"})
+    s.append(MODEL_FAILED, {"message": "boom"})
+    s.append(TOOL_FAILURE_GUARD, {"level": "hard", "consecutive_failures": 3})
+    run_failed, model_failed, guard = store.read_events("fc")[-3:]
+
+    # theme=None ⇒ 纯文本，零 ANSI（旧行为）
+    assert render_replay_event(run_failed) == "[run failed] cancelled"
+    assert "\x1b[" not in (render_replay_event(model_failed) or "")
+
+    err = "\x1b[38;2;215;95;95m"
+    theme = Theme(color="truecolor")
+    assert render_replay_event(run_failed, theme=theme) == err + "[run failed] cancelled\x1b[0m"
+    assert render_replay_event(model_failed, theme=theme).startswith(err)
+    assert render_replay_event(guard, theme=theme).startswith(err)
+
+    # nocolor ⇒ 原样（只着色，文本不变）
+    plain = Theme(color="nocolor")
+    assert render_replay_event(run_failed, theme=plain) == "[run failed] cancelled"
+    assert render_replay_event(guard, theme=plain).startswith("[guard] level=hard")
