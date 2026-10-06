@@ -71,8 +71,8 @@ class TestPendingStateMachine:
             "usage_total": {"prompt_tokens": 1, "completion_tokens": 2}}))
         joined = "".join(out)
         assert "(previous tool result not observed)" in joined
-        # orphan 行出现在用量行之前（用量行文案归 P0-6，本断言只约束相对顺序）
-        assert joined.index("(previous tool result not observed)") < joined.index("tokens:")
+        # orphan 行出现在用量行之前（用量行文案归 P0-6 #738：`↑in ↓out`，本断言只约束相对顺序）
+        assert joined.index("(previous tool result not observed)") < joined.index("↑")
         assert renderer._pending_tool is False
 
     def test_orphan_on_run_failed(self):
@@ -82,7 +82,8 @@ class TestPendingStateMachine:
         renderer.handle(_event(RUN_FAILED, {"reason": "boom"}))
         joined = "".join(out)
         assert "(previous tool result not observed)" in joined
-        assert joined.index("(previous tool result not observed)") < joined.index("[run failed]")
+        # P0-7（#739）后 RUN_FAILED 为 `● 人话` 块，旧 `[run failed]` 标签已消失
+        assert joined.index("(previous tool result not observed)") < joined.index("运行失败")
         assert renderer._pending_tool is False
 
     def test_orphan_on_run_paused(self):
