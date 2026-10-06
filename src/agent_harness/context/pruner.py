@@ -19,7 +19,8 @@ shadow）的成员上构建（#643 T15/P-1）：可见性直接取自 derive 的
 不在此另写区间算法——被 shadow 的事件本就不在 Runtime Context（不变量 #5/#6），
 对它们下裁决策既无投影效果、又会把收益门读数算进不存在于上下文的 token。
 不裁清单全部确定性：指纹不同 / ok=false（失败诊断保留）/ 等价类可见成员中最新一条 /
-被 ``source_event_ids`` 引用（W-02 保护事实接缝，main 上恒空）/ 无 artifact_ref
+被 ``source_event_ids`` 引用（W-02 保护事实接缝；main 上现有写入者均不引用
+tool/result 事件 id，本豁免对候选恒不触发）/ 无 artifact_ref
 （已保存裁决 (A)：pruner 不现场 store.save，未外置结果不参与）/ ref 校验失败 /
 最近 K 条 tool 结果窗口内（#414 W-31.2 ``keep_recent_tool_results``）/
 一轮收益低于收益门（#414 W-31.2 ``clear_at_least_tokens``）。
@@ -63,8 +64,9 @@ __all__ = [
 _SUMMARY_MAX_CHARS = 120
 
 #: 豁免原因：候选结果被某事件的 ``source_event_ids`` 引用（W-02 保护事实接缝）。
-#: main 上该集合恒空（唯一写入者 session.resume 的 dangling 修复指向 tool_call_id），
-#: 行为不受影响；W-02 落地后零改动生效。
+#: main 上该集合非空，但现有写入者（resume dangling 修复指向 TOOL_CALL id、
+#: task 验收修订/接受、OPERATION_RECONCILED）均不引用 tool/result 事件 id，
+#: 故本豁免对候选恒不触发，行为不受影响；W-02 落地后零改动生效。
 SKIP_PROTECTED_REFERENCE = "protected_reference"
 
 #: 豁免原因：artifact_ref 读回校验失败（含 KeyError 与其他 store 异常）。

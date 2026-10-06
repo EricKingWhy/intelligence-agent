@@ -151,6 +151,56 @@ class TestBuilderPruneIntegration:
         )
         assert snapshot["messages"] < estimate_message_tokens(session.derive_messages())
 
+    @pytest.mark.asyncio
+    async def test_usage_snapshot_replays_recorded_decisions_until_next_build(
+        self, tmp_path,
+    ):
+        """#708 裁决 B：重放 = 按落账时点决策，不做当前可见性复核。
+
+        build1 落决策（只裁 c1）；随后追加 c3——当前可见集变化，fresh 口径下
+        c2 也该裁。在下一次 build **之前**读看板：usage_snapshot 仍按 build1
+        决策重放，c2 保持完整成本（相对 fresh 口径偏高、安全方向），不因
+        "现在该裁"而提前替换。下一次 build 重算决策 ⇒ 读数自纠（c2 进骨架）。
+        """
+        session = make_session(tmp_path)
+        store = FakeArtifactStore()
+        content = "w\n" * 150
+        first = await _append_read(
+            session, store, call_id="c1", path="a.txt", content=content)
+        second = await _append_read(
+            session, store, call_id="c2", path="a.txt", content=content)
+        builder = _builder(store)
+        await builder.build(session)
+        assert set(builder._prune_decisions[session.session_id]) == {first.seq}
+
+        # 投影变化：新重复成员到来（此刻 fresh 口径会连 c2 一起裁）。
+        await _append_read(session, store, call_id="c3", path="a.txt", content=content)
+
+        # fresh 口径对照：当前可见集上重算会多裁 c2。
+        pairs = derive_messages_with_source_ranges(session.events)
+        fresh_messages, fresh_report = await builder._pruner.prune(
+            pairs, session.events,
+        )
+        assert {r.seq for r in fresh_report.pruned} == {first.seq, second.seq}
+
+        # 钉语义：看板仍按 build1 决策重放（只替换 c1），不提前采用 fresh 口径；
+        # 与"按当前决策重放投影"的既定读法逐 token 一致（防 A 向回归：看板私改
+        # 重算口径会同时打破这两条）。
+        snap = builder.usage_snapshot(session)
+        assert snap["messages"] == _expected_pruned_total(session, builder)
+        assert snap["messages"] > estimate_message_tokens(fresh_messages), (
+            "重放按落账决策：c2 未被提前替换（偏高、安全方向）"
+        )
+
+        # 下一次 build 重算决策 ⇒ 自纠（c2 进骨架，读数收敛）。
+        await builder.build(session)
+        assert set(builder._prune_decisions[session.session_id]) == {
+            first.seq, second.seq,
+        }
+        snap2 = builder.usage_snapshot(session)
+        assert snap2["messages"] == builder._token_estimate_total
+        assert snap2["messages"] < snap["messages"], "下次 build 重算后读数收敛"
+
     def test_constructor_requires_pairing(self):
         model = ScriptedModel([])
         with pytest.raises(ValueError):

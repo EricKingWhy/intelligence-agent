@@ -788,8 +788,10 @@ class ContextBuilder:
             })
         # W-04 (#348)：落 bracket 后重投影确认——从已持久化的事件重算"下一次
         # build 会看到的投影"，与本次产物比对（裁剪路径重放本 build 的裁剪决策，
-        # 保证与 compact 输入同一视图）。不合即 fail-closed：bracket 已在 JSONL
-        # （历史不删除），但本次执行不得继续在未核验的投影上工作。
+        # 保证与 compact 输入同一视图）。决策与投影同 build 同源（#708 裁决 B：
+        # 重放按落账时点决策、不做可见性复核），比对不存在跨 build 分歧窗口。
+        # 不合即 fail-closed：bracket 已在 JSONL（历史不删除），但本次执行不得
+        # 继续在未核验的投影上工作。
         projected = self._reproject(session)
         if projected != result.messages:
             raise CompactionPostWriteError(
@@ -887,6 +889,9 @@ class ContextBuilder:
 
         裁剪路径重放**本 build 刚落下的**裁剪决策（与 usage_snapshot 同一读法），
         保证重算视图与 compact 的输入一致——否则被裁的骨架行会被当成失配。
+        重放语义＝按落账时点决策、不做当前可见性复核（#708 裁决 B）：本方法
+        只在 build 末尾消费，决策与投影同 build 同源、不存在跨 build 分歧窗口；
+        跨 build 读（usage_snapshot）的漂移口径在彼处文档化。
         """
         if self._pruner is None:
             return session.derive_messages()
@@ -1104,9 +1109,13 @@ class ContextBuilder:
         W-03 (#347)：pruner 装配时，messages 桶走与 build 同一条裁剪路径
         （地雷 2，#200 双视图教训）。本方法是同步读口而 store 校验是 async，
         因此重放**最近一次 build 落下的决策**（seq → 骨架行）——同一 builder
-        实例上与 build 产物逐字节一致；build 之后新到达的结果尚未裁，
-        估值偏高（安全方向），下一次 build 收敛。在途 run 的看板读的正是
-        刚 build 过的同一个 builder 实例，常态下两者一致。
+        实例上与 build 产物逐字节一致。重放语义（#708 裁决 B）＝**按落账时点
+        决策，不做当前可见性复核**：读数含义是"截至最近一次 build 的状态"，
+        与当前 fresh 口径的偏差有界于一个 build 周期、在下一次 build 重算
+        决策时自纠——build 之后新到达的结果尚未裁 ⇒ 偏高（安全方向）；投影
+        在其后变化使旧决策与 fresh 口径分歧（如被裁 seq 的等价类可见成员
+        构成变化）⇒ 偏低。在途 run 的看板读的正是刚 build 过的同一个
+        builder 实例，常态下两者一致。
         """
         if self._pruner is None:
             messages_tokens = estimate_message_tokens(session.derive_messages())
