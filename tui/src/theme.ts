@@ -10,7 +10,6 @@ import {
   backgroundAnsi,
   foregroundAnsi,
   parseColor,
-  styleText,
   type Color,
   type TerminalColorMode,
 } from "@earendil-works/pi-tui";
@@ -88,6 +87,3 @@ export function tintFn(color: Color, mode: TerminalColorMode): (text: string) =>
 export function loaderFrames(platform: string): string[] | undefined {
   return platform === "win32" ? [GLYPHS.dot, GLYPHS.circle] : undefined;
 }
-
-/** 供需要直接 styleText 的调用方使用（带 bold 等属性时）。 */
-export { styleText };

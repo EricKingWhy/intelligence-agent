@@ -55,15 +55,13 @@ export function toolCardLines(tool: ToolCardModel, theme: IaTheme): string[] {
 
 /** 装配成带状态 tint 底色的 Box 组件（增量更新时由 app 层重建/替换）。 */
 export function toolCardComponent(tool: ToolCardModel, theme: IaTheme): Component {
-  const bg =
+  const tint =
     tool.status === "success"
-      ? tintFn(parseColor(CARD_TINTS.success), theme.mode)
+      ? CARD_TINTS.success
       : tool.status === "error"
-        ? tintFn(parseColor(CARD_TINTS.error), theme.mode)
-        : tool.status === "running"
-          ? tintFn(parseColor(CARD_TINTS.running), theme.mode)
-          : undefined;
-  const box = new Box(1, 0, bg);
+        ? CARD_TINTS.error
+        : CARD_TINTS.running;
+  const box = new Box(1, 0, tintFn(parseColor(tint), theme.mode));
   box.addChild(new Text(toolCardLines(tool, theme).join("\n")));
   return box;
 }

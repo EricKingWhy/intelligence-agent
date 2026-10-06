@@ -5,7 +5,7 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "ia-tui": "./dist/index.js"
+    "ia-tui": "./dist/src/index.js"
   },
   "engines": {
     "node": ">=22"

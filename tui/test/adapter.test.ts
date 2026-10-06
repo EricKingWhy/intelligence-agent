@@ -131,6 +131,7 @@ test("run 四态可区分：running / paused / completed / failed", () => {
   applyEvent(paused, env(1, "run/paused", { reason: "client_absent", budget_version: 1 }));
   assert.equal(paused.runStatus, "paused");
   assert.equal(paused.pauseInfo?.reason, "client_absent");
+  assert.equal(paused.pauseInfo?.runId, "r1", "run_id 取自信封（恢复必须点名它）");
 
   const resumed = createState();
   applyEvent(resumed, env(1, "run/paused", { reason: "client_absent", budget_version: 1 }));

@@ -58,6 +58,8 @@ export interface PauseInfo {
   reason: string;
   triggerDimension: string;
   budgetVersion: number | null;
+  /** 被暂停 run 的 id（恢复请求必须点名它（Spec 03 第 5 节：同 run 续跑））。 */
+  runId: string | null;
   /** 原始 durable data；横幅渲染读它（views/pause.ts），这里不二次拆解。 */
   data: Record<string, unknown>;
   seq: number | null;
@@ -192,6 +194,7 @@ export function applyEvent(state: ConversationState, event: EventEnvelope): void
         reason: asString(data.reason) || "unknown",
         triggerDimension: asString(data.trigger_dimension),
         budgetVersion: asNumber(data.budget_version),
+        runId: event.run_id,
         data,
         seq: event.seq,
       };

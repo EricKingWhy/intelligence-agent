@@ -2,7 +2,7 @@
  * REST 客户端（fetch）：后端 API 面以 src/agent_harness/web/app.py 为准。
  * TUI 是纯客户端：所有真相向服务端查询，本地不写任何会话状态。
  */
-import type { EventEnvelope } from "./events.ts";
+import { asNumber, asString, isRecord, type EventEnvelope } from "./events.ts";
 import type { SessionSummaryView } from "./views/sessionselect.ts";
 
 export class ApiError extends Error {
@@ -16,9 +16,9 @@ export class ApiError extends Error {
 }
 
 export interface ResumeRequest {
+  run_id?: string;
   resume_basis?: string;
-  expected_version?: number;
-  budget?: unknown;
+  budget?: { expected_version?: number };
 }
 
 export class ApiClient {
@@ -63,10 +63,15 @@ export class ApiClient {
     return raw.map(parseEventRow);
   }
 
-  createSession(task: string): Promise<unknown> {
-    return this.request("/api/sessions", {
+  /**
+   * 只建会话（launch=false，无 task）-> 返回会话 JSON；任务随后经
+   * /messages 投递（launch=true 与 task 组合的 SSE 响应对 TUI 无用，
+   * 事件统一走 GET /stream 订阅消费）。
+   */
+  createSession(): Promise<{ session_id?: string }> {
+    return this.request("/api/sessions?launch=false", {
       method: "POST",
-      body: JSON.stringify({ task }),
+      body: JSON.stringify({}),
     });
   }
 
@@ -148,13 +153,13 @@ export class ApiClient {
 function parseEventRow(row: unknown): EventEnvelope {
   const obj = (typeof row === "object" && row !== null ? row : {}) as Record<string, unknown>;
   return {
-    type: typeof obj.type === "string" ? obj.type : "",
-    data: (typeof obj.data === "object" && obj.data !== null ? obj.data : {}) as Record<string, unknown>,
-    seq: typeof obj.seq === "number" ? obj.seq : null,
+    type: asString(obj.type),
+    data: isRecord(obj.data) ? obj.data : {},
+    seq: asNumber(obj.seq),
     run_id: typeof obj.run_id === "string" ? obj.run_id : null,
-    step_id: typeof obj.step_id === "number" ? obj.step_id : null,
-    session_id: typeof obj.session_id === "string" ? obj.session_id : "",
-    time: typeof obj.time === "string" ? obj.time : "",
+    step_id: asNumber(obj.step_id),
+    session_id: asString(obj.session_id),
+    time: asString(obj.time),
     durability: "durable",
   };
 }

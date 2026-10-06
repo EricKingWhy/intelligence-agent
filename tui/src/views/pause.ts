@@ -13,6 +13,12 @@
 import { asString, isRecord } from "../events.ts";
 import { decimalRemaining } from "../format.ts";
 
+/** run 作用域快照（cli.py `data.limits.run` 的同一读法；缺/畸形 = 空对象）。 */
+function runScope(data: Record<string, unknown>): Record<string, unknown> {
+  const limits = isRecord(data.limits) ? data.limits : {};
+  return isRecord(limits.run) ? limits.run : {};
+}
+
 /** turns 维两档读数（缺键 = unavailable；缺 consumed 不能算 remaining；形状不合 = unavailable）。 */
 function turnFacts(data: Record<string, unknown>): {
   consumedText: string;
@@ -21,7 +27,7 @@ function turnFacts(data: Record<string, unknown>): {
   localText: string;
 } {
   const limits = isRecord(data.limits) ? data.limits : {};
-  const runLimits = isRecord(limits.run) ? limits.run : {};
+  const runLimits = runScope(data);
   const localLimits = isRecord(limits.local) ? limits.local : {};
   const consumed = isRecord(data.consumed) ? data.consumed : {};
   const turns = consumed.agent_turns;
@@ -56,9 +62,7 @@ const EXTRA_DIMENSIONS: Array<[string, string]> = [
 ];
 
 function extraDimensionLines(data: Record<string, unknown>, carried: boolean): string[] {
-  const limits = isRecord((isRecord(data.limits) ? data.limits : {}).run)
-    ? (isRecord(data.limits) ? data.limits : {}).run as Record<string, unknown>
-    : {};
+  const limits = runScope(data);
   const consumed = isRecord(data.consumed) ? data.consumed : {};
   const lines: string[] = [];
   for (const [consumedKey, ceilingKey] of EXTRA_DIMENSIONS) {
@@ -76,9 +80,7 @@ function extraDimensionLines(data: Record<string, unknown>, carried: boolean): s
 }
 
 function deadlineLines(data: Record<string, unknown>, carried: boolean): string[] {
-  const limits = isRecord((isRecord(data.limits) ? data.limits : {}).run)
-    ? (isRecord(data.limits) ? data.limits : {}).run as Record<string, unknown>
-    : {};
+  const limits = runScope(data);
   if (!("deadline_at" in limits)) return [];
   const value = limits.deadline_at;
   const prefix = carried ? "  carried deadline: " : "  deadline: ";
@@ -90,9 +92,7 @@ function deadlineLines(data: Record<string, unknown>, carried: boolean): string[
 }
 
 function perToolLines(data: Record<string, unknown>, carried: boolean): string[] {
-  const limits = isRecord((isRecord(data.limits) ? data.limits : {}).run)
-    ? (isRecord(data.limits) ? data.limits : {}).run as Record<string, unknown>
-    : {};
+  const limits = runScope(data);
   const ceilingTable = isRecord(limits.tool_call_limits) ? limits.tool_call_limits : null;
   const consumed = isRecord(data.consumed) ? data.consumed : {};
   const callsTable = isRecord(consumed.tool_calls_by_tool) ? consumed.tool_calls_by_tool : null;

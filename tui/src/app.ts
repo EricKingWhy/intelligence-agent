@@ -6,7 +6,8 @@
  * 在场协议（ADR-0046 / Spec 11 第 6.2 节）：
  * - Ctrl+C / /quit 只停 TUI，不杀 Python Core 在途 Tool；退出时 best-effort
  *   POST /client-exit（服务端接缝未开时如实提示，不伪造暂停成功）；
- * - client_absent 暂停不自动续跑；/resume 显式提交 resume_basis=client_return。
+ * - client_absent 暂停不自动续跑；/resume 显式提交 resume_basis=client_return
+ *   （wire 形状：run_id + resume_basis + budget.expected_version，app.py ResumeRequest）。
  */
 import {
   Container,
@@ -16,11 +17,17 @@ import {
   Text,
   TuiMainScreen,
   getTerminalColorMode,
+  type Component,
   type TUI,
 } from "@earendil-works/pi-tui";
 
 import { ApiClient } from "./api.ts";
-import { applyEvent, createState, type ConversationState } from "./adapter.ts";
+import {
+  applyEvent,
+  createState,
+  type ConversationState,
+  type Turn,
+} from "./adapter.ts";
 import { formatTokens } from "./format.ts";
 import { SeqCursor, openStream } from "./sse.ts";
 import { createTheme, type IaTheme } from "./theme.ts";
@@ -30,7 +37,8 @@ import {
   statusLine,
   turnComponents,
 } from "./views/chat.ts";
-import { approvalLines } from "./views/approval.ts";
+import { approvalDecision, approvalLines } from "./views/approval.ts";
+import { sessionSelectList } from "./views/sessionselect.ts";
 import { renderPauseLines, renderResumeHint } from "./views/pause.ts";
 
 const RECONNECT_DELAY_MS = 1000;
@@ -40,9 +48,27 @@ export interface AppOptions {
   sessionId: string;
 }
 
+/** 已渲染轮次的签名：文本尾部 + 工具卡摘要（变了才重建该轮组件）。 */
+function turnSignature(turn: Turn): string {
+  return (
+    `${turn.role}|${turn.text.length}|${turn.text.slice(-80)}|` +
+    turn.tools
+      .map(
+        (t) =>
+          `${t.toolCallId}:${t.status}:${t.output.length}:${t.message.length}:${t.artifact?.artifact_id ?? ""}`,
+      )
+      .join(";")
+  );
+}
+
+interface RenderedTurn {
+  sig: string;
+  comps: Component[];
+}
+
 export class TuiApp {
-  readonly state: ConversationState = createState();
-  readonly cursor = new SeqCursor();
+  state: ConversationState = createState();
+  cursor = new SeqCursor();
   private readonly api: ApiClient;
   private readonly theme: IaTheme;
   private readonly tui: TUI;
@@ -52,11 +78,18 @@ export class TuiApp {
   private readonly statusText = new Text("");
   private pauseBannerText: Text | null = null;
   private approvalText: Text | null = null;
+  private renderedTurns: RenderedTurn[] = [];
+  private renderedOrphanCount = 0;
   private running = true;
+  /** 会话代际：切会话（/sessions /new）时 +1，旧订阅循环自行退出。 */
+  private generation = 0;
+  private abort = new AbortController();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private renderedTurnCount = 0;
 
-  constructor(private readonly options: AppOptions) {
+  constructor(
+    private readonly options: AppOptions,
+    private readonly isTTY: boolean = Boolean(process.stdin.isTTY),
+  ) {
     this.theme = createTheme(getTerminalColorMode());
     this.api = new ApiClient(options.baseUrl);
     const terminal = new ProcessTerminal();
@@ -85,10 +118,13 @@ export class TuiApp {
       void this.quit();
       return { consume: true };
     }
-    // 批准内联问答：y/N 键盘决策；消费按键防止漏进编辑器。
+    // 批准内联问答：TTY y/N 决策；非 TTY 在 renderApproval 处默认拒绝。
     const approval = this.state.pendingApprovals[0];
     if (approval !== undefined && (data === "y" || data === "n")) {
-      void this.decideApproval(approval.approvalId, data === "y");
+      const decision = approvalDecision(this.isTTY, data);
+      if (decision !== "wait") {
+        void this.decideApproval(approval.approvalId, decision === "approved");
+      }
       return { consume: true };
     }
     return undefined;
@@ -99,12 +135,14 @@ export class TuiApp {
     await this.rebuildFromHistory();
     this.tui.start();
     this.tui.setFocus(this.editor);
-    void this.subscribeLoop();
+    this.subscribeLoop();
   }
 
-  /** 全量重建（进会话 / truncated）：GET /events，幂等游标回填 max seq。 */
+  /** 全量重建（进会话 / truncated）：重置状态后从 GET /events 重投影，
+   *  幂等游标回填 max seq。重放不叠加（不变量 #22：重建后状态仍可对账）。 */
   async rebuildFromHistory(): Promise<void> {
     const events = await this.api.getEvents(this.options.sessionId);
+    this.state = createState();
     for (const event of events) applyEvent(this.state, event);
     const maxSeq = events.reduce(
       (acc, e) => (e.seq !== null && e.seq > acc ? e.seq : acc), -1,
@@ -113,37 +151,43 @@ export class TuiApp {
     this.renderAll();
   }
 
-  /** 订阅循环：断开按游标重连（seq 幂等去重）；truncated 走全量重建。 */
-  private async subscribeLoop(): Promise<void> {
-    while (this.running) {
-      const outcome = await new Promise<"ended" | "error" | "truncated">((resolve) => {
-        void openStream(
-          this.options.baseUrl,
-          this.options.sessionId,
-          this.cursor,
-          {
-            onFrame: (frame) => {
-              applyEvent(this.state, frame);
-              this.renderIncremental();
+  /** 订阅循环：断开按游标重连（seq 幂等去重）；truncated 走全量重建；
+   *  切会话（generation 变化）后旧循环退出，由 switchSession 起新循环。 */
+  private subscribeLoop(): void {
+    const gen = this.generation;
+    void (async () => {
+      while (this.running && gen === this.generation) {
+        const outcome = await new Promise<"ended" | "error" | "truncated">((resolve) => {
+          void openStream(
+            this.options.baseUrl,
+            this.options.sessionId,
+            this.cursor,
+            {
+              onFrame: (frame) => {
+                if (gen !== this.generation) return;
+                applyEvent(this.state, frame);
+                this.renderIncremental();
+              },
+              onTruncated: () => {
+                void this.rebuildFromHistory();
+              },
+              onClosed: (reason, error) => {
+                if (reason === "error" && error !== undefined) {
+                  this.appendNote(`stream reconnect: ${String(error)}`);
+                }
+                resolve(reason);
+              },
             },
-            onTruncated: () => {
-              void this.rebuildFromHistory();
-            },
-            onClosed: (reason, error) => {
-              if (reason === "error" && error !== undefined) {
-                this.appendNote(`stream reconnect: ${String(error)}`);
-              }
-              resolve(reason);
-            },
-          },
-        );
-      });
-      if (!this.running) break;
-      if (outcome === "truncated") continue; // 重建后立即重连
-      await new Promise((resolve) => {
-        this.reconnectTimer = setTimeout(resolve, RECONNECT_DELAY_MS);
-      });
-    }
+            { signal: this.abort.signal },
+          );
+        });
+        if (!this.running || gen !== this.generation) return;
+        if (outcome === "truncated") continue; // 重建后立即重连
+        await new Promise((resolve) => {
+          this.reconnectTimer = setTimeout(resolve, RECONNECT_DELAY_MS);
+        });
+      }
+    })();
   }
 
   private async handleSubmit(text: string): Promise<void> {
@@ -164,10 +208,25 @@ export class TuiApp {
 
   /** 斜杠命令：走服务端接口，不在本地造第二套状态。 */
   private async runCommand(command: string): Promise<void> {
-    const [name] = command.split(/\s+/);
+    const [name, ...args] = command.split(/\s+/);
     const sessionId = this.options.sessionId;
     try {
       switch (name) {
+        case "/sessions":
+          await this.showSessionPicker();
+          break;
+        case "/new": {
+          const task = args.join(" ").trim();
+          const created = await this.api.createSession();
+          const newId = created.session_id;
+          if (typeof newId !== "string" || !newId) {
+            this.appendNote("create failed: 服务端未返回 session_id");
+            break;
+          }
+          await this.switchSession(newId);
+          if (task) await this.api.sendMessage(newId, task);
+          break;
+        }
         case "/cancel":
           await this.api.cancel(sessionId);
           this.appendNote("cancel requested");
@@ -193,7 +252,9 @@ export class TuiApp {
           await this.quit();
           break;
         case "/help":
-          this.appendNote("commands: /cancel /compact /budget /progress /resume /quit");
+          this.appendNote(
+            "commands: /sessions /new <task> /cancel /compact /budget /progress /resume /quit",
+          );
           break;
         default:
           this.appendNote(`unknown command: ${command}（/help 查看可用命令）`);
@@ -203,7 +264,35 @@ export class TuiApp {
     }
   }
 
-  /** 显式续跑：client_absent 只接受 client_return；用户命令触发，不自动。 */
+  /** Task/Session 选择器：SelectList 覆盖层；数据来自 GET /api/sessions。 */
+  private async showSessionPicker(): Promise<void> {
+    const sessions = await this.api.listSessions();
+    const list = sessionSelectList(sessions, this.theme);
+    const handle = this.tui.showOverlay(list, { width: "80%", maxHeight: "60%" });
+    list.onCancel = () => handle.hide();
+    list.onSelect = (item) => {
+      handle.hide();
+      void this.switchSession(item.value).catch((error: unknown) => {
+        this.appendNote(`switch failed: ${String(error)}`);
+      });
+    };
+  }
+
+  /** 切会话：打断旧订阅（generation + abort），重置状态与游标，重建 + 重订。 */
+  private async switchSession(sessionId: string): Promise<void> {
+    if (sessionId === this.options.sessionId) return;
+    this.generation += 1;
+    this.abort.abort();
+    this.abort = new AbortController();
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    (this.options as { sessionId: string }).sessionId = sessionId;
+    this.cursor = new SeqCursor();
+    await this.rebuildFromHistory();
+    this.subscribeLoop();
+  }
+
+  /** 显式续跑：client_absent 只接受 client_return；用户命令触发，不自动。
+   *  wire 形状 = ResumeRequest（app.py）：run_id + resume_basis + budget.expected_version。 */
   private async resumePaused(): Promise<void> {
     const pause = this.state.pauseInfo;
     if (pause === null) {
@@ -216,9 +305,14 @@ export class TuiApp {
       );
       return;
     }
+    if (!pause.runId) {
+      this.appendNote("暂停事件缺 run_id（来源 seq " + String(pause.seq ?? "?") + "），无法恢复");
+      return;
+    }
     await this.api.resume(this.options.sessionId, {
+      run_id: pause.runId,
       resume_basis: "client_return",
-      expected_version: pause.budgetVersion ?? undefined,
+      budget: { expected_version: pause.budgetVersion ?? undefined },
     });
     this.appendNote("resume submitted (client_return)");
   }
@@ -237,40 +331,58 @@ export class TuiApp {
     this.tui.requestRender();
   }
 
-  /** 全量重画（历史重建 / truncated 重建）。 */
+  /** 全量重画（进会话 / truncated 重建 / 切会话）。 */
   private renderAll(): void {
-    this.chatContainer.clear();
     this.footerContainer.clear();
     this.pauseBannerText = null;
     this.approvalText = null;
     this.renderedOrphanCount = 0;
     if (this.state.turns.length === 0) {
-      this.chatContainer.addChild(emptyStateComponent(this.theme));
+      // 空状态：短文案 + 命令提示，不堆装饰框
+      this.renderedTurns = [{ sig: "", comps: [emptyStateComponent(this.theme)] }];
+    } else {
+      this.renderedTurns = this.state.turns.map((turn) => ({
+        sig: turnSignature(turn),
+        comps: turnComponents(turn, this.theme),
+      }));
     }
-    for (const component of conversationComponents(this.state, this.theme)) {
-      this.chatContainer.addChild(component);
-    }
-    this.renderedTurnCount = this.state.turns.length;
+    this.rebuildChat();
+    this.renderedOrphanCount = 0;
     this.renderOrphanArtifacts();
     this.renderPauseBanner();
     this.renderApproval();
     this.refreshStatus();
   }
 
-  /** 增量投影：只追加新轮次 + 刷新页脚（流式不闪烁由差分渲染兜底）。 */
+  /** 用 renderedTurns 重建对话容器（轮次间空行；aesthetics 间距纪律）。 */
+  private rebuildChat(): void {
+    this.chatContainer.clear();
+    this.renderedTurns.forEach((block, i) => {
+      if (i > 0) this.chatContainer.addChild(new Spacer());
+      for (const component of block.comps) this.chatContainer.addChild(component);
+    });
+  }
+
+  /** 增量投影：只重建内容变化的轮次；新增轮次追加（流式不闪烁由差分渲染兜底）。 */
   private renderIncremental(): void {
-    while (this.renderedTurnCount < this.state.turns.length) {
-      const turn = this.state.turns[this.renderedTurnCount];
-      if (turn === undefined) break;
-      if (this.renderedTurnCount > 0 || this.state.turns.length > 1) {
-        // 轮次之间空一行（aesthetics 间距纪律）
-        this.chatContainer.addChild(new Spacer());
+    if (this.state.turns.length === 0 && this.renderedTurns.length === 0) return;
+    // 已渲染轮次：签名变了才重建该轮（流式 delta 落在最后一轮）
+    for (let i = 0; i < this.state.turns.length; i++) {
+      const turn = this.state.turns[i];
+      if (turn === undefined) continue;
+      const sig = turnSignature(turn);
+      const rendered = this.renderedTurns[i];
+      if (rendered === undefined) {
+        this.renderedTurns[i] = { sig, comps: turnComponents(turn, this.theme) };
+      } else if (rendered.sig !== sig) {
+        // 空状态占位块（sig 为空）也要让位
+        this.renderedTurns[i] = { sig, comps: turnComponents(turn, this.theme) };
       }
-      for (const component of turnComponents(turn, this.theme)) {
-        this.chatContainer.addChild(component);
-      }
-      this.renderedTurnCount += 1;
     }
+    if (this.renderedTurns.length > this.state.turns.length) {
+      this.renderedTurns.length = this.state.turns.length;
+    }
+    this.rebuildChat();
     this.renderOrphanArtifacts();
     this.renderPauseBanner();
     this.renderApproval();
@@ -295,8 +407,6 @@ export class TuiApp {
     }
   }
 
-  private renderedOrphanCount = 0;
-
   private renderPauseBanner(): void {
     if (this.pauseBannerText !== null) {
       this.footerContainer.removeChild(this.pauseBannerText);
@@ -320,6 +430,12 @@ export class TuiApp {
     }
     const approval = this.state.pendingApprovals[0];
     if (approval === undefined) return;
+    // 非 TTY（管道/录制环境）默认拒绝（审批拒绝不可绕过）（Cline 语义）
+    const decision = approvalDecision(this.isTTY, null);
+    if (decision === "denied") {
+      void this.decideApproval(approval.approvalId, false);
+      return;
+    }
     this.approvalText = new Text(approvalLines(approval, this.theme).join("\n"));
     this.footerContainer.addChild(this.approvalText);
   }
