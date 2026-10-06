@@ -75,8 +75,10 @@ def test_resume_projection_has_no_compactable_early_turn():
 async def test_over_hard_without_early_turn_raises_fail_closed(token_estimate):
     """超 hard + 无 early ⇒ fail-closed：抛 ContextWindowExceededError。
 
-    刻画点：异常类型、逐字文案、failures 恒空（预检类失败不算摘要尝试）、
-    非"写后"失败（无 bracket 写入）、模型零调用、入参投影不被改动。
+    刻画点：异常类型、文案英文首句逐字一致（后附 #648 中文恢复指引）、
+    failures 携带一条 attempt=0 的有界诊断（#648 选项 B，用户 2026-10-06 批准；
+    此前刻意"保持为空表"，本次是刻意的反转）、非"写后"失败（无 bracket 写入）、
+    模型零调用、入参投影不被改动。
     """
     model = _CountingModel()
     messages = _resume_projection()
@@ -87,9 +89,11 @@ async def test_over_hard_without_early_turn_raises_fail_closed(token_estimate):
             model, max_context_tokens=MAX_CONTEXT_TOKENS,
         ).compact(messages, token_estimate)
 
-    assert str(exc_info.value) == "No complete early turn can be compacted"
-    # 预检类超限（tool 块 / 无完整早期轮 / 请求本身超限）没有尝试记录。
-    assert exc_info.value.failures == []
+    assert str(exc_info.value).startswith("No complete early turn can be compacted")
+    assert "恢复指引" in str(exc_info.value)
+    # #648 选项 B：预检类拒绝也有一条 attempt=0 的有界诊断（此前为空表）。
+    assert len(exc_info.value.failures) == 1
+    assert exc_info.value.failures[0].error_class == "no_compactable_early_turn"
     # 写前失败：历史没有多出 bracket，不得被吞成"未改动"的写后语义。
     assert not isinstance(exc_info.value, CompactionPostWriteError)
     # 摘要模型从未被调用：拒绝发生在任何摘要尝试之前（区别于"双失败后仍超限"
