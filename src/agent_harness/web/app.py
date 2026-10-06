@@ -76,7 +76,12 @@ from agent_harness.model.config import ConfigError, ModelConfig
 from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
-from agent_harness.sandbox import WorkspaceRegistry
+from agent_harness.sandbox import (
+    SUPPORTED_BACKENDS,
+    SandboxUnavailableError,
+    WorkspaceRegistry,
+    probe_all_capabilities,
+)
 from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import validate_user_protected_fact_annotations
@@ -167,6 +172,16 @@ class _AmendValueValidators(BaseModel):
     未知 ``context_providers`` id 的判定依赖运行时 wiring，不在这一层
     （见 ``_validate_wired_context_providers``）。
     """
+
+    @field_validator("sandbox_backend", check_fields=False)
+    @classmethod
+    def _validate_sandbox_backend(cls, v: str | None) -> str | None:
+        # #363 / W-19：未知后端名在请求层响亮 422（registry 层 ValueError 是
+        # 第二道防线）。None = 未显式选择 ⇒ 部署默认。
+        if v is not None and v not in SUPPORTED_BACKENDS:
+            valid = ", ".join(SUPPORTED_BACKENDS)
+            raise ValueError(f"sandbox_backend must be one of: {valid}")
+        return v
 
     @field_validator("reasoning_effort", check_fields=False)
     @classmethod
@@ -553,6 +568,10 @@ class CreateSessionRequest(_AmendValueValidators):
     # False——两个字段都缺省 → workspace-write + ask（读免问、写/Bash 逐次问）；
     # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
     auto_approve: bool = False
+    # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
+    # （当前 "local"，向后兼容）。未知值 → 422（字段校验器响亮拒绝）。
+    # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
+    sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort
     # / agent_profile / context_providers）
     reasoning_effort: str | None = None
@@ -1746,6 +1765,27 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     # ── 路由 ──
 
+    @app.get("/api/sandbox/capabilities")
+    async def sandbox_capabilities() -> dict[str, object]:
+        """#363 / W-19：Sandbox 后端能力探针（给选择器 UI 用）。
+
+        返回各后端可用性 + 不可用原因 + 修复提示。纯查询，无副作用
+        （不创建容器、不拉镜像）。前端据此渲染选择器：可用项可选，
+        不可用项**置灰保留并显示原因**（抄 Cline "rather than silently
+        disappearing"，不隐藏）。
+        """
+        return {
+            "backends": [
+                {
+                    "backend": c.backend,
+                    "available": c.available,
+                    "reason": c.reason,
+                    "details": c.details,
+                }
+                for c in probe_all_capabilities()
+            ],
+        }
+
     @app.get("/api/health")
     async def health() -> dict[str, object]:
         """存活探针 + durability 观测（#515）+ 附着协议形状（W-11 #355）。
@@ -1974,6 +2014,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                 amend=AmendOptions.from_request(req),
                 launch=launch,
                 remember_as_procedural_rule=req.remember_as_procedural_rule,
+                # #363 / W-19：显式 sandbox 后端选择。
+                sandbox_backend=req.sandbox_backend,
             )
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
@@ -1983,6 +2025,24 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except StorageBusyError as e:
             # #515（审查 P2-3）：launch 路径的 transport/delegation 写锁耗尽 → 503。
             raise storage_http_error(e) from e
+        except SandboxUnavailableError as e:
+            # #363 / W-19：选定的后端不可用 → 409 + 结构化诊断（绝不静默降级）。
+            # detail 带 remediation 与可用后端列表，前端据此渲染"切换"动作。
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(e),
+                    "backend": e.backend,
+                    "reason": e.reason,
+                    "details": e.details,
+                    "remediation": e.remediation,
+                    "available_backends": [
+                        c.backend
+                        for c in probe_all_capabilities()
+                        if c.available
+                    ],
+                },
+            ) from e
 
         session, run, subscriber = result.session, result.run, result.subscriber
 

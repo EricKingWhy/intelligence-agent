@@ -239,6 +239,8 @@ def _build_tooling(
     session_store: JsonlSessionStore | None,
     agent_profile: str | None,
     project_instructions: ProjectInstructionStore | None = None,
+    # #363 / W-19：显式选择的 sandbox 后端（None ⇒ registry 部署默认）。
+    sandbox_backend: str | None = None,
 ) -> _RootTooling:
     """sandbox 绑定 + **根 registry**（收窄前）构造——唯一的工具面事实源。
 
@@ -261,7 +263,9 @@ def _build_tooling(
     if workspace_registry.exists(session_id):
         sandbox = workspace_registry.get(session_id)
     else:
-        sandbox = workspace_registry.create(session_id, workspace_root=workspace)
+        sandbox = workspace_registry.create(
+            session_id, workspace_root=workspace, backend=sandbox_backend
+        )
     if project_instructions is None:
         project_instructions = project_instruction_store(settings)
     registry = ToolRegistry()
@@ -434,6 +438,8 @@ async def build_runtime(
     # 显式传入 EvidenceCompletionPolicy 即开启证据检查与纠正循环——装配开关就是
     # 策略实例本身，无布尔旗标）。
     completion_policy: CompletionPolicy | None = None,
+    # #363 / W-19：显式选择的 sandbox 后端（None ⇒ registry 部署默认）。
+    sandbox_backend: str | None = None,
 ) -> AgentRuntime:
     """装配全栈 Runtime：调用方保证 stores 已 initialize、workspace 已就绪。
 
@@ -566,6 +572,8 @@ async def build_runtime(
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=agent_profile,
         project_instructions=project_instructions,
+        # #363 / W-19：显式 sandbox 后端选择。
+        sandbox_backend=sandbox_backend,
     )
     registry = tooling.registry
     overflow_handler = tooling.overflow_handler
