@@ -1,0 +1,1 @@
+2026-10-06	机械归属（先回后正）：965cf82d = Merge origin/main into codebuddy/354-w10-dir-lease，父一 de6ca904（我方 #354 五笔，已有独立审查行）、父二 origin/main（main 侧 = PR #720 #639 线合并，各有自己的归属行）。合并零冲突（main 侧全为 #639 实现/测试/docs 新增文件），我方代码零改动。	de6ca904..965cf82d
