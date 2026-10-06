@@ -22,7 +22,7 @@ from agent_harness.workspace.lease_paths import (
     normalize_dir_key,
     paths_conflict,
 )
-from tests.symlink_capability import needs_symlink
+from tests.symlink_capability import make_dir_link, needs_dir_link
 
 # —— POSIX 形态：realpath 解析 + fail-closed ——
 
@@ -37,12 +37,15 @@ def test_trailing_separator_and_dot_segments_converge(tmp_path: Path) -> None:
     assert key == normalize_dir_key(str(tmp_path / "other" / ".." / "proj"))
 
 
-@needs_symlink
+@needs_dir_link
 def test_symlink_resolves_to_same_key_as_target(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "link"
-    link.symlink_to(real)
+    # Windows 无特权宿主退回 junction（mklink /J）——两者都是 reparse point，
+    # realpath 都解析到 real，断言语义不变（#731，先例 tests/web/test_host_dirs_api.py）。
+    if not make_dir_link(link, real):
+        pytest.skip("宿主无法创建目录链接（探测与使用间能力变化）")
     assert normalize_dir_key(str(link)) == normalize_dir_key(str(real))
 
 
@@ -51,12 +54,37 @@ def test_missing_path_fail_closed(tmp_path: Path) -> None:
         normalize_dir_key(str(tmp_path / "does-not-exist"))
 
 
-@needs_symlink
+@pytest.mark.skipif(os.name != "nt", reason="Windows 形态 nt 分支专属（POSIX 宿主走词法等价层）")
+@pytest.mark.parametrize("exc", [OSError(2, "no such file"), ValueError("bad reparse point")])
+def test_windows_realpath_failure_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    """nt 臂 realpath 失败必须收敛为 LeasePathError（API 422），不得逃逸成 500。
+
+    POSIX 臂的 realpath 本就包在 try/except OSError 里；nt 臂 #726 起也调
+    realpath，ntpath 在异态（winerror≠0 的 reparse 解析）可抛 ValueError，
+    须与 POSIX 臂同款收敛。
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+
+    def _boom(_p: str) -> str:
+        raise exc
+
+    monkeypatch.setattr(os.path, "realpath", _boom)
+    with pytest.raises(LeasePathError):
+        normalize_dir_key(str(real))
+
+
+@needs_dir_link
 def test_symlink_loop_fail_closed(tmp_path: Path) -> None:
     a = tmp_path / "a"
     b = tmp_path / "b"
-    a.symlink_to(b)
-    b.symlink_to(a)
+    # 悬空端构造（目标允许暂不存在，_dir_link_created 用 lstat 核验）；
+    # 真实 Windows 宿主实测：junction 环 realpath 不抛但 stat 抛
+    # OSError [winerror 1921] ⇒ 存在性校验 fail-closed，语义同 POSIX 链接环。
+    if not make_dir_link(a, b) or not make_dir_link(b, a):
+        pytest.skip("宿主无法创建目录链接（探测与使用间能力变化）")
     with pytest.raises(LeasePathError):
         normalize_dir_key(str(a))
 
