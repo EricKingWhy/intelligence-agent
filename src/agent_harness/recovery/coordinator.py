@@ -277,8 +277,14 @@ class DecisionsReconcileCallback(ReconcileCallback):
     时 ``RecoveryAdjudicationToken`` 的 CAS 复核。
     """
 
-    def __init__(self, decisions: dict[str, ReconcileVerdict]) -> None:
+    def __init__(
+        self,
+        decisions: dict[str, ReconcileVerdict],
+        sources: dict[str, str] | None = None,
+    ) -> None:
         self._decisions = dict(decisions)
+        # #357 W-13（契约 3）：用户来源自陈（可缺省，#547 旧形状零迁移）。
+        self._sources = dict(sources or {})
 
     async def resolve(
         self, operation: Operation, hint: ReconcileHint
@@ -290,6 +296,10 @@ class DecisionsReconcileCallback(ReconcileCallback):
                 "（预检后待裁决集合发生变化）——拒绝恢复，避免伪造结果或盲目重跑"
             )
         return verdict
+
+    def source_for(self, operation: Operation) -> str | None:
+        """返回该裁决的用户来源自陈；未给来源时 None（不伪造）。"""
+        return self._sources.get(operation.tool_call_id)
 
 
 class PendingPolicy(ABC):
@@ -666,8 +676,11 @@ class RecoveryCoordinator:
                     )
                 current_events = self._session_store.read_events(session_id)
                 current_session = self._session_from_events(session_id, current_events)
+                # 来源自陈在 CAS 复核通过后读取（#357 W-13 契约 3）：stale 裁决
+                # 连来源都不会被写入。
                 await self._commit_reconcile(
-                    current_session, current, verdict
+                    current_session, current, verdict,
+                    source=callback.source_for(current),
                 )
 
         # 重锁后重新加载 Session：另一个恢复方可能在 callback 等待期间追加了
@@ -912,23 +925,30 @@ class RecoveryCoordinator:
         session: Session,
         operation: Operation,
         verdict: ReconcileVerdict,
+        *,
+        source: str | None = None,
     ) -> None:
         """在重获恢复锁并通过 token 校验后提交人工裁决。"""
         result, ledger_state = self._verdict_outcome(operation, verdict)
         content = result.model_dump_json()
+        meta: dict[str, str] = {
+            "verdict": verdict.value,
+            "reconciled_at": datetime.now(UTC).isoformat(
+                timespec="milliseconds"
+            ),
+        }
+        if source is not None:
+            # #357 W-13（契约 3）：用户来源自陈逐字落账；有值才写，不伪造。
+            meta["source"] = source
+        # DEFER（#357 W-13，D1 audit-only）：Ledger 保持 NEED_RECONCILE，
+        # 不把合成的 DEFER 文案写进 result_json（COALESCE 保持原值）——
+        # 悬空是「结果未定」的诚实表示。
+        defer = verdict is ReconcileVerdict.DEFER
         await self._operation_ledger.update_state(
             operation.session_id, operation.tool_call_id,
             ledger_state,
-            result_json=content,
-            reconcile_meta=json.dumps(
-                {
-                    "verdict": verdict.value,
-                    "reconciled_at": datetime.now(UTC).isoformat(
-                        timespec="milliseconds"
-                    ),
-                },
-                ensure_ascii=False,
-            ),
+            result_json=None if defer else content,
+            reconcile_meta=json.dumps(meta, ensure_ascii=False),
         )
 
         # reconcile reason 进 JSONL 诊断层（spec 12 §2）：裁决依据可 tail/grep，
@@ -947,37 +967,38 @@ class RecoveryCoordinator:
             ledger_state=ledger_state.value,
         )
 
-        if not any(
-            event.type == TOOL_CALL
-            and event.data.get("tool_call_id") == operation.tool_call_id
-            for event in session.events
-        ):
-            session.append(
-                TOOL_CALL,
-                {
-                    "tool_call_id": operation.tool_call_id,
-                    "tool_name": operation.tool_name,
-                    "args": _args_from_identity(operation.args_identity) or {},
-                },
-                run_id=operation.run_id,
-                agent_id=operation.agent_id,
-            )
-        # `#315`：**只补缺的那一半**。非悬空的未证行（工具已经落过一条如实的结果，
-        # 只是那次结果说"状态未知"）不该再补第二条 `tool/result`——同一 tool_call_id
-        # 两条结果会破坏 `derive_messages` 依赖的 1:1 配对（`07 §8` 的不变量）。
-        # 那种情况下裁决的 durable 落点是 **Ledger 行本身**：状态进终态、
-        # `reconcile_meta` 记下裁决（上面那次 update_state）。
-        if not any(
-            event.type == TOOL_RESULT
-            and event.data.get("tool_call_id") == operation.tool_call_id
-            for event in session.events
-        ):
-            session.append(
-                TOOL_RESULT,
-                {"tool_call_id": operation.tool_call_id, "content": content},
-                run_id=operation.run_id,
-                agent_id=operation.agent_id,
-            )
+        if not defer:
+            if not any(
+                event.type == TOOL_CALL
+                and event.data.get("tool_call_id") == operation.tool_call_id
+                for event in session.events
+            ):
+                session.append(
+                    TOOL_CALL,
+                    {
+                        "tool_call_id": operation.tool_call_id,
+                        "tool_name": operation.tool_name,
+                        "args": _args_from_identity(operation.args_identity) or {},
+                    },
+                    run_id=operation.run_id,
+                    agent_id=operation.agent_id,
+                )
+            # `#315`：**只补缺的那一半**。非悬空的未证行（工具已经落过一条如实的结果，
+            # 只是那次结果说"状态未知"）不该再补第二条 `tool/result`——同一 tool_call_id
+            # 两条结果会破坏 `derive_messages` 依赖的 1:1 配对（`07 §8` 的不变量）。
+            # 那种情况下裁决的 durable 落点是 **Ledger 行本身**：状态进终态、
+            # `reconcile_meta` 记下裁决（上面那次 update_state）。
+            if not any(
+                event.type == TOOL_RESULT
+                and event.data.get("tool_call_id") == operation.tool_call_id
+                for event in session.events
+            ):
+                session.append(
+                    TOOL_RESULT,
+                    {"tool_call_id": operation.tool_call_id, "content": content},
+                    run_id=operation.run_id,
+                    agent_id=operation.agent_id,
+                )
         self._append_reconciled_event(
             session, operation, verdict, state=ledger_state
         )
@@ -1083,6 +1104,26 @@ class RecoveryCoordinator:
                     retryable=True,
                 ),
                 OperationState.CANCELLED,
+            )
+        if verdict is ReconcileVerdict.DEFER:
+            # DEFER = 用户暂缓决定（#357 W-13 修订 A §9.4-3，D1 audit-only）。
+            # 【对 07 §8「不留 dangling call」的明示豁免】本分支**有意**不推进
+            # 终态、不合成终态 tool/result（_commit_reconcile 对 DEFER 跳过事件
+            # 配对）：悬空调用是「结果未定」的诚实表示，不是缺陷——强行补一条
+            # 结果才会把「未定」伪装成「已定」。Ledger 目标状态保持 NEED_RECONCILE
+            # （该 op 仍出现在后续 pending_decisions，可稍后重新裁决）。
+            # 豁免依据：#357 W-13 + 修订 A §9.4-3；规格文件冻结不改。
+            # 返回的 ToolResult 仅满足签名、不落盘（content 不写 Ledger/事件流）。
+            return (
+                ToolResult.failure(
+                    message=(
+                        f"操作 '{operation.tool_name}' 崩溃时结果未知；"
+                        "用户选择暂缓裁决（DEFER），结果仍未确定。"
+                    ),
+                    error_code=ErrorCode.CANCELLED,
+                    retryable=False,
+                ),
+                OperationState.NEED_RECONCILE,
             )
         return (
             ToolResult.failure(

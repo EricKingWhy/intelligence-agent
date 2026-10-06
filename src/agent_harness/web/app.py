@@ -55,6 +55,7 @@ from agent_harness.agent.run_budget import (
 from agent_harness.assembly import (
     RecoveryStores,
     initialize_stores,
+    root_registry_reconcile_info,
     root_registry_tool_names,
 )
 from agent_harness.capability.base import CapabilityError, CapabilityRegistry
@@ -662,10 +663,15 @@ class RecoverDecisionRequest(BaseModel):
 
     ``verdict`` 用字符串承载，合法值由领域层校验（``InvalidDecision`` 422）——
     与 PermissionChangeRequest 同一条纪律：规则单一来源，传输层不复述。
+
+    ``source``（#357 W-13 契约 3）：用户来源自陈（如「我查了外部系统」），
+    可选——省略 = 合法（#547 形状零迁移），有值时逐字进 ``reconcile_meta``。
+    上限 2000 **字符**，与 ``ApproveRequest.reason`` 同口径（防重复放大）。
     """
 
     tool_call_id: str = Field(min_length=1)
     verdict: str = Field(min_length=1)
+    source: str | None = Field(default=None, max_length=2000)
 
 
 class RecoverRequest(BaseModel):
@@ -1146,6 +1152,18 @@ class AppState:
             store=self.store,
             get_wiring=self.get_wiring,
         )
+        # `#357` W-13（契约 1/6/7）：恢复裁决呈现元数据端口。与上面两个端口
+        # 同源装配（`root_registry_reconcile_info` 零副作用投影、与名字集投影
+        # 逐分支同构，P2-1：不实例化 sandbox），`session_service()` 原样搬入领域层。
+        self.reconcile_info = _reconcile_info_provider(
+            settings=settings,
+            store=self.store,
+            get_wiring=self.get_wiring,
+        )
+        # `#357` W-13（契约 5）：启动崩溃扫描的**快照**（lifespan 内只扫一次并
+        # 存这里；`GET /api/recovery/interrupted` 只读它，绝不重跑扫描——扫描
+        # 会写 run/interrupted + 跑 reconcile）。None = lifespan 未跑过。
+        self.interrupted_scan: list | None = None
 
     def _cache_context_snapshot(
         self, session_id: str, snapshot: dict[str, Any], tool_definitions: list[dict[str, Any]],
@@ -1329,6 +1347,30 @@ def _registered_tool_names_provider(
     return _names
 
 
+def _reconcile_info_provider(
+    *,
+    settings: Settings,
+    store: JsonlSessionStore,
+    get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
+) -> Any:
+    """组合根适配：恢复裁决呈现元数据端口（`ToolReconcileInfoProvider`，#357）。
+
+    判据 = **根 registry**（树级语义）：由 `root_registry_reconcile_info`
+    **零副作用**计算（读工具类元数据，不实例化 sandbox、不 mkdir——P2-1 同款
+    取舍），与 `root_registry_tool_names` 逐分支同构，一致性由
+    `tests/test_assembly_root_registry_names.py` 同型对账钉住。存为
+    `AppState.reconcile_info` 成员，`session_service()` 原样搬入领域层。
+    """
+
+    async def _info(session_id: str) -> dict[str, Any]:
+        _, wiring = await get_wiring()
+        return root_registry_reconcile_info(
+            settings, wiring, session_id=session_id, session_store=store,
+        )
+
+    return _info
+
+
 def session_service(state: AppState) -> SessionService:
     """用容器的成员构造 `SessionService`（传输侧唯一适配点）。"""
     return SessionService(
@@ -1351,6 +1393,7 @@ def session_service(state: AppState) -> SessionService:
         validate_session_declaration=state.validate_session_declaration,
         budget_recovery_failed_sessions=state.budget_recovery_failed_sessions,
         registered_tool_names=state.registered_tool_names,
+        reconcile_info=state.reconcile_info,
     )
 
 
@@ -1677,6 +1720,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             try:
 
                 scan_results = await session_service(state).scan_interrupted()
+                # #357 W-13（契约 5）：快照存 state，供只读端点消费——端点绝不
+                # 重跑 scan_interrupted（后者写 run/interrupted + 跑 reconcile）。
+                state.interrupted_scan = scan_results
                 for result in scan_results:
                     logging.getLogger("agent_harness.web").warning(
                         "启动崩溃扫描：session=%s recovery=%s detail=%s",
@@ -2144,6 +2190,14 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         worktree_path: str | None = None
         cwd = req.cwd
         if cwd and req.on_conflict == "worktree":
+            # PRD WS6/WS7：cwd 格式校验先于租约检查，文案走 PRD 契约
+            # （`cwd 必须是绝对路径` / `目录不存在` / `不是目录`），不透传
+            # lease_paths 的通用文案。
+            from agent_harness.session.service import SessionService
+            try:
+                SessionService._resolve_cwd(cwd)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
             await state.ensure_stores()
             try:
                 dir_locked = await _is_dir_locked(state, cwd)
@@ -2978,7 +3032,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = session_service(app.state.agent)
         decisions = [
-            ReconcileDecision(tool_call_id=d.tool_call_id, verdict=d.verdict)
+            ReconcileDecision(
+                tool_call_id=d.tool_call_id, verdict=d.verdict, source=d.source,
+            )
             for d in (req.decisions if req is not None else [])
         ]
         try:
@@ -2999,6 +3055,25 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             # 断层 / seq 重复），不可重试，需按定位记录人工修复。
             raise http_error(e) from e
         return [e.to_dict() for e in events]
+
+    @app.get("/api/recovery/interrupted")
+    async def list_interrupted_recoveries() -> dict[str, Any]:
+        """恢复列表（#357 W-13 契约 5，**只读**）：启动扫描快照的四要素呈现。
+
+        lifespan 启动时跑过一次 ``scan_interrupted`` 并把结论快照存进
+        ``app.state``；本端点只读快照 + 只读富化（Task / 无终态 run / 工作目录
+        锚 / 进度文件版本），**绝不重跑扫描**——``scan_interrupted`` 会补写
+        ``run/interrupted`` 并跑 reconcile，有写副作用（07 §9 的恢复编排只属于
+        显式 recover / resume 入口）。lifespan 未跑 → ``snapshot_available=false``
+        + 空列表（不伪造扫描结论）。#22：列表由后端单点驱动，前端不维护第二套
+        真相。
+        """
+        state: AppState = app.state.agent
+        snapshot = state.interrupted_scan
+        if snapshot is None:
+            return {"snapshot_available": False, "items": []}
+        items = await session_service(state).interrupted_recovery_rows(snapshot)
+        return {"snapshot_available": True, "items": items}
 
     # ── 模型切换（T7 #137，PRD §2.3）───────────────────────────────────
     # fork 创建端点在 web/lineage.py（ADR-0017 决策 6 的独立 router 面）。

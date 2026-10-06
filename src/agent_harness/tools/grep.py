@@ -73,6 +73,11 @@ class GrepTool(Tool):
             suggested_action="重新执行同样的正则搜索，核对匹配结果是否与预期一致（只读操作，重跑安全）。",
         )
 
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：重复同一正则搜索无外部副作用（#357 契约 7）。
+        return True
+
     async def execute(self, args: _GrepArgs) -> ToolResult:
         """re.compile → list_files → 逐文件逐行 search → 收集匹配。"""
         try:

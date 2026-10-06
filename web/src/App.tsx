@@ -27,10 +27,13 @@ import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
+import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
+import { RecoveryListPanel } from './components/RecoveryListPanel';
 import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
+import { TaskReviewPanel } from './components/TaskReviewPanel';
 import {
   centerTabs,
   deriveSurfaces,
@@ -58,6 +61,7 @@ import {
   getSandboxBackends,
   type CatalogEntry,
   type ModelCatalogEntry,
+  type PendingDecision,
   type SandboxBackendEntry,
   type StartSessionPayload,
 } from './lib/api';
@@ -122,6 +126,7 @@ export default function App() {
     setArchived,
     recover,
     resumePausedRun,
+    submitDecisions,
     refreshSessions,
     changeModel,
     changePermission,
@@ -266,6 +271,14 @@ export default function App() {
 
   // #200 上下文容量看板：open 的 sid（null = 关闭）。必须在 Esc 中断 effect 之前声明（effect 读它）。
   const [contextUsageOpen, setContextUsageOpen] = useState<string | null>(null);
+  // #353 W-09：任务审阅浮层（独立入口——不占用 TopBar / capabilities 面，避免与并行票冲突）。
+  // 同样必须在 Esc 中断 effect 之前声明（看板同因）。
+  const [taskReviewOpen, setTaskReviewOpen] = useState(false);
+  // #353：会话切走即关闭审阅浮层（面板内容按会话重建，不跨会话复用——否则会
+  // 在用户没点开的情况下展示另一个会话的审阅内容）。
+  useEffect(() => {
+    setTaskReviewOpen(false);
+  }, [selectedId]);
   // Esc 中断（Claude Code "esc to interrupt" 语言）：流式中 Esc = 停止当前 run，
   // 与 Composer 停止按钮同走 cancelStream。dialog 打开时（palette/auth 面板）
   // Esc 优先归它们——target 在 dialog 内则不抢。target 可能是 window/document
@@ -280,11 +293,12 @@ export default function App() {
       const t = e.target;
       if (t instanceof Element && t.closest('[role="dialog"]')) return;
       if (contextUsageOpen !== null) return; // 看板在场：Esc 归看板（关闭，不打断 run）
+      if (taskReviewOpen) return; // #353：审阅浮层在场，Esc 归浮层（非 Radix，closest 不命中）
       cancelStream();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [streaming, cancelStream, contextUsageOpen]);
+  }, [streaming, cancelStream, contextUsageOpen, taskReviewOpen]);
 
   // 主题状态归 App（TopBar 按钮与 Command Palette Toggle Theme 共享）。
   const [theme, setTheme] = useState<Theme>(initTheme);
@@ -356,6 +370,16 @@ export default function App() {
   const jumpToApproval = useCallback((approvalId: string) => {
     setJumpRequest({ key: `approval:${approvalId}`, nonce: Date.now() });
   }, []);
+  /* #353 P1-2：任务审阅面板点证据"来源事件 #seq" → 关浮层 + 跳回原事件。
+   * 复用 jumpRequest 通道；seq 在已加载的 conversation.events 里找。 */
+  const jumpToEventSeq = useCallback((seq: number) => {
+    const ev = conversation?.events.find((e) => e.seq === seq);
+    if (!ev) return;
+    const key = streamKeyFromEvent(ev.data, ev.step_id);
+    if (!key) return;
+    setTaskReviewOpen(false);
+    setJumpRequest({ key, nonce: Date.now() });
+  }, [conversation]);
   // 空状态示例任务 → 注入 Composer（对象引用变化触发注入，可重复点击）
   const [presetTask, setPresetTask] = useState<PresetTask | null>(null);
   const onPresetTask = useCallback((text: string) => setPresetTask({ text, id: Date.now() }), []);
@@ -889,6 +913,16 @@ export default function App() {
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
+  // #357 W-13：恢复列表浮层（顶栏 历史 按钮入口；只读，先列后继续）。
+  const [recoveryListOpen, setRecoveryListOpen] = useState(false);
+  /** #357 W-13：用户收起裁决面板时记住**那一份**清单的引用（按引用判等，见下）。
+   *  新的 409 会带来新数组 ⇒ 面板重新弹出；同一份清单在提交失败后重渲时保持收起态。 */
+  const [dismissedDecisions, setDismissedDecisions] = useState<PendingDecision[] | null>(null);
+  // #357 W-13：裁决面板的可见性——只由后端 409 载荷驱动（不变量 #22）。用户 Esc/关闭
+  // 只收起**当前这一份**清单（按引用判等），新的 409 会带来新数组而重新弹出。
+  const pendingDecisions = recoverState.pendingDecisions;
+  const showDecisionPanel =
+    pendingDecisions !== null && pendingDecisions.length > 0 && pendingDecisions !== dismissedDecisions;
   // #200：上下文容量看板（数据源 = 当前选中会话；会话切走时浮层不跨会话存活）。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1096,6 +1130,7 @@ export default function App() {
         authRequired={authRequired}
         onOpenMemories={() => setMemoriesOpen(true)}
         onOpenApprovePolicy={() => setApprovePolicyOpen(true)}
+        onOpenRecoveryList={() => setRecoveryListOpen(true)}
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
       />
@@ -1218,6 +1253,22 @@ export default function App() {
               })}
             </div>
           )}
+          {/* #357 W-13：UNKNOWN 裁决面板（修订 A §9.4）——由后端 409 的
+              `pending_decisions` 驱动，提交走 useSession.submitDecisions（同一 #547
+              合同）。全部由后端载荷构成，App 不维护第二套裁决真相（不变量 #22）。
+              放在 canRecover 门**外**：裁决在途时入口仍应可见。 */}
+          {showDecisionPanel && pendingDecisions && (
+            <RecoveryDecisionPanel
+              key={pendingDecisions.map((d) => d.tool_call_id).join('|')}
+              decisions={pendingDecisions}
+              submitting={recoverState.status === 'pending'}
+              message={recoverState.message}
+              onSubmit={(payload) => {
+                if (selectedId) void submitDecisions(selectedId, payload);
+              }}
+              onClose={() => setDismissedDecisions(pendingDecisions)}
+            />
+          )}
           {conversation?.run_interrupted && !streaming && (
             <div className="interrupt-banner" role="status" aria-live="polite">
               {/* step_id 可能缺失/null，且这是**真值不是缺失**：进程在该 run 的第一个
@@ -1243,6 +1294,14 @@ export default function App() {
               onResume={handleResumePaused}
               resuming={resumingRunId === paused.run_id}
             />
+          )}
+          {/* #353 W-09：任务审阅入口（独立浮层，仅在有选中会话时出现）。 */}
+          {selectedId !== null && (
+            <div className="task-review-entry">
+              <button className="btn-ghost" onClick={() => setTaskReviewOpen(true)}>
+                任务审阅
+              </button>
+            </div>
           )}
           {constraintRequest && selectedId !== null && !loadingHistory && (
             <ConstraintResolutionDialog
@@ -1382,6 +1441,16 @@ export default function App() {
         }}
       />
       <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      {/* #357 W-13：恢复列表浮层（顶栏 历史 入口）。只读列表；「继续」= 打开该会话，
+          恢复仍走会话内既有恢复链路（不新增恢复编排）。 */}
+      <RecoveryListPanel
+        open={recoveryListOpen}
+        onOpenChange={setRecoveryListOpen}
+        onResume={(sid) => {
+          setRecoveryListOpen(false);
+          void selectSession(sid);
+        }}
+      />
       {/* #684 Phase 2：持久审批规则管理（TopBar Shield 入口；只读 + 二次确认撤销）。 */}
       <ApprovePolicyPanel
         open={approvePolicyOpen}
@@ -1393,6 +1462,15 @@ export default function App() {
         open={contextUsageOpen !== null}
         onClose={() => setContextUsageOpen(null)}
       />
+      {/* #353 W-09：任务审阅浮层（服务端 Task/Evidence 投影驱动；会话切走即关闭）。 */}
+      {taskReviewOpen && selectedId !== null && (
+        <TaskReviewPanel
+          sessionId={selectedId}
+          open
+          onClose={() => setTaskReviewOpen(false)}
+          onJumpToEvent={jumpToEventSeq}
+        />
+      )}
     </div>
   );
 }
