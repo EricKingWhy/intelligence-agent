@@ -12,7 +12,8 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentEvent
-from agent_harness.cli import StreamRenderer, run
+from agent_harness.cli import StreamRenderer, _collapse_args, run
+from agent_harness.cli_theme import Theme
 from agent_harness.session import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
@@ -49,7 +50,31 @@ class TestStreamRenderer:
         renderer.handle(_event(TOOL_CALL, {
             "tool_call_id": "c1", "tool_name": "bash",
             "args": {"command": "ls -la", "timeout": 5}}))
-        assert "".join(out) == '正在查\n\n[tool] bash command="ls -la" timeout=5\n'
+        # plain 模式：glyph/分隔符保留、零 ANSI——布局与模式无关（#734）
+        assert "".join(out) == '正在查\n\n● bash command="ls -la" · timeout=5\n'
+
+    def test_tool_call_truecolor(self):
+        out: list[str] = []
+        renderer = StreamRenderer(out.append, theme=Theme(color="truecolor"))
+        renderer.handle(_event(TOOL_CALL, {
+            "tool_call_id": "c1", "tool_name": "bash",
+            "args": {"command": "ls -la", "timeout": 5}}))
+        joined = "".join(out)
+        # ● 与 tool_name 着 accent（品牌粉 #f1b3ca），参数段着 muted
+        assert "\x1b[38;2;241;179;202m●\x1b[0m" in joined
+        assert "\x1b[38;2;241;179;202mbash\x1b[0m" in joined
+
+    def test_tool_call_ascii_preset(self):
+        out: list[str] = []
+        renderer = StreamRenderer(
+            out.append, theme=Theme(color="truecolor", glyph_set="ascii"))
+        renderer.handle(_event(TOOL_CALL, {
+            "tool_call_id": "c1", "tool_name": "bash",
+            "args": {"command": "ls -la", "timeout": 5}}))
+        joined = "".join(out)
+        # ascii preset：pending glyph=[*]（OMP symbols.ts L1173）、sep.dot=" - "（L1233）
+        assert "[*]" in joined
+        assert " - " in joined
 
     def test_tool_result_shows_status_duration_and_preview(self):
         out: list[str] = []
@@ -99,6 +124,14 @@ class TestStreamRenderer:
                                  (MODEL_COMPLETED, {"content": "你好"})):
             renderer.handle(_event(event_type, data))
         assert out == []
+
+
+def test_collapse_args_flattens_newlines():
+    """字符串参数里的换行压成单个空格（oh-my-pi flattenForHeader 思想，#734），
+    状态行永远单行；引号规则：压平后含空格加引号。"""
+    result = _collapse_args({"command": "echo a\necho b"}, sep=" · ")
+    assert "\n" not in result
+    assert result == 'command="echo a echo b"'
 
 
 @pytest.mark.asyncio
