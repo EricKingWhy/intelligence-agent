@@ -236,10 +236,10 @@ def _gate_round() -> AIMessage:
 
 
 class TestPresenceManagedRuns:
-    """`02 §5.2.1` / `11 §6.2`：已纳入在场协议的 run，零订阅者超过宽限后
-    **不**走「取消 ⇒ run/failed(orphaned)」，而是置缺席闸门，由 runtime 在
-    下一个循环顶准入点以 run/paused(client_absent) 收口。未登记的 run（旧
-    Web / CLI）维持既有孤儿回收语义（上方 `test_orphan_run_reclaimed_after_grace`
+    """`02 §5.2.1` / `11 §6.2` / W-12（#356）选项 B：已纳入在场协议的 run，
+    只有**明确退出信号**（`signal_client_exit`）才以 run/paused(client_absent)
+    收口；零订阅者超过宽限到期**不再**置缺席（只记日志、继续跑）。未登记的 run
+    （旧 Web / CLI）维持既有孤儿回收语义（上方 `test_orphan_run_reclaimed_after_grace`
     钉住的那条，本类不改它）。"""
 
     @pytest.mark.asyncio
@@ -265,11 +265,10 @@ class TestPresenceManagedRuns:
             await manager2.aclose()
 
     @pytest.mark.asyncio
-    async def test_grace_expiry_pauses_client_absent_instead_of_orphan_cancel(
-        self, tmp_path,
-    ):
-        """宽限到期时 Tool 正在提交：不取消（盲中止副作用）、不重试；工具照常
-        收口后，run 以恰好一条 run/paused(client_absent) 停下，无 run/failed。"""
+    async def test_grace_expiry_without_signal_keeps_run_running(self, tmp_path):
+        """[W-12 选项 B] 宽限到期（零订阅者）而**无明确退出信号**：不置缺席、
+        不暂停、不失败，run 在途工具照常收口并继续跑到自然完成（decision 8）。
+        旧行为（到期置缺席 → run/paused(client_absent)）已按本票作废。"""
         store = JsonlSessionStore(root=tmp_path / "sessions")
         session = _make_session(tmp_path)
         released = asyncio.Event()
@@ -289,34 +288,36 @@ class TestPresenceManagedRuns:
                 await asyncio.sleep(0.01)
             assert calls == [1], "工具已开始执行（在途中）"
 
-            run.unsubscribe(subscriber)  # 最后一个客户端离开 → 宽限计时
-            await asyncio.sleep(0.4)     # 0.2s 宽限到期 → 置缺席（不是取消）
-            assert run.task is not None and not run.task.done(), (
-                "在途 Tool 未被取消：缺席只挡下一次准入，不中止进行中的提交"
+            run.unsubscribe(subscriber)  # 最后一个客户端断线 → 宽限计时
+            await asyncio.sleep(0.4)     # 0.2s 宽限到期：无信号 ⇒ 继续跑
+            assert runtime.client_presence.absent is False, (
+                "无明确退出信号：宽限到期不得置缺席（选项 B：继续跑）"
             )
+            assert run.task is not None and not run.task.done(), "run 仍在跑"
             assert not run.reap_requested, "在场管理 run 不走 orphaned 取消臂"
+            in_flight_types = [e.type for e in store.read_events(session.session_id)]
+            assert RUN_PAUSED not in in_flight_types
+            assert RUN_FAILED not in in_flight_types
 
             released.set()               # 在途工具按现有路径收口
             await asyncio.wait_for(run.task, timeout=5)
 
-            events = store.read_events(session.session_id)
-            types = [e.type for e in events]
-            assert types.count(RUN_PAUSED) == 1, "恰好一条 run/paused"
-            assert RUN_FAILED not in types, "不得再走 run/failed(orphaned) 旧路径"
-            paused = next(e for e in events if e.type == RUN_PAUSED)
-            assert paused.data["reason"] == "client_absent"
-            assert paused.data["trigger_dimension"] == "client_presence"
+            types = [e.type for e in store.read_events(session.session_id)]
+            assert RUN_COMPLETED in types, "断线不阻断：run 自然完成"
+            assert RUN_PAUSED not in types
+            assert RUN_FAILED not in types
             assert calls == [1], "工具恰好执行一次（不盲重试）"
             assert not run.task.cancelled()
-            assert run.paused is True
+            assert run.paused is False
         finally:
             await manager.aclose()
 
     @pytest.mark.asyncio
     async def test_leave_after_pause_does_not_double_write(self, tmp_path):
-        """「已经 paused 时又收到离开事件」：暂停后再订阅再离开（再触发一次
-        回收计时），不得写第二条 run/paused，也不得翻成 run/failed——暂停
-        run 的 task 已收口、runtime 引用已释放，回收分支必须无害跳过。"""
+        """「已经 paused 时又收到离开事件」：明确退出信号造成一条 run/paused 后，
+        再发生一次零订阅者宽限到期，不得写第二条 run/paused，也不得翻成
+        run/failed——暂停 run 的 task 已收口、runtime 引用已释放，宽限到期分支
+        必须无害跳过。"""
         store = JsonlSessionStore(root=tmp_path / "sessions")
         session = _make_session(tmp_path)
         released = asyncio.Event()
@@ -334,13 +335,24 @@ class TestPresenceManagedRuns:
                 if calls:
                     break
                 await asyncio.sleep(0.01)
-            run.unsubscribe(subscriber)
-            await asyncio.sleep(0.4)
+
+            # 明确退出信号：立即置缺席，放行在途工具后以一条 paused 收口。
+            signal = asyncio.create_task(
+                manager.signal_client_exit(session.session_id, client_id="cli"),
+            )
+            for _ in range(500):
+                if runtime.client_presence.absent:
+                    break
+                await asyncio.sleep(0.01)
+            assert runtime.client_presence.absent is True
             released.set()
+            await asyncio.wait_for(signal, timeout=5)
             await asyncio.wait_for(run.task, timeout=5)
             assert run.paused is True
 
-            # 已经 paused 之后的"又一次离开"：新订阅者接入又离开 → 计时再起。
+            # 已经 paused 之后的"又一次离开"：订阅者全离开 → 计时再起 → 到期
+            # 只记日志，不双写。
+            run.unsubscribe(subscriber)
             late = run.subscribe()
             run.unsubscribe(late)
             await asyncio.sleep(0.4)
