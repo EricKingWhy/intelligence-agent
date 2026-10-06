@@ -235,3 +235,21 @@ def test_approve_policy_invalid_granularity_422(tmp_path, monkeypatch) -> None:
         },
     )
     assert resp.status_code == 422, resp.text
+
+
+def test_approve_decision_not_in_allowed_422(tmp_path, monkeypatch) -> None:
+    """「合法枚举但不在 allowed → 422」的 HTTP 级组合钉（batch-51 G3 下沉）。
+
+    batch-51 原以 bash e2e 钉此组合；#526/#684 后可缓存审批的 allowed 含全部
+    四档，e2e 前提消失。服务分支（session.test_service）、422 映射
+    （test_domain_error_mapping）与端点 except 臂各有钉，本条把三段组合成
+    一条真 HTTP 断言。
+    """
+    client = _client(tmp_path, monkeypatch)
+    sid, approval_id, _queue = _seed_pending_policy_approval(client)
+
+    resp = client.post(
+        f"/api/sessions/{sid}/approve",
+        json={"approval_id": approval_id, "decision": "approve_session"},
+    )
+    assert resp.status_code == 422, resp.text

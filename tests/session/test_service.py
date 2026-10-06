@@ -271,6 +271,33 @@ class TestResolveApproval:
                 policy_granularity="fuzzy",
             )
 
+    @pytest.mark.asyncio
+    async def test_valid_decision_not_in_allowed_rejected(self, app_state):
+        """合法枚举但不在 requested 事件的 allowed_decisions → InvalidDecision（422）。
+
+        batch-51 G3 原以 bash e2e 钉此边界（当时 allowed=[deny, approve_once]）；
+        #526/#684 后可缓存审批的 allowed 含全部四档，e2e 前提消失——失败关闭钉
+        下沉到本处（service.resolve_approval 是该边界的执行点）。
+        """
+        sid, approval_id, _queue = _seed_pending_policy_approval(app_state)
+        service = session_service(app_state)
+        with pytest.raises(InvalidDecision):
+            await service.resolve_approval(
+                session_id=sid,
+                approval_id=approval_id,
+                decision="approve_session",
+            )
+        # 拒绝路径零持久化副作用（审查 P3-2）：allowed 检查先于 resolve，
+        # 同一审批未被消费——随后合法决策仍可正常解决；若未来顺序回归
+        # （先 resolve 后校验），这里会以 ApprovalAlreadyResolved 变红。
+        result = await service.resolve_approval(
+            session_id=sid,
+            approval_id=approval_id,
+            decision="approve_policy",
+            policy_granularity="exact",
+        )
+        assert result.decision.value == "approve_policy"
+
 
 def _seed_pending_policy_approval(app_state):
     """建一个 session + live queue + 一条允许 approve_policy 的待审批请求。
