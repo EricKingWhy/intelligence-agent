@@ -1,0 +1,1 @@
+2026-10-06	#708 裁决 B：builder 三处重放语义注释口径（按落账时点决策、不做可见性复核；#348 同源无跨 build 窗口）+ usage_snapshot 漂移双向文档化 + pruner 两处 source_event_ids 口径修正（非恒空、写入者非唯一）+ 钉用例（重放≠fresh、下次 build 自纠）；变异 M1 空决策表 ⇒ 钉用例转红	6a79900b..ace1481c

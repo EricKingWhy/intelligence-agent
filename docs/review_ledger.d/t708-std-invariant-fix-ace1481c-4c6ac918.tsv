@@ -1,0 +1,1 @@
+2026-10-06	#708 Standards 轴增量（该轴 must-fix 2）：pruner 写入口径改核实不变量（tool 侧被引用的只有 TOOL_CALL 事件 id 与失败 TOOL_RESULT evidence、候选必 ok=true 故恒不碰撞；写入者 6 处含 fork 收养）+ builder 消费拓扑改 compact_now 双入口（build 阈值/手动 compact_session_context）	ace1481c..4c6ac918

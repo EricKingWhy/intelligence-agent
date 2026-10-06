@@ -191,7 +191,8 @@ async def test_full_preflight_rejected_then_narrowed_segment_compacts():
     assert len(model.snapshots) == 1
     assert result.compacted_turn_count == 1
     assert result.narrowed is True
-    assert result.bracket_id is not None
+    # #647 T11f：compactor 不铸造身份（无溯源 ⇒ 无身份）。
+    assert result.bracket_id is None
     # 投影 = 摘要 + 保留尾段（prefix 为空）；巨型块逐字保留、未被摘要替换。
     assert result.messages[1] is big_ai
     assert result.messages[2].tool_call_id == "call-big"
