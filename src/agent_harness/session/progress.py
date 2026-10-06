@@ -35,6 +35,7 @@ import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -73,6 +74,8 @@ _PREV_NAME = "progress.prev.md"
 _TMP_PREFIX = _MD_NAME + "."
 _TMP_SUFFIX = ".tmp"
 _END_MARKER = "<!-- agent-progress:end -->"
+#: 外部编辑守卫的"现有正文不可读"哨兵（与"文件缺失"的 None 区分）。
+_UNREADABLE_BODY = object()
 # 写锁文件（#660，协议形态 Port 自 instance_lock.py L101-124）。命名必须避开
 # `_TMP_PREFIX`（"progress.md.*"）清理 glob——否则下一次写入会误删外部持有的锁文件，
 # 架空整个协议（tests/session/test_progress_file.py 有回归钉）。
@@ -541,6 +544,11 @@ class ProgressWriteOutcome:
     reason: str | None = None
 
 
+def _normalize_generated_at(body: str) -> str:
+    """generated_at 行归一成占位（digest 与 W-06 对账共用的唯一归一化）。"""
+    return re.sub(r"(?m)^- generated_at: .*$", "- generated_at: -", body)
+
+
 def progress_content_digest(body: str) -> str:
     """进度文件内容哈希（幂等跳过与 W-06 reader 对账的**公共契约**）。
 
@@ -548,8 +556,9 @@ def progress_content_digest(body: str) -> str:
     无关。任何消费方判断"文件是否与事件流一致"MUST 复用本函数，不得自算
     第二种归一化（两套哈希 = 第二真相）。
     """
-    normalized = re.sub(r"(?m)^- generated_at: .*$", "- generated_at: -", body)
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        _normalize_generated_at(body).encode("utf-8")
+    ).hexdigest()
 
 
 def _read_meta(path: Path) -> dict | None:
@@ -652,6 +661,7 @@ def write_progress_file(
     events,
     *,
     now: str | None = None,
+    overwrite_external_edit: bool = False,
 ) -> ProgressWriteOutcome:
     """派生 → 渲染 → 脱敏 → 原子落盘；幂等；失败明确报错不谎报最新。
 
@@ -660,6 +670,12 @@ def write_progress_file(
     明确失败。锁进程退出由 OS 兜底释放。
     只派生与写文件，不追加任何事件、不调 git；调用方负责在既有触发点
     （创建/交付/cancel/run 终态等）以 best-effort 方式调用。
+
+    **外部编辑守卫（W-06，#350）**：现有文件内容既不等于当前事件投影、也不是
+    服务端最后一次写入（meta hash）⇒ 判外部编辑，``fail("external_edit")``
+    拒绝覆写——用户在"丢弃手改"或"确认为新用户指令"（``resolve`` 路径，
+    ``overwrite_external_edit=True``）之前，真相与文件都不动，绝不把文件文本
+    自动升级为授权/事实。文件缺失或只读到旧版本照常重建/更新。
     """
     paths = progress_paths(root, session_id)
     doc = derive_progress_document(events, session_id=session_id)
@@ -681,9 +697,18 @@ def write_progress_file(
     _cleanup_stale_tmp(paths.directory)
 
     old_meta = _read_meta(paths.meta)
+    # 磁盘实况先读一次（W-06）：幂等跳过与外部编辑守卫共用同一份读数。
+    # 读不了（权限/编码损坏）用哨兵标记，走 fail-closed 分支。
+    disk_digest: str | None | object = None
+    if paths.markdown.exists():
+        try:
+            disk_digest = _disk_body_digest(paths.markdown)
+        except (OSError, UnicodeDecodeError):
+            disk_digest = _UNREADABLE_BODY
     if (
         old_meta is not None
-        and paths.markdown.exists()  # 正文被外部删掉 ⇒ 重建，不假跳过（审查 P2-1）
+        and isinstance(disk_digest, str)
+        and disk_digest == digest  # 磁盘正文就是当前投影（不是被人改过的旧版）
         and old_meta.get("source_event_seq") == doc.source_event_seq
         and old_meta.get("content_sha256") == digest
     ):
@@ -706,6 +731,27 @@ def write_progress_file(
         return fail("locked", "目标进度文件被另一写入方锁定（advisory 写锁）")
 
     try:
+        # 外部编辑守卫（W-06）：锁内复判（disk_digest 在锁前已读一次，这里用
+        # 同一读数；锁内复读会缩小竞态窗口但多一次 I/O——幂等跳过已在锁外
+        # 依据同一读数做出，此处保持同一份事实）。判据与 verify_progress_file
+        # 共用 _classify_disk_body：现有内容 ≠ 当前投影 且 ≠ 服务端最后一次
+        # 写入（meta hash）⇒ 外部编辑；读不了同样 fail-closed，不盲覆写。
+        # （置于 mkstemp 之前：守卫拒绝时不留临时文件。）
+        if disk_digest is _UNREADABLE_BODY and not overwrite_external_edit:
+            return fail(
+                "external_edit",
+                "现有进度文件不可读（权限或编码损坏），等待用户确认后再重建",
+            )
+        if (
+            isinstance(disk_digest, str)
+            and not overwrite_external_edit
+            and _classify_disk_body(disk_digest, old_meta, digest) == "external"
+        ):
+            return fail(
+                "external_edit",
+                "进度文件在服务端最后一次写入之外被修改；用户确认丢弃"
+                "或作为新用户指令前不覆写",
+            )
         fd, tmp_name = tempfile.mkstemp(prefix=_TMP_PREFIX, suffix=_TMP_SUFFIX,
                                         dir=paths.directory)
         try:
@@ -756,3 +802,308 @@ def write_progress_file(
         return fail("env", f"正文已替换但 meta 落盘失败（下次写自动修复）：{exc.strerror or exc}")
     return ProgressWriteOutcome(ok=True, skipped=False, path=paths.markdown,
                                 source_event_seq=doc.source_event_seq)
+
+
+# ── W-06（#350）：磁盘重读对账（reader / compare）────────────────────────────
+#
+# 进度文件是投影不是真相（模块 docstring）；本节把"文件现在说了什么"与
+# "SessionEvent 投影说该是什么"对账，给四个重读点（任务启动 / 服务重启 /
+# 压缩后 / 交付前）与外部编辑冲突流一个确定状态。对账哈希**复用**
+# ``progress_content_digest``（W-05 公共契约，禁第二套归一化）。
+
+
+PROGRESS_VERIFY_OK = "ok"
+PROGRESS_VERIFY_MISSING = "missing"
+PROGRESS_VERIFY_STALE = "stale"
+PROGRESS_VERIFY_FOREIGN_SESSION = "foreign_session"
+PROGRESS_VERIFY_INVALID_SCHEMA = "invalid_schema"
+PROGRESS_VERIFY_EXTERNALLY_EDITED = "externally_edited"
+PROGRESS_VERIFY_UNREADABLE = "unreadable"
+
+_HEADER_FIELD_RE = re.compile(r"^- ([a-z_]+): (.*)$")
+
+
+def _disk_body_digest(path: Path) -> str | None:
+    """读现有正文并算对账哈希；文件不存在返回 None；读不了原样抛
+    （OSError / UnicodeDecodeError），由调用方决定 fail-closed 形态。"""
+    try:
+        body = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return progress_content_digest(body)
+
+
+def _classify_disk_body(
+    disk_digest: str | None, meta: dict | None, expected_digest: str,
+) -> str:
+    """现有内容三分类（writer 守卫与 verify 共用的唯一判据）。
+
+    - ``current``：与当前事件投影逐字节一致（归一化后）；缺文件同 current
+      （调用方在调用前已处理"缺文件"分支）；
+    - ``server_stale``：等于服务端最后一次写入（meta hash）——只是事件前进了，
+      正常更新路径；
+    - ``external``：两者都不是——服务端写入之外被修改（或服务端从未写过它）。
+    """
+    if disk_digest is None or disk_digest == expected_digest:
+        return "current"
+    if meta is not None and disk_digest == meta.get("content_sha256"):
+        return "server_stale"
+    return "external"
+
+
+def _parse_progress_body(body: str) -> tuple[dict[str, str], dict[str, str]]:
+    """把渲染格式的正文拆成（头部字段, 节名 → 节文本）。容错：解析不了的
+    形状只影响 diff 展示，不参与状态判定（状态判定只看哈希与头部字段）。"""
+    header: dict[str, str] = {}
+    sections: dict[str, str] = {}
+    current: str | None = None
+    bucket: list[str] = []
+    for line in body.splitlines():
+        match = _HEADER_FIELD_RE.match(line)
+        if match is not None and current is None:
+            header[match.group(1)] = match.group(2)
+            continue
+        if line.startswith("## "):
+            if current is not None:
+                sections[current] = "\n".join(bucket).strip()
+            current = line[3:].strip()
+            bucket = []
+            continue
+        if current is not None:
+            bucket.append(line)
+    if current is not None:
+        sections[current] = "\n".join(bucket).strip()
+    return header, sections
+
+
+def _diff_bodies(
+    file_body: str, expected_body: str,
+) -> tuple[ProgressFieldDiff, ...]:
+    """字段级差异（文件 vs 投影）。actual 一律过 ``sanitize_text``——外部编辑
+    可能塞进凭证内容，冲突展示面绝不能成为第二个泄漏通道。"""
+    file_header, file_sections = _parse_progress_body(file_body)
+    expected_header, expected_sections = _parse_progress_body(expected_body)
+    diffs: list[ProgressFieldDiff] = []
+    for key in sorted(set(file_header) | set(expected_header)):
+        if key == "generated_at":
+            continue  # 写入时刻不是投影事实，归一化后不参与对账
+        expected = expected_header.get(key)
+        actual = file_header.get(key)
+        if expected != actual:
+            diffs.append(ProgressFieldDiff(
+                field=f"header.{key}", expected=expected, actual=actual,
+            ))
+    for name in sorted(set(file_sections) | set(expected_sections)):
+        expected = expected_sections.get(name)
+        actual = file_sections.get(name)
+        if expected != actual:
+            diffs.append(ProgressFieldDiff(
+                field=f"section:{name}",
+                expected=expected, actual=actual,
+            ))
+    sanitized = []
+    for diff in diffs:
+        expected_safe = sanitize_text(diff.expected)
+        actual_safe = sanitize_text(diff.actual)
+        sanitized.append(ProgressFieldDiff(
+            field=diff.field,
+            expected=expected_safe,
+            actual=actual_safe,
+        ))
+    return tuple(sanitized)
+
+
+@dataclass(frozen=True)
+class ProgressFieldDiff:
+    """一个字段/节的文件侧与投影侧差异（两侧文本均已脱敏）。"""
+
+    field: str
+    expected: str | None  # SessionEvent 投影（真相侧；行内已带（来源 seq N））
+    actual: str | None    # 磁盘文件侧；无法安全呈现时为 None（整段省略）
+
+
+@dataclass(frozen=True)
+class ProgressVerification:
+    """verify_progress_file 的结果（确定状态机，见各 PROGRESS_VERIFY_* 常量）。"""
+
+    status: str
+    session_id: str
+    expected_source_event_seq: int
+    file_source_event_seq: int | None
+    diffs: tuple[ProgressFieldDiff, ...]
+    #: 证据 refs 里读不回的 artifact_id（仅 artifact_exists 提供时检查）
+    unreadable_artifacts: tuple[str, ...]
+    #: "performed"（做过可读回校验）| "skipped"（无 artifact 判据，未检查）
+    artifact_check: str
+    reason: str | None
+    evidence_artifact_ids: tuple[str, ...] = ()
+
+    @property
+    def verifiable(self) -> bool:
+        """票面口径：status=ok 且全部证据 refs 可读回，才算"进度文件可核对"。"""
+        return self.status == PROGRESS_VERIFY_OK and not self.unreadable_artifacts
+
+
+def verify_progress_file(
+    root: Path | str,
+    session_id: str,
+    events,
+    *,
+    artifact_exists: Callable[[str], bool] | None = None,
+) -> ProgressVerification:
+    """从磁盘重读 progress.md，与 SessionEvent 投影对账（纯读，零副作用）。
+
+    状态判定顺序（互斥，先命中先返回）：
+    文件缺失 → ``missing``；读不了 → ``unreadable``；schema_version 头不匹配
+    → ``invalid_schema``；session_id 头不匹配 → ``foreign_session``；内容
+    ≠ 投影且 ≠ 服务端最后一次写入 → ``externally_edited``（附字段级差异）；
+    文件落后于当前投影 → ``stale``；一致 → ``ok``。
+    ``artifact_exists`` 提供时对证据 refs 做可读回校验（票面：仅允许引用可读回
+    的 Artifact；读不到 ⇒ verifiable=False，展示"进度文件不可核对"）。
+    """
+    paths = progress_paths(root, session_id)
+    doc = derive_progress_document(events, session_id=session_id)
+    expected_body = render_progress_markdown(doc, generated_at="-")
+    evidence_ids = tuple(
+        artifact["artifact_id"] for artifact in doc.evidence
+        if artifact.get("artifact_id")
+    )
+
+    def result(status: str, *, file_seq: int | None = None,
+               diffs: tuple[ProgressFieldDiff, ...] = (),
+               reason: str | None = None) -> ProgressVerification:
+        return ProgressVerification(
+            status=status, session_id=session_id,
+            expected_source_event_seq=doc.source_event_seq,
+            file_source_event_seq=file_seq, diffs=diffs,
+            unreadable_artifacts=(), artifact_check="skipped",
+            reason=reason, evidence_artifact_ids=evidence_ids,
+        )
+
+    try:
+        body = paths.markdown.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return result(PROGRESS_VERIFY_MISSING, reason="进度文件不存在")
+    except (OSError, UnicodeDecodeError) as exc:
+        return result(PROGRESS_VERIFY_UNREADABLE, reason=str(exc))
+
+    header, _sections = _parse_progress_body(body)
+    if header.get("schema_version") != PROGRESS_SCHEMA_VERSION:
+        return result(
+            PROGRESS_VERIFY_INVALID_SCHEMA,
+            reason=f"schema_version 不匹配：{header.get('schema_version')!r}",
+        )
+    if header.get("session_id") != session_id:
+        return result(
+            PROGRESS_VERIFY_FOREIGN_SESSION,
+            reason=f"文件头部 session_id={header.get('session_id')!r}，"
+                   f"期望 {session_id!r}",
+        )
+    raw_seq = header.get("source_event_seq")
+    file_seq: int | None
+    try:
+        file_seq = int(raw_seq) if raw_seq is not None else None
+    except ValueError:
+        file_seq = None
+    if file_seq is None:
+        return result(
+            PROGRESS_VERIFY_INVALID_SCHEMA,
+            reason=f"source_event_seq 不可解析：{raw_seq!r}",
+        )
+
+    disk_digest = progress_content_digest(body)
+    classification = _classify_disk_body(
+        disk_digest, _read_meta(paths.meta),
+        progress_content_digest(expected_body),
+    )
+    if classification == "external":
+        return result(
+            PROGRESS_VERIFY_EXTERNALLY_EDITED, file_seq=file_seq,
+            diffs=_diff_bodies(body, expected_body),
+            reason="内容既不等于当前投影也不是服务端最后一次写入（外部编辑）",
+        )
+    if file_seq < doc.source_event_seq:
+        return result(
+            PROGRESS_VERIFY_STALE, file_seq=file_seq,
+            reason=f"文件 source_event_seq={file_seq} 落后于当前投影 "
+                   f"{doc.source_event_seq}",
+        )
+    if file_seq > doc.source_event_seq:
+        # 文件自报比事件流还新：伪造的 seq，按外部编辑处理
+        return result(
+            PROGRESS_VERIFY_EXTERNALLY_EDITED, file_seq=file_seq,
+            diffs=_diff_bodies(body, expected_body),
+            reason="文件 source_event_seq 超前于事件流（伪造 seq）",
+        )
+    if classification == "server_stale":
+        # seq 相同但内容是旧版本：meta 与正文不同源，按外部编辑处理
+        return result(
+            PROGRESS_VERIFY_EXTERNALLY_EDITED, file_seq=file_seq,
+            diffs=_diff_bodies(body, expected_body),
+            reason="内容与 meta 同源但与当前投影不一致",
+        )
+
+    verification = result(PROGRESS_VERIFY_OK, file_seq=file_seq)
+    if artifact_exists is not None and evidence_ids:
+        unreadable = tuple(
+            artifact_id for artifact_id in evidence_ids
+            if not artifact_exists(artifact_id)
+        )
+        verification = ProgressVerification(
+            status=verification.status,
+            session_id=verification.session_id,
+            expected_source_event_seq=verification.expected_source_event_seq,
+            file_source_event_seq=verification.file_source_event_seq,
+            diffs=verification.diffs,
+            unreadable_artifacts=unreadable,
+            artifact_check="performed",
+            reason=(
+                "部分证据 refs 不可读回：进度文件不可核对"
+                if unreadable else None
+            ),
+            evidence_artifact_ids=evidence_ids,
+        )
+    return verification
+
+
+def render_progress_brief_lines(doc: ProgressDocument) -> list[str]:
+    """W-06 注入块内容行：原目标 + 接受状态 + 阻塞与下一步 + 待对账。
+
+    全部动态文本走 ``_v`` 唯一脱敏出口（与正文渲染同一条纪律）。"""
+    lines = [f"原目标：{_v(doc.goal)}" if doc.goal else f"原目标：{_MISSING}"]
+    acceptance = doc.acceptance
+    if acceptance["acceptance"]:
+        lines.append(
+            f"接受状态：{_v(acceptance['acceptance']['decision'])}"
+            f"（version {acceptance['version']}）"
+        )
+    else:
+        lines.append(f"接受状态：未接受（version {acceptance['version']}）")
+    for blocker in doc.blockers:
+        if blocker["kind"] == "run_paused":
+            lines.append(
+                f"阻塞：Run 暂停 run_id={_v(blocker['run_id'])}，"
+                f"原因：{_v(blocker['reason'])}"
+            )
+        else:
+            lines.append(f"在途：Run run_id={_v(blocker['run_id'])}")
+    for operation in doc.pending_operations:
+        lines.append(
+            f"待对账：tool={_v(operation['tool_name'])}"
+            f"（来源 seq {operation['source_seq']}）"
+        )
+    return lines
+
+
+def render_external_edit_instruction(verification: ProgressVerification) -> str:
+    """把外部编辑差异渲染成"用户确认为新用户指令"的消息文本（confirm 路径）。
+
+    差异文本已在 ``_diff_bodies`` 脱敏；这里只做事实性搬运，绝不替用户措辞、
+    绝不把文件文本升格成授权。"""
+    lines = ["（用户确认）进度文件被手动修改，以下手改内容作为新用户指令："]
+    for diff in verification.diffs:
+        actual = diff.actual if diff.actual is not None else _BLOCKED
+        lines.append(f"- {diff.field} 改为：{actual}")
+    if len(lines) == 1:
+        lines.append(f"- （无字段级差异；{_MISSING}）")
+    return "\n".join(lines)

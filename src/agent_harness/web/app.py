@@ -1634,6 +1634,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_task_routes(app, validate_session_id=validate_session_id)
 
+    # W-06 / #350 进度文件重读对账路由（独立 router：对账状态查询 + 外部编辑
+    # 冲突两出口；对账单源在 session/progress.py，本模块只留一行接入面）
+    from agent_harness.web.progress_status import register_progress_routes
+
+    register_progress_routes(app, validate_session_id=validate_session_id)
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
     # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
     # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。

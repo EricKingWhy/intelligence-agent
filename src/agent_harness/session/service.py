@@ -35,6 +35,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
+from functools import partial
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
@@ -103,6 +104,7 @@ from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     KIND_QUEUE,
     KIND_STEER,
+    PROGRESS_CONFIRM_ORIGIN,
     UndeliveredInput,
     collect_dangling,
     derive_protected_facts,
@@ -173,7 +175,15 @@ from agent_harness.session.model_switch import (
 from agent_harness.session.model_switch import (
     restore_policy_inputs as _restore_policy_inputs,
 )
-from agent_harness.session.progress import ProgressWriteOutcome, write_progress_file
+from agent_harness.session.progress import (
+    PROGRESS_VERIFY_EXTERNALLY_EDITED,
+    PROGRESS_VERIFY_OK,
+    ProgressVerification,
+    ProgressWriteOutcome,
+    render_external_edit_instruction,
+    verify_progress_file,
+    write_progress_file,
+)
 from agent_harness.session.queue import QueuedMessage, SteerRequest
 from agent_harness.session.session import Session, validate_event_seq
 from agent_harness.session.store import (
@@ -1716,6 +1726,10 @@ class SessionService:
                 port=stuck_evidence,
                 runtime_builder=build_resume_runtime,
             )
+            # W-06（#350）：服务重启/同 run 恢复的重读点——从磁盘重读并对账后
+            # 把文件刷成当前投影（外部编辑在场时 writer 守卫拒绝覆写，冲突经
+            # progress_file_status 呈现，绝不静默覆盖用户手改）。
+            await self.refresh_progress_file(session_id)
             return self._bind_and_launch(
                 session=session, runtime=runtime, task=task,
                 user_input_metadata=user_input_metadata,
@@ -1745,6 +1759,9 @@ class SessionService:
                     session_id,
                     workspace_registry=self._workspace_registry,
                 )
+            # W-06（#350）：服务重启/新任务恢复的重读点（与同 run 分支同口径；
+            # 外部编辑在场时 writer 守卫拒绝覆写，冲突经 progress_file_status 呈现）。
+            await self.refresh_progress_file(session_id)
             return self._bind_and_launch(
                 session=session, runtime=runtime, task=task,
                 user_input_metadata=user_input_metadata,
@@ -3770,6 +3787,112 @@ class SessionService:
                 exc_info=True,
             )
             return None
+
+    # ── W-06（#350）：进度文件重读对账与外部编辑冲突 ─────────────────────
+
+    async def progress_file_status(
+        self, session_id: str,
+    ) -> ProgressVerification | None:
+        """从磁盘重读 progress.md 并与 SessionEvent 投影对账（只读，零副作用）。
+
+        返回 None = 无 cwd 锚（进度文件机制不适用于该会话）。外部编辑在场时
+        返回 ``externally_edited`` + 字段级差异——**只是展示，绝不采信**：文件
+        文本不进投影、不进权限（Runtime 权限只由 permission 事件决定）。
+        证据 refs 的可读回校验（票面"仅允许引用可读回的 Artifact"）在此处做：
+        store 按装配期同一选择器选取，读不到的 ref 记入
+        ``unreadable_artifacts``（verifiable=False）。
+        """
+        self._validate_session_id(session_id)
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        cwd = session_cwd(events)
+        if not cwd or not Path(cwd).is_dir():
+            return None
+        verification = await anyio.to_thread.run_sync(
+            verify_progress_file, cwd, session_id, events
+        )
+        if verification.status != PROGRESS_VERIFY_OK:
+            return verification
+        artifact_store = self._artifact_store_for(session_id)
+        if artifact_store is None:
+            return verification
+        unreadable: list[str] = []
+        for artifact_id in verification.evidence_artifact_ids:
+            try:
+                await artifact_store.load(artifact_id)
+            except Exception:  # noqa: BLE001 — 任何读回失败都记为不可读（对账语义）
+                unreadable.append(artifact_id)
+        if unreadable:
+            verification = replace(
+                verification, unreadable_artifacts=tuple(unreadable),
+                artifact_check="performed",
+            )
+        return verification
+
+    def _artifact_store_for(self, session_id: str) -> Any | None:
+        """进度对账用的 artifact 读回判据（与读路径同一选择器，无配置 = None）。"""
+        from agent_harness.storage.artifact_select import select_artifact_store
+
+        selection = select_artifact_store(self._settings, session_id)
+        return selection.store if selection is not None else None
+
+    async def progress_resolve_external_edit(
+        self, session_id: str, *, action: str,
+    ) -> tuple[ProgressVerification | None, str | None]:
+        """解决外部编辑冲突（票面工作指令 2 的两个出口；HTTP 翻译在 web 层）。
+
+        - ``discard``：用户丢弃手改——文件从服务端投影重写（事件流零改动）。
+        - ``confirm``：用户把手改**确认为新用户指令**——先追加 USER_MESSAGE
+          （无副作用追加路径，不启动任何 run），再从服务端投影重写文件。
+          手改文本只以指令身份进事件流，绝不自动升格为授权/保护事实
+          （不变量 #11：Runtime 权限只由 permission 事件决定）。
+
+        返回 ``(verification, error_kind)``：error_kind 为 None = 成功；
+        ``"conflict"`` = 没有待处理的外部编辑；``"shape"`` = action 非法；
+        ``"no_anchor"`` = 无 cwd 锚。重写用 ``overwrite_external_edit=True``
+        ——这是该旁路的唯一两个合法调用点。
+        """
+        if action not in ("discard", "confirm"):
+            return None, "shape"
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        if not events:
+            raise SessionNotFound(f"session '{session_id}' not found")
+        cwd = session_cwd(events)
+        if not cwd or not Path(cwd).is_dir():
+            return None, "no_anchor"
+        verification = await anyio.to_thread.run_sync(
+            verify_progress_file, cwd, session_id, events
+        )
+        if verification.status != PROGRESS_VERIFY_EXTERNALLY_EDITED:
+            return verification, "conflict"
+        if action == "confirm":
+            instruction = render_external_edit_instruction(verification)
+
+            def _append_instruction(session: Session) -> object:
+                # 无副作用追加（CONTEXT.md「无副作用追加」）：只落事件，不触发
+                # Resume 副作用、不启动 run。
+                return session.append(USER_MESSAGE, {
+                    "content": instruction,
+                    "origin": PROGRESS_CONFIRM_ORIGIN,
+                })
+
+            await self._apply_task_handler(session_id, _append_instruction)
+            events = await anyio.to_thread.run_sync(
+                self._store.read_events, session_id
+            )
+        await anyio.to_thread.run_sync(
+            partial(
+                write_progress_file, cwd, session_id, events,
+                overwrite_external_edit=True,
+            ),
+        )
+        return (
+            await anyio.to_thread.run_sync(
+                verify_progress_file, cwd, session_id, events
+            ),
+            None,
+        )
 
     async def _apply_task_handler(
         self,

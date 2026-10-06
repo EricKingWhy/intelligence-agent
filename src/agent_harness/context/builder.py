@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
@@ -20,6 +21,7 @@ from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
+from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     ProtectedFact,
     derive_messages_with_source_ranges,
@@ -39,6 +41,14 @@ from agent_harness.session.event import (
     SessionEvent,
 )
 from agent_harness.session.plan import PlanState, derive_plan
+from agent_harness.session.progress import (
+    PROGRESS_VERIFY_OK,
+    PROGRESS_VERIFY_STALE,
+    derive_progress_document,
+    render_progress_brief_lines,
+    verify_progress_file,
+    write_progress_file,
+)
 
 logger = logging.getLogger("agent_harness.context")
 
@@ -124,6 +134,60 @@ _PLAN_EVENT_DRIVEN_WINDOW = 1
 #: `compactor._programmatic_summary_sections`），同名会让对照 build 产物与
 #: 摘要的消费方误判为同一来源。也避开 `_is_compaction_summary` 全部前缀。
 _MODIFIED_PATHS_BLOCK_HEADING = "## 最近修改文件"
+
+#: W-06（#350）：进度核对块标题。同样避开 `_is_compaction_summary` 全部前缀
+#: 与清单/文件块标题——ephemeral 块与持久化摘要绝不同形。
+_PROGRESS_BLOCK_HEADING = "## 任务进度核对（progress.md）"
+
+
+def _should_inject_progress(events: list[SessionEvent]) -> bool:
+    """W-06（#350）：进度核对块的注入判据——**纯事件推导**。
+
+    会话已发生过压缩（存在 COMPACTION_END）⇒ 注入：压缩接班后模型可见输入
+    必须含**经核对**的原目标/下一步（票面 AC「重启和压缩后」的耐久读法——
+    bracket 持久在事件流里，重启后重放同一判据成立，与 `_should_inject_plan`
+    的恒注入分支同构）。未经压缩的会话，原目标仍在完整投影历史里，不重复
+    注入（token 经济，同清单块的静默窗逻辑）。
+    """
+    return any(event.type == COMPACTION_END for event in events)
+
+
+def _render_progress_block(
+    doc, *, status: str,
+) -> str:
+    """进度核对块的确定性渲染——内容行逐字来自 `render_progress_brief_lines`。"""
+    lines = [_PROGRESS_BLOCK_HEADING]
+    if status == PROGRESS_VERIFY_OK:
+        lines.append(
+            "以下内容已与磁盘 progress.md 重读核对一致（经核对的原目标/下一步）："
+        )
+    else:
+        lines.append(
+            f"进度文件不可核对（{status}）；以下为 SessionEvent 投影，"
+            "不得凭记忆宣布任务完成："
+        )
+    lines.extend(render_progress_brief_lines(doc))
+    return "\n".join(lines)
+
+
+def _inject_progress_block(messages: list[AnyMessage], progress_text: str) -> list[AnyMessage]:
+    """把进度核对块作为一条 SystemMessage 注入（落点与清单块同形：第一条
+    压缩摘要之前；无摘要时开头连续 SystemMessage 之后）。只依赖 SystemMessage
+    分布，不会插进 AI(tool_calls)/ToolResult 配对中间。调用顺序在
+    `_inject_plan_block` 之后 ⇒ 最终顺序 = 清单 → 进度核对 → 摘要。"""
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage) and _is_compaction_summary(message):
+            return [
+                *messages[:index], SystemMessage(content=progress_text),
+                *messages[index:],
+            ]
+    insertion = 0
+    while insertion < len(messages) and isinstance(messages[insertion], SystemMessage):
+        insertion += 1
+    return [
+        *messages[:insertion], SystemMessage(content=progress_text),
+        *messages[insertion:],
+    ]
 
 
 def _should_inject_plan(
@@ -323,6 +387,9 @@ class ContextBuilder:
         # W-31.5 (#417)：最近一次 build 实际注入的最近修改文件块成本（同清单
         # 锚块的记账口径：非持久化注入、独立记账口，usage_snapshot 折进 "other"）。
         self._last_modified_paths_tokens: int = 0
+        # W-06（#350）：最近一次 build 实际注入的进度核对块成本（同清单锚块的
+        # 记账口径：非持久化注入、独立记账口）。
+        self._last_progress_tokens: int = 0
         # 清单兜底重注入周期（PRD §4.6 Cline Focus Chain 默认值 6，配置可调）。
         self.plan_reinject_every_messages = plan_reinject_every_messages
         # W-03 (#347)：可回读 Artifact 前提下的旧 Tool Result 投影裁剪。
@@ -343,6 +410,46 @@ class ContextBuilder:
             )
         self._prune_decisions: dict[str, dict[int, str]] = {}
         self._last_prune_report: PruneReport | None = None
+
+    async def _resolve_progress_block(self, session: Session) -> tuple[str | None, int]:
+        """W-06（#350）：压缩后进度核对块（磁盘重读对账 + 落后自愈）。
+
+        判据纯事件推导（`_should_inject_progress`）；内容从磁盘 progress.md
+        **重读核对**后取投影——status=ok 时文件与投影逐字节一致，注入经核对
+        的原目标/下一步；否则注入"进度文件不可核对（原因）"+ SessionEvent
+        投影（模型不得凭记忆宣布完成）。无 cwd 锚（进度文件机制不适用）⇒
+        不注入。注入文本是 ephemeral 块：不落事件、不进 derive_messages。
+
+        「压缩之后」重读点的自愈语义：bracket 三事件落盘使事件流前进，文件
+        随即落后（stale = 服务端最后一次写入、只是没跟上，**不是**外部编辑
+        ——classify 已排除 external）。此时 best-effort 调 `write_progress_file`
+        从投影刷新（幂等原子写，不追加事件）再复核对账——刷新失败则如实
+        注入"不可核对"，绝不把 stale 文件说成已核对。
+        """
+        if not _should_inject_progress(session.events):
+            return None, 0
+        cwd = session_cwd(session.events)
+        if not cwd or not Path(cwd).is_dir():
+            return None, 0
+        doc = derive_progress_document(session.events, session_id=session.session_id)
+        verification = verify_progress_file(cwd, session.session_id, session.events)
+        if verification.status == PROGRESS_VERIFY_STALE:
+            try:
+                outcome = write_progress_file(
+                    cwd, session.session_id, session.events,
+                )
+            except Exception:
+                logger.warning(
+                    "压缩后进度文件刷新失败（session=%s）——按不可核对注入",
+                    session.session_id, exc_info=True,
+                )
+            else:
+                if outcome.ok:
+                    verification = verify_progress_file(
+                        cwd, session.session_id, session.events,
+                    )
+        text = _render_progress_block(doc, status=verification.status)
+        return text, estimate_message_tokens([SystemMessage(content=text)])
 
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
@@ -485,6 +592,11 @@ class ContextBuilder:
         )
         token_estimate += paths_tokens
         self._last_modified_paths_tokens = paths_tokens
+        # W-06（#350）：进度核对块决策与成本（先计入再走阈值判定——注入了就
+        # 计数，不计数 = 系统性低估，同清单块教训）。
+        progress_text, progress_tokens = await self._resolve_progress_block(session)
+        token_estimate += progress_tokens
+        self._last_progress_tokens = progress_tokens
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
@@ -495,6 +607,8 @@ class ContextBuilder:
             built = self._inject_runtime_context(built, runtime_context)
             if plan_text is not None:
                 built = _inject_plan_block(built, plan_text)
+            if progress_text is not None:
+                built = _inject_progress_block(built, progress_text)
             if paths_text is not None:
                 built = _inject_modified_paths(built, paths_text)
             return self._prepend_system_prompt(built)
@@ -536,6 +650,11 @@ class ContextBuilder:
             if paths_text is not None else 0
         )
         self._last_modified_paths_tokens = paths_tokens
+        # W-06（#350）：落 bracket 后重估进度核对块——本次 build 可能恰好触发
+        # 首次压缩，判据必须在 bracket 事件在场的前提下重估（压缩后模型输入含
+        # 经核对的原目标/下一步）。
+        progress_text, progress_tokens = await self._resolve_progress_block(session)
+        self._last_progress_tokens = progress_tokens
         # 压缩后的 token_estimate 只含 messages；所有在 messages 之外的上下文
         # （system prompt、运行时快照、保护事实与计划锚块）在 provider 预算中各补回一次。
         reserved_tokens = (
@@ -544,6 +663,7 @@ class ContextBuilder:
             + runtime_context_tokens
             + plan_tokens
             + paths_tokens
+            + progress_tokens
         )
         # 硬护栏复核只对**确已压缩**的路径生效（no-op 沿用原投影，不在此拒）。
         recheck = compacted_token_estimate + protected_facts_tokens
@@ -559,6 +679,8 @@ class ContextBuilder:
         built = self._inject_runtime_context(built, runtime_context)
         if plan_text is not None:
             built = _inject_plan_block(built, plan_text)
+        if progress_text is not None:
+            built = _inject_progress_block(built, progress_text)
         if paths_text is not None:
             built = _inject_modified_paths(built, paths_text)
         # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
