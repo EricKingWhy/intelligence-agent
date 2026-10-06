@@ -3,8 +3,10 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
@@ -919,11 +921,25 @@ class ContextBuilder:
             return None
         # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
         self._preflight_rejection_streaks.pop(session.session_id, None)
-        if not result.summary or not result.bracket_id:
+        if not result.summary:
             raise ContextWindowExceededError(
                 "Refusing to persist an unvalidated compaction summary"
             )
-        bracket_id = result.bracket_id or ""
+        if result.source_seq_start is None or result.source_seq_end is None:
+            # fail-closed：无来源区间不铸造身份。此前的 `or 0` 静默回退在此
+            # 被显式拒绝取代（compactor 的 T12h 路径本应已拦截，此处是持久化
+            # 边界的最后守卫）——无溯源 ⇒ 无身份。
+            raise ContextWindowExceededError(
+                "Refusing to persist compaction without source event range"
+            )
+        # #647 T11f：身份在持久化边界铸造（照搬成熟产品）——
+        # Pi（earendil-works/pi @28dcce2b）session-manager.ts appendCompaction
+        # （L1262-1288）：在同一函数内、_appendEntry 之前由 generateId（L277）铸造；
+        # DeepSeek Harness（@5badb150）region.ts:204：
+        # `const compactionId = CompactionId(randomUUID())`，随后即
+        # session.append('compaction/start', lifecycle)。
+        # 无持久化 ⇒ 无身份：compactor 直调结果永不携带可用身份。
+        bracket_id = str(uuid4())
         # 失败记录已在上面无条件落盘，且与 failures 条目一一对应（每条一个事件）。
         # 守卫复验的基线必须加上这份自身写入，否则重试成功会被误判为并发改动。
         own_writes = len(result.failures)
@@ -988,7 +1004,9 @@ class ContextBuilder:
                 f"Re-projected compaction still exceeds hard guard: {recheck} tokens",
                 bracket_id=bracket_id,
             )
-        return result
+        # 把持久化边界铸造的身份回填给调用方（对标 DSH compactRegion 返回携带
+        # compactionId 的 CompactionResult：service/web/CLI 仍能拿到可用身份）。
+        return replace(result, bracket_id=bracket_id)
 
     @staticmethod
     def _protected_facts_messages(facts: list[ProtectedFact]) -> list[AnyMessage]:
