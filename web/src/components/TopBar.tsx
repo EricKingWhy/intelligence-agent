@@ -6,7 +6,7 @@
  * decision), inspector collapse toggle + theme toggle.
  */
 
-import { Activity, Brain, Gauge, KeyRound, Moon, PanelRight, ShieldCheck, Sun } from 'lucide-react';
+import { Activity, Brain, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, Sun } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Theme } from '../lib/theme';
 import { DENSITIES, type TraceDensity } from '../lib/density';
@@ -33,13 +33,16 @@ interface Props {
   onOpenMemories: () => void;
   /** 打开持久审批规则管理浮层（#684 Phase 2）。与记忆管理同簇的低频管理动作。 */
   onOpenApprovePolicy: () => void;
+  /** 打开恢复列表浮层（#357 W-13）：列出上次运行留下的中断会话。可选——
+   *  未提供时不渲染入口（保持 TopBar 既有测试夹具零迁移）。 */
+  onOpenRecoveryList?: () => void;
   /** #200：会话 id（context-usage 看板的数据源）；null = 无会话（按钮不渲染）。 */
   sessionId: string | null;
   /** 打开上下文容量看板（#200，设计稿 §5）。 */
   onOpenContextUsage: (sessionId: string) => void;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, sessionId, onOpenContextUsage }: Props) {
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, sessionId, onOpenContextUsage }: Props) {
 
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
@@ -222,6 +225,17 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         >
           <ShieldCheck size={16} />
         </button>
+        {/* #357 W-13：恢复列表入口——列上次运行留下的中断会话（只读、先列后继续）。 */}
+        {onOpenRecoveryList && (
+          <button
+            className="icon-btn"
+            onClick={onOpenRecoveryList}
+            aria-label="恢复列表"
+            title="恢复列表——查看上次运行留下的中断会话（只读）"
+          >
+            <History size={16} />
+          </button>
+        )}
         <button
           className="icon-btn"
           onClick={onToggleInspector}

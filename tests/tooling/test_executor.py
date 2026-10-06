@@ -86,6 +86,25 @@ class CountingTool(Tool):
         return ToolResult.success(message=f"计入 {args.value}", data={"value": args.value})
 
 
+class NamedCountingTool(CountingTool):
+    def __init__(self, tool_name: str) -> None:
+        super().__init__()
+        self._tool_name = tool_name
+
+    @property
+    def name(self) -> str:
+        return self._tool_name
+
+
+class ExclusiveCountingTool(NamedCountingTool):
+    def __init__(self, tool_name: str) -> None:
+        super().__init__(tool_name)
+
+    @property
+    def batch_exclusive(self) -> bool:
+        return True
+
+
 # ============================================================================
 # 工具：ExplodingTool —— 工具内部抛异常，证明 TOOL_EXECUTION_ERROR 不冒泡
 # ============================================================================
@@ -845,6 +864,32 @@ class TestBatchConcurrency:
         assert all(r.result.ok for r in results)
         # 核心证据：整批串行，耗时接近 0.3s（给 0.25s 下限排除"误并发"）。
         assert elapsed > 0.25
+
+    @pytest.mark.asyncio
+    async def test_batch_exclusive_tool_prevents_every_peer_from_executing(self):
+        reg = ToolRegistry()
+        before = NamedCountingTool("before")
+        exclusive = ExclusiveCountingTool("question")
+        after = NamedCountingTool("after")
+        reg.register(before)
+        reg.register(exclusive)
+        reg.register(after)
+        executor = ToolExecutor(reg)
+
+        results = await executor.execute_batch([
+            {"id": "before", "name": "before", "args": {"value": 1}},
+            {"id": "question", "name": exclusive.name, "args": {"value": 2}},
+            {"id": "after", "name": "after", "args": {"value": 3}},
+        ])
+
+        assert [result.tool_call_id for result in results] == [
+            "before", "question", "after",
+        ]
+        assert [before.call_count, exclusive.call_count, after.call_count] == [0, 1, 0]
+        assert not results[0].result.ok
+        assert results[1].result.ok
+        assert not results[2].result.ok
+        assert "用户输入" in results[0].result.message
 
 
 # ============================================================================

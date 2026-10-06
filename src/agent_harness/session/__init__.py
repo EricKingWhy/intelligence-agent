@@ -4,6 +4,8 @@ Phase 1 完整导出：SessionEvent DTO、JsonlSessionStore、derive_messages、
 """
 
 from agent_harness.session.context import (
+    ConstraintToolContext,
+    current_constraint_tool_context_var,
     current_session_var,
     memory_injected_ids_var,
     run_context_var,
@@ -60,6 +62,7 @@ from agent_harness.session.event import (
     TOOL_FAILURE_GUARD,
     TOOL_OUTPUT_DELTA,
     TOOL_RESULT,
+    USER_INPUT_REQUESTED,
     USER_MESSAGE,
     SessionEvent,
 )
@@ -123,7 +126,9 @@ __all__ = [
     "TOOL_FAILURE_GUARD",
     "TOOL_OUTPUT_DELTA",
     "TOOL_RESULT",
+    "USER_INPUT_REQUESTED",
     "USER_MESSAGE",
+    "ConstraintToolContext",
     "JsonlSessionStore",
     "PlanItem",
     "PlanState",
@@ -132,6 +137,7 @@ __all__ = [
     "SessionEvent",
     "StartedHeader",
     "apply_plan_update",
+    "current_constraint_tool_context_var",
     "current_session_var",
     "cwd_event_data",
     "derive_messages",

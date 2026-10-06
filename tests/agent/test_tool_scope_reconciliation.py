@@ -69,6 +69,11 @@ _CAPABILITY_TOOL_CLASSES: tuple[tuple[str, str], ...] = (
     # build_runtime 在 BUILTIN_LOCAL_TOOLS 循环外单独注册（无构造依赖，会话经
     # current_session_var 执行期取得）
     ("UpdatePlanTool", "agent_harness.tools.update_plan"),
+    ("RegisterConstraintTool", "agent_harness.tools.register_constraint"),
+    (
+        "RequestConstraintResolutionTool",
+        "agent_harness.tools.request_constraint_resolution",
+    ),
     # knowledge / memory / websearch / skills / multiagent / ticker（demo）
     ("RetrieveKnowledgeTool", "agent_harness.knowledge.tools"),
     ("ReadKnowledgeSourceTool", "agent_harness.knowledge.tools"),
@@ -112,6 +117,14 @@ _UNSCOPED_TOOL_REASONS: dict[str, str] = {
         "MinIO/Local 配对的产物读回工具，未在任何档位声明：审计 §5.7 实测它是 coding "
         "收窄后**唯一**被剔除的工具，而前端 tooltip 因此列不出这个名字。**只登记不改 scope**"
         "——收窄面变更会牵动跨端手工镜像的 17/12/7（#238 Scope）"
+    ),
+    "register_constraint": (
+        "只供直接用户会话的根 main/coding Runtime 使用；coding AgentSpec 同时用于委派 child，"
+        "故不放入共享 tool_scope，根 coding 在 profile 收窄后单独接回、grantable_names 恒剔除"
+    ),
+    "request_constraint_resolution": (
+        "只供直接用户会话的根 main/coding Runtime 使用；coding AgentSpec 同时用于委派 child，"
+        "故不放入共享 tool_scope，根 coding 在 profile 收窄后单独接回、grantable_names 恒剔除"
     ),
     "ingest_document": (
         "知识库**写入**工具，未在任何档位声明（子代理走只读检索 retrieve_knowledge / "

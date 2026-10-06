@@ -20,8 +20,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -64,6 +66,7 @@ from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
 from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.failure import PROVIDER_FAILURE_MESSAGES
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import (
@@ -118,6 +121,14 @@ from agent_harness.tooling.contract import PermissionPolicy
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 5
 
+#: TTY 同行 spinner（P0-3 challenge 修订，2026-10-06）：
+#: 阈值 1.0s（短工具零闪屏，抄 npm Progress#render 的延迟渲染思想取工具场景保守值）；
+#: 帧间隔 120ms（抄 gh briandowns/spinner）；帧抄 cli-spinners dots，ascii 抄 npm Progress.lines。
+_SPINNER_DELAY_S = 1.0
+_SPINNER_INTERVAL_S = 0.12
+_SPINNER_FRAMES_UNICODE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER_FRAMES_ASCII = "-\\|/"
+
 #: 陈旧账行名清除通道（#616）的 CLI 入口标识，写进 `session_budget_events` 审计的
 #: `source` 字段（与 Web 的 `PURGE_ENTRY_API` 同款，只是入口不同）。
 PURGE_ENTRY_CLI = "cli"
@@ -140,6 +151,61 @@ def _preview_window(
     return lines[len(lines) - keep:], len(lines) - keep
 
 
+#: run/failed 的 run 级 reason → (人话一句话, 下一步)。parent 裁决（2026-10-06）：
+#: 每个 reason 写死一句中文，不许开放式发挥。provider_* 四类**不在此表**——复用
+#: `model/failure.py` 的固定文案（不复制文案）。`context_window_exceeded` 生产不可达
+#: （#348 起走 run/paused），入表仅作历史载荷防御（ADR-0033 §2.4 边界 5）。
+_RUN_FAILED_HUMAN: dict[str, tuple[str, str]] = {
+    "cancelled": (
+        "运行被手动取消",
+        "用 `agent-harness resume <session_id>` 接上同一次运行",
+    ),
+    "orphaned": (
+        "运行宿主进程丢失，任务已被孤儿回收",
+        "用 `agent-harness sessions` 查看，用 `resume` 恢复",
+    ),
+    "context_window_exceeded": (
+        "上下文窗口超限",
+        "先 `compact` 压缩历史，再 `resume` 继续",
+    ),
+}
+
+#: 走 `message` / 未分类兜底时的下一步指引。口径与 failure.py 的
+#: ``UNCLASSIFIED_FAILURE_MESSAGE`` 尾句一致（只指向原始信息，不承诺"请重试"）。
+_RUN_FAILED_NEXT_STEP = "完整原始信息见后端日志"
+
+
+def _humanize_run_failed(data: dict) -> tuple[str, str | None]:
+    """`run/failed.data` → (人话一句话, 下一步指引)。
+
+    优先级（ADR-0033：失败归因面产出的固定文案优先）：data 的 ``message`` 非空 ⇒
+    直接用它（runtime 的 ``failure_terminal`` 落的就是项目自有中文文案）；否则按
+    ``reason`` 依次查 ``_RUN_FAILED_HUMAN``（run 级）→ ``PROVIDER_FAILURE_MESSAGES``
+    （provider 分类，import 复用不复制）→ 未分类兜底。
+    ``下一步`` 同样按 ``reason`` 判定：命中 provider 分类 ⇒ ``None``（其文案内已含
+    "请…"指引，不另加）；否则给 :data:`_RUN_FAILED_NEXT_STEP`。
+    """
+    reason = data.get("reason")
+    message = data.get("message")
+    if isinstance(message, str) and message.strip():
+        human = message.strip()
+    elif isinstance(reason, str) and reason in _RUN_FAILED_HUMAN:
+        human = _RUN_FAILED_HUMAN[reason][0]
+    elif isinstance(reason, str) and reason in PROVIDER_FAILURE_MESSAGES:
+        human = PROVIDER_FAILURE_MESSAGES[reason]
+    elif isinstance(reason, str) and reason:
+        human = f"运行失败（{reason}），原因未分类"
+    else:
+        human = "运行失败，原因未分类"
+    if isinstance(reason, str) and reason in _RUN_FAILED_HUMAN:
+        next_step: str | None = _RUN_FAILED_HUMAN[reason][1]
+    elif isinstance(reason, str) and reason in PROVIDER_FAILURE_MESSAGES:
+        next_step = None
+    else:
+        next_step = _RUN_FAILED_NEXT_STEP
+    return human, next_step
+
+
 class StreamRenderer:
     """AgentEvent → 终端文本（事件流的纯函数；write 注入便于测试）。
 
@@ -148,10 +214,37 @@ class StreamRenderer:
     一律静默——终端不是第二份事件日志。
     """
 
-    def __init__(self, write: Callable[[str], None], theme: Theme | None = None) -> None:
+    def __init__(
+        self,
+        write: Callable[[str], None],
+        theme: Theme | None = None,
+        tty_animated: bool | None = None,
+    ) -> None:
         self._write = write
         self._theme = theme if theme is not None else detect_theme()
         self._delta_open = False  # 流式正文输出中：工具行/终态行前先补换行
+        self._pending_tool = False  # True = 已打印 running 行、尚未见到 TOOL_RESULT
+        # 2026-10-06 challenge 修订：TTY 门控（抄 npm definitions.js L1557-1561，
+        # "双 TTY + TERM!=dumb"；npm 注释原文：prevents the progress from appearing
+        # when piping output）。构造参数 tty_animated 可注入覆盖，供测试伪造 TTY；
+        # 门控做在构造层单点判定，不散落各分支（bubbles 启示）。
+        self._tty_animated = (
+            tty_animated
+            if tty_animated is not None
+            else (
+                sys.stdout.isatty()
+                and sys.stderr.isatty()
+                and os.environ.get("TERM") != "dumb"
+            )
+        )
+        # spinner 只在 TTY 门控为真时启动；timer 回调线程与 handle 线程共享写口，
+        # 用一把锁界定「停/擦」与「写帧」的次序（单线程事件循环 + Timer 线程，见票面）。
+        self._pending_line = ""  # running 行正文（去前导 \n），spinner 同行重写用
+        self._spinner_enabled = False
+        self._spinner_running = False  # 已写出一帧（终止时需要 \r\033[K 擦除）
+        self._spinner_frame = 0
+        self._spinner_timer: threading.Timer | None = None
+        self._spinner_lock = threading.Lock()
 
     def handle(self, event: AgentEvent) -> None:
         if event.type == TEXT_DELTA:
@@ -159,6 +252,10 @@ class StreamRenderer:
             self._delta_open = True
         elif event.type == TOOL_CALL:
             self._end_delta()
+            if self._pending_tool:
+                # 上一个工具的 TOOL_RESULT 丢失：先收敛它，再开新的（永不静默吞）
+                self._stop_spinner_erase_line()
+                self._write_orphan_line()
             theme = self._theme
             args = _collapse_args(event.data.get("args") or {}, sep=theme.sep())
             line = ("\n" + theme.paint("accent", theme.glyph("pending"))
@@ -166,38 +263,143 @@ class StreamRenderer:
             if args:
                 line += " " + theme.paint("muted", args)
             self._write(line + "\n")
+            self._pending_tool = True
+            if self._tty_animated:
+                # 1.0s 内 TOOL_RESULT 到达 → 不启动动画（短工具零闪屏）；
+                # 超阈值 → 每 120ms 在同一行重写 `● bash <args> <frame>`（先 \r\033[K，不写 \n）。
+                self._pending_line = line[1:]  # 去掉前导 \n，spinner 同行重写同一视觉行
+                self._spinner_frame = 0
+                self._start_spinner_delay()
         elif event.type == TOOL_RESULT:
+            # 2026-10-06 challenge 修订：终止分支先停 timer + 擦 spinner 行，再走收敛行逻辑。
+            self._stop_spinner_erase_line()
             self._render_result(event.data)
+            self._pending_tool = False
         elif event.type == RUN_COMPLETED:
             self._end_delta()
+            self._settle_orphan_pending()
             self._write("\n")
             usage = event.data.get("usage_total") or {}
             if usage:
                 self._write(_render_footer(usage, theme=self._theme) + "\n")
         elif event.type == RUN_FAILED:
+            # P0-7：整块 ERR 色（`●` + 人话 + 技术原因 + 下一步），文案复用
+            # failure.py / 本模块 _RUN_FAILED_HUMAN，不另造。reason 缺失/空 ⇒ 省
+            # ` (<reason>)` 段；next_step 为 None（provider 类）⇒ 省「。下一步：」段。
             self._end_delta()
+            self._settle_orphan_pending()
+            human, next_step = _humanize_run_failed(event.data)
             reason = event.data.get("reason")
-            suffix = f" ({reason})" if reason else ""
-            self._write(f"\n[run failed]{suffix}\n")
+            head = f"{self._theme.glyph('fail')} {human}"
+            # 技术原因只在人话没自带时缀出：未分类兜底句已含 `（reason）`（AC3），
+            # 再缀 `(reason)` 会重复（`运行失败（weird_x），原因未分类 (weird_x)`）。
+            if isinstance(reason, str) and reason and reason not in human:
+                head += f" ({reason})"
+            block = head + (f"。下一步：{next_step}" if next_step else "")
+            self._write("\n" + self._theme.paint("err", block) + "\n")
         elif event.type == RUN_PAUSED:
             # `#312`：暂停**不是**失败——独立成块，让终端能把 paused 与 failed
             # 分开（同一份 durable data，与 replay / Web 显示的事实一致）。
             self._end_delta()
+            self._settle_orphan_pending()
             self._write(render_pause_block(event.data))
         elif event.type == RUN_RESUMED:
+            # `RUN_RESUMED` **不清** pending：暂停→恢复是同一 run 的延续，
+            # TOOL_RESULT 仍可能后到（本票 §5 orphan 边界）。
             self._end_delta()
             self._write(render_resume_block(event.data))
 
+    def _settle_orphan_pending(self) -> None:
+        """RUN_COMPLETED / RUN_FAILED / RUN_PAUSED：pending 未配对时先擦 spinner 再写 orphan。"""
+        if self._pending_tool:
+            self._stop_spinner_erase_line()
+            self._write_orphan_line()
+            self._pending_tool = False
+
+    def _start_spinner_delay(self) -> None:
+        """超过阈值仍 pending 才起动画：先排 1.0s 阈值 timer（到期未终止才进帧循环）。"""
+        with self._spinner_lock:
+            self._spinner_enabled = True
+            timer = threading.Timer(_SPINNER_DELAY_S, self._begin_spinner)
+            timer.daemon = True
+            self._spinner_timer = timer
+        timer.start()
+
+    def _begin_spinner(self) -> None:
+        with self._spinner_lock:
+            if not self._spinner_enabled:
+                return
+            self._spinner_timer = None
+        self._spinner_write_frame()
+
+    def _spinner_write_frame(self) -> None:
+        """写一帧并排下一帧；回调只调 self._write（票面线程安全边界）。
+
+        先写 `\\r\\033[K`（抄 briandowns/spinner erase() L482）再写本行、不写 `\\n`
+        ——同一行重写。`_spinner_enabled` 在锁内读，终止分支置 False 后本函数即静默。
+        """
+        with self._spinner_lock:
+            if not self._spinner_enabled:
+                return
+            frames = (
+                _SPINNER_FRAMES_ASCII
+                if self._theme.glyph_set == "ascii"
+                else _SPINNER_FRAMES_UNICODE
+            )
+            frame = frames[self._spinner_frame % len(frames)]
+            self._spinner_frame += 1
+            self._spinner_running = True
+            self._write("\r\033[K" + self._pending_line + " "
+                        + self._theme.paint("muted", frame))
+            timer = threading.Timer(_SPINNER_INTERVAL_S, self._spinner_write_frame)
+            timer.daemon = True
+            self._spinner_timer = timer
+        timer.start()
+
+    def _stop_spinner_erase_line(self) -> None:
+        """停 timer；若已写出帧则 `\\r\\033[K` 擦除 spinner 行（未写帧则静默）。
+
+        非 TTY（`_tty_animated=False`）下 `_spinner_enabled` 恒为 False、`_spinner_running`
+        恒为 False ⇒ 本函数无副作用，输出与静态票面逐字节一致（零 `\\r`/ANSI 动画）。
+        """
+        with self._spinner_lock:
+            self._spinner_enabled = False
+            timer = self._spinner_timer
+            self._spinner_timer = None
+            running = self._spinner_running
+            self._spinner_running = False
+        if timer is not None:
+            timer.cancel()
+        if running:
+            self._write("\r\033[K")
+
+    def _write_orphan_line(self) -> None:
+        """前一个 running 行未等到 TOOL_RESULT 时的防御行（parent 裁决原文，无歧义）。"""
+        theme = self._theme
+        self._write("  " + theme.paint("muted", theme.glyph("attach")) + " "
+                    + theme.paint("muted", "(previous tool result not observed)")
+                    + "\n")
+
     def _render_result(self, data: dict) -> None:
+        theme = self._theme
+
+        def _prefix(glyph_name: str, role: str) -> str:
+            return ("  " + theme.paint("muted", theme.glyph("attach")) + " "
+                    + theme.paint(role, theme.glyph(glyph_name)) + " ")
+
         try:
             result = json.loads(data["content"])
         except (KeyError, ValueError):
-            self._write("  [fail] (unparseable result)\n")
+            self._write(_prefix("fail", "err") + "failed "
+                        + theme.paint("muted", "(unparseable result)") + "\n")
             return
-        status = "[ok]" if result.get("ok") else "[fail]"
+        ok = bool(result.get("ok"))
+        header = _prefix("ok" if ok else "fail", "ok" if ok else "err")
+        header += "done" if ok else "failed"
         duration = result.get("metadata", {}).get("duration_ms")
-        suffix = f" ({duration / 1000:.1f}s)" if isinstance(duration, (int, float)) else ""
-        self._write(f"  {status}{suffix}\n")
+        if isinstance(duration, (int, float)):
+            header += theme.paint("muted", f"{theme.sep()}Took {_format_duration(duration)}")
+        self._write(header + "\n")
         message = result.get("message") or ""
         lines = message.splitlines()
         visible, hidden = _preview_window(lines)
@@ -275,6 +477,38 @@ def _render_footer(usage: dict, *, theme) -> str:
     if usage.get("completion_tokens"):
         segments.append("↓" + _format_tokens(usage["completion_tokens"]))
     return theme.paint("muted", " ".join(segments))
+
+
+def _emit_stderr(text: str, theme: Theme | None = None) -> None:
+    """stderr 统一 muted 灰（246）。Pi 纪律：stderr 流不染 ERR 红；ERR 红只用于
+    stdout 事件流里的失败块（`evidence/pi/05_error.txt`，来源见 P0-7 票面）。
+
+    口径（写死）：全进程以 ``sys.stdout`` 的能力为准，stderr 继承——即用无参的
+    ``detect_theme()``（它探测 ``sys.stdout``），不为 ``sys.stderr`` 单独探测
+    （stdout 重定向而 stderr 仍是 TTY 的分歧场景下，以 stdout 为准）。
+    本批票中"dim/灰"一律 = ``muted``（246）；``faint``（239）本次不用（跨票统一口径）。
+    """
+    th = theme if theme is not None else detect_theme()
+    print(th.paint("muted", text), file=sys.stderr)
+
+
+def _format_duration(ms: float) -> str:
+    """毫秒 → '0.1s' / '1m 2s' / '1h 2m 3s'。
+
+    算法照抄 Pi bash.ts formatDuration（pi-mono HEAD 428a12b，L23-31，MIT）：
+    <60s → f"{s:.1f}s"；<60m → f"{m}m {rem}s"；否则 f"{h}h {m}m {s}s"。
+    上游无 ms 分级（0ms→"0.0s"），此处同样不做；负数不钳制（原样渲染，数据问题不掩盖）。
+    跨票契约：P0-5（时长徽章）复用本函数，不得再定义第二个 duration 格式化函数。
+    """
+    seconds = ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total_seconds = int(seconds)
+    minutes, rem = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {rem}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {rem}s"
 
 
 # ── 暂停 / 恢复渲染（#312，PRD §11 CLI behavior）──────────────────────────
@@ -833,6 +1067,10 @@ async def run(
             workspace_registry=workspace_registry,
             session_id=session_id, workspace=workspace,
             max_agent_turns=fuse.max_agent_turns,
+            include_constraint_tools=True,
+            # CLI 没有提交 user-input answer 的入口；保留模型可登记 protected fact，
+            # 但不暴露会把 run 暂停在无法回答状态的澄清工具。
+            include_constraint_resolution_tool=False,
             local_fuse_source=fuse.source,
             # 档位显式化：**与下面证据端口的摘要输入同源**。运行时实际生效的档位就是
             # 这一档（此前靠 `build_runtime` 的默认参数），若两处各写一次，暂停快照
@@ -930,7 +1168,7 @@ def main() -> None:
         # 而不是留下「锁被占用」的旧话术诱发启动者另开第二个实例。
         from agent_harness.host_service import describe_lock_error_with_attach
 
-        print(describe_lock_error_with_attach(settings.workspace_dir, error), file=sys.stderr)
+        _emit_stderr(describe_lock_error_with_attach(settings.workspace_dir, error))
         raise SystemExit(2) from error
     try:
         _main_dispatch()
@@ -968,7 +1206,7 @@ def _main_serve(argv: list[str]) -> None:
     except (HostServiceError, InstanceLockError) as error:
         # HostServiceError = 活服务但凭据不可用（exit 3）；InstanceLockError =
         # 二次检查窗口内无服务可附着、锁在非服务写者手里（exit 2，原报错原样出）。
-        print(error, file=sys.stderr)
+        _emit_stderr(str(error))
         raise SystemExit(3 if isinstance(error, HostServiceError) else 2) from error
     except KeyboardInterrupt:
         print("服务已停止")
@@ -1172,7 +1410,7 @@ def _main_fork(argv: list[str]) -> None:
             )
         )
     except ForkBoundaryError as error:
-        print(f"fork 失败：{error}", file=sys.stderr)
+        _emit_stderr(f"fork 失败：{error}")
         raise SystemExit(1) from None
     print(f"已分叉：child session = {child_id}")
     print(f"（原会话 {args.session_id} 未改动；在新分支重发第 "
@@ -1280,22 +1518,28 @@ async def fork_command(
 # ── replay（Phase 14 T8, ADR-0017 决策 4：逻辑回放，零副作用契约）────────────
 
 
-def render_replay_event(event: SessionEvent) -> str | None:
+def render_replay_event(
+    event: SessionEvent, *, theme: Theme | None = None
+) -> str | None:
     """SessionEvent → 终端行（纯函数）。生命周期噪音返回 None 不渲染。
 
     tool result 一律渲染**冻结终态**（spec 03 §6：逻辑回放不重执行、不产生
     外部副作用）。失败事实（run/failed、model/failed、熔断、fallback）如实
     呈现，绝不美化。
+
+    `theme` 为 keyword-only：`None` ⇒ 纯文本（旧测试行为不变）；传入时只给失败三行
+    （run/failed、model/failed、熔断）包 ERR 色——**只着色，不改文本**（标签文本归 P0-8）。
+    `[stuck]` / `[fallback]` 不染（非失败语义，#317/#312 纪律）。
     """
     data = event.data
     if event.type == USER_MESSAGE:
-        return f"\n[用户] {data.get('content', '')}"
+        return f"\n[user] {data.get('content', '')}"
     if event.type == MODEL_COMPLETED:
         content = data.get("content", "")
         return f"[assistant] {content}" if content else None
     if event.type == TOOL_CALL:
         args = data.get("args", {})
-        return f"[工具] {data.get('tool_name', '')}({_collapse_args(args)})"
+        return f"[tool] {data.get('tool_name', '')}({_collapse_args(args)})"
     if event.type == TOOL_RESULT:
         content = str(data.get("content", ""))
         lines = content.splitlines() or [""]
@@ -1304,9 +1548,10 @@ def render_replay_event(event: SessionEvent) -> str | None:
         # hint 在前（隐藏的是更早的行，在上方；照抄 Pi keep="end" 的 [hint, ...lines]）。
         # 本票只改取行方向与截断文案，`│` 前缀与外层标签及着色归 P0-8。
         more = "" if not hidden else f"  │ … ({hidden} earlier lines)\n"
-        return f"  → 结果（冻结）:\n{more}{preview}"
+        return f"  → result (frozen):\n{more}{preview}"
     if event.type == RUN_FAILED:
-        return f"[run 失败] {data.get('reason', 'unspecified')}"
+        line = f"[run failed] {data.get('reason', 'unspecified')}"
+        return theme.paint("err", line) if theme is not None else line
     if event.type == RUN_PAUSED:
         # `#312`：暂停是**非终态**收口（逻辑 run 未终结）——replay 必须如实重建它，
         # 否则刷新/回放之后的 CLI 看到的会话就像"跑完了"。
@@ -1317,10 +1562,12 @@ def render_replay_event(event: SessionEvent) -> str | None:
     if event.type == RUN_RESUMED:
         return render_resume_block(data).lstrip("\n").rstrip("\n")
     if event.type == MODEL_FAILED:
-        return f"[模型失败] {data.get('message', '')}"
+        line = f"[model failed] {data.get('message', '')}"
+        return theme.paint("err", line) if theme is not None else line
     if event.type == TOOL_FAILURE_GUARD:
-        return (f"[熔断] level={data.get('level', '')}"
+        line = (f"[guard] level={data.get('level', '')}"
                 f" consecutive_failures={data.get('consecutive_failures', '')}")
+        return theme.paint("err", line) if theme is not None else line
     if event.type == GUARD_STUCK:
         # `#317`：stuck 护栏的两种动作都如实呈现（`replan` 是"已纠正过一次"的 durable
         # 依据，`paused` 是暂停前的最后一步）——只渲染 run/paused 会让回放看起来
@@ -1331,23 +1578,23 @@ def render_replay_event(event: SessionEvent) -> str | None:
         return (f"[fallback] {data.get('from_model', '')}→"
                 f"{data.get('to_model', '')} ({data.get('reason', '')})")
     if event.type == AGENT_DELEGATION_STARTED:
-        return (f"[委派→{data.get('target', '')}] "
+        return (f"[delegate→{data.get('target', '')}] "
                 f"child={data.get('child_session_id', '')}")
     if event.type == AGENT_DELEGATION_FINISHED:
         summary = str(data.get("summary", ""))[:200]
-        return (f"[委派完成→{data.get('target', '')}] "
+        return (f"[delegate done→{data.get('target', '')}] "
                 f"{data.get('status', '')}: {summary}")
     if event.type == ARTIFACT_CREATED:
         return f"[artifact] {str(data)[:120]}"
     if event.type == ARTIFACT_EXTERNALIZED:
-        return f"[外置产物] artifact_id={data.get('artifact_id', '')} size={data.get('size', 0)}"
+        return f"[artifact externalized] artifact_id={data.get('artifact_id', '')} size={data.get('size', 0)}"
     if event.type == SESSION_FORKED:
-        return (f"[fork] 来自 {data.get('parent_session_id', '')}"
+        return (f"[fork] from {data.get('parent_session_id', '')}"
                 f" @{data.get('fork_point_seq')}")
     if event.type == CONTEXT_COMPACTED:
-        return "[context 压缩]（早期历史已摘要，原文在 JSONL）"
+        return "[context compacted] (early history summarized, raw in JSONL)"
     if event.type == OPERATION_RECONCILE_REQUIRED:
-        return f"[需裁决] {str(data)[:120]}"
+        return f"[reconcile required] {str(data)[:120]}"
     # session/started, session/resumed, run/started, run/completed,
     # memory/degraded：生命周期噪音，不渲染
     return None
@@ -1373,8 +1620,10 @@ async def replay_command(
     events = store.read_events(session_id)
     if not events:
         raise ValueError(f"Session '{session_id}' 不存在或事件日志为空")
-    lines = [line for line in (render_replay_event(e) for e in events) if line]
-    output = "\n".join(lines) if lines else "（无可渲染内容）"
+    theme = detect_theme()
+    lines = [line for line in (render_replay_event(e, theme=theme) for e in events)
+             if line]
+    output = "\n".join(lines) if lines else "(no renderable content)"
     if write is not None:
         write(output + "\n")
     return output
@@ -1389,7 +1638,7 @@ def _main_replay(argv: list[str]) -> None:
     try:
         output = asyncio.run(replay_command(args.session_id))
     except ValueError as error:
-        print(f"replay 失败：{error}", file=sys.stderr)
+        _emit_stderr(f"replay 失败：{error}")
         raise SystemExit(1) from None
     print(output)
 
@@ -1498,6 +1747,7 @@ async def resume_command(
         task=None,
         resume_run_id=run_id or paused.run_id,
         resume_basis=basis,
+        include_constraint_resolution_tool=False,
         run_max_agent_turns_total=run_turns_total,
         run_max_model_requests=run_model_requests,
         run_max_total_tokens=run_total_tokens,
@@ -1687,7 +1937,7 @@ def _main_resume(argv: list[str]) -> None:
         ))
     except (BudgetConflict, BudgetRejection, InvalidSessionId, SessionNotFound) as error:
         # 被拒请求零副作用——这里只说事实，不重试、不猜（PRD §9：422 形状 / 409 冲突）。
-        print(f"resume 被拒绝：{error}", file=sys.stderr)
+        _emit_stderr(f"resume 被拒绝：{error}")
         raise SystemExit(1) from None
     if outcome.paused:
         return  # 又被预算挡住仍是可恢复的事实，不是失败（同 `run` 的口径）
@@ -1771,7 +2021,7 @@ def _main_budgets(argv: list[str]) -> None:
             )
         )
     except (InvalidSessionId, SessionNotFound) as error:
-        print(f"清理失败：{error}", file=sys.stderr)
+        _emit_stderr(f"清理失败：{error}")
         raise SystemExit(1) from None
     print(output)
     if confirm_required:
@@ -1855,18 +2105,17 @@ def _main_compact(argv: list[str]) -> None:
     except CompactionPostWriteError as error:
         # bracket 三事件已落盘、复核未过：历史已变，不得谎报"未改动"（F2 #635）。
         # 给出可操作文案——会话本身可继续，提示用户检查该 bracket。
-        print(
+        _emit_stderr(
             "压缩失败：压缩 bracket 已写入但复核未通过"
-            f"（bracket={error.bracket_id}），会话可继续，请检查。",
-            file=sys.stderr,
+            f"（bracket={error.bracket_id}），会话可继续，请检查。"
         )
         raise SystemExit(1) from None
     except (InvalidSessionId, SessionNotFound) as error:
-        print(f"压缩失败：{error}", file=sys.stderr)
+        _emit_stderr(f"压缩失败：{error}")
         raise SystemExit(1) from None
     except CompactionInProgress:
         # 类型化拒绝理由（F6 #635）：不再靠错误字符串子串匹配。
-        print("压缩被拒绝：压缩已在进行中（零改动）", file=sys.stderr)
+        _emit_stderr("压缩被拒绝：压缩已在进行中（零改动）")
         raise SystemExit(1) from None
     except CompactionConcurrentWrite as error:
         # G1 #635：按 reason 给诚实且可操作的文案，不再统一声称"零改动"——
@@ -1877,15 +2126,15 @@ def _main_compact(argv: list[str]) -> None:
             message = "压缩被拒绝：run 在收尾窗口，请等待 run 结束后重试"
         else:
             message = "压缩被拒绝：压缩期间会话被并发改动，请重试"
-        print(message, file=sys.stderr)
+        _emit_stderr(message)
         raise SystemExit(1) from None
     except ActiveRunConflict:
         # 在途 run（子类已在上方分别处理，这里是基类语义）。
-        print("压缩被拒绝：在途 run 运行中（零改动）", file=sys.stderr)
+        _emit_stderr("压缩被拒绝：在途 run 运行中（零改动）")
         raise SystemExit(1) from None
     except ConfigError as error:
         # 非法 --model：解析在零副作用前完成，未写入任何事件。
-        print(f"压缩失败：{error}", file=sys.stderr)
+        _emit_stderr(f"压缩失败：{error}")
         raise SystemExit(1) from None
     print(output)
 

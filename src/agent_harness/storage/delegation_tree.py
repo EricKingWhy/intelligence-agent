@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -1108,6 +1108,76 @@ class SqliteDelegationTreeLedger:
                 raise
 
     @retry_on_busy
+    async def record_session_tool_call(
+        self, budget_key: str, *, tool_call_id: str, tool_name: str,
+        calls: int, attempts: int,
+    ) -> bool:
+        """按 tool_call_id 幂等并入一次工具结果预算增量。
+
+        事件流与 session budget 位于不同存储。审计事件和计数更新在本 SQLite
+        事务内原子提交；恢复可安全重放同一 tool/result，而不会重复累计。
+        """
+        if not tool_call_id or not tool_name:
+            raise ValueError("tool_call_id and tool_name must be non-empty")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (calls, attempts)
+        ):
+            raise ValueError("calls and attempts must be non-negative integers")
+        detail = {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "calls": calls,
+            "attempts": attempts,
+        }
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    """SELECT detail FROM session_budget_events
+                       WHERE budget_key = ? AND kind = 'tool_call_recorded'""",
+                    (budget_key,),
+                )
+                for event_row in await cursor.fetchall():
+                    recorded = json.loads(event_row["detail"] or "{}")
+                    if recorded.get("tool_call_id") != tool_call_id:
+                        continue
+                    if recorded != detail:
+                        raise ValueError(
+                            f"tool_call_id {tool_call_id!r} was recorded with different budget data"
+                        )
+                    await connection.commit()
+                    return False
+
+                cursor = await connection.execute(
+                    "SELECT * FROM session_budgets WHERE budget_key = ?", (budget_key,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise KeyError(f"unknown session budget: {budget_key}")
+                calls_table = _tool_map_from_json(row["tool_calls_by_tool"]) or {}
+                attempts_table = _tool_map_from_json(row["tool_attempts_by_tool"]) or {}
+                if calls:
+                    calls_table[tool_name] = calls_table.get(tool_name, 0) + calls
+                if attempts:
+                    attempts_table[tool_name] = attempts_table.get(tool_name, 0) + attempts
+                await connection.execute(
+                    """UPDATE session_budgets
+                       SET tool_calls_by_tool = ?, tool_attempts_by_tool = ?
+                       WHERE budget_key = ?""",
+                    (_tool_map_json(calls_table), _tool_map_json(attempts_table), budget_key),
+                )
+                await self._append_session_event(
+                    connection, budget_key, "tool_call_recorded",
+                    version=int(row["version"]), detail=detail,
+                )
+                await connection.commit()
+                return True
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    @retry_on_busy
     async def update_session_limits(
         self, budget_key: str, *, expected_version: int, limits: SessionLimits,
     ) -> SessionBudgetSnapshot:
@@ -1493,7 +1563,14 @@ class InMemoryDelegationTreeLedger:
         self._trees: dict[str, dict[str, object]] = {}
         self._events: dict[str, list[str]] = {}
         self._budgets: dict[str, dict[str, object]] = {}
+        self._tool_call_records: dict[str, dict[str, dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
+        self._model_request_accountings: dict[str, dict[str, dict[str, Any]]] = {}
+        self._resolved_model_request_accountings: set[tuple[str, str]] = set()
+        self._recorded_model_request_ids: dict[str, set[str]] = {}
+        self._settled_model_request_accountings: dict[
+            tuple[str, str], dict[str, Any]
+        ] = {}
         self._model_request_accountings: dict[str, dict[str, dict[str, Any]]] = {}
         self._resolved_model_request_accountings: set[tuple[str, str]] = set()
         self._recorded_model_request_ids: dict[str, set[str]] = {}
@@ -1786,6 +1863,46 @@ class InMemoryDelegationTreeLedger:
             state["tool_calls_by_tool"] = _tool_map_json(calls_table)
             state["tool_attempts_by_tool"] = _tool_map_json(attempts_table)
 
+    async def record_session_tool_call(
+        self, budget_key: str, *, tool_call_id: str, tool_name: str,
+        calls: int, attempts: int,
+    ) -> bool:
+        if not tool_call_id or not tool_name:
+            raise ValueError("tool_call_id and tool_name must be non-empty")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (calls, attempts)
+        ):
+            raise ValueError("calls and attempts must be non-negative integers")
+        detail = {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "calls": calls,
+            "attempts": attempts,
+        }
+        async with self._lock:
+            if budget_key not in self._budgets:
+                raise KeyError(f"unknown session budget: {budget_key}")
+            records = self._tool_call_records.setdefault(budget_key, {})
+            existing = records.get(tool_call_id)
+            if existing is not None:
+                if existing != detail:
+                    raise ValueError(
+                        f"tool_call_id {tool_call_id!r} was recorded with different budget data"
+                    )
+                return False
+            state = self._budgets[budget_key]
+            calls_table = _tool_map_from_json(state["tool_calls_by_tool"]) or {}
+            attempts_table = _tool_map_from_json(state["tool_attempts_by_tool"]) or {}
+            if calls:
+                calls_table[tool_name] = calls_table.get(tool_name, 0) + calls
+            if attempts:
+                attempts_table[tool_name] = attempts_table.get(tool_name, 0) + attempts
+            state["tool_calls_by_tool"] = _tool_map_json(calls_table)
+            state["tool_attempts_by_tool"] = _tool_map_json(attempts_table)
+            records[tool_call_id] = detail
+            return True
+
     async def update_session_limits(
         self, budget_key: str, *, expected_version: int, limits: SessionLimits,
     ) -> SessionBudgetSnapshot:
@@ -1952,6 +2069,9 @@ class SessionBudgetHandle:
     budget_key: str
     root_session_id: str
     limits: SessionLimits = field(default_factory=SessionLimits)
+    on_tool_call_record_failure: Callable[[], None] | None = field(
+        default=None, compare=False, repr=False,
+    )
 
     async def snapshot(self) -> SessionBudgetSnapshot:
         snapshot = await self.ledger.get_session_budget(self.budget_key)
@@ -2019,3 +2139,23 @@ class SessionBudgetHandle:
         await self.ledger.record_session_tools(
             self.budget_key, calls=calls, attempts=attempts,
         )
+
+    async def record_tool_call(
+        self, *, tool_call_id: str, tool_name: str, calls: int, attempts: int,
+    ) -> bool:
+        try:
+            return await self.ledger.record_session_tool_call(
+                self.budget_key,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                calls=calls,
+                attempts=attempts,
+            )
+        except asyncio.CancelledError:
+            if self.on_tool_call_record_failure is not None:
+                self.on_tool_call_record_failure()
+            raise
+        except Exception:
+            if self.on_tool_call_record_failure is not None:
+                self.on_tool_call_record_failure()
+            raise

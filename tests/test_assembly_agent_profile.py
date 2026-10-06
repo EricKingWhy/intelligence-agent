@@ -47,7 +47,10 @@ class ScriptedModelFactory:
         yield AIMessageChunk(content="ok")
 
 
-async def _build_runtime(tmp_path: Path, agent_profile: str | None, **settings_overrides):
+async def _build_runtime(
+    tmp_path: Path, agent_profile: str | None, *, include_constraint_tools: bool = False,
+    **settings_overrides,
+):
     """装配一个 runtime（最小 wiring），返回 runtime 供断言 registry/system_prompt。"""
     settings = _settings(tmp_path, **settings_overrides)
     wiring = CapabilityWiring()
@@ -63,6 +66,7 @@ async def _build_runtime(tmp_path: Path, agent_profile: str | None, **settings_o
             workspace=tmp_path / "workspaces" / "sess-profile",
             max_agent_turns=10,
             agent_profile=agent_profile,
+            include_constraint_tools=include_constraint_tools,
         )
     return runtime
 
@@ -79,6 +83,7 @@ async def test_build_runtime_coding_profile_filters_registry(tmp_path):
     )
     # 关键工具在
     assert {"read", "write", "bash", "edit", "apply_patch"} <= tool_names
+    assert not {"register_constraint", "request_constraint_resolution"} & tool_names
     # delegate 不在（coding 不能委派）
     assert "delegate" not in tool_names
 
@@ -128,6 +133,15 @@ async def test_build_runtime_coding_profile_injects_system_prompt(tmp_path):
     """C5：agent_profile="coding" → runtime 的 ContextBuilder.system_prompt == coding 文本。"""
     runtime = await _build_runtime(tmp_path, agent_profile="coding")
     assert runtime._context_builder.system_prompt == BUILTIN_PROFILES["coding"].system_prompt
+
+
+@pytest.mark.asyncio
+async def test_root_coding_runtime_can_opt_in_to_constraint_tools(tmp_path):
+    runtime = await _build_runtime(
+        tmp_path, agent_profile="coding", include_constraint_tools=True,
+    )
+    tool_names = {tool.name for tool in runtime.registry.list()}
+    assert {"register_constraint", "request_constraint_resolution"} <= tool_names
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,7 @@ import os
 import stat
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -57,22 +57,30 @@ from agent_harness.agent.resume_evidence import (
     relevant_steer_seq,
 )
 from agent_harness.agent.run_budget import (
+    CLOSEOUT_DETERMINISTIC,
     REASON_STUCK,
+    REASON_USER_INPUT,
+    RESUME_BASIS_USER_INPUT,
+    TRIGGER_USER_INPUT,
     BudgetConsumed,
     LaunchRunBudget,
     PausedRun,
     RunBudgetState,
     RunLimits,
+    SessionBudgetPort,
     SessionLimits,
     build_limits_snapshot,
+    build_pause_data,
     build_resume_data,
     derive_run_budget,
+    deterministic_continuation,
     latest_paused_run,
     latest_run_id,
     project_budget,
     run_limits_from_request,
     session_budget_key,
     session_limits_from_request,
+    session_resume_headroom_ok,
     stuck_resume_evidence,
     validate_resume,
 )
@@ -115,6 +123,7 @@ from agent_harness.session.derive import (
     collect_dangling,
     derive_protected_facts,
     detect_dangling,
+    is_direct_user_input_event,
     undelivered_inputs,
     validate_user_fact_links,
     validate_user_protected_fact_annotations,
@@ -155,6 +164,10 @@ from agent_harness.session.event import (
     PERMISSION_RESOLVED,
     QUEUE_CANCELLED,
     QUEUE_CONSUMED,
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_INTERRUPTED,
+    RUN_PAUSED,
     RUN_RESUMED,
     SESSION_FORKED,
     SESSION_RESUMED,
@@ -162,6 +175,7 @@ from agent_harness.session.event import (
     STEER_APPLIED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
+    USER_INPUT_REQUESTED,
     USER_MESSAGE,
     SessionEvent,
     _utc_now_iso,
@@ -195,6 +209,7 @@ from agent_harness.session.progress import (
     PROGRESS_VERIFY_OK,
     ProgressVerification,
     ProgressWriteOutcome,
+    read_progress_file_version,
     render_external_edit_instruction,
     verify_progress_file,
     write_progress_file,
@@ -227,7 +242,7 @@ from agent_harness.storage.delegation_tree import (
     SessionToolLimitsPurge,
 )
 from agent_harness.storage.local_artifact import discard_local_artifacts
-from agent_harness.storage.operation import needs_reconcile
+from agent_harness.storage.operation import OperationState, needs_reconcile
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
     ApprovalCallback,
@@ -236,7 +251,7 @@ from agent_harness.tooling.approval import (
 )
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import PolicyGranularity
-from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tooling.contract import PermissionPolicy, ToolReconcileInfo
 from agent_harness.tools.git import git_head_command
 
 if TYPE_CHECKING:
@@ -577,10 +592,14 @@ class ReconcileDecision:
 
     verdict 用字符串承载（HTTP/CLI 传输词汇），合法性在 `recover` 预检里统一
     校验（``InvalidDecision`` 422）——规则单一来源，不在传输层复述。
+
+    ``source``（#357 W-13 契约 3）：用户来源自陈（如「我查了外部系统」），
+    有值时随裁决逐字进 ``reconcile_meta``。带默认值 ⇒ #547 旧构造点零迁移。
     """
 
     tool_call_id: str
     verdict: str
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -649,9 +668,182 @@ class SessionDeclarationValidator(Protocol):
         session_id: str,
         workspace: Path,
         agent_profile: str | None,
+        include_constraint_resolution_tool: bool = True,
     ) -> None: ...
 
 
+_CONSTRAINT_INPUT_CHOICES = frozenset(
+    {"replace_persistently", "current_task_only", "keep_existing", "custom"}
+)
+
+
+def _pending_user_input_request(
+    events: list[SessionEvent], *, run_id: str,
+) -> SessionEvent | None:
+    answered = {
+        event.data.get("input_request_id")
+        for event in events
+        if event.type == USER_MESSAGE
+        and isinstance(event.data.get("input_request_id"), str)
+    }
+    return next(
+        (
+            event for event in reversed(events)
+            if event.type == USER_INPUT_REQUESTED
+            and event.run_id == run_id
+            and isinstance(event.data.get("request_id"), str)
+            and event.data["request_id"] not in answered
+        ),
+        None,
+    )
+
+
+def _latest_pending_user_input_request(
+    events: list[SessionEvent],
+) -> SessionEvent | None:
+    run_id = latest_run_id(events)
+    if run_id is None:
+        return None
+    if any(
+        event.run_id == run_id
+        and event.type in {RUN_COMPLETED, RUN_FAILED, RUN_INTERRUPTED}
+        for event in events
+    ):
+        return None
+    return _pending_user_input_request(events, run_id=run_id)
+
+
+def _pending_user_input_pause(
+    events: list[SessionEvent], *, run_id: str,
+) -> PausedRun | None:
+    if latest_run_id(events) != run_id:
+        return None
+    state = derive_run_budget(events, run_id)
+    if state.paused is not None or state.terminal_type is not None:
+        return None
+    request = _pending_user_input_request(events, run_id=run_id)
+    if request is None:
+        return None
+    request_id = request.data["request_id"]
+    continuation = deterministic_continuation(
+        events=events, run_id=run_id, trigger_dimension=TRIGGER_USER_INPUT,
+        limits=state.limits, consumed=state.consumed,
+        reason=REASON_USER_INPUT, input_request_id=request_id,
+    )
+    return PausedRun(
+        run_id=run_id, pause_seq=request.seq, step_id=request.step_id,
+        reason=REASON_USER_INPUT, trigger_dimension=TRIGGER_USER_INPUT,
+        version=state.version, consumed=state.consumed, limits=state.limits,
+        local_fuse=None, continuation=continuation,
+        closeout_source=CLOSEOUT_DETERMINISTIC,
+        resume_requirements=(), turn_index=state.turn_index,
+        input_request_id=request_id,
+    )
+
+
+def _constraint_input_answer_data(
+    events: list[SessionEvent], *, run_id: str, paused: PausedRun,
+    answer: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, bool]:
+    if paused.reason != REASON_USER_INPUT:
+        if answer is not None:
+            raise BudgetConflict("本次暂停不接受 user_input 回答")
+        return None, False
+    if answer is None:
+        raise BudgetRejection("user_input 暂停恢复必须提交 input_request 回答")
+    if set(answer) - {"request_id", "choice", "custom_text"}:
+        raise BudgetRejection("input_request 包含不支持的字段")
+    request_id = answer.get("request_id")
+    choice = answer.get("choice")
+    custom_text = answer.get("custom_text")
+    if (
+        not isinstance(request_id, str) or not request_id
+        or not isinstance(choice, str) or choice not in _CONSTRAINT_INPUT_CHOICES
+    ):
+        raise BudgetRejection("input_request 的 request_id 或 choice 无效")
+    if paused.input_request_id != request_id:
+        raise BudgetConflict("input_request_id 与当前暂停的 run 不匹配")
+    if choice == "custom":
+        if not isinstance(custom_text, str) or not custom_text.strip() or len(custom_text) > 100_000:
+            raise BudgetRejection("自定义回复必须是 1 至 100000 字符的非空文本")
+    elif custom_text is not None:
+        raise BudgetRejection("仅 custom 选项可以携带 custom_text")
+
+    requests = [
+        event for event in events
+        if event.type == USER_INPUT_REQUESTED
+        and event.run_id == run_id
+        and event.data.get("request_id") == request_id
+    ]
+    if len(requests) != 1:
+        raise BudgetConflict("未找到唯一匹配的持久化用户输入请求")
+    request = requests[0]
+    if request.data.get("kind") != "protected_fact_conflict":
+        raise BudgetConflict("当前用户输入请求类型不支持此恢复流程")
+    source_id = request.data.get("source_event_id")
+    source_seq = request.data.get("source_event_seq")
+    fact_id = request.data.get("fact_id")
+    candidate = request.data.get("candidate")
+    old_value = request.data.get("old_value")
+    source = next(
+        (event for event in events if event.event_id == source_id), None,
+    )
+    if (
+        source is None or source.seq != source_seq
+        or not is_direct_user_input_event(events, source.event_id)
+        or not isinstance(candidate, str)
+        or not isinstance(source.data.get("content"), str)
+        or candidate not in source.data["content"]
+    ):
+        raise BudgetConflict("澄清请求引用的用户原文已不再有效")
+    normalized_answer: dict[str, Any] = {"request_id": request_id, "choice": choice}
+    if choice == "custom":
+        normalized_answer["custom_text"] = custom_text
+    existing = [
+        event for event in events
+        if event.type == USER_MESSAGE and event.data.get("input_request_id") == request_id
+    ]
+    if existing:
+        if len(existing) == 1 and existing[0].data.get("input_request_answer") == normalized_answer:
+            return None, True
+        raise BudgetConflict("该用户输入请求已用不同回答处理")
+
+    fact = next(
+        (item for item in derive_protected_facts(events) if item.fact_id == fact_id),
+        None,
+    )
+    if (
+        fact is None or fact.type != "constraint" or fact.status != "active"
+        or fact.value != old_value
+    ):
+        raise BudgetConflict("澄清请求引用的旧约束已不再生效")
+
+    if choice == "replace_persistently":
+        content = f"用户确认永久替换旧约束。新约束原文：{candidate}"
+        annotations = validate_user_protected_fact_annotations(
+            content,
+            [{
+                "fact_type": "constraint", "value": candidate,
+                "supersedes_fact_id": fact_id,
+            }],
+        )
+    elif choice == "current_task_only":
+        content = f"用户选择仅在当前任务采用此约束：{candidate}"
+        annotations = []
+    elif choice == "keep_existing":
+        content = f"用户选择保留旧约束并忽略本次冲突要求：{candidate}"
+        annotations = []
+    else:
+        content = custom_text
+        annotations = []
+    data: dict[str, Any] = {
+        "content": content,
+        "input_request_id": request_id,
+        "input_request_answer": normalized_answer,
+    }
+    if annotations:
+        data["protected_facts"] = annotations
+    return data, False
 @runtime_checkable
 class RegisteredToolNamesProvider(Protocol):
     """`#616` 根 registry 名字集的**领域端口**（判据 = 根 registry 的树级语义）。
@@ -673,6 +865,27 @@ class RegisteredToolNamesProvider(Protocol):
     """
 
     async def __call__(self, session_id: str) -> frozenset[str]: ...
+
+
+@runtime_checkable
+class ToolReconcileInfoProvider(Protocol):
+    """恢复裁决呈现元数据的**领域端口**（#357 W-13 契约 1/6/7）。
+
+    返回某会话视角下根 registry 的 ``tool_name → ToolReconcileInfo`` 投影；
+    ``_reconcile_pending`` 据它为 409 载荷产出只读展示字段
+    （``default_action/risk_level/probe``）。计算是组合层的事
+    （``assembly.root_registry_reconcile_info``，零副作用投影、与
+    ``root_registry_tool_names`` 逐分支同构，一致性由
+    ``tests/test_assembly_root_registry_names.py`` 同型对账钉住），同
+    ``RegisteredToolNamesProvider`` 一样由组合根注入实现
+    （``web/app.py::session_service`` 唯一适配点）。
+
+    未注入（直构 ``SessionService`` 的调用方）⇒ 展示字段 **fail-closed**：
+    未知工具按"高风险不可核验"呈现（DEFER/high + verifiable=false），
+    绝不把未知工具渲染成可安全重试（不变量 #14 同向）。
+    """
+
+    async def __call__(self, session_id: str) -> dict[str, ToolReconcileInfo]: ...
 
 
 class SessionService:
@@ -715,7 +928,9 @@ class SessionService:
         ensure_stores: Callable[[], Awaitable[None]],
         get_wiring: Callable[[], Awaitable[tuple[CapabilityRegistry, CapabilityWiring]]],
         validate_session_declaration: SessionDeclarationValidator | None = None,
+        budget_recovery_failed_sessions: set[str] | None = None,
         registered_tool_names: RegisteredToolNamesProvider | None = None,
+        reconcile_info: ToolReconcileInfoProvider | None = None,
     ) -> None:
         self._store = store
         self._run_manager = run_manager
@@ -734,7 +949,12 @@ class SessionService:
         self._ensure_stores = ensure_stores
         self._get_wiring = get_wiring
         self._validate_session_declaration = validate_session_declaration
+        self._budget_recovery_failed_sessions = (
+            budget_recovery_failed_sessions
+            if budget_recovery_failed_sessions is not None else set()
+        )
         self._registered_tool_names = registered_tool_names
+        self._reconcile_info = reconcile_info
 
     # ── 属性透传（调用方可直接用 service.store 等）────────────────────
 
@@ -977,15 +1197,42 @@ class SessionService:
         """
         await self._ensure_stores()
         operations = await self._operation_ledger.list_for_session(session_id)
+        events = await anyio.to_thread.run_sync(
+            self._store.read_events, session_id,
+        )
+        answered = {
+            event.data.get("input_request_id")
+            for event in events
+            if event.type == USER_MESSAGE
+            and isinstance(event.data.get("input_request_id"), str)
+        }
+        recoverable_constraint_calls = {
+            event.data.get("tool_call_id")
+            for event in events
+            if event.type == USER_INPUT_REQUESTED
+            and isinstance(event.data.get("request_id"), str)
+            and event.data["request_id"] not in answered
+            and isinstance(event.data.get("tool_call_id"), str)
+            and event.data["tool_call_id"]
+        }
         return [
             operation.tool_call_id
             for operation in operations
             if needs_reconcile(operation)
+            and not (
+                operation.state is OperationState.RUNNING
+                and operation.tool_name == "request_constraint_resolution"
+                and operation.tool_call_id in recoverable_constraint_calls
+            )
         ]
 
     async def _has_unreconciled_operations(self, session_id: str) -> bool:
         """恢复前置判据（`#315`）：账本上是否还有未结清的副作用。"""
-        return bool(await self._unreconciled_tool_calls(session_id))
+        await self._ensure_stores()
+        return any(
+            needs_reconcile(operation)
+            for operation in await self._operation_ledger.list_for_session(session_id)
+        )
 
     async def has_session(self, session_id: str) -> bool:
         """检查 session 是否存在（用于 cancel/approve 等 404 前置校验）。"""
@@ -1202,6 +1449,9 @@ class SessionService:
             budget_key=session_id,
             root_session_id=session_id,
             limits=session_limits,
+            on_tool_call_record_failure=(
+                lambda: self._budget_recovery_failed_sessions.add(session_id)
+            ),
         )
         runtime = await build_runtime(
             settings=self._settings,
@@ -1211,6 +1461,7 @@ class SessionService:
             session_id=session_id,
             workspace=workspace,
             max_agent_turns=fuse.max_agent_turns,
+            include_constraint_tools=True,
             permission_mode=permission_mode,
             approval_callback=approval_callback,
             session_store=self._store,
@@ -1335,6 +1586,8 @@ class SessionService:
         amend: AmendOptions | None = None,
         resume_run_id: str | None = None,
         resume_basis: str | None = None,
+        input_request: Mapping[str, Any] | None = None,
+        include_constraint_resolution_tool: bool = True,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -1413,6 +1666,30 @@ class SessionService:
         )
         if not existing:
             raise SessionNotFound(f"session '{session_id}' not found")
+        if session_id in self._budget_recovery_failed_sessions:
+            from agent_harness.recovery.scan import record_constraint_tool_results
+
+            await self._ensure_stores()
+            budget_key = session_budget_key(existing, session_id=session_id)
+            try:
+                replayed = await record_constraint_tool_results(
+                    existing,
+                    budget_key=budget_key,
+                    recorder=self._stores.delegation_tree_ledger.record_session_tool_call,
+                )
+            except Exception as error:
+                raise BudgetConflict(
+                    "约束澄清工具的 session 预算账未能恢复，拒绝启动该会话的新 run。"
+                ) from error
+            if replayed == 0:
+                raise BudgetConflict(
+                    "约束澄清工具的持久结果缺失，拒绝启动该会话的新 run。"
+                )
+            self._budget_recovery_failed_sessions.discard(session_id)
+        if task is not None and _latest_pending_user_input_request(existing) is not None:
+            raise BudgetConflict(
+                "当前有待回答的约束澄清；请先提交答案，再启动新任务"
+            )
         # 同 run 恢复先把暂停快照里的逐维策略面还原回本次 amend（ADR-0048 D6/D8）。位置在
         # fuse **之前**：档位同时是 ceiling 的输入（`_profile_turn_ceiling`），两处必须同一个
         # 值；也在 `_amend_with_session_model` 之前——那一跳若发生在暂停之后，是用户真实的
@@ -1496,6 +1773,7 @@ class SessionService:
                 session_id=session_id,
                 workspace=evidence_workspace,
                 agent_profile=(amend.agent_profile if amend is not None else None),
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
             )
         if session_limits.configured:
             if session_row is not None:
@@ -1528,6 +1806,9 @@ class SessionService:
             root_session_id=budget_key,
             limits=(
                 session_row.limits if session_row is not None else session_limits
+            ),
+            on_tool_call_record_failure=(
+                lambda: self._budget_recovery_failed_sessions.add(session_id)
             ),
         )
         # T7 #137：未显式指定 model 时用会话派生的当前模型（切换后下一轮生效）。
@@ -1567,6 +1848,14 @@ class SessionService:
             claim_run_id, claim_version, claim_basis = (
                 resume_run_id, expected_version, resume_basis,
             )
+            if claim_basis == RESUME_BASIS_USER_INPUT and input_request is None:
+                raise BudgetRejection(
+                    "user_input 恢复必须提交 input_request 回答"
+                )
+            if claim_basis != RESUME_BASIS_USER_INPUT and input_request is not None:
+                raise BudgetRejection(
+                    "input_request 只适用于 resume_basis=user_input"
+                )
             # 阶段一（锁内只读）：CAS 读侧。**先**在这里失败，才不会出现"先建目录/
             # 先 append 再拒绝"；真正的提交在阶段二（`_commit_paused_resume`），
             # 两次校验共用 `_paused_resume_state`——规则只有一份。
@@ -1574,6 +1863,7 @@ class SessionService:
                 session_id=session_id, run_id=claim_run_id,
                 expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis,
+                input_request=input_request,
                 # `#318`：session 维触发的暂停，session CAS 已在上方完成 ⇒ 豁免
                 # "必须点名 run 维 ceiling"（run headroom 仍照判）。
                 session_ceiling_raised=session_limits.configured,
@@ -1582,7 +1872,10 @@ class SessionService:
                 port=stuck_evidence,
             )
         else:
-            if resume_run_id is not None or expected_version is not None or resume_basis is not None:
+            if (
+                resume_run_id is not None or expected_version is not None
+                or resume_basis is not None or input_request is not None
+            ):
                 raise BudgetRejection(
                     "请求同时带了新任务文本与同 run 恢复声明（run_id / "
                     "expected_version / resume_basis）：两者是不同动作，请二选一"
@@ -1782,6 +2075,8 @@ class SessionService:
                 session_id=session_id,
                 workspace=workspace,
                 max_agent_turns=fuse.max_agent_turns,
+                include_constraint_tools=True,
+                include_constraint_resolution_tool=include_constraint_resolution_tool,
                 permission_mode=permission_mode,
                 approval_callback=approval_callback,
                 session_store=self._store,
@@ -1818,6 +2113,8 @@ class SessionService:
                 session_id=session_id, run_id=claim_run_id,
                 expected_version=claim_version, limits=run_limits,
                 resume_basis=claim_basis, fuse=fuse,
+                input_request=input_request,
+                session_budget=session_budget,
                 # `#318`：与阶段一同一格豁免输入（两阶段共用同一份判定）。
                 session_ceiling_raised=session_limits.configured,
                 # `#317`：阶段二要把依据落进 `run/resumed.resume_evidence`——**必须**
@@ -1850,6 +2147,14 @@ class SessionService:
         async with self._resume_lock(session_id):
             if self._run_manager.get_active(session_id) is not None:
                 raise ActiveRunConflict("session has an active run")
+            if task is not None:
+                locked_events = await anyio.to_thread.run_sync(
+                    self._store.read_events, session_id,
+                )
+                if _latest_pending_user_input_request(locked_events) is not None:
+                    raise BudgetConflict(
+                        "当前有待回答的约束澄清；请先提交答案，再发送新任务"
+                    )
             runtime, interactive, approval_callback = await build_resume_runtime(launch_budget)
             if deferred_session_resume:
                 # #372 AC4：装配成功后才落恢复标记（dangling 修复与标记语义仍
@@ -1978,6 +2283,7 @@ class SessionService:
         expected_version: int | None,
         limits: RunLimits,
         resume_basis: str | None,
+        input_request: Mapping[str, Any] | None = None,
         resume_evidence: ResumeEvidence | None = None,
         session_ceiling_raised: bool = False,
     ) -> tuple[PausedRun, RunLimits, ResumeEvidence | None]:
@@ -1996,11 +2302,16 @@ class SessionService:
         事实一起再算一次（否则两条依据各自对着不同的事件流比；ADR-0048 D7）。
         """
         paused = latest_paused_run(events)
+        if paused is None and isinstance(run_id, str):
+            paused = _pending_user_input_pause(events, run_id=run_id)
         if paused is None:
             raise BudgetConflict(
                 "本会话最新逻辑 run 不在暂停态（可能已被恢复、已终结，或已被后续新 run "
                 "取代）——expected_version 对应的暂停事实不存在；本请求未启动任何工作"
             )
+        _constraint_input_answer_data(
+            events, run_id=paused.run_id, paused=paused, answer=input_request,
+        )
         effective = validate_resume(
             paused, run_id=run_id, expected_version=expected_version,
             limits=limits, resume_basis=resume_basis,
@@ -2031,6 +2342,7 @@ class SessionService:
     async def _plan_paused_resume(
         self, *, session_id: str, run_id: str, expected_version: int,
         limits: RunLimits, resume_basis: str,
+        input_request: Mapping[str, Any] | None = None,
         port: StuckEvidencePort | None = None,
         session_ceiling_raised: bool = False,
     ) -> LaunchRunBudget:
@@ -2043,8 +2355,12 @@ class SessionService:
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, _ = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
-                limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
+                limits=limits, resume_basis=resume_basis, input_request=input_request,
+                resume_evidence=evidence,
                 session_ceiling_raised=session_ceiling_raised,
+            )
+            await self._assert_user_input_session_headroom(
+                events, session_id=session_id, resume_basis=resume_basis,
             )
             if self._run_manager.get_active(session_id) is not None:
                 # 暂停后"当前执行"已收口（task done），所以这里命中的是**并发**：
@@ -2055,6 +2371,8 @@ class SessionService:
     async def _commit_paused_resume(
         self, *, session_id: str, run_id: str, expected_version: int,
         limits: RunLimits, resume_basis: str, fuse: LocalFuse,
+        session_budget: SessionBudgetPort,
+        input_request: Mapping[str, Any] | None = None,
         port: StuckEvidencePort | None = None,
         session_ceiling_raised: bool = False,
         runtime_builder: Callable[
@@ -2086,8 +2404,12 @@ class SessionService:
             evidence = self._resume_evidence(events, run_id=run_id, port=port)
             paused, effective, evidence = self._paused_resume_state(
                 events, run_id=run_id, expected_version=expected_version,
-                limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
+                limits=limits, resume_basis=resume_basis, input_request=input_request,
+                resume_evidence=evidence,
                 session_ceiling_raised=session_ceiling_raised,
+            )
+            await self._assert_user_input_session_headroom(
+                events, session_id=session_id, resume_basis=resume_basis,
             )
             needs_recovery = (
                 detect_dangling(events)
@@ -2095,9 +2417,15 @@ class SessionService:
                 or await self._has_unreconciled_operations(session_id)
             )
             if needs_recovery:
-                # RecoveryCoordinator 会追加 session/resumed。只在本请求已通过锁内
-                # CAS 后执行，避免迟到输家占用 runtime 的下一个事件序号。
-                await self.recover(session_id)
+                # 用户输入续跑需等 runtime 装配后做最后一次共享预算检查，再提交
+                # session/resumed；否则恢复阶段会在预算拒绝前留下续跑事实。
+                if resume_basis == RESUME_BASIS_USER_INPUT:
+                    await self.recover(
+                        session_id, defer_session_resumed=True,
+                    )
+                else:
+                    # 其他恢复沿用 RecoveryCoordinator 的单段提交语义。
+                    await self.recover(session_id)
                 events = await anyio.to_thread.run_sync(
                     self._store.read_events, session_id,
                 )
@@ -2107,17 +2435,81 @@ class SessionService:
                 evidence = self._resume_evidence(events, run_id=run_id, port=port)
                 paused, effective, evidence = self._paused_resume_state(
                     events, run_id=run_id, expected_version=expected_version,
-                    limits=limits, resume_basis=resume_basis, resume_evidence=evidence,
+                    limits=limits, resume_basis=resume_basis, input_request=input_request,
+                    resume_evidence=evidence,
                     session_ceiling_raised=session_ceiling_raised,
+                )
+                await self._assert_user_input_session_headroom(
+                    events, session_id=session_id, resume_basis=resume_basis,
                 )
             session = Session.load(
                 self._store, session_id,
                 workspace_registry=self._workspace_registry,
             )
+            if (
+                paused.reason == REASON_USER_INPUT
+                and latest_paused_run(session.events) is None
+            ):
+                pending = _pending_user_input_request(
+                    session.events, run_id=run_id,
+                )
+                if pending is None or pending.data.get("request_id") != paused.input_request_id:
+                    raise BudgetConflict("待处理的 user_input 请求已变化")
+                state = derive_run_budget(session.events, run_id)
+                snapshot = await session_budget.snapshot()
+                pause_data = build_pause_data(
+                    reason=REASON_USER_INPUT,
+                    trigger_dimension=TRIGGER_USER_INPUT,
+                    version=state.version,
+                    consumed=state.consumed,
+                    limits=build_limits_snapshot(
+                        run_limits=state.limits, local_fuse=fuse,
+                        session_limits=snapshot.limits,
+                    ),
+                    continuation=deterministic_continuation(
+                        events=session.events, run_id=run_id,
+                        trigger_dimension=TRIGGER_USER_INPUT, limits=state.limits,
+                        consumed=state.consumed, reason=REASON_USER_INPUT,
+                        input_request_id=paused.input_request_id,
+                    ),
+                    closeout_source=CLOSEOUT_DETERMINISTIC,
+                    input_request_id=paused.input_request_id,
+                )
+                pause_data["session"] = {
+                    "version": snapshot.version,
+                    "consumed": snapshot.consumed.as_projection(),
+                }
+                session.append(
+                    RUN_PAUSED, pause_data,
+                    run_id=run_id, step_id=pending.step_id,
+                )
+                paused, effective, evidence = self._paused_resume_state(
+                    session.events, run_id=run_id,
+                    expected_version=expected_version, limits=limits,
+                    resume_basis=resume_basis, input_request=input_request,
+                    resume_evidence=self._resume_evidence(
+                        session.events, run_id=run_id, port=port,
+                    ),
+                    session_ceiling_raised=session_ceiling_raised,
+                )
             launch_budget = self._launch_budget_from(paused, limits=effective)
             runtime, interactive, approval_callback = await runtime_builder(launch_budget)
-            # Recovery 已写 SESSION_RESUMED；否则只让 CAS 胜者写这条恢复事实。
-            if not needs_recovery:
+            # Runtime 装配也会 await；兄弟 run 可能在此前消耗共享额度。这个检查
+            # 必须紧邻答案与续跑事件提交，中间不再 await，保持“答题时重查”语义。
+            await self._assert_user_input_session_headroom(
+                session.events, session_id=session_id, resume_basis=resume_basis,
+            )
+            answer_data, answer_already_recorded = _constraint_input_answer_data(
+                session.events, run_id=run_id, paused=paused, answer=input_request,
+            )
+            if answer_data is not None and not answer_already_recorded:
+                session.append(USER_MESSAGE, answer_data)
+            # 用户输入续跑的 Recovery 延迟 SESSION_RESUMED 到上述最终预算检查之后。
+            # 其他路径由 RecoveryCoordinator 写入；无 Recovery 时由 CAS 胜者写入。
+            if (
+                not needs_recovery
+                or resume_basis == RESUME_BASIS_USER_INPUT
+            ):
                 session.append(SESSION_RESUMED, {})
             session.append(
                 RUN_RESUMED,
@@ -2144,6 +2536,25 @@ class SessionService:
                 run_id=paused.run_id,
             )
             return launch_budget, session, runtime, interactive, approval_callback
+
+    async def _assert_user_input_session_headroom(
+        self, events: list, *, session_id: str, resume_basis: str,
+    ) -> None:
+        if resume_basis != RESUME_BASIS_USER_INPUT:
+            return
+        snapshot = await self._stores.delegation_tree_ledger.get_session_budget(
+            session_budget_key(events, session_id=session_id)
+        )
+        if snapshot is None:
+            raise BudgetConflict(
+                "Shared session budget snapshot is unavailable; cannot resume this run."
+            )
+        if not session_resume_headroom_ok(
+            consumed=snapshot.consumed, limits=snapshot.limits,
+        ):
+            raise BudgetConflict(
+                "Shared session budget no longer has room for same-run continuation."
+            )
 
     # ── 重连续传 ─────────────────────────────────────────────────────
 
@@ -2363,6 +2774,14 @@ class SessionService:
         self._validate_session_id(session_id)
         if not await self.has_session(session_id):
             raise SessionNotFound(f"session '{session_id}' not found")
+
+        current_events = await anyio.to_thread.run_sync(
+            self._store.read_events, session_id
+        )
+        if _latest_pending_user_input_request(current_events) is not None:
+            raise BudgetConflict(
+                "当前有待回答的约束澄清；请先提交答案，再发送新消息"
+            )
 
         try:
             normalized_protected_facts = validate_user_protected_fact_annotations(
@@ -3494,6 +3913,8 @@ class SessionService:
         self,
         session_id: str,
         decisions: Sequence[ReconcileDecision] | None = None,
+        *,
+        defer_session_resumed: bool = False,
     ) -> list:
         """崩溃恢复（原 POST /recover）：RecoveryCoordinator 唯一入口。
 
@@ -3528,6 +3949,7 @@ class SessionService:
 
         # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
         normalized: dict[str, ReconcileVerdict] = {}
+        sources: dict[str, str] = {}
         for decision in decisions or ():
             try:
                 verdict = ReconcileVerdict(decision.verdict)
@@ -3535,7 +3957,7 @@ class SessionService:
                 raise InvalidDecision(
                     f"裁决值 '{decision.verdict}' 不合法（tool_call_id="
                     f"{decision.tool_call_id}）：合法值 CONFIRM_SUCCESS / "
-                    "CONFIRM_FAILURE / RETRY / ABANDON"
+                    "CONFIRM_FAILURE / RETRY / ABANDON / DEFER"
                 ) from None
             if decision.tool_call_id in normalized:
                 raise InvalidDecision(
@@ -3543,6 +3965,9 @@ class SessionService:
                     "一次恢复里每个调用只能裁决一次（防重复提交）"
                 )
             normalized[decision.tool_call_id] = verdict
+            # #357 W-13（契约 3）：来源自陈可选，有值才留痕，绝不伪造。
+            if decision.source is not None:
+                sources[decision.tool_call_id] = decision.source
 
         pending = await self._reconcile_pending(session_id, existing)
         pending_ids = {item["tool_call_id"] for item in pending}
@@ -3569,7 +3994,7 @@ class SessionService:
                 f"存在需要人工裁决的 UNKNOWN Operation（{detail}）：先 POST "
                 "/api/sessions/{id}/recover 携带 decisions=[{tool_call_id, "
                 "verdict}] 结清（verdict ∈ CONFIRM_SUCCESS / CONFIRM_FAILURE / "
-                "RETRY / ABANDON）；裁决前请先核查该调用的外部事实",
+                "RETRY / ABANDON / DEFER）；裁决前请先核查该调用的外部事实",
                 pending_decisions=pending,
             )
 
@@ -3579,11 +4004,16 @@ class SessionService:
             operation_ledger=self._operation_ledger,
             database_path=self._harness_db,
             reconcile_callback=(
-                DecisionsReconcileCallback(normalized) if normalized else None
+                DecisionsReconcileCallback(normalized, sources=sources)
+                if normalized
+                else None
             ),
         )
         try:
-            recovered = await coordinator.recover(session_id)
+            recovered = await coordinator.recover(
+                session_id,
+                defer_session_resumed=defer_session_resumed,
+            )
         except RecoveryError as error:
             raise RecoveryConflict(str(error)) from error
         return recovered.events
@@ -3597,25 +4027,68 @@ class SessionService:
         要裁决）；非悬空行按 ``storage.needs_reconcile`` 全量（#315 的未证形态）。
         终态三元组经既有懒导入通道复用协调器的 ``TERMINAL_STATES``（批次收口
         Spec 轴 P3-3 单源化：不再内联镜像，漂移在源头不可能发生）。
+
+        #357 W-13（契约 1/2/6，修订 A）：每条增**只读展示字段**——
+        ``default_action``（replay_safe 工具 → RETRY；否则 DEFER，#14 安全侧）、
+        ``risk_level``、``probe{verifiable, suggested_action}``（逐字取工具既有
+        ``ReconcileHint``）。展示不改裁决语义：仍是同一 409 载荷、同一
+        ``decisions`` 合同；probe 绝不携带"已查到/未查到"结论——那是 UI 层用户
+        核对后的如实自陈。端口未注入或工具名不在根 registry ⇒ fail-closed
+        （DEFER/high + verifiable=false），绝不把未知工具渲染成可安全重试。
         """
         from agent_harness.recovery.coordinator import TERMINAL_STATES
 
+        info_map: dict[str, ToolReconcileInfo] = {}
+        if self._reconcile_info is not None:
+            info_map = await self._reconcile_info(session_id)
+
         dangling_ids, _ = collect_dangling(events)
         operations = await self._operation_ledger.list_for_session(session_id)
+        answered = {
+            event.data.get("input_request_id")
+            for event in events
+            if event.type == USER_MESSAGE
+            and isinstance(event.data.get("input_request_id"), str)
+        }
+        recoverable_constraint_calls = {
+            (event.run_id, event.data.get("tool_call_id"))
+            for event in events
+            if event.type == USER_INPUT_REQUESTED
+            and isinstance(event.data.get("request_id"), str)
+            and event.data["request_id"] not in answered
+            and isinstance(event.data.get("tool_call_id"), str)
+            and event.data["tool_call_id"]
+        }
         pending: list[dict] = []
         for operation in operations:
             if not needs_reconcile(operation):
+                continue
+            if (
+                operation.state is OperationState.RUNNING
+                and operation.tool_name == "request_constraint_resolution"
+                and (operation.run_id, operation.tool_call_id)
+                in recoverable_constraint_calls
+            ):
                 continue
             if (
                 operation.tool_call_id in dangling_ids
                 and operation.state in TERMINAL_STATES
             ):
                 continue
+            info = info_map.get(operation.tool_name)
             pending.append(
                 {
                     "tool_call_id": operation.tool_call_id,
                     "tool_name": operation.tool_name,
                     "state": operation.state.value,
+                    "default_action": "RETRY" if info and info.replay_safe else "DEFER",
+                    "risk_level": "low" if info and info.replay_safe else "high",
+                    "probe": {
+                        "verifiable": info.verifiable if info else False,
+                        "suggested_action": (
+                            info.suggested_action if info else None
+                        ),
+                    },
                 }
             )
         return pending
@@ -3629,14 +4102,99 @@ class SessionService:
         from agent_harness.recovery.scan import scan_interrupted_sessions
 
         await self._ensure_stores()
+        self._budget_recovery_failed_sessions.clear()
         results = await scan_interrupted_sessions(
             session_store=self._store,
             operation_ledger=self._operation_ledger,
             workspace_registry=self._workspace_registry,
             database_path=self._harness_db,
+            session_budget_reader=(
+                self._stores.delegation_tree_ledger.get_session_budget
+            ),
+            session_tool_result_recorder=(
+                self._stores.delegation_tree_ledger.record_session_tool_call
+            ),
             session_budget_ledger=self._stores.delegation_tree_ledger,
         )
+        self._budget_recovery_failed_sessions.update(
+            result.session_id for result in results if result.budget_recovery_failed
+        )
         return results
+
+    async def interrupted_recovery_rows(
+        self, snapshot: list[InterruptionScanResult]
+    ) -> list[dict]:
+        """启动扫描快照 → 恢复列表行（#357 W-13 契约 5，只读富化，零写副作用）。
+
+        数据源只有两份 durable 事实：lifespan 存下的扫描快照（``run/interrupted``
+        已在扫描时落盘，本方法**绝不重跑** ``scan_interrupted``）+ 各 session 的
+        事件流/映射/进度文件（全部只读）。每行四要素：上次 Task
+        （``derive_task_state`` 口径，未定义时回落 ``first_user_message``）、
+        无终态 run、工作目录锚（``session_cwd``，与进度文件同一锚）、进度文件
+        版本（文件头 ``schema_version`` + ``source_event_seq``；缺失/不可读/
+        schema 不匹配如实标，不伪造"最新"）。
+
+        fail-safe（抄 Cline 默认亮 Resume）：快照行存在但状态读不出来（事件读
+        失败 / 进度文件不可读）→ 该行 ``resume_available=true``——状态不可读时
+        给安全侧 affordance，不做静默降级成"不可恢复"。
+        """
+        rows: list[dict] = []
+        for result in snapshot:
+            row: dict = {
+                "session_id": result.session_id,
+                "recovery": result.recovery.value,
+                "detail": result.detail,
+                "interrupted_runs": [
+                    {
+                        "run_id": run.run_id,
+                        "interrupted_seq": run.interrupted_seq,
+                        "step_id": run.step_id,
+                        "agent_id": run.agent_id,
+                    }
+                    for run in result.interrupted
+                ],
+                # fail-safe 默认：恢复列表的"继续"闸门在前端加载顺序（07 §9），
+                # 后端读不出状态时保持亮灯，绝不把"读不出"伪装成"不可恢复"。
+                "resume_available": True,
+            }
+            try:
+                events = await anyio.to_thread.run_sync(
+                    self._store.read_events, result.session_id
+                )
+                task_state = derive_task_state(events)
+                row["task"] = (
+                    task_state.task_text
+                    if task_state.defined and task_state.task_text
+                    else next(
+                        (
+                            e.data["content"].strip()[:128]
+                            for e in events
+                            if e.type == USER_MESSAGE
+                            and isinstance(e.data.get("content"), str)
+                            and e.data["content"].strip()
+                        ),
+                        None,
+                    )
+                )
+                cwd = session_cwd(events)
+                row["workspace_root"] = cwd
+                row["progress"] = (
+                    await anyio.to_thread.run_sync(
+                        read_progress_file_version, cwd, result.session_id
+                    )
+                    if cwd
+                    else {"status": "missing", "reason": "无 cwd 锚"}
+                )
+            except Exception as error:  # noqa: BLE001 — 单行失败不拖垮整表，fail-safe 亮灯
+                logger.warning(
+                    "恢复列表：session=%s 状态读取失败（%s），按 fail-safe 呈现",
+                    result.session_id, error,
+                )
+                row["task"] = None
+                row["workspace_root"] = None
+                row["progress"] = {"status": "unreadable", "reason": str(error)}
+            rows.append(row)
+        return rows
 
     async def scan_unfinished_forks(self) -> list[ForkScanResult]:
         """进程启动扫描（#555）：按 ``fork/in-progress`` 标记回收未完成 fork 残留。

@@ -124,6 +124,9 @@ REASON_STUCK = "stuck"
 #: `run/failed(reason=orphaned)` 孤儿回收语义（`11 §6.2`：协议只接管明确登记的 Task）。
 REASON_CLIENT_ABSENT = "client_absent"
 
+# `run/paused.data.reason`：等待 protected-fact 冲突的明确用户输入。
+REASON_USER_INPUT = "user_input"
+
 #: `03 §5` 冻结的 run 状态词表里**唯一**由对账（而非暂停 / 终态）给出的那一个（`#315` 起可产）。
 #: 它在投影里**覆盖** `paused`：`03 §5` 明写「`needs_reconcile` 同样 MUST 先 reconcile 才
 #: 允许恢复」，所以一条"暂停 + 欠着未对账副作用"的 run，其状态词是这一个——暂停原因
@@ -165,6 +168,9 @@ TRIGGER_MAX_CONTEXT_TOKENS = "max_context_tokens"
 #: 闸门落在 runtime 循环顶——与预算判定同一处唯一准入点（`02 §5.2.1`：阻止新的
 #: Model / Tool / Child 接纳发生在任何新工作开始之前）。
 TRIGGER_CLIENT_PRESENCE = "client_presence"
+
+# protected-fact 冲突澄清不是 ceiling 维度，但保留稳定的暂停维度名。
+TRIGGER_USER_INPUT = "user_input"
 
 #: 整数 ceiling / usage 的**存储上限**：SQLite INTEGER 是 64 位有符号
 #: （`-2**63 .. 2**63-1`；约束来源是代码里的 `storage/delegation_tree.py` 的
@@ -290,6 +296,8 @@ def reason_for_dimension(dimension: str) -> str:
         return REASON_DEADLINE
     if dimension == TRIGGER_CLIENT_PRESENCE:
         return REASON_CLIENT_ABSENT
+    if dimension == TRIGGER_USER_INPUT:
+        return REASON_USER_INPUT
     return REASON_BUDGET_EXHAUSTED
 
 
@@ -308,6 +316,7 @@ RESUME_BASIS_RELEVANT_STEER = "relevant_steer"
 RESUME_BASIS_ENVIRONMENT_CHANGE = "environment_change"
 RESUME_BASIS_POLICY_CHANGE = "policy_change"
 RESUME_BASIS_CLIENT_RETURN = "client_return"
+RESUME_BASIS_USER_INPUT = "user_input"
 RESUME_BASIS_VALUES: frozenset[str] = frozenset(
     {
         RESUME_BASIS_BUDGET_INCREASE,
@@ -315,6 +324,7 @@ RESUME_BASIS_VALUES: frozenset[str] = frozenset(
         RESUME_BASIS_ENVIRONMENT_CHANGE,
         RESUME_BASIS_POLICY_CHANGE,
         RESUME_BASIS_CLIENT_RETURN,
+        RESUME_BASIS_USER_INPUT,
     }
 )
 
@@ -692,6 +702,7 @@ class PausedRun:
     #: 归因沿用同一个序号（不跳号、也不谎报成第 1 轮）。不是暂停事实本身，
     #: 所以**不**进 `as_projection()`（客户端投影不需要它）。
     turn_index: int | None = None
+    input_request_id: str | None = None
 
     @property
     def consumed_turns(self) -> int:
@@ -725,6 +736,8 @@ class PausedRun:
         }
         if self.stuck:
             projection["stuck"] = dict(self.stuck)
+        if self.input_request_id is not None:
+            projection["input_request_id"] = self.input_request_id
         return projection
 
 
@@ -1078,6 +1091,12 @@ def derive_run_budget(events: Iterable[SessionEvent], run_id: str) -> RunBudgetS
                 resume_requirements=_strings(event.data.get("resume_requirements")),
                 stuck=_stuck_projection(event.data.get("stuck"), reason=event.data.get("reason")),
                 turn_index=turn_index,
+                input_request_id=(
+                    event.data.get("input_request_id")
+                    if isinstance(event.data.get("input_request_id"), str)
+                    and event.data.get("input_request_id")
+                    else None
+                ),
             )
         elif event.type == RUN_RESUMED:
             version += 1
@@ -1891,10 +1910,27 @@ def validate_resume(
             paused, limits=limits, now=now,
             session_ceiling_raised=session_ceiling_raised,
         )
+    if paused.reason == REASON_USER_INPUT:
+        if resume_basis != RESUME_BASIS_USER_INPUT:
+            raise BudgetConflict(
+                f"user_input 暂停只接受 resume_basis={RESUME_BASIS_USER_INPUT}；"
+                f"本次未启动任何工作"
+            )
+        effective = resume_limits(paused.limits, request=limits)
+        if effective != paused.limits:
+            raise BudgetConflict(
+                "user_input 恢复不能更改 run ceiling；本次未启动任何工作"
+            )
+        # 用户回答只解除等待状态，不改变预算。沿用暂停快照中的全部 ceiling 与
+        # counter，并仍验证下一次准入确有余量，避免恢复后立即再次暂停。
+        return _validated_resume_limits(
+            paused, limits=RunLimits(), now=now,
+            session_ceiling_raised=session_ceiling_raised,
+        )
     if paused.reason not in (REASON_BUDGET_EXHAUSTED, REASON_DEADLINE):
         raise BudgetConflict(
             f"未知暂停原因 reason={paused.reason}：本实现只认 "
-            f"{sorted((REASON_BUDGET_EXHAUSTED, REASON_DEADLINE, REASON_STUCK, REASON_CLIENT_ABSENT))}，"
+            f"{sorted((REASON_BUDGET_EXHAUSTED, REASON_DEADLINE, REASON_STUCK, REASON_CLIENT_ABSENT, REASON_USER_INPUT))}，"
             f"拒绝启动工作"
         )
     if resume_basis != RESUME_BASIS_BUDGET_INCREASE:
@@ -2007,6 +2043,7 @@ def build_pause_data(
     trace_id: str | None = None,
     stuck: Mapping[str, Any] | None = None,
     accounting_unknown: Iterable[str] = (),
+    input_request_id: str | None = None,
 ) -> dict[str, Any]:
     """`run/paused` 的 data（`03 §3.4`：reason / trigger_dimension / version /
     consumed / limits / continuation / closeout_source / resume_requirements）。
@@ -2038,6 +2075,8 @@ def build_pause_data(
     }
     if stuck is not None:
         data["stuck"] = dict(stuck)
+    if input_request_id is not None:
+        data["input_request_id"] = input_request_id
     if accounting_unknown:
         data["accounting_unknown"] = sorted(accounting_unknown)
     return data
@@ -2232,6 +2271,7 @@ def deterministic_continuation(
     blocked_by: Sequence[str] = (),
     reason: str | None = None,
     stuck: Mapping[str, Any] | None = None,
+    input_request_id: str | None = None,
 ) -> dict[str, Any]:
     """确定性 continuation：**只**用已持久化事实组装（`02 §5.2`）。
 
@@ -2260,6 +2300,27 @@ def deterministic_continuation(
         return apply_blocked_by(
             _client_absent_continuation(consumed=consumed), blocked_by,
         )
+    if reason == REASON_USER_INPUT:
+        return apply_blocked_by({
+            "completed": [
+                (
+                    f"本逻辑 run 已消耗 {consumed.agent_turns} 个 agent turn、"
+                    f"{_value_text(consumed.model_requests)} 次 Provider 请求"
+                ),
+                (
+                    f"累计 token：{_value_text(consumed.total_tokens)}；"
+                    f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}"
+                ),
+            ],
+            "remaining": ["等待用户处理 protected-fact 冲突后，从同一 run 继续"],
+            "blockers": [
+                f"用户输入请求 {input_request_id or '(unknown)'} 尚待处理"
+            ],
+            CONTINUATION_ACTION_KEY: (
+                "收到该请求的用户回答后，以同一 run_id 恢复；恢复请求携带 "
+                f"expected_version 与 resume_basis={RESUME_BASIS_USER_INPUT}"
+            ),
+        }, blocked_by)
     items = [event for event in events if event.run_id == run_id]
     tool_results = sum(1 for event in items if event.type == TOOL_RESULT)
     ceiling = limits.ceiling_of(trigger_dimension)
@@ -2962,6 +3023,10 @@ class SessionBudgetPort(Protocol):
     ) -> None: ...
 
     async def record_tools(self, *, calls: Mapping[str, int], attempts: Mapping[str, int]) -> None: ...
+
+    async def record_tool_call(
+        self, *, tool_call_id: str, tool_name: str, calls: int, attempts: int,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)

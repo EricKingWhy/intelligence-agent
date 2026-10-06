@@ -72,7 +72,7 @@ class _NotifierSpy:
 
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,
-        events: list[Any],
+        events: list[Any], protected_fact_token_budget: int | None = None,
     ) -> object | None:
         if self._order is not None:
             self._order.append("notify")
@@ -81,6 +81,7 @@ class _NotifierSpy:
         self.calls.append({
             "session_id": session_id, "run_id": run_id,
             "terminal_status": terminal_status, "events": list(events),
+            "protected_fact_token_budget": protected_fact_token_budget,
         })
         if self._explode:
             raise RuntimeError("memory formation host is broken")
@@ -198,6 +199,7 @@ async def test_completed_arm_hands_the_run_over_exactly_once(seeded: _Seeded) ->
     assert call["session_id"] == seeded.session.session_id
     assert call["run_id"] == RUN_ID
     assert call["terminal_status"] == STATUS_COMPLETED
+    assert call["protected_fact_token_budget"] == 8_192
     # 本轮事件切片：从 memory_event_start 起（含用户发言与模型回复），到终态为止
     types = [event.type for event in call["events"]]
     assert types[0] == USER_MESSAGE, "起点必须在本轮用户发言之前（否则资格判定看不到输入）"
