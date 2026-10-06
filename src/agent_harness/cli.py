@@ -20,8 +20,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
+import os
 import re
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -119,6 +122,14 @@ from agent_harness.tooling.contract import PermissionPolicy
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 5
 
+#: TTY 同行 spinner（P0-3 challenge 修订，2026-10-06）：
+#: 阈值 1.0s（短工具零闪屏，抄 npm Progress#render 的延迟渲染思想取工具场景保守值）；
+#: 帧间隔 120ms（抄 gh briandowns/spinner）；帧抄 cli-spinners dots，ascii 抄 npm Progress.lines。
+_SPINNER_DELAY_S = 1.0
+_SPINNER_INTERVAL_S = 0.12
+_SPINNER_FRAMES_UNICODE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER_FRAMES_ASCII = "-\\|/"
+
 #: 陈旧账行名清除通道（#616）的 CLI 入口标识，写进 `session_budget_events` 审计的
 #: `source` 字段（与 Web 的 `PURGE_ENTRY_API` 同款，只是入口不同）。
 PURGE_ENTRY_CLI = "cli"
@@ -204,10 +215,37 @@ class StreamRenderer:
     一律静默——终端不是第二份事件日志。
     """
 
-    def __init__(self, write: Callable[[str], None], theme: Theme | None = None) -> None:
+    def __init__(
+        self,
+        write: Callable[[str], None],
+        theme: Theme | None = None,
+        tty_animated: bool | None = None,
+    ) -> None:
         self._write = write
         self._theme = theme if theme is not None else detect_theme()
         self._delta_open = False  # 流式正文输出中：工具行/终态行前先补换行
+        self._pending_tool = False  # True = 已打印 running 行、尚未见到 TOOL_RESULT
+        # 2026-10-06 challenge 修订：TTY 门控（抄 npm definitions.js L1557-1561，
+        # "双 TTY + TERM!=dumb"；npm 注释原文：prevents the progress from appearing
+        # when piping output）。构造参数 tty_animated 可注入覆盖，供测试伪造 TTY；
+        # 门控做在构造层单点判定，不散落各分支（bubbles 启示）。
+        self._tty_animated = (
+            tty_animated
+            if tty_animated is not None
+            else (
+                sys.stdout.isatty()
+                and sys.stderr.isatty()
+                and os.environ.get("TERM") != "dumb"
+            )
+        )
+        # spinner 只在 TTY 门控为真时启动；timer 回调线程与 handle 线程共享写口，
+        # 用一把锁界定「停/擦」与「写帧」的次序（单线程事件循环 + Timer 线程，见票面）。
+        self._pending_line = ""  # running 行正文（去前导 \n），spinner 同行重写用
+        self._spinner_enabled = False
+        self._spinner_running = False  # 已写出一帧（终止时需要 \r\033[K 擦除）
+        self._spinner_frame = 0
+        self._spinner_timer: threading.Timer | None = None
+        self._spinner_lock = threading.Lock()
 
     def handle(self, event: AgentEvent) -> None:
         if event.type == TEXT_DELTA:
@@ -215,6 +253,10 @@ class StreamRenderer:
             self._delta_open = True
         elif event.type == TOOL_CALL:
             self._end_delta()
+            if self._pending_tool:
+                # 上一个工具的 TOOL_RESULT 丢失：先收敛它，再开新的（永不静默吞）
+                self._stop_spinner_erase_line()
+                self._write_orphan_line()
             theme = self._theme
             args = _collapse_args(event.data.get("args") or {}, sep=theme.sep())
             line = ("\n" + theme.paint("accent", theme.glyph("pending"))
@@ -222,10 +264,21 @@ class StreamRenderer:
             if args:
                 line += " " + theme.paint("muted", args)
             self._write(line + "\n")
+            self._pending_tool = True
+            if self._tty_animated:
+                # 1.0s 内 TOOL_RESULT 到达 → 不启动动画（短工具零闪屏）；
+                # 超阈值 → 每 120ms 在同一行重写 `● bash <args> <frame>`（先 \r\033[K，不写 \n）。
+                self._pending_line = line[1:]  # 去掉前导 \n，spinner 同行重写同一视觉行
+                self._spinner_frame = 0
+                self._start_spinner_delay()
         elif event.type == TOOL_RESULT:
+            # 2026-10-06 challenge 修订：终止分支先停 timer + 擦 spinner 行，再走收敛行逻辑。
+            self._stop_spinner_erase_line()
             self._render_result(event.data)
+            self._pending_tool = False
         elif event.type == RUN_COMPLETED:
             self._end_delta()
+            self._settle_orphan_pending()
             self._write("\n")
             usage = event.data.get("usage_total") or {}
             if usage:
@@ -235,6 +288,7 @@ class StreamRenderer:
             # failure.py / 本模块 _RUN_FAILED_HUMAN，不另造。reason 缺失/空 ⇒ 省
             # ` (<reason>)` 段；next_step 为 None（provider 类）⇒ 省「。下一步：」段。
             self._end_delta()
+            self._settle_orphan_pending()
             human, next_step = _humanize_run_failed(event.data)
             reason = event.data.get("reason")
             head = f"{self._theme.glyph('fail')} {human}"
@@ -248,27 +302,114 @@ class StreamRenderer:
             # `#312`：暂停**不是**失败——独立成块，让终端能把 paused 与 failed
             # 分开（同一份 durable data，与 replay / Web 显示的事实一致）。
             self._end_delta()
+            self._settle_orphan_pending()
             self._write(render_pause_block(event.data))
         elif event.type == RUN_RESUMED:
+            # `RUN_RESUMED` **不清** pending：暂停→恢复是同一 run 的延续，
+            # TOOL_RESULT 仍可能后到（本票 §5 orphan 边界）。
             self._end_delta()
             self._write(render_resume_block(event.data))
 
+    def _settle_orphan_pending(self) -> None:
+        """RUN_COMPLETED / RUN_FAILED / RUN_PAUSED：pending 未配对时先擦 spinner 再写 orphan。"""
+        if self._pending_tool:
+            self._stop_spinner_erase_line()
+            self._write_orphan_line()
+            self._pending_tool = False
+
+    def _start_spinner_delay(self) -> None:
+        """超过阈值仍 pending 才起动画：先排 1.0s 阈值 timer（到期未终止才进帧循环）。"""
+        with self._spinner_lock:
+            self._spinner_enabled = True
+            timer = threading.Timer(_SPINNER_DELAY_S, self._begin_spinner)
+            timer.daemon = True
+            self._spinner_timer = timer
+        timer.start()
+
+    def _begin_spinner(self) -> None:
+        with self._spinner_lock:
+            if not self._spinner_enabled:
+                return
+            self._spinner_timer = None
+        self._spinner_write_frame()
+
+    def _spinner_write_frame(self) -> None:
+        """写一帧并排下一帧；回调只调 self._write（票面线程安全边界）。
+
+        先写 `\\r\\033[K`（抄 briandowns/spinner erase() L482）再写本行、不写 `\\n`
+        ——同一行重写。`_spinner_enabled` 在锁内读，终止分支置 False 后本函数即静默。
+        """
+        with self._spinner_lock:
+            if not self._spinner_enabled:
+                return
+            frames = (
+                _SPINNER_FRAMES_ASCII
+                if self._theme.glyph_set == "ascii"
+                else _SPINNER_FRAMES_UNICODE
+            )
+            frame = frames[self._spinner_frame % len(frames)]
+            self._spinner_frame += 1
+            self._spinner_running = True
+            self._write("\r\033[K" + self._pending_line + " "
+                        + self._theme.paint("muted", frame))
+            timer = threading.Timer(_SPINNER_INTERVAL_S, self._spinner_write_frame)
+            timer.daemon = True
+            self._spinner_timer = timer
+        timer.start()
+
+    def _stop_spinner_erase_line(self) -> None:
+        """停 timer；若已写出帧则 `\\r\\033[K` 擦除 spinner 行（未写帧则静默）。
+
+        非 TTY（`_tty_animated=False`）下 `_spinner_enabled` 恒为 False、`_spinner_running`
+        恒为 False ⇒ 本函数无副作用，输出与静态票面逐字节一致（零 `\\r`/ANSI 动画）。
+        """
+        with self._spinner_lock:
+            self._spinner_enabled = False
+            timer = self._spinner_timer
+            self._spinner_timer = None
+            running = self._spinner_running
+            self._spinner_running = False
+        if timer is not None:
+            timer.cancel()
+        if running:
+            self._write("\r\033[K")
+
+    def _write_orphan_line(self) -> None:
+        """前一个 running 行未等到 TOOL_RESULT 时的防御行（parent 裁决原文，无歧义）。"""
+        theme = self._theme
+        self._write("  " + theme.paint("muted", theme.glyph("attach")) + " "
+                    + theme.paint("muted", "(previous tool result not observed)")
+                    + "\n")
+
     def _render_result(self, data: dict) -> None:
+        theme = self._theme
+
+        def _prefix(glyph_name: str, role: str) -> str:
+            return ("  " + theme.paint("muted", theme.glyph("attach")) + " "
+                    + theme.paint(role, theme.glyph(glyph_name)) + " ")
+
         try:
             result = json.loads(data["content"])
         except (KeyError, ValueError):
-            mark = self._theme.paint("err", self._theme.glyph("fail"))
-            self._write(f"  {mark} (unparseable result)\n")
+            self._write(_prefix("fail", "err") + "failed "
+                        + theme.paint("muted", "(unparseable result)") + "\n")
             return
-        # P0-7：成功 `●` 着 OK 色（114）、失败 `●` 着 ERR 色（167）——颜色区分状态，
-        # `●` 字形本身与状态无关（Pi 纪律）。message 预览行保持 muted 不染红：
-        # 错误标记染红，输出本体保持灰（`evidence/pi/05_error.txt`）。
         ok = bool(result.get("ok"))
-        mark = self._theme.paint(
-            "ok" if ok else "err", self._theme.glyph("ok" if ok else "fail"))
+        header = _prefix("ok" if ok else "fail", "ok" if ok else "err")
+        header += "done" if ok else "failed"
         duration = result.get("metadata", {}).get("duration_ms")
-        suffix = f" ({duration / 1000:.1f}s)" if isinstance(duration, (int, float)) else ""
-        self._write(f"  {mark}{suffix}\n")
+        # P0-5 #737 调用方守卫：bool 显式排除（isinstance(True, int) 为真，防脏数据）；
+        # NaN/inf 不渲染（math.isfinite；纯函数内不处理，int(nan) 会抛）；
+        # 负数按 0 处理（max(0, …)，数据问题不掩盖由 _format_duration 诚实渲染正数部分）。
+        if (
+            isinstance(duration, (int, float))
+            and not isinstance(duration, bool)
+            and math.isfinite(duration)
+        ):
+            header += theme.paint(
+                "muted", f"{theme.sep()}Took {_format_duration(max(0, duration))}"
+            )
+        self._write(header + "\n")
         message = result.get("message") or ""
         lines = message.splitlines()
         visible, hidden = _preview_window(lines)
@@ -359,6 +500,25 @@ def _emit_stderr(text: str, theme: Theme | None = None) -> None:
     """
     th = theme if theme is not None else detect_theme()
     print(th.paint("muted", text), file=sys.stderr)
+
+
+def _format_duration(ms: float) -> str:
+    """毫秒 → '0.1s' / '1m 2s' / '1h 2m 3s'。
+
+    算法照抄 Pi bash.ts formatDuration（pi-mono HEAD 428a12b，L23-31，MIT）：
+    <60s → f"{s:.1f}s"；<60m → f"{m}m {rem}s"；否则 f"{h}h {m}m {s}s"。
+    上游无 ms 分级（0ms→"0.0s"），此处同样不做；负数不钳制（原样渲染，数据问题不掩盖）。
+    跨票契约：P0-5（时长徽章）复用本函数，不得再定义第二个 duration 格式化函数。
+    """
+    seconds = ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total_seconds = int(seconds)
+    minutes, rem = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {rem}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {rem}s"
 
 
 # ── 暂停 / 恢复渲染（#312，PRD §11 CLI behavior）──────────────────────────
@@ -917,6 +1077,10 @@ async def run(
             workspace_registry=workspace_registry,
             session_id=session_id, workspace=workspace,
             max_agent_turns=fuse.max_agent_turns,
+            include_constraint_tools=True,
+            # CLI 没有提交 user-input answer 的入口；保留模型可登记 protected fact，
+            # 但不暴露会把 run 暂停在无法回答状态的澄清工具。
+            include_constraint_resolution_tool=False,
             local_fuse_source=fuse.source,
             # 档位显式化：**与下面证据端口的摘要输入同源**。运行时实际生效的档位就是
             # 这一档（此前靠 `build_runtime` 的默认参数），若两处各写一次，暂停快照
@@ -1593,6 +1757,7 @@ async def resume_command(
         task=None,
         resume_run_id=run_id or paused.run_id,
         resume_basis=basis,
+        include_constraint_resolution_tool=False,
         run_max_agent_turns_total=run_turns_total,
         run_max_model_requests=run_model_requests,
         run_max_total_tokens=run_total_tokens,

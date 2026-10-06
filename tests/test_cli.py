@@ -92,9 +92,9 @@ class TestStreamRenderer:
             "content": json.dumps({
                 "ok": True, "message": "a\nb\nc\nd",
                 "metadata": {"duration_ms": 1234}})}))
-        # 4 行 ≤ 5：全部显示、无截断行（#736 取行方向修正后旧 `... +1 more lines` 消失）
-        # P0-7：状态标签 `●`（plain 无色；suffix 归 P0-5，本票保留现状 `(1.2s)`）
-        assert out == ["  ● (1.2s)\n", "  a\n", "  b\n", "  c\n", "  d\n"]
+        # 4 行 ≤ 5：全部显示、无截断行（#736 取行方向修正后旧 `... +1 more lines` 消失）；
+        # 状态行改为收敛行 `  └ ● done · Took 1.2s`（#735）。
+        assert out == ["  └ ● done · Took 1.2s\n", "  a\n", "  b\n", "  c\n", "  d\n"]
 
     def test_preview_tail_five(self):
         """8 行输出取尾部 5 行（l4..l8）；hint 在保留行之前——隐藏的是更早的行。"""
@@ -105,7 +105,7 @@ class TestStreamRenderer:
             "content": json.dumps({
                 "ok": True, "message": "\n".join(f"l{i}" for i in range(1, 9)),
                 "metadata": {"duration_ms": 1234}})}))
-        assert out == ["  ● (1.2s)\n", "  └ … (3 earlier lines)\n",
+        assert out == ["  └ ● done · Took 1.2s\n", "  └ … (3 earlier lines)\n",
                        "  l4\n", "  l5\n", "  l6\n", "  l7\n", "  l8\n"]
         joined = "".join(out)
         # 顺序即契约：hint 在保留行之前（隐藏的是更早的行，在上方）
@@ -118,7 +118,7 @@ class TestStreamRenderer:
             "tool_call_id": "c1",
             "content": json.dumps({
                 "ok": True, "message": "\n".join(f"l{i}" for i in range(1, 6))})}))
-        assert out == ["  ●\n", "  l1\n", "  l2\n", "  l3\n", "  l4\n", "  l5\n"]
+        assert out == ["  └ ● done\n", "  l1\n", "  l2\n", "  l3\n", "  l4\n", "  l5\n"]
 
     def test_preview_empty(self):
         """message 为空：无预览行、无截断行（现状保持）。"""
@@ -126,7 +126,7 @@ class TestStreamRenderer:
         StreamRenderer(out.append).handle(_event(TOOL_RESULT, {
             "tool_call_id": "c1",
             "content": json.dumps({"ok": True, "message": ""})}))
-        assert out == ["  ●\n"]
+        assert out == ["  └ ● done\n"]
 
     def test_tool_failure_marked_without_duration(self):
         out: list[str] = []
@@ -134,7 +134,7 @@ class TestStreamRenderer:
         renderer.handle(_event(TOOL_RESULT, {
             "tool_call_id": "c1",
             "content": json.dumps({"ok": False, "message": "boom"})}))
-        assert out == ["  ●\n", "  boom\n"]
+        assert out == ["  └ ● failed\n", "  boom\n"]
 
     def test_run_completed_prints_usage_footer(self):
         out: list[str] = []
@@ -299,6 +299,7 @@ def test_render_footer_muted_truecolor():
 async def test_cli_run_streams_persists_session_and_returns_final_text(
     tmp_path, monkeypatch
 ):
+    import agent_harness.cli as cli_module
     from agent_harness.config import Settings
 
     monkeypatch.setattr(
@@ -310,11 +311,22 @@ async def test_cli_run_streams_persists_session_and_returns_final_text(
         "agent_harness.assembly.create_chat_model",
         lambda config, **kw: ScriptedModel([AIMessage(content="你好世界")], chunk_size=2),
     )
+    original_build_runtime = cli_module.build_runtime
+    tool_names: set[str] = set()
+
+    async def capture_cli_tools(**kwargs):
+        runtime = await original_build_runtime(**kwargs)
+        tool_names.update(tool.name for tool in runtime.registry.list())
+        return runtime
+
+    monkeypatch.setattr(cli_module, "build_runtime", capture_cli_tools)
     out: list[str] = []
     outcome = await run("打个招呼", write=out.append)
 
     assert outcome.final_text == "你好世界"
     assert outcome.paused is False, "正常完成不是暂停（#312：两者都可能没有回答，必须可区分）"
+    assert "register_constraint" in tool_names
+    assert "request_constraint_resolution" not in tool_names
     streamed = "".join(out)
     assert "你好" in streamed and "世界" in streamed, "回答经 delta 流式可见"
 

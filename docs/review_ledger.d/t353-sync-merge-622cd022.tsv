@@ -1,0 +1,1 @@
+2026-10-07	#353 先回后正同步合并：merge 622cd022 合 origin/main 15377d7e（来侧 = #357 W-13 发布 #773 等；与本票任务审阅面零语义交集）。1 处真冲突（web/src/App.tsx：#353 任务审阅入口 + 主侧 ConstraintResolutionDialog → 并集保留两独立 JSX 块）；全树复扫无残留标记；tsc 通过；#353 focused 测试 34/34 通过（当场采集）。合并树 Gate-0 重采随收据落账	3f2c3c75ff2b7f7ae464be828714ccc64afd21e3..622cd0229e454340745e61367ddb84591d629e04

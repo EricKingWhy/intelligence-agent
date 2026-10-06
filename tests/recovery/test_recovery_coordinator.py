@@ -900,3 +900,32 @@ def test_decisions_callback_missing_decision_fails_closed() -> None:
     callback = DecisionsReconcileCallback({"call-1": ReconcileVerdict.ABANDON})
     with pytest.raises(ReconcileRequired):
         asyncio.run(callback.resolve(_operation_for("call-other"), None))
+
+
+# ── #357 W-13：source_for 是非抽象可选端口——既有子类零迁移 ──
+
+
+def test_decisions_callback_source_for_returns_mapped_source() -> None:
+    from agent_harness.recovery.coordinator import DecisionsReconcileCallback
+    from agent_harness.recovery.reconcile import ReconcileVerdict
+
+    callback = DecisionsReconcileCallback(
+        {"call-1": ReconcileVerdict.CONFIRM_SUCCESS},
+        sources={"call-1": "我查了外部系统"},
+    )
+    assert callback.source_for(_operation_for("call-1")) == "我查了外部系统"
+    assert callback.source_for(_operation_for("call-other")) is None
+
+
+def test_legacy_callback_without_source_for_is_still_usable() -> None:
+    """R10：`source_for` 非抽象且默认 None——#547 时代只实现 `resolve` 的子类
+    不做任何迁移仍可实例化、可用。"""
+    from agent_harness.recovery import ReconcileCallback
+    from agent_harness.recovery.reconcile import ReconcileVerdict
+
+    class _LegacyCallback(ReconcileCallback):
+        async def resolve(self, operation: Operation, hint) -> ReconcileVerdict:
+            return ReconcileVerdict.ABANDON
+
+    callback = _LegacyCallback()
+    assert callback.source_for(_operation_for("call-1")) is None

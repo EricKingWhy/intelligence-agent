@@ -1,0 +1,1 @@
+2026-10-07	#735 vitest 豁免（隔离复现证据）：StepDetail.window.test.tsx「DIFFS / ARTIFACTS：默认先裁」在 #735 树与基线 08808e0e 树上均 1 failed / 5 passed（5000ms 超时，时序敏感）；#735 的 diff 零 web/ 文件（git diff 08808e0e..HEAD -- web/ 为空）。按测试铁律 waive 通道放行：基线同红 ⇒ 与本票改动无关。vitest 全量：1340 passed / 2 failed（两次运行失败数不同 2→1，抖动）；tsc -b 0 错；oxlint 0 error / 42 warnings；vite build ✓。	08808e0e..08808e0e

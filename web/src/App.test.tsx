@@ -96,7 +96,13 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
         error: null,
         sessionsError: null,
         titlesById: {},
-        recoverState: { phase: 'idle' },
+        recoverState: {
+          // #357 W-13：App 现在读 `pendingDecisions` 决定是否挂裁决面板——夹具补全
+          // RecoverState 的形状（本用例只驱动投影提交，恢复态保持 idle）。
+          status: 'idle', message: null, conflict: false, repaired: 0,
+          terminalRepaired: false, stillUnterminated: false, stillDangling: false,
+          pendingDecisions: null,
+        },
         selectSession: NOOP,
         submitTask: H.submitTask,
         sendMessage: NOOP,
@@ -104,6 +110,7 @@ vi.mock('./hooks/useSession', async (importOriginal) => {
         removeSession: NOOP,
         setArchived: NOOP,
         recover: NOOP,
+        submitDecisions: NOOP,
         refreshSessions: NOOP,
         changeModel: NOOP,
         fork: NOOP,

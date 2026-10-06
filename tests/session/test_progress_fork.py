@@ -170,7 +170,13 @@ class TestForkChildProgressFile:
 
 
 class _FailingRegistry:
-    """基础设施故障的 registry 替身（fork 失败注入，原样上抛）。"""
+    """基础设施故障的 registry 替身（fork 失败注入，原样上抛）。
+
+    create() 形参与生产 WorkspaceRegistry.create() 保持对齐（#363 起生产
+    调用点会传 backend=，更早还有 workspace_root=）：本替身在入口即抛
+    OSError、形参接受后不消费——签名失配会让 TypeError 抢在失败注入点
+    之前，把"基础设施故障"洗成"替身接口过期"。
+    """
 
     def exists(self, session_id: str) -> bool:
         return True
@@ -183,7 +189,13 @@ class _FailingRegistry:
     def default_workspace_root(self, session_id: str) -> Path:
         return Path("/nonexistent-child-ws")
 
-    def create(self, session_id: str):
+    def create(
+        self,
+        session_id: str,
+        *,
+        workspace_root: Path | None = None,
+        backend: str | None = None,
+    ):
         raise OSError("staging unavailable")
 
     def fork_staging_root(self) -> Path:

@@ -85,6 +85,11 @@ class RetrieveKnowledgeTool(Tool):
             suggested_action="重复同一检索安全（只读），可换措辞复核证据。",
         )
 
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：重复检索不改知识库（#357 契约 7）。
+        return True
+
     async def execute(self, args: _RetrieveArgs) -> ToolResult:
         try:
             result = await self._service.retrieve(
@@ -158,6 +163,11 @@ class ReadKnowledgeSourceTool(Tool):
             verifiable=True,
             suggested_action="重复同一回读安全（只读）。",
         )
+
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：重复回读语料不改知识库（#357 契约 7）。
+        return True
 
     async def execute(self, args: _ReadSourceArgs) -> ToolResult:
         try:
