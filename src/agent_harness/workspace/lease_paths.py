@@ -11,9 +11,10 @@
 
 - **Windows 形态**（`PureWindowsPath(p).drive` 非空，含 UNC）：盘符 + 全路径
   **casefold**（NTFS 大小写不敏感）；`.`/`..`/尾分隔符/分隔符方向按词法归一。
-  在真实 Windows 宿主上本层先经 `os.path.realpath`（junction 由 OS 解析），
-  并做与 POSIX 形态同款的存在性校验（缺失/非目录 fail-closed），再做词法
-  归一与折叠；POSIX 宿主（测试）只有词法层，这是它的等价逻辑。
+  在真实 Windows 宿主上本层先经 `os.path.realpath`（junction 由 OS 解析，
+  解析异常与 POSIX 臂同款 fail-closed），并做同款存在性校验（缺失/非目录
+  fail-closed），再做词法归一与折叠；POSIX 宿主（测试）只有词法层，这是
+  它的等价逻辑。
 - **POSIX 形态**：`os.path.realpath` + 目标目录存在性校验——符号链接在此
   解析，链接环/不可解析、目标不存在/不是目录 → `LeasePathError`
   （fail-closed：不能安全解析的路径不能证明独立性，拒绝）。
@@ -101,7 +102,13 @@ def normalize_dir_key(path: str) -> str:
             # 真实 Windows 宿主：junction/symlink 先由 OS 解析；非 strict
             # realpath 对缺失路径不抛（只做词法消解），存在性校验必须在本层
             # 补上（与 POSIX 形态同 fail-closed），再词法归一。
-            resolved = os.path.realpath(path)
+            try:
+                resolved = os.path.realpath(path)
+            except (OSError, ValueError) as e:
+                # 链接环 / 不可解析 / ntpath 异态（winerror≠0 的 reparse 解析
+                # 可抛 ValueError）：不能安全证明指向哪个目录 → 与 POSIX 臂
+                # 同款收敛为 LeasePathError，不逃逸成 API 500。
+                raise LeasePathError(f"路径无法安全解析（{e}）：{path!r}") from e
             _require_existing_dir(resolved, path)
         else:
             resolved = path
