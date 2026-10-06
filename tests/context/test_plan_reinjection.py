@@ -476,8 +476,13 @@ async def test_safe_continue_provider_budget_not_double_counted(tmp_path):
     assert [e.data["attempt"] for e in failures] == [1, 2]
     assert _plan_block(messages) is not None  # 清单块照常在场（与压缩成败无关）
     assert builder._last_plan_tokens > 0
+    # 本 fixture 的 provider_estimate（messages+facts+plan）落在 [auto, hard) 带
+    # （auto=0.5），warning 文本按「先计入再注入」并入 provider_estimate——
+    # provider remaining 相应少一次 warning 成本（不再是修复前的漏记账面）。
+    assert builder._last_pressure_warning_tokens > 0
     expected = (int(10000 * 0.85)
                 - estimate_message_tokens(session.derive_messages())
                 - builder._last_plan_tokens
-                - builder._last_protected_fact_tokens)
+                - builder._last_protected_fact_tokens
+                - builder._last_pressure_warning_tokens)
     assert provider.captured == expected
