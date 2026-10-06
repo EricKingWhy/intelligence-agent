@@ -1,0 +1,1 @@
+2026-10-06	#708 Correctness 轴增量（该轴 must-fix 1）：usage_snapshot 重放源改回'最近一次 build 或 compact_now 重算落下的决策'（每次 build 投影装配都重录、自纠在下一次 build；原'下次压缩'与其钉用例 10M 预算夹具矛盾）+ 测试模块 docstring 同步	4c6ac918..8c9b23ff

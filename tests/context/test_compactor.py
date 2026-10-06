@@ -383,7 +383,8 @@ async def test_rejected_first_candidate_is_not_used_when_retry_succeeds():
     assert result.summary is not None
     assert "细节" not in result.summary
     assert "已完成读取历史记录，并选择直接展示内容。" in result.summary
-    assert result.bracket_id is not None
+    # #647 T11f：compactor 不铸造身份（无溯源 ⇒ 无身份）。
+    assert result.bracket_id is None
     assert estimate_message_tokens(result.messages) + reserved_tokens < 30_000
 
 
@@ -793,7 +794,8 @@ async def test_eight_section_summary_passes_shrink_validation(monkeypatch):
     assert "不得删除 old_rows；精确 ID 是 R-042" in result.summary
     assert "R-042" in result.summary
     assert "## 文件清单\n(none)" in result.summary
-    assert result.bracket_id is not None
+    # #647 T11f：compactor 不铸造身份（无溯源 ⇒ 无身份）。
+    assert result.bracket_id is None
     assert any(candidate is result.messages[0] for candidate in shrink_candidates)
 
 

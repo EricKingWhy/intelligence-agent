@@ -224,8 +224,12 @@ class TestCompactorBracketMetadata:
     """ContextCompactor.compact() 返回 bracket 元数据。"""
 
     @pytest.mark.asyncio
-    async def test_compact_returns_bracket_id_and_summary(self):
-        """compact 返回 bracket_id 和 summary。"""
+    async def test_compact_returns_summary_without_bracket_id(self):
+        """compact 返回 summary；bracket_id 为 None（#647 T11f：无溯源 ⇒ 无身份）。
+
+        身份只在持久化边界由 builder 铸造（对标 Pi/DSH），compactor 直调结果
+        永不携带可用身份。
+        """
         model = ScriptedModel([AIMessage(content=MODEL_SECTIONS)])
         # #556 裁决 C：目标节由 protected_facts 通道承载（与 builder 同一通路）。
         facts = derive_protected_facts([
@@ -240,7 +244,8 @@ class TestCompactorBracketMetadata:
         result = await ContextCompactor(
             model, max_context_tokens=8000,
         ).compact(messages, estimate_message_tokens(messages), protected_facts=facts)
-        assert result.bracket_id is not None
+        # #647 T11f：compactor 不铸造身份（无溯源 ⇒ 无身份）。
+        assert result.bracket_id is None
         assert result.summary is not None
         assert result.summary.startswith("## 原始目标与用户约束\n")
         assert "读取 old.txt 后继续。" in result.summary

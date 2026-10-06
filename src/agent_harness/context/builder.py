@@ -3,8 +3,10 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
@@ -919,11 +921,25 @@ class ContextBuilder:
             return None
         # #639 阶段 B：成功压缩清零该会话的连续预检拒绝计数（pop ⇒ 等价 0）。
         self._preflight_rejection_streaks.pop(session.session_id, None)
-        if not result.summary or not result.bracket_id:
+        if not result.summary:
             raise ContextWindowExceededError(
                 "Refusing to persist an unvalidated compaction summary"
             )
-        bracket_id = result.bracket_id or ""
+        if result.source_seq_start is None or result.source_seq_end is None:
+            # fail-closed：无来源区间不铸造身份。此前的 `or 0` 静默回退在此
+            # 被显式拒绝取代（compactor 的 T12h 路径本应已拦截，此处是持久化
+            # 边界的最后守卫）——无溯源 ⇒ 无身份。
+            raise ContextWindowExceededError(
+                "Refusing to persist compaction without source event range"
+            )
+        # #647 T11f：身份在持久化边界铸造（照搬成熟产品）——
+        # Pi（earendil-works/pi @28dcce2b）session-manager.ts appendCompaction
+        # （L1262-1288）：在同一函数内、_appendEntry 之前由 generateId（L277）铸造；
+        # DeepSeek Harness（@5badb150）region.ts:204：
+        # `const compactionId = CompactionId(randomUUID())`，随后即
+        # session.append('compaction/start', lifecycle)。
+        # 无持久化 ⇒ 无身份：compactor 直调结果永不携带可用身份。
+        bracket_id = str(uuid4())
         # 失败记录已在上面无条件落盘，且与 failures 条目一一对应（每条一个事件）。
         # 守卫复验的基线必须加上这份自身写入，否则重试成功会被误判为并发改动。
         own_writes = len(result.failures)
@@ -959,9 +975,13 @@ class ContextBuilder:
                 "bracket_id": bracket_id,
             })
         # W-04 (#348)：落 bracket 后重投影确认——从已持久化的事件重算"下一次
-        # build 会看到的投影"，与本次产物比对（裁剪路径重放本 build 的裁剪决策，
-        # 保证与 compact 输入同一视图）。不合即 fail-closed：bracket 已在 JSONL
-        # （历史不删除），但本次执行不得继续在未核验的投影上工作。
+        # build 会看到的投影"，与本次产物比对（裁剪路径重放本次压缩刚落下的
+        # 裁剪决策，保证与 compact 输入同一视图）。决策与投影在同一次
+        # compact_now 调用内同源——决策重算先于本复核，自动路径（build 阈值
+        # 命中）与手动路径（compact_session_context）共用此出口（#708 裁决 B：
+        # 重放按落账时点决策、不做可见性复核），比对不存在跨 build 分歧窗口。
+        # 不合即 fail-closed：bracket 已在 JSONL（历史不删除），但本次执行不得
+        # 继续在未核验的投影上工作。
         projected = self._reproject(session)
         if projected != result.messages:
             raise CompactionPostWriteError(
@@ -988,7 +1008,9 @@ class ContextBuilder:
                 f"Re-projected compaction still exceeds hard guard: {recheck} tokens",
                 bracket_id=bracket_id,
             )
-        return result
+        # 把持久化边界铸造的身份回填给调用方（对标 DSH compactRegion 返回携带
+        # compactionId 的 CompactionResult：service/web/CLI 仍能拿到可用身份）。
+        return replace(result, bracket_id=bracket_id)
 
     @staticmethod
     def _protected_facts_messages(facts: list[ProtectedFact]) -> list[AnyMessage]:
@@ -1083,8 +1105,13 @@ class ContextBuilder:
     def _reproject(self, session: Session) -> list[AnyMessage]:
         """从已持久化的事件重算模型可见投影（W-04 重投影确认的读数来源）。
 
-        裁剪路径重放**本 build 刚落下的**裁剪决策（与 usage_snapshot 同一读法），
+        裁剪路径重放**本次压缩刚落下的**裁剪决策（与 usage_snapshot 同一读法），
         保证重算视图与 compact 的输入一致——否则被裁的骨架行会被当成失配。
+        重放语义＝按落账时点决策、不做当前可见性复核（#708 裁决 B）：唯一
+        消费点是 compact_now 尾部复核（自动路径 = build 阈值命中、手动路径 =
+        ``compact_session_context`` 共用），决策重算先于本调用、同一次调用内
+        同源，不存在跨 build 分歧窗口；跨 build 读（usage_snapshot）的漂移
+        口径在彼处文档化。
         """
         if self._pruner is None:
             return session.derive_messages()
@@ -1301,10 +1328,16 @@ class ContextBuilder:
 
         W-03 (#347)：pruner 装配时，messages 桶走与 build 同一条裁剪路径
         （地雷 2，#200 双视图教训）。本方法是同步读口而 store 校验是 async，
-        因此重放**最近一次 build 落下的决策**（seq → 骨架行）——同一 builder
-        实例上与 build 产物逐字节一致；build 之后新到达的结果尚未裁，
-        估值偏高（安全方向），下一次 build 收敛。在途 run 的看板读的正是
-        刚 build 过的同一个 builder 实例，常态下两者一致。
+        因此重放**最近一次 build 或 compact_now 重算落下的决策**（seq → 骨架
+        行；每次 build 的投影装配都重录决策，压缩路径在 compact_now 内重算）
+        ——同一 builder 实例上与该次产物逐字节一致。重放语义（#708 裁决 B）
+        ＝**按落账时点决策，不做当前可见性复核**：读数含义是"截至最近一次
+        决策落账的状态"，与当前 fresh 口径的偏差有界于一次 build 周期、在
+        下一次 build 重算决策时自纠——决策落账后新到达的重复成员使旧保留
+        成员在 fresh 口径下变为可裁而重放仍按旧决策保留 ⇒ 偏高（安全方向）；
+        投影在其后变化使旧决策与 fresh 口径分歧（如被裁 seq 的等价类可见
+        成员构成变化）⇒ 偏低。在途 run 的看板读的正是刚 build 过的同一个
+        builder 实例，常态下两者一致。
         """
         if self._pruner is None:
             messages_tokens = estimate_message_tokens(session.derive_messages())
