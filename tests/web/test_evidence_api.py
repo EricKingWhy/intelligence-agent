@@ -11,7 +11,6 @@ tests/web/test_task_delivery_api.py（patch build_runtime/launch，
 
 from __future__ import annotations
 
-import hashlib
 import subprocess
 from pathlib import Path
 
@@ -189,7 +188,7 @@ class TestGetEvidence:
         fresh = client.get(f"/api/sessions/{sid}/evidence").json()
         assert fresh["evidence"][cids][0]["freshness"]["status"] == "fresh"
 
-        target.write_bytes(b"v2 // 改了一行\n")
+        target.write_bytes("v2 // 改了一行\n".encode())
         stale = client.get(f"/api/sessions/{sid}/evidence").json()
         rec = stale["evidence"][cids][0]
         assert rec["freshness"]["status"] == "stale"
