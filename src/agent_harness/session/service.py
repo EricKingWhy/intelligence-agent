@@ -231,6 +231,7 @@ from agent_harness.tooling.approval import (
 from agent_harness.tooling.approval_queue import PendingApprovalQueue
 from agent_harness.tooling.approve_policy import PolicyGranularity
 from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tools.git import git_head_command
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -4062,7 +4063,14 @@ class SessionService:
             }
         )
         current_manifest = await self._current_evidence_manifest(root, covered)
-        current_head = await self._git_head(root)
+        # 懒惰求值（§9.5）：没有任何记录带 base_head 时不 spawn git 子进程——
+        # 读接口不引入不必要的宿主副作用与延迟。
+        needs_head = any(
+            record.base_head is not None
+            for records in state.by_criterion.values()
+            for record in records
+        )
+        current_head = await self._git_head(root) if needs_head else None
         store = self._artifact_store_for(session_id)
         by_criterion: dict[str, list[dict]] = {}
         for criterion_id, records in state.by_criterion.items():
@@ -4114,18 +4122,23 @@ class SessionService:
 
     @staticmethod
     async def _git_head(root: str | None) -> str | None:
-        """工作区仓库的当前 HEAD（只读；非 git 目录/执行失败 → None，如实）。"""
+        """工作区仓库的当前 HEAD（只读；非 git 目录/执行失败 → None，如实）。
+
+        命令构造走 ``tools/git.py::git_head_command``（白名单纪律：逐字固定、
+        零插值、无 shell）；cwd 钉在工作区 root。
+        """
         if not root:
             return None
 
         def _run() -> str | None:
             try:
                 proc = subprocess.run(
-                    ["git", "-C", root, "rev-parse", "HEAD"],
+                    git_head_command(),
                     capture_output=True,
                     text=True,
                     timeout=15,
                     check=False,
+                    cwd=root,
                 )
             except (OSError, subprocess.SubprocessError):
                 return None

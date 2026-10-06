@@ -507,3 +507,44 @@ def test_artifact_ok_stays_fresh(tmp_path) -> None:
         artifact_readable=True, artifact_attribution_ok=True,
     )
     assert freshness.status == "fresh"
+
+
+# ── 写侧：具体拒绝原因（票面"保存失败时显示缺项"）────────────────────────────
+
+
+def test_rejection_reason_names_the_field(tmp_path) -> None:
+    """形状拒绝必须指出具体缺项，而不是笼统的"形状非法"。"""
+    session = _session(tmp_path)
+    cids = _two_criteria(session)
+    before = len(session.events)
+    outcome = apply_evidence_recorded(
+        session, _dto(session.session_id, cids[0], kind="video")
+    )
+    assert not outcome.ok and outcome.error_kind == "shape"
+    assert "kind" in outcome.reason, outcome.reason
+    outcome = apply_evidence_recorded(
+        session, _dto(session.session_id, cids[0], base_head="short-sha")
+    )
+    assert not outcome.ok and outcome.error_kind == "shape"
+    assert "base_head" in outcome.reason, outcome.reason
+    dto = _dto(session.session_id, cids[0], evidence_id="x")
+    dto["criterion_id"] = None
+    outcome = apply_evidence_recorded(session, dto)
+    assert not outcome.ok and outcome.error_kind == "shape"
+    assert "criterion_id" in outcome.reason, outcome.reason
+    assert len(session.events) == before
+
+
+def test_base_head_must_be_40_hex(tmp_path) -> None:
+    """base_head 只接受 40 位 hex（git rev-parse HEAD）或 None。"""
+    session = _session(tmp_path)
+    cids = _two_criteria(session)
+    before = len(session.events)
+    assert not apply_evidence_recorded(
+        session, _dto(session.session_id, cids[0], base_head="abc123")
+    ).ok
+    # 40 位 hex 通过（其余字段合法）
+    assert apply_evidence_recorded(
+        session, _dto(session.session_id, cids[0], base_head="f" * 40)
+    ).ok
+    assert len(session.events) == before + 1

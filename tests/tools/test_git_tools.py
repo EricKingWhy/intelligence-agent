@@ -299,3 +299,10 @@ async def test_git_pathspec_keeps_dotdot_substring_names(tmp_path):
     result = await executor.execute(_tool_call("git_status", {"pathspec": "a..b.txt"}))
     assert result.result.ok is True
     assert "a..b.txt" in result.result.data["stdout"]
+
+
+def test_git_head_command_is_fixed_argv() -> None:
+    """W-08 #352 base_head：命令逐字固定、零插值、零 pathspec（白名单纪律最严形态）。"""
+    from agent_harness.tools.git import git_head_command
+
+    assert git_head_command() == ["git", "rev-parse", "HEAD"]

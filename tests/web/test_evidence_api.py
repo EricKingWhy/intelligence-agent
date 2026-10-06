@@ -51,6 +51,7 @@ def client(tmp_path, monkeypatch):
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "artifacts"),
         enable_cors=False,
     )
     app = create_app(settings, enable_cors=False)
@@ -144,6 +145,17 @@ class TestPostEvidence:
         client, _ = client
         resp = _post(client, "does-not-exist", _dto("does-not-exist", "ac-x"))
         assert resp.status_code == 404, resp.text
+
+    def test_post_returns_record_with_freshness(self, client) -> None:
+        """POST 与 GET 同口径：返回的 record 带 freshness 陈旧标识。"""
+        client, _ = client
+        sid = _create_session(client)
+        (cids,) = _define(client, sid)
+        resp = _post(client, sid, _dto(sid, cids))
+        assert resp.status_code == 200, resp.text
+        record = resp.json()["record"]
+        assert record["evidence_id"] == "ev-001"
+        assert record["freshness"]["status"] == "fresh"
 
 
 class TestGetEvidence:
@@ -256,3 +268,50 @@ class TestGetEvidence:
         rec = client.get(f"/api/sessions/{sid}/evidence").json()["evidence"][cids][0]
         assert rec["command_or_action"] == dto["command_or_action"]
         assert rec["exit_code_or_observation"] == dto["exit_code_or_observation"]
+
+    @pytest.mark.asyncio
+    async def test_artifact_readable_with_matching_attribution_stays_fresh(
+        self, client
+    ) -> None:
+        """artifact 真实可读回 + tool_call_id 归属一致 → fresh（显式归属校验正路）。"""
+        from agent_harness.storage.local_artifact import LocalArtifactStore
+
+        client, app = client
+        sid = _create_session(client)
+        (cids,) = _define(client, sid)
+        store = LocalArtifactStore(app.state.agent.settings, session_id=sid)
+        artifact = await store.save(
+            sid, "12 passed", mime_type="text/plain",
+            source_tool="bash", tool_call_id="tc-1",
+        )
+        dto = _dto(
+            sid, cids, evidence_id="ev-ok", artifact_ref=artifact.artifact_id,
+            tool_call_id="tc-1",
+        )
+        assert _post(client, sid, dto).status_code == 200
+        rec = client.get(f"/api/sessions/{sid}/evidence").json()["evidence"][cids][0]
+        assert rec["freshness"]["status"] == "fresh", rec["freshness"]["reasons"]
+
+    @pytest.mark.asyncio
+    async def test_artifact_attribution_mismatch_stale_via_api(
+        self, client
+    ) -> None:
+        """artifact 旁挂 tool_call_id 与证据对不上 → stale（归属校验反路）。"""
+        from agent_harness.storage.local_artifact import LocalArtifactStore
+
+        client, app = client
+        sid = _create_session(client)
+        (cids,) = _define(client, sid)
+        store = LocalArtifactStore(app.state.agent.settings, session_id=sid)
+        artifact = await store.save(
+            sid, "12 passed", mime_type="text/plain",
+            source_tool="bash", tool_call_id="tc-1",
+        )
+        dto = _dto(
+            sid, cids, evidence_id="ev-mismatch", artifact_ref=artifact.artifact_id,
+            tool_call_id="tc-other",
+        )
+        assert _post(client, sid, dto).status_code == 200
+        rec = client.get(f"/api/sessions/{sid}/evidence").json()["evidence"][cids][0]
+        assert rec["freshness"]["status"] == "stale"
+        assert any("归属" in r for r in rec["freshness"]["reasons"])

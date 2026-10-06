@@ -33,14 +33,13 @@ from agent_harness.session.task import TASK_FIELD_MAX_LENGTH, derive_task_state
 
 logger = logging.getLogger(__name__)
 
-#: 证据来源分类（票面枚举）。
+#: 证据来源分类（票面枚举）：``test`` / ``ui`` / ``diff`` = 机器验证事实；
+#: ``external`` = 人工/外部结论（reviewer 结论、用户手工验收——票面"用户手工验收
+#: 与机器验证事实分列"即按 kind 区分；用户裁决另由接受轴 task/accepted 承载）。
 EVIDENCE_KINDS = ("test", "ui", "diff", "external")
 
 #: 证据结果三态（票面枚举；无 Chrome/MCP 的浏览器项落 blocked，绝不落 pass）。
 EVIDENCE_RESULTS = ("pass", "fail", "blocked")
-
-#: 新鲜 / 陈旧（陈旧只产出状态，不改写当初记录的 result）。
-FRESHNESS_STATUSES = ("fresh", "stale")
 
 #: 票面 14 字段（写侧闭合 DTO：未知顶层键按 shape 拒绝）。
 _EVIDENCE_FIELD_NAMES = frozenset(
@@ -63,7 +62,7 @@ _EVIDENCE_FIELD_NAMES = frozenset(
 )
 
 _SHA256_RE_LEN = 64
-_BASE_HEAD_MAX_LENGTH = 128
+_BASE_HEAD_HEX_LEN = 40
 _PROGRESS_MD_NAME = "progress.md"
 
 
@@ -195,6 +194,11 @@ def _non_empty_str(value: object, *, max_length: int) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= max_length
 
 
+def _opt_str(value: object, *, max_length: int) -> bool:
+    """可选自由文本字段的统一判据：None 或限长非空字符串。"""
+    return value is None or _non_empty_str(value, max_length=max_length)
+
+
 def _check_manifest_shape(raw: object) -> str | None:
     """workspace_manifest 嵌套 DTO 形状校验；合法返回 None，否则返回原因。"""
     if not isinstance(raw, dict):
@@ -240,59 +244,53 @@ def _parse_manifest(raw: dict) -> EvidenceManifest | None:
     )
 
 
-def _parse_record(data: dict | None) -> EvidenceRecord | None:
-    """evidence/recorded 载荷解析：非法 → None（投影跳过该事件）。
+def _parse_record(data: dict | None) -> tuple[EvidenceRecord | None, str | None]:
+    """evidence/recorded 载荷解析 → ``(record, None)``；非法 → ``(None, 具体原因)``。
 
-    刻意与写侧同严格：投影侧不做缺省补全（task.py `_parse_criteria` 同判据），
-    否则两次 derive 可能得到不同结果，重放确定性就没了。
+    具体原因供写侧"保存失败时显示缺项"（票面）；投影侧只取 record（非法即跳过
+    该事件）。刻意与写侧同严格：投影侧不做缺省补全（task.py ``_parse_criteria``
+    同判据），否则两次 derive 可能得到不同结果，重放确定性就没了。
     """
     if not isinstance(data, dict):
-        return None
-    if set(data) - _EVIDENCE_FIELD_NAMES:
-        return None
+        return None, f"evidence 载荷必须是对象，得到 {type(data).__name__}"
+    unknown = set(data) - _EVIDENCE_FIELD_NAMES
+    if unknown:
+        return None, f"未知字段：{sorted(unknown)}（14 字段 DTO 是闭合的）"
     if not _non_empty_str(data.get("evidence_id"), max_length=TASK_FIELD_MAX_LENGTH):
-        return None
+        return None, "evidence_id 必须是非空字符串"
     for key in ("task_session_id", "run_id", "criterion_id", "captured_at"):
         if not _non_empty_str(data.get(key), max_length=TASK_FIELD_MAX_LENGTH):
-            return None
+            return None, f"{key} 必须是非空字符串"
     if data.get("kind") not in EVIDENCE_KINDS:
-        return None
+        return None, f"kind 非法：{data.get('kind')!r}（合法值 {list(EVIDENCE_KINDS)}）"
     if data.get("result") not in EVIDENCE_RESULTS:
-        return None
+        return (
+            None,
+            f"result 非法：{data.get('result')!r}（合法值 {list(EVIDENCE_RESULTS)}）",
+        )
     seq = data.get("source_event_seq")
     if seq is not None and (not isinstance(seq, int) or isinstance(seq, bool) or seq < 0):
-        return None
-    tool_call_id = data.get("tool_call_id")
-    if tool_call_id is not None and not _non_empty_str(
-        tool_call_id, max_length=TASK_FIELD_MAX_LENGTH
-    ):
-        return None
-    command = data.get("command_or_action")
-    if command is not None and not _non_empty_str(
-        command, max_length=TASK_FIELD_MAX_LENGTH
-    ):
-        return None
+        return None, f"source_event_seq 必须是非负整数或 None，得到 {seq!r}"
+    if not _opt_str(data.get("tool_call_id"), max_length=TASK_FIELD_MAX_LENGTH):
+        return None, "tool_call_id 必须是非空字符串或 None"
+    if not _opt_str(data.get("command_or_action"), max_length=TASK_FIELD_MAX_LENGTH):
+        return None, "command_or_action 必须是非空字符串或 None"
     exit_info = data.get("exit_code_or_observation")
     if exit_info is not None:
         if isinstance(exit_info, bool):
-            return None
+            return None, "exit_code_or_observation 不能是布尔值"
         if not isinstance(exit_info, int) and not _non_empty_str(
             exit_info, max_length=TASK_FIELD_MAX_LENGTH
         ):
-            return None
-    artifact_ref = data.get("artifact_ref")
-    if artifact_ref is not None and not _non_empty_str(
-        artifact_ref, max_length=TASK_FIELD_MAX_LENGTH
-    ):
-        return None
+            return None, "exit_code_or_observation 必须是整数/非空字符串或 None"
+    if not _opt_str(data.get("artifact_ref"), max_length=TASK_FIELD_MAX_LENGTH):
+        return None, "artifact_ref 必须是非空字符串或 None"
     base_head = data.get("base_head")
-    if base_head is not None and not _non_empty_str(
-        base_head, max_length=_BASE_HEAD_MAX_LENGTH
-    ):
-        return None
+    if base_head is not None and not _is_hex(base_head, _BASE_HEAD_HEX_LEN):
+        return None, "base_head 必须是 40 位 hex（git rev-parse HEAD）或 None"
     manifest = _parse_manifest(data.get("workspace_manifest"))
     if manifest is None:
-        return None
+        return None, _manifest_error(data.get("workspace_manifest"))
     return EvidenceRecord(
         evidence_id=data["evidence_id"],
         task_session_id=data["task_session_id"],
@@ -300,15 +298,21 @@ def _parse_record(data: dict | None) -> EvidenceRecord | None:
         criterion_id=data["criterion_id"],
         kind=data["kind"],
         source_event_seq=seq,
-        tool_call_id=tool_call_id,
+        tool_call_id=data.get("tool_call_id"),
         captured_at=data["captured_at"],
         result=data["result"],
-        command_or_action=command,
+        command_or_action=data.get("command_or_action"),
         exit_code_or_observation=exit_info,
-        artifact_ref=artifact_ref,
+        artifact_ref=data.get("artifact_ref"),
         base_head=base_head,
         workspace_manifest=manifest,
-    )
+    ), None
+
+
+def _manifest_error(raw: object) -> str:
+    """workspace_manifest 非法的具体原因（写侧"保存失败时显示缺项"）。"""
+    reason = _check_manifest_shape(raw)
+    return reason if reason is not None else "workspace_manifest 非法"
 
 
 def _check_shape(evidence: dict, session) -> str | None:
@@ -322,8 +326,9 @@ def _check_shape(evidence: dict, session) -> str | None:
     unknown = set(evidence) - _EVIDENCE_FIELD_NAMES
     if unknown:
         return f"未知字段：{sorted(unknown)}（14 字段 DTO 是闭合的）"
-    if _parse_record(evidence) is None:
-        return "evidence 载荷形状非法（字段缺失或类型/枚举/长度不合规）"
+    _, error = _parse_record(evidence)
+    if error is not None:
+        return error
     if evidence["task_session_id"] != session.session_id:
         return (
             f"task_session_id {evidence['task_session_id']!r} 与本会话 "
@@ -378,7 +383,7 @@ def derive_evidence_state(events: list) -> EvidenceState:
     for event in events:
         if event.type != EVIDENCE_RECORDED:
             continue
-        record = _parse_record(event.data if isinstance(event.data, dict) else None)
+        record, _ = _parse_record(event.data if isinstance(event.data, dict) else None)
         if record is None:
             logger.warning(
                 "evidence/recorded (seq=%s) payload 非法，投影跳过该事件",
@@ -456,7 +461,9 @@ def evaluate_evidence_freshness(
     reasons: list[str] = []
     if current_manifest is None:
         reasons.append("无法读取当前工作区 manifest（fail-closed 判 stale）")
-    else:
+    elif current_manifest.manifest_hash != record.workspace_manifest.manifest_hash:
+        # manifest_hash 先行比对：一致则文件维度直接通过；不一致才逐文件
+        # diff 产出明确原因（列出变动文件）。
         current = {item.path: item.sha256 for item in current_manifest.files}
         for item in record.workspace_manifest.files:
             current_sha = current.get(item.path)

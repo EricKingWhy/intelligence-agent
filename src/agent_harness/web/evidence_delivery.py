@@ -95,6 +95,15 @@ def register_evidence_routes(
         except (InvalidSessionId, SessionNotFound, SeqConflict) as e:
             raise http_error(e) from e
         _evidence_http_error(outcome)
-        records = outcome.state.by_criterion.get(req.evidence.get("criterion_id"), ())
-        recorded = records[-1].to_payload() if records else {}
+        # POST 与 GET 同口径：返回的 record 带 freshness（读取时求值），
+        # 客户端拿到的陈旧标识与刷新后一致。
+        projection = await service.evidence_state(session_id)
+        recorded: dict = {}
+        if projection is not None:
+            for item in projection["by_criterion"].get(
+                req.evidence.get("criterion_id"), ()
+            ):
+                if item.get("evidence_id") == req.evidence.get("evidence_id"):
+                    recorded = item
+                    break
         return {"status": "recorded", "record": recorded}
