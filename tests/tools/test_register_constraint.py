@@ -178,3 +178,24 @@ async def test_conflict_question_rejects_candidate_not_from_current_user(tmp_pat
     assert result.data["status"] == "rejected"
     assert not result.pending_events
     assert not any(event.type == USER_INPUT_REQUESTED for event in session.events)
+
+
+def test_register_prompt_rejects_tentative_constraints_and_stops_without_work():
+    guidance = RegisterConstraintTool().prompt_guidance.lower()
+
+    assert "maybe" in guidance
+    assert "not decided" in guidance
+    assert "no requested work" in guidance
+    assert "stop" in guidance
+    assert "not saved" in guidance
+
+
+def test_resolution_schema_and_guidance_require_exact_single_request():
+    properties = RequestConstraintResolutionArgs.model_json_schema()["properties"]
+    guidance = RequestConstraintResolutionTool().prompt_guidance.lower()
+
+    assert "active protected constraint" in properties["fact_id"]["description"].lower()
+    assert "verbatim contiguous text from the current direct user message" in properties["candidate"]["description"].lower()
+    assert "exactly once" in guidance
+    assert "wait for the user" in guidance
+    assert "do not use another tool" in guidance

@@ -41,8 +41,21 @@ _ADMISSION_REJECTION_MESSAGES = {
 class RequestConstraintResolutionArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    fact_id: str = Field(..., strict=True, min_length=1, max_length=128)
-    candidate: str = Field(..., strict=True, min_length=1, max_length=10_000)
+    fact_id: str = Field(
+        ..., strict=True, min_length=1, max_length=128,
+        description=(
+            "Copy the exact id of the active protected constraint being corrected, "
+            "as shown in the injected active protected constraints. Never guess or synthesize an id."
+        ),
+    )
+    candidate: str = Field(
+        ..., strict=True, min_length=1, max_length=10_000,
+        description=(
+            "Copy the complete proposed constraint as verbatim contiguous text from the "
+            "current direct user message. Do not paraphrase, combine it with the old constraint, "
+            "or add text the user did not write."
+        ),
+    )
 
     @field_validator("candidate")
     @classmethod
@@ -94,8 +107,13 @@ class RequestConstraintResolutionTool(Tool):
             "user choose whether it replaces the persistent rule or applies only to this task. "
             "Also use it for another material constraint that may conflict with an active one only "
             "when you cannot reliably infer its persistence scope. Do not use it for ordinary "
-            "conversation or non-conflicting additions. Before asking, do not register the opposite "
-            "constraint or continue work affected by the conflict."
+            "conversation or non-conflicting additions. Copy the exact active fact id from the "
+            "protected-constraints context and the complete candidate verbatim from the current "
+            "direct user message. Call this tool exactly once. Before asking, do not register the "
+            "opposite constraint or continue work affected by the conflict. After a requested result, "
+            "wait for the user; do not use another tool until they answer. If the request is rejected, "
+            "do not guess another id or retry with a synthesized candidate. After the user's answer, "
+            "apply only their selected scope; if they requested no concrete work, acknowledge it and stop."
         )
 
     @property
