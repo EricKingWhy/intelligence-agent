@@ -1526,7 +1526,7 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   [EventType.TASK_PROTECTED_FACT]: { apply: noopProjection, summarize: emptySummary },
   // #352：evidence/recorded 是验收证据的 durable 事实，不是对话时间线项；
   // 权威投影在后端 `derive_evidence_state`（GET /api/sessions/{sid}/evidence 单源），
-  // 前端不在本地再造第二套证据状态（与 TASK_* 同不变量）。登记为 no-op ⇒ 已知类型、
+  // 前端不在本地再造第二套证据状态（与 TASK_* 同不变量 #22）。登记为 no-op ⇒ 已知类型、
   // 不进 `unknown_events`；证据 UI 呈现面归后续前端票，本行只负责 `Record` 的穷尽性
   // （生成物 `event-types.ts` 新增类型时 tsc 失败直到登记）。
   [EventType.EVIDENCE_RECORDED]: { apply: noopProjection, summarize: emptySummary },
