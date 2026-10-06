@@ -12,7 +12,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from agent_harness.agent import AgentEvent
-from agent_harness.cli import StreamRenderer, _collapse_args, run
+from agent_harness.cli import StreamRenderer, _collapse_args, _preview_window, run
 from agent_harness.cli_theme import Theme
 from agent_harness.session import (
     MODEL_COMPLETED,
@@ -84,8 +84,40 @@ class TestStreamRenderer:
             "content": json.dumps({
                 "ok": True, "message": "a\nb\nc\nd",
                 "metadata": {"duration_ms": 1234}})}))
-        assert out == ["  [ok] (1.2s)\n", "  a\n", "  b\n", "  c\n",
-                       "  ... +1 more lines\n"]
+        # 4 行 ≤ 5：全部显示、无截断行（#736 取行方向修正后旧 `... +1 more lines` 消失）
+        assert out == ["  [ok] (1.2s)\n", "  a\n", "  b\n", "  c\n", "  d\n"]
+
+    def test_preview_tail_five(self):
+        """8 行输出取尾部 5 行（l4..l8）；hint 在保留行之前——隐藏的是更早的行。"""
+        out: list[str] = []
+        renderer = StreamRenderer(out.append)
+        renderer.handle(_event(TOOL_RESULT, {
+            "tool_call_id": "c1",
+            "content": json.dumps({
+                "ok": True, "message": "\n".join(f"l{i}" for i in range(1, 9)),
+                "metadata": {"duration_ms": 1234}})}))
+        assert out == ["  [ok] (1.2s)\n", "  └ … (3 earlier lines)\n",
+                       "  l4\n", "  l5\n", "  l6\n", "  l7\n", "  l8\n"]
+        joined = "".join(out)
+        # 顺序即契约：hint 在保留行之前（隐藏的是更早的行，在上方）
+        assert joined.index("  └ … (3 earlier lines)\n") < joined.index("  l4\n")
+
+    def test_preview_exactly_five(self):
+        """恰好 5 行：全显示，无截断行。"""
+        out: list[str] = []
+        StreamRenderer(out.append).handle(_event(TOOL_RESULT, {
+            "tool_call_id": "c1",
+            "content": json.dumps({
+                "ok": True, "message": "\n".join(f"l{i}" for i in range(1, 6))})}))
+        assert out == ["  [ok]\n", "  l1\n", "  l2\n", "  l3\n", "  l4\n", "  l5\n"]
+
+    def test_preview_empty(self):
+        """message 为空：无预览行、无截断行（现状保持）。"""
+        out: list[str] = []
+        StreamRenderer(out.append).handle(_event(TOOL_RESULT, {
+            "tool_call_id": "c1",
+            "content": json.dumps({"ok": True, "message": ""})}))
+        assert out == ["  [ok]\n"]
 
     def test_tool_failure_marked_without_duration(self):
         out: list[str] = []
@@ -132,6 +164,14 @@ def test_collapse_args_flattens_newlines():
     result = _collapse_args({"command": "echo a\necho b"}, sep=" · ")
     assert "\n" not in result
     assert result == 'command="echo a echo b"'
+
+
+def test_preview_window():
+    """`_preview_window` 纯函数：keep="end" 取尾部，隐藏数 = 总行数 − keep。"""
+    assert _preview_window(["a", "b"], 5) == (["a", "b"], 0)
+    visible, hidden = _preview_window([str(i) for i in range(7)], 5)
+    assert visible == ["2", "3", "4", "5", "6"]
+    assert hidden == 2
 
 
 @pytest.mark.asyncio
