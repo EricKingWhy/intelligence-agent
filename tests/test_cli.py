@@ -15,6 +15,7 @@ from agent_harness.agent import AgentEvent
 from agent_harness.cli import (
     StreamRenderer,
     _collapse_args,
+    _emit_stderr,
     _format_tokens,
     _preview_window,
     _render_footer,
@@ -92,7 +93,8 @@ class TestStreamRenderer:
                 "ok": True, "message": "a\nb\nc\nd",
                 "metadata": {"duration_ms": 1234}})}))
         # 4 行 ≤ 5：全部显示、无截断行（#736 取行方向修正后旧 `... +1 more lines` 消失）
-        assert out == ["  [ok] (1.2s)\n", "  a\n", "  b\n", "  c\n", "  d\n"]
+        # P0-7：状态标签 `●`（plain 无色；suffix 归 P0-5，本票保留现状 `(1.2s)`）
+        assert out == ["  ● (1.2s)\n", "  a\n", "  b\n", "  c\n", "  d\n"]
 
     def test_preview_tail_five(self):
         """8 行输出取尾部 5 行（l4..l8）；hint 在保留行之前——隐藏的是更早的行。"""
@@ -103,7 +105,7 @@ class TestStreamRenderer:
             "content": json.dumps({
                 "ok": True, "message": "\n".join(f"l{i}" for i in range(1, 9)),
                 "metadata": {"duration_ms": 1234}})}))
-        assert out == ["  [ok] (1.2s)\n", "  └ … (3 earlier lines)\n",
+        assert out == ["  ● (1.2s)\n", "  └ … (3 earlier lines)\n",
                        "  l4\n", "  l5\n", "  l6\n", "  l7\n", "  l8\n"]
         joined = "".join(out)
         # 顺序即契约：hint 在保留行之前（隐藏的是更早的行，在上方）
@@ -116,7 +118,7 @@ class TestStreamRenderer:
             "tool_call_id": "c1",
             "content": json.dumps({
                 "ok": True, "message": "\n".join(f"l{i}" for i in range(1, 6))})}))
-        assert out == ["  [ok]\n", "  l1\n", "  l2\n", "  l3\n", "  l4\n", "  l5\n"]
+        assert out == ["  ●\n", "  l1\n", "  l2\n", "  l3\n", "  l4\n", "  l5\n"]
 
     def test_preview_empty(self):
         """message 为空：无预览行、无截断行（现状保持）。"""
@@ -124,7 +126,7 @@ class TestStreamRenderer:
         StreamRenderer(out.append).handle(_event(TOOL_RESULT, {
             "tool_call_id": "c1",
             "content": json.dumps({"ok": True, "message": ""})}))
-        assert out == ["  [ok]\n"]
+        assert out == ["  ●\n"]
 
     def test_tool_failure_marked_without_duration(self):
         out: list[str] = []
@@ -132,7 +134,7 @@ class TestStreamRenderer:
         renderer.handle(_event(TOOL_RESULT, {
             "tool_call_id": "c1",
             "content": json.dumps({"ok": False, "message": "boom"})}))
-        assert out == ["  [fail]\n", "  boom\n"]
+        assert out == ["  ●\n", "  boom\n"]
 
     def test_run_completed_prints_usage_footer(self):
         out: list[str] = []
@@ -150,10 +152,58 @@ class TestStreamRenderer:
         assert out == ["\n"]
 
     def test_run_failed_shows_reason(self):
+        # P0-7（AC1）：plain 档整块 `● 人话 (技术原因)。下一步：指引`，零 ANSI
         out: list[str] = []
-        StreamRenderer(out.append).handle(
+        StreamRenderer(out.append, theme=Theme(color="nocolor")).handle(
             _event(RUN_FAILED, {"reason": "cancelled"}))
-        assert out == ["\n[run failed] (cancelled)\n"]
+        assert out == [
+            (
+                "\n● 运行被手动取消 (cancelled)。"
+                "下一步：用 `agent-harness resume <session_id>` 接上同一次运行\n"
+            )
+        ]
+
+    def test_run_failed_message_priority(self):
+        """P0-7（AC2）：data 带 message ⇒ 走归因面固定文案（ADR-0033），不套 run 级表；
+        provider 类文案内已含"请…"指引 ⇒ 无「。下一步：」段。"""
+        out: list[str] = []
+        StreamRenderer(out.append, theme=Theme(color="nocolor")).handle(
+            _event(RUN_FAILED, {
+                "reason": "provider_auth_failed",
+                "message": "模型供应商鉴权失败（API Key 无效或无权限），请检查供应商凭证配置"}))
+        assert out == [
+            (
+                "\n● 模型供应商鉴权失败（API Key 无效或无权限），请检查供应商凭证配置"
+                " (provider_auth_failed)\n"
+            )
+        ]
+
+    def test_run_failed_unknown_reason(self):
+        """P0-7（AC3）：未分类 reason ⇒ 兜底人话 + 后端日志指引；reason 缺失时省略 ` ()` 段。"""
+        out: list[str] = []
+        StreamRenderer(out.append, theme=Theme(color="nocolor")).handle(
+            _event(RUN_FAILED, {"reason": "weird_x"}))
+        assert out == [
+            "\n● 运行失败（weird_x），原因未分类。下一步：完整原始信息见后端日志\n"
+        ]
+        out2: list[str] = []
+        StreamRenderer(out2.append, theme=Theme(color="nocolor")).handle(
+            _event(RUN_FAILED, {}))
+        assert out2 == ["\n● 运行失败，原因未分类。下一步：完整原始信息见后端日志\n"]
+
+    def test_run_failed_truecolor_block(self):
+        """P0-7（AC6）：真彩档整块 ERR 色（#e5726f → 215;95;95）包住 `●` 到句尾。"""
+        out: list[str] = []
+        StreamRenderer(out.append, theme=Theme(color="truecolor")).handle(
+            _event(RUN_FAILED, {"reason": "cancelled"}))
+        assert out == [
+            (
+                "\n\x1b[38;2;215;95;95m"
+                "● 运行被手动取消 (cancelled)。"
+                "下一步：用 `agent-harness resume <session_id>` 接上同一次运行"
+                "\x1b[0m\n"
+            )
+        ]
 
     def test_persistence_only_events_are_silent(self):
         """model/completed、user/message 等持久化镜像不渲染——事实在 JSONL，
@@ -180,6 +230,18 @@ def test_preview_window():
     visible, hidden = _preview_window([str(i) for i in range(7)], 5)
     assert visible == ["2", "3", "4", "5", "6"]
     assert hidden == 2
+
+
+def test_emit_stderr_is_muted_gray(capsys):
+    """P0-7（AC8）：stderr 统一 muted 灰（246）；Pi 纪律——stderr 不染 ERR 红。"""
+    _emit_stderr("x", theme=Theme(color="truecolor"))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "\x1b[38;2;148;148;148mx\x1b[0m\n"
+
+    _emit_stderr("x", theme=Theme(color="nocolor"))
+    captured = capsys.readouterr()
+    assert captured.err == "x\n"
 
 
 @pytest.mark.parametrize(
@@ -294,7 +356,11 @@ async def test_cli_run_failed_returns_empty_final_text(tmp_path, monkeypatch):
     outcome = await run("触发失败", write=out.append)
     assert outcome.final_text == ""
     assert outcome.paused is False
-    assert "[run failed]" in "".join(out)
+    # P0-7：失败块走人话渲染（未分类异常落 UNCLASSIFIED_FAILURE_MESSAGE，含类名 +
+    # 后端日志指引），旧 `[run failed]` 标签已由 `●` 人话块取代。
+    streamed = "".join(out)
+    assert "●" in streamed and "TimeoutError" in streamed
+    assert "下一步：完整原始信息见后端日志" in streamed
 
 
 @pytest.mark.asyncio
