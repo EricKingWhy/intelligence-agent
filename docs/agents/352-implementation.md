@@ -138,3 +138,17 @@ Spec 轴：NEEDS-FIX（P0=0/P1=4/P2=3/P3=3）。逐条裁决：
   结论 REREVIEW-SPEC: CLEAN (P0-P3=0)。
 - 说明：Spec 审查者抽查时读到了我正在落盘的 Standards 修复中间态（送审 diff 与工作树短暂不一致），
   其闭合判定不受影响（语义一致）；最终工作树即其所见的终态。
+
+## 8. 终验读数（2026-10-06）
+
+- **Gate-0**：`2dadbc8c` 上 6/6 PASS（diff-check / ruff / oxlint / tsc / guards / coverage），
+  读数 `docs/gate/2dadbc8c582e8d519a314409b8ea25f780a12119.json`（20.4s）。
+  过程中修过两处 gate 暴露的问题：① tsc 要求 `EVENT_SEMANTICS` 穷尽登记 →
+  `web/src/lib/projection.ts` 补 `EVIDENCE_RECORDED` no-op（另起 mini 双轴审查，均 CLEAN，
+  台账第二行）；② `test_all_event_types_registered` 硬编码期望集缺新类型 → 补 `evidence/recorded`
+  （测试枚举机械跟进，台账第三行）。
+- **回归**：tests/session 768 passed（仅 `test_readonly_target_fails_explicitly` 在 root 下
+  环境假红，AGENTS.md 已记）；tests/web 730 passed；tests/tools 164 passed。
+  环境坑：`no_proxy` 含 IPv6 条目会使 httpx 报 `Invalid port: ':1]'`（测试前
+  `export no_proxy=localhost,127.0.0.1`）；venv 需补 `langgraph`/`langmem`/`httpx2[ws]`。
+- **冻结**：HEAD `c687702c`（tree `a83077d7`），`git diff --check` 干净；未 push/PR/merge/关单。
