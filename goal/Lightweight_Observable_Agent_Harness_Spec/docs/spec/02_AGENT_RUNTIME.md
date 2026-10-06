@@ -110,11 +110,14 @@ Streaming MUST：
   ⇒ 拒绝且不启动任何工作。并发恢复同一版本 ⇒ 至多一个生效。
 - 事件字段、投影字段与状态枚举的契约见 `03 §3.4`（事件）、`03 §5`（Run 状态集合）与 `11 §6.1`。
 
-#### 5.2.1 个人工作台的客户端离开扩展（2026-09-27 用户批准；#305 原验收不变）
+#### 5.2.1 个人工作台的客户端离开扩展（2026-09-27 用户批准；#305 原验收不变；2026-10-06 按 #356 选项 B 修订）
 
-在产品任务明确由桌面/TUI/本机 Web 托管的**后续产品阶段**，最后一个托管该 Task 的客户端明确退出，或意外断线经过有界重连宽限时，Run MUST 停止接纳新的 Model/Tool/Child 工作；在途 Tool 依既有 Operation Ledger 收尾。确认没有未决副作用后，落一次持久化 `run/paused(reason=client_absent)`，沿用同一 `run_id`、预算消耗和 continuation；该原因的 continuation 只从持久化事实确定性生成，MUST NOT 为“礼貌收尾”额外发起模型请求。UNKNOWN / NEED_RECONCILE 优先于可安全续跑的 paused 状态。重新出现客户端**不自动续跑**，须用户明确提交 `resume_basis=client_return` 与当前 `expected_version`，并先通过既有 reconcile 检查。
+在产品任务明确由桌面/TUI/本机 Web 托管的**后续产品阶段**，客户端离开分两种情形，**必须区分**：
 
-本扩展只替换**受产品客户端在场协议管理的 Run** 的零订阅者孤儿回收结果；未接入该协议的原 CLI/Web 运行仍按 `03 §5` 的既有 `run/failed(reason=orphaned)` 语义收口，直至有独立迁移证据。预算 / deadline / stuck 三条 #305 暂停原因、显式 cancel、现有预算账目与真实 Live Gate 验收均不因本段改写。
+- **明确退出**（客户端主动发送退出信号，声明最后一个托管该 Task 的客户端正在离开）：Run MUST 停止接纳新的 Model/Tool/Child 工作；在途 Tool 依既有 Operation Ledger 收尾，不强杀。确认没有未决副作用后，落一次持久化 `run/paused(reason=client_absent)`，沿用同一 `run_id`、预算消耗和 continuation；该原因的 continuation 只从持久化事实确定性生成，MUST NOT 为“礼貌收尾”额外发起模型请求。UNKNOWN / NEED_RECONCILE 优先于可安全续跑的 paused 状态。暂停后客户端返回**不自动续跑**，须用户明确提交 `resume_basis=client_return` 与当前 `expected_version`，并先通过既有 reconcile 检查。
+- **意外断线**（无明确退出信号）：Run MUST NOT 因此停止接纳——“零订阅者”不是客户端离开的证据（网络抖动/重连中的短暂断流与用户关闭客户端在服务端不可区分）。Run 继续推进，由持久化 + 重连 replay + 显式 resume 自愈；零订阅者宽限计时到期**只记日志、不置缺席、不暂停**。
+
+本扩展只适用于**受产品客户端在场协议管理的 Run**；未接入该协议的原 CLI/Web 运行仍按 `03 §5` 的既有 `run/failed(reason=orphaned)` 语义收口，直至有独立迁移证据。预算 / deadline / stuck 三条 #305 暂停原因、显式 cancel、现有预算账目与真实 Live Gate 验收均不因本段改写。
 
 ### 5.3 Stuck 检测（五模式，扩展既有 guard 责任域）
 
