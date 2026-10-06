@@ -27,12 +27,9 @@ import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
 import { ContextUsagePanel } from './components/ContextUsagePanel';
 import { StepDetail, type InspectorFocus, type InspectorPanelAction } from './components/StepDetail';
 import { PausedPanel } from './components/PausedPanel';
-<<<<<<< HEAD
 import { RecoveryDecisionPanel } from './components/RecoveryDecisionPanel';
 import { RecoveryListPanel } from './components/RecoveryListPanel';
-=======
 import { ConstraintResolutionDialog } from './components/ConstraintResolutionDialog';
->>>>>>> origin/main
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import { OutputPanel } from './components/OutputPanel';
 import { ChangesPanel } from './components/ChangesPanel';
@@ -63,12 +60,9 @@ import {
   getSandboxBackends,
   type CatalogEntry,
   type ModelCatalogEntry,
-<<<<<<< HEAD
   type PendingDecision,
-=======
   type SandboxBackendEntry,
   type StartSessionPayload,
->>>>>>> origin/main
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
