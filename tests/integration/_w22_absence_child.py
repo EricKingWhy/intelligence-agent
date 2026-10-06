@@ -43,6 +43,7 @@ from agent_harness.model.scripted import ScriptedModel
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session import TOOL_CALL, JsonlSessionStore, Session
 from agent_harness.session.runmanager import CLIENT_EXIT_PAUSED, RunManager
+from agent_harness.storage import OperationState, SqliteOperationLedger
 
 GRACE_SECONDS = 0.2
 
@@ -95,6 +96,20 @@ async def main() -> None:
         assert any(e.type == TOOL_CALL for e in session.events), "bash 未进入在途"
 
         if mode == "crash_before_pause":
+            # #744：等 operation 进 ledger 且到 RUNNING 再崩——TOOL_CALL 与 ledger
+            # 写入之间有竞态窗口（#358 规则引擎加宽），只等 TOOL_CALL 会在
+            # Windows 上崩在写入前，导致父进程恢复时找不到 call-1。
+            ledger = SqliteOperationLedger(root / "harness.db")
+            await ledger.initialize()
+            for _ in range(500):
+                op = await ledger.get(session.session_id, "call-1")
+                if op is not None and op.state is OperationState.RUNNING:
+                    break
+                await asyncio.sleep(0.02)
+            op = await ledger.get(session.session_id, "call-1")
+            assert op is not None and op.state is OperationState.RUNNING, (
+                "bash operation 未进入 RUNNING，无法构造崩溃窗口"
+            )
             # 明确退出信号置缺席后、真实 bash（sleep 10）仍在执行时硬崩：
             # run/paused 永远来不及写——父进程按既有 interrupted/reconcile 恢复。
             _signal_task = asyncio.create_task(
