@@ -16,7 +16,9 @@ from agent_harness.cli import (
     StreamRenderer,
     _collapse_args,
     _emit_stderr,
+    _format_tokens,
     _preview_window,
+    _render_footer,
     run,
 )
 from agent_harness.cli_theme import Theme
@@ -136,11 +138,12 @@ class TestStreamRenderer:
 
     def test_run_completed_prints_usage_footer(self):
         out: list[str] = []
-        renderer = StreamRenderer(out.append)
+        renderer = StreamRenderer(out.append, theme=Theme(color="nocolor"))
         renderer.handle(_event(RUN_COMPLETED, {
             "final_text": "完成",
             "usage_total": {"prompt_tokens": 1200, "completion_tokens": 345}}))
-        assert out == ["\n", "tokens: in 1.2k, out 345\n"]
+        # #738：页脚升级为 `↑in ↓out`（Pi footer.ts 语法）；左对齐单行，无模型名/右对齐
+        assert out == ["\n", "↑1.2k ↓345\n"]
 
     def test_run_completed_without_usage_prints_blank_line_only(self):
         out: list[str] = []
@@ -239,6 +242,57 @@ def test_emit_stderr_is_muted_gray(capsys):
     _emit_stderr("x", theme=Theme(color="nocolor"))
     captured = capsys.readouterr()
     assert captured.err == "x\n"
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (999, "999"),
+        (1200, "1.2k"),
+        (9999, "10.0k"),
+        (15230, "15k"),
+        (999999, "1000k"),
+        (1500000, "1.5M"),
+        (15500000, "16M"),
+        (None, "?"),
+        (-5, "?"),
+        ("x", "?"),
+        (True, "?"),
+    ],
+)
+def test_format_tokens_pi_five_tiers(count, expected):
+    """`_format_tokens` Pi 五档边界（#738 票面 §1 表逐条；`<10000` 与 `>=10000`
+    的 k 档、`<10000000` 与 `>=10000000` 的 M 档各走小数/整数压缩不同分支）。"""
+    assert _format_tokens(count) == expected
+
+
+def test_render_footer_left_aligned_no_padding():
+    """`_render_footer` 返回左对齐单行、无填充（#738 去右对齐）。"""
+    assert _render_footer(
+        {"prompt_tokens": 1200, "completion_tokens": 345},
+        theme=Theme(color="nocolor"),
+    ) == "↑1.2k ↓345"
+
+
+def test_render_footer_drops_none_or_zero_segments():
+    """`None`/0 的段 drop；两段都无 → 空串（Pi L181-182 语义）。"""
+    assert _render_footer(
+        {"prompt_tokens": None, "completion_tokens": 345},
+        theme=Theme(color="nocolor"),
+    ) == "↓345"
+    assert _render_footer(
+        {"prompt_tokens": 0, "completion_tokens": 345},
+        theme=Theme(color="nocolor"),
+    ) == "↓345"
+    assert _render_footer({}, theme=Theme(color="nocolor")) == ""
+
+
+def test_render_footer_muted_truecolor():
+    """dim 段统一取 P0-1 的 muted=（148,148,148）（跨票口径 #738）。"""
+    assert _render_footer(
+        {"prompt_tokens": 1200, "completion_tokens": 345},
+        theme=Theme(color="truecolor"),
+    ) == "\x1b[38;2;148;148;148m↑1.2k ↓345\x1b[0m"
 
 
 @pytest.mark.asyncio
