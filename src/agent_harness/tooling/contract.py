@@ -265,6 +265,18 @@ class Tool(ABC):
         """
         return ReconcileHint(verifiable=False)
 
+    @property
+    def replay_safe(self) -> bool:
+        """崩溃恢复时本工具被中断后「盲目重跑」是否安全。默认 False（unsafe）。
+
+        判据（True 的必要且充分条件）：``side_effect == READ_ONLY`` 且重执行
+        幂等、无任何外部副作用（含远程）。形制取自 Pi durable ``replay:"safe"``
+        （双 safe 才重跑）；与 reconcile_hint 正交——hint 只影响「可否外部核验」，
+        本属性只影响「可否安全重放」。不变量 #14 不变：协调器永不据此自动重跑，
+        本属性只驱动恢复裁决 UI 的默认方向（#357 W-13 契约 7）。
+        """
+        return False
+
     def resource_keys(self, args: BaseModel) -> list[str]:
         """声明本次调用将触碰的共享 resource key（供跨批互斥使用）。
 

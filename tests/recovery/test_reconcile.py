@@ -1064,3 +1064,135 @@ async def test_non_dangling_pending_operation_is_not_a_reconcile_case(
     assert recovered.events[-1].type == SESSION_RESUMED
     operation = await ledger.get(session.session_id, "call-1")
     assert operation is not None and operation.state is OperationState.PENDING
+
+
+# ── #357 W-13：DEFER 第五裁决 + 裁决来源留痕（#547 合同只做加法） ──
+
+
+class _BlockingSourcedCallback(ReconcileCallback):
+    """阻塞放行 + 声明 source_for 的 callback：证明来源留痕不绕过 token-CAS。"""
+
+    def __init__(self, verdict: ReconcileVerdict, source: str) -> None:
+        self.verdict = verdict
+        self.source = source
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def resolve(
+        self, operation: Operation, hint: ReconcileHint
+    ) -> ReconcileVerdict:
+        self.started.set()
+        await self.release.wait()
+        return self.verdict
+
+    def source_for(self, operation: Operation) -> str | None:
+        return self.source
+
+
+def test_reconcile_decision_source_field_is_backward_compatible() -> None:
+    """R8：`ReconcileDecision.source` 带默认值——旧构造点（#547 两条目）零迁移。"""
+    from agent_harness.session.service import ReconcileDecision
+
+    legacy = ReconcileDecision("c1", "ABANDON")
+    assert legacy.source is None
+    assert ReconcileDecision("c1", "ABANDON", source="查了外部系统").source == "查了外部系统"
+
+
+@pytest.mark.asyncio
+async def test_defer_verdict_keeps_pending_without_terminal_result(
+    tmp_path: Path,
+) -> None:
+    """R5（D1 audit-only）：DEFER = 用户暂缓——Ledger 保持 NEED_RECONCILE 可稍后
+    重新裁决；reconcile_meta 记 DEFER；operation/reconciled 审计事件在场；
+    **不合成**终态 tool/result（悬空是 DEFER 的诚实表示，非缺陷——对 07 §8 的
+    明示豁免，依据 #357 修订 A §9.4-3）。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, session.session_id, "call-1", OperationState.RUNNING)
+
+    recovered = await _make_coordinator(
+        store,
+        ledger,
+        tmp_path / "state.db",
+        reconcile_callback=_ScriptedCallback(ReconcileVerdict.DEFER),
+    ).recover(session.session_id)
+
+    operation = await ledger.get(session.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.NEED_RECONCILE
+    meta = json.loads(operation.reconcile_meta)
+    assert meta["verdict"] == "DEFER"
+    assert "reconciled_at" in meta
+    assert _result_events(recovered) == {}, "DEFER 不得合成终态 tool/result"
+    reconciled = [e for e in recovered.events if e.type == OPERATION_RECONCILED]
+    assert reconciled, "DEFER 也必须落 operation/reconciled 审计事件"
+    assert reconciled[0].data["verdict"] == "DEFER"
+    assert reconciled[0].data["state"] == "NEED_RECONCILE"
+
+
+@pytest.mark.asyncio
+async def test_confirm_success_records_source_annotation_in_meta(
+    tmp_path: Path,
+) -> None:
+    """R9：裁决来源随裁决落 reconcile_meta；除 verdict/reconciled_at/source 外
+    **不伪造**任何自动验证字段。"""
+    from agent_harness.recovery.coordinator import DecisionsReconcileCallback
+
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, session.session_id, "call-1", OperationState.RUNNING)
+    callback = DecisionsReconcileCallback(
+        {"call-1": ReconcileVerdict.CONFIRM_SUCCESS},
+        sources={"call-1": "我查了外部系统：迁移已应用"},
+    )
+
+    await _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback,
+    ).recover(session.session_id)
+
+    operation = await ledger.get(session.session_id, "call-1")
+    meta = json.loads(operation.reconcile_meta)
+    assert set(meta) == {"verdict", "reconciled_at", "source"}, (
+        "reconcile_meta 只记裁决事实，不得伪造自动验证字段"
+    )
+    assert meta["verdict"] == "CONFIRM_SUCCESS"
+    assert meta["source"] == "我查了外部系统：迁移已应用"
+
+
+@pytest.mark.asyncio
+async def test_sourced_callback_still_rejected_when_operation_changes(
+    tmp_path: Path,
+) -> None:
+    """R18（#547 回归护栏）：带 source_for 的裁决同样走 token-CAS——等待期
+    Operation 被改 → RecoveryError，零 tool/result 写入。"""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    crashed = _make_crashed_session(store)
+    ledger = SqliteOperationLedger(tmp_path / "state.db")
+    await ledger.initialize()
+    await _seed_operation(ledger, crashed.session_id, "call-1", OperationState.RUNNING)
+
+    callback = _BlockingSourcedCallback(
+        ReconcileVerdict.CONFIRM_SUCCESS, source="来源留痕不能绕过 CAS"
+    )
+    coordinator = _make_coordinator(
+        store, ledger, tmp_path / "state.db", reconcile_callback=callback,
+    )
+
+    pending = asyncio.create_task(coordinator.recover(crashed.session_id))
+    await callback.started.wait()
+    await ledger.update_state(
+        crashed.session_id, "call-1", OperationState.CANCELLED,
+    )
+    callback.release.set()
+
+    with pytest.raises(RecoveryError, match="stale reconcile verdict"):
+        await pending
+    operation = await ledger.get(crashed.session_id, "call-1")
+    assert operation is not None and operation.state is OperationState.CANCELLED
+    assert not [
+        event for event in store.read_events(crashed.session_id)
+        if event.type == TOOL_RESULT
+    ]

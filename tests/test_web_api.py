@@ -990,6 +990,126 @@ def test_recover_partial_coverage_returns_409_with_pending_list(client):
     assert all(s is OperationState.UNKNOWN for s in asyncio.run(_row_states()))
 
 
+# ── #357 W-13：DEFER 第五裁决 + 裁决来源（#547 合同只做加法） ──
+
+
+def test_recover_with_defer_is_accepted_and_keeps_pending(client):
+    """R4/R6：DEFER 被预检接纳（200，不再 422）；Ledger 保持 NEED_RECONCILE，
+    再次 recover 无裁决 → 409 且该 op 仍在 pending_decisions（可稍后重新裁决）。"""
+    from agent_harness.storage import OperationState
+
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-def"]))
+    base = f"/api/sessions/{session.session_id}/recover"
+
+    resp = client.post(
+        base,
+        json={"decisions": [{"tool_call_id": "call-def", "verdict": "DEFER"}]},
+    )
+    assert resp.status_code == 200, resp.json()
+    reconciled = [e for e in resp.json() if e["type"] == "operation/reconciled"]
+    assert reconciled and reconciled[0]["data"]["verdict"] == "DEFER"
+
+    async def _row():
+        return await state.stores.operation_ledger.get(session.session_id, "call-def")
+
+    assert asyncio.run(_row()).state is OperationState.NEED_RECONCILE
+
+    again = client.post(base)
+    assert again.status_code == 409, "DEFER 不结清：无裁决再次恢复必须仍 409"
+    pending = again.json()["detail"]["pending_decisions"]
+    assert [p["tool_call_id"] for p in pending] == ["call-def"]
+
+
+def test_recover_all_deferred_decisions_do_not_block(client):
+    """R7：全部 pending 都被 DEFER 覆盖时 recover() 返回 200 不 409（不阻塞）。"""
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-d1", "call-d2"]))
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/recover",
+        json={"decisions": [
+            {"tool_call_id": "call-d1", "verdict": "DEFER"},
+            {"tool_call_id": "call-d2", "verdict": "DEFER"},
+        ]},
+    )
+    assert resp.status_code == 200, resp.json()
+
+
+def test_recover_decision_source_is_optional_and_capped(client):
+    """R11：source 省略合法（#547 形状零迁移、不伪造来源）；2000 字符内逐字
+    留痕进 reconcile_meta；超限 422 且零写入（与 ApproveRequest.reason 同口径）。"""
+    state = client.app.state.agent
+    session = asyncio.run(
+        _seed_reconcile_window(state, ["call-omit", "call-marked", "call-long"])
+    )
+    base = f"/api/sessions/{session.session_id}/recover"
+
+    over = client.post(
+        base,
+        json={"decisions": [
+            {"tool_call_id": "call-omit", "verdict": "DEFER"},
+            {"tool_call_id": "call-marked", "verdict": "CONFIRM_SUCCESS"},
+            {"tool_call_id": "call-long", "verdict": "CONFIRM_SUCCESS",
+             "source": "x" * 2001},
+        ]},
+    )
+    assert over.status_code == 422, "source 超 2000 字符必须 422"
+
+    def _row(call_id):
+        return asyncio.run(
+            state.stores.operation_ledger.get(session.session_id, call_id)
+        )
+
+    assert all(
+        _row(c).state.value == "UNKNOWN"
+        for c in ("call-omit", "call-marked", "call-long")
+    ), "被拒请求零写入"
+
+    ok = client.post(
+        base,
+        json={"decisions": [
+            {"tool_call_id": "call-omit", "verdict": "DEFER"},
+            {"tool_call_id": "call-marked", "verdict": "CONFIRM_SUCCESS",
+             "source": "我查了 git status，改动已落盘"},
+            {"tool_call_id": "call-long", "verdict": "CONFIRM_SUCCESS",
+             "source": "后补的合规来源"},
+        ]},
+    )
+    assert ok.status_code == 200, ok.json()
+    assert "source" not in json.loads(_row("call-omit").reconcile_meta), (
+        "省略 source 不得伪造来源"
+    )
+    marked = json.loads(_row("call-marked").reconcile_meta)
+    assert marked["source"] == "我查了 git status，改动已落盘"
+
+
+def test_recover_duplicate_tool_call_id_rejected_without_writes(client):
+    """R17（#547 回归护栏）：同一 tool_call_id 两条裁决 → 422 且零写入。"""
+    state = client.app.state.agent
+    session = asyncio.run(_seed_reconcile_window(state, ["call-dup"]))
+    base = f"/api/sessions/{session.session_id}/recover"
+    before = client.get(f"/api/sessions/{session.session_id}/events")
+
+    resp = client.post(
+        base,
+        json={"decisions": [
+            {"tool_call_id": "call-dup", "verdict": "CONFIRM_SUCCESS"},
+            {"tool_call_id": "call-dup", "verdict": "ABANDON"},
+        ]},
+    )
+    assert resp.status_code == 422, "重复提交必须 422"
+
+    async def _row_state():
+        op = await state.stores.operation_ledger.get(session.session_id, "call-dup")
+        return op.state.value
+
+    assert asyncio.run(_row_state()) == "UNKNOWN", "被拒请求零写入"
+    assert client.get(f"/api/sessions/{session.session_id}/events").json() == (
+        before.json()
+    )
+
+
 # ── 集成 AI 移交：HTML 响应 CSP 头（纵深防御，INTEGRATION_NOTES §4.1）──
 
 

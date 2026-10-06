@@ -599,10 +599,15 @@ class RecoverDecisionRequest(BaseModel):
 
     ``verdict`` 用字符串承载，合法值由领域层校验（``InvalidDecision`` 422）——
     与 PermissionChangeRequest 同一条纪律：规则单一来源，传输层不复述。
+
+    ``source``（#357 W-13 契约 3）：用户来源自陈（如「我查了外部系统」），
+    可选——省略 = 合法（#547 形状零迁移），有值时逐字进 ``reconcile_meta``。
+    上限 2000 **字符**，与 ``ApproveRequest.reason`` 同口径（防重复放大）。
     """
 
     tool_call_id: str = Field(min_length=1)
     verdict: str = Field(min_length=1)
+    source: str | None = Field(default=None, max_length=2000)
 
 
 class RecoverRequest(BaseModel):
@@ -2688,7 +2693,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         """
         service = session_service(app.state.agent)
         decisions = [
-            ReconcileDecision(tool_call_id=d.tool_call_id, verdict=d.verdict)
+            ReconcileDecision(
+                tool_call_id=d.tool_call_id, verdict=d.verdict, source=d.source,
+            )
             for d in (req.decisions if req is not None else [])
         ]
         try:

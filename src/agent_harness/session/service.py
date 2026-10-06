@@ -566,10 +566,14 @@ class ReconcileDecision:
 
     verdict 用字符串承载（HTTP/CLI 传输词汇），合法性在 `recover` 预检里统一
     校验（``InvalidDecision`` 422）——规则单一来源，不在传输层复述。
+
+    ``source``（#357 W-13 契约 3）：用户来源自陈（如「我查了外部系统」），
+    有值时随裁决逐字进 ``reconcile_meta``。带默认值 ⇒ #547 旧构造点零迁移。
     """
 
     tool_call_id: str
     verdict: str
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3427,6 +3431,7 @@ class SessionService:
 
         # ── #547 裁决预检（先查账、后开工；被拒请求零写入）──────────────
         normalized: dict[str, ReconcileVerdict] = {}
+        sources: dict[str, str] = {}
         for decision in decisions or ():
             try:
                 verdict = ReconcileVerdict(decision.verdict)
@@ -3434,7 +3439,7 @@ class SessionService:
                 raise InvalidDecision(
                     f"裁决值 '{decision.verdict}' 不合法（tool_call_id="
                     f"{decision.tool_call_id}）：合法值 CONFIRM_SUCCESS / "
-                    "CONFIRM_FAILURE / RETRY / ABANDON"
+                    "CONFIRM_FAILURE / RETRY / ABANDON / DEFER"
                 ) from None
             if decision.tool_call_id in normalized:
                 raise InvalidDecision(
@@ -3442,6 +3447,9 @@ class SessionService:
                     "一次恢复里每个调用只能裁决一次（防重复提交）"
                 )
             normalized[decision.tool_call_id] = verdict
+            # #357 W-13（契约 3）：来源自陈可选，有值才留痕，绝不伪造。
+            if decision.source is not None:
+                sources[decision.tool_call_id] = decision.source
 
         pending = await self._reconcile_pending(session_id, existing)
         pending_ids = {item["tool_call_id"] for item in pending}
@@ -3468,7 +3476,7 @@ class SessionService:
                 f"存在需要人工裁决的 UNKNOWN Operation（{detail}）：先 POST "
                 "/api/sessions/{id}/recover 携带 decisions=[{tool_call_id, "
                 "verdict}] 结清（verdict ∈ CONFIRM_SUCCESS / CONFIRM_FAILURE / "
-                "RETRY / ABANDON）；裁决前请先核查该调用的外部事实",
+                "RETRY / ABANDON / DEFER）；裁决前请先核查该调用的外部事实",
                 pending_decisions=pending,
             )
 
@@ -3478,7 +3486,9 @@ class SessionService:
             operation_ledger=self._operation_ledger,
             database_path=self._harness_db,
             reconcile_callback=(
-                DecisionsReconcileCallback(normalized) if normalized else None
+                DecisionsReconcileCallback(normalized, sources=sources)
+                if normalized
+                else None
             ),
         )
         try:

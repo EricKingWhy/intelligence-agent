@@ -151,6 +151,10 @@ _ALLOWED_TRANSITIONS: dict[OperationState, frozenset[OperationState]] = {
             OperationState.SUCCEEDED,
             OperationState.FAILED,
             OperationState.CANCELLED,
+            # 自环（#357 W-13）：DEFER 裁决保持 pending（不推进终态）的同时要
+            # 落 reconcile_meta 审计——没有自环就无法在保持 NEED_RECONCILE 的
+            # 情况下写 meta。行内容变化仍由 UPDATE 的 CAS（WHERE state = ?）守卫。
+            OperationState.NEED_RECONCILE,
         }
     ),
 }

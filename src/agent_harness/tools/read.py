@@ -83,6 +83,11 @@ class ReadTool(Tool):
             suggested_action="重读目标路径，核对内容是否与预期一致（读操作无副作用，重读安全）。",
         )
 
+    @property
+    def replay_safe(self) -> bool:
+        # 只读 + 幂等：重读同一路径无外部副作用（#357 契约 7）。
+        return True
+
     async def execute(self, args: _ReadArgs) -> ToolResult:
         """调 sandbox.read_text；文件不存在或路径越界映射成失败 ToolResult。"""
         try:
