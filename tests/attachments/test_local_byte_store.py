@@ -194,7 +194,7 @@ def test_kill_during_staging_leaves_no_readable_object(tmp_path: Path) -> None:
     为什么确定不 flaky：子进程在 sentinel 之后**睡到被杀**，父进程只在看到 sentinel 后
     才动手——两边没有"谁先到"的竞态。
 
-    前提假设：猴补的 `_slow_write` 把**首次** `os.write` 当作写入 staging 的判据，这依赖
+    前提假设：monkeypatch 后的 `_slow_write` 把**首次** `os.write` 当作写入 staging 的判据，这依赖
     "进入 `save_bytes` 写 staging 前无其它 Python 级 `os.write` 调用"。当前成立；若未来
     在 `save_bytes` 之前（或更早的导入/初始化阶段）新增其它 Python 级 `os.write`，
     sentinel 会在非 staging 写时被触达，使本用例**假红**（而非假绿）——fail-loud，不会
