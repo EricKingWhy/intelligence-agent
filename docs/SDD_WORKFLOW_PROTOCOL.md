@@ -868,7 +868,7 @@ skill 支撑，或显式声明"不需要引"**」，第 1 条要求「新写的�
 | 阶段 | 引用的 skill | 在这一步干什么 |
 | --- | --- | --- |
 | Tickets（拆分与排序） | `docs/agents/skills/principle-sequence-verifiable-units/SKILL.md` | 提交 / PR 的**堆叠顺序本身要能自证**给 reviewer（先失败测试后修复、先基线后处理）；不在当前单元绿之前推进 |
-| Implement / TDD | **Matt `tdd`（主开发，不在本目录）** | Matt `implement` 已明文「Use /tdd where possible」⇒ 这一步的路由归 Matt，本节不重复 |
+| Implement / TDD | **Matt `tdd`（主开发，不在本目录）** | Matt `implement` 1.3.1 已明文「Call the Skill tool with "tdd" where possible, at pre-agreed seams.」⇒ 这一步的路由归 Matt，本节不重复 |
 | Implement / Review | **Matt `code-review`（主开发，不在本目录）** | 双轴独立审查保持 Matt 原版，用户 2026-09-22 明确「不能改变」 |
 | Runtime Verification | `docs/agents/skills/principle-prove-it-works/SKILL.md` | 声明完成前对**真实产物**取证；**能脚本化就脚本化**，读数留给 reviewer 重跑 |
 | Runtime Verification | `docs/agents/skills/blast-radius/SKILL.md` | 算改动在**别处**会破坏什么；到不了"跑真代码"一级的安全事实**必须明文标 `unproven`** |
@@ -876,6 +876,18 @@ skill 支撑，或显式声明"不需要引"**」，第 1 条要求「新写的�
 | Runtime Verification（基建） | `docs/agents/skills/maintain-verification-skill/SKILL.md` | feature map 的维护环（源波次 ∥ live 波次）；最坏一个 PR |
 | Evidence Gate | `docs/agents/skills/principle-encode-lessons-in-structure/SKILL.md` | 同一条指令写第二遍时，编码成 lint / 元数据 / 运行时检查 / 脚本；挑**允许范围内最强的机制** |
 | Evidence Gate | `docs/agents/skills/show-me-your-work/SKILL.md` | 决策轨迹 TSV；英文原文 `Other skills route their audit trail here instead of inventing one.`（"别的技能把审计轨迹路由到这里，不要自造一套"）——与本仓台账同构 |
+
+### 9.1 Matt 1.3.1 与旧项目的兼容约束
+
+开始使用 Matt skill 前读取本节；执行方法仍使用 Matt 原版正文，项目优先级按 AGENTS §1.1。安装与回滚记录见 `docs/agents/matt-skills-upgrade-2026-10.md`。
+
+- **词汇表**：正文只维护在根 `GLOSSARY.md`；旧 `CONTEXT.md` 保留跳转入口，读取它后必须继续读取 GLOSSARY 的相关正文，不能把指针当作必读已完成。旧 skill 要更新 CONTEXT 时，把词汇变更写入 GLOSSARY 并保持 CONTEXT 为指针。迁移保留原有全部定义与 Avoid 词，不因新版格式建议重写术语。领域文档读取细则在 `docs/agents/domain.md`；历史文件及冻结规格中的旧路径仍可通过入口读取正文。
+- **宿主调用**：先核对实际枚举的 Skill / 命令。宿主有 Skill 工具时使用实际注册名（插件命名空间以枚举为准）；没有时读取已安装的完整 SKILL.md 与触发引用，按正文执行并说明宿主适配。目录别名不是命令，不能伪造 Skill 工具。此适配不绕过 `disable-model-invocation` / `allow_implicit_invocation`：用户专用 skill 仍须用户明确调用，或用户明确授权执行包含该阶段的 SDD 任务；仅安装、讨论或模型推荐不算授权。不修改 Matt 的调用元数据。
+- **实施路由**：本仓主干仍按 §8.8 与上表逐票使用 `implement`；`ask-matt` 推荐 `implement-spec` 不自动改变路线。新版 `implement-spec` 的整 spec 并行施工、merger 和清理流程与本仓逐票/授权规则有冲突；收到明确调用时先报告冲突并请用户决定执行范围，未获明确流程变更批准继续使用逐票主干。审查可以按既有协议并行，不能据此并行施工多 Ticket。reset/rebase、冲突文件、push、PR merge、branch/worktree 删除仍逐项按 AGENTS §14.4，不由 skill 扩大授权。
+- **新 skill 与维护入口**：`pr` 负责准备 PR 材料，发布、合并仍按 Git 手册和授权表；`retro` 先提交改进候选，只在用户授权的范围内写文档，不能把必读、安全、Failure/Recovery 或验证门禁降为审查侧可选项。`setup-matt-pocock-skills` 在本仓复用现有 AGENTS、协议、tracker、domain 和 labels，更新时保持本仓差异，不用上游模板覆盖项目规则。`handoff` 可把会话补充放在系统临时目录；Ticket/门禁/审查证据仍按 §16.1 的既有仓库落点，临时交接引用这些证据，不能成为唯一事实源。
+- **Git 冲突入口**：上游 1.3.1 已移除 `resolving-merge-conflicts`，新流程按 AGENTS §14.7 与 `docs/agents/git-workflow.md` §4；旧名称只作历史，不把它当作仍存在的可调用 skill。
+- **票面关系**：`to-tickets` 使用现有来源 issue 作为父票；sub-issue 是父子关系，native blocked-by 是先后依赖，两者分别建立。按 `docs/agents/issue-tracker.md` 的现有 native dependency / 兼容回退处理，保持 in-progress 认领、逐票验收及关单规则。PR request triage 仍为 no。
+- **任务授权与写入范围**：Skill 提供执行方法，不新增权限。文件修改按 AGENTS §4.4 和当前已授权 Task 的范围执行；范围内的 research、prototype、wizard、领域建模与文档编写可正常产出，不因 Skill 未在本节点名而再次请求授权。`writing-for-agents` 是所有 Agent 文档的写作参考，不限定产物路径；按被编辑文件的项目规则执行。AGENTS.md 保持现有章节编号和标题，词汇正文只维护在 `GLOSSARY.md`，`CONTEXT.md` 保持跳转入口；冻结规格仍按既有变更规则处理。Git 操作另按 AGENTS §14.4，Skill 不扩大提交、发布、合并或删除授权。
 
 **引用的一处硬边界（2026-09-22 两轴审查实测）**：这些正文是上游在**别家宿主**里写的，按路径读得到，
 但里面有**在本仓执行不了的步骤**（上游存在、本目录未搬的跨 skill 引用；Cursor 专属路径）。
