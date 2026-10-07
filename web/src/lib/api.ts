@@ -2382,6 +2382,9 @@ export interface TaskState {
   task_text: string | null;
   read_write_intent: string | null;
   cwd: string | null;
+  /** 会话创建时显式声明的权限档（后端 `TaskState.to_payload` 的 permission_mode 投影）；
+   *  未声明（历史会话 / 用户没选）为 null，不替用户猜档位。 */
+  authorization: string | null;
   criteria: TaskCriterionPayload[];
   verification: Record<string, TaskVerificationEntryPayload>;
   acceptance: TaskAcceptancePayload | null;
