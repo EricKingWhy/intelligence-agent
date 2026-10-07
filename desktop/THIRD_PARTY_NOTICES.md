@@ -65,3 +65,18 @@ and the fail-safe "unknown counts as busy" rule. No TypeScript is copied from
 those files, and the DeepSeek account/Host coupling they carry is not reproduced:
 the backend here is the repository's own Python service (W-11) reached over
 loopback HTTP.
+
+## #361 [W-16] installer adaptations
+
+| Local file | Upstream file @ commit | Source lines | Nature |
+| --- | --- | --- | --- |
+| `installer/installer-directories.nsh` | `apps/desktop/scripts/installer-directories.nsh` @ `5badb15` | 1–135 | ADAPT (stage→promote→rollback protocol preserved; `dsh`→`ia` prefixes; adapted to stock electron-builder hooks — the stock template owns extraction so staging happens in `customInit`) |
+| `installer/installer.nsh` | `apps/desktop/scripts/installer.nsh` @ `5badb15` | 1–218 | ADAPT (per-user refusal pattern; bilingual strings; DSH's custom-template extraction/window-frame.dll/brand machinery not reproduced — stock electron-builder hooks only) |
+| `scripts/test-windows-installer.mjs` | `apps/desktop/scripts/test-windows-installer.mjs` @ `5badb15` | 1–125 | ADAPT (isolated GUID per run, win32/x64 guard, en_US+zh_CN, --compile-only/--uninstall-only; DSH signing/packaging infra not reproduced) |
+| `src/installer/preflight.ts` | `apps/desktop/README.md` @ `5badb15` | L39 | PORT DESIGN (ask the Host about in-flight tasks before update; fail-closed abort) |
+
+`scripts/build-windows-installer.mjs` resource layout (`asar: false`,
+`extraResources` for runtimes, NSIS `perMachine: false`) is a PORT DESIGN of
+OpenHands `electron-builder.config.mjs` @ `b0a1a2d` (no OpenHands code copied;
+their `uvx` first-run download is explicitly not reproduced — this repo's
+runtime is bundled offline per the lockfile).
