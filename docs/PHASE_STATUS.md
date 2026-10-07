@@ -41,7 +41,7 @@
 ## 当前工作焦点
 
 - **2026-10-08 · Matt skills 1.3.1 兼容更新**：词汇正文保留到 GLOSSARY，CONTEXT 兼容入口保留，逐票实施与任务授权规则保留；四宿主本地更新完成，用户已批准发布三跳。范围及验收例外见 `docs/phase_status/2026-10.md` 的 Matt 发布条目；远端合并状态以 PR 为准。
-- **2026-10-08 · #496 prompt-only**：分支 `codex/issue-496-quality`，提示代码 commit `d0804a1b`；最新 full real-gold report `docs/evidence/memory-v2-real-gold-v1.9.0-d0804a1be5dd-5a2ddcfb.json` 未达标，#496 保持 OPEN/in-progress；逐项指标与来源对账见月档 #496 条目。
+- **2026-10-08 · #496 gold 来源校正**：用户批准修订 `positive_procedure` 预期；数据与回归守卫 commit `e5446528`（gold v1.9.1，来源 `['tool','user']`）。完整 live report `docs/evidence/memory-v2-real-gold-v1.9.1-e5446528e625-6f2ef33e.json`：27/27 执行、3 降级；write_precision 7/7=1.0 通过，coverage 7/11=0.636 与 kind_accuracy 8/12=0.667 未达阈值；临时 Milvus collection 已核实清理。#496 保持 OPEN/in-progress；细节见月档校正记录。
 
 **#663 部分发布（2026-10-07）** PR #770 已合入 main（merge fb31bb5c，PR head 953e95d3）；发布分支 `codex/context-663-publish` 已同步 `origin/main d8155f9e`（merge `543cdd1b`；tree `b8a4f7353c7f8d0ff59b2445614d46022c1cb130`）。保护事实登记、B-lite 成功轮次抽取、明确更正 Web 选项/自定义澄清、同 run 暂停续跑及预算 fail-closed 已实现。AC16 最新 B-lite 证据 13/18 且不在最终树；功能审查仍有 P1/P2 交接项。合并树全量 pytest 6496P/43S/51D/27F；补入可选 SDK 后 11 个导入红和 2 个间歇红重跑通过，review 行落账后定向 ledger 用例 1P，当前 last-failed 为 13F。前端 Playwright 10 项与干净旧 main 复现；Gate-0 完整 6/6 PASS @`bbbe6247`；收据 `docs/gate/bbbe624774857664c8e49150ffbb419cb566cbd1.json`；后续 receipt-only tip `73ea717` 的 `--since origin/main` 复核 6/6 PASS；PR #770 gate0 CI 6/6 PASS（37s，run 37508404180），gitleaks PASS。issue 保持 OPEN/in-progress，详见 Tracker #663。
 

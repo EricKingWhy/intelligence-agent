@@ -43,3 +43,7 @@
 - LangMem clone：C:/Users/王浩宇/AppData/Local/Temp/issue496-research-langmem
 - 当前实现的 deterministic procedural gate：src/agent_harness/memory/v2/policy.py:419-445, 595-670
 - Gold runner 的 positive_procedure event 构造：scripts/run_memory_v2_real_gold_gate.py:207-263
+
+## 后续授权与 gold 更正（2026-10-08）
+
+本记录前文描述的是用户批准 prompt-only 阶段的范围。用户后来单独批准核实并修订 `positive_procedure` 的 gold 来源预期，语料升为 v1.9.1；研究来源和产品判定未变。具体证据、回归与未达标 live gate 见 `docs/phase_status/2026-10.md` 的 #496 校正记录。
