@@ -187,7 +187,15 @@ export interface ResolveOptions {
 }
 
 const ATTACH_BUDGET_MS = 2_000;
-const START_BUDGET_MS = 30_000;
+/**
+ * 冷启动预算（#846）。装完安装件后的**首次**启动实测 35.7 s（`--check`）/ 36-42 s
+ * （真实附着），热态 6.6-6.9 s：30 s 窗口会把「只是慢」判成失败，且失败后那个
+ * 服务仍会自己就绪、变成没有客户端的孤儿。取 90 s 与桌面壳对**同一个子进程**的
+ * `DEFAULT_START_BUDGET_MS` 对齐（W-21 D11 / #837）：两个客户端不许对同一件事
+ * 各有一套预算。客户端**不**在超时后杀掉这个子进程（它可能已被别的客户端附着，
+ * 见 test/host.test.ts 的单写者结构守卫）。
+ */
+const START_BUDGET_MS = 90_000;
 const POLL_INTERVAL_MS = 250;
 const HEALTH_PROBE_TIMEOUT_MS = 1_500;
 const TOKEN_READ_ATTEMPTS = 20;
@@ -273,7 +281,8 @@ export async function resolveLocalService(
     if (endpoint === undefined) {
       throw new Error(
         `本机服务 ${String((options.startBudgetMs ?? START_BUDGET_MS) / 1000)}s 内未就绪（数据根 ${options.root}）：` +
-          `检查 ${options.pythonPath} 能否运行 \`-m agent_harness.cli serve\``,
+          "若安装刚完成，该服务可能仍在启动（冷启动实测 36-42 s），稍后重试即可附着它；" +
+          `否则检查 ${options.pythonPath} 能否运行 \`-m agent_harness.cli serve\``,
       );
     }
   }

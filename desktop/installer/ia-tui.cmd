@@ -17,6 +17,10 @@ rem
 rem Usage: ia-tui.cmd --session SESSIONID
 rem        ia-tui.cmd --session new
 rem        ia-tui.cmd --check
+rem
+rem The child exit code is forwarded: W-21 #847. A bare endlocal reset it to 0,
+rem so a failed TUI start read as success in scripts and in the gate readings.
 setlocal
 "%~dp0resources\node\node.exe" "%~dp0resources\tui\dist\src\index.js" %*
-endlocal
+set "rc=%ERRORLEVEL%"
+endlocal & exit /b %rc%

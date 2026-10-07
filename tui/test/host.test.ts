@@ -51,7 +51,15 @@ interface Fake {
 }
 
 /** 注入面：真文件系统与网络都不碰。 */
-function fakeDeps(options: { live?: boolean; endpointPresent?: boolean; token?: string | undefined } = {}): Fake {
+function fakeDeps(
+  options: {
+    live?: boolean;
+    endpointPresent?: boolean;
+    token?: string | undefined;
+    /** 子进程起得来、但要等这么多假时钟毫秒才健康（#846 的慢冷启动）。 */
+    readyAfterMs?: number;
+  } = {},
+): Fake {
   const spawns: ServeRequest[] = [];
   let clock = 0;
   const fake: Fake = {
@@ -63,7 +71,7 @@ function fakeDeps(options: { live?: boolean; endpointPresent?: boolean; token?: 
     live: options.live ?? false,
     deps: {
       readEndpoint: async () => (fake.endpointPresent || fake.live ? ENDPOINT : undefined),
-      healthOk: async () => fake.live,
+      healthOk: async () => fake.live && clock >= (options.readyAfterMs ?? 0),
       spawnServe: (request) => {
         spawns.push(request);
         const error = fake.spawnError;
@@ -139,6 +147,29 @@ test("spawn 失败（解释器不存在）立即报出原因，不空等整个�
   fake.spawnError = new Error("spawn ENOENT");
   await assert.rejects(resolveLocalService(OPTIONS, fake.deps), /spawn ENOENT/);
   assert.ok(fake.clock < 5_000, `不应空等 30s 冷启动预算，实际 ${String(fake.clock)}ms`);
+});
+
+test("冷启动：装完安装件的首次启动慢到 42 s 仍在窗口内，附着成功（#846）", async () => {
+  // 实测读数：装完安装件后第一次 `ia-tui --check` 35.7 s、第一次真实附着 36 s、
+  // 另一次 42 s；30 s 窗口在这里必然失败（旧常量下本用例抛「未就绪」）。
+  const fake = fakeDeps({ token: "tok-slow", readyAfterMs: 42_000 });
+  const service = await resolveLocalService(OPTIONS, fake.deps);
+  assert.equal(service.source, "started");
+  assert.equal(service.baseUrl, "http://127.0.0.1:51234");
+  assert.ok(fake.clock >= 42_000, `慢启动应当被等满，实际只等到 ${String(fake.clock)}ms`);
+});
+
+test("冷启动超预算：报数据根与「可能仍在启动」，不再把慢启动说成 python 坏了（#846）", async () => {
+  const fake = fakeDeps({ token: "tok-timeout", readyAfterMs: 600_000 });
+  await assert.rejects(
+    () => resolveLocalService(OPTIONS, fake.deps),
+    (error: Error) => {
+      assert.match(error.message, /90s 内未就绪/);
+      assert.ok(error.message.includes(OPTIONS.root), "错误里要有数据根");
+      assert.match(error.message, /可能仍在启动/, "慢启动的下一步必须写明");
+      return true;
+    },
+  );
 });
 
 test("端点载荷按协议解析；形状不符一律拒绝", () => {

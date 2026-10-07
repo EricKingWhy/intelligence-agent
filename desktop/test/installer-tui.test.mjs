@@ -180,7 +180,15 @@ describe('ia-tui.cmd', () => {
   it('forwards arguments and keeps the environment local to the launcher', () => {
     assert.match(launcher, /%$|\s%\*$/m, 'forwards argv')
     assert.match(launcher, /^setlocal$/m)
-    assert.match(launcher, /^endlocal$/m)
+    assert.match(launcher, /^endlocal & exit \/b %rc%$/m, 'endlocal then leave with the captured code')
+  })
+
+  it('propagates the child exit code (W-21 #847: a bare endlocal swallowed it)', () => {
+    assert.match(launcher, /^set "rc=%ERRORLEVEL%"$/m, 'capture the node exit code before endlocal')
+    assert.ok(
+      !/^endlocal\s*$/m.test(launcher),
+      'a bare endlocal resets the exit code to 0, so a failed TUI start reads as success',
+    )
   })
 
   it('keeps comments parser-safe (cmd evaluates pipes/angles before rem)', () => {
