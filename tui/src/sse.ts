@@ -46,6 +46,8 @@ export interface StreamHandlers {
 
 export interface StreamOptions {
   signal?: AbortSignal;
+  /** 注入 fetch（带 Bearer 的通道，见 host.ts）；缺省全局 fetch = 既有行为。 */
+  fetchImpl?: typeof fetch;
 }
 
 /** 从 SSE 响应体逐帧解析（data: 行以空行分隔；只认 data: 前缀，帧内 JSON 单行）。 */
@@ -96,7 +98,7 @@ export async function openStream(
   const url = `${baseUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/stream?after_seq=${cursor.lastSeq}`;
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await (options.fetchImpl ?? fetch)(url, {
       headers: { accept: "text/event-stream" },
       signal: options.signal,
     });
