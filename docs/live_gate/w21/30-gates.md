@@ -1,6 +1,7 @@
 # V3.1-lite 全量门禁（阶段二-2）
 
-- 分支：`codebuddy/365-w21-gate`；基线 `6728cf7e`；本分支为 **docs-only**（`docs/live_gate/w21/` 3 个 markdown），无产品代码改动
+- 分支：`codebuddy/365-w21-gate`；基线 `6728cf7e`；本分支为 **docs-only**（`docs/live_gate/w21/` 4 个 markdown），无产品代码改动
+- 注：证据基线 `6728cf7e`；审查时 origin/main 已前进至 `1db0b371`（#794），本分支不 merge，待 Windows 真机执行时以新基线重新取证
 - 环境：`no_proxy=localhost,127.0.0.1` + `NO_PROXY=localhost,127.0.0.1`（大小写都设）；`PYTHONPATH=<repo>/src`；venv bin 在 PATH 首位；前端 `NODE_USE_ENV_PROXY=0`
 
 ## 已完成的车道
@@ -21,7 +22,7 @@
 |---|---|
 | 后端全量 pytest（干净 worktree 重跑） | ✅ 完成：**6656 passed, 22 skipped, 51 deselected, 4 failed**（`~/workspace/w21-work/pytest-worktree.log`，651s）。注：worktree 首跑另有第 5 红 `test_exec_bit_matches_shebang.py::test_gate0_guards_lane_runs_this_guard`，系 worktree 缺 `.venv` 导致 `venv_python()` 取空（验证 setup artifact），补 symlink 后该文件 12/12 通过，不计入 |
 | vitest | `npx vitest run`（worktree 的 web/，node_modules symlink） | ✅ **99 文件 / 1479 用例全过**（exit 0） |
-| Playwright e2e `--workers=2` | 纯净 worktree，`npx playwright test --workers=2` | **490 passed, 16 failed**（46.1m；16 = 8 个用例 × 1280/1920 双宽度，见下表） |
+| Playwright e2e `--workers=2` | 纯净 worktree，`npx playwright test --workers=2` | **490 passed, 16 failed**（46.1m；16 = 5 个任务创建用例×双宽度（10）+ T12p/T12r×双宽度（4）+ T12o×1（仅 1920）+ AC8×1（仅 1920），共 9 个用例，见下表） |
 
 ## e2e 16 红分析（base 已有，本分支 docs-only 不可能引入）
 
@@ -40,7 +41,7 @@
 | 失败用例 | 根因 | 定性 |
 |---|---|---|
 | `test_tracer_port.py::test_port_surface_is_closed_for_both_implementations` | `typing.get_protocol_members` 在 Python 3.12 不存在（3.13+ API） | base 已有，版本/环境问题 |
-| `test_constraint_registration_kill.py::test_fact_durable_before_ledger_terminal_requires_manual_reconcile` | `_ConfirmSuccess` 缺 `source_for` 属性（`coordinator.py:683`） | base 已有真问题，另有分支 `origin/fix/i784-confirm-source-for` 在修（issue #784），不属本票 |
+| `test_constraint_registration_kill.py::test_fact_durable_before_ledger_terminal_requires_manual_reconcile` | `_ConfirmSuccess` 缺 `source_for` 属性（`coordinator.py:683`） | base 已有真问题，（issue #784，截至 2026-10-07 审查时已关闭；仍不在本基线 6728cf7e 内，不属本票） |
 | `test_local_sandbox.py::TestExecBasic::test_timeout_returns_negative_exit_code` | 容器无 raw socket，`ping` 报 `Operation not permitted`，exit 2 ≠ -1 | base 已有，容器环境限制 |
 | `test_progress_file.py::TestAtomicWrite::test_readonly_target_fails_explicitly` | root 绕过权限位（chmod 只读不生效） | 已知假红，AGENTS.md 2026-10-06 教训 |
 
