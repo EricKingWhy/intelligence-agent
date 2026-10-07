@@ -287,6 +287,15 @@ class JsonlSessionStore:
     def _events_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
 
+    def events_path(self, session_id: str) -> Path:
+        """会话目录的 ``events.jsonl`` 路径（公开）。
+
+        #368 P3-4：retention 的 usage/preview/execute 需要定位 events 文件
+        （大小/戳），此前跨类读 ``_events_path`` 私有方法。这里暴露同一逻辑的
+        公开入口——store 根布局只由本类定义，消费方不复制拼接规则。
+        """
+        return self._events_path(session_id)
+
     def _lock_for(self, session_id: str) -> threading.Lock:
         """取得该会话的写锁（懒创建；表结构由 _state_guard 保护）。
 

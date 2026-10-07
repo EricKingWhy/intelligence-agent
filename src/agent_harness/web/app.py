@@ -172,6 +172,19 @@ CONTEXT_PROVIDER_DESCRIPTIONS = catalog_router.CONTEXT_PROVIDER_DESCRIPTIONS
 REASONING_EFFORT_DESCRIPTIONS = catalog_router.REASONING_EFFORT_DESCRIPTIONS
 register_catalog_routes = catalog_router.register_catalog_routes
 
+# 自定义响应头清单（#785）：响应侧新增 X- 头必须同步登记进本清单
+# （tests/web/test_cors_expose_headers.py 守卫强制）；请求侧读头不入清单。
+# 契约范围、机制依据（含 cors.py 出处）与豁免口径见该测试 docstring。
+EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
+    {
+        "X-Local-Fuse-Source",
+        "X-Local-Max-Agent-Turns",
+        "X-Permission-Mode",
+        "X-Worktree-Path",
+        "X-Worktree-Path-Encoded",
+    }
+)
+
 # ── Request / Response schemas ──
 
 
@@ -1883,6 +1896,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_evidence_routes(app, validate_session_id=validate_session_id)
 
+    # #368 / W-24 会话保留 / 空间显示 / 显式清理路由（独立 router：usage + 清理
+    # 预览/执行；语义单源在 session/service.py，本模块只留一行接入面）
+    from agent_harness.web.retention import register_retention_routes
+
+    register_retention_routes(app, validate_session_id=validate_session_id)
+
     # W-06 / #350 进度文件重读对账路由（独立 router：对账状态查询 + 外部编辑
     # 冲突两出口；对账单源在 session/progress.py，本模块只留一行接入面）
     from agent_harness.web.progress_status import register_progress_routes
@@ -2029,6 +2048,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             allow_origins=["*"],
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=sorted(EXPOSED_CUSTOM_RESPONSE_HEADERS),
         )
 
     # ── 路由 ──

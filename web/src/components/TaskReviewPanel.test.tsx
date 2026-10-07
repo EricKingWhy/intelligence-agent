@@ -22,6 +22,10 @@ vi.mock('../lib/api', async () => {
     acceptTask: vi.fn(),
     releaseTaskAcceptance: vi.fn(),
     releaseTaskLease: vi.fn(),
+    // #368 W-24：面板新增存储占用 / 清理入口依赖——一并 mock，避免走真实 fetch。
+    getSessionUsage: vi.fn(),
+    previewCleanup: vi.fn(),
+    executeCleanup: vi.fn(),
   };
 });
 
@@ -31,6 +35,7 @@ const getWorkspaceGitStatus = vi.mocked(api.getWorkspaceGitStatus);
 const getWorkspaceGitDiff = vi.mocked(api.getWorkspaceGitDiff);
 const acceptTask = vi.mocked(api.acceptTask);
 const releaseTaskLease = vi.mocked(api.releaseTaskLease);
+const getSessionUsage = vi.mocked(api.getSessionUsage);
 
 function criterion(id: string, text: string, origin: 'user' | 'agent' = 'user') {
   return { item_id: id, text, origin, confirmed: origin === 'user' };
@@ -90,6 +95,14 @@ beforeEach(() => {
   getEvidenceState.mockResolvedValue({});
   getWorkspaceGitStatus.mockResolvedValue({ exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
   getWorkspaceGitDiff.mockResolvedValue({ exit_code: 0, stdout: '', stderr: '', artifact_ref: null });
+  getSessionUsage.mockResolvedValue({
+    events_bytes: 0,
+    artifacts_bytes: 0,
+    progress_bytes: 0,
+    artifact_count: 0,
+    reclaimable_bytes: 0,
+    computed_at: '2026-10-07T00:00:00Z',
+  });
 });
 
 afterEach(() => {
