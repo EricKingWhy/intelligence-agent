@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from evaluation.live_gate import repo
@@ -108,13 +110,39 @@ def test_capabilities_json_is_pure_json(tmp_path: Path, capsys, monkeypatch) -> 
     async def _fake_check(settings, *, timeout=None):
         return ProviderCapability(verdict="BLOCKED", reason="机制测试：不探测", credential_names=[])
 
+    original_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, package=None: object()
+        if name == "docker"
+        else original_find_spec(name, package),
+    )
+
+    original_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda command, *args, **kwargs: None
+        if command == "docker"
+        else original_which(command, *args, **kwargs),
+    )
+
+    original_run = subprocess.run
+
+    def _run_without_docker(command, *args, **kwargs):
+        if command and command[0] == "docker":
+            raise FileNotFoundError("docker")
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _run_without_docker)
     monkeypatch.setattr(
         "evaluation.live_gate.capability.check_capability", _fake_check, raising=True,
     )
     assert cli.main(["capabilities", "--json"]) == cli.EXIT_NOT_PASSED
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "BLOCKED"
-    assert "docker" in payload
+    assert payload["docker"] == "不可用（未安装 docker CLI）"
 
 
 def test_validate_returns_one_for_a_tampered_verdict(tmp_path: Path, capsys) -> None:
