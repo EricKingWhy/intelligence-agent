@@ -77,6 +77,12 @@ def test_formation_prompt_rejects_transient_content_and_retrieval_questions():
     assert "Approval without the actual procedure is not enough" in _FORMATION_PROMPT
 
 
+def test_formation_prompt_explains_procedural_evidence_threshold():
+    assert "two distinct successful tool-result refs" in _FORMATION_PROMPT
+    assert "A plain user approval alone does not satisfy R5" in _FORMATION_PROMPT
+    assert "Do not count a tool call without a successful result" in _FORMATION_PROMPT
+
+
 def test_formation_prompt_requires_procedure_fields_to_be_strings():
     assert (
         "For procedural payloads, `trigger`, `procedure`, and `success_condition` "
