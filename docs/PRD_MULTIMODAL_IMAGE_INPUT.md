@@ -303,5 +303,5 @@ Open WebUI/LibreChat 的「后端为权威并把配置下发前端」模式）�
 4. **可观察性**：附件相关事实（上传、引用、省略降级）都要能在 SessionEvent/JSONL 中定位；
    诊断日志与事件分层不变（不变量 #4）。
 5. **上游漂移**：所有上游引用登记在调研报告（含 commit）；开工时按 `reference-sources.md` 纪律
-   重新核对版本与 License。`reference-sources.md` 尚未补录「多模态输入」领域条目（该文件当前有
-   他人未提交改动，待其落地后补录）。
+   重新核对版本与 License。`reference-sources.md` 的「多模态图片输入 / 附件」领域条目与本地克隆
+   （deepseek-harness / oh-my-pi / codex）已补录，并披露了 §3.1「先补清单再调研」的事后补录偏差。
