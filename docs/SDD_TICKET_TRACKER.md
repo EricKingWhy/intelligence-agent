@@ -12,7 +12,7 @@
 
 ---
 
-> **当前状态（2026-10-07，#832）**：本地实现已提交 `0db3881a`（`codex/issue-832-live-gate-docker-cli`）：Docker CLI 缺失时返回明确不可用状态，并以 CLI JSON 行为测试覆盖；目标用例红→绿，CLI 模块 8 passed，Ruff / `git diff --check` 通过。GitHub issue 保持 OPEN / `in-progress`；独立 review、覆盖台账与发布/集成尚未完成（未 push / PR）。
+> **当前状态（2026-10-08，#832）**：实现提交 0db3881a、状态落账提交 444dcc9c，分支 codex/issue-832-live-gate-docker-cli。按成熟做法用 Python 标准库 shutil.which 预检 Docker CLI，并将查得的可执行路径用于调用；参考来源与复用判定见 2026-10 月度归档。普通 PATH 与进程内排除 Docker PATH 的两次相关测试均为 8 passed，Ruff 与 git diff --check 通过。两轴独立审查：Standards CLEAN；Correctness/Spec 提出的 AC3 环境证据缺口已用原生 Windows 进程隔离 PATH 的运行验证闭合。覆盖闸门及 post-review Gate-0 正在收尾；GitHub issue 仍 OPEN，未 push / PR / merge。
 
 ## 当前规划：Memory V2（截至 2026-09-27）
 
