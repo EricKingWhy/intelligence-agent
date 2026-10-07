@@ -80,6 +80,10 @@ export interface WsScript {
   delayMs?: number;
   /** 一个帧都不发就关闭（服务端/代理拒掉这条订阅）：考零服务帧路径。 */
   closeNow?: boolean;
+  /** 心跳 opt-in（毫秒）：按此间隔下行 `{type:'server_ping'}`，直到连接关闭。
+   *  真后端 2s 一次（#420 AC1 计入停摆看门狗活性）。缺省不发——o-wait-hint
+   *  等 spec 刻意依赖停摆路径，必须按脚本 opt-in，不能全局默认开。 */
+  pingIntervalMs?: number;
 }
 
 export type WsProvider = (ctx: {
@@ -147,6 +151,18 @@ async function installWsRoute(
           ws.close(); // 异常收尾：没有 done（客户端只能靠 terminalSeen 判断）
         } else if (active && ending === 'done') {
           ws.send(JSON.stringify({ type: 'done', session_id: sessionId }));
+        }
+        // 心跳 opt-in：真后端 2s 一次 server_ping，客户端计入停摆看门狗活性
+        // （#420 AC1）。长等待的用例按需打开，避免 mock 静默被误判为断流。
+        if (script?.pingIntervalMs && ending !== 'drop') {
+          const timer = setInterval(() => {
+            try {
+              ws.send(JSON.stringify({ type: 'server_ping', session_id: sessionId }));
+            } catch {
+              clearInterval(timer);
+            }
+          }, script.pingIntervalMs);
+          ws.onClose(() => clearInterval(timer));
         }
       })();
     });

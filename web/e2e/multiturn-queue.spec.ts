@@ -725,6 +725,10 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
       // 窗外落定的**收据**（极短 JSON 被延迟到窗外，慢链路上的真实形态）
       return answerLate(route, 200, { status: 'queued', mode: 'queue' });
     },
+    // 心跳 opt-in：本用例等待 6s 验证无假「连接中断」，真后端 2s 一次
+    // server_ping 计入停摆看门狗活性（#420 AC1）；mock 缺省静默，高负载下
+    // 累计静默超 10s 会被误判断流。只给本用例开，不碰全局默认。
+    onWs: () => ({ ending: 'keep', pingIntervalMs: 2000 }),
   });
 
   await page.goto('/');
@@ -735,10 +739,8 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
   await box.press('Enter');
 
   await expect.poll(() => calls.length, { timeout: 8000 }).toBe(1);
-  // 活过三轮退避（500 + 1000 + 2000，合计 3.5s）＋余量：假「连接中断」正是在那之后才
-  // 弹出来。高负载下定时器会漂移，6000 的余量不够（曾假红），放宽到 10000——
-  // 退避窗口 + 余量，不是在等任何具体状态。
-  await page.waitForTimeout(10000);
+  // 活过三轮退避（500 + 1000 + 2000）＋余量：假「连接中断」正是在那之后才弹出来
+  await page.waitForTimeout(6000);
   await expect(page.locator('.app-error')).toHaveCount(0);
   await expect(page.locator('.reconnect-banner')).toBeHidden();
   /* 订阅恰好两次：① 窗外按 launched 接的那条（已被纠正，代际推进后它的整条重连链
@@ -776,7 +778,7 @@ test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐
     // 断言对「掐流」这个变异毫无判别力（实测踩过——第一版 delayMs 没设，变异照样绿）。
     onWs: () => ({
       events: LIVE_FRAMES, frames: [DELTA], hasActiveRun: true, ending: 'keep',
-      delayMs: LATE_MS + 1000,
+      delayMs: LATE_MS + 1000, pingIntervalMs: 2000,
     }),
   });
 
@@ -884,6 +886,7 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
     // 的错，基线 WS 其实来自 ack 分支，于是"永远等不到帧"）。
     onWs: () => ({
       events: LIVE_FRAMES, frames: [AFTER_QUEUE], hasActiveRun: true, ending: 'keep',
+      pingIntervalMs: 2000,
     }),
   });
 
