@@ -7544,6 +7544,8 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **两轴独立审查**（首轮两 subagent 均基础设施故障——配额中断、无结论行，作废重派一轮）：Correctness/Spec **APPROVE**（P0-P3=0；P4×1 = kill 场景未断言 reconcile_meta 无 source 字段，归 #357/W-13 自有覆盖面，登记不修）；Standards **APPROVE**（P0-P4=0；P4×1 = message 同族计数低报 4/实为 10，勘误入台账行不 amend）。
 - **门禁**：Gate-0 派单前 @`48708cdb` 5/6（coverage ❌ = 本笔预期，收据在案）；终态 6/6 @`b413fc78`（21.5s，收据 `docs/gate/b413fc78….json`）；台账行 `t784-confirm-source-for-e7756003-48708cdb.tsv`（`b413fc78`）⇒ 覆盖闸门 exit 0。冻结树全量 **6616P / 1F / 26S / 51D（1427.67s）** @`48708cdb` 树——constraint_kill 本票红在全量**转绿**；1F = `test_review_coverage_immutable_ref::test_real_ledger_passes_after_the_431_fix` **台账时序红**（该测试读工作树台账跑真覆盖闸门，审查行落盘前按设计红；行落盘后复跑 1.20s 绿，#726 同款先例），零新增红。
 - **集成状态**：push / PR（Closes #784）/ CI gate0 / merge / 关单 + 摘 in-progress：按用户整链指示执行。
+- **先回后正（PR #796 首推即 CONFLICTING）**：main 前移 `e7756003`→`6230920e`（来侧 PR #795 #781 发布 `c95fe8ec` 及其三轮先回后正、#793 #353 前端 P2、#792 磁盘满 507 **代码面** `session/{service,store,task}.py`+`web/app.py`+6 测试文件）；且 PR 有冲突时 GitHub 造不出 merge ref ⇒ pull_request 类 gate0 不入队（当时 PR checks 只有 gitleaks）。sync merge `899abe42`：2 处 docs EOF 双追加冲突（tracker/月档）按 union 先例解决（双侧保留零删除、机械去标记、标记 0 残留、diff-check clean；PHASE_STATUS ort 自动合并两侧段在位），披露于 merge 提交供事后否决；`--cc` 集 = 3 docs ⇒ 覆盖闸门 docs-only 自动归属 exit 0。合并树含来侧代码面 ⇒ §14.10 全量重采 **6631P / 26S / 51D / 0F（1434.26s，exit 0）**——本票 constraint_kill 红清零保持、台账时序红随审查行落盘转绿、来侧 +15P、零新增红。Gate-0 @落账 tip 6/6（收据随收据笔）→ push → CI gate0 → PR #796 merge → 关单。
+
 ## #781 flake 修复（2026-10-07，multiturn 排队拒绝快照竞态；已合并 PR #789 → `c95fe8ec`，已关单）
 
 - **票面与认领**：EricKingWhy/intelligence-agent#781（testing/ready-for-agent，由 #764 合并树全量 r1 唯一间歇红开票）；认领 = in-progress + assignee @me（先于代码）。分支 `fix/i781-flake-snapshot-race` 基点 `943c93ce` = origin/main tip（本仓 main 未动）。
