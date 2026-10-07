@@ -31,7 +31,7 @@ from pathlib import Path
 
 # One verified-download implementation for both runtimes (sha256 check + cache).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prepare_python_runtime import download  # noqa: E402
+from prepare_python_runtime import download
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCK_RELATIVE = Path("desktop") / "installer" / "node-runtime.lock.json"
