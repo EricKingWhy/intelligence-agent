@@ -7595,3 +7595,10 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **证据**：产物 204,375,375 B / sha256 `ce5fd54acf925bb6e17731e35990f18c52a0a90da57f834ad39960d0c6ad9880`（`productCodeSha256=1d4688ad…`，HEAD `80557a6b`）。两次独立实机复跑都覆盖「装完第一次启动 + 陈旧端点记录在场」：复跑 1 子进程 pid 12100、端点 t=56.8 s 被改写（port 50922）、窗口 t=59.2 s、失败对话框 never；复跑 2 pid 38652、t=44.4 s（port 50935）、t=49.6 s、never。TUI 冷启动后桌面附着（复跑 2：pid 7920/port 58469，`failureDialog=False mainWindowVisible=True endpointStill=…`），窗口截图渲染出产品 UI。桌面 `npm test` **205 pass / 0 fail**、`tsc --noEmit` exit 0；D9 真实树 249 个 `.py` 一致 / 追加一行即拒绝 / 恢复后逐字节相同；D10 真实树 touch 后构建 exit 1 并点名 `desktop/dist/src/main.js`，`npm run build` 后继续打包。明细 `docs/live_gate/w21/42-w21-d8-d11-gate-fixes.md`，月档 `docs/phase_status/2026-10.md`；工作树外证据 `D:/w21-work/evidence/{d9-ac2.txt,d9-ac4.txt,d10-ac2.txt,d10-ac2-build.log,d9-d11-npm-test.log,d11/*,d11b/*}`。
 - **披露/注记**：①D8 AC1 票面写的「20 s 内」在本机对服务自身启动时间不成立，已由 #837 以 90 s 就绪预算替代（两票同一次提交）；②D10 AC2 陈旧分支的文案复用共享话术 `rebuild before packing`，字面串 `npm run build` 出现在缺件分支；③不带凭据的 `GET /` 返回 401 属服务端 fail-closed 设计（`auth_required` 恒真），非缺陷。
 - **状态**：#834/#835/#836/#837 四票均已关单（comment 记 branch/commit/证据/集成负责人 EricKingWhy，未集成按 §14.12 允许）；#365 仍 OPEN，W-16 烟测（install/start/exit/update/恢复）、Run A/Run B、双轴独立审查 + `scripts/check_review_coverage.py` 均**未执行**。**待批准**：①本分支 push + 开 PR；②PR #811 merge；③#815 第三条路径接受或否决。
+
+## W-16 烟测落在执行侧（2026-10-08；安装件 `ce5fd54a…`，开发机、非干净 VM）
+
+- **What/读数**：#365 执行协议第 1 条的前置烟测，在 D8–D11 修复后的安装件（sha256 `ce5fd54acf925bb6e17731e35990f18c52a0a90da57f834ad39960d0c6ad9880`，版本 `0.1.0.0`）上跑完 A–F 六腿：**A** 卸载旧安装（7.1 s，数据根逐字节不变）→ **B** 静默安装（exit 0，299.2 s，app exe + `ia-tui.cmd` + 两个快捷方式）→ **C** 启动（4.9 s 主窗口可见，端点 pid 7920/port 58469）→ **D** 退出（桌面进程 0、服务存活、端点与数据不变）→ **E** 就地更新（exit 0，217.9 s，数据不变，附着同一服务）→ **F** 卸载（9.0 s，数据根 + 凭据 + 端点保留）。
+- **观察**：服务跨卸载/更新存活（与「客户端从不杀服务」一致，本次无在途任务 ⇒ W-16 的「运行中更新安全暂停」未覆盖）；关闭窗口 = 隐藏到托盘属产品设计，故退出腿走显式结束进程，托盘 → quit 路径未实测。
+- **未执行**：干净 VM、旧会话与模型配置可见、一次真实短任务、运行中更新安全暂停、服务暂停失败、迁移中断、磁盘满回退、卸载器 UI 双语检查。
+- **证据**：`docs/live_gate/w21/43-w16-smoke-artifact.md`；日志 `D:/w21-work/evidence/smoke-w16.txt` 与 `smoke-w16-def.txt`（驱动脚本 `D:/w21-work/smoke-w16.py`）。**不宣布 #365 Gate 通过**。
