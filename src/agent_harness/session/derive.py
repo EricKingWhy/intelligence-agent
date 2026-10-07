@@ -33,6 +33,11 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from agent_harness.attachments.projection import (
+    content_block_with_text,
+    parse_image_refs,
+    text_with_omitted_images,
+)
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
@@ -1108,13 +1113,38 @@ def _normalize_tool_calls_for_projection(
     return normalized
 
 
-def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
-    """从事件序列投影出 messages 列表。"""
-    return [message for message, _source_range in derive_messages_with_source_ranges(events)]
+def derive_messages(
+    events: list[SessionEvent], *, supports_vision: bool = False,
+) -> list[AnyMessage]:
+    """从事件序列投影出 messages 列表（`supports_vision` 语义见 `derive_messages_with_source_ranges`）。"""
+    return [
+        message
+        for message, _source_range in derive_messages_with_source_ranges(
+            events, supports_vision=supports_vision
+        )
+    ]
+
+
+def referenced_attachment_ids(events: list[SessionEvent]) -> set[str]:
+    """本会话 `user/message` 事件真实引用过的附件 id 集合（纯函数）。
+
+    这是 #823 MM-02 补回的受控读回授权判据（PRD D5 / DSH `ATTACHMENT_NOT_REFERENCED`）：
+    只有被某条用户消息引用过的 `attachment_id` 才允许读回；未引用（含上传后从未发送）
+    一律 404。坏形状的引用条目按 `parse_image_refs` 的容错纪律逐条跳过。
+    """
+    referenced: set[str] = set()
+    for event in events:
+        if event.type != USER_MESSAGE:
+            continue
+        for ref in parse_image_refs(event.data.get("attachments")):
+            referenced.add(ref.attachment_id)
+    return referenced
 
 
 def derive_messages_with_source_ranges(
     events: list[SessionEvent],
+    *,
+    supports_vision: bool = False,
 ) -> list[tuple[AnyMessage, tuple[int, int] | None]]:
     """从事件序列投影出 messages 列表。
 
@@ -1132,6 +1162,14 @@ def derive_messages_with_source_ranges(
     （答 + tool_call/result）走同一条 shadowed 跳过路径，所以"编辑了问句"在模型可见
     上下文里表现为"旧问句那一轮整段消失、只剩新问句"。dangling 合成发生在 shadow
     之后，被取代轮里的 tool_call 不会被补一条合成 ToolMessage。
+
+    #823 / MM-02（附件）：`user/message.data["attachments"]` 是**引用数组**。投影按
+    `supports_vision` 分两条路：支持视觉 → 该 user 消息内容物化成
+    `[text 块, 标准图片块…]`（`attachments.image_content_block`，**只带引用不含
+    base64**，字节由请求装配层的 adapter 在发送前取回）；不支持视觉 → 原文本后追加
+    固定占位符（`IMAGE_OMITTED_PLACEHOLDER`，不静默丢弃）。**无附件的消息逐字不变**
+    （AC8）。默认 `supports_vision=False`，故 `derive_messages(events)` 的既有语义
+    （纯文本逐字投影）不变。
     """
     # 第一遍：只接受持久化完整的 compaction bracket。写入中途失败时，
     # append-only 日志可能留下 START 或 SUMMARY；不完整 bracket 不能遮蔽原事件。
@@ -1302,7 +1340,16 @@ def derive_messages_with_source_ranges(
 
         if event.type == USER_MESSAGE:
             content = event.data.get("content", "")
-            messages.append((HumanMessage(content=content), (event.seq, event.seq)))
+            refs = parse_image_refs(event.data.get("attachments"))
+            if refs:
+                text = content if isinstance(content, str) else str(content)
+                if supports_vision:
+                    projected: str | list[dict[str, str]] = content_block_with_text(text, refs)
+                else:
+                    projected = text_with_omitted_images(text)
+                messages.append((HumanMessage(content=projected), (event.seq, event.seq)))
+            else:
+                messages.append((HumanMessage(content=content), (event.seq, event.seq)))
 
         elif event.type == MODEL_COMPLETED:
             content = event.data.get("content", "")
@@ -1440,6 +1487,9 @@ class UndeliveredInput:
     revoke_fact_id: str | None = None
     refutes_event_id: str | None = None
     protected_facts: list[dict[str, Any]] | None = None
+    #: #823 / MM-02：附件引用数组（规范化后的 event-data 形状），投递时原样带进
+    #: 新的 `user/message`，使排队/steer 的附图不静默丢失。
+    attachments: list[dict[str, Any]] | None = None
 
 
 def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
@@ -1488,6 +1538,7 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     revoke_fact_id=event.data.get("revoke_fact_id"),
                     refutes_event_id=event.data.get("refutes_event_id"),
                     protected_facts=annotations,
+                    attachments=_normalized_attachments(event),
                 )
             )
         elif event.type == STEER_REQUESTED:
@@ -1510,10 +1561,19 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     revoke_fact_id=event.data.get("revoke_fact_id"),
                     refutes_event_id=event.data.get("refutes_event_id"),
                     protected_facts=annotations,
+                    attachments=_normalized_attachments(event),
                 )
             )
     items.sort(key=lambda item: item.seq)
     return items
+
+
+def _normalized_attachments(event: SessionEvent) -> list[dict[str, Any]] | None:
+    """事件 data 的附件引用 → 规范化后的 dict 列表（坏条目跳过）；无则 None。"""
+    refs = parse_image_refs(event.data.get("attachments"))
+    if not refs:
+        return None
+    return [ref.model_dump() for ref in refs]
 
 
 def _undelivered_fact_annotations(

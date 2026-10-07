@@ -213,6 +213,22 @@ def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
     return entries
 
 
+def model_supports_vision(settings: "Settings", config: "ModelConfig") -> bool:
+    """本次请求模型是否声明支持视觉（#823 / MM-02）。
+
+    解析优先级与 `GET /api/models` 渲染一致：**catalog 条目的显式声明 > provider
+    preset 的声明 > False（不猜测）**。未声明一律 False——契约是"未知能力省略、
+    不猜"（见 `_CAPABILITY_FIELDS` 注释），而"假装支持"会把图发给一个看不懂的模型
+    （DeepSeek 约束下还可能 400）。解析单点在此，供装配层与发送端点共用。
+    """
+    entry = find_catalog_entry(settings, config.provider, config.model_name)
+    if entry is not None and entry.supports_vision is not None:
+        return entry.supports_vision
+    preset = PROVIDER_PRESETS.get(config.provider, {})
+    declared = preset.get("supports_vision")
+    return declared is True
+
+
 def find_catalog_entry(
     settings: Settings, provider: str, model_id: str
 ) -> ModelCatalogEntry | None:

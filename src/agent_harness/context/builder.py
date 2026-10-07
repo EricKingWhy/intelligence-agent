@@ -1,5 +1,6 @@
 """Session 事件投影到 Runtime Context 的单一入口。"""
 
+import base64
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
@@ -10,6 +11,7 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
+from agent_harness.attachments.normalize import normalize_image
 from agent_harness.context.compactor import (
     CompactionFailure,
     CompactionPostWriteError,
@@ -21,6 +23,7 @@ from agent_harness.context.compactor import (
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
+from agent_harness.model.multimodal import DEFAULT_IMAGE_DETAIL, to_provider_messages
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
 from agent_harness.session.cwd import session_cwd
@@ -29,6 +32,7 @@ from agent_harness.session.derive import (
     derive_messages_with_source_ranges,
     derive_modified_file_paths,
     derive_protected_facts,
+    referenced_attachment_ids,
     serialize_protected_facts,
 )
 from agent_harness.session.event import (
@@ -429,6 +433,12 @@ class ContextBuilder:
         summary_model: Any | None = None,
         plan_reinject_every_messages: int = 6,
         model_call_gate: Any | None = None,
+        # #823 / MM-02：本次请求模型是否支持视觉。True ⇒ `derive_messages` 把
+        # `user/message` 的附件引用物化成图片内容块，并在 `build` 出口把它们翻译成
+        # provider 载荷（`model/multimodal.to_provider_messages`）。默认 False =
+        # 纯文本投影逐字不变（既有调用方零影响）。
+        model_supports_vision: bool = False,
+        image_detail: str = DEFAULT_IMAGE_DETAIL,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
@@ -444,6 +454,11 @@ class ContextBuilder:
         # #559：摘要调用与主循环同闸（进程级在飞 ≤N）；None = 不过闸（既有
         # 行为逐字节等价），只透传给 compactor。
         self.model_call_gate = model_call_gate
+        # #823 / MM-02：视觉能力与附件载荷缓存。`_image_payloads` 每次 build 现算
+        # （attachment_id → (media_type, base64)），只在 `model_supports_vision` 时非空。
+        self._supports_vision = model_supports_vision
+        self._image_detail = image_detail
+        self._image_payloads: dict[str, tuple[str, str]] = {}
         self.max_context_tokens = max_context_tokens
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
@@ -514,6 +529,8 @@ class ContextBuilder:
                 keep_recent_tool_results=keep_recent_tool_results,
                 clear_at_least_tokens=clear_at_least_tokens,
             )
+        # #823 / MM-02：附件字节也住这个 store（`load_bytes`），投影物化时按需取回。
+        self._artifact_store = artifact_store
         self._prune_decisions: dict[str, dict[int, str]] = {}
         self._last_prune_report: PruneReport | None = None
         # #639 阶段 B：每会话"连续以预检拒绝收尾"的轮计数（thrashing guard）。
@@ -566,8 +583,11 @@ class ContextBuilder:
         # W-04：warning 记账口先清零——builder 实例跨 build 复用，未压缩路径
         # 不注入 warning，残值会把上一轮的成本错记到本轮看板（stale 账）。
         self._last_pressure_warning_tokens = 0
+        self._image_payloads = await self._load_image_payloads(session)
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(session.events)
+        pairs = derive_messages_with_source_ranges(
+            session.events, supports_vision=self._supports_vision
+        )
         if self._pruner is None:
             # 与 session.derive_messages() 同一投影；额外留下 source_ranges 供
             # #448 的真实 usage 锚做「事件 → 消息」定位（不传给压缩器，行为不变）。
@@ -703,7 +723,7 @@ class ContextBuilder:
                 built = _inject_progress_block(built, progress_text)
             if paths_text is not None:
                 built = _inject_modified_paths(built, paths_text)
-            return self._prepend_system_prompt(built)
+            return self._finalize(built)
         # T2 (#635)：阈值命中的压缩整段抽到 `compact_now`——手动路径（#635 T3）
         # 复用**同一实现**（不变量 #22），本 build 只负责决定"该压了"。
         # `runtime_context` 原样传入：runtime provider 每次 build 只调一次的既有
@@ -797,7 +817,7 @@ class ContextBuilder:
             built = _insert_before_last_human(
                 built, HumanMessage(content=pressure_text),
             )
-        return self._prepend_system_prompt(built)
+        return self._finalize(built)
 
     async def compact_now(
         self,
@@ -839,7 +859,9 @@ class ContextBuilder:
         """
         # ── 投影（与 build 同一口径；裁剪路径存在时重放裁剪决策）──────────
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(session.events)
+        pairs = derive_messages_with_source_ranges(
+            session.events, supports_vision=self._supports_vision
+        )
         if self._pruner is None:
             messages = [message for message, _source_range in pairs]
             anchor_ranges = [source_range for _message, source_range in pairs]
@@ -1231,6 +1253,52 @@ class ContextBuilder:
         if not self.system_prompt:
             return messages
         return [SystemMessage(content=self.system_prompt), *messages]
+
+    async def _load_image_payloads(self, session: Session) -> dict[str, tuple[str, str]]:
+        """按事件引用过的附件 id 取回字节、归一化并 base64 编码（#823 / MM-02）。
+
+        只在 `model_supports_vision` 时执行。store 缺席、单个字节缺失或解码失败都
+        不抛出——该引用在装配 adapter 里降级为占位文本块（不静默丢弃、不 brick run）。
+        返回 `attachment_id → (media_type, base64)`，供 `_finalize` 的 adapter 使用。
+        """
+        if not self._supports_vision or self._artifact_store is None:
+            return {}
+        payloads: dict[str, tuple[str, str]] = {}
+        for attachment_id in sorted(referenced_attachment_ids(session.events)):
+            try:
+                blob = await self._artifact_store.load_bytes(attachment_id)
+            except Exception:  # noqa: BLE001 —— 存储故障降级为占位符，不让一张图 brick run
+                logger.warning(
+                    "附件字节读取失败（%s）——投影降级为占位符", attachment_id,
+                )
+                continue
+            data = blob.content
+            if not data:
+                continue
+            try:
+                normalized = normalize_image(data)
+                media_type, raw = normalized.media_type, normalized.data
+            except Exception:  # noqa: BLE001 —— 解码失败回退原始字节（best-effort）
+                logger.warning(
+                    "附件归一化失败（%s）——按原始字节发送", attachment_id,
+                )
+                media_type, raw = blob.mime_type, data
+            payloads[attachment_id] = (media_type, base64.b64encode(raw).decode("ascii"))
+        return payloads
+
+    def _finalize(self, messages: list[AnyMessage]) -> list[AnyMessage]:
+        """注入 system prompt，并把标准图片块翻译成 provider 载荷（#823 / MM-02）。
+
+        无图时逐字等价于 `_prepend_system_prompt`（默认 `_supports_vision` 为 False）。
+        """
+        prepared = self._prepend_system_prompt(messages)
+        if not self._supports_vision:
+            return prepared
+        return to_provider_messages(
+            prepared,
+            resolve_image=self._image_payloads.get,
+            detail=self._image_detail,
+        )
 
     def _usage_anchored_tokens(
         self, session: Session,

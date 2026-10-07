@@ -102,6 +102,7 @@ from agent_harness.session.service import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    AttachmentReferenceInvalid,
     EventLogCorruptError,
     InvalidDecision,
     InvalidSessionId,
@@ -852,6 +853,9 @@ class SendMessageRequest(_AmendValueValidators):
     protected_facts: list[ProtectedFactAnnotation] = Field(
         default_factory=list, max_length=32
     )
+    # #823 / MM-02：附件 id 列表（内容寻址 `sha256:<hex>`）。默认空 = 纯文本，既有
+    # 行为逐字不变；服务端逐条校验"存在且属本会话"，不合法 → 422。
+    attachments: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_protected_facts_match_user_text(self) -> SendMessageRequest:
@@ -3325,6 +3329,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     fact.model_dump(exclude_none=True)
                     for fact in req.protected_facts
                 ],
+                attachments=req.attachments or None,
             )
         except (
             InvalidSessionId,
@@ -3335,6 +3340,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             QueueItemNotFound,
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
+            AttachmentReferenceInvalid,
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,

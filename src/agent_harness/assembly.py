@@ -44,7 +44,7 @@ from agent_harness.context.project_instructions import (
     project_instruction_store,
 )
 from agent_harness.model.concurrency import ModelCallGate
-from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.config import ConfigError, ModelConfig, model_supports_vision
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
@@ -890,6 +890,9 @@ async def build_runtime(
             # W-31.2 (#414)：裁剪的两个确定性护栏，原样透传（校验在 pruner 构造处）。
             keep_recent_tool_results=settings.keep_recent_tool_results,
             clear_at_least_tokens=settings.clear_at_least_tokens,
+            # #823 / MM-02：本次 run 的请求模型是否支持视觉——决定 `user/message`
+            # 的附件引用被物化成图片内容块还是降级为占位符。
+            model_supports_vision=model_supports_vision(settings, config),
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——

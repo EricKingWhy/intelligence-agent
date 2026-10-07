@@ -136,6 +136,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    AttachmentReferenceInvalid,
     CompactionConcurrentWrite,
     CompactionInProgress,
     EventLogCorruptError,
@@ -2840,6 +2841,8 @@ class SessionService:
             refutes_event_id=refutes_event_id,
             protected_facts=protected_facts,
             remember_as_procedural_rule=remember_as_procedural_rule,
+            # #823 / MM-02：附件引用随排队项一起留（投递时会带进新的 user/message）。
+            attachments=user_input_metadata.get("attachments"),
         )
         self._append_session_event(
             session_id, MESSAGE_QUEUED,
@@ -2848,6 +2851,74 @@ class SessionService:
             **user_input_metadata,
         )
         return queued
+
+    async def _resolve_attachment_refs(
+        self, session_id: str, attachment_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """校验附件 id 并解析成事件引用数组（#823 / MM-02）。
+
+        逐条校验：形态（`sha256:<64hex>`）→ 存在于本会话字节命名空间（别的会话 /
+        从未上传一律拒绝）→ 字节可读且能解析出尺寸。任一条不成立抛
+        `AttachmentReferenceInvalid`（HTTP 422）。返回**去重保序**的引用 dict 列表。
+        """
+        from agent_harness.attachments import (
+            AttachmentError,
+            detect_image,
+            resolve_image_limits,
+        )
+        from agent_harness.storage.artifact import BYTE_ARTIFACT_ID_PATTERN
+
+        store = self._artifact_store_for(session_id)
+        limits = resolve_image_limits(self._settings)
+        refs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for attachment_id in attachment_ids:
+            if not isinstance(attachment_id, str) or not BYTE_ARTIFACT_ID_PATTERN.fullmatch(
+                attachment_id
+            ):
+                raise AttachmentReferenceInvalid(
+                    "attachment_id 必须形如 sha256:<64 位小写十六进制>："
+                    f"{attachment_id!r}"
+                )
+            if attachment_id in seen:
+                continue
+            if store is None:
+                raise AttachmentReferenceInvalid(
+                    "本部署没有可用的附件存储（artifact_dir 为空，或对象存储只配了一半）"
+                )
+            try:
+                blob = await store.load_bytes(attachment_id)
+            except KeyError as error:
+                raise AttachmentReferenceInvalid(
+                    f"附件 {attachment_id!r} 不在会话 {session_id!r} 的命名空间里"
+                    "（不存在，或属于别的会话）"
+                ) from error
+            data = blob.content
+            if not data:
+                raise AttachmentReferenceInvalid(f"附件 {attachment_id!r} 字节为空")
+            try:
+                detected = detect_image(
+                    data,
+                    max_pixels=limits.max_image_pixels,
+                    max_dimension=limits.max_image_dimension,
+                    allowed_media_types=limits.media_types,
+                )
+            except AttachmentError as error:
+                raise AttachmentReferenceInvalid(
+                    f"附件 {attachment_id!r} 字节无法解析为图片：{error}"
+                ) from error
+            seen.add(attachment_id)
+            refs.append(
+                {
+                    "kind": "image",
+                    "attachment_id": attachment_id,
+                    "media_type": detected.media_type,
+                    "bytes": blob.size,
+                    "width": detected.width,
+                    "height": detected.height,
+                }
+            )
+        return refs
 
     async def send_message(
         self,
@@ -2863,6 +2934,10 @@ class SessionService:
         refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
         remember_as_procedural_rule: bool = False,
+        # #823 / MM-02：附件 id 列表（内容寻址 `sha256:<hex>`）。None/空 = 纯文本，
+        # 既有行为逐字不变。本票只校验"id 存在且属本会话"，不做上限聚合与视觉门禁
+        # （那是 MM-03）——视觉与否由投影层按当前模型能力决定。
+        attachments: list[str] | None = None,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -2987,6 +3062,15 @@ class SessionService:
             except ValueError as error:
                 raise ProtectedFactReferenceInvalid(str(error)) from error
 
+        # 第 1 步续（#823 / MM-02）：附件引用校验——id 形态 / 存在性 / 字节可读，
+        # 全是**纯读**（不发写），与上面的取代/预算校验同一条"先校验后落盘"纪律。
+        # 事件只带引用（`kind/attachment_id/media_type/bytes/width/height`），字节
+        # 已由上传端点内容寻址落盘（persist-before-event）——此处读回并复核尺寸。
+        if attachments:
+            resolved_refs = await self._resolve_attachment_refs(session_id, attachments)
+            if resolved_refs:
+                user_input_metadata["attachments"] = resolved_refs
+
         # 第 1 步：**纯读/纯函数**校验全部先于任何落盘（本方法的顺序纪律）。
         # 取代校验是纯读，预算判定是纯函数；`cancel_queue` 会写 queue/cancelled，所以
         # 两者都必须在它之前——否则一个被拒请求会先毁掉用户的排队项（"旧项被取消 +
@@ -3031,6 +3115,7 @@ class SessionService:
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
                 remember_as_procedural_rule=remember_as_procedural_rule,
+                attachments=user_input_metadata.get("attachments"),
             )
             self._append_session_event(
                 session_id, STEER_REQUESTED,
@@ -3234,6 +3319,9 @@ class SessionService:
         }
         if nxt.protected_facts:
             user_input_metadata["protected_facts"] = nxt.protected_facts
+        if nxt.attachments:
+            # #823 / MM-02：排队/steer 项投递成新 run 时，附件引用随之进入 user/message。
+            user_input_metadata["attachments"] = nxt.attachments
         events = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
         )
@@ -3690,7 +3778,7 @@ class SessionService:
         ADR-0040 协作者契约（超本票范围）。改从更轻接缝取可作为后续票的优化。
         """
         from agent_harness.context.builder import ContextBuilder
-        from agent_harness.model.config import ModelConfig
+        from agent_harness.model.config import ModelConfig, model_supports_vision
         from agent_harness.model.provider import create_chat_model
         from agent_harness.session.model_switch import current_model_selection
 
@@ -3727,6 +3815,7 @@ class SessionService:
             plan_reinject_every_messages=self._settings.plan_reinject_every_messages,
             keep_recent_tool_results=self._settings.keep_recent_tool_results,
             clear_at_least_tokens=self._settings.clear_at_least_tokens,
+            model_supports_vision=model_supports_vision(self._settings, config),
         )
 
     def _compaction_write_guard(
@@ -4973,6 +5062,7 @@ class SessionService:
                     remember_as_procedural_rule=_has_procedural_rule_signal(
                         events, item.kind, item.input_id,
                     ),
+                    attachments=item.attachments,
                 )
                 for item in pending
                 if item.kind == KIND_QUEUE
@@ -4990,6 +5080,7 @@ class SessionService:
                     remember_as_procedural_rule=_has_procedural_rule_signal(
                         events, item.kind, item.input_id,
                     ),
+                    attachments=item.attachments,
                 )
                 for item in pending
                 if item.kind != KIND_QUEUE

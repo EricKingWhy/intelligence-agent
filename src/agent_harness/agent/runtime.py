@@ -1421,6 +1421,8 @@ class AgentRuntime:
             for key in (
                 "revoke_fact_id", "refutes_event_id", "protected_facts",
                 "remember_as_procedural_rule",
+                # #823 / MM-02：steer 也带附件引用（注入成 user/message）。
+                "attachments",
             ):
                 value = getattr(steer, key, None)
                 if value is not None:
@@ -1619,6 +1621,8 @@ class AgentRuntime:
                             "refutes_event_id",
                             "protected_facts",
                             "remember_as_procedural_rule",
+                            # #823 / MM-02：附件引用数组随 user/message 落盘（只带引用）。
+                            "attachments",
                         )
                         if user_input_metadata is not None
                         and key in user_input_metadata

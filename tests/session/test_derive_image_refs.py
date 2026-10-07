@@ -1,0 +1,97 @@
+"""#823 / MM-02：derive_messages 的附件物化 / 占位分支。"""
+
+from __future__ import annotations
+
+from langchain_core.messages import HumanMessage
+
+from agent_harness.attachments.projection import IMAGE_OMITTED_PLACEHOLDER
+from agent_harness.session import USER_MESSAGE, SessionEvent
+from agent_harness.session.derive import (
+    derive_messages,
+    derive_messages_with_source_ranges,
+    referenced_attachment_ids,
+)
+
+_REF = {
+    "kind": "image",
+    "attachment_id": "sha256:" + "a" * 64,
+    "media_type": "image/png",
+    "bytes": 1024,
+    "width": 640,
+    "height": 480,
+}
+
+
+def _user(seq: int, data: dict) -> SessionEvent:
+    return SessionEvent(seq=seq, type=USER_MESSAGE, session_id="s1", data=data)
+
+
+def test_text_only_message_is_byte_identical() -> None:
+    events = [_user(0, {"content": "纯文本"})]
+    (message, _range), = derive_messages_with_source_ranges(events)
+    assert isinstance(message, HumanMessage)
+    assert message.content == "纯文本"  # 逐字不变（AC8）
+    assert isinstance(message.content, str)
+
+
+def test_vision_materializes_image_block_without_base64() -> None:
+    events = [_user(0, {"content": "看图", "attachments": [_REF]})]
+    (message, _range), = derive_messages_with_source_ranges(events, supports_vision=True)
+    assert message.content == [
+        {"type": "text", "text": "看图"},
+        {"type": "image", "file_id": _REF["attachment_id"], "mime_type": "image/png"},
+    ]
+    # 事件流 / 投影里绝不出现 base64（AC3）。
+    assert "base64" not in str(message.content)
+
+
+def test_non_vision_appends_placeholder() -> None:
+    events = [_user(0, {"content": "看图", "attachments": [_REF]})]
+    (message, _range), = derive_messages_with_source_ranges(events, supports_vision=False)
+    assert message.content == f"看图\n{IMAGE_OMITTED_PLACEHOLDER}"
+
+
+def test_default_derive_is_non_vision() -> None:
+    events = [_user(0, {"content": "看图", "attachments": [_REF]})]
+    (message,) = derive_messages(events)
+    assert message.content == f"看图\n{IMAGE_OMITTED_PLACEHOLDER}"
+
+
+def test_bad_attachment_entries_are_ignored() -> None:
+    events = [_user(0, {"content": "x", "attachments": ["nope", {"kind": "file"}]})]
+    (message,) = derive_messages(events)
+    assert message.content == "x"  # 无可解析引用 ⇒ 文本逐字不变
+
+
+def test_referenced_attachment_ids_scans_user_messages() -> None:
+    other = {**_REF, "attachment_id": "sha256:" + "b" * 64}
+    events = [
+        _user(0, {"content": "a", "attachments": [_REF]}),
+        SessionEvent(seq=1, type="model/completed", session_id="s1", data={"content": "ok"}),
+        _user(2, {"content": "b", "attachments": [other]}),
+    ]
+    assert referenced_attachment_ids(events) == {
+        "sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+    }
+
+
+def test_referenced_attachment_ids_empty_for_plain_text() -> None:
+    assert referenced_attachment_ids([_user(0, {"content": "hi"})]) == set()
+
+
+def test_undelivered_inputs_carries_attachments() -> None:
+    """排队/steer 的附件引用不静默丢失（投递时随新 user/message 带出）。"""
+    from agent_harness.session.derive import undelivered_inputs
+    from agent_harness.session.event import MESSAGE_QUEUED
+
+    event = SessionEvent(
+        seq=0,
+        type=MESSAGE_QUEUED,
+        session_id="s1",
+        data={"queue_id": "q1", "content": "看图", "attachments": [_REF]},
+    )
+    (item,) = undelivered_inputs([event])
+    assert item.attachments is not None
+    assert item.attachments[0]["attachment_id"] == _REF["attachment_id"]
+    assert item.attachments[0]["width"] == 640

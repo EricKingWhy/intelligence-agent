@@ -19,12 +19,9 @@
 | 上传路由不受 1 MiB JSON body 上限约束 | 200 放行 |
 | 既有 JSON 端点的 1 MiB 行为 | 逐字不变（413 + 同 detail） |
 
-MM-01 授权口径的**已知缺口**（登记，非本票覆盖）：本票读端点的授权单位 = **会话命名空间
-归属**（"上传即归属本会话"），不是 PRD D5 的"被本 Session 事件引用"——MM-01 没有任何
-"事件引用附件"的机制（那是 MM-02）。故"已上传但**从未被消息引用**的 id → 404"这条 AC
-在本票**未达成**，由 **MM-02** 补回事件引用闸门（见 `web/attachments.py` 模块 docstring
-与 `docs/tickets/multimodal-2026-10-07/MM-02-model-sees-image.md`）。本文件的
-`test_never_uploaded_id_is_404` 只覆盖"从未上传"。
+读端点授权（#823 / MM-02 收紧）：只有被本会话某条 `user/message` 事件引用的
+`attachment_id` 才可读回；未引用（含上传后从未发送）→ 404，与"从未上传 / 别的会话"
+不可区分。故本文件的读回断言都先用 `_reference` 发送一条带附件引用的消息。
 """
 
 from __future__ import annotations
@@ -95,6 +92,18 @@ def _upload(
     )
 
 
+def _reference(client: TestClient, session_id: str, *attachment_ids: str):
+    """发送一条带附件引用的消息——这是读回（MM-02 事件引用闸门）的前置条件。"""
+    with patch(
+        "agent_harness.assembly.create_chat_model",
+        return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
+    ):
+        return client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "看图", "attachments": list(attachment_ids)},
+        )
+
+
 def test_upload_then_read_back_is_byte_equal(tmp_path: Path) -> None:
     client = _client(tmp_path)
     session_id = _create_session(client)
@@ -114,6 +123,8 @@ def test_upload_then_read_back_is_byte_equal(tmp_path: Path) -> None:
     assert len(attachment_id) == len("sha256:") + 64
     assert "/" not in attachment_id and "://" not in attachment_id
 
+    # #823 / MM-02：读回需该 id 被本会话 user/message 事件引用。
+    assert _reference(client, session_id, attachment_id).status_code == 200
     got = client.get(
         f"/api/sessions/{session_id}/attachments/{attachment_id}/content"
     )
@@ -135,9 +146,8 @@ def test_duplicate_upload_yields_same_id(tmp_path: Path) -> None:
 def test_never_uploaded_id_is_404(tmp_path: Path) -> None:
     """**从未上传过**的合法形态 id → 404。
 
-    注意名字的诚实性：它**不**测 AC 里"已上传但从未被消息引用 → 404"那条——MM-01 没有
-    事件引用机制，那条语义未达成、缺口登记为 MM-02 覆盖项（见模块 docstring）。另见
-    `test_other_session_id_is_404`（跨会话 404 与之不可区分）。
+    与"已上传但从未被消息引用 → 404"（`test_uploaded_but_unreferenced_is_404`，
+    MM-02 补回的事件引用闸门）在本轮之后是同一条 404（不可区分，不泄露存在性）。
     """
     client = _client(tmp_path)
     session_id = _create_session(client)
@@ -147,6 +157,28 @@ def test_never_uploaded_id_is_404(tmp_path: Path) -> None:
     assert resp.status_code == 404, resp.text
 
 
+def test_uploaded_but_unreferenced_is_404(tmp_path: Path) -> None:
+    """**已上传但从未被消息引用**的 id → 404（#823 / MM-02 闭合 MM-01 遗留缺口）。
+
+    MM-01 的读授权只到"上传即归属本会话命名空间"；MM-02 把它收紧为"被本 Session
+    事件引用"（PRD D5 / DSH `ATTACHMENT_NOT_REFERENCED`）。
+    """
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    attachment_id = _upload(client, session_id, png_bytes(30, 30)).json()["attachment_id"]
+
+    unreferenced = client.get(
+        f"/api/sessions/{session_id}/attachments/{attachment_id}/content"
+    )
+    assert unreferenced.status_code == 404, unreferenced.text
+
+    # 引用之后即可读回（同一 id），证明确实是"引用闸门"而非别的（如存储故障）。
+    assert _reference(client, session_id, attachment_id).status_code == 200
+    assert client.get(
+        f"/api/sessions/{session_id}/attachments/{attachment_id}/content"
+    ).status_code == 200
+
+
 def test_other_session_id_is_404(tmp_path: Path) -> None:
     """别的会话拿到 id 也取不到内容，且与"从未上传"不可区分（不泄露存在性）。"""
     client = _client(tmp_path)
@@ -154,6 +186,7 @@ def test_other_session_id_is_404(tmp_path: Path) -> None:
     session_b = _create_session(client)
     assert session_a != session_b
     attachment_id = _upload(client, session_a, png_bytes(20, 20)).json()["attachment_id"]
+    assert _reference(client, session_a, attachment_id).status_code == 200
 
     own = client.get(
         f"/api/sessions/{session_a}/attachments/{attachment_id}/content"
@@ -256,6 +289,7 @@ def test_upload_route_is_exempt_from_json_body_cap(tmp_path: Path) -> None:
     up = _upload(client, session_id, payload)
     assert up.status_code == 200, up.text
     attachment_id = up.json()["attachment_id"]
+    assert _reference(client, session_id, attachment_id).status_code == 200
 
     got = client.get(
         f"/api/sessions/{session_id}/attachments/{attachment_id}/content"
