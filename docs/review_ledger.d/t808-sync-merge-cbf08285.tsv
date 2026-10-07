@@ -1,0 +1,1 @@
+2026-10-07	sync: merge origin/main（cbf08285，PR #802 #368 证据保留 W-24 Batch A-D+修复+台账）into fix/808-review-findings-cleanup。来侧 15 笔已由 t368-*.tsv 行覆盖；与 #808 唯一文件交集 app.py 零语义冲突（来侧 retention 端点 +6 行 × 本侧 EXPOSED 注释块），ort 自动合并。机械行：--cc 空集 fail-closed 规避（#781 4e1aa204 先例）。	e2fd27699d0289fa11fe0c725c7a2f06f3269ef0..ce175c2d511f6cb66cd4df49a2e598ee5d4357c5

@@ -163,6 +163,16 @@ async def test_fact_durable_before_ledger_terminal_requires_manual_reconcile(
     assert is_direct_user_input_event(
         after_first_reconcile, first_source.event_id,
     )
+    # C-P4（#808）：替身不覆写 source_for ⇒ ABC 默认 None ⇒ coordinator
+    # "有值才写"（不伪造）。reconcile_meta 必须诚实缺 source 字段，
+    # verdict/reconciled_at 两个真实键一并钉住防漂移。
+    reconciled = await ledger.get(_SESSION_ID, _CALL_ID)
+    assert reconciled is not None
+    assert reconciled.reconcile_meta is not None
+    reconcile_meta = json.loads(reconciled.reconcile_meta)
+    assert reconcile_meta["verdict"] == ReconcileVerdict.CONFIRM_SUCCESS.value
+    assert "reconciled_at" in reconcile_meta
+    assert "source" not in reconcile_meta
 
     await coordinator.recover(_SESSION_ID)
     after_repeat = store.read_events(_SESSION_ID)
