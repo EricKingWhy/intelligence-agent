@@ -3901,7 +3901,9 @@ class SessionService:
         （事件日志 / artifact / 进度文件）拆列，``reclaimable_bytes`` 即
         "在预览确认后可释放"的部分。所有"不存在"的面如实记 0，不伪造。
         """
-        self._validate_session_id(session_id)
+        # 形态 + 存在性（与 preview/execute 同一契约：非法 id → 422，
+        # 不存在的会话 → 404，而不是 200 配一串 0 误导调用方）。
+        await self._require_existing_session(session_id)
         reachable, candidates, _pending, _children, _stamp = await self._cleanup_state(
             session_id
         )
@@ -5176,6 +5178,18 @@ class SessionService:
         )
         current_head = await self._git_head(root) if needs_head else None
         store = self._artifact_store_for(session_id)
+        # cleaned 集一次预取（线程池）：免得每条缺失 artifact 的记录各读一次文件，
+        # 同步磁盘 I/O 不进事件循环（与 delete_session 同一纪律）。
+        needs_cleaned = any(
+            record.artifact_ref
+            for records in state.by_criterion.values()
+            for record in records
+        )
+        cleaned_refs: set[str] = (
+            await anyio.to_thread.run_sync(self._get_cleaned_artifacts, session_id)
+            if needs_cleaned
+            else set()
+        )
         by_criterion: dict[str, list[dict]] = {}
         for criterion_id, records in state.by_criterion.items():
             items = []
@@ -5185,7 +5199,9 @@ class SessionService:
                 cleaned = False
                 if record.artifact_ref:
                     readable, attribution_ok, cleaned = (
-                        await self._check_evidence_artifact(store, record)
+                        await self._check_evidence_artifact(
+                            store, record, cleaned_refs=cleaned_refs
+                        )
                     )
                 freshness = evaluate_evidence_freshness(
                     record,
@@ -5254,7 +5270,7 @@ class SessionService:
         return await anyio.to_thread.run_sync(_run)
 
     async def _check_evidence_artifact(
-        self, store, record
+        self, store, record, cleaned_refs: set[str] | None = None
     ) -> tuple[bool, bool | None, bool]:
         """证据 artifact 的可读回 + 归属校验 + "原件已清理"标记（#368 W-24）。
 
@@ -5267,16 +5283,20 @@ class SessionService:
           本会话 cleaned 集合里 ⇒ 原件是被**显式清理**的，而非从未存在 / 外部丢失。
           其余分支恒 False。``evaluate_evidence_freshness`` 消费它产出"原件已清理"
           枚举（与"不可读回/损坏"区分）。
+        - ``cleaned_refs``：调用方已预取的 cleaned 集合（事件循环外一次读完，
+          免得每条记录各读一次文件）；不传则本函数自己读（同步小文件，兜底路径）。
         """
         if store is None:
             return False, None, False
         try:
             artifact = await store.load(record.artifact_ref)
         except KeyError:
-            cleaned = record.artifact_ref in self._get_cleaned_artifacts(
-                record.task_session_id
+            refs = (
+                cleaned_refs
+                if cleaned_refs is not None
+                else self._get_cleaned_artifacts(record.task_session_id)
             )
-            return False, None, cleaned
+            return False, None, record.artifact_ref in refs
         except OSError:
             return False, None, False
         if not record.tool_call_id:

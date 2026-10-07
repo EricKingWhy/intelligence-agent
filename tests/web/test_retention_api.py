@@ -86,6 +86,12 @@ class TestSessionUsage:
         resp = client.get("/api/sessions/bad.id/usage")
         assert resp.status_code == 422, resp.text
 
+    def test_nonexistent_session_is_404(self, client) -> None:
+        # #368 审查 P3-1：不存在的会话必须 404，不能 200 配一串 0 误导调用方。
+        client, _ = client
+        resp = client.get("/api/sessions/nonexistent-session-xyz/usage")
+        assert resp.status_code == 404, resp.text
+
 
 class TestCleanupPreview:
     def test_preview_shape(self, client) -> None:
