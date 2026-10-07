@@ -1,0 +1,1 @@
+2026-10-07	#353 P2 先回后正同步合并：merge 7284ce73 合 origin/main 930877df（来侧 #788 授权字段 + #790 损坏会话；TaskReviewPanel 授权占位符冲突人工解决：保留 #788 真实 authorization 字段渲染，删占位符；parseTaskResponse/下一步推导保留）。tsc 通过	85817ca2b858ba9875a22c7b12a296f8e6c16200..7284ce73133625b70918b1104ffc8cfa2a8c1de3
