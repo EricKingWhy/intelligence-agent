@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -47,6 +47,7 @@ from langchain_core.messages import AIMessage
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import FakeArtifactStore, compute_artifact_id
 from agent_harness.web.app import create_app
+from tests.s3_fakes import FakeS3Client, FakeSDKSession
 from tests.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
@@ -437,54 +438,6 @@ def test_runtime_overflow_writes_a_readable_artifact(tmp_path: Path) -> None:
     assert got.json()["truncated"] is False
 
 
-class _FakeBody:
-    """最小 S3 body 替身（`async with response["Body"] as stream`）。"""
-
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
-
-    async def read(self) -> bytes:
-        return self._data
-
-
-class _FakeS3Client:
-    """记录请求的 s3 客户端替身：不发网络，就能断言真实 key。"""
-
-    def __init__(self, *, error: Exception | None = None, payload: bytes = b"") -> None:
-        self.requests: list[dict] = []
-        self._error = error
-        self._payload = payload
-
-    async def get_object(self, **kwargs: object) -> dict:
-        self.requests.append(kwargs)
-        if self._error is not None:
-            raise self._error
-        return {"Body": _FakeBody(self._payload), "ContentType": "text/plain"}
-
-
-class _FakeSDKSession:
-    def __init__(self, client: _FakeS3Client) -> None:
-        self._client = client
-
-    def client(self, _service: str, **_kwargs: object):
-        client = self._client
-
-        class _ClientCM:
-            async def __aenter__(self) -> _FakeS3Client:
-                return client
-
-            async def __aexit__(self, *exc: object) -> bool:
-                return False
-
-        return _ClientCM()
-
-
 def _minio_store(session_id: str) -> MinioArtifactStore:
     pytest.importorskip("aioboto3")
     from agent_harness.storage.minio_artifact import MinioArtifactStore
@@ -510,8 +463,8 @@ def test_minio_load_namespaces_key_by_store_session(monkeypatch: pytest.MonkeyPa
     content = "hello\n"
     artifact_id = compute_artifact_id(content)
     store = _minio_store("sess-b")
-    client = _FakeS3Client(payload=content.encode())
-    monkeypatch.setattr(store, "_sdk_session", _FakeSDKSession(client))
+    client = FakeS3Client(payload=content.encode())
+    monkeypatch.setattr(store, "_sdk_session", FakeSDKSession(client))
 
     artifact = asyncio.run(store.load(artifact_id))
 
@@ -535,7 +488,7 @@ def test_minio_load_maps_missing_object_to_key_error(
     store = _minio_store("sess-b")
     missing = store._client_error({"Error": {"Code": "NoSuchKey"}}, "GetObject")
     monkeypatch.setattr(
-        store, "_sdk_session", _FakeSDKSession(_FakeS3Client(error=missing))
+        store, "_sdk_session", FakeSDKSession(FakeS3Client(error=missing))
     )
 
     with pytest.raises(KeyError):

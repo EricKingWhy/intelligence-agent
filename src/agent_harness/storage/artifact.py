@@ -30,6 +30,13 @@ from pydantic import BaseModel
 #: MinIO 干脆不校验，两边行为不一致（#185 AC3）。
 ARTIFACT_ID_PATTERN = re.compile(r"[0-9a-f]{16}")
 
+#: **字节路径**的 artifact id 形态：完整内容哈希，带 `sha256:` 前缀
+#: （`sha256:<64 hex>`）。与文本路径的 16 位短 id 是两个 id 空间：字节路径专供
+#: 附件入站（#822 MM-01），不参与文本 artifact 的 overflow/inspect 语义。
+#: 前缀是对外契约（附件响应 `attachment_id` 必须形如 `sha256:<hex>`），存储键用
+#: 前缀后的 64 位 hex（路径安全，见各 Provider）。
+BYTE_ARTIFACT_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+
 #: artifact 存储键里 session 段的安全形态：**单个名字段，不是路径**。
 #: 三个 Provider 的键都是 `{session_id}/{artifact_id}`；本地 Provider 要把它拼进文件
 #: 系统路径，不校验时 `..` / 反斜杠段 / 盘符段都能越出 artifact 根目录（ADR-0029 D2
@@ -78,6 +85,21 @@ class ArtifactSlice(BaseModel):
     query: dict[str, int | str | None]
 
 
+class BlobArtifact(BaseModel):
+    """**字节路径**的 artifact：原始字节 + 内容寻址 id + Content-Type。
+
+    与文本 `Artifact` 分开：文本路径的 `content` 是 `str`（UTF-8 假设），字节路径
+    的 `content` 是 `bytes`。两者 key 布局与 id 形态都不同（16 位短 id vs
+    `sha256:<64hex>`），是**两个 id 空间**（#822 MM-01）。
+    """
+
+    artifact_id: str
+    session_id: str
+    size: int
+    mime_type: str
+    content: bytes | None = None  # load_bytes() 时填充；save_bytes() 不填充
+
+
 class ArtifactStore(ABC):
     """Artifact 的持久化边界（async ABC）。"""
 
@@ -114,10 +136,36 @@ class ArtifactStore(ABC):
         截断行额外携带 truncated=True 与 full_length，原文始终保留在 Artifact 里。
         """
 
+    @abstractmethod
+    async def save_bytes(
+        self, session_id: str, data: bytes, *, mime_type: str
+    ) -> BlobArtifact:
+        """存**原始字节**（内容寻址，id 形态见 `BYTE_ARTIFACT_ID_PATTERN`）。
+
+        与文本 `save` 的区别：不做 UTF-8 假设、id 是完整 sha256（非前 16 位）。
+        同一字节重复存入必须收敛到同一 id 且只落一份（去重）。
+        """
+
+    @abstractmethod
+    async def load_bytes(self, artifact_id: str) -> BlobArtifact:
+        """按字节 id 读回原始字节（`content` 填充），并做内容寻址自证。
+
+        not-found（含"属于别的会话"）统一 `KeyError`——与文本路径同契约。
+        """
+
 
 def compute_artifact_id(content: str) -> str:
     """content-hash 寻址：SHA-256 前 16 字符作为 artifact_id。"""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def compute_byte_artifact_id(data: bytes) -> str:
+    """**字节路径**的内容寻址 id：完整 SHA-256，带 `sha256:` 前缀。
+
+    来源: DeepSeek Harness `5badb150` `attachment-local/src/file-store.ts`
+    （`AttachmentId("sha256:<hex>")`，MIT）。
+    """
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
 def slice_lines(
@@ -216,6 +264,7 @@ class FakeArtifactStore(ArtifactStore):
 
     def __init__(self) -> None:
         self._artifacts: dict[str, tuple[Artifact, str]] = {}  # id → (meta, content)
+        self._blobs: dict[str, tuple[BlobArtifact, bytes]] = {}  # 字节路径 id → (meta, data)
 
     async def save(
         self,
@@ -269,3 +318,23 @@ class FakeArtifactStore(ArtifactStore):
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
         )
+
+    async def save_bytes(
+        self, session_id: str, data: bytes, *, mime_type: str
+    ) -> BlobArtifact:
+        artifact_id = compute_byte_artifact_id(data)
+        blob = BlobArtifact(
+            artifact_id=artifact_id,
+            session_id=session_id,
+            size=len(data),
+            mime_type=mime_type,
+        )
+        # 同 id 覆盖 = 内容寻址去重（同字节序列只留一份）。
+        self._blobs[artifact_id] = (blob, data)
+        return blob
+
+    async def load_bytes(self, artifact_id: str) -> BlobArtifact:
+        if artifact_id not in self._blobs:
+            raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
+        blob, data = self._blobs[artifact_id]
+        return blob.model_copy(update={"content": data})
