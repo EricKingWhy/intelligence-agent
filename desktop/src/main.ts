@@ -22,6 +22,7 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
 import { DesktopBackgroundNotice } from './background-notice.ts'
 import { desktopWebPreferences, decideNavigation, type LocalPagePolicy } from './security.ts'
 import { DesktopServiceHost } from './service-host.ts'
+import { resolvePreloadPath, resolveShellAssetsDir, resolveTrayIconPath } from './shell-paths.ts'
 import { inspectManagedSessions, type QuitInspectionDeps } from './quit-inspection.ts'
 import { en, zh, resolveDesktopLocale, type DesktopLocale } from './messages.ts'
 
@@ -100,7 +101,10 @@ async function main(): Promise<void> {
   }
 
   // 3. Hardened window.
-  const preload = join(__dirname, 'preload.js')
+  // W-21 D6 (#814): ESM has no CommonJS directory global; assets are resolved
+  // from this module's own directory (see shell-paths.ts), never from cwd.
+  const assetsDir = resolveShellAssetsDir(import.meta.dirname)
+  const preload = resolvePreloadPath(assetsDir)
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -125,7 +129,7 @@ async function main(): Promise<void> {
 
   // 4. Tray: only "open" and "quit".
   tray = new DesktopTray({
-    iconPath: join(__dirname, 'tray-icon.ico'),
+    iconPath: resolveTrayIconPath(assetsDir),
     locale: currentLocale,
     open: () => { focusPrimaryWindow() },
     quit: () => { void requestQuit(quitConfirmation) },
