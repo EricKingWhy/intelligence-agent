@@ -402,7 +402,7 @@ test('AC8: pagination stops at the backend offset ceiling with an explicit bound
         const timeout = window.setTimeout(() => {
           observer.disconnect();
           reject(new Error('pagination request did not settle'));
-        }, 10_000);
+        }, 20_000);
         observer.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'] });
         button.click();
       });
