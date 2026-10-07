@@ -12,6 +12,8 @@
  *   - electron-builder (npm i -D electron-builder; lazy-required)
  *   - installer/staging/python/python.exe prepared per installer/README.md
  *     (offline Python runtime pinned by installer/python-runtime.lock.json)
+ *   - installer/staging/node/node.exe, the same way
+ *     (offline Node runtime pinned by installer/node-runtime.lock.json)
  *   - the compiled desktop app (npm run build -> dist/)
  *
  * Resource layout (PORT DESIGN from OpenHands electron-builder.config.mjs,
@@ -21,11 +23,12 @@
  *   <install>/Intelligence Agent.exe
  *   <install>/resources/app/...          (this package)
  *   <install>/resources/python/python.exe (bundled runtime, from the lockfile)
+ *   <install>/resources/node/node.exe     (terminal client runtime, W-21 D5)
  * User data is NOT in the install dir: %APPDATA%\\intelligence-agent.
  */
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -184,8 +187,86 @@ export function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
+/** Minimal well-formed Node runtime lock, used by tests and as documentation. */
+export const GOOD_NODE_LOCK = {
+  schemaVersion: 1,
+  target: { platform: 'win32', arch: 'x64' },
+  node: {
+    version: '24.21.0',
+    url: 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip',
+    sha256: '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541',
+  },
+  requirements: { engines: '>=22', minimumMajor: 22 },
+  layout: { resourcesDir: 'node', executable: 'node/node.exe' },
+}
+
+function failNode(message) {
+  throw new Error(`node-runtime.lock.json: ${message}`)
+}
+
+/**
+ * Validate the Node runtime lockfile (W-21 D5 / #817). Throws on violations.
+ * Pure (testable); the real file lives at installer/node-runtime.lock.json.
+ *
+ * The pin has to satisfy the TUI's own `engines.node` (tui/package.json), so a
+ * hand-edited lock cannot ship a runtime older than the client needs.
+ */
+export function validateNodeRuntimeLockfile(lock) {
+  if (lock === null || typeof lock !== 'object') failNode('not a JSON object')
+  if (lock.schemaVersion !== 1) failNode(`unsupported schemaVersion ${String(lock.schemaVersion)}`)
+  if (lock.target?.platform !== 'win32' || lock.target?.arch !== 'x64') {
+    failNode('target must be { platform: "win32", arch: "x64" }')
+  }
+  const node = lock.node
+  if (node === null || typeof node !== 'object') failNode('missing "node" pin')
+  const [major] = String(node.version ?? '').split('.').map(Number)
+  if (!Number.isInteger(major)) failNode(`bad node.version ${String(node.version)}`)
+  const minimum = lock.requirements?.minimumMajor
+  if (!Number.isInteger(minimum)) failNode('requirements.minimumMajor must be an integer')
+  if (major < minimum) {
+    failNode(`node ${node.version} is below requirements.minimumMajor ${String(minimum)} (tui engines)`)
+  }
+  if (typeof node.url !== 'string' || !node.url.startsWith('https://')) failNode('node.url must be https')
+  if (!SHA256_RE.test(node.sha256 ?? '')) failNode('node.sha256 must be 64 lowercase hex chars')
+  if (typeof lock.layout?.resourcesDir !== 'string' || lock.layout.resourcesDir === '') {
+    failNode('layout.resourcesDir is required')
+  }
+  if (lock.layout?.executable !== `${lock.layout.resourcesDir}/node.exe`) {
+    failNode(`layout.executable must be ${lock.layout.resourcesDir}/node.exe`)
+  }
+}
+
+/**
+ * Assert the staged Node runtime is the pinned one. `run` is injectable for
+ * unit tests; on Windows it is node's spawnSync against the staged binary.
+ */
+export function assertNodeRuntime({ nodeExe, version, run = spawnSync }) {
+  const result = run(nodeExe, ['--version'], { encoding: 'utf8' })
+  if (result.error) {
+    throw new Error(
+      `bundled node failed to start (${nodeExe}): ${result.error.message} — ` +
+        'stage it with desktop/scripts/prepare_node_runtime.py (installer/README.md)',
+    )
+  }
+  const actual = String(result.stdout ?? '').trim()
+  if (result.status !== 0 || actual !== `v${version}`) {
+    const detail = String(result.stderr ?? '').trim().split('\n').pop() ?? ''
+    throw new Error(
+      `bundled node reports ${actual === '' ? `exit ${String(result.status)}` : actual} ` +
+        `(${nodeExe}): node-runtime.lock.json pins v${version} ${detail}`,
+    )
+  }
+  return actual
+}
+
 /** Index document of the packaged renderer build (W-21 D3). */
 const WEB_INDEX = join('web', 'index.html')
+
+/** Terminal client launcher shipped at the install root (W-21 D5). */
+const TUI_LAUNCHER = 'ia-tui.cmd'
+
+/** The TUI's only runtime dependency; its own dependencies follow it (W-21 D5). */
+const TUI_ROOT_PACKAGE = '@earendil-works/pi-tui'
 
 /**
  * Assert the packaged app carries the renderer build (W-21 D3 / #815).
@@ -258,10 +339,103 @@ export function assertNsisIncludePlacement(source, includedFile) {
 }
 
 /**
+ * Assert the packaged TUI runs from the artifact (W-21 D5 / #817).
+ *
+ * The TUI is shipped as `<resources>/tui` (compiled `dist/` + its runtime
+ * dependency closure) and started by `ia-tui.cmd` with the bundled Node runtime
+ * at `<resources>/node/node.exe`. `pi-tui` is the one runtime dependency; its
+ * own dependencies are read from the *shipped* manifest, so a version bump that
+ * adds a dependency fails the build instead of producing a TUI that cannot
+ * import (`marked` / `get-east-asian-width` today).
+ *
+ * @param options.resourcesDir - `<appOutDir>/resources`.
+ * @param options.appOutDir - directory the app exe and the launcher live in.
+ * @param options.readJson - injectable file reader (unit-testable off-Windows).
+ * @param options.existsSync - injectable existence check.
+ */
+export function assertTuiRuntimeClosure({
+  resourcesDir,
+  appOutDir,
+  readJson = (path) => JSON.parse(readFileSync(path, 'utf8')),
+  existsSync: exists = existsSync,
+}) {
+  const entry = join(resourcesDir, 'tui', 'dist', 'src', 'index.js')
+  if (!exists(entry)) {
+    throw new Error(
+      `bundled TUI missing: ${entry} — build it with \`npm run build\` in tui/ ` +
+        '(the installer ships tui/dist as resources/tui/dist)',
+    )
+  }
+  const launcher = join(appOutDir, TUI_LAUNCHER)
+  if (!exists(launcher)) {
+    throw new Error(`TUI launcher missing: ${launcher} — installer extraFiles must ship it`)
+  }
+  const nodeExe = join(resourcesDir, 'node', 'node.exe')
+  if (!exists(nodeExe)) {
+    throw new Error(
+      `bundled node runtime missing: ${nodeExe} — the TUI needs a real console, which the app's ` +
+        'own Electron binary cannot provide; stage it with scripts/prepare_node_runtime.py',
+    )
+  }
+  const modulesDir = join(resourcesDir, 'tui', 'node_modules')
+  const pending = [TUI_ROOT_PACKAGE]
+  const seen = new Set()
+  while (pending.length > 0) {
+    const name = pending.pop()
+    if (seen.has(name)) continue
+    seen.add(name)
+    const manifest = join(modulesDir, ...name.split('/'), 'package.json')
+    if (!exists(manifest)) {
+      throw new Error(
+        `bundled TUI dependency missing: ${manifest} — add it to the installer's tui ` +
+          'extraResources filter (npm ls --omit=dev in tui/)',
+      )
+    }
+    for (const dependency of Object.keys(readJson(manifest).dependencies ?? {})) {
+      pending.push(dependency)
+    }
+  }
+}
+
+/**
+ * Assert a compiled entry point is newer than the sources it was built from.
+ *
+ * The installer build never runs `tsc` (W-21 D3 lesson: a stale compiled module
+ * shipped in an otherwise green build), so a stale `dist/` passes every
+ * "file exists" check while the artifact carries the old product.
+ *
+ * @param options.entry - compiled entry file the artifact ships.
+ * @param options.newestSourceMtimeMs - newest mtime under the source tree.
+ * @param options.entryMtimeMs - mtime of the compiled entry.
+ */
+export function assertFreshBuild({ entry, newestSourceMtimeMs, entryMtimeMs }) {
+  if (entryMtimeMs < newestSourceMtimeMs) {
+    throw new Error(`stale build: ${entry} is older than its sources — rebuild before packing`)
+  }
+}
+
+/** Newest mtime (ms) in a directory tree; 0 when the tree does not exist. */
+function newestMtimeMs(dir) {
+  let newest = 0
+  let entries
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) newest = Math.max(newest, newestMtimeMs(full))
+    else newest = Math.max(newest, statSync(full).mtimeMs)
+  }
+  return newest
+}
+
+/**
  * Pure electron-builder configuration for the Windows x64 installer.
  * Kept pure (no electron-builder import) so it is unit-testable on any OS.
  */
-export function createWindowsInstallerConfig({ version, appId, productName, installerDir, runtimeProduct }) {
+export function createWindowsInstallerConfig({ version, appId, productName, installerDir, runtimeProduct, nodeVersion }) {
   const productFilename = productName.replace(/ /g, '-')
   return {
     appId,
@@ -281,10 +455,25 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
     // `from` is relative to the project dir (desktop/).
     extraResources: [
       { from: `${installerDir}/staging/python/`, to: 'python/', filter: ['**/*'] },
+      // W-21 D5 (#817): the terminal client's runtime. The app's own Electron
+      // binary cannot host a raw-mode TUI (measured: no TTY in node mode), so
+      // the artifact carries its own node.exe (node-runtime.lock.json).
+      { from: `${installerDir}/staging/node/`, to: 'node/', filter: ['**/*'] },
       // W-21 D3 (#815): the built renderer UI; the shell tells the service where
       // it is (WEB_DIST_DIR) and loads its window from the service origin.
       { from: '../web/dist/', to: 'web/', filter: ['**/*'] },
+      // W-21 D5 (#817): the terminal client (compiled dist + runtime deps).
+      // Only the runtime closure is shipped — the TUI's devDependencies
+      // (typescript, @types) stay out; afterPack asserts the closure anyway.
+      { from: '../tui/dist/', to: 'tui/dist/', filter: ['**/*'] },
+      {
+        from: '../tui/node_modules/',
+        to: 'tui/node_modules/',
+        filter: ['@earendil-works/**', 'get-east-asian-width/**', 'marked/**'],
+      },
     ],
+    // W-21 D5 (#817): the TUI entry, at the install root next to the app exe.
+    extraFiles: [{ from: `${installerDir}/${TUI_LAUNCHER}`, to: TUI_LAUNCHER }],
     win: {
       target: [{ target: 'nsis', arch: ['x64'] }],
     },
@@ -317,14 +506,19 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
       // W-21 D2: a staged runtime holding only the dependency closure imports
       // nothing; fail the build instead of shipping an installer that cannot start.
       assertRuntimeProduct({ pythonExe, product: runtimeProduct })
+      // W-21 D5: the terminal client runs on the bundled node runtime.
+      assertNodeRuntime({ nodeExe: join(resourcesDir, 'node', 'node.exe'), version: nodeVersion })
       // W-21 D3: the window loads the packaged renderer build from the service.
       assertBundledWebAssets({ resourcesDir })
+      // W-21 D5: the terminal client must run from the artifact (entry +
+      // launcher + the whole dependency closure of its one runtime dependency).
+      assertTuiRuntimeClosure({ resourcesDir, appOutDir: context.appOutDir })
     },
   }
 }
 
-function loadLockfile() {
-  const path = join(installerDir, 'python-runtime.lock.json')
+function loadLockfile(name = 'python-runtime.lock.json') {
+  const path = join(installerDir, name)
   if (!existsSync(path)) fail(`not found: ${path}`)
   return JSON.parse(readFileSync(path, 'utf8'))
 }
@@ -344,6 +538,9 @@ async function main() {
     `(${lock.wheels.length} pinned wheels)`,
     `+ product ${lock.product.name}==${lock.product.version}`,
   )
+  const nodeLock = loadLockfile('node-runtime.lock.json')
+  validateNodeRuntimeLockfile(nodeLock)
+  console.log('node lockfile OK:', nodeLock.node.version, `(${nodeLock.layout.executable})`)
 
   const pkg = JSON.parse(readFileSync(join(desktopDir, 'package.json'), 'utf8'))
   const config = createWindowsInstallerConfig({
@@ -352,10 +549,17 @@ async function main() {
     productName: 'Intelligence Agent',
     installerDir,
     runtimeProduct: lock.product,
+    nodeVersion: nodeLock.node.version,
   })
   config.directories.output = outDir
 
-  for (const required of ['installer.nsh', 'installer-directories.nsh', 'python-runtime.lock.json']) {
+  for (const required of [
+    'installer.nsh',
+    'installer-directories.nsh',
+    'python-runtime.lock.json',
+    'node-runtime.lock.json',
+    TUI_LAUNCHER,
+  ]) {
     if (!existsSync(join(installerDir, required))) {
       throw new Error(`missing installer input: ${required}`)
     }
@@ -378,6 +582,25 @@ async function main() {
   if (!existsSync(webDistIndex)) {
     throw new Error(`renderer build missing: ${webDistIndex} — run \`npm run build\` in web/`)
   }
+  // W-21 D5: same for the terminal client (compiled from tui/src by tsc), plus
+  // the staleness guard — a stale dist ships an old TUI in a green build.
+  const tuiEntry = join(desktopDir, '..', 'tui', 'dist', 'src', 'index.js')
+  if (!existsSync(tuiEntry)) {
+    throw new Error(`TUI build missing: ${tuiEntry} — run \`npm run build\` in tui/`)
+  }
+  assertFreshBuild({
+    entry: tuiEntry,
+    newestSourceMtimeMs: newestMtimeMs(join(desktopDir, '..', 'tui', 'src')),
+    entryMtimeMs: statSync(tuiEntry).mtimeMs,
+  })
+  // …and for the staged runtime the TUI runs on.
+  const stagedNode = join(installerDir, 'staging', nodeLock.layout.executable)
+  if (!existsSync(stagedNode)) {
+    throw new Error(
+      `bundled node runtime not staged: ${stagedNode} — ` +
+        'run `python scripts/prepare_node_runtime.py` (installer/README.md)',
+    )
+  }
   let builder
   try {
     builder = await import('electron-builder')
@@ -394,7 +617,6 @@ async function main() {
 
   // SHA-256 manifest over the produced artifacts (#361: unsigned but hashed).
   const manifest = []
-  const { readdirSync } = await import('node:fs')
   for (const file of readdirSync(outDir)) {
     if (!file.endsWith('.exe') && !file.endsWith('.nsh')) continue
     manifest.push(`${sha256File(join(outDir, file))}  ${file}`)
@@ -406,6 +628,7 @@ async function main() {
     platform: 'win32',
     arch: 'x64',
     lockfileSha256: sha256File(join(installerDir, 'python-runtime.lock.json')),
+    nodeLockfileSha256: sha256File(join(installerDir, 'node-runtime.lock.json')),
     builtAt: new Date().toISOString(),
   }
   writeFileSync(join(outDir, 'installer-build.json'), `${JSON.stringify(buildInfo, null, 2)}\n`)
