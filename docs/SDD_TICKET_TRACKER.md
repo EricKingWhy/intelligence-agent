@@ -7618,3 +7618,13 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **分段与操作者工具链注记**：第 2 段按产品 `next_safe_action` 把窗口提到 `MAX_CONTEXT_TOKENS=600000` 并用 `POST /resume` 续完（该响应是 run 的事件流，910 s 才收完）；审批回环把 `run/paused` 当终止事件需重设 baseline；`follow()` 计数 0 属操作者脚本 wart（以直读事件与 `final` 汇总为准）。
 - **证据**：`docs/live_gate/w21/45-run-b-kill-reconcile.md`、`docs/live_gate/w21/46-run-b-defects-tui.md`；操作者证据 `D:/w21-work/evidence/run-b/*`（91 文件清单 `run-b-manifest.json`）。
 - **状态**：Run B 核心腿通过但**不是完整通过**（TUI 腿被 #842 阻断）；#365 仍 OPEN；新增缺陷票 #842(P0)/#843(P2)/#844(P1) 待维护者处置；**待批准**：①本分支 push + 开 PR；②PR #811 merge；③#815 第三条路径接受或否决。
+
+## W-21 #842（D12）修复 + Run B TUI 腿重跑（2026-10-08；安装件 `46e7a9e2…`；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，未提交；**push/PR 待批准，未集成**）
+
+- **修复**：`tui/src/views/chat.ts` `USER_TINT` 与 `tui/src/theme.ts` `CARD_TINTS` 的 `rgb(...)` 字面量换成等值 hex（`#262226`/`#26282e`/`#1e2821`/`#2e1e21`，RGB 分量逐位相同）+ 纠正与 `parseColor` 契约不符的注释；新增 `tui/test/tints.test.ts`（用户轮与三态工具卡装配 + `src/` 颜色字面量扫源守门），旧字面量 3 条红 → 修复后 **54 tests / 0 fail**、`tsc --noEmit` exit 0。提交 `14898f1a`。
+- **收口调查（票面修复方向第 3 条）**：live 路径与附着路径构造同一批 Box，差别只在异常落点——附着抛到 `index.ts:174` 顶层 `main().catch` 直接退出；live 的抛错被 `sse.ts:113-127` 当流错误收走，记成 `stream reconnect: Invalid color value: …` 并每秒重连、永不渲染（帧已被 `SeqCursor` 推进游标后丢弃）。机械证明：回放真机会话 4934 帧，修复前第 3 帧（seq=2 `user/message`）抛，修复后全通过；据此**更正**票面「跟完 8 分钟真实运行」的说法（进程活着，投影早已死）。
+- **重打包**：`desktop/dist-installer/Intelligence-Agent-Setup-0.1.0.exe`，204,377,641 B，sha256 `46e7a9e2c22bd2ea16f9e82e1cbfe9c3f22f0f5a626d72bd979e4ef5eb7e2fd6`（HEAD `14898f1a`，`productCodeSha256` 与上一版一致 `1d4688ad…`）。静默安装 rc=0 / 127.3 s；安装树 `const USER_TINT = "#262226";`。
+- **TUI 腿重跑（#842 真机验收）**：附着**被恢复的那个会话**（`d4d78a49…`，4934 事件、2 条 `user/message`）→ 无 `ia-tui failed`、无重连 note、屏幕渲染出工具卡与计划更新；桌面 + TUI 同时在场于同一会话（服务 pid 25264/port 62511、桌面 4 进程、TUI node 1 个、会话在列表里）；TUI 单独退出 → 服务与桌面存活；桌面单独退出 → 桌面消失、服务存活（本轮服务由 TUI 冷启动，故与 Run B「桌面拉起→桌面退出即消失」互补）。
+- **新缺陷（如实回票）**：装完安装件后**首次**启动服务就绪 35.7 s（`--check`）/36–42 s（真实启动）> `host.ts:190` 的 30 s 窗口，TUI 硬失败退出并留孤儿服务（热态 6.6–6.9 s；已排除 pyc 首次编译：删光 249 个 `.pyc` 仍 6.9 s）⇒ **#846（P1）**；`ia-tui.cmd` 吞子进程退出码（`endlocal` 无 `exit /b`，`--check` 失败仍 rc=0）⇒ **#847（P2）**。
+- **证据**：`docs/live_gate/w21/47-w21-run-b-tui-legs-rerun.md`（含操作者偏差：误注入 `END` 触发 `HTTP 500` 且**会话零副作用**、控制台无回滚缓冲、截图缺失）；操作者证据 `D:/w21-work/evidence/run-b-842/*`、探针 `D:/w21-work/d12-probe/{probe.mjs,live-path.mjs}`。
+- **状态**：**#842 的 AC 在真机上达成**（可关票）；#846/#847 未修；**Run B 的两次独立完整通过尚未在 `46e7a9e2…` 上重跑**，故本段不构成 #365 通过结论；D13（#843）仍待裁决；**待批准**：①本分支 push + 开 PR；②PR #811 merge；③#815 第三条路径接受或否决。

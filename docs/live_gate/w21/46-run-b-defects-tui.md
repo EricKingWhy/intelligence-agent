@@ -17,7 +17,8 @@ ia-tui failed: Error: Invalid color value: rgb(38, 34, 38)
 在附着阶段直接失败退出：控制台进程 `cmd_alive=false`，屏幕只剩这一行错误（`tui2-screen-attached.txt`、`tui2-opened.json`）。
 
 对照：同一安装件 `--session new` 冷启动正常（`tui-console.txt`：console allocated → `TUI launched cmd pid=24196 --session new` → node pids `[24652]`，
-随后该 TUI 成功投递了任务消息并跟完 8 分钟真实运行）。
+随后该 TUI 投递了任务消息）。**更正（2026-10-08，见下节）**：该 TUI 只是进程活着（心跳 `cmd_alive=True`），
+它的投影从第一条 `user/message` 起就已经死了，8 分钟里没有渲染出任何内容。
 
 ### 定位（仓库源码，不是 dist）
 
@@ -67,12 +68,45 @@ patched copy         renders a user turn -> 1 component(s); no throw
 
 输出留档：`D:\w21-work\evidence\run-b\d12-probe-output.txt`。安装件原树未被修改（只读复制）。
 
-### 本轮未定位到的部分（据实记录）
+### 差异路径（#842 施工时查清）
 
-第一个 TUI（`--session new`）在真实运行中活了 8 分钟，期间接收过 1 条 `user/message` 与 44 条 `tool/call` 事件却未崩；
-而 `--session <id>` 附着立即崩。上面的 hermetic 对照说明**全量重建路径**（`conversationComponents`）在用户轮上必抛，
-但**增量渲染路径与全量重建路径的差异本轮没有定位到具体行**——为什么 live 的 8 分钟没走到这个构造点，仍待修复票查清，
-不要只改字面量。
+两条路径**构造的是同一批 Box**，差别在异常落点：
+
+- 附着：`app.ts` 启动时 `rebuildFromHistory()` → `renderAll()` → `turnComponents(用户轮)` 抛 →
+  冒泡到 `index.ts:174` 顶层 `main().catch` → 打印 `ia-tui failed: …` → 进程退出。
+- live：`app.ts:171-175` `onFrame` → `applyEvent` → `renderIncremental()` → 同一个 `turnComponents` 抛 →
+  被 `sse.ts:113-127` 的 `catch` 当成**流错误**收走 → `onClosed("error")` → `app.ts:183` 记一条
+  `stream reconnect: Invalid color value: …` 并 1000 ms 后重连（`RECONNECT_DELAY_MS`）。
+  抛错那一帧已被 `SeqCursor`（`sse.ts:116`）先推进游标再交给处理器，所以被丢弃且不会重放；
+  下一帧照抛 → 每秒一条 note、永远重连、永远不渲染。
+
+机械证明（`D:\w21-work\d12-probe\live-path.mjs`，复刻 `onFrame` 的调用序，回放真机会话 `d4d78a49`
+的 4934 帧事件流；输出 `D:\w21-work\evidence\run-b\d12-live-path.txt`）：
+
+```
+修复前（安装件原树）  live 投影在第 3 帧（seq=2 type=user/message）抛出 -> Invalid color value: rgb(38, 34, 38)
+修复后（工作树 dist）  live 投影跑完全部 4934 帧无抛出（末轮 role=assistant，共 4 轮）
+```
+
+即：8 分钟那次的 TUI 屏幕（`tui-screen-after-reopen.txt`）只有重连 note、没有一行会话内容，
+与「投影早已死」一致；先前「跟完 8 分钟真实运行」的说法按此更正。修四个字面量后两条路径同时恢复
+（`tui/test/tints.test.ts` 在旧字面量下 3 条红、替换后 54/54 绿）。
+
+### 残留项（不在 #842 修复范围，待裁决）
+
+上面 live 路径的**异常吞噬**本身是一个独立缺陷：客户端投影缺陷被记成 `stream reconnect: …`
+（伪装成网络问题）并转成每秒一次、永不停止的重连循环，而不是可见的失败。
+修它要定新的客户端失败语义（停止 / 退出 / 单独提示）并给 `app.ts` 补测试挂具，
+按 §8/§9.3 不塞进本次字面量修复；已记入 #842 评论待裁决。
+
+### 修复与真机验收（2026-10-08，提交 `14898f1a`）
+
+四个字面量换成等值 hex（`#262226` / `#26282e` / `#1e2821` / `#2e1e21`），注释按依赖真实契约纠正，
+新增 `tui/test/tints.test.ts`（旧字面量 3 条红 → 修复后 54 tests / 0 fail）。
+重打包安装件 sha256 `46e7a9e2c22bd2ea16f9e82e1cbfe9c3f22f0f5a626d72bd979e4ef5eb7e2fd6`，
+在同一安装件上附着**被恢复的那个会话**（`d4d78a49…`）成功渲染，无失败行、无重连 note；
+共存与两条退出规则一并重跑。读数与操作者偏差见 `docs/live_gate/w21/47-w21-run-b-tui-legs-rerun.md`。
+同轮新发现两个缺陷：首次启动超 30 s 就绪窗口（#846）、`ia-tui.cmd` 吞退出码（#847）。
 
 
 ## D13：Host 重启换端口后，已附着的 TUI 永久重连失败（待裁决）
