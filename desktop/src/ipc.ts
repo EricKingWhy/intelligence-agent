@@ -21,11 +21,40 @@ export const DESKTOP_IPC = {
   windowState: 'ia-desktop:window-state',
 } as const
 
-/** Scheme of shell-owned application documents. */
-export const SCHEME = 'ia-app'
+/** Command-line switch carrying the shell's own page origin into the renderer. */
+export const SERVICE_ORIGIN_SWITCH = '--ia-service-origin='
 
-/** Host of the packaged page. */
-export const APP_HOST = 'app'
+/**
+ * Read the shell's own page origin from a renderer's `process.argv`
+ * (`webPreferences.additionalArguments`). Undefined when the switch is absent —
+ * the caller then treats the document as unowned.
+ */
+export function parseServiceOriginArg(argv: readonly string[]): string | undefined {
+  const value = argv.find((arg) => arg.startsWith(SERVICE_ORIGIN_SWITCH))
+  if (value === undefined) return undefined
+  const origin = value.slice(SERVICE_ORIGIN_SWITCH.length)
+  try {
+    return new URL(origin).origin === origin ? origin : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * True only for the shell's own top frame.
+ *
+ * W-21 D3 (#815): the page origin is the local service's loopback origin, so the
+ * expected value is passed in rather than hardcoded; a frame whose origin does
+ * not match exactly (a stray loopback page, a subframe, another port) gets no
+ * bridge.
+ */
+export function isOwnedRendererOrigin(args: {
+  readonly currentOrigin: string
+  readonly expectedOrigin: string | undefined
+  readonly isMainFrame: boolean
+}): boolean {
+  return args.isMainFrame && args.expectedOrigin !== undefined && args.currentOrigin === args.expectedOrigin
+}
 
 /** Non-secret service connection facts handed to the local page. Never the token. */
 export interface DesktopBootstrap {
@@ -53,9 +82,9 @@ export interface IaDesktopBridge {
 /**
  * Reject IPC outside the allowed shell document origins.
  * @param event - IPC caller whose frame URL supplies the origin.
- * @param hostnames - shell document hosts allowed for this operation.
+ * @param allowedOrigins - the shell's own document origin(s) for this operation.
  */
-export function assertDesktopSender(event: IpcMainInvokeEvent, hostnames: readonly string[] = [APP_HOST]): void {
+export function assertDesktopSender(event: IpcMainInvokeEvent, allowedOrigins: readonly string[]): void {
   const senderFrame = event.senderFrame
   if (senderFrame === null) throw new Error('ia desktop: rejected IPC without a sender frame')
   let url: URL
@@ -64,7 +93,7 @@ export function assertDesktopSender(event: IpcMainInvokeEvent, hostnames: readon
   } catch {
     throw new Error('ia desktop: rejected IPC from an unparseable frame URL')
   }
-  if (url.protocol !== `${SCHEME}:` || !hostnames.includes(url.hostname)) {
+  if (!allowedOrigins.includes(url.origin)) {
     throw new Error('ia desktop: rejected IPC from an unowned renderer')
   }
 }

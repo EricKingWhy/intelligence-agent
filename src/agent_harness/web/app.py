@@ -3496,8 +3496,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     return app
 
 
-def mount_static(app: FastAPI) -> None:
+def mount_static(app: FastAPI, web_dist_dir: str | None = None) -> None:
     """挂载前端构建产物为静态资源。
+
+    ``web_dist_dir`` 缺省/空串时用仓库内 ``<repo>/web/dist``（既有行为）；非空
+    时用调用方给的目录——Electron 外壳经 ``Settings.web_dist_dir``（env
+    ``WEB_DIST_DIR``）传安装目录里的产物，服务端不去猜安装布局（W-21 D3）。
 
     独立于 ``create_app`` —— 测试在 ``create_app`` 返回后追加的自定义路由
     （如 ``/identity-probe``）不会被 StaticFiles Mount 遮蔽。生产部署由
@@ -3510,7 +3514,11 @@ def mount_static(app: FastAPI) -> None:
     携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
     静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
     """
-    web_dist = Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
+    web_dist = (
+        Path(web_dist_dir)
+        if web_dist_dir
+        else Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
+    )
     if web_dist.exists():
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
 
@@ -3523,5 +3531,5 @@ def create_prod_app(settings: Settings | None = None) -> FastAPI:
     遮蔽测试后加的 probe 路由。
     """
     app = create_app(settings, enable_cors=True)
-    mount_static(app)
+    mount_static(app, settings.web_dist_dir if settings is not None else None)
     return app

@@ -45,6 +45,19 @@ SOFTWARE.
 | `src/quit-confirmation.ts` | `apps/desktop/src/quit-confirmation.ts` @ `5badb15` | 1–96 | ADAPT (inspection type swapped to this repo's shape) |
 | `src/background-notice.ts` | `apps/desktop/src/background-notice.ts` @ `5badb15` | 1–~60 | ADAPT (window-close hint marker) |
 | `src/directory-picker.ts` | `apps/desktop/src/directory-picker.ts` @ `5badb15` | 1–30 | ADAPT (channel + sender guard) |
+| `src/service-proxy.ts` | `apps/desktop/src/web-document.ts` @ `5badb15` | 75–100 | ADAPT (same authenticated-forwarding idea: shell attaches the credential, hop-by-hop response headers are withheld from the renderer; Node `http` server with an explicit socket splice for `upgrade` instead of a Request/Response handler, and a Bearer host token instead of a cookie — W-21 D3) |
+
+## PI-Desktop (`vastsa/PI-Desktop`) — reference only, no code copied
+
+- **Commit read:** `1e07bad33a298b7738e7abfaeefe528da6b4a378`
+- **License:** LGPL-3.0. Because it is copyleft, this is a **read-only
+  reference**: no PI-Desktop code was copied, adapted, or ported into this
+  package, and none of its source is redistributed here.
+- **Used for:** the preload constraint recorded in `src/preload.cts` —
+  `apps/desktop/electron.vite.config.ts:85-97` states that a preload must be a
+  fully bundled CJS file to run in a sandboxed renderer (and emits `format:
+  'cjs'`). This repo reached the same conclusion by direct measurement on
+  Electron 44 (see the header there) and satisfies it without a bundler.
 
 ## OpenHands (`OpenHands/OpenHands`)
 

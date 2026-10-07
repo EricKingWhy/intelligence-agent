@@ -33,12 +33,47 @@ export function resolveShellAssetsDir(moduleDir: string | undefined): string {
   return moduleDir
 }
 
-/** Absolute path of the compiled sandboxed preload script. */
+/**
+ * Absolute path of the compiled sandboxed preload script.
+ *
+ * W-21 D3 (#815): the artifact is `preload.cjs`, compiled from `src/preload.cts`.
+ * A sandboxed renderer parses its preload as CommonJS and provides no module
+ * resolution (measured: an ESM preload fails with "Cannot use import statement
+ * outside a module", a relative require with "module not found"), so the
+ * extension is part of the contract rather than a style choice.
+ */
 export function resolvePreloadPath(moduleDir: string): string {
-  return join(moduleDir, 'preload.js')
+  return join(moduleDir, 'preload.cjs')
 }
 
 /** Absolute path of the multi-size tray icon (Windows picks the scale bitmap). */
 export function resolveTrayIconPath(moduleDir: string): string {
   return join(moduleDir, 'tray-icon.ico')
+}
+
+/** Injectable platform surface for renderer asset resolution (unit-testable). */
+export interface WebAssetsDeps {
+  readonly packaged: boolean
+  /** `process.resourcesPath` in the packaged app (the builder copies web/dist there). */
+  readonly resourcesPath: string
+  /** `app.getAppPath()`: the desktop package directory during development. */
+  readonly appPath: string
+  readonly existsSync: (path: string) => boolean
+}
+
+/**
+ * Locate the built renderer UI (W-21 D3 / #815).
+ *
+ * Packaged: `<resources>/web/index.html` (installer `extraResources`, asserted in
+ * afterPack). Development: `<repo>/web/dist/index.html` (the same directory the
+ * service mounts when `WEB_DIST_DIR` is unset).
+ *
+ * @returns the directory that holds `index.html`, or undefined when neither
+ *   candidate exists — the caller fails closed instead of loading a 404 page.
+ */
+export function resolveWebAssetsDir(deps: WebAssetsDeps): string | undefined {
+  const candidates = deps.packaged
+    ? [join(deps.resourcesPath, 'web')]
+    : [join(deps.appPath, '..', 'web', 'dist')]
+  return candidates.find((candidate) => deps.existsSync(join(candidate, 'index.html')))
 }

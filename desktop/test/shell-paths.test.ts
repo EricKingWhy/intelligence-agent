@@ -11,6 +11,7 @@ import {
   resolvePreloadPath,
   resolveShellAssetsDir,
   resolveTrayIconPath,
+  resolveWebAssetsDir,
 } from '../src/shell-paths.ts'
 
 const DEV_DIR = `${sep === '\\' ? 'C:\\repo\\desktop' : '/repo/desktop'}${sep}dist${sep}src`
@@ -28,9 +29,11 @@ describe('resolveShellAssetsDir', () => {
 })
 
 describe('window asset paths', () => {
+  // W-21 D3 (#815): the preload is CommonJS because a sandboxed renderer parses
+  // its preload as CJS with no module resolution (see src/preload.cts).
   it('resolves the preload script next to the compiled main, dev and packaged', () => {
-    assert.equal(resolvePreloadPath(DEV_DIR), `${DEV_DIR}${sep}preload.js`)
-    assert.equal(resolvePreloadPath(PACKAGED_DIR), `${PACKAGED_DIR}${sep}preload.js`)
+    assert.equal(resolvePreloadPath(DEV_DIR), `${DEV_DIR}${sep}preload.cjs`)
+    assert.equal(resolvePreloadPath(PACKAGED_DIR), `${PACKAGED_DIR}${sep}preload.cjs`)
   })
 
   it('resolves the tray icon next to the compiled main, dev and packaged', () => {
@@ -45,5 +48,37 @@ describe('window asset paths', () => {
     assert.ok(fromOtherCwd.startsWith(DEV_DIR))
     assert.ok(!fromOtherCwd.startsWith(process.cwd()))
     assert.ok(!fromOtherCwd.includes(`.${sep}.agent`))
+  })
+})
+
+describe('renderer build resolution (W-21 D3 #815)', () => {
+  const files = (...present: string[]) => (path: string) => present.includes(path)
+
+  it('packaged build lives under resources/web', () => {
+    const dir = resolveWebAssetsDir({
+      packaged: true,
+      resourcesPath: 'C:\\Program Files\\Intelligence Agent\\resources',
+      appPath: 'C:\\Program Files\\Intelligence Agent\\resources\\app',
+      existsSync: files('C:\\Program Files\\Intelligence Agent\\resources\\web\\index.html'),
+    })
+    assert.equal(dir, 'C:\\Program Files\\Intelligence Agent\\resources\\web')
+  })
+
+  it('development build lives in the repo web/dist', () => {
+    // node:path join normalises `<desktop>/..` to the repository root.
+    const dir = resolveWebAssetsDir({
+      packaged: false,
+      resourcesPath: 'unused',
+      appPath: 'D:\\repo\\desktop',
+      existsSync: files('D:\\repo\\web\\dist\\index.html'),
+    })
+    assert.equal(dir, 'D:\\repo\\web\\dist')
+  })
+
+  it('is undefined when the build was never produced', () => {
+    assert.equal(
+      resolveWebAssetsDir({ packaged: true, resourcesPath: 'C:\\r', appPath: 'C:\\r\\app', existsSync: () => false }),
+      undefined,
+    )
   })
 })

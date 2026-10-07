@@ -119,6 +119,43 @@ describe('DesktopServiceHost data root', () => {
     assert.equal(seen[WORKSPACE_DIR_ENV], DATA_ROOT)
   })
 
+  it('merges childEnv over the inherited environment (W-21 D3)', async () => {
+    let seen: NodeJS.ProcessEnv = {}
+    const host = new DesktopServiceHost({
+      root: DATA_ROOT,
+      pythonPath: PYTHON,
+      env: { PATH: 'C:\\Windows' },
+      childEnv: { WEB_DIST_DIR: 'C:\\Program Files\\Intelligence Agent\\resources\\web' },
+      spawnChild: (_pythonPath, _args, options) => { seen = options.env; return idleChild() },
+      readiness: { readEndpoint: async () => ENDPOINT, healthDeps: readyHealth() },
+    })
+
+    await host.start()
+
+    assert.equal(seen.WEB_DIST_DIR, 'C:\\Program Files\\Intelligence Agent\\resources\\web')
+    assert.equal(seen.PATH, 'C:\\Windows')
+    assert.equal(seen[WORKSPACE_DIR_ENV], DATA_ROOT)
+  })
+
+  it('exposes readiness for the shell to load the UI from (W-21 D3)', async () => {
+    const host = new DesktopServiceHost({
+      root: DATA_ROOT,
+      pythonPath: PYTHON,
+      spawnChild: () => idleChild(),
+      readiness: { readEndpoint: async () => ENDPOINT, healthDeps: readyHealth() },
+    })
+    // Compare through a boolean: asserting on the getter itself would pin its
+    // type for the rest of the scope.
+    assert.equal(host.readiness === undefined, true)
+
+    await host.start()
+
+    const after = host.readiness
+    assert.ok(after !== undefined)
+    assert.equal(after.endpoint.port, ENDPOINT.port)
+    assert.equal(after.version, '1.0.0')
+  })
+
   it('refuses a relative root before spawning anything', async () => {
     let spawned = false
     const host = new DesktopServiceHost({

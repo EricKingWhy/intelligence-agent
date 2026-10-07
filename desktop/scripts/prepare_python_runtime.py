@@ -120,7 +120,7 @@ def build_product_wheel(repo: Path, product: dict, wheelhouse: Path) -> Path:
 
 
 def install_offline(python_exe: Path, wheelhouse: Path, requirements: list[str], marker: Path) -> None:
-    """pip install the locked closure plus the product, with no index access."""
+    """pip install the locked dependency closure, with no index access."""
     recorded = "\n".join(requirements)
     if marker.exists() and marker.read_text(encoding="utf-8") == recorded:
         print("[skip] wheel closure already installed")
@@ -139,6 +139,32 @@ def install_offline(python_exe: Path, wheelhouse: Path, requirements: list[str],
     print(f"[pip ] installing {len(requirements)} distributions offline")
     subprocess.run(command, check=True)
     marker.write_text(recorded, encoding="utf-8")
+
+
+def install_product(python_exe: Path, wheel: Path) -> None:
+    """Install the product wheel over whatever is staged already.
+
+    `--force-reinstall` is the point: a rebuilt product keeps the same version
+    string, so pip's "requirement already satisfied" check would silently keep the
+    previous code in the runtime the installer ships (observed: the staged runtime
+    still had the pre-fix `web/app.py`). `--no-deps` keeps it to the one
+    distribution — the closure is handled above.
+    """
+    print(f"[pip ] installing {wheel.name} (force-reinstall, no deps)")
+    subprocess.run(
+        [
+            str(python_exe),
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--no-deps",
+            "--force-reinstall",
+            "--no-warn-script-location",
+            str(wheel),
+        ],
+        check=True,
+    )
 
 
 def probe_product(python_exe: Path, product: dict) -> str:
@@ -178,10 +204,10 @@ def main() -> int:
     python_exe = ensure_interpreter(lock, cache, staging)
     for wheel in wheels:
         download(wheel["url"], wheelhouse / wheel["filename"], wheel["sha256"])
-    build_product_wheel(repo, product, wheelhouse)
+    product_wheel = build_product_wheel(repo, product, wheelhouse)
     requirements = [f"{wheel['name']}=={wheel['version']}" for wheel in wheels]
-    requirements.append(f"{product['name']}=={product['version']}")
     install_offline(python_exe, wheelhouse, requirements, staging / "python" / CLOSURE_MARKER)
+    install_product(python_exe, product_wheel)
 
     version = probe_product(python_exe, product)
     print(f"[done] {python_exe} imports {product['module']} ({product['name']}=={version})")

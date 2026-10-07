@@ -93,9 +93,16 @@ installer/staging/python/python.exe -m pip install --no-index --find-links wheel
 # 5. The closure of step 4 is dependencies only. The product itself must be in the
 #    runtime too, or the bundled service has nothing to run (W-21 defect D2).
 uv build --wheel --out-dir wheelhouse
-installer/staging/python/python.exe -m pip install --no-index --find-links wheelhouse `
-  "$($lock.product.name)==$($lock.product.version)"
+installer/staging/python/python.exe -m pip install --no-index --no-deps `
+  --force-reinstall wheelhouse/$($lock.product.wheel)
 ```
+
+`--force-reinstall` is not optional. A rebuilt product keeps the same version
+string, so pip's "requirement already satisfied" check would leave the previous
+code in the runtime the installer ships — that is how a stale `web/app.py`
+reached a packaged build. `scripts/prepare_python_runtime.py` does exactly this
+in `install_product`; its dependency closure is installed separately and is
+still cached by `install_offline`'s marker.
 
 `scripts/build-windows-installer.mjs` re-asserts step 5 in `afterPack` (product
 importable, version equal to `product.version`) and fails the build otherwise.
@@ -107,13 +114,30 @@ Regenerating the closure (maintainer): on any machine with `uv`,
 then refresh `wheels[]` (name/version/filename/url/sha256 from PyPI).
 Bump `schemaVersion` if the shape changes.
 
+## Renderer build (W-21 defect D3)
+
+The packaged window is served by the bundled service, so the frontend build has
+to be in the package as well:
+
+```powershell
+cd ../web && npm run build      # produces web/dist (gitignored)
+```
+
+`extraResources` copies it to `<install>\resources\web`, and `afterPack` fails
+the build when `resources/web/index.html` is missing. At runtime the shell tells
+the service where that directory is (`WEB_DIST_DIR`) and serves the window
+through its own loopback proxy, which attaches the host token — the token never
+reaches the page, and the page's relative API/WebSocket URLs work unchanged
+because the proxy origin *is* the page origin.
+
 ## Building
 
 ```powershell
 # checks only (any OS): lockfile schema + config + NSIS inputs
 node scripts/build-windows-installer.mjs --compile-only
 
-# full build (Windows x64; needs electron-builder + staged runtime + npm run build)
+# full build (Windows x64; needs electron-builder + the staged runtime + web/dist —
+# see "Preparing the Python runtime" and "Renderer build" above)
 node scripts/build-windows-installer.mjs
 # artifacts: desktop/dist-installer/Intelligence-Agent-Setup-<version>.exe
 #            desktop/dist-installer/SHA256SUMS.txt

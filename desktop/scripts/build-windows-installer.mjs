@@ -184,6 +184,27 @@ export function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
+/** Index document of the packaged renderer build (W-21 D3). */
+const WEB_INDEX = join('web', 'index.html')
+
+/**
+ * Assert the packaged app carries the renderer build (W-21 D3 / #815).
+ *
+ * The shell loads its window from the local service, which serves this
+ * directory; without `index.html` the window renders nothing (the frozen
+ * defect). `existsSync` is injectable so the check is unit-testable off-Windows.
+ */
+export function assertBundledWebAssets({ resourcesDir, existsSync: exists = existsSync }) {
+  const index = join(resourcesDir, WEB_INDEX)
+  if (!exists(index)) {
+    throw new Error(
+      `bundled renderer build missing: ${index} — build it with \`npm run build\` in web/ ` +
+        '(the installer ships web/dist as resources/web)',
+    )
+  }
+  return index
+}
+
 /**
  * Pure electron-builder configuration for the Windows x64 installer.
  * Kept pure (no electron-builder import) so it is unit-testable on any OS.
@@ -208,6 +229,9 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
     // `from` is relative to the project dir (desktop/).
     extraResources: [
       { from: `${installerDir}/staging/python/`, to: 'python/', filter: ['**/*'] },
+      // W-21 D3 (#815): the built renderer UI; the shell tells the service where
+      // it is (WEB_DIST_DIR) and loads its window from the service origin.
+      { from: '../web/dist/', to: 'web/', filter: ['**/*'] },
     ],
     win: {
       target: [{ target: 'nsis', arch: ['x64'] }],
@@ -241,6 +265,8 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
       // W-21 D2: a staged runtime holding only the dependency closure imports
       // nothing; fail the build instead of shipping an installer that cannot start.
       assertRuntimeProduct({ pythonExe, product: runtimeProduct })
+      // W-21 D3: the window loads the packaged renderer build from the service.
+      assertBundledWebAssets({ resourcesDir })
     },
   }
 }
@@ -290,6 +316,11 @@ async function main() {
   }
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     throw new Error('full installer build requires Windows x64 (use --compile-only elsewhere)')
+  }
+  // Fail before electron-builder spends minutes on a package it cannot complete.
+  const webDistIndex = join(desktopDir, '..', 'web', 'dist', 'index.html')
+  if (!existsSync(webDistIndex)) {
+    throw new Error(`renderer build missing: ${webDistIndex} — run \`npm run build\` in web/`)
   }
   let builder
   try {

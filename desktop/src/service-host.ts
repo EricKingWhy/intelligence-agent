@@ -97,6 +97,8 @@ export interface DesktopServiceHostOptions {
   readonly root: string
   readonly pythonPath: string
   readonly env?: NodeJS.ProcessEnv
+  /** Extra variables for the child only, merged over `env` (e.g. WEB_DIST_DIR, W-21 D3). */
+  readonly childEnv?: NodeJS.ProcessEnv
   readonly spawnChild?: SpawnChild
   readonly readiness?: Partial<EndpointReadinessDeps> & { portTimeoutMs?: number; readyTimeoutMs?: number; intervalMs?: number; probeTimeoutMs?: number }
   readonly onFailure?: (error: Error) => void
@@ -114,11 +116,21 @@ export class DesktopServiceHost implements DesktopBackendHost {
   private exitCode: number | null = null
   private stopRequested = false
   private failureReported = false
+  private ready: { endpoint: HostEndpointInfo; version: string } | undefined
 
   private readonly options: DesktopServiceHostOptions
 
   constructor(options: DesktopServiceHostOptions) {
     this.options = options}
+
+  /**
+   * Readiness of the running child (endpoint file + health payload), or undefined
+   * before a successful start. W-21 D3: the shell needs the port to load the
+   * packaged UI from the service it just started.
+   */
+  get readiness(): { endpoint: HostEndpointInfo; version: string } | undefined {
+    return this.ready
+  }
 
   /** Spawn once and await readiness; rejects on spawn failure, exit, or readiness timeout. */
   async start(): Promise<{ endpoint: HostEndpointInfo; version: string }> {
@@ -134,7 +146,11 @@ export class DesktopServiceHost implements DesktopBackendHost {
     const spawnChild = this.options.spawnChild ?? defaultSpawnChild()
     const child = spawnChild(this.options.pythonPath, buildServeArgs(), {
       cwd: root,
-      env: { ...(this.options.env ?? process.env), [WORKSPACE_DIR_ENV]: root },
+      env: {
+        ...(this.options.env ?? process.env),
+        ...this.options.childEnv,
+        [WORKSPACE_DIR_ENV]: root,
+      },
     })
     this.child = child
     child.stderr?.setEncoding?.('utf8')
@@ -157,6 +173,7 @@ export class DesktopServiceHost implements DesktopBackendHost {
         ...(this.options.readiness?.intervalMs === undefined ? {} : { intervalMs: this.options.readiness.intervalMs }),
         ...(this.options.readiness?.probeTimeoutMs === undefined ? {} : { probeTimeoutMs: this.options.readiness.probeTimeoutMs }),
       })
+      this.ready = ready
       return ready
     } catch (error) {
       const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`

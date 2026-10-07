@@ -94,3 +94,35 @@ export function resolveDesktopDataRoot(userDataDir: string): string {
   }
   return join(userDataDir, 'workspace')
 }
+
+/**
+ * Credential channel shared with the service child (W-21 D3 / #815).
+ *
+ * The shell spawns the service and must present the host token to the service's
+ * API (the window is served through the shell's proxy, which attaches it). The
+ * OS keyring backend is a native facility the shell cannot open without an extra
+ * native module (`host-client.ts` documents that gap), so the shell selects the
+ * server's cross-process file backend with `AGENT_HARNESS_HOST_CREDENTIALS` — the
+ * same shape both upstream products ship (PI-Desktop stores the host token in a
+ * `0600` file under the app's data dir; DSH keeps its launch token in the
+ * desktop process). The file lives beside the data root in the per-user profile,
+ * which Windows already ACLs to that user, and never inside the install dir that
+ * an update replaces.
+ *
+ * @param userDataDir - Electron `app.getPath('userData')` (already absolute).
+ * @returns absolute path of the JSON credential file.
+ */
+export function resolveHostCredentialPath(userDataDir: string): string {
+  if (userDataDir.trim() === '') {
+    throw new Error('resolveHostCredentialPath: userData dir is empty')
+  }
+  return join(userDataDir, 'host-credentials.json')
+}
+
+/** Value for `AGENT_HARNESS_HOST_CREDENTIALS` selecting that file backend. */
+export function hostCredentialsEnvValue(credentialPath: string): string {
+  if (credentialPath.trim() === '') {
+    throw new Error('hostCredentialsEnvValue: credential path is empty')
+  }
+  return `file:${credentialPath}`
+}
