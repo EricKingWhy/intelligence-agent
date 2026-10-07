@@ -16,10 +16,11 @@
  */
 
 import { spawn as nodeSpawn } from 'node:child_process'
+import { isAbsolute } from 'node:path'
 import type { DesktopBackendHost } from './backend-controller.ts'
 import { defaultHealthProbeDeps, readHostEndpoint } from './host-client.ts'
 import { waitForBackendReady, type HealthProbeDeps, type ReadinessOptions } from './health.ts'
-import type { HostEndpointInfo } from './host-protocol.ts'
+import { WORKSPACE_DIR_ENV, type HostEndpointInfo } from './host-protocol.ts'
 
 /** Command the shell spawns; the service owns attach-or-start. */
 export function buildServeArgs(): readonly string[] {
@@ -92,6 +93,7 @@ export async function awaitServiceReady(
 
 /** Options for one shell-owned service child. */
 export interface DesktopServiceHostOptions {
+  /** Absolute data root; handed to the child as WORKSPACE_DIR and read back for the endpoint file. */
   readonly root: string
   readonly pythonPath: string
   readonly env?: NodeJS.ProcessEnv
@@ -121,10 +123,18 @@ export class DesktopServiceHost implements DesktopBackendHost {
   /** Spawn once and await readiness; rejects on spawn failure, exit, or readiness timeout. */
   async start(): Promise<{ endpoint: HostEndpointInfo; version: string }> {
     if (this.child !== undefined) throw new Error('desktop service host already started')
+    const root = this.options.root
+    // W-21 D4 (#813): both sides must agree on one absolute data root — the child
+    // resolves `Settings.workspace_dir` (where it publishes `.host-service.json`)
+    // from this variable, and `awaitServiceReady` reads the file from the same
+    // path. A relative root would have the child resolve it against its own cwd.
+    if (!isAbsolute(root)) {
+      throw new Error(`desktop data root must be an absolute path: ${root}`)
+    }
     const spawnChild = this.options.spawnChild ?? defaultSpawnChild()
     const child = spawnChild(this.options.pythonPath, buildServeArgs(), {
-      cwd: this.options.root,
-      env: this.options.env ?? process.env,
+      cwd: root,
+      env: { ...(this.options.env ?? process.env), [WORKSPACE_DIR_ENV]: root },
     })
     this.child = child
     child.stderr?.setEncoding?.('utf8')
@@ -141,7 +151,7 @@ export class DesktopServiceHost implements DesktopBackendHost {
       now: this.options.readiness?.now ?? Date.now,
     }
     try {
-      const ready = await awaitServiceReady(this.options.root, readiness, {
+      const ready = await awaitServiceReady(root, readiness, {
         ...(this.options.readiness?.portTimeoutMs === undefined ? {} : { portTimeoutMs: this.options.readiness.portTimeoutMs }),
         ...(this.options.readiness?.readyTimeoutMs === undefined ? {} : { readyTimeoutMs: this.options.readiness.readyTimeoutMs }),
         ...(this.options.readiness?.intervalMs === undefined ? {} : { intervalMs: this.options.readiness.intervalMs }),

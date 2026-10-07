@@ -15,7 +15,7 @@ import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { claimDesktopSingleInstance } from './single-instance.ts'
-import { resolvePythonPath, resolveUserDataDir } from './installer/paths.ts'
+import { resolveDesktopDataRoot, resolvePythonPath, resolveUserDataDir } from './installer/paths.ts'
 import { DesktopBackendController } from './backend-controller.ts'
 import { DesktopTray } from './tray.ts'
 import { DesktopQuitConfirmation } from './quit-confirmation.ts'
@@ -63,7 +63,10 @@ async function main(): Promise<void> {
   // installed app never needs a system Python.
   const backend = new DesktopBackendController(
     (onFailure) => new DesktopServiceHost({
-      root: process.cwd(),
+      // W-21 D4 (#813): an absolute data root under user data, not process.cwd()
+      // (the install dir in a packaged app). The shell hands it to the child as
+      // WORKSPACE_DIR and reads the endpoint file back from the same path.
+      root: resolveDesktopDataRoot(app.getPath('userData')),
       pythonPath: resolvePythonPath({
         platform: process.platform,
         execPath: process.execPath,
