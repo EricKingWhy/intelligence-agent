@@ -57,3 +57,29 @@ def test_latest_intent_reasserts_forget():
     assert not f("忘记A，保留B，忘记C", "B")
     assert f("forget A, keep B, forget C", "C")
     assert not f("forget A, keep B, forget C", "B")
+
+
+def test_postposition_keep_governs_target():
+    """P3-1：keep 意图**紧邻后置**于 target 也构成管辖 → 拒绝删除。
+
+    - 「新密码留着」：keep 紧跟 target 之后，管辖 target（fail-open 修复本体）；
+    - 「把新密码留着」：把字结构的 keep 动词同样紧邻 target，一并拒绝；
+    - 「把新密码留着，忘记旧密码」：忘记前的逗号重置子句前缀，target 不落在
+      子句内，本就 False（回归 pin，不是本次修复的红）；
+    - over-block 边界（把字句误管辖也是 bug）：keep 管辖他物时**不得**误拦
+      target——「把旧的留着」管辖「旧的」、keep 与 target 之间有间隔（逗号、
+      其他名词）一律放行；
+    - 正常删除、前置 keep 均不受影响。
+    """
+    # 红：后置 keep 构成管辖 → 拒绝。
+    assert not f("忘记旧密码，新密码留着", "新密码")
+    assert not q("忘记旧密码，新密码留着", "新密码")
+    assert not f("忘记旧密码，把新密码留着", "新密码")
+    assert not f("把新密码留着，忘记旧密码", "新密码")  # 逗号重置子句前缀（pin）
+    # 正常删除不受影响。
+    assert f("忘记旧密码", "旧密码")
+    assert f("忘记旧邮箱，保留新邮箱", "旧邮箱")
+    # over-block 边界：keep 管辖他物或与 target 有间隔 → 不误拦。
+    assert f("忘记新密码，把旧的留着", "新密码")
+    assert f("忘记新密码，新钥匙留着", "新密码")
+    assert f("忘记新密码，留着新钥匙", "新密码")
