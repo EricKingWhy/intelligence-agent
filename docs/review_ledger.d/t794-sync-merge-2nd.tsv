@@ -1,0 +1,1 @@
+2026-10-07	sync: merge origin/main（0c5a0c53，PR #796 #784 confirm-source-for）into codebuddy/794-remember-comma。来侧改动面：confirm-source-for/docs，本分支文件零交集（本分支：src/agent_harness/memory/v2/commands.py + tests/memory/v2/test_794_comma_clause.py），自动合并零冲突。	d337cffe4fdd976b4d51f0ed2e3cf2042e35c004..de9a31316c379ab125bc6db5d3e128e6e476e11c

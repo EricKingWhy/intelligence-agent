@@ -141,7 +141,14 @@ def _command_clause(user_text: str, intent: re.Pattern[str]) -> tuple[str, int, 
         if prefix and " ".join(prefix.casefold().split()) not in allowed_prefixes:
             continue
         tail = user_text[match.end():]
-        boundary = _COMMAND_BOUNDARY.search(tail)
+        # #794：逗号不终止「记住/忘记」指令的子句（中文「记住X，Y」里逗号后才是实质内容）。
+        # 跳过逗号边界，子句延续到下一个非逗号边界或句末；intent 之前的前缀判定不受影响。
+        boundary = None
+        for bmatch in _COMMAND_BOUNDARY.finditer(tail):
+            if bmatch.group() in (",", "，"):
+                continue
+            boundary = bmatch
+            break
         clause = tail[:boundary.start()] if boundary is not None else tail
         return clause, match.start(), match.end() + len(clause)
     return "", -1, -1

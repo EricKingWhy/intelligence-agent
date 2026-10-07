@@ -1,0 +1,1 @@
+2026-10-07	sync: merge origin/main（3f0ef451，PR #804 #785 CORS expose headers + #785 落账/docs）into codebuddy/794-remember-comma。来侧改动面：web CORS expose_headers + 测试 + #785 台账/docs，本分支文件零交集（本分支：src/agent_harness/memory/v2/commands.py + tests/memory/v2/test_794_comma_clause.py），自动合并零冲突。	092edaed2e1542184fab2d65574d43c484ec0422..30054d4b2f9f57b5d2e2bd00df6af1400b7fa7fa
