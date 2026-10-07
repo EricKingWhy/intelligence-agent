@@ -123,28 +123,38 @@ _COMMAND_BOUNDARY = re.compile(
     r"[,，.!?。！？;；\r\n]|\b(?:but|however|except|although|whereas)\b|(?:但是|不过|然而|但)",
     re.IGNORECASE,
 )
-_KEEP_INTENT = re.compile(r"保留|留着|留下|\bkeep\b", re.IGNORECASE)
+_KEEP_INTENT = re.compile(
+    r"保留|留住|留在|留着|留下|\bkeep\b|\bpreserve\b|\bretain\b", re.IGNORECASE,
+)
 
 
 def _reverse_keep_intent(clause: str, target: str) -> bool:
     """#806：target 被最近的「保留」意图管辖时返回 True（forget guard 必须拒绝）。
 
-    取 target 之前的片段，比较其中最后一个 keep 意图与最后一个 forget 意图：
-    keep 更近（last_keep_end > last_forget_end）说明用户对 target 的最新表态是
-    保留。全程在 casefold 后的串上操作，不用 folded 下标切原串（casefold 可能
-    改变字符串长度）。
-    取舍：「留下」收进 keep 意图是 fail-closed——删除类 guard 宁可误拦不可误删。
+    遍历 target 在 folded clause 中的**所有**出现位置（步进 1 以覆盖重叠出现，
+    fail-closed）：任一处之前片段内最后一个 keep 意图比最后一个 forget 意图更近
+    （last_keep_end > last_forget_end）即拒绝——例如「忘记新邮箱旧档，保留新邮箱」
+    提议删「新邮箱」，首次出现落在待删片段内、第二次出现被「保留」管辖，必须拒绝。
+    全程在 casefold 后的串上操作，不用 folded 下标切原串（casefold 可能改变字符串长度）。
+    取舍一：「留下」「留住」「留在」收进 keep 意图是 fail-closed——删除类 guard
+    宁可误拦不可误删。
+    取舍二：「不保留」「别保留」会先命中「保留」被当作 keep 意图，对 target 造成
+    over-block（连想删的也拦下）；方向同样 fail-closed，与取舍一一致。
     """
     folded_clause = clause.casefold()
-    idx = folded_clause.find(target.casefold())
-    if idx < 0:
+    needle = target.casefold()
+    if not needle:
         return False
-    before = folded_clause[:idx]
-    keep_ends = [m.end() for m in _KEEP_INTENT.finditer(before)]
-    if not keep_ends:
-        return False
-    forget_ends = [m.end() for m in _FORGET_INTENT.finditer(before)]
-    return not forget_ends or keep_ends[-1] > forget_ends[-1]
+    start = 0
+    while (idx := folded_clause.find(needle, start)) >= 0:
+        before = folded_clause[:idx]
+        keep_ends = [m.end() for m in _KEEP_INTENT.finditer(before)]
+        if keep_ends:
+            forget_ends = [m.end() for m in _FORGET_INTENT.finditer(before)]
+            if not forget_ends or keep_ends[-1] > forget_ends[-1]:
+                return True
+        start = idx + 1
+    return False
 
 
 def _command_clause(user_text: str, intent: re.Pattern[str]) -> tuple[str, int, int]:
@@ -239,10 +249,12 @@ def explicit_remember_matches(user_text: str, content: str) -> bool:
 
 def explicit_forget_matches(user_text: str, memory_id: str) -> bool:
     clause, _, _ = _command_clause(user_text, _FORGET_INTENT)
+    stripped = memory_id.strip()
     return bool(
         has_forget_intent(user_text)
-        and memory_id.casefold() in clause.casefold()
-        and not _reverse_keep_intent(clause, memory_id)
+        and stripped
+        and stripped.casefold() in clause.casefold()
+        and not _reverse_keep_intent(clause, stripped)
     )
 
 
