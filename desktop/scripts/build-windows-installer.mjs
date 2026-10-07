@@ -206,6 +206,58 @@ export function assertBundledWebAssets({ resourcesDir, existsSync: exists = exis
 }
 
 /**
+ * Assert the NSIS custom include's placement rules (#816 / W-21 D1).
+ *
+ * Both rules come from measured failures of the real build, and neither is
+ * visible in a plain "file exists" check:
+ *   1. `!include "${__FILEDIR__}…"` inside a macro body is substituted when the
+ *      macro is inserted — in the *inserting* file's context, i.e.
+ *      `app-builder-lib/templates/nsis` — so the build died with
+ *      `!include: could not find: …\templates\nsis\installer-directories.nsh`.
+ *      The path has to be captured by a top-level `!define` instead (measured:
+ *      #816).
+ *   2. That include must be installer-only (`!ifndef BUILD_UNINSTALLER`): the
+ *      uninstaller build inserts `customHeader` too but references none of those
+ *      functions, so including them there fails with
+ *      `warning 6010: install function "iaPromoteApplication" not referenced`
+ *      (fatal under electron-builder's makensis settings).
+ *
+ * @param source - text of the custom include file (`installer/installer.nsh`).
+ * @param includedFile - basename of the file the installer build must pull in.
+ */
+export function assertNsisIncludePlacement(source, includedFile) {
+  const isComment = (line) => /^\s*(;|$)/.test(line)
+  let inMacro = false
+  let installerOnly = false
+  let sawInclude = false
+  for (const line of source.split(/\r?\n/)) {
+    if (isComment(line)) continue
+    if (/^\s*!macro\b/.test(line)) inMacro = true
+    else if (/^\s*!macroend\b/.test(line)) inMacro = false
+    if (inMacro && /!include\s+"\$\{__FILEDIR__\}/.test(line)) {
+      throw new Error(
+        'installer.nsh: a ${__FILEDIR__} include inside a macro body resolves against the stock ' +
+          'template directory at insertion time — capture the path in a top-level !define instead (#816)',
+      )
+    }
+    if (/!ifndef\s+BUILD_UNINSTALLER/.test(line)) installerOnly = true
+    if (line.includes('!include') && line.includes(includedFile)) {
+      sawInclude = true
+      if (inMacro && !installerOnly) {
+        throw new Error(
+          `installer.nsh: ${includedFile} is included from a macro body without an enclosing ` +
+            '!ifndef BUILD_UNINSTALLER guard — the uninstaller build inserts the same macro and ' +
+            'fails on unreferenced install functions (#816)',
+        )
+      }
+    }
+  }
+  if (!sawInclude) {
+    throw new Error(`installer.nsh does not include ${includedFile}`)
+  }
+}
+
+/**
  * Pure electron-builder configuration for the Windows x64 installer.
  * Kept pure (no electron-builder import) so it is unit-testable on any OS.
  */
@@ -308,6 +360,10 @@ async function main() {
       throw new Error(`missing installer input: ${required}`)
     }
   }
+  assertNsisIncludePlacement(
+    readFileSync(join(installerDir, 'installer.nsh'), 'utf8'),
+    'installer-directories.nsh',
+  )
   console.log('installer inputs OK')
 
   if (compileOnly) {
