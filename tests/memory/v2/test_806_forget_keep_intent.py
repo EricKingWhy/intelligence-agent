@@ -97,3 +97,62 @@ def test_postposition_keep_attributive_form_does_not_govern():
     assert f("忘记新密码留下的内容", "新密码")
     assert not f("忘记旧密码，新密码留着", "新密码")
     assert not q("忘记旧密码，新密码留着", "新密码")
+
+
+def test_review_p3_leftover_particle_attributive_not_governing():
+    """P3：keep 后隔助词（来/在）再接「的」仍是定语，不管辖 target。
+
+    「被留下来的旧档案」——「留下」后隔「来」再接「的」，与「留着的东西」
+    同为定语形态（keep 修饰其后的名词），此前落入裸后置被判管辖误拦
+    （over-block 本体）。修复后放行；裸后置原 pin 不回归。
+    """
+    assert f("忘记被留下来的旧档案", "旧档案")
+    assert q("忘记被留下来的旧档案", "旧档案")
+    assert f("忘记新密码留下来的东西", "新密码")  # 紧邻后置隔「来」再「的」同豁免
+    assert not f("忘记旧密码，新密码留着", "新密码")  # 裸后置仍管辖（P3-1 pin）
+
+
+def test_review_p4_word_interior_substring_not_keep():
+    """P4-1：词内子串不得充当 keep 意图——「遗留」中的「留」。
+
+    「遗留在」=「遗留」+「在」，「留在」是词内子串误命中，此前被判 keep
+    管辖误拦 target（over-block 本体）。修复后放行；真 keep 词「保留在」
+    仍管辖（边界对照，防 prev-char 守卫误伤）。前片对照：真 keep「保留」
+    紧邻的「保留在」不被豁免；「遗留下来的」同时踩 P3（隔「来」接「的」
+    定语）与 P4-1（「遗留」词内子串）两条修复路径。
+    """
+    assert f("忘记遗留在备份里的旧档案", "旧档案")
+    assert f("忘记遗留下来的旧档案", "旧档案")
+    assert not f("忘记旧密码，保留在备份里的新密码", "新密码")  # 真 keep 对照
+
+
+def test_review_p4_last_occurrence_wins():
+    """P4-2：target 多次出现时由**最后一次出现**的管辖意图判定（最新表态优先）。
+
+    - 「忘记A，保留B，忘记B」：末次出现被「忘记」管辖 → 放行（over-block
+      本体；此前「任一处被保留管辖即拒绝」让先前的保留压过最后的忘记）；
+    - P2-1 旧案不回归：「忘记新邮箱旧档，保留新邮箱」末次出现被「保留」
+      管辖 → 仍拒绝；
+    - 「忘记A，保留B，忘记C」删 B 仍拒绝（B 唯一出现被保留管辖，pin）。
+    """
+    assert f("忘记A，保留B，忘记B", "B")
+    assert q("忘记A，保留B，忘记B", "B")
+    assert not f("忘记新邮箱旧档，保留新邮箱", "新邮箱")
+    assert not f("忘记A，保留B，忘记C", "B")
+
+
+def test_review_p4_boundary_pins():
+    """P4-3：已披露取舍的稳定性 pin（防回归，非本次红）。
+
+    - 取舍二：「不保留」先命中「保留」→ over-block 拒删（fail-closed 稳定）；
+    - KEEP/Keep 大小写：输入 casefold 后命中，keep 豁免/管辖与大小写无关；
+    - 取舍四：英文后置 under-block（"forget the old key, keep it" 删 old key
+      放行）——测其稳定，不修复；
+    - 「保留B忘记B」：forget 意图前缀「保留B」非合法指令前缀 → 无子句 →
+      fail-closed 拒删（宁拦勿删，与取舍一同向）。
+    """
+    assert not f("忘记A，不保留B", "B")
+    assert not f("forget the old key, KEEP the new key", "new key")
+    assert not f("forget the old key, Keep the new key", "new key")
+    assert f("forget the old key, keep it", "old key")
+    assert not f("保留B忘记B", "B")
