@@ -34,6 +34,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const scriptDir = join(fileURLToPath(new URL('.', import.meta.url)))
 const desktopDir = resolve(scriptDir, '..')
+const repoDir = resolve(desktopDir, '..')
 const installerDir = join(desktopDir, 'installer')
 
 /** Minimal well-formed lock, used by tests and as documentation. */
@@ -461,6 +462,28 @@ export function assertFreshBuild({ entry, newestSourceMtimeMs, entryMtimeMs }) {
   }
 }
 
+/**
+ * The desktop shell the artifact runs must itself be fresh (W-21 D10 / #836).
+ *
+ * `files: ['dist/**\/*']` copies the compiled shell verbatim, so a build run without
+ * `npm run build` ships the previous shell while every other check stays green
+ * (observed: an artifact whose `resources/app/dist/src/service-host.js` predated the
+ * D8 fix). Same assertion the TUI entry already gets, one entry higher.
+ *
+ * @param options.entry - compiled shell entry (`dist/src/main.js`).
+ * @param options.sourceDir - `desktop/src`.
+ * @param options.newestSourceMtimeMs - injectable, defaults to the real tree.
+ * @param options.entryMtimeMs - injectable, defaults to the real file.
+ */
+export function assertDesktopBuildFresh({
+  entry,
+  sourceDir,
+  newestSourceMtimeMs = newestMtimeMs(sourceDir),
+  entryMtimeMs = statSync(entry).mtimeMs,
+}) {
+  assertFreshBuild({ entry, newestSourceMtimeMs, entryMtimeMs })
+}
+
 /** Newest mtime (ms) in a directory tree; 0 when the tree does not exist. */
 function newestMtimeMs(dir) {
   let newest = 0
@@ -476,6 +499,109 @@ function newestMtimeMs(dir) {
     else newest = Math.max(newest, statSync(full).mtimeMs)
   }
   return newest
+}
+
+/**
+ * Content hashes of every Python module in a package tree, keyed by relative path.
+ *
+ * Content, not mtime and not version: the runtime carries a `pip install` of a wheel
+ * whose version string never changes between commits (W-21 D9 / #835 — the installer
+ * shipped a pre-D5 `web/app.py` because nothing compared the code), while pip writes
+ * install-time mtimes.
+ *
+ * @param root - package directory to walk.
+ * @param deps - injectable filesystem, for tests.
+ * @returns Map of relative POSIX path → sha256 hex.
+ */
+export function pythonFileHashes(root, { readdir = readdirSync, readFile = readFileSync } = {}) {
+  const hashes = new Map()
+  const walk = (dir, prefix) => {
+    let entries
+    try { entries = readdir(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (entry.name === '__pycache__') continue
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      if (entry.isDirectory()) walk(join(dir, entry.name), relative)
+      else if (entry.name.endsWith('.py')) {
+        hashes.set(relative, createHash('sha256').update(readFile(join(dir, entry.name))).digest('hex'))
+      }
+    }
+  }
+  walk(root, '')
+  return hashes
+}
+
+/**
+ * One digest over a package tree's module hashes (recorded in the build metadata so
+ * an artifact names the product code it was built from).
+ *
+ * @param root - package directory.
+ * @param deps - injectable filesystem, for tests.
+ * @returns sha256 hex over the sorted `path:hash` lines.
+ */
+export function productCodeDigest(root, deps) {
+  const lines = [...pythonFileHashes(root, deps).entries()]
+    .map(([path, hash]) => `${path}:${hash}`)
+    .sort()
+  if (lines.length === 0) throw new Error(`no Python modules under ${root}`)
+  return createHash('sha256').update(lines.join('\n')).digest('hex')
+}
+
+/**
+ * Directory the staged interpreter imports the product module from.
+ *
+ * Asking the staged runtime is the only layout-free answer: it is the same
+ * interpreter the installer ships, whatever the runtime's directory shape.
+ *
+ * @param options.pythonExe - staged interpreter.
+ * @param options.module - top-level product module (lockfile `product.module`).
+ * @param options.run - injectable spawn, for tests.
+ * @returns absolute path of the imported package.
+ */
+export function stagedProductDir({ pythonExe, module, run = spawnSync }) {
+  const probe = `import importlib, os; print(os.path.dirname(importlib.import_module(${JSON.stringify(module)}).__file__))`
+  const result = run(pythonExe, ['-c', probe], { encoding: 'utf8' })
+  if (result.status !== 0) {
+    const detail = result.error !== undefined
+      ? result.error.message
+      : String(result.stderr ?? '').trim() || `exit ${String(result.status)}`
+    throw new Error(`staged runtime does not import ${module} (${pythonExe}): ${detail}`)
+  }
+  const path = String(result.stdout ?? '').trim().split(/\r?\n/).at(-1)?.trim() ?? ''
+  if (path === '') throw new Error(`staged runtime printed no path for ${module}`)
+  return path
+}
+
+/**
+ * The packaged runtime must carry THIS checkout's product code (W-21 D9 / #835).
+ *
+ * `assertRuntimeProduct` only checks the distribution *version*, and the version does
+ * not move between commits — so a staged copy that lags the checkout passes every
+ * existing check and ships silently. This compares module content instead, and fails
+ * with the command that refreshes staging. Same spirit as `assertFreshBuild` (stale
+ * compiled entry) one layer down.
+ *
+ * @param options.sourceDir - `src/<module>` in this checkout.
+ * @param options.stagedDir - the package the staged runtime imports.
+ * @param deps - injectable filesystem, for tests (`readdir`, `readFile`).
+ */
+export function assertStagedProductMatchesSource({ sourceDir, stagedDir, ...deps }) {
+  const source = pythonFileHashes(sourceDir, deps)
+  if (source.size === 0) throw new Error(`no product modules under ${sourceDir}`)
+  const staged = pythonFileHashes(stagedDir, deps)
+  const missing = [...source.keys()].filter((path) => !staged.has(path))
+  const drifted = [...source.keys()].filter((path) => staged.has(path) && staged.get(path) !== source.get(path))
+  if (missing.length > 0 || drifted.length > 0) {
+    const report = [
+      ...drifted.slice(0, 5),
+      ...missing.slice(0, 5).map((path) => `${path} (missing)`),
+      `${String(missing.length + drifted.length)} file(s)`,
+    ].join(', ')
+    throw new Error(
+      `staged product differs from the checkout: ${report} — run `
+      + '"python desktop/scripts/prepare_python_runtime.py" before packing',
+    )
+  }
 }
 
 /**
@@ -639,6 +765,14 @@ async function main() {
     newestSourceMtimeMs: newestMtimeMs(join(desktopDir, '..', 'tui', 'src')),
     entryMtimeMs: statSync(tuiEntry).mtimeMs,
   })
+  // W-21 D10 (#836): …and for the desktop shell itself, which this build packages
+  // verbatim from dist/. Without this the artifact can carry the previous shell
+  // while every other check passes (observed in the D8 regression run).
+  const shellEntry = join(desktopDir, 'dist', 'src', 'main.js')
+  if (!existsSync(shellEntry)) {
+    throw new Error(`desktop shell build missing: ${shellEntry} — run \`npm run build\` in desktop/`)
+  }
+  assertDesktopBuildFresh({ entry: shellEntry, sourceDir: join(desktopDir, 'src') })
   // …and for the staged runtime the TUI runs on.
   const stagedNode = join(installerDir, 'staging', nodeLock.layout.executable)
   if (!existsSync(stagedNode)) {
@@ -647,6 +781,21 @@ async function main() {
         'run `python scripts/prepare_node_runtime.py` (installer/README.md)',
     )
   }
+  // W-21 D9 (#835): the staged Python runtime must carry THIS checkout's product
+  // code. The version pin is blind to a lagging copy (observed: the installer
+  // shipped a pre-D5 web/app.py, so the packaged service served no renderer).
+  const stagedPython = join(installerDir, 'staging', lock.layout.executable)
+  if (!existsSync(stagedPython)) {
+    throw new Error(
+      `bundled python runtime not staged: ${stagedPython} — ` +
+        'run `python scripts/prepare_python_runtime.py` (installer/README.md)',
+    )
+  }
+  assertStagedProductMatchesSource({
+    sourceDir: join(repoDir, 'src', lock.product.module),
+    stagedDir: stagedProductDir({ pythonExe: stagedPython, module: lock.product.module }),
+  })
+  console.log('staged product matches the checkout')
   let builder
   try {
     builder = await import('electron-builder')
@@ -675,6 +824,9 @@ async function main() {
     arch: 'x64',
     lockfileSha256: sha256File(join(installerDir, 'python-runtime.lock.json')),
     nodeLockfileSha256: sha256File(join(installerDir, 'node-runtime.lock.json')),
+    // W-21 D9 (#835): the product code this artifact was built from — the gate
+    // evidence names it instead of trusting a version string.
+    productCodeSha256: productCodeDigest(join(repoDir, 'src', lock.product.module)),
     builtAt: new Date().toISOString(),
   }
   writeFileSync(join(outDir, 'installer-build.json'), `${JSON.stringify(buildInfo, null, 2)}\n`)

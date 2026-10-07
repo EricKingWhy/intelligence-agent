@@ -6,9 +6,11 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 import {
+  assertDesktopBuildFresh,
   assertFreshBuild,
   assertTuiRuntimeClosure,
   createWindowsInstallerConfig,
@@ -90,6 +92,35 @@ describe('assertFreshBuild', () => {
       () => assertFreshBuild({ entry: 'dist/src/index.js', newestSourceMtimeMs: 300, entryMtimeMs: 200 }),
       /stale build: dist\/src\/index\.js is older than its sources/,
     )
+  })
+})
+
+describe('assertDesktopBuildFresh (W-21 D10 / #836)', () => {
+  const entry = 'D:\\repo\\desktop\\dist\\src\\main.js'
+  const sourceDir = 'D:\\repo\\desktop\\src'
+
+  it('accepts a compiled shell newer than desktop/src', () => {
+    assertDesktopBuildFresh({ entry, sourceDir, newestSourceMtimeMs: 100, entryMtimeMs: 200 })
+  })
+
+  it('fails when desktop/dist predates desktop/src (skipped npm run build)', () => {
+    assert.throws(
+      () => assertDesktopBuildFresh({ entry, sourceDir, newestSourceMtimeMs: 300, entryMtimeMs: 200 }),
+      /stale build: D:\\repo\\desktop\\dist\\src\\main\.js is older than its sources/,
+    )
+  })
+
+  it('reads the real tree when no mtimes are injected', {
+    skip: existsSync(fileURLToPath(new URL('../dist/src/main.js', import.meta.url)))
+      ? false
+      : 'desktop/dist is not built on this machine',
+  }, () => {
+    // Green here means this checkout's compiled shell is not older than its
+    // sources; the installer build refuses to package when it is.
+    assertDesktopBuildFresh({
+      entry: fileURLToPath(new URL('../dist/src/main.js', import.meta.url)),
+      sourceDir: fileURLToPath(new URL('../src', import.meta.url)),
+    })
   })
 })
 

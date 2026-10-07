@@ -6,14 +6,16 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   assertRuntimeProduct,
+  assertStagedProductMatchesSource,
   createWindowsInstallerConfig,
+  productCodeDigest,
   runtimeProductProbe,
   validateProductPin,
   validateRuntimeLockfile,
@@ -162,5 +164,149 @@ describe('afterPack runtime assertion', () => {
       () => config.afterPack({ electronPlatformName: 'win32', appOutDir }),
       /bundled python runtime missing/,
     )
+  })
+})
+
+/** In-memory package tree keyed by absolute path, for the injectable filesystem. */
+function fakeTree(files) {
+  const normalize = (path) => path.replaceAll('\\', '/')
+  const entries = new Map(Object.entries(files).map(([path, content]) => [normalize(path), content]))
+  return {
+    readFile: (path) => {
+      const key = normalize(path)
+      if (!entries.has(key)) throw Object.assign(new Error(`ENOENT: ${key}`), { code: 'ENOENT' })
+      return Buffer.from(entries.get(key))
+    },
+    readdir: (dir) => {
+      const prefix = `${normalize(dir).replace(/\/$/, '')}/`
+      const names = new Map()
+      for (const path of entries.keys()) {
+        if (!path.startsWith(prefix)) continue
+        const rest = path.slice(prefix.length)
+        const slash = rest.indexOf('/')
+        names.set(slash === -1 ? rest : rest.slice(0, slash), slash !== -1)
+      }
+      if (names.size === 0) throw Object.assign(new Error(`ENOENT: ${prefix}`), { code: 'ENOENT' })
+      return [...names.entries()].map(([name, isDirectory]) => ({ name, isDirectory: () => isDirectory }))
+    },
+  }
+}
+
+/**
+ * W-21 D9 (#835): a staged runtime whose product code lags the checkout used to pass
+ * every existing check — the distribution version never moves between commits — and
+ * the installer shipped it. These tests cover the content comparison that closes it.
+ */
+describe('assertStagedProductMatchesSource', () => {
+  const sourceDir = join('C:\\repo', 'src', 'agent_harness')
+  const stagedDir = join('C:\\stage', 'Lib', 'site-packages', 'agent_harness')
+  const cliSource = 'def main():\n    return 0\n'
+  const appSource = 'def mount_static(app, web_dist_dir=None):\n    ...\n'
+  const sourceFiles = {
+    [join(sourceDir, 'cli.py')]: cliSource,
+    [join(sourceDir, 'web', 'app.py')]: appSource,
+  }
+
+  it('accepts a staged copy that matches the checkout', () => {
+    assertStagedProductMatchesSource({
+      sourceDir,
+      stagedDir,
+      ...fakeTree({
+        ...sourceFiles,
+        [join(stagedDir, 'cli.py')]: cliSource,
+        [join(stagedDir, 'web', 'app.py')]: appSource,
+      }),
+    })
+  })
+
+  it('rejects the same version with drifted module content', () => {
+    assert.throws(
+      () => assertStagedProductMatchesSource({
+        sourceDir,
+        stagedDir,
+        ...fakeTree({
+          ...sourceFiles,
+          [join(stagedDir, 'cli.py')]: cliSource,
+          // The pre-D5 web/app.py: same distribution version, older code.
+          [join(stagedDir, 'web', 'app.py')]: 'def mount_static(app, web_dist_dir=None):\n    pass\n',
+        }),
+      }),
+      (error) => {
+        assert.match(error.message, /staged product differs from the checkout/)
+        assert.match(error.message, /web\/app\.py/)
+        assert.match(error.message, /python desktop\/scripts\/prepare_python_runtime\.py/)
+        return true
+      },
+    )
+  })
+
+  it('rejects a staged tree that is missing a module', () => {
+    assert.throws(
+      () => assertStagedProductMatchesSource({
+        sourceDir,
+        stagedDir,
+        ...fakeTree({ ...sourceFiles, [join(stagedDir, 'cli.py')]: cliSource }),
+      }),
+      /web\/app\.py \(missing\)/,
+    )
+  })
+
+  it('ignores __pycache__ on both sides', () => {
+    assertStagedProductMatchesSource({
+      sourceDir,
+      stagedDir,
+      ...fakeTree({
+        ...sourceFiles,
+        [join(sourceDir, '__pycache__', 'cli.cpython-312.pyc')]: 'binary',
+        [join(stagedDir, 'cli.py')]: cliSource,
+        [join(stagedDir, 'web', 'app.py')]: appSource,
+        [join(stagedDir, '__pycache__', 'cli.cpython-312.pyc')]: 'binary',
+      }),
+    })
+  })
+
+  it('rejects a source tree with no modules at all', () => {
+    assert.throws(
+      () => assertStagedProductMatchesSource({ sourceDir, stagedDir, ...fakeTree({}) }),
+      /no product modules under/,
+    )
+  })
+
+  // The real trees: green only while installer/staging is refreshed after every
+  // Python change (`python desktop/scripts/prepare_python_runtime.py`).
+  const stagedPython = join(desktopDir, 'installer', 'staging', 'python', 'python.exe')
+  it('matches the checkout for the staged runtime on this machine', {
+    skip: existsSync(stagedPython) ? false : 'no staged Python runtime on this machine',
+  }, () => {
+    assertStagedProductMatchesSource({
+      sourceDir: join(repoRoot, 'src', 'agent_harness'),
+      stagedDir: join(desktopDir, 'installer', 'staging', 'python', 'Lib', 'site-packages', 'agent_harness'),
+    })
+  })
+})
+
+describe('productCodeDigest', () => {
+  const root = join('C:\\repo', 'src', 'agent_harness')
+
+  it('is stable across directory listing order and sensitive to content', () => {
+    const a = productCodeDigest(root, fakeTree({
+      [join(root, 'cli.py')]: 'a',
+      [join(root, 'web', 'app.py')]: 'b',
+    }))
+    const b = productCodeDigest(root, fakeTree({
+      [join(root, 'web', 'app.py')]: 'b',
+      [join(root, 'cli.py')]: 'a',
+    }))
+    const c = productCodeDigest(root, fakeTree({
+      [join(root, 'cli.py')]: 'a',
+      [join(root, 'web', 'app.py')]: 'c',
+    }))
+    assert.match(a, /^[0-9a-f]{64}$/)
+    assert.equal(a, b)
+    assert.notEqual(a, c)
+  })
+
+  it('rejects a tree with no modules', () => {
+    assert.throws(() => productCodeDigest(root, fakeTree({})), /no Python modules under/)
   })
 })
