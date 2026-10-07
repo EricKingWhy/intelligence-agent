@@ -1,0 +1,1 @@
+2026-10-07	sync-merge: #790（#752）同步 origin/main（来侧 #361/#772/#775 等，app.py/api.test.ts 自动合并无冲突）；实现者自检：test_corrupt_session_visibility + test_jsonl_reader_golden 11/11 通过。	dc0f3c2fa0ee6b7b503eb95d61d2a3a834f6c870..2bd906e2dd72cd3d1db4d3669c36aaf65c56db17

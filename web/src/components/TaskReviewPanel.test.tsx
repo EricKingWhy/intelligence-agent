@@ -42,6 +42,7 @@ function taskState(over: Partial<api.TaskState> = {}): api.TaskState {
     task_text: '把 CSV 导入写对',
     read_write_intent: '拟写入',
     cwd: '/repo',
+    authorization: null,
     criteria: [criterion('ac-1', '导入去重')],
     verification: { 'ac-1': { value: 'passed', evidence: null } },
     acceptance: null,
@@ -126,6 +127,22 @@ describe('#353 TaskReviewPanel — 空态与两轴', () => {
     getTaskState.mockResolvedValue(taskState({ product_state: 'deliverable' }));
     await renderPanel();
     expect(host.querySelector('.task-review-chip')?.textContent).toBe('可交付');
+  });
+});
+
+describe('#353 P2-2 — 授权档位投影（创建期声明，不猜）', () => {
+  it('authorization 有值 → 原目标区渲染该档位', async () => {
+    getTaskState.mockResolvedValue(taskState({ authorization: 'workspace-write' }));
+    await renderPanel();
+    const meta = host.querySelector('.task-review-meta')?.textContent ?? '';
+    expect(meta).toContain('授权档位');
+    expect(meta).toContain('workspace-write');
+  });
+
+  it('authorization 为 null → 渲染「未声明」（不替用户猜档位）', async () => {
+    getTaskState.mockResolvedValue(taskState({ authorization: null }));
+    await renderPanel();
+    expect(host.querySelector('.task-review-meta')?.textContent).toContain('未声明');
   });
 });
 
@@ -321,5 +338,40 @@ describe('#353 P1-2 — 证据来源事件 seq 可点跳转', () => {
     getEvidenceState.mockResolvedValue({ 'ac-1': [evidenceRecord({ source_event_seq: null })] });
     await renderPanel();
     expect(host.querySelector('.task-review-evidence-seq')).toBeNull();
+  });
+});
+
+describe('#353 P2-2/P2-3 — 授权诚实呈现与下一步', () => {
+  it('P2-2：原目标节显示真实授权档位（#788 落地后占位符已移除）', async () => {
+    getTaskState.mockResolvedValue(taskState());
+    await renderPanel();
+    expect(text()).toContain('授权档位');
+    expect(text()).toContain('未声明');
+    expect(text()).not.toContain('服务端投影暂未提供');
+  });
+
+  it('P2-3：有未通过项 → 下一步列出"未通过"', async () => {
+    getTaskState.mockResolvedValue(
+      taskState({
+        criteria: [criterion('ac-1', '导入去重'), criterion('ac-2', '导出对账')],
+        verification: {
+          'ac-1': { value: 'failed', evidence: null },
+          'ac-2': { value: 'passed', evidence: 'pytest' },
+        },
+      }),
+    );
+    getEvidenceState.mockResolvedValue({ 'ac-2': [evidenceRecord({})] });
+    await renderPanel();
+    expect(text()).toContain('下一步');
+    expect(text()).toContain('处理以下未通过/缺证据项');
+    expect(text()).toContain('未通过');
+  });
+
+  it('P2-3：无未通过/缺证据 → 诚实显示"暂无下一步建议"', async () => {
+    getTaskState.mockResolvedValue(taskState());
+    getEvidenceState.mockResolvedValue({ 'ac-1': [evidenceRecord({})] });
+    await renderPanel();
+    expect(text()).toContain('下一步');
+    expect(text()).toContain('暂无下一步建议（服务端未提供）');
   });
 });

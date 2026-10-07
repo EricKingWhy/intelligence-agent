@@ -139,6 +139,10 @@ class SessionSummaryStats:
     #: （行由 lineage/fork 懒补，不是 1:1 恒成立），所以这里的默认值与"无行"同义，
     #: 不会撒谎；真值只能由服务层的联接给出（AC3）。
     archived: bool = False
+    #: #752：事件日志是否损坏（零可解析事件但有损坏行）。损坏是一种可观测的
+    #: 状态，不是"不存在"——列表应包含并标记，而不是静默丢弃（与 `recover`
+    #: 的 409 诊断对齐）。由 `SessionService.list_sessions` 经完整性报告回填。
+    corrupted: bool = False
 
 
 #: #516：目录扫描 stat 批次的共享线程池（懒建）。stat 在 syscall 期间释放 GIL，

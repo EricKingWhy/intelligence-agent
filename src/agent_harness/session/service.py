@@ -1093,10 +1093,32 @@ class SessionService:
         stats_list = await anyio.to_thread.run_sync(
             store.read_session_summaries, ids, limiter=_LIST_SYNC_LIMITER
         )
+        # #752：零可解析事件的行不能直接丢弃——需区分"真空"（新会话/空文件）
+        # 与"全坏"（有损坏行）。全坏是可观测的损坏状态，列表应包含并标记
+        # `corrupted=True`（与 `recover` 的 409 诊断对齐），而不是静默消失。
+        # 只对零事件行做完整性检查（非常见路径），批量一次 to_thread。
+        zero_ids = [
+            sid for sid, stats in zip(ids, stats_list)
+            if stats is not None and stats.event_count == 0
+        ]
+        corrupt_ids: set[str] = set()
+        if zero_ids:
+            reports = await anyio.to_thread.run_sync(
+                lambda: [store.read_events_report(sid) for sid in zero_ids],
+                limiter=_LIST_SYNC_LIMITER,
+            )
+            for sid, (_, integrity) in zip(zero_ids, reports):
+                if integrity.corrupt_lines:
+                    corrupt_ids.add(sid)
         for sid, stats in zip(ids, stats_list):
-            if stats is None or stats.event_count == 0:
+            if stats is None:
                 continue
-            backfill: dict[str, Any] = {"archived": sid in archived_ids}
+            if stats.event_count == 0 and sid not in corrupt_ids:
+                continue
+            backfill: dict[str, Any] = {
+                "archived": sid in archived_ids,
+                "corrupted": sid in corrupt_ids,
+            }
             ref = fixed_ref if workspace_id is not None else refs.get(sid)
             if ref is not None:
                 backfill["workspace"] = ref
@@ -1117,13 +1139,19 @@ class SessionService:
 
         用于前端刷新后重建视图（不变量 #22）；replay 等零副作用场景也用它。
         不调用 Session.resume（那会追加 session/resumed）。
+
+        #752：零可解析事件时区分"真不存在"与"全坏"——前者 404，后者 409
+        （`EventLogCorruptError`，与 `recover` 的诊断对齐）。404 会把"数据损坏，
+        需要恢复"掩蔽成"没这个东西"，用户到不了恢复入口。
         """
         self._validate_session_id(session_id)
-        events = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        events, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        if not events:
+        if not events and not integrity.corrupt_lines:
             raise SessionNotFound(f"session '{session_id}' not found")
+        # 全坏日志（零可解析事件 + 有损坏行）：抛 409 而非误导性 404。
+        self._raise_if_event_log_corrupt(session_id, integrity)
         return events
 
     async def budget_projection(self, session_id: str) -> dict[str, Any]:
@@ -1235,12 +1263,16 @@ class SessionService:
         )
 
     async def has_session(self, session_id: str) -> bool:
-        """检查 session 是否存在（用于 cancel/approve 等 404 前置校验）。"""
+        """检查 session 是否存在（用于 cancel/approve 等 404 前置校验）。
+
+        #752："存在"指磁盘上有该会话（即使事件日志全坏），不是"有可解析事件"。
+        全坏会话返回 True——调用方据此区分 404（真不存在）与 409（损坏）。
+        """
         self._validate_session_id(session_id)
-        events = await anyio.to_thread.run_sync(
-            self._store.read_events, session_id
+        events, integrity = await anyio.to_thread.run_sync(
+            self._store.read_events_report, session_id
         )
-        return bool(events)
+        return bool(events) or bool(integrity.corrupt_lines)
 
     # ── 启动 + 运行 ──────────────────────────────────────────────────
 

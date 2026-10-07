@@ -2382,6 +2382,9 @@ export interface TaskState {
   task_text: string | null;
   read_write_intent: string | null;
   cwd: string | null;
+  /** 会话创建时显式声明的权限档（后端 `TaskState.to_payload` 的 permission_mode 投影）；
+   *  未声明（历史会话 / 用户没选）为 null，不替用户猜档位。 */
+  authorization: string | null;
   criteria: TaskCriterionPayload[];
   verification: Record<string, TaskVerificationEntryPayload>;
   acceptance: TaskAcceptancePayload | null;
@@ -2445,25 +2448,43 @@ async function taskReviewError(res: Response, fallback: string): Promise<TaskRev
   return new TaskReviewRequestError(res.status, detail || `${fallback}（${res.status}）`);
 }
 
+/** 任务审阅 API 响应的通用解析（P2-1 抽取的公共模式）。
+ *  - map404=true 时：404 → TaskNotDefinedError（未定义任务空态）；
+ *  - 其余非 2xx → taskReviewError(fallback)；
+ *  - JSON 解析失败 → null，由 extract 决定回退值。
+ *  行为与抽取前四处内联代码逐字一致。 */
+async function parseTaskResponse<T>(
+  res: Response,
+  fallback: string,
+  extract: (body: { task?: unknown; evidence?: unknown } | null) => T,
+  map404 = false,
+): Promise<T> {
+  if (map404 && res.status === 404) throw new TaskNotDefinedError('未定义任务');
+  if (!res.ok) throw await taskReviewError(res, fallback);
+  const body = (await res.json().catch(() => null)) as { task?: unknown; evidence?: unknown } | null;
+  return extract(body);
+}
+
 /** GET /api/sessions/{id}/task —— 任务交付状态投影（只读）。
  *  404 = 未定义任务（TaskNotDefinedError）；其余非 2xx = TaskReviewRequestError。 */
 export async function getTaskState(sessionId: string): Promise<TaskState> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/task`);
-  if (res.status === 404) throw new TaskNotDefinedError('未定义任务');
-  if (!res.ok) throw await taskReviewError(res, '加载任务状态失败');
-  const body = (await res.json().catch(() => null)) as { task?: unknown } | null;
-  return (body?.task ?? null) as TaskState;
+  return parseTaskResponse(res, '加载任务状态失败', (body) => (body?.task ?? null) as TaskState, true);
 }
 
 /** GET /api/sessions/{id}/evidence —— 证据投影 + 服务端新鲜度（只读）。
  *  404 = 未定义任务（TaskNotDefinedError）；无证据 = `{}`。 */
 export async function getEvidenceState(sessionId: string): Promise<EvidenceByCriterion> {
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/evidence`);
-  if (res.status === 404) throw new TaskNotDefinedError('未定义任务');
-  if (!res.ok) throw await taskReviewError(res, '加载证据失败');
-  const body = (await res.json().catch(() => null)) as { evidence?: unknown } | null;
-  const evidence = body?.evidence;
-  return (typeof evidence === 'object' && evidence !== null ? evidence : {}) as EvidenceByCriterion;
+  return parseTaskResponse(
+    res,
+    '加载证据失败',
+    (body) => {
+      const evidence = body?.evidence;
+      return (typeof evidence === 'object' && evidence !== null ? evidence : {}) as EvidenceByCriterion;
+    },
+    true,
+  );
 }
 
 /** POST /api/sessions/{id}/task/acceptance —— 用户裁决（CAS：expected_version 必填）。
@@ -2485,9 +2506,7 @@ export async function acceptTask(
       body: JSON.stringify(payload),
     },
   );
-  if (!res.ok) throw await taskReviewError(res, '接受任务失败');
-  const result = (await res.json().catch(() => null)) as { task?: unknown } | null;
-  return (result?.task ?? null) as TaskState;
+  return parseTaskResponse(res, '接受任务失败', (result) => (result?.task ?? null) as TaskState);
 }
 
 /** POST /api/sessions/{id}/task/acceptance/release —— 撤销裁决（同样 CAS）。 */
@@ -2505,9 +2524,7 @@ export async function releaseTaskAcceptance(
       body: JSON.stringify(payload),
     },
   );
-  if (!res.ok) throw await taskReviewError(res, '撤销接受失败');
-  const result = (await res.json().catch(() => null)) as { task?: unknown } | null;
-  return (result?.task ?? null) as TaskState;
+  return parseTaskResponse(res, '撤销接受失败', (result) => (result?.task ?? null) as TaskState);
 }
 
 /** POST /api/sessions/{id}/task/lease/release —— 释放**目录写租约**（幂等）。
