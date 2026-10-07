@@ -1,4 +1,4 @@
-"""文件名消毒（来源: DeepSeek Harness `5badb150` `packages/attachment/attachment-local/src/file-store.ts` 的 `fileLeafName`，MIT）。
+"""文件名消毒（来源: DeepSeek Harness `5badb150` `packages/attachment/attachment-local/src/file-store.ts:45-56` 的 `fileLeafName`，MIT）。
 
 两种分隔符都**手工**剥掉：POSIX 宿主把 `\\` 当普通字符，`os.path.basename` 会把
 Windows 客户端的完整本地路径留下并泄漏进引用 / 会话日志。Windows 拒绝的文件名字符

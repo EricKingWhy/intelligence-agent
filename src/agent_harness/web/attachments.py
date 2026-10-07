@@ -1,6 +1,6 @@
 """#822 / MM-01：附件入站 REST 传输面（独立 router）。
 
-三个职责，语义单源在 `attachments/` 与 `storage/`：
+两个职责，语义单源在 `attachments/` 与 `storage/`：
 
 - `POST /api/sessions/{session_id}/attachments`（octet-stream 流式上传）——
   原始字节进得来、按字节判 MIME、内容寻址落盘，回不透明 `sha256:<hex>` id；
@@ -8,10 +8,14 @@
   受控读回原始字节 + `Content-Type`；只认**本会话**命名空间里的 id，别的会话 /
   未上传过的 id 一律 404（不泄露存在性）。
 
-**授权口径（MM-01）**：读回要求 id 属于 URL 里的 session（store 按 session 构造、
-provider 把 session 拼进键或路径）。DSH 的 `ATTACHMENT_NOT_REFERENCED` 是"被本
-session 事件引用"，本仓把"引用"前移到了**上传即归属本会话**——MM-01 不往
-`user/message` 写附件引用（那是 MM-02），故上传的会话归属就是本票的授权单位。
+**授权口径（MM-01，记录一次授权的重定义）**：读回要求 id 属于 URL 里的 session
+（store 按 session 构造、provider 把 session 拼进键或路径），即**授权单位 =
+「上传即归属本会话」的命名空间归属**。DSH 的 `ATTACHMENT_NOT_REFERENCED` 本意是
+"被**本 session 事件引用**"，而 MM-01 不往 `user/message` 写附件引用（那是 MM-02），
+本票也没有任何"事件引用附件"的机制——故字面执行"未引用→404"会与"上传即读回字节
+相等"这条 AC 结构上互斥。**⇒ MM-02 必须补回「事件引用」授权闸门**：读端点要额外
+校验该 id 被本 Session 的 `user/message` 事件真实引用（这正是 PRD D5 的原文）。
+MM-02 的票面已登记该必做项（见 `docs/tickets/multimodal-2026-10-07/`）。
 
 **绕开 1 MiB JSON body 上限**：上传请求体可达单张图上限（默认 20 MiB）。该配额
 针对 JSON 端点，由 `BodyDepthGuardMiddleware` 全局强制；本模块导出
@@ -31,7 +35,6 @@ from starlette.responses import Response
 
 from agent_harness.attachments import (
     EXTENSION_MEDIA_TYPES,
-    SUPPORTED_IMAGE_MEDIA_TYPES,
     AttachmentError,
     attachment_http_status,
     detect_image,
@@ -108,10 +111,15 @@ async def _read_body_bounded(request: Request, max_bytes: int) -> bytes:
 
 
 def _declared_image_media_type(request: Request) -> str | None:
-    """请求 `Content-Type` 里声明的图片类型；非图片类型 / 缺省 → None。"""
+    """请求 `Content-Type` 声明的图片类型；非 `image/*`（含缺省）→ None。
+
+    判据是**前缀** `image/` 而不是"∈ 支持集"：声明成 `image/svg+xml` 等非支持类型时
+    也必须与字节判定比对——否则 `Content-Type: image/svg+xml` + PNG 字节会被静默
+    接受成 PNG（契约要求"与声明类型不符即拒绝"，不能只覆盖声明为受支持类型的子集）。
+    """
     header = request.headers.get("content-type", "")
     declared = header.split(";", 1)[0].strip().lower()
-    return declared if declared in SUPPORTED_IMAGE_MEDIA_TYPES else None
+    return declared if declared.startswith("image/") else None
 
 
 def _check_declared_matches(
@@ -142,6 +150,10 @@ def _check_declared_matches(
 
 
 def _unavailable_storage_error() -> HTTPException:
+    # detail 用 dict（`code` + `message`）而不是裸 str：与本仓 #227 的
+    # `artifact_store_unavailable` 503 同一形状（见 `web/app.py` 与 ADR-0035）——
+    # "存储不可用"这一族错误给前端一个机读码，不让它按 503 猜原因。这是既有后端
+    # 错误契约惯例；本 router 其余 4xx 的 detail 仍是 str（那些是领域异常文案）。
     return HTTPException(
         status_code=503,
         detail={

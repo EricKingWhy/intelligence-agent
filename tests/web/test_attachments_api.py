@@ -18,6 +18,13 @@
 | 超单张字节上限 | 413，不留存储残留 |
 | 上传路由不受 1 MiB JSON body 上限约束 | 200 放行 |
 | 既有 JSON 端点的 1 MiB 行为 | 逐字不变（413 + 同 detail） |
+
+MM-01 授权口径的**已知缺口**（登记，非本票覆盖）：本票读端点的授权单位 = **会话命名空间
+归属**（"上传即归属本会话"），不是 PRD D5 的"被本 Session 事件引用"——MM-01 没有任何
+"事件引用附件"的机制（那是 MM-02）。故"已上传但**从未被消息引用**的 id → 404"这条 AC
+在本票**未达成**，由 **MM-02** 补回事件引用闸门（见 `web/attachments.py` 模块 docstring
+与 `docs/tickets/multimodal-2026-10-07/MM-02-model-sees-image.md`）。本文件的
+`test_never_uploaded_id_is_404` 只覆盖"从未上传"。
 """
 
 from __future__ import annotations
@@ -42,9 +49,13 @@ _JSON_HDR = {"content-type": "application/json"}
 
 
 def _client(tmp_path: Path, **overrides: Any) -> TestClient:
+    # 所有用例都把附件落盘根指向 tmp_path：默认 `.agent/artifacts` 是相对进程 CWD
+    # 解析的（LocalArtifactStore 对相对路径做 resolve()），会让测试写穿到仓库根、
+    # 残留对象跨轮累积（ADR-0038 同族的测试隔离纪律）。overrides 不得再传 artifact_dir。
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "artifacts"),
         model_api_key="sk-test",
         **overrides,
     )
@@ -121,8 +132,13 @@ def test_duplicate_upload_yields_same_id(tmp_path: Path) -> None:
     assert first == second
 
 
-def test_unreferenced_id_is_404(tmp_path: Path) -> None:
-    """从未上传过的合法形态 id → 404。"""
+def test_never_uploaded_id_is_404(tmp_path: Path) -> None:
+    """**从未上传过**的合法形态 id → 404。
+
+    注意名字的诚实性：它**不**测 AC 里"已上传但从未被消息引用 → 404"那条——MM-01 没有
+    事件引用机制，那条语义未达成、缺口登记为 MM-02 覆盖项（见模块 docstring）。另见
+    `test_other_session_id_is_404`（跨会话 404 与之不可区分）。
+    """
     client = _client(tmp_path)
     session_id = _create_session(client)
     resp = client.get(
@@ -192,6 +208,23 @@ def test_declared_content_type_mismatch_is_rejected(tmp_path: Path) -> None:
     assert resp.status_code == 422, resp.text
 
 
+def test_declared_unsupported_image_type_mismatch_is_rejected(tmp_path: Path) -> None:
+    """声明成**非支持**的 `image/*`（svg+xml）而字节是 PNG → 也拒绝（不是只查支持集）。
+
+    边界收紧的判别点：若只在"声明 ∈ 支持集"时才比对，`image/svg+xml` 会被当成 None
+    而静默接受 PNG 字节。这里按 `image/` 前缀一律比对声明 vs 字节。
+    """
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    resp = _upload(
+        client,
+        session_id,
+        png_bytes(10, 10),
+        headers={"content-type": "image/svg+xml"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
 def test_non_image_bytes_are_rejected(tmp_path: Path) -> None:
     client = _client(tmp_path)
     session_id = _create_session(client)
@@ -201,9 +234,7 @@ def test_non_image_bytes_are_rejected(tmp_path: Path) -> None:
 
 def test_over_single_image_limit_is_413_and_leaves_no_residue(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "artifacts"
-    client = _client(
-        tmp_path, artifact_dir=str(artifact_dir), attachment_max_image_bytes=1000
-    )
+    client = _client(tmp_path, attachment_max_image_bytes=1000)
     session_id = _create_session(client)
 
     resp = _upload(client, session_id, large_png_bytes(4, 4, 2000))

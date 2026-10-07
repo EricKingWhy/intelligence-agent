@@ -1,6 +1,6 @@
 """图片头探测：按 magic bytes 判定 MIME、按头部解析像素尺寸（不完整解码）。
 
-magic-bytes 判据对译自 Pi `packages/coding-agent/src/utils/mime.ts`
+magic-bytes 判据对译自 Pi `packages/coding-agent/src/utils/mime.ts:1-116`
 （MIT，commit `1b347794`）；尺寸解析用标准库实现（**零新依赖**）——本仓未依赖
 Pillow，且本票只要求"解析图片头"、不做解码/归一化（那是 MM-02）。
 

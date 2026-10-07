@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings
 
 #: .env 锚定到仓库根（config.py 位于 <root>/src/agent_harness/）——
@@ -164,8 +164,9 @@ class Settings(BaseSettings):
     attachment_max_message_image_bytes: int = Field(default=200 * 1024 * 1024, ge=1)
     attachment_max_image_pixels: int = Field(default=64_000_000, ge=1)
     attachment_max_image_dimension: int = Field(default=8192, ge=1)
-    # 允许的图片 media types（逗号分隔）。解析与校验在
-    # `attachments.types.resolve_image_limits`（未知类型响亮失败，不静默忽略）。
+    # 允许的图片 media types（逗号分隔）。解析规则单点在
+    # `attachments.types.parse_allowed_media_types`；本字段在**构造期**（= 启动期）
+    # 就校验它（下面的 validator），配错即响亮失败，不会拖到请求路径才 500。
     attachment_allowed_media_types: str = "image/png,image/jpeg,image/webp,image/gif"
     # detached-run 孤儿回收宽限期（秒，ADR-0016 §2.1）：零订阅者连续超过
     # 该时长 → run 被取消收尾（run/failed(reason=orphaned)）。有订阅者期间
@@ -198,3 +199,17 @@ class Settings(BaseSettings):
     # development，绝不落入 default）；release 标版本/SHA（空=不塞，SDK 自决）。
     langfuse_tracing_environment: str = "development"
     langfuse_release: str = ""
+
+    @field_validator("attachment_allowed_media_types")
+    @classmethod
+    def _validate_allowed_media_types(cls, value: str) -> str:
+        """附件允许类型在**构造期**（= 启动期）校验，与同族 `Field(ge=1)` 同风格。
+
+        配置错误（未知类型 / 空）在服务起来时即响亮失败，而不是拖到每次上传才在
+        请求路径抛 `ValueError`（那会变成 500，运维只能从请求日志发现配置错误）。
+        解析规则单点在 `attachments.types.parse_allowed_media_types`。
+        """
+        from agent_harness.attachments.types import parse_allowed_media_types
+
+        parse_allowed_media_types(value)
+        return value

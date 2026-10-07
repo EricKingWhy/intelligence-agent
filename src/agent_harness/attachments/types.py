@@ -1,4 +1,5 @@
-"""附件领域的持久化契约（来源: DeepSeek Harness `5badb150` `packages/attachment/attachment/src/types.ts`，MIT）。
+"""附件领域的持久化契约（来源: DeepSeek Harness `5badb150`
+`packages/attachment/attachment/src/types.ts:1-164`，MIT）。
 
 只移植 MM-01 需要的三个契约：`ImageAttachmentRef` / `ImageAttachmentLimits` /
 `AttachmentId`（本仓用 `str` + 别名表达 opacity，落库形状见 `storage/artifact.py`
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
     from agent_harness.config import Settings
 
 #: 内容寻址 id（`sha256:<64 hex>`）。**永不**是路径 / 裸 URL / bearer 句柄。
-#: 来源: DSH `file-store.ts` `FILE_ID_PATTERN`。
+#: 来源: DSH `attachment-local/src/file-store.ts:45-56` `FILE_ID_PATTERN`。
 AttachmentId = str
 
 #: v1 接受的栅格图片 media types（来源: DSH `types.ts` `ImageMediaType`）。
@@ -44,6 +45,9 @@ class ImageAttachmentRef(BaseModel):
 
     与 DSH 的差异：MM-01 不做归一化，故 `original_dimensions` 缺省不出现（那要
     归一化缩放过才填）。`name` 是**去掉本地路径信息**的展示名（见 `file_leaf_name`）。
+
+    **MM-01 不使用**：这是 PRD D1 要求的前置契约，落进 `user/message.data` 的附件引用
+    数组由 **MM-02**（事件引用 + 投影物化）真正消费；本票只导出它，故此刻无调用点。
     """
 
     attachment_id: AttachmentId
@@ -68,14 +72,13 @@ class ImageAttachmentLimits(BaseModel):
     media_types: tuple[str, ...]
 
 
-def resolve_image_limits(settings: Settings) -> ImageAttachmentLimits:
-    """把 `Settings` 里的附件上限键解析成领域契约（单一解析点）。
+def parse_allowed_media_types(raw: str) -> tuple[str, ...]:
+    """解析逗号分隔的允许图片类型；未知类型 / 空 → `ValueError`（响亮失败）。
 
-    `attachment_allowed_media_types` 是逗号分隔的字符串（沿用本仓"复杂配置 = env
-    里字符串"的既有形制）；未知类型**响亮失败**——静默忽略会让部署者以为某格式已放行，
-    实际被悄悄拒绝（fail-closed 的反面）。
+    **单一解析点**：`Settings` 的字段校验（**启动期**，见 `config.Settings`）与
+    `resolve_image_limits`（请求期）共用它，避免两处规则漂移。未知类型静默忽略会让
+    部署者以为某格式已放行、实际被悄悄拒绝（fail-closed 的反面）。
     """
-    raw = settings.attachment_allowed_media_types
     media_types: list[str] = []
     for item in raw.split(","):
         value = item.strip()
@@ -90,13 +93,24 @@ def resolve_image_limits(settings: Settings) -> ImageAttachmentLimits:
             media_types.append(value)
     if not media_types:
         raise ValueError("attachment_allowed_media_types 不能为空")
+    return tuple(media_types)
+
+
+def resolve_image_limits(settings: Settings) -> ImageAttachmentLimits:
+    """把 `Settings` 里的附件上限键解析成领域契约（单一解析点）。
+
+    `attachment_allowed_media_types` 是逗号分隔的字符串（沿用本仓"复杂配置 = env
+    里字符串"的既有形制）；解析规则单点在 `parse_allowed_media_types`，且**已由
+    `Settings` 在构造期（= 启动期）预校验**——请求路径不会再撞上配置错误（配错在
+    服务起来时即响亮失败）。
+    """
     return ImageAttachmentLimits(
         max_image_bytes=settings.attachment_max_image_bytes,
         max_images_per_message=settings.attachment_max_images_per_message,
         max_message_image_bytes=settings.attachment_max_message_image_bytes,
         max_image_pixels=settings.attachment_max_image_pixels,
         max_image_dimension=settings.attachment_max_image_dimension,
-        media_types=tuple(media_types),
+        media_types=parse_allowed_media_types(settings.attachment_allowed_media_types),
     )
 
 
@@ -107,5 +121,6 @@ __all__ = [
     "ImageAttachmentLimits",
     "ImageAttachmentRef",
     "ImageMediaType",
+    "parse_allowed_media_types",
     "resolve_image_limits",
 ]

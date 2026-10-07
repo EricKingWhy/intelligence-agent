@@ -205,7 +205,8 @@ class LocalArtifactStore(ArtifactStore):
     # ── 字节路径（#822 MM-01：附件入站）─────────────────────────────────────
     #
     # 落盘算法移植自 DeepSeek Harness `5badb150`
-    # `packages/attachment/attachment-local/src/store.ts`（MIT）：staging → fsync →
+    # `packages/attachment/attachment-local/src/store.ts:214-388,431-458`（MIT）：
+    # staging → fsync →
     # 原子发布（`os.link` hardlink）→ 权限收紧（0o400）→ 目录 fsync。与文本路径的
     # `temp + os.replace` 是两个纪律：字节路径要"半途失败不产生可被读到的半文件"，
     # 靠的是**先写完整 staging 文件并 fsync，再 hardlink 到目标**——目标在任何时刻

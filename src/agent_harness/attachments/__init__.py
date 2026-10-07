@@ -8,9 +8,10 @@
 
 - 契约（`AttachmentId` / `ImageAttachmentRef` / `ImageAttachmentLimits`）与纯算法
   （文件名消毒、内容寻址原子发布）移植自 **DeepSeek Harness** `packages/attachment`
-  （MIT，commit `5badb150`）：`attachment/src/types.ts`、`attachment/src/error.ts`、
-  `attachment-local/src/file-store.ts`、`attachment-local/src/store.ts`。
-- magic-bytes 图片探测对译自 **Pi** `packages/coding-agent/src/utils/mime.ts`
+  （MIT，commit `5badb150`）：`attachment/src/types.ts:1-164`、
+  `attachment/src/error.ts:1-87`、`attachment-local/src/file-store.ts:45-56`、
+  `attachment-local/src/store.ts:214-388,431-458`。
+- magic-bytes 图片探测对译自 **Pi** `packages/coding-agent/src/utils/mime.ts:1-116`
   （MIT，commit `1b347794`），尺寸解析换成本仓标准库实现（零新依赖，见 `probe.py`）。
 - 只移植契约与纯算法，**不移植**任何 Cordis 绑定的类。
 """
