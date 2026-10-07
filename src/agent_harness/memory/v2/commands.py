@@ -140,6 +140,16 @@ def _reverse_keep_intent(clause: str, target: str) -> bool:
     宁可误拦不可误删。
     取舍二：「不保留」「别保留」会先命中「保留」被当作 keep 意图，对 target 造成
     over-block（连想删的也拦下）；方向同样 fail-closed，与取舍一一致。
+    取舍三（P3-1 后置管辖）：keep 意图**紧邻** target 之后（「新密码留着」，
+    含把字「把新密码留着」——其 keep 动词同样紧邻 target，无需单独把字规则）
+    视为 keep 管辖 → 拒绝。仅取紧邻形态：间隔一字符即不构成管辖（「新密码，
+    留着」「新钥匙留着」「把旧的留着」——把字句里「留着」管辖「旧的」而非
+    target，误拦即 over-block bug）。
+    取舍四：英文后置形态（"the new key stays/keep it"）不处理——英文 keep
+    意图由前置最近意图规则覆盖（"forget the old key, keep the new key"）；
+    并列/悬垂后置（「把新密码和旧密码都留着」）不构成紧邻 → 不拦，方向
+    under-block。紧邻判据在 over-block（误拦正常删除）与 under-block（漏拦
+    并列形态）之间取窄，与「误拦也是 bug」的边界设计一致。
     """
     folded_clause = clause.casefold()
     needle = target.casefold()
@@ -153,6 +163,8 @@ def _reverse_keep_intent(clause: str, target: str) -> bool:
             forget_ends = [m.end() for m in _FORGET_INTENT.finditer(before)]
             if not forget_ends or keep_ends[-1] > forget_ends[-1]:
                 return True
+        if _KEEP_INTENT.match(folded_clause, idx + len(needle)):
+            return True
         start = idx + 1
     return False
 
