@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>导入状态 - batch-import-demo</title></head>
+<body>
+<h1>批量导入状态</h1>
+<div>
+  <input id="rid" placeholder="request_id（例：R-042）" size="20">
+  <button onclick="check()">查询</button>
+</div>
+<pre id="out">输入 request_id 查询导入状态…</pre>
+<script>
+async function check() {
+  const rid = document.getElementById('rid').value.trim();
+  const out = document.getElementById('out');
+  if (!rid) { out.textContent = '请输入 request_id'; return; }
+  try {
+    const r = await fetch('/api/import/' + encodeURIComponent(rid));
+    const j = await r.json();
+    if (!r.ok) { out.textContent = '未找到: ' + rid; return; }
+    out.textContent =
+      'request_id: ' + j.request_id + '\n' +
+      '状态: ' + j.status + '\n' +
+      '总行数: ' + j.total_rows + '  已写入: ' + j.written_rows + '\n' +
+      (j.error ? '错误: ' + j.error : '无错误');
+    // 判定器用：data-status 属性供自动化读取
+    out.setAttribute('data-status', j.status);
+    out.setAttribute('data-written', j.written_rows);
+  } catch (e) {
+    out.textContent = '请求失败: ' + e;
+  }
+}
+</script>
+</body>
+</html>
