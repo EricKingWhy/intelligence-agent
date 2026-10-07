@@ -31,6 +31,7 @@ import logging
 from dataclasses import dataclass, field
 from uuid import uuid4
 
+from agent_harness.session.approval import declared_permission_mode
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.event import (
     RUN_STARTED,
@@ -115,6 +116,11 @@ class TaskState:
     task_text: str | None = None
     read_write_intent: str | None = None
     cwd: str | None = None
+    #: 会话创建时**显式声明**的权限档（#353 P2-2）。来源 = ``session/started`` 的
+    #: ``permission_mode``（``declared_permission_mode``），与 ``cwd`` 同级——只认
+    #: 创建期声明、不随会话内改档变化，task/defined 不复制第二份。``None`` = 未声明
+    #: （历史会话 / 用户没选），不替用户猜一个更严或更松的档。
+    authorization: str | None = None
     criteria: tuple[TaskCriterion, ...] = ()
     verification: dict[str, VerificationEntry] = field(default_factory=dict)
     acceptance: Acceptance | None = None
@@ -145,6 +151,7 @@ class TaskState:
             "task_text": self.task_text,
             "read_write_intent": self.read_write_intent,
             "cwd": self.cwd,
+            "authorization": self.authorization,
             "criteria": [item.to_payload() for item in self.criteria],
             "verification": {
                 item_id: {"value": entry.value, "evidence": entry.evidence}
@@ -331,11 +338,13 @@ def derive_task_state(events: list[SessionEvent]) -> TaskState:
                 open_runs.add(event.run_id)
         elif etype in RUN_TERMINAL_TYPES and event.run_id is not None:
             open_runs.discard(event.run_id)
+    mode = declared_permission_mode(events)
     return TaskState(
         defined=defined,
         task_text=task_text,
         read_write_intent=read_write_intent,
         cwd=session_cwd(events),
+        authorization=mode.value if mode else None,
         criteria=criteria,
         verification=verification,
         acceptance=acceptance,

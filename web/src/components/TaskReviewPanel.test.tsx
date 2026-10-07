@@ -42,6 +42,7 @@ function taskState(over: Partial<api.TaskState> = {}): api.TaskState {
     task_text: '把 CSV 导入写对',
     read_write_intent: '拟写入',
     cwd: '/repo',
+    authorization: null,
     criteria: [criterion('ac-1', '导入去重')],
     verification: { 'ac-1': { value: 'passed', evidence: null } },
     acceptance: null,
@@ -126,6 +127,22 @@ describe('#353 TaskReviewPanel — 空态与两轴', () => {
     getTaskState.mockResolvedValue(taskState({ product_state: 'deliverable' }));
     await renderPanel();
     expect(host.querySelector('.task-review-chip')?.textContent).toBe('可交付');
+  });
+});
+
+describe('#353 P2-2 — 授权档位投影（创建期声明，不猜）', () => {
+  it('authorization 有值 → 原目标区渲染该档位', async () => {
+    getTaskState.mockResolvedValue(taskState({ authorization: 'workspace-write' }));
+    await renderPanel();
+    const meta = host.querySelector('.task-review-meta')?.textContent ?? '';
+    expect(meta).toContain('授权档位');
+    expect(meta).toContain('workspace-write');
+  });
+
+  it('authorization 为 null → 渲染「未声明」（不替用户猜档位）', async () => {
+    getTaskState.mockResolvedValue(taskState({ authorization: null }));
+    await renderPanel();
+    expect(host.querySelector('.task-review-meta')?.textContent).toContain('未声明');
   });
 });
 
