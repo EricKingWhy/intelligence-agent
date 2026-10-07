@@ -23,9 +23,13 @@ from agent_harness.assembly import (
     root_registry_tool_names,
 )
 from agent_harness.config import Settings
+from agent_harness.prompt.tool_sections import join_guidance
 from agent_harness.sandbox import WorkspaceRegistry
 from agent_harness.session.store import JsonlSessionStore
 from agent_harness.tooling.contract import PermissionPolicy
+from agent_harness.tools.request_constraint_resolution import (
+    REGISTER_CONSTRAINT_HANDOFF,
+)
 
 
 class ScriptedModelFactory:
@@ -151,11 +155,47 @@ async def test_registered_register_constraint_guidance_matches_its_registry(tmp_
     assert ("request_constraint_resolution" in guidance) == (
         "request_constraint_resolution" in names
     )
-    # 转接的是 resolver **自己的**话（不是装配层另抄一份）。
-    resolver_sentence = "a pending card does not authorize the conflicting action"
-    assert (resolver_sentence in guidance.lower()) == (
+    # 注入的是**增量**转接句，不是 resolver guidance 的副本（Call 3 P2-1）：
+    # resolver 独有的话只在它自己的 `tool:` section 里，不在 register 的 guidance 里。
+    assert (REGISTER_CONSTRAINT_HANDOFF in guidance) == (
         "request_constraint_resolution" in names
     )
+    assert "a pending card does not authorize the conflicting action" not in guidance.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("registration_only", [True, False], ids=["registration-only", "both"])
+async def test_root_prompt_has_no_duplicated_register_and_resolver_guidance(tmp_path, registration_only):
+    """Call 3 P2-1：拼装后的 system prompt 里 resolver 的行为指导只出现一次。
+
+    resolver 的全文经 `tool:request_constraint_resolution` 独立进 system prompt。把全文
+    再嵌进 `register_constraint` 的 guidance，等于同一份指导每次请求下发两遍（实测净增
+    1403 字符）。这里在**真实装配**的 registry 上取两份 guidance 拼装对照——默认构造
+    断不到这条接线。
+    """
+    settings = _settings(tmp_path, multiagent=False)
+    _, wiring = await assemble_wiring(settings)
+    session_id = "sess-guidance-dedup"
+    tooling = _build_tooling(
+        settings, wiring,
+        session_id=session_id, workspace=tmp_path / "workspaces" / session_id,
+        workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+        session_store=JsonlSessionStore(root=tmp_path / "sessions"),
+        agent_profile=None,
+        include_constraint_tools=True,
+        include_constraint_resolution_tool=not registration_only,
+    )
+    registry = tooling.registry
+
+    resolver_only = "a pending card does not authorize the conflicting action"
+    if registration_only:
+        # resolver 不在册：连它的句子都不该出现（点名不存在的工具）。
+        assert resolver_only not in registry.get("register_constraint").prompt_guidance.lower()
+        return
+    joined = join_guidance([
+        registry.get("register_constraint"), registry.get("request_constraint_resolution"),
+    ]).lower()
+    assert joined.count(resolver_only) == 1
 
 
 @pytest.mark.asyncio

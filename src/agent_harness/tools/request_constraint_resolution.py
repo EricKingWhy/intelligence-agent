@@ -66,6 +66,17 @@ class RequestConstraintResolutionArgs(BaseModel):
         return value
 
 
+#: 给 `register_constraint` 的**增量**转接句：什么情况该从"登记约束"转向澄清。
+#: 不重复本工具 guidance 已经说过的内容（那份全文经 `tool:request_constraint_resolution`
+#: 独立进 system prompt）；两边都写一遍 = 每次请求付两份字符（Call 3 P2-1）。
+#: 装配层只在 resolver 真在册时注入它（`assembly._build_tooling`）。
+REGISTER_CONSTRAINT_HANDOFF = (
+    "For an explicit correction or possible material conflict with an active fact "
+    "whose scope is unclear, call request_constraint_resolution once instead; "
+    "a 'this task may need...' phrase can still conflict."
+)
+
+
 class RequestConstraintResolutionTool(Tool):
     def __init__(self) -> None:
         pass

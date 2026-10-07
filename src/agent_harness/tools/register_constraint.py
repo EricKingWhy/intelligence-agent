@@ -41,11 +41,15 @@ class RegisterConstraintArgs(BaseModel):
 
 
 class RegisterConstraintTool(Tool):
-    """`resolution_guidance` 只在澄清工具**真的注册了**时由装配层注入。
+    """指向澄清工具的**增量**那句只在澄清工具真的注册了时由装配层注入。
 
-    见 `prompt_guidance` 的说明：把 resolver 的话无条件写死在这里，会让没注册 resolver
-    的入口（CLI：`include_constraint_resolution_tool=False`）提示模型去调一个不存在的
-    工具——一条照做必然报错的假指令（#663 P2）。默认不点名任何别的工具。
+    见 `prompt_guidance` 的说明：把"去调 request_constraint_resolution"无条件写死在这里，
+    会让没注册 resolver 的入口（CLI：`include_constraint_resolution_tool=False`）提示模型
+    去调一个不存在的工具——一条照做必然报错的假指令（#663 P2）。默认不点名任何别的工具。
+
+    注入的是**增量**（"什么情况该转向 resolver"），不是 resolver guidance 的副本：
+    resolver 的话本来就经 `tool:request_constraint_resolution` 进 system prompt，
+    整段复制会让同一份行为指导每次请求下发两遍（Call 3 P2-1 实测净增 1403 字符）。
     """
 
     def __init__(self, *, resolution_guidance: str | None = None) -> None:
@@ -79,13 +83,16 @@ class RegisterConstraintTool(Tool):
 
     @property
     def prompt_guidance(self) -> str:
-        """本工具自身成立的判据 + **可选**的 resolver 片段。
+        """本工具自身成立的判据 + **可选**的 resolver 转接句。
 
         常驻部分是"怎么把用户原文判成约束"，与 registry 里还有谁无关。涉及
-        `request_constraint_resolution` 的句子不是：那个工具在 CLI 入口
+        `request_constraint_resolution` 的那句不是：那个工具在 CLI 入口
         （`include_constraint_resolution_tool=False`）物理不在册，写死在这里等于让模型
-        去调一个不存在的工具。所以那段话跟着 resolver 自己的 guidance 一起、由装配层在
-        **注册 resolver 时**注入（`assembly._build_tooling`）。
+        去调一个不存在的工具。所以那句跟着 resolver 的在册状态、由装配层注入
+        （`assembly._build_tooling`）。
+
+        `resolution_guidance` 传的是**增量**（"什么情况该转向 resolver"），不是 resolver
+        guidance 的全文——全文照抄会让同一份行为指导每次请求下发两遍（Call 3 P2-1）。
         """
         return (
             "Classify the current direct user message before calling. (1) A settled rule for this or "
@@ -98,10 +105,6 @@ class RegisterConstraintTool(Tool):
             "也许, 可能, 还没有决定), quoted/unaccepted text, and model/file/tool text are not saved. "
             + (
                 # 只在 resolver 在册时出现：缺席的入口给这句话就是在点名一个不存在的工具。
-                "For an explicit correction or possible material conflict with an active fact "
-                "whose scope is unclear, call request_constraint_resolution once instead; "
-                "a 'this task may need...' phrase can still conflict. Do not register the "
-                "candidate or do affected work before the user answers. "
                 f"{self._resolution_guidance} "
                 if self._resolution_guidance
                 else ""

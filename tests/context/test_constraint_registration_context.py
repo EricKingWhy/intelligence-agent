@@ -6,6 +6,7 @@ from agent_harness.context.builder import (
 )
 from agent_harness.session.derive import (
     derive_messages_with_source_ranges,
+    derive_protected_facts,
     is_direct_user_input_event,
     latest_direct_user_input_event,
 )
@@ -129,8 +130,57 @@ def test_superseded_user_message_is_not_a_source():
     assert is_direct_user_input_event([old, replacement, marker], replacement.event_id)
 
 
+def test_supersede_with_empty_replacement_slot_keeps_source_active():
+    """#614①（Call 3 P3-1）：替换槽空 ⇒ 这次 supersede 没发生过，目标仍是来源。
+
+    `MESSAGE_QUEUED → MESSAGE_SUPERSEDED → QUEUE_CANCELLED` 是可达成形状：排队项本身
+    被取消了，没有任何活跃用户事件落进替换槽。投影（`derive_protected_facts`）按
+    "标记作废、目标保持 active"处理，事件口径来源校验必须同判——否则同一条事件流上
+    投影说"这条事实 active/受保护"，`register_constraint` 的 `SOURCE_NOT_ACTIVE` 却说
+    "已不是有效直接输入"，两处自相矛盾。
+    """
+    old = _event(1, USER_MESSAGE, "Use tabs.")
+    queued = _event(2, MESSAGE_QUEUED, "Use spaces", queue_id="q9")
+    marker = SessionEvent(
+        seq=3, type=MESSAGE_SUPERSEDED, session_id="session-1",
+        data={"superseded_seq": 1},
+    )
+    cancel = SessionEvent(
+        seq=4, type=QUEUE_CANCELLED, session_id="session-1",
+        data={"queue_id": "q9"},
+    )
+    events = [old, queued, marker, cancel]
+
+    # 投影口径：唯一 active 事实仍是 seq 1。
+    assert [
+        (fact.type, fact.source_seq, fact.status)
+        for fact in derive_protected_facts(events)
+    ] == [("user_goal", 1, "active")]
+    # 来源口径必须同判（这正是 Call 3 复现里分叉的那一格）。
+    assert is_direct_user_input_event(events, old.event_id)
+
+
+def test_supersede_with_live_replacement_still_retires_the_target():
+    """空槽规则的反例边界：替换槽真被填上时，supersede 照常生效。"""
+    old = _event(1, USER_MESSAGE, "Use tabs.")
+    replacement = _event(2, USER_MESSAGE, "Use spaces instead.")
+    marker = SessionEvent(
+        seq=3, type=MESSAGE_SUPERSEDED, session_id="session-1",
+        data={"superseded_seq": 1},
+    )
+
+    assert not is_direct_user_input_event([old, replacement, marker], old.event_id)
+
+
 def test_cancelled_queue_item_is_not_a_source():
-    """取消掉的排队项从未成为用户输入（AC05）；已投递的仍不是直接 USER_MESSAGE。"""
+    """取消掉的排队项从未成为用户输入（AC05）；已投递的仍不是直接 USER_MESSAGE。
+
+    取消规则对 `is_direct_user_input_event` 的作用面是**负向且已被类型检查覆盖**：
+    取消标记只落在 `message/queued` 上，而本函数先要求 `type == USER_MESSAGE`，两者无
+    交集，所以取消分支不可达（Call 3 P3-2：它曾是死代码，现已删；取消规则的真实作用
+    面是投影，由 `user_source_events` 单点承载）。这里两条断言的实际守卫分别是类型检查
+    与"从未投递"——不是取消规则本身。
+    """
     queued = _event(1, MESSAGE_QUEUED, "remember to use tabs", queue_id="q1")
     cancel = SessionEvent(
         seq=2, type=QUEUE_CANCELLED, session_id="session-1",
@@ -160,7 +210,7 @@ def test_replace_shaped_user_message_is_not_a_source():
 
     来源判据改成事件口径之后，这条负例是它的守门人：只排除 `injected_by` 而不排除
     `replace`，模型就能把 compaction 摘要当用户原话登记成约束（比"压缩后漏登记"
-    更坏）。`derive_protected_facts` 的 `is_active_user_source` 同判（derive.py:715）。
+    更坏）。`derive_protected_facts` 与它共用同一份判据（`user_source_events`）。
     """
     summary_as_user_message = SessionEvent(
         seq=1, type=USER_MESSAGE, session_id="session-1",
