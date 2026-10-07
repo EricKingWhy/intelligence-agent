@@ -786,13 +786,27 @@ test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐
   await submitTask(page, '长任务');
   await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
 
+  /* mock 的一次性 SSE（fulfillSse：3 帧后包体即终）没有终态帧 ⇒ 客户端
+   * onStreamEnd 必然走「stream ended unexpectedly」重连（500ms 退避）。真后端的
+   * POST SSE 在 run 在途时不会提前收尾——这条重连是 mock 给不出长连接的副产品，
+   * 也是**产品正确行为**（真机这一幕=代理掐流，客户端就该重连）。它构成一条
+   * 「幻影订阅」。本用例曾断言 subs 恰好 1 条，等于假设 fill+Enter 永远赢下
+   * 500ms 竞速——负载下必输（双 worker 实测 3/3 红，订阅 [3,3]）。等幻影落定
+   * 把竞速变确定态：此后 Enter 作废旧代际，幻影链不可能再冒出新订阅。 */
+  await expect.poll(() => subs.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+
   const box = page.getByLabel('Agent 任务');
   await box.fill('慢链路下追问');
   await box.press('Enter');
 
   await expect(page.locator('.model-output').last()).toContainText('延迟启动的回答', { timeout: 12_000 });
   await expect(page.locator('.app-error')).toHaveCount(0);
-  expect(subs).toHaveLength(1); // 接流一次；迟到的响应头不该触发第二次订阅
+  /* 恰好两条：① 幻影重连（上述 mock 副产品，Enter 之前已落定）；② 窗口到期时
+   * launched 分支接的那条。**锁的是「Enter 之后只允许这一条」**：迟到的响应头
+   * 落定（settle）若被当成「判错了」去 cancel + 重接，这里就会多出第三条——
+   * 那是本用例真正要灭的变异（掐掉正在收的 run）。幻影的快照/帧在 Enter 之后
+   * 才到（delayMs），被代际守卫丢弃，上屏文本只能来自 ②那条流。 */
+  expect(subs).toHaveLength(2);
 });
 
 /* ── T12q：纠正之后的**回退重投**失败时照样要报错 ──
@@ -870,8 +884,8 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
        兜底路径失效。否则本用例对修复毫无判别力——修复前 ack 分支置 viewing，
        那次迁移会顺带自动重接一次流，帧照样上屏（实测：第一版本用例在修复前
        也绿，属于假绿）。空日志 = 没有未收口的 run = 兜底不启动，于是
-       本场**唯一的 WS 订阅只可能来自 ack 分支自己接流**（模拟交付层直连的
-       快链路：POST /messages 的 200 JSON 在窗内落定，SSE 那条没有 WS）。 */
+       ack 分支接的那条订阅是**唯一可能把新帧送进视图**的通道（初始 POST 的
+       一次性 SSE 还会触发一条幻影重连订阅，但其帧被代际守卫丢弃——见尾部）。 */
     events: [],
     wsSubscribes: subs,
     onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
@@ -881,18 +895,25 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
         contentType: 'application/json',
         body: JSON.stringify({ status: 'queued', mode: 'queue' }),
       }),
-    // 帧挂在**唯一那次**订阅上：接流本身就是要考的事，不另设第二次订阅
-    // （设 `call >= 2` 会把脚本挂在一次不存在的调用上——那正是本用例第一版
-    // 的错，基线 WS 其实来自 ack 分支，于是"永远等不到帧"）。
+    // 帧**必须晚于 Enter** 才到（delayMs）：初始 POST 的一次性 SSE 无终态收尾会
+    // 触发一条 Enter 之前的幻影重连订阅（见用例尾部说明）——帧若即时到达，会在
+    // 幻影流（旧代际）里被应用并推进本地游标，ack 分支的游标就成了时序彩票。
+    // 挂到 delayMs 之后，幻影的帧落在 Enter 之后、被代际守卫整帧丢弃，游标才
+    // 确定；真正上屏的那一截只能来自 ack 分支接的流——判别力不变。
     onWs: () => ({
       events: LIVE_FRAMES, frames: [AFTER_QUEUE], hasActiveRun: true, ending: 'keep',
-      pingIntervalMs: 2000,
+      delayMs: LATE_MS + 1000, pingIntervalMs: 2000,
     }),
   });
 
   await page.goto('/');
   await submitTask(page, '长任务');
   await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+
+  // 等幻影重连落定（同 T12p 的说明：mock 一次性 SSE 无终态 ⇒ 500ms 重连是
+  // 产品正确行为）。否则「Enter 赢 / 输 500ms 竞速」两种时序会给出演播
+  // [1 条] 与 [2 条] 两种结局，下面的计数断言在负载下必炸（双 worker 实测）。
+  await expect.poll(() => subs.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
 
   const box = page.getByLabel('Agent 任务');
   await box.fill('排队的一句');
@@ -901,9 +922,13 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
   // 关键断言：排队之后 run 的输出仍然上屏
   await expect(page.locator('.model-output').last()).toContainText('排队之后仍在写', { timeout: 8000 });
   await expect(page.locator('.app-error')).toHaveCount(0);
-  // 恰好一次订阅——就是 ack 分支接的那条（也不该出现重连风暴）。
-  expect(subs).toHaveLength(1);
-  // 且必须带**本地游标**：不带就会从 -1 重发整段快照，旧终态会被重新投影，
-  // 足以把「流还在跑」判成「已收尾」（#208 游标契约）。
-  expect(subs[0]).toMatchObject({ session_id: 'mt-live-1', after_seq: 3 });
+  // 恰好两条：① 幻影重连（mock 副产品，Enter 之前已落定，其帧被代际守卫丢弃）；
+  // ② ack 分支接的那条。**锁的是「Enter 之后只允许这一条」**——修复前 ack 分支
+  // 只置 viewing、一次都不接，那段文本永远不上屏；重连风暴（每轮退避各一条）
+  // 也会把这里推过 2。
+  expect(subs).toHaveLength(2);
+  // 且 ② 必须带**本地游标**：不带就会从 -1 重发整段快照，旧终态会被重新投影，
+  // 足以把「流还在跑」判成「已收尾」（#208 游标契约）。幻影帧被代际丢弃后
+  // 本地游标停在 3，ack 分支接流必须原样带上它。
+  expect(subs[1]).toMatchObject({ session_id: 'mt-live-1', after_seq: 3 });
 });
