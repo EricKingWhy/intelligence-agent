@@ -107,6 +107,7 @@ class TestModelsEndpoint:
         )
         settings = Settings(
             _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
             model_provider="deepseek", model_name="deepseek-chat",
             agent_models=agent_models,
         )
