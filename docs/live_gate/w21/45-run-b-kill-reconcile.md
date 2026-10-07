@@ -3,7 +3,7 @@
 - 安装件 sha256 `ce5fd54acf925bb6e17731e35990f18c52a0a90da57f834ad39960d0c6ad9880`
 - 模型 `mimo-v2.6-flash`；样例 `D:\w21-work\run-b-sample-20261008T045103`；会话 `d4d78a49-c5a4-429f-b1a3-db551447842d`
 - 上下文窗口：第 1 段（TUI 冷启动派生服务）用产品默认；第 2 段（续跑）操作者设为 `MAX_CONTEXT_TOKENS=600000`（见「分段与 W-04 暂停/恢复」）
-- 操作者证据目录 `D:\w21-work\evidence\run-b\`（`run-b-manifest.json` 收录 91 个文件哈希）
+- 操作者证据目录 `D:\w21-work\evidence\run-b\`（`run-b-manifest.json` 收录该目录文件 sha256 前 16 位，本轮收口时 95 个）
 
 ## 结论（先说结果）
 
