@@ -12,7 +12,11 @@ from pathlib import Path
 import anyio.to_thread
 import pytest
 
-from agent_harness.recovery import ReconcileRequired, RecoveryCoordinator
+from agent_harness.recovery import (
+    ReconcileCallback,
+    ReconcileRequired,
+    RecoveryCoordinator,
+)
 from agent_harness.recovery.reconcile import ReconcileVerdict
 from agent_harness.session import JsonlSessionStore
 from agent_harness.session.derive import is_direct_user_input_event
@@ -122,7 +126,10 @@ async def test_fact_durable_before_ledger_terminal_requires_manual_reconcile(
     operation = await ledger.get(_SESSION_ID, _CALL_ID)
     assert operation is not None and operation.state.value == "RUNNING"
 
-    class _ConfirmSuccess:
+    class _ConfirmSuccess(ReconcileCallback):
+        # 继承 ABC 而非鸭子类型：coordinator 对回调无条件调 `source_for`
+        #（#357 W-13 契约 3），ABC 默认实现返回 None（诚实不伪造）；鸭子
+        # 替身会在该调用点 AttributeError（#784）。resolve 的失败注入断言零改动。
         async def resolve(self, operation: Operation, hint) -> ReconcileVerdict:
             assert operation.tool_call_id == _CALL_ID
             current_events = store.read_events(_SESSION_ID)
