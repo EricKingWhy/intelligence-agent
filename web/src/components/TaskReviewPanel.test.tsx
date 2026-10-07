@@ -342,11 +342,12 @@ describe('#353 P1-2 — 证据来源事件 seq 可点跳转', () => {
 });
 
 describe('#353 P2-2/P2-3 — 授权诚实呈现与下一步', () => {
-  it('P2-2：原目标节显示"授权信息：服务端投影暂未提供"（不编造）', async () => {
+  it('P2-2：原目标节显示真实授权档位（#788 落地后占位符已移除）', async () => {
     getTaskState.mockResolvedValue(taskState());
     await renderPanel();
-    expect(text()).toContain('授权信息');
-    expect(text()).toContain('服务端投影暂未提供');
+    expect(text()).toContain('授权档位');
+    expect(text()).toContain('未声明');
+    expect(text()).not.toContain('服务端投影暂未提供');
   });
 
   it('P2-3：有未通过项 → 下一步列出"未通过"', async () => {
