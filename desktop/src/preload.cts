@@ -46,9 +46,12 @@ function argvValue(switchName: string): string | undefined {
 
 /**
  * Ownership is an exact origin match with the origin main created the window for,
- * plus "this is the top frame" — not a hardcoded scheme (W-21 D3). Every
- * privileged call is additionally re-checked in main by `assertDesktopSender`,
- * which is the authority; this only keeps the bridge out of foreign frames.
+ * plus "this is the top frame" — not a hardcoded scheme (W-21 D3). This inline
+ * comparison is the only gate that runs today: the main-side re-check exists
+ * (`assertDesktopSender` in ipc.ts, used by the directory-picker handler) but
+ * that handler is not installed in main, and web/src does not consume this
+ * bridge yet. Whoever wires the picker must install it, or the re-check stays
+ * dead code and this line remains the whole boundary.
  */
 const expectedOrigin = argvValue(SERVICE_ORIGIN_SWITCH)
 const isOwnLocalPage = process.isMainFrame && expectedOrigin !== undefined
