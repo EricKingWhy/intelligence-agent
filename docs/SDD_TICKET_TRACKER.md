@@ -12,7 +12,7 @@
 
 ---
 
-> **当前状态（2026-10-08，#832）**：实现提交 0db3881a；审查与状态提交 7e1de14e；Gate-0 收据提交 ece0fb4e；分支 codex/issue-832-live-gate-docker-cli。采用 Python 标准库 shutil.which 预检 Docker CLI 并使用解析出的可执行路径，来源复核与复用判定见 2026-10 月度归档。相关 CLI 测试在普通 PATH 与排除 Docker CLI 的进程 PATH 下各 8 passed，Ruff 通过。两轴独立审查完成；审查覆盖闸门 exit 0。Gate-0 6/6 PASS（收据对应 7e1de14e），以 9e1c065b 为基点的差异范围复跑亦 6/6 PASS、覆盖 6 个改动文件。GitHub issue CLOSED，in-progress 已移除；本地未 push / PR / merge，待集成负责人 EricKingWhy 接手。
+> **当前状态（2026-10-08，#832）**：实现提交 0db3881a；审查与状态提交 7e1de14e；Gate-0 收据提交 ece0fb4e；分支 codex/issue-832-live-gate-docker-cli。采用 Python 标准库 shutil.which 预检 Docker CLI 并使用解析出的可执行路径，来源复核与复用判定见 2026-10 月度归档。相关 CLI 测试在普通 PATH 与排除 Docker CLI 的进程 PATH 下各 8 passed，Ruff 通过。两轴独立审查完成；审查覆盖闸门 exit 0。Gate-0 6/6 PASS（收据对应 7e1de14e），以 9e1c065b 为基点的差异范围复跑亦 6/6 PASS、覆盖 6 个改动文件。GitHub issue 曾被提前关闭，现已 reopen 并恢复 OPEN / in-progress；按 V3.1-lite 补齐集成前完整门禁，尚未 push / PR / merge。
 
 ## 当前规划：Memory V2（截至 2026-09-27）
 
