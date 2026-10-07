@@ -446,14 +446,20 @@ def evaluate_evidence_freshness(
     current_head: str | None,
     artifact_readable: bool | None = None,
     artifact_attribution_ok: bool | None = None,
+    artifact_cleaned: bool = False,
 ) -> EvidenceFreshness:
     """读取时求值证据是否仍然新鲜（fail-closed：任一存疑即 stale）。
 
     - ``current_manifest is None``（工作区不可读）→ stale；
     - 记录中有、当前缺失或 sha 不同的文件 → stale（逐个列明 path）；
     - ``record.base_head`` 非 None 且 ``current_head`` 不符 → stale；
-    - ``record.artifact_ref`` 非空：不可读回 → stale；可读回但归属校验未过 → stale；
+    - ``record.artifact_ref`` 非空：``artifact_cleaned`` 为真 → stale（原件已被
+      显式清理，原因区别于"不可读回/损坏"）；否则不可读回 → stale；可读回但归属
+      校验未过 → stale；
     - 全过 → fresh、``reasons == ()``。陈旧只产出状态，**不改写** ``record.result``。
+
+    ``artifact_cleaned`` 只是"原件已清理"的枚举区分（#368 / W-24）：证据投影不重写，
+    仍落 stale，只是把清理与损坏/不可读分开报。
     """
     reasons: list[str] = []
     if current_manifest is None:
@@ -473,7 +479,9 @@ def evaluate_evidence_freshness(
             f"base_head 已变动：记录 {record.base_head!r}，当前 {current_head!r}"
         )
     if record.artifact_ref:
-        if artifact_readable is not True:
+        if artifact_cleaned:
+            reasons.append(f"artifact 原件已清理：{record.artifact_ref}")
+        elif artifact_readable is not True:
             reasons.append(f"artifact 不可读回：{record.artifact_ref}")
         elif record.tool_call_id and artifact_attribution_ok is not True:
             reasons.append(f"artifact 归属校验未通过：{record.artifact_ref}")

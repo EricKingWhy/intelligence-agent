@@ -7433,6 +7433,54 @@ button.json-row {
 .task-review-op { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .task-review-op-label { font-size: var(--text-xs); color: var(--text-secondary); }
 .task-review-op-consequence { margin: 0; font-size: var(--text-xs); color: var(--text-tertiary); }
+
+/* #368 W-24：存储占用行 + 清理预览浮层内容。 */
+.task-review-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.cleanup-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.cleanup-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.cleanup-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.cleanup-item-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  cursor: pointer;
+}
+.cleanup-size { color: var(--text-tertiary); }
+.cleanup-blocked {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cleanup-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
 .task-review-reason {
   width: 100%;
   box-sizing: border-box;
