@@ -55,6 +55,7 @@ def _state(tmp_path) -> MagicMock:
         model_provider="deepseek",
         model_name="deepseek-chat",
         agent_models=_CATALOG,
+        provider_store_path=str(tmp_path / "model-providers.json"),
     )
     state = MagicMock()
     state.settings = settings
@@ -200,6 +201,7 @@ class TestChangeModel:
             model_provider="deepseek",
             model_name="deepseek-chat",
             agent_models=_CATALOG,
+            provider_store_path=str(tmp_path / "model-providers.json"),
         )
         _seed_session(state)
 
@@ -405,6 +407,7 @@ class TestDefaultModelSelection:
                 '[{"name": "deepseek-chat", "provider": "deepseek",'
                 ' "model_name": "deepseek-reasoner"}]'
             ),
+            provider_store_path=str(tmp_path / "model-providers.json"),
         )
         _seed_session(state, provider="deepseek", model_id="gpt-4o")
 
