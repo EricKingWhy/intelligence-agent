@@ -123,6 +123,28 @@ _COMMAND_BOUNDARY = re.compile(
     r"[,，.!?。！？;；\r\n]|\b(?:but|however|except|although|whereas)\b|(?:但是|不过|然而|但)",
     re.IGNORECASE,
 )
+_KEEP_INTENT = re.compile(r"保留|留着|留下|\bkeep\b", re.IGNORECASE)
+
+
+def _reverse_keep_intent(clause: str, target: str) -> bool:
+    """#806：target 被最近的「保留」意图管辖时返回 True（forget guard 必须拒绝）。
+
+    取 target 之前的片段，比较其中最后一个 keep 意图与最后一个 forget 意图：
+    keep 更近（last_keep_end > last_forget_end）说明用户对 target 的最新表态是
+    保留。全程在 casefold 后的串上操作，不用 folded 下标切原串（casefold 可能
+    改变字符串长度）。
+    取舍：「留下」收进 keep 意图是 fail-closed——删除类 guard 宁可误拦不可误删。
+    """
+    folded_clause = clause.casefold()
+    idx = folded_clause.find(target.casefold())
+    if idx < 0:
+        return False
+    before = folded_clause[:idx]
+    keep_ends = [m.end() for m in _KEEP_INTENT.finditer(before)]
+    if not keep_ends:
+        return False
+    forget_ends = [m.end() for m in _FORGET_INTENT.finditer(before)]
+    return not forget_ends or keep_ends[-1] > forget_ends[-1]
 
 
 def _command_clause(user_text: str, intent: re.Pattern[str]) -> tuple[str, int, int]:
@@ -220,15 +242,18 @@ def explicit_forget_matches(user_text: str, memory_id: str) -> bool:
     return bool(
         has_forget_intent(user_text)
         and memory_id.casefold() in clause.casefold()
+        and not _reverse_keep_intent(clause, memory_id)
     )
 
 
 def explicit_forget_query_matches(user_text: str, query: str) -> bool:
     clause, _, _ = _command_clause(user_text, _FORGET_INTENT)
+    stripped = query.strip()
     return bool(
         has_forget_intent(user_text)
-        and query.strip()
-        and query.strip().casefold() in clause.casefold()
+        and stripped
+        and stripped.casefold() in clause.casefold()
+        and not _reverse_keep_intent(clause, stripped)
     )
 
 
