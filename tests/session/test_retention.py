@@ -537,6 +537,93 @@ async def test_execute_rejects_changed_selection(make_session_service, env):
     assert set(result["deleted"]) == {a, b}
 
 
+# ── e2b) #368 P3-3 UX 方案 a：preview 接受 selected_refs（token 绑勾选子集）──
+
+
+@pytest.mark.asyncio
+async def test_preview_selected_refs_changes_token(make_session_service, env):
+    """方案 a (a)：传 selected_refs=子集 → token 与不传（affected 全集）不同。
+
+    列表内容（affected / blocked / evidence_invalidated / reclaimable_bytes）不变
+    ——前端已持有全集，重取只为拿新 token。
+    """
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    a, _ = await _add_artifact(settings, sid, "selref-a")
+    b, _ = await _add_artifact(settings, sid, "selref-b")
+
+    service = _make_service(make_session_service, settings, store)
+    full = await service.preview_artifact_cleanup(sid)
+    subset = await service.preview_artifact_cleanup(sid, selected_refs=[a])
+
+    assert {item["artifact_ref"] for item in full["affected"]} == {a, b}
+    assert {item["artifact_ref"] for item in subset["affected"]} == {a, b}
+    assert subset["reclaimable_bytes"] == full["reclaimable_bytes"]
+    assert subset["snapshot_token"] != full["snapshot_token"]
+
+
+@pytest.mark.asyncio
+async def test_preview_selected_refs_subset_executes(make_session_service, env):
+    """方案 a (b)：子集 token + 子集 refs 调 execute → 成功（deleted 非空）。"""
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    a, _ = await _add_artifact(settings, sid, "selref-a")
+    b, _ = await _add_artifact(settings, sid, "selref-b")
+
+    service = _make_service(make_session_service, settings, store)
+    subset = await service.preview_artifact_cleanup(sid, selected_refs=[a])
+    result = await service.execute_artifact_cleanup(sid, subset["snapshot_token"], [a])
+
+    assert result["deleted"] == [a]
+    assert not (Path(settings.artifact_dir) / sid / a).exists()
+    assert (Path(settings.artifact_dir) / sid / b).exists()
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_full_token_with_subset_refs(make_session_service, env):
+    """方案 a (c)：全集 token（不传 selected_refs 拿的）+ 子集 refs → 409。"""
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    a, _ = await _add_artifact(settings, sid, "selref-a")
+    _b, _ = await _add_artifact(settings, sid, "selref-b")
+
+    service = _make_service(make_session_service, settings, store)
+    full = await service.preview_artifact_cleanup(sid)
+    with pytest.raises(SnapshotTokenMismatch):
+        await service.execute_artifact_cleanup(sid, full["snapshot_token"], [a])
+
+
+@pytest.mark.asyncio
+async def test_preview_selected_refs_intersects_blocked(make_session_service, env):
+    """方案 a (d)：selected_refs 含 blocked ref → token 按交集生成（不炸）。
+
+    非出生证明 tool/result 引用 → blocked('referenced')；把它混进 selected_refs，
+    交集只剩可清理的 a，token 必须等于只传 [a] 时的 token。
+    """
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    a, _ = await _add_artifact(settings, sid, "selref-a")
+    blocked_ref, _ = await _add_artifact(settings, sid, "selref-blocked")
+    session.append(
+        TOOL_RESULT,
+        {"tool_call_id": "tc-live", "content": json.dumps({"artifact_ref": blocked_ref})},
+    )
+
+    service = _make_service(make_session_service, settings, store)
+    mixed = await service.preview_artifact_cleanup(sid, selected_refs=[a, blocked_ref])
+    blocked_reasons = {
+        item["artifact_ref"]: item["reason"] for item in mixed["blocked"]
+    }
+    assert blocked_reasons.get(blocked_ref) == "referenced"
+
+    only_a = await service.preview_artifact_cleanup(sid, selected_refs=[a])
+    assert mixed["snapshot_token"] == only_a["snapshot_token"]
+
+
 # ── e3) P3-6：preview 内 events 只读一遍 ─────────────────────────────────
 
 

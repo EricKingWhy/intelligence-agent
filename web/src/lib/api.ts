@@ -1450,15 +1450,22 @@ export async function getSessionUsage(sessionId: string): Promise<SessionUsage> 
 
 /** POST /api/sessions/{id}/cleanup/preview —— 取一份可清理预览（**不改任何东西**）。
  *  `mode` 默认 `"unreferenced"`（后端唯一模式）；返回的 `snapshot_token` 是执行时的
- *  并发闸门：预览与执行之间若有新事件改变可达集，execute 会以 409 拒绝（快照过期）。 */
+ *  并发闸门：预览与执行之间若有新事件改变可达集，execute 会以 409 拒绝（快照过期）。
+ *
+ *  `selectedRefs`（#368 P3-3 UX 方案 a）：勾选变化后重取时传入当前勾选集合，后端按
+ *  「勾选 ∩ 可清理」生成 token，使「取消勾选 → 拿新 token 执行」不再 409。省略则按
+ *  可清理全集生成（旧行为）。 */
 export async function previewCleanup(
   sessionId: string,
   mode = 'unreferenced',
+  selectedRefs?: string[],
 ): Promise<CleanupPreview> {
+  const payload: { mode: string; selected_refs?: string[] } = { mode };
+  if (selectedRefs !== undefined) payload.selected_refs = selectedRefs;
   const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/cleanup/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) throw await sessionError(res, '清理预览失败');
   const raw: unknown = await res.json().catch(() => null);

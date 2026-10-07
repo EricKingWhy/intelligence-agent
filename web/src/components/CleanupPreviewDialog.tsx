@@ -8,7 +8,9 @@
  *  - 表单状态放在**只在打开时挂载**的内层组件里（`{target && <Form/>}`），关闭即丢弃
  *    ——上次的勾选 / 回执不会漏到下一次；
  *  - `onConfirm` 返回 Promise，成功 / 失败回执都**留在浮层**里，调用方负责刷新；
- *  - 打开即拉一次 preview（`onPreview` 走 ref：父组件重渲染不重拉、不重置勾选）。
+ *  - 打开即拉一次 preview（`onPreview` 走 ref：父组件重渲染不重拉、不重置勾选）；
+ *  - 勾选变化时防抖重取 preview（#368 P3-3 UX 方案 a）：token 绑定"将被清理的 ref
+ *    集合"，取消勾选后旧 token 会被 execute 判 409，故用当前勾选集合重取新 token。
  *
  *  诚实红线（不变量 #22 / 本票验收）：回执**分列** deleted / failed / not_deleted，
  *  有未删项时逐条明示原因，**绝不出现"全部清理"**这类合并结论。 */
@@ -19,6 +21,9 @@ import { TriangleAlert, X } from 'lucide-react';
 import { formatBytes } from '../lib/format';
 import type { CleanupPreview, CleanupResult } from '../lib/api';
 
+/** 勾选变化后重取 preview 的防抖窗口（毫秒）。 */
+const REPREVIEW_DEBOUNCE_MS = 300;
+
 /** 确认面上的会话标识：只需 sessionId——本浮层不读会话标题，也不带可能过期的计数。 */
 export interface CleanupTarget {
   sessionId: string;
@@ -28,8 +33,10 @@ interface Props {
   /** 待清理会话；null = 关闭。 */
   target: CleanupTarget | null;
   onOpenChange: (open: boolean) => void;
-  /** 取预览（**只读**）。reject = 预览失败，原因留在浮层。 */
-  onPreview: (sessionId: string) => Promise<CleanupPreview>;
+  /** 取预览（**只读**）。`selectedRefs` 传当前勾选集合时，后端按"勾选 ∩ 可清理"
+   *  生成 token（与 execute 复算口径一致）；省略则按可清理全集生成。
+   *  reject = 预览失败，原因留在浮层。 */
+  onPreview: (sessionId: string, selectedRefs?: string[]) => Promise<CleanupPreview>;
   /** 执行清理（**不可恢复**）。resolve = 后端回执；reject = 留在浮层的原因。 */
   onConfirm: (sessionId: string, snapshotToken: string, refs: string[]) => Promise<CleanupResult>;
 }
@@ -91,6 +98,14 @@ function CleanupForm({
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<CleanupResult | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+  /** 勾选变化后重取 preview 的在途态：true 时禁用确认，杜绝拿旧 token 执行。 */
+  const [refreshing, setRefreshing] = useState(false);
+  /** 重取失败的原因（不清空已渲染的列表——只有初次加载失败才走 loadError）。 */
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  /** 只有用户手动勾选才触发重取；初始默认全选不触发（其 token 已匹配全集）。 */
+  const didToggleRef = useRef(false);
+  /** 递增请求 id：旧请求回来时若已被更新的请求超车则丢弃（防竞态）。 */
+  const previewReqIdRef = useRef(0);
   /** 初焦落在「取消」而非右上「关闭(X)」——不可逆动作的确认面，初焦应在安全出口。 */
   const cancelRef = useRef<HTMLButtonElement>(null);
 
@@ -112,12 +127,39 @@ function CleanupForm({
     };
   }, [target.sessionId, onPreview]);
 
+  // 勾选变化 → 防抖后用当前勾选集合重取 preview，拿与 execute 一致的新 token。
+  // 竞态：每次变化递增请求 id，旧响应回来时若已被超车则丢弃。
+  useEffect(() => {
+    if (!didToggleRef.current) return;
+    const refs = [...selected];
+    const reqId = ++previewReqIdRef.current;
+    setRefreshing(true);
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const p = await onPreview(target.sessionId, refs);
+          if (reqId !== previewReqIdRef.current) return; // 已被更新的请求超车 → 丢弃
+          setPreview((prev) => (prev ? { ...prev, snapshot_token: p.snapshot_token } : prev));
+          setRefreshError(null);
+        } catch (e) {
+          if (reqId === previewReqIdRef.current) {
+            setRefreshError(e instanceof Error ? e.message : '清理预览失败');
+          }
+        } finally {
+          if (reqId === previewReqIdRef.current) setRefreshing(false);
+        }
+      })();
+    }, REPREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [selected, onPreview, target.sessionId]);
+
   const selectedCount = useMemo(
     () => (preview ? preview.affected.filter((a) => selected.has(a.artifact_ref)).length : 0),
     [preview, selected],
   );
 
   const toggle = (ref: string) => {
+    didToggleRef.current = true;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(ref)) next.delete(ref);
@@ -185,6 +227,12 @@ function CleanupForm({
         </div>
       )}
 
+      {refreshError && (
+        <div className="project-error" role="alert">
+          {refreshError}
+        </div>
+      )}
+
       <div className="project-dialog-actions">
         {result ? (
           <Dialog.Close asChild>
@@ -200,7 +248,7 @@ function CleanupForm({
             <button
               className="project-btn project-btn-danger"
               onClick={() => void confirm()}
-              disabled={pending || preview === null || selectedCount === 0}
+              disabled={pending || refreshing || preview === null || selectedCount === 0}
             >
               {pending ? '正在清理…' : `确认清理 ${selectedCount} 个原件`}
             </button>

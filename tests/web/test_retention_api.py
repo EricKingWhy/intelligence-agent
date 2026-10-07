@@ -133,6 +133,27 @@ class TestCleanupPreview:
         )
         assert resp.status_code == 404, resp.text
 
+    def test_preview_accepts_selected_refs(self, client) -> None:
+        # 方案 a：selected_refs 是可选字段；空列表也合法（token 按空交集生成）。
+        client, _ = client
+        sid = _create_session(client)
+        resp = client.post(
+            f"/api/sessions/{sid}/cleanup/preview",
+            json={"mode": "unreferenced", "selected_refs": []},
+        )
+        assert resp.status_code == 200, resp.text
+        assert isinstance(resp.json()["snapshot_token"], str)
+
+    def test_preview_selected_refs_non_list_is_422(self, client) -> None:
+        # 形状非法（非 list）→ pydantic 422（与 mode 收窄同一口径）。
+        client, _ = client
+        sid = _create_session(client)
+        resp = client.post(
+            f"/api/sessions/{sid}/cleanup/preview",
+            json={"selected_refs": "not-a-list"},
+        )
+        assert resp.status_code == 422, resp.text
+
 
 class TestCleanupExecute:
     def _preview_token(self, client, sid: str) -> str:

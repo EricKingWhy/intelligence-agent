@@ -128,6 +128,19 @@ describe('#368 previewCleanup — 形状防御与请求体', () => {
     expect(calls[0].body).toEqual({ mode: 'unreferenced' });
   });
 
+  it('selected_refs 显式传入 → 进请求体；不传则字段省略（旧行为不变）', async () => {
+    const { calls } = captureFetch(200, {});
+    await previewCleanup('s1', 'unreferenced', ['art_a', 'art_b']);
+    expect(calls[0].body).toEqual({
+      mode: 'unreferenced',
+      selected_refs: ['art_a', 'art_b'],
+    });
+
+    const { calls: calls2 } = captureFetch(200, {});
+    await previewCleanup('s1');
+    expect(calls2[0].body).toEqual({ mode: 'unreferenced' });
+  });
+
   it('缺字段 / 非对象 body → 数组 []、字符串 ""、数字 0', async () => {
     captureFetch(200, { snapshot_token: 42, affected: 'bad', blocked: null });
     const preview = await previewCleanup('s1');

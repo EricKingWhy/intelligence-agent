@@ -3966,7 +3966,10 @@ class SessionService:
         }
 
     async def preview_artifact_cleanup(
-        self, session_id: str, mode: str = "unreferenced"
+        self,
+        session_id: str,
+        mode: str = "unreferenced",
+        selected_refs: list[str] | None = None,
     ) -> dict:
         """清理预览：可达集 + blocked/affected 明细 + 快照 token（CAS）。
 
@@ -3975,8 +3978,14 @@ class SessionService:
         ``referenced`` / ``evidence``；``affected`` 是"预览确认后可清"的候选（其证据
         引用会被 ``evidence_invalidated`` 列出）。``snapshot_token`` 供 execute 复验——
         预览后引用集变化即失效（Kubernetes resourceVersion 乐观并发）；token 同时
-        纳入本次 ``affected`` 的 ref 集合（#368 P3-3），execute 侧用请求 refs 复算，
-        勾选与预览不一致即 409。
+        纳入本次要清理的 ref 集合（#368 P3-3），execute 侧用请求 refs 复算。
+
+        ``selected_refs``（#368 P3-3 UX 方案 a）：前端勾选变化后重取预览时传入**当前
+        勾选集合**——token 用 ``sorted(set(selected_refs) & affected_refs)`` 生成，与
+        execute 侧复算口径一致，使"取消勾选 → 拿新 token 执行"不再 409；交集同时挡掉
+        传入的非法 / blocked ref。``None``（默认）保持旧行为：按 affected 全集生成。
+        ``affected`` / ``blocked`` / ``evidence_invalidated`` / ``reclaimable_bytes``
+        列表内容与是否传 ``selected_refs`` 无关（前端已持有全集，重取只为新 token）。
         """
         if mode != "unreferenced":
             raise ValueError(f"unsupported cleanup mode: {mode!r}")
@@ -4003,6 +4012,12 @@ class SessionService:
                         "referenced_by": list(info["referenced_by"]) if info else [],
                     })
         affected_refs = {item["artifact_ref"] for item in affected}
+        # 方案 a：勾选子集 → token 绑「勾选 ∩ 可清理」；不传 → 旧行为（affected 全集）。
+        token_refs = (
+            sorted(affected_refs)
+            if selected_refs is None
+            else sorted(set(selected_refs) & affected_refs)
+        )
         # P3-6：复用 _cleanup_state 已读到的 events，不再二次读盘。
         state = derive_evidence_state(events)
         evidence_invalidated = sorted({
@@ -4013,8 +4028,7 @@ class SessionService:
         })
         return {
             "snapshot_token": self._snapshot_token_from_state(
-                reachable, candidates, pending, children_stamps, stamp,
-                sorted(affected_refs),
+                reachable, candidates, pending, children_stamps, stamp, token_refs,
             ),
             "affected": affected,
             "evidence_invalidated": evidence_invalidated,
@@ -4046,9 +4060,10 @@ class SessionService:
         reachable, candidates, pending, children_stamps, stamp, events = (
             await self._cleanup_state(session_id)
         )
-        # P3-3：token 绑定"将被清理的 ref 集合"。预览的 token 用当时 affected 全集，
-        # 这里用「请求 refs ∩ 当前可清理集」——勾选与预览不一致（少了或多出不可清理
-        # 项）即 409。同时保留逐 ref 重验：不可清理项仍如实记 not_deleted（执行契约）。
+        # P3-3：token 绑定"将被清理的 ref 集合"。预览侧可用 selected_refs 绑定勾选
+        # 子集（方案 a），这里用「请求 refs ∩ 当前可清理集」复算——勾选与预览 token
+        # 不一致（少了或多出不可清理项）即 409。同时保留逐 ref 重验：不可清理项仍如实
+        # 记 not_deleted（执行契约）。
         affected_refs = {
             ref
             for ref in candidates

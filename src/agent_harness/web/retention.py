@@ -36,9 +36,15 @@ if TYPE_CHECKING:
 
 
 class CleanupPreviewRequest(BaseModel):
-    """POST /cleanup/preview：只支持 ``mode="unreferenced"``（非法值 → 422）。"""
+    """POST /cleanup/preview：只支持 ``mode="unreferenced"``（非法值 → 422）。
+
+    ``selected_refs``（#368 P3-3 UX 方案 a）：前端勾选变化后重取预览时传入当前勾选
+    集合，token 按 ``勾选 ∩ 可清理`` 生成（与 execute 复算口径一致）；不传 → 按
+    affected 全集生成（旧行为）。形状非法（非 list）由 pydantic 给 422。
+    """
 
     mode: Literal["unreferenced"] = "unreferenced"
+    selected_refs: list[str] | None = None
 
 
 class CleanupExecuteRequest(BaseModel):
@@ -77,7 +83,9 @@ def register_retention_routes(
             raise http_error(e) from e
         service = session_service(app.state.agent)
         try:
-            return await service.preview_artifact_cleanup(session_id, mode=req.mode)
+            return await service.preview_artifact_cleanup(
+                session_id, mode=req.mode, selected_refs=req.selected_refs
+            )
         except (InvalidSessionId, SessionNotFound, ActiveRunConflict) as e:
             raise http_error(e) from e
 

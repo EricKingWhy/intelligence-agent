@@ -199,4 +199,43 @@ describe('#368 CleanupPreviewDialog', () => {
     expect(text()).toContain('清理预览已过期，请重新预览');
     expect(text()).not.toContain('已删除');
   });
+
+  it('取消勾选 → debounce 后带勾选集合重取 preview，确认用最新 token（方案 a）', async () => {
+    const onPreview = vi
+      .fn()
+      .mockResolvedValueOnce(preview()) // 初次：全集 token tok-1
+      .mockResolvedValue(preview({ snapshot_token: 'tok-2' })); // 重取：勾选子集 token
+    const onConfirm = vi
+      .fn()
+      .mockResolvedValue({ deleted: [], failed: [], not_deleted: [] });
+    render(
+      <CleanupPreviewDialog
+        target={{ sessionId: 's1' }}
+        onOpenChange={() => {}}
+        onPreview={onPreview}
+        onConfirm={onConfirm}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(onPreview).toHaveBeenCalledTimes(1);
+
+    const boxes = [...document.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[];
+    await act(async () => { boxes[0].click(); });
+    // debounce 未到点 → 尚未重取
+    expect(onPreview).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350));
+    });
+    expect(onPreview).toHaveBeenCalledTimes(2);
+    // 第二次带当前勾选集合（取消 art_aaaa… 后只剩 art_b）
+    expect(onPreview).toHaveBeenLastCalledWith('s1', ['art_b']);
+
+    // 确认必须用重取后的最新 token + 当前勾选
+    await act(async () => {
+      buttonByText('确认清理 1 个原件')!.click();
+      await Promise.resolve();
+    });
+    expect(onConfirm).toHaveBeenCalledWith('s1', 'tok-2', ['art_b']);
+  });
 });

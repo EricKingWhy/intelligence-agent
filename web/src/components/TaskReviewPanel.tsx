@@ -131,7 +131,11 @@ export function TaskReviewPanel({
   }, [open, loadUsage]);
 
   // 稳定引用：CleanupPreviewDialog 打开时只拉一次 preview，父组件重渲染不重拉、不重置勾选。
-  const handlePreview = useCallback((sid: string) => previewCleanup(sid), []);
+  // 勾选变化时浮层带当前勾选集合重取（方案 a），拿与 execute 一致的新 token。
+  const handlePreview = useCallback(
+    (sid: string, selectedRefs?: string[]) => previewCleanup(sid, 'unreferenced', selectedRefs),
+    [],
+  );
   const handleConfirm = useCallback(
     async (sid: string, token: string, refs: string[]) => {
       const result = await executeCleanup(sid, token, refs);
