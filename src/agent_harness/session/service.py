@@ -27,18 +27,21 @@ HTTP/CLI 响应。
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import stat
 import subprocess
 import time
 from collections.abc import Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import partial
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+from uuid import uuid4
 
 import anyio
 
@@ -148,6 +151,7 @@ from agent_harness.session.errors import (
     SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
+    SnapshotTokenMismatch,
     SteerTargetNotFound,
     SupersedeTargetInvalid,
     UnknownModel,
@@ -157,6 +161,9 @@ from agent_harness.session.errors import (
     WorkspacePathInvalid,
 )
 from agent_harness.session.event import (
+    ARTIFACT_CREATED,
+    ARTIFACT_EXTERNALIZED,
+    EVIDENCE_RECORDED,
     FORK_IN_PROGRESS,
     MESSAGE_QUEUED,
     MESSAGE_SUPERSEDED,
@@ -175,6 +182,7 @@ from agent_harness.session.event import (
     STEER_APPLIED,
     STEER_REQUESTED,
     TOOL_APPROVAL_REQUESTED,
+    TOOL_RESULT,
     USER_INPUT_REQUESTED,
     USER_MESSAGE,
     SessionEvent,
@@ -209,6 +217,7 @@ from agent_harness.session.progress import (
     PROGRESS_VERIFY_OK,
     ProgressVerification,
     ProgressWriteOutcome,
+    progress_paths,
     read_progress_file_version,
     render_external_edit_instruction,
     verify_progress_file,
@@ -236,12 +245,15 @@ from agent_harness.session.workflow import (
     WorkflowMode,
     append_workflow_mode_change,
 )
-from agent_harness.storage.artifact import SESSION_KEY_PATTERN
+from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
 from agent_harness.storage.delegation_tree import (
     SessionBudgetHandle,
     SessionToolLimitsPurge,
 )
-from agent_harness.storage.local_artifact import discard_local_artifacts
+from agent_harness.storage.local_artifact import (
+    delete_local_artifacts,
+    discard_local_artifacts,
+)
 from agent_harness.storage.operation import OperationState, needs_reconcile
 from agent_harness.storage.session_meta import SessionMeta
 from agent_harness.tooling.approval import (
@@ -886,6 +898,89 @@ class ToolReconcileInfoProvider(Protocol):
     """
 
     async def __call__(self, session_id: str) -> dict[str, ToolReconcileInfo]: ...
+
+
+# ── 证据保留 / 清理（#368 W-24）模块级助手 ──────────────────────────────
+
+#: blocked 原因的优先级（高者胜）：未决 Operation > fork 子会话引用 > 事件引用。
+_CLEANUP_BLOCK_PRIORITY = ("unreconciled_operation", "fork_child_reference", "referenced")
+
+
+def _blocking_reason(info: dict | None) -> str | None:
+    """可达集条目 → 阻断原因；None 表示可清理（含"仅被证据引用"）。
+
+    证据引用**不阻断**清理：它是会被清理动作"失效"的审计记录（预览经
+    ``evidence_invalidated`` 如实告知），不是活动/恢复链引用。真正的硬引用是
+    未决 Operation、fork 子会话、以及 tool/result 与 artifact 事件（重放/恢复
+    需要它们）。
+    """
+    if not info:
+        return None
+    reasons = info.get("reasons") or set()
+    for reason in _CLEANUP_BLOCK_PRIORITY:
+        if reason in reasons:
+            return reason
+    return None
+
+
+def _tool_result_artifact_ref(content: object) -> str | None:
+    """tool/result 的 ``content``（ToolResult JSON 文本）里读 ``artifact_ref``。"""
+    if not isinstance(content, str):
+        return None
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    ref = parsed.get("artifact_ref")
+    return ref if isinstance(ref, str) and ref else None
+
+
+def _artifact_refs_in_event(event: SessionEvent) -> list[tuple[str, str]]:
+    """一条事件里的 (artifact_ref, 定位标签) 列表（四类事件，见 #368 票面）。"""
+    data = event.data if isinstance(event.data, dict) else {}
+    if event.type == EVIDENCE_RECORDED:
+        ref = data.get("artifact_ref")
+        if isinstance(ref, str) and ref:
+            return [
+                (ref, f"evidence:{data.get('criterion_id')}/{data.get('evidence_id')}")
+            ]
+    elif event.type in (ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED):
+        ref = data.get("artifact_id")
+        if isinstance(ref, str) and ref:
+            return [(ref, f"event:{event.seq}")]
+    elif event.type == TOOL_RESULT:
+        ref = data.get("artifact_ref")
+        if not (isinstance(ref, str) and ref):
+            ref = _tool_result_artifact_ref(data.get("content"))
+        if isinstance(ref, str) and ref:
+            return [(ref, f"tool_result:{data.get('tool_call_id')}")]
+    return []
+
+
+def _file_size(path: Path) -> int:
+    """文件字节数；不存在 / 读不到 → 0（"不存在即 0"的诚实表达）。"""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _dir_size(path: Path) -> int:
+    """目录递归字节数；不存在 → 0。"""
+    if not path.is_dir():
+        return 0
+    return sum(_file_size(entry) for entry in path.rglob("*") if entry.is_file())
+
+
+def _stat_stamp(path: Path) -> list[int] | None:
+    """文件的 (size, mtime_ns)；不存在 → None。"""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return [info.st_size, info.st_mtime_ns]
 
 
 class SessionService:
@@ -3791,6 +3886,324 @@ class SessionService:
             detached_from_projects=detached,
         )
 
+    # ── 证据保留 / 清理（#368 W-24）──────────────────────────────────────
+    #
+    # 首版**不做**固定天数自动删除（ADR-0004 / ADR-0029 Non-Goals）：用户能看到占用，
+    # 显式预览、显式确认后才清理。清理面是"自己拼得出的本地 artifact 路径"——不读
+    # 沙箱映射、不碰 ``agent-progress/``、绝不碰工作目录源码（ADR-0029 D2 同款安全
+    # 形状）。远端 S3/MinIO 对象不在本票范围（那些 Provider 没有 delete）。
+
+    async def get_session_usage(self, session_id: str) -> dict:
+        """会话占用的近似/精确大小（零副作用只读）。
+
+        返回逐项字节数与可回收量；列结构参照 ``docker system df`` 的
+        ``TYPE / TOTAL / ACTIVE / SIZE / RECLAIMABLE`` 思路——这里按**存储面**
+        （事件日志 / artifact / 进度文件）拆列，``reclaimable_bytes`` 即
+        "在预览确认后可释放"的部分。所有"不存在"的面如实记 0，不伪造。
+        """
+        self._validate_session_id(session_id)
+        reachable, candidates, _pending, _children, _stamp = await self._cleanup_state(
+            session_id
+        )
+        reclaimable = sum(
+            size
+            for ref, size in candidates.items()
+            if _blocking_reason(reachable.get(ref)) is None
+        )
+        events_bytes = await anyio.to_thread.run_sync(
+            _file_size, self._session_events_path(session_id)
+        )
+        if self._settings.artifact_dir.strip():
+            artifacts_bytes = await anyio.to_thread.run_sync(
+                _dir_size, self._artifact_dir_for(session_id)
+            )
+        else:
+            artifacts_bytes = 0
+        progress_bytes = await anyio.to_thread.run_sync(
+            self._progress_bytes, session_id
+        )
+        return {
+            "events_bytes": events_bytes,
+            "artifacts_bytes": artifacts_bytes,
+            "progress_bytes": progress_bytes,
+            "artifact_count": len(candidates),
+            "reclaimable_bytes": reclaimable,
+            "computed_at": _utc_now_iso(),
+        }
+
+    async def preview_artifact_cleanup(
+        self, session_id: str, mode: str = "unreferenced"
+    ) -> dict:
+        """清理预览：可达集 + blocked/affected 明细 + 快照 token（CAS）。
+
+        只支持 ``mode="unreferenced"``。``blocked`` 的 reason 取
+        ``active_task`` / ``unreconciled_operation`` / ``fork_child_reference`` /
+        ``referenced``；``affected`` 是"预览确认后可清"的候选（其证据引用会被
+        ``evidence_invalidated`` 列出）。``snapshot_token`` 供 execute 复验——
+        预览后引用集变化即失效（Kubernetes resourceVersion 乐观并发）。
+        """
+        if mode != "unreferenced":
+            raise ValueError(f"unsupported cleanup mode: {mode!r}")
+        await self._require_existing_session(session_id)
+        reachable, candidates, pending, children, stamp = await self._cleanup_state(
+            session_id
+        )
+        blocked: list[dict] = []
+        affected: list[dict] = []
+        if self._run_manager.is_busy(session_id):
+            blocked.extend(
+                {"artifact_ref": ref, "reason": "active_task"} for ref in candidates
+            )
+        else:
+            for ref, size in candidates.items():
+                info = reachable.get(ref)
+                reason = _blocking_reason(info)
+                if reason is not None:
+                    blocked.append({"artifact_ref": ref, "reason": reason})
+                else:
+                    affected.append({
+                        "artifact_ref": ref,
+                        "size": size,
+                        "referenced_by": list(info["referenced_by"]) if info else [],
+                    })
+        affected_refs = {item["artifact_ref"] for item in affected}
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        state = derive_evidence_state(events)
+        evidence_invalidated = sorted({
+            record.evidence_id
+            for records in state.by_criterion.values()
+            for record in records
+            if record.artifact_ref in affected_refs
+        })
+        return {
+            "snapshot_token": self._snapshot_token_from_state(
+                reachable, candidates, pending, children, stamp
+            ),
+            "affected": affected,
+            "evidence_invalidated": evidence_invalidated,
+            "reclaimable_bytes": sum(item["size"] for item in affected),
+            "blocked": blocked,
+        }
+
+    async def execute_artifact_cleanup(
+        self, session_id: str, snapshot_token: str, artifact_refs: list[str]
+    ) -> dict:
+        """执行清理：token 复验 + 逐 ref 重验不可达后才删（诚实明细，不做总结断言）。
+
+        守卫顺序照 ``delete_session``：形态+存在性 → 在途 run → 挂起审批（两者都
+        是 409 ``ActiveRunConflict``）。fork 子会话**不拒绝**——它折进可达集保护
+        （子会话引用的 ref 会被重验判成 ``not_deleted``）。返回 ``deleted`` /
+        ``failed`` / ``not_deleted``（``not_deleted`` 带 reason），UI 据此显示
+        "已删/未删"，**不**展示"已全部清理"。
+        """
+        await self._require_existing_session(session_id)
+        if self._run_manager.is_busy(session_id):
+            raise ActiveRunConflict(
+                f"session '{session_id}' has a run in flight; clean up after it finishes"
+            )
+        queue = self._approval_queues.get(session_id)
+        if queue is not None and queue.pending_ids():
+            raise ActiveRunConflict(
+                f"session '{session_id}' has a pending approval; resolve it first"
+            )
+        reachable, candidates, pending, children, stamp = await self._cleanup_state(
+            session_id
+        )
+        current = self._snapshot_token_from_state(
+            reachable, candidates, pending, children, stamp
+        )
+        if current != snapshot_token:
+            raise SnapshotTokenMismatch(
+                f"cleanup preview for session '{session_id}' is stale; preview again"
+            )
+        not_deleted: list[dict] = []
+        to_delete: list[str] = []
+        for ref in artifact_refs:
+            reason = _blocking_reason(reachable.get(ref))
+            if reason is not None:
+                not_deleted.append({"artifact_ref": ref, "reason": reason})
+            else:
+                to_delete.append(ref)
+        result = await anyio.to_thread.run_sync(
+            delete_local_artifacts, self._settings, session_id, to_delete
+        )
+        deleted = list(result["deleted"])
+        failed = list(result["failed"])
+        not_deleted.extend(
+            {"artifact_ref": ref, "reason": "not_found"} for ref in result["not_found"]
+        )
+        not_deleted.extend(
+            {"artifact_ref": ref, "reason": "invalid"} for ref in result["invalid"]
+        )
+        if deleted:
+            await self._record_cleaned_artifacts(session_id, deleted)
+        return {"deleted": deleted, "failed": failed, "not_deleted": not_deleted}
+
+    # ── 保留：内部助手 ──────────────────────────────────────────────────
+
+    async def _compute_reachable_artifacts(self, session_id: str) -> dict[str, dict]:
+        """本会话 + fork 子会话的可达 artifact 集：``{ref: {referenced_by, reasons}}``。
+
+        引用来源：本会话四类事件的 artifact_ref、未决 Operation、直接 fork 子会话
+        （``origin != "delegation"``）递归。key 按 session 隔离（artifact 物理上不
+        跨会话共享），所以"共享 ref"在本项目里就是"会话内多引用者 + fork 父子引用"。
+        """
+        metas = await self._session_meta_store.list_all()
+        children_by_parent: dict[str, list[str]] = {}
+        for meta in metas:
+            if meta.parent_session_id and meta.origin != "delegation":
+                children_by_parent.setdefault(meta.parent_session_id, []).append(
+                    meta.session_id
+                )
+        return await self._reachable_for_session(session_id, children_by_parent)
+
+    async def _reachable_for_session(
+        self, session_id: str, children_by_parent: dict[str, list[str]]
+    ) -> dict[str, dict]:
+        """递归算一个会话（含其 fork 子树）的可达 artifact 集。"""
+        events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
+        result: dict[str, dict] = {}
+
+        def _add(ref: str, tag: str, reason: str) -> None:
+            entry = result.setdefault(ref, {"referenced_by": [], "reasons": set()})
+            if tag not in entry["referenced_by"]:
+                entry["referenced_by"].append(tag)
+            entry["reasons"].add(reason)
+
+        for event in events:
+            reason = "evidence" if event.type == EVIDENCE_RECORDED else "referenced"
+            for ref, tag in _artifact_refs_in_event(event):
+                _add(ref, tag, reason)
+        operations = await self._operation_ledger.list_for_session(session_id)
+        for operation in operations:
+            if needs_reconcile(operation) and operation.artifact_ref:
+                _add(
+                    operation.artifact_ref,
+                    f"operation:{operation.operation_id}（未决）",
+                    "unreconciled_operation",
+                )
+        for child_id in children_by_parent.get(session_id, []):
+            child_map = await self._reachable_for_session(child_id, children_by_parent)
+            for ref, info in child_map.items():
+                for tag in info["referenced_by"]:
+                    _add(ref, f"fork_child:{child_id}:{tag}", "fork_child_reference")
+                result[ref]["reasons"].update(info["reasons"])
+        return result
+
+    async def _cleanup_state(
+        self, session_id: str
+    ) -> tuple[dict[str, dict], dict[str, int], list[str], list[str], list[int] | None]:
+        """一次性算齐预览/执行/token 所需的确定状态（可达集、候选、未决、子会话、戳）。"""
+        metas = await self._session_meta_store.list_all()
+        children_by_parent: dict[str, list[str]] = {}
+        for meta in metas:
+            if meta.parent_session_id and meta.origin != "delegation":
+                children_by_parent.setdefault(meta.parent_session_id, []).append(
+                    meta.session_id
+                )
+        reachable = await self._reachable_for_session(session_id, children_by_parent)
+        candidates = await anyio.to_thread.run_sync(
+            self._list_local_artifacts, session_id
+        )
+        operations = await self._operation_ledger.list_for_session(session_id)
+        pending = sorted(
+            operation.operation_id
+            for operation in operations
+            if needs_reconcile(operation)
+        )
+        children = sorted(children_by_parent.get(session_id, []))
+        stamp = await anyio.to_thread.run_sync(
+            _stat_stamp, self._session_events_path(session_id)
+        )
+        return reachable, candidates, pending, children, stamp
+
+    @staticmethod
+    def _snapshot_token_from_state(
+        reachable: dict[str, dict],
+        candidates: dict[str, int],
+        pending: list[str],
+        children: list[str],
+        stamp: list[int] | None,
+    ) -> str:
+        """可达集 + 各 ref 大小 + 未决 op + 子会话 + events.jsonl 戳 → 确定性 token。"""
+        material = {
+            "reachable": sorted(reachable),
+            "sizes": {ref: candidates[ref] for ref in sorted(candidates)},
+            "pending_operations": pending,
+            "children": children,
+            "events": stamp,
+        }
+        blob = json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+    def _artifact_dir_for(self, session_id: str) -> Path:
+        return Path(self._settings.artifact_dir.strip()).resolve() / session_id
+
+    def _list_local_artifacts(self, session_id: str) -> dict[str, int]:
+        """本地 artifact 目录里的内容文件 ``{artifact_id: size}``（不计 .json 旁挂）。"""
+        root = self._settings.artifact_dir.strip()
+        if not root:
+            return {}
+        session_dir = Path(root).resolve() / session_id
+        if not session_dir.is_dir():
+            return {}
+        return {
+            entry.name: _file_size(entry)
+            for entry in session_dir.iterdir()
+            if ARTIFACT_ID_PATTERN.fullmatch(entry.name) and entry.is_file()
+        }
+
+    def _session_events_path(self, session_id: str) -> Path:
+        """会话目录的 events.jsonl 路径（从 store 取，避免与 store 根布局漂移）。"""
+        return self._store._events_path(session_id)
+
+    def _progress_bytes(self, session_id: str) -> int:
+        """该会话进度文件（``<项目根>/agent-progress/<sid>/progress.md``）字节数。"""
+        events = self._store.read_events(session_id)
+        root = session_cwd(events)
+        if not root:
+            return 0
+        return _file_size(progress_paths(root, session_id).markdown)
+
+    def _cleaned_path(self, session_id: str) -> Path:
+        """cleaned 集合落盘路径：会话目录下 ``cleaned_artifacts.json``。"""
+        return self._session_events_path(session_id).parent / "cleaned_artifacts.json"
+
+    def _get_cleaned_artifacts(self, session_id: str) -> set[str]:
+        """已清理 artifact id 集合；缺失 / 损坏 → 空集（宽容读法）。"""
+        path = self._cleaned_path(session_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        if not isinstance(raw, list):
+            return set()
+        return {item for item in raw if isinstance(item, str)}
+
+    async def _record_cleaned_artifacts(
+        self, session_id: str, refs: list[str]
+    ) -> None:
+        await anyio.to_thread.run_sync(
+            self._record_cleaned_blocking, session_id, list(refs)
+        )
+
+    def _record_cleaned_blocking(self, session_id: str, refs: list[str]) -> None:
+        """并集去重后原子写回 cleaned 集合（tmp + os.replace）。"""
+        path = self._cleaned_path(session_id)
+        merged = sorted(self._get_cleaned_artifacts(session_id) | set(refs))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_atomic(path, json.dumps(merged, ensure_ascii=False).encode("utf-8"))
+
+    @staticmethod
+    def _write_atomic(path: Path, body: bytes) -> None:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_bytes(body)
+            os.replace(tmp, path)
+        finally:
+            with suppress(OSError):
+                tmp.unlink()
+
     # ── 审批 ─────────────────────────────────────────────────────────
 
     async def resolve_approval(
@@ -4770,8 +5183,11 @@ class SessionService:
                 readable: bool | None = None
                 attribution_ok: bool | None = None
                 if record.artifact_ref:
-                    readable, attribution_ok = await self._check_evidence_artifact(
-                        store, record
+                    # _cleaned（#368 W-24 Batch B）：原件已被显式清理的标记。Batch C 的
+                    # evidence.py 加参后再透传进 freshness；本批只保证判定可得，不改变
+                    # 现有 stale 语义（清理后仍是"不可读回"→ stale）。
+                    readable, attribution_ok, _cleaned = (
+                        await self._check_evidence_artifact(store, record)
                     )
                 freshness = evaluate_evidence_freshness(
                     record,
@@ -4838,30 +5254,38 @@ class SessionService:
 
         return await anyio.to_thread.run_sync(_run)
 
-    @staticmethod
     async def _check_evidence_artifact(
-        store, record
-    ) -> tuple[bool, bool | None]:
-        """证据 artifact 的可读回 + 显式归属/来源校验（票面"只引用权限受控的原件"）。
+        self, store, record
+    ) -> tuple[bool, bool | None, bool]:
+        """证据 artifact 的可读回 + 归属校验 + "原件已清理"标记（#368 W-24）。
 
         - 可读回：``store.load`` 成功（content-hash 自证在实现里；
           KeyError/OSError → 不可读）。
         - 归属：证据带 ``tool_call_id`` 时，必须与 artifact 旁挂元数据的
           ``tool_call_id`` 一致；元数据缺失 → 无法确认（None，fail-closed）；
           证据无 ``tool_call_id`` → 跳过该维度。
+        - cleaned（第三元组项）：``store.load`` 抛 ``KeyError``（不存在）且该 ref 在
+          本会话 cleaned 集合里 ⇒ 原件是被**显式清理**的，而非从未存在 / 外部丢失。
+          其余分支恒 False。Batch C 的 ``evaluate_evidence_freshness`` 消费它产出
+          "原件已清理"枚举；本批仅保证判定可得。
         """
         if store is None:
-            return False, None
+            return False, None, False
         try:
             artifact = await store.load(record.artifact_ref)
-        except (KeyError, OSError):
-            return False, None
+        except KeyError:
+            cleaned = record.artifact_ref in self._get_cleaned_artifacts(
+                record.task_session_id
+            )
+            return False, None, cleaned
+        except OSError:
+            return False, None, False
         if not record.tool_call_id:
-            return True, True
+            return True, True, False
         meta_tcid = artifact.tool_call_id
         if not meta_tcid:
-            return True, None
-        return True, meta_tcid == record.tool_call_id
+            return True, None, False
+        return True, meta_tcid == record.tool_call_id, False
 
     async def fork(
         self, *, session_id: str, from_seq: int, with_tail_summary: bool = False
