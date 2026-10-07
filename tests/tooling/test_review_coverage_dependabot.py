@@ -90,3 +90,25 @@ def test_any_non_version_line_is_rejected(path, line):
 
 def test_changed_lines_skips_file_headers():
     assert crc.changed_lines("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n context\n") == ["a", "b"]
+
+
+def test_changed_lines_keeps_content_starting_with_dashes_or_pluses():
+    # P1（2026-10-07）：内容行 `--- x` / `+++ x` 在 diff 里长成 `---- x` / `++++ x`，
+    # 必须保留并参与形状核对，不能当文件头吞掉 —— 否则伪造 dependabot 作者可在
+    # workflow 里夹带 `+++ uses: evil@<40hex>` 而闸门照样放行（实证：旧实现返回 True）。
+    evil_sha = "a" * 40
+    evil_diff = (
+        "--- a/.github/workflows/gate0.yml\n"
+        "+++ b/.github/workflows/gate0.yml\n"
+        "@@ -1 +1 @@\n"
+        "+        uses: actions/checkout@" + evil_sha + " # v7.0.1\n"
+        "++++ uses: evil/action@" + evil_sha + "\n"
+        "---- sneaky: removed-line\n"
+    )
+    assert crc.changed_lines(evil_diff) == [
+        "        uses: actions/checkout@" + evil_sha + " # v7.0.1",
+        "+++ uses: evil/action@" + evil_sha,
+        "--- sneaky: removed-line",
+    ]
+    assert not crc.is_dependabot_version_bump(
+        BOT, [".github/workflows/gate0.yml"], {".github/workflows/gate0.yml": evil_diff})

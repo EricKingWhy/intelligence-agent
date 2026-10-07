@@ -512,10 +512,16 @@ def _dependabot_line_rule(path: str) -> re.Pattern[str] | None:
 
 
 def changed_lines(diff_text: str) -> list[str]:
-    """`git show --unified=0` 的输出 → 全部增删行（去掉 `+`/`-` 前缀，不含 `+++`/`---` 头）。"""
+    """`git show --unified=0` 的输出 → 全部增删行（去掉 `+`/`-` 前缀，不含文件头）。
+
+    文件头形如 `--- a/f` / `+++ b/f`（标记后必有空格）；内容行 `--- x` / `+++ x`
+    在 diff 里长成 `---- x` / `++++ x`，**必须保留**并参与形状核对 —— 否则伪造
+    dependabot 作者可在 workflow 里夹带 `+++ uses: evil@<40hex>` 而闸门照样放行
+    （2026-10-07 实证 P1）。
+    """
     out: list[str] = []
     for ln in diff_text.split("\n"):
-        if ln.startswith(("+++", "---")):
+        if ln.startswith(("--- ", "+++ ")):
             continue
         if ln.startswith(("+", "-")):
             out.append(ln[1:])
