@@ -7,6 +7,7 @@
 Primary/Reviewer 按任务角色确定，不绑定 Claude 或其他工具。
 
 - 开始任务：AGENTS §2–§3；确认当前用户授权、仓库、分支、工作树。
+- Matt skills：先读 SDD 协议 §9 的兼容约束；词汇表读 `GLOSSARY.md`，旧 `CONTEXT.md` 按其指针继续读取。
 - Review/Debug：按 AGENTS §4 必须读取 `docs/agents/review-debug-playbook.md` 对应分支。
 - 设计/选型：按 AGENTS §6.1 必须读取来源清单与协议“方案依据”。
 - 同步/merge/push/PR merge/关单：按 AGENTS §13–§14 必须读取 `docs/agents/git-workflow.md` 对应步骤；授权只以 AGENTS §14.4 为准。
