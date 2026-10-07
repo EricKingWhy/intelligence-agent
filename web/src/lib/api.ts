@@ -608,10 +608,22 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
 
 /** #367 P3：从创建响应读 worktree 路径。后端 launch=true 走 SSE（无 JSON 体），
  *  worktree 信息走 `X-Worktree-Path` 响应头（`X-Permission-Mode` 同型先例）；
- *  launch=false 时走 JSON 体 `worktree_path`（由调用方直接读）。无头/空头 → null。 */
+ *  launch=false 时走 JSON 体 `worktree_path`（由调用方直接读）。无头/空头 → null。
+ *  #765：路径含非 latin-1 字符（中文用户名/中文目录）时后端改发
+ *  `X-Worktree-Path-Encoded`（RFC 5987 ext-value `UTF-8''<percent-encoded>`，
+ *  HTTP 头字段值只能 latin-1），此处按该约定兜底解码；畸形值按缺席处理——
+ *  这是展示性提示，不让它炸掉创建流程。 */
 export function worktreePathFromResponse(res: Response): string | null {
   const v = res.headers.get('X-Worktree-Path');
-  return v && v.length > 0 ? v : null;
+  if (v && v.length > 0) return v;
+  const encoded = res.headers.get('X-Worktree-Path-Encoded');
+  if (!encoded || !encoded.startsWith("UTF-8''")) return null;
+  try {
+    const decoded = decodeURIComponent(encoded.slice("UTF-8''".length));
+    return decoded.length > 0 ? decoded : null;
+  } catch {
+    return null;
+  }
 }
 
 /** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。

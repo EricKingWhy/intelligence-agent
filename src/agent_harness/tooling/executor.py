@@ -142,6 +142,42 @@ def _rejected_delta(tool_name: str) -> dict[str, Any]:
     return {"tool_name": tool_name, "tool_calls": 0, "tool_attempts": 0}
 
 
+def _stringified_json_object_fields(exc: ValidationError) -> list[str]:
+    """#767 方案 A：找出"对象型字段收到 JSON 字符串"的字段名（按出现顺序去重）。
+
+    判据：某条 ValidationError 的 `loc` 首段指向的字段，其收到的 `input`
+    是 str、且 `json.loads` 能成功解析为 dict。这类失败的典型来源是模型把
+    对象转义成了字符串（双重编码），而"把 JSON 字符串反转义"是非显而易见
+    的修复动作——Pydantic 原生文案没告诉模型，所以模型 10 次原样重试。
+
+    只读 `exc.errors()` 的证据、只产出字段名，不碰解析、不修参数：
+    spec `04_TOOL_RUNTIME.md` §5 —— "Executor MUST NOT 偷偷替模型猜测/
+    修复参数"。指引写进 message 回模型自纠（Vision:172；LangGraph
+    `ToolInvocationError` 模式）。
+    """
+    fields: list[str] = []
+    for err in exc.errors():
+        loc = err.get("loc", ())
+        if not loc:
+            continue
+        field = str(loc[0])
+        if field in fields:
+            continue
+        raw = err.get("input")
+        if not isinstance(raw, str):
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, RecursionError):
+            # RecursionError：json.loads 对极端深嵌套输入会抛递归错误；
+            # executor 对外永不抛异常（test_no_exception_bubbles_up），
+            # 此处判据失败 = 当作"不是 stringified JSON"，保持原错误文案。
+            continue
+        if isinstance(parsed, dict):
+            fields.append(field)
+    return fields
+
+
 #: 一次 tool_call 在执行域内最多尝试几次（含第一次）。
 #: 为什么是模块级常量而不是可配置项：重试上限必须收敛在【唯一 Retry Layer】
 #: 一处可见可调；一旦可配置，"到底重试几次"会重新散落回各层，铁律二就被架空。
@@ -435,10 +471,24 @@ class ToolExecutor:
                 f"{'.'.join(str(p) for p in err.get('loc', ()))}: {err.get('msg', '')}"
                 for err in e.errors()[:2]
             )
+            # #767 方案 A：对象型字段收到 JSON 字符串时追加可操作指引。
+            # 只改 message 层（不修参数，spec 04 §5 禁止偷偷修复）；保持
+            # retryable=False（spec §6：INVALID_ARGUMENT 默认不重试）。
+            guidance = ""
+            stringified_fields = _stringified_json_object_fields(e)
+            if stringified_fields:
+                names = "、".join(f"'{f}'" for f in stringified_fields)
+                guidance = (
+                    f" {names} 收到的是 JSON 字符串（内容本身合法），"
+                    "请直接传对象、不要转义成字符串后重试。"
+                )
             return ToolExecution(
                 tool_call_id=tool_call_id,
                 result=ToolResult.failure(
-                    message=f"工具 '{name}' 参数校验失败：{details}。请修正参数后重新调用。",
+                    message=(
+                        f"工具 '{name}' 参数校验失败：{details}。"
+                        f"请修正参数后重新调用。{guidance}"
+                    ),
                     error_code=ErrorCode.INVALID_ARGUMENT,
                     retryable=False,  # 参数错是确定性的，重试也是同样的错
                 ),
