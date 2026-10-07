@@ -126,9 +126,12 @@ _COMMAND_BOUNDARY = re.compile(
 _KEEP_INTENT = re.compile(
     r"保留|留住|留在|留着|留下|\bkeep\b|\bpreserve\b|\bretain\b", re.IGNORECASE,
 )
-# 紧邻分支专用（P4-2）：只收中文 keep 词。\b 锚定的英文词在紧邻 `match` 位置
-# （target 末字与 keep 首字同为 word char，\b 不成立）恒不命中，是死分支；
-# 英文后置形态本就不拦（取舍四），去掉死分支行为零变化。
+# 紧邻分支专用（P4-2）：只收中文 keep 词。target 末字符是 word char 时，
+# target 末字与 keep 首字同为 word char，\b 不成立，英文词在该位置恒不命中；
+# 但 target 以非 word char 结尾（如标点「foo-keep」）时 target 侧 \b 成立，
+# 旧代码（bc04b60b^，紧邻检查用含英文词的 _KEEP_INTENT）会命中并返回 True，
+# 新代码不命中——该 edge case 下删英文词有行为差异（新代码不拦，under-block
+# 方向），并非零变化（P4-1 审查实测：old=True / new=False）。
 _KEEP_INTENT_ADJACENT = re.compile(r"保留|留住|留在|留着|留下", re.IGNORECASE)
 
 
@@ -154,8 +157,9 @@ def _reverse_keep_intent(clause: str, target: str) -> bool:
     裸后置（后随字符非「的」）仍构成管辖。
     取舍四：英文后置形态（"the new key stays/keep it"）不处理——英文 keep
     意图由前置最近意图规则覆盖（"forget the old key, keep the new key"）；
-    紧邻分支因此只收中文 keep 词（\\b 锚定的英文词在该分支恒不命中，见
-    _KEEP_INTENT_ADJACENT 注释，删除死分支行为零变化）。并列/悬垂后置
+    紧邻分支因此只收中文 keep 词（target 末字为 word char 时 \b 锚定的英文词
+    在该分支恒不命中；target 以非 word char 结尾时有差异，见
+    _KEEP_INTENT_ADJACENT 注释）。并列/悬垂后置
     （「把新密码和旧密码都留着」）不构成紧邻 → 不拦，方向 under-block。
     紧邻判据在 over-block（误拦正常删除）与 under-block（漏拦
     并列形态）之间取窄，与「误拦也是 bug」的边界设计一致。
