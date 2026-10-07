@@ -6,9 +6,12 @@
 proxy），不经 CORS；本契约修的是 5173 直连 / 跨域部署拓扑下的可见性。
 两个守卫：
 
-① 行为钉：CORS 简单响应暴露的头清单必须与 ``EXPOSED_CUSTOM_RESPONSE_HEADERS``
-   **精确相等**——缺失（新增头漏登记 → 跨域 JS 不可见）与多出（响应侧没实际
-   下发的头混进暴露清单）都算偏离契约；
+① 行为钉：CORS 简单响应实际下发的暴露头清单必须与
+   ``EXPOSED_CUSTOM_RESPONSE_HEADERS`` **精确相等**——钉的是 middleware
+   配置与登记清单的漂移：缺失（新增头漏登记/漏喂 expose_headers → 跨域
+   JS 不可见）与多出（没登记的头混进暴露配置）都算偏离契约。边界：某头
+   登记进集合但无端点实际下发时本钉不红（"登记但不下发"需另设端点响应
+   头实测，本守卫不覆盖）；
 ② 防漏登：``src/agent_harness/web/`` 全部模块源码里引号包裹的 ``X-…`` 头
    字面量必须登记进 ``EXPOSED_CUSTOM_RESPONSE_HEADERS``。域界定（有意为之）：
    - 库产出的 ``X-Accel-Buffering``（sse-starlette SSE 反缓冲头）刻意不登记——
@@ -74,14 +77,19 @@ def test_cors_simple_response_exposes_all_custom_headers(cors_client: TestClient
 def _quoted_x_header_literals(web_dir: Path) -> dict[str, set[str]]:
     """收集 web 目录全部 ``*.py`` 源码里引号包裹的 ``X-…`` 头字面量（按文件分组）。
 
-    单/双引号都认；``Path.glob("*.py")`` 只落目录直属文件且 ``__pycache__``
-    是目录（只含 .pyc），天然不在扫描面内。
+    单/双引号都认；``rglob`` 递归覆盖子包（排除 ``__pycache__``）。已知漏报
+    口径：只认引号内完整字面量，f-string/拼接的动态头名（``f"X-Tenant-{tid}"``）
+    不命中——动态头名处应显式登记或豁免，勿依赖本守卫。
     """
     literals: dict[str, set[str]] = {}
-    for py_file in sorted(web_dir.glob("*.py")):
+    for py_file in sorted(web_dir.rglob("*.py")):
+        if "__pycache__" in py_file.parts:
+            continue
         source = py_file.read_text(encoding="utf-8")
         for match in re.finditer(r'[\'"](X-[A-Za-z0-9-]+)[\'"]', source):
-            literals.setdefault(py_file.name, set()).add(match.group(1))
+            literals.setdefault(
+                py_file.relative_to(web_dir).as_posix(), set()
+            ).add(match.group(1))
     return literals
 
 

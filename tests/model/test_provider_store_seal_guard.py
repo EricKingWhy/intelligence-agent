@@ -41,13 +41,20 @@ _SENSITIVE_SURFACE_BRANCHES: tuple[str, ...] = (
     "resolve_selection",
     r"ProviderStore\.for_settings",
 )
-_FROZEN_SURFACE_BRANCHES = frozenset(_SENSITIVE_SURFACE_BRANCHES)
+# 冻结集是独立硬编码字面量（先例 tests/tooling/test_review_coverage_lint.py:90），
+# 不从支单派生：派生冻结集的相等断言恒真，拦不住静默删支（#808 r2 F-1 实证：
+# 删 resolve_selection 支静默绿）。支单任何增删都对不上字面量即红。
+_FROZEN_SURFACE_BRANCHES = frozenset(
+    {"api/model-providers", "api/models", "resolve_selection",
+     r"ProviderStore\.for_settings"}
+)
 _SENSITIVE_SURFACE_RX = re.compile("|".join(_SENSITIVE_SURFACE_BRANCHES))
 
 # 密封判据是赋值形态，不是"字符串在场"（#808 收紧）：注释/docstring 只提及
 # provider_store_path 一词不算钉；判据不解析语法树，注释文本恰好带 ``=`` 时会
-# 误判为已钉（漏报方向残余，见模块 docstring"已知范围限制"）。
-_SEAL_RX = re.compile(r"provider_store_path\s*=")
+# 误判为已钉（漏报方向残余，见模块 docstring"已知范围限制"）；``==`` 比较形态
+# （只 assert 不注入）不算已钉，(?!=) 负向排除（#808 r2 F-2）。
+_SEAL_RX = re.compile(r"provider_store_path\s*=(?!=)")
 
 # 豁免清单（相对 tests/ 的 posix rel path → 理由；#808 从 basename 改为 rel path
 # 键，杜绝同名异目录文件被静默豁免）。形态命中但 store 内容不可达才可豁免；
@@ -96,7 +103,8 @@ def test_store_content_sensitive_tests_are_sealed():
             continue
         if not _SEAL_RX.search(source):
             violations.append(
-                f"{rel}：触及 /api/model-providers 或 /api/models 但未钉 "
+                f"{rel}：触及敏感面（/api/model-providers、/api/models 或 "
+                "resolve_selection / ProviderStore.for_settings 形态）但未钉 "
                 "provider_store_path（宿主 HOME 的自定义 provider 会泄进断言）；"
                 "比照 tests/web/test_web_models.py 夹具补 "
                 "provider_store_path=str(tmp_path / 'model-providers.json')，"
