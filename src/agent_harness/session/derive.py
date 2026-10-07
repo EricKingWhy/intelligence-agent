@@ -156,9 +156,12 @@ def live_supersede_markers(events: list[SessionEvent]) -> list[tuple[int, int]]:
     active。
 
     投影（`derive_protected_facts`）与事件口径来源校验（`is_direct_user_input_event`）
-    共用这一份，判据不再两写（Call 3 P3-1）。与 `superseded_event_seqs` 刻意分开：
-    那个是**纯解析**的 seq 集合，喂给 `derive_messages_with_source_ranges` 算投影
-    shadow 区间，其口径不受本条规则影响。
+    共用这一份，判据不再两写（Call 3 P3-1）。**作用面只有这两处**：与
+    `superseded_event_seqs` 刻意分开，那个是**纯解析**的 seq 集合，喂给
+    `derive_messages_with_source_ranges` 算投影 shadow 区间——#614① 的替换槽规则
+    **不作用于消息投影**（见 Call 5 P3：同一条作废标记在事实表里目标保持 active，
+    在消息投影里仍按解析口径被 shadow、模型看不到目标原文）。修那条要动可见面、
+    属语义变更，需先裁决；此处只如实标注两者的口径差。
     """
     event_by_seq = {event.seq: event for event in events}
     source_seqs = [event.seq for event in user_source_events(events)]
@@ -1629,8 +1632,16 @@ def is_direct_user_input_event(
       `user_source_events`，同一份判据不再两写）；
     - `steer/requested` / `message/queued` 是未投递请求，本函数只认 `USER_MESSAGE`；
     - 带 `input_request_id` 的是澄清答复，不是新的约束来源；
-    - 被取代的用户消息不再是来源；判据与投影同源（`live_supersede_markers`，含
-      #614① 的替换槽规则——替换排队项被取消时 supersede 未实际发生，目标仍有效）。
+    - 被取代的用户消息不再是来源；本函数与 `derive_protected_facts` 共用
+      `live_supersede_markers`（含 #614① 的替换槽规则——替换排队项被取消时 supersede
+      未实际发生，目标仍有效）。
+
+    ⚠ **#614① 只覆盖「保护事实投影 + 本闸门」这两处口径**，**不含**消息投影
+    （`derive_messages_with_source_ranges` 的 `superseded_ranges`，仍是纯解析的
+    `superseded_event_seqs`）。后果：同一条作废标记下，事实表判目标 active、本闸门判
+    True，可该目标原文在消息投影里仍被 shadow——模型看不到它，于是
+    `latest_direct_user_input_event`（只从消息投影取源）也选不中它。这是**既有行为**，
+    不是本票回归；修它要改可见面、属语义变更，须先裁决（Call 5 P3，本票只做披露）。
 
     取消失效的排队项不在本函数的作用面内：取消标记只落在 `message/queued` 上，而
     本函数先要求 `USER_MESSAGE`，两者无交集（Call 3 P3-2 证过那条分支不可达）。
