@@ -37,6 +37,19 @@
 - oh-my-pi 的 `blob:sha256:` 外置方案是本设计的直接先例（`docs/research/...-research.md` §7）。
 - 本仓 `session/derive.py`、`context/builder.py`、`model/` adapter 为 REUSE 扩展。
 
+## 承接 MM-01 的必做项（补回「事件引用」授权闸门）
+
+MM-01（#822）的受控读回端点（`GET /api/sessions/{id}/attachments/{aid}/content`）在**本票范围内**
+把授权单位前移成**会话命名空间归属**（"上传即归属本会话"）——因为 MM-01 没有任何"事件引用附件"
+的机制，字面执行 PRD D5 的"未被本 Session 事件引用 → 404"会与"上传即读回字节相等"这条 AC
+结构上互斥（见 `web/attachments.py` 模块 docstring 的「授权口径」段）。
+
+**本票必须补回「事件引用」授权闸门**：一旦 `user/message` 带上附件引用数组（见上面 AC 第 1 条），
+受控读回（或投影 / 装配入口）必须**额外**校验该 `attachment_id` 被本 Session 的 `user/message`
+事件真实引用；未被引用的 id 返回 404（DSH `ATTACHMENT_NOT_REFERENCED` 语义，即 PRD D5 原文）。
+这是 MM-01 遗留、由本票闭合的契约缺口：MM-01 的测试 `test_never_uploaded_id_is_404` 只覆盖
+"从未上传"，本票必须补"已上传但未被引用 → 404"的用例。
+
 ## 明确不做
 
 上限聚合、非视觉降级与预算计入（MM-03）；任何客户端 UI；图片生成 / 图片编辑；
