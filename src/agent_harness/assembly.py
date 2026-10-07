@@ -306,6 +306,12 @@ def _build_tooling(
     if include_constraint_tools:
         # 冲突指引**跟着 resolver 的在册状态走**：resolver 缺席的入口（CLI）拿到那段话
         # 只会去调一个不存在的工具（#663 P2）。guidance 由 resolver 自己产出，这里只转接。
+        #
+        # 设计来源: pi 28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9
+        #   packages/agent/src/agent.ts:85 —— 系统消息里的工具声明由**当前那份活的
+        #   tools 列表**派生（`tools.map(toToolDeclaration)`），不是另抄一份静态清单：
+        #   工具面变了、说明不同步变，就是让模型对着不存在的工具下指令。这里同理——
+        #   指引里那段"去调 request_constraint_resolution"跟着 registry 的在册状态走。
         registry.register(RegisterConstraintTool(
             resolution_guidance=(
                 RequestConstraintResolutionTool().prompt_guidance
