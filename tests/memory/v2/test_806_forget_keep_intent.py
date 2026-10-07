@@ -83,3 +83,17 @@ def test_postposition_keep_governs_target():
     assert f("忘记新密码，把旧的留着", "新密码")
     assert f("忘记新密码，新钥匙留着", "新密码")
     assert f("忘记新密码，留着新钥匙", "新密码")
+
+
+def test_postposition_keep_attributive_form_does_not_govern():
+    """审查清零 P3：定语形态的后置 keep 不管辖 target → 放行删除。
+
+    「留着的东西」「留下的内容」里 keep 词后紧跟「的」是定语标志（keep 修饰
+    其后的名词，不作用于 target「新密码」），与已披露的「把旧的留着」同类
+    over-block；裸后置（后随字符非「的」）仍构成管辖，P3-1 原 pin 不回归。
+    """
+    assert f("忘记新密码留着的东西", "新密码")
+    assert q("忘记新密码留着的东西", "新密码")
+    assert f("忘记新密码留下的内容", "新密码")
+    assert not f("忘记旧密码，新密码留着", "新密码")
+    assert not q("忘记旧密码，新密码留着", "新密码")

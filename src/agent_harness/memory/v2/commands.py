@@ -126,6 +126,10 @@ _COMMAND_BOUNDARY = re.compile(
 _KEEP_INTENT = re.compile(
     r"保留|留住|留在|留着|留下|\bkeep\b|\bpreserve\b|\bretain\b", re.IGNORECASE,
 )
+# 紧邻分支专用（P4-2）：只收中文 keep 词。\b 锚定的英文词在紧邻 `match` 位置
+# （target 末字与 keep 首字同为 word char，\b 不成立）恒不命中，是死分支；
+# 英文后置形态本就不拦（取舍四），去掉死分支行为零变化。
+_KEEP_INTENT_ADJACENT = re.compile(r"保留|留住|留在|留着|留下", re.IGNORECASE)
 
 
 def _reverse_keep_intent(clause: str, target: str) -> bool:
@@ -144,11 +148,16 @@ def _reverse_keep_intent(clause: str, target: str) -> bool:
     含把字「把新密码留着」——其 keep 动词同样紧邻 target，无需单独把字规则）
     视为 keep 管辖 → 拒绝。仅取紧邻形态：间隔一字符即不构成管辖（「新密码，
     留着」「新钥匙留着」「把旧的留着」——把字句里「留着」管辖「旧的」而非
-    target，误拦即 over-block bug）。
+    target，误拦即 over-block bug）。定语形态同不管辖（审查清零 P3）：keep
+    之后紧跟「的」是定语标志（「留着的东西/的内容」——keep 修饰其后的名词，
+    不作用于 target），不视为管辖，与「把旧的留着」同类 over-block 边界；
+    裸后置（后随字符非「的」）仍构成管辖。
     取舍四：英文后置形态（"the new key stays/keep it"）不处理——英文 keep
     意图由前置最近意图规则覆盖（"forget the old key, keep the new key"）；
-    并列/悬垂后置（「把新密码和旧密码都留着」）不构成紧邻 → 不拦，方向
-    under-block。紧邻判据在 over-block（误拦正常删除）与 under-block（漏拦
+    紧邻分支因此只收中文 keep 词（\\b 锚定的英文词在该分支恒不命中，见
+    _KEEP_INTENT_ADJACENT 注释，删除死分支行为零变化）。并列/悬垂后置
+    （「把新密码和旧密码都留着」）不构成紧邻 → 不拦，方向 under-block。
+    紧邻判据在 over-block（误拦正常删除）与 under-block（漏拦
     并列形态）之间取窄，与「误拦也是 bug」的边界设计一致。
     """
     folded_clause = clause.casefold()
@@ -163,7 +172,8 @@ def _reverse_keep_intent(clause: str, target: str) -> bool:
             forget_ends = [m.end() for m in _FORGET_INTENT.finditer(before)]
             if not forget_ends or keep_ends[-1] > forget_ends[-1]:
                 return True
-        if _KEEP_INTENT.match(folded_clause, idx + len(needle)):
+        adjacent = _KEEP_INTENT_ADJACENT.match(folded_clause, idx + len(needle))
+        if adjacent is not None and folded_clause[adjacent.end():adjacent.end() + 1] != "的":
             return True
         start = idx + 1
     return False
@@ -260,6 +270,12 @@ def explicit_remember_matches(user_text: str, content: str) -> bool:
 
 
 def explicit_forget_matches(user_text: str, memory_id: str) -> bool:
+    """Require the target to be inside the clause governed by the user's forget command.
+
+    #806 审查披露（P4-3）：memory_id 先 strip 再匹配——tool 参数两侧空白视为
+    调用噪声，`f("忘记旧密码", " 旧密码 ")` 因此由 False 变 True（更放行），
+    属有意的语义变化。
+    """
     clause, _, _ = _command_clause(user_text, _FORGET_INTENT)
     stripped = memory_id.strip()
     return bool(
