@@ -1,5 +1,7 @@
 # SDD Ticket Tracker
 
+> **2026-10-08 · Matt skills 1.3.1 发布**：用户已批准 push / PR / merge。发布分支 `codex/matt-skills-1.3.1-release` 从 `origin/main 9e1c065b` 隔离重放已修正的兼容文档，四宿主本地启用已完成。验收按用户决定仅做词汇/入口/路由/元数据/diff 核验，不做 A/B 或项目全量测试；合并须 GitHub 必需 `gate0` 绿。明细见 `docs/phase_status/2026-10.md` 的同日 Matt 发布条目；实际远端状态以 PR 为准。
+
 > **持久化活文档** — 跨 context window 追踪 SDD 循环进度。
 > 每次进入新 context window 时，先读本文件恢复状态。
 

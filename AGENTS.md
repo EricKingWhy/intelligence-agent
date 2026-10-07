@@ -106,7 +106,7 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 第五项还须按以下时机检查关联指针：
 
 - 操作 GitHub Issue 前必须读 `docs/agents/issue-tracker.md`；选用或变更标签前必须读 `docs/agents/triage-labels.md`。
-- 依赖领域概念或架构决策进行方案、实现或审查前，必须读 `CONTEXT.md` 与相关 `docs/adr/`，不要求整读无关 ADR。
+- 依赖领域概念或架构决策进行方案、实现或审查前，必须读 `GLOSSARY.md` 与相关 `docs/adr/`，不要求整读无关 ADR。
 - 开始代码实现或缺陷修复前，必须读 `docs/agents/implementation-discipline.md`，核对 §9.5–§9.6 的执行细则与不可简化红线。
 
 将表中示例替换为本次实际读过的文件/章节；没有实际读取、返回错误/截断未补完或未达到该细则读取判据，均不得标 READY；未读项写 `BLOCKED（尚未读取）`，已发现必读文件缺失则同时明确依赖动作阻塞。文件“存在”、本次未依赖、旧摘要提及，都不是实读证据；禁止 `READY（弱）` 或用 N/A 代替具体 Task 的前四项。已读项列实际路径/章节，不编造工具调用或行数。触发细则只读本任务必须读的范围；检查表不扩大完整阅读要求，也不能豁免上述相关阅读。若本任务不触发额外细则，在第五项写明依据，不能据此免读前四项。
@@ -172,7 +172,7 @@ SPEC_ROOT = goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/
 Ticket 是 tracer bullet；一次只施工一个 Ticket，验证完成后再领下一张。批次组织按当前 SDD 协议，逐票验收不减少。
 所有 Agent 不重新创建第二套 Engineering Specification。
 GitHub Issues 使用 `EricKingWhy/intelligence-agent`；操作约定读 `docs/agents/issue-tracker.md`，标签读 `docs/agents/triage-labels.md`。
-领域知识读 `CONTEXT.md` 与相关 `docs/adr/`；重要架构决定变化 SHOULD 写 ADR，不只留在对话里。
+领域知识读 `GLOSSARY.md` 与相关 `docs/adr/`；重要架构决定变化 SHOULD 写 ADR，不只留在对话里。
 
 非主开发的 Agent：
 
@@ -350,6 +350,8 @@ Scope 外问题只报告，不顺手修。
 # 10. Skill 使用
 
 **不维护静态工具清单**：可调用的 Skill / 命令以当前 Agent 环境**实际枚举**为准；协议要求按路径读取的仓库 Skill 正文按 §16.2 执行，不受工具注册与否影响。
+
+使用 Matt skills（含 setup、ask-matt、implement-spec、pr、retro、handoff）前，必须读取 `docs/SDD_WORKFLOW_PROTOCOL.md` §9 的兼容约束；领域词汇表正文只维护在 `GLOSSARY.md`，旧 `CONTEXT.md` 是必读跳转入口。
 
 通用意图 → skill 对照（名称以实际枚举为准）：
 
