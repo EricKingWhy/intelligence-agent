@@ -12,6 +12,8 @@
 
 ---
 
+> **当前状态（2026-10-07，#832）**：本地实现已提交 `0db3881a`（`codex/issue-832-live-gate-docker-cli`）：Docker CLI 缺失时返回明确不可用状态，并以 CLI JSON 行为测试覆盖；目标用例红→绿，CLI 模块 8 passed，Ruff / `git diff --check` 通过。GitHub issue 保持 OPEN / `in-progress`；独立 review、覆盖台账与发布/集成尚未完成（未 push / PR）。
+
 ## 当前规划：Memory V2（截至 2026-09-27）
 
 | ID | GitHub | 状态 | 目标 | blocked_by |
