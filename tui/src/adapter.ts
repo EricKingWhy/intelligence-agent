@@ -71,6 +71,17 @@ export interface ResumeInfo {
   budgetVersion: number | null;
 }
 
+/** 进度清单行（#382 W-28；PRD 长任务第 7.1 节五字段，`task/plan_updated.data.items`）。
+ *  与 W-27 `web/src/types.ts` 的 PlanItem 同形；TUI 与 Web 消费同一份服务端投影。 */
+export interface PlanItem {
+  id: string;
+  content: string;
+  activeForm: string;
+  /** 服务端枚举 `pending|in_progress|completed`；投影不做状态机改写（脏数据原样进）。 */
+  status: string;
+  source: string;
+}
+
 export interface ConversationState {
   turns: Turn[];
   runStatus: RunStatus;
@@ -81,6 +92,9 @@ export interface ConversationState {
   pendingApprovals: PendingApproval[];
   /** artifact/created 找不到宿主工具卡时的入口占位（真实 id，不伪造归属）。 */
   orphanArtifacts: ArtifactRef[];
+  /** 进度清单（#382 W-28）：`task/plan_updated` 整表覆盖投影（W-26 契约）。
+   *  null = 未出现过清单（不等于清空）；[] = 服务端明确清空。 */
+  plan: PlanItem[] | null;
 }
 
 export function createState(): ConversationState {
@@ -93,6 +107,7 @@ export function createState(): ConversationState {
     usageTotal: null,
     pendingApprovals: [],
     orphanArtifacts: [],
+    plan: null,
   };
 }
 
@@ -221,9 +236,42 @@ export function applyEvent(state: ConversationState, event: EventEnvelope): void
     case EVENT.RUN_INTERRUPTED:
       state.runStatus = "interrupted";
       break;
+    case EVENT.TASK_PLAN_UPDATED:
+      projectPlanUpdated(state, data);
+      break;
     default:
       break; // 词汇表里其余事件首版不投影（Event 不是所有都要上屏）
   }
+}
+
+/** #382（W-28）：`task/plan_updated` 投影，整表覆盖 last-wins + 行级容错。
+ *
+ *  契约：PRD 长任务第 7.1-7.3 节（五字段、整表覆盖、软上限 50）；后端 `session/plan.py`
+ *  handler 已硬校验（单 in_progress / 状态机 / id 唯一），投影只防「手写 / 污染 JSONL
+ *  的旧数据」：一行坏数据只损失该行，与 W-27 `web/src/lib/projection.ts:1245-1265`
+ *  同一容错哲学。状态机级违规（如双 in_progress）不改写、原样保留，渲染端容错。
+ *
+ *  data.items 非数组 = 坏帧整个忽略（清单保持原值）；[] 是合法清空。 */
+function projectPlanUpdated(state: ConversationState, data: Record<string, unknown>): void {
+  const rawItems = data.items;
+  if (!Array.isArray(rawItems)) return;
+  const items: PlanItem[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawItems) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const row = raw as Record<string, unknown>;
+    if (typeof row.id !== "string" || row.id === "" || seen.has(row.id)) continue;
+    seen.add(row.id);
+    const content = typeof row.content === "string" ? row.content : "";
+    items.push({
+      id: row.id,
+      content,
+      activeForm: typeof row.activeForm === "string" && row.activeForm !== "" ? row.activeForm : content,
+      status: typeof row.status === "string" ? row.status : "",
+      source: typeof row.source === "string" ? row.source : "",
+    });
+  }
+  state.plan = items;
 }
 
 function assistantTurn(state: ConversationState, seq: number | null): Turn {
