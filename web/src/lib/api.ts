@@ -381,6 +381,38 @@ export async function getSandboxBackends(): Promise<SandboxBackendEntry[]> {
     }));
 }
 
+/** #362 / W-18：GET /api/mcp/servers —— 已装配 MCP server + 连接状态。 */
+export interface McpServerEntry {
+  name: string;
+  connected: boolean;
+}
+
+export async function getMcpServers(): Promise<{ servers: McpServerEntry[]; errors: string[] }> {
+  const res = await apiFetch('/api/mcp/servers');
+  if (!res.ok) return { servers: [], errors: [] };
+  const body: unknown = await res.json();
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  const servers = (Array.isArray(r.servers) ? r.servers : []) as Record<string, unknown>[];
+  const errors = (Array.isArray(r.errors) ? r.errors : []) as unknown[];
+  return {
+    servers: servers
+      .filter((s) => typeof s.name === 'string')
+      .map((s) => ({ name: s.name as string, connected: s.connected === true })),
+    errors: errors.filter((e): e is string => typeof e === 'string'),
+  };
+}
+
+/** #362 / W-18：POST /api/mcp/servers/{name}/disconnect —— 断开指定 server（幂等）。 */
+export async function disconnectMcpServer(name: string): Promise<boolean> {
+  const res = await apiFetch(`/api/mcp/servers/${encodeURIComponent(name)}/disconnect`, {
+    method: 'POST',
+  });
+  if (!res.ok) return false;
+  const body: unknown = await res.json().catch(() => ({}));
+  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  return r.disconnected === true;
+}
+
 /** #367 / W-23 选项 A：POST /api/worktrees —— 为 git 仓库创建隔离 worktree。
  *  响应 `{worktree_path}`。目录冲突默认走这个（六家共识），"排队等"作次选项。 */
 export async function createWorktree(repoPath: string): Promise<string> {
@@ -576,10 +608,22 @@ export async function startSession(payload: StartSessionPayload): Promise<Respon
 
 /** #367 P3：从创建响应读 worktree 路径。后端 launch=true 走 SSE（无 JSON 体），
  *  worktree 信息走 `X-Worktree-Path` 响应头（`X-Permission-Mode` 同型先例）；
- *  launch=false 时走 JSON 体 `worktree_path`（由调用方直接读）。无头/空头 → null。 */
+ *  launch=false 时走 JSON 体 `worktree_path`（由调用方直接读）。无头/空头 → null。
+ *  #765：路径含非 latin-1 字符（中文用户名/中文目录）时后端改发
+ *  `X-Worktree-Path-Encoded`（RFC 5987 ext-value `UTF-8''<percent-encoded>`，
+ *  HTTP 头字段值只能 latin-1），此处按该约定兜底解码；畸形值按缺席处理——
+ *  这是展示性提示，不让它炸掉创建流程。 */
 export function worktreePathFromResponse(res: Response): string | null {
   const v = res.headers.get('X-Worktree-Path');
-  return v && v.length > 0 ? v : null;
+  if (v && v.length > 0) return v;
+  const encoded = res.headers.get('X-Worktree-Path-Encoded');
+  if (!encoded || !encoded.startsWith("UTF-8''")) return null;
+  try {
+    const decoded = decodeURIComponent(encoded.slice("UTF-8''".length));
+    return decoded.length > 0 ? decoded : null;
+  } catch {
+    return null;
+  }
 }
 
 /** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
@@ -2338,6 +2382,9 @@ export interface TaskState {
   task_text: string | null;
   read_write_intent: string | null;
   cwd: string | null;
+  /** 会话创建时显式声明的权限档（后端 `TaskState.to_payload` 的 permission_mode 投影）；
+   *  未声明（历史会话 / 用户没选）为 null，不替用户猜档位。 */
+  authorization: string | null;
   criteria: TaskCriterionPayload[];
   verification: Record<string, TaskVerificationEntryPayload>;
   acceptance: TaskAcceptancePayload | null;

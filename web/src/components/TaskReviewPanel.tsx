@@ -217,8 +217,8 @@ export function TaskReviewPanel({
                 <dd>{task.read_write_intent ?? '—'}</dd>
                 <dt>工作目录</dt>
                 <dd>{task.cwd ?? '—'}</dd>
-                <dt>授权信息</dt>
-                <dd>服务端投影暂未提供</dd>
+                <dt>授权档位</dt>
+                <dd>{task.authorization ?? '未声明'}</dd>
               </dl>
               <h3 className="task-review-h">验收项（{task.criteria.length}）</h3>
               {task.criteria.length === 0 ? (

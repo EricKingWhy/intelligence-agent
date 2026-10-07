@@ -622,6 +622,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-tertiary);
   background: var(--surface-2, transparent);
 }
+/* #752：「已损坏」徽标——用警告色区别于"已归档"的中性灰，传达"需要处理"。 */
+.session-item-corrupted {
+  display: inline-block;
+  margin-top: 3px;
+  margin-left: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--color-warning, #d97706);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-warning, #d97706);
+  background: transparent;
+}
 /* 「显示已归档」开关（#171）的按下态：icon-only 按钮没有文字，状态只能靠颜色与
  * `aria-pressed`（无障碍树）双重表达。 */
 .rail-archived-toggle.on {

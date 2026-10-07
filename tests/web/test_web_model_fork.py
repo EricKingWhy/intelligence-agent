@@ -27,6 +27,8 @@ _CATALOG_JSON = (
 
 @pytest.fixture
 def client(tmp_path):
+    # provider_store_path 钉进 tmp_path：自定义 provider 存储默认读 HOME 用户态，
+    # 不密封会把宿主真配置（如自定义 provider 条目）泄进 catalog 断言。
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
@@ -34,6 +36,7 @@ def client(tmp_path):
         model_provider="deepseek",
         model_name="deepseek-chat",
         agent_models=_CATALOG_JSON,
+        provider_store_path=str(tmp_path / "model-providers.json"),
     )
     return TestClient(create_app(settings, enable_cors=False))
 
@@ -162,12 +165,12 @@ class TestForkEndpoint:
 
 
 class TestModelsEndpointShadowing:
-    def test_entry_shadowed_by_default_is_not_listed(self):
+    def test_entry_shadowed_by_default_is_not_listed(self, tmp_path):
         """catalog 条目与默认条目同 provider + 同名 → POST /model 会解析成默认链，
         列表里不该出现这个选不中的死选项。"""
         settings = Settings(
             _env_file=None,
-            workspace_dir="/tmp/x",
+            workspace_dir=str(tmp_path),
             model_api_key="sk-test",
             model_provider="deepseek",
             model_name="deepseek-chat",
@@ -177,6 +180,9 @@ class TestModelsEndpointShadowing:
                 ' {"name": "gpt-4o", "provider": "deepseek",'
                 ' "model_name": "gpt-4o-mini"}]'
             ),
+            # provider_store_path 钉进 tmp_path：自定义 provider 存储默认读 HOME
+            # 用户态，不密封会把宿主真配置泄进 catalog 断言。
+            provider_store_path=str(tmp_path / "model-providers.json"),
         )
         client = TestClient(create_app(settings, enable_cors=False))
 

@@ -18,6 +18,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 import anyio
 import jwt
@@ -897,6 +898,10 @@ class SessionSummary(BaseModel):
     # 时那些行必须能被认出来）。与 `workspace` 同样**刻意不给默认值**：默认 `False`
     # 会让漏映射的构造点把"已归档"谎报成未归档，徽标静默消失（假事实，不变量 #21 同族）。
     archived: bool
+    # #752：事件日志是否损坏（零可解析事件但有损坏行）。损坏是可观测状态，
+    # 不是"不存在"——前端据此渲染损坏徽标并引导至恢复入口。与 `archived`
+    # 同样刻意不给默认值，漏映射响亮失败。
+    corrupted: bool
 
 
 class SessionArchived(BaseModel):
@@ -1544,6 +1549,28 @@ def _local_fuse_headers(fuse: Any | None) -> dict[str, str]:
     }
 
 
+def _worktree_headers(worktree_path: str) -> dict[str, str]:
+    """worktree 回执头（`#367` / `X-Permission-Mode` 同型先例）。
+
+    为什么不能直接放裸值：HTTP 头字段值只能 latin-1（starlette `init_headers`
+    硬编码 `v.encode("latin-1")`），而 worktree 路径继承仓库位置
+    （`<toplevel-parent>/worktrees/<repo>-<hex>`）——仓库在中文用户名/中文
+    目录下（Windows 常态）会让裸值在响应构造期 `UnicodeEncodeError`，整个
+    创建请求 500（`#765` locked_dir 红）。latin-1 可编码时保持
+    `X-Worktree-Path` 裸值逐字节不变（既有消费者零影响）；否则改发
+    `X-Worktree-Path-Encoded`（RFC 5987 ext-value：`UTF-8''<percent-encoded>`，
+    `safe=''` 全量转义——裸 Windows 路径里合法的 `%` 会让"同一头名混装裸值
+    与编码值"产生歧义），前端 `worktreePathFromResponse` 按该约定兜底解码。
+    """
+    try:
+        worktree_path.encode("latin-1")
+    except UnicodeEncodeError:
+        return {
+            "X-Worktree-Path-Encoded": f"UTF-8''{quote(worktree_path, safe='')}"
+        }
+    return {"X-Worktree-Path": worktree_path}
+
+
 def _run_stream_response(
     state: Any, run: Any, subscriber: Any, session_id: str,
     *, headers: dict[str, str] | None = None,
@@ -1859,13 +1886,55 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             ]
         }
 
+    # #362 / W-18：MCP server 状态与断开（Chrome DevTools MCP 可选 capability）。
+    # 来源闸与下方项目路由共用 `require_trusted_origin`（ADR-0025 D1），此处先导入。
+    from agent_harness.web.projects import require_trusted_origin
+
+    @app.get("/api/mcp/servers")
+    async def list_mcp_servers() -> dict:
+        """已装配的 MCP server + 连接状态（未装配时空列表，不 503——
+        "没配 MCP" 是缺省态，不是故障）。"""
+        from agent_harness.mcp.capability import MCPCapability
+
+        _, wiring = await state.get_wiring()
+        capability = next(
+            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
+        )
+        if capability is None:
+            return {"servers": []}
+        return {
+            "servers": [
+                {"name": name, "connected": capability.is_connected(name)}
+                for name in capability.server_names()
+            ],
+            "errors": list(capability.errors),
+        }
+
+    @app.post("/api/mcp/servers/{server_name}/disconnect")
+    async def disconnect_mcp_server(
+        server_name: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict:
+        """断开指定 MCP server（#362 / W-18：Chrome MCP 手动断开）。
+
+        关闭其连接；该 server 的工具此后调用按既有语义失败（不静默）。
+        语义：200 → `{name, disconnected}`（幂等，无此 server 也 200）；
+        来源闸（ADR-0025 D1）：连接管理是宿主侧动作，只接受本机来源。
+        """
+        from agent_harness.mcp.capability import MCPCapability
+
+        _, wiring = await state.get_wiring()
+        capability = next(
+            (c for c in wiring.lifecycle if isinstance(c, MCPCapability)), None
+        )
+        if capability is None:
+            return {"name": server_name, "disconnected": False}
+        disconnected = await capability.disconnect_server(server_name)
+        return {"name": server_name, "disconnected": disconnected}
+
     # WS-4 / #154 项目 CRUD 路由（同为独立 router：本模块只留这一行接入面）
-    # `require_trusted_origin` 一并取用：#172 的会话硬删是宿主侧不可逆操作，
-    # 与项目 / 记忆端点共用同一条来源闸（ADR-0025 D1），不复制安全规则。
-    from agent_harness.web.projects import (
-        register_project_routes,
-        require_trusted_origin,
-    )
+    # `require_trusted_origin` 已在上方 #362 处导入（ADR-0025 D1 共用来源闸）。
+    from agent_harness.web.projects import register_project_routes
 
     register_project_routes(app)
 
@@ -2051,6 +2120,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     else None
                 ),
                 archived=s.archived,
+                corrupted=s.corrupted,
             )
             for s in summaries
         ]
@@ -2065,7 +2135,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         service = session_service(app.state.agent)
         try:
             events = await service.get_events(session_id)
-        except (InvalidSessionId, SessionNotFound) as e:
+        except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as e:
             raise http_error(e) from e
         return [e.to_dict() for e in events]
 
@@ -2273,9 +2343,10 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         fuse_headers = _local_fuse_headers(result.local_fuse) if launch else {}
         headers = {"X-Permission-Mode": permission_mode.value, **fuse_headers}
         # #367 / W-23 选项 A：launch=true 走 SSE（无 JSON 体）→ worktree 信息走
-        # 响应头（`X-Permission-Mode` 同型先例）。
+        # 响应头（`X-Permission-Mode` 同型先例）；#765：非 latin-1 路径改发编码
+        # 伴随头（`_worktree_headers`），不在响应构造期 500。
         if worktree_path is not None:
-            headers["X-Worktree-Path"] = worktree_path
+            headers.update(_worktree_headers(worktree_path))
 
         # #204：只建路径——返回会话 JSON（非 SSE）。形状刻意小：只回传前端
         # 初始化 composer 状态所需的字段（id + 权限档位），不伪造事件数/标题

@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit",
-    "test": "node --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts"
+    "test": "node --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts test/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

@@ -769,6 +769,17 @@ function SessionRow({
               所属项目「{s.staleProject.title}」未在列表中
             </div>
           )}
+          {/* #752：「已损坏」徽标。事件日志零可解析事件但有损坏行——损坏是
+              可观测状态，不是"不存在"。点选后可用恢复入口（409 诊断）修复，
+              而不是让会话静默消失。 */}
+          {s.corrupted && (
+            <div
+              className="session-item-corrupted"
+              title="事件日志损坏（零可解析事件）：点选后可通过恢复入口查看诊断并修复"
+            >
+              已损坏
+            </div>
+          )}
         </div>
       </button>
       <DropdownMenu.Root>

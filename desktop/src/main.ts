@@ -12,8 +12,10 @@
  */
 
 import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { claimDesktopSingleInstance } from './single-instance.ts'
+import { resolvePythonPath, resolveUserDataDir } from './installer/paths.ts'
 import { DesktopBackendController } from './backend-controller.ts'
 import { DesktopTray } from './tray.ts'
 import { DesktopQuitConfirmation } from './quit-confirmation.ts'
@@ -42,6 +44,12 @@ function focusPrimaryWindow(): void {
 }
 
 async function main(): Promise<void> {
+  // #361 [W-16]: user data lives outside the install dir
+  // (%APPDATA%\intelligence-agent) and survives uninstall/updates.
+  if (process.platform === 'win32' && process.env.APPDATA !== undefined && process.env.APPDATA !== '') {
+    app.setPath('userData', resolveUserDataDir(process.env.APPDATA))
+  }
+
   // 1. Single instance: a second launch only wakes the existing window.
   if (!claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })) return
 
@@ -51,10 +59,17 @@ async function main(): Promise<void> {
 
   // 2. Backend: one Python service child via the controller; readiness is
   // owned by DesktopServiceHost (two-level health check inside start()).
+  // #361 [W-16]: prefer the installer-bundled runtime when present, so the
+  // installed app never needs a system Python.
   const backend = new DesktopBackendController(
     (onFailure) => new DesktopServiceHost({
       root: process.cwd(),
-      pythonPath: process.execPath.replace(/electron(.exe)?$/i, 'python'),
+      pythonPath: resolvePythonPath({
+        platform: process.platform,
+        execPath: process.execPath,
+        resourcesPath: process.resourcesPath,
+        existsSync,
+      }),
       onFailure,
     }),
     () => { /* state published to a loading window; minimal */ },
