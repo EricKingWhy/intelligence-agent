@@ -220,11 +220,19 @@ def model_supports_vision(settings: "Settings", config: "ModelConfig") -> bool:
     preset 的声明 > False（不猜测）**。未声明一律 False——契约是"未知能力省略、
     不猜"（见 `_CAPABILITY_FIELDS` 注释），而"假装支持"会把图发给一个看不懂的模型
     （DeepSeek 约束下还可能 400）。解析单点在此，供装配层与发送端点共用。
+
+    `config` 没有 `provider` / `model_name`（测试替身或精简配置对象）时同样返回
+    False：调用点（`build_runtime`）拿到的可能是被 monkeypatch 的替身 config，能力
+    面缺席就是"未知"，按契约不猜。
     """
-    entry = find_catalog_entry(settings, config.provider, config.model_name)
+    provider = getattr(config, "provider", None)
+    model_name = getattr(config, "model_name", None)
+    if not isinstance(provider, str) or not isinstance(model_name, str):
+        return False
+    entry = find_catalog_entry(settings, provider, model_name)
     if entry is not None and entry.supports_vision is not None:
         return entry.supports_vision
-    preset = PROVIDER_PRESETS.get(config.provider, {})
+    preset = PROVIDER_PRESETS.get(provider, {})
     declared = preset.get("supports_vision")
     return declared is True
 
