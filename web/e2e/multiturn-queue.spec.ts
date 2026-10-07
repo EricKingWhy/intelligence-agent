@@ -899,10 +899,15 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
     // 触发一条 Enter 之前的幻影重连订阅（见用例尾部说明）——帧若即时到达，会在
     // 幻影流（旧代际）里被应用并推进本地游标，ack 分支的游标就成了时序彩票。
     // 挂到 delayMs 之后，幻影的帧落在 Enter 之后、被代际守卫整帧丢弃，游标才
-    // 确定；真正上屏的那一截只能来自 ack 分支接的流——判别力不变。
+    // 确定；正常时序下真正上屏的那一截只能来自 ack 分支接的流——判别力不变。
+    // delayMs 取 LATE_MS+4000（≈5.6s）是给 fill+Enter 留富余量：poll 只等到幻影
+    // **订阅落定**（≈T0+500ms），其帧要到 ≈T0+500+delayMs 才来——若 Enter 慢于
+    // 这个差值（此前 2600ms 时余量仅 ~2.1s），幻影帧会在 Enter 前被应用、游标
+    // 推到 4，ack 分支就会带 after_seq:4（负载下假红）。上屏断言的 8000ms 仍
+    // 覆盖 ack 流的 delayMs 等待（5600 < 8000）。
     onWs: () => ({
       events: LIVE_FRAMES, frames: [AFTER_QUEUE], hasActiveRun: true, ending: 'keep',
-      delayMs: LATE_MS + 1000, pingIntervalMs: 2000,
+      delayMs: LATE_MS + 4000, pingIntervalMs: 2000,
     }),
   });
 
