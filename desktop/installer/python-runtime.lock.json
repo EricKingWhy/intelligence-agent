@@ -510,8 +510,16 @@
     "executable": "python/python.exe",
     "note": "extracted under <install>/resources/python/; the desktop shell prefers it when present (src/installer/paths.ts resolvePythonPath)"
   },
+  "product": {
+    "name": "intelligence-agent",
+    "version": "1.0.0",
+    "module": "agent_harness",
+    "wheel": "intelligence_agent-1.0.0-py3-none-any.whl",
+    "note": "Built from this checkout by scripts/prepare_python_runtime.py (uv build --wheel) and installed offline like any other wheel. No sha256 on purpose: the product wheel is rebuilt per build, unlike the immutable third-party wheels above."
+  },
   "notes": [
     "Offline install: python.exe -m pip install --no-index --find-links <wheelhouse> <name==version>...",
+    "The staged runtime must contain the product too (product.* below); the wheels[] closure is dependencies only.",
     "Regenerate the wheels list with: uv pip compile --python-platform windows --python-version 3.12 <deps>, then refresh filename/url/sha256 from PyPI."
   ]
 }

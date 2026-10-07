@@ -56,6 +56,18 @@ src/installer/
 
 ## Preparing the Python runtime (build machine)
 
+One command (idempotent; needs `uv`, the build backend pinned in `pyproject.toml`):
+
+```powershell
+python scripts/prepare_python_runtime.py
+# download cache: <repo>/.scratch/python-runtime-cache by default (gitignored); --cache DIR to share it
+```
+
+It runs the steps below — download + verify the interpreter and the wheel
+closure, extract under `installer/staging/`, build the product wheel from this
+checkout and install everything offline — and finishes by importing the
+product's CLI in the staged runtime. The manual steps, for reference:
+
 ```powershell
 # 1. Read the pins
 $lock = Get-Content installer/python-runtime.lock.json | ConvertFrom-Json
@@ -77,7 +89,18 @@ foreach ($w in $lock.wheels) {
 # 4. Install offline into the bundled runtime (no index, no network at install time)
 installer/staging/python/python.exe -m pip install --no-index --find-links wheelhouse `
   ( ($lock.wheels | ForEach-Object { "$($_.name)==$($_.version)" }) -join ' ' )
+
+# 5. The closure of step 4 is dependencies only. The product itself must be in the
+#    runtime too, or the bundled service has nothing to run (W-21 defect D2).
+uv build --wheel --out-dir wheelhouse
+installer/staging/python/python.exe -m pip install --no-index --find-links wheelhouse `
+  "$($lock.product.name)==$($lock.product.version)"
 ```
+
+`scripts/build-windows-installer.mjs` re-asserts step 5 in `afterPack` (product
+importable, version equal to `product.version`) and fails the build otherwise.
+`product.wheel` must match `pyproject.toml` after a version bump — the prep
+script refuses to install a wheel whose name disagrees with the pin.
 
 Regenerating the closure (maintainer): on any machine with `uv`,
 `uv pip compile --python-platform windows --python-version 3.12 <deps>`,

@@ -45,5 +45,10 @@ node_modules/
 # 临时剖析/调试产物（diagnosing-bugs harness 等），永不入库
 .scratch/
 
+# Windows 安装包构建产物（W-16/W-21）：staging 是几百 MB 的离线运行时，
+# dist-installer 是 electron-builder 输出；两者由 desktop/scripts/ 重新生成，绝不入库。
+desktop/installer/staging/
+desktop/dist-installer/
+
 # Eval 运行报告（本地 JSON 报告是运行产物；数据集真相源在 evaluation/datasets/ 入库）
 evaluation/reports/*.json

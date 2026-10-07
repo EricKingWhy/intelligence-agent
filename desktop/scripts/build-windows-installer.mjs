@@ -24,6 +24,7 @@
  * User data is NOT in the install dir: %APPDATA%\\intelligence-agent.
  */
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -51,6 +52,12 @@ export const GOOD_LOCK = {
       sha256: '71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e',
     },
   ],
+  product: {
+    name: 'intelligence-agent',
+    version: '1.0.0',
+    module: 'agent_harness',
+    wheel: 'intelligence_agent-1.0.0-py3-none-any.whl',
+  },
 }
 
 const SHA256_RE = /^[0-9a-f]{64}$/
@@ -97,6 +104,79 @@ export function validateRuntimeLockfile(lock) {
       fail(`wheel ${wheel.name}: filename ${wheel.filename} does not match version ${wheel.version}`)
     }
   }
+  // W-21 D2: the closure above is dependencies only — the product itself must be
+  // pinned too, or the bundled runtime cannot start the service at all.
+  validateProductPin(lock.product)
+}
+
+/** A bare wheel filename (no path separators) — the name/version checks follow. */
+const WHEEL_FILENAME_RE = /^[^/\\]+\.whl$/
+
+/** Validate the `product` pin (name/version/module/wheel). Throws on violations. */
+export function validateProductPin(product) {
+  if (product === null || typeof product !== 'object') fail('missing "product" pin')
+  for (const field of ['name', 'version', 'module', 'wheel']) {
+    if (typeof product[field] !== 'string' || product[field] === '') {
+      fail(`product is missing ${field}`)
+    }
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(product.module)) {
+    fail(`product.module ${product.module} is not a dotted Python module path`)
+  }
+  // PEP 427 filename must agree with name+version, so a version bump that
+  // forgets this pin fails the build instead of installing the wrong wheel.
+  const norm = (s) => s.replace(/[-_.]+/g, '-').toLowerCase()
+  if (!WHEEL_FILENAME_RE.test(product.wheel)) {
+    fail(`product.wheel ${product.wheel} is not a wheel filename`)
+  }
+  if (norm(product.wheel.split('-')[0]) !== norm(product.name)) {
+    fail(`product.wheel ${product.wheel} does not match product.name ${product.name}`)
+  }
+  if (!product.wheel.includes(`-${product.version}-`)) {
+    fail(`product.wheel ${product.wheel} does not match product.version ${product.version}`)
+  }
+}
+
+/**
+ * Probe run by the bundled interpreter: print the installed distribution
+ * version and import the CLI entry point (pyproject [project.scripts]).
+ */
+export function runtimeProductProbe(product) {
+  return [
+    'import importlib, importlib.metadata as m',
+    `mod = importlib.import_module(${JSON.stringify(product.module)} + '.cli')`,
+    `assert callable(mod.main), ${JSON.stringify(`${product.module}.cli:main is not callable`)}`,
+    `print(m.version(${JSON.stringify(product.name)}))`,
+  ].join('; ')
+}
+
+/**
+ * Assert the bundled runtime contains the product package (not just its
+ * dependencies) at the pinned version. `run` is injectable for unit tests;
+ * on Windows it is node's spawnSync against the staged interpreter.
+ */
+export function assertRuntimeProduct({ pythonExe, product, run = spawnSync }) {
+  if (product === null || typeof product !== 'object') {
+    throw new Error('python-runtime.lock.json: missing "product" pin')
+  }
+  const result = run(pythonExe, ['-c', runtimeProductProbe(product)], { encoding: 'utf8' })
+  if (result.error) throw new Error(`bundled python failed to start (${pythonExe}): ${result.error.message}`)
+  const stderr = String(result.stderr ?? '').trim()
+  if (result.status !== 0) {
+    const detail = stderr.split('\n').filter((line) => line.trim() !== '').pop() ?? ''
+    throw new Error(
+      `bundled runtime lacks the product package ${product.name}==${product.version} ` +
+        `(${pythonExe} exited ${String(result.status)}): ${detail} — ` +
+        'stage the runtime with desktop/scripts/prepare_python_runtime.py (installer/README.md)',
+    )
+  }
+  const version = String(result.stdout ?? '').trim().split('\n').pop().trim()
+  if (version !== product.version) {
+    throw new Error(
+      `bundled ${product.name} is ${version}, python-runtime.lock.json pins ${product.version}`,
+    )
+  }
+  return version
 }
 
 /** SHA-256 hex of a file. */
@@ -108,7 +188,7 @@ export function sha256File(path) {
  * Pure electron-builder configuration for the Windows x64 installer.
  * Kept pure (no electron-builder import) so it is unit-testable on any OS.
  */
-export function createWindowsInstallerConfig({ version, appId, productName, installerDir }) {
+export function createWindowsInstallerConfig({ version, appId, productName, installerDir, runtimeProduct }) {
   const productFilename = productName.replace(/ /g, '-')
   return {
     appId,
@@ -158,6 +238,9 @@ export function createWindowsInstallerConfig({ version, appId, productName, inst
           `bundled python runtime missing: ${pythonExe} — prepare it per installer/README.md`,
         )
       }
+      // W-21 D2: a staged runtime holding only the dependency closure imports
+      // nothing; fail the build instead of shipping an installer that cannot start.
+      assertRuntimeProduct({ pythonExe, product: runtimeProduct })
     },
   }
 }
@@ -176,7 +259,13 @@ async function main() {
 
   const lock = loadLockfile()
   validateRuntimeLockfile(lock)
-  console.log('lockfile OK:', lock.python.implementation, lock.python.version, `(${lock.wheels.length} pinned wheels)`)
+  console.log(
+    'lockfile OK:',
+    lock.python.implementation,
+    lock.python.version,
+    `(${lock.wheels.length} pinned wheels)`,
+    `+ product ${lock.product.name}==${lock.product.version}`,
+  )
 
   const pkg = JSON.parse(readFileSync(join(desktopDir, 'package.json'), 'utf8'))
   const config = createWindowsInstallerConfig({
@@ -184,6 +273,7 @@ async function main() {
     appId: 'com.intelligence-agent.desktop',
     productName: 'Intelligence Agent',
     installerDir,
+    runtimeProduct: lock.product,
   })
   config.directories.output = outDir
 
