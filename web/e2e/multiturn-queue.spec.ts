@@ -735,8 +735,10 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
   await box.press('Enter');
 
   await expect.poll(() => calls.length, { timeout: 8000 }).toBe(1);
-  // 活过三轮退避（500 + 1000 + 2000）＋余量：假「连接中断」正是在那之后才弹出来
-  await page.waitForTimeout(6000);
+  // 活过三轮退避（500 + 1000 + 2000，合计 3.5s）＋余量：假「连接中断」正是在那之后才
+  // 弹出来。高负载下定时器会漂移，6000 的余量不够（曾假红），放宽到 10000——
+  // 退避窗口 + 余量，不是在等任何具体状态。
+  await page.waitForTimeout(10000);
   await expect(page.locator('.app-error')).toHaveCount(0);
   await expect(page.locator('.reconnect-banner')).toBeHidden();
   /* 订阅恰好两次：① 窗外按 launched 接的那条（已被纠正，代际推进后它的整条重连链
