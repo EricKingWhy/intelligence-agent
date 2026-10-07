@@ -51,7 +51,7 @@ const item = (
   activeForm: string,
 ): PlanItem => ({ id, content, activeForm, status, source: "agent" });
 
-/** 三态混合清单：完成 → 进行中 → 待办（覆盖全部三种样式分支）。 */
+/** 三态混合清单：完成、进行中、待办（覆盖全部三种样式分支）。 */
 const PLAN: PlanItem[] = [
   item("a", "completed", "读代码", "正在读代码"),
   item("b", "in_progress", "写测试", "正在写测试"),
@@ -140,27 +140,27 @@ test("空清单 / null 不渲染（无清单会话不留空壳）", () => {
 test("三态快照（展开）：计数行 + 完成删除线+dim + 进行中 activeForm+accent+bold + 待办 dim", () => {
   const lines = renderPlanList(PLAN, testTheme(), { expanded: true });
   assert.deepEqual(lines, [
-    "<d>└ </d><t>进度清单</t><d> · 1/3 complete</d>",
+    "<t>进度清单</t><d> · 1/3 complete</d>",
     "<d>└ </d>\x1b[9m<d>  · 读代码</d>\x1b[29m",
     "  \x1b[1m<a>> ● 正在写测试</a>\x1b[22m",
     "  <d>  ○ 实现</d>",
   ]);
 });
 
-test("三态快照（折叠默认）：完成组整组收起 + N more below 披露行", () => {
+test("三态快照（折叠默认）：完成组整组收起 + 完成组披露行", () => {
   const lines = renderPlanList(PLAN, testTheme());
   assert.deepEqual(lines, [
-    "<d>└ </d><t>进度清单</t><d> · 1/3 complete</d>",
+    "<t>进度清单</t><d> · 1/3 complete</d>",
     "<d>└ </d>\x1b[1m<a>> ● 正在写测试</a>\x1b[22m",
     "  <d>  ○ 实现</d>",
-    "  <d>· 1 more below (ctrl+t)</d>",
+    "  <d>· 已完成 1 项 (ctrl+t)</d>",
   ]);
 });
 
 test("ASCII 兜底表：glyph 换成 [ ] / [-]，结构不变（Claude Code 双表策略）", () => {
   const lines = renderPlanList(PLAN, testTheme(), { expanded: true, ascii: true });
   assert.deepEqual(lines, [
-    "<d>└ </d><t>进度清单</t><d> · 1/3 complete</d>",
+    "<t>进度清单</t><d> · 1/3 complete</d>",
     "<d>└ </d>\x1b[9m<d>  [-] 读代码</d>\x1b[29m",
     "  \x1b[1m<a>> [ ] 正在写测试</a>\x1b[22m",
     "  <d>  [ ] 实现</d>",
@@ -170,7 +170,7 @@ test("ASCII 兜底表：glyph 换成 [ ] / [-]，结构不变（Claude Code 双�
 test("未知 status 按待办渲染（有序优先级表兜底，不崩）", () => {
   const lines = renderPlanList([item("a", "weird", "未知态", "未知态")], testTheme(), { expanded: true });
   assert.deepEqual(lines, [
-    "<d>└ </d><t>进度清单</t><d> · 0/1 complete</d>",
+    "<t>进度清单</t><d> · 0/1 complete</d>",
     "<d>└ </d><d>  ○ 未知态</d>",
   ]);
 });
@@ -181,14 +181,46 @@ test("in_progress 文案取 activeForm；activeForm 为空回落 content", () =>
   assert.ok(!lines[1]?.includes("undefined"));
 });
 
-test("行数超上限时截断并给 N more below（Codex 折叠披露触发）", () => {
+test("不设行数上限：清单全量渲染，不静默丢项（软上限 50 由服务端硬校验）", () => {
   const many: PlanItem[] = Array.from({ length: 12 }, (_, i) =>
     item(`p${i}`, "pending", `步骤 ${i}`, `步骤 ${i}`),
   );
   const lines = renderPlanList(many, testTheme(), { expanded: true });
-  // 头 + 上限内行 + 披露行
-  assert.equal(lines.length, 1 + 8 + 1);
-  assert.ok(lines[lines.length - 1]?.includes("4 more below"), `末行应为披露行，实际 ${lines[lines.length - 1]}`);
+  // 头 + 全部 12 行，无截断、无披露行（第 9 项之后也必须可达）。
+  assert.equal(lines.length, 1 + 12);
+  for (let i = 0; i < 12; i++) {
+    assert.ok(lines.some((l) => l.includes(`步骤 ${i}`)), `第 ${i} 项须在渲染结果里`);
+  }
+  assert.ok(!lines.some((l) => l.includes("more below")), "不应有溢出披露行");
+});
+
+test("折叠只收起完成组：披露行描述完成组折叠，不暗示能揭开被截断的行", () => {
+  const many: PlanItem[] = [
+    item("done", "completed", "已完成项", "正在完成"),
+    ...Array.from({ length: 10 }, (_, i) => item(`p${i}`, "pending", `步骤 ${i}`, `步骤 ${i}`)),
+  ];
+  const lines = renderPlanList(many, testTheme());
+  // 头 + 10 个未完成行（全部可达）+ 1 行完成组披露；完成项不出现。
+  assert.equal(lines.length, 1 + 10 + 1);
+  assert.ok(!lines.some((l) => l.includes("已完成项")), "折叠时完成项不渲染");
+  assert.ok(lines[lines.length - 1]?.includes("已完成 1 项 (ctrl+t)"), "披露行只描述完成组折叠");
+});
+
+test("双 in_progress 只高亮首个（对齐 W-27 契约），其余按待办降级", () => {
+  const lines = renderPlanList(
+    [item("a", "in_progress", "A", "正在 A"), item("b", "in_progress", "B", "正在 B")],
+    testTheme(),
+    { expanded: true },
+  );
+  assert.deepEqual(lines, [
+    "<t>进度清单</t><d> · 0/2 complete</d>",
+    "<d>└ </d>\x1b[1m<a>> ● 正在 A</a>\x1b[22m",
+    "  <d>  ○ B</d>",
+  ]);
+  // 第二个 in_progress 不高亮、文案回落 content（取 B 而非「正在 B」）。
+  assert.ok(!lines[2]?.includes("<a>"), "第二个 in_progress 不应高亮");
+  assert.ok(!lines[2]?.includes("正在 B"), "第二个 in_progress 文案应回落 content");
+  assert.ok(lines[2]?.includes("○ B"), "第二个 in_progress 按待办 glyph 渲染");
 });
 
 test("真实主题：完成项确实带 \\x1b[9m 删除线与 \\x1b[29m 复位（硬约束）", async () => {
@@ -200,7 +232,7 @@ test("真实主题：完成项确实带 \\x1b[9m 删除线与 \\x1b[29m 复位�
   assert.ok(completedLine.includes("\x1b[29m"), "完成项须带删除线复位序列");
 });
 
-test("glyph 全走白名单：渲染输出无非白名单字符（GBK 安全）", () => {
+test("glyph 全走白名单：rich 与 ASCII 两条分支的输出都无非白名单字符（GBK 安全）", () => {
   const WHITELIST = new Set(["●", "○", "└", "─", "│", "┌", "┐", "┘", "├", "┤", "·"]);
   // 与 test/glyphs.test.ts 同一判据：白名单 glyph + CJK 汉字/标点安全区。
   const allowed = (ch: string): boolean => {
@@ -211,10 +243,16 @@ test("glyph 全走白名单：渲染输出无非白名单字符（GBK 安全）"
     if (code >= 0x3400 && code <= 0x4dbf) return true;
     return WHITELIST.has(ch);
   };
-  const rendered = renderPlanList(PLAN, testTheme(), { expanded: true, ascii: true }).join("");
-  for (const ch of rendered) {
-    const code = ch.codePointAt(0) ?? 0;
-    if (code < 128) continue;
-    assert.ok(allowed(ch), `输出含非白名单字符 ${JSON.stringify(ch)}`);
-  }
+  const check = (label: string, rendered: string): void => {
+    for (const ch of rendered) {
+      const code = ch.codePointAt(0) ?? 0;
+      if (code < 128) continue;
+      assert.ok(allowed(ch), `${label} 输出含非白名单字符 ${JSON.stringify(ch)}`);
+    }
+  };
+  // 默认 rich 表（· ● ○）+ ASCII 兜底表都要覆盖——只测 ASCII 会漏掉真正的默认路径。
+  check("rich", renderPlanList(PLAN, testTheme(), { expanded: true }).join(""));
+  check("ascii", renderPlanList(PLAN, testTheme(), { expanded: true, ascii: true }).join(""));
+  // 折叠路径的披露行也走白名单。
+  check("collapsed", renderPlanList(PLAN, testTheme()).join(""));
 });

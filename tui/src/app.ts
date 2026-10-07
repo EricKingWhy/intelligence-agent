@@ -12,11 +12,13 @@
 import {
   Container,
   Editor,
+  Key,
   ProcessTerminal,
   Spacer,
   Text,
   TuiMainScreen,
   getTerminalColorMode,
+  matchesKey,
   type Component,
   type TUI,
 } from "@earendil-works/pi-tui";
@@ -123,8 +125,10 @@ export class TuiApp {
       void this.quit();
       return { consume: true };
     }
-    if (data === "\x14") {
+    if (matchesKey(data, Key.ctrl("t"))) {
       // Ctrl+T：切换进度清单完成组的折叠/展开（Claude Code app:toggleTodos 同款）。
+      // 用 pi-tui matchesKey 而非裸比较 `\x14`：Kitty/CSI-u 扩展编码（如 tmux 上报
+      // `\x1b[116;5u`）下裸字节不成立，matchesKey 同时覆盖 legacy 与 CSI-u。
       this.planExpanded = !this.planExpanded;
       this.renderPlan();
       this.tui.requestRender();
@@ -349,6 +353,8 @@ export class TuiApp {
     this.pauseBannerText = null;
     this.approvalText = null;
     this.planText = null;
+    // 跨会话/重建重置折叠开关：避免上一会话的展开态泄漏到新会话（#382 审查 P3）。
+    this.planExpanded = false;
     this.renderedOrphanCount = 0;
     if (this.state.turns.length === 0) {
       // 空状态：短文案 + 命令提示，不堆装饰框
@@ -377,9 +383,13 @@ export class TuiApp {
     });
   }
 
-  /** 增量投影：只重建内容变化的轮次；新增轮次追加（流式不闪烁由差分渲染兜底）。 */
+  /** 增量投影：只重建内容变化的轮次；新增轮次追加（流式不闪烁由差分渲染兜底）。
+   *
+   *  无早退：`renderPlan` / `renderPauseBanner` / `renderApproval` 挂在 footer，
+   *  与 turns 是否为空无关；若在无 turn 时早退，`task/plan_updated` 先于任何
+   *  turn 到达（或 footer 类事件单独到达）就会漏画（#382 审查 P4）。
+   *  turns 与 renderedTurns 皆空时下面的循环是 no-op，重建空对话容器无害。 */
   private renderIncremental(): void {
-    if (this.state.turns.length === 0 && this.renderedTurns.length === 0) return;
     // 已渲染轮次：签名变了才重建该轮（流式 delta 落在最后一轮）
     for (let i = 0; i < this.state.turns.length; i++) {
       const turn = this.state.turns[i];
