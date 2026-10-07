@@ -2016,6 +2016,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_model_provider_routes(app)
 
+    # #822 / MM-01 用户图片附件入站（独立 router：上传 + 受控读回）。上传请求体走
+    # 流式字节、可达单张图上限，故该路由从 BodyDepthGuardMiddleware 的 1 MiB 配额中
+    # 豁免（下方 add_middleware 处传入 `ATTACHMENT_UPLOAD_PATH_RE`）；既有 JSON 端点
+    # 行为逐字不变。
+    from agent_harness.web.attachments import (
+        ATTACHMENT_UPLOAD_PATH_RE,
+        register_attachment_routes,
+    )
+
+    register_attachment_routes(app, validate_session_id=validate_session_id)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
@@ -2033,7 +2044,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # 添加 = 最内层，落点**在认证内层**——未认证请求先被 401 挡下，不做无谓的
     # body 扫描；先 csp（内层）后 auth（外层），与旧 BaseHTTPMiddleware 版注册
     # 顺序逐层一致；CORS 仍最后添加 = 最外层。
-    app.add_middleware(BodyDepthGuardMiddleware)
+    app.add_middleware(
+        BodyDepthGuardMiddleware, exempt_path_pattern=ATTACHMENT_UPLOAD_PATH_RE
+    )
     app.add_middleware(CSPHeaderMiddleware)
     app.add_middleware(AuthSeamMiddleware, settings=settings)
 

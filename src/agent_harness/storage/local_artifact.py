@@ -29,6 +29,7 @@ artifact 绝不能落进去——那条路径会话硬删时不许碰（ADR-0029
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -43,11 +44,14 @@ import anyio
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
+    BYTE_ARTIFACT_ID_PATTERN,
     SESSION_KEY_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
+    BlobArtifact,
     compute_artifact_id,
+    compute_byte_artifact_id,
     slice_artifact,
 )
 
@@ -197,6 +201,170 @@ class LocalArtifactStore(ArtifactStore):
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
         )
+
+    # ── 字节路径（#822 MM-01：附件入站）─────────────────────────────────────
+    #
+    # 落盘算法移植自 DeepSeek Harness `5badb150`
+    # `packages/attachment/attachment-local/src/store.ts:214-388,431-458`（MIT）：
+    # staging → fsync →
+    # 原子发布（`os.link` hardlink）→ 权限收紧（0o400）→ 目录 fsync。与文本路径的
+    # `temp + os.replace` 是两个纪律：字节路径要"半途失败不产生可被读到的半文件"，
+    # 靠的是**先写完整 staging 文件并 fsync，再 hardlink 到目标**——目标在任何时刻
+    # 要么不存在、要么是完整对象。
+    #
+    # 布局（**会话内**内容寻址，跨会话不共享——PRD 明确不做跨 session 共享）：
+    #     <artifact_dir>/<session_id>/attachments/objects/<sha[:2]>/<sha>      内容
+    #     <artifact_dir>/<session_id>/attachments/objects/<sha[:2]>/<sha>.json 元数据
+    #     <artifact_dir>/<session_id>/attachments/tmp/<uuid>                   staging
+
+    async def save_bytes(
+        self, session_id: str, data: bytes, *, mime_type: str
+    ) -> BlobArtifact:
+        if session_id != self._session_id:
+            raise ValueError("save_bytes session_id must match the store namespace")
+        return await anyio.to_thread.run_sync(
+            self._save_bytes_blocking, data, mime_type
+        )
+
+    def _save_bytes_blocking(self, data: bytes, mime_type: str) -> BlobArtifact:
+        artifact_id = compute_byte_artifact_id(data)
+        sha256 = artifact_id.split(":", 1)[1]
+        self._publish_blob(data, sha256)
+        blob = BlobArtifact(
+            artifact_id=artifact_id,
+            session_id=self._session_id,
+            size=len(data),
+            mime_type=mime_type,
+        )
+        # 元数据是便利（读回 Content-Type），内容才是事实：所以内容先发布、元数据后写。
+        # 崩溃只会留下"有内容、没元数据"（load 退化为 octet-stream），绝不会留下
+        # "有元数据、没内容"的假记录。
+        self._write_blob_meta(sha256, blob)
+        return blob
+
+    async def load_bytes(self, artifact_id: str) -> BlobArtifact:
+        if not BYTE_ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
+        return await anyio.to_thread.run_sync(self._load_bytes_blocking, artifact_id)
+
+    def _load_bytes_blocking(self, artifact_id: str) -> BlobArtifact:
+        sha256 = artifact_id.split(":", 1)[1]
+        path = self._blob_object_path(sha256)
+        try:
+            body = path.read_bytes()
+        except FileNotFoundError as error:
+            # not-found 是契约内的结果（含"属于别的会话"= 本会话命名空间里没有），
+            # 统一 KeyError → 404；不把"服务端异常"谎报成"不存在"。
+            raise KeyError(f"Blob artifact '{artifact_id}' does not exist") from error
+        if hashlib.sha256(body).hexdigest() != sha256:
+            raise KeyError(
+                f"Blob artifact '{artifact_id}' content hash mismatch "
+                "(file modified or corrupted out-of-band)"
+            )
+        meta = self._read_blob_meta(sha256)
+        return BlobArtifact(
+            artifact_id=artifact_id,
+            session_id=self._session_id,
+            size=len(body),
+            mime_type=meta.get("mime_type") or "application/octet-stream",
+            content=body,
+        )
+
+    def _blob_objects_dir(self) -> Path:
+        return self._dir / "attachments" / "objects"
+
+    def _blob_object_path(self, sha256: str) -> Path:
+        return self._blob_objects_dir() / sha256[:2] / sha256
+
+    def _blob_meta_path(self, sha256: str) -> Path:
+        return self._blob_objects_dir() / sha256[:2] / f"{sha256}.json"
+
+    def _read_blob_meta(self, sha256: str) -> dict:
+        try:
+            raw = json.loads(self._blob_meta_path(sha256).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _write_blob_meta(self, sha256: str, blob: BlobArtifact) -> None:
+        target = self._blob_meta_path(sha256)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._write_atomic(
+            target,
+            json.dumps(blob.model_dump(exclude={"content"}), ensure_ascii=False).encode(
+                "utf-8"
+            ),
+        )
+
+    def _publish_blob(self, data: bytes, sha256: str) -> None:
+        """staging → fsync → hardlink 原子发布；任何失败都不留可读的半文件。"""
+        staging_dir = self._dir / "attachments" / "tmp"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        target = self._blob_object_path(sha256)
+        temporary = staging_dir / uuid4().hex
+        handle: int | None = None
+        try:
+            handle = os.open(
+                temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+            # `os.write` 不保证一次写完（大对象必然部分写）——循环写完。
+            view = memoryview(data)
+            written = 0
+            while written < len(view):
+                written += os.write(handle, view[written:])
+            if hashlib.sha256(data).hexdigest() != sha256:
+                raise OSError("staged bytes do not match their publication digest")
+            os.fsync(handle)
+            os.close(handle)
+            handle = None
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                # 内容寻址去重：别的写入者已发布同一对象。校验已有对象完整即接受，
+                # 否则拒绝（不把损坏对象当成"已存在"）。
+                if hashlib.sha256(target.read_bytes()).hexdigest() != sha256:
+                    raise OSError(
+                        "stored blob failed integrity verification"
+                    ) from None
+            finally:
+                with suppress(OSError):
+                    os.unlink(temporary)
+            os.chmod(target, 0o400)
+            self._sync_blob_dirs(target.parent)
+        except BaseException:
+            if handle is not None:
+                with suppress(OSError):
+                    os.close(handle)
+            with suppress(OSError):
+                os.unlink(temporary)
+            raise
+
+    def _sync_blob_dirs(self, start: Path) -> None:
+        """从对象父目录向上 fsync 到 artifact 根：目录项也要落盘，重启才找得到。"""
+        if os.name == "nt":  # Windows 打不开目录句柄，NTFS 元数据日志负责目录项
+            return
+        level = start
+        stop = self._root
+        while True:
+            self._fsync_dir(level)
+            if level == stop or level.parent == level:
+                break
+            level = level.parent
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
     # —— 内部方法 ——
 
