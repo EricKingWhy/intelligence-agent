@@ -38,6 +38,14 @@ export interface ReadinessOptions {
   readonly intervalMs?: number
   /** Per-request timeout. */
   readonly probeTimeoutMs?: number
+  /**
+   * Ceiling for one attempt at one endpoint record (W-21 D8 / #834).
+   *
+   * `awaitServiceReady` retries a record it cannot reach, so a single attempt must
+   * not be able to consume the whole wait: a stale record would otherwise burn
+   * `portTimeoutMs` on a dead port while the live service sits on another one.
+   */
+  readonly attemptTimeoutMs?: number
 }
 
 const DEFAULTS = {
@@ -46,6 +54,18 @@ const DEFAULTS = {
   intervalMs: 600,
   probeTimeoutMs: 2_000,
 } as const
+
+/** Reason fragment `classifyHealth` produces for a service that speaks another version. */
+const PROTOCOL_INCOMPATIBLE_MARKER = '协议版本不符'
+
+/**
+ * Whether a readiness failure can never be fixed by waiting — the service speaks a
+ * different protocol version, so retrying (W-21 D8 / #834: a stale endpoint record
+ * may point at another service) would only mask a real incompatibility.
+ */
+export function isProtocolIncompatible(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(PROTOCOL_INCOMPATIBLE_MARKER)
+}
 
 /**
  * Wait until the local service is ready to serve the web application.
@@ -88,7 +108,7 @@ export async function waitForBackendReady(
       if (verdict.kind === 'incompatible') throw new Error(verdict.reason)
     } catch (error) {
       // An incompatibility is terminal; a transient transport/health failure is not.
-      if (error instanceof Error && error.message.includes('协议版本不符')) throw error
+      if (isProtocolIncompatible(error)) throw error
     }
     if (deps.now() >= readyDeadline) {
       throw new Error(`Timed out waiting for 127.0.0.1:${String(port)}/api/health to become ready`)

@@ -19,7 +19,12 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { isAbsolute } from 'node:path'
 import type { DesktopBackendHost } from './backend-controller.ts'
 import { defaultHealthProbeDeps, readHostEndpoint } from './host-client.ts'
-import { waitForBackendReady, type HealthProbeDeps, type ReadinessOptions } from './health.ts'
+import {
+  isProtocolIncompatible,
+  waitForBackendReady,
+  type HealthProbeDeps,
+  type ReadinessOptions,
+} from './health.ts'
 import { WORKSPACE_DIR_ENV, type HostEndpointInfo } from './host-protocol.ts'
 
 /** Command the shell spawns; the service owns attach-or-start. */
@@ -67,7 +72,30 @@ export interface EndpointReadinessDeps {
   readonly healthDeps: HealthProbeDeps
   readonly sleep: (ms: number) => Promise<void>
   readonly now: () => number
+  /**
+   * Error that ends the wait before the budget does — the child this shell owns
+   * died, so no amount of waiting can produce an endpoint. Same shape as the
+   * TUI's own wait (`tui/src/host.ts` `waitForService(..., abortReason)`).
+   */
+  readonly abortReason?: () => Error | undefined
 }
+
+/**
+ * Readiness budget for the shell's own child (W-21 D11 / #837).
+ *
+ * Measured on the W-21 gate machine with the installed artifact and exactly the
+ * command the shell spawns: 8.7 s on an idle machine with a warm file cache,
+ * 30.1 s and 33.6 s immediately after an install, and not within 60 s on the
+ * very first run after one. The packaged service imports the whole harness
+ * (~5.5 s of `agent_harness.cli` imports on their own) before it publishes the
+ * endpoint file, so the old 20 s clock failed healthy starts, killed the child,
+ * and left the stale record in place for the next attempt.
+ *
+ * 90 s covers the worst measured case with margin; a child that dies ends the
+ * wait immediately (`abortReason`), so the budget only bounds a hung child.
+ * The TUI budgets the same child at 30 s (`tui/src/host.ts` `START_BUDGET_MS`).
+ */
+const DEFAULT_START_BUDGET_MS = 90_000
 
 /** Wait for the endpoint file and then for the service behind it to be healthy. */
 export async function awaitServiceReady(
@@ -75,17 +103,39 @@ export async function awaitServiceReady(
   deps: EndpointReadinessDeps,
   options: ReadinessOptions = {},
 ): Promise<{ endpoint: HostEndpointInfo; version: string }> {
-  const endpointTimeoutMs = options.portTimeoutMs ?? 20_000
+  const endpointTimeoutMs = options.portTimeoutMs ?? DEFAULT_START_BUDGET_MS
   const intervalMs = options.intervalMs ?? 300
+  const attemptTimeoutMs = options.attemptTimeoutMs ?? 1_500
   const deadline = deps.now() + endpointTimeoutMs
+  let lastAttempt: string | undefined
   for (;;) {
     const endpoint = await deps.readEndpoint(root)
     if (endpoint !== undefined) {
-      const health = await waitForBackendReady(endpoint.port, deps.healthDeps, options)
-      return { endpoint, version: health.version }
+      // W-21 D8 (#834): a record that fails its probe is NOT terminal here. The file
+      // outlives a killed service and a reboot, and the child this shell just spawned
+      // rewrites it — so re-read every pass and let only the overall deadline fail the
+      // start. (The CLI's own cold start takes the same view: `attach_probe` reports a
+      // dead record as STALE and `serve_once` keeps polling — src/agent_harness/
+      // host_service.py.) An incompatible protocol_version still aborts immediately.
+      try {
+        const health = await waitForBackendReady(endpoint.port, deps.healthDeps, {
+          ...options,
+          portTimeoutMs: attemptTimeoutMs,
+          readyTimeoutMs: attemptTimeoutMs,
+        })
+        return { endpoint, version: health.version }
+      } catch (error) {
+        if (isProtocolIncompatible(error)) throw error
+        lastAttempt = error instanceof Error ? error.message : String(error)
+      }
     }
+    // A dead child is a terminal failure, not a slow one: report it with the
+    // child's own output instead of waiting out the budget (W-21 D11 / #837).
+    const abort = deps.abortReason?.()
+    if (abort !== undefined) throw abort
     if (deps.now() >= deadline) {
-      throw new Error('Timed out waiting for the local service endpoint file')
+      const diagnosis = lastAttempt === undefined ? '' : ` (last attempt: ${lastAttempt})`
+      throw new Error(`Timed out waiting for the local service endpoint file${diagnosis}`)
     }
     await deps.sleep(intervalMs)
   }
@@ -100,7 +150,13 @@ export interface DesktopServiceHostOptions {
   /** Extra variables for the child only, merged over `env` (e.g. WEB_DIST_DIR, W-21 D3). */
   readonly childEnv?: NodeJS.ProcessEnv
   readonly spawnChild?: SpawnChild
-  readonly readiness?: Partial<EndpointReadinessDeps> & { portTimeoutMs?: number; readyTimeoutMs?: number; intervalMs?: number; probeTimeoutMs?: number }
+  readonly readiness?: Partial<EndpointReadinessDeps> & {
+    portTimeoutMs?: number
+    readyTimeoutMs?: number
+    intervalMs?: number
+    probeTimeoutMs?: number
+    attemptTimeoutMs?: number
+  }
   readonly onFailure?: (error: Error) => void
   readonly stopGraceMs?: number
   readonly stopKillMs?: number
@@ -112,6 +168,8 @@ const MAX_DIAGNOSTIC_CHARS = 16 * 1024
 export class DesktopServiceHost implements DesktopBackendHost {
   private child: ManagedChild | undefined
   private stderr = ''
+  private stdout = ''
+  private spawnError: Error | undefined
   private exited = false
   private exitCode: number | null = null
   private stopRequested = false
@@ -157,7 +215,15 @@ export class DesktopServiceHost implements DesktopBackendHost {
     child.stderr?.on('data', (chunk: Buffer | string) => {
       this.stderr = (this.stderr + chunk.toString()).slice(-MAX_DIAGNOSTIC_CHARS)
     })
-    child.onError((error) => { this.fail(error) })
+    // W-21 D8 (#834): the child says useful things on stdout too — `agent-harness
+    // serve` reports "已有本机服务在运行…（已附着，本进程退出）" there before it exits
+    // (src/agent_harness/cli.py `_main_serve`), which is exactly the case where this
+    // shell's Wait for the endpoint file would otherwise time out with no explanation.
+    child.stdout?.setEncoding?.('utf8')
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      this.stdout = (this.stdout + chunk.toString()).slice(-MAX_DIAGNOSTIC_CHARS)
+    })
+    child.onError((error) => { this.spawnError = error; this.fail(error) })
     child.onExit((code) => { this.exited = true; this.exitCode = code })
 
     const readiness: EndpointReadinessDeps = {
@@ -165,6 +231,14 @@ export class DesktopServiceHost implements DesktopBackendHost {
       healthDeps: this.options.readiness?.healthDeps ?? defaultHealthProbeDeps(),
       sleep: this.options.readiness?.sleep ?? defaultSleep,
       now: this.options.readiness?.now ?? Date.now,
+      // W-21 D11 (#837): readiness is bounded by this child's lifetime, not by a
+      // clock alone — a child that failed to spawn or already exited can never
+      // publish an endpoint, so waiting out the budget would only delay the
+      // same failure (DeepSeek Harness rejects its host-ready promise from the
+      // exit path the same way, apps/desktop/src/host-process.ts).
+      abortReason: () => this.spawnError ?? (this.exited
+        ? new Error(`the service process exited before it was ready (exit code ${String(this.exitCode)})`)
+        : undefined),
     }
     try {
       const ready = await awaitServiceReady(root, readiness, {
@@ -172,11 +246,13 @@ export class DesktopServiceHost implements DesktopBackendHost {
         ...(this.options.readiness?.readyTimeoutMs === undefined ? {} : { readyTimeoutMs: this.options.readiness.readyTimeoutMs }),
         ...(this.options.readiness?.intervalMs === undefined ? {} : { intervalMs: this.options.readiness.intervalMs }),
         ...(this.options.readiness?.probeTimeoutMs === undefined ? {} : { probeTimeoutMs: this.options.readiness.probeTimeoutMs }),
+        ...(this.options.readiness?.attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs: this.options.readiness.attemptTimeoutMs }),
       })
       this.ready = ready
       return ready
     } catch (error) {
-      const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`
+      const output = [this.stderr.trim(), this.stdout.trim()].filter((part) => part !== '').join('\n')
+      const suffix = output === '' ? '' : `: ${output}`
       const failure = new Error(`${error instanceof Error ? error.message : String(error)}${suffix}`)
       this.fail(failure)
       throw failure
