@@ -38,7 +38,7 @@ def test_review_fixes_all_occurrences_word_family_and_english():
     - P2-1：target 多次出现时任一处被「保留」管辖即拒绝（fail-closed），
       不只看首次出现；
     - P2-2：「留住/留在」与「留着/留下」同词族；
-    - P3-1：英文 \\\\bpreserve\\\\b / \\\\bretain\\\\b；
+    - P3-1：英文 \\bpreserve\\b / \\bretain\\b；
     - P4-1：空串/空白 memory_id 不放行（与 query 变体对称守卫）。
     """
     assert not f("忘记新邮箱旧档，保留新邮箱", "新邮箱")
