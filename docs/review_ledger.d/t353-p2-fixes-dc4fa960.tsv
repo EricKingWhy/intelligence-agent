@@ -1,0 +1,1 @@
+2026-10-07	#353 P2 三项修复（两轴审查 findings 处置，用户 2026-10-07 指示当 bug 修）：P2-1 api.ts 四函数重复三件套抽取 parseTaskResponse helper（行为逐字一致）；P2-2 授权信息缺失→前端诚实显示"服务端投影暂未提供"（后端 to_payload 无该字段，未编造）；P2-3 "下一步"从未通过/缺证据验收项推导，无则诚实显示缺口。测试：tsc exit 0、api.test.ts 124/124、TaskReviewPanel.test.tsx 22/22（含 3 新增 P2 用例）	341b915e01179f795640c7375e09df948b278a99..dc4fa960a6214a572deaff355ea39ca94eb48e18
