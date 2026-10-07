@@ -38,6 +38,14 @@ node d12-probe/live-path.mjs "<install>/resources/tui" <run-b/events-final.json>
 
 单测：`tui/test/tints.test.ts` 旧字面量 3 条红 → 修复后 **54 tests / 0 fail**，`tsc --noEmit` exit 0（提交 `14898f1a`）。
 
+> **审查更正（2026-10-08，两轴独立审查）**：该单测里的「扫源守门」实际只匹配**双引号**字面量
+> （`tints.test.ts:85` 的 `/"([^"\n]*)"/g`）⇒ 单引号或模板串写法的 `rgb(...)` 会被静默漏过，
+> 本轮「守门」的作用域**窄于**它的取名。两条轴各自独立报出（A 轴 P4 / B 轴 P2，B 轴用变异实测：
+> 在 `chat.ts` 加一行单引号 `rgb(40, 36, 40)` 后该用例仍 3/3 绿）。
+> 本文件与 tracker 里「颜色字面量扫源守门」的表述按此更正；加宽扫描器**未随本批修复**，
+> 登记归下一自然审查边界（见 `docs/phase_status/2026-10.md` 与台账行
+> `docs/review_ledger.d/t365-w21-gate-fixes-two-axis-cbf08285-e8b57282.tsv`）。
+
 ## 两条退出规则的归属差异（本轮新读数）
 
 - 本轮服务是 **TUI 冷启动**的（父进程是 TUI 的 cmd）：TUI 退出、桌面退出都不影响它（`tui-exit.json`、`desktop-exit.json` 都是同 pid 存活）。
