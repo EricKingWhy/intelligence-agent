@@ -1,13 +1,23 @@
-"""#785：CORS expose_headers 守卫——跨域 dev 下自定义响应头对 JS 必须可见。
+"""#785：CORS expose_headers 守卫——自定义响应头对前端 JS 的可见性契约。
 
-背景：starlette CORSMiddleware 仅在 ``expose_headers`` 非空时下发
+机制：starlette CORSMiddleware 仅在 ``expose_headers`` 非空时下发
 ``Access-Control-Expose-Headers``（cors.py:44-45）；缺省时浏览器对 JS 隐藏
-全部自定义响应头（同源部署不受影响）。两个守卫：
+全部自定义响应头。影响面：默认 dev 走 Vite proxy 同源（web/vite.config.ts
+proxy），不经 CORS；本契约修的是 5173 直连 / 跨域部署拓扑下的可见性。
+两个守卫：
 
-① 行为钉：CORS 简单响应必须暴露 app 全部自定义响应头；
-② 防漏登：app.py 源码里的 ``"X-…"`` 头字面量必须全部登记进
-   ``EXPOSED_CUSTOM_RESPONSE_HEADERS``。请求侧读头先例目前为零；未来若
-   出现，把该头加进 ``_NON_RESPONSE_X_HEADERS`` 豁免集并写明理由。
+① 行为钉：CORS 简单响应暴露的头清单必须与 ``EXPOSED_CUSTOM_RESPONSE_HEADERS``
+   **精确相等**——缺失（新增头漏登记 → 跨域 JS 不可见）与多出（响应侧没实际
+   下发的头混进暴露清单）都算偏离契约；
+② 防漏登：``src/agent_harness/web/`` 全部模块源码里引号包裹的 ``X-…`` 头
+   字面量必须登记进 ``EXPOSED_CUSTOM_RESPONSE_HEADERS``。域界定（有意为之）：
+   - 库产出的 ``X-Accel-Buffering``（sse-starlette SSE 反缓冲头）刻意不登记——
+     消费方是 nginx 等反代，不是前端 JS；
+   - 守卫只认 X- 前缀——非 X- 自定义响应头（如 app.py CSPHeaderMiddleware
+     产出的 ``Content-Security-Policy``，无 JS 消费者）不在此契约内。
+
+请求侧读头先例目前为零；未来若出现，把该头加进 ``_NON_RESPONSE_X_HEADERS``
+豁免映射并写明理由（dict 值即理由——结构强制，无理由写不进去）。
 """
 
 from __future__ import annotations
@@ -22,10 +32,10 @@ from agent_harness.config import Settings
 from agent_harness.web import app as app_module
 from agent_harness.web.app import create_app
 
-# 请求侧 X- 头豁免集（当前为空：app.py 无任何请求侧 X- 头读取；
-# 新增请求侧头时加入此集合并写明理由，响应头则必须登记进
-# EXPOSED_CUSTOM_RESPONSE_HEADERS）。
-_NON_RESPONSE_X_HEADERS: frozenset[str] = frozenset()
+# 请求侧 X- 头豁免映射：头名 → 豁免理由（当前为空：web/ 无任何请求侧 X- 头
+# 读取）。新增请求侧头时加入此映射并写明理由——结构强制：无理由写不进去
+# （dict 值即理由）；响应头则必须登记进 EXPOSED_CUSTOM_RESPONSE_HEADERS。
+_NON_RESPONSE_X_HEADERS: dict[str, str] = {}
 
 
 @pytest.fixture
@@ -52,16 +62,41 @@ def test_cors_simple_response_exposes_all_custom_headers(cors_client: TestClient
         "自定义响应头对 JS 全部不可见（#785）"
     )
     listed = {header.strip() for header in exposed.split(",")}
-    assert set(app_module.EXPOSED_CUSTOM_RESPONSE_HEADERS) <= listed
-
-
-def test_every_x_header_literal_in_app_is_registered():
-    source = Path(app_module.__file__).read_text(encoding="utf-8")
-    found = set(re.findall(r'"(X-[A-Za-z0-9-]+)"', source))
     registered = set(app_module.EXPOSED_CUSTOM_RESPONSE_HEADERS)
-    unregistered = found - registered - _NON_RESPONSE_X_HEADERS
+    # 精确相等而非子集：多出 / 缺失都算偏离契约（#808 C-F2）。
+    assert listed == registered, (
+        f"多出 {sorted(listed - registered)} / 缺失 {sorted(registered - listed)}——"
+        "Access-Control-Expose-Headers 必须与 EXPOSED_CUSTOM_RESPONSE_HEADERS "
+        "精确相等，多出或缺失都算偏离契约"
+    )
+
+
+def _quoted_x_header_literals(web_dir: Path) -> dict[str, set[str]]:
+    """收集 web 目录全部 ``*.py`` 源码里引号包裹的 ``X-…`` 头字面量（按文件分组）。
+
+    单/双引号都认；``Path.glob("*.py")`` 只落目录直属文件且 ``__pycache__``
+    是目录（只含 .pyc），天然不在扫描面内。
+    """
+    literals: dict[str, set[str]] = {}
+    for py_file in sorted(web_dir.glob("*.py")):
+        source = py_file.read_text(encoding="utf-8")
+        for match in re.finditer(r'[\'"](X-[A-Za-z0-9-]+)[\'"]', source):
+            literals.setdefault(py_file.name, set()).add(match.group(1))
+    return literals
+
+
+def test_every_x_header_literal_in_web_is_registered():
+    registered = set(app_module.EXPOSED_CUSTOM_RESPONSE_HEADERS)
+    exempted = set(_NON_RESPONSE_X_HEADERS)
+    found = _quoted_x_header_literals(Path(app_module.__file__).parent)
+    unregistered = [
+        (file_name, header)
+        for file_name, headers in found.items()
+        for header in sorted(headers - registered - exempted)
+    ]
     assert not unregistered, (
-        f"app.py 出现未登记的 X- 头字面量: {sorted(unregistered)}——"
+        f"web/ 模块源码出现未登记的 X- 头字面量: {sorted(unregistered)}——"
         "响应头请登记进 EXPOSED_CUSTOM_RESPONSE_HEADERS（#785）；"
-        "请求侧读头请加进本文件的 _NON_RESPONSE_X_HEADERS 豁免集并写明理由"
+        "请求侧读头请加进本文件的 _NON_RESPONSE_X_HEADERS 豁免映射并写明理由"
+        "（豁免必须带理由字符串：dict 值即理由，无理由写不进去）"
     )
