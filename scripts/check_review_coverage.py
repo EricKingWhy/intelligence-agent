@@ -478,6 +478,97 @@ def format_auto_attribution(short: str, subject: str, files: list[str]) -> str:
     return f"✅ docs-only（按路径自动归属）: {short}  {subject} — {' + '.join(files)}"
 
 
+# --------------------------------------------------------------------------- #
+# Dependabot 纯版本号升级的机械归属（2026-10-07）
+# --------------------------------------------------------------------------- #
+
+#: 作者必须是 Dependabot。⚠ 作者名**可伪造**（本地 `git commit --author` 即可），所以它只是
+#: **前置筛选**，不是归属证据；证据是下面的**逐行内容判据**：每一条增删行都必须是版本号形状。
+DEPENDABOT_AUTHOR_RE = re.compile(r"^dependabot\[bot\] <\d+\+dependabot\[bot\]@users\.noreply\.github\.com>$")
+
+#: 依赖清单文件 → 其增删行必须逐行命中的形状。任何一行不命中 ⇒ 不归属（fail-closed）。
+#: 刻意**不收**的形状：`[tool.*]` 段、`addopts`、`scripts`、`run:` 等 —— 它们是闸门读的配置
+#: （见 gate0.yml 头部「不保证」段），只要动了一行就回落到人工审查。
+_PYPROJECT_DEP_LINE = re.compile(
+    r'^\s*"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?\s*(>=|<=|==|~=|!=|<|>)[^"]*"\s*,?\s*$')
+_PACKAGE_JSON_DEP_LINE = re.compile(
+    r'^\s*"(@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+"\s*:\s*"[\^~]?\d[A-Za-z0-9.+-]*"\s*,?\s*$')
+#: 行尾 `# …` 注释任意：YAML 注释不改变行为，Dependabot 只改其中的版本号。
+_WORKFLOW_USES_LINE = re.compile(
+    r'^\s*(-\s+)?uses:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[0-9a-f]{40}\s*(#.*)?$')
+
+#: 锁文件：内容由包管理器生成，不是闸门配置，不逐行判形状（它们不能关掉任何车道）。
+DEPENDABOT_LOCKFILES = ("uv.lock", "web/pnpm-lock.yaml")
+
+
+def _dependabot_line_rule(path: str) -> re.Pattern[str] | None:
+    if path == "pyproject.toml":
+        return _PYPROJECT_DEP_LINE
+    if path == "web/package.json":
+        return _PACKAGE_JSON_DEP_LINE
+    if re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", path):
+        return _WORKFLOW_USES_LINE
+    return None
+
+
+def changed_lines(diff_text: str) -> list[str]:
+    """`git show --unified=0` 的输出 → 全部增删行（去掉 `+`/`-` 前缀，不含文件头）。
+
+    文件头形如 `--- a/f` / `+++ b/f`（标记后必有空格）；内容行 `--- x` / `+++ x`
+    在 diff 里长成 `---- x` / `++++ x`，**必须保留**并参与形状核对 —— 否则伪造
+    dependabot 作者可在 workflow 里夹带 `+++ uses: evil@<40hex>` 而闸门照样放行
+    （2026-10-07 实证 P1）。
+    """
+    out: list[str] = []
+    for ln in diff_text.split("\n"):
+        if ln.startswith(("--- ", "+++ ")):
+            continue
+        if ln.startswith(("+", "-")):
+            out.append(ln[1:])
+    return out
+
+
+def is_dependabot_version_bump(author: str, files: list[str], diffs: dict[str, str]) -> bool:
+    """作者是 Dependabot，且**全部**改动都是版本号升级 ⇒ 可机械自动归属。
+
+    判据（每条都 fail-closed）：
+      · `files` 为空 ⇒ False（"核对不了"不是"没问题"）；
+      · 作者不是 Dependabot ⇒ False；
+      · 任一路径既不是锁文件、也没有对应的行形状规则 ⇒ False；
+      · 有规则的文件：增删行为空（核对不了）或任一行不命中形状 ⇒ False；
+      · 只改锁文件、不动任何清单 ⇒ 允许（uv / pnpm 的传递依赖升级就是这个形状）。
+    伪造作者名也只能借此放行"纯版本号字符串"的改动 —— 它关不掉任何车道。
+    """
+    if not files or not DEPENDABOT_AUTHOR_RE.match(author):
+        return False
+    for f in files:
+        if f in DEPENDABOT_LOCKFILES:
+            continue
+        rule = _dependabot_line_rule(f)
+        if rule is None:
+            return False
+        lines = changed_lines(diffs.get(f, ""))
+        if not lines or not all(rule.match(ln) for ln in lines):
+            return False
+    return True
+
+
+def format_dependabot(short: str, subject: str, files: list[str]) -> str:
+    return f"✅ Dependabot 纯版本号升级（逐行形状核对）: {short}  {subject} — {' + '.join(files)}"
+
+
+def dependabot_inputs(sha: str, files: list[str]) -> tuple[str, dict[str, str]]:
+    """取一个提交的作者与逐文件 `--unified=0` diff（只在候选提交上调用，数量极少）。"""
+    author = git("show", "-s", "--format=%an <%ae>", sha).stdout.strip()
+    diffs: dict[str, str] = {}
+    if DEPENDABOT_AUTHOR_RE.match(author):
+        for f in files:
+            if f in DEPENDABOT_LOCKFILES:
+                continue
+            diffs[f] = git("show", "--no-renames", "--format=", "--unified=0", sha, "--", f).stdout
+    return author, diffs
+
+
 def zero_content_parent(sha: str, parents: list[str], trees: dict[str, str | None]) -> str | None:
     """`sha` 的整棵树是否**逐字等于**某个父提交的树 ⇒ 该提交零新增内容。命中则返回那个父。
 
@@ -820,6 +911,13 @@ def main(argv: list[str]) -> int:
             print(format_auto_attribution(short, subject, files_docs))
             continue
 
+        # Dependabot 纯版本号升级（2026-10-07）：作者筛选 + **逐行形状**核对，排在白名单之前。
+        if files_docs:
+            author, diffs = dependabot_inputs(sha, files_docs)
+            if is_dependabot_version_bump(author, files_docs, diffs):
+                print(format_dependabot(short, subject, files_docs))
+                continue
+
         reason = ""
         for w in wl:
             if w.startswith((f"{short}\t", f"{sha}\t")):
@@ -862,7 +960,7 @@ def main(argv: list[str]) -> int:
     # 口径门：断言的是"每条 commit 都有台账归属"，**不是**"审查确实发生过"——台账是声明式输入，
     # 审查行的真实性由人对账（详见 docs/SDD_WORKFLOW_PROTOCOL.md §7 第 8 条的信任边界）。
     print(f"✅ 台账覆盖闸门通过：{base_literal}..HEAD 每条 commit 均有归属"
-          f"（审查行 / docs-only / 台账记账 / 零新增内容）。")
+          f"（审查行 / docs-only / 台账记账 / 零新增内容 / Dependabot 版本号）。")
     return 0
 
 
