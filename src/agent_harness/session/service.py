@@ -902,17 +902,26 @@ class ToolReconcileInfoProvider(Protocol):
 
 # ── 证据保留 / 清理（#368 W-24）模块级助手 ──────────────────────────────
 
-#: blocked 原因的优先级（高者胜）：未决 Operation > fork 子会话引用 > 事件引用。
-_CLEANUP_BLOCK_PRIORITY = ("unreconciled_operation", "fork_child_reference", "referenced")
+#: blocked 原因的优先级（高者胜）：未决 Operation > fork 子会话引用 > 非出生证明的
+#: tool/result 活引用 > 新鲜证据引用。
+#: ``birth_certificate`` / ``evidence_stale`` **不在**此列——它们是"删掉会失去什么"的
+#: 告知，不阻断删除（#368 独立审查 P0-1：出生证明不是活引用）。
+_CLEANUP_BLOCK_PRIORITY = (
+    "unreconciled_operation",
+    "fork_child_reference",
+    "referenced",
+    "evidence",
+)
 
 
 def _blocking_reason(info: dict | None) -> str | None:
-    """可达集条目 → 阻断原因；None 表示可清理（含"仅被证据引用"）。
+    """可达集条目 → 阻断原因；None 表示可清理。
 
-    证据引用**不阻断**清理：它是会被清理动作"失效"的审计记录（预览经
-    ``evidence_invalidated`` 如实告知），不是活动/恢复链引用。真正的硬引用是
-    未决 Operation、fork 子会话、以及 tool/result 与 artifact 事件（重放/恢复
-    需要它们）。
+    阻断集**只留真正的活引用**（#368 独立审查 P0-1）：未决 Operation、fork 子会话
+    引用、非出生证明的 tool/result 活引用（``referenced``）、以及 freshness 未 stale
+    的证据引用（``evidence``）。artifact 自身的 creation 事件与产生它的那条
+    tool/result 是"出生证明"（``birth_certificate``），stale 证据是 ``evidence_stale``
+    ——两者都不阻断，只在 ``referenced_by`` 里如实告知用户"删掉会失去什么"。
     """
     if not info:
         return None
@@ -3904,14 +3913,19 @@ class SessionService:
         # 形态 + 存在性（与 preview/execute 同一契约：非法 id → 422，
         # 不存在的会话 → 404，而不是 200 配一串 0 误导调用方）。
         await self._require_existing_session(session_id)
-        reachable, candidates, _pending, _children, _stamp = await self._cleanup_state(
-            session_id
+        reachable, candidates, _pending, _children_stamps, _stamp = (
+            await self._cleanup_state(session_id)
         )
-        reclaimable = sum(
-            size
-            for ref, size in candidates.items()
-            if _blocking_reason(reachable.get(ref)) is None
-        )
+        if self._run_manager.is_busy(session_id):
+            # 与 preview 同口径：在途 run 时 preview 把全部候选判 ``active_task``，
+            # 没有"可回收"可言——否则 usage 会报出一个 preview 根本给不出的数。
+            reclaimable = 0
+        else:
+            reclaimable = sum(
+                size
+                for ref, size in candidates.items()
+                if _blocking_reason(reachable.get(ref)) is None
+            )
         events_bytes = await anyio.to_thread.run_sync(
             _file_size, self._session_events_path(session_id)
         )
@@ -3947,8 +3961,8 @@ class SessionService:
         if mode != "unreferenced":
             raise ValueError(f"unsupported cleanup mode: {mode!r}")
         await self._require_existing_session(session_id)
-        reachable, candidates, pending, children, stamp = await self._cleanup_state(
-            session_id
+        reachable, candidates, pending, children_stamps, stamp = (
+            await self._cleanup_state(session_id)
         )
         blocked: list[dict] = []
         affected: list[dict] = []
@@ -3979,7 +3993,7 @@ class SessionService:
         })
         return {
             "snapshot_token": self._snapshot_token_from_state(
-                reachable, candidates, pending, children, stamp
+                reachable, candidates, pending, children_stamps, stamp
             ),
             "affected": affected,
             "evidence_invalidated": evidence_invalidated,
@@ -4008,11 +4022,11 @@ class SessionService:
             raise ActiveRunConflict(
                 f"session '{session_id}' has a pending approval; resolve it first"
             )
-        reachable, candidates, pending, children, stamp = await self._cleanup_state(
-            session_id
+        reachable, candidates, pending, children_stamps, stamp = (
+            await self._cleanup_state(session_id)
         )
         current = self._snapshot_token_from_state(
-            reachable, candidates, pending, children, stamp
+            reachable, candidates, pending, children_stamps, stamp
         )
         if current != snapshot_token:
             raise SnapshotTokenMismatch(
@@ -4043,12 +4057,11 @@ class SessionService:
 
     # ── 保留：内部助手 ──────────────────────────────────────────────────
 
-    async def _compute_reachable_artifacts(self, session_id: str) -> dict[str, dict]:
-        """本会话 + fork 子会话的可达 artifact 集：``{ref: {referenced_by, reasons}}``。
+    async def _children_by_parent(self) -> dict[str, list[str]]:
+        """fork 子会话（``origin != "delegation"``）按父 id 归组。
 
-        引用来源：本会话四类事件的 artifact_ref、未决 Operation、直接 fork 子会话
-        （``origin != "delegation"``）递归。key 按 session 隔离（artifact 物理上不
-        跨会话共享），所以"共享 ref"在本项目里就是"会话内多引用者 + fork 父子引用"。
+        可达集递归与快照 token 都消费它：子会话引用父会话的 artifact 是硬引用
+        （``fork_child_reference``）；委派子会话不在同一 lineage，不参与。
         """
         metas = await self._session_meta_store.list_all()
         children_by_parent: dict[str, list[str]] = {}
@@ -4057,12 +4070,27 @@ class SessionService:
                 children_by_parent.setdefault(meta.parent_session_id, []).append(
                     meta.session_id
                 )
-        return await self._reachable_for_session(session_id, children_by_parent)
+        return children_by_parent
 
     async def _reachable_for_session(
         self, session_id: str, children_by_parent: dict[str, list[str]]
     ) -> dict[str, dict]:
-        """递归算一个会话（含其 fork 子树）的可达 artifact 集。"""
+        """递归算一个会话（含其 fork 子树）的可达 artifact 集：``{ref: {referenced_by, reasons}}``。
+
+        每条引用按语义打 reason（#368 独立审查 P0-1）——**只有活引用阻断删除**：
+
+        - ``birth_certificate``：artifact 自身的 creation 事件、以及产生它的那条
+          tool/result（``tool_call_id`` 与 artifact 元数据一致）——"出生证明"，
+          不阻断（只剩出生证明的 artifact 正是本票要清的对象）；
+        - ``referenced``：其他引用该 artifact 的 tool/result——活引用，阻断；
+        - ``evidence`` / ``evidence_stale``：证据引用的 freshness 未 stale / 已 stale
+          ——前者是活引用（阻断），后者是"删掉会失去什么"的告知（不阻断）；
+        - ``unreconciled_operation`` / ``fork_child_reference``：阻断。
+
+        阻断判据在 ``_blocking_reason``；``referenced_by`` 保留全部标签（含出生证明），
+        让预览如实告诉用户"删掉会失去什么"。key 按 session 隔离（artifact 物理上不
+        跨会话共享），"共享 ref"在本项目里就是"会话内多引用者 + fork 父子引用"。
+        """
         events = await anyio.to_thread.run_sync(self._store.read_events, session_id)
         result: dict[str, dict] = {}
 
@@ -4072,8 +4100,42 @@ class SessionService:
                 entry["referenced_by"].append(tag)
             entry["reasons"].add(reason)
 
+        tool_result_refs = {
+            ref
+            for event in events
+            if event.type == TOOL_RESULT
+            for ref, _tag in _artifact_refs_in_event(event)
+        }
+        birth_tool_call_ids = await self._artifact_birth_tool_call_ids(
+            session_id, tool_result_refs
+        )
+        fresh_evidence_ids = await self._fresh_evidence_ids(session_id, events)
+
         for event in events:
-            reason = "evidence" if event.type == EVIDENCE_RECORDED else "referenced"
+            data = event.data if isinstance(event.data, dict) else {}
+            if event.type == TOOL_RESULT:
+                event_tcid = data.get("tool_call_id")
+                for ref, tag in _artifact_refs_in_event(event):
+                    meta_tcid = birth_tool_call_ids.get(ref)
+                    is_birth = bool(
+                        isinstance(event_tcid, str)
+                        and event_tcid
+                        and isinstance(meta_tcid, str)
+                        and meta_tcid
+                        and event_tcid == meta_tcid
+                    )
+                    _add(ref, tag, "birth_certificate" if is_birth else "referenced")
+                continue
+            if event.type == EVIDENCE_RECORDED:
+                reason = (
+                    "evidence"
+                    if data.get("evidence_id") in fresh_evidence_ids
+                    else "evidence_stale"
+                )
+            elif event.type in (ARTIFACT_CREATED, ARTIFACT_EXTERNALIZED):
+                reason = "birth_certificate"
+            else:
+                continue
             for ref, tag in _artifact_refs_in_event(event):
                 _add(ref, tag, reason)
         operations = await self._operation_ledger.list_for_session(session_id)
@@ -4092,17 +4154,110 @@ class SessionService:
                 result[ref]["reasons"].update(info["reasons"])
         return result
 
+    async def _artifact_birth_tool_call_ids(
+        self, session_id: str, refs: set[str]
+    ) -> dict[str, str | None]:
+        """ref → artifact 元数据的 ``tool_call_id``（出生证明判据）。
+
+        只有 LocalArtifactStore 的旁挂元数据存了 ``source_tool`` / ``tool_call_id``
+        （``storage/artifact.py`` 的 ``Artifact``；S3/MinIO 的 load 如实返回 None）。
+        读不到 / 元数据缺 ``tool_call_id`` → None，调用方据此 fail-closed 判活引用
+        （宁可误拦不可误删）。
+        """
+        store = self._artifact_store_for(session_id)
+        result: dict[str, str | None] = {}
+        for ref in refs:
+            if store is None:
+                result[ref] = None
+                continue
+            try:
+                artifact = await store.load(ref)
+            except (KeyError, OSError):
+                result[ref] = None
+                continue
+            result[ref] = artifact.tool_call_id
+        return result
+
+    async def _fresh_evidence_ids(
+        self, session_id: str, events: list[SessionEvent]
+    ) -> set[str]:
+        """该会话 freshness 判定为 fresh 的 ``evidence_id`` 集合（fail-closed）。
+
+        复用证据投影的求值机器（当前工作区 manifest + git HEAD + artifact
+        可读回/归属/已清理，与 ``evidence_state`` 同源）。求不出 freshness 时
+        ``evaluate_evidence_freshness`` 本身 fail-closed 判 stale ⇒ 该证据引用
+        **不阻断**删除（#368 独立审查 P0-1：stale 证据是"删掉会失去什么"的告知，
+        不是活引用）。
+        """
+        state = derive_evidence_state(events)
+        if not state.by_criterion:
+            return set()
+        root = session_cwd(events)
+        covered = sorted({
+            item.path
+            for records in state.by_criterion.values()
+            for record in records
+            for item in record.workspace_manifest.files
+        })
+        current_manifest = await self._current_evidence_manifest(root, covered)
+        needs_head = any(
+            record.base_head is not None
+            for records in state.by_criterion.values()
+            for record in records
+        )
+        current_head = await self._git_head(root) if needs_head else None
+        store = self._artifact_store_for(session_id)
+        needs_cleaned = any(
+            record.artifact_ref
+            for records in state.by_criterion.values()
+            for record in records
+        )
+        cleaned_refs: set[str] = (
+            await anyio.to_thread.run_sync(self._get_cleaned_artifacts, session_id)
+            if needs_cleaned
+            else set()
+        )
+        fresh: set[str] = set()
+        for records in state.by_criterion.values():
+            for record in records:
+                readable: bool | None = None
+                attribution_ok: bool | None = None
+                cleaned = False
+                if record.artifact_ref:
+                    readable, attribution_ok, cleaned = (
+                        await self._check_evidence_artifact(
+                            store, record, cleaned_refs=cleaned_refs
+                        )
+                    )
+                freshness = evaluate_evidence_freshness(
+                    record,
+                    current_manifest=current_manifest,
+                    current_head=current_head,
+                    artifact_readable=readable,
+                    artifact_attribution_ok=attribution_ok,
+                    artifact_cleaned=cleaned,
+                )
+                if freshness.status == "fresh":
+                    fresh.add(record.evidence_id)
+        return fresh
+
     async def _cleanup_state(
         self, session_id: str
-    ) -> tuple[dict[str, dict], dict[str, int], list[str], list[str], list[int] | None]:
-        """一次性算齐预览/执行/token 所需的确定状态（可达集、候选、未决、子会话、戳）。"""
-        metas = await self._session_meta_store.list_all()
-        children_by_parent: dict[str, list[str]] = {}
-        for meta in metas:
-            if meta.parent_session_id and meta.origin != "delegation":
-                children_by_parent.setdefault(meta.parent_session_id, []).append(
-                    meta.session_id
-                )
+    ) -> tuple[
+        dict[str, dict],
+        dict[str, int],
+        list[str],
+        dict[str, list[int] | None],
+        list[int] | None,
+    ]:
+        """一次性算齐预览/执行/token 所需的确定状态。
+
+        返回 ``(reachable, candidates, pending, children_stamps, events_stamp)``：
+        ``children_stamps`` 是直接 fork 子会话 id → 其 ``events.jsonl`` 的
+        ``(size, mtime_ns)``——token 必须覆盖子会话引用变化（#368 独立审查 P1-1：
+        子会话新增引用时父 events 不变，旧 token 不能漏）。
+        """
+        children_by_parent = await self._children_by_parent()
         reachable = await self._reachable_for_session(session_id, children_by_parent)
         candidates = await anyio.to_thread.run_sync(
             self._list_local_artifacts, session_id
@@ -4114,25 +4269,41 @@ class SessionService:
             if needs_reconcile(operation)
         )
         children = sorted(children_by_parent.get(session_id, []))
+        children_stamps = {
+            child_id: await anyio.to_thread.run_sync(
+                _stat_stamp, self._session_events_path(child_id)
+            )
+            for child_id in children
+        }
         stamp = await anyio.to_thread.run_sync(
             _stat_stamp, self._session_events_path(session_id)
         )
-        return reachable, candidates, pending, children, stamp
+        return reachable, candidates, pending, children_stamps, stamp
 
     @staticmethod
     def _snapshot_token_from_state(
         reachable: dict[str, dict],
         candidates: dict[str, int],
         pending: list[str],
-        children: list[str],
+        children_stamps: dict[str, list[int] | None],
         stamp: list[int] | None,
     ) -> str:
-        """可达集 + 各 ref 大小 + 未决 op + 子会话 + events.jsonl 戳 → 确定性 token。"""
+        """可达集各 ref 的 reasons + 大小 + 未决 op + 子会话事件戳 + events 戳 → token。
+
+        纳入**每个 ref 的 reasons**（不只是名集合）与**子会话 events.jsonl 戳**：
+        子会话新增引用会改变父会话可达 ref 的 reasons（``fork_child_reference``）或
+        子会话戳，两者任一变化都必须让旧 token 失效（#368 独立审查 P1-1）。
+        """
         material = {
-            "reachable": sorted(reachable),
+            "reachable": {
+                ref: sorted(reachable[ref]["reasons"]) for ref in sorted(reachable)
+            },
             "sizes": {ref: candidates[ref] for ref in sorted(candidates)},
             "pending_operations": pending,
-            "children": children,
+            "children": {
+                child_id: children_stamps[child_id]
+                for child_id in sorted(children_stamps)
+            },
             "events": stamp,
         }
         blob = json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")

@@ -23,7 +23,9 @@ from agent_harness.config import Settings
 from agent_harness.session import JsonlSessionStore, Session
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
+    ARTIFACT_EXTERNALIZED,
     EVIDENCE_RECORDED,
+    TOOL_CALL,
     TOOL_RESULT,
 )
 from agent_harness.session.service import (
@@ -127,7 +129,9 @@ async def test_reachable_scan_covers_all_reference_sources(make_session_service,
     session.append(ARTIFACT_CREATED, {"artifact_id": ref_created, "tool_call_id": "tc-9"})
 
     service = _make_service(make_session_service, settings, store)
-    reachable = await service._compute_reachable_artifacts(sid)
+    reachable = await service._reachable_for_session(
+        sid, await service._children_by_parent()
+    )
 
     assert ref_evidence in reachable
     assert ref_tool in reachable
@@ -155,7 +159,9 @@ async def test_multiple_referencers_single_entry(make_session_service, env):
     )
 
     service = _make_service(make_session_service, settings, store)
-    reachable = await service._compute_reachable_artifacts(sid)
+    reachable = await service._reachable_for_session(
+        sid, await service._children_by_parent()
+    )
     assert list(reachable) == [ref]
     assert len(reachable[ref]["referenced_by"]) == 2
 
@@ -235,6 +241,64 @@ async def test_preview_shape(make_session_service, env):
 
     blocked = {item["artifact_ref"]: item["reason"] for item in preview["blocked"]}
     assert blocked[ref_tool] == "referenced"
+
+
+# ── d2) P0-1：真实事件顺序下，出生证明 artifact 可清理（不再恒 blocked）────────
+
+
+@pytest.mark.asyncio
+async def test_birth_certificate_artifact_is_reclaimable(make_session_service, env):
+    """真实事件顺序 ``tool/call → artifact/externalized → tool/result`` + 证据引用。
+
+    生产里每个本地 artifact 都由溢出外置产生（``tooling/overflow.py`` 的
+    ``save(source_tool=..., tool_call_id=...)`` + deferred ``artifact/externalized``
+    事件 + tool result 带 ``artifact_ref``）。旧语义把这些"出生证明"事件判成硬引用
+    ⇒ 每个 artifact 永远 blocked、``affected`` 恒空。新语义：只剩出生证明（+ stale
+    证据）的 artifact 可清理，``affected`` 非空、``reclaimable_bytes > 0``。
+    """
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    # 走真实 LocalArtifactStore.save：tool_call_id 与后续事件一致
+    artifact = await LocalArtifactStore(settings, session_id=sid).save(
+        sid, "overflow-content", mime_type="text/plain",
+        source_tool="bash", tool_call_id="tc-real",
+    )
+    ref = artifact.artifact_id
+
+    # 真实事件顺序：tool/call → artifact/externalized → tool/result
+    session.append(
+        TOOL_CALL,
+        {"tool_call_id": "tc-real", "tool_name": "bash", "arguments": {}},
+    )
+    session.append(
+        ARTIFACT_EXTERNALIZED,
+        {
+            "artifact_id": ref, "session_id": sid, "source_tool": "bash",
+            "tool_call_id": "tc-real", "size": artifact.size,
+            "mime_type": "text/plain",
+        },
+    )
+    session.append(
+        TOOL_RESULT,
+        {"tool_call_id": "tc-real", "content": json.dumps({"artifact_ref": ref})},
+    )
+    # 一条证据引用该 artifact（fixture manifest 对不上 → fail-closed stale → 不阻断）
+    session.append(
+        EVIDENCE_RECORDED,
+        _evidence_payload(sid, evidence_id="ev-birth", criterion_id="ac-1",
+                          artifact_ref=ref),
+    )
+
+    service = _make_service(make_session_service, settings, store)
+    preview = await service.preview_artifact_cleanup(sid)
+
+    affected = {item["artifact_ref"]: item for item in preview["affected"]}
+    assert ref in affected, f"出生证明 artifact 应可清理，实际 blocked={preview['blocked']}"
+    assert preview["reclaimable_bytes"] > 0
+    assert affected[ref]["size"] == artifact.size
+    # 出生证明事件的标签仍在 referenced_by 里（用户看得见"删掉会失去什么"）
+    assert any("tc-real" in tag for tag in affected[ref]["referenced_by"])
 
 
 # ── e) snapshot_token 稳定性 ──────────────────────────────────────────────
@@ -353,6 +417,45 @@ async def test_execute_stale_token_after_new_reference(make_session_service, env
         await service.execute_artifact_cleanup(sid, preview["snapshot_token"], [ref])
 
 
+@pytest.mark.asyncio
+async def test_child_new_reference_invalidates_token(make_session_service, env):
+    """P1-1：fork 子会话新增引用 → 旧 token 执行必须 409。
+
+    父 events.jsonl 不变、可达集**名集合**也不变（ref 已因父会话出生证明在可达集里），
+    仅子会话引用变化——旧 token material 漏掉子会话事件与 ref reasons 时不会失效。
+    """
+    settings, store = env
+    parent = Session.start(store)
+    parent_id = parent.session_id
+    ref, _ = await _add_artifact(settings, parent_id, "parent-content")
+    # 父会话已有出生证明引用 → ref 已在可达集（名集合不因新增引用而变）
+    parent.append(
+        TOOL_RESULT,
+        {"tool_call_id": "tc-1", "content": json.dumps({"artifact_ref": ref})},
+    )
+
+    child_id = "child-cas"
+    child = Session.start(store, session_id=child_id)
+    metas = [
+        SessionMeta(
+            session_id=child_id, created_at="2026-10-06T00:00:00Z",
+            parent_session_id=parent_id, origin="fork",
+        )
+    ]
+    service = _make_service(make_session_service, settings, store, metas=metas)
+    preview = await service.preview_artifact_cleanup(parent_id)
+
+    # 子会话新增一条引用该 ref 的 tool/result → 旧 token 必须失效
+    child.append(
+        TOOL_RESULT,
+        {"tool_call_id": "tc-child", "content": json.dumps({"artifact_ref": ref})},
+    )
+    with pytest.raises(SnapshotTokenMismatch):
+        await service.execute_artifact_cleanup(
+            parent_id, preview["snapshot_token"], [ref]
+        )
+
+
 # ── i) blocked-在途 run ──────────────────────────────────────────────────
 
 
@@ -459,6 +562,19 @@ async def test_get_session_usage(make_session_service, env):
     # 证据引用不算阻断 → 两件都可在确认后清理
     assert usage["reclaimable_bytes"] == size + orphan_size
     assert usage["computed_at"]
+
+
+@pytest.mark.asyncio
+async def test_get_session_usage_busy_reclaimable_zero(make_session_service, env):
+    """P2：在途 run 时 usage 的 reclaimable_bytes 与 preview 口径一致（记 0）。"""
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    await _add_artifact(settings, sid, "orphan")
+
+    service = _make_service(make_session_service, settings, store, busy=True)
+    usage = await service.get_session_usage(sid)
+    assert usage["reclaimable_bytes"] == 0
 
 
 # ── preview mode 校验 ────────────────────────────────────────────────────
