@@ -163,6 +163,10 @@ export interface SessionSummary {
    *  `undefined`，于是已归档的行静默丢掉徽标、也躲过归档开关的过滤。
    *  这是「已归档」徽标与归档可见性过滤**唯一**的数据源。 */
   archived: boolean;
+  /** #752：事件日志是否损坏（零可解析事件但有损坏行）。**非可选**——与
+   *  `archived` 同款理由。前端据此渲染损坏徽标并引导至恢复入口，而不是让
+   *  会话静默消失。 */
+  corrupted: boolean;
 }
 
 /** `POST/DELETE /api/sessions/{id}/archive` 的成功回执（#171）。
