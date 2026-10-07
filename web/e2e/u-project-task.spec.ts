@@ -31,9 +31,10 @@ const ALPHA = 'D:/repos/alpha';
 const BETA = 'D:/repos/beta';
 
 /** 真后端 GET /api/permission-modes 的三档（id 是封闭枚举，未知值 → 422）。
- *  Composer 控制行（底部 dock）仍消费这份清单；弹窗（#367 选项 A）已不再使用
- *  权限档——留着它让「弹窗里没有权限档 picker」这条断言区分的是产品语义，
- *  而不是 mock 缺数据。 */
+ *  实际消费方是**弹窗之外**的 Composer dock：底部控制行用这份清单渲染权限
+ *  控件，清单为空时控件整个隐藏（Composer.tsx）。#367 选项 A 的弹窗只认自主度
+ *  三档（组件内置，不吃这条端点）——「弹窗里没有权限档 picker」的判别力来自
+ *  弹窗结构本身，与这条 mock 无关；留着它是为了让 dock 在每个用例页面上正常在场。 */
 const REAL_PERMISSION_MODES = [
   { id: 'read-only', display_name: '只读', description: '可读文件和运行只读工具，不可写入。', icon: 'lock' },
   {
@@ -201,7 +202,7 @@ test('AC12 422 留在确认面：后端 detail 原样可见、不关对话框、
   await box.getByRole('button', { name: '创建任务' }).click();
 
   // 后端 detail 原样出现在浮层里——submitTask 的 ownError 通道把失败原因交回弹窗
-  //（前缀「提交失败：」是 submitTask 的统一文案；「创建会话失败：」是旧空会话流程
+  // （前缀「提交失败：」是 submitTask 的统一文案；「创建会话失败：」是旧空会话流程
   // 的前缀，随 #367 退场）。用 toHaveText（整串相等）：后半段一旦被改写（哪怕改成
   // 更"友好"的话）这条断言必须变红。
   await expect(box.locator('.project-error')).toHaveText(`提交失败：目录不存在：${ALPHA}`, { timeout: 10_000 });
