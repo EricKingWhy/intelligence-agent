@@ -7637,3 +7637,16 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **证伪读数**：B 轴 3 组变异（#842 扫源 / D8-D11 就绪重读与 spawn 失败 / D9-D10 双守卫）各命中不同失败集，其中 D8/D11 两组共用 1 条失败面已按 §8.3 第 4 条登记「互不构成鉴别力证据」；A 轴 2 处 `web/app.py` 变异各 1 红。**未覆盖面如实登记**：D5 `host.ts` 竞态枚举、`web/app.py` 静态挂载穿越 fuzz、NSIS 非 ASCII 目录真机、真机安装包复跑。
 - **隔离自证**：两轴收尾 `git status --short` 均只有 `?? docs/gate/*.json`，副本内被改文件 `hash-object` 与 HEAD blob 一致；主工作树全程未被变异。
 - **状态**：本批 review coverage 完成（`scripts/check_review_coverage.py` rc=0 / 0 ❌）；**#365 仍 OPEN**。残余：①待用户裁决；②③归下一自然边界；**Run A / Run B 的两次独立完整通过仍未在新安装件上重跑**（先决条件 #846 未修）。明细 `docs/phase_status/2026-10.md`。
+
+## W-21 修复批 §8.8.5 修后重审（2026-10-08；范围 `e8b57282..779f8980`；台账行 `t365-w21-gate-fixes-rereview-e8b57282-779f8980.tsv`）
+
+- **What**：#365 修复批的 **§8.8.5 修后重审**（发现阶段双轴之后**唯一**的一轮）——Standards 轴与 Correctness 轴各一独立只读子代理，口径 = `AGENTS.md` §4.1 + `docs/agents/review-debug-playbook.md` Independent Review 分支。范围 = `e8b57282..779f8980` 共 **2 笔代码提交**（`648b724e` = #846 TUI 冷启动预算 30 s→90 s + 超时文案；`779f8980` = #847 launcher 转发子进程退出码 + tint 扫源加宽 + `preload.cts` 注释更正），tip = 冻结树 `779f8980`（tree `61e1c7bf3e3e5f7ae99b129000eccb7fcfee620d`）。
+- **派单前机械面（§8.2 第 4 条）**：裸全量 Gate-0 = **5/6**，唯一红 `coverage`（结构性例外：本轮 2 笔代码提交尚无审查行）；读数 `docs/gate/779f8980d4723e5190f3188f238ee1cbc1039c05.json`。
+- **上轮两条 finding 已闭合（变异红证）**：①tint 扫源加宽后，副本里给 `tui/src/views/chat.ts` 加单引号 `'rgb(40, 36, 40)'` 与模板串同值 → 用例**转红**（上轮同操作 3/3 绿）；②`preload.cts` 注释更正后去注释 token 流与改前**逐 token 相同**（语义惰性）。
+- **结论**：A 轴 **PASS-WITH-FINDINGS（P0=0 P1=0 P2=0 P3=1 P4=2）**；B 轴 **PASS-WITH-FINDINGS（P0=0 P1=0 P2=2 P3=4 P4=2）**。两轴均无 P0/P1 ⇒ 不触发 §8.3 第 4 条停止条件，也不触发 §8.8.3 失败回退。
+- **本轮新 findings（全部落在本轮新写的代码面上；处置 = 只登记不修）**：**P2** ①三分支交替式扫源在 `'a"rgb(40, 36, 40)"'` 上先命中单引号分支、吞掉内层双引号颜色 ⇒ **旧正则能命中、新正则回归漏检**；②探针钉的是 `literalValues` 而非扫描循环（变异 M2 把循环改回内联双引号匹配，探针仍 4/4 绿）⇒ 探针的红不构成鉴别力证据。**P3** ③`desktop/src/service-host.ts:96` 仍写 "The TUI budgets the same child at 30 s" 而 `tui/src/host.ts` 已 `90_000`（实读确认）；④`spawnServe` 只接 `onError`、无 `exit`/`close` 监听 ⇒ 子进程起来后死掉仍被当成「还在启动」，空等满 90 s 再误报「可能仍在启动…稍后重试即可附着它」（桌面壳对同一子进程早已用 `abortReason` 做到「一死立即结束等待」）；⑤超时文案「冷启动实测 36-42 s」与 `service-host.ts:88-90` 的 "not within 60 s" 矛盾；⑥`ia-tui.cmd` 守门只校文本不钉顺序（变异 M3 把捕获行移到子进程前，守门 17/17 仍绿）。**P4** ⑦扫源仍漏 `"1px solid rgb(40, 36, 40)"` 与 `"#ffff"`、注释内引号颜色误报（既有形态，非本批引入）。
+- **为什么只登记不修**：§8.8.5 明写「若除初始两轴之外该票已用满 1 轮修后重审，就**不再开第 3 轮**，改为**登记残余 + 请用户裁决**」。本票初始两轴 + 本轮 1 轮修后重审额度已用满 ⇒ 不再为这些 P2/P3/P4 开新一轮。已开 **#848** 承接 R1–R7，是否在跑 Run A / Run B 之前修**交用户裁决**。
+- **B 轴另核过并判「成立/存活」**：#847 退出码转发在真 `cmd.exe` 上对 0/1/2/7/42/256/-1/-1073741510/65536 逐一实测正确；`preload.cts` 改动语义惰性；spawn 失败路径仍立即中止。**未覆盖面如实登记**：真机安装件上的 TUI 冷启动实测（36–42 s 为开发机读数）、桌面与 TUI 同时在场 / 单独退出的竞态。
+- **隔离自证**：两轴收尾 `git status --short` 只余 `?? docs/gate/*.json`；全部变异在主工作树之外的副本（`D:/w21-work/rereview-A`、`rereview-B`）里做。
+- **台账与闸门**：新行 `docs/review_ledger.d/t365-w21-gate-fixes-rereview-e8b57282-779f8980.tsv`（三列，**794 字符** ≤ §8.5 的 800 硬上限）；`scripts/check_review_coverage.py` **rc=0 / 0 ❌**。
+- **状态**：**#365 仍 OPEN**。待用户裁决：①#848 的 R1–R7 是否在跑 Run A/B 前修；②D3 代理 P2（并入 #815 第三条路径）；③本分支 push + 开 PR；④PR #811 merge。明细 `docs/phase_status/2026-10.md`。
