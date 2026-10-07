@@ -107,7 +107,7 @@ curl -N -X POST 'http://127.0.0.1:8000/api/sessions?launch=false' \
 ## 核心概念
 
 - **Session（会话）** —— 工作的耐用单元。拥有自己的事件日志、checkpoint、预算和工作区。
-- **Run（运行）** —— 会话中的一次执行。Run 是 crash-safe 的：进程被杀后，`POST /recover`（或 CLI）能从最后一个 checkpoint 把会话带回来。
+- **Run（运行）** —— 会话中的一次执行。Run 是 crash-safe 的：进程被杀后，`POST /api/sessions/{id}/recover`（或 CLI）能从最后一个 checkpoint 把会话带回来。
 - **事件流** —— 每次状态变更都是一次 append 的类型化事件。没有原地修改；时间线本身就是会话。
 - **Fork（分叉）** —— 在任意点分支会话，尝试不同方案，原会话不受影响。
 - **Budget（预算）** —— 按 run 设置 token/turn 上限；超限由 harness 叫停，而不是账单给你惊喜。
@@ -152,7 +152,7 @@ curl -N -X POST 'http://127.0.0.1:8000/api/sessions?launch=false' \
 | `GET /api/sessions` | 会话列表 |
 | `DELETE /api/sessions/{id}` | 删除会话 |
 | `POST /api/sessions/{id}/messages` | 追问（queue / steer） |
-| `POST /resume` · `POST /forks` · `POST /recover` · `POST /cancel` | 恢复、分叉、崩溃恢复、取消 |
+| `POST /api/sessions/{id}/resume` · `/forks` · `/recover` · `/cancel` | 恢复、分叉、崩溃恢复、取消 |
 | `GET /api/sessions/{id}/events` · `/stream` | 事件日志 / 实时 SSE 订阅 |
 | `POST /api/sessions/{id}/approve` | 批准或拒绝待审批操作 |
 | `GET /api/sessions/{id}/budget` · `/context-usage` · `/lineage` | 预算、上下文用量、run 血缘 |
@@ -170,7 +170,7 @@ flowchart LR
     RM --> ES["append-only 事件存储\ncheckpoints · SQLite"]
 ```
 
-后端拥有耐用状态；CLI 和 Web UI 是同一套 API 上的薄客户端。崩溃恢复之所以成立，是因为 run 状态活在 checkpoint 和事件日志里——而不是进程内存里。
+后端拥有耐用状态；Web UI 是同一套 API 上的薄客户端。CLI 则直连本地 `JsonlSessionStore`（不经过 HTTP），受 `InstanceLock` 单写者锁约束——同一数据目录下第二个 CLI/Web 进程会被明确拒绝。崩溃恢复之所以成立，是因为 run 状态活在 checkpoint 和事件日志里——而不是进程内存里。
 
 ## 开发
 
