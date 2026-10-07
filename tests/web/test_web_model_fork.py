@@ -33,9 +33,6 @@ def client(tmp_path):
         _env_file=None,
         workspace_dir=str(tmp_path),
         model_api_key="sk-test",
-        # provider store 默认落 Path.home()/.agent-harness（#203），不钉会吃
-        # 机器级自定义供应商（同 test_web_models 的宿主实证）。
-        provider_store_path=str(tmp_path / "model-providers.json"),
         model_provider="deepseek",
         model_name="deepseek-chat",
         agent_models=_CATALOG_JSON,
@@ -175,7 +172,6 @@ class TestModelsEndpointShadowing:
             _env_file=None,
             workspace_dir=str(tmp_path),
             model_api_key="sk-test",
-            provider_store_path=str(tmp_path / "model-providers.json"),
             model_provider="deepseek",
             model_name="deepseek-chat",
             agent_models=(
