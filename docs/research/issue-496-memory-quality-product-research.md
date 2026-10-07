@@ -35,7 +35,7 @@
 
 ## 当前结论
 
-两个独立成熟产品支持证据引用、细节保真和结构化输出。它们不证明本项目应放宽 R5，也不证明当前 adjudication 失败可由特定 prompt 修复。继续施工前需先裁决 run5 事实冲突，并确认 fallback/adjudication failure 是否纳入 #496 的质量修复范围。
+用户 2026-10-08 已确认本轮只做原票面的 prompt 调优：允许调整 formation / adjudication 提示，不改 Runtime 的 R5 / #485 重试与 fail-closed 语义、模型、gold v1.9.0 或阈值。当前真实门禁显示 positive_procedure 已形成候选并通过 R5 选择门，但 adjudication 仍返回 NOOP；提示应明确阶段职责，不在 adjudication 重复 R5 取证。run5 报告与 issue 评论对该 case 的描述不一致，按报告原始数据记录，不能作为已命中证据。
 
 ## 可复核位置
 

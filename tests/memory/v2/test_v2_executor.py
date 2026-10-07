@@ -79,8 +79,21 @@ def test_formation_prompt_rejects_transient_content_and_retrieval_questions():
 
 def test_formation_prompt_explains_procedural_evidence_threshold():
     assert "two distinct successful tool-result refs" in _FORMATION_PROMPT
-    assert "A plain user approval alone does not satisfy R5" in _FORMATION_PROMPT
+    assert "A plain user approval without the actual procedure does not satisfy R5" in _FORMATION_PROMPT
+    assert "When the direct user message states a complete reusable procedure, cite an exact " \
+        "excerpt from that message so Runtime can check its trusted marker" in _FORMATION_PROMPT
     assert "Do not count a tool call without a successful result" in _FORMATION_PROMPT
+
+
+def test_adjudication_prompt_respects_the_runtime_evidence_gate():
+    assert "Candidates reaching this stage have already passed Runtime's deterministic R5 gate" \
+        in _ADJUDICATION_PROMPT
+    assert "do not re-run R5 or demand another qualifying event" in _ADJUDICATION_PROMPT
+    assert "Continue to apply the action rules below, including duplicate, conflict, evidence, " \
+        "policy, and relation checks" in _ADJUDICATION_PROMPT
+    assert "do not choose NOOP solely because its success condition is derived from the user's " \
+        "stated steps or purpose rather than separately executed" in _ADJUDICATION_PROMPT
+    assert "use ADD only when the existing ADD rule below applies" in _ADJUDICATION_PROMPT
 
 
 def test_formation_prompt_requires_procedure_fields_to_be_strings():
