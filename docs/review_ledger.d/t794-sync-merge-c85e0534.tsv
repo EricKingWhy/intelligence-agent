@@ -1,0 +1,1 @@
+2026-10-07	sync: merge origin/main（7f1f857f，PR #797 #364 挑战夹具 + PR #795 #781 flake 修复）into codebuddy/794-remember-comma。来侧改动面：challenge-fixture 工具/模板/docs + flake 修复，本分支文件零交集（本分支：src/agent_harness/memory/v2/commands.py + tests/memory/v2/test_794_comma_clause.py），自动合并零冲突。	85c24c0b39887abf7ca8e5babb1051f11d3097fb..c85e05344383ce295fac57efcddbdb8f278199d5
