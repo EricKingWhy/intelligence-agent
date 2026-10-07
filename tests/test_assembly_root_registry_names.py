@@ -123,6 +123,42 @@ async def test_pre_cas_name_set_matches_real_root_registry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("registration_only", [True, False], ids=["registration-only", "both"])
+async def test_registered_register_constraint_guidance_matches_its_registry(tmp_path, registration_only):
+    """#663 P2：装配出的 `register_constraint` 指引必须与**同一 registry** 的实情一致。
+
+    工具指引点名 `request_constraint_resolution` 却不注册它 = 一条照做必然报错的假指令
+    （CLI 入口就是 `include_constraint_resolution_tool=False`）。这段注入发生在
+    `_build_tooling`，所以只有**穿过装配**取到那个工具实例才能钉住它——默认构造的
+    guidance 断不到这条接线（`tests/tools/test_register_constraint.py` 只钉两端）。
+    """
+    settings = _settings(tmp_path, multiagent=False)
+    _, wiring = await assemble_wiring(settings)
+    session_id = "sess-register-guidance"
+    tooling = _build_tooling(
+        settings, wiring,
+        session_id=session_id, workspace=tmp_path / "workspaces" / session_id,
+        workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+        session_store=JsonlSessionStore(root=tmp_path / "sessions"),
+        agent_profile=None,
+        include_constraint_tools=True,
+        include_constraint_resolution_tool=not registration_only,
+    )
+    names = {tool.name for tool in tooling.registry.list()}
+    guidance = tooling.registry.get("register_constraint").prompt_guidance
+
+    # 指引说的每件事，registry 里都必须真的在册（反过来的方向由名字集用例钉）。
+    assert ("request_constraint_resolution" in guidance) == (
+        "request_constraint_resolution" in names
+    )
+    # 转接的是 resolver **自己的**话（不是装配层另抄一份）。
+    resolver_sentence = "a pending card does not authorize the conflicting action"
+    assert (resolver_sentence in guidance.lower()) == (
+        "request_constraint_resolution" in names
+    )
+
+
+@pytest.mark.asyncio
 async def test_root_reconcile_info_projection_matches_real_root_registry(tmp_path):
     """#357 W-13 R12-R14：`root_registry_reconcile_info`（零副作用）与真实装配对账。
 
