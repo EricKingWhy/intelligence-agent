@@ -1383,8 +1383,9 @@ export interface CleanupAffectedItem {
   referenced_by: string[];
 }
 
-/** 一条被挡下的原件：`reason` 是后端枚举（active_task / unreconciled_operation /
- *  referenced / fork_child_reference），前端只做中文解释，不改判据。 */
+/** 一条被挡下的原件：`reason` 是后端枚举（preview.blocked：active_task /
+ *  unreconciled_operation / referenced / fork_child_reference / evidence；
+ *  execute.not_deleted 另含 not_found / invalid），前端只做中文解释，不改判据。 */
 export interface CleanupBlockedItem {
   artifact_ref: string;
   reason: string;

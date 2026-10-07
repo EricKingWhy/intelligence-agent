@@ -32,6 +32,7 @@ from agent_harness.session.service import (
     ActiveRunConflict,
     SnapshotTokenMismatch,
 )
+from agent_harness.session.task import apply_task_definition, derive_task_state
 from agent_harness.storage.local_artifact import LocalArtifactStore
 from agent_harness.storage.operation import Operation, OperationState
 from agent_harness.storage.session_meta import SessionMeta
@@ -102,6 +103,54 @@ def _evidence_payload(session_id, *, evidence_id, criterion_id, artifact_ref=Non
             "files": [], "manifest_hash": "c" * 64, "progress_md_sha256": None,
         },
     }
+
+
+async def _session_with_evidence_artifact(settings, store, *, content="ev-content"):
+    """带 task 定义 + 出生证明 artifact + 引用它的证据的会话。
+
+    返回 ``(session, sid, ref, criterion_id)``；artifact 走真实 LocalArtifactStore
+    保存（tool_call_id 与后续事件一致 → 判出生证明，不阻断清理），证据引用因
+    fixture 无工作区 → fail-closed stale（不阻断）。供投影端到端用例复用。
+    """
+    session = Session.start(store)
+    sid = session.session_id
+    outcome = apply_task_definition(
+        session, task_text="清理证据原件", criteria=[{"text": "原件可被清理"}]
+    )
+    assert outcome.ok, outcome.reason
+    criterion_id = derive_task_state(session.events).criteria[0].item_id
+    artifact = await LocalArtifactStore(settings, session_id=sid).save(
+        sid, content, mime_type="text/plain", source_tool="bash", tool_call_id="tc-1"
+    )
+    ref = artifact.artifact_id
+    session.append(
+        TOOL_CALL, {"tool_call_id": "tc-1", "tool_name": "bash", "arguments": {}}
+    )
+    session.append(
+        ARTIFACT_EXTERNALIZED,
+        {
+            "artifact_id": ref, "session_id": sid, "source_tool": "bash",
+            "tool_call_id": "tc-1", "size": artifact.size, "mime_type": "text/plain",
+        },
+    )
+    session.append(
+        TOOL_RESULT,
+        {"tool_call_id": "tc-1", "content": json.dumps({"artifact_ref": ref})},
+    )
+    session.append(
+        EVIDENCE_RECORDED,
+        _evidence_payload(sid, evidence_id="ev-1", criterion_id=criterion_id,
+                          artifact_ref=ref),
+    )
+    return session, sid, ref, criterion_id
+
+
+def _freshness_reasons(state: dict, criterion_id: str) -> list[str]:
+    return [
+        reason
+        for item in state["by_criterion"][criterion_id]
+        for reason in item["freshness"]["reasons"]
+    ]
 
 
 # ── a) 可达集扫描 ─────────────────────────────────────────────────────────
@@ -352,7 +401,10 @@ async def test_execute_deletes_and_records(make_session_service, env):
     assert not (Path(settings.artifact_dir) / sid / ref).exists()
 
     cleaned_path = store._root / sid / "cleaned_artifacts.json"
-    assert json.loads(cleaned_path.read_text(encoding="utf-8")) == sorted([ref, orphan])
+    cleaned = json.loads(cleaned_path.read_text(encoding="utf-8"))
+    # #368 P3-1：cleaned 记录改 {ref: 清理代际（最大 seq）}
+    assert set(cleaned) == {ref, orphan}
+    assert all(isinstance(generation, int) for generation in cleaned.values())
 
 
 # ── g) token 不符 → SnapshotTokenMismatch ────────────────────────────────
@@ -456,6 +508,163 @@ async def test_child_new_reference_invalidates_token(make_session_service, env):
         )
 
 
+# ── e2) P3-3：token 绑定勾选 refs ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_changed_selection(make_session_service, env):
+    """P3-3：preview 拿 token 后换勾选（传不同 ref 子集）→ 旧 token 执行 409。
+
+    预览 token 绑定当时的 affected 全集；execute 用「请求 refs ∩ 当前可清理集」
+    复算，勾选不一致即 SnapshotTokenMismatch。
+    """
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    a, _ = await _add_artifact(settings, sid, "sel-a")
+    b, _ = await _add_artifact(settings, sid, "sel-b")
+
+    service = _make_service(make_session_service, settings, store)
+    preview = await service.preview_artifact_cleanup(sid)
+    assert {item["artifact_ref"] for item in preview["affected"]} == {a, b}
+
+    with pytest.raises(SnapshotTokenMismatch):
+        await service.execute_artifact_cleanup(sid, preview["snapshot_token"], [a])
+    # 全选（与预览一致）仍可执行
+    result = await service.execute_artifact_cleanup(
+        sid, preview["snapshot_token"], [a, b]
+    )
+    assert set(result["deleted"]) == {a, b}
+
+
+# ── e3) P3-6：preview 内 events 只读一遍 ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_preview_reads_events_once(make_session_service, env):
+    """P3-6：preview 只读一次 events.jsonl（_cleanup_state 复用给 evidence_invalidated）。"""
+    settings, store = env
+    session = Session.start(store)
+    sid = session.session_id
+    await _add_artifact(settings, sid, "once-content")
+
+    calls = {"n": 0}
+    real_read_events = store.read_events
+
+    def _counting(session_id):
+        calls["n"] += 1
+        return real_read_events(session_id)
+
+    store.read_events = _counting  # 实例属性遮蔽绑定方法，仅本用例计数
+    service = _make_service(make_session_service, settings, store)
+    await service.preview_artifact_cleanup(sid)
+    assert calls["n"] == 1, f"preview 应只读一次 events，实际 {calls['n']} 次"
+
+
+# ── e4) P3-7：execute → cleaned → 证据投影端到端 ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cleaned_artifact_projection_end_to_end(make_session_service, env):
+    """P3-7：preview→execute 清理带证据引用的 artifact→cleaned 落盘→投影判"原件已清理"。"""
+    settings, store = env
+    _session, sid, ref, criterion_id = await _session_with_evidence_artifact(
+        settings, store
+    )
+
+    service = _make_service(make_session_service, settings, store)
+    preview = await service.preview_artifact_cleanup(sid)
+    assert ref in {item["artifact_ref"] for item in preview["affected"]}
+
+    result = await service.execute_artifact_cleanup(
+        sid, preview["snapshot_token"], [ref]
+    )
+    assert result["deleted"] == [ref]
+
+    cleaned = json.loads(
+        (store._root / sid / "cleaned_artifacts.json").read_text(encoding="utf-8")
+    )
+    assert ref in cleaned
+
+    state = await service.evidence_state(sid)
+    reasons = _freshness_reasons(state, criterion_id)
+    assert any(f"artifact 原件已清理：{ref}" in reason for reason in reasons)
+    assert not any("artifact 不可读回" in reason for reason in reasons)
+
+
+# ── e5) P3-1：清理后同 id 重建 → 不判"原件已清理" ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_recreated_artifact_not_projected_as_cleaned(make_session_service, env):
+    """P3-1：清理 → 重建同内容（内容寻址同 id）→ 外部删除 → 投影判"不可读回"而非"已清理"。"""
+    settings, store = env
+    session, sid, ref, criterion_id = await _session_with_evidence_artifact(
+        settings, store
+    )
+
+    service = _make_service(make_session_service, settings, store)
+    preview = await service.preview_artifact_cleanup(sid)
+    result = await service.execute_artifact_cleanup(
+        sid, preview["snapshot_token"], [ref]
+    )
+    assert result["deleted"] == [ref]
+
+    # 重建同内容：LocalArtifactStore 内容寻址 → 同 id；append 一条 seq 更大的 creation 事件
+    rebuilt = await LocalArtifactStore(settings, session_id=sid).save(
+        sid, "ev-content", mime_type="text/plain", source_tool="bash", tool_call_id="tc-1"
+    )
+    assert rebuilt.artifact_id == ref
+    session.append(
+        ARTIFACT_EXTERNALIZED,
+        {
+            "artifact_id": ref, "session_id": sid, "source_tool": "bash",
+            "tool_call_id": "tc-1", "size": rebuilt.size, "mime_type": "text/plain",
+        },
+    )
+    # 外部删除（非清理流程）：无事件，投影只能靠"清理代际 vs creation seq"区分
+    (Path(settings.artifact_dir) / sid / ref).unlink()
+
+    state = await service.evidence_state(sid)
+    reasons = _freshness_reasons(state, criterion_id)
+    assert any(f"artifact 不可读回：{ref}" in reason for reason in reasons)
+    assert not any("原件已清理" in reason for reason in reasons)
+
+
+# ── e6) P3-8：delegation 子会话引用不阻断（判定结论 b）────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delegation_child_reference_does_not_block(make_session_service, env):
+    """P3-8 判定结论 (b)：委派子会话引用父 artifact 不阻断父清理。
+
+    委派 = spawn（fresh child，不继承父事件）；child 的 tool_scope 不含读回工具、
+    工具溢出在根命名空间被拒（fail-open）——不构成父原件的活引用。
+    """
+    settings, store = env
+    parent = Session.start(store)
+    parent_id = parent.session_id
+    ref, _ = await _add_artifact(settings, parent_id, "parent-content")
+
+    child_id = "child-deleg"
+    child = Session.start(store, session_id=child_id)
+    child.append(
+        TOOL_RESULT,
+        {"tool_call_id": "tc-c", "content": json.dumps({"artifact_ref": ref})},
+    )
+    metas = [
+        SessionMeta(
+            session_id=child_id, created_at="2026-10-06T00:00:00Z",
+            parent_session_id=parent_id, origin="delegation",
+        )
+    ]
+    service = _make_service(make_session_service, settings, store, metas=metas)
+    preview = await service.preview_artifact_cleanup(parent_id)
+
+    assert ref in {item["artifact_ref"] for item in preview["affected"]}
+    assert all(item["artifact_ref"] != ref for item in preview["blocked"])
+
+
 # ── i) blocked-在途 run ──────────────────────────────────────────────────
 
 
@@ -525,14 +734,48 @@ async def test_check_evidence_artifact_reports_cleaned(make_session_service, env
 
     service = _make_service(make_session_service, settings, store)
     record = SimpleNamespace(artifact_ref=ref, tool_call_id=None, task_session_id=sid)
-    assert await service._check_evidence_artifact(_KeyErrorStore(), record) == (
+    assert await service._check_evidence_artifact(_KeyErrorStore(), record, sid) == (
         False, None, True,
     )
 
     other = SimpleNamespace(
         artifact_ref="b" * 16, tool_call_id=None, task_session_id=sid
     )
-    assert await service._check_evidence_artifact(_KeyErrorStore(), other) == (
+    assert await service._check_evidence_artifact(_KeyErrorStore(), other, sid) == (
+        False, None, False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_evidence_artifact_fallback_uses_request_session(
+    make_session_service, env
+):
+    """P3-2：cleaned 兜底读**请求会话**集合，不再依赖 ``record.task_session_id``。
+
+    请求会话（A）有 cleaned 记录；记录声明的 task_session_id（B）没有——兜底必须
+    走 A（True）；把 session_id 换成 B 则 False，证明驱动量是 session_id 而非记录字段。
+    """
+    settings, store = env
+    session_a = Session.start(store)
+    sid_a = session_a.session_id
+    ref = "a" * 16
+    cleaned_dir = store._root / sid_a
+    cleaned_dir.mkdir(parents=True, exist_ok=True)
+    (cleaned_dir / "cleaned_artifacts.json").write_text(
+        json.dumps({ref: 0}), encoding="utf-8"
+    )
+    session_b = Session.start(store)
+    sid_b = session_b.session_id
+    assert sid_b != sid_a
+
+    service = _make_service(make_session_service, settings, store)
+    record = SimpleNamespace(artifact_ref=ref, tool_call_id=None, task_session_id=sid_b)
+    # 兜底走请求会话 A → 已清理
+    assert await service._check_evidence_artifact(_KeyErrorStore(), record, sid_a) == (
+        False, None, True,
+    )
+    # 请求会话换成 B（无 cleaned 记录）→ 未清理（证明不看 record.task_session_id）
+    assert await service._check_evidence_artifact(_KeyErrorStore(), record, sid_b) == (
         False, None, False,
     )
 

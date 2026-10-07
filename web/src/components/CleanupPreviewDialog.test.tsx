@@ -143,6 +143,45 @@ describe('#368 CleanupPreviewDialog', () => {
     expect(text()).not.toContain('全部清理');
   });
 
+  it('blocked/not_deleted 的 reason 全覆盖：evidence/not_found/invalid 均有中文解释', async () => {
+    const onPreview = vi.fn().mockResolvedValue(
+      preview({
+        affected: [],
+        blocked: [
+          { artifact_ref: 'art_ev', reason: 'evidence' },
+          { artifact_ref: 'art_nf', reason: 'not_found' },
+          { artifact_ref: 'art_inv', reason: 'invalid' },
+          { artifact_ref: 'art_unk', reason: 'mystery_reason' },
+        ],
+      }),
+    );
+    const result: CleanupResult = {
+      deleted: [],
+      failed: [],
+      not_deleted: [
+        { artifact_ref: 'art_nf2', reason: 'not_found' },
+        { artifact_ref: 'art_inv2', reason: 'invalid' },
+      ],
+    };
+    const onConfirm = vi.fn().mockResolvedValue(result);
+    render(
+      <CleanupPreviewDialog
+        target={{ sessionId: 's1' }}
+        onOpenChange={() => {}}
+        onPreview={onPreview}
+        onConfirm={onConfirm}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); });
+
+    // preview.blocked：三种此前未映射的 reason 都有中文解释
+    expect(text()).toContain('仍有新鲜证据引用');
+    expect(text()).toContain('原件已不存在');
+    expect(text()).toContain('引用格式非法');
+    // 未知原因原样显示，不编
+    expect(text()).toContain('mystery_reason');
+  });
+
   it('确认失败（如 409 快照过期）→ 错误留在浮层，不伪装成功', async () => {
     const onPreview = vi.fn().mockResolvedValue(preview());
     const onConfirm = vi.fn().mockRejectedValue(new Error('清理预览已过期，请重新预览'));

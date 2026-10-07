@@ -35,12 +35,20 @@ interface Props {
 }
 
 /** 后端 reason 枚举的中文解释；未知原因**原样显示**，不编（与 deleteSession 的
- *  "409 只靠 detail 区分、绝不自己编文案"同一纪律）。 */
+ *  "409 只靠 detail 区分、绝不自己编文案"同一纪律）。
+ *
+ *  全集对齐后端（#368 P3-5）：preview.blocked 用 active_task /
+ *  unreconciled_operation / fork_child_reference / referenced / evidence
+ *  （_CLEANUP_BLOCK_PRIORITY + 在途 run）；execute.not_deleted 另加
+ *  not_found / invalid（delete_local_artifacts 的返回分类）。 */
 const BLOCK_REASON_LABEL: Record<string, string> = {
   active_task: '有在途任务',
   unreconciled_operation: '有未对账操作',
   referenced: '仍被事件引用',
   fork_child_reference: '被 fork 子会话引用',
+  evidence: '仍有新鲜证据引用',
+  not_found: '原件已不存在',
+  invalid: '引用格式非法',
 };
 
 function blockReasonLabel(reason: string): string {
