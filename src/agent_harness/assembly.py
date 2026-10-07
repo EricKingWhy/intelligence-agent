@@ -304,7 +304,15 @@ def _build_tooling(
     # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
     registry.register(UpdatePlanTool())
     if include_constraint_tools:
-        registry.register(RegisterConstraintTool())
+        # 冲突指引**跟着 resolver 的在册状态走**：resolver 缺席的入口（CLI）拿到那段话
+        # 只会去调一个不存在的工具（#663 P2）。guidance 由 resolver 自己产出，这里只转接。
+        registry.register(RegisterConstraintTool(
+            resolution_guidance=(
+                RequestConstraintResolutionTool().prompt_guidance
+                if include_resolution_tool
+                else None
+            ),
+        ))
     if include_resolution_tool:
         registry.register(RequestConstraintResolutionTool())
 
@@ -702,7 +710,13 @@ async def build_runtime(
         # of the shared coding tool_scope so AgentFactory cannot grant them to children.
         registered_names = {tool.name for tool in registry.list()}
         if include_constraint_tools and RegisterConstraintTool().name not in registered_names:
-            registry.register(RegisterConstraintTool())
+            registry.register(RegisterConstraintTool(
+                resolution_guidance=(
+                    RequestConstraintResolutionTool().prompt_guidance
+                    if include_resolution_tool
+                    else None
+                ),
+            ))
         if include_resolution_tool and RequestConstraintResolutionTool().name not in registered_names:
             registry.register(RequestConstraintResolutionTool())
 

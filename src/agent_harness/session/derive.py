@@ -98,6 +98,52 @@ _USER_FACT_TYPES = frozenset(
 _USER_INPUT_FACT_TYPES = _USER_FACT_TYPES - {"authorization_revocation"}
 _USER_SOURCE_TYPES = frozenset({USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED})
 
+
+def cancelled_queue_event_ids(events: list[SessionEvent]) -> set[str]:
+    """`message/queued` 事件里被 `queue/cancelled` 取消掉的那些 event id。
+
+    顺序无关的纯集合运算（会话事件按 seq 重放，取消标记总在被取消项之后）。
+    `derive_protected_facts` 只认 `queue_id`（那边判的是 protected-fact 来源），
+    这里回 event id 是因为 `is_direct_user_input_event` 的入参就是 event id——
+    映射口径只写这一处，避免两处各写一遍。
+    """
+    cancelled_ids = {
+        event.data.get("queue_id")
+        for event in events
+        if event.type == QUEUE_CANCELLED
+        and isinstance(event.data.get("queue_id"), str)
+    }
+    if not cancelled_ids:
+        return set()
+    return {
+        event.event_id
+        for event in events
+        if event.type == MESSAGE_QUEUED
+        and event.data.get("queue_id") in cancelled_ids
+    }
+
+
+def superseded_event_seqs(events: list[SessionEvent]) -> set[int]:
+    """`message/superseded` 指向的 seq 集合（ADR-0030）。
+
+    `derive_messages_with_source_ranges`（投影）与 `is_direct_user_input_event`
+    （事件口径来源校验）共用这一份解析，避免两处各写一遍、日后判据漂移。
+    """
+    seqls: set[int] = set()
+    for event in events:
+        if event.type != MESSAGE_SUPERSEDED:
+            continue
+        raw = event.data.get("superseded_seq")
+        # 一行坏数据只损失该行（存储模块契约）：非 int 就跳过并警告，不 brick 恢复。
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            seqls.add(raw)
+        elif raw is not None:
+            logger.warning(
+                "MESSAGE_SUPERSEDED.superseded_seq 形状非法（%s），忽略该条",
+                type(raw).__name__,
+            )
+    return seqls
+
 #: W-06（#350）：经 POST /progress/resolve 确认的手改指令所带的用户消息标记。
 #: derive_protected_facts 把带此标记的 USER_MESSAGE 也收为 user_goal 来源——
 #: "确认后才更新真相"要求确认指令在后续重读（重启/压缩后）中对模型可见。
@@ -1232,19 +1278,7 @@ def derive_messages_with_source_ranges(
     # summary）；把 supersede 区间并进去会让下标错位，summary 落到错误的位置甚至不吐。
     # 跳过逻辑仍然只有一处（`is_shadowed`），没有第二套跳过实现。
     superseded_ranges: list[tuple[int, int]] = []
-    superseded_seqs: set[int] = set()
-    for event in events:
-        if event.type != MESSAGE_SUPERSEDED:
-            continue
-        raw = event.data.get("superseded_seq")
-        # 一行坏数据只损失该行（存储模块契约）：非 int 就跳过并警告，不 brick 恢复。
-        if isinstance(raw, int) and not isinstance(raw, bool):
-            superseded_seqs.add(raw)
-        elif raw is not None:
-            logger.warning(
-                "MESSAGE_SUPERSEDED.superseded_seq 形状非法（%s），忽略该条",
-                type(raw).__name__,
-            )
+    superseded_seqs = superseded_event_seqs(events)
     if superseded_seqs:
         user_seqs = [e.seq for e in events if e.type == USER_MESSAGE]
         last_seq = max((e.seq for e in events), default=0)
@@ -1571,22 +1605,39 @@ def derive_modified_file_paths(events: list[SessionEvent]) -> list[str]:
 def is_direct_user_input_event(
     events: list[SessionEvent], event_id: str,
 ) -> bool:
-    """Return whether an event is still an active direct user message."""
+    """Return whether an event is an active direct user message.
+
+    判据只看**事件事实**（类型 / 内容形状 / 注入与取代标记 / 取消标记），不依赖
+    "这条消息这次有没有被注入给模型"：
+
+    - compaction 只改注入预算，不删原始 session entry，也不改"这是用户原话"这一
+      事实。以模型可见投影为判据会让压缩后的 run 再也登记不了约束——投影里只剩
+      summary，原文那条事件被判成"非直接输入"（#663 P2）。
+      设计来源: pi 28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9
+      packages/coding-agent/docs/sessions.md:40（"Compaction adds a summary and keeps
+      recent messages. It does not delete the original session entries."）⇒ 来源靠
+      原始事件 id，而不是当前注入文本；
+    - `user/message(replace)` 是 compaction 摘要的替身，虽然是 `USER_MESSAGE`
+      但**不是**用户说的话；`injected_by` 同理（与 `derive_protected_facts` 的
+      `is_active_user_source` 同判，derive.py:715）；
+    - `steer/requested` / `message/queued` 是未投递请求，本函数只认 `USER_MESSAGE`；
+    - 带 `input_request_id` 的是澄清答复，不是新的约束来源；
+    - supersede 与排队取消是用户的意图行为，两者都让事件不再是可登记来源。
+    """
     event = next((item for item in events if item.event_id == event_id), None)
     if (
         event is None
         or event.type != USER_MESSAGE
         or event.data.get("injected_by")
+        or event.data.get("replace")
+        or "input_request_id" in event.data
         or not isinstance(event.data.get("content"), str)
         or not event.data["content"].strip()
     ):
         return False
-    return any(
-        source_range == (event.seq, event.seq)
-        and isinstance(message, HumanMessage)
-        and message.content == event.data["content"]
-        for message, source_range in derive_messages_with_source_ranges(events)
-    )
+    if event.event_id in cancelled_queue_event_ids(events):
+        return False
+    return event.seq not in superseded_event_seqs(events)
 
 
 def latest_direct_user_input_event(

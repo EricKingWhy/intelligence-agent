@@ -238,3 +238,32 @@ def test_possible_conflict_guidance_requests_clarification_without_deferring():
     assert "do not wait for the user to confirm the conflict" in guidance
     assert "a pending card does not authorize the conflicting action" in guidance
     assert "do not infer task-only scope from 'this task' phrasing alone" in guidance
+
+
+def test_register_guidance_never_names_a_resolver_that_is_not_registered():
+    """指引不许点名一个**物理不在册**的工具（#663 P2）。
+
+    `register_constraint` 在 CLI 入口就在册（`include_constraint_tools=True`），但同一
+    入口显式关掉了澄清工具（`include_constraint_resolution_tool=False`——CLI 收不到那道
+    答复）。指引里写死"去调 request_constraint_resolution"，模型照做只会撞一个不存在的
+    工具名。所以那段话由装配层在 resolver 真在册时注入，guidance 自己不知道 registry 里
+    还有谁。
+    """
+    # 默认（未接线）= 不点名 resolver。
+    assert "request_constraint_resolution" not in RegisterConstraintTool().prompt_guidance
+
+    # 常驻判据不受影响（与 registry 里还有谁无关的那部分）。
+    guidance = RegisterConstraintTool().prompt_guidance.lower()
+    assert guidance.startswith("classify the current direct user message before calling")
+    assert "only merge after all tests pass" in guidance
+    assert "rejected means nothing was saved" in guidance
+
+    # resolver 在册时冲突指引必须回来，且转接的是 resolver **自己的**话。
+    wired = RegisterConstraintTool(
+        resolution_guidance=RequestConstraintResolutionTool().prompt_guidance,
+    ).prompt_guidance.lower()
+    assert "call request_constraint_resolution once instead" in wired
+    assert "a pending card does not authorize the conflicting action" in wired
+    assert "do not infer task-only scope from 'this task' phrasing alone" in wired
+    # 只出现一次（装配层注入 ≠ 本文件再抄一份）。
+    assert wired.count("a pending card does not authorize the conflicting action") == 1
