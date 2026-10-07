@@ -1363,6 +1363,138 @@ export function describeSessionError(error: unknown, fallback: string): string {
   return message || fallback;
 }
 
+// ── 证据保留 / 空间占用 / 清理（#368 W-24）──
+
+/** 会话存储占用（GET /api/sessions/{id}/usage）——**只读投影**，不缓存。
+ *  `reclaimable_bytes` 是"当前可回收"的估算（不可回收项不在此列，见 blocked）。 */
+export interface SessionUsage {
+  events_bytes: number;
+  artifacts_bytes: number;
+  progress_bytes: number;
+  artifact_count: number;
+  reclaimable_bytes: number;
+  computed_at: string;
+}
+
+/** 一条可清理原件：`referenced_by` 是仍引用它的事件 / 证据 id（会话内多引用者）。 */
+export interface CleanupAffectedItem {
+  artifact_ref: string;
+  size: number;
+  referenced_by: string[];
+}
+
+/** 一条被挡下的原件：`reason` 是后端枚举（active_task / unreconciled_operation /
+ *  referenced / fork_child_reference），前端只做中文解释，不改判据。 */
+export interface CleanupBlockedItem {
+  artifact_ref: string;
+  reason: string;
+}
+
+/** 清理预览（POST …/cleanup/preview）：`snapshot_token` 必须原样回传给 execute。 */
+export interface CleanupPreview {
+  snapshot_token: string;
+  affected: CleanupAffectedItem[];
+  evidence_invalidated: string[];
+  reclaimable_bytes: number;
+  blocked: CleanupBlockedItem[];
+}
+
+/** 清理执行回执（POST …/cleanup/execute）：三个字段**分开展示**，不合并成一句"完成"。
+ *  `deleted` = 真删了；`failed` = 后端尝试删但失败；`not_deleted` = 执行时被挡下
+ *  （与预览的 blocked 同枚举）。任何非空都必须在界面上明示，绝不谎报"全部清理"。 */
+export interface CleanupResult {
+  deleted: string[];
+  failed: string[];
+  not_deleted: CleanupBlockedItem[];
+}
+
+/** 形状防御的三个小工具（与 deleteSession 同一纪律）：类型不符即回落安全默认值，
+ *  绝不让读字段抛 TypeError 把"读回执失败"伪装成"操作失败"。 */
+function asNum(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+function asStr(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
+function asStrArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+function asAffectedItem(raw: unknown): CleanupAffectedItem {
+  const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return { artifact_ref: asStr(o.artifact_ref), size: asNum(o.size), referenced_by: asStrArray(o.referenced_by) };
+}
+function asBlockedItem(raw: unknown): CleanupBlockedItem {
+  const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return { artifact_ref: asStr(o.artifact_ref), reason: asStr(o.reason) };
+}
+
+/** GET /api/sessions/{id}/usage —— 会话存储占用（只读）。
+ *
+ *  形状防御照 deleteSession：非 2xx 抛 SessionError（detail 原样，缺失用中文兜底 +
+ *  状态码）；200 但字段缺失 / 类型不对 ⇒ 给安全默认值，不让调用方拿到 TypeError。 */
+export async function getSessionUsage(sessionId: string): Promise<SessionUsage> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/usage`);
+  if (!res.ok) throw await sessionError(res, '读取存储占用失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    events_bytes: asNum(body.events_bytes),
+    artifacts_bytes: asNum(body.artifacts_bytes),
+    progress_bytes: asNum(body.progress_bytes),
+    artifact_count: asNum(body.artifact_count),
+    reclaimable_bytes: asNum(body.reclaimable_bytes),
+    computed_at: asStr(body.computed_at),
+  };
+}
+
+/** POST /api/sessions/{id}/cleanup/preview —— 取一份可清理预览（**不改任何东西**）。
+ *  `mode` 默认 `"unreferenced"`（后端唯一模式）；返回的 `snapshot_token` 是执行时的
+ *  并发闸门：预览与执行之间若有新事件改变可达集，execute 会以 409 拒绝（快照过期）。 */
+export async function previewCleanup(
+  sessionId: string,
+  mode = 'unreferenced',
+): Promise<CleanupPreview> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/cleanup/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw await sessionError(res, '清理预览失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    snapshot_token: asStr(body.snapshot_token),
+    affected: Array.isArray(body.affected) ? body.affected.map(asAffectedItem) : [],
+    evidence_invalidated: asStrArray(body.evidence_invalidated),
+    reclaimable_bytes: asNum(body.reclaimable_bytes),
+    blocked: Array.isArray(body.blocked) ? body.blocked.map(asBlockedItem) : [],
+  };
+}
+
+/** POST /api/sessions/{id}/cleanup/execute —— 删除选中的原件（**不可恢复**）。
+ *
+ *  `snapshotToken` 必须是同一份预览返回的 token；过期 → 409，跨源 → 403，两者都由
+ *  sessionError 带状态码上抛，调用方据此分支（不吞、不猜）。 */
+export async function executeCleanup(
+  sessionId: string,
+  snapshotToken: string,
+  artifactRefs: string[],
+): Promise<CleanupResult> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/cleanup/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ snapshot_token: snapshotToken, artifact_refs: artifactRefs }),
+  });
+  if (!res.ok) throw await sessionError(res, '清理原件失败');
+  const raw: unknown = await res.json().catch(() => null);
+  const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    deleted: asStrArray(body.deleted),
+    failed: asStrArray(body.failed),
+    not_deleted: Array.isArray(body.not_deleted) ? body.not_deleted.map(asBlockedItem) : [],
+  };
+}
+
 // ── Recover（后端新端点，df4f7d8 §1.1）──
 
 /** 恢复失败的可区分错误：status 404 = 会话不存在；409 = 存在需人工裁决的高风险

@@ -46,6 +46,16 @@ export function formatRelativeTime(iso: string | null, now: number = Date.now())
   return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
+/** 字节数人性化（#368 W-24）：B / KB / MB / GB，一位小数。
+ *  非有限 / 负值返回 '—'——宁可显"不可得"，也不编一个像样的数字。 */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 /** 不可信大输出的展示截断上限（字符）。20k 字符远超正常阅读需要，
  *  又足以拦住 MB 级 stdout / JSON 把主线程卡死的前端 DoS（安全审查发现 1）。 */
 export const DISPLAY_TRUNCATE_LIMIT = 20_000;
