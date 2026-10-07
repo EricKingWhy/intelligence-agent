@@ -5182,11 +5182,9 @@ class SessionService:
             for record in records:
                 readable: bool | None = None
                 attribution_ok: bool | None = None
+                cleaned = False
                 if record.artifact_ref:
-                    # _cleaned（#368 W-24 Batch B）：原件已被显式清理的标记。Batch C 的
-                    # evidence.py 加参后再透传进 freshness；本批只保证判定可得，不改变
-                    # 现有 stale 语义（清理后仍是"不可读回"→ stale）。
-                    readable, attribution_ok, _cleaned = (
+                    readable, attribution_ok, cleaned = (
                         await self._check_evidence_artifact(store, record)
                     )
                 freshness = evaluate_evidence_freshness(
@@ -5195,6 +5193,7 @@ class SessionService:
                     current_head=current_head,
                     artifact_readable=readable,
                     artifact_attribution_ok=attribution_ok,
+                    artifact_cleaned=cleaned,
                 )
                 items.append(
                     {
@@ -5266,8 +5265,8 @@ class SessionService:
           证据无 ``tool_call_id`` → 跳过该维度。
         - cleaned（第三元组项）：``store.load`` 抛 ``KeyError``（不存在）且该 ref 在
           本会话 cleaned 集合里 ⇒ 原件是被**显式清理**的，而非从未存在 / 外部丢失。
-          其余分支恒 False。Batch C 的 ``evaluate_evidence_freshness`` 消费它产出
-          "原件已清理"枚举；本批仅保证判定可得。
+          其余分支恒 False。``evaluate_evidence_freshness`` 消费它产出"原件已清理"
+          枚举（与"不可读回/损坏"区分）。
         """
         if store is None:
             return False, None, False
