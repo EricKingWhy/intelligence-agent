@@ -40,6 +40,7 @@ import {
 import { approvalDecision, approvalLines } from "./views/approval.ts";
 import { sessionSelectList } from "./views/sessionselect.ts";
 import { renderPauseLines, renderResumeHint } from "./views/pause.ts";
+import { renderPlanList } from "./views/plan.ts";
 
 const RECONNECT_DELAY_MS = 1000;
 
@@ -78,6 +79,10 @@ export class TuiApp {
   private readonly statusText = new Text("");
   private pauseBannerText: Text | null = null;
   private approvalText: Text | null = null;
+  /** 进度清单横幅（footer 常驻；`task/plan_updated` 投影，零项不挂）。 */
+  private planText: Text | null = null;
+  /** 完成组折叠开关（`ctrl+t` 切换；对应 Claude Code `showExpandedTodos`）。 */
+  private planExpanded = false;
   private renderedTurns: RenderedTurn[] = [];
   private renderedOrphanCount = 0;
   private running = true;
@@ -116,6 +121,13 @@ export class TuiApp {
     if (data === "\x03") {
       // Ctrl+C：只停 TUI。不调 /cancel（在途 Tool 跑到稳定边界由服务端收口）。
       void this.quit();
+      return { consume: true };
+    }
+    if (data === "\x14") {
+      // Ctrl+T：切换进度清单完成组的折叠/展开（Claude Code app:toggleTodos 同款）。
+      this.planExpanded = !this.planExpanded;
+      this.renderPlan();
+      this.tui.requestRender();
       return { consume: true };
     }
     // 批准内联问答：TTY y/N 决策；非 TTY 在 renderApproval 处默认拒绝。
@@ -336,6 +348,7 @@ export class TuiApp {
     this.footerContainer.clear();
     this.pauseBannerText = null;
     this.approvalText = null;
+    this.planText = null;
     this.renderedOrphanCount = 0;
     if (this.state.turns.length === 0) {
       // 空状态：短文案 + 命令提示，不堆装饰框
@@ -349,6 +362,7 @@ export class TuiApp {
     this.rebuildChat();
     this.renderedOrphanCount = 0;
     this.renderOrphanArtifacts();
+    this.renderPlan();
     this.renderPauseBanner();
     this.renderApproval();
     this.refreshStatus();
@@ -384,6 +398,7 @@ export class TuiApp {
     }
     this.rebuildChat();
     this.renderOrphanArtifacts();
+    this.renderPlan();
     this.renderPauseBanner();
     this.renderApproval();
     this.refreshStatus();
@@ -404,6 +419,25 @@ export class TuiApp {
         ),
       );
       this.renderedOrphanCount += 1;
+    }
+  }
+
+  /** 进度清单横幅：完成组折叠/展开由 `ctrl+t` 控制；零项不挂（不留空壳）。 */
+  private renderPlan(): void {
+    const lines = renderPlanList(this.state.plan, this.theme, { expanded: this.planExpanded });
+    if (lines.length === 0) {
+      if (this.planText !== null) {
+        this.footerContainer.removeChild(this.planText);
+        this.planText = null;
+      }
+      return;
+    }
+    const text = lines.join("\n");
+    if (this.planText === null) {
+      this.planText = new Text(text);
+      this.footerContainer.addChild(this.planText);
+    } else {
+      this.planText.setText(text);
     }
   }
 
