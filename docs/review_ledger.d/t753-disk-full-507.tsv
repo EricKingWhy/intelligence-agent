@@ -1,0 +1,1 @@
+2026-10-07	fix(web): #753 磁盘满返回 503（实现者自检）：全局异常处理接入 storage_http_status（OSError ENOSPC/EFBIG、sqlite3 SQLITE_FULL/IOERR → 503 + 中文 detail）；tests/web/test_disk_full_507.py 3/3 通过；ruff 绿；gate0 6/6。	930877df2d0a64248b75cd8b8d3b423eeb22ace7..e5fa4fd729ee0e294c83443f08aab6b342c16a70
