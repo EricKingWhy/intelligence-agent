@@ -35,7 +35,7 @@
 
 ## 当前结论
 
-用户 2026-10-08 已确认本轮只做原票面的 prompt 调优：允许调整 formation / adjudication 提示，不改 Runtime 的 R5 / #485 重试与 fail-closed 语义、模型、gold v1.9.0 或阈值。当前真实门禁显示 positive_procedure 已形成候选并通过 R5 选择门，但 adjudication 仍返回 NOOP；提示应明确阶段职责，不在 adjudication 重复 R5 取证。run5 报告与 issue 评论对该 case 的描述不一致，按报告原始数据记录，不能作为已命中证据。
+用户 2026-10-08 批准仅做原票面 prompt 调优；冻结 gold v1.9.0、模型、阈值及 R5 / #485 语义下，本轮修改的完整门禁仍失败（`docs/evidence/memory-v2-real-gold-v1.9.0-d0804a1be5dd-5a2ddcfb.json`）。补充单例诊断揭示 user/tool `source_authority` 与冻结 gold 预期存在差异；详见 `docs/phase_status/2026-10.md` 的 #496 条目。本轮未改 gold 或阈值，也不据单例诊断宣称达标。
 
 ## 可复核位置
 
