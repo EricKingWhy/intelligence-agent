@@ -353,6 +353,53 @@ export function assertNsisIncludePlacement(source, includedFile) {
  * @param options.readJson - injectable file reader (unit-testable off-Windows).
  * @param options.existsSync - injectable existence check.
  */
+/**
+ * Assert every `LangString` in installer.nsh is behind its own language guard
+ * (W-21 D7 / #831).
+ *
+ * `LangString <name> ${LANG_X}` names a language; when that language is not
+ * loaded in the compile at hand, makensis emits `warning 7025` and
+ * electron-builder turns makensis warnings into errors. The W-16 smoke builds
+ * one language per run (`installerLanguages: [language]`), which is how a
+ * bilingual, unguarded block aborted the uninstaller pass of its en_US run.
+ * `!ifdef LANG_X` is the portable guard: `customHeader` is inserted after
+ * `addLangs` (app-builder-lib installer.nsi:43 then :45) and
+ * `LoadLanguageFile` defines `${LANG_<NAME>}` (measured on makensis 3.0.4.1).
+ * Only a real makensis run exposes a missing guard, so it is asserted here.
+ */
+export function assertNsisLangStringGuards(source) {
+  // Each open !if/!ifdef/!ifndef pushes the language its body is conditional
+  // on, or null for unrelated conditions; !else clears the current level.
+  const guards = []
+  const unguarded = []
+  for (const [index, raw] of source.split(/\r?\n/).entries()) {
+    if (/^\s*(;|$)/.test(raw)) continue
+    const languageGuard = /^\s*!\s*ifn?def\s+(LANG_[A-Z0-9_]+)\s*$/.exec(raw)
+    if (languageGuard) {
+      guards.push(languageGuard[1])
+    } else if (/^\s*!\s*if(n?def)?\b/.test(raw)) {
+      guards.push(null)
+    } else if (/^\s*!\s*else\b/.test(raw)) {
+      if (guards.length > 0) guards[guards.length - 1] = null
+    } else if (/^\s*!\s*endif\b/.test(raw)) {
+      guards.pop()
+    } else {
+      const declaration = /^\s*LangString\s+\S+\s+\$\{(LANG_[A-Z0-9_]+)\}/.exec(raw)
+      if (declaration && !guards.includes(declaration[1])) {
+        unguarded.push(`line ${index + 1}: ${declaration[1]}`)
+      }
+    }
+  }
+  if (unguarded.length > 0) {
+    throw new Error(
+      `installer.nsh: LangString declarations missing their own language guard ` +
+        `(${unguarded.join(', ')}) — a language this build does not load fails the makensis ` +
+        'run with `warning 7025: is not a valid language id`, which electron-builder treats as ' +
+        'an error (#831). Wrap each language in `!ifdef LANG_<NAME>`',
+    )
+  }
+}
+
 export function assertTuiRuntimeClosure({
   resourcesDir,
   appOutDir,
@@ -564,10 +611,9 @@ async function main() {
       throw new Error(`missing installer input: ${required}`)
     }
   }
-  assertNsisIncludePlacement(
-    readFileSync(join(installerDir, 'installer.nsh'), 'utf8'),
-    'installer-directories.nsh',
-  )
+  const installerNshSource = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
+  assertNsisIncludePlacement(installerNshSource, 'installer-directories.nsh')
+  assertNsisLangStringGuards(installerNshSource)
   console.log('installer inputs OK')
 
   if (compileOnly) {

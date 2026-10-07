@@ -8,11 +8,19 @@
  *   - the same include without `!ifndef BUILD_UNINSTALLER` broke the uninstaller
  *     build with `warning 6010: install function "iaPromoteApplication" not
  *     referenced` (the second failure, after the first was fixed).
+ *
+ * #831 (W-21 D7) added the third rule: a `LangString` for a language the build
+ * does not load is `warning 7025`, fatal under electron-builder — the W-16
+ * smoke builds one language per run and aborted there.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
-import { assertNsisIncludePlacement } from '../scripts/build-windows-installer.mjs'
+import {
+  assertNsisIncludePlacement,
+  assertNsisLangStringGuards,
+} from '../scripts/build-windows-installer.mjs'
 
 const INCLUDED = 'installer-directories.nsh'
 
@@ -63,5 +71,66 @@ describe('assertNsisIncludePlacement', () => {
   it('ignores commented-out includes', () => {
     const commented = ['; !include "${__FILEDIR__}\\installer-directories.nsh"', FIXED].join('\n')
     assert.doesNotThrow(() => assertNsisIncludePlacement(commented, INCLUDED))
+  })
+})
+
+const BROKEN_UNGUARDED_LANGSTRINGS = [
+  '!macro customHeader',
+  '  LangString iaPerUserOnly ${LANG_ENGLISH} "english text"',
+  '  LangString iaPerUserOnly ${LANG_SIMPCHINESE} "中文文案"',
+  '!macroend',
+].join('\n')
+
+const GUARDED_LANGSTRINGS = [
+  '!macro customHeader',
+  '  !ifdef LANG_ENGLISH',
+  '    LangString iaPerUserOnly ${LANG_ENGLISH} "english text"',
+  '  !endif',
+  '  !ifdef LANG_SIMPCHINESE',
+  '    LangString iaPerUserOnly ${LANG_SIMPCHINESE} "中文文案"',
+  '  !endif',
+  '!macroend',
+].join('\n')
+
+describe('assertNsisLangStringGuards', () => {
+  it('rejects a LangString whose language is not guarded', () => {
+    assert.throws(
+      () => assertNsisLangStringGuards(BROKEN_UNGUARDED_LANGSTRINGS),
+      /line 3: LANG_SIMPCHINESE.*!ifdef LANG_<NAME>/s,
+    )
+  })
+
+  it('rejects a LangString guarded by a different language', () => {
+    const wrongGuard = [
+      '!ifdef LANG_ENGLISH',
+      '  LangString iaPerUserOnly ${LANG_SIMPCHINESE} "中文文案"',
+      '!endif',
+    ].join('\n')
+    assert.throws(() => assertNsisLangStringGuards(wrongGuard), /LANG_SIMPCHINESE/)
+  })
+
+  it('does not accept a guard that a sibling !else opened up', () => {
+    const elseBranch = [
+      '!ifdef LANG_ENGLISH',
+      '  ; english branch',
+      '!else',
+      '  LangString iaPerUserOnly ${LANG_SIMPCHINESE} "中文文案"',
+      '!endif',
+    ].join('\n')
+    assert.throws(() => assertNsisLangStringGuards(elseBranch), /LANG_SIMPCHINESE/)
+  })
+
+  it('accepts per-language guards', () => {
+    assert.doesNotThrow(() => assertNsisLangStringGuards(GUARDED_LANGSTRINGS))
+  })
+
+  it('ignores commented-out declarations', () => {
+    const commented = ['; LangString iaPerUserOnly ${LANG_SIMPCHINESE} "中文文案"', GUARDED_LANGSTRINGS].join('\n')
+    assert.doesNotThrow(() => assertNsisLangStringGuards(commented))
+  })
+
+  it('accepts the shipped installer.nsh', () => {
+    const source = readFileSync(new URL('../installer/installer.nsh', import.meta.url), 'utf8')
+    assert.doesNotThrow(() => assertNsisLangStringGuards(source))
   })
 })
