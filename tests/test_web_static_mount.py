@@ -7,6 +7,7 @@ it as ``Settings.web_dist_dir`` (env ``WEB_DIST_DIR``); the default stays
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -40,6 +41,55 @@ def test_absent_directory_is_a_noop(tmp_path: Path) -> None:
 
     app = FastAPI()
     mount_static(app, str(tmp_path / "absent"))
+    assert TestClient(app).get("/").status_code == 404
+
+
+def test_default_prefers_the_build_next_to_the_bundled_runtime(monkeypatch, tmp_path: Path) -> None:
+    """W-21 D5 (#817): ``<resources>/python/python.exe`` ⇒ ``<resources>/web``.
+
+    The service started by the TUI (or attached to by the shell) must serve the
+    desktop window without anyone telling it where the install put the renderer
+    build, so the default derives it from the runtime's own location.
+    """
+    from agent_harness.web import app as app_module
+
+    resources = tmp_path / "resources"
+    built = _built_ui(resources)
+    interpreter = resources / "python" / ("python.exe" if os.name == "nt" else "python")
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    monkeypatch.setattr(app_module.sys, "executable", str(interpreter))
+    monkeypatch.setattr(app_module, "_repo_web_dist", lambda: tmp_path / "no-repo-build")
+
+    app = FastAPI()
+    app_module.mount_static(app)
+    index = TestClient(app).get("/")
+    assert index.status_code == 200
+    assert "staged-ui" in index.text
+    assert app_module._bundled_web_dist() == built
+
+
+def test_default_falls_back_to_the_repo_build(monkeypatch, tmp_path: Path) -> None:
+    """dev 形态：运行时旁边没有产物时仍用 ``<repo>/web/dist``（既有行为）。"""
+    from agent_harness.web import app as app_module
+
+    built = _built_ui(tmp_path / "repo")
+    monkeypatch.setattr(app_module, "_bundled_web_dist", lambda: tmp_path / "absent")
+    monkeypatch.setattr(app_module, "_repo_web_dist", lambda: built)
+
+    app = FastAPI()
+    app_module.mount_static(app)
+    assert TestClient(app).get("/").status_code == 200
+
+
+def test_explicit_directory_never_falls_back(monkeypatch, tmp_path: Path) -> None:
+    """显式目录说话算话：目录不存在就是不挂载，不回落到任何默认候选（W-21 D3 语义）。"""
+    from agent_harness.web import app as app_module
+
+    monkeypatch.setattr(app_module, "_bundled_web_dist", lambda: _built_ui(tmp_path / "bundle"))
+
+    app = FastAPI()
+    app_module.mount_static(app, str(tmp_path / "absent"))
     assert TestClient(app).get("/").status_code == 404
 
 

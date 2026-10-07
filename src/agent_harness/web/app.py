@@ -13,6 +13,7 @@ import importlib.metadata
 import json
 import logging
 import sqlite3
+import sys
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from functools import partial
@@ -3496,12 +3497,35 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     return app
 
 
+def _repo_web_dist() -> Path:
+    """仓库内的前端产物：``<repo>/web/dist``（开发与生产部署的既有默认）。"""
+    return Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
+
+
+def _bundled_web_dist() -> Path:
+    """打包形态的前端产物：与随包运行时同级的 ``<resources>/web``。
+
+    W-21 D5（#817）：桌面外壳把运行时放在 ``<resources>/python/python.exe``、
+    渲染层放在 ``<resources>/web``。这里只用**运行时自身位置**推导，不查注册表
+    也不猜安装根，因此任何由该运行时启动的服务（外壳、TUI、手工命令行）都能直接
+    服务桌面窗口；dev 形态下该目录不存在，自然回落到 ``<repo>/web/dist``。
+    """
+    return Path(sys.executable).resolve().parent.parent / "web"
+
+
+def _default_web_dist_candidates() -> list[Path]:
+    """未显式指定产物目录时的候选顺序：随包产物优先，其次仓库产物。"""
+    return [_bundled_web_dist(), _repo_web_dist()]
+
+
 def mount_static(app: FastAPI, web_dist_dir: str | None = None) -> None:
     """挂载前端构建产物为静态资源。
 
-    ``web_dist_dir`` 缺省/空串时用仓库内 ``<repo>/web/dist``（既有行为）；非空
-    时用调用方给的目录——Electron 外壳经 ``Settings.web_dist_dir``（env
-    ``WEB_DIST_DIR``）传安装目录里的产物，服务端不去猜安装布局（W-21 D3）。
+    ``web_dist_dir`` 非空时只用该目录（调用方说了算：Electron 外壳经
+    ``Settings.web_dist_dir`` / env ``WEB_DIST_DIR`` 传安装目录里的产物，W-21 D3）；
+    缺省/空串时按 ``_default_web_dist_candidates()`` 取第一个存在的目录——随包
+    运行时旁的 ``<resources>/web``，否则 ``<repo>/web/dist``（W-21 D5，让任何由
+    该运行时启动的服务都能服务桌面窗口）。
 
     独立于 ``create_app`` —— 测试在 ``create_app`` 返回后追加的自定义路由
     （如 ``/identity-probe``）不会被 StaticFiles Mount 遮蔽。生产部署由
@@ -3512,15 +3536,14 @@ def mount_static(app: FastAPI, web_dist_dir: str | None = None) -> None:
     部署约束：静态挂载只适配本地信任模式（未配置 JWT_SECRET）。fail-closed
     生效时全量默认拒绝（test_auth_fail_closed 契约），而浏览器顶层导航无法
     携带 Bearer——index.html 都会 401。生产 + JWT 的支持形态是反向代理：
-    静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。
+    静态资源在代理层直出，仅 /api 转发到本服务（前端带 Bearer 调用）。桌面
+    形态下这个「反向代理」就是外壳自持的 loopback 代理（W-21 D3）。
     """
-    web_dist = (
-        Path(web_dist_dir)
-        if web_dist_dir
-        else Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist"
-    )
-    if web_dist.exists():
-        app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
+    candidates = [Path(web_dist_dir)] if web_dist_dir else _default_web_dist_candidates()
+    for web_dist in candidates:
+        if web_dist.exists():
+            app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
+            return
 
 
 def create_prod_app(settings: Settings | None = None) -> FastAPI:

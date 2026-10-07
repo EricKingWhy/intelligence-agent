@@ -39,10 +39,13 @@ import {
 import { startServiceProxy, type ServiceProxy } from './service-proxy.ts'
 import {
   fileCredentialsTokenProvider,
+  readHostEndpoint,
+  defaultHealthProbeDeps,
   signalClientExit,
   type HostTokenProvider,
   type LoopbackFetch,
 } from './host-client.ts'
+import { attachRunningService } from './service-attach.ts'
 import { inspectManagedSessions, type QuitInspectionDeps } from './quit-inspection.ts'
 import { en, zh, resolveDesktopLocale, type DesktopLocale } from './messages.ts'
 import type { HostEndpointInfo } from './host-protocol.ts'
@@ -142,6 +145,8 @@ async function main(): Promise<void> {
     () => { /* state published to a loading window; minimal */ },
   )
 
+  let endpoint: HostEndpointInfo | undefined
+  let token: string | undefined
   try {
     if (webAssetsDir === undefined) {
       // Fail closed: pointing the window at a missing build renders an empty
@@ -151,10 +156,36 @@ async function main(): Promise<void> {
         + 'the packaged build is shipped as <resources>/web',
       )
     }
-    // W-21 D4/D3: the child is spawned with the data root as its working
-    // directory, so that directory must exist first — `spawn` fails with ENOENT
-    // on a missing cwd, before the service (which would create it) ever runs.
-    await backend.start(async () => { await mkdir(dataRoot, { recursive: true }) })
+    // W-21 D5 (#817): one service per data root. A service is normally already
+    // running here — started by the TUI, or left behind by an earlier desktop
+    // run (the quit path signals client-exit but never kills the child) — and
+    // attaching is the only way to keep a single writer on one storage tree.
+    endpoint = await attachRunningService({ root: dataRoot }, {
+      readEndpoint: readHostEndpoint,
+      healthDeps: defaultHealthProbeDeps(),
+    })
+    if (endpoint === undefined) {
+      // W-21 D4/D3: the child is spawned with the data root as its working
+      // directory, so that directory must exist first — `spawn` fails with ENOENT
+      // on a missing cwd, before the service (which would create it) ever runs.
+      await backend.start(async () => { await mkdir(dataRoot, { recursive: true }) })
+      endpoint = backend.host?.readiness?.endpoint
+    }
+    if (endpoint === undefined) {
+      throw new Error('desktop backend reports ready without a service endpoint')
+    }
+    // The credential channel is read after readiness: the service writes the
+    // token before it publishes the endpoint file.
+    token = await readHostToken(fileCredentialsTokenProvider(credentialPath), dataRoot)
+    if (endpoint.auth_required && token === undefined) {
+      // Fail closed with the reason instead of loading a page that every request
+      // 401s: no token means the attached service was started without the file
+      // credential channel this shell can read.
+      throw new Error(
+        `the running service requires a credential that is not in ${credentialPath} — `
+        + 'start the service through the desktop or the TUI so both ends share the channel',
+      )
+    }
   } catch (error) {
     // Startup failure: retry / open redacted log / exit (ticket acceptance).
     const detail = `${messages.startupSummary}${error instanceof Error ? `\n\n${error.message}` : ''}`
@@ -180,15 +211,14 @@ async function main(): Promise<void> {
   // from this module's own directory (see shell-paths.ts), never from cwd.
   const assetsDir = resolveShellAssetsDir(import.meta.dirname)
   const preload = resolvePreloadPath(assetsDir)
-  const endpoint = backend.host?.readiness?.endpoint
   if (endpoint === undefined) {
+    // Unreachable: the catch above returns. Kept as the invariant it is.
     throw new Error('desktop backend reports ready without a service endpoint')
   }
   // W-21 D3 (#815): the window loads the shell's own loopback proxy, which
   // attaches the host token on the way to the service. The page therefore keeps
   // addressing its API and live channel relative to its own origin (no token, no
   // second origin) while the service stays fail-closed.
-  const token = await readHostToken(fileCredentialsTokenProvider(credentialPath), dataRoot)
   serviceProxy = await startServiceProxy({
     serviceOrigin: `http://127.0.0.1:${String(endpoint.port)}`,
     ...(token === undefined ? {} : { token }),
