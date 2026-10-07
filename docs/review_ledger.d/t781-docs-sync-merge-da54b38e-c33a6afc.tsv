@@ -1,0 +1,1 @@
+2026-10-07	#781 补记 PR #795 预同步合并（strict 复检：origin/main 前移 c95fe8ec→cf051989 = PR #790/#791/#792/#793 等，含 session store/service、web app.py、README、tests/* 与台账 33 笔，与本 PR 补记三文件 tracker/PHASE_STATUS/月档零文件交集）；ort 零冲突零手工解决（§14.7 未触发）；merge 提交 --cc 集为空（两侧零同改）⇒ 覆盖闸门中途态 FAIL 属预期，本行补机械归属；本 PR 零代码贡献（补记三文件 docs-only，da54b38e 已按路径自动归属）⇒ 不触发合并树全量重跑，门禁 = Gate-0 + CI gate0	da54b38e..c33a6afc
