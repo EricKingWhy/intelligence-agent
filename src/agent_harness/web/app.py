@@ -172,6 +172,20 @@ CONTEXT_PROVIDER_DESCRIPTIONS = catalog_router.CONTEXT_PROVIDER_DESCRIPTIONS
 REASONING_EFFORT_DESCRIPTIONS = catalog_router.REASONING_EFFORT_DESCRIPTIONS
 register_catalog_routes = catalog_router.register_catalog_routes
 
+# 自定义响应头清单（#785）：跨域 dev（Vite 5173）下，starlette CORSMiddleware
+# 只在 `expose_headers` 非空时才下发 Access-Control-Expose-Headers；缺省时浏览器
+# 对前端 JS 隐藏全部自定义响应头。响应侧新增 X- 头必须同步登记进本清单
+# （tests/web/test_cors_expose_headers.py 的守卫用例强制）；请求侧读头不入清单。
+EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
+    {
+        "X-Local-Fuse-Source",
+        "X-Local-Max-Agent-Turns",
+        "X-Permission-Mode",
+        "X-Worktree-Path",
+        "X-Worktree-Path-Encoded",
+    }
+)
+
 # ── Request / Response schemas ──
 
 
@@ -2035,6 +2049,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             allow_origins=["*"],
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=sorted(EXPOSED_CUSTOM_RESPONSE_HEADERS),
         )
 
     # ── 路由 ──
