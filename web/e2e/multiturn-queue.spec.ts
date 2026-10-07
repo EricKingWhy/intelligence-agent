@@ -792,7 +792,10 @@ test('T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐
    * 也是**产品正确行为**（真机这一幕=代理掐流，客户端就该重连）。它构成一条
    * 「幻影订阅」。本用例曾断言 subs 恰好 1 条，等于假设 fill+Enter 永远赢下
    * 500ms 竞速——负载下必输（双 worker 实测 3/3 红，订阅 [3,3]）。等幻影落定
-   * 把竞速变确定态：此后 Enter 作废旧代际，幻影链不可能再冒出新订阅。 */
+   * 把竞速变确定态：此后 Enter 作废旧代际，幻影链不可能再冒出新订阅。下面的
+   * `toBeGreaterThanOrEqual(1)` 是防御写法，**假设幻影链恰好一条**：本 mock 的
+   * WS `ending:'keep'` 不收尾就不会触发下一轮退避重连，2s ping 保活避免长静默
+   * 被停摆看门狗掐掉重开——多于一条近乎不可能；真多出来时由尾部计数断言接住。 */
   await expect.poll(() => subs.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
 
   const box = page.getByLabel('Agent 任务');
@@ -921,6 +924,8 @@ test('T12r：在途 run 排队一条消息后，live 流必须继续收到并应
   // 等幻影重连落定（同 T12p 的说明：mock 一次性 SSE 无终态 ⇒ 500ms 重连是
   // 产品正确行为）。否则「Enter 赢 / 输 500ms 竞速」两种时序会给出演播
   // [1 条] 与 [2 条] 两种结局，下面的计数断言在负载下必炸（双 worker 实测）。
+  // `≥1` 是防御写法，**假设幻影链恰好一条**：`ending:'keep'` 不收尾 + 2s ping
+  // 保活使多于一条近乎不可能；真多出来时由尾部计数断言接住。
   await expect.poll(() => subs.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
 
   const box = page.getByLabel('Agent 任务');
