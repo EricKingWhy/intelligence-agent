@@ -856,7 +856,19 @@ async def test_rejected_queue_edit_keeps_the_old_queued_item(tmp_path, monkeypat
     )
     assert queued.status == "queued"
     queue_id = queued.queued_message.queue_id
+    # #781：RUN_STARTED 与夹具 gate 阻塞之间隔着 run task 的**调度点**——快照前
+    # run 可能还没走到 `_start_request`（该调用在模型并发闸之后，见
+    # model/fallback.py），`model/request-started` 便晚于下面的快照落账。不等它
+    # 就位，下面"被拒请求零副作用"的逐条比对会与该落盘竞态——合并树全量
+    # 实测偶发多出一条，focused 复跑稳定绿（窗口是调度的，不是语义的）。
+    await harness.wait_for(
+        lambda: len(harness.of_type(session_id, MODEL_REQUEST_STARTED)) == 1,
+        what="首个模型请求开账落盘（#781）",
+    )
     before = [e.type for e in harness.events(session_id)]
+    # 审查 P2 收口：等到位之后快照**必须**已含首笔开账；守卫被改坏/
+    # 删除时本行在源头响亮失败，而不是留到下面整表比对里以"多出一条"形式展现。
+    assert before.count(MODEL_REQUEST_STARTED) == 1, before
 
     # 拒绝成因换成越权 ceiling（#320：alias 冲突这一档已随迁移收口删除）；
     # 要钉的性质不变——预算拒绝早于 `cancel_queue` 的落盘，旧排队项原样保留。
