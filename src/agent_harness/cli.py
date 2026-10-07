@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import sys
@@ -397,8 +398,17 @@ class StreamRenderer:
         header = _prefix("ok" if ok else "fail", "ok" if ok else "err")
         header += "done" if ok else "failed"
         duration = result.get("metadata", {}).get("duration_ms")
-        if isinstance(duration, (int, float)):
-            header += theme.paint("muted", f"{theme.sep()}Took {_format_duration(duration)}")
+        # P0-5 #737 调用方守卫：bool 显式排除（isinstance(True, int) 为真，防脏数据）；
+        # NaN/inf 不渲染（math.isfinite；纯函数内不处理，int(nan) 会抛）；
+        # 负数按 0 处理（max(0, …)，数据问题不掩盖由 _format_duration 诚实渲染正数部分）。
+        if (
+            isinstance(duration, (int, float))
+            and not isinstance(duration, bool)
+            and math.isfinite(duration)
+        ):
+            header += theme.paint(
+                "muted", f"{theme.sep()}Took {_format_duration(max(0, duration))}"
+            )
         self._write(header + "\n")
         message = result.get("message") or ""
         lines = message.splitlines()

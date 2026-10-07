@@ -123,6 +123,11 @@ class MCPServerConnection:
         # connected=True 但 _session=None 的楔死态（见 call_tool 前置检查）。
         self._lifecycle = asyncio.Lock()
 
+    @property
+    def config_name(self) -> str:
+        """server 配置名（#362 / W-18：按名断开/状态查询用）。"""
+        return self._config.name
+
     async def connect(self) -> None:
         """建立并初始化会话（wiring 时调用；幂等）。失败抛 MCPServerDownError。
 

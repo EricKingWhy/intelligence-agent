@@ -129,6 +129,37 @@ def test_format_duration():
     assert _format_duration(3661000) == "1h 1m 1s"
     # 59999/1000 = 59.999 → :.1f 得 "60.0s"（与 Pi toFixed(1) 一致）
     assert _format_duration(59999) == "60.0s"
+    # P0-5 #737 边界表（9 行；纯函数只锁定算法面，调用方守卫另测）：
+    assert _format_duration(999) == "1.0s"
+    assert _format_duration(59950) == "60.0s"  # 59.95 <60 走秒档，toFixed(1) 进位，Pi 原样
+    assert _format_duration(60000) == "1m 0s"  # 严格 <60 分界
+    assert _format_duration(3599999) == "59m 59s"
+    assert _format_duration(3600000) == "1h 0m 0s"  # 严格 <60 分界
+
+
+def test_duration_badge_caller_guards():
+    """P0-5 #737 调用方守卫：bool/NaN/inf/None/非数值不渲染 badge；负数按 0 处理。"""
+    import math
+
+    def badge_of(duration_ms):
+        out: list[str] = []
+        StreamRenderer(out.append).handle(_tool_result(ok=True, duration_ms=duration_ms))
+        return out[0]
+
+    # bool 是 int 子类，显式排除 → 无 badge
+    assert "Took" not in badge_of(True)
+    assert "Took" not in badge_of(False)
+    # NaN / inf 不渲染（纯函数内 int(nan) 会抛，调用方守卫是契约）
+    assert "Took" not in badge_of(float("nan"))
+    assert "Took" not in badge_of(math.inf)
+    assert "Took" not in badge_of(-math.inf)
+    # None / 非数值不渲染（保持现状）
+    assert "Took" not in badge_of(None)
+    assert "Took" not in badge_of("1234")
+    # 负数按 0 处理 → badge 显示 0.0s
+    assert "Took 0.0s" in badge_of(-500)
+    # 正常值仍渲染
+    assert "Took 1.2s" in badge_of(1234)
 
 
 def test_convergence_truecolor():

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,21 @@ from agent_harness.sandbox.registry import WorkspaceBindingError, WorkspaceRegis
 @pytest.fixture
 def registry(tmp_path: Path) -> WorkspaceRegistry:
     return WorkspaceRegistry(root=tmp_path, backend="local")
+
+
+def test_create_signature_pinned_for_doubles() -> None:
+    """防 #746 型替身漂移（W-19 加 backend、手写替身没跟上）：create() 签名
+    演化在此响亮失败，逼显式确认替身面与两个生产调用点（session.py:184 /
+    assembly.py:266）。create_autospec 替身自动跟随真实签名；手写替身需人工同步。"""
+    sig = inspect.signature(WorkspaceRegistry.create)
+    names = list(sig.parameters)
+    kinds = [sig.parameters[n].kind for n in names]
+    assert names == ["self", "session_id", "workspace_root", "backend"], \
+        "create() 签名演化：先确认两个生产调用点（session.py:184 / assembly.py:266）与替身面"
+    assert all(k is inspect.Parameter.POSITIONAL_OR_KEYWORD for k in kinds[:2]), \
+        "session_id 须保持可位置传参（两个调用点均按位置实参调用）"
+    assert all(k is inspect.Parameter.KEYWORD_ONLY for k in kinds[2:]), \
+        "workspace_root/backend 须保持 keyword-only"
 
 
 class TestCreate:

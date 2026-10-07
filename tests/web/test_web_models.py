@@ -21,16 +21,16 @@ _AGENT_MODELS = (
 
 @pytest.fixture
 def catalog_app(tmp_path):
-    # _env_file=None：钉死测试配置，不吃机器 .env（MODEL_NAME/FALLBACK_* 会漂移）
-    # provider_store_path：默认落 Path.home()/.agent-harness（#203），不钉会吃
-    # 机器级自定义供应商——本宿主实证：手工配置的 shrimp 泄进 /api/models 精确列表断言。
+    # _env_file=None：钉死测试配置，不吃机器 .env（MODEL_NAME/FALLBACK_* 会漂移）；
+    # provider_store_path 钉进 tmp_path——自定义 provider 存储默认读 HOME 用户态
+    # （~/.agent-harness/model-providers.json），不密封会把宿主真配置泄进 catalog 断言。
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
-        provider_store_path=str(tmp_path / "model-providers.json"),
         model_provider="deepseek", model_name="deepseek-chat",
         fallback_model_provider="mimo", fallback_model_name="mimo-v2.6-flash",
         fallback_model_api_key="sk-fallback",
         agent_models=_AGENT_MODELS,
+        provider_store_path=str(tmp_path / "model-providers.json"),
     )
     return create_app(settings, enable_cors=False)
 
