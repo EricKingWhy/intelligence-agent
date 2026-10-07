@@ -7291,6 +7291,13 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   - **交接残余第 5 项（`/api/models` 基线对照）正式关闭（Call 3 P3-5，独立复现）**：`git diff origin/main...HEAD -- web/ tests/web/` **为空**；密封补丁 `463e6bcf`/`be16b104`（`provider_store_path` 钉 tmp_path）**已在 origin/main**；本机 `~/.agent-harness/model-providers.json` 已不存在；两文件在本分支树 **19 passed**。结论：多出的 `shrimp:deepseek-v4.1-flash` **不是本票引入**，第 5 项关闭、无须再跟踪。
   - **待协调者**：独立双轴审查（本行只做实现归属）。PR 待开（base=main）。
 
+- **Call 5 复审新发现修复（2026-10-08，`db502a1a`，5 文件 +36/-14）**：Call 5 复审判 **PASS**（8 项修复逐项到位、三个变异实验确认断言有牙齿），另出新发现 P3×1 + P4×4，本批全部修完。
+  - **P3（既有行为，不改语义）**：`derive_messages_with_source_ranges` 的 `superseded_ranges` 仍用纯解析 `superseded_event_seqs`，#614① 的替换槽规则**不作用于消息投影**——同一条作废标记下事实表判目标 active、闸门判 True，可目标原文在消息投影里仍被 shadow，`latest_direct_user_input_event`（只从消息投影取源）因此选不中它。取 Call 5 给的不改语义那条：`live_supersede_markers` 与 `is_direct_user_input_event` 的 docstring 降级为「#614① 只对保护事实投影 + 来源闸门成立，消息投影不受影响」，写明后果与「修它属语义变更、须先裁决」。**未**改 `superseded_ranges` 判据。
+  - **P4-1 接线演练**：`_register_constraint_crash_child.py` 由裸构造 `RegisterConstraintTool()` 改为按 `assembly._build_tooling` 规则接线（传 `REGISTER_CONSTRAINT_HANDOFF` + 注册 `RequestConstraintResolutionTool`）——原先走的是「resolver 缺席」分支，装配层真正产出的形态从没被 crash 用例演练过。
+  - **P4-2 字符**：`REGISTER_CONSTRAINT_HANDOFF` 去掉无条件重复的「call … once instead」，202→101 字符；拼装后 guidance **2601→2500，省 101 字符/请求**（`join_guidance` 实测）。
+  - **P4-3/P4-4 记账**：台账与本文的累计文件数锚 tip（17/+1112 是 `c8ed24f6` 时点，tip `a4d37420` = 18/+1248）；`git rev-list --all --count` 全扫数 4215→**4220**。
+  - **定向读数**：`tests/recovery` + `tests/tools` + `tests/session` + `tests/test_assembly_root_registry_names.py` = **1139 passed / 4 skipped / 0 failed**（树校验前置）；ruff 全绿；`git diff --check` 干净。台账行 `docs/review_ledger.d/t663-call6-call5-findings-fix.tsv`。
+
 ## #644 ToolResult 溢出预算覆盖全 data 顶层字段（2026-10-05；分支 `fix/i644-tool-result-overflow-budget`，基点 `e8e36f60` = origin/main；push/PR/merge 三动作逐项待批）
 
 - **票面与方案**：用户批准 #644+#646 顺序施工（SDD 一次一票）。溢出判定语义扩展属设计/选型类，走协议 §1.3 调研：Codex `codex-rs/utils/output-truncation`（serde_json 序列化后判长——与本修法同构）、Claude Code（50,000 字符阈值→落盘+路径回执）、Pi（`MCP_OUTPUT_MAX_BYTES`=20KB+truncateMiddle+全量临时文件+路径回执）、MCP 规范无截断条款（认领评论预期引用已如实更正，可背书引用为 MCP Client Best Practices 控制台输出截断条目）+ Reuse Matrix L60「Oversized output spill = PORT DESIGN (ArtifactStore/MinIO)」。认领评论 issuecomment-5990493888。
