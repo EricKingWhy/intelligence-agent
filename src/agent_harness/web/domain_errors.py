@@ -132,6 +132,7 @@ from agent_harness.session.errors import (
     SessionHasChildren,
     SessionNotFound,
     SessionServiceError,
+    SnapshotTokenMismatch,
     SteerTargetNotFound,
     SupersedeTargetInvalid,
     UnknownModel,
@@ -208,6 +209,10 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # BUG-011：seq 冲突是「资源当前状态与请求冲突」，**不是**「资源不存在」——
     # 旧行为把它翻成 404（`send_message` 的 `Send failed: 404`），掩盖了日志损坏。
     SeqConflict: 409,
+    # #368 / W-24：清理预览的 CAS token 过期（抄 Kubernetes resourceVersion 乐观
+    # 并发）——预览后引用集变化即失效。请求形状合法（token 是字符串），是**状态
+    # 对不上**，所以 409，客户端应重新预览取新 token。
+    SnapshotTokenMismatch: 409,
     # #565：events.jsonl 完整性闸门（完整坏行 / seq 断层 / seq 重复）——恢复入口
     # 拒绝继续。与 SeqConflict 同为 409 但**不可重试**：重读同一文件无用，需按
     # 脱敏定位记录人工修复；文案里已带该指引。

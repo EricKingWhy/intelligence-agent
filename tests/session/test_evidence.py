@@ -509,6 +509,38 @@ def test_artifact_ok_stays_fresh(tmp_path) -> None:
     assert freshness.status == "fresh"
 
 
+def test_artifact_cleaned_reports_original_removed(tmp_path) -> None:
+    """#368 W-24：原件已被显式清理 → stale，原因明确区分于"不可读回/损坏"。"""
+    ref = "12" * 8
+    record, _, _ = _recorded_with_real_manifest(
+        tmp_path, evidence_id="ev-cleaned", artifact_ref=ref, tool_call_id="tc-1",
+    )
+    manifest = compute_evidence_manifest(tmp_path, ["src/auth.py"])
+    freshness = evaluate_evidence_freshness(
+        record, current_manifest=manifest, current_head=record.base_head,
+        artifact_readable=False, artifact_attribution_ok=None,
+        artifact_cleaned=True,
+    )
+    assert freshness.status == "stale"
+    assert f"artifact 原件已清理：{ref}" in freshness.reasons
+    assert all("不可读回" not in reason for reason in freshness.reasons)
+
+
+def test_artifact_cleaned_false_uses_unreadable_branch(tmp_path) -> None:
+    """artifact_cleaned=False（默认）→ 走既有"不可读回"分支，枚举不漂移。"""
+    ref = "34" * 8
+    record, _, _ = _recorded_with_real_manifest(
+        tmp_path, evidence_id="ev-unread", artifact_ref=ref, tool_call_id="tc-1",
+    )
+    manifest = compute_evidence_manifest(tmp_path, ["src/auth.py"])
+    freshness = evaluate_evidence_freshness(
+        record, current_manifest=manifest, current_head=record.base_head,
+        artifact_readable=False, artifact_attribution_ok=None,
+    )
+    assert freshness.status == "stale"
+    assert f"artifact 不可读回：{ref}" in freshness.reasons
+
+
 # ── 写侧：具体拒绝原因（票面"保存失败时显示缺项"）────────────────────────────
 
 

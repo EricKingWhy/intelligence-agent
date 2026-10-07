@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -252,3 +253,60 @@ def discard_local_artifacts(settings: Settings, session_id: str) -> None:
     target = Path(root).resolve() / session_id
     if target.is_dir():
         shutil.rmtree(target, ignore_errors=True)
+
+
+def delete_local_artifacts(
+    settings: Settings, session_id: str, artifact_ids: Iterable[str]
+) -> dict[str, list[str]]:
+    """按 id 精确删除该会话的**本地** artifact（内容 + 旁挂元数据）。幂等。
+
+    与 `discard_local_artifacts` 同一条安全形状（ADR-0029 D2）：**不读映射**，只删
+    "用 setting + session_id + artifact_id 自己拼出来的路径"。路径全由
+    `settings.artifact_dir` 与两个已校验的名字段拼成，只有 harness 会往里写，所以删除
+    判定是写死的构造规则，碰不到用户目录——`agent-progress/` 与工作目录源码绝不碰。
+
+    返回 `{"deleted", "not_found", "invalid", "failed"}` 四个 list，保持输入顺序：
+
+    - session_id 不合 `SESSION_KEY_PATTERN` → 所有 id 记 `invalid`，直接返回（不拼路径）；
+    - 单个 id 不合 `ARTIFACT_ID_PATTERN` → `invalid`；
+    - 内容文件不存在 → `not_found`（幂等：删第二次走这里）；
+    - 存在 → 删内容 + 同名 `.json` 旁挂（旁挂缺失也接受，幂等），成功 → `deleted`；
+      任一 `OSError` → `failed`，记下后继续处理下一个，不中断整批。
+
+    **不在本函数范围**：配置了 S3/MinIO 时的远端对象（那些 Provider 没有 delete），
+    另见 ADR-0029 D6 单独开票。
+    """
+    result: dict[str, list[str]] = {
+        "deleted": [],
+        "not_found": [],
+        "invalid": [],
+        "failed": [],
+    }
+    root = settings.artifact_dir.strip()
+    if not root or not SESSION_KEY_PATTERN.fullmatch(session_id):
+        # 拼不出安全路径就不动手：所有 id 如实记 invalid（纵深防御）。
+        result["invalid"].extend(artifact_ids)
+        return result
+    session_dir = Path(root).resolve() / session_id
+    for artifact_id in artifact_ids:
+        if not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            result["invalid"].append(artifact_id)
+            continue
+        content_path = session_dir / artifact_id
+        if not content_path.exists():
+            result["not_found"].append(artifact_id)
+            continue
+        try:
+            content_path.unlink()
+        except FileNotFoundError:
+            # 检查与删除之间的竞态：别人先删了 → 如实记 not_found（幂等）。
+            result["not_found"].append(artifact_id)
+            continue
+        except OSError:
+            # 单个失败不拖垮整批：记下继续（调用方据 failed 对账）。
+            result["failed"].append(artifact_id)
+            continue
+        with suppress(FileNotFoundError):
+            (session_dir / f"{artifact_id}{_META_SUFFIX}").unlink()
+        result["deleted"].append(artifact_id)
+    return result

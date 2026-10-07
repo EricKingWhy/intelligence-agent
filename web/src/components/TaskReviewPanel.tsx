@@ -17,10 +17,20 @@
  *  语义独立于 `ApprovalCard`：本控件是 CAS 裁决（task acceptance），**不复用**
  *  permission allow-once 语义，也不 import `postApproval`。 */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
-import type { EvidenceRecord, ProductState, VerificationValue } from '../lib/api';
+import {
+  executeCleanup,
+  getSessionUsage,
+  previewCleanup,
+  type EvidenceRecord,
+  type ProductState,
+  type SessionUsage,
+  type VerificationValue,
+} from '../lib/api';
+import { formatBytes } from '../lib/format';
 import { useTaskReview } from '../hooks/useTaskReview';
+import { CleanupPreviewDialog } from './CleanupPreviewDialog';
 
 /** 交付四态（后端 `PRODUCT_STATES`）中文映射——缺省刻意为空串（未定义任务）。 */
 const PRODUCT_LABEL: Record<Exclude<ProductState, ''>, string> = {
@@ -101,6 +111,39 @@ export function TaskReviewPanel({
 }) {
   const review = useTaskReview(open ? sessionId : null);
   const [gapReason, setGapReason] = useState('');
+
+  // #368 W-24：存储占用（只读）+ 清理预览浮层。占用随面板打开 / 清理成功后重拉。
+  const [usage, setUsage] = useState<SessionUsage | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+
+  const loadUsage = useCallback(async () => {
+    try {
+      setUsage(await getSessionUsage(sessionId));
+      setUsageError(null);
+    } catch (e) {
+      setUsageError(e instanceof Error ? e.message : '读取存储占用失败');
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (open) void loadUsage();
+  }, [open, loadUsage]);
+
+  // 稳定引用：CleanupPreviewDialog 打开时只拉一次 preview，父组件重渲染不重拉、不重置勾选。
+  // 勾选变化时浮层带当前勾选集合重取（方案 a），拿与 execute 一致的新 token。
+  const handlePreview = useCallback(
+    (sid: string, selectedRefs?: string[]) => previewCleanup(sid, 'unreferenced', selectedRefs),
+    [],
+  );
+  const handleConfirm = useCallback(
+    async (sid: string, token: string, refs: string[]) => {
+      const result = await executeCleanup(sid, token, refs);
+      await loadUsage();
+      return result;
+    },
+    [loadUsage],
+  );
 
   // Esc 关闭（可键盘达；弹层惯例同 ContextUsagePanel）。
   useEffect(() => {
@@ -528,11 +571,46 @@ export function TaskReviewPanel({
                     </p>
                   </div>
                 )}
+                {/* #368 W-24：存储占用 + 清理预览。只读占用 + 一个入口，不动既有操作逻辑。 */}
+                <div className="task-review-op">
+                  <div className="task-review-usage" aria-label="存储占用">
+                    <span className="task-review-axis-label">存储占用</span>
+                    {usageError ? (
+                      <span className="task-review-hint">存储占用不可得：{usageError}</span>
+                    ) : usage === null ? (
+                      <span className="task-review-hint">读取中…</span>
+                    ) : (
+                      <>
+                        <span>
+                          事件 {formatBytes(usage.events_bytes)} · 原件{' '}
+                          {formatBytes(usage.artifacts_bytes)}（{usage.artifact_count} 个） · 进度{' '}
+                          {formatBytes(usage.progress_bytes)}
+                        </span>
+                        <span className="task-review-hint">
+                          可回收 {formatBytes(usage.reclaimable_bytes)}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <button className="btn-ghost" onClick={() => setCleanupOpen(true)}>
+                    清理预览…
+                  </button>
+                  <p className="task-review-op-consequence">
+                    后果：预览列出可清理的原件与将失去可回读原件的证据；执行会删除选中原件，
+                    <strong>不可恢复</strong>。
+                  </p>
+                </div>
               </div>
             </section>
           </>
         )}
       </div>
+      <CleanupPreviewDialog
+        target={cleanupOpen ? { sessionId } : null}
+        onOpenChange={setCleanupOpen}
+        onPreview={handlePreview}
+        onConfirm={handleConfirm}
+      />
     </div>
   );
 }
