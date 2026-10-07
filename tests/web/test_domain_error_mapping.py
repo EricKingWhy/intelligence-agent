@@ -130,6 +130,9 @@ def test_status_map_is_the_audited_contract():
         # run_id 不是被暂停的那个、没有暂停 run、ceiling 没真高于已消耗）——请求
         # **形状**合法（那是上面三条 422 的口径），是"状态对不上"，所以是 409。
         "BudgetConflict": 409,
+        # #368 / W-24：清理预览的 CAS token 过期（抄 Kubernetes resourceVersion 乐观
+        # 并发）——预览后引用集变化即失效，请求形态合法、是状态对不上，所以是 409。
+        "SnapshotTokenMismatch": 409,
     }
 
 

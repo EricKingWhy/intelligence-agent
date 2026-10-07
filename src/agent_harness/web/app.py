@@ -1896,6 +1896,12 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_evidence_routes(app, validate_session_id=validate_session_id)
 
+    # #368 / W-24 会话保留 / 空间显示 / 显式清理路由（独立 router：usage + 清理
+    # 预览/执行；语义单源在 session/service.py，本模块只留一行接入面）
+    from agent_harness.web.retention import register_retention_routes
+
+    register_retention_routes(app, validate_session_id=validate_session_id)
+
     # W-06 / #350 进度文件重读对账路由（独立 router：对账状态查询 + 外部编辑
     # 冲突两出口；对账单源在 session/progress.py，本模块只留一行接入面）
     from agent_harness.web.progress_status import register_progress_routes

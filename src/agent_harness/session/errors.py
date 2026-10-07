@@ -251,3 +251,13 @@ class UnknownModel(SessionServiceError):
 
 class InvalidForkBoundary(SessionServiceError):
     """fork 锚点非法（不是用户消息 seq / 前缀含未终态 run）。"""
+
+
+class SnapshotTokenMismatch(SessionServiceError):
+    """清理预览快照已过期（抄 Kubernetes resourceVersion 乐观并发：预览后引用集
+    变化 → 409 重算）。
+
+    预览返回的 ``snapshot_token`` 是那一刻可达集 / 未决 Operation / 子会话 / 事件
+    文件的确定指纹；执行时重算不符即拒，绝不在"用户看到的那一版"之外动手——否则
+    预览之后新增的引用会被静默删掉。调用方应重新预览取新 token。
+    """
