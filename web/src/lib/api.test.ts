@@ -43,6 +43,7 @@ import {
   sendMessage,
   startSession,
   createEmptySession,
+  worktreePathFromResponse,
 } from './api';
 import { onUnauthorized } from './auth';
 import type { MemorySummary, Project, SessionSummary } from '../types';
@@ -1670,5 +1671,36 @@ describe('#353 task review — task / evidence / lease / workspace-git 端点契
     const result = await getWorkspaceGitDiff('s1', { path: 'src/a.py', staged: true });
     expect(calls[0].url).toBe('/api/sessions/s1/workspace/git/diff?path=src%2Fa.py&staged=true');
     expect(result.stdout).toBe('diff --git a/x b/x');
+  });
+});
+
+describe('worktreePathFromResponse — 裸头优先 + RFC 5987 编码伴随头兜底（#765）', () => {
+  it('裸 X-Worktree-Path 原样返回（既有契约逐字节不变）', () => {
+    const res = new Response(null, {
+      headers: { 'X-Worktree-Path': 'D:\\wt\\repo-abc12345' },
+    });
+    expect(worktreePathFromResponse(res)).toBe('D:\\wt\\repo-abc12345');
+  });
+
+  it('路径含非 latin-1 字符时解码 X-Worktree-Path-Encoded（后端 quote safe=\'\' 形状）', () => {
+    // 后端 _worktree_headers 对不可编码路径发 `UTF-8''<quote(safe='')>`；
+    // ":" 与 "\" 也会被转义，decodeURIComponent 原样还原。
+    const encoded = "UTF-8''C%3A%5CUsers%5C%E7%8E%8B%E6%B5%A9%E5%AE%87%5Crepo";
+    const res = new Response(null, {
+      headers: { 'X-Worktree-Path-Encoded': encoded },
+    });
+    expect(worktreePathFromResponse(res)).toBe('C:\\Users\\王浩宇\\repo');
+  });
+
+  it('两头都无 / 编码值缺前缀或畸形 → null（展示性提示不炸流程）', () => {
+    expect(worktreePathFromResponse(new Response())).toBeNull();
+    const malformed = new Response(null, {
+      headers: { 'X-Worktree-Path-Encoded': '%E7%8E%8B' }, // 缺 UTF-8'' 前缀
+    });
+    expect(worktreePathFromResponse(malformed)).toBeNull();
+    const badEscape = new Response(null, {
+      headers: { 'X-Worktree-Path-Encoded': "UTF-8''%E7%8E" }, // 截断的 %XX 序列
+    });
+    expect(worktreePathFromResponse(badEscape)).toBeNull();
   });
 });

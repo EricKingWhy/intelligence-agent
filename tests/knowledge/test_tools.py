@@ -5,7 +5,7 @@
 """
 
 import json
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 
 import pytest
 import pytest_asyncio
@@ -112,9 +112,11 @@ async def test_read_source_tool_bad_citation_is_failure(seeded_service, identity
 
 
 @pytest.mark.asyncio
-def _registry_with(sandbox: Mock) -> Mock:
-    registry = Mock(spec=WorkspaceRegistry)
-    registry.get = Mock(return_value=sandbox)
+def _registry_with(sandbox: Mock):
+    # create_autospec：调用期按真实 WorkspaceRegistry 签名对账，kwarg 漂移
+    # （#746 型）在测试运行期即 TypeError，而非静默通过或报错在替身接口上。
+    registry = create_autospec(WorkspaceRegistry, instance=True)
+    registry.get.return_value = sandbox
     return registry
 
 

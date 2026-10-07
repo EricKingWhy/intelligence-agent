@@ -39,6 +39,7 @@ function taskState(over: Partial<api.TaskState> = {}): api.TaskState {
     task_text: '把 CSV 导入写对',
     read_write_intent: '拟写入',
     cwd: '/repo',
+    authorization: null,
     criteria: [{ item_id: 'ac-1', text: '导入去重', origin: 'user', confirmed: true }],
     verification: { 'ac-1': { value: 'passed', evidence: null } },
     acceptance: null,

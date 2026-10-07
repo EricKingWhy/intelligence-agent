@@ -257,6 +257,31 @@ def test_session_without_task_definition_has_no_task_state(tmp_path) -> None:
     assert not state.defined
     assert state.product_state == ""  # 未定义任务：无交付状态可言（REST 404 语义）
 
+
+# ── 授权字段（#353 P2-2）：从 session/started 的创建期声明派生，不猜 ──────────
+
+
+def test_authorization_from_declared_permission_mode(tmp_path) -> None:
+    """session/started 声明 permission_mode ⇒ to_payload 暴露同值 authorization。"""
+    store = JsonlSessionStore(root=tmp_path)
+    session = Session.start(
+        store,
+        cwd=str(tmp_path),
+        started_data={"permission_mode": "workspace-write"},
+    )
+    state = derive_task_state(session.events)
+    assert state.authorization == "workspace-write"
+    assert state.to_payload()["authorization"] == "workspace-write"
+
+
+def test_authorization_none_when_permission_mode_absent(tmp_path) -> None:
+    """未声明 permission_mode ⇒ authorization 为 None（不替用户猜档位）。"""
+    session = _session(tmp_path)
+    state = derive_task_state(session.events)
+    assert state.authorization is None
+    assert state.to_payload()["authorization"] is None
+
+
 # ── Fork：接受事实随事件前缀继承，fork 后父子独立（票面 AC「Fork 独立接受」）──
 
 
