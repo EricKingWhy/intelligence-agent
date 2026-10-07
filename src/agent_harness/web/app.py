@@ -1809,6 +1809,37 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # "Internal Server Error"（TestClient 则直接 re-raise），前端按 JSON 解析
     # 错误体时拿到纯文本。注册 Exception handler 后换回 JSON 信封——状态码
     # 仍是诚实的 500，这层只换**表示**，不把任何意外异常洗成 4xx。
+    # #753：磁盘满（ENOSPC/EFBIG）与 SQLite 存储满（SQLITE_FULL/SQLITE_IOERR）
+    # 的集中转换点。`storage_http_status` 已定义映射（#515/#569：存储类错误 → 503），
+    # 此处将其接入全局异常处理，使所有写磁盘的 API 路径（会话创建、事件落盘、
+    # artifact 写入等）都能返回明确的 503 而非泛化的 500。未识别的 OSError /
+    # sqlite3.Error 交还通用 500 处理（不洗成 4xx/5xx 的误报）。
+    @app.exception_handler(OSError)
+    async def _oserror_to_storage_status(request: Any, exc: OSError):
+        status = storage_http_status(exc)
+        if status is not None:
+            logging.getLogger("agent_harness.web").warning(
+                "存储写入失败（%s）：%s %s", exc, request.method, request.url.path
+            )
+            return JSONResponse(
+                status_code=status,
+                content={"detail": "磁盘空间不足，无法完成写入"},
+            )
+        return await _unhandled_exception_to_json(request, exc)
+
+    @app.exception_handler(sqlite3.Error)
+    async def _sqlite_error_to_storage_status(request: Any, exc: sqlite3.Error):
+        status = storage_http_status(exc)
+        if status is not None:
+            logging.getLogger("agent_harness.web").warning(
+                "存储写入失败（%s）：%s %s", exc, request.method, request.url.path
+            )
+            return JSONResponse(
+                status_code=status,
+                content={"detail": "磁盘空间不足，无法完成写入"},
+            )
+        return await _unhandled_exception_to_json(request, exc)
+
     @app.exception_handler(Exception)
     async def _unhandled_exception_to_json(request: Any, exc: Exception):
         logging.getLogger("agent_harness.web").exception(
