@@ -1,5 +1,6 @@
 """Session-scoped S3 ArtifactStore；SDK 仅在构造 Provider 时加载。"""
 
+import hashlib
 import importlib
 import json
 from datetime import UTC, datetime
@@ -7,11 +8,14 @@ from datetime import UTC, datetime
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import (
     ARTIFACT_ID_PATTERN,
+    BYTE_ARTIFACT_ID_PATTERN,
     SESSION_KEY_PATTERN,
     Artifact,
     ArtifactSlice,
     ArtifactStore,
+    BlobArtifact,
     compute_artifact_id,
+    compute_byte_artifact_id,
     slice_artifact,
 )
 
@@ -120,4 +124,59 @@ class S3ArtifactStore(ArtifactStore):
             keyword=keyword,
             max_lines=max_lines,
             max_chars_per_line=max_chars_per_line,
+        )
+
+    # ── 字节路径（#822 MM-01）───────────────────────────────────────────────
+
+    async def save_bytes(
+        self, session_id: str, data: bytes, *, mime_type: str
+    ) -> BlobArtifact:
+        if session_id != self._session_id:
+            raise ValueError("save_bytes session_id must match the store namespace")
+        artifact_id = compute_byte_artifact_id(data)
+        sha256 = artifact_id.split(":", 1)[1]
+        blob = BlobArtifact(
+            artifact_id=artifact_id,
+            session_id=session_id,
+            size=len(data),
+            mime_type=mime_type,
+        )
+        async with self._sdk_session.client("s3", **self._client_kwargs) as client:
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=f"{session_id}/attachments/{sha256}",
+                Body=data,
+                ContentType=mime_type,
+            )
+        return blob
+
+    async def load_bytes(self, artifact_id: str) -> BlobArtifact:
+        if not BYTE_ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
+        sha256 = artifact_id.split(":", 1)[1]
+        async with self._sdk_session.client("s3", **self._client_kwargs) as client:
+            try:
+                response = await client.get_object(
+                    Bucket=self._bucket,
+                    Key=f"{self._session_id}/attachments/{sha256}",
+                )
+            except self._client_error as error:
+                if error.response.get("Error", {}).get("Code") == "NoSuchKey":
+                    raise KeyError(
+                        f"Blob artifact '{artifact_id}' does not exist"
+                    ) from error
+                raise
+            async with response["Body"] as stream:
+                body = await stream.read()
+        if hashlib.sha256(body).hexdigest() != sha256:
+            raise KeyError(
+                f"Blob artifact '{artifact_id}' content hash mismatch "
+                "(object modified or corrupted out-of-band)"
+            )
+        return BlobArtifact(
+            artifact_id=artifact_id,
+            session_id=self._session_id,
+            size=len(body),
+            mime_type=response.get("ContentType", "application/octet-stream"),
+            content=body,
         )

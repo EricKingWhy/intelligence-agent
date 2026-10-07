@@ -156,6 +156,17 @@ class Settings(BaseSettings):
     # （ADR-0029 D2：只删 harness 自己拼出来的路径），又不能碰用户目录。
     # 默认值落在 `.agent/` 下与 workspace 同族（.gitignore 已整目录忽略运行时产物）。
     artifact_dir: str = ".agent/artifacts"
+    # #822 / MM-01：用户图片附件入站上限（D12/D11，默认取 DSH 一组：20 MiB/图、
+    # 20 张/消息、200 MiB/消息、64M 像素、8192px/边）。服务端权威强制；MM-01 只
+    # 消费单张字节 / 像素 / 边长三个（数量与总字节在发送端点，属 MM-02/03）。
+    attachment_max_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
+    attachment_max_images_per_message: int = Field(default=20, ge=1)
+    attachment_max_message_image_bytes: int = Field(default=200 * 1024 * 1024, ge=1)
+    attachment_max_image_pixels: int = Field(default=64_000_000, ge=1)
+    attachment_max_image_dimension: int = Field(default=8192, ge=1)
+    # 允许的图片 media types（逗号分隔）。解析与校验在
+    # `attachments.types.resolve_image_limits`（未知类型响亮失败，不静默忽略）。
+    attachment_allowed_media_types: str = "image/png,image/jpeg,image/webp,image/gif"
     # detached-run 孤儿回收宽限期（秒，ADR-0016 §2.1）：零订阅者连续超过
     # 该时长 → run 被取消收尾（run/failed(reason=orphaned)）。有订阅者期间
     # 不计时；≤0 = 不回收（不推荐：无人观看的 run 会烧到自然终态）。
