@@ -361,6 +361,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     # 续聊走 SessionService（业务逻辑不进 WS 层）
                     from agent_harness.agent.budget import BudgetRejection
                     from agent_harness.session.service import (
+                        AttachmentReferenceInvalid,
                         InvalidSessionId,
                         ProtectedFactReferenceInvalid,
                         SessionNotFound,
@@ -399,11 +400,27 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         await _send_json({"type": "error", "message": str(error)})
                         continue
                     service = session_service(state)
+                    # #823 / MM-02：附件 id 列表（与 HTTP 端点同形）。形状错误当场回
+                    # 错误帧（不静默丢弃）；存在性/归属校验在领域层，错误同样回帧。
+                    raw_attachments = msg.get("attachments")
+                    if raw_attachments is None:
+                        attachments = None
+                    elif isinstance(raw_attachments, list) and all(
+                        isinstance(item, str) for item in raw_attachments
+                    ):
+                        attachments = raw_attachments
+                    else:
+                        await _send_json({
+                            "type": "error",
+                            "message": "attachments must be a list of attachment ids",
+                        })
+                        continue
                     try:
                         result = await service.send_message(
                             session_id=sid, content=content, mode=mode, **claims,
                             revoke_fact_id=msg.get("revoke_fact_id"),
                             refutes_event_id=msg.get("refutes_event_id"),
+                            attachments=attachments,
                         )
                     # WorkspaceBindingConflict（#266）：WS 是 HTTP 三个端点之外的第四个
                     # 续聊入口——不在这里收编，它会逃到外层的 `except Exception`（只
@@ -413,6 +430,7 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         InvalidSessionId,
                         SessionNotFound,
                         ProtectedFactReferenceInvalid,
+                        AttachmentReferenceInvalid,
                         WorkspaceBindingConflict,
                         BudgetRejection,
                     ) as e:

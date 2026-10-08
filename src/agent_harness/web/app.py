@@ -103,6 +103,7 @@ from agent_harness.session.service import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    AttachmentReferenceInvalid,
     EventLogCorruptError,
     InvalidDecision,
     InvalidSessionId,
@@ -173,10 +174,9 @@ CONTEXT_PROVIDER_DESCRIPTIONS = catalog_router.CONTEXT_PROVIDER_DESCRIPTIONS
 REASONING_EFFORT_DESCRIPTIONS = catalog_router.REASONING_EFFORT_DESCRIPTIONS
 register_catalog_routes = catalog_router.register_catalog_routes
 
-# 自定义响应头清单（#785）：跨域 dev（Vite 5173）下，starlette CORSMiddleware
-# 只在 `expose_headers` 非空时才下发 Access-Control-Expose-Headers；缺省时浏览器
-# 对前端 JS 隐藏全部自定义响应头。响应侧新增 X- 头必须同步登记进本清单
-# （tests/web/test_cors_expose_headers.py 的守卫用例强制）；请求侧读头不入清单。
+# 自定义响应头清单（#785）：响应侧新增 X- 头必须同步登记进本清单
+# （tests/web/test_cors_expose_headers.py 守卫强制）；请求侧读头不入清单。
+# 契约范围、机制依据（含 cors.py 出处）与豁免口径见该测试 docstring。
 EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
     {
         "X-Local-Fuse-Source",
@@ -815,6 +815,17 @@ class ProtectedFactAnnotation(BaseModel):
     supersedes_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+#: `attachments` 的静态兜底上限（#823 / MM-02，A3/B7）。取部署上限键
+#: `attachment_max_images_per_message` 的**默认值**（`ImageAttachmentLimits` 同源，
+#: 不硬编码魔法数）——只是 pydantic 层的最后一道拒绝面，防止 1 MiB body 里塞进成千
+#: 上万条合法 id 触发等量 `load_bytes`+`detect_image`（同步/IO 放大 + 巨量引用）。
+#: **完整聚合上限**（按部署配置的数量/总字节，`_resolve_attachment_refs` 逐条之外的
+#: 聚合校验）归 MM-03。
+_MAX_ATTACHMENTS_PER_MESSAGE = Settings.model_fields[
+    "attachment_max_images_per_message"
+].default
+
+
 class SendMessageRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/messages 的请求体（PRD §5.3 续聊入口）。
 
@@ -853,6 +864,13 @@ class SendMessageRequest(_AmendValueValidators):
     model: str | None = None
     protected_facts: list[ProtectedFactAnnotation] = Field(
         default_factory=list, max_length=32
+    )
+    # #823 / MM-02：附件 id 列表（内容寻址 `sha256:<hex>`）。默认空 = 纯文本，既有
+    # 行为逐字不变；服务端逐条校验"存在且属本会话"，不合法 → 422。
+    # A3/B7：`max_length` 是 pydantic 层兜底（取值见 `_MAX_ATTACHMENTS_PER_MESSAGE`），
+    # 完整聚合上限（部署可配的数量/总字节）归 MM-03。
+    attachments: list[str] = Field(
+        default_factory=list, max_length=_MAX_ATTACHMENTS_PER_MESSAGE
     )
 
     @model_validator(mode="after")
@@ -2018,6 +2036,17 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     register_model_provider_routes(app)
 
+    # #822 / MM-01 用户图片附件入站（独立 router：上传 + 受控读回）。上传请求体走
+    # 流式字节、可达单张图上限，故该路由从 BodyDepthGuardMiddleware 的 1 MiB 配额中
+    # 豁免（下方 add_middleware 处传入 `ATTACHMENT_UPLOAD_PATH_RE`）；既有 JSON 端点
+    # 行为逐字不变。
+    from agent_harness.web.attachments import (
+        ATTACHMENT_UPLOAD_PATH_RE,
+        register_attachment_routes,
+    )
+
+    register_attachment_routes(app, validate_session_id=validate_session_id)
+
     if not settings.jwt_secret:
         # R6-4：未配置密钥 = 本地信任模式（fail-open）。保留开发便利，但必须
         # 响亮告知——静默降级是原审计的核心危害。
@@ -2035,7 +2064,9 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
     # 添加 = 最内层，落点**在认证内层**——未认证请求先被 401 挡下，不做无谓的
     # body 扫描；先 csp（内层）后 auth（外层），与旧 BaseHTTPMiddleware 版注册
     # 顺序逐层一致；CORS 仍最后添加 = 最外层。
-    app.add_middleware(BodyDepthGuardMiddleware)
+    app.add_middleware(
+        BodyDepthGuardMiddleware, exempt_path_pattern=ATTACHMENT_UPLOAD_PATH_RE
+    )
     app.add_middleware(CSPHeaderMiddleware)
     app.add_middleware(AuthSeamMiddleware, settings=settings)
 
@@ -3314,6 +3345,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     fact.model_dump(exclude_none=True)
                     for fact in req.protected_facts
                 ],
+                attachments=req.attachments or None,
             )
         except (
             InvalidSessionId,
@@ -3324,6 +3356,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             QueueItemNotFound,
             SteerTargetNotFound,
             ProtectedFactReferenceInvalid,
+            AttachmentReferenceInvalid,
             SupersedeTargetInvalid,
             SeqConflict,
             WorkspaceBindingConflict,

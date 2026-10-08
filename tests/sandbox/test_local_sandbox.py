@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,8 +70,8 @@ class TestExecBasic:
 
     def test_timeout_returns_negative_exit_code(self, sandbox: LocalSubprocessSandbox):
         """命令超过 timeout → ExecResult.exit_code=-1 + stderr 含超时提示，不抛异常。"""
-        # sleep 5 但 timeout=0.3 秒——到点被掐断
-        result = sandbox.exec("ping -n 5 127.0.0.1 > nul", timeout=0.3)
+        # sleep 5 但 timeout=0.3 秒——到点被掐断（跨平台：解释器内 sleep，不依赖 ping 权限）
+        result = sandbox.exec(sys.executable + ' -c "import time; time.sleep(5)"', timeout=0.3)
 
         assert result.exit_code == -1
         assert "超时" in result.stderr

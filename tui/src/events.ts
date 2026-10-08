@@ -38,6 +38,7 @@ export const EVENT = {
   RUN_PAUSED: "run/paused",
   RUN_RESUMED: "run/resumed",
   RUN_INTERRUPTED: "run/interrupted",
+  TASK_PLAN_UPDATED: "task/plan_updated",
 } as const;
 
 /** 解析 SSE data 行 -> 信封；形状不合返回 null（坏帧丢弃，不投影）。 */

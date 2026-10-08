@@ -17,6 +17,7 @@ from agent_harness.model.config import (
     ModelConfig,
     _pick_capabilities,
     find_catalog_entry,
+    model_supports_vision,
     parse_model_catalog,
 )
 
@@ -165,3 +166,37 @@ class TestPromptCacheCapabilityDeclaration:
                 {"name": "bad", "provider": "deepseek", "model_name": "m",
                  "prompt_cache": 123},
             ])))
+
+
+class TestModelSupportsVision:
+    """#823 / MM-02（A5）：视觉能力的解析口径（catalog 显式 > preset 声明 > False）。"""
+
+    def _config(self, provider: str, model_name: str) -> tuple[Settings, ModelConfig]:
+        settings = Settings(
+            _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-test",
+            model_provider=provider, model_name=model_name,
+        )
+        return settings, ModelConfig.from_settings(settings)
+
+    def test_mimo_preset_declares_vision(self):
+        """mimo preset 经 AC11 真机验证过视觉 ⇒ 显式声明 True（出厂即可用）。"""
+        settings, config = self._config("mimo", "mimo-v2.6-flash")
+        assert model_supports_vision(settings, config) is True
+
+    def test_deepseek_preset_not_guessed(self):
+        """未验证的 preset 不猜——deepseek 省略 ⇒ False。"""
+        settings, config = self._config("deepseek", "deepseek-chat")
+        assert model_supports_vision(settings, config) is False
+
+    def test_catalog_entry_overrides_preset(self):
+        """catalog 显式声明优先于 preset 声明。"""
+        settings = Settings(
+            _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-test",
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([
+                {"name": "vis", "provider": "deepseek", "model_name": "deepseek-chat",
+                 "supports_vision": True},
+            ]),
+        )
+        config = ModelConfig.resolve_selection(settings, "vis")
+        assert model_supports_vision(settings, config) is True

@@ -408,6 +408,10 @@ class TestAtomicWrite:
             os.close(fd)
         assert target.read_bytes() == old_bytes, "失败后旧文件原样（不谎报最新）"
 
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root 绕过文件权限位，chmod 只读不生效（环境限制）",
+    )
     def test_readonly_target_fails_explicitly(self, tmp_path) -> None:
         session = _session(tmp_path)
         apply_task_definition(session, task_text="第一版")

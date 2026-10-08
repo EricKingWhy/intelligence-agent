@@ -167,12 +167,15 @@ _FORMATION_PROMPT = (
     "Durability means future usefulness, not repetition. Semantic memories represent "
     "stable facts, preferences, profiles, project facts, constraints, or accepted "
     "corrections. Episodic memories are reusable accounts of a specific situation, action "
-    "or decision, outcome, and lesson. Classify a concrete user decision with its stated "
-    "situation and rationale as episodic when future planning needs to remember what happened "
-    "and why; do not classify that decision as semantic only because it produced a stable "
-    "state. Use semantic for a resulting stable project fact only when it is independently "
-    "useful without the event context and supported by evidence. Do not infer missing events "
-    "or lessons. A temporary activity, "
+    "or decision, outcome, and lesson. Use episodic when future planning needs the specific "
+    "situation, decision event, outcome, and lesson. Use semantic for an enduring project "
+    "choice, configuration, or constraint even when the user included how or why it was selected. "
+    "A specific event and its outcome remain episodic when recalled for later planning; future "
+    "relevance alone does not make an event semantic. Use semantic only for a stable fact that "
+    "persists independently of that event. "
+    "A temporary schedule change or one-time operational outcome remains episodic when its result "
+    "matters for future planning; semantic is for facts that continue beyond the event. "
+    "Do not infer missing events or lessons. A temporary activity, "
     "one-off request to run a job, replay instruction, or injected test failure is not "
     "memory content. If a message contains both a transient event and a separate durable "
     "fact, evaluate the fact on its own. A procedural memory must include reusable steps "
@@ -180,7 +183,21 @@ _FORMATION_PROMPT = (
     "the success condition from the stated steps and their stated purpose — deriving it "
     "from evidence is not inventing it. When the user approves a complete procedure, form a "
     "procedural candidate when policy permits. Approval without the actual procedure is not "
-    "enough. "
+    "enough. Runtime R5 accepts a procedural candidate when its evidence cites two distinct "
+    "qualifying event refs, or cites the exact text of a direct user event whose explicit trusted "
+    "Runtime marker is set. That marker is Runtime metadata and may not appear in this payload; "
+    "never infer or invent it. When the direct user message states a complete reusable procedure, "
+    "cite an exact excerpt from that message so Runtime can check its trusted marker. A plain user "
+    "approval without the actual procedure does not satisfy R5. For tool-backed procedures, include "
+    "two distinct successful tool-result refs in the candidate's evidence by citing the ref of "
+    "each tool_calls entry whose status is success. Do not count a tool call without a successful "
+    "result, a failed/missing/unknown result, or the same ref twice. For tool-backed procedures, "
+    "cite the exact user-stated steps when present and both distinct successful tool-result refs; "
+    "user evidence does not replace either result. If neither path is supported, return no procedural "
+    "candidate. The trusted marker may be absent from this payload. Do not infer or decide the "
+    "trusted Runtime marker or R5 eligibility; Runtime alone applies R5 using trusted metadata "
+    "and qualifying event refs. For a complete procedure stated directly by the user, cite its "
+    "exact excerpt and let Runtime evaluate the trusted marker. "
     "A question whose purpose is to retrieve or inspect an existing fact is not itself a "
     "memory or answer and must not be stored.\n"
     "Return ONLY one JSON object: "
@@ -196,9 +213,19 @@ _FORMATION_PROMPT = (
     "0..1, and evidence items {event_id, role, excerpt}. Cite an event by copying the "
     "`ref` value that item carries in the payload into `event_id` (refs look like e1, "
     "e2); never invent one, and never cite an item whose ref is null.\n"
+    "Every evidence item must contain exactly `event_id`, `role`, and a non-empty `excerpt` "
+    "copied from its referenced event (at most 300 characters); never use `summary` or other "
+    "keys. For a successful tool result, copy a non-empty excerpt from that result into "
+    "`excerpt`; citing its ref alone is not enough.\n"
     "For durable user facts and preferences, preserve explicitly stated names, values, "
     "quantities, dates, and qualifiers in the memory content and typed payload. Do not "
     "generalize away a concrete value; every detail must remain supported by cited evidence.\n"
+    "For durable project choices, preserve user-stated behavior, constraints, and reasons that "
+    "explain their value; do not reduce a described choice to its name alone.\n"
+    "For procedural memories, preserve every essential action, object, order, and execution "
+    "boundary. Concise wording is allowed only when it preserves all of them without generalizing; "
+    "if they cannot fit in the 500-character procedure field, return no procedural candidate. Keep "
+    "the success condition supported by cited evidence.\n"
     "The payload is a discriminated JSON object: all listed keys are required, "
     "`payload.kind` is required and must "
     "exactly match the candidate `kind`; do not omit it. Semantic payload keys are "
@@ -260,6 +287,12 @@ _ADJUDICATION_PROMPT = (
     "`project_id`, because Runtime binds it from trusted context. Copy "
     "every `evidence` item's `event_id` from the candidate unchanged — those values are "
     "the payload's refs and a rewritten one can no longer be resolved.\n"
+    "Candidates reaching this stage have already passed Runtime's deterministic R5 gate. "
+    "Treat their cited evidence as accepted; do not re-run R5 or demand another qualifying event. "
+    "Continue to apply the action rules below, including duplicate, conflict, evidence, policy, "
+    "and relation checks. For a complete procedural candidate, do not choose NOOP solely because "
+    "its success condition is derived from the user's stated steps or purpose rather than "
+    "separately executed; use ADD only when the existing ADD rule below applies.\n"
     "For UPDATE or INVALIDATE, `target_memory_id` must be copied exactly as it appears "
     "in one active entry of `relevant_memories`; never invent, rewrite, or infer an ID. "
     "Use ADD for a genuinely new durable candidate with no equivalent active memory. "
@@ -601,6 +634,30 @@ class MemoryJobExecutor:
             return await self._degrade(job, worker_id=worker_id, run_id=run_id, sink=sink,
                                        state=state,
                                        reason=DegradedReason.RUN_EVENTS_UNAVAILABLE)
+        # 先持久进入可恢复阶段，**再**等受限 extractor（#663 P2）。
+        #
+        # 反过来的话，抽取在飞的那段窗口里 durable 行还是 `QUEUED`——而抽取器此刻
+        # 已经发出了一次真实的外部模型请求（上限 20s）。进程若在那个窗口被杀，重启
+        # 扫描认领的是一个"还没开始过"的 job，与"一次请求已经在飞"这个事实对不上。
+        # `FORMING` 是 `list_recoverable` 认得的中间态（`list_recoverable` 只按
+        # "非终态"过滤，不按阶段），所以推进到它之后这个窗口就关上了。
+        #
+        # 设计来源:
+        #   pi 28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9
+        #     packages/durable/src/harness/compaction.ts:146 —— `select` 阶段先
+        #     `runtime.commit(... checkpoint: { phase: "summarize" })` 落检查点，
+        #     下一阶段 `summarize`（:148）才发外部模型请求；
+        #   deepseek-harness 5badb15009ae1756c3afe0ae0cef1faafc290ccc
+        #     packages/jobs/jobs-local/src/index.ts:267-276 —— 先注册 durable 记录
+        #     并广播 `registered`，再启动生产者泵，注释逐字："Binding the shared
+        #     producer state is the commit"。
+        advanced = await self._advance(job, worker_id=worker_id,
+                                       stage=MemoryJobStage.FORMING, state=state)
+        if advanced is None:
+            return await self._lost(job_id)
+        job = advanced
+        # 失败隔离不变：抽取异常仍只记日志，不影响上面这次已经落盘的状态推进，
+        # 也不影响主 run（它早已终结）。
         if self._session_store is not None and job.protected_fact_token_budget is not None:
             try:
                 await self._extract_protected_constraints(
@@ -613,11 +670,6 @@ class MemoryJobExecutor:
                 )
         budget = MemoryJobBudget(limits=self._limits, clock=self._clock)
         try:
-            advanced = await self._advance(job, worker_id=worker_id,
-                                           stage=MemoryJobStage.FORMING, state=state)
-            if advanced is None:
-                return await self._lost(job_id)
-            job = advanced
             formation_started = self._clock()
             formation, refs = await self._form(
                 job, run_events=run_events, history=history, roles=roles,

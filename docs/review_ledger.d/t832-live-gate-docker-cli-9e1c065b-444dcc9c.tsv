@@ -1,0 +1,1 @@
+2026-10-08	#832 两轴独立审查：Standards CLEAN；Correctness/Spec 最初提出 AC3 无 Docker CLI 环境证据缺口，后由原生 Windows 进程 PATH 隔离下的真实运行及 8 项回归验证闭合；无未解决代码 finding	9e1c065bd9c6a5b6bfc44d9deb7269ef06388b98..444dcc9c9800ee262d347d635e08a7e23b24283c

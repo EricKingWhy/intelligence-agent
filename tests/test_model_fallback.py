@@ -12,8 +12,9 @@ import asyncio
 
 import httpx
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
+from agent_harness.attachments.projection import IMAGE_OMITTED_PLACEHOLDER
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.fallback import (
     FallbackTransition,
@@ -21,6 +22,7 @@ from agent_harness.model.fallback import (
     TwoLevelFallbackPolicy,
     is_transient_model_error,
 )
+from agent_harness.model.multimodal import downgrade_to_non_vision
 from tests.scripted_model import ScriptedModel
 
 # ---- 1. is_transient_model_error（决策 15：共享 helper，policy 复用） ----
@@ -243,6 +245,45 @@ class TestCoordinatorAinvoke:
         async with asyncio.timeout(1):
             async with gate.slot():
                 pass
+
+    @pytest.mark.asyncio
+    async def test_ainvoke_retry_reprojects_messages_after_switch(self):
+        """#823 / MM-02 A2 残口：**非流式**回退重试前对 messages 重投影。
+
+        集成用例走 `runtime.run`（astream）；本用例锁 `ainvoke` 侧同一接缝
+        （`fallback.py` 的 `retry_messages = self._reproject_after_switch(...)`）——
+        coordinator 注入 `reproject_on_switch` 钩子后，primary 瞬时失败触发
+        `_try_switch` 成功，重试发出**之前** messages 被重投影；故 fallback 拿到的
+        是降级后的消息，而不是切换前的 `image_url` 块。钩子以**切换后的角色**调用
+        一次。变异验证：去掉那行重投影接线，下面的断言即变红（行为否则无锁）。
+        """
+        seen_roles: list[str] = []
+
+        def reproject(role: str, messages: list) -> list:
+            seen_roles.append(role)
+            return downgrade_to_non_vision(messages)
+
+        primary = _FlakyModel(_answer("unused"), 1, TimeoutError("t"))
+        fallback = _answer("from fallback")
+        coordinator = ModelFallbackCoordinator(
+            primary=primary, fallback=fallback,
+            primary_name="primary-model", fallback_name="fallback-model",
+            reproject_on_switch=reproject,
+        )
+        vision_message = HumanMessage(content=[
+            {"type": "text", "text": "看图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QQ=="}},
+        ])
+
+        ai = await coordinator.ainvoke([vision_message])
+
+        assert ai.content == "from fallback"
+        assert seen_roles == ["fallback"]
+        # fallback 真正收到的 user 消息已是非视觉降级形态（字符串 + 占位符），
+        # 不再是切换前的 image_url 块列表。
+        retry_user = fallback.snapshots[0].messages[0]
+        assert isinstance(retry_user.content, str)
+        assert retry_user.content == f"看图\n{IMAGE_OMITTED_PLACEHOLDER}"
 
     @pytest.mark.asyncio
     async def test_non_transient_failure_reraises(self):

@@ -123,6 +123,113 @@ _COMMAND_BOUNDARY = re.compile(
     r"[,，.!?。！？;；\r\n]|\b(?:but|however|except|although|whereas)\b|(?:但是|不过|然而|但)",
     re.IGNORECASE,
 )
+# 输入均为 casefold 后的串，无需 re.IGNORECASE（P4-3 顺手清理）。
+_KEEP_INTENT = re.compile(r"保留|留住|留在|留着|留下|\bkeep\b|\bpreserve\b|\bretain\b")
+# 紧邻分支专用（P4-2）：只收中文 keep 词。target 末字符是 word char 时，
+# target 末字与 keep 首字同为 word char，\b 不成立，英文词在该位置恒不命中；
+# 但 target 以非 word char 结尾（如标点「foo-keep」）时 target 侧 \b 成立，
+# 旧代码（bc04b60b^，紧邻检查用含英文词的 _KEEP_INTENT）会命中并返回 True，
+# 新代码不命中——该 edge case 下删英文词有行为差异（新代码不拦，under-block
+# 方向），并非零变化（P4-1 审查实测：old=True / new=False）。
+_KEEP_INTENT_ADJACENT = re.compile(r"保留|留住|留在|留着|留下")
+# P4-1：「遗留/残留/停留/滞留/挽留/拘留/扣留」是含「留」的**非 keep 词**，
+# 其后紧跟的「留在/留着/留下」等是词内子串误命中（如「遗留在备份里」），
+# 前一字落入本集合即跳过该匹配。真 keep 词（「保留」等）不受影响。
+_KEEP_FALSE_PRECEDERS = frozenset("遗残停滞挽拘扣")
+# P3：keep 词后可跳过的有限助词（至多 2 个），再遇「的」即定语标志。
+_KEEP_PARTICLES = frozenset("来在")
+_KEEP_ATTRIBUTIVE_MARKER = "的"
+_KEEP_PARTICLE_SKIP_LIMIT = 2
+
+
+def _keep_attributive(folded: str, keep_end: int) -> bool:
+    """P3：keep 匹配之后（允许跳过至多 2 个助词 来/在）紧跟「的」= 定语标志。
+
+    keep 修饰其后的名词（「留着的东西」「留下来的内容」），不作用于 target，
+    不构成管辖。裸后置（后随字符非「的」）仍构成管辖。
+    """
+    i = keep_end
+    skipped = 0
+    while i < len(folded) and folded[i] in _KEEP_PARTICLES and skipped < _KEEP_PARTICLE_SKIP_LIMIT:
+        i += 1
+        skipped += 1
+    return folded[i:i + 1] == _KEEP_ATTRIBUTIVE_MARKER
+
+
+def _keep_word_interior(folded: str, keep_start: int) -> bool:
+    """P4-1：keep 匹配前一字构成非 keep 词（遗留/残留/停留等）→ 词内子串误命中。"""
+    return keep_start > 0 and folded[keep_start - 1] in _KEEP_FALSE_PRECEDERS
+
+
+def _governing_keep_end(folded_clause: str, before: str) -> int | None:
+    """返回 before 片段内最后一个可能管辖 target 的 keep 意图结束下标。
+
+    过滤掉两类不构成管辖的 keep 匹配：定语形态（P3，keep+助词+「的」修饰
+    其后名词）与词内子串误命中（P4-1，「遗留」中的「留」）。
+    """
+    for m in reversed(list(_KEEP_INTENT.finditer(before))):
+        if _keep_word_interior(folded_clause, m.start()):
+            continue
+        if _keep_attributive(folded_clause, m.end()):
+            continue
+        return m.end()
+    return None
+
+
+def _reverse_keep_intent(clause: str, target: str) -> bool:
+    """#806：target 被「保留」意图管辖时返回 True（forget guard 必须拒绝）。
+
+    取 target 在 folded clause 中的**最后一次出现**做判定（步进 1 收集全部
+    出现位置，P4-2 最新表态优先）：末次出现之前片段内最后一个 keep 意图比
+    最后一个 forget 意图更近（last_keep_end > last_forget_end）即拒绝——
+    「忘记新邮箱旧档，保留新邮箱」末次出现被「保留」管辖必须拒绝；反过来
+    「忘记A，保留B，忘记B」末次出现被「忘记」管辖 → 放行（用户最后明确
+    说忘记 B，先前的保留不再压过最新表态）。全程在 casefold 后的串上操作，
+    不用 folded 下标切原串（casefold 可能改变字符串长度）。
+    取舍一：「留下」「留住」「留在」收进 keep 意图是 fail-closed——删除类 guard
+    宁可误拦不可误删。
+    取舍二：「不保留」「别保留」会先命中「保留」被当作 keep 意图，对 target 造成
+    over-block（连想删的也拦下）；方向同样 fail-closed，与取舍一一致。
+    取舍三（P3-1 后置管辖）：keep 意图**紧邻** target 之后（「新密码留着」，
+    含把字「把新密码留着」——其 keep 动词同样紧邻 target，无需单独把字规则）
+    视为 keep 管辖 → 拒绝。仅取紧邻形态：间隔一字符即不构成管辖（「新密码，
+    留着」「新钥匙留着」「把旧的留着」——把字句里「留着」管辖「旧的」而非
+    target，误拦即 over-block bug）。定语形态同不管辖（审查清零 P3）：keep
+    之后（允许跳过至多 2 个助词 来/在）紧跟「的」是定语标志（「留着的东西/
+    留下来的内容」——keep 修饰其后的名词，不作用于 target），不视为管辖，
+    与「把旧的留着」同类 over-block 边界；裸后置（后随字符非「的」）仍构成
+    管辖。前向分支（keep 在 target 之前）同样应用定语豁免（P3：
+    「被留下来的旧档案」不拦）与词内子串防误命中（P4-1：「遗留在备份里的
+    旧档案」——「遗留」中的「留」不构成 keep 意图）。
+    取舍四：英文后置形态（"the new key stays/keep it"）不处理——英文 keep
+    意图由前置最近意图规则覆盖（"forget the old key, keep the new key"）；
+    紧邻分支因此只收中文 keep 词（target 末字为 word char 时 \b 锚定的英文词
+    在该分支恒不命中；target 以非 word char 结尾时有差异，见
+    _KEEP_INTENT_ADJACENT 注释）。并列/悬垂后置
+    （「把新密码和旧密码都留着」）不构成紧邻 → 不拦，方向 under-block。
+    紧邻判据在 over-block（误拦正常删除）与 under-block（漏拦
+    并列形态）之间取窄，与「误拦也是 bug」的边界设计一致。
+    """
+    folded_clause = clause.casefold()
+    needle = target.casefold()
+    if not needle:
+        return False
+    occurrences = []
+    start = 0
+    while (idx := folded_clause.find(needle, start)) >= 0:
+        occurrences.append(idx)
+        start = idx + 1
+    if not occurrences:
+        return False
+    idx = occurrences[-1]
+    before = folded_clause[:idx]
+    keep_end = _governing_keep_end(folded_clause, before)
+    if keep_end is not None:
+        forget_ends = [m.end() for m in _FORGET_INTENT.finditer(before)]
+        if not forget_ends or keep_end > forget_ends[-1]:
+            return True
+    adjacent = _KEEP_INTENT_ADJACENT.match(folded_clause, idx + len(needle))
+    return adjacent is not None and not _keep_attributive(folded_clause, adjacent.end())
 
 
 def _command_clause(user_text: str, intent: re.Pattern[str]) -> tuple[str, int, int]:
@@ -216,19 +323,30 @@ def explicit_remember_matches(user_text: str, content: str) -> bool:
 
 
 def explicit_forget_matches(user_text: str, memory_id: str) -> bool:
+    """Require the target to be inside the clause governed by the user's forget command.
+
+    #806 审查披露（P4-3）：memory_id 先 strip 再匹配——tool 参数两侧空白视为
+    调用噪声，`f("忘记旧密码", " 旧密码 ")` 因此由 False 变 True（更放行），
+    属有意的语义变化。
+    """
     clause, _, _ = _command_clause(user_text, _FORGET_INTENT)
+    stripped = memory_id.strip()
     return bool(
         has_forget_intent(user_text)
-        and memory_id.casefold() in clause.casefold()
+        and stripped
+        and stripped.casefold() in clause.casefold()
+        and not _reverse_keep_intent(clause, stripped)
     )
 
 
 def explicit_forget_query_matches(user_text: str, query: str) -> bool:
     clause, _, _ = _command_clause(user_text, _FORGET_INTENT)
+    stripped = query.strip()
     return bool(
         has_forget_intent(user_text)
-        and query.strip()
-        and query.strip().casefold() in clause.casefold()
+        and stripped
+        and stripped.casefold() in clause.casefold()
+        and not _reverse_keep_intent(clause, stripped)
     )
 
 

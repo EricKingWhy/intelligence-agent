@@ -12,13 +12,22 @@
 | --- | --- | --- |
 | Pi（即更名前的 badlogic/pi-mono） | `D:\reference\pi` | `https://github.com/earendil-works/pi` |
 | dg-ai-notes（Pi 源码精读笔记，第三方） | `D:\reference\dg-ai-notes` | `https://github.com/buchidonggua/dg-ai-notes` |
+| DeepSeek Harness（DSH） | `D:\reference\deepseek-harness` | `https://github.com/deepseek-ai/deepseek-harness` |
+| oh-my-pi | `D:\reference\oh-my-pi` | `https://github.com/can1357/oh-my-pi` |
+| Codex CLI | `D:\reference\codex` | `https://github.com/openai/codex` |
 
 重建命令（新机器一次即可）：
 
 ```bash
 git clone --depth 1 https://github.com/earendil-works/pi.git D:\reference\pi
 git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference\dg-ai-notes
+git clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git D:\reference\deepseek-harness
+git clone --depth 1 https://github.com/can1357/oh-my-pi.git D:\reference\oh-my-pi
+git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 ```
+
+（`--depth 1` 浅克隆取的是**当时**的 HEAD；上表后三个克隆在 2026-10-07 实测分别为
+`5badb150` / `1c0993c3` / `7f89227`。Pi 同日实测 `1b347794`。引用时按下方纪律记 commit。）
 
 **引用纪律**：
 
@@ -100,6 +109,44 @@ git clone --depth 1 https://github.com/buchidonggua/dg-ai-notes.git D:\reference
 | 本仓 `src/agent_harness/instance_lock.py` | 已有跨平台 advisory 锁协议（#150） | `_take_os_lock` 双平台分支、advisory 边界声明——仓内先例 |
 
 （2026-10-04 i660 调研首查时本领域缺失，按本文件 §3.1 规则补录；外部来源当时因宿主权限未实读核实，判定与核实状态见 `docs/research/i660-posix-guard-research.md` §4。）
+
+### 多模态图片输入 / 附件（2026-10-07 新增，i821 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| DSH（本地克隆，MIT） | 与目标项目**同构**的附件域（事件存引用、字节外置）；Web / 桌面复用主源 | `packages/attachment`（`AttachmentId` 不透明 id、`ImageAttachmentRef`、`ImageAttachmentLimits`）、`attachment-local`（staging→fsync→原子发布、`normalization.ts` 归一化、文件名消毒含 Windows 保留名）、`docs/subsystems/attachment.md`（persist-before-event 不变量逐字）、`ui-attachment`（`drop-events` / `DropOverlay`）、`ui-conversation`（`historical-images` 受控读取）、`apps/desktop/src/preload-app.ts`（`__DSH_HOST_PATHS__` 路径桥） |
+| Pi（本地克隆，MIT） | CLI / TUI 复用主源；**降级文案的逐字来源** | `packages/ai/src/types.ts`（`ImageContent`）、`api/transform-messages.ts`（`downgradeUnsupportedImages` 的文本占位符）、`packages/tui`（终端图片协议层、`Image` 组件、`getNativeClipboard`） |
+| oh-my-pi（本地克隆，MIT） | **内容寻址外置**先例（与本仓不变量 15 同构） | `session/blob-store.ts`（`blob:sha256:` 外置，注释明写 "externalizing large binary data (images) from session JSONL files"）、`prompt/attachment-chips.ts`（`[Image #N]` chip + pendingImages）、`input-controller.ts` 的路径粘贴 |
+| Cline（`cline/cline`，Apache-2.0） | CLI 粘贴的平台分支与 data-url 构造 | `apps/cli` 的 `image-paste.ts`；其 OpenTUI / React 组件**不可复制** |
+| Claude Code（闭源） | 交互语义参考（**非代码来源**） | `[Image #N]` chip、Windows 用 `Alt+V`（`Ctrl+V` 常被终端截获）、API 层自动降采样 1568px |
+| Codex CLI（本地克隆） | 粘贴 / 路径双入口与缩放档 | `UserInput::LocalImage{path,detail}`、ResizeToFit 2048px、`view_image` 对非视觉模型拒绝、读取失败插文本占位符 |
+| Provider 官方文档（2026-10-07 读取） | 请求载荷形状的权威 | OpenAI Chat Completions（`image_url` 同时接受 http(s) 与 `data:`，`detail` 档位）；**DeepSeek 已有视觉**（`deepseek-flash`；图片**只允许出现在 user 消息**，system/assistant → 400）；Anthropic image block（`source ∈ {base64,url,file}`，单图 ≤10MB）；Gemini（`inline_data` / `file_data`）；Qwen/DashScope 与 GLM 的 base64 支持与张数上限差异 |
+| Web 聊天 UI：Open WebUI / LibreChat / LobeChat（克隆实证） | 「上传与消息解耦、消息只存引用、发送时物化」的共识 | Open WebUI 的 `convert_url_images_to_base64`（SSRF + 所有权校验）、LibreChat 的 `encodeAndFormatImages`（按 endpoint 输出原生块）、LobeChat 的非 vision 文本占位符与**故意不鉴权**的 `/f/{id}`（反面对照）；后端为权威并把配置下发前端 |
+| LangChain core content blocks | 标准内容块形状 | `langchain_core/messages/content.py` 的 `ImageContentBlock`；请求方向的「标准块 → provider 载荷」翻译在 partner 集成包内，**core 不代做** |
+
+**⚠ 已知硬冲突（不得直接照搬 DSH 的上传形态）**：DSH 把图片 base64 随 JSON prompt 提交，默认 body 上限
+**300 MiB** 且启动断言 `maxRequestBodyBytes ≥ maxMessageImageBytes*4/3 + 1 MiB`；本仓
+`BODY_MAX_BYTES = 1 MiB`。结论与取舍见 `docs/PRD_MULTIMODAL_IMAGE_INPUT.md`（选流式上传 + prompt 只带 ref）。
+
+**补录说明（§3.1 偏差披露）**：本领域在 i821 调研开始时尚未在清单中，属**事后补录**——首轮调研
+按用户指定上游直接开展，未先补本清单。逐文件复制清单、引用 commit 与核实状态见
+`docs/research/2026-10-07-multimodal-image-input-research.md`；票面见
+`docs/tickets/multimodal-2026-10-07/`（#821–#830）。
+
+### 任务进度清单 / 计划面板（2026-10-08 新增，W-27.1 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| ZCode 桌面端（本机安装，闭源） | 观感对齐的一手行为来源 | `resources/app.asar`：`XCt`（折叠窗口：>6 项 → 3 项窗口、锚点 = 首个 inProgress；@315031925）、`$Ct`（折叠行四分支文案 + hover 弹出；@315031936）、`kCt` / `pIt`（面板计数模型 / 消息流卡片）；**只对齐可观察行为，不复制代码与资源** |
+| opencode（官方仓库，2026-10-08 读取） | 列表折叠 / 可见性阈值的独立先例 | `packages/tui/src/feature-plugins/sidebar/todo.tsx`（>2 条才出折叠、全完成即隐藏）、`packages/app/src/pages/session/composer/session-todo-dock.tsx`（dock done/total） |
+| Claude Code 官方文档（2026-10-08 读取） | 交互形态一手文档 | `code.claude.com/docs/en/interactive-mode.md`（Ctrl+T 清单、最多 5 条、折叠随 resume 恢复）、`agent-sdk/todo-tracking.md`（N/M 计数范式） |
+| Codex CLI（本地克隆 `D:\reference\codex` @7f89227） | 终端侧折叠先例 | `codex-rs/tui/src/history_cell/plans.rs`（`Updated Plan · x/y complete`、`DETAIL_PREVIEW_LINES=3`）；`codex-rs/protocol/src/plan_tool.rs`（三态 schema；PlanUpdate 事件 transient、不落 rollout） |
+| oh-my-pi（@1c0993c3）/ DSH（@5badb150）/ Pi（@1b34794）（本地克隆） | 同族机制对照（提醒 / 持久化 / 面板） | oh-my-pi `packages/coding-agent/src/session/todo-tracker.ts`（提醒闭环）、`packages/tui/src/tools/todo.ts`（树渲染）；DSH `packages/client/ui-conversation/src/client/skeleton/TodoPanel.tsx`（Web 面板）、`packages/todo/tool-todo/src/index.ts`（log-only 事件）；Pi 仅 `packages/coding-agent/examples/extensions/todo.ts`（示例，核心无此工具） |
+| 本仓既有 | 先行收敛结论（W-26~W-29 的依据） | `docs/research/2026-09-27-agent-progress-visualization-research.md`（渲染四件套）；PRD `docs/PRD_LONG_TASK_CONTEXT_MANAGEMENT.md` §7 |
+
+**补录说明（§3.1 偏差披露）**：本领域在 W-27.1 调研开始时尚未在清单中，属**事后补录**——首轮调研
+按用户指定上游（ZCode 本机 bundle + 本地克隆 + 官方文档）直接开展，未先补本清单。机制摘要 / 契合点 /
+判定（PORT DESIGN + BUILD）/ License 见 `docs/tickets/workbench-2026-09-27/W-27-1-plan-list-window-fold.md` 方案依据块。
 
 ## 3. 怎么用（与流程的挂钩）
 

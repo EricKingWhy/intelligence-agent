@@ -80,6 +80,10 @@ export interface WsScript {
   delayMs?: number;
   /** 一个帧都不发就关闭（服务端/代理拒掉这条订阅）：考零服务帧路径。 */
   closeNow?: boolean;
+  /** 心跳 opt-in（毫秒）：按此间隔下行 `{type:'server_ping'}`，直到连接关闭。
+   *  真后端 2s 一次（#420 AC1 计入停摆看门狗活性）。缺省不发——o-wait-hint
+   *  等 spec 刻意依赖停摆路径，必须按脚本 opt-in，不能全局默认开。 */
+  pingIntervalMs?: number;
 }
 
 export type WsProvider = (ctx: {
@@ -123,6 +127,22 @@ async function installWsRoute(
           ws.close();
           return;
         }
+        // 心跳 opt-in 先启动：delayMs 期间连接已建立但无帧，真后端此时
+        // 也在发 2s 一次的 server_ping；计时器放在 delay 之前，避免
+        // delay + 测试前置步骤累计静默超 10s 被停摆看门狗误判。
+        let pingTimer: ReturnType<typeof setInterval> | undefined;
+        if (script?.pingIntervalMs) {
+          pingTimer = setInterval(() => {
+            try {
+              ws.send(JSON.stringify({ type: 'server_ping', session_id: sessionId }));
+            } catch {
+              if (pingTimer) clearInterval(pingTimer);
+            }
+          }, script.pingIntervalMs);
+          ws.onClose(() => {
+            if (pingTimer) clearInterval(pingTimer);
+          });
+        }
         if (script?.delayMs) await new Promise((r) => setTimeout(r, script.delayMs));
         const events = script?.events ?? sessionEvents.get(sessionId) ?? mock.events ?? [];
         const frames = script?.frames ?? [];
@@ -145,6 +165,7 @@ async function installWsRoute(
           script?.ending ?? (frames.some((f) => RUN_TERMINAL_TYPES.has(f.type)) ? 'done' : 'keep');
         if (ending === 'drop') {
           ws.close(); // 异常收尾：没有 done（客户端只能靠 terminalSeen 判断）
+          // drop 时连接已关，ping 计时器由 onClose 清理
         } else if (active && ending === 'done') {
           ws.send(JSON.stringify({ type: 'done', session_id: sessionId }));
         }
