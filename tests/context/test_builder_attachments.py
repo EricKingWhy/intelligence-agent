@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -11,7 +12,7 @@ from PIL import Image
 from agent_harness.attachments.projection import IMAGE_OMITTED_PLACEHOLDER
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.model.multimodal import DEFAULT_IMAGE_DETAIL
-from agent_harness.session import USER_MESSAGE
+from agent_harness.session import USER_MESSAGE, JsonlSessionStore, Session
 from agent_harness.storage.artifact import FakeArtifactStore, compute_byte_artifact_id
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
@@ -110,3 +111,35 @@ async def test_text_only_build_is_unchanged(tmp_path):
         m for m in messages if isinstance(m, HumanMessage) and m.content == "只有文字"
     )
     assert user.content == "只有文字"  # 无附件 ⇒ 逐字不变（AC8）
+
+
+def _first_image_url_block(messages):
+    for message in messages:
+        if isinstance(message, HumanMessage) and isinstance(message.content, list):
+            for block in message.content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    return block
+    raise AssertionError("请求里没有 image_url 块")
+
+
+@pytest.mark.asyncio
+async def test_resume_rebuilds_identical_image_block(tmp_path):
+    """AC9：从**持久化事件前缀**重建（resume）出的请求与首次一致（图片块形状相同）。
+
+    与"同一进程内续聊"不同：这里丢弃内存 Session，从磁盘 JSONL 重新 `Session.load`，
+    用独立 builder 重新投影 + 重新取字节归一化——证明重建只依赖事件前缀（含引用）
+    与字节存储，不依赖任何进程内状态。
+    """
+    session, store, _aid = await _session_with_image(tmp_path)
+    first = await _builder(store, vision=True).build(session)
+    first_block = _first_image_url_block(first)
+
+    reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
+    rebuilt = await _builder(store, vision=True).build(reloaded)
+
+    assert _first_image_url_block(rebuilt) == first_block
+    # 事件流里永远只有引用、没有 base64（AC3）。
+    persisted = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
+    assert "base64" not in json.dumps(
+        [event.data for event in persisted], ensure_ascii=False
+    )

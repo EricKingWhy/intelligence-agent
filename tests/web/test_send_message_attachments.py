@@ -274,3 +274,69 @@ def test_ws_send_message_rejects_non_list_attachments(tmp_path: Path) -> None:
         payload = json.loads(ws.receive_text())
 
     assert payload["type"] == "error", payload
+
+
+def test_ws_send_message_rejects_unknown_attachment(tmp_path: Path) -> None:
+    """WS 与 HTTP 同形：存在性/归属校验失败（未知 id）同样回错误帧（AC4）。"""
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "send_message",
+                    "session_id": session_id,
+                    "content": "看图",
+                    "attachments": ["sha256:" + "0" * 64],
+                }
+            )
+        )
+        payload = json.loads(ws.receive_text())
+
+    assert payload["type"] == "error", payload
+    # 校验失败发生在任何落盘之前：事件流里没有引用。
+    assert "attachment" not in _events_text(tmp_path, session_id)
+
+
+def _events_line_count(tmp_path: Path, session_id: str) -> int:
+    text = _events_text(tmp_path, session_id)
+    return len([line for line in text.splitlines() if line.strip()])
+
+
+def test_upload_appends_no_event(tmp_path: Path) -> None:
+    """AC1：**上传本身不产生事件**——字节落存储，事件只在发送时写。
+
+    上传走内容寻址落盘（persist-before-event 的"persist"半），不 append 任何
+    SessionEvent；引用数组只在 `user/message` 事件里出现。
+    """
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    before = _events_line_count(tmp_path, session_id)
+
+    up = _upload(client, session_id, _png(24, 18))
+    assert up.status_code == 200, up.text
+
+    assert _events_line_count(tmp_path, session_id) == before
+    # 上传后事件流里没有任何附件引用（引用只在发送时进 user/message）。
+    assert "attachment" not in _events_text(tmp_path, session_id)
+
+
+def test_sent_attachment_bytes_are_readable_after_event(tmp_path: Path) -> None:
+    """AC2 persist-before-event：事件引用落盘后，其指向的字节必然可读且逐字节相等。"""
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    payload = _png(24, 18)
+    attachment_id = _upload(client, session_id, payload).json()["attachment_id"]
+
+    resp, _ = _send(client, session_id, content="看图", attachments=[attachment_id])
+    assert resp.status_code == 200, resp.text
+
+    # 事件已写（引用已落盘）⇒ 此刻受控读回必须成功且字节相等。
+    event = _user_message_with_attachments(tmp_path, session_id)
+    assert event["data"]["attachments"][0]["attachment_id"] == attachment_id
+    got = client.get(
+        f"/api/sessions/{session_id}/attachments/{attachment_id}/content"
+    )
+    assert got.status_code == 200, got.text
+    assert got.content == payload
