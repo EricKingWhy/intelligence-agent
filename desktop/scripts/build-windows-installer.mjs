@@ -104,6 +104,80 @@ export function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
+/** The `${LANG_<NAME>}` symbol a LangString line references, or null. */
+function langStringSymbol(line) {
+  const match = /^\s*LangString\s+\S+\s+\$\{LANG_([A-Z0-9_]+)\}/.exec(line)
+  return match ? match[1] : null
+}
+
+/**
+ * Open a conditional-compilation frame. Only `!ifdef` / `!ifndef` carry
+ * symbols; every opener is pushed so `!endif` pops the right frame.
+ */
+function conditionalFrame(line) {
+  const match = /^\s*!(if|ifdef|ifndef|ifmacrodef|ifmacrondef)\b(.*)$/.exec(line)
+  if (!match) return null
+  const kind = match[1]
+  const symbols =
+    kind === 'ifdef' || kind === 'ifndef'
+      ? new Set(match[2].match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])
+      : new Set()
+  return { kind, symbols }
+}
+
+/**
+ * Every `LangString <name> ${LANG_<X>}` in an NSIS script that is NOT enclosed
+ * in a matching `!ifdef LANG_<X>` block, as `{ line, symbol }` (line is 1-based).
+ *
+ * #831: the stock NSIS template inserts `customHeader` right after
+ * `!insertmacro addLangs`, so the `${LANG_*}` symbols defined by
+ * `LoadLanguageFile` are visible there. A single-language installer
+ * (`installerLanguages: [language]`) does not load the other language, so an
+ * unguarded `LangString ... ${LANG_SIMPCHINESE}` makes makensis emit warning
+ * 7025 — fatal, because electron-builder runs makensis with warnings-as-errors.
+ * The `!else` branch of an enclosing guard drops its symbols (fail-closed).
+ */
+export function unguardedLangStrings(source) {
+  const bad = []
+  const stack = []
+  const lines = source.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    const frame = conditionalFrame(line)
+    if (frame) {
+      stack.push(frame)
+      continue
+    }
+    if (/^\s*!else\b/.test(line)) {
+      const top = stack[stack.length - 1]
+      if (top) top.symbols = new Set()
+      continue
+    }
+    if (/^\s*!endif\b/.test(line)) {
+      stack.pop()
+      continue
+    }
+    const symbol = langStringSymbol(line)
+    if (symbol === null) continue
+    const guarded = stack.some((f) => f.kind === 'ifdef' && f.symbols.has(`LANG_${symbol}`))
+    if (!guarded) bad.push({ line: i + 1, symbol })
+  }
+  return bad
+}
+
+/**
+ * Build-time assertion (#831): every `LangString <name> ${LANG_<X>}` in the
+ * installer script must sit inside a matching `!ifdef LANG_<X>` guard, so a
+ * language-set bug fails the build instead of aborting deep inside makensis.
+ */
+export function validateLangStringGuards(source) {
+  const bad = unguardedLangStrings(source)
+  if (bad.length > 0) {
+    const where = bad.map((b) => `line ${b.line}: ${b.symbol}`).join(', ')
+    throw new Error(`installer.nsh: LangString not guarded by !ifdef LANG_<NAME> (${where})`)
+  }
+}
+
 /**
  * Pure electron-builder configuration for the Windows x64 installer.
  * Kept pure (no electron-builder import) so it is unit-testable on any OS.
@@ -192,6 +266,10 @@ async function main() {
       throw new Error(`missing installer input: ${required}`)
     }
   }
+  // #831: fail early when a LangString is not guarded by its language.
+  const installerNsh = join(installerDir, 'installer.nsh')
+  validateLangStringGuards(readFileSync(installerNsh, 'utf8'))
+  console.log('installer LangString guards OK')
   console.log('installer inputs OK')
 
   if (compileOnly) {
