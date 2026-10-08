@@ -1798,7 +1798,14 @@ def is_direct_user_input_event(
 def latest_direct_user_input_event(
     events: list[SessionEvent], model_messages: list[AnyMessage],
 ) -> SessionEvent | None:
-    """Find the newest direct user message still present in model input."""
+    """Find the newest direct user message still present in model input.
+
+    C2 同源（#862）：候选投影项排除 compaction summary（`message.name ==
+    COMPACTION_SUMMARY_MESSAGE_NAME`，与 `is_direct_user_input_event` 的 C2 收紧紧同一手法）。
+    不排除时，「已被 live-supersede 的事件 s 的单事件 bracket 的 summary 文本恰等于 s 的
+    content」会让 `(s, s)` 那项把一条**已作废**的消息重选为"最新直接用户输入"——summary 是
+    投影替身、不是用户原话，不得据此复活已撤回消息。
+    """
     latest_direct_message = next(
         (
             event for event in reversed(events)
@@ -1833,6 +1840,11 @@ def latest_direct_user_input_event(
             source_range is None
             or source_range[0] != source_range[1]
             or not isinstance(message, HumanMessage)
+            # C2 同源（#862）：`(seq, seq)` 命中 compaction summary 则不计入候选。否则
+            # 「已被 live-supersede 的事件 s，其单事件 bracket 的 summary 文本恰等于 s 的
+            # content」会让这一项把一条已撤回的消息还原成"最新直接用户输入"——summary 是
+            # 投影替身、不是用户原话（与 `is_direct_user_input_event` 的 C2 收紧同一手法）。
+            or message.name == COMPACTION_SUMMARY_MESSAGE_NAME
         ):
             continue
         text = _projected_user_text(message)
