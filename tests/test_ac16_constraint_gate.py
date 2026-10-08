@@ -2090,4 +2090,3 @@ def test_launched_post_forwards_to_the_bounded_helper(driver):
         if "self._client.post(" in line and "async def _post_bounded" not in line
     ]
     assert len(bare_posts) == 1, f"裸 POST 调用点应只剩 _post_bounded 内一处，实为：{bare_posts}"
-
