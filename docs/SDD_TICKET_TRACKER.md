@@ -7777,3 +7777,13 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 
 **未决**：main 尚未同步（§14.7 两处冲突的并集方案待批准）；push / PR 待批准；#815 第三路径待裁决；
 `#859`（`stream/truncated` 无 `time` 被 `parseEnvelope` 丢弃）待修。**#365 保持 OPEN**。
+
+## W-21 七票批收尾（2026-10-08；#850 两条残余修复 + 修后重审 + 冻结树全量 + T12p 归因；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，tip `86cd73c1`；**push/PR 待批准，未集成**）
+
+**范围**：`3c850121..c6b6e01a`（代码面仅 `c6b6e01a` 一笔）+ 记账笔。用户裁决「修 #850 两条残余 + 一轮针对新 diff 的修后重审」。逐条明细见 `docs/live_gate/w21/55-seven-ticket-fixes.md` §9；台账行 `docs/review_ledger.d/t365-w21-rereview-850-residuals-3c850121-c6b6e01a.tsv`。
+
+- **修复 `c6b6e01a`**：`src/agent_harness/sandbox/local.py` 判据 `strip()`→`rstrip()` + 拒绝文案按实测分列两形状；`src/agent_harness/sandbox/base.py` 契约 docstring 改写；`tests/sandbox/test_local_sandbox.py` 新增前导换行参数化用例；`tests/tooling/test_approve_policy.py` 加平台分支断言。红证：只加测试不改源 ⇒ 该组 **3 failed**（全 `DID NOT RAISE`），改源后绿；focused **356 passed / 15 skipped**；ruff 干净。
+- **修后重审（§8.8.5；`3c850121..c6b6e01a`）**：两轴各一独立只读子代理、均 **APPROVE-WITH-FINDINGS**、均自证零写入。F1（P1 前导换行被 `strip()` 放行）与 F2（本批引入红测试）逐条闭合（正确性轴在仓库外克隆单点还原 `strip()` ⇒ 3 failed、还原 `rstrip()` ⇒ 绿）。**两轴独立收敛同一条新 P3**：`rstrip()` 使前导裸 CR 被拒而真实 `cmd.exe` `rc=0` 正常执行 ⇒ 新引入的 fail-closed 误拒，**登记不修**（§8.8.5 额度用满）。另 P4 命名/摘要漂移 + P4 测试缺口。零 P0/P1/P2。
+- **冻结树 `86cd73c1` 全量 13 车道**：① ruff ✅ ② pytest **6744P/27S/51D rc=0**（2035.63s，**本批引入的红已消失**）③ guards ✅ ④ tui 69/69 ⑤ tui tsc ✅ ⑥ desktop 1 红 = staging 陈旧（重打包前置）⑦ web tsc ✅ ⑧ vitest 1 红 = 在册 flake B-29（本批 `web/` 改动 0 文件）⑨ oxlint ✅ ⑩ vite build ✅ ⑪ playwright **11 红/495 绿**（10 条 `u-project-task.spec.ts` 陈旧 spec，main `b895940b`/PR #819 已根修 + 1 条 T12p，见下）⑫ diff-check ✅ ⑬ coverage rc=0。原始日志 `D:\w21-work\gate86cd.txt`。
+- **T12p 归因（原「待归因」项，已闭合）**：失败签名 = `expect(subs).toHaveLength(1)` 实得 **2 条、两条同 `after_seq=3`**（**非超时**）。根因 = 该断言在 **main 上已被 `9b37eeb1`「fix(e2e): T12p/T12r 幻影重连订阅竞态根因修复」改掉**（`9b37eeb1` 不在 HEAD；`origin/main` 现为 `toHaveLength(2)`；其 commit message 记的实测 `[3,3]` 与本次逐字吻合）⇒ **陈旧 spec，非本批引入、非未知红**，与本批 10 条 `u-project-task` 红同类（main 已根修、本分支落后 188 提交）。隔离复跑 `--workers=2 -g "T12p"` **3/3 绿**（`D:\w21-work\t12p-run{1,2,3}.log`）。**不登记为「已知环境 flake」**（非超时型且 main 已根修），随同步消失。
+- **未重打包、未跑 Run A / Run B**（等批准）。**待用户裁决/批准**：① P3+P4 残余（登记 vs 另开一轮修）② 重打包 + Run A/B 各两次（新样本）③ 两处 docs 冲突并集解决（§14.7）④ #815 第三路径 (c) 追认/否决 ⑤ push + 开 PR（§14.4 单独批准）。**#365 保持 OPEN**。

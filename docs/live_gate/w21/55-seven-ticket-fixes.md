@@ -211,3 +211,72 @@ FAILED tests/tooling/test_approve_policy.py::TestExecutorIntegration::test_comma
   「两次通过」不构成 #365 票面要求的证据（票面明令不得隐藏失败、不得只用 fake model 宣称通过）。
 - ⑪ playwright 本车道**无读数**（被另一个 clone 的 dev server 占住 5173）——这是一处**已知缺口**，
   不写成通过；待端口空出或用户裁定后重跑。
+
+## 9. 收尾：残余修复 + 修后重审 + 冻结树全量 + T12p 归因（2026-10-08）
+
+> 本节是 §6–§8 之后**新窗口**的读数：修复提交 `c6b6e01a` 与冻结树 `86cd73c1`。
+> §6–§8 的旧读数仍有效（其窗口早于本轮），两段读数各自独立。
+
+### 9.1 本轮修复（`c6b6e01a`，代码面唯一一笔）
+
+用户裁决「修这两条 + 一轮针对新 diff 的修后重审」后落地：
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/agent_harness/sandbox/local.py` | 判据 `command.strip()` → `command.rstrip()`（只去尾部，前导换行不再被放行）；拒绝文案按实测分列两形状（前导换行 = 什么都不跑 / 内部换行 = 只跑第一行） |
+| `src/agent_harness/sandbox/base.py` | 契约 docstring 按实测改写 |
+| `tests/sandbox/test_local_sandbox.py` | 新增 `test_leading_newline_is_refused`（参数化 3 形状）+ 类 docstring 订正 |
+| `tests/tooling/test_approve_policy.py` | 加 `import os` + 平台分支断言（原用例把「多行命令能跑通」当断言，被 #850 行为变更打翻） |
+
+**红证（可复跑）**：只加测试不改源时 `TestExecMultiLineCommandGuard` = **3 failed / 4 passed / 1 skipped**（三条参数化全 `DID NOT RAISE`）；改源后该组全绿。
+**focused 读数**：`tests/sandbox` + `tests/tools` + `tests/tooling/test_approve_policy.py` = **356 passed / 15 skipped**；ruff 干净。
+
+**修前机械面（§8.2 第 4 条）**：`c6b6e01a` 上裸全量 Gate-0 = **5/6**，唯一红 coverage，❌ 集合**恰为 `c6b6e01a` 一笔** ⇒ 判据成立才派单。读数 `docs/gate/c6b6e01a9fa1cf37ce5119f8ed6d26d1fa11f740.json`。
+
+### 9.2 修后重审（§8.8.5；范围 `3c850121..c6b6e01a`）
+
+两轴各一独立只读子代理、互不可见，**均 APPROVE-WITH-FINDINGS**，均自证主工作树零写入（`git status --short` 仅 `?? docs/gate/c6b6e01a….json`）。
+
+- **F1（P1，前导换行被 `strip()` 放行）与 F2（本批引入的红测试）逐条实测闭合**：规范轴把三个前导形状经真实 `cmd.exe` 复验为真静默 no-op（`rc=0 stdout=''`）；正确性轴在**主工作树之外的克隆**里把 `body = command.rstrip()` 单点还原为 `strip()`（锚点命中数 == 1）⇒ **3 failed**（`DID NOT RAISE`），还原 `rstrip()` ⇒ 绿；F2 同理复现旧断言必红。
+- **新收敛的一条 P3（两轴独立得到同一条）**：`rstrip()` 不再归一首部空白 ⇒ **前导裸 CR**（`"\recho A"` 等 4 形状）被拒，而真实 `cmd.exe` **`rc=0 stdout="A"`（正常执行）** ⇒ 本 diff **新引入的误拒**。方向 **fail-closed**（显式报错、无假成功、无数据丢失），故非 P1/P2。**已登记不修** —— §8.8.5「每轴 1 轮、无第二轮」额度本票已用满，协议出口 = 停止修复 + 登记残余 + 交用户裁决。
+- **P4（规范轴）命名/摘要漂移**：`sandbox/base.py:72` 类 docstring 首行仍写「含**内部**换行」（实现已含前导）；函数名 `_has_interior_newline` 与新语义不符；`tests/sandbox/test_local_sandbox.py:261` 仍写「含内部换行」。
+- **P4（规范轴）测试缺口**：新增用例未钉 `"\r\necho A"`（最贴近现实的真静默 no-op 形状，当前确被拒但无回归保护）与裸 CR 边界。
+- **正确性轴 fail-closed 网格**：3375 组合形状逐条比对守卫判定 vs 真实 `cmd.exe` ⇒ **零条「放行 + rc=0 + 内容静默丢失」**（120 条被放行但 cmd 弄坏的形状全部 `rc!=0`，响亮失败）。
+- **台账行**：`docs/review_ledger.d/t365-w21-rereview-850-residuals-3c850121-c6b6e01a.tsv`（写实际范围 `3c8501213726cc226fe78fba7870cd1d09ce6886..c6b6e01a9fa1cf37ce5119f8ed6d26d1fa11f740`，710 字符 ≤ 800）。
+
+### 9.3 冻结树 `86cd73c1` 全量 13 车道（串行、零改动窗口，总墙钟 ≈ 54 min）
+
+原始日志 `D:\w21-work\gate86cd.txt` / 汇总 `gate86cd.summary.txt`；跑法脚本 `D:\w21-work\gate_86cd.sh`。
+
+| 车道 | rc | 读数 |
+| --- | --- | --- |
+| ① ruff | 0 | All checks passed |
+| ② pytest-full | **0** | **6744 passed, 27 skipped, 51 deselected in 2035.63s** ← 本批引入的红已消失 |
+| ③ guards | 0 | 6s PASS |
+| ④ tui tests | 0 | 69/69 |
+| ⑤ tui tsc | 0 | 干净 |
+| ⑥ desktop tests | **1** | 唯一红 = `assertStagedProductMatchesSource`（staging 陈旧，重打包前置） |
+| ⑦ web tsc | 0 | 13s |
+| ⑧ web vitest | **1** | 1 failed = `StepDetail.window.test.tsx > F5 尾窗 > DIFFS/ARTIFACTS：默认先裁` = 在册 flake B-29（本批 `web/` 改动 0 文件） |
+| ⑨ web oxlint | 0 | 1s |
+| ⑩ vite build | 0 | 3s |
+| ⑪ playwright | **1** | **11 failed, 495 passed (18.0m)**：10 条在 `u-project-task.spec.ts`（spec 未随 #367 选项 A 重写，main 的 `b895940b`/PR #819 已根修）+ 1 条 T12p（见 §9.4）——**11 条全部是陈旧 spec、main 已根修，本分支落后 main 188 提交故仍有** |
+| ⑫ diff-check | 0 | 干净 |
+| ⑬ coverage-gate | 0 | `089524a~1..HEAD 每条 commit 均有归属` |
+
+⑫真机验收 n/a（未重打包）；③ `run_tests_clean.sh` 未跑（② 无沙箱配额形状，绕行不必要）；tui/desktop 的 `node --test` 不在协议 13 车道表内，已手工补跑。
+
+### 9.4 T12p 归因（原 §8 的「待归因」项，**已闭合**）
+
+- **位置**：`web/e2e/multiturn-queue.spec.ts:791`（本分支版本），标题「T12p：迟到的事件流响应 → WS 继续收该 run 的输出（不掐流、不重订阅）」，仅 `chromium-1280` 红（`chromium-1920` 通过）。
+- **失败签名（`gate86cd.txt` 原文）**：`expect(received).toHaveLength(expected)`，`Expected length: 1 / Received length: 2`，`Received array: [{"after_seq": 3, "session_id": "mt-live-1"}, {"after_seq": 3, "session_id": "mt-live-1"}]` —— **不是超时，是订阅数 2 ≠ 1**。
+- **根因（机械定位）**：该断言在 **main 上已被 `9b37eeb1`「fix(e2e): T12p/T12r 幻影重连订阅竞态根因修复」改掉**（`git merge-base --is-ancestor 9b37eeb1 HEAD` ⇒ **否**；`origin/main` 上该用例现为 `expect.poll(...).toBeGreaterThanOrEqual(1)` + `expect(subs).toHaveLength(2)`，并带注释解释「mock 一次性 SSE 无终态帧 ⇒ 500ms 退避重连发出一条幻影订阅（after_seq=3），叠加 launched/ack 那条 ⇒ subs=2，`toHaveLength(1)` 假红」）。`9b37eeb1` 的 commit message 记的实测形状 **`[3,3]`** 与本次失败逐字吻合。⇒ **这是陈旧 spec，不是本批引入的缺陷，也不是未知红**；与本批 10 条 `u-project-task.spec.ts` 红**同类**（main 已根修、本分支落后 188 提交）。
+- **隔离读数（接续会话当场采集，2026-10-08）**：端口 5173 空出后，`node node_modules/@playwright/test/cli.js test e2e/multiturn-queue.spec.ts --workers=2 -g "T12p"` **连跑 3 次全部 2 passed**（两 project 各绿；日志 `D:\w21-work\t12p-run{1,2,3}.log`）⇒ 印证「负载下必输 500ms 竞速」的非确定性，与 `9b37eeb1` 的根因叙述一致。
+- **处置**：**不**登记为「已知环境 flake」（它不是超时型，且 main 已根修）；随 main 同步后应自然消失。同步后按 §14.10 在合并树重跑全量门禁复核。
+
+### 9.5 残余与待裁决
+
+- **P3（前导裸 CR 误拒，fail-closed）+ P4（命名/摘要漂移）+ P4（测试缺口）**：本轮**只登记不修**（§8.8.5 额度用满），交用户裁决（是否另开一轮修）。
+- **⑪ playwright 11 红**：全部陈旧 spec（main 已根修），随同步消失；**不写成通过**，也不登记为 flake。
+- **重打包 + Run A / Run B 各两次**：未执行，等用户批准。
+- **`#365` 保持 OPEN**，未关单。
