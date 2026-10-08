@@ -59,6 +59,7 @@ def test_inspection_reports_skill_metadata_resources_and_requirements(tmp_path: 
         ("missing.md", "MISSING_RESOURCE"),
         ("../../outside.txt", "REFERENCE_OUTSIDE_PACKAGE"),
         ("C:/outside.md", "REFERENCE_OUTSIDE_PACKAGE"),
+        ("file:///outside.md", "REFERENCE_OUTSIDE_PACKAGE"),
     ],
 )
 def test_inspection_rejects_missing_and_escaping_references(
@@ -151,7 +152,10 @@ def test_nested_markdown_references_resolve_from_skill_root(tmp_path: Path) -> N
         "---\nname: root-relative-skill\ndescription: Example.\n---\n"
         "See [the guide](references/REFERENCE.md).\n",
     )
-    _write(source / "references" / "REFERENCE.md", "See [the image](assets/logo.bin).\n")
+    _write(
+        source / "references" / "REFERENCE.md",
+        "See [the image](assets/logo.bin) and [online](https://example.test/guide).\n",
+    )
     _write(source / "assets" / "logo.bin", b"image-data")
 
     report = inspect_skill_package(source, scope="project")
@@ -193,7 +197,7 @@ def test_inspection_lists_pyproject_build_and_optional_dependencies(tmp_path: Pa
     _write(
         source / "pyproject.toml",
         "[build-system]\nrequires = ['setuptools>=68']\n"
-        "[project]\ndependencies = ['requests>=2']\n"
+        "[project]\nrequires-python = '>=3.11'\ndependencies = ['requests>=2']\n"
         "[project.optional-dependencies]\ntest = ['pytest>=8']\n",
     )
 
@@ -252,13 +256,16 @@ def test_inspection_follows_requirements_includes_without_executing_them(
     assert dependency["support"] == "manual_review"
 
 
-def test_inspection_rejects_requirements_include_outside_package(tmp_path: Path) -> None:
+@pytest.mark.parametrize("include", ["../../outside.txt", "%2e%2e/outside.txt"])
+def test_inspection_rejects_requirements_include_outside_package(
+    tmp_path: Path, include: str
+) -> None:
     source = tmp_path / "escaping-requirements-include"
     _write(
         source / "SKILL.md",
         "---\nname: escaping-requirements-include\ndescription: Example.\n---\n",
     )
-    _write(source / "requirements.txt", "-r ../../outside.txt\n")
+    _write(source / "requirements.txt", f"-r {include}\n")
 
     report = inspect_skill_package(source, scope="project")
 
@@ -266,6 +273,25 @@ def test_inspection_rejects_requirements_include_outside_package(tmp_path: Path)
     assert "DEPENDENCY_INCLUDE_OUTSIDE_PACKAGE" in {
         error["code"] for error in report["errors"]
     }
+
+
+def test_inspection_lists_poetry_dependencies_and_python_requirement(tmp_path: Path) -> None:
+    source = tmp_path / "poetry-dependencies"
+    _write(
+        source / "SKILL.md",
+        "---\nname: poetry-dependencies\ndescription: Example.\n---\n",
+    )
+    _write(
+        source / "pyproject.toml",
+        "[tool.poetry.dependencies]\npython = '^3.11'\nrequests = '^2.31'\n"
+        "[tool.poetry.group.test.dependencies]\npytest = '^8'\n",
+    )
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert {item["name"] for item in report["dependencies"]} == {"requests", "pytest"}
+    assert any(item["kind"] == "runtime" for item in report["requirements"])
 
 
 def test_inspection_rejects_missing_requirements_include(tmp_path: Path) -> None:
@@ -360,6 +386,21 @@ def test_inspection_reports_oversized_skill_file(tmp_path: Path) -> None:
 
     assert report["status"] == "unsupported"
     assert "SKILL_FILE_TOO_LARGE" in {error["code"] for error in report["errors"]}
+
+
+def test_inspection_reports_oversized_markdown_reference(tmp_path: Path) -> None:
+    source = tmp_path / "large-reference"
+    _write(
+        source / "SKILL.md",
+        "---\nname: large-reference\ndescription: Example.\n---\n"
+        "See [the guide](references/REFERENCE.md).\n",
+    )
+    _write(source / "references" / "REFERENCE.md", "x" * 1_000_001)
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "REFERENCE_FILE_TOO_LARGE" in {error["code"] for error in report["errors"]}
 
 
 def test_cli_plugins_inspect_is_read_only_and_never_runs_scripts(

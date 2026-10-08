@@ -87,7 +87,7 @@ def inspect_skill_package(
     if not resolved_skill_file.is_file():
         _add_error(errors, "SKILL_FILE_NOT_A_FILE", "SKILL.md", "SKILL.md must be a regular file.")
         return report
-    skill_text = _read_skill_file(resolved_skill_file, errors)
+    skill_text = _read_skill_file(root, resolved_skill_file, errors)
     if skill_text is None:
         return report
 
@@ -228,49 +228,103 @@ def inspect_skill_package(
     return report
 
 
-def _read_skill_file(path: Path, errors: list[dict[str, str]]) -> str | None:
+def _read_skill_file(
+    root: Path, path: Path, errors: list[dict[str, str]]
+) -> str | None:
+    return _read_bounded_package_text(
+        root,
+        path,
+        "SKILL.md",
+        SKILL_FILE_MAX_BYTES,
+        errors,
+        too_large_code="SKILL_FILE_TOO_LARGE",
+        unreadable_code="SKILL_FILE_UNREADABLE",
+        changed_code="SKILL_FILE_CHANGED",
+        not_file_code="SKILL_FILE_NOT_A_FILE",
+        outside_code="SYMLINK_OUTSIDE_PACKAGE",
+    )
+
+
+def _read_bounded_package_text(
+    root: Path,
+    path: Path,
+    relative: str,
+    max_bytes: int,
+    errors: list[dict[str, str]],
+    *,
+    too_large_code: str,
+    unreadable_code: str,
+    changed_code: str,
+    not_file_code: str,
+    outside_code: str,
+) -> str | None:
     try:
-        before = path.lstat()
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        _add_error(errors, unreadable_code, relative, type(error).__name__)
+        return None
+    if not _within(resolved, root):
+        _add_error(errors, outside_code, relative, "File resolves outside the package directory.")
+        return None
+    if resolved != path:
+        _add_error(errors, changed_code, relative, "File path became a symbolic link during inspection.")
+        return None
+    try:
+        before = resolved.lstat()
         if not stat.S_ISREG(before.st_mode):
-            _add_error(errors, "SKILL_FILE_NOT_A_FILE", "SKILL.md", "SKILL.md must be a regular file.")
+            _add_error(errors, not_file_code, relative, "Expected a regular file.")
             return None
-        if before.st_size > SKILL_FILE_MAX_BYTES:
+        if before.st_size > max_bytes:
             _add_error(
                 errors,
-                "SKILL_FILE_TOO_LARGE",
-                "SKILL.md",
-                f"SKILL.md exceeds {SKILL_FILE_MAX_BYTES} bytes.",
+                too_large_code,
+                relative,
+                f"File exceeds {max_bytes} bytes.",
             )
             return None
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
+        descriptor = os.open(resolved, flags)
         with os.fdopen(descriptor, "rb") as source:
             opened = os.fstat(source.fileno())
-            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
-                _add_error(errors, "SKILL_FILE_CHANGED", "SKILL.md", "SKILL.md changed during inspection; retry with a stable package.")
+            try:
+                current = path.resolve(strict=True)
+                current_stat = path.stat()
+            except (OSError, RuntimeError, ValueError):
+                _add_error(errors, changed_code, relative, "File changed during inspection; retry with a stable package.")
                 return None
-            if opened.st_size > SKILL_FILE_MAX_BYTES:
+            if not _within(current, root):
+                _add_error(errors, outside_code, relative, "File changed to resolve outside the package directory.")
+                return None
+            if (
+                current != resolved
+                or not stat.S_ISREG(opened.st_mode)
+                or not os.path.samestat(before, opened)
+                or not os.path.samestat(opened, current_stat)
+            ):
+                _add_error(errors, changed_code, relative, "File changed during inspection; retry with a stable package.")
+                return None
+            if opened.st_size > max_bytes:
                 _add_error(
                     errors,
-                    "SKILL_FILE_TOO_LARGE",
-                    "SKILL.md",
-                    f"SKILL.md exceeds {SKILL_FILE_MAX_BYTES} bytes.",
+                    too_large_code,
+                    relative,
+                    f"File exceeds {max_bytes} bytes.",
                 )
                 return None
-            content = source.read(SKILL_FILE_MAX_BYTES + 1)
-        if len(content) > SKILL_FILE_MAX_BYTES:
+            content = source.read(max_bytes + 1)
+        if len(content) > max_bytes:
             _add_error(
                 errors,
-                "SKILL_FILE_TOO_LARGE",
-                "SKILL.md",
-                f"SKILL.md exceeds {SKILL_FILE_MAX_BYTES} bytes.",
+                too_large_code,
+                relative,
+                f"File exceeds {max_bytes} bytes.",
             )
             return None
         return content.decode("utf-8-sig")
     except UnicodeDecodeError as error:
-        _add_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", type(error).__name__)
+        _add_error(errors, unreadable_code, relative, type(error).__name__)
     except OSError as error:
-        _add_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", type(error).__name__)
+        _add_error(errors, unreadable_code, relative, type(error).__name__)
     return None
 
 
@@ -436,14 +490,19 @@ def _check_markdown_references(
     errors: list[dict[str, str]] = []
     relative_markdown = _relative(markdown_path, root)
     if content is None:
-        try:
-            size = markdown_path.stat().st_size
-            if size > _MAX_METADATA_SCAN_BYTES:
-                _add_error(errors, "REFERENCE_FILE_TOO_LARGE", relative_markdown, f"Markdown file exceeds {_MAX_METADATA_SCAN_BYTES} bytes and could not be checked.")
-                return errors
-            content = markdown_path.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeDecodeError) as error:
-            _add_error(errors, "MARKDOWN_UNREADABLE", relative_markdown, type(error).__name__)
+        content = _read_bounded_package_text(
+            root,
+            markdown_path,
+            relative_markdown,
+            _MAX_METADATA_SCAN_BYTES,
+            errors,
+            too_large_code="REFERENCE_FILE_TOO_LARGE",
+            unreadable_code="MARKDOWN_UNREADABLE",
+            changed_code="MARKDOWN_CHANGED",
+            not_file_code="RESOURCE_NOT_FILE",
+            outside_code="REFERENCE_OUTSIDE_PACKAGE",
+        )
+        if content is None:
             return errors
 
     raw_targets = [
@@ -483,12 +542,18 @@ def _check_markdown_references(
                 f"Reference {raw_target!r} is malformed.",
             )
             continue
-        if parsed.scheme or parsed.netloc or not parsed.path:
+        is_file_uri = parsed.scheme.lower() == "file"
+        if (parsed.scheme and not is_file_uri) or (parsed.netloc and not is_file_uri) or not parsed.path:
             continue
         target_text = unquote(parsed.path).replace("\\", "/")
         windows_path = PureWindowsPath(target_text)
         reference_path = target_text
-        if PurePosixPath(target_text).is_absolute() or windows_path.is_absolute() or windows_path.drive:
+        if (
+            (is_file_uri and parsed.netloc)
+            or PurePosixPath(target_text).is_absolute()
+            or windows_path.is_absolute()
+            or windows_path.drive
+        ):
             _add_reference_error(
                 errors, "REFERENCE_OUTSIDE_PACKAGE", reference_path, relative_markdown,
                 "Absolute references are not allowed.",
@@ -562,7 +627,7 @@ def _inspect_dependencies(
             )
     package_json = paths.get("package.json")
     if package_json is not None:
-        content = _read_small_file(root / "package.json", "package.json", errors)
+        content = _read_small_file(root, "package.json", errors)
         if content is not None:
             try:
                 parsed_json = json.loads(content)
@@ -581,7 +646,7 @@ def _inspect_dependencies(
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Could not statically parse dependency declarations.")
     pyproject = paths.get("pyproject.toml")
     if pyproject is not None:
-        content = _read_small_file(root / "pyproject.toml", "pyproject.toml", errors)
+        content = _read_small_file(root, "pyproject.toml", errors)
         if content is not None:
             try:
                 parsed_toml = tomllib.loads(content)
@@ -589,6 +654,19 @@ def _inspect_dependencies(
                 if not isinstance(project, dict):
                     _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project must be a TOML table.")
                 else:
+                    requires_python = project.get("requires-python")
+                    if requires_python is not None:
+                        if isinstance(requires_python, str) and requires_python.strip():
+                            requirements.append(
+                                _manual_requirement(
+                                    "runtime",
+                                    requires_python.strip(),
+                                    "pyproject.toml [project.requires-python]",
+                                    "Required Python versions cannot be verified during read-only inspection.",
+                                )
+                            )
+                        else:
+                            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.requires-python must be a non-empty string.")
                     _append_python_dependencies(
                         project.get("dependencies", []),
                         "pyproject.toml [project.dependencies]",
@@ -608,6 +686,18 @@ def _inspect_dependencies(
                                 requirements,
                                 errors,
                             )
+                    dynamic = project.get("dynamic", [])
+                    if not isinstance(dynamic, list) or any(not isinstance(item, str) for item in dynamic):
+                        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.dynamic must be an array of strings.")
+                    elif any(item in {"dependencies", "optional-dependencies"} for item in dynamic):
+                        requirements.append(
+                            _manual_requirement(
+                                "dependency-declaration",
+                                ", ".join(item for item in dynamic if item in {"dependencies", "optional-dependencies"}),
+                                "pyproject.toml [project.dynamic]",
+                                "Dynamic dependencies cannot be fully determined from this manifest.",
+                            )
+                        )
                 build_system = parsed_toml.get("build-system", {})
                 if not isinstance(build_system, dict):
                     _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "build-system must be a TOML table.")
@@ -619,6 +709,47 @@ def _inspect_dependencies(
                         requirements,
                         errors,
                     )
+                tool = parsed_toml.get("tool", {})
+                if not isinstance(tool, dict):
+                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool must be a TOML table.")
+                else:
+                    poetry = tool.get("poetry")
+                    if poetry is not None:
+                        if not isinstance(poetry, dict):
+                            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool.poetry must be a TOML table.")
+                        else:
+                            if "dependencies" in poetry:
+                                _append_poetry_dependencies(
+                                    poetry["dependencies"],
+                                    "pyproject.toml [tool.poetry.dependencies]",
+                                    dependencies,
+                                    requirements,
+                                    errors,
+                                )
+                            if "dev-dependencies" in poetry:
+                                _append_poetry_dependencies(
+                                    poetry["dev-dependencies"],
+                                    "pyproject.toml [tool.poetry.dev-dependencies]",
+                                    dependencies,
+                                    requirements,
+                                    errors,
+                                )
+                            groups = poetry.get("group", {})
+                            if not isinstance(groups, dict):
+                                _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool.poetry.group must be a TOML table.")
+                            else:
+                                for group, definition in groups.items():
+                                    if not isinstance(definition, dict):
+                                        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"tool.poetry.group.{group} must be a TOML table.")
+                                        continue
+                                    if "dependencies" in definition:
+                                        _append_poetry_dependencies(
+                                            definition["dependencies"],
+                                            f"pyproject.toml [tool.poetry.group.{group}.dependencies]",
+                                            dependencies,
+                                            requirements,
+                                            errors,
+                                        )
             except (tomllib.TOMLDecodeError, AttributeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "Could not statically parse dependency declarations.")
     dependencies.sort(key=lambda item: (item["source"], item["name"].lower()))
@@ -651,6 +782,32 @@ def _append_python_dependencies(
                     "Dependency declaration could not be classified statically.",
                 )
             )
+
+
+def _append_poetry_dependencies(
+    values: Any,
+    source: str,
+    dependencies: list[dict[str, str]],
+    requirements: list[dict[str, str]],
+    errors: list[dict[str, str]],
+) -> None:
+    if not isinstance(values, dict):
+        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} must be a TOML table.")
+        return
+    for name, declaration in values.items():
+        if not isinstance(name, str):
+            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} contains a non-string dependency name.")
+        elif name.lower() == "python":
+            requirements.append(
+                _manual_requirement(
+                    "runtime",
+                    str(declaration),
+                    source,
+                    "Required Python versions cannot be verified during read-only inspection.",
+                )
+            )
+        else:
+            dependencies.append(_dependency(name, source))
 
 
 def _read_requirements_file(
@@ -691,7 +848,7 @@ def _read_requirements_file(
             )
         )
         return
-    content = _read_small_file(root / relative, relative, errors)
+    content = _read_small_file(root, relative, errors)
     if content is None:
         return
 
@@ -738,7 +895,7 @@ def _read_requirements_file(
                     )
                 )
                 continue
-            include_path = include_url.path.replace("\\", "/")
+            include_path = unquote(include_url.path).replace("\\", "/")
             try:
                 candidate = (root / include_path).resolve(strict=False)
             except (OSError, RuntimeError, ValueError):
@@ -818,15 +975,21 @@ def _manual_requirement(
     }
 
 
-def _read_small_file(path: Path, relative: str, errors: list[dict[str, str]]) -> str | None:
-    try:
-        if path.stat().st_size > _MAX_METADATA_SCAN_BYTES:
-            _add_error(errors, "DEPENDENCY_FILE_TOO_LARGE", relative, f"File exceeds {_MAX_METADATA_SCAN_BYTES} bytes.")
-            return None
-        return path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as error:
-        _add_error(errors, "DEPENDENCY_FILE_UNREADABLE", relative, type(error).__name__)
-        return None
+def _read_small_file(
+    root: Path, relative: str, errors: list[dict[str, str]]
+) -> str | None:
+    return _read_bounded_package_text(
+        root,
+        root / relative,
+        relative,
+        _MAX_METADATA_SCAN_BYTES,
+        errors,
+        too_large_code="DEPENDENCY_FILE_TOO_LARGE",
+        unreadable_code="DEPENDENCY_FILE_UNREADABLE",
+        changed_code="DEPENDENCY_FILE_CHANGED",
+        not_file_code="DEPENDENCY_FILE_NOT_A_FILE",
+        outside_code="DEPENDENCY_FILE_OUTSIDE_PACKAGE",
+    )
 
 
 def _dependency(name: str, source: str) -> dict[str, str]:
