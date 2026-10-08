@@ -18,9 +18,11 @@ from langchain_core.messages import HumanMessage
 from agent_harness.attachments.projection import IMAGE_OMITTED_PLACEHOLDER
 from agent_harness.session import USER_MESSAGE, SessionEvent
 from agent_harness.session.derive import (
+    COMPACTION_SUMMARY_MESSAGE_NAME,
     derive_messages,
     derive_messages_with_source_ranges,
     is_direct_user_input_event,
+    latest_direct_user_input_event,
 )
 from agent_harness.session.event import (
     COMPACTION_END,
@@ -191,6 +193,46 @@ def test_superseded_event_with_matching_summary_is_not_direct_input() -> None:
     assert not is_direct_user_input_event(events, old.event_id)
     # 替换槽里的新消息仍是活跃来源。
     assert is_direct_user_input_event(events, replacement.event_id)
+
+
+def test_superseded_event_with_matching_summary_is_not_latest_input() -> None:
+    """C2 同源（#862）：`latest_direct_user_input_event` 也不得让已作废消息复活。
+
+    构造与 C2 同源：一条 live-supersede 的事件 s（替换槽被填满 ⇒ 目标真被撤回），同时落在
+    一个**以 s 为起点**的单事件 compaction bracket 内，且该 bracket 的 summary 文本**恰好
+    等于** s 的原始 content。此时投影在 `(s, s)` 处正是这条 summary，`_projected_user_text`
+    还原出的文本 == s 的 content ⇒ 未修复前 `latest_direct_user_input_event` 把一条**已撤回**
+    的消息选为最新直接用户输入（它只从消息投影取源，`_projected_user_text` 又还原回原文）。
+
+    替换槽用**排队项**（`message/queued`，`live_supersede_markers` 认可的可达形态）而非一条新的
+    `user/message`：后者的 seq 更高、会先成为候选并胜出 `max(...)`，反而**掩盖**这条已作废消息
+    被误选的事实。此构造下模型可见投影里唯一的 `(s, s)` 来源就是那条 summary。
+
+    修法：`candidates` 推导排除 compaction summary（`message.name ==
+    COMPACTION_SUMMARY_MESSAGE_NAME`）。修复后候选集为空 ⇒ 返回 None，与
+    `is_direct_user_input_event`（C2 收紧后判 False）同口径。
+    """
+    content = "本题只用标准库"
+    old = _user(1, content)
+    queued = SessionEvent(
+        seq=2, type=MESSAGE_QUEUED, session_id="s1",
+        data={"content": "换一条", "queue_id": "q9"},
+    )
+    marker = SessionEvent(
+        seq=3, type=MESSAGE_SUPERSEDED, session_id="s1",
+        data={"superseded_seq": 1},
+    )
+    events = [old, queued, marker, *_bracket(4, 1, 1, summary=content)]
+
+    # 模型可见投影在 (1, 1) 处正是那条与原文逐字相同的 summary——这是巧合命中的构造。
+    model_messages = derive_messages(events)
+    (message, source_range), = derive_messages_with_source_ranges(events)
+    assert (message.content, source_range) == (content, (1, 1))
+    assert message.name == COMPACTION_SUMMARY_MESSAGE_NAME
+
+    # live-supersede 生效：目标已撤回。投影里那条 summary 不是用户原话，
+    # 不得被还原成"最新直接用户输入"⇒ 无活跃直接输入。
+    assert latest_direct_user_input_event(events, model_messages) is None
 
 
 def test_plain_text_message_selection_is_byte_identical() -> None:
