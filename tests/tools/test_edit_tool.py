@@ -201,3 +201,97 @@ class TestEditErrors:
 
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+
+
+class TestEditLineEndingTolerance:
+    """#851：CRLF 文件 + 模型给的 LF old_string。
+
+    Windows 上 `core.autocrlf=true` 检出即 CRLF，而模型（几乎所有）生成 LF 字符串。
+    字节精确匹配下「从 read 结果里逐字抄下来的一段」在 CRLF 文件里匹配不到 ⇒
+    报「未找到匹配的字符串」，把「行尾不同」与「上下文抄错」混成一类，
+    模型只能盲试（#365 的三次真实运行都撞上）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_lf_old_string_matches_crlf_file(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """真实症状：CRLF 文件 + LF old_string 必须改得上，且写回仍是 CRLF。"""
+        sandbox.write_text("f.py", "def foo():\r\n    return 1\r\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "old_string": "def foo():\n    return 1\n",
+                "new_string": "def bar():\n    return 2\n",
+            })
+        )
+
+        assert result.result.ok is True
+        assert result.result.data["replacements"] == 1
+        # 行尾必须原样保留：CRLF 进、CRLF 出，否则整个文件都会进 diff
+        assert sandbox.read_text("f.py") == "def bar():\r\n    return 2\r\n"
+
+    @pytest.mark.asyncio
+    async def test_crlf_file_untouched_region_keeps_its_bytes(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """只动 old_string 命中的那一段：其余行（含行尾）逐字节不变。"""
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\r\nc = 3\r\n")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "b = 2", "new_string": "b = 22"})
+        )
+
+        assert result.result.ok is True
+        assert sandbox.read_text("f.py") == "a = 1\r\nb = 22\r\nc = 3\r\n"
+
+    @pytest.mark.asyncio
+    async def test_crlf_file_ambiguity_still_detected(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """归一化匹配不得吃掉三态语义：CRLF 文件里 2 处匹配仍须报多匹配。"""
+        sandbox.write_text("f.py", "x\r\nx\r\n")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "x", "new_string": "y"})
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        assert "2" in result.result.message
+        assert sandbox.read_text("f.py") == "x\r\nx\r\n"
+
+    @pytest.mark.asyncio
+    async def test_lf_file_still_edits_byte_exact(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """LF 文件走原路径：不因本修复引入任何行尾改写。"""
+        sandbox.write_text("f.py", "a = 1\nb = 2\n")
+
+        result = await executor.execute(
+            _tool_call({"path": "f.py", "old_string": "b = 2", "new_string": "b = 22"})
+        )
+
+        assert result.result.ok is True
+        assert sandbox.read_text("f.py") == "a = 1\nb = 22\n"
+
+    @pytest.mark.asyncio
+    async def test_mixed_line_endings_are_not_normalized(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """混行尾文件**不**走归一化：宁可报错，也不把整文件行尾改写掉。"""
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "old_string": "a = 1\nb = 2\n",
+                "new_string": "a = 9\nb = 2\n",
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        # 文件逐字节不变
+        assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\n"
