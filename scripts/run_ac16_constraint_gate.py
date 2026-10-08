@@ -2271,16 +2271,21 @@ def _attempt_record(
 
 
 def _write_attempts_ledger(
-    path: Path, attempts: list[dict[str, Any]], *, sha: str,
+    path: Path, attempts: list[dict[str, Any]], *, sha: str, values: Sequence[str],
 ) -> None:
-    """P3-5：attempts 增量落盘（原子替换）。
+    """P3-5：attempts 增量落盘（原子替换），落盘前过**同一道**凭证扫描。
 
     整个 campaign 的 18 次 attempt 若只在内存 `list` 里攒着，进程中途崩溃就全丢 ——
     票面 §10.2 要求"失败轨迹保留"。每跑完一次就追加并原子替换写一次（tmp + replace，
     协议 §8.9）：崩溃时盘上留下**已经跑过**的那些，不会半截截断。`started_at_utc` 与
     code_sha 在同一时刻取定，不随后续崩溃漂移。
+
+    **凭证扫描**（任务书 §任务B 条 3"落盘前过 `credential_scan_values`"）：这一路是**主要**
+    的落盘形态（18 次里最多落 18 次），必须与 `_write_evidence` 走同一层精确值扫描 —— 否则
+    "最终 evidence 扫了、增量 attempts 没扫"就是一条真的旁路。命中即脱敏、并把状态改成
+    failed（与 `_write_evidence` 同一处置），不静默放行。
     """
-    payload = {
+    payload: dict[str, Any] = {
         "campaign": "AC16",
         "ticket": 663,
         "code_sha": sha,
@@ -2288,10 +2293,13 @@ def _write_attempts_ledger(
         "attempts_recorded": len(attempts),
         "attempts": attempts,
     }
+    scanned, findings = scan_payload(payload, values=values)
+    if findings:
+        scanned = {**scanned, "status": "failed", "reason": "凭证扫描命中增量证据字段（已脱敏落盘）"}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        handle.write(json.dumps(scanned, ensure_ascii=False, indent=2) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, path)
@@ -2337,6 +2345,7 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
                 [_attempt_record(o, v, git_facts=git_facts)
                  for o, v in zip(observations, verdicts, strict=True)],
                 sha=git_facts["code_sha"],
+                values=credential_scan_values(config, runner._settings()),
             )
     # §10.2：只有跑到这里才把"整套 18 次已完成"记成 1——崩溃在中途不落这个终局证据，
     # 盘上留 `attempts.json` 的增量轨迹（上一行）。

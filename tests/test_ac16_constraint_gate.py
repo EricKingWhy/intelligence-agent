@@ -1248,7 +1248,7 @@ def test_attempts_ledger_appends_incrementally(driver, tmp_path):
     path = tmp_path / "attempts.json"
     driver._write_attempts_ledger(
         path, [driver._attempt_record(observations[0], verdicts[0], git_facts=_git_facts())],
-        sha="d" * 40,
+        sha="d" * 40, values=(),
     )
     first = json.loads(path.read_text(encoding="utf-8"))
     assert first["attempts_recorded"] == 1
@@ -1257,11 +1257,25 @@ def test_attempts_ledger_appends_incrementally(driver, tmp_path):
         path,
         [driver._attempt_record(o, v, git_facts=_git_facts())
          for o, v in zip(observations[:2], verdicts[:2], strict=True)],
-        sha="d" * 40,
+        sha="d" * 40, values=(),
     )
     second = json.loads(path.read_text(encoding="utf-8"))
     assert second["attempts_recorded"] == 2
     assert not path.with_suffix(path.suffix + ".tmp").exists()  # 原子替换，无残留 tmp
+
+
+def test_attempts_ledger_is_credential_scanned_on_write(driver, tmp_path):
+    """增量 attempts 落盘必须与最终 evidence 走**同一道**凭证扫描（任务书 §任务B 条 3）。
+
+    这一路是主要的落盘形态（最多落 18 次），旧实现只 `json.dumps` 直接写、绕过扫描 ——
+    "最终 evidence 扫了、增量没扫"是真旁路。命中即脱敏并把状态改成 failed。
+    """
+    record = {"case_id": "M1", "attempt": 1, "final_reply": "key 泄露 sk-live-secret-value 在回复里"}
+    path = tmp_path / "attempts.json"
+    driver._write_attempts_ledger(path, [record], sha="d" * 40, values=("sk-live-secret-value",))
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["status"] == "failed"
+    assert "sk-live-secret-value" not in path.read_text(encoding="utf-8")
 
 
 def test_read_job_row_is_read_only_and_per_run(driver, tmp_path):
