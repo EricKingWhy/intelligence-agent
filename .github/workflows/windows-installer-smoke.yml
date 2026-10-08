@@ -1,0 +1,126 @@
+# .github/workflows/windows-installer-smoke.yml —— W-16 Windows x64 安装器真机烟测（Issue #885）
+#
+# 为什么存在
+#
+# `desktop/scripts/test-windows-installer.mjs`（#361 [W-16] 的验收烟测）首行硬性要求
+# `process.platform === 'win32' && process.arch === 'x64'`（脚本本身如此，本工作流**不改**它的
+# 行为与判据）。Linux 本机与云端 Docker 沙箱都跑不了 ⇒ #831 的 AC1（两语言 install/uninstall
+# UI 烟测）只能标 NOT_RUN。仓库是 public，GitHub 托管的 `windows-latest` runner 免费，且预装
+# Node + PowerShell + bsdtar，正好满足脚本需求：脚本实际跑的是 `$Installer /S` 静默安装，
+# 无头 runner 可跑，**不需要**交互桌面。
+#
+# 它跑什么
+#
+# 脚本用生产的 NSIS 配置（`installer/installer.nsh` + `installer-directories.nsh`）为每次运行
+# 构一个随机 GUID 的隔离安装包，在 en_US + zh_CN 两种语言下跑真实安装/卸载断言：
+#   - 默认模式      → `windows-installer-smoke.ps1`：静默安装、校验卸载注册表项、安装目录与
+#                     用户数据标记（%APPDATA%\intelligence-agent）未被安装触碰；
+#   - `--uninstall-only` → `windows-uninstall-smoke.ps1`：安装后静默卸载，断言「程序被移除、
+#                     注册表项被移除、用户数据**必须**保留」（#361 的核心保证）。
+# 本工作流跑全套（默认 + `--uninstall-only`）；`--compile-only` 是手动触发的快速模式（只编译
+# 安装包，跳过 UI 断言）。
+#
+# 依赖说明：脚本给 electron-builder 传 `prepackaged`（一个最小原生 payload），而 app-builder-lib
+# 的 `platformPackager.doPack` 在 `prepackaged != null` 时**直接返回** ⇒ `afterPack` 钩子与
+# `extraResources` 都不会执行 ⇒ **不需要**按 `installer/README.md` 准备 `installer/staging` 里的
+# 离线 Python 运行时。脚本只 `require('electron-builder')` + `app-builder-lib/out/toolsets/windows.js`
+# （lazy-require，故意不进 `desktop/package.json`，见 build-windows-installer.mjs 头注释），
+# 所以本工作流在 `npm ci` 之后按版本显式装它。
+#
+# checkout 的坑位（照 gate0.yml 的三个教训）
+#
+# ① `ref: github.event.pull_request.head.sha` —— `actions/checkout` 默认检出 `refs/pull/N/merge`
+#    这个**合成 merge 提交**；本工作流要测的是 PR 的**头提交**本身。`workflow_dispatch` 没有
+#    pull_request 事件，回退到 `github.ref`（手动选的分支）。
+# ② `fetch-depth: 0` —— 与 gate0 的 checkout 形态保持一致，不给自己留「以后加覆盖闸门车道就踩
+#    浅克隆坑」的伏笔（本工作流当前不跑覆盖闸门，全历史不是必需的）。
+# ③ 只跑 `pull_request`（+ 手动），**不跑 push** —— 与 gate0 同理：PR 合并后 main 顶端会多出
+#    一个新提交，若在 push 上跑，main 会在每次集成后被动变红。本工作流**不设为** main 必需状态
+#    检查（Issue #885「不做」明写）。
+#
+# 加固
+#
+# `permissions: contents: read`（只读仓库）。所有第三方 action 一律**完整 SHA + 版本注释**
+# （与仓库既有工作流一致；tag 可变、可删，有投毒面），升级走 Dependabot。
+
+name: windows-installer-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      compile_only:
+        description: '只编译 NSIS 安装包（跳过安装/卸载 UI 断言），用于快速自检'
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    # 路径过滤：只在安装器相关文件变化时跑，不给每个 PR 增加 10–20 分钟负担。
+    paths:
+      - 'desktop/installer/**'
+      - 'installer/**'
+      - 'desktop/scripts/test-windows-installer.mjs'
+      - 'desktop/scripts/build-windows-installer.mjs'
+      - 'desktop/package.json'
+      - 'desktop/package-lock.json'
+      - '.github/workflows/windows-installer-smoke.yml'
+
+# 本工作流只读仓库，不需要任何写权限。
+permissions:
+  contents: read
+
+concurrency:
+  # 同一 PR 连推多次时只保留最后一次 —— 前一次的结论对判定没有意义。
+  group: windows-installer-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer-smoke:
+    name: windows-installer-smoke
+    runs-on: windows-latest
+    # hung 时不能无限烧分钟数。
+    timeout-minutes: 45
+    steps:
+      - name: 检出（PR 头提交；workflow_dispatch 用所选分支）
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+
+      - name: 装 Node 22（desktop/package.json engines 要求 node >= 22）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 装 desktop 依赖（npm ci，锁文件钉住）
+        working-directory: desktop
+        run: npm ci
+
+      - name: 装 electron-builder（脚本 lazy-require，未进 desktop/package.json）
+        working-directory: desktop
+        run: npm install --no-save --no-audit --no-fund electron-builder@26.15.3
+
+      - name: 安装器烟测 — 安装断言（en_US + zh_CN）
+        if: ${{ !inputs.compile_only }}
+        working-directory: desktop
+        run: node scripts/test-windows-installer.mjs
+
+      - name: 安装器烟测 — 卸载断言 + 用户数据保留（en_US + zh_CN）
+        if: ${{ !inputs.compile_only }}
+        working-directory: desktop
+        run: node scripts/test-windows-installer.mjs --uninstall-only
+
+      - name: 快速模式 — 仅编译安装包
+        if: ${{ inputs.compile_only }}
+        working-directory: desktop
+        run: node scripts/test-windows-installer.mjs --compile-only
+
+      - name: 上传安装器测试产物与日志（失败也上传）
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-installer-smoke
+          path: desktop/.desktop-build/installer-tests/**
+          if-no-files-found: warn
+          retention-days: 14
