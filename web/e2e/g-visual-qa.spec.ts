@@ -5,6 +5,7 @@
 import { expect, test } from '@playwright/test';
 import {
   AGENT_PROFILES,
+  MODELS,
   PERMISSION_MODES,
   REASONING_EFFORTS,
   fulfillSse,
@@ -19,12 +20,23 @@ const frames = [
 ];
 
 const WIDTHS = [1440, 1280, 1024, 820, 768];
+const MODELS_WITH_REASONING = [
+  {
+    ...MODELS[0],
+    reasoning_effort: {
+      supported: ['minimal', 'deep'],
+      default: 'minimal',
+      wire_mapping: { minimal: 'low', deep: 'high' },
+    },
+  },
+];
 
 for (const width of WIDTHS) {
   test(`Composer control row 在 ${width}px 宽度下不溢出`, async ({ page }) => {
     await routeApi(page, {
       sessions: [],
       events: [],
+      models: MODELS_WITH_REASONING,
       permissionModes: PERMISSION_MODES,
       agentProfiles: AGENT_PROFILES,
       reasoningEfforts: REASONING_EFFORTS,
@@ -46,18 +58,36 @@ for (const width of WIDTHS) {
     expect(controlsBox!.x).toBeGreaterThanOrEqual(dockBox!.x);
     expect(controlsBox!.x + controlsBox!.width).toBeLessThanOrEqual(dockBox!.x + dockBox!.width + 1);
 
-    // 控件 trigger 在场：ModelPicker 空（/api/models 默认 []）→ 不渲染；
-    // 权限/Profile 两个 OptionPicker + 预算触发器（#536/#537 `a538c5fe`
-    // 引入 `.composer-budget-trigger`）= 3；reasoning 能力控件另断言为隐藏。计数定位器收窄到 `.composer-controls`
-    // 行内（审查 P4：页级 `.composer-control` 会被未来复用该类的组件误触绊线），
-    // 与上方 overflow 断言的被测整行对齐。任何新增行内 `.composer-control` 都
-    // 必须同步本断言与注释——计数是防「行内静默加成员」的绊线（#611：未同步
-    // 曾使 nightly 10 例恒红，被排除的正是这行）。
-    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(3);
-    await expect(page.locator('.composer-control[aria-label="Reasoning Effort"]')).toHaveCount(0);
+    // 该宽度下 Reasoning Effort trigger 与其他控件同在；行内计数防止成员静默变化。
+    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(4);
+    const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+    await expect(effortTrigger).toBeVisible();
     await expect(page.locator('.composer-budget-trigger')).toHaveCount(1);
+
+    // 打开真实档位控件，确认弹层及滑杆都留在当前视口内。
+    await effortTrigger.click();
+    const picker = page.locator('.picker-content-custom');
+    await expect(picker).toBeVisible();
+    await expect(page.locator('.reasoning-effort-slider')).toBeVisible();
+    const pickerBox = await picker.boundingBox();
+    expect(pickerBox).not.toBeNull();
+    expect(pickerBox!.x).toBeGreaterThanOrEqual(0);
+    expect(pickerBox!.x + pickerBox!.width).toBeLessThanOrEqual(width + 1);
   });
 }
+
+test('Reasoning Effort 在模型未声明能力时隐藏', async ({ page }) => {
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+  });
+
+  await page.goto('/');
+  await expect(page.locator('.composer-control[aria-label="Reasoning Effort"]')).toHaveCount(0);
+});
 
 test('Composer control row 在浅色模式下可见', async ({ page }) => {
   await routeApi(page, {
