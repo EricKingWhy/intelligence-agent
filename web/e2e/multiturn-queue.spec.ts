@@ -750,6 +750,120 @@ test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无�
   expect(subs).toHaveLength(2);
 });
 
+/* ── T12o-缝隙：迟到纠正落进 release()→#2 重锁的缝隙 → 仍不得排新重连链 ──
+ *
+ * T12o 锁的是"纠正要推进代际、换掉接错的流"，但它留了一个**未覆盖的交错**：
+ * 首根重连定时器（500ms）已经触发、`release()` 放掉了单飞位，而重连换上的 #2 流
+ * 因慢链路还没回快照——此刻 `pending=false`。迟到的纠正恰好落进这道
+ * release→relock 缝隙里（探针实测窗口约 100ms 宽），于是纠正换上来的新流
+ * （**新代际**）settle 时 `request()` 因 `pending=false` 而成功，又排一条新链
+ * （500/1000/2000），最终弹出一条假「连接中断」。代际检查杀不掉它——排链的正是
+ * 纠正自己的新流，代际全过；单飞位又在 `release()` 与 #2 重锁之间同时让路。
+ *
+ * 复现手法（阶段一探针转正）：用 `onWs` 的**按次剧本**把第 2 次订阅的快照延迟
+ * 400ms，人为撑大缝隙；再把迟到收据延到 1750ms 落定，使它确定性落进缝隙。
+ * 正确行为 = 纠正落在缝隙里（pending=false）时也**不得排新重连链/弹假 banner**。
+ * 断言要活过三轮退避（5s+）才看得见差别——与 T12o 同理。
+ *
+ * 心跳仍按脚本 opt-in（第 2 次 delayMs 期间连接已建立但无帧，真后端此时也在发
+ * 2s 一次 server_ping）；**不给 mock 加全局 ping**——o-wait-hint.spec.ts 依赖
+ * 停摆路径，必须按脚本 opt-in。 */
+
+/** 本用例专用的**更晚**落定（1750ms）。T12o 族的共享常量 `LATE_MS=1600` 是整族的
+ *  时序基线，不能为本用例改动；而"纠正落进 release→#2 重锁缝隙"需要把纠正点再往后
+ *  推一点（探针实测 1750ms 才稳定落进缝隙）。故在本地另立一个变体，与 `answerLate`
+ *  并列、只服务于下面这条缝隙用例。 */
+const VERY_LATE_MS = 1750;
+const answerVeryLate = async (route: Route, status: number, body: unknown) => {
+  await new Promise((r) => setTimeout(r, VERY_LATE_MS));
+  await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+};
+
+test('T12o-缝隙：迟到纠正落进 release→relock 缝隙 → 无假「连接中断」', async ({ page }) => {
+  const calls: Record<string, unknown>[] = [];
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    onMessagesPost: (route) => {
+      calls.push(JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>);
+      // 迟到的 queued 收据：落定得比 T12o 更晚（1750ms），好让它确定性落进缝隙
+      return answerVeryLate(route, 200, { status: 'queued', mode: 'queue' });
+    },
+    // 按次剧本：只把第 2 次接流撑大（延迟 400ms 回快照 = release→relock 缝隙变宽），
+    // 其余订阅照常 2s 心跳、立即回快照。
+    onWs: ({ call }) =>
+      call === 2
+        ? { ending: 'keep', pingIntervalMs: 2000, delayMs: 400 }
+        : { ending: 'keep', pingIntervalMs: 2000 },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('慢链路上排个队');
+  await box.press('Enter');
+
+  await expect.poll(() => calls.length, { timeout: 8000 }).toBe(1);
+  // 活过三轮退避（500 + 1000 + 2000）＋余量：假「连接中断」正是在那之后才弹出来
+  await page.waitForTimeout(8000);
+  await expect(page.locator('.app-error')).toHaveCount(0);
+  await expect(page.locator('.reconnect-banner')).toBeHidden();
+});
+
+/* ── P3-1：纠正后新流收到首帧即释放 hold → 真实断线能重连 ──
+ *
+ * 背景（独立审查 P3-1）：方案 B 在纠正分支加了 `hold()` 占住单飞位，但 hold
+ * 保持到下次 `reset()`（submit 入口）。若纠正换上的新流健康跑起来后发生**真实**
+ * 断线，`scheduleReconnect → request()` 因 `pending=true` 返回 null → 静默吞掉，
+ * 不重连。这是 pre-existing（win 路径原本如此），但 P0-P4 全修，现在必须修掉。
+ *
+ * 修复：新流首帧到达即释放 hold（microtask 延迟，确保 T12o 的同步 settle 路径
+ * 仍看到 pending=true）。本用例锁这个行为。
+ *
+ * 场景：
+ *  1. 提交 → 判 launched → 接流 #1（快照 has_active_run=false，会被纠正 cancel）
+ *  2. 迟到 queued 收据（LATE_MS）→ 纠正 → hold() → 接流 #2
+ *  3. #2 健康：快照 has_active_run=true + 真实帧，然后 `ending: 'drop'` 真断线
+ *  4. 正确行为：客户端必须重连 → 出现第 3 次订阅
+ *  5. Bug 行为（修前）：hold 未释放 → request() 返回 null → 无第 3 次订阅
+ *
+ * 不给 mock 加全局 ping（o-wait-hint 依赖停摆路径，按脚本 opt-in）。 */
+
+test('P3-1：纠正后新流首帧释放 hold → 真实断线能重连', async ({ page }) => {
+  const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  const HEALTHY_FRAMES: FrameSpec[] = [
+    { type: 'model/delta', data: { delta: '健康流增量' }, seq: 10, session_id: 'mt-session-1', run_id: 'mt-run-1', step_id: 1, time: '2026-09-15T00:00:02Z' },
+  ];
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    wsSubscribes: subs,
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    // 迟到 queued 收据 → 触发纠正（hold 占住单飞位）
+    onMessagesPost: (route) => answerLate(route, 200, { status: 'queued', mode: 'queue' }),
+    onWs: ({ call }) =>
+      call === 1
+        ? { hasActiveRun: false, ending: 'keep', pingIntervalMs: 2000 }
+        : call === 2
+          ? { hasActiveRun: true, frames: HEALTHY_FRAMES, ending: 'drop', pingIntervalMs: 2000 }
+          : { hasActiveRun: true, ending: 'keep', pingIntervalMs: 2000 },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('P3-1 真实断线重连');
+  await box.press('Enter');
+
+  // 纠正（~1600ms）→ #2 接上收帧 → 真断线 → 重连应在 500ms 退避后发生。
+  // 修前：hold 未释放，第 3 次订阅永不出现（15s 超时红）。
+  // 修后：第 3 次订阅出现。
+  await expect.poll(() => subs.length, { timeout: 20000 }).toBeGreaterThanOrEqual(3);
+});
+
 /* ── T12p：迟到的**事件流**响应 → 当初判 launched 是对的，WS 继续收（不必也不许再接一条）──
  *
  * 窗外那条支路并非只在判错时才走到：交付层攒包时，正常流式的**响应头本身**就会
