@@ -30,12 +30,32 @@
 4. 本批**没有代码改动**（`git diff` 相对冻结树只有 `docs/`）：两条缺陷与 W-16 缺口都在本票范围外，
    因此不触发代码面门禁的重跑判据；但按 §14.10 仍在当前 tip 上跑完整门禁并留读数。
 
+## 全量门禁读数（2026-10-08）
+
+13 条车道的读数与逐条归因见 `53-full-gate-readings.md`。摘要：**10 条绿**（① ruff、
+② pytest-full **6723P/26S/51D/0F**、③ pytest-clean 同读数、④ tsc、⑥ oxlint、⑦ guards、
+⑧ coverage exit 0、⑨ diff-check、⑩ vite build、⑬ Gate-0 **6/6**）；**两条红均非本批引入**：
+
+- ⑤ vitest `1F/1496P` —— 唯一红是**在册环境 flake** `StepDetail.window.test.tsx:132`（隔离单跑 6/6 绿）；
+- ⑪ e2e `496P/10F` —— 10 红**全在** `web/e2e/u-project-task.spec.ts`，spec 仍锁 #204 旧契约而实现
+  已被 #367 选项 A 取代；该红**已由 main 的 PR #819 / `b895940b` 根修**，本分支基点早于该修复。
+
+② 首轮 `rc=0xC0000005` 且**零用例执行**（仓库根 pytest 走进两棵 gitignored 打包树）已归因并
+登记 **#856**；`.venv` 按 CI 口径补齐 `--all-extras` 后全量转绿。
+
+**因此本文件不宣称「冻结树上全量门禁全绿」**：⑪ 在冻结树上确实红，其消除依赖同步 main。
+
 ## 未决 / 待批准（逐项分开，按 §14.4）
 
 1. `fix/w21-windows-gate-fixes` 分支 **push** + 开 PR（push 与 PR merge 是两次独立批准）。
 2. PR #811 merge（既有待批准项）。
 3. #815 第三路径裁决（现携带 D3-proxy 的 P2 读数）。
 4. #848 的 R1–R7、#849 / #850 / #851 / #853 / #854 是否在关单前修。
+5. **是否先把 main 同步进本分支**：本分支落后 main 64 提交（本地 main `9e1c065b`、
+   `origin/main` `5b7c14c3`）。冻结安装件 `28a382cc` 因此**不对应任何将被合并的树**；
+   §14.4 允许「main 合回自己的短分支」，但同步会带入产品面改动（含 #367 的 UI 变更）⇒
+   按 §14.10 须在合并树**重跑全量门禁**，且 Run A/B 的 Live 证据能否传递须按 §8.8 重新判定
+   （很可能需要重打包 + 重跑）。这是一个需要用户决定的范围问题，本线不擅自执行。
 5. 缺陷披露项（`49` / `50` 已逐条落账）：mimo 402 账号耗尽 + 换用 senseaudio/glm-5.3-flash；
    attempt 2 的 TASK.md 里操作者两条环境注记（绕开了 #850/#851）；MSYS `find` 的 PATH 产物 +
    bash 60 s 超时 → UNKNOWN → quiescence 阻塞 → 第二次 reconcile；restart 扫描回填
