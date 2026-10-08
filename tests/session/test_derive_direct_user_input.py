@@ -210,7 +210,7 @@ def test_superseded_event_with_matching_summary_is_not_latest_input() -> None:
 
     修法：`candidates` 推导排除 compaction summary（`message.name ==
     COMPACTION_SUMMARY_MESSAGE_NAME`）。修复后候选集为空 ⇒ 返回 None，与
-    `is_direct_user_input_event`（C2 收紧紧后判 False）同口径。
+    `is_direct_user_input_event`（C2 收紧后判 False）同口径。
     """
     content = "本题只用标准库"
     old = _user(1, content)
