@@ -1984,3 +1984,31 @@ def test_partial_campaign_evidence_is_labelled_partial(driver, tmp_path):
     assert payload["partial_slots"] == ["M9-1", "M1-2"]
     # 部分集合**不能**自称跑完了一整套（那会让 §10.2 的整套判据凭空满足）。
     assert payload["rerun_policy"]["decision"] == "partial_slots"
+
+
+# ── Round 6：M7/M8/M9 不该等一个永不会出现的抽取 job ────────────────────────────
+
+
+def test_no_extraction_job_is_expected_for_primary_only_cases(driver):
+    """M7/M8/M9 由实际 session primary 执行，**不产生** B-lite 抽取 job。
+
+    实测（Round 6 定点重跑的 memory-v2.db）：M1 两次各有一条 `memory-v2:<run_id>` job
+    行；M9 两次**一条都没有**。而驱动对每个 slot 都会先等 job 行出现（上界
+    `_RUN_TIMEOUT_SECONDS`=300s）——M8/M9 每个 slot 白等 5 分钟，整套 18 次里就是
+    **~45 分钟**纯等待。`_EXTRACTION_CASES` 已经声明了"谁才有抽取入口"，等不等必须
+    由它决定，不能所有案例一视同仁。
+    """
+    for case_id in ("M7", "M8", "M9"):
+        assert driver.case_expects_extraction_job(case_id) is False, case_id
+    for case_id in ("M1", "M2", "M3", "M4", "M5", "M6"):
+        assert driver.case_expects_extraction_job(case_id) is True, case_id
+
+
+def test_absent_extraction_job_returns_immediately_for_primary_cases(driver):
+    """`_extraction_evidence(expect_job=False)` **立刻**返回缺席形状，不查库、不进等待循环。"""
+    import asyncio
+
+    runner = object.__new__(driver._RealRunner)  # 只借方法，不跑真实装配
+
+    out = asyncio.run(runner._extraction_evidence("run-x", expect_job=False))
+    assert out == {"job": None, "extraction_state": "", "candidates": None}

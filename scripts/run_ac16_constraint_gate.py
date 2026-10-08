@@ -176,6 +176,17 @@ _EXTRACTION_CASES = frozenset({"M1", "M2", "M3", "M4", "M5", "M6"})
 #: 交互/预算拒绝案例：由实际 session primary model 执行（票面 §0.4 AC16 口径）。
 _PRIMARY_CASES = frozenset({"M7", "M8", "M9"})
 
+
+def case_expects_extraction_job(case_id: str) -> bool:
+    """这个案例会不会产生 B-lite 抽取 job（= 它是否走抽取登记入口）。
+
+    M7/M8/M9 由实际 session primary 执行、**不产生**抽取 job（Round 6 定点重跑的
+    `memory-v2.db` 实测：M1 两次各一行 `memory-v2:<run_id>`，M9 两次一行都没有）。
+    驱动对每个 slot 都会先等那一行出现，上界 `_RUN_TIMEOUT_SECONDS`=300s ——
+    一视同仁的话 M8/M9 四个 slot 就白等 ~20 分钟（整套 18 次里更多）。
+    """
+    return case_id in _EXTRACTION_CASES
+
 #: 每个案例除「实际主模型」这条基线判据外的专属判据（票面 §9.1 逐案例「两次都应满足」）。
 #:
 #: M1–M3 刻意**不**要求 `register_constraint_called`：票面 §0.4 规定这条路径的登记入口是
@@ -1842,7 +1853,9 @@ class _RealRunner:
                 )
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
-    async def _extraction_evidence(self, run_id: str) -> dict[str, Any]:
+    async def _extraction_evidence(
+        self, run_id: str, *, expect_job: bool = True,
+    ) -> dict[str, Any]:
         """本次 run 的 B-lite 抽取**落库证据**（per-run，不跨 attempt 累积），取到即返回。
 
         为什么读 job 行而不是读 `_invoker` 的累计计数：job 的幂等键逐字是
@@ -1877,7 +1890,12 @@ class _RealRunner:
         run 终态事件是我们在 SSE 里先看到的，而入队发生在 run 任务的后续步骤里——首次读可能
         还没那一行。所以先等一行出现（有界 `_RUN_TIMEOUT_SECONDS`），再等它 `done`
         （有界 `_EXTRACTION_DRAIN_TIMEOUT_SECONDS`）；两个上界都到点就如实返回所见状态。
+
+        `expect_job=False`（M7/M8/M9，见 `case_expects_extraction_job`）**直接**返回缺席
+        形状：这些案例压根不产生抽取 job，"等一行永不会出现的行"只有白等（上界 300s/slot）。
         """
+        if not expect_job:
+            return {"job": None, "extraction_state": "", "candidates": None}
         runner = getattr(self, "_formation_runner", None)
         if runner is None:
             return {"job": None, "extraction_state": "", "candidates": None}
@@ -1971,7 +1989,9 @@ class _RealRunner:
             await self._answer_card(session_id, case, events)
 
         # 抽取 job：run 终态臂已入队，等它抽出结果并读**本次 run 那一行**的落库证据。
-        extraction = await self._extraction_evidence(run_id)
+        extraction = await self._extraction_evidence(
+            run_id, expect_job=case_expects_extraction_job(case.case_id),
+        )
         events = await self._events(session_id)
         finished_at = _now_utc()
 
