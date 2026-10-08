@@ -1728,11 +1728,24 @@ def is_direct_user_input_event(
       未实际发生，目标仍有效）。这是**唯一的负向闸门**；
     - 投影一致比对（#823 / MM-02 A7）：事件若在消息投影里仍有**单事件来源范围**
       `(seq, seq)` 的 `HumanMessage`，用 `_projected_user_text` 把带图消息的投影
-      （视觉为块列表、非视觉为原文 + 占位符后缀）还原回**事件原始 content** 再比对，
-      带图 user 消息因此不会被漏掉。此项**只作正向信号**：压缩后单事件 bracket 的
-      summary 投影来源范围恰好也是 `(seq, seq)` 且内容对不上，若当成硬闸门就会退回
-      #663 P2 的 bug；故与负向闸门**取并**——比对命中即判真，未命中不据此拒绝，负向
-      判定只交给 `live_supersede_markers`。
+      （视觉为块列表、非视觉为原文 + 占位符后缀）还原回**事件原始 content** 再比对。
+      此项是**防御性正向信号、当前不承重**——带图消息判 True 完全由负向闸门的 `¬S`
+      （未被作废）提供，本项在全部非巧合输入上退化为死项；保留它是为闸门语义日后变动
+      留一个正向兜底，不代表"带图消息靠它才不漏"；
+    - 本条只做正向补充：与负向闸门**取并**，比对命中即判真，未命中不据此拒绝（#663 P2
+      的论证保留——压缩后单事件 bracket 的 summary 投影来源范围也是 `(seq, seq)`，当
+      硬闸门就会退回 #663 P2 的 bug）；唯一的负向判定由 `live_supersede_markers`（含
+      #614① 替换槽规则）承担；
+    - C2 收紧：`(seq, seq)` 若命中一条 compaction summary（`message.name ==
+      COMPACTION_SUMMARY_MESSAGE_NAME`）则**不计入**投影项。否则「已被 live-supersede
+      的事件 s，其单事件 bracket 的 summary 文本恰好等于 s 的 content」会让投影项对一条
+      已撤回的消息返回 True，与 #663 单边（False）分叉。
+
+    设计意图（P4）：函数尾部是上述投影项与负向闸门的 **OR**。7 场景探针实测：在全部现实
+    输入上，此 OR 与 #663 单边（只用 `live_supersede_markers`）**逐位相同**——投影项只在
+    巧合输入（C2）上才会单独点亮，而 C2 已被上面的 summary 排除收紧。故投影项当前
+    **不承重**：既不该被当成"带图消息的判别依据"而依赖，也不该被当成冗余而删除；它的
+    价值是防御性的（闸门语义若变动，正向项仍是兜底），不承载 #823 的行为。
 
     ⚠ **#614① 只覆盖「保护事实投影 + 本闸门」这两处口径**，**不含**消息投影
     （`derive_messages_with_source_ranges` 的 `superseded_ranges`，仍是纯解析的
@@ -1757,7 +1770,8 @@ def is_direct_user_input_event(
         return False
     # #823 / MM-02（A7，本线）：投影一致比对，图片感知。带图 user 消息的投影是块
     # 列表（视觉）或带占位符后缀的字符串（非视觉），用 `_projected_user_text` 还原
-    # 回**事件原始 content** 再比对，否则带图消息会被漏掉。
+    # 回**事件原始 content** 再比对。这是**防御性正向项**（设计意图见 docstring）：带图
+    # 消息判 True 实际由下方 `¬S` 提供，本项在非巧合输入上是死项。
     #
     # #663 P2（main 侧）：这条比对**只能当正向信号，不能当拒绝依据**——compaction 把
     # 原文收进 summary 后，单事件 bracket 的 summary 投影来源范围恰好也是 `(seq, seq)`，
@@ -1765,9 +1779,13 @@ def is_direct_user_input_event(
     # "非直接输入"（正是 #663 P2 要修的 bug）。因此与作废标记判定**取并**：投影比对命中
     # ⇒ 是直接输入；命中不了（含压缩、含 #614① 空槽）不据此拒绝，负向闸门只由
     # `live_supersede_markers`（含 #614① 替换槽规则）承担。
+    #
+    # C2：投影项必须排除 compaction summary——否则「已被 live-supersede 的 s，其单事件
+    # bracket 的 summary 恰等于 s 的 content」会让本项对一条已撤回的消息返回 True。
     return any(
         source_range == (event.seq, event.seq)
         and isinstance(message, HumanMessage)
+        and message.name != COMPACTION_SUMMARY_MESSAGE_NAME
         and _projected_user_text(message) == event.data["content"]
         for message, source_range in derive_messages_with_source_ranges(events)
     ) or event.seq not in {

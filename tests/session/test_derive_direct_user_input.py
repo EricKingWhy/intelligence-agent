@@ -162,6 +162,37 @@ def test_superseded_image_message_is_not_direct_input() -> None:
     assert is_direct_user_input_event([old, replacement, marker], replacement.event_id)
 
 
+def test_superseded_event_with_matching_summary_is_not_direct_input() -> None:
+    """C2（#823 窄审查）：OR 的投影项不得让已撤回的消息复活。
+
+    构造：一条 live-supersede 的事件 s（替换槽被填满 ⇒ 目标真被撤回），同时落在一个
+    **以 s 为起点**的单事件 compaction bracket 内，且该 bracket 的 summary 文本**恰好
+    等于** s 的原始 content。此时投影在 `(s, s)` 处出现该 summary，
+    `_projected_user_text(summary) == content` ⇒ 合并前的 OR 对一条已撤回消息返回 True，
+    与 #663 单边（只用 `live_supersede_markers`，判 False）分叉。
+
+    修法：投影项排除 compaction summary（`message.name ==
+    COMPACTION_SUMMARY_MESSAGE_NAME`）。合并后返回 False，与 main 单边一致。
+    """
+    content = "本题只用标准库"
+    old = _user(1, content)
+    replacement = _user(2, "换一条")
+    marker = SessionEvent(
+        seq=3, type=MESSAGE_SUPERSEDED, session_id="s1",
+        data={"superseded_seq": 1},
+    )
+    events = [old, replacement, marker, *_bracket(4, 1, 1, summary=content)]
+
+    # 投影在 (1, 1) 处正是那条与原文逐字相同的 summary——这是巧合命中的构造。
+    projected = derive_messages_with_source_ranges(events)
+    assert (projected[0][0].content, projected[0][1]) == (content, (1, 1))
+
+    # live-supersede 生效：目标已撤回，投影项不得把它拉回来。
+    assert not is_direct_user_input_event(events, old.event_id)
+    # 替换槽里的新消息仍是活跃来源。
+    assert is_direct_user_input_event(events, replacement.event_id)
+
+
 def test_plain_text_message_selection_is_byte_identical() -> None:
     """AC8 回归：无附件消息的投影逐字不变，判据行为不变。"""
     events = [_user(1, "回答用中文")]
