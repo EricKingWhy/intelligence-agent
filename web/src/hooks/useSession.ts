@@ -411,8 +411,7 @@ export function useSession() {
   const reconnectRef = useRef<ReconnectController>(new ReconnectController());
   const streamGenRef = useRef(0);
   // P3-1：纠正分支 hold() 后，新流首帧到达即释放 hold（否则真实断线被静默吞掉）。
-  // 用 microtask 延迟释放——T12o 的同步 settle 路径（快照 has_active_run=false）
-  // 必须仍看到 pending=true 才会被挡住。
+  // 同步释放——T12o 的 #2 没有帧，onEvent 永不触发，hold 不会被提前释放。
   const correctionHoldRef = useRef(false);
   const terminalSeenRef = useRef(false);
   // #478：durable pause 的干净收流标记。run/paused 被 #312 刻意排除在
@@ -667,16 +666,13 @@ export function useSession() {
           if (!shouldApplyStreamFrame(modeRef.current, event)) return;
           framesSeen += 1; // 恢复探测用：见 onStreamEnd 的「零帧收流」
           attachFrames += 1; // 接流是否真的接上过：见 onStreamError
-          // P3-1：纠正后新流首帧到达 → 释放 hold。microtask 延迟是关键：
-          // T12o 的快照 has_active_run=false 会同步走 settle→onStreamEnd，
-          // 必须让那条同步路径仍看到 pending=true（被 hold 挡住）；microtask
-          // 在同步块结束后才跑，健康流的首帧之后 hold 才释放，此后真实断线
-          // 的 scheduleReconnect 才能正常排链。
+          // P3-1：纠正后新流首帧到达 → 释放 hold。同步释放即可：
+          // T12o 的 #2 快照 has_active_run=false 会同步走 settle→onStreamEnd，
+          // 但 T12o 的 #2 没有帧（frames=[]），onEvent 永不触发，hold 本就不会
+          // 被释放——同步释放不影响 T12o。microtask 反而引入不必要的时序依赖。
           if (correctionHoldRef.current) {
             correctionHoldRef.current = false;
-            queueMicrotask(() => {
-              if (streamGenRef.current === gen) reconnectRef.current.release();
-            });
+            if (streamGenRef.current === gen) reconnectRef.current.release();
           }
           // 数据回来了 = 重连真的成了（见 awaitingEvidence 的注释），收条。
           if (awaitingEvidence) endReconnecting();

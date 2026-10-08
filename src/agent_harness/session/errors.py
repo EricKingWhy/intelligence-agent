@@ -249,6 +249,16 @@ class UnknownModel(SessionServiceError):
     """模型切换目标不在 catalog 中（provider + model_id 未命中）。"""
 
 
+class AttachmentReferenceInvalid(SessionServiceError):
+    """发送消息时引用的附件不合法（#823 / MM-02）。
+
+    三种情形共用一个 422（入参非法，客户端可纠正）：id 形态不是 `sha256:<64hex>`、
+    本会话字节存储里不存在（含别的会话、从未上传）、已上传但字节读不回/解码不出尺寸。
+    读端点对"未被事件引用"另有 404 口径（PRD D5）；这里是**发送**侧——请求里的
+    引用不成立，属入参错误，不是"资源不存在"。
+    """
+
+
 class InvalidForkBoundary(SessionServiceError):
     """fork 锚点非法（不是用户消息 seq / 前缀含未终态 run）。"""
 

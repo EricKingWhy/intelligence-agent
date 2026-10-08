@@ -1,5 +1,6 @@
 """Session 事件投影到 Runtime Context 的单一入口。"""
 
+import base64
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
@@ -10,6 +11,11 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
+from agent_harness.attachments.normalize import (
+    TARGET_MAX_BYTES,
+    TARGET_MAX_DIMENSION,
+    normalize_image,
+)
 from agent_harness.context.compactor import (
     CompactionFailure,
     CompactionPostWriteError,
@@ -21,14 +27,21 @@ from agent_harness.context.compactor import (
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
+from agent_harness.model.multimodal import (
+    DEFAULT_IMAGE_DETAIL,
+    downgrade_to_non_vision,
+    to_provider_messages,
+)
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     ProtectedFact,
+    derive_messages,
     derive_messages_with_source_ranges,
     derive_modified_file_paths,
     derive_protected_facts,
+    referenced_attachment_ids,
     serialize_protected_facts,
 )
 from agent_harness.session.event import (
@@ -429,6 +442,16 @@ class ContextBuilder:
         summary_model: Any | None = None,
         plan_reinject_every_messages: int = 6,
         model_call_gate: Any | None = None,
+        # #823 / MM-02：本次请求模型是否支持视觉。True ⇒ `derive_messages` 把
+        # `user/message` 的附件引用物化成图片内容块，并在 `build` 出口把它们翻译成
+        # provider 载荷（`model/multimodal.to_provider_messages`）。默认 False =
+        # 纯文本投影逐字不变（既有调用方零影响）。
+        model_supports_vision: bool = False,
+        image_detail: str = DEFAULT_IMAGE_DETAIL,
+        # #823 / MM-02（B4）：发送前归一化目标（PRD D11 可配置）。默认取
+        # `attachments.normalize` 的模块常量（DSH 一组），装配层从 Settings 接线。
+        image_normalize_max_dimension: int = TARGET_MAX_DIMENSION,
+        image_normalize_max_bytes: int = TARGET_MAX_BYTES,
     ) -> None:
         if max_context_tokens <= 0 or not 0 < auto_compact_threshold <= hard_guard_threshold <= 1:
             raise ValueError("require positive budget and 0 < auto <= hard <= 1")
@@ -444,6 +467,24 @@ class ContextBuilder:
         # #559：摘要调用与主循环同闸（进程级在飞 ≤N）；None = 不过闸（既有
         # 行为逐字节等价），只透传给 compactor。
         self.model_call_gate = model_call_gate
+        # #823 / MM-02：视觉能力与附件载荷缓存。`_image_payloads` 每次 build 现算
+        # （attachment_id → (media_type, base64)），只在 `model_supports_vision` 时非空。
+        self._supports_vision = model_supports_vision
+        self._image_detail = image_detail
+        self._image_normalize_max_dimension = image_normalize_max_dimension
+        self._image_normalize_max_bytes = image_normalize_max_bytes
+        self._image_payloads: dict[str, tuple[str, str]] = {}
+        # #823 / MM-02（B3）：`attachment_id → (media_type, base64)` 实例级缓存。
+        # 附件内容寻址（id = 字节的 sha256）、不可变，归一化/编码又是纯函数，故
+        # 同一 builder 实例内同 id 的载荷终身可复用——避免每次 build 对所有被引用
+        # 附件重复 `load_bytes` + Pillow 解码 + 编码 + base64。只缓存**成功**结果
+        # （负结果不缓存，让暂态读取失败可在下一轮重试）。
+        # 上界（#823 / MM-02 重审 P4）：本缓存**无显式淘汰**，但 builder 实例的生命
+        # 周期 = 单 run（`build_runtime` 每 run 新建，见 `service.py`），键数被该 run
+        # 的图片引用数界定（单键值 ≤ 归一化后图片字节的 base64）。不构成泄漏；**若
+        # 未来把 builder 复用为跨会话/长命实例，必须补上界或淘汰**（届时按 id 的
+        # 内容寻址 + 不可变仍可安全做 LRU）。
+        self._image_payload_cache: dict[str, tuple[str, str]] = {}
         self.max_context_tokens = max_context_tokens
         self.auto_compact_threshold = auto_compact_threshold
         self.hard_guard_threshold = hard_guard_threshold
@@ -461,12 +502,15 @@ class ContextBuilder:
         # 每次 build 重新渲染顺带保证工具清单与模型名永远是当前事实。
         # 传 None（默认）→ 行为与 T7 之前完全一致（向后兼容）。
         self._runtime_context_provider = runtime_context_provider
-        # (session_id, seq) → 该事件投影消息的 token 成本。事件落盘后其投影
-        # 消息内容终身不变，成本是常量——此前每步对全部历史重新 model_dump_json
-        # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
+        # (session_id, seq, supports_vision) → 该事件投影消息的 token 成本。同一事件
+        # 在视觉/非视觉两种投影下内容不同（图片块 vs 占位符串）、成本不同，故键必须
+        # 带视觉维度（#823 / MM-02 重审 P3：`set_supports_vision` 可 mid-run 变更）。
+        # 事件落盘后其投影消息内容在同一口径下终身不变，成本是常量——此前每步对全部
+        # 历史重新 model_dump_json + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步
+        # run 纯开销 2.2s）。
         # memo 仅属于最近传入的 Session 对象；同 id 的独立对象切换时清空，避免
         # 把一个对象的 seq 成本用于另一个对象，同时保持单个对象内的增量缓存。
-        self._token_memo: dict[tuple[str, int], int] = {}
+        self._token_memo: dict[tuple[str, int, bool], int] = {}
         self._token_memo_session: Session | None = None
         # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
         # **只含投影 messages**（_estimate_tokens_cached 的返回值）；system_prompt
@@ -514,6 +558,8 @@ class ContextBuilder:
                 keep_recent_tool_results=keep_recent_tool_results,
                 clear_at_least_tokens=clear_at_least_tokens,
             )
+        # #823 / MM-02：附件字节也住这个 store（`load_bytes`），投影物化时按需取回。
+        self._artifact_store = artifact_store
         self._prune_decisions: dict[str, dict[int, str]] = {}
         self._last_prune_report: PruneReport | None = None
         # #639 阶段 B：每会话"连续以预检拒绝收尾"的轮计数（thrashing guard）。
@@ -566,8 +612,11 @@ class ContextBuilder:
         # W-04：warning 记账口先清零——builder 实例跨 build 复用，未压缩路径
         # 不注入 warning，残值会把上一轮的成本错记到本轮看板（stale 账）。
         self._last_pressure_warning_tokens = 0
+        self._image_payloads = await self._load_image_payloads(session)
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(session.events)
+        pairs = derive_messages_with_source_ranges(
+            session.events, supports_vision=self._supports_vision
+        )
         if self._pruner is None:
             # 与 session.derive_messages() 同一投影；额外留下 source_ranges 供
             # #448 的真实 usage 锚做「事件 → 消息」定位（不传给压缩器，行为不变）。
@@ -605,6 +654,14 @@ class ContextBuilder:
                     for fact in active_facts
                 ],
             )
+        # ⚠ 口径（#823 / MM-02，A4 / PRD D3）：本估算对带图消息只计**标准图片块**
+        # （`{"type":"image","file_id",...}`，几 token）——真正的 base64 载荷在
+        # `_load_image_payloads`/`_finalize` 装配请求时才注入，**不计入本次 token
+        # 估算与预算/hard guard**。也就是说多张大图可让实际请求体量远超
+        # `max_context_tokens * hard_guard_threshold` 而估算看不见：本票按票面授权
+        # 将此「图片按 Provider 近似公式计入预算」**显式登记为 MM-03 必做**
+        # （见 #824），此处注释即 PRD D3 要求的「口径必须显式记录」。不要在没有
+        # MM-03 的预算计入前把本估算当"已含图片"的用量。
         token_estimate = self._estimate_tokens_cached(session, messages)
         # #448：真实 usage 锚（Pi `compaction.ts:214-243` estimateContextTokens 同构）。
         # tiktoken 估算对数字/十六进制密集的 tool 结果会**低估**（#448 实测两 provider
@@ -703,7 +760,7 @@ class ContextBuilder:
                 built = _inject_progress_block(built, progress_text)
             if paths_text is not None:
                 built = _inject_modified_paths(built, paths_text)
-            return self._prepend_system_prompt(built)
+            return self._finalize(built)
         # T2 (#635)：阈值命中的压缩整段抽到 `compact_now`——手动路径（#635 T3）
         # 复用**同一实现**（不变量 #22），本 build 只负责决定"该压了"。
         # `runtime_context` 原样传入：runtime provider 每次 build 只调一次的既有
@@ -797,7 +854,7 @@ class ContextBuilder:
             built = _insert_before_last_human(
                 built, HumanMessage(content=pressure_text),
             )
-        return self._prepend_system_prompt(built)
+        return self._finalize(built)
 
     async def compact_now(
         self,
@@ -839,7 +896,9 @@ class ContextBuilder:
         """
         # ── 投影（与 build 同一口径；裁剪路径存在时重放裁剪决策）──────────
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(session.events)
+        pairs = derive_messages_with_source_ranges(
+            session.events, supports_vision=self._supports_vision
+        )
         if self._pruner is None:
             messages = [message for message, _source_range in pairs]
             anchor_ranges = [source_range for _message, source_range in pairs]
@@ -893,6 +952,8 @@ class ContextBuilder:
                 ],
             )
         # ── token 估算（与 build 同序同式；口径见 build 内注释）────────────
+        # ⚠ 同 build：图片 base64 载荷**不计入**本估算（#823 / MM-02，A4 / PRD D3
+        # 口径显式记录；「图片预算计入」为 MM-03 必做，登记见 #824）。
         token_estimate = self._estimate_tokens_cached(session, messages)
         usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
         token_estimate = max(token_estimate, usage_anchor)
@@ -967,6 +1028,10 @@ class ContextBuilder:
                 source_ranges=source_ranges,
                 protected_facts=protected_facts,
                 reserved_tokens=reserved_tokens,
+                # #823 / MM-02：压缩内部的 early 窗口重推导必须与压缩输入同一
+                # 视觉口径（`_pruner is None` 手动路径下 source_ranges=None，
+                # 会走重推导分支）。
+                supports_vision=self._supports_vision,
             )
         except ContextWindowExceededError as error:
             self._record_compaction_failures(session, error.failures)
@@ -1154,10 +1219,19 @@ class ContextBuilder:
         ``compact_session_context`` 共用），决策重算先于本调用、同一次调用内
         同源，不存在跨 build 分歧窗口；跨 build 读（usage_snapshot）的漂移
         口径在彼处文档化。
+
+        #823 / MM-02：投影必须与 `compact_now` 的输入**同一口径**——附件引用按
+        `model_supports_vision` 物化成图片块（或占位符），故这里也传同一
+        `supports_vision`。否则带图会话一触发压缩，压缩产物（图片块）与重投影
+        （占位符文本）不一致 ⇒ 误报 `CompactionPostWriteError`。
         """
         if self._pruner is None:
-            return session.derive_messages()
-        pairs = derive_messages_with_source_ranges(session.events)
+            return derive_messages(
+                session.events, supports_vision=self._supports_vision
+            )
+        pairs = derive_messages_with_source_ranges(
+            session.events, supports_vision=self._supports_vision
+        )
         return self._pruner.apply(
             pairs, self._prune_decisions.get(session.session_id, {}),
         )
@@ -1231,6 +1305,97 @@ class ContextBuilder:
         if not self.system_prompt:
             return messages
         return [SystemMessage(content=self.system_prompt), *messages]
+
+    async def _load_image_payloads(self, session: Session) -> dict[str, tuple[str, str]]:
+        """按事件引用过的附件 id 取回字节、归一化并 base64 编码（#823 / MM-02）。
+
+        只在 `model_supports_vision` 时执行。store 缺席、单个字节缺失或解码失败都
+        不抛出——该引用在装配 adapter 里降级为占位文本块（不静默丢弃、不 brick run）。
+        返回 `attachment_id → (media_type, base64)`，供 `_finalize` 的 adapter 使用。
+        """
+        if not self._supports_vision or self._artifact_store is None:
+            return {}
+        payloads: dict[str, tuple[str, str]] = {}
+        for attachment_id in sorted(referenced_attachment_ids(session.events)):
+            # #823 / MM-02（B3）：命中实例级缓存即复用（内容寻址不可变，见
+            # `_image_payload_cache` 注释）——跳过整条 load/解码/编码/base64 链。
+            cached = self._image_payload_cache.get(attachment_id)
+            if cached is not None:
+                payloads[attachment_id] = cached
+                continue
+            try:
+                blob = await self._artifact_store.load_bytes(attachment_id)
+            except Exception:  # noqa: BLE001 —— 存储故障降级为占位符，不让一张图 brick run
+                logger.warning(
+                    "附件字节读取失败（%s）——投影降级为占位符", attachment_id,
+                )
+                continue
+            data = blob.content
+            if not data:
+                continue
+            try:
+                # B4：归一化目标从配置接线（默认 = 模块常量 DSH 一组）。
+                normalized = normalize_image(
+                    data,
+                    max_dimension=self._image_normalize_max_dimension,
+                    max_bytes=self._image_normalize_max_bytes,
+                )
+                media_type, raw = normalized.media_type, normalized.data
+            except Exception:  # noqa: BLE001 —— 解码失败回退原始字节（best-effort）
+                logger.warning(
+                    "附件归一化失败（%s）——按原始字节发送", attachment_id,
+                )
+                media_type, raw = blob.mime_type, data
+            payload = (media_type, base64.b64encode(raw).decode("ascii"))
+            self._image_payload_cache[attachment_id] = payload
+            payloads[attachment_id] = payload
+        return payloads
+
+    def set_supports_vision(self, supports_vision: bool) -> None:
+        """更新本次投影的视觉判定（#823 / MM-02 A2：跟随**当前请求模型**）。
+
+        PRD D6：投影必须按当前请求模型决定视觉/占位——即便入口被绕过（例如发送后
+        fallback 到非视觉模型）。`_supports_vision` 构造期按主模型定死不够：run 内
+        切到 fallback 后，下一次 build 必须用 fallback 的能力。Runtime 在每次
+        `build` 前按 coordinator 的角色调用本方法；投影、token 估算、压缩、
+        `_finalize` 全部读同一个 `self._supports_vision`，一次更新即全局同口径。
+        """
+        self._supports_vision = supports_vision
+
+    def reproject_without_vision(
+        self, messages: list[AnyMessage],
+    ) -> list[AnyMessage]:
+        """把已按视觉口径投影/装配的消息降级为非视觉形态（#823 / MM-02 A2 残口）。
+
+        PRD D6 字面场景="发送后 fallback 到非视觉模型"：切换那一步的重试若复用
+        切换前已投影的 `messages`（含 provider `image_url` 块），非视觉 fallback
+        会直接收到图片块、D6 承诺的降级不发生。Runtime 让 coordinator 在切换后调用
+        本方法**只重投影消息**——纯消息变换，**不读 session、不触发 build/压缩**
+        （实现者原先顾虑的"在途重新 build 有副作用"因此在方案上被规避）。
+
+        **含图片块的形态**下，返回的新消息与
+        `derive_messages(..., supports_vision=False)` 的产物逐字一致（首文本块 +
+        占位符）。已无图片块的消息原样返回（无图消息逐字不变，AC8）——包括图片字节
+        取不回时已被降级成 `[{text:原文},{text:占位符}]` 双文本块的形态——降级发生在
+        翻译阶段，见 `model.multimodal._translate_block`（`to_provider_messages` 逐块
+        调用它），`downgrade_to_non_vision` 只是原样返回该形态。它与 derive 的非视觉
+        单字符串不逐字相等，但不含任何图片块（D6 语义不受影响）。
+        """
+        return downgrade_to_non_vision(messages)
+
+    def _finalize(self, messages: list[AnyMessage]) -> list[AnyMessage]:
+        """注入 system prompt，并把标准图片块翻译成 provider 载荷（#823 / MM-02）。
+
+        无图时逐字等价于 `_prepend_system_prompt`（默认 `_supports_vision` 为 False）。
+        """
+        prepared = self._prepend_system_prompt(messages)
+        if not self._supports_vision:
+            return prepared
+        return to_provider_messages(
+            prepared,
+            resolve_image=self._image_payloads.get,
+            detail=self._image_detail,
+        )
 
     def _usage_anchored_tokens(
         self, session: Session,
@@ -1311,7 +1476,12 @@ class ContextBuilder:
             return self._token_estimate_total
         total = 0
         for event, message in zip(projecting, messages):
-            key = (session.session_id, event.seq)
+            # 键必须带上视觉维度（#823 / MM-02 重审 P3）：`_supports_vision` 可在
+            # mid-run 变更（`set_supports_vision`），同一 (session_id, seq) 的带图事件
+            # 在视觉/非视觉两种投影下编码成本不同。只按 (session_id, seq) 记忆会
+            # 命中前一口径的 memo，使 `set_supports_vision` 的"估算全局同口径"声明
+            # 失效。纳入后，切换视野那次 build 按新口径重估。
+            key = (session.session_id, event.seq, self._supports_vision)
             cost = self._token_memo.get(key)
             if cost is None:
                 cost = estimate_tokens(message.model_dump_json())
@@ -1382,9 +1552,18 @@ class ContextBuilder:
         builder 实例，常态下两者一致。
         """
         if self._pruner is None:
-            messages_tokens = estimate_message_tokens(session.derive_messages())
+            # #823 / MM-02（A6）：看板/tokens_before 读数必须与 build/compact 的
+            # 视觉口径一致——带图会话下用 vision=False 的占位符文本估算会低估，
+            # 与真实投影（图片块）口径漂移。传同一 `self._supports_vision`。
+            messages_tokens = estimate_message_tokens(
+                derive_messages(
+                    session.events, supports_vision=self._supports_vision,
+                )
+            )
         else:
-            pairs = derive_messages_with_source_ranges(session.events)
+            pairs = derive_messages_with_source_ranges(
+                session.events, supports_vision=self._supports_vision,
+            )
             messages = self._pruner.apply(
                 pairs, self._prune_decisions.get(session.session_id, {}),
             )

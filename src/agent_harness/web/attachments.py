@@ -8,14 +8,12 @@
   受控读回原始字节 + `Content-Type`；只认**本会话**命名空间里的 id，别的会话 /
   未上传过的 id 一律 404（不泄露存在性）。
 
-**授权口径（MM-01，记录一次授权的重定义）**：读回要求 id 属于 URL 里的 session
-（store 按 session 构造、provider 把 session 拼进键或路径），即**授权单位 =
-「上传即归属本会话」的命名空间归属**。DSH 的 `ATTACHMENT_NOT_REFERENCED` 本意是
-"被**本 session 事件引用**"，而 MM-01 不往 `user/message` 写附件引用（那是 MM-02），
-本票也没有任何"事件引用附件"的机制——故字面执行"未引用→404"会与"上传即读回字节
-相等"这条 AC 结构上互斥。**⇒ MM-02 必须补回「事件引用」授权闸门**：读端点要额外
-校验该 id 被本 Session 的 `user/message` 事件真实引用（这正是 PRD D5 的原文）。
-MM-02 的票面已登记该必做项（见 `docs/tickets/multimodal-2026-10-07/`）。
+**授权口径（MM-02 收紧，闭合 MM-01 的已知缺口）**：读回要求该 `attachment_id`
+被**本 Session 的 `user/message` 事件真实引用**（PRD D5 / DSH
+`ATTACHMENT_NOT_REFERENCED` 语义）。MM-01 落地时授权单位只是"上传即归属本会话"的
+命名空间归属，因为当时还没有"事件引用附件"的机制；MM-02 让 `user/message` 带上
+`attachments` 引用数组后，此处补回事件引用闸门：**未引用（含上传后从未发送）→ 404**，
+且与"从未上传 / 属于别的会话"**不可区分**（不泄露存在性）。
 
 **绕开 1 MiB JSON body 上限**：上传请求体可达单张图上限（默认 20 MiB）。该配额
 针对 JSON 端点，由 `BodyDepthGuardMiddleware` 全局强制；本模块导出
@@ -41,6 +39,7 @@ from agent_harness.attachments import (
     file_leaf_name,
     resolve_image_limits,
 )
+from agent_harness.session.derive import referenced_attachment_ids
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
 from agent_harness.storage.artifact import BYTE_ARTIFACT_ID_PATTERN
 from agent_harness.storage.artifact_select import select_artifact_store
@@ -213,8 +212,10 @@ def register_attachment_routes(
     async def read_attachment_content(session_id: str, attachment_id: str) -> Response:
         """受控读回原始字节 + 正确 `Content-Type`。
 
-        404 覆盖三种**不可区分**的情形（不泄露存在性）：从未上传过该 id、该 id 属于
-        别的会话、id 形态合法但本会话命名空间里没有。422 只留给 id 形态非法。
+        **授权闸门（#823 / MM-02，收紧）**：id 必须被本会话某条 `user/message` 事件
+        真实引用（PRD D5 / DSH `ATTACHMENT_NOT_REFERENCED` 语义）。未引用（含上传后
+        从未发送、别的会话）一律 404，与"从未上传"**不可区分**（不泄露存在性）。
+        422 只留给 id 形态非法。
         """
         state = app.state.agent
         try:
@@ -229,8 +230,18 @@ def register_attachment_routes(
                     f"{attachment_id!r}"
                 ),
             )
-        if not await session_service(state).has_session(session_id):
+        service = session_service(state)
+        if not await service.has_session(session_id):
             raise http_error(SessionNotFound(f"session '{session_id}' not found"))
+
+        # #823 / MM-02（A8）：授权判据是「id 被本会话某条 user/message 引用」，本实现
+        # 每次 GET 都 `read_events_report` 全量解析 + 扫描事件日志（O(事件数)/图）。
+        # 权衡已登记：**正确性优先**——事件日志是唯一权威来源，且这是受控读回入口
+        # （非热路径）；大会话 + 多图场景的索引/缓存优化（如按会话缓存被引用 id 集合、
+        # 或落附件引用索引）留待后续票，不在此引入易与事件流漂移的旁路状态。
+        events = await service.get_events(session_id)
+        if attachment_id not in referenced_attachment_ids(events):
+            raise _attachment_not_found(session_id, attachment_id)
 
         store = _build_attachment_store(state.settings, session_id)
         if store is None:
@@ -238,14 +249,21 @@ def register_attachment_routes(
         try:
             blob = await store.load_bytes(attachment_id)
         except KeyError as error:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"attachment {attachment_id!r} 不在会话 {session_id!r} 的"
-                    "命名空间里（不存在，或属于别的会话）"
-                ),
-            ) from error
+            # 事件引用了但字节读不回：违反 persist-before-event 前提（不应发生），
+            # 仍按同形 404 如实回，不泄露内部不一致。
+            raise _attachment_not_found(session_id, attachment_id) from error
         # content 一定被 load_bytes 填充（契约）；None 只可能来自未 load 的元数据形状。
         return Response(
             content=blob.content or b"", media_type=blob.mime_type
         )
+
+
+def _attachment_not_found(session_id: str, attachment_id: str) -> HTTPException:
+    """统一的 404（"不存在 / 属于别的会话 / 未被本会话事件引用"三种情形同形）。"""
+    return HTTPException(
+        status_code=404,
+        detail=(
+            f"attachment {attachment_id!r} 不在会话 {session_id!r} 的"
+            "命名空间里（不存在，或属于别的会话）"
+        ),
+    )

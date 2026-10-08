@@ -136,6 +136,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    AttachmentReferenceInvalid,
     CompactionConcurrentWrite,
     CompactionInProgress,
     EventLogCorruptError,
@@ -276,6 +277,7 @@ if TYPE_CHECKING:
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
     from agent_harness.context.builder import ContextBuilder
+    from agent_harness.model.config import ModelConfig
     from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
@@ -2840,6 +2842,8 @@ class SessionService:
             refutes_event_id=refutes_event_id,
             protected_facts=protected_facts,
             remember_as_procedural_rule=remember_as_procedural_rule,
+            # #823 / MM-02：附件引用随排队项一起留（投递时会带进新的 user/message）。
+            attachments=user_input_metadata.get("attachments"),
         )
         self._append_session_event(
             session_id, MESSAGE_QUEUED,
@@ -2848,6 +2852,77 @@ class SessionService:
             **user_input_metadata,
         )
         return queued
+
+    async def _resolve_attachment_refs(
+        self, session_id: str, attachment_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """校验附件 id 并解析成事件引用数组（#823 / MM-02）。
+
+        逐条校验：形态（`sha256:<64hex>`）→ 存在于本会话字节命名空间（别的会话 /
+        从未上传一律拒绝）→ 字节可读且能解析出尺寸。任一条不成立抛
+        `AttachmentReferenceInvalid`（HTTP 422）。返回**去重保序**的引用 dict 列表。
+        """
+        from agent_harness.attachments import (
+            AttachmentError,
+            detect_image,
+            resolve_image_limits,
+        )
+        from agent_harness.storage.artifact import BYTE_ARTIFACT_ID_PATTERN
+
+        store = self._artifact_store_for(session_id)
+        limits = resolve_image_limits(self._settings)
+        refs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for attachment_id in attachment_ids:
+            if not isinstance(attachment_id, str) or not BYTE_ARTIFACT_ID_PATTERN.fullmatch(
+                attachment_id
+            ):
+                raise AttachmentReferenceInvalid(
+                    "attachment_id 必须形如 sha256:<64 位小写十六进制>："
+                    f"{attachment_id!r}"
+                )
+            if attachment_id in seen:
+                continue
+            if store is None:
+                raise AttachmentReferenceInvalid(
+                    "本部署没有可用的附件存储（artifact_dir 为空，或对象存储只配了一半）"
+                )
+            try:
+                blob = await store.load_bytes(attachment_id)
+            except KeyError as error:
+                raise AttachmentReferenceInvalid(
+                    f"附件 {attachment_id!r} 不在会话 {session_id!r} 的命名空间里"
+                    "（不存在，或属于别的会话）"
+                ) from error
+            data = blob.content
+            if not data:
+                raise AttachmentReferenceInvalid(f"附件 {attachment_id!r} 字节为空")
+            try:
+                detected = detect_image(
+                    data,
+                    max_pixels=limits.max_image_pixels,
+                    max_dimension=limits.max_image_dimension,
+                    allowed_media_types=limits.media_types,
+                )
+            except AttachmentError as error:
+                raise AttachmentReferenceInvalid(
+                    f"附件 {attachment_id!r} 字节无法解析为图片：{error}"
+                ) from error
+            seen.add(attachment_id)
+            # #823 / MM-02（B6）：不写 `name`——发送端点只收 id 列表，上传回执的
+            # 展示名未持久化、也无回传信道，故事件引用数组的 `name` 结构性缺省
+            # （AC1 该字段可选）。展示名接线留待前端票 / MM-03。
+            refs.append(
+                {
+                    "kind": "image",
+                    "attachment_id": attachment_id,
+                    "media_type": detected.media_type,
+                    "bytes": blob.size,
+                    "width": detected.width,
+                    "height": detected.height,
+                }
+            )
+        return refs
 
     async def send_message(
         self,
@@ -2863,6 +2938,10 @@ class SessionService:
         refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
         remember_as_procedural_rule: bool = False,
+        # #823 / MM-02：附件 id 列表（内容寻址 `sha256:<hex>`）。None/空 = 纯文本，
+        # 既有行为逐字不变。本票只校验"id 存在且属本会话"，不做上限聚合与视觉门禁
+        # （那是 MM-03）——视觉与否由投影层按当前模型能力决定。
+        attachments: list[str] | None = None,
         run_max_agent_turns_total: int | None = None,
         run_max_model_requests: int | None = None,
         run_max_total_tokens: int | None = None,
@@ -2987,6 +3066,15 @@ class SessionService:
             except ValueError as error:
                 raise ProtectedFactReferenceInvalid(str(error)) from error
 
+        # 第 1 步续（#823 / MM-02）：附件引用校验——id 形态 / 存在性 / 字节可读，
+        # 全是**纯读**（不发写），与上面的取代/预算校验同一条"先校验后落盘"纪律。
+        # 事件只带引用（`kind/attachment_id/media_type/bytes/width/height`），字节
+        # 已由上传端点内容寻址落盘（persist-before-event）——此处读回并复核尺寸。
+        if attachments:
+            resolved_refs = await self._resolve_attachment_refs(session_id, attachments)
+            if resolved_refs:
+                user_input_metadata["attachments"] = resolved_refs
+
         # 第 1 步：**纯读/纯函数**校验全部先于任何落盘（本方法的顺序纪律）。
         # 取代校验是纯读，预算判定是纯函数；`cancel_queue` 会写 queue/cancelled，所以
         # 两者都必须在它之前——否则一个被拒请求会先毁掉用户的排队项（"旧项被取消 +
@@ -3031,6 +3119,7 @@ class SessionService:
                 refutes_event_id=refutes_event_id,
                 protected_facts=normalized_protected_facts or None,
                 remember_as_procedural_rule=remember_as_procedural_rule,
+                attachments=user_input_metadata.get("attachments"),
             )
             self._append_session_event(
                 session_id, STEER_REQUESTED,
@@ -3234,6 +3323,9 @@ class SessionService:
         }
         if nxt.protected_facts:
             user_input_metadata["protected_facts"] = nxt.protected_facts
+        if nxt.attachments:
+            # #823 / MM-02：排队/steer 项投递成新 run 时，附件引用随之进入 user/message。
+            user_input_metadata["attachments"] = nxt.attachments
         events = await anyio.to_thread.run_sync(
             self._store.read_events, session_id
         )
@@ -3564,8 +3656,17 @@ class SessionService:
 
             session = Session(session_id, self._store, list(events))
             from agent_harness.context.tokens import estimate_message_tokens
+            from agent_harness.session.derive import derive_messages
 
-            tokens_before = estimate_message_tokens(session.derive_messages())
+            # #823 / MM-02（A6）：`tokens_before` 必须与 `compact_now` 的视觉口径
+            # 一致——带图会话 + 视觉模型下用 vision=False 投影（占位符文本）估算
+            # 会与实际投影（图片块）漂移。按会话**当前请求模型**判定。
+            tokens_before = estimate_message_tokens(
+                derive_messages(
+                    session.events,
+                    supports_vision=self._session_model_supports_vision(session),
+                )
+            )
             effective_summary_name = (
                 model if model is not None else self._settings.summary_model
             )
@@ -3671,6 +3772,47 @@ class SessionService:
         config = ModelConfig.resolve_selection(self._settings, name, store)
         return create_chat_model(config)
 
+    def _session_model_config(self, session: Session) -> ModelConfig:
+        """会话**当前生效**的模型配置（catalog / 自定义选择优先，回落默认链）。
+
+        F3 (#635) 的解析口径单点：`_compact_context_builder`（建客户端）与
+        `_session_model_supports_vision`（#823 A6 视觉口径）共用，避免两处漂移。
+        会话切换（catalog 未命中）记 warning 并回落默认链——两条消费点同口径。
+        """
+        from agent_harness.model.config import ModelConfig, find_catalog_entry
+        from agent_harness.model.provider_store import ProviderStore
+        from agent_harness.session.model_switch import current_model_selection
+
+        config = ModelConfig.from_settings(self._settings)
+        provider, model_id = current_model_selection(session.events)
+        if model_id is None:
+            return config
+        if find_catalog_entry(self._settings, provider or "", model_id) is None:
+            logger.warning(
+                "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
+                provider, model_id,
+            )
+            return config
+        return ModelConfig.resolve_selection(
+            self._settings, model_id, ProviderStore.for_settings(self._settings),
+        )
+
+    def _session_model_supports_vision(self, session: Session) -> bool:
+        """会话当前请求模型是否支持视觉（#823 / MM-02，A6 口径统一）。
+
+        **尽力而为**：本判定只用于 `tokens_before` 这类读数口径。若模型配置此刻
+        无法解析（如测试替身未配 key，或部署配置有误），按"未知能力不猜"的既有契约
+        回落 False——真正的压缩会在 `_compact_context_builder` 里响亮失败，故这里
+        不吞掉任何本该暴露的错误，只保证读数路径不因能力面缺席而中断。
+        """
+        from agent_harness.model.config import model_supports_vision
+
+        try:
+            config = self._session_model_config(session)
+        except Exception:  # noqa: BLE001 —— 能力面未知 ⇒ False（不猜），读数不中断
+            return False
+        return model_supports_vision(self._settings, config)
+
     async def _compact_context_builder(
         self, session: Session, summary_model: BaseChatModel | None,
     ) -> ContextBuilder:
@@ -3690,32 +3832,16 @@ class SessionService:
         ADR-0040 协作者契约（超本票范围）。改从更轻接缝取可作为后续票的优化。
         """
         from agent_harness.context.builder import ContextBuilder
-        from agent_harness.model.config import ModelConfig
+        from agent_harness.model.config import model_supports_vision
         from agent_harness.model.provider import create_chat_model
-        from agent_harness.session.model_switch import current_model_selection
 
         _, wiring = await self._get_wiring()
-        config = ModelConfig.from_settings(self._settings)
         # F3 (#635)：缺省摘要模型 = 主模型，必须跟随会话级模型覆盖（AC5："缺省 =
         # 主模型逐字节等价"）。自动路径经 `amend_with_session_model` →
         # `ModelConfig.resolve_selection` 解析会话模型；手动路径此前只看 settings，
-        # 会话切换被忽略。此处用同一解析点、同一回落口径（catalog 未命中记 warning
-        # 并回落默认链），保证两条路径对同一会话给出同一主模型。
-        provider, model_id = current_model_selection(session.events)
-        if model_id is not None:
-            from agent_harness.model.config import find_catalog_entry
-            from agent_harness.model.provider_store import ProviderStore
-
-            if find_catalog_entry(self._settings, provider or "", model_id) is None:
-                logger.warning(
-                    "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
-                    provider, model_id,
-                )
-            else:
-                config = ModelConfig.resolve_selection(
-                    self._settings, model_id,
-                    ProviderStore.for_settings(self._settings),
-                )
+        # 会话切换被忽略。解析口径单点在 `_session_model_config`（catalog 未命中记
+        # warning 并回落默认链），保证两条路径对同一会话给出同一主模型。
+        config = self._session_model_config(session)
         main_model = create_chat_model(config)
         return ContextBuilder(
             main_model,
@@ -3727,6 +3853,12 @@ class SessionService:
             plan_reinject_every_messages=self._settings.plan_reinject_every_messages,
             keep_recent_tool_results=self._settings.keep_recent_tool_results,
             clear_at_least_tokens=self._settings.clear_at_least_tokens,
+            model_supports_vision=model_supports_vision(self._settings, config),
+            # #823 / MM-02（B2）：图片块 `detail` 档位（PRD D4/D11 可配置）。
+            image_detail=self._settings.image_detail,
+            # #823 / MM-02（B4）：发送前归一化目标（PRD D11 可配置）。
+            image_normalize_max_dimension=self._settings.image_normalize_max_dimension,
+            image_normalize_max_bytes=self._settings.image_normalize_max_bytes,
         )
 
     def _compaction_write_guard(
@@ -4973,6 +5105,7 @@ class SessionService:
                     remember_as_procedural_rule=_has_procedural_rule_signal(
                         events, item.kind, item.input_id,
                     ),
+                    attachments=item.attachments,
                 )
                 for item in pending
                 if item.kind == KIND_QUEUE
@@ -4990,6 +5123,7 @@ class SessionService:
                     remember_as_procedural_rule=_has_procedural_rule_signal(
                         events, item.kind, item.input_id,
                     ),
+                    attachments=item.attachments,
                 )
                 for item in pending
                 if item.kind != KIND_QUEUE

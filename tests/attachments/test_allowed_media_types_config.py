@@ -38,3 +38,22 @@ def test_empty_media_types_fails_at_settings_construction() -> None:
 def test_duplicates_are_collapsed_in_order() -> None:
     settings = _settings(attachment_allowed_media_types="image/png, image/png,image/jpeg")
     assert resolve_image_limits(settings).media_types == ("image/png", "image/jpeg")
+
+
+def test_image_projection_config_defaults() -> None:
+    """#823 / MM-02（B2/B4）：投影相关配置键有 DSH 一组默认值。"""
+    settings = _settings()
+    assert settings.image_detail == "auto"
+    assert settings.image_normalize_max_dimension == 2048
+    assert settings.image_normalize_max_bytes == 4 * 1024 * 1024
+
+
+def test_image_projection_config_overrides() -> None:
+    settings = _settings(
+        image_detail="low",
+        image_normalize_max_dimension=1024,
+        image_normalize_max_bytes=512 * 1024,
+    )
+    assert settings.image_detail == "low"
+    assert settings.image_normalize_max_dimension == 1024
+    assert settings.image_normalize_max_bytes == 512 * 1024

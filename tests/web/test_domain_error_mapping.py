@@ -72,6 +72,9 @@ def test_status_map_is_the_audited_contract():
         "InvalidDecision": 422,
         "UnknownModel": 422,
         "InvalidForkBoundary": 422,
+        # #823 / MM-02：发送消息引用的 attachment_id 不合法（形态 / 不存在 / 读不回）——
+        # 入参错误（客户端可纠正），与读端点"未被事件引用"的 404 口径分开。
+        "AttachmentReferenceInvalid": 422,
         "ActiveRunConflict": 409,
         # F6 / #635：手动压缩的两个类型化拒绝——同 409，但类型可区分（CLI 据此
         # 映射文案，不再靠错误字符串子串）。子类必须自己登记（精确类型索引）。

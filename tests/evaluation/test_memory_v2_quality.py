@@ -157,6 +157,7 @@ def _observed_source_authority(events, written, candidate_evidence):
             }
         else:
             observed_sources = set()
+        return sorted(observed_sources)
     elif candidate_evidence:
         refs = build_formation_input(events).refs
         role_by_ref = {
@@ -646,7 +647,7 @@ def test_frozen_gold_declares_expected_contract_and_is_synthetic():
     corpus, cases = load_memory_gold()
 
     assert corpus["synthetic"] is True
-    assert corpus["version"] == "1.9.0"
+    assert corpus["version"] == "1.9.1"
     assert len(cases) >= 15
     assert {
         "cancelled", "startup_failure", "no_model_call", "no_genuine_user_input",
@@ -831,6 +832,15 @@ def test_real_procedure_gold_events_replay_complete_tool_call_batch():
 
     assert calls.keys() == results.keys()
     assert len(calls) == 2
+    expected_authorities = sorted({
+        resolve_evidence_source(event).value
+        for event in events if event.type in {USER_MESSAGE, TOOL_RESULT}
+    })
+    assert case.expected["source_authority"] == expected_authorities
+    written_sources = SimpleNamespace(source_event_ids={
+        event.event_id for event in events if event.type in {USER_MESSAGE, TOOL_RESULT}
+    })
+    assert _observed_source_authority(events, [written_sources], []) == expected_authorities
     assert all(calls[key].seq < results[key].seq for key in calls)
     assert [event.type for event in events if event.type in {TOOL_CALL, TOOL_RESULT}] == [
         TOOL_CALL, TOOL_CALL, TOOL_RESULT, TOOL_RESULT,
