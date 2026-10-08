@@ -158,3 +158,28 @@ def test_non_json_secret_is_still_collected_as_a_whole() -> None:
     """JSON 解析失败**不抛**：那只说明"这个字段不是 JSON"，整串照旧进精确值层。"""
     values = credential_values(_Stub(model_api_key=SecretStr("plain-secret-value-0002")))
     assert values == ["plain-secret-value-0002"]
+
+
+def test_protected_fact_ids_are_not_mistaken_for_an_authorization_header() -> None:
+    """反控（AC16 Round 6 实测踩坑）：`authorization:<event-id>` 是**事实 ID**，不是 HTTP 头。
+
+    证据里每条 session 都投影一条 `authorization` 保护事实，`fact_id` 逐字是
+    `authorization:<uuid4>`。`_AUTH_HEADER` 的 `\\b` 在 `n` 与 `:` 之间成立，于是这条
+    普通事实 ID 被当成 `Authorization: …` 命中，把整份 AC16 证据的 `status` 翻成
+    failed（18 处命中）。
+
+    判据：真 HTTP 头（键名 `Authorization` 整体，后跟冒号 + 值）仍须命中；事实 ID 不命中。
+    """
+    fact_id = "authorization:2dd4df30-bbe3-432f-a231-1d7de3663ffb"
+    masked, findings = mask_text(fact_id, where="t")
+    assert findings == []
+    assert masked == fact_id
+
+    # 正控：真头照旧命中（含 `Bearer ` 与裸值两种写法）。
+    for header in (
+        "Authorization: Bearer " + "Z" * 30,
+        "authorization: " + "Z" * 30,
+        "authorization=" + "Z" * 30,
+    ):
+        _, hits = mask_text(header, where="t")
+        assert [hit.rule for hit in hits] == ["authorization_header"], header

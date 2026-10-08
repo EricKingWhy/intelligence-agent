@@ -221,7 +221,7 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
     "M8": (
         "run_paused_user_input",
         "card_has_exact_old_and_new",
-        "no_register_constraint_call",
+        "no_register_constraint_before_answer",
         "active_projection_unchanged_before_answer",
         "selected_answer_recorded_once",
         "run_resumed_in_same_run",
@@ -230,7 +230,7 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
     "M9": (
         "run_paused_user_input",
         "card_has_exact_old_and_new",
-        "no_register_constraint_call",
+        "no_register_constraint_before_answer",
         "active_projection_unchanged_before_answer",
         "selected_answer_recorded_once",
         "run_resumed_in_same_run",
@@ -329,6 +329,11 @@ CASE_DEFINITIONS: tuple[CaseDefinition, ...] = (
         expected_behavior="即使更正范围清楚也调 request_constraint_resolution，仅永久替换后 supersede 旧事实",
         seed_active_constraint=NO_NEW_DEPENDENCY,
         resume_choice="replace_persistently",
+        # 票面 M9 要「完整展示旧/新原文」= **新约束原文**，不是整句用户消息：工具自己的
+        # 指导逐字要求 "Omit correction framing such as 'I correct this rule:'"，所以
+        # 去掉更正前缀后的实质约束才是合法 candidate。Round 5 拿整句输入当期望值，把这条
+        # 被指导要求的行为判成假负（实测两次都因此 FAIL，而同一文本在旧驱动下 PASS）。
+        required_active_text="今后的任务可以按需要新增第三方依赖。",
     ),
 )
 
@@ -374,6 +379,36 @@ def shared_input(case_id: str) -> CaseDefinition | None:
         if other.case_id != case_id and other.input_text == case.input_text
     ]
     return same[0] if same else None
+
+
+def parse_slots(spec: str) -> list[PlanSlot]:
+    """`"M9-1,M1-2"` → 那两个 `PlanSlot`（顺序照写、去重报错）。
+
+    判据/观测修好后只重跑**受影响的槽位**时用（任务书 §任务B 条 2）。**fail-closed**：
+    任何非法槽位一律 `ValueError`，不静默跳过 —— 少跑的槽位在证据里是"没跑"，而
+    "没跑"最容易被当成"没红"。
+    """
+    slots: list[PlanSlot] = []
+    seen: set[str] = set()
+    for raw in spec.split(","):
+        token = raw.strip()
+        if not token:
+            raise ValueError(f"槽位规格含空项：{spec!r}")
+        if token in seen:
+            raise ValueError(f"槽位重复：{token}")
+        case_id, _, attempt_text = token.partition("-")
+        if case_id not in _CASES_BY_ID:
+            raise ValueError(f"未知案例：{case_id!r}（合法：{sorted(_CASES_BY_ID)}）")
+        if not attempt_text.isdigit():
+            raise ValueError(f"槽位格式应为 <案例>-<次数>：{token!r}")
+        attempt = int(attempt_text)
+        if not 1 <= attempt <= ATTEMPTS_PER_CASE:
+            raise ValueError(f"次数越界：{token!r}（合法 1..{ATTEMPTS_PER_CASE}）")
+        seen.add(token)
+        slots.append(PlanSlot(case_id=case_id, attempt=attempt))
+    if not slots:
+        raise ValueError("槽位规格为空")
+    return slots
 
 
 @dataclass(frozen=True)
@@ -934,9 +969,36 @@ def assert_resolution_cards(
         "card_has_exact_old_and_new": (
             card.get("old_value") == expected_old and card.get("candidate") == expected_candidate
         ),
-        "no_register_constraint_call": "register_constraint" not in _tool_call_names(events),
+        "no_register_constraint_before_answer": _no_register_call_before_answer(events),
         "active_projection_unchanged_before_answer": before == pre_answer,
     }
+
+
+def _answer_index(events: Sequence[Any]) -> int | None:
+    """答题事件的**位置**（带 `input_request_id` 的第一条 `user/message`），无则 None。
+
+    位置而不是布尔：票面 M9 的判据有**作用域**（"回答前"），所以判据必须能按这条事件把
+    事件流切成前后两段。按第一条取——`selected_answer_recorded_once` 另判"恰一条"。
+    """
+    for index, event in enumerate(events):
+        if _event_type(event) == "user/message" and _event_data(event).get("input_request_id"):
+            return index
+    return None
+
+
+def _no_register_call_before_answer(events: Sequence[Any]) -> bool:
+    """**答题前**没有 `register_constraint` 调用（票面 M9 逐字："回答前 active 集合不变"）。
+
+    Round 5 实测 M9-1：答题**之后**模型又调了一次 `register_constraint`（候选与当前来源
+    逐字不符 ⇒ 生产返回 rejected、无副作用）。旧驱动的判据名是
+    `no_register_constraint_before_answer`，改名时把 before-answer 作用域弄丢了，变成
+    对全事件流生效 ⇒ 比票面严，把一次**答题后的、被拒的**调用判成假负。
+
+    无答题事件时全流都算"答题前"（fail-closed：拿不到作用域边界就不给豁免）。
+    """
+    limit = _answer_index(events)
+    window = events if limit is None else events[:limit]
+    return "register_constraint" not in _tool_call_names(window)
 
 
 def _event_type(event: Any) -> str:
@@ -1085,6 +1147,22 @@ def _terminal_status_for_run(
     return "running", None  # run/started 或 run/resumed
 
 
+def run_failure_reason(events: Sequence[Any], run_id: str) -> str:
+    """本次 run 的 `run/failed` 原因（无失败 ⇒ 空串）。
+
+    证据里的 `error` 字段口径是"空串 = 本次成功跑完"，所以**run 以 `run/failed` 收口时
+    必须落下真实原因**，否则一次基础设施失败（Round 5 实测 M1-2：首个模型回合之前被
+    provider RateLimitError 终止）在证据上长得和"跑完了但一行都没有"完全一样，事后无法
+    恢复死因——这正是 Round 4 审查 P2-2 修失败原因序列化时要堵的那类洞，当时只覆盖了
+    驱动侧抛异常的路径，漏了"run 自己失败"这条。
+    """
+    for event in reversed(list(events)):
+        if _event_run_id(event) == run_id and _event_type(event) == "run/failed":
+            reason = _event_data(event).get("reason") or "未提供原因"
+            return f"run/failed(reason={reason})"
+    return ""
+
+
 def _final_reply_text(events: Sequence[Any]) -> str:
     """最终模型回复正文 = 最后一条**有正文**的 `model/completed.content`。
 
@@ -1228,15 +1306,17 @@ def build_observation(
         )
         return _split_required(case_id, attempt, assertions, extra_detail={"m7_mechanical_basis": extra_detail})
     else:  # M8 / M9
+        # 期望的 candidate 是**实质新约束原文**（`case.active_text`），不是整句用户消息：
+        # 工具有意剥掉更正前缀（prompt_guidance 逐字要求），M9 输入带前缀、M8 不带。
         assertions.update(assert_resolution_cards(
             events, expected_old=case.seed_active_constraint or "",
-            expected_candidate=case.input_text,
+            expected_candidate=case.active_text,
             facts_before=facts_before,
             facts_pre_answer=facts_after if facts_pre_answer is None else facts_pre_answer,
         ))
         assertions.update(assert_resume_outcome(
             events, facts_after, persistent=(case.resume_choice == "replace_persistently"),
-            old_value=case.seed_active_constraint or "", expected_candidate=case.input_text,
+            old_value=case.seed_active_constraint or "", expected_candidate=case.active_text,
         ))
     return _split_required(case_id, attempt, assertions)
 
@@ -1914,6 +1994,9 @@ class _RealRunner:
             "extraction_outputs": extraction_outputs,
             "extraction": extraction,
             "new_registrations": new_active_constraints(facts_before, facts_after),
+            # run 自己失败时把原因带出去（见 `run_failure_reason`）：否则证据里的 `error`
+            # 是空串，与"跑完了但一行都没有"长得一样。
+            "run_failure": run_failure_reason(events, run_id),
         }
 
     def _seed_budget_pressure(self, session: Any, session_id: str) -> None:
@@ -2009,6 +2092,7 @@ class _RealRunner:
             final_reply=raw["final_reply"], tool_results=raw["tool_results"],
             run_id=raw["run_id"],
         )
+        observation = replace(observation, error=raw["run_failure"])
         return replace(observation, details={
             **observation.details,
             "session_id": raw["session_id"],
@@ -2144,8 +2228,14 @@ def campaign_evidence(
     campaign_id: str, full_sets_completed: int, git_facts: dict[str, str],
     provider: dict[str, Any], runtime: dict[str, Any],
     started_at_utc: str, completed_at_utc: str,
+    partial_slots: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """把整套 18 次的 verdict + observation 折成入库证据（schema 见 `assert_evidence_shape`）。"""
+    """把整套 18 次的 verdict + observation 折成入库证据（schema 见 `assert_evidence_shape`）。
+
+    `partial_slots` 非空 = 这次只跑了**指定槽位**（判据/观测修好后的定点重跑）。这种证据
+    必须自报 partial，且 `rerun_policy.decision` 记 `partial_slots`：否则一份只有 2 条的
+    证据会长得跟"整套 18 次跑完"一样，§10.2 的整套判据就被凭空满足了。
+    """
     obs_by_slot = {f"{o.case_id}-{o.attempt}": o for o in observations}
     attempts: list[dict[str, Any]] = []
     for verdict in verdicts:
@@ -2156,13 +2246,25 @@ def campaign_evidence(
         ))
     passed = [v for v in verdicts if v.passed]
     failed = [v for v in verdicts if not v.passed]
-    decision = decide_campaign(verdicts, full_sets_completed=full_sets_completed)
-    return {
+    if partial_slots:
+        # 定点重跑：只如实记录跑过的槽位，不调 `decide_campaign`（那需要整套 18 个 verdict）。
+        decision_status, decision_note = "partial_slots", (
+            f"定点重跑 {len(partial_slots)} 个槽位：{', '.join(partial_slots)}；"
+            "其余槽位沿用上一套完整 campaign 的结果"
+        )
+    else:
+        decision = decide_campaign(verdicts, full_sets_completed=full_sets_completed)
+        decision_status, decision_note = decision.status, decision.note
+    if partial_slots:
+        status = "partial"
+    else:
+        status = "passed" if decision_status == "pass" else "failed"
+    payload: dict[str, Any] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "ticket": 663,
         "ac": "AC16",
         "campaign_id": campaign_id,
-        "status": "passed" if decision.status == "pass" else "failed",
+        "status": status,
         "code_sha": git_facts["code_sha"],
         "git_tree": git_facts["git_tree"],
         "working_tree_fingerprint_sha256": git_facts["working_tree_fingerprint_sha256"],
@@ -2173,7 +2275,7 @@ def campaign_evidence(
         "expected_attempt_count": len(build_plan()),
         "attempts": attempts,
         "result": {
-            "verdict": "passed" if decision.status == "pass" else "failed",
+            "verdict": status,
             "attempts_recorded": len(verdicts),
             "expected_attempts": len(build_plan()),
             "passed_attempts": len(passed),
@@ -2183,10 +2285,13 @@ def campaign_evidence(
         "rerun_policy": {
             "max_full_set_reruns": MAX_FULL_SET_RERUNS,
             "full_sets_completed": full_sets_completed,
-            "decision": decision.status,
-            "note": decision.note,
+            "decision": decision_status,
+            "note": decision_note,
         },
     }
+    if partial_slots:
+        payload["partial_slots"] = list(partial_slots)
+    return payload
 
 
 def _detail_list(details: dict[str, Any], key: str) -> list[Any]:
@@ -2348,7 +2453,9 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
     git_facts = _git_facts()
     verdicts: list[CaseVerdict] = []
     observations: list[Observation] = []
-    for slot in build_plan():
+    selected_slots = parse_slots(args.slots) if args.slots else build_plan()
+    partial_slots = tuple(slot.slot_id for slot in selected_slots) if args.slots else ()
+    for slot in selected_slots:
         observation = await runner.run_slot(slot)
         verdict = case_verdict(observation)
         observations.append(observation)
@@ -2362,12 +2469,15 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
                 values=credential_scan_values(config, runner._settings()),
             )
     # §10.2：只有跑到这里才把"整套 18 次已完成"记成 1——崩溃在中途不落这个终局证据，
-    # 盘上留 `attempts.json` 的增量轨迹（上一行）。
-    full_sets_completed = 1
-    decision = decide_campaign(verdicts, full_sets_completed=full_sets_completed)
+    # 盘上留 `attempts.json` 的增量轨迹（上一行）。定点重跑（`--slots`）不算一整集。
+    full_sets_completed = 0 if partial_slots else 1
+    decision = None if partial_slots else decide_campaign(
+        verdicts, full_sets_completed=full_sets_completed,
+    )
     payload = campaign_evidence(
         verdicts, observations, config, campaign_id=campaign_id,
         full_sets_completed=full_sets_completed,
+        partial_slots=partial_slots,
         git_facts=git_facts,
         provider={
             "session_primary": {
@@ -2394,6 +2504,14 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
         _write_evidence(payload, path, values=credential_scan_values(config, runner._settings()))
     else:
         path = None
+    if partial_slots:
+        return CampaignResult(
+            status="partial", evidence_path=path,
+            passed_attempts=sum(1 for v in verdicts if v.passed),
+            failed_attempts=sum(1 for v in verdicts if not v.passed),
+            failing_cases=tuple(v.slot_id for v in verdicts if not v.passed),
+            note=payload["rerun_policy"]["note"],
+        )
     return CampaignResult(
         status=decision.status, evidence_path=path,
         passed_attempts=sum(1 for v in verdicts if v.passed),
@@ -2418,7 +2536,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-dir", default="", help="证据目录（默认 docs/live_gate）")
     parser.add_argument("--campaign-id", default="", help="证据 campaign_id")
-    parser.add_argument("--dry-run", action="store_true", help="只打印 18 次计划，不发任何请求")
+    parser.add_argument(
+        "--slots", default="",
+        help="定点重跑：逗号分隔的槽位（如 M9-1,M1-2）；缺省 = 整套 18 次",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="只打印计划槽位，不发任何请求")
     parser.add_argument("--no-write", action="store_true", help="不落盘证据")
     return parser
 
@@ -2426,10 +2548,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.dry_run:
-        for slot in build_plan():
+        slots = parse_slots(args.slots) if args.slots else build_plan()
+        for slot in slots:
             case = _CASES_BY_ID[slot.case_id]
             print(f"{slot.slot_id}\t{case.input_text}")
-        print(f"[ac16] 计划 {len(build_plan())} 次（9 案例 × 2）；未发起任何模型请求")
+        scope = f"定点 {len(slots)} 个槽位（{args.slots}）" if args.slots else "整套 18 次（9 案例 × 2）"
+        print(f"[ac16] 计划 {scope}；未发起任何模型请求")
         return 0
     result = asyncio.run(run_campaign(args))
     print(

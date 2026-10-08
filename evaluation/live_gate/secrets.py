@@ -49,7 +49,19 @@ _KEY_SHAPED = (
     re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}"),
     re.compile(r"\b[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b"),  # id.secret 形态
 )
-_AUTH_HEADER = re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;'\"]+")
+#: `Authorization:` / `Authorization=` 形态的 HTTP 头。
+#:
+#: ⚠ **值不能是 UUID**：生产每条 session 都投影一条 `authorization` 保护事实，其
+#: `fact_id` 逐字是 `authorization:<event_id>` —— 形状与 HTTP 头完全同构，于是整份
+#: AC16 证据被命中 18 处、`status` 翻成 failed，纯假阳性。UUID 是**标识符**，不是凭证；
+#: 这与本模块已有的"纯长 hex 不收"（见上）是同一条理由：形状层只抓"几乎不可能是自然
+#: 文本/标识符"的东西。真头（`Authorization: Bearer <token>` 或裸 token）照旧命中。
+_AUTH_HEADER = re.compile(
+    r"(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?"
+    r"(?![0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b)"
+    r"[^\s,;'\"]+"
+)
+
 #: "键名像凭证"的词表：赋值形态（`_SECRET_ASSIGNMENT`）与 JSON 条目扫描（`_SECRET_KEY_NAME`）
 #: 共用一份，避免两处对"什么算凭证字段"给出不同答案。
 _SECRET_KEY_VOCAB = r"api[_-]?key|apikey|secret|token|password|passwd|credential"

@@ -803,16 +803,20 @@ def test_m8_m9_paused_requires_run_paused_not_failed(driver):
 
 
 def test_m9_requires_supersede_after_persistent_choice(driver):
-    """P1-1：M9 判据必须区分"真 supersede"与"什么都没干 / 只 ADD"。"""
+    """P1-1：M9 判据必须区分"真 supersede"与"什么都没干 / 只 ADD"。
+
+    Round 6：新值取自 `case.active_text`（实质约束原文，即卡片 candidate 的合法值），
+    不是带更正前缀的整句输入——见 `test_m9_card_candidate_is_the_substantive_new_text...`。
+    """
     case = driver._CASES_BY_ID["M9"]
-    events = [_card(case.seed_active_constraint, case.input_text), _paused(),
+    events = [_card(case.seed_active_constraint, case.active_text), _paused(),
               _resumed(), _answer(), _model_turn()]
     # 真 supersede：旧值离开 active 投影、新候选进入。
     superseded = _obs(
         driver, "M9", events=events,
         facts_before=[_fact("constraint", case.seed_active_constraint)],
         facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
-        facts_after=[_fact("constraint", case.input_text)],
+        facts_after=[_fact("constraint", case.active_text)],
     )
     assert driver.case_verdict(superseded).passed is True
     # 什么都没干：旧值仍在 active（新值从未登记）⇒ 必须判负。
@@ -829,7 +833,7 @@ def test_m9_requires_supersede_after_persistent_choice(driver):
         facts_before=[_fact("constraint", case.seed_active_constraint)],
         facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
         facts_after=[_fact("constraint", case.seed_active_constraint),
-                     _fact("constraint", case.input_text)],
+                     _fact("constraint", case.active_text)],
     )
     assert driver.case_verdict(both_active).passed is False
     # 空 active：旧值也没了、新值也没进 ⇒ 判负。
@@ -1827,3 +1831,156 @@ def test_working_tree_fingerprint_reuses_live_gate_proof(driver, monkeypatch):
     monkeypatch.setattr(repo_module, "worktree_proof", lambda: {**fake_proof(),
                         "_counts": {"tracked": 0, "hidden": 0, "risky": 0, "untracked": 3}})
     assert driver.working_tree_fingerprint() != fingerprint
+
+
+# ── Round 6：M9 判据对齐票面原文（更正前缀 / 答题作用域）─────────────────────────
+
+
+def test_m9_card_candidate_is_the_substantive_new_text_not_the_whole_message(driver):
+    """票面 M9 要「完整展示旧/新原文」——**新约束原文**，不是整句用户消息。
+
+    工具自己的指导（`request_constraint_resolution.py` 的 prompt_guidance）逐字要求
+    "Omit correction framing such as 'I correct this rule:'"，所以 M9 输入
+    "我更正这条长期约束：今后的任务可以按需要新增第三方依赖。" 的合法 candidate
+    是去掉更正前缀后的实质约束。Round 5 拿整句输入当 expected_candidate，把这条
+    **被指导要求**的行为判成假负（实测 M9 两次都因此 FAIL，而同一文本在旧驱动下 PASS）。
+    """
+    case = driver._CASES_BY_ID["M9"]
+    substantive = case.active_text
+    assert substantive != case.input_text, "M9 的实质约束文本必须与整句输入不同（前缀被剥掉）"
+    assert substantive in case.input_text, "实质约束必须是用户原文的逐字连续子串"
+    assert case.input_text.endswith(substantive), "更正前缀只能从**开头**剥掉（candidate 是原文后缀）"
+    obs = _obs(
+        driver, "M9",
+        events=[_card(case.seed_active_constraint, substantive), _paused(),
+                _resumed(), _answer(), _model_turn()],
+        facts_before=[_fact("constraint", case.seed_active_constraint)],
+        facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
+        facts_after=[_fact("constraint", substantive)],
+    )
+    assert driver.case_verdict(obs).passed is True
+    assert obs.assertions["card_has_exact_old_and_new"] is True
+    assert obs.assertions["persistent_choice_superseded_old"] is True
+
+
+def test_m9_card_still_rejects_a_paraphrased_or_truncated_candidate(driver):
+    """对齐票面不等于放宽：拿别的话 / 残句当 candidate 仍须判负（判据保留牙齿）。"""
+    case = driver._CASES_BY_ID["M9"]
+    for bogus in ("今后可以加依赖", "本次修改不能新增第三方依赖。", ""):
+        obs = _obs(
+            driver, "M9",
+            events=[_card(case.seed_active_constraint, bogus), _paused(),
+                    _resumed(), _answer(), _model_turn()],
+            facts_before=[_fact("constraint", case.seed_active_constraint)],
+            facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
+            facts_after=[_fact("constraint", case.active_text)],
+        )
+        assert obs.assertions["card_has_exact_old_and_new"] is False, bogus
+        assert driver.case_verdict(obs).passed is False, bogus
+
+
+def _register_call_after_answer(value: str, request_id: str = "r1") -> list[dict]:
+    """答题后的 register_constraint 调用（`_answer` 之后）。"""
+    return [{"type": "tool/call", "data": {"tool_name": "register_constraint",
+                                           "args": {"value": value}}}]
+
+
+def test_m8_m9_no_register_constraint_call_is_scoped_to_before_the_answer(driver):
+    """票面 M9 逐字是「**回答前** active 集合不变且不继续受影响工作」。
+
+    驱动旧口径把 `register_constraint` 的全事件流扫描当判据（判据名也从旧驱动的
+    `no_register_constraint_before_answer` 改名时丢了作用域），比票面严。实测 M9-1
+    的该调用发生在 tool/result(seq 41, requested) → 卡片 → run/paused(seq 42) →
+    resume 之后（tool/call seq 55，结果 rejected，无副作用），被误判。
+    """
+    case = driver._CASES_BY_ID["M9"]
+    head = [_card(case.seed_active_constraint, case.active_text), _paused()]
+    tail = [_resumed(), _answer(), _model_turn()]
+    facts = {
+        "facts_before": [_fact("constraint", case.seed_active_constraint)],
+        "facts_pre_answer": [_fact("constraint", case.seed_active_constraint)],
+        "facts_after": [_fact("constraint", case.active_text)],
+    }
+    after = _obs(
+        driver, "M9",
+        events=[*head, *tail[:2], *_register_call_after_answer("x"), *tail[2:]],
+        **facts,
+    )
+    assert after.assertions["no_register_constraint_before_answer"] is True
+    assert driver.case_verdict(after).passed is True
+    # 答题**前**调 register_constraint ⇒ 仍须判负（这正是票面要拦的行为）。
+    before = _obs(
+        driver, "M9", events=[head[0], *_register_call_after_answer("x"), head[1], *tail],
+        **facts,
+    )
+    assert before.assertions["no_register_constraint_before_answer"] is False
+    assert driver.case_verdict(before).passed is False
+
+
+def test_run_failure_reason_is_read_from_the_run_failed_event(driver):
+    """Run 以 `run/failed` 收口时，驱动必须落下真实失败原因。
+
+    Round 5 实测 M1-2：run 在**首个模型回合之前**被 provider RateLimitError 终止，
+    事件流零 tool_call / 零 model/completed、`error` 空串（与驱动自己那句
+    "空串 = 本次成功跑完"直接矛盾，Round 4 P2-2 修失败原因序列化时漏了这条路径）。
+    """
+    events = [
+        {"type": "run/started", "data": {}, "run_id": "run-1"},
+        {"type": "run/failed", "data": {"reason": "RateLimitError"}, "run_id": "run-1"},
+    ]
+    assert driver.run_failure_reason(events, "run-1") == "run/failed(reason=RateLimitError)"
+    # 别的 run 的失败不能算到本次头上。
+    assert driver.run_failure_reason(events, "run-2") == ""
+    # 正常收口 = 空串（合法事实，不是未采集）。
+    assert driver.run_failure_reason(
+        [{"type": "run/completed", "data": {}, "run_id": "run-1"}], "run-1",
+    ) == ""
+
+
+# ── Round 6：slot 级重跑（判据/观测修好后只重跑受影响的槽位）──────────────────────
+
+
+def test_parse_slots_selects_exactly_the_named_slots(driver):
+    """`M9-1,M1-2` ⇒ 恰好这两个槽位（票面 §10.2 的整套重跑之外，本轮按任务书做定点重跑）。"""
+    slots = driver.parse_slots("M9-1,M1-2")
+    assert [s.slot_id for s in slots] == ["M9-1", "M1-2"]
+    assert slots[0] == driver.PlanSlot(case_id="M9", attempt=1)
+
+
+def test_parse_slots_rejects_unknown_or_malformed_specs(driver):
+    """fail-closed：不认识的槽位/坏格式一律报错，不静默少跑（少跑的槽位会被当成没过）。"""
+    for spec in ("M99-1", "M1-3", "M1-0", "M1", "M1-1,M1-1", "", "1-1"):
+        with pytest.raises(ValueError):
+            driver.parse_slots(spec)
+
+
+def test_partial_campaign_evidence_is_labelled_partial(driver, tmp_path):
+    """定点重跑落盘的证据必须**自报**是部分集合，不能长得像整套 18 次。"""
+    slots = driver.parse_slots("M9-1,M1-2")
+    verdicts = [
+        driver.case_verdict(_passing_observation(driver, s.case_id, s.attempt))
+        for s in slots
+    ]
+    observations = [
+        _passing_observation(driver, s.case_id, s.attempt) for s in slots
+    ]
+    payload = driver.campaign_evidence(
+        verdicts, observations, _config(driver, tmp_path),
+        campaign_id="AC16-round6-partial", full_sets_completed=1,
+        git_facts=_git_facts(),
+        provider={
+            "session_primary": {"provider": "mimo", "model_id": "mimo-v2.6-flash"},
+            "memory_primary": {"provider": "mimo", "model_id": "mimo-v2.6-flash"},
+        },
+        runtime={"api": "production create_app ASGI", "scripted_or_fake_model": False},
+        started_at_utc="2026-10-08T00:00:00+00:00",
+        completed_at_utc="2026-10-08T00:01:00+00:00",
+        partial_slots=tuple(s.slot_id for s in slots),
+    )
+    driver.assert_evidence_shape(payload)
+    assert payload["status"] == "partial"
+    assert payload["result"]["verdict"] == "partial"
+    assert payload["result"]["attempts_recorded"] == 2
+    assert payload["partial_slots"] == ["M9-1", "M1-2"]
+    # 部分集合**不能**自称跑完了一整套（那会让 §10.2 的整套判据凭空满足）。
+    assert payload["rerun_policy"]["decision"] == "partial_slots"
