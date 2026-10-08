@@ -121,6 +121,10 @@ async def test_formation_request_distinguishes_events_from_enduring_project_choi
         "Use semantic for an enduring project choice, configuration, or constraint even "
         "when the user included how or why it was selected"
     ) in call.system_prompt
+    assert (
+        "A temporary schedule change or one-time operational outcome remains episodic when its "
+        "result matters for future planning; semantic is for facts that continue beyond the event."
+    ) in call.system_prompt
 
 
 @pytest.mark.asyncio
@@ -134,6 +138,13 @@ async def test_formation_request_preserves_ordered_procedure_details(env: Env):
         "For procedural memories, preserve every user-stated step in order, including its "
         "action, object, and boundary; do not compress the procedure into a higher-level "
         "summary. Keep the success condition supported by cited evidence."
+    ) in call.system_prompt
+    assert (
+        "When the trusted marker is not explicit, a direct user description alone is insufficient; "
+        "require two distinct qualifying refs. For "
+        "tool-backed procedures, cite the exact user-stated steps when present and both distinct "
+        "successful tool-result refs; user evidence does not replace either result. If neither "
+        "path is supported, return no procedural candidate."
     ) in call.system_prompt
 
 
