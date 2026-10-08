@@ -211,6 +211,25 @@ def test_inspection_lists_pyproject_build_and_optional_dependencies(tmp_path: Pa
     }
 
 
+def test_inspection_marks_dynamic_python_requirement_for_manual_review(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "dynamic-python-requirement"
+    _write(
+        source / "SKILL.md",
+        "---\nname: dynamic-python-requirement\ndescription: Example.\n---\n",
+    )
+    _write(source / "pyproject.toml", "[project]\ndynamic = ['requires-python']\n")
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert {
+        (item["kind"], item["name"], item["support"])
+        for item in report["requirements"]
+    } >= {("runtime", "requires-python (dynamic)", "manual_review")}
+
+
 @pytest.mark.parametrize(
     ("manifest", "content"),
     [("package.json", "[]\n"), ("pyproject.toml", "[project]\ndependencies = 'requests'\n")],
@@ -340,21 +359,83 @@ def test_inspection_rejects_skill_file_replaced_between_check_and_read(
         replacement,
         "---\nname: changed-skill\ndescription: Replaced.\n---\n",
     )
-    real_open = os.open
+    real_open_package_file = inspection._open_package_file
     replaced = False
 
-    def replace_before_open(path: str | bytes | os.PathLike[str], flags: int) -> int:
+    def replace_before_open(root: Path, path: Path, changed_code: str) -> int:
         nonlocal replaced
-        if Path(path) == skill_file and not replaced:
+        if path == skill_file and not replaced:
             replacement.replace(skill_file)
             replaced = True
-        return real_open(path, flags)
+        return real_open_package_file(root, path, changed_code)
 
-    monkeypatch.setattr(inspection.os, "open", replace_before_open)
+    monkeypatch.setattr(inspection, "_open_package_file", replace_before_open)
 
     report = inspect_skill_package(source, scope="project")
 
     assert report["status"] == "unsupported"
+    assert "SKILL_FILE_CHANGED" in {error["code"] for error in report["errors"]}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-descriptor boundary check")
+def test_inspection_rejects_parent_symlink_swapped_before_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "parent-race-skill"
+    outside = tmp_path / "outside"
+    _write(
+        source / "SKILL.md",
+        "---\nname: parent-race-skill\ndescription: Example.\n---\n"
+        "See [the guide](references/REFERENCE.md).\n",
+    )
+    _write(source / "references" / "REFERENCE.md", "Package content.\n")
+    _write(outside / "REFERENCE.md", "Outside content.\n")
+    real_open = inspection._open_posix_package_file
+    swapped = False
+
+    def swap_parent_before_open(
+        root: Path, path: Path, flags: int, changed_code: str
+    ) -> int:
+        nonlocal swapped
+        if path == source / "references" / "REFERENCE.md" and not swapped:
+            package_references = source / "references"
+            package_references.rename(source / "references-original")
+            package_references.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(root, path, flags, changed_code)
+
+    if (
+        os.open not in os.supports_dir_fd
+        or not getattr(os, "O_DIRECTORY", 0)
+        or not getattr(os, "O_NOFOLLOW", 0)
+    ):
+        pytest.skip("Safe package-relative file reads are unavailable on this platform")
+    monkeypatch.setattr(inspection, "_open_posix_package_file", swap_parent_before_open)
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert swapped
+    assert report["status"] == "unsupported"
+    assert "REFERENCE_FILE_CHANGED" in {error["code"] for error in report["errors"]}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows opened-handle path check")
+def test_inspection_rejects_open_handle_outside_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "handle-boundary-skill"
+    outside = tmp_path / "outside" / "SKILL.md"
+    _write(
+        source / "SKILL.md",
+        "---\nname: handle-boundary-skill\ndescription: Example.\n---\n",
+    )
+    _write(outside, "---\nname: outside\ndescription: Must not be read.\n---\n")
+    monkeypatch.setattr(inspection, "_windows_open_handle_path", lambda _fd: outside)
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert report["name"] is None
     assert "SKILL_FILE_CHANGED" in {error["code"] for error in report["errors"]}
 
 

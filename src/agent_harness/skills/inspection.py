@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -26,6 +27,12 @@ _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _MAX_PACKAGE_ENTRIES = 10_000
 _MAX_REQUIREMENT_INCLUDE_DEPTH = 64
 _MAX_METADATA_SCAN_BYTES = SKILL_FILE_MAX_BYTES
+
+
+class _PackageReadBoundaryError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def inspect_skill_package(
@@ -282,24 +289,12 @@ def _read_bounded_package_text(
                 f"File exceeds {max_bytes} bytes.",
             )
             return None
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(resolved, flags)
+        descriptor = _open_package_file(root, resolved, changed_code)
         with os.fdopen(descriptor, "rb") as source:
             opened = os.fstat(source.fileno())
-            try:
-                current = path.resolve(strict=True)
-                current_stat = path.stat()
-            except (OSError, RuntimeError, ValueError):
-                _add_error(errors, changed_code, relative, "File changed during inspection; retry with a stable package.")
-                return None
-            if not _within(current, root):
-                _add_error(errors, outside_code, relative, "File changed to resolve outside the package directory.")
-                return None
             if (
-                current != resolved
-                or not stat.S_ISREG(opened.st_mode)
+                not stat.S_ISREG(opened.st_mode)
                 or not os.path.samestat(before, opened)
-                or not os.path.samestat(opened, current_stat)
             ):
                 _add_error(errors, changed_code, relative, "File changed during inspection; retry with a stable package.")
                 return None
@@ -321,11 +316,136 @@ def _read_bounded_package_text(
             )
             return None
         return content.decode("utf-8-sig")
+    except _PackageReadBoundaryError as error:
+        _add_error(errors, error.code, relative, str(error))
     except UnicodeDecodeError as error:
         _add_error(errors, unreadable_code, relative, type(error).__name__)
     except OSError as error:
         _add_error(errors, unreadable_code, relative, type(error).__name__)
     return None
+
+
+def _open_package_file(root: Path, path: Path, changed_code: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if os.name == "nt":
+        descriptor = os.open(path, flags)
+        try:
+            opened_path = _windows_open_handle_path(descriptor)
+            if not _windows_path_within(opened_path, root) or not _same_windows_path(
+                opened_path, path
+            ):
+                raise _PackageReadBoundaryError(
+                    changed_code,
+                    "Opened file path changed during inspection; retry with a stable package.",
+                )
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    return _open_posix_package_file(root, path, flags, changed_code)
+
+
+def _open_posix_package_file(
+    root: Path, path: Path, flags: int, changed_code: str
+) -> int:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    if (
+        os.open not in os.supports_dir_fd
+        or not getattr(os, "O_DIRECTORY", 0)
+        or not getattr(os, "O_NOFOLLOW", 0)
+    ):
+        raise OSError("Safe package-relative file reads are unavailable on this platform.")
+
+    try:
+        relative_parts = path.relative_to(root).parts
+    except ValueError as error:
+        raise _PackageReadBoundaryError(
+            changed_code, "File path moved outside the package directory."
+        ) from error
+    if not relative_parts or any(part in {"", ".", ".."} for part in relative_parts):
+        raise _PackageReadBoundaryError(changed_code, "Invalid package-relative file path.")
+
+    descriptor = os.open(root.anchor, directory_flags)
+    try:
+        for part in root.parts[1:]:
+            next_descriptor = os.open(part, directory_flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        for part in relative_parts[:-1]:
+            next_descriptor = os.open(part, directory_flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return os.open(
+            relative_parts[-1],
+            flags | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=descriptor,
+        )
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise _PackageReadBoundaryError(
+                changed_code,
+                "A package path component changed during inspection; retry with a stable package.",
+            ) from error
+        raise
+    finally:
+        os.close(descriptor)
+
+
+def _windows_open_handle_path(descriptor: int) -> Path:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    get_final_path.restype = wintypes.DWORD
+
+    handle = msvcrt.get_osfhandle(descriptor)
+    buffer_size = 32768
+    while True:
+        buffer = ctypes.create_unicode_buffer(buffer_size)
+        length = get_final_path(handle, buffer, buffer_size, 0)
+        if length == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if length < buffer_size:
+            final_path = buffer.value
+            break
+        if length > 1_048_576:
+            raise OSError("Opened file path is too long to verify safely.")
+        buffer_size = length + 1
+
+    if final_path.startswith("\\\\?\\UNC\\"):
+        final_path = "\\\\" + final_path[8:]
+    elif final_path.startswith("\\\\?\\"):
+        final_path = final_path[4:]
+    return Path(final_path)
+
+
+def _same_windows_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(
+        os.path.normpath(str(right))
+    )
+
+
+def _windows_path_within(path: Path, root: Path) -> bool:
+    candidate = os.path.normcase(os.path.normpath(str(path)))
+    package_root = os.path.normcase(os.path.normpath(str(root)))
+    try:
+        return os.path.commonpath((candidate, package_root)) == package_root
+    except ValueError:
+        return False
 
 
 def _add_error(errors: list[dict[str, str]], code: str, path: str, message: str) -> None:
@@ -689,15 +809,30 @@ def _inspect_dependencies(
                     dynamic = project.get("dynamic", [])
                     if not isinstance(dynamic, list) or any(not isinstance(item, str) for item in dynamic):
                         _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.dynamic must be an array of strings.")
-                    elif any(item in {"dependencies", "optional-dependencies"} for item in dynamic):
-                        requirements.append(
-                            _manual_requirement(
-                                "dependency-declaration",
-                                ", ".join(item for item in dynamic if item in {"dependencies", "optional-dependencies"}),
-                                "pyproject.toml [project.dynamic]",
-                                "Dynamic dependencies cannot be fully determined from this manifest.",
+                    else:
+                        dynamic_dependencies = [
+                            item
+                            for item in dynamic
+                            if item in {"dependencies", "optional-dependencies"}
+                        ]
+                        if dynamic_dependencies:
+                            requirements.append(
+                                _manual_requirement(
+                                    "dependency-declaration",
+                                    ", ".join(dynamic_dependencies),
+                                    "pyproject.toml [project.dynamic]",
+                                    "Dynamic dependencies cannot be fully determined from this manifest.",
+                                )
                             )
-                        )
+                        if "requires-python" in dynamic:
+                            requirements.append(
+                                _manual_requirement(
+                                    "runtime",
+                                    "requires-python (dynamic)",
+                                    "pyproject.toml [project.dynamic]",
+                                    "The dynamic Python version requirement cannot be determined during read-only inspection.",
+                                )
+                            )
                 build_system = parsed_toml.get("build-system", {})
                 if not isinstance(build_system, dict):
                     _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "build-system must be a TOML table.")
