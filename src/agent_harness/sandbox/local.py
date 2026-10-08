@@ -54,18 +54,23 @@ logger = logging.getLogger("agent_harness.sandbox.local")
 _DRAIN_CHUNK_BYTES = 65536
 
 
-def _has_interior_newline(command: str) -> bool:
-    """命令去掉**尾部**空白后是否仍含换行（#850）。
+def _has_line_break(command: str) -> bool:
+    """命令去掉**尾部**空白后是否仍含 cmd.exe 的**行分隔**换行（#850）。
 
-    cmd.exe 的引号剥离有两种形状，都以 exit_code=0 返回（本机实测 rc=0 / stderr=""）：
-    前导换行（`"\necho A"`）⇒ **整条都不执行**（stdout=""）；换行之后还有内容
-    （`"echo A\necho B"`）⇒ **只执行第一行**（stdout="A\n"）。两者都会把「没跑完」
-    报成成功，故都要拒绝。只有**尾部**换行无害（实测 `echo hi\n\n` 正常以 0 退出且有
-    输出），所以归一化只能用 rstrip()：用 strip() 会把前导换行一并吃掉，于是
-    `"\necho A"` 被放行（#848 复审 P1）。
+    判据是实测的行分隔字符，不是「含控制字符」——`shell=True` 在 Windows 等价于
+    `cmd.exe /c "<命令>"`，各形状都以 rc=0 / stderr="" 返回：
+    前导行分隔（`"\\necho A"`、`"\\r\\necho A"`）⇒ **整条都不执行**（stdout=""）；
+    行分隔之后还有内容（`"echo A\\necho B"`、`"echo A\\r\\necho B"`）⇒ **只执行第一行**
+    （stdout="A\\n"）。两者都会把「没跑完」报成成功，故都要拒绝。
+
+    行分隔字符是 **LF**（裸 LF 与 CRLF 都含它）；**裸 CR 不是行分隔**——实测
+    `"\\recho A"` 正常跑出 "A"、`"echo A\\recho B"` 整条照跑（两段并成一行），
+    只是被吞掉、内容不丢 ⇒ 裸 CR 不进判据（否则会把本来能跑的命令误拒——#848 复审 P3）。
+    尾部换行无害（实测 `"echo hi\\n\\n"` / `"echo hi\\r\\n"` / `"echo hi\\r"` 均正常
+    以 0 退出且有输出），所以归一化只能用 `rstrip()`：用 `strip()` 会把前导换行一并
+    吃掉，于是 `"\\necho A"` 被放行（#848 复审 P1）。
     """
-    body = command.rstrip()
-    return "\n" in body or "\r" in body
+    return "\n" in command.rstrip()
 
 
 class _CappedCapture:
@@ -208,10 +213,10 @@ class LocalSubprocessSandbox(Sandbox):
         回调异常不中断排空（捕获完整性优先，异常只落 debug 日志）。
         """
         self.ensure_started()
-        if os.name == "nt" and _has_interior_newline(command):
+        if os.name == "nt" and _has_line_break(command):
             raise MultiLineCommandUnsupportedError(
-                "命令被拒绝：Windows 本机沙箱用 cmd.exe 执行，含换行的命令会被 "
-                "cmd.exe 的引号剥离规则吃掉——前导换行会让整条命令都不执行，"
+                "命令被拒绝：Windows 本机沙箱用 cmd.exe 执行，含换行（LF 或 CRLF）的"
+                "命令会被 cmd.exe 的引号剥离规则吃掉——前导换行会让整条命令都不执行，"
                 "换行之后还有内容则只执行第一行，两种都以 exit_code=0 返回。"
                 "为避免把「没跑完」报成成功，本机直接拒绝该命令。"
                 "请改写为单行命令，或先用 write 工具把脚本写入文件再执行该文件。"

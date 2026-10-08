@@ -69,13 +69,17 @@ class ExecResult:
 
 
 class MultiLineCommandUnsupportedError(RuntimeError):
-    """后端无法安全执行含内部换行的命令（#850）。
+    """后端无法安全执行含**行分隔**换行的命令（#850）。
 
     Windows 本机后端走 `shell=True`，CPython 把它拼成 `cmd.exe /c "<命令>"`；命令里
-    带换行时 cmd.exe 的引号剥离规则会吃掉命令，两种形状都以 0 退出（本机实测 rc=0 /
-    stderr=""）：**前导换行**（`"\necho A"`）⇒ stdout=""，整条都没执行；**换行之后
-    还有内容**（`"echo A\necho B"`）⇒ stdout="A\n"，只执行第一行。#365 Run B 因此让
-    模型拿到假成功，写出「已修复 app.py」的假报告，而文件逐字节未变。
+    带行分隔换行（LF 或 CRLF）时 cmd.exe 的引号剥离规则会吃掉命令，两种形状都以 0
+    退出（本机实测 rc=0 / stderr=""）：**前导换行**（`"\\necho A"`、`"\\r\\necho A"`）
+    ⇒ stdout=""，整条都没执行；**换行之后还有内容**（`"echo A\\necho B"`、
+    `"echo A\\r\\necho B"`）⇒ stdout="A\\n"，只执行第一行。#365 Run B 因此让模型拿到
+    假成功，写出「已修复 app.py」的假报告，而文件逐字节未变。
+
+    **裸 CR**（`\\r` 后面不跟 LF）不是行分隔（实测 `"\\recho A"` 正常跑出 "A"）⇒ 不在
+    本异常的面内；判据只认 LF（见 `local._has_line_break`）。
 
     为什么是拒绝而不是换一种拼接：实测把命令作为独立 argv 传给 `cmd /c` 会把现在
     能用的单行引号命令弄坏（`python -c "print(1+1)"` 由输出 `2` 变成空输出，

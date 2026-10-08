@@ -220,7 +220,7 @@ def test_write_text_is_atomic_replace(tmp_path):
 
 
 class TestExecMultiLineCommandGuard:
-    """#850：Windows 本机沙箱必须**明确拒绝**含换行的命令（尾部换行除外）。
+    """#850：Windows 本机沙箱必须**明确拒绝**会被 cmd.exe 当行分隔的命令（尾部换行除外）。
 
     机制（本机实测）：`shell=True` 在 Windows 把命令拼成 `cmd.exe /c "<命令>"`；
     命令里带换行时 cmd.exe 的引号剥离规则会吃掉命令，两种形状都以 0 退出（rc=0 /
@@ -228,7 +228,11 @@ class TestExecMultiLineCommandGuard:
     **换行之后还有内容**（`"echo A\necho B"`）⇒ stdout="A\n"，只执行第一行。
     #365 Run B 因此让模型拿到假成功，写出「已修复 app.py」的假报告，实际文件逐字节未变。
 
-    底线：不能把「没跑完」报成 exit_code=0。
+    底线：不能把「没跑完」报成 exit_code=0。判据是**行分隔**，不是「含控制字符」：
+    CRLF（`"\r\n"`）与 LF 同判为行分隔（实测 `"\r\necho A"` 整条不执行、
+    `"echo A\r\necho B"` 只跑第一行）；而**裸 CR**（`\r` 后面不跟 LF）实测**不是**
+    行分隔——`"\recho A"` 正常跑出 "A"、`"echo A\recho B"` 整条执行（两段并成一行）
+    ⇒ 不得拒绝（#848 复审 P3：拒绝一条本来能跑的命令同样是缺陷）。
     """
 
     @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
@@ -253,6 +257,34 @@ class TestExecMultiLineCommandGuard:
             sandbox.exec(command)
 
     @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    @pytest.mark.parametrize("command", ["\r\necho A", "echo A\r\necho B"])
+    def test_crlf_is_a_line_break_and_is_refused(
+        self, sandbox: LocalSubprocessSandbox, command: str,
+    ):
+        """CRLF 与 LF 同判：前导 CRLF 整条不执行、内部 CRLF 只跑第一行（实测）⇒ 拒绝。"""
+        with pytest.raises(MultiLineCommandUnsupportedError):
+            sandbox.exec(command)
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    @pytest.mark.parametrize("command", ["\recho A", "\r\recho A", "  \recho A"])
+    def test_leading_bare_cr_still_runs(
+        self, sandbox: LocalSubprocessSandbox, command: str,
+    ):
+        """裸 CR 不是行分隔：实测 rc=0 / stdout="A" ⇒ 不得误拒（#848 复审 P3）。"""
+        result = sandbox.exec(command)
+
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "A"
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    def test_interior_bare_cr_still_runs(self, sandbox: LocalSubprocessSandbox):
+        """内部裸 CR 同样不是行分隔：实测整条仍执行（两段被并成一行）。"""
+        result = sandbox.exec("echo A\recho B")
+
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "Aecho B"
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
     def test_refusal_is_never_a_silent_zero_exit(self, sandbox: LocalSubprocessSandbox):
         """关键回归：必须是显式异常，不能是 rc=0 的空结果。"""
         try:
@@ -265,6 +297,17 @@ class TestExecMultiLineCommandGuard:
     def test_trailing_newline_still_runs(self, sandbox: LocalSubprocessSandbox):
         """尾部换行无害（实测 rc 正常有输出），不得被误拒。"""
         result = sandbox.exec("echo hi\n\n")
+
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "hi"
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    @pytest.mark.parametrize("command", ["echo hi\r", "echo hi\r\n", "echo hi\r\n\r\n"])
+    def test_trailing_cr_forms_still_run(
+        self, sandbox: LocalSubprocessSandbox, command: str,
+    ):
+        """尾部 CR / CRLF 与尾部 LF 同判无害（实测 rc=0 / stdout="hi"）⇒ 不得误拒。"""
+        result = sandbox.exec(command)
 
         assert result.exit_code == 0
         assert result.stdout.strip() == "hi"
