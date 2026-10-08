@@ -7687,3 +7687,33 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **#850（P1，产品）**：Windows 上多行 bash 命令**静默空转**——CPython 把 `shell=True` 包成 `cmd.exe /c "<整段>"`，多行命令返回 `exit_code=0`、无输出、什么都没执行。现场读数：`seq 120/128/181/189/206/214/228/262/294…` 全部 `exit_code=0` 且 `stdout` 为空，紧随的 `type baseline.txt` `exit_code=1`「系统找不到指定的文件」交替出现；单行命令正常、heredoc 正确报错。同一条 issue 里还记录了 `run/paused.data.continuation` 里**谎称 completed** 的文案与错误归因。现场读数的评论已投到 #850。
 - **#851（P1，产品）**：`edit` / `apply_patch` 按**字节精确**匹配，LF 字符串改 CRLF 文件**必失败**且报错不提示行尾（Windows 默认行尾）。机械复现：模型的 `old_string` 在**LF 归一化**文件里 `True`、在**原始字节**里 `False`（`CRLF=0 LF=11 len=598`）；现场读数 seq 20 读到 10044 字符/278 CRLF、seq 69 `apply_patch ok=false`、seq 113 `edit ok=false`、`app.py` mtime 从未变化。影响全部 gate 运行（见上表）；最小修复方向是「仅匹配时归一化、保留文件原行尾」，至少也要把行尾事实写进失败信息。issue 正文含 UTF-8 无 BOM 的复现脚本。
 - **证据**：`D:/w21-work/issue-crlf-edit.md`（#851 正文）、`D:/w21-work/comment-850-live.md`（#850 现场读数评论）、`D:/w21-work/evidence/run-b-pass2/attempt1-summary.txt`。
+
+## W-21（#365）B-4 桌面/TUI 一致性 + W-16 剩余腿 + B-1…B-5 收口（2026-10-08）
+
+- **B-4 取证**（证据件 `docs/live_gate/w21/50-b4-desktop-tui-consistency.md`）：同一服务
+  `pid=8472 port=57257`、同一数据根，桌面走 CDP 读**渲染层**、TUI 走真实控制台整屏读取、服务端读
+  `/api/sessions|/events|/stream` 权威值。**一致**：长会话 `0c3b6366…` 桌面会话栏 `701 事件` ↔ TUI
+  `/sessions` 选择器首行 `701 events` ↔ API `event_count=701`；TUI `/progress`
+  `expected_source_event_seq=700` = 末 seq；两端渲染同一份最终报告。短会话 `896132bb…` 桌面 `已完成` +
+  `· 4,812 tok` ↔ TUI `─ completed · tokens in 4.8k, out 3` ↔ `usage_total.total_tokens=4812`。
+- **B-4 不一致（两条新缺陷，本票只登记不修）**：
+  - **#853（P1）** TUI 对**空闲**会话发消息必报假失败：`POST /messages` 的 launched 分支返回 SSE
+    （`src/agent_harness/web/app.py:3358-3363`），而 `tui/src/api.ts:52` 无条件 `JSON.parse` ⇒
+    `SyntaxError` + `send failed:` 备注；消息其实已被接受并跑完（seq 2..8，桌面 `已完成`）。
+    **该行在 Run B 第 1 次的 `evidence/run-b-pass1/tui2-screen-before-exit.txt` 里就已存在**（当时未记录）。
+  - **#854（P1）** 空闲时附着的 TUI 收不到后续 run 的直播帧：同一控制台 11:50 与 11:55 两轮 run
+    之后仍 `○ idle` + `还没有会话内容。`；同刻桌面读两轮 `已完成`；新控制台附着同会话**立刻**渲染
+    `─ completed`。嫌疑点：`app.py:2480-2498` 的 `if subscriber is None: return`（idle 会话的流按设计
+    收尾，客户端须自重重连）+ `tui/src/app.ts:163-197` 的重连循环；与 #843 同族。
+- **W-16 剩余腿**（证据件 `docs/live_gate/w21/51-w16-remaining-legs.md`）：旧会话与模型配置可见
+  （16 条旧会话 + 模型选择器浮层 5 项：`默认链` / `senseaudio 1` / `qwen 2` / `shrimp 1` / `管理模型`
+  + 每轮 `.model-tag` = `glm-5.3-flash`）**通过**；安装器/卸载器双语
+  （`node scripts/test-windows-installer.mjs --uninstall-only`，`en_US` 与 `zh_CN` 各一次构建 +
+  `UNINSTALL_OK userDataPreserved=true`，`rc=0`）**通过**（口径：静默装卸，非逐页点击）；
+  磁盘满回退**仅逻辑/单测验证**（用户指令不得真填盘）：`domain_errors.py:362-397` 的
+  ENOSPC/EFBIG/SQLITE_FULL/SQLITE_IOERR → 503 + 固定 detail，定向单测 **9 passed** 与 **20 passed**。
+  **未执行**：干净 Windows x64 VM 复跑、运行中更新安全暂停、服务暂停失败、迁移中断、卸载器逐页 UI 双语。
+- **B-1…B-5 收口**（证据件 `docs/live_gate/w21/52-b1-b5-closeout.md`）：**B-5 判据满足**（Run A / Run B
+  各两次，四次判定器 `overall=pass`，均在冻结件 `01477e59…` 上）；**B-4b 不通过**（上列两条缺陷）；
+  **#365 保持 OPEN**，不关单。
+- 本轮**无代码改动**（相对冻结树 `28a382cc` 只动 `docs/`）；按 §14.10 仍在当前 tip 跑完整门禁并留读数。
