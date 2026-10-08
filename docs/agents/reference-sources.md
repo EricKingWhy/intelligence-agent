@@ -133,6 +133,21 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 `docs/research/2026-10-07-multimodal-image-input-research.md`；票面见
 `docs/tickets/multimodal-2026-10-07/`（#821–#830）。
 
+### 任务进度清单 / 计划面板（2026-10-08 新增，W-27.1 调研）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| ZCode 桌面端（本机安装，闭源） | 观感对齐的一手行为来源 | `resources/app.asar`：`XCt`（折叠窗口：>6 项 → 3 项窗口、锚点 = 首个 inProgress；@315031925）、`$Ct`（折叠行四分支文案 + hover 弹出；@315031936）、`kCt` / `pIt`（面板计数模型 / 消息流卡片）；**只对齐可观察行为，不复制代码与资源** |
+| opencode（官方仓库，2026-10-08 读取） | 列表折叠 / 可见性阈值的独立先例 | `packages/tui/src/feature-plugins/sidebar/todo.tsx`（>2 条才出折叠、全完成即隐藏）、`packages/app/src/pages/session/composer/session-todo-dock.tsx`（dock done/total） |
+| Claude Code 官方文档（2026-10-08 读取） | 交互形态一手文档 | `code.claude.com/docs/en/interactive-mode.md`（Ctrl+T 清单、最多 5 条、折叠随 resume 恢复）、`agent-sdk/todo-tracking.md`（N/M 计数范式） |
+| Codex CLI（本地克隆 `D:\reference\codex` @7f89227） | 终端侧折叠先例 | `codex-rs/tui/src/history_cell/plans.rs`（`Updated Plan · x/y complete`、`DETAIL_PREVIEW_LINES=3`）；`codex-rs/protocol/src/plan_tool.rs`（三态 schema；PlanUpdate 事件 transient、不落 rollout） |
+| oh-my-pi（@1c0993c3）/ DSH（@5badb150）/ Pi（@1b34794）（本地克隆） | 同族机制对照（提醒 / 持久化 / 面板） | oh-my-pi `packages/coding-agent/src/session/todo-tracker.ts`（提醒闭环）、`packages/tui/src/tools/todo.ts`（树渲染）；DSH `packages/client/ui-conversation/src/client/skeleton/TodoPanel.tsx`（Web 面板）、`packages/todo/tool-todo/src/index.ts`（log-only 事件）；Pi 仅 `packages/coding-agent/examples/extensions/todo.ts`（示例，核心无此工具） |
+| 本仓既有 | 先行收敛结论（W-26~W-29 的依据） | `docs/research/2026-09-27-agent-progress-visualization-research.md`（渲染四件套）；PRD `docs/PRD_LONG_TASK_CONTEXT_MANAGEMENT.md` §7 |
+
+**补录说明（§3.1 偏差披露）**：本领域在 W-27.1 调研开始时尚未在清单中，属**事后补录**——首轮调研
+按用户指定上游（ZCode 本机 bundle + 本地克隆 + 官方文档）直接开展，未先补本清单。机制摘要 / 契合点 /
+判定（PORT DESIGN + BUILD）/ License 见 `docs/tickets/workbench-2026-09-27/W-27-1-plan-list-window-fold.md` 方案依据块。
+
 ## 3. 怎么用（与流程的挂钩）
 
 1. 出现新领域 / 新来源：**先补本清单再调研**——"去哪查"只在这里维护一处；
