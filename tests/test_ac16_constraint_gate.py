@@ -500,9 +500,10 @@ def test_campaign_never_drops_failing_cases_on_rerun(driver):
 # ── 入库证据装配：把 18 个 verdict + observation 折成可复核 JSON ───────────────
 
 
-def _config(driver, tmp_path):
+def _config(driver, tmp_path, *, direct_api_key=None, env_file=None):
     return driver.RunnerConfig(
-        env_file=None,
+        direct_api_key=direct_api_key,
+        env_file=env_file,
         session_primary_provider="mimo", session_primary_model="mimo-v2.6-flash",
         memory_primary_provider="mimo", memory_primary_model="mimo-v2.6-flash",
         write=True, out_dir=tmp_path,
@@ -601,3 +602,131 @@ def test_write_evidence_redacts_secret_hits_and_fails_the_run(driver, tmp_path):
     written = json.loads(path.read_text(encoding="utf-8"))
     assert written["status"] == "failed"
     assert "sk-leaked-secret-value" not in path.read_text(encoding="utf-8")
+
+
+# ── 凭证来源：`MODEL_API_KEY` 直传优先于文件，且全程不落盘 ─────────────────────
+
+
+#: 全程只用假值（票面：本轮无真实凭证、不许索取）。
+_FAKE_ENV_KEY = "sk-test-dummy-000"
+_FAKE_FILE_KEY = "sk-test-dummy-111"
+
+
+def test_direct_env_key_beats_file_and_enters_settings_as_kwarg(driver, tmp_path, monkeypatch):
+    """`MODEL_API_KEY` 非空 ⇒ 用它，文件只作其余配置的兜底（`_env_file`）。"""
+    calls: list[tuple] = []
+    stub_path = tmp_path / "fake.env"
+    stub_path.write_text(f"MODEL_API_KEY={_FAKE_FILE_KEY}\n", encoding="utf-8")
+
+    def _stub(*args, **kwargs):
+        calls.append((args, kwargs))
+        return object()
+
+    import agent_harness.config as config_module
+    monkeypatch.setattr(config_module, "Settings", _stub)
+    monkeypatch.setenv(driver.DIRECT_KEY_ENV, _FAKE_ENV_KEY)
+
+    config = driver.resolve_runner_config(driver.build_parser().parse_args(
+        ["--env-file", str(stub_path)],
+    ))
+    assert config.direct_api_key == _FAKE_ENV_KEY
+    runner = driver._RealRunner(config)
+    assert runner.preflight() == []
+    runner._settings()
+
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    assert kwargs["model_api_key"] == _FAKE_ENV_KEY  # 直传值，不是文件里的
+    assert kwargs["_env_file"] == str(stub_path)
+
+
+def test_file_fallback_used_when_direct_env_key_absent(driver, tmp_path, monkeypatch):
+    """无直传 ⇒ 退回文件：不传 `model_api_key` kwarg，`_env_file` 指向指定文件。"""
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        "agent_harness.config.Settings", lambda *a, **kw: calls.append((a, kw)) or object(),
+    )
+    monkeypatch.delenv(driver.DIRECT_KEY_ENV, raising=False)
+
+    config = driver.resolve_runner_config(driver.build_parser().parse_args(
+        ["--env-file", str(tmp_path / "x.env")],
+    ))
+    assert config.direct_api_key is None
+    driver._RealRunner(config)._settings()
+
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    assert "model_api_key" not in kwargs
+    assert kwargs["_env_file"] == str(tmp_path / "x.env")
+
+
+def test_blank_direct_env_key_counts_as_absent(driver, monkeypatch):
+    """空白直传 = 未直传（与 `.env` 侧"配了"的口径不同：空白 key 发出去只会换 401）。"""
+    monkeypatch.setenv(driver.DIRECT_KEY_ENV, "   ")
+    config = driver.resolve_runner_config(driver.build_parser().parse_args([]))
+    assert config.direct_api_key is None
+
+
+def test_env_file_var_beats_cli_arg(driver, monkeypatch):
+    """票面 §任务第 2 条的次序：`AC16_ENV_FILE` > `--env-file`（只在直传缺席时生效）。"""
+    monkeypatch.delenv(driver.DIRECT_KEY_ENV, raising=False)
+    monkeypatch.setenv(driver.DEFAULT_ENV_FILE_ENV, "from-var.env")
+    args = driver.build_parser().parse_args(["--env-file", "from-cli.env"])
+    assert driver.resolve_runner_config(args).env_file == "from-var.env"
+    # 环境变量缺席时才轮到 CLI 参数。
+    monkeypatch.delenv(driver.DEFAULT_ENV_FILE_ENV)
+    assert driver.resolve_runner_config(args).env_file == "from-cli.env"
+
+
+def test_direct_key_never_writes_a_credential_file(driver, tmp_path, monkeypatch):
+    """直传路径全程不落盘：唯一的文件是仓库里**已跟踪**的键名模板，且工作目录无新增文件。"""
+    monkeypatch.setenv(driver.DIRECT_KEY_ENV, _FAKE_ENV_KEY)
+    before = {p.resolve() for p in Path.cwd().iterdir()} | {p.resolve() for p in tmp_path.rglob("*")}
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "agent_harness.config.Settings", lambda *a, **kw: calls.append(kw) or object(),
+    )
+    config = driver.resolve_runner_config(driver.build_parser().parse_args([]))
+    assert config.direct_api_key == _FAKE_ENV_KEY
+    assert config.env_file is None
+    assert driver._RealRunner(config).preflight() == []
+    driver._RealRunner(config)._settings()
+
+    # 文件面只有一个：已跟踪的 `.env.example`（键名模板、被 git 跟踪、无真凭证）。
+    assert [kw["_env_file"] for kw in calls] == [str(driver.EXAMPLE_ENV_FILE)]
+    assert Path(driver.EXAMPLE_ENV_FILE).is_file()
+    assert _FAKE_ENV_KEY not in Path(driver.EXAMPLE_ENV_FILE).read_text(encoding="utf-8")
+
+    after = {p.resolve() for p in Path.cwd().iterdir()} | {p.resolve() for p in tmp_path.rglob("*")}
+    assert after == before, "直传路径不得新建任何文件"
+
+
+def test_direct_key_is_scanned_as_configured_credential(driver, tmp_path, monkeypatch):
+    """回归：直传的 key 混进 evidence 字段 ⇒ 精确值扫描抓住、判 fail、脱敏落盘。"""
+    monkeypatch.setenv(driver.DIRECT_KEY_ENV, _FAKE_ENV_KEY)
+    config = driver.resolve_runner_config(driver.build_parser().parse_args([]))
+    assert config.direct_api_key == _FAKE_ENV_KEY
+
+    payload = _build_evidence(driver, tmp_path)
+    payload["attempts"][0]["run_id"] = f"run-{config.direct_api_key}"  # 混入直传凭证
+    path = driver._write_evidence(
+        payload, tmp_path / "evidence.json",
+        values=((config.direct_api_key,) if config.direct_api_key else ()),
+    )
+
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["status"] == "failed"
+    assert _FAKE_ENV_KEY not in path.read_text(encoding="utf-8")
+
+
+def test_credential_scan_values_always_carry_the_direct_key(driver, tmp_path):
+    """落盘前那一把精确值**恒含**直传 key —— 调用点真的把它传下去了，不是只在签名里。"""
+    from agent_harness.config import Settings
+
+    # 夹具已密封 Settings 相关环境变量 ⇒ 这份 Settings 里没有任何真凭证（值域只有直传那一个）。
+    empty = Settings(_env_file=None)
+    config = _config(driver, tmp_path, direct_api_key=_FAKE_ENV_KEY)
+    assert driver.credential_scan_values(config, empty) == (_FAKE_ENV_KEY,)
+    # 未直传时不凭空塞值（扫描层只认真配置过的值）。
+    assert driver.credential_scan_values(_config(driver, tmp_path), empty) == ()

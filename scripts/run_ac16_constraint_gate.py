@@ -33,8 +33,32 @@ Milvus/embedding 预检 + SQLite 每例一库），判据全是 Memory V2 的写
 
 本脚本的**确定性逻辑**（案例定义 / verdict / 证据 schema / §10.2 重跑）由
 `tests/test_ac16_constraint_gate.py` 钉死。真实执行面（`_RealRunner`）需要模型凭证，
-按 `--dry-run` 只打印计划、不发起任何模型请求；凭证经环境变量 `AC16_ENV_FILE` 指向的
-`.env` 注入（本轮留空 ⇒ 无凭证）。
+按 `--dry-run` 只打印计划、不发起任何模型请求。
+
+## 凭证：`MODEL_API_KEY` 直传优先，绝不落盘
+
+凭证按下面的优先级取，**第一顺位整条路径不碰磁盘**：
+
+1. **环境变量 `MODEL_API_KEY`**（直传）：非空即直接用它的值 —— 全程**不写任何文件、
+   不打印、不记日志**，值只在进程内存里走一圈（`Settings.model_api_key` → `ModelConfig`），
+   最终由 provider SDK 在请求边界消费。
+2. `AC16_ENV_FILE` 指向的文件（**fallback**，优先于 `--env-file`）。
+3. `--env-file` 显式指定的文件。
+
+⚠ 第 2/3 条的文件间顺序 = **任务书 §任务第 2 条明写的次序**（`AC16_ENV_FILE` > `--env-file`）。
+Round 1 的实现是 `args.env_file or os.environ.get(DEFAULT_ENV_FILE_ENV)`（CLI 压过 env），
+本轮按票面改正 —— 这条子序只在"直传缺席"时才生效，零安全影响，改动可追溯。
+
+"环境变量 > 文件"是 **pydantic-settings 自身的优先级**（init kwargs > `os.environ` >
+`env_file`，同一条记在 `tests/conftest.py::_clean_settings_env`），不是本脚本另加的判据；
+所以文件型凭证一律经 `Settings(_env_file=...)` 读，本脚本**不自己解析 `.env`**。
+直传路径的 env_file 兜底指仓库里**已跟踪**的 `.env.example` —— 那是**键名模板**、
+不是凭证文件（真凭证列在那里等于泄漏），因此"直传不落盘"这句话不因它而破；
+被 `.gitignore` 覆盖的 `.env` 由调用方经 `AC16_ENV_FILE` / `--env-file` 指进来。
+
+两条路径汇合后都过同一道闸：落盘 evidence 前用 `evaluation.live_gate.secrets` 的**精确值
+扫描**查一遍配置里的真凭证值，出现在任何字段 ⇒ 判 fail 并脱敏（回归证明：
+`tests/test_ac16_constraint_gate.py::test_direct_key_is_scanned_as_configured_credential`）。
 """
 
 from __future__ import annotations
@@ -74,7 +98,15 @@ ATTEMPTS_PER_CASE = 2
 #: §10.2 停止条件：整套重跑最多 2 次（首次 + 1 次重跑）；再不过就停并报告。
 MAX_FULL_SET_RERUNS = 2
 
-#: §9.1「测试模型为部署实际会话主模型」——本轮不填真实凭证，只留注入点（环境变量）。
+#: 直传凭证的环境变量名（全仓约定，见 `.env.example`）。非空 ⇒ 优先于任何凭证文件。
+DIRECT_KEY_ENV = "MODEL_API_KEY"
+
+#: `.env` 形态的**只读键名模板**（仓库跟踪，含 `MODEL_API_KEY=sk-xxx` 这类占位值）。
+#: 直传路径下用作 `Settings(_env_file=...)` 的兜底 —— 取的是 pydantic-settings 的
+#: `model_config` 默认值本身，**不是**新建一个可能被注入的候选路径。
+EXAMPLE_ENV_FILE = _REPO_ROOT / ".env.example"
+
+#: §9.1「测试模型为部署实际会话主模型」——文件型凭证的 fallback 注入点（有直传时可不用）。
 DEFAULT_ENV_FILE_ENV = "AC16_ENV_FILE"
 
 #: 依赖登记入口的案例（M1–M6）：其写/不写由 B-lite 抽取投影判定。
@@ -669,6 +701,8 @@ class MissingCredentialsError(RuntimeError):
 
 @dataclass
 class RunnerConfig:
+    #: 直传凭证（`MODEL_API_KEY` 的值）；None = 未直传 ⇒ 走 `env_file`。**绝不写盘、绝不打印**。
+    direct_api_key: str | None
     env_file: str | None
     session_primary_provider: str
     session_primary_model: str
@@ -678,14 +712,22 @@ class RunnerConfig:
     out_dir: Path
 
 
-def resolve_runner_config(args: argparse.Namespace) -> RunnerConfig:
-    """从环境变量 / 参数解析 runner 配置（**不读 .env**——本轮不填真实凭证）。
+def _direct_api_key() -> str | None:
+    """进程环境里的 `MODEL_API_KEY`。空/纯空白 = 未直传（与 `.env` 的"配了"口径不同：
+    直传是我们自己判"能不能用"，空白 key 去发请求只会换来一个 401）。"""
+    value = os.environ.get(DIRECT_KEY_ENV, "")
+    return value if value.strip() else None
 
-    真实运行时 `env_file` 指向含凭证的 `.env`；本轮为空 ⇒ `_RealRunner.preflight`
-    判 `MissingCredentialsError`，脚本以 `BLOCKED` 收尾（**不产出 PASS**）。
+
+def resolve_runner_config(args: argparse.Namespace) -> RunnerConfig:
+    """从环境变量 / 参数解析 runner 配置（**不读凭证内容**，只决定从哪读）。
+
+    凭证来源优先级：`MODEL_API_KEY` 环境变量（直传）> `AC16_ENV_FILE` > `--env-file`。
+    文件型凭证一律由 `Settings(_env_file=...)` 读，本脚本不解析 `.env` 正文。
     """
     return RunnerConfig(
-        env_file=args.env_file or os.environ.get(DEFAULT_ENV_FILE_ENV) or None,
+        direct_api_key=_direct_api_key(),
+        env_file=os.environ.get(DEFAULT_ENV_FILE_ENV) or args.env_file or None,
         session_primary_provider=os.environ.get("AC16_SESSION_PROVIDER", "mimo"),
         session_primary_model=os.environ.get("AC16_SESSION_MODEL", "mimo-v2.6-flash"),
         memory_primary_provider=os.environ.get("AC16_MEMORY_PROVIDER", "mimo"),
@@ -783,26 +825,41 @@ class _RealRunner:
 
     def preflight(self) -> list[str]:
         """返回未满足的前置（非空 ⇒ BLOCKED，不发任何模型请求）。"""
+        if self._config.direct_api_key:
+            return []
         if not self._config.env_file:
             return [
                 (
-                    "无模型凭证：设置 AC16_ENV_FILE 指向含凭证的 .env，或 --env-file 指定；"
-                    "本轮（Round 1）刻意不填，脚本按 BLOCKED 收尾，不产出 PASS"
+                    f"无模型凭证：设置 {DIRECT_KEY_ENV} 直传，或 {DEFAULT_ENV_FILE_ENV} / "
+                    "--env-file 指向含凭证的 .env；本轮（Round 1b）刻意不填，"
+                    "脚本按 BLOCKED 收尾，不产出 PASS"
                 ),
             ]
         if not Path(self._config.env_file).exists():
-            return [f"AC16_ENV_FILE 指向的文件不存在：{self._config.env_file}"]
+            return [f"{DEFAULT_ENV_FILE_ENV} 指向的文件不存在：{self._config.env_file}"]
         return []
+
+    def _settings(self) -> Any:
+        """构造生产 `Settings`：直传 key 作显式 kwarg，文件作 `_env_file` 兜底。
+
+        优先级靠 pydantic-settings 自身实现（init kwargs > `os.environ` > `env_file`），
+        本脚本**不自己解析 `.env`**、也不把凭证写进任何临时文件。
+        """
+        from agent_harness.config import Settings
+
+        env_file = str(self._config.env_file or EXAMPLE_ENV_FILE)
+        if self._config.direct_api_key:
+            return Settings(model_api_key=self._config.direct_api_key, _env_file=env_file)
+        return Settings(_env_file=env_file)
 
     # -- 装配（Round 3 首次真正走到）------------------------------------------------
 
     async def _setup(self) -> None:  # pragma: no cover - 需要真实凭证
         from unittest.mock import patch
 
-        from agent_harness.config import Settings
         from agent_harness.web.app import create_app
 
-        settings = Settings(_env_file=self._config.env_file)
+        settings = self._settings()
         # 主模型注入点：只把工厂换成"记录 + 真实构造"，跑的还是生产 create_app。
         patcher = patch("agent_harness.assembly.create_chat_model", side_effect=self._recorder)
         patcher.start()
@@ -978,6 +1035,20 @@ def campaign_evidence(
     }
 
 
+def credential_scan_values(config: RunnerConfig, settings: Any) -> tuple[str, ...]:
+    """落盘前要扫的**精确值**：配置里所有 `SecretStr` 的值 + 直传 key。
+
+    直传 key **恒**在返回值里 —— 它没进过任何文件、判别它的唯一机械手段就是"证据里出现
+    即 fail"。这一小段独立成函数，是为了让"调用点真的把它传下去了"可被单测钉住
+    （2026-10-08 隔离副本变异实测：把 `+ direct` 摘掉时，只测 `_write_evidence` 的用例
+    **全绿** ⇒ 那条路径没有鉴别力）。
+    """
+    from evaluation.live_gate.secrets import credential_values
+
+    direct = (config.direct_api_key,) if config.direct_api_key else ()
+    return tuple(credential_values(settings)) + direct
+
+
 def _evidence_path(config: RunnerConfig, campaign_id: str) -> Path:
     head = (_git("rev-parse", "HEAD") or "0" * 40)[:12]
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -1018,8 +1089,6 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
     # 面已接好但本轮不跑：只有带凭证的 Round 3 才走到这里。
     import uuid as _uuid
 
-    from evaluation.live_gate.secrets import credential_values
-
     started_at = _now_utc()
     await runner._setup()
     verdicts: list[CaseVerdict] = []
@@ -1055,10 +1124,9 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
     )
     path = _evidence_path(config, campaign_id)
     if config.write:
-        from agent_harness.config import Settings
-
-        values = tuple(credential_values(Settings(_env_file=config.env_file)))
-        _write_evidence(payload, path, values=values)
+        # 凭证扫描：直传 key 与配置文件里的值一起作为**精确值**喂进扫描层，
+        # 命中即判 fail（`_write_evidence`）。
+        _write_evidence(payload, path, values=credential_scan_values(config, runner._settings()))
     else:
         path = None
     return CampaignResult(
@@ -1076,7 +1144,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run_ac16_constraint_gate.py", description=__doc__,
     )
-    parser.add_argument("--env-file", default="", help="含模型凭证的 .env（本轮可留空）")
+    parser.add_argument(
+        "--env-file", default="",
+        help=(
+            f"含模型凭证的 .env；{DIRECT_KEY_ENV} 非空时直传优先，"
+            f"{DEFAULT_ENV_FILE_ENV} 非空时它压过本参数"
+        ),
+    )
     parser.add_argument("--out-dir", default="", help="证据目录（默认 docs/live_gate）")
     parser.add_argument("--campaign-id", default="", help="证据 campaign_id")
     parser.add_argument("--dry-run", action="store_true", help="只打印 18 次计划，不发任何请求")
