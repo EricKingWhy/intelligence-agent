@@ -6,20 +6,25 @@ import json
 import math
 import os
 import re
+import stat
 import tomllib
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from agent_harness.skills.discovery import SKILL_FILE_MAX_BYTES, parse_skill_markdown
+from agent_harness.skills.discovery import (
+    SKILL_FILE_MAX_BYTES,
+    parse_skill_markdown_text,
+)
 
 _STRICT_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(\s*(<[^>]+>|[^)\s]+)")
 _MARKDOWN_REFERENCE = re.compile(r"(?m)^\s*\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)")
 _HTML_REFERENCE = re.compile(r"(?:href|src)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))", re.IGNORECASE)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
-_MAX_PACKAGE_FILES = 10_000
+_MAX_PACKAGE_ENTRIES = 10_000
+_MAX_REQUIREMENT_INCLUDE_DEPTH = 64
 _MAX_METADATA_SCAN_BYTES = SKILL_FILE_MAX_BYTES
 
 
@@ -68,27 +73,26 @@ def inspect_skill_package(
         if not _within(resolved_skill_file, root):
             _add_error(errors, "SYMLINK_OUTSIDE_PACKAGE", "SKILL.md", "SKILL.md resolves outside the package directory.")
             return report
-    if not skill_file.exists():
+    try:
+        resolved_skill_file = skill_file.resolve(strict=True)
+    except FileNotFoundError:
         _add_error(errors, "SKILL_FILE_MISSING", "SKILL.md", "Package must contain a SKILL.md file.")
         return report
-    if not skill_file.is_file():
+    except (OSError, RuntimeError):
+        _add_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", "SKILL.md cannot be resolved safely.")
+        return report
+    if not _within(resolved_skill_file, root):
+        _add_error(errors, "SYMLINK_OUTSIDE_PACKAGE", "SKILL.md", "SKILL.md resolves outside the package directory.")
+        return report
+    if not resolved_skill_file.is_file():
         _add_error(errors, "SKILL_FILE_NOT_A_FILE", "SKILL.md", "SKILL.md must be a regular file.")
         return report
-    try:
-        if skill_file.stat().st_size > SKILL_FILE_MAX_BYTES:
-            _add_error(
-                errors,
-                "SKILL_FILE_TOO_LARGE",
-                "SKILL.md",
-                f"SKILL.md exceeds {SKILL_FILE_MAX_BYTES} bytes.",
-            )
-            return report
-    except OSError as error:
-        _add_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", type(error).__name__)
+    skill_text = _read_skill_file(resolved_skill_file, errors)
+    if skill_text is None:
         return report
 
     try:
-        entry, parse_errors = parse_skill_markdown(skill_file)
+        entry, parse_errors = parse_skill_markdown_text(skill_text, skill_file)
     except RecursionError:
         entry, parse_errors = None, ["frontmatter nesting is too deep"]
     if entry is None:
@@ -166,13 +170,22 @@ def inspect_skill_package(
                 }
             )
 
-    markdown_paths = [root / relative for relative in ("SKILL.md", *(item["path"] for item in files if item["path"].lower().endswith(".md")))]
+    markdown_paths = [root / "SKILL.md"]
+    markdown_paths.extend(
+        root / item["path"]
+        for item in files
+        if item["path"] != "SKILL.md"
+        and item["path"].lower().endswith(".md")
+        and not item.get("symlink")
+    )
     for markdown_path in dict.fromkeys(markdown_paths):
-        errors.extend(_check_markdown_references(root, markdown_path))
+        content = skill_text if markdown_path == skill_file else None
+        errors.extend(_check_markdown_references(root, markdown_path, content))
 
-    dependencies, dependency_errors = _inspect_dependencies(root, files)
+    dependencies, dependency_requirements, dependency_errors = _inspect_dependencies(root, files)
     report["dependencies"] = dependencies
     errors.extend(dependency_errors)
+    report["requirements"].extend(dependency_requirements)
     report["requirements"].extend(dependencies)
 
     if isinstance(compatibility, str) and compatibility.strip():
@@ -213,6 +226,52 @@ def inspect_skill_package(
     else:
         report["status"] = "complete"
     return report
+
+
+def _read_skill_file(path: Path, errors: list[dict[str, str]]) -> str | None:
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            _add_error(errors, "SKILL_FILE_NOT_A_FILE", "SKILL.md", "SKILL.md must be a regular file.")
+            return None
+        if before.st_size > SKILL_FILE_MAX_BYTES:
+            _add_error(
+                errors,
+                "SKILL_FILE_TOO_LARGE",
+                "SKILL.md",
+                f"SKILL.md exceeds {SKILL_FILE_MAX_BYTES} bytes.",
+            )
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
+                _add_error(errors, "SKILL_FILE_CHANGED", "SKILL.md", "SKILL.md changed during inspection; retry with a stable package.")
+                return None
+            if opened.st_size > SKILL_FILE_MAX_BYTES:
+                _add_error(
+                    errors,
+                    "SKILL_FILE_TOO_LARGE",
+                    "SKILL.md",
+                    f"SKILL.md exceeds {SKILL_FILE_MAX_BYTES} bytes.",
+                )
+                return None
+            content = source.read(SKILL_FILE_MAX_BYTES + 1)
+        if len(content) > SKILL_FILE_MAX_BYTES:
+            _add_error(
+                errors,
+                "SKILL_FILE_TOO_LARGE",
+                "SKILL.md",
+                f"SKILL.md exceeds {SKILL_FILE_MAX_BYTES} bytes.",
+            )
+            return None
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        _add_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", type(error).__name__)
+    except OSError as error:
+        _add_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", type(error).__name__)
+    return None
 
 
 def _add_error(errors: list[dict[str, str]], code: str, path: str, message: str) -> None:
@@ -292,14 +351,29 @@ def _inventory(
     errors: list[dict[str, str]] = []
     symlinks: list[str] = []
     pending = [root]
+    entry_count = 0
+    too_many_entries = False
     while pending:
         directory = pending.pop()
         try:
             with os.scandir(directory) as scan:
-                entries = sorted(scan, key=lambda item: item.name)
+                entries = []
+                for entry in scan:
+                    entry_count += 1
+                    if entry_count > _MAX_PACKAGE_ENTRIES:
+                        _add_error(
+                            errors,
+                            "PACKAGE_TOO_MANY_ENTRIES",
+                            ".",
+                            f"Package exceeds {_MAX_PACKAGE_ENTRIES} filesystem entries.",
+                        )
+                        too_many_entries = True
+                        break
+                    entries.append(entry)
         except OSError as error:
             _add_error(errors, "DIRECTORY_UNREADABLE", _relative(directory, root), type(error).__name__)
             continue
+        entries.sort(key=lambda item: item.name)
         for entry in entries:
             path = Path(entry.path)
             relative = _relative(path, root)
@@ -324,11 +398,10 @@ def _inventory(
                     continue
                 if entry.is_file(follow_symlinks=False):
                     files.append({"path": relative, "size_bytes": entry.stat(follow_symlinks=False).st_size})
-                    if len(files) > _MAX_PACKAGE_FILES:
-                        _add_error(errors, "PACKAGE_TOO_MANY_FILES", ".", f"Package exceeds {_MAX_PACKAGE_FILES} files.")
-                        return files[:_MAX_PACKAGE_FILES], errors, symlinks
             except OSError as error:
                 _add_error(errors, "RESOURCE_UNREADABLE", relative, type(error).__name__)
+        if too_many_entries:
+            break
     files.sort(key=lambda item: item["path"])
     return files, errors, symlinks
 
@@ -357,18 +430,21 @@ def _has_symlink_component(candidate: Path, root: Path) -> bool:
     return False
 
 
-def _check_markdown_references(root: Path, markdown_path: Path) -> list[dict[str, str]]:
+def _check_markdown_references(
+    root: Path, markdown_path: Path, content: str | None = None
+) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     relative_markdown = _relative(markdown_path, root)
-    try:
-        size = markdown_path.stat().st_size
-        if size > _MAX_METADATA_SCAN_BYTES:
-            _add_error(errors, "REFERENCE_FILE_TOO_LARGE", relative_markdown, f"Markdown file exceeds {_MAX_METADATA_SCAN_BYTES} bytes and could not be checked.")
+    if content is None:
+        try:
+            size = markdown_path.stat().st_size
+            if size > _MAX_METADATA_SCAN_BYTES:
+                _add_error(errors, "REFERENCE_FILE_TOO_LARGE", relative_markdown, f"Markdown file exceeds {_MAX_METADATA_SCAN_BYTES} bytes and could not be checked.")
+                return errors
+            content = markdown_path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError) as error:
+            _add_error(errors, "MARKDOWN_UNREADABLE", relative_markdown, type(error).__name__)
             return errors
-        content = markdown_path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as error:
-        _add_error(errors, "MARKDOWN_UNREADABLE", relative_markdown, type(error).__name__)
-        return errors
 
     raw_targets = [
         match.group(1)
@@ -385,6 +461,20 @@ def _check_markdown_references(root: Path, markdown_path: Path) -> list[dict[str
     for raw_target in dict.fromkeys(raw_targets):
         if raw_target.startswith("<") and raw_target.endswith(">"):
             raw_target = raw_target[1:-1]
+        decoded_target = unquote(raw_target)
+        has_windows_drive = bool(re.match(r"^[A-Za-z]:", decoded_target))
+        normalized_target = decoded_target.replace("\\", "/")
+        is_posix_absolute = normalized_target.startswith("/") and not normalized_target.startswith("//")
+        is_windows_unc = decoded_target.startswith("\\\\")
+        if is_posix_absolute or is_windows_unc or has_windows_drive:
+            _add_reference_error(
+                errors,
+                "REFERENCE_OUTSIDE_PACKAGE",
+                normalized_target,
+                relative_markdown,
+                "Absolute references are not allowed.",
+            )
+            continue
         try:
             parsed = urlsplit(raw_target)
         except ValueError:
@@ -397,18 +487,14 @@ def _check_markdown_references(root: Path, markdown_path: Path) -> list[dict[str
             continue
         target_text = unquote(parsed.path).replace("\\", "/")
         windows_path = PureWindowsPath(target_text)
-        reference_path = (
-            target_text
-            if PurePosixPath(target_text).is_absolute() or windows_path.drive
-            else (PurePosixPath(relative_markdown).parent / target_text).as_posix()
-        )
+        reference_path = target_text
         if PurePosixPath(target_text).is_absolute() or windows_path.is_absolute() or windows_path.drive:
             _add_reference_error(
                 errors, "REFERENCE_OUTSIDE_PACKAGE", reference_path, relative_markdown,
                 "Absolute references are not allowed.",
             )
             continue
-        candidate = markdown_path.parent.joinpath(*PurePosixPath(target_text).parts)
+        candidate = root.joinpath(*PurePosixPath(target_text).parts)
         try:
             resolved = candidate.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
@@ -447,31 +533,50 @@ def _check_markdown_references(root: Path, markdown_path: Path) -> list[dict[str
 
 def _inspect_dependencies(
     root: Path, files: list[dict[str, Any]]
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     dependencies: list[dict[str, str]] = []
+    requirements: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
     paths = {item["path"]: item for item in files}
     requirements_path = paths.get("requirements.txt")
     if requirements_path is not None:
-        parsed_lines = _read_small_file(root / "requirements.txt", "requirements.txt", errors)
-        if parsed_lines is not None:
-            for line in parsed_lines.splitlines():
-                requirement = line.split("#", 1)[0].strip()
-                if not requirement or requirement.startswith(("-", "--")):
-                    continue
-                match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
-                if match:
-                    dependencies.append(_dependency(match.group(1), "requirements.txt"))
+        if requirements_path.get("symlink"):
+            requirements.append(
+                _manual_requirement(
+                    "dependency-file",
+                    "requirements.txt",
+                    "requirements.txt",
+                    "Symbolic links are not followed while reading dependency declarations.",
+                )
+            )
+        else:
+            _read_requirements_file(
+                root,
+                "requirements.txt",
+                paths,
+                dependencies,
+                requirements,
+                errors,
+                active=set(),
+                visited=set(),
+            )
     package_json = paths.get("package.json")
     if package_json is not None:
         content = _read_small_file(root / "package.json", "package.json", errors)
         if content is not None:
             try:
                 parsed_json = json.loads(content)
-                for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
-                    values = parsed_json.get(section, {}) if isinstance(parsed_json, dict) else {}
-                    if isinstance(values, dict):
-                        dependencies.extend(_dependency(str(name), "package.json") for name in values)
+                if not isinstance(parsed_json, dict):
+                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Dependency manifest must be a JSON object.")
+                else:
+                    for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+                        if section not in parsed_json:
+                            continue
+                        values = parsed_json[section]
+                        if isinstance(values, dict):
+                            dependencies.extend(_dependency(str(name), "package.json") for name in values)
+                        else:
+                            _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", f"{section} must be a JSON object.")
             except (json.JSONDecodeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Could not statically parse dependency declarations.")
     pyproject = paths.get("pyproject.toml")
@@ -480,17 +585,237 @@ def _inspect_dependencies(
         if content is not None:
             try:
                 parsed_toml = tomllib.loads(content)
-                declared = parsed_toml.get("project", {}).get("dependencies", [])
-                if isinstance(declared, list):
-                    for item in declared:
-                        if isinstance(item, str):
-                            match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", item)
-                            if match:
-                                dependencies.append(_dependency(match.group(1), "pyproject.toml"))
+                project = parsed_toml.get("project", {})
+                if not isinstance(project, dict):
+                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project must be a TOML table.")
+                else:
+                    _append_python_dependencies(
+                        project.get("dependencies", []),
+                        "pyproject.toml [project.dependencies]",
+                        dependencies,
+                        requirements,
+                        errors,
+                    )
+                    optional = project.get("optional-dependencies", {})
+                    if not isinstance(optional, dict):
+                        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.optional-dependencies must be a TOML table.")
+                    else:
+                        for group, values in optional.items():
+                            _append_python_dependencies(
+                                values,
+                                f"pyproject.toml [project.optional-dependencies.{group}]",
+                                dependencies,
+                                requirements,
+                                errors,
+                            )
+                build_system = parsed_toml.get("build-system", {})
+                if not isinstance(build_system, dict):
+                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "build-system must be a TOML table.")
+                else:
+                    _append_python_dependencies(
+                        build_system.get("requires", []),
+                        "pyproject.toml [build-system.requires]",
+                        dependencies,
+                        requirements,
+                        errors,
+                    )
             except (tomllib.TOMLDecodeError, AttributeError, TypeError):
                 _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "Could not statically parse dependency declarations.")
     dependencies.sort(key=lambda item: (item["source"], item["name"].lower()))
-    return dependencies, errors
+    return dependencies, requirements, errors
+
+
+def _append_python_dependencies(
+    values: Any,
+    source: str,
+    dependencies: list[dict[str, str]],
+    requirements: list[dict[str, str]],
+    errors: list[dict[str, str]],
+) -> None:
+    if not isinstance(values, list):
+        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} must be an array of dependency strings.")
+        return
+    for value in values:
+        if not isinstance(value, str):
+            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} contains a non-string dependency.")
+            continue
+        match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", value)
+        if match:
+            dependencies.append(_dependency(match.group(1), source))
+        else:
+            requirements.append(
+                _manual_requirement(
+                    "dependency-declaration",
+                    value,
+                    source,
+                    "Dependency declaration could not be classified statically.",
+                )
+            )
+
+
+def _read_requirements_file(
+    root: Path,
+    relative: str,
+    files: dict[str, dict[str, Any]],
+    dependencies: list[dict[str, str]],
+    requirements: list[dict[str, str]],
+    errors: list[dict[str, str]],
+    *,
+    active: set[str],
+    visited: set[str],
+) -> None:
+    if len(active) >= _MAX_REQUIREMENT_INCLUDE_DEPTH:
+        _add_error(
+            errors,
+            "DEPENDENCY_INCLUDE_TOO_DEEP",
+            relative,
+            f"Requirements includes exceed the {_MAX_REQUIREMENT_INCLUDE_DEPTH}-file nesting limit.",
+        )
+        return
+    if relative in active:
+        _add_error(errors, "DEPENDENCY_INCLUDE_CYCLE", relative, "Requirements files include each other recursively.")
+        return
+    if relative in visited:
+        return
+    file_info = files.get(relative)
+    if file_info is None:
+        _add_error(errors, "MISSING_DEPENDENCY_FILE", relative, "Included dependency file is missing from the package.")
+        return
+    if file_info.get("symlink"):
+        requirements.append(
+            _manual_requirement(
+                "dependency-file",
+                relative,
+                relative,
+                "Symbolic links are not followed while reading dependency declarations.",
+            )
+        )
+        return
+    content = _read_small_file(root / relative, relative, errors)
+    if content is None:
+        return
+
+    active.add(relative)
+    visited.add(relative)
+    for raw_line in content.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        include = _requirements_include(line)
+        if include is not None:
+            include = include.strip().strip("\"'")
+            if not include:
+                _add_error(errors, "DEPENDENCY_INCLUDE_INVALID", relative, "Requirements include path is empty.")
+                continue
+            decoded_include = unquote(include)
+            normalized_include = decoded_include.replace("\\", "/")
+            absolute_path = (
+                normalized_include.startswith("/")
+                and not normalized_include.startswith("//")
+            ) or normalized_include.startswith("//") or bool(
+                re.match(r"^[A-Za-z]:", decoded_include)
+            ) or decoded_include.startswith("\\\\")
+            if absolute_path:
+                _add_error(
+                    errors,
+                    "DEPENDENCY_INCLUDE_OUTSIDE_PACKAGE",
+                    normalized_include,
+                    "Absolute requirements includes are not allowed.",
+                )
+                continue
+            try:
+                include_url = urlsplit(include)
+            except ValueError:
+                _add_error(errors, "DEPENDENCY_INCLUDE_INVALID", relative, "Requirements include path is malformed.")
+                continue
+            if include_url.scheme or include_url.netloc:
+                requirements.append(
+                    _manual_requirement(
+                        "dependency-file",
+                        include,
+                        relative,
+                        "Remote dependency includes are not downloaded or executed during inspection.",
+                    )
+                )
+                continue
+            include_path = include_url.path.replace("\\", "/")
+            try:
+                candidate = (root / include_path).resolve(strict=False)
+            except (OSError, RuntimeError, ValueError):
+                _add_error(errors, "BAD_DEPENDENCY_INCLUDE", include, "Requirements include cannot be resolved safely.")
+                continue
+            if not _within(candidate, root):
+                _add_error(
+                    errors,
+                    "DEPENDENCY_INCLUDE_OUTSIDE_PACKAGE",
+                    include_path,
+                    "Requirements include resolves outside the package directory.",
+                )
+                continue
+            relative_include = _relative(candidate, root)
+            if relative_include not in files:
+                if candidate.exists():
+                    _add_error(errors, "DEPENDENCY_INCLUDE_NOT_FILE", relative_include, "Requirements include must point to a file.")
+                else:
+                    _add_error(errors, "MISSING_DEPENDENCY_FILE", relative_include, "Included dependency file is missing from the package.")
+                continue
+            _read_requirements_file(
+                root,
+                relative_include,
+                files,
+                dependencies,
+                requirements,
+                errors,
+                active=active,
+                visited=visited,
+            )
+            continue
+
+        if line.startswith("-"):
+            requirements.append(
+                _manual_requirement(
+                    "dependency-option",
+                    line,
+                    relative,
+                    "Dependency options can affect installation behavior and require manual review.",
+                )
+            )
+            continue
+        match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+        if match:
+            dependencies.append(_dependency(match.group(1), relative))
+        else:
+            requirements.append(
+                _manual_requirement(
+                    "dependency-declaration",
+                    line,
+                    relative,
+                    "Dependency declaration could not be classified statically.",
+                )
+            )
+    active.remove(relative)
+
+
+def _requirements_include(line: str) -> str | None:
+    if line == "-r" or line.startswith(("-r ", "-r\t")):
+        return line[2:].strip()
+    if line.startswith("-r") and not line.startswith("--"):
+        return line[2:].strip().removeprefix("=").strip()
+    if line == "--requirement" or line.startswith(("--requirement ", "--requirement\t", "--requirement=")):
+        return line[len("--requirement"):].strip().removeprefix("=").strip()
+    return None
+
+
+def _manual_requirement(
+    kind: str, name: str, source: str, reason: str
+) -> dict[str, str]:
+    return {
+        "kind": kind,
+        "name": name,
+        "source": source,
+        "support": "manual_review",
+        "reason": reason,
+    }
 
 
 def _read_small_file(path: Path, relative: str, errors: list[dict[str, str]]) -> str | None:

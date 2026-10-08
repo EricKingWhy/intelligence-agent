@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_harness import cli
+from agent_harness.skills import inspection
 from agent_harness.skills.inspection import inspect_skill_package
 
 
@@ -35,7 +37,7 @@ def test_inspection_reports_skill_metadata_resources_and_requirements(tmp_path: 
         "Read [the guide](references/REFERENCE.md). Run `scripts/check.py`.\n",
     )
     _write(source / "scripts" / "check.py", "print('must not run')\n")
-    _write(source / "references" / "REFERENCE.md", "See [the image](../assets/logo.bin).\n")
+    _write(source / "references" / "REFERENCE.md", "See [the image](assets/logo.bin).\n")
     _write(source / "assets" / "logo.bin", b"image-data")
 
     report = inspect_skill_package(source, scope="project")
@@ -56,6 +58,7 @@ def test_inspection_reports_skill_metadata_resources_and_requirements(tmp_path: 
     [
         ("missing.md", "MISSING_RESOURCE"),
         ("../../outside.txt", "REFERENCE_OUTSIDE_PACKAGE"),
+        ("C:/outside.md", "REFERENCE_OUTSIDE_PACKAGE"),
     ],
 )
 def test_inspection_rejects_missing_and_escaping_references(
@@ -141,6 +144,22 @@ def test_inspection_checks_reference_style_markdown_links(tmp_path: Path) -> Non
     assert "MISSING_RESOURCE" in {error["code"] for error in report["errors"]}
 
 
+def test_nested_markdown_references_resolve_from_skill_root(tmp_path: Path) -> None:
+    source = tmp_path / "root-relative-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: root-relative-skill\ndescription: Example.\n---\n"
+        "See [the guide](references/REFERENCE.md).\n",
+    )
+    _write(source / "references" / "REFERENCE.md", "See [the image](assets/logo.bin).\n")
+    _write(source / "assets" / "logo.bin", b"image-data")
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "complete"
+    assert report["errors"] == []
+
+
 def test_inspection_lists_declared_dependencies_for_manual_review(tmp_path: Path) -> None:
     source = tmp_path / "dependency-skill"
     _write(
@@ -163,6 +182,154 @@ def test_inspection_lists_declared_dependencies_for_manual_review(tmp_path: Path
         "vitest",
     }
     assert all(item["support"] == "manual_review" for item in report["dependencies"])
+
+
+def test_inspection_lists_pyproject_build_and_optional_dependencies(tmp_path: Path) -> None:
+    source = tmp_path / "pyproject-dependencies"
+    _write(
+        source / "SKILL.md",
+        "---\nname: pyproject-dependencies\ndescription: Example.\n---\n",
+    )
+    _write(
+        source / "pyproject.toml",
+        "[build-system]\nrequires = ['setuptools>=68']\n"
+        "[project]\ndependencies = ['requests>=2']\n"
+        "[project.optional-dependencies]\ntest = ['pytest>=8']\n",
+    )
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert {item["name"] for item in report["dependencies"]} == {
+        "setuptools",
+        "requests",
+        "pytest",
+    }
+
+
+@pytest.mark.parametrize(
+    ("manifest", "content"),
+    [("package.json", "[]\n"), ("pyproject.toml", "[project]\ndependencies = 'requests'\n")],
+)
+def test_inspection_rejects_unrecognized_dependency_manifest_shapes(
+    tmp_path: Path, manifest: str, content: str
+) -> None:
+    source = tmp_path / "invalid-dependency-manifest"
+    _write(
+        source / "SKILL.md",
+        "---\nname: invalid-dependency-manifest\ndescription: Example.\n---\n",
+    )
+    _write(source / manifest, content)
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_FILE_INVALID" in {error["code"] for error in report["errors"]}
+
+
+@pytest.mark.parametrize(
+    "include",
+    ["-r base.txt", "--requirement base.txt", "-rbase.txt", "--requirement=base.txt"],
+)
+def test_inspection_follows_requirements_includes_without_executing_them(
+    tmp_path: Path, include: str
+) -> None:
+    source = tmp_path / "requirements-include-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: requirements-include-skill\ndescription: Example.\n---\n",
+    )
+    _write(source / "requirements.txt", f"{include}\n")
+    _write(source / "base.txt", "requests>=2.0\n")
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert len(report["dependencies"]) == 1
+    dependency = report["dependencies"][0]
+    assert dependency["name"] == "requests"
+    assert dependency["source"] == "base.txt"
+    assert dependency["support"] == "manual_review"
+
+
+def test_inspection_rejects_requirements_include_outside_package(tmp_path: Path) -> None:
+    source = tmp_path / "escaping-requirements-include"
+    _write(
+        source / "SKILL.md",
+        "---\nname: escaping-requirements-include\ndescription: Example.\n---\n",
+    )
+    _write(source / "requirements.txt", "-r ../../outside.txt\n")
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "DEPENDENCY_INCLUDE_OUTSIDE_PACKAGE" in {
+        error["code"] for error in report["errors"]
+    }
+
+
+def test_inspection_rejects_missing_requirements_include(tmp_path: Path) -> None:
+    source = tmp_path / "missing-requirements-include"
+    _write(
+        source / "SKILL.md",
+        "---\nname: missing-requirements-include\ndescription: Example.\n---\n",
+    )
+    _write(source / "requirements.txt", "--requirement missing.txt\n")
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "MISSING_DEPENDENCY_FILE" in {error["code"] for error in report["errors"]}
+
+
+def test_inspection_bounds_empty_directory_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "many-directories"
+    _write(
+        source / "SKILL.md",
+        "---\nname: many-directories\ndescription: Example.\n---\n",
+    )
+    (source / "empty-one").mkdir(parents=True)
+    (source / "empty-two").mkdir()
+    monkeypatch.setattr(inspection, "_MAX_PACKAGE_ENTRIES", 2)
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "PACKAGE_TOO_MANY_ENTRIES" in {error["code"] for error in report["errors"]}
+
+
+def test_inspection_rejects_skill_file_replaced_between_check_and_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "changed-skill"
+    skill_file = source / "SKILL.md"
+    replacement = tmp_path / "replacement.md"
+    _write(
+        skill_file,
+        "---\nname: changed-skill\ndescription: Original.\n---\n",
+    )
+    _write(
+        replacement,
+        "---\nname: changed-skill\ndescription: Replaced.\n---\n",
+    )
+    real_open = os.open
+    replaced = False
+
+    def replace_before_open(path: str | bytes | os.PathLike[str], flags: int) -> int:
+        nonlocal replaced
+        if Path(path) == skill_file and not replaced:
+            replacement.replace(skill_file)
+            replaced = True
+        return real_open(path, flags)
+
+    monkeypatch.setattr(inspection.os, "open", replace_before_open)
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "unsupported"
+    assert "SKILL_FILE_CHANGED" in {error["code"] for error in report["errors"]}
 
 
 def test_inspection_does_not_read_skill_symlink_outside_package(tmp_path: Path) -> None:
@@ -206,7 +373,7 @@ def test_cli_plugins_inspect_is_read_only_and_never_runs_scripts(
         "Read [the reference](references/REFERENCE.md).\n",
     )
     _write(source / "scripts" / "sentinel.py", f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n")
-    _write(source / "references" / "REFERENCE.md", "See [the asset](../assets/data.bin).\n")
+    _write(source / "references" / "REFERENCE.md", "See [the asset](assets/data.bin).\n")
     _write(source / "assets" / "data.bin", b"asset bytes")
     workspace = tmp_path / "workspace"
     global_skills = tmp_path / "global-skills"
@@ -236,6 +403,7 @@ def test_cli_plugins_inspect_is_read_only_and_never_runs_scripts(
     [
         ("cli-missing", "See [reference](references/missing.md).\n", "MISSING_RESOURCE"),
         ("cli-escape", "See [reference](../../outside.txt).\n", "REFERENCE_OUTSIDE_PACKAGE"),
+        ("cli-absolute", "See [reference](C:/outside.txt).\n", "REFERENCE_OUTSIDE_PACKAGE"),
         ("cli-conflict", "No references.\n", "NAME_CONFLICT"),
     ],
 )
