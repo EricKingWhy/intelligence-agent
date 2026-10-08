@@ -104,6 +104,119 @@ _USER_FACT_TYPES = frozenset(
 _USER_INPUT_FACT_TYPES = _USER_FACT_TYPES - {"authorization_revocation"}
 _USER_SOURCE_TYPES = frozenset({USER_MESSAGE, MESSAGE_QUEUED, STEER_REQUESTED})
 
+
+def _cancelled_queue_ids(events: list[SessionEvent]) -> set[str]:
+    """被 `queue/cancelled` 取消掉的 `queue_id` 集合（顺序无关的纯集合运算）。
+
+    取消判据的**唯一**实现：投影（`derive_protected_facts`）与事件口径来源校验
+    （`is_direct_user_input_event` 经 `user_source_events`）都从这里取，不再各写一份
+    （Call 3 P4-1）。
+    """
+    return {
+        event.data.get("queue_id")
+        for event in events
+        if event.type == QUEUE_CANCELLED
+        and isinstance(event.data.get("queue_id"), str)
+    }
+
+
+def _is_cancelled_queue_source(event: SessionEvent, cancelled_ids: set[str]) -> bool:
+    queue_id = event.data.get("queue_id")
+    return (
+        event.type == MESSAGE_QUEUED
+        and isinstance(queue_id, str)
+        and queue_id in cancelled_ids
+    )
+
+
+def user_source_events(events: list[SessionEvent]) -> list[SessionEvent]:
+    """形状上算用户来源的事件，按 seq 升序——**不含** supersede 判定。
+
+    判据：类型在 `_USER_SOURCE_TYPES`、`content` 是非空 string、无 `injected_by`、
+    无 `replace`、且不是被取消的排队项。
+
+    这是投影与事件口径来源校验共用的**唯一**判据（Call 3 P3-1/P4-1）。取消规则只有
+    对 `message/queued` 才可达：`is_direct_user_input_event` 先要求 `USER_MESSAGE`，
+    而取消标记只可能落在 `message/queued` 上，所以那边的取消分支不可达——取消规则的
+    真实作用面是投影（`MESSAGE_QUEUED` 也在 `_USER_SOURCE_TYPES` 里）。
+    """
+    cancelled_ids = _cancelled_queue_ids(events)
+    return [
+        event
+        for event in events
+        if event.type in _USER_SOURCE_TYPES
+        and isinstance(event.data.get("content"), str)
+        and bool(event.data["content"].strip())
+        and not event.data.get("injected_by")
+        and not event.data.get("replace")
+        and not _is_cancelled_queue_source(event, cancelled_ids)
+    ]
+
+
+def live_supersede_markers(events: list[SessionEvent]) -> list[tuple[int, int]]:
+    """**真的发生过**的 supersede 标记，返回 `(目标 seq, 替换槽 seq)` 列表（#614①）。
+
+    替换槽规则：目标与标记之间必须存在一条形状有效的用户事件（`user_source_events`），
+    否则这次 supersede 实际没有发生过——替换排队后被取消是可达形态
+    （`MESSAGE_QUEUED → MESSAGE_SUPERSEDED → QUEUE_CANCELLED`），标记作废、目标保持
+    active。
+
+    投影（`derive_protected_facts`）与事件口径来源校验（`is_direct_user_input_event`）
+    共用这一份，判据不再两写（Call 3 P3-1）。**作用面只有这两处**：与
+    `superseded_event_seqs` 刻意分开，那个是**纯解析**的 seq 集合，喂给
+    `derive_messages_with_source_ranges` 算投影 shadow 区间——#614① 的替换槽规则
+    **不作用于消息投影**（见 Call 5 P3：同一条作废标记在事实表里目标保持 active，
+    在消息投影里仍按解析口径被 shadow、模型看不到目标原文）。修那条要动可见面、
+    属语义变更，需先裁决；此处只如实标注两者的口径差。
+    """
+    event_by_seq = {event.seq: event for event in events}
+    source_seqs = [event.seq for event in user_source_events(events)]
+    markers: list[tuple[int, int]] = []
+    for event in events:
+        if event.type != MESSAGE_SUPERSEDED:
+            continue
+        target_seq = event.data.get("superseded_seq")
+        if not isinstance(target_seq, int) or isinstance(target_seq, bool):
+            continue
+        target = event_by_seq.get(target_seq)
+        if (
+            target is None
+            or target.type not in _USER_SOURCE_TYPES
+            or target.data.get("injected_by")
+            or event.seq <= target.seq
+            or event.session_id != target.session_id
+        ):
+            continue
+        replacement_index = bisect_right(source_seqs, target.seq)
+        replacement_end = bisect_left(source_seqs, event.seq)
+        if replacement_end <= replacement_index:
+            # 替换槽空（#614①）：这次 supersede 没有实际发生，标记作废。
+            continue
+        markers.append((target_seq, source_seqs[replacement_end - 1]))
+    return markers
+
+
+def superseded_event_seqs(events: list[SessionEvent]) -> set[int]:
+    """`message/superseded` 指向的 seq 集合（ADR-0030）。
+
+    `derive_messages_with_source_ranges`（投影）与 `is_direct_user_input_event`
+    （事件口径来源校验）共用这一份解析，避免两处各写一遍、日后判据漂移。
+    """
+    seqls: set[int] = set()
+    for event in events:
+        if event.type != MESSAGE_SUPERSEDED:
+            continue
+        raw = event.data.get("superseded_seq")
+        # 一行坏数据只损失该行（存储模块契约）：非 int 就跳过并警告，不 brick 恢复。
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            seqls.add(raw)
+        elif raw is not None:
+            logger.warning(
+                "MESSAGE_SUPERSEDED.superseded_seq 形状非法（%s），忽略该条",
+                type(raw).__name__,
+            )
+    return seqls
+
 #: W-06（#350）：经 POST /progress/resolve 确认的手改指令所带的用户消息标记。
 #: derive_protected_facts 把带此标记的 USER_MESSAGE 也收为 user_goal 来源——
 #: "确认后才更新真相"要求确认指令在后续重读（重启/压缩后）中对模型可见。
@@ -675,30 +788,12 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     """Rebuild protected task facts from the immutable event prefix."""
     event_by_seq = {event.seq: event for event in events}
     event_by_id = {event.event_id: event for event in events}
-    # supersede 标记的目标收集**并入下方合并遍历**（#614①）：标记是否成立
-    # 取决于"目标与标记之间有没有**未被取消**的活跃用户事件"（替换槽），
-    # 那需要 direct_user_events 先就位。这里只先放取消队列的来源——它们
-    # 无条件算 superseded（来源事件本身被取消，其事实不再受保护）。
     superseded_sources: set[str] = set()
-    cancelled_queue_ids = {
-        event.data.get("queue_id")
-        for event in events
-        if event.type == QUEUE_CANCELLED
-        and isinstance(event.data.get("queue_id"), str)
-    }
-
-    def is_cancelled_queue_source(event: SessionEvent) -> bool:
-        queue_id = event.data.get("queue_id")
-        return (
-            event.type == MESSAGE_QUEUED
-            and isinstance(queue_id, str)
-            and queue_id in cancelled_queue_ids
-        )
-
+    cancelled_ids = _cancelled_queue_ids(events)
     superseded_sources.update(
         event.event_id
         for event in events
-        if is_cancelled_queue_source(event)
+        if _is_cancelled_queue_source(event, cancelled_ids)
     )
     latest_tool_result_seq = {
         event.data["tool_call_id"]: event.seq
@@ -718,71 +813,32 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
     prior_fact_by_id: dict[str, tuple[int, str]] = {}
     superseded_by: dict[str, str] = {}
     latest_permission_fact_id: str | None = None
-    def is_active_user_source(event: SessionEvent) -> bool:
-        content = event.data.get("content")
-        return (
-            event.type in _USER_SOURCE_TYPES
-            and isinstance(content, str)
-            and bool(content.strip())
-            and not event.data.get("injected_by")
-            and not event.data.get("replace")
-            and not is_cancelled_queue_source(event)
-        )
 
-    first_user_source = next(
-        (event for event in events if is_active_user_source(event)),
-        None,
-    )
+    # 形状有效的用户来源只有一份判据（`user_source_events`，Call 3 P4-1）——
+    # 取消规则、`replace` / `injected_by` 排除、非空 content 都在那一处。
+    direct_user_events = user_source_events(events)
+    first_user_source = direct_user_events[0] if direct_user_events else None
     user_goal_sources = {first_user_source.event_id} if first_user_source else set()
     # W-06（#350）：确认过的外部编辑指令（见 PROGRESS_CONFIRM_ORIGIN）以
     # user_goal 保护事实身份进入投影。首条用户消息口径保持不变；这里只是
     # 追加来源，不改变 supersede/取消等既有判定。
-    for event in events:
-        if (
-            event.type == USER_MESSAGE
-            and event.data.get("origin") == PROGRESS_CONFIRM_ORIGIN
-            and is_active_user_source(event)
-        ):
-            user_goal_sources.add(event.event_id)
-    direct_user_events = [
-        event
-        for event in events
-        if is_active_user_source(event)
-    ]
-    direct_user_seqs = [event.seq for event in direct_user_events]
-    for event in events:
-        target_seq = event.data.get("superseded_seq")
-        if (
-            event.type != MESSAGE_SUPERSEDED
-            or not isinstance(target_seq, int)
-            or isinstance(target_seq, bool)
-        ):
-            continue
-        target = event_by_seq.get(target_seq)
-        if (
-            target is None
-            or target.type not in _USER_SOURCE_TYPES
-            or target.data.get("injected_by")
-            or event.seq <= target.seq
-            or event.session_id != target.session_id
-        ):
-            continue
-        replacement_index = bisect_right(direct_user_seqs, target.seq)
-        replacement_end = bisect_left(direct_user_seqs, event.seq)
-        if replacement_end <= replacement_index:
-            # 替换槽空（#614①）：目标与标记之间没有**未被取消**的活跃用户
-            # 事件——这次 supersede 实际没有发生过（替换排队后被取消是
-            # 可达形态：MESSAGE_QUEUED → MESSAGE_SUPERSEDED → QUEUE_CANCELLED）。
-            # 标记作废：目标保持 active。§1 的选取口径本来就是"取消的替换
-            # 不进 sources"（S2 实测 §1 仍取目标），§2 的 status 必须同判，
-            # 否则目标节说"目标仍生效"、保护事实表却把它标成 superseded，
-            # 两节自相矛盾且丢失唯一 active 目标。
-            continue
+    user_goal_sources.update(
+        event.event_id
+        for event in direct_user_events
+        if event.type == USER_MESSAGE
+        and event.data.get("origin") == PROGRESS_CONFIRM_ORIGIN
+    )
+    # supersede 标记是否成立（替换槽非空，#614①）由 `live_supersede_markers` 判——
+    # 与 `is_direct_user_input_event` 共用同一份，不再两写（Call 3 P3-1/P4-1）。
+    for target_seq, replacement_seq in live_supersede_markers(events):
+        target = event_by_seq[target_seq]
         superseded_sources.add(target.event_id)
         if target.type == USER_MESSAGE:
-            user_goal_sources.add(
-                direct_user_events[replacement_end - 1].event_id
+            replacement = next(
+                (e for e in direct_user_events if e.seq == replacement_seq), None
             )
+            if replacement is not None:
+                user_goal_sources.add(replacement.event_id)
     tool_results_by_call: dict[str, list[SessionEvent]] = {}
     for event in events:
         call_id = event.data.get("tool_call_id")
@@ -1271,19 +1327,7 @@ def derive_messages_with_source_ranges(
     # summary）；把 supersede 区间并进去会让下标错位，summary 落到错误的位置甚至不吐。
     # 跳过逻辑仍然只有一处（`is_shadowed`），没有第二套跳过实现。
     superseded_ranges: list[tuple[int, int]] = []
-    superseded_seqs: set[int] = set()
-    for event in events:
-        if event.type != MESSAGE_SUPERSEDED:
-            continue
-        raw = event.data.get("superseded_seq")
-        # 一行坏数据只损失该行（存储模块契约）：非 int 就跳过并警告，不 brick 恢复。
-        if isinstance(raw, int) and not isinstance(raw, bool):
-            superseded_seqs.add(raw)
-        elif raw is not None:
-            logger.warning(
-                "MESSAGE_SUPERSEDED.superseded_seq 形状非法（%s），忽略该条",
-                type(raw).__name__,
-            )
+    superseded_seqs = superseded_event_seqs(events)
     if superseded_seqs:
         user_seqs = [e.seq for e in events if e.type == USER_MESSAGE]
         last_seq = max((e.seq for e in events), default=0)
@@ -1661,22 +1705,74 @@ def _projected_user_text(message: AnyMessage) -> str | None:
 def is_direct_user_input_event(
     events: list[SessionEvent], event_id: str,
 ) -> bool:
-    """Return whether an event is still an active direct user message."""
+    """Return whether an event is an active direct user message.
+
+    判据以**事件事实**为主体（类型 / 内容形状 / 注入与取代标记），不依赖"这条消息这次
+    有没有被注入给模型"。唯一一处投影比对（下条 `#823 / MM-02`）刻意做成"命中即通过、
+    未命中不拒绝"，因此压缩（#663 P2）不会改变结论：
+
+    - compaction 只改注入预算，不删原始 session entry，也不改"这是用户原话"这一
+      事实。以模型可见投影为判据会让压缩后的 run 再也登记不了约束——投影里只剩
+      summary，原文那条事件被判成"非直接输入"（#663 P2）。
+      设计来源: pi 28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9
+      packages/coding-agent/docs/sessions.md:40（"Compaction adds a summary and keeps
+      recent messages. It does not delete the original session entries."）⇒ 来源靠
+      原始事件 id，而不是当前注入文本；
+    - `user/message(replace)` 是 compaction 摘要的替身，虽然是 `USER_MESSAGE`
+      但**不是**用户说的话；`injected_by` 同理（与 `derive_protected_facts` 共用
+      `user_source_events`，同一份判据不再两写）；
+    - `steer/requested` / `message/queued` 是未投递请求，本函数只认 `USER_MESSAGE`；
+    - 带 `input_request_id` 的是澄清答复，不是新的约束来源；
+    - 被取代的用户消息不再是来源；本函数与 `derive_protected_facts` 共用
+      `live_supersede_markers`（含 #614① 的替换槽规则——替换排队项被取消时 supersede
+      未实际发生，目标仍有效）。这是**唯一的负向闸门**；
+    - 投影一致比对（#823 / MM-02 A7）：事件若在消息投影里仍有**单事件来源范围**
+      `(seq, seq)` 的 `HumanMessage`，用 `_projected_user_text` 把带图消息的投影
+      （视觉为块列表、非视觉为原文 + 占位符后缀）还原回**事件原始 content** 再比对，
+      带图 user 消息因此不会被漏掉。此项**只作正向信号**：压缩后单事件 bracket 的
+      summary 投影来源范围恰好也是 `(seq, seq)` 且内容对不上，若当成硬闸门就会退回
+      #663 P2 的 bug；故与负向闸门**取并**——比对命中即判真，未命中不据此拒绝，负向
+      判定只交给 `live_supersede_markers`。
+
+    ⚠ **#614① 只覆盖「保护事实投影 + 本闸门」这两处口径**，**不含**消息投影
+    （`derive_messages_with_source_ranges` 的 `superseded_ranges`，仍是纯解析的
+    `superseded_event_seqs`）。后果：同一条作废标记下，事实表判目标 active、本闸门判
+    True，可该目标原文在消息投影里仍被 shadow——模型看不到它，于是
+    `latest_direct_user_input_event`（只从消息投影取源）也选不中它。这是**既有行为**，
+    不是本票回归；修它要改可见面、属语义变更，须先裁决（Call 5 P3，本票只做披露）。
+
+    取消失效的排队项不在本函数的作用面内：取消标记只落在 `message/queued` 上，而
+    本函数先要求 `USER_MESSAGE`，两者无交集（Call 3 P3-2 证过那条分支不可达）。
+    """
     event = next((item for item in events if item.event_id == event_id), None)
     if (
         event is None
         or event.type != USER_MESSAGE
         or event.data.get("injected_by")
+        or event.data.get("replace")
+        or "input_request_id" in event.data
         or not isinstance(event.data.get("content"), str)
         or not event.data["content"].strip()
     ):
         return False
+    # #823 / MM-02（A7，本线）：投影一致比对，图片感知。带图 user 消息的投影是块
+    # 列表（视觉）或带占位符后缀的字符串（非视觉），用 `_projected_user_text` 还原
+    # 回**事件原始 content** 再比对，否则带图消息会被漏掉。
+    #
+    # #663 P2（main 侧）：这条比对**只能当正向信号，不能当拒绝依据**——compaction 把
+    # 原文收进 summary 后，单事件 bracket 的 summary 投影来源范围恰好也是 `(seq, seq)`，
+    # 被携带者只剩那条摘要、与原文逐字对不上；若拿它当硬闸门，压缩后的原文事件会被判成
+    # "非直接输入"（正是 #663 P2 要修的 bug）。因此与作废标记判定**取并**：投影比对命中
+    # ⇒ 是直接输入；命中不了（含压缩、含 #614① 空槽）不据此拒绝，负向闸门只由
+    # `live_supersede_markers`（含 #614① 替换槽规则）承担。
     return any(
         source_range == (event.seq, event.seq)
         and isinstance(message, HumanMessage)
         and _projected_user_text(message) == event.data["content"]
         for message, source_range in derive_messages_with_source_ranges(events)
-    )
+    ) or event.seq not in {
+        target_seq for target_seq, _replacement_seq in live_supersede_markers(events)
+    }
 
 
 def latest_direct_user_input_event(

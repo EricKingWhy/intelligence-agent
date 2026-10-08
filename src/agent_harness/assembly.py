@@ -96,6 +96,7 @@ from agent_harness.tools import (
 )
 from agent_harness.tools.register_constraint import RegisterConstraintTool
 from agent_harness.tools.request_constraint_resolution import (
+    REGISTER_CONSTRAINT_HANDOFF,
     RequestConstraintResolutionTool,
 )
 from agent_harness.tools.update_plan import UpdatePlanTool
@@ -304,7 +305,23 @@ def _build_tooling(
     # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
     registry.register(UpdatePlanTool())
     if include_constraint_tools:
-        registry.register(RegisterConstraintTool())
+        # 冲突指引**跟着 resolver 的在册状态走**：resolver 缺席的入口（CLI）拿到那段话
+        # 只会去调一个不存在的工具（#663 P2）。注入的是**增量**转接句，不是 resolver
+        # guidance 的副本——那份全文经 `tool:request_constraint_resolution` 独立进
+        # system prompt，照抄一遍等于每次请求下发两份（Call 3 P2-1）。
+        #
+        # 设计来源: pi 28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9
+        #   packages/agent/src/agent.ts:85 —— 系统消息里的工具声明由**当前那份活的
+        #   tools 列表**派生（`tools.map(toToolDeclaration)`），不是另抄一份静态清单：
+        #   工具面变了、说明不同步变，就是让模型对着不存在的工具下指令。这里同理——
+        #   转接句跟着 registry 的在册状态走。
+        registry.register(RegisterConstraintTool(
+            resolution_guidance=(
+                REGISTER_CONSTRAINT_HANDOFF
+                if include_resolution_tool
+                else None
+            ),
+        ))
     if include_resolution_tool:
         registry.register(RequestConstraintResolutionTool())
 
@@ -702,7 +719,13 @@ async def build_runtime(
         # of the shared coding tool_scope so AgentFactory cannot grant them to children.
         registered_names = {tool.name for tool in registry.list()}
         if include_constraint_tools and RegisterConstraintTool().name not in registered_names:
-            registry.register(RegisterConstraintTool())
+            registry.register(RegisterConstraintTool(
+                resolution_guidance=(
+                    REGISTER_CONSTRAINT_HANDOFF
+                    if include_resolution_tool
+                    else None
+                ),
+            ))
         if include_resolution_tool and RequestConstraintResolutionTool().name not in registered_names:
             registry.register(RequestConstraintResolutionTool())
 

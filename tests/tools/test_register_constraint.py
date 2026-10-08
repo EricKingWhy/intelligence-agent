@@ -1,5 +1,6 @@
 import pytest
 
+from agent_harness.prompt.tool_sections import join_guidance
 from agent_harness.session.context import (
     ConstraintToolContext,
     current_constraint_tool_context_var,
@@ -25,6 +26,7 @@ from agent_harness.tools.register_constraint import (
     RegisterConstraintTool,
 )
 from agent_harness.tools.request_constraint_resolution import (
+    REGISTER_CONSTRAINT_HANDOFF,
     RequestConstraintResolutionArgs,
     RequestConstraintResolutionTool,
 )
@@ -238,3 +240,62 @@ def test_possible_conflict_guidance_requests_clarification_without_deferring():
     assert "do not wait for the user to confirm the conflict" in guidance
     assert "a pending card does not authorize the conflicting action" in guidance
     assert "do not infer task-only scope from 'this task' phrasing alone" in guidance
+
+
+def test_register_guidance_never_names_a_resolver_that_is_not_registered():
+    """指引不许点名一个**物理不在册**的工具（#663 P2）。
+
+    `register_constraint` 在 CLI 入口就在册（`include_constraint_tools=True`），但同一
+    入口显式关掉了澄清工具（`include_constraint_resolution_tool=False`——CLI 收不到那道
+    答复）。指引里写死"去调 request_constraint_resolution"，模型照做只会撞一个不存在的
+    工具名。所以那句话由装配层在 resolver 真在册时注入，guidance 自己不知道 registry 里
+    还有谁。
+    """
+    # 默认（未接线）= 不点名 resolver。
+    assert "request_constraint_resolution" not in RegisterConstraintTool().prompt_guidance
+
+    # 常驻判据不受影响（与 registry 里还有谁无关的那部分）。
+    guidance = RegisterConstraintTool().prompt_guidance.lower()
+    assert guidance.startswith("classify the current direct user message before calling")
+    assert "only merge after all tests pass" in guidance
+    assert "rejected means nothing was saved" in guidance
+
+    # resolver 在册时转接句必须回来。
+    wired = RegisterConstraintTool(
+        resolution_guidance=REGISTER_CONSTRAINT_HANDOFF,
+    ).prompt_guidance.lower()
+    assert "call request_constraint_resolution once instead" in wired
+
+
+def test_wired_guidance_is_incremental_not_a_copy_of_the_resolver_section():
+    """Call 3 P2-1：注入的必须是**增量**，不是 resolver guidance 的副本。
+
+    resolver 的全文经 `tool:request_constraint_resolution` 独立进 system prompt
+    （`prompt/tool_sections.py`）。把全文再嵌进 `register_constraint` 的 guidance，
+    等于同一份行为指导每次请求下发两遍（实测净增 1403 字符、拼接后 3801 vs 基部 2398）。
+    这里钉住"拼装后的提示里 resolver 的独有句子只出现一次"——正是 Call 3 指出旧断言
+    覆盖不到的那一格（旧断言只数 wired 内部，看不到与 resolver section 的重复）。
+    """
+    resolver = RequestConstraintResolutionTool()
+    joined = join_guidance([
+        RegisterConstraintTool(resolution_guidance=REGISTER_CONSTRAINT_HANDOFF),
+        resolver,
+    ]).lower()
+
+    # 转接句在（register 这一份）。
+    assert "call request_constraint_resolution once instead" in joined
+    # resolver 独有的话只出现一次（来自 resolver section 自己）。
+    for resolver_only in (
+        "a pending card does not authorize the conflicting action",
+        "do not infer task-only scope from 'this task' phrasing alone",
+        "never swap them or put the old rule in candidate",
+    ):
+        assert joined.count(resolver_only) == 1, resolver_only
+    # 副本形态会撞破上面的断言（守门人自检：这条测试对"整段复制"确实有牙齿）。
+    with_copy = join_guidance([
+        RegisterConstraintTool(resolution_guidance=resolver.prompt_guidance),
+        resolver,
+    ]).lower()
+    assert with_copy.count(
+        "a pending card does not authorize the conflicting action"
+    ) == 2, "副本形态应当被这条断言判红（守门人自检）"

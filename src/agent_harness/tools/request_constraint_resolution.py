@@ -66,6 +66,17 @@ class RequestConstraintResolutionArgs(BaseModel):
         return value
 
 
+#: 给 `register_constraint` 的**增量**转接句：什么情况该从"登记约束"转向澄清。
+#: 只留 resolver guidance **没说过**的那格——它的 section 已覆盖"何时调用 / 参数角色 /
+#: 等待用户"，本句重复其中任何一条都是每次请求白付一份字符（Call 3 P2-1 的整段复制、
+#: Call 5 P4 的"call … once instead"无条件重复，两次都是这个毛病）。
+#: 装配层只在 resolver 真在册时注入它（`assembly._build_tooling`）。
+REGISTER_CONSTRAINT_HANDOFF = (
+    "A 'this task may need...' phrase can still conflict; "
+    "call request_constraint_resolution once instead."
+)
+
+
 class RequestConstraintResolutionTool(Tool):
     def __init__(self) -> None:
         pass
