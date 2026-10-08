@@ -68,6 +68,23 @@ class ExecResult:
     timed_out: bool = field(default=False)
 
 
+class MultiLineCommandUnsupportedError(RuntimeError):
+    """后端无法安全执行含内部换行的命令（#850）。
+
+    Windows 本机后端走 `shell=True`，CPython 把它拼成 `cmd.exe /c "<命令>"`；命令里
+    带换行时 cmd.exe 的引号剥离规则把整串吃掉——**什么都不执行却以 0 退出**（本机
+    实测 rc=0 / stdout="" / stderr=""）。#365 Run B 因此让模型拿到假成功，写出
+    「已修复 app.py」的假报告，而文件逐字节未变。
+
+    为什么是拒绝而不是换一种拼接：实测把命令作为独立 argv 传给 `cmd /c` 会把现在
+    能用的单行引号命令弄坏（`python -c "print(1+1)"` 由输出 `2` 变成空输出，
+    写文件的那条由落盘变成不落盘），得不偿失。
+
+    归在契约层：这是「后端可拒绝某个命令形状」的通用语义；Tool 层据此把它与
+    ADR-0002 的「命令业务失败」区分开（后者命令真的跑过、ok=True）。
+    """
+
+
 class Sandbox(ABC):
     """Coding Tool 的隔离执行环境契约。
 

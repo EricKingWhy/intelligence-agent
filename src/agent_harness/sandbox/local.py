@@ -31,6 +31,7 @@ from uuid import uuid4
 
 from agent_harness.sandbox.base import (
     ExecResult,
+    MultiLineCommandUnsupportedError,
     Sandbox,
     ShellEnvironment,
     ShellFamily,
@@ -51,6 +52,16 @@ logger = logging.getLogger("agent_harness.sandbox.local")
 #: ⚠ 必须 <= decoding.PROBE_LIMIT：单次喂入超过剩余探测预算会让「已满上限的
 #: 合法 UTF-8 + 同段坏字节」被判成兜底编码（与坏字节落在下一段的结果不一致）。
 _DRAIN_CHUNK_BYTES = 65536
+
+
+def _has_interior_newline(command: str) -> bool:
+    """命令去掉首尾空白后是否仍含换行（#850）。
+
+    尾部换行无害（本机实测 `echo hi\n\n` 正常以 0 退出并有输出），只有「换行之后
+    还有内容」才触发 cmd.exe 的引号剥离，故只判内部换行——否则会把大量正常命令误拒。
+    """
+    body = command.strip()
+    return "\n" in body or "\r" in body
 
 
 class _CappedCapture:
@@ -193,6 +204,14 @@ class LocalSubprocessSandbox(Sandbox):
         回调异常不中断排空（捕获完整性优先，异常只落 debug 日志）。
         """
         self.ensure_started()
+        if os.name == "nt" and _has_interior_newline(command):
+            raise MultiLineCommandUnsupportedError(
+                "命令被拒绝：Windows 本机沙箱用 cmd.exe 执行，含内部换行的命令会被 "
+                "cmd.exe 的引号剥离规则整串吃掉——什么都不执行却以 exit_code=0 返回。"
+                "为避免把「什么都没跑」报成成功，本机直接拒绝该命令。"
+                "请改写为单行命令，或先用 write 工具把脚本写入文件再执行该文件。"
+                "（命令末尾的换行无妨，只有换行之后还有内容才会被拒绝。）"
+            )
         effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
 
         # 输出解码（OBS-011）：子进程写的是**原始字节**，编码取决于产出方——

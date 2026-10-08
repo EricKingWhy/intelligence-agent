@@ -6,11 +6,16 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from agent_harness.sandbox import ExecResult, LocalSubprocessSandbox
+from agent_harness.sandbox import (
+    ExecResult,
+    LocalSubprocessSandbox,
+    MultiLineCommandUnsupportedError,
+)
 
 # ============================================================================
 # 夹具：每个测试一个独立 workspace 目录，互不干扰
@@ -211,3 +216,51 @@ def test_write_text_is_atomic_replace(tmp_path):
     (tmp_path / "f.txt").write_bytes(b"old content")
     sandbox.write_text("f.txt", "new content")
     assert (tmp_path / "f.txt").read_bytes() == b"new content"
+
+
+class TestExecMultiLineCommandGuard:
+    """#850：Windows 本机沙箱必须**明确拒绝**含内部换行的命令。
+
+    机制（本机实测）：`shell=True` 在 Windows 把命令拼成 `cmd.exe /c "<命令>"`；
+    命令里带换行时 cmd.exe 的引号剥离规则把整串吃掉——**什么都不执行却以 0 退出**
+    （rc=0 / stdout="" / stderr=""）。#365 Run B 因此让模型拿到假成功，
+    写出「已修复 app.py」的假报告，实际文件逐字节未变。
+
+    底线：不能把 no-op 报成 exit_code=0。
+    """
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    def test_interior_newline_is_refused(self, sandbox: LocalSubprocessSandbox):
+        """模型在 #850 里写的形状：多行 python -c。"""
+        with pytest.raises(MultiLineCommandUnsupportedError):
+            sandbox.exec('python -c "\nimport os\nprint(1)\n"\n')
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    def test_two_line_command_is_refused(self, sandbox: LocalSubprocessSandbox):
+        """纯 cmd 多行同样只跑第一行，也要拒绝。"""
+        with pytest.raises(MultiLineCommandUnsupportedError):
+            sandbox.exec("echo a\necho b")
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    def test_refusal_is_never_a_silent_zero_exit(self, sandbox: LocalSubprocessSandbox):
+        """关键回归：必须是显式异常，不能是 rc=0 的空结果。"""
+        try:
+            result = sandbox.exec("echo a\necho b")
+        except MultiLineCommandUnsupportedError:
+            return
+        pytest.fail(f"含内部换行的命令被静默「成功」了：{result!r}")
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    def test_trailing_newline_still_runs(self, sandbox: LocalSubprocessSandbox):
+        """尾部换行无害（实测 rc 正常有输出），不得被误拒。"""
+        result = sandbox.exec("echo hi\n\n")
+
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "hi"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX 上 /bin/sh 本就支持多行")
+    def test_posix_multiline_still_runs(self, sandbox: LocalSubprocessSandbox):
+        result = sandbox.exec("echo a\necho b")
+
+        assert result.exit_code == 0
+        assert result.stdout.split() == ["a", "b"]
