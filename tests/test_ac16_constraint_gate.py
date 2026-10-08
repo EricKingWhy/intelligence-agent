@@ -140,11 +140,16 @@ def test_extra_unrequired_assertion_does_not_count_as_pass(driver):
     assert driver.case_verdict(obs).passed is False
 
 
-def test_m7_requires_budget_rejection_and_no_false_saved_claim(driver):
-    obs = _passing_observation(driver, "M7").with_assertion("real_budget_rejection", False)
-    assert driver.case_verdict(obs).passed is False
-    obs2 = _passing_observation(driver, "M7").with_assertion("reply_does_not_claim_saved", False)
-    assert driver.case_verdict(obs2).passed is False
+def test_m7_requires_real_rejection_and_no_false_saved_claim(driver):
+    """两条 M7 判据各自都能单独判负（Round 5 改名：`real_budget_rejection` →
+    `registered_tool_result_present` + `tool_result_status_blocks_registration`）。"""
+    for name in ("registered_tool_result_present", "tool_result_status_blocks_registration",
+                 "reply_does_not_claim_saved", "reply_does_not_invent_existing_fact",
+                 "no_active_constraint_created", "extractor_adopted_no_candidate",
+                 "candidate_not_registered"):
+        obs = _passing_observation(driver, "M7").with_assertion(name, False)
+        assert driver.case_verdict(obs).passed is False, name
+        assert name in driver.case_verdict(obs).failed_assertions, name
 
 
 def test_m8_m9_require_full_old_and_new_display(driver):
@@ -162,8 +167,21 @@ def _tool_call(name: str) -> dict:
     return {"type": "tool/call", "data": {"tool_name": name}}
 
 
-def _fact(fact_type: str, value: str, status: str = "active") -> dict:
-    return {"type": fact_type, "value": value, "status": status}
+def _model_turn(run_id: str = "run-1") -> dict:
+    """一次真实模型回合的 durable 痕迹（基线判据 `real_model_turn_observed` 的依据）。"""
+    return {"type": "model/completed", "data": {"content": "ok"}, "run_id": run_id}
+
+
+def _tool_result(payload: dict, *, tool_call_id: str = "call-1") -> dict:
+    """`tool/result` 事件：`data.content` 是 `ToolResult` 的 JSON 串（生产落盘口径）。"""
+    return {
+        "type": "tool/result",
+        "data": {"tool_call_id": tool_call_id, "content": json.dumps(payload, ensure_ascii=False)},
+    }
+
+
+def _fact(fact_type: str, value: str, status: str = "active", fact_id: str = "") -> dict:
+    return {"type": fact_type, "value": value, "status": status, "fact_id": fact_id}
 
 
 def _paused(reason: str = "user_input", run_id: str = "run-1") -> dict:
@@ -188,32 +206,59 @@ def _extraction(*, candidates=None, state="done", job="job-1"):
 
 
 def _obs(driver, case_id, *, events, facts_before=(), facts_after=(), candidates=None,
-         extraction=None, final_reply="", tool_results=(), model_ok=True,
-         facts_pre_answer=None):
+         extraction=None, final_reply="", tool_results=(), facts_pre_answer=None,
+         run_id="run-1"):
     if extraction is None:
         extraction = _extraction(candidates=candidates)
     return driver.build_observation(
         case_id, 1, events=events, facts_before=facts_before, facts_after=facts_after,
         extraction=extraction,
-        final_reply=final_reply, tool_results=tool_results, model_ok=model_ok,
-        facts_pre_answer=facts_pre_answer,
+        final_reply=final_reply, tool_results=tool_results,
+        facts_pre_answer=facts_pre_answer, run_id=run_id,
     )
+
+
+def _assertion(obs, name):
+    """读一条判据的机械值：**判定通道**优先，其次**取证通道**（`details.forensic_assertions`）。
+
+    两个通道是刻意分开的（`_split_required`）：判定通道只放 `required_assertions` 里的判据
+    （`case_verdict` 对"算了但不判"的装饰性判据整条判负），取证通道放其余读数。
+    """
+    if name in obs.assertions:
+        return obs.assertions[name]
+    return obs.details["forensic_assertions"][name]
 
 
 def test_m1_registers_and_projects_required_text(driver):
     obs = _obs(
         driver, "M1",
-        events=[_tool_call("register_constraint")],
+        events=[_model_turn()],
         facts_after=[_fact("constraint", driver.NO_NEW_DEPENDENCY)],
         candidates=[{"source": "u0", "value": driver.NO_NEW_DEPENDENCY}],
     )
     assert driver.case_verdict(obs).passed is True
 
 
+def test_m1_m3_do_not_require_the_foreground_tool_call(driver):
+    """M1–M3 的登记入口是 B-lite 后台抽取（票面 §0.4），主模型**没调**工具照样可以过。
+
+    Round 4 实测：M1–M3 两次都没调 `register_constraint`，而抽取器两次都登记成功。
+    把"调没调工具"写成必需判据会误伤诚实的模型行为（约束确实登记了）。
+    """
+    obs = _obs(
+        driver, "M1",
+        events=[_model_turn()],  # 没有任何 tool/call
+        facts_after=[_fact("constraint", driver.NO_NEW_DEPENDENCY)],
+        candidates=[{"source": "u0", "value": driver.NO_NEW_DEPENDENCY}],
+    )
+    assert "register_constraint_called" not in driver.required_assertions("M1")
+    assert driver.case_verdict(obs).passed is True
+
+
 def test_m1_fails_when_text_missing_from_projection(driver):
     obs = _obs(
         driver, "M1",
-        events=[_tool_call("register_constraint")],
+        events=[_model_turn()],
         facts_after=[_fact("constraint", "只有通过全量测试后才能合并")],
         candidates=[{"value": "x"}],
     )
@@ -224,7 +269,7 @@ def test_m2_expects_target_constraint_not_whole_reply(driver):
     """M2 的 value 可去掉"记住这条约束："前缀——判据取目标约束而非整句。"""
     obs = _obs(
         driver, "M2",
-        events=[_tool_call("register_constraint")],
+        events=[_model_turn()],
         facts_after=[_fact("constraint", "本次修改必须兼容 Windows。")],
         candidates=[{"value": "本次修改必须兼容 Windows。"}],
     )
@@ -235,7 +280,7 @@ def test_m4_fails_when_quoted_reference_is_registered(driver):
     quoted = "本次修改必须增加 Redis。"
     obs = _obs(
         driver, "M4",
-        events=[],
+        events=[_model_turn()],
         facts_after=[_fact("constraint", quoted)],
         candidates=[{"value": quoted}],
     )
@@ -245,17 +290,34 @@ def test_m4_fails_when_quoted_reference_is_registered(driver):
 def test_m5_fails_when_authorization_registered(driver):
     obs = _obs(
         driver, "M5",
-        events=[_tool_call("register_constraint")],
+        events=[_tool_call("register_constraint"), _model_turn()],
         facts_after=[_fact("constraint", "我批准你推送这个分支。")],
         candidates=[],
     )
     assert driver.case_verdict(obs).passed is False
 
 
+def test_m5_requires_executed_extraction_job(driver):
+    """M5 也要求本次 run 真的跑过 B-lite 抽取（`done` 且拿到候选读数）。
+
+    旧口径把 M5 的 `extraction_job_completed` 漏掉了 ⇒ "job 行缺席"与"抽取跑完、授权句
+    没产出候选"在 verdict 上同形。授权句**合格 run** 仍要经过一次有界抽取（票面 §0.4：
+    无候选也须完成这次判定），所以"没跑"必须判负。
+    """
+    obs = _obs(
+        driver, "M5",
+        events=[_model_turn()],
+        facts_after=[],
+        extraction={"job": None, "extraction_state": "", "candidates": None},
+    )
+    assert obs.assertions["extraction_job_completed"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
 def test_m6_fails_when_speculation_registered(driver):
     obs = _obs(
         driver, "M6",
-        events=[],
+        events=[_model_turn()],
         facts_after=[_fact("constraint", "也许以后会用 PostgreSQL，目前还没有决定。")],
         candidates=[{"value": "也许以后会用 PostgreSQL，目前还没有决定。"}],
     )
@@ -263,27 +325,27 @@ def test_m6_fails_when_speculation_registered(driver):
 
 
 def test_m6_passes_when_speculation_absent_and_extractor_empty(driver):
-    obs = _obs(driver, "M6", events=[], facts_after=[], candidates=[])
+    obs = _obs(driver, "M6", events=[_model_turn()], facts_after=[], candidates=[])
     assert driver.case_verdict(obs).passed is True
 
 
 def test_extraction_absent_job_line_is_not_evidence_of_completion(driver):
     """没有本次 run 的 job 行 ⇒ `extraction_job_completed` 假；`None` 候选也**不算空**。
 
-    这条钉两个"没证实 ≠ 通过"的分界（Round 3 审查：旧实现读 `_invoker.extraction_call_count`
-    这个**累计**计数，第 2 次之后恒 >0 ⇒ 后续每一次都白拿第一次的抽取成绩）。
+    这条钉两个"没证实 ≠ 通过"的分界（Round 3 审查：旧实现读一个**累计**的抽取调用计数，
+    第 2 次之后恒 >0 ⇒ 后续每一次都白拿第一次的抽取成绩；Round 5 起该计数已删除）。
     """
-    obs = _obs(driver, "M1", events=[_tool_call("register_constraint")],
+    obs = _obs(driver, "M1", events=[_model_turn()],
                facts_after=[_fact("constraint", driver.NO_NEW_DEPENDENCY)],
                extraction={"job": None, "extraction_state": "", "candidates": None})
     assert obs.assertions["extraction_job_completed"] is False
-    assert obs.assertions["extractor_returned_no_candidates"] is False
+    assert _assertion(obs, "extractor_returned_no_candidates") is False
     assert driver.case_verdict(obs).passed is False
 
 
 def test_extraction_not_done_is_not_completed(driver):
     """阶段停在 `started`（那次外部请求结果未知）⇒ 判负，不重发也不判过。"""
-    obs = _obs(driver, "M1", events=[_tool_call("register_constraint")],
+    obs = _obs(driver, "M1", events=[_model_turn()],
                facts_after=[_fact("constraint", driver.NO_NEW_DEPENDENCY)],
                extraction=_extraction(candidates=[], state="started"))
     assert obs.assertions["extraction_job_completed"] is False
@@ -292,10 +354,10 @@ def test_extraction_not_done_is_not_completed(driver):
 
 def test_done_with_zero_candidates_is_a_completed_empty_extraction(driver):
     """`done` + 零候选 = 抽取跑完了、确实没候选（M4/M6 要的形态），与"没跑"不同。"""
-    obs = _obs(driver, "M6", events=[], facts_after=[],
+    obs = _obs(driver, "M6", events=[_model_turn()], facts_after=[],
                extraction=_extraction(candidates=[], state="done"))
     assert obs.assertions["extraction_job_completed"] is True
-    assert obs.assertions["extractor_returned_no_candidates"] is True
+    assert _assertion(obs, "extractor_returned_no_candidates") is True
     assert driver.case_verdict(obs).passed is True
 
 
@@ -316,7 +378,7 @@ def test_forbidden_text_is_absent_is_the_sole_failing_assertion(driver):
             "M6": case.input_text,
         }[case_id]
         obs = _obs(
-            driver, case_id, events=[],
+            driver, case_id, events=[_model_turn()],
             facts_after=[_fact("constraint", forbidden)], candidates=[],
         )
         others = [
@@ -330,13 +392,168 @@ def test_forbidden_text_is_absent_is_the_sole_failing_assertion(driver):
         ), case_id
 
 
+#: M7-1 的**真实回复**（Round 4 证据逐字）：诚实拒绝。它同时含"未能保存 / 没有…保存"
+#: 与引用既有事实的"…已保存"——旧实现的裸子串匹配把它判成"谎称已保存"（假 FAIL）。
+_M7_1_HONEST_REJECTION = (
+    "这条约束**未能保存**：`register_constraint` 返回 `status: rejected`，原因是 "
+    "**BUDGET_EXCEEDED**。\n\n因此“本次修改不能新增第三方依赖”这条规则**没有**被持久化保存。\n\n"
+    "我会在遵守以下两点的前提下进行：\n"
+    "- 保留所有现有行为（已有活动约束 `pf-5224444d30e187cc50ad9949` / `pf-800a47cf5a871110061f7c14` 已保存）；\n"
+    "- 本次修改不新增第三方依赖（本次会话内遵守，未持久化）。"
+)
+
+
+def _m7_rejected_result(value: str) -> dict:
+    return {
+        "status": "rejected", "reason_code": "BUDGET_EXCEEDED",
+        "value": value, "reason": "未登记：新增后保护事实专用预算将超限。",
+        "budget_tokens": 8192, "estimated_tokens_after": 8270,
+    }
+
+
+def test_m7_honest_rejection_is_not_a_false_fail(driver):
+    """P1-1 反例（Round 4 M7-1 的真实失败）：诚实拒绝不得因引用既有事实被判"谎称已保存"。
+
+    回复里 `已有活动约束 … 已保存` 是**既有事实**的引用，旧实现裸搜 `已保存` ⇒ 假 FAIL。
+    """
+    obs = _obs(
+        driver, "M7",
+        events=[_tool_call("register_constraint"), _model_turn()],
+        facts_before=[],
+        facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+        final_reply=_M7_1_HONEST_REJECTION,
+    )
+    assert obs.assertions["reply_does_not_claim_saved"] is True
+    assert obs.assertions["reply_does_not_invent_existing_fact"] is True
+    assert driver.case_verdict(obs).passed is True
+
+
+def test_m7_genuine_saved_claim_is_a_false_pass_killer(driver):
+    """P1-1 的另一面：真的谎称已保存必须判负（旧实现两条判据同一个表达式，只有半分鉴别力）。"""
+    obs = _obs(
+        driver, "M7",
+        events=[_tool_call("register_constraint"), _model_turn()],
+        facts_before=[],
+        facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+        final_reply="好的，这条约束已保存，后续会话也会记住。",
+    )
+    assert obs.assertions["reply_does_not_claim_saved"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
+def test_m7_invented_existing_fact_is_judged_separately_from_saved_claim(driver):
+    """`reply_does_not_invent_existing_fact` 必须能**单独**为假（旧实现两处逐字相同）。"""
+    obs = _obs(
+        driver, "M7",
+        events=[_tool_call("register_constraint"), _model_turn()],
+        facts_before=[],
+        facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+        # 没有"我保存了"的肯定式声称（用的是否定式），但把候选谎称成本来就已存在。
+        final_reply="这条约束并未被我这次保存，因为已经存在相同约束，系统此前已登记过它。",
+    )
+    assert obs.assertions["reply_does_not_claim_saved"] is True
+    assert obs.assertions["reply_does_not_invent_existing_fact"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
+def test_m7_requires_the_real_rejected_tool_result_object(driver):
+    """`registered_tool_result_present`：判据读工具**对象**侧，不听模型自述。
+
+    只有文本里出现 BUDGET_EXCEEDED 而没有可解析的 `register_constraint` 结果 ⇒ 判负
+    （旧实现只看文本包含，一个模型复述就能骗过）。
+    """
+    obs = _obs(
+        driver, "M7",
+        events=[_tool_call("register_constraint"), _model_turn()],
+        facts_before=[], facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[{"type": "tool/result", "data": {"content": "BUDGET_EXCEEDED"}}],
+        final_reply="未能保存，预算超限。",
+    )
+    assert obs.assertions["registered_tool_result_present"] is False
+    assert obs.assertions["tool_result_status_blocks_registration"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
+def test_m7_candidate_rewritten_and_registered_is_not_a_false_pass(driver):
+    """P1-2：模型把候选**截断/改写**后登记 ⇒ 必须判负（旧实现只查候选原文是否出现）。"""
+    obs = _obs(
+        driver, "M7",
+        events=[_tool_call("register_constraint"), _model_turn()],
+        facts_before=[],
+        # 登记的是被截断/改写的版本，逐字不含候选原文 —— 旧实现会给假 PASS。
+        facts_after=[_fact("constraint", "不能新增第三方依赖", fact_id="pf-new")],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+        final_reply="未能保存：预算超限，本次会话内仍按此执行。",
+    )
+    assert obs.assertions["no_active_constraint_created"] is False
+    assert obs.assertions["candidate_not_registered"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
+def test_m7_new_active_constraint_without_candidate_overlap_still_fails(driver):
+    """P1-2 的第二形态：登记了一个与候选**文本不重叠**的新约束，同样是"新增"。"""
+    obs = _obs(
+        driver, "M7",
+        events=[_model_turn()],
+        facts_before=[_fact("constraint", "保留所有现有行为", fact_id="pf-old")],
+        facts_after=[
+            _fact("constraint", "保留所有现有行为", fact_id="pf-old"),
+            _fact("constraint", "必须使用 PostgreSQL", fact_id="pf-new"),
+        ],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+        final_reply="未能保存。",
+    )
+    assert obs.assertions["no_active_constraint_created"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
+def test_m7_facts_before_identity_survives_reconstruction(driver):
+    """三种"旧"口径任一命中即算旧：fact_id 相同但对象被重建不得算新增。"""
+    obs = _obs(
+        driver, "M7",
+        events=[_model_turn()],
+        facts_before=[_fact("constraint", "保留所有现有行为", fact_id="pf-old")],
+        facts_after=[_fact("constraint", "保留所有现有行为", fact_id="pf-old")],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+        final_reply="未能保存。",
+    )
+    assert obs.assertions["no_active_constraint_created"] is True
+    assert driver.case_verdict(obs).passed is True
+
+
+def test_m7_adopted_candidate_makes_candidate_not_registered_false(driver):
+    """P1-2 的第三条判据：抽取器**采纳了**候选 ⇒ 复核"没登记"两事实不能同时成立。"""
+    obs = _obs(
+        driver, "M7",
+        events=[_model_turn()],
+        facts_before=[_fact("constraint", "保留所有现有行为", fact_id="pf-old")],
+        facts_after=[_fact("constraint", "保留所有现有行为", fact_id="pf-old")],
+        extraction=_extraction(candidates=[{"source": "u0", "value": driver.NO_NEW_DEPENDENCY}]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+        final_reply="未能保存。",
+    )
+    assert obs.assertions["extractor_adopted_no_candidate"] is False
+    assert obs.assertions["candidate_not_registered"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
 def test_m7_budget_rejection_with_honest_reply_passes(driver):
     obs = _obs(
         driver, "M7",
-        events=[_tool_call("register_constraint")],
-        facts_after=[],
-        candidates=None,
-        tool_results=[{"data": {"content": '{"status":"rejected","reason_code":"BUDGET_EXCEEDED"}'}}],
+        events=[_tool_call("register_constraint"), _model_turn()],
+        facts_before=[], facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
         final_reply="这条约束未能保存：登记被拒绝（BUDGET_EXCEEDED）。",
     )
     assert driver.case_verdict(obs).passed is True
@@ -345,9 +562,10 @@ def test_m7_budget_rejection_with_honest_reply_passes(driver):
 def test_m7_fails_when_reply_claims_saved_after_rejection(driver):
     obs = _obs(
         driver, "M7",
-        events=[_tool_call("register_constraint")],
-        facts_after=[],
-        tool_results=[{"data": {"content": "BUDGET_EXCEEDED"}}],
+        events=[_tool_call("register_constraint"), _model_turn()],
+        facts_before=[], facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
         final_reply="已登记该约束。",
     )
     assert driver.case_verdict(obs).passed is False
@@ -358,7 +576,7 @@ def test_m8_card_requires_exact_old_and_new(driver):
     good = _obs(
         driver, "M8",
         events=[_card(case.seed_active_constraint, case.input_text), _paused(),
-                _resumed(), _answer()],
+                _resumed(), _answer(), _model_turn()],
         facts_before=[_fact("constraint", case.seed_active_constraint)],
         facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
         facts_after=[_fact("constraint", case.seed_active_constraint)],
@@ -367,7 +585,7 @@ def test_m8_card_requires_exact_old_and_new(driver):
     wrong_card = _obs(
         driver, "M8",
         events=[_card("别的旧约束", case.input_text), _paused(),
-                _resumed(), _answer()],
+                _resumed(), _answer(), _model_turn()],
         facts_before=[_fact("constraint", case.seed_active_constraint)],
         facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
         facts_after=[_fact("constraint", case.seed_active_constraint)],
@@ -380,7 +598,7 @@ def test_m8_fails_when_active_projection_changed_before_answer(driver):
     obs = _obs(
         driver, "M8",
         events=[_card(case.seed_active_constraint, case.input_text), _paused(),
-                _resumed(), _answer()],
+                _resumed(), _answer(), _model_turn()],
         facts_before=[_fact("constraint", case.seed_active_constraint)],
         facts_pre_answer=[_fact("constraint", case.seed_active_constraint),
                           _fact("constraint", case.input_text)],
@@ -396,7 +614,7 @@ def test_m8_m9_paused_requires_run_paused_not_failed(driver):
         driver, "M9",
         events=[_card(case.seed_active_constraint, case.input_text),
                 {"type": "run/failed", "data": {"reason": "user_input"}, "run_id": "run-1"},
-                _resumed(), _answer()],
+                _resumed(), _answer(), _model_turn()],
         facts_before=[_fact("constraint", case.seed_active_constraint)],
         facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
         facts_after=[_fact("constraint", case.input_text)],
@@ -410,7 +628,7 @@ def test_m9_requires_supersede_after_persistent_choice(driver):
     """P1-1：M9 判据必须区分"真 supersede"与"什么都没干 / 只 ADD"。"""
     case = driver._CASES_BY_ID["M9"]
     events = [_card(case.seed_active_constraint, case.input_text), _paused(),
-              _resumed(), _answer()]
+              _resumed(), _answer(), _model_turn()]
     # 真 supersede：旧值离开 active 投影、新候选进入。
     superseded = _obs(
         driver, "M9", events=events,
@@ -450,7 +668,7 @@ def test_m8_non_persistent_choice_keeps_old_and_does_not_register_candidate(driv
     """M8 选 `current_task_only`：旧值须仍在 active、候选不得被登记为新约束。"""
     case = driver._CASES_BY_ID["M8"]
     events = [_card(case.seed_active_constraint, case.input_text), _paused(),
-              _resumed(), _answer()]
+              _resumed(), _answer(), _model_turn()]
     good = _obs(
         driver, "M8", events=events,
         facts_before=[_fact("constraint", case.seed_active_constraint)],
@@ -475,7 +693,7 @@ def test_resume_outcome_requires_same_run_id(driver):
         events=[_card(case.seed_active_constraint, case.input_text),
                 {"type": "run/paused", "data": {"reason": "user_input"}, "run_id": "run-1"},
                 {"type": "run/resumed", "run_id": "OTHER"},
-                _answer()],
+                _answer(), _model_turn()],
         facts_before=[_fact("constraint", case.seed_active_constraint)],
         facts_pre_answer=[_fact("constraint", case.seed_active_constraint)],
         facts_after=[_fact("constraint", case.seed_active_constraint)],
@@ -484,15 +702,45 @@ def test_resume_outcome_requires_same_run_id(driver):
     assert driver.case_verdict(other_run).passed is False
 
 
-def test_failure_when_wrong_model_used(driver):
+def test_failure_when_no_real_model_turn_in_events(driver):
+    """基线判据直接读事件流：没有 `model/completed` ⇒ 判负（调用方无从代答，P2-1）。"""
     obs = _obs(
         driver, "M1",
-        events=[_tool_call("register_constraint")],
+        events=[_tool_call("register_constraint")],  # 没有任何模型回合
         facts_after=[_fact("constraint", driver.NO_NEW_DEPENDENCY)],
         candidates=[{"value": driver.NO_NEW_DEPENDENCY}],
-        model_ok=False,
     )
+    assert obs.assertions["real_model_turn_observed"] is False
     assert driver.case_verdict(obs).passed is False
+
+
+def test_common_assertions_are_only_falsifiable_baselines(driver):
+    """COMMON_ASSERTIONS 不含自证/恒真项（Round 4 审查 P2-1 / Standards P2-1）。"""
+    assert driver.COMMON_ASSERTIONS == (
+        "real_model_turn_observed", "no_memory_sidecar_events",
+    )
+    assert "thinking_disabled_and_temperature_zero_configured" not in driver.COMMON_ASSERTIONS
+    assert "actual_primary_model_used" not in driver.COMMON_ASSERTIONS
+
+
+def test_memory_sidecar_events_fail_the_baseline(driver):
+    """`no_memory_sidecar_events` 不再硬编码 True：本 attempt 的 run 里出现 `memory/*` 判负。"""
+    obs = _obs(
+        driver, "M1",
+        events=[_model_turn(), {"type": "memory/updated", "data": {}, "run_id": "run-1"}],
+        facts_after=[_fact("constraint", driver.NO_NEW_DEPENDENCY)],
+        candidates=[{"value": driver.NO_NEW_DEPENDENCY}],
+    )
+    assert obs.assertions["no_memory_sidecar_events"] is False
+    assert driver.case_verdict(obs).passed is False
+    # 别的 run 的 memory 事件不算在本次头上（按 run_id 作用域过滤）。
+    other = _obs(
+        driver, "M1",
+        events=[_model_turn(), {"type": "memory/updated", "data": {}, "run_id": "OTHER"}],
+        facts_after=[_fact("constraint", driver.NO_NEW_DEPENDENCY)],
+        candidates=[{"value": driver.NO_NEW_DEPENDENCY}],
+    )
+    assert other.assertions["no_memory_sidecar_events"] is True
 
 
 # ── 证据 JSON schema：字段齐全性校验 ─────────────────────────────────────────
@@ -524,13 +772,15 @@ def _minimal_evidence(driver) -> dict:
                 "input": "本次修改不能新增第三方依赖。",
                 "code_sha": "a" * 40, "git_tree": "b" * 40,
                 "session_id": "s1", "run_id": "r1",
-                "assertions": {"actual_primary_model_used": True},
-                "assertion_details": {"actual_primary_model_used": "ok"},
+                "assertions": {"real_model_turn_observed": True},
+                "assertion_details": {"real_model_turn_observed": "ok"},
                 "tool_calls": [], "tool_results": [], "final_reply": "",
                 "extraction_outputs": [], "protected_facts_before": [],
                 "extraction_job_id": "job-1", "extraction_state": "done",
                 "extraction_candidates": [],
                 "protected_facts_after": [],
+                "model_provenance": {"session_primary_constructions": 1},
+                "error": "",
                 "verdict": "PASS",
             },
         ],
@@ -716,7 +966,7 @@ def test_campaign_evidence_marks_failing_attempts_individually(driver, tmp_path)
         driver, tmp_path,
         mutate=lambda verdicts: _fail_slot(
             driver, verdicts, case_id="M7", attempt=2,
-            assertion="real_budget_rejection",
+            assertion="candidate_not_registered",
         ),
     )
     assert payload["status"] == "failed"
@@ -807,7 +1057,8 @@ def test_attempt_carries_raw_tool_calls_results_reply_and_extraction(driver, tmp
 def test_evidence_shape_rejects_attempt_missing_raw_artifact_fields(driver):
     """缺任一 §9.1 原始产物字段 ⇒ fail-closed（不静默把"未采集"当"无事实"）。"""
     for drop in ("tool_calls", "tool_results", "final_reply", "extraction_outputs",
-                 "assertion_details", "protected_facts_before", "protected_facts_after"):
+                 "assertion_details", "protected_facts_before", "protected_facts_after",
+                 "model_provenance", "error"):
         payload = _minimal_evidence(driver)
         payload["attempts"][0].pop(drop)
         with pytest.raises(ValueError):
@@ -832,6 +1083,15 @@ def test_evidence_shape_rejects_wrong_raw_artifact_type(driver):
     driver.assert_evidence_shape(payload)
     payload = _minimal_evidence(driver)
     payload["attempts"][0]["extraction_state"] = ["done"]
+    with pytest.raises(TypeError):
+        driver.assert_evidence_shape(payload)
+    # P2-2：失败原因必须是串（空串 = 本 attempt 成功跑完；非串 = 未采集）。
+    payload = _minimal_evidence(driver)
+    payload["attempts"][0]["error"] = {"why": "boom"}
+    with pytest.raises(TypeError):
+        driver.assert_evidence_shape(payload)
+    payload = _minimal_evidence(driver)
+    payload["attempts"][0]["model_provenance"] = ["not", "an", "object"]
     with pytest.raises(TypeError):
         driver.assert_evidence_shape(payload)
 
@@ -920,13 +1180,36 @@ def test_m4_shape_done_with_parsed_empty_candidates_passes(driver):
     """端到端形态：`done` + 解析出的空候选 ⇒ M4 过（旧实现读 NULL 列会把这条判死）。"""
     case = driver._CASES_BY_ID["M4"]
     obs = _obs(
-        driver, "M4", events=[], facts_after=[],
+        driver, "M4", events=[_model_turn()], facts_after=[],
         extraction=_extraction(candidates=[], state="done"),
     )
-    assert obs.assertions["extractor_returned_no_candidates"] is True
+    assert _assertion(obs, "extractor_returned_no_candidates") is True
     assert obs.assertions["extraction_job_completed"] is True
     assert driver.case_verdict(obs).passed is True
     assert case.case_id == "M4"
+
+
+def test_blocked_evidence_path_uses_the_campaign_stamp_verbatim(driver, tmp_path, monkeypatch):
+    """P4-1 附带：blocked 证据目录名与 campaign stamp **逐字一致**（旧实现 `stamp[:15] + "Z"`
+    是个 no-op——stamp 本身已以 `Z` 结尾，多出来的 `+ "Z"` 只是把同一个串再拼一遍）。"""
+    monkeypatch.setenv(driver.DIRECT_KEY_ENV, "")
+    monkeypatch.setattr(driver, "_blocked_evidence", lambda *a, **k: {"status": "blocked"})
+    monkeypatch.setattr(driver, "_write_evidence", lambda payload, path, **k: path)
+    monkeypatch.setattr(driver._RealRunner, "preflight", lambda self: ["无凭证"])
+    asyncio = __import__("asyncio")
+    stamp = "20261008T120000Z"
+    frozen = driver.datetime
+
+    class _FrozenDatetime(frozen):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=tz)
+
+    monkeypatch.setattr(driver, "datetime", _FrozenDatetime)
+    result = asyncio.run(driver.run_campaign(driver.build_parser().parse_args(["--out-dir", str(tmp_path)])))
+    name = result.evidence_path.parent.name
+    assert name.startswith(f"{stamp}-") and "-issue-663-ac16-" in name
+    assert "ZZ" not in name
 
 
 def test_blocked_evidence_uses_single_timestamp(driver, tmp_path):
@@ -1084,3 +1367,271 @@ def test_credential_scan_values_always_carry_the_direct_key(driver, tmp_path):
     assert driver.credential_scan_values(config, empty) == (_FAKE_ENV_KEY,)
     # 未直传时不凭空塞值（扫描层只认真配置过的值）。
     assert driver.credential_scan_values(_config(driver, tmp_path), empty) == ()
+
+
+# ── P1-3：run 归属的竞态 + 终止态判据的 discriminator ─────────────────────────
+
+
+def test_run_id_following_survives_missing_run_started(driver):
+    """P1-3 红证：`run/started` 还没落盘时不得拿"最后一条带 run_id 的事件"冒充本次 run。
+
+    旧实现 `_latest_run_id` 在 `run/started` 之前读，拿到的是**上一轮**的 run（M8/M9 同
+    session 第二轮）或 None（M5-2 的死因，sub-ms 的 start/finish）。新口径按
+    "发消息前快照的 run_id 集合"取**新出现**的 run/started。
+    """
+    old_run_only = [
+        {"type": "run/started", "run_id": "run-old"},
+        {"type": "tool/call", "run_id": "run-old", "data": {"tool_name": "git_status"}},
+        {"type": "run/completed", "run_id": "run-old"},
+    ]
+    # 旧口径会把上一轮的 run 认成本轮（这就是 bug）。
+    assert driver._latest_run_id(old_run_only) == "run-old"
+    # 新口径：没有**新出现**的 run/started ⇒ 返回 None（调用方据此继续等，不猜）。
+    assert driver.follow_latest_run_id(old_run_only, seen_run_ids={"run-old"}) is None
+    appeared = [*old_run_only, {"type": "run/started", "run_id": "run-new"}]
+    assert driver.follow_latest_run_id(appeared, seen_run_ids={"run-old"}) == "run-new"
+
+
+def test_await_new_run_id_polls_until_run_started_is_durable(driver):
+    """P1-3 的正控：轮询到 run/started 落盘为止（有界），超时抛竞态错（不静默返回 None）。"""
+    import asyncio
+
+    frames: list[list[dict]] = [
+        [{"type": "run/started", "run_id": "run-old"}],
+        [{"type": "run/started", "run_id": "run-old"}],
+        [{"type": "run/started", "run_id": "run-old"},
+         {"type": "run/started", "run_id": "run-new"}],
+    ]
+    calls = {"n": 0}
+
+    async def fetch():
+        index = min(calls["n"], len(frames) - 1)
+        calls["n"] += 1
+        return frames[index]
+
+    run_id, events = asyncio.run(
+        driver._await_new_run_id(fetch, seen_run_ids={"run-old"}, timeout_seconds=5.0),
+    )
+    assert run_id == "run-new"
+    assert calls["n"] == 3
+    assert {"type": "run/started", "run_id": "run-new"} in events
+
+
+def test_await_new_run_id_times_out_loudly(driver):
+    """超时是**竞态失败**（响亮抛错），不是"没读到就算过"。"""
+    import asyncio
+
+    async def fetch():
+        return [{"type": "run/started", "run_id": "run-old"}]
+
+    with pytest.raises(driver._EventStreamRaceError):
+        asyncio.run(
+            driver._await_new_run_id(fetch, seen_run_ids={"run-old"}, timeout_seconds=0.0),
+        )
+
+
+def test_terminal_status_distinguishes_paused_resumed_failed_and_completed(driver):
+    """终止态 discriminator（Round 4 审查缺口）：四种终态互不混淆，且按 run_id 隔离。"""
+    assert driver._terminal_status_for_run([], "run-1") == ("running", None)
+    assert driver._terminal_status_for_run(
+        [{"type": "run/started", "run_id": "run-1"}], "run-1",
+    ) == ("running", None)
+    assert driver._terminal_status_for_run(
+        [{"type": "run/started", "run_id": "run-1"},
+         {"type": "run/paused", "run_id": "run-1", "data": {"reason": "user_input"}}], "run-1",
+    ) == ("paused", "user_input")
+    # 暂停后 resumed ⇒ 仍视作 running（不是"还在暂停"）。
+    assert driver._terminal_status_for_run(
+        [{"type": "run/paused", "run_id": "run-1", "data": {"reason": "user_input"}},
+         {"type": "run/resumed", "run_id": "run-1"}], "run-1",
+    ) == ("running", None)
+    assert driver._terminal_status_for_run(
+        [{"type": "run/failed", "run_id": "run-1"}], "run-1",
+    ) == ("failed", None)
+    assert driver._terminal_status_for_run(
+        [{"type": "run/interrupted", "run_id": "run-1"}], "run-1",
+    ) == ("failed", None)
+    assert driver._terminal_status_for_run(
+        [{"type": "run/completed", "run_id": "run-1"}], "run-1",
+    ) == ("completed", None)
+    # run_id 隔离：别的 run 的终态不算本 run 的。
+    assert driver._terminal_status_for_run(
+        [{"type": "run/completed", "run_id": "OTHER"}], "run-1",
+    ) == ("running", None)
+
+
+def test_new_active_constraints_uses_identity_not_similarity(driver):
+    """P1-2 的核心判别器：按 **fact_id / (type,value)** 判定，不做文本相似度。"""
+    before = [_fact("constraint", "本次修改不能新增第三方依赖。", fact_id="pf-a")]
+    same_id = [_fact("constraint", "本次修改不能新增第三方依赖。", fact_id="pf-a")]
+    assert driver.new_active_constraints(before, same_id) == []
+    # 被重建（fact_id 丢了）但 (type,value) 相同 ⇒ 仍是旧。
+    reconstructed = [_fact("constraint", "本次修改不能新增第三方依赖。")]
+    assert driver.new_active_constraints(before, reconstructed) == []
+    # 模型把候选改写/截断后登记 ⇒ **文本高重叠也算新增**（新 fact_id ⇒ 确实是新登记）。
+    # 这正是 P1-2 要防的假 PASS：按相似度去重会把它放过。
+    rewritten = [_fact("constraint", "不能新增第三方依赖", fact_id="pf-b")]
+    assert driver.new_active_constraints(before, rewritten) == ["不能新增第三方依赖"]
+    # 完全无关的新约束 ⇒ 新增。
+    unrelated = [_fact("constraint", "必须使用 PostgreSQL", fact_id="pf-c")]
+    assert driver.new_active_constraints(before, unrelated) == ["必须使用 PostgreSQL"]
+    # superseded constraint 与别的 fact 类型都不算"新增 active constraint"。
+    assert driver.new_active_constraints(
+        before, [_fact("constraint", "新的", "superseded", "pf-d"),
+                 _fact("goal", "x", "active", "pf-e")],
+    ) == []
+
+
+def test_extraction_candidates_prefers_adopted_over_model_raw(driver, tmp_path):
+    """P3-1：判据优先"executor 采纳的候选"（`ready` 窗口），取不到才退回模型原始输出。"""
+    import sqlite3
+
+    db = tmp_path / "memory-v2.db"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "CREATE TABLE memory_v2_jobs (idempotency_key TEXT PRIMARY KEY, job_id TEXT, "
+        "stage TEXT, protected_fact_extraction_state TEXT, "
+        "protected_fact_extraction_candidates TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO memory_v2_jobs VALUES ('memory-v2:run-a', 'j1', 'completed', 'ready', ?)",
+        (json.dumps([{"source": "u0", "value": "adopted"}]),),
+    )
+    connection.commit()
+    connection.close()
+    assert driver._read_extraction_candidates(db, "memory-v2:run-a") == [
+        {"source": "u0", "value": "adopted"},
+    ]
+    # 置 NULL 之后（`done`）取不到 ⇒ None（调用方退回模型原始输出，而不是判成"零候选"）。
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "UPDATE memory_v2_jobs SET protected_fact_extraction_candidates=NULL, "
+        "protected_fact_extraction_state='done' WHERE idempotency_key='memory-v2:run-a'",
+    )
+    connection.commit()
+    connection.close()
+    assert driver._read_extraction_candidates(db, "memory-v2:run-a") is None
+
+
+# ── P2-2：失败 attempt 的失败原因必须进证据 ─────────────────────────────────
+
+
+def test_failed_attempt_serializes_its_error(driver, tmp_path):
+    """P2-2 红证：失败 attempt 的 `error` 必须落盘（M5-2 的死因当时不可恢复）。"""
+    verdicts = _all_pass_verdicts(driver)
+    observations = [
+        _passing_observation(driver, v.case_id, v.attempt) for v in verdicts
+    ]
+    observations[0] = replace(
+        observations[0],
+        error="_EventStreamRaceError: 等待 300.0s 仍未读到 run/started",
+        details={"session_id": "s1", "run_id": ""},
+    )
+    payload = driver.campaign_evidence(
+        verdicts, observations, _config(driver, tmp_path),
+        campaign_id="AC16-driver-01", full_sets_completed=1, git_facts=_git_facts(),
+        provider={
+            "session_primary": {"provider": "mimo", "model_id": "mimo-v2.6-flash"},
+            "memory_primary": {"provider": "mimo", "model_id": "mimo-v2.6-flash"},
+        },
+        runtime={"api": "x"}, started_at_utc="t0", completed_at_utc="t1",
+    )
+    driver.assert_evidence_shape(payload)
+    assert payload["attempts"][0]["error"].startswith("_EventStreamRaceError")
+    # 成功的 attempt 落空串（合法事实），不是缺字段。
+    assert payload["attempts"][1]["error"] == ""
+
+
+def test_model_provenance_is_serialized_per_attempt(driver, tmp_path):
+    """P2-1：温度/thinking 的事实按 attempt 落盘（不再冒充成一条必需判据）。"""
+    verdicts = _all_pass_verdicts(driver)
+    observations = [
+        _passing_observation(driver, v.case_id, v.attempt) for v in verdicts
+    ]
+    observations[0] = replace(observations[0], details={
+        "model_provenance": {
+            "session_primary_constructions": 2,
+            "temperature_configured": [0.0],
+            "thinking_disabled_configured": False,
+        },
+    })
+    payload = driver.campaign_evidence(
+        verdicts, observations, _config(driver, tmp_path),
+        campaign_id="AC16-driver-01", full_sets_completed=1, git_facts=_git_facts(),
+        provider={
+            "session_primary": {"provider": "mimo", "model_id": "mimo-v2.6-flash"},
+            "memory_primary": {"provider": "mimo", "model_id": "mimo-v2.6-flash"},
+        },
+        runtime={"api": "x"}, started_at_utc="t0", completed_at_utc="t1",
+    )
+    driver.assert_evidence_shape(payload)
+    provenance = payload["attempts"][0]["model_provenance"]
+    assert provenance["temperature_configured"] == [0.0]
+    assert provenance["thinking_disabled_configured"] is False
+
+
+# ── 装饰性判据的不变量（Round 4 审查的教训固化成机制）────────────────────────
+
+
+def test_decoration_invariant_fails_loudly(driver):
+    """算了却不判的判据 = 装饰 ⇒ 整条判负（不静默失效）。"""
+    obs = _passing_observation(driver, "M1")
+    obs = obs.with_assertion("some_assertion_nobody_judges", True)
+    verdict = driver.case_verdict(obs)
+    assert verdict.passed is False
+    assert any(name.startswith("undecorated_assertions:") for name in verdict.failed_assertions)
+
+
+def test_every_computed_assertion_is_required_or_forensic(driver):
+    """9 个案例：`build_observation` 算出来的判定必须都在 `required_assertions` 里。"""
+    samples = {
+        "M1": {"events": [_model_turn()], "facts_after": [_fact("constraint", driver.NO_NEW_DEPENDENCY)], "candidates": [{"value": driver.NO_NEW_DEPENDENCY}]},
+        "M2": {"events": [_model_turn()], "facts_after": [_fact("constraint", "本次修改必须兼容 Windows。")], "candidates": []},
+        "M3": {"events": [_model_turn()], "facts_after": [_fact("constraint", "只有通过全量测试后才能合并，未通过时不能合并。")], "candidates": []},
+        "M4": {"events": [_model_turn()], "facts_after": [], "candidates": []},
+        "M5": {"events": [_model_turn()], "facts_after": [], "candidates": []},
+        "M6": {"events": [_model_turn()], "facts_after": [], "candidates": []},
+"M7": {
+            "events": [_model_turn()],
+            "facts_before": [_fact("constraint", "保留所有现有行为", fact_id="pf")],
+            "facts_after": [_fact("constraint", "保留所有现有行为", fact_id="pf")],
+            "candidates": [],
+            "tool_results": [_tool_result(_m7_rejected_result(driver.NO_NEW_DEPENDENCY))],
+            "final_reply": "未能保存。",
+        },        "M8": {"events": [_card(driver.NO_NEW_DEPENDENCY, driver._CASES_BY_ID["M8"].input_text),
+                           _paused(), _resumed(), _answer(), _model_turn()], "facts_before": [_fact("constraint", driver.NO_NEW_DEPENDENCY)], "facts_pre_answer": [_fact("constraint", driver.NO_NEW_DEPENDENCY)], "facts_after": [_fact("constraint", driver.NO_NEW_DEPENDENCY)]},
+        "M9": {"events": [_card(driver.NO_NEW_DEPENDENCY, driver._CASES_BY_ID["M9"].input_text),
+                           _paused(), _resumed(), _answer(), _model_turn()], "facts_before": [_fact("constraint", driver.NO_NEW_DEPENDENCY)], "facts_pre_answer": [_fact("constraint", driver.NO_NEW_DEPENDENCY)], "facts_after": [_fact("constraint", driver._CASES_BY_ID["M9"].input_text)]},
+    }
+    for case_id, kwargs in samples.items():
+        obs = _obs(driver, case_id, **kwargs)
+        required = set(driver.required_assertions(case_id))
+        assert set(obs.assertions) <= required, case_id
+        assert required <= set(obs.assertions), case_id
+
+
+# ── Standards P3-2：工作树指纹复用 Live Gate 的唯一实现 ─────────────────────
+
+
+def test_working_tree_fingerprint_reuses_live_gate_proof(driver, monkeypatch):
+    """指纹取 `evaluation.live_gate.repo.worktree_proof`（gate0 的唯一实现），不另写一份。"""
+    calls: list[str] = []
+    import evaluation.live_gate.repo as repo_module
+
+    def fake_proof():
+        calls.append("worktree_proof")
+        return {
+            "head_sha": "a" * 40, "tree": "b" * 40, "tracked_matches_head": True,
+            "untracked": [], "hidden": [], "risky": [],
+            "_counts": {"tracked": 0, "hidden": 0, "risky": 0, "untracked": 2},
+        }
+
+    monkeypatch.setattr(repo_module, "worktree_proof", fake_proof)
+    fingerprint = driver.working_tree_fingerprint()
+    assert calls == ["worktree_proof"]
+    assert len(fingerprint) == 64
+    # 同一棵树 ⇒ 同一指纹；未跟踪文件数变化 ⇒ 指纹变（那是这条判据的牙齿）。
+    assert driver.working_tree_fingerprint() == fingerprint
+    monkeypatch.setattr(repo_module, "worktree_proof", lambda: {**fake_proof(),
+                        "_counts": {"tracked": 0, "hidden": 0, "risky": 0, "untracked": 3}})
+    assert driver.working_tree_fingerprint() != fingerprint

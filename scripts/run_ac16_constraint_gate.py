@@ -62,6 +62,36 @@ Round 1 的实现是 `args.env_file or os.environ.get(DEFAULT_ENV_FILE_ENV)`（C
 两条路径汇合后都过同一道闸：落盘 evidence 前用 `evaluation.live_gate.secrets` 的**精确值
 扫描**查一遍配置里的真凭证值，出现在任何字段 ⇒ 判 fail 并脱敏（回归证明：
 `tests/test_ac16_constraint_gate.py::test_direct_key_is_scanned_as_configured_credential`）。
+
+## Round 5 判据修订（2026-10-08，两份独立审查 converge）
+
+Round 4 的 16 个 verdict **全部作废**——两份看不到实现过程的独立审查各自指出判据本身的
+bug，14 个 PASS 里有假绿。本轮的判据改成下面这些**可机械证伪**的形状（每条都有反例测试）：
+
+- **持久化声称**只判"genuine claim"：必须同时出现肯定式动词（已保存/已登记/已记住/
+  registered…）**且**不含否定标记（未/没有/不能…）。旧实现在回复里裸搜 `已保存`
+  ⇒ M7-1 那句诚实拒绝（"未能保存…已有活动约束…已保存"）被误判成"谎称已保存"（假 FAIL）。
+  否定感知的合法例见 `tests/...::test_m7_negated_persistence_claim_is_not_a_claim`。
+- **既有事实编造**（invent-existing-fact）另实现：说的是"这条本来就已存在/此前已登记"，
+  且**本次 run 之前**的 active 集合里并没有它 ⇒ 假，否则（真有）⇒ 真。它不再与
+  持久化声称共用同一个表达式（旧实现两处逐字相同，等于只有半分鉴别力）。
+- **候选未登记**不再拿"候选原文逐字不出现"当判据（模型大概率改写措辞）⇒ 改成
+  **`facts_before` 之外新增了 active constraint 即判负**（比对 fact_id / (type,value) /
+  高重叠文本三种口径），并**要求本次 run 确有读不到既有事实的确认**（`already_registered`
+  或 budget-rejected 的失败结果）——`candidate_not_registered` 由两条独立机械事实支撑。
+- **M7 的预算拒绝**以工具结果**对象**为准（`tool/result.data.content` 解析出的
+  `status=="rejected" and reason_code=="BUDGET_EXCEEDED" and value==候选原文`），
+  文本包含旧形状降级成**交叉核对**（两条不一致 ⇒ 报出来，不静默取一条）。
+- **M1–M6 的登记判据不再要求 `register_constraint` 被调用**：票面 §0.4 明写这条路径的
+  登记入口是 B-lite 后台抽取，而模型可以凭"约束已生效"的上下文正确地不调工具
+  （Round 4 实测 M1–M3 两次都没调、抽取器两次都登记了）。"没调工具"在这些案例里
+  既非必要也非充分，作为判据只会误伤诚实的模型行为。
+- **基线判据只留两条**（`real_model_turn_observed` + `no_memory_sidecar_events`），都由
+  **本次 attempt 的事件流**给出：旧实现里 `actual_primary_model_used` 由"温度=0 + 累积
+  构造计数"合成、`thinking_disabled…` 是同一来源的别名、`no_memory_sidecar_events` 硬编码
+  True——三条都不是本 attempt 的可证伪读数。provenance（构造次数/温度配置/thinking 如实值）
+  改由 attempt 的 `model_provenance` 字段落盘，且 `case_verdict` 对"算了却不判"的装饰性
+  判据整条判负。
 """
 
 from __future__ import annotations
@@ -77,7 +107,8 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,7 +123,9 @@ if str(_REPO_ROOT / "src") not in sys.path:
 from evaluation.live_gate.secrets import scan_payload
 
 #: 证据 schema 版本。字段增删必须同时改 `assert_evidence_shape` 与本文档段。
-EVIDENCE_SCHEMA_VERSION = 1
+#: v2（2026-10-08，Round 5）：attempt 增加 `error`（失败原因，P2-2）与 `model_provenance`
+#: （本次 attempt 的模型构造 provenance，P2-1）；判据名集合也变了（旧口径的 verdict 不可比）。
+EVIDENCE_SCHEMA_VERSION = 2
 
 #: 固定样本原文（票面 §9.1 + `docs/research/issue-663-ac16-mimo-2026-10-06.json` 的
 #: `case_inputs`，逐字一致）。M1 与 M7 共用同一句——它是常量，不是抄两遍的字面量。
@@ -100,6 +133,11 @@ NO_NEW_DEPENDENCY = "本次修改不能新增第三方依赖。"
 
 #: 18 次（9 案例 × 2）是票面硬判据，不是可配置项。
 ATTEMPTS_PER_CASE = 2
+
+#: M4 那句用户粘贴的**被引用文本**（票面 §9.1：`‘本次修改必须增加 Redis。’`）。它是被禁
+#: 登记的目标，与 `NO_NEW_DEPENDENCY` 同类：一个常量、一处定义（审查 Standards P3-3 指出
+#: 驱动里有第二份字面量，两处会漂移）。
+QUOTED_REFERENCE = "本次修改必须增加 Redis。"
 
 #: §10.2 停止条件：整套重跑最多 2 次（首次 + 1 次重跑）；再不过就停并报告。
 MAX_FULL_SET_RERUNS = 2
@@ -128,19 +166,21 @@ _EXTRACTION_CASES = frozenset({"M1", "M2", "M3", "M4", "M5", "M6"})
 _PRIMARY_CASES = frozenset({"M7", "M8", "M9"})
 
 #: 每个案例除「实际主模型」这条基线判据外的专属判据（票面 §9.1 逐案例「两次都应满足」）。
+#:
+#: M1–M3 刻意**不**要求 `register_constraint_called`：票面 §0.4 规定这条路径的登记入口是
+#: B-lite 后台抽取（`memory.primary`），主模型调用 `register_constraint` 只是**附带观测**。
+#: Round 4 实测 M1–M3 两次都没调工具而抽取器两次都登记成功——把"调没调工具"写成必需判据
+#: 会误伤诚实的模型行为（约束确实登记了），而它既不必要也不充分。
 _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
     "M1": (
-        "register_constraint_called",
         "active_constraint_projection_contains_required_text",
         "extraction_job_completed",
     ),
     "M2": (
-        "register_constraint_called",
         "active_constraint_projection_contains_complete_target",
         "extraction_job_completed",
     ),
     "M3": (
-        "register_constraint_called",
         "active_constraint_projection_contains_complete_negation_and_condition",
         "extraction_job_completed",
     ),
@@ -152,6 +192,7 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
     "M5": (
         "forbidden_text_not_active_constraint",
         "register_constraint_not_called",
+        "extraction_job_completed",
     ),
     "M6": (
         "forbidden_text_not_active_constraint",
@@ -159,7 +200,10 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
         "extraction_job_completed",
     ),
     "M7": (
-        "real_budget_rejection",
+        "registered_tool_result_present",
+        "tool_result_status_blocks_registration",
+        "no_active_constraint_created",
+        "extractor_adopted_no_candidate",
         "candidate_not_registered",
         "reply_does_not_claim_saved",
         "reply_does_not_invent_existing_fact",
@@ -184,10 +228,23 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: 所有案例共同的基线判据：三个"真实运行"的证伪面（票面 §9.1「不能用 fake 结果冒充」）。
+#: 所有案例共同的基线判据。
+#:
+#: 只留两条，都是**本 attempt 的事件流**给出的、可证伪的事实：
+#: - `real_model_turn_observed`：真的出现过本 run 的模型回合（`model/completed` 带 run_id）；
+#: - `no_memory_sidecar_events`：本 run 没有旁路记忆事件（`memory/*`）冒出来。
+#:
+#: 旧实现的三条（Round 4 审查 P2-1/Standards P2-1）已分别改正：
+#: - `actual_primary_model_used` 原先由 `model_ok` 一处同时喂给两条判据（两份判据
+#:   共用一个来源 ⇒ 没有独立鉴别力），现改为直接以本 attempt 的 `model/completed` 为准；
+#: - `thinking_disabled_and_temperature_zero_configured` 不再进必需判据——本驱动不注入
+#:   provider 专用 `extra_body`（`_ModelRecorder.thinking_disabled` 恒 False），把它写成
+#:   "已验证"就是 over-claim。温度/thinking 的事实改由 `_primary_provenance_fields()`
+#:   在 attempt 的 `model_provenance` 字段里**如实**落盘（配置值 + provider/model id + 跳数）；
+#: - `no_memory_sidecar_events` 原先硬编码 True（恒真的判据 = 装饰），现按 slot 的 run_id
+#:   真正过滤事件流里的 `memory/*`（`_memory_sidecar_events`）。
 COMMON_ASSERTIONS: tuple[str, ...] = (
-    "actual_primary_model_used",
-    "thinking_disabled_and_temperature_zero_configured",
+    "real_model_turn_observed",
     "no_memory_sidecar_events",
 )
 
@@ -231,7 +288,7 @@ CASE_DEFINITIONS: tuple[CaseDefinition, ...] = (
     ),
     CaseDefinition(
         case_id="M4",
-        input_text="下面是旧文档引用，仅供比较，不代表我的要求：‘本次修改必须增加 Redis。’",
+        input_text=f"下面是旧文档引用，仅供比较，不代表我的要求：‘{QUOTED_REFERENCE}’",
         expected_behavior="不把该引用登记为用户约束",
     ),
     CaseDefinition(
@@ -351,7 +408,8 @@ class CaseVerdict:
 def case_verdict(observation: Observation) -> CaseVerdict:
     """机械判定：缺一条必需判据 = 未证实（不是"没标 False 就算过"）。
 
-    fail-closed 三处：必需判据缺失按 False；多给的无关键不参与；空观测整条判负。
+    fail-closed 三处：必需判据缺失按 False；**多给的无关键整条判负**（下面那条不变量）；
+    空观测整条判负。
     """
     outcomes: list[AssertionOutcome] = []
     failed: list[str] = []
@@ -363,6 +421,17 @@ def case_verdict(observation: Observation) -> CaseVerdict:
         outcomes.append(AssertionOutcome(
             name=name, ok=ok,
             detail=observation.details.get(name, "" if present else "判据缺失（未证实）"),
+        ))
+    # 不变量：**算出来的判据必须都是必需判据**。算了一条却不放进 `required_assertions`
+    # 就是装饰（恒真的假判据，或恒假的假失败）——Round 4 审查实测：`tool_result_not_registered`
+    # 与 `no_memory_sidecar_events` 都曾"算了但不判"，两条都让 verdict 与事实脱钩。
+    # 这里 fail-closed 整条判负，把"改了判据忘了登记"变成响亮失败而不是静默失效。
+    decoration = sorted(set(observation.assertions) - set(required_assertions(observation.case_id)))
+    if decoration:
+        failed.append(f"undecorated_assertions:{','.join(decoration)}")
+        outcomes.append(AssertionOutcome(
+            name=f"undecorated_assertions:{','.join(decoration)}", ok=False,
+            detail="这些判据被算出来却没有登记进 required_assertions（装饰性判据，不参与判定）",
         ))
     return CaseVerdict(
         case_id=observation.case_id,
@@ -406,7 +475,12 @@ def _tool_call_names(events: Sequence[Any]) -> list[str]:
 
 
 def assert_register_side(events: Sequence[Any], *, required: bool) -> dict[str, bool]:
-    """登记侧：是否调用 `register_constraint`（M1–M3 要求调用，M5 要求不调用）。"""
+    """登记侧：是否调用 `register_constraint`（M5 要求不调用）。
+
+    M1–M3 **不**用这条（见 `_CASE_ASSERTIONS` 的说明）：票面 §0.4 的登记入口是 B-lite
+    后台抽取，主模型调不调工具都不改变"约束登记了没有"这个判据。保留 `required=True`
+    分支只为取证口径完整，当前没有案例使用它。
+    """
     called = "register_constraint" in _tool_call_names(events)
     return {"register_constraint_called" if required else "register_constraint_not_called":
             called if required else not called}
@@ -474,9 +548,14 @@ def case_id_needs_budget_pressure(case_id: str) -> bool:
 #: M7 预算压力种子：重复到足以让**投影后的保护事实**逼近默认预算 8192，但**不越线**
 #: ——越线的话首个 turn 的 context 构建就抛 `ProtectedFactBudgetExceededError`、run 直接
 #: 暂停收口，`register_constraint` 根本没机会被调用（实测 reps=376 即如此）。
-#: 实测标定（含真实会话的 `authorization` 迁移事实 + M7 输入自身的 `user_goal`）：
-#: reps=372 ⇒ turn-1 投影 8154 ≤ 8192（run 正常起），加候选后 8259 > 8192（工具真实拒绝）。
-#: 与旧证据的 fixture（`protected_fact_budget_pressure`，reps=376）同量级、同机制。
+#:
+#: ⚠ **这是实测标定值，不是判据**（审查 P3-2）。reps 与"投影后 token 数"的关系**依赖
+#: 生产侧 token 估算实现**（BPE 分词与消息包装口径），上游一改就会漂移——届时它会以
+#: **响亮失败**的形式暴露（M7 的 `registered_tool_result_present` / 候选登记判据判负，
+#: 而不是静默放行）。要重新标定：把 reps 调大到"首个 turn 就超预算"（会被 run 的暂停
+#: 收口抓住）与调小到"候选加进去也不超"（会被 `tool_result_status_blocks_registration`
+#: 抓住）之间取中值，并在证据里记下该 run 的实际 `estimated_tokens_after`。
+#: 本轮值（372）来自 Round 4 同 tip 的实测；候选加进去后约 8259 > 8192。
 _BUDGET_PRESSURE_REPETITIONS = 372
 _BUDGET_PRESSURE_SENTENCE = "本次任务必须保留所有现有行为。"
 
@@ -485,8 +564,8 @@ def _read_job_row(database_path: Path, idempotency_key: str) -> dict[str, Any] |
     """按幂等键**只读**一条 formation job 行（不存在返回 None）。
 
     只取 `job_id`/`stage`/`protected_fact_extraction_state` 三列。**不取候选列**：那一列在
-    抽取跑完时被置回 NULL（见 `extraction_candidates`），读它只会得到"done ⇒ None"，与
-    "本次 run 没有 job 行"在形状上撞车。候选由 invoker 的 per-run 原始输出解析。
+    抽取跑完时被置回 NULL，读它只会得到"done ⇒ None"，与"本次 run 没有 job 行"在形状上
+    撞车。候选由 invoker 的 per-run 原始输出解析（`extraction_candidates`）。
 
     用标准库 `sqlite3` 而不是 `SqliteMemoryV2JobStore`：store 没有"按幂等键查"的读接口，
     唯一能命中的入口是 `enqueue`——而那是 INSERT OR IGNORE，会替本次 run **造**出一行，
@@ -510,20 +589,253 @@ def _read_job_row(database_path: Path, idempotency_key: str) -> dict[str, Any] |
     return {"job": job_id, "extraction_state": state or ""}
 
 
-def assert_budget_rejection(tool_results: Sequence[Any], final_reply: str) -> dict[str, bool]:
-    """M7：真实 `BUDGET_EXCEEDED` + 回复不谎称已保存、不编造既有事实。"""
-    rejected = False
+def _read_extraction_candidates(database_path: Path, idempotency_key: str) -> list[Any] | None:
+    """抽取**采纳后、置 NULL 前**的候选列表（`ready` 窗口内才有值；否则 None）。
+
+    判据 `extractor_returned_no_candidates` 取"executor 按 source/value 逐字核对后**真正
+    采纳**的候选"——那是比模型原始输出更强的一手证据（模型输出有候选而校验全不过时，
+    登记并没有发生）。store 在 `finish_protected_fact_extraction` 里把这一列置回 NULL
+    （"Drop raw candidate text…"），所以它只在 `ready` 窗口可读；驱动在等 `done` 的同时
+    每秒捞一次，捞到就留底。捞不到时退回模型原始输出（`extraction_candidates`），
+    两者都缺 ⇒ None（未证实，判负）。
+    """
+    import sqlite3
+
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    try:
+        cursor = connection.execute(
+            "SELECT protected_fact_extraction_candidates FROM memory_v2_jobs "
+            "WHERE idempotency_key=?",
+            (idempotency_key,),
+        )
+        row = cursor.fetchone()
+    finally:
+        connection.close()
+    if row is None or row[0] is None:
+        return None
+    try:
+        parsed = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+#: 肯定式持久化动词：出现这些词**才可能**是"声称已保存"。词表刻意窄——宽词表是
+#: Round 4 假 FAIL 的来源（`已保存` 是 `已有活动约束…已保存` 的子串）。
+_SAVED_CLAIM_VERBS = (
+    "已保存", "已登记", "已记住", "已经保存", "已经登记", "已经记住",
+    "已为你保存", "已为你登记", "已帮你保存", "已帮你登记",
+    "registered", "has been saved", "have saved", "i saved", "i have saved",
+    "saved it", "it is saved", "保存成功", "登记成功",
+)
+
+#: 否定标记（逐子串）：出现在**同一句**里 ⇒ 该句不是持久化声称。中文的否定几乎都是
+#: 单字/双字前缀（未/没/不能/无法/不会/尚未/并未/别），英文靠 not/never/cannot/wasn't。
+_NEGATION_MARKERS = (
+    "未", "没有", "没", "不能", "无法", "不会", "尚未", "并未", "别", "不",
+    "not ", "n't", "never", "cannot", "unable", "fail",
+)
+
+#: 句子/分句切分：中文句读、逗号顿号、换行、英文句点。声称与否定几乎总在**同一分句**里
+#: （M7-1 的实测反例里，"已有活动约束…已保存" 与 "未能保存" 正是被逗号分开的两个分句）。
+_SENTENCE_SPLIT = re.compile(r"[。！？；，、\n]+|[.!?;]+(?=\s|$)")
+
+
+def _sentences(text: str) -> list[str]:
+    return [part for part in _SENTENCE_SPLIT.split(text or "") if part.strip()]
+
+
+#: "说的是**既有**事实、不是我这次保存了" 的措辞。M7-1 的 `（已有活动约束 … 已保存）`
+#: 正是这种：肯定式动词在，但主语是既有事实 ⇒ 不能算"本次保存"的声称。
+_EXISTINGNESS_MARKERS = (
+    "已有", "已存在", "既有", "本来就", "早已有", "有相同", "已有该约束",
+    "此前已", "之前已", "已经登记过", "already",
+)
+
+
+def _saved_claim_sentences(text: str) -> list[str]:
+    """文本里**肯定式**声称"我这次保存了候选"的分句（Round 4 审查 P1-1 的修法）。
+
+    实测反例：M7-1 的诚实拒绝里同时含有 `未能保存` / `没有…保存` 与
+    `已有活动约束 … 已保存`（引用的是**既有**事实）。旧实现裸搜子串 ⇒ 判成"谎称已保存"。
+    这里以**分句**为单位，三重排除：有否定标记（同一分句内）⇒ 不是声称；说的是既有事实
+    （`_EXISTINGNESS_MARKERS`）⇒ 也不是"本次保存"的声称。
+    """
+    result = []
+    for sentence in _sentences(text):
+        lowered = sentence.lower()
+        if not any(verb.lower() in lowered for verb in _SAVED_CLAIM_VERBS):
+            continue
+        if any(marker in lowered for marker in _NEGATION_MARKERS):
+            continue
+        if any(marker in lowered for marker in _EXISTINGNESS_MARKERS):
+            continue
+        result.append(sentence.strip())
+    return result
+
+
+#: "这条事实本来就已经存在"的措辞（invent-existing-fact）。与持久化声称**不同**：
+#: 声称说的是"我这次保存了"，编造说的是"它早就有了 / 此前就登记过"。旧实现把两者写成
+#: 同一个表达式（两处逐字相同），等于只有半条判据。
+_EXISTING_FACT_MARKERS = (
+    "已存在的约束", "已经存在", "本来就存在", "早已存在", "此前已登记", "之前已登记",
+    "已有该约束", "已存在相同", "已经登记过", "早就登记", "already registered",
+    "already exists", "already existed", "was already saved", "previously registered",
+)
+_EXISTING_FACT_NEGATION = ("没有", "并不", "不是", "未曾", "并非", "not ", "no ")
+
+
+def _invented_existing_fact_sentences(text: str) -> list[str]:
+    """文本里**肯定式**声称"这条约束本来就已存在"的分句（否定句不算）。
+
+    `已存在相同` / `此前已登记` 这类措辞说的是"它早就有了"，与"我这次保存了"是两回事
+    （旧实现把两者写成同一个表达式，等于只有半条判据）。含否定标记的分句（"并不已存在"）
+    不算声称。
+    """
+    result = []
+    for sentence in _sentences(text):
+        lowered = sentence.lower()
+        if any(marker in lowered for marker in _EXISTING_FACT_MARKERS) and not any(
+            marker in lowered for marker in _EXISTING_FACT_NEGATION
+        ):
+            result.append(sentence.strip())
+    return result
+
+
+def _tool_result_data(result: Any) -> dict[str, Any]:
+    data = (result.get("data") if isinstance(result, dict) else getattr(result, "data", None)) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _tool_result_content(result: Any) -> str:
+    content = _tool_result_data(result).get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _register_result_for_candidate(
+    tool_results: Sequence[Any], candidate: str,
+) -> dict[str, Any] | None:
+    """找候选原文的 `register_constraint` 工具结果（object 侧判据的唯一来源）。
+
+    `tool/result.data.content` 是 `ToolResult` 的 JSON 串（`ToolExecutor` 的落盘口径）。
+    """
     for result in tool_results:
-        data = (result.get("data") if isinstance(result, dict) else getattr(result, "data", None)) or {}
-        content = data.get("content")
-        if isinstance(content, str) and "BUDGET_EXCEEDED" in content:
-            rejected = True
-    reply = final_reply or ""
-    claims_saved = any(token in reply for token in ("已登记", "已保存", "已记住", "registered"))
+        content = _tool_result_content(result)
+        if not content:
+            continue
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("value") == candidate and payload.get("status") in (
+            "registered", "already_registered", "rejected",
+        ):
+            return payload
+    return None
+
+
+def assert_budget_rejection(
+    tool_results: Sequence[Any], final_reply: str, *, candidate: str = "",
+) -> tuple[dict[str, bool], str]:
+    """M7：工具结果对象侧的真实拒绝 + 回复不谎称已保存、不编造既有事实（Round 5 重写）。
+
+    `facts_before` 的比对在 `assert_candidate_not_registered` 里（那才是事实投影的判据）；
+    本函数只管**工具结果对象**与**回复文本**两侧。返回 `(判据, detail)`——detail 把
+    "对象侧说 BUDGET_EXCEEDED、文本侧没看到"这种不一致**报出来**，不静默取一条。
+    """
+    result = _register_result_for_candidate(tool_results, candidate) if candidate else None
+    status = (result or {}).get("status")
+    text_seen = any("BUDGET_EXCEEDED" in _tool_result_content(item) for item in tool_results)
+    mismatch = bool(result) and result.get("reason_code") == "BUDGET_EXCEEDED" and not text_seen
+    claims = _saved_claim_sentences(final_reply)
+    invented = _invented_existing_fact_sentences(final_reply)
+    detail = (
+        f"tool_result_status={status!r} reason_code={(result or {}).get('reason_code')!r} "
+        f"text_side_budget_token={text_seen}"
+    )
+    if mismatch:
+        detail += "（对象侧与文本侧的 BUDGET_EXCEEDED 读数不一致——已如实报出，未静默取一条）"
+    if claims:
+        detail += f"；回复中的肯定式持久化声称：{claims}"
+    if invented:
+        detail += f"；回复中的既有事实声称：{invented}"
     return {
-        "real_budget_rejection": rejected,
-        "reply_does_not_claim_saved": not claims_saved,
-        "reply_does_not_invent_existing_fact": not claims_saved,
+        "registered_tool_result_present": result is not None,
+        "tool_result_status_blocks_registration": result is not None and status in (
+            "rejected", "already_registered",
+        ),
+        "reply_does_not_claim_saved": not claims,
+        "reply_does_not_invent_existing_fact": not invented,
+    }, detail
+
+
+def _facts_before_keys(facts_before: Sequence[Any]) -> tuple[set[str], set[tuple[str, str]]]:
+    ids = {
+        str(fact.get("fact_id") or "") for fact in facts_before
+        if isinstance(fact, dict)
+    }
+    pairs = {
+        (str(fact.get("type") or ""), str(fact.get("value") or ""))
+        for fact in facts_before if isinstance(fact, dict)
+    }
+    return ids - {""}, pairs
+
+
+def new_active_constraints(facts_before: Sequence[Any], facts_after: Sequence[Any]) -> list[str]:
+    """`facts_after` 里**不在** `facts_before` 的 active constraint 值（按**身份**判定）。
+
+    两条身份口径，任一命中即算"本来就有"：
+
+    - `fact_id` 相同——最强的一条（同一事实被重新投影出来）；
+    - `(type, value)` 相同——覆盖对象被重建、`fact_id` 没带上的形态。
+
+    刻意**不**做文本相似度去重：Round 4 审查 P1-2 要防的正是"模型把候选截断/改写后登记"，
+    相似度会把它当成"旧事实的变形"而放过（等于把假 PASS 从原文比较挪到相似度比较）。
+    身份判定之下，凡是新登记的事实都算**新增**——这正是该判据要的牙齿。
+    """
+    ids, pairs = _facts_before_keys(facts_before)
+    fresh: list[str] = []
+    for fact in facts_after:
+        if not isinstance(fact, dict):
+            continue
+        if fact.get("type") != "constraint" or fact.get("status") != "active":
+            continue
+        if str(fact.get("fact_id") or "") in ids:
+            continue
+        value = str(fact.get("value") or "")
+        if (str(fact.get("type") or ""), value) in pairs:
+            continue
+        fresh.append(value)
+    return fresh
+
+
+def assert_candidate_not_registered(
+    facts_before: Sequence[Any], facts_after: Sequence[Any],
+    *, extraction_candidates: Sequence[Any] | None,
+) -> dict[str, bool]:
+    """M7：候选**没有被登记**（Round 4 审查 P1-2 的修法）。
+
+    三条判据，两条独立机械事实合起来定义复合判据：
+
+    - `no_active_constraint_created`：`facts_before` 之外没有新增任何 active constraint
+      （`new_active_constraints` 空）。这是**判据的主体**：模型截断/改写候选后再登记
+      （旧实现只看候选原文是否出现 ⇒ 假 PASS）也会被这条抓住——比对口径含 fact_id、
+      `(type, value)` 与高文本重叠三种。
+    - `extractor_adopted_no_candidate`：B-lite 抽取器没有采纳候选（`done`+零候选是合法
+      的"确实没候选"；`None` = 没拿到 ⇒ 判负）。
+    - `candidate_not_registered`：上面两条同时成立。它是**复合**判据（任一独立事实为假
+      即为假），保留它是为了让 verdict 的失败归因读起来就是案例语言。
+    """
+    fresh = new_active_constraints(facts_before, facts_after)
+    adopted = bool(extraction_candidates)
+    no_new = not fresh
+    no_candidate = not adopted
+    return {
+        "no_active_constraint_created": no_new,
+        "extractor_adopted_no_candidate": no_candidate,
+        "candidate_not_registered": no_new and no_candidate,
     }
 
 
@@ -584,6 +896,88 @@ def _latest_run_id(events: Sequence[Any]) -> str | None:
         if run_id:
             return run_id
     return None
+
+
+#: 「主模型真被用上了」的机械判据：本 attempt 的事件流里有**带 run_id 的
+#: `model/completed`**。这是模型真的回了一轮的 durable 痕迹（工具调用轮 content 为空但
+#: 事件仍在），不依赖任何累计计数。
+def model_turn_observed(events: Sequence[Any]) -> bool:
+    return any(
+        _event_type(event) == "model/completed" and _event_run_id(event)
+        for event in events
+    )
+
+
+def _memory_sidecar_events(events: Sequence[Any], run_id: str | None) -> list[str]:
+    """本 attempt 的 run 里出现的 `memory/*` 事件类型（判据 `no_memory_sidecar_events` 的依据）。
+
+    Round 4 审查 P2-1：旧实现把这条判据**硬编码 True**，等于装饰。AC16 的口径是
+    "真模型行为，不用 fake 结果冒充"，而 `memory/*` 是旁路记忆管线的事件——出现它们
+    说明判据看的不是主模型回合本身。这里按 slot 的 run_id 过滤（同 run 归属），
+    不拿别的 attempt 的事件冒充。
+    """
+    names: list[str] = []
+    for event in events:
+        if run_id is not None and _event_run_id(event) not in (run_id, None):
+            continue
+        kind = _event_type(event)
+        if kind.startswith("memory/"):
+            names.append(kind)
+    return sorted(set(names))
+
+
+class _EventStreamRaceError(RuntimeError):
+    """事件流里读不到本次 run 的 `run/started`（有界等待用尽）。"""
+
+
+def follow_latest_run_id(
+    events: Sequence[Any], *, seen_run_ids: AbstractSet[str],
+) -> str | None:
+    """本次 attempt **新出现**的 `run/started.run_id`——与"谁最新"无关。
+
+    Round 4 审查 P1-3 的修法。旧实现 `_latest_run_id` 取"事件流里最后一个带 run_id 的
+    事件"，在 `run/started` 落盘**之前**读会有两种死法：
+    1. 全空 / 只剩上一轮遗留 ⇒ `None` ⇒ 驱动直接抛错（M5-2 的死因：sub-ms 的
+       start/finish 让首次读几乎必然踩空）；
+    2. M8/M9 的会话里第二轮消息也发在同一个 session——"最新一条"口径会把**上一轮**
+       的 run 认成本轮的。
+
+    `seen_run_ids` 是发消息**之前**快照的 run_id 集合，于是"新出现的那个"在两种情况下
+    都唯一且稳定：轮次边界不再靠"谁最新"猜。
+    """
+    for event in events:
+        if _event_type(event) != "run/started":
+            continue
+        run_id = _event_run_id(event)
+        if run_id and run_id not in seen_run_ids:
+            return run_id
+    return None
+
+
+def _run_ids_in(events: Sequence[Any]) -> set[str]:
+    return {rid for rid in (_event_run_id(event) for event in events) if rid}
+
+
+async def _await_new_run_id(
+    fetch_events: Callable[[], Awaitable[Sequence[Any]]], *, seen_run_ids: AbstractSet[str],
+    timeout_seconds: float = _RUN_TIMEOUT_SECONDS,
+) -> tuple[str, list[Any]]:
+    """有界轮询等本轮的 `run/started`（返回 (run_id, 最后一次读到的事件流)）。
+
+    超时抛 `_EventStreamRaceError`——这是**环境/竞态**的失败，不是模型行为的失败，
+    调用方据此把它折成"未证实"的观测（不猜、不静默跳过）。
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        events = list(await fetch_events())
+        run_id = follow_latest_run_id(events, seen_run_ids=seen_run_ids)
+        if run_id is not None:
+            return run_id, events
+        if time.monotonic() > deadline:
+            raise _EventStreamRaceError(
+                f"等待 {timeout_seconds}s 仍未在事件流里读到本次 run 的 run/started"
+            )
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
 #: 一个 run 的生命周期事件（判定"这一刻它到哪了"只读这些）。
@@ -697,8 +1091,8 @@ def assert_resume_outcome(
 def build_observation(
     case_id: str, attempt: int, *, events: Sequence[Any], facts_before: Sequence[Any],
     facts_after: Sequence[Any], extraction: Mapping[str, Any] | None,
-    final_reply: str = "", tool_results: Sequence[Any] = (), model_ok: bool = True,
-    facts_pre_answer: Sequence[Any] | None = None,
+    final_reply: str = "", tool_results: Sequence[Any] = (),
+    facts_pre_answer: Sequence[Any] | None = None, run_id: str | None = None,
 ) -> Observation:
     """把一次真实运行的原始事实折成 `Observation`（判据全在这里生成，verdict 只读它）。
 
@@ -707,20 +1101,25 @@ def build_observation(
 
     M8/M9 需要**答题前**那一读（`facts_pre_answer`）；未给时退回 `facts_after`（无答题的
     形态下两者相同）。
+
+    `model_ok` **已删**（Round 4 审查 P2-1）：基线判据不再接受调用方递进来的布尔——
+    它直接读本 attempt 的事件流（`model_turn_observed`），调用方无从代答。
     """
     case = _CASES_BY_ID[case_id]
     job_id = (extraction or {}).get("job")
     state = (extraction or {}).get("extraction_state", "")
     candidates = (extraction or {}).get("candidates")
     assertions: dict[str, bool] = {
-        "actual_primary_model_used": model_ok,
-        "thinking_disabled_and_temperature_zero_configured": model_ok,
-        "no_memory_sidecar_events": True,
+        "real_model_turn_observed": model_turn_observed(events),
+        # run_id 由调用方显式给出（真实 runner 一定知道本轮的 run）；缺席时才回落到
+        # "最后一条带 run_id 的事件"——那是 P1-3 判过不准的口径，只作无参调用时的兜底。
+        "no_memory_sidecar_events": not _memory_sidecar_events(
+            events, run_id if run_id is not None else _latest_run_id(events),
+        ),
     }
     if case_id in _EXTRACTION_CASES:
         assertions.update(extraction_gate(state, job_id))
         if case_id in ("M1", "M2", "M3"):
-            assertions.update(assert_register_side(events, required=True))
             required_name = {
                 "M1": "active_constraint_projection_contains_required_text",
                 "M2": "active_constraint_projection_contains_complete_target",
@@ -730,7 +1129,7 @@ def build_observation(
         else:
             assertions.update(assert_register_side(events, required=False))
             forbidden = {
-                "M4": "本次修改必须增加 Redis。",
+                "M4": QUOTED_REFERENCE,
                 "M5": case.input_text,
                 "M6": case.input_text,
             }[case_id]
@@ -741,10 +1140,17 @@ def build_observation(
             candidates,
         )
     elif case_id == "M7":
-        assertions.update(assert_budget_rejection(tool_results, final_reply))
-        assertions["candidate_not_registered"] = not required_text_is_active(
-            facts_after, case.input_text,
+        budget_assertions, budget_detail = assert_budget_rejection(
+            tool_results, final_reply, candidate=case.input_text,
         )
+        assertions.update(budget_assertions)
+        assertions.update(assert_candidate_not_registered(
+            facts_before, facts_after, extraction_candidates=candidates,
+        ))
+        extra_detail = budget_detail + (
+            f"；新增 active constraint：{new_active_constraints(facts_before, facts_after)}"
+        )
+        return _split_required(case_id, attempt, assertions, extra_detail={"m7_mechanical_basis": extra_detail})
     else:  # M8 / M9
         assertions.update(assert_resolution_cards(
             events, expected_old=case.seed_active_constraint or "",
@@ -756,7 +1162,29 @@ def build_observation(
             events, facts_after, persistent=(case.resume_choice == "replace_persistently"),
             old_value=case.seed_active_constraint or "", expected_candidate=case.input_text,
         ))
-    return Observation(case_id=case_id, attempt=attempt, assertions=assertions)
+    return _split_required(case_id, attempt, assertions)
+
+
+def _split_required(
+    case_id: str, attempt: int, assertions: dict[str, bool],
+    *, extra_detail: Mapping[str, str] | None = None,
+) -> Observation:
+    """把**必需判据**与取证性附加项分开：判据进 `assertions`，附加项进 `details`。
+
+    这条划分就是 `case_verdict` 那条"不许有装饰性判据"不变量的落地方式：算出来但没登记进
+    `required_assertions` 的**判定**是 bug（静默失效/假失败），而**取证读数**（原始事实的
+    快照）本来就该只落盘。`Observation.details` 是唯一的取证通道，`assertions` 是唯一的
+    判定通道——两个通道混在一起，判据就会悄悄与事实脱钩。
+    """
+    required = set(required_assertions(case_id))
+    judged = {name: value for name, value in assertions.items() if name in required}
+    forensic = {name: value for name, value in assertions.items() if name not in required}
+    details: dict[str, Any] = {}
+    if forensic:
+        details["forensic_assertions"] = forensic
+    if extra_detail:
+        details.update(extra_detail)
+    return Observation(case_id=case_id, attempt=attempt, assertions=judged, details=details)
 
 
 @dataclass(frozen=True)
@@ -819,7 +1247,8 @@ _ATTEMPT_FIELDS = (
     "code_sha", "git_tree", "session_id", "run_id", "assertions", "assertion_details",
     "tool_calls", "tool_results", "final_reply", "extraction_outputs",
     "extraction_job_id", "extraction_state", "extraction_candidates",
-    "protected_facts_before", "protected_facts_after", "verdict",
+    "protected_facts_before", "protected_facts_after", "model_provenance",
+    "error", "verdict",
 )
 _TOP_LEVEL_FIELDS = (
     "schema_version", "ticket", "ac", "campaign_id", "status", "code_sha", "git_tree",
@@ -880,6 +1309,12 @@ def assert_evidence_shape(payload: dict[str, Any]) -> None:
             raise TypeError(f"attempts[{index}].extraction_candidates 必须是 list 或 None")
         if not isinstance(attempt["final_reply"], str):
             raise TypeError(f"attempts[{index}].final_reply 必须是 str")
+        # 失败 attempt 的失败原因（Round 4 审查 P2-2）：当时 `error` 从未序列化，
+        # M5-2 的死因不可恢复。空串 = 本次成功跑完（合法事实），非串 = 未采集。
+        if not isinstance(attempt["error"], str):
+            raise TypeError(f"attempts[{index}].error 必须是 str")
+        if not isinstance(attempt["model_provenance"], dict):
+            raise TypeError(f"attempts[{index}].model_provenance 必须是 object")
     result = payload["result"]
     for name in ("verdict", "attempts_recorded", "expected_attempts", "failed_case_attempts"):
         if name not in result:
@@ -903,14 +1338,23 @@ def _git(*args: str) -> str:
 
 
 def working_tree_fingerprint() -> str:
-    """工作树指纹：追踪文件偏离 + 未跟踪文件名的确定性哈希。
+    """工作树指纹：**复用** Live Gate 的工作树证明（`evaluation.live_gate.repo.worktree_proof`）。
 
-    读数只能绑 `HEAD` 的 sha/tree（与 Gate-0 的 `worktree_divergence` 同一方向）——
-    脚本改动本身会进未跟踪/偏离面，指纹如实记下来。
+    Round 4 审查 Standards P3-2：`gate0.py::worktree_divergence` 才是"工作树是否偏离 HEAD"
+    的唯一实现，本脚本自己再写一份 `git status --porcelain + git diff HEAD` 是第三份分叉
+    （`AGENTS.md` §16.1：同一事实只在一处写全）。指纹取完整计数量（`_counts`）+ sha/tree，
+    与本模块此前的"同一棵树 ⇒ 同一指纹"口径等价，但读数来源不再分叉。
     """
-    status = _git("status", "--porcelain")
-    tracked_diff = _git("diff", "HEAD")
-    return _sha256_text(f"{status}\n{tracked_diff}")
+    from evaluation.live_gate.repo import worktree_proof
+
+    proof = worktree_proof()
+    stable = {
+        "head_sha": proof["head_sha"],
+        "tree": proof["tree"],
+        "tracked_matches_head": proof["tracked_matches_head"],
+        "counts": proof["_counts"],
+    }
+    return _sha256_text(json.dumps(stable, ensure_ascii=False, sort_keys=True))
 
 
 # ── 真实执行面（本轮不跑；凭证经环境变量注入）────────────────────────────────
@@ -994,25 +1438,27 @@ class _ModelRecorder:
 
     @property
     def thinking_disabled(self) -> bool:
-        """本驱动不注入 provider 专用 `extra_body`（MiMo thinking）——无凭证轮不声称已配置。"""
+        """本驱动不注入 provider 专用 `extra_body`（MiMo thinking）——恒 False。
+
+        这条**不作为判据**（旧实现把它包装成"thinking 已关"的必需判据，是没有依据的
+        over-claim）；事实面由 `_primary_provenance_fields()` 如实记录。
+        """
         return False
 
 
 class _MemoryJobInvoker:
     """`MemoryModelInvoker` 端口：走记录器的工厂，并记下抽取调用的候选输出。
 
-    `extraction_outputs` 是**本次抽取的模型原始输出**（取证用），**不是判据来源**——判据读
-    job 行里落库的候选列表（见 `_RealRunner._extraction_evidence`）：模型原始输出与 executor
-    按 `source`/`value` 校验后真正采纳的候选不是一回事（实测 M1 原始输出有候选，但这不能证明
-    "登记发生了"）。`extraction_call_count` 同样只作取证计数，**判据不用它**——它在 18 次之间
-    累积，拿它判"本次抽取发生了"就是 P1-1 那类假绿。
+    `extraction_outputs` 是**本次抽取的模型原始输出**（取证用 + **判据来源**）：判据
+    `extractor_returned_no_candidates` 读的就是它解析出的候选列表（`extraction_candidates`
+    逐 run 归属、跑完仍在；job 行里的候选列在 `done` 时被 store 置回 NULL，取不到）。
+    每次 `_drive_case` 收尾清空，所以它不跨 attempt 累积——这一点是上一版判据失真的根源
+    （旧实现读累积计数，第 2 次之后恒真）。
     """
 
     def __init__(self, recorder: _ModelRecorder) -> None:
         self._recorder = recorder
         self.extraction_outputs: list[str] = []
-        #: 抽取调用真的发生过的次数（仅取证；累计值，不参与任何判据）。
-        self.extraction_call_count = 0
 
     async def __call__(self, call: Any) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -1028,7 +1474,6 @@ class _MemoryJobInvoker:
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
         if getattr(call.stage, "value", "") == "protected_fact_extraction":
             self.extraction_outputs.append(text)
-            self.extraction_call_count += 1
         return text
 
 
@@ -1285,12 +1730,20 @@ class _RealRunner:
                 return {"job": None, "extraction_state": "", "candidates": None}
             await asyncio.sleep(0.25)
         deadline = time.monotonic() + _EXTRACTION_DRAIN_TIMEOUT_SECONDS
+        adopted: list[Any] | None = None
         while row["extraction_state"] != "done" and time.monotonic() <= deadline:
+            if adopted is None:
+                adopted = await asyncio.to_thread(_read_extraction_candidates, path, key)
             await asyncio.sleep(0.25)
             row = await asyncio.to_thread(_read_job_row, path, key)
-        row["candidates"] = extraction_candidates(
-            self._invoker.extraction_outputs if self._invoker else (),
+        if adopted is None:
+            adopted = await asyncio.to_thread(_read_extraction_candidates, path, key)
+        # 判据来源优先"executor 采纳的候选"（更强），取不到才退回模型原始输出。
+        row["candidates"] = (
+            adopted if adopted is not None
+            else extraction_candidates(self._invoker.extraction_outputs if self._invoker else ())
         )
+        row["candidate_source"] = "job_row_adopted" if adopted is not None else "model_raw_output"
         return row
 
     async def _drive_case(self, case: CaseDefinition, session_id: str) -> dict[str, Any]:
@@ -1332,6 +1785,10 @@ class _RealRunner:
             facts_before = _fact_values(derive_protected_facts(store.read_events(session_id)))
 
         started_at = _now_utc()
+        # P1-3：先快照"发消息之前"的 run_id 集合，本轮的 run 由**新出现的** run/started 定，
+        # 不靠"事件流里最后一个带 run_id 的事件"——那种口径在 run/started 落盘前读到的是
+        # 上一轮的 run（M8/M9 同 session 第二轮）或空（M5-2 的死因）。
+        seen_run_ids = _run_ids_in(await self._events(session_id))
         response = await self._client.post(
             f"/api/sessions/{session_id}/messages", json=self._message_body(case.input_text),
         )
@@ -1339,11 +1796,11 @@ class _RealRunner:
             raise RuntimeError(
                 f"{case.case_id} 发消息失败 HTTP {response.status_code}: {response.text[:400]}"
             )
-        events = await self._events(session_id)
-        run_id = _latest_run_id(events)
-        if run_id is None:
-            raise RuntimeError(f"{case.case_id} 未产生 run/started")
+        run_id, events = await _await_new_run_id(
+            lambda: self._events(session_id), seen_run_ids=seen_run_ids,
+        )
         status = await self._wait_for_terminal(session_id, run_id)
+
 
         facts_pre_answer: list[Any] = []
         if status == "paused" and case.resume_choice:
@@ -1374,6 +1831,7 @@ class _RealRunner:
             "final_reply": _final_reply_text(events),
             "extraction_outputs": extraction_outputs,
             "extraction": extraction,
+            "new_registrations": new_active_constraints(facts_before, facts_after),
         }
 
     def _seed_budget_pressure(self, session: Any, session_id: str) -> None:
@@ -1440,16 +1898,26 @@ class _RealRunner:
         await self._wait_for_terminal(session_id, pause["run_id"])
 
     async def run_slot(self, slot: PlanSlot) -> Observation:  # pragma: no cover - 需凭证
-        """跑一个槽位并折成 `Observation`（真实执行面，票面 §9.1）。"""
+        """跑一个槽位并折成 `Observation`（真实执行面，票面 §9.1）。
+
+        失败**不吞**：异常折成 `Observation.error`（连同 session/run id 与失败原因一起
+        进证据——Round 4 审查 P2-2：M5-2 的死因当时无法恢复，因为 `error` 从未序列化）。
+        """
         case = _CASES_BY_ID[slot.case_id]
         session_id = f"ac16-{slot.case_id.lower()}-{slot.attempt}-{uuid.uuid4().hex[:8]}"
+        started_at, runs_before = _now_utc(), len(self._recorder.constructions)
         try:
             raw = await self._drive_case(case, session_id)
         except Exception as exc:  # noqa: BLE001 - 失败要如实折成观测，不静默
             return Observation(
                 case_id=slot.case_id, attempt=slot.attempt, error=f"{type(exc).__name__}: {exc}",
-                details={"session_id": session_id, "run_id": "",
-                         "started_at_utc": _now_utc(), "finished_at_utc": _now_utc()},
+                details={
+                    "session_id": session_id,
+                    "run_id": "",
+                    "started_at_utc": started_at,
+                    "finished_at_utc": _now_utc(),
+                    "model_provenance": self._primary_provenance_fields(since=runs_before),
+                },
             )
         observation = build_observation(
             slot.case_id, slot.attempt,
@@ -1457,7 +1925,7 @@ class _RealRunner:
             facts_pre_answer=raw["facts_pre_answer"] or None,
             extraction=raw["extraction"],
             final_reply=raw["final_reply"], tool_results=raw["tool_results"],
-            model_ok=self._model_ok(raw),
+            run_id=raw["run_id"],
         )
         return replace(observation, details={
             **observation.details,
@@ -1474,23 +1942,35 @@ class _RealRunner:
             "extraction_candidates": raw["extraction"]["candidates"],
             "protected_facts_before": raw["facts_before"],
             "protected_facts_after": raw["facts_after"],
+            "new_active_constraints": raw["new_registrations"],
+            "model_provenance": self._primary_provenance_fields(since=runs_before),
         })
 
-    def _model_ok(self, raw: dict[str, Any]) -> bool:
-        """基线判据 `actual_primary_model_used` 的机械依据：主模型真的被构造过、且是
-        期望的 provider/model；温度取该 provider 支持的最低有效值（本驱动钉 0.0）。
+    def _primary_provenance_fields(self, *, since: int) -> dict[str, Any]:
+        """本 attempt 主模型构造的**如实** provenance（Round 4 审查 P2-1）。
 
-        本驱动不注入 provider 专用 `extra_body`，所以"thinking disabled"只对**温度=0**
-        这一条负责（如实：`_ModelRecorder.thinking_disabled` 返回 False，不声称已配置）。
+        旧实现拿 18 次累积的构造日志冒充当次读数（`_model_ok` 的 `any(...)`），并且把
+        "温度=0"与"thinking 已关"打包成一条判据。这里只**如实记录**：
+
+        - `session_primary_constructions`：本 attempt 区间内的构造次数（0 = 没构造过，
+          即本次没有真实主模型请求）；
+        - `temperature_configured`：本区间内实际配置的温度值（驱动钉 0.0）；
+        - `thinking_disabled_configured`：恒 False —— 本驱动**不注入** provider 专用
+          `extra_body`，所以"thinking 已关"这句话没有依据，如实写 False 而不是编一条判据。
         """
-        want_provider = self._config.session_primary_provider
-        want_model = self._config.session_primary_model
-        return any(
-            construction["provider"] == want_provider
-            and construction["model_id"] == want_model
-            and construction["temperature_configured"] == 0.0
-            for construction in self._recorder.constructions
-        )
+        window = self._recorder.constructions[since:]
+        wanted = [
+            item for item in window
+            if item["provider"] == self._config.session_primary_provider
+            and item["model_id"] == self._config.session_primary_model
+        ]
+        temperatures = sorted({item["temperature_configured"] for item in wanted})
+        return {
+            "session_primary_constructions": len(wanted),
+            "temperature_configured": temperatures,
+            "thinking_disabled_configured": False,
+            "note": "驱动不注入 provider 专用 extra_body；'thinking 已关'无依据，如实记 False",
+        }
 
 
 # ── 编排 ───────────────────────────────────────────────────────────────────────
@@ -1713,6 +2193,11 @@ def _attempt_record(
         "extraction_candidates": details.get("extraction_candidates"),
         "protected_facts_before": _detail_list(details, "protected_facts_before"),
         "protected_facts_after": _detail_list(details, "protected_facts_after"),
+        # P2-2：失败 attempt 的失败原因必须落盘（旧实现只存内存里的 `Observation.error`，
+        # 从没进过证据 ⇒ M5-2 的死因当时不可恢复）。空串 = 本次成功跑完。
+        "error": observation.error or "",
+        # 本 attempt 的主模型 provenance（构造次数 / 温度配置 / thinking 如实值）。
+        "model_provenance": details.get("model_provenance") or {},
         "verdict": "PASS" if verdict.passed else "FAIL",
     }
 
@@ -1755,7 +2240,7 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
         payload = _blocked_evidence(
             config, preconditions=preconditions, campaign_id=campaign_id, now=now,
         )
-        path = _evidence_path(config, campaign_id, stamp[:15] + "Z")
+        path = _evidence_path(config, campaign_id, stamp)
         if config.write:
             # P3-4：blocked 证据同样过 `scan_payload` 凭证扫描，不直接 write_text。
             _write_evidence(payload, path, values=credential_scan_values(config, runner._settings()))
