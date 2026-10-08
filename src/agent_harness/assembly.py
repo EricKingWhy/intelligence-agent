@@ -641,8 +641,13 @@ async def build_runtime(
     # 的 per-run coordinator 负责（见 agent/fallback 接线）。
     fallback_model = None
     if config.fallback is not None:
+        fallback_effort = (
+            config.fallback.reasoning_effort.default
+            if config.fallback.reasoning_effort is not None
+            else None
+        )
         fallback_model = create_chat_model(
-            config.fallback, reasoning_effort=reasoning_effort,
+            config.fallback, reasoning_effort=fallback_effort,
         )
     # 进程级模型并发闸（#89 / #559 修复）：闸实例归 wiring（装配生命周期）所有，
     # 同一进程内所有 build_runtime 共享同一实例（全局在飞模型调用数的语义——

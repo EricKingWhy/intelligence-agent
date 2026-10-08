@@ -235,7 +235,10 @@ export function createCommitCoalescer(
 export const UNKNOWN_MODEL_ERROR_TEXT = '模型不可用（422）：请从模型选择器重新选择';
 
 export function isUnknownModelError(message: string | null | undefined): boolean {
-  return message === UNKNOWN_MODEL_ERROR_TEXT;
+  return (
+    message === UNKNOWN_MODEL_ERROR_TEXT ||
+    message === `提交失败：${UNKNOWN_MODEL_ERROR_TEXT}`
+  );
 }
 
 /** 续聊 422 的稳定文案（handoff §5 P2，P1 修复后）：/messages 的 422 现在可能来自

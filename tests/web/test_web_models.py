@@ -87,6 +87,52 @@ class TestModelsEndpoint:
         # mimo 未做缓存机制核实 ⇒ 不声明（不猜测）
         assert "prompt_cache" not in mimo
 
+    def test_models_expose_declared_reasoning_effort_capability(self, tmp_path):
+        descriptor = {
+            "supported": ["minimal", "deep"],
+            "default": "minimal",
+            "wire_mapping": {"minimal": "low", "deep": "high"},
+        }
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([{
+                "name": "reasoning-model", "provider": "deepseek",
+                "model_name": "deepseek-r1", "reasoning_effort": descriptor,
+            }]),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+
+        models = client.get("/api/models").json()["models"]
+        reasoning_model = next(m for m in models if m["id"] == "reasoning-model")
+        default_model = next(m for m in models if m["is_default"])
+
+        assert reasoning_model["reasoning_effort"] == descriptor
+        assert "reasoning_effort" not in default_model
+
+    def test_default_model_uses_matching_catalog_effort_declaration(self, tmp_path):
+        descriptor = {
+            "supported": ["minimal", "standard"],
+            "default": "standard",
+            "wire_mapping": {"minimal": "none", "standard": "low"},
+        }
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([{
+                "name": "default-profile", "provider": "deepseek",
+                "model_name": "deepseek-chat", "reasoning_effort": descriptor,
+            }]),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+
+        models = client.get("/api/models").json()["models"]
+        default_model = next(m for m in models if m["is_default"])
+
+        assert default_model["reasoning_effort"] == descriptor
+
     def test_models_catalog_entry_without_capabilities_falls_back_to_preset(self, catalog_client):
         """catalog 条目不声明能力位 → 回落 preset，metadata_source=provider_preset。"""
         body = catalog_client.get("/api/models").json()
@@ -160,6 +206,66 @@ class TestSessionModelParam:
         assert resp.status_code == 200
         assert seen["names"][0] == "deepseek-chat"
 
+    @pytest.mark.parametrize(
+        ("fallback_effort", "expected_fallback_effort"),
+        [
+            (
+                {
+                    "supported": ["minimal"],
+                    "default": "minimal",
+                    "wire_mapping": {"minimal": "low"},
+                },
+                "minimal",
+            ),
+            (None, None),
+        ],
+        ids=["declared-default", "provider-default"],
+    )
+    def test_fallback_uses_its_own_default_or_provider_default(
+        self, tmp_path, fallback_effort, expected_fallback_effort,
+    ):
+        primary_effort = {
+            "supported": ["minimal", "deep"],
+            "default": "deep",
+            "wire_mapping": {"minimal": "low", "deep": "high"},
+        }
+        fallback_entry = {
+            "name": "fallback",
+            "provider": "mimo",
+            "model_name": "mimo-v2.6-flash",
+        }
+        if fallback_effort is not None:
+            fallback_entry["reasoning_effort"] = fallback_effort
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-primary",
+            model_provider="deepseek", model_name="deepseek-chat",
+            fallback_model_provider="mimo", fallback_model_name="mimo-v2.6-flash",
+            fallback_model_api_key="sk-fallback",
+            agent_models=json.dumps([
+                {"name": "primary", "provider": "deepseek", "model_name": "deepseek-chat",
+                 "reasoning_effort": primary_effort},
+                fallback_entry,
+            ]),
+            provider_store_path=str(tmp_path / "model-providers.json"),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+        seen: list[tuple[str, str | None]] = []
+
+        def fake_factory(config, *, reasoning_effort=None, **kw):
+            seen.append((config.model_name, reasoning_effort))
+            return ScriptedModel(responses=[AIMessage(content="ok")])
+
+        with patch("agent_harness.assembly.create_chat_model", side_effect=fake_factory):
+            response = client.post(
+                "/api/sessions", json={"task": "hi", "reasoning_effort": "deep"},
+            )
+
+        assert response.status_code == 200
+        assert seen == [
+            ("deepseek-chat", "deep"),
+            ("mimo-v2.6-flash", expected_fallback_effort),
+        ]
+
     def test_unknown_model_422(self, catalog_client):
         with patch("agent_harness.assembly.create_chat_model",
                    return_value=ScriptedModel(responses=[AIMessage(content="ok")])):
@@ -167,3 +273,64 @@ class TestSessionModelParam:
                 "/api/sessions", json={"task": "hi", "model": "no-such"})
         assert resp.status_code == 422
         assert "no-such" in resp.text
+
+    def test_unsupported_reasoning_effort_is_rejected_with_actionable_response(self, tmp_path):
+        descriptor = {
+            "supported": ["minimal"],
+            "default": "minimal",
+            "wire_mapping": {"minimal": "low"},
+        }
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([{
+                "name": "limited-primary", "provider": "deepseek",
+                "model_name": "deepseek-chat", "reasoning_effort": descriptor,
+            }]),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+
+        response = client.post(
+            "/api/sessions",
+            json={
+                "task": "hi",
+                "model": "limited-primary",
+                "reasoning_effort": "deep",
+            },
+        )
+
+        assert response.status_code == 422
+        assert "deepseek-chat" in response.json()["detail"]
+        assert "deep" in response.json()["detail"]
+        workspace_root = tmp_path / "workspaces"
+        assert not workspace_root.exists() or not any(workspace_root.iterdir())
+
+    def test_invalid_reasoning_effort_wire_mapping_is_rejected_before_workspace_creation(
+        self, tmp_path,
+    ):
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([{
+                "name": "invalid-wire-map", "provider": "deepseek",
+                "model_name": "deepseek-r1",
+                "reasoning_effort": {
+                    "supported": ["minimal"],
+                    "default": "minimal",
+                    "wire_mapping": {"minimal": "deep"},
+                },
+            }]),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+
+        response = client.post(
+            "/api/sessions",
+            json={"task": "hi", "model": "invalid-wire-map", "reasoning_effort": "minimal"},
+        )
+
+        assert response.status_code == 422
+        assert "wire_mapping" in response.json()["detail"]
+        workspace_root = tmp_path / "workspaces"
+        assert not workspace_root.exists() or not any(workspace_root.iterdir())

@@ -19,6 +19,18 @@ import {
   submitTask,
 } from './fixtures';
 
+const MODELS_WITH_REASONING = [
+  {
+    ...MODELS[0],
+    reasoning_effort: {
+      supported: ['minimal', 'deep'],
+      default: 'minimal',
+      wire_mapping: { minimal: 'low', deep: 'high' },
+    },
+  },
+  ...MODELS.slice(1),
+];
+
 const FIRST_FRAMES = [
   { type: 'session/started', seq: 1, session_id: 'cont-session-1', run_id: 'cont-run-1', time: '2026-09-08T00:00:00Z' },
   { type: 'run/started', seq: 2, session_id: 'cont-session-1', run_id: 'cont-run-1', time: '2026-09-08T00:00:00Z' },
@@ -73,7 +85,7 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
   await routeApi(page, {
     sessions: [],
     events: [],
-    models: MODELS,
+    models: MODELS_WITH_REASONING,
     agentProfiles: AGENT_PROFILES,
     reasoningEfforts: REASONING_EFFORTS,
     // #201：UI 已无 context_providers 选择入口（多选控件删除）→ 断言该键不发
@@ -90,9 +102,15 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
   // 选模型：目录第一行（catalog 里 default: true 的项）
   await pickFirstModel(page);
   // Agent 档位 → coding（第二项；下压 2 次，首项是「默认（未选）」）
-  // 推理深度 → deep（第三项；下压 3 次）
   await pickControl(page, 'Agent Profile', 2, 'Coding');
-  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
+  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await effortTrigger.click();
+  const effortSlider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  await expect(effortSlider).toBeVisible();
+  await effortSlider.focus();
+  await page.keyboard.press('End');
+  await expect(effortSlider).toHaveAttribute('aria-valuetext', /Deep/);
+  await page.keyboard.press('Escape');
 
   // 续聊发第二条
   await submitTask(page, '第二条消息');

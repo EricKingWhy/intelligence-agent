@@ -13,9 +13,11 @@ import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
+import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
+import { ReasoningEffortSlider } from './ReasoningEffortSlider';
 
 /** #283：升到这一档要在 pill 浮层里给一次显式确认（ADR-0041 D1——后端**不加**强制标志位，
  *  确认是 UX 层的责任）。字面量与后端 `PermissionPolicy.DANGER_FULL_ACCESS` 同值：它同时
@@ -63,6 +65,7 @@ interface Props {
   /** GET /api/reasoning-efforts 清单。空 → 隐藏控件。 */
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
+  reasoningEffortProjection?: ActiveFallbackModelProjection | null;
   onReasoningEffortChange?: (id: string | null) => void;
   // ── #426/#536：新建会话的预算入口（turns / total_tokens / deadline_at，单入口
   //    popover——BudgetPicker）。各维草稿是输入原样字符串，判形/换算在映射层
@@ -113,6 +116,7 @@ export const Composer = memo(function Composer({
   onAgentProfileChange,
   reasoningEfforts = [],
   selectedReasoningEffort = null,
+  reasoningEffortProjection = null,
   onReasoningEffortChange,
   budgetRunTurns,
   onBudgetRunTurnsChange,
@@ -298,12 +302,42 @@ export const Composer = memo(function Composer({
     }
   };
 
+  const currentModel = selectedModel === null
+    ? models.find((model) => model.default)
+    : models.find((model) => model.name === selectedModel);
+  const effortModel = reasoningEffortProjection ? reasoningEffortProjection.model : currentModel;
+  const reasoningEffortCapability =
+    effortModel?.isAvailable === false ? undefined : effortModel?.reasoningEffort;
+  const supportedEffortIds = new Set(reasoningEffortCapability?.supported ?? []);
+  const modelReasoningEfforts = reasoningEffortCapability
+    ? reasoningEfforts.filter((effort) => supportedEffortIds.has(effort.id))
+    : [];
+  const projectedDefault = reasoningEffortCapability?.default ?? null;
+  const effectiveReasoningEffort = reasoningEffortProjection
+    ? modelReasoningEfforts.some((effort) => effort.id === projectedDefault)
+      ? projectedDefault
+      : null
+    : modelReasoningEfforts.some((effort) => effort.id === selectedReasoningEffort)
+      ? selectedReasoningEffort
+      : null;
+  const selectedEffortIndex = modelReasoningEfforts.findIndex(
+    (effort) => effort.id === effectiveReasoningEffort,
+  );
+  const reasoningEffortTone =
+    selectedEffortIndex < 0
+      ? undefined
+      : selectedEffortIndex === 0
+        ? 'blue'
+        : selectedEffortIndex === modelReasoningEfforts.length - 1
+          ? 'deep'
+          : 'violet';
+
   // 控件行是否渲染——至少有一个非空目录或预算入口（#426）时才显示 control row 容器
   const hasControls =
     models.length > 0 ||
     permissionModes.length > 0 ||
     agentProfiles.length > 0 ||
-    reasoningEfforts.length > 0 ||
+    modelReasoningEfforts.length > 0 ||
     (!permissionInSession && onBudgetRunTurnsChange !== undefined);
 
   return (
@@ -470,6 +504,15 @@ export const Composer = memo(function Composer({
               onModelChange={onModelChange ?? (() => {})}
               disabled={locked}
             />
+            {reasoningEffortProjection && (
+              <span
+                className="composer-fallback-effort-note"
+                role="status"
+                title={`本轮已切换到备用模型 ${reasoningEffortProjection.modelName}`}
+              >
+                {reasoningEffortCapability ? '本轮备用模型默认档' : '本轮备用模型 · Provider 默认'}
+              </span>
+            )}
             {/* #201：三个档位下拉合并为同一个 OptionPicker——同一份实现、同一份视觉、
                 同一套 ARIA（此前三处手抄 + 十条不一致）。
                 ⚠ `aria-label` **刻意维持原值的中英混用**（`权限模式` / `Agent Profile` /
@@ -534,11 +577,24 @@ export const Composer = memo(function Composer({
             />
             <OptionPicker
               ariaLabel="Reasoning Effort"
-              title="推理深度选哪一档？"
-              options={toCatalogOptions(reasoningEfforts, catalogIcon)}
-              value={selectedReasoningEffort}
-              onChange={onReasoningEffortChange ?? (() => {})}
+              title={reasoningEffortProjection ? '备用模型的推理默认档' : '推理深度选哪一档？'}
+              options={toCatalogOptions(modelReasoningEfforts, catalogIcon)}
+              value={effectiveReasoningEffort}
+              onChange={(id) => onReasoningEffortChange?.(id)}
               icon={Brain}
+              currentTone={reasoningEffortTone}
+              footer={reasoningEffortProjection && reasoningEffortCapability
+                ? `本轮显示备用模型 ${reasoningEffortProjection.modelName} 的默认档位；运行结束后恢复主模型选择。`
+                : undefined}
+              customContent={
+                <ReasoningEffortSlider
+                  options={modelReasoningEfforts}
+                  value={effectiveReasoningEffort}
+                  defaultValue={reasoningEffortCapability?.default ?? null}
+                  disabled={locked || reasoningEffortProjection !== null}
+                  onChange={(id) => onReasoningEffortChange?.(id)}
+                />
+              }
               placeholder="推理"
               disabled={locked}
             />
