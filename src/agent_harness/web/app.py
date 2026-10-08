@@ -9,6 +9,7 @@ create_app() 是单一入口——传入 Settings，返回装配好的 FastAPI�
 from __future__ import annotations
 
 import asyncio
+import hmac
 import importlib.metadata
 import json
 import logging
@@ -69,7 +70,12 @@ from agent_harness.context.project_instructions import (
     release_project_instruction_store,
 )
 from agent_harness.context.tokens import estimate_tokens
-from agent_harness.host_service import HOST_PROTOCOL_VERSION
+from agent_harness.host_service import (
+    HOST_PROTOCOL_VERSION,
+    HOST_SKILLS_NONCE_HEADER,
+    HOST_SKILLS_PROOF_HEADER,
+    host_skills_request_proof,
+)
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -1687,9 +1693,15 @@ class AuthSeamMiddleware:
     不经 BaseHTTPMiddleware 的任务组，SSE 断连取消不再跨请求传染。
     """
 
-    def __init__(self, app: Any, settings: Settings) -> None:
+    def __init__(
+        self,
+        app: Any,
+        settings: Settings,
+        host_service_token: str | None = None,
+    ) -> None:
         self.app = app
         self._settings = settings
+        self._host_service_token = host_service_token
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -1703,8 +1715,41 @@ class AuthSeamMiddleware:
             return
         identity = IdentityContext("local", "local", ["user", "session"])
         headers = Headers(scope=scope)
+        host_challenge_nonce = None
+        if (
+            scope.get("method") == "GET"
+            and scope.get("path") == "/api/skills"
+            and self._host_service_token
+            and self._settings.jwt_secret
+        ):
+            nonce = headers.get(HOST_SKILLS_NONCE_HEADER)
+            proof = headers.get(HOST_SKILLS_PROOF_HEADER, "")
+            if nonce:
+                try:
+                    claims = jwt.decode(
+                        self._host_service_token,
+                        self._settings.jwt_secret.get_secret_value(),
+                        algorithms=["HS256"],
+                        options={"require": ["tenant_id", "user_id", "exp"]},
+                    )
+                    expected = host_skills_request_proof(self._host_service_token, nonce)
+                    scopes = claims.get("scopes", ["user", "session"])
+                    valid_identity = (
+                        claims.get("tenant_id") == "local"
+                        and isinstance(claims.get("user_id"), str)
+                        and bool(claims["user_id"].strip())
+                        and isinstance(scopes, list)
+                        and all(isinstance(item, str) for item in scopes)
+                    )
+                except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+                    expected = ""
+                    valid_identity = False
+                if expected and valid_identity and hmac.compare_digest(proof, expected):
+                    host_challenge_nonce = nonce
+                    identity = IdentityContext("local", claims["user_id"], scopes)
+                    scope.setdefault("state", {})["host_skills_challenge_nonce"] = nonce
         authorization = headers.get("authorization")
-        if self._settings.jwt_secret:
+        if self._settings.jwt_secret and host_challenge_nonce is None:
             # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
             # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
             # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
@@ -1752,7 +1797,12 @@ def _package_version() -> str:
         return "unknown"
 
 
-def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    enable_cors: bool = True,
+    host_service_token: str | None = None,
+) -> FastAPI:
     """装配 FastAPI 应用。测试可注入 test settings；生产默认从 .env 读。"""
     if settings is None:
         settings = Settings()
@@ -1840,6 +1890,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
+    app.state.host_service_token = host_service_token
 
     # #517 BUG-06：未捕获异常的全局兜底。Starlette 默认给 text/plain 的
     # "Internal Server Error"（TestClient 则直接 re-raise），前端按 JSON 解析
@@ -2071,7 +2122,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         BodyDepthGuardMiddleware, exempt_path_pattern=ATTACHMENT_UPLOAD_PATH_RE
     )
     app.add_middleware(CSPHeaderMiddleware)
-    app.add_middleware(AuthSeamMiddleware, settings=settings)
+    app.add_middleware(
+        AuthSeamMiddleware,
+        settings=settings,
+        host_service_token=host_service_token,
+    )
 
     if enable_cors:
         # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。

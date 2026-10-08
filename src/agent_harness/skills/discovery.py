@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import stat
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,18 @@ def _spath(path: str | os.PathLike[str]) -> str:
     return single_line(str(path))
 
 
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_point)
+
+
 @dataclass(frozen=True, slots=True)
 class SkillCatalogEntry:
     """目录条目：name + description(+when_to_use) + 来源路径 + frontmatter 其余字段；正文延迟读取。"""
@@ -72,6 +86,8 @@ class SkillCatalogEntry:
     # 模型可通过 workspace-write 工具在 wiring 之后把 skill 目录换成
     # 指向目录外的 junction/symlink，把任意宿主文件读进 Context。
     scanned_root: Path | None = None
+    # Verify the exact bytes consumed by lazy load_skill against the install snapshot.
+    managed_skill_sha256: str | None = None
 
     def load_body(self) -> str:
         """按需读取 SKILL.md 正文（frontmatter 之后的部分）——每次读盘，不缓存。"""
@@ -82,12 +98,23 @@ class SkillCatalogEntry:
             )
         # 尺寸上限在 load 侧同样生效：发现后文件可被 workspace-write 换成超大内容，
         # "读入阶段有界"必须覆盖模型触发的加载路径（与发现同一威胁模型）。
-        if self.source_path.stat().st_size > SKILL_FILE_MAX_BYTES:
+        # Bound the read itself: a post-discovery replacement must not turn the stat
+        # check into an unbounded allocation.
+        with self.source_path.open("rb") as handle:
+            raw = handle.read(SKILL_FILE_MAX_BYTES + 1)
+        if len(raw) > SKILL_FILE_MAX_BYTES:
             raise OSError(f"{_spath(self.source_path)}: too large (> {SKILL_FILE_MAX_BYTES} bytes)")
+        if (
+            self.managed_skill_sha256 is not None
+            and hashlib.sha256(raw).hexdigest() != self.managed_skill_sha256
+        ):
+            raise OSError(
+                f"{_spath(self.source_path)}: changed after installation; refusing to load"
+            )
         # utf-8-sig：Windows 记事本等默认写 BOM，残留 \ufeff 会让首行 '---' 校验失败。
         # 非 UTF-8 字节抛 UnicodeDecodeError（ValueError 子类）——让调用方明确看到
         # 读盘失败，而不是吞回空字符串（吞空会让 load_skill 工具返回空内容）。
-        text = self.source_path.read_text(encoding="utf-8-sig")
+        text = raw.decode("utf-8-sig")
         return _split_frontmatter(text)[1].strip()
 
 
@@ -197,12 +224,19 @@ class SkillDiscovery:
         directories: list[Path],
         manual_paths: list[Path] | None = None,
         project_dir: Path | None = None,
+        *,
+        managed_directory: Path | None = None,
+        enabled_managed_skills: set[str] | None = None,
+        enabled_managed_skill_digests: dict[str, str] | None = None,
     ) -> None:
         self._directories = [Path(d) for d in directories]
         self._manual_paths = [Path(p) for p in (manual_paths or [])]
         # 写入目标 = project skill 目录。None = 未配置写入面：register/update/remove
         # 响亮拒绝，绝不落 global（避免污染用户全局）。
         self._project_dir = Path(project_dir) if project_dir is not None else None
+        self._managed_directory = Path(managed_directory) if managed_directory is not None else None
+        self._enabled_managed_skills = set(enabled_managed_skills or ())
+        self._enabled_managed_skill_digests = dict(enabled_managed_skill_digests or {})
         # 最近一次 discover() 结果的缓存：SkillCapability 持本类引用（不再是装配期
         # 静态 catalog），写入方法刷新后 capability 的可见性随之收敛。
         self._catalog: SkillCatalog | None = None
@@ -221,6 +255,9 @@ class SkillDiscovery:
         seen: dict[str, Path] = {}
 
         def _consider(path: Path, origin: str, root: Path | None) -> None:
+            managed_candidate, managed_digest = self._managed_snapshot_for(path)
+            if managed_candidate and managed_digest is None:
+                return
             entry, errors = parse_skill_markdown(path)
             catalog.errors.extend(f"[{origin}] {e}" for e in errors)
             if entry is None:
@@ -230,9 +267,13 @@ class SkillDiscovery:
                     f"[{origin}] {_spath(path)}: resolves outside scanned skill directory {_spath(root)}"
                 )
                 return
-            if root is not None:
+            if root is not None or managed_digest is not None:
                 # 携带包含根，供 load_body 读盘时重验证（TOCTOU 防线）。
-                entry = replace(entry, scanned_root=root)
+                entry = replace(
+                    entry,
+                    scanned_root=root,
+                    managed_skill_sha256=managed_digest,
+                )
             if entry.name in seen:
                 # 同名先到先得，冲突显式可见（spec 08 §5 精神：不允许静默忽略）。
                 catalog.conflicts.append(
@@ -243,10 +284,14 @@ class SkillDiscovery:
             catalog.entries.append(entry)
 
         for directory in self._directories:
+            managed = directory == self._managed_directory
             if not directory.exists():
                 continue  # 目录不存在 → 空 catalog，不是错误（OPTIONAL 语义）
             if not directory.is_dir():
                 catalog.errors.append(f"[directory] {_spath(directory)}: not a directory")
+                continue
+            if managed and not self._managed_directory_is_safe():
+                catalog.errors.append(f"[directory] {_spath(directory)}: managed directory is unsafe")
                 continue
             try:
                 skill_dirs = sorted(directory.iterdir())
@@ -256,6 +301,8 @@ class SkillDiscovery:
                 catalog.errors.append(f"[directory] {_spath(directory)}: unreadable ({error})")
                 continue
             for skill_dir in skill_dirs:
+                if managed and skill_dir.name not in self._enabled_managed_skills:
+                    continue
                 skill_file = skill_dir / "SKILL.md"
                 if skill_dir.is_dir() and skill_file.is_file():
                     _consider(skill_file, "directory", directory)
@@ -267,6 +314,55 @@ class SkillDiscovery:
                 catalog.errors.append(f"[manual] {_spath(manual)}: not a file")
         self._catalog = catalog
         return catalog
+
+    def _managed_directory_is_safe(self) -> bool:
+        """Keep managed packages below the real project Skills directory."""
+        if self._managed_directory is None:
+            return False
+        project_dir = self._managed_directory.parent
+        workspace_dir = project_dir.parent
+        try:
+            if _is_reparse_point(self._managed_directory) or _is_reparse_point(project_dir):
+                return False
+            workspace_root = workspace_dir.resolve(strict=True)
+            project_root = project_dir.resolve(strict=True)
+            managed_root = self._managed_directory.resolve(strict=True)
+            return project_root.parent == workspace_root and managed_root.parent == project_root
+        except (OSError, RuntimeError):
+            return False
+
+    def _managed_snapshot_for(self, path: Path) -> tuple[bool, str | None]:
+        """Return managed membership and install-time body digest without reading it."""
+        if self._managed_directory is None:
+            return False, None
+        try:
+            path.absolute().relative_to(self._managed_directory.absolute())
+            lexical_candidate = True
+        except ValueError:
+            lexical_candidate = False
+        try:
+            managed_root = self._managed_directory.resolve(strict=True)
+            relative = path.resolve(strict=True).relative_to(managed_root)
+            resolved_candidate = True
+        except (OSError, RuntimeError, ValueError):
+            relative = None
+            resolved_candidate = False
+        if not lexical_candidate and not resolved_candidate:
+            return False, None
+        if not self._managed_directory_is_safe() or relative is None:
+            return True, None
+        if (
+            len(relative.parts) != 2
+            or relative.parts[1].casefold() != "skill.md"
+            or _is_reparse_point(self._managed_directory / relative.parts[0])
+            or _is_reparse_point(path)
+        ):
+            return True, None
+        name = relative.parts[0]
+        digest = self._enabled_managed_skill_digests.get(name)
+        if name not in self._enabled_managed_skills or digest is None:
+            return True, None
+        return True, digest
 
     # ── #529：当前目录（缓存投影）+ 闭环写入路径 ──────────────────────────────
 

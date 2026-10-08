@@ -277,17 +277,35 @@ async def _wire_skills(
     from agent_harness.skills.capability import SkillCapability
     from agent_harness.skills.context_provider import SkillCatalogContextProvider
     from agent_harness.skills.discovery import SkillDiscovery
+    from agent_harness.skills.package_manager import (
+        SkillPackageError,
+        SkillPackageManager,
+    )
 
     # 全局目录（spec 09 §2）+ 项目目录（workspace 级）+ options 扩展目录/手动路径。
     global_dir = Path(settings.skill_global_dir) if settings.skill_global_dir \
         else Path.home() / ".intelligence-agent" / "skills"
     project_dir = Path(settings.workspace_dir) / "skills"
-    directories = [global_dir, project_dir]
+    package_manager = SkillPackageManager(settings.workspace_dir, global_skills_dir=global_dir)
+    managed_dir = package_manager.managed_skills_dir
+    try:
+        enabled_managed_skill_digests = package_manager.enabled_skill_digests()
+    except SkillPackageError as error:
+        logger.warning("managed Skill registry is invalid; imported Skills stay disabled: %s", error)
+        enabled_managed_skill_digests = {}
+    directories = [global_dir, project_dir, managed_dir]
     directories.extend(_coerce_path_list(cfg, "directories"))
     manual_paths = _coerce_path_list(cfg, "paths")
     # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
     # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
-    discovery = SkillDiscovery(directories=directories, manual_paths=manual_paths, project_dir=project_dir)
+    discovery = SkillDiscovery(
+        directories=directories,
+        manual_paths=manual_paths,
+        project_dir=project_dir,
+        managed_directory=managed_dir,
+        enabled_managed_skills=set(enabled_managed_skill_digests),
+        enabled_managed_skill_digests=enabled_managed_skill_digests,
+    )
     catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
     # SkillCapability.errors() 仍可编程读取。

@@ -29,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from agent_harness.agent import AgentEvent
@@ -63,7 +64,11 @@ from agent_harness.cli_theme import Theme, detect_theme
 from agent_harness.config import Settings
 from agent_harness.context.compactor import CompactionPostWriteError
 from agent_harness.identity import IdentityContext
-from agent_harness.instance_lock import InstanceLock, InstanceLockError
+from agent_harness.instance_lock import (
+    ALLOW_SHARED_ROOT_ENV,
+    InstanceLock,
+    InstanceLockError,
+)
 from agent_harness.logging import LogContext, log_context, setup_logging
 from agent_harness.memory.types import memory_session_var
 from agent_harness.model.accounting import HARNESS_MODEL_ACCOUNTING
@@ -119,6 +124,9 @@ from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from agent_harness.tooling.approve_policy import ApprovePolicyStore
 from agent_harness.tooling.contract import PermissionPolicy
+
+if TYPE_CHECKING:
+    from agent_harness.skills.package_manager import SkillPackageManager
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 5
@@ -1182,9 +1190,9 @@ def main() -> None:
         finally:
             flush_process_sink()
         return
-    # Local package inspection is a strictly read-only preflight: it does not take
-    # the runtime lock, initialize logging, or flush telemetry on its way out.
-    if len(sys.argv) > 2 and sys.argv[1:3] == ["plugins", "inspect"]:
+    # Package lifecycle commands coordinate through their own registry lock and
+    # may inspect the already-running authenticated host; they do not own a Runtime.
+    if len(sys.argv) > 1 and sys.argv[1] == "plugins":
         _main_plugins(sys.argv[2:])
         return
     # ARCH-7（#150）：CLI 与 Web 并发使用同一 session root 被**有意拒绝**——
@@ -1396,7 +1404,7 @@ def _main_dispatch() -> None:
 
 
 def _main_plugins(argv: list[str]) -> None:
-    """Read-only local package inspection CLI (no install or package execution)."""
+    """Inspect and manage project-local Skill packages without running package code."""
     parser = argparse.ArgumentParser(prog="agent-harness plugins")
     subcommands = parser.add_subparsers(dest="command", required=True)
     inspect = subcommands.add_parser(
@@ -1404,19 +1412,140 @@ def _main_plugins(argv: list[str]) -> None:
     )
     inspect.add_argument("local_dir", help="local directory containing SKILL.md")
     inspect.add_argument("--scope", choices=["project"], required=True)
+    install = subcommands.add_parser("install", help="install a local Skill package disabled")
+    install.add_argument("local_dir", help="local directory containing SKILL.md")
+    enable = subcommands.add_parser("enable", help="enable a complete installed Skill for new Runtimes")
+    enable.add_argument("name")
+    disable = subcommands.add_parser("disable", help="disable an installed Skill for new Runtimes")
+    disable.add_argument("name")
+    remove = subcommands.add_parser("remove", help="remove an unchanged installed Skill package")
+    remove.add_argument("name")
+    subcommands.add_parser("list", help="list saved selection and current Runtime state")
     args = parser.parse_args(argv)
 
-    from agent_harness.skills.inspection import inspect_skill_package
-
     settings = Settings()
-    report = inspect_skill_package(
-        args.local_dir,
-        scope=args.scope,
-        existing_skills=Path(settings.workspace_dir) / "skills",
+    from agent_harness.skills.package_manager import (
+        SkillPackageError,
+        SkillPackageManager,
     )
-    print(json.dumps(report, ensure_ascii=False, indent=2))
-    if report["status"] == "unsupported":
-        raise SystemExit(1)
+
+    manager = SkillPackageManager(
+        settings.workspace_dir,
+        global_skills_dir=settings.skill_global_dir or None,
+    )
+    try:
+        if args.command == "inspect":
+            from agent_harness.skills.inspection import inspect_skill_package
+
+            report = inspect_skill_package(
+                args.local_dir,
+                scope=args.scope,
+                existing_skills=manager.project_skills_dir,
+            )
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            if report["status"] == "unsupported":
+                raise SystemExit(1)
+            return
+        if args.command == "install":
+            record = manager.install(args.local_dir)
+            print(
+                json.dumps(
+                    {"name": Path(record["source"]).name, **record},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return
+        if args.command == "enable":
+            manager.enable(args.name)
+            print(json.dumps({"name": args.name, "saved_selection": "enabled"}, ensure_ascii=False))
+            return
+        if args.command == "disable":
+            manager.disable(args.name)
+            print(json.dumps({"name": args.name, "saved_selection": "disabled"}, ensure_ascii=False))
+            return
+        if args.command == "remove":
+            if os.environ.get(ALLOW_SHARED_ROOT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+                raise SkillPackageError(
+                    "cannot safely remove while ALLOW_SHARED_ROOT is enabled; disable it and retry"
+                )
+            try:
+                removal_lock = InstanceLock(settings.workspace_dir).acquire()
+            except (InstanceLockError, OSError) as error:
+                raise SkillPackageError(
+                    "cannot verify that the current Runtime is stopped; removal was refused"
+                ) from error
+            try:
+                manager.remove(args.name)
+            finally:
+                removal_lock.release()
+            print(json.dumps({"name": args.name, "removed": True}, ensure_ascii=False))
+            return
+        if args.command == "list":
+            print(json.dumps(_skill_package_listing(settings, manager), ensure_ascii=False, indent=2))
+            return
+    except (SkillPackageError, OSError) as error:
+        _emit_stderr(str(error))
+        raise SystemExit(2) from error
+
+
+def _query_current_skill_runtime(
+    workspace_dir: str,
+) -> tuple[str, str, set[str] | None]:
+    """Read a running host's catalog with challenge proofs; never send its bearer token."""
+    if os.environ.get(ALLOW_SHARED_ROOT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "unavailable", "shared-root mode prevents a reliable Runtime presence check", None
+    from agent_harness.host_service import query_attached_skill_catalog
+
+    catalog = query_attached_skill_catalog(workspace_dir)
+    if catalog is not None:
+        sources = {
+            os.path.normcase(os.path.realpath(str(skill["source"])))
+            for skill in catalog["skills"]
+            if isinstance(skill, dict) and isinstance(skill.get("source"), str)
+        }
+        return "running", "authenticated live Skills catalog", sources
+    try:
+        probe_lock = InstanceLock(workspace_dir).acquire()
+    except (InstanceLockError, OSError):
+        return "unavailable", "workspace lock is unavailable; per-Skill Runtime state cannot be queried", None
+    probe_lock.release()
+    return "not_running", "workspace lock is available; no Runtime owns the workspace", None
+
+
+def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> dict[str, object]:
+    runtime_state, detail, runtime_skill_sources = _query_current_skill_runtime(settings.workspace_dir)
+    packages: list[dict[str, object]] = []
+    for name, record in sorted(manager.list_packages().items()):
+        enabled = bool(record["enabled"])
+        if runtime_state == "not_running":
+            current = "not_running"
+            pending_restart: bool | None = False
+        elif runtime_state == "unavailable":
+            current = "unavailable"
+            pending_restart = None
+        else:
+            package_skill = manager.managed_skills_dir / name / "SKILL.md"
+            package_source = os.path.normcase(os.path.realpath(str(package_skill)))
+            discovered = package_source in (runtime_skill_sources or set())
+            current = "discovered" if discovered else "not_discovered"
+            pending_restart = enabled != discovered
+        packages.append(
+            {
+                "name": name,
+                "type": record["type"],
+                "scope": record["scope"],
+                "source": record["source"],
+                "saved_selection": "enabled" if enabled else "disabled",
+                "compatibility": record["compatibility"],
+                "current_runtime": current,
+                "pending_restart": pending_restart,
+            }
+        )
+    return {
+        "runtime": {"state": runtime_state, "detail": detail},
+        "packages": packages,
+    }
 
 
 def _main_ingest(argv: list[str]) -> None:

@@ -30,8 +30,10 @@ from __future__ import annotations
 import enum
 import getpass
 import hashlib
+import hmac
 import json
 import os
+import re
 import secrets as secrets_module
 import socket
 import threading
@@ -61,6 +63,9 @@ __all__ = [
     "ENDPOINT_FILENAME",
     "HOST_CREDENTIALS_ENV",
     "HOST_PROTOCOL_VERSION",
+    "HOST_SKILLS_NONCE_HEADER",
+    "HOST_SKILLS_PROOF_HEADER",
+    "HOST_SKILLS_RESPONSE_PROOF_HEADER",
     "HOST_TOKEN_TTL_SECONDS",
     "AttachResult",
     "AttachStatus",
@@ -74,8 +79,11 @@ __all__ = [
     "default_credentials",
     "describe_lock_error_with_attach",
     "ensure_service",
+    "host_skills_request_proof",
+    "host_skills_response_proof",
     "host_token_username",
     "publish_endpoint",
+    "query_attached_skill_catalog",
     "read_endpoint",
     "serve_once",
 ]
@@ -107,6 +115,38 @@ HOST_TOKEN_TTL_SECONDS = 7 * 24 * 3600
 
 #: 锁竞争输家二次检查的轮询间隔（秒）。
 _ATTACH_POLL_INTERVAL = 0.25
+
+# Bound local JSON reads so a stale or unexpected loopback service cannot force
+# an unbounded allocation during attach probing.
+_MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
+HOST_SKILLS_NONCE_HEADER = "X-Agent-Harness-Nonce"
+HOST_SKILLS_PROOF_HEADER = "X-Agent-Harness-Proof"
+HOST_SKILLS_RESPONSE_PROOF_HEADER = "X-Agent-Harness-Response-Proof"
+_HOST_SKILLS_NONCE_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def host_skills_request_proof(token: str, nonce: str) -> str:
+    """Authenticate a catalog query without transmitting the host bearer token."""
+    if not _HOST_SKILLS_NONCE_PATTERN.fullmatch(nonce):
+        raise ValueError("host Skills challenge nonce must be 32 random bytes in hex")
+    message = b"agent-harness-host:v1\nGET\n/api/skills\n" + nonce.encode("ascii")
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def host_skills_response_proof(token: str, nonce: str, status: int, body: bytes) -> str:
+    """Bind an authenticated catalog response to its request challenge and body."""
+    if not _HOST_SKILLS_NONCE_PATTERN.fullmatch(nonce):
+        raise ValueError("host Skills challenge nonce must be 32 random bytes in hex")
+    body_digest = hashlib.sha256(body).hexdigest().encode("ascii")
+    message = (
+        b"agent-harness-host:v1\nRESPONSE\nGET\n/api/skills\n"
+        + nonce.encode("ascii")
+        + b"\n"
+        + str(status).encode("ascii")
+        + b"\n"
+        + body_digest
+    )
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 class HostServiceError(RuntimeError):
@@ -308,12 +348,81 @@ class HostTokenStore:
 _LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def _read_bounded_body(response: Any) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError as error:
+            raise ValueError("local service returned an invalid Content-Length") from error
+        if declared_length < 0 or declared_length > _MAX_JSON_RESPONSE_BYTES:
+            raise ValueError("local service JSON response exceeds size limit")
+    body = response.read(_MAX_JSON_RESPONSE_BYTES + 1)
+    if len(body) > _MAX_JSON_RESPONSE_BYTES:
+        raise ValueError("local service JSON response exceeds size limit")
+    return body
+
+
 def _http_get_json(url: str, *, token: str | None, timeout: float) -> tuple[int, object]:
     request = urllib.request.Request(url)
     if token is not None:
         request.add_header("Authorization", f"Bearer {token}")
     with _LOOPBACK_OPENER.open(request, timeout=timeout) as response:
-        return response.status, json.loads(response.read().decode("utf-8"))
+        return response.status, json.loads(_read_bounded_body(response).decode("utf-8"))
+
+
+def query_attached_skill_catalog(
+    root: str | os.PathLike[str],
+    *,
+    credentials: Credentials | None = None,
+    connect_timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> dict[str, Any] | None:
+    """Read the live Skills catalog using nonce HMACs, never sending the bearer token.
+
+    Returns ``None`` when the endpoint is absent, stale, older than the challenge
+    extension, unauthenticated, or returns an invalidly signed response.
+    """
+    endpoint = read_endpoint(root)
+    if endpoint is None or not endpoint.auth_required:
+        return None
+    try:
+        with socket.create_connection(("127.0.0.1", endpoint.port), timeout=connect_timeout):
+            pass
+        status, health = _http_get_json(
+            f"http://127.0.0.1:{endpoint.port}/api/health",
+            token=None,
+            timeout=connect_timeout,
+        )
+    except (OSError, ValueError, urllib.error.HTTPError):
+        return None
+    if (
+        status != 200
+        or not isinstance(health, dict)
+        or health.get("status") != "ok"
+        or health.get("protocol_version") != HOST_PROTOCOL_VERSION
+    ):
+        return None
+
+    token = HostTokenStore(credentials).get_token(root)
+    if not token:
+        return None
+    nonce = secrets_module.token_hex(32)
+    request = urllib.request.Request(f"http://127.0.0.1:{endpoint.port}/api/skills")
+    request.add_header(HOST_SKILLS_NONCE_HEADER, nonce)
+    request.add_header(HOST_SKILLS_PROOF_HEADER, host_skills_request_proof(token, nonce))
+    try:
+        with _LOOPBACK_OPENER.open(request, timeout=connect_timeout) as response:
+            body = _read_bounded_body(response)
+            response_proof = response.headers.get(HOST_SKILLS_RESPONSE_PROOF_HEADER, "")
+            expected_proof = host_skills_response_proof(token, nonce, response.status, body)
+            if not hmac.compare_digest(response_proof, expected_proof):
+                return None
+            payload = json.loads(body.decode("utf-8"))
+    except (OSError, ValueError, urllib.error.HTTPError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("skills"), list):
+        return None
+    return payload
 
 
 def attach_probe(
@@ -479,7 +588,7 @@ def serve_once(
 
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(effective, enable_cors=False),
+            create_app(effective, enable_cors=False, host_service_token=token),
             host=host,
             port=0,
             log_level="warning",
