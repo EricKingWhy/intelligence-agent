@@ -189,4 +189,4 @@ jobs:
         run: node node_modules/@playwright/test/cli.js install --with-deps chromium
       - name: 运行 e2e 冒烟集（2 worker；webServer 自动起 vite :5173）
         working-directory: web
-        run: node node_modules/@playwright/test/cli.js test --workers=2 task-review.spec.ts u-project-task.spec.ts control-row.spec.ts context-usage.spec.ts y-inspector-peek.spec.ts w-session-delete.spec.ts e-reconnect.spec.ts d-recover.spec.ts stream-fallback.spec.ts n-approval-card.spec.ts composer-stream-actions.spec.ts queue-flush.spec.ts
+        run: node node_modules/@playwright/test/cli.js test --workers=2 task-review.spec.ts u-project-task.spec.ts control-row.spec.ts context-usage.spec.ts y-inspector-peek.spec.ts w-session-delete.spec.ts e-reconnect.spec.ts d-recover.spec.ts stream-fallback.spec.ts n-approval-card.spec.ts composer-stream-actions.spec.ts queue-flush.spec.ts multiturn-queue.spec.ts
