@@ -466,6 +466,21 @@ def extraction_candidates(call_outputs: Sequence[str] | None) -> list[Any] | Non
     return None
 
 
+def case_id_needs_budget_pressure(case_id: str) -> bool:
+    """M7 的案例定义要求"B 小于候选 T"——只有它需要预算压力前置。"""
+    return case_id == "M7"
+
+
+#: M7 预算压力种子：重复到足以让**投影后的保护事实**逼近默认预算 8192，但**不越线**
+#: ——越线的话首个 turn 的 context 构建就抛 `ProtectedFactBudgetExceededError`、run 直接
+#: 暂停收口，`register_constraint` 根本没机会被调用（实测 reps=376 即如此）。
+#: 实测标定（含真实会话的 `authorization` 迁移事实 + M7 输入自身的 `user_goal`）：
+#: reps=372 ⇒ turn-1 投影 8154 ≤ 8192（run 正常起），加候选后 8259 > 8192（工具真实拒绝）。
+#: 与旧证据的 fixture（`protected_fact_budget_pressure`，reps=376）同量级、同机制。
+_BUDGET_PRESSURE_REPETITIONS = 372
+_BUDGET_PRESSURE_SENTENCE = "本次任务必须保留所有现有行为。"
+
+
 def _read_job_row(database_path: Path, idempotency_key: str) -> dict[str, Any] | None:
     """按幂等键**只读**一条 formation job 行（不存在返回 None）。
 
@@ -1308,6 +1323,13 @@ class _RealRunner:
                 value=case.seed_active_constraint, source_event_id=seed_source.event_id,
             ))
             facts_before = _fact_values(derive_protected_facts(store.read_events(session_id)))
+        if case_id_needs_budget_pressure(case.case_id):
+            # M7 的案例定义逐字是"B 小于候选 T"——不布这个前置，`register_constraint`
+            # 永远走不到 `BUDGET_EXCEEDED` 那一支，M7 会以"没触发拒绝"判负（真因是驱动
+            # 少布了压力，不是模型错）。复刻旧证据的 fixture（`protected_fact_budget_pressure`）：
+            # 先播一条足以把投影推过默认预算 8192 的既有保护事实，候选一加即超限。
+            self._seed_budget_pressure(session, session_id)
+            facts_before = _fact_values(derive_protected_facts(store.read_events(session_id)))
 
         started_at = _now_utc()
         response = await self._client.post(
@@ -1353,6 +1375,24 @@ class _RealRunner:
             "extraction_outputs": extraction_outputs,
             "extraction": extraction,
         }
+
+    def _seed_budget_pressure(self, session: Any, session_id: str) -> None:
+        """给 M7 播一条"几乎占满预算"的既有保护事实（复刻旧证据的 fixture）。
+
+        播一条常量级大值（重复 `_BUDGET_PRESSURE_REPETITIONS` 次），使**投影后的**保护事实
+        几乎顶到默认预算；随后 `register_constraint` 一加候选即 `estimated_tokens_after > B`
+        ⇒ 真实的 `BUDGET_EXCEEDED`。这是"布 B < T 的前置"，不是"伪造拒绝"——拒绝仍由生产
+        工具按真实计数发出。
+        """
+        from agent_harness.session.derive import build_protected_fact_data
+        from agent_harness.session.event import TASK_PROTECTED_FACT, USER_MESSAGE
+
+        seed_value = _BUDGET_PRESSURE_SENTENCE * _BUDGET_PRESSURE_REPETITIONS
+        seed_source = session.append(USER_MESSAGE, {"content": seed_value})
+        session.append(TASK_PROTECTED_FACT, build_protected_fact_data(
+            session.events, session_id=session_id, fact_type="constraint",
+            value=seed_value, source_event_id=seed_source.event_id,
+        ))
 
     def _message_body(self, content: str) -> dict[str, Any]:
         """用户消息体：给足 run/session 预算，避免预算暂停掩盖真实行为。
