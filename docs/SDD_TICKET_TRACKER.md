@@ -32,7 +32,7 @@
 | MEM-V2-7 | #303 | COMPLETED / integrated (PR #374); cutover and AC8 verified | Clean-slate cutover and legacy-path retirement | #298, #299, #300 |
 | MEM-V2-8 | #304 | CLOSED / integrated（2026-10-01 关单：PR #473 → merge `daec5888`；阶段性证据 = 用户裁决③——run4 27/27 零降级 + run5 安全面全绿 & write_precision 1.0 首次达标，五跑全程 fail-closed 零脏写；质量阈值层分层另立 #496 OPEN） | Final real Gate and release evidence | #301, #302, #303 |
 | — | #485 | CLOSED / integrated（2026-10-01 关单：R9 修复重试 `9a1981f7` TDD 红→绿 + 独立审查 APPROVE；run4 0 degraded 验证；随 PR #473 merge `daec5888` 进 main；证据评论 issuecomment-5931228472） | R9 语义修订：模型输出契约违规允许一次修复重试（用户裁决 2026-10-01） | #298 |
-| — | #496 | OPEN / in-progress（2026-10-08：用户批准单项 gold 更正；v1.9.1 / `e5446528`；最新 real gate 有 3 degraded，coverage/kind 未达阈值；详见 `docs/phase_status/2026-10.md` #496 校正记录） | Memory V2 质量层：formation 提取覆盖与分类准确率 | #304 |
+| — | #496 | OPEN / in-progress（2026-10-08：prompt 调优与获批 gold 来源校正已提交；tip `883aeef5` real-gold 27/27、1 degraded；precision 0.80、coverage 0.727、kind 0.833 未达 AC；详见月档） | Memory V2 质量层：formation 提取覆盖与分类准确率 | #304 |
 | — | #483 | CLOSED（2026-10-01 16:03 关单：main 全量绿达成，处置经用户批准变更——main 侧修复 `9995de2f` 对旧夹具四处对齐；合并树上由 #304 语料 v1.9.0 全量重写承载，scope=project 两条修复已吸收进冲突裁决） | 既有红 #2：main 金集语料 v1.1.0 落后 #298 收口行为（helper 断言 + 3 例 eligibility 标签翻转） | #304 |
 
 **事实源与边界（截至 2026-09-27）**：PRD = `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md`；票面 = `docs/tickets/mem-v2-*.md`；研究 = `docs/research/2026-09-22-production-long-term-memory-systems.md`。`#297`–`#303` 的实现均已集成；`#303` 的真实 cutover、保留证明与 AC8 smoke 已完成，最终证据见 `docs/evidence/memory-v2-*2026-09-27.json`。`#304` 已解除依赖并可开始。
