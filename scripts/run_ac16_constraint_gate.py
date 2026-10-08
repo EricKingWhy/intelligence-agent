@@ -166,6 +166,17 @@ _MIN_EFFECTIVE_TEMPERATURE = 0.0
 
 #: 单个 run 等的上限（秒）。超过就抛 TimeoutError，折成该槽位的失败观测——不静默跳过。
 _RUN_TIMEOUT_SECONDS = 300.0
+#: `/messages`、`/resume` 这两个 **launched** POST 的上界（秒）。
+#:
+#: 它们的响应体是 detached run 的 live SSE 流，而 `httpx.ASGITransport` 要等整个 ASGI
+#: app 调用返回才交出 response（body 全缓冲在 `body_parts`，`await self.app(...)` 在构造
+#: `Response` 之前——httpx `_transports/asgi.py::handle_async_request`）。所以
+#: `await client.post(...)` 在这个 transport 下**等于"等这条 run 收尾"**，而 httpx 自己的
+#: `Timeout` 对 ASGITransport 不生效（超时挂在真实 transport 的连接/读上）。没有这层上界，
+#: 一次在首个模型回合里跑偏、迟迟不收口的 run 会让驱动**永久**卡在 POST 上——轮询用的
+#: `_RUN_TIMEOUT_SECONDS` 够不着（它在 POST 返回之后才开始），campaign 静默挂死。
+#: Round 6-final 实测见 `test_answer_resume_post_is_bounded_not_forever` 的 docstring。
+_POST_TIMEOUT_SECONDS = 300.0
 #: 等 run 终态的轮询间隔（秒）。
 _POLL_INTERVAL_SECONDS = 0.5
 #: B-lite 抽取 job 的 drain 上限（秒）。抽取是 job 内一次有界模型调用（工具超时 20s）。
@@ -1849,6 +1860,23 @@ class _RealRunner:
         response.raise_for_status()
         return response.json()
 
+    async def _post_bounded(self, path: str, *, what: str, **kwargs: Any) -> Any:
+        """给 launched POST 套一层上界（见 `_POST_TIMEOUT_SECONDS`）。
+
+        为什么不能靠 httpx 自己的 `Timeout`：`ASGITransport` 不实现连接/读超时，
+        `await client.post(...)` 在这个 transport 下等价于"等这条 run 的 SSE 流收尾"。
+        所以这里用 `asyncio.timeout` 兜住，超时抛**能定位**的 `RuntimeError`（折进该槽位的
+        `Observation.error` 如实判负），而不是让 campaign 静默挂死。
+        """
+        try:
+            async with asyncio.timeout(_POST_TIMEOUT_SECONDS):
+                return await self._client.post(path, **kwargs)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"{what} 的 POST {path} 在 {_POST_TIMEOUT_SECONDS}s 内未返回"
+                f"（launched 分支的 SSE 流未收尾；ASGITransport 下 POST 等价于等 run 收口）"
+            ) from exc
+
     async def _wait_for_terminal(self, session_id: str, run_id: str) -> str:
         """轮询事件流直到该 run 出终态；返回 `completed` / `failed` / `paused`。
 
@@ -1989,8 +2017,9 @@ class _RealRunner:
         # 不靠"事件流里最后一个带 run_id 的事件"——那种口径在 run/started 落盘前读到的是
         # 上一轮的 run（M8/M9 同 session 第二轮）或空（M5-2 的死因）。
         seen_run_ids = _run_ids_in(await self._events(session_id))
-        response = await self._client.post(
-            f"/api/sessions/{session_id}/messages", json=self._message_body(case.input_text),
+        response = await self._post_bounded(
+            f"/api/sessions/{session_id}/messages", what=f"{case.case_id} 发消息",
+            json=self._message_body(case.input_text),
         )
         if response.status_code != 200:
             raise RuntimeError(
@@ -2082,8 +2111,8 @@ class _RealRunner:
         )
         if request is None or pause is None:
             raise RuntimeError(f"{case.case_id} 期望暂停+卡片，实际缺一")
-        resumed = await self._client.post(
-            f"/api/sessions/{session_id}/resume",
+        resumed = await self._post_bounded(
+            f"/api/sessions/{session_id}/resume", what=f"{case.case_id} 答复 /resume",
             json={
                 "run_id": pause["run_id"],
                 "resume_basis": "user_input",

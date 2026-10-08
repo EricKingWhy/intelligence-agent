@@ -2025,3 +2025,69 @@ def test_absent_extraction_job_returns_immediately_for_primary_cases(driver):
 
     out = asyncio.run(runner._extraction_evidence("run-x", expect_job=False))
     assert out == {"job": None, "extraction_state": "", "candidates": None}
+
+
+# ── Round 7：`/messages` 与 `/resume` 的 POST 必须有上界（否则 campaign 静默挂死）───
+
+
+def _hanging_post_client():
+    """`post()` 永不返回的假 client——复刻"run 迟迟不收口"时 ASGITransport 的卡法。"""
+    import asyncio
+
+    class _Hanging:
+        async def post(self, *args, **kwargs):
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    return _Hanging()
+
+
+def test_answer_resume_post_is_bounded_not_forever(driver, monkeypatch):
+    """答复 `/resume` 的 POST 必须有上界，超时抛**可诊断**的错误，不许永久挂住。
+
+    回归背景（Round 6-final 实测，`20261008T080221Z` campaign 卡死）：`/messages` 与
+    `/resume` 在 `launched` 分支返回的是 detached run 的 live SSE 流，而
+    `httpx.ASGITransport` **只在整个 ASGI app 调用返回后**才交出 response——它把 body
+    全缓冲在 `body_parts` 里，`await self.app(scope, receive, send)` 在构造 `Response`
+    **之前**（httpx `_transports/asgi.py::handle_async_request`）。于是
+    `await self._client.post(...)` 在 ASGITransport 下等于"等这条 run 的流收尾"；httpx
+    自己的 `Timeout` 对 ASGITransport **不生效**（超时挂在真实 transport 的连接/读上）。
+
+    没有这一层上界时，一次在首个模型回合里跑偏、迟迟不收口的 run（实测 M8-1：模型答完
+    卡片后拿 bash 探索宿主仓库，17 个回合仍未出终态）会让驱动**永久**停在
+    `await client.post(...)` 上——驱动自己的 `_RUN_TIMEOUT_SECONDS` 轮询上界够不着
+    （轮询在 POST 返回之后才开始），campaign 于是静默挂死、证据零写入。
+    """
+    import asyncio
+
+    runner = object.__new__(driver._RealRunner)  # 只借方法，不跑真实装配
+    runner._client = _hanging_post_client()
+    monkeypatch.setattr(driver, "_POST_TIMEOUT_SECONDS", 0.05)
+    case = driver._CASES_BY_ID["M9"]
+    events = [
+        {"type": "user/input-requested", "data": {"request_id": "req-1"}},
+        {"type": "run/paused", "run_id": "run-1",
+         "data": {"reason": "user_input", "budget_version": 1}},
+    ]
+
+    # 修复前：POST 永不返回 ⇒ 3s 后 wait_for 抛 TimeoutError（pytest.raises 接不住）⇒ 红。
+    async def _drive():
+        return await runner._answer_card("sess-1", case, events)
+
+    with pytest.raises(RuntimeError, match="resume"):
+        asyncio.run(asyncio.wait_for(_drive(), timeout=3.0))
+
+
+def test_launched_post_forwards_to_the_bounded_helper(driver):
+    """`/messages` 与 `/resume` 两处 POST **都**走 `_post_bounded`，不裸调 `client.post`。
+
+    源码级判据（不需要真实装配）：驱动里 `self._client.post(` 的裸调用应只剩上界包装内部
+    那一处——两处 launched 端点若有一处漏包，那次 POST 就重新变成无界等待。
+    """
+    source = driver.__file__ and _SCRIPT.read_text(encoding="utf-8")
+    bare_posts = [
+        line for line in source.splitlines()
+        if "self._client.post(" in line and "async def _post_bounded" not in line
+    ]
+    assert len(bare_posts) == 1, f"裸 POST 调用点应只剩 _post_bounded 内一处，实为：{bare_posts}"
+
