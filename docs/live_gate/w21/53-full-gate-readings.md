@@ -138,6 +138,13 @@ Expected: visible   Timeout: 5000ms   Error: element(s) not found
 
 **结论**：**非 W-21 引入**；是分支基点落后 main 造成的**在册既有红**，同步 main 即消除。
 
+**实测确认（不靠提交信息）**：本树的实现面与 main **逐字相同**——
+`da15848c`（#367 选项 A）与 `805ff39d`（删旧弹窗）**都是 HEAD 的祖先**，
+且 `web/src/components/TaskCreationDialog.tsx`、`web/src/components/SessionList.tsx` 在
+`HEAD` 与 `main` 之间 `git diff` 为空。把 **main 版的该 spec** 取进树里（临时未跟踪文件，
+跑完即删、`git status` 复原为 clean）在同一棵树上跑：**10 passed / 10（22.7s，两 project 各 5/5）**。
+⇒ 这一红**只**由 spec 陈旧造成，同步 main 即转绿；**产品面无需任何改动**。
+
 ### 2.4 ⑬ Gate-0 首轮 rc=1：工作树有未提交改动，读数落盘被拒
 
 首轮（`1cfc7b02` + 未提交的 N-3 文档改动）6/6 车道 **PASS**，但 `gate0.py` 依协议 §8.7 第 3 条
@@ -166,5 +173,7 @@ Expected: visible   Timeout: 5000ms   Error: element(s) not found
    ⇒ 该 shim **不在场**；仍实跑一遍以取读数：**6723 passed / 26 skipped / 51 deselected，1141.66s，rc=0**，
    与 ② 逐项相同（`run_tests_clean.sh` 默认目标 `tests/`，故也不受 §2.1 的产物树问题影响）。
 4. ⑪ 的 10 红**全部**在同一 spec、同一断言，已逐条核对失败清单与失败快照；未发现其他 spec 红。
-5. 本文件不宣称「全量门禁在冻结树上全绿」：车道 ⑪ 在冻结树上确实红（原因见 §2.3），
-   该红的消除依赖同步 main，属待批准动作。
+   其中「同步 main 即消除」这一句是**实测**结论（见 §2.3 末段），不是从提交信息推断的。
+5. 本文件不宣称「全量门禁在冻结树上全绿」：车道 ⑪ 在冻结树上确实红（原因见 §2.3）。
+   ⑪ 的消除本身只需同步 spec（产品面零改动，已实测），但**同步 main 会带入 64 笔其他改动**，
+   故合并树上的全量门禁仍须重跑；是否执行该同步属待批准动作（§14.4）。
