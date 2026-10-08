@@ -7737,3 +7737,43 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   **分支落后 main 64 提交**（本地 main `9e1c065b`、`origin/main` `5b7c14c3` 再多 58）⇒ 冻结安装件
   不对应任何将被合并的树；集成前须先同步 main 并按 §14.10 在合并树重跑全量门禁，Run A/B 的 Live
   证据可否传递须按 §8.8 重新判定。**#365 保持 OPEN**，未关单。
+## W-21 七票修复批（2026-10-08；#848–#856，分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`）
+
+**范围**：`412e4570..3c850121` = 7 笔代码（`3ef9f8de` #851 / `c4860324` #850 / `1be41f56` #853 /
+`cfb1c71a` #854 / `cc7b5994` #849 / `6535a4d5` #856 / `3c850121` #848）。逐票根因、红证与读数见
+`docs/live_gate/w21/55-seven-ticket-fixes.md`；审查台账行
+`docs/review_ledger.d/t365-w21-seven-ticket-fixes-412e4570-3c850121.tsv`。
+
+**机械面**：派单前裸全量 Gate-0 = **5/6**（唯一红 coverage，❌ 集合恰为本批 7 笔），读数
+`docs/gate/3c8501213726cc226fe78fba7870cd1d09ce6886.json`；写台账行后 `check_review_coverage.py`
+**rc=0**（2975 / 2901 / 74，0 条未归属）。
+
+**两轴独立审查**（各一独立只读子代理、互不可见；两轴均 PASS-WITH-FINDINGS，9/9 冻结值相符、
+零文件改动）：Correctness P0=0 **P1=1** P2=0 P3=2；Standards P0=0 P1=0 P2=0 P3=6 P4=1。
+
+**冻结树全量重车道**（串行跑、零改动窗口）：① ruff ✅ ② pytest **1 红**（6739P/27S/51D，见下）
+③ `run_tests_clean.sh` 未跑（② 无沙箱配额形状，绕行不必要）④ web tsc ✅ ⑤ vitest 1 红 = 在册 flake
+B-29（本批 `web/` 改动 **0 文件**）⑥ oxlint ✅ ⑦ guards ✅ ⑧ coverage ✅（落账后）⑨ diff-check ✅
+⑩ vite build ✅ ⑪ playwright **无读数**（5173 被**另一 clone** 的 dev server 占住，preflight 拒绝复用；
+按 §14.13 未动它）⑫ 真机验收 n/a（未重打包）⑬ Gate-0 5/6。补跑：tui **69/69** + `tsc --noEmit` 干净；
+desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈旧，重打包前置）。
+
+**【待用户裁决】两条都在 #850 的面，本轮只登记不修** —— §8.8.5「每轴 1 轮、无第二轮」额度本票
+已用满（上一批 `e8b57282..779f8980` 用掉），协议出口 = 停止修复 + 登记残余 + 交用户裁决：
+1. **P1**：`src/agent_harness/sandbox/local.py:57-64` 用 `command.strip()` 判内部换行 ⇒ **前导**换行的
+   多行命令不被拒绝，本机实测 `"\necho A"` → `rc=0` **零输出**，正是 #850 要消灭的「静默 no-op
+   报成功」。判据应为 `rstrip()`；`tests/sandbox/test_local_sandbox.py` 缺前导换行用例。
+2. **本批引入的红**：`tests/tooling/test_approve_policy.py::TestExecutorIntegration::test_command_policy_newline_rejected_without_crash`
+   —— 机械归因三条：该文件不在本批 diff、末次改动 `9fab6ff2`（#684）、守卫在基点 `412e4570` 不存在
+   （由 `c4860324` 引入）⇒ #850 的行为变更打翻了既有测试里「多行命令仍能跑通」的假设。
+
+⇒ **本批不可交付**：未重打包、未跑 Run A / Run B（票面明令不得隐藏失败、不得只用 fake model 宣称
+通过）。裁决后按「修 + 一轮针对新 diff 的修后重审」收口，再重打包与两次 Run A / Run B。
+
+**其余登记（不修）**：见证据件 55 §6.2 —— tint token 正则对 5/7 位 hex **两个方向都错**（5 位假红 /
+7 位假绿）、#851 行尾容忍与 #850 新契约异常无规格/ADR 出处、#849 判定口径与冻结证据件
+`10-w20-deterministic-evidence.md` 分叉、`tui/test/host.test.ts` 的 R3 契约测试跨打包线读 desktop 源树、
+`tools/edit.py` 错误码与 `05:110/112` 不符（**非本批引入**）、#853 顺带把 3 处构造参数属性改成显式字段。
+
+**未决**：main 尚未同步（§14.7 两处冲突的并集方案待批准）；push / PR 待批准；#815 第三路径待裁决；
+`#859`（`stream/truncated` 无 `time` 被 `parseEnvelope` 丢弃）待修。**#365 保持 OPEN**。
