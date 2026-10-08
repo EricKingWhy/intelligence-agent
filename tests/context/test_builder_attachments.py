@@ -6,16 +6,34 @@ import io
 import json
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from PIL import Image
 
 from agent_harness.attachments.projection import IMAGE_OMITTED_PLACEHOLDER
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.model.multimodal import DEFAULT_IMAGE_DETAIL
-from agent_harness.session import USER_MESSAGE, JsonlSessionStore, Session
+from agent_harness.session import (
+    MODEL_COMPLETED,
+    USER_MESSAGE,
+    JsonlSessionStore,
+    Session,
+)
 from agent_harness.storage.artifact import FakeArtifactStore, compute_byte_artifact_id
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
+
+#: 合法四节摘要剧本（与 tests/context/test_647_bracket_identity.py 同源）。
+_MODEL_SECTIONS = """## 已完成工作与关键决策
+已完成读取历史记录，并选择直接展示内容。
+
+## 失败方案
+(none)
+
+## 当前进行中状态
+摘要覆盖的历史工作已完成。
+
+## Next Step
+等待当前请求继续。"""
 
 
 def _png(width: int = 8, height: int = 6, *, alpha: bool = False) -> bytes:
@@ -143,3 +161,44 @@ async def test_resume_rebuilds_identical_image_block(tmp_path):
     assert "base64" not in json.dumps(
         [event.data for event in persisted], ensure_ascii=False
     )
+
+
+@pytest.mark.asyncio
+async def test_vision_compaction_reprojection_is_same_projection(tmp_path):
+    """视觉投影下压缩的「重投影确认」必须与压缩输入**同口径**（#823）。
+
+    `compact_now` 按 `model_supports_vision` 物化图片块，其尾部 `_reproject` 复核
+    必须用**同一** `supports_vision`——否则带图会话一触发压缩，重投影（占位符文本）
+    与压缩产物（图片块）不一致 ⇒ `CompactionPostWriteError`，run 直接 fail-closed。
+    """
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "读取旧记录后继续。"})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    data = _png()
+    attachment_id = compute_byte_artifact_id(data)
+    session.append(USER_MESSAGE, {
+        "content": "看看这张图",
+        "attachments": [{
+            "kind": "image",
+            "attachment_id": attachment_id,
+            "media_type": "image/png",
+            "bytes": len(data),
+            "width": 8,
+            "height": 6,
+        }],
+    })
+    store = FakeArtifactStore()
+    await store.save_bytes(session.session_id, data, mime_type="image/png")
+
+    builder = ContextBuilder(
+        ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]),
+        artifact_store=store,
+        artifact_read_tool_name="read_artifact",
+        model_supports_vision=True,
+        max_context_tokens=10_000,
+        auto_compact_threshold=0.3,
+    )
+    result = await builder.compact_now(session)
+
+    assert result is not None
+    assert result.compacted_turn_count == 1

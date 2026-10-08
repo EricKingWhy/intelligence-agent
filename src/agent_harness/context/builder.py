@@ -29,6 +29,7 @@ from agent_harness.session import Session
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     ProtectedFact,
+    derive_messages,
     derive_messages_with_source_ranges,
     derive_modified_file_paths,
     derive_protected_facts,
@@ -1176,10 +1177,19 @@ class ContextBuilder:
         ``compact_session_context`` 共用），决策重算先于本调用、同一次调用内
         同源，不存在跨 build 分歧窗口；跨 build 读（usage_snapshot）的漂移
         口径在彼处文档化。
+
+        #823 / MM-02：投影必须与 `compact_now` 的输入**同一口径**——附件引用按
+        `model_supports_vision` 物化成图片块（或占位符），故这里也传同一
+        `supports_vision`。否则带图会话一触发压缩，压缩产物（图片块）与重投影
+        （占位符文本）不一致 ⇒ 误报 `CompactionPostWriteError`。
         """
         if self._pruner is None:
-            return session.derive_messages()
-        pairs = derive_messages_with_source_ranges(session.events)
+            return derive_messages(
+                session.events, supports_vision=self._supports_vision
+            )
+        pairs = derive_messages_with_source_ranges(
+            session.events, supports_vision=self._supports_vision
+        )
         return self._pruner.apply(
             pairs, self._prune_decisions.get(session.session_id, {}),
         )
