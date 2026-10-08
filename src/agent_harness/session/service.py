@@ -136,6 +136,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    AttachmentMessageTooLarge,
     AttachmentReferenceInvalid,
     CompactionConcurrentWrite,
     CompactionInProgress,
@@ -143,6 +144,7 @@ from agent_harness.session.errors import (
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
+    ModelDoesNotSupportImages,
     PendingApprovalConflict,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
@@ -155,6 +157,7 @@ from agent_harness.session.errors import (
     SnapshotTokenMismatch,
     SteerTargetNotFound,
     SupersedeTargetInvalid,
+    TooManyAttachments,
     UnknownModel,
     WorkspaceBindingConflict,
     WorkspaceNameInvalid,
@@ -2922,6 +2925,22 @@ class SessionService:
                     "height": detected.height,
                 }
             )
+        # #824 / MM-03（AC1）：聚合上限——单条消息的图片**数量**与**总字节**。
+        # 数量是"一条消息"的属性（上传端点看不到），总字节是引用集之和；两者都只在
+        # 发送端点可判。整条路径是**纯读**（load_bytes / detect 均无写），超限在任何
+        # 落盘之前拒绝 ⇒ 零事件、零存储残留。单张图字节/像素/边长的上限由上传端点
+        # 在保存前判（`web/attachments.py`），与本层互补、不重复。
+        if len(refs) > limits.max_images_per_message:
+            raise TooManyAttachments(
+                f"单条消息最多 {limits.max_images_per_message} 张图片，"
+                f"本次引用了 {len(refs)} 张"
+            )
+        total_bytes = sum(ref["bytes"] for ref in refs)
+        if total_bytes > limits.max_message_image_bytes:
+            raise AttachmentMessageTooLarge(
+                "单条消息的图片总字节超过上限"
+                f"（{limits.max_message_image_bytes} 字节）：本次合计 {total_bytes} 字节"
+            )
         return refs
 
     async def send_message(
@@ -3070,9 +3089,30 @@ class SessionService:
         # 全是**纯读**（不发写），与上面的取代/预算校验同一条"先校验后落盘"纪律。
         # 事件只带引用（`kind/attachment_id/media_type/bytes/width/height`），字节
         # 已由上传端点内容寻址落盘（persist-before-event）——此处读回并复核尺寸。
+        #
+        # #824 / MM-03：在途 run 的判定提前到这里——视觉门禁（AC4）要按"本条消息最终
+        # 由哪个模型投影"判定：idle 的 queue 消息会消费 `amend.model`（一次性模型覆盖，
+        # 会被 `resume_and_launch` 持久化成会话模型），在途 run 的 queued 消息与 steer
+        # 则丢弃 amend（模型不变）。提前读一次即拿到该事实，且仍在任何写（cancel_queue /
+        # append）之前——被拒请求零副作用。
+        active_run = self._run_manager.get_active(session_id)
         if attachments:
             resolved_refs = await self._resolve_attachment_refs(session_id, attachments)
             if resolved_refs:
+                # #824 / MM-03（AC4，PRD D6 "不信任客户端"）：服务端权威视觉门禁。所选
+                # （或本条一次性覆盖的）模型不支持视觉却附图 → 422，零落盘。投影层的
+                # 占位符降级（AC5/AC6）兜住"发送后 fallback 到非视觉模型"的场景，二者
+                # 构成双保险。
+                amend_model = (
+                    amend.model
+                    if (amend is not None and mode == "queue" and active_run is None)
+                    else None
+                )
+                if not self._supports_vision_for_request(current_events, amend_model):
+                    raise ModelDoesNotSupportImages(
+                        "当前所选模型不支持图片输入，不能发送带图片的消息；"
+                        "请改选支持视觉的模型，或去掉附图。"
+                    )
                 user_input_metadata["attachments"] = resolved_refs
 
         # 第 1 步：**纯读/纯函数**校验全部先于任何落盘（本方法的顺序纪律）。
@@ -3099,8 +3139,6 @@ class SessionService:
 
         if queue_id is not None:
             await self.cancel_queue(session_id=session_id, queue_id=queue_id)
-
-        active_run = self._run_manager.get_active(session_id)
 
         if mode == "steer":
             if active_run is None:
@@ -3779,12 +3817,23 @@ class SessionService:
         `_session_model_supports_vision`（#823 A6 视觉口径）共用，避免两处漂移。
         会话切换（catalog 未命中）记 warning 并回落默认链——两条消费点同口径。
         """
+        return self._session_model_config_from_events(session.events)
+
+    def _session_model_config_from_events(
+        self, events: list[SessionEvent]
+    ) -> ModelConfig:
+        """同 `_session_model_config`，但直接吃事件列表（#824 / MM-03 发送端点复用）。
+
+        发送端点此刻只有一个**事件快照**（尚未构造 `Session` 聚合），视觉门禁需要按
+        会话当前模型判定；把口径抽到"吃 events"这一层，两处（Session / 快照）共用
+        同一实现，不写第二遍解析逻辑。
+        """
         from agent_harness.model.config import ModelConfig, find_catalog_entry
         from agent_harness.model.provider_store import ProviderStore
         from agent_harness.session.model_switch import current_model_selection
 
         config = ModelConfig.from_settings(self._settings)
-        provider, model_id = current_model_selection(session.events)
+        provider, model_id = current_model_selection(events)
         if model_id is None:
             return config
         if find_catalog_entry(self._settings, provider or "", model_id) is None:
@@ -3796,6 +3845,34 @@ class SessionService:
         return ModelConfig.resolve_selection(
             self._settings, model_id, ProviderStore.for_settings(self._settings),
         )
+
+    def _supports_vision_for_request(
+        self, events: list[SessionEvent], model_name: str | None
+    ) -> bool:
+        """本次带图请求将由其投影的模型是否支持视觉（#824 / MM-03，AC4 门禁口径）。
+
+        `model_name` 为**显式 amend.model**（本请求一次性覆盖，`resume_and_launch`
+        会把它持久化成会话模型）时为非 None，优先按它判定；否则按会话当前模型。
+        解析失败（未知模型名 / 测试替身无 key）按"未知能力不猜"的既有契约回落
+        False——与 `_session_model_supports_vision` 同一纪律；显式未知 `amend.model`
+        另有 `_validate_amend_for_existing_session` 的 422 前置（此处不吞真实错误，
+        只保证门禁判定本身不因能力面缺席而抛）。
+        """
+        from agent_harness.model.config import ModelConfig, model_supports_vision
+        from agent_harness.model.provider_store import ProviderStore
+
+        try:
+            config = (
+                ModelConfig.resolve_selection(
+                    self._settings, model_name,
+                    ProviderStore.for_settings(self._settings),
+                )
+                if model_name
+                else self._session_model_config_from_events(events)
+            )
+        except Exception:  # noqa: BLE001 —— 能力面未知 ⇒ False（不猜），门禁不中断
+            return False
+        return model_supports_vision(self._settings, config)
 
     def _session_model_supports_vision(self, session: Session) -> bool:
         """会话当前请求模型是否支持视觉（#823 / MM-02，A6 口径统一）。
