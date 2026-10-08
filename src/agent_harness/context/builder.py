@@ -1376,9 +1376,10 @@ class ContextBuilder:
         **含图片块的形态**下，返回的新消息与
         `derive_messages(..., supports_vision=False)` 的产物逐字一致（首文本块 +
         占位符）。已无图片块的消息原样返回（无图消息逐字不变，AC8）——包括图片字节
-        取不回时已被降级成 `[{text:原文},{text:占位符}]` 双文本块的形态（见
-        `model.multimodal.downgrade_to_non_vision`），它与 derive 的非视觉单字符串
-        不逐字相等，但不含任何图片块（D6 语义不受影响）。
+        取不回时已被降级成 `[{text:原文},{text:占位符}]` 双文本块的形态——降级发生在
+        翻译阶段，见 `model.multimodal._translate_block`（`to_provider_messages` 逐块
+        调用它），`downgrade_to_non_vision` 只是原样返回该形态。它与 derive 的非视觉
+        单字符串不逐字相等，但不含任何图片块（D6 语义不受影响）。
         """
         return downgrade_to_non_vision(messages)
 
