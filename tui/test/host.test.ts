@@ -48,6 +48,8 @@ interface Fake {
   live: boolean;
   /** 下一次 spawn 立刻报这个错（spawn ENOENT 一类）。 */
   spawnError?: Error;
+  /** 下一次 spawn 后子进程立刻以这个码退出（undefined = 不退；null = 被信号带走）。 */
+  exitCode?: number | null;
 }
 
 /** 注入面：真文件系统与网络都不碰。 */
@@ -75,10 +77,14 @@ function fakeDeps(
       spawnServe: (request) => {
         spawns.push(request);
         const error = fake.spawnError;
-        if (error === undefined) fake.live = true;
+        const exitCode = fake.exitCode;
+        if (error === undefined && exitCode === undefined) fake.live = true;
         return {
           onError: (listener) => {
             if (error !== undefined) listener(error);
+          },
+          onExit: (listener) => {
+            if (exitCode !== undefined) listener(exitCode);
           },
         };
       },
@@ -146,7 +152,22 @@ test("spawn 失败（解释器不存在）立即报出原因，不空等整个�
   const fake = fakeDeps({});
   fake.spawnError = new Error("spawn ENOENT");
   await assert.rejects(resolveLocalService(OPTIONS, fake.deps), /spawn ENOENT/);
-  assert.ok(fake.clock < 5_000, `不应空等 30s 冷启动预算，实际 ${String(fake.clock)}ms`);
+  assert.ok(fake.clock < 5_000, `不应空等冷启动预算，实际 ${String(fake.clock)}ms`);
+});
+
+test("冷启动：子进程起来后立刻死掉 → 立即报「已退出」，不空等满预算（#848 R4）", async () => {
+  // 没有这条时 TUI 会等满 90 s 再报「可能仍在启动…稍后重试即可附着它」，把「进程已死」
+  // 说成「只是慢」——桌面壳对同一个子进程早就用 abortReason 做到「一死就结束等待」。
+  const fake = fakeDeps({});
+  fake.exitCode = 1;
+  await assert.rejects(
+    () => resolveLocalService(OPTIONS, fake.deps),
+    (error: Error) => {
+      assert.match(error.message, /在就绪前退出（exit code 1）/);
+      return true;
+    },
+  );
+  assert.ok(fake.clock < 5_000, `子进程已死不该等满预算，实际 ${String(fake.clock)}ms`);
 });
 
 test("冷启动：装完安装件的首次启动慢到 42 s 仍在窗口内，附着成功（#846）", async () => {
@@ -167,6 +188,10 @@ test("冷启动超预算：报数据根与「可能仍在启动」，不再把�
       assert.match(error.message, /90s 内未就绪/);
       assert.ok(error.message.includes(OPTIONS.root), "错误里要有数据根");
       assert.match(error.message, /可能仍在启动/, "慢启动的下一步必须写明");
+      assert.ok(
+        !/冷启动实测\s*\d/.test(error.message),
+        "文案不得复述写死的冷启动秒数（#848 R5：它与桌面壳记的 60 s 对不上）",
+      );
       return true;
     },
   );
@@ -244,6 +269,21 @@ test("describeService：附着/冷启动与凭据在场与否都摆在明面上�
   const line = describeService({ baseUrl: "http://127.0.0.1:51234", token: "s3cret", endpoint: ENDPOINT, source: "started" });
   assert.equal(line, "started http://127.0.0.1:51234 (pid 4242, protocol 1, credential present)");
   assert.ok(!line.includes("s3cret"));
+});
+
+test("契约：桌面壳与 TUI 对同一个子进程用同一个启动预算（#848 R3）", () => {
+  const budgetOf = (source: string, name: string): number => {
+    const digits = new RegExp("const " + name + " = ([0-9_]+)").exec(source)?.[1];
+    assert.ok(digits !== undefined, `${name} 没找到（常量改名了？）`);
+    return Number(digits.replaceAll("_", ""));
+  };
+  const tui = budgetOf(readFileSync(new URL("../src/host.ts", import.meta.url), "utf8"), "START_BUDGET_MS");
+  const desktop = budgetOf(
+    readFileSync(new URL("../../desktop/src/service-host.ts", import.meta.url), "utf8"),
+    "DEFAULT_START_BUDGET_MS",
+  );
+  assert.equal(tui, desktop, "两个客户端不许对同一个子进程各有一套启动预算");
+  assert.ok(tui > 60_000, `预算必须盖住桌面壳记过的最差读数（not within 60 s），实际 ${String(tui)}ms`);
 });
 
 test("契约：镜像的服务端常量与 host_service.py 一致（两份不许漂移）", () => {

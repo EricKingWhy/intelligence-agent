@@ -159,9 +159,19 @@ export interface ServeRequest {
   readonly env: NodeJS.ProcessEnv;
 }
 
-/** 子进程句柄（只为拿到 spawn 失败原因，客户端不管理它的生命周期）。 */
+/** 子进程句柄（只为拿到 spawn 失败 / 提前退出的原因，客户端不管理它的生命周期）。 */
 export interface SpawnedServe {
   onError(listener: (error: Error) => void): void;
+  /**
+   * 子进程退出（#848 R4）。已死的子进程不可能再发布端点：不接这个信号，TUI 会把
+   * 「起来了但立刻死了」说成「可能仍在启动」，空等满整个预算。桌面壳对**同一个**
+   * 子进程早就这么做（`abortReason`，W-21 D11 / #837），两个客户端不许对同一件事
+   * 有两种说法。
+   *
+   * 附着路径不受影响：子进程抢锁失败、附着到已有服务后正常退出时，端点文件已经在
+   * 了，`waitForService` 先读到它并返回，走不到这个中止分支。
+   */
+  onExit(listener: (code: number | null) => void): void;
 }
 
 /** 注入的本机 IO 面（单测不需要真服务）。 */
@@ -189,11 +199,16 @@ export interface ResolveOptions {
 const ATTACH_BUDGET_MS = 2_000;
 /**
  * 冷启动预算（#846）。装完安装件后的**首次**启动实测 35.7 s（`--check`）/ 36-42 s
- * （真实附着），热态 6.6-6.9 s：30 s 窗口会把「只是慢」判成失败，且失败后那个
- * 服务仍会自己就绪、变成没有客户端的孤儿。取 90 s 与桌面壳对**同一个子进程**的
- * `DEFAULT_START_BUDGET_MS` 对齐（W-21 D11 / #837）：两个客户端不许对同一件事
- * 各有一套预算。客户端**不**在超时后杀掉这个子进程（它可能已被别的客户端附着，
- * 见 test/host.test.ts 的单写者结构守卫）。
+ * （真实附着），热态 6.6-6.9 s；桌面壳在同一台机器上还记过更差的一次：装完安装件
+ * 后的**第一次**运行 "not within 60 s"（`desktop/src/service-host.ts`）。两条读数
+ * 不冲突，是同一现象的两端：30 s 窗口会把「只是慢」判成失败，而失败后那个服务
+ * 仍会自己就绪、变成没有客户端的孤儿。
+ *
+ * 取 90 s 与桌面壳对**同一个子进程**的 `DEFAULT_START_BUDGET_MS` 对齐
+ * （W-21 D11 / #837）：两个客户端不许对同一件事各有一套预算。**文案里不复述任何
+ * 秒数**（#848 R5）：写死的读数一旦与另一侧的记录对不上，用户读到的就是错的。
+ * 客户端**不**在超时后杀掉这个子进程（它可能已被别的客户端附着，见
+ * test/host.test.ts 的单写者结构守卫）。
  */
 const START_BUDGET_MS = 90_000;
 const POLL_INTERVAL_MS = 250;
@@ -260,6 +275,7 @@ export async function resolveLocalService(
     // 子进程 cwd = 数据根：spawn 前必须存在（不然 ENOENT，服务来不及建）。
     await deps.ensureDir(options.root);
     let spawnError: Error | undefined;
+    let exitCode: number | null | undefined;
     const child = deps.spawnServe({
       pythonPath: options.pythonPath,
       root: options.root,
@@ -272,16 +288,26 @@ export async function resolveLocalService(
     child.onError((error) => {
       spawnError ??= error;
     });
+    child.onExit((code) => {
+      exitCode ??= code;
+    });
     endpoint = await waitForService(
       options.root,
       deps,
       options.startBudgetMs ?? START_BUDGET_MS,
-      () => spawnError,
+      () =>
+        spawnError ??
+        (exitCode === undefined
+          ? undefined
+          : new Error(
+              `本机服务进程在就绪前退出（exit code ${String(exitCode)}）：子进程已死，` +
+                "再等也不会发布端点",
+            )),
     );
     if (endpoint === undefined) {
       throw new Error(
         `本机服务 ${String((options.startBudgetMs ?? START_BUDGET_MS) / 1000)}s 内未就绪（数据根 ${options.root}）：` +
-          "若安装刚完成，该服务可能仍在启动（冷启动实测 36-42 s），稍后重试即可附着它；" +
+          "若安装刚完成，首次冷启动可能明显慢于热态，该服务可能仍在启动，稍后重试即可附着它；" +
           `否则检查 ${options.pythonPath} 能否运行 \`-m agent_harness.cli serve\``,
       );
     }
@@ -344,6 +370,9 @@ export function defaultHostDeps(): HostDeps {
       return {
         onError: (listener) => {
           child.once("error", listener);
+        },
+        onExit: (listener) => {
+          child.once("exit", listener);
         },
       };
     },

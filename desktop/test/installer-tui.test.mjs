@@ -191,6 +191,22 @@ describe('ia-tui.cmd', () => {
     )
   })
 
+  it('captures the exit code after the child ran, not before (W-21 #848 R6)', () => {
+    // M3 mutation: moving the capture line above the node line kept the old guard 17/17
+    // green while the launcher returned the pre-launch error code. Order is the whole
+    // point, so it gets its own assertion. Both patterns are line-anchored: the comment
+    // block above also mentions resources\node\node.exe.
+    const lines = launcher.split(/\r?\n/)
+    const childLine = lines.findIndex((line) => /^"%~dp0resources\\node\\node\.exe"/.test(line))
+    const captureLine = lines.findIndex((line) => /^set "rc=%ERRORLEVEL%"$/.test(line))
+    assert.ok(childLine >= 0, 'the node invocation line must exist')
+    assert.ok(captureLine >= 0, 'the capture line must exist')
+    assert.ok(
+      captureLine > childLine,
+      `the capture must run after the child (child at ${String(childLine)}, capture at ${String(captureLine)})`,
+    )
+  })
+
   it('keeps comments parser-safe (cmd evaluates pipes/angles before rem)', () => {
     for (const line of launcher.split(/\r?\n/)) {
       if (!/^rem\b/i.test(line.trim())) continue

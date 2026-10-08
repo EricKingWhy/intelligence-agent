@@ -93,7 +93,10 @@ export interface EndpointReadinessDeps {
  *
  * 90 s covers the worst measured case with margin; a child that dies ends the
  * wait immediately (`abortReason`), so the budget only bounds a hung child.
- * The TUI budgets the same child at 30 s (`tui/src/host.ts` `START_BUDGET_MS`).
+ * The TUI budgets the same child (`tui/src/host.ts` `START_BUDGET_MS`). The two
+ * clients must not keep two different budgets for one child, so the number is
+ * not repeated here — `tui/test/host.test.ts` pins the two constants equal
+ * (W-21 #848 R3: the prose said 30 s long after the constant became 90 s).
  */
 const DEFAULT_START_BUDGET_MS = 90_000
 
