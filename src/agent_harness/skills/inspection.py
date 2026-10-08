@@ -1234,7 +1234,9 @@ def _read_requirements_file(
                 continue
             include_path = unquote(include_url.path).replace("\\", "/")
             try:
-                candidate = (root / include_path).resolve(strict=False)
+                candidate = (
+                    root / Path(relative).parent / include_path
+                ).resolve(strict=False)
             except (OSError, RuntimeError, ValueError):
                 _add_error(errors, "BAD_DEPENDENCY_INCLUDE", include, "Requirements include cannot be resolved safely.")
                 continue

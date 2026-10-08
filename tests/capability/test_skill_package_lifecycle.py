@@ -131,6 +131,28 @@ def test_needs_adaptation_package_is_preserved_but_cannot_be_enabled(tmp_path: P
     assert not marker.exists()
 
 
+def test_nested_requirements_include_resolves_against_containing_file(
+    tmp_path: Path,
+) -> None:
+    source = _complete_package(tmp_path / "source")
+    _write(source / "requirements.txt", "-r requirements/nested.txt\n")
+    _write(source / "common.txt", "")
+    _write(source / "requirements" / "nested.txt", "-r common.txt\n")
+    _write(
+        source / "requirements" / "common.txt",
+        "nested-only-dependency==1.2.3\n",
+    )
+
+    report = inspection.inspect_skill_package(source)
+
+    assert report["status"] == "needs-adaptation"
+    assert any(
+        item["name"] == "nested-only-dependency"
+        and item["source"] == "requirements/common.txt"
+        for item in report["dependencies"]
+    )
+
+
 def test_shell_fence_command_requires_manual_review(tmp_path: Path) -> None:
     source = _complete_package(tmp_path / "source")
     _write(
