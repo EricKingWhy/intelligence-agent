@@ -75,10 +75,17 @@ def downgrade_to_non_vision(messages: list[AnyMessage]) -> list[AnyMessage]:
     `image_url` 块。本函数只做**纯消息变换**（不读 session、不触发 build/压缩等副作
     用）：含图片内容块的消息整体降级为等价的非视觉投影。
 
-    降级产物与 `derive_messages(..., supports_vision=False)` **逐字一致**——取首个
-    文本块的文本，追加 `IMAGE_OMITTED_PLACEHOLDER`（视觉下 `content` 必首块为
-    `{"type":"text","text":原文}`，见 `attachments.projection.content_block_with_text`）。
-    无图片块的消息（纯文本 / 只有文本块）原样返回（无图消息逐字不变，AC8）。返回新
+    **含图片块的形态**下，降级产物与 `derive_messages(..., supports_vision=False)`
+    逐字一致——取首个文本块的文本，追加 `IMAGE_OMITTED_PLACEHOLDER`（视觉下
+    `content` 必首块为 `{"type":"text","text":原文}`，见
+    `attachments.projection.content_block_with_text`）。
+
+    已无图片块的消息原样返回（无图消息逐字不变，AC8）。这包含两类：纯文本 / 只有
+    文本块的消息，以及**图片字节取不回**的形态——`_translate_block` 早已把那张图片块
+    降级成文本占位块，此时 `content` 是 `[{text:原文},{text:占位符}]` 双文本块列表，
+    `_has_image_block` 为假，本函数不再动它。该形态与
+    `derive_messages(..., supports_vision=False)` 的单字符串**不逐字相等**；但它不含
+    任何图片块，D6 语义不受影响（非视觉 fallback 不会收到 `image_url` 块）。返回新
     消息对象，不原地改输入。
 
     识别 `image`（标准块）与 `image_url`（provider 块）两种形态：前者用于投影后、
