@@ -26,11 +26,7 @@ from agent_harness.context.compactor import (
 )
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
-from agent_harness.context.tokens import (
-    estimate_message_tokens,
-    estimate_tokens,
-    image_tokens_in_message,
-)
+from agent_harness.context.tokens import estimate_message_tokens, message_cost
 from agent_harness.model.multimodal import (
     DEFAULT_IMAGE_DETAIL,
     downgrade_to_non_vision,
@@ -1441,16 +1437,12 @@ class ContextBuilder:
             if anchor_index is None:
                 continue
             # 锚覆盖的是该轮的输入 prompt；响应消息与其后的新增消息不在其中，
-            # 按投影估算补上（与 _estimate_tokens_cached 同一编码口径，含图片块
-            # 近似成本——#824 / MM-03，否则图片增量会被漏计）。
+            # 按投影估算补上（与 `message_cost` 同一编码口径，含图片块近似成本
+            # ——#824 / MM-03，否则图片增量会被漏计）。
             anchored = prompt_tokens
-            anchored += estimate_tokens(
-                messages[anchor_index].model_dump_json(),
-            ) + image_tokens_in_message(messages[anchor_index])
+            anchored += message_cost(messages[anchor_index])
             anchored += sum(
-                estimate_tokens(message.model_dump_json())
-                + image_tokens_in_message(message)
-                for message in messages[anchor_index + 1:]
+                message_cost(message) for message in messages[anchor_index + 1:]
             )
             return anchored
         return 0
@@ -1489,13 +1481,11 @@ class ContextBuilder:
             key = (session.session_id, event.seq, self._supports_vision)
             cost = self._token_memo.get(key)
             if cost is None:
-                # 结构 token + 图片近似成本（#824 / MM-03，AC7）：带图消息在视觉口径
-                # 下含标准图片块，按 IMAGE_TOKENS_PER_IMAGE 追加；非视觉口径投影成
-                # 占位符文本（无图片块），增量为 0。key 带视觉维度，故两口径各记一次。
-                cost = (
-                    estimate_tokens(message.model_dump_json())
-                    + image_tokens_in_message(message)
-                )
+                # 结构 token + 图片近似成本（#824 / MM-03，AC7）：`message_cost` 单点
+                # 定义该惯用式；带图消息在视觉口径下含标准图片块，按
+                # IMAGE_TOKENS_PER_IMAGE 追加；非视觉口径投影成占位符文本（无图片
+                # 块），增量为 0。key 带视觉维度，故两口径各记一次。
+                cost = message_cost(message)
                 self._token_memo[key] = cost
             total += cost
         self._token_estimate_total = total

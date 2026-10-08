@@ -3811,22 +3811,22 @@ class SessionService:
         return create_chat_model(config)
 
     def _session_model_config(self, session: Session) -> ModelConfig:
-        """会话**当前生效**的模型配置（catalog / 自定义选择优先，回落默认链）。
-
-        F3 (#635) 的解析口径单点：`_compact_context_builder`（建客户端）与
-        `_session_model_supports_vision`（#823 A6 视觉口径）共用，避免两处漂移。
-        会话切换（catalog 未命中）记 warning 并回落默认链——两条消费点同口径。
+        """`Session` 形态的**薄封装**：取 `session.events` 后委托给
+        `_session_model_config_from_events`（解析口径与 warning 都在那里，单点）。
+        保留本方法只是给三条持有 `Session` 的旧调用点（`_compact_context_builder` /
+        `_session_model_supports_vision`）一个便利入口。
         """
         return self._session_model_config_from_events(session.events)
 
     def _session_model_config_from_events(
         self, events: list[SessionEvent]
     ) -> ModelConfig:
-        """同 `_session_model_config`，但直接吃事件列表（#824 / MM-03 发送端点复用）。
+        """会话**当前生效**的模型配置（catalog / 自定义选择优先，回落默认链）。
 
-        发送端点此刻只有一个**事件快照**（尚未构造 `Session` 聚合），视觉门禁需要按
-        会话当前模型判定；把口径抽到"吃 events"这一层，两处（Session / 快照）共用
-        同一实现，不写第二遍解析逻辑。
+        F3 (#635) 的解析口径单点：`_compact_context_builder`、`_session_model_supports_vision`
+        （#823 A6 视觉口径）与 `_supports_vision_for_request`（#824 MM-03 发送端点门禁）
+        共用，避免多处漂移。会话切换（catalog 未命中）记 warning 并回落默认链。
+        吃 `events` 而非 `Session`：发送端点此刻只有事件快照、尚未构造 `Session` 聚合。
         """
         from agent_harness.model.config import ModelConfig, find_catalog_entry
         from agent_harness.model.provider_store import ProviderStore
@@ -3838,7 +3838,7 @@ class SessionService:
             return config
         if find_catalog_entry(self._settings, provider or "", model_id) is None:
             logger.warning(
-                "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
+                "会话当前模型 %s/%s 已不在 catalog，回落默认链",
                 provider, model_id,
             )
             return config
@@ -3853,10 +3853,12 @@ class SessionService:
 
         `model_name` 为**显式 amend.model**（本请求一次性覆盖，`resume_and_launch`
         会把它持久化成会话模型）时为非 None，优先按它判定；否则按会话当前模型。
-        解析失败（未知模型名 / 测试替身无 key）按"未知能力不猜"的既有契约回落
-        False——与 `_session_model_supports_vision` 同一纪律；显式未知 `amend.model`
-        另有 `_validate_amend_for_existing_session` 的 422 前置（此处不吞真实错误，
-        只保证门禁判定本身不因能力面缺席而抛）。
+
+        **失败关闭**：模型解析抛任何异常（未知模型名 / 配置错误 / 测试替身无 key）
+        一律按"未知能力不猜"回落 False ⇒ 门禁拒绝发图（不放行、不中断）。这与
+        `_session_model_supports_vision` 同一纪律；显式未知 `amend.model` 在 web 层
+        另有 `_validate_amend_for_existing_session` 的 422 前置。刻意吞异常，故
+        docstring 不声称"不吞真实错误"。
         """
         from agent_harness.model.config import ModelConfig, model_supports_vision
         from agent_harness.model.provider_store import ProviderStore
@@ -3870,7 +3872,7 @@ class SessionService:
                 if model_name
                 else self._session_model_config_from_events(events)
             )
-        except Exception:  # noqa: BLE001 —— 能力面未知 ⇒ False（不猜），门禁不中断
+        except Exception:  # noqa: BLE001 —— 能力面未知 ⇒ False（失败关闭），门禁不中断
             return False
         return model_supports_vision(self._settings, config)
 

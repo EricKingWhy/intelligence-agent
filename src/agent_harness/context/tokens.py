@@ -146,6 +146,20 @@ def image_tokens_in_message(message: AnyMessage) -> int:
     ) * IMAGE_TOKENS_PER_IMAGE
 
 
+def message_cost(message: AnyMessage, *, payload: str | None = None) -> int:
+    """单条消息的 token 成本 = 结构 token + 图片近似成本（#824 / MM-03，AC7）。
+
+    结构 token 走 `estimate_tokens(model_dump_json)`（与全仓同一编码）；图片增量见
+    `image_tokens_in_message` / `IMAGE_TOKENS_PER_IMAGE`。预算/增量/锚三条估算路径
+    共用本函数，避免"结构 + 图片"这一惯用式在四处各写一遍而漂移。`payload` 已由
+    调用方算好时直接传入（`estimate_message_tokens` 要先拿它做 surrogate 校验，
+    否则会重复序列化）。
+    """
+    if payload is None:
+        payload = message.model_dump_json()
+    return estimate_tokens(payload) + image_tokens_in_message(message)
+
+
 def estimate_message_tokens(messages: list[AnyMessage]) -> int:
     """计入消息结构和 tool_calls；与文本估算使用同一个编码。
 
@@ -179,5 +193,5 @@ def estimate_message_tokens(messages: list[AnyMessage]) -> int:
                 "代理项（U+D800–U+DFFF），无法序列化进 Context 预算；"
                 "按 hard guard 语义拒绝本轮估算"
             ) from error
-        total += estimate_tokens(payload) + image_tokens_in_message(message)
+        total += message_cost(message, payload=payload)
     return total
