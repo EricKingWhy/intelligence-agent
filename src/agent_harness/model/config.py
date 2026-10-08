@@ -50,6 +50,11 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "model_name": "mimo-v2.6-flash",
         # 官方模型规格明确支持 function tool calling。
         "supports_tools": True,
+        # #823 / MM-02（A5）：`mimo-v2.6-flash` 经 AC11 真机验证成功描述图片
+        # （import 时提供截图 → 模型正确读出数字/颜色，见 #823 台账）——只声明
+        # **已验证**的能力。其余 preset 未做视觉验证，按"不猜"契约省略（省略 ⇒
+        # False）；部署若要启用视觉须经 AGENT_MODELS 显式声明 `supports_vision`。
+        "supports_vision": True,
     },
     # SenseAudio（OpenAI 兼容）。无默认模型，MODEL_NAME 必填。
     "senseaudio": {
@@ -211,6 +216,30 @@ def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
             **capability_kwargs,
         ))
     return entries
+
+
+def model_supports_vision(settings: "Settings", config: "ModelConfig") -> bool:
+    """本次请求模型是否声明支持视觉（#823 / MM-02）。
+
+    解析优先级与 `GET /api/models` 渲染一致：**catalog 条目的显式声明 > provider
+    preset 的声明 > False（不猜测）**。未声明一律 False——契约是"未知能力省略、
+    不猜"（见 `_CAPABILITY_FIELDS` 注释），而"假装支持"会把图发给一个看不懂的模型
+    （DeepSeek 约束下还可能 400）。解析单点在此，供装配层与发送端点共用。
+
+    `config` 没有 `provider` / `model_name`（测试替身或精简配置对象）时同样返回
+    False：调用点（`build_runtime`）拿到的可能是被 monkeypatch 的替身 config，能力
+    面缺席就是"未知"，按契约不猜。
+    """
+    provider = getattr(config, "provider", None)
+    model_name = getattr(config, "model_name", None)
+    if not isinstance(provider, str) or not isinstance(model_name, str):
+        return False
+    entry = find_catalog_entry(settings, provider, model_name)
+    if entry is not None and entry.supports_vision is not None:
+        return entry.supports_vision
+    preset = PROVIDER_PRESETS.get(provider, {})
+    declared = preset.get("supports_vision")
+    return declared is True
 
 
 def find_catalog_entry(

@@ -33,6 +33,12 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from agent_harness.attachments.projection import (
+    IMAGE_OMITTED_PLACEHOLDER,
+    content_block_with_text,
+    parse_image_refs,
+    text_with_omitted_images,
+)
 from agent_harness.session.event import (
     ARTIFACT_CREATED,
     ARTIFACT_EXTERNALIZED,
@@ -1164,13 +1170,38 @@ def _normalize_tool_calls_for_projection(
     return normalized
 
 
-def derive_messages(events: list[SessionEvent]) -> list[AnyMessage]:
-    """从事件序列投影出 messages 列表。"""
-    return [message for message, _source_range in derive_messages_with_source_ranges(events)]
+def derive_messages(
+    events: list[SessionEvent], *, supports_vision: bool = False,
+) -> list[AnyMessage]:
+    """从事件序列投影出 messages 列表（`supports_vision` 语义见 `derive_messages_with_source_ranges`）。"""
+    return [
+        message
+        for message, _source_range in derive_messages_with_source_ranges(
+            events, supports_vision=supports_vision
+        )
+    ]
+
+
+def referenced_attachment_ids(events: list[SessionEvent]) -> set[str]:
+    """本会话 `user/message` 事件真实引用过的附件 id 集合（纯函数）。
+
+    这是 #823 MM-02 补回的受控读回授权判据（PRD D5 / DSH `ATTACHMENT_NOT_REFERENCED`）：
+    只有被某条用户消息引用过的 `attachment_id` 才允许读回；未引用（含上传后从未发送）
+    一律 404。坏形状的引用条目按 `parse_image_refs` 的容错纪律逐条跳过。
+    """
+    referenced: set[str] = set()
+    for event in events:
+        if event.type != USER_MESSAGE:
+            continue
+        for ref in parse_image_refs(event.data.get("attachments")):
+            referenced.add(ref.attachment_id)
+    return referenced
 
 
 def derive_messages_with_source_ranges(
     events: list[SessionEvent],
+    *,
+    supports_vision: bool = False,
 ) -> list[tuple[AnyMessage, tuple[int, int] | None]]:
     """从事件序列投影出 messages 列表。
 
@@ -1188,6 +1219,14 @@ def derive_messages_with_source_ranges(
     （答 + tool_call/result）走同一条 shadowed 跳过路径，所以"编辑了问句"在模型可见
     上下文里表现为"旧问句那一轮整段消失、只剩新问句"。dangling 合成发生在 shadow
     之后，被取代轮里的 tool_call 不会被补一条合成 ToolMessage。
+
+    #823 / MM-02（附件）：`user/message.data["attachments"]` 是**引用数组**。投影按
+    `supports_vision` 分两条路：支持视觉 → 该 user 消息内容物化成
+    `[text 块, 标准图片块…]`（`attachments.image_content_block`，**只带引用不含
+    base64**，字节由请求装配层的 adapter 在发送前取回）；不支持视觉 → 原文本后追加
+    固定占位符（`IMAGE_OMITTED_PLACEHOLDER`，不静默丢弃）。**无附件的消息逐字不变**
+    （AC8）。默认 `supports_vision=False`，故 `derive_messages(events)` 的既有语义
+    （纯文本逐字投影）不变。
     """
     # 第一遍：只接受持久化完整的 compaction bracket。写入中途失败时，
     # append-only 日志可能留下 START 或 SUMMARY；不完整 bracket 不能遮蔽原事件。
@@ -1346,7 +1385,16 @@ def derive_messages_with_source_ranges(
 
         if event.type == USER_MESSAGE:
             content = event.data.get("content", "")
-            messages.append((HumanMessage(content=content), (event.seq, event.seq)))
+            refs = parse_image_refs(event.data.get("attachments"))
+            if refs:
+                text = content if isinstance(content, str) else str(content)
+                if supports_vision:
+                    projected: str | list[dict[str, str]] = content_block_with_text(text, refs)
+                else:
+                    projected = text_with_omitted_images(text)
+                messages.append((HumanMessage(content=projected), (event.seq, event.seq)))
+            else:
+                messages.append((HumanMessage(content=content), (event.seq, event.seq)))
 
         elif event.type == MODEL_COMPLETED:
             content = event.data.get("content", "")
@@ -1484,6 +1532,9 @@ class UndeliveredInput:
     revoke_fact_id: str | None = None
     refutes_event_id: str | None = None
     protected_facts: list[dict[str, Any]] | None = None
+    #: #823 / MM-02：附件引用数组（规范化后的 event-data 形状），投递时原样带进
+    #: 新的 `user/message`，使排队/steer 的附图不静默丢失。
+    attachments: list[dict[str, Any]] | None = None
 
 
 def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
@@ -1532,6 +1583,7 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     revoke_fact_id=event.data.get("revoke_fact_id"),
                     refutes_event_id=event.data.get("refutes_event_id"),
                     protected_facts=annotations,
+                    attachments=_normalized_attachments(event),
                 )
             )
         elif event.type == STEER_REQUESTED:
@@ -1554,10 +1606,19 @@ def undelivered_inputs(events: list[SessionEvent]) -> list[UndeliveredInput]:
                     revoke_fact_id=event.data.get("revoke_fact_id"),
                     refutes_event_id=event.data.get("refutes_event_id"),
                     protected_facts=annotations,
+                    attachments=_normalized_attachments(event),
                 )
             )
     items.sort(key=lambda item: item.seq)
     return items
+
+
+def _normalized_attachments(event: SessionEvent) -> list[dict[str, Any]] | None:
+    """事件 data 的附件引用 → 规范化后的 dict 列表（坏条目跳过）；无则 None。"""
+    refs = parse_image_refs(event.data.get("attachments"))
+    if not refs:
+        return None
+    return [ref.model_dump() for ref in refs]
 
 
 def _undelivered_fact_annotations(
@@ -1612,13 +1673,43 @@ def derive_modified_file_paths(events: list[SessionEvent]) -> list[str]:
     return paths
 
 
+def _projected_user_text(message: AnyMessage) -> str | None:
+    """从投影出的 user 消息还原**事件原始 content**（#823 / MM-02 A7）。
+
+    带图 user 消息的投影不再是纯文本：视觉下 content 是块列表
+    （`[{"type":"text","text":原文}, {"type":"image",...}]`），非视觉下是
+    ``原文 + "\\n" + 占位符``。两者都比不上 `event.data["content"]`，故
+    `is_direct_user_input_event` / `latest_direct_user_input_event` 会漏掉带图
+    消息（A7）。这里统一还原回原文，供它们按**事件原始 content**比对；无附件的
+    纯文本消息逐字不变（还原即原文本身）。非 user 文本形态返回 None。
+    """
+    content = message.content
+    if isinstance(content, str):
+        suffix = f"\n{IMAGE_OMITTED_PLACEHOLDER}"
+        if content == IMAGE_OMITTED_PLACEHOLDER:
+            return ""
+        if content.endswith(suffix):
+            return content[: -len(suffix)]
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    return text
+            elif isinstance(block, str):
+                return block
+    return None
+
+
 def is_direct_user_input_event(
     events: list[SessionEvent], event_id: str,
 ) -> bool:
     """Return whether an event is an active direct user message.
 
-    判据只看**事件事实**（类型 / 内容形状 / 注入与取代标记），不依赖"这条消息这次
-    有没有被注入给模型"：
+    判据以**事件事实**为主体（类型 / 内容形状 / 注入与取代标记），不依赖"这条消息这次
+    有没有被注入给模型"。唯一一处投影比对（下条 `#823 / MM-02`）刻意做成"命中即通过、
+    未命中不拒绝"，因此压缩（#663 P2）不会改变结论：
 
     - compaction 只改注入预算，不删原始 session entry，也不改"这是用户原话"这一
       事实。以模型可见投影为判据会让压缩后的 run 再也登记不了约束——投影里只剩
@@ -1634,7 +1725,28 @@ def is_direct_user_input_event(
     - 带 `input_request_id` 的是澄清答复，不是新的约束来源；
     - 被取代的用户消息不再是来源；本函数与 `derive_protected_facts` 共用
       `live_supersede_markers`（含 #614① 的替换槽规则——替换排队项被取消时 supersede
-      未实际发生，目标仍有效）。
+      未实际发生，目标仍有效）。这是**唯一的负向闸门**；
+    - 投影一致比对（#823 / MM-02 A7）：事件若在消息投影里仍有**单事件来源范围**
+      `(seq, seq)` 的 `HumanMessage`，用 `_projected_user_text` 把带图消息的投影
+      （视觉为块列表、非视觉为原文 + 占位符后缀）还原回**事件原始 content** 再比对。
+      此项是**防御性正向信号、当前不承重**：对普通活跃用户消息它常为 True，只是与负向
+      闸门的 `¬S`（未被作废）**取并后恒不改变 OR 结果**（正向冗余项），故带图消息判 True
+      并不依赖它；保留它是为闸门语义日后变动留一个正向兜底，不代表"带图消息靠它才不漏"，
+      更不表示"本项恒为 False 或可删除"；
+    - 本条只做正向补充：与负向闸门**取并**，比对命中即判真，未命中不据此拒绝（#663 P2
+      的论证保留——压缩后单事件 bracket 的 summary 投影来源范围也是 `(seq, seq)`，当
+      硬闸门就会退回 #663 P2 的 bug）；唯一的负向判定由 `live_supersede_markers`（含
+      #614① 替换槽规则）承担；
+    - C2 收紧：`(seq, seq)` 若命中一条 compaction summary（`message.name ==
+      COMPACTION_SUMMARY_MESSAGE_NAME`）则**不计入**投影项。否则「已被 live-supersede
+      的事件 s，其单事件 bracket 的 summary 文本恰好等于 s 的 content」会让投影项对一条
+      已撤回的消息返回 True，与 #663 单边（False）分叉。
+
+    设计意图（P4）：函数尾部是上述投影项与负向闸门的 **OR**。7 场景探针实测：在全部现实
+    输入上，此 OR 与 #663 单边（只用 `live_supersede_markers`）**逐位相同**——投影项只在
+    巧合输入（C2）上才会单独点亮，而 C2 已被上面的 summary 排除收紧。故投影项当前是一个
+    **恒不改变 OR 结果的正向冗余项**：既不该被当成"带图消息的判别依据"而依赖，也不该因其
+    冗余而删除；它的价值是防御性的（闸门语义若变动，正向项仍是兜底），不承载 #823 的行为。
 
     ⚠ **#614① 只覆盖「保护事实投影 + 本闸门」这两处口径**，**不含**消息投影
     （`derive_messages_with_source_ranges` 的 `superseded_ranges`，仍是纯解析的
@@ -1657,7 +1769,28 @@ def is_direct_user_input_event(
         or not event.data["content"].strip()
     ):
         return False
-    return event.seq not in {
+    # #823 / MM-02（A7，本线）：投影一致比对，图片感知。带图 user 消息的投影是块
+    # 列表（视觉）或带占位符后缀的字符串（非视觉），用 `_projected_user_text` 还原
+    # 回**事件原始 content** 再比对。这是**防御性正向项、当前不承重**（设计意图见
+    # docstring）：普通活跃用户消息上常为 True，但与下方 `¬S` 取并后**恒不改变结果**
+    # （正向冗余项），并非恒 False，也不该被删除。
+    #
+    # #663 P2（main 侧）：这条比对**只能当正向信号，不能当拒绝依据**——compaction 把
+    # 原文收进 summary 后，单事件 bracket 的 summary 投影来源范围恰好也是 `(seq, seq)`，
+    # 被携带者只剩那条摘要、与原文逐字对不上；若拿它当硬闸门，压缩后的原文事件会被判成
+    # "非直接输入"（正是 #663 P2 要修的 bug）。因此与作废标记判定**取并**：投影比对命中
+    # ⇒ 是直接输入；命中不了（含压缩、含 #614① 空槽）不据此拒绝，负向闸门只由
+    # `live_supersede_markers`（含 #614① 替换槽规则）承担。
+    #
+    # C2：投影项必须排除 compaction summary——否则「已被 live-supersede 的 s，其单事件
+    # bracket 的 summary 恰等于 s 的 content」会让本项对一条已撤回的消息返回 True。
+    return any(
+        source_range == (event.seq, event.seq)
+        and isinstance(message, HumanMessage)
+        and message.name != COMPACTION_SUMMARY_MESSAGE_NAME
+        and _projected_user_text(message) == event.data["content"]
+        for message, source_range in derive_messages_with_source_ranges(events)
+    ) or event.seq not in {
         target_seq for target_seq, _replacement_seq in live_supersede_markers(events)
     }
 
@@ -1683,25 +1816,37 @@ def latest_direct_user_input_event(
     ):
         return None
 
-    final_user_contents = {
-        message.content
+    # #823 / MM-02（A7）：按**事件的原始 content**比对，而不是投影消息的 content
+    # ——带图 user 消息的投影是块列表（视觉）或带占位符后缀的字符串（非视觉），
+    # 旧写法（要求 message.content 是 str 且等于 event content）会漏掉它们。
+    final_user_texts = {
+        text
         for message in model_messages
-        if isinstance(message, HumanMessage) and isinstance(message.content, str)
+        if isinstance(message, HumanMessage)
+        for text in (_projected_user_text(message),)
+        if text is not None
     }
-    candidates = [
-        event
-        for message, source_range in derive_messages_with_source_ranges(events)
-        if source_range is not None
-        and source_range[0] == source_range[1]
-        and isinstance(message, HumanMessage)
-        and isinstance(message.content, str)
-        and message.content in final_user_contents
-        for event in events
-        if event.seq == source_range[0]
-        and event.type == USER_MESSAGE
-        and not event.data.get("injected_by")
-        and isinstance(event.data.get("content"), str)
-        and event.data["content"].strip()
-        and event.data["content"] == message.content
-    ]
+    events_by_seq = {event.seq: event for event in events}
+    candidates: list[SessionEvent] = []
+    for message, source_range in derive_messages_with_source_ranges(events):
+        if (
+            source_range is None
+            or source_range[0] != source_range[1]
+            or not isinstance(message, HumanMessage)
+        ):
+            continue
+        text = _projected_user_text(message)
+        if text is None or text not in final_user_texts:
+            continue
+        event = events_by_seq.get(source_range[0])
+        if (
+            event is None
+            or event.type != USER_MESSAGE
+            or event.data.get("injected_by")
+            or not isinstance(event.data.get("content"), str)
+            or not event.data["content"].strip()
+            or event.data["content"] != text
+        ):
+            continue
+        candidates.append(event)
     return max(candidates, key=lambda event: event.seq, default=None)

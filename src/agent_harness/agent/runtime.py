@@ -31,7 +31,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage
 
 from agent_harness.agent.budget import (
     DEFAULT_MAX_AGENT_TURNS,
@@ -116,6 +116,7 @@ from agent_harness.logging import log_event, new_span_id
 from agent_harness.memory.writeback import MemoryWriteback
 from agent_harness.model.accounting import (
     PROVIDER_ROLE_CLOSEOUT,
+    PROVIDER_ROLE_PRIMARY,
     REQUEST_OUTCOME_COMPLETED,
     REQUEST_OUTCOME_FAILED,
     cost_usd_from_response,
@@ -1223,6 +1224,10 @@ class AgentRuntime:
         fallback_policy: FallbackPolicy | None = None,
         primary_model_name: str = "primary",
         fallback_model_name: str = "fallback",
+        # #823 / MM-02（A2）：按调用角色（"primary"/"fallback"）给出的视觉能力，
+        # 让投影跟随**当前请求模型**（PRD D6 "fallback 自动降级"）。None = 不介入
+        # （既有调用方与测试的 builder 视觉位保持构造期值，行为逐字不变）。
+        vision_by_model_role: Mapping[str, bool] | None = None,
         stream_idle_timeout: float = 0.0,
         stream_total_timeout: float = 0.0,
         model_call_gate: ModelCallGate | None = None,
@@ -1258,6 +1263,12 @@ class AgentRuntime:
         self._fallback_policy = fallback_policy or TwoLevelFallbackPolicy()
         self._primary_model_name = primary_model_name
         self._fallback_model_name = fallback_model_name
+        # #823 / MM-02（A2）：角色 → 视觉能力映射（仅装配层提供；None = 不介入）。
+        # 每次 build 前按 coordinator 当前角色把它写进 context_builder，使投影、
+        # 估算、压缩、请求装配全部跟随当前请求模型（PRD D6）。
+        self._vision_by_model_role = (
+            dict(vision_by_model_role) if vision_by_model_role else None
+        )
         # 流式守卫（秒，逐项 ≤0 关闭）：idle=死连接，total=慢滴漏——所有 run
         # 都受保护（无 fallback 时走统一失败兜底），见 model/stall.py。
         self._stream_idle_timeout = stream_idle_timeout
@@ -1421,6 +1432,8 @@ class AgentRuntime:
             for key in (
                 "revoke_fact_id", "refutes_event_id", "protected_facts",
                 "remember_as_procedural_rule",
+                # #823 / MM-02：steer 也带附件引用（注入成 user/message）。
+                "attachments",
             ):
                 value = getattr(steer, key, None)
                 if value is not None:
@@ -1619,6 +1632,8 @@ class AgentRuntime:
                             "refutes_event_id",
                             "protected_facts",
                             "remember_as_procedural_rule",
+                            # #823 / MM-02：附件引用数组随 user/message 落盘（只带引用）。
+                            "attachments",
                         )
                         if user_input_metadata is not None
                         and key in user_input_metadata
@@ -1812,6 +1827,15 @@ class AgentRuntime:
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
                 telemetry.context_build_started(step=steps)
+                # #823 / MM-02（A2）：投影跟随**当前请求模型**——run 内切到 fallback
+                # 后，本步的视觉/占位判定（PRD D6）必须按 fallback 的能力。
+                # D6 全路径由两处共同保证：
+                #  ① 本同步：其后每一步按 fallback 口径投影（主路径）；
+                #  ② coordinator 的 `reproject_on_switch` 钩子：**切换那一步的 fallback
+                #     重试**在发出前，把切换前口径已投影/装配的 messages 重投影为非视觉
+                #     形态（残口已闭合，见 `_reproject_messages_after_switch`）。
+                # 两处都只做投影/消息变换，不在模型流中途重新 build（无压缩等副作用）。
+                self._sync_context_vision(model_coord.current_role)
                 try:
                     messages = await self._context_builder.build(session)
                 except ContextWindowExceededError as error:
@@ -3446,6 +3470,10 @@ class AgentRuntime:
         ):
             return fallback, CLOSEOUT_DETERMINISTIC, []
         try:
+            # #823 / MM-02（A2）：closeout 恒用 `self._raw_model`（primary），
+            # 故这里把投影视觉位同步回 primary——否则主循环切 fallback 后遗留的
+            # 视觉位会让 closeout 按 fallback 口径投影（与它实际用的模型错配）。
+            self._sync_context_vision(PROVIDER_ROLE_PRIMARY)
             messages = await self._context_builder.build(arms.session)
         except Exception as error:  # noqa: BLE001 - closeout 是尽力而为，绝不能反噬暂停
             logger.warning(
@@ -3818,6 +3846,21 @@ class AgentRuntime:
             yield to_agent_event(end_event)
         stages.raise_first()
 
+    def _sync_context_vision(self, role: str) -> None:
+        """按**当前请求模型角色**更新 context_builder 的视觉判定（#823 / MM-02 A2）。
+
+        `vision_by_model_role` 未注入（None）→ 不介入：builder 保持构造期视觉位，
+        既有调用方与测试行为逐字不变。builder 无该接缝（非 ContextBuilder 的测试
+        替身）→ 同样静默跳过，不因缺能力而中断 run。
+        """
+        mapping = self._vision_by_model_role
+        if not mapping:
+            return
+        setter = getattr(self._context_builder, "set_supports_vision", None)
+        if setter is None:
+            return
+        setter(mapping.get(role, False))
+
     def _new_coordinator(self) -> ModelFallbackCoordinator:
         """per-run coordinator 工厂（_drive 每调一次；测试可直取验证接线）。"""
         return ModelFallbackCoordinator(
@@ -3828,7 +3871,30 @@ class AgentRuntime:
             idle_timeout=self._stream_idle_timeout,
             total_timeout=self._stream_total_timeout,
             gate=self._model_call_gate,
+            # #823 / MM-02（A2 残口）：切换当步的 fallback 重试前重投影（PRD D6）。
+            reproject_on_switch=self._reproject_messages_after_switch,
         )
+
+    def _reproject_messages_after_switch(
+        self, role: str, messages: list[AnyMessage],
+    ) -> list[AnyMessage]:
+        """coordinator 切到 `role` 后、重试发出前，按目标角色口径重投影（#823 A2 残口）。
+
+        PRD D6 字面场景="发送后 fallback 到非视觉模型"：切换那一步的重试不能用切换前
+        已投影的 `messages`（含 provider `image_url` 块）。这里**只重投影消息**——调
+        builder 的纯变换，不触发 build/压缩（隔离实现者原先顾虑的副作用）。
+
+        映射缺席（None）/ 目标角色支持视觉 / builder 无该接缝 → 原样返回。
+        """
+        mapping = self._vision_by_model_role
+        if not mapping or mapping.get(role, False):
+            return messages
+        reproject = getattr(
+            self._context_builder, "reproject_without_vision", None,
+        )
+        if reproject is None:
+            return messages
+        return reproject(messages)
 
     def _new_tracer(
         self, session: Session, run_id: str, user_input: str | None, turn_index: int,
