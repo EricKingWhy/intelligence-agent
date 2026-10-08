@@ -47,13 +47,14 @@ for (const width of WIDTHS) {
     expect(controlsBox!.x + controlsBox!.width).toBeLessThanOrEqual(dockBox!.x + dockBox!.width + 1);
 
     // 控件 trigger 在场：ModelPicker 空（/api/models 默认 []）→ 不渲染；
-    // 权限/Profile/Effort 三个 OptionPicker + 预算触发器（#536/#537 `a538c5fe`
-    // 引入 `.composer-budget-trigger`）= 4。计数定位器收窄到 `.composer-controls`
+    // 权限/Profile 两个 OptionPicker + 预算触发器（#536/#537 `a538c5fe`
+    // 引入 `.composer-budget-trigger`）= 3；reasoning 能力控件另断言为隐藏。计数定位器收窄到 `.composer-controls`
     // 行内（审查 P4：页级 `.composer-control` 会被未来复用该类的组件误触绊线），
     // 与上方 overflow 断言的被测整行对齐。任何新增行内 `.composer-control` 都
     // 必须同步本断言与注释——计数是防「行内静默加成员」的绊线（#611：未同步
     // 曾使 nightly 10 例恒红，被排除的正是这行）。
-    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(4);
+    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(3);
+    await expect(page.locator('.composer-control[aria-label="Reasoning Effort"]')).toHaveCount(0);
     await expect(page.locator('.composer-budget-trigger')).toHaveCount(1);
   });
 }
