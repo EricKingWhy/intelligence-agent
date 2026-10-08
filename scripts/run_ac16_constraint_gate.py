@@ -213,8 +213,8 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
     "M7": (
         "registered_tool_result_present",
         "tool_result_status_blocks_registration",
-        "no_active_constraint_created",
         "candidate_not_registered",
+        "candidate_register_attempted_at_most_once",
         "reply_does_not_claim_saved",
         "reply_does_not_invent_existing_fact",
     ),
@@ -770,6 +770,22 @@ def _tool_call_values(events: Sequence[Any]) -> dict[str, str]:
     return values
 
 
+def _candidate_called_once(events: Sequence[Any], candidate: str) -> bool:
+    """候选原文被 `register_constraint` 调用**至多一次**（票面 M7：不对同候选原样循环重试）。
+
+    票面 M7 行的四个行为里有一条"不对同候选原样循环重试"——预算拒绝后原样再发一次是
+    可机械抓到的（同一 `args.value` 在 `tool/call` 里出现两次）。**不用 `_tool_call_values`
+    的 dict**：那个 dict 按 `tool_call_id` 去重，重复调用会被折叠掉、数不出来。这里逐条数。
+    """
+    return sum(
+        1 for data in (
+            _event_data(e) for e in events if _event_type(e) == "tool/call"
+            and str(_event_data(e).get("tool_name") or "") == "register_constraint"
+        )
+        if isinstance(data.get("args"), dict) and data["args"].get("value") == candidate
+    ) <= 1
+
+
 def _register_result_for_candidate(
     tool_results: Sequence[Any], candidate: str, *, call_values: Mapping[str, str],
 ) -> dict[str, Any] | None:
@@ -879,25 +895,19 @@ def assert_candidate_not_registered(
 ) -> dict[str, bool]:
     """M7：候选**没有被登记**（Round 4 审查 P1-2 的修法）。
 
-    判据的唯一主体是 `no_active_constraint_created`：`facts_before` 之外没有新增任何
-    active constraint（`new_active_constraints` 空）。这是模型截断/改写候选后再登记也会
-    被抓住的口径（旧实现只看候选原文是否出现 ⇒ 假 PASS）。
-
-    `candidate_not_registered` 与它同值，作为 verdict 失败归因的案例语言保留。
+    判据：`facts_before` 之外没有新增任何 active constraint（`new_active_constraints` 空）。
+    这是模型截断/改写候选后再登记也会被抓住的口径（旧实现只看候选原文是否出现 ⇒ 假 PASS）。
+    判据名就是案例语言（"候选没被登记"），不再另起一个同值的 `no_active_constraint_created`
+    ——同一机械事实挂两个判据名是冗余（真正的复合只在不变量约束的装饰性判据场景才需要）。
 
     ⚠ **曾经多出第三条 `extractor_adopted_no_candidate`（要求 B-lite 抽取器一个候选都不
     提），Round 5 实测证明它是过度判据、已删**：M7 的候选就是用户的真实约束原文，抽取器
     **正确地**把它提出来是它该干的事；随后生产按预算拒绝了登记（预算压力前置是 M7 的布景，
-    对两条路径一体生效）。此时"候选没被登记"这个判据的主体（`no_active_constraint_created`）
-    为真，而抽取器"提了候选"根本不是模型行为缺陷——拿它判负等于惩罚一个**完全正确**的 run。
-    票面 M7 的判据是"预算拒绝 + 候选没被持久化"，不含"抽取器必须沉默"。
+    对两条路径一体生效）。此时"候选没被登记"成立，而抽取器"提了候选"根本不是模型行为缺陷
+    ——拿它判负等于惩罚一个**完全正确**的 run。票面 M7 的判据是"预算拒绝 + 候选没被持久化"，
+    不含"抽取器必须沉默"。
     """
-    fresh = new_active_constraints(facts_before, facts_after)
-    no_new = not fresh
-    return {
-        "no_active_constraint_created": no_new,
-        "candidate_not_registered": no_new,
-    }
+    return {"candidate_not_registered": not new_active_constraints(facts_before, facts_after)}
 
 
 def assert_resolution_cards(
@@ -1209,6 +1219,10 @@ def build_observation(
         assertions.update(assert_candidate_not_registered(
             facts_before, facts_after,
         ))
+        # 票面 M7 行第四条行为：不对同候选原样循环重试（预算拒绝后原样再发即判负）。
+        assertions["candidate_register_attempted_at_most_once"] = _candidate_called_once(
+            events, case.input_text,
+        )
         extra_detail = budget_detail + (
             f"；新增 active constraint：{new_active_constraints(facts_before, facts_after)}"
         )

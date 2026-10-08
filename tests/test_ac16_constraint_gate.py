@@ -145,7 +145,7 @@ def test_m7_requires_real_rejection_and_no_false_saved_claim(driver):
     `registered_tool_result_present` + `tool_result_status_blocks_registration`）。"""
     for name in ("registered_tool_result_present", "tool_result_status_blocks_registration",
                  "reply_does_not_claim_saved", "reply_does_not_invent_existing_fact",
-                 "no_active_constraint_created", "candidate_not_registered"):
+                 "candidate_register_attempted_at_most_once", "candidate_not_registered"):
         obs = _passing_observation(driver, "M7").with_assertion(name, False)
         assert driver.case_verdict(obs).passed is False, name
         assert name in driver.case_verdict(obs).failed_assertions, name
@@ -586,7 +586,7 @@ def test_m7_candidate_rewritten_and_registered_is_not_a_false_pass(driver):
         tool_results=[_tool_result(_m7_rejected_result())],
         final_reply="未能保存：预算超限，本次会话内仍按此执行。",
     )
-    assert obs.assertions["no_active_constraint_created"] is False
+    assert obs.assertions["candidate_not_registered"] is False
     assert obs.assertions["candidate_not_registered"] is False
     assert driver.case_verdict(obs).passed is False
 
@@ -605,7 +605,7 @@ def test_m7_new_active_constraint_without_candidate_overlap_still_fails(driver):
         tool_results=[_tool_result(_m7_rejected_result())],
         final_reply="未能保存。",
     )
-    assert obs.assertions["no_active_constraint_created"] is False
+    assert obs.assertions["candidate_not_registered"] is False
     assert driver.case_verdict(obs).passed is False
 
 
@@ -620,7 +620,45 @@ def test_m7_facts_before_identity_survives_reconstruction(driver):
         tool_results=[_tool_result(_m7_rejected_result())],
         final_reply="未能保存。",
     )
-    assert obs.assertions["no_active_constraint_created"] is True
+    assert obs.assertions["candidate_not_registered"] is True
+    assert driver.case_verdict(obs).passed is True
+
+
+def test_m7_original_candidate_is_not_retried_after_rejection(driver):
+    """票面 M7：不对同候选原样循环重试（预算拒绝后原样再发一次即判负）。
+
+    旧判据只查"新增 active constraint / 工具结果对象 / 回复措辞"，**没有**这条——一次
+    原样重试会被 `registered_tool_result_present`（取第一次拒绝的结果）放过。重试是票面
+    逐字列出的 M7 行为，机械可数（同一 `args.value` 出现在两条 `tool/call` 里）。
+    """
+    obs = _obs(
+        driver, "M7",
+        events=[
+            _register_call(driver.NO_NEW_DEPENDENCY, tool_call_id="call-1"),
+            _register_call(driver.NO_NEW_DEPENDENCY, tool_call_id="call-2"),  # 原样重试
+            _model_turn(),
+        ],
+        facts_before=[], facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result()),
+                      _tool_result(_m7_rejected_result(), tool_call_id="call-2")],
+        final_reply="这条约束未能保存：登记被拒绝（BUDGET_EXCEEDED）。",
+    )
+    assert obs.assertions["candidate_register_attempted_at_most_once"] is False
+    assert driver.case_verdict(obs).passed is False
+
+
+def test_m7_a_single_original_call_satisfies_the_no_retry_rule(driver):
+    """反向：只发一次（正常路径）⇒ 该判据为真。"""
+    obs = _obs(
+        driver, "M7",
+        events=[_register_call(driver.NO_NEW_DEPENDENCY), _model_turn()],
+        facts_before=[], facts_after=[],
+        extraction=_extraction(candidates=[]),
+        tool_results=[_tool_result(_m7_rejected_result())],
+        final_reply="这条约束未能保存：登记被拒绝（BUDGET_EXCEEDED）。",
+    )
+    assert obs.assertions["candidate_register_attempted_at_most_once"] is True
     assert driver.case_verdict(obs).passed is True
 
 
