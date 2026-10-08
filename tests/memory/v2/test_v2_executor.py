@@ -77,6 +77,25 @@ def test_formation_prompt_rejects_transient_content_and_retrieval_questions():
     assert "Approval without the actual procedure is not enough" in _FORMATION_PROMPT
 
 
+def test_formation_prompt_explains_procedural_evidence_threshold():
+    assert "two distinct successful tool-result refs" in _FORMATION_PROMPT
+    assert "A plain user approval without the actual procedure does not satisfy R5" in _FORMATION_PROMPT
+    assert "When the direct user message states a complete reusable procedure, cite an exact " \
+        "excerpt from that message so Runtime can check its trusted marker" in _FORMATION_PROMPT
+    assert "Do not count a tool call without a successful result" in _FORMATION_PROMPT
+
+
+def test_adjudication_prompt_respects_the_runtime_evidence_gate():
+    assert "Candidates reaching this stage have already passed Runtime's deterministic R5 gate" \
+        in _ADJUDICATION_PROMPT
+    assert "do not re-run R5 or demand another qualifying event" in _ADJUDICATION_PROMPT
+    assert "Continue to apply the action rules below, including duplicate, conflict, evidence, " \
+        "policy, and relation checks" in _ADJUDICATION_PROMPT
+    assert "do not choose NOOP solely because its success condition is derived from the user's " \
+        "stated steps or purpose rather than separately executed" in _ADJUDICATION_PROMPT
+    assert "use ADD only when the existing ADD rule below applies" in _ADJUDICATION_PROMPT
+
+
 def test_formation_prompt_requires_procedure_fields_to_be_strings():
     assert (
         "For procedural payloads, `trigger`, `procedure`, and `success_condition` "
@@ -87,17 +106,79 @@ def test_formation_prompt_requires_procedure_fields_to_be_strings():
     ) in _FORMATION_PROMPT
 
 
-def test_formation_prompt_distinguishes_episodic_decisions_from_semantic_facts():
-    assert "Semantic memories represent stable facts, preferences, profiles, project facts, " \
-        "constraints, or accepted corrections" in _FORMATION_PROMPT
-    assert "Episodic memories are reusable accounts of a specific situation, action or " \
-        "decision, outcome, and lesson" in _FORMATION_PROMPT
-    assert "as episodic when future planning needs to remember what happened and why" \
-        in _FORMATION_PROMPT
-    assert "do not classify that decision as semantic only because it produced a stable state" \
-        in _FORMATION_PROMPT
-    assert "stays semantic even when learned during a conversation" in _FORMATION_PROMPT
-    assert "Do not infer missing events or lessons" in _FORMATION_PROMPT
+@pytest.mark.asyncio
+async def test_formation_request_distinguishes_events_from_enduring_project_choices(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "Use episodic when future planning needs the specific situation, decision event, "
+        "outcome, and lesson"
+    ) in call.system_prompt
+    assert (
+        "Use semantic for an enduring project choice, configuration, or constraint even "
+        "when the user included how or why it was selected"
+    ) in call.system_prompt
+    assert (
+        "A temporary schedule change or one-time operational outcome remains episodic when its "
+        "result matters for future planning; semantic is for facts that continue beyond the event."
+    ) in call.system_prompt
+    assert (
+        "future relevance alone does not make an event semantic. Use semantic only for a stable "
+        "fact that persists independently of that event."
+    ) in call.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_formation_request_preserves_ordered_procedure_details(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "For procedural memories, preserve every essential action, object, order, and execution "
+        "boundary. Concise wording is allowed only when it preserves all of them without "
+        "generalizing; if they cannot fit in the 500-character procedure field, return no "
+        "procedural candidate. Keep the success condition supported by cited evidence."
+    ) in call.system_prompt
+    assert (
+        "Do not infer or decide the trusted Runtime marker or R5 eligibility; Runtime alone applies "
+        "R5 using trusted metadata and qualifying event refs."
+    ) in call.system_prompt
+    assert "When the trusted marker is not explicit, a direct user description alone is insufficient" \
+        not in call.system_prompt
+    assert "do not compress the procedure into a higher-level summary" not in call.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_formation_request_requires_excerpts_for_tool_evidence(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "Every evidence item must contain exactly `event_id`, `role`, and a non-empty `excerpt` "
+        "copied from its referenced event (at most 300 characters); never use `summary` or other "
+        "keys. For a successful tool result, copy a non-empty excerpt from that result into "
+        "`excerpt`; citing its ref alone is not enough."
+    ) in call.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_formation_request_preserves_project_choice_behavior_and_reason(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "For durable project choices, preserve user-stated behavior, constraints, and reasons "
+        "that explain their value; do not reduce a described choice to its name alone."
+    ) in call.system_prompt
 
 
 def test_adjudication_prompt_never_replaces_concrete_values_in_refined_content():

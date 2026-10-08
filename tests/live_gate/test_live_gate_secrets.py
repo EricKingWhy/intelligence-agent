@@ -158,3 +158,67 @@ def test_non_json_secret_is_still_collected_as_a_whole() -> None:
     """JSON 解析失败**不抛**：那只说明"这个字段不是 JSON"，整串照旧进精确值层。"""
     values = credential_values(_Stub(model_api_key=SecretStr("plain-secret-value-0002")))
     assert values == ["plain-secret-value-0002"]
+
+
+def test_protected_fact_ids_are_not_mistaken_for_an_authorization_header() -> None:
+    """反控（AC16 Round 6 实测踩坑）：`authorization:<event-id>` 是**事实 ID**，不是 HTTP 头。
+
+    证据里每条 session 都投影一条 `authorization` 保护事实，`fact_id` 逐字是
+    `authorization:<uuid4>`。`_AUTH_HEADER` 的 `\\b` 在 `n` 与 `:` 之间成立，于是这条
+    普通事实 ID 被当成 `Authorization: …` 命中，把整份 AC16 证据的 `status` 翻成
+    failed（18 处命中）。
+
+    判据：真 HTTP 头（键名 `Authorization` 整体，后跟冒号 + 值）仍须命中；事实 ID 不命中。
+    """
+    fact_id = "authorization:2dd4df30-bbe3-432f-a231-1d7de3663ffb"
+    masked, findings = mask_text(fact_id, where="t")
+    assert findings == []
+    assert masked == fact_id
+
+    # 正控：真头照旧命中（含 `Bearer ` 与裸值两种写法）。
+    for header in (
+        "Authorization: Bearer " + "Z" * 30,
+        "authorization: " + "Z" * 30,
+        "authorization=" + "Z" * 30,
+    ):
+        _, hits = mask_text(header, where="t")
+        assert [hit.rule for hit in hits] == ["authorization_header"], header
+
+
+def test_bearer_with_a_uuid_value_never_leaks_past_the_mask() -> None:
+    """反控（Round 6 Standards 轴实测）：`Bearer <uuid>` 不能被**部分**掩成泄漏。
+
+    第一版把 `(?!uuid)` 放在可选的 `(?:bearer\\s+)?` **之后** ⇒ 回溯让 `[^\\s]+` 只吃到
+    `Bearer`，输出 `Authorization: *** 2dd4df30-…`：`Bearer` 被掩、**凭证本身明文留着**。
+    这比"不掩"更糟 —— 它看起来脱敏了（`***` 在场），却把值整条泄漏。
+
+    两种形态的行为**刻意不同**，本用例把它们钉开：
+    - `Bearer <uuid>` 是**真 HTTP 头**形态 ⇒ 整条掩成 `***`，值绝不出现在输出里；
+    - `authorization:<uuid>`（无空格）是生产的**事实 ID** 形态 ⇒ 整条不命中（见上一个用例）。
+    """
+    token = "2dd4df30-bbe3-432f-a231-1d7de3663ffb"
+    masked, findings = mask_text(f"Authorization: Bearer {token}", where="t")
+    assert token not in masked, f"UUID 明文泄漏：{masked!r}"
+    assert masked == "Authorization: ***"
+    assert [f.rule for f in findings] == ["authorization_header"]
+    # 反控的另一半：裸事实 ID 形态**不命中**（这是本轮修假阳性的目的本身）。
+    bare = f"authorization:{token}"
+    masked_bare, findings_bare = mask_text(bare, where="t")
+    assert findings_bare == []
+    assert masked_bare == bare
+
+
+def test_repeated_or_spaced_bearer_prefixes_never_leave_a_partial_mask() -> None:
+    """反控（Round 6 Standards 轴二轮）：`Bearer` 前缀重复时不许只掩掉前缀、漏掉凭证。
+
+    二轮实测：`Authorization: Bearer Bearer sk-live-…` 曾被掩成
+    `Authorization: *** sk-live-…` —— 同一回溯病灶（`[^\\s]+` 只吃到第二个 `Bearer`），
+    连 `_KEY_SHAPED` 都只能掩住 `sk-` 那半截，**不匹配 `_KEY_SHAPED` 的 token 会整条泄漏**。
+    判据：无论 `Bearer` 前缀出现几次，凭证 token 都不得出现在输出里。
+    """
+    for token in ("sk-live-abcdefghijklmnopqrst", "opaque-token-without-a-known-shape"):
+        for prefix in ("Bearer ", "Bearer Bearer ", "bearer  "):
+            text = f"Authorization: {prefix}{token}"
+            masked, findings = mask_text(text, where="t")
+            assert token not in masked, f"{text!r} -> {masked!r}"
+            assert [f.rule for f in findings] == ["authorization_header"], text
