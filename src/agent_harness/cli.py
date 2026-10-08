@@ -1182,6 +1182,11 @@ def main() -> None:
         finally:
             flush_process_sink()
         return
+    # Local package inspection is a strictly read-only preflight: it does not take
+    # the runtime lock, initialize logging, or flush telemetry on its way out.
+    if len(sys.argv) > 2 and sys.argv[1:3] == ["plugins", "inspect"]:
+        _main_plugins(sys.argv[2:])
+        return
     # ARCH-7（#150）：CLI 与 Web 并发使用同一 session root 被**有意拒绝**——
     # 无保护的跨进程多写者会产出重复 seq / 交错写，且 run 归属共识只在进程内
     # 有效。这里不吞异常：响亮失败 + 明确错误信息（锁路径 / 占用者 / 逃生门）。
@@ -1273,6 +1278,9 @@ def _main_dispatch() -> None:
         return
     if argv and argv[0] == "approvals":
         _main_approvals(argv[1:])
+        return
+    if argv and argv[0] == "plugins":
+        _main_plugins(argv[1:])
         return
     if argv and argv[0] == "replay":
         _main_replay(argv[1:])
@@ -1384,6 +1392,30 @@ def _main_dispatch() -> None:
         # 把它也压成 exit 1 会让脚本把"被预算挡住、可恢复"读成"跑挂了"。
         return
     if not outcome.final_text:
+        raise SystemExit(1)
+
+
+def _main_plugins(argv: list[str]) -> None:
+    """Read-only local package inspection CLI (no install or package execution)."""
+    parser = argparse.ArgumentParser(prog="agent-harness plugins")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    inspect = subcommands.add_parser(
+        "inspect", help="inspect a local Skill package without installing it"
+    )
+    inspect.add_argument("local_dir", help="local directory containing SKILL.md")
+    inspect.add_argument("--scope", choices=["project"], required=True)
+    args = parser.parse_args(argv)
+
+    from agent_harness.skills.inspection import inspect_skill_package
+
+    settings = Settings()
+    report = inspect_skill_package(
+        args.local_dir,
+        scope=args.scope,
+        existing_skills=Path(settings.workspace_dir) / "skills",
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] == "unsupported":
         raise SystemExit(1)
 
 
