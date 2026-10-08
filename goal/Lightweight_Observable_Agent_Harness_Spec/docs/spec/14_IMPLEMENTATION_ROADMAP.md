@@ -147,6 +147,9 @@ Gate：
 - Remote MCP Tool 仍经过统一 ToolExecutor；
 - 不出现双重 retry。
 
+## Post-Phase 7/8 follow-up — Cross-market package import
+
+Phase 7 and Phase 8 above describe their original Capability/Skills and MCP tools foundations. Their original Gates and completed status remain unchanged. The user-approved package import and per-project activation work is a later follow-up described by PRD #868, spec 08 §6, spec 09 §§1–2, and ADR-0052. It builds on the existing phases; it does not retroactively add installation, Marketplace, OAuth, or native-plugin SPI requirements to the completed gates. `docs/PHASE_STATUS.md` remains the implementation-status source.
 ## Phase 9 — Streaming Surfaces
 
 交付：
