@@ -137,6 +137,19 @@ async def test_formation_request_preserves_ordered_procedure_details(env: Env):
     ) in call.system_prompt
 
 
+@pytest.mark.asyncio
+async def test_formation_request_preserves_project_choice_behavior_and_reason(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "For durable project choices, preserve user-stated behavior, constraints, and reasons "
+        "that explain their value; do not reduce a described choice to its name alone."
+    ) in call.system_prompt
+
+
 def test_adjudication_prompt_never_replaces_concrete_values_in_refined_content():
     """#496：refine content = 压缩/澄清而非替换，用户原话的具体值逐字保留。"""
     assert "Refining content means condensing or clarifying, never replacing" \

@@ -207,6 +207,8 @@ _FORMATION_PROMPT = (
     "For durable user facts and preferences, preserve explicitly stated names, values, "
     "quantities, dates, and qualifiers in the memory content and typed payload. Do not "
     "generalize away a concrete value; every detail must remain supported by cited evidence.\n"
+    "For durable project choices, preserve user-stated behavior, constraints, and reasons that "
+    "explain their value; do not reduce a described choice to its name alone.\n"
     "For procedural memories, preserve every user-stated step in order, including its action, "
     "object, and boundary; do not compress the procedure into a higher-level summary. Keep the "
     "success condition supported by cited evidence.\n"
