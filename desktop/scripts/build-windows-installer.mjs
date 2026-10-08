@@ -608,6 +608,93 @@ export function assertStagedProductMatchesSource({ sourceDir, stagedDir, ...deps
  * Pure electron-builder configuration for the Windows x64 installer.
  * Kept pure (no electron-builder import) so it is unit-testable on any OS.
  */
+/** The `${LANG_<NAME>}` symbol a LangString line references, or null. */
+function langStringSymbol(line) {
+  const match = /^\s*LangString\s+\S+\s+\$\{LANG_([A-Z0-9_]+)\}/.exec(line)
+  return match ? match[1] : null
+}
+
+/**
+ * Open a conditional-compilation frame. Every opener is pushed so a later
+ * `!endif` pops the right frame. Only `!ifdef` carries the symbols the guard
+ * check tests: an `!ifndef LANG_X` frame must never count as a guard, so its
+ * symbols are not collected (`kind` already distinguishes it).
+ */
+function conditionalFrame(line) {
+  const match = /^\s*!(if|ifdef|ifndef|ifmacrodef|ifmacrondef)\b(.*)$/.exec(line)
+  if (!match) return null
+  const kind = match[1]
+  const symbols =
+    kind === 'ifdef' ? new Set(match[2].match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) : new Set()
+  return { kind, symbols }
+}
+
+/**
+ * Every `LangString <name> ${LANG_<X>}` line that is NOT enclosed in a matching
+ * `!ifdef LANG_<X>` block, as `{ line, symbol }` (line is 1-based). See
+ * `validateLangStringGuards` for why this matters (#831).
+ */
+export function unguardedLangStrings(source) {
+  const bad = []
+  const stack = []
+  const lines = source.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    const frame = conditionalFrame(line)
+    if (frame) {
+      stack.push(frame)
+      continue
+    }
+    if (/^\s*!else\b/.test(line)) {
+      const top = stack[stack.length - 1]
+      if (top) top.symbols = new Set()
+      continue
+    }
+    if (/^\s*!endif\b/.test(line)) {
+      stack.pop()
+      continue
+    }
+    const symbol = langStringSymbol(line)
+    if (symbol === null) continue
+    const guarded = stack.some((f) => f.kind === 'ifdef' && f.symbols.has(`LANG_${symbol}`))
+    if (!guarded) bad.push({ line: i + 1, symbol })
+  }
+  return bad
+}
+
+/**
+ * Build-time assertion (#831): throw when `source` contains a LangString that
+ * is not inside a matching `!ifdef LANG_<NAME>` guard.
+ *
+ * The stock NSIS template inserts `customHeader` right after
+ * `!insertmacro addLangs`, so the `${LANG_*}` symbols defined by
+ * `LoadLanguageFile` are visible there. A single-language installer
+ * (`installerLanguages: [language]`, as the W-16 smoke test builds) loads only
+ * that language, and NSIS leaves an undefined `${SYMBOL}` as literal text, so
+ * an unguarded `LangString ... ${LANG_SIMPCHINESE}` makes makensis emit warning
+ * 7025 — fatal, because electron-builder runs makensis with warnings-as-errors.
+ * This turns that into an early, explicit build failure.
+ */
+export function validateLangStringGuards(source, filename) {
+  const bad = unguardedLangStrings(source)
+  if (bad.length > 0) {
+    const where = bad.map((b) => `line ${b.line}: ${b.symbol}`).join(', ')
+    throw new Error(`${filename}: LangString not guarded by !ifdef LANG_<NAME> (${where})`)
+  }
+}
+
+/**
+ * Validate every NSIS script that runs inside `customHeader`: installer.nsh and
+ * the installer-directories.nsh it `!include`s. Both are compiled after
+ * addLangs, so both share the #831 hazard.
+ */
+export function validateInstallerScripts(installerDir) {
+  for (const file of ['installer.nsh', 'installer-directories.nsh']) {
+    validateLangStringGuards(readFileSync(join(installerDir, file), 'utf8'), file)
+  }
+}
+
+
 export function createWindowsInstallerConfig({ version, appId, productName, installerDir, runtimeProduct, nodeVersion }) {
   const productFilename = productName.replace(/ /g, '-')
   return {
@@ -740,6 +827,9 @@ async function main() {
   const installerNshSource = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
   assertNsisIncludePlacement(installerNshSource, 'installer-directories.nsh')
   assertNsisLangStringGuards(installerNshSource)
+  // #831: fail early when a LangString is not guarded by its language.
+  validateInstallerScripts(installerDir)
+  console.log('installer LangString guards OK')
   console.log('installer inputs OK')
 
   if (compileOnly) {

@@ -1,0 +1,1 @@
+2026-10-09	#865 同步后发现复审：Spec NEEDS-FIX（P2：五种窄宽度都用空模型目录，未覆盖可用滑杆）；Standards PASS（无硬 finding，记录重复 fixture smell）。P0/P1/P2/P3/P4=0/0/1/0/0；由 23ff045a 修复。	17c62ed2b9fa86a797491b45707322cf87403da9..b49d7cfb66cfaa1b9d6c83782a429c43de169e10

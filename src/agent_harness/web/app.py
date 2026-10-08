@@ -78,7 +78,11 @@ from agent_harness.identity import (
 )
 from agent_harness.instance_lock import InstanceLock
 from agent_harness.logging import setup_logging
-from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.config import (
+    ConfigError,
+    ModelConfig,
+    UnsupportedReasoningEffort,
+)
 from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
@@ -2391,6 +2395,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
                     result.session.session_id, WorkflowMode.PLAN)
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
+        except UnsupportedReasoningEffort as e:
+            raise model_http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05：client 构造期失败（代理环境/配置问题）→ 503。
             raise model_http_error(e) from e
@@ -2587,6 +2593,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
             raise http_error(e) from e
         except ModelClientConstructionError as e:
             # #517 BUG-05：同 create——构造期失败 → 503，不冒充 500。
+            raise model_http_error(e) from e
+        except UnsupportedReasoningEffort as e:
             raise model_http_error(e) from e
         except StorageBusyError as e:
             # #515（审查 P2-3）：同 create——launch 路径写锁耗尽 → 503。
@@ -3378,6 +3386,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except ModelClientConstructionError as e:
             # #517 BUG-05：idle→launched 分支会构造 client——同 create/resume，503。
             raise model_http_error(e) from e
+        except UnsupportedReasoningEffort as e:
+            raise model_http_error(e) from e
         except StorageBusyError as e:
             # #515（审查 P2-3）：同 create——launched 分支的写锁耗尽 → 503。
             raise storage_http_error(e) from e
@@ -3479,6 +3489,8 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         except ModelClientConstructionError as e:
             # #517 BUG-05（审查 P2-1）：flush 在 idle 时走 resume_and_launch 构造
             # client——BUG-05 的第 4 个构造调用点，同 create/resume/messages → 503。
+            raise model_http_error(e) from e
+        except UnsupportedReasoningEffort as e:
             raise model_http_error(e) from e
         except StorageBusyError as e:
             # #515（审查 P2-3）：投递路径的写锁耗尽 → 503。

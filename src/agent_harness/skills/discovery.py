@@ -113,7 +113,6 @@ def _split_frontmatter(text: str) -> tuple[str | None, str]:
 
 def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str]]:
     """解析单个 SKILL.md；失败返回 (None, errors)，绝不抛出中断发现流程。"""
-    errors: list[str] = []
     try:
         # 尺寸上限先于 read（stat 一次 vs 全量读入）：读入阶段就有界。
         if path.stat().st_size > SKILL_FILE_MAX_BYTES:
@@ -124,6 +123,14 @@ def parse_skill_markdown(path: Path) -> tuple[SkillCatalogEntry | None, list[str
         # UnicodeDecodeError 是 ValueError 子类，不是 OSError——非 UTF-8（GBK/Latin-1
         # 等）字节会从这里抛；捕获它才不违背"解析失败进 errors，绝不中断扫描"的契约。
         return None, [f"{_spath(path)}: unreadable ({type(error).__name__})"]
+    return parse_skill_markdown_text(text, path)
+
+
+def parse_skill_markdown_text(
+    text: str, path: Path
+) -> tuple[SkillCatalogEntry | None, list[str]]:
+    """解析已经有界读取的 Skill 文本，复用发现路径的同一 frontmatter 规则。"""
+    errors: list[str] = []
     frontmatter, _body = _split_frontmatter(text)
     if frontmatter is None:
         return None, [f"{_spath(path)}: missing '---' frontmatter fence"]

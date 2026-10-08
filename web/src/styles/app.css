@@ -6382,6 +6382,14 @@ button.json-row {
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
 }
+.composer-fallback-effort-note {
+  max-width: min(100%, 340px);
+  padding: 4px 6px;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 /* #426：新建会话的预算入口（一维 turns）。与档位 picker 同行同高——它是同级的
    "本次运行条件"设置，不是全局设置页的成员；数值窄框 + 前置标签，留空即默认。 */
 .composer-budget {
@@ -6499,6 +6507,13 @@ button.json-row {
   font-weight: 600;
   color: var(--text-secondary);
   user-select: none;
+}
+.picker-custom-body {
+  padding: 0 var(--space-sm) var(--space-sm);
+}
+.picker-content-custom {
+  width: min(340px, calc(100vw - 24px));
+  min-width: min(320px, calc(100vw - 24px));
 }
 .picker-foot {
   margin-top: var(--space-xs);
@@ -7499,4 +7514,280 @@ button.json-row {
   display: flex;
   justify-content: flex-end;
   padding: var(--space-xs) var(--space-md);
+}
+
+/* Reasoning effort slider: the blue-to-violet fill and energy are state-driven. */
+.reasoning-effort-slider {
+  --effort-energy: 0;
+  --effort-fill: 14px;
+  --effort-color: #4d93f8;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 216px;
+  padding: var(--space-xs) 0;
+}
+.reasoning-effort-slider__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+.reasoning-effort-slider__current,
+.composer-trigger-current[data-tone="blue"],
+.composer-trigger-current[data-tone="violet"],
+.composer-trigger-current[data-tone="deep"] {
+  font-weight: 600;
+}
+.reasoning-effort-slider__current {
+  color: var(--text-primary);
+}
+.reasoning-effort-slider__current[data-tone="blue"],
+.composer-trigger-current[data-tone="blue"] {
+  color: #9bc4ff;
+}
+.reasoning-effort-slider__current[data-tone="violet"],
+.composer-trigger-current[data-tone="violet"] {
+  color: #d2b2ff;
+}
+.reasoning-effort-slider__current[data-tone="deep"],
+.composer-trigger-current[data-tone="deep"] {
+  color: #e0caff;
+}
+:root[data-theme='light'] .reasoning-effort-slider__current[data-tone="blue"],
+:root[data-theme='light'] .composer-trigger-current[data-tone="blue"] {
+  color: #2456a4;
+}
+:root[data-theme='light'] .reasoning-effort-slider__current[data-tone="violet"],
+:root[data-theme='light'] .composer-trigger-current[data-tone="violet"] {
+  color: #6534b1;
+}
+:root[data-theme='light'] .reasoning-effort-slider__current[data-tone="deep"],
+:root[data-theme='light'] .composer-trigger-current[data-tone="deep"] {
+  color: #4c1d95;
+}
+.reasoning-effort-slider__track {
+  position: relative;
+  height: 28px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  touch-action: none;
+}
+.reasoning-effort-slider__track::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  border-radius: inherit;
+  box-shadow: 0 1px 12px rgba(168, 85, 247, 0.45);
+  opacity: var(--effort-energy);
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-apple);
+}
+.reasoning-effort-slider__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  width: var(--effort-fill);
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4d93f8 0%, var(--effort-color) 100%);
+  pointer-events: none;
+  transition: background 160ms ease;
+}
+.reasoning-effort-slider__energy {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  width: var(--effort-fill);
+  overflow: hidden;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #3b1178 0%, #6d28d9 30%, #9333ea 62%, #c084fc 100%);
+  opacity: var(--effort-energy);
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+.reasoning-effort-slider__sweep {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 18%, rgba(255, 255, 255, 0.3) 50%, transparent 82%);
+  transform: translateX(100%);
+  animation: reasoning-effort-sweep 2.4s linear infinite;
+}
+@keyframes reasoning-effort-sweep {
+  to { transform: translateX(-100%); }
+}
+.reasoning-effort-slider__stars {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 3;
+  width: var(--effort-fill);
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.reasoning-effort-slider__star {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  margin-top: -1.5px;
+  pointer-events: none;
+  animation-name: reasoning-effort-star-cross;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.reasoning-effort-slider__star-dot {
+  position: absolute;
+  top: 0;
+  left: 100%;
+  width: 3px;
+  height: 3px;
+  margin-left: -1.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.9);
+  opacity: var(--effort-star-brightness, 1);
+  transform: scale(var(--effort-star-brightness, 1));
+}
+@keyframes reasoning-effort-star-cross {
+  0% { transform: translate3d(100%, 0, 0); opacity: 0; }
+  6%, 94% { opacity: 1; }
+  100% { transform: translate3d(-100%, 0, 0); opacity: 0; }
+}
+.reasoning-effort-slider__tick {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  width: 3px;
+  height: 3px;
+  margin: -1.5px 0 0 -1.5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-primary) 28%, transparent);
+  pointer-events: none;
+}
+.reasoning-effort-slider__tick[data-passed="true"] {
+  background: rgba(255, 255, 255, 0.68);
+}
+.reasoning-effort-slider__input {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  appearance: none;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+.reasoning-effort-slider__input:active {
+  cursor: grabbing;
+}
+.reasoning-effort-slider__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.reasoning-effort-slider__input::-webkit-slider-runnable-track {
+  height: 28px;
+  border: 0;
+  background: transparent;
+}
+.reasoning-effort-slider__input::-moz-range-track {
+  height: 28px;
+  border: 0;
+  background: transparent;
+}
+.reasoning-effort-slider__input::-moz-range-progress {
+  height: 28px;
+  background: transparent;
+}
+.reasoning-effort-slider__input::-webkit-slider-thumb {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  appearance: none;
+  border: 1px solid rgba(15, 17, 21, 0.08);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.34);
+  cursor: grab;
+}
+.reasoning-effort-slider__input::-moz-range-thumb {
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(15, 17, 21, 0.08);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.34);
+  cursor: grab;
+}
+.reasoning-effort-slider__labels {
+  display: grid;
+  gap: 2px;
+  margin-top: var(--space-xs);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+.reasoning-effort-slider__labels span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reasoning-effort-slider__labels span[data-active="true"] {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-effort-slider__fill,
+  .reasoning-effort-slider__energy,
+  .reasoning-effort-slider__track::after {
+    transition: none;
+  }
+  .reasoning-effort-slider__sweep {
+    display: none;
+  }
+  .reasoning-effort-slider__star {
+    left: var(--effort-star-x);
+    right: auto;
+    width: 3px;
+    animation: none;
+    opacity: var(--effort-star-brightness, 1);
+    transform: none;
+  }
+  .reasoning-effort-slider__star-dot {
+    left: 50%;
+    margin-left: -1.5px;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.reasoning-effort-slider[data-disabled="true"] .reasoning-effort-slider__track {
+  opacity: 0.55;
+}
+.reasoning-effort-slider[data-disabled="true"] .reasoning-effort-slider__sweep,
+.reasoning-effort-slider[data-disabled="true"] .reasoning-effort-slider__star {
+  animation-play-state: paused;
+}
+.reasoning-effort-slider__input:disabled {
+  cursor: not-allowed;
+}
+.reasoning-effort-slider__input:not(:disabled):hover::-webkit-slider-thumb {
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.42);
+}
+.reasoning-effort-slider__input:not(:disabled):hover::-moz-range-thumb {
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.42);
+}
+
+
+.reasoning-effort-slider__track[data-energy="off"] .reasoning-effort-slider__sweep {
+  animation-play-state: paused;
 }
