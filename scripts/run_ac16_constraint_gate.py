@@ -153,6 +153,11 @@ EXAMPLE_ENV_FILE = _REPO_ROOT / ".env.example"
 #: §9.1「测试模型为部署实际会话主模型」——文件型凭证的 fallback 注入点（有直传时可不用）。
 DEFAULT_ENV_FILE_ENV = "AC16_ENV_FILE"
 
+#: §9.1「temperature 使用该 Provider 支持的最低有效值」。部署默认是 `Settings.temperature
+#: = 0.2`；本驱动显式覆盖成 0.0（`_session_primary_model_config`），否则主模型会用部署
+#: 默认采样——那就不是"最低有效值"，且两次 run 的可复现性变差。
+_MIN_EFFECTIVE_TEMPERATURE = 0.0
+
 #: 单个 run 等的上限（秒）。超过就抛 TimeoutError，折成该槽位的失败观测——不静默跳过。
 _RUN_TIMEOUT_SECONDS = 300.0
 #: 等 run 终态的轮询间隔（秒）。
@@ -712,23 +717,39 @@ def _tool_result_content(result: Any) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _tool_result_payload(result: Any) -> dict[str, Any]:
+    """从 `tool/result` 事件里取出**工具自己的 data**（剥掉外层 `ToolResult` 包装）。
+
+    实测形状（Round 5 冒烟抓到）：`data.content` 是外层 `ToolResult` 的 JSON 串 ——
+    `{"ok":true,"message":…,"data":{<工具自己的 data>},…}`。工具的 `status`/`value` 在
+    **外层 `data` 字段**里。驱动一度把整个 content 当工具的 data，于是永远读不到判据字段
+    （`registered_tool_result_present` 恒假、M7-1 被误判成"没调工具"）。也接受 content
+    已经是 dict（另一种落盘形态）或未包装的裸工具 data。
+    """
+    raw = _tool_result_data(result).get("content")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    if isinstance(raw.get("data"), dict) and "status" in raw["data"]:
+        return raw["data"]
+    return raw
+
+
 def _register_result_for_candidate(
     tool_results: Sequence[Any], candidate: str,
 ) -> dict[str, Any] | None:
     """找候选原文的 `register_constraint` 工具结果（object 侧判据的唯一来源）。
 
-    `tool/result.data.content` 是 `ToolResult` 的 JSON 串（`ToolExecutor` 的落盘口径）。
+    只认 `register_constraint` 的结果，且其内在 data 带 `value` 与三种 `status` 之一；
+    `value` 必须逐字等于候选原文（工具在来源校验通过后才回填 value，所以它同时证明
+    "来源校验过了"）。
     """
     for result in tool_results:
-        content = _tool_result_content(result)
-        if not content:
-            continue
-        try:
-            payload = json.loads(content)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
+        payload = _tool_result_payload(result)
         if payload.get("value") == candidate and payload.get("status") in (
             "registered", "already_registered", "rejected",
         ):
@@ -1546,6 +1567,11 @@ class _RealRunner:
         构造靠 provider preset + 直传 key：`MODEL_PROVIDER`/`MODEL_NAME`/`MODEL_BASE_URL`
         显式传入，其余 capability 配置继续由 `_env_file` 兜底。`model_api_key` 取直传值
         （没直传时 `_env_file` 里的值），**绝不落盘**。
+
+        `temperature` 显式钉 `_MIN_EFFECTIVE_TEMPERATURE`（0.0）：票面 §9.1 要求"temperature
+        使用该 Provider 支持的最低有效值"。部署默认是 `Settings.temperature = 0.2`，
+        不显式覆盖就会以 0.2 跑 —— Round 5 冒烟的 `model_provenance` 实测到 `[0.0, 0.2]`
+        两个值（前者是本驱动的 memory.primary 显式 0.0，后者是会话主模型继承的部署默认）。
         """
         from agent_harness.config import Settings
 
@@ -1553,6 +1579,7 @@ class _RealRunner:
         overrides: dict[str, Any] = {
             "model_provider": self._config.session_primary_provider,
             "model_name": self._config.session_primary_model,
+            "temperature": _MIN_EFFECTIVE_TEMPERATURE,
         }
         if self._config.direct_api_key:
             overrides["model_api_key"] = self._config.direct_api_key
@@ -1579,7 +1606,7 @@ class _RealRunner:
             model_name=self._config.memory_primary_model,
             api_key=key,
             base_url=preset["model_base_url"],
-            temperature=0.0,
+            temperature=_MIN_EFFECTIVE_TEMPERATURE,
         )
 
     def _fresh_workspace_dir(self) -> str:

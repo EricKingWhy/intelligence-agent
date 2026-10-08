@@ -173,10 +173,23 @@ def _model_turn(run_id: str = "run-1") -> dict:
 
 
 def _tool_result(payload: dict, *, tool_call_id: str = "call-1") -> dict:
-    """`tool/result` 事件：`data.content` 是 `ToolResult` 的 JSON 串（生产落盘口径）。"""
+    """`tool/result` 事件：`data.content` 是**外层** `ToolResult` 的 JSON 串。
+
+    实测形状（生产落盘，Round 5 冒烟抓到的 bug）：
+    `{"ok":true,"message":…,"data":{<工具自己的 data>},…}` —— 工具自己的 `data` 在**外层
+    `data` 字段里**。驱动一度把整个 content 当成工具的 data 解析，于是永远读不到
+    `status`/`value`（`registered_tool_result_present` 恒假）。
+    """
     return {
         "type": "tool/result",
-        "data": {"tool_call_id": tool_call_id, "content": json.dumps(payload, ensure_ascii=False)},
+        "data": {
+            "tool_call_id": tool_call_id,
+            "content": json.dumps(
+                {"ok": True, "message": "…", "data": payload,
+                 "error_code": None, "retryable": False, "metadata": {}},
+                ensure_ascii=False,
+            ),
+        },
     }
 
 
@@ -545,6 +558,47 @@ def test_m7_adopted_candidate_makes_candidate_not_registered_false(driver):
     assert obs.assertions["extractor_adopted_no_candidate"] is False
     assert obs.assertions["candidate_not_registered"] is False
     assert driver.case_verdict(obs).passed is False
+
+
+def test_m7_tool_result_payload_is_unwrapped_from_outer_envelope(driver):
+    """红证：真实落盘的 `tool/result` content 是外层 `ToolResult` 包装，必须剥一层。
+
+    旧实现直接对 content 取 `status`/`value` ⇒ 恒读不到 ⇒ `registered_tool_result_present`
+    与 `tool_result_status_blocks_registration` 恒假（真机 M7-1 实测即如此）。
+    """
+    envelope = {
+        "type": "tool/result",
+        "data": {
+            "tool_call_id": "call-1",
+            "content": json.dumps({
+                "ok": True, "message": "未登记：…", "data": _m7_rejected_result(driver.NO_NEW_DEPENDENCY),
+                "error_code": None, "retryable": False, "metadata": {"duration_ms": 3.4},
+            }, ensure_ascii=False),
+        },
+    }
+    assert driver._tool_result_payload(envelope)["status"] == "rejected"
+    assert driver._tool_result_payload(envelope)["value"] == driver.NO_NEW_DEPENDENCY
+    # 已解析成 dict 的 content（另一种落盘形态）同样认得。
+    assert driver._tool_result_payload({"data": {"content": _m7_rejected_result(driver.NO_NEW_DEPENDENCY)}})[
+        "status"
+    ] == "rejected"
+
+
+def test_session_primary_temperature_is_pinned_to_minimum(driver, tmp_path, monkeypatch):
+    """§9.1「temperature 使用最低有效值」：会话主模型显式钉 0.0，不吃部署默认 0.2。
+
+    红证依据：Round 5 冒烟的 `model_provenance` 实测到 `[0.0, 0.2]` —— 0.2 就是会话主模型
+    继承的 `Settings.temperature` 默认值。
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "agent_harness.config.Settings", lambda *a, **kw: calls.append(kw) or object(),
+    )
+    config = _config(driver, tmp_path, direct_api_key="sk-x")
+    driver._RealRunner(config)._session_primary_model_config()
+    assert calls[0]["temperature"] == 0.0 == driver._MIN_EFFECTIVE_TEMPERATURE
+    assert calls[0]["model_provider"] == "mimo"
+    assert calls[0]["model_name"] == "mimo-v2.6-flash"
 
 
 def test_m7_budget_rejection_with_honest_reply_passes(driver):
