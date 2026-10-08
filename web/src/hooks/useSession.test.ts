@@ -298,6 +298,7 @@ describe('T4 — 重连契约纯函数（#97）', () => {
 describe('isUnknownModelError — 422 具名判定（#103，消魔法子串）', () => {
   it('仅精确匹配未知模型专项错误', () => {
     expect(isUnknownModelError(UNKNOWN_MODEL_ERROR_TEXT)).toBe(true);
+    expect(isUnknownModelError(`提交失败：${UNKNOWN_MODEL_ERROR_TEXT}`)).toBe(true);
     expect(isUnknownModelError('模型不可用（422）：请从模型选择器重新选择 ')).toBe(false);
     expect(isUnknownModelError('Start failed: 422')).toBe(false);
     expect(isUnknownModelError('加载会话列表失败：422')).toBe(false);
