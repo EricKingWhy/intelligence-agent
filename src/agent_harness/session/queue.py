@@ -38,6 +38,8 @@ class QueuedMessage:
     refutes_event_id: str | None = None
     protected_facts: list[dict[str, Any]] | None = None
     remember_as_procedural_rule: bool = False
+    #: #823 / MM-02：附件引用数组（`user/message.data["attachments"]` 的形状）。
+    attachments: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -56,6 +58,8 @@ class SteerRequest:
     refutes_event_id: str | None = None
     protected_facts: list[dict[str, Any]] | None = None
     remember_as_procedural_rule: bool = False
+    #: #823 / MM-02：附件引用数组（见 `QueuedMessage.attachments`）。
+    attachments: list[dict[str, Any]] | None = None
 
 
 class SteerSource(Protocol):
@@ -101,6 +105,7 @@ class MessageQueueManager:
         revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
         remember_as_procedural_rule: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> QueuedMessage:
         """把消息放入 session 的队列，返回 QueuedMessage。"""
         queue_id = str(uuid4())
@@ -113,6 +118,7 @@ class MessageQueueManager:
             refutes_event_id=refutes_event_id,
             protected_facts=protected_facts,
             remember_as_procedural_rule=remember_as_procedural_rule,
+            attachments=attachments,
         )
         async with self._lock:
             self._queues.setdefault(session_id, []).append(msg)
@@ -166,6 +172,7 @@ class MessageQueueManager:
         revoke_fact_id: str | None = None, refutes_event_id: str | None = None,
         protected_facts: list[dict[str, Any]] | None = None,
         remember_as_procedural_rule: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> SteerRequest:
         """注册一个 steer 请求。runtime 在下一步前检查并注入。"""
         steer_id = str(uuid4())
@@ -179,6 +186,7 @@ class MessageQueueManager:
             refutes_event_id=refutes_event_id,
             protected_facts=protected_facts,
             remember_as_procedural_rule=remember_as_procedural_rule,
+            attachments=attachments,
         )
         async with self._lock:
             self._steers.setdefault(session_id, []).append(req)

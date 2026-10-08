@@ -22,7 +22,17 @@ from agent_harness.attachments.errors import (
     attachment_http_status,
 )
 from agent_harness.attachments.filenames import file_leaf_name
+from agent_harness.attachments.normalize import NormalizedImage, normalize_image
 from agent_harness.attachments.probe import DetectedImage, detect_image
+from agent_harness.attachments.projection import (
+    IMAGE_OMITTED_PLACEHOLDER,
+    KIND_IMAGE,
+    ImageRef,
+    content_block_with_text,
+    image_content_block,
+    parse_image_refs,
+    text_with_omitted_images,
+)
 from agent_harness.attachments.types import (
     EXTENSION_MEDIA_TYPES,
     SUPPORTED_IMAGE_MEDIA_TYPES,
@@ -33,14 +43,23 @@ from agent_harness.attachments.types import (
 
 __all__ = [
     "EXTENSION_MEDIA_TYPES",
+    "IMAGE_OMITTED_PLACEHOLDER",
+    "KIND_IMAGE",
     "SUPPORTED_IMAGE_MEDIA_TYPES",
     "AttachmentError",
     "AttachmentErrorCode",
     "DetectedImage",
     "ImageAttachmentLimits",
     "ImageAttachmentRef",
+    "ImageRef",
+    "NormalizedImage",
     "attachment_http_status",
+    "content_block_with_text",
     "detect_image",
     "file_leaf_name",
+    "image_content_block",
+    "normalize_image",
+    "parse_image_refs",
     "resolve_image_limits",
+    "text_with_omitted_images",
 ]

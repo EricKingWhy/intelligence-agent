@@ -17,6 +17,12 @@ dependencies = [
     "langchain-core>=1.6.5",
     "langchain-openai>=1.5.0",
     "mcp>=2.1.1",
+    # #823 MM-02：图片归一化（EXIF 方向、alpha→WebP 否则 JPEG、限内缩放）需要
+    # 真实解码/重编码，标准库做不到。归一化语义移植自 DeepSeek Harness
+    # `attachment-local/src/normalization.ts`（MIT，commit 5badb150，上游用 sharp），
+    # 本仓改用 Pillow。MM-01（#822）的 probe.py 注释已登记「本仓未依赖 Pillow，
+    # 归一化是 MM-02」，故本票引入。
+    "pillow>=10",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.15.0",
     "pyjwt>=2.10,<3",
