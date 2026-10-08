@@ -85,6 +85,26 @@
 - 严重度：B-4 的票面要求正是「桌面/TUI 同一 Task 状态与 Event seq 一致」；此形态下**同时在场时两者不一致**，
   且 TUI 侧的状态栏是错的（`idle`）。不涉及数据正确性（服务端事件流与账本不受影响），故按 P1/P2 之间报。
 
+### N-3（观察项，未单独立票）会话终态投影在「restart 回填 `run/interrupted`」后与最新 run 不一致
+
+同一长会话 `0c3b6366…` 的两端终态读数（桌面 CDP `b4-desktop-conversation.txt`）：
+
+| 面 | 读数 |
+| --- | --- |
+| 桌面状态徽标 | **`已中断`** + `上次运行在第 34 步中断（原因：process_restart）` |
+| 桌面计划 | `进程 7 项 · 已完成 7 项` |
+| TUI `/progress` | `status: "stale"`、`expected_source_event_seq: 700` vs `file_source_event_seq: 698`、`verifiable: false`、`reason: "文件 source_event_seq=698 落后于当前投影 700"` |
+| 服务端事件流 | 最新 run 于 **seq 698 `run/completed`** 收口；**seq 699 `run/interrupted`** 是启动扫描为更早的孤儿 run `de1700fa-e8be-490d-bb42-7adce098eab8`（`interrupted_seq 534`）回填的 |
+
+即：**最新 run 已完成，但两端的终态投影都指向「中断」**——桌面按「最后一个 `run/interrupted`」判定，
+启动扫描又把孤儿 run 的中断事件补在完成事件**之后**，投影层无法区分这两者。
+`web/src/lib/projection.ts::projectRunStarted` 的注释意图是「**最近一个** run 以中断收口」，
+本读数与该意图相悖；TUI 侧同源表现为 progress 永久 `stale`。
+`GET /api/recovery/interrupted` 同刻报 `recovery: "recovered"`、`progress.source_event_seq: 698`，
+却仍把 `de1700fa` 列为 `resume_available: true`。
+
+本项与 #854（陈旧终态展示）同族，**未单独立票**，登记在此供裁决时一并处置（#365 不在本票修产品代码）。
+
 ## 诚实注记
 
 1. **桌面会话栏的 `N 事件` 是加载时快照**：`896132bb` 已有 17 条事件时，会话栏仍写
