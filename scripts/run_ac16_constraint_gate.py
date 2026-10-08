@@ -180,12 +180,14 @@ _PRIMARY_CASES = frozenset({"M7", "M8", "M9"})
 def case_expects_extraction_job(case_id: str) -> bool:
     """这个案例会不会产生 B-lite 抽取 job（= 它是否走抽取登记入口）。
 
-    M7/M8/M9 由实际 session primary 执行、**不产生**抽取 job（Round 6 定点重跑的
-    `memory-v2.db` 实测：M1 两次各一行 `memory-v2:<run_id>`，M9 两次一行都没有）。
-    驱动对每个 slot 都会先等那一行出现，上界 `_RUN_TIMEOUT_SECONDS`=300s ——
-    一视同仁的话 M8/M9 四个 slot 就白等 ~20 分钟（整套 18 次里更多）。
+    逐案例声明（`CaseDefinition.expects_extraction_job`），**不按 `_EXTRACTION_CASES` /
+    `_PRIMARY_CASES` 推断**：实测 M7 虽然由 session primary 执行，却**有**抽取 job
+    （Round 5 `20261008T054419Z-6869dd6a` 证据：M7 两次 job 行都在、`state=done`），
+    M8/M9 才是一次都没有。按"primary 案例一律无 job"推断会把 M7 的证据抹成空缺、并让它的
+    `facts_after` 在抽取落库前就取投影（换掉判据时序）。驱动对每个 slot 都会先等 job 行出现
+    （上界 `_RUN_TIMEOUT_SECONDS`=300s）——真正无 job 的 M8/M9 四个 slot 白等 ~20 分钟。
     """
-    return case_id in _EXTRACTION_CASES
+    return _CASES_BY_ID[case_id].expects_extraction_job
 
 #: 每个案例除「实际主模型」这条基线判据外的专属判据（票面 §9.1 逐案例「两次都应满足」）。
 #:
@@ -276,6 +278,11 @@ class CaseDefinition:
 
     `required_active_text` 是 projected active constraint 里必须逐字出现的原文
     （M2 的 value 可含"记住这条约束："前缀，所以判据取**目标约束**而不是整句输入）。
+
+    `expects_extraction_job` 是**实测**出来的、逐案例的机械事实（不是从
+    `_EXTRACTION_CASES` / `_PRIMARY_CASES` 推断的）：这个案例的 run 会不会入队一条
+    B-lite 抽取 job。M1–M7 会（M7 虽由 session primary 执行，Round 5 证据里两次都有
+    job 行、`state=done`），M8/M9 不会。驱动按它决定要不要等那条 job 行。
     """
 
     case_id: str
@@ -284,6 +291,7 @@ class CaseDefinition:
     seed_active_constraint: str | None = None
     resume_choice: str | None = None
     required_active_text: str | None = None
+    expects_extraction_job: bool = True
 
     @property
     def active_text(self) -> str:
@@ -333,6 +341,7 @@ CASE_DEFINITIONS: tuple[CaseDefinition, ...] = (
         expected_behavior="调 request_constraint_resolution，不注册相反事实，选择前不继续受影响工作",
         seed_active_constraint=NO_NEW_DEPENDENCY,
         resume_choice="current_task_only",
+        expects_extraction_job=False,
     ),
     CaseDefinition(
         case_id="M9",
@@ -345,6 +354,7 @@ CASE_DEFINITIONS: tuple[CaseDefinition, ...] = (
         # 去掉更正前缀后的实质约束才是合法 candidate。Round 5 拿整句输入当期望值，把这条
         # 被指导要求的行为判成假负（实测两次都因此 FAIL，而同一文本在旧驱动下 PASS）。
         required_active_text="今后的任务可以按需要新增第三方依赖。",
+        expects_extraction_job=False,
     ),
 )
 
@@ -1891,7 +1901,7 @@ class _RealRunner:
         还没那一行。所以先等一行出现（有界 `_RUN_TIMEOUT_SECONDS`），再等它 `done`
         （有界 `_EXTRACTION_DRAIN_TIMEOUT_SECONDS`）；两个上界都到点就如实返回所见状态。
 
-        `expect_job=False`（M7/M8/M9，见 `case_expects_extraction_job`）**直接**返回缺席
+        `expect_job=False`（M8/M9，见 `case_expects_extraction_job`）**直接**返回缺席
         形状：这些案例压根不产生抽取 job，"等一行永不会出现的行"只有白等（上界 300s/slot）。
         """
         if not expect_job:

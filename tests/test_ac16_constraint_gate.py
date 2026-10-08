@@ -1989,16 +1989,21 @@ def test_partial_campaign_evidence_is_labelled_partial(driver, tmp_path):
 # ── Round 6：M7/M8/M9 不该等一个永不会出现的抽取 job ────────────────────────────
 
 
-def test_no_extraction_job_is_expected_for_primary_only_cases(driver):
-    """M7/M8/M9 由实际 session primary 执行，**不产生** B-lite 抽取 job。
+def test_only_m8_m9_skip_the_extraction_job_wait(driver):
+    """**只有 M8/M9** 不产生 B-lite 抽取 job；M7 有。
 
-    实测（Round 6 定点重跑的 memory-v2.db）：M1 两次各有一条 `memory-v2:<run_id>` job
-    行；M9 两次**一条都没有**。而驱动对每个 slot 都会先等 job 行出现（上界
-    `_RUN_TIMEOUT_SECONDS`=300s）——M8/M9 每个 slot 白等 5 分钟，整套 18 次里就是
-    **~45 分钟**纯等待。`_EXTRACTION_CASES` 已经声明了"谁才有抽取入口"，等不等必须
-    由它决定，不能所有案例一视同仁。
+    实测（Round 5 完整 campaign 的证据，`20261008T054419Z-6869dd6a`，每个 slot 都等过 job）：
+    **M7 两次都有 job 行且 `state=done`**，M8/M9 四次全无。所以判据不能按
+    `_PRIMARY_CASES`（M7/M8/M9 一起）取反——那会把 M7 也算成"永不出 job"。
+
+    M7 被算错的代价有两条，都不是"只是慢一点"：
+    ① `_extraction_evidence` 立刻返回缺席形状 ⇒ M7 证据里的 `extraction_job_id` /
+       `extraction_state` / `extraction_candidates` 全变 `None`/空，**已采到的实测证据被抹掉**；
+    ② 不再等 job `done` 再读 `facts_after` ⇒ M7 的 `candidate_not_registered` 可能在抽取
+       落库**之前**取投影，判据时序与 Round 5 不同 ⇒ 等于换了一套判据。
     """
-    for case_id in ("M7", "M8", "M9"):
+    assert driver.case_expects_extraction_job("M7") is True
+    for case_id in ("M8", "M9"):
         assert driver.case_expects_extraction_job(case_id) is False, case_id
     for case_id in ("M1", "M2", "M3", "M4", "M5", "M6"):
         assert driver.case_expects_extraction_job(case_id) is True, case_id
