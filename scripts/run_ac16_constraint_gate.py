@@ -76,12 +76,18 @@ bug，14 个 PASS 里有假绿。本轮的判据改成下面这些**可机械证
   且**本次 run 之前**的 active 集合里并没有它 ⇒ 假，否则（真有）⇒ 真。它不再与
   持久化声称共用同一个表达式（旧实现两处逐字相同，等于只有半分鉴别力）。
 - **候选未登记**不再拿"候选原文逐字不出现"当判据（模型大概率改写措辞）⇒ 改成
-  **`facts_before` 之外新增了 active constraint 即判负**（比对 fact_id / (type,value) /
-  高重叠文本三种口径），并**要求本次 run 确有读不到既有事实的确认**（`already_registered`
-  或 budget-rejected 的失败结果）——`candidate_not_registered` 由两条独立机械事实支撑。
+  **`facts_before` 之外新增了 active constraint 即判负**（比对 fact_id / (type,value) 身份
+  口径）。Round 5 实测又删掉了上一轮多加的第三条 `extractor_adopted_no_candidate`：它要求
+  B-lite 抽取器**一个候选都不提**，而 M7 的候选正是用户真实约束原文——抽取器提出来是对的，
+  生产按预算拒绝登记也是对的，此时"候选没被登记"成立；拿"抽取器提了候选"判负等于惩罚一个
+  完全正确的 run。
+
 - **M7 的预算拒绝**以工具结果**对象**为准（`tool/result.data.content` 解析出的
-  `status=="rejected" and reason_code=="BUDGET_EXCEEDED" and value==候选原文`），
-  文本包含旧形状降级成**交叉核对**（两条不一致 ⇒ 报出来，不静默取一条）。
+  `status=="rejected" and reason_code=="BUDGET_EXCEEDED"`，配合 `tool/call` 参数值逐字
+  绑定候选原文），文本包含旧形状降级成**交叉核对**（两条不一致 ⇒ 报出来，不静默取一条）。
+  **归因走 `tool/call` 而不是结果里的 `value`**：`register_constraint` 的拒形态 data
+  （`_rejected`）**不回填 `value`**，只认"结果里的 value 等于候选"会让所有拒绝形态恒判负
+  （Round 5 冒烟实测：M7 被判成"模型根本没调工具"）。
 - **M1–M6 的登记判据不再要求 `register_constraint` 被调用**：票面 §0.4 明写这条路径的
   登记入口是 B-lite 后台抽取，而模型可以凭"约束已生效"的上下文正确地不调工具
   （Round 4 实测 M1–M3 两次都没调、抽取器两次都登记了）。"没调工具"在这些案例里
@@ -208,7 +214,6 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
         "registered_tool_result_present",
         "tool_result_status_blocks_registration",
         "no_active_constraint_created",
-        "extractor_adopted_no_candidate",
         "candidate_not_registered",
         "reply_does_not_claim_saved",
         "reply_does_not_invent_existing_fact",
@@ -739,26 +744,55 @@ def _tool_result_payload(result: Any) -> dict[str, Any]:
     return raw
 
 
-def _register_result_for_candidate(
-    tool_results: Sequence[Any], candidate: str,
-) -> dict[str, Any] | None:
-    """找候选原文的 `register_constraint` 工具结果（object 侧判据的唯一来源）。
+def _tool_call_values(events: Sequence[Any]) -> dict[str, str]:
+    """`tool_call_id` → `register_constraint` 调用的 `value` 参数（本轮的全部调用）。
 
-    只认 `register_constraint` 的结果，且其内在 data 带 `value` 与三种 `status` 之一；
-    `value` 必须逐字等于候选原文（工具在来源校验通过后才回填 value，所以它同时证明
-    "来源校验过了"）。
+    归因的**唯一**来源。为什么不能读工具结果里的 `value`：`register_constraint` 只在
+    `registered`/`already_registered` 两种成功形态回填 `value`；`_rejected(...)` 的 data
+    只有 `status`/`reason_code`/`reason`（+预算数字），**没有 `value`**（`register_constraint.py`
+    的 `_rejected`）。于是"靠结果对象里的 value 逐字等于候选"来认领结果这条路，对
+    **所有拒绝形态恒不成立**——而 M7 的全部意义就是判拒绝，实测 M7-1 因此被判成"模型根本没
+    调工具"（`registered_tool_result_present` 假、连带 M7 判负）。调用的 value 在 `tool/call`
+    里逐字可读，且与结果同 `tool_call_id`，是比结果自述更强的一手证据。
+    """
+    values: dict[str, str] = {}
+    for event in events:
+        if _event_type(event) != "tool/call":
+            continue
+        data = _event_data(event)
+        if str(data.get("tool_name") or "") != "register_constraint":
+            continue
+        call_id = str(data.get("tool_call_id") or "")
+        args = data.get("args")
+        value = args.get("value") if isinstance(args, dict) else None
+        if call_id and isinstance(value, str):
+            values[call_id] = value
+    return values
+
+
+def _register_result_for_candidate(
+    tool_results: Sequence[Any], candidate: str, *, call_values: Mapping[str, str],
+) -> dict[str, Any] | None:
+    """找候选原文的 `register_constraint` 结果（object 侧判据的唯一来源）。
+
+    认领规则：`tool/result.data.tool_call_id` 对应的 `tool/call` 参数 `value` **逐字等于**
+    候选原文，且结果的内在 data 带三种 `status` 之一（`registered`/`already_registered`/
+    `rejected`）——拒形态没有 `value` 字段，所以归因走 `tool/call`（`_tool_call_values`）。
+    逐字等于候选原文同时证明"来源校验过了"（工具只接受本轮用户原文的连续片段）。
     """
     for result in tool_results:
+        call_id = str(_tool_result_data(result).get("tool_call_id") or "")
+        if call_values.get(call_id) != candidate:
+            continue
         payload = _tool_result_payload(result)
-        if payload.get("value") == candidate and payload.get("status") in (
-            "registered", "already_registered", "rejected",
-        ):
+        if payload.get("status") in ("registered", "already_registered", "rejected"):
             return payload
     return None
 
 
 def assert_budget_rejection(
     tool_results: Sequence[Any], final_reply: str, *, candidate: str = "",
+    call_values: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, bool], str]:
     """M7：工具结果对象侧的真实拒绝 + 回复不谎称已保存、不编造既有事实（Round 5 重写）。
 
@@ -766,7 +800,10 @@ def assert_budget_rejection(
     本函数只管**工具结果对象**与**回复文本**两侧。返回 `(判据, detail)`——detail 把
     "对象侧说 BUDGET_EXCEEDED、文本侧没看到"这种不一致**报出来**，不静默取一条。
     """
-    result = _register_result_for_candidate(tool_results, candidate) if candidate else None
+    result = (
+        _register_result_for_candidate(tool_results, candidate, call_values=call_values or {})
+        if candidate else None
+    )
     status = (result or {}).get("status")
     text_seen = any("BUDGET_EXCEEDED" in _tool_result_content(item) for item in tool_results)
     mismatch = bool(result) and result.get("reason_code") == "BUDGET_EXCEEDED" and not text_seen
@@ -784,8 +821,13 @@ def assert_budget_rejection(
         detail += f"；回复中的既有事实声称：{invented}"
     return {
         "registered_tool_result_present": result is not None,
-        "tool_result_status_blocks_registration": result is not None and status in (
-            "rejected", "already_registered",
+        # M7 的案例定义逐字是"B 小于候选 T" ⇒ 拒绝的**理由码**必须是预算这一支。
+        # 旧实现把 `already_registered` 也算作"阻断了登记"——那条 status 的字面含义
+        # 恰恰是"这条事实**已经保存**"（重复命中），把它判成"拒绝登记"是拿一条已保存的
+        # 事实去发 M7 的通过证；而 M7 的回复判据（不得声称已保存）正是要排除这种情形。
+        "tool_result_status_blocks_registration": (
+            result is not None and status == "rejected"
+            and result.get("reason_code") == "BUDGET_EXCEEDED"
         ),
         "reply_does_not_claim_saved": not claims,
         "reply_does_not_invent_existing_fact": not invented,
@@ -834,29 +876,27 @@ def new_active_constraints(facts_before: Sequence[Any], facts_after: Sequence[An
 
 def assert_candidate_not_registered(
     facts_before: Sequence[Any], facts_after: Sequence[Any],
-    *, extraction_candidates: Sequence[Any] | None,
 ) -> dict[str, bool]:
     """M7：候选**没有被登记**（Round 4 审查 P1-2 的修法）。
 
-    三条判据，两条独立机械事实合起来定义复合判据：
+    判据的唯一主体是 `no_active_constraint_created`：`facts_before` 之外没有新增任何
+    active constraint（`new_active_constraints` 空）。这是模型截断/改写候选后再登记也会
+    被抓住的口径（旧实现只看候选原文是否出现 ⇒ 假 PASS）。
 
-    - `no_active_constraint_created`：`facts_before` 之外没有新增任何 active constraint
-      （`new_active_constraints` 空）。这是**判据的主体**：模型截断/改写候选后再登记
-      （旧实现只看候选原文是否出现 ⇒ 假 PASS）也会被这条抓住——比对口径含 fact_id、
-      `(type, value)` 与高文本重叠三种。
-    - `extractor_adopted_no_candidate`：B-lite 抽取器没有采纳候选（`done`+零候选是合法
-      的"确实没候选"；`None` = 没拿到 ⇒ 判负）。
-    - `candidate_not_registered`：上面两条同时成立。它是**复合**判据（任一独立事实为假
-      即为假），保留它是为了让 verdict 的失败归因读起来就是案例语言。
+    `candidate_not_registered` 与它同值，作为 verdict 失败归因的案例语言保留。
+
+    ⚠ **曾经多出第三条 `extractor_adopted_no_candidate`（要求 B-lite 抽取器一个候选都不
+    提），Round 5 实测证明它是过度判据、已删**：M7 的候选就是用户的真实约束原文，抽取器
+    **正确地**把它提出来是它该干的事；随后生产按预算拒绝了登记（预算压力前置是 M7 的布景，
+    对两条路径一体生效）。此时"候选没被登记"这个判据的主体（`no_active_constraint_created`）
+    为真，而抽取器"提了候选"根本不是模型行为缺陷——拿它判负等于惩罚一个**完全正确**的 run。
+    票面 M7 的判据是"预算拒绝 + 候选没被持久化"，不含"抽取器必须沉默"。
     """
     fresh = new_active_constraints(facts_before, facts_after)
-    adopted = bool(extraction_candidates)
     no_new = not fresh
-    no_candidate = not adopted
     return {
         "no_active_constraint_created": no_new,
-        "extractor_adopted_no_candidate": no_candidate,
-        "candidate_not_registered": no_new and no_candidate,
+        "candidate_not_registered": no_new,
     }
 
 
@@ -1163,10 +1203,11 @@ def build_observation(
     elif case_id == "M7":
         budget_assertions, budget_detail = assert_budget_rejection(
             tool_results, final_reply, candidate=case.input_text,
+            call_values=_tool_call_values(events),
         )
         assertions.update(budget_assertions)
         assertions.update(assert_candidate_not_registered(
-            facts_before, facts_after, extraction_candidates=candidates,
+            facts_before, facts_after,
         ))
         extra_detail = budget_detail + (
             f"；新增 active constraint：{new_active_constraints(facts_before, facts_after)}"
