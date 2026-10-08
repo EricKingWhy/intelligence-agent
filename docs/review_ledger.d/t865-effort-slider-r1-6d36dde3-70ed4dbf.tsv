@@ -1,0 +1,1 @@
+2026-10-08	#865 双轴发现审查：Spec NEEDS-FIX（P2 wire mapping + P3 Tracker），Standards NEEDS-FIX（同一 P2）。唯一 finding 计数 P0/P1/P2/P3/P4=0/0/1/1/0；P2 后由 5964714e 修复。	6d36dde3bd417b165ac375cfe62a70f06ac78127..70ed4dbf28523ee46980e47f2355f08cf4c06af2
