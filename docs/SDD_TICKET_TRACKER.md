@@ -14,7 +14,7 @@
 
 ---
 
-> **当前状态（2026-10-08，#869 T0）**：#869「跨市场插件导入与适配规格合同」已完成并关闭；分支 `codex/issue-869-spec-contract`，规格提交 `9d2910c2989005d53a36a9a96921235a9ac23fa8`（基于 `d17bd34279ba64e5f051035e0fba7314a6c27eb1`）。PRD、Engineering Spec、ADR、术语表与 T0 票面已对齐，双轴独立审查无发现，文档差异检查通过；GitHub issue 关闭评论已记录。纯文档票未运行产品测试；未 push、未开 PR、未合并。父票 #868 仍 OPEN，后续插件安装/启停与滑条适配属于 T1–T10，不计入 T0 完成。明细见 `docs/phase_status/2026-10.md` 的 #869 T0 条目。
+> **发布状态（2026-10-09，#869 T0）**：#869「跨市场插件导入与适配规格合同」已完成并关闭；原始内容提交 `9d2910c2989005d53a36a9a96921235a9ac23fa8`（基于 `d17bd34279ba64e5f051035e0fba7314a6c27eb1`）。发布分支 `codex/issue-869-spec-contract-publish` 已推送，PR [#880](https://github.com/EricKingWhy/intelligence-agent/pull/880) 已创建；在 2026-10-09 00:09（Asia/Shanghai）记录的 head `eb05ca0a93a9b72e58f30f3e861e93ddf5cdeafd` 上，GitHub 必需 `gate0` 与 gitleaks 成功，PR 级 Chromium E2E smoke 仍在运行，后续状态以 PR 为准。纯文档发布；本地 Gate-0 收据见 `docs/gate/44d22a9017ae2674eb083e1ea0d62484dd8ad1b8.json`，完整本地验证结果与残余见本 Tracker 的 #869 发布记录和月档。父票 #868 仍 OPEN，插件安装/启停、MCP/Skill 生命周期和滑条适配仍属后续 T1–T10。
 
 > **当前状态（2026-10-08，#832）**：实现提交 0db3881a；审查与状态提交 7e1de14e；Gate-0 收据提交 ece0fb4e；发布分支 codex/issue-832-live-gate-docker-cli-pr。采用 Python 标准库 shutil.which 预检 Docker CLI 并使用解析出的可执行路径，来源复核与复用判定见 2026-10 月度归档。相关 CLI 测试在普通 PATH 与排除 Docker CLI 的进程 PATH 下各 8 passed，Ruff 通过。两轴独立审查完成；审查覆盖闸门 exit 0。Gate-0 6/6 PASS（收据对应 7e1de14e），以 9e1c065b 为基点的差异范围复跑亦 6/6 PASS、覆盖 6 个改动文件。PR #839（Closes #832）于 2026-10-08 合入 main，merge commit afa4273371cf7bed2cb69c6d6478dcbbc47081a8；GitHub 必需 gate0 CI 45s PASS，issue 已自动 CLOSED 并移除 in-progress；最终交付评论 issuecomment-6043340255。完整 pytest 在 Windows 收集阶段有既有 os.geteuid() 错误，未记作全绿；是否另票修复待用户裁决。
 
@@ -7620,3 +7620,10 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **验收交叉核对**：① 明确插件包导入、项目/全局范围、锁定/显式升级/回退、项目显式启用和冲突选择；② 标准 Skill 整目录与 MCP tools 的首版范围及 OAuth 等暂缓边界已写入规格；③ DSH/Pi 插件采用逐插件薄适配，滑条作为首个完整 UI 样板，完整启用受用户可见功能兼容门禁约束；④ 信任边界、现有 Tool 权限与账本、环境凭据、重启提示及缺口报告均有对应合同。ADR 0052 记录七项决策及与 PRD 决策/用户故事的映射。
 - **验证与审查**：Correctness/Spec 与 Standards 两轴独立复审均无发现；`git show --check` 与 `git diff --check main...HEAD` 通过。此票只改文档，未运行产品测试。GitHub #869 票面与本地 T0 文件一致，父 #868 描述与本地 PRD 一致。
 - **交付边界**：GitHub #869 已关闭，交付评论为 [issuecomment-6062868721](https://github.com/EricKingWhy/intelligence-agent/issues/869#issuecomment-6062868721)，并移除 `in-progress` 标签；没有 push、PR 或 merge。插件安装器、生命周期、兼容性报告、MCP/Skill 导入和滑条运行时适配仍由父 PRD 下的后续票负责。
+
+
+## #869 T0 发布记录（2026-10-09 · PR #880）
+
+- **发布**：`codex/issue-869-spec-contract-publish` 已推送，PR [#880](https://github.com/EricKingWhy/intelligence-agent/pull/880) 已创建；记录时 head 为 `eb05ca0a93a9b72e58f30f3e861e93ddf5cdeafd`，base 为 `100a4ff3430666ee3a1b9c41ce4f80c80358e4d3`。
+- **范围**：产品代码、测试、Web、配置和 scripts 相对 `origin/main` 的差异为空；仅发布文档与 Gate-0 收据。#869 原始内容两轴独立审查和覆盖闸门已通过。
+- **门禁与残余**：本地 Gate-0 收据 `docs/gate/44d22a9017ae2674eb083e1ea0d62484dd8ad1b8.json` 为 6/6 PASS。pytest、Vitest、完整 Playwright 的真实结果和未闭合环境问题见 `docs/phase_status/2026-10.md` 的 #869 发布记录；未把本地全量验证描述为全绿。PR head 的 GitHub 状态以 #880 页面为准。
