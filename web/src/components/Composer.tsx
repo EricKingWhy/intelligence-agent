@@ -13,6 +13,7 @@ import { modKey } from '../lib/platform';
 import { toolScopeNote } from '../lib/agentProfileScope';
 import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
+import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
@@ -64,6 +65,7 @@ interface Props {
   /** GET /api/reasoning-efforts 清单。空 → 隐藏控件。 */
   reasoningEfforts?: CatalogEntry[];
   selectedReasoningEffort?: string | null;
+  reasoningEffortProjection?: ActiveFallbackModelProjection | null;
   onReasoningEffortChange?: (id: string | null) => void;
   // ── #426/#536：新建会话的预算入口（turns / total_tokens / deadline_at，单入口
   //    popover——BudgetPicker）。各维草稿是输入原样字符串，判形/换算在映射层
@@ -114,6 +116,7 @@ export const Composer = memo(function Composer({
   onAgentProfileChange,
   reasoningEfforts = [],
   selectedReasoningEffort = null,
+  reasoningEffortProjection = null,
   onReasoningEffortChange,
   budgetRunTurns,
   onBudgetRunTurnsChange,
@@ -302,17 +305,21 @@ export const Composer = memo(function Composer({
   const currentModel = selectedModel === null
     ? models.find((model) => model.default)
     : models.find((model) => model.name === selectedModel);
+  const effortModel = reasoningEffortProjection ? reasoningEffortProjection.model : currentModel;
   const reasoningEffortCapability =
-    currentModel?.isAvailable === false ? undefined : currentModel?.reasoningEffort;
+    effortModel?.isAvailable === false ? undefined : effortModel?.reasoningEffort;
   const supportedEffortIds = new Set(reasoningEffortCapability?.supported ?? []);
   const modelReasoningEfforts = reasoningEffortCapability
     ? reasoningEfforts.filter((effort) => supportedEffortIds.has(effort.id))
     : [];
-  const effectiveReasoningEffort = modelReasoningEfforts.some(
-    (effort) => effort.id === selectedReasoningEffort,
-  )
-    ? selectedReasoningEffort
-    : null;
+  const projectedDefault = reasoningEffortCapability?.default ?? null;
+  const effectiveReasoningEffort = reasoningEffortProjection
+    ? modelReasoningEfforts.some((effort) => effort.id === projectedDefault)
+      ? projectedDefault
+      : null
+    : modelReasoningEfforts.some((effort) => effort.id === selectedReasoningEffort)
+      ? selectedReasoningEffort
+      : null;
   const selectedEffortIndex = modelReasoningEfforts.findIndex(
     (effort) => effort.id === effectiveReasoningEffort,
   );
@@ -497,6 +504,15 @@ export const Composer = memo(function Composer({
               onModelChange={onModelChange ?? (() => {})}
               disabled={locked}
             />
+            {reasoningEffortProjection && (
+              <span
+                className="composer-fallback-effort-note"
+                role="status"
+                title={`本轮已切换到备用模型 ${reasoningEffortProjection.modelName}`}
+              >
+                {reasoningEffortCapability ? '本轮备用模型默认档' : '本轮备用模型 · Provider 默认'}
+              </span>
+            )}
             {/* #201：三个档位下拉合并为同一个 OptionPicker——同一份实现、同一份视觉、
                 同一套 ARIA（此前三处手抄 + 十条不一致）。
                 ⚠ `aria-label` **刻意维持原值的中英混用**（`权限模式` / `Agent Profile` /
@@ -561,18 +577,21 @@ export const Composer = memo(function Composer({
             />
             <OptionPicker
               ariaLabel="Reasoning Effort"
-              title="推理深度选哪一档？"
+              title={reasoningEffortProjection ? '备用模型的推理默认档' : '推理深度选哪一档？'}
               options={toCatalogOptions(modelReasoningEfforts, catalogIcon)}
               value={effectiveReasoningEffort}
-              onChange={onReasoningEffortChange ?? (() => {})}
+              onChange={(id) => onReasoningEffortChange?.(id)}
               icon={Brain}
               currentTone={reasoningEffortTone}
+              footer={reasoningEffortProjection && reasoningEffortCapability
+                ? `本轮显示备用模型 ${reasoningEffortProjection.modelName} 的默认档位；运行结束后恢复主模型选择。`
+                : undefined}
               customContent={
                 <ReasoningEffortSlider
                   options={modelReasoningEfforts}
                   value={effectiveReasoningEffort}
                   defaultValue={reasoningEffortCapability?.default ?? null}
-                  disabled={locked}
+                  disabled={locked || reasoningEffortProjection !== null}
                   onChange={(id) => onReasoningEffortChange?.(id)}
                 />
               }

@@ -17,6 +17,10 @@ class ConfigError(Exception):
     """配置错误（未知 provider、缺少必填项等）。"""
 
 
+class UnsupportedReasoningEffort(ConfigError):
+    """A requested reasoning level is not declared for the selected model."""
+
+
 # 各厂商 OpenAI 兼容端点与默认模型。
 #
 # Phase 2（SDD 03 §16 ModelOption）：preset 可携带能力位元数据——
@@ -359,6 +363,21 @@ class ModelConfig:
     def get_secret_value(self) -> str:
         """取明文 key（仅 SDK 请求边界使用）。"""
         return self.api_key.get_secret_value()
+
+    def validate_reasoning_effort(
+        self, effort: str,
+    ) -> ReasoningEffortCapability:
+        """Validate a user-selected level before runtime construction or side effects."""
+        capability = self.reasoning_effort
+        if capability is None:
+            raise UnsupportedReasoningEffort(
+                f"model {self.model_name!r} has no reasoning_effort declaration"
+            )
+        if effort not in capability.supported:
+            raise UnsupportedReasoningEffort(
+                f"model {self.model_name!r} does not support reasoning_effort {effort!r}"
+            )
+        return capability
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "ModelConfig":

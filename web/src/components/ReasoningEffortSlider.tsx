@@ -64,11 +64,11 @@ function colorAt(progress: number): string {
   return mixColor(VIOLET, DEEP_VIOLET, (progress - 2 / 3) * 3);
 }
 
-function toneAt(index: number, progress: number): 'default' | 'blue' | 'violet' | 'deep' {
-  if (index === 0) return 'default';
-  if (progress <= 1 / 3) return 'blue';
-  if (progress <= 2 / 3) return 'violet';
-  return 'deep';
+function toneAt(optionIndex: number, optionCount: number): 'default' | 'blue' | 'violet' | 'deep' {
+  if (optionIndex < 0) return 'default';
+  if (optionIndex === 0) return 'blue';
+  if (optionIndex === optionCount - 1) return 'deep';
+  return 'violet';
 }
 
 function offsetAt(progress: number): string {
@@ -92,14 +92,18 @@ export function ReasoningEffortSlider({
   const selectedIndex = selectedOptionIndex < 0 ? 0 : selectedOptionIndex + 1;
   const lastIndex = labels.length - 1;
   const progress = lastIndex > 0 ? selectedIndex / lastIndex : 0;
-  const energyPosition = Math.min(1, Math.max(0, (progress - 1 / 3) / (2 / 3)));
-  const energy = energyPosition * energyPosition * (3 - 2 * energyPosition);
+  const effortProgress = selectedOptionIndex < 0
+    ? 0
+    : options.length > 1
+      ? selectedOptionIndex / (options.length - 1)
+      : 0;
+  const energy = effortProgress * effortProgress * (3 - 2 * effortProgress);
   const currentLabel = labels[selectedIndex] ?? '默认';
   const currentValueLabel =
     selectedIndex === 0 && defaultOption
       ? `${currentLabel} · ${defaultOption.display_name}`
       : currentLabel;
-  const tone = toneAt(selectedIndex, progress);
+  const tone = toneAt(selectedOptionIndex, options.length);
   const selectedOption = selectedOptionIndex >= 0 ? options[selectedOptionIndex] : null;
   const valueText =
     selectedIndex === 0
@@ -112,7 +116,7 @@ export function ReasoningEffortSlider({
   const visualStyle = {
     '--effort-fill': offsetAt(progress),
     '--effort-energy': energy.toFixed(3),
-    '--effort-color': colorAt(progress),
+    '--effort-color': colorAt(effortProgress),
   } as SliderStyle;
 
   const handleChange = (event: ChangeEvent<HTMLInputElement>) => {

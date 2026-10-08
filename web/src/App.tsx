@@ -67,6 +67,7 @@ import {
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { modelChangeTarget } from './lib/modelSelection';
+import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
 import type { ConstraintInputAnswer, ToolCall, PresetTask, AgentEvent, UndeliveredInput } from './types';
@@ -174,6 +175,10 @@ export default function App() {
   // selectedModel=null = 默认链（提交不带 model 字段，默认链行为不变）。
   const [models, setModels] = useState<ModelCatalogEntry[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const selectedModelRef = useRef(selectedModel);
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
   const fetchModels = useCallback(async () => {
     try {
       setModels(await getModels());
@@ -531,6 +536,7 @@ export default function App() {
     }),
     [selectedModel, selectedPermissionMode, selectedAgentProfile, selectedReasoningEffort],
   );
+  const reasoningEffortProjection = projectActiveFallbackModel(conversation, models);
 
   // #426：新建会话的预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
   // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。
@@ -779,6 +785,10 @@ export default function App() {
       setModels(modelList);
       setSelectedModel((prev) => (prev && modelList.some((m) => m.name === prev) ? prev : null));
       const defaultModel = modelList.find((model) => model.default);
+      const currentModelName = selectedModelRef.current;
+      const currentModel = currentModelName === null
+        ? defaultModel
+        : modelList.find((model) => model.name === currentModelName) ?? defaultModel;
       setPermissionModes(modes);
       setSelectedPermissionMode((prev) => (prev && modes.some((m) => m.id === prev) ? prev : null));
       setAgentProfiles(profiles);
@@ -787,7 +797,8 @@ export default function App() {
       setSelectedReasoningEffort((prev) => (
         prev &&
         efforts.some((effort) => effort.id === prev) &&
-        defaultModel?.reasoningEffort?.supported.includes(prev)
+        currentModel?.isAvailable !== false &&
+        currentModel?.reasoningEffort?.supported.includes(prev)
           ? prev
           : null
       ));
@@ -1402,6 +1413,7 @@ export default function App() {
                     onAgentProfileChange={setSelectedAgentProfile}
                     reasoningEfforts={reasoningEfforts}
                     selectedReasoningEffort={selectedReasoningEffort}
+                    reasoningEffortProjection={reasoningEffortProjection}
                     onReasoningEffortChange={setSelectedReasoningEffort}
                     /* #426：新建会话的预算入口（会话内 Composer 不显示，见组件注释） */
                     budgetRunTurns={budgetRunTurnsDraft}

@@ -292,6 +292,9 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   await expect(page.locator('.picker-item')).toHaveCount(0);
   await expect(slider).toBeFocused();
   await page.keyboard.press('ArrowRight');
+  await expect(slider).toHaveValue('1');
+  await expect(page.locator('.reasoning-effort-slider__current')).toHaveAttribute('data-tone', 'blue');
+  await expect(effortTrigger.locator('.composer-trigger-current')).toHaveAttribute('data-tone', 'blue');
   await page.keyboard.press('ArrowRight');
   await expect(slider).toHaveValue('2');
 
@@ -311,6 +314,133 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   // #201：多选 context provider 控件已删除，UI 上没有任何入口能设这个键 →
   // 断言它不出现在 payload（后端仍接受程序化显式传值，见 web/src/lib/amend.ts）。
   expect(body.context_providers).toBeUndefined();
+});
+
+test('Reasoning Effort refresh keeps a value supported by the selected model', async ({ page }) => {
+  let modelCatalogReads = 0;
+  page.on('response', (response) => {
+    if (new URL(response.url()).pathname === '/api/models') modelCatalogReads += 1;
+  });
+
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    permissionModes: PERMISSION_MODES,
+    agentProfiles: AGENT_PROFILES,
+    reasoningEfforts: REASONING_EFFORTS,
+    models: [DEFAULT_REASONING_MODEL, REASONING_MODEL],
+    onSessionPost: (route) => route.fulfill({
+      status: 422,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'unknown model' }),
+    }),
+  });
+
+  await page.goto('/');
+  const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
+  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await expect(modelTrigger).toBeVisible();
+
+  await modelTrigger.click();
+  const openaiProvider = page.locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: 'openai' }).first();
+  await openaiProvider.hover();
+  await page.locator('[role="menuitemradio"]', { hasText: 'effort-model' }).first().click();
+  await expect(modelTrigger).toContainText('effort-model');
+
+  await effortTrigger.click();
+  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  await expect(slider).toBeVisible();
+  await expect(slider).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(slider).toBeVisible();
+  await page.keyboard.press('ArrowRight');
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveAttribute('aria-valuetext', /Deep/);
+  await page.keyboard.press('Escape');
+
+  await page.getByLabel('Agent 任务').fill('触发模型目录刷新');
+  const modelCatalogReadsBeforeSend = modelCatalogReads;
+  await page.getByLabel('发送').click();
+  await expect.poll(() => modelCatalogReads).toBe(modelCatalogReadsBeforeSend + 1);
+  await expect(effortTrigger).toContainText('Deep');
+});
+
+test('active fallback projects its own default without replacing the primary preference', async ({ page }) => {
+  const primaryModel = {
+    ...REASONING_MODEL,
+    name: 'primary-model',
+    model: 'primary-model-id',
+    default: true,
+  };
+  const fallbackModel = {
+    name: 'fallback-model',
+    provider: 'fallback-provider',
+    model: 'fallback-model-id',
+    default: false,
+    reasoning_effort: {
+      supported: ['minimal'],
+      default: 'minimal',
+      wire_mapping: { minimal: 'low' },
+    },
+  };
+  const sessionId = 'e2e-session-fallback-effort';
+  const runId = 'e2e-run-fallback-effort';
+  const frames = [
+    { type: 'session/started', seq: 1, session_id: sessionId, run_id: runId, time: T },
+    { type: 'run/started', data: { turn_index: 1 }, seq: 2, session_id: sessionId, run_id: runId, time: T },
+    { type: 'user/message', data: { content: 'active fallback' }, seq: 3, session_id: sessionId, run_id: runId, step_id: 1, time: T },
+    { type: 'model/fallback', data: { from_model: 'primary-model-id', to_model: 'fallback-model-id', reason: 'TimeoutError' }, seq: 4, session_id: sessionId, run_id: runId, step_id: 1, time: T },
+  ];
+  const completed = {
+    type: 'run/completed', data: {}, seq: 5,
+    session_id: sessionId, run_id: runId, time: T,
+  };
+
+  await routeApi(page, {
+    sessions: [{
+      session_id: sessionId,
+      event_count: frames.length + 1,
+      first_event_time: T,
+      last_event_time: T,
+      first_user_message: 'active fallback',
+      trace_id: null,
+      trace_url: null,
+    }],
+    events: frames.slice(0, 3),
+    models: [primaryModel, fallbackModel],
+    reasoningEfforts: REASONING_EFFORTS,
+    onWs: () => ({
+      events: frames.slice(0, 3),
+      frames: [frames[3], completed],
+      hasActiveRun: true,
+      frameDelayMs: 750,
+      ending: 'done',
+    }),
+  });
+
+  await page.goto('/');
+  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await expect(effortTrigger).toBeVisible();
+  await effortTrigger.click();
+  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  await expect(slider).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await expect(effortTrigger).toContainText('Deep');
+  await page.keyboard.press('Escape');
+
+  await page.locator('.session-item').first().click();
+  await expect(effortTrigger).toContainText('Minimal');
+  await effortTrigger.click();
+  await expect(slider).toBeDisabled();
+  await expect(slider).toHaveAttribute('aria-valuetext', /Minimal/);
+  const fallbackTrack = page.locator('.reasoning-effort-slider__track');
+  await expect(fallbackTrack).toHaveAttribute('data-energy', 'off');
+  expect(await fallbackTrack.evaluate((track) => (track as HTMLElement).style.getPropertyValue('--effort-color')))
+    .toBe('#4d93f8');
+  await expect(slider).toBeEnabled();
+  await expect(effortTrigger).toContainText('Deep');
+  await expect(slider).toHaveAttribute('aria-valuetext', /Deep/);
 });
 
 test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出 N/M', async ({ page }) => {

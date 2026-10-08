@@ -6382,6 +6382,14 @@ button.json-row {
   gap: var(--space-xs);
   padding: 0 var(--space-sm) var(--space-sm);
 }
+.composer-fallback-effort-note {
+  max-width: min(100%, 340px);
+  padding: 4px 6px;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 /* #426：新建会话的预算入口（一维 turns）。与档位 picker 同行同高——它是同级的
    "本次运行条件"设置，不是全局设置页的成员；数值窄框 + 前置标签，留空即默认。 */
 .composer-budget {

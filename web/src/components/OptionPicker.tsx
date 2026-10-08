@@ -234,7 +234,14 @@ export function OptionPicker({
           onOpenAutoFocus={
             customContent === undefined
               ? focusPickerListOnOpen(listRef, searchHidden)
-              : undefined
+              : (event) => {
+                  const slider = (event.currentTarget as HTMLElement).querySelector<HTMLElement>(
+                    '[role="slider"]',
+                  );
+                  if (!slider) return;
+                  event.preventDefault();
+                  requestAnimationFrame(() => slider.focus({ preventScroll: true }));
+                }
           }
         >
           <Command

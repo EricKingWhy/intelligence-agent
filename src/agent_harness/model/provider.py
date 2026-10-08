@@ -93,16 +93,7 @@ def create_chat_model(
         "max_retries": 0,
     }
     if reasoning_effort is not None:
-        capability = getattr(config, "reasoning_effort", None)
-        if capability is None:
-            raise ConfigError(
-                f"model {config.model_name!r} has no reasoning_effort declaration"
-            )
-        if reasoning_effort not in capability.supported:
-            raise ConfigError(
-                f"model {config.model_name!r} does not support reasoning_effort "
-                f"{reasoning_effort!r}"
-            )
+        capability = config.validate_reasoning_effort(reasoning_effort)
         wire = capability.wire_mapping.get(reasoning_effort)
         if wire not in WIRE_REASONING_EFFORTS:
             raise ConfigError(

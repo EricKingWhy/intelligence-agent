@@ -118,7 +118,24 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
         </button>
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content className="picker-content" side="top" align="end" sideOffset={6}>
+        <Menu.Content
+          className="picker-content"
+          side="top"
+          align="end"
+          sideOffset={6}
+          onCloseAutoFocus={(event) => {
+            const content = event.currentTarget;
+            const focused = document.activeElement;
+            if (
+              content instanceof HTMLElement &&
+              focused &&
+              focused !== document.body &&
+              !content.contains(focused)
+            ) {
+              event.preventDefault();
+            }
+          }}
+        >
           <div className="picker-head">用哪个模型？</div>
           {/* 一级：「默认链」是唯一的一级可选项（= 提交 null，后端按默认链行为）。 */}
           <Menu.Item
