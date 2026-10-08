@@ -246,6 +246,15 @@ export interface ApiMock {
   onCapabilitiesGet?: (route: Route) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/messages（续聊入口；空闲会话 → 同形 SSE） */
   onMessagesPost?: (route: Route) => Promise<void> | void;
+  // ── #825（MM-04）附件（POST 上传 / GET 受控读回）──
+  /** `POST /api/sessions/{id}/attachments?name=` 的拦截口（计数 / 造 413·422）。
+   *  缺省 = 记住字节并回 `sha256:<64 hex>` 回执（形状同 `AttachmentUploadResponse`）。 */
+  onAttachmentPost?: (route: Route) => Promise<void> | void;
+  /** `GET /api/sessions/{id}/attachments/{aid}/content` 的拦截口；返回 true = 已处理。
+   *  缺省 = **只有**被本会话某条 `user/message` 引用的 id 才回字节，其余 404——
+   *  与真后端的授权闸门同形（#823 / MM-02），所以"发送前的草稿图不能走受控读回"
+   *  这条在 e2e 里也是真的。 */
+  onAttachmentContentGet?: (route: Route, attachmentId: string) => Promise<boolean> | boolean;
   /** POST /api/sessions/{id}/queue/flush（「立即发送全部」）。缺省 404——该端点
    *  此前没有 mock（也无人调用）。 */
   onFlushPost?: (route: Route) => Promise<void> | void;
@@ -493,6 +502,12 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
   const memorySettings = { extraction_enabled: true, recall_enabled: true, ...mock.memorySettings };
   /** 带 cwd 建会话时**真的发生过**的帧（供 GET /events 回读：见该分支注释）。 */
   const sessionEvents = new Map<string, FrameSpec[]>();
+  /** #825（MM-04）：附件字节 + 引用关系（语义对齐 `web/attachments.py`）。
+   *  读写两个端点**共用**这一份状态：读端点只在 id 被某条 `user/message` 引用时才
+   *  给字节——这样"发送前草稿拿不到受控读回"与"发送后刷新仍能渲染"这两条
+   *  在 e2e 里就是 mock 的真行为，而不是靠断言绕过去。 */
+  const attachmentState = new Map<string, { bytes: Buffer; mediaType: string }>();
+  let attachmentSeq = 0;
   /** `GET /api/sessions` 的次数（`sessionsListFailAfter` 用；见该分支注释）。 */
   let listCalls = 0;
 
@@ -761,6 +776,47 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
     }
     if (path === '/api/models') {
       return route.fulfill({ status: 200, body: JSON.stringify({ models: mock.models ?? [] }), contentType: 'application/json' });
+    }
+    // ── #825（MM-04）附件上传 / 受控读回（语义对齐 `web/attachments.py`）──
+    // 上传：真后端从**字节**判定 media type 并要求与声明一致、按内容寻址返回 id，
+    // 这里同样回 `sha256:<64 hex>` 形状（读端点对别的形状回 422，mock 不能比真后端松）。
+    const attachmentUploadMatch = /^\/api\/sessions\/([^/]+)\/attachments$/.exec(path);
+    if (attachmentUploadMatch && req.method() === 'POST') {
+      if (mock.onAttachmentPost) return mock.onAttachmentPost(route);
+      const bytes = req.postDataBuffer();
+      if (bytes === null || bytes.length === 0) {
+        return json(route, { detail: 'attachment body is empty' }, 422);
+      }
+      const mediaType = req.headers()['content-type'] ?? 'application/octet-stream';
+      const id = `sha256:${String(++attachmentSeq).padStart(64, '0')}`;
+      attachmentState.set(id, { bytes, mediaType });
+      const name = new URL(req.url()).searchParams.get('name');
+      return json(route, {
+        attachment_id: id,
+        media_type: mediaType,
+        bytes: bytes.length,
+        width: 1,
+        height: 1,
+        name,
+      });
+    }
+    const attachmentContentMatch = /^\/api\/sessions\/([^/]+)\/attachments\/([^/]+)\/content$/.exec(path);
+    if (attachmentContentMatch && req.method() === 'GET') {
+      const sid = decodeURIComponent(attachmentContentMatch[1]);
+      const id = decodeURIComponent(attachmentContentMatch[2]);
+      if (mock.onAttachmentContentGet && (await mock.onAttachmentContentGet(route, id))) return;
+      const stored = attachmentState.get(id);
+      // 授权闸门：未被本会话某条 `user/message` 引用 ⇒ 同形 404（"不存在 / 别的会话 /
+      // 未引用"三种情形不可区分——真后端刻意如此，不泄露存在性）。
+      const referenced = (sessionEvents.get(sid) ?? mock.events ?? []).some((f) => {
+        if (f.type !== 'user/message') return false;
+        const ids: unknown = f.data?.['attachments'];
+        return Array.isArray(ids) && ids.includes(id);
+      });
+      if (stored === undefined || !referenced) {
+        return json(route, { detail: `attachment '${id}' 不在会话 '${sid}' 的命名空间里` }, 404);
+      }
+      return route.fulfill({ status: 200, contentType: stored.mediaType, body: stored.bytes });
     }
     // ── Phase 2b Composer control row（Ticket F1/B1）──
     if (path === '/api/permission-modes') {
