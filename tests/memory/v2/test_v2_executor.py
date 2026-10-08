@@ -106,17 +106,35 @@ def test_formation_prompt_requires_procedure_fields_to_be_strings():
     ) in _FORMATION_PROMPT
 
 
-def test_formation_prompt_distinguishes_episodic_decisions_from_semantic_facts():
-    assert "Semantic memories represent stable facts, preferences, profiles, project facts, " \
-        "constraints, or accepted corrections" in _FORMATION_PROMPT
-    assert "Episodic memories are reusable accounts of a specific situation, action or " \
-        "decision, outcome, and lesson" in _FORMATION_PROMPT
-    assert "as episodic when future planning needs to remember what happened and why" \
-        in _FORMATION_PROMPT
-    assert "do not classify that decision as semantic only because it produced a stable state" \
-        in _FORMATION_PROMPT
-    assert "stays semantic even when learned during a conversation" in _FORMATION_PROMPT
-    assert "Do not infer missing events or lessons" in _FORMATION_PROMPT
+@pytest.mark.asyncio
+async def test_formation_request_distinguishes_events_from_enduring_project_choices(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "Use episodic when future planning needs the specific situation, decision event, "
+        "outcome, and lesson"
+    ) in call.system_prompt
+    assert (
+        "Use semantic for an enduring project choice, configuration, or constraint even "
+        "when the user included how or why it was selected"
+    ) in call.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_formation_request_preserves_ordered_procedure_details(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "For procedural memories, preserve every user-stated step in order, including its "
+        "action, object, and boundary; do not compress the procedure into a higher-level "
+        "summary. Keep the success condition supported by cited evidence."
+    ) in call.system_prompt
 
 
 def test_adjudication_prompt_never_replaces_concrete_values_in_refined_content():
