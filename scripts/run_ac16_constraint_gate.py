@@ -19,7 +19,7 @@ Milvus/embedding 预检 + SQLite 每例一库），判据全是 Memory V2 的写
 `${...}` 源别名、失败保留），本脚本照搬其口径而不照搬其执行器——正是这次重构的教训：
 为复用而共享一个错的执行器，等于把两套语义搅在一起。
 
-## 18 次怎么算
+## 18 次怎么跑
 
 - M1–M6：一次成功 run 后由 **B-lite**（`memory.primary` 角色、durable job 内的一次有界
   抽取）判定写/不写；`register_constraint` 主模型调用只作为附带观测（B-lite 才是票面
@@ -29,11 +29,14 @@ Milvus/embedding 预检 + SQLite 每例一库），判据全是 Memory V2 的写
   `/resume` 回答（M8 `current_task_only`、M9 `replace_persistently`）并断言答案落盘与
   永久替换语义。
 
-## 本轮（Round 1）不跑真实模型
+真实执行面（`_RealRunner`）走生产 `create_app` 的 ASGI 入口 + `TestClient` 等价通道，
+消费真实模型（`mimo`/`mimo-v2.6-flash`）与生产 tool registry / executor。
 
-本脚本的**确定性逻辑**（案例定义 / verdict / 证据 schema / §10.2 重跑）由
-`tests/test_ac16_constraint_gate.py` 钉死。真实执行面（`_RealRunner`）需要模型凭证，
-按 `--dry-run` 只打印计划、不发起任何模型请求。
+## 确定性逻辑与真实执行的边界
+
+`tests/test_ac16_constraint_gate.py` 钉死**确定性**部分（案例定义 / verdict / 证据
+schema / §10.2 重跑策略 / 凭证来源），不需要模型凭证即可复跑。真实执行面（`_RealRunner`）
+需要 `MODEL_API_KEY`；无凭证时按 `--dry-run` 只打印 18 次计划、`--no-write` 不发请求。
 
 ## 凭证：`MODEL_API_KEY` 直传优先，绝不落盘
 
@@ -71,7 +74,10 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+import tempfile
+import time
+import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,6 +114,13 @@ EXAMPLE_ENV_FILE = _REPO_ROOT / ".env.example"
 
 #: §9.1「测试模型为部署实际会话主模型」——文件型凭证的 fallback 注入点（有直传时可不用）。
 DEFAULT_ENV_FILE_ENV = "AC16_ENV_FILE"
+
+#: 单个 run 等的上限（秒）。超过就抛 TimeoutError，折成该槽位的失败观测——不静默跳过。
+_RUN_TIMEOUT_SECONDS = 300.0
+#: 等 run 终态的轮询间隔（秒）。
+_POLL_INTERVAL_SECONDS = 0.5
+#: B-lite 抽取 job 的 drain 上限（秒）。抽取是 job 内一次有界模型调用（工具超时 20s）。
+_EXTRACTION_DRAIN_TIMEOUT_SECONDS = 120.0
 
 #: 依赖登记入口的案例（M1–M6）：其写/不写由 B-lite 抽取投影判定。
 _EXTRACTION_CASES = frozenset({"M1", "M2", "M3", "M4", "M5", "M6"})
@@ -157,12 +170,16 @@ _CASE_ASSERTIONS: dict[str, tuple[str, ...]] = {
         "no_register_constraint_call",
         "active_projection_unchanged_before_answer",
         "selected_answer_recorded_once",
+        "run_resumed_in_same_run",
+        "persistent_choice_superseded_old",
     ),
     "M9": (
         "run_paused_user_input",
         "card_has_exact_old_and_new",
         "no_register_constraint_call",
         "active_projection_unchanged_before_answer",
+        "selected_answer_recorded_once",
+        "run_resumed_in_same_run",
         "persistent_choice_superseded_old",
     ),
 }
@@ -331,22 +348,11 @@ class CaseVerdict:
         return f"{self.case_id}-{self.attempt}"
 
 
-def case_passes(observation: Observation) -> bool:
+def case_verdict(observation: Observation) -> CaseVerdict:
     """机械判定：缺一条必需判据 = 未证实（不是"没标 False 就算过"）。
 
     fail-closed 三处：必需判据缺失按 False；多给的无关键不参与；空观测整条判负。
     """
-    return all(observation.assertions.get(name, False) for name in required_assertions(observation.case_id))
-
-
-def failed_assertions(observation: Observation) -> tuple[str, ...]:
-    return tuple(
-        name for name in required_assertions(observation.case_id)
-        if not observation.assertions.get(name, False)
-    )
-
-
-def case_verdict(observation: Observation) -> CaseVerdict:
     outcomes: list[AssertionOutcome] = []
     failed: list[str] = []
     for name in required_assertions(observation.case_id):
@@ -399,18 +405,6 @@ def _tool_call_names(events: Sequence[Any]) -> list[str]:
     return names
 
 
-def _run_status(events: Sequence[Any]) -> str:
-    for event in events:
-        get = event.get if isinstance(event, dict) else lambda key, e=event: getattr(e, key, None)
-        if get("type") == "run/completed":
-            return "completed"
-    for event in events:
-        get = event.get if isinstance(event, dict) else lambda key, e=event: getattr(e, key, None)
-        if get("type") in ("run/failed", "run/paused"):
-            return get("type").split("/")[1]
-    return "unknown"
-
-
 def assert_register_side(events: Sequence[Any], *, required: bool) -> dict[str, bool]:
     """登记侧：是否调用 `register_constraint`（M1–M3 要求调用，M5 要求不调用）。"""
     called = "register_constraint" in _tool_call_names(events)
@@ -431,8 +425,74 @@ def forbidden_text_is_absent(facts: Sequence[Any], forbidden_text: str) -> bool:
 
 
 def extraction_candidates_empty(candidates: Sequence[Any] | None) -> bool:
-    """B-lite 抽取器是否未返回任何候选（M4/M6 要求空）。"""
-    return not candidates
+    """B-lite 抽取器**真正采纳**的候选是否为空（M4/M6 要求空）。
+
+    入参是 job 行里落库的候选列表（`protected_fact_extraction_candidates`），不是模型原始
+    输出——原始输出有候选而 executor 全判不合格时，"登记"并没有发生，此时判"抽取器没产出"
+    才是真的。**取 None（没有 job 行 / 阶段没跑到）判负**：那是"没证实"，不是"空"。
+    """
+    return candidates is not None and not candidates
+
+
+def extraction_gate(state: str, job_id: str | None) -> dict[str, bool]:
+    """M1–M4/M6 的两条抽取判据的**共同**机械依据（一次读 job 行，两处引用）。
+
+    `extraction_job_completed`：本次 run 的 job 行存在，且抽取阶段已 `done`。
+    `extractor_returned_no_candidates` 由 `extraction_candidates_empty` 单独出（M4/M6 要求
+    空、M1–M3 不要求），这里只出"阶段跑完了没有"这一条。
+    """
+    return {"extraction_job_completed": bool(job_id) and state == "done"}
+
+
+def extraction_candidates(call_outputs: Sequence[str] | None) -> list[Any] | None:
+    """从**本次 run** 抽取调用的模型原始输出解析候选列表（`None` = 没解析出 JSON）。
+
+    为什么不用 job 行的 `protected_fact_extraction_candidates`：`finish_protected_fact_extraction`
+    跑完会把那一列**置回 NULL**（"Drop raw candidate text after idempotent registration has been
+    attempted"）——于是 `done` 的行上候选取不到，而取到的时候（`ready`）又太早。能**逐 run**
+    归属、且在判据那一刻仍在的，只有 invoker 记下的原始输出（每次 run 前清空，见 `_drive_case`）。
+
+    executor 在这一步之后还会按 `source`/`value` 逐字核对 `source_text` 才登记，所以原始输出里的
+    候选**不等于**最终采纳——但对 M4/M6 要判的那一条（"抽取器有没有硬扯出一个候选"）而言，原始
+    输出正是判据；登记与否另有 `forbidden_text_not_active_constraint` 盯着，两条合起来才完整。
+    """
+    for text in reversed(list(call_outputs or [])):
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("candidates"), list):
+            return parsed["candidates"]
+    return None
+
+
+def _read_job_row(database_path: Path, idempotency_key: str) -> dict[str, Any] | None:
+    """按幂等键**只读**一条 formation job 行（不存在返回 None）。
+
+    只取 `job_id`/`stage`/`protected_fact_extraction_state` 三列。**不取候选列**：那一列在
+    抽取跑完时被置回 NULL（见 `extraction_candidates`），读它只会得到"done ⇒ None"，与
+    "本次 run 没有 job 行"在形状上撞车。候选由 invoker 的 per-run 原始输出解析。
+
+    用标准库 `sqlite3` 而不是 `SqliteMemoryV2JobStore`：store 没有"按幂等键查"的读接口，
+    唯一能命中的入口是 `enqueue`——而那是 INSERT OR IGNORE，会替本次 run **造**出一行，
+    把判据变成恒真。这里只 SELECT（幂等键有 UNIQUE 约束，命中唯一）。
+    """
+    import sqlite3
+
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    try:
+        cursor = connection.execute(
+            "SELECT job_id, stage, protected_fact_extraction_state FROM memory_v2_jobs "
+            "WHERE idempotency_key=?",
+            (idempotency_key,),
+        )
+        row = cursor.fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    job_id, _stage, state = row
+    return {"job": job_id, "extraction_state": state or ""}
 
 
 def assert_budget_rejection(tool_results: Sequence[Any], final_reply: str) -> dict[str, bool]:
@@ -467,6 +527,9 @@ def assert_resolution_cards(
     before = sorted(_fact_value(f) for f in _project_active_constraints(facts_before))
     pre_answer = sorted(_fact_value(f) for f in _project_active_constraints(facts_pre_answer))
     return {
+        # P3-3：`paused` 只从 `type=="run/paused"` 取——一次 `run/failed` 不会凑出
+        # 这个列表（旧实现同形的 `_run_status` 把 paused 与 failed 一视同仁，已删）。
+        # M8/M9 的"暂停"是核心判据，反例测试见 `test_m8_m9_paused_requires_run_paused_not_failed`。
         "run_paused_user_input": bool(paused) and all(
             _event_data(p).get("reason") == "user_input" for p in paused
         ),
@@ -487,40 +550,160 @@ def _event_data(event: Any) -> dict[str, Any]:
     return data or {}
 
 
+def _event_run_id(event: Any) -> str | None:
+    value = event.get("run_id") if isinstance(event, dict) else getattr(event, "run_id", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _events_of_type(events: Sequence[Any], event_type: str) -> list[dict[str, Any]]:
+    """某类型的全部事件（原样 dict，落进 §9.1 的原始产物字段）。"""
+    return [
+        e if isinstance(e, dict) else e.to_dict()
+        for e in events if _event_type(e) == event_type
+    ]
+
+
+def _latest_run_id(events: Sequence[Any]) -> str | None:
+    for event in reversed(list(events)):
+        run_id = _event_run_id(event)
+        if run_id:
+            return run_id
+    return None
+
+
+#: 一个 run 的生命周期事件（判定"这一刻它到哪了"只读这些）。
+_RUN_LIFECYCLE_TYPES = (
+    "run/started", "run/paused", "run/resumed", "run/completed", "run/failed",
+    "run/interrupted",
+)
+
+
+def _terminal_status_for_run(
+    events: Sequence[Any], run_id: str,
+) -> tuple[str, str | None]:
+    """按 `run_id` 取**最后一条**生命周期事件 → (状态, 暂停原因)。
+
+    只看"整条流里有没有 run/completed"不够：M8/M9 的 run 会先 `run/paused`（卡片）再
+    `run/resumed` → 恢复后 `run/completed`。取**该 run 的最后一条**生命周期事件，
+    暂停态才不会被后面的 resumed 误判成"还在暂停"，反之亦然（Round 2 审查 P3-3 同族：
+    判据必须区分 paused 与 failed）。
+    """
+    lifecycle = [
+        e for e in events
+        if _event_run_id(e) == run_id and _event_type(e) in _RUN_LIFECYCLE_TYPES
+    ]
+    if not lifecycle:
+        return "running", None
+    last = lifecycle[-1]
+    kind = _event_type(last)
+    if kind == "run/completed":
+        return "completed", None
+    if kind in ("run/failed", "run/interrupted"):
+        return "failed", None
+    if kind == "run/paused":
+        return "paused", _event_data(last).get("reason")
+    return "running", None  # run/started 或 run/resumed
+
+
+def _final_reply_text(events: Sequence[Any]) -> str:
+    """最终模型回复正文 = 最后一条**有正文**的 `model/completed.content`。
+
+    纯工具调用的模型回合 content 为空（不覆盖），所以取"最后一条非空"而不是"最后一条"。
+    """
+    text = ""
+    for event in events:
+        if _event_type(event) == "model/completed":
+            content = _event_data(event).get("content")
+            if isinstance(content, str) and content.strip():
+                text = content
+    return text
+
+
+def _fact_values(facts: Sequence[Any]) -> list[dict[str, Any]]:
+    """`ProtectedFact` / dict → 可 JSON 化的 dict 列表（证据字段与判据共用同一形状）。"""
+    result: list[dict[str, Any]] = []
+    for fact in facts:
+        if isinstance(fact, dict):
+            result.append(dict(fact))
+        elif hasattr(fact, "to_dict"):
+            result.append(fact.to_dict())
+    return result
+
+
 def assert_resume_outcome(
     events: Sequence[Any], facts_after_resume: Sequence[Any], *, persistent: bool,
+    old_value: str = "", expected_candidate: str = "",
 ) -> dict[str, bool]:
-    """M8/M9：答案落盘一次 + 同 run 恢复；永久替换才 supersede 旧事实。"""
+    """M8/M9：答案落盘一次 + 同 run 恢复；永久替换才 supersede 旧事实。
+
+    三处判据都必须是**机械可证伪**的（票面 §9.1 / §10.2）：
+
+    - `selected_answer_recorded_once`：恰一条带 `input_request_id` 的用户答案；
+    - `run_resumed_in_same_run`（P2-3）：`run/resumed` 的 `run_id` 必须**等于暂停 run 的
+      `run_id`**（同 run 恢复语义）。此前只数条数、从不比 `run_id` ⇒ 恢复到**别的 run**
+      也会被判 True（Round 2 审查实测：把两个事件都标到 `run_id="OTHER"` 仍 True）。
+      `run_id` 缺失（`None`/空）一律判 False（未证实 ≠ 通过）。
+    - `persistent_choice_superseded_old`（P1-1）：永久替换要求**旧值离开 active 投影**、
+      且新候选**进入** active 投影。此前只查"active 集合非空" ⇒ "什么都没干"（旧值仍在）
+      与"只 ADD"（旧+新同时 active）都会发假 PASS。非永久选择反向成立：旧值**仍须在**
+      active 投影里，且候选**不得**被登记为新约束。
+    """
     resumed = [e for e in events if _event_type(e) == "run/resumed"]
     answers = [
         e for e in events
         if _event_type(e) == "user/message" and _event_data(e).get("input_request_id")
     ]
-    active = _project_active_constraints(facts_after_resume)
+    paused_runs = [
+        _event_run_id(e) for e in events if _event_type(e) == "run/paused"
+    ]
+    paused_run_ids = {rid for rid in paused_runs if rid is not None}
+    resumed_run_ids = {_event_run_id(e) for e in resumed} - {None}
+    same_run = (
+        bool(resumed_run_ids) and len(paused_run_ids) == 1
+        and resumed_run_ids == paused_run_ids
+    )
+    active_values = [_fact_value(f) for f in _project_active_constraints(facts_after_resume)]
+    old_left = bool(old_value) and not any(old_value in value for value in active_values)
+    candidate_present = bool(expected_candidate) and any(
+        expected_candidate in value for value in active_values
+    )
+    old_still_active = bool(old_value) and any(old_value in value for value in active_values)
+    if persistent:
+        superseded = old_left and candidate_present
+    else:
+        superseded = old_still_active and not candidate_present
     return {
         "selected_answer_recorded_once": len(answers) == 1 and len(resumed) >= 1,
-        "persistent_choice_superseded_old": (bool(active) if persistent else True),
+        "run_resumed_in_same_run": same_run,
+        "persistent_choice_superseded_old": superseded,
     }
 
 
 def build_observation(
     case_id: str, attempt: int, *, events: Sequence[Any], facts_before: Sequence[Any],
-    facts_after: Sequence[Any], extraction_candidates: Sequence[Any] | None, job_completed: bool,
+    facts_after: Sequence[Any], extraction: Mapping[str, Any] | None,
     final_reply: str = "", tool_results: Sequence[Any] = (), model_ok: bool = True,
     facts_pre_answer: Sequence[Any] | None = None,
 ) -> Observation:
     """把一次真实运行的原始事实折成 `Observation`（判据全在这里生成，verdict 只读它）。
 
+    `extraction` 是本次 run 的**落库证据**（`_RealRunner._extraction_evidence` 的返回）；
+    `None` = 没读到（无 runner / 未采集）⇒ 抽取两项判负，不猜。
+
     M8/M9 需要**答题前**那一读（`facts_pre_answer`）；未给时退回 `facts_after`（无答题的
     形态下两者相同）。
     """
     case = _CASES_BY_ID[case_id]
+    job_id = (extraction or {}).get("job")
+    state = (extraction or {}).get("extraction_state", "")
+    candidates = (extraction or {}).get("candidates")
     assertions: dict[str, bool] = {
         "actual_primary_model_used": model_ok,
         "thinking_disabled_and_temperature_zero_configured": model_ok,
         "no_memory_sidecar_events": True,
     }
     if case_id in _EXTRACTION_CASES:
+        assertions.update(extraction_gate(state, job_id))
         if case_id in ("M1", "M2", "M3"):
             assertions.update(assert_register_side(events, required=True))
             required_name = {
@@ -540,9 +723,8 @@ def build_observation(
                 facts_after, forbidden,
             )
         assertions["extractor_returned_no_candidates"] = extraction_candidates_empty(
-            extraction_candidates,
+            candidates,
         )
-        assertions["extraction_job_completed"] = job_completed
     elif case_id == "M7":
         assertions.update(assert_budget_rejection(tool_results, final_reply))
         assertions["candidate_not_registered"] = not required_text_is_active(
@@ -557,6 +739,7 @@ def build_observation(
         ))
         assertions.update(assert_resume_outcome(
             events, facts_after, persistent=(case.resume_choice == "replace_persistently"),
+            old_value=case.seed_active_constraint or "", expected_candidate=case.input_text,
         ))
     return Observation(case_id=case_id, attempt=attempt, assertions=assertions)
 
@@ -618,7 +801,10 @@ _SHA64 = re.compile(r"^[0-9a-f]{64}$")
 
 _ATTEMPT_FIELDS = (
     "case_id", "attempt", "started_at_utc", "finished_at_utc", "input",
-    "code_sha", "git_tree", "session_id", "run_id", "assertions", "verdict",
+    "code_sha", "git_tree", "session_id", "run_id", "assertions", "assertion_details",
+    "tool_calls", "tool_results", "final_reply", "extraction_outputs",
+    "extraction_job_id", "extraction_state", "extraction_candidates",
+    "protected_facts_before", "protected_facts_after", "verdict",
 )
 _TOP_LEVEL_FIELDS = (
     "schema_version", "ticket", "ac", "campaign_id", "status", "code_sha", "git_tree",
@@ -659,6 +845,26 @@ def assert_evidence_shape(payload: dict[str, Any]) -> None:
             raise ValueError(f"attempts[{index}] 缺字段：{gap}")
         if "assertions" in attempt and not isinstance(attempt["assertions"], dict):
             raise TypeError(f"attempts[{index}].assertions 必须是 object")
+        # §9.1 要求的原始产物必须**真**落盘（形状可机械核）：断言逐条 bool、断言 detail
+        # 逐条串、工具调用/结果与抽取候选是列表、最终回复是串。空列表是合法事实（M4/M6
+        # 就该没有候选），类型不对是**未采集**——不能拿空对象冒充实测过的证据。
+        if not isinstance(attempt["assertion_details"], dict):
+            raise TypeError(f"attempts[{index}].assertion_details 必须是 object")
+        for name in ("tool_calls", "tool_results", "extraction_outputs",
+                     "protected_facts_before", "protected_facts_after"):
+            if not isinstance(attempt[name], list):
+                raise TypeError(f"attempts[{index}].{name} 必须是 list")
+        # 抽取落库证据（判据的真实来源，见 `_read_job_row`）：`extraction_candidates` 是
+        # **本次 run** 采纳的候选；`None` 是合法且有意义的事实（job 行缺席 / 阶段没跑到），
+        # 与"空列表"（跑完了、零候选）不是一回事，所以这里只核"列表或 None"。
+        if not isinstance(attempt["extraction_job_id"], (str, type(None))):
+            raise TypeError(f"attempts[{index}].extraction_job_id 必须是 str 或 None")
+        if not isinstance(attempt["extraction_state"], str):
+            raise TypeError(f"attempts[{index}].extraction_state 必须是 str")
+        if not isinstance(attempt["extraction_candidates"], (list, type(None))):
+            raise TypeError(f"attempts[{index}].extraction_candidates 必须是 list 或 None")
+        if not isinstance(attempt["final_reply"], str):
+            raise TypeError(f"attempts[{index}].final_reply 必须是 str")
     result = payload["result"]
     for name in ("verdict", "attempts_recorded", "expected_attempts", "failed_case_attempts"):
         if name not in result:
@@ -778,11 +984,20 @@ class _ModelRecorder:
 
 
 class _MemoryJobInvoker:
-    """`MemoryModelInvoker` 端口：走记录器的工厂，并记下抽取调用的候选输出。"""
+    """`MemoryModelInvoker` 端口：走记录器的工厂，并记下抽取调用的候选输出。
+
+    `extraction_outputs` 是**本次抽取的模型原始输出**（取证用），**不是判据来源**——判据读
+    job 行里落库的候选列表（见 `_RealRunner._extraction_evidence`）：模型原始输出与 executor
+    按 `source`/`value` 校验后真正采纳的候选不是一回事（实测 M1 原始输出有候选，但这不能证明
+    "登记发生了"）。`extraction_call_count` 同样只作取证计数，**判据不用它**——它在 18 次之间
+    累积，拿它判"本次抽取发生了"就是 P1-1 那类假绿。
+    """
 
     def __init__(self, recorder: _ModelRecorder) -> None:
         self._recorder = recorder
         self.extraction_outputs: list[str] = []
+        #: 抽取调用真的发生过的次数（仅取证；累计值，不参与任何判据）。
+        self.extraction_call_count = 0
 
     async def __call__(self, call: Any) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -798,15 +1013,23 @@ class _MemoryJobInvoker:
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
         if getattr(call.stage, "value", "") == "protected_fact_extraction":
             self.extraction_outputs.append(text)
+            self.extraction_call_count += 1
         return text
 
 
 class _RealRunner:
-    """真实执行面：生产 `create_app` + Web 会话入口驱动 M1–M9。
+    """真实执行面：生产 `create_app` + Web 会话入口（ASGI）驱动 M1–M9。
 
-    面已接好（会话创建 / 消息 / 事件投影 / resume / 抽取 job 桥接），但**本轮不执行**：
-    `preflight` 在缺凭证时直接判 `MissingCredentialsError`。Round 3 拿到凭证后 `run_slot`
-    按下面的步骤跑一次。
+    执行编排（票面 §9.1 的 18 次）：每个 slot 建独立会话 → 发该 case 的用户原文 →
+    轮询事件流等 run 终态 →（M8/M9）读卡片并以脚本化选择 `/resume` → drain B-lite 抽取
+    job → 采集原始产物（tool call/result、最终回复、抽取候选输出、事实投影快照）。
+
+    **真实面与确定性面分开声明（如实，不声称"全真实"）**：
+    - 真实：会话创建、用户输入投递、模型调用（`mimo`/`mimo-v2.6-flash`、temp 0.0）、工具
+      执行、事件投影、暂停/恢复、memory.primary 抽取——全部走生产 `create_app` 的接线；
+    - 驱动代劳：M8/M9 用户卡片**答复**（脚本化选择，见 `_drive_case`）；M7 的
+      `protected_fact_token_budget` 由环境/设置决定，不人为压低。
+    这两条不构成"用 fake 结果冒充模型行为"：模型侧的调用与工具决策仍是真实发生的行为。
 
     抽取 job 桥接要点（对照 `memory/v2/assembly.build_memory_formation`）：生产
     `wire_capabilities` 只在 `CAPABILITIES` 配了 memory provider 且向量存储可用时才建
@@ -822,6 +1045,9 @@ class _RealRunner:
         self._invoker: _MemoryJobInvoker | None = None
         self._app: Any = None
         self._client: Any = None
+        self._patcher: Any = None
+        self._formation_runner: Any = None
+        self._workspace_dir: str | None = None
 
     def preflight(self) -> list[str]:
         """返回未满足的前置（非空 ⇒ BLOCKED，不发任何模型请求）。"""
@@ -831,7 +1057,7 @@ class _RealRunner:
             return [
                 (
                     f"无模型凭证：设置 {DIRECT_KEY_ENV} 直传，或 {DEFAULT_ENV_FILE_ENV} / "
-                    "--env-file 指向含凭证的 .env；本轮（Round 1b）刻意不填，"
+                    "--env-file 指向含凭证的 .env。缺凭证时不发任何模型请求，"
                     "脚本按 BLOCKED 收尾，不产出 PASS"
                 ),
             ]
@@ -852,34 +1078,99 @@ class _RealRunner:
             return Settings(model_api_key=self._config.direct_api_key, _env_file=env_file)
         return Settings(_env_file=env_file)
 
-    # -- 装配（Round 3 首次真正走到）------------------------------------------------
+    # -- 装配 ----------------------------------------------------------------------
 
-    async def _setup(self) -> None:  # pragma: no cover - 需要真实凭证
+    def _session_primary_model_config(self) -> Any:
+        """会话主模型 = `mimo` / `mimo-v2.6-flash`（票面 §9.1「部署实际会话主模型」）。
+
+        构造靠 provider preset + 直传 key：`MODEL_PROVIDER`/`MODEL_NAME`/`MODEL_BASE_URL`
+        显式传入，其余 capability 配置继续由 `_env_file` 兜底。`model_api_key` 取直传值
+        （没直传时 `_env_file` 里的值），**绝不落盘**。
+        """
+        from agent_harness.config import Settings
+
+        env_file = str(self._config.env_file or EXAMPLE_ENV_FILE)
+        overrides: dict[str, Any] = {
+            "model_provider": self._config.session_primary_provider,
+            "model_name": self._config.session_primary_model,
+        }
+        if self._config.direct_api_key:
+            overrides["model_api_key"] = self._config.direct_api_key
+        return Settings(_env_file=env_file, **overrides)
+
+    def _memory_primary_model_config(self) -> Any:
+        """`memory.primary` 的 `ModelConfig`：provider 硬钉 `mimo`（in-process 覆写）。
+
+        `resolve_memory_roles` 把 `memory.primary` 别名**硬编码**到 provider `senseaudio`
+        （`memory/v2/roles.py:58`）——那是部署默认，不是票面要求。票面 §9.1 要求"测试模型
+        为部署实际会话主模型"，此前 15/18 证据也是以 `mimo` 跑 memory.primary 的
+        （`override: "in-process per user's instruction"`）。配置面没有任何 key 能把该别名
+        改指 `mimo`，所以本驱动**显式构造**这个 `ModelConfig` 直接喂给
+        `build_memory_formation(roles=...)` —— 不靠改 provider role 常量（那会动生产代码）。
+        """
+        from agent_harness.model.config import PROVIDER_PRESETS, ModelConfig
+
+        preset = PROVIDER_PRESETS[self._config.memory_primary_provider]
+        key = self._config.direct_api_key
+        if not key:
+            key = self._settings().model_api_key.get_secret_value()
+        return ModelConfig(
+            provider=self._config.memory_primary_provider,
+            model_name=self._config.memory_primary_model,
+            api_key=key,
+            base_url=preset["model_base_url"],
+            temperature=0.0,
+        )
+
+    def _fresh_workspace_dir(self) -> str:
+        """本次装配的 workspace 根（`settings.workspace_dir`），临时目录、进程退出即弃。
+
+        路径带 `mkdtemp` 的随机段 ⇒ 两次运行不会共用同一个 `memory-v2.db`；这也顺带保证
+        会话日志、记忆库、索引全部与仓库工作区隔离（跑 18 次不往仓库里落运行态文件）。
+        """
+        if self._workspace_dir is None:
+            self._workspace_dir = tempfile.mkdtemp(prefix="ac16-workspace-")
+        return self._workspace_dir
+
+    async def _setup(self) -> None:  # pragma: no cover - 需凭证
         from unittest.mock import patch
+
+        import httpx
 
         from agent_harness.web.app import create_app
 
-        settings = self._settings()
+        settings = self._session_primary_model_config()
+        # 每次装配一个**干净 workspace**（同 `run_memory_v2_real_gold_gate` 的做法）：
+        # `memory-v2.db` 的 job 表按"每用户串行"认领——一条卡在中间态的**僵尸行**（先前被
+        # 中断的进程留下的、lease 还没到期的 `forming`）会让 `claim` 的 `NOT EXISTS(busy…)`
+        # 恒假，此后所有 job 停在 `queued`（实测：一次被杀掉的探测进程留下这样一行，
+        # 之后每个 slot 的抽取阶段 120s 都停在 `pending`）。这**不是**驱动的执行逻辑——
+        # 是"复用了一个别的进程弄脏过的库"。干净目录 = 库状态只由本驱动这 18 次决定。
+        settings.workspace_dir = self._fresh_workspace_dir()
         # 主模型注入点：只把工厂换成"记录 + 真实构造"，跑的还是生产 create_app。
-        patcher = patch("agent_harness.assembly.create_chat_model", side_effect=self._recorder)
-        patcher.start()
+        self._patcher = patch("agent_harness.assembly.create_chat_model", side_effect=self._recorder)
+        self._patcher.start()
         self._app = create_app(settings, enable_cors=False)
         # 记忆形成管线：接上 memory.primary 抽取（见类 docstring）。
         await self._wire_memory_formation(settings)
+        # 走生产 ASGI 入口（同 create_app 的全部路由），但**不**经 TestClient 的独立
+        # 事件循环——detached run task 与 `runner.drain()` 必须落在同一个 loop 上，否则
+        # 抽取 pump 的任务属于另一个 loop，`drain()` 等不到。ASGITransport 在当前 loop
+        # 内联跑 ASGI app，正是这个语义。
+        self._client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self._app), base_url="http://ac16.local",
+        )
 
     async def _wire_memory_formation(self, settings: Any) -> None:  # pragma: no cover - 需凭证
         from unittest.mock import patch
 
         from agent_harness.memory.v2.assembly import build_memory_formation
-        from agent_harness.memory.v2.roles import resolve_memory_roles
+        from agent_harness.memory.v2.roles import MemoryModelRoles
 
-        roles = resolve_memory_roles(settings)
-        if roles.primary is None:
-            raise MissingCredentialsError(
-                "memory.primary 角色解析不出——检查 AGENT_MODELS / .env"
-            )
         self._invoker = _MemoryJobInvoker(self._recorder)
         _registry, wiring = await self._app.state.agent.get_wiring()
+        # 显式 `MemoryModelRoles(primary=mimo 配置)`：见 `_memory_primary_model_config`。
+        roles = MemoryModelRoles(primary=self._memory_primary_model_config(), fallback=None)
         # 只替换 invoker 构造：`build_memory_formation` 内部 `ChatModelInvoker()` 走注入点，
         # 于是抽取调用和主模型共用 `_ModelRecorder`，M1–M6 的抽取确为真实 memory.primary。
         with patch(
@@ -890,12 +1181,275 @@ class _RealRunner:
                 settings, sessions=self._app.state.agent.store,
                 memory_v2=wiring.memory_v2, roles=roles,
             )
-        if runner is not None:
-            wiring.memory_formation = runner
+        if runner is None:
+            raise MissingCredentialsError(
+                "memory formation 未装配（build_memory_formation 返回 None）——M1–M6 的 "
+                "B-lite 抽取面缺失"
+            )
+        wiring.memory_formation = runner
+        self._formation_runner = runner
 
-    async def run_slot(self, slot: PlanSlot) -> Observation:  # pragma: no cover - Round 3
-        raise MissingCredentialsError(
-            "真实执行面本轮不运行（无凭证）；Round 2 独立审查通过后由 Round 3 执行"
+    # -- 单槽真实执行 --------------------------------------------------------------
+
+    async def _events(self, session_id: str) -> list[dict[str, Any]]:
+        response = await self._client.get(f"/api/sessions/{session_id}/events")
+        response.raise_for_status()
+        return response.json()
+
+    async def _wait_for_terminal(self, session_id: str, run_id: str) -> str:
+        """轮询事件流直到该 run 出终态；返回 `completed` / `failed` / `paused`。
+
+        run 由 RunManager 以 detached task 驱动，`POST /messages` 返回的 SSE 只是订阅者
+        视图；轮询 durable 事件流是唯一与"run 真的收口了"对齐的读法（也覆盖暂停态）。
+        """
+        deadline = time.monotonic() + _RUN_TIMEOUT_SECONDS
+        while True:
+            events = await self._events(session_id)
+            status, pause_reason = _terminal_status_for_run(events, run_id)
+            if status == "paused":
+                if pause_reason == "user_input":
+                    return "paused"
+                raise RuntimeError(
+                    f"run {run_id} 以 run/paused(reason={pause_reason}) 收口——期望 user_input"
+                )
+            if status in ("completed", "failed"):
+                return status
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"run {session_id}/{run_id} 在 {_RUN_TIMEOUT_SECONDS}s 内未出终态"
+                )
+            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+    async def _extraction_evidence(self, run_id: str) -> dict[str, Any]:
+        """本次 run 的 B-lite 抽取**落库证据**（per-run，不跨 attempt 累积），取到即返回。
+
+        为什么读 job 行而不是读 `_invoker` 的累计计数：job 的幂等键逐字是
+        `memory-v2:{run_id}`（`memory/v2/runner.idempotency_key`），所以这一行**就是**
+        本次 run 的那条作业——`run_id` 逐 slot 唯一，证据一定属于本 slot。而累计计数在 18 次
+        之间不清零：第 2 次之后"计数>0"恒真，用它判 `extraction_job_completed` 等于让后续
+        每一次都白拿第一次的成绩（P1-1 同类的假绿）。
+
+        取值时机（**这条是本轮实测踩出来的**）：抽取阶段一翻到 `done` 就收工——`done` 表示
+        本次 run 的候选已落库，判据要的事实齐了。**不在这里等 formation 跑完**：job 表按
+        "每用户串行"认领（`jobs.claim` 的 `NOT EXISTS(busy…)`），一条仍在 formation 的 job
+        会挡住所**有**后续 run 的抽取（实测 M1-1 抽取 17s 完成、formation 却持续到 40s+，
+        期间 M1-2 的抽取停在 `pending`）。等它跑完即等于把串行延迟累加进每一个 slot。
+        formation 在后台自行收尾，不影响本 slot 的判据。
+
+        **不调 `runner.drain()`**：`drain()` 有界，超时会 `cancel()` 掉在途服务循环
+        （`runner.py:480`），等于把一条正在跑的 formation 连同它的库写入一起杀掉。读库就够。
+        只读还绕开另一件事：`jobs.enqueue` 是 INSERT OR IGNORE，会替本次 run **造**一行——
+        那样"job 存在"就恒真，判据失去牙齿。所以直接按幂等键 SELECT
+        （不新增 store API：`SqliteMemoryV2JobStore.database_path` 是公开属性）。
+
+        返回的每个字段都是**可复核的机械事实**：
+        - `job`：None = 本次 run 的 job 行不存在（本次 run 不合格/未入队，如 M5 的授权句）。
+          **缺席本身判负**（不是"没标 False 就算过"）。
+        - `candidates`：**本次 run** 抽取调用的模型原始输出里解析出的候选列表（`extraction_candidates`）。
+          不是 executor 最终采纳的那批——那一批在 `done` 时被 store 置回 NULL 了。判的是"抽取器
+          有没有硬扯出一个候选"，原始输出正是这一条的判据；采纳与否另有 active 投影判据盯着。
+        - `extraction_state`：`pending`/`started`/`ready`/`done`。`done` = 抽取阶段跑完
+          （含"跑完但零候选"）；停在 `started` = 那一次外部请求的结果未知（崩溃恢复语义），
+          如实判负、不重发第二次请求。
+
+        run 终态事件是我们在 SSE 里先看到的，而入队发生在 run 任务的后续步骤里——首次读可能
+        还没那一行。所以先等一行出现（有界 `_RUN_TIMEOUT_SECONDS`），再等它 `done`
+        （有界 `_EXTRACTION_DRAIN_TIMEOUT_SECONDS`）；两个上界都到点就如实返回所见状态。
+        """
+        runner = getattr(self, "_formation_runner", None)
+        if runner is None:
+            return {"job": None, "extraction_state": "", "candidates": None}
+        path = runner._jobs.database_path
+        key = f"memory-v2:{run_id}"
+        absent_deadline = time.monotonic() + _RUN_TIMEOUT_SECONDS
+        while True:
+            row = await asyncio.to_thread(_read_job_row, path, key)
+            if row is not None:
+                break
+            if time.monotonic() > absent_deadline:
+                return {"job": None, "extraction_state": "", "candidates": None}
+            await asyncio.sleep(0.25)
+        deadline = time.monotonic() + _EXTRACTION_DRAIN_TIMEOUT_SECONDS
+        while row["extraction_state"] != "done" and time.monotonic() <= deadline:
+            await asyncio.sleep(0.25)
+            row = await asyncio.to_thread(_read_job_row, path, key)
+        row["candidates"] = extraction_candidates(
+            self._invoker.extraction_outputs if self._invoker else (),
+        )
+        return row
+
+    async def _drive_case(self, case: CaseDefinition, session_id: str) -> dict[str, Any]:
+        """一次真实运行（含 M8/M9 的暂停-答复-恢复），返回该次 attempt 的原始观测。
+
+        步骤（票面 §9.1）：建会话 →（M8/M9 先播 active 旧约束）→ 发用户原文 →
+        等 run 终态 →（M8/M9）读卡片、以脚本化选择答复 `/resume` → 等恢复后的 run 终态 →
+        drain 抽取 job → 采集原始产物。
+
+        **确定性豁免声明（如实写）**：`request_constraint_resolution` 的**调用**必须由真实
+        主模型发出（M8/M9 判据就靠这个证伪）；但**答复**按票面是脚本化供给——本函数用旧
+        证据 JSON 里当时的选择（M8 `current_task_only`、M9 `replace_persistently`）。这是
+        "驱动代替用户点卡片"，不是"用 fake 结果冒充模型行为"。
+        """
+        from agent_harness.session.derive import (
+            build_protected_fact_data,
+            derive_protected_facts,
+        )
+        from agent_harness.session.event import TASK_PROTECTED_FACT, USER_MESSAGE
+        from agent_harness.session.session import Session
+
+        store = self._app.state.agent.store
+        session = Session.start(store, session_id=session_id)
+
+        facts_before: list[Any] = []
+        if case.seed_active_constraint:
+            seed_source = session.append(USER_MESSAGE, {"content": case.seed_active_constraint})
+            session.append(TASK_PROTECTED_FACT, build_protected_fact_data(
+                session.events, session_id=session_id, fact_type="constraint",
+                value=case.seed_active_constraint, source_event_id=seed_source.event_id,
+            ))
+            facts_before = _fact_values(derive_protected_facts(store.read_events(session_id)))
+
+        started_at = _now_utc()
+        response = await self._client.post(
+            f"/api/sessions/{session_id}/messages", json=self._message_body(case.input_text),
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"{case.case_id} 发消息失败 HTTP {response.status_code}: {response.text[:400]}"
+            )
+        events = await self._events(session_id)
+        run_id = _latest_run_id(events)
+        if run_id is None:
+            raise RuntimeError(f"{case.case_id} 未产生 run/started")
+        status = await self._wait_for_terminal(session_id, run_id)
+
+        facts_pre_answer: list[Any] = []
+        if status == "paused" and case.resume_choice:
+            events = await self._events(session_id)
+            facts_pre_answer = _fact_values(derive_protected_facts(store.read_events(session_id)))
+            await self._answer_card(session_id, case, events)
+
+        # 抽取 job：run 终态臂已入队，等它抽出结果并读**本次 run 那一行**的落库证据。
+        extraction = await self._extraction_evidence(run_id)
+        events = await self._events(session_id)
+        finished_at = _now_utc()
+
+        extraction_outputs = list(self._invoker.extraction_outputs) if self._invoker else []
+        if self._invoker is not None:
+            self._invoker.extraction_outputs.clear()
+        facts_after = _fact_values(derive_protected_facts(store.read_events(session_id)))
+        return {
+            "session_id": session_id,
+            "run_id": run_id,
+            "started_at_utc": started_at,
+            "finished_at_utc": finished_at,
+            "events": events,
+            "facts_before": facts_before,
+            "facts_pre_answer": facts_pre_answer,
+            "facts_after": facts_after,
+            "tool_calls": _events_of_type(events, "tool/call"),
+            "tool_results": _events_of_type(events, "tool/result"),
+            "final_reply": _final_reply_text(events),
+            "extraction_outputs": extraction_outputs,
+            "extraction": extraction,
+        }
+
+    def _message_body(self, content: str) -> dict[str, Any]:
+        """用户消息体：给足 run/session 预算，避免预算暂停掩盖真实行为。
+
+        M8/M9 需要在 run 内暂停-恢复，预算必须容得下；M7 的预算拒绝由工具侧
+        （`protected_fact_token_budget`）触发，不是 run 预算，故这里统一放宽。
+        """
+        return {
+            "content": content,
+            "budget": {
+                "run": {"max_agent_turns_total": 24, "max_model_requests": 24},
+                "session": {"max_agent_turns_total": 48, "max_model_requests": 48},
+            },
+        }
+
+    async def _answer_card(
+        self, session_id: str, case: CaseDefinition, events: list[Any],
+    ) -> None:
+        request = next((e for e in events if e.get("type") == "user/input-requested"), None)
+        pause = next(
+            (e for e in events if e.get("type") == "run/paused"
+             and e.get("data", {}).get("reason") == "user_input"),
+            None,
+        )
+        if request is None or pause is None:
+            raise RuntimeError(f"{case.case_id} 期望暂停+卡片，实际缺一")
+        resumed = await self._client.post(
+            f"/api/sessions/{session_id}/resume",
+            json={
+                "run_id": pause["run_id"],
+                "resume_basis": "user_input",
+                "budget": {"expected_version": pause["data"]["budget_version"], "run": {}},
+                "input_request": {
+                    "request_id": request["data"]["request_id"],
+                    "choice": case.resume_choice,
+                },
+            },
+        )
+        if resumed.status_code != 200:
+            raise RuntimeError(
+                f"{case.case_id} 答复 /resume 失败 HTTP {resumed.status_code}: "
+                f"{resumed.text[:400]}"
+            )
+        # 恢复后的 run 出终态再返回（同 run 续跑，run_id 不变）。
+        await self._wait_for_terminal(session_id, pause["run_id"])
+
+    async def run_slot(self, slot: PlanSlot) -> Observation:  # pragma: no cover - 需凭证
+        """跑一个槽位并折成 `Observation`（真实执行面，票面 §9.1）。"""
+        case = _CASES_BY_ID[slot.case_id]
+        session_id = f"ac16-{slot.case_id.lower()}-{slot.attempt}-{uuid.uuid4().hex[:8]}"
+        try:
+            raw = await self._drive_case(case, session_id)
+        except Exception as exc:  # noqa: BLE001 - 失败要如实折成观测，不静默
+            return Observation(
+                case_id=slot.case_id, attempt=slot.attempt, error=f"{type(exc).__name__}: {exc}",
+                details={"session_id": session_id, "run_id": "",
+                         "started_at_utc": _now_utc(), "finished_at_utc": _now_utc()},
+            )
+        observation = build_observation(
+            slot.case_id, slot.attempt,
+            events=raw["events"], facts_before=raw["facts_before"], facts_after=raw["facts_after"],
+            facts_pre_answer=raw["facts_pre_answer"] or None,
+            extraction=raw["extraction"],
+            final_reply=raw["final_reply"], tool_results=raw["tool_results"],
+            model_ok=self._model_ok(raw),
+        )
+        return replace(observation, details={
+            **observation.details,
+            "session_id": raw["session_id"],
+            "run_id": raw["run_id"],
+            "started_at_utc": raw["started_at_utc"],
+            "finished_at_utc": raw["finished_at_utc"],
+            "tool_calls": raw["tool_calls"],
+            "tool_results": raw["tool_results"],
+            "final_reply": raw["final_reply"],
+            "extraction_outputs": raw["extraction_outputs"],
+            "extraction_job_id": raw["extraction"]["job"],
+            "extraction_state": raw["extraction"]["extraction_state"],
+            "extraction_candidates": raw["extraction"]["candidates"],
+            "protected_facts_before": raw["facts_before"],
+            "protected_facts_after": raw["facts_after"],
+        })
+
+    def _model_ok(self, raw: dict[str, Any]) -> bool:
+        """基线判据 `actual_primary_model_used` 的机械依据：主模型真的被构造过、且是
+        期望的 provider/model；温度取该 provider 支持的最低有效值（本驱动钉 0.0）。
+
+        本驱动不注入 provider 专用 `extra_body`，所以"thinking disabled"只对**温度=0**
+        这一条负责（如实：`_ModelRecorder.thinking_disabled` 返回 False，不声称已配置）。
+        """
+        want_provider = self._config.session_primary_provider
+        want_model = self._config.session_primary_model
+        return any(
+            construction["provider"] == want_provider
+            and construction["model_id"] == want_model
+            and construction["temperature_configured"] == 0.0
+            for construction in self._recorder.constructions
         )
 
 
@@ -914,9 +1468,17 @@ class CampaignResult:
 
 def _blocked_evidence(
     config: RunnerConfig, *, preconditions: list[str], campaign_id: str,
+    now: str | None = None,
 ) -> dict[str, Any]:
+    """BLOCKED 证据（缺凭证时唯一落盘的形状）。
+
+    P4-1：时间戳与 `campaign_id` 取自**同一时刻**——`now` 缺席时才回落到本函数内的
+    单次 `_now_utc()`，两处各调一次 `datetime.now` 会让 started/completed 与文件名
+    落在不同时刻，不再是可复核的不变量。
+    """
     head = _git("rev-parse", "HEAD") or "0" * 40
     tree = _git("rev-parse", "HEAD^{tree}") or "0" * 40
+    stamp = now or _now_utc()
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "ticket": 663,
@@ -926,8 +1488,8 @@ def _blocked_evidence(
         "code_sha": head,
         "git_tree": tree,
         "working_tree_fingerprint_sha256": working_tree_fingerprint(),
-        "started_at_utc": _now_utc(),
-        "completed_at_utc": _now_utc(),
+        "started_at_utc": stamp,
+        "completed_at_utc": stamp,
         "provider": {
             "session_primary": {
                 "provider": config.session_primary_provider,
@@ -939,7 +1501,7 @@ def _blocked_evidence(
             },
         },
         "runtime": {
-            "api": "FastAPI TestClient through production create_app",
+            "api": "production create_app ASGI (httpx.ASGITransport, same event loop)",
             "production_tool_registry_and_executor": True,
             "scripted_or_fake_model": False,
             "independent_session_per_attempt": True,
@@ -986,20 +1548,10 @@ def campaign_evidence(
     attempts: list[dict[str, Any]] = []
     for verdict in verdicts:
         observation = obs_by_slot.get(verdict.slot_id)
-        case = _CASES_BY_ID[verdict.case_id]
-        attempts.append({
-            "case_id": verdict.case_id,
-            "attempt": verdict.attempt,
-            "started_at_utc": started_at_utc,
-            "finished_at_utc": completed_at_utc,
-            "input": case.input_text,
-            "code_sha": git_facts["code_sha"],
-            "git_tree": git_facts["git_tree"],
-            "session_id": (observation.details.get("session_id", "") if observation else ""),
-            "run_id": (observation.details.get("run_id", "") if observation else ""),
-            "assertions": dict(observation.assertions) if observation else {},
-            "verdict": "PASS" if verdict.passed else "FAIL",
-        })
+        attempts.append(_attempt_record(
+            observation, verdict, git_facts=git_facts,
+            fallback_started=started_at_utc, fallback_finished=completed_at_utc,
+        ))
     passed = [v for v in verdicts if v.passed]
     failed = [v for v in verdicts if not v.passed]
     decision = decide_campaign(verdicts, full_sets_completed=full_sets_completed)
@@ -1035,6 +1587,16 @@ def campaign_evidence(
     }
 
 
+def _detail_list(details: dict[str, Any], key: str) -> list[Any]:
+    """从 observation.details 取一个列表字段；缺席/类型不对 ⇒ 空列表（未采集 = 空事实）。
+
+    空列表与"没写这个键"在证据里同形，这正是我们要的：`assert_evidence_shape` 只保证
+    字段**存在且是列表**，值本身是实测事实（M4/M6 的候选就该是空的）。
+    """
+    value = details.get(key)
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 def credential_scan_values(config: RunnerConfig, settings: Any) -> tuple[str, ...]:
     """落盘前要扫的**精确值**：配置里所有 `SecretStr` 的值 + 直传 key。
 
@@ -1049,36 +1611,114 @@ def credential_scan_values(config: RunnerConfig, settings: Any) -> tuple[str, ..
     return tuple(credential_values(settings)) + direct
 
 
-def _evidence_path(config: RunnerConfig, campaign_id: str) -> Path:
+def _evidence_dir(config: RunnerConfig, campaign_id: str, stamp: str) -> Path:
     head = (_git("rev-parse", "HEAD") or "0" * 40)[:12]
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return config.out_dir / f"{stamp}-{head}-issue-663-ac16-{campaign_id}" / "evidence.json"
+    return config.out_dir / f"{stamp}-{head}-issue-663-ac16-{campaign_id}"
+
+
+def _evidence_path(config: RunnerConfig, campaign_id: str, stamp: str) -> Path:
+    return _evidence_dir(config, campaign_id, stamp) / "evidence.json"
 
 
 def _write_evidence(payload: dict[str, Any], path: Path, *, values: Sequence[str]) -> Path:
-    """凭证扫描（命中即判 fail，不静默）、脱敏后落盘。"""
+    """凭证扫描（命中即判 fail，不静默）、脱敏后落盘。
+
+    blocked 证据也走这里（P3-4）：它同样含 provider / campaign_id / preconditions 等
+    字段，上游一旦把 key 注进去就会原文落盘 —— 旧实现对该分支直接 `write_text`、绕过
+    扫描，是防御缺口。形状校验对 blocked **刻意不适用**（`attempts` 允许为空，
+    见 `_blocked_evidence`）。
+    """
     scanned, findings = scan_payload(payload, values=values)
     if findings:
         scanned = {**scanned, "status": "failed", "reason": "凭证扫描命中证据字段（已脱敏落盘）"}
-        assert_evidence_shape(scanned)
-    elif scanned.get("status") != "blocked":
+    # shape 校验按**原始**形状判定：blocked 证据刻意允许 `attempts: []`（见
+    # `_blocked_evidence`），即便它因扫描命中被改写成 failed，也仍是 blocked 形状 ——
+    # 用改写后的状态判会把它推进"attempts 非空"的判据里，反而误报。
+    if payload.get("status") != "blocked":
         assert_evidence_shape(scanned)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(scanned, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
 
 
+def _attempt_record(
+    observation: Observation, verdict: CaseVerdict, *, git_facts: dict[str, str],
+    fallback_started: str = "", fallback_finished: str = "",
+) -> dict[str, Any]:
+    """把一次真实运行的 observation 折成一条 attempt 记录（§9.1 原始产物在此落盘）。
+
+    与 `run_campaign` 的随跑随写（`_write_attempts_ledger`）**共用本函数** —— 两处
+    必须同构，否则"增量轨迹"与"最终证据"会出现两份不一致的形状。
+    """
+    case = _CASES_BY_ID[verdict.case_id]
+    details = dict(observation.details)
+    return {
+        "case_id": verdict.case_id,
+        "attempt": verdict.attempt,
+        "started_at_utc": details.get("started_at_utc") or fallback_started,
+        "finished_at_utc": details.get("finished_at_utc") or fallback_finished,
+        "input": case.input_text,
+        "code_sha": git_facts["code_sha"],
+        "git_tree": git_facts["git_tree"],
+        "session_id": details.get("session_id", ""),
+        "run_id": details.get("run_id", ""),
+        "assertions": dict(observation.assertions) if observation else {},
+        "assertion_details": {o.name: o.detail for o in verdict.assertions},
+        "tool_calls": _detail_list(details, "tool_calls"),
+        "tool_results": _detail_list(details, "tool_results"),
+        "final_reply": details.get("final_reply", "") or "",
+        "extraction_outputs": _detail_list(details, "extraction_outputs"),
+        "extraction_job_id": details.get("extraction_job_id"),
+        "extraction_state": details.get("extraction_state", "") or "",
+        "extraction_candidates": details.get("extraction_candidates"),
+        "protected_facts_before": _detail_list(details, "protected_facts_before"),
+        "protected_facts_after": _detail_list(details, "protected_facts_after"),
+        "verdict": "PASS" if verdict.passed else "FAIL",
+    }
+
+
+def _write_attempts_ledger(
+    path: Path, attempts: list[dict[str, Any]], *, sha: str,
+) -> None:
+    """P3-5：attempts 增量落盘（原子替换）。
+
+    整个 campaign 的 18 次 attempt 若只在内存 `list` 里攒着，进程中途崩溃就全丢 ——
+    票面 §10.2 要求"失败轨迹保留"。每跑完一次就追加并原子替换写一次（tmp + replace，
+    协议 §8.9）：崩溃时盘上留下**已经跑过**的那些，不会半截截断。`started_at_utc` 与
+    code_sha 在同一时刻取定，不随后续崩溃漂移。
+    """
+    payload = {
+        "campaign": "AC16",
+        "ticket": 663,
+        "code_sha": sha,
+        "type": "ac16_attempts_incremental",
+        "attempts_recorded": len(attempts),
+        "attempts": attempts,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
 async def run_campaign(args: argparse.Namespace) -> CampaignResult:
-    campaign_id = args.campaign_id or f"AC16-driver-{datetime.now(UTC).strftime('%H%M%S')}"
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    campaign_id = args.campaign_id or f"AC16-driver-{stamp[9:15]}"
     config = resolve_runner_config(args)
     runner = _RealRunner(config)
     preconditions = runner.preflight()
     if preconditions:
-        payload = _blocked_evidence(config, preconditions=preconditions, campaign_id=campaign_id)
-        path = _evidence_path(config, campaign_id)
+        now = _now_utc()
+        payload = _blocked_evidence(
+            config, preconditions=preconditions, campaign_id=campaign_id, now=now,
+        )
+        path = _evidence_path(config, campaign_id, stamp[:15] + "Z")
         if config.write:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            # P3-4：blocked 证据同样过 `scan_payload` 凭证扫描，不直接 write_text。
+            _write_evidence(payload, path, values=credential_scan_values(config, runner._settings()))
         else:
             path = None
         return CampaignResult(
@@ -1086,24 +1726,33 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
             failing_cases=(), note="；".join(preconditions),
         )
 
-    # 面已接好但本轮不跑：只有带凭证的 Round 3 才走到这里。
-    import uuid as _uuid
-
+    dir_path = _evidence_dir(config, campaign_id, stamp)
+    attempts_path = dir_path / "attempts.json"
     started_at = _now_utc()
     await runner._setup()
+    git_facts = _git_facts()
     verdicts: list[CaseVerdict] = []
     observations: list[Observation] = []
     for slot in build_plan():
         observation = await runner.run_slot(slot)
-        observation = replace(observation, details={
-            **observation.details, "session_id": _uuid.uuid4().hex, "run_id": _uuid.uuid4().hex,
-        })
+        verdict = case_verdict(observation)
         observations.append(observation)
-        verdicts.append(case_verdict(observation))
-    decision = decide_campaign(verdicts, full_sets_completed=1)
+        verdicts.append(verdict)
+        if config.write:
+            _write_attempts_ledger(
+                attempts_path,
+                [_attempt_record(o, v, git_facts=git_facts)
+                 for o, v in zip(observations, verdicts, strict=True)],
+                sha=git_facts["code_sha"],
+            )
+    # §10.2：只有跑到这里才把"整套 18 次已完成"记成 1——崩溃在中途不落这个终局证据，
+    # 盘上留 `attempts.json` 的增量轨迹（上一行）。
+    full_sets_completed = 1
+    decision = decide_campaign(verdicts, full_sets_completed=full_sets_completed)
     payload = campaign_evidence(
-        verdicts, observations, config, campaign_id=campaign_id, full_sets_completed=1,
-        git_facts=_git_facts(),
+        verdicts, observations, config, campaign_id=campaign_id,
+        full_sets_completed=full_sets_completed,
+        git_facts=git_facts,
         provider={
             "session_primary": {
                 "provider": config.session_primary_provider,
@@ -1115,14 +1764,14 @@ async def run_campaign(args: argparse.Namespace) -> CampaignResult:
             },
         },
         runtime={
-            "api": "FastAPI TestClient through production create_app",
+            "api": "production create_app ASGI (httpx.ASGITransport, same event loop)",
             "production_tool_registry_and_executor": True,
             "scripted_or_fake_model": False,
             "independent_session_per_attempt": True,
         },
         started_at_utc=started_at, completed_at_utc=_now_utc(),
     )
-    path = _evidence_path(config, campaign_id)
+    path = _evidence_path(config, campaign_id, stamp)
     if config.write:
         # 凭证扫描：直传 key 与配置文件里的值一起作为**精确值**喂进扫描层，
         # 命中即判 fail（`_write_evidence`）。
