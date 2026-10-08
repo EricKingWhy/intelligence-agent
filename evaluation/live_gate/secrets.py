@@ -49,7 +49,29 @@ _KEY_SHAPED = (
     re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}"),
     re.compile(r"\b[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b"),  # id.secret 形态
 )
-_AUTH_HEADER = re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;'\"]+")
+#: `Authorization:` / `Authorization=` 形态的 HTTP 头。
+#:
+#: ⚠ **键后不能直接跟 UUID**：生产每条 session 都投影一条 `authorization` 保护事实，其
+#: `fact_id` 逐字是 `authorization:<event_id>` —— 形状与 HTTP 头完全同构，于是整份
+#: AC16 证据被命中 18 处、`status` 翻成 failed，纯假阳性。UUID 是**标识符**，不是凭证；
+#: 这与本模块已有的"纯长 hex 不收"（见上）是同一条理由：形状层只抓"几乎不可能是自然
+#: 文本/标识符"的东西。
+#:
+#: **判据放在键后（`(?!\s*uuid)`），不放在值前**：放在值前那一版把负向前瞻摆在可选的
+#: `(?:bearer\s+)?` **之后**，回溯会让 `[^\s]+` 只吃到 `Bearer`，把 `Authorization:
+#: Bearer <uuid>` 掩成 `Authorization: *** <uuid>` —— 看起来脱敏了，凭证却整条明文留着
+#: （Round 6 Standards 轴实测）。键后判断没有回溯空间：`authorization:` 后面紧跟 UUID
+#: 只可能是事实 ID，直接整条不匹配。
+#:
+#: 代价（**已知且刻意**）：键后紧跟 UUID 的真头 `Authorization: <uuid>` 会漏报。这与本模块
+#: 反控用例钉住的取舍一致 —— 形状层不为"UUID 当凭证"这一极小概率形态牺牲整份证据的
+#: 可用性（带 `Bearer` 前缀的形态仍照常命中，凭证不会泄漏）。
+_AUTH_HEADER = re.compile(
+    r"(?i)\b(authorization\s*[:=]\s*)(?!\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b)"
+    r"(?:bearer\s+)*"
+    r"[^\s,;'\"]+"
+)
+
 #: "键名像凭证"的词表：赋值形态（`_SECRET_ASSIGNMENT`）与 JSON 条目扫描（`_SECRET_KEY_NAME`）
 #: 共用一份，避免两处对"什么算凭证字段"给出不同答案。
 _SECRET_KEY_VOCAB = r"api[_-]?key|apikey|secret|token|password|passwd|credential"

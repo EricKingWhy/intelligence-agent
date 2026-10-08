@@ -1,0 +1,629 @@
+{
+  "campaign": "AC16",
+  "ticket": 663,
+  "code_sha": "938680d17f841b01b19eb0954e8d3f9dfe9298b2",
+  "type": "ac16_attempts_incremental",
+  "attempts_recorded": 4,
+  "attempts": [
+    {
+      "case_id": "M1",
+      "attempt": 1,
+      "started_at_utc": "2026-10-08T07:29:13.476+00:00",
+      "finished_at_utc": "2026-10-08T07:29:30.725+00:00",
+      "input": "本次修改不能新增第三方依赖。",
+      "code_sha": "938680d17f841b01b19eb0954e8d3f9dfe9298b2",
+      "git_tree": "ac621496e11b700fed831cd62fc5994eeeebe309",
+      "session_id": "ac16-m1-1-8cff67ca",
+      "run_id": "5b8a20b3-780d-4c0e-b488-4dc4147ccdcb",
+      "assertions": {
+        "real_model_turn_observed": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "active_constraint_projection_contains_required_text": true
+      },
+      "assertion_details": {
+        "active_constraint_projection_contains_required_text": "",
+        "extraction_job_completed": "",
+        "real_model_turn_observed": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "4cb166a2-8815-458f-9d1a-82ca5b6e4e24",
+          "seq": 32,
+          "time": "2026-10-08T07:29:20.998+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m1-1-8cff67ca",
+          "schema_version": "runtime_event/v1",
+          "run_id": "5b8a20b3-780d-4c0e-b488-4dc4147ccdcb",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_5c00af4e468841c5bcff8546",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "本次修改不能新增第三方依赖。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "b8e11ad8-95dd-4e44-8646-dda6aa3b7057",
+          "seq": 35,
+          "time": "2026-10-08T07:29:21.012+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m1-1-8cff67ca",
+          "schema_version": "runtime_event/v1",
+          "run_id": "5b8a20b3-780d-4c0e-b488-4dc4147ccdcb",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_5c00af4e468841c5bcff8546",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-fe716c81c5e1f15e1775dcc2\",\"fact_type\":\"constraint\",\"value\":\"本次修改不能新增第三方依赖。\",\"source_event_id\":\"5f7f270d-f9f6-4f6e-bc8a-57f40b0c656a\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":1.8,\"total_duration_ms\":1.8},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已保存该约束（status: `registered`）：**本次修改不能新增第三方依赖。** 后续工作会严格遵守，只使用现有依赖。\n\n有具体任务时随时告诉我。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"本次修改不能新增第三方依赖。\"}]}"
+      ],
+      "extraction_job_id": "4e23da3c-118f-463a-b233-0c1a4598c3bb",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "本次修改不能新增第三方依赖。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:968f8ec6-5038-4179-92ca-d5adc539ba1e",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "968f8ec6-5038-4179-92ca-d5adc539ba1e",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m1-1-8cff67ca"
+        },
+        {
+          "fact_id": "pf-4724c2d239787a91872fd190",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "5f7f270d-f9f6-4f6e-bc8a-57f40b0c656a",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-1-8cff67ca"
+        },
+        {
+          "fact_id": "pf-fe716c81c5e1f15e1775dcc2",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "5f7f270d-f9f6-4f6e-bc8a-57f40b0c656a",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-1-8cff67ca"
+        },
+        {
+          "fact_id": "work_boundary:8070827a-06a8-4661-9801-24711ed31999",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "5b8a20b3-780d-4c0e-b488-4dc4147ccdcb"
+          },
+          "source_event_id": "8070827a-06a8-4661-9801-24711ed31999",
+          "source_seq": 55,
+          "status": "active",
+          "session_id": "ac16-m1-1-8cff67ca"
+        }
+      ],
+      "error": "",
+      "model_provenance": {
+        "session_primary_constructions": 3,
+        "temperature_configured": [
+          0.0
+        ],
+        "thinking_disabled_configured": false,
+        "note": "驱动不注入 provider 专用 extra_body；'thinking 已关'无依据，如实记 False"
+      },
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M1",
+      "attempt": 2,
+      "started_at_utc": "2026-10-08T07:29:30.755+00:00",
+      "finished_at_utc": "2026-10-08T07:30:13.295+00:00",
+      "input": "本次修改不能新增第三方依赖。",
+      "code_sha": "938680d17f841b01b19eb0954e8d3f9dfe9298b2",
+      "git_tree": "ac621496e11b700fed831cd62fc5994eeeebe309",
+      "session_id": "ac16-m1-2-0a997ba4",
+      "run_id": "aa1ab862-65f5-4c51-b35d-710f6ac89448",
+      "assertions": {
+        "real_model_turn_observed": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "active_constraint_projection_contains_required_text": true
+      },
+      "assertion_details": {
+        "active_constraint_projection_contains_required_text": "",
+        "extraction_job_completed": "",
+        "real_model_turn_observed": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "230b4a98-c04d-415a-b4be-92878b716993",
+          "seq": 51,
+          "time": "2026-10-08T07:29:59.811+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m1-2-0a997ba4",
+          "schema_version": "runtime_event/v1",
+          "run_id": "aa1ab862-65f5-4c51-b35d-710f6ac89448",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_008dbae0b8a044b09651e9c4",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "本次修改不能新增第三方依赖。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "a9246e39-d74b-48d9-ad7f-05685e4b0499",
+          "seq": 54,
+          "time": "2026-10-08T07:29:59.828+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m1-2-0a997ba4",
+          "schema_version": "runtime_event/v1",
+          "run_id": "aa1ab862-65f5-4c51-b35d-710f6ac89448",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_008dbae0b8a044b09651e9c4",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-0d7c981d3bb5ba46a650f5e3\",\"fact_type\":\"constraint\",\"value\":\"本次修改不能新增第三方依赖。\",\"source_event_id\":\"b3001968-23dd-4462-a744-f5784c915af9\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":1.6,\"total_duration_ms\":1.6},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已登记该约束：**本次修改不能新增第三方依赖。**（状态：registered）后续修改中我会严格只用现有依赖，不引入任何新的第三方库。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"本次修改不能新增第三方依赖。\"}]}"
+      ],
+      "extraction_job_id": "8e37ae7c-0812-4a59-9199-20c29c2ca72a",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "本次修改不能新增第三方依赖。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:4d010fcb-f8e0-4451-8192-134dbbbea95e",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "4d010fcb-f8e0-4451-8192-134dbbbea95e",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m1-2-0a997ba4"
+        },
+        {
+          "fact_id": "pf-d39f1d2663faf581156562f8",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b3001968-23dd-4462-a744-f5784c915af9",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-2-0a997ba4"
+        },
+        {
+          "fact_id": "pf-0d7c981d3bb5ba46a650f5e3",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b3001968-23dd-4462-a744-f5784c915af9",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-2-0a997ba4"
+        },
+        {
+          "fact_id": "work_boundary:03733e71-bb7f-4a8d-8b64-31349e75aeda",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "aa1ab862-65f5-4c51-b35d-710f6ac89448"
+          },
+          "source_event_id": "03733e71-bb7f-4a8d-8b64-31349e75aeda",
+          "source_seq": 72,
+          "status": "active",
+          "session_id": "ac16-m1-2-0a997ba4"
+        }
+      ],
+      "error": "",
+      "model_provenance": {
+        "session_primary_constructions": 4,
+        "temperature_configured": [
+          0.0
+        ],
+        "thinking_disabled_configured": false,
+        "note": "驱动不注入 provider 专用 extra_body；'thinking 已关'无依据，如实记 False"
+      },
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M9",
+      "attempt": 1,
+      "started_at_utc": "2026-10-08T07:30:13.346+00:00",
+      "finished_at_utc": "2026-10-08T07:35:35.053+00:00",
+      "input": "我更正这条长期约束：今后的任务可以按需要新增第三方依赖。",
+      "code_sha": "938680d17f841b01b19eb0954e8d3f9dfe9298b2",
+      "git_tree": "ac621496e11b700fed831cd62fc5994eeeebe309",
+      "session_id": "ac16-m9-1-00e62a67",
+      "run_id": "27e03e60-7ff8-474d-9bea-b8b25f8b2f90",
+      "assertions": {
+        "real_model_turn_observed": true,
+        "no_memory_sidecar_events": true,
+        "run_paused_user_input": true,
+        "card_has_exact_old_and_new": true,
+        "no_register_constraint_before_answer": true,
+        "active_projection_unchanged_before_answer": true,
+        "selected_answer_recorded_once": true,
+        "run_resumed_in_same_run": true,
+        "persistent_choice_superseded_old": true
+      },
+      "assertion_details": {
+        "run_paused_user_input": "",
+        "card_has_exact_old_and_new": "",
+        "no_register_constraint_before_answer": "",
+        "active_projection_unchanged_before_answer": "",
+        "selected_answer_recorded_once": "",
+        "run_resumed_in_same_run": "",
+        "persistent_choice_superseded_old": "",
+        "real_model_turn_observed": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "3ba6c85a-dd44-43e7-8770-64e5223aec76",
+          "seq": 49,
+          "time": "2026-10-08T07:30:25.554+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m9-1-00e62a67",
+          "schema_version": "runtime_event/v1",
+          "run_id": "27e03e60-7ff8-474d-9bea-b8b25f8b2f90",
+          "step_id": 2,
+          "data": {
+            "tool_call_id": "call_9290d6dd8b0141039c3eb04b",
+            "tool_name": "request_constraint_resolution",
+            "args": {
+              "fact_id": "pf-895b79ca975fcd7cc544cf3c",
+              "candidate": "今后的任务可以按需要新增第三方依赖。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "b6e767c8-bda6-4557-8124-acf772d11544",
+          "seq": 52,
+          "time": "2026-10-08T07:30:25.572+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m9-1-00e62a67",
+          "schema_version": "runtime_event/v1",
+          "run_id": "27e03e60-7ff8-474d-9bea-b8b25f8b2f90",
+          "step_id": 2,
+          "data": {
+            "tool_call_id": "call_9290d6dd8b0141039c3eb04b",
+            "content": "{\"ok\":true,\"message\":\"约束问题已保存；当前 run 将暂停，等待你的选择后继续。\",\"data\":{\"status\":\"requested\",\"request_id\":\"bd9ba5c2-3c65-48a6-8065-4e5f9c57a790\",\"question\":\"新要求与一条生效约束可能冲突。请选择如何处理。\",\"choices\":[{\"id\":\"replace_persistently\",\"label\":\"永久替换旧约束\"},{\"id\":\"current_task_only\",\"label\":\"仅当前任务采用新约束\"},{\"id\":\"keep_existing\",\"label\":\"保留旧约束并忽略本次要求\"},{\"id\":\"custom\",\"label\":\"自定义回复\"}],\"old_value\":\"本次修改不能新增第三方依赖。\",\"candidate\":\"今后的任务可以按需要新增第三方依赖。\"},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":0.5,\"total_duration_ms\":0.5},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "request_constraint_resolution",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已确认：旧约束「本次修改不能新增第三方依赖。」已被永久替换为新约束「今后的任务可以按需要新增第三方依赖。」\n\n今后的任务按此新约束执行——可以按需要新增第三方依赖。如需开始具体工作，请告诉我任务内容。",
+      "extraction_outputs": [],
+      "extraction_job_id": null,
+      "extraction_state": "",
+      "extraction_candidates": null,
+      "protected_facts_before": [
+        {
+          "fact_id": "pf-5d11c1f67e3f9925763298d6",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b3d4a4ab-7e32-4a63-bb27-f5c4f098d944",
+          "source_seq": 1,
+          "status": "active",
+          "session_id": "ac16-m9-1-00e62a67"
+        },
+        {
+          "fact_id": "pf-895b79ca975fcd7cc544cf3c",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b3d4a4ab-7e32-4a63-bb27-f5c4f098d944",
+          "source_seq": 1,
+          "status": "active",
+          "session_id": "ac16-m9-1-00e62a67"
+        }
+      ],
+      "protected_facts_after": [
+        {
+          "fact_id": "pf-5d11c1f67e3f9925763298d6",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b3d4a4ab-7e32-4a63-bb27-f5c4f098d944",
+          "source_seq": 1,
+          "status": "active",
+          "session_id": "ac16-m9-1-00e62a67"
+        },
+        {
+          "fact_id": "pf-895b79ca975fcd7cc544cf3c",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b3d4a4ab-7e32-4a63-bb27-f5c4f098d944",
+          "source_seq": 1,
+          "status": "superseded",
+          "session_id": "ac16-m9-1-00e62a67",
+          "superseded_by_fact_id": "pf-71b25953b10b8b97533576bc"
+        },
+        {
+          "fact_id": "authorization:6fe32f20-a227-4241-bfa6-170348010671",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "6fe32f20-a227-4241-bfa6-170348010671",
+          "source_seq": 4,
+          "status": "active",
+          "session_id": "ac16-m9-1-00e62a67"
+        },
+        {
+          "fact_id": "work_boundary:ad7a8c03-686b-48d9-87bc-c177a2d3a112",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/paused",
+            "run_id": "27e03e60-7ff8-474d-9bea-b8b25f8b2f90",
+            "reason": "user_input"
+          },
+          "source_event_id": "ad7a8c03-686b-48d9-87bc-c177a2d3a112",
+          "source_seq": 53,
+          "status": "active",
+          "session_id": "ac16-m9-1-00e62a67"
+        },
+        {
+          "fact_id": "pf-71b25953b10b8b97533576bc",
+          "type": "constraint",
+          "value": "今后的任务可以按需要新增第三方依赖。",
+          "source_event_id": "c3f8169d-be73-4f8b-8fb3-3d451ee09efb",
+          "source_seq": 54,
+          "status": "active",
+          "session_id": "ac16-m9-1-00e62a67"
+        },
+        {
+          "fact_id": "work_boundary:d8d2fd32-57f7-4fa8-b372-012edb3e01d7",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "27e03e60-7ff8-474d-9bea-b8b25f8b2f90"
+          },
+          "source_event_id": "d8d2fd32-57f7-4fa8-b372-012edb3e01d7",
+          "source_seq": 122,
+          "status": "active",
+          "session_id": "ac16-m9-1-00e62a67"
+        }
+      ],
+      "error": "",
+      "model_provenance": {
+        "session_primary_constructions": 3,
+        "temperature_configured": [
+          0.0
+        ],
+        "thinking_disabled_configured": false,
+        "note": "驱动不注入 provider 专用 extra_body；'thinking 已关'无依据，如实记 False"
+      },
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M9",
+      "attempt": 2,
+      "started_at_utc": "2026-10-08T07:35:35.088+00:00",
+      "finished_at_utc": "2026-10-08T07:40:53.878+00:00",
+      "input": "我更正这条长期约束：今后的任务可以按需要新增第三方依赖。",
+      "code_sha": "938680d17f841b01b19eb0954e8d3f9dfe9298b2",
+      "git_tree": "ac621496e11b700fed831cd62fc5994eeeebe309",
+      "session_id": "ac16-m9-2-0ea2bd79",
+      "run_id": "08df0d9e-55fe-4df6-bbab-678ca0a21c59",
+      "assertions": {
+        "real_model_turn_observed": true,
+        "no_memory_sidecar_events": true,
+        "run_paused_user_input": true,
+        "card_has_exact_old_and_new": true,
+        "no_register_constraint_before_answer": true,
+        "active_projection_unchanged_before_answer": true,
+        "selected_answer_recorded_once": true,
+        "run_resumed_in_same_run": true,
+        "persistent_choice_superseded_old": true
+      },
+      "assertion_details": {
+        "run_paused_user_input": "",
+        "card_has_exact_old_and_new": "",
+        "no_register_constraint_before_answer": "",
+        "active_projection_unchanged_before_answer": "",
+        "selected_answer_recorded_once": "",
+        "run_resumed_in_same_run": "",
+        "persistent_choice_superseded_old": "",
+        "real_model_turn_observed": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "a08d8fd8-1b8b-4f5b-a467-db241b410ce5",
+          "seq": 21,
+          "time": "2026-10-08T07:35:39.848+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m9-2-0ea2bd79",
+          "schema_version": "runtime_event/v1",
+          "run_id": "08df0d9e-55fe-4df6-bbab-678ca0a21c59",
+          "step_id": 2,
+          "data": {
+            "tool_call_id": "call_e9ead74fa6e9448e9aa2cc3c",
+            "tool_name": "request_constraint_resolution",
+            "args": {
+              "fact_id": "pf-863b8615fd667f3ad2c17df0",
+              "candidate": "今后的任务可以按需要新增第三方依赖。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "2d963ec7-de19-4bf1-8046-6c4e73929dfb",
+          "seq": 24,
+          "time": "2026-10-08T07:35:39.908+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m9-2-0ea2bd79",
+          "schema_version": "runtime_event/v1",
+          "run_id": "08df0d9e-55fe-4df6-bbab-678ca0a21c59",
+          "step_id": 2,
+          "data": {
+            "tool_call_id": "call_e9ead74fa6e9448e9aa2cc3c",
+            "content": "{\"ok\":true,\"message\":\"约束问题已保存；当前 run 将暂停，等待你的选择后继续。\",\"data\":{\"status\":\"requested\",\"request_id\":\"2ba20466-707a-44ab-a5e3-491f8ce223d2\",\"question\":\"新要求与一条生效约束可能冲突。请选择如何处理。\",\"choices\":[{\"id\":\"replace_persistently\",\"label\":\"永久替换旧约束\"},{\"id\":\"current_task_only\",\"label\":\"仅当前任务采用新约束\"},{\"id\":\"keep_existing\",\"label\":\"保留旧约束并忽略本次要求\"},{\"id\":\"custom\",\"label\":\"自定义回复\"}],\"old_value\":\"本次修改不能新增第三方依赖。\",\"candidate\":\"今后的任务可以按需要新增第三方依赖。\"},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":0.4,\"total_duration_ms\":0.4},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "request_constraint_resolution",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已确认：旧约束「本次修改不能新增第三方依赖。」已被永久替换为新约束「今后的任务可以按需要新增第三方依赖。」后续任务将按新约束执行，可以按需新增第三方依赖。",
+      "extraction_outputs": [],
+      "extraction_job_id": null,
+      "extraction_state": "",
+      "extraction_candidates": null,
+      "protected_facts_before": [
+        {
+          "fact_id": "pf-83c3b1e0f513e56f0b0b760e",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b38427a3-f0d4-4e46-a44a-7ab2a0226183",
+          "source_seq": 1,
+          "status": "active",
+          "session_id": "ac16-m9-2-0ea2bd79"
+        },
+        {
+          "fact_id": "pf-863b8615fd667f3ad2c17df0",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b38427a3-f0d4-4e46-a44a-7ab2a0226183",
+          "source_seq": 1,
+          "status": "active",
+          "session_id": "ac16-m9-2-0ea2bd79"
+        }
+      ],
+      "protected_facts_after": [
+        {
+          "fact_id": "pf-83c3b1e0f513e56f0b0b760e",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b38427a3-f0d4-4e46-a44a-7ab2a0226183",
+          "source_seq": 1,
+          "status": "active",
+          "session_id": "ac16-m9-2-0ea2bd79"
+        },
+        {
+          "fact_id": "pf-863b8615fd667f3ad2c17df0",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "b38427a3-f0d4-4e46-a44a-7ab2a0226183",
+          "source_seq": 1,
+          "status": "superseded",
+          "session_id": "ac16-m9-2-0ea2bd79",
+          "superseded_by_fact_id": "pf-df2aab4239a05200394744a7"
+        },
+        {
+          "fact_id": "authorization:76ca9649-c1dc-4042-8f47-27f103d2cb45",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "76ca9649-c1dc-4042-8f47-27f103d2cb45",
+          "source_seq": 4,
+          "status": "active",
+          "session_id": "ac16-m9-2-0ea2bd79"
+        },
+        {
+          "fact_id": "work_boundary:3a8a046d-7eb3-480f-ba09-ab9915a08f1a",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/paused",
+            "run_id": "08df0d9e-55fe-4df6-bbab-678ca0a21c59",
+            "reason": "user_input"
+          },
+          "source_event_id": "3a8a046d-7eb3-480f-ba09-ab9915a08f1a",
+          "source_seq": 25,
+          "status": "active",
+          "session_id": "ac16-m9-2-0ea2bd79"
+        },
+        {
+          "fact_id": "pf-df2aab4239a05200394744a7",
+          "type": "constraint",
+          "value": "今后的任务可以按需要新增第三方依赖。",
+          "source_event_id": "4e3b5785-cd40-4214-b118-f3ec339a98c2",
+          "source_seq": 26,
+          "status": "active",
+          "session_id": "ac16-m9-2-0ea2bd79"
+        },
+        {
+          "fact_id": "work_boundary:677545f4-51a3-4f87-a05a-07712b49a9d3",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "08df0d9e-55fe-4df6-bbab-678ca0a21c59"
+          },
+          "source_event_id": "677545f4-51a3-4f87-a05a-07712b49a9d3",
+          "source_seq": 96,
+          "status": "active",
+          "session_id": "ac16-m9-2-0ea2bd79"
+        }
+      ],
+      "error": "",
+      "model_provenance": {
+        "session_primary_constructions": 2,
+        "temperature_configured": [
+          0.0
+        ],
+        "thinking_disabled_configured": false,
+        "note": "驱动不注入 provider 专用 extra_body；'thinking 已关'无依据，如实记 False"
+      },
+      "verdict": "PASS"
+    }
+  ]
+}
