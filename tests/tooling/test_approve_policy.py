@@ -14,6 +14,7 @@ Codex acceptWithExecpolicyAmendment（精确安装 / 换行拒绝）、ZCode（�
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 
@@ -398,8 +399,13 @@ class TestExecutorIntegration:
             approval_callback=approver, project_root=tmp_path,
         )
         result = await executor.execute(_tc("bash", {"command": "echo a\necho b"}))
-        # 本次调用仍被显式批准，但含换行的命令级规则拒绝安装（不崩溃）。
-        assert result.result.ok is True
+        # 含换行的命令级规则拒绝安装（不崩溃）；命令本身在 Windows 本机沙箱被拒绝
+        # （#850：cmd.exe 会把它吃掉却报 exit_code=0），其它平台照常执行。
+        if os.name == "nt":
+            assert result.result.ok is False
+            assert "命令被拒绝" in (result.result.message or "")
+        else:
+            assert result.result.ok is True
         assert ApprovePolicyStore(tmp_path).load() == []
 
     @pytest.mark.asyncio

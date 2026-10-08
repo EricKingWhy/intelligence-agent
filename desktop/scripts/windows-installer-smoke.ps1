@@ -13,8 +13,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-& $Installer /S
-if ($LASTEXITCODE -ne 0) { throw "installer exited with $LASTEXITCODE" }
+# NSIS installers are GUI-subsystem executables: `& $exe` returns immediately
+# and never sets $LASTEXITCODE, so both the wait and the exit code have to come
+# from Start-Process (#831, measured on this machine).
+$install = Start-Process -FilePath $Installer -ArgumentList '/S' -Wait -PassThru
+if ($install.ExitCode -ne 0) { throw "installer exited with $($install.ExitCode)" }
 
 $regKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$RegistryKey"
 $installLocation = (Get-ItemProperty -Path $regKey -ErrorAction Stop).InstallLocation

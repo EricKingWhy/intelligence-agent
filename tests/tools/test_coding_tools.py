@@ -15,7 +15,9 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from agent_harness.sandbox import (
+    ExecResult,
     LocalSubprocessSandbox,
+    MultiLineCommandUnsupportedError,
     ShellEnvironment,
     ShellFamily,
 )
@@ -879,3 +881,40 @@ def test_crlf_line_endings_preserved_on_read_write_cycle(
     with open(raw_out, "r", encoding="utf-8", newline="") as f:
         roundtrip = f.read()
     assert roundtrip == crlf_content, "CRLF 行尾在 write_text → read 中被篡改"
+
+
+class _RefusingStub(LocalSubprocessSandbox):
+    """exec 直接抛多行拒绝的替身：让工具层的映射在任何平台都可测。"""
+
+    def exec(self, command: str, **kwargs) -> ExecResult:  # type: ignore[override]
+        raise MultiLineCommandUnsupportedError(
+            "命令被拒绝：含内部换行的多行命令（测试替身）。"
+        )
+
+
+class TestBashToolRefusesUnsupportedCommandShape:
+    """#850：沙箱拒绝的命令形状必须映射成**工具失败**。
+
+    不能沿用 ADR-0002 的「非零 exit_code 仍 ok=True」——那条的前提是命令**真的执行了**；
+    这里命令一个字节都没跑，报 ok=True 等于对模型说「命令已执行」。
+    """
+
+    def test_description_warns_that_multiline_is_refused(self, tmp_path):
+        """工具描述是模型唯一的线索来源：必须提前声明多行会被拒。"""
+        stub = _ShellStub(tmp_path, ShellEnvironment("cmd.exe", ShellFamily.CMD))
+
+        description = BashTool(stub).description
+
+        assert "换行" in description
+        assert "拒绝" in description
+
+    @pytest.mark.asyncio
+    async def test_refusal_maps_to_tool_execution_error(self, tmp_path):
+        """直调工具：bash 是 DANGER，经 ToolExecutor 会先被审批闸拒掉，测不到映射。"""
+        tool = BashTool(_RefusingStub(tmp_path))
+
+        result = await tool.execute(tool.args_schema(command="echo a\necho b"))
+
+        assert result.ok is False
+        assert result.error_code is ErrorCode.TOOL_EXECUTION_ERROR
+        assert "换行" in result.message

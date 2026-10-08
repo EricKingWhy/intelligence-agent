@@ -65,6 +65,15 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   `PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q -p no:randomly`
 - 期望证据：`N passed / M skipped / 0 failed / 0 errors` **连同**跑它的 sha 与 `git rev-parse <sha>^{tree}`。
 - 耗时：分钟级（历史读数见 `docs/phase_status/2026-09.md`，本批未重跑）。
+- **环境前置**：`.venv` 须是 `uv sync --locked --all-extras` 口径。缺 `memory` extra 时，
+  本命令在**收集期**即 `ModuleNotFoundError: No module named 'langgraph'`
+  （`tests/memory/test_langmem_store_actions.py:24`，rc=2）——不是用例失败。
+- **收集面**：本命令是**无参数**的仓库根调用，靠 `pyproject.toml` 的 `testpaths = ["tests"]` 收口；
+  去掉它，收集面就是整个 rootdir，会走进根下两棵 **gitignored** 的打包产物树
+  （`desktop/dist-installer/`、`desktop/installer/staging/`，各含一份 Python 运行时）
+  ⇒ **一个用例都不跑**的访问违例（`rc=3221225477`，Git Bash 下 `rc=139`），输出里没有任何
+  失败签名；CI 的检出里没有那两棵树 ⇒ 只有建过安装包的机器会踩到。
+  判据：`tests/tooling/test_pytest_root_scope.py`（#856）。
 
 ### ③ 后端全量（本机沙箱绕行）
 

@@ -4144,9 +4144,12 @@ B-21 审查行明确记着「成功路径仍从未在真实 Web 服务上执行�
 | `tests/web/test_web_batch51_spec_contract.py::test_approval_queue_gc_after_run_completes` | 失败断言 = `:381-382 assert session_id not in state.approval_queues`（"run 终结后 approval_queue 必须被 GC（防泄漏）"）；同用例其余断言（`:362` approval_id 在场 / `:366` run 暂停时 queue 在场）失败一律按真缺陷阻断；无超时/预算数字成分 | 合并树 `a131c897` 全量 r1 唯一红（5653P/1F/1079.44s）；隔离单跑 passed（3.86s）+ 同文件全族 6 passed（6.41s）；本线改动面（session/errors.py、session/service.py、web/domain_errors.py、tools/write.py + 3 测试文件）与该测试零交集；pre-existing：2026-09-10 起多批叙事在册（月档 2026-09.md:220「已知计时 flake，隔离复跑必过」、tracker:4027、tracker:6892 基线纯净树同红正控、tracker:7158 W-22「负载敏感 flake」） | 同树 r2 全量 0 failed（5654P/923.82s，2026-10-04 当场采集；r1 1F→r2 0F 唯一差异即本用例，总数 5715 两轮闭合） | 生效（r1 1F→隔离绿→r2 同树 0F；Windows 负载敏感型断言早读，非确定性。机制 = run 终结 JSONL 落盘先于 done_callback 调度，测试以固定 `asyncio.sleep(0.1)`（:378）代替对 approval_queues 轮询，负载下回调超窗 ⇒ 断言早读；是否开票加固待用户裁决） |
 | `tests/session/test_progress_file.py::TestAtomicWrite::test_readonly_target_fails_explicitly` | **失败断言 = `:420` `assert not outcome.ok and outcome.reason`**（实得 `ProgressWriteOutcome(ok=True)`，即只读目标未报失败）；同用例其余断言零失败；无超时/预算数字成分 | impC 树（`d7e3c22c`）与基线副本（`d377b8e4`，隔离 clone + `PYTHONPATH=副本/src`）同红（2026-10-05 当场采集）；根因 = 本机以 root（uid=0）运行 ⇒ `os.access(p, os.W_OK)` 恒真，`progress.py:696` 只读前置检查被 root 权限位绕过，`os.replace` 第二道防线的 `PermissionError` 同被 root 直写绕过 | 基线同红即独立确认（同一签名、同一断言、两棵树） | 生效（root 环境项：`#660` 防护在 root 下不可判，非 #525 引入——本线改动面 tooling/edit 与 progress.py 零交集；非 root 环境下该用例按真缺陷处理，不在此条目豁免内） |
 | `web/e2e/workspace-modes.spec.ts:102`（`test` = `AC6：tab 集恰好等于"声明为真 且有实现"的面（逐面独立）`，跑在 chromium-1280 / chromium-1920 两个 project） | **测试级超时**：`Test timed out in 30000ms`（playwright `timeout: 30_000`），`failureMessages` 唯一含超时文本、**无任何 assertion 级失败**；该用例任何 assertion 级失败一律按真缺陷阻断 | #357 门禁期组合跑（`--workers=2`，2 核满载）该 node 2 失败（两个 project 各 1）；**不含本批 UI 层改动的树（`77e5a844`）同 spec 同签名同失败** ⇒ 非本批 UI 引入；作者侧安静单跑 2/2 通过 | **已取得（2026-10-07，parent 当场采集）**：本树（`21c60fd9`）隔离单跑 `--workers=1` **2/2 通过**（chromium-1280 10.4s / chromium-1920 10.9s），退出码 0 | ✅ **生效**：命中本签名时允许按「同树单跑 3 次、≥2 次通过」当场取证而不必重跑全量；签名不符 / 不在表内 ⇒ 一律阻断不变。**同 hazard 兄弟用例未登记**（组合跑中同文件 AC1/AC2/AC3/AC4/AC5/AC7/#193/#223 未出现同签名失败）⇒ 一旦出现各自同签名失败，先按阻断处理再决定是否登记 |
+| `tests/recovery/test_approval_http_ack_kill.py::test_http_200_approval_survives_barrier_kill_and_startup_recovery` | **测试级超时**：`TimeoutError`，唯一失败点 = `:27` 的 `await asyncio.wait_for(process.stdout.readline(), timeout=20)`（经 `:56` 的 `_read_child_line(process)` 调用，即子进程 20 s 内没吐出 `READY:` 行）；`failureMessages` 唯一含超时文本、**无任何 assertion 级失败**（`:57` `ready.startswith("READY:")`、`:88` `BARRIER:` 等断言零失败）——命中任何 assertion 级失败一律按真缺陷阻断 | 冻结树 `12034e4f` 全量读数 **15 failed / 7004 passed / 28 skipped / 51 deselected / 1 error**（2592.62 s，日志 `D:\w21-work\gate-sync2.txt`），15 条红中命中本签名者**唯一** = 本用例；同树隔离单跑 3 次 **3 passed**（21.28 / 21.28 / 21.16 s，退出码 0）；测试文件 blob 与 `origin/main` 逐字相同 | **已取得（2026-10-09）**：独立只读子代理当场采集——同树隔离单跑 3 次 **3 passed**（21.10 / 17.01 / 20.68 s，退出码 0）；同一用例在**纯 `origin/main` 树**（`git archive origin/main` 解包 + `PYTHONPATH=<副本>/src`）单跑 **1 passed**（14.16 s，退出码 0） | ✅ **生效**（2026-10-09 新登记）：双重前提已齐（本行「独立确认」栏已填 + 状态生效 + 失败签名唯一命中本行）⇒ 命中本签名时允许按「同树单跑 3 次、≥2 次通过」当场取证而**不必重跑全量**；签名不符 / 不在表内 ⇒ 一律阻断不变。**同 hazard 兄弟用例**：本文件只有一个测试函数（`:39`），`_read_child_line` 的两处调用（`:56` 读 `READY:` / `:88` 读 `BARRIER:`）都在本用例内 ⇒ **无兄弟用例**；`tests/recovery/test_session_budget_request_recovery.py:77` 是 `wait_for(..., timeout=remaining)`（预算由剩余时间算，非固定 20 s）⇒ 签名不同、**不登记**，一旦出现各自同签名失败先按阻断处理再决定是否登记 |
 | `tests/web/test_web_ws_relay.py::test_ws_truncation_criterion_is_persisted_max_not_enqueue_cursor` | **失败断言 = `:906` `assert "stream/truncated" not in types`**，实得 `types == ["stream/truncated"]`（快照被误判超限、回了截断控制帧）；**同用例其它断言失败一律按真缺陷阻断** —— `:858`（前置「在途 run 必须已产出 >2 个事件」）、`:886`（「持久面持续前进，无法静默」）、`:912`（`seqs == [persisted_max - 1, persisted_max]`，窗口应恰好补持久面那两条）；无超时/预算数字成分 | 来源 #831 后端全量分块跑：该用例截断判据间歇红 **1 次**（签名逐字 = `assert 'stream/truncated' not in ['stream/truncated']`，即 `:906`）；与 #831 代码 diff **零交集**（`git diff 100a4ff..HEAD -- tests/web` 为空）；先例：同文件 sibling `test_ws_relay` truncation 判据曾登 #415（在册 flake，后被 `1ebde312` "burst-then-stall + 静默判据" 根除，本条为该 hazard 根除后的残余复发）。**本机当场采集（2026-10-09，冻结树 `b43efca8` tree `c982b16953799deb2d2b9c9675a16eb4223a11bb`）**：整文件隔离单跑 3 次 **16 passed / 16 passed / 16 passed（51.72s / 49.45s / 35.11s）**（`--basetemp=~/pytest-flake-ws/run{1,2,3}`，venv bin 前置 PATH，`no_proxy`/`NO_PROXY` 大小写均清空） | **仅取得「隔离一致性」读数（2026-10-09）**：独立只读子代理同树（`b43efca8`，tree `c982b169…`）隔离单跑该文件 **3 次全部 16 passed**（ic1/ic2/ic3 = 44.94s / 35.25s / 33.26s，退出码均 0）。**但按 §8.6.3 line 543，隔离读数不构成「能复现该环境的独立确认」**：该 flake 为全量并行负载诱发（隔离必绿），独立方与作者同机、同树、同隔离条件 ⇒ 均未在**能复现**该负载环境的条件下独立确认。**故本栏记「未取得独立确认」，状态置「不生效」**（先例：同表 #376 `store.py:632` 写锁超时亦因拿不到独立确认而不登记，tracker:161） | **不生效（待独立确认）（2026-10-09 由 `codebuddy/flake-ws-relay-truncation-register` 登记，来源 #831 收尾待裁决项）**：四栏已填（node id / 失败签名 / 证据 / 独立确认），但「独立确认」栏未达 §8.6.3 line 543 的「能复现环境下取得」门槛 ⇒ **不使用本条目的双重前提**（不把 `:906` 命中当已知 flake 放行，仍按真失败/未知红阻断）；**待办 = 在能复现该负载（全量并行）的环境中取得一次独立确认**，取得后由用户批准转为「在册/生效」。**同 hazard 兄弟用例未登记**（同文件 `test_ws_truncation_on_active_run_leaves_no_subscriber`（`:748`）/ `test_ws_snapshot_backlog_over_threshold_emits_control_frame`（`:687`）为**不同场景**、断言面不含 `:906` 那条「判据取持久 max」语义）⇒ 一旦出现各自同签名失败，先按阻断处理再决定是否登记 |
 
 **本行由 `#283`（F18-B 前端）第三手补记登记（2026-09-22，用户批准「补全套」）**：该票门禁期抓到过一次该签名失败，当时按 §8.6「作者独立归因（失败集合差集）」处置并记为残余（不阻断，因差集 ∅）；本次补做 §8.6.3 要求的**登记 + 一次独立确认**，把「已发生过一次的未知红」转为「表内已知 flake」，以免下次复现时按未知红阻断。登记提交归属见 `docs/review_ledger.tsv` 的对应白名单行。**注意**：本次两条读数都**没有**在孤立条件下复现超时本身 —— 该条目只覆盖「**测试级超时且无 assertion 失败**」这一种形状，不构成对「该用例一定不会真失败」的背书。
+
+**签名文本订正（2026-10-09，W-21 第 2 次冻结树 `12034e4f` 门禁期）**：`web/src/components/StepDetail.window.test.tsx:132` 行的签名原文写 `Test timed out in 5000ms`（vitest 默认 `testTimeout`）。main 的 `d3676182`（2026-10-07，消息「fix(tests): StepDetail AC4 加 20s 超时（高负载下 5s 默认超时 flake）」）给该用例加了显式 `{ timeout: 20000 }` ⇒ **同一 node、同一形状**（测试级超时、零 assertion 级失败）的失败文本随之为 `Error: Test timed out in 20000ms.`（`web/src/components/StepDetail.window.test.tsx:132:3`）。本次门禁实测即该形状（vitest `1 failed / 1496 passed`，唯一红 = 本 node）；该 spec 文件 blob 与 `origin/main` 逐字相同；独立只读子代理同树隔离单跑该 spec **3 次 6/6 通过**（47.70 / 8.76 / 8.76 s，退出码 0）。⇒ 本行签名覆盖**两个预算数字**（历史 `5000ms` / 当前 `20000ms`），其余判据（node、describe/it、零 assertion 级失败、四条行内断言命中即阻断）**不变**。
 
 **登记（不修）**：`docs/PHASE_STATUS.md` 的 B-28 条目实测 **2873 字符** > 协议 §8.5 第 2 条的 2000 硬上限（该条明细在当月归档 `docs/phase_status/2026-09.md` B-28 段本来就有）。按 §8.5「已有超限条目只登记、不追溯重写」处理——压缩它属于另一笔需要单独决定的事，不在本次"提速"范围。
 
@@ -7618,6 +7621,215 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **先回后正**：origin/main `6a624caa`→`cbf08285`（来侧 PR #802 = #368 证据保留 W-24 Batch A-D+修复，15 笔已由 t368 行覆盖）；唯一文件交集 app.py 零语义冲突（来侧 retention 端点 +6 × 本侧注释块）⇒ ort 自动合并 `ce175c2d`，零手工解决。
 - **门禁**：台账两行 `t808-review-findings-cleanup.tsv`（`6a624caa..e2fd2769`）+ `t808-sync-merge-cbf08285.tsv`（机械行，e2fd2769..ce175c2d）⇒ 覆盖闸门 exit 0；合并树全量 @`ce175c2d` = **6716P / 26S / 51D / 0F（1075.48s，exit 0）** 零失败；三域 focused（constraint_kill/seal_guard/cors）5 passed + ruff 全绿 + 删支突变红复验。Gate-0 收据随收据笔；push/PR（Closes #808）/CI/merge/关单按用户整链指示执行。
 
+## W-21 Windows 发布链修复批（2026-10-07；#809 → #812–#817；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，基点 `cbf08285`；**push/PR 待批准，未集成**）
+
+- **What**：修完 #809 的六条 Windows 发布链缺陷（D2 #812 / D4 #813 / D6 #814 / D3 #815 / D1 #816 / D5 #817），一条分支八笔提交：`483d3569`(D2) · `187d1204`(D4) · `47a036a8`(D6) · `0ba825b1`(D3) · `e06a4719`(D1) · `9d0214e9`+`0e3d4d6b`+`ac37371a`(D5)；编码顺序按用户批准 D2/D4 → D6 → D3 → D1 → D5。本批**不宣布 #365 Gate 通过**（Run A/Run B、B-5、关单都在 #365 本体）。
+- **Why**：#365 [W-21] 的两次独立真实模型 Gate 在冻结树上不可执行——安装包产不出（NSIS include 在宏体内求值 `${__FILEDIR__}`）/ 运行时只有依赖闭包没有产品包 / 窗口加载 `ia-app://` 而全仓无该 scheme 处理器且 `web/dist` 未入包 / 端点文件两侧路径不同源 / 产物无 TUI / 主进程 ESM 用 `__dirname`。冻结读数见 #809 与 `docs/live_gate/w21/40-windows-gate-result.md`（PR #811，docs-only，CI gate0 绿，merge 待批）。
+- **证据**：修复后 `node scripts/build-windows-installer.mjs` exit 0 → `Intelligence-Agent-Setup-0.1.0.exe` 204,370,634 B / sha256 `5e2c0407ec5c2103c3043440d4bc61af6589f2126826cacb82d41323037bffd0`；产物内冷启动服务 → TUI `--check` 200/401 → 二次附着同 pid/端口 → 真控制台渲染（截图）→ 硬杀客户端后服务存活 → 桌面附着同一 pid/端口。D5 明细 `docs/live_gate/w21/41-d5-tui-artifact-evidence.md`；D1/D3/D4 的构建日志与实机截图在 `D:/w21-work/evidence/`（工作树外，未入 git）。
+- **关键决定（票内实现选择，不改 AC）**：D5 产物自带 Node 运行时（`resources/node/node.exe` + `node-runtime.lock.json` 锚 nodejs.org SHA-256SUMS）——实测 Electron 44.5.1 的 `ELECTRON_RUN_AS_NODE=1` 无控制台（`ERR_TTY_INIT_FAILED`），VS Code `bin/code.cmd` 形状带不了 raw-mode TUI；取 DSH `primary-runtime` 做法（@5badb15 的 architecture note 明写其取舍）。安装包 +约 24 MB。
+- **披露待否决**：D3 未取票面 (a)/(b)，改用**外壳自持 loopback 代理**（前端按自身 origin 寻址 API/WS + 服务 fail-closed + token 不得进渲染层 + 自定义 scheme 承载不了 WebSocket ⇒ 票面两条都不满足）；机制 ADAPT 自 DSH `web-document.ts:75-100`，已在 #815 关单 comment 公开披露，否决则需重做加载面。
+- **状态**：#812/#814/#813/#815/#816/#817 六票均已关单（comment 记 branch/commit/证据/集成负责人 EricKingWhy，未集成按 §14.12 允许）；#365 仍 OPEN。**待批准**：①本分支 push + 开 PR；②PR #811 merge。
+- **关联观察（只报告）**：`AGENT_HARNESS_HOST_CREDENTIALS` 只认 `memory`/`file:<path>`（裸路径静默退系统凭据管理器 → 401）；打包安装的模型配置锚 `<install>\resources\python\Lib\.env`（缺省退化为环境变量）⇒ Run A/Run B 与 W-16 烟测需在启动环境提供 `MODEL_API_KEY`；未配模型时 `POST /api/sessions` 500 `ConfigError`（服务端既有行为）。
+
+## W-21 D8–D11 第二批修复（2026-10-08；#834–#837；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，HEAD `80557a6b`；**push/PR 待批准，未集成**）
+
+- **What**：第一批六条（#812–#817）修完后重打包实机验证暴露的第二批四条——D8 #834 陈旧端点记录导致启动自锁（读到即锁定、单次健康失败即终态、子进程 stdout 不进诊断）、D9 #835 安装包可静默夹带陈旧产品代码（staging 与 checkout 无一致性守卫，版本号不变即过关）、D10 #836 桌面外壳 dist 无新鲜度守卫（绿构建可夹带旧 shell JS）、D11 #837 就绪预算 20 s 小于服务真实启动时间（实测 8.7 s 热 / 30.1、33.6 s 装机窗口 / >60 s 首次）⇒ 外壳杀掉正在健康启动的子进程、留下陈旧端点（即 D8 自锁的真正触发点）。两笔提交：`0aca596b`(D8+D11) · `80557a6b`(D9+D10)；预算 90 s（`DEFAULT_START_BUDGET_MS` 单一来源）+ 子进程退出/启动错误即失败，附着预算 3 s 不动。
+- **Why**：闸门不得用与分支不符的代码或不可靠的就绪判定过闸——D9/D10 是「构建可静默夹带陈旧代码」，D8/D11 是「健康启动被外壳自己掐死」；四条不修则 W-16 烟测 start 腿与 Run A 前置在本机不可复现。上游对照：DSH 就绪由子进程消息界定、无启动时钟；PI-Desktop `DEFAULT_RPC_TIMEOUT_MS=130_000` / `SERVICE_HEALTHY_MS=60_000`；同仓 TUI 给同一个子进程 30 s。
+- **证据**：产物 204,375,375 B / sha256 `ce5fd54acf925bb6e17731e35990f18c52a0a90da57f834ad39960d0c6ad9880`（`productCodeSha256=1d4688ad…`，HEAD `80557a6b`）。两次独立实机复跑都覆盖「装完第一次启动 + 陈旧端点记录在场」：复跑 1 子进程 pid 12100、端点 t=56.8 s 被改写（port 50922）、窗口 t=59.2 s、失败对话框 never；复跑 2 pid 38652、t=44.4 s（port 50935）、t=49.6 s、never。TUI 冷启动后桌面附着（复跑 2：pid 7920/port 58469，`failureDialog=False mainWindowVisible=True endpointStill=…`），窗口截图渲染出产品 UI。桌面 `npm test` **205 pass / 0 fail**、`tsc --noEmit` exit 0；D9 真实树 249 个 `.py` 一致 / 追加一行即拒绝 / 恢复后逐字节相同；D10 真实树 touch 后构建 exit 1 并点名 `desktop/dist/src/main.js`，`npm run build` 后继续打包。明细 `docs/live_gate/w21/42-w21-d8-d11-gate-fixes.md`，月档 `docs/phase_status/2026-10.md`；工作树外证据 `D:/w21-work/evidence/{d9-ac2.txt,d9-ac4.txt,d10-ac2.txt,d10-ac2-build.log,d9-d11-npm-test.log,d11/*,d11b/*}`。
+- **披露/注记**：①D8 AC1 票面写的「20 s 内」在本机对服务自身启动时间不成立，已由 #837 以 90 s 就绪预算替代（两票同一次提交）；②D10 AC2 陈旧分支的文案复用共享话术 `rebuild before packing`，字面串 `npm run build` 出现在缺件分支；③不带凭据的 `GET /` 返回 401 属服务端 fail-closed 设计（`auth_required` 恒真），非缺陷。
+- **状态**：#834/#835/#836/#837 四票均已关单（comment 记 branch/commit/证据/集成负责人 EricKingWhy，未集成按 §14.12 允许）；#365 仍 OPEN，W-16 烟测（install/start/exit/update/恢复）、Run A/Run B、双轴独立审查 + `scripts/check_review_coverage.py` 均**未执行**。**待批准**：①本分支 push + 开 PR；②PR #811 merge；③#815 第三条路径接受或否决。
+
+## W-16 烟测落在执行侧（2026-10-08；安装件 `ce5fd54a…`，开发机、非干净 VM）
+
+- **What/读数**：#365 执行协议第 1 条的前置烟测，在 D8–D11 修复后的安装件（sha256 `ce5fd54acf925bb6e17731e35990f18c52a0a90da57f834ad39960d0c6ad9880`，版本 `0.1.0.0`）上跑完 A–F 六腿：**A** 卸载旧安装（7.1 s，数据根逐字节不变）→ **B** 静默安装（exit 0，299.2 s，app exe + `ia-tui.cmd` + 两个快捷方式）→ **C** 启动（4.9 s 主窗口可见，端点 pid 7920/port 58469）→ **D** 退出（桌面进程 0、服务存活、端点与数据不变）→ **E** 就地更新（exit 0，217.9 s，数据不变，附着同一服务）→ **F** 卸载（9.0 s，数据根 + 凭据 + 端点保留）。
+- **观察**：服务跨卸载/更新存活（与「客户端从不杀服务」一致，本次无在途任务 ⇒ W-16 的「运行中更新安全暂停」未覆盖）；关闭窗口 = 隐藏到托盘属产品设计，故退出腿走显式结束进程，托盘 → quit 路径未实测。
+- **未执行**：干净 VM、旧会话与模型配置可见、一次真实短任务、运行中更新安全暂停、服务暂停失败、迁移中断、磁盘满回退、卸载器 UI 双语检查。
+- **证据**：`docs/live_gate/w21/43-w16-smoke-artifact.md`；日志 `D:/w21-work/evidence/smoke-w16.txt` 与 `smoke-w16-def.txt`（驱动脚本 `D:/w21-work/smoke-w16.py`）。**不宣布 #365 Gate 通过**。
+## W-21 Run A：桌面 + 真实模型长任务（2026-10-08；安装件 `ce5fd54a…`；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，未提交；**push/PR 待批准，未集成**）
+
+- **What**：票面第 1 条的前置实跑——从安装后的桌面启动真实模型（`mimo-v2.6-flash`），在隔离样例 `run-a-sample-20261008T030004` 上完成「定位 → 修改 → 测试 → 真实浏览器页面验证 → diff 审阅」整链；会话 `cbebff65-30fc-48be-86b1-5000ea906bbf`，4 个 run / 5725 事件；操作者 diff 85 行，模型自审无新依赖、未改判定器、无 scope 外改动。
+- **覆盖读数**：`context/compacted` seq 4151（`compacted_turn_count=3`、`bracket_id=7ad352f2…`，真实模型摘要）；`context/compaction_failed` 8 条（2 条 `transport_error` + 4 条真实模型 `plan_section_mismatch` + 2 条 `no_compactable_early_turn`，每次失败原投影保留、零写入）⇒ 「≥1 次 compaction」与「≥1 次摘要调用失败」两条都成立；W-04 路径 `run/paused` seq 2187（`budget_exhausted`/`max_context_tokens`、`consumed.total_tokens=581535`、version 1）经 `POST /resume {budget_increase, expected_version}` 续完同一 run（`run/completed` seq 3395）；turn 4（seq 4148）在新 context window 内以磁盘为准复述 progress，旧 7 条禁令与未完成项未漂移；`judge.py` 6 项全 `ok`、`overall: pass`；`features.json` 7 项真（`kill-reconcile` 保持 false —— 那条属 Run B）。
+- **缺陷回票**：手动压缩在真实长会话里两条子情形都不可满足（seq 4050/4051、4145/4146 `plan_section_mismatch`：`_validate_plan_section` 拿摘要第 5 节与**当前**计划逐字比对，而摘要只覆盖最后一条 `HumanMessage` 之前的消息）⇒ 已开 **#844**（P1）。
+- **证据**：`docs/live_gate/w21/44-run-a-desktop-real-model.md`；操作者证据 `D:/w21-work/evidence/run-a/*`（含 `run-a-compaction-legs.md`、judge/features/diff 读数）。
+- **状态**：Run A 覆盖完毕，但**不宣布 #365 通过**；两张 Run 都要完成后才谈 B-5 与关单。
+
+## W-21 Run B：TUI 冷启动 → 库提交后/ToolResult 前 kill Host → 桌面重开 → 人工 reconcile → 续跑（2026-10-08；安装件 `ce5fd54a…`；同上分支/工作树，未提交；**push/PR 待批准，未集成**）
+
+- **核心读数（通过）**：TUI 冷启动派生服务（`--check` → pid 9296/port 51742、200/401）并创建会话 `d4d78a49-c5a4-429f-b1a3-db551447842d`；真实模型跑任务期间操作者用**本地 SQLite 触发**（业务库 `imp_` 行 0→40 与 Ledger 在飞调用同时成立，50 ms 轮询）在业务库提交之后、ToolResult 之前杀掉 Host——被杀的 `call_4403e930cf3c41aba43c4f41`（bash）`state=RUNNING`、`finished_at NULL`、kill 延迟 **0.235 s**，事件流 1698 条止于 `run/interrupted` 且**无该 tool_call_id 的 `tool/result`**。桌面重开派生新服务（pid 5740/59380），启动扫描把该 Operation 标 `UNKNOWN` 并在 `/api/recovery/interrupted` 里明写「未提供 ReconcileCallback，拒绝恢复——避免伪造结果或盲目重跑高风险副作用（不变量 #14）」⇒ **人工确认需要项**成立。
+- **reconcile 契约读数**：裸 `POST /recover {}` → **409** + `pending_decisions`（`default_action=DEFER`、`risk_level=high`、`probe.verifiable=false`）；`decisions` 传对象 → **422** `list_type`（必须是裸列表）；按库/账本事实裁决 `CONFIRM_SUCCESS`（R-042 failed 20/0、R-043 completed 40/40、`imp_R-043_*` 恰 40 条、7 条 seed 未动；示例应用是独立进程故副作用完成而 Host 未收结果）后 POST → **200**，账本转 `SUCCEEDED` + `reconcile_meta`，事件链 `operation/reconcile-required` → 合成 `tool/result` → `operation/reconciled` → `session/resumed`（seq 1698–1701）。续跑后 run `8f204212`（29 次工具调用）`run/completed` seq 4933，最终报告 2582 字符；操作者 `judge.py` 6/6 `pass`、操作者 diff 86 行；账本终态 61 行（59 SUCCEEDED + 2 FAILED，0 非终态）。
+- **阻断与偏差（如实）**：TUI 重附着被**产品缺陷 D12**（#842：`USER_TINT="rgb(38, 34, 38)"` 被 pi-tui `parseColor` 拒绝，`--session <有用户消息的会话>` 启动即崩；已用安装件原树 vs 只改一个字面量副本的 hermetic 前/后对照钉住根因与一行修复）阻断，续跑指令改为投递**与 TUI 相同端点同 body** 的 HTTP 请求（`resume-delivery.json` 标注）；D13（#843）记录被 kill 服务留下的 TUI 永久重连失败（端点不重解析，定性待裁决）；共存/退出腿改用新开会话的 TUI（`0db00217…`，Tag=tui3）：同时在场 = 附着到桌面托管的同一服务（端点未变）、TUI 单独退出 = 服务与 4 个桌面进程存活、桌面单独退出 = 桌面进程与服务同时消失。
+- **分段与操作者工具链注记**：第 2 段按产品 `next_safe_action` 把窗口提到 `MAX_CONTEXT_TOKENS=600000` 并用 `POST /resume` 续完（该响应是 run 的事件流，910 s 才收完）；审批回环把 `run/paused` 当终止事件需重设 baseline；`follow()` 计数 0 属操作者脚本 wart（以直读事件与 `final` 汇总为准）。
+- **证据**：`docs/live_gate/w21/45-run-b-kill-reconcile.md`、`docs/live_gate/w21/46-run-b-defects-tui.md`；操作者证据 `D:/w21-work/evidence/run-b/*`（91 文件清单 `run-b-manifest.json`）。
+- **状态**：Run B 核心腿通过但**不是完整通过**（TUI 腿被 #842 阻断）；#365 仍 OPEN；新增缺陷票 #842(P0)/#843(P2)/#844(P1) 待维护者处置；**待批准**：①本分支 push + 开 PR；②PR #811 merge；③#815 第三条路径接受或否决。
+
+## W-21 #842（D12）修复 + Run B TUI 腿重跑（2026-10-08；安装件 `46e7a9e2…`；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，未提交；**push/PR 待批准，未集成**）
+
+- **修复**：`tui/src/views/chat.ts` `USER_TINT` 与 `tui/src/theme.ts` `CARD_TINTS` 的 `rgb(...)` 字面量换成等值 hex（`#262226`/`#26282e`/`#1e2821`/`#2e1e21`，RGB 分量逐位相同）+ 纠正与 `parseColor` 契约不符的注释；新增 `tui/test/tints.test.ts`（用户轮与三态工具卡装配 + `src/` 颜色字面量扫源守门），旧字面量 3 条红 → 修复后 **54 tests / 0 fail**、`tsc --noEmit` exit 0。提交 `14898f1a`。
+- **收口调查（票面修复方向第 3 条）**：live 路径与附着路径构造同一批 Box，差别只在异常落点——附着抛到 `index.ts:174` 顶层 `main().catch` 直接退出；live 的抛错被 `sse.ts:113-127` 当流错误收走，记成 `stream reconnect: Invalid color value: …` 并每秒重连、永不渲染（帧已被 `SeqCursor` 推进游标后丢弃）。机械证明：回放真机会话 4934 帧，修复前第 3 帧（seq=2 `user/message`）抛，修复后全通过；据此**更正**票面「跟完 8 分钟真实运行」的说法（进程活着，投影早已死）。
+- **重打包**：`desktop/dist-installer/Intelligence-Agent-Setup-0.1.0.exe`，204,377,641 B，sha256 `46e7a9e2c22bd2ea16f9e82e1cbfe9c3f22f0f5a626d72bd979e4ef5eb7e2fd6`（HEAD `14898f1a`，`productCodeSha256` 与上一版一致 `1d4688ad…`）。静默安装 rc=0 / 127.3 s；安装树 `const USER_TINT = "#262226";`。
+- **TUI 腿重跑（#842 真机验收）**：附着**被恢复的那个会话**（`d4d78a49…`，4934 事件、2 条 `user/message`）→ 无 `ia-tui failed`、无重连 note、屏幕渲染出工具卡与计划更新；桌面 + TUI 同时在场于同一会话（服务 pid 25264/port 62511、桌面 4 进程、TUI node 1 个、会话在列表里）；TUI 单独退出 → 服务与桌面存活；桌面单独退出 → 桌面消失、服务存活（本轮服务由 TUI 冷启动，故与 Run B「桌面拉起→桌面退出即消失」互补）。
+- **新缺陷（如实回票）**：装完安装件后**首次**启动服务就绪 35.7 s（`--check`）/36–42 s（真实启动）> `host.ts:190` 的 30 s 窗口，TUI 硬失败退出并留孤儿服务（热态 6.6–6.9 s；已排除 pyc 首次编译：删光 249 个 `.pyc` 仍 6.9 s）⇒ **#846（P1）**；`ia-tui.cmd` 吞子进程退出码（`endlocal` 无 `exit /b`，`--check` 失败仍 rc=0）⇒ **#847（P2）**。
+- **证据**：`docs/live_gate/w21/47-w21-run-b-tui-legs-rerun.md`（含操作者偏差：误注入 `END` 触发 `HTTP 500` 且**会话零副作用**、控制台无回滚缓冲、截图缺失）；操作者证据 `D:/w21-work/evidence/run-b-842/*`、探针 `D:/w21-work/d12-probe/{probe.mjs,live-path.mjs}`。
+- **状态**：**#842 的 AC 在真机上达成**（可关票）；#846/#847 未修；**Run B 的两次独立完整通过尚未在 `46e7a9e2…` 上重跑**，故本段不构成 #365 通过结论；D13（#843）仍待裁决；**待批准**：①本分支 push + 开 PR；②PR #811 merge；③#815 第三条路径接受或否决。
+## W-21 修复批两轴独立审查（2026-10-08；范围 `cbf08285..e8b57282`；台账行 `t365-w21-gate-fixes-two-axis-cbf08285-e8b57282.tsv`）
+
+- **What**：#365 修复工作（#812–#817 / #831 / #834–#837 / #842）的**发现阶段双轴独立审查**——Standards 轴与 Correctness 轴各一独立只读子代理（口径 = `AGENTS.md` §4.1 + `docs/agents/review-debug-playbook.md` Independent Review 分支）。范围 = **13 笔代码提交 / 60 文件 +5582−141**，tip = 冻结树 `e8b57282`（tree `ce154b617e8c8ba601c39b3e76c2d5fea090261e`）。
+- **派单前机械面清零（协议 §8.2 第 4 条）**：首次裸全量 Gate-0 = **4/6**（`ruff` + `coverage` 红）。`ruff` 红是本批 `ac37371a` 引入的 `desktop/scripts/prepare_node_runtime.py:34` 死 `# noqa: E402`（RUF100；实测 `--select E402` 不触发）⇒ 以 `e8b57282` 只删注释修掉；重跑 **5/6**，唯一红 `coverage` 属结构性例外，❌ 集合**恰为本批 13 笔代码提交**。读数 `docs/gate/e8b572821b8dd5e49dc7120836b9a005b830107a.json`。
+- **结论**：两轴均 **PASS-WITH-FINDINGS，P0 = P1 = 0**（未触发 §8.8.3「任一轴 NEEDS-FIX」回退格；失败回退边界表**未触发**）。
+- **findings 与处置（3 条）**：①**P2** D3 外壳 loopback 代理对**任意本机进程**注入 host token（`service-proxy.ts:160` 绑 127.0.0.1、`:75` 注入 Bearer、无调用方校验）——编排侧独立复核成立，**不预判**，登记为 **#815 第三条路径的裁决材料**，交用户接受/否决；②**P2/P4** #842 守门单测扫源只认双引号（`tints.test.ts:85`），单引号/模板串静默漏（B 轴变异实测）——**登记不修**，按协议 §2 归下一自然审查边界（#846 批），并就地更正 `47-*.md` 表述；③**P3** `preload.cts:50` 注释称 main 侧 `assertDesktopSender` 兜底：函数在（`ipc.ts:87`）但 `installDesktopDirectoryPicker` **无调用点**、`web/src` 不消费该 bridge ⇒ 兜底未生效、真正执行的 preload 内联判定无测试（今日无功能影响）——同归下一自然边界。
+- **证伪读数**：B 轴 3 组变异（#842 扫源 / D8-D11 就绪重读与 spawn 失败 / D9-D10 双守卫）各命中不同失败集，其中 D8/D11 两组共用 1 条失败面已按 §8.3 第 4 条登记「互不构成鉴别力证据」；A 轴 2 处 `web/app.py` 变异各 1 红。**未覆盖面如实登记**：D5 `host.ts` 竞态枚举、`web/app.py` 静态挂载穿越 fuzz、NSIS 非 ASCII 目录真机、真机安装包复跑。
+- **隔离自证**：两轴收尾 `git status --short` 均只有 `?? docs/gate/*.json`，副本内被改文件 `hash-object` 与 HEAD blob 一致；主工作树全程未被变异。
+- **状态**：本批 review coverage 完成（`scripts/check_review_coverage.py` rc=0 / 0 ❌）；**#365 仍 OPEN**。残余：①待用户裁决；②③归下一自然边界；**Run A / Run B 的两次独立完整通过仍未在新安装件上重跑**（先决条件 #846 未修）。明细 `docs/phase_status/2026-10.md`。
+
+## W-21 修复批 §8.8.5 修后重审（2026-10-08；范围 `e8b57282..779f8980`；台账行 `t365-w21-gate-fixes-rereview-e8b57282-779f8980.tsv`）
+
+- **What**：#365 修复批的 **§8.8.5 修后重审**（发现阶段双轴之后**唯一**的一轮）——Standards 轴与 Correctness 轴各一独立只读子代理，口径 = `AGENTS.md` §4.1 + `docs/agents/review-debug-playbook.md` Independent Review 分支。范围 = `e8b57282..779f8980` 共 **2 笔代码提交**（`648b724e` = #846 TUI 冷启动预算 30 s→90 s + 超时文案；`779f8980` = #847 launcher 转发子进程退出码 + tint 扫源加宽 + `preload.cts` 注释更正），tip = 冻结树 `779f8980`（tree `61e1c7bf3e3e5f7ae99b129000eccb7fcfee620d`）。
+- **派单前机械面（§8.2 第 4 条）**：裸全量 Gate-0 = **5/6**，唯一红 `coverage`（结构性例外：本轮 2 笔代码提交尚无审查行）；读数 `docs/gate/779f8980d4723e5190f3188f238ee1cbc1039c05.json`。
+- **上轮两条 finding 已闭合（变异红证）**：①tint 扫源加宽后，副本里给 `tui/src/views/chat.ts` 加单引号 `'rgb(40, 36, 40)'` 与模板串同值 → 用例**转红**（上轮同操作 3/3 绿）；②`preload.cts` 注释更正后去注释 token 流与改前**逐 token 相同**（语义惰性）。
+- **结论**：A 轴 **PASS-WITH-FINDINGS（P0=0 P1=0 P2=0 P3=1 P4=2）**；B 轴 **PASS-WITH-FINDINGS（P0=0 P1=0 P2=2 P3=4 P4=2）**。两轴均无 P0/P1 ⇒ 不触发 §8.3 第 4 条停止条件，也不触发 §8.8.3 失败回退。
+- **本轮新 findings（全部落在本轮新写的代码面上；处置 = 只登记不修）**：**P2** ①三分支交替式扫源在 `'a"rgb(40, 36, 40)"'` 上先命中单引号分支、吞掉内层双引号颜色 ⇒ **旧正则能命中、新正则回归漏检**；②探针钉的是 `literalValues` 而非扫描循环（变异 M2 把循环改回内联双引号匹配，探针仍 4/4 绿）⇒ 探针的红不构成鉴别力证据。**P3** ③`desktop/src/service-host.ts:96` 仍写 "The TUI budgets the same child at 30 s" 而 `tui/src/host.ts` 已 `90_000`（实读确认）；④`spawnServe` 只接 `onError`、无 `exit`/`close` 监听 ⇒ 子进程起来后死掉仍被当成「还在启动」，空等满 90 s 再误报「可能仍在启动…稍后重试即可附着它」（桌面壳对同一子进程早已用 `abortReason` 做到「一死立即结束等待」）；⑤超时文案「冷启动实测 36-42 s」与 `service-host.ts:88-90` 的 "not within 60 s" 矛盾；⑥`ia-tui.cmd` 守门只校文本不钉顺序（变异 M3 把捕获行移到子进程前，守门 17/17 仍绿）。**P4** ⑦扫源仍漏 `"1px solid rgb(40, 36, 40)"` 与 `"#ffff"`、注释内引号颜色误报（既有形态，非本批引入）。
+- **为什么只登记不修**：§8.8.5 明写「若除初始两轴之外该票已用满 1 轮修后重审，就**不再开第 3 轮**，改为**登记残余 + 请用户裁决**」。本票初始两轴 + 本轮 1 轮修后重审额度已用满 ⇒ 不再为这些 P2/P3/P4 开新一轮。已开 **#848** 承接 R1–R7，是否在跑 Run A / Run B 之前修**交用户裁决**。
+- **B 轴另核过并判「成立/存活」**：#847 退出码转发在真 `cmd.exe` 上对 0/1/2/7/42/256/-1/-1073741510/65536 逐一实测正确；`preload.cts` 改动语义惰性；spawn 失败路径仍立即中止。**未覆盖面如实登记**：真机安装件上的 TUI 冷启动实测（36–42 s 为开发机读数）、桌面与 TUI 同时在场 / 单独退出的竞态。
+- **隔离自证**：两轴收尾 `git status --short` 只余 `?? docs/gate/*.json`；全部变异在主工作树之外的副本（`D:/w21-work/rereview-A`、`rereview-B`）里做。
+- **台账与闸门**：新行 `docs/review_ledger.d/t365-w21-gate-fixes-rereview-e8b57282-779f8980.tsv`（三列，**794 字符** ≤ §8.5 的 800 硬上限）；`scripts/check_review_coverage.py` **rc=0 / 0 ❌**。
+- **状态**：**#365 仍 OPEN**。待用户裁决：①#848 的 R1–R7 是否在跑 Run A/B 前修；②D3 代理 P2（并入 #815 第三条路径）；③本分支 push + 开 PR；④PR #811 merge。明细 `docs/phase_status/2026-10.md`。
+
+## W-21 前置验证：桌面开窗 + TUI 冷启动附着 + #847 真机（2026-10-08；安装件 `01477e59…`；提交 `a185637a`；**push/PR 待批准，未集成**）
+
+- **What**：#365 执行协议把 Run A / Run B 挂在「桌面能开窗、TUI 能冷启动附着」两个前提上；旧安装件（`46e7a9e2…`）上第二条不成立（#846）。本段是在含 #846/#847 修复的**新安装件**上对该前提的真机实测。安装件 204,379,033 B，sha256 `01477e59779693299216f9595966106e71a7f7d92409856aa18729899b8591e6`（HEAD `28a382cc`，`productCodeSha256=1d4688ad…` 与上一版一致）。
+- **读数（四条全过）**：静默安装 rc=0 / **122.7 s**，安装树含 `START_BUDGET_MS = 90_000`、launcher `endlocal & exit /b %rc%`、`const USER_TINT = "#262226";`；TUI 冷启动 `ia-tui.cmd --check` **rc=0 / 39.5 s**（装完**第一次**，窗口 90 s 内）、带凭据 200 / 不带 401；桌面开窗 **2.3 s** 可见（标题 `Agent Harness Inspector`，4 进程，**附着到 TUI 起的同一服务** pid 23752/port 65036）；#847 真机 rc=**1**（`APPDATA` 指向文件逼出子进程 `ENOTDIR`）。
+- **证据**：`docs/live_gate/w21/48-pre-run-artifact-verification.md`；操作者证据 `D:/w21-work/evidence/pre0147/*`、驱动 `D:/w21-work/pre-0147.py`。
+
+## W-21 第 1 次独立完整通过（2026-10-08；安装件 `01477e59…`；提交 `712ebb8c`（Run A）+ `d53e88f2`（Run B）；**push/PR 待批准，未集成**）
+
+- **Run A（桌面 + 真实模型长任务）**：新样本 `run-a-sample-20261008T071551`，会话 `c9d49b73-f97b-4323-9cd1-5e5a8ae04325`（桌面创建，21 次 bash 审批）。phase1 `run/completed` @ 1068.6 s / 1418 事件；turn2 150.8 s / 588；turn3 15 s / 31；phase2 181.2 s / 649。`judge.py` **overall=pass / missing=[]**（六项逐项 ok）；`records` 47 行 = 7 seed + 40 `imp_R-043_*`（`imp_R-042_*`=0）；事件 2691、末条 `run/completed`；上下文 90629/200000（**未触发**硬护栏）；diff 88 行。真实 Chrome（154.0.8037.98 headless）读 `http://127.0.0.1:8911` 查 R-042 → `failed / 20 / 0 / row 17: empty id`，`data-status=failed data-written=0`，与 DB 一致。
+- **Run A 的缺陷读数**：手动压缩腿**两次都失败**——`?model=glm-5.3-flash` 报 `transport_error` + `OpenAIAuthenticationError`；默认模型报 `plan_section_mismatch: in-progress item(s) missing: r2`。两次都零写入（`tokens_before=tokens_after=56061`、`compacted_turn_count=0`）。⇒ **#844 的新读数**：`_validate_plan_section` 在**两个方向**上都拒真实模型摘要，该状态下压缩不可用。
+- **Run B（TUI 冷启动 → kill → 桌面重开 → reconcile → 续跑）**：新样本 `…T080318`，会话 `430e304a-dff0-4dd8-96e2-3ed78e6504ee`（**真控制台里的 TUI** 创建）。TUI 冷启动 `--check` rc=0/8.7 s（服务 pid 26508/port 64360）；kill 窗口命中 `import_rows 0→40` + 在飞 `call_81ef7c09f3384d918e89e8b0`（bash `timeout 120 python verify_scenarios.py`，`state=RUNNING`），**kill 延迟 0.281 s**；桌面重开新服务 pid 27216/port 53526，`GET /api/recovery/interrupted` = `needs_manual_reconcile` 且文案明写不变量 #14；人工裁决 `CONFIRM_SUCCESS` → `POST /recover` **200**、悬空 `[]`；续跑 `run/completed` @ 816 s / 2145 事件。`judge.py` **pass**；事件 2809 / 2 run，`tool/call` 50 与 `tool/result` 50 成对，`run/interrupted`×1 + `operation/reconcile-required`×1 + `operation/reconciled`×1 + `run/completed`×1；上下文 81661/200000；账本 0 非终态。桌面 4 进程 + TUI node 2 个 + **一个**服务同场；TUI 单独退出服务存活；桌面单独退出**服务随桌面消失**（互补的那条规则已在 `47-*.md` 实测）。
+- **诚实注记**：Run B 第 1 次**未复测裸 `POST /recover` 的 409 分支**（驱动只在 `decisions.json` 缺失时发裸请求）——第 2 次已补上；`final` 段前补了一次 TUI 冷启动取数（`desktop-exit` 刚把服务带走）；`window=0,0,0,0` 是控制台句柄查询在该环境取不到尺寸，node 进程与整屏读取正常。
+- **证据**：`docs/live_gate/w21/49-two-independent-passes.md`（Run A / Run B 各一段）；操作者证据 `D:/w21-work/evidence/run-a-pass1/*`、`run-b-pass1/*`。
+
+## W-21 第 2 次独立完整通过（2026-10-08；安装件 `01477e59…`；提交 `b433b68f` + `43146596`；**push/PR 待批准，未集成**）
+
+- **模型替换（先记事实）**：第 1 次的 `mimo` profile（`mimo-v2.6-flash`）在 gate 进行中账号余额耗尽（HTTP 402 `insufficient_balance`），第 2 次起改用 `glm` profile（`senseaudio` / `glm-5.3-flash`，`https://api.senseaudio.cn/v1`）。两次都是**真实模型**；换的只是服务商，验收口径不变。驱动 `D:/w21-work/run-b.py` 的 `MODEL_PROFILES` 已把两个 profile 与替换原因写进代码注释。
+- **Run A 第 2 次 attempt 1（fail，已开 #849）**：新样本 `…T083632`，会话 `3cf0462a-86fd-4259-9cef-2bbaf370145e`；`run/completed` @ 357.8 s / 518 事件。`judge.py` **fail**：`r042_zero_writes` `completed 19/19`、`r043_exactly_once` `41/41`、`ui_truthful` `页面=completed`。**根因**：判定器读的是同一个 `demo.db`，而模型探索阶段用**未修复的旧代码**跑过 R-042/R-043，留下的行没清 ⇒ 判定器把中间产物当终态。对照实验（新样本 `…T090954`）：删 60 业务行 + 2 审计行后重新 POST，R-042 → `failed 20/0`、R-043 → `completed 40/40`，**同一份修复代码**再跑 judge → **pass**。⇒ 判定器对探索顺序敏感，判定口径缺口记为 **#849**。
+- **Run A 第 2 次 attempt 2（pass）**：新样本 `…T092458`，会话 `2ea284fa-1814-4c8f-88d6-3a55723c59c9`。phase1 `run/completed` @ 718.8 s / 812 事件（含 seq 487 `guard/stuck level=replan count=6/6 replan_count=1` —— 守卫**重规划**而非暂停，模型随即自述「bash 里 python 写出的文件…都没有持久化——只有 write 工具写的文件留了下来。换路：改用 write 工具整体…」并改用 `write`）；turn2 101 / turn3 63 / phase2 150 事件。`judge.py` **pass**；`records` 47 = 7 seed + 40 `imp_R-043_*`；事件 1131、末条 `run/completed`；上下文 101431/200000；diff 84 行。真实 Chrome 读 R-042 → `failed / 40 / 0 / row 17: empty id`。压缩腿**两次都失败**（`?model=qwen3.8-27b` → `transport_error`+`OpenAIPermissionDeniedError`；默认模型 → `plan_section_mismatch: Plan section must be (none)`），零写入 ⇒ #844 的**第三个**方向读数。
+- **Run B 第 2 次 attempt 1（stuck 暂停，未走到 kill 窗口）**：新样本 `…T094214`，会话 `e2aaad3c-be05-4111-9b61-abe5fcb287f1`（393 事件）。`run/paused` @ 362.2 s，`guard/stuck level=paused count=12/6 replan_count=1`、`trigger_dimension=stuck.alternating_loop`、`consumed={agent_turns 47, model_requests 48, total_tokens 1013258, tool_calls 50}`。**根因链**：`edit`/`apply_patch` 因行尾不匹配失败（**#851**）⇒ 模型改用多行 `python -c` 补丁 ⇒ CPython 在 Windows 把 `shell=True` 包成 `cmd.exe /c "<整段>"`，多行命令**静默空转**（`exit_code=0`、无输出、什么都没执行）（**#850**）⇒ 交替循环（9 行 `python -c` 空转 ↔ 1 行 `os.path.exists` 输出）12 次 ⇒ 守卫升级为 stuck 暂停。本 attempt 共 16 次多行空转、`edit` 失败 1、`apply_patch` 失败 1、`update_plan` 状态机被拒 ×2。
+- **续跑尝试（如实记录）**：stuck 暂停拒 `budget_increase`（409）；`relevant_steer` 需「暂停后有新 steer」而**注册入口当前不存在**（残余 6/9）；只剩 `environment_change`/`policy_change` 且都要**当场观测到的真实差异**——暂停快照除 `permission_mode` 外各维 `policy_inputs` 为空，操作者没有可诚实主张的差异 ⇒ **不伪造证据**，记为失败 attempt，另起 attempt 2。
+- **Run B 第 2 次 attempt 2（全腿完成）**：新样本 `…T102428`，会话 `0c3b6366-1ac8-457d-ac21-4677a3a3a9fa`。TUI 冷启动 rc=0/13.6 s（服务 pid 26460/port 60743）→ 真控制台 TUI 建会话 → seed → host 8912 → **kill 窗口 @ 222.9 s**（`import_rows 0→40`、在飞 `chatcmpl-tool-a23f0d10895d5759` bash `python verify.py`、**kill 延迟 0.328 s**；kill 时刻审计 `R-042 failed 20/16` **部分写入**、`R-043 completed 40/40`）→ 桌面重开（pid 27772/port 58492，`needs_manual_reconcile`）→ 第二个 TUI 附着 → 查 DB/账本（16 行，悬空恰为该调用）→ **裸 `POST /recover` → 409** + `pending_decisions`（`default_action=DEFER`、`risk_level=high`、`probe.verifiable=false`）→ 裁决 `CONFIRM_SUCCESS` → **200**（seq 113 `operation/reconciled`）→ 真实 Chrome 读页面 `failed / 20 / 16`（修复前，与 DB 一致）→ TUI 续跑（`run/completed` @ 1026.4 s / 580 事件，模型把 R-042 修到 `written_rows=0`）。
+- **attempt 2 的第二个 UNKNOWN（如实记录）**：修复期间一条命令里的 `find` 落到 **MSYS `find`** 上开始扫 C: ⇒ bash **60 s 超时** ⇒ 账本 `UNKNOWN`（`reconcile_meta={"unproven_side_effect": true, "error_code": "TIMEOUT"}`）⇒ **静默完成闸门**按住该 run（零写入：无 SessionEvent、无终态、无 `run/paused`）。第二次 reconcile（裸请求 409 → `CONFIRM_SUCCESS` **200**，seq 533/534）**只解开闸门、不自动续跑**（只产生 `session/resumed`，无新模型活动）⇒ 操作者再投一条收尾指令 ⇒ `run/completed` @ seq 698。MSYS `find` 的 PATH 是**操作者侧 harness 伪影**（Git Bash PATH 漏进产品 `cmd.exe`），不是产品缺陷。
+- **attempt 2 终态**：`judge.py` **pass / missing=[]**（六项）；操作者 diff 73 行；事件 **701** / 3 run，`run/interrupted`×2 + `operation/reconcile-required`×2 + `operation/reconciled`×2 + `run/completed`×1，`tool/call` 39 与 `tool/result` 39 成对；上下文 41458/200000（缓存命中 0.989）；证据 73 文件。同场 = 桌面 4 进程 + TUI node 2 + 一个服务；TUI 单独退出服务存活；桌面单独退出服务消失（与第 1 次一致）。
+- **环境说明让步（必须披露）**：attempt 2 的操作者任务简报里加了两条**属实的环境事实**（cmd.exe 一条命令只能一行；仓库文本是 CRLF、整文件改动用 `write` 最稳），**明确标注为环境补充、与验收口径同级但不改变任何验收条件**。它们分别对应 #850 与 #851 ⇒ attempt 2 是在**绕过已知缺陷**的条件下跑通的。第 1 次与 Run A 两次用的都是未加说明的原始简报。
+- **跨全部六次运行的缺陷计数（只读统计，`D:/w21-work/summarize-run.py`）**：多行 bash 静默空转（#850）分别为 4 / 6 / 26 / 3 / **16** / **0**；`edit`+`apply_patch` 失败（#851）分别为 2 / 2 / 2 / 0 / 2 / 2 —— 两个缺陷**六次运行里六次都在场**；attempt 2 的 0 次空转是环境说明的结果，不是缺陷消失。
+- **重启扫描的既定行为（披露）**：收尾后操作者重开桌面，启动扫描发现静默闸门按住的 run `de1700fa…` 无终态（闸门是零写入的），补写 `run/interrupted{interrupted_seq 534, reason=process_restart}` + `session/resumed`（seq 699/700）；随后 `GET /api/recovery/interrupted` 报该会话 `recovery="recovered"`、`progress.source_event_seq=698`，但仍把该 run 列在 `interrupted_runs` 里且 `resume_available=true`。这是 `src/agent_harness/recovery/scan.py::_mark_interrupted` 的既定行为，语义自洽；唯一毛刺是**已恢复的会话仍带 `resume_available=true`**，只登记不单独开票。
+- **证据**：`docs/live_gate/w21/49-two-independent-passes.md`（Run A 第 2 次 + Run B 第 2 次 + 跨运行计数表）；操作者证据 `D:/w21-work/evidence/run-a-pass2-attempt1/*`、`run-a-pass2/*`、`run-b-pass2/*`、`run-b-pass2-attempt2/*`；Gate-0 读数 `docs/gate/28a382ccd49295a68b52d6a96c14b238b2774099.json`（6/6 PASS，`43146596` 补入版本库）。
+- **状态**：票面要求的**两次独立完整通过**（每次含 Run A 桌面 + Run B kill/reconcile/续跑 + 浏览器 + diff 审阅 + 两条退出规则）在 `01477e59…` 上**均已达成**；但**本段不宣布 #365 通过**——待用户裁决 #849/#850/#851 是否在关单前修，且 W-16 恢复腿（暂停失败 / 迁移中断 / 干净 VM / 磁盘满回退逻辑）与 B-5 尚未完成。**待批准**：①本分支 push + 开 PR；②PR #811 merge；③#815 第三条路径（含 D3 代理 P2）接受或否决；④#848 的 R1–R7 是否在关单前修。
+
+## W-21 新登记缺陷（2026-10-08；均为**操作者侧回票**，#365 不修产品代码）
+
+- **#849（P2，判定器）**：`tools/challenge-fixture/judge.py` 对**探索顺序敏感**——模型在探索阶段用未修复代码留下的业务行会被判定器当成终态（Run A 第 2 次 attempt 1 的 fail 即此因；复位后同一份代码 pass）。判定器归操作者所有。
+- **#850（P1，产品）**：Windows 上多行 bash 命令**静默空转**——CPython 把 `shell=True` 包成 `cmd.exe /c "<整段>"`，多行命令返回 `exit_code=0`、无输出、什么都没执行。现场读数：`seq 120/128/181/189/206/214/228/262/294…` 全部 `exit_code=0` 且 `stdout` 为空，紧随的 `type baseline.txt` `exit_code=1`「系统找不到指定的文件」交替出现；单行命令正常、heredoc 正确报错。同一条 issue 里还记录了 `run/paused.data.continuation` 里**谎称 completed** 的文案与错误归因。现场读数的评论已投到 #850。
+- **#851（P1，产品）**：`edit` / `apply_patch` 按**字节精确**匹配，LF 字符串改 CRLF 文件**必失败**且报错不提示行尾（Windows 默认行尾）。机械复现：模型的 `old_string` 在**LF 归一化**文件里 `True`、在**原始字节**里 `False`（`CRLF=0 LF=11 len=598`）；现场读数 seq 20 读到 10044 字符/278 CRLF、seq 69 `apply_patch ok=false`、seq 113 `edit ok=false`、`app.py` mtime 从未变化。影响全部 gate 运行（见上表）；最小修复方向是「仅匹配时归一化、保留文件原行尾」，至少也要把行尾事实写进失败信息。issue 正文含 UTF-8 无 BOM 的复现脚本。
+- **证据**：`D:/w21-work/issue-crlf-edit.md`（#851 正文）、`D:/w21-work/comment-850-live.md`（#850 现场读数评论）、`D:/w21-work/evidence/run-b-pass2/attempt1-summary.txt`。
+
+## W-21（#365）B-4 桌面/TUI 一致性 + W-16 剩余腿 + B-1…B-5 收口（2026-10-08）
+
+- **B-4 取证**（证据件 `docs/live_gate/w21/50-b4-desktop-tui-consistency.md`）：同一服务
+  `pid=8472 port=57257`、同一数据根，桌面走 CDP 读**渲染层**、TUI 走真实控制台整屏读取、服务端读
+  `/api/sessions|/events|/stream` 权威值。**一致**：长会话 `0c3b6366…` 桌面会话栏 `701 事件` ↔ TUI
+  `/sessions` 选择器首行 `701 events` ↔ API `event_count=701`；TUI `/progress`
+  `expected_source_event_seq=700` = 末 seq；两端渲染同一份最终报告。短会话 `896132bb…` 桌面 `已完成` +
+  `· 4,812 tok` ↔ TUI `─ completed · tokens in 4.8k, out 3` ↔ `usage_total.total_tokens=4812`。
+- **B-4 不一致（两条新缺陷，本票只登记不修）**：
+  - **#853（P1）** TUI 对**空闲**会话发消息必报假失败：`POST /messages` 的 launched 分支返回 SSE
+    （`src/agent_harness/web/app.py:3358-3363`），而 `tui/src/api.ts:52` 无条件 `JSON.parse` ⇒
+    `SyntaxError` + `send failed:` 备注；消息其实已被接受并跑完（seq 2..8，桌面 `已完成`）。
+    **该行在 Run B 第 1 次的 `evidence/run-b-pass1/tui2-screen-before-exit.txt` 里就已存在**（当时未记录）。
+  - **#854（P1）** 空闲时附着的 TUI 收不到后续 run 的直播帧：同一控制台 11:50 与 11:55 两轮 run
+    之后仍 `○ idle` + `还没有会话内容。`；同刻桌面读两轮 `已完成`；新控制台附着同会话**立刻**渲染
+    `─ completed`。嫌疑点：`app.py:2480-2498` 的 `if subscriber is None: return`（idle 会话的流按设计
+    收尾，客户端须自重重连）+ `tui/src/app.ts:163-197` 的重连循环；与 #843 同族。
+- **W-16 剩余腿**（证据件 `docs/live_gate/w21/51-w16-remaining-legs.md`）：旧会话与模型配置可见
+  （16 条旧会话 + 模型选择器浮层 5 项：`默认链` / `senseaudio 1` / `qwen 2` / `shrimp 1` / `管理模型`
+  + 每轮 `.model-tag` = `glm-5.3-flash`）**通过**；安装器/卸载器双语
+  （`node scripts/test-windows-installer.mjs --uninstall-only`，`en_US` 与 `zh_CN` 各一次构建 +
+  `UNINSTALL_OK userDataPreserved=true`，`rc=0`）**通过**（口径：静默装卸，非逐页点击）；
+  磁盘满回退**仅逻辑/单测验证**（用户指令不得真填盘）：`domain_errors.py:362-397` 的
+  ENOSPC/EFBIG/SQLITE_FULL/SQLITE_IOERR → 503 + 固定 detail，定向单测 **9 passed** 与 **20 passed**。
+  **未执行**：干净 Windows x64 VM 复跑、运行中更新安全暂停、服务暂停失败、迁移中断、卸载器逐页 UI 双语。
+- **B-1…B-5 收口**（证据件 `docs/live_gate/w21/52-b1-b5-closeout.md`）：**B-5 判据满足**（Run A / Run B
+  各两次，四次判定器 `overall=pass`，均在冻结件 `01477e59…` 上）；**B-4b 不通过**（上列两条缺陷）；
+  **#365 保持 OPEN**，不关单。
+- 本轮**无代码改动**（相对冻结树 `28a382cc` 只动 `docs/`）；按 §14.10 仍在当前 tip 跑完整门禁并留读数。
+
+- **2026-10-08（#365 W-21 全量门禁读数，冻结树）**：13 条车道读数与逐条归因见
+  `docs/live_gate/w21/53-full-gate-readings.md`。**绿**：① ruff / ② pytest-full
+  **6723P/26S/51D/0F（1194.67s）** / ③ pytest-clean **同读数（1141.66s）** / ④ tsc /
+  ⑥ oxlint / ⑦ guards / ⑧ coverage exit 0 / ⑨ diff-check / ⑩ vite build /
+  ⑬ Gate-0 **6/6 PASS**（`docs/gate/abaa611c7dd796bad1e6cdcd8eb2cf9f677af563.json`）。
+  **红两条，均非本批引入**：⑤ vitest **1F/1496P**（唯一红 = 在册 flake
+  `StepDetail.window.test.tsx:132` 超时，隔离单跑 6/6 绿、该用例 1301ms）；
+  ⑪ e2e **496P/10F**（10 红全在 `web/e2e/u-project-task.spec.ts`，spec 仍锁 #204 旧契约而实现
+  已由 #367 选项 A 的 `TaskCreationDialog` 取代 ⇒ 选择器永久失配；**main 的 PR #819 / `b895940b`
+  已根修**，本分支基点 `cbf08285` 早于该修复进入 main）。
+  **② 首轮 rc=0xC0000005 且零用例执行**：仓库根 pytest 走进两棵 gitignored 打包树
+  （`desktop/dist-installer` 942 MB、`desktop/installer/staging`，各 5402 `.py`，含完整 Python 3.13
+  运行时），收集 pywin32 `test_addtask.py` 打崩解释器；车道 ② 是**唯一**走仓库根的 pytest
+  （CI 跑 `pytest tests`、③⑧ 带显式路径）⇒ CI 恒绿掩盖。移出产物树后暴露 `.venv` 缺 `memory`
+  extra，按 CI 口径 `uv sync --locked --all-extras` 补齐后全绿。**已登记 #856**
+  （复现 + 反证 + 建议：`testpaths`/`norecursedirs` + 车道表补 extras 前置）。
+  **分支落后 main 64 提交**（本地 main `9e1c065b`、`origin/main` `5b7c14c3` 再多 58）⇒ 冻结安装件
+  不对应任何将被合并的树；集成前须先同步 main 并按 §14.10 在合并树重跑全量门禁，Run A/B 的 Live
+  证据可否传递须按 §8.8 重新判定。**#365 保持 OPEN**，未关单。
+## W-21 七票修复批（2026-10-08；#848–#856，分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`）
+
+**范围**：`412e4570..3c850121` = 7 笔代码（`3ef9f8de` #851 / `c4860324` #850 / `1be41f56` #853 /
+`cfb1c71a` #854 / `cc7b5994` #849 / `6535a4d5` #856 / `3c850121` #848）。逐票根因、红证与读数见
+`docs/live_gate/w21/55-seven-ticket-fixes.md`；审查台账行
+`docs/review_ledger.d/t365-w21-seven-ticket-fixes-412e4570-3c850121.tsv`。
+
+**机械面**：派单前裸全量 Gate-0 = **5/6**（唯一红 coverage，❌ 集合恰为本批 7 笔），读数
+`docs/gate/3c8501213726cc226fe78fba7870cd1d09ce6886.json`；写台账行后 `check_review_coverage.py`
+**rc=0**（2975 / 2901 / 74，0 条未归属）。
+
+**两轴独立审查**（各一独立只读子代理、互不可见；两轴均 PASS-WITH-FINDINGS，9/9 冻结值相符、
+零文件改动）：Correctness P0=0 **P1=1** P2=0 P3=2；Standards P0=0 P1=0 P2=0 P3=6 P4=1。
+
+**冻结树全量重车道**（串行跑、零改动窗口）：① ruff ✅ ② pytest **1 红**（6739P/27S/51D，见下）
+③ `run_tests_clean.sh` 未跑（② 无沙箱配额形状，绕行不必要）④ web tsc ✅ ⑤ vitest 1 红 = 在册 flake
+B-29（本批 `web/` 改动 **0 文件**）⑥ oxlint ✅ ⑦ guards ✅ ⑧ coverage ✅（落账后）⑨ diff-check ✅
+⑩ vite build ✅ ⑪ playwright **无读数**（5173 被**另一 clone** 的 dev server 占住，preflight 拒绝复用；
+按 §14.13 未动它）⑫ 真机验收 n/a（未重打包）⑬ Gate-0 5/6。补跑：tui **69/69** + `tsc --noEmit` 干净；
+desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈旧，重打包前置）。
+
+**【待用户裁决】两条都在 #850 的面，本轮只登记不修** —— §8.8.5「每轴 1 轮、无第二轮」额度本票
+已用满（上一批 `e8b57282..779f8980` 用掉），协议出口 = 停止修复 + 登记残余 + 交用户裁决：
+1. **P1**：`src/agent_harness/sandbox/local.py:57-64` 用 `command.strip()` 判内部换行 ⇒ **前导**换行的
+   多行命令不被拒绝，本机实测 `"\necho A"` → `rc=0` **零输出**，正是 #850 要消灭的「静默 no-op
+   报成功」。判据应为 `rstrip()`；`tests/sandbox/test_local_sandbox.py` 缺前导换行用例。
+2. **本批引入的红**：`tests/tooling/test_approve_policy.py::TestExecutorIntegration::test_command_policy_newline_rejected_without_crash`
+   —— 机械归因三条：该文件不在本批 diff、末次改动 `9fab6ff2`（#684）、守卫在基点 `412e4570` 不存在
+   （由 `c4860324` 引入）⇒ #850 的行为变更打翻了既有测试里「多行命令仍能跑通」的假设。
+
+⇒ **本批不可交付**：未重打包、未跑 Run A / Run B（票面明令不得隐藏失败、不得只用 fake model 宣称
+通过）。裁决后按「修 + 一轮针对新 diff 的修后重审」收口，再重打包与两次 Run A / Run B。
+
+**其余登记（不修）**：见证据件 55 §6.2 —— tint token 正则对 5/7 位 hex **两个方向都错**（5 位假红 /
+7 位假绿）、#851 行尾容忍与 #850 新契约异常无规格/ADR 出处、#849 判定口径与冻结证据件
+`10-w20-deterministic-evidence.md` 分叉、`tui/test/host.test.ts` 的 R3 契约测试跨打包线读 desktop 源树、
+`tools/edit.py` 错误码与 `05:110/112` 不符（**非本批引入**）、#853 顺带把 3 处构造参数属性改成显式字段。
+
+**未决**：main 尚未同步（§14.7 两处冲突的并集方案待批准）；push / PR 待批准；#815 第三路径待裁决；
+`#859`（`stream/truncated` 无 `time` 被 `parseEnvelope` 丢弃）待修。**#365 保持 OPEN**。
+
+## W-21 七票批收尾（2026-10-08；#850 两条残余修复 + 修后重审 + 冻结树全量 + T12p 归因；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，tip `86cd73c1`；**push/PR 待批准，未集成**）
+
+**范围**：`3c850121..c6b6e01a`（代码面仅 `c6b6e01a` 一笔）+ 记账笔。用户裁决「修 #850 两条残余 + 一轮针对新 diff 的修后重审」。逐条明细见 `docs/live_gate/w21/55-seven-ticket-fixes.md` §9；台账行 `docs/review_ledger.d/t365-w21-rereview-850-residuals-3c850121-c6b6e01a.tsv`。
+
+- **修复 `c6b6e01a`**：`src/agent_harness/sandbox/local.py` 判据 `strip()`→`rstrip()` + 拒绝文案按实测分列两形状；`src/agent_harness/sandbox/base.py` 契约 docstring 改写；`tests/sandbox/test_local_sandbox.py` 新增前导换行参数化用例；`tests/tooling/test_approve_policy.py` 加平台分支断言。红证：只加测试不改源 ⇒ 该组 **3 failed**（全 `DID NOT RAISE`），改源后绿；focused **356 passed / 15 skipped**；ruff 干净。
+- **修后重审（§8.8.5；`3c850121..c6b6e01a`）**：两轴各一独立只读子代理、均 **APPROVE-WITH-FINDINGS**、均自证零写入。F1（P1 前导换行被 `strip()` 放行）与 F2（本批引入红测试）逐条闭合（正确性轴在仓库外克隆单点还原 `strip()` ⇒ 3 failed、还原 `rstrip()` ⇒ 绿）。**两轴独立收敛同一条新 P3**：`rstrip()` 使前导裸 CR 被拒而真实 `cmd.exe` `rc=0` 正常执行 ⇒ 新引入的 fail-closed 误拒，**登记不修**（§8.8.5 额度用满）。另 P4 命名/摘要漂移 + P4 测试缺口。零 P0/P1/P2。
+- **冻结树 `86cd73c1` 全量 13 车道**：① ruff ✅ ② pytest **6744P/27S/51D rc=0**（2035.63s，**本批引入的红已消失**）③ guards ✅ ④ tui 69/69 ⑤ tui tsc ✅ ⑥ desktop 1 红 = staging 陈旧（重打包前置）⑦ web tsc ✅ ⑧ vitest 1 红 = 在册 flake B-29（本批 `web/` 改动 0 文件）⑨ oxlint ✅ ⑩ vite build ✅ ⑪ playwright **11 红/495 绿**（10 条 `u-project-task.spec.ts` 陈旧 spec，main `b895940b`/PR #819 已根修 + 1 条 T12p，见下）⑫ diff-check ✅ ⑬ coverage rc=0。原始日志 `D:\w21-work\gate86cd.txt`。
+- **T12p 归因（原「待归因」项，已闭合）**：失败签名 = `expect(subs).toHaveLength(1)` 实得 **2 条、两条同 `after_seq=3`**（**非超时**）。根因 = 该断言在 **main 上已被 `9b37eeb1`「fix(e2e): T12p/T12r 幻影重连订阅竞态根因修复」改掉**（`9b37eeb1` 不在 HEAD；`origin/main` 现为 `toHaveLength(2)`；其 commit message 记的实测 `[3,3]` 与本次逐字吻合）⇒ **陈旧 spec，非本批引入、非未知红**，与本批 10 条 `u-project-task` 红同类（main 已根修、本分支落后 188 提交）。隔离复跑 `--workers=2 -g "T12p"` **3/3 绿**（`D:\w21-work\t12p-run{1,2,3}.log`）。**不登记为「已知环境 flake」**（非超时型且 main 已根修），随同步消失。
+- **未重打包、未跑 Run A / Run B**（等批准）。**待用户裁决/批准**：① P3+P4 残余（登记 vs 另开一轮修）② 重打包 + Run A/B 各两次（新样本）③ 两处 docs 冲突并集解决（§14.7）④ #815 第三路径 (c) 追认/否决 ⑤ push + 开 PR（§14.4 单独批准）。**#365 保持 OPEN**。
 
 ## #869 T0 — 跨市场插件导入与适配规格合同
 
@@ -7633,3 +7845,39 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
 - **发布**：`codex/issue-869-spec-contract-publish` 已推送，PR [#880](https://github.com/EricKingWhy/intelligence-agent/pull/880) 已创建；记录时 head 为 `eb05ca0a93a9b72e58f30f3e861e93ddf5cdeafd`，base 为 `100a4ff3430666ee3a1b9c41ce4f80c80358e4d3`。
 - **范围**：产品代码、测试、Web、配置和 scripts 相对 `origin/main` 的差异为空；仅发布文档与 Gate-0 收据。#869 原始内容两轴独立审查和覆盖闸门已通过。
 - **门禁与残余**：本地 Gate-0 收据 `docs/gate/44d22a9017ae2674eb083e1ea0d62484dd8ad1b8.json` 为 6/6 PASS。pytest、Vitest、完整 Playwright 的真实结果和未闭合环境问题见 `docs/phase_status/2026-10.md` 的 #869 发布记录；未把本地全量验证描述为全绿。PR head 的 GitHub 状态以 #880 页面为准。
+
+## W-21 七票批收尾·第 2 次同步 + 冻结树全量（2026-10-08/09；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，冻结 tip `12034e4f`；**已 push + 开 PR #886；第 3 次同步已完成（见下一节），未集成**）
+
+**范围**：`a5ba11d8..12034e4f`（第 2 次先回后正同步合并 `b2cc80c3` + 台账记账笔 `12034e4f`）。代码面仍是 `c6b6e01a`/`9f167357` 两笔（已由 §8.8.5 修后重审行覆盖）；本段只记第 2 次同步、冻结树全量读数与待裁决项。
+
+- **第 2 次先回后正（`b2cc80c3`）**：第 1 次同步后 main 又进 13 笔（`d17bd342`→`cb0d9113`，全为 docs/spec/workflow/台账：`GLOSSARY.md`、`goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/{08,09,14}_*.md`、`docs/PRD_CROSS_MARKET_PLUGIN_PORTABILITY.md`、`docs/adr/0052-*.md`、`docs/tickets/plugin-portability-2026-10-08/T0-spec-contract.md`、`docs/PHASE_STATUS.md`、`.github/workflows/gate0.yml`、3 条台账行、2 个 Gate-0 收据）。**2 处冲突**（`docs/SDD_TICKET_TRACKER.md` / `docs/phase_status/2026-10.md`）均为**文件末尾追加对追加**（本线 209 / 131 行 vs main 15 / 20 行），按用户已批准的**并集零删除**语义解决，并以 `git merge-file --union` 独立通路复核逐字一致；机械核验证明两侧新增行 0 缺失、0 冲突标记残留。合并树 `bb57fdd4` 与两父树均不等 ⇒ 落覆盖闸门 fail-closed 形状，故补台账行 `docs/review_ledger.d/t365-w21-sync-merge2-a5ba11d8-b2cc80c3.tsv`。**本合并 16 个文件全为 docs/spec/workflow/台账，零 `src/tests/web/desktop/tui/scripts` 改动** ⇒ 车道输入面与第 1 次合并树逐字相同。
+- **重打包（第 2 次合并树）**：tui build / desktop build / `prepare_python_runtime.py` / `build-windows-installer.mjs` 四步 rc=0（installer 段 501 s）。产物 `Intelligence-Agent-Setup-0.1.0.exe` **209,330,760 B / sha256 `d4fd96626542be1b149eb4a79c146730f9f2849dca898a2f13d8a454fba601ec`**；`productCodeSha256` 仍 `6b96ec44…`、两枚 lockfile sha 未变（产品代码零改动）。与第 1 次产物（`8bc640d7…`，209,330,774 B）字节不同 = NSIS/PE 时间戳与压缩块边界差异，非产品代码差异。日志 `D:\w21-work\repack-sync2.txt`。
+- **冻结树 `12034e4f`（tree `7bb2ea3f62ed43f41dca51a37bfa355064ef5cac`）全量 13 车道**：① ruff ✅ ② pytest **15F / 7004P / 28S / 51D / 1E rc=1**（2592.62 s；跑法带 `--continue-on-collection-errors`，因 main 的 `tests/session/test_progress_file.py:412` `os.geteuid()` 在 Windows 收集期即 `AttributeError`，默认跑法会中断整轮）③ guards ✅ 38 passed ④ tui 69/69 ✅ ⑤ tui tsc ✅ ⑥ desktop ✅ ⑦ web tsc ✅ ⑧ vitest **1F / 1496P**（= 在册 flake `StepDetail.window.test.tsx:132`）⑨ oxlint ✅ ⑩ vite build ✅ ⑪ playwright **510 passed / 0 failed**（16.6 m）⑫ diff-check ✅ ⑬ coverage rc=0。原始日志 `D:\w21-work\gate-sync2.txt`。
+- **15 条 pytest 红的逐条归属（机械证据）**：**14 条 = 既有红** —— 在**纯 `origin/main` 树**（`git archive origin/main` 解包，非本线工作树）上跑同一组 node id，读数 **14 failed / 1 passed**，失败集合与冻结树逐条相同；5 个失败测试文件（`tests/attachments/test_local_byte_store.py`、`tests/web/test_attachments_api.py`、`tests/web/test_send_message_attachments.py`、`tests/multiagent/test_delegate.py`、`tests/recovery/test_approval_http_ack_kill.py`）的 blob 与 `origin/main` 逐字相同（`git rev-parse` 对比）。其中 13 条 = 附件族（与 `docs/phase_status/2026-10.md:1005` 的 #496 登记「13 项附件字节/完整性/Windows 权限失败」同族，样本签名 `assert 292 == 256` = NTFS 不认 POSIX `0o400`）；另 1 条 = `tests/multiagent/test_delegate.py::TestBlockingParallelDelegation::test_three_delegates_run_concurrently`（Windows 并发）。**1 条 = 新增已知环境 flake**（`test_http_200_approval_survives_barrier_kill_and_startup_recovery`：满载下 20 s 内没读到子进程 `READY:` 行，隔离 3/3 通过）⇒ 已按 §8.6 第 3 条**新登记**进「已知环境 flake」表（含独立确认）。**1 条收集错误** = `tests/session/test_progress_file.py:412`（blob 与 `origin/main` 逐字相同 `ce8847f0…`，main `a3f21582` 引入，已由 #832 行登记）。**零未知红**。
+- **裸全量 Gate-0**：冻结树 `12034e4f` **6/6 PASS**（43.3 s，含 coverage），收据 `docs/gate/12034e4fafabe0a077358e590fc382d52461b82f.json`（随本次记账笔入库）。
+- **push + PR（2026-10-09）**：分支已推送 `origin/fix/w21-windows-gate-fixes`（tip `a29573d6`）；PR **#886** 已创建（base `main`，`https://github.com/EricKingWhy/intelligence-agent/pull/886`）。GitHub 现报 `mergeable=CONFLICTING` / `mergeStateStatus=DIRTY`（服务端 main 保护 **strict**，第 3 次同步未做）；`gitleaks` PASS，而 **`gate0` 因合并 ref 无法计算根本不会给出绿检查** ⇒ 不解决同步就拿不到必需状态检查。**第 3 次同步只读 dry-run**（`git merge-tree --write-tree --name-only HEAD origin/main`，只读通路、不写 ref、不改工作树）：4 处冲突 —— `desktop/installer/installer.nsh`、`desktop/scripts/build-windows-installer.mjs`（**两处代码面**，与本批 D2/D6/D9/D10 同文件、与 #831 LangString 守卫相撞）、`docs/PHASE_STATUS.md`、`docs/phase_status/2026-10.md`（两处文档）。按 §14.4「冲突文件修改与解决后的 add = 每次单独批准」/§14.7，**代码面冲突无批准不得解决** ⇒ 第 3 次同步（及随之必须重跑的完整 13 车道 + 重打包）**停在待批准**。
+- **残余 / 待用户裁决**：①既有缺陷是否授权修（14 条 Windows 既有红 + `os.geteuid()` 收集错误；#365 票面禁改产品代码，本票只报告）②`/api/ws` 完全未鉴权（`src/agent_harness/web/app.py:1692` 非 http 直通 + `src/agent_harness/web/websocket.py:123` 裸 `accept()`）⇒ 桌面代理注入的 WS `authorization` 是空操作，真正权威在 HTTP API；**建议另开 issue**（只报告，本票不修）③#815 第三路径 (c)「外壳自持 loopback 代理」已获批方案但**未实施**（#365 禁改产品代码 ⇒ 需单独票面）④**已 push + 开 PR #886**（见上一节）；**第 3 次同步已获批准并完成**（见下一节）；剩余待批准 = **PR merge**（§14.4 单独批准；已获用户批准，待 CI `gate0` 绿）。**#365 保持 OPEN**。
+
+## W-21 七票批收尾·第 3 次同步 + 合并面双轴真实审查（2026-10-08/09；分支 `fix/w21-windows-gate-fixes` @ worktree `D:\intelligence-agent-wt-w21`，合并 `f6b9d5fe` / tree `74b1eeafc76af6077c23e8440aa004aaca80a1a4`；**未集成**）
+
+**范围**：`d5e29535..f6b9d5fe`（第 3 次先回后正同步合并，父一 `d5e29535` 本线 tip / 父二 `b43efca8` = `origin/main`）。代码面 = 合并面本身（7 文件对两父的全新增量）；本线既有代码面未变，故第 2 次冻结树的车道读数不传递（§8.8.2 INV-1）。
+
+- **第 3 次先回后正（`f6b9d5fe`）**：`origin/main` 自 `cb0d9113` 再进 42 笔到 `b43efca8`。服务端 main 保护是 strict ⇒ 不并入就拿不到必需状态检查 `gate0`；按 `docs/agents/git-workflow.md` §3.1 第 2 条（短分支先合最新 main 属常设授权）执行。**4 处冲突逐文件分析与解决**：
+  - `desktop/installer/installer.nsh` —— **取 origin/main 版**（用户裁决）。**两条线各自独立实现了 #831**（本线 `b9a326c5` 7 文件 vs main `1057abc4` + `496aad99` + `81c130ff`），两侧改的是同一批行 ⇒ 已批准的「并集零删除」语义在此文件**不成立**：并集会产生 **16 条重复 `LangString`** 声明，单语言构建触发 NSIS `warning 7025`（warnings-as-errors ⇒ 致命）。按 §9.1.1 停止相关施工并请用户裁决。本线 #816 的 `IA_INSTALLER_DIR` 定义与 `!include`（在冲突区外）完整保留。
+  - `desktop/scripts/build-windows-installer.mjs` —— **确定性重建**（非逐行并集）。理由（实测）：两侧新增块都以函数内结尾并共用同一组收尾大括号 ⇒ 逐行并集会让本线函数不闭合（`node --check` 报 `Unexpected token 'export'`）。重建脚本从 main 侧 patch 取 2 个 hunk（86 + 3 行），分别插到 `createWindowsInstallerConfig` 之前与 `assertNsisLangStringGuards(...)` 之后（各断言命中数 = 1）；结果 843 → 933 行，导出 = 本线 20 ∪ main 7 = **23**。
+  - `docs/PHASE_STATUS.md` / `docs/phase_status/2026-10.md` —— 按已批准的**并集零删除**解决（对两父 `git diff --numstat` 删除列均为 0）。
+  - 另 3 个文件自动合并：`desktop/scripts/test-windows-installer.mjs`、`docs/SDD_TICKET_TRACKER.md`、`src/agent_harness/web/app.py` —— 两侧改动分处不相交区域，均在实际位置、无重复，`ast.parse` 通过。
+  - **合并结果**：`f6b9d5fe`；`git merge-base --is-ancestor origin/main HEAD` rc=0（0 behind / 63 ahead）；`git diff --check` 对两父均 rc=0；7 文件无冲突标记。
+- **为何这个合并需要真实审查行**：`git show --cc --name-only f6b9d5fe` **非空**且含 4 个代码文件 + 3 个文档文件，且逐个 blob 与两父**都不相同**（实测 `git rev-parse HEAD:<path>` 对 `^1` 与 `^2` 均不等，7/7）⇒ 合并引入了两父都没有的**新组合内容**。§7 第 8 条的机械归属只对「零新增内容」（整树逐字等于某父）成立 ⇒ 必须落真实 review 行。落行前 coverage 在合并提交上 fail-closed（唯一 ❌ = `f6b9d5fe`），落行后 exit 0。
+- **合并面的双轴独立审查**（按发现阶段规格，审查面 = 该 7 文件**对两父的增量**，不扩到整票 diff 与全仓；两轴均先读 `docs/agents/review-debug-playbook.md` 的 Independent Review 分支）：**Correctness/Spec PASS-WITH-FINDINGS（P0=0 P1=0 P2=0 P3=2）**；**Standards/Reuse PASS-WITH-FINDINGS（P0=0 P1=0 P2=1 P3=3 P4=1）**。两轴共同核验成立（实测）：`installer.nsh` LangString 恰 **8** 条、每条落在匹配 `!ifdef LANG_*` 守卫块内、本线 #816 include 完整；`build-windows-installer.mjs` `node --check` 通过、动态 import 得 **23** 导出、无重复定义、无死函数、两侧调用点均在；两文档并集删除列全 0；7/7 blob 与派单期望值逐字相符；`desktop` 定向 installer 测试 **42P/0F**、`tsc -b` rc=0、`oxlint` 0 warning/0 error。两轴各自自证零写入（`git status --short` 空、7 文件 `git hash-object` 与合并提交 blob 逐一相同）。
+- **发现登记不修（P2×1 + P3×4）**：依据 = 无 P0/P1；§8.8.5 本票修后重审额度已用满；`AGENTS.md` §8 Scope Lock —— 合并面已冻结，修复会改动两轴以 hash 具名的树。**P2-1（两轴同指）** = 两线各自实现 #831 后两套守卫实现同时存活且都被调用（`build-windows-installer.mjs:829` 本线 `assertNsisLangStringGuards` + `:831` main `validateInstallerScripts`）；本线实现判据更松（把 `!ifndef LANG_X` 也算作守卫）且只扫 `installer.nsh`（main 的还扫 `installer-directories.nsh`）⇒ 并行实现残留的耦合冗余；**净行为仍 fail-closed**，因为更强的那套也在跑。**P3 同族**：①重复测试面（`desktop/test/installer-nsis.test.mjs` vs `installer-scripts.test.mjs`）；②重建把 `createWindowsInstallerConfig` 的 JSDoc 与其目标函数拆开（`:607-610` 现挂在 `langStringSymbol` 上方、`:698` 无注释）；③`PHASE_STATUS`「最近条目（最新在上）」并集后 10-09 条目被排到 10-08 之下；④月档 #831 段只记 main 一侧实现。
+- **台账行**：`docs/review_ledger.d/t365-w21-sync-merge3-d5e29535-f6b9d5fe.tsv`。
+- **重打包（2026-10-09）**：4 步 rc=0 —— `tui-build` / `desktop-build` / `py-runtime`（`desktop/scripts/prepare_python_runtime.py`）/ `installer`（`node scripts/build-windows-installer.mjs`，355s）。产物 `desktop/dist-installer/Intelligence-Agent-Setup-0.1.0.exe` **209,363,621 B** / sha256 `1dc8898aedc644640a1597c9440a6e7a03a5e43a945e8aa2508815fdcc24dfc7`；`installer-build.json`：`lockfileSha256=81e4ae10…`、`nodeLockfileSha256=63b791d3…`、`productCodeSha256=c5ba729f…`、`builtAt=2026-10-08T19:22:31.111Z`。重打包清掉了此前的 desktop 暂存红（该车道本轮转绿）。
+- **合并树全量 13 车道（冻结 tip `83b5e1a8` / tree `da2411de5bfc95b3346744ad9f2aa1ece65b66ab`）**：**12 绿 / 1 红**。绿 = ruff、guards（38 passed）、tui-tests、tui-tsc、desktop-tests、web-tsc、web-vitest、web-oxlint、vite-build、playwright（**516 passed / 13.4m**）、diff-check、coverage。红 = **pytest**：`16 failed, 7046 passed, 30 skipped, 51 deselected, 1 error in 1173.57s (0:19:33)`。日志 `/d/w21-work/gate-sync3.txt`。
+- **§8.6 既有红归因（零未知红）**：把冻结树上的 16 条 FAILED node id 原样在**纯 `origin/main`（`b43efca8`）抽取树**上复跑（`git archive` 到 `/d/w21-work/attrib-main3`，`PYTHONPATH=<抽取树>/src`，实证 `agent_harness from D:\w21-work\attrib-main3\src\agent_harness\__init__.py`）⇒ **16/16 同集合失败**（`16 failed in 11.64s`，日志 `/d/w21-work/attrib-main3-pytest.txt`）。另 1 条 **ERROR** = `tests/session/test_progress_file.py` 的 `os.geteuid()` 收集错误，属 main 侧既有（tracker #832 已登记）。⇒ 本合并**未引入新红**，16 红 + 1 error 全部归因 main，已在 #889「门禁修复」票登记。与第 2 次同步（15F）的 3 条差异 = 本线修复 2 条、main 新引入 3 条；3 条新红根因均在 main 的 `src/agent_harness/model/config.py`（`find_catalog_entry` 需 `settings.agent_models`；`validate_reasoning_effort` 对 `deepseek-chat` 抛 `UnsupportedReasoningEffort`），相关测试文件与该 `config.py`、`evaluation/smoke.py`、`session/service.py` 逐 blob 与 `origin/main` 相同。
+- **裸全量 Gate-0（冻结 tip）**：**6/6 PASS，墙钟 19.0s**（diff-check / ruff / oxlint / tsc / guards / coverage），收据落盘 `docs/gate/83b5e1a891975af7260d47c19199aecce4c8515f.json`（随本次记账提交）。Gate-0 无 pytest 车道 ⇒ 其 PASS 与上面的 pytest 红不矛盾（§14.10：Gate-0 不替代完整门禁）。
+- **第 4 次先回后正（合并 `c098a5a7` / tree `1c48f3c91bfb835ec2de4797bf2d156819866c95`）**：`origin/main` 自 `b43efca8` 再进 **10 笔**到 `df2b2435`，**全部 docs-only**（`docs/SDD_TICKET_TRACKER.md` 1 行 + `docs/gate/` 5 份收据 + `docs/review_ledger.d/` 1 行），`git diff --name-only b43efca8..df2b2435 | grep -v '^docs/'` 为空。服务端 main 保护 strict ⇒ 不并入就拿不到必需状态检查 `gate0`；按 `docs/agents/git-workflow.md` §3.1 第 2 条（短分支先合最新 main 属常设授权）执行。**唯一冲突** `docs/SDD_TICKET_TRACKER.md`：两侧在同一锚点（`web/e2e/workspace-modes.spec.ts:102` 表行）之后向同一张「已知 flake 登记表」插入独立表行（本线 `tests/recovery/test_approval_http_ack_kill.py::test_http_200_…` vs main `tests/web/test_web_ws_relay.py::test_ws_truncation_criterion_is_persisted_max_not_enqueue_cursor`）⇒ 文本冲突但语义可共存。**按用户批准的「并集零删除」解决**：两行都在表内、顺序为本线行 → main 行 → 本线原有空行与「签名文本订正」段；对两父 `git diff --numstat` 删除列均 **0**（vs HEAD `1+/0-`、vs origin/main `244+/0-`）。`git diff --check` rc=0、无冲突标记、全文 CRLF（lone_lf 0）。
+- **代码面不变 ⇒ 13 车道读数传递**：`git diff --name-only 83b5e1a8 c098a5a7` 过滤 `docs/` 后为空 ⇒ 第 4 次合并树的代码面与第 3 次冻结树逐路径相同，上面那条 13 车道读数（12 绿 + pytest 16F 已归因）对代码面继续有效，不重跑。
+- **合并面审查归属**：`git show --cc --name-only c098a5a7` 只列 `docs/SDD_TICKET_TRACKER.md`（**无代码文件**）⇒ 不触发 §7 第 8 条的真实审查行要求；coverage 对该 merge 按 docs-only 自动归属，实测 `✅ 台账覆盖闸门通过`、exit 0、❌ 0 条。
+- **裸全量 Gate-0（第 4 次合并 tip）**：**6/6 PASS，墙钟 33.2s**（diff-check / ruff / oxlint / tsc / guards / coverage），收据 `docs/gate/c098a5a7d18808463fe9f3aa8728265d79ba5e86.json`（随本次记账提交）。
+- **待办**：push → CI `gate0` 绿 → merge PR #886（已批准）。**#365 保持 OPEN**。

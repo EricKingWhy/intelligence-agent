@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "generated": {
+    "at": "2026-10-07T13:01:09Z",
+    "by": "pin copied from the upstream checksum list",
+    "from": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt"
+  },
+  "node": {
+    "runtime": "node",
+    "version": "24.21.0",
+    "distribution": "nodejs.org",
+    "archive": "node-v24.21.0-win-x64.zip",
+    "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip",
+    "sha256": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+    "size": 37618919,
+    "members": [
+      "node-v24.21.0-win-x64/node.exe",
+      "node-v24.21.0-win-x64/LICENSE"
+    ],
+    "license": "MIT (Node.js). The archive root's LICENSE is staged next to the binary."
+  },
+  "requirements": {
+    "engines": ">=22",
+    "minimumMajor": 22,
+    "note": "tui/package.json engines.node; assertNodeRuntimeVersion keeps the pin at or above it"
+  },
+  "layout": {
+    "resourcesDir": "node",
+    "executable": "node/node.exe",
+    "note": "extracted under <install>/resources/node/; installer/ia-tui.cmd starts the shipped TUI with it, because the app's own Electron binary cannot host a raw-mode terminal (W-21 D5, measured: ELECTRON_RUN_AS_NODE has no TTY and node:tty reopens fail with ERR_TTY_INIT_FAILED)"
+  },
+  "notes": [
+    "Only node.exe and the archive's license are staged: the terminal client needs no npm/npx tree.",
+    "Regenerate the pin with: curl -s https://nodejs.org/dist/v<version>/SHASUMS256.txt, then copy the node-v<version>-win-x64.zip line.",
+    "Stage it with desktop/scripts/prepare_node_runtime.py (installer/README.md -> Building)."
+  ]
+}

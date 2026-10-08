@@ -7,8 +7,10 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  hostCredentialsEnvValue,
   installerAppId,
   installerProductName,
+  resolveHostCredentialPath,
   resolveUserDataDir,
   defaultInstallDir,
   uninstallRegistryKey,
@@ -96,5 +98,22 @@ describe('resolvePythonPath', () => {
       resolvePythonPath(dev('/home/u/repo/node_modules/electron/dist/electron')),
       '/home/u/repo/node_modules/electron/dist/python',
     )
+  })
+})
+
+describe('credential channel (W-21 D3 #815)', () => {
+  it('keeps the credential file in the per-user profile, beside the data root', () => {
+    const path = resolveHostCredentialPath('C:\\Users\\u\\AppData\\Roaming\\intelligence-agent')
+    assert.ok(path.endsWith('host-credentials.json'))
+    assert.ok(!path.includes('workspace'), 'the credential file is not session content')
+  })
+
+  it('fails closed on an empty user data dir', () => {
+    assert.throws(() => resolveHostCredentialPath('  '), /userData dir is empty/)
+    assert.throws(() => hostCredentialsEnvValue(''), /credential path is empty/)
+  })
+
+  it('selects the server file backend by prefix', () => {
+    assert.equal(hostCredentialsEnvValue('C:\\tmp\\c.json'), 'file:C:\\tmp\\c.json')
   })
 })
