@@ -125,6 +125,10 @@ async def test_formation_request_distinguishes_events_from_enduring_project_choi
         "A temporary schedule change or one-time operational outcome remains episodic when its "
         "result matters for future planning; semantic is for facts that continue beyond the event."
     ) in call.system_prompt
+    assert (
+        "future relevance alone does not make an event semantic. Use semantic only for a stable "
+        "fact that persists independently of that event."
+    ) in call.system_prompt
 
 
 @pytest.mark.asyncio
@@ -135,17 +139,18 @@ async def test_formation_request_preserves_ordered_procedure_details(env: Env):
     call = invoker.calls[0]
     assert call.stage is MemoryModelStage.FORMATION
     assert (
-        "For procedural memories, preserve every user-stated step in order, including its "
-        "action, object, and boundary; do not compress the procedure into a higher-level "
-        "summary. Keep the success condition supported by cited evidence."
+        "For procedural memories, preserve every essential action, object, order, and execution "
+        "boundary. Concise wording is allowed only when it preserves all of them without "
+        "generalizing; if they cannot fit in the 500-character procedure field, return no "
+        "procedural candidate. Keep the success condition supported by cited evidence."
     ) in call.system_prompt
     assert (
-        "When the trusted marker is not explicit, a direct user description alone is insufficient; "
-        "require two distinct qualifying refs. For "
-        "tool-backed procedures, cite the exact user-stated steps when present and both distinct "
-        "successful tool-result refs; user evidence does not replace either result. If neither "
-        "path is supported, return no procedural candidate."
+        "Do not infer or decide the trusted Runtime marker or R5 eligibility; Runtime alone applies "
+        "R5 using trusted metadata and qualifying event refs."
     ) in call.system_prompt
+    assert "When the trusted marker is not explicit, a direct user description alone is insufficient" \
+        not in call.system_prompt
+    assert "do not compress the procedure into a higher-level summary" not in call.system_prompt
 
 
 @pytest.mark.asyncio
