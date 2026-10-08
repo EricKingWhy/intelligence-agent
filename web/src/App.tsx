@@ -493,6 +493,13 @@ export default function App() {
       // 此前 `if (selectedId && name)` 把 null 一并跳过，导致界面显示「默认链」而会话继续跑
       // 上一个非默认模型（真机：选 glm-5.3-flash 后选「默认链」，JSONL 不新增 model/changed）。
       const target = modelChangeTarget(name, models);
+      const targetModel = target ? models.find((model) => model.name === target) : undefined;
+      if (
+        selectedReasoningEffort !== null &&
+        !targetModel?.reasoningEffort?.supported.includes(selectedReasoningEffort)
+      ) {
+        setSelectedReasoningEffort(null);
+      }
       if (selectedId && target) {
         const entry = models.find((m) => m.name === target);
         if (entry?.provider) {
@@ -509,7 +516,7 @@ export default function App() {
         }
       }
     },
-    [selectedId, models, changeModel],
+    [selectedId, models, changeModel, selectedReasoningEffort],
   );
 
   // Composer 档位打包（提交路径与 handleSubmit 的依赖数组共用同一引用）。
@@ -771,12 +778,19 @@ export default function App() {
       ]);
       setModels(modelList);
       setSelectedModel((prev) => (prev && modelList.some((m) => m.name === prev) ? prev : null));
+      const defaultModel = modelList.find((model) => model.default);
       setPermissionModes(modes);
       setSelectedPermissionMode((prev) => (prev && modes.some((m) => m.id === prev) ? prev : null));
       setAgentProfiles(profiles);
       setSelectedAgentProfile((prev) => (prev && profiles.some((m) => m.id === prev) ? prev : null));
       setReasoningEfforts(efforts);
-      setSelectedReasoningEffort((prev) => (prev && efforts.some((m) => m.id === prev) ? prev : null));
+      setSelectedReasoningEffort((prev) => (
+        prev &&
+        efforts.some((effort) => effort.id === prev) &&
+        defaultModel?.reasoningEffort?.supported.includes(prev)
+          ? prev
+          : null
+      ));
     })();
   }, [error]);
 

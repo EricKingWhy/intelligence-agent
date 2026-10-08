@@ -13,6 +13,7 @@
 > §14 的现行模型看，不要照历史条目里的旧分支分工。
 
 ---
+> **当前状态（2026-10-08，#865）**：Issue [#865](https://github.com/EricKingWhy/intelligence-agent/issues/865) 已认领并处于 `in-progress`。范围按用户裁决冻结：保留 OpenAI-compatible Provider 边界；模型目录声明支持档位、默认值及 wire 映射；Composer 仅展示当前模型可用档位，默认仍表示未显式传参；滑杆使用用户选择的鲜艳渐变并遵守主题、键盘和 reduced-motion。用户确认验证模型目录、Provider 映射/未知值、Composer 当前模型选档与请求体三个边界。分支 `codex/effort-slider` 已同步至 `origin/main` `6d36dde3`；预览 `http://127.0.0.1:5181/` 保留供用户验收。当前实现尚在进行，未推送、未提 PR、未合并。
 
 > **当前状态（2026-10-08，#832）**：实现提交 0db3881a；审查与状态提交 7e1de14e；Gate-0 收据提交 ece0fb4e；发布分支 codex/issue-832-live-gate-docker-cli-pr。采用 Python 标准库 shutil.which 预检 Docker CLI 并使用解析出的可执行路径，来源复核与复用判定见 2026-10 月度归档。相关 CLI 测试在普通 PATH 与排除 Docker CLI 的进程 PATH 下各 8 passed，Ruff 通过。两轴独立审查完成；审查覆盖闸门 exit 0。Gate-0 6/6 PASS（收据对应 7e1de14e），以 9e1c065b 为基点的差异范围复跑亦 6/6 PASS、覆盖 6 个改动文件。PR #839（Closes #832）于 2026-10-08 合入 main，merge commit afa4273371cf7bed2cb69c6d6478dcbbc47081a8；GitHub 必需 gate0 CI 45s PASS，issue 已自动 CLOSED 并移除 in-progress；最终交付评论 issuecomment-6043340255。完整 pytest 在 Windows 收集阶段有既有 os.geteuid() 错误，未记作全绿；是否另票修复待用户裁决。
 

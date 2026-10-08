@@ -16,6 +16,7 @@ import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import { ModelPicker } from './ModelPicker';
 import { BudgetPicker } from './BudgetPicker';
 import { OptionPicker, toCatalogOptions } from './OptionPicker';
+import { ReasoningEffortSlider } from './ReasoningEffortSlider';
 
 /** #283：升到这一档要在 pill 浮层里给一次显式确认（ADR-0041 D1——后端**不加**强制标志位，
  *  确认是 UX 层的责任）。字面量与后端 `PermissionPolicy.DANGER_FULL_ACCESS` 同值：它同时
@@ -298,12 +299,38 @@ export const Composer = memo(function Composer({
     }
   };
 
+  const currentModel = selectedModel === null
+    ? models.find((model) => model.default)
+    : models.find((model) => model.name === selectedModel);
+  const reasoningEffortCapability =
+    currentModel?.isAvailable === false ? undefined : currentModel?.reasoningEffort;
+  const supportedEffortIds = new Set(reasoningEffortCapability?.supported ?? []);
+  const modelReasoningEfforts = reasoningEffortCapability
+    ? reasoningEfforts.filter((effort) => supportedEffortIds.has(effort.id))
+    : [];
+  const effectiveReasoningEffort = modelReasoningEfforts.some(
+    (effort) => effort.id === selectedReasoningEffort,
+  )
+    ? selectedReasoningEffort
+    : null;
+  const selectedEffortIndex = modelReasoningEfforts.findIndex(
+    (effort) => effort.id === effectiveReasoningEffort,
+  );
+  const reasoningEffortTone =
+    selectedEffortIndex < 0
+      ? undefined
+      : selectedEffortIndex === 0
+        ? 'blue'
+        : selectedEffortIndex === modelReasoningEfforts.length - 1
+          ? 'deep'
+          : 'violet';
+
   // 控件行是否渲染——至少有一个非空目录或预算入口（#426）时才显示 control row 容器
   const hasControls =
     models.length > 0 ||
     permissionModes.length > 0 ||
     agentProfiles.length > 0 ||
-    reasoningEfforts.length > 0 ||
+    modelReasoningEfforts.length > 0 ||
     (!permissionInSession && onBudgetRunTurnsChange !== undefined);
 
   return (
@@ -535,10 +562,20 @@ export const Composer = memo(function Composer({
             <OptionPicker
               ariaLabel="Reasoning Effort"
               title="推理深度选哪一档？"
-              options={toCatalogOptions(reasoningEfforts, catalogIcon)}
-              value={selectedReasoningEffort}
+              options={toCatalogOptions(modelReasoningEfforts, catalogIcon)}
+              value={effectiveReasoningEffort}
               onChange={onReasoningEffortChange ?? (() => {})}
               icon={Brain}
+              currentTone={reasoningEffortTone}
+              customContent={
+                <ReasoningEffortSlider
+                  options={modelReasoningEfforts}
+                  value={effectiveReasoningEffort}
+                  defaultValue={reasoningEffortCapability?.default ?? null}
+                  disabled={locked}
+                  onChange={(id) => onReasoningEffortChange?.(id)}
+                />
+              }
               placeholder="推理"
               disabled={locked}
             />

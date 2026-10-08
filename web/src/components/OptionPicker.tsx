@@ -142,6 +142,8 @@ interface Props {
    *   - 渲染函数：需要 `close` 的交互内容。使用者是权限 picker 的升档确认面（#283）。
    *  两者可以同时不存在（不渲染这一行）。 */
   footer?: ReactNode | ((ctx: { close: () => void }) => ReactNode);
+  /** Replace the standard option list with a single custom selector surface. */
+  customContent?: ReactNode;
   /** 是否渲染「默认（未选）」那一行（缺省 `true`）。
    *
    *  为什么需要这个开关（#283）：会话内改档走 `POST /api/sessions/{id}/permission`，
@@ -152,6 +154,8 @@ interface Props {
   /** `disabled` 时 trigger 的 `title`（说清**为什么**不可点）。缺省 → 沿用原 title 规则。
    *  #236：权限 pill 在会话内转为只读，需要一句能解释原因的悬停文案。 */
   disabledHint?: string;
+  /** Optional theme-safe tint for the selected trigger value. */
+  currentTone?: 'blue' | 'violet' | 'deep';
 }
 
 export function OptionPicker({
@@ -163,9 +167,11 @@ export function OptionPicker({
   value,
   onChange,
   footer,
+  customContent,
   showDefault = true,
   disabled = false,
   disabledHint,
+  currentTone,
 }: Props) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(
@@ -213,18 +219,23 @@ export function OptionPicker({
           disabled={disabled}
         >
           <Icon size={13} className="composer-trigger-icon" aria-hidden="true" />
-          <span className="composer-trigger-current">{triggerLabel}</span>
+          <span className="composer-trigger-current" data-tone={currentTone}>{triggerLabel}</span>
           <ChevronDown size={12} className="composer-trigger-chevron" aria-hidden="true" />
         </button>
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
-          className="picker-content"
+          className={`picker-content${customContent !== undefined ? ' picker-content-custom' : ''}`}
           side="top"
           align="start"
           sideOffset={6}
-          // FE-R11-04：短目录搜索框不可见 → 焦点交给 listbox，键盘导航才有效
-          onOpenAutoFocus={focusPickerListOnOpen(listRef, searchHidden)}
+          // Standard lists focus cmdk's listbox/search. A custom selector lets Radix
+          // focus its native control (the reasoning slider) directly.
+          onOpenAutoFocus={
+            customContent === undefined
+              ? focusPickerListOnOpen(listRef, searchHidden)
+              : undefined
+          }
         >
           <Command
             label={ariaLabel}
@@ -237,12 +248,18 @@ export function OptionPicker({
             }}
           >
             <div className="picker-head">{title}</div>
-            <div className={`picker-search-wrap${searchHidden ? ' hidden' : ''}`}>
-              <Icon size={13} aria-hidden="true" />
-              <CommandInput placeholder="搜索…" className="picker-search" />
-            </div>
-            <CommandList ref={listRef}>
-              <CommandGroup>
+            {customContent !== undefined ? (
+              <div className="picker-custom-body" role="group" aria-label={ariaLabel}>
+                {customContent}
+              </div>
+            ) : (
+              <>
+                <div className={`picker-search-wrap${searchHidden ? ' hidden' : ''}`}>
+                  <Icon size={13} aria-hidden="true" />
+                  <CommandInput placeholder="搜索…" className="picker-search" />
+                </div>
+                <CommandList ref={listRef}>
+                  <CommandGroup>
                 {/* FE-R11-05：单选必须能回到「没选」——否则选了就再也退不回来
                     （只能整页 reload）。提交 null，与 trigger placeholder 同义。
                     #283：会话内这一行由调用方关掉（`showDefault={false}`）——那条路径上
@@ -281,9 +298,11 @@ export function OptionPicker({
                     </CommandItem>
                   );
                 })}
-              </CommandGroup>
-            </CommandList>
-            {footerContent ? <div className="picker-foot">{footerContent}</div> : null}
+                  </CommandGroup>
+                </CommandList>
+                {footerContent ? <div className="picker-foot">{footerContent}</div> : null}
+              </>
+            )}
           </Command>
         </Popover.Content>
       </Popover.Portal>

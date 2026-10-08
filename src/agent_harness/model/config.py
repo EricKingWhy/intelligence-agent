@@ -88,10 +88,69 @@ _CAPABILITY_FIELDS: dict[str, type] = {
     "prompt_cache": str,
 }
 
+REASONING_EFFORT_LEVELS = frozenset({"minimal", "standard", "deep"})
+
 
 def _pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
     """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。"""
     return {k: source[k] for k in _CAPABILITY_FIELDS if k in source}
+
+
+@dataclass(frozen=True)
+class ReasoningEffortCapability:
+    supported: tuple[str, ...]
+    default: str
+    wire_mapping: dict[str, str]
+
+    def as_catalog_value(self) -> dict[str, Any]:
+        return {
+            "supported": list(self.supported),
+            "default": self.default,
+            "wire_mapping": dict(self.wire_mapping),
+        }
+
+
+def _parse_reasoning_effort_capability(
+    value: Any, model_name: str,
+) -> ReasoningEffortCapability:
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"AGENT_MODELS {model_name!r} reasoning_effort must be an object"
+        )
+    if set(value) != {"supported", "default", "wire_mapping"}:
+        raise ConfigError(
+            f"AGENT_MODELS {model_name!r} reasoning_effort requires supported, "
+            "default, and wire_mapping"
+        )
+    supported = value["supported"]
+    default = value["default"]
+    wire_mapping = value["wire_mapping"]
+    if (
+        not isinstance(supported, list)
+        or not supported
+        or any(not isinstance(level, str) for level in supported)
+        or len(set(supported)) != len(supported)
+        or not set(supported) <= REASONING_EFFORT_LEVELS
+    ):
+        raise ConfigError(
+            f"AGENT_MODELS {model_name!r} reasoning_effort supported levels are invalid"
+        )
+    if not isinstance(default, str) or default not in supported:
+        raise ConfigError(
+            f"AGENT_MODELS {model_name!r} reasoning_effort default must be supported"
+        )
+    if (
+        not isinstance(wire_mapping, dict)
+        or set(wire_mapping) != set(supported)
+        or any(not isinstance(wire, str) or not wire for wire in wire_mapping.values())
+    ):
+        raise ConfigError(
+            f"AGENT_MODELS {model_name!r} reasoning_effort wire_mapping must map "
+            "every supported level"
+        )
+    return ReasoningEffortCapability(
+        supported=tuple(supported), default=default, wire_mapping=dict(wire_mapping),
+    )
 
 
 @dataclass(frozen=True)
@@ -120,6 +179,7 @@ class ModelCatalogEntry:
     supports_reasoning_summary: bool | None = None
     # #520：prompt caching 机制声明（declarative only，见 _CAPABILITY_FIELDS 注）。
     prompt_cache: str | None = None
+    reasoning_effort: ReasoningEffortCapability | None = None
 
     def declared_capabilities(self) -> dict[str, Any]:
         """返回本条目【显式声明】的能力位（None 的不计入）。"""
@@ -138,6 +198,8 @@ class ModelCatalogEntry:
             caps["supports_reasoning_summary"] = self.supports_reasoning_summary
         if self.prompt_cache is not None:
             caps["prompt_cache"] = self.prompt_cache
+        if self.reasoning_effort is not None:
+            caps["reasoning_effort"] = self.reasoning_effort.as_catalog_value()
         return caps
 
 
@@ -208,11 +270,16 @@ def parse_model_catalog(settings: Settings) -> list[ModelCatalogEntry]:
                             f"AGENT_MODELS 条目 {name!r} 的 {cap_field} 必须是 string"
                         )
                 capability_kwargs[cap_field] = value
+        reasoning_effort = (
+            _parse_reasoning_effort_capability(item["reasoning_effort"], name)
+            if "reasoning_effort" in item else None
+        )
         entries.append(ModelCatalogEntry(
             name=name, provider=provider, model_name=model_name,
             base_url=item.get("base_url") or None,
             api_key=SecretStr(api_key) if isinstance(api_key, str) and api_key else None,
             temperature=temperature,
+            reasoning_effort=reasoning_effort,
             **capability_kwargs,
         ))
     return entries
@@ -272,6 +339,7 @@ class ModelConfig:
         base_url: str,
         temperature: float,
         fallback: "ModelConfig | None" = None,
+        reasoning_effort: ReasoningEffortCapability | None = None,
     ):
         # 运行期 SDK 要明文，但持有形态是 SecretStr：repr(config) / vars(config)
         # / pytest 失败局部变量等调试路径脱敏为 **********（与 Settings 层一致）。
@@ -283,6 +351,7 @@ class ModelConfig:
         self.api_key = SecretStr(api_key)
         self.base_url = base_url
         self.temperature = temperature
+        self.reasoning_effort = reasoning_effort
         # Model Fallback 两级链（ADR-0014 决策 14）：瞬时故障切 fallback、
         # never 切回。V1 只消费第一级（Runtime 的 coordinator 持有两级结构）。
         self.fallback = fallback
@@ -301,6 +370,9 @@ class ModelConfig:
             temperature=settings.temperature,
             key_env="MODEL_API_KEY",
         )
+        entry = find_catalog_entry(settings, config.provider, config.model_name)
+        if entry is not None:
+            config.reasoning_effort = entry.reasoning_effort
         config.fallback = cls._fallback_from(settings)
         return config
 
@@ -314,7 +386,7 @@ class ModelConfig:
         # FALLBACK_MODEL_PROVIDER 为空 = 单级（无 fallback），静默缺省。
         if not settings.fallback_model_provider:
             return None
-        return cls._single_from(
+        config = cls._single_from(
             provider=settings.fallback_model_provider,
             model_name=settings.fallback_model_name,
             api_key=settings.fallback_model_api_key.get_secret_value(),
@@ -322,6 +394,10 @@ class ModelConfig:
             temperature=settings.temperature,
             key_env="FALLBACK_MODEL_API_KEY",
         )
+        entry = find_catalog_entry(settings, config.provider, config.model_name)
+        if entry is not None:
+            config.reasoning_effort = entry.reasoning_effort
+        return config
 
     @classmethod
     def from_catalog(cls, settings: Settings, name: str) -> "ModelConfig":
@@ -347,6 +423,7 @@ class ModelConfig:
                       or PROVIDER_PRESETS[entry.provider]["model_base_url"]),
             temperature=(entry.temperature if entry.temperature is not None
                          else settings.temperature),
+            reasoning_effort=entry.reasoning_effort,
         )
         # fallback 链语义不动（ADR-0014）：catalog 选择只替换 primary。
         resolved.fallback = cls._fallback_from(settings)

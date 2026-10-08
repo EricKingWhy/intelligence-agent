@@ -87,6 +87,52 @@ class TestModelsEndpoint:
         # mimo 未做缓存机制核实 ⇒ 不声明（不猜测）
         assert "prompt_cache" not in mimo
 
+    def test_models_expose_declared_reasoning_effort_capability(self, tmp_path):
+        descriptor = {
+            "supported": ["minimal", "deep"],
+            "default": "minimal",
+            "wire_mapping": {"minimal": "low", "deep": "high"},
+        }
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([{
+                "name": "reasoning-model", "provider": "deepseek",
+                "model_name": "deepseek-r1", "reasoning_effort": descriptor,
+            }]),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+
+        models = client.get("/api/models").json()["models"]
+        reasoning_model = next(m for m in models if m["id"] == "reasoning-model")
+        default_model = next(m for m in models if m["is_default"])
+
+        assert reasoning_model["reasoning_effort"] == descriptor
+        assert "reasoning_effort" not in default_model
+
+    def test_default_model_uses_matching_catalog_effort_declaration(self, tmp_path):
+        descriptor = {
+            "supported": ["minimal", "standard"],
+            "default": "standard",
+            "wire_mapping": {"minimal": "none", "standard": "low"},
+        }
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([{
+                "name": "default-profile", "provider": "deepseek",
+                "model_name": "deepseek-chat", "reasoning_effort": descriptor,
+            }]),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+
+        models = client.get("/api/models").json()["models"]
+        default_model = next(m for m in models if m["is_default"])
+
+        assert default_model["reasoning_effort"] == descriptor
+
     def test_models_catalog_entry_without_capabilities_falls_back_to_preset(self, catalog_client):
         """catalog 条目不声明能力位 → 回落 preset，metadata_source=provider_preset。"""
         body = catalog_client.get("/api/models").json()

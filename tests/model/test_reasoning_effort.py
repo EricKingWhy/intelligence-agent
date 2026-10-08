@@ -1,33 +1,18 @@
-"""create_chat_model 的 reasoning_effort 注入（RUNTIME 子批次）。
-
-reasoning_effort 是会话级思考深度控制。**两套词汇必须分开**：
-
-- harness 语义档位（`REASONING_EFFORT_DESCRIPTIONS` 的 key）：`minimal | standard | deep`
-  ——产品词汇，Web 层 validator 与前端清单引用它；
-- provider 线格式枚举（OpenAI 兼容推理接口的 `reasoning_effort` 字段）：
-  `none | minimal | low | medium | high | xhigh | max`
-  ——**只认这几个字面量，其他值一律 400**（实测 `invalid_parameter_error`，
-  input `'deep'`）。
-
-`create_chat_model` 于是必须把语义档位翻译成线格式枚举后再注入；原样透传
-会让「标准 / 深度」两档在真实对话中**必然** BadRequestError → run 立刻失败、
-零输出（2026-09-08 ~ 09-11 生产日志反复出现）。不支持的 Provider 是否忽略
-该字段由 Provider 决定，但发出去的字面量必须合法。
-
-覆盖契约：
-  G1：reasoning_effort="deep" → 模型拿到线格式 "high"；
-  G1b：reasoning_effort="standard" → 模型拿到线格式 "medium"；
-  G2：不传 reasoning_effort → 模型的 reasoning_effort 为 None；
-  G3：传 reasoning_effort=None → 同默认；
-  G4：reasoning_effort="minimal" → 线格式同名 "minimal"；
-  G5：Web 层档位清单与线格式翻译表**键集一致**（漂移守护）。
-"""
+"""Model-declared reasoning effort mappings at the ChatOpenAI construction boundary."""
 
 from __future__ import annotations
 
-from agent_harness.model.config import ModelConfig
+import pytest
+import json
+
+from agent_harness.config import Settings
+from agent_harness.model.config import (
+    ConfigError,
+    ModelConfig,
+    ReasoningEffortCapability,
+    REASONING_EFFORT_LEVELS,
+)
 from agent_harness.model.provider import (
-    REASONING_EFFORT_WIRE,
     WIRE_REASONING_EFFORTS,
     create_chat_model,
 )
@@ -50,7 +35,43 @@ def _config() -> ModelConfig:
         api_key="sk-test",
         base_url="https://api.deepseek.com",
         temperature=0.2,
+        reasoning_effort=ReasoningEffortCapability(
+            supported=("minimal", "standard", "deep"),
+            default="standard",
+            wire_mapping={
+                "minimal": "minimal", "standard": "medium", "deep": "high",
+            },
+        ),
     )
+
+
+def _mapped_config() -> ModelConfig:
+    settings = Settings(
+        _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-test",
+        model_provider="deepseek", model_name="deepseek-chat",
+        agent_models=json.dumps([{
+            "name": "model-with-custom-effort-map",
+            "provider": "deepseek",
+            "model_name": "deepseek-r1",
+            "reasoning_effort": {
+                "supported": ["minimal", "standard"],
+                "default": "minimal",
+                "wire_mapping": {"minimal": "none", "standard": "low"},
+            },
+        }]),
+    )
+    return ModelConfig.resolve_selection(settings, "model-with-custom-effort-map")
+
+
+def test_create_chat_model_uses_selected_model_wire_mapping():
+    model = create_chat_model(_mapped_config(), reasoning_effort="standard")
+    assert getattr(model, "reasoning_effort", None) == "low"
+
+
+@pytest.mark.parametrize("effort", ["deep", "unknown"])
+def test_create_chat_model_rejects_unsupported_effort(effort):
+    with pytest.raises(ConfigError, match="reasoning_effort"):
+        create_chat_model(_mapped_config(), reasoning_effort=effort)
 
 
 def test_create_chat_model_translates_deep_to_wire_enum():
@@ -99,14 +120,5 @@ def test_every_harness_level_maps_into_legal_wire_enum():
         )
 
 
-def test_web_catalog_keys_and_wire_table_do_not_drift():
-    """G5（drift guard）：Web validator 认的档位集合 == 翻译表键集。
-
-    两者键集不一致 = 某个档位穿过 validator 却在 provider 层被丢弃（静默
-    失效）。G4b 会以「非法字面量」的形式先红，G5 补一句更直白的诊断。
-    """
-    assert set(_harness_levels()) == set(REASONING_EFFORT_WIRE), (
-        "Web 档位清单与线格式翻译表键集漂移："
-        f"catalog={sorted(_harness_levels())} "
-        f"wire={sorted(REASONING_EFFORT_WIRE)}"
-    )
+def test_web_effort_levels_match_model_catalog_vocabulary():
+    assert set(_harness_levels()) == set(REASONING_EFFORT_LEVELS)

@@ -26,6 +26,29 @@ import {
   routeApi,
 } from './fixtures';
 
+const REASONING_MODEL = {
+  name: 'effort-model',
+  provider: 'openai',
+  model: 'effort-model',
+  default: false,
+  reasoning_effort: {
+    supported: ['minimal', 'deep'],
+    default: 'minimal',
+    wire_mapping: { minimal: 'low', deep: 'high' },
+  },
+};
+const DEFAULT_REASONING_MODEL = {
+  name: 'limited-model',
+  provider: 'limited',
+  model: 'limited-model',
+  default: true,
+  reasoning_effort: {
+    supported: ['minimal'],
+    default: 'minimal',
+    wire_mapping: { minimal: 'low' },
+  },
+};
+
 test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭', async ({ page }) => {
   const frames = [
     { type: 'session/started', seq: 1, session_id: 'e2e-session-0001', run_id: 'e2e-run-0001', time: '2026-09-08T00:00:00Z' },
@@ -53,10 +76,10 @@ test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭',
 
   // ModelPicker 目录空时不渲染——这里没 mock models，所以 model-picker 不在场
   await expect(modelTrigger).toHaveCount(0);
-  // 三个档位控件在场
+  // Controls without per-model capability metadata stay hidden.
   await expect(permTrigger).toBeVisible();
   await expect(agentTrigger).toBeVisible();
-  await expect(effortTrigger).toBeVisible();
+  await expect(effortTrigger).toHaveCount(0);
 
   // 键盘打开「权限模式」浮层
   await permTrigger.focus();
@@ -216,6 +239,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
     permissionModes: PERMISSION_MODES,
     agentProfiles: AGENT_PROFILES,
     reasoningEfforts: REASONING_EFFORTS,
+    models: [DEFAULT_REASONING_MODEL, REASONING_MODEL],
     onSessionPost: (route) => {
       const req = route.request();
       capturedBody = req.postData() ?? '';
@@ -225,11 +249,51 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   await page.goto('/');
 
-  // 选 权限模式 → auto / Agent 档位 → coding / 推理深度 → deep
-  // （每个控件首项都是「默认（未选）」，故下压次数 = 条目下标 + 1）
-  await pickControl(page, '权限模式', 1, '只读');
-  await pickControl(page, 'Agent Profile', 2, 'Coding');
-  await pickControl(page, 'Reasoning Effort', 3, 'Deep');
+  const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
+  const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await effortTrigger.click();
+  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveValue('0');
+  await expect(slider).toHaveAttribute('aria-valuetext', /Minimal/);
+  const defaultLabels = page.locator('.reasoning-effort-slider__labels span');
+  await expect(defaultLabels).toHaveCount(2);
+  await expect(defaultLabels.nth(1)).toHaveText('Minimal');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.picker-content')).toHaveCount(0);
+
+  await modelTrigger.click();
+  const openaiProvider = page.locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: 'openai' }).first();
+  await openaiProvider.hover();
+  await page.locator('[role="menuitemradio"]', { hasText: 'effort-model' }).first().click();
+  await expect(modelTrigger).toContainText('effort-model');
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+
+  // Select the non-default permission/profile values first.
+  const permissionTrigger = page.locator('.composer-control').nth(0);
+  const readOnlyMode = PERMISSION_MODES.find((mode) => mode.id === 'read-only');
+  await permissionTrigger.click();
+  await page.locator('.picker-item', { hasText: readOnlyMode!.display_name }).first().click();
+  await expect(permissionTrigger).toContainText(readOnlyMode!.display_name);
+  const agentTrigger = page.locator('.composer-control').nth(1);
+  const codingProfile = AGENT_PROFILES.find((profile) => profile.id === 'coding');
+  await agentTrigger.click();
+  await page.locator('.picker-item', { hasText: codingProfile!.display_name }).first().click();
+  await expect(agentTrigger).toContainText(codingProfile!.display_name);
+  await effortTrigger.click();
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveAttribute('aria-valuetext', /Minimal/);
+  await expect(slider).toHaveValue('0');
+  const sliderLabels = page.locator('.reasoning-effort-slider__labels span');
+  await expect(sliderLabels).toHaveCount(3);
+  await expect(sliderLabels.nth(1)).toHaveText('Minimal');
+  await expect(sliderLabels.nth(2)).toHaveText('Deep');
+  await expect(sliderLabels.filter({ hasText: /^Standard$/ })).toHaveCount(0);
+  await expect(page.locator('.picker-item')).toHaveCount(0);
+  await expect(slider).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await expect(slider).toHaveValue('2');
 
   // 提交任务
   await page.getByLabel('Agent 任务').fill('payload 测试');
@@ -240,6 +304,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   const body = JSON.parse(capturedBody!);
   // 字段名对齐后端 B1 契约
+  expect(body.model).toBe('effort-model');
   expect(body.permission_mode).toBe('read-only');
   expect(body.agent_profile).toBe('coding');
   expect(body.reasoning_effort).toBe('deep');
@@ -400,7 +465,6 @@ test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形'
   const cases = [
     { label: '权限模式', title: '只读' },
     { label: 'Agent Profile', title: 'Main' },
-    { label: 'Reasoning Effort', title: 'Minimal' },
   ];
   for (const { label, title } of cases) {
     const trigger = page.locator(`.composer-control[aria-label="${label}"]`);
