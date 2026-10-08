@@ -25,10 +25,35 @@
 
 !include "LogicLib.nsh"
 
+; #885 — freeze this file's own directory at PARSE time. electron-builder
+; `!include`s this file by absolute path (NsisTarget.computeCommonInstallerScriptHeader),
+; so ${__FILEDIR__} here is .../desktop/installer/. Capturing it into a define
+; now (rather than inside the macro below) is the whole point: the macro body
+; is expanded later, when makensis processes installer.nsi.
+;
+; Why not use ${__FILEDIR__} directly inside the macro, as before #885:
+;   * ${__FILEDIR__} is resolved at macro-EXPANSION time, i.e. while makensis
+;     reads installer.nsi — not this file — so it is the template's directory;
+;   * electron-builder feeds the assembled script to makensis on stdin
+;     (`cwd` = app-builder-lib/templates/nsis), and in that case NSIS predefines
+;     ${__FILEDIR__} to "." — so `!include "${__FILEDIR__}\installer-directories.nsh"`
+;     resolves against the templates dir and aborts with
+;     `!include: could not find: ...\app-builder-lib\templates\nsis\installer-directories.nsh`.
+;   * the sibling file is NOT on the include search path in the smoke build
+;     anyway: test-windows-installer.mjs replaces `directories`, dropping
+;     buildResources, so buildResourcesDir — the only dir electron-builder
+;     !addincludedir's for us — is desktop/build, not desktop/installer.
+; Verified against the bundled NSIS 3.0.4.1 with the exact stdin + cwd shape.
+; The directory name can contain a space ("Intelligence Agent" checkout); the
+; surrounding quotes in the !include below keep that safe.
+!ifndef IA_INSTALLER_DIR
+  !define IA_INSTALLER_DIR "${__FILEDIR__}"
+!endif
+
 !macro customHeader
   ManifestDPIAware true
 
-  !include "${__FILEDIR__}\installer-directories.nsh"
+  !include "${IA_INSTALLER_DIR}installer-directories.nsh"
 
   ; Bilingual UI strings. The template loads only the configured
   ; installerLanguages, so guard each language: a ${LANG_<NAME>} that is not
