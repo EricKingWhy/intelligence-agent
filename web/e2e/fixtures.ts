@@ -78,6 +78,8 @@ export interface WsScript {
   ending?: 'done' | 'keep' | 'drop';
   /** 首次下行前延迟（毫秒）：考「断线条延迟显示」「接流补帧」的时序。 */
   delayMs?: number;
+  /** Delay between streamed frames so a test can observe intermediate UI state. */
+  frameDelayMs?: number;
   /** 一个帧都不发就关闭（服务端/代理拒掉这条订阅）：考零服务帧路径。 */
   closeNow?: boolean;
   /** 心跳 opt-in（毫秒）：按此间隔下行 `{type:'server_ping'}`，直到连接关闭。
@@ -155,8 +157,11 @@ async function installWsRoute(
             has_active_run: active,
           }),
         );
-        for (const f of frames) {
+        for (const [index, f] of frames.entries()) {
           ws.send(JSON.stringify({ type: 'event', session_id: sessionId, event: f }));
+          if (script?.frameDelayMs && index < frames.length - 1) {
+            await new Promise((r) => setTimeout(r, script.frameDelayMs));
+          }
         }
         // run 收口 → 服务端 relay task 下行 done（真后端在带终态帧后就是这么收尾的）。
         // `hasActiveRun: true` 而未声明 ending 也照样收尾：脚本没说要保持，就当成

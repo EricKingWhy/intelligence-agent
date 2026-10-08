@@ -56,6 +56,19 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 
 （DeepSeek Harness 的核查链接已在 Reuse Matrix §3 / §7，此处不重复。）
 
+### 模型推理档位与 Provider 控制（#865 已核实来源，2026-10-08）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| [Claude Code 官方文档](https://code.claude.com/docs/en) | 闭源产品交互参考 | 推理档位的入口、作用范围、默认与设置持久化 |
+| [Anthropic API 官方文档](https://platform.claude.com/docs/en) | Provider 参数语义权威 | thinking / adaptive thinking、模型适用范围、请求参数与预算关系 |
+| [OpenAI Codex 官方文档](https://developers.openai.com/codex) | Codex 产品配置参考 | 推理档位的配置入口、默认、覆盖顺序和模型适用范围 |
+| [OpenAI API 官方文档](https://platform.openai.com/docs) | API 参数语义权威 | reasoning effort 的合法值、请求形状与模型支持范围 |
+| Codex CLI（本地克隆，见 §1） | 开源实现来源 | 配置类型、默认值、模型校验及参数到请求的传递 |
+| [dsh-codex-effort-slider](https://github.com/Microqian2th/dsh-codex-effort-slider) | 本次指定的视觉与交互来源 | 滑杆档位映射、输入方式、动效、可访问性和 License；不作为 Provider 契约 |
+
+本节索引已核实的调研来源；机制、契合点、复用判定与 License 结论见 [#865 调研报告](../research/2026-10-08-effort-slider-provider-adaptation.md) 与 Issue。上游代码行/commit 证据固定在报告中；当前范围只适配上游滑杆设计，保留本项目 Provider 边界。
+
 ### Coding Agent 工具链 / 执行期检查
 
 | 来源 | 是什么 | 看什么 |

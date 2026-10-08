@@ -30,15 +30,24 @@
 
   !include "${__FILEDIR__}\installer-directories.nsh"
 
-  ; Bilingual UI strings (the template adds ENGLISH + SIMPCHINESE via addLangs).
+  ; Bilingual UI strings. The template loads only the configured
+  ; installerLanguages, so guard each language: a ${LANG_<NAME>} that is not
+  ; loaded (e.g. a single-language build) makes makensis emit warning 7025,
+  ; fatal under electron-builder's warnings-as-errors. #831 — full rationale
+  ; and the matching build-time assertion live in
+  ; scripts/build-windows-installer.mjs.
+  !ifdef LANG_ENGLISH
   LangString iaPerUserOnly ${LANG_ENGLISH} "This installer is per-user only. A per-machine installation of Intelligence Agent was found; uninstall it first, then run this installer again."
-  LangString iaPerUserOnly ${LANG_SIMPCHINESE} "此安装程序仅支持按用户安装。检测到 Intelligence Agent 的按计算机安装，请先卸载它，再重新运行此安装程序。"
   LangString iaAppRunning ${LANG_ENGLISH} "Intelligence Agent (or one of its background processes) is still running. Close it and run the installer again — the previous version was left untouched."
-  LangString iaAppRunning ${LANG_SIMPCHINESE} "Intelligence Agent（或其后台进程）仍在运行。请关闭后重新运行安装程序——旧版本未被改动。"
   LangString iaUpdateFailed ${LANG_ENGLISH} "The update failed: the new files are incomplete. The previous version has been restored."
-  LangString iaUpdateFailed ${LANG_SIMPCHINESE} "更新失败：新文件不完整。已恢复到旧版本。"
   LangString iaRollbackFailed ${LANG_ENGLISH} "Could not restore the previous version automatically. The complete backup was kept at:"
+  !endif
+  !ifdef LANG_SIMPCHINESE
+  LangString iaPerUserOnly ${LANG_SIMPCHINESE} "此安装程序仅支持按用户安装。检测到 Intelligence Agent 的按计算机安装，请先卸载它，再重新运行此安装程序。"
+  LangString iaAppRunning ${LANG_SIMPCHINESE} "Intelligence Agent（或其后台进程）仍在运行。请关闭后重新运行安装程序——旧版本未被改动。"
+  LangString iaUpdateFailed ${LANG_SIMPCHINESE} "更新失败：新文件不完整。已恢复到旧版本。"
   LangString iaRollbackFailed ${LANG_SIMPCHINESE} "无法自动恢复旧版本。完整备份保留在："
+  !endif
 !macroend
 
 !macro customInit

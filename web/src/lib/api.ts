@@ -804,6 +804,51 @@ export async function postApproval(
  *  （`app.py:1044-1093`）；内置 preset / catalog 条目恒 `true`。所以"不可用"这一态在
  *  默认部署（没配任何自定义供应商）里根本不会出现——UI 实现了它，不等于默认部署能看到。
  */
+export interface ModelReasoningEffortCapability {
+  supported: string[];
+  default: string;
+  wireMapping: Record<string, string>;
+}
+
+const REASONING_EFFORT_WIRE_VALUES = new Set([
+  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+]);
+
+function parseModelReasoningEffort(value: unknown): ModelReasoningEffortCapability | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (
+    !Array.isArray(raw.supported) ||
+    raw.supported.length === 0 ||
+    raw.supported.some((level) => typeof level !== 'string' || level.length === 0) ||
+    new Set(raw.supported).size !== raw.supported.length ||
+    typeof raw.default !== 'string' ||
+    !raw.supported.includes(raw.default) ||
+    typeof raw.wire_mapping !== 'object' ||
+    raw.wire_mapping === null ||
+    Array.isArray(raw.wire_mapping)
+  ) {
+    return undefined;
+  }
+
+  const wireMapping = raw.wire_mapping as Record<string, unknown>;
+  if (
+    Object.keys(wireMapping).length !== raw.supported.length ||
+    raw.supported.some((level) =>
+      typeof wireMapping[level] !== 'string' ||
+      !REASONING_EFFORT_WIRE_VALUES.has(wireMapping[level] as string)
+    )
+  ) {
+    return undefined;
+  }
+
+  return {
+    supported: raw.supported as string[],
+    default: raw.default,
+    wireMapping: wireMapping as Record<string, string>,
+  };
+}
+
 export interface ModelCatalogEntry {
   name: string;
   provider: string | null;
@@ -823,6 +868,8 @@ export interface ModelCatalogEntry {
   supportsTools?: boolean | null;
   supportsVision?: boolean | null;
   supportsReasoningSummary?: boolean | null;
+  /** Explicit backend declaration; absent or malformed means no slider for this model. */
+  reasoningEffort?: ModelReasoningEffortCapability;
 }
 
 /** GET /api/models。窄化解析（零伪造）：仅 name 非空字符串的条目入选，
@@ -864,6 +911,7 @@ export async function getModels(): Promise<ModelCatalogEntry[]> {
           typeof r.supports_reasoning_summary === 'boolean'
             ? r.supports_reasoning_summary
             : null,
+        reasoningEffort: parseModelReasoningEffort(r.reasoning_effort),
       },
     ];
   });

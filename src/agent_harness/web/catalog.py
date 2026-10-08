@@ -23,6 +23,7 @@ from agent_harness.model.config import (
     PROVIDER_PRESETS,
     ModelConfig,
     _pick_capabilities,
+    find_catalog_entry,
     parse_model_catalog,
 )
 from agent_harness.model.provider_store import ProviderStore
@@ -126,7 +127,7 @@ def _render_model_option(
     for cap_key in (
         "context_window", "speed_tier", "supports_tools",
         "supports_vision", "supports_reasoning_summary",
-        "prompt_cache",
+        "prompt_cache", "reasoning_effort",
     ):
         if cap_key in capabilities:
             option[cap_key] = capabilities[cap_key]
@@ -155,14 +156,23 @@ async def list_models(
         """
     default_config = ModelConfig.from_settings(state.settings)
     default_provider = state.settings.model_provider
-    default_caps = _pick_capabilities(PROVIDER_PRESETS.get(default_provider, {}))
+    default_entry = find_catalog_entry(
+        state.settings, default_provider, default_config.model_name,
+    )
+    default_declared = (
+        default_entry.declared_capabilities() if default_entry is not None else {}
+    )
+    default_caps = {
+        **_pick_capabilities(PROVIDER_PRESETS.get(default_provider, {})),
+        **default_declared,
+    }
     models: list[dict[str, Any]] = [_render_model_option(
         id=default_config.model_name,
         provider=default_provider,
         model_name=default_config.model_name,
         is_default=True,
         capabilities=default_caps,
-        metadata_source="provider_preset",
+        metadata_source="agent_models" if default_declared else "provider_preset",
     )]
     for entry in parse_model_catalog(state.settings):
         shadowed = resolve_model_target(state.settings, entry.provider, entry.name)
