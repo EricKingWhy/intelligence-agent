@@ -410,6 +410,10 @@ export function useSession() {
   // 迁移规则只能靠通读整段闭包确认。控制器无 I/O 无定时器，调度仍留在此处。
   const reconnectRef = useRef<ReconnectController>(new ReconnectController());
   const streamGenRef = useRef(0);
+  // P3-1：纠正分支 hold() 后，新流首帧到达即释放 hold（否则真实断线被静默吞掉）。
+  // 用 microtask 延迟释放——T12o 的同步 settle 路径（快照 has_active_run=false）
+  // 必须仍看到 pending=true 才会被挡住。
+  const correctionHoldRef = useRef(false);
   const terminalSeenRef = useRef(false);
   // #478：durable pause 的干净收流标记。run/paused 被 #312 刻意排除在
   // RUN_TERMINAL_TYPES 外（「暂停」≠「跑完」——该集合还消费于 wsStream 终态兜底
@@ -663,6 +667,17 @@ export function useSession() {
           if (!shouldApplyStreamFrame(modeRef.current, event)) return;
           framesSeen += 1; // 恢复探测用：见 onStreamEnd 的「零帧收流」
           attachFrames += 1; // 接流是否真的接上过：见 onStreamError
+          // P3-1：纠正后新流首帧到达 → 释放 hold。microtask 延迟是关键：
+          // T12o 的快照 has_active_run=false 会同步走 settle→onStreamEnd，
+          // 必须让那条同步路径仍看到 pending=true（被 hold 挡住）；microtask
+          // 在同步块结束后才跑，健康流的首帧之后 hold 才释放，此后真实断线
+          // 的 scheduleReconnect 才能正常排链。
+          if (correctionHoldRef.current) {
+            correctionHoldRef.current = false;
+            queueMicrotask(() => {
+              if (streamGenRef.current === gen) reconnectRef.current.release();
+            });
+          }
           // 数据回来了 = 重连真的成了（见 awaitingEvidence 的注释），收条。
           if (awaitingEvidence) endReconnecting();
           lastFrameAtRef.current = Date.now();
@@ -1267,6 +1282,8 @@ export function useSession() {
                最终弹假的「连接中断」。hold 占住单飞位（不计额度），让纠正自己换上的
                新流 settle 时 request() 返回 null，旧链不得再调度。 */
             reconnectRef.current.hold();
+            // P3-1：新流首帧到达即释放 hold（见 correctionHoldRef 注释）。
+            correctionHoldRef.current = true;
             sseRef.current?.cancel(); // 收掉那条接错的流（含服务端订阅）
           }
           if (outcome.kind === 'ack') {

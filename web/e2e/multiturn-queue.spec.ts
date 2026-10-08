@@ -812,6 +812,58 @@ test('T12o-缝隙：迟到纠正落进 release→relock 缝隙 → 无假「连�
   await expect(page.locator('.reconnect-banner')).toBeHidden();
 });
 
+/* ── P3-1：纠正后新流收到首帧即释放 hold → 真实断线能重连 ──
+ *
+ * 背景（独立审查 P3-1）：方案 B 在纠正分支加了 `hold()` 占住单飞位，但 hold
+ * 保持到下次 `reset()`（submit 入口）。若纠正换上的新流健康跑起来后发生**真实**
+ * 断线，`scheduleReconnect → request()` 因 `pending=true` 返回 null → 静默吞掉，
+ * 不重连。这是 pre-existing（win 路径原本如此），但 P0-P4 全修，现在必须修掉。
+ *
+ * 修复：新流首帧到达即释放 hold（microtask 延迟，确保 T12o 的同步 settle 路径
+ * 仍看到 pending=true）。本用例锁这个行为。
+ *
+ * 场景：
+ *  1. 提交 → 判 launched → 接流 #1（快照 has_active_run=false，会被纠正 cancel）
+ *  2. 迟到 queued 收据（LATE_MS）→ 纠正 → hold() → 接流 #2
+ *  3. #2 健康：快照 has_active_run=true + 真实帧，然后 `ending: 'drop'` 真断线
+ *  4. 正确行为：客户端必须重连 → 出现第 3 次订阅
+ *  5. Bug 行为（修前）：hold 未释放 → request() 返回 null → 无第 3 次订阅
+ *
+ * 不给 mock 加全局 ping（o-wait-hint 依赖停摆路径，按脚本 opt-in）。 */
+
+test('P3-1：纠正后新流首帧释放 hold → 真实断线能重连', async ({ page }) => {
+  const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  const HEALTHY_FRAMES: FrameSpec[] = [
+    { type: 'model/delta', data: { delta: '健康流增量' }, seq: 10, session_id: 'mt-session-1', run_id: 'mt-run-1', step_id: 1, time: '2026-09-15T00:00:02Z' },
+  ];
+  await routeApi(page, {
+    sessions: [],
+    events: [],
+    wsSubscribes: subs,
+    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
+    // 迟到 queued 收据 → 触发纠正（hold 占住单飞位）
+    onMessagesPost: (route) => answerLate(route, 200, { status: 'queued', mode: 'queue' }),
+    onWs: ({ call }) =>
+      call === 1
+        ? { hasActiveRun: false, ending: 'keep', pingIntervalMs: 2000 }
+        : call === 2
+          ? { hasActiveRun: true, frames: HEALTHY_FRAMES, ending: 'drop', pingIntervalMs: 2000 }
+          : { hasActiveRun: true, ending: 'keep', pingIntervalMs: 2000 },
+  });
+
+  await page.goto('/');
+  await openIdleSession(page);
+
+  const box = page.getByLabel('Agent 任务');
+  await box.fill('P3-1 真实断线重连');
+  await box.press('Enter');
+
+  // 纠正（~1600ms）→ #2 接上收帧 → 真断线 → 重连应在 500ms 退避后发生。
+  // 修前：hold 未释放，第 3 次订阅永不出现（15s 超时红）。
+  // 修后：第 3 次订阅出现。
+  await expect.poll(() => subs.length, { timeout: 20000 }).toBeGreaterThanOrEqual(3);
+});
+
 /* ── T12p：迟到的**事件流**响应 → 当初判 launched 是对的，WS 继续收（不必也不许再接一条）──
  *
  * 窗外那条支路并非只在判错时才走到：交付层攒包时，正常流式的**响应头本身**就会
