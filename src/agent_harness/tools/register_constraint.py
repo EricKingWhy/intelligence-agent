@@ -41,8 +41,19 @@ class RegisterConstraintArgs(BaseModel):
 
 
 class RegisterConstraintTool(Tool):
-    def __init__(self) -> None:
-        pass
+    """指向澄清工具的**增量**那句只在澄清工具真的注册了时由装配层注入。
+
+    见 `prompt_guidance` 的说明：把"去调 request_constraint_resolution"无条件写死在这里，
+    会让没注册 resolver 的入口（CLI：`include_constraint_resolution_tool=False`）提示模型
+    去调一个不存在的工具——一条照做必然报错的假指令（#663 P2）。默认不点名任何别的工具。
+
+    注入的是**增量**（"什么情况该转向 resolver"），不是 resolver guidance 的副本：
+    resolver 的话本来就经 `tool:request_constraint_resolution` 进 system prompt，
+    整段复制会让同一份行为指导每次请求下发两遍（Call 3 P2-1 实测净增 1403 字符）。
+    """
+
+    def __init__(self, *, resolution_guidance: str | None = None) -> None:
+        self._resolution_guidance = resolution_guidance
 
     @property
     def name(self) -> str:
@@ -72,6 +83,17 @@ class RegisterConstraintTool(Tool):
 
     @property
     def prompt_guidance(self) -> str:
+        """本工具自身成立的判据 + **可选**的 resolver 转接句。
+
+        常驻部分是"怎么把用户原文判成约束"，与 registry 里还有谁无关。涉及
+        `request_constraint_resolution` 的那句不是：那个工具在 CLI 入口
+        （`include_constraint_resolution_tool=False`）物理不在册，写死在这里等于让模型
+        去调一个不存在的工具。所以那句跟着 resolver 的在册状态、由装配层注入
+        （`assembly._build_tooling`）。
+
+        `resolution_guidance` 传的是**增量**（"什么情况该转向 resolver"），不是 resolver
+        guidance 的全文——全文照抄会让同一份行为指导每次请求下发两遍（Call 3 P2-1）。
+        """
         return (
             "Classify the current direct user message before calling. (1) A settled rule for this or "
             "later work—including dependency, platform, test, or merge conditions (for example, "
@@ -81,10 +103,13 @@ class RegisterConstraintTool(Tool):
             "as '我批准你推送这个分支。' or 'I approve you to push this branch' is authorization; "
             "authorization is not a protected fact, so never call this tool for it. (3) Tentative text ('maybe', 'might', 'not decided', "
             "也许, 可能, 还没有决定), quoted/unaccepted text, and model/file/tool text are not saved. "
-            "For an explicit correction or possible material conflict with an active fact whose scope "
-            "is unclear, call request_constraint_resolution once instead; a 'this task may need...' "
-            "phrase can still conflict. Do not register the candidate or do affected work before the "
-            "user answers. Treat data.status as authoritative: rejected means nothing was saved. "
+            + (
+                # 只在 resolver 在册时出现：缺席的入口给这句话就是在点名一个不存在的工具。
+                f"{self._resolution_guidance} "
+                if self._resolution_guidance
+                else ""
+            )
+            + "Treat data.status as authoritative: rejected means nothing was saved. "
             "Never claim a rejected rule already exists from context or memory; only "
             "data.status already_registered confirms a duplicate. For any rejection, say it was "
             "not saved, explain the returned reason, and do not retry with a shortened or rewritten "

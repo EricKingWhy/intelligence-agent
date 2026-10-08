@@ -601,6 +601,30 @@ class MemoryJobExecutor:
             return await self._degrade(job, worker_id=worker_id, run_id=run_id, sink=sink,
                                        state=state,
                                        reason=DegradedReason.RUN_EVENTS_UNAVAILABLE)
+        # 先持久进入可恢复阶段，**再**等受限 extractor（#663 P2）。
+        #
+        # 反过来的话，抽取在飞的那段窗口里 durable 行还是 `QUEUED`——而抽取器此刻
+        # 已经发出了一次真实的外部模型请求（上限 20s）。进程若在那个窗口被杀，重启
+        # 扫描认领的是一个"还没开始过"的 job，与"一次请求已经在飞"这个事实对不上。
+        # `FORMING` 是 `list_recoverable` 认得的中间态（`list_recoverable` 只按
+        # "非终态"过滤，不按阶段），所以推进到它之后这个窗口就关上了。
+        #
+        # 设计来源:
+        #   pi 28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9
+        #     packages/durable/src/harness/compaction.ts:146 —— `select` 阶段先
+        #     `runtime.commit(... checkpoint: { phase: "summarize" })` 落检查点，
+        #     下一阶段 `summarize`（:148）才发外部模型请求；
+        #   deepseek-harness 5badb15009ae1756c3afe0ae0cef1faafc290ccc
+        #     packages/jobs/jobs-local/src/index.ts:267-276 —— 先注册 durable 记录
+        #     并广播 `registered`，再启动生产者泵，注释逐字："Binding the shared
+        #     producer state is the commit"。
+        advanced = await self._advance(job, worker_id=worker_id,
+                                       stage=MemoryJobStage.FORMING, state=state)
+        if advanced is None:
+            return await self._lost(job_id)
+        job = advanced
+        # 失败隔离不变：抽取异常仍只记日志，不影响上面这次已经落盘的状态推进，
+        # 也不影响主 run（它早已终结）。
         if self._session_store is not None and job.protected_fact_token_budget is not None:
             try:
                 await self._extract_protected_constraints(
@@ -613,11 +637,6 @@ class MemoryJobExecutor:
                 )
         budget = MemoryJobBudget(limits=self._limits, clock=self._clock)
         try:
-            advanced = await self._advance(job, worker_id=worker_id,
-                                           stage=MemoryJobStage.FORMING, state=state)
-            if advanced is None:
-                return await self._lost(job_id)
-            job = advanced
             formation_started = self._clock()
             formation, refs = await self._form(
                 job, run_events=run_events, history=history, roles=roles,

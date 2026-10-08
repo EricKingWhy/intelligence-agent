@@ -45,6 +45,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import FastAPI
@@ -267,13 +268,24 @@ class BodyDepthGuardMiddleware:
         *,
         max_depth: int = BODY_MAX_DEPTH,
         max_bytes: int = BODY_MAX_BYTES,
+        exempt_path_pattern: re.Pattern[str] | None = None,
     ) -> None:
         self.app = app
         self.max_depth = max_depth
         self.max_bytes = max_bytes
+        #: 豁免路径（#822 附件上传）：命中即**原样放行**——既不累计字节、也不数深度，
+        #: 且不缓冲 body（让下游按 `request.stream()` 流式消费）。默认 None = 零行为变化，
+        #: 既有 JSON 端点的 1 MiB / 深度行为逐字不变（回归测试钉住）。
+        self.exempt_path_pattern = exempt_path_pattern
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if self.exempt_path_pattern is not None and self.exempt_path_pattern.match(
+            scope.get("path", "")
+        ):
             await self.app(scope, receive, send)
             return
 

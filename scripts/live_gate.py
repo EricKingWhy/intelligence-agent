@@ -102,12 +102,16 @@ async def _cmd_capabilities(args: argparse.Namespace) -> int:
 
 def _docker_state() -> str:
     import importlib.util
+    import shutil
     import subprocess
 
     if importlib.util.find_spec("docker") is None:
         return "不可用（未安装 docker SDK）"
+    docker_executable = shutil.which("docker")
+    if docker_executable is None:
+        return "不可用（未安装 docker CLI）"
     result = subprocess.run(
-        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        [docker_executable, "info", "--format", "{{.ServerVersion}}"],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
     )
     return f"可用（server {result.stdout.strip()}）" if result.returncode == 0 else "不可用（daemon 未响应）"

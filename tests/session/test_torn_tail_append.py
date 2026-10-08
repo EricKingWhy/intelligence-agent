@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from agent_harness.session import (
     JsonlSessionStore,
     SessionEvent,
 )
+from agent_harness.session.errors import SeqConflict
 
 
 @pytest.fixture
@@ -270,26 +272,53 @@ def test_torn_only_file_repairs_to_boundary_and_appends(
 def test_concurrent_appends_with_torn_tail_stay_wellformed(
     store: JsonlSessionStore,
 ) -> None:
-    """并发 append 撞上撕裂尾段：修复只在锁内做一次，全部事件完整可读。"""
+    """并发 append 撞上撕裂尾段：修复只在锁内做一次，全部事件完整可读。
+
+    旧版用 4 线程各写固定 seq（2,3,4,5）——线程调度顺序不保证，
+    seq=3 的线程先抢到锁落盘后，seq=2 的线程再写会触发 SeqConflict
+    （那是 seq 守卫的正确行为，不是产品 bug）。新版让 4 线程用屏障
+    同时起跑争抢同一个 seq=2：恰好一个获胜（它修复撕裂尾），其余三个
+    必得 SeqConflict（被捕获计数，不抛）。这是确定性的，不再 flake。
+    """
     session_id = "torn-concurrent"
     path = _seed(store, session_id, 2)
     torn = b'{"seq": 2, "type": "tool/resul'
     with path.open("ab") as fh:
         fh.write(torn)
 
-    def append(seq: int) -> None:
+    barrier = threading.Barrier(4)
+    won = []
+    conflicted = []
+
+    def append(i: int) -> None:
+        barrier.wait()  # 同时起跑，最大化修复竞争窗口
+        try:
+            store.append_event(
+                session_id,
+                _event(session_id, 2, "tool/result", {"tool_call_id": f"c{i}"}),
+            )
+            won.append(i)
+        except SeqConflict:
+            conflicted.append(i)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(append, range(4)))
+
+    # 恰好一个获胜（它做了撕裂尾修复），三个被 seq 守卫正确拒绝
+    assert len(won) == 1, f"必须恰好一个线程获胜: won={won}"
+    assert len(conflicted) == 3, f"其余三个必须 SeqConflict: {conflicted}"
+    assert torn not in path.read_bytes(), "撕裂尾必须被修复"
+
+    # 后续 append 正常续写
+    for seq in range(3, 6):
         store.append_event(
             session_id,
             _event(session_id, seq, "tool/result", {"tool_call_id": f"c{seq}"}),
         )
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(append, range(2, 6)))
-
     events, integrity = store.read_events_report(session_id)
     assert [e.seq for e in events] == [0, 1, 2, 3, 4, 5]
     assert integrity.healthy, f"并发修复后必须 healthy: {integrity}"
-    assert torn not in path.read_bytes()
 
 
 def test_truncate_fingerprint_is_sanitized(

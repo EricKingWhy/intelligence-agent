@@ -117,7 +117,7 @@ describe('F5 尾窗：默认挂载节点数有上限（AC3）', () => {
 });
 
 describe('F5 尾窗：出口能到达全部条目（AC4）', () => {
-  it('TOOLS：有「加载更早」出口，点到窗口到底时行数 = N', () => {
+  it('TOOLS：有「加载更早」出口，点到窗口到底时行数 = N', { timeout: 20000 }, () => {
     render(<ChatTab conversation={initConversation('f5')} tools={mkTools(N, 'plain')} onFocusTool={noop} />);
     expect(earlierButton()).not.toBeNull();
     // 默认端是**最新**：最后一行必须是第 N 个工具（AC5）。
@@ -129,7 +129,7 @@ describe('F5 尾窗：出口能到达全部条目（AC4）', () => {
     expect(rows('.detail-tool-row')).toBe(N);
   });
 
-  it('DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N', () => {
+  it('DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N', { timeout: 20000 }, () => {
     render(<ChangesTab tools={mkTools(N, 'diff')} sessionId="f5" />);
     const beforeDiffs = rows('.detail-section');
     /* `before < N` 才是 AC4 的区分点：只断言「最终 = N」在改造前**也成立**

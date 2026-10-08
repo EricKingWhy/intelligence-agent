@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import typing
 from typing import Any
 
@@ -139,7 +140,11 @@ def test_null_tracer_lifecycle_is_inert_and_returns_usable_handles():
 
 def test_port_surface_is_closed_for_both_implementations():
     """端口声明的每个方法，两个实现都提供（否则 Core 会在缺席实现上 AttributeError）。"""
-    declared = sorted(typing.get_protocol_members(Tracer))
+    if sys.version_info >= (3, 13):
+        declared = sorted(typing.get_protocol_members(Tracer))
+    else:
+        # _get_protocol_attrs 是内部 API；3.13 的公开函数 get_protocol_members 即其包装。
+        declared = sorted(typing._get_protocol_attrs(Tracer))
     for impl in (NullTracer(), _tracer(FakeRecorder())):
         missing = [name for name in declared if not hasattr(impl, name)]
         assert missing == [], f"{type(impl).__name__} 缺端口成员: {missing}"
