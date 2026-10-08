@@ -54,8 +54,13 @@ const output = await mkdtemp(join(outputRoot, 'run-'))
 const payload = join(output, 'payload')
 await mkdir(join(payload, 'resources'), { recursive: true })
 
-const { createWindowsInstallerConfig } = await import('./build-windows-installer.mjs')
+const { createWindowsInstallerConfig, validateInstallerScripts } = await import('./build-windows-installer.mjs')
 const childOptions = { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+
+// #831: run the same build-time LangString assertion the production build runs,
+// so a language-guard regression fails this smoke build early — before the
+// per-language makensis runs below — instead of aborting inside makensis.
+validateInstallerScripts(join(appRoot, 'installer'))
 
 let succeeded = false
 try {

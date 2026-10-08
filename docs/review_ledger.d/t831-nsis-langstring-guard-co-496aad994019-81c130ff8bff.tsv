@@ -1,0 +1,1 @@
+2026-10-08	#831 §8.3.8 发现阶段补审（新内容 496aad99..81c130ff：validateLangStringGuards 去除未被生产调用者使用的 filename 默认值 + 3 处测试调用点）：两轴各给结论。Standards/CO APPROVE P0:0 P1:0 P2:0 P3:0 P4:1（未来单参调用会打 undefined: 的 cosmetic 假设项，当前无此调用者）；Spec/CO FAITHFUL P0:0 P1:0 P2:0 P3:0 P4:0（AC3 仍成立：两入口都传 filename）。两轴各带 COPY 内红证/变异。	496aad9940190994dd99d85b741c15aca682b5f9..81c130ff8bff306d05a32dc3eaee31ab94354af1
