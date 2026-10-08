@@ -2,11 +2,15 @@
  * 原图查看浮层（#825 / MM-04 / AC6）：点开看大图 + 复制 / 下载原图。
  *
  * 来源：DeepSeek Harness `packages/client/ui-attachment/src/MessageImage.tsx` 的
- * `ImageLightbox` 用法（MIT，commit `5badb150`）——判定 **ADAPT**（票面 D7）：
+ * `ImageLightbox` **用法模式**（MIT，commit `5badb150`）——判定 **ADAPT**（票面 D7）：
  * 上游用的是 DSH 私有原语 `@deepseek-ai/dsh-client-ui-primitives` 的 `ImageLightbox`
  * 与其 CSS module（本仓没有这两个依赖）；这里换成**本仓既有原语**
  * `@radix-ui/react-dialog`（与 `DeleteSessionDialog`/`ApprovalModal` 同一套用法），
- * 只保留其交互语义：模态、Esc/遮罩关闭、正文是原始尺寸的图、动作是复制/下载。
+ * 只保留其交互语义：**缩略图 → 模态查看器、Esc/遮罩关闭、正文是原始尺寸的图**。
+ *
+ * **复制 / 下载不是上游语义**（上游 `ImageLightbox.tsx` @ `5badb150` 只有 `<img>` 与
+ * 关闭按钮）：这两个动作是本仓按 AC6 新增的，实现与归属说明见
+ * `web/THIRD_PARTY_NOTICES.md` 的本文件行。
  *
  * 两个动作的语义边界：
  * - **下载原图** = 受控端点的原始字节（`<a download>` 指向 `src` 本身，不做任何转码）；

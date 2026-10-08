@@ -6,7 +6,7 @@
  * @ commit `5badb15009ae1756c3afe0ae0cef1faafc290ccc`（仓库 `deepseek-ai/deepseek-harness`，MIT）。
  * 许可全文与改动说明见 `web/THIRD_PARTY_NOTICES.md`。相对上游只做两处机械改动：
  * 1. `./DropOverlay.module.css` → 全局 class（`drop-mask`/`drop-wrap`/…）——本仓无 CSS module；
- * 2. clipPath id `dshDropOverlayClip` → `drop-overlay-clip`（去掉上游前缀，本仓只此一份）。
+ * 2. clipPath id `dshDropOverlayClip` → `dropOverlayClip`（去掉上游前缀，本仓只此一份）。
  * 两幅 SVG 插图（`UploadIllustration` / `UploadDisabledIllustration`）为上游资产，原样保留。
  */
 

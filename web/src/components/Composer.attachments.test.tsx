@@ -66,11 +66,14 @@ function dispatchDrag(type: 'dragenter' | 'dragover' | 'dragleave' | 'drop', fil
   document.dispatchEvent(event);
 }
 
-function pasteFiles(textarea: HTMLTextAreaElement, files: File[]): Event {
+/** 造一次粘贴事件。`text` = 同一个剪贴板里 `text/plain` 的内容（网页 / Word 会给
+ *  「图 + 文本」的混合剪贴板；纯文本粘贴的用例传空串）。 */
+function pasteFiles(textarea: HTMLTextAreaElement, files: File[], text = ''): Event {
   const event = new Event('paste', { bubbles: true, cancelable: true });
   Object.defineProperty(event, 'clipboardData', {
     value: {
       items: files.map((file) => ({ kind: 'file', type: file.type, getAsFile: () => file })),
+      getData: (format: string) => (format === 'text/plain' ? text : ''),
     },
   });
   act(() => {
@@ -171,6 +174,23 @@ describe('Composer 附图：#825 AC1 三条 intake 通道', () => {
       textarea().dispatchEvent(textPaste);
     });
     expect(textPaste.defaultPrevented).toBe(false);
+  });
+
+  it('混合剪贴板（图 + 文本）：接管事件后 text/plain 插到光标处，文本不丢', async () => {
+    paint({});
+    await typeText('看图吧');
+    const ta = textarea();
+    // 光标落在「看图」与「吧」之间：插入位置必须真按光标算，不能只往末尾追加。
+    ta.setSelectionRange(2, 2);
+    const event = pasteFiles(ta, [imageFile('shot.png')], '（来自网页）');
+
+    // 有文件 ⇒ 事件被接管（图要入栏），文本由**我们**回填（不回填就等于吞掉）。
+    expect(event.defaultPrevented).toBe(true);
+    expect(cards()).toHaveLength(1);
+    expect(textarea().value).toBe('看图（来自网页）吧');
+    // 受控 textarea 的 value 由 React 写回，插入符位置由渲染后的 effect 补回；
+    // 不补的话光标留在末尾，用户接着敲的字会跑到粘贴内容之后。
+    expect(textarea().selectionStart).toBe(2 + '（来自网页）'.length);
   });
 
   it('文件选择器 → 入栏；同一张图可再次选择（onChange 后 value 被清空）', async () => {

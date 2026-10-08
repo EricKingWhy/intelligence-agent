@@ -308,7 +308,10 @@ export const Composer = memo(function Composer({
     }
     setValue('');
     setRememberAsProceduralRule(false);
-    // 已进请求的那些草稿清掉；**失败/在途的留在栏里**（它们没进请求，重试或下一轮再带）。
+    // 已进请求的那些草稿清掉。注意**清空发生在提交瞬间、失败不回填**（与文本同一
+    // 语义：`setValue('')` 也不会因为 POST 失败而把文本还回来）——`attachmentIds`
+    // 只含**已就绪**的引用，在途/失败的草稿没进请求，因此仍留在栏里，等用户重试
+    // 或下一轮再带。
     attachments.clearSent(attachmentIds);
   };
 
@@ -345,12 +348,12 @@ export const Composer = memo(function Composer({
   const pickFiles = () => {
     if (canAttach) fileInputRef.current?.click();
   };
+  const addDraftFiles = attachments.addFiles;
   /** 只把"是否接受"这一条门禁挂在本组件上；真正的入列/上传在 hook 里。
    *  依赖那个**稳定的** `addFiles`（useDraftAttachments 的依赖是
    *  [sessionId, commit, setIntakeError, startUpload]，同一会话内标识不变）：
    *  依赖整个 `attachments` 对象会让下面的拖放 effect 每个渲染重装 5 个监听
    *  （hook 每次渲染返回新对象字面量）。 */
-  const addDraftFiles = attachments.addFiles;
   const addFiles = useCallback(
     (files: readonly File[], directories?: ReadonlySet<File>) => {
       if (!canAttach) return;
@@ -358,6 +361,25 @@ export const Composer = memo(function Composer({
     },
     [canAttach, addDraftFiles],
   );
+  /** 把文本插到**光标处**（混合剪贴板的文本回填，见 `onPaste`）。
+   *
+   *  受控 textarea 的 `value` 由 React 在提交阶段写入，那一刻浏览器会把插入符推到
+   *  末尾——所以目标位置先存进 ref，由渲染后的 effect 消费（否则光标落在粘贴内容之后，
+   *  用户接着敲的字会跑到粘贴文本的后面）。 */
+  const pendingCaret = useRef<number | null>(null);
+  useEffect(() => {
+    const caret = pendingCaret.current;
+    if (caret === null) return;
+    pendingCaret.current = null;
+    inputRef.current?.setSelectionRange(caret, caret);
+  });
+  const insertAtCaret = (text: string) => {
+    const element = inputRef.current;
+    const start = element?.selectionStart ?? value.length;
+    const end = element?.selectionEnd ?? start;
+    pendingCaret.current = start + text.length;
+    setValue(`${value.slice(0, start)}${text}${value.slice(end)}`);
+  };
   // 整页拖放（AC1）：document 级监听，拖到任意位置都算——只把"是否接受"交给这里，
   // 计数/命中判断在 `lib/dropEvents.ts`（上游 COPY，含空目录剔除）。
   useEffect(
@@ -461,6 +483,17 @@ export const Composer = memo(function Composer({
               <span className={`queue-item-badge queue-item-${item.kind}`}>
                 {item.kind === 'steer' ? '引导' : '排队'}
               </span>
+              {/* #825（MM-04）：投递前草稿已从附图栏清掉、受控读回又被授权闸门挡成
+                  404（引用还没写进事件流）⇒ 这一条在 UI 里本来**零痕迹**，用户会以为
+                  图丢了。只给张数、不渲染缩略图（那必然是一片"加载失败"）。 */}
+              {item.attachments !== undefined && item.attachments.length > 0 && (
+                <span
+                  className="queue-item-attachments"
+                  title="这条待发送输入带着图片，投递时会连附件引用一起发出去"
+                >
+                  附图 {item.attachments.length} 张
+                </span>
+              )}
               <span className="queue-item-content" title={item.content}>
                 {item.content.length > 40 ? `${item.content.slice(0, 40)}…` : item.content}
               </span>
@@ -548,9 +581,8 @@ export const Composer = memo(function Composer({
             否则连选同一张图不会触发 change。 */}
         <input
           ref={fileInputRef}
-          className="composer-file-input"
           type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
+          accept={IMAGE_LIMITS.mediaTypes.join(',')}
           multiple
           hidden
           onChange={(event) => {
@@ -583,11 +615,16 @@ export const Composer = memo(function Composer({
             const files = filesFromClipboard(event.clipboardData);
             if (files.length === 0) return;
             // 门禁命中时同样**不**接管：`addFiles` 会直接 return，而
-            // preventDefault 已经执行 ⇒ 事件被吞、毫无反馈，且网页/Word 那种
-            // 「图片 + 文本」混合剪贴板连文本也一起丢（三方通道里另两条在禁用态
-            // 都有显式出口，粘贴这条不能例外地静默）。
+            // preventDefault 已经执行 ⇒ 事件被吞、毫无反馈（三方通道里另两条在禁用
+            // 态都有显式出口，粘贴这条不能例外地静默）。
             if (!canAttach) return;
             event.preventDefault();
+            // 网页 / Word 的剪贴板是**混合**的：`items` 里有图，`text/plain` 里还有
+            // 文字（标题、选区文本、图注）。`preventDefault` 之后原生粘贴不再发生
+            // ⇒ 不回填就等于把文本吞掉（上游 `keymap.ts:161-187` 同款做法：有文件时
+            // 照样读 `text/plain`，非空即接管并交给文本通道）。
+            const pastedText = event.clipboardData.getData('text/plain');
+            if (pastedText !== '') insertAtCaret(pastedText);
             addFiles(files);
           }}
           rows={2}

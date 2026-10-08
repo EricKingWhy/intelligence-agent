@@ -471,6 +471,18 @@ export function sessionRow(
   };
 }
 
+/** 从一条附件引用里取 `attachment_id`（`user/message.data.attachments` 的元素形状）。
+ *
+ *  单点在这里，是因为它同时被**读端点授权闸门**（见下方 `attachmentState` 分支）与
+ *  任何需要核对"这条消息引用了哪张图"的夹具用到——写成 `ids.includes(id)` 那种字符串
+ *  比较会在真形状（对象数组）上恒假，把"发送后能读回"的用例整体假红。 */
+function attachmentRefId(ref: unknown): string | null {
+  if (typeof ref !== 'object' || ref === null) return null;
+  if (!('attachment_id' in ref)) return null;
+  const value: unknown = ref.attachment_id;
+  return typeof value === 'string' ? value : null;
+}
+
 /** 按会话 id 定位侧栏里的一行（行内 id 文本是 `session_id.slice(0, 12)`，所以短 id
  *  才匹配得上）。放在这里而不是各 spec 各写一份：窄屏 / 删会话 / 触摸可达几个车道都
  *  用同一条定位（见本文件顶部"多个 spec 共用同一份，避免各自复制后静默漂移"）。 */
@@ -807,11 +819,13 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
       if (mock.onAttachmentContentGet && (await mock.onAttachmentContentGet(route, id))) return;
       const stored = attachmentState.get(id);
       // 授权闸门：未被本会话某条 `user/message` 引用 ⇒ 同形 404（"不存在 / 别的会话 /
-      // 未引用"三种情形不可区分——真后端刻意如此，不泄露存在性）。
+      // 未引用"三种情形不可区分——真后端刻意如此，不泄露存在性）。判据与后端
+      // `session/derive.py::referenced_attachment_ids` 同形：`data.attachments` 是
+      // **引用对象数组**，要比的是每项的 `attachment_id`（不是字符串数组）。
       const referenced = (sessionEvents.get(sid) ?? mock.events ?? []).some((f) => {
         if (f.type !== 'user/message') return false;
-        const ids: unknown = f.data?.['attachments'];
-        return Array.isArray(ids) && ids.includes(id);
+        const refs: unknown = f.data?.['attachments'];
+        return Array.isArray(refs) && refs.some((ref) => attachmentRefId(ref) === id);
       });
       if (stored === undefined || !referenced) {
         return json(route, { detail: `attachment '${id}' 不在会话 '${sid}' 的命名空间里` }, 404);

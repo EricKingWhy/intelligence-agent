@@ -1,7 +1,9 @@
 /** #825（MM-04）：`user/message.data.attachments` 的投影（AC5「刷新/重入后仍在」的上游事实）。
 
  *  钉住两件事：
- *  1. 附件是 `content` 的平行字段，逐帧覆盖（与 user_message 同语义）；
+ *  1. 附件是 `content` 的平行字段，但**非空才写**（`projection.ts::projectUserMessage`：
+ *     同一 step 重复到达的空帧不该抹掉已解析出的引用——这一步与 `user_message` 的
+ *     无条件覆盖**不同**）；
  *  2. 容错粒度是**逐条**（对齐后端 `attachments/projection.py::parse_image_refs`）——
  *     一行坏引用只损失那一行，不能让整个会话视图 brick。
  */
@@ -55,6 +57,25 @@ describe('projectUserMessage — 附件引用（#825）', () => {
       height: 480,
       name: null,
     });
+  });
+
+  it('后继空 attachments 帧不抹掉已解析的引用（非空才写 ≠ 逐帧覆盖）', () => {
+    const withRefs = applyEvent(
+      initConversation('s1'),
+      ev({
+        type: EventType.USER_MESSAGE,
+        data: { content: '两张', step: 1, attachments: [ref('sha256:aa')] },
+      }),
+    );
+    const afterEmptyFrame = applyEvent(
+      withRefs,
+      // 同一 step 的第二帧不带 attachments（既有 projection 的 broken 不变量会让
+      // 重复帧落到同一个 turn 上）。
+      ev({ type: EventType.USER_MESSAGE, data: { content: '两张', step: 1 } }),
+    );
+    expect(afterEmptyFrame.turns[0].user_attachments?.map((a) => a.attachment_id)).toEqual([
+      'sha256:aa',
+    ]);
   });
 
   it('坏引用逐条跳过，好引用照常进（不因一行坏数据丢掉整轮图片）', () => {

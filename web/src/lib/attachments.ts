@@ -11,7 +11,7 @@
  *   `packages/client/ui-conversation/src/client/skeleton/InputBar.tsx:207-247`（intake 预检：
  *   只对图片子集判限、**整批拒绝**、立即告知、被拒文件永不进入 rail；宿主在提交时重复强制）
  *   与 `packages/client/ui-conversation/src/client/input/editor/keymap.ts:161-187`（粘贴：
- *   `clipboardData.items` 取 `kind === 'file'` + 目录项识别；无文件时**不**吞掉文本粘贴）。
+ *   `clipboardData.items` 取 `kind === 'file'`，**无文件时不吞掉文本粘贴**）。
  *   本仓差异：DSH 用一次性 toast，本仓按 AC3 要求「就地显式原因」——错误串由本模块**返回**，
  *   由调用方常驻渲染（不自动消失），文案改为中文并带上文件名与具体上限。
  * - 第二独立来源 **LibreChat**（MIT，commit `e1dfc10449ff713faffacd60273fddcfe2c0a698`）
@@ -90,8 +90,10 @@ export function formatBytes(bytes: number): string {
 /**
  * 整批预检（AC2/AC3）：返回**要么整批进入上传、要么整批被拒并给出原因**。
  *
- * 语义（逐条移植 DSH `InputBar.tsx:208-243`）：
- * 1. 非图片（type 不在允许集）→ 报「不支持的图片格式」并列出文件名；
+ * 语义（限值判定移植 DSH `InputBar.tsx:208-243`；第 1 条是本仓特有的范围决定）：
+ * 1. **本仓特有（MM-05 前不支持非图片）**：非图片（type 不在允许集）→ 报「不支持的图片
+ *    格式」并列出文件名。上游只对**图片子集**判限，非图片照常进它的 `addFiles`（`@path`
+ *    文件引用通道）；本票没有那条通道，所以拒收，而非照搬上游；
  * 2. `已附图张数 + 本批张数 > maxImagesPerMessage` → 报数量上限（含当前张数）；
  * 3. 任一张 `size > maxImageBytes` → 报单张上限并列出**是哪几个文件**；
  * 4. 合计 `已附图字节 + 本批字节 > maxMessageImageBytes` → 报单条总上限。

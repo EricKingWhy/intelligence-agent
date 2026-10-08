@@ -3339,6 +3339,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   font-size: var(--text-xs);
   color: var(--color-foreground);
 }
+/* #825（MM-04）：带图待发送项的**张数**指示（不渲染缩略图：投递前受控读回是 404）。 */
+.queue-item-attachments {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
 .queue-item-actions {
   flex-shrink: 0;
   display: inline-flex;

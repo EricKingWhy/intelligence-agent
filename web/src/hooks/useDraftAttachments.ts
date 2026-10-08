@@ -129,10 +129,11 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
 
   const addFiles = useCallback(
     (files: readonly File[], directories?: ReadonlySet<File>) => {
-      if (sessionId === null) {
-        setIntakeError('图片需要先有会话：附图上传挂在会话上，请先创建或选中一个会话');
-        return;
-      }
+      // 会话缺失时**静默返回**，不给文案：用户可见的原因由 Composer 单点给出
+      // （`attachBlockedReason`：门禁 + 拖放遮罩文案 + 按钮 title 三处同源）。这里
+      // 再写一份只会漂移，而它是**结构性**守卫——上传端点 per-session，没有会话就
+      // 没有落点，放行会留下一排永远"上传中"的卡片。
+      if (sessionId === null) return;
       // 目录拖拽产出的"文件"是空壳（`dropEvents.ts::droppedDirectories`），直接丢弃。
       const candidates = files.filter((file) => !directories?.has(file));
       if (candidates.length === 0) return;
