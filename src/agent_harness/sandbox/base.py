@@ -72,9 +72,10 @@ class MultiLineCommandUnsupportedError(RuntimeError):
     """后端无法安全执行含内部换行的命令（#850）。
 
     Windows 本机后端走 `shell=True`，CPython 把它拼成 `cmd.exe /c "<命令>"`；命令里
-    带换行时 cmd.exe 的引号剥离规则把整串吃掉——**什么都不执行却以 0 退出**（本机
-    实测 rc=0 / stdout="" / stderr=""）。#365 Run B 因此让模型拿到假成功，写出
-    「已修复 app.py」的假报告，而文件逐字节未变。
+    带换行时 cmd.exe 的引号剥离规则会吃掉命令，两种形状都以 0 退出（本机实测 rc=0 /
+    stderr=""）：**前导换行**（`"\necho A"`）⇒ stdout=""，整条都没执行；**换行之后
+    还有内容**（`"echo A\necho B"`）⇒ stdout="A\n"，只执行第一行。#365 Run B 因此让
+    模型拿到假成功，写出「已修复 app.py」的假报告，而文件逐字节未变。
 
     为什么是拒绝而不是换一种拼接：实测把命令作为独立 argv 传给 `cmd /c` 会把现在
     能用的单行引号命令弄坏（`python -c "print(1+1)"` 由输出 `2` 变成空输出，

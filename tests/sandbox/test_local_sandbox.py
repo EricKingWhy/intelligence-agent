@@ -219,14 +219,15 @@ def test_write_text_is_atomic_replace(tmp_path):
 
 
 class TestExecMultiLineCommandGuard:
-    """#850：Windows 本机沙箱必须**明确拒绝**含内部换行的命令。
+    """#850：Windows 本机沙箱必须**明确拒绝**含换行的命令（尾部换行除外）。
 
     机制（本机实测）：`shell=True` 在 Windows 把命令拼成 `cmd.exe /c "<命令>"`；
-    命令里带换行时 cmd.exe 的引号剥离规则把整串吃掉——**什么都不执行却以 0 退出**
-    （rc=0 / stdout="" / stderr=""）。#365 Run B 因此让模型拿到假成功，
-    写出「已修复 app.py」的假报告，实际文件逐字节未变。
+    命令里带换行时 cmd.exe 的引号剥离规则会吃掉命令，两种形状都以 0 退出（rc=0 /
+    stderr=""）：**前导换行**（`"\necho A"`）⇒ stdout=""，整条都没执行；
+    **换行之后还有内容**（`"echo A\necho B"`）⇒ stdout="A\n"，只执行第一行。
+    #365 Run B 因此让模型拿到假成功，写出「已修复 app.py」的假报告，实际文件逐字节未变。
 
-    底线：不能把 no-op 报成 exit_code=0。
+    底线：不能把「没跑完」报成 exit_code=0。
     """
 
     @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
@@ -240,6 +241,15 @@ class TestExecMultiLineCommandGuard:
         """纯 cmd 多行同样只跑第一行，也要拒绝。"""
         with pytest.raises(MultiLineCommandUnsupportedError):
             sandbox.exec("echo a\necho b")
+
+    @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
+    @pytest.mark.parametrize("command", ["\necho A", "\n\necho A", "  \necho A"])
+    def test_leading_newline_is_refused(
+        self, sandbox: LocalSubprocessSandbox, command: str,
+    ):
+        """前导换行同样什么都不执行却以 0 退出（#848 复审 P1：strip() 会把它放行）。"""
+        with pytest.raises(MultiLineCommandUnsupportedError):
+            sandbox.exec(command)
 
     @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 引号剥离仅 Windows")
     def test_refusal_is_never_a_silent_zero_exit(self, sandbox: LocalSubprocessSandbox):

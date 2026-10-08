@@ -55,12 +55,16 @@ _DRAIN_CHUNK_BYTES = 65536
 
 
 def _has_interior_newline(command: str) -> bool:
-    """命令去掉首尾空白后是否仍含换行（#850）。
+    """命令去掉**尾部**空白后是否仍含换行（#850）。
 
-    尾部换行无害（本机实测 `echo hi\n\n` 正常以 0 退出并有输出），只有「换行之后
-    还有内容」才触发 cmd.exe 的引号剥离，故只判内部换行——否则会把大量正常命令误拒。
+    cmd.exe 的引号剥离有两种形状，都以 exit_code=0 返回（本机实测 rc=0 / stderr=""）：
+    前导换行（`"\necho A"`）⇒ **整条都不执行**（stdout=""）；换行之后还有内容
+    （`"echo A\necho B"`）⇒ **只执行第一行**（stdout="A\n"）。两者都会把「没跑完」
+    报成成功，故都要拒绝。只有**尾部**换行无害（实测 `echo hi\n\n` 正常以 0 退出且有
+    输出），所以归一化只能用 rstrip()：用 strip() 会把前导换行一并吃掉，于是
+    `"\necho A"` 被放行（#848 复审 P1）。
     """
-    body = command.strip()
+    body = command.rstrip()
     return "\n" in body or "\r" in body
 
 
@@ -206,11 +210,13 @@ class LocalSubprocessSandbox(Sandbox):
         self.ensure_started()
         if os.name == "nt" and _has_interior_newline(command):
             raise MultiLineCommandUnsupportedError(
-                "命令被拒绝：Windows 本机沙箱用 cmd.exe 执行，含内部换行的命令会被 "
-                "cmd.exe 的引号剥离规则整串吃掉——什么都不执行却以 exit_code=0 返回。"
-                "为避免把「什么都没跑」报成成功，本机直接拒绝该命令。"
+                "命令被拒绝：Windows 本机沙箱用 cmd.exe 执行，含换行的命令会被 "
+                "cmd.exe 的引号剥离规则吃掉——前导换行会让整条命令都不执行，"
+                "换行之后还有内容则只执行第一行，两种都以 exit_code=0 返回。"
+                "为避免把「没跑完」报成成功，本机直接拒绝该命令。"
                 "请改写为单行命令，或先用 write 工具把脚本写入文件再执行该文件。"
-                "（命令末尾的换行无妨，只有换行之后还有内容才会被拒绝。）"
+                "（命令末尾的换行无妨；只要换行之后还有内容——含开头就是换行的形状——"
+                "就会被拒绝。）"
             )
         effective_timeout = timeout if timeout is not None else DEFAULT_EXEC_TIMEOUT
 
