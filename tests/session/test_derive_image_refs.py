@@ -147,3 +147,22 @@ def test_latest_direct_user_input_plain_text_still_selected() -> None:
     ]
     selected = latest_direct_user_input_event(events, derive_messages(events))
     assert selected is not None and selected.seq == 2
+
+
+def test_projected_user_text_mis_strips_trailing_placeholder_from_plain_text() -> None:
+    """P4 负例：`_projected_user_text` 的逆映射是启发式（#823 / MM-02 重审 P4）。
+
+    非视觉下带图 user 消息的投影是 `原文 + "\\n" + 占位符`；还原事件原文只能靠
+    **后缀剥离**。这带来一个已知局限：一条**纯文本**消息若恰好以该占位符文案结尾，
+    也会被误剥离——两种形态在 `HumanMessage.content` 层面不可区分（附件标记只存在于
+    事件里，投影后已丢失），无法在不改投影契约的前提下消除。
+
+    影响面极小（概率极低，且仅影响"来源约束选择"），故**如实登记为已知局限**并钉住
+    当前行为：本用例红 = 有人改了后缀启发式，需重新评估该局限是否仍成立。
+    """
+    from agent_harness.session.derive import _projected_user_text
+
+    plain = f"人类在讨论这个占位符文案\n{IMAGE_OMITTED_PLACEHOLDER}"
+    assert _projected_user_text(HumanMessage(content=plain)) == "人类在讨论这个占位符文案"
+    # 恰好等于占位符本身（无前缀文本）亦被剥成空串——同源边界。
+    assert _projected_user_text(HumanMessage(content=IMAGE_OMITTED_PLACEHOLDER)) == ""

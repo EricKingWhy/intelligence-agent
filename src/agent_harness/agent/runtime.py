@@ -31,7 +31,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage
 
 from agent_harness.agent.budget import (
     DEFAULT_MAX_AGENT_TURNS,
@@ -1829,10 +1829,12 @@ class AgentRuntime:
                 telemetry.context_build_started(step=steps)
                 # #823 / MM-02（A2）：投影跟随**当前请求模型**——run 内切到 fallback
                 # 后，本步的视觉/占位判定（PRD D6）必须按 fallback 的能力。
-                # 边界（如实记录）：切换发生在**模型调用中途**，coordinator 的当次
-                # 重试复用本步已投影的 messages（在途重新 build 会在流中触发压缩等
-                # 副作用，不安全），故"切换那一步的重试"仍用切换前的口径；本同步保证
-                # 其后每一步按 fallback 口径投影（D6 的主路径）。
+                # D6 全路径由两处共同保证：
+                #  ① 本同步：其后每一步按 fallback 口径投影（主路径）；
+                #  ② coordinator 的 `reproject_on_switch` 钩子：**切换那一步的 fallback
+                #     重试**在发出前，把切换前口径已投影/装配的 messages 重投影为非视觉
+                #     形态（残口已闭合，见 `_reproject_messages_after_switch`）。
+                # 两处都只做投影/消息变换，不在模型流中途重新 build（无压缩等副作用）。
                 self._sync_context_vision(model_coord.current_role)
                 try:
                     messages = await self._context_builder.build(session)
@@ -3869,7 +3871,30 @@ class AgentRuntime:
             idle_timeout=self._stream_idle_timeout,
             total_timeout=self._stream_total_timeout,
             gate=self._model_call_gate,
+            # #823 / MM-02（A2 残口）：切换当步的 fallback 重试前重投影（PRD D6）。
+            reproject_on_switch=self._reproject_messages_after_switch,
         )
+
+    def _reproject_messages_after_switch(
+        self, role: str, messages: list[AnyMessage],
+    ) -> list[AnyMessage]:
+        """coordinator 切到 `role` 后、重试发出前，按目标角色口径重投影（#823 A2 残口）。
+
+        PRD D6 字面场景="发送后 fallback 到非视觉模型"：切换那一步的重试不能用切换前
+        已投影的 `messages`（含 provider `image_url` 块）。这里**只重投影消息**——调
+        builder 的纯变换，不触发 build/压缩（隔离实现者原先顾虑的副作用）。
+
+        映射缺席（None）/ 目标角色支持视觉 / builder 无该接缝 → 原样返回。
+        """
+        mapping = self._vision_by_model_role
+        if not mapping or mapping.get(role, False):
+            return messages
+        reproject = getattr(
+            self._context_builder, "reproject_without_vision", None,
+        )
+        if reproject is None:
+            return messages
+        return reproject(messages)
 
     def _new_tracer(
         self, session: Session, run_id: str, user_input: str | None, turn_index: int,

@@ -27,7 +27,11 @@ from agent_harness.context.compactor import (
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
 from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
-from agent_harness.model.multimodal import DEFAULT_IMAGE_DETAIL, to_provider_messages
+from agent_harness.model.multimodal import (
+    DEFAULT_IMAGE_DETAIL,
+    downgrade_to_non_vision,
+    to_provider_messages,
+)
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
 from agent_harness.session.cwd import session_cwd
@@ -475,6 +479,11 @@ class ContextBuilder:
         # 同一 builder 实例内同 id 的载荷终身可复用——避免每次 build 对所有被引用
         # 附件重复 `load_bytes` + Pillow 解码 + 编码 + base64。只缓存**成功**结果
         # （负结果不缓存，让暂态读取失败可在下一轮重试）。
+        # 上界（#823 / MM-02 重审 P4）：本缓存**无显式淘汰**，但 builder 实例的生命
+        # 周期 = 单 run（`build_runtime` 每 run 新建，见 `service.py`），键数被该 run
+        # 的图片引用数界定（单键值 ≤ 归一化后图片字节的 base64）。不构成泄漏；**若
+        # 未来把 builder 复用为跨会话/长命实例，必须补上界或淘汰**（届时按 id 的
+        # 内容寻址 + 不可变仍可安全做 LRU）。
         self._image_payload_cache: dict[str, tuple[str, str]] = {}
         self.max_context_tokens = max_context_tokens
         self.auto_compact_threshold = auto_compact_threshold
@@ -493,12 +502,15 @@ class ContextBuilder:
         # 每次 build 重新渲染顺带保证工具清单与模型名永远是当前事实。
         # 传 None（默认）→ 行为与 T7 之前完全一致（向后兼容）。
         self._runtime_context_provider = runtime_context_provider
-        # (session_id, seq) → 该事件投影消息的 token 成本。事件落盘后其投影
-        # 消息内容终身不变，成本是常量——此前每步对全部历史重新 model_dump_json
-        # + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步 run 纯开销 2.2s）。
+        # (session_id, seq, supports_vision) → 该事件投影消息的 token 成本。同一事件
+        # 在视觉/非视觉两种投影下内容不同（图片块 vs 占位符串）、成本不同，故键必须
+        # 带视觉维度（#823 / MM-02 重审 P3：`set_supports_vision` 可 mid-run 变更）。
+        # 事件落盘后其投影消息内容在同一口径下终身不变，成本是常量——此前每步对全部
+        # 历史重新 model_dump_json + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步
+        # run 纯开销 2.2s）。
         # memo 仅属于最近传入的 Session 对象；同 id 的独立对象切换时清空，避免
         # 把一个对象的 seq 成本用于另一个对象，同时保持单个对象内的增量缓存。
-        self._token_memo: dict[tuple[str, int], int] = {}
+        self._token_memo: dict[tuple[str, int, bool], int] = {}
         self._token_memo_session: Session | None = None
         # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
         # **只含投影 messages**（_estimate_tokens_cached 的返回值）；system_prompt
@@ -1350,6 +1362,22 @@ class ContextBuilder:
         """
         self._supports_vision = supports_vision
 
+    def reproject_without_vision(
+        self, messages: list[AnyMessage],
+    ) -> list[AnyMessage]:
+        """把已按视觉口径投影/装配的消息降级为非视觉形态（#823 / MM-02 A2 残口）。
+
+        PRD D6 字面场景="发送后 fallback 到非视觉模型"：切换那一步的重试若复用
+        切换前已投影的 `messages`（含 provider `image_url` 块），非视觉 fallback
+        会直接收到图片块、D6 承诺的降级不发生。Runtime 让 coordinator 在切换后调用
+        本方法**只重投影消息**——纯消息变换，**不读 session、不触发 build/压缩**
+        （实现者原先顾虑的"在途重新 build 有副作用"因此在方案上被规避）。
+
+        返回的新消息与 `derive_messages(..., supports_vision=False)` 的产物逐字一致
+        （首文本块 + 占位符）；无图片块的消息原样返回（无图消息逐字不变，AC8）。
+        """
+        return downgrade_to_non_vision(messages)
+
     def _finalize(self, messages: list[AnyMessage]) -> list[AnyMessage]:
         """注入 system prompt，并把标准图片块翻译成 provider 载荷（#823 / MM-02）。
 
@@ -1443,7 +1471,12 @@ class ContextBuilder:
             return self._token_estimate_total
         total = 0
         for event, message in zip(projecting, messages):
-            key = (session.session_id, event.seq)
+            # 键必须带上视觉维度（#823 / MM-02 重审 P3）：`_supports_vision` 可在
+            # mid-run 变更（`set_supports_vision`），同一 (session_id, seq) 的带图事件
+            # 在视觉/非视觉两种投影下编码成本不同。只按 (session_id, seq) 记忆会
+            # 命中前一口径的 memo，使 `set_supports_vision` 的"估算全局同口径"声明
+            # 失效。纳入后，切换视野那次 build 按新口径重估。
+            key = (session.session_id, event.seq, self._supports_vision)
             cost = self._token_memo.get(key)
             if cost is None:
                 cost = estimate_tokens(message.model_dump_json())

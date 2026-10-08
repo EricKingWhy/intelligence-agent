@@ -217,6 +217,9 @@ class ModelFallbackCoordinator:
         idle_timeout: float = 0.0,
         total_timeout: float = 0.0,
         gate: ModelCallGate | None = None,
+        reproject_on_switch: (
+            Callable[[str, list[AnyMessage]], list[AnyMessage]] | None
+        ) = None,
     ) -> None:
         self._policy = policy or TwoLevelFallbackPolicy()
         self._fallback = fallback
@@ -231,6 +234,11 @@ class ModelFallbackCoordinator:
         # 进程级模型并发闸（#89）：共享实例（assembly 创建、parent/child 传递
         # 同一引用）。闸包在 stall 看门狗【外面】——排队等槽位不计入 idle。
         self._gate = gate
+        # #823 / MM-02（A2 残口）：切到 fallback 后、那次重试发出**之前**，用它把
+        # 切换前口径下已投影/装配的 messages 重投影成 fallback 口径（PRD D6：非视觉
+        # fallback 不该收到 image_url 块）。None = 不介入（既有调用方逐字不变）。
+        # 回调只做纯消息变换——不 build、不压缩（副作用风险由调用方隔离）。
+        self._reproject_on_switch = reproject_on_switch
         self.current = primary
         self._transitions: list[FallbackTransition] = []
         self._requests: list[ModelRequestAttempt] = []
@@ -297,9 +305,12 @@ class ModelFallbackCoordinator:
             )
             if not isinstance(error, Exception) or not self._try_switch(error):
                 raise
+            retry_messages = self._reproject_after_switch(
+                self._current_role(), messages,
+            )
             try:
                 return await self._ainvoke_once(
-                    messages, on_request_started, on_request_failed,
+                    retry_messages, on_request_started, on_request_failed,
                 )
             except BaseException as retry_error:
                 if isinstance(retry_error, Exception):
@@ -387,6 +398,7 @@ class ModelFallbackCoordinator:
             ):
                 raise
             retry_role = self._current_role()
+            retry_messages = self._reproject_after_switch(retry_role, messages)
             retry_request_id: str | None = None
             try:
                 async with self._slot():
@@ -394,7 +406,7 @@ class ModelFallbackCoordinator:
                     retry_request_id = self._start_request(
                         retry_role, on_request_started,
                     )
-                    async for chunk in self._guarded_stream(self.current, messages):
+                    async for chunk in self._guarded_stream(self.current, retry_messages):
                         yield chunk
             except BaseException as retry_error:
                 if retry_request_id is None:
@@ -465,6 +477,19 @@ class ModelFallbackCoordinator:
         if self._fallback is not None and self.current is self._fallback:
             return PROVIDER_ROLE_FALLBACK
         return PROVIDER_ROLE_PRIMARY
+
+    def _reproject_after_switch(
+        self, role: str, messages: list[AnyMessage],
+    ) -> list[AnyMessage]:
+        """切换后按新角色口径重投影消息（#823 / MM-02 A2 残口）。
+
+        只在这一步（`_try_switch` 成功之后、重试发出之前）调用；无回调（未注入 /
+        不涉及视觉的角色映射）→ 原样返回，行为逐字不变。回调由 Runtime 提供，只做
+        纯消息变换（不 build / 不压缩）。
+        """
+        if self._reproject_on_switch is None:
+            return messages
+        return self._reproject_on_switch(role, messages)
 
     @staticmethod
     def _start_request(

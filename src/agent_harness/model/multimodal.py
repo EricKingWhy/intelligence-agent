@@ -21,7 +21,10 @@ from collections.abc import Callable
 
 from langchain_core.messages import AnyMessage
 
-from agent_harness.attachments.projection import IMAGE_OMITTED_PLACEHOLDER
+from agent_harness.attachments.projection import (
+    IMAGE_OMITTED_PLACEHOLDER,
+    text_with_omitted_images,
+)
 
 #: 默认 `detail`（PRD D4 / OpenAI Chat Completions 取值：auto|low|high|original）。
 DEFAULT_IMAGE_DETAIL = "auto"
@@ -64,6 +67,54 @@ def to_provider_messages(
     return result
 
 
+def downgrade_to_non_vision(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """把已按视觉口径装配的消息降级为非视觉形态（#823 / MM-02 A2 残口）。
+
+    PRD D6 字面场景：主模型支持视觉、**发送后** fallback 到非视觉模型——切换那一步
+    的重试若复用切换前已投影/装配的 `messages`，非视觉 fallback 会直接收到 provider
+    `image_url` 块。本函数只做**纯消息变换**（不读 session、不触发 build/压缩等副作
+    用）：含图片内容块的消息整体降级为等价的非视觉投影。
+
+    降级产物与 `derive_messages(..., supports_vision=False)` **逐字一致**——取首个
+    文本块的文本，追加 `IMAGE_OMITTED_PLACEHOLDER`（视觉下 `content` 必首块为
+    `{"type":"text","text":原文}`，见 `attachments.projection.content_block_with_text`）。
+    无图片块的消息（纯文本 / 只有文本块）原样返回（无图消息逐字不变，AC8）。返回新
+    消息对象，不原地改输入。
+
+    识别 `image`（标准块）与 `image_url`（provider 块）两种形态：前者用于投影后、
+    装配前的消息，后者用于 coordinator 重试点（已是装配后形态）。
+    """
+    result: list[AnyMessage] = []
+    for message in messages:
+        content = message.content
+        if not isinstance(content, list) or not _has_image_block(content):
+            result.append(message)
+            continue
+        result.append(
+            message.model_copy(
+                update={"content": text_with_omitted_images(_first_text_block(content))}
+            )
+        )
+    return result
+
+
+def _has_image_block(content: list[object]) -> bool:
+    return any(
+        isinstance(block, dict)
+        and block.get("type") in (_STANDARD_IMAGE_TYPE, _PROVIDER_IMAGE_TYPE)
+        for block in content
+    )
+
+
+def _first_text_block(content: list[object]) -> str:
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                return text
+    return ""
+
+
 def _translate_block(
     block: object, *, resolve_image: ImageResolver, detail: str
 ) -> object:
@@ -86,6 +137,7 @@ def _translate_block(
 __all__ = [
     "DEFAULT_IMAGE_DETAIL",
     "ImageResolver",
+    "downgrade_to_non_vision",
     "image_data_url",
     "to_provider_messages",
 ]
