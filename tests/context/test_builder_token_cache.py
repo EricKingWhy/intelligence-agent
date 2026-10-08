@@ -174,6 +174,51 @@ class TestTokenMemoFallback:
         assert calls["n"] == 3
 
 
+class TestTokenMemoVisionDimension:
+    """#823 / MM-02 重审 P3：memo 键必须含视觉维度。
+
+    `set_supports_vision` 可在 mid-run 变更（A2）；同一 (session_id, seq) 的带图
+    事件在视觉/非视觉两种投影下内容不同（图片块列表 vs 原文+占位符串），编码成本
+    也不同。若 memo 只按 (session_id, seq) 记忆，切换口径后那次估算会命中旧口径的
+    memo，使 `set_supports_vision` 的"估算全局同口径"声明失效。
+    """
+
+    def test_vision_toggle_reestimates_same_event(self, tmp_path, monkeypatch):
+        from agent_harness.session.derive import derive_messages
+
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {
+            "content": "看图",
+            "attachments": [{
+                "kind": "image", "attachment_id": "sha256:" + "a" * 64,
+                "media_type": "image/png", "bytes": 1024, "width": 8, "height": 6,
+            }],
+        })
+        builder = ContextBuilder(ScriptedModel([]), model_supports_vision=True)
+        vision_messages = derive_messages(session.events, supports_vision=True)
+        non_vision_messages = derive_messages(session.events, supports_vision=False)
+
+        calls = {"n": 0}
+        real_estimate = builder_module.estimate_tokens
+
+        def counting_estimate(text: str) -> int:
+            calls["n"] += 1
+            return real_estimate(text)
+
+        monkeypatch.setattr(builder_module, "estimate_tokens", counting_estimate)
+
+        builder._estimate_tokens_cached(session, vision_messages)
+        assert calls["n"] == 1  # 单个投影事件恰好编码一次
+
+        # 切换到非视觉口径：同一事件必须重新编码（键含视觉维度 ⇒ memo 未命中）。
+        builder.set_supports_vision(False)
+        builder._estimate_tokens_cached(session, non_vision_messages)
+        assert calls["n"] == 2, "切换口径后同一事件必须按新口径重估（memo 未命中）"
+        assert builder._token_estimate_total == estimate_message_tokens(
+            non_vision_messages,
+        )
+
+
 class TestSingleEstimationPass:
     @pytest.mark.asyncio
     async def test_provider_budget_reuses_memo_total(self, tmp_path, monkeypatch):

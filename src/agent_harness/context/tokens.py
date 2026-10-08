@@ -107,6 +107,12 @@ def _contains_lone_surrogate(value: object) -> bool:
 def estimate_message_tokens(messages: list[AnyMessage]) -> int:
     """计入消息结构和 tool_calls；与文本估算使用同一个编码。
 
+    ⚠ 口径（#823 / MM-02，A4 / PRD D3）：本函数按 `model_dump_json` 计**消息结构**
+    ——带图消息里的标准图片块（`{"type":"image","file_id",...}`）只有几 token，真正
+    的 base64 载荷在请求装配时才注入、**不计入**此处估算。图片按 Provider 近似公式
+    计入预算/上下文压力属 **MM-03 必做**（登记见 #824）；在此之前不要把本估算当作
+    "已含图片开销"的用量（多张大图可击穿 hard guard 而估算看不见）。
+
     #650：孤立 Unicode surrogate 能通过 Python 层校验、却无法编码进
     JSON——``model_dump_json`` 裸抛 ``PydanticSerializationError``（未收敛）。
     Context 预算边界把它映射为 ``ContextWindowExceededError``（spec 06 §8

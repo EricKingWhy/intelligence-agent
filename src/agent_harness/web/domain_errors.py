@@ -117,6 +117,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    AttachmentReferenceInvalid,
     CompactionConcurrentWrite,
     CompactionInProgress,
     EventLogCorruptError,
@@ -157,6 +158,9 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     InvalidDecision: 422,
     UnknownModel: 422,
     InvalidForkBoundary: 422,
+    # #823 / MM-02：发送消息引用的 attachment_id 不合法（形态 / 不存在 / 读不回）——
+    # 入参错误，客户端可纠正（读端点对"未被事件引用"另走 404，口径不同）。
+    AttachmentReferenceInvalid: 422,
     # T3 / #308（ADR-0044 D1/D8/D9）：预算配置不可接受——alias 冲突 / 越过生效上层
     # ceiling。父类与两个子类各自登记（精确类型索引）。
     BudgetRejection: 422,

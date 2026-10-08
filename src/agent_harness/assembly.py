@@ -44,7 +44,7 @@ from agent_harness.context.project_instructions import (
     project_instruction_store,
 )
 from agent_harness.model.concurrency import ModelCallGate
-from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.config import ConfigError, ModelConfig, model_supports_vision
 from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
@@ -866,6 +866,14 @@ async def build_runtime(
             session_id, instruction_cwd,
         ).with_runtime_context(runtime_context)
 
+    # #823 / MM-02（A2）：视觉能力按**当前请求模型**判定（PRD D6——"fallback 自动
+    # 降级"）。主/备两级各自解析声明；运行时在每次 build 前按 coordinator 的当前角色
+    # 同步进 context_builder，切 fallback 后投影自动改用 fallback 的口径。
+    primary_supports_vision = model_supports_vision(settings, config)
+    fallback_supports_vision = (
+        model_supports_vision(settings, config.fallback)
+        if config.fallback is not None else False
+    )
     return AgentRuntime(
         model=model,
         registry=registry,
@@ -913,6 +921,15 @@ async def build_runtime(
             # W-31.2 (#414)：裁剪的两个确定性护栏，原样透传（校验在 pruner 构造处）。
             keep_recent_tool_results=settings.keep_recent_tool_results,
             clear_at_least_tokens=settings.clear_at_least_tokens,
+            # #823 / MM-02：本次 run 的请求模型是否支持视觉——决定 `user/message`
+            # 的附件引用被物化成图片内容块还是降级为占位符。构造期按**主模型**，
+            # run 内切 fallback 时由 Runtime 经 `vision_by_model_role` 更新（A2）。
+            model_supports_vision=primary_supports_vision,
+            # #823 / MM-02（B2）：图片块 `detail` 档位（PRD D4/D11 可配置）。
+            image_detail=settings.image_detail,
+            # #823 / MM-02（B4）：发送前归一化目标（PRD D11 可配置）。
+            image_normalize_max_dimension=settings.image_normalize_max_dimension,
+            image_normalize_max_bytes=settings.image_normalize_max_bytes,
         ),
         # #298 T7b：V2 记忆形成的宿主。它是**进程级单例**（装配期建一次，见
         # `memory/v2/assembly.py` 决定三），本函数每轮调用只是把它接上终结臂——
@@ -920,6 +937,12 @@ async def build_runtime(
         # 未装配时是 None：终结臂只跳过记忆形成。
         memory_formation=wiring.memory_formation,
         fallback_model=fallback_model,
+        # #823 / MM-02（A2）：角色 → 视觉能力，供 Runtime 每次 build 前让投影跟随
+        # 当前请求模型（PRD D6）。
+        vision_by_model_role={
+            "primary": primary_supports_vision,
+            "fallback": fallback_supports_vision,
+        },
         stream_idle_timeout=settings.model_stream_idle_timeout,
         stream_total_timeout=settings.model_stream_total_timeout,
         model_call_gate=model_call_gate,

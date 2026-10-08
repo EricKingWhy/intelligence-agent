@@ -41,13 +41,15 @@ EXTENSION_MEDIA_TYPES: dict[str, ImageMediaType] = {
 
 
 class ImageAttachmentRef(BaseModel):
-    """一张不可变图片的持久化引用（来源: DSH `ImageAttachmentRef`）。
+    """一张不可变图片的持久化引用的**基类**（来源: DSH `ImageAttachmentRef`）。
 
     与 DSH 的差异：MM-01 不做归一化，故 `original_dimensions` 缺省不出现（那要
     归一化缩放过才填）。`name` 是**去掉本地路径信息**的展示名（见 `file_leaf_name`）。
 
-    **MM-01 不使用**：这是 PRD D1 要求的前置契约，落进 `user/message.data` 的附件引用
-    数组由 **MM-02**（事件引用 + 投影物化）真正消费；本票只导出它，故此刻无调用点。
+    **消费方**：MM-02 的投影层领域模型 `attachments.projection.ImageRef` 直接**继承本类**
+    并加一个 `kind` 判别字段（#823 / MM-02 B1：消除双份领域模型）。二者不再是重复
+    定义——`kind` 是唯一差异，事件里 `user/message.data["attachments"]` 的形状即
+    `ImageRef`。
     """
 
     attachment_id: AttachmentId
@@ -55,6 +57,10 @@ class ImageAttachmentRef(BaseModel):
     bytes: int
     width: int
     height: int
+    #: 展示名（去本地路径）。#823 / MM-02（B6）：写入路径**恒缺省**——上传回执的 name
+    #: 未持久化（`web/attachments.py` 只存字节+mime），发送端点只收 id 列表、无回传信道，
+    #: 属**结构性缺省**；`parse_image_refs` 会解析它（兼容未来写入方）。展示名接线留待
+    #: 前端票 / MM-03，不留无声死字段。
     name: str | None = None
 
 
@@ -65,7 +71,11 @@ class ImageAttachmentLimits(BaseModel):
     """
 
     max_image_bytes: int
+    #: #823 / MM-02（B6）：单消息图片**数量**上限。`resolve_image_limits` 已读出，但
+    #: 发送路径的聚合校验（超数量 → 413/422）归 MM-03；当前仅 pydantic 层有静态兜底
+    #: （`web.app.SendMessageRequest.attachments` 的 `max_length`）。不做无声死字段。
     max_images_per_message: int
+    #: #823 / MM-02（B6）：单消息图片**总字节**上限，同样归 MM-03 消费（见上）。
     max_message_image_bytes: int
     max_image_pixels: int
     max_image_dimension: int

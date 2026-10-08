@@ -378,6 +378,7 @@ class ContextCompactor:
         protected_facts: list[ProtectedFact] | None = None,
         reserved_tokens: int = 0,
         source_ranges: list[tuple[int, int] | None] | None = None,
+        supports_vision: bool = False,
     ) -> CompactionResult:
         if reserved_tokens < 0:
             raise ValueError("reserved_tokens must be non-negative")
@@ -414,6 +415,7 @@ class ContextCompactor:
         # 长度不符视同区间不可用（走既有拒绝路径），不做静默截断。
         early_ranges = _early_source_ranges(
             messages, events, source_ranges, prefix_end, cut,
+            supports_vision=supports_vision,
         )
         trusted_summaries = _trusted_summary_indices(early, early_ranges, events)
         prompt = SystemMessage(
@@ -871,6 +873,8 @@ def _early_source_ranges(
     source_ranges: list[tuple[int, int] | None] | None,
     prefix_end: int,
     cut: int,
+    *,
+    supports_vision: bool = False,
 ) -> list[tuple[int, int] | None] | None:
     """early 窗口（messages[prefix_end:cut]）的「消息 → 来源 seq range」对齐。
 
@@ -879,6 +883,12 @@ def _early_source_ranges(
     ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。长度不符视同
     区间不可用（走既有拒绝路径），不做静默截断。未传 ranges 时从 events
     重投影并逐条对齐，对齐失败同样视为不可用。
+
+    `supports_vision`（#823 / MM-02）：重推导时必须用**与压缩输入同一口径**的
+    视觉判定。带图会话的 `user/message` 在视觉模型下投影为图片块列表，在非视觉
+    模型下投影为占位符字符串——若调用方按视觉口径构造 `messages`（图片块）而此处
+    按默认 `False` 重推导（占位符），`projected == supplied` 必不成立 ⇒ 对齐失败
+    ⇒ 来源区间不可用 ⇒ 手动压缩静默 no-op。默认 False 保持既有调用方行为不变。
     """
     if events is None:
         return None
@@ -890,7 +900,9 @@ def _early_source_ranges(
         )
     from agent_harness.session.derive import derive_messages_with_source_ranges
 
-    mapped = derive_messages_with_source_ranges(events)
+    mapped = derive_messages_with_source_ranges(
+        events, supports_vision=supports_vision,
+    )
     aligned = len(mapped) == len(messages) and all(
         projected == supplied
         for (projected, _source_range), supplied in zip(mapped, messages)
