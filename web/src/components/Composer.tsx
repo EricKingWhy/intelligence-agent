@@ -345,12 +345,18 @@ export const Composer = memo(function Composer({
   const pickFiles = () => {
     if (canAttach) fileInputRef.current?.click();
   };
+  /** 只把"是否接受"这一条门禁挂在本组件上；真正的入列/上传在 hook 里。
+   *  依赖那个**稳定的** `addFiles`（useDraftAttachments 的依赖是
+   *  [sessionId, commit, setIntakeError, startUpload]，同一会话内标识不变）：
+   *  依赖整个 `attachments` 对象会让下面的拖放 effect 每个渲染重装 5 个监听
+   *  （hook 每次渲染返回新对象字面量）。 */
+  const addDraftFiles = attachments.addFiles;
   const addFiles = useCallback(
     (files: readonly File[], directories?: ReadonlySet<File>) => {
       if (!canAttach) return;
-      attachments.addFiles(files, directories);
+      addDraftFiles(files, directories);
     },
-    [canAttach, attachments],
+    [canAttach, addDraftFiles],
   );
   // 整页拖放（AC1）：document 级监听，拖到任意位置都算——只把"是否接受"交给这里，
   // 计数/命中判断在 `lib/dropEvents.ts`（上游 COPY，含空目录剔除）。
@@ -576,6 +582,11 @@ export const Composer = memo(function Composer({
             // 抢先接管会把普通复制粘贴弄坏）。
             const files = filesFromClipboard(event.clipboardData);
             if (files.length === 0) return;
+            // 门禁命中时同样**不**接管：`addFiles` 会直接 return，而
+            // preventDefault 已经执行 ⇒ 事件被吞、毫无反馈，且网页/Word 那种
+            // 「图片 + 文本」混合剪贴板连文本也一起丢（三方通道里另两条在禁用态
+            // 都有显式出口，粘贴这条不能例外地静默）。
+            if (!canAttach) return;
             event.preventDefault();
             addFiles(files);
           }}

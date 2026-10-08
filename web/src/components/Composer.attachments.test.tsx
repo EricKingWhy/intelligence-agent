@@ -66,7 +66,7 @@ function dispatchDrag(type: 'dragenter' | 'dragover' | 'dragleave' | 'drop', fil
   document.dispatchEvent(event);
 }
 
-function pasteFiles(textarea: HTMLTextAreaElement, files: File[]): void {
+function pasteFiles(textarea: HTMLTextAreaElement, files: File[]): Event {
   const event = new Event('paste', { bubbles: true, cancelable: true });
   Object.defineProperty(event, 'clipboardData', {
     value: {
@@ -76,6 +76,9 @@ function pasteFiles(textarea: HTMLTextAreaElement, files: File[]): void {
   act(() => {
     textarea.dispatchEvent(event);
   });
+  // 返回事件：`defaultPrevented` 就是"有没有把粘贴吞掉"的判据（入口被门禁挡住时
+  // 必须放行原生粘贴，否则网页/Word 那种"图 + 文本"的混合剪贴板连文本也丢）。
+  return event;
 }
 
 let container: HTMLDivElement;
@@ -312,7 +315,9 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
     const hint = container.querySelector('.composer-attach-hint');
     expect(hint?.textContent).toContain('supports_vision=false');
 
-    pasteFiles(textarea(), [imageFile('a.png')]);
+    // 粘贴：不入栏，且**不接管**事件（`preventDefault` 一开，混合剪贴板里的文本也丢）。
+    const pasteEvent = pasteFiles(textarea(), [imageFile('a.png')]);
+    expect(pasteEvent.defaultPrevented).toBe(false);
     await act(async () => {
       dispatchDrag('dragenter', [imageFile('a.png')]);
     });
@@ -335,5 +340,8 @@ describe('Composer 附图：#825 AC7 入口门禁', () => {
     paint({ sessionId: null });
     expect(attachButton().disabled).toBe(true);
     expect(attachButton().title).toContain('需要先有会话');
+    // 同样不得吞掉粘贴：新建态下用户往往是"粘一段文字顺便带张截图"。
+    expect(pasteFiles(textarea(), [imageFile('a.png')]).defaultPrevented).toBe(false);
+    expect(cards()).toHaveLength(0);
   });
 });

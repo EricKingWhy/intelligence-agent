@@ -254,6 +254,25 @@ test('AC1/AC2/AC4/AC5/AC6：粘贴 → 缩略图 → 发送带 attachments → �
   // 展示名缺省（写入路径不持久化 name）⇒ 回落「图片」，不伪造文件名。
   await expect(download).toHaveAttribute('download', '图片');
   expect(await download.getAttribute('href')).toContain(contentPath);
+  // 遮挡检查（独立审查 P1 的回归闸门）：Radix 把 Overlay 与 Content 渲染成 body 下的
+  // 兄弟节点，两者都 fixed + 显式 z-index ⇒ 遮罩一旦被抬到内容之上，`inset: 0` 会把
+  // 指针事件全接走：按钮"可见"（`toBeVisible` 不查遮挡）但点不到。这里直接问浏览器
+  // "这个坐标上最顶层的元素是谁"，并让 Playwright 的 hit-target 检查去点一次真实下载。
+  for (const selector of ['.image-lightbox-btn', 'a.image-lightbox-btn']) {
+    const topmost = await lightbox.locator(selector).first().evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return hit !== null && hit.closest('.image-lightbox') !== null;
+    });
+    expect(topmost).toBe(true);
+  }
+  const downloadStart = page.waitForEvent('download');
+  await download.click();
+  // 真的点到了那个 anchor（命中测试由 Playwright 执行：被遮罩盖住会直接报
+  // "intercepts pointer events" 而不是静默点到别处）。文件名不断言：名字由
+  // `download` 属性给出，而拦截式 mock 响应下 `suggestedFilename()` 拿不到它
+  // （实测给的是兜底的 `download`），断言 URL 才落在受控端点这条事实上。
+  expect((await downloadStart).url()).toContain(contentPath);
   await page.keyboard.press('Escape');
   await expect(lightbox).toHaveCount(0);
 });
@@ -312,8 +331,131 @@ test('AC7：supports_vision=false 禁用附图入口并可见说明；粘贴/拖
   await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
 });
 
+test('AC7（后半）：已附图的历史轮在非视觉模型下标注「图已被省略」', async ({ page }) => {
+  // 历史轮直接预置在事件流里（本次不发消息）：数据源是**事件的引用**，与是否刚从
+  // Composer 发出来无关——这正是"刷新/重入后仍在"的同一份事实。
+  const historical = `sha256:${'b'.repeat(64)}`;
+  await openSession(page, {
+    models: [{ name: 'text-only', provider: 'local', model: 'text-only', default: true, supports_vision: false }],
+    events: [
+      ...FIRST_FRAMES,
+      { type: 'run/started', seq: 6, session_id: SID, run_id: RUN2, time: T },
+      {
+        type: 'user/message',
+        data: {
+          content: '这是带图的历史消息',
+          attachments: [
+            { kind: 'image', attachment_id: historical, media_type: 'image/png', bytes: PNG_3PX.length, width: 3, height: 3 },
+          ],
+        },
+        seq: 7,
+        session_id: SID,
+        run_id: RUN2,
+        step_id: 1,
+        time: T,
+      },
+      { type: 'model/completed', data: { content: '好' }, seq: 8, session_id: SID, run_id: RUN2, step_id: 1, time: T },
+      { type: 'run/completed', data: {}, seq: 9, session_id: SID, run_id: RUN2, time: T },
+    ],
+    // 该 id 已被 `user/message` 引用 ⇒ 授权闸门本身会放行；这里仍显式提供真字节，
+    // 让"图与标注同轮共存"这条断言落在真解码上（不是坏图占位）。
+    onAttachmentContentGet: async (route) => {
+      await route.fulfill({ status: 200, contentType: 'image/png', body: PNG_3PX });
+      return true; // 契约：返回假值 = 未处理，会落回**默认授权闸门**（对本用例是 404）。
+    },
+  });
+
+  const omitted = page.locator('.msg-images-omitted');
+  await expect(omitted).toHaveCount(1);
+  await expect(omitted).toContainText('图已被省略');
+  // 图**没有**被删掉：历史附图照常显示（标注是附加事实，不是替换）。
+  const image = page.locator('.msg-images .msg-image-img').first();
+  await expect(image).toBeVisible({ timeout: 10_000 });
+  await expect
+    .poll(() => image.evaluate((el) => (el as HTMLImageElement).naturalWidth > 0))
+    .toBe(true);
+});
+
 test('AC7：supports_vision 缺席（后端沉默）不得被当成"不支持"', async ({ page }) => {
   await openSession(page, { models: MODELS });
   await expect(page.getByRole('button', { name: '添加图片' })).toBeEnabled();
   await expect(page.locator('.composer-attach-hint')).toHaveCount(0);
+});
+
+/** AC8 前置：队列里有一条**带图**的排队项。
+ *
+ *  图片引用来自事件流（`message/queued.data.attachments`），队列内容来自 `GET /queue`
+ *  补齐——真后端的 `/queue` **不下发**附件，于是"补齐不得抹掉事件流已知的引用"这条
+ *  也就落在了真实路径上（`restoreUndeliveredFromQueue` 按 id 保留）。
+ */
+const QUEUED_ID = 'mm04-queued-0001';
+const QUEUED_IMAGE = `sha256:${'c'.repeat(64)}`;
+
+async function openQueuedWithImage(page: Page): Promise<{ bodies: Record<string, unknown>[] }> {
+  const bodies: Record<string, unknown>[] = [];
+  await openSession(page, {
+    events: [
+      ...FIRST_FRAMES,
+      {
+        type: 'message/queued',
+        data: {
+          queue_id: QUEUED_ID,
+          content: '排队里的图',
+          attachments: [
+            { kind: 'image', attachment_id: QUEUED_IMAGE, media_type: 'image/png', bytes: PNG_3PX.length, width: 3, height: 3 },
+          ],
+        },
+        seq: 6,
+        session_id: SID,
+        run_id: RUN1,
+        time: T,
+      },
+    ],
+    onQueueGet: (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [{ queue_id: QUEUED_ID, content: '排队里的图', created_at: T }],
+          steers: [],
+        }),
+      }),
+    onMessagesPost: (route) => {
+      bodies.push(JSON.parse(route.request().postData() ?? '{}'));
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'steered', mode: 'steer' }),
+      });
+    },
+  });
+  await expect(page.locator('.queue-item')).toHaveCount(1);
+  return { bodies };
+}
+
+test('AC8：队列条「立即」重投递带回复图引用（否则图静默消失）', async ({ page }) => {
+  const { bodies } = await openQueuedWithImage(page);
+  await page.locator('.queue-item').getByRole('button', { name: '立即发送' }).click();
+  await expect.poll(() => bodies.length).toBe(1);
+  // 不带 attachments = 后端按本请求重建 user/message ⇒ 队列项里的图静默消失。
+  expect(bodies[0]).toMatchObject({
+    content: '排队里的图',
+    mode: 'steer',
+    queue_id: QUEUED_ID,
+    attachments: [QUEUED_IMAGE],
+  });
+});
+
+test('AC8：队列条「编辑」重投递同样带回复图引用', async ({ page }) => {
+  const { bodies } = await openQueuedWithImage(page);
+  await page.locator('.queue-item').getByRole('button', { name: '编辑排队消息' }).click();
+  await page.getByLabel('编辑排队消息内容').fill('排队里的图（改过文案）');
+  await page.getByRole('button', { name: '保存排队消息' }).click();
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toMatchObject({
+    content: '排队里的图（改过文案）',
+    mode: 'queue',
+    queue_id: QUEUED_ID,
+    attachments: [QUEUED_IMAGE],
+  });
 });

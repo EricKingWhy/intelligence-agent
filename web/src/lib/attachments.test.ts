@@ -1,8 +1,13 @@
-/** #825（MM-04）AC10：粘贴取文件 + 整批预检 + 预算文案的**纯函数**契约。
+/** #825（MM-04）：附图**纯函数层**的契约——`filesFromClipboard`（AC10）、
+ *  `partitionIntake`（AC2/AC3 的整批判定）、`budgetText` / `formatBytes`（AC2 预算）。
  *
- *  为什么值得单独钉：这三条是"用户看得见的拒绝理由"的唯一来源（AC3），
- *  且 AC10 要求粘贴逻辑独立成纯函数供桌面复用——纯函数的好处就该被固定行为锁住，
- *  而不是靠 React 测试间接观察。
+ *  为什么值得单独钉：这些函数是"用户看得见的拒绝理由"的唯一来源（AC3 要求点名
+ *  文件与具体上限），且 AC10 明确要求粘贴取文件逻辑独立成纯函数供桌面复用——
+ *  纯函数的契约就该被直接锁住，而不是靠 React 测试间接观察。
+ *
+ *  这里**不**测通道接线（粘贴/拖放/选择器如何触发）与上传状态机：那两条在
+ *  `components/Composer.attachments.test.tsx`（需要真事件与 jsdom 环境），
+ *  `data:` 缩略图与受控读回在 `e2e/image-attachments.spec.ts`（需要真浏览器）。
  */
 
 import { describe, expect, it } from 'vitest';

@@ -81,12 +81,17 @@ export function ComposerAttachments({
         </div>
       )}
       {items.length > 0 && (
-        <div className="composer-attach-rail" role="list" aria-label="待发送图片">
+        /* `role="group"` 而非 `list`：栏内既有卡片，也有预算 `<span role="status">` 与
+           「再加一张」按钮——`list` 的 required owned element 只有 `listitem`/`group`，
+           把按钮塞进列表里要么违反 ARIA（axe `aria-required-children`），要么就得给
+           按钮也标 `listitem` 而丢掉按钮语义（本仓 `DirectoryBrowser`/`ProjectDialogs`
+           的既有惯例）。带名字的 `group` 只表达"这是一簇相关控件"，与实物一致。 */
+        <div className="composer-attach-rail" role="group" aria-label="待发送图片">
           <span className="composer-attach-budget" role="status">
             {budget}
           </span>
           {items.map((item) => (
-            <div key={item.id} className="composer-attach-card" role="listitem" data-status={item.status}>
+            <div key={item.id} className="composer-attach-card" data-status={item.status}>
               {item.thumb !== null ? (
                 <img className="composer-attach-thumb" src={item.thumb} alt={item.file.name || '待发送图片'} />
               ) : (

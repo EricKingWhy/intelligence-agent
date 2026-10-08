@@ -62,7 +62,7 @@ interface Props {
   onFork?: (fromSeq: number) => void;
   /** ADR-0030（#195）§5.3：编辑最新一条用户消息（supersede 语义）。
    *  保存即发 POST /messages {supersedes_seq}；编辑态在 TurnView 原地。 */
-  onEditTurn?: (fromSeq: number, newContent: string) => void;
+  onEditTurn?: (fromSeq: number, newContent: string, attachmentIds: readonly string[]) => void;
   /** APR-01：审批卡提交时后端回 404（队列已 GC）→ 把该 approval_id 上报为失效。
    *  失效事实由 App 持有（同时驱动 composer 解锁与卡片只读），卡内不存第二份。 */
   goneApprovalIds?: ReadonlySet<string>;
@@ -543,7 +543,7 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
 // 浅比较才真的会命中原注释所声明的效果。注意它**不能**做成「身份永不改变」：那样
 // override 变化时 memo 也会 bail out，点击工具行的档位循环会静默无效（见
 // lib/disclosure.ts 顶部注释与 Conversation.render.test.tsx 的 AC8 代理用例）。
-export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn, supportsVision = null }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string) => void; isSupersededTurn?: boolean; supportsVision?: boolean | null }) {
+export const TurnView = memo(function TurnView({ turn, turnIndex, model, density, disclosure, reasoningDisclosure, onFocusTool, onOpenSession, onInspectChild, onFork, isFirstUserTurn, sessionId, latestEditableSeq, onEditTurn, isSupersededTurn, supportsVision = null }: { turn: Turn; turnIndex?: number | null; model: string | null; density: TraceDensity; disclosure?: Disclosure; reasoningDisclosure?: ReasoningDisclosureApi; onFocusTool?: (tool: ToolCall) => void; onOpenSession?: (sessionId: string) => void; onInspectChild?: (child: { childSessionId: string; target: string }) => void; onFork?: (fromSeq: number) => void; isFirstUserTurn?: boolean; sessionId?: string; latestEditableSeq?: number | null; onEditTurn?: (fromSeq: number, newContent: string, attachmentIds: readonly string[]) => void; isSupersededTurn?: boolean; supportsVision?: boolean | null }) {
   // F1（#270）必做 2：`cycle` 回调此前在链路渲染器里**每次渲染现建一个新闭包**，
   // 作为 prop 传给 memo(ToolCard) ⇒ 浅比较恒不等，memo 恒 miss。移到组件里用
   // useCallback 建立一次（依赖 disclosure——它只在 override / density 变化时换引用，
@@ -636,7 +636,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                   e.preventDefault();
                   const trimmed = editValue.trim();
                   if (!trimmed || turn.user_message_seq === null) return;
-                  onEditTurn?.(turn.user_message_seq, trimmed);
+                  onEditTurn?.(
+                    turn.user_message_seq,
+                    trimmed,
+                    userImages.map((image) => image.attachment_id),
+                  );
                   setEditing(false);
                 }
                 if (e.key === 'Escape') {
@@ -654,7 +658,11 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, model, density
                 onClick={() => {
                   const trimmed = editValue.trim();
                   if (!trimmed || turn.user_message_seq === null) return;
-                  onEditTurn?.(turn.user_message_seq, trimmed);
+                  onEditTurn?.(
+                    turn.user_message_seq,
+                    trimmed,
+                    userImages.map((image) => image.attachment_id),
+                  );
                   setEditing(false);
                 }}
                 aria-label="保存修改"

@@ -840,4 +840,11 @@ export interface UndeliveredInput {
   content: string;
   seq: number;
   created_at: string;
+  /** #825（MM-04）：该条待发送输入带的附图引用（`message/queued` /
+   *  `steer/requested` 事件里的同一个字段，形状同 `user/message.data.attachments`）。
+   *  「立即 / 编辑」重投递时**原样回传**——不回传等于把这些图静默丢掉
+   *  （后端按本请求的 attachments 重建 user/message，不会继承旧项的引用）。
+   *  缺省 = 该条本来就没有图，或本项来自 `GET /queue` 补齐（该端点不下发附件，
+   *  见报告里的 NEEDS-USER-DECISION）。 */
+  attachments?: ImageAttachmentRef[];
 }

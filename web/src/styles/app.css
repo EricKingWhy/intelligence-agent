@@ -3458,12 +3458,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .composer-actions > button {
   pointer-events: auto;
 }
-/* 动作簇的实测宽度（右缩进 8 + 提示 64 + 间距 4 + 按钮 32 = 108，取 124 留余量——
-   提示文案随字体度量浮动，取小了会重新压回档位行）。
+/* 动作簇的实测宽度（右缩进 8 + 附图入口 32 + 间距 4 + 提示 64 + 间距 4 + 发送 32
+   + 间距 4 + 停止 32 = 180 的保守下界，取 160：#825 之前本常量只算了「提示 + 一个
+   按钮」，而流式时簇里一直并存发送与停止两个按钮 ⇒ 取值只保证"不比改动前更差、且把
+   本票新增的 36px（32 按钮 + 4 间距）算进去了"；真正的重算是布局票，不在本票范围。
    **必须定义在 dock 上**：消费方 `.composer-controls` 与 `.composer-actions` 是兄弟，
    定义在簇里的话档位行读不到，`padding-right` 会在计算值阶段落回 0——本票踩过。 */
 .composer-dock {
-  --composer-actions-w: 124px;
+  --composer-actions-w: 160px;
 }
 /* 流式中把档位行的右端让给动作簇。
    为什么必须留：窄工作区（例如 1280 视口 + Inspector 拖到上限 480）下档位行会顶到
@@ -8026,8 +8028,11 @@ button.json-row {
  * `.msg` 是 flex 行（右对齐用户气泡）。让附图**独占一行**需要 `.msg-user`
  * 换行 + 附图 `flex-basis: 100%`：既拿到"图在气泡上方"，又不给气泡套一层
  * 容器——套容器会把 `.msg-bubble-user` 的 `max-width: 78%` 改成相对容器计算，
- * 那是**所有**用户气泡的宽度回归。无附图时本元素根本不渲染 ⇒ 既有 DOM 零变化。 */
-.msg-user {
+ * 那是**所有**用户气泡的宽度回归。无附图时该元素不渲染（`MessageImages` 直接
+ * 返回 null），`:has(.msg-images)` 也不命中 ⇒ 纯文本轮次的 `.msg-user` 拿到的是
+ * 与改动前**逐字相同**的 `flex-wrap: nowrap`（否则窄列下动作行会从"气泡被压窄"
+ * 变成"动作行换行"，那是本票不该顺带引入的视觉变化）。 */
+.msg-user:has(.msg-images) {
   flex-wrap: wrap;
 }
 .msg-images {
@@ -8107,7 +8112,13 @@ button.json-row {
   gap: var(--space-sm);
 }
 .image-lightbox-overlay {
-  z-index: 60;
+  /* 必须与 `.image-lightbox` 的 51 配对（`Radix Dialog.Portal` 把 Overlay 与 Content
+     渲染成 body 下的**兄弟节点**，两者都 fixed + 显式 z-index ⇒ 同一层叠上下文）。
+     overlay 高于 content 的后果不是"遮罩更黑"：`inset: 0` 的遮罩会把指针事件全接走，
+     浮层里的复制/下载/关闭全部点不到，任意点击还会被 Radix 判成 outside 而直接关层
+     ——即 AC6 的复制/下载整条不可用。全仓 13 处 Dialog.Overlay 用的都是裸
+     `.palette-overlay`(50)，这里也照抄那一对（#203 的教训：浮层问题一律先看层叠配对）。 */
+  z-index: 50;
 }
 .image-lightbox-head {
   display: flex;

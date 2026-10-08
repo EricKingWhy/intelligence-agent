@@ -734,12 +734,18 @@ export default function App() {
 
   /** ADR-0030 §5.3 编辑最新一条用户消息 → supersede（POST /messages 带
    *  supersedes_seq）。只传 fromSeq（新内容由 Composer 的 textarea 已 trim）；
-   *  409（非最新/已取代）走 sendMessage 的既有错误通道。 */
+   *  409（非最新/已取代）走 sendMessage 的既有错误通道。
+   *  #825（MM-04）：该轮已带的附图引用必须随重投递一起回去——后端只按**本请求**
+   *  的 attachments 重建 `user/message`，supersede 不继承旧消息的引用，不带就是
+   *  静默丢图（旧轮整段移除 + 新轮无图 + 字节成孤儿）。 */
   const handleEditTurn = useCallback(
-    (fromSeq: number, newContent: string) => {
+    (fromSeq: number, newContent: string, attachmentIds: readonly string[] = []) => {
       if (!selectedId) return;
       void sendMessage(selectedId, newContent, {
-        amend: { supersedes_seq: fromSeq },
+        amend: {
+          supersedes_seq: fromSeq,
+          ...(attachmentIds.length > 0 ? { attachments: [...attachmentIds] } : {}),
+        },
       });
     },
     [sendMessage, selectedId],
@@ -754,8 +760,15 @@ export default function App() {
   const handleSteerItem = useCallback(
     (item: UndeliveredInput) => {
       if (!selectedId) return;
+      const attachmentIds = (item.attachments ?? []).map((a) => a.attachment_id);
       void sendMessage(selectedId, item.content, {
-        amend: { mode: 'steer', queue_id: item.id },
+        amend: {
+          mode: 'steer',
+          queue_id: item.id,
+          // #825（MM-04）：重投递必须带回该条自己的附图引用——后端按本请求重建
+          // `user/message`，不带就把队列项里的图静默丢掉（界面也无从察觉）。
+          ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+        },
       });
     },
     [sendMessage, selectedId],
@@ -777,8 +790,14 @@ export default function App() {
   const handleEditItem = useCallback(
     (item: UndeliveredInput, newContent: string) => {
       if (!selectedId) return;
+      const attachmentIds = (item.attachments ?? []).map((a) => a.attachment_id);
       void sendMessage(selectedId, newContent, {
-        amend: { mode: 'queue', queue_id: item.id },
+        amend: {
+          mode: 'queue',
+          queue_id: item.id,
+          // 同 handleSteerItem：就地编辑排队项时把该条原有的附图引用原样带回。
+          ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+        },
       });
     },
     [sendMessage, selectedId],

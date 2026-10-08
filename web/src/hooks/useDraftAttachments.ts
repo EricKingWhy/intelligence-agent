@@ -46,8 +46,6 @@ export interface DraftAttachmentsApi {
   items: DraftAttachment[];
   /** 可进发送请求的引用 id，顺序 = 附图顺序。 */
   readyIds: string[];
-  /** 仍有在途上传（供 UI 显示"上传中"，**不**用来禁用发送）。 */
-  uploading: boolean;
   /** 最近一次 intake 被拒的原因（AC3：常驻就地显示，直到用户关掉或下次 intake 成功）。 */
   intakeError: string | null;
   addFiles: (files: readonly File[], directories?: ReadonlySet<File>) => void;
@@ -197,7 +195,6 @@ export function useDraftAttachments(sessionId: string | null): DraftAttachmentsA
     readyIds: items.flatMap((item) =>
       item.status === 'ready' && item.receipt ? [item.receipt.attachment_id] : [],
     ),
-    uploading: items.some((item) => item.status === 'uploading'),
     intakeError: errorRef.current,
     addFiles,
     remove,
