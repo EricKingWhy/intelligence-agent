@@ -171,7 +171,7 @@ export function unguardedLangStrings(source) {
  * 7025 — fatal, because electron-builder runs makensis with warnings-as-errors.
  * This turns that into an early, explicit build failure.
  */
-export function validateLangStringGuards(source, filename = 'installer.nsh') {
+export function validateLangStringGuards(source, filename) {
   const bad = unguardedLangStrings(source)
   if (bad.length > 0) {
     const where = bad.map((b) => `line ${b.line}: ${b.symbol}`).join(', ')

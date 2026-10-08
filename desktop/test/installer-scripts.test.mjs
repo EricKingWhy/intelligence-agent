@@ -130,13 +130,13 @@ describe('unguardedLangStrings / validateLangStringGuards (#831)', () => {
       '!endif',
     ].join('\n')
     assert.deepEqual(unguardedLangStrings(src), [])
-    validateLangStringGuards(src)
+    validateLangStringGuards(src, 'installer.nsh')
   })
 
   it('flags a LangString with no guard at all', () => {
     const src = 'LangString iaFoo ${LANG_SIMPCHINESE} "zh"'
     assert.deepEqual(unguardedLangStrings(src), [{ line: 1, symbol: 'SIMPCHINESE' }])
-    assert.throws(() => validateLangStringGuards(src), /not guarded/)
+    assert.throws(() => validateLangStringGuards(src, 'installer.nsh'), /not guarded/)
   })
 
   it('does not treat a mismatched guard as covering another language', () => {
@@ -191,7 +191,7 @@ describe('installer.nsh LangString guards (#831)', () => {
 
   it('every LangString ${LANG_<NAME>} is wrapped in a matching !ifdef guard', () => {
     assert.deepEqual(unguardedLangStrings(installerNsh), [])
-    validateLangStringGuards(installerNsh)
+    validateLangStringGuards(installerNsh, 'installer.nsh')
   })
 
   it('validateInstallerScripts passes on the real installer directory', () => {
