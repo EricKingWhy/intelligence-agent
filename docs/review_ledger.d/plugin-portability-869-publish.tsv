@@ -1,0 +1,2 @@
+2026-10-08	#869 T0 两轴独立审查：Standards 与 Correctness/Spec 分别复审原始七文件提交，均无发现；逐项核对 4 条 AC、PRD 决策/Story16、Specs 08/09、Roadmap、GLOSSARY、ADR-0052 与 #865 归属；范围 d17bd342..9d2910c2；纯文档未跑产品测试。	d17bd34279ba64e5f051035e0fba7314a6c27eb1..9d2910c2989005d53a36a9a96921235a9ac23fa8
+2026-10-08	机械归属：同步合并 origin/main 到 codex/issue-869-spec-contract-publish；父一 4befa524，父二 100a4ff3；无冲突且 git show --cc --name-only 为空；合并树 6495180c 与父树 8c10a618/929f9905 均不同；父一保留 #869 规格/进度，父二带入 gate0.yml 与两条 PR #857 台账行；本行只记账、不作新审查主张。	100a4ff3430666ee3a1b9c41ce4f80c80358e4d3..12c094edf162c9052b0960776e9a4f8a66a332fe

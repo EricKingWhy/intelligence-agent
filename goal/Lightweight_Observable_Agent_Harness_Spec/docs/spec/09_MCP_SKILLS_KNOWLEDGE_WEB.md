@@ -23,6 +23,16 @@ Remote MCP Server
 - MCP SDK retry 与 ToolExecutor retry 不得叠加失控；
 - remote side effect 不能靠 Tool Name 猜，必须映射 metadata/policy。
 
+### 1.1 MCP 包导入后续范围（PRD #868）
+
+原 Phase 8 的合同仍限 MCP Client 的 tools 原语。后续包导入只为显式配置现有 MCP 能力提供入口，不扩展 MCP 原语：仅支持当前 `MCPServerConfig` 能表达的 stdio / Streamable HTTP 和 `tools/list` / `tools/call`。MCP resources、prompts、SSE transport 与 OAuth 登录均不属于首版兼容面；需要 OAuth 的 server 在预检中明确报告 `oauth_required_unsupported`，不得显示完整兼容或启动后伪装成匿名访问。
+
+导入描述必须映射到现有 `MCPServerConfig` 字段（server name、transport、command/args 或 URL、cwd、env/headers、timeout、enabled、tool permission overrides）。没有明确描述时只报告缺少适配描述；不得从 package name、README 或任意脚本猜启动命令。预检只解析静态文件，不启动子进程、不连接远端。
+
+凭据继续使用 ADR-0012 的 `${VAR}` / `${VAR:-default}` 环境变量引用；值在运行时展开，明文 secret 不写入安装记录、包清单或诊断。环境变量不可用时预检列明缺项，不回显 secret。安装或启用不覆盖 MCP 权限映射：只读提示的解释、最严默认、配置覆写、审批、单次执行和错误语义继续按 ADR-0012。
+
+MCP server 启动属于执行边界。未信任的 server 不得因导入成功而启动；启动后的每个模型工具调用仍走 `ToolRegistry → Validation → Permission → Scheduler → ToolExecutor → Operation Ledger（需要时）→ ToolResult → SessionEvent`，不增加独立 retry 或副作用路径。server 连接失败仍按 OPTIONAL_RUNTIME 降级并可观察，不能拖垮基础 Agent。管理配置允许重启后生效，不要求热插拔。
+
 ## 2. Skills
 
 参考 Pi 的 progressive disclosure 思路。
@@ -38,16 +48,21 @@ discover
 → inject into Context
 ```
 
-V1：
+原 Phase 7 的 Runtime 规则保持不变：
 - 支持 global/project skill directories；
 - 支持发现和解析；
 - 支持按需 load；
 - 支持手动指定 Skill；
-- 不做 Marketplace；
-- 不做复杂自动推荐系统。
+- Skill 全文不默认永久进入 Context；
+- Skill 是 Context Capability，不等于 Tool。
 
-Skill 是 Context Capability，不等于 Tool。
+### 2.1 Skill 包导入后续范围（PRD #868）
 
+本项目可以从用户明确选择的本地目录或固定 Git commit 导入整个 Skill 目录。源目录根必须含 `SKILL.md`；`scripts/`、`references/`、`assets/` 和其他包内相对资源随同目录保留，引用仍以 Skill 根为基准。安装到 project 或 global 目录后继续由当前 SkillDiscovery 发现；导入不改变其一层发现规则、frontmatter 校验和渐进披露行为。
+
+导入器不执行 Skill 中的脚本。相对引用缺失、越过 Skill 根或依赖当前宿主不支持的运行时/命令时，预检应逐项报告；不得仅因 `SKILL.md` 可读就判完整。Skill 正文仍按需加载；当模型按 Skill 指引请求脚本能力时，由现有命令/工具入口执行并沿用现有 sandbox、permission 与 approval 行为。Skill 内容与脚本本身不能声明或提升权限。
+
+project/global 安装、项目显式启用、同 ID scope 选择、版本锁定/升级/回退、信任及待重启状态由 spec 08 §6 与 ADR-0052 定义；不要在 SkillCatalog 或 `CAPABILITIES` 中复制第二份安装状态。
 ## 3. Knowledge Capability
 
 Knowledge/RAG 是插件，不是固定 Runtime Pipeline。

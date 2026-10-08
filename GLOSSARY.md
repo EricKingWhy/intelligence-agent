@@ -303,9 +303,8 @@ _Avoid_: save_memory, remember, store_memory
 _Avoid_: plugin marketplace, service locator, DI container
 
 **CapabilityDescriptor**:
-能力的自描述元数据（spec 08 §5 字段清单原文）：`name / version / provider_name / capabilities[] / risk / supports_streaming / supports_recovery / supports_concurrency / config_schema`，外加 `degradation`（REQUIRED_CORE / OPTIONAL_RUNTIME / OPTIONAL_OBSERVABILITY 三分类）与 `enabled`。`supports(sub)` 是 Consumer 使用前的强制检查位——不支持必须显式报错，不允许"接受但静默忽略"。
-_Avoid_: capability metadata bag, plugin manifest（V1 无 manifest 文件）
-
+Capability 的自描述元数据（spec 08 §5 字段清单）：`name / version / provider_name / capabilities[] / risk / supports_streaming / supports_recovery / supports_concurrency / config_schema`，外加 `degradation` 与 `enabled`。`supports(sub)` 是 Consumer 使用前的强制检查位。Descriptor 描述 Runtime Provider，不等同于外部插件包的安装清单。
+_Avoid_: capability metadata bag
 **CapabilityError**:
 Capability 域的显式错误词汇表，四码：`not_found`（注册表无此能力）/ `unsupported`（有但 descriptor 不支持所需子能力）/ `disabled`（配置显式停用）/ `init_failed`（factory 构造失败）。全部显式抛出，无静默降级——降级只能走 `optional()` 的 None 路径。
 _Avoid_: generic RuntimeError, silent fallback
@@ -315,9 +314,20 @@ Capability 三档降级分类（spec 08 §7 原文）。REQUIRED_CORE 缺失则�
 _Avoid_: soft/hard dependency, optional flag
 
 **CAPABILITIES 配置**:
-Plugin 显式配置（spec 08 §6 V1 形态）：env `CAPABILITIES` JSON 字符串，结构 `{"<name>": {"provider": "...", "enabled": bool, "options": {...}}}`。缺省 `{}` = 零行为变化。只做显式加载，不做 entry-point 扫描、不做 Marketplace。
+显式 Runtime 装配配置（spec 08 §6）：env `CAPABILITIES` JSON 选择本项目已登记的 Capability / Provider。缺省 `{}` = 零行为变化；它不负责下载、安装或保存外部包，也不扫描 entry points 或提供 Marketplace。外部包安装与项目启用状态由 ADR-0052 定义的独立安装记录承载。
 _Avoid_: plugin config file, YAML plugin system
 
+**Plugin Package（插件包）**:
+用户从本地目录或 Git 来源显式导入的 Skill、MCP server 描述或原生插件来源快照。它记录来源、解析版本、内容摘要和 scope；是否可运行仍由标准支持范围或本项目侧适配器决定。Plugin Package 不是 CapabilityDescriptor、Provider 或新的 Runtime SPI。
+_Avoid_: capability provider, runtime extension ABI
+
+**Plugin Compatibility Report（插件兼容报告）**:
+对插件包声明或逐包适配清单列出的必要贡献逐项判定的报告，包含直接兼容、适配映射、缺口和不支持项。“完整兼容”要求所有必要用户可见功能（包括必要 UI）及运行语义都有本项目实现和验收依据；有未解决必要缺口时不得完整启用。兼容结论与来源信任结论分开记录。
+_Avoid_: install success, package loaded
+
+**Thin Adapter（薄适配器）**:
+由本项目维护的逐包映射，将一个明确版本的 DSH/Pi 来源贡献接到本项目已有的 Capability、Tool、ContextProvider 或本项目原生 UI。它不提供 DSH/Pi runtime，不允许来源包绕过本项目权限与执行链。第二个同类案例出现前不抽通用 SPI。
+_Avoid_: host emulator, generic plugin hook
 **SkillCatalog**:
 发现的 SKILL.md 条目列表：`name + description + 来源路径`。由 `SkillDiscovery` 扫描全局（`~/.intelligence-agent/skills/`）+ 项目（`<workspace>/skills/`）目录 + 手动指定路径产生，只扫一层 `skills/<name>/SKILL.md`。解析失败的 skill 进入显式错误列表，不静默跳过。同名 skill 先到先得。
 _Avoid_: skill index, skill database
