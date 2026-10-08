@@ -168,6 +168,16 @@ class Settings(BaseSettings):
     # `attachments.types.parse_allowed_media_types`；本字段在**构造期**（= 启动期）
     # 就校验它（下面的 validator），配错即响亮失败，不会拖到请求路径才 500。
     attachment_allowed_media_types: str = "image/png,image/jpeg,image/webp,image/gif"
+    # #823 / MM-02（B2）：发给视觉模型时图片块的 `detail` 档位（PRD D4/D11 的
+    # "detail 默认值"可配置）。默认 `auto`（OpenAI 取值之一）；装配层把它接进
+    # `ContextBuilder`，投影出口翻译 provider 载荷时使用。
+    image_detail: str = "auto"
+    # #823 / MM-02（B4）：发送前归一化目标（PRD D11 的"发送前缩放档"可配置）。
+    # 默认取 DSH 一组：长边 ≤ 2048px、编码后 ≤ 4 MiB。注意**字节目标是尽力而为**
+    # （`_encode_within` 质量阶梯用尽仍可能 > 目标，见 `attachments/normalize.py`），
+    # 不是硬上限——名字/注释如实，不谎称硬约束。
+    image_normalize_max_dimension: int = Field(default=2048, ge=1)
+    image_normalize_max_bytes: int = Field(default=4 * 1024 * 1024, ge=1)
     # detached-run 孤儿回收宽限期（秒，ADR-0016 §2.1）：零订阅者连续超过
     # 该时长 → run 被取消收尾（run/failed(reason=orphaned)）。有订阅者期间
     # 不计时；≤0 = 不回收（不推荐：无人观看的 run 会烧到自然终态）。

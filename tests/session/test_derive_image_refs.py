@@ -95,3 +95,55 @@ def test_undelivered_inputs_carries_attachments() -> None:
     assert item.attachments is not None
     assert item.attachments[0]["attachment_id"] == _REF["attachment_id"]
     assert item.attachments[0]["width"] == 640
+
+
+def _image_session() -> list[SessionEvent]:
+    return [
+        _user(0, {"content": "旧消息"}),
+        SessionEvent(seq=1, type="model/completed", session_id="s1", data={"content": "答"}),
+        _user(2, {"content": "看图", "attachments": [_REF]}),
+    ]
+
+
+def test_is_direct_user_input_event_accepts_image_message() -> None:
+    """A7：带图 user 消息仍是"活跃直接用户输入"（视觉/非视觉投影都要选中）。"""
+    from agent_harness.session.derive import is_direct_user_input_event
+
+    events = _image_session()
+    target = next(e for e in events if e.seq == 2)
+    assert is_direct_user_input_event(events, target.event_id) is True
+
+
+def test_latest_direct_user_input_selects_image_message_vision() -> None:
+    """A7：最新一条带图用户消息（视觉投影为块列表）必须被选中，不回落到旧文本。"""
+    from agent_harness.session.derive import latest_direct_user_input_event
+
+    events = _image_session()
+    model_messages = derive_messages(events, supports_vision=True)
+    selected = latest_direct_user_input_event(events, model_messages)
+    assert selected is not None
+    assert selected.seq == 2
+
+
+def test_latest_direct_user_input_selects_image_message_non_vision() -> None:
+    """A7：非视觉投影（原文 + 占位符后缀）同样必须选中带图消息。"""
+    from agent_harness.session.derive import latest_direct_user_input_event
+
+    events = _image_session()
+    model_messages = derive_messages(events, supports_vision=False)
+    selected = latest_direct_user_input_event(events, model_messages)
+    assert selected is not None
+    assert selected.seq == 2
+
+
+def test_latest_direct_user_input_plain_text_still_selected() -> None:
+    """A7 回归：纯文本最新用户消息的选择行为不变。"""
+    from agent_harness.session.derive import latest_direct_user_input_event
+
+    events = [
+        SessionEvent(seq=0, type=USER_MESSAGE, session_id="s1", data={"content": "旧"}),
+        SessionEvent(seq=1, type="model/completed", session_id="s1", data={"content": "答"}),
+        SessionEvent(seq=2, type=USER_MESSAGE, session_id="s1", data={"content": "新问题"}),
+    ]
+    selected = latest_direct_user_input_event(events, derive_messages(events))
+    assert selected is not None and selected.seq == 2

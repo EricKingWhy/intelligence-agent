@@ -20,9 +20,12 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageOps
 
-#: 发送前的归一化目标（PRD D2 / DSH 一组默认）：长边 ≤ 2048px、编码后 ≤ 4 MiB。
+#: 发送前归一化目标的**默认值**（PRD D2 / DSH 一组）：长边 ≤ 2048px、编码后 ≤ 4 MiB。
 #: 与上传接纳上限（`attachments.types` 的 20 MiB / 8192px）分开：接纳上限管"收不收"，
-#: 这里管"发给模型前压到多大"。
+#: 这里管"发给模型前压到多大"。真实目标可经 `Settings.image_normalize_max_dimension` /
+#: `image_normalize_max_bytes` 配置（#823 / MM-02 B4），由 `ContextBuilder` 接线传入；
+#: 本常量仅作缺省。**字节目标是尽力而为、不是硬上限**：`_encode_within` 质量阶梯用尽
+#: 仍可能返回 > `max_bytes`（见下），名字/注释如实，不谎称硬约束。
 TARGET_MAX_DIMENSION = 2048
 TARGET_MAX_BYTES = 4 * 1024 * 1024
 

@@ -116,6 +116,7 @@ from agent_harness.logging import log_event, new_span_id
 from agent_harness.memory.writeback import MemoryWriteback
 from agent_harness.model.accounting import (
     PROVIDER_ROLE_CLOSEOUT,
+    PROVIDER_ROLE_PRIMARY,
     REQUEST_OUTCOME_COMPLETED,
     REQUEST_OUTCOME_FAILED,
     cost_usd_from_response,
@@ -1223,6 +1224,10 @@ class AgentRuntime:
         fallback_policy: FallbackPolicy | None = None,
         primary_model_name: str = "primary",
         fallback_model_name: str = "fallback",
+        # #823 / MM-02（A2）：按调用角色（"primary"/"fallback"）给出的视觉能力，
+        # 让投影跟随**当前请求模型**（PRD D6 "fallback 自动降级"）。None = 不介入
+        # （既有调用方与测试的 builder 视觉位保持构造期值，行为逐字不变）。
+        vision_by_model_role: Mapping[str, bool] | None = None,
         stream_idle_timeout: float = 0.0,
         stream_total_timeout: float = 0.0,
         model_call_gate: ModelCallGate | None = None,
@@ -1258,6 +1263,12 @@ class AgentRuntime:
         self._fallback_policy = fallback_policy or TwoLevelFallbackPolicy()
         self._primary_model_name = primary_model_name
         self._fallback_model_name = fallback_model_name
+        # #823 / MM-02（A2）：角色 → 视觉能力映射（仅装配层提供；None = 不介入）。
+        # 每次 build 前按 coordinator 当前角色把它写进 context_builder，使投影、
+        # 估算、压缩、请求装配全部跟随当前请求模型（PRD D6）。
+        self._vision_by_model_role = (
+            dict(vision_by_model_role) if vision_by_model_role else None
+        )
         # 流式守卫（秒，逐项 ≤0 关闭）：idle=死连接，total=慢滴漏——所有 run
         # 都受保护（无 fallback 时走统一失败兜底），见 model/stall.py。
         self._stream_idle_timeout = stream_idle_timeout
@@ -1816,6 +1827,13 @@ class AgentRuntime:
                 # 第 1 步：ContextBuilder 是模型可见投影的唯一入口。
                 context_event_start = session.mark()
                 telemetry.context_build_started(step=steps)
+                # #823 / MM-02（A2）：投影跟随**当前请求模型**——run 内切到 fallback
+                # 后，本步的视觉/占位判定（PRD D6）必须按 fallback 的能力。
+                # 边界（如实记录）：切换发生在**模型调用中途**，coordinator 的当次
+                # 重试复用本步已投影的 messages（在途重新 build 会在流中触发压缩等
+                # 副作用，不安全），故"切换那一步的重试"仍用切换前的口径；本同步保证
+                # 其后每一步按 fallback 口径投影（D6 的主路径）。
+                self._sync_context_vision(model_coord.current_role)
                 try:
                     messages = await self._context_builder.build(session)
                 except ContextWindowExceededError as error:
@@ -3450,6 +3468,10 @@ class AgentRuntime:
         ):
             return fallback, CLOSEOUT_DETERMINISTIC, []
         try:
+            # #823 / MM-02（A2）：closeout 恒用 `self._raw_model`（primary），
+            # 故这里把投影视觉位同步回 primary——否则主循环切 fallback 后遗留的
+            # 视觉位会让 closeout 按 fallback 口径投影（与它实际用的模型错配）。
+            self._sync_context_vision(PROVIDER_ROLE_PRIMARY)
             messages = await self._context_builder.build(arms.session)
         except Exception as error:  # noqa: BLE001 - closeout 是尽力而为，绝不能反噬暂停
             logger.warning(
@@ -3821,6 +3843,21 @@ class AgentRuntime:
         if end_event is not None:
             yield to_agent_event(end_event)
         stages.raise_first()
+
+    def _sync_context_vision(self, role: str) -> None:
+        """按**当前请求模型角色**更新 context_builder 的视觉判定（#823 / MM-02 A2）。
+
+        `vision_by_model_role` 未注入（None）→ 不介入：builder 保持构造期视觉位，
+        既有调用方与测试行为逐字不变。builder 无该接缝（非 ContextBuilder 的测试
+        替身）→ 同样静默跳过，不因缺能力而中断 run。
+        """
+        mapping = self._vision_by_model_role
+        if not mapping:
+            return
+        setter = getattr(self._context_builder, "set_supports_vision", None)
+        if setter is None:
+            return
+        setter(mapping.get(role, False))
 
     def _new_coordinator(self) -> ModelFallbackCoordinator:
         """per-run coordinator 工厂（_drive 每调一次；测试可直取验证接线）。"""

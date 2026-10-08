@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 from PIL import Image
@@ -340,3 +341,28 @@ def test_sent_attachment_bytes_are_readable_after_event(tmp_path: Path) -> None:
     )
     assert got.status_code == 200, got.text
     assert got.content == payload
+
+
+def test_send_request_rejects_attachment_count_above_limit() -> None:
+    """#823 / MM-02（A3/B7）：pydantic 层对 `attachments` 数量有静态兜底。
+
+    完整聚合上限（部署可配的数量/总字节）归 MM-03；此处只钉住"模型层有上界"，
+    防止 1 MiB body 里塞进成千上万条合法 id 触发等量 load/detect。上限取部署键
+    `attachment_max_images_per_message` 的默认值（非硬编码魔法数）。
+    """
+    from pydantic import ValidationError
+
+    from agent_harness.web.app import SendMessageRequest
+
+    limit = Settings.model_fields["attachment_max_images_per_message"].default
+    SendMessageRequest(content="x", attachments=["a"] * limit)  # 边界内合法
+    with pytest.raises(ValidationError):
+        SendMessageRequest(content="x", attachments=["a"] * (limit + 1))
+
+
+def test_send_too_many_attachments_is_422(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    session_id = _create_session(client)
+    too_many = ["sha256:" + "0" * 64] * 21
+    resp, _ = _send(client, session_id, content="x", attachments=too_many)
+    assert resp.status_code == 422, resp.text

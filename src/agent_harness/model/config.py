@@ -50,6 +50,11 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "model_name": "mimo-v2.6-flash",
         # 官方模型规格明确支持 function tool calling。
         "supports_tools": True,
+        # #823 / MM-02（A5）：`mimo-v2.6-flash` 经 AC11 真机验证成功描述图片
+        # （import 时提供截图 → 模型正确读出数字/颜色，见 #823 台账）——只声明
+        # **已验证**的能力。其余 preset 未做视觉验证，按"不猜"契约省略（省略 ⇒
+        # False）；部署若要启用视觉须经 AGENT_MODELS 显式声明 `supports_vision`。
+        "supports_vision": True,
     },
     # SenseAudio（OpenAI 兼容）。无默认模型，MODEL_NAME 必填。
     "senseaudio": {

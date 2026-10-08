@@ -81,6 +81,8 @@ class TestModelsEndpoint:
         mimo = next(m for m in body["models"] if m["id"] == "mimo-flash")
         assert mimo["provider"] == "mimo"
         assert mimo.get("supports_tools") is True
+        # #823 / MM-02（A5）：mimo preset 经 AC11 真机验证过视觉 ⇒ 出厂声明 True。
+        assert mimo.get("supports_vision") is True
         assert mimo["metadata_source"] == "provider_preset"
         # mimo 未做缓存机制核实 ⇒ 不声明（不猜测）
         assert "prompt_cache" not in mimo

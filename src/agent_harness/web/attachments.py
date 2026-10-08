@@ -234,6 +234,11 @@ def register_attachment_routes(
         if not await service.has_session(session_id):
             raise http_error(SessionNotFound(f"session '{session_id}' not found"))
 
+        # #823 / MM-02（A8）：授权判据是「id 被本会话某条 user/message 引用」，本实现
+        # 每次 GET 都 `read_events_report` 全量解析 + 扫描事件日志（O(事件数)/图）。
+        # 权衡已登记：**正确性优先**——事件日志是唯一权威来源，且这是受控读回入口
+        # （非热路径）；大会话 + 多图场景的索引/缓存优化（如按会话缓存被引用 id 集合、
+        # 或落附件引用索引）留待后续票，不在此引入易与事件流漂移的旁路状态。
         events = await service.get_events(session_id)
         if attachment_id not in referenced_attachment_ids(events):
             raise _attachment_not_found(session_id, attachment_id)

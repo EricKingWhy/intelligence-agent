@@ -814,6 +814,17 @@ class ProtectedFactAnnotation(BaseModel):
     supersedes_fact_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+#: `attachments` 的静态兜底上限（#823 / MM-02，A3/B7）。取部署上限键
+#: `attachment_max_images_per_message` 的**默认值**（`ImageAttachmentLimits` 同源，
+#: 不硬编码魔法数）——只是 pydantic 层的最后一道拒绝面，防止 1 MiB body 里塞进成千
+#: 上万条合法 id 触发等量 `load_bytes`+`detect_image`（同步/IO 放大 + 巨量引用）。
+#: **完整聚合上限**（按部署配置的数量/总字节，`_resolve_attachment_refs` 逐条之外的
+#: 聚合校验）归 MM-03。
+_MAX_ATTACHMENTS_PER_MESSAGE = Settings.model_fields[
+    "attachment_max_images_per_message"
+].default
+
+
 class SendMessageRequest(_AmendValueValidators):
     """POST /api/sessions/{id}/messages 的请求体（PRD §5.3 续聊入口）。
 
@@ -855,7 +866,11 @@ class SendMessageRequest(_AmendValueValidators):
     )
     # #823 / MM-02：附件 id 列表（内容寻址 `sha256:<hex>`）。默认空 = 纯文本，既有
     # 行为逐字不变；服务端逐条校验"存在且属本会话"，不合法 → 422。
-    attachments: list[str] = Field(default_factory=list)
+    # A3/B7：`max_length` 是 pydantic 层兜底（取值见 `_MAX_ATTACHMENTS_PER_MESSAGE`），
+    # 完整聚合上限（部署可配的数量/总字节）归 MM-03。
+    attachments: list[str] = Field(
+        default_factory=list, max_length=_MAX_ATTACHMENTS_PER_MESSAGE
+    )
 
     @model_validator(mode="after")
     def validate_protected_facts_match_user_text(self) -> SendMessageRequest:

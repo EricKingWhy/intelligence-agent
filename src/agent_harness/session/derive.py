@@ -34,6 +34,7 @@ from langchain_core.messages import (
 )
 
 from agent_harness.attachments.projection import (
+    IMAGE_OMITTED_PLACEHOLDER,
     content_block_with_text,
     parse_image_refs,
     text_with_omitted_images,
@@ -1628,6 +1629,35 @@ def derive_modified_file_paths(events: list[SessionEvent]) -> list[str]:
     return paths
 
 
+def _projected_user_text(message: AnyMessage) -> str | None:
+    """从投影出的 user 消息还原**事件原始 content**（#823 / MM-02 A7）。
+
+    带图 user 消息的投影不再是纯文本：视觉下 content 是块列表
+    （`[{"type":"text","text":原文}, {"type":"image",...}]`），非视觉下是
+    ``原文 + "\\n" + 占位符``。两者都比不上 `event.data["content"]`，故
+    `is_direct_user_input_event` / `latest_direct_user_input_event` 会漏掉带图
+    消息（A7）。这里统一还原回原文，供它们按**事件原始 content**比对；无附件的
+    纯文本消息逐字不变（还原即原文本身）。非 user 文本形态返回 None。
+    """
+    content = message.content
+    if isinstance(content, str):
+        suffix = f"\n{IMAGE_OMITTED_PLACEHOLDER}"
+        if content == IMAGE_OMITTED_PLACEHOLDER:
+            return ""
+        if content.endswith(suffix):
+            return content[: -len(suffix)]
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    return text
+            elif isinstance(block, str):
+                return block
+    return None
+
+
 def is_direct_user_input_event(
     events: list[SessionEvent], event_id: str,
 ) -> bool:
@@ -1644,7 +1674,7 @@ def is_direct_user_input_event(
     return any(
         source_range == (event.seq, event.seq)
         and isinstance(message, HumanMessage)
-        and message.content == event.data["content"]
+        and _projected_user_text(message) == event.data["content"]
         for message, source_range in derive_messages_with_source_ranges(events)
     )
 
@@ -1670,25 +1700,37 @@ def latest_direct_user_input_event(
     ):
         return None
 
-    final_user_contents = {
-        message.content
+    # #823 / MM-02（A7）：按**事件的原始 content**比对，而不是投影消息的 content
+    # ——带图 user 消息的投影是块列表（视觉）或带占位符后缀的字符串（非视觉），
+    # 旧写法（要求 message.content 是 str 且等于 event content）会漏掉它们。
+    final_user_texts = {
+        text
         for message in model_messages
-        if isinstance(message, HumanMessage) and isinstance(message.content, str)
+        if isinstance(message, HumanMessage)
+        for text in (_projected_user_text(message),)
+        if text is not None
     }
-    candidates = [
-        event
-        for message, source_range in derive_messages_with_source_ranges(events)
-        if source_range is not None
-        and source_range[0] == source_range[1]
-        and isinstance(message, HumanMessage)
-        and isinstance(message.content, str)
-        and message.content in final_user_contents
-        for event in events
-        if event.seq == source_range[0]
-        and event.type == USER_MESSAGE
-        and not event.data.get("injected_by")
-        and isinstance(event.data.get("content"), str)
-        and event.data["content"].strip()
-        and event.data["content"] == message.content
-    ]
+    events_by_seq = {event.seq: event for event in events}
+    candidates: list[SessionEvent] = []
+    for message, source_range in derive_messages_with_source_ranges(events):
+        if (
+            source_range is None
+            or source_range[0] != source_range[1]
+            or not isinstance(message, HumanMessage)
+        ):
+            continue
+        text = _projected_user_text(message)
+        if text is None or text not in final_user_texts:
+            continue
+        event = events_by_seq.get(source_range[0])
+        if (
+            event is None
+            or event.type != USER_MESSAGE
+            or event.data.get("injected_by")
+            or not isinstance(event.data.get("content"), str)
+            or not event.data["content"].strip()
+            or event.data["content"] != text
+        ):
+            continue
+        candidates.append(event)
     return max(candidates, key=lambda event: event.seq, default=None)

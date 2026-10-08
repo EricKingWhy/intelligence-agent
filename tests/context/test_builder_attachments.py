@@ -202,3 +202,152 @@ async def test_vision_compaction_reprojection_is_same_projection(tmp_path):
 
     assert result is not None
     assert result.compacted_turn_count == 1
+
+
+@pytest.mark.asyncio
+async def test_vision_compaction_without_pruner_is_not_a_noop(tmp_path):
+    """手动压缩路径（builder **不传** artifact_store）的带图压缩不得静默 no-op（#823）。
+
+    手动压缩 `service._build_context_builder` 不传 artifact_store ⇒ `_pruner is None`
+    ⇒ `compact_now` 的 `source_ranges=None` ⇒ 压缩器**内部**在 `_early_source_ranges`
+    从 events 重推导对齐。该重推导必须与压缩输入同一视觉口径——否则带图会话下
+    重推导（占位符文本 `str`）与压缩产物（图片块列表 `list`）不一致 ⇒ 来源区间不可用
+    ⇒ `compacted_turn_count=0`（用户按"压缩"却被告知无早期轮）。
+
+    变异验证：把 `_early_source_ranges` 的 `supports_vision` 传参去掉，本用例必须红。
+    """
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "读取旧记录后继续。"})
+    session.append(MODEL_COMPLETED, {"content": "历史分析 " * 800})
+    data = _png()
+    attachment_id = compute_byte_artifact_id(data)
+    session.append(USER_MESSAGE, {
+        "content": "看看这张图",
+        "attachments": [{
+            "kind": "image",
+            "attachment_id": attachment_id,
+            "media_type": "image/png",
+            "bytes": len(data),
+            "width": 8,
+            "height": 6,
+        }],
+    })
+
+    # 对齐 `service._build_context_builder` 手动路径：**不传** store / read_tool_name。
+    builder = ContextBuilder(
+        ScriptedModel([AIMessage(content=_MODEL_SECTIONS)]),
+        model_supports_vision=True,
+        max_context_tokens=10_000,
+        auto_compact_threshold=0.3,
+    )
+    result = await builder.compact_now(session)
+
+    assert result is not None
+    assert result.compacted_turn_count == 1
+
+
+class _CountingStore(FakeArtifactStore):
+    """记录 `load_bytes` 调用次数的假 store（B3 缓存验证用）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_calls = 0
+
+    async def load_bytes(self, artifact_id: str):
+        self.load_calls += 1
+        return await super().load_bytes(artifact_id)
+
+
+def _decode_data_url_image(block: dict) -> Image.Image:
+    import base64
+
+    b64 = block["image_url"]["url"].split(";base64,", 1)[1]
+    return Image.open(io.BytesIO(base64.b64decode(b64)))
+
+
+@pytest.mark.asyncio
+async def test_custom_image_detail_is_applied(tmp_path):
+    """B2：`image_detail` 构造参数（配置接线）真的传到了 provider 载荷。"""
+    session, store, _aid = await _session_with_image(tmp_path)
+    messages = await ContextBuilder(
+        ScriptedModel([]),
+        artifact_store=store,
+        artifact_read_tool_name="read_artifact",
+        model_supports_vision=True,
+        image_detail="low",
+    ).build(session)
+    assert _first_image_url_block(messages)["image_url"]["detail"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_configured_normalize_dimension_is_applied(tmp_path):
+    """B4：归一化长边目标从构造参数（Settings 接线）生效。"""
+    session = make_session(tmp_path)
+    data = _png(40, 20)
+    attachment_id = compute_byte_artifact_id(data)
+    session.append(USER_MESSAGE, {
+        "content": "图",
+        "attachments": [{
+            "kind": "image", "attachment_id": attachment_id,
+            "media_type": "image/png", "bytes": len(data), "width": 40, "height": 20,
+        }],
+    })
+    store = FakeArtifactStore()
+    await store.save_bytes(session.session_id, data, mime_type="image/png")
+    messages = await ContextBuilder(
+        ScriptedModel([]),
+        artifact_store=store,
+        artifact_read_tool_name="read_artifact",
+        model_supports_vision=True,
+        image_normalize_max_dimension=10,
+    ).build(session)
+    image = _decode_data_url_image(_first_image_url_block(messages))
+    assert max(image.size) <= 10
+
+
+@pytest.mark.asyncio
+async def test_image_payload_cache_avoids_repeat_load(tmp_path):
+    """B3：同一 builder 实例重复 build 不重复 `load_bytes`（内容寻址不可变）。"""
+    session = make_session(tmp_path)
+    data = _png()
+    attachment_id = compute_byte_artifact_id(data)
+    session.append(USER_MESSAGE, {
+        "content": "图",
+        "attachments": [{
+            "kind": "image", "attachment_id": attachment_id,
+            "media_type": "image/png", "bytes": len(data), "width": 8, "height": 6,
+        }],
+    })
+    store = _CountingStore()
+    await store.save_bytes(session.session_id, data, mime_type="image/png")
+    builder = ContextBuilder(
+        ScriptedModel([]),
+        artifact_store=store,
+        artifact_read_tool_name="read_artifact",
+        model_supports_vision=True,
+    )
+    await builder.build(session)
+    await builder.build(session)
+    assert store.load_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_usage_snapshot_messages_bucket_uses_vision_projection(tmp_path):
+    """A6：`usage_snapshot` 的 messages 桶按**同一视觉口径**投影估算，不漂移。"""
+    from agent_harness.context.tokens import estimate_message_tokens
+    from agent_harness.session.derive import derive_messages
+
+    session, store, _aid = await _session_with_image(tmp_path)
+    vision_builder = _builder(store, vision=True)
+    nonvision_builder = ContextBuilder(
+        ScriptedModel([]),
+        artifact_store=store,
+        artifact_read_tool_name="read_artifact",
+        model_supports_vision=False,
+    )
+    assert vision_builder.usage_snapshot(session)["messages"] == estimate_message_tokens(
+        derive_messages(session.events, supports_vision=True)
+    )
+    assert nonvision_builder.usage_snapshot(session)["messages"] == estimate_message_tokens(
+        derive_messages(session.events, supports_vision=False)
+    )

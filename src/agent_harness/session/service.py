@@ -277,6 +277,7 @@ if TYPE_CHECKING:
     from agent_harness.capability.wiring import CapabilityWiring
     from agent_harness.config import Settings
     from agent_harness.context.builder import ContextBuilder
+    from agent_harness.model.config import ModelConfig
     from agent_harness.recovery.scan import ForkScanResult, InterruptionScanResult
     from agent_harness.sandbox.registry import WorkspaceRegistry
     from agent_harness.session.queue import MessageQueueManager
@@ -2908,6 +2909,9 @@ class SessionService:
                     f"附件 {attachment_id!r} 字节无法解析为图片：{error}"
                 ) from error
             seen.add(attachment_id)
+            # #823 / MM-02（B6）：不写 `name`——发送端点只收 id 列表，上传回执的
+            # 展示名未持久化、也无回传信道，故事件引用数组的 `name` 结构性缺省
+            # （AC1 该字段可选）。展示名接线留待前端票 / MM-03。
             refs.append(
                 {
                     "kind": "image",
@@ -3652,8 +3656,17 @@ class SessionService:
 
             session = Session(session_id, self._store, list(events))
             from agent_harness.context.tokens import estimate_message_tokens
+            from agent_harness.session.derive import derive_messages
 
-            tokens_before = estimate_message_tokens(session.derive_messages())
+            # #823 / MM-02（A6）：`tokens_before` 必须与 `compact_now` 的视觉口径
+            # 一致——带图会话 + 视觉模型下用 vision=False 投影（占位符文本）估算
+            # 会与实际投影（图片块）漂移。按会话**当前请求模型**判定。
+            tokens_before = estimate_message_tokens(
+                derive_messages(
+                    session.events,
+                    supports_vision=self._session_model_supports_vision(session),
+                )
+            )
             effective_summary_name = (
                 model if model is not None else self._settings.summary_model
             )
@@ -3759,6 +3772,47 @@ class SessionService:
         config = ModelConfig.resolve_selection(self._settings, name, store)
         return create_chat_model(config)
 
+    def _session_model_config(self, session: Session) -> ModelConfig:
+        """会话**当前生效**的模型配置（catalog / 自定义选择优先，回落默认链）。
+
+        F3 (#635) 的解析口径单点：`_compact_context_builder`（建客户端）与
+        `_session_model_supports_vision`（#823 A6 视觉口径）共用，避免两处漂移。
+        会话切换（catalog 未命中）记 warning 并回落默认链——两条消费点同口径。
+        """
+        from agent_harness.model.config import ModelConfig, find_catalog_entry
+        from agent_harness.model.provider_store import ProviderStore
+        from agent_harness.session.model_switch import current_model_selection
+
+        config = ModelConfig.from_settings(self._settings)
+        provider, model_id = current_model_selection(session.events)
+        if model_id is None:
+            return config
+        if find_catalog_entry(self._settings, provider or "", model_id) is None:
+            logger.warning(
+                "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
+                provider, model_id,
+            )
+            return config
+        return ModelConfig.resolve_selection(
+            self._settings, model_id, ProviderStore.for_settings(self._settings),
+        )
+
+    def _session_model_supports_vision(self, session: Session) -> bool:
+        """会话当前请求模型是否支持视觉（#823 / MM-02，A6 口径统一）。
+
+        **尽力而为**：本判定只用于 `tokens_before` 这类读数口径。若模型配置此刻
+        无法解析（如测试替身未配 key，或部署配置有误），按"未知能力不猜"的既有契约
+        回落 False——真正的压缩会在 `_compact_context_builder` 里响亮失败，故这里
+        不吞掉任何本该暴露的错误，只保证读数路径不因能力面缺席而中断。
+        """
+        from agent_harness.model.config import model_supports_vision
+
+        try:
+            config = self._session_model_config(session)
+        except Exception:  # noqa: BLE001 —— 能力面未知 ⇒ False（不猜），读数不中断
+            return False
+        return model_supports_vision(self._settings, config)
+
     async def _compact_context_builder(
         self, session: Session, summary_model: BaseChatModel | None,
     ) -> ContextBuilder:
@@ -3778,32 +3832,16 @@ class SessionService:
         ADR-0040 协作者契约（超本票范围）。改从更轻接缝取可作为后续票的优化。
         """
         from agent_harness.context.builder import ContextBuilder
-        from agent_harness.model.config import ModelConfig, model_supports_vision
+        from agent_harness.model.config import model_supports_vision
         from agent_harness.model.provider import create_chat_model
-        from agent_harness.session.model_switch import current_model_selection
 
         _, wiring = await self._get_wiring()
-        config = ModelConfig.from_settings(self._settings)
         # F3 (#635)：缺省摘要模型 = 主模型，必须跟随会话级模型覆盖（AC5："缺省 =
         # 主模型逐字节等价"）。自动路径经 `amend_with_session_model` →
         # `ModelConfig.resolve_selection` 解析会话模型；手动路径此前只看 settings，
-        # 会话切换被忽略。此处用同一解析点、同一回落口径（catalog 未命中记 warning
-        # 并回落默认链），保证两条路径对同一会话给出同一主模型。
-        provider, model_id = current_model_selection(session.events)
-        if model_id is not None:
-            from agent_harness.model.config import find_catalog_entry
-            from agent_harness.model.provider_store import ProviderStore
-
-            if find_catalog_entry(self._settings, provider or "", model_id) is None:
-                logger.warning(
-                    "会话当前模型 %s/%s 已不在 catalog，手动压缩回落默认链",
-                    provider, model_id,
-                )
-            else:
-                config = ModelConfig.resolve_selection(
-                    self._settings, model_id,
-                    ProviderStore.for_settings(self._settings),
-                )
+        # 会话切换被忽略。解析口径单点在 `_session_model_config`（catalog 未命中记
+        # warning 并回落默认链），保证两条路径对同一会话给出同一主模型。
+        config = self._session_model_config(session)
         main_model = create_chat_model(config)
         return ContextBuilder(
             main_model,
@@ -3816,6 +3854,11 @@ class SessionService:
             keep_recent_tool_results=self._settings.keep_recent_tool_results,
             clear_at_least_tokens=self._settings.clear_at_least_tokens,
             model_supports_vision=model_supports_vision(self._settings, config),
+            # #823 / MM-02（B2）：图片块 `detail` 档位（PRD D4/D11 可配置）。
+            image_detail=self._settings.image_detail,
+            # #823 / MM-02（B4）：发送前归一化目标（PRD D11 可配置）。
+            image_normalize_max_dimension=self._settings.image_normalize_max_dimension,
+            image_normalize_max_bytes=self._settings.image_normalize_max_bytes,
         )
 
     def _compaction_write_guard(

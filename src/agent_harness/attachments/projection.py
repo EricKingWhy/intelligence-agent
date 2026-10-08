@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from agent_harness.attachments.types import ImageAttachmentRef
 
 #: 附件引用的 `kind` 词汇。v1 只有图片（通用文件走 `@path` 引用，不进 provider）。
 KIND_IMAGE = "image"
@@ -28,21 +28,18 @@ KIND_IMAGE = "image"
 IMAGE_OMITTED_PLACEHOLDER = "(image omitted: model does not support images)"
 
 
-class ImageRef(BaseModel):
+class ImageRef(ImageAttachmentRef):
     """`user/message.data["attachments"]` 里一条图片引用的形状（#823 AC1）。
 
     加法式扩展：`content` 仍是 `str`，引用是平行字段。`name` 是去掉本地路径信息的
     展示名（可缺省）。这是**事件持久化**的形状；模型可见投影由 `image_content_block`
     给出。
+
+    #823 / MM-02（B1）：**继承** MM-01 的持久化契约 `ImageAttachmentRef`，只加一个
+    `kind` 判别字段——不再是与之重复的第二份领域模型。
     """
 
     kind: str = KIND_IMAGE
-    attachment_id: str
-    media_type: str
-    bytes: int
-    width: int
-    height: int
-    name: str | None = None
 
 
 def parse_image_refs(raw: Any) -> list[ImageRef]:

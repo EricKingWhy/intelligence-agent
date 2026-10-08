@@ -447,6 +447,15 @@ class ModelFallbackCoordinator:
         """
         return self._double_failure
 
+    @property
+    def current_role(self) -> str:
+        """此刻生效的调用角色（`"primary"` / `"fallback"`）——公开只读视图。
+
+        #823 / MM-02（A2）：Runtime 在每次 `build` 前据此让投影跟随当前请求模型
+        （PRD D6 "fallback 自动降级"）。与 `_current_role` 同一判据（身份 `is`）。
+        """
+        return self._current_role()
+
     def _current_role(self) -> str:
         """此刻的调用角色：`self.current` 指向 fallback 就是 fallback，否则 primary。
 
