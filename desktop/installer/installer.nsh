@@ -30,14 +30,12 @@
 
   !include "${__FILEDIR__}\installer-directories.nsh"
 
-  ; Bilingual UI strings. The template loads only the languages in the
-  ; configured installerLanguages set (addLangs -> MUI_LANGUAGE ->
-  ; LoadLanguageFile), so the ${LANG_<NAME>} symbol of a language that is
-  ; not in the set stays undefined, and NSIS leaves an undefined ${SYMBOL}
-  ; as its literal text. A LangString for such a language therefore makes
-  ; makensis emit warning 7025, which is fatal here because electron-builder
-  ; runs makensis with warnings-as-errors. #831: guard each language so a
-  ; single-language installer (installerLanguages: [language]) still builds.
+  ; Bilingual UI strings. The template loads only the configured
+  ; installerLanguages, so guard each language: a ${LANG_<NAME>} that is not
+  ; loaded (e.g. a single-language build) makes makensis emit warning 7025,
+  ; fatal under electron-builder's warnings-as-errors. #831 — full rationale
+  ; and the matching build-time assertion live in
+  ; scripts/build-windows-installer.mjs.
   !ifdef LANG_ENGLISH
   LangString iaPerUserOnly ${LANG_ENGLISH} "This installer is per-user only. A per-machine installation of Intelligence Agent was found; uninstall it first, then run this installer again."
   LangString iaAppRunning ${LANG_ENGLISH} "Intelligence Agent (or one of its background processes) is still running. Close it and run the installer again — the previous version was left untouched."

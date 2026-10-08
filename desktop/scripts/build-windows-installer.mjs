@@ -111,31 +111,24 @@ function langStringSymbol(line) {
 }
 
 /**
- * Open a conditional-compilation frame. Only `!ifdef` / `!ifndef` carry
- * symbols; every opener is pushed so `!endif` pops the right frame.
+ * Open a conditional-compilation frame. Every opener is pushed so a later
+ * `!endif` pops the right frame. Only `!ifdef` carries the symbols the guard
+ * check tests: an `!ifndef LANG_X` frame must never count as a guard, so its
+ * symbols are not collected (`kind` already distinguishes it).
  */
 function conditionalFrame(line) {
   const match = /^\s*!(if|ifdef|ifndef|ifmacrodef|ifmacrondef)\b(.*)$/.exec(line)
   if (!match) return null
   const kind = match[1]
   const symbols =
-    kind === 'ifdef' || kind === 'ifndef'
-      ? new Set(match[2].match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])
-      : new Set()
+    kind === 'ifdef' ? new Set(match[2].match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) : new Set()
   return { kind, symbols }
 }
 
 /**
- * Every `LangString <name> ${LANG_<X>}` in an NSIS script that is NOT enclosed
- * in a matching `!ifdef LANG_<X>` block, as `{ line, symbol }` (line is 1-based).
- *
- * #831: the stock NSIS template inserts `customHeader` right after
- * `!insertmacro addLangs`, so the `${LANG_*}` symbols defined by
- * `LoadLanguageFile` are visible there. A single-language installer
- * (`installerLanguages: [language]`) does not load the other language, so an
- * unguarded `LangString ... ${LANG_SIMPCHINESE}` makes makensis emit warning
- * 7025 — fatal, because electron-builder runs makensis with warnings-as-errors.
- * The `!else` branch of an enclosing guard drops its symbols (fail-closed).
+ * Every `LangString <name> ${LANG_<X>}` line that is NOT enclosed in a matching
+ * `!ifdef LANG_<X>` block, as `{ line, symbol }` (line is 1-based). See
+ * `validateLangStringGuards` for why this matters (#831).
  */
 export function unguardedLangStrings(source) {
   const bad = []
@@ -166,15 +159,34 @@ export function unguardedLangStrings(source) {
 }
 
 /**
- * Build-time assertion (#831): every `LangString <name> ${LANG_<X>}` in the
- * installer script must sit inside a matching `!ifdef LANG_<X>` guard, so a
- * language-set bug fails the build instead of aborting deep inside makensis.
+ * Build-time assertion (#831): throw when `source` contains a LangString that
+ * is not inside a matching `!ifdef LANG_<NAME>` guard.
+ *
+ * The stock NSIS template inserts `customHeader` right after
+ * `!insertmacro addLangs`, so the `${LANG_*}` symbols defined by
+ * `LoadLanguageFile` are visible there. A single-language installer
+ * (`installerLanguages: [language]`, as the W-16 smoke test builds) loads only
+ * that language, and NSIS leaves an undefined `${SYMBOL}` as literal text, so
+ * an unguarded `LangString ... ${LANG_SIMPCHINESE}` makes makensis emit warning
+ * 7025 — fatal, because electron-builder runs makensis with warnings-as-errors.
+ * This turns that into an early, explicit build failure.
  */
-export function validateLangStringGuards(source) {
+export function validateLangStringGuards(source, filename = 'installer.nsh') {
   const bad = unguardedLangStrings(source)
   if (bad.length > 0) {
     const where = bad.map((b) => `line ${b.line}: ${b.symbol}`).join(', ')
-    throw new Error(`installer.nsh: LangString not guarded by !ifdef LANG_<NAME> (${where})`)
+    throw new Error(`${filename}: LangString not guarded by !ifdef LANG_<NAME> (${where})`)
+  }
+}
+
+/**
+ * Validate every NSIS script that runs inside `customHeader`: installer.nsh and
+ * the installer-directories.nsh it `!include`s. Both are compiled after
+ * addLangs, so both share the #831 hazard.
+ */
+export function validateInstallerScripts(installerDir) {
+  for (const file of ['installer.nsh', 'installer-directories.nsh']) {
+    validateLangStringGuards(readFileSync(join(installerDir, file), 'utf8'), file)
   }
 }
 
@@ -267,8 +279,7 @@ async function main() {
     }
   }
   // #831: fail early when a LangString is not guarded by its language.
-  const installerNsh = join(installerDir, 'installer.nsh')
-  validateLangStringGuards(readFileSync(installerNsh, 'utf8'))
+  validateInstallerScripts(installerDir)
   console.log('installer LangString guards OK')
   console.log('installer inputs OK')
 

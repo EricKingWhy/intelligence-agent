@@ -13,6 +13,7 @@ import {
   createWindowsInstallerConfig,
   validateRuntimeLockfile,
   validateLangStringGuards,
+  validateInstallerScripts,
   unguardedLangStrings,
   sha256File,
   GOOD_LOCK,
@@ -176,17 +177,32 @@ describe('unguardedLangStrings / validateLangStringGuards (#831)', () => {
   it('ignores a numeric language id (never a ${LANG_*} symbol)', () => {
     assert.deepEqual(unguardedLangStrings('LangString iaFoo 1033 "en"'), [])
   })
+  it('names the offending file in the error message', () => {
+    assert.throws(
+      () => validateLangStringGuards('LangString iaFoo ${LANG_ENGLISH} "en"', 'other.nsh'),
+      /^Error: other\.nsh: LangString not guarded/,
+    )
+  })
 })
 
 describe('installer.nsh LangString guards (#831)', () => {
-  const installerNsh = readFileSync(
-    fileURLToPath(new URL('../installer/installer.nsh', import.meta.url)),
-    'utf8',
-  )
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+  const installerNsh = readFileSync(join(installerDir, 'installer.nsh'), 'utf8')
 
   it('every LangString ${LANG_<NAME>} is wrapped in a matching !ifdef guard', () => {
     assert.deepEqual(unguardedLangStrings(installerNsh), [])
     validateLangStringGuards(installerNsh)
+  })
+
+  it('validateInstallerScripts passes on the real installer directory', () => {
+    validateInstallerScripts(installerDir)
+  })
+
+  it('validateInstallerScripts inspects installer-directories.nsh too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ia-nsh-'))
+    writeFileSync(join(dir, 'installer.nsh'), '!ifdef LANG_ENGLISH\nLangString a ${LANG_ENGLISH} "x"\n!endif\n')
+    writeFileSync(join(dir, 'installer-directories.nsh'), 'LangString b ${LANG_SIMPCHINESE} "y"\n')
+    assert.throws(() => validateInstallerScripts(dir), /installer-directories\.nsh/)
   })
 
   it('still declares both English and Chinese strings (no text regression)', () => {
