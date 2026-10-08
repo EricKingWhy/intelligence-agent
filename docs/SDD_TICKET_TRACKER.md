@@ -7717,3 +7717,23 @@ lint 命中由 52 → 54）⇒ 压到 **799 / 751** 后回到 52（按 §16.1，
   各两次，四次判定器 `overall=pass`，均在冻结件 `01477e59…` 上）；**B-4b 不通过**（上列两条缺陷）；
   **#365 保持 OPEN**，不关单。
 - 本轮**无代码改动**（相对冻结树 `28a382cc` 只动 `docs/`）；按 §14.10 仍在当前 tip 跑完整门禁并留读数。
+
+- **2026-10-08（#365 W-21 全量门禁读数，冻结树）**：13 条车道读数与逐条归因见
+  `docs/live_gate/w21/53-full-gate-readings.md`。**绿**：① ruff / ② pytest-full
+  **6723P/26S/51D/0F（1194.67s）** / ③ pytest-clean **同读数（1141.66s）** / ④ tsc /
+  ⑥ oxlint / ⑦ guards / ⑧ coverage exit 0 / ⑨ diff-check / ⑩ vite build /
+  ⑬ Gate-0 **6/6 PASS**（`docs/gate/abaa611c7dd796bad1e6cdcd8eb2cf9f677af563.json`）。
+  **红两条，均非本批引入**：⑤ vitest **1F/1496P**（唯一红 = 在册 flake
+  `StepDetail.window.test.tsx:132` 超时，隔离单跑 6/6 绿、该用例 1301ms）；
+  ⑪ e2e **496P/10F**（10 红全在 `web/e2e/u-project-task.spec.ts`，spec 仍锁 #204 旧契约而实现
+  已由 #367 选项 A 的 `TaskCreationDialog` 取代 ⇒ 选择器永久失配；**main 的 PR #819 / `b895940b`
+  已根修**，本分支基点 `cbf08285` 早于该修复进入 main）。
+  **② 首轮 rc=0xC0000005 且零用例执行**：仓库根 pytest 走进两棵 gitignored 打包树
+  （`desktop/dist-installer` 942 MB、`desktop/installer/staging`，各 5402 `.py`，含完整 Python 3.13
+  运行时），收集 pywin32 `test_addtask.py` 打崩解释器；车道 ② 是**唯一**走仓库根的 pytest
+  （CI 跑 `pytest tests`、③⑧ 带显式路径）⇒ CI 恒绿掩盖。移出产物树后暴露 `.venv` 缺 `memory`
+  extra，按 CI 口径 `uv sync --locked --all-extras` 补齐后全绿。**已登记 #856**
+  （复现 + 反证 + 建议：`testpaths`/`norecursedirs` + 车道表补 extras 前置）。
+  **分支落后 main 64 提交**（本地 main `9e1c065b`、`origin/main` `5b7c14c3` 再多 58）⇒ 冻结安装件
+  不对应任何将被合并的树；集成前须先同步 main 并按 §14.10 在合并树重跑全量门禁，Run A/B 的 Live
+  证据可否传递须按 §8.8 重新判定。**#365 保持 OPEN**，未关单。
