@@ -3103,6 +3103,11 @@ class SessionService:
                 # （或本条一次性覆盖的）模型不支持视觉却附图 → 422，零落盘。投影层的
                 # 占位符降级（AC5/AC6）兜住"发送后 fallback 到非视觉模型"的场景，二者
                 # 构成双保险。
+                #
+                # 生效模型口径：`amend` **只有 idle 的 queue 消息会消费**（下方 idle 分支
+                # 经 `resume_and_launch` 持久化 `amend.model`）；在途 run 的 queued 消息与
+                # steer 丢弃 amend ⇒ 用会话当前模型。本条件必须与 amend 的真实消费点
+                # （`resume_and_launch`/`amend_with_session_model`）同源同改。
                 amend_model = (
                     amend.model
                     if (amend is not None and mode == "queue" and active_run is None)

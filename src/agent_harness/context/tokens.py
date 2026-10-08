@@ -52,6 +52,10 @@ logger = logging.getLogger("agent_harness.context.tokens")
 IMAGE_TOKENS_PER_IMAGE = 1200
 
 #: 图片内容块的判别值：标准块（投影后 / 装配前）与 provider 块（装配后）。
+#: 取值与 `attachments.projection.image_content_block`（产出 `"image"`）和
+#: `model.multimodal._STANDARD_IMAGE_TYPE` / `_PROVIDER_IMAGE_TYPE`（`"image"` /
+#: `"image_url"`）**同源**——这里是 context 层、不反向依赖 model 适配层，故以常量
+#: 复述协议级 block type。两处若改其一，务必同步（本注解即同步义务登记）。
 _IMAGE_BLOCK_TYPES = frozenset({"image", "image_url"})
 
 #: 进程内「精确编码不可用」锁（#570）：tiktoken 只记忆**成功**的编码实例
