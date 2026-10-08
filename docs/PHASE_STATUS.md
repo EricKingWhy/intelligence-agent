@@ -40,6 +40,7 @@
 
 ## 当前工作焦点
 
+- **2026-10-09 · #869 T0 发布 PR #880**：规格合同已随 `codex/issue-869-spec-contract-publish` 推送；在记录的 head `eb05ca0a` 上，GitHub 必需 Gate-0 与 gitleaks 成功，PR 级 Chromium E2E smoke 当时仍在运行。纯文档发布；本地 Gate-0 收据 `docs/gate/44d22a9017ae2674eb083e1ea0d62484dd8ad1b8.json`，完整本地验证残余见月档。此项不改变 Phase 7/8 状态或原 Gate；插件安装与生命周期、Skill/MCP 导入、DSH 滑条适配仍由父票 #868 下 T1–T10 实现。
 - **2026-10-08 · Matt skills 1.3.1 兼容更新**：词汇正文保留到 GLOSSARY，CONTEXT 兼容入口保留，逐票实施与任务授权规则保留；四宿主本地更新完成，用户已批准发布三跳。范围及验收例外见 `docs/phase_status/2026-10.md` 的 Matt 发布条目；远端合并状态以 PR 为准。
 - **2026-10-08 · #496 prompt 调优与 gold 来源校正**：按用户明确指示合并 PR #852 并关闭 #496（验收例外，不代表质量 AC 达标）。real-gold 27/27、1 degraded；precision 8/10=0.800（0.95）与 coverage 8/11=0.727（0.95）未达，kind 11/12=0.917（0.90）达标；positive_procedure 来源符合批准 gold 但 write_match_count=0，根因未定，报告缺 provider/model ID。最终同步树 f616d8d / tree 7e92b3bb Gate-0 6/6；Vitest 1497、Playwright 510、Vite build 通过。后端排除 Windows `os.geteuid()` 收集文件后为 6959P/27S/51D/22F；20 项附件/worktree 红可在本机复现，直接路径与 origin/main blob 相同，不属 #496 diff；详见月档及 GitHub 关闭评论。
 
