@@ -13,6 +13,7 @@ import { isCancelledRunFailure } from './runCancel';
 import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
 import { parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
+import { parseImageRefs } from './attachmentRefs';
 
 // 事件类型常量统一取 EventType（generated/event-types.ts，后端 event.py 生成物）。
 // 此前 reasoning / tool-output 两族以本地字面量先行（fixture 驱动，不硬阻塞后端），
@@ -403,6 +404,11 @@ function projectUserMessage(state: ConversationState, event: AgentEvent): void {
   withTurnAt(state, step, (turn) => {
     touchTurn(turn, event);
     turn.user_message = String(event.data.content ?? '');
+    // #825（MM-04）：附图是 `content` 的**平行字段**（PRD D3），事件里只有引用。
+    // 每帧覆盖（与 user_message 同语义）：同一条 user/message 不会分片到达，
+    // 真到了也是"最后一条帧即事实"。
+    const attachments = parseImageRefs(event.data.attachments);
+    if (attachments.length > 0) turn.user_attachments = attachments;
     // BUG-001：fork 锚点需要 user/message 的 seq（持久事实），
     // 而非 turn.step_id（resolveStep 合成值）。null-seq 帧不入册。
     if (event.seq !== null) {
