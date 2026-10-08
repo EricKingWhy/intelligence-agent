@@ -154,6 +154,21 @@ async def test_formation_request_preserves_ordered_procedure_details(env: Env):
 
 
 @pytest.mark.asyncio
+async def test_formation_request_requires_excerpts_for_tool_evidence(env: Env):
+    invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
+    await _run(env, invoker)
+
+    call = invoker.calls[0]
+    assert call.stage is MemoryModelStage.FORMATION
+    assert (
+        "Every evidence item must contain exactly `event_id`, `role`, and a non-empty `excerpt` "
+        "copied from its referenced event (at most 300 characters); never use `summary` or other "
+        "keys. For a successful tool result, copy a non-empty excerpt from that result into "
+        "`excerpt`; citing its ref alone is not enough."
+    ) in call.system_prompt
+
+
+@pytest.mark.asyncio
 async def test_formation_request_preserves_project_choice_behavior_and_reason(env: Env):
     invoker = FakeInvoker(formation=[_formation_no_memory()], adjudication=[])
     await _run(env, invoker)
