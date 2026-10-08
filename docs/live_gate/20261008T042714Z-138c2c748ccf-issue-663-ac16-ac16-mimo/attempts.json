@@ -1,0 +1,929 @@
+{
+  "campaign": "AC16",
+  "ticket": 663,
+  "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+  "type": "ac16_attempts_incremental",
+  "attempts_recorded": 8,
+  "attempts": [
+    {
+      "case_id": "M1",
+      "attempt": 1,
+      "started_at_utc": "2026-10-08T04:27:18.674+00:00",
+      "finished_at_utc": "2026-10-08T04:27:32.987+00:00",
+      "input": "本次修改不能新增第三方依赖。",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m1-1-0b0f568d",
+      "run_id": "c1fd5794-cb43-400a-9d79-49991371d865",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_called": true,
+        "active_constraint_projection_contains_required_text": true,
+        "extractor_returned_no_candidates": false
+      },
+      "assertion_details": {
+        "register_constraint_called": "",
+        "active_constraint_projection_contains_required_text": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "b433c14e-6110-462d-9ac9-91f983b58200",
+          "seq": 45,
+          "time": "2026-10-08T04:27:26.559+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m1-1-0b0f568d",
+          "schema_version": "runtime_event/v1",
+          "run_id": "c1fd5794-cb43-400a-9d79-49991371d865",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_10bc9d1ebb7e4ec9afa099be",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "本次修改不能新增第三方依赖。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "2faf0df6-c767-483b-a00a-2cea4d7045d9",
+          "seq": 48,
+          "time": "2026-10-08T04:27:26.573+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m1-1-0b0f568d",
+          "schema_version": "runtime_event/v1",
+          "run_id": "c1fd5794-cb43-400a-9d79-49991371d865",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_10bc9d1ebb7e4ec9afa099be",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-5a2d70ca0194f4a51c749861\",\"fact_type\":\"constraint\",\"value\":\"本次修改不能新增第三方依赖。\",\"source_event_id\":\"7c84453e-fe67-4711-bf0e-0c43cc03d299\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":1.6,\"total_duration_ms\":1.6},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已保存该约束（状态：registered）：**本次修改不能新增第三方依赖。** 后续修改将只使用现有依赖，不会引入任何新的第三方库。请告诉我具体要做的修改内容。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"本次修改不能新增第三方依赖。\"}]}"
+      ],
+      "extraction_job_id": "05fe1e81-0435-421c-a0b7-4189b853d18f",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "本次修改不能新增第三方依赖。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:3ecc4199-bd24-4915-aac5-cbad1f0c818d",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "3ecc4199-bd24-4915-aac5-cbad1f0c818d",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m1-1-0b0f568d"
+        },
+        {
+          "fact_id": "pf-9672962cf92dcc1777884b82",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "7c84453e-fe67-4711-bf0e-0c43cc03d299",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-1-0b0f568d"
+        },
+        {
+          "fact_id": "pf-5a2d70ca0194f4a51c749861",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "7c84453e-fe67-4711-bf0e-0c43cc03d299",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-1-0b0f568d"
+        },
+        {
+          "fact_id": "work_boundary:0ee4fcff-174f-4068-b3de-09824cd9ce40",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "c1fd5794-cb43-400a-9d79-49991371d865"
+          },
+          "source_event_id": "0ee4fcff-174f-4068-b3de-09824cd9ce40",
+          "source_seq": 65,
+          "status": "active",
+          "session_id": "ac16-m1-1-0b0f568d"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M1",
+      "attempt": 2,
+      "started_at_utc": "2026-10-08T04:27:33.019+00:00",
+      "finished_at_utc": "2026-10-08T04:27:54.681+00:00",
+      "input": "本次修改不能新增第三方依赖。",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m1-2-e6c89e9f",
+      "run_id": "6230aaf2-c6c2-43ba-953e-1e1155363bd8",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_called": true,
+        "active_constraint_projection_contains_required_text": true,
+        "extractor_returned_no_candidates": false
+      },
+      "assertion_details": {
+        "register_constraint_called": "",
+        "active_constraint_projection_contains_required_text": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "63b1a90a-3c59-4bce-b0b1-76c61756aa74",
+          "seq": 42,
+          "time": "2026-10-08T04:27:48.250+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m1-2-e6c89e9f",
+          "schema_version": "runtime_event/v1",
+          "run_id": "6230aaf2-c6c2-43ba-953e-1e1155363bd8",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_cab4259ab7e64dffbf8a8302",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "本次修改不能新增第三方依赖。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "121861ae-2feb-4377-bc6a-8de0d1e87113",
+          "seq": 45,
+          "time": "2026-10-08T04:27:48.260+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m1-2-e6c89e9f",
+          "schema_version": "runtime_event/v1",
+          "run_id": "6230aaf2-c6c2-43ba-953e-1e1155363bd8",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_cab4259ab7e64dffbf8a8302",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-efaa6ecfbc2edb93dfeb5eb4\",\"fact_type\":\"constraint\",\"value\":\"本次修改不能新增第三方依赖。\",\"source_event_id\":\"f161c65c-421f-454b-afc1-2ddce0969a34\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":1.6,\"total_duration_ms\":1.6},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已保存该约束：**本次修改不能新增第三方依赖。**（状态：registered）\n\n后续所有修改将仅使用现有依赖。如有具体任务，请告诉我。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"本次修改不能新增第三方依赖。\"}]}"
+      ],
+      "extraction_job_id": "dc0703a4-d400-4084-aa07-d918e3557b09",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "本次修改不能新增第三方依赖。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:c1cefd34-5be5-4c48-83bb-84ea352b59cd",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "c1cefd34-5be5-4c48-83bb-84ea352b59cd",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m1-2-e6c89e9f"
+        },
+        {
+          "fact_id": "pf-48f86128e60096e501587ef0",
+          "type": "user_goal",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "f161c65c-421f-454b-afc1-2ddce0969a34",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-2-e6c89e9f"
+        },
+        {
+          "fact_id": "pf-efaa6ecfbc2edb93dfeb5eb4",
+          "type": "constraint",
+          "value": "本次修改不能新增第三方依赖。",
+          "source_event_id": "f161c65c-421f-454b-afc1-2ddce0969a34",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m1-2-e6c89e9f"
+        },
+        {
+          "fact_id": "work_boundary:c7317d10-0dbb-412a-b3ee-ab9e4eb3ada1",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "6230aaf2-c6c2-43ba-953e-1e1155363bd8"
+          },
+          "source_event_id": "c7317d10-0dbb-412a-b3ee-ab9e4eb3ada1",
+          "source_seq": 62,
+          "status": "active",
+          "session_id": "ac16-m1-2-e6c89e9f"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M2",
+      "attempt": 1,
+      "started_at_utc": "2026-10-08T04:27:54.727+00:00",
+      "finished_at_utc": "2026-10-08T04:28:18.708+00:00",
+      "input": "记住这条约束：本次修改必须兼容 Windows。",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m2-1-f00f1e0e",
+      "run_id": "4ca7a993-62c9-4c80-b17e-55e5d4577c67",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_called": true,
+        "active_constraint_projection_contains_complete_target": true,
+        "extractor_returned_no_candidates": false
+      },
+      "assertion_details": {
+        "register_constraint_called": "",
+        "active_constraint_projection_contains_complete_target": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "e71a08af-220f-4d49-ae1c-ac83c91a627e",
+          "seq": 31,
+          "time": "2026-10-08T04:27:59.470+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m2-1-f00f1e0e",
+          "schema_version": "runtime_event/v1",
+          "run_id": "4ca7a993-62c9-4c80-b17e-55e5d4577c67",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_7f038fea001046a7a3dbe591",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "记住这条约束：本次修改必须兼容 Windows。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "8920d0eb-590e-487d-989a-89dfe6df4484",
+          "seq": 34,
+          "time": "2026-10-08T04:27:59.487+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m2-1-f00f1e0e",
+          "schema_version": "runtime_event/v1",
+          "run_id": "4ca7a993-62c9-4c80-b17e-55e5d4577c67",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_7f038fea001046a7a3dbe591",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-6a8e1d24f13382dc68c5c8f5\",\"fact_type\":\"constraint\",\"value\":\"记住这条约束：本次修改必须兼容 Windows。\",\"source_event_id\":\"39b9ce76-8678-48cc-be5a-6755bf0909c0\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":1.6,\"total_duration_ms\":1.6},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已保存这条约束（状态：registered）：本次修改必须兼容 Windows。后续工作都会遵循这一要求。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"记住这条约束：本次修改必须兼容 Windows。\"}]}"
+      ],
+      "extraction_job_id": "aea81cfa-9754-4b2e-8696-1a368713234f",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "记住这条约束：本次修改必须兼容 Windows。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:77ed9e60-3d37-4b3f-bb34-24f3bfc3ac98",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "77ed9e60-3d37-4b3f-bb34-24f3bfc3ac98",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m2-1-f00f1e0e"
+        },
+        {
+          "fact_id": "pf-85deb484e1e8e4d8abb3e3a1",
+          "type": "user_goal",
+          "value": "记住这条约束：本次修改必须兼容 Windows。",
+          "source_event_id": "39b9ce76-8678-48cc-be5a-6755bf0909c0",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m2-1-f00f1e0e"
+        },
+        {
+          "fact_id": "pf-6a8e1d24f13382dc68c5c8f5",
+          "type": "constraint",
+          "value": "记住这条约束：本次修改必须兼容 Windows。",
+          "source_event_id": "39b9ce76-8678-48cc-be5a-6755bf0909c0",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m2-1-f00f1e0e"
+        },
+        {
+          "fact_id": "work_boundary:354de39d-cb7f-4c11-afec-7af3e893cbfb",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "4ca7a993-62c9-4c80-b17e-55e5d4577c67"
+          },
+          "source_event_id": "354de39d-cb7f-4c11-afec-7af3e893cbfb",
+          "source_seq": 49,
+          "status": "active",
+          "session_id": "ac16-m2-1-f00f1e0e"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M2",
+      "attempt": 2,
+      "started_at_utc": "2026-10-08T04:28:18.734+00:00",
+      "finished_at_utc": "2026-10-08T04:28:43.558+00:00",
+      "input": "记住这条约束：本次修改必须兼容 Windows。",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m2-2-989861be",
+      "run_id": "286abfe1-f936-4119-bdfd-c456a4f58bb6",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_called": true,
+        "active_constraint_projection_contains_complete_target": true,
+        "extractor_returned_no_candidates": false
+      },
+      "assertion_details": {
+        "register_constraint_called": "",
+        "active_constraint_projection_contains_complete_target": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "3f45e951-5fc8-451d-a432-af17cd148239",
+          "seq": 23,
+          "time": "2026-10-08T04:28:26.303+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m2-2-989861be",
+          "schema_version": "runtime_event/v1",
+          "run_id": "286abfe1-f936-4119-bdfd-c456a4f58bb6",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_69254a2e926642d6978fa152",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "记住这条约束：本次修改必须兼容 Windows。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "55abdc60-9b45-495a-b14b-7fb697183b57",
+          "seq": 26,
+          "time": "2026-10-08T04:28:26.326+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m2-2-989861be",
+          "schema_version": "runtime_event/v1",
+          "run_id": "286abfe1-f936-4119-bdfd-c456a4f58bb6",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_69254a2e926642d6978fa152",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-8c561a78e1ffaa428b5bd0e5\",\"fact_type\":\"constraint\",\"value\":\"记住这条约束：本次修改必须兼容 Windows。\",\"source_event_id\":\"35576b0a-a991-494e-9b0e-b6740cb80aa4\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":2.1,\"total_duration_ms\":2.1},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已保存该约束（状态：registered）：\n\n**本次修改必须兼容 Windows。**\n\n后续相关工作会按此执行——避免使用仅 Linux 可用的 API、注意路径分隔符与换行符差异、跨平台进程/编码等问题。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"记住这条约束：本次修改必须兼容 Windows。\"}]}"
+      ],
+      "extraction_job_id": "ed7c1c78-cab6-4476-9a5e-d5215a81bf2d",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "记住这条约束：本次修改必须兼容 Windows。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:2b92ac98-b8f3-4276-9ad0-9702389da9a3",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "2b92ac98-b8f3-4276-9ad0-9702389da9a3",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m2-2-989861be"
+        },
+        {
+          "fact_id": "pf-7eb5e520d3881e0d5a2da174",
+          "type": "user_goal",
+          "value": "记住这条约束：本次修改必须兼容 Windows。",
+          "source_event_id": "35576b0a-a991-494e-9b0e-b6740cb80aa4",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m2-2-989861be"
+        },
+        {
+          "fact_id": "pf-8c561a78e1ffaa428b5bd0e5",
+          "type": "constraint",
+          "value": "记住这条约束：本次修改必须兼容 Windows。",
+          "source_event_id": "35576b0a-a991-494e-9b0e-b6740cb80aa4",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m2-2-989861be"
+        },
+        {
+          "fact_id": "work_boundary:f2228d8c-ea76-415c-8c74-bf51b1a9c0f7",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "286abfe1-f936-4119-bdfd-c456a4f58bb6"
+          },
+          "source_event_id": "f2228d8c-ea76-415c-8c74-bf51b1a9c0f7",
+          "source_seq": 47,
+          "status": "active",
+          "session_id": "ac16-m2-2-989861be"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M3",
+      "attempt": 1,
+      "started_at_utc": "2026-10-08T04:28:43.793+00:00",
+      "finished_at_utc": "2026-10-08T04:28:59.539+00:00",
+      "input": "只有通过全量测试后才能合并，未通过时不能合并。",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m3-1-cdaba44f",
+      "run_id": "72bd2d87-c5d7-4b39-ad92-744727f94bdc",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_called": true,
+        "active_constraint_projection_contains_complete_negation_and_condition": true,
+        "extractor_returned_no_candidates": false
+      },
+      "assertion_details": {
+        "register_constraint_called": "",
+        "active_constraint_projection_contains_complete_negation_and_condition": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "43408b29-1637-405d-9b0f-1ca93f1387ce",
+          "seq": 51,
+          "time": "2026-10-08T04:28:50.026+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m3-1-cdaba44f",
+          "schema_version": "runtime_event/v1",
+          "run_id": "72bd2d87-c5d7-4b39-ad92-744727f94bdc",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_94ab1faf3ebe4a60b2e8334f",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "只有通过全量测试后才能合并，未通过时不能合并。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "3202d23c-92f1-43eb-9ec1-07ce19cab815",
+          "seq": 54,
+          "time": "2026-10-08T04:28:50.038+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m3-1-cdaba44f",
+          "schema_version": "runtime_event/v1",
+          "run_id": "72bd2d87-c5d7-4b39-ad92-744727f94bdc",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_94ab1faf3ebe4a60b2e8334f",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-ec227663af08babe22437224\",\"fact_type\":\"constraint\",\"value\":\"只有通过全量测试后才能合并，未通过时不能合并。\",\"source_event_id\":\"a51bb09c-889f-4dcc-b7c2-5cdb2fe28b21\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":1.7,\"total_duration_ms\":1.7},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已保存该约束（状态：registered，fact_id: pf-ec227663af08babe22437224）：**只有通过全量测试后才能合并，未通过时不能合并。**\n\n后续任何合并操作都会以全量测试通过为前提；测试未通过时不执行合并。本次没有其他待办任务，我在此停下。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"只有通过全量测试后才能合并，未通过时不能合并。\"}]}"
+      ],
+      "extraction_job_id": "9c435043-3fb1-4273-9960-9348bca27b88",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "只有通过全量测试后才能合并，未通过时不能合并。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:34c60849-7031-4817-ac92-b26effad8fb5",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "34c60849-7031-4817-ac92-b26effad8fb5",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m3-1-cdaba44f"
+        },
+        {
+          "fact_id": "pf-eb4365b8a2b9a5975f0dfd53",
+          "type": "user_goal",
+          "value": "只有通过全量测试后才能合并，未通过时不能合并。",
+          "source_event_id": "a51bb09c-889f-4dcc-b7c2-5cdb2fe28b21",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m3-1-cdaba44f"
+        },
+        {
+          "fact_id": "pf-ec227663af08babe22437224",
+          "type": "constraint",
+          "value": "只有通过全量测试后才能合并，未通过时不能合并。",
+          "source_event_id": "a51bb09c-889f-4dcc-b7c2-5cdb2fe28b21",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m3-1-cdaba44f"
+        },
+        {
+          "fact_id": "work_boundary:484e71ec-127e-4e84-90f8-7b1ac1fe4de7",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "72bd2d87-c5d7-4b39-ad92-744727f94bdc"
+          },
+          "source_event_id": "484e71ec-127e-4e84-90f8-7b1ac1fe4de7",
+          "source_seq": 79,
+          "status": "active",
+          "session_id": "ac16-m3-1-cdaba44f"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M3",
+      "attempt": 2,
+      "started_at_utc": "2026-10-08T04:28:59.569+00:00",
+      "finished_at_utc": "2026-10-08T04:29:30.838+00:00",
+      "input": "只有通过全量测试后才能合并，未通过时不能合并。",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m3-2-e4b10b85",
+      "run_id": "dd800377-056f-42f4-9037-87cf678f0b1e",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_called": true,
+        "active_constraint_projection_contains_complete_negation_and_condition": true,
+        "extractor_returned_no_candidates": false
+      },
+      "assertion_details": {
+        "register_constraint_called": "",
+        "active_constraint_projection_contains_complete_negation_and_condition": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [
+        {
+          "event_id": "a5ee216a-2ae4-45c8-b998-0971b653abe4",
+          "seq": 34,
+          "time": "2026-10-08T04:29:05.850+00:00",
+          "type": "tool/call",
+          "session_id": "ac16-m3-2-e4b10b85",
+          "schema_version": "runtime_event/v1",
+          "run_id": "dd800377-056f-42f4-9037-87cf678f0b1e",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_275be0327a62457681bebfb9",
+            "tool_name": "register_constraint",
+            "args": {
+              "value": "只有通过全量测试后才能合并，未通过时不能合并。"
+            }
+          }
+        }
+      ],
+      "tool_results": [
+        {
+          "event_id": "3129a396-c76e-43b9-80b4-8dffef0cc97d",
+          "seq": 37,
+          "time": "2026-10-08T04:29:05.866+00:00",
+          "type": "tool/result",
+          "session_id": "ac16-m3-2-e4b10b85",
+          "schema_version": "runtime_event/v1",
+          "run_id": "dd800377-056f-42f4-9037-87cf678f0b1e",
+          "step_id": 1,
+          "data": {
+            "tool_call_id": "call_275be0327a62457681bebfb9",
+            "content": "{\"ok\":true,\"message\":\"已登记本条用户约束。\",\"data\":{\"status\":\"registered\",\"fact_id\":\"pf-11e3fd58e0692d4b732bb234\",\"fact_type\":\"constraint\",\"value\":\"只有通过全量测试后才能合并，未通过时不能合并。\",\"source_event_id\":\"ed5ade35-5896-4cbb-96f4-0f7be0389411\",\"source_event_seq\":3},\"error_code\":null,\"retryable\":false,\"metadata\":{\"attempt\":1,\"max_attempts\":3,\"duration_ms\":1.7,\"total_duration_ms\":1.7},\"artifact_ref\":null}",
+            "budget_delta": {
+              "tool_name": "register_constraint",
+              "tool_calls": 1,
+              "tool_attempts": 1
+            }
+          }
+        }
+      ],
+      "final_reply": "已保存该约束：只有通过全量测试后才能合并，未通过时不能合并。后续涉及合并的操作，我都会先执行全量测试，未通过则不合并。",
+      "extraction_outputs": [
+        "{\"candidates\": [{\"source\": \"u0\", \"value\": \"只有通过全量测试后才能合并，未通过时不能合并。\"}]}"
+      ],
+      "extraction_job_id": "661e7eb3-227b-476f-ba24-65b4ea21030d",
+      "extraction_state": "done",
+      "extraction_candidates": [
+        {
+          "source": "u0",
+          "value": "只有通过全量测试后才能合并，未通过时不能合并。"
+        }
+      ],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:ce565596-d237-4aa0-805b-adcb6d892ba6",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "ce565596-d237-4aa0-805b-adcb6d892ba6",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m3-2-e4b10b85"
+        },
+        {
+          "fact_id": "pf-402d291cf0d2412853db02e5",
+          "type": "user_goal",
+          "value": "只有通过全量测试后才能合并，未通过时不能合并。",
+          "source_event_id": "ed5ade35-5896-4cbb-96f4-0f7be0389411",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m3-2-e4b10b85"
+        },
+        {
+          "fact_id": "pf-11e3fd58e0692d4b732bb234",
+          "type": "constraint",
+          "value": "只有通过全量测试后才能合并，未通过时不能合并。",
+          "source_event_id": "ed5ade35-5896-4cbb-96f4-0f7be0389411",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m3-2-e4b10b85"
+        },
+        {
+          "fact_id": "work_boundary:b2246b1c-6ef1-40db-bfe0-b81a879c40dd",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "dd800377-056f-42f4-9037-87cf678f0b1e"
+          },
+          "source_event_id": "b2246b1c-6ef1-40db-bfe0-b81a879c40dd",
+          "source_seq": 53,
+          "status": "active",
+          "session_id": "ac16-m3-2-e4b10b85"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M4",
+      "attempt": 1,
+      "started_at_utc": "2026-10-08T04:29:30.879+00:00",
+      "finished_at_utc": "2026-10-08T04:29:49.048+00:00",
+      "input": "下面是旧文档引用，仅供比较，不代表我的要求：‘本次修改必须增加 Redis。’",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m4-1-fc0f5f97",
+      "run_id": "6c1e5b4f-98c8-4ee7-9b49-f149d06d4720",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_not_called": true,
+        "forbidden_text_not_active_constraint": true,
+        "extractor_returned_no_candidates": true
+      },
+      "assertion_details": {
+        "forbidden_text_not_active_constraint": "",
+        "extractor_returned_no_candidates": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [],
+      "tool_results": [],
+      "final_reply": "已了解运行时上下文（工作目录、系统信息、当前日期）。关于那句“本次修改必须增加 Redis”，按你的说明它仅作旧文档比较用途，不作为本次要求，我不会据此执行任何改动。\n\n目前没有具体的任务请求；需要我做什么，请直接说明。",
+      "extraction_outputs": [
+        "{\"candidates\": []}"
+      ],
+      "extraction_job_id": "61753aec-8b1f-47a1-b641-072350843a5e",
+      "extraction_state": "done",
+      "extraction_candidates": [],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:5d47c92c-12aa-4d2c-8ec2-16ceb5eef282",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "5d47c92c-12aa-4d2c-8ec2-16ceb5eef282",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m4-1-fc0f5f97"
+        },
+        {
+          "fact_id": "pf-c629f2f4f6595546ad1416c2",
+          "type": "user_goal",
+          "value": "下面是旧文档引用，仅供比较，不代表我的要求：‘本次修改必须增加 Redis。’",
+          "source_event_id": "1727a0f7-caea-4b25-99b2-0b0a96990cf8",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m4-1-fc0f5f97"
+        },
+        {
+          "fact_id": "work_boundary:06eaba79-b489-4f0a-b872-556c47e950ac",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "6c1e5b4f-98c8-4ee7-9b49-f149d06d4720"
+          },
+          "source_event_id": "06eaba79-b489-4f0a-b872-556c47e950ac",
+          "source_seq": 35,
+          "status": "active",
+          "session_id": "ac16-m4-1-fc0f5f97"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "M4",
+      "attempt": 2,
+      "started_at_utc": "2026-10-08T04:29:49.086+00:00",
+      "finished_at_utc": "2026-10-08T04:29:58.275+00:00",
+      "input": "下面是旧文档引用，仅供比较，不代表我的要求：‘本次修改必须增加 Redis。’",
+      "code_sha": "138c2c748ccf0722c380042826de861d4acf06fd",
+      "git_tree": "414298277d5fdca5b03ff6d69439d5f6af6e1823",
+      "session_id": "ac16-m4-2-273a7c3a",
+      "run_id": "7c1571b3-1fd0-4bdd-ae08-9338d1aedec3",
+      "assertions": {
+        "actual_primary_model_used": true,
+        "thinking_disabled_and_temperature_zero_configured": true,
+        "no_memory_sidecar_events": true,
+        "extraction_job_completed": true,
+        "register_constraint_not_called": true,
+        "forbidden_text_not_active_constraint": true,
+        "extractor_returned_no_candidates": true
+      },
+      "assertion_details": {
+        "forbidden_text_not_active_constraint": "",
+        "extractor_returned_no_candidates": "",
+        "extraction_job_completed": "",
+        "actual_primary_model_used": "",
+        "thinking_disabled_and_temperature_zero_configured": "",
+        "no_memory_sidecar_events": ""
+      },
+      "tool_calls": [],
+      "tool_results": [],
+      "final_reply": "已收到。这条「本次修改必须增加 Redis」的旧文档引用我已按你的说明处理——它仅供比较，不作为本次运行的要求，我不会据此增加 Redis 相关改动。\n\n目前没有具体的任务请求，我先停在这里；请告诉我接下来需要做什么。",
+      "extraction_outputs": [
+        "{\"candidates\": []}"
+      ],
+      "extraction_job_id": "6ee2f760-200f-48d1-8bf0-cf17609467ca",
+      "extraction_state": "done",
+      "extraction_candidates": [],
+      "protected_facts_before": [],
+      "protected_facts_after": [
+        {
+          "fact_id": "authorization:aa67428e-495d-4e9a-911b-40233f4ca7ce",
+          "type": "authorization",
+          "value": {
+            "permission_mode": "workspace-write",
+            "auto_approve": true,
+            "permission_migration": "legacy-v1-defaults",
+            "reason": "此会话创建于默认权限收紧（#358）之前，沿用旧默认 workspace-write + 自动批准。新会话默认为 workspace-write + 逐次询问。可在会话内改档切换。"
+          },
+          "source_event_id": "aa67428e-495d-4e9a-911b-40233f4ca7ce",
+          "source_seq": 2,
+          "status": "active",
+          "session_id": "ac16-m4-2-273a7c3a"
+        },
+        {
+          "fact_id": "pf-1ea8a7ddef86bed9cae02231",
+          "type": "user_goal",
+          "value": "下面是旧文档引用，仅供比较，不代表我的要求：‘本次修改必须增加 Redis。’",
+          "source_event_id": "972bc4ab-2934-4282-88e8-8153bccb52e8",
+          "source_seq": 3,
+          "status": "active",
+          "session_id": "ac16-m4-2-273a7c3a"
+        },
+        {
+          "fact_id": "work_boundary:fb97ca77-69cc-4c4f-b5d2-47a9d6b108e9",
+          "type": "work_boundary",
+          "value": {
+            "state": "run/completed",
+            "run_id": "7c1571b3-1fd0-4bdd-ae08-9338d1aedec3"
+          },
+          "source_event_id": "fb97ca77-69cc-4c4f-b5d2-47a9d6b108e9",
+          "source_seq": 34,
+          "status": "active",
+          "session_id": "ac16-m4-2-273a7c3a"
+        }
+      ],
+      "verdict": "PASS"
+    }
+  ]
+}
