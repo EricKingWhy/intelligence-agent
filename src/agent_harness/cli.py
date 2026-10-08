@@ -41,6 +41,7 @@ from agent_harness.agent.profiles import declared_turn_ceiling
 from agent_harness.agent.resume_evidence import evidence_port
 from agent_harness.agent.run_budget import (
     REASON_STUCK,
+    REASON_USER_INPUT,
     RESUME_BASIS_BUDGET_INCREASE,
     RESUME_BASIS_RELEVANT_STEER,
     STUCK_RESUME_REQUIREMENTS,
@@ -880,9 +881,18 @@ def resume_hint(session_id: str, *, data: dict) -> str:
     **stuck 暂停走另一条**：它的 `trigger_dimension` 是模式名，按维度回落就会给出
     `--run-turns-total N`——一条恒被 409 挡死的假指令（stuck 不接受 `budget_increase`，
     ADR-0048 D7）。所以那一类按事件自己列的可用依据给 `--basis`。
+
+    **user_input 暂停也走另一条**：它不是"抬高就能继续"，而是在等一道 CLI 今天收不到的
+    答复（`validate_resume` 的 user_input 分支只收 `resume_basis=user_input` + 答复体，
+    并且**禁止**改动 run ceiling）。按维度回落会同时印出两道假指令——开关假
+    （`--run-turns-total N` 恒 409）与判据假（"N 必须高于 consumed"与"不许改 ceiling"
+    相反）。所以这一类不给命令行，指向真存在的入口（Web 问题卡）。
     """
-    if data.get("reason") == REASON_STUCK:
+    reason = str(data.get("reason", ""))
+    if reason == REASON_STUCK:
         return _stuck_resume_hint(session_id, data)
+    if reason == REASON_USER_INPUT:
+        return _user_input_resume_hint(data)
     dimension = str(data.get("trigger_dimension", ""))
     if dimension.startswith("session."):
         # session 维触发的暂停（`#318`）：抬高发生在 **durable 的 session 账行**上，
@@ -901,6 +911,22 @@ def resume_hint(session_id: str, *, data: dict) -> str:
         f" {_resume_command_tail(dimension)}"
         f" --expected-version {data.get('budget_version', '')}"
         f"  ({_resume_ceiling_rule(dimension)})\n"
+    )
+
+
+def _user_input_resume_hint(data: dict) -> str:
+    """`user_input` 暂停的"接下来怎么做"：指向**真存在**的入口，不给假命令。
+
+    这里刻意不打印 `agent-harness resume`：CLI 今天没有提交澄清答复的参数
+    （`validate_resume` 的 user_input 分支拒绝任何 ceiling 变动，也要求
+    `resume_basis=user_input` 加答复体），照抄必撞 409。ADR-0051 §3 明确不为这一条新增
+    通用 AskUserQuestion 开关，所以 CLI 就诚实说"这道答复得走 Web"，而不是装作自己能收。
+    """
+    request_id = data.get("input_request_id", "")
+    return (
+        f"  resume: 这次暂停在等一条 protected-fact 澄清答复"
+        f"（input_request_id={request_id}）——CLI 不能提交该答复；"
+        f"请在 Web 会话页回答该问题后续跑（同一 run 恢复，ceiling 不变）\n"
     )
 
 

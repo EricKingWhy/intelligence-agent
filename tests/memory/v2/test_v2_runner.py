@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from langchain_core.messages import HumanMessage
 
 from agent_harness.context.builder import preview_constraint_registration
 from agent_harness.identity import (
@@ -64,6 +65,9 @@ from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.fallback import is_transient_model_error
 from agent_harness.session import (
+    COMPACTION_END,
+    COMPACTION_START,
+    CONTEXT_COMPACTED,
     MODEL_COMPLETED,
     RUN_COMPLETED,
     RUN_STARTED,
@@ -72,6 +76,7 @@ from agent_harness.session import (
 )
 from agent_harness.session.derive import (
     build_protected_fact_data,
+    derive_messages_with_source_ranges,
     derive_protected_facts,
 )
 from agent_harness.session.errors import SessionNotFound
@@ -1522,3 +1527,213 @@ async def test_the_production_slice_grounds_formation_in_the_users_own_words(
     # ③：形成期的相似记忆检索问的是**用户那句话**
     assert searcher.queries, "检索根本没被调用"
     assert searcher.queries[0] == "请以后都用 pnpm 装依赖", searcher.queries[:2]
+
+
+# --------------------------------------------------------------------------------------
+# 3b. durable 时序与压缩后的来源（#663 P2）
+# --------------------------------------------------------------------------------------
+
+
+class SlowExtractionInvoker(FakeInvoker):
+    """抽取调用**在飞时不返回**：把 durable 行读下来，等测试放行。
+
+    断言的是"抽取等待期间盘上是什么"，而不是"跑完之后是什么"——后者对"先 await
+    再进 FORMING"与"先进 FORMING 再 await"两种实现给出同一读数，等于没测（本票
+    P2 的缺陷只在等待窗口里可见）。
+    """
+
+    def __init__(self, *, env: Env, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._env = env
+        self.seen_stage: str | None = None
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, call: MemoryModelCall) -> str:
+        if call.stage is MemoryModelStage.PROTECTED_FACT_EXTRACTION:
+            self.seen_stage = _job_rows(self._env)[0]["stage"]
+            self.entered.set()
+            await self.release.wait()
+        return await super().__call__(call)
+
+
+def _extraction_ready(env: Env) -> None:
+    _seed_run(env)
+    _open_session(env).append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+
+
+@pytest.mark.asyncio
+async def test_job_is_recoverable_while_the_extractor_is_still_in_flight(env: Env) -> None:
+    """慢 extractor：等待窗口内 job 必须已经在**恢复扫得到**的阶段。
+
+    缺陷形状（本票 P2）：`run()` 先 `await` 抽取器（上限 20s，且真的发一次外部模型
+    请求），之后才 `_advance(FORMING)`。那段窗口里 durable 行还是 `QUEUED`，而抽取
+    请求其实已经在飞——此刻进程被杀，重启扫描认领的是一个"还没开始过"的 job。
+    先持久推进到 FORMING 再 await 抽取器，窗口就关上（设计来源见 executor.py 那里）。
+    """
+    _extraction_ready(env)
+    invoker = SlowExtractionInvoker(
+        env=env, formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=['{"candidates":[]}'],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await asyncio.wait_for(invoker.entered.wait(), timeout=10)
+
+    # 抽取在飞：durable 行必须已离开 QUEUED，且被恢复扫描看得到。
+    assert invoker.seen_stage == MemoryJobStage.FORMING.value
+    recoverable = await env.jobs.list_recoverable()
+    assert [job.stage for job in recoverable] == [MemoryJobStage.FORMING]
+
+    invoker.release.set()
+    await runner.drain()
+    assert _job_rows(env)[0]["stage"] == MemoryJobStage.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_main_run_does_not_wait_for_the_extractor(env: Env) -> None:
+    """主 run 不等待：抽取仍被卡住时，终结通知就已经返回（AC10 的同一性质）。"""
+    _extraction_ready(env)
+    invoker = SlowExtractionInvoker(
+        env=env, formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=['{"candidates":[]}'],
+    )
+    runner = _runner(env, invoker)
+
+    job = await asyncio.wait_for(
+        _notify(runner, env, protected_fact_token_budget=8_192), timeout=10,
+    )
+    assert job is not None
+    await asyncio.wait_for(invoker.entered.wait(), timeout=10)
+    assert not invoker.release.is_set()
+
+    invoker.release.set()
+    await runner.drain()
+
+
+@pytest.mark.asyncio
+async def test_extraction_failure_leaves_no_model_candidate_text_in_durable_state(env: Env) -> None:
+    """失败不污染状态：抽取异常后 durable 行不留任何候选原文，job 仍走完终态。"""
+    _extraction_ready(env)
+    invoker = FakeInvoker(
+        formation=[_formation_no_memory()], adjudication=[],
+        constraint_extraction=[RuntimeError("provider unavailable")],
+    )
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    row = _job_rows(env)[0]
+    assert row["protected_fact_extraction_state"] == "done"
+    assert row["protected_fact_extraction_candidates"] is None
+    assert row["stage"] == MemoryJobStage.COMPLETED.value
+
+
+def _append_compaction_bracket(session: Session, *, run_id: str, start: int, end: int) -> None:
+    """写一个**持久化完整**的 4-event bracket，覆盖 `[start, end]` 的原始事件。"""
+    session.append(COMPACTION_START, {"bracket_id": "b1", "source_seq_start": start,
+                                      "source_seq_end": end}, run_id=run_id)
+    session.append(CONTEXT_COMPACTED, {"bracket_id": "b1", "source_seq_start": start,
+                                       "source_seq_end": end,
+                                       "summary": "早先的对话已被压缩"}, run_id=run_id)
+    session.append(COMPACTION_END, {"bracket_id": "b1"}, run_id=run_id)
+
+
+@pytest.mark.asyncio
+async def test_compacted_run_still_extracts_the_direct_user_constraint(env: Env) -> None:
+    """压缩后的 run 仍能登记约束：来源边界是"直接用户事件"，不是"仍在最终投影里"。
+
+    这条走完整链路（真 store / 真 JSONL / 真 runner）：压缩 → 成功终结 → 抽取 →
+    登记，断的是最终 protected fact 本身。
+    """
+    value = "请以后都用 pnpm 装依赖"
+    _seed_run(env, user_text=value)
+    session = _open_session(env)
+    events = session.events
+    source = events[env.marks[(SESSION, RUN)]]
+    # 压缩掉本轮之前的整段（含本轮用户消息），再写成功终结。
+    _append_compaction_bracket(session, run_id=RUN, start=events[0].seq, end=source.seq)
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+
+    # 前提：投影里已经没有原文了（只有 summary）——否则这条用例没测到 P2。
+    projected = [
+        message for message, _range in derive_messages_with_source_ranges(session.events)
+    ]
+    assert not any(
+        isinstance(message, HumanMessage) and value in (message.content or "")
+        for message in projected
+    )
+
+    invoker = _working(constraint_extraction=[json.dumps({
+        "candidates": [{"source": "u0", "value": value}],
+    }, ensure_ascii=False)])
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    facts = [fact for fact in derive_protected_facts(env.sessions.read_events(SESSION))
+             if fact.type == "constraint"]
+    assert [(fact.value, fact.source_event_id, fact.status) for fact in facts] == [
+        (value, source.event_id, "active"),
+    ]
+    # 压缩段落本身（assistant / summary）没有被当成来源：别名只发给了用户原文。
+    extraction = next(call for call in invoker.calls
+                      if call.stage is MemoryModelStage.PROTECTED_FACT_EXTRACTION)
+    assert extraction.payload == {"messages": [{"source": "u0", "content": value}]}
+
+
+@pytest.mark.asyncio
+async def test_assistant_text_never_becomes_a_constraint_source(env: Env) -> None:
+    """assistant 文本不是来源（与压缩无关的既有边界，和上一条同侧钉住）。"""
+    value = "请以后都用 pnpm 装依赖"
+    _seed_run(env, user_text=value)
+    session = _open_session(env)
+    session.append(MODEL_COMPLETED, {"content": "以后都用 npm 装依赖"}, run_id=RUN)
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+    invoker = _working(constraint_extraction=[json.dumps({
+        "candidates": [{"source": "u0", "value": "以后都用 npm 装依赖"}],
+    }, ensure_ascii=False)])
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    facts = [fact for fact in derive_protected_facts(env.sessions.read_events(SESSION))
+             if fact.type == "constraint"]
+    assert facts == []
+    extraction = next(call for call in invoker.calls
+                      if call.stage is MemoryModelStage.PROTECTED_FACT_EXTRACTION)
+    assert [message["content"] for message in extraction.payload["messages"]] == [value]
+
+
+@pytest.mark.asyncio
+async def test_earlier_run_user_message_is_not_a_source_for_this_run(env: Env) -> None:
+    """跨 run 负例（AC24）：来源必须落在**本 job 的可信 run slice** 里。
+
+    早先那一轮的原文虽然也是直接用户消息，但它不属于本次成功 run 的切片——抽取只
+    处理完成事件对应的这一段，不回头扫描整段 history。
+    """
+    _seed_run(env, run_id="run-0", user_text="早先那一轮的原文")
+    _seed_run(env, run_id=RUN, user_text="请以后都用 pnpm 装依赖")
+    session = _open_session(env)
+    session.append(RUN_COMPLETED, {"status": "completed"}, run_id=RUN)
+
+    invoker = _working(constraint_extraction=[json.dumps({
+        "candidates": [{"source": "u0", "value": "早先那一轮的原文"}],
+    }, ensure_ascii=False)])
+    runner = _runner(env, invoker)
+
+    await _notify(runner, env, protected_fact_token_budget=8_192)
+    await runner.drain()
+
+    extraction = next(call for call in invoker.calls
+                      if call.stage is MemoryModelStage.PROTECTED_FACT_EXTRACTION)
+    assert [message["content"] for message in extraction.payload["messages"]] == [
+        "请以后都用 pnpm 装依赖",
+    ]
+    facts = [fact for fact in derive_protected_facts(env.sessions.read_events(SESSION))
+             if fact.type == "constraint"]
+    assert facts == []

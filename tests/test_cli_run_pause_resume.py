@@ -935,3 +935,33 @@ async def test_cli_resume_with_the_same_spent_deadline_is_rejected(monkeypatch, 
         )
 
     assert [e.to_dict() for e in store.read_events(session_id)] == before
+
+
+def test_resume_hint_does_not_offer_a_ceiling_for_a_user_input_pause():
+    """`user_input` 暂停不能用"抬高 ceiling"恢复——CLI 也收不到那道答复。
+
+    一条提示上叠着两道假指令：
+
+    1. 开关假：`validate_resume` 的 user_input 分支只接受 `resume_basis=user_input`，
+       按 `trigger_dimension` 回落得到的 `--run-turns-total N` 照抄必撞 409；
+    2. 判据假：user_input 恢复**不许**改 run ceiling（`effective != paused.limits`
+       直接 `BudgetConflict`，run_budget.py:1913），尾句"N 必须高于 consumed + 预留
+       closeout 轮"与实现正好相反。
+
+    真实入口是 Web 的问题卡（`input_request` 答复体），CLI 今天没有也可以不装作有
+    （ADR-0051 §3：不为这一条新增通用 AskUserQuestion 开关）。
+    """
+    text = resume_hint(
+        "sess-42",
+        data={
+            **_PAUSE_DATA,
+            "reason": "user_input",
+            "trigger_dimension": "run.max_agent_turns_total",
+            "input_request_id": "req-7",
+        },
+    )
+
+    assert "--run-turns-total" not in text
+    assert "必须高于 consumed + 预留 closeout 轮" not in text
+    assert "req-7" in text
+    assert "web" in text.lower() or "浏览器" in text
