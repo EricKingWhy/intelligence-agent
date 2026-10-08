@@ -44,3 +44,8 @@ python tools/challenge-fixture/judge.py --db /tmp/demo1/demo.db --base-url http:
 ## 判定器输出
 
 JSON，缺任一项为 fail，不补假结果。见 `judge.py`。
+
+判定器**自己创建验收夹具**（#849）：跑之前先清掉 R-042/R-043 的**非 seed 产物**
+（只删 `imp_R-042_%` / `imp_R-043_%` 与这两条审计行，7 条 seed 一律不碰），再自己
+POST 两条验收载荷并轮询到终态，然后才断言。这样判定结果只取决于「当前代码是否修对」，
+与被测 Agent 在修复前是否用这两个 id 复现过无关（此前会把正确的修复判成 fail）。
