@@ -1262,6 +1262,11 @@ export function useSession() {
                定时器仍会按 500/1000/2000ms 跑完三次退避、最后弹一条假的「连接中断」
                ——把真正该显示的原因（这条响应）盖掉。 */
             myGen = ++streamGenRef.current;
+            /* 纠正接管重连调度权：旧链此刻可能刚 release() 放掉单飞位、接错的那条流
+               还没重锁，旧链的退避定时器就会照常跑完并弹假的「连接中断」。hold 占住
+               单飞位（不计额度），让纠正自己换上的新流 settle 时 request() 返回 null，
+               旧链不得再调度。 */
+            reconnectRef.current.hold();
             sseRef.current?.cancel(); // 收掉那条接错的流（含服务端订阅）
           }
           if (outcome.kind === 'ack') {
