@@ -65,10 +65,10 @@ _KEY_SHAPED = (
 #:
 #: 代价（**已知且刻意**）：键后紧跟 UUID 的真头 `Authorization: <uuid>` 会漏报。这与本模块
 #: 反控用例钉住的取舍一致 —— 形状层不为"UUID 当凭证"这一极小概率形态牺牲整份证据的
-#: 可用性（`Bearer <uuid>` 仍照常命中，凭证不会泄漏）。
+#: 可用性（带 `Bearer` 前缀的形态仍照常命中，凭证不会泄漏）。
 _AUTH_HEADER = re.compile(
     r"(?i)\b(authorization\s*[:=]\s*)(?!\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b)"
-    r"(?:bearer\s+)?"
+    r"(?:bearer\s+)*"
     r"[^\s,;'\"]+"
 )
 

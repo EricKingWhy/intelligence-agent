@@ -206,3 +206,19 @@ def test_bearer_with_a_uuid_value_never_leaks_past_the_mask() -> None:
     masked_bare, findings_bare = mask_text(bare, where="t")
     assert findings_bare == []
     assert masked_bare == bare
+
+
+def test_repeated_or_spaced_bearer_prefixes_never_leave_a_partial_mask() -> None:
+    """反控（Round 6 Standards 轴二轮）：`Bearer` 前缀重复时不许只掩掉前缀、漏掉凭证。
+
+    二轮实测：`Authorization: Bearer Bearer sk-live-…` 曾被掩成
+    `Authorization: *** sk-live-…` —— 同一回溯病灶（`[^\\s]+` 只吃到第二个 `Bearer`），
+    连 `_KEY_SHAPED` 都只能掩住 `sk-` 那半截，**不匹配 `_KEY_SHAPED` 的 token 会整条泄漏**。
+    判据：无论 `Bearer` 前缀出现几次，凭证 token 都不得出现在输出里。
+    """
+    for token in ("sk-live-abcdefghijklmnopqrst", "opaque-token-without-a-known-shape"):
+        for prefix in ("Bearer ", "Bearer Bearer ", "bearer  "):
+            text = f"Authorization: {prefix}{token}"
+            masked, findings = mask_text(text, where="t")
+            assert token not in masked, f"{text!r} -> {masked!r}"
+            assert [f.rule for f in findings] == ["authorization_header"], text
