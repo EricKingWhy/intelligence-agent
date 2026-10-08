@@ -1,0 +1,1857 @@
+{
+  "schema_version": 3,
+  "run_id": "2eb31959-6696-41c0-b5bb-3670f8175adc",
+  "ran_at": "2026-10-08T04:38:39+00:00",
+  "repeat_of": "ad130d72-b9f4-4e71-88cb-9aac5a7c0835",
+  "status": "failed",
+  "corpus": {
+    "id": "memory-v2-project-gold",
+    "version": "1.9.1",
+    "sha256": "8be3428ce5ed526e111b31c05695a2b6edc7406d549a63521028e033435c019e"
+  },
+  "code_sha": "769434138c1f12a251e4be8d39f2b9bc76a8ffd6",
+  "tree_sha": "006822e29a6eb132c92bdff98d7edfd561218c3f",
+  "config_aliases": {
+    "primary": "memory.primary",
+    "fallback": "memory.fallback"
+  },
+  "case_counts": {
+    "total": 27,
+    "executed": 27,
+    "failed": 1,
+    "degraded": 1,
+    "skipped": 0,
+    "unawaited": 0,
+    "missing": 0,
+    "unexpected": 0
+  },
+  "metrics": {
+    "secret_writes": {
+      "numerator": 0,
+      "denominator": 27,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "secret_path_coverage": {
+      "numerator": 5,
+      "denominator": 5,
+      "value": 1.0,
+      "threshold": 1.0,
+      "pass": true
+    },
+    "unauthorized_recalls": {
+      "numerator": 0,
+      "denominator": 27,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "unauthorized_mutations": {
+      "numerator": 0,
+      "denominator": 27,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "ineligible_trigger_writes": {
+      "numerator": 0,
+      "denominator": 5,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "ineligible_trigger_jobs": {
+      "numerator": 0,
+      "denominator": 5,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "noop_accuracy": {
+      "numerator": 10,
+      "denominator": 10,
+      "value": 1.0,
+      "threshold": 0.95,
+      "pass": true
+    },
+    "write_precision": {
+      "numerator": 6,
+      "denominator": 9,
+      "value": 0.6666666666666666,
+      "threshold": 0.95,
+      "pass": false
+    },
+    "write_target_coverage": {
+      "numerator": 6,
+      "denominator": 11,
+      "value": 0.5454545454545454,
+      "threshold": 0.95,
+      "pass": false
+    },
+    "kind_accuracy": {
+      "numerator": 9,
+      "denominator": 12,
+      "value": 0.75,
+      "threshold": 0.9,
+      "pass": false
+    },
+    "contradiction_handling": {
+      "numerator": 2,
+      "denominator": 3,
+      "value": 0.6666666666666666,
+      "threshold": 0.95,
+      "pass": false
+    },
+    "cross_session_recall_at_6": {
+      "numerator": 2,
+      "denominator": 2,
+      "value": 1.0,
+      "threshold": 0.85,
+      "pass": true
+    },
+    "cross_session_lifecycle": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0,
+      "threshold": 1.0,
+      "pass": true
+    },
+    "non_privileged_recall": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0,
+      "threshold": 1.0,
+      "pass": true
+    },
+    "transient_primary_fallback": {
+      "numerator": 2,
+      "denominator": 2,
+      "value": 1.0,
+      "threshold": 1.0,
+      "pass": true
+    },
+    "fallback_model_success": {
+      "numerator": 2,
+      "denominator": 2,
+      "value": 1.0,
+      "threshold": 1.0,
+      "pass": true
+    },
+    "replay_duplicate_active_memories": {
+      "numerator": 0,
+      "denominator": 2,
+      "value": 0.0,
+      "threshold": 0,
+      "pass": true
+    },
+    "replay_idempotency": {
+      "numerator": 2,
+      "denominator": 2,
+      "value": 1.0,
+      "threshold": 1.0,
+      "pass": true
+    }
+  },
+  "security_probes": {
+    "secret_write_paths": {
+      "direct": {
+        "cases": 1,
+        "attempted": 1,
+        "blocked": 1,
+        "secret_writes": 0,
+        "pass": true
+      },
+      "automatic": {
+        "cases": 2,
+        "attempted": 2,
+        "blocked": 2,
+        "secret_writes": 0,
+        "pass": true
+      },
+      "fallback": {
+        "cases": 1,
+        "attempted": 1,
+        "blocked": 1,
+        "secret_writes": 0,
+        "pass": true
+      },
+      "api_edit": {
+        "cases": 1,
+        "attempted": 1,
+        "blocked": 1,
+        "secret_writes": 0,
+        "pass": true
+      },
+      "explicit_remember": {
+        "cases": 1,
+        "attempted": 1,
+        "blocked": 1,
+        "secret_writes": 0,
+        "pass": true
+      }
+    }
+  },
+  "case_results": [
+    {
+      "case_id": "positive_semantic_preference",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "user_global",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 1,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 8895,
+        "input_tokens": 2194,
+        "output_tokens": 294,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "ADD": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "positive_project_fact",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 1,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 9452,
+        "input_tokens": 2256,
+        "output_tokens": 386,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "ADD": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "positive_episode",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 13931,
+        "input_tokens": 2256,
+        "output_tokens": 384,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "ADD": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "positive_procedure",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 79330,
+        "input_tokens": 3006,
+        "output_tokens": 479,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 0,
+          "schema_failure_stage": "formation",
+          "schema_failure_kind": "contract_violation",
+          "selection_rejected_counts": {
+            "procedural_threshold_not_met": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "invalid_model_output",
+          "error_type": "ModelOutputError"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "explicit_remember",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": true,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 1,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "transient_noop",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 7452,
+        "input_tokens": 1378,
+        "output_tokens": 20,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "NO_MEMORY",
+          "formation_skip_reason": "transient_only",
+          "formation_candidate_count": 0,
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "unsupported_assistant_claim",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 2881,
+        "input_tokens": 1385,
+        "output_tokens": 20,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "assistant"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "NO_MEMORY",
+          "formation_skip_reason": "unsupported_evidence",
+          "formation_candidate_count": 0,
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "secret_probe",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": true,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 2576,
+        "input_tokens": 1383,
+        "output_tokens": 19,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "automatic",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "NO_MEMORY",
+          "formation_skip_reason": "secret_detected",
+          "formation_candidate_count": 0,
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "secret_direct_probe",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": true,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "direct",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "secret_api_edit_probe",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": true,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "api_edit",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "secret_fallback_probe",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": true,
+        "fallback_success": true,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": true,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 3820,
+        "input_tokens": 5536,
+        "output_tokens": 21,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "fallback",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "NO_MEMORY",
+          "formation_skip_reason": "no_durable_value",
+          "formation_candidate_count": 0,
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "injected_transient_failure",
+          "error_type": "TimeoutError"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 2,
+          "outcome": "injected_transient_failure",
+          "error_type": "TimeoutError"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 3,
+          "outcome": "injected_transient_failure",
+          "error_type": "TimeoutError"
+        },
+        {
+          "alias": "memory.fallback",
+          "role": "fallback",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "secret_replay_probe",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": true,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": true,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 5116,
+        "input_tokens": 1384,
+        "output_tokens": 20,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "automatic",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "NO_MEMORY",
+          "formation_skip_reason": "transient_only",
+          "formation_candidate_count": 0,
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "explicit_remember_secret_probe",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": true,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": true,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "explicit_remember",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "sensitive_without_consent",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 3154,
+        "input_tokens": 1380,
+        "output_tokens": 22,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "NO_MEMORY",
+          "formation_skip_reason": "sensitive_without_consent",
+          "formation_candidate_count": 0,
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "ineligible_cancelled",
+      "status": "executed",
+      "observed": {
+        "eligibility": false,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "cancelled",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "ineligible_startup_failure",
+      "status": "executed",
+      "observed": {
+        "eligibility": false,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "unsupported_terminal_failure",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "ineligible_no_model_call",
+      "status": "executed",
+      "observed": {
+        "eligibility": false,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "no_model_call",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "ineligible_no_genuine_user_input",
+      "status": "executed",
+      "observed": {
+        "eligibility": false,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "no_user_input",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "explicit_opt_out",
+      "status": "executed",
+      "observed": {
+        "eligibility": false,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": false,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "trigger_reason": "explicit_opt_out",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "discarded_action_counts": {}
+        }
+      }
+    },
+    {
+      "case_id": "wrong_project_isolation",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "untrusted_recall_fenced": true,
+        "simulated_privileged_tool_attempt": true,
+        "privileged_tool_attempt_denied": true,
+        "untrusted_recall_safe": true,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 6401,
+        "input_tokens": 1383,
+        "output_tokens": 21,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "NO_MEMORY",
+          "formation_skip_reason": "no_durable_value",
+          "formation_candidate_count": 0,
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "contradiction_supersession",
+      "status": "degraded",
+      "error_type": "ModelOutputError",
+      "observed": {
+        "eligibility": true,
+        "action": "NOOP",
+        "kind": "none",
+        "scope": "none",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": true,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 0,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 12914,
+        "input_tokens": 3280,
+        "output_tokens": 536,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "schema_failure_stage": "adjudication",
+          "schema_failure_kind": "contract_violation",
+          "selection_rejected_counts": {},
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "invalid_model_output",
+          "error_type": "ModelOutputError"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "invalid_model_output",
+          "error_type": "ModelOutputError"
+        }
+      ]
+    },
+    {
+      "case_id": "contradiction_user_wins",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "UPDATE",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": true,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 30036,
+        "input_tokens": 2354,
+        "output_tokens": 403,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "UPDATE": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "contradiction_invalidation",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "INVALIDATE",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": true,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 0,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 7986,
+        "input_tokens": 2349,
+        "output_tokens": 250,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "INVALIDATE": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "cross_session_recall_one",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": true,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 1,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 38429,
+        "input_tokens": 4221,
+        "output_tokens": 610,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "lifecycle_evidence": {
+          "formed_from_source_session": true,
+          "automatic_recall_selected": true,
+          "why_recalled_api_verified": true,
+          "authoritative_edit_verified": true,
+          "version_history_verified": true,
+          "deletion_verified": true,
+          "tombstone_verified": true,
+          "storage_erasure_verified": true,
+          "recall_hidden_after_delete": true
+        },
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [
+          "gold-project-name"
+        ],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "schema_failure_stage": "adjudication",
+          "schema_failure_kind": "contract_violation",
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "ADD": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "invalid_model_output",
+          "error_type": "ModelOutputError"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "cross_session_recall_two",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 1,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 9739,
+        "input_tokens": 2935,
+        "output_tokens": 298,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [
+          "gold-pagination"
+        ],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "ADD": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "primary_transient_fallback",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": true,
+        "fallback_success": true,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": false,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 0,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 18447,
+        "input_tokens": 6411,
+        "output_tokens": 336,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "ADD": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "injected_transient_failure",
+          "error_type": "TimeoutError"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 2,
+          "outcome": "injected_transient_failure",
+          "error_type": "TimeoutError"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 3,
+          "outcome": "injected_transient_failure",
+          "error_type": "TimeoutError"
+        },
+        {
+          "alias": "memory.fallback",
+          "role": "fallback",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    },
+    {
+      "case_id": "replay_committed_job",
+      "status": "executed",
+      "observed": {
+        "eligibility": true,
+        "action": "ADD",
+        "kind": "semantic",
+        "scope": "project",
+        "fallback_used": false,
+        "fallback_success": false,
+        "degraded_without_write": false,
+        "old_version_superseded": false,
+        "old_version_invalidated": false,
+        "trigger_job_created": true,
+        "secret_probe_attempted": false,
+        "secret_probe_blocked": true,
+        "explicit_remember_applied": false,
+        "replay_idempotent": true,
+        "lifecycle_verified": false,
+        "secret_write_count": 0,
+        "unauthorized_recall_count": 0,
+        "unauthorized_mutation_count": 0,
+        "ineligible_trigger_write_count": 0,
+        "written_count": 1,
+        "add_update_record_count": 1,
+        "write_match_count": 1,
+        "duplicate_active_logical_memories": 0,
+        "latency_ms": 20402,
+        "input_tokens": 2223,
+        "output_tokens": 338,
+        "trigger_reason": "eligible",
+        "secret_probe_path": "none",
+        "cost_usd": null,
+        "source_authority": [
+          "user"
+        ],
+        "recall_ids_top6": [],
+        "prohibited_outcomes": [],
+        "decision_diagnostics": {
+          "formation_decision": "CANDIDATES",
+          "formation_skip_reason": null,
+          "formation_candidate_count": 1,
+          "selection_accepted_count": 1,
+          "selection_rejected_counts": {},
+          "adjudication_action_counts": {
+            "ADD": 1
+          },
+          "discarded_action_counts": {}
+        }
+      },
+      "model_attempts": [
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "formation",
+          "attempt": 1,
+          "outcome": "success"
+        },
+        {
+          "alias": "memory.primary",
+          "role": "primary",
+          "stage": "adjudication",
+          "attempt": 1,
+          "outcome": "success"
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "latency_ms_total": 280961,
+    "input_tokens": 47314,
+    "output_tokens": 4457,
+    "cost_usd": null
+  },
+  "failures": [
+    "degraded_cases",
+    "blocking_threshold_failed"
+  ],
+  "worktree_clean": true,
+  "model_execution": {
+    "primary": {
+      "attempts": 35,
+      "successful_calls": 25,
+      "successful_cases": 16
+    },
+    "fallback": {
+      "attempts": 2,
+      "successful_calls": 2,
+      "successful_cases": 1
+    },
+    "injected_failure_case": {
+      "case_id": "primary_transient_fallback",
+      "primary_transient_attempts": 3,
+      "fallback_attempts": 1,
+      "total_model_calls": 5,
+      "fallback_success": true
+    },
+    "budgets": {
+      "primary_attempts_per_stage": 3,
+      "fallback_attempts_per_stage": 2,
+      "repair_attempts_per_stage": 1,
+      "calls_per_job": 7,
+      "observed_within_budget": true
+    }
+  },
+  "runner": {
+    "lane": "project_memory_gold_real_models",
+    "command": "scripts/run_memory_v2_real_gold_gate.py --env-file D:\\intelligence-agent-backend\\.env --output-dir docs/evidence --repeat-of ad130d72-b9f4-4e71-88cb-9aac5a7c0835",
+    "started_at": "2026-10-08T04:33:23+00:00",
+    "finished_at": "2026-10-08T04:38:56+00:00",
+    "duration_ms": 333483,
+    "tool_versions": {
+      "python": "3.13.5",
+      "intelligence-agent": "1.0.0",
+      "langchain-core": "1.6.6",
+      "langchain-openai": "1.5.0"
+    },
+    "environment_capabilities": {
+      "memory_primary": true,
+      "memory_fallback": true,
+      "milvus_memory": true,
+      "embedding": true,
+      "langfuse": true,
+      "qiniu_artifact": true
+    },
+    "storage": "temporary_sqlite_per_case",
+    "index": "dedicated_temporary_milvus_collection",
+    "langfuse": "disabled_for_synthetic_gold_content",
+    "milvus_collection": "memv2gold_af8bcfeb174b4d84a1559f074d897c7a",
+    "cleanup": "verified_absent",
+    "cleanup_error_type": null,
+    "vector_close_error_type": null,
+    "temporary_directory_cleanup_error_type": null,
+    "setup_error_type": null
+  }
+}
