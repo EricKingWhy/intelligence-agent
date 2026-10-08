@@ -55,6 +55,31 @@ def test_inspection_reports_skill_metadata_resources_and_requirements(tmp_path: 
 
 
 @pytest.mark.parametrize(
+    "command_guidance",
+    ["Run `pandoc` to render the report.", "Execute `pandoc --version` before rendering."],
+)
+def test_inspection_marks_bare_inline_host_command_for_manual_review(
+    tmp_path: Path, command_guidance: str
+) -> None:
+    source = tmp_path / "command-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: command-skill\ndescription: Uses a host command.\n---\n\n"
+        f"{command_guidance}\n",
+    )
+
+    report = inspect_skill_package(source, scope="project")
+
+    assert report["status"] == "needs-adaptation"
+    assert any(
+        requirement["kind"] == "command-runtime"
+        and requirement["name"] == "pandoc"
+        and requirement["support"] == "manual_review"
+        for requirement in report["requirements"]
+    )
+
+
+@pytest.mark.parametrize(
     ("reference", "expected_code"),
     [
         ("missing.md", "MISSING_RESOURCE"),
@@ -651,6 +676,39 @@ def test_cli_plugins_lifecycle_tracks_saved_and_live_runtime_state(
     run("remove", "complete-skill")
     assert not (workspace / "skills" / ".managed" / "complete-skill").exists()
     assert json.loads(run("list"))["packages"] == []
+
+
+def test_cli_plugins_install_uses_configured_extension_skill_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    source = tmp_path / "duplicate-skill"
+    _write(
+        source / "SKILL.md",
+        "---\nname: duplicate-skill\ndescription: Imported package.\n---\n\nBody.\n",
+    )
+    extension = tmp_path / "extension-skills"
+    _write(
+        extension / "custom-folder" / "SKILL.md",
+        "---\nname: duplicate-skill\ndescription: Existing extension Skill.\n---\n\nBody.\n",
+    )
+    workspace = tmp_path / "workspace"
+    global_skills = tmp_path / "global-skills"
+    settings = SimpleNamespace(
+        workspace_dir=str(workspace),
+        skill_global_dir=str(global_skills),
+        capabilities=json.dumps(
+            {"skills": {"options": {"directories": [str(extension)]}}}
+        ),
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(sys, "argv", ["agent-harness", "plugins", "install", str(source)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 2
+    assert "configured Skill 'duplicate-skill' already exists" in capsys.readouterr().err
+    assert not (workspace / "plugin-installs.json").exists()
 
 
 def test_cli_plugins_lists_adaptation_requirements_and_rejects_enable(

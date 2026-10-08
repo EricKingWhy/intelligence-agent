@@ -12,7 +12,8 @@ from agent_harness.capability.base import (
     CapabilityRegistry,
     Degradation,
 )
-from agent_harness.capability.wiring import wire_capabilities
+from agent_harness.capability.config import ProviderConfig
+from agent_harness.capability.wiring import coerce_skill_path_list, wire_capabilities
 from agent_harness.config import Settings
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session import Session
@@ -323,6 +324,11 @@ class TestSkillsPathOptionCoercion:
         registry = CapabilityRegistry()
         await self._wire(registry, {"paths": str(entry.source_path)}, tmp_path)
         assert [e.name for e in registry.get("skills").catalog()] == ["manual-str"]
+
+    def test_user_home_is_expanded_for_runtime_skill_sources(self):
+        config = ProviderConfig(options={"directories": "~/skills"})
+
+        assert coerce_skill_path_list(config, "directories") == [Path.home() / "skills"]
 
     @pytest.mark.asyncio
     async def test_non_iterable_directories_raise_init_failed(self, tmp_path):

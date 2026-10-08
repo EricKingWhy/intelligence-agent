@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from agent_harness.skills.package_lock import MANIFEST_FILENAME, registry_lock
+
 #: 发现阶段单文件读取上限（stat 尺寸拦截，先于任何 read；单位是字节）。
 #: SKILL.md 是被扫描目录里的自由文件（模型 workspace-write 可写），无上限时
 #: 超大文件会在 wiring 期打爆内存——tool 层的 64K 正文截断发生在完整读盘之后，
@@ -252,7 +254,8 @@ class SkillDiscovery:
 
     def discover(self) -> SkillCatalog:
         catalog = SkillCatalog()
-        seen: dict[str, Path] = {}
+        seen: dict[str, tuple[Path, bool]] = {}
+        blocked_managed_conflicts: set[str] = set()
 
         def _consider(path: Path, origin: str, root: Path | None) -> None:
             managed_candidate, managed_digest = self._managed_snapshot_for(path)
@@ -274,13 +277,22 @@ class SkillDiscovery:
                     scanned_root=root,
                     managed_skill_sha256=managed_digest,
                 )
+            if entry.name in blocked_managed_conflicts:
+                return
             if entry.name in seen:
+                previous_path, previous_managed = seen[entry.name]
                 # 同名先到先得，冲突显式可见（spec 08 §5 精神：不允许静默忽略）。
                 catalog.conflicts.append(
-                    f"skill '{entry.name}' from {_spath(path)} shadowed by {_spath(seen[entry.name])}"
+                    f"skill '{entry.name}' from {_spath(path)} shadowed by {_spath(previous_path)}"
                 )
+                if previous_managed or managed_digest is not None:
+                    # A configured source can appear after an imported Skill was selected.
+                    # Do not expose either copy until the name conflict is resolved.
+                    catalog.entries = [item for item in catalog.entries if item.name != entry.name]
+                    seen.pop(entry.name, None)
+                    blocked_managed_conflicts.add(entry.name)
                 return
-            seen[entry.name] = path
+            seen[entry.name] = (path, managed_digest is not None)
             catalog.entries.append(entry)
 
         for directory in self._directories:
@@ -305,7 +317,7 @@ class SkillDiscovery:
                     continue
                 skill_file = skill_dir / "SKILL.md"
                 if skill_dir.is_dir() and skill_file.is_file():
-                    _consider(skill_file, "directory", directory)
+                    _consider(skill_file, "directory", skill_dir if managed else directory)
 
         for manual in self._manual_paths:
             if manual.is_file():
@@ -389,22 +401,25 @@ class SkillDiscovery:
 
     def remove(self, name: str) -> None:
         """删除 project 目录里的 skill 并刷新；global/手动路径来源的 skill 显式拒绝。"""
-        target = next((e for e in self.catalog().entries if e.name == name), None)
-        if target is None:
-            raise ValueError(f"skill '{name}' is not in the catalog")
-        if self._project_dir is None or not resolve_within(target.source_path, self._project_dir):
-            # 文件即真相：不是 project 目录里的文件，就不归闭环写路径管。
-            raise ValueError(
-                f"refusing to remove '{name}': source {_spath(target.source_path)} "
-                f"is outside project skill directory"
-            )
-        skill_file = target.source_path
-        skill_file.unlink()
-        try:
-            skill_file.parent.rmdir()  # 空目录顺手清掉；非空（用户放了别的文件）则保留
-        except OSError:
-            pass
-        self._refresh(skill_file)
+        if self._project_dir is None:
+            raise ValueError("refusing to remove a Skill without a project skill directory")
+        with registry_lock(self._project_dir.parent / MANIFEST_FILENAME):
+            target = next((e for e in self.discover().entries if e.name == name), None)
+            if target is None:
+                raise ValueError(f"skill '{name}' is not in the catalog")
+            if not resolve_within(target.source_path, self._project_dir):
+                # 文件即真相：不是 project 目录里的文件，就不归闭环写路径管。
+                raise ValueError(
+                    f"refusing to remove '{name}': source {_spath(target.source_path)} "
+                    f"is outside project skill directory"
+                )
+            skill_file = target.source_path
+            skill_file.unlink()
+            try:
+                skill_file.parent.rmdir()  # 空目录顺手清掉；非空（用户放了别的文件）则保留
+            except OSError:
+                pass
+            self._refresh(skill_file)
 
     def _write_entry(self, entry: SkillCatalogEntry) -> Path:
         """序列化 + 落盘 + 刷新（同事务）。任何一步失败不留半写状态。"""
@@ -428,18 +443,43 @@ class SkillDiscovery:
                 f"skill '{entry.name}': serialized SKILL.md too large "
                 f"({len(content.encode('utf-8'))} > {MAX_SKILL_BYTES} bytes)"
             )
-        skill_dir = self._project_dir / entry.name
-        created = not skill_dir.exists()
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_file = skill_dir / "SKILL.md"
-        try:
-            skill_file.write_text(content, encoding="utf-8")
-        except OSError:
+        with registry_lock(self._project_dir.parent / MANIFEST_FILENAME):
+            skill_dir = self._project_dir / entry.name
+            skill_file = skill_dir / "SKILL.md"
+            current = next(
+                (item for item in self.discover().entries if item.name == entry.name),
+                None,
+            )
+            project_update = (
+                current is not None
+                and resolve_within(current.source_path, self._project_dir)
+                and current.source_path.resolve() == skill_file.resolve()
+            )
+            if skill_dir.exists() and not project_update:
+                raise ValueError(
+                    f"Skill '{entry.name}' already exists; refusing to overwrite or shadow it"
+                )
+            if self._managed_directory is not None:
+                managed_target = self._managed_directory / entry.name
+                if managed_target.exists() or managed_target.is_symlink():
+                    raise ValueError(
+                        f"managed Skill '{entry.name}' already exists; refusing a name conflict"
+                    )
+            if current is not None and not project_update:
+                raise ValueError(
+                    f"Skill '{entry.name}' is already provided outside the project directory"
+                )
+            created = not skill_dir.exists()
             if created:
-                skill_dir.rmdir()  # 尽力清理本次新建的空壳目录（无半写）
-            raise
-        self._refresh(skill_file)
-        return skill_file
+                skill_dir.mkdir(parents=True)
+            try:
+                skill_file.write_text(content, encoding="utf-8")
+            except OSError:
+                if created:
+                    skill_dir.rmdir()  # 尽力清理本次新建的空壳目录（无半写）
+                raise
+            self._refresh(skill_file)
+            return skill_file
 
     def _refresh(self, *written: Path) -> None:
         """写入后刷新 catalog（重新 discover）；失败整体报错并回滚本次写入的文件。"""

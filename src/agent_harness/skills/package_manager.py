@@ -11,26 +11,15 @@ import shutil
 import stat
 import tempfile
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from agent_harness.skills.inspection import inspect_skill_package
+from agent_harness.skills.inspection import _is_junction, inspect_skill_package
+from agent_harness.skills.package_lock import MANIFEST_FILENAME
+from agent_harness.skills.package_lock import registry_lock as _registry_lock
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - POSIX
-    msvcrt = None  # type: ignore[assignment]
-
-
-MANIFEST_FILENAME = "plugin-installs.json"
 MANIFEST_VERSION = 1
 MANAGED_DIRECTORY_NAME = ".managed"
 _NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -49,6 +38,8 @@ class SkillPackageManager:
         workspace_dir: str | os.PathLike[str],
         *,
         global_skills_dir: str | os.PathLike[str] | None = None,
+        additional_skill_directories: list[str | os.PathLike[str]] | None = None,
+        additional_skill_paths: list[str | os.PathLike[str]] | None = None,
     ) -> None:
         self.workspace_dir = Path(workspace_dir).expanduser()
         self.project_skills_dir = self.workspace_dir / "skills"
@@ -59,6 +50,12 @@ class SkillPackageManager:
             if global_skills_dir is not None
             else Path.home() / ".intelligence-agent" / "skills"
         )
+        self.additional_skill_directories = [
+            Path(path).expanduser() for path in (additional_skill_directories or [])
+        ]
+        self.additional_skill_paths = [
+            Path(path).expanduser() for path in (additional_skill_paths or [])
+        ]
 
     def install(self, source: str | os.PathLike[str]) -> dict[str, Any]:
         source_report = inspect_skill_package(
@@ -75,10 +72,7 @@ class SkillPackageManager:
             packages = manifest["packages"]
             if name in packages:
                 raise SkillPackageError(f"Skill {name!r} is already installed")
-            if self._path_exists(self.project_skills_dir / name):
-                raise SkillPackageError(f"project Skill {name!r} already exists")
-            if self._path_exists(self.global_skills_dir / name):
-                raise SkillPackageError(f"global Skill {name!r} already exists; refusing a shadow conflict")
+            self._assert_no_shadow_conflict(name)
 
             self._ensure_managed_directory()
             target = self.managed_skills_dir / name
@@ -87,12 +81,27 @@ class SkillPackageManager:
                     f"managed path for Skill {name!r} already exists without an install record"
                 )
 
+            source_digest = _tree_sha256(source_root)
             staging_root = self.managed_skills_dir / f".staging-{uuid.uuid4().hex}"
             staging_package = staging_root / name
             staging_root.mkdir()
             try:
-                shutil.copytree(source_root, staging_package, symlinks=True, copy_function=shutil.copy2)
+                shutil.copytree(
+                    source_root,
+                    staging_package,
+                    symlinks=True,
+                    copy_function=shutil.copy2,
+                    ignore=_reject_junctions,
+                )
+                if _tree_sha256(staging_package) != source_digest:
+                    raise SkillPackageError(
+                        "Skill package changed or could not be copied without following linked directories"
+                    )
                 report = inspect_skill_package(staging_package, scope="project")
+                if report.get("name") != name:
+                    raise SkillPackageError(
+                        "Skill name changed between preflight and package snapshot"
+                    )
                 self._raise_if_uninstallable(report)
                 digest = _tree_sha256(staging_package)
                 record = {
@@ -101,6 +110,7 @@ class SkillPackageManager:
                     "source": str(source_root),
                     "sha256": digest,
                     "skill_sha256": _file_sha256(staging_package / "SKILL.md"),
+                    "trust": {"status": "untrusted", "sha256": digest},
                     "enabled": False,
                     "installed_at": datetime.now(UTC).isoformat(),
                     "compatibility": {
@@ -132,6 +142,7 @@ class SkillPackageManager:
                 raise SkillPackageError(
                     f"Skill {name!r} has status {status!r}; only complete packages can be enabled"
                 )
+            self._assert_no_shadow_conflict(name)
             package = self._package_path(name)
             self._verify_package(package, record)
             if record["enabled"]:
@@ -206,6 +217,7 @@ class SkillPackageManager:
             for name, record in packages.items():
                 if not record["enabled"] or record["compatibility"]["status"] != "complete":
                     continue
+                self._assert_no_shadow_conflict(name)
                 package = self.managed_skills_dir / name
                 if not self._is_managed_package(package):
                     raise SkillPackageError(f"enabled Skill {name!r} is missing or unsafe")
@@ -242,6 +254,9 @@ class SkillPackageManager:
                 or not _DIGEST_PATTERN.fullmatch(record["sha256"])
                 or not isinstance(record.get("skill_sha256"), str)
                 or not _DIGEST_PATTERN.fullmatch(record["skill_sha256"])
+                or not isinstance(record.get("trust"), dict)
+                or record["trust"].get("status") != "untrusted"
+                or record["trust"].get("sha256") != record.get("sha256")
                 or not isinstance(record.get("enabled"), bool)
                 or not isinstance(record.get("compatibility"), dict)
                 or record["compatibility"].get("status") not in {"complete", "needs-adaptation"}
@@ -285,6 +300,42 @@ class SkillPackageManager:
         if _tree_sha256(package) != record["sha256"]:
             raise SkillPackageError(
                 f"Skill {package.name!r} changed after installation; refusing this operation"
+            )
+
+    def _assert_no_shadow_conflict(self, name: str) -> None:
+        if self._path_exists(self.project_skills_dir / name):
+            raise SkillPackageError(
+                f"project Skill {name!r} already exists; refusing a shadow conflict"
+            )
+        if self._path_exists(self.global_skills_dir / name):
+            raise SkillPackageError(
+                f"global Skill {name!r} already exists; refusing a shadow conflict"
+            )
+        from agent_harness.skills.discovery import SkillDiscovery
+
+        catalog = SkillDiscovery(
+            [
+                self.project_skills_dir,
+                self.global_skills_dir,
+                *self.additional_skill_directories,
+            ],
+            manual_paths=self.additional_skill_paths,
+            managed_directory=self.managed_skills_dir,
+        ).discover()
+        source = next((entry.source_path for entry in catalog.entries if entry.name == name), None)
+        if source is not None:
+            source_resolved = source.resolve()
+            try:
+                source_resolved.relative_to(self.project_skills_dir.resolve())
+                source_kind = "project"
+            except ValueError:
+                try:
+                    source_resolved.relative_to(self.global_skills_dir.resolve())
+                    source_kind = "global"
+                except ValueError:
+                    source_kind = "configured"
+            raise SkillPackageError(
+                f"{source_kind} Skill {name!r} already exists at {source}; refusing a shadow conflict"
             )
 
     def _is_managed_package(self, package: Path) -> bool:
@@ -331,36 +382,6 @@ class SkillPackageManager:
         raise SkillPackageError(f"Skill preflight rejected the package: {codes or 'unsupported'}")
 
 
-@contextmanager
-def _registry_lock(path: Path) -> Iterator[None]:
-    lock_path = path.with_name(path.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if fcntl is not None:
-        with lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return
-    if msvcrt is not None:  # pragma: no cover - Windows
-        with lock_path.open("a+b") as handle:
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                with suppress(OSError):
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-    yield  # pragma: no cover
-
-
 def _is_reparse_point(path: Path) -> bool:
     try:
         info = path.lstat()
@@ -371,6 +392,16 @@ def _is_reparse_point(path: Path) -> bool:
     attributes = getattr(info, "st_file_attributes", 0)
     reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_point)
+
+
+def _reject_junctions(directory: str, names: list[str]) -> list[str]:
+    junctions = [name for name in names if _is_junction(Path(directory) / name)]
+    if junctions:
+        joined = ", ".join(sorted(junctions))
+        raise SkillPackageError(
+            f"Skill package contains Windows junctions that cannot be copied safely: {joined}"
+        )
+    return []
 
 
 def _file_sha256(path: Path) -> str:

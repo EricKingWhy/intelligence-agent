@@ -14,6 +14,8 @@ import importlib.metadata
 import json
 import logging
 import sqlite3
+import threading
+import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from functools import partial
@@ -74,6 +76,8 @@ from agent_harness.host_service import (
     HOST_PROTOCOL_VERSION,
     HOST_SKILLS_NONCE_HEADER,
     HOST_SKILLS_PROOF_HEADER,
+    HOST_SKILLS_PROOF_WINDOW_SECONDS,
+    HOST_SKILLS_TIMESTAMP_HEADER,
     host_skills_request_proof,
 )
 from agent_harness.identity import (
@@ -1702,6 +1706,23 @@ class AuthSeamMiddleware:
         self.app = app
         self._settings = settings
         self._host_service_token = host_service_token
+        self._host_skills_nonce_lock = threading.Lock()
+        self._host_skills_used_nonces: dict[str, float] = {}
+
+    def _consume_host_skills_nonce(self, nonce: str) -> bool:
+        now = time.monotonic()
+        with self._host_skills_nonce_lock:
+            self._host_skills_used_nonces = {
+                used: expires_at
+                for used, expires_at in self._host_skills_used_nonces.items()
+                if expires_at > now
+            }
+            if nonce in self._host_skills_used_nonces:
+                return False
+            if len(self._host_skills_used_nonces) >= 4096:
+                return False
+            self._host_skills_used_nonces[nonce] = now + HOST_SKILLS_PROOF_WINDOW_SECONDS
+            return True
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -1724,30 +1745,53 @@ class AuthSeamMiddleware:
         ):
             nonce = headers.get(HOST_SKILLS_NONCE_HEADER)
             proof = headers.get(HOST_SKILLS_PROOF_HEADER, "")
+            proof_timestamp = headers.get(HOST_SKILLS_TIMESTAMP_HEADER, "")
             if nonce:
                 try:
                     claims = jwt.decode(
                         self._host_service_token,
                         self._settings.jwt_secret.get_secret_value(),
                         algorithms=["HS256"],
-                        options={"require": ["tenant_id", "user_id", "exp"]},
+                        options={"require": ["tenant_id", "user_id", "service_uuid", "exp"]},
                     )
-                    expected = host_skills_request_proof(self._host_service_token, nonce)
+                    service_uuid = claims.get("service_uuid")
+                    expected = host_skills_request_proof(
+                        self._host_service_token, nonce, service_uuid, proof_timestamp
+                    )
                     scopes = claims.get("scopes", ["user", "session"])
+                    try:
+                        timestamp_is_fresh = (
+                            abs(int(time.time()) - int(proof_timestamp))
+                            <= HOST_SKILLS_PROOF_WINDOW_SECONDS
+                        )
+                    except ValueError:
+                        timestamp_is_fresh = False
                     valid_identity = (
                         claims.get("tenant_id") == "local"
                         and isinstance(claims.get("user_id"), str)
                         and bool(claims["user_id"].strip())
+                        and isinstance(service_uuid, str)
                         and isinstance(scopes, list)
                         and all(isinstance(item, str) for item in scopes)
                     )
                 except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
                     expected = ""
                     valid_identity = False
-                if expected and valid_identity and hmac.compare_digest(proof, expected):
+                    timestamp_is_fresh = False
+                    service_uuid = None
+                if (
+                    expected
+                    and valid_identity
+                    and timestamp_is_fresh
+                    and hmac.compare_digest(proof, expected)
+                    and self._consume_host_skills_nonce(nonce)
+                ):
                     host_challenge_nonce = nonce
                     identity = IdentityContext("local", claims["user_id"], scopes)
-                    scope.setdefault("state", {})["host_skills_challenge_nonce"] = nonce
+                    state = scope.setdefault("state", {})
+                    state["host_skills_challenge_nonce"] = nonce
+                    state["host_skills_service_uuid"] = service_uuid
+                    state["host_skills_proof_timestamp"] = proof_timestamp
         authorization = headers.get("authorization")
         if self._settings.jwt_secret and host_challenge_nonce is None:
             # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。

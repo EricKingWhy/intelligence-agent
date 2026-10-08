@@ -1424,16 +1424,33 @@ def _main_plugins(argv: list[str]) -> None:
     args = parser.parse_args(argv)
 
     settings = Settings()
+    from agent_harness.capability.base import CapabilityError
+    from agent_harness.capability.config import parse_capabilities_config
+    from agent_harness.capability.wiring import coerce_skill_path_list
     from agent_harness.skills.package_manager import (
         SkillPackageError,
         SkillPackageManager,
     )
 
-    manager = SkillPackageManager(
-        settings.workspace_dir,
-        global_skills_dir=settings.skill_global_dir or None,
-    )
     try:
+        skills_config = parse_capabilities_config(
+            getattr(settings, "capabilities", None)
+        ).get("skills")
+        enabled_skills_config = (
+            skills_config if skills_config is not None and skills_config.enabled else None
+        )
+        manager = SkillPackageManager(
+            settings.workspace_dir,
+            global_skills_dir=settings.skill_global_dir or None,
+            additional_skill_directories=(
+                coerce_skill_path_list(enabled_skills_config, "directories")
+                if enabled_skills_config is not None else []
+            ),
+            additional_skill_paths=(
+                coerce_skill_path_list(enabled_skills_config, "paths")
+                if enabled_skills_config is not None else []
+            ),
+        )
         if args.command == "inspect":
             from agent_harness.skills.inspection import inspect_skill_package
 
@@ -1484,7 +1501,7 @@ def _main_plugins(argv: list[str]) -> None:
         if args.command == "list":
             print(json.dumps(_skill_package_listing(settings, manager), ensure_ascii=False, indent=2))
             return
-    except (SkillPackageError, OSError) as error:
+    except (CapabilityError, SkillPackageError, OSError) as error:
         _emit_stderr(str(error))
         raise SystemExit(2) from error
 
@@ -1538,6 +1555,7 @@ def _skill_package_listing(settings: Settings, manager: SkillPackageManager) -> 
                 "source": record["source"],
                 "saved_selection": "enabled" if enabled else "disabled",
                 "compatibility": record["compatibility"],
+                "trust": record["trust"],
                 "current_runtime": current,
                 "pending_restart": pending_restart,
             }

@@ -60,12 +60,16 @@ def register_skill_routes(app: FastAPI) -> None:
             "conflicts": capability.conflicts(),
         }
         nonce = getattr(request.state, "host_skills_challenge_nonce", None)
+        service_uuid = getattr(request.state, "host_skills_service_uuid", None)
+        timestamp = getattr(request.state, "host_skills_proof_timestamp", None)
         token = getattr(request.app.state, "host_service_token", None)
-        if nonce and token:
+        if nonce and service_uuid and timestamp and token:
             response = JSONResponse(payload)
             response.headers[HOST_SKILLS_RESPONSE_PROOF_HEADER] = host_skills_response_proof(
                 token,
                 nonce,
+                service_uuid,
+                timestamp,
                 response.status_code,
                 response.body,
             )
