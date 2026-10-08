@@ -123,3 +123,23 @@ def test_every_harness_level_maps_into_legal_wire_enum():
 
 def test_web_effort_levels_match_model_catalog_vocabulary():
     assert set(_harness_levels()) == set(REASONING_EFFORT_LEVELS)
+
+
+def test_model_catalog_rejects_unknown_reasoning_effort_wire_value():
+    settings = Settings(
+        _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-test",
+        model_provider="deepseek", model_name="deepseek-chat",
+        agent_models=json.dumps([{
+            "name": "model-with-invalid-effort-map",
+            "provider": "deepseek",
+            "model_name": "deepseek-r1",
+            "reasoning_effort": {
+                "supported": ["minimal", "standard"],
+                "default": "minimal",
+                "wire_mapping": {"minimal": "deep", "standard": "low"},
+            },
+        }]),
+    )
+
+    with pytest.raises(ConfigError, match="wire_mapping"):
+        ModelConfig.resolve_selection(settings, "model-with-invalid-effort-map")

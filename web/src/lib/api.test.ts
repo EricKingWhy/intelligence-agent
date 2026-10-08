@@ -166,6 +166,14 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
             wire_mapping: { minimal: 'low' },
           },
         },
+        {
+          name: 'invalid-wire-value',
+          reasoning_effort: {
+            supported: ['minimal'],
+            default: 'minimal',
+            wire_mapping: { minimal: 'deep' },
+          },
+        },
       ],
     });
 
@@ -176,6 +184,7 @@ describe('getModels — 模型目录窄化解析（#103，零伪造）', () => {
       wireMapping: { minimal: 'low', deep: 'high' },
     });
     expect(models[1].reasoningEffort).toBeUndefined();
+    expect(models[2].reasoningEffort).toBeUndefined();
   });
 
   it('#199：is_available 是**三态**——没说 ≠ 可用（`!== false` 是伪造）', async () => {

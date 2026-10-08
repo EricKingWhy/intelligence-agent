@@ -810,6 +810,10 @@ export interface ModelReasoningEffortCapability {
   wireMapping: Record<string, string>;
 }
 
+const REASONING_EFFORT_WIRE_VALUES = new Set([
+  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+]);
+
 function parseModelReasoningEffort(value: unknown): ModelReasoningEffortCapability | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
@@ -828,7 +832,13 @@ function parseModelReasoningEffort(value: unknown): ModelReasoningEffortCapabili
   }
 
   const wireMapping = raw.wire_mapping as Record<string, unknown>;
-  if (raw.supported.some((level) => typeof wireMapping[level] !== 'string' || !wireMapping[level])) {
+  if (
+    Object.keys(wireMapping).length !== raw.supported.length ||
+    raw.supported.some((level) =>
+      typeof wireMapping[level] !== 'string' ||
+      !REASONING_EFFORT_WIRE_VALUES.has(wireMapping[level] as string)
+    )
+  ) {
     return undefined;
   }
 

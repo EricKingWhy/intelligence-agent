@@ -93,6 +93,10 @@ _CAPABILITY_FIELDS: dict[str, type] = {
 }
 
 REASONING_EFFORT_LEVELS = frozenset({"minimal", "standard", "deep"})
+# OpenAI-compatible reasoning_effort wire values accepted by the provider boundary.
+REASONING_EFFORT_WIRE_VALUES = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
 
 
 def _pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
@@ -146,11 +150,14 @@ def _parse_reasoning_effort_capability(
     if (
         not isinstance(wire_mapping, dict)
         or set(wire_mapping) != set(supported)
-        or any(not isinstance(wire, str) or not wire for wire in wire_mapping.values())
+        or any(
+            not isinstance(wire, str) or wire not in REASONING_EFFORT_WIRE_VALUES
+            for wire in wire_mapping.values()
+        )
     ):
         raise ConfigError(
             f"AGENT_MODELS {model_name!r} reasoning_effort wire_mapping must map "
-            "every supported level"
+            "every supported level to a supported wire value"
         )
     return ReasoningEffortCapability(
         supported=tuple(supported), default=default, wire_mapping=dict(wire_mapping),

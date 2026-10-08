@@ -9,15 +9,15 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from agent_harness.logging import log_event
-from agent_harness.model.config import ConfigError, ModelConfig
+from agent_harness.model.config import (
+    REASONING_EFFORT_WIRE_VALUES as WIRE_REASONING_EFFORTS,
+)
+from agent_harness.model.config import (
+    ConfigError,
+    ModelConfig,
+)
 
 logger = logging.getLogger("agent_harness.model")
-
-#: provider 线格式的合法 reasoning_effort 枚举（OpenAI 兼容推理接口字段定义）。
-#: 只认这几个字面量——其他值一律 400 invalid_parameter_error（实测）。
-WIRE_REASONING_EFFORTS: frozenset[str] = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-)
 
 class ReasoningChatOpenAI(ChatOpenAI):
     """接出第三方网关思考内容的 ChatOpenAI 子类（D-B① / ADR-0016 §3.4）。

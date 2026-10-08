@@ -305,3 +305,32 @@ class TestSessionModelParam:
         assert "deep" in response.json()["detail"]
         workspace_root = tmp_path / "workspaces"
         assert not workspace_root.exists() or not any(workspace_root.iterdir())
+
+    def test_invalid_reasoning_effort_wire_mapping_is_rejected_before_workspace_creation(
+        self, tmp_path,
+    ):
+        settings = Settings(
+            _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+            provider_store_path=str(tmp_path / "model-providers.json"),
+            model_provider="deepseek", model_name="deepseek-chat",
+            agent_models=json.dumps([{
+                "name": "invalid-wire-map", "provider": "deepseek",
+                "model_name": "deepseek-r1",
+                "reasoning_effort": {
+                    "supported": ["minimal"],
+                    "default": "minimal",
+                    "wire_mapping": {"minimal": "deep"},
+                },
+            }]),
+        )
+        client = TestClient(create_app(settings, enable_cors=False))
+
+        response = client.post(
+            "/api/sessions",
+            json={"task": "hi", "model": "invalid-wire-map", "reasoning_effort": "minimal"},
+        )
+
+        assert response.status_code == 422
+        assert "wire_mapping" in response.json()["detail"]
+        workspace_root = tmp_path / "workspaces"
+        assert not workspace_root.exists() or not any(workspace_root.iterdir())
