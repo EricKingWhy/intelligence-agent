@@ -14,6 +14,8 @@
 
 ---
 
+> **当前状态（2026-10-09，#870 T1）**：#870「本地 Skill 整目录预检与兼容报告」已完成并关闭；分支 `codex/issue-870-skill-inspect`，代码 tip `3f2a13fed65dd7c667b06f76acea775419dff0d8`（tree `7b9801ef775f73f56ab6e699284b54edc84136a5`）。定向 pytest 70 passed / 2 skipped、Ruff 与真实 CLI smoke 通过；四轮 Standards + Spec 独立审查后终审 APPROVE（P0–P4=0），review coverage exit 0。Gate-0 `--no-record` 6/6 PASS（45.2s，无收据；工作树含既有用户改动）。GitHub #870 CLOSED，评论 issuecomment-6065720221，`in-progress` 已移除；未 push、未开 PR、未合并。明细见 `docs/phase_status/2026-10.md`。
+
 > **当前状态（2026-10-08，#869 T0）**：#869「跨市场插件导入与适配规格合同」已完成并关闭；分支 `codex/issue-869-spec-contract`，规格提交 `9d2910c2989005d53a36a9a96921235a9ac23fa8`（基于 `d17bd34279ba64e5f051035e0fba7314a6c27eb1`）。PRD、Engineering Spec、ADR、术语表与 T0 票面已对齐，双轴独立审查无发现，文档差异检查通过；GitHub issue 关闭评论已记录。纯文档票未运行产品测试；未 push、未开 PR、未合并。父票 #868 仍 OPEN，后续插件安装/启停与滑条适配属于 T1–T10，不计入 T0 完成。明细见 `docs/phase_status/2026-10.md` 的 #869 T0 条目。
 
 > **当前状态（2026-10-08，#832）**：实现提交 0db3881a；审查与状态提交 7e1de14e；Gate-0 收据提交 ece0fb4e；发布分支 codex/issue-832-live-gate-docker-cli-pr。采用 Python 标准库 shutil.which 预检 Docker CLI 并使用解析出的可执行路径，来源复核与复用判定见 2026-10 月度归档。相关 CLI 测试在普通 PATH 与排除 Docker CLI 的进程 PATH 下各 8 passed，Ruff 通过。两轴独立审查完成；审查覆盖闸门 exit 0。Gate-0 6/6 PASS（收据对应 7e1de14e），以 9e1c065b 为基点的差异范围复跑亦 6/6 PASS、覆盖 6 个改动文件。PR #839（Closes #832）于 2026-10-08 合入 main，merge commit afa4273371cf7bed2cb69c6d6478dcbbc47081a8；GitHub 必需 gate0 CI 45s PASS，issue 已自动 CLOSED 并移除 in-progress；最终交付评论 issuecomment-6043340255。完整 pytest 在 Windows 收集阶段有既有 os.geteuid() 错误，未记作全绿；是否另票修复待用户裁决。
