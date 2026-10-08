@@ -183,3 +183,26 @@ def test_protected_fact_ids_are_not_mistaken_for_an_authorization_header() -> No
     ):
         _, hits = mask_text(header, where="t")
         assert [hit.rule for hit in hits] == ["authorization_header"], header
+
+
+def test_bearer_with_a_uuid_value_never_leaks_past_the_mask() -> None:
+    """反控（Round 6 Standards 轴实测）：`Bearer <uuid>` 不能被**部分**掩成泄漏。
+
+    第一版把 `(?!uuid)` 放在可选的 `(?:bearer\\s+)?` **之后** ⇒ 回溯让 `[^\\s]+` 只吃到
+    `Bearer`，输出 `Authorization: *** 2dd4df30-…`：`Bearer` 被掩、**凭证本身明文留着**。
+    这比"不掩"更糟 —— 它看起来脱敏了（`***` 在场），却把值整条泄漏。
+
+    两种形态的行为**刻意不同**，本用例把它们钉开：
+    - `Bearer <uuid>` 是**真 HTTP 头**形态 ⇒ 整条掩成 `***`，值绝不出现在输出里；
+    - `authorization:<uuid>`（无空格）是生产的**事实 ID** 形态 ⇒ 整条不命中（见上一个用例）。
+    """
+    token = "2dd4df30-bbe3-432f-a231-1d7de3663ffb"
+    masked, findings = mask_text(f"Authorization: Bearer {token}", where="t")
+    assert token not in masked, f"UUID 明文泄漏：{masked!r}"
+    assert masked == "Authorization: ***"
+    assert [f.rule for f in findings] == ["authorization_header"]
+    # 反控的另一半：裸事实 ID 形态**不命中**（这是本轮修假阳性的目的本身）。
+    bare = f"authorization:{token}"
+    masked_bare, findings_bare = mask_text(bare, where="t")
+    assert findings_bare == []
+    assert masked_bare == bare

@@ -1935,6 +1935,14 @@ def test_run_failure_reason_is_read_from_the_run_failed_event(driver):
     assert driver.run_failure_reason(
         [{"type": "run/completed", "data": {}, "run_id": "run-1"}], "run-1",
     ) == ""
+    # `run/interrupted` 也是失败态（`_terminal_status_for_run` 就这么判）——
+    # Standards 轴实测：原先只扫 `run/failed`，被中断的 run 会漏成空串。
+    assert driver.run_failure_reason(
+        [{"type": "run/interrupted", "data": {"reason": "StallWatchdog"}, "run_id": "run-1"}],
+        "run-1",
+    ) == "run/interrupted(reason=StallWatchdog)"
+    # 两处对"什么算失败"必须同源。
+    assert set(driver._RUN_FAILURE_TYPES) <= set(driver._RUN_LIFECYCLE_TYPES)
 
 
 # ── Round 6：slot 级重跑（判据/观测修好后只重跑受影响的槽位）──────────────────────

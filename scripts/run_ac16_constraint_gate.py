@@ -1139,6 +1139,9 @@ _RUN_LIFECYCLE_TYPES = (
     "run/started", "run/paused", "run/resumed", "run/completed", "run/failed",
     "run/interrupted",
 )
+#: run 的**失败态**收口事件。`run_failure_reason` 与 `_terminal_status_for_run` 共用，
+#: 免得两处对"什么算失败"给出不同答案（Round 6 Standards 轴：前者原先只扫 `run/failed`）。
+_RUN_FAILURE_TYPES = ("run/failed", "run/interrupted")
 
 
 def _terminal_status_for_run(
@@ -1161,7 +1164,7 @@ def _terminal_status_for_run(
     kind = _event_type(last)
     if kind == "run/completed":
         return "completed", None
-    if kind in ("run/failed", "run/interrupted"):
+    if kind in _RUN_FAILURE_TYPES:
         return "failed", None
     if kind == "run/paused":
         return "paused", _event_data(last).get("reason")
@@ -1169,18 +1172,25 @@ def _terminal_status_for_run(
 
 
 def run_failure_reason(events: Sequence[Any], run_id: str) -> str:
-    """本次 run 的 `run/failed` 原因（无失败 ⇒ 空串）。
+    """本次 run 的失败原因（无失败 ⇒ 空串）。
 
-    证据里的 `error` 字段口径是"空串 = 本次成功跑完"，所以**run 以 `run/failed` 收口时
-    必须落下真实原因**，否则一次基础设施失败（Round 5 实测 M1-2：首个模型回合之前被
-    provider RateLimitError 终止）在证据上长得和"跑完了但一行都没有"完全一样，事后无法
-    恢复死因——这正是 Round 4 审查 P2-2 修失败原因序列化时要堵的那类洞，当时只覆盖了
-    驱动侧抛异常的路径，漏了"run 自己失败"这条。
+    证据里的 `error` 字段口径是"空串 = 本次成功跑完"，所以**run 以失败态收口时必须落下
+    真实原因**，否则一次基础设施失败（Round 5 实测 M1-2：首个模型回合之前被 provider
+    RateLimitError 终止）在证据上长得和"跑完了但一行都没有"完全一样，事后无法恢复死因
+    ——这正是 Round 4 审查 P2-2 修失败原因序列化时要堵的那类洞，当时只覆盖了驱动侧抛异常
+    的路径，漏了"run 自己失败"这条。
+
+    失败态取 `_RUN_FAILURE_TYPES`（`run/failed` 与 `run/interrupted`）：与
+    `_terminal_status_for_run` 判"failed"的那一组**同源**（Round 6 Standards 轴指出
+    此前只扫 `run/failed`，被中断的 run 会漏成空串）。`reason` 缺席时如实写"未提供原因"。
     """
     for event in reversed(list(events)):
-        if _event_run_id(event) == run_id and _event_type(event) == "run/failed":
+        if _event_run_id(event) != run_id:
+            continue
+        kind = _event_type(event)
+        if kind in _RUN_FAILURE_TYPES:
             reason = _event_data(event).get("reason") or "未提供原因"
-            return f"run/failed(reason={reason})"
+            return f"{kind}(reason={reason})"
     return ""
 
 
