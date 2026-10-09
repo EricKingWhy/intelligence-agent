@@ -51,10 +51,15 @@ def _child_script(root: Path, *, hold: float = 0.0, ready: Path | None = None) -
 
 
 def _run_child(root: Path, *, hold: float = 0.0, env: dict | None = None) -> subprocess.CompletedProcess:
+    # harness 拥有子进程 stdout 编码：强制 PYTHONIOENCODING=utf-8（覆盖 ambient，
+    # Windows GA 下 ambient 是 cp1252，子进程打印中文锁错误会 UnicodeEncodeError）。
+    # 父进程显式 encoding="utf-8" 解码，不依赖父进程 locale（Windows GA 是 cp1252，
+    # 否则会把 UTF-8 字节按 cp1252 解出 mojibake）。调用方传入的其他 env key 保留。
     return subprocess.run(
         [sys.executable, "-c", _child_script(root, hold=hold)],
-        capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT), check=False,
-        env={**os.environ, **(env or {})},
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
+        cwd=str(REPO_ROOT), check=False,
+        env={**os.environ, **(env or {}), "PYTHONIOENCODING": "utf-8"},
     )
 
 
@@ -104,7 +109,9 @@ def test_lock_is_auto_released_when_holder_process_dies(tmp_path: Path) -> None:
     ready = tmp_path / "child-ready"
     proc = subprocess.Popen(
         [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     try:
         _wait_for_ready(ready)
@@ -242,8 +249,9 @@ def test_rebuild_maintenance_publishes_fence_then_detects_active_bypass_writer(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
     )
     maintenance = None
     try:
@@ -341,8 +349,9 @@ def test_escape_hatch_lease_blocks_cutover_until_writer_exits(tmp_path: Path) ->
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
     )
     try:
         _wait_for_ready(ready)
@@ -368,8 +377,9 @@ def test_normal_startup_refuses_active_shared_root_lease_after_primary_releases(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
     )
     try:
         _wait_for_ready(ready)
@@ -426,8 +436,9 @@ holder.release()
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1"},
+        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
     )
     try:
         _wait_for_ready(ready)
@@ -531,3 +542,23 @@ def test_help_is_not_blocked_but_real_command_is(tmp_path: Path) -> None:
         assert "启动被拒绝" in blocked.stderr and str(tmp_path) in blocked.stderr
     finally:
         holder.release()
+
+
+def test_help_prints_utf8_even_under_cp1252_console(tmp_path: Path) -> None:
+    """Windows GA 回归：控制台/重定向流为 cp1252 时，`--help` 的中文帮助必须
+    完整输出且不崩（rc=0）。
+
+    产品侧在 CLI 入口把 stdout/stderr 归一到 UTF-8（见 `cli._ensure_utf8_console_streams`），
+    所以这里显式给子进程 `PYTHONIOENCODING=cp1252`（复现 Windows 语义），再用**字节模式**
+    抓 stdout 并按 UTF-8 **严格**解码——不指定 `text=True`，避免父进程 locale 干扰断言。
+    严格解码成功即证明输出是合法 UTF-8（中文帮助完整、没被 mangling）。
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "agent_harness.cli", "--help"],
+        capture_output=True, timeout=60, cwd=str(REPO_ROOT), check=False,
+        env={**os.environ, "WORKSPACE_DIR": str(tmp_path), "PYTHONIOENCODING": "cp1252"},
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    stdout = proc.stdout.decode("utf-8")  # 严格解码：非法字节会在这里抛，正是回归点
+    assert "usage" in stdout.lower()
+    assert "发送给 Agent 的任务" in stdout, "中文帮助文本必须完整输出"

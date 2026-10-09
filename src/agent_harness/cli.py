@@ -1390,7 +1390,40 @@ async def run(
         return RunOutcome(final_text=final_text, paused=pause_data is not None)
 
 
+def _ensure_utf8_console_streams() -> None:
+    """把 ``sys.stdout`` / ``sys.stderr`` 原地归一到 UTF-8（Windows cp1252 修复）。
+
+    Windows runner 的控制台/重定向流编码是 cp1252，打印中文帮助（argparse 经
+    ``sys.stdout``）或锁错误信息（``_emit_stderr``）会抛 ``UnicodeEncodeError`` →
+    CLI 启动崩。编码问题在**入口边界一次性归一化**，不在每个 ``print`` 处打补丁：
+    Click 在 Windows 边界换流（pallets/click ``_winconsole.py`` 的
+    ``_get_windows_console_stream``，L266–L292，BSD-3-Clause）；标准库手段是
+    ``io.TextIOWrapper.reconfigure(encoding=...)``（CPython 3.7+，What's New 3.7，
+    原地换编码、已绑定的 handler 不受影响）。崩溃场景是重定向/CI 捕获流，真控制台
+    （PEP 528）本就是 UTF-8，故不引入 ctypes / ``WriteConsoleW``。
+
+    best-effort：仅当流的 ``encoding`` 不是 UTF-8 且有 ``reconfigure`` 时才换；单个流
+    的任何异常就地吞掉（pytest 捕获流 / StringIO / 被替换的流都不能让 CLI 启动崩）。
+    **不改 ``errors`` 策略**——保持 strict：UTF-8 能编码一切字符，``replace`` /
+    ``backslashreplace`` 只会造成静默数据损坏。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if encoding in ("utf-8", "utf8"):
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001, S110 — 任何流（pytest 捕获/已被替换）都不能让 CLI 崩
+            pass
+
+
 def main() -> None:
+    # 入口第一件事：归一控制台编码，覆盖 --help / serve / plugins inspect 与正常分发
+    # 所有退出路径（Windows cp1252 下打印中文会 UnicodeEncodeError）。
+    _ensure_utf8_console_streams()
     # W-11（#355）：`serve` 是唯一的冷启动闭环入口——自己竞争 InstanceLock、失败时
     # 二次检查附着既有服务，因此必须绕开下面的外层锁（否则 serve 永远死在
     # "第二个写者"的报错上）。与 --help 同级的早分发。
