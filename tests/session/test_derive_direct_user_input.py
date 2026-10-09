@@ -33,6 +33,14 @@ from agent_harness.session.event import (
     QUEUE_CANCELLED,
 )
 
+#: 澄清答复的正文与载荷（取值与真生产点 `session/service.py::_constraint_input_answer_data`
+#: 的 `current_task_only` 分支逐字一致）。
+_ANSWER_TEXT = "用户选择仅在当前任务采用此约束：For this task, use TypeScript."
+_ANSWER_DATA = {
+    "input_request_id": "request-1",
+    "input_request_answer": {"request_id": "request-1", "choice": "current_task_only"},
+}
+
 _REF = {
     "kind": "image",
     "attachment_id": "sha256:" + "a" * 64,
@@ -243,3 +251,142 @@ def test_plain_text_message_selection_is_byte_identical() -> None:
     assert message.content == "回答用中文"
     assert source_range == (1, 1)
     assert is_direct_user_input_event(events, events[0].event_id) is True
+
+
+def test_replace_summary_stand_in_within_bracket_is_not_latest_input() -> None:
+    """P3-1（#911）：`user/message(replace)` 替身一旦落盘就会被投影，不得被选为最新输入。
+
+    `session/event.py` 登记过 4-event bracket 形状（``COMPACTION_START → CONTEXT_COMPACTED
+    → USER_MESSAGE(replace) → COMPACTION_END``），但**现行写入路径不落这条替身**
+    （`context/builder.py` 只写 START / CONTEXT_COMPACTED / END），全仓 `src/` 与全部
+    git 历史都无 `replace=True` 生产点。因此"不可达"成立，但**理由不是它被 shadow**：
+    投影只 shadow `source_seq_start..source_seq_end` 区间，而替身写在 SUMMARY 之后、
+    区间之外 ⇒ 只要有这条事件就会被投影成 `(seq, seq)`（`_bracket` 已钉住这一点）。
+
+    本条用例证明的正是"**若**历史上出现过该形状（旧日志 / 外部导入），闸门会把它选为
+    最新直接用户输入"——其 content 与自身逐字相等，天然满足候选条件；而
+    `is_direct_user_input_event`（含 `event.data.get("replace")` 排除）判 False ⇒ 两侧分叉。
+
+    修法：#862 同源——候选闸门补 `event.data.get("replace")` 排除，使两处口径一致。
+    """
+    summary = "摘要：用户要求不要新增依赖"
+    real = _user(1, "本题只用标准库")
+    # 替身事件：`replace=True`（compaction 摘要替身的登记形状）。投影只 shadow bracket 的
+    # source 区间 [1, 1]，替身的 seq=2 在区间之外 ⇒ 它会被投影成 (2, 2)。
+    stand_in = SessionEvent(
+        seq=2, type=USER_MESSAGE, session_id="s1",
+        data={"content": summary, "replace": True},
+    )
+    events = [real, stand_in, *_bracket(3, 1, 1, summary=summary)]
+
+    messages = derive_messages(events)
+    projected = derive_messages_with_source_ranges(events)
+    # 替身确实被投影成 (2, 2)，不是 compaction summary 命名的消息。
+    assert (stand_in.data["content"], (2, 2)) in [
+        (message.content, source_range) for message, source_range in projected
+    ]
+    assert not any(
+        getattr(message, "name", None) == COMPACTION_SUMMARY_MESSAGE_NAME
+        and source_range == (2, 2)
+        for message, source_range in projected
+    )
+
+    # 分叉证据：替换替身不是用户原话（事件口径判 False）。
+    assert not is_direct_user_input_event(events, stand_in.event_id)
+    # 修复后：替身被排除；原文的 (1,1) 投影项是 summary 命名消息（C2 排除）、替身在 (2,2) 被
+    # 排除 ⇒ **无候选**（锚定态，非"或原文"——原文早已被 bracket 换成 summary 投影）。
+    selected = latest_direct_user_input_event(events, messages)
+    assert selected is None
+
+
+def test_replace_stand_in_does_not_resurrect_superseded_target() -> None:
+    """P3-1（#911）残口的最坏后果：替身会让一条**已被撤回**的消息"复活"。
+
+    与 #862 C2 同源的污染形状，但命中路径不同：#862 修的是**投影项被 summary 命名**的
+    分支（`message.name == COMPACTION_SUMMARY_MESSAGE_NAME`）；本条走的是
+    `replace=True` 的普通 `USER_MESSAGE` 替身——它不是 summary 命名，C2 收紧拦不住它。
+
+    构造：s=1 被 live-supersede（替换槽 seq=2 被填满），替身 seq=3 与 summary 命名无关、
+    其 content 恰等于 s 的 content。未修复前闸门把它选为"最新直接用户输入"，等价于对一条
+    已撤回的消息给出"当前有效约束来源"，与 `is_direct_user_input_event`（判 False）分叉。
+    """
+    content = "本题只用标准库"
+    old = _user(1, content)
+    replacement = _user(2, "换一条")
+    marker = SessionEvent(
+        seq=3, type=MESSAGE_SUPERSEDED, session_id="s1",
+        data={"superseded_seq": 1},
+    )
+    stand_in = SessionEvent(
+        seq=5, type=USER_MESSAGE, session_id="s1",
+        data={"content": content, "replace": True},
+    )
+    events = [old, replacement, marker, *_bracket(6, 1, 1, summary=content), stand_in]
+
+    messages = derive_messages(events)
+    assert not is_direct_user_input_event(events, stand_in.event_id)
+    # 修复后替身被排除：落回替换槽里那条**真实**的新消息，两函数同口径判 True。
+    selected = latest_direct_user_input_event(events, messages)
+    assert selected is not None and selected.event_id == replacement.event_id
+    assert is_direct_user_input_event(events, selected.event_id)
+
+
+def test_input_request_answer_with_later_message_edited_is_not_latest_input() -> None:
+    """P3-1（#911）：澄清答复在"后续消息被编辑取代"后不得被选为最新直接输入。
+
+    票面的推理（"候选闸门要求投影文本 == 事件原始 content，而澄清答复的投影即其原文 ⇒
+    真实路径下两处口径一致"）只在**答复就是最后一条 user 事件**时成立——那种形状由函数
+    开头的 `latest_direct_message` 早退守卫（返回 None）挡住。**一旦答复之后还有 user
+    事件**，早退守卫不触发，而那条后续消息若被 `message/superseded` 取代（投影里整轮被
+    shadow），投影中 seq 最高的可见 `HumanMessage` 就是答复本身，其文本与自身 content
+    逐字相等 ⇒ 未修复前本闸门选中**澄清答复**，而 `is_direct_user_input_event` 恒判
+    False ⇒ 两处口径分叉。
+
+    形状全部来自真生产点：答复由 `session/service.py::_constraint_input_answer_data` 落盘；
+    后续消息与 `message/queued` / `message/superseded` 由续聊/编辑路径落盘
+    （`_queue_incoming_message` / `SendMessageRequest.supersedes_seq`）。本用例直接钉住
+    "两函数同口径"：选中的事件必须判 True。
+    """
+    original = _user(1, "The previous rule may not fit: For this task, use TypeScript.")
+    answer = _user(2, _ANSWER_TEXT, **_ANSWER_DATA)
+    later = _user(3, "再来一件事")
+    replacement_slot = SessionEvent(
+        seq=4, type=MESSAGE_QUEUED, session_id="s1",
+        data={"content": "改成别的事", "queue_id": "q1"},
+    )
+    marker = SessionEvent(
+        seq=5, type=MESSAGE_SUPERSEDED, session_id="s1",
+        data={"superseded_seq": 3},
+    )
+    events = [original, answer, later, replacement_slot, marker]
+
+    messages = derive_messages(events)
+    assert not is_direct_user_input_event(events, answer.event_id)
+    selected = latest_direct_user_input_event(events, messages)
+    assert selected is not None and selected.event_id == original.event_id
+    assert is_direct_user_input_event(events, selected.event_id)
+
+
+def test_input_request_answer_with_later_message_shadowed_is_not_latest_input() -> None:
+    """同前，但替换槽为空（#614①）：后续消息仍被**纯解析**的投影 shadow。
+
+    `message/superseded` 没有合法替换槽 ⇒ `live_supersede_markers` 不算这次取代发生
+    （事件口径下 seq=3 仍判 True），可消息投影用的 `superseded_event_seqs` 是纯解析的
+    ⇒ seq=3 照旧不进投影。于是投影里最新的可见 user 消息仍是澄清答复：未修复前本闸门
+    选它、事件口径判 False ⇒ 分叉。修复后落回最新一条**可见**的直接输入（seq=1），
+    与 `is_direct_user_input_event` 同口径。
+    """
+    original = _user(1, "The previous rule may not fit: For this task, use TypeScript.")
+    answer = _user(2, _ANSWER_TEXT, **_ANSWER_DATA)
+    later = _user(3, "再来一件事")
+    marker = SessionEvent(
+        seq=5, type=MESSAGE_SUPERSEDED, session_id="s1",
+        data={"superseded_seq": 3},
+    )
+    events = [original, answer, later, marker]
+
+    messages = derive_messages(events)
+    assert not is_direct_user_input_event(events, answer.event_id)
+    selected = latest_direct_user_input_event(events, messages)
+    assert selected is not None and selected.event_id == original.event_id
+    assert is_direct_user_input_event(events, selected.event_id)
