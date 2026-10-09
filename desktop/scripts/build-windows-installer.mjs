@@ -684,14 +684,156 @@ export function validateLangStringGuards(source, filename) {
 }
 
 /**
+ * Blank out NSIS `;` line comments (NSIS has no block comments). A `;` inside a
+ * double-quoted string is not a comment, and `$\"` escapes a quote inside a
+ * string, so the scan tracks both (#901).
+ */
+export function stripNsisComments(source) {
+  return source
+    .split(/\r?\n/)
+    .map((line) => {
+      let inQuote = false
+      let out = ''
+      for (let i = 0; i < line.length; i += 1) {
+        const ch = line[i]
+        if (inQuote && ch === '$' && line[i + 1] === '"') {
+          out += '$"'
+          i += 1
+        } else if (ch === '"') {
+          inQuote = !inQuote
+          out += ch
+        } else if (!inQuote && ch === ';') {
+          break
+        } else {
+          out += ch
+        }
+      }
+      return out
+    })
+    .join('\n')
+}
+
+/**
+ * Every `\\?` in code (comments ignored) that does not carry the separator
+ * backslash of a complete long-path prefix, as `{ line, text }` (#901 / R1).
+ *
+ * NSIS strings have no backslash escapes, so `"\\?$dir"` builds `\\?C:\...`:
+ * Win32 requires the separator right after the question mark, so that path is
+ * unresolvable and every delete/rename naming it fails. R1 shipped with exactly
+ * this typo, and the delete of the previous version failed on every update.
+ */
+export function malformedLongPathPrefixes(source) {
+  const bad = []
+  const lines = stripNsisComments(source).split(/\r?\n/)
+  for (let i = 0; i < lines.length; i += 1) {
+    const pattern = /\\\\\?/g
+    let match = pattern.exec(lines[i])
+    while (match !== null) {
+      if (lines[i][match.index + match[0].length] !== '\\') {
+        bad.push({ line: i + 1, text: lines[i].trim() })
+      }
+      match = pattern.exec(lines[i])
+    }
+  }
+  return bad
+}
+
+/** Build-time assertion for `malformedLongPathPrefixes` (#901 / R1). */
+export function validateLongPathPrefixes(source, filename) {
+  const bad = malformedLongPathPrefixes(source)
+  if (bad.length > 0) {
+    const where = bad.map((b) => `line ${b.line}: ${b.text}`).join('; ')
+    throw new Error(
+      `${filename}: "\\\\?" is not a complete long-path prefix (expected "\\\\?\\") — ${where}`,
+    )
+  }
+}
+
+/**
+ * Problems with the `$iaBackupDirectory` delete site of the atomic-swap
+ * protocol, as `{ line, what }` (#901 / R1):
+ *
+ *   - `ClearErrors` has to precede the delete: the NSIS error flag is sticky,
+ *     so a test without a clear can read an unrelated earlier failure;
+ *   - exactly one `${Errors}` read may sit between the delete and
+ *     `iaClearBackupDir`. LogicLib's `${Errors}` is `IfErrors`, which consumes
+ *     the flag: measured on NSIS 3.0.4.1, the first read after a delete that
+ *     fails because a child directory denies DELETE reports the error and an
+ *     immediate second read reports none, while an intervening `StrCpy` does
+ *     not clear it. A second read therefore turns the failure branch into dead
+ *     code;
+ *   - the failure has to be recorded as `IaLeftoverDir`. Without it a failed
+ *     delete cleared the pointer that named the previous version and the
+ *     directory stayed on disk with nothing referencing it (R1: ~0.7 GB per
+ *     update, 3.50 GiB measured on one machine), and a silent install has no
+ *     UI and writes no NSIS detail log to read it back from.
+ *
+ * Fail-closed: a file with no long-path delete of `$iaBackupDirectory` at all
+ * is reported as a problem, so removing the delete site cannot pass silently.
+ */
+export function unguardedBackupDelete(source) {
+  const problems = []
+  const lines = stripNsisComments(source).split(/\r?\n/)
+  const deleteLine = /RMDir\s+\/r\s+"\\\\\?\\\$iaBackupDirectory"/
+  let sites = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!deleteLine.test(lines[i])) continue
+    sites += 1
+    const before = lines.slice(Math.max(0, i - 3), i).filter((line) => line.trim() !== '')
+    if (!before.some((line) => /^\s*ClearErrors\b/.test(line))) {
+      problems.push({ line: i + 1, what: 'missing ClearErrors before the delete' })
+    }
+    const rest = lines.slice(i + 1)
+    const clearIndex = rest.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/.test(line))
+    const window = clearIndex === -1 ? rest : rest.slice(0, clearIndex)
+    const errorsMacro = '${Errors}'
+    const reads = window.filter((line) => line.includes(errorsMacro)).length
+    if (reads === 0) {
+      problems.push({ line: i + 1, what: `missing ${errorsMacro} check before iaClearBackupDir` })
+    } else if (reads > 1) {
+      problems.push({
+        line: i + 1,
+        what: `${reads} ${errorsMacro} reads between the delete and iaClearBackupDir — only the first can see the failed delete`,
+      })
+    }
+    if (!window.some((line) => /WriteRegStr\b[^\n]*"IaLeftoverDir"/.test(line))) {
+      problems.push({ line: i + 1, what: 'failed delete is not recorded (no IaLeftoverDir write)' })
+    }
+  }
+  if (sites === 0) {
+    problems.push({ line: 0, what: 'no long-path RMDir of $iaBackupDirectory found' })
+  }
+  return problems
+}
+
+/** Build-time assertion for `unguardedBackupDelete` (#901 / R1). */
+export function validateBackupDeleteGuards(source, filename) {
+  const problems = unguardedBackupDelete(source)
+  if (problems.length > 0) {
+    const where = problems
+      .map((p) => (p.line === 0 ? p.what : `line ${p.line}: ${p.what}`))
+      .join('; ')
+    throw new Error(`${filename}: unguarded backup delete — ${where}`)
+  }
+}
+
+/**
  * Validate every NSIS script that runs inside `customHeader`: installer.nsh and
  * the installer-directories.nsh it `!include`s. Both are compiled after
- * addLangs, so both share the #831 hazard.
+ * addLangs, so both share the #831 hazard; the #901 long-path and backup-delete
+ * guards apply to both files, while the delete site itself only exists in
+ * installer-directories.nsh.
  */
 export function validateInstallerScripts(installerDir) {
   for (const file of ['installer.nsh', 'installer-directories.nsh']) {
-    validateLangStringGuards(readFileSync(join(installerDir, file), 'utf8'), file)
+    const source = readFileSync(join(installerDir, file), 'utf8')
+    validateLangStringGuards(source, file)
+    validateLongPathPrefixes(source, file)
   }
+  validateBackupDeleteGuards(
+    readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
+    'installer-directories.nsh',
+  )
 }
 
 

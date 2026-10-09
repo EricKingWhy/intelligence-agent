@@ -16,7 +16,13 @@
 ;                          rename also blocks updating over a live process.
 ;   iaPromoteApplication (customInstall, end of the install section):
 ;                          if the new files are in place, delete the backup;
-;                          otherwise roll back.
+;                          otherwise roll back. A backup that cannot be deleted
+;                          is left in place and reported three ways — the
+;                          IaLeftoverDir value in this application's own
+;                          registry key, the detail log, and $(iaStaleBackup)
+;                          where a UI is running; the backup pointer is cleared
+;                          either way, so a finished install can never be
+;                          mistaken for an incomplete one below.
 ;   iaRollbackApplication: remove the partial install and rename the backup
 ;                          back. A backup that cannot be restored is left in
 ;                          place, never deleted (same rule as upstream).
@@ -104,8 +110,24 @@ Function iaPromoteApplication
     Return
   ${EndIf}
   ${If} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
-    ; Long-path prefix so deep runtime trees (node_modules-style) are removed.
-    RMDir /r "\\?$iaBackupDirectory"
+    ; #901 (R1): NSIS strings have no backslash escapes, so the long-path
+    ; prefix needs its own separator backslash: "\\?$iaBackupDirectory" built
+    ; "\\?C:\..." — no separator after the "?" — and Win32 cannot resolve that
+    ; form, so this delete failed on every update, silently (measured: 0.7 GB
+    ; of unreferenced previous versions per update on one machine).
+    ClearErrors
+    RMDir /r "\\?\$iaBackupDirectory"
+    ${If} ${Errors}
+      ; Keep the leftover discoverable instead of orphaning it: a silent
+      ; install has no UI, so the registry is the record the user or tooling
+      ; can read back. The pointer below is still cleared on purpose —
+      ; .onGUIEnd and iaRollbackApplication read a non-empty IaBackupDir as
+      ; "the install section never completed" and would roll back a good
+      ; update over a directory that is merely undeletable.
+      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory
+      DetailPrint "iaPromoteApplication: could not remove $iaBackupDirectory"
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaStaleBackup) $iaBackupDirectory" /SD IDOK
+    ${EndIf}
     !insertmacro iaClearBackupDir
   ${Else}
     Call iaRollbackApplication

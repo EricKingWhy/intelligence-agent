@@ -14,6 +14,11 @@ import {
   validateRuntimeLockfile,
   validateLangStringGuards,
   validateInstallerScripts,
+  validateLongPathPrefixes,
+  validateBackupDeleteGuards,
+  malformedLongPathPrefixes,
+  unguardedBackupDelete,
+  stripNsisComments,
   unguardedLangStrings,
   sha256File,
   GOOD_LOCK,
@@ -206,10 +211,133 @@ describe('installer.nsh LangString guards (#831)', () => {
   })
 
   it('still declares both English and Chinese strings (no text regression)', () => {
-    for (const name of ['iaPerUserOnly', 'iaAppRunning', 'iaUpdateFailed', 'iaRollbackFailed']) {
+    for (const name of ['iaPerUserOnly', 'iaAppRunning', 'iaUpdateFailed', 'iaRollbackFailed', 'iaStaleBackup']) {
       assert.match(installerNsh, new RegExp(`LangString ${name} \\$\\{LANG_ENGLISH\\}`))
       assert.match(installerNsh, new RegExp(`LangString ${name} \\$\\{LANG_SIMPCHINESE\\}`))
     }
+  })
+})
+
+describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
+  const installerDir = fileURLToPath(new URL('../installer', import.meta.url))
+  // The pre-#901 shape: "\\?" with no separator backslash. NSIS strings have no
+  // backslash escapes, so this builds "\\?C:\..." — a path Win32 cannot resolve.
+  const BROKEN_DELETE = 'RMDir /r "\\\\?$iaBackupDirectory"'
+  const FIXED_DELETE = 'RMDir /r "\\\\?\\$iaBackupDirectory"'
+
+  it('strips `;` comments but not `;` inside a string', () => {
+    assert.equal(stripNsisComments('RMDir /r "a;b" ; trailing'), 'RMDir /r "a;b" ')
+    assert.equal(stripNsisComments('; whole line'), '')
+    assert.equal(stripNsisComments('x $" ; still in string'), 'x $" ; still in string')
+  })
+
+  it('flags the pre-#901 prefix and accepts the corrected one', () => {
+    assert.deepEqual(malformedLongPathPrefixes(FIXED_DELETE), [])
+    assert.deepEqual(malformedLongPathPrefixes(BROKEN_DELETE), [{ line: 1, text: BROKEN_DELETE }])
+    assert.throws(() => validateLongPathPrefixes(BROKEN_DELETE, 'installer-directories.nsh'), /long-path prefix/)
+  })
+
+  it('does not flag the same text inside a comment', () => {
+    assert.deepEqual(malformedLongPathPrefixes(`; upstream: ${BROKEN_DELETE}`), [])
+  })
+
+  it('requires ClearErrors, one ${Errors} read and the leftover record around the delete', () => {
+    assert.deepEqual(unguardedBackupDelete([FIXED_DELETE, '!insertmacro iaClearBackupDir'].join('\n')), [
+      { line: 1, what: 'missing ClearErrors before the delete' },
+      { line: 1, what: 'missing ${Errors} check before iaClearBackupDir' },
+      { line: 1, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+    ])
+    const guarded = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(guarded), [])
+  })
+
+  it('flags a second ${Errors} read: it cannot see the failed delete', () => {
+    // Measured on NSIS 3.0.4.1: LogicLib's ${Errors} is IfErrors, which consumes
+    // the error flag — the first read after a failing delete reports it, an
+    // immediate second read reports none. A marker read ahead of the outcome
+    // test would silently disable the leftover record.
+    const twoReads = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  StrCpy $4 "1"',
+      '${EndIf}',
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(twoReads), [
+      {
+        line: 2,
+        what: '2 ${Errors} reads between the delete and iaClearBackupDir — only the first can see the failed delete',
+      },
+    ])
+  })
+
+  it('flags a failure that is only logged, not recorded', () => {
+    const loggedOnly = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} ${Errors}',
+      '  DetailPrint "could not remove $iaBackupDirectory"',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(loggedOnly), [
+      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+    ])
+  })
+
+  it('tests Errors before clearing the pointer, even across comment lines', () => {
+    const withoutTest = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '; the backup is gone now',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(withoutTest), [
+      { line: 2, what: 'missing ${Errors} check before iaClearBackupDir' },
+      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+    ])
+  })
+
+  it('is fail-closed: no delete site at all is a problem', () => {
+    assert.deepEqual(unguardedBackupDelete('Function nothing\nFunctionEnd'), [
+      { line: 0, what: 'no long-path RMDir of $iaBackupDirectory found' },
+    ])
+  })
+
+  it('validateBackupDeleteGuards names the file', () => {
+    assert.throws(
+      () => validateBackupDeleteGuards('Function nothing\nFunctionEnd', 'installer-directories.nsh'),
+      /^Error: installer-directories\.nsh: unguarded backup delete/,
+    )
+  })
+
+  it('the shipped scripts carry the corrected, guarded delete', () => {
+    const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
+    assert.deepEqual(malformedLongPathPrefixes(source), [])
+    assert.deepEqual(unguardedBackupDelete(source), [])
+  })
+
+  it('validateInstallerScripts fails on a malformed prefix and on an unguarded delete', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ia-nsh901-'))
+    const okLang = '!ifdef LANG_ENGLISH\nLangString a ${LANG_ENGLISH} "x"\n!endif\n'
+    writeFileSync(join(dir, 'installer.nsh'), `${okLang}${BROKEN_DELETE}\n`)
+    writeFileSync(join(dir, 'installer-directories.nsh'), okLang)
+    assert.throws(() => validateInstallerScripts(dir), /long-path prefix/)
+
+    writeFileSync(join(dir, 'installer.nsh'), okLang)
+    writeFileSync(join(dir, 'installer-directories.nsh'), `${okLang}${FIXED_DELETE}\n!insertmacro iaClearBackupDir\n`)
+    assert.throws(() => validateInstallerScripts(dir), /unguarded backup delete/)
   })
 })
 
