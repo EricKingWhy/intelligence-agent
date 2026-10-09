@@ -27,9 +27,9 @@
 
 ; #885 — freeze this file's own directory at PARSE time. electron-builder
 ; `!include`s this file by absolute path (NsisTarget.computeCommonInstallerScriptHeader),
-; so ${__FILEDIR__} here is .../desktop/installer/. Capturing it into a define
-; now (rather than inside the macro below) is the whole point: the macro body
-; is expanded later, when makensis processes installer.nsi.
+; so ${__FILEDIR__} here is the .../desktop/installer directory. Capturing it
+; into a define now (rather than inside the macro below) is the whole point:
+; the macro body is expanded later, when makensis processes installer.nsi.
 ;
 ; Why not use ${__FILEDIR__} directly inside the macro, as before #885:
 ;   * ${__FILEDIR__} is resolved at macro-EXPANSION time, i.e. while makensis
@@ -43,9 +43,21 @@
 ;     anyway: test-windows-installer.mjs replaces `directories`, dropping
 ;     buildResources, so buildResourcesDir — the only dir electron-builder
 ;     !addincludedir's for us — is desktop/build, not desktop/installer.
-; Verified against the bundled NSIS 3.0.4.1 with the exact stdin + cwd shape.
-; The directory name can contain a space ("Intelligence Agent" checkout); the
-; surrounding quotes in the !include below keep that safe.
+;
+; #885 (2nd fix) — the `!include` below appends a LITERAL separator. Do not
+; drop it and do not assume ${__FILEDIR__} ends with one: NSIS computes the
+; value differently per platform (Source/scriptpp.cpp, set_file_predefine):
+;   * Windows (the shipping target): GetFullPathName + PathRemoveFileSpec,
+;     which removes the file spec INCLUDING the trailing backslash ⇒
+;     `${__FILEDIR__}` = `...\desktop\installer` (NO trailing separator). The
+;     run 37828964065 failure `...\desktop\installerinstaller-directories.nsh`
+;     is exactly this: `installer` + `installer-directories.nsh`.
+;   * POSIX (dev machines): `my_strncpy(dir, filename, p - filename + 1)` KEEPS
+;     the trailing separator ⇒ `${__FILEDIR__}` = `.../installer/`.
+; A literal `\` after the define yields a single clean separator on Windows
+; and a tolerated doubled one (`installer//…`) on POSIX; verified with the
+; bundled NSIS on both shapes. The directory name can contain a space
+; ("Intelligence Agent" checkout); the surrounding quotes keep that safe.
 !ifndef IA_INSTALLER_DIR
   !define IA_INSTALLER_DIR "${__FILEDIR__}"
 !endif
@@ -53,7 +65,7 @@
 !macro customHeader
   ManifestDPIAware true
 
-  !include "${IA_INSTALLER_DIR}installer-directories.nsh"
+  !include "${IA_INSTALLER_DIR}\installer-directories.nsh"
 
   ; Bilingual UI strings. The template loads only the configured
   ; installerLanguages, so guard each language: a ${LANG_<NAME>} that is not
