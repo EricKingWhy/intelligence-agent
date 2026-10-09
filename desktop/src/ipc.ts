@@ -80,6 +80,20 @@ export interface IaDesktopBridge {
 }
 
 /**
+ * Global the preload exposes the narrow host-path lookup on
+ * (`window.__IA_HOST_PATHS__`, #826 / MM-05). It is a **second** global rather
+ * than another member of `iaDesktop`: the one capability this ticket adds stays
+ * readable and reviewable in isolation.
+ *
+ * The preload cannot import this module (a sandboxed renderer has no module
+ * resolution), so the literal is duplicated there and pinned from both sides —
+ * `desktop/test/preload.test.ts` (which global the preload writes) and
+ * `desktop/test/preload-host-paths.test.ts` (which global the web app reads,
+ * plus the behavioural gate).
+ */
+export const HOST_PATHS_GLOBAL = '__IA_HOST_PATHS__'
+
+/**
  * Reject IPC outside the allowed shell document origins.
  * @param event - IPC caller whose frame URL supplies the origin.
  * @param allowedOrigins - the shell's own document origin(s) for this operation.

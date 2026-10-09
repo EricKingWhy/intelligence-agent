@@ -5,8 +5,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -306,8 +306,20 @@ test("契约：镜像的服务端常量与 host_service.py 一致（两份不许
  * 一个 `serve`（它自己抢 `InstanceLock`）。客户端从不杀服务：退出只发
  * `client-exit`（app.ts 的 quit 路径）。这条测试按结构钉住，因为"某个新模块
  * 顺手 kill 一下"是审查最容易漏的形状。
+ *
+ * #827 MM-06 修订（剪贴板取图必须起短命外部命令：wl-paste / xclip / powershell.exe）：
+ * ① 终止信号的形状（`SIGKILL`/`SIGTERM`/`taskkill`/`.kill(`）**仍然全树禁止**——
+ *    短命命令的超时收口交给 `execFile({timeout})`（Node 内部处理），源码里绝不出现
+ *    手搓 kill；② `node:child_process` 收窄成**显式登记表**：只有登记文件才允许拉
+ *    子进程，新增一条要在这里写清理由（这就是把"漏审的形状"变成"必须改这张表"）。
  */
-test("单写者规则：只有 host.ts 能拉子进程，且全树没有终止服务的代码", () => {
+const CHILD_PROCESS_ALLOW_LIST: Record<string, string> = {
+  "host.ts": "#365：本机服务生命周期的唯一所有者（发现 / 冷启动 / 凭据）",
+  "lib/clipboard-command.ts":
+    "#827 MM-06：剪贴板取图要起 wl-paste / xclip / powershell.exe（短命，与会话/服务生命周期无关）",
+};
+
+test("单写者规则：child_process 只在登记文件里，且全树没有终止服务的代码", () => {
   const root = fileURLToPath(new URL("../src", import.meta.url));
   const files: string[] = [];
   const walk = (dir: string): void => {
@@ -319,12 +331,21 @@ test("单写者规则：只有 host.ts 能拉子进程，且全树没有终止�
   };
   walk(root);
   assert.ok(files.length > 5, `应扫到 src 下的全部 .ts，实际 ${String(files.length)}`);
+  const relativeToSrc = (file: string): string =>
+    relative(root, file).split(sep).join("/");
   for (const file of files) {
     const text = readFileSync(file, "utf8");
     assert.ok(!/SIGTERM|SIGKILL|taskkill/i.test(text), `${file} 不得向服务发终止信号`);
     assert.ok(!/\.kill\(/.test(text), `${file} 不得杀进程`);
-    if (!file.endsWith("host.ts")) {
-      assert.ok(!/node:child_process/.test(text), `${file} 只能由 host.ts 拉起本机服务`);
+    if (CHILD_PROCESS_ALLOW_LIST[relativeToSrc(file)] === undefined) {
+      assert.ok(
+        !/node:child_process/.test(text),
+        `${file} 未登记子进程理由（见 CHILD_PROCESS_ALLOW_LIST）`,
+      );
     }
+  }
+  // 登记表不许留空条目（文件改名/删除后要在这里同步收口）。
+  for (const key of Object.keys(CHILD_PROCESS_ALLOW_LIST)) {
+    assert.ok(existsSync(join(root, key)), `CHILD_PROCESS_ALLOW_LIST 登记的 ${key} 不存在`);
   }
 });

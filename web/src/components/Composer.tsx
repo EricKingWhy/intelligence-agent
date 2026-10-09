@@ -15,6 +15,7 @@ import { catalogIcon } from '../lib/catalogIcons';
 import type { CatalogEntry, ModelCatalogEntry } from '../lib/api';
 import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortProjection';
 import { budgetText, filesFromClipboard, IMAGE_LIMITS } from '../lib/attachments';
+import { routeHostFiles } from '../lib/hostFiles';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
 import { useDraftAttachments } from '../hooks/useDraftAttachments';
@@ -349,37 +350,60 @@ export const Composer = memo(function Composer({
     if (canAttach) fileInputRef.current?.click();
   };
   const addDraftFiles = attachments.addFiles;
-  /** 只把"是否接受"这一条门禁挂在本组件上；真正的入列/上传在 hook 里。
-   *  依赖那个**稳定的** `addFiles`（useDraftAttachments 的依赖是
-   *  [sessionId, commit, setIntakeError, startUpload]，同一会话内标识不变）：
-   *  依赖整个 `attachments` 对象会让下面的拖放 effect 每个渲染重装 5 个监听
-   *  （hook 每次渲染返回新对象字面量）。 */
-  const addFiles = useCallback(
-    (files: readonly File[], directories?: ReadonlySet<File>) => {
-      if (!canAttach) return;
-      addDraftFiles(files, directories);
-    },
-    [canAttach, addDraftFiles],
-  );
-  /** 把文本插到**光标处**（混合剪贴板的文本回填，见 `onPaste`）。
+  /** 把文本插到**光标处**（混合剪贴板的文本回填，见 `onPaste`；`#826` 的 `@path` 引用同一条）。
    *
    *  受控 textarea 的 `value` 由 React 在提交阶段写入，那一刻浏览器会把插入符推到
    *  末尾——所以目标位置先存进 ref，由渲染后的 effect 消费（否则光标落在粘贴内容之后，
-   *  用户接着敲的字会跑到粘贴文本的后面）。 */
+   *  用户接着敲的字会跑到粘贴文本的后面）。
+   *
+   *  `draftTextRef` 是 `value` 的**同步镜像**：同一 tick 里的第二次插入（粘贴的文本 +
+   *  同一次事件里分流出的引用）必须看得见第一次的结果——`value` 闭包要等下一次渲染才
+   *  更新，照它算第二次会把第一次插进去的内容整段丢掉。 */
   const pendingCaret = useRef<number | null>(null);
+  const draftTextRef = useRef(value);
+  useEffect(() => {
+    draftTextRef.current = value;
+  });
   useEffect(() => {
     const caret = pendingCaret.current;
     if (caret === null) return;
     pendingCaret.current = null;
     inputRef.current?.setSelectionRange(caret, caret);
   });
-  const insertAtCaret = (text: string) => {
+  /** 恒等稳定的插入口：`addFiles` 依赖它，而 `addFiles` 是拖放 effect 的依赖——
+   *  每次渲染换新函数会把 5 个 document 监听重装一遍（既有注释同一条理由）。 */
+  const insertText = useCallback((text: string) => {
     const element = inputRef.current;
-    const start = element?.selectionStart ?? value.length;
+    const current = draftTextRef.current;
+    const start = element?.selectionStart ?? current.length;
     const end = element?.selectionEnd ?? start;
+    const next = `${current.slice(0, start)}${text}${current.slice(end)}`;
+    draftTextRef.current = next;
     pendingCaret.current = start + text.length;
-    setValue(`${value.slice(0, start)}${text}${value.slice(end)}`);
-  };
+    setValue(next);
+  }, []);
+  /** 只把"是否接受"这一条门禁挂在本组件上；真正的入列/上传在 hook 里。
+   *  依赖那个**稳定的** `addFiles`（useDraftAttachments 的依赖是
+   *  [sessionId, commit, setIntakeError, startUpload]，同一会话内标识不变）：
+   *  依赖整个 `attachments` 对象会让下面的拖放 effect 每个渲染重装 5 个监听
+   *  （hook 每次渲染返回新对象字面量）。
+   *
+   *  #826（MM-05）：三条通道（拖放 / 粘贴 / 选择器）都先过 `routeHostFiles`——桌面
+   *  （preload 桥在场）把「有真实路径的非图片文件」转成 `@path` 引用插进输入框，不上传
+   *  字节；图片、剪贴板字节、目录与无桥时的任何文件原样交给既有上传入口（Web 行为不变）。
+   *
+   *  `prefixText` 只服务粘贴通道：混合剪贴板要在**同一次插入**里带上 `text/plain`（分开
+   *  插两次会互相看不见对方——光标位置是渲染后的 DOM 状态，同一 tick 里它还没变过）。 */
+  const addFiles = useCallback(
+    (files: readonly File[], directories?: ReadonlySet<File>, prefixText = '') => {
+      if (!canAttach) return;
+      const routing = routeHostFiles(files, { directories });
+      const mentions = routing.references.length > 0 ? `${routing.references.join(' ')} ` : '';
+      if (prefixText !== '' || mentions !== '') insertText(`${prefixText}${mentions}`);
+      if (routing.uploads.length > 0) addDraftFiles(routing.uploads, directories);
+    },
+    [canAttach, addDraftFiles, insertText],
+  );
   // 整页拖放（AC1）：document 级监听，拖到任意位置都算——只把"是否接受"交给这里，
   // 计数/命中判断在 `lib/dropEvents.ts`（上游 COPY，含空目录剔除）。
   useEffect(
@@ -624,8 +648,8 @@ export const Composer = memo(function Composer({
             // ⇒ 不回填就等于把文本吞掉（上游 `keymap.ts:161-187` 同款做法：有文件时
             // 照样读 `text/plain`，非空即接管并交给文本通道）。
             const pastedText = event.clipboardData.getData('text/plain');
-            if (pastedText !== '') insertAtCaret(pastedText);
-            addFiles(files);
+            // 文本与引用走**同一次**插入（顺序：粘贴文本在前，引用紧随其后）。
+            addFiles(files, undefined, pastedText);
           }}
           rows={2}
           disabled={locked}
@@ -693,7 +717,7 @@ export const Composer = memo(function Composer({
               title="这次会话用哪个档位？"
               options={toCatalogOptions(agentProfiles, catalogIcon)}
               value={selectedAgentProfile}
-              onChange={onAgentProfileChange ?? (() => {})}
+              onChange={(id) => onAgentProfileChange?.(id)}
               icon={User}
               placeholder="Agent"
               disabled={locked}

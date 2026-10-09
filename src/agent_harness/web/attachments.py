@@ -32,12 +32,14 @@ from pydantic import BaseModel
 from starlette.responses import Response
 
 from agent_harness.attachments import (
-    EXTENSION_MEDIA_TYPES,
+    STORAGE_UNAVAILABLE_MESSAGE,
     AttachmentError,
     attachment_http_status,
+    check_declared_image_matches,
     detect_image,
     file_leaf_name,
     resolve_image_limits,
+    single_image_too_large_message,
 )
 from agent_harness.session.derive import referenced_attachment_ids
 from agent_harness.session.errors import InvalidSessionId, SessionNotFound
@@ -103,7 +105,7 @@ async def _read_body_bounded(request: Request, max_bytes: int) -> bytes:
         total += len(chunk)
         if total > max_bytes:
             raise AttachmentError(
-                f"图片超过单张字节上限（{max_bytes} 字节）。", "IMAGE_TOO_LARGE"
+                single_image_too_large_message(max_bytes), "IMAGE_TOO_LARGE"
             )
         chunks.append(chunk)
     return b"".join(chunks)
@@ -124,28 +126,16 @@ def _declared_image_media_type(request: Request) -> str | None:
 def _check_declared_matches(
     request: Request, name: str | None, detected_media_type: str
 ) -> None:
-    """声明（Content-Type / 文件名扩展名）与字节判定不符 → 拒绝。
+    """声明（`Content-Type` / 文件名扩展名）与字节判定不符 → 拒绝。
 
-    客户端声明不是权威（#822 AC）：不一致时以**字节**为准，且不是静默采用字节，
-    而是明确拒绝（避免"我以为是 PNG"这类认知偏差被吞掉）。
+    判定本身是 `attachments.admission.check_declared_image_matches`（与 CLI `--image`
+    **同一份**，两入口结论一致）；本函数只负责从请求里取出 `Content-Type` 声明。
     """
-    declared = _declared_image_media_type(request)
-    if declared is not None and declared != detected_media_type:
-        raise AttachmentError(
-            f"声明的类型 {declared!r} 与字节判定 {detected_media_type!r} 不符。",
-            "IMAGE_TYPE_MISMATCH",
-        )
-    if name:
-        leaf = file_leaf_name(name)
-        dot = leaf.rfind(".")
-        extension = leaf[dot:].lower() if dot >= 0 else ""
-        extension_type = EXTENSION_MEDIA_TYPES.get(extension)
-        if extension_type is not None and extension_type != detected_media_type:
-            raise AttachmentError(
-                f"文件名 {leaf!r} 的扩展名与字节判定"
-                f" {detected_media_type!r} 不符。",
-                "IMAGE_TYPE_MISMATCH",
-            )
+    check_declared_image_matches(
+        declared_media_type=_declared_image_media_type(request),
+        name=name,
+        detected_media_type=detected_media_type,
+    )
 
 
 def _unavailable_storage_error() -> HTTPException:
@@ -157,7 +147,7 @@ def _unavailable_storage_error() -> HTTPException:
         status_code=503,
         detail={
             "code": ATTACHMENT_STORAGE_UNAVAILABLE,
-            "message": "本部署没有可用的附件存储（artifact_dir 为空，或对象存储只配了一半）",
+            "message": STORAGE_UNAVAILABLE_MESSAGE,
         },
     )
 

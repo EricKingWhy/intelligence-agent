@@ -30,14 +30,17 @@ interface Args {
   sessionId: string | null;
   dataRoot: string | null;
   check: boolean;
+  /** `@<图片路径>` 位置参数（PRD 用户故事 19 / AC4）：随首轮消息带入的附图。 */
+  images: string[];
 }
 
 const USAGE = [
-  "usage: ia-tui --session <id|new> [--data-root <dir>] [--server <url>]",
+  "usage: ia-tui --session <id|new> [--data-root <dir>] [--server <url>] [@<image>...]",
   "       ia-tui --check [--data-root <dir>]",
   "  --session <id|new>  会话 id；`new` = 先建一个会话再进界面",
   "  --data-root <dir>   数据根（默认 %APPDATA%\\intelligence-agent\\workspace，与桌面同源）",
   "  --server <url>      显式指向服务（开发用；跳过发现，不带凭据）",
+  "  @<image>            图片路径（PNG/JPEG/WEBP/GIF），带入首轮消息（可给多个）",
   "  --check             解析/冷启动本机服务并打印事实（凭据是否可用），不进入界面",
 ].join("\n");
 
@@ -47,6 +50,7 @@ function parseArgs(argv: string[]): Args {
     sessionId: null,
     dataRoot: null,
     check: false,
+    images: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -62,6 +66,8 @@ function parseArgs(argv: string[]): Args {
     } else if (arg === "--data-root" && value !== undefined) {
       args.dataRoot = value;
       i += 1;
+    } else if (arg !== undefined && arg.startsWith("@") && arg.length > 1) {
+      args.images.push(arg.slice(1));
     } else {
       throw new Error(`unknown argument: ${String(arg)}\n${USAGE}`);
     }
@@ -167,7 +173,7 @@ async function main(): Promise<void> {
     }
     sessionId = createdId;
   }
-  const app = new TuiApp({ baseUrl, token, sessionId });
+  const app = new TuiApp({ baseUrl, token, sessionId, initialImages: args.images });
   await app.start();
 }
 

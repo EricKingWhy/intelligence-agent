@@ -118,6 +118,7 @@ from agent_harness.session.errors import (
     ApprovalAlreadyResolved,
     ApprovalQueueMissing,
     ApprovalRequestMissing,
+    AttachmentMessageTooLarge,
     AttachmentReferenceInvalid,
     CompactionConcurrentWrite,
     CompactionInProgress,
@@ -125,6 +126,7 @@ from agent_harness.session.errors import (
     InvalidDecision,
     InvalidForkBoundary,
     InvalidSessionId,
+    ModelDoesNotSupportImages,
     PendingApprovalConflict,
     ProtectedFactReferenceInvalid,
     QueueItemNotFound,
@@ -137,6 +139,7 @@ from agent_harness.session.errors import (
     SnapshotTokenMismatch,
     SteerTargetNotFound,
     SupersedeTargetInvalid,
+    TooManyAttachments,
     UnknownModel,
     WorkspaceBindingConflict,
     WorkspaceMoveInvalid,
@@ -162,6 +165,11 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # #823 / MM-02：发送消息引用的 attachment_id 不合法（形态 / 不存在 / 读不回）——
     # 入参错误，客户端可纠正（读端点对"未被事件引用"另走 404，口径不同）。
     AttachmentReferenceInvalid: 422,
+    # #824 / MM-03：聚合上限与视觉门禁（发送端点，落盘前判定）。
+    # 数量超部署上限 → 422（入参非法）；所选模型不支持视觉却附图 → 422（可纠正：
+    # 改选视觉模型或去掉图）。总字节超限 → 413（见下方 413 组）。
+    TooManyAttachments: 422,
+    ModelDoesNotSupportImages: 422,
     # T3 / #308（ADR-0044 D1/D8/D9）：预算配置不可接受——alias 冲突 / 越过生效上层
     # ceiling。父类与两个子类各自登记（精确类型索引）。
     BudgetRejection: 422,
@@ -222,6 +230,9 @@ _DOMAIN_ERROR_STATUS: dict[type[SessionServiceError], int] = {
     # 拒绝继续。与 SeqConflict 同为 409 但**不可重试**：重读同一文件无用，需按
     # 脱敏定位记录人工修复；文案里已带该指引。
     EventLogCorruptError: 409,
+    # 413：单条消息引用的图片总字节超部署上限（#824 / MM-03）。与上传端点单张图
+    # 超限同码（HTTP `Content Too Large`）——都是"载荷太大"，客户端可缩小后重试。
+    AttachmentMessageTooLarge: 413,
 }
 
 #: workspace 包 / 文件系统异常 → HTTP status 的第二张表（WS-4 / #154）。
