@@ -319,8 +319,7 @@ class DockerSandbox(Sandbox):
                     if not stop_requested:
                         holder["stream"] = stream
                 if stop_requested:
-                    response_closed = self._close_exec_response(stream)
-                    stream_closed = self._close_exec_stream(stream)
+                    response_closed, stream_closed = self._close_exec_resources(stream)
                     with stream_lock:
                         holder["stream_cleanup"] = (
                             stream,
@@ -586,20 +585,28 @@ class DockerSandbox(Sandbox):
             return False, None
 
     @staticmethod
-    def _close_exec_response(stream: object | None) -> bool:
+    def _close_exec_response(stream: object | None) -> tuple[bool, bool]:
         if stream is None:
-            return True
+            return True, False
         # docker-py has no public response handle on CancellableStream. Its 7.x
         # implementation retains the HTTPResponse here and stream.close() only
         # shuts down the socket; feature-detect this optional compatibility hook.
         response = getattr(stream, "_response", None)
         if response is None:
-            return True
+            return True, False
         response_close = getattr(response, "close", None)
         if response_close is None:
-            return False
-        complete, _ = DockerSandbox._best_effort_bounded_call(response_close, 0.2)
-        return complete
+            return False, False
+        close_finished = threading.Event()
+
+        def close_response() -> None:
+            try:
+                response_close()
+            finally:
+                close_finished.set()
+
+        complete, _ = DockerSandbox._best_effort_bounded_call(close_response, 0.2)
+        return complete, not close_finished.is_set()
 
     @staticmethod
     def _close_exec_stream(stream: object | None) -> bool:
@@ -610,6 +617,15 @@ class DockerSandbox(Sandbox):
             return True
         complete, _ = DockerSandbox._best_effort_bounded_call(stream_close, 0.2)
         return complete
+
+    @staticmethod
+    def _close_exec_resources(stream: object | None) -> tuple[bool, bool]:
+        response_closed, response_close_pending = DockerSandbox._close_exec_response(
+            stream,
+        )
+        if response_close_pending:
+            return response_closed, False
+        return response_closed, DockerSandbox._close_exec_stream(stream)
 
     def _close_exec_reader(
         self,
@@ -636,8 +652,7 @@ class DockerSandbox(Sandbox):
                     response_closed = late_cleanup[1]
                     stream_closed = late_cleanup[2]
                 else:
-                    response_closed = self._close_exec_response(stream)
-                    stream_closed = self._close_exec_stream(stream)
+                    response_closed, stream_closed = self._close_exec_resources(stream)
                 closed_stream = stream
             if not worker.is_alive():
                 break
