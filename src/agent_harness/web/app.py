@@ -1690,7 +1690,8 @@ class CSPHeaderMiddleware:
 #: 通道。值形如 ``base64url.bearer.authorization.agent-harness.<base64url 无 padding 的 token>``：
 #: 前缀里的 `agent-harness` 是命名空间（k8s 用 `k8s.io`），避免与其他产品的同名子协议
 #: 碰撞；token 用 base64url 无 padding 编码，因为它必须落在 RFC 6455 的 HTTP token 字符
-#: 集内——padding 的 `=` 不是合法 token 字符（`.` 同样不是），只有 `[A-Za-z0-9_-]` 可用。
+#: 集内——padding 的 `=` 不是合法 token 字符（`.` 合法，故前缀里的点可用），编码体逐字符
+#: 落在 `[A-Za-z0-9_-]`。
 #: 前端对侧在 `web/src/lib/wsStream.ts` 的同名常量。
 WS_BEARER_SUBPROTOCOL_PREFIX = "base64url.bearer.authorization.agent-harness."
 
@@ -1841,7 +1842,7 @@ class AuthSeamMiddleware:
           WS 握手不受 CORS 约束，服务端不判 Origin 就等于允许用户访问的任意网页连上来
           读写会话。**范围仅限本路由**——跨源 HTTP 读写面（会话事件流 / 消息入口等）
           仍无来源闸而 CORS 为 `*`，那是既有缺口、不在本票 Scope。判据与
-          `projects.require_trusted_origin` 共用一份实现与文案常量。
+          `projects.require_trusted_origin` 共用一份策略实现（出口文案与 close reason 各自一份）。
 
         拒 = `websocket.close`（未 accept）⇒ uvicorn 回 **403** 且不建连
         （`websockets_impl.py:296-304`）。语义与 Django Channels 的

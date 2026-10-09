@@ -63,7 +63,7 @@ HTTP 用 401 JSON 响应，WS 用 `websocket.close`（未 accept）——uvicorn
    ⚠ **这一条是相对改动前的行为变更**，不是"零影响"：base 对**任意** Origin 的 WS 握手
    一律放行，现在跨源被拒（受影响旧用法：从 `file://` / sandboxed iframe 打开本服务，
    它们的 `Origin` 是 `null`）。票面验收 3 的准确表述是"本地信任模式仍可用；跨源浏览器
-   握手由放行改为拒绝"——**该重述经王浩宇 2026-10-10 直接批准（复审 P3-5 裁决选 A）**。
+   握手由放行改为拒绝"——该重述经用户在主对话 2026-10-10 00:03:35 CST（= 2026-10-09 16:03:35 UTC）回复 'a' 批准（复审 P3-5 裁决选 A），早于提交 ffcd19db（2026-10-09 17:11 UTC）。
 4. **拒的落点**：`await send({"type": "websocket.close", ...})` 且**不**先 accept。
    实测（uvicorn 0.52.4 `protocols/websockets/websockets_impl.py:296-304`）：
    握手前的 `websocket.close` 一律以 HTTP **403** 收场、连接不建立 ⇒ 与 Phoenix 的
@@ -86,7 +86,8 @@ Kubernetes 四行（机制摘要指向本文；Kubernetes 行见下节，即 P1-
 Channels（`channels-ws.py` / `channels-auth.py`）与 Phoenix（`phoenix-transport.ex`）
 有正文快照；Socket.IO 的官方文档页取回是 14 字节的 `404: Not Found`（该来源按
 URL + 小节标题引用，无正文快照）；**Kubernetes 无快照**——P1-1 所采纳的子协议方案
-只有 `file:line` 与 commit `714f97d7` 的引用，行号未随源码快照一并留存。
+只有 `file:line` 与 commit `714f97d7` 的引用，行号未随源码快照一并留存。另有
+`channels-denier-ref.md` 与 `socketio-mw.md` 两个同款 14 字节 `404: Not Found` 页。
 
 ## License
 

@@ -44,7 +44,7 @@
 `_raise_on_close`）。这里锚的是"升级阶段就失败"这个事实本身——**先 accept 再关**的实现
 不会在 `__enter__` 抛（那时拿到的是已建立的连接），所以两种实现仍能被区分。
 
-这 33 例不是一个模子：**拒**侧（凭据来源 × 有无 Origin × 本机/跨源）锚的是判据矩阵，
+接缝二的 33 例不是一个模子：**拒**侧（凭据来源 × 有无 Origin × 本机/跨源）锚的是判据矩阵，
 **放行**侧锚 over-fix（"没被过度收紧"）的共 **10 个用例函数**——其中 8 个走 `_ping_pong`
 （证明放行的是既有 `handle_websocket` 协议行为，连同 `test_unconfigured_accepts_local_browser_origins`
 的 4 项 parametrize 展开共 11 例）、2 个断言 `ws.accepted_subprotocol`（证明协商值）。
