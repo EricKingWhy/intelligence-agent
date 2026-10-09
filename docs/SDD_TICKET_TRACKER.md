@@ -7968,4 +7968,4 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **新残余 Q11（P3：`engines` minor 地板无机器执行面；实测 `node.version=22.0.0` 穿过 validator + 全套用例）** ⇒ 登记进 #919（更名 Q1–Q11）。**Q5 消解**：三处调用点已由 main #830 修法覆盖（2 × 原生 `truncateSync`、1 × `mkfifo` ENOENT skip）+ 本批探针；nightly tui（windows）腿待合并后首跑。
 - **冻结树 13 车道（`953550c9` / tree `a10e6b07`；日志 `D:\w21-work\gate-final.txt`）**：13/13 全绿（pytest 7183 passed / 0 failed；playwright 538 passed；coverage rc=0）；Gate-0 6/6 收据 `docs/gate/953550c9bbac00ae010802d0c3faaa9e7f4b518e.json`（40.1s）；`6534026e` 为 docs-only 收据提交 ⇒ §8.8.4 文档面机械归属。
 - **无答复披露**：三问（tui 冲突取法 / docs 冲突取法 / nightly tui 腿是否加 `npm run check`）用户未作答，按报告推荐项执行，已在 PR #920 正文披露供否决。
-- **待批准**：PR #920 merge（push 已执行）；#904/#905/#908 关单在集成后（§14.12）。
+- **已集成**：PR #920 merge **`98cd3025`**（2026-10-10；merge tree `8b3fe84f` **逐字节等于**冻结头 `c2d2b31e` 的 tree ⇒ 按 §8.8.4「树相同」传递代码车道证据，无需重跑）；服务端 CI：`gate0` pass 36s / `e2e 冒烟集（Chromium）` pass 6m0s / `windows-installer-smoke` pass 1m30s / gitleaks pass；#904/#905/#908 已按 §14.12 关单并各留集成记录评论（分支、交付 commit、集成负责人、验收核对、残余指向 #919）。分支 `codex/w21-residuals` 保留（删除需单独批准）。
