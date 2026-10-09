@@ -56,37 +56,50 @@ export interface HostPathsBridge {
 /**
  * 当前文档里的宿主路径桥；缺席或形状不对 → `undefined`（Web 页面永远走这条）。
  *
- * 形状用 `typeof` 逐层判而不是信全局：桥是 renderer 里可被页面脚本改写的全局，一个坏形状
- * 必须降级成"没有桥"，而不是让拖入路径炸在 `pathFor is not a function` 上（VS Code 同款纪律）。
+ * 形状用 `typeof` 逐层判而不是信全局：桥是 renderer 里可被页面脚本改写的全局（连键本身都
+ * 可能是抛错访问器），一个坏形状——或一次抛错的探测——必须降级成"没有桥"，而不是让拖入
+ * 路径炸在 `pathFor is not a function` 上（VS Code 同款纪律）。
  */
 export function hostPathsBridge(scope: unknown = globalThis): HostPathsBridge | undefined {
   if (typeof scope !== 'object' || scope === null) return undefined;
   // Named assertion, one reason: `globalThis` is a page-script-writable bag with no
   // schema to parse; every member below is checked at runtime before it is used.
   const host = scope as Record<string, unknown>;
-  const candidate = host[HOST_PATHS_GLOBAL];
-  if (typeof candidate !== 'object' || candidate === null) return undefined;
-  // 形状探测本身也是**可抛点**：`in` 会走 Proxy 的 `has` 陷阱、属性读取会走 getter，
-  // 而这两样都由页面脚本控制（暴力测试 R1/R3 实测：`has` 陷阱抛错会让拖入路径上抛出一个
-  // 未捕获错误，文件既不进引用也不进上传——静默吞掉整次投递）。所以探测整体包进 try：
-  // 坏形状的唯一合法归宿还是"没有桥"（上一段承诺的降级纪律）。
+  // 探测整体包进 try——**包括全局键本身的那一次读**：键也可以由页面脚本控制（抛错 accessor、
+  // Proxy 的 `get` 陷阱），而它同样是"坏形状"的一种。异常一旦逸出本函数，就会穿过
+  // `routeHostFiles` → Composer `addFiles` → `dropEvents.onDrop` 把整次拖入静默吞掉（文件既不进
+  // 引用也不进上传）；坏形状的唯一合法归宿还是"没有桥"（上一段承诺的降级纪律）。
   let pathFor: unknown;
+  let target: object | undefined;
   try {
+    // 形状探测本身也是**可抛点**：`in` 会走 Proxy 的 `has` 陷阱、属性读取会走 getter，
+    // 而这两样都由页面脚本控制（暴力测试 R1/R3 实测：`has` 陷阱抛错会让拖入路径上抛出一个
+    // 未捕获错误——静默吞掉整次投递）。
+    const candidate = host[HOST_PATHS_GLOBAL];
+    if (typeof candidate !== 'object' || candidate === null) return undefined;
     const probe = candidate as { pathFor?: unknown }; // Named assertion: 页面全局无 schema，逐成员运行期判。
     if (!('pathFor' in probe)) return undefined;
     pathFor = probe.pathFor;
+    target = candidate;
   } catch {
     return undefined;
   }
-  if (typeof pathFor !== 'function') return undefined;
+  if (typeof pathFor !== 'function' || target === undefined) return undefined;
   const lookup = pathFor; // `const` 绑定：闭包里保住收窄后的函数类型。
+  const self = target;
   return {
     // `call` binds back to the bridge object: a contextBridge proxy is not promised
     // to stay callable once detached. Non-string answers are flattened here so the
-    // returned bridge keeps its declared shape.
+    // returned bridge keeps its declared shape — and the call itself is a throwable
+    // point too (a detached proxy, a page-script wrapper), so it becomes "no path"
+    // instead of escaping into the drag path.
     pathFor: (file: File) => {
-      const path: unknown = lookup.call(candidate, file);
-      return typeof path === 'string' ? path : '';
+      try {
+        const path: unknown = lookup.call(self, file);
+        return typeof path === 'string' ? path : '';
+      } catch {
+        return '';
+      }
     },
   };
 }

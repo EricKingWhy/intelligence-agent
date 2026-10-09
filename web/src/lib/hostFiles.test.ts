@@ -78,6 +78,40 @@ describe('#826 hostPathsBridge — 形状判定', () => {
     }
   });
 
+  it('全局键本身抛错（页面脚本给该键装抛错访问器）→ undefined，且分流退化为上传，不抛', () => {
+    // 键同样由页面脚本控制（B 审查 F1：出厂 Electron 配置下不可达——`exposeInMainWorld` 把它定义成
+    // 只读不可配置；可达路径是非 Electron 语境 / 扩展注入 / 启用 kContextBridgeMutability）。这一读若在
+    // try 之外，异常会从 `hostPathsBridge()` 逸出到 `routeHostFiles` → Composer `addFiles` →
+    // `dropEvents.onDrop`，整次投递被静默吞掉（文件既不进引用也不进上传）。
+    Object.defineProperty(globalThis, HOST_PATHS_GLOBAL, {
+      configurable: true,
+      get() {
+        throw new Error('hostile key getter');
+      },
+    });
+    try {
+      expect(() => hostPathsBridge()).not.toThrow();
+      expect(hostPathsBridge()).toBeUndefined();
+      const pdf = file('notes.pdf', 'application/pdf');
+      expect(routeHostFiles([pdf])).toEqual({ uploads: [pdf], references: [] });
+    } finally {
+      Reflect.deleteProperty(globalThis, HOST_PATHS_GLOBAL);
+    }
+  });
+
+  it('桥的 pathFor 调用点抛错 → 返回的桥不抛、压成空串（声明形状字面成立）', () => {
+    const bridge = hostPathsBridge({
+      [HOST_PATHS_GLOBAL]: {
+        pathFor: () => {
+          throw new Error('detached contextBridge proxy');
+        },
+      },
+    });
+    expect(bridge).toBeDefined();
+    expect(() => bridge?.pathFor(file('a.pdf', 'application/pdf'))).not.toThrow();
+    expect(bridge?.pathFor(file('a.pdf', 'application/pdf'))).toBe('');
+  });
+
   it('形状正确 → 可直接调用，且非字符串返回值被压成空串（桥的声明形状不被破坏）', () => {
     const bridge = hostPathsBridge({ [HOST_PATHS_GLOBAL]: { pathFor: () => 7 } });
     expect(bridge).toBeDefined();

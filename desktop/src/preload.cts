@@ -8,6 +8,16 @@
  * The host token never reaches the renderer at all: main injects it into the
  * loopback proxy it owns (src/service-proxy.ts), so the local page never holds it.
  *
+ * ADAPTED from DeepSeek Harness (MIT License):
+ *   apps/desktop/src/preload-app.ts:76-84 (the one-method host-path bridge:
+ *   `pathFor(file)` delegating to `webUtils.getPathForFile`)
+ *   https://github.com/deepseek-ai/deepseek-harness
+ *   commit 5badb15009ae1756c3afe0ae0cef1faafc290ccc
+ * Full MIT text and provenance ledger: desktop/THIRD_PARTY_NOTICES.md.
+ * Changes: the bridge is gated by `isOwnLocalPage` (exact origin + main frame)
+ * instead of the upstream `dsh-app:` scheme, an unowned frame gets no host-path
+ * global at all, and the global name is this repo's `__IA_HOST_PATHS__`.
+ *
  * W-21 D3 (#815) — why this file is `.cts` and import-free:
  * a sandboxed renderer parses its preload as CommonJS and provides no module
  * resolution, so an ESM preload fails to load (measured: "Cannot use import

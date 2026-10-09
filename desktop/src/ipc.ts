@@ -94,17 +94,6 @@ export interface IaDesktopBridge {
 export const HOST_PATHS_GLOBAL = '__IA_HOST_PATHS__'
 
 /**
- * Renderer-side shape of the host-path bridge. One method: the absolute path of
- * a `File` the user picked or dropped, or `''` when that `File` has no disk
- * backend (clipboard bytes, a `File` constructed in page script). Electron's
- * `webUtils.getPathForFile` owns that decision; this repo adds no lookup of its
- * own, so there is no path for a file the user did not select.
- */
-export interface HostPathsBridge {
-  pathFor(file: File): string
-}
-
-/**
  * Reject IPC outside the allowed shell document origins.
  * @param event - IPC caller whose frame URL supplies the origin.
  * @param allowedOrigins - the shell's own document origin(s) for this operation.
