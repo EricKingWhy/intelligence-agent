@@ -1073,14 +1073,17 @@ function deadBranchText(line) {
   return (negated ? !truth : truth) ? undefined : line.trim()
 }
 
-export function unguardedBackupDelete(source) {
+export function unguardedBackupDelete(source, options = {}) {
+  const { sitePolicies = {}, requireSite = true } = options
   const problems = []
   const lines = stripNsisComments(source).split(/\r?\n/)
   const trace = logicLibTrace(lines)
   const macroRanges = macroBodyRanges(lines)
   // Either quote style is the same delete: measured on 3.0.4.1, `RMDir /r '…'`
-  // and `RMDir /r `…`` both compile and remove the directory.
-  const deleteLine = /RMDir\s+\/r\s+(['"`])\\\\\?\\\$iaBackupDirectory\1/i
+  // and `RMDir /r `…`` both compile and remove the directory. The target is the
+  // variable iaPrepareDelete writes and clears again on a refusal (#904), so a
+  // delete of anything else is a site this guard cannot say anything about.
+  const deleteLine = /RMDir\s+\/r\s+(['"`])\$iaDeleteTarget\1/i
   const ERRORS = '${Errors}'
   const errorsMacro = /\$\{Errors\}/i
   // A read is a line-anchored `${If}`/`${IfNot}`/`${Unless}` condition carrying
@@ -1091,6 +1094,18 @@ export function unguardedBackupDelete(source) {
   const errorsRead = /^\s*(?:\$\{(If|IfNot|Unless)\}[^\n]*\$\{Errors\}|IfErrors\b)/i
   const clearErrors = /^\s*ClearErrors\b/i
   const clearCall = /!insertmacro\s+iaClearBackupDir\b/i
+  // #904: the delete may only run on the target iaPrepareDelete built — that
+  // call is where the shape check and the reparse-point scan live — and only
+  // behind a status gate, so a refused target is never deleted. iaPrepareDelete
+  // clears the target on a refusal, and a caller that ignores the status cannot
+  // delete anything (measured: `RMDir /r ""` removes nothing and sets the error
+  // flag), but a site that never prepares at all would delete a path built
+  // somewhere else. The uninstaller names the helper's un. twin (`Call
+  // un.iaPrepareDelete`): NSIS only lets un. code call un.-prefixed functions
+  // (measured), and installer-cleanup.nsh instantiates both name spaces from one
+  // body — it is the same prepare step either way.
+  const prepareCall = /^\s*Call\s+(?:un\.)?iaPrepareDelete\b/i
+  const statusGate = /^\s*StrCmp\s+\$iaDeleteStatus\s+"ok"\s+0\s+\S+/i
   // Where the record has to land: HKCU, this application's own key, carrying the
   // whole backup path. Variable and define spellings are case-insensitive
   // (measured), so the match is too, and either the key or the value may be
@@ -1111,6 +1126,71 @@ export function unguardedBackupDelete(source) {
           !(index >= range.start && index <= range.end) || (i >= range.start && i <= range.end),
       )
     const blockStart = enclosingBlockStart(lines, i)
+    // Which site is this (#904)? The backup-delete rules below are the strict
+    // default (`backup`: the promote site). The other two recursive deletes of
+    // the shipped scripts have documented, narrower contracts and are named
+    // explicitly by the caller through `sitePolicies`; an unlisted site keeps
+    // the strict default, and a site name the table lists but the source does
+    // not use simply never matches.
+    const siteName = (
+      /^\s*(?:Function|!macro)\s+(\S+)/i.exec(lines[blockStart] ?? '')?.[1] ?? ''
+    ).toLowerCase()
+    const policy =
+      Object.entries(sitePolicies).find(
+        ([name]) => name.toLowerCase() === siteName,
+      )?.[1] ?? 'backup'
+    const wants = {
+      clearCall: policy === 'backup',
+      readCount: policy === 'backup' || policy === 'sweep',
+      record: policy === 'backup',
+      // `partial` (the rollback delete of the partial install): its verifier is
+      // the rename that follows, so the delete's own error is deliberately not
+      // read — what it must guarantee is a recorded leftover somewhere in the
+      // same function for the restore-failure path.
+      deferredRecord: policy === 'partial',
+      // `sweep` (the uninstaller): the application's registry key is on its way
+      // out, so the record is the report and the exit code instead.
+      sweepReport: policy === 'sweep',
+    }
+    // The target only exists after this call, and the call is what validates
+    // the name (shape) and the tree (reparse points).
+    const prepareIndex = (() => {
+      for (let j = i - 1; j >= blockStart; j -= 1) {
+        if (lines[j].trim() === '' || !onDeletePath(j)) continue
+        if (prepareCall.test(lines[j])) return j
+      }
+      return -1
+    })()
+    if (prepareIndex === -1) {
+      problems.push({
+        line: i + 1,
+        what: 'no Call iaPrepareDelete before the delete — the target is not shape-checked or scanned',
+      })
+    } else if (!onSameBranch(trace, prepareIndex, i)) {
+      problems.push({
+        line: i + 1,
+        what: 'the Call iaPrepareDelete above the delete sits in a branch the delete is not on — it does not validate this target',
+      })
+    } else if (branchDividersBetween(trace, prepareIndex, i).length > 0) {
+      problems.push({
+        line: i + 1,
+        what: 'the Call iaPrepareDelete above the delete sits in a sibling branch — it does not validate this target',
+      })
+    } else {
+      const gateIndex = (() => {
+        for (let j = i - 1; j > prepareIndex; j -= 1) {
+          if (lines[j].trim() === '' || !onDeletePath(j)) continue
+          if (statusGate.test(lines[j])) return j
+        }
+        return -1
+      })()
+      if (gateIndex === -1) {
+        problems.push({
+          line: i + 1,
+          what: `no ${'StrCmp $iaDeleteStatus "ok"'} gate between iaPrepareDelete and the delete — a refused target would still be deleted`,
+        })
+      }
+    }
     const blockEnd = (() => {
       for (let j = i + 1; j < lines.length; j += 1) {
         if (CLOSES_FUNCTION.test(lines[j])) return j
@@ -1149,7 +1229,7 @@ export function unguardedBackupDelete(source) {
     const clearIndex = rest.findIndex(
       (line, offset) => clearCall.test(line) && onDeletePath(i + 1 + offset),
     )
-    if (clearIndex === -1 || (limit !== -1 && limit < clearIndex)) {
+    if (wants.clearCall && (clearIndex === -1 || (limit !== -1 && limit < clearIndex))) {
       problems.push({ line: i + 1, what: 'no !insertmacro iaClearBackupDir after the delete' })
     }
     const bounds = [...enclosing, clearIndex].filter((index) => index !== -1)
@@ -1160,40 +1240,96 @@ export function unguardedBackupDelete(source) {
     }
     const readHits = window.filter(({ line }) => errorsRead.test(line))
     const strayErrors = window.filter(({ line }) => errorsMacro.test(line) && !errorsRead.test(line))
-    if (readHits.length === 0) {
-      problems.push({ line: i + 1, what: `missing ${ERRORS} check before iaClearBackupDir` })
-    } else if (readHits.length > 1) {
-      problems.push({
-        line: i + 1,
-        what: `${readHits.length} ${ERRORS} reads between the delete and iaClearBackupDir — only the first can see the failed delete`,
-      })
-    }
-    for (const stray of strayErrors) {
-      problems.push({
-        line: stray.index + 1,
-        what: 'an unrecognized ${Errors} usage between the delete and iaClearBackupDir — only a ${If}/${IfNot}/${Unless} condition or a raw IfErrors reads the flag',
-      })
-    }
-    const firstRead = readHits.length > 0 ? readHits[0].index : -1
-    if (
-      firstRead !== -1 &&
-      window.some(({ line, index }) => index < firstRead && clearErrors.test(line))
-    ) {
-      problems.push({
-        line: i + 1,
-        what: `ClearErrors between the delete and the ${ERRORS} read discards the failed delete`,
-      })
+    // The window's far end is the clear call at the promote site and the end of
+    // the block everywhere else, so the messages name the bound they use.
+    const windowEndLabel = wants.clearCall ? 'iaClearBackupDir' : 'the end of the delete\'s block'
+    if (wants.readCount) {
+      if (readHits.length === 0) {
+        problems.push({ line: i + 1, what: `missing ${ERRORS} check before ${windowEndLabel}` })
+      } else if (readHits.length > 1) {
+        problems.push({
+          line: i + 1,
+          what: `${readHits.length} ${ERRORS} reads between the delete and ${windowEndLabel} — only the first can see the failed delete`,
+        })
+      }
+      for (const stray of strayErrors) {
+        problems.push({
+          line: stray.index + 1,
+          what: `an unrecognized ${ERRORS} usage between the delete and ${windowEndLabel} — only a ${'${If}/${IfNot}/${Unless}'} condition or a raw IfErrors reads the flag`,
+        })
+      }
+      const firstRead = readHits.length > 0 ? readHits[0].index : -1
+      if (
+        firstRead !== -1 &&
+        window.some(({ line, index }) => index < firstRead && clearErrors.test(line))
+      ) {
+        problems.push({
+          line: i + 1,
+          what: `ClearErrors between the delete and the ${ERRORS} read discards the failed delete`,
+        })
+      }
     }
     // The record has to land where the reader looks (HKCU, this app's own key)
     // and carry the whole directory, not a name built from it: a record of
     // "$iaBackupDirectory-tmp" or one written to another hive names something
     // the next promote will never find — the R1 orphan again.
     const recordHit = window.find(({ line }) => recordWrite.test(line))
-    if (recordHit === undefined) {
+    if (wants.record && recordHit === undefined) {
       problems.push({
         line: i + 1,
         what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)',
       })
+    }
+    if (wants.deferredRecord) {
+      // The rollback site: the delete's own error is not read (the rename that
+      // follows is the operation whose failure has to be visible), but the
+      // function has to record the backup somewhere when the restore fails.
+      const block = lines.slice(blockStart, blockEnd + 1)
+      if (!block.some((line) => recordWrite.test(line))) {
+        problems.push({
+          line: i + 1,
+          what: 'the rollback site does not record a leftover (no IaLeftoverDir write of $iaBackupDirectory)',
+        })
+      }
+    }
+    if (wants.sweepReport) {
+      // The uninstaller sweep: the application's registry key is being removed,
+      // so the record is the report and the exit code. Enumerating by name shape
+      // is what makes the sweep independent of the single-slot records, and the
+      // prompt is the user's say before anything is deleted.
+      const block = lines.slice(blockStart, blockEnd + 1)
+      const required = [
+        {
+          re: /FindFirst\s+\$\d\s+\$\d\s+"\$INSTDIR\.old-\*"/i,
+          what: 'the sweep does not enumerate "$INSTDIR.old-*" by name shape',
+        },
+        {
+          re: /^\s*\$\{GetParent\}\s+"\$INSTDIR"\s+\$\d/im,
+          what:
+            'the sweep does not cut the parent off $INSTDIR in FileFunc\'s ("[path]" $result) order — swapped, the macro\'s last Pop lands on $INSTDIR and the delete pass then enumerates ".old-*" relative and finds nothing (measured on the real uninstaller)',
+        },
+        {
+          re: /\$\(iaLeftoverSweep\)/,
+          what: 'the sweep does not ask before deleting (no $(iaLeftoverSweep) prompt)',
+        },
+        {
+          re: /^\s*SetErrorLevel\b/im,
+          what: 'nothing sets a non-zero exit code when leftovers are kept',
+        },
+      ]
+      for (const { re, what } of required) {
+        if (!block.some((line) => re.test(line))) problems.push({ line: i + 1, what })
+      }
+      // Fail-closed on the swapped form itself: FileFunc passes the path as the
+      // first, quoted argument, so a ${GetParent} whose first argument is a bare
+      // variable is result-first by construction and writes into it.
+      if (block.some((line) => /\$\{GetParent\}\s+\$/.test(line))) {
+        problems.push({
+          line: i + 1,
+          what:
+            'a ${GetParent} in the sweep passes a variable as its first argument (FileFunc\'s order is "[path]" $result)',
+        })
+      }
     }
     // Conditional compilation above the delete (net-open) or anywhere in its
     // block: text that satisfies every check above is worth nothing if it never
@@ -1273,9 +1409,14 @@ export function unguardedBackupDelete(source) {
     // A delete inside a macro body only runs where that macro is inserted: with
     // no `!insertmacro` for it anywhere in the file the delete never runs, and
     // the window's `!macroend` bound made it look complete (round-5 item 4).
-    // Fail-closed: the file has to insert the macro after defining it.
+    // Fail-closed: the file has to insert the macro after defining it. The
+    // uninstaller sweep is the one exception (#904): its `customUnInstall` body
+    // is inserted by the electron-builder template, not by our file, and the
+    // uninstaller build fails outright if the template's insertion has no macro
+    // to expand.
     const macroName = /^\s*!macro\s+(\S+)/i.exec(lines[blockStart])?.[1]
     if (
+      policy !== 'sweep' &&
       macroName !== undefined &&
       !lines.some(
         (line, index) =>
@@ -1289,15 +1430,38 @@ export function unguardedBackupDelete(source) {
       })
     }
   }
-  if (sites === 0) {
-    problems.push({ line: 0, what: 'no long-path RMDir of $iaBackupDirectory found' })
+  if (sites === 0 && requireSite) {
+    problems.push({ line: 0, what: 'no recursive RMDir of $iaDeleteTarget (a prepared target) found' })
   }
   return problems
 }
 
-/** Build-time assertion for `unguardedBackupDelete` (#901 / R1). */
-export function validateBackupDeleteGuards(source, filename) {
-  const problems = unguardedBackupDelete(source)
+/**
+ * Delete sites whose contract deviates from the strict backup-delete default
+ * (#904). The promote site keeps the default — clear, exactly one read, record,
+ * clear call. The other two recursive deletes of the shipped scripts have
+ * narrower, documented jobs:
+ *
+ *   - `iarollbackapplication`: it removes the PARTIAL install before renaming
+ *     the backup back. The rename that follows is the operation whose failure
+ *     has to be visible, so this delete's own error is deliberately not read;
+ *     the function must record the backup for the restore-failure path instead.
+ *   - `customuninstall`: the uninstaller's leftover sweep. Its enumeration is by
+ *     name shape (the records are single slots and the uninstall section may
+ *     remove the key), the prompt is the user's say, and a leftover that stays
+ *     turns the exit code non-zero instead of being recorded in a key that is
+ *     going away. Its enclosing macro is inserted by the electron-builder
+ *     template, not by our file, which is why the macro-insertion rule below
+ *     does not apply to it.
+ */
+export const DELETE_SITE_POLICIES = {
+  iarollbackapplication: 'partial',
+  customuninstall: 'sweep',
+}
+
+/** Build-time assertion for `unguardedBackupDelete` (#901 / R1, #904). */
+export function validateBackupDeleteGuards(source, filename, options = {}) {
+  const problems = unguardedBackupDelete(source, options)
   if (problems.length > 0) {
     const where = problems
       .map((p) => (p.line === 0 ? p.what : `line ${p.line}: ${p.what}`))
@@ -1307,21 +1471,96 @@ export function validateBackupDeleteGuards(source, filename) {
 }
 
 /**
- * Validate every NSIS script that runs inside `customHeader`: installer.nsh and
- * the installer-directories.nsh it `!include`s. Both are compiled after
- * addLangs, so both share the #831 hazard; the #901 long-path and backup-delete
- * guards apply to both files, while the delete site itself only exists in
- * installer-directories.nsh.
+ * Build-time assertion for the #904 cleanup primitives (installer-cleanup.nsh).
+ *
+ * The delete-site rules are only as strong as the helpers behind them, and the
+ * site scan cannot see into an `!include`d helper's body: if the shape check,
+ * the reparse scan, the long-path form or the prepare wrapper went away, every
+ * site would still read as clean while the target is neither validated nor
+ * scanned. Everything here is therefore fail-closed: each primitive has to be
+ * present by name, the reparse mask and the UNC form have to be in the text,
+ * and the file may not grow a recursive delete of its own (that is the sites'
+ * job, where the guard can see its window).
+ */
+export function validateCleanupHelpers(source, filename) {
+  const code = stripNsisComments(source)
+  const required = [
+    {
+      what: 'Function iaCheckBackupShape',
+      re: /^\s*Function\s+iaCheckBackupShape\b/im,
+    },
+    {
+      what: 'the hex set of the shape check',
+      re: /"0123456789abcdefABCDEF"/i,
+    },
+    {
+      what: 'the ".old-{" literal of the shape check (braces included: that is the name System::Call\'s "g" GUID form produces)',
+      re: /"\.old-\{"/,
+    },
+    {
+      what: 'Function iaBuildLongPath',
+      re: /^\s*Function\s+iaBuildLongPath\b/im,
+    },
+    {
+      what: 'the "\\\\?\\UNC\\" long-path form for UNC paths',
+      re: /\\\\\?\\UNC\\/i,
+    },
+    {
+      what: 'Function iaScanReparsePoints',
+      re: /^\s*Function\s+iaScanReparsePoints\b/im,
+    },
+    {
+      what: 'the 0x400 FILE_ATTRIBUTE_REPARSE_POINT mask',
+      re: /0x400/i,
+    },
+    {
+      what: 'FindClose on the scan paths',
+      re: /^\s*FindClose\b/im,
+    },
+    {
+      what: 'Function iaPrepareDelete',
+      re: /^\s*Function\s+iaPrepareDelete\b/im,
+    },
+    {
+      what: 'the refusal that clears the delete target',
+      re: /StrCpy\s+\$iaDeleteTarget\s+""/i,
+    },
+  ]
+  const problems = required.filter(({ re }) => !re.test(code)).map(({ what }) => `missing ${what}`)
+  if (/RMDir\s+\/r/im.test(code)) {
+    problems.push('a recursive delete inside the helper file — deletes belong to the sites the guard inspects')
+  }
+  if (problems.length > 0) {
+    throw new Error(`${filename}: cleanup helpers incomplete — ${problems.join('; ')}`)
+  }
+}
+
+/**
+ * Validate every NSIS script that runs inside `customHeader`: installer.nsh,
+ * the installer-cleanup.nsh it `!include`s unconditionally, and the
+ * installer-directories.nsh it includes for the installer build only. All three
+ * are compiled after addLangs, so all three share the #831 hazard; the #901
+ * long-path guard applies to all three. The backup-delete guard runs on the two
+ * files that hold delete sites (installer-cleanup.nsh may not hold one at all),
+ * with the #904 site policies applied, and the cleanup primitives themselves are
+ * asserted separately.
  */
 export function validateInstallerScripts(installerDir) {
-  for (const file of ['installer.nsh', 'installer-directories.nsh']) {
+  for (const file of ['installer.nsh', 'installer-cleanup.nsh', 'installer-directories.nsh']) {
     const source = readFileSync(join(installerDir, file), 'utf8')
     validateLangStringGuards(source, file)
     validateLongPathPrefixes(source, file)
   }
-  validateBackupDeleteGuards(
-    readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
-    'installer-directories.nsh',
+  for (const file of ['installer-directories.nsh', 'installer.nsh']) {
+    validateBackupDeleteGuards(
+      readFileSync(join(installerDir, file), 'utf8'),
+      file,
+      { sitePolicies: DELETE_SITE_POLICIES },
+    )
+  }
+  validateCleanupHelpers(
+    readFileSync(join(installerDir, 'installer-cleanup.nsh'), 'utf8'),
+    'installer-cleanup.nsh',
   )
 }
 

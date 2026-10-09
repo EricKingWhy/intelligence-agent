@@ -6,8 +6,10 @@
 ;                     move any previous version aside (iaStageApplication)
 ;   customInstall   - end of the install section: verify the new files and
 ;                     either delete the backup or roll back (iaPromoteApplication)
-;   customUnInstall - uninstall section: user data is NEVER deleted here;
-;                     explicit cleanup is scripts/clean-user-data.mjs
+;   customUnInstall - uninstall section: sweep the "<install dir>.old-{guid}"
+;                     backup directories earlier updates left behind (#904);
+;                     user data is NEVER deleted here, explicit cleanup is
+;                     scripts/clean-user-data.mjs
 ;
 ; Design notes (from DeepSeek Harness installer.nsh, MIT, commit
 ; 5badb15009ae1756c3afe0ae0cef1faafc290ccc — per-user refusal pattern):
@@ -24,6 +26,10 @@
 ; Full MIT text and provenance ledger: desktop/THIRD_PARTY_NOTICES.md.
 
 !include "LogicLib.nsh"
+; The uninstaller sweep needs ${GetParent}; FileFunc.nsh is the NSIS standard
+; library that provides it (its own include guard makes the double include with
+; the template's multiUser.nsh harmless).
+!include "FileFunc.nsh"
 
 ; #816 (W-21 D1): `__FILEDIR__` is only usable here, at the top level of this
 ; file. Inside a macro body it is substituted when the macro is inserted — in
@@ -49,6 +55,13 @@
 !macro customHeader
   ManifestDPIAware true
 
+  ; #904: the shape check, the reparse-point refusal and the long-path form are
+  ; shared: the installer protocol uses them, and the uninstaller's leftover
+  ; sweep does too, so this include is NOT under the BUILD_UNINSTALLER guard.
+  ; Every function in it stays reachable from both builds — an unreferenced
+  ; function is fatal there (warning 6010).
+  !include "${IA_INSTALLER_DIR}\installer-cleanup.nsh"
+
   !ifndef BUILD_UNINSTALLER
     !include "${IA_INSTALLER_DIR}\installer-directories.nsh"
   !endif
@@ -65,6 +78,8 @@
   LangString iaUpdateFailed ${LANG_ENGLISH} "The update failed: the new files are incomplete. The previous version has been restored."
   LangString iaRollbackFailed ${LANG_ENGLISH} "Could not restore the previous version automatically. The complete backup was kept at:"
   LangString iaStaleBackup ${LANG_ENGLISH} "The update is complete, but the previous version could not be removed completely. Delete this folder to reclaim the space:"
+  LangString iaLeftoverSweep ${LANG_ENGLISH} "Earlier updates left backup folders of the previous version next to the installation directory, and they can take up a lot of disk space. Delete them now?"
+  LangString iaLeftoverKept ${LANG_ENGLISH} "Some backup folders could not be removed: they are in use, contain links, or were not created by this installer. They were left in place — delete them by hand to reclaim the space."
   !endif
   !ifdef LANG_SIMPCHINESE
   LangString iaPerUserOnly ${LANG_SIMPCHINESE} "此安装程序仅支持按用户安装。检测到 Intelligence Agent 的按计算机安装，请先卸载它，再重新运行此安装程序。"
@@ -72,6 +87,8 @@
   LangString iaUpdateFailed ${LANG_SIMPCHINESE} "更新失败：新文件不完整。已恢复到旧版本。"
   LangString iaRollbackFailed ${LANG_SIMPCHINESE} "无法自动恢复旧版本。完整备份保留在："
   LangString iaStaleBackup ${LANG_SIMPCHINESE} "更新已完成，但旧版本未能完全删除。可手动删除以下文件夹以回收磁盘空间："
+  LangString iaLeftoverSweep ${LANG_SIMPCHINESE} "早前的更新在安装目录旁留下了旧版本的备份文件夹，可能占用大量磁盘空间。现在删除它们吗？"
+  LangString iaLeftoverKept ${LANG_SIMPCHINESE} "部分备份文件夹未能删除：它们正在使用、包含链接，或不是本安装程序创建的。已保留原样，可手动删除以回收磁盘空间。"
   !endif
 !macroend
 
@@ -102,4 +119,82 @@
   ;   node scripts/clean-user-data.mjs --preview
   ; The stock template only removes $APPDATA\${APP_FILENAME} when the
   ; --delete-app-data flag is passed; this installer never passes it.
+  ;
+  ; #904 item 4: the same update protocol leaves "<install dir>.old-{guid}"
+  ; backup directories NEXT TO the install directory, and the stock uninstaller
+  ; does not know them — one machine carried 3.50 GiB in five of them. This
+  ; sweep is the authoritative discovery path for them: it enumerates by NAME
+  ; SHAPE, so it does not depend on the IaBackupDir / IaLeftoverDir single
+  ; slots (only one leftover can be recorded at a time, and the uninstall
+  ; section is free to remove the registry key). Fail-closed throughout: only a
+  ; name passing the shape check for exactly "$INSTDIR.old-{8-4-4-4-12}"
+  ; (iaStageApplication's own format, braces included — measured) is touched,
+  ; every candidate goes through the shared prepare step (which refuses a tree
+  ; containing a reparse point — RMDir /r deletes THROUGH a junction, measured),
+  ; and anything left behind is reported and turns the uninstall's exit code
+  ; non-zero (the section's SetErrorLevel: it reaches a caller through an
+  ; in-place launch -- the form the stock updater's own call uses -- while a
+  ; plain launch only reports the stub's 0 either way; readings in
+  ; test/harness/nsis-probes/launch-form-probe). $9 counts in the first pass,
+  ; then whatever was kept.
+  ; $INSTDIR itself may already be gone here; only its name is needed, and the
+  ; leftovers live beside it.
+  FindFirst $0 $1 "$INSTDIR.old-*"
+  StrCmp $0 "" iaSweepDone
+  StrCpy $9 0
+iaSweepCount:
+  StrCmp $1 "" iaSweepAsk
+  StrCmp $1 "." iaSweepCountNext
+  StrCmp $1 ".." iaSweepCountNext
+  IntOp $9 $9 + 1
+iaSweepCountNext:
+  FindNext $0 $1
+  Goto iaSweepCount
+iaSweepAsk:
+  FindClose $0
+  StrCmp $9 0 iaSweepDone
+  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDone
+iaSweepDelete:
+  ; The leftovers sit beside $INSTDIR and FindFirst hands back leaf names, so
+  ; the parent directory is cut off $INSTDIR once (FileFunc.nsh's ${GetParent},
+  ; the NSIS standard library helper -- "GetParent" is not an instruction).
+  ; FileFunc's order is "[path]" $result: swapped, the macro's last Pop lands
+  ; on $INSTDIR, the delete pass then enumerates ".old-*" relative and finds
+  ; nothing (measured on the real uninstaller), so the guard pins this form.
+  ${GetParent} "$INSTDIR" $2
+  FindFirst $0 $1 "$INSTDIR.old-*"
+  StrCmp $0 "" iaSweepDone
+  StrCpy $9 0
+iaSweepLoop:
+  StrCmp $1 "" iaSweepLoopEnd
+  StrCmp $1 "." iaSweepNext
+  StrCmp $1 ".." iaSweepNext
+  StrCpy $iaDeleteCandidate "$2\$1"
+  StrCpy $iaDeleteBase "$INSTDIR"
+  StrCpy $iaDeleteShapeCheck "1"
+  ; This body only ever compiles inside the uninstaller build (the installer
+  ; build never inserts customUnInstall, and NSIS compiles a macro body only
+  ; where it is inserted -- measured: an invalid instruction in this body was
+  ; reported by the BUILD_UNINSTALLER pass alone). There, this is un. code and
+  ; NSIS only lets it Call un.-prefixed functions, so the call names the
+  ; uninstaller instantiation of the helper directly. The installer's own
+  ; delete sites use the plain name.
+  Call un.iaPrepareDelete
+  StrCmp $iaDeleteStatus "ok" 0 iaSweepKept
+  ClearErrors
+  RMDir /r "$iaDeleteTarget"
+  IfErrors 0 iaSweepNext
+  StrCpy $iaDeleteStatus "failed"
+iaSweepKept:
+  DetailPrint "customUnInstall: leftover kept: $iaDeleteCandidate ($iaDeleteStatus)"
+  IntOp $9 $9 + 1
+iaSweepNext:
+  FindNext $0 $1
+  Goto iaSweepLoop
+iaSweepLoopEnd:
+  FindClose $0
+  StrCmp $9 0 iaSweepDone
+  MessageBox MB_OK|MB_ICONEXCLAMATION "$(iaLeftoverKept)" /SD IDOK
+  SetErrorLevel 2
+iaSweepDone:
 !macroend
