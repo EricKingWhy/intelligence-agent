@@ -361,10 +361,13 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                     # 续聊走 SessionService（业务逻辑不进 WS 层）
                     from agent_harness.agent.budget import BudgetRejection
                     from agent_harness.session.service import (
+                        AttachmentMessageTooLarge,
                         AttachmentReferenceInvalid,
                         InvalidSessionId,
+                        ModelDoesNotSupportImages,
                         ProtectedFactReferenceInvalid,
                         SessionNotFound,
+                        TooManyAttachments,
                         WorkspaceBindingConflict,
                     )
                     from agent_harness.web.app import session_service, ws_budget_claims
@@ -431,6 +434,9 @@ async def handle_websocket(websocket: WebSocket, state: AppState) -> None:
                         SessionNotFound,
                         ProtectedFactReferenceInvalid,
                         AttachmentReferenceInvalid,
+                        TooManyAttachments,
+                        AttachmentMessageTooLarge,
+                        ModelDoesNotSupportImages,
                         WorkspaceBindingConflict,
                         BudgetRejection,
                     ) as e:

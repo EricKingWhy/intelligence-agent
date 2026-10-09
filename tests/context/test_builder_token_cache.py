@@ -66,13 +66,13 @@ class TestTokenMemoCorrectness:
         builder = ContextBuilder(ScriptedModel([]))
 
         calls = {"n": 0}
-        real_estimate = builder_module.estimate_tokens
+        real_cost = builder_module.message_cost
 
-        def counting_estimate(text: str) -> int:
+        def counting_cost(message) -> int:
             calls["n"] += 1
-            return real_estimate(text)
+            return real_cost(message)
 
-        monkeypatch.setattr(builder_module, "estimate_tokens", counting_estimate)
+        monkeypatch.setattr(builder_module, "message_cost", counting_cost)
 
         await builder.build(session)
         first_round = calls["n"]
@@ -156,13 +156,13 @@ class TestTokenMemoFallback:
         await builder.build(session)  # fallback 路径
 
         calls = {"n": 0}
-        real_estimate = builder_module.estimate_tokens
+        real_cost = builder_module.message_cost
 
-        def counting_estimate(text: str) -> int:
+        def counting_cost(message) -> int:
             calls["n"] += 1
-            return real_estimate(text)
+            return real_cost(message)
 
-        monkeypatch.setattr(builder_module, "estimate_tokens", counting_estimate)
+        monkeypatch.setattr(builder_module, "message_cost", counting_cost)
 
         session.append(TOOL_RESULT, {"tool_call_id": "dangling-1", "content": "结果"})
         await builder.build(session)
@@ -199,13 +199,13 @@ class TestTokenMemoVisionDimension:
         non_vision_messages = derive_messages(session.events, supports_vision=False)
 
         calls = {"n": 0}
-        real_estimate = builder_module.estimate_tokens
+        real_cost = builder_module.message_cost
 
-        def counting_estimate(text: str) -> int:
+        def counting_cost(message) -> int:
             calls["n"] += 1
-            return real_estimate(text)
+            return real_cost(message)
 
-        monkeypatch.setattr(builder_module, "estimate_tokens", counting_estimate)
+        monkeypatch.setattr(builder_module, "message_cost", counting_cost)
 
         builder._estimate_tokens_cached(session, vision_messages)
         assert calls["n"] == 1  # 单个投影事件恰好编码一次
@@ -228,13 +228,13 @@ class TestSingleEstimationPass:
         builder = ContextBuilder(ScriptedModel([]))
 
         calls = {"n": 0}
-        real_estimate = builder_module.estimate_tokens
+        real_cost = builder_module.message_cost
 
-        def counting_estimate(text: str) -> int:
+        def counting_cost(message) -> int:
             calls["n"] += 1
-            return real_estimate(text)
+            return real_cost(message)
 
-        monkeypatch.setattr(builder_module, "estimate_tokens", counting_estimate)
+        monkeypatch.setattr(builder_module, "message_cost", counting_cost)
         await builder.build(session)
 
         assert calls["n"] == 3  # 3 条投影消息各一次（旧实现要 6 次）

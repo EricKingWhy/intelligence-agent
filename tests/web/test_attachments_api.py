@@ -44,6 +44,14 @@ _DATA_PREFIX = "data:"
 _OCTET = {"content-type": "application/octet-stream"}
 _JSON_HDR = {"content-type": "application/json"}
 
+#: #824 / MM-03：发送带图消息现在有服务端视觉门禁（非视觉模型 → 422）。本文件的
+#: 读回授权断言都用 `_reference` 发一条带附件引用的消息，故默认装配一个**显式声明
+#: 支持视觉**的 catalog，让发送链可走通（门禁本身的测试在 test_mm03_gates_and_limits.py）。
+_VISION_CATALOG = json.dumps(
+    [{"name": "vision-probe", "provider": "deepseek",
+      "model_name": "deepseek-chat", "supports_vision": True}]
+)
+
 
 def _client(tmp_path: Path, **overrides: Any) -> TestClient:
     # 所有用例都把附件落盘根指向 tmp_path：默认 `.agent/artifacts` 是相对进程 CWD
@@ -54,6 +62,7 @@ def _client(tmp_path: Path, **overrides: Any) -> TestClient:
         workspace_dir=str(tmp_path),
         artifact_dir=str(tmp_path / "artifacts"),
         model_api_key="sk-test",
+        agent_models=overrides.pop("agent_models", _VISION_CATALOG),
         **overrides,
     )
     return TestClient(create_app(settings, enable_cors=False))
@@ -66,7 +75,11 @@ def _create_session(client: TestClient) -> str:
     ):
         resp = client.post(
             "/api/sessions",
-            json={"task": "hi", "budget": {"local": {"max_agent_turns": 1}}},
+            json={
+                "task": "hi",
+                "model": "vision-probe",
+                "budget": {"local": {"max_agent_turns": 1}},
+            },
         )
     assert resp.status_code == 200, resp.text
     frames = [
@@ -307,3 +320,38 @@ def test_json_endpoint_body_cap_is_unchanged(tmp_path: Path) -> None:
 
     assert resp.status_code == 413, resp.text
     assert resp.json()["detail"] == BODY_TOO_LARGE_DETAIL
+
+
+# ---------------------------------------------------------------------------
+# #824 / MM-03：像素 / 边长上限同样是"保存前拒绝"（AC1 不落事件、不留存储残留）
+# ---------------------------------------------------------------------------
+
+
+def test_over_max_pixels_is_422_and_leaves_no_residue(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    client = _client(tmp_path, attachment_max_image_pixels=100)
+    session_id = _create_session(client)
+
+    resp = _upload(client, session_id, png_bytes(50, 50))  # 2500 px > 100
+
+    assert resp.status_code == 422, resp.text
+    session_dir = artifact_dir / session_id / "attachments"
+    leftovers = (
+        [p for p in session_dir.rglob("*") if p.is_file()] if session_dir.exists() else []
+    )
+    assert leftovers == [], "超像素不得留下任何存储残留"
+
+
+def test_over_max_dimension_is_422_and_leaves_no_residue(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    client = _client(tmp_path, attachment_max_image_dimension=16)
+    session_id = _create_session(client)
+
+    resp = _upload(client, session_id, png_bytes(32, 4))  # 边长 32 > 16
+
+    assert resp.status_code == 422, resp.text
+    session_dir = artifact_dir / session_id / "attachments"
+    leftovers = (
+        [p for p in session_dir.rglob("*") if p.is_file()] if session_dir.exists() else []
+    )
+    assert leftovers == [], "超边长不得留下任何存储残留"
