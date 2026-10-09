@@ -1,0 +1,1 @@
+2026-10-10	#916 discard_local_artifacts 删不掉 Windows 只读回执：rmtree 加 onerror 清只读位后重试（旧 ignore_errors=True 静默吞掉只读文件删除失败）；清位用「原 mode 或上写位」避免抹掉读权限；新增 Windows 语义回归用例（模拟只读 unlink 被拒，红→绿）	cc8b67c9361c84a4e7b20a607a0e3ea198dc3c4a..f819979664c43cc21ecc9d4adde041c08a0a84c0
