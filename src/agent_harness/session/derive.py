@@ -1855,10 +1855,11 @@ def latest_direct_user_input_event(
         event = events_by_seq.get(source_range[0])
         # P3-1（#911）：`replace`（compaction 摘要替身）与 `input_request_id`（澄清答复）
         # 都不是"新的约束来源"，在事实闸门里被排除，此处同样排除。
-        # 口径说明：`input_request_id` 与事实闸门一样是"**键存在即排除**"（`in`），非逐字取 str 后判 ——
+        # 口径说明（仅就 `input_request_id` 而言）：该键**存在即排除**（`in`），非逐字取 str 后判 ——
         # 非 str 的畸形载荷（如 `{"input_request_id": 123}`）同样被排除，两处保持一致。
-        # （注意：本函数开头的 `latest_direct_message` 早退守卫用的是 `isinstance(..., str)`，属既有写法，
-        # 与上述两条 `in` 不是同一条判据；`x is str` 与 `键存在` 只在非 str 载荷上分叉。）
+        # `replace` 则与事实闸门同为**真值判定**（`event.data.get("replace")`）。
+        # 另注意本函数开头的 `latest_direct_message` 早退守卫用的是 `isinstance(..., str)`（既有写法）：
+        # 同一函数内三种写法并存，与上面两条都不是同一条判据。
         #
         # 两类事件都是真 `HumanMessage`、投影文本与自身 content 逐字相等 ⇒ 天然满足候选
         # 的「单事件来源范围 + 投影文本 == 事件 content」，此前只有 C2（summary 命名）那一支
