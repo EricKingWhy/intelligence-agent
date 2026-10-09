@@ -29,7 +29,7 @@
   `base64url.bearer.authorization.k8s.io.<base64url 无 padding 的 token>` 承载 Bearer，
   校验成功后**剥离该子协议不回显**（防泄漏）。
 
-判别力说明（为什么这些用例能区分"拒"与"放行"）：本文件共 **33 例**，走**两条不同的
+判别力说明（为什么这些用例能区分"拒"与"放行"）：本文件共 **35 例**，走**两条不同的
 测试接缝**，断言强度不同，别混为一谈。
 
 **接缝一：真实 uvicorn + httpx2**（末尾 2 例）。被拒的握手由 uvicorn 回 HTTP 403，
@@ -38,12 +38,16 @@
 连会话面都没进"这个结构性事实（订阅 / 写入都到不了业务侧，且同一服务上带凭据的连接
 照常工作——拒的是连接，不是把进程搞崩）。
 
-**接缝二：starlette `TestClient`**（其余 **31 例**，含 parametrize 展开）。`__enter__`
+**接缝二：starlette `TestClient`**（其余 **33 例**，含 parametrize 展开）。`__enter__`
 收到 accept 之前的 close 就抛 `WebSocketDisconnect`，**拿不到 status_code**（它只在
 `websocket.http.response.start` 那条路上才带状态码，见 `starlette/testclient.py` 的
 `_raise_on_close`）。这里锚的是"升级阶段就失败"这个事实本身——**先 accept 再关**的实现
-不会在 `__enter__` 抛（那时拿到的是已建立的连接），所以两种实现仍能被区分。这 31 例
-覆盖的是**判据矩阵**（凭据来源 × 有无 Origin × 本机/跨源），不是状态码。
+不会在 `__enter__` 抛（那时拿到的是已建立的连接），所以两种实现仍能被区分。
+
+这 33 例不是一个模子：**拒**侧（凭据来源 × 有无 Origin × 本机/跨源）锚的是判据矩阵，
+**放行**侧（`_ping_pong` 证明放行的是既有 `handle_websocket` 协议行为、`ws.accepted_subprotocol`
+证明协商值）锚的是"没被过度收紧"——后者是 over-fix 的反锚，与"拒"侧同等重要，别被
+"判据矩阵"四个字盖过去。
 """
 
 from __future__ import annotations
@@ -271,6 +275,40 @@ def test_subprotocol_credential_is_not_echoed(tmp_path: Path) -> None:
                     WS_BUSINESS_SUBPROTOCOL, _bearer_subprotocol(_token()),
                 ]) as ws:
         assert ws.accepted_subprotocol == WS_BUSINESS_SUBPROTOCOL
+
+
+def test_does_not_echo_unknown_subprotocol(tmp_path: Path) -> None:
+    """客户端自带一个第三方子协议（无凭据）⇒ 仍被拒。
+
+    子协议协商的基本约定是"回显 = 我实现了这个协议"：原实现回显"第一个非 token 前缀的
+    子协议"，客户端自带什么就回显什么。白名单化后**没有人**会拿到那个回显——拒绝路径上
+    `__enter__` 直接抛（本用例），放行路径上 `accepted_subprotocol` 恒为 `None` 或业务
+    子协议（见 `test_unknown_subprotocol_is_not_echoed_even_when_credential_is_valid`）。
+    这条同时锚住"改了回显策略不是把闸门一起放松"。
+    """
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            pytest.raises(WebSocketDisconnect), \
+            client.websocket_connect(
+                "/api/ws", subprotocols=["other.product.v9"]):
+        pass
+
+
+def test_unknown_subprotocol_is_not_echoed_even_when_credential_is_valid(
+    tmp_path: Path,
+) -> None:
+    """凭据有效但客户端只带第三方子协议 ⇒ 放行，且回显值**不是**它（白名单的真读数）。
+
+    上一条在拒绝路径上量不到回显（`__enter__` 已抛），这条走放行路径才拿得到
+    `accepted_subprotocol`：`other.product.v9` 从未被请求回显 ⇒ 它是 `None`。
+    原实现会在这里回显 `other.product.v9`。
+    """
+    with TestClient(_app(tmp_path, jwt_secret=_SECRET)) as client, \
+            client.websocket_connect(
+                "/api/ws",
+                headers={"Authorization": f"Bearer {_token()}"},
+                subprotocols=["other.product.v9"],
+            ) as ws:
+        assert ws.accepted_subprotocol is None
 
 
 def test_refuses_browser_shaped_client_without_credential(tmp_path: Path) -> None:

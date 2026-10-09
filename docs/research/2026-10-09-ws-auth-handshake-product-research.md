@@ -64,27 +64,50 @@ HTTP 用 401 JSON 响应，WS 用 `websocket.close`（未 accept）——uvicorn
    它们的 `Origin` 是 `null`）。票面验收 3 的准确表述是"本地信任模式仍可用；跨源浏览器
    握手由放行改为拒绝"。
 4. **拒的落点**：`await send({"type": "websocket.close", ...})` 且**不**先 accept。
-   实测（uvicorn 0.52.4 `protocols/websockets/websockets_impl.py:295-303`）：
+   实测（uvicorn 0.52.4 `protocols/websockets/websockets_impl.py:296-304`）：
    握手前的 `websocket.close` 一律以 HTTP **403** 收场、连接不建立 ⇒ 与 Phoenix 的
    403 同形；给出 `code=1008`（policy violation）是为了在 ASGI 层表达语义，
    但**不声称**它到达客户端（HTTP/1.1 403 响应里没有 close code）。
-5. **出口的文案形状分叉，策略不分叉**：策略（含 `origin_is_local` 与原因文案）抽成
-   `projects.check_trusted_origin` 由 HTTP / WS 共用（#890 P3-4）；两侧只在出口上分叉——
-   HTTP 转 403 JSON，WS 转握手前 close。WS 侧的 `Origin` 只进日志且按 `[:120]` 截断
-   （客户端可控、无长度上界），close `reason` 用固定短 ASCII（ASGI 限 ≤123 字节可打印
-   ASCII，且它到不了客户端）。
+5. **策略与文案都不分叉，只有出口形状分叉**：策略（`origin_is_local`）+ 原因文案（含
+   `Origin` 的那句）抽成 `projects.check_trusted_origin` 由 HTTP / WS 共用（#890 P3-4），
+   WS 侧记的正是它返回的那条字符串；两侧只在出口上分叉——HTTP 转 403 JSON，WS 转握手前
+   close。日志按 `[:120]` 截断（`Origin` 客户端可控、无长度上界），close `reason` 用固定
+   短 ASCII（ASGI 限 ≤123 字节可打印 ASCII，且它到不了客户端）。
 
 ## 与既有来源清单的关系（§3.1 偏差披露）
 
 `docs/agents/reference-sources.md` §2 已有「WebSocket / ASGI transport」节，但只索引
 RFC 6455 / ASGI 规范 / uvicorn 设置 / `websockets` 内存文档——**鉴权接入面没有条目**。
-本次调研按 §3.1「出现新领域/新来源先补本清单」在该节补了 Channels / Phoenix / Socket.IO
-三行（机制摘要指向本文）。三家的本地克隆不落盘（本机无 `D:\reference`；本次按需取
-单文件正文并记 commit / tag），正文快照留在 `~/refs-890/src/`（本机临时目录，不入库）。
+本次调研按 §3.1「出现新领域/新来源先补本清单」在该节补了 Channels / Phoenix / Socket.IO /
+Kubernetes 四行（机制摘要指向本文；Kubernetes 行见下节，即 P1-1 所采纳的子协议方案来源）。
+四家的本地克隆不落盘（本机无 `D:\reference`；本次按需取单文件正文并记 commit / tag），
+正文快照留在 `~/refs-890/src/`（本机临时目录，不入库）。
 
 ## License
 
-三家均为宽松许可（Channels BSD-3-Clause、Phoenix MIT、Socket.IO MIT）。本票
-**未逐字复制**任一上游代码：只取"判定点必须在 accept 之前 + 拒走 close"这条机制，
+四家均为宽松许可（Channels BSD-3-Clause、Phoenix MIT、Socket.IO MIT、Kubernetes
+Apache-2.0）。本票**未逐字复制**任一上游代码：只取"判定点必须在 accept 之前 + 拒走
+close"这条机制与 k8s 的子协议**形状**（前缀命名空间改为本项目自己的 `agent-harness`），
 判据、常量、文案全部来自本项目既有实现（`AuthSeamMiddleware` / `_LOCAL_HOSTNAMES`），
 故不新增 `THIRD_PARTY_NOTICES` 条目。
+
+## 部署约束：反向代理必须转发 `Sec-WebSocket-Protocol`（#890 P4）
+
+浏览器侧的凭据只在升级请求的 `Sec-WebSocket-Protocol` 头里（见上节），因此**任何**
+夹在浏览器与本服务之间的反向代理都必须：
+
+1. 转发请求方向的 `Sec-WebSocket-Protocol` 头（含其逗号分隔的多个值）；
+2. 转发 101 响应方向的 `Sec-WebSocket-Protocol` 回显头（回显的只可能是业务子协议
+   `agent-harness.v1`，见 `app.py` 的 `_negotiate_subprotocol`），且不得自行改写/丢弃
+   逗号分隔的多个值。
+
+任一条缺失的后果是**静默降级**：前端拿不到凭据通道即回落 SSE（`web/src/lib/wsStream.ts`
+的两条降级路径有 `console.warn`），连接本身看起来"没有报错"，只是变成交付层攒包的非
+live 通道。配了 `JWT_SECRET` 的部署尤其要检查这一条——本地信任模式下凭据通道不参与判定，
+漏配也不会显形。
+
+本仓两条既有代理都满足：`desktop/src/service-proxy.ts` 的 `upstreamHeaders()` 对除
+`host` / `authorization` 外的入站头**逐头透传**（`connection` / `upgrade` 刻意保留），
+`relayable()` 也只滤 hop-by-hop 头；`web/vite.config.ts` 的 dev proxy 带 `ws: true`。
+故风险限于第三方反代（nginx 默认转发全部头，一般无需配置；仅在显式 `proxy_set_header`
+白名单或 `Sec-WebSocket-Protocol` 被剥的形态下出问题）。

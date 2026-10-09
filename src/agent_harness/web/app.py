@@ -1705,6 +1705,11 @@ WS_BUSINESS_SUBPROTOCOL = "agent-harness.v1"
 #: 真实来源只进日志（截断后）。
 WS_ORIGIN_DENIED_REASON = "cross-origin websocket handshake denied"
 
+#: 凭据被拒的 close reason。与上面那条同受一条 ASGI 约束（≤123 字节可打印 ASCII），
+#: 且同样**到不了客户端**——uvicorn 对握手前的 close 固定回 403。抽成具名常量是为了
+#: 两个拒绝出口对称：分支里各写一条字面量，改一处忘一处就会漂移。
+WS_CREDENTIAL_REJECTED_REASON = "websocket credential rejected"
+
 
 def _token_subprotocol(subprotocols: list[str]) -> str | None:
     """命中 Bearer 前缀的那个子协议（没有则 None）。"""
@@ -1739,20 +1744,19 @@ def _bearer_from_subprotocols(subprotocols: list[str]) -> str | None:
 
 
 def _negotiate_subprotocol(subprotocols: list[str]) -> str | None:
-    """挑一个要在 101 响应里回显的子协议：**业务子协议优先**，token 子协议永不回显。
+    """挑一个要在 101 响应里回显的子协议：**只可能是业务子协议**，其余一律 None。
 
-    只回显业务子协议的理由是防泄漏（k8s 同款：校验成功后把承载 token 的子协议从
-    协商列表剔除）。返回 None 的两种情形：客户端没请求任何子协议（本就该不设该字段），
-    或**只**请求了承载 token 的那一个——后者浏览器会因"请求了子协议却没收到回显"自己
-    判握手失败（k8s 直接报 `missing additional subprotocol` 错误；本项目靠浏览器这条
-    语义兜住，我们自己的客户端永远会带业务子协议）。
+    回显即"服务端声称实现了这个协议"，所以此处必须有白名单：原实现回显"第一个非 token
+    前缀的子协议"，等于客户端自带什么就声称支持什么（`subprotocols=["other.product.v9"]`
+    会拿到 `Sec-WebSocket-Protocol: other.product.v9`）——违反子协议协商的基本约定。
+
+    不回显承载 token 的那一个则是防泄漏（k8s 同款：校验成功后把它从协商列表剔除）。
+    返回 None 的两种情形：客户端没请求任何子协议（本就该不设该字段），或**只**请求了
+    承载 token 的那一个——后者浏览器会因"请求了子协议却没收到回显"自己判握手失败
+    （k8s 直接报 `missing additional subprotocol` 错误；本项目靠浏览器这条语义兜住，
+    我们自己的客户端永远会带业务子协议）。
     """
-    if WS_BUSINESS_SUBPROTOCOL in subprotocols:
-        return WS_BUSINESS_SUBPROTOCOL
-    for proto in subprotocols:
-        if not proto.startswith(WS_BEARER_SUBPROTOCOL_PREFIX):
-            return proto
-    return None
+    return WS_BUSINESS_SUBPROTOCOL if WS_BUSINESS_SUBPROTOCOL in subprotocols else None
 
 
 class _IdentityRejected(Exception):
@@ -1832,7 +1836,7 @@ class AuthSeamMiddleware:
           读写会话。判据与 `projects.require_trusted_origin` 共用一份实现与文案常量。
 
         拒 = `websocket.close`（未 accept）⇒ uvicorn 回 **403** 且不建连
-        （`websockets_impl.py:295-303`）。语义与 Django Channels 的
+        （`websockets_impl.py:296-304`）。语义与 Django Channels 的
         `WebsocketDenier`（deny 走 `close()`）、Phoenix `check_origin` 的
         握手前 `forbidden` 一致；socket.io 亦是"连接建立之前"鉴权，
         故不采用"先 accept 再发 error 帧"的形状（那会把未认证连接先建起来）。
@@ -1856,21 +1860,23 @@ class AuthSeamMiddleware:
             # uvicorn 对握手前的 close 固定回 403，code / reason 传不过去；
             # 这里给的形状只是 ASGI 层语义表达，不声称到达客户端。
             await send({"type": "websocket.close", "code": 1008,
-                        "reason": "websocket credential rejected"})
+                        "reason": WS_CREDENTIAL_REJECTED_REASON})
             return
         # 函数内 import：`projects` 反向 import 本模块（`project_service` 等），
         # 模块级引会成环。策略正文（含 `origin_is_local`）与 HTTP 面共用一份——
         # 配了密钥时它自己短路放行（认证层才是边界），所以此处无条件调用。
         from agent_harness.web.projects import check_trusted_origin
 
-        origin = headers.get("origin")
-        if check_trusted_origin(
-            origin, jwt_secret_configured=bool(self._settings.jwt_secret),
-        ) is not None:
-            # 客户端可控且无长度上界 ⇒ 日志按长度截断，别让它灌水。
+        # 判据**与出口文案**都取自 `projects`：HTTP 面把它放进 403 的 `detail`，
+        # 这里把它记进日志——同一条字符串，两处各写一份必然漂移。
+        cross_origin = check_trusted_origin(
+            headers.get("origin"),
+            jwt_secret_configured=bool(self._settings.jwt_secret),
+        )
+        if cross_origin is not None:
+            # 文案里含客户端可控、无长度上界的 `Origin` ⇒ 按长度截断，别让它灌水。
             logging.getLogger("agent_harness.web").warning(
-                "拒绝跨源 WebSocket 握手（未配置 JWT_SECRET 的本地信任模式下只"
-                "接受本机来源）：Origin=%r", (origin or "")[:120],
+                "拒绝跨源 WebSocket 握手：%s", cross_origin[:120],
             )
             # reason 固定短 ASCII（ASGI 限 ≤123 字节可打印 ASCII），来源只进日志。
             await send({"type": "websocket.close", "code": 1008,

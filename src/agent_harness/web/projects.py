@@ -88,7 +88,7 @@ def cross_origin_reason(origin: str) -> str:
     记进日志（close reason 另有固定短 ASCII 常量，ASGI 限 ≤123 字节可打印 ASCII）。
     """
     return (
-        f"拒绝跨源访问：Origin={origin!r}。宿主侧 API（项目 / 目录列举 / WS 会话流）"
+        f"拒绝跨源访问：Origin={origin!r}。宿主侧 API（项目 / 目录列举）"
         "只接受本机来源（配置 JWT_SECRET 后由认证层接管）。"
     )
 
