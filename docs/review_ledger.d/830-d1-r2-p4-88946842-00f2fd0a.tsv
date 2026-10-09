@@ -1,0 +1,1 @@
+2026-10-09	#830 D1 R2 复审新 P4 微修复：P4-1 附件读回 404 文案对齐事件引用隔离语义（web/attachments.py）；P4-2 回落告警措辞去掉不成立的 next candidate（storage/local_artifact.py）	889468427d1d23c890758f2f7b8522a45b10cc44..00f2fd0a3de5688c58d96571f3e2cc33698b2185
