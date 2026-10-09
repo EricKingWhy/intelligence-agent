@@ -171,10 +171,10 @@ test("键位：Windows 用 Alt+V（Ctrl+V 常被终端截获）", () => {
   assert.deepEqual(clipboardImageBindings({ platform: "win32", env: {} }), ["alt+v"]);
 });
 
-test("键位：WSL 双绑（Ctrl+V 与 Alt+V 都取 Windows 剪贴板）", () => {
+test("键位：全平台只绑 Alt+V —— WSL 不再绑 Ctrl+V（那是终端自己的粘贴文本键，会吞文本 + 刷噪音）", () => {
   assert.deepEqual(
     clipboardImageBindings({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu" } }),
-    ["ctrl+v", "alt+v"],
+    ["alt+v"],
   );
 });
 

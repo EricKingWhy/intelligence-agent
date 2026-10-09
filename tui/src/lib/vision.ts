@@ -27,11 +27,20 @@ export interface ModelOptionView {
  * `modelName` 来自会话最新一条 `run/started.data.model`（= 装配层真正发往 provider 的
  * `model` 字段）。会话还没有 run（全新会话）时传 `null` => 用目录里的 `is_default` 条目
  * （不传 model 参数时服务端用的就是默认链）。解析不到任何条目 => `false`（不猜）。
+ *
+ * **两阶段查找，与服务端 `find_catalog_entry` 同序**（独立审查 P3：客户端把 `id` 与
+ * `model` 混在一个 `find` 里时，数组顺序可能让与服务端不同的条目胜出 => 客户端假拒）：
+ * 1. 先按 `id`（= 服务端 catalog 条目的 `name`）精确匹配，命中即采用：服务端第一阶段
+ *    就是 `(provider, name)` 精确匹配，`name` 即 `/api/models` 条目的 `id`；
+ * 2. 无 `id` 命中时再按 `model`（上游模型名）匹配：恰好一条 => 采用；**多条同名 => 歧义**，
+ *    客户端没有 provider 信息、无法像服务端那样消歧 => **乐观返回 `true`**（不预检，
+ *    把判定交给服务端 422），宁可放过也不假拒。
  */
 export function resolveVisionSupport(models: ModelOptionView[], modelName: string | null): boolean {
-  const entry =
-    modelName === null
-      ? models.find((m) => m.is_default === true)
-      : models.find((m) => m.model === modelName || m.id === modelName);
-  return entry?.supports_vision === true;
+  if (modelName === null) return models.find((m) => m.is_default === true)?.supports_vision === true;
+  const byId = models.find((m) => m.id === modelName);
+  if (byId !== undefined) return byId.supports_vision === true;
+  const byModel = models.filter((m) => m.model === modelName);
+  if (byModel.length > 1) return true;
+  return byModel[0]?.supports_vision === true;
 }

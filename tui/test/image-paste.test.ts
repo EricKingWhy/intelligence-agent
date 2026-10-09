@@ -18,6 +18,7 @@ import { test } from "node:test";
 import {
   clipboardImageName,
   isImagePath,
+  MAX_IMAGE_BYTES,
   pastedImagePath,
   readImageFile,
   resolvePastedImagePath,
@@ -176,3 +177,41 @@ test("readImageFile：符号链接指向常规图片照常可读（常规文件�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("readImageFile：超过 20 MiB 上限 ⇒ too_large，且不把整文件读进内存", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ia827-big-"));
+  try {
+    const file = join(dir, "huge.png");
+    // 稀疏文件：只占 inode 元数据，不真写 21 MiB 数据。
+    execFileSync("truncate", ["-s", "21M", file]);
+    const started = Date.now();
+    // 必须是 too_large 而不是 unsupported：尺寸门在 magic-bytes 判型**之前**短路
+    // （全零的稀疏文件若被读进内存判型，只会得到 unsupported）。
+    assert.deepEqual(readImageFile(file), { ok: false, reason: "too_large" });
+    assert.ok(Date.now() - started < 1_000, "超限必须在读盘之前拒掉");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readImageFile：恰好等于上限不拒（口径 = 服务端 attachment_max_image_bytes 的严格大于）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ia827-limit-"));
+  try {
+    const file = join(dir, "limit.png");
+    execFileSync("truncate", ["-s", String(MAX_IMAGE_BYTES), file]);
+    // 20 MiB 全零文件：过尺寸门 ⇒ 按 magic bytes 判型 ⇒ unsupported（不是 too_large）。
+    assert.deepEqual(readImageFile(file), { ok: false, reason: "unsupported" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "readImageFile：字符设备（/dev/zero）按 missing 快速拒绝，绝不阻塞",
+  { skip: process.platform === "win32" },
+  () => {
+    const started = Date.now();
+    assert.deepEqual(readImageFile("/dev/zero"), { ok: false, reason: "missing" });
+    assert.ok(Date.now() - started < 2_000, "字符设备不得被读盘阻塞");
+  },
+);

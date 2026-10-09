@@ -17,10 +17,13 @@
  * 3. 上游把图读成 data URL（OpenTUI 内联渲染用）；本仓契约是**字节流式上传**
  *    （`POST /api/sessions/{id}/attachments`），故这里回字节而不是 base64；
  * 4. 上游 `readImageDataUrlFromPastedText` 无条件 `readFileSync`；本仓读盘前先
- *    `statSync(...).isFile()`：非常规文件（FIFO / 设备 / 目录）一律回 `missing`，
- *    否则无写端的 FIFO 会让阻塞式读盘**永久**冻住整个 TUI 事件循环。
+ *    `statSync(...).isFile()` 筛查，再把**同一 fd** 交给 `fstatSync` 判定：非常规文件
+ *    （FIFO / 设备 / 目录）一律回 `missing`，否则无写端的 FIFO 会让阻塞式读盘**永久**
+ *    冻住整个 TUI 事件循环（`openSync` 落在 FIFO 上同样会阻塞，故这条 `statSync` 筛查
+ *    不能省）。同一 fd 上还做**大小上限**预检（与服务端 `attachment_max_image_bytes`
+ *    同口径），超限直接拒，不把整文件读进内存。
  */
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -75,7 +78,14 @@ export function uploadDeclaredName(name: string, mimeType: string): string | und
 
 export type ReadImageFileResult =
   | { ok: true; image: PendingImage }
-  | { ok: false; reason: "missing" | "unsupported" };
+  | { ok: false; reason: "missing" | "unsupported" | "too_large" };
+
+/**
+ * 单张图片的本地尺寸上限：与服务端**同源口径**（`src/agent_harness/config.py:166`
+ * `attachment_max_image_bytes` 默认 `20 * 1024 * 1024`）。本地先拒，省掉一次注定 413
+ * 的上传，也不把超大文件读进内存。
+ */
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 export function isImagePath(filePath: string): boolean {
   const normalized = filePath.toLowerCase();
@@ -137,35 +147,58 @@ export function pastedImagePath(
 }
 
 /**
- * 读一张图片文件：`ok:false` 给出**明确原因**（`missing` 文件不在 / 读不了，
- * `unsupported` 按 magic bytes 判不是本仓接受的图片），调用方据此给用户可读错误。
+ * 读一张图片文件：`ok:false` 给出**明确原因**（`missing` 文件不在 / 读不了或不是常规文件，
+ * `unsupported` 按 magic bytes 判不是本仓接受的图片，`too_large` 超过 `MAX_IMAGE_BYTES`），
+ * 调用方据此给用户可读错误。
+ *
+ * 读盘在**同一个 fd** 上完成（#827 独立审查 P3/P4）：
+ * - `statSync(...).isFile()` 先做非阻塞筛查（`openSync` 落在无写端的 FIFO 上会阻塞），
+ *   非常规文件直接按 `missing` 拒；
+ * - 之后 `openSync` 拿 fd，判定与读字节都用这个 fd（`fstatSync(fd)` / `readFileSync(fd)`），
+ *   不再二次解析路径，关掉 `statSync` 与读盘之间「文件被换成 FIFO/目录」的 TOCTOU 窗口；
+ * - `fstatSync(fd).size` 做尺寸预检：超限即拒，不读进内存。
+ * 符号链接照常跟随（fd 指向目标），普通图片的可观察行为逐字不变。
  */
 export function readImageFile(filePath: string): ReadImageFileResult {
-  let bytes: Buffer;
   try {
-    // 只读**常规文件**（#827 阶段三 brutal 发现的 P4）：`readFileSync` 落在 FIFO 上会
-    // **永久阻塞**（把整个 TUI 冻住），落在目录上抛 EISDIR。两者都不是"一张可发送的图片"，
-    // 一律按 `missing` 明确拒绝，绝不让编辑器/事件循环卡在读盘上。符号链接照常跟随
-    // （`statSync` 解析到目标），普通图片的可观察行为逐字不变。
     if (!statSync(filePath).isFile()) {
       return { ok: false, reason: "missing" };
     }
-    bytes = readFileSync(filePath);
   } catch {
     return { ok: false, reason: "missing" };
   }
-  const mimeType = detectSupportedImageMimeType(bytes);
-  if (mimeType === null || !SUPPORTED_IMAGE_MEDIA_TYPES.includes(mimeType)) {
-    return { ok: false, reason: "unsupported" };
+  let fd: number;
+  try {
+    fd = openSync(filePath, "r");
+  } catch {
+    return { ok: false, reason: "missing" };
   }
-  const absolute = resolve(filePath);
-  return {
-    ok: true,
-    image: {
-      bytes: new Uint8Array(bytes),
-      mimeType,
-      name: basename(absolute),
-      path: absolute,
-    },
-  };
+  try {
+    const stats = fstatSync(fd);
+    if (!stats.isFile()) {
+      return { ok: false, reason: "missing" };
+    }
+    if (stats.size > MAX_IMAGE_BYTES) {
+      return { ok: false, reason: "too_large" };
+    }
+    const bytes = readFileSync(fd);
+    const mimeType = detectSupportedImageMimeType(bytes);
+    if (mimeType === null || !SUPPORTED_IMAGE_MEDIA_TYPES.includes(mimeType)) {
+      return { ok: false, reason: "unsupported" };
+    }
+    const absolute = resolve(filePath);
+    return {
+      ok: true,
+      image: {
+        bytes: new Uint8Array(bytes),
+        mimeType,
+        name: basename(absolute),
+        path: absolute,
+      },
+    };
+  } catch {
+    return { ok: false, reason: "missing" };
+  } finally {
+    closeSync(fd);
+  }
 }

@@ -70,17 +70,18 @@ export function isWaylandSession(env: NodeJS.ProcessEnv = process.env): boolean 
 export type ClipboardImageKey = "alt+v" | "ctrl+v";
 
 /**
- * 粘贴剪贴板图片的键位（AC1）：Windows 用 `Alt+V`（`Ctrl+V` 常被终端截获成"粘贴文本"，
- * 到不了应用）；WSL **双绑**（`Ctrl+V` 与 `Alt+V` 都触发，取的是 Windows 侧剪贴板）。
+ * 粘贴剪贴板图片的键位（AC1）：**恒为 `Alt+V`**。
+ *
+ * Windows 用 `Alt+V`（`Ctrl+V` 常被终端截获成"粘贴文本"，到不了应用）；WSL 早期还双绑了
+ * `Ctrl+V`，但 `Ctrl+V` 在 WSL 终端**就是**粘贴文本键：拦截它会把用户正常粘贴的文本吞掉，
+ * 而剪贴板里没有图时还会刷一条"没有可用的图片"噪音（#827 独立审查 P3）。
+ * 平台差异只属于**取图阶梯**（`readClipboardImage`：WSL 经 `powershell.exe` 取 Windows 侧
+ * 剪贴板），与键位无关，故这里不再按平台分叉。
  */
-export function clipboardImageBindings(options?: {
+export function clipboardImageBindings(_options?: {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
 }): ClipboardImageKey[] {
-  const platform = options?.platform ?? process.platform;
-  const env = options?.env ?? process.env;
-  if (platform === "win32") return ["alt+v"];
-  if (platform === "linux" && isWSL(env)) return ["ctrl+v", "alt+v"];
   return ["alt+v"];
 }
 

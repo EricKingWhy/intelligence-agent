@@ -48,3 +48,28 @@ test("按 id 也能命中（会话模型可能是 id 形态，如自定义供应
     true,
   );
 });
+
+test("id 未命中时按 model（上游模型名）命中单一条目", () => {
+  const models = [{ id: "catalog-name", model: "upstream-model", supports_vision: true }];
+  assert.equal(resolveVisionSupport(models, "upstream-model"), true);
+  assert.equal(
+    resolveVisionSupport([{ id: "catalog-name", model: "upstream-model", supports_vision: false }], "upstream-model"),
+    false,
+  );
+});
+
+test("id 精确命中优先于数组更靠前的 model 命中（与服务端 name 优先同序，避免假拒）", () => {
+  const models = [
+    { id: "other", model: "target", supports_vision: false },
+    { id: "target", model: "upstream", supports_vision: true },
+  ];
+  assert.equal(resolveVisionSupport(models, "target"), true, "id 命中的那份才是权威条目");
+});
+
+test("多条同名 model（客户端无 provider 消歧）⇒ 乐观放行，把判定交给服务端 422", () => {
+  const models = [
+    { id: "prov-a", model: "same", supports_vision: false },
+    { id: "prov-b", model: "same", supports_vision: true },
+  ];
+  assert.equal(resolveVisionSupport(models, "same"), true, "歧义不许假拒");
+});

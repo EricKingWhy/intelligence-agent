@@ -5,7 +5,7 @@ projects. Every adapted file carries a header naming the upstream file, the exac
 commit, and the source line range. This file holds the license texts and the
 provenance ledger.
 
-## Pi (`badloop/pi`)
+## Pi (`earendil-works/pi`)
 
 - **Commit read for this adaptation:** `28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9`
 - **License:** MIT

@@ -44,11 +44,14 @@ import {
   pastedImagePath,
   readImageFile,
   uploadDeclaredName,
+  MAX_IMAGE_BYTES,
 } from "./lib/image-paste.ts";
 import { renderDraftImage } from "./lib/image-view.ts";
 import {
   compactDraftImages,
   imageMarker,
+  parseImageMarkers,
+  stripImageMarkers,
   type PendingImage,
 } from "./lib/pending-images.ts";
 import { resolveVisionSupport, type ModelOptionView } from "./lib/vision.ts";
@@ -126,6 +129,13 @@ export class TuiApp {
   /** 待发图片（AC3）：下标 0 即正文里的 `[Image #1]`。提交/换会话时清空。 */
   pendingImages: PendingImage[] = [];
   /**
+   * 待发图片的**内容版本**：数组每次增删都 +1。footer 投影按「版本 + 正文标记集」缓存，
+   * 没有变化就不重投影（`renderDraftImage` 要 base64 编码整张图，逐键重画代价太大）。
+   */
+  private pendingImagesVersion = 0;
+  /** 上一次 footer 图片区投影的键（版本 + 标记集）；`null` = 还没投影过。 */
+  private imageViewKey: string | null = null;
+  /**
    * 待发图片区（footer）：说明行 + 每张图的缩略图（AC7）或文本占位（AC6）。
    * 用**一个长期挂载的容器**承载（不是每次增删组件）：`renderAll()` 会 clear 整个
    * footer，把容器重挂一次即可保持"图片区在其它横幅之前"的稳定次序。
@@ -169,6 +179,10 @@ export class TuiApp {
       },
     });
     this.editor.onSubmit = (text) => void this.handleSubmit(text);
+    // #3（独立审查 P3）：footer 的图片区是「正文当前标记集」的投影，所以正文一变就要
+    // 重投影。pi-tui Editor 的 onChange 覆盖全部文本改动（输入 / 删除 / 粘贴 / setText），
+    // 是这里唯一可靠的钩子。
+    this.editor.onChange = () => this.renderPendingImages();
     this.tui.addChild(this.statusText);
     this.tui.addChild(this.chatContainer);
     this.footerContainer.addChild(this.imagesContainer);
@@ -203,9 +217,8 @@ export class TuiApp {
       }
       return { consume: true };
     }
-    // AC1：粘贴剪贴板图片。键位按平台（Windows 用 Alt+V；WSL 双绑 Ctrl+V/Alt+V）。
-    // 用 pi-tui matchesKey 而非裸比较 `\x1bv`：Kitty/CSI-u 扩展编码下裸字节不成立
-    // （与 Ctrl+T 同一条纪律）。
+    // AC1：粘贴剪贴板图片。键位见 `clipboardImageBindings`（恒为 Alt+V）。用 pi-tui
+    // matchesKey 而非裸比较 `\x1bv`：Kitty/CSI-u 扩展编码下裸字节不成立（与 Ctrl+T 同一条纪律）。
     for (const binding of clipboardImageBindings({ platform: this.platform, env: this.env })) {
       if (matchesKey(data, binding)) {
         void this.pasteClipboardImage();
@@ -299,11 +312,16 @@ export class TuiApp {
       await this.runCommand(trimmed);
       return;
     }
-    const imageCount = this.pendingImages.length;
-    // AC8：有图先做视觉能力预检 -- **在清空编辑器之前**判定，拒绝时草稿与图片原样保留
-    // （用户可删标记只发文字，或换模型后重发）。目录查不到（网络失败）=> 不预检，
+    // AC3：提交时稠密重编号 -- 仍被正文引用的图保留（按原下标升序），标记被删掉的图丢弃，
+    // 引用不到的悬空标记（手打 `[Image #99]`）由 compact 一并删掉。`null` = 无需改写。
+    const compacted = compactDraftImages(trimmed, this.pendingImages.length);
+    const keep = compacted === null ? this.pendingImages.map((_, index) => index) : compacted.keep;
+    const content = compacted?.text ?? trimmed;
+    // AC8：**只有正文里仍被引用的图**才需要视觉能力预检（独立审查 P1：按数组长度判定会把
+    // "删光标记只发文字"的用户永久拒掉，而默认 preset 常常不声明 supports_vision）。
+    // 判定仍在清空编辑器之前，拒绝时草稿与图片原样保留。目录查不到（网络失败）=> 不预检，
     // 让服务端 422 做权威判定（本地绝不猜"支持"）。
-    if (imageCount > 0) {
+    if (keep.length > 0) {
       let models: ModelOptionView[] | null = null;
       try {
         models = await this.api.listModels();
@@ -312,22 +330,17 @@ export class TuiApp {
       }
       if (models !== null && !resolveVisionSupport(models, this.state.modelName)) {
         this.appendNote(
-          "当前模型不支持图片输入（supports_vision=false）：草稿与图片已保留。" +
-            "换用支持视觉的模型后重发，或删掉正文里的 [Image #N] 标记只发文字。",
+          "当前模型不支持图片输入（supports_vision=false）：只有正文里仍被 [Image #N] 引用的图" +
+            "才触发本预检。删掉正文里剩余的 [Image #N] 标记只发文字，或换用支持视觉的模型后重发。",
         );
         return;
       }
     }
-    // AC3：提交时稠密重编号 -- 仍被正文引用的图保留（按原下标升序），标记被删掉的图丢弃。
-    // `null` = 无需改写（无图，或全部引用且已是 1..K），正文逐字不变。
-    const compacted = compactDraftImages(trimmed, imageCount);
-    const content = compacted?.text ?? trimmed;
-    const keptImages =
-      compacted === null
-        ? [...this.pendingImages]
-        : compacted.keep
-            .map((index) => this.pendingImages[index])
-            .filter((image): image is PendingImage => image !== undefined);
+    const keptImages = keep
+      .map((index) => this.pendingImages[index])
+      .filter((image): image is PendingImage => image !== undefined);
+    // 本次提交开始时数组的张数 = 上传窗口的边界（下标不小于它的才是窗口内新贴的图）。
+    const countAtSubmit = this.pendingImages.length;
     // AC5：先按服务端契约上传每张图（字节流式 + Content-Type/<name> 与字节判定一致），
     // 拿到 attachment_id 再投消息。上传失败**保留草稿**（已改的正文也留给用户重发）。
     const attachments: string[] = [];
@@ -343,8 +356,19 @@ export class TuiApp {
       this.appendNote(`upload failed: ${String(error)}`);
       return;
     }
+    // 独立审查 P3（#2）：上传是异地的 await，这段窗口里用户可能又贴了新图（下标 >= countAtSubmit）
+    // 且标记就在正文里（用户自己删掉标记的仍算撤销）。收尾清空数组后把这些新图重新入列，
+    // 绝不被静默吞掉；窗口之前就有、却没进 keep 的图是用户主动删掉的，不许复活（AC3 语义）。
+    const survivingMarkers = new Set(parseImageMarkers(this.editor.getText()));
+    const carried = this.pendingImages.filter(
+      (_, index) => index >= countAtSubmit && survivingMarkers.has(index + 1),
+    );
     this.editor.setText("");
     this.setPendingImages([]);
+    if (carried.length > 0) {
+      for (const image of carried) this.addPendingImage(image);
+      this.appendNote(`提交期间新粘贴的 ${String(carried.length)} 张图片已保留（标记已重编号）`);
+    }
     try {
       await this.api.sendMessage(this.options.sessionId, content, attachments);
     } catch (error) {
@@ -384,7 +408,10 @@ export class TuiApp {
       this.appendNote(
         result.reason === "missing"
           ? `找不到或读不了这个文件：${filePath}`
-          : `不是本仓支持的图片格式（PNG/JPEG/WEBP/GIF）：${filePath}`,
+          : result.reason === "too_large"
+            ? `图片超过 ${String(MAX_IMAGE_BYTES / (1024 * 1024))} MiB 上限` +
+              `（与服务端 attachment_max_image_bytes 同口径），请压缩后重试：${filePath}`
+            : `不是本仓支持的图片格式（PNG/JPEG/WEBP/GIF）：${filePath}`,
       );
       return;
     }
@@ -403,6 +430,7 @@ export class TuiApp {
   /** 追加一张待发图：数组 push + 光标处插 `[Image #N]`（N = 插入后的张数，AC3）。 */
   private addPendingImage(image: PendingImage): void {
     this.pendingImages.push(image);
+    this.pendingImagesVersion += 1;
     this.editor.insertTextAtCursor(imageMarker(this.pendingImages.length));
     this.renderPendingImages();
     this.tui.requestRender();
@@ -410,22 +438,34 @@ export class TuiApp {
 
   private setPendingImages(images: PendingImage[]): void {
     this.pendingImages = images;
+    this.pendingImagesVersion += 1;
     this.renderPendingImages();
     this.tui.requestRender();
   }
 
-  /** 待发图片区（AC6/AC7）：协议可用 => pi-tui 缩略图；`WT_SESSION` 等 => 文本占位。 */
+  /**
+   * 待发图片区（AC6/AC7）：**只投影正文当前仍引用的图**（`[Image #N]` <-> 下标 N-1）--
+   * 用户在正文里删掉标记，footer 的计数与缩略图立刻跟着少一张（独立审查 P3：原先渲染整个
+   * 数组，删完标记仍显示，与"删标记即撤销"的提示自相矛盾）。
+   * 协议可用 => pi-tui 缩略图；`WT_SESSION` 等 => 文本占位。
+   * 「版本 + 标记集」没变就不重投影（见 `imageViewKey`）。
+   */
   private renderPendingImages(): void {
+    const markers = new Set(parseImageMarkers(this.editor.getText()));
+    const visible = this.pendingImages.filter((_, index) => markers.has(index + 1));
+    const key = `${String(this.pendingImagesVersion)}|${[...markers].sort((a, b) => a - b).join(",")}`;
+    if (key === this.imageViewKey) return;
+    this.imageViewKey = key;
     this.imagesContainer.clear();
-    if (this.pendingImages.length === 0) return;
+    if (visible.length === 0) return;
     this.imagesContainer.addChild(
       new Text(
         this.theme.muted(
-          `待发图片 ${String(this.pendingImages.length)} 张（Alt+V 再贴一张；删掉正文里的 [Image #N] 标记即撤销）`,
+          `待发图片 ${String(visible.length)} 张（Alt+V 再贴一张；删掉正文里的 [Image #N] 标记即撤销）`,
         ),
       ),
     );
-    for (const image of this.pendingImages) {
+    for (const image of visible) {
       const rendered = renderDraftImage(image, {
         fallbackColor: (value) => this.theme.dim(value),
       });
@@ -514,8 +554,13 @@ export class TuiApp {
     this.abort.abort();
     this.abort = new AbortController();
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
-    (this.options as { sessionId: string }).sessionId = sessionId;
+    this.options.sessionId = sessionId;
     this.cursor = new SeqCursor();
+    // 独立审查 P3（#6）：待发图片是**旧会话**的草稿，切会话时清空数组并抹掉正文里的标记，
+    // 兑现 `pendingImages` 注释的承诺（否则旧会话的图会被带进新会话）。
+    this.setPendingImages([]);
+    const draft = this.editor.getText();
+    if (parseImageMarkers(draft).length > 0) this.editor.setText(stripImageMarkers(draft));
     await this.rebuildFromHistory();
     this.subscribeLoop();
   }

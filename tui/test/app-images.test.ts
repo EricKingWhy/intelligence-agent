@@ -1,13 +1,19 @@
 /**
  * TUI 图片输入接线（#827 MM-06）：AC1（Alt+V 剪贴板）、AC2（粘贴路径识别）、
  * AC3（标记 ↔ 待发数组 / 删标记即撤销）、AC4（`@path` 命令行参数）、
- * AC5（上传 + 请求体引用，经注入 fetch 的 adapter 接缝）、AC8（视觉能力提交前拒绝）。
+ * AC5（上传 + 请求体引用，经注入 fetch 的 adapter 接缝）、AC8（视觉能力提交前拒绝）、
+ * AC9（第三方声明），以及独立审查修复项（P1 预检只认"仍被引用的图"、P3 悬空标记/窗口内
+ * 新图/footer 投影/切会话清场、P4 单图上限提示）。
  *
  * 全部经**注入的 fetch**（`AppOptions.fetchImpl`）与**注入的剪贴板读取器**
  * （`AppOptions.readClipboardImage`）驱动：不碰真网络、不碰真剪贴板、不用真计时器。
  * `TuiApp` 非 TTY 可构造（与 `app.test.ts` 同一套受控 cast 访问面）。
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { TuiApp } from "../src/app.ts";
@@ -44,8 +50,14 @@ interface AppInternals {
   pendingImages: PendingImage[];
   editor: { getText(): string; setText(text: string): void };
   imagesContainer: { children: { render(width: number): string[] }[] };
+  /** chat 区（提示语断言：#2 拒绝理由、#3 窗口保留提示都在这里）。 */
+  chatContainer: { children: { render(width: number): string[] }[] };
   interceptKeys(data: string): { consume: boolean } | undefined;
   handleSubmit(text: string): Promise<void>;
+  /** 切会话（#6）：会 `rebuildFromHistory()`（走 GET /events）+ `subscribeLoop()`。 */
+  switchSession(sessionId: string): Promise<void>;
+  /** 订阅循环（#6 测试要把它换成空实现，否则真 SSE 循环 + 1s 重连定时器会吊住 node:test）。 */
+  subscribeLoop(): void;
 }
 
 interface Harness {
@@ -72,6 +84,8 @@ function makeHarness(options?: {
   initialImages?: string[];
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
+  /** 上传在途时执行（#3：模拟"上传窗口里用户又贴了一张"）。 */
+  onUpload?: (app: AppInternals) => void;
 }): Harness {
   const calls: RecordedCall[] = [];
   const failUploads = { value: false };
@@ -82,6 +96,7 @@ function makeHarness(options?: {
     calls.push({ url, body: typeof init?.body === "string" ? init.body : "" });
     if (url.includes("/attachments")) {
       if (failUploads.value) return new Response("boom", { status: 500 });
+      options?.onUpload?.(app);
       uploadCount += 1;
       return jsonResponse({
         attachment_id: `sha256:img${String(uploadCount)}`,
@@ -96,6 +111,8 @@ function makeHarness(options?: {
       if (options?.modelsFail === true) return new Response("nope", { status: 503 });
       return jsonResponse({ models: options?.models ?? [] });
     }
+    // GET /events（切会话/启动时的全量重建）：空历史。
+    if (url.includes("/events")) return jsonResponse([]);
     return jsonResponse({ status: "queued" });
   }) as unknown as typeof fetch;
 
@@ -149,14 +166,13 @@ test("AC1：CSI-u 扩展编码 \\x1b[118;3u（kitty/tmux 上报的 Alt+V）同�
   assert.equal(harness.app.pendingImages.length, 1);
 });
 
-test("AC1：WSL 下 Ctrl+V 也取剪贴板；非 WSL 的 Linux 不绑 Ctrl+V", async () => {
+test("AC1：Ctrl+V 任何平台都不拦截（那是终端自己的粘贴文本键；图片只认 Alt+V）", () => {
   const wsl = makeHarness({ env: { WSL_DISTRO_NAME: "Ubuntu" } });
-  assert.deepEqual(wsl.app.interceptKeys("\x16"), { consume: true });
-  await settle();
-  assert.equal(wsl.app.pendingImages.length, 1);
+  assert.equal(wsl.app.interceptKeys("\x16"), undefined, "WSL 的 Ctrl+V 交给终端/编辑器");
+  assert.equal(wsl.app.pendingImages.length, 0);
 
   const plain = makeHarness({ env: {} });
-  assert.equal(plain.app.interceptKeys("\x16"), undefined, "非 WSL 的 Ctrl+V 不拦截（交给编辑器）");
+  assert.equal(plain.app.interceptKeys("\x16"), undefined, "非 WSL 的 Ctrl+V 同样不拦截");
   assert.equal(plain.app.pendingImages.length, 0);
 });
 
@@ -379,4 +395,143 @@ test("AC6/AC7 接线：提交后待发图片区清空（不留空壳）", async 
   await app.handleSubmit("[Image #1]");
 
   assert.equal(app.imagesContainer.children.length, 0);
+});
+
+test("独立审查 P1：正文里没有 [Image #N] 标记 ⇒ 不做视觉预检（只发文字不许被永久拒）", async () => {
+  const harness = makeHarness({
+    models: [{ id: "text-only", model: "text-only", is_default: true, supports_vision: false }],
+  });
+  const app = harness.app;
+  app.state.modelName = "text-only";
+  app.interceptKeys("\x1bv");
+  await settle();
+  assert.equal(app.pendingImages.length, 1);
+
+  // 用户把正文里的标记删了只发文字（handleSubmit 收到的 = 提交那一刻的正文，与真实一致）。
+  await app.handleSubmit("图片标记都删了，只发文字");
+
+  assert.equal(
+    harness.calls.filter((call) => call.url.includes("/api/models")).length,
+    0,
+    "没有引用任何图 ⇒ 连目录都不查",
+  );
+  assert.equal(harness.calls.filter((call) => call.url.includes("/attachments")).length, 0);
+  assert.deepEqual(messageBodies(harness.calls), [
+    { content: "图片标记都删了，只发文字", mode: "queue" },
+  ]);
+  assert.equal(app.pendingImages.length, 0, "删标记即撤销：待发数组清空");
+  assert.equal(app.editor.getText(), "");
+});
+
+test("独立审查 P1：拒绝提示点明判定依据 + 给两条出路", async () => {
+  const harness = makeHarness({
+    models: [{ id: "text-only", model: "text-only", is_default: true, supports_vision: false }],
+  });
+  const app = harness.app;
+  app.state.modelName = "text-only";
+  app.interceptKeys("\x1bv");
+  await settle();
+
+  await app.handleSubmit("[Image #1] 看看这个");
+
+  const notes = app.chatContainer.children.map((child) => child.render(500).join("\n")).join("\n");
+  assert.ok(notes.includes("supports_vision=false"), "点明判定依据");
+  assert.ok(notes.includes("只发文字"), "出路一：删标记只发文字");
+  assert.ok(notes.includes("换用支持视觉的模型"), "出路二：换模型");
+  assert.equal(app.pendingImages.length, 1, "拒绝后图片保留");
+  assert.equal(app.editor.getText(), "[Image #1]", "拒绝后正文保留");
+});
+
+test("独立审查 P4：提交时正文里的悬空标记（手打 [Image #9]）被删掉，不发给模型", async () => {
+  const harness = makeHarness({ models: VISION_MODELS });
+  const app = harness.app;
+  app.state.modelName = "m";
+  app.interceptKeys("\x1bv");
+  await settle();
+  app.editor.setText("[Image #1] 和 [Image #9] 都看看");
+
+  await app.handleSubmit("[Image #1] 和 [Image #9] 都看看");
+
+  assert.deepEqual(messageBodies(harness.calls), [
+    { content: "[Image #1] 和 都看看", mode: "queue", attachments: ["sha256:img1"] },
+  ]);
+});
+
+test("独立审查 P3：上传窗口里新贴的图不被吞掉（收尾只清本次快照内的图）", async () => {
+  const harness = makeHarness({
+    models: VISION_MODELS,
+    // 上传在途时用户又贴了一张（走 AC2 的路径粘贴 => 产物可辨识：path/名字与剪贴板图不同）。
+    onUpload: (app) => {
+      app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
+    },
+  });
+  const app = harness.app;
+  app.state.modelName = "m";
+  app.interceptKeys("\x1bv");
+  await settle();
+  assert.equal(app.pendingImages.length, 1);
+  // pi-tui 的 submitValue() 先清编辑器再 onSubmit(text)：按真实时序建模（否则本用例不成立）。
+  app.editor.setText("");
+
+  await app.handleSubmit("[Image #1] 第一张");
+
+  assert.equal(app.pendingImages.length, 1, "窗口内的新图还在");
+  assert.equal(app.pendingImages[0]?.path, FIXTURE_PNG, "留下的正是窗口内新贴的那张");
+  assert.equal(app.editor.getText(), "[Image #1]", "新图标记重编号为 1");
+  assert.deepEqual(messageBodies(harness.calls), [
+    { content: "[Image #1] 第一张", mode: "queue", attachments: ["sha256:img1"] },
+  ]);
+});
+
+test("独立审查 P3：footer 图片区跟着正文标记走（删掉标记的那张立刻不再显示）", async () => {
+  const harness = makeHarness();
+  const app = harness.app;
+  app.interceptKeys("\x1bv");
+  await settle();
+  app.interceptKeys("\x1bv");
+  await settle();
+  assert.equal(app.imagesContainer.children.length, 3, "说明行 + 2 张");
+
+  app.editor.setText("[Image #2]");
+
+  assert.equal(app.imagesContainer.children.length, 2, "说明行 + 仅剩的 1 张");
+  const header = app.imagesContainer.children[0]?.render(120).join("\n") ?? "";
+  assert.ok(header.includes("待发图片 1 张"), "计数如实反映可见张数");
+});
+
+test("独立审查 P3：切会话清空待发图片并抹掉正文标记（旧会话的图不跟着走）", async () => {
+  const harness = makeHarness();
+  const app = harness.app;
+  app.interceptKeys("\x1bv");
+  await settle();
+  app.editor.setText("[Image #1] 草稿");
+  assert.equal(app.pendingImages.length, 1);
+  assert.equal(app.imagesContainer.children.length, 2);
+  // 真订阅循环会连 SSE + 1s 重连定时器，node:test 进程会被吊住 => 换空实现。
+  app.subscribeLoop = () => {};
+
+  await app.switchSession("s2");
+
+  assert.equal(app.pendingImages.length, 0);
+  assert.equal(app.editor.getText(), " 草稿", "标记抹掉，其余草稿原样");
+  assert.equal(app.imagesContainer.children.length, 0);
+});
+
+test("独立审查 P3/P4：超过 20 MiB 的 @path 参数给出上限提示，不进待发数组", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ia827-app-big-"));
+  try {
+    const big = join(dir, "big.png");
+    execFileSync("truncate", ["-s", "21M", big]);
+    const harness = makeHarness({ initialImages: [big] });
+
+    assert.equal(harness.app.pendingImages.length, 0);
+    assert.equal(harness.app.editor.getText(), "");
+    const notes = harness.app.chatContainer.children
+      .map((child) => child.render(500).join("\n"))
+      .join("\n");
+    assert.ok(notes.includes("20 MiB"), "提示里给出与服务端同口径的上限");
+    assert.ok(notes.includes(big), "提示里带上路径");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
