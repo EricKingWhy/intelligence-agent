@@ -1,0 +1,1 @@
+2026-10-10	修 Windows GA cp1252 中文输出崩溃：cli.py 入口 reconfigure stdout/stderr 为 UTF-8，test_instance_lock 子进程 harness 强制 PYTHONIOENCODING=utf-8 并显式 UTF-8 解码（含 TDD 回归）	11730372133d1b687ca518650848a88f1ff8197b..44ae0e1ad5d651392ef9e0ff82ad7c233b83d85c
