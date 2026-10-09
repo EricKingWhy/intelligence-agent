@@ -619,12 +619,24 @@ class DockerSandbox(Sandbox):
 
         def close_resources() -> None:
             try:
-                if response_close is not None:
-                    response_close()
-                status["response_closed"] = True
-                if stream_close is not None:
-                    stream_close()
-                status["stream_closed"] = True
+                try:
+                    if response_close is not None:
+                        response_close()
+                    status["response_closed"] = True
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(
+                        "Docker exec HTTP response close failed: %s",
+                        type(error).__name__,
+                    )
+                try:
+                    if stream_close is not None:
+                        stream_close()
+                    status["stream_closed"] = True
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(
+                        "Docker exec output stream close failed: %s",
+                        type(error).__name__,
+                    )
             finally:
                 close_result.set_result(
                     (status["response_closed"], status["stream_closed"]),
