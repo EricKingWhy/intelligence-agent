@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   clipboardImageName,
@@ -56,8 +57,12 @@ test("http(s) URL 不是本地路径 ⇒ undefined", () => {
   assert.equal(resolvePastedImagePath("https://example.com/a.png", "linux"), undefined);
 });
 
-test("file:// URL 转成本地路径", () => {
-  assert.equal(resolvePastedImagePath("file:///tmp/shot.png", "linux"), "/tmp/shot.png");
+test("file:// URL 转成本地路径（#908：宿主语义——期望值按宿主路径构造，不硬写 POSIX 字面）", () => {
+  // file:// 分支走宿主 fileURLToPath（`platform` 形参只管反斜杠反转义那条分支），
+  // 语义是「这台机器上的真实本地文件」；POSIX 字面 `file:///tmp/shot.png` 在 Windows
+  // 无对应原像（会被解析到当前盘）。故 URL 与期望值都按宿主路径构造。
+  const target = join(tmpdir(), "ia-tui-paste-shot.png");
+  assert.equal(resolvePastedImagePath(pathToFileURL(target).href), target);
 });
 
 test("非 win32 反转义终端插入的反斜杠；win32 保留原样", () => {
@@ -160,23 +165,46 @@ test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞�
   }
 });
 
-test("readImageFile：符号链接指向常规图片照常可读（常规文件守卫不误伤链接）", () => {
-  const dir = mkdtempSync(join(tmpdir(), "ia827-link-"));
+/**
+ * #908（第 6 例，成因③）：symlink 是**宿主能力**——Windows 未开开发者模式/非管理员时
+ * `symlinkSync` 直接 EPERM。探针失败按能力跳过（Linux CI 上探针通过、真跑本用例），
+ * 不把环境差异判成产品红。
+ */
+function symlinkSkipReason(): false | string {
+  const dir = mkdtempSync(join(tmpdir(), "ia827-link-probe-"));
   try {
     const target = join(dir, "shot.png");
     writeFileSync(target, PNG);
-    const link = join(dir, "link.png");
-    symlinkSync(target, link);
-    const result = readImageFile(link);
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      assert.equal(result.image.mimeType, "image/png");
-      assert.equal(result.image.name, "link.png");
-    }
+    symlinkSync(target, join(dir, "link.png"));
+    return false;
+  } catch {
+    return "宿主不允许创建符号链接（Windows 需开发者模式或管理员），按能力探测跳过";
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
+}
+
+test(
+  "readImageFile：符号链接指向常规图片照常可读（常规文件守卫不误伤链接）",
+  { skip: symlinkSkipReason() },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), "ia827-link-"));
+    try {
+      const target = join(dir, "shot.png");
+      writeFileSync(target, PNG);
+      const link = join(dir, "link.png");
+      symlinkSync(target, link);
+      const result = readImageFile(link);
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.image.mimeType, "image/png");
+        assert.equal(result.image.name, "link.png");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("readImageFile：超过 20 MiB 上限 ⇒ too_large，且不把整文件读进内存", () => {
   const dir = mkdtempSync(join(tmpdir(), "ia827-big-"));

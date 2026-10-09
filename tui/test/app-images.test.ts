@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { TuiApp } from "../src/app.ts";
 import type { ConversationState } from "../src/adapter.ts";
@@ -31,8 +32,10 @@ const PNG_BYTES = Uint8Array.from([
 ]);
 
 /** 仓库内的真图片 fixture（AC2/AC4 要真读盘）。 */
-const FIXTURE_PNG = new URL("./fixtures/shot.png", import.meta.url).pathname;
-const MISSING_PNG = new URL("./fixtures/not-there.png", import.meta.url).pathname;
+// #908：`.pathname` 在 Windows 得 `/D:/…`（前导斜杠 + 正斜杠），readImageFile 判坏；
+// 用 fileURLToPath 按宿主 URL 语义还原成可读盘的本地路径。
+const FIXTURE_PNG = fileURLToPath(new URL("./fixtures/shot.png", import.meta.url));
+const MISSING_PNG = fileURLToPath(new URL("./fixtures/not-there.png", import.meta.url));
 
 /** 让挂起的异步剪贴板读取跑完（纯微任务，不涉真计时器）。 */
 async function settle(): Promise<void> {
@@ -204,7 +207,9 @@ test("AC1：剪贴板读取抛异常 ⇒ catch 并提示（不炸掉 TUI、不�
 });
 
 test("AC2：整块括号粘贴的图片路径 ⇒ 识别为附图并吞掉那段文本", () => {
-  const harness = makeHarness();
+  // #908：粘贴的是**宿主**路径，platform 也按宿主 —— 默认 "linux" 会把 Windows
+  // 路径的反斜杠当终端转义剥掉（`D:\…` -> `D:…`），读盘必然失败。
+  const harness = makeHarness({ platform: process.platform });
   const outcome = harness.app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
   assert.deepEqual(outcome, { consume: true });
   assert.equal(harness.app.pendingImages.length, 1);
@@ -221,7 +226,7 @@ test("AC2：非图片的粘贴不拦截（多行文本、普通路径照旧交�
 });
 
 test("AC2：粘的图片路径不存在 ⇒ 报错且不落附图（文本已被当附图处理）", () => {
-  const harness = makeHarness();
+  const harness = makeHarness({ platform: process.platform });
   const outcome = harness.app.interceptKeys(`\x1b[200~${MISSING_PNG}\x1b[201~`);
   assert.deepEqual(outcome, { consume: true });
   assert.equal(harness.app.pendingImages.length, 0);
@@ -463,6 +468,8 @@ test("独立审查 P4：提交时正文里的悬空标记（手打 [Image #9]）
 test("独立审查 P3：上传窗口里新贴的图不被吞掉（收尾只清本次快照内的图）", async () => {
   const harness = makeHarness({
     models: VISION_MODELS,
+    // #908：粘贴的是宿主路径 => platform 取宿主（同 AC2，默认 "linux" 会剥反斜杠）。
+    platform: process.platform,
     // 上传在途时用户又贴了一张（走 AC2 的路径粘贴 => 产物可辨识：path/名字与剪贴板图不同）。
     onUpload: (app) => {
       app.interceptKeys(`\x1b[200~${FIXTURE_PNG}\x1b[201~`);
@@ -494,7 +501,8 @@ test("复审 N1：视觉预检 listModels 的 await 窗口里新贴的图不被�
   const modelsGate = new Promise<void>((resolve) => {
     releaseModels = resolve;
   });
-  const harness = makeHarness({ models: VISION_MODELS, modelsGate });
+  // #908：粘贴的是宿主路径 => platform 取宿主。
+  const harness = makeHarness({ models: VISION_MODELS, modelsGate, platform: process.platform });
   const app = harness.app;
   app.state.modelName = "m";
   app.interceptKeys("\x1bv");

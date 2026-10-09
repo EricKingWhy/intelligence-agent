@@ -12,7 +12,10 @@
  * kitty 里时被上游探测抢先（那样断言会变成对环境的断言）。
  */
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 
@@ -24,11 +27,18 @@ const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
 
+/**
+ * #908：原图路径按**宿主**构造。pi-tui 的 `imageFallback` 会把它缩短成 `~/...`，并在
+ * 支持 OSC 8 时链到 `pathToFileURL(path)`——两者都是宿主语义；硬写 POSIX 字面
+ * `file:///home/u/...` 在 Windows 上会被解析到当前盘（`file:///D:/home/u/...`）而断言不上。
+ */
+const SHOT_PATH = join(homedir(), "shots", "shot.png");
+
 const IMAGE: PendingImage = {
   bytes: PNG_BYTES,
   mimeType: "image/png",
   name: "shot.png",
-  path: "/home/u/shots/shot.png",
+  path: SHOT_PATH,
 };
 
 const theme = { fallbackColor: (text: string): string => text };
@@ -81,8 +91,8 @@ test("AC6：WT_SESSION（images: null）⇒ 文本占位，不含任何图片协
     assert.ok(output.includes("1x1"), "占位必须给出尺寸");
     assert.ok(output.includes("image/png"), "占位必须给出 media type");
     assert.ok(
-      output.includes("file:///home/u/shots/shot.png"),
-      "支持 OSC 8 的终端上路径应是可点击的原图链接",
+      output.includes(pathToFileURL(SHOT_PATH).href),
+      "支持 OSC 8 的终端上路径应是可点击的原图链接（宿主 file:// URL）",
     );
   });
 });
@@ -93,7 +103,10 @@ test("AC6：终端不支持 OSC 8 时，占位仍给出可读的原图路径（�
     assert.ok(rendered.kind === "text");
     const output = rendered.lines.join("\n");
     assert.ok(!output.includes("\x1b]8;"), "无超链接能力时不得输出 OSC 8 序列");
-    assert.ok(output.includes("shots/shot.png"), "路径必须以文本形式可见");
+    assert.ok(
+      output.includes(join("~", "shots", "shot.png")),
+      "路径必须以 ~/... 的文本形式可见（缩短发生在链接之前）",
+    );
   });
 });
 
