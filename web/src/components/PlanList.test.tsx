@@ -116,6 +116,14 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     }
   });
 
+  it('AC4 后组折叠行排在后组各项之前：展开时折叠行不位移（悬浮不因位移丢焦收起）', () => {
+    act(() => root.render(createElement(PlanList, { items: golden17() })));
+    const toggle = container.querySelector('.plan-list-fold-after .plan-list-fold-toggle')!;
+    const p15 = container.querySelector('[data-plan-id="p15"]')!;
+    // p15 在 toggle 之后（DOCUMENT_POSITION_FOLLOWING = 4）⇒ 展开后组时新增行落在折叠行下方。
+    expect(toggle.compareDocumentPosition(p15) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('AC4 点击切换 + 固定：click → 展开并被悬浮离开/再点收起，aria-expanded 同步', () => {
     act(() => root.render(createElement(PlanList, { items: golden17() })));
     const after = container.querySelector<HTMLButtonElement>('.plan-list-fold-after .plan-list-fold-toggle')!;

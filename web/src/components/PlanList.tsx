@@ -27,7 +27,7 @@
  * openDelay≈120ms / closeDelay≈80ms）；触摸设备（hover:none）点按；同一时刻
  * 至多一组展开（打开一组自动收起另一组）。
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, ChevronRight } from 'lucide-react';
 import type { PlanItem } from '../types';
 
@@ -241,6 +241,20 @@ export function PlanList({ items }: { items: PlanItem[] }) {
     </li>
   );
 
+  // 后组折叠行必须排在**它展开后新增的行之上**：否则展开时新增行插在折叠行前面、折叠行被
+  // 下移，指针落到别处 ⇒ 悬浮态立刻 mouseleave 收起（e2e 实测 chromium-1280 悬停展开后
+  // p15 仍 hidden）。故把后组折叠行插入「窗口末尾」位置（后组各项之前）。
+  // 关键：所有行仍在**同一个数组**里（forEach + push）——若拆成两段 `.map()`，锚点变化使
+  // windowEnd 移动时 item 会跨数组搬迁，触发 remount，破坏 AC6 的行节点身份。
+  const rows: ReactNode[] = [];
+  if (fold.folded && fold.before.count > 0) rows.push(foldRow('before', fold.before, beforeOpen));
+  items.forEach((it, index) => {
+    if (fold.folded && fold.after.count > 0 && index === fold.windowEnd) {
+      rows.push(foldRow('after', fold.after, afterOpen));
+    }
+    rows.push(<PlanRow key={it.id} item={it} current={it.id === currentId} collapsed={hiddenFor(index)} />);
+  });
+
   return (
     <section className="plan-list" aria-label="进度清单">
       <div className="plan-list-head">
@@ -248,13 +262,7 @@ export function PlanList({ items }: { items: PlanItem[] }) {
           进程 {items.length} 项 · 已完成 {completed.length} 项
         </span>
       </div>
-      <ul className="plan-list-items">
-        {fold.folded && fold.before.count > 0 && foldRow('before', fold.before, beforeOpen)}
-        {items.map((it, index) => (
-          <PlanRow key={it.id} item={it} current={it.id === currentId} collapsed={hiddenFor(index)} />
-        ))}
-        {fold.folded && fold.after.count > 0 && foldRow('after', fold.after, afterOpen)}
-      </ul>
+      <ul className="plan-list-items">{rows}</ul>
     </section>
   );
 }
