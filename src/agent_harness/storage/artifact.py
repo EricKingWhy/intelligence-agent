@@ -150,8 +150,24 @@ class ArtifactStore(ABC):
     async def load_bytes(self, artifact_id: str) -> BlobArtifact:
         """按字节 id 读回原始字节（`content` 填充），并做内容寻址自证。
 
-        not-found（含"属于别的会话"）统一 `KeyError`——与文本路径同契约。
+        **读回**语义：id 存在即可读（#830 之后字节对象按内容寻址、可跨会话寻址；
+        "谁能读"由调用方的授权闸门负责，不由本方法负责）。not-found 统一
+        `KeyError`——与文本路径同契约。
         """
+
+    async def load_uploaded_bytes(self, artifact_id: str) -> BlobArtifact:
+        """按字节 id 读回**本会话上传过**的字节（发送侧归属校验用）。
+
+        与 `load_bytes` 的区别只有一问：**"谁的字节"**。`load_bytes` 答"存在吗"，
+        本方法答"属于本会话吗"（PRD D5：发送时校验 id "属于本 session 上下文"）。
+        不是本会话上传的（含别的会话、从未上传）统一 `KeyError` → 422。
+
+        默认实现 = `load_bytes`：远端 Provider 的字节 key 本就带会话前缀
+        （`{session_id}/attachments/{sha256}`），命名空间即会话 ⇒ 两者等价。
+        **字节根跨会话全局去重的 Provider 必须覆写它**（`LocalArtifactStore` 即如此），
+        否则"存在于全局"会被误当成"属于本会话"。
+        """
+        return await self.load_bytes(artifact_id)
 
 
 def compute_artifact_id(content: str) -> str:

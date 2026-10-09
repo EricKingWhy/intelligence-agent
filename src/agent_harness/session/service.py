@@ -2868,9 +2868,13 @@ class SessionService:
     ) -> list[dict[str, Any]]:
         """校验附件 id 并解析成事件引用数组（#823 / MM-02）。
 
-        逐条校验：形态（`sha256:<64hex>`）→ 存在于本会话字节命名空间（别的会话 /
-        从未上传一律拒绝）→ 字节可读且能解析出尺寸。任一条不成立抛
+        逐条校验：形态（`sha256:<64hex>`）→ **本会话上传过**（别的会话 / 从未上传一律
+        拒绝）→ 字节可读且能解析出尺寸。任一条不成立抛
         `AttachmentReferenceInvalid`（HTTP 422）。返回**去重保序**的引用 dict 列表。
+
+        归属判据用 `load_uploaded_bytes` 而不是 `load_bytes`（#830 D1）：字节对象
+        现在是全局内容寻址的（fork 出的子会话要读得回继承的引用），"读得到"不再等于
+        "属于本会话"——本会话上传时会落一条会话回执（hardlink），归属只看它。
         """
         from agent_harness.attachments import (
             STORAGE_UNAVAILABLE_MESSAGE,
@@ -2900,7 +2904,7 @@ class SessionService:
             if store is None:
                 raise AttachmentReferenceInvalid(STORAGE_UNAVAILABLE_MESSAGE)
             try:
-                blob = await store.load_bytes(attachment_id)
+                blob = await store.load_uploaded_bytes(attachment_id)
             except KeyError as error:
                 raise AttachmentReferenceInvalid(
                     f"附件 {attachment_id!r} 不在会话 {session_id!r} 的命名空间里"
