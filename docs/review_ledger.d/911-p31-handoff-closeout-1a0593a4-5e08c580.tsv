@@ -1,0 +1,1 @@
+2026-10-10	#911 断点与收尾记账批归属行：b0bb86af（handoffs 断点文件状态段收尾：标注旧结论「input_request_id 不可分叉」已被实证推翻并留痕）/ 5e08c580 及本笔（本机 Gate-0 6/6 读数落盘 49e7d18e / 5eb01b4c / b0bb86af）。本批零代码改动（git diff e2c8b8ff..HEAD -- src/ tests/ 为空），故沿用 e2c8b8ff 上四轮审查结论。终态本机 Gate-0 6/6、覆盖闸门 exit 0。明细见 docs/phase_status/2026-10.md。	1a0593a450c84261b71ad69eb73dbb23b32c0d37..5e08c580a5adeaa6f50c5e179bfcb8268cb2aad8

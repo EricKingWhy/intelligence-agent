@@ -102,6 +102,45 @@ def test_host_service_challenge_authenticates_and_signs_live_skills_response(
         assert client.get("/api/skills", headers=invalid).status_code == 401
 
 
+def test_bearer_authenticates_skills_when_host_challenge_is_invalid(
+    tmp_path: Path,
+) -> None:
+    secret = "host-challenge-test-secret-with-sufficient-length"
+    host_token = _host_token(secret, expires_in=timedelta(minutes=5))
+    bearer_token = jwt.encode(
+        {
+            "tenant_id": "acme",
+            "user_id": "alice",
+            "scopes": ["user"],
+            "exp": int((datetime.now(UTC) + timedelta(minutes=5)).timestamp()),
+        },
+        secret,
+        algorithm="HS256",
+    )
+    app = create_app(
+        Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+        enable_cors=False,
+        host_service_token=host_token,
+    )
+    app.state.agent = _FakeAgent(_SkillCapability(tmp_path / "skills" / "sample-skill" / "SKILL.md"))
+    nonce = secrets.token_hex(32)
+    timestamp = str(int(datetime.now(UTC).timestamp()))
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/skills",
+            headers={
+                "Authorization": f"Bearer {bearer_token}",
+                HOST_SKILLS_NONCE_HEADER: nonce,
+                HOST_SKILLS_TIMESTAMP_HEADER: timestamp,
+                HOST_SKILLS_PROOF_HEADER: "0" * 64,
+            },
+        )
+
+    assert response.status_code == 200
+    assert HOST_SKILLS_RESPONSE_PROOF_HEADER not in response.headers
+
+
 def test_expired_host_token_cannot_use_skills_challenge(tmp_path: Path) -> None:
     secret = "host-challenge-test-secret-with-sufficient-length"
     token = _host_token(secret, expires_in=timedelta(days=-1))

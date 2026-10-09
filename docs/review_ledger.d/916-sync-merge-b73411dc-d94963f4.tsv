@@ -1,0 +1,1 @@
+2026-10-10	#916 sync merge d94963f4：父1=b73411dc（本票 tip，D2/D3/cp1252/readonly 修复分支）、父2=cab16c30（origin/main，#917 合入点）；merge-base=03b7ec36；三树互不相等；main 侧新增文件（web/app.py、web/projects.py、web/websocket.py、tests/web/test_ws_auth.py 等）与本票文件零重叠、合并零冲突；机械归属	b73411dcdcc087d59016710e6307e69e8756ad98..d94963f43ab7bb79b50252fa69825828cd278a9a

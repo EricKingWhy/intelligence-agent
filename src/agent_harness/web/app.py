@@ -9,6 +9,7 @@ create_app() 是单一入口——传入 Settings，返回装配好的 FastAPI�
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import importlib.metadata
 import json
@@ -1693,12 +1694,117 @@ class CSPHeaderMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+#: 承载 Bearer 的子协议前缀（#890，用户裁决走 k8s 同款形状）。
+#:
+#: 浏览器原生 WebSocket API **不能**设置 `Authorization` 头，子协议是它唯一能带凭据的
+#: 通道。值形如 ``base64url.bearer.authorization.agent-harness.<base64url 无 padding 的 token>``：
+#: 前缀里的 `agent-harness` 是命名空间（k8s 用 `k8s.io`），避免与其他产品的同名子协议
+#: 碰撞；token 用 base64url 无 padding 编码，因为它必须落在 RFC 6455 的 HTTP token 字符
+#: 集内——padding 的 `=` 不是合法 token 字符（`.` 合法，故前缀里的点可用），编码体逐字符
+#: 落在 `[A-Za-z0-9_-]`。
+#: 前端对侧在 `web/src/lib/wsStream.ts` 的同名常量。
+WS_BEARER_SUBPROTOCOL_PREFIX = "base64url.bearer.authorization.agent-harness."
+
+#: 业务子协议：只为满足"浏览器请求了子协议就必须收到一个回显"这条规范。
+#: 出处是 **WHATWG** 的 `establish a WebSocket connection`（响应里没有可回显的子协议 ⇒
+#: 客户端自己 fail 掉连接）。⚠ 这一条**不在** RFC 6455 里：RFC 6455 §4.1 第 6 步只对
+#: "服务端回显了客户端**没请求过**的子协议"要求 MUST fail，对"请求了却没回显"没有规定
+#: —— WHATWG 在该步的 note 里明确点出了这个差别。RFC 6455 一侧对应的是 §4.2.2 的
+#: **服务端**义务：不同意客户端任何一个请求时 MUST NOT 回显。本仓据此**从不**回显承载
+#: token 的那一个（防泄漏），所以客户端必须再带一个可回显的。k8s 同款：它要求客户端
+#: "至少再带一个真实子协议"。
+WS_BUSINESS_SUBPROTOCOL = "agent-harness.v1"
+
+#: 跨源拒的 close reason。**固定短 ASCII**：ASGI 规定 `reason` ≤123 字节且限可打印
+#: ASCII，而 `Origin` 是客户端可控、无长度上界的——原样拼进去既越界又是注入面。
+#: 真实来源只进日志（截断后）。
+WS_ORIGIN_DENIED_REASON = "cross-origin websocket handshake denied"
+
+#: 凭据被拒的 close reason。与上面那条同受一条 ASGI 约束（≤123 字节可打印 ASCII），
+#: 且同样**到不了客户端**——uvicorn 对握手前的 close 固定回 403。抽成具名常量是为了
+#: 两个拒绝出口对称：分支里各写一条字面量，改一处忘一处就会漂移。
+WS_CREDENTIAL_REJECTED_REASON = "websocket credential rejected"
+
+
+def _token_subprotocol(subprotocols: list[str]) -> str | None:
+    """命中 Bearer 前缀的那个子协议（没有则 None）。"""
+    for proto in subprotocols:
+        if proto.startswith(WS_BEARER_SUBPROTOCOL_PREFIX):
+            return proto
+    return None
+
+
+def _bearer_from_subprotocols(subprotocols: list[str]) -> str | None:
+    """从子协议列表解出 `Authorization` 头的**等价形状**（`"Bearer <token>"`）。
+
+    解出来直接喂同一个 `_resolve_identity`，因此两条通道的 fail-closed 语义
+    完全一致（缺 token / 坏签名 / 过期 / 无 exp 都是同一个出口），不存在第二套判据。
+
+    解码用 `base64url` 且**不带 padding**（k8s 的 `base64.RawURLEncoding` 同款）：
+    padding 的 `=` 不是合法 HTTP token 字符，浏览器会直接拒发这个子协议。
+    token 本身不是 UTF-8 文本的先验（JWT 是 ASCII，但这里不假定）⇒ 解码失败
+    一律返回 None（当作"没给凭据"），交给 `_resolve_identity` 的 fail-closed 处理。
+
+    解码是**部分宽容的**：多余字符数恰在 padding 补齐窗口内时被忽略；
+    其它尾部字符可能抛 `binascii.Error`（`ValueError` 子类，落 fail-closed 分支）
+    或被解成另一 token。缺的 padding 由上面那行 `=` 补齐，故不同子协议串可解出
+    **同一 token**。
+    结果等价，仍走同一 `_resolve_identity` 鉴权路径，不构成绕过（实跑确认）。
+    """
+    proto = _token_subprotocol(subprotocols)
+    if proto is None:
+        return None
+    encoded = proto[len(WS_BEARER_SUBPROTOCOL_PREFIX):]
+    if not encoded:
+        return None
+    try:
+        token = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        return f"Bearer {token.decode('utf-8')}"
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _negotiate_subprotocol(subprotocols: list[str]) -> str | None:
+    """挑一个要在 101 响应里回显的子协议：**只可能是业务子协议**，其余一律 None。
+
+    回显即"服务端声称实现了这个协议"，所以此处必须有白名单：原实现回显"第一个非 token
+    前缀的子协议"，等于客户端自带什么就声称支持什么（`subprotocols=["other.product.v9"]`
+    会拿到 `Sec-WebSocket-Protocol: other.product.v9`）——违反子协议协商的基本约定。
+
+    不回显承载 token 的那一个则是防泄漏（k8s 同款：校验成功后把它从协商列表剔除）。
+
+    返回 None 即"**业务子协议不在请求列表里**"，穷尽所有情形：没请求任何子协议；只请求了
+    承载 token 的那一个；只请求了第三方子协议（`other.product.v9`）；第三方 + token 而**没**
+    带业务子协议。后三种里浏览器都会因"请求了子协议却没收到回显"自己判握手失败
+    （k8s 直接报 `missing additional subprotocol` 错误；本项目靠浏览器这条语义兜住，
+    我们自己的客户端永远会带业务子协议）。
+    """
+    return WS_BUSINESS_SUBPROTOCOL if WS_BUSINESS_SUBPROTOCOL in subprotocols else None
+
+
+class _IdentityRejected(Exception):
+    """凭据判定失败（`AuthSeamMiddleware._resolve_identity` 的唯一失败出口）。
+
+    HTTP 面缺 / 坏凭据**恒 401**（tests/test_identity.py 与前端 `lib/auth.ts` 的 401
+    引导横幅钉住那条契约），由调用处写死；WS 侧不在此处理——它没有 HTTP 状态行，
+    只能以 ASGI `websocket.close` 收场。
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 class AuthSeamMiddleware:
     """纯 ASGI 中间件：身份认证 + IdentityContext 绑定（行为契约同旧实现）。
 
-    fail-open/fail-closed 语义、claims 校验、401 形状逐字节不变
+    HTTP 面的 fail-open/fail-closed 语义、claims 校验、401 形状逐字节不变
     （tests/test_identity.py / test_web_api.py 钉住）；差异仅在传输层：
     不经 BaseHTTPMiddleware 的任务组，SSE 断连取消不再跨请求传染。
+
+    #890：**websocket scope 不再直通**，而是走同一个 `_resolve_identity`——
+    配置密钥时无凭据握手在 `websocket.accept()` 之前被拒（`websocket.close`），
+    这正是缺陷的修复点：此前 WS 是无条件放行的旁路，Bearer 边界在它上面是空操作。
     """
 
     def __init__(
@@ -1729,6 +1835,9 @@ class AuthSeamMiddleware:
             return True
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "websocket":
+            await self._authenticate_websocket(scope, receive, send)
+            return
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -1738,9 +1847,8 @@ class AuthSeamMiddleware:
             # tests/host_service/ 钉住不泄密。
             await self.app(scope, receive, send)
             return
-        identity = IdentityContext("local", "local", ["user", "session"])
         headers = Headers(scope=scope)
-        host_challenge_nonce = None
+        identity: IdentityContext | None = None
         if (
             scope.get("method") == "GET"
             and scope.get("path") == "/api/skills"
@@ -1790,44 +1898,17 @@ class AuthSeamMiddleware:
                     and hmac.compare_digest(proof, expected)
                     and self._consume_host_skills_nonce(nonce)
                 ):
-                    host_challenge_nonce = nonce
                     identity = IdentityContext("local", claims["user_id"], scopes)
                     state = scope.setdefault("state", {})
                     state["host_skills_challenge_nonce"] = nonce
                     state["host_skills_service_uuid"] = service_uuid
                     state["host_skills_proof_timestamp"] = proof_timestamp
-        authorization = headers.get("authorization")
-        if self._settings.jwt_secret and host_challenge_nonce is None:
-            # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
-            # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
-            # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
-            # 过期语义，永不过期的签名 token 等于永久凭证）。
-            if not authorization:
-                response: Response = JSONResponse(
-                    {"detail": "Missing identity token"}, status_code=401)
-                await response(scope, receive, send)
-                return
+        if identity is None:
             try:
-                scheme, encoded = authorization.split(" ", 1)
-                if scheme.lower() != "bearer":
-                    raise ValueError("Expected Bearer token")
-                # SecretStr 取明文给 jwt.decode；truthiness 判断仍基于密钥值
-                # （SecretStr("") 为 falsy，未配置语义不变）。
-                claims = jwt.decode(
-                    encoded, self._settings.jwt_secret.get_secret_value(),
-                    algorithms=["HS256"],
-                    options={"require": ["tenant_id", "user_id", "exp"]})
-                tenant, user = claims["tenant_id"], claims["user_id"]
-                scopes = claims.get("scopes", ["user", "session"])
-                if (not isinstance(tenant, str) or not tenant.strip()
-                        or not isinstance(user, str) or not user.strip()
-                        or not isinstance(scopes, list)
-                        or any(not isinstance(s, str) for s in scopes)):
-                    raise ValueError("Invalid identity claims")
-                identity = IdentityContext(tenant, user, scopes)
-            except (jwt.InvalidTokenError, ValueError):
-                response = JSONResponse(
-                    {"detail": "Invalid identity token"}, status_code=401)
+                identity = self._resolve_identity(headers.get("authorization"))
+            except _IdentityRejected as rejected:
+                response: Response = JSONResponse(
+                    {"detail": rejected.detail}, status_code=401)
                 await response(scope, receive, send)
                 return
         token = set_identity_context(identity)
@@ -1835,6 +1916,131 @@ class AuthSeamMiddleware:
             await self.app(scope, receive, send)
         finally:
             identity_context_var.reset(token)
+
+    async def _authenticate_websocket(
+        self, scope: Any, receive: Any, send: Any,
+    ) -> None:
+        """WS 握手前的凭据 + 来源判定（#890）。**必须在 accept 之前**。
+
+        两条分支与 HTTP 面同源，不是第二套判据：
+
+        - **已配置 `jwt_secret`**：凭据走同一个 `_resolve_identity`，来源有两个等价
+          通道（任一通过即放行）：`Authorization: Bearer`（桌面外壳 loopback 代理
+          注入的那条）与 `Sec-WebSocket-Protocol` 子协议（浏览器唯一能用的那条，
+          见 `WS_BEARER_SUBPROTOCOL_PREFIX`）。
+          此处**不看 `Origin`**——本机任意进程都能伪造 `Origin: http://localhost`，
+          把它当边界是假边界；HTTP 面的 `require_trusted_origin` 在配了密钥时也是
+          直接返回（认证层才是边界）。
+        - **未配置 `jwt_secret`**：本地信任模式 + 来源闸。无 `Origin` ⇒ 非浏览器
+          发起（第三方网页**无法**构造不带 Origin 的浏览器握手）⇒ 放行；带 Origin
+          则只接受本机 hostname，其余拒绝。这一条封的是 **WS 通道**的 drive-by 形态：
+          WS 握手不受 CORS 约束，服务端不判 Origin 就等于允许用户访问的任意网页连上来
+          读写会话。**范围仅限本路由**——跨源 HTTP 读写面（会话事件流 / 消息入口等）
+          仍无来源闸而 CORS 为 `*`，那是既有缺口、不在本票 Scope。判据与
+          `projects.require_trusted_origin` 共用一份策略实现（出口文案与 close reason 各自一份）。
+
+        拒 = `websocket.close`（未 accept）⇒ uvicorn 回 **403** 且不建连
+        （`websockets_impl.py:296-304`）。语义与 Django Channels 的
+        `WebsocketDenier`（deny 走 `close()`）、Phoenix `check_origin` 的
+        握手前 `forbidden` 一致；socket.io 亦是"连接建立之前"鉴权，
+        故不采用"先 accept 再发 error 帧"的形状（那会把未认证连接先建起来）。
+        """
+        headers = Headers(scope=scope)
+        subprotocols = list(scope.get("subprotocols") or [])
+        # 两种来源等价（任一通过即放行）；都缺席时退化成一次 `None`，让
+        # `_resolve_identity` 仍走一遍它的 fail-closed（配了密钥 ⇒ 缺凭据即拒；
+        # 未配置密钥 ⇒ 本地信任模式照常放行）。
+        credentials = [c for c in (headers.get("authorization"),
+                                   _bearer_from_subprotocols(subprotocols))
+                       if c is not None] or [None]
+        identity: IdentityContext | None = None
+        for credential in credentials:
+            try:
+                identity = self._resolve_identity(credential)
+                break
+            except _IdentityRejected:
+                continue
+        if identity is None:
+            # uvicorn 对握手前的 close 固定回 403，code / reason 传不过去；
+            # 这里给的形状只是 ASGI 层语义表达，不声称到达客户端。
+            await send({"type": "websocket.close", "code": 1008,
+                        "reason": WS_CREDENTIAL_REJECTED_REASON})
+            return
+        # 函数内 import：`projects` 反向 import 本模块（`project_service` 等），
+        # 模块级引会成环。策略正文（含 `origin_is_local`）与 HTTP 面共用一份——
+        # 配了密钥时它自己短路放行（认证层才是边界），所以此处无条件调用。
+        from agent_harness.web.projects import check_trusted_origin
+
+        # 判据取自 `projects`（`check_trusted_origin`）：HTTP 面把它放进 403 的
+        # `detail`，这里把它截断记进日志。注意：WS 的 close reason **不是**这条
+        # 文案，而是本模块自有常量 `WS_ORIGIN_DENIED_REASON`（固定短 ASCII，
+        # 受 ASGI ≤123 字节可打印 ASCII 约束）——`projects` 返回的文案只进日志。
+        cross_origin = check_trusted_origin(
+            headers.get("origin"),
+            jwt_secret_configured=bool(self._settings.jwt_secret),
+        )
+        if cross_origin is not None:
+            # 文案里含客户端可控、无长度上界的 `Origin` ⇒ 按长度截断，别让它灌水。
+            logging.getLogger("agent_harness.web").warning(
+                "拒绝跨源 WebSocket 握手：%s", cross_origin[:120],
+            )
+            # reason 固定短 ASCII（ASGI 限 ≤123 字节可打印 ASCII），来源只进日志。
+            await send({"type": "websocket.close", "code": 1008,
+                        "reason": WS_ORIGIN_DENIED_REASON})
+            return
+        # k8s 同款：承载 token 的子协议校验成功后**不回显**（防泄漏）——`negotiated`
+        # 只可能是业务子协议（或 None）。浏览器请求了子协议却收不到回显会自己判
+        # 握手失败（WHATWG establish-a-WebSocket-connection），故客户端另带一个。
+        negotiated = _negotiate_subprotocol(subprotocols)
+
+        async def send_with_subprotocol(message: Any) -> None:
+            # `handle_websocket` 的 `accept()` 不带 subprotocol（它不关心协商），
+            # 而浏览器**必须**收到一个回显——否则客户端自己判握手失败。在此补齐。
+            if message["type"] == "websocket.accept" and negotiated is not None:
+                message = {**message, "subprotocol": negotiated}
+            await send(message)
+
+        token = set_identity_context(identity)
+        try:
+            await self.app(scope, receive, send_with_subprotocol)
+        finally:
+            identity_context_var.reset(token)
+
+    def _resolve_identity(self, authorization: str | None) -> IdentityContext:
+        """**HTTP 与 WS 共用的唯一凭据判定点**（#890）。
+
+        同一份 fail-closed 语义、同一份 claims 校验、同一份文案——两条传输面不
+        各写一份，是"WS 与 HTTP 同口径"这条验收的结构性保证。未配置密钥 ⇒ 本地
+        信任模式（local 身份），零行为变化。
+        """
+        if not self._settings.jwt_secret:
+            return IdentityContext("local", "local", ["user", "session"])
+        # R6-4/R8-3（用户拍板 fail-closed）：配置了密钥 = 需要认证。
+        # 匿名请求不再静默降级为 trusted local（此前配合 CORS * 等于把
+        # agent API 开放给任意网页）；无 exp 的 token 一并拒绝（强制
+        # 过期语义，永不过期的签名 token 等于永久凭证）。
+        if not authorization:
+            raise _IdentityRejected("Missing identity token")
+        try:
+            scheme, encoded = authorization.split(" ", 1)
+            if scheme.lower() != "bearer":
+                raise ValueError("Expected Bearer token")
+            # SecretStr 取明文给 jwt.decode；truthiness 判断仍基于密钥值
+            # （SecretStr("") 为 falsy，未配置语义不变）。
+            claims = jwt.decode(
+                encoded, self._settings.jwt_secret.get_secret_value(),
+                algorithms=["HS256"],
+                options={"require": ["tenant_id", "user_id", "exp"]})
+            tenant, user = claims["tenant_id"], claims["user_id"]
+            scopes = claims.get("scopes", ["user", "session"])
+            if (not isinstance(tenant, str) or not tenant.strip()
+                    or not isinstance(user, str) or not user.strip()
+                    or not isinstance(scopes, list)
+                    or any(not isinstance(s, str) for s in scopes)):
+                raise ValueError("Invalid identity claims")
+            return IdentityContext(tenant, user, scopes)
+        except (jwt.InvalidTokenError, ValueError) as invalid:
+            raise _IdentityRejected("Invalid identity token") from invalid
 
 
 def _package_version() -> str:
