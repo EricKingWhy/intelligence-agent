@@ -1690,7 +1690,7 @@ class CSPHeaderMiddleware:
 #: 通道。值形如 ``base64url.bearer.authorization.agent-harness.<base64url 无 padding 的 token>``：
 #: 前缀里的 `agent-harness` 是命名空间（k8s 用 `k8s.io`），避免与其他产品的同名子协议
 #: 碰撞；token 用 base64url 无 padding 编码，因为它必须落在 RFC 6455 的 HTTP token 字符
-#: 集内（`[A-Za-z0-9_-]` 全部合法，`.`, `=` 之外的 padding 会越界）。
+#: 集内——padding 的 `=` 不是合法 token 字符（`.` 同样不是），只有 `[A-Za-z0-9_-]` 可用。
 #: 前端对侧在 `web/src/lib/wsStream.ts` 的同名常量。
 WS_BEARER_SUBPROTOCOL_PREFIX = "base64url.bearer.authorization.agent-harness."
 
@@ -1837,9 +1837,11 @@ class AuthSeamMiddleware:
           直接返回（认证层才是边界）。
         - **未配置 `jwt_secret`**：本地信任模式 + 来源闸。无 `Origin` ⇒ 非浏览器
           发起（第三方网页**无法**构造不带 Origin 的浏览器握手）⇒ 放行；带 Origin
-          则只接受本机 hostname，其余拒绝。这一条正是 drive-by 面的封堵：WS 握手
-          不受 CORS 约束，服务端不判 Origin 就等于允许用户访问的任意网页连上来
-          读写会话。判据与 `projects.require_trusted_origin` 共用一份实现与文案常量。
+          则只接受本机 hostname，其余拒绝。这一条封的是 **WS 通道**的 drive-by 形态：
+          WS 握手不受 CORS 约束，服务端不判 Origin 就等于允许用户访问的任意网页连上来
+          读写会话。**范围仅限本路由**——跨源 HTTP 读写面（会话事件流 / 消息入口等）
+          仍无来源闸而 CORS 为 `*`，那是既有缺口、不在本票 Scope。判据与
+          `projects.require_trusted_origin` 共用一份实现与文案常量。
 
         拒 = `websocket.close`（未 accept）⇒ uvicorn 回 **403** 且不建连
         （`websockets_impl.py:296-304`）。语义与 Django Channels 的

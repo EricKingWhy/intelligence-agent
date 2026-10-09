@@ -97,8 +97,9 @@ const WS_BUSINESS_SUBPROTOCOL = 'agent-harness.v1';
 function wsSubprotocols(): string[] {
   const token = getToken();
   if (!token) return [WS_BUSINESS_SUBPROTOCOL];
-  // base64url 无 padding：`+`→`-`、`/`→`_`、去掉结尾 `=`。手写而非 btoa，因为
-  // btoa 只吃 Latin-1，而 token 是 UTF-8 文本（开发者粘贴的任意串）。
+  // base64url 无 padding：`+`→`-`、`/`→`_`、去掉结尾 `=`。先 `TextEncoder` 把
+  // token 转成 UTF-8 字节再喂 `btoa`——`btoa` 只吃 Latin-1，而 token 是 UTF-8 文本
+  // （开发者粘贴的任意串），直接喂会抛 InvalidCharacterError。
   const encoded = base64UrlEncode(new TextEncoder().encode(token));
   return [WS_BUSINESS_SUBPROTOCOL, `${WS_BEARER_SUBPROTOCOL_PREFIX}${encoded}`];
 }

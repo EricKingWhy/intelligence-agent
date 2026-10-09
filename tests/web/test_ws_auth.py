@@ -32,7 +32,7 @@
 判别力说明（为什么这些用例能区分"拒"与"放行"）：本文件共 **35 例**，走**两条不同的
 测试接缝**，断言强度不同，别混为一谈。
 
-**接缝一：真实 uvicorn + httpx2**（末尾 2 例）。被拒的握手由 uvicorn 回 HTTP 403，
+**接缝一：真实 uvicorn + httpx2**（另外 2 例，即文件末尾那两个 `async` 用例）。被拒的握手由 uvicorn 回 HTTP 403，
 客户端在 `client.websocket(...)` 的 `__enter__` 抛 `HTTPXWSException`，其 `.response`
 带 `status_code == 403`——**只有这两例能断言状态码**。它们覆盖的正是"拒发生在协议层、
 连会话面都没进"这个结构性事实（订阅 / 写入都到不了业务侧，且同一服务上带凭据的连接
@@ -45,7 +45,7 @@
 不会在 `__enter__` 抛（那时拿到的是已建立的连接），所以两种实现仍能被区分。
 
 这 33 例不是一个模子：**拒**侧（凭据来源 × 有无 Origin × 本机/跨源）锚的是判据矩阵，
-**放行**侧（`_ping_pong` 证明放行的是既有 `handle_websocket` 协议行为、`ws.accepted_subprotocol`
+**放行**侧 8 例（`_ping_pong` 证明放行的是既有 `handle_websocket` 协议行为、`ws.accepted_subprotocol`
 证明协商值）锚的是"没被过度收紧"——后者是 over-fix 的反锚，与"拒"侧同等重要，别被
 "判据矩阵"四个字盖过去。
 """

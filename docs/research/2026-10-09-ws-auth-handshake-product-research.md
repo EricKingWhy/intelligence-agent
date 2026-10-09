@@ -34,7 +34,8 @@ HTTP 用 401 JSON 响应，WS 用 `websocket.close`（未 accept）——uvicorn
 - 来源：k8s commit `714f97d7baf4975ad3aa47735a868a81a984d1f0`
   `staging/src/k8s.io/apiserver/pkg/authentication/request/websocket/protocol.go`。
 - 形状：子协议值 `base64url.bearer.authorization.<ns>.<base64url 无 padding 的 token>`；
-  本项目命名空间取 `agent-harness`（k8s 用 `k8s.io`）。
+  本项目命名空间取 `agent-harness`（k8s 用 `k8s.io`）。两者**形状同款但串不互通**：
+  命名空间不同，前端只会发 `agent-harness` 那一条。
 - 为什么 base64url 无 padding：子协议值必须是 RFC 6455 的合法 HTTP token 字符，
   padding 的 `=` 会被浏览器直接拒发。
 - 关键细节照搬：校验成功后**剥离该子协议、101 响应不回显**（防泄漏）；因浏览器请求了
@@ -62,7 +63,7 @@ HTTP 用 401 JSON 响应，WS 用 `websocket.close`（未 accept）——uvicorn
    ⚠ **这一条是相对改动前的行为变更**，不是"零影响"：base 对**任意** Origin 的 WS 握手
    一律放行，现在跨源被拒（受影响旧用法：从 `file://` / sandboxed iframe 打开本服务，
    它们的 `Origin` 是 `null`）。票面验收 3 的准确表述是"本地信任模式仍可用；跨源浏览器
-   握手由放行改为拒绝"。
+   握手由放行改为拒绝"——**该重述经王浩宇 2026-10-10 直接批准（复审 P3-5 裁决选 A）**。
 4. **拒的落点**：`await send({"type": "websocket.close", ...})` 且**不**先 accept。
    实测（uvicorn 0.52.4 `protocols/websockets/websockets_impl.py:296-304`）：
    握手前的 `websocket.close` 一律以 HTTP **403** 收场、连接不建立 ⇒ 与 Phoenix 的
@@ -80,8 +81,12 @@ HTTP 用 401 JSON 响应，WS 用 `websocket.close`（未 accept）——uvicorn
 RFC 6455 / ASGI 规范 / uvicorn 设置 / `websockets` 内存文档——**鉴权接入面没有条目**。
 本次调研按 §3.1「出现新领域/新来源先补本清单」在该节补了 Channels / Phoenix / Socket.IO /
 Kubernetes 四行（机制摘要指向本文；Kubernetes 行见下节，即 P1-1 所采纳的子协议方案来源）。
-四家的本地克隆不落盘（本机无 `D:\reference`；本次按需取单文件正文并记 commit / tag），
-正文快照留在 `~/refs-890/src/`（本机临时目录，不入库）。
+四家的本地克隆不落盘（本机无 `D:\reference`；本次按需取单文件正文并记 commit / tag）。
+本机临时目录 `~/refs-890/src/` 的留存情况**如实分列**（该目录不入库，仅供本票复算）：
+Channels（`channels-ws.py` / `channels-auth.py`）与 Phoenix（`phoenix-transport.ex`）
+有正文快照；Socket.IO 的官方文档页取回是 14 字节的 `404: Not Found`（该来源按
+URL + 小节标题引用，无正文快照）；**Kubernetes 无快照**——P1-1 所采纳的子协议方案
+只有 `file:line` 与 commit `714f97d7` 的引用，行号未随源码快照一并留存。
 
 ## License
 
