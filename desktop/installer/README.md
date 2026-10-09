@@ -48,8 +48,11 @@ src/installer/
   renames the live dir to `$INSTDIR.old-<guid>` before the install section
   (a running app locks its directory, so the rename also guards against
   updating over a live process); `customInstall` verifies the new files and
-  either deletes the backup or rolls back. A backup that cannot be restored
-  is left in place, never deleted.
+  then deletes the backup, records it, or rolls back. A delete that fails
+  because a child cannot be removed (#901) leaves the install finished, the
+  directory in place and its path in `IaLeftoverDir`, so the next promote can
+  still name it; a backup that cannot be restored is left in place, never
+  deleted.
 - **User data isolation**: `%APPDATA%\intelligence-agent` (set via
   `app.setPath('userData', …)` in `src/main.ts`), always outside the install
   dir. Uninstall never touches it; explicit cleanup is

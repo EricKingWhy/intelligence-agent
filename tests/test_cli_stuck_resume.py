@@ -387,6 +387,16 @@ async def test_a_resume_without_a_policy_declaration_cannot_forge_a_policy_chang
        快照里 profile / effort 仍是暂停侧声明过的值（不是悄悄回落默认）。
     """
     settings = _settings(tmp_path)
+    settings.agent_models = json.dumps([{
+        "name": "deepseek-chat",
+        "provider": "deepseek",
+        "model_name": "deepseek-chat",
+        "reasoning_effort": {
+            "supported": ["deep"],
+            "default": "deep",
+            "wire_mapping": {"deep": "high"},
+        },
+    }])
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(
         "agent_harness.assembly.create_chat_model",

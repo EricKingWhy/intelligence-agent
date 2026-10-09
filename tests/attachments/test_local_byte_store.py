@@ -236,7 +236,11 @@ def test_object_permission_is_read_only(tmp_path: Path) -> None:
     store = _store(tmp_path, "sess-a")
     blob = asyncio.run(store.save_bytes("sess-a", b"perm", mime_type="image/png"))
     path = _object_path(tmp_path, blob.artifact_id)
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o400
+    file_stat = os.stat(path)
+    if os.name == "nt":
+        assert file_stat.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+    else:
+        assert stat.S_IMODE(file_stat.st_mode) == 0o400
 
 
 def test_session_delete_drops_receipt_but_keeps_global_object(tmp_path: Path) -> None:

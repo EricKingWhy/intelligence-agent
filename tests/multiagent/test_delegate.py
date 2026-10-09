@@ -343,17 +343,13 @@ class TestBlockingParallelDelegation:
 
     @pytest.mark.asyncio
     async def test_three_delegates_run_concurrently(self, tmp_path):
-        import time
-
-        tool, _ = self._parallel_tool(tmp_path, child_delay=0.3, max_active=3)
+        tool, provider = self._parallel_tool(tmp_path, child_delay=0.3, max_active=3)
         calls = [_args("coding", f"任务{i}") for i in range(3)]
 
-        t0 = time.perf_counter()
         results = await asyncio.gather(*[tool.execute(c) for c in calls])
-        wall = time.perf_counter() - t0
 
         assert all(r.ok for r in results)
-        assert wall < 0.9, f"并发执行应远快于串行 0.9s，实际 {wall:.2f}s"
+        assert provider._factory._model.peak == 3
 
     @pytest.mark.asyncio
     async def test_active_children_capped_and_no_loss(self, tmp_path):

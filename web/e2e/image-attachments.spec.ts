@@ -19,6 +19,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 import { MODELS, fulfillSse, routeApi, type ApiMock, type FrameSpec } from './fixtures';
 
 const SID = 'mm04-session-0001';
@@ -249,6 +250,9 @@ test('AC1/AC2/AC4/AC5/AC6：粘贴 → 缩略图 → 发送带 attachments → �
   const lightbox = page.locator('.image-lightbox');
   await expect(lightbox).toBeVisible();
   await expect(lightbox.locator('.image-lightbox-img')).toBeVisible();
+  await expect
+    .poll(() => lightbox.locator('.image-lightbox-img').evaluate((el) => (el as HTMLImageElement).naturalWidth > 0))
+    .toBe(true);
   await expect(lightbox.getByRole('button', { name: '复制原图' })).toBeVisible();
   const download = lightbox.locator('a.image-lightbox-btn');
   // 展示名缺省（写入路径不持久化 name）⇒ 回落「图片」，不伪造文件名。
@@ -266,13 +270,33 @@ test('AC1/AC2/AC4/AC5/AC6：粘贴 → 缩略图 → 发送带 attachments → �
     });
     expect(topmost).toBe(true);
   }
+  const cdp = await page.context().newCDPSession(page);
+  let cdpDownloadRequest: { url: string; method: string } | undefined;
+  cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+    cdpDownloadRequest = { url: request.url, method: request.method };
+    await cdp.send('Fetch.fulfillRequest', {
+      requestId,
+      responseCode: 200,
+      responseHeaders: [
+        { name: 'Content-Type', value: 'image/png' },
+        { name: 'Content-Disposition', value: 'attachment; filename="shot.png"' },
+      ],
+      body: PNG_3PX.toString('base64'),
+    });
+  });
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: `*${contentPath}`, requestStage: 'Request' }] });
   const downloadStart = page.waitForEvent('download');
   await download.click();
-  // 真的点到了那个 anchor（命中测试由 Playwright 执行：被遮罩盖住会直接报
-  // "intercepts pointer events" 而不是静默点到别处）。文件名不断言：名字由
-  // `download` 属性给出，而拦截式 mock 响应下 `suggestedFilename()` 拿不到它
-  // （实测给的是兜底的 `download`），断言 URL 才落在受控端点这条事实上。
-  expect((await downloadStart).url()).toContain(contentPath);
+  // Chromium 的原生 <a download> 请求绕过 Playwright route；用 CDP 只拦截这次真实点击的 GET，
+  // 回同一份 PNG 字节，再核对下载成功且字节未变。Playwright 点击命中检查仍覆盖遮罩遮挡。
+  const downloaded = await downloadStart;
+  expect(downloaded.url()).toContain(contentPath);
+  expect(cdpDownloadRequest?.method).toBe('GET');
+  expect(cdpDownloadRequest?.url).toContain(contentPath);
+  expect(await downloaded.failure()).toBeNull();
+  expect(await readFile(await downloaded.path())).toEqual(PNG_3PX);
+  await cdp.send('Fetch.disable');
+  await cdp.detach();
   await page.keyboard.press('Escape');
   await expect(lightbox).toHaveCount(0);
 });
