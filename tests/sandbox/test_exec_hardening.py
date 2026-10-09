@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import os
 import shlex
 import subprocess
@@ -19,6 +18,7 @@ import sys
 import textwrap
 import threading
 import time
+import weakref
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -1154,8 +1154,9 @@ def test_docker_cleanup_failure_guard_survives_sandbox_collection():
     sandbox._exec_state = DockerSandbox._state_for_container(container_name)
     sandbox._mark_exec_cleanup_failed()
 
+    sandbox_ref = weakref.ref(sandbox)
     del sandbox
-    gc.collect()
+    assert sandbox_ref() is None
 
     recovered = object.__new__(DockerSandbox)
     recovered._container_name = container_name
