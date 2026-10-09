@@ -12,10 +12,9 @@
  * kitty 里时被上游探测抢先（那样断言会变成对环境的断言）。
  */
 import assert from "node:assert/strict";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 
@@ -27,18 +26,13 @@ const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
 
-/**
- * #908：原图路径按**宿主**构造。pi-tui 的 `imageFallback` 会把它缩短成 `~/...`，并在
- * 支持 OSC 8 时链到 `pathToFileURL(path)`——两者都是宿主语义；硬写 POSIX 字面
- * `file:///home/u/...` 在 Windows 上会被解析到当前盘（`file:///D:/home/u/...`）而断言不上。
- */
-const SHOT_PATH = join(homedir(), "shots", "shot.png");
+const IMAGE_PATH = "/home/u/shots/shot.png";
 
 const IMAGE: PendingImage = {
   bytes: PNG_BYTES,
   mimeType: "image/png",
   name: "shot.png",
-  path: SHOT_PATH,
+  path: IMAGE_PATH,
 };
 
 const theme = { fallbackColor: (text: string): string => text };
@@ -90,9 +84,19 @@ test("AC6：WT_SESSION（images: null）⇒ 文本占位，不含任何图片协
     assert.ok(output.includes("shot.png"), "占位必须给出文件名");
     assert.ok(output.includes("1x1"), "占位必须给出尺寸");
     assert.ok(output.includes("image/png"), "占位必须给出 media type");
-    assert.ok(
-      output.includes(pathToFileURL(SHOT_PATH).href),
-      "支持 OSC 8 的终端上路径应是可点击的原图链接（宿主 file:// URL）",
+    // 不写死 `file:///home/u/...`：`imageFallback`（上游 pi-tui）用 `pathToFileURL` 造链接，
+    // 同一条 `/home/u/...` 在 Windows 上按**当前盘**解析成 `file:///C:/home/u/...` ⇒ 期望值
+    // 随平台变、盘符不可写死（#830 D3）。这里也不与同一个原语的输出比字面量（那会把两侧
+    // 绑死、形状回归看不见），而是断言**语义**：OSC 8 链接必须存在，且解码回来就是同一份
+    // 文件 —— 斜杠数、盘符、百分号编码任一出错都会在这里红。
+    // 终止符两类都排除：`\x1b`（ST，上游 hyperlink 用 `\x1b\\`）与 `\x07`（BEL，部分终端
+    // 用 BEL 收尾）—— 否则终止符被吃进 href、`fileURLToPath` 假红。
+    const linked = /file:\/\/[^\s\x1b\x07]+/.exec(output);
+    assert.ok(linked, "支持 OSC 8 的终端上路径应是可点击的原图链接");
+    assert.equal(
+      fileURLToPath(linked[0]),
+      resolve(IMAGE_PATH),
+      "OSC 8 链接必须指回同一份原图",
     );
   });
 });
@@ -103,10 +107,7 @@ test("AC6：终端不支持 OSC 8 时，占位仍给出可读的原图路径（�
     assert.ok(rendered.kind === "text");
     const output = rendered.lines.join("\n");
     assert.ok(!output.includes("\x1b]8;"), "无超链接能力时不得输出 OSC 8 序列");
-    assert.ok(
-      output.includes(join("~", "shots", "shot.png")),
-      "路径必须以 ~/... 的文本形式可见（缩短发生在链接之前）",
-    );
+    assert.ok(output.includes("shots/shot.png"), "路径必须以文本形式可见");
   });
 });
 

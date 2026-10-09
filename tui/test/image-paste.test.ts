@@ -10,11 +10,10 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
 
 import {
   clipboardImageName,
@@ -33,6 +32,12 @@ const PNG = Uint8Array.from([
   0x1f, 0x15, 0xc4, 0x89,
   0x00, 0x00, 0x00, 0x00, 0x49, 0x44, 0x41, 0x54, 0xae, 0x42, 0x60, 0x82,
 ]);
+
+/** 命令不存在时 `child_process` 抛出的错误带 `code = "ENOENT"`（`Error` 上没声明这个字段）。 */
+function isEnoent(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return error.code === "ENOENT";
+}
 
 test("剥掉包裹引号（Windows 复制路径常带引号）", () => {
   assert.equal(resolvePastedImagePath('"/tmp/shot.png"', "linux"), "/tmp/shot.png");
@@ -57,12 +62,15 @@ test("http(s) URL 不是本地路径 ⇒ undefined", () => {
   assert.equal(resolvePastedImagePath("https://example.com/a.png", "linux"), undefined);
 });
 
-test("file:// URL 转成本地路径（#908：宿主语义——期望值按宿主路径构造，不硬写 POSIX 字面）", () => {
-  // file:// 分支走宿主 fileURLToPath（`platform` 形参只管反斜杠反转义那条分支），
-  // 语义是「这台机器上的真实本地文件」；POSIX 字面 `file:///tmp/shot.png` 在 Windows
-  // 无对应原像（会被解析到当前盘）。故 URL 与期望值都按宿主路径构造。
-  const target = join(tmpdir(), "ia-tui-paste-shot.png");
-  assert.equal(resolvePastedImagePath(pathToFileURL(target).href), target);
+test("file:// URL 转成本地路径（按注入的 platform 判定，不吃运行时平台）", () => {
+  assert.equal(resolvePastedImagePath("file:///tmp/shot.png", "linux"), "/tmp/shot.png");
+  // 同一份代码在 Windows 运行时上：注入 win32 必须走盘符语义，注入 linux 必须走 POSIX
+  // 语义（#830 D3：`fileURLToPath` 原先只看运行时平台 => Windows 上这条必红）。
+  assert.equal(
+    resolvePastedImagePath("file:///C:/shots/a.png", "win32"),
+    "C:\\shots\\a.png",
+  );
+  assert.equal(resolvePastedImagePath("file:///tmp/shot.png", "win32"), undefined);
 });
 
 test("非 win32 反转义终端插入的反斜杠；win32 保留原样", () => {
@@ -151,11 +159,19 @@ test("clipboardImageName：剪贴板文件名按 media type 给，扩展名与�
   }
 });
 
-test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞（P4：FIFO 上的 readFileSync 会永久卡住）", () => {
+test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞（P4：FIFO 上的 readFileSync 会永久卡住）", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ia827-fifo-"));
   try {
     const fifo = join(dir, "pipe.png");
-    execFileSync("mkfifo", [fifo]);
+    try {
+      execFileSync("mkfifo", [fifo]);
+    } catch (error) {
+      // `mkfifo` 是外部 POSIX 二进制：Windows 上只有 runner 镜像 PATH 里的 Git for Windows
+      // coreutils 提供它（复审 P3）⇒ 环境缺它时**显式跳过**，别把它当成产品回归。
+      if (!isEnoent(error)) throw error;
+      t.skip("本机没有 mkfifo（POSIX FIFO 用例）");
+      return;
+    }
     const started = Date.now();
     assert.deepEqual(readImageFile(fifo), { ok: false, reason: "missing" });
     assert.ok(Date.now() - started < 2_000, "不得阻塞在读盘上（无写端的 FIFO 会一直等）");
@@ -166,9 +182,8 @@ test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞�
 });
 
 /**
- * #908（第 6 例，成因③）：symlink 是**宿主能力**——Windows 未开开发者模式/非管理员时
- * `symlinkSync` 直接 EPERM。探针失败按能力跳过（Linux CI 上探针通过、真跑本用例），
- * 不把环境差异判成产品红。
+ * symlink 是**宿主能力**：Windows 未开开发者模式/非管理员时 `symlinkSync` 直接 `EPERM`。
+ * 探针失败按能力跳过（runner 与 Linux 上探针通过、真跑本用例），不把环境差异判成产品红。
  */
 function symlinkSkipReason(): false | string {
   const dir = mkdtempSync(join(tmpdir(), "ia827-link-probe-"));
@@ -210,8 +225,11 @@ test("readImageFile：超过 20 MiB 上限 ⇒ too_large，且不把整文件读
   const dir = mkdtempSync(join(tmpdir(), "ia827-big-"));
   try {
     const file = join(dir, "huge.png");
-    // 稀疏文件：只占 inode 元数据，不真写 21 MiB 数据。
-    execFileSync("truncate", ["-s", "21M", file]);
+    // 稀疏文件：只占 inode 元数据，不真写 21 MiB 数据。用 Node 原生 `truncateSync`（先建空文件：
+    // 它不像外部 `truncate -s` 那样自带创建）——外部 `truncate` 二进制在 Windows 上只有 runner
+    // 镜像 PATH 里的 Git for Windows coreutils 提供（复审 P3：那属外部依赖，不该进用例）。
+    writeFileSync(file, "");
+    truncateSync(file, 21 * 1024 * 1024);
     const started = Date.now();
     // 必须是 too_large 而不是 unsupported：尺寸门在 magic-bytes 判型**之前**短路
     // （全零的稀疏文件若被读进内存判型，只会得到 unsupported）。
@@ -226,7 +244,8 @@ test("readImageFile：恰好等于上限不拒（口径 = 服务端 attachment_m
   const dir = mkdtempSync(join(tmpdir(), "ia827-limit-"));
   try {
     const file = join(dir, "limit.png");
-    execFileSync("truncate", ["-s", String(MAX_IMAGE_BYTES), file]);
+    writeFileSync(file, "");
+    truncateSync(file, MAX_IMAGE_BYTES);
     // 20 MiB 全零文件：过尺寸门 ⇒ 按 magic bytes 判型 ⇒ unsupported（不是 too_large）。
     assert.deepEqual(readImageFile(file), { ok: false, reason: "unsupported" });
   } finally {

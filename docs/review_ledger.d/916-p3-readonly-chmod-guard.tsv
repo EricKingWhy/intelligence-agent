@@ -1,0 +1,1 @@
+2026-10-10	#916 P3 复审修：_clear_readonly_and_retry 的 os.chmod 清只读位原在 if func in (os.unlink, os.rmdir) 守卫之外无条件执行，POSIX 上因 func=os.open/os.scandir 触发回调时会先加写位再不重试（越界改权限、且与 docstring 不符）；移入守卫块内使改位与重试同域。复审 fix-916-review-out.txt 唯一本票范围内 P3；不动测试断言、不扩大 scope	f819979664c43cc21ecc9d4adde041c08a0a84c0..a2c57d2c1beae76ef6e890b34177aa5d4475b347

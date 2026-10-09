@@ -543,3 +543,4 @@ Tracker 先定位当前态/相关 Ticket；历史按需读。版本以协议头�
 4. **自然收口与集成**：按协议 §3/§7/§8.1 在冻结树跑完整门禁，按其判据传递机器证据并跑 coverage；运行相关真实入口验证。Gate-0 不替代完整门禁。Git 动作逐项核对 §14.4，未获批准的 push/PR merge 停在待批准状态。
 5. **异常**：必读文件缺失/读取失败时停止依赖动作并报告路径/错误，不能用入口摘要替代；不依赖它的只读分析可继续。票面/规格实质冲突或新证据推翻计划时，停止相关施工，报告证据/影响/最小替代方案并按 §9.1.1 请求决定；不擅改票面、AC 或制造完成记录。
 6. **压缩/恢复/交接**：一旦上下文压缩、摘要、新窗口或不确定状态，第一动作先按本节的协议读取完成判定读完整协议，再按协议自愈条款与 §4 读取 Tracker、核对仓库/branch/HEAD/status 和 review 覆盖；确认上述前置完成后，才按记录与已有授权继续。结束按 §11 交付，标明剩余事项和待批准动作；不能仅凭摘要或旧对话认定已验证/已审查。
+- 2026-10-09：沙箱跑本仓门禁要**用 `git bundle` 克隆真仓**（不是 `git archive` 快照）+ 依赖按 CI 同形（`uv sync --frozen` + `pnpm install --frozen-lockfile`）。快照树会让 coverage（台账 base SHA 解析不到）与 guards（宿主机 `npm install` 生出的 `web/package-lock.json` 无映射行）双双假红；`npm install` 也会打红同一条 guards 判据（本仓锁文件是 `pnpm-lock.yaml`）。另：`sbx --cloud exec` 的本地流一断，远端命令会被一起 cancel（`canceled: io: read/write on closed pipe`），长测试一律 `setsid nohup ... &` 起在远端再轮询日志。
