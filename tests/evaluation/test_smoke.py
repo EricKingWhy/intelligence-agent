@@ -138,6 +138,7 @@ def test_smoke_builds_runtime_with_fallback_config(tmp_path: Path, monkeypatch):
         "langfuse_public_key": SecretStr(""), "langfuse_secret_key": SecretStr(""),
         "langfuse_base_url": "", "langfuse_trace_content": "full",
         "langfuse_tracing_environment": "development", "langfuse_release": "",
+        "agent_models": SecretStr(""),
     })()
 
     def fake_create(config):

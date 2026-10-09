@@ -105,7 +105,10 @@ def test_object_permission_is_read_only(tmp_path: Path) -> None:
     store = _store(tmp_path, "sess-a")
     blob = asyncio.run(store.save_bytes("sess-a", b"perm", mime_type="image/png"))
     path = _object_path(tmp_path, "sess-a", blob.artifact_id)
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o400
+    # Windows NTFS coerces 0o400 to 0o444 (read for all classes); assert the
+    # semantic that matters — no write bit set — instead of exact Unix bits.
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode & stat.S_IWRITE == 0, f"blob object is writable (mode={oct(mode)})"
 
 
 def test_halfway_failure_leaves_no_readable_residue(
