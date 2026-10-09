@@ -11,6 +11,14 @@
 
 断言口径：只看外部可观察行为——`user/message` 事件里的引用数组、字节能否从存储读回、
 stderr 文案、退出码、有无残留文件/事件。不断言私有函数名与内部字段顺序。
+
+审查修复批（`#828` 双轴 13 findings）另加：
+
+- 声明闸门：`shot.jpg` 装 PNG 字节 ⇒ 拒（与 Web 上传端点同一份判定，A-F1）；
+- 有界读：超大文件不走 `Path.read_bytes()` 全量读入（A-F2）；
+- 像素 / 边长按各自原因归类，不笼统说成"不是受支持的图片"（A-F3）；
+- 目录 / 非常规文件给准确文案（A-F6）；
+- 两条退出通道：输入不成立 exit 1、命令行形状错 exit 2（B-P3-3）。
 """
 
 from __future__ import annotations
@@ -108,7 +116,10 @@ def _run_cli_rejected(monkeypatch, capsys, settings, images) -> str:
     with pytest.raises(SystemExit) as exit_info:
         cli._main_dispatch()
 
-    assert exit_info.value.code == 1, "输入不成立 ⇒ exit 1（不是 argparse 的用法错误 2）"
+    # 两条退出通道的分工（B-P3-3）：输入不成立 ⇒ exit 1；命令行形状错 ⇒ argparse 的 2。
+    # 逐字锚 1（外部契约），再确认常量没被改值后与实际退出码脱节。
+    assert cli.IMAGE_INPUT_EXIT_CODE == 1, "输入不成立这一档的退出码契约必须是 1"
+    assert exit_info.value.code == cli.IMAGE_INPUT_EXIT_CODE
     stderr = capsys.readouterr().err
     assert _session_ids(settings) == [], "被拒的 run 不得留下任何会话事件"
     assert _artifact_files(settings) == [], "被拒的 run 不得留下附件字节"
@@ -269,7 +280,41 @@ def test_image_over_single_byte_limit_is_rejected(monkeypatch, capsys, tmp_path)
     stderr = _run_cli_rejected(monkeypatch, capsys, settings, [image])
 
     assert str(image) in stderr
-    assert "单张上限" in stderr
+    assert "单张字节上限" in stderr
+
+
+def test_oversized_image_is_not_read_wholesale(monkeypatch, capsys, tmp_path):
+    """A-F2：单张读取按上限 + 1 字节即停——绝不 `Path.read_bytes()` 整个读进来。"""
+    settings = _settings(tmp_path, attachment_max_image_bytes=64)
+    image = tmp_path / "huge.png"
+    image.write_bytes(png_bytes(2, 2) + b"\x00" * (8 * 1024 * 1024))
+    assert image.stat().st_size > 8 * 1024 * 1024
+
+    read_calls: list[Path] = []
+    original = Path.read_bytes
+
+    def spy(self: Path) -> bytes:
+        read_calls.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spy)
+    stderr = _run_cli_rejected(monkeypatch, capsys, settings, [image])
+
+    assert "单张字节上限" in stderr
+    assert image not in read_calls, "超大文件不得走 Path.read_bytes 全量读入"
+
+
+def test_image_over_pixel_limit_is_rejected(monkeypatch, capsys, tmp_path):
+    """A-F3：像素超限按自己的原因归类，不再笼统说成"不是受支持的图片"。"""
+    settings = _settings(tmp_path, attachment_max_image_pixels=4)
+    image = tmp_path / "many.png"
+    image.write_bytes(png_bytes(4, 3))  # 12 像素 > 4
+
+    stderr = _run_cli_rejected(monkeypatch, capsys, settings, [image])
+
+    assert str(image) in stderr
+    assert "像素" in stderr
+    assert "不是受支持的图片" not in stderr, "归类词不能错位"
 
 
 def test_image_over_dimension_limit_is_rejected(monkeypatch, capsys, tmp_path):
@@ -280,7 +325,36 @@ def test_image_over_dimension_limit_is_rejected(monkeypatch, capsys, tmp_path):
     stderr = _run_cli_rejected(monkeypatch, capsys, settings, [image])
 
     assert str(image) in stderr
-    assert "边长" in stderr
+    assert "边长超过上限" in stderr
+
+
+def test_extension_mismatch_is_rejected(monkeypatch, capsys, tmp_path):
+    """A-F1：`shot.jpg` 装 PNG 字节 ⇒ 与 Web 上传端点同判（扩展名声明不符即拒）。
+
+    不比对时这条输入会被静默接受成 `image/png`，而同一文件经 Web 上传端点必拒
+    （`IMAGE_TYPE_MISMATCH`）——同一份输入两个入口结论相反。
+    """
+    settings = _settings(tmp_path)
+    image = tmp_path / "shot.jpg"
+    image.write_bytes(png_bytes(4, 3))
+
+    stderr = _run_cli_rejected(monkeypatch, capsys, settings, [image])
+
+    assert str(image) in stderr
+    assert "不符" in stderr and "扩展名" in stderr
+
+
+def test_directory_path_is_reported_as_not_a_regular_file(monkeypatch, capsys, tmp_path):
+    """A-F6：路径存在但不是常规文件 ⇒ 准确文案，不谎报"不存在"。"""
+    settings = _settings(tmp_path)
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+
+    stderr = _run_cli_rejected(monkeypatch, capsys, settings, [directory])
+
+    assert str(directory) in stderr
+    assert "不是常规文件" in stderr
+    assert "不存在" not in stderr
 
 
 def test_too_many_images_are_rejected(monkeypatch, capsys, tmp_path):
@@ -294,6 +368,16 @@ def test_too_many_images_are_rejected(monkeypatch, capsys, tmp_path):
 
     assert "最多 1 张" in stderr
     assert "2" in stderr
+
+
+def test_argument_usage_error_exits_2(monkeypatch, capsys):
+    """B-P3-3：命令行**形状**不对走 argparse 的 exit 2（与 `--image` 的 exit 1 分流）。"""
+    monkeypatch.setattr(sys, "argv", ["agent-harness"])  # 缺 message 位置参数
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli._main_dispatch()
+
+    assert exit_info.value.code == 2
 
 
 # ── AC4：模型不支持视觉 ⇒ 提交前拒 ──────────────────────────────────────
