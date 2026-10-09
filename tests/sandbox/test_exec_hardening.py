@@ -1022,10 +1022,37 @@ def test_docker_exec_fails_closed_when_response_close_fails():
     with pytest.raises(RuntimeError, match="HTTP response did not close"):
         sandbox.exec("echo done", timeout=5)
 
-    api.exec_start.return_value.close.assert_not_called()
+    api.exec_start.return_value.close.assert_called_once_with()
 
     with pytest.raises(RuntimeError, match="previous cleanup was unconfirmed"):
         sandbox.exec("must not run", timeout=5)
+
+
+def test_docker_exec_attempts_stream_close_after_response_close_fails():
+    """A failed response close must not prevent the socket shutdown attempt."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    close_order = []
+    response = Mock()
+
+    def close_response():
+        close_order.append("response")
+        raise OSError("response close failed")
+
+    response.close.side_effect = close_response
+
+    class _Stream:
+        _response = response
+
+        def close(self):
+            close_order.append("stream")
+
+    response_closed, stream_closed, pending = DockerSandbox._close_exec_resources(
+        _Stream(),
+    )
+
+    assert close_order == ["response", "stream"]
+    assert (response_closed, stream_closed, pending) == (False, True, None)
 
 
 @pytest.mark.parametrize("late_cleanup", [False, True])
