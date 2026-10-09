@@ -1,0 +1,1 @@
+2026-10-09	#864 W-27.1 进度清单窗口化折叠实现 + 两轴独立审查（Standards + Spec 独立子代理，base f769ad4d）findings 全修：交互模型改 pinned/hover 双状态并按可见态切换、补触摸分支测试、修悬浮悬停孤儿、后组折叠行前置；复审 round2/3 清零，P0-P2=0	f769ad4dca38440376384d02e4461a8463cffa64..72a71d5cad09ee84eed1db3f53653f4b9ed2fa46
