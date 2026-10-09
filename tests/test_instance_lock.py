@@ -63,6 +63,23 @@ def _run_child(root: Path, *, hold: float = 0.0, env: dict | None = None) -> sub
     )
 
 
+def _popen_utf8_child(script: str, *, env: dict | None = None) -> subprocess.Popen:
+    """启动长持锁子进程的 Popen 包装，把子进程 stdout/stderr 编码钉死为 UTF-8。
+
+    契约：
+    - ``script``：交给 ``sys.executable -c`` 运行的子进程脚本源码。
+    - ``env``：追加进子进程 env 的调用方自定义 key（同名覆盖 ambient）。
+    - ``PYTHONIOENCODING`` 恒为 ``utf-8``：harness 拥有子进程 stdout 编码，不随 ambient
+      漂移（Windows GA 下 ambient 是 cp1252，子进程打印中文锁错误会 UnicodeEncodeError）。
+    """
+    return subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", cwd=str(REPO_ROOT),
+        env={**os.environ, **(env or {}), "PYTHONIOENCODING": "utf-8"},
+    )
+
+
 def _wait_for_ready(ready: Path, timeout: float = 20.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -73,11 +90,19 @@ def _wait_for_ready(ready: Path, timeout: float = 20.0) -> None:
 
 
 def _run_cli(args: list[str], root: Path) -> subprocess.CompletedProcess:
-    """跑真实 CLI 入口（WORKSPACE_DIR 指向 root，确保打的是同一把锁）。"""
+    """跑真实 CLI 入口（WORKSPACE_DIR 指向 root，确保打的是同一把锁）——编码金丝雀。
+
+    子进程**强制** ``PYTHONIOENCODING=cp1252``：复现 Windows GA 的确定性语义，使这条
+    金丝雀在 Linux（ambient 本就是 UTF-8）上也真的走 Windows 路径——否则测试是假阴性。
+    产品侧 ``_ensure_utf8_console_streams`` 会把 cp1252 的 stdout/stderr 重配为 UTF-8，
+    父侧再用 ``encoding="utf-8"`` 解码，两侧闭环（父侧不传 encoding 会按 cp1252 解 UTF-8
+    字节而 UnicodeDecodeError）。注意 ``_run_child`` 相反，强制子进程 ``PYTHONIOENCODING=utf-8``，
+    它不是金丝雀，本函数才是。
+    """
     return subprocess.run(
         [sys.executable, "-m", "agent_harness.cli", *args],
-        capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT), check=False,
-        env={**os.environ, "WORKSPACE_DIR": str(root)},
+        capture_output=True, text=True, encoding="utf-8", timeout=60, cwd=str(REPO_ROOT), check=False,
+        env={**os.environ, "WORKSPACE_DIR": str(root), "PYTHONIOENCODING": "cp1252"},
     )
 
 
@@ -107,12 +132,7 @@ def test_lock_is_auto_released_when_holder_process_dies(tmp_path: Path) -> None:
     这正是"不用裸 pidfile"的理由——残留锁会让服务永久起不来。
     """
     ready = tmp_path / "child-ready"
-    proc = subprocess.Popen(
-        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-        cwd=str(REPO_ROOT),
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-    )
+    proc = _popen_utf8_child(_child_script(tmp_path, hold=60, ready=ready))
     try:
         _wait_for_ready(ready)
         with pytest.raises(InstanceLockError):
@@ -244,14 +264,9 @@ def test_rebuild_maintenance_publishes_fence_then_detects_active_bypass_writer(
     monkeypatch.delenv(ALLOW_SHARED_ROOT_ENV, raising=False)
     holder = InstanceLock(tmp_path).acquire()
     ready = tmp_path / "shared-root-ready"
-    proc = subprocess.Popen(
-        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
+    proc = _popen_utf8_child(
+        _child_script(tmp_path, hold=60, ready=ready),
+        env={ALLOW_SHARED_ROOT_ENV: "1"},
     )
     maintenance = None
     try:
@@ -344,14 +359,9 @@ def test_escape_hatch_downgrades_to_warning(tmp_path: Path) -> None:
 def test_escape_hatch_lease_blocks_cutover_until_writer_exits(tmp_path: Path) -> None:
     holder = InstanceLock(tmp_path).acquire()
     ready = tmp_path / "shared-root-ready"
-    proc = subprocess.Popen(
-        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
+    proc = _popen_utf8_child(
+        _child_script(tmp_path, hold=60, ready=ready),
+        env={ALLOW_SHARED_ROOT_ENV: "1"},
     )
     try:
         _wait_for_ready(ready)
@@ -372,14 +382,9 @@ def test_normal_startup_refuses_active_shared_root_lease_after_primary_releases(
 ) -> None:
     holder = InstanceLock(tmp_path).acquire()
     ready = tmp_path / "shared-root-ready"
-    proc = subprocess.Popen(
-        [sys.executable, "-c", _child_script(tmp_path, hold=60, ready=ready)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
+    proc = _popen_utf8_child(
+        _child_script(tmp_path, hold=60, ready=ready),
+        env={ALLOW_SHARED_ROOT_ENV: "1"},
     )
     try:
         _wait_for_ready(ready)
@@ -431,15 +436,7 @@ while not finish.exists():
     time.sleep(0.01)
 holder.release()
 """
-    proc = subprocess.Popen(
-        [sys.executable, "-c", script],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        cwd=str(REPO_ROOT),
-        env={**os.environ, ALLOW_SHARED_ROOT_ENV: "1", "PYTHONIOENCODING": "utf-8"},
-    )
+    proc = _popen_utf8_child(script, env={ALLOW_SHARED_ROOT_ENV: "1"})
     try:
         _wait_for_ready(ready)
         holder.release()

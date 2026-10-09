@@ -1409,7 +1409,9 @@ def _ensure_utf8_console_streams() -> None:
     """
     for stream in (sys.stdout, sys.stderr):
         encoding = getattr(stream, "encoding", None)
-        if encoding in ("utf-8", "utf8"):
+        # 归一大小写：CPython 的流 .encoding 可能返回大写 "UTF-8"，否则会触发一次
+        # 冗余 reconfigure（结果等价，但无谓）。用 str() 兜住 None / 非字符串编码。
+        if str(encoding).lower() in ("utf-8", "utf8"):
             continue
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
