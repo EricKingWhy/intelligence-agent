@@ -290,6 +290,9 @@ def test_metadata_sidecar_missing_falls_back_to_octet_stream(tmp_path: Path) -> 
 
 #: 模拟层的 `O_BINARY` 位。Linux 上 `os.O_BINARY` 不存在（`getattr` 取 0），只有把它
 #: 注入 `os` 模块，`_publish_blob` 的 `getattr(os, "O_BINARY", 0)` 才能在 Linux 上被观测。
+#: 注意：`0x8000` 与内核 `O_LARGEFILE`（`asm-generic/fcntl.h:51`）同位，本仓产品码不设
+#: 该位且真 `os.open` 前**必须**剥掉它（`flags & ~_EMULATED_O_BINARY`），否则会污染
+#: 真实 flag 位。下方的 `emulating_open` 已如此处理。
 _EMULATED_O_BINARY = 0x8000
 
 
@@ -322,11 +325,11 @@ def test_publish_blob_forces_binary_mode_under_emulated_text_mode(
     上一条用例在 Linux 上恒绿（Linux 没有文本模式），而 Linux 正是 CI 真正跑测试的
     平台：只有这条用例能在 Linux 上守住"发布必须带 `O_BINARY`"这条纪律。做法是把
     平台行为注入进来——`os.O_BINARY` 补一位模拟位、`os.open` 把它剥掉后再交给真
-    `os.open`(Linux 不认这个 flag),并让**不带**该位的 fd 走 CRT 文本模式语义
-    (写盘时 `0x0A` -> `0x0D 0x0A`)。缺陷机理与真 Windows 逐条同形。
+    `os.open`（Linux 不认这个 flag），并让**不带**该位的 fd 走 CRT 文本模式语义
+    （写盘时 `0x0A` -> `0x0D 0x0A`）。缺陷机理与真 Windows 逐条同形。
 
-    模拟层按 **fd 号**记状态 ⇒ 每次 open 都要**双向**刷新它(带位就从集合里删):fd 号会被
-    复用,只往里加、不删的话,同一个号先被别人不带位地打开、再被本次发布打开时,陈旧记录
+    模拟层按 **fd 号**记状态 ⇒ 每次 open 都要**双向**刷新它（带位就从集合里删）：fd 号会被
+    复用，只往里加、不删的话，同一个号先被别人不带位地打开、再被本次发布打开时，陈旧记录
     还在 ⇒ 对象那次写被误判成文本模式 ⇒ 用例假红。以"本次 open 的真实位"为准。
 
     **识别面(不许改错层)**:本用例识别的是 **open flag 路线**——它挂钩 `os.open` 的

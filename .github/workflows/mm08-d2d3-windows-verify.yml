@@ -11,15 +11,16 @@
 # 约定本就成立），所以修复的验收只能在 Windows runner 上取证。
 #
 # 它跑什么（对准本票的两条判据）
-#   job `cli`：`uv run pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py -q`
+#   job `cli`：`uv run pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py tests/test_instance_lock.py -q`
 #     - D2 判据：`tests/test_cli_image.py` 由 **2 failed** 转 **0 failed**；
 #     - 新增回归 `test_published_object_bytes_are_not_newline_expanded` 与
 #       `test_publish_blob_forces_binary_mode_under_emulated_text_mode`（后者 win32 上 skip）。
 #   job `tui`：`npm ci` -> `npm run check`（tsc --noEmit）-> `npm test`
-#     - D3 判据：`npm test` **201 例全绿**。spec reporter 摘要显式给出计数：
-#       `ℹ tests 201 / pass 201 / fail 0 / skipped 0`（Windows 上两条 win32-only
-#       路径断言**真跑**；Linux 上它们是 `skipped 2` —— `test/host.test.ts` 两例
-#       按 `process.platform !== "win32"` 跳过，不再红）。
+#     - D3 判据：`npm test` 的 spec reporter 摘要里 `ℹ tests 201` 且 `ℹ fail 0`
+#       （Windows 上两条 win32-only 路径断言**真跑**；Linux 上它们是 `skipped 2` ——
+#       `test/host.test.ts` 两例按 `process.platform !== "win32"` 跳过，不再红；
+#       另有 1 例 win32-skip（`/dev/zero` 字符设备，`tui/test/image-paste.test.ts:237`
+#       在 win32 上 skip））。
 #
 # 触发与边界
 #   `on:` 挂 `workflow_dispatch`（合入默认分支后可手工跑）+ `push`（仅本票特性分支）。
@@ -118,9 +119,12 @@ jobs:
       - name: 装 Node 22（与 tui/package.json engines 对齐）
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          # `'22'` 解析到 22.x 的最新；真正的下界由 `tui/package.json` 的
-          # `engines.node`（`>=22.1`）钉住：`fileURLToPath` 的 `windows` 选项自
-          # v22.1.0 起才有，22.0.x 会**静默忽略**它（复审 P3）。
+          # `22` 解析到 22.x 的最新。注意 `tui/package.json` 的 `engines.node`
+          # （`>=22.1`）只是声明下界，**有效**下界更高：依赖
+          # `@earendil-works/pi-tui@1.0.4` 自带 `engines: {"node": ">=22.19.0"}`，
+          # 且 `npm test` 走的 `--experimental-transform-types` 需 Node ≥22.7.0
+          # ⇒ **有效下界为 ≥22.19**。`fileURLToPath` 的 `windows` 选项自 v22.1.0
+          # 起才有，22.0.x 会**静默忽略**它（复审 P3）。
           node-version: '22'
 
       - name: 装 tui 依赖（npm ci）
@@ -145,7 +149,7 @@ jobs:
           # 只对 pass/skip 做**读数记录**，不把它们做成第二套判据（退出码才是判据）。
           Select-String -Path "${{ runner.temp }}\mm08-d2d3-tui-full.log" -Pattern '^ℹ (tests|pass|fail|skipped) ' |
             ForEach-Object { Write-Output $_.Line }
-          Write-Output "npm test 退出码=$code（修复前 = 6 failed / 201；修复后 fail=0、skipped=0）"
+          Write-Output "npm test 退出码=$code（修复前 = 6 failed / 201；修复后 fail=0，另有 1 例 win32-skip）"
           exit $code
 
       - name: 上传 TUI 证据
