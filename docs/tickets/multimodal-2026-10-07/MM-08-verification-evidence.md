@@ -20,7 +20,9 @@
 | 本轮 GA 修复提交（子进程 UTF-8） | `fa99acc1`；其机械归属行 `a52ab2bf` |
 | GA 真触发读数 | §9 两轮：首轮 [#37941349749](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941349749)（暴露探针编码 bug）、次轮 [#37941646937](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941646937)（暴露 D2/D3） |
 | 门禁读数 | `docs/gate/1fc9bc54b3540b291df5a51ff3fc08c730b99354.json` = Gate-0 **6/6 PASS**（tip=B1, tree=`944ff04657ea`, 13.0s） |
-| 门禁可用性 | 本机 4/6（`web/node_modules` 缺失 ⇒ oxlint/tsc 车道阻塞）；沙箱 6/6（§10） |
+| 本轮门禁读数 | `docs/gate/7f2114d69cf1058239b92033c42a003ec00ab40f.json`（初版终树 6/6）+ **同步合并后** `docs/gate/c6a74115e8d7258b9b24757686fa730558a09046.json`（6/6，`tree=741ab3e79538`，30.2s——本仓惯例：读数提交本身是最后一个提交） |
+| 同步合并 | `c8ee6c71`（`origin/main` `7fcd0209` / #909 → 本线；零冲突、`--cc` 空表、三方树互不相等；归属行 `docs/review_ledger.d/830-sync-merge-5bb62440-c8ee6c71.tsv`） |
+| 门禁可用性 | 本轮末段在本机补了 `web` 依赖（`cd web && pnpm install --frozen-lockfile`，pnpm 12.9.1 / node 24.20.0）后，**本机裸全量 Gate-0 即 6/6**（此前因缺 `web/node_modules` 是 4/6——oxlint/tsc 两条车道**阻塞**而非失败）；云沙箱同读数见 §10.1 |
 
 ## 1. 五项启动检查表
 
