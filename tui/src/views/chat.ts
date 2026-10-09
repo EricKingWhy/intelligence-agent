@@ -34,7 +34,8 @@ export function markdownTheme(theme: IaTheme): MarkdownTheme {
   };
 }
 
-const USER_TINT = "rgb(38, 34, 38)";
+/** 用户消息底色 = rgb(38, 34, 38)；parseColor 只认 number / #rgb / #rrggbb / oklch / okhsl。 */
+const USER_TINT = "#262226";
 
 export function turnComponents(turn: Turn, theme: IaTheme): Component[] {
   const components: Component[] = [];

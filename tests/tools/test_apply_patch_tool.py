@@ -218,3 +218,46 @@ class TestApplyPatchErrors:
 
         assert result.result.ok is False
         assert result.result.error_code == ErrorCode.INVALID_ARGUMENT
+
+
+class TestApplyPatchLineEndingTolerance:
+    """#851：apply_patch 与 edit 共用同一条匹配路径，行尾容忍必须一致。"""
+
+    @pytest.mark.asyncio
+    async def test_lf_hunks_apply_to_crlf_file(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """CRLF 文件 + 多个 LF hunk：全部改得上，且逐 hunk 之后仍能继续匹配。"""
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\r\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "hunks": [
+                    {"old_string": "a = 1\n", "new_string": "a = 11\n"},
+                    {"old_string": "b = 2\n", "new_string": "b = 22\n"},
+                ],
+            })
+        )
+
+        assert result.result.ok is True
+        assert result.result.data["hunks_applied"] == 2
+        assert sandbox.read_text("f.py") == "a = 11\r\nb = 22\r\n"
+
+    @pytest.mark.asyncio
+    async def test_mixed_line_endings_still_fail_closed(
+        self, executor: ToolExecutor, sandbox: LocalSubprocessSandbox
+    ):
+        """混行尾文件不走归一化：宁可整批失败，也不改写整文件行尾。"""
+        sandbox.write_text("f.py", "a = 1\r\nb = 2\n")
+
+        result = await executor.execute(
+            _tool_call({
+                "path": "f.py",
+                "hunks": [{"old_string": "a = 1\n", "new_string": "a = 11\n"}],
+            })
+        )
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.TOOL_EXECUTION_ERROR
+        assert sandbox.read_text("f.py") == "a = 1\r\nb = 2\n"

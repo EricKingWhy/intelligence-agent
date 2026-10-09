@@ -146,6 +146,10 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     workspace_dir: str = ".agent/workspace"
+    # 前端构建产物目录（W-21 D3 / #815）：空串 = mount_static 的既有默认
+    # `<repo>/web/dist`。Electron 外壳在打包形态下经 env `WEB_DIST_DIR` 传安装
+    # 目录里的 `resources/web`，服务端不猜安装布局；不设时行为完全不变。
+    web_dist_dir: str = ""
     # artifact 本地落盘根目录（spec 06 §3 的默认 Provider：Local filesystem，
     # "开发/小型部署"）。落盘形态是 `<artifact_dir>/<session_id>/<artifact_id>`——
     # 与对象存储的 key 约定 `{session_id}/{artifact_id}` 逐段同构，三个 Provider

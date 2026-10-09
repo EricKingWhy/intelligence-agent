@@ -21,7 +21,11 @@ import threading
 from pydantic import BaseModel, Field
 
 from agent_harness.prompt import DEFAULT_REGISTRY
-from agent_harness.sandbox import Sandbox, ShellFamily
+from agent_harness.sandbox import (
+    MultiLineCommandUnsupportedError,
+    Sandbox,
+    ShellFamily,
+)
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.deadline import tool_execution_deadline_var
@@ -118,6 +122,8 @@ class BashTool(Tool):
                 "Windows cmd.exe 注意事项：单引号不是引用符、$VAR 不展开、"
                 "cat/ls/grep 等 Unix 命令通常不可用（用 type/dir/findstr 代替）、"
                 "Unix 风格重定向（如 2>/dev/null）无效。"
+                "含内部换行的多行命令会被直接拒绝（cmd.exe 会把整串静默丢弃、"
+                "什么都不执行），请写成单行，或先用 write 工具把脚本写入文件再执行。"
             )
         parts.append(
             "参数：command 为要执行的 shell 命令字符串。"
@@ -185,6 +191,13 @@ class BashTool(Tool):
             # 清理失败压过超时/取消结论——进程可能还活着时不能报"干净结束"。
             worker.result()
             raise
+        except MultiLineCommandUnsupportedError as e:
+            # #850：命令**没有执行**（沙箱在执行前拒绝），所以不能走 ADR-0002 的
+            # 「非零 exit_code 仍 ok=True」——那条的前提是命令真的跑过。
+            return ToolResult.failure(
+                message=str(e),
+                error_code=ErrorCode.TOOL_EXECUTION_ERROR,
+            )
         except PermissionError as e:
             return ToolResult.failure(
                 message=str(e),

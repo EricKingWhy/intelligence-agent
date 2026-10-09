@@ -9,6 +9,7 @@ DockerSandbox 的 docker SDK 依赖在其实例化时才懒加载，
 
 from agent_harness.sandbox.base import (
     ExecResult,
+    MultiLineCommandUnsupportedError,
     Sandbox,
     ShellEnvironment,
     ShellFamily,
@@ -31,6 +32,7 @@ __all__ = [
     "DockerSandbox",
     "ExecResult",
     "LocalSubprocessSandbox",
+    "MultiLineCommandUnsupportedError",
     "Sandbox",
     "SandboxCapabilities",
     "SandboxUnavailableError",

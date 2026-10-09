@@ -5,6 +5,20 @@
  *   断开由调用方按游标重连；网络层不维护第二份会话状态。
  */
 import { parseEnvelope, type EventEnvelope } from "./events.ts";
+/**
+ * SSE 帧分隔符（空行）与行分隔符。
+ *
+ * 服务端 sse-starlette 的默认分隔符是 CRLF（`ServerSentEvent.DEFAULT_SEPARATOR
+ * = "\r\n"`，`web/app.py` 的 `_sse_response` 没传 `sep`），线形是
+ * `data: {...}\r\n\r\n`。只认裸 LF 的 `"\n\n"` 永远匹配不上：字节照收、流照常
+ * 收尾重连，却一帧都切不出来，客户端静默空转（#854）。web 端 `web/src/lib/sse.ts`
+ * 早有同一条结论（注释原话 "uvicorn on Windows does"），这里按同一线形事实匹配。
+ *
+ * 分隔符可能跨 chunk（`\r` 落在上一段、`\n` 落在下一段），所以只在**整个缓冲区**
+ * 上匹配：不预先把 `\r\n` 归一化成 `\n`，也就不必为「尾部孤立 `\r`」再养一份 carry。
+ */
+const FRAME_SEPARATOR = /\r?\n\r?\n|\r\r/;
+const LINE_BREAK = /\r\n|\r|\n/;
 
 export type CursorDecision = "apply" | "skip" | "rebuild";
 
@@ -46,6 +60,8 @@ export interface StreamHandlers {
 
 export interface StreamOptions {
   signal?: AbortSignal;
+  /** 注入 fetch（带 Bearer 的通道，见 host.ts）；缺省全局 fetch = 既有行为。 */
+  fetchImpl?: typeof fetch;
 }
 
 /** 从 SSE 响应体逐帧解析（data: 行以空行分隔；只认 data: 前缀，帧内 JSON 单行）。 */
@@ -61,11 +77,11 @@ export async function consumeSseBody(
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      let sep: number;
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const chunk = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        for (const line of chunk.split("\n")) {
+      let sep: RegExpExecArray | null;
+      while ((sep = FRAME_SEPARATOR.exec(buffer)) !== null) {
+        const chunk = buffer.slice(0, sep.index);
+        buffer = buffer.slice(sep.index + sep[0].length);
+        for (const line of chunk.split(LINE_BREAK)) {
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (!payload) continue;
@@ -96,7 +112,7 @@ export async function openStream(
   const url = `${baseUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/stream?after_seq=${cursor.lastSeq}`;
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await (options.fetchImpl ?? fetch)(url, {
       headers: { accept: "text/event-stream" },
       signal: options.signal,
     });
