@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 from collections.abc import Iterable
@@ -55,9 +56,18 @@ from agent_harness.storage.artifact import (
     slice_artifact,
 )
 
+logger = logging.getLogger("agent_harness.storage.local_artifact")
+
 #: 旁挂元数据的后缀。用后缀而不是把元数据塞进内容头部：内容必须**逐字节**等于
 #: 模型当初产出的大输出（`compute_artifact_id` 要对得上），塞头部就会改变内容。
 _META_SUFFIX = ".json"
+
+#: 字节对象根（全局内容寻址）的目录名，位于 `artifact_dir` 之下。
+#: **前导点**让它不可能是合法的 `SESSION_KEY_PATTERN`（`[A-Za-z0-9_-]{1,128}`），
+#: 于是名为 `attachments` 的会话永远拼不出这个路径——`discard_local_artifacts`
+#: 之类的"setting + session_id 拼路径"入口在构造上碰不到全局对象根
+#: （同 `sandbox/registry.py` 的 `.fork-tmp` 先例）。
+_GLOBAL_ATTACHMENT_DIRNAME = ".attachments"
 
 
 class LocalArtifactStore(ArtifactStore):
@@ -202,7 +212,7 @@ class LocalArtifactStore(ArtifactStore):
             max_chars_per_line=max_chars_per_line,
         )
 
-    # ── 字节路径（#822 MM-01：附件入站）─────────────────────────────────────
+    # ── 字节路径（#822 MM-01：附件入站；#830 D1：对象根全局化）─────────────────
     #
     # 落盘算法移植自 DeepSeek Harness `5badb150`
     # `packages/attachment/attachment-local/src/store.ts:214-388,431-458`（MIT）：
@@ -212,10 +222,29 @@ class LocalArtifactStore(ArtifactStore):
     # 靠的是**先写完整 staging 文件并 fsync，再 hardlink 到目标**——目标在任何时刻
     # 要么不存在、要么是完整对象。
     #
-    # 布局（**会话内**内容寻址，跨会话不共享——PRD 明确不做跨 session 共享）：
-    #     <artifact_dir>/<session_id>/attachments/objects/<sha[:2]>/<sha>      内容
-    #     <artifact_dir>/<session_id>/attachments/objects/<sha[:2]>/<sha>.json 元数据
-    #     <artifact_dir>/<session_id>/attachments/tmp/<uuid>                   staging
+    # 布局（**全局**内容寻址对象根 + 会话上传回执；#830 D1）：
+    #     <root>/.attachments/objects/<sha[:2]>/<sha>       字节对象（跨会话去重）
+    #     <root>/.attachments/objects/<sha[:2]>/<sha>.json  对象元数据（旁挂，可缺）
+    #     <root>/.attachments/tmp/<uuid>                    staging
+    #     <root>/<session_id>/attachments/objects/<sha[:2]>/<sha>  会话上传回执（hardlink）
+    #
+    # **为什么对象根必须是全局的**（#830 MM-08 D1）：`session/fork.py` 复制的是
+    # workspace，**绝不**复制附件对象（其 docstring 原文："Artifact 是全局 store 的
+    # 内容寻址 ref…绝不复制"）。对象若按会话命名空间落盘，fork 出的子会话就永远
+    # 读不回它自己在种子事件里继承的引用（404 + 模型侧退化成占位符）。
+    # 与上游两条独立实现同构：DeepSeek Harness `attachment-local/src/store.ts:47-54`
+    # （对象根 `DSH_HOME/attachments/v1`，每用户全局）、oh-my-pi
+    # `packages/coding-agent/src/session/blob-store.ts:40-68`（`~/.omp/agent/blobs`
+    # 全局，"Content-addressing … provides automatic deduplication across sessions"）。
+    #
+    # **回执是"本会话拥有这些字节"的唯一事实**：发送侧归属判据（PRD D5"属于本
+    # session 上下文"）不能再用"对象读得到"（全局之后它对人人都读得到），改看回执；
+    # 读回授权则仍由调用方的事件引用闸门负责（`web/attachments.py`，
+    # 与 DSH `commands.ts:405-410` 的 `ATTACHMENT_NOT_REFERENCED` 同构）。
+    # 回执是全局对象的 hardlink（同一 inode）⇒ 不复制字节、去重不受影响；**升级场景例外**：
+    # 该会话旧路径若已有同 sha 对象（升级前布局），`os.link` 撞 `FileExistsError` ⇒
+    # 保留**旧 inode**（字节与该 sha 逐字节相同，功能等价，但与全局对象不是同一 inode）。
+    # 会话硬删时回执随目录一起消失，全局对象留在原地（孤儿回收见 PRD D2"v1 不做自动清理"）。
 
     async def save_bytes(
         self, session_id: str, data: bytes, *, mime_type: str
@@ -230,6 +259,9 @@ class LocalArtifactStore(ArtifactStore):
         artifact_id = compute_byte_artifact_id(data)
         sha256 = artifact_id.split(":", 1)[1]
         self._publish_blob(data, sha256)
+        # 会话回执（#830 D1）：本会话"上传过这些字节"的事实。对象先发布、回执后建 ⇒
+        # 不变量是"有回执 ⇒ 有对象"，绝不会出现回执指向不存在的对象。
+        self._link_session_receipt(sha256)
         blob = BlobArtifact(
             artifact_id=artifact_id,
             session_id=self._session_id,
@@ -247,15 +279,51 @@ class LocalArtifactStore(ArtifactStore):
             raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
         return await anyio.to_thread.run_sync(self._load_bytes_blocking, artifact_id)
 
+    async def load_uploaded_bytes(self, artifact_id: str) -> BlobArtifact:
+        """只认**本会话上传过**的字节（会话回执）；#830 D1 的发送侧归属判据。"""
+        if not BYTE_ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+            raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
+        return await anyio.to_thread.run_sync(self._load_uploaded_bytes_blocking, artifact_id)
+
     def _load_bytes_blocking(self, artifact_id: str) -> BlobArtifact:
         sha256 = artifact_id.split(":", 1)[1]
-        path = self._blob_object_path(sha256)
+        # 全局对象根优先，未命中回落本会话旧路径（#830 D1 的**向后兼容**读法：升级前
+        # 落盘的对象按旧布局还在原处，不因这次改动变成"读不到的孤儿"）。
+        for path in self._blob_object_candidates(sha256):
+            try:
+                body = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            try:
+                return self._blob_from_bytes(artifact_id, sha256, body)
+            except KeyError:
+                # **"存在但自证失败"同样算该候选未命中**（带外篡改 / 写坏）：记 warning 后
+                # 继续回落，不遮蔽同一 sha 在另一候选（本会话旧路径）里的完好副本。回落语义
+                # 覆盖"不存在"与"存在但损坏"两种未命中，全部候选都失败才 KeyError。
+                logger.warning(
+                    "blob candidate %s failed content-address verification "
+                    "(artifact %s)",
+                    path,
+                    artifact_id,
+                )
+                continue
+        # not-found 是契约内的结果（从未上传 / 本部署里查无此对象 / 全部候选都自证失败），
+        # 统一 KeyError → 404；不把"服务端异常"谎报成"不存在"。**归属**不在这里判——那是
+        # 调用方的事件引用闸门（读回）与会话回执（发送）的事，见本类字节路径段注释。
+        raise KeyError(f"Blob artifact '{artifact_id}' does not exist")
+
+    def _load_uploaded_bytes_blocking(self, artifact_id: str) -> BlobArtifact:
+        sha256 = artifact_id.split(":", 1)[1]
+        path = self._session_blob_object_path(sha256)
         try:
             body = path.read_bytes()
         except FileNotFoundError as error:
-            # not-found 是契约内的结果（含"属于别的会话"= 本会话命名空间里没有），
-            # 统一 KeyError → 404；不把"服务端异常"谎报成"不存在"。
+            # 没上传过（或属于别的会话）：统一 KeyError，与"从未上传"不可区分。
             raise KeyError(f"Blob artifact '{artifact_id}' does not exist") from error
+        return self._blob_from_bytes(artifact_id, sha256, body)
+
+    def _blob_from_bytes(self, artifact_id: str, sha256: str, body: bytes) -> BlobArtifact:
+        """字节 → `BlobArtifact`（内容寻址自证 + 旁挂元数据；三条读路径共用一件）。"""
         if hashlib.sha256(body).hexdigest() != sha256:
             raise KeyError(
                 f"Blob artifact '{artifact_id}' content hash mismatch "
@@ -270,43 +338,91 @@ class LocalArtifactStore(ArtifactStore):
             content=body,
         )
 
-    def _blob_objects_dir(self) -> Path:
-        return self._dir / "attachments" / "objects"
+    # 路径构造：全局对象根（新写入的唯一落点）与会话命名空间（回执 / 升级前旧对象）。
 
-    def _blob_object_path(self, sha256: str) -> Path:
-        return self._blob_objects_dir() / sha256[:2] / sha256
+    def _global_blob_objects_dir(self) -> Path:
+        return self._root / _GLOBAL_ATTACHMENT_DIRNAME / "objects"
 
-    def _blob_meta_path(self, sha256: str) -> Path:
-        return self._blob_objects_dir() / sha256[:2] / f"{sha256}.json"
+    def _global_blob_staging_dir(self) -> Path:
+        return self._root / _GLOBAL_ATTACHMENT_DIRNAME / "tmp"
+
+    def _global_blob_object_path(self, sha256: str) -> Path:
+        return self._global_blob_objects_dir() / sha256[:2] / sha256
+
+    def _global_blob_meta_path(self, sha256: str) -> Path:
+        return self._global_blob_objects_dir() / sha256[:2] / f"{sha256}.json"
+
+    def _session_blob_object_path(self, sha256: str) -> Path:
+        """本会话命名空间里的对象路径 = 上传回执位 / 升级前旧对象的落点。"""
+        return self._dir / "attachments" / "objects" / sha256[:2] / sha256
+
+    def _session_blob_meta_path(self, sha256: str) -> Path:
+        return self._dir / "attachments" / "objects" / sha256[:2] / f"{sha256}.json"
+
+    def _blob_object_candidates(self, sha256: str) -> tuple[Path, Path]:
+        """读回候选路径，**顺序即优先级**：全局对象根 → 本会话旧路径。"""
+        return (self._global_blob_object_path(sha256), self._session_blob_object_path(sha256))
 
     def _read_blob_meta(self, sha256: str) -> dict:
-        try:
-            raw = json.loads(self._blob_meta_path(sha256).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return raw if isinstance(raw, dict) else {}
+        """读旁挂元数据：全局优先、回落本会话旧旁挂；都缺或损坏都返回 `{}`。"""
+        for path in (self._global_blob_meta_path(sha256), self._session_blob_meta_path(sha256)):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(raw, dict):
+                return raw
+        return {}
 
     def _write_blob_meta(self, sha256: str, blob: BlobArtifact) -> None:
-        target = self._blob_meta_path(sha256)
+        """写**全局**对象旁挂元数据（按 sha 单一文件）。
+
+        `session_id` **剥离**：全局对象跨会话去重、每个 sha 只有一份旁挂，写上传者会话 id
+        只会被后上传者覆盖 ⇒ 该字段对全局对象无意义（会误导读者以为有单一归属）。消费侧
+        （`_blob_from_bytes` / `_read_blob_meta`）只读 `mime_type`，而 mime 由内容派生
+        ⇒ 同字节同值，剥离无行为影响。
+        """
+        target = self._global_blob_meta_path(sha256)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._write_atomic(
             target,
-            json.dumps(blob.model_dump(exclude={"content"}), ensure_ascii=False).encode(
-                "utf-8"
-            ),
+            json.dumps(
+                blob.model_dump(exclude={"content", "session_id"}), ensure_ascii=False
+            ).encode("utf-8"),
         )
 
+    def _link_session_receipt(self, sha256: str) -> None:
+        """在本会话命名空间建一条回执 hardlink，指向全局对象（不复制字节）。幂等。
+
+        **升级场景**：该会话旧路径下若已存在同 sha 的升级前旧对象，`os.link` 抛
+        `FileExistsError`，此时**保留旧 inode**（不改动、不收敛）——旧对象的字节与该 sha
+        逐字节相同，读/归属行为等价；差别只是它与全局对象不是同一 inode。故"回执就是全局
+        对象的 hardlink"这条不变量**只在本次写入新建回执时成立**。
+        """
+        target = self._global_blob_object_path(sha256)
+        receipt = self._session_blob_object_path(sha256)
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(target, receipt)
+        except FileExistsError:
+            # 回执位已被占用：同会话重复上传同一字节（幂等返回），或升级前旧对象占位
+            # （保留旧 inode，见 docstring）。两种情形都无需再动磁盘。
+            return
+        # 回执是**授权事实**，必须比 HTTP 回执先落稳：目录项也要 fsync。
+        self._sync_blob_dirs(receipt.parent)
+
     def _publish_blob(self, data: bytes, sha256: str) -> None:
-        """staging → fsync → hardlink 原子发布；任何失败都不留可读的半文件。"""
-        staging_dir = self._dir / "attachments" / "tmp"
+        """staging → fsync → hardlink 原子发布（全局对象根）；失败不留可读半文件。"""
+        staging_dir = self._global_blob_staging_dir()
         staging_dir.mkdir(parents=True, exist_ok=True)
-        target = self._blob_object_path(sha256)
+        target = self._global_blob_object_path(sha256)
         temporary = staging_dir / uuid4().hex
         handle: int | None = None
         try:
-            # Windows CRT 文本模式落盘会把 0x0A 撑成 0x0D 0x0A ⇒ 对象字节数变了 ⇒
-            # content-addressable 自证 hash mismatch（#830 D2）。`O_BINARY` 让落盘按
-            # 字节精确；POSIX 没有该 flag，`getattr` 取 0。
+            # `O_BINARY` 只在 Windows 存在（POSIX 上 `getattr` 取 0，逐位或等价于无操作）：
+            # 缺它时 MSVCRT 会把二进制流当文本处理——0x0A 撑成 0x0D 0x0A 使对象字节数变化 ⇒
+            # content-addressable 自证 hash mismatch（#830 D2），0x1A 还会被当作提前 EOF。
+            # 加它让落盘按字节精确。
             handle = os.open(
                 temporary,
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
@@ -412,10 +528,16 @@ def discard_local_artifacts(settings: Settings, session_id: str) -> None:
     这里的路径完全由 `settings.artifact_dir` 与 session_id 拼成，只有 harness 会往里写，
     所以删除判定是"写死的构造规则"，碰不到用户目录——这正是 ADR-0029 D2 要求的安全形状。
 
-    **两条刻意不做的**（记录在案，不在本票范围）：
+    **三条刻意不做的**（记录在案，不在本票范围）：
     - 配置了 S3/MinIO 时**远端对象不删**（那些 Provider 没有 delete）；
     - 不做任何自动 TTL / 体积清理（ADR-0004 明确不做自动 TTL；ADR-0029 Non-Goals 同款）。
-      于是 artifact 的生命周期 = 会话生命周期：只要会话还在，它的引用就必然可解析。
+      文本 artifact 仍满足旧口径"生命周期 = 会话生命周期：只要会话还在，它的引用就必然可解析"；
+    - **#830 D1 起，附件字节对象的回收已从"会话删除"语义中剥离**：字节对象落在全局内容
+      寻址根（`<root>/.attachments/objects/…`，跨会话去重），本函数只删 `<root>/<session_id>`
+      （连带回执），**全局字节对象留在原地、不随会话删除回收**。这是相对 D1 之前的行为回归
+      （旧布局下字节对象在会话目录内、随目录一起删），当前**刻意接受**（设计文档 §8.2 / PRD D2
+      "v1 不做自动清理"）；后续 GC（引用计数 / 宽限期；DSH 有 `gc`、oh-my-pi 有 `omp gc`）
+      是独立的 follow-up 票，不由本函数承担。别把这里的"幂等删除"读成"字节也被回收了"。
     """
     root = settings.artifact_dir.strip()
     if not root:
