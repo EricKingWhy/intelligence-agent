@@ -5,8 +5,11 @@
 - **已 push**，**PR #918 已开**（base=main）：https://github.com/EricKingWhy/intelligence-agent/pull/918
 - 基线 origin/main `8edade99`；已做 **2 次先回后正同步**（merge `6f39f595` 合 8f55233c；merge `27078c50` 合 cab16c30）
 - 推送 tip：`git rev-parse HEAD`（本文件写入时为 `6e9aa9ad`）
-- **代码面自被审 SHA `e2c8b8ff` 起逐字节未变**（`git diff e2c8b8ff..HEAD -- src/ tests/` 为空；
-  `derive.py` blob `5d3a4fa3724d85c73394b696e6bea48ba1c3d9b8`）；其后全部为 docs-only（台账/归档/tracker/收据）
+- **本票两文件自被审 SHA `e2c8b8ff` 起逐字节未变**：`derive.py` blob `5d3a4fa3724d85c73394b696e6bea48ba1c3d9b8`、
+  测试 blob `5925a6a7082b7eb6c0962688f2600a1db4f6ea7c`（`git diff e2c8b8ff..HEAD -- <这两个路径>` 为空）。
+  ⚠ **不要**用 `git diff e2c8b8ff..HEAD -- src/ tests/`（无路径限定）来佐证：该 range 含第 2 次同步合并
+  `27078c50`，会把 main 侧 #890 的 4 个文件（`web/app.py`、`web/projects.py`、`web/websocket.py`、
+  `tests/web/test_ws_auth.py`）算进来（该命令实测非空）。本票自己的提交全部是 docs-only（台账/归档/tracker/收据）
 
 ## 门禁
 - 本机 Gate-0：`f9c1ed02` / tree `b2f191ab` **6/6 PASS**（22.6s，收据 `docs/gate/f9c1ed02….json`）；
