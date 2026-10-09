@@ -264,7 +264,7 @@ def _attachment_not_found(session_id: str, attachment_id: str) -> HTTPException:
     return HTTPException(
         status_code=404,
         detail=(
-            f"attachment {attachment_id!r} 不在会话 {session_id!r} 的"
-            "命名空间里（不存在，或属于别的会话）"
+            f"attachment {attachment_id!r} 未被会话 {session_id!r} 的事件引用"
+            "（不存在，或属于别的会话）"
         ),
     )
