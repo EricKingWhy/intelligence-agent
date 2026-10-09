@@ -3,7 +3,18 @@
  * TUI 是纯客户端：所有真相向服务端查询，本地不写任何会话状态。
  */
 import { asNumber, asString, isRecord, type EventEnvelope } from "./events.ts";
+import type { ModelOptionView } from "./lib/vision.ts";
 import type { SessionSummaryView } from "./views/sessionselect.ts";
+
+/** `POST /api/sessions/{id}/attachments` 的回执（`web/attachments.py:AttachmentUploadResponse`）。 */
+export interface AttachmentUploadResponse {
+  attachment_id: string;
+  media_type: string;
+  bytes: number;
+  width: number;
+  height: number;
+  name?: string | null;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -94,12 +105,67 @@ export class ApiClient {
   /**
    * 投递消息。会话空闲时服务端返回 launched 的 SSE 流（#853）：这里放弃该响应体、
    * 按「已受理」返回 null，事件由 /stream 订阅投递（见 request()）。
+   *
+   * `attachments`（#827 MM-06 / AC4）：MM-02 的上传回执 `attachment_id` 列表。
+   * 空/未给 => **不带该键**（纯文本提交的请求体逐字节不变）。
    */
-  sendMessage(sessionId: string, content: string): Promise<unknown> {
+  sendMessage(sessionId: string, content: string, attachments?: string[]): Promise<unknown> {
+    const body: Record<string, unknown> = { content, mode: "queue" };
+    if (attachments && attachments.length > 0) body["attachments"] = attachments;
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content, mode: "queue" }),
+      body: JSON.stringify(body),
     });
+  }
+
+  /**
+   * 上传一张图片（#827 MM-06 / AC5 的 adapter 接缝）。
+   *
+   * 契约（`web/attachments.py:169-207`）：请求体是**原始字节**（不套 JSON、不 base64），
+   * `Content-Type` 声明图片类型，`?name=` 是展示名。服务端按 magic bytes 判型，并且
+   * **声明（Content-Type / 文件名扩展名）与字节判定不符即拒**（`IMAGE_TYPE_MISMATCH`），
+   * 所以调用方必须保证三者一致（本仓 TUI 由 `uploadDeclaredName` 保证）。
+   */
+  uploadAttachment(
+    sessionId: string,
+    bytes: Uint8Array,
+    options: { name?: string; mediaType: string },
+  ): Promise<AttachmentUploadResponse> {
+    const query = options.name ? `?name=${encodeURIComponent(options.name)}` : "";
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/attachments${query}`,
+      {
+        method: "POST",
+        headers: { "content-type": options.mediaType },
+        body: bytes as unknown as RequestInit["body"],
+      },
+    );
+  }
+
+  /**
+   * 模型目录（`GET /api/models`，AC8 的视觉能力来源）。响应外层是 `{"models": [...]}`；
+   * 这里只收出 TUI 真正要的字段（id / model / is_default / supports_vision），
+   * 其余字段（provider、display_name、不可用原因...）不引入本客户端。形状不对的条目
+   * **丢弃**而不是猜。
+   */
+  async listModels(): Promise<ModelOptionView[]> {
+    const raw = await this.request<{ models?: unknown }>("/api/models");
+    const rows = Array.isArray(raw?.models) ? raw.models : [];
+    const options: ModelOptionView[] = [];
+    for (const row of rows) {
+      if (!isRecord(row)) continue;
+      const id = asString(row["id"]);
+      if (!id) continue;
+      const option: ModelOptionView = { id };
+      const model = asString(row["model"]);
+      if (model) option.model = model;
+      if (typeof row["is_default"] === "boolean") option.is_default = row["is_default"];
+      if (typeof row["supports_vision"] === "boolean") {
+        option.supports_vision = row["supports_vision"];
+      }
+      options.push(option);
+    }
+    return options;
   }
 
   approve(
