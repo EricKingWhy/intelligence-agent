@@ -19,6 +19,8 @@ import {
   malformedLongPathPrefixes,
   unguardedBackupDelete,
   stripNsisComments,
+  LOGICLIB_OPENS,
+  LOGICLIB_CLOSES,
   unguardedLangStrings,
   sha256File,
   GOOD_LOCK,
@@ -241,17 +243,32 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.equal(stripNsisComments('RMDir /r "a;b" ; trailing'), 'RMDir /r "a;b" ')
     assert.equal(stripNsisComments('; whole line'), '')
     assert.equal(stripNsisComments('x $" ; still in string'), 'x $" ; still in string')
-    // NSIS also takes `#` comments — at the start of a line or after a complete
-    // statement (measured on makensis 3.0.4.1: `DetailPrint "x" # trailing`
-    // compiles while `DetailPrint "x" stray` fails with "Error in script", so
-    // the `#` starts a comment rather than being ignored) — but a `#` inside a
-    // string is text, and one glued to a token is left alone so a stray `#` can
-    // only ever over-report, never eat code.
+    // NSIS also takes `#` comments — at the start of a line, after a complete
+    // statement, or glued to the closing quote of one (measured on makensis
+    // 3.0.4.1: `DetailPrint "x" # trailing` AND `DetailPrint "x"# trailing`
+    // compile and show the line, while `DetailPrint "x" stray` fails with "Error
+    // in script", so the `#` starts a comment rather than being ignored) — but a
+    // `#` inside a string is text, and one glued to a non-quote token is left
+    // alone: measured, `StrCpy $0 foo#bar` stores `foo#bar`, so cutting there
+    // would eat code. Leaving that case alone can only over-report, which is the
+    // fail-closed direction.
     assert.equal(stripNsisComments('# whole line'), '')
     assert.equal(stripNsisComments('  # indented'), '  ')
     assert.equal(stripNsisComments('DetailPrint "x" # trailing'), 'DetailPrint "x" ')
     assert.equal(stripNsisComments('DetailPrint "a # b"'), 'DetailPrint "a # b"')
-    assert.equal(stripNsisComments('StrCpy $0 "a"#$1'), 'StrCpy $0 "a"#$1')
+    assert.equal(stripNsisComments('StrCpy $0 "a"#$1'), 'StrCpy $0 "a"')
+    assert.equal(stripNsisComments("StrCpy $0 'a'#$1"), "StrCpy $0 'a'")
+    assert.equal(stripNsisComments('StrCpy $0 `a`#$1'), 'StrCpy $0 `a`')
+    assert.equal(stripNsisComments('StrCpy $0 foo#bar'), 'StrCpy $0 foo#bar')
+    // All three string forms are strings: measured, the single-quoted and
+    // backtick forms compile AND delete, and a `;` inside one is text.
+    assert.equal(stripNsisComments("RMDir /r 'a;b' ; trailing"), "RMDir /r 'a;b' ")
+    assert.equal(stripNsisComments('RMDir /r `a;b` ; trailing'), 'RMDir /r `a;b` ')
+    // `$\'` is an escape inside a single-quoted string (measured: it stores a
+    // literal `'`), so the quote after it does not close the string and the
+    // trailing `;` is still content; a bare `'` does close it.
+    assert.equal(stripNsisComments("x 'a$\\' ; keep"), "x 'a$\\' ; keep")
+    assert.equal(stripNsisComments("x 'a$\\'b' ; gone"), "x 'a$\\'b' ")
   })
 
   it('keeps a `;` that follows an escaped quote inside a string', () => {
@@ -456,6 +473,10 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       { line: 3, what: 'no !insertmacro iaClearBackupDir after the delete' },
       { line: 3, what: 'missing ${Errors} check before iaClearBackupDir' },
       { line: 3, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
+      {
+        line: 3,
+        what: "the delete sits inside !macro promote, which the file never !insertmacro's — the delete never runs",
+      },
     ])
   })
 
@@ -545,6 +566,10 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '  !insertmacro iaClearBackupDir',
       '  ${EndIf}',
       '!MACROEND',
+      // A macro body runs where the macro is inserted, so the file has to insert
+      // it or the guard reports the delete as never running (#905 item 4) — this
+      // fixture is a call site as well as a definition.
+      '!insertmacro iaPromoteApplication',
     ].join('\n')
     assert.deepEqual(unguardedBackupDelete(casedBlock), [])
     // Fail-closed on the wrapper that a block-scoped scan cannot see: a
@@ -606,6 +631,11 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       {
         line: 5,
         what: 'the delete sits 2 LogicLib level(s) inside the block — a branch above it can skip the delete and its checks',
+      },
+      {
+        line: 5,
+        what:
+          'the constant-false condition `${If} 1 == 0` covers the delete and the ${Errors} read and the leftover record and iaClearBackupDir — that code can never run',
       },
     ])
     // Control: the promote guard itself is one level, and nothing is reported.
@@ -820,6 +850,337 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     assert.deepEqual(unguardedBackupDelete(lower), [])
   })
 
+  it('counts LogicLib nesting case-insensitively (R1: `${iF}` … `${eNdIf}`)', () => {
+    // Define and macro names are case-insensitive (measured on 3.0.4.1:
+    // `!define Foo` answers `!ifdef foo`), so a mixed-case opener nests exactly
+    // like `${If}` — a case-sensitive scan reads the guarded block as one level
+    // away from the checks it belongs to.
+    const casedCloser = [
+      'Function iaPromoteApplication',
+      '  ClearErrors',
+      '  ${If} ${FileExists} "$INSTDIR\\app.exe"',
+      `    ${FIXED_DELETE}`,
+      '    ${If} ${Errors}',
+      '      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '    ${EndIf}',
+      '    !insertmacro iaClearBackupDir',
+      '  ${eNdIf}',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(casedCloser), [])
+    // And a never-taken mixed-case branch is a never-taken branch: the constant
+    // condition is decided the same way, with the file's own spelling in the
+    // message.
+    const casedDeadBranch = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${iF} 1 == 0',
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${eNdIf}',
+      '${eNdIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(casedDeadBranch), [
+      {
+        line: 2,
+        what:
+          'the constant-false condition `${iF} 1 == 0` covers the ${Errors} read and the leftover record — that code can never run',
+      },
+    ])
+  })
+
+  it('does not accept a ClearErrors from another branch (R5)', () => {
+    // The flag is sticky, so a clear in a branch this delete is not on reads as
+    // "cleared" while the delete's own path has none (round-5 R5, verified
+    // against this guard).
+    const otherBranch = [
+      'Function iaPromoteApplication',
+      '  ${If} $0 == "a"',
+      '    ClearErrors',
+      '  ${EndIf}',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(otherBranch), [
+      {
+        line: 5,
+        what: 'the ClearErrors above the delete sits in a branch the delete is not on — it does not clear this path',
+      },
+    ])
+    // The same block with one side each: the `${Else}` is the divider that makes
+    // the clear and the delete different paths.
+    const siblingBranch = [
+      'Function iaPromoteApplication',
+      '  ${If} $0 == "a"',
+      '    ClearErrors',
+      '  ${Else}',
+      `    ${FIXED_DELETE}`,
+      '    ${If} ${Errors}',
+      '      WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '    ${EndIf}',
+      '    !insertmacro iaClearBackupDir',
+      '  ${EndIf}',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(siblingBranch), [
+      {
+        line: 5,
+        what: 'the ClearErrors above the delete sits in a sibling branch — it does not clear this path',
+      },
+    ])
+  })
+
+  it('flags a clear call on the other side of a branch divider (R2)', () => {
+    // Delete and clear call inside the same block, but the clear sits after the
+    // `${Else}`: a path that takes the delete branch never reaches the clear, so
+    // a finished install still reads as incomplete.
+    const siblingClear = [
+      'ClearErrors',
+      '${If} $0 == "a"',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '${Else}',
+      '  !insertmacro iaClearBackupDir',
+      '${EndIf}',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(siblingClear), [
+      {
+        line: 3,
+        what: 'iaClearBackupDir sits in a sibling branch of the delete — a path skips the clear',
+      },
+    ])
+  })
+
+  it('flags a never-taken branch that covers the checks (R3/R5)', () => {
+    // A literal comparison that cannot hold is the `!ifdef NOPE` bypass in
+    // LogicLib syntax. The guard decides literal comparisons only — this is not
+    // reachability analysis — so a dead branch written that way has to be
+    // reported, and a condition that does hold has to stay clean.
+    const deadBranch = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${If} 1 == 0',
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(deadBranch), [
+      {
+        line: 2,
+        what:
+          'the constant-false condition `${If} 1 == 0` covers the ${Errors} read and the leftover record — that code can never run',
+      },
+    ])
+    // Control: `${IfNot} 1 == 0` always holds, so its body runs and nothing is
+    // reported. Deciding this the other way round would flag live code.
+    const aliveBranch = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '${IfNot} 1 == 0',
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(aliveBranch), [])
+  })
+
+  it('ignores statements in a macro body the delete is not in (R4)', () => {
+    // A macro body does not run at its definition site: a `ClearErrors` defined
+    // just above the delete clears nothing here, and checks parked in a macro
+    // body after the delete do not run with it (round-5 R4, both verified
+    // against this guard).
+    const clearInMacro = [
+      'Function iaPromoteApplication',
+      '  !macro helper',
+      '    ClearErrors',
+      '  !macroend',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(clearInMacro), [
+      { line: 5, what: 'missing ClearErrors before the delete' },
+    ])
+    const checksInMacro = [
+      'ClearErrors',
+      FIXED_DELETE,
+      '!macro recordLeftover',
+      '  ${If} ${Errors}',
+      '  ${EndIf}',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '!macroend',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(checksInMacro), [
+      { line: 2, what: 'no !insertmacro iaClearBackupDir after the delete' },
+      { line: 2, what: 'missing ${Errors} check before iaClearBackupDir' },
+      { line: 2, what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)' },
+    ])
+  })
+
+  it('flags a delete in a macro the file never inserts (item 4, fail-closed)', () => {
+    // The guard's window ends at the enclosing `!macroend`, so a delete inside a
+    // macro body used to look complete while nothing ran it: without an
+    // `!insertmacro` for that macro anywhere after its definition, the delete
+    // never runs.
+    const body = [
+      '  ClearErrors',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  !insertmacro iaClearBackupDir',
+    ]
+    const notInserted = ['!macro promote', ...body, '!macroend'].join('\n')
+    assert.deepEqual(unguardedBackupDelete(notInserted), [
+      {
+        line: 3,
+        what: "the delete sits inside !macro promote, which the file never !insertmacro's — the delete never runs",
+      },
+    ])
+    // Control: with a call site the same body is clean, and the call site may sit
+    // anywhere after the definition and in any case — macro names are
+    // case-insensitive (measured).
+    const inserted = [notInserted, '!INSERTMACRO Promote'].join('\n')
+    assert.deepEqual(unguardedBackupDelete(inserted), [])
+  })
+
+  it('accepts a delete and a record in any of the three quote styles (item 3)', () => {
+    // Measured on 3.0.4.1: `RMDir /r '…'` and `RMDir /r `…`` compile and delete
+    // the same directory as the double-quoted form, so a single-quoted call is
+    // the same delete and not a missing one.
+    const singleQuoted = [
+      'ClearErrors',
+      "RMDir /r '\\\\?\\$iaBackupDirectory'",
+      '${If} ${Errors}',
+      "  WriteRegStr HKCU '${INSTALL_REGISTRY_KEY}' 'IaLeftoverDir' '$iaBackupDirectory'",
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(singleQuoted), [])
+    const backtickQuoted = [
+      'ClearErrors',
+      'RMDir /r `\\\\?\\$iaBackupDirectory`',
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU `${INSTALL_REGISTRY_KEY}` `IaLeftoverDir` `$iaBackupDirectory`',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(backtickQuoted), [])
+  })
+
+  it('accepts case variants of the variable and define names (item 2)', () => {
+    // Variable and define names are case-insensitive (measured on 3.0.4.1:
+    // `StrCmp $IABackupDirectory` compiles against `Var iaBackupDirectory`, and
+    // `!define Foo` answers `!ifdef foo`), so a re-cased spelling is the same
+    // delete, read and record — reported as missing, it would blame correct code.
+    const cased = [
+      'ClearErrors',
+      'rmdir /r "\\\\?\\$IABackupDirectory"',
+      '${IF} ${errors}',
+      '  WriteRegStr HKCU "${install_registry_key}" "IaLeftoverDir" $IABackupDirectory',
+      '${ENDIF}',
+      '!INSERTMACRO iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(cased), [])
+  })
+
+  it('reads the flag only from the forms that really read it (item 1)', () => {
+    // `IfErrors` consumes the flag whatever spelling reaches it, so a raw
+    // `IfErrors` and the negated `${IfNot}`/`${Unless}` conditions all count as
+    // the read.
+    const rawIfErrors = [
+      'ClearErrors',
+      FIXED_DELETE,
+      'IfErrors lblFailed lblDone',
+      'lblFailed:',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      'lblDone:',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(rawIfErrors), [])
+    for (const read of ['${IfNot} ${Errors}', '${Unless} ${Errors}']) {
+      const layout = [
+        'ClearErrors',
+        FIXED_DELETE,
+        read,
+        '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+        '${EndIf}',
+        '!insertmacro iaClearBackupDir',
+      ].join('\n')
+      assert.deepEqual(unguardedBackupDelete(layout), [], read)
+    }
+    // A `${Errors}` the guard cannot name is reported instead of counted — a
+    // usage in a string literal does not even compile as a statement (measured:
+    // "DetailPrint expects 1 parameters, got 3"), and a read that cannot be
+    // recognized must not satisfy a rule about reads.
+    const inString = [
+      'ClearErrors',
+      FIXED_DELETE,
+      'DetailPrint "flag ${Errors} seen"',
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(inString), [
+      {
+        line: 3,
+        what:
+          'an unrecognized ${Errors} usage between the delete and iaClearBackupDir — only a ${If}/${IfNot}/${Unless} condition or a raw IfErrors reads the flag',
+      },
+    ])
+  })
+
+  it('does not count or report a `${Errors}` in a comment (R7)', () => {
+    // `#` glued to a closing quote starts a comment (measured), and the comment
+    // is stripped before the window is scanned: it neither inflates the read
+    // count nor shows up as an unrecognized usage.
+    const gluedComment = [
+      'ClearErrors',
+      FIXED_DELETE,
+      'DetailPrint "x"# ${Errors} is sticky, read it once',
+      '${If} ${Errors}',
+      '  WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '${EndIf}',
+      '!insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(gluedComment), [])
+  })
+
+  it('stops the delete window at a mixed-case FunctionEnd (R6)', () => {
+    // `functionend` closes the function exactly like `FunctionEnd` does
+    // (directives are case-insensitive — measured), so a clear call after it is
+    // outside the delete's block and does not satisfy the check.
+    const cased = [
+      'Function iaPromoteApplication',
+      '  ClearErrors',
+      `  ${FIXED_DELETE}`,
+      '  ${If} ${Errors}',
+      '    WriteRegStr HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir" $iaBackupDirectory',
+      '  ${EndIf}',
+      '  functionend',
+      '  !insertmacro iaClearBackupDir',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(cased), [
+      { line: 3, what: 'no !insertmacro iaClearBackupDir after the delete' },
+    ])
+  })
+
   it('validateBackupDeleteGuards names the file', () => {
     assert.throws(
       () => validateBackupDeleteGuards('Function nothing\nFunctionEnd', 'installer-directories.nsh'),
@@ -875,10 +1236,12 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     // And the record handling has to run on the delete's own path: a
     // same-shaped block parked inside an extra never-taken branch (`${If} 1 == 0`)
     // satisfies every assertion above while the record handling never runs.
-    // Depth is counted with the same block macros the build guard counts, so the
-    // two notions of nesting agree.
-    const opensBlock = /\$\{(If|IfNot|Unless|While|Do|DoWhile|DoUntil|For|ForEach|Select|Switch)\}/g
-    const closesBlock = /\$\{(EndIf|EndWhile|Loop|Next|EndSelect|EndSwitch)\}/g
+    // Depth is counted with the SAME lists the build guard counts with, so the
+    // two notions of nesting cannot drift again (#905 / R8: this copy was missing
+    // three closers and the case-insensitivity, and read the guard's own layouts
+    // differently).
+    const opensBlock = new RegExp(LOGICLIB_OPENS, 'gi')
+    const closesBlock = new RegExp(LOGICLIB_CLOSES, 'gi')
     const depthAt = (index) => {
       let depth = 0
       for (const line of lines.slice(0, index)) {

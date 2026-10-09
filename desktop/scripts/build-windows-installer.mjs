@@ -698,26 +698,39 @@ export function stripNsisComments(source) {
   return source
     .split(/\r?\n/)
     .map((line) => {
-      let inQuote = false
+      // NSIS's three string forms and its comment markers, as measured on
+      // makensis 3.0.4.1 (#905 / R7): `"`, `'` and `` ` `` all delimit strings
+      // (`RMDir /r '<path>;x'` compiles and deletes a name containing the `;`),
+      // `$\<quote>` inside a string is an escape that does not close it
+      // (`$\'` stores a literal `'`), and `;`/`#` start a comment only outside
+      // one. A `#` glued to a closing quote starts a comment too (measured:
+      // `DetailPrint "a"# trailing` compiles, and `StrCpy $0 "a"#$1` stores
+      // `a`), while one glued to a non-quote token is text (`StrCpy $0 foo#bar`
+      // stores `foo#bar`) — leaving that case alone can only over-report, which
+      // is the fail-closed direction.
+      let quote = ''
       let out = ''
       for (let i = 0; i < line.length; i += 1) {
         const ch = line[i]
-        if (inQuote && ch === '$' && line[i + 1] === '\\' && line[i + 2] === '"') {
-          out += '$\\"'
+        if (quote !== '' && ch === '$' && line[i + 1] === '\\' && line[i + 2] === quote) {
+          out += `$\\${quote}`
           i += 2
-        } else if (ch === '"') {
-          inQuote = !inQuote
+        } else if (ch === '"' || ch === "'" || ch === '`') {
+          if (quote === '') quote = ch
+          else if (quote === ch) quote = ''
           out += ch
-        } else if (!inQuote && ch === ';') {
+        } else if (quote === '' && ch === ';') {
           break
-        } else if (!inQuote && ch === '#' && (out.trim() === '' || /\s$/.test(out))) {
-          // NSIS also accepts `#` comments — at the start of a line or after a
-          // complete statement: measured on makensis 3.0.4.1, `DetailPrint "x"
-          // # trailing` compiles while `DetailPrint "x" stray` fails with
-          // "Error in script", so the `#` really starts a comment and the rest
-          // of the line is not a parameter. A `#` inside a string is text; one
-          // right after a non-space token is left alone, because guessing there
-          // could eat code — leaving it can only over-report (fail-closed).
+        } else if (
+          quote === '' &&
+          ch === '#' &&
+          (out.trim() === '' || /\s$/.test(out) || /["'`]$/.test(out))
+        ) {
+          // NSIS also accepts `#` comments — at the start of a line, after a
+          // complete statement, or glued to the closing quote of one (measured:
+          // `DetailPrint "x" # trailing` compiles while `DetailPrint "x" stray`
+          // fails with "Error in script", so the `#` really starts a comment and
+          // the rest of the line is not a parameter).
           break
         } else {
           out += ch
@@ -767,17 +780,25 @@ export function validateLongPathPrefixes(source, filename) {
 
 /**
  * Problems with the `$iaBackupDirectory` delete site of the atomic-swap
- * protocol, as `{ line, what }` (#901 / R1):
+ * protocol, as `{ line, what }` (#901 / R1, extended for #905):
  *
- *   - `ClearErrors` has to precede the delete, in the same block: the NSIS error
- *     flag is sticky, so a test without a clear can read an unrelated earlier
- *     failure, and a clear call in the previous function or in a macro
- *     definition does not clear this path;
+ *   - `ClearErrors` has to precede the delete on the delete's own path: the NSIS
+ *     error flag is sticky, so a test without a clear can read an unrelated
+ *     earlier failure, and a clear call in the previous function, in a macro
+ *     definition (round-5 R4), in a branch the delete is not on (R5), or on the
+ *     other side of an `${Else}` does not clear this path either;
  *   - exactly one `${Errors}` read may sit between the delete and
- *     `iaClearBackupDir`. LogicLib's `${Errors}` is `IfErrors`, which consumes
- *     the flag: measured on NSIS 3.0.4.1, the first read after a delete that
- *     fails because a child directory denies DELETE reports the error and an
- *     immediate second read reports none, while an intervening `StrCpy` does
+ *     `iaClearBackupDir`, and it has to be a form the guard can name: a
+ *     line-anchored `${If}`/`${IfNot}`/`${Unless}` condition carrying
+ *     `${Errors}` — LogicLib expands the macro to `"" Errors ""`, its condition
+ *     form — or a line-anchored raw `IfErrors`. Any other `${Errors}` inside the
+ *     window is reported rather than counted: `${Errors}` in a string literal
+ *     does not even compile (measured: "DetailPrint expects 1 parameters, got
+ *     3"), and a usage the guard cannot recognize must not satisfy a rule about
+ *     reads (round-5 item 1). LogicLib's `${Errors}` is `IfErrors`, which
+ *     consumes the flag: measured on NSIS 3.0.4.1, the first read after a delete
+ *     that fails because a child directory denies DELETE reports the error and
+ *     an immediate second read reports none, while an intervening `StrCpy` does
  *     not clear it. A second read therefore turns the failure branch into dead
  *     code;
  *   - the failure has to be recorded as `IaLeftoverDir`, in `HKCU` under
@@ -787,7 +808,11 @@ export function validateLongPathPrefixes(source, filename) {
  *     a record at all a failed delete cleared the pointer that named the
  *     previous version and the directory stayed on disk with nothing referencing
  *     it (R1: ~0.7 GB per update, 3.50 GiB measured on one machine), and a silent
- *     install has no UI and writes no NSIS detail log to read it back from.
+ *     install has no UI and writes no NSIS detail log to read it back from;
+ *   - a delete inside a `!macro` body is only reported clean when the file also
+ *     `!insertmacro`s that macro (round-5 item 4, fail-closed): a macro body runs
+ *     at its call sites, not at its definition, and the window's own `!macroend`
+ *     bound made such a delete look complete while nothing ran it.
  *
  * The check window ends at `iaClearBackupDir`, at the enclosing `FunctionEnd`,
  * or at the enclosing `!macroend`, whichever comes first, and a delete without a
@@ -795,9 +820,11 @@ export function validateLongPathPrefixes(source, filename) {
  * clear call alone made the guard fail open — with the call removed, an
  * unrelated `${Errors}` read further down the file satisfied the check for this
  * site, and a delete inside a macro had no enclosing `FunctionEnd` to stop at.
+ * Statements inside a `!macro` body that does not contain the delete are
+ * ignored — their definition site is not a call site (round-5 R4).
  *
  * Two shapes are problems on their own, because text that satisfies the checks
- * is not the same as code that runs them (both verified against this guard):
+ * is not the same as code that runs them (all verified against this guard):
  *
  *   - **conditional compilation** — either a directive anywhere in the delete's
  *     enclosing block (`Function` … `FunctionEnd` or `!macro` … `!macroend`), or
@@ -814,37 +841,84 @@ export function validateLongPathPrefixes(source, filename) {
  *     guard), because a branch above it skips the delete and every check with
  *     it — and relative depths alone cannot see a wrapper around the whole
  *     guarded body, which moves delete, checks and clear down together — and
- *     `iaClearBackupDir` has to be at the delete's own depth, or a path skips
- *     the clear and a finished install still reads as incomplete.
+ *     `iaClearBackupDir` has to be at the delete's own depth and on the delete's
+ *     side of every `${Else}`/`${ElseIf}`/`${Case}`/`${CaseElse}` divider, or a
+ *     path skips the clear and a finished install still reads as incomplete
+ *     (round-5 R2). Nesting counts every block macro of LogicLib 2.6 — the
+ *     `${DoWhile}`/`${DoUntil}`/`${LoopWhile}` family included — and is
+ *     case-insensitive, because define and macro names are: `${iF}` … `${eNdIf}`
+ *     nests exactly as `${If}` … `${EndIf}` does (round-5 R1);
+ *   - **constant-false branches**: an opener whose condition is a comparison of
+ *     two literals that cannot hold (`${If} 1 == 0`, `${IfNot} 1 == 1`,
+ *     `${Unless} 1 == 1`, integer or quoted operands) is reported when it covers
+ *     the delete, its `${Errors}` read, its record or the clear call. This is the
+ *     same bypass as `!ifdef NOPE`, in LogicLib's syntax — round-5 R3/R5 asked
+ *     for this narrow reading, not for reachability analysis (see the limits
+ *     below).
  *
  * Fail-closed: a file with no long-path delete of `$iaBackupDirectory` at all
  * is reported as a problem, so removing the delete site cannot pass silently.
  * The site match is case-insensitive — NSIS directives are — so a re-cased
- * `rmdir /r` is recognized rather than reported as a missing delete.
+ * `rmdir /r` is recognized rather than reported as a missing delete, and the
+ * delete argument may use any of NSIS's three quote styles (all three compile
+ * and delete — measured), because a single-quoted call is the same delete.
  *
- * Limits of this scan (it reads one file's text, not compiled code): `${Errors}`
- * is counted wherever it appears, including inside a string literal; the delete
- * argument, the record key and the record value are matched in the shipped
- * spelling (double quotes, `HKCU "${INSTALL_REGISTRY_KEY}"`, whole
- * `$iaBackupDirectory`), so a single-quote or backtick argument is reported as a
- * missing delete and a re-cased or concatenated record as not recorded — both
- * fail closed (reported, not silently accepted). A delete sitting in a macro
- * that nothing inserts, or in an `!include`d file, is invisible here; the
- * follow-up issue for #901 tracks that along with the other text-scan limits.
+ * Limits of this scan (it reads one file's text, not compiled code), each with
+ * the construction it is known to let through — reported as a gap, not accepted
+ * as safe:
+ *
+ *   - comments and strings follow the measured rules (makensis 3.0.4.1, see
+ *     `stripNsisComments`): `"`/`'`/`` ` `` all delimit strings, `$\<quote>`
+ *     inside a string is an escape, and `;`/`#` start a comment outside a
+ *     string — including a `#` glued to a closing quote — while a `#` glued to
+ *     a non-quote token is text (`StrCpy $0 foo#bar` stores `foo#bar`). A stray
+ *     `#` can therefore only over-report;
+ *   - the record and delete argument must be written as one statement on one
+ *     line, with the `${INSTALL_REGISTRY_KEY}` define (any case) and the whole
+ *     `$iaBackupDirectory` (any case) as the value. A record built by
+ *     concatenation, or one written by a helper macro that takes the path as an
+ *     argument, reads as "not recorded";
+ *   - the constant-false rule decides only literal comparisons. A skip built
+ *     from variables, `${FileExists}`, arithmetic or an unlisted condition is
+ *     not analyzed at all — e.g. `${If} $0 != ""` … with `$0` known to the
+ *     installer as empty. Catching that needs a evaluator, not a text scan;
+ *   - a delete reached through `!include` is invisible here, and so is a macro
+ *     `!insertmacro`d from an `!include`d file (the include boundary, round-5
+ *     item 4): only the named installer scripts are scanned.
  */
 // LogicLib 2.6's block macros. The closers matter as much as the openers: the
 // do-loop family closes with `${Loop}`, `${LoopWhile}` or `${LoopUntil}` and
 // `${Unless}` with `${EndUnless}` — leaving those out read a correctly closed
 // loop as nesting that is not there (measured: `${Do} … ${LoopUntil}` around a
-// top-level statement reported "1 LogicLib level(s) deeper").
-const OPENS_BLOCK = /\$\{(If|IfNot|Unless|While|Do|DoWhile|DoUntil|For|ForEach|Select|Switch)\}/g
-const CLOSES_BLOCK =
-  /\$\{(EndIf|EndWhile|EndUnless|Loop|LoopWhile|LoopUntil|Next|EndSelect|EndSwitch)\}/g
-// Directives are case-insensitive (`!IFDEF` compiles — measured on 3.0.4.1), so
-// the scan is too.
+// top-level statement reported "1 LogicLib level(s) deeper"). The lists are
+// exported as pattern sources so the test suite counts nesting with the same
+// lists: its private copy had drifted — three closers and the case-insensitivity
+// were missing, so test and guard disagreed about the same layout (#905 / R8).
+export const LOGICLIB_OPENS =
+  '\\$\\{(If|IfNot|Unless|While|Do|DoWhile|DoUntil|For|ForEach|Select|Switch)\\}'
+export const LOGICLIB_CLOSES =
+  '\\$\\{(EndIf|EndWhile|EndUnless|Loop|LoopWhile|LoopUntil|Next|EndSelect|EndSwitch)\\}'
+// LogicLib 2.6.0 (`Include/LogicLib.nsh`): `${Else}`/`${ElseIf}` divide one
+// `${If}`, `${Case}`/`${CaseElse}` divide one `${Switch}`. The two sides are
+// different paths, so a delete on one side and its clear call on the other do
+// not run together (round-5 R2).
+const DIVIDES_BLOCK = /\$\{(Else|ElseIf|Case|CaseElse)\}/gi
+// Directives, define names, variable names and macro names are all
+// case-insensitive (measured on 3.0.4.1: `!IFDEF` compiles, `!define Foo`
+// answers `!ifdef foo`, `$IABackupDirectory` resolves `Var iaBackupDirectory`),
+// so the scans are too: `${iF}` opens a block exactly like `${If}`, and a
+// case-sensitive scan goes blind to it (round-5 R1).
+const OPENS_BLOCK = new RegExp(LOGICLIB_OPENS, 'gi')
+const CLOSES_BLOCK = new RegExp(LOGICLIB_CLOSES, 'gi')
 const CONDITIONAL = /^\s*!(if\b|ifdef\b|ifndef\b|ifmacrodef\b|ifmacrondef\b|else\b|elseif\b|endif\b)/i
 const OPENS_FUNCTION = /^\s*(Function|!macro)\b/i
 const CLOSES_FUNCTION = /^\s*(FunctionEnd|!macroend)\b/i
+const INSERT_MACRO = /^\s*!insertmacro\s+(\S+)/i
+// Comparisons of two literal integers, or of two quoted literals: the only
+// conditions `constantConditionTruth` decides. LogicLib compares `==`/`=` by
+// string (case-insensitively) and `<`/`>` numerically.
+const INTEGER_COMPARISON = /^(-?\d+)\s*(==|!=|<>|<=|>=|<|>|=)\s*(-?\d+)$/
+const QUOTED_COMPARISON = /^(['"`])(.*)\1\s*(==|!=|<>|=)\s*(['"`])(.*)\4$/
 
 /** Net LogicLib block nesting over `lines` (openers minus closers). */
 function logicLibDepth(lines) {
@@ -854,6 +928,88 @@ function logicLibDepth(lines) {
     depth -= (line.match(CLOSES_BLOCK) ?? []).length
   }
   return depth
+}
+
+/**
+ * LogicLib block structure over `lines`: the openers in effect when each line
+ * starts (`stackBefore`), every divider with the block it divides (`dividers`),
+ * and the line each opener closes on (`closeOf`). Within a line the events are
+ * ordered by position, so an opener and its closer on one line still cancel.
+ */
+function logicLibTrace(lines) {
+  const stack = []
+  const stackBefore = []
+  const dividers = []
+  const closeOf = new Map()
+  for (let k = 0; k < lines.length; k += 1) {
+    stackBefore.push(stack.slice())
+    const events = []
+    for (const match of lines[k].matchAll(OPENS_BLOCK)) events.push({ at: match.index, kind: 'open' })
+    for (const match of lines[k].matchAll(CLOSES_BLOCK)) events.push({ at: match.index, kind: 'close' })
+    for (const match of lines[k].matchAll(DIVIDES_BLOCK)) events.push({ at: match.index, kind: 'divide' })
+    events.sort((a, b) => a.at - b.at)
+    for (const event of events) {
+      if (event.kind === 'open') {
+        stack.push(k)
+      } else if (event.kind === 'close') {
+        const opener = stack.pop()
+        if (opener !== undefined) closeOf.set(opener, k)
+      } else {
+        dividers.push({ line: k, opener: stack.length > 0 ? stack[stack.length - 1] : -1 })
+      }
+    }
+  }
+  return { stackBefore, dividers, closeOf }
+}
+
+/**
+ * True when `inner` sits in the same branch chain as `outer`: every block open
+ * at `inner` is also open at `outer`. A candidate that fails this is deeper than
+ * the delete or outside a block the delete sits in, so it does not run on every
+ * path that reaches the delete.
+ */
+function onSameBranch(trace, inner, outer) {
+  return trace.stackBefore[inner].every((opener) => trace.stackBefore[outer].includes(opener))
+}
+
+/** `${Else}`-family dividers in `(from, to)` that split a block open at `from`. */
+function branchDividersBetween(trace, from, to) {
+  return trace.dividers.filter(
+    (divider) =>
+      divider.line > from && divider.line < to && trace.stackBefore[from].includes(divider.opener),
+  )
+}
+
+/**
+ * Line of the innermost `Function`/`!macro` still open at `index`, else 0.
+ *
+ * Scanning backwards for the nearest opener read a `!macro` whose `!macroend`
+ * already closed above the delete as the enclosing block, and then measured the
+ * delete against a macro body it is not in (round-5 item 4) — a closed block has
+ * to be counted out.
+ */
+function enclosingBlockStart(lines, index) {
+  const stack = []
+  for (let j = 0; j < index; j += 1) {
+    if (OPENS_FUNCTION.test(lines[j])) stack.push(j)
+    else if (CLOSES_FUNCTION.test(lines[j])) stack.pop()
+  }
+  return stack.length === 0 ? 0 : stack[stack.length - 1]
+}
+
+/** `!macro` … `!macroend` body ranges, `{ start, end }`, both ends inclusive. */
+function macroBodyRanges(lines) {
+  const ranges = []
+  let start = -1
+  for (let k = 0; k < lines.length; k += 1) {
+    if (start === -1 && /^\s*!macro\b/i.test(lines[k])) start = k
+    else if (start !== -1 && /^\s*!macroend\b/i.test(lines[k])) {
+      ranges.push({ start, end: k })
+      start = -1
+    }
+  }
+  if (start !== -1) ranges.push({ start, end: lines.length - 1 })
+  return ranges
 }
 
 /**
@@ -873,35 +1029,116 @@ function openConditionals(lines, index) {
   return Math.max(open, 0)
 }
 
+/**
+ * The truth of a literal comparison, or `undefined` when the condition is not
+ * decidable. Deliberately narrow (round-5 R3/R5): the guard reads text, so only
+ * comparisons of two literals are decided — `${If} 1 == 0` and friends.
+ */
+function constantConditionTruth(condition) {
+  const numbers = INTEGER_COMPARISON.exec(condition)
+  if (numbers !== null) {
+    const left = Number(numbers[1])
+    const right = Number(numbers[3])
+    if (numbers[2] === '==' || numbers[2] === '=') return left === right
+    if (numbers[2] === '!=' || numbers[2] === '<>') return left !== right
+    if (numbers[2] === '<') return left < right
+    if (numbers[2] === '>') return left > right
+    if (numbers[2] === '<=') return left <= right
+    return left >= right
+  }
+  const quoted = QUOTED_COMPARISON.exec(condition)
+  if (quoted === null) return undefined
+  const left = quoted[2]
+  const right = quoted[5]
+  // A `$` means the text is a variable, not a literal: `"$a" == "$b"` is not
+  // decidable here.
+  if (left.includes('$') || right.includes('$')) return undefined
+  if (quoted[3] === '==' || quoted[3] === '=') return left.toLowerCase() === right.toLowerCase()
+  return left.toLowerCase() !== right.toLowerCase()
+}
+
+/**
+ * The text of an opener on `line` whose condition can never hold, else
+ * `undefined`. Only openers written the usual way — one per line, at the start,
+ * with nothing but the condition after them — are decided; `${DoWhile}` and
+ * `${DoUntil}` are left alone because their bodies run once regardless, and a
+ * negated opener (`${IfNot}`, `${Unless}`) is dead when its condition HOLDS.
+ */
+function deadBranchText(line) {
+  const opener = /^\s*\$\{(If|IfNot|Unless|While)\}\s+(.*)$/i.exec(line)
+  if (opener === null) return undefined
+  const truth = constantConditionTruth(opener[2].trim())
+  if (truth === undefined) return undefined
+  const negated = /^(IfNot|Unless)$/i.test(opener[1])
+  return (negated ? !truth : truth) ? undefined : line.trim()
+}
+
 export function unguardedBackupDelete(source) {
   const problems = []
   const lines = stripNsisComments(source).split(/\r?\n/)
-  const deleteLine = /RMDir\s+\/r\s+"\\\\\?\\\$iaBackupDirectory"/i
-  const errorsMacro = '${Errors}'
+  const trace = logicLibTrace(lines)
+  const macroRanges = macroBodyRanges(lines)
+  // Either quote style is the same delete: measured on 3.0.4.1, `RMDir /r '…'`
+  // and `RMDir /r `…`` both compile and remove the directory.
+  const deleteLine = /RMDir\s+\/r\s+(['"`])\\\\\?\\\$iaBackupDirectory\1/i
+  const ERRORS = '${Errors}'
+  const errorsMacro = /\$\{Errors\}/i
+  // A read is a line-anchored `${If}`/`${IfNot}`/`${Unless}` condition carrying
+  // `${Errors}` — LogicLib expands the macro to `"" Errors ""`, which only
+  // compiles as a condition — or a line-anchored raw `IfErrors`. Anything else
+  // is reported instead of counted (round-5 item 1): a read the guard cannot
+  // name must not satisfy a rule about reads.
+  const errorsRead = /^\s*(?:\$\{(If|IfNot|Unless)\}[^\n]*\$\{Errors\}|IfErrors\b)/i
+  const clearErrors = /^\s*ClearErrors\b/i
+  const clearCall = /!insertmacro\s+iaClearBackupDir\b/i
+  // Where the record has to land: HKCU, this application's own key, carrying the
+  // whole backup path. Variable and define spellings are case-insensitive
+  // (measured), so the match is too, and either the key or the value may be
+  // quoted in any of the three forms.
+  const recordWrite =
+    /^\s*WriteRegStr\s+HKCU\s+(['"`])\$\{INSTALL_REGISTRY_KEY\}\1\s+(['"`])IaLeftoverDir\2\s+(['"`])?\$iaBackupDirectory\3?\s*$/i
   let sites = 0
   for (let i = 0; i < lines.length; i += 1) {
     if (!deleteLine.test(lines[i])) continue
     sites += 1
-    const blockStart = (() => {
-      for (let j = i - 1; j >= 0; j -= 1) {
-        if (OPENS_FUNCTION.test(lines[j])) return j
-      }
-      return 0
-    })()
+    // A macro body only runs where the macro is inserted, so its statements are
+    // not on the delete's path unless they share the delete's macro body
+    // (round-5 R4: a `ClearErrors` in a macro defined above the delete used to
+    // satisfy the check).
+    const onDeletePath = (index) =>
+      macroRanges.every(
+        (range) =>
+          !(index >= range.start && index <= range.end) || (i >= range.start && i <= range.end),
+      )
+    const blockStart = enclosingBlockStart(lines, i)
     const blockEnd = (() => {
       for (let j = i + 1; j < lines.length; j += 1) {
         if (CLOSES_FUNCTION.test(lines[j])) return j
       }
       return lines.length - 1
     })()
-    // `ClearErrors` has to be on the delete's own path: a clear call in the
-    // previous function or in a macro definition does not clear this one.
-    const before = lines
-      .slice(blockStart, i)
-      .filter((line) => line.trim() !== '')
-      .slice(-3)
-    if (!before.some((line) => /^\s*ClearErrors\b/.test(line))) {
+    // `ClearErrors` has to be on the delete's own path: a clear in the previous
+    // function, in a macro definition, in a branch the delete is not on, or on
+    // the far side of an `${Else}` does not clear this one.
+    const candidates = []
+    for (let j = i - 1; j >= blockStart; j -= 1) {
+      if (lines[j].trim() === '' || !onDeletePath(j)) continue
+      candidates.push(j)
+      if (candidates.length === 3) break
+    }
+    const clearCandidate = candidates.find((j) => clearErrors.test(lines[j]))
+    if (clearCandidate === undefined) {
       problems.push({ line: i + 1, what: 'missing ClearErrors before the delete' })
+    } else if (!onSameBranch(trace, clearCandidate, i)) {
+      problems.push({
+        line: i + 1,
+        what: 'the ClearErrors above the delete sits in a branch the delete is not on — it does not clear this path',
+      })
+    } else if (branchDividersBetween(trace, clearCandidate, i).length > 0) {
+      problems.push({
+        line: i + 1,
+        what: 'the ClearErrors above the delete sits in a sibling branch — it does not clear this path',
+      })
     }
     const rest = lines.slice(i + 1)
     const enclosing = [
@@ -909,39 +1146,50 @@ export function unguardedBackupDelete(source) {
       rest.findIndex((line) => /^\s*!macroend\b/i.test(line)),
     ].filter((index) => index !== -1)
     const limit = enclosing.length === 0 ? -1 : Math.min(...enclosing)
-    const clearIndex = rest.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/i.test(line))
+    const clearIndex = rest.findIndex(
+      (line, offset) => clearCall.test(line) && onDeletePath(i + 1 + offset),
+    )
     if (clearIndex === -1 || (limit !== -1 && limit < clearIndex)) {
       problems.push({ line: i + 1, what: 'no !insertmacro iaClearBackupDir after the delete' })
     }
     const bounds = [...enclosing, clearIndex].filter((index) => index !== -1)
-    const window = bounds.length === 0 ? rest : rest.slice(0, Math.min(...bounds))
-    const reads = window.filter((line) => line.includes(errorsMacro)).length
-    const firstRead = window.findIndex((line) => line.includes(errorsMacro))
-    if (reads === 0) {
-      problems.push({ line: i + 1, what: `missing ${errorsMacro} check before iaClearBackupDir` })
-    } else if (reads > 1) {
+    const windowEnd = bounds.length === 0 ? rest.length : Math.min(...bounds)
+    const window = []
+    for (let offset = 0; offset < windowEnd; offset += 1) {
+      if (onDeletePath(i + 1 + offset)) window.push({ line: rest[offset], index: i + 1 + offset })
+    }
+    const readHits = window.filter(({ line }) => errorsRead.test(line))
+    const strayErrors = window.filter(({ line }) => errorsMacro.test(line) && !errorsRead.test(line))
+    if (readHits.length === 0) {
+      problems.push({ line: i + 1, what: `missing ${ERRORS} check before iaClearBackupDir` })
+    } else if (readHits.length > 1) {
       problems.push({
         line: i + 1,
-        what: `${reads} ${errorsMacro} reads between the delete and iaClearBackupDir — only the first can see the failed delete`,
+        what: `${readHits.length} ${ERRORS} reads between the delete and iaClearBackupDir — only the first can see the failed delete`,
       })
     }
-    if (firstRead !== -1 && window.slice(0, firstRead).some((line) => /^\s*ClearErrors\b/.test(line))) {
+    for (const stray of strayErrors) {
+      problems.push({
+        line: stray.index + 1,
+        what: 'an unrecognized ${Errors} usage between the delete and iaClearBackupDir — only a ${If}/${IfNot}/${Unless} condition or a raw IfErrors reads the flag',
+      })
+    }
+    const firstRead = readHits.length > 0 ? readHits[0].index : -1
+    if (
+      firstRead !== -1 &&
+      window.some(({ line, index }) => index < firstRead && clearErrors.test(line))
+    ) {
       problems.push({
         line: i + 1,
-        what: `ClearErrors between the delete and the ${errorsMacro} read discards the failed delete`,
+        what: `ClearErrors between the delete and the ${ERRORS} read discards the failed delete`,
       })
     }
     // The record has to land where the reader looks (HKCU, this app's own key)
     // and carry the whole directory, not a name built from it: a record of
     // "$iaBackupDirectory-tmp" or one written to another hive names something
     // the next promote will never find — the R1 orphan again.
-    if (
-      !window.some((line) =>
-        /WriteRegStr\s+HKCU\s+"\$\{INSTALL_REGISTRY_KEY\}"\s+"IaLeftoverDir"\s+"?\$iaBackupDirectory"?\s*$/.test(
-          line,
-        ),
-      )
-    ) {
+    const recordHit = window.find(({ line }) => recordWrite.test(line))
+    if (recordHit === undefined) {
       problems.push({
         line: i + 1,
         what: 'failed delete is not recorded (no IaLeftoverDir write of $iaBackupDirectory)',
@@ -987,7 +1235,58 @@ export function unguardedBackupDelete(source) {
           line: i + 1,
           what: `iaClearBackupDir sits ${clearDepth - deleteDepth} LogicLib level(s) deeper than the delete — a path skips the clear`,
         })
+      } else if (branchDividersBetween(trace, i, i + 1 + clearIndex).length > 0) {
+        problems.push({
+          line: i + 1,
+          what: 'iaClearBackupDir sits in a sibling branch of the delete — a path skips the clear',
+        })
       }
+    }
+    // A dead branch around the checks is the `!ifdef NOPE` bypass written in
+    // LogicLib's syntax: `${If} 1 == 0` turns the delete and its checks into text
+    // that never runs. Only literal comparisons are decided — this is not
+    // reachability analysis (round-5 R3/R5).
+    const guarded = [
+      { line: i, label: 'the delete' },
+      ...readHits.map((hit) => ({ line: hit.index, label: `the ${ERRORS} read` })),
+      ...(recordHit === undefined ? [] : [{ line: recordHit.index, label: 'the leftover record' }]),
+      ...(clearIndex === -1 ? [] : [{ line: i + 1 + clearIndex, label: 'iaClearBackupDir' }]),
+    ]
+    const lastGuarded = Math.max(...guarded.map((target) => target.line))
+    for (let j = blockStart + 1; j <= lastGuarded; j += 1) {
+      if (!onDeletePath(j)) continue
+      const condition = deadBranchText(lines[j])
+      if (condition === undefined) continue
+      const close = trace.closeOf.get(j) ?? lines.length - 1
+      const covered = guarded.filter((target) => target.line > j && target.line <= close)
+      if (covered.length === 0) continue
+      problems.push({
+        line: i + 1,
+        what:
+          'the constant-false condition `' +
+          condition +
+          '` covers ' +
+          covered.map((target) => target.label).join(' and ') +
+          ' — that code can never run',
+      })
+    }
+    // A delete inside a macro body only runs where that macro is inserted: with
+    // no `!insertmacro` for it anywhere in the file the delete never runs, and
+    // the window's `!macroend` bound made it look complete (round-5 item 4).
+    // Fail-closed: the file has to insert the macro after defining it.
+    const macroName = /^\s*!macro\s+(\S+)/i.exec(lines[blockStart])?.[1]
+    if (
+      macroName !== undefined &&
+      !lines.some(
+        (line, index) =>
+          index > blockStart &&
+          (INSERT_MACRO.exec(line)?.[1] ?? '').toLowerCase() === macroName.toLowerCase(),
+      )
+    ) {
+      problems.push({
+        line: i + 1,
+        what: `the delete sits inside !macro ${macroName}, which the file never !insertmacro's — the delete never runs`,
+      })
     }
   }
   if (sites === 0) {
