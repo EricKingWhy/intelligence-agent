@@ -1,0 +1,1 @@
+2026-10-09	机械归属（非审查主张）：#871 sync merge `9bc1be5`，父一 `52d64bf9`、父二 `c812d8bc`，merge-base `00238569`。incoming `00238569..c812d8bc` 仅新增 `docs/review_ledger.d/825-merge-00238569.tsv`；该 blob 与父二相同。相对父一也仅新增同一文件；`git show --cc --name-status` 为空，合并树 `512c1365` 不等于两父树。无手工冲突内容；本行只做机械归属。	52d64bf9e053f45e4fd153ee9b68a2ab0a8229a6..9bc1be5ef624d11da03fc342e9816e8aba3f3ebb
