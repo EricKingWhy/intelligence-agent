@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import inspect
-import warnings
 from types import SimpleNamespace
 from typing import Any
 
@@ -228,17 +226,10 @@ def test_langfuse_experiment_awaits_task_and_checks_case_and_evaluator_results(
     item = _item()
     client = _AsyncExperimentClient([item])
 
-    with warnings.catch_warnings(record=True) as observed_warnings:
-        warnings.simplefilter("always")
-        passed = _run_experiment(tmp_path, client)
-        gc.collect()
-    assert not [
-        warning for warning in observed_warnings
-        if issubclass(warning.category, RuntimeWarning)
-        and "was never awaited" in str(warning.message)
-    ]
+    passed = _run_experiment(tmp_path, client)
     assert passed["status"] == "ok"
     assert passed["total"] == passed["passed"] == 1
+    assert not inspect.isawaitable(client.result.item_results[0].output)
     assert client.result.item_results[0].output["result"]["ok"] is True
     assert client.result.item_results[0].output["result"]["metrics"][
         "duplicate_confirmed_side_effects"

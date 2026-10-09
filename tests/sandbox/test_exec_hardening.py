@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import os
 import shlex
 import subprocess
@@ -19,6 +18,8 @@ import sys
 import textwrap
 import threading
 import time
+import weakref
+from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -870,6 +871,304 @@ def test_docker_exec_passes_through_normal_result():
     assert result.stdout == "done"
 
 
+def test_docker_exec_closes_stream_after_successful_read():
+    """A successful Docker exec releases its SDK response stream."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    class _CloseTrackingStream:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            yield (None, b"\x1eAH_PID:1234\x1f\n")
+            yield (b"done", None)
+
+        def close(self):
+            self.closed = True
+
+    response = Mock()
+    stream = _CloseTrackingStream()
+    # docker-py 7.x returns a CancellableStream that retains the HTTPResponse
+    # in `_response`; its public close() shuts down the socket but does not
+    # close that response object.
+    stream._response = response
+    api = Mock()
+    api.exec_create.return_value = {"Id": "exec-close"}
+    api.exec_start.return_value = stream
+    api.exec_inspect.return_value = {"ExitCode": 0}
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Mock(id="container-1", status="running")
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+
+    result = sandbox.exec("echo done", timeout=5)
+
+    assert result.exit_code == 0
+    assert result.stdout == "done"
+    assert stream.closed is True
+    response.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failure_mode", ["reader_error", "timeout", "late_stream"])
+def test_docker_exec_closes_response_before_failed_stream(failure_mode):
+    """Closing a CancellableStream first can make HTTPResponse GC raise."""
+    docker = pytest.importorskip("docker")
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    state = {"socket_closed": False}
+    read_release = threading.Event()
+
+    class _Socket:
+        def shutdown(self, how):
+            state["socket_closed"] = True
+
+        def close(self):
+            state["socket_closed"] = True
+
+    class _Response:
+        def __init__(self):
+            self.closed = False
+            self.raw = SimpleNamespace(
+                closed=False,
+                _fp=SimpleNamespace(
+                    fp=SimpleNamespace(raw=SimpleNamespace(sock=_Socket()))
+                ),
+            )
+
+        def close(self):
+            if state["socket_closed"]:
+                raise ValueError("I/O operation on closed file")
+            self.closed = True
+            self.raw.closed = True
+
+        def __del__(self):
+            if not self.closed:
+                state["gc_warning"] = True
+                raise ValueError("I/O operation on closed file")
+
+    response = _Response()
+
+    def chunks():
+        if failure_mode == "late_stream":
+            yield (b"done", None)
+            return
+        yield (None, b"\x1eAH_PID:1234\x1f\n")
+        if failure_mode == "reader_error":
+            raise RuntimeError("reader failed")
+        assert read_release.wait(5)
+
+    stream = docker.types.CancellableStream(chunks(), response)
+    api = Mock()
+    api.exec_create.return_value = {"Id": "exec-response-close"}
+    if failure_mode == "late_stream":
+        def _late_exec_start(*args, _stream=stream, **kwargs):
+            return _stream if read_release.wait(5) else None
+
+        api.exec_start.side_effect = _late_exec_start
+    else:
+        api.exec_start.return_value = stream
+    api.exec_inspect.return_value = {"Running": False, "ExitCode": 0}
+    container = Mock(id="container-1", status="running")
+    container.exec_run = Mock(
+        side_effect=lambda *args, **kwargs: read_release.set() or Mock(exit_code=0)
+    )
+    if failure_mode == "late_stream":
+        container.kill = Mock(side_effect=read_release.set)
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+
+    if failure_mode == "reader_error":
+        with pytest.raises(RuntimeError, match="reader failed"):
+            sandbox.exec("echo done", timeout=5)
+    else:
+        result = sandbox.exec("sleep forever", timeout=0.05)
+        assert result.exit_code == -1
+
+    assert response.closed
+    api.exec_start.return_value = None
+    del stream, response
+
+    assert not state.get("gc_warning", False)
+
+
+def test_docker_exec_fails_closed_when_response_close_fails():
+    """A failed SDK response close must be visible and block later execs."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    response = Mock()
+    response.close.side_effect = OSError("response close failed")
+
+    class _Stream:
+        _response = response
+
+        def __iter__(self):
+            yield (None, b"\x1eAH_PID:1234\x1f\n")
+            yield (b"done", None)
+
+        close = Mock()
+
+    api = Mock()
+    api.exec_create.return_value = {"Id": "exec-close-failure"}
+    api.exec_start.return_value = _Stream()
+    api.exec_inspect.return_value = {"ExitCode": 0}
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Mock(id="container-1", status="running")
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+
+    with pytest.raises(RuntimeError, match="HTTP response did not close"):
+        sandbox.exec("echo done", timeout=5)
+
+    api.exec_start.return_value.close.assert_called_once_with()
+
+    with pytest.raises(RuntimeError, match="previous cleanup was unconfirmed"):
+        sandbox.exec("must not run", timeout=5)
+
+
+def test_docker_exec_attempts_stream_close_after_response_close_fails():
+    """A failed response close must not prevent the socket shutdown attempt."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    close_order = []
+    response = Mock()
+
+    def close_response():
+        close_order.append("response")
+        raise OSError("response close failed")
+
+    response.close.side_effect = close_response
+
+    class _Stream:
+        _response = response
+
+        def close(self):
+            close_order.append("stream")
+
+    response_closed, stream_closed, pending = DockerSandbox._close_exec_resources(
+        _Stream(),
+    )
+
+    assert close_order == ["response", "stream"]
+    assert (response_closed, stream_closed, pending) == (False, True, None)
+
+
+@pytest.mark.parametrize("late_cleanup", [False, True])
+def test_docker_exec_finishes_response_close_before_unblocking_reader(late_cleanup):
+    """A slow response close must finish before stream.close unblocks the reader."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_finished = threading.Event()
+    stream_close_started = threading.Event()
+    reader_release = threading.Event()
+    state = {}
+
+    class _Response:
+        def close(self):
+            close_started.set()
+            release_close.wait()
+            close_finished.set()
+
+    response = _Response()
+
+    class _Stream:
+        _response = response
+
+        def close(self):
+            if not close_finished.is_set():
+                state["overlap"] = True
+            stream_close_started.set()
+            reader_release.set()
+
+    worker = threading.Thread(target=lambda: reader_release.wait(5))
+    worker.start()
+    sandbox = object.__new__(DockerSandbox)
+    stream = _Stream()
+    holder = {"stream": stream}
+    if late_cleanup:
+        response_closed, stream_closed, close_state = sandbox._close_exec_resources(
+            stream,
+        )
+        holder["stream_cleanup"] = (
+            stream,
+            response_closed,
+            stream_closed,
+            close_state,
+        )
+    cleanup_errors = []
+
+    def cleanup():
+        try:
+            sandbox._close_exec_reader(
+                holder, worker, threading.Lock(),
+            )
+        except RuntimeError as error:
+            cleanup_errors.append(error)
+
+    cleanup_thread = threading.Thread(target=cleanup)
+    cleanup_thread.start()
+
+    try:
+        assert close_started.wait(2)
+        assert not stream_close_started.wait(0.5)
+        release_close.set()
+        cleanup_thread.join(4)
+        assert not cleanup_thread.is_alive()
+        assert not cleanup_errors
+        assert close_finished.is_set()
+        assert stream_close_started.is_set()
+        assert not state.get("overlap", False)
+        assert not worker.is_alive()
+    finally:
+        release_close.set()
+        reader_release.set()
+        cleanup_thread.join(4)
+        worker.join(1)
+
+def test_docker_exec_reports_reader_thread_after_container_stop_failure():
+    """A stop exception must not skip the final reader-thread liveness check."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    release_reader = threading.Event()
+    reader_done = threading.Event()
+
+    class _Stream:
+        _response = Mock()
+
+        def __iter__(self):
+            yield (b"ready", None)
+            try:
+                release_reader.wait(5)
+            finally:
+                reader_done.set()
+
+        def close(self):
+            pass
+
+    api = Mock()
+    api.exec_create.return_value = {"Id": "exec-reader-cleanup"}
+    api.exec_start.return_value = _Stream()
+    container = Mock(id="container-1", status="running")
+    container.kill = Mock(side_effect=RuntimeError("kill unavailable"))
+    container.wait = Mock(side_effect=RuntimeError("wait unavailable"))
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = container
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+
+    try:
+        with pytest.raises(RuntimeError, match="output stream worker did not stop"):
+            sandbox.exec("sleep forever", timeout=0.05)
+    finally:
+        release_reader.set()
+
+    assert reader_done.wait(1)
+
+
 class _StreamingDockerExec:
     def __init__(self):
         self.killed = threading.Event()
@@ -1121,8 +1420,9 @@ def test_docker_cleanup_failure_guard_survives_sandbox_collection():
     sandbox._exec_state = DockerSandbox._state_for_container(container_name)
     sandbox._mark_exec_cleanup_failed()
 
+    sandbox_ref = weakref.ref(sandbox)
     del sandbox
-    gc.collect()
+    assert sandbox_ref() is None
 
     recovered = object.__new__(DockerSandbox)
     recovered._container_name = container_name

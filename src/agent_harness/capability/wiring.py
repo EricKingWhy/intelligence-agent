@@ -244,7 +244,7 @@ async def _wire_memory_v2(
         # Stop/drain the runner before the shared vector provider is closed.
         wiring.lifecycle.append(runner)
 
-def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
+def coerce_skill_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
     """规整 options 里的目录/路径选项为 list[Path]，容忍 str/Path 单值写法。
 
     options 是 dict[str, Any]，strict 校验不查值：`"directories": "D:/skills"`
@@ -263,7 +263,7 @@ def _coerce_path_list(cfg: ProviderConfig, key: str) -> list[Path]:
             code="init_failed",
         )
     try:
-        return [Path(item) for item in value]
+        return [Path(item).expanduser() for item in value]
     except TypeError:
         raise CapabilityError(
             f"capability 'skills' option '{key}' must be a path or a list of paths, got {value!r}",
@@ -277,17 +277,41 @@ async def _wire_skills(
     from agent_harness.skills.capability import SkillCapability
     from agent_harness.skills.context_provider import SkillCatalogContextProvider
     from agent_harness.skills.discovery import SkillDiscovery
+    from agent_harness.skills.package_manager import (
+        SkillPackageError,
+        SkillPackageManager,
+    )
 
     # 全局目录（spec 09 §2）+ 项目目录（workspace 级）+ options 扩展目录/手动路径。
-    global_dir = Path(settings.skill_global_dir) if settings.skill_global_dir \
+    global_dir = Path(settings.skill_global_dir).expanduser() if settings.skill_global_dir \
         else Path.home() / ".intelligence-agent" / "skills"
-    project_dir = Path(settings.workspace_dir) / "skills"
-    directories = [global_dir, project_dir]
-    directories.extend(_coerce_path_list(cfg, "directories"))
-    manual_paths = _coerce_path_list(cfg, "paths")
+    project_dir = Path(settings.workspace_dir).expanduser() / "skills"
+    additional_directories = coerce_skill_path_list(cfg, "directories")
+    manual_paths = coerce_skill_path_list(cfg, "paths")
+    package_manager = SkillPackageManager(
+        settings.workspace_dir,
+        global_skills_dir=global_dir,
+        additional_skill_directories=additional_directories,
+        additional_skill_paths=manual_paths,
+    )
+    managed_dir = package_manager.managed_skills_dir
+    try:
+        enabled_managed_skill_digests = package_manager.enabled_skill_digests()
+    except SkillPackageError as error:
+        logger.warning("managed Skills are unavailable; imported Skills stay disabled: %s", error)
+        enabled_managed_skill_digests = {}
+    directories = [global_dir, project_dir, managed_dir]
+    directories.extend(additional_directories)
     # #529：discovery 引用传给 capability（不再是装配期静态 catalog）——
     # project_dir 是闭环写入面，沉淀 register/update/remove 写它并内嵌刷新。
-    discovery = SkillDiscovery(directories=directories, manual_paths=manual_paths, project_dir=project_dir)
+    discovery = SkillDiscovery(
+        directories=directories,
+        manual_paths=manual_paths,
+        project_dir=project_dir,
+        managed_directory=managed_dir,
+        enabled_managed_skills=set(enabled_managed_skill_digests),
+        enabled_managed_skill_digests=enabled_managed_skill_digests,
+    )
     catalog = discovery.discover()
     # 解析失败可观察（ADR-0011 Q1：不静默跳过）——坏 SKILL.md 在装配日志里留痕，
     # SkillCapability.errors() 仍可编程读取。

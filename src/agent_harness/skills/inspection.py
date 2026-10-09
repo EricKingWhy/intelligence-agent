@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shlex
 import stat
 import tomllib
 from datetime import date, datetime
@@ -24,6 +25,50 @@ _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(\s*(<[^>]+>|[^)\s]+)")
 _MARKDOWN_REFERENCE = re.compile(r"(?m)^\s*\[[^\]]+\]:\s*(<[^>]+>|[^\s]+)")
 _HTML_REFERENCE = re.compile(r"(?:href|src)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))", re.IGNORECASE)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_COMMAND_IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_.+-]*\Z")
+_COMMAND_INVOCATION = re.compile(r"\s*(?:[$>]\s*)?[A-Za-z][A-Za-z0-9_.+-]*\s+.+\Z")
+_SHELL_FENCE_START = re.compile(
+    r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*(?P<language>bash|sh|shell|zsh|fish|powershell|pwsh|ps1|cmd|bat|batch)\b[^\r\n]*\r?\n",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SHELL_BUILTINS = frozenset(
+    {
+        ".", "break", "cd", "continue", "echo", "eval", "exec", "exit", "export",
+        "false", "getopts", "hash", "pwd", "read", "return", "set", "shift",
+        "source", "test", "times", "trap", "true", "type", "ulimit", "umask",
+        "unset", "wait",
+    }
+)
+_POWERSHELL_BUILTINS = frozenset(
+    {
+        "add-content", "clear-host", "convertfrom-json", "convertto-json", "copy-item",
+        "foreach-object", "get-childitem", "get-command", "get-content", "get-date",
+        "get-location", "get-member", "get-process", "join-path", "measure-object",
+        "move-item", "new-item", "out-file", "pop-location", "push-location",
+        "read-host", "remove-item", "rename-item", "resolve-path", "select-object",
+        "set-content", "set-location", "sort-object", "split-path", "start-sleep",
+        "test-path", "where-object", "write-debug", "write-error", "write-host",
+        "write-output", "write-verbose", "write-warning",
+    }
+)
+_CMD_BUILTINS = frozenset(
+    {
+        "assoc", "attrib", "break", "call", "cd", "chdir", "choice", "cls", "color",
+        "copy", "date", "del", "dir", "echo", "endlocal", "erase", "exit", "for",
+        "ftype", "goto", "if", "md", "mkdir", "mklink", "move", "path", "pause",
+        "popd", "prompt", "pushd", "rd", "rem", "ren", "rename", "rmdir", "set",
+        "setlocal", "shift", "start", "time", "title", "type", "ver", "verify", "vol",
+    }
+)
+_COMMAND_ACTION_CONTEXT = re.compile(
+    r"\b(?:run|execute|invoke|call|launch|install|require(?:s)?|need(?:s)?|use|using|command|executable)"
+    r"(?:\s+the)?\s*[:=]?\s*\Z",
+    re.IGNORECASE,
+)
+_COMMAND_EXECUTION_CONTEXT = re.compile(
+    r"\b(?:run|execute|invoke|launch|install)(?:\s+the)?\s*[:=]?\s*\Z",
+    re.IGNORECASE,
+)
 _MAX_PACKAGE_ENTRIES = 10_000
 _MAX_REQUIREMENT_INCLUDE_DEPTH = 64
 _MAX_METADATA_SCAN_BYTES = SKILL_FILE_MAX_BYTES
@@ -185,9 +230,18 @@ def inspect_skill_package(
         and item["path"].lower().endswith(".md")
         and not item.get("symlink")
     )
+    command_requirements: list[dict[str, str]] = []
     for markdown_path in dict.fromkeys(markdown_paths):
         content = skill_text if markdown_path == skill_file else None
-        errors.extend(_check_markdown_references(root, markdown_path, content))
+        errors.extend(
+            _check_markdown_references(
+                root,
+                markdown_path,
+                content,
+                command_requirements=command_requirements,
+            )
+        )
+    report["requirements"].extend(command_requirements)
 
     dependencies, dependency_requirements, dependency_errors = _inspect_dependencies(root, files)
     report["dependencies"] = dependencies
@@ -515,7 +569,19 @@ def _is_link(path: Path) -> bool:
 
 def _is_junction(path: Path) -> bool:
     is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction is not None and is_junction())
+    if is_junction is not None and is_junction():
+        return True
+    if path.is_symlink():
+        return False
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_attribute)
 
 
 def _inventory(
@@ -552,7 +618,16 @@ def _inventory(
             path = Path(entry.path)
             relative = _relative(path, root)
             try:
-                if entry.is_symlink() or _is_junction(path):
+                if _is_junction(path):
+                    symlinks.append(relative)
+                    _add_error(
+                        errors,
+                        "UNSUPPORTED_JUNCTION",
+                        relative,
+                        "Windows junctions cannot be safely snapshotted; replace them with regular files or directories.",
+                    )
+                    continue
+                if entry.is_symlink():
                     symlinks.append(relative)
                     try:
                         resolved = path.resolve(strict=True)
@@ -605,7 +680,11 @@ def _has_symlink_component(candidate: Path, root: Path) -> bool:
 
 
 def _check_markdown_references(
-    root: Path, markdown_path: Path, content: str | None = None
+    root: Path,
+    markdown_path: Path,
+    content: str | None = None,
+    *,
+    command_requirements: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     relative_markdown = _relative(markdown_path, root)
@@ -624,6 +703,11 @@ def _check_markdown_references(
         )
         if content is None:
             return errors
+
+    if command_requirements is not None:
+        command_requirements.extend(
+            _inspect_inline_commands(content, relative_markdown)
+        )
 
     raw_targets = [
         match.group(1)
@@ -714,6 +798,124 @@ def _check_markdown_references(
                 f"Reference {raw_target!r} does not point to a file.",
             )
     return errors
+
+
+def _inspect_inline_commands(content: str, source: str) -> list[dict[str, str]]:
+    requirements: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(
+        command: str,
+        reason: str = "The host command is declared in Skill guidance but is not executed or availability-checked during inspection.",
+    ) -> None:
+        if not _COMMAND_IDENTIFIER.fullmatch(command) or command.casefold() in seen:
+            return
+        seen.add(command.casefold())
+        requirements.append(
+            {
+                "kind": "command-runtime",
+                "name": command,
+                "support": "manual_review",
+                "source": source,
+                "reason": reason,
+            }
+        )
+
+    for match in _INLINE_CODE.finditer(content):
+        snippet = match.group(1).strip()
+        context = content[max(0, match.start() - 80) : match.start()]
+        has_action_context = bool(_COMMAND_ACTION_CONTEXT.search(context))
+        command_text = snippet.lstrip("$> ")
+        if _COMMAND_IDENTIFIER.fullmatch(command_text):
+            if not has_action_context and not snippet.startswith(("$ ", "> ")):
+                continue
+        elif not (
+            _looks_like_command_invocation(snippet)
+            or _COMMAND_EXECUTION_CONTEXT.search(context)
+        ):
+            continue
+        command = command_text.split(maxsplit=1)[0]
+        add(command)
+
+    for language, body in _shell_fence_bodies(content):
+        builtins = _SHELL_BUILTINS
+        if language.casefold() in {"powershell", "pwsh", "ps1"}:
+            builtins |= _POWERSHELL_BUILTINS
+        elif language.casefold() in {"cmd", "bat", "batch"}:
+            builtins |= _CMD_BUILTINS
+        for line in body.splitlines():
+            command_groups, parse_failed = _split_shell_commands(line)
+            if parse_failed:
+                add(
+                    "shell",
+                    "A fenced shell line could not be parsed safely; review its host command requirements manually.",
+                )
+            for command_words in command_groups:
+                words = command_words
+                while words and words[0].casefold() in {"if", "then", "elif", "while", "until", "else"}:
+                    words = words[1:]
+                while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.+", words[0]):
+                    words = words[1:]
+                if not words:
+                    continue
+                command = words[0].replace("\\", "/").rsplit("/", 1)[-1]
+                if command.casefold() not in builtins:
+                    add(command)
+    return requirements
+
+
+def _shell_fence_bodies(content: str) -> list[tuple[str, str]]:
+    """Return shell fence bodies, accepting Markdown's longer closing fences."""
+    bodies: list[tuple[str, str]] = []
+    search_from = 0
+    while fence := _SHELL_FENCE_START.search(content, search_from):
+        marker = fence.group("fence")
+        marker_char = re.escape(marker[0])
+        body_start = fence.end()
+        closing_pattern = re.compile(
+            rf"^[ \t]*{marker_char}{{{len(marker)},}}[ \t]*\r?$",
+            re.MULTILINE,
+        )
+        closing = closing_pattern.search(content, body_start)
+        if closing is None:
+            break
+        bodies.append((fence.group("language"), content[body_start : closing.start()]))
+        search_from = closing.end()
+    return bodies
+
+
+def _looks_like_command_invocation(snippet: str) -> bool:
+    """Require shell-like argument syntax for context-free inline code spans."""
+    if not _COMMAND_INVOCATION.fullmatch(snippet):
+        return False
+    arguments = snippet.strip().lstrip("$> ").split()[1:]
+    return any(
+        argument.startswith(("-", "./", "../"))
+        or "/" in argument
+        or "\\" in argument
+        or re.search(r"\.[A-Za-z0-9]{1,8}$", argument) is not None
+        or "=" in argument
+        for argument in arguments
+    )
+
+
+def _split_shell_commands(line: str) -> tuple[list[list[str]], bool]:
+    """Use the standard shell tokenizer so quoted separators do not split commands."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return [], True
+    commands: list[list[str]] = [[]]
+    for token in tokens:
+        if token and all(character in ";&|" for character in token):
+            if commands[-1]:
+                commands.append([])
+        else:
+            commands[-1].append(token)
+    return [command for command in commands if command], False
 
 
 def _inspect_dependencies(
@@ -1032,7 +1234,9 @@ def _read_requirements_file(
                 continue
             include_path = unquote(include_url.path).replace("\\", "/")
             try:
-                candidate = (root / include_path).resolve(strict=False)
+                candidate = (
+                    root / Path(relative).parent / include_path
+                ).resolve(strict=False)
             except (OSError, RuntimeError, ValueError):
                 _add_error(errors, "BAD_DEPENDENCY_INCLUDE", include, "Requirements include cannot be resolved safely.")
                 continue

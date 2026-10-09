@@ -1,0 +1,1 @@
+2026-10-09	机械归属（非审查主张）：#871 sync merge `145011be`，父一 `16393055`、父二 `76577061`，merge-base `c812d8bc`。相对父一的 10 路径集合与 `c812d8bc..origin/main` 完全相同，10/10 blob 均与父二一致；workflow `.github/workflows/windows-installer-smoke.yml` 来源 commit `d82b3ab8`，已有独立审查行。`--cc` 为空、合并树 `e8d4916e` 不等于父树，无冲突手改；本行仅归属同步提交。	16393055dbb47b8db3f87c438b2c64176287a3dc..145011becd0f44a255d479ff9a1d0386aa28337c

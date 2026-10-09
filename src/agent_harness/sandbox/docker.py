@@ -12,6 +12,8 @@ import shlex
 import tarfile
 import threading
 import weakref
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path, PurePosixPath
 from time import perf_counter, sleep
 from typing import ClassVar
@@ -296,6 +298,7 @@ class DockerSandbox(Sandbox):
             maxsize=128,
         )
         stop_stream = threading.Event()
+        stream_lock = threading.Lock()
         holder: dict[str, object] = {}
         control_pid: int | None = None
         control_pending = bytearray()
@@ -313,7 +316,28 @@ class DockerSandbox(Sandbox):
         def _run() -> None:
             try:
                 stream = api.exec_start(exec_id, stream=True, demux=True)
-                holder["stream"] = stream
+                with stream_lock:
+                    stop_requested = stop_stream.is_set()
+                    if not stop_requested:
+                        holder["stream"] = stream
+                if stop_requested:
+                    response_closed, stream_closed, pending_stream_cleanup = (
+                        self._close_exec_resources(stream)
+                    )
+                    with stream_lock:
+                        holder["stream_cleanup"] = (
+                            stream,
+                            response_closed,
+                            stream_closed,
+                            pending_stream_cleanup,
+                        )
+                        holder["stream"] = stream
+                    if pending_stream_cleanup is None and (
+                        not response_closed or not stream_closed
+                    ):
+                        self._mark_exec_cleanup_failed()
+                        logger.error("Late Docker exec stream could not be closed")
+                    return
                 for chunk in stream:
                     _put(chunk)
             except Exception as error:  # noqa: BLE001
@@ -419,18 +443,22 @@ class DockerSandbox(Sandbox):
                     break
                 if chunk is not None:
                     consume(chunk)
-            stop_stream.set()
+            with stream_lock:
+                stop_stream.set()
             self._terminate_exec(api, exec_id, control_pid)
-            stream = holder.get("stream")
-            if stream is not None and hasattr(stream, "close"):
-                self._best_effort_bounded_call(stream.close, 0.2)
-            self._stop_container()
-            worker.join(1.0)
-            if worker.is_alive():
-                self._mark_exec_cleanup_failed()
-                raise RuntimeError(
-                    "Docker exec cleanup could not be confirmed: output stream worker did not stop"
-                )
+            stop_error: Exception | None = None
+            try:
+                self._stop_container()
+            except Exception as error:  # noqa: BLE001
+                stop_error = error
+            try:
+                self._close_exec_reader(holder, worker, stream_lock)
+            except RuntimeError as cleanup_error:
+                if stop_error is not None:
+                    raise cleanup_error from stop_error
+                raise
+            if stop_error is not None:
+                raise stop_error
             while True:
                 try:
                     chunk = output_queue.get_nowait()
@@ -441,20 +469,21 @@ class DockerSandbox(Sandbox):
         else:
             if "error" in holder:
                 self._terminate_exec(api, exec_id, control_pid)
-                stream = holder.get("stream")
-                if stream is not None and hasattr(stream, "close"):
-                    self._best_effort_bounded_call(stream.close, 0.2)
+                stop_error: Exception | None = None
                 try:
                     self._stop_container()
+                except Exception as error:  # noqa: BLE001
+                    stop_error = error
+                try:
+                    self._close_exec_reader(holder, worker, stream_lock)
                 except RuntimeError as cleanup_error:
+                    if stop_error is not None:
+                        raise cleanup_error from stop_error
                     raise cleanup_error from holder["error"]
-                worker.join(1.0)
-                if worker.is_alive():
-                    self._mark_exec_cleanup_failed()
-                    raise RuntimeError(
-                        "Docker exec cleanup could not be confirmed: output stream worker did not stop"
-                    ) from holder["error"]
+                if stop_error is not None:
+                    raise stop_error from holder["error"]
                 raise holder["error"]
+            self._close_exec_reader(holder, worker, stream_lock)
 
         if control_pending:
             text = stderr_decoder.feed(bytes(control_pending))
@@ -561,6 +590,142 @@ class DockerSandbox(Sandbox):
         except Exception as error:  # noqa: BLE001
             logger.debug("Docker cleanup call failed: %s", type(error).__name__)
             return False, None
+
+    @staticmethod
+    def _close_exec_resources(
+        stream: object | None,
+        close_state: Future[tuple[bool, bool]] | None = None,
+    ) -> tuple[bool, bool, Future[tuple[bool, bool]] | None]:
+        if close_state is not None:
+            if not close_state.done():
+                return False, False, close_state
+            response_closed, stream_closed = close_state.result()
+            return response_closed, stream_closed, None
+        if stream is None:
+            return True, True, None
+        # docker-py 7.x keeps the HTTPResponse in CancellableStream._response;
+        # stream.close() only shuts down its socket. Run both closes in order on
+        # one bounded worker so a timeout cannot make them race.
+        response = getattr(stream, "_response", None)
+        response_close = getattr(response, "close", None) if response is not None else None
+        if response is not None and response_close is None:
+            return False, False, None
+        stream_close = getattr(stream, "close", None)
+        status = {
+            "response_closed": response is None,
+            "stream_closed": stream_close is None,
+        }
+        close_result: Future[tuple[bool, bool]] = Future()
+
+        def close_resources() -> None:
+            try:
+                try:
+                    if response_close is not None:
+                        response_close()
+                    status["response_closed"] = True
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(
+                        "Docker exec HTTP response close failed: %s",
+                        type(error).__name__,
+                    )
+                try:
+                    if stream_close is not None:
+                        stream_close()
+                    status["stream_closed"] = True
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(
+                        "Docker exec output stream close failed: %s",
+                        type(error).__name__,
+                    )
+            finally:
+                close_result.set_result(
+                    (status["response_closed"], status["stream_closed"]),
+                )
+
+        DockerSandbox._best_effort_bounded_call(close_resources, 0.4)
+        if close_result.done():
+            response_closed, stream_closed = close_result.result()
+            return response_closed, stream_closed, None
+        return False, False, close_result
+
+    def _close_exec_reader(
+        self,
+        holder: dict[str, object],
+        worker: threading.Thread,
+        stream_lock,
+    ) -> None:
+        closed_stream = None
+        response_closed = True
+        stream_closed = True
+        pending_stream_cleanup: tuple[object, Future[tuple[bool, bool]]] | None = None
+        for _ in range(3):
+            if pending_stream_cleanup is not None:
+                stream, close_state = pending_stream_cleanup
+                try:
+                    close_state.result(timeout=1.0)
+                except FutureTimeoutError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    response_closed = False
+                    stream_closed = False
+                    closed_stream = stream
+                    pending_stream_cleanup = None
+                else:
+                    response_closed, stream_closed, next_pending = (
+                        self._close_exec_resources(stream, close_state)
+                    )
+                    pending_stream_cleanup = (
+                        (stream, next_pending) if next_pending is not None else None
+                    )
+                    if pending_stream_cleanup is None:
+                        closed_stream = stream
+            else:
+                worker.join(1.0)
+                with stream_lock:
+                    stream = holder.get("stream")
+                    late_cleanup = holder.get("stream_cleanup")
+                if stream is not None and stream is not closed_stream:
+                    if (
+                        isinstance(late_cleanup, tuple)
+                        and len(late_cleanup) == 4
+                        and late_cleanup[0] is stream
+                        and isinstance(late_cleanup[1], bool)
+                        and isinstance(late_cleanup[2], bool)
+                        and (
+                            late_cleanup[3] is None
+                            or isinstance(late_cleanup[3], Future)
+                        )
+                    ):
+                        response_closed = late_cleanup[1]
+                        stream_closed = late_cleanup[2]
+                        close_state = late_cleanup[3]
+                        if close_state is not None:
+                            pending_stream_cleanup = (stream, close_state)
+                        else:
+                            closed_stream = stream
+                    else:
+                        response_closed, stream_closed, close_state = (
+                            self._close_exec_resources(stream)
+                        )
+                        if close_state is not None:
+                            pending_stream_cleanup = (stream, close_state)
+                        else:
+                            closed_stream = stream
+            if not worker.is_alive() and pending_stream_cleanup is None:
+                break
+
+        failures = []
+        if not response_closed:
+            failures.append("HTTP response did not close")
+        if not stream_closed:
+            failures.append("output stream did not close")
+        if worker.is_alive():
+            failures.append("output stream worker did not stop")
+        if failures:
+            self._mark_exec_cleanup_failed()
+            raise RuntimeError(
+                "Docker exec cleanup could not be confirmed: " + "; ".join(failures)
+            )
 
     def _stop_container(self) -> None:
         kill_error: Exception | None = None

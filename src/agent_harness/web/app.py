@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import importlib.metadata
 import json
 import logging
 import sqlite3
 import sys
+import threading
+import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from functools import partial
@@ -71,7 +74,14 @@ from agent_harness.context.project_instructions import (
     release_project_instruction_store,
 )
 from agent_harness.context.tokens import estimate_tokens
-from agent_harness.host_service import HOST_PROTOCOL_VERSION
+from agent_harness.host_service import (
+    HOST_PROTOCOL_VERSION,
+    HOST_SKILLS_NONCE_HEADER,
+    HOST_SKILLS_PROOF_HEADER,
+    HOST_SKILLS_PROOF_WINDOW_SECONDS,
+    HOST_SKILLS_TIMESTAMP_HEADER,
+    host_skills_request_proof,
+)
 from agent_harness.identity import (
     IdentityContext,
     identity_context_var,
@@ -1797,9 +1807,32 @@ class AuthSeamMiddleware:
     这正是缺陷的修复点：此前 WS 是无条件放行的旁路，Bearer 边界在它上面是空操作。
     """
 
-    def __init__(self, app: Any, settings: Settings) -> None:
+    def __init__(
+        self,
+        app: Any,
+        settings: Settings,
+        host_service_token: str | None = None,
+    ) -> None:
         self.app = app
         self._settings = settings
+        self._host_service_token = host_service_token
+        self._host_skills_nonce_lock = threading.Lock()
+        self._host_skills_used_nonces: dict[str, float] = {}
+
+    def _consume_host_skills_nonce(self, nonce: str) -> bool:
+        now = time.monotonic()
+        with self._host_skills_nonce_lock:
+            self._host_skills_used_nonces = {
+                used: expires_at
+                for used, expires_at in self._host_skills_used_nonces.items()
+                if expires_at > now
+            }
+            if nonce in self._host_skills_used_nonces:
+                return False
+            if len(self._host_skills_used_nonces) >= 4096:
+                return False
+            self._host_skills_used_nonces[nonce] = now + HOST_SKILLS_PROOF_WINDOW_SECONDS
+            return True
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "websocket":
@@ -1815,13 +1848,69 @@ class AuthSeamMiddleware:
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)
-        try:
-            identity = self._resolve_identity(headers.get("authorization"))
-        except _IdentityRejected as rejected:
-            response: Response = JSONResponse(
-                {"detail": rejected.detail}, status_code=401)
-            await response(scope, receive, send)
-            return
+        identity: IdentityContext | None = None
+        if (
+            scope.get("method") == "GET"
+            and scope.get("path") == "/api/skills"
+            and self._host_service_token
+            and self._settings.jwt_secret
+        ):
+            nonce = headers.get(HOST_SKILLS_NONCE_HEADER)
+            proof = headers.get(HOST_SKILLS_PROOF_HEADER, "")
+            proof_timestamp = headers.get(HOST_SKILLS_TIMESTAMP_HEADER, "")
+            if nonce:
+                try:
+                    claims = jwt.decode(
+                        self._host_service_token,
+                        self._settings.jwt_secret.get_secret_value(),
+                        algorithms=["HS256"],
+                        options={"require": ["tenant_id", "user_id", "service_uuid", "exp"]},
+                    )
+                    service_uuid = claims.get("service_uuid")
+                    expected = host_skills_request_proof(
+                        self._host_service_token, nonce, service_uuid, proof_timestamp
+                    )
+                    scopes = claims.get("scopes", ["user", "session"])
+                    try:
+                        timestamp_is_fresh = (
+                            abs(int(time.time()) - int(proof_timestamp))
+                            <= HOST_SKILLS_PROOF_WINDOW_SECONDS
+                        )
+                    except ValueError:
+                        timestamp_is_fresh = False
+                    valid_identity = (
+                        claims.get("tenant_id") == "local"
+                        and isinstance(claims.get("user_id"), str)
+                        and bool(claims["user_id"].strip())
+                        and isinstance(service_uuid, str)
+                        and isinstance(scopes, list)
+                        and all(isinstance(item, str) for item in scopes)
+                    )
+                except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+                    expected = ""
+                    valid_identity = False
+                    timestamp_is_fresh = False
+                    service_uuid = None
+                if (
+                    expected
+                    and valid_identity
+                    and timestamp_is_fresh
+                    and hmac.compare_digest(proof, expected)
+                    and self._consume_host_skills_nonce(nonce)
+                ):
+                    identity = IdentityContext("local", claims["user_id"], scopes)
+                    state = scope.setdefault("state", {})
+                    state["host_skills_challenge_nonce"] = nonce
+                    state["host_skills_service_uuid"] = service_uuid
+                    state["host_skills_proof_timestamp"] = proof_timestamp
+        if identity is None:
+            try:
+                identity = self._resolve_identity(headers.get("authorization"))
+            except _IdentityRejected as rejected:
+                response: Response = JSONResponse(
+                    {"detail": rejected.detail}, status_code=401)
+                await response(scope, receive, send)
+                return
         token = set_identity_context(identity)
         try:
             await self.app(scope, receive, send)
@@ -1962,7 +2051,12 @@ def _package_version() -> str:
         return "unknown"
 
 
-def create_app(settings: Settings | None = None, *, enable_cors: bool = True) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    enable_cors: bool = True,
+    host_service_token: str | None = None,
+) -> FastAPI:
     """装配 FastAPI 应用。测试可注入 test settings；生产默认从 .env 读。"""
     if settings is None:
         settings = Settings()
@@ -2050,6 +2144,7 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
 
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
+    app.state.host_service_token = host_service_token
 
     # #517 BUG-06：未捕获异常的全局兜底。Starlette 默认给 text/plain 的
     # "Internal Server Error"（TestClient 则直接 re-raise），前端按 JSON 解析
@@ -2281,7 +2376,11 @@ def create_app(settings: Settings | None = None, *, enable_cors: bool = True) ->
         BodyDepthGuardMiddleware, exempt_path_pattern=ATTACHMENT_UPLOAD_PATH_RE
     )
     app.add_middleware(CSPHeaderMiddleware)
-    app.add_middleware(AuthSeamMiddleware, settings=settings)
+    app.add_middleware(
+        AuthSeamMiddleware,
+        settings=settings,
+        host_service_token=host_service_token,
+    )
 
     if enable_cors:
         # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
