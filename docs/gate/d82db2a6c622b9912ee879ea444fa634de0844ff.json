@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "gate": "gate0",
-  "recorded_at": "2026-10-09T20:45:58+08:00",
+  "recorded_at": "2026-10-09T12:47:42+00:00",
   "sha": "d82db2a6c622b9912ee879ea444fa634de0844ff",
   "tree": "8ce33013e6bc4c0c4caefc8af20bd7d7c816907f",
   "argv": [],
@@ -10,14 +10,14 @@
   "total": 6,
   "failed": [],
   "env_failures": [],
-  "wall_seconds": 24.42,
+  "wall_seconds": 15.22,
   "budget_seconds": 60.0,
   "lane_timeout_seconds": 300.0,
   "tool_versions": {
-    "git": "git version 2.43.0",
-    "python": "Python 3.12.3",
+    "git": "git version 2.53.0",
+    "python": "Python 3.12.12",
     "ruff": "ruff 0.16.3",
-    "node": "v24.20.0",
+    "node": "v22.22.1",
     "oxlint": "Version: 1.85.0",
     "tsc": "Version 6.0.3"
   },
@@ -31,10 +31,8 @@
   "affected": null,
   "worktree": {
     "tracked_matches_head": true,
-    "untracked": [
-      ".venv"
-    ],
-    "untracked_total": 1
+    "untracked": [],
+    "untracked_total": 0
   },
   "lanes": [
     {
@@ -42,7 +40,7 @@
       "desc": "git diff --check",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.02,
+      "seconds": 0.1,
       "cwd": ".",
       "argv": [
         "git",
@@ -56,7 +54,7 @@
       "desc": "ruff check .",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.08,
+      "seconds": 0.16,
       "cwd": ".",
       "argv": [
         "./.venv/bin/ruff",
@@ -70,7 +68,7 @@
       "desc": "oxlint（web/）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.89,
+      "seconds": 0.31,
       "cwd": "web",
       "argv": [
         "/usr/bin/node",
@@ -83,7 +81,7 @@
       "desc": "tsc -b（web/，类型检查；不含 vite build）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 18.99,
+      "seconds": 10.18,
       "cwd": "web",
       "argv": [
         "/usr/bin/node",
@@ -97,7 +95,7 @@
       "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 3.17,
+      "seconds": 3.59,
       "cwd": ".",
       "argv": [
         "./.venv/bin/python",
@@ -124,7 +122,7 @@
       "desc": "覆盖闸门 check_review_coverage.py",
       "status": "PASS",
       "rc": 0,
-      "seconds": 1.28,
+      "seconds": 0.88,
       "cwd": ".",
       "argv": [
         "./.venv/bin/python",
