@@ -24,6 +24,18 @@
 #   限制（本票不 push main / 不开 PR），与 #830 的 `mm08-windows-verify.yml` 同一处置。
 #   不挂 pull_request / schedule，不做常驻 CI。CI 里不含任何密钥。
 #   第三方 action 一律完整 SHA + 版本注释（tag 可变、有投毒面）。
+#
+# 与同仓另一条 Windows 车道的关系（复审 P3）
+#   `mm08-windows-verify.yml`（#830 的近似验证，目前只存在于 `omp/830-mm08-cross-client-verify`
+#   分支）与本文件在检出/装 Node/装 uv/上传证据四步上同形。两文件服务不同票、且都依赖
+#   `push` 分支触发（本票不 push main / 不开 PR），所以本次**没有**合并成一份：合并要么需要
+#   改到别人的分支，要么把两条判据耦合成一份 `inputs` 契约。代价是重复 —— 处置是两边都写清
+#   分工（本文件就是 D2/D3 的车辆），并把四个 action 的 SHA 与版本注释保持同一组：
+#     actions/checkout v4.4.0 / actions/setup-node v4.4.0 / actions/upload-artifact v7.0.1 /
+#     astral-sh/setup-uv v10.2.0。
+#   重跑纪律：**改本文件列出的 `paths` 里任一文件、或升级 Node/uv 之后，必须重跑本车道并把
+#   新读数写进证据**（这条车道不在常驻门禁里 —— `workflow_dispatch` 要求 workflow 在默认
+#   分支，D2/D3 的 Windows 回归首轮就是这样漏到验证票才发现的）。
 name: mm08-d2d3-windows-verify
 
 on:
@@ -33,10 +45,16 @@ on:
       - omp/fix-mm08-d2-d3-windows
     paths:
       # 只在真正决定这两条判据的路径变化时触发（docs-only 提交不烧 runner 分钟）。
+      # 依赖锁/清单也算「决定判据」：Node 或 uv 一升级，这两条车道的读数就不可比，
+      # 漏了它们会出现「依赖变了、车道静默不跑」。
       - .github/workflows/mm08-d2d3-windows-verify.yml
+      - uv.lock
+      - pyproject.toml
       - src/agent_harness/storage/local_artifact.py
       - tests/test_cli_image.py
       - tests/attachments/test_local_byte_store.py
+      - tui/package.json
+      - tui/package-lock.json
       - tui/src/lib/image-paste.ts
       - tui/test/app-images.test.ts
       - tui/test/image-paste.test.ts
@@ -89,6 +107,9 @@ jobs:
       - name: 装 Node 22（与 tui/package.json engines 对齐）
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
+          # `'22'` 解析到 22.x 的最新；真正的下界由 `tui/package.json` 的
+          # `engines.node`（`>=22.1`）钉住：`fileURLToPath` 的 `windows` 选项自
+          # v22.1.0 起才有，22.0.x 会**静默忽略**它（复审 P3）。
           node-version: '22'
 
       - name: 装 tui 依赖（npm ci）

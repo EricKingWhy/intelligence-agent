@@ -177,7 +177,14 @@ class InstanceLock:
     def _create_shared_root_lease(self) -> tuple[Path, int]:
         with _shared_root_registry_lock(self._root):
             path = self._root / f"{_SHARED_ROOT_LEASE_PREFIX}{uuid.uuid4().hex}{_SHARED_ROOT_LEASE_SUFFIX}"
-            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            # 载荷是 UTF-8 文本，但显式带 `O_BINARY`：Windows 的 CRT 缺它时会把 `\n` 撑成
+            # CRLF，读回（`_read_holder` 走 `read_text()`）虽能容忍，但落盘字节不再等于本进程
+            # 写下的那些。与 `context/project_instructions.py` / `skills/inspection.py` 同一惯例。
+            fd = os.open(
+                path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
             locked = False
             try:
                 _take_os_lock(fd)
@@ -300,7 +307,11 @@ class InstanceLock:
                 return existing
 
             self._root.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+            # 同上：`self._fd` 就是 `_write_holder` 的写目标，带 `O_BINARY` 免得 Windows 上
+            # 把诊断文本的 `\n` 落成 CRLF。
+            fd = os.open(
+                self._path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600
+            )
             try:
                 _take_os_lock(fd)
             except OSError as error:

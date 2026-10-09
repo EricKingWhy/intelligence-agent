@@ -10,8 +10,7 @@
  * `TuiApp` 非 TTY 可构造（与 `app.test.ts` 同一套受控 cast 访问面）。
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -565,7 +564,10 @@ test("独立审查 P3/P4：超过 20 MiB 的 @path 参数给出上限提示，�
   const dir = mkdtempSync(join(tmpdir(), "ia827-app-big-"));
   try {
     const big = join(dir, "big.png");
-    execFileSync("truncate", ["-s", "21M", big]);
+    // 稀疏文件（Node 原生 `truncateSync`，先建空文件——外部 `truncate -s` 才自带创建；那个
+    // 二进制在 Windows 上靠 runner 镜像的 Git for Windows coreutils，属外部依赖——复审 P3）。
+    writeFileSync(big, "");
+    truncateSync(big, 21 * 1024 * 1024);
     const harness = makeHarness({ initialImages: [big] });
 
     assert.equal(harness.app.pendingImages.length, 0);

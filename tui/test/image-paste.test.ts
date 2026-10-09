@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -32,6 +32,12 @@ const PNG = Uint8Array.from([
   0x1f, 0x15, 0xc4, 0x89,
   0x00, 0x00, 0x00, 0x00, 0x49, 0x44, 0x41, 0x54, 0xae, 0x42, 0x60, 0x82,
 ]);
+
+/** 命令不存在时 `child_process` 抛出的错误带 `code = "ENOENT"`（`Error` 上没声明这个字段）。 */
+function isEnoent(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return error.code === "ENOENT";
+}
 
 test("剥掉包裹引号（Windows 复制路径常带引号）", () => {
   assert.equal(resolvePastedImagePath('"/tmp/shot.png"', "linux"), "/tmp/shot.png");
@@ -153,11 +159,19 @@ test("clipboardImageName：剪贴板文件名按 media type 给，扩展名与�
   }
 });
 
-test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞（P4：FIFO 上的 readFileSync 会永久卡住）", () => {
+test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞（P4：FIFO 上的 readFileSync 会永久卡住）", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ia827-fifo-"));
   try {
     const fifo = join(dir, "pipe.png");
-    execFileSync("mkfifo", [fifo]);
+    try {
+      execFileSync("mkfifo", [fifo]);
+    } catch (error) {
+      // `mkfifo` 是外部 POSIX 二进制：Windows 上只有 runner 镜像 PATH 里的 Git for Windows
+      // coreutils 提供它（复审 P3）⇒ 环境缺它时**显式跳过**，别把它当成产品回归。
+      if (!isEnoent(error)) throw error;
+      t.skip("本机没有 mkfifo（POSIX FIFO 用例）");
+      return;
+    }
     const started = Date.now();
     assert.deepEqual(readImageFile(fifo), { ok: false, reason: "missing" });
     assert.ok(Date.now() - started < 2_000, "不得阻塞在读盘上（无写端的 FIFO 会一直等）");
@@ -173,6 +187,7 @@ test("readImageFile：符号链接指向常规图片照常可读（常规文件�
     const target = join(dir, "shot.png");
     writeFileSync(target, PNG);
     const link = join(dir, "link.png");
+    // Windows 上建符号链接要管理员/开发者模式（GitHub runner 有）；无权限时红属环境限制。
     symlinkSync(target, link);
     const result = readImageFile(link);
     assert.equal(result.ok, true);
@@ -189,8 +204,11 @@ test("readImageFile：超过 20 MiB 上限 ⇒ too_large，且不把整文件读
   const dir = mkdtempSync(join(tmpdir(), "ia827-big-"));
   try {
     const file = join(dir, "huge.png");
-    // 稀疏文件：只占 inode 元数据，不真写 21 MiB 数据。
-    execFileSync("truncate", ["-s", "21M", file]);
+    // 稀疏文件：只占 inode 元数据，不真写 21 MiB 数据。用 Node 原生 `truncateSync`（先建空文件：
+    // 它不像外部 `truncate -s` 那样自带创建）——外部 `truncate` 二进制在 Windows 上只有 runner
+    // 镜像 PATH 里的 Git for Windows coreutils 提供（复审 P3：那属外部依赖，不该进用例）。
+    writeFileSync(file, "");
+    truncateSync(file, 21 * 1024 * 1024);
     const started = Date.now();
     // 必须是 too_large 而不是 unsupported：尺寸门在 magic-bytes 判型**之前**短路
     // （全零的稀疏文件若被读进内存判型，只会得到 unsupported）。
@@ -205,7 +223,8 @@ test("readImageFile：恰好等于上限不拒（口径 = 服务端 attachment_m
   const dir = mkdtempSync(join(tmpdir(), "ia827-limit-"));
   try {
     const file = join(dir, "limit.png");
-    execFileSync("truncate", ["-s", String(MAX_IMAGE_BYTES), file]);
+    writeFileSync(file, "");
+    truncateSync(file, MAX_IMAGE_BYTES);
     // 20 MiB 全零文件：过尺寸门 ⇒ 按 magic bytes 判型 ⇒ unsupported（不是 too_large）。
     assert.deepEqual(readImageFile(file), { ok: false, reason: "unsupported" });
   } finally {

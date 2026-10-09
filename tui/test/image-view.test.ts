@@ -12,8 +12,9 @@
  * kitty 里时被上游探测抢先（那样断言会变成对环境的断言）。
  */
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 
@@ -83,12 +84,17 @@ test("AC6：WT_SESSION（images: null）⇒ 文本占位，不含任何图片协
     assert.ok(output.includes("shot.png"), "占位必须给出文件名");
     assert.ok(output.includes("1x1"), "占位必须给出尺寸");
     assert.ok(output.includes("image/png"), "占位必须给出 media type");
-    // 期望值按**运行时平台**生成：`imageFallback` 用 `pathToFileURL` 造链接，同一条
-    // `/home/u/...` 在 Windows 上会得到 `file:///D:/home/u/...`（#830 D3：写死
-    // `file:///home/u/...` 只在 POSIX 上成立）。
-    assert.ok(
-      output.includes(pathToFileURL(IMAGE_PATH).href),
-      "支持 OSC 8 的终端上路径应是可点击的原图链接",
+    // 不写死 `file:///home/u/...`：`imageFallback`（上游 pi-tui）用 `pathToFileURL` 造链接，
+    // 同一条 `/home/u/...` 在 Windows 上按**当前盘**解析成 `file:///C:/home/u/...` ⇒ 期望值
+    // 随平台变、盘符不可写死（#830 D3）。这里也不与同一个原语的输出比字面量（那会把两侧
+    // 绑死、形状回归看不见），而是断言**语义**：OSC 8 链接必须存在，且解码回来就是同一份
+    // 文件 —— 斜杠数、盘符、百分号编码任一出错都会在这里红。
+    const linked = /file:\/\/[^\s\x1b]+/.exec(output);
+    assert.ok(linked, "支持 OSC 8 的终端上路径应是可点击的原图链接");
+    assert.equal(
+      fileURLToPath(linked[0]),
+      resolve(IMAGE_PATH),
+      "OSC 8 链接必须指回同一份原图",
     );
   });
 });
