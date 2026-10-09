@@ -24,7 +24,7 @@
     "license": "MIT (Node.js). The archive root's LICENSE is staged next to the binary."
   },
   "requirements": {
-    "engines": ">=22",
+    "engines": ">=22.1",
     "minimumMajor": 22,
     "note": "tui/package.json engines.node; assertNodeRuntimeVersion keeps the pin at or above it"
   },
