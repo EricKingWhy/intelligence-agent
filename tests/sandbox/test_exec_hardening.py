@@ -870,6 +870,39 @@ def test_docker_exec_passes_through_normal_result():
     assert result.stdout == "done"
 
 
+def test_docker_exec_closes_stream_after_successful_read():
+    """A successful Docker exec releases its SDK response stream."""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    class _CloseTrackingStream:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            yield (None, b"\x1eAH_PID:1234\x1f\n")
+            yield (b"done", None)
+
+        def close(self):
+            self.closed = True
+
+    stream = _CloseTrackingStream()
+    api = Mock()
+    api.exec_create.return_value = {"Id": "exec-close"}
+    api.exec_start.return_value = stream
+    api.exec_inspect.return_value = {"ExitCode": 0}
+
+    sandbox = object.__new__(DockerSandbox)
+    sandbox._container = Mock(id="container-1", status="running")
+    sandbox._client = Mock(api=api)
+    sandbox._exec_lock = threading.Lock()
+
+    result = sandbox.exec("echo done", timeout=5)
+
+    assert result.exit_code == 0
+    assert result.stdout == "done"
+    assert stream.closed is True
+
+
 class _StreamingDockerExec:
     def __init__(self):
         self.killed = threading.Event()
