@@ -51,9 +51,24 @@ from tests.scripted_model import ScriptedModel
 
 
 def _settings(tmp_path: Path) -> Settings:
+    from pydantic import SecretStr
+
+    # deepseek-chat 的默认 preset 不声明 reasoning_effort，但 from_settings 会从
+    # AGENT_MODELS catalog 补 capability。这里给默认模型声明 deep，使
+    # create_and_launch 的 validate_reasoning_effort("deep") 通过（#865）。
     return Settings(
         model_api_key="sk-test",
         workspace_dir=str(tmp_path / "workspace"),
+        agent_models=SecretStr(json.dumps([{
+            "name": "deepseek-chat",
+            "provider": "deepseek",
+            "model_name": "deepseek-chat",
+            "reasoning_effort": {
+                "supported": ["minimal", "standard", "deep"],
+                "default": "standard",
+                "wire_mapping": {"minimal": "none", "standard": "low", "deep": "high"},
+            },
+        }])),
         _env_file=None,  # 不吃仓库根 .env（测试必须自足）
     )
 
