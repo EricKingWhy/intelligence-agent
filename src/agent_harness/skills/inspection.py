@@ -617,7 +617,7 @@ def _check_markdown_references(
             _MAX_METADATA_SCAN_BYTES,
             errors,
             too_large_code="REFERENCE_FILE_TOO_LARGE",
-            unreadable_code="MARKDOWN_UNREADABLE",
+            unreadable_code="REFERENCE_FILE_UNREADABLE",
             changed_code="REFERENCE_FILE_CHANGED",
             not_file_code="RESOURCE_NOT_FILE",
             outside_code="REFERENCE_OUTSIDE_PACKAGE",

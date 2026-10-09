@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -46,10 +47,13 @@ def _config() -> ModelConfig:
     )
 
 
-def _mapped_config() -> ModelConfig:
+def _mapped_config(tmp_path: Path) -> ModelConfig:
+    # provider_store_path 钉进 tmp_path：resolve_selection 命中密封守卫敏感面，
+    # 不密封会把宿主 HOME 的自定义 provider 泄进断言（比照 tests/web/test_web_models.py）。
     settings = Settings(
         _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-test",
         model_provider="deepseek", model_name="deepseek-chat",
+        provider_store_path=str(tmp_path / "model-providers.json"),
         agent_models=json.dumps([{
             "name": "model-with-custom-effort-map",
             "provider": "deepseek",
@@ -64,15 +68,15 @@ def _mapped_config() -> ModelConfig:
     return ModelConfig.resolve_selection(settings, "model-with-custom-effort-map")
 
 
-def test_create_chat_model_uses_selected_model_wire_mapping():
-    model = create_chat_model(_mapped_config(), reasoning_effort="standard")
+def test_create_chat_model_uses_selected_model_wire_mapping(tmp_path: Path):
+    model = create_chat_model(_mapped_config(tmp_path), reasoning_effort="standard")
     assert getattr(model, "reasoning_effort", None) == "low"
 
 
 @pytest.mark.parametrize("effort", ["deep", "unknown"])
-def test_create_chat_model_rejects_unsupported_effort(effort):
+def test_create_chat_model_rejects_unsupported_effort(tmp_path: Path, effort):
     with pytest.raises(ConfigError, match="reasoning_effort"):
-        create_chat_model(_mapped_config(), reasoning_effort=effort)
+        create_chat_model(_mapped_config(tmp_path), reasoning_effort=effort)
 
 
 def test_create_chat_model_translates_deep_to_wire_enum():
@@ -125,10 +129,11 @@ def test_web_effort_levels_match_model_catalog_vocabulary():
     assert set(_harness_levels()) == set(REASONING_EFFORT_LEVELS)
 
 
-def test_model_catalog_rejects_unknown_reasoning_effort_wire_value():
+def test_model_catalog_rejects_unknown_reasoning_effort_wire_value(tmp_path: Path):
     settings = Settings(
         _env_file=None, workspace_dir="/tmp/x", model_api_key="sk-test",
         model_provider="deepseek", model_name="deepseek-chat",
+        provider_store_path=str(tmp_path / "model-providers.json"),
         agent_models=json.dumps([{
             "name": "model-with-invalid-effort-map",
             "provider": "deepseek",
