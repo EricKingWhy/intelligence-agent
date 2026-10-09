@@ -751,29 +751,25 @@ class DockerSandbox(Sandbox):
     def delete(self) -> None:
         """彻底清理：移除容器 + 删除 Volume。幂等。"""
         docker = importlib.import_module("docker")
-        try:
-            if self._container is not None:
-                try:
-                    self._container.remove(force=True)
-                except docker.errors.NotFound:
-                    pass
-                finally:
-                    self._container = None
-            else:
-                # 跨进程：容器可能还在，按确定性名字查回再删。
-                try:
-                    existing = self._client.containers.get(self._container_name)
-                except docker.errors.NotFound:
-                    existing = None
-                if existing is not None:
-                    existing.remove(force=True)
+        if self._container is not None:
             try:
-                self._client.volumes.get(self._volume_name).remove(force=True)
+                self._container.remove(force=True)
             except docker.errors.NotFound:
                 pass
-        finally:
-            self._client.close()
-
+            finally:
+                self._container = None
+        else:
+            # 跨进程：容器可能还在，按确定性名字查回再删。
+            try:
+                existing = self._client.containers.get(self._container_name)
+            except docker.errors.NotFound:
+                existing = None
+            if existing is not None:
+                existing.remove(force=True)
+        try:
+            self._client.volumes.get(self._volume_name).remove(force=True)
+        except docker.errors.NotFound:
+            pass
         state = getattr(self, "_exec_state", None)
         if state is not None:
             cls = type(self)
