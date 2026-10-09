@@ -56,11 +56,14 @@ on:
         default: false
   pull_request:
     # 路径过滤：只在安装器相关文件变化时跑，不给每个 PR 增加 10–20 分钟负担。
-    # 除票面点名的三条外，另加 build-windows-installer.mjs（烟测直接 import 它）、
-    # desktop 的依赖清单（本 job 跑 `npm ci` 构建安装包）与本工作流自身。
+    # 除票面点名的三条外，另加：两个被执行的 PowerShell 断言脚本（test-windows-installer.mjs
+    # 直接 shell 它们）、build-windows-installer.mjs（烟测直接 import 它）、desktop 的依赖清单
+    # （本 job 跑 `npm ci` 构建安装包）与本工作流自身。
     paths:
       - 'desktop/installer/**'
       - 'desktop/scripts/test-windows-installer.mjs'
+      - 'desktop/scripts/windows-installer-smoke.ps1'
+      - 'desktop/scripts/windows-uninstall-smoke.ps1'
       - 'desktop/scripts/build-windows-installer.mjs'
       - 'desktop/package.json'
       - 'desktop/package-lock.json'
@@ -103,6 +106,8 @@ jobs:
 
       - name: 装 electron-builder（脚本 lazy-require，未进 desktop/package.json）
         working-directory: desktop
+        # electron-builder 不在 desktop 依赖里（脚本 lazy-require；见 build-windows-installer.mjs
+        # 头注释「npm i -D electron-builder」，故锁文件无它）⇒ 此处是版本唯一钉点，锁死 26.15.3。
         run: npm install --no-save --no-audit --no-fund electron-builder@26.15.3
 
       - name: 安装器烟测 — 安装断言（en_US + zh_CN）
