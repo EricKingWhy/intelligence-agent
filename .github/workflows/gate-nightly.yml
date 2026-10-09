@@ -5,7 +5,11 @@
 #   ① backend 全量 pytest（与 gate1 相同命令，刻意重复 —— 每晚跑同一套才能比出
 #      漂移/flake：外部 snapshot、时序、网络变化；参考 Google 后置 CI 的机制）；
 #   ② frontend vitest + vite build；
-#   ③ playwright e2e（Chromium，1280/1920 两档；webServer 自动起 vite :5173，
+#   ③ tui 单测（`cd tui && npm test`；#908：平台耦合修复后纳入夜间 —— gate0/gate1
+#      都没有 tui 车道，不加在这里 TUI 就没有任何 CI 覆盖；ubuntu + windows 两个
+#      宿主都跑：原 7 个红色用例是 Windows 宿主耦合，只在 ubuntu 上跑就再也看不见
+#      它回来）；
+#   ④ playwright e2e（Chromium，1280/1920 两档；webServer 自动起 vite :5173，
 #      API 由 page.route 拦截 mock，**不需要真后端** —— 见 web/playwright.config.ts；
 #      e2e 慢且偶发，放夜间不占 PR 时间）。
 #
@@ -103,6 +107,32 @@ jobs:
           name: nightly-frontend-reports
           path: artifacts/
           retention-days: 30
+
+  tui:
+    name: tui 单测（node:test, ${{ matrix.os }}）
+    strategy:
+      fail-fast: false
+      matrix:
+        # #908 的 7 个红色用例是 Windows 宿主耦合，修好之后这条车道必须两个宿主
+        # 都跑：只看 ubuntu 的话，"又写回 Windows-only 断言"在 CI 里永远是绿的。
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: 装 Node 22（npm 缓存）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tui/package-lock.json
+      - name: 装 tui 依赖
+        working-directory: tui
+        run: npm ci
+      - name: tui 单测（#908：套件含 mkfifo/truncate/symlink 等宿主能力用例，两宿主同跑）
+        working-directory: tui
+        run: npm test
 
   e2e:
     name: playwright e2e（Chromium）
