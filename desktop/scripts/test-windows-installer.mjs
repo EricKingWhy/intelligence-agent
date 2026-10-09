@@ -99,9 +99,17 @@ SectionEnd
       config: {
         ...baseConfig,
         extraMetadata: { name: `@ia-installer-test-${id.slice(0, 8)}/app-${id}` },
-        artifactName: 'installer-test.exe',
         directories: { output: languageOutput },
-        nsis: { ...baseConfig.nsis, guid, installerLanguages: [language] },
+        // The target-level artifactName (from the production config) wins over
+        // a top-level one, so the override has to live in `nsis`: without it
+        // the build writes `<productName>-Setup-<version>.exe` while the smoke
+        // script below is handed `installer-test.exe` and never runs (#831).
+        nsis: {
+          ...baseConfig.nsis,
+          guid,
+          installerLanguages: [language],
+          artifactName: 'installer-test.exe',
+        },
       },
     })
     if (compileOnly) continue

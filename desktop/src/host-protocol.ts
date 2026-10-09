@@ -18,6 +18,15 @@ export const TOKEN_USERNAME_PREFIX = 'host-service/'
 /** Environment variable that selects the credential backend (server-side seam). */
 export const HOST_CREDENTIALS_ENV = 'AGENT_HARNESS_HOST_CREDENTIALS'
 
+/**
+ * Environment variable carrying the service's data root (`Settings.workspace_dir`,
+ * pydantic-settings without a prefix, so the field is settable as WORKSPACE_DIR).
+ * The service publishes the endpoint file, the instance lock and `harness.db`
+ * under this directory; the shell must read the endpoint from the same absolute
+ * path it hands to the child (W-21 defect D4 / #813).
+ */
+export const WORKSPACE_DIR_ENV = 'WORKSPACE_DIR'
+
 /** Endpoint file payload; secrets never appear here (the host token uses the credential channel). */
 export interface HostEndpointInfo {
   readonly pid: number

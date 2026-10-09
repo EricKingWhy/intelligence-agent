@@ -6,12 +6,14 @@ import { asNumber, asString, isRecord, type EventEnvelope } from "./events.ts";
 import type { SessionSummaryView } from "./views/sessionselect.ts";
 
 export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly detail: string,
-  ) {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string) {
     super(`HTTP ${status}: ${detail}`);
     this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -22,10 +24,13 @@ export interface ResumeRequest {
 }
 
 export class ApiClient {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly fetchFn: typeof fetch = fetch,
-  ) {}
+  private readonly baseUrl: string;
+  private readonly fetchFn: typeof fetch;
+
+  constructor(baseUrl: string, fetchFn: typeof fetch = fetch) {
+    this.baseUrl = baseUrl;
+    this.fetchFn = fetchFn;
+  }
 
   private url(path: string): string {
     return `${this.baseUrl.replace(/\/$/, "")}${path}`;
@@ -36,6 +41,17 @@ export class ApiClient {
       ...init,
       headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
     });
+    // #853：`POST /messages` 的 launched 分支（会话空闲）返回 text/event-stream，
+    // 而 request() 原先无条件 `JSON.parse(text)`，必然抛 SyntaxError，TUI 落一行假
+    // `send failed`（消息其实已被接受、run 已跑完）。且 `await response.text()` 要等
+    // 整轮 run 收尾才返回，UI 表现为「发送挂住整轮 run，然后报失败」。
+    // 服务端的 run 是 detached 的（app.py `_run_stream_response`：断连只
+    // unsubscribe、不影响 run），本客户端另有一条按 seq 续传的 /stream 订阅在投递
+    // 事件，该响应体对 TUI 无用，直接放弃：既不抛错，也不阻塞。
+    if (response.ok && isEventStream(response)) {
+      await discardBody(response);
+      return null as T;
+    }
     const text = await response.text();
     if (!response.ok) {
       let detail = text;
@@ -75,6 +91,10 @@ export class ApiClient {
     });
   }
 
+  /**
+   * 投递消息。会话空闲时服务端返回 launched 的 SSE 流（#853）：这里放弃该响应体、
+   * 按「已受理」返回 null，事件由 /stream 订阅投递（见 request()）。
+   */
   sendMessage(sessionId: string, content: string): Promise<unknown> {
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
@@ -147,6 +167,26 @@ export class ApiClient {
     ).catch(() => null);
     if (response === null) return { delivered: false, status: 0 };
     return { delivered: response.ok, status: response.status };
+  }
+}
+
+/** 响应体是否为 SSE（`text/event-stream`，可能带 `; charset=` 参数）。 */
+function isEventStream(response: Response): boolean {
+  return (response.headers.get("content-type") ?? "")
+    .toLowerCase()
+    .includes("text/event-stream");
+}
+
+/**
+ * 放弃响应体（#853）：launched 分支的 SSE 体只表示「已受理」。服务端的 run 是
+ * detached 的，断连只 unsubscribe、不影响 run（app.py `_run_stream_response`）；
+ * 不读到底，发消息不再挂住整轮 run。
+ */
+async function discardBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // 连接已断/已取消：无副作用
   }
 }
 

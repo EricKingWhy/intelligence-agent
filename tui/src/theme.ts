@@ -19,7 +19,7 @@ export { parseColor };
 export const ACCENT = "#f1b3ca";
 export const ACCENT_COLOR: Color = parseColor(ACCENT);
 
-/** 中性与语义色（oklch/rgb 字面量交给 parseColor，终端色深自适应）。 */
+/** 中性与语义色（hex/oklch 字面量交给 parseColor，终端色深自适应）。 */
 export const COLORS = {
   muted: parseColor("#9aa0a8"),
   dim: parseColor("#7c828c"),
@@ -43,11 +43,12 @@ export const GLYPHS = {
   teeLeft: "┤",
 } as const;
 
-/** 工具卡状态底色 tint（Pi tool-execution 套路：状态靠底色传达，不靠图标）。 */
+/** 工具卡状态底色 tint（Pi tool-execution 套路：状态靠底色传达，不靠图标）。
+ *  值是 hex：parseColor 不认 rgb(...) 字面量，写错形态会在装配组件时抛（#842）。 */
 export const CARD_TINTS = {
-  running: "rgb(38, 40, 46)",
-  success: "rgb(30, 40, 33)",
-  error: "rgb(46, 30, 33)",
+  running: "#26282e", // = rgb(38, 40, 46)
+  success: "#1e2821", // = rgb(30, 40, 33)
+  error: "#2e1e21", // = rgb(46, 30, 33)
 } as const;
 
 /** 主题函数集：组件需要 (text) => string 形态的颜色钩子。 */

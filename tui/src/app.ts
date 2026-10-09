@@ -31,6 +31,7 @@ import {
   type Turn,
 } from "./adapter.ts";
 import { formatTokens } from "./format.ts";
+import { authorizedFetch } from "./host.ts";
 import { SeqCursor, openStream } from "./sse.ts";
 import { createTheme, type IaTheme } from "./theme.ts";
 import {
@@ -49,6 +50,8 @@ const RECONNECT_DELAY_MS = 1000;
 export interface AppOptions {
   baseUrl: string;
   sessionId: string;
+  /** 本机服务的 Bearer（host.ts 的凭据通道）；缺省 = 本地信任模式，行为不变。 */
+  token?: string;
 }
 
 /** 已渲染轮次的签名：文本尾部 + 工具卡摘要（变了才重建该轮组件）。 */
@@ -73,6 +76,7 @@ export class TuiApp {
   state: ConversationState = createState();
   cursor = new SeqCursor();
   private readonly api: ApiClient;
+  private readonly fetchImpl: typeof fetch;
   private readonly theme: IaTheme;
   private readonly tui: TUI;
   private readonly editor: Editor;
@@ -98,7 +102,10 @@ export class TuiApp {
     private readonly isTTY: boolean = Boolean(process.stdin.isTTY),
   ) {
     this.theme = createTheme(getTerminalColorMode());
-    this.api = new ApiClient(options.baseUrl);
+    // W-21 D5 (#817)：服务端非 fail-open，REST / SSE / client-exit 全走带
+    // Bearer 的同一条 fetch（无 token 时 authorizedFetch 原样返回全局 fetch）。
+    this.fetchImpl = authorizedFetch(options.token);
+    this.api = new ApiClient(options.baseUrl, this.fetchImpl);
     const terminal = new ProcessTerminal();
     this.tui = new TuiMainScreen(terminal);
     this.editor = new Editor(this.tui, {
@@ -194,7 +201,7 @@ export class TuiApp {
                 resolve(reason);
               },
             },
-            { signal: this.abort.signal },
+            { signal: this.abort.signal, fetchImpl: this.fetchImpl },
           );
         });
         if (!this.running || gen !== this.generation) return;
