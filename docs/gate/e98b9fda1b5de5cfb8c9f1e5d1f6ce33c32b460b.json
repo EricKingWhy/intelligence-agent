@@ -1,16 +1,16 @@
 {
   "schema": 1,
   "gate": "gate0",
-  "recorded_at": "2026-10-09T13:51:17+00:00",
-  "sha": "1c507c053b4697117576b8166d86afdfa3860e98",
-  "tree": "1259bca67be33baa0c056749cf9956b5cc1d76f8",
+  "recorded_at": "2026-10-09T13:58:01+00:00",
+  "sha": "e98b9fda1b5de5cfb8c9f1e5d1f6ce33c32b460b",
+  "tree": "387420d7101eba28c1bd1d7c27d4f2de0da9e7d3",
   "argv": [],
   "result": "PASS",
   "passed": 6,
   "total": 6,
   "failed": [],
   "env_failures": [],
-  "wall_seconds": 18.54,
+  "wall_seconds": 26.24,
   "budget_seconds": 60.0,
   "lane_timeout_seconds": 300.0,
   "tool_versions": {
@@ -40,7 +40,7 @@
       "desc": "git diff --check",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.05,
+      "seconds": 0.01,
       "cwd": ".",
       "argv": [
         "git",
@@ -54,7 +54,7 @@
       "desc": "ruff check .",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.19,
+      "seconds": 0.2,
       "cwd": ".",
       "argv": [
         "./.venv/bin/ruff",
@@ -68,7 +68,7 @@
       "desc": "oxlint（web/）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 0.44,
+      "seconds": 0.42,
       "cwd": "web",
       "argv": [
         "/usr/bin/node",
@@ -81,7 +81,7 @@
       "desc": "tsc -b（web/，类型检查；不含 vite build）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 11.52,
+      "seconds": 17.17,
       "cwd": "web",
       "argv": [
         "/usr/bin/node",
@@ -95,7 +95,7 @@
       "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
       "status": "PASS",
       "rc": 0,
-      "seconds": 5.09,
+      "seconds": 7.07,
       "cwd": ".",
       "argv": [
         "./.venv/bin/python",
@@ -121,7 +121,7 @@
       "desc": "覆盖闸门 check_review_coverage.py",
       "status": "PASS",
       "rc": 0,
-      "seconds": 1.25,
+      "seconds": 1.37,
       "cwd": ".",
       "argv": [
         "./.venv/bin/python",
