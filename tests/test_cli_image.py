@@ -18,6 +18,8 @@ stderr 文案、退出码、有无残留文件/事件。不断言私有函数名
 - 有界读：超大文件不走 `Path.read_bytes()` 全量读入（A-F2）；
 - 像素 / 边长按各自原因归类，不笼统说成"不是受支持的图片"（A-F3）；
 - 目录 / 非常规文件给准确文案（A-F6）；
+- 读取失败（`OSError`）恢复为「文件读取失败」+ exit 1，不逃逸成 traceback（复审 A-R1）；
+- 拒因文案不重复同一件事（复审 B New-3）；
 - 两条退出通道：输入不成立 exit 1、命令行形状错 exit 2（B-P3-3）。
 """
 
@@ -281,6 +283,10 @@ def test_image_over_single_byte_limit_is_rejected(monkeypatch, capsys, tmp_path)
 
     assert str(image) in stderr
     assert "单张字节上限" in stderr
+    # B New-3：分类前缀与括号**不重复同一句话**——括号只补前缀给不出的上限数值
+    # （64 = `attachment_max_image_bytes`）。
+    assert stderr.count("单张字节上限") == 1
+    assert "（64 字节）" in stderr
 
 
 def test_oversized_image_is_not_read_wholesale(monkeypatch, capsys, tmp_path):
@@ -315,6 +321,8 @@ def test_image_over_pixel_limit_is_rejected(monkeypatch, capsys, tmp_path):
     assert str(image) in stderr
     assert "像素" in stderr
     assert "不是受支持的图片" not in stderr, "归类词不能错位"
+    # B New-3：不再把领域层的整句自述（"图片像素数超过上限。"）原样放进括号重复一遍。
+    assert stderr.count("像素数超过上限") == 1
 
 
 def test_image_over_dimension_limit_is_rejected(monkeypatch, capsys, tmp_path):
@@ -326,6 +334,7 @@ def test_image_over_dimension_limit_is_rejected(monkeypatch, capsys, tmp_path):
 
     assert str(image) in stderr
     assert "边长超过上限" in stderr
+    assert stderr.count("边长超过上限") == 1  # B New-3：不重复同一句话
 
 
 def test_extension_mismatch_is_rejected(monkeypatch, capsys, tmp_path):
@@ -342,6 +351,7 @@ def test_extension_mismatch_is_rejected(monkeypatch, capsys, tmp_path):
 
     assert str(image) in stderr
     assert "不符" in stderr and "扩展名" in stderr
+    assert stderr.count("不符") == 1, "B New-3：不再叠一层与领域层自述重复的 CLI 前缀"
 
 
 def test_directory_path_is_reported_as_not_a_regular_file(monkeypatch, capsys, tmp_path):
@@ -355,6 +365,43 @@ def test_directory_path_is_reported_as_not_a_regular_file(monkeypatch, capsys, t
     assert str(directory) in stderr
     assert "不是常规文件" in stderr
     assert "不存在" not in stderr
+
+
+#: `exists()` / `is_file()` 都为 True、`open()` 必抛 `OSError` 的确定性触发点。root 下
+#: `chmod 000` 会被绕过（权限位不生效），故不用自建只读文件构造"读不了"的输入。
+_UNREADABLE_IMAGE = Path("/proc/1/mem")
+
+
+def _has_unreadable_image_probe() -> bool:
+    """本机是否具备"存在、是常规文件、但打开即 `OSError`"的确定性输入。"""
+    if sys.platform != "linux":
+        return False
+    try:
+        with _UNREADABLE_IMAGE.open("rb"):
+            return False
+    except OSError:
+        return True
+
+
+def test_unreadable_image_path_is_reported_cleanly(monkeypatch, capsys, tmp_path):
+    """A-R1：读取失败（EACCES / EIO / 判定与打开之间被换掉）⇒ 明确文案 + exit 1。
+
+    修前这段 `OSError` 从 `_admit_cli_images` 直穿出去，用户看到整段 Python traceback
+    ——被拒路径的"文件读取失败"归类在修复批里被删掉了（`cli.py` 只捕 `AttachmentError`，
+    `attachments/admission.py` 的 `open()` 不处理 `OSError`）。用真实不可读文件而不是
+    monkeypatch：`/proc/1/mem` 在 root / 非 root 下 `open()` 都抛 `PermissionError`，
+    且 `exists()` / `is_file()` 恒 True，能一路走到读取那一行。
+    """
+    if not _has_unreadable_image_probe():
+        pytest.skip("/proc/1/mem 在本环境可读（非 Linux / 特权容器）：无确定性触发点")
+
+    settings = _settings(tmp_path)
+
+    stderr = _run_cli_rejected(monkeypatch, capsys, settings, [_UNREADABLE_IMAGE])
+
+    assert str(_UNREADABLE_IMAGE) in stderr, "错误文案必须点名具体路径"
+    assert "文件读取失败" in stderr, "读取失败要有自己的归类文案"
+    assert "Traceback" not in stderr, "不得把未捕获异常打成 traceback"
 
 
 def test_too_many_images_are_rejected(monkeypatch, capsys, tmp_path):

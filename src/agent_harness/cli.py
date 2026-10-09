@@ -124,7 +124,7 @@ from agent_harness.tooling.contract import PermissionPolicy
 if TYPE_CHECKING:
     # 只用于 `_image_rejection_message` 的形参标注。附件包（含 Pillow 归一化）在**运行期**
     # 仍走 `_admit_cli_images` 内的惰性导入——纯文本调用不为一个没用到的旗标付导入成本。
-    from agent_harness.attachments import AttachmentError
+    from agent_harness.attachments import AttachmentError, ImageAttachmentLimits
 
 _ARGS_LINE_LIMIT = 120
 _PREVIEW_LINES = 5
@@ -1114,7 +1114,17 @@ async def _admit_cli_images(
                 detected_media_type=detected.media_type,
             )
         except AttachmentError as error:
-            raise ImageInputRejected(_image_rejection_message(path, error)) from error
+            raise ImageInputRejected(
+                _image_rejection_message(path, error, limits)
+            ) from error
+        except OSError as error:
+            # 复审 A-R1：读取失败（EACCES / EIO / `exists()`、`is_file()` 与 `open()` 之间
+            # 路径被换掉）恢复为明确文案 + exit 1。修前这段 `OSError` 从
+            # `read_image_file_bounded` 直穿出去（本函数只捕 `AttachmentError`），用户看到
+            # 整段 traceback，而修复前同一输入给的是这条「文件读取失败」+ exit 1。
+            raise ImageInputRejected(
+                f"--image 文件读取失败：{path}（{error}）"
+            ) from error
         attachment_id = compute_byte_artifact_id(data)
         if attachment_id in seen:  # 同字节只引用一次（与发送端点同口径）
             continue
@@ -1164,21 +1174,25 @@ async def _admit_cli_images(
     return refs
 
 
-def _image_rejection_message(path: Path, error: AttachmentError) -> str:
+def _image_rejection_message(
+    path: Path, error: AttachmentError, limits: ImageAttachmentLimits
+) -> str:
     """按 `error.code` **归类** `--image` 的接纳失败（#828 审查 A-F3）。
 
     原先一律说成"不是受支持的图片"，把 `detect_image` 的像素 / 边长超限与新加的声明不符
     都塞进括号里 ⇒ 归类词错。这里逐码给对应的明确原因。
+
+    复审 B New-3：分类前缀与括号里的自述**不重复同一件事**。三条限值码由 CLI 自己说
+    （括号只补前缀给不出的**上限数值**）；其余码（声明不符 / 不支持 / 损坏）领域层的自述
+    已含分类与具体取值，直接采用，不再叠一层会与它重复的 CLI 前缀。
     """
     if error.code == "IMAGE_TOO_LARGE":
-        return f"--image 文件超过单张字节上限：{path}（{error}）"
+        return f"--image 文件超过单张字节上限：{path}（{limits.max_image_bytes} 字节）"
     if error.code == "IMAGE_TOO_MANY_PIXELS":
-        return f"--image 图片像素数超过上限：{path}（{error}）"
+        return f"--image 图片像素数超过上限：{path}（{limits.max_image_pixels} 像素）"
     if error.code == "IMAGE_DIMENSION_TOO_LARGE":
-        return f"--image 图片边长超过上限：{path}（{error}）"
-    if error.code == "IMAGE_TYPE_MISMATCH":
-        return f"--image 文件名声明与图片字节不符：{path}（{error}）"
-    return f"--image 文件不是受支持的图片：{path}（{error}）"
+        return f"--image 图片边长超过上限：{path}（{limits.max_image_dimension} 像素）"
+    return f"--image {path}：{error}"
 
 
 async def run(
@@ -1233,9 +1247,11 @@ async def run(
 
     `#828` / MM-07：`images` 是 `--image` 收集到的本地图片路径。给了就按「读文件 →
     字节签名探测 MIME → 声明/限值/视觉闸门 → 上传到本会话附件存储」接纳，并把引用
-    数组随首条 `user/message` 事件发出（MM-02 的引用契约）。任何一条被拒都抛
-    `ImageInputRejected`（调用方转 exit 1）——被拒路径都在附件写点之前，故**不发消息、
-    不留附件字节**（写点自身的 `OSError` 按存储语义处理，见 `_admit_cli_images`）。
+    数组随首条 `user/message` 事件发出（MM-02 的引用契约）。**每一条输入/接纳不成立
+    的路径都抛 `ImageInputRejected`**（调用方转 exit 1），逐条列举：路径不存在 / 不是
+    常规文件；**读取失败（`OSError`）**；单张或聚合超限；声明与字节不符；当前模型不支持
+    视觉；无可用附件存储；附件写入失败（`OSError`）。除最后一条（写点自身失败）外都在
+    附件写点之前，故**不发消息、不留附件字节**（见 `_admit_cli_images`）。
     缺省 `None` ⇒ 纯文本路径零改动（`user_input_metadata` 恒 None）。
     """
     settings = Settings()
