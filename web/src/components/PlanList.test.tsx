@@ -252,6 +252,34 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     }
   });
 
+  it('AC4 悬浮快速穿过别组不留悬停孤儿（A 开 → 离开 A → 进 B → 未到延迟即离开 B）', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      const before = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-before .plan-list-fold-toggle',
+      )!;
+      const after = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-after .plan-list-fold-toggle',
+      )!;
+      act(() => fireEnter(before));
+      act(() => {
+        vi.advanceTimersByTime(HOVER_OPEN_DELAY_MS);
+      });
+      expect(before.getAttribute('aria-expanded')).toBe('true');
+      act(() => fireLeave(before));
+      act(() => fireEnter(after));
+      act(() => fireLeave(after)); // B 未到打开延迟即离开（A 的关闭已被 B 的 enter 取消）
+      act(() => {
+        vi.advanceTimersByTime(HOVER_CLOSE_DELAY_MS);
+      });
+      expect(before.getAttribute('aria-expanded')).toBe('false');
+      expect(after.getAttribute('aria-expanded')).toBe('false');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('AC6 脏数据容错：双 in_progress 只高亮第一个，不崩', () => {
     act(() =>
       root.render(createElement(PlanList, { items: [item('a', 'in_progress'), item('b', 'in_progress')] })),

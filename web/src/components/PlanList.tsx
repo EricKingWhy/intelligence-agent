@@ -153,6 +153,9 @@ export function PlanList({ items }: { items: PlanItem[] }) {
   const [pinnedGroup, setPinnedGroup] = useState<FoldSide | null>(null);
   const [hoverGroup, setHoverGroup] = useState<FoldSide | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 指针当前所在的组（悬浮判定用）：快速穿到别组时，上一组的「离开」不再排定关闭，
+  // 避免其关闭被新组的 enter 取消后留下永久展开的悬停孤儿。
+  const hoverSideRef = useRef<FoldSide | null>(null);
 
   useEffect(
     () => () => {
@@ -192,6 +195,7 @@ export function PlanList({ items }: { items: PlanItem[] }) {
   };
   const hoverEnter = (side: FoldSide) => {
     if (hoverNone()) return;
+    hoverSideRef.current = side;
     clearTimer();
     timerRef.current = setTimeout(() => {
       setHoverGroup(side);
@@ -200,9 +204,13 @@ export function PlanList({ items }: { items: PlanItem[] }) {
   };
   const hoverLeave = (side: FoldSide) => {
     // 只解除**临时**展开；固定组由 pinnedGroup 承担 ⇒ 悬浮离开后自动回落到固定组。
+    // 指针已不在本组（快速穿到别组）时不排关闭 —— 否则会留下悬停孤儿：A 的关闭被
+    // B 的 enter 取消、B 又未到打开延迟即离开 ⇒ 无任何组排定关闭、A 永久展开。
+    if (hoverSideRef.current !== side) return;
+    hoverSideRef.current = null;
     clearTimer();
     timerRef.current = setTimeout(() => {
-      setHoverGroup((cur) => (cur === side ? null : cur));
+      setHoverGroup(null);
       timerRef.current = null;
     }, HOVER_CLOSE_DELAY_MS);
   };
