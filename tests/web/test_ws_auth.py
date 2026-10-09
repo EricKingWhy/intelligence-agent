@@ -258,3 +258,100 @@ async def test_unauthorized_handshake_starts_no_session_work(tmp_path: Path) -> 
             await serve_task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_handshake_cannot_read_nor_drive_a_real_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验收 1 的两条**可观测**面：被拒的握手读不到事件、也驱不动会话。
+
+    上一条锚的是"没进 `handle_websocket`"这个**结构性**事实；这一条锚的是票面
+    验收 1 的原话（"不能读到任何事件、不能驱动会话"）——用真实会话做对照：
+
+      · 读：先建一个真会话（走 HTTP，带 Bearer），拿到它的 `session_id`；
+        无凭据的 WS 无法 `subscribe`（握手就被拒）⇒ 事件一条也拿不到。
+      · 写：无凭据的 WS 无法 `send_message` ⇒ 事件条数**一条不增**
+        （真正的判别点是"没变"，不是"没收到回执"——静默丢弃也会让回执缺席）。
+
+    对照侧同一条连接形态带凭据跑一遍：`subscribe` 拿到含真实事件的快照、
+    `send_message` 起新 run ⇒ 证明上面的"拿不到"是鉴权造成的，不是端点坏了。
+    """
+    import httpx2
+    from httpx2.websockets import HTTPXWSException
+
+    from tests.web.test_web_ws_relay import _OneTurnModel, _recv_until
+
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: _OneTurnModel(),
+    )
+    server, serve_task, port = await _serve(_app(tmp_path, jwt_secret=_SECRET))
+    auth = {"Authorization": f"Bearer {_token()}"}
+    base = f"http://127.0.0.1:{port}"
+    ws_url = f"ws://127.0.0.1:{port}/api/ws"
+
+    try:
+        async with httpx2.AsyncClient(timeout=30) as client:
+            # ① 造一个真会话（HTTP 面凭据齐全）：读到 run/completed 收流。
+            frames: list[dict] = []
+            async with client.stream(
+                "POST", f"{base}/api/sessions", json={"task": "建会话"}, headers=auth,
+            ) as response:
+                assert response.status_code == 200
+                async for line in response.aiter_lines():
+                    if line.startswith("data:"):
+                        frame = json.loads(line.removeprefix("data:").strip())
+                        frames.append(frame)
+                        if frame.get("type") == "run/completed":
+                            break
+            session_id = frames[0]["session_id"]
+
+            async def event_count() -> int:
+                got = await client.get(f"{base}/api/sessions/{session_id}/events", headers=auth)
+                assert got.status_code == 200
+                return len(got.json())
+
+            before = await event_count()
+            assert before > 0, "对照会话必须真有事件，否则下面的『一条不增』没有判别力"
+
+            # ② 无凭据的 WS：握手就被拒 ⇒ 订阅与写入都到不了业务面。
+            with pytest.raises(HTTPXWSException):
+                async with client.websocket(ws_url) as ws:
+                    await ws.send_text(json.dumps({
+                        "type": "subscribe", "session_id": session_id,
+                    }))
+                    await ws.send_text(json.dumps({
+                        "type": "send_message", "session_id": session_id,
+                        "content": "无凭据也想驱动会话",
+                    }))
+
+            assert await event_count() == before, "被拒的连接不得驱动会话（事件一条都不该增）"
+
+            # ③ 同一形态带凭据：读得到（快照含真实事件）、写得动（新 run 起得来）。
+            async with client.websocket(ws_url, headers=auth) as ws:
+                await ws.send_text(json.dumps({
+                    "type": "subscribe", "session_id": session_id,
+                }))
+                frames = await _recv_until(ws, lambda fs: any(
+                    f.get("type") == "snapshot" for f in fs))
+                snapshot = next(f for f in frames if f.get("type") == "snapshot")
+                assert snapshot["events"], "带凭据的订阅必须拿到事件（读面通）"
+
+                await ws.send_text(json.dumps({
+                    "type": "send_message", "session_id": session_id,
+                    "content": "带凭据可以驱动",
+                }))
+                frames = await _recv_until(ws, lambda fs: any(
+                    f.get("type") == "launched" for f in fs))
+                assert any(f.get("type") == "launched" for f in frames), \
+                    "带凭据的写入必须真的起 run（写面通）"
+
+            assert await event_count() > before, "对照：带凭据的写入确实增了事件"
+    finally:
+        server.should_exit = True
+        serve_task.cancel()
+        try:
+            await serve_task
+        except asyncio.CancelledError:
+            pass
