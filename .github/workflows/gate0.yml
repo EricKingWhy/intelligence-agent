@@ -139,7 +139,7 @@ jobs:
       # pnpm 必须先于 setup-node：`cache: pnpm` 要读 pnpm 的 store 路径
       # （官方示例顺序；反了的话 setup-node 会直接报 "Unable to locate executable file: pnpm"）。
       - name: 装 Node 22（pnpm store 缓存）
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: pnpm
@@ -171,7 +171,7 @@ jobs:
         with:
           version: 10.32.1
       - name: 装 Node 22（pnpm store 缓存）
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: pnpm
