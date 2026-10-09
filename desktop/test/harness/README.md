@@ -12,7 +12,7 @@ remains (or when the restore is not byte-identical).
 | script | mutates | what it pins | last run |
 | --- | --- | --- | --- |
 | `teeth-check.mjs` | `installer/installer-directories.nsh` | the promote site's leftover record (#904): 6 mutated shapes — long-path probe replaced by the unprefixed one, no probe at all, swapped branches, record never read back, the record block in a dead branch, the whole block in a dead branch | 6/6 red, 0 survivors, restore identical (sha256 `47261c9d…`) |
-| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule | 40/40 red, 0 survivors, restore identical (sha256 `94841cf9…`) |
+| `teeth-check-guards.mjs` | `scripts/build-windows-installer.mjs` | every guard rule, one mutation per rule | 46/46 red, 0 survivors, restore identical (sha256 `c1d7fc0d…`) |
 
 Run from `desktop/`:
 
@@ -34,6 +34,12 @@ table, the sweep's enumerate-ask-report requirements, the sweep's `${GetParent}`
 argument order — FileFunc takes the path first — plus the fail-closed rejection
 of a bare-variable first argument, the rollback site's leftover record,
 fail-closed missing-site detection, and the cleanup-helper primitive list).
+
+The round-6 additions (2026-10-10 review of #904) are the sweep's armed shape
+check (`StrCpy $iaDeleteShapeCheck "1"` above its prepare call — with it off,
+every `"$INSTDIR.old-*"` sibling is deleted), the sweep's exit code pinned to
+`SetErrorLevel 2` *below* the delete, and the stray-delete scan (any recursive
+delete that is not the prepared target is a problem).
 
 ## nsis-probes/
 

@@ -1487,6 +1487,7 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       '  FindFirst $0 $1 "$INSTDIR.old-*"',
       '  ${GetParent} "$INSTDIR" $2',
       '  StrCpy $iaDeleteCandidate "$INSTDIR.old-x"',
+      '  StrCpy $iaDeleteShapeCheck "1"',
       '  Call iaPrepareDelete',
       '  StrCmp $iaDeleteStatus "ok" 0 iaSweepDone',
       '  ClearErrors',
@@ -1544,7 +1545,41 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       unguardedBackupDelete(swapped('  SetErrorLevel 2', '  StrCpy $9 ""'), {
         sitePolicies: DELETE_SITE_POLICIES,
       }),
-      [{ line: 14, what: 'nothing sets a non-zero exit code when leftovers are kept' }],
+      [{ line: 14, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' }],
+    )
+    // The value is the contract the caller reads (rc 2: the launch-form probe
+    // and the real-machine driver assert it), and it has to sit on the kept
+    // path below the delete — a `SetErrorLevel 0` next to it, or a `SetErrorLevel
+    // 2` above the delete that runs before anything was kept, both used to
+    // satisfy the earlier presence check (round-6 review, P3).
+    assert.deepEqual(
+      unguardedBackupDelete(swapped('  SetErrorLevel 2', '  SetErrorLevel 0'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [{ line: 14, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' }],
+    )
+    const aboveOnly = sweep
+      .split('\n')
+      .map((line) => (line === '  SetErrorLevel 2' ? '  StrCpy $9 ""' : line))
+      .join('\n')
+      .replace('  FindFirst $0 $1 "$INSTDIR.old-*"', '  SetErrorLevel 2\n  FindFirst $0 $1 "$INSTDIR.old-*"')
+    assert.deepEqual(unguardedBackupDelete(aboveOnly, { sitePolicies: DELETE_SITE_POLICIES }), [
+      { line: 15, what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)' },
+    ])
+    // The flag is what makes iaPrepareDelete run the name check at all: with it
+    // off, the delete pass removes every "$INSTDIR.old-*" sibling — foreign or
+    // unbraced names included — and the reparse scan is the only refusal left
+    // (round-6 review, P2: this exact mutation passed every check).
+    assert.deepEqual(
+      unguardedBackupDelete(swapped('  StrCpy $iaDeleteShapeCheck "1"', '  StrCpy $iaDeleteShapeCheck "0"'), {
+        sitePolicies: DELETE_SITE_POLICIES,
+      }),
+      [
+        {
+          line: 14,
+          what: 'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        },
+      ],
     )
     // FileFunc's argument order is "[path]" $result. Swapped, the macro's last
     // Pop lands on $INSTDIR: on the real uninstaller the delete pass then
@@ -1573,6 +1608,28 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
       }),
       [{ line: 14, what: "missing ${Errors} check before the end of the delete's block" }],
     )
+  })
+
+  it('flags a recursive delete that is not the prepared target (#904, round 6)', () => {
+    // Every other rule here binds `RMDir /r "$iaDeleteTarget"`; a second
+    // recursive delete of anything else — a path read from the registry, say —
+    // used to pass the whole guard while the delete that really runs is the
+    // one the rules cannot say anything about (round-6 review, P3).
+    const source = [
+      'StrCpy $iaDeleteShapeCheck "1"',
+      'Call iaPrepareDelete',
+      'StrCmp $iaDeleteStatus "ok" 0 iaPromoteDeleteSkipped',
+      'ClearErrors',
+      FIXED_DELETE,
+      'RMDir /r "$iaBackupDirectory"',
+      ...GUARDED_TAIL,
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(source), [
+      {
+        line: 6,
+        what: 'a recursive delete of something other than $iaDeleteTarget — only a target iaPrepareDelete built may be deleted',
+      },
+    ])
   })
 
   it('the rollback delete records the backup instead of reading its own error (#904)', () => {

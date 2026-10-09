@@ -127,16 +127,21 @@
   ; SHAPE, so it does not depend on the IaBackupDir / IaLeftoverDir single
   ; slots (only one leftover can be recorded at a time, and the uninstall
   ; section is free to remove the registry key). Fail-closed throughout: only a
-  ; name passing the shape check for exactly "$INSTDIR.old-{8-4-4-4-12}"
-  ; (iaStageApplication's own format, braces included — measured) is touched,
-  ; every candidate goes through the shared prepare step (which refuses a tree
+  ; name passing the shape check for "$INSTDIR.old-{8-4-4-4-12}"
+  ; (iaStageApplication's own format, braces included — measured) is touched.
+  ; StrCmp is case-insensitive by default and NTFS is too, so ".OLD-{…}" names
+  ; the same directory: the check pins the name, not a particular case.
+  ; Every candidate goes through the shared prepare step (which refuses a tree
   ; containing a reparse point — RMDir /r deletes THROUGH a junction, measured),
-  ; and anything left behind is reported and turns the uninstall's exit code
+  ; and anything left behind — a refusal, a failed delete, or the user
+  ; answering No to the prompt — is reported and turns the uninstall's exit code
   ; non-zero (the section's SetErrorLevel: it reaches a caller through an
   ; in-place launch -- the form the stock updater's own call uses -- while a
   ; plain launch only reports the stub's 0 either way; readings in
   ; test/harness/nsis-probes/launch-form-probe). $9 counts in the first pass,
-  ; then whatever was kept.
+  ; then whatever was kept. The prompt is interactive-only: its /SD IDOK default
+  ; makes a silent uninstall take the delete path, so the declined branch below
+  ; is never a silent run's outcome.
   ; $INSTDIR itself may already be gone here; only its name is needed, and the
   ; leftovers live beside it.
   FindFirst $0 $1 "$INSTDIR.old-*"
@@ -153,7 +158,14 @@ iaSweepCountNext:
 iaSweepAsk:
   FindClose $0
   StrCmp $9 0 iaSweepDone
-  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDone
+  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "($9) $(iaLeftoverSweep)" /SD IDOK IDOK iaSweepDelete IDCANCEL iaSweepDeclined
+iaSweepDeclined:
+  ; #904 item 4: declining is a "kept" outcome, not a success — the leftovers
+  ; are still on disk, so the exit code says so. No second dialog: the user
+  ; just answered this one, and the DetailPrint line is the log's record.
+  DetailPrint "customUnInstall: leftover sweep declined: $9 kept"
+  SetErrorLevel 2
+  Goto iaSweepDone
 iaSweepDelete:
   ; The leftovers sit beside $INSTDIR and FindFirst hands back leaf names, so
   ; the parent directory is cut off $INSTDIR once (FileFunc.nsh's ${GetParent},

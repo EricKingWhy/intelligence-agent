@@ -257,6 +257,27 @@ const mutations = {
     '  if (/RMDir\\s+\\/r/im.test(code)) {',
     '  if (false) {',
   ),
+
+  // --- rules round 6 added (2026-10-10 review) ---
+  // The sweep's shape gate (P2: `"1"`→`"0"` at installer.nsh:174 survived the
+  // whole guard and the unit suite), the exit-code value and its position on the
+  // kept path (P3), and the stray second recursive delete (P3).
+  'sweep shape-check arming requirement dropped (#904)': swap(
+    "        policy === 'sweep' &&",
+    '        false &&',
+  ),
+  'sweep exit-code value pin dropped (#904)': swap(
+    '/^\\s*SetErrorLevel\\s+2\\s*$/i.test(line)',
+    '/^\\s*SetErrorLevel\\b/i.test(line)',
+  ),
+  'sweep exit-code position weakened to the whole block (#904)': swap(
+    '          .slice(i + 1, blockEnd + 1)',
+    '          .slice(blockStart, blockEnd + 1)',
+  ),
+  'stray recursive-delete rule dropped (#904)': swap(
+    '    if (!/RMDir\\s+\\/r/i.test(lines[i]) || deleteLine.test(lines[i])) continue',
+    '    if (true) continue',
+  ),
 }
 
 let survivors = 0

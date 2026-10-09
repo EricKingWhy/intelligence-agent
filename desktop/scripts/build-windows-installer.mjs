@@ -1190,6 +1190,27 @@ export function unguardedBackupDelete(source, options = {}) {
           what: `no ${'StrCmp $iaDeleteStatus "ok"'} gate between iaPrepareDelete and the delete — a refused target would still be deleted`,
         })
       }
+      // #904 item 3 (round 6): iaPrepareDelete runs the name check only when
+      // this flag is armed, and the reparse scan alone is not the contract —
+      // with the flag gone the delete runs on whatever name the caller built,
+      // so the sweep would remove every "$INSTDIR.old-*" sibling, foreign or
+      // unbraced (measured: a `"1"`→`"0"` mutation at installer.nsh:174 passed
+      // every check of this guard and the whole unit suite).
+      if (
+        policy === 'sweep' &&
+        !lines
+          .slice(blockStart, prepareIndex)
+          .some(
+            (line, offset) =>
+              onDeletePath(blockStart + offset) &&
+              /^\s*StrCpy\s+\$iaDeleteShapeCheck\s+"1"\s*$/i.test(line),
+          )
+      ) {
+        problems.push({
+          line: i + 1,
+          what: 'the sweep does not arm the shape check (StrCpy $iaDeleteShapeCheck "1") above its prepare call — iaPrepareDelete then skips the name check and deletes whatever name the caller built',
+        })
+      }
     }
     const blockEnd = (() => {
       for (let j = i + 1; j < lines.length; j += 1) {
@@ -1312,13 +1333,24 @@ export function unguardedBackupDelete(source, options = {}) {
           re: /\$\(iaLeftoverSweep\)/,
           what: 'the sweep does not ask before deleting (no $(iaLeftoverSweep) prompt)',
         },
-        {
-          re: /^\s*SetErrorLevel\b/im,
-          what: 'nothing sets a non-zero exit code when leftovers are kept',
-        },
       ]
       for (const { re, what } of required) {
         if (!block.some((line) => re.test(line))) problems.push({ line: i + 1, what })
+      }
+      // #904 item 4 (round 6): the exit code is the contract the caller reads,
+      // so its value is pinned — 2, the reading the launch-form probe and the
+      // real-machine driver assert — and it has to sit below the delete: a
+      // `SetErrorLevel 0` next to it, or one above the delete that runs before
+      // anything was kept, used to satisfy a presence check.
+      if (
+        !lines
+          .slice(i + 1, blockEnd + 1)
+          .some((line) => /^\s*SetErrorLevel\s+2\s*$/i.test(line))
+      ) {
+        problems.push({
+          line: i + 1,
+          what: 'nothing sets the exit code to 2 when leftovers are kept (SetErrorLevel 2)',
+        })
       }
       // Fail-closed on the swapped form itself: FileFunc passes the path as the
       // first, quoted argument, so a ${GetParent} whose first argument is a bare
@@ -1429,6 +1461,17 @@ export function unguardedBackupDelete(source, options = {}) {
         what: `the delete sits inside !macro ${macroName}, which the file never !insertmacro's — the delete never runs`,
       })
     }
+  }
+  // #904 (round 6): the sites above are the only recursive deletes these files
+  // may have. The rules all bind `RMDir /r "$iaDeleteTarget"`, so a second
+  // recursive delete of anything else — a registry-read path, say — used to
+  // pass every check while the delete that really runs is the unvalidated one.
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/RMDir\s+\/r/i.test(lines[i]) || deleteLine.test(lines[i])) continue
+    problems.push({
+      line: i + 1,
+      what: 'a recursive delete of something other than $iaDeleteTarget — only a target iaPrepareDelete built may be deleted',
+    })
   }
   if (sites === 0 && requireSite) {
     problems.push({ line: 0, what: 'no recursive RMDir of $iaDeleteTarget (a prepared target) found' })
