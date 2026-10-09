@@ -31,11 +31,22 @@
  *   `model/delta` 是 stream-only（seq=null、从不落库），不会出现在快照里，
  *   故 null-seq 帧无需去重也不会重复。
  *
+ * ## 凭据（配置了 `JWT_SECRET` 的部署）
+ *
+ * 浏览器 `WebSocket` 构造器**不能**设 `Authorization` 头，所以 token 走
+ * `Sec-WebSocket-Protocol` 子协议（k8s 同款形状，见 `WS_BEARER_SUBPROTOCOL_PREFIX`）。
+ * token 来源与 HTTP 面**同一处**：`auth.getToken()`（localStorage `ahi.apiToken`），
+ * 不另造一份凭据存储。未配置 token 时只发业务子协议——**子协议这条通道本身**对本地
+ * 信任形态没有影响（该形态下后端不看凭据、只看来源闸）。
+ * 桌面外壳形态下 loopback 代理注入的 `Bearer` 头照旧有效（两种来源后端等价）。
+ *
  * ## WS 不可用时：自动降级到 HTTP SSE
  *
  * WS 不是所有部署都能用（前置代理可能拒掉 Upgrade 握手）。**建连阶段一个服务帧
  * 都没收到**就失败 = 传输不可用 → 用同一个 `after_seq` 改走
- * `GET /sessions/{id}/stream`，把 SSE 响应体逐字节搬进本流。
+ * `GET /sessions/{id}/stream`，把 SSE 响应体逐字节搬进本流。降级必定打
+ * `console.warn`（#890）：这是"凭据/部署有问题"的唯一可见信号，静默等于让现场
+ * 只剩「直播卡住」。
  *
  * 两种失败**不**降级，因为它们恰恰证明 WS 是通的：
  * - 已经收到过服务帧（快照/事件/心跳）后断流 —— 那是流本身的问题，交给上层的
@@ -62,12 +73,43 @@
 
 import type { AgentEvent } from '../types';
 import { listSessions, streamSession } from './api';
+import { getToken } from './auth';
 // 终态集合**不另抄一份**：runState.ts 是「这个 run 收口了吗」的唯一判断点
 // （T8 加 run/interrupted 时三处各自枚举集体漂移，见那里的注释）。
 import { RUN_TERMINAL_TYPES } from './runState';
 
 /** 抖动窗口：`done` 未及时到达时，收到终态事件后兜底收流。 */
 const TERMINAL_FALLBACK_MS = 2500;
+
+/** 承载 token 的子协议前缀（#890，与后端 `WS_BEARER_SUBPROTOCOL_PREFIX` 逐字对应）。
+ *
+ *  浏览器的 `WebSocket` 构造器**不能**设 `Authorization` 头——子协议是它唯一能带凭据
+ *  的通道。后端按 k8s 同款形状解出 `base64url.bearer.authorization.agent-harness.<token>`：
+ *  base64url 无 padding 编码，因为子协议值必须是合法 HTTP token 字符，padding 的 `=`
+ *  会被浏览器直接拒发。后端校验成功后**不回显**这个子协议（防泄漏）。 */
+const WS_BEARER_SUBPROTOCOL_PREFIX = 'base64url.bearer.authorization.agent-harness.';
+
+/** 业务子协议：请求了子协议就必须收到一个回显（否则浏览器自己判握手失败），而承载
+ *  token 的那一个后端永不回显 ⇒ 必须再带一个可回显的。后端同名常量同值。 */
+const WS_BUSINESS_SUBPROTOCOL = 'agent-harness.v1';
+
+/** 子协议列表：不带 token 时只给业务子协议（未配置密钥的本地信任形态照常连上）。 */
+function wsSubprotocols(): string[] {
+  const token = getToken();
+  if (!token) return [WS_BUSINESS_SUBPROTOCOL];
+  // base64url 无 padding：`+`→`-`、`/`→`_`、去掉结尾 `=`。先 `TextEncoder` 把
+  // token 转成 UTF-8 字节再喂 `btoa`——`btoa` 只吃 Latin-1，而 token 是 UTF-8 文本
+  // （开发者粘贴的任意串），直接喂会抛 InvalidCharacterError。
+  const encoded = base64UrlEncode(new TextEncoder().encode(token));
+  return [WS_BUSINESS_SUBPROTOCOL, `${WS_BEARER_SUBPROTOCOL_PREFIX}${encoded}`];
+}
+
+/** UTF-8 字节 → base64url（无 padding）。 */
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
 function wsEndpoint(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -203,14 +245,21 @@ export function wsStreamResponse(
         }
         fallbackStarted = true;
         teardown();
-        void fallbackToSse(err ? err.message : 'WebSocket 不可用');
+        // 不静默（#890 P1-1）：建连阶段失败是"配置/凭据/部署"问题的**唯一**信号，
+        // 而这里接着降级到 SSE——正是 `vite.config.ts` 与 LIVE_BROWSER_TEST §9.4 F14
+        // 写明要绕开的通道（交付层攒包，41~44s）。不打日志的话现场只剩"直播卡住"，
+        // 排障无从下手。只在降级这一条路上打（正常断流交给上层重连，不刷屏）。
+        const why = err ? err.message : 'WebSocket 建连阶段即关闭';
+        console.warn(`[wsStream] WS 不可用，降级到 HTTP SSE：${why}`);
+        void fallbackToSse(why);
       };
 
       try {
-        sock = new WebSocket(wsEndpoint());
+        sock = new WebSocket(wsEndpoint(), wsSubprotocols());
       } catch (e) {
         // 构造就抛（CSP / 非 WS 环境）：没有任何 socket 可关，直接降级
         fallbackStarted = true;
+        console.warn(`[wsStream] 无法构造 WebSocket，降级到 HTTP SSE：${(e as Error).message}`);
         void fallbackToSse((e as Error).message);
         return;
       }
