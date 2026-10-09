@@ -28,60 +28,56 @@ const eol = raw.includes('\r\n') ? '\r\n' : '\n'
 const sha = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
 process.stdout.write(`original sha256 = ${sha(raw)} eol=${JSON.stringify(eol)}\n`)
 
-const prefixedProbe = '${IfNot} ${FileExists} "\\\\?\\$iaLeftoverDirectory"'
 const unprefixedProbe = '${IfNot} ${FileExists} "$iaLeftoverDirectory"'
 const dropLine = 'DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"'
 const lf = '\n'
 
 const readLine = `    !insertmacro iaReadLeftoverDir${lf}`
-// The shipped shape: the record is dropped only inside BOTH negative probes.
+// The shipped shape (#904): the record is dropped only after iaProbePath, the
+// helper that tries every form that can name the path. The pre-#904 shape (the
+// unprefixed probe alone) is one of the mutations below: it reads a
+// longer-than-MAX_PATH or UNC record as "gone" and drops it.
 const shippedProbeBlock = [
   '    ${If} $iaLeftoverDirectory != ""',
-  `      ${unprefixedProbe}`,
-  `        ${prefixedProbe}`,
-  `          ${dropLine}`,
-  '        ${EndIf}',
-  '      ${EndIf}',
-  '    ${EndIf}',
-].join(lf)
-// Prefixed probe only: what the first repair round shipped, and what lets a UNC
-// or otherwise inexpressible recorded path be read as "gone".
-const prefixedOnlyBlock = [
-  '    ${If} $iaLeftoverDirectory != ""',
-  `      ${prefixedProbe}`,
+  '      StrCpy $iaPlainPath "$iaLeftoverDirectory"',
+  '      Call iaProbePath',
+  '      ${If} $iaProbeFound != "1"',
   `        ${dropLine}`,
   '      ${EndIf}',
   '    ${EndIf}',
 ].join(lf)
-const swappedBlock = [
+const unprefixedOnlyBlock = [
   '    ${If} $iaLeftoverDirectory != ""',
   `      ${unprefixedProbe}`,
-  '        ${Else}',
-  `          ${dropLine}`,
-  '        ${EndIf}',
+  `        ${dropLine}`,
+  '      ${EndIf}',
+  '    ${EndIf}',
+].join(lf)
+const unprobedBlock = [
+  '    ${If} $iaLeftoverDirectory != ""',
+  `      ${dropLine}`,
+  '    ${EndIf}',
+].join(lf)
+const swappedBlock = [
+  '    ${If} $iaLeftoverDirectory != ""',
+  '      StrCpy $iaPlainPath "$iaLeftoverDirectory"',
+  '      Call iaProbePath',
+  '      ${If} $iaProbeFound == "1"',
+  `        ${dropLine}`,
   '      ${EndIf}',
   '    ${EndIf}',
 ].join(lf)
 
 const mutations = {
-  'probe without the long-path prefix at all (B-1)': (source) => {
+  'probe without the long-path helper (B-1)': (source) => {
     if (!source.includes(shippedProbeBlock)) throw new Error('probe block not found')
-    return source.replace(
-      shippedProbeBlock,
-      [
-        '    ${If} $iaLeftoverDirectory != ""',
-        `      ${unprefixedProbe}`,
-        `        ${dropLine}`,
-        '      ${EndIf}',
-        '    ${EndIf}',
-      ].join(lf),
-    )
+    return source.replace(shippedProbeBlock, unprefixedOnlyBlock)
   },
-  'drop on one probe form only (B-P2-2)': (source) => {
+  'drop without probing the path at all (B-P2-2)': (source) => {
     if (!source.includes(shippedProbeBlock)) throw new Error('probe block not found')
-    return source.replace(shippedProbeBlock, prefixedOnlyBlock)
+    return source.replace(shippedProbeBlock, unprobedBlock)
   },
-  'branches swapped: drop the record while the directory exists (P3-A5)': (source) => {
+  'branches swapped: drop the record while the path is still there (P3-A5)': (source) => {
     if (!source.includes(shippedProbeBlock)) throw new Error('probe block not found')
     return source.replace(shippedProbeBlock, swappedBlock)
   },
@@ -100,19 +96,15 @@ const mutations = {
       ].join(lf),
     )
   },
-  'whole guarded body parked in a never-taken branch (F1)': (source) => {
-    // What relative-depth assertions cannot see: delete, checks and clear all
+  'whole record handling parked in a never-taken branch (F1)': (source) => {
+    // What relative-depth assertions cannot see: read, probe, drop and clear all
     // move one level down together, so every comparison between them still
-    // holds. Only the delete's absolute depth (and the guard's absolute bound)
+    // holds. Only the block's absolute place (and the guard's absolute bound)
     // catches it.
-    const shippedDelete = `    RMDir /r "\\\\?\\$iaBackupDirectory"`
     const clearCall = '    !insertmacro iaClearBackupDir'
-    const anchor = ['    ClearErrors', shippedDelete].join(lf)
-    if (!source.includes(anchor)) throw new Error('delete anchor not found')
-    if (!source.includes([lf, clearCall].join(''))) throw new Error('clear anchor not found')
-    return source
-      .replace(anchor, ['    ${If} 1 == 0', '    ClearErrors', shippedDelete].join(lf))
-      .replace([lf, clearCall].join(''), [lf, clearCall, '    ${EndIf}'].join(''))
+    const anchor = ['    !insertmacro iaReadLeftoverDir', shippedProbeBlock, clearCall].join(lf)
+    if (!source.includes(anchor)) throw new Error('record-handling anchor not found')
+    return source.replace(anchor, `    \${If} 1 == 0${lf}${anchor}${lf}    \${EndIf}`)
   },
 }
 
@@ -147,3 +139,7 @@ for (const [name, mutate] of Object.entries(mutations)) {
 const restored = readFileSync(nsh, 'utf8')
 process.stdout.write(`\nrestored sha256 = ${sha(restored)} identical=${restored === raw}\n`)
 process.stdout.write(`surviving mutations = ${survivors}\n`)
+// A survivor is a hole in the assertions (or a mutation that no longer applies
+// to the shipped text), so the run fails: a harness that only prints them is
+// easy to read as green.
+if (survivors > 0 || restored !== raw) process.exitCode = 1

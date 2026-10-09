@@ -197,6 +197,66 @@ const mutations = {
     (line) => line.startsWith('        } else if (ch === \'"\''),
     () => '        } else if (ch === \'"\') {',
   ),
+
+  // --- rules #904 added ---
+  'prepare requirement dropped (#904)': swap(
+    '        if (prepareCall.test(lines[j])) return j',
+    '        if (false) return j',
+  ),
+  'prepare call without the uninstaller name space (#904)': swap(
+    '  const prepareCall = /^\\s*Call\\s+(?:un\\.)?iaPrepareDelete\\b/i',
+    '  const prepareCall = /^\\s*Call\\s+iaPrepareDelete\\b/i',
+  ),
+  'prepare same-branch check dropped (#904)': swap(
+    '    } else if (!onSameBranch(trace, prepareIndex, i)) {',
+    '    } else if (false) {',
+  ),
+  'prepare sibling-divider check dropped (#904)': swap(
+    '    } else if (branchDividersBetween(trace, prepareIndex, i).length > 0) {',
+    '    } else if (false) {',
+  ),
+  'status gate requirement dropped (#904)': swap('      if (gateIndex === -1) {', '      if (false) {'),
+  'site policy table ignored — strict everywhere (#904)': swap(
+    [
+      '    const policy =',
+      '      Object.entries(sitePolicies).find(',
+      '        ([name]) => name.toLowerCase() === siteName,',
+      "      )?.[1] ?? 'backup'",
+    ].join('\n'),
+    "    const policy = 'backup'",
+  ),
+  'sweep read-count rule dropped (#904)': swap(
+    "      readCount: policy === 'backup' || policy === 'sweep',",
+    "      readCount: policy === 'backup',",
+  ),
+  'sweep macro-insertion exemption dropped (#904)': swap("      policy !== 'sweep' &&", '      true &&'),
+  'rollback leftover-record requirement dropped (#904)': swap(
+    '    if (wants.deferredRecord) {',
+    '    if (false) {',
+  ),
+  'sweep report requirements dropped (#904)': swap('    if (wants.sweepReport) {', '    if (false) {'),
+  // FileFunc's ${GetParent} takes ("[path]" $result): with the arguments swapped
+  // the macro's last Pop lands on $INSTDIR and the sweep silently deletes
+  // nothing (measured on the real uninstaller). The required form and the
+  // fail-closed rejection of a bare-variable first argument are separate rules,
+  // so each gets its own mutation.
+  'sweep ${GetParent} order requirement dropped (#904)': swap(
+    '/^\\s*\\$\\{GetParent\\}\\s+"\\$INSTDIR"\\s+\\$\\d/im,',
+    '/^\\s*\\$\\{GetParent\\}\\s+"\\$INSTDIRX"\\s+\\$\\d/im,',
+  ),
+  'sweep ${GetParent} bare-variable rejection dropped (#904)': swap(
+    '/\\$\\{GetParent\\}\\s+\\$/',
+    '/\\$\\{GetParent\\}\\s+\\$NOPE/',
+  ),
+  'fail-closed on a missing site dropped (#904)': swap('  if (sites === 0 && requireSite) {', '  if (false) {'),
+  'cleanup primitive list ignored (#904)': swap(
+    '  const problems = required.filter(({ re }) => !re.test(code)).map(({ what }) => `missing ${what}`)',
+    '  const problems = []',
+  ),
+  'cleanup helper recursive-delete ban dropped (#904)': swap(
+    '  if (/RMDir\\s+\\/r/im.test(code)) {',
+    '  if (false) {',
+  ),
 }
 
 let survivors = 0
@@ -235,3 +295,7 @@ for (const [name, mutate] of Object.entries(mutations)) {
 const restored = readFileSync(guardPath, 'utf8')
 process.stdout.write(`\nrestored sha256 = ${sha(restored)} identical=${restored === raw}\n`)
 process.stdout.write(`surviving mutations = ${survivors}\n`)
+// A survivor is a fixture that does not pin its rule (or a mutation that no
+// longer applies to the shipped text), so the run fails: a harness that only
+// prints them is easy to read as green.
+if (survivors > 0 || restored !== raw) process.exitCode = 1
