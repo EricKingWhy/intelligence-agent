@@ -13,7 +13,7 @@
 > §14 的现行模型看，不要照历史条目里的旧分支分工。
 
 ---
-> **当前状态（2026-10-09，#871 CLOSED）**：#871「项目级本地 Skill 安装、启停与移除」已完成并关闭，交付评论 [issuecomment-6069627082](https://github.com/EricKingWhy/intelligence-agent/issues/871#issuecomment-6069627082)；`in-progress` 已移除。分支 `codex/issue-871-skill-lifecycle` 已同步到最新 `origin/main` `76577061575714e8e0aacc3d84f2f59885e168a8`，合并 `145011be` 的 10 个 incoming 文件均与 main 父树一致，机械归属行已补；无冲突。`origin/main` 新增 `.github/workflows/windows-installer-smoke.yml` 属非 docs 路径，因此此前 Gate-0 与全量验证不传递；最新同步树的完整验证与 Gate-0 待执行。Issue 仍 CLOSED；未 push、未开 PR、未合并 GitHub。
+> **当前状态（2026-10-09，#871 CLOSED）**：#871「项目级本地 Skill 安装、启停与移除」已完成并关闭，交付评论 [issuecomment-6069627082](https://github.com/EricKingWhy/intelligence-agent/issues/871#issuecomment-6069627082)；`in-progress` 已移除。分支已同步最新 `origin/main` `76577061575714e8e0aacc3d84f2f59885e168a8`，merge `145011be` 的 10 个 incoming 文件均与 main 父树一致，机械归属行已补。最新同步树 Gate-0 6/6 PASS：`9109b15506f52f72e9b5db43004f51e6a064e8e1` / tree `3a6261c4c69d`，收据 `docs/gate/9109b15506f52f72e9b5db43004f51e6a064e8e1.json`。因新增 `.github/workflows/windows-installer-smoke.yml` 是非 docs 路径，旧全量验证不传递；最新树的全量 pytest 与前端完整验证待重跑。未 push、未开 PR、未合并 GitHub。
 
 > **当前状态（2026-10-09，#865）**：PR [#881](https://github.com/EricKingWhy/intelligence-agent/pull/881) 已合入 `main`，merge commit `5eaeabb9675f32d3913ddbd6f1106d1ccb422607`；Issue #865 已随 PR 自动关闭，`in-progress` 已移除，交付评论为 `issuecomment-6065790688`。分支 `codex/effort-slider` 的 PR head 为 `83dfbd3f544e44fbf833f9b04c7e9340ff6cddcd`。GitHub 必需 `gate0`、Chromium PR smoke（5m54s）和 gitleaks 均通过。本地及完整门禁读数、既有测试红与非阻断 P3 见 2026-10 月档 #865；未将 Vitest / pytest 全量表述为全绿。
 
