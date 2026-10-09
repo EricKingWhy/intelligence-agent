@@ -45,11 +45,15 @@ def _png(width: int = 12, height: int = 8) -> bytes:
 
 
 def _client(tmp_path: Path, **overrides: Any) -> TestClient:
+    # #824 / MM-03：发送带图消息现在有服务端视觉门禁（非视觉模型 → 422）。本文件
+    # 测的是附件管线的形状/归属/载荷，故默认给一个**显式声明支持视觉**的 catalog，
+    # 让"发图"这条主链可走通；门禁本身的测试在 test_mm03_gates_and_limits.py。
     settings = Settings(
         _env_file=None,
         workspace_dir=str(tmp_path),
         artifact_dir=str(tmp_path / "artifacts"),
         model_api_key="sk-test",
+        agent_models=overrides.pop("agent_models", _VISION_CATALOG),
         **overrides,
     )
     return TestClient(create_app(settings, enable_cors=False))
@@ -66,7 +70,7 @@ def _session_id_from_sse(resp: Any) -> str:
     return str(session_id)
 
 
-def _create_session(client: TestClient, *, model: str | None = None) -> str:
+def _create_session(client: TestClient, *, model: str | None = "vision-probe") -> str:
     body: dict[str, Any] = {"task": "hi", "budget": {"local": {"max_agent_turns": 1}}}
     if model is not None:
         body["model"] = model

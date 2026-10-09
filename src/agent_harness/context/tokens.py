@@ -30,6 +30,34 @@ from pydantic_core import PydanticSerializationError
 
 logger = logging.getLogger("agent_harness.context.tokens")
 
+#: 一张图片的近似 token 成本（#824 / MM-03，AC7 / PRD D3）。
+#:
+#: **口径（显式记录）**：投影层的**标准图片块**
+#: （`{"type":"image","file_id":...}`，`attachments.projection.image_content_block`）
+#: 只带内容寻址 id，不带像素/字节尺寸——本仓在估算处按**固定近似值**计入图片开销，
+#: 而不是按 Provider 像素公式精算。依据（≥2 独立来源）：
+#:
+#: - Pi `packages/ai/src/utils/estimate.ts:16,34`（MIT，commit `1b347794`）：
+#:   图片按 `ESTIMATED_IMAGE_CHARS = 4800` 字符计 → `4800 / 4 = 1200` token/图。
+#: - Open WebUI 的图片预算下界参照 = 1000 token/图（`docs/research/
+#:   2026-10-07-multimodal-image-input-research.md` §3.2 第 6 条）。
+#: - DSH 有更精确的 DeepSeek 像素公式（`packages/llm/llm-deepseek/
+#:   src/image-tokens.ts`，MIT，commit `5badb150`：14px patch、3:1 下采样、封顶
+#:   1024 token），但需要图片像素尺寸，而标准块刻意不携带（加字段会破坏跨端投影
+#:   契约，见 `attachments/projection.py` 的块形状）；故取"下界 + 常量"这一更稳的口径。
+#:
+#: **目的**：防止"图不计费导致 hard guard 失守"——多张大图会让估算显著抬高，
+#: 不再让 `max_context_tokens * hard_guard_threshold` 对图片开销视而不见。真实
+#: usage 仍以 Provider 回执为权威（`builder._usage_anchored_tokens` 的锚价只抬高）。
+IMAGE_TOKENS_PER_IMAGE = 1200
+
+#: 图片内容块的判别值：标准块（投影后 / 装配前）与 provider 块（装配后）。
+#: 取值与 `attachments.projection.image_content_block`（产出 `"image"`）和
+#: `model.multimodal._STANDARD_IMAGE_TYPE` / `_PROVIDER_IMAGE_TYPE`（`"image"` /
+#: `"image_url"`）**同源**——这里是 context 层、不反向依赖 model 适配层，故以常量
+#: 复述协议级 block type。两处若改其一，务必同步（本注解即同步义务登记）。
+_IMAGE_BLOCK_TYPES = frozenset({"image", "image_url"})
+
 #: 进程内「精确编码不可用」锁（#570）：tiktoken 只记忆**成功**的编码实例
 #: （``registry.ENCODINGS``），失败后每次 ``get_encoding`` 都会重新走下载
 #: 路径——run 内多次估算会把一次断网放大成 N 次慢网络重试（每次还各抛
@@ -104,14 +132,46 @@ def _contains_lone_surrogate(value: object) -> bool:
     return False
 
 
+def image_tokens_in_message(message: AnyMessage) -> int:
+    """消息内容里的图片块数 × 单图近似成本（#824 / MM-03，AC7）。
+
+    识别**标准块**（`{"type":"image",...}`，投影后、装配前）与 **provider 块**
+    （`{"type":"image_url",...}`，装配后）两种形态；纯文本（`str` 内容）或只含
+    文本块的列表一律 0——无附件的纯文本链路 token 口径逐字不变（AC9）。
+    成本常量与口径见 `IMAGE_TOKENS_PER_IMAGE`。
+    """
+    content = message.content
+    if not isinstance(content, list):
+        return 0
+    return sum(
+        1
+        for block in content
+        if isinstance(block, dict) and block.get("type") in _IMAGE_BLOCK_TYPES
+    ) * IMAGE_TOKENS_PER_IMAGE
+
+
+def message_cost(message: AnyMessage, *, payload: str | None = None) -> int:
+    """单条消息的 token 成本 = 结构 token + 图片近似成本（#824 / MM-03，AC7）。
+
+    结构 token 走 `estimate_tokens(model_dump_json)`（与全仓同一编码）；图片增量见
+    `image_tokens_in_message` / `IMAGE_TOKENS_PER_IMAGE`。预算/增量/锚三条估算路径
+    共用本函数，避免"结构 + 图片"这一惯用式在四处各写一遍而漂移。`payload` 已由
+    调用方算好时直接传入（`estimate_message_tokens` 要先拿它做 surrogate 校验，
+    否则会重复序列化）。
+    """
+    if payload is None:
+        payload = message.model_dump_json()
+    return estimate_tokens(payload) + image_tokens_in_message(message)
+
+
 def estimate_message_tokens(messages: list[AnyMessage]) -> int:
     """计入消息结构和 tool_calls；与文本估算使用同一个编码。
 
-    ⚠ 口径（#823 / MM-02，A4 / PRD D3）：本函数按 `model_dump_json` 计**消息结构**
-    ——带图消息里的标准图片块（`{"type":"image","file_id",...}`）只有几 token，真正
-    的 base64 载荷在请求装配时才注入、**不计入**此处估算。图片按 Provider 近似公式
-    计入预算/上下文压力属 **MM-03 必做**（登记见 #824）；在此之前不要把本估算当作
-    "已含图片开销"的用量（多张大图可击穿 hard guard 而估算看不见）。
+    图片口径（#824 / MM-03，AC7 / PRD D3）：带图消息里的标准图片块
+    （`{"type":"image","file_id",...}`）在 `model_dump_json` 里只有几 token，真正
+    的 base64 载荷在请求装配时才注入。为**不让图不计费击穿 hard guard**，本函数在
+    结构 token 之外，按 `image_tokens_in_message` 追加每张图的近似成本（常量与来源
+    见 `IMAGE_TOKENS_PER_IMAGE`）。纯文本消息该增量为 0，既有口径逐字不变（AC9）。
 
     #650：孤立 Unicode surrogate 能通过 Python 层校验、却无法编码进
     JSON——``model_dump_json`` 裸抛 ``PydanticSerializationError``（未收敛）。
@@ -137,5 +197,5 @@ def estimate_message_tokens(messages: list[AnyMessage]) -> int:
                 "代理项（U+D800–U+DFFF），无法序列化进 Context 预算；"
                 "按 hard guard 语义拒绝本轮估算"
             ) from error
-        total += estimate_tokens(payload)
+        total += message_cost(message, payload=payload)
     return total

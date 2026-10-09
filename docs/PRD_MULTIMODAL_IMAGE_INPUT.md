@@ -158,8 +158,12 @@ spec 03 §3.1「事件只留 ref，正文不进事件流」）决定：图片**�
 - `derive_messages` 投影：`user/message` → `HumanMessage(content=[{type:"text"},{type:"image_url",...}])`
   仅当该次请求的模型支持视觉；否则 `content` 文本追加占位符
   `"(image omitted: model does not support images)"`（Pi 语义，逐字可核对）。
-- token 估算：图片按 Provider 近似公式计入（不适用 tiktoken 逐字计数），并计入预算/上下文压力；
-  口径必须显式记录，避免「图不计费导致 hard guard 失守」。
+- token 估算（#824 / MM-03 记录的实现口径；单一事实源 `context/tokens.py::IMAGE_TOKENS_PER_IMAGE`
+  及其 docstring）：图片计入估算与预算/上下文压力，避免「图不计费导致 hard guard 失守」。
+  本仓取**每图固定近似成本** `1200` token；依据（≥2 独立来源）：Pi
+  `packages/ai/src/utils/estimate.ts`（`ESTIMATED_IMAGE_CHARS=4800 → /4 = 1200`，MIT，
+  commit `1b347794`）、Open WebUI 的 1000 token/图下界参照（调研报告 §3.2）。真实 usage 仍以
+  Provider 回执为权威（`_usage_anchored_tokens` 的锚价只抬高估算）。
 - compaction：摘要保留 artifact refs（spec 06 §5 已要求），旧图不因压缩被删除事实。
 
 ### D4. Provider 载荷
