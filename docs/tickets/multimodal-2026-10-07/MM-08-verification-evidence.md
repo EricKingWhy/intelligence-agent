@@ -79,6 +79,8 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | AC7 | 跨 session 读附件 404 授权断言在真实服务复验 | 真服务上打 4 种状态 | **PASS** |
 | AC8 | 缺陷以票面+证据回报，不扩大范围 | 本文件 §5（D1）即其证据 | **PASS（过程项）** |
 
+**原始读数（入库、字节可核）**：`docs/evidence/830-mm08-cross-client-local.json`（本机驱动全量 `evidence.json`，即上表逐条字段的来源）、`docs/evidence/830-mm08-cross-client-sandbox-verifier.txt`（沙箱驱动 stdout，同样 7 PASS/1 FAIL/1 NOT_RUN）。沙箱那次的 `evidence.json` 随沙箱销毁，但同批 `~/logs` 已整体取回本机（`/home/hatch/pytest-830/box-logs/logs.tgz`，391 KB）。
+
 ### AC1 — 跨端一致（PASS）
 
 - 命令：`python scripts/verify_830_mm08.py --work /home/hatch/pytest-830/mm08-fix`（退出码 1，因 AC3 FAIL）

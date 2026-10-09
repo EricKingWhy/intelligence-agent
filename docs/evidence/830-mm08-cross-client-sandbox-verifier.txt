@@ -1,0 +1,17 @@
+repo=/home/agent/ia
+work=/home/agent/m8b
+python=/home/agent/ia/.venv/bin/python
+server ready at http://127.0.0.1:48309 (pid=25207)
+[PASS] AC1 同一 session：Web 上传/引用 → TUI 客户端读到同一 attachment 引用与同一字节
+[PASS] AC2 kill -9 / 重启：事件与附件字节稳态；在途 run 被打断后事实不丢且可 resume 接续
+[FAIL] AC3 fork 边界语义与图复用：child 继承边界前的 ref，且该图在 child 仍可取回/可解释
+       note: 缺陷候选（AC3）：child 的 user/message 继承了 attachment ref，但附件字节在 child 命名空间里取不回（LocalArtifactStore 按 session_id 分目录，fork 不复制/不链接附件对象）⇒ 受控读回 404，且装配给模型的图片块被降级成 '(image omitted: model does not support images)' 占位符。
+[PASS] AC4 压缩后摘要保留 artifact ref（精确标识清单）；旧图可找回；事实不被压缩删除
+[PASS] AC5 事件流只记引用/尺寸/mime，不含 base64；大图不造成事件爆炸
+[PASS] AC6-TUI 真实 TUI 客户端代码（tui/src/api.ts）上传附图 → 事件带引用 → 回读同字节
+[PASS] AC6-CLI CLI `--image`：成功 exit 0 且事件带引用；缺文件/非图片/扩展名不符 exit 1 且零附件
+[NOT_RUN] AC6-VISION 真实视觉模型对同一张图给出回答（服务端真跑）
+[PASS] AC7 真实服务上跨会话读附件 404（与不存在不可区分）；未引用 404；形状非法 422
+server killed; elapsed=20.4s
+counts={'PASS': 7, 'FAIL': 1, 'NOT_RUN': 1}
+evidence -> /home/agent/m8b/evidence.json
