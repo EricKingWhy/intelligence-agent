@@ -1,0 +1,1 @@
+2026-10-09	#830 驱动子进程强制 UTF-8（run_cli/run_tui_client 加 encoding=utf-8,errors=replace + 子进程 PYTHONIOENCODING=utf-8）修 GA #37941349749 里 CLI job 的 cp1252 UnicodeDecodeError 探针假红；workflow paths 纳入 scripts/verify_830_mm08.py 与 scripts/mm08_stub_server.py	73e89f22344aeef34c85d862cf6c42ce3298ffa3..fa99acc1bc217cba7ad1f24678d2b939f8d7a5b1
