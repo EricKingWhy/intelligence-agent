@@ -259,6 +259,34 @@ class AttachmentReferenceInvalid(SessionServiceError):
     """
 
 
+class TooManyAttachments(SessionServiceError):
+    """单条消息引用的图片**数量**超过部署上限（#824 / MM-03）。
+
+    HTTP 422（入参非法，客户端可纠正）：请求里挂了超过
+    `attachment_max_images_per_message` 张图。判定在**发送端点**（数量是"一条消息"
+    的属性，上传端点看不到），且在任何落盘之前——被拒请求零事件、零存储残留。
+    """
+
+
+class AttachmentMessageTooLarge(SessionServiceError):
+    """单条消息引用的图片**总字节**超过部署上限（#824 / MM-03）。
+
+    HTTP 413（`Content Too Large`，与既有 body / 单张图超限同码）：请求里图片
+    字节之和超过 `attachment_max_message_image_bytes`。同样是发送端点在任何落盘
+    之前的判定；单张图的字节上限（upload 端点的 413）与之独立。
+    """
+
+
+class ModelDoesNotSupportImages(SessionServiceError):
+    """所选模型不支持视觉，但不能发送带图片的消息（#824 / MM-03，AC4）。
+
+    HTTP 422（客户端可纠正——改选视觉模型或去掉附图）。这是**服务端权威门禁**
+    （PRD D6 "不信任客户端"）：即便入口 UI 被绕过，服务端也拒绝把图发给看不懂的
+    模型。与投影层降级（`derive_messages(supports_vision=False)` 的占位符）构成
+    双保险——门禁拦在发送前，降级兜住"发送后 fallback 到非视觉模型"的场景。
+    """
+
+
 class InvalidForkBoundary(SessionServiceError):
     """fork 锚点非法（不是用户消息 seq / 前缀含未终态 run）。"""
 

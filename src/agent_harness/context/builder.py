@@ -26,7 +26,7 @@ from agent_harness.context.compactor import (
 )
 from agent_harness.context.provider import ContextProvider
 from agent_harness.context.pruner import PruneReport, ToolResultPruner
-from agent_harness.context.tokens import estimate_message_tokens, estimate_tokens
+from agent_harness.context.tokens import estimate_message_tokens, message_cost
 from agent_harness.model.multimodal import (
     DEFAULT_IMAGE_DETAIL,
     downgrade_to_non_vision,
@@ -654,14 +654,13 @@ class ContextBuilder:
                     for fact in active_facts
                 ],
             )
-        # ⚠ 口径（#823 / MM-02，A4 / PRD D3）：本估算对带图消息只计**标准图片块**
-        # （`{"type":"image","file_id",...}`，几 token）——真正的 base64 载荷在
-        # `_load_image_payloads`/`_finalize` 装配请求时才注入，**不计入本次 token
-        # 估算与预算/hard guard**。也就是说多张大图可让实际请求体量远超
-        # `max_context_tokens * hard_guard_threshold` 而估算看不见：本票按票面授权
-        # 将此「图片按 Provider 近似公式计入预算」**显式登记为 MM-03 必做**
-        # （见 #824），此处注释即 PRD D3 要求的「口径必须显式记录」。不要在没有
-        # MM-03 的预算计入前把本估算当"已含图片"的用量。
+        # 口径（#824 / MM-03，AC7 / PRD D3）：带图消息的 token 估算**已计入图片成本**
+        # ——`_estimate_tokens_cached` 在结构 token 上按 `IMAGE_TOKENS_PER_IMAGE`
+        # 追加每张图的近似开销（常量与来源见 `context/tokens.py`）。真正的 base64
+        # 载荷仍在 `_load_image_payloads`/`_finalize` 装配请求时才注入；估算用的是
+        # Pi 式固定近似（1200 token/图，标准块不带像素尺寸故不按 Provider 像素公式
+        # 精算），**目的是防止"图不计费导致 hard guard 失守"**，不追求逐 Provider 精确。
+        # 真实 usage 仍以 Provider 回执为权威（`_usage_anchored_tokens` 只抬高）。
         token_estimate = self._estimate_tokens_cached(session, messages)
         # #448：真实 usage 锚（Pi `compaction.ts:214-243` estimateContextTokens 同构）。
         # tiktoken 估算对数字/十六进制密集的 tool 结果会**低估**（#448 实测两 provider
@@ -1438,14 +1437,12 @@ class ContextBuilder:
             if anchor_index is None:
                 continue
             # 锚覆盖的是该轮的输入 prompt；响应消息与其后的新增消息不在其中，
-            # 按投影估算补上（与 _estimate_tokens_cached 同一编码口径）。
+            # 按投影估算补上（与 `message_cost` 同一编码口径，含图片块近似成本
+            # ——#824 / MM-03，否则图片增量会被漏计）。
             anchored = prompt_tokens
-            anchored += estimate_tokens(
-                messages[anchor_index].model_dump_json(),
-            )
+            anchored += message_cost(messages[anchor_index])
             anchored += sum(
-                estimate_tokens(message.model_dump_json())
-                for message in messages[anchor_index + 1:]
+                message_cost(message) for message in messages[anchor_index + 1:]
             )
             return anchored
         return 0
@@ -1484,7 +1481,11 @@ class ContextBuilder:
             key = (session.session_id, event.seq, self._supports_vision)
             cost = self._token_memo.get(key)
             if cost is None:
-                cost = estimate_tokens(message.model_dump_json())
+                # 结构 token + 图片近似成本（#824 / MM-03，AC7）：`message_cost` 单点
+                # 定义该惯用式；带图消息在视觉口径下含标准图片块，按
+                # IMAGE_TOKENS_PER_IMAGE 追加；非视觉口径投影成占位符文本（无图片
+                # 块），增量为 0。key 带视觉维度，故两口径各记一次。
+                cost = message_cost(message)
                 self._token_memo[key] = cost
             total += cost
         self._token_estimate_total = total
