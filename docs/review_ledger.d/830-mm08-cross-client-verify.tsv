@@ -1,0 +1,1 @@
+2026-10-09	#830 MM-08 跨端与恢复验证：新增验证脚手架（真 uvicorn + 真 TUI/CLI 客户端 + 确定性模型替身，AC1-AC7 驱动）与 Windows 近似验证 workflow（workflow_dispatch 手工触发，无密钥）；验证票只验不改，产品面零改动，缺陷 D1（fork 继承引用取不回字节）以证据回报	9c5bc1b4044b899e705b5d2df527d4d6dfe03df1..b795d41cf9b6a180fa78244f34ce90af13272864
