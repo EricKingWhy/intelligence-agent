@@ -16,6 +16,9 @@
 | 基线 | `origin/main` = `9c5bc1b4044b899e705b5d2df527d4d6dfe03df1` |
 | 脚手架提交 A″ | `b795d41cf9b6a180fa78244f34ce90af13272864`（3 文件：`scripts/mm08_stub_server.py`、`scripts/verify_830_mm08.py`、`.github/workflows/mm08-windows-verify.yml`；三者都是**新增**，产品代码零改动） |
 | 台账提交 B1 | `1fc9bc54b3540b291df5a51ff3fc08c730b99354`（`docs/review_ledger.d/830-mm08-cross-client-verify.tsv`，range `origin/main..A″`） |
+| 本轮修复提交（AC6-VISION / push 触发 / P3-P4） | `09245f03`；其机械归属行 `73e89f22` |
+| 本轮 GA 修复提交（子进程 UTF-8） | `fa99acc1`；其机械归属行 `a52ab2bf` |
+| GA 真触发读数 | §9 两轮：首轮 [#37941349749](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941349749)（暴露探针编码 bug）、次轮 [#37941646937](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941646937)（暴露 D2/D3） |
 | 门禁读数 | `docs/gate/1fc9bc54b3540b291df5a51ff3fc08c730b99354.json` = Gate-0 **6/6 PASS**（tip=B1, tree=`944ff04657ea`, 13.0s） |
 | 门禁可用性 | 本机 4/6（`web/node_modules` 缺失 ⇒ oxlint/tsc 车道阻塞）；沙箱 6/6（§10） |
 
@@ -79,7 +82,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | AC5 | 事件流可定位附件引用且**无 base64** | 大图（512KB）后扫 JSONL | **PASS** |
 | AC6 | 真机走查三端 | Web→真实视觉模型（**真跑 PASS**）/ TUI Windows Terminal（见 §9）/ CLI `--image` | AC6-TUI **PASS**、AC6-CLI **PASS**、AC6-VISION **PASS** |
 | AC7 | 跨 session 读附件 404 授权断言在真实服务复验 | 真服务上打 4 种状态 | **PASS** |
-| AC8 | 缺陷以票面+证据回报，不扩大范围 | 本文件 §5（D1）即其证据 | **PASS（过程项）** |
+| AC8 | 缺陷以票面+证据回报，不扩大范围 | 本文件 §5（D1/D2/D3）即其证据 | **PASS（过程项）** |
 
 **原始读数（入库、字节可核）**：`docs/evidence/830-mm08-cross-client-local.json`（本机最终驱动全量 `evidence.json`，即上表逐条字段的来源，`counts={'PASS':8,'FAIL':1,'NOT_RUN':0}`、`elapsed_s=61.33`）、`docs/evidence/830-mm08-cross-client-local-verify.txt`（同轮 `verify.log`：逐条 `[PASS]/[FAIL]` 行 + 墙钟，审查 P4-2 要求墙钟可核）、`docs/evidence/830-mm08-cross-client-sandbox-verifier.txt`（沙箱驱动 stdout，**无常视觉凭证** ⇒ 7 PASS/1 FAIL/1 NOT_RUN；那份早于 AC6-VISION 接线，故与本地读数差这一条）。沙箱那次的 `evidence.json` 随沙箱销毁，但同批 `~/logs` 已整体取回本机（`/home/hatch/pytest-830/box-logs/logs.tgz`，391 KB）。
 
@@ -194,6 +197,29 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 
 **修法方向（供决策，不在本票实施）**：(a) fork 时把被引用附件在 child 命名空间**落一份**（或硬链接/软链接）；(b) 附件存储改为**跨会话内容寻址**（DSH 式全局根）+ 授权仍按事件引用（本仓已有该闸门）；(c) child 读回时**回落到父命名空间**（需定义父链与权限边界，最容易出错）。三者都动产品语义。
 
+### D2 — Windows：`LocalArtifactStore` 用**文本模式** `os.open` 发布二进制对象 ⇒ 含 `0x0A` 的图片字节被撑成 CRLF，读回哈希不符（GA 近似验证新发现）
+
+| 项 | 内容 |
+| --- | --- |
+| 现象 | Windows 上 CLI `--image` 的**字节入站**必坏：`POST`/落盘看起来成功、事件引用也对，但**读回**该对象时 `KeyError: Blob artifact '<sha>' content hash mismatch (file modified or corrupted out-of-band)`；装配面随之打出 `WARNING 附件字节读取失败（sha256:…）——投影降级为占位符`（模型看不到图，**静默退化**） |
+| 复现 | GA [#37941646937](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941646937) job `cli` 步骤 5：`uv run pytest tests/test_cli_image.py -q` → `2 failed, 14 passed, 1 skipped`（`[shot.png]` / `[shot.bin]` 两例都红）；本地 Linux 同一命令全绿 ⇒ **Windows 专属** |
+| 证据 | ① 失败断言在 `tests/test_cli_image.py:201` 的 `await selection.store.load_bytes(attachment_id)`，异常抛在 `src/agent_harness/storage/local_artifact.py:260`；② 报错的 sha `71ceed261bd98059556ecf0e11ff21ceb281c793987dc5697ba3cec90211f769` **逐字等于** `sha256(png_bytes(4,3))`（本地实测复算一致）；③ 该载荷 68 字节、含 **2 个 `0x0A`**（PNG 签名 `\x89PNG\r\n\x1a\n`）；④ `_publish_blob`（`local_artifact.py:307`）用 `os.open(tmp, os.O_CREAT\|os.O_EXCL\|os.O_WRONLY, 0o600)`——**没有** `O_BINARY`；CPython 3.13 `Modules/posixmodule.c::os_open_impl` 在 `MS_WINDOWS` 下只补 `O_NOINHERIT`，flags 原样交给 CRT `_wopen`，而 CRT 默认**文本模式** ⇒ 写盘时 `0x0A → 0x0D 0x0A`。⑤ 本仓**自己**就有两处按同一理由加的 `getattr(os, "O_BINARY", 0)`（`context/project_instructions.py:388`、`skills/inspection.py:329`，`tests/context/test_project_instructions.py:229` 还断言了它）——即"os.open 在 Windows 要带 O_BINARY"是本仓已知纪律，唯独字节对象发布这一处漏了 |
+| 严重度 | **P1**（数据损坏 + 静默降级：Windows 上一切含 `0x0A` 的附件字节都会被写坏；上传成功、事件正常，只有模型侧看不到图。JPG/WebP/GIF 同样中招——只要字节里有 `0x0A`） |
+| 目标仓库 | intelligence-agent（后端；`src/agent_harness/storage/local_artifact.py::_publish_blob` 一行修复：`flags |= getattr(os, "O_BINARY", 0)`） |
+| 归属 | **NEEDS-USER-DECISION**：本票是验证票，只登记不修。注意它的发现路径是"#830 的 Windows 近似验证"——**没有这次 push 触发的 runner，这条在 Linux 上永远看不见** |
+| 诚实边界 | "CRLF 撑开"这条**机理**由 CPython 源码 + 本仓既有 O_BINARY 纪律推出（[INFERENCE] 级，未在 runner 上直接 dump 落盘字节）；但"读回哈希不符 + 载荷含 0x0A + 该处没带 O_BINARY + 仅 Windows 复现"是**实测事实**。补一条直接证据最省事的办法：在 runner 上 `python -c "import pathlib;print(pathlib.Path(rb'<对象路径>').read_bytes().count(b'\r\n'))"` |
+
+### D3 — `tui` 全量套件在 Windows 上不可移植（6 例红；测试/实现的 POSIX 假设，非 Windows 语义错）
+
+| 项 | 内容 |
+| --- | --- |
+| 现象 | GA `tui` job 步骤 5 `npm test` → **201 例 / 195 pass / 6 fail**（`npm test 退出码=1`）。Linux 上同一命令是 199/2（那 2 条正是要在 Windows 上过的，见上节） |
+| 复现 | GA [#37941646937](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941646937) job `tui` 步骤 5；本地 `cd tui && npm test` 不复现（Linux 全过那 6 条） |
+| 证据（6 例逐条根因） | ① `tui/test/app-images.test.ts:210`（AC2 括号粘贴）、② `:233`（AC4 `@path`）、③ `:481`（P3 上传窗口）、④ `:508`（N1 预检窗口）——四例同因：`const FIXTURE_PNG = new URL("./fixtures/shot.png", import.meta.url).pathname`；`URL.pathname` 在 Windows 上给 `/D:/a/.../shot.png`（**前导斜杠 + 正斜杠**），`statSync` 解不出来 ⇒ 图被判"读不到" ⇒ `pendingImages` 为空（`0 !== 1` / `0 !== 2` / `1 !== 2`）。修法：`fileURLToPath(new URL(...))`。⑤ `tui/test/image-paste.test.ts:60`（`file://` URL）：`resolvePastedImagePath(text, platform)` 的 `file://` 分支直接调 `fileURLToPath(raw)`——**吃运行时平台、不吃注入的 `platform` 参数**；Windows 上它对 `file:///tmp/shot.png` 抛错 ⇒ 返回 `undefined`，而断言写的是 Linux 期望 `/tmp/shot.png`。⑥ `tui/test/image-view.test.ts:83`（AC6 OSC 8）：占位文本断言含 `file:///home/u/shots/shot.png`，实现用运行时 `pathToFileURL` ⇒ Windows 上是 `file:///D:/…` |
+| 严重度 | **P2**（不影响 Windows 上的产品语义——`AC6-W1`/`AC6-W2` 的 Windows 判定 17/17 全过、`tsc` 也过；但**全套件红**会让"Windows 上跑 tui 全量"这条车道永远红，遮住将来真正的 Windows 回归。属"测试面不可移植"而非"产品坏"） |
+| 目标仓库 | intelligence-agent（`tui/test/*` 三处 + `tui/src/lib/image-paste.ts` 的 `platform` 传参一致性） |
+| 归属 | **NEEDS-USER-DECISION**：本票只登记不修（改测试会动 #827 的判别力，超出验证票范围） |
+
 ## 6. 观察项（登记但**不算缺陷**）
 
 - **O1 压缩 409**：`POST /context/compact` 在 run 终结收尾窗口会被 `is_busy` 判忙 → 409。驱动按真客户端行为重试（1s×最多 30 次），实测 `compact_attempts=2`。**设计内**，非缺陷。
@@ -230,11 +256,29 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 - Job `cli`（`runs-on: windows-latest`，Python 3.13 + uv，`if: ${{ !inputs.tui_only }}`）：`uv sync --locked --python 3.13` → `scripts/verify_830_mm08.py --only ac6-cli`（**与本地同一套断言**，不另写一份）→ `uv run pytest tests/test_cli_image.py -q`（16 例，Windows `tmp_path` 下重跑）→ `if: always()` 上传 `mm08-windows-cli` artifact。
 - 不写任何 secret；每条步骤都 `Tee-Object` 落 `$RUNNER_TEMP\mm08-tui` / `mm08-cli*`，`if: always()` 上传为 artifact。
 
-**本机（Linux）已能给出的同源读数**：`tui` 套件 201 条中 199 通过，**2 条失败且都只可能在 Windows 上通过**——`tui/test/host.test.ts:215`（`路径约定：数据根与凭据文件是同一层`）与 `:225`（`python 解析`）：两者断言的是 Windows 路径形状（`path.join` 在 Linux 下产出 `/`）。`cd tui && npm run check`（= workflow 步骤 2 同命令）**exit 0**（Linux 上类型面即过，win32 分支的类型面由 Windows runner 取证）。`tui/test/image-view.test.ts:68` 覆盖 `WT_SESSION`（`images:null`）⇒ 文本占位 + 负例转义序列 + 不得内嵌 base64；`:90` 覆盖「无 OSC 8 能力」时的文本路径。
+**本机（Linux）已能给出的同源读数**：`tui` 套件 201 条中 199 通过，**2 条失败且都只可能在 Windows 上通过**——`tui/test/host.test.ts:215`（`路径约定：数据根与凭据文件是同一层`）与 `:225`（`python 解析`）：两者断言的是 Windows 路径形状（`path.join` 在 Linux 下产出 `/`）。**这两条在 Windows runner 上确已通过**（`AC6-W2` 步骤 17/17 pass）；但 Windows 上**另**暴露 6 条 POSIX 假设的失败（D3）——即"Linux 上只红这 2 条"**不能**反推"Windows 上就全绿"。`cd tui && npm run check`（= workflow 步骤 2 同命令）**exit 0**（Linux 上类型面即过；Windows 上同命令也 exit 0，win32 分支的类型面已由 runner 取证）。`tui/test/image-view.test.ts:68` 覆盖 `WT_SESSION`（`images:null`）⇒ 文本占位 + 负例转义序列 + 不得内嵌 base64；`:90` 覆盖「无 OSC 8 能力」时的文本路径。
 
-**GA 触发结果（`workflow_dispatch` 实测 404 → 改用 `push` 触发；见 §11 U4）**
+**GA 触发结果 —— `on: push` 真触发两轮（run 链接 / 通过项 / 失败项 / 退出码）**
 
-> 下面这段是**加 `push` 之前**的老读数，保留为决策依据。加 `push` 后的**真触发结果**在同批提交里补写（`push` ⇒ workflow 自动跑，不需要 workflow 在默认分支）。
+> 老读数（`workflow_dispatch` 路线）保留在下方小节，作为"为什么改成 push 触发"的决策依据。
+
+| 项 | 第 1 轮 | 第 2 轮 |
+| --- | --- | --- |
+| run | [#37941349749](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941349749) | [#37941646937](https://github.com/EricKingWhy/intelligence-agent/actions/runs/37941646937) |
+| head | `73e89f22` | `a52ab2bf` |
+| 结论 | `failure`（两 job 均红） | `failure`（两 job 均红，**失败面已收敛到下面两条真发现**） |
+| Job `tui` | 步骤 1-4 全 success（含 `npm run check` 与 AC6-W1/W2）；步骤 5 `npm test` **exit 1** | 同上；步骤 5 `npm test` **exit 1**（201 例 / 195 pass / 6 fail，见 D3） |
+| Job `cli` | 步骤 4 `AC6-W3` **exit 1**：`UnicodeDecodeError: 'charmap' codec … byte 0x90` | 步骤 4 `AC6-W3` **exit 0**（`[PASS] AC6-CLI`，`counts={'PASS':1,'FAIL':0,'NOT_RUN':0}`）；步骤 5 `pytest tests/test_cli_image.py -q` **exit 1**（2 failed / 14 passed / 1 skipped，见 D2） |
+
+**第 1 轮失败的是探针自己，不是产品**：CLI job 的 `AC6-W3` 死在 `subprocess` 的 reader 线程——子进程（真 CLI）按 UTF-8 写中文 stderr，父进程（驱动）按 runner 的 locale 默认编码 `cp1252` 读。已在提交 `fa99acc1` 修掉（两处 `subprocess.run` 显式 `encoding="utf-8", errors="replace"`，并给 CLI 子进程固定 `PYTHONIOENCODING=utf-8`），第 2 轮该步 **PASS**。顺带把 workflow 的 `paths` 扩到它真正消费的两个脚本，使证据脚本的修复能在同一 runner 上复跑。
+
+**第 2 轮剩下的两个红都是真发现**（按验证票口径只登记不修，见 §5 的 D2 / D3）：
+- **D2（产品真缺陷，P1）**：`AC6-W3` 的仓库自带用例在 Windows 上 2 例红，根因是 `LocalArtifactStore._publish_blob` 用**文本模式** `os.open` 写二进制对象 ⇒ 含 `0x0A` 的图片字节被撑成 CRLF，读回哈希不符。
+- **D3（测试可移植性，P2）**：`tui` 全量 201 例里 **6 例红**，全是"测试/实现假设 POSIX 路径或运行时平台"（`.pathname`、硬编码 `/tmp`、`fileURLToPath` 不吃注入的 platform），不是 Windows 语义错。
+
+**诚实边界（必须原样保留）**：这是**同一代码路径的 headless 近似验证**——runner 上置 `WT_SESSION` 走 `tui/src/lib/host.ts` 的真判定分支，命令与断言取自仓库真文件；它**不是**真机 GUI 验证（没有 Windows Terminal 的渲染器、没有真粘贴事件、没有真控制台），也**不覆盖**真机才有的输入法/剪贴板/终端渲染差异。
+
+**老读数（`workflow_dispatch` 实测 404，保留为决策依据）**
 
 - 分支已推：`omp/830-mm08-cross-client-verify`；workflow 文件**确实在分支上**（`gh api .../contents/.github/workflows/mm08-windows-verify.yml?ref=<branch>` → `sha=578aa72bea16783e4b9e0127232d2b78e2c1c8ae`）。
 - 但 `gh workflow run mm08-windows-verify.yml --ref <branch>` → **HTTP 404 “not found on the default branch”**；REST `POST /actions/workflows/mm08-windows-verify.yml/dispatches` → 同样 404。`gh api .../actions/workflows` 列出的 6 个 workflow 里**没有它**。
@@ -271,6 +315,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | 台账覆盖（真判据：无 flag） | `python scripts/check_review_coverage.py` | exit 0 |
 | Gate-0 裸全量 | `python scripts/gate0.py` | **4/6**：本机**没有** `web/node_modules` ⇒ oxlint/tsc 两条车道**阻塞**（不是失败面），其余 4 条 PASS；6/6 以沙箱读数为准（§10.1） |
 | `tui` 全量 | `cd tui && npm ci && npm test` | 201 tests / 199 pass / 2 fail（同 §10.1 的两条 Windows 路径断言） |
+| 验证驱动（单条，编码修复后复跑） | `python scripts/verify_830_mm08.py --only ac6-cli --work /home/hatch/pytest-830/mm08-cli-recheck` | `counts={'PASS': 1, 'FAIL': 0, 'NOT_RUN': 0}`，exit 0——证明 `fa99acc1` 的 `encoding="utf-8"` 改动在本机**无回归** |
 | `tui` WT_SESSION 断言脚本（workflow 步骤 AC6-W1） | 从 workflow 里原样抽出 `.ts` 后 `WT_SESSION=mm08-local node --experimental-transform-types wt-check.ts` | **exit 0**；日志 `capabilities.images=null hyperlinks=true`、`kind=text`、原始 Windows 长路径未被截断、`link=false isAbsolute=false host=linux`、绝对路径正向锚 `absLink=ok path=/tmp/mm08/shot.png` |
 
 ## 11. 待用户决策事项
@@ -282,12 +327,13 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | U3 | **Windows 真机走查** | 真机（有人有 Windows Terminal 的机器）走一次；或接受 §9 的 GA 近似并明确标注 |
 | U4 | ~~**GA 触发路径**~~ | **已解决**（2026-10-09）：`workflow_dispatch` 要求 workflow 在**默认分支**（本票不 push main ⇒ `gh workflow run`/REST dispatch 双双 404）。改走 **`on: push`（仅本分支 `omp/830-mm08-cross-client-verify`，`paths` 只盯该 workflow 文件）** 真触发一次 `windows-latest`。**实测结果见 §9「GA 触发结果」**。已保留 `workflow_dispatch` 供日后合入 main 后手工跑 |
 | U5 | push/PR/merge 边界 | 本票只推了特性分支 `omp/830-mm08-cross-client-verify`（为触发 GA，用户 2026-10-09 批准）；未开 PR、未合 main |
+| U6 | **D2 / D3 修不修、怎么修**（GA 近似验证新发现） | (a) D2 一行修（`flags \|= getattr(os, "O_BINARY", 0)`）+ 补一条 Windows 落盘字节直读的回归用例，D3 另开票改 6 条测试；(b) 全留观察项不修（Windows 附件字节仍是坏的）；(c) 只修 D2。本票只登记 |
 
 ## 12. 三问自检
 
 1. **"跑过了吗？"** — 跑过。三套真实入口（HTTP / 真 TUI 客户端码 / 真 CLI 子进程）在真服务上跑，读数是退出码 + JSONL + 落盘 sha256 + provider 请求体。
 2. **"跑的是我要的那份代码吗？"** — 是。`origin/main` 基线 `9c5bc1b4`；脚手架提交 `A″` 只新增 3 个文件（验证脚本 ×2 + workflow ×1），无产品代码改动；沙箱与 worktree 各自 `git rev-parse HEAD` 固定并写进日志首行。
-3. **"读数有没有被我自己污染？"** — 唯一替身是模型 provider（打桩点即 PRD 指定的缝）；其余真跑。已发现并修掉两处**探针自身**的假读数（AC3/AC4 选错事件），修后 AC4 的 `unmodified` 从恒假变成真断言、AC3 的 `image_user_seq` 从 2 变成真实的 10。其余观察项（409、TUI 无历史图路径、沙箱 node 无 TS）均按"观察项 ≠ 缺陷"分开登记。
+3. **"读数有没有被我自己污染？"** — 唯一替身是模型 provider（打桩点即 PRD 指定的缝）；其余真跑。已发现并修掉两处**探针自身**的假读数（AC3/AC4 选错事件），修后 AC4 的 `unmodified` 从恒假变成真断言、AC3 的 `image_user_seq` 从 2 变成真实的 10。其余观察项（409、TUI 无历史图路径、沙箱 node 无 TS）均按"观察项 ≠ 缺陷"分开登记。**追加**：push 触发的两轮 GA 先抓出**探针自己**的编码 bug（已修 `fa99acc1`），再抓出 D2/D3 两条**真发现**——两轮都留了 run 链接与逐 step 退出码，可复核。
 
 ## 13. V3.1-lite 逐节合规
 
@@ -298,7 +344,7 @@ python scripts/verify_830_mm08.py --only ac6-cli --work <dir>              # 单
 | 依赖核实 | blocked_by 机读核实 | §2（5/5 祖先） |
 | 真实入口 | 真服务 + 真客户端，非单测 | §3 + §4（三入口） |
 | 逐 AC 证据 | 命令 / 退出码 / 片段 | §4（每条含判据与读数；原始 JSON 在运行目录 `evidence.json`） |
-| 缺陷回报 | 现象/复现/证据/严重度/目标仓库 | §5（D1） |
+| 缺陷回报 | 现象/复现/证据/严重度/目标仓库 | §5（D1 fork 读图 / D2 Windows 二进制发布被文本模式写坏 / D3 tui 套件不可移植） |
 | 缺口 | 如实登记，不 mock | §7（两条，①AC6-VISION 已闭环为 PASS）+ §4 AC6 |
 | 沙箱 | id / 资源 / 姿态 / 收尾 | §8 |
 | 门禁 | 读数落盘 | §10 |
