@@ -1857,6 +1857,8 @@ def latest_direct_user_input_event(
         # 都不是"新的约束来源"，在事实闸门里被排除，此处同样排除。
         # 口径说明：`input_request_id` 与事实闸门一样是"**键存在即排除**"（`in`），非逐字取 str 后判 ——
         # 非 str 的畸形载荷（如 `{"input_request_id": 123}`）同样被排除，两处保持一致。
+        # （注意：本函数开头的 `latest_direct_message` 早退守卫用的是 `isinstance(..., str)`，属既有写法，
+        # 与上述两条 `in` 不是同一条判据；`x is str` 与 `键存在` 只在非 str 载荷上分叉。）
         #
         # 两类事件都是真 `HumanMessage`、投影文本与自身 content 逐字相等 ⇒ 天然满足候选
         # 的「单事件来源范围 + 投影文本 == 事件 content」，此前只有 C2（summary 命名）那一支
@@ -1865,8 +1867,8 @@ def latest_direct_user_input_event(
         #     `message/superseded` 取代（整轮 shadow）时，投影里 seq 最高的可见
         #     `HumanMessage` 正是答复本身（函数开头的 `latest_direct_message` 早退守卫只在
         #     答复**就是最后一条**事件时才触发）。此时闸门把澄清答复选成"最新直接用户输入"。
-        #   * `replace=True`：**无生产写点**（全 `src/` 与全部 git 历史零写点，含 `tests/` 亦无；
-        #     唯一出现是 `tests/context/test_constraint_registration_context.py:217` 的手工构造。
+        #   * `replace=True`：**无生产写点**（全 `src/` 与全部 git 历史零写点）。手工构造只见于
+        #     `tests/context/test_constraint_registration_context.py:217` 与本票新增的两处用例。
         #     `context/builder.py` 只落 START / CONTEXT_COMPACTED / END，不落
         #     `session/event.py` 登记的那条替身）。但"不可达"的理由**不是**它被 shadow——
         #     投影只 shadow `source_seq_start..source_seq_end`，替身写在 SUMMARY 之后、
