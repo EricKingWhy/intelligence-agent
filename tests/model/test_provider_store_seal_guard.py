@@ -72,10 +72,6 @@ _EXEMPT: dict[str, str] = {
     "model/test_model_catalog.py": (
         "仅 docstring 引述 /api/models；测试对象是 env-catalog 解析，不含 store 面"
     ),
-    "model/test_reasoning_effort.py": (
-        "resolve_selection 调用均用 catalog 名（无冒号 ⇒ 走 from_catalog，"
-        "不经 from_custom_provider/store）；测试对象是 reasoning_effort 解析，不含 store 面"
-    ),
     "model/test_provider_store_seal_guard.py": (
         "守卫自身——docstring/消息引用端点字面量，无 store 面；消除「靠违规消息"
         "恰好含 provider_store_path 字样通过」的意外自洽"
