@@ -138,6 +138,8 @@ def test_smoke_builds_runtime_with_fallback_config(tmp_path: Path, monkeypatch):
         "langfuse_public_key": SecretStr(""), "langfuse_secret_key": SecretStr(""),
         "langfuse_base_url": "", "langfuse_trace_content": "full",
         "langfuse_tracing_environment": "development", "langfuse_release": "",
+        # ModelConfig.from_settings 会读 settings.agent_models 解析 catalog
+        # （#865 reasoning effort）；替身须与 Settings 默认值一致（SecretStr("")）。
         "agent_models": SecretStr(""),
     })()
 
