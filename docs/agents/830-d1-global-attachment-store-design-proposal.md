@@ -8,13 +8,13 @@
 
 ## 0. 方案依据（AGENTS §6.1）
 
-来源均为**本地浅克隆 + `file:line` + commit**，两处均为 MIT，只 PORT DESIGN（不复制代码，不引入依赖）。
+来源均为**本地浅克隆 + `file:line` + commit**（clone：DeepSeek Harness `~/deepseek-harness`、oh-my-pi `~/workspace/cli-beauty-20261006/oh-my-pi-src`；引用 commit 即各 clone 的 HEAD，可用 `git -C <clone> rev-parse HEAD` 核验），两处均为 MIT，只 PORT DESIGN（不复制代码，不引入依赖）。
 
 | 来源 | 版本/commit | 文件:行 | 机制（读到的事实） | 契合点 | 判定 |
 | --- | --- | --- | --- | --- | --- |
-| DeepSeek Harness | `5badb15009ae1756c3afe0ae0cef1faafc290ccc`（MIT，Copyright 2026 DeepSeek） | `packages/attachment/attachment-local/src/store.ts:47-51`、`file-store.ts:75-81` | 对象根是 **`DSH_HOME/attachments/v1`（每用户全局，非每会话）**；对象路径 = `objects/<sha256[:2]>/<sha256>`（文件另加 `file-objects/<sha[:2]>/<sha>`）。**没有 session 段**。 | 本项目 D2 已 declared「落盘算法移植 DSH `attachment-local`」；`<sha[:2]>` 分片形状两边一致，改根即可对齐 | **PORT DESIGN** |
+| DeepSeek Harness | `5badb15009ae1756c3afe0ae0cef1faafc290ccc`（MIT，Copyright 2026 DeepSeek） | `packages/attachment/attachment-local/src/store.ts:47-54`、`file-store.ts:75-81` | 对象根是 **`DSH_HOME/attachments/v1`（每用户全局，非每会话）**；对象路径 = `objects/<sha256[:2]>/<sha256>`（文件另加 `file-objects/<sha[:2]>/<sha>`）。**没有 session 段**。 | 本项目 D2 已 declared「落盘算法移植 DSH `attachment-local`」；`<sha[:2]>` 分片形状两边一致，改根即可对齐 | **PORT DESIGN** |
 | DeepSeek Harness | 同上 | `packages/api/session-controller/src/commands.ts:405-410`（谓词 `:682`） | 读授权 = **「该 id 被本会话事件流引用」**，否则 `ATTACHMENT_NOT_REFERENCED`；写入侧图片以 inline base64 到达（`prompt()` `:307-370`），因此 wire 调用方**不可能引用到自己没上传的 id** | 本项目读闸门（`web/attachments.py` GET）与它同构，本方案**不动**；写入侧我们按 id 引用，故须自建等价的所有权事实（见 §5） | **PORT DESIGN** |
-| oh-my-pi | `579da1d661c5cb8d43bc2ddd429ab72e67165ad8`（MIT，Copyright 2025 Mario Zechner） | `packages/utils/src/dirs.ts:962-964`、`packages/coding-agent/src/session/blob-store.ts:8,40-68,180-234,295-320`、`session/session-persistence.ts:217` | 附件字节存**全局**内容寻址 blob store（`~/.omp/agent/blobs/<sha256-hex>`），会话文件里只留 `blob:sha256:<hex>` 引用；docstring 原文：*"Content-addressing makes writes idempotent and provides automatic deduplication **across sessions**"*；`put` 同长度已存在即复用（去重）、staging + rename 原子发布；`parseBlobRef` 用 64 位小写 hex 正则做**单一收口**，防 `../` 越出 blob 根 | 「事件流存引用、字节外置且跨会话去重」的第二个独立实现；正则收口与我们 `BYTE_ARTIFACT_ID_PATTERN` 同形状；本项目 PRD「Further Notes 1」已把它的 `blob:sha256:` 记为直接先例 | **PORT DESIGN** |
+| oh-my-pi | `a507b6235d82f66d53183677b68a85da26c2eb29`（MIT，Copyright 2025 Mario Zechner；clone `~/workspace/cli-beauty-20261006/oh-my-pi-src` 的 HEAD） | `packages/utils/src/dirs.ts:962-964`、`packages/coding-agent/src/session/blob-store.ts:8,40-68,180-234,295-320`、`session/session-persistence.ts:217` | 附件字节存**全局**内容寻址 blob store（`~/.omp/agent/blobs/<sha256-hex>`），会话文件里只留 `blob:sha256:<hex>` 引用；docstring 原文：*"Content-addressing makes writes idempotent and provides automatic deduplication **across sessions**"*；`put` 同长度已存在即复用（去重）、staging + rename 原子发布；`parseBlobRef` 用 64 位小写 hex 正则做**单一收口**，防 `../` 越出 blob 根 | 「事件流存引用、字节外置且跨会话去重」的第二个独立实现；正则收口与我们 `BYTE_ARTIFACT_ID_PATTERN` 同形状；本项目 PRD「Further Notes 1」已把它的 `blob:sha256:` 记为直接先例 | **PORT DESIGN** |
 
 **为什么不是别家**：Pi / Claude Code / Codex / Gemini CLI 把 base64 内联进会话文件（PRD「Further Notes 1」已核实），
 与不变量 #15「大内容优先外置」相反，不作候选；LobeChat 式无鉴权公开链接被 PRD「Out of Scope」明确排除。
@@ -57,7 +57,7 @@
 因此名为 `attachments` 的会话**不可能**与全局根同名——`discard_local_artifacts` / `delete_local_artifacts` /
 `_artifact_dir_for` / `_list_local_artifacts` 都是「`root` + session_id 拼路径」，点号目录让"全局根被某个会话的
 rmtree 连带删除"在构造上不可能（同 `sandbox/registry.py:181-192` 的 `.fork-tmp` 先例）。
-**为什么保留 `objects/<sha[:2]>/` 分片**：与 DSH `store.ts:47-51`、Git 对象库同形状，避免单目录上万文件。
+**为什么保留 `objects/<sha[:2]>/` 分片**：与 DSH `store.ts:47-54`、Git 对象库同形状，避免单目录上万文件。
 
 ## 4. 读写语义
 
@@ -99,9 +99,11 @@ GET 200 / 模型载荷含图片块。子会话目录**不产生任何附件字�
 
 ## 8. 已知取舍与未修项（如实登记，不在本票范围）
 
-1. **远端 Provider（S3/MinIO）不修**：字节日志 key 仍是 `{session_id}/attachments/{sha}`，fork 后子会话读不回的问题
-   在这两个 Provider 上**仍然存在**。理由：本票根因与证据都在 Local（默认 Provider）；改远端 key 是存储布局迁移
-   （需要回填/双读），属独立票（PRD D2 的"加法式扩展"边界）。
+1. **远端 Provider（S3/MinIO）不修 —— 本票对 D1 的修复只覆盖 Local Provider（默认）**：字节日志 key 仍是
+   `{session_id}/attachments/{sha}`，fork 后子会话读不回的问题在这两个 Provider 上**仍然存在**（即 S3/MinIO
+   部署下 D1 = 未修复，仍是已知缺口）。理由：本票根因与证据都在 Local；改远端 key 是存储布局迁移
+   （需要回填/双读），属独立票（PRD D2 的"加法式扩展"边界）。⇒ 关单 comment 与 PRD 层面**不许**把这点
+   含糊成"fork 继承引用已修"，必须写明"仅 Local Provider"。
 2. **孤儿字节不回收**：对象全局驻留 + 内容寻址去重，会话硬删后全局对象仍在（磁盘增长）。PRD D2 已登记
    "v1 不做自动清理、孤儿附件保留"；本方案把保留面从"未发送的上传"扩到"被删会话的字节"，同属后续票
    （GC 需引用计数/宽限期，DSH 有 `gc`、oh-my-pi 有 `omp gc`，我们暂无）。
