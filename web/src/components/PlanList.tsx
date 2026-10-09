@@ -172,6 +172,14 @@ export function PlanList({ items }: { items: PlanItem[] }) {
       timerRef.current = null;
     }
   };
+  /** 排定一次延迟动作（悬浮开/合共用同一形状）：先取消在途定时器，动作后清引用。 */
+  const schedule = (action: () => void, delay: number) => {
+    clearTimer();
+    timerRef.current = setTimeout(() => {
+      action();
+      timerRef.current = null;
+    }, delay);
+  };
 
   const fold = computePlanFold(items);
   const completed = items.filter((it) => it.status === 'completed');
@@ -181,26 +189,25 @@ export function PlanList({ items }: { items: PlanItem[] }) {
   const beforeOpen = fold.folded && openGroup === 'before';
   const afterOpen = fold.folded && openGroup === 'after';
 
-  // click / Enter / Space（原生 button 语义）：按**可见展开态**切换——已展开（无论由
-  // 悬浮还是固定而来）则收起，否则展开并**固定**。打开一组自动收起另一组（单一生效组）。
+  // click / Enter / Space（原生 button 语义，AC4「切换」）：按**可见展开态**切换——已展开
+  // （无论由悬浮还是固定而来）则收起，否则展开并**固定**。收起时区分来源：若当前可见组是
+  // **悬浮**撑开的，只清悬浮态、回落到 pinnedGroup（可能是另一组）——否则会把用户此前固定的
+  // 另一组一并清掉（AC4 互斥是「开一组收起另一组」，不等于「清掉另一组的固定」）。
   const activate = (side: FoldSide) => {
     clearTimer();
-    if (openGroup === side) {
-      setPinnedGroup(null);
-      setHoverGroup(null);
-    } else {
+    if (openGroup !== side) {
       setPinnedGroup(side);
       setHoverGroup(null);
+    } else if (hoverGroup === side) {
+      setHoverGroup(null);
+    } else {
+      setPinnedGroup(null);
     }
   };
   const hoverEnter = (side: FoldSide) => {
     if (hoverNone()) return;
     hoverSideRef.current = side;
-    clearTimer();
-    timerRef.current = setTimeout(() => {
-      setHoverGroup(side);
-      timerRef.current = null;
-    }, HOVER_OPEN_DELAY_MS);
+    schedule(() => setHoverGroup(side), HOVER_OPEN_DELAY_MS);
   };
   const hoverLeave = (side: FoldSide) => {
     // 只解除**临时**展开；固定组由 pinnedGroup 承担 ⇒ 悬浮离开后自动回落到固定组。
@@ -208,11 +215,7 @@ export function PlanList({ items }: { items: PlanItem[] }) {
     // B 的 enter 取消、B 又未到打开延迟即离开 ⇒ 无任何组排定关闭、A 永久展开。
     if (hoverSideRef.current !== side) return;
     hoverSideRef.current = null;
-    clearTimer();
-    timerRef.current = setTimeout(() => {
-      setHoverGroup(null);
-      timerRef.current = null;
-    }, HOVER_CLOSE_DELAY_MS);
+    schedule(() => setHoverGroup(null), HOVER_CLOSE_DELAY_MS);
   };
 
   /** 某行是否隐藏：折叠时，窗口外且所在组未展开 ⇒ 隐藏；未折叠 ⇒ 全显示。 */
@@ -229,6 +232,7 @@ export function PlanList({ items }: { items: PlanItem[] }) {
         type="button"
         // 复用既有 `.plan-list-toggle` 视觉（inline-flex / muted / hover 底），
         // 不新增 CSS（`app.css` 属三 clone 共享面，本票 Scope Lock 在组件内）。
+        // `.plan-list-fold-toggle`（及下面的 -before/-after）是测试/查询钩子，无独立 CSS 规则。
         className="plan-list-toggle plan-list-fold-toggle"
         aria-expanded={open}
         onClick={() => activate(side)}

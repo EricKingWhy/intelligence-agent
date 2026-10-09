@@ -236,6 +236,32 @@ describe('#381（W-27）+ #864（W-27.1）：PlanList 渲染', () => {
     }
   });
 
+  it('AC4 收起悬浮组不误伤另一组的固定：固定前组 → 悬浮后组 → 点后组收起 → 前组仍固定展开', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      act(() => root.render(createElement(PlanList, { items: golden17() })));
+      const before = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-before .plan-list-fold-toggle',
+      )!;
+      const after = container.querySelector<HTMLButtonElement>(
+        '.plan-list-fold-after .plan-list-fold-toggle',
+      )!;
+      act(() => fireClick(before)); // 固定前组
+      expect(before.getAttribute('aria-expanded')).toBe('true');
+      act(() => fireEnter(after)); // 悬浮后组临时接管（互斥）
+      act(() => {
+        vi.advanceTimersByTime(HOVER_OPEN_DELAY_MS);
+      });
+      expect(after.getAttribute('aria-expanded')).toBe('true');
+      expect(before.getAttribute('aria-expanded')).toBe('false');
+      act(() => fireClick(after)); // 收起悬浮的后组 → 回落，**不得**清掉前组的固定
+      expect(after.getAttribute('aria-expanded')).toBe('false');
+      expect(before.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('AC4 触摸设备（hover:none）：悬浮不开（无悬浮层），点按切换固定', () => {
     // jsdom 默认**无** window.matchMedia（实测 undefined）⇒ 其余用例走「有悬浮」分支；
     // 本用例显式装上返回 matches:true 的匹配器，走触摸分支。
