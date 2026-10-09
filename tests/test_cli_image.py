@@ -373,8 +373,17 @@ _UNREADABLE_IMAGE = Path("/proc/1/mem")
 
 
 def _has_unreadable_image_probe() -> bool:
-    """本机是否具备"存在、是常规文件、但打开即 `OSError`"的确定性输入。"""
+    """本机是否具备"存在、是常规文件、但打开即 `OSError`"的确定性输入。
+
+    三条件按顺序实测：`FileNotFoundError` / `NotADirectoryError` 都是 `OSError`，若只看
+    `open()`，在**看不到** `/proc/1/mem` 的环境（procfs 未挂载 / `hidepid=2` 且非 root）
+    里会把"目标根本不存在"误判成"触发点可用"，让用例在该环境**假红**而不是 skip ——
+    且与这里声称的三条件不符。故先断 `exists()` / `is_file()`，再试 `open()`（仍接受
+    任意 `OSError`：EACCES / EIO 等都算）。
+    """
     if sys.platform != "linux":
+        return False
+    if not (_UNREADABLE_IMAGE.exists() and _UNREADABLE_IMAGE.is_file()):
         return False
     try:
         with _UNREADABLE_IMAGE.open("rb"):
