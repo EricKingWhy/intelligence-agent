@@ -32,6 +32,26 @@ import {
 } from "./adapter.ts";
 import { formatTokens } from "./format.ts";
 import { authorizedFetch } from "./host.ts";
+import {
+  clipboardImageBindings,
+  readClipboardImage,
+  type ClipboardImage,
+  type ClipboardImageOptions,
+} from "./lib/clipboard-image.ts";
+import {
+  clipboardImageName,
+  isImagePath,
+  pastedImagePath,
+  readImageFile,
+  uploadDeclaredName,
+} from "./lib/image-paste.ts";
+import { renderDraftImage } from "./lib/image-view.ts";
+import {
+  compactDraftImages,
+  imageMarker,
+  type PendingImage,
+} from "./lib/pending-images.ts";
+import { resolveVisionSupport, type ModelOptionView } from "./lib/vision.ts";
 import { SeqCursor, openStream } from "./sse.ts";
 import { createTheme, type IaTheme } from "./theme.ts";
 import {
@@ -47,11 +67,27 @@ import { renderPlanList } from "./views/plan.ts";
 
 const RECONNECT_DELAY_MS = 1000;
 
+/** 终端括号粘贴标记（pi-tui `StdinBuffer` 也按这两个标记聚合，见 stdin-buffer.js:23）。 */
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+
 export interface AppOptions {
   baseUrl: string;
   sessionId: string;
   /** 本机服务的 Bearer（host.ts 的凭据通道）；缺省 = 本地信任模式，行为不变。 */
   token?: string;
+  /**
+   * 注入 REST fetch（#827 MM-06 的测试 seam）。缺省 = `authorizedFetch(token)`
+   * （带 Bearer 的同一条 fetch）。**只为测试注入**，生产路径不受影响。
+   */
+  fetchImpl?: typeof fetch;
+  /** 剪贴板取图（默认 `lib/clipboard-image.readClipboardImage`）；测试注入假剪贴板。 */
+  readClipboardImage?: (options?: ClipboardImageOptions) => Promise<ClipboardImage | null>;
+  /** 启动时预载的图片路径（`ia-tui --session s @a.png`，PRD 用户故事 19 / AC4）。 */
+  initialImages?: string[];
+  /** 平台/环境（剪贴板阶梯与键位判定）；缺省 = `process.platform` / `process.env`。 */
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
 }
 
 /** 已渲染轮次的签名：文本尾部 + 工具卡摘要（变了才重建该轮组件）。 */
@@ -87,6 +123,17 @@ export class TuiApp {
   private approvalText: Text | null = null;
   /** 进度清单横幅（footer 常驻；`task/plan_updated` 投影，零项不挂）。 */
   private planText: Text | null = null;
+  /** 待发图片（AC3）：下标 0 即正文里的 `[Image #1]`。提交/换会话时清空。 */
+  pendingImages: PendingImage[] = [];
+  /**
+   * 待发图片区（footer）：说明行 + 每张图的缩略图（AC7）或文本占位（AC6）。
+   * 用**一个长期挂载的容器**承载（不是每次增删组件）：`renderAll()` 会 clear 整个
+   * footer，把容器重挂一次即可保持"图片区在其它横幅之前"的稳定次序。
+   */
+  private readonly imagesContainer = new Container();
+  private readonly readClipboard: (options?: ClipboardImageOptions) => Promise<ClipboardImage | null>;
+  private readonly platform: NodeJS.Platform;
+  private readonly env: NodeJS.ProcessEnv;
   /** 完成组折叠开关（`ctrl+t` 切换；对应 Claude Code `showExpandedTodos`）。 */
   private planExpanded = false;
   private renderedTurns: RenderedTurn[] = [];
@@ -104,7 +151,10 @@ export class TuiApp {
     this.theme = createTheme(getTerminalColorMode());
     // W-21 D5 (#817)：服务端非 fail-open，REST / SSE / client-exit 全走带
     // Bearer 的同一条 fetch（无 token 时 authorizedFetch 原样返回全局 fetch）。
-    this.fetchImpl = authorizedFetch(options.token);
+    this.fetchImpl = options.fetchImpl ?? authorizedFetch(options.token);
+    this.platform = options.platform ?? process.platform;
+    this.env = options.env ?? process.env;
+    this.readClipboard = options.readClipboardImage ?? readClipboardImage;
     this.api = new ApiClient(options.baseUrl, this.fetchImpl);
     const terminal = new ProcessTerminal();
     this.tui = new TuiMainScreen(terminal);
@@ -121,9 +171,12 @@ export class TuiApp {
     this.editor.onSubmit = (text) => void this.handleSubmit(text);
     this.tui.addChild(this.statusText);
     this.tui.addChild(this.chatContainer);
+    this.footerContainer.addChild(this.imagesContainer);
     this.tui.addChild(this.footerContainer);
     this.tui.addChild(this.editor);
     this.tui.addInputListener((data) => this.interceptKeys(data));
+    // AC4：`@path` 命令行参数在启动时进待发图片数组（标记随首轮消息发出）。
+    for (const filePath of options.initialImages ?? []) this.attachImageArg(filePath);
   }
 
   private interceptKeys(data: string): { consume: boolean } | undefined {
@@ -149,6 +202,27 @@ export class TuiApp {
         void this.decideApproval(approval.approvalId, decision === "approved");
       }
       return { consume: true };
+    }
+    // AC1：粘贴剪贴板图片。键位按平台（Windows 用 Alt+V；WSL 双绑 Ctrl+V/Alt+V）。
+    // 用 pi-tui matchesKey 而非裸比较 `\x1bv`：Kitty/CSI-u 扩展编码下裸字节不成立
+    // （与 Ctrl+T 同一条纪律）。
+    for (const binding of clipboardImageBindings({ platform: this.platform, env: this.env })) {
+      if (matchesKey(data, binding)) {
+        void this.pasteClipboardImage();
+        return { consume: true };
+      }
+    }
+    // AC2：终端粘贴一整段文本时的**单块**括号粘贴（pi-tui 的 StdinBuffer 保证
+    // `\x1b[200~...\x1b[201~` 要么整块到达、要么等到收齐才回调）。若粘贴内容就是一条
+    // 图片文件路径 -- 识别为附图并**吞掉**这段文本（不再当正文）；否则不拦截，
+    // 交给 Editor 自己处理（多行文本、普通路径都照旧）。
+    if (data.startsWith(BRACKETED_PASTE_START) && data.endsWith(BRACKETED_PASTE_END)) {
+      const pasted = data.slice(BRACKETED_PASTE_START.length, -BRACKETED_PASTE_END.length);
+      const filePath = pastedImagePath(pasted, this.platform);
+      if (filePath !== null) {
+        this.attachImageFile(filePath);
+        return { consume: true };
+      }
     }
     return undefined;
   }
@@ -216,16 +290,148 @@ export class TuiApp {
   private async handleSubmit(text: string): Promise<void> {
     const trimmed = text.trim();
     this.editor.addToHistory(text);
-    this.editor.setText("");
-    if (!trimmed) return;
+    if (!trimmed) {
+      this.editor.setText("");
+      return;
+    }
     if (trimmed.startsWith("/")) {
+      this.editor.setText("");
       await this.runCommand(trimmed);
       return;
     }
+    const imageCount = this.pendingImages.length;
+    // AC8：有图先做视觉能力预检 -- **在清空编辑器之前**判定，拒绝时草稿与图片原样保留
+    // （用户可删标记只发文字，或换模型后重发）。目录查不到（网络失败）=> 不预检，
+    // 让服务端 422 做权威判定（本地绝不猜"支持"）。
+    if (imageCount > 0) {
+      let models: ModelOptionView[] | null = null;
+      try {
+        models = await this.api.listModels();
+      } catch {
+        models = null;
+      }
+      if (models !== null && !resolveVisionSupport(models, this.state.modelName)) {
+        this.appendNote(
+          "当前模型不支持图片输入（supports_vision=false）：草稿与图片已保留。" +
+            "换用支持视觉的模型后重发，或删掉正文里的 [Image #N] 标记只发文字。",
+        );
+        return;
+      }
+    }
+    // AC3：提交时稠密重编号 -- 仍被正文引用的图保留（按原下标升序），标记被删掉的图丢弃。
+    // `null` = 无需改写（无图，或全部引用且已是 1..K），正文逐字不变。
+    const compacted = compactDraftImages(trimmed, imageCount);
+    const content = compacted?.text ?? trimmed;
+    const keptImages =
+      compacted === null
+        ? [...this.pendingImages]
+        : compacted.keep
+            .map((index) => this.pendingImages[index])
+            .filter((image): image is PendingImage => image !== undefined);
+    // AC5：先按服务端契约上传每张图（字节流式 + Content-Type/<name> 与字节判定一致），
+    // 拿到 attachment_id 再投消息。上传失败**保留草稿**（已改的正文也留给用户重发）。
+    const attachments: string[] = [];
     try {
-      await this.api.sendMessage(this.options.sessionId, trimmed);
+      for (const image of keptImages) {
+        const receipt = await this.api.uploadAttachment(this.options.sessionId, image.bytes, {
+          name: uploadDeclaredName(image.name, image.mimeType),
+          mediaType: image.mimeType,
+        });
+        attachments.push(receipt.attachment_id);
+      }
+    } catch (error) {
+      this.appendNote(`upload failed: ${String(error)}`);
+      return;
+    }
+    this.editor.setText("");
+    this.setPendingImages([]);
+    try {
+      await this.api.sendMessage(this.options.sessionId, content, attachments);
     } catch (error) {
       this.appendNote(`send failed: ${String(error)}`);
+    }
+  }
+
+  /**
+   * 剪贴板取图（AC1）：拿到字节就追加一张待发图（正文里插 `[Image #N]`）；
+   * 没有图 / 读失败给一行明确提示，**不静默**（PRD 用户故事 24）。
+   */
+  private async pasteClipboardImage(): Promise<void> {
+    let image: ClipboardImage | null;
+    try {
+      image = await this.readClipboard({ platform: this.platform, env: this.env });
+    } catch (error) {
+      this.appendNote(`clipboard image failed: ${String(error)}`);
+      return;
+    }
+    if (image === null) {
+      this.appendNote("剪贴板里没有可用的图片（支持 PNG/JPEG/WEBP/GIF）");
+      return;
+    }
+    this.addPendingImage({
+      bytes: image.bytes,
+      mimeType: image.mimeType,
+      // 剪贴板字节没有本地文件名；声明名由 media type 决定（扩展名必须与字节判定一致）。
+      name: clipboardImageName(image.mimeType),
+      path: null,
+    });
+  }
+
+  /** 图片文件路径 -> 附图（AC2 的落点；读不到/不是图片给明确错误）。 */
+  private attachImageFile(filePath: string): void {
+    const result = readImageFile(filePath);
+    if (!result.ok) {
+      this.appendNote(
+        result.reason === "missing"
+          ? `找不到或读不了这个文件：${filePath}`
+          : `不是本仓支持的图片格式（PNG/JPEG/WEBP/GIF）：${filePath}`,
+      );
+      return;
+    }
+    this.addPendingImage(result.image);
+  }
+
+  /** `@path` 命令行参数（AC4）：非图片扩展名直接报错（不静默忽略）。 */
+  private attachImageArg(filePath: string): void {
+    if (!isImagePath(filePath)) {
+      this.appendNote(`参数 @${filePath} 不是图片文件（PNG/JPEG/WEBP/GIF）`);
+      return;
+    }
+    this.attachImageFile(filePath);
+  }
+
+  /** 追加一张待发图：数组 push + 光标处插 `[Image #N]`（N = 插入后的张数，AC3）。 */
+  private addPendingImage(image: PendingImage): void {
+    this.pendingImages.push(image);
+    this.editor.insertTextAtCursor(imageMarker(this.pendingImages.length));
+    this.renderPendingImages();
+    this.tui.requestRender();
+  }
+
+  private setPendingImages(images: PendingImage[]): void {
+    this.pendingImages = images;
+    this.renderPendingImages();
+    this.tui.requestRender();
+  }
+
+  /** 待发图片区（AC6/AC7）：协议可用 => pi-tui 缩略图；`WT_SESSION` 等 => 文本占位。 */
+  private renderPendingImages(): void {
+    this.imagesContainer.clear();
+    if (this.pendingImages.length === 0) return;
+    this.imagesContainer.addChild(
+      new Text(
+        this.theme.muted(
+          `待发图片 ${String(this.pendingImages.length)} 张（Alt+V 再贴一张；删掉正文里的 [Image #N] 标记即撤销）`,
+        ),
+      ),
+    );
+    for (const image of this.pendingImages) {
+      const rendered = renderDraftImage(image, {
+        fallbackColor: (value) => this.theme.dim(value),
+      });
+      this.imagesContainer.addChild(
+        rendered.kind === "image" ? rendered.component : new Text(rendered.lines.join("\n")),
+      );
     }
   }
 
@@ -360,6 +566,8 @@ export class TuiApp {
     this.pauseBannerText = null;
     this.approvalText = null;
     this.planText = null;
+    // footer 被 clear() 了：待发图片区重挂一次（次序恒定：图片区在最前）。
+    this.footerContainer.addChild(this.imagesContainer);
     // 跨会话/重建重置折叠开关：避免上一会话的展开态泄漏到新会话（#382 审查 P3）。
     this.planExpanded = false;
     this.renderedOrphanCount = 0;
@@ -376,6 +584,7 @@ export class TuiApp {
     this.renderedOrphanCount = 0;
     this.renderOrphanArtifacts();
     this.renderPlan();
+    this.renderPendingImages();
     this.renderPauseBanner();
     this.renderApproval();
     this.refreshStatus();
