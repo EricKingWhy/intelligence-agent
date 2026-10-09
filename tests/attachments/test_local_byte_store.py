@@ -105,16 +105,14 @@ def test_object_permission_is_read_only(tmp_path: Path) -> None:
     store = _store(tmp_path, "sess-a")
     blob = asyncio.run(store.save_bytes("sess-a", b"perm", mime_type="image/png"))
     path = _object_path(tmp_path, "sess-a", blob.artifact_id)
-    mode = stat.S_IMODE(os.stat(path).st_mode)
+    # Windows 没有 POSIX 权限位：CPython 按只读属性合成 st_mode（只读 ⇒ 0o444、
+    # 可写 ⇒ 0o666），`os.chmod(path, 0o400)` 在 Windows 上不可满足 ⇒ 用原生
+    # FILE_ATTRIBUTE_READONLY 更精确。
+    file_stat = os.stat(path)
     if os.name == "nt":
-        # Windows 没有 POSIX 权限位：CPython 按"只读属性"**合成** st_mode（只读 ⇒ 0o444、
-        # 可写 ⇒ 0o666），`os.chmod(path, 0o400)` 只落成"清掉写入位"⇒ 0o400 在 Windows 上
-        # 不可满足（#830 D2 的 GA 实跑抓到的既有断言，与本票改动无关）。这里断言同一条
-        # 语义（对象不可写），判别力不变：真被写成可写，下面两条都红。
-        assert mode & 0o222 == 0, f"对象必须是只读的，实际 mode={oct(mode)}"
-        assert not os.access(path, os.W_OK)
+        assert file_stat.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
     else:
-        assert mode == 0o400
+        assert stat.S_IMODE(file_stat.st_mode) == 0o400
 
 
 def test_halfway_failure_leaves_no_readable_residue(
