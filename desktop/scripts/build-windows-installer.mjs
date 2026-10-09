@@ -725,8 +725,9 @@ export function stripNsisComments(source) {
  *
  * NSIS strings have no backslash escapes, so `"\\?$dir"` builds `\\?C:\...`:
  * Win32 requires the separator right after the question mark, so that path is
- * unresolvable and every delete/rename naming it fails. R1 shipped with exactly
- * this typo, and the delete of the previous version failed on every update.
+ * unresolvable and every delete/rename naming it fails. That typo came with the
+ * atomic-swap protocol in #361 and made the delete of the previous version fail
+ * on every update; #901 / R1 corrected it and added the guards below.
  */
 export function malformedLongPathPrefixes(source) {
   const bad = []
@@ -774,11 +775,12 @@ export function validateLongPathPrefixes(source, filename) {
  *     update, 3.50 GiB measured on one machine), and a silent install has no
  *     UI and writes no NSIS detail log to read it back from.
  *
- * The check window ends at `iaClearBackupDir` or at the enclosing `FunctionEnd`,
- * whichever comes first, and a delete without a following `iaClearBackupDir` is
- * itself a problem: bounding the window by the clear call alone made the guard
- * fail open — with the call removed, an unrelated `${Errors}` read further down
- * the file satisfied the check for this site.
+ * The check window ends at `iaClearBackupDir`, at the enclosing `FunctionEnd`,
+ * or at the enclosing `!macroend`, whichever comes first, and a delete without a
+ * following `iaClearBackupDir` is itself a problem: bounding the window by the
+ * clear call alone made the guard fail open — with the call removed, an
+ * unrelated `${Errors}` read further down the file satisfied the check for this
+ * site, and a delete inside a macro had no enclosing `FunctionEnd` to stop at.
  *
  * Fail-closed: a file with no long-path delete of `$iaBackupDirectory` at all
  * is reported as a problem, so removing the delete site cannot pass silently.
@@ -797,12 +799,16 @@ export function unguardedBackupDelete(source) {
       problems.push({ line: i + 1, what: 'missing ClearErrors before the delete' })
     }
     const rest = lines.slice(i + 1)
-    const functionEnd = rest.findIndex((line) => /^\s*FunctionEnd\b/.test(line))
+    const enclosing = [
+      rest.findIndex((line) => /^\s*FunctionEnd\b/.test(line)),
+      rest.findIndex((line) => /^\s*!macroend\b/.test(line)),
+    ].filter((index) => index !== -1)
+    const limit = enclosing.length === 0 ? -1 : Math.min(...enclosing)
     const clearIndex = rest.findIndex((line) => /!insertmacro\s+iaClearBackupDir\b/.test(line))
-    if (clearIndex === -1 || (functionEnd !== -1 && functionEnd < clearIndex)) {
+    if (clearIndex === -1 || (limit !== -1 && limit < clearIndex)) {
       problems.push({ line: i + 1, what: 'no !insertmacro iaClearBackupDir after the delete' })
     }
-    const bounds = [functionEnd, clearIndex].filter((index) => index !== -1)
+    const bounds = [...enclosing, clearIndex].filter((index) => index !== -1)
     const window = bounds.length === 0 ? rest : rest.slice(0, Math.min(...bounds))
     const reads = window.filter((line) => line.includes(errorsMacro)).length
     const firstRead = window.findIndex((line) => line.includes(errorsMacro))

@@ -366,6 +366,26 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     ])
   })
 
+  it('does not let another macro satisfy the check (fail-closed window)', () => {
+    const acrossMacros = [
+      '!macro promote',
+      '  ClearErrors',
+      `  ${FIXED_DELETE}`,
+      '!macroend',
+      'Function other',
+      '  ${If} ${Errors}',
+      '  ${EndIf}',
+      '  WriteRegStr HKCU "k" "IaLeftoverDir" $iaBackupDirectory',
+      '  !insertmacro iaClearBackupDir',
+      'FunctionEnd',
+    ].join('\n')
+    assert.deepEqual(unguardedBackupDelete(acrossMacros), [
+      { line: 3, what: 'no !insertmacro iaClearBackupDir after the delete' },
+      { line: 3, what: 'missing ${Errors} check before iaClearBackupDir' },
+      { line: 3, what: 'failed delete is not recorded (no IaLeftoverDir write)' },
+    ])
+  })
+
   it('is fail-closed: no delete site at all is a problem', () => {
     assert.deepEqual(unguardedBackupDelete('Function nothing\nFunctionEnd'), [
       { line: 0, what: 'no long-path RMDir of $iaBackupDirectory found' },
@@ -383,10 +403,30 @@ describe('long-path prefix and backup-delete guards (#901 / R1)', () => {
     const source = readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8')
     assert.deepEqual(malformedLongPathPrefixes(source), [])
     assert.deepEqual(unguardedBackupDelete(source), [])
-    // The record must not outlive the directory it names: a promote drops it
-    // when the recorded path is gone, and keeps it while the directory exists.
-    assert.match(source, /\$\{IfNot\}\s+\$\{FileExists\}\s+"\$iaLeftoverDirectory"/)
-    assert.match(source, /\$\{IfNot\}[\s\S]*?DeleteRegValue[^\n]*"IaLeftoverDir"[\s\S]*?\$\{EndIf\}/)
+  })
+
+  it('keeps the leftover record exactly while the recorded directory exists', () => {
+    // Existence-only regexes let a branch swap pass (keep when the directory
+    // exists, drop when it is gone), so this pins the shape: read the record,
+    // probe it with the long-path prefix — measured on NSIS 3.0.4.1 to be the
+    // only form that answers "true" for a >MAX_PATH directory — and drop it as
+    // the first statement of the negative branch.
+    const lines = stripNsisComments(
+      readFileSync(join(installerDir, 'installer-directories.nsh'), 'utf8'),
+    )
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+    const read = lines.findIndex((line) => /^!insertmacro\s+iaReadLeftoverDir\b/.test(line))
+    const probe = lines.findIndex((line) =>
+      /^\$\{IfNot\}\s+\$\{FileExists\}\s+"\\\\\?\\\$iaLeftoverDirectory"$/.test(line),
+    )
+    const drop = lines.findIndex((line) => /^DeleteRegValue\b[^\n]*"IaLeftoverDir"/.test(line))
+    assert.notEqual(read, -1)
+    assert.notEqual(probe, -1)
+    assert.notEqual(drop, -1)
+    assert.ok(read < probe)
+    assert.equal(drop, probe + 1)
   })
 
   it('validateInstallerScripts fails on a malformed prefix and on an unguarded delete', () => {

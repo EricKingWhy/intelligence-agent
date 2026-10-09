@@ -19,11 +19,13 @@
 ;                          otherwise roll back. A backup that cannot be deleted
 ;                          is left in place and recorded — always the
 ;                          IaLeftoverDir value in this application's own
-;                          registry key, always the detail log, and
+;                          registry key and the DetailPrint line, plus
 ;                          $(iaStaleBackup) in a UI install (a silent one has no
-;                          box to show it). The record names the most recent
-;                          leftover and is dropped once that directory is gone,
-;                          not by the next delete that happens to succeed. The
+;                          box to show it; the detail line only reaches a file
+;                          in a log-enabled build). The record names the most
+;                          recent leftover; a promote that gets past the checks
+;                          below drops it once that directory is gone, while one
+;                          that returns early leaves it. The
 ;                          backup pointer is cleared either way, so a finished
 ;                          install can never be mistaken for an incomplete one
 ;                          below.
@@ -142,10 +144,14 @@ Function iaPromoteApplication
     ; An earlier record names a directory that may be gone by now (removed by
     ; hand, or by a later delete that got through). Drop it once it is no longer
     ; true and keep it while the directory is still there: clearing it blindly
-    ; would hide an older leftover behind the update that just succeeded.
+    ; would hide an older leftover behind the update that just succeeded. The
+    ; probe needs the long-path prefix just like the delete above — measured on
+    ; NSIS 3.0.4.1, ${FileExists} answers "false" for a >MAX_PATH directory when
+    ; the path is unprefixed, which would drop the record for the very leftover
+    ; this block exists to keep.
     !insertmacro iaReadLeftoverDir
     ${If} $iaLeftoverDirectory != ""
-      ${IfNot} ${FileExists} "$iaLeftoverDirectory"
+      ${IfNot} ${FileExists} "\\?\$iaLeftoverDirectory"
         DeleteRegValue HKCU "${INSTALL_REGISTRY_KEY}" "IaLeftoverDir"
       ${EndIf}
     ${EndIf}
