@@ -95,6 +95,12 @@ export interface ConversationState {
   /** 进度清单（#382 W-28）：`task/plan_updated` 整表覆盖投影（W-26 契约）。
    *  null = 未出现过清单（不等于清空）；[] = 服务端明确清空。 */
   plan: PlanItem[] | null;
+  /**
+   * 本会话最近一轮 run 的**请求侧模型名**（`run/started.data.model`，ADR-0034）。
+   * `null` = 还没有 run，或该轮没落该键（旧数据/无 model 路径）。MM-06 AC8 用它
+   * 交叉查 `GET /api/models` 的 `supports_vision` 来判定"当前模型能不能看图"。
+   */
+  modelName: string | null;
 }
 
 export function createState(): ConversationState {
@@ -108,6 +114,7 @@ export function createState(): ConversationState {
     pendingApprovals: [],
     orphanArtifacts: [],
     plan: null,
+    modelName: null,
   };
 }
 
@@ -202,6 +209,11 @@ export function applyEvent(state: ConversationState, event: EventEnvelope): void
     }
     case EVENT.RUN_STARTED:
       state.runStatus = "running";
+      // #827 MM-06（AC8）：请求侧模型名（ADR-0034）。键缺席 => 保持上一轮的值，
+      // 不把"这轮没写"误当成"没有模型"（旧数据无该键）。
+      if (typeof data["model"] === "string" && data["model"]) {
+        state.modelName = data["model"];
+      }
       break;
     case EVENT.RUN_PAUSED:
       state.runStatus = "paused";

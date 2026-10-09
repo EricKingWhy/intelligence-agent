@@ -1,0 +1,1 @@
+2026-10-10	#830 D1 双轴审查 findings 修复批（11 条：A-P2 会话硬删不回收 + 读隔离单屏障登记；A-P3 回落对损坏候选继续（TDD 红→绿）+ FakeArtifactStore 归属 docstring + hardlink 升级场景注释 + S3/MinIO 已知缺口口径；A-P4 全局元数据剥离 session_id + 发送闸门 422 文案；B-F1 两个 untracked 脚本移出仓库 + B-F2 同 A-P3 + B-F3 oh-my-pi commit 可核验 + B-F4 DSH 行号订正）	765f6462c6be60a2c127173e82201c8eacc7618f..9f68aa4775216a41703d5ece7194dbe4efd98de4

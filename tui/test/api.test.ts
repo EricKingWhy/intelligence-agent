@@ -133,3 +133,122 @@ test("非 2xx 仍抛 ApiError 且带 detail（不回归）", async () => {
     },
   );
 });
+
+/** 抓一次请求（URL + init + 原始字节体）的探针。 */
+function captureFetch(
+  respond: (url: string, init: RequestInit | undefined) => Response,
+): { calls: { url: string; init: RequestInit | undefined }[]; fetchFn: typeof fetch } {
+  const calls: { url: string; init: RequestInit | undefined }[] = [];
+  const fetchFn = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, init });
+    return respond(url, init);
+  }) as unknown as typeof fetch;
+  return { calls, fetchFn };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+test("AC5：附图提交 ⇒ 请求体带 attachments 引用列表（顺序即正文引用序）", async () => {
+  const probe = captureFetch(() => new Response("", { status: 200 }));
+
+  await clientWith(probe.fetchFn).sendMessage("s1", "看这两张 [Image #1] [Image #2]", [
+    "sha256:aaa",
+    "sha256:bbb",
+  ]);
+
+  assert.equal(probe.calls.length, 1);
+  assert.equal(probe.calls[0]?.url, "http://127.0.0.1:1/api/sessions/s1/messages");
+  assert.deepEqual(JSON.parse(String(probe.calls[0]?.init?.body)), {
+    content: "看这两张 [Image #1] [Image #2]",
+    mode: "queue",
+    attachments: ["sha256:aaa", "sha256:bbb"],
+  });
+});
+
+test("AC5：无附图 ⇒ 请求体不带 attachments 键（纯文本行为逐字不变）", async () => {
+  const probe = captureFetch(() => new Response("", { status: 200 }));
+
+  await clientWith(probe.fetchFn).sendMessage("s1", "纯文字");
+
+  assert.deepEqual(JSON.parse(String(probe.calls[0]?.init?.body)), {
+    content: "纯文字",
+    mode: "queue",
+  });
+});
+
+test("AC5：uploadAttachment 发原始字节 + 声明 Content-Type，?name= 编码进查询串", async () => {
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+  const probe = captureFetch(() =>
+    jsonResponse({
+      attachment_id: "sha256:deadbeef",
+      media_type: "image/png",
+      bytes: 4,
+      width: 1,
+      height: 1,
+      name: "我的 截图.png",
+    }),
+  );
+
+  const receipt = await clientWith(probe.fetchFn).uploadAttachment("s1", bytes, {
+    name: "我的 截图.png",
+    mediaType: "image/png",
+  });
+
+  assert.equal(probe.calls[0]?.url, "http://127.0.0.1:1/api/sessions/s1/attachments?name=%E6%88%91%E7%9A%84%20%E6%88%AA%E5%9B%BE.png");
+  const init = probe.calls[0]?.init;
+  assert.equal(init?.method, "POST");
+  assert.equal(
+    (init?.headers as Record<string, string>)["content-type"],
+    "image/png",
+    "声明类型必须盖过 request() 的 JSON 缺省头（服务端按它比对字节判定）",
+  );
+  assert.deepEqual([...Uint8Array.from(init?.body as Uint8Array)], [...bytes]);
+  assert.equal(receipt.attachment_id, "sha256:deadbeef");
+});
+
+test("AC5：省略声明名时不带 ?name=（服务端 name 可缺省）", async () => {
+  const probe = captureFetch(() => jsonResponse({ attachment_id: "sha256:1", media_type: "image/png", bytes: 4, width: 1, height: 1 }));
+
+  await clientWith(probe.fetchFn).uploadAttachment("s1", Uint8Array.from([0x89]), {
+    mediaType: "image/png",
+  });
+
+  assert.equal(probe.calls[0]?.url, "http://127.0.0.1:1/api/sessions/s1/attachments");
+});
+
+test("AC8：listModels 解包 {models:[...]}，只收 TUI 需要的字段、丢弃形状不对的条目", async () => {
+  const probe = captureFetch(() =>
+    jsonResponse({
+      models: [
+        { id: "vision-a", model: "vision-a", is_default: true, supports_vision: true, provider: "p" },
+        { id: "text-b", model: "text-b", is_default: false, supports_vision: false },
+        { id: "no-model", is_default: false },
+        { model: "id 缺失" },
+        "不是对象",
+      ],
+    }),
+  );
+
+  const models = await clientWith(probe.fetchFn).listModels();
+
+  assert.equal(probe.calls[0]?.url, "http://127.0.0.1:1/api/models");
+  assert.deepEqual(models, [
+    { id: "vision-a", model: "vision-a", is_default: true, supports_vision: true },
+    { id: "text-b", model: "text-b", is_default: false, supports_vision: false },
+    { id: "no-model", is_default: false },
+  ]);
+});
+
+test("AC8：能力位缺席的条目不带 supports_vision（未知 ≠ false 的「假」）", async () => {
+  const probe = captureFetch(() => jsonResponse({ models: [{ id: "unknown", is_default: false }] }));
+
+  const models = await clientWith(probe.fetchFn).listModels();
+
+  assert.equal("supports_vision" in (models[0] ?? {}), false);
+});

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
+from pydantic import SecretStr
 
 from agent_harness import cli
 from agent_harness.agent.budget import BudgetConflict, BudgetRejection
@@ -51,9 +52,22 @@ from tests.scripted_model import ScriptedModel
 
 
 def _settings(tmp_path: Path) -> Settings:
+    # deepseek-chat 的默认 preset 不声明 reasoning_effort，但 from_settings 会从
+    # AGENT_MODELS catalog 补 capability。这里给默认模型声明 deep，使
+    # create_and_launch 的 validate_reasoning_effort("deep") 通过（#865）。
     return Settings(
         model_api_key="sk-test",
         workspace_dir=str(tmp_path / "workspace"),
+        agent_models=SecretStr(json.dumps([{
+            "name": "deepseek-chat",
+            "provider": "deepseek",
+            "model_name": "deepseek-chat",
+            "reasoning_effort": {
+                "supported": ["minimal", "standard", "deep"],
+                "default": "standard",
+                "wire_mapping": {"minimal": "none", "standard": "low", "deep": "high"},
+            },
+        }])),
         _env_file=None,  # 不吃仓库根 .env（测试必须自足）
     )
 
@@ -373,6 +387,16 @@ async def test_a_resume_without_a_policy_declaration_cannot_forge_a_policy_chang
        快照里 profile / effort 仍是暂停侧声明过的值（不是悄悄回落默认）。
     """
     settings = _settings(tmp_path)
+    settings.agent_models = json.dumps([{
+        "name": "deepseek-chat",
+        "provider": "deepseek",
+        "model_name": "deepseek-chat",
+        "reasoning_effort": {
+            "supported": ["deep"],
+            "default": "deep",
+            "wire_mapping": {"deep": "high"},
+        },
+    }])
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(
         "agent_harness.assembly.create_chat_model",

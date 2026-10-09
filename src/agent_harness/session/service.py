@@ -2868,14 +2868,22 @@ class SessionService:
     ) -> list[dict[str, Any]]:
         """校验附件 id 并解析成事件引用数组（#823 / MM-02）。
 
-        逐条校验：形态（`sha256:<64hex>`）→ 存在于本会话字节命名空间（别的会话 /
-        从未上传一律拒绝）→ 字节可读且能解析出尺寸。任一条不成立抛
+        逐条校验：形态（`sha256:<64hex>`）→ **本会话上传过**（别的会话 / 从未上传一律
+        拒绝）→ 字节可读且能解析出尺寸。任一条不成立抛
         `AttachmentReferenceInvalid`（HTTP 422）。返回**去重保序**的引用 dict 列表。
+
+        归属判据用 `load_uploaded_bytes` 而不是 `load_bytes`（#830 D1）：字节对象
+        现在是全局内容寻址的（fork 出的子会话要读得回继承的引用），"读得到"不再等于
+        "属于本会话"——本会话上传时会落一条会话回执（hardlink），归属只看它。
         """
         from agent_harness.attachments import (
+            STORAGE_UNAVAILABLE_MESSAGE,
             AttachmentError,
             detect_image,
+            image_reference,
+            message_images_too_large_message,
             resolve_image_limits,
+            too_many_images_message,
         )
         from agent_harness.storage.artifact import BYTE_ARTIFACT_ID_PATTERN
 
@@ -2894,14 +2902,12 @@ class SessionService:
             if attachment_id in seen:
                 continue
             if store is None:
-                raise AttachmentReferenceInvalid(
-                    "本部署没有可用的附件存储（artifact_dir 为空，或对象存储只配了一半）"
-                )
+                raise AttachmentReferenceInvalid(STORAGE_UNAVAILABLE_MESSAGE)
             try:
-                blob = await store.load_bytes(attachment_id)
+                blob = await store.load_uploaded_bytes(attachment_id)
             except KeyError as error:
                 raise AttachmentReferenceInvalid(
-                    f"附件 {attachment_id!r} 不在会话 {session_id!r} 的命名空间里"
+                    f"本会话未上传过该附件 {attachment_id!r}"
                     "（不存在，或属于别的会话）"
                 ) from error
             data = blob.content
@@ -2922,15 +2928,15 @@ class SessionService:
             # #823 / MM-02（B6）：不写 `name`——发送端点只收 id 列表，上传回执的
             # 展示名未持久化、也无回传信道，故事件引用数组的 `name` 结构性缺省
             # （AC1 该字段可选）。展示名接线留待前端票 / MM-03。
+            # 形状单源 = `attachments.admission.image_reference`（CLI `--image` 同一份）。
             refs.append(
-                {
-                    "kind": "image",
-                    "attachment_id": attachment_id,
-                    "media_type": detected.media_type,
-                    "bytes": blob.size,
-                    "width": detected.width,
-                    "height": detected.height,
-                }
+                image_reference(
+                    attachment_id,
+                    detected.media_type,
+                    size=blob.size,
+                    width=detected.width,
+                    height=detected.height,
+                )
             )
         # #824 / MM-03（AC1）：聚合上限——单条消息的图片**数量**与**总字节**。
         # 数量是"一条消息"的属性（上传端点看不到），总字节是引用集之和；两者都只在
@@ -2939,14 +2945,14 @@ class SessionService:
         # 在保存前判（`web/attachments.py`），与本层互补、不重复。
         if len(refs) > limits.max_images_per_message:
             raise TooManyAttachments(
-                f"单条消息最多 {limits.max_images_per_message} 张图片，"
-                f"本次引用了 {len(refs)} 张"
+                too_many_images_message(limits.max_images_per_message, len(refs))
             )
         total_bytes = sum(ref["bytes"] for ref in refs)
         if total_bytes > limits.max_message_image_bytes:
             raise AttachmentMessageTooLarge(
-                "单条消息的图片总字节超过上限"
-                f"（{limits.max_message_image_bytes} 字节）：本次合计 {total_bytes} 字节"
+                message_images_too_large_message(
+                    limits.max_message_image_bytes, total_bytes
+                )
             )
         return refs
 

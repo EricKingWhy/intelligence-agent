@@ -1,0 +1,1 @@
+2026-10-09	#830 D1 附件存储全局内容寻址（方案 b）实现批机械归属行（TDD 红→绿：fork 子会话读回继承附件字节回归；local_artifact 全局根 + 双读回落；artifact ABC + load_uploaded_bytes；service 发送侧归属）	7fcd0209fec4d79a599b61e6a4761e60c20329f8..5297b359ff5faf3e78d9d34d65ebbebec29b3aa9
