@@ -11,6 +11,7 @@
 | 读回本会话 id | 200 原始字节 + 正确 Content-Type |
 | 读从未上传的 id | 404 |
 | 读别的会话的 id | 404（不泄露存在性） |
+| fork 出的子会话读**被继承**的 id | 200（子会话带父会话事件 ⇒ 引用闸门成立；字节由全局内容寻址对象根提供，#830 D1） |
 | id 形态非法 | 422 |
 | 会话不存在 | 404 |
 | 声明类型 / 扩展名与字节不符 | 422 |
@@ -22,6 +23,12 @@
 读端点授权（#823 / MM-02 收紧）：只有被本会话某条 `user/message` 事件引用的
 `attachment_id` 才可读回；未引用（含上传后从未发送）→ 404，与"从未上传 / 别的会话"
 不可区分。故本文件的读回断言都先用 `_reference` 发送一条带附件引用的消息。
+
+授权与存储布局的**分工**（#830 D1）：字节对象改为全局内容寻址（跨会话去重、fork
+零拷贝继承），故"跨会话 404"不再由 store 的会话命名空间保证，而完全由上面这条事件
+引用闸门保证——`test_other_session_id_is_404` 因此额外断言对象确实在全局盘上，把
+"404 来自闸门而非缺对象"钉死。fork 场景的端到端回归见
+`tests/web/test_fork_attachment_d1.py`。
 """
 
 from __future__ import annotations
@@ -193,13 +200,24 @@ def test_uploaded_but_unreferenced_is_404(tmp_path: Path) -> None:
 
 
 def test_other_session_id_is_404(tmp_path: Path) -> None:
-    """别的会话拿到 id 也取不到内容，且与"从未上传"不可区分（不泄露存在性）。"""
+    """别的会话拿到 id 也取不到内容，且与"从未上传"不可区分（不泄露存在性）。
+
+    #830 D1 之后隔离**不是**靠 store 的会话命名空间：字节对象已全局内容寻址
+    （下面的全局对象存在性断言把这点钉住），404 完全由"本会话事件是否引用过该 id"
+    这条读闸门决定（PRD D5 / DSH `ATTACHMENT_NOT_REFERENCED`）。会话 B 没有引用
+    该 id ⇒ 404，即使对象就在本机磁盘上。
+    """
     client = _client(tmp_path)
     session_a = _create_session(client)
     session_b = _create_session(client)
     assert session_a != session_b
     attachment_id = _upload(client, session_a, png_bytes(20, 20)).json()["attachment_id"]
     assert _reference(client, session_a, attachment_id).status_code == 200
+
+    # 字节对象落在**全局**根（跨会话共用）——所以下面的 404 只可能来自引用闸门。
+    sha = attachment_id.split(":", 1)[1]
+    global_object = tmp_path / "artifacts" / ".attachments" / "objects" / sha[:2] / sha
+    assert global_object.is_file(), "字节对象必须落在全局根（内容寻址）"
 
     own = client.get(
         f"/api/sessions/{session_a}/attachments/{attachment_id}/content"
@@ -209,7 +227,7 @@ def test_other_session_id_is_404(tmp_path: Path) -> None:
     )
 
     assert own.status_code == 200, own.text
-    assert other.status_code == 404, "attachment_id 无归属信息，隔离只能靠 store 的会话命名空间"
+    assert other.status_code == 404, "隔离只能靠读端点的事件引用闸门（对象本身在全局盘上）"
     # 不泄露存在性：两种 404 的文案形状必须一致（回显的 id 是调用方已知的，需归一化后比）。
     unreferenced = client.get(
         f"/api/sessions/{session_b}/attachments/sha256:{'0' * 64}/content"

@@ -1,6 +1,19 @@
-"""LocalArtifactStore 字节路径（#822 MM-01）：staging → fsync → 原子发布 / 去重 / 隔离。
+"""LocalArtifactStore 字节路径（#822 MM-01；#830 D1 对象根全局化）。
 
 落盘算法来源: DeepSeek Harness `5badb150` `attachment-local/src/store.ts`（MIT）。
+对象根全局化 + 跨会话去重的来源: DSH `store.ts:47-51`、oh-my-pi
+`packages/coding-agent/src/session/blob-store.ts:40-68`（均 MIT，见
+`docs/agents/830-d1-global-attachment-store-design-proposal.md` §0）。
+
+布局（`<root>` = `artifact_dir`）：
+
+    <root>/.attachments/objects/<sha[:2]>/<sha>       全局字节对象（跨会话去重）
+    <root>/.attachments/objects/<sha[:2]>/<sha>.json  对象元数据（旁挂，可缺）
+    <root>/.attachments/tmp/<uuid>                    staging
+    <root>/<sid>/attachments/objects/<sha[:2]>/<sha>  会话上传回执（hardlink）
+
+两条读语义：`load_bytes` = 内容寻址读回（全局优先 → 回落本会话旧路径，向后兼容）；
+`load_uploaded_bytes` = **本会话上传过**（只看回执/旧路径），是发送侧归属判据。
 """
 
 from __future__ import annotations
@@ -18,7 +31,10 @@ import pytest
 
 from agent_harness.config import Settings
 from agent_harness.storage.artifact import compute_byte_artifact_id
-from agent_harness.storage.local_artifact import LocalArtifactStore
+from agent_harness.storage.local_artifact import (
+    LocalArtifactStore,
+    discard_local_artifacts,
+)
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -34,9 +50,31 @@ def _store(tmp_path: Path, session_id: str) -> LocalArtifactStore:
     return LocalArtifactStore(_settings(tmp_path), session_id=session_id)
 
 
-def _object_path(tmp_path: Path, session_id: str, attachment_id: str) -> Path:
+def _sharded(root: Path, attachment_id: str) -> Path:
     sha = attachment_id.split(":", 1)[1]
-    return tmp_path / "artifacts" / session_id / "attachments" / "objects" / sha[:2] / sha
+    return root / sha[:2] / sha
+
+
+def _object_path(tmp_path: Path, attachment_id: str) -> Path:
+    """全局对象路径（与会话无关）。"""
+    return _sharded(tmp_path / "artifacts" / ".attachments" / "objects", attachment_id)
+
+
+def _receipt_path(tmp_path: Path, session_id: str, attachment_id: str) -> Path:
+    """会话上传回执路径（旧布局位，hardlink 指向全局对象）。"""
+    return _sharded(
+        tmp_path / "artifacts" / session_id / "attachments" / "objects", attachment_id
+    )
+
+
+def _meta_path(tmp_path: Path, attachment_id: str) -> Path:
+    """全局对象旁挂元数据路径。"""
+    obj = _object_path(tmp_path, attachment_id)
+    return obj.with_name(f"{obj.name}.json")
+
+
+def _staging_dir(tmp_path: Path) -> Path:
+    return tmp_path / "artifacts" / ".attachments" / "tmp"
 
 
 def test_bytes_roundtrip_is_byte_equal(tmp_path: Path) -> None:
@@ -52,6 +90,11 @@ def test_bytes_roundtrip_is_byte_equal(tmp_path: Path) -> None:
     assert blob.artifact_id == compute_byte_artifact_id(payload)
     assert blob.artifact_id.startswith("sha256:")
     assert len(blob.artifact_id) == len("sha256:") + 64
+    # 对象落在全局根；会话侧只有一条同 inode 的回执（不复制字节）。
+    assert _object_path(tmp_path, blob.artifact_id).is_file()
+    receipt = _receipt_path(tmp_path, "sess-a", blob.artifact_id)
+    assert receipt.is_file()
+    assert receipt.stat().st_ino == _object_path(tmp_path, blob.artifact_id).stat().st_ino
 
 
 def test_dedup_same_bytes_same_id_and_one_object(tmp_path: Path) -> None:
@@ -61,23 +104,76 @@ def test_dedup_same_bytes_same_id_and_one_object(tmp_path: Path) -> None:
     second = asyncio.run(store.save_bytes("sess-a", payload, mime_type="image/png"))
 
     assert first.artifact_id == second.artifact_id
-    objects = list(
-        (tmp_path / "artifacts" / "sess-a" / "attachments" / "objects").rglob("*")
-    )
-    files = [p for p in objects if p.is_file() and p.suffix != ".json"]
-    assert len(files) == 1, "同一字节序列只应落一份对象"
+    objects = [
+        p for p in (tmp_path / "artifacts" / ".attachments" / "objects").rglob("*")
+        if p.is_file() and p.suffix != ".json"
+    ]
+    assert len(objects) == 1, "同一字节序列只应落一份对象"
 
 
-def test_cross_session_id_is_not_readable(tmp_path: Path) -> None:
-    """别的会话拿到 id 也取不到内容（授权来自会话命名空间）。"""
+def test_same_bytes_across_sessions_share_one_object(tmp_path: Path) -> None:
+    """跨会话去重（#830 D1 的核心收益）：两个会话上传同字节 → 全局仍只 1 份。"""
+    payload = b"shared-across-sessions" * 50
+
+    a = asyncio.run(_store(tmp_path, "sess-a").save_bytes("sess-a", payload, mime_type="image/png"))
+    b = asyncio.run(_store(tmp_path, "sess-b").save_bytes("sess-b", payload, mime_type="image/png"))
+
+    assert a.artifact_id == b.artifact_id
+    objects = [
+        p for p in (tmp_path / "artifacts" / ".attachments" / "objects").rglob("*")
+        if p.is_file() and p.suffix != ".json"
+    ]
+    assert len(objects) == 1
+    # 两个会话各有自己的回执（各指同一 inode）。
+    receipts = [
+        _receipt_path(tmp_path, sid, a.artifact_id) for sid in ("sess-a", "sess-b")
+    ]
+    assert all(r.is_file() for r in receipts)
+    inodes = {r.stat().st_ino for r in receipts}
+    assert len(inodes) == 1, "回执必须是同一 inode 的 hardlink（零拷贝）"
+
+
+def test_cross_session_bytes_readable_but_not_owned(tmp_path: Path) -> None:
+    """`load_bytes` 跨会话可读（内容寻址）；`load_uploaded_bytes` 仍按会话拒（归属）。"""
     writer = _store(tmp_path, "sess-a")
     blob = asyncio.run(writer.save_bytes("sess-a", b"secret", mime_type="image/png"))
 
     reader_b = _store(tmp_path, "sess-b")
+    # 读回语义：全局内容寻址 ⇒ 别的会话也读得到（"谁能读"由调用方的引用闸门负责）。
+    assert asyncio.run(reader_b.load_bytes(blob.artifact_id)).content == b"secret"
+    # 归属语义：没上传过的会话拿不到（发送侧 422 的判据）。
     with pytest.raises(KeyError):
-        asyncio.run(reader_b.load_bytes(blob.artifact_id))
-    # 自己的会话读得到
-    assert asyncio.run(_store(tmp_path, "sess-a").load_bytes(blob.artifact_id)).content == b"secret"
+        asyncio.run(reader_b.load_uploaded_bytes(blob.artifact_id))
+    # 上传者自己两条都通。
+    own = _store(tmp_path, "sess-a")
+    assert asyncio.run(own.load_bytes(blob.artifact_id)).content == b"secret"
+    assert asyncio.run(own.load_uploaded_bytes(blob.artifact_id)).content == b"secret"
+
+
+def test_legacy_session_scoped_object_is_still_readable(tmp_path: Path) -> None:
+    """升级前落在会话命名空间里的对象不因对象根全局化而 brick（向后兼容读法）。"""
+    store = _store(tmp_path, "sess-a")
+    payload = b"pre-upgrade-bytes"
+    attachment_id = compute_byte_artifact_id(payload)
+    legacy = _receipt_path(tmp_path, "sess-a", attachment_id)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(payload)
+    meta = legacy.with_name(f"{legacy.name}.json")
+    meta.write_text('{"mime_type": "image/webp"}', encoding="utf-8")
+
+    assert _object_path(tmp_path, attachment_id).exists() is False  # 全局确实没有
+    loaded = asyncio.run(store.load_bytes(attachment_id))
+    assert loaded.content == payload
+    assert loaded.mime_type == "image/webp"  # 旧旁挂也被回落读到
+    # 归属：旧对象的会话路径本身就是回执位。
+    assert asyncio.run(store.load_uploaded_bytes(attachment_id)).content == payload
+    # 旧对象**只**在本会话命名空间里（全局根没有它）⇒ 别的会话两条都读不到。
+    # 这是登记的已知缺口：升级前上传的旧对象 fork 出的子会话仍读不回（见方案文档 §8.3）。
+    other = _store(tmp_path, "sess-b")
+    with pytest.raises(KeyError):
+        asyncio.run(other.load_bytes(attachment_id))
+    with pytest.raises(KeyError):
+        asyncio.run(other.load_uploaded_bytes(attachment_id))
 
 
 def test_missing_and_malformed_ids_raise_key_error(tmp_path: Path) -> None:
@@ -88,24 +184,62 @@ def test_missing_and_malformed_ids_raise_key_error(tmp_path: Path) -> None:
         asyncio.run(store.load_bytes("not-a-valid-id"))
     with pytest.raises(KeyError):
         asyncio.run(store.load_bytes("sha256:XYZ"))
+    with pytest.raises(KeyError):
+        asyncio.run(store.load_uploaded_bytes("sha256:" + "0" * 64))
+    with pytest.raises(KeyError):
+        asyncio.run(store.load_uploaded_bytes("sha256:XYZ"))
 
 
 def test_tampered_object_is_rejected(tmp_path: Path) -> None:
     store = _store(tmp_path, "sess-a")
     blob = asyncio.run(store.save_bytes("sess-a", b"original", mime_type="image/png"))
-    path = _object_path(tmp_path, "sess-a", blob.artifact_id)
+    path = _object_path(tmp_path, blob.artifact_id)
     # chmod 0o400 后仍可被 root 覆盖（本机 root）；这里直接改字节模拟带外篡改。
     os.chmod(path, 0o600)
     path.write_bytes(b"tampered")
     with pytest.raises(KeyError):
         asyncio.run(store.load_bytes(blob.artifact_id))
+    # 回执指同一 inode ⇒ 篡改同样被归属读拒（不自证就一律不可读）。
+    with pytest.raises(KeyError):
+        asyncio.run(store.load_uploaded_bytes(blob.artifact_id))
 
 
 def test_object_permission_is_read_only(tmp_path: Path) -> None:
     store = _store(tmp_path, "sess-a")
     blob = asyncio.run(store.save_bytes("sess-a", b"perm", mime_type="image/png"))
-    path = _object_path(tmp_path, "sess-a", blob.artifact_id)
+    path = _object_path(tmp_path, blob.artifact_id)
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o400
+
+
+def test_session_delete_drops_receipt_but_keeps_global_object(tmp_path: Path) -> None:
+    """会话硬删只带走回执（该会话目录），全局对象留在原地（孤儿回收不在本票范围）。"""
+    store = _store(tmp_path, "sess-a")
+    blob = asyncio.run(store.save_bytes("sess-a", b"survives", mime_type="image/png"))
+
+    discard_local_artifacts(_settings(tmp_path), "sess-a")
+
+    assert not _receipt_path(tmp_path, "sess-a", blob.artifact_id).exists()
+    assert _object_path(tmp_path, blob.artifact_id).is_file()
+    assert (
+        asyncio.run(_store(tmp_path, "sess-b").load_bytes(blob.artifact_id)).content
+        == b"survives"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 专用：会话名不得吃掉全局对象根")
+def test_session_named_like_the_global_root_cannot_eat_it(tmp_path: Path) -> None:
+    """名为 `attachments` / `.attachments` 的会话删不掉全局对象根（前导点点目录纪律）。
+
+    `discard_local_artifacts` 是"setting + session_id 拼路径"的删除入口；全局根用
+    **前导点**目录名（`SESSION_KEY_PATTERN` 不允许前导点）⇒ 构造上拼不出它。
+    """
+    blob = asyncio.run(
+        _store(tmp_path, "sess-a").save_bytes("sess-a", b"global", mime_type="image/png")
+    )
+    for name in ("attachments", "objects", "tmp"):
+        discard_local_artifacts(_settings(tmp_path), name)
+
+    assert _object_path(tmp_path, blob.artifact_id).is_file()
 
 
 def test_halfway_failure_leaves_no_readable_residue(
@@ -124,12 +258,15 @@ def test_halfway_failure_leaves_no_readable_residue(
         asyncio.run(store.save_bytes("sess-a", payload, mime_type="image/png"))
 
     attachment_id = compute_byte_artifact_id(payload)
-    object_path = _object_path(tmp_path, "sess-a", attachment_id)
+    object_path = _object_path(tmp_path, attachment_id)
     assert not object_path.exists(), "失败的发布不得留下对象"
     # 读回也必然 KeyError（没有半文件可读）
     with pytest.raises(KeyError):
         asyncio.run(store.load_bytes(attachment_id))
-    staging = tmp_path / "artifacts" / "sess-a" / "attachments" / "tmp"
+    # 归属读也不能凭空成立（对象都没发布 ⇒ 回执不存在）
+    with pytest.raises(KeyError):
+        asyncio.run(store.load_uploaded_bytes(attachment_id))
+    staging = _staging_dir(tmp_path)
     assert not staging.exists() or list(staging.iterdir()) == [], "staging 必须清空"
 
 
@@ -243,13 +380,16 @@ def test_kill_during_staging_leaves_no_readable_object(tmp_path: Path) -> None:
     assert proc.returncode == -signal.SIGKILL, "进程必须是被真实 SIGKILL 杀死的"
 
     attachment_id = compute_byte_artifact_id(payload)
-    object_path = _object_path(tmp_path, "sess-a", attachment_id)
-    assert not object_path.exists(), "进程在发布前被杀，不得出现目标对象"
+    assert not _object_path(tmp_path, attachment_id).exists(), (
+        "进程在发布前被杀，不得出现目标对象"
+    )
     with pytest.raises(KeyError):
         asyncio.run(_store(tmp_path, "sess-a").load_bytes(attachment_id))
+    with pytest.raises(KeyError):
+        asyncio.run(_store(tmp_path, "sess-a").load_uploaded_bytes(attachment_id))
 
     # staging 里确实留下了半个文件——它在 tmp/，不是可读对象路径（即 AC 的"可被读到"）。
-    staging = artifact_dir / "sess-a" / "attachments" / "tmp"
+    staging = _staging_dir(tmp_path)
     partials = [p for p in staging.rglob("*") if p.is_file()]
     assert partials, "应能观察到被中断时留下的 staging 半文件（证明真的杀在写入中途）"
     assert all(p.stat().st_size < len(payload) for p in partials), "半文件必须是**未写完**的"
@@ -259,12 +399,7 @@ def test_metadata_sidecar_missing_falls_back_to_octet_stream(tmp_path: Path) -> 
     """内容才是事实：删掉元数据仍能读回字节，Content-Type 退化为 octet-stream。"""
     store = _store(tmp_path, "sess-a")
     blob = asyncio.run(store.save_bytes("sess-a", b"meta", mime_type="image/png"))
-    sha = blob.artifact_id.split(":", 1)[1]
-    meta = (
-        tmp_path / "artifacts" / "sess-a" / "attachments" / "objects" / sha[:2]
-        / f"{sha}.json"
-    )
-    meta.unlink()
+    _meta_path(tmp_path, blob.artifact_id).unlink()
 
     loaded = asyncio.run(store.load_bytes(blob.artifact_id))
     assert loaded.content == b"meta"
