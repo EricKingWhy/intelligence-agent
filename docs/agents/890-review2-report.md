@@ -1,4 +1,5 @@
 [claude-code:unrecognized_model] {"model":"dolphin/deepseek-ai/DeepSeek-V4.1-Flash","query_source":"sdk"}
+Both axes returned and I've cross-verified their load-bearing claims myself. Consolidated report below.
 > 来源：`~/workspace/system/dispatch/890-review2.log` 的**逐字副本**（仓外文件，落仓只为让台账行的
 > 更正指针从仓库内可达——第三轮复审 P4-3）。除本段说明外，正文未作任何编辑。
 > 落仓日期 2026-10-09，落仓提交见 `docs/review_ledger.d/` 对应的更正行。
