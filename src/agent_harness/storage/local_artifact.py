@@ -543,9 +543,11 @@ def _clear_readonly_and_retry(
     其全局对象的只读位——这是删除只读 hardlink 在 Windows 上无法回避的代价；对象内容的
     content-addressable 自证仍在读回时兜底。
     """
-    with suppress(OSError):
-        os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
     if func in (os.unlink, os.rmdir):
+        # 改位与重试**同域**：只对可单参重试的两个 func 清只读位。对 `os.open` 等其余
+        # func 触发时不碰权限（它们需要更多参数、无法重试，改位会是纯粹的越界副作用）。
+        with suppress(OSError):
+            os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
         with suppress(OSError):
             func(path)
 
