@@ -7,7 +7,7 @@
  *   `resolvePastedImagePath`）；
  * - `apps/cli/src/utils/image-attachments.ts:4-29`（扩展名 -> 是否图片）。
  *
- * 与上游的三处差别（都在 NOTICE 里登记）：
+ * 与上游的四处差别（都在 NOTICE 里登记）：
  * 1. **砍掉 OpenTUI 依赖**：上游的 `PasteLikeEvent{bytes,metadata}` 来自 OpenTUI，
  *    `IMAGE_EXTENSIONS` 里的 bmp/svg 本仓服务端不收（`attachments/types.py::EXTENSION_MEDIA_TYPES`
  *    只有 png/jpg/jpeg/webp/gif）=> 扩展名集与服务端 **逐字对齐**；
@@ -15,9 +15,12 @@
  *    macOS 文件名变体归位；本仓 TUI 的粘贴路径只做"剥引号 / CRLF 归一 / `file://` 转换"，
  *    存在性由 `readImageFile` 真读盘判定（读不到就是明确错误，见 PRD 用户故事 24）；
  * 3. 上游把图读成 data URL（OpenTUI 内联渲染用）；本仓契约是**字节流式上传**
- *    （`POST /api/sessions/{id}/attachments`），故这里回字节而不是 base64。
+ *    （`POST /api/sessions/{id}/attachments`），故这里回字节而不是 base64；
+ * 4. 上游 `readImageDataUrlFromPastedText` 无条件 `readFileSync`；本仓读盘前先
+ *    `statSync(...).isFile()`：非常规文件（FIFO / 设备 / 目录）一律回 `missing`，
+ *    否则无写端的 FIFO 会让阻塞式读盘**永久**冻住整个 TUI 事件循环。
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -140,6 +143,13 @@ export function pastedImagePath(
 export function readImageFile(filePath: string): ReadImageFileResult {
   let bytes: Buffer;
   try {
+    // 只读**常规文件**（#827 阶段三 brutal 发现的 P4）：`readFileSync` 落在 FIFO 上会
+    // **永久阻塞**（把整个 TUI 冻住），落在目录上抛 EISDIR。两者都不是"一张可发送的图片"，
+    // 一律按 `missing` 明确拒绝，绝不让编辑器/事件循环卡在读盘上。符号链接照常跟随
+    // （`statSync` 解析到目标），普通图片的可观察行为逐字不变。
+    if (!statSync(filePath).isFile()) {
+      return { ok: false, reason: "missing" };
+    }
     bytes = readFileSync(filePath);
   } catch {
     return { ok: false, reason: "missing" };

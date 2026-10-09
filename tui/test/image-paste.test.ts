@@ -9,7 +9,8 @@
  *    webp/gif），不含上游的 bmp/svg —— 服务端 v1 只收这四种栅格图。
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -141,5 +142,37 @@ test("uploadDeclaredName：扩展名与字节判定一致才声明（否则省�
 test("clipboardImageName：剪贴板文件名按 media type 给，扩展名与字节判定一致", () => {
   for (const mimeType of ["image/png", "image/jpeg", "image/webp", "image/gif"]) {
     assert.equal(uploadDeclaredName(clipboardImageName(mimeType), mimeType), clipboardImageName(mimeType));
+  }
+});
+
+test("readImageFile：非常规文件按 missing 明确拒绝，且绝不阻塞（P4：FIFO 上的 readFileSync 会永久卡住）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ia827-fifo-"));
+  try {
+    const fifo = join(dir, "pipe.png");
+    execFileSync("mkfifo", [fifo]);
+    const started = Date.now();
+    assert.deepEqual(readImageFile(fifo), { ok: false, reason: "missing" });
+    assert.ok(Date.now() - started < 2_000, "不得阻塞在读盘上（无写端的 FIFO 会一直等）");
+    assert.deepEqual(readImageFile(dir), { ok: false, reason: "missing" }, "目录同样按 missing 拒绝");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readImageFile：符号链接指向常规图片照常可读（常规文件守卫不误伤链接）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ia827-link-"));
+  try {
+    const target = join(dir, "shot.png");
+    writeFileSync(target, PNG);
+    const link = join(dir, "link.png");
+    symlinkSync(target, link);
+    const result = readImageFile(link);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.image.mimeType, "image/png");
+      assert.equal(result.image.name, "link.png");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
