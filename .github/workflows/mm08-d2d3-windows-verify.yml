@@ -1,0 +1,120 @@
+# .github/workflows/mm08-d2d3-windows-verify.yml —— #830 D2 / D3 修复的 **Windows 验证**
+#
+# 为什么存在
+#
+# MM-08（#830）的 `windows-latest` 近似验证抓出两条只在 Windows 上显形的缺陷：
+#   D2（产品，P1）：`LocalArtifactStore._publish_blob` 用文本模式 `os.open` 发布二进制
+#      对象 ⇒ 含 `0x0A` 的字节被撑成 CRLF ⇒ 读回哈希不符（`tests/test_cli_image.py` 2 例红）；
+#   D3（测试可移植性，P2）：`tui` 全量 201 例里 6 例红（`.pathname` / 写死 `file:///home/u`
+#      / `fileURLToPath` 不吃注入的 platform）。
+# 施工机是 Linux 云电脑，这两条在 Linux 上**不可复现**（Linux 无 CRT 文本模式；POSIX 路径
+# 约定本就成立），所以修复的验收只能在 Windows runner 上取证。
+#
+# 它跑什么（对准本票的两条判据）
+#   job `cli`：`uv run pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py -q`
+#     - D2 判据：`tests/test_cli_image.py` 由 **2 failed** 转 **0 failed**；
+#     - 新增回归 `test_published_object_bytes_are_not_newline_expanded` 与
+#       `test_publish_blob_forces_binary_mode_under_emulated_text_mode`（后者 win32 上 skip）。
+#   job `tui`：`npm ci` -> `npm run check`（tsc --noEmit）-> `npm test`
+#     - D3 判据：`npm test` **201 例全绿**（Linux 上是 199/201：两条 Windows 路径断言必红）。
+#
+# 触发与边界
+#   `on:` 挂 `workflow_dispatch`（合入默认分支后可手工跑）+ `push`（仅本票特性分支）。
+#   加 `push` 的唯一目的是绕过"`workflow_dispatch` 要求 workflow 文件在**默认分支**"这条
+#   限制（本票不 push main / 不开 PR），与 #830 的 `mm08-windows-verify.yml` 同一处置。
+#   不挂 pull_request / schedule，不做常驻 CI。CI 里不含任何密钥。
+#   第三方 action 一律完整 SHA + 版本注释（tag 可变、有投毒面）。
+name: mm08-d2d3-windows-verify
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - omp/fix-mm08-d2-d3-windows
+    paths:
+      # 只在真正决定这两条判据的路径变化时触发（docs-only 提交不烧 runner 分钟）。
+      - .github/workflows/mm08-d2d3-windows-verify.yml
+      - src/agent_harness/storage/local_artifact.py
+      - tests/test_cli_image.py
+      - tests/attachments/test_local_byte_store.py
+      - tui/src/lib/image-paste.ts
+      - tui/test/app-images.test.ts
+      - tui/test/image-paste.test.ts
+      - tui/test/image-view.test.ts
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cli:
+    name: D2（Windows 字节发布不再是文本模式）
+    runs-on: windows-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: 装 uv（与 gate0.yml 同版本 pin）
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: 同步依赖（uv.lock 锁文件）
+        run: |
+          uv python install 3.13
+          uv sync --locked --python 3.13
+          uv run python -V
+
+      - name: D2 回归：Windows 下 CLI --image 真字节落盘读回
+        run: |
+          uv run pytest tests/test_cli_image.py tests/attachments/test_local_byte_store.py -q -p no:cacheprovider 2>&1 |
+            Tee-Object -FilePath "${{ runner.temp }}\mm08-d2d3-cli-pytest.log"
+          $code = $LASTEXITCODE
+          Write-Output "pytest 退出码=$code（修复前 tests/test_cli_image.py = 2 failed）"
+          exit $code
+
+      - name: 上传 CLI 证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mm08-d2d3-windows-cli
+          path: ${{ runner.temp }}/mm08-d2d3-cli-pytest.log
+          if-no-files-found: warn
+
+  tui:
+    name: D3（tui 全量在 Windows 上可移植）
+    runs-on: windows-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: 装 Node 22（与 tui/package.json engines 对齐）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: 装 tui 依赖（npm ci）
+        working-directory: tui
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查（npm run check = tsc --noEmit）
+        working-directory: tui
+        run: |
+          npm run check 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-d2d3-tsc.log"
+          $code = $LASTEXITCODE
+          Write-Output "tsc --noEmit 退出码=$code"
+          exit $code
+
+      - name: D3 回归：tui 全量（修复前 6 failed）
+        working-directory: tui
+        run: |
+          npm test 2>&1 | Tee-Object -FilePath "${{ runner.temp }}\mm08-d2d3-tui-full.log"
+          $code = $LASTEXITCODE
+          Write-Output "npm test 退出码=$code（修复前 = 6 failed / 201；修复后必须全绿）"
+          exit $code
+
+      - name: 上传 TUI 证据
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mm08-d2d3-windows-tui
+          path: ${{ runner.temp }}/mm08-d2d3-*.log
+          if-no-files-found: warn

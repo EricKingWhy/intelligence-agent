@@ -304,9 +304,13 @@ class LocalArtifactStore(ArtifactStore):
         temporary = staging_dir / uuid4().hex
         handle: int | None = None
         try:
-            handle = os.open(
-                temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-            )
+            # `O_BINARY`：Windows 的 CRT 在没有它时按**文本模式**落盘，会把内容里的
+            # `0x0A` 撑成 `0x0D 0x0A` ⇒ 对象字节数变了 ⇒ 读回时 content-addressable
+            # 自证报 hash mismatch（#830 D2）。POSIX 没有这个 flag，`getattr` 取 0。
+            # 与 `context/project_instructions.py`、`skills/inspection.py` 同一条纪律。
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            flags |= getattr(os, "O_BINARY", 0)
+            handle = os.open(temporary, flags, 0o600)
             # `os.write` 不保证一次写完（大对象必然部分写）——循环写完。
             view = memoryview(data)
             written = 0

@@ -13,6 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 
@@ -24,11 +25,13 @@ const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
 
+const IMAGE_PATH = "/home/u/shots/shot.png";
+
 const IMAGE: PendingImage = {
   bytes: PNG_BYTES,
   mimeType: "image/png",
   name: "shot.png",
-  path: "/home/u/shots/shot.png",
+  path: IMAGE_PATH,
 };
 
 const theme = { fallbackColor: (text: string): string => text };
@@ -80,8 +83,11 @@ test("AC6：WT_SESSION（images: null）⇒ 文本占位，不含任何图片协
     assert.ok(output.includes("shot.png"), "占位必须给出文件名");
     assert.ok(output.includes("1x1"), "占位必须给出尺寸");
     assert.ok(output.includes("image/png"), "占位必须给出 media type");
+    // 期望值按**运行时平台**生成：`imageFallback` 用 `pathToFileURL` 造链接，同一条
+    // `/home/u/...` 在 Windows 上会得到 `file:///D:/home/u/...`（#830 D3：写死
+    // `file:///home/u/...` 只在 POSIX 上成立）。
     assert.ok(
-      output.includes("file:///home/u/shots/shot.png"),
+      output.includes(pathToFileURL(IMAGE_PATH).href),
       "支持 OSC 8 的终端上路径应是可点击的原图链接",
     );
   });

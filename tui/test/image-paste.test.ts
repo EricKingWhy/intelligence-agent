@@ -56,8 +56,15 @@ test("http(s) URL 不是本地路径 ⇒ undefined", () => {
   assert.equal(resolvePastedImagePath("https://example.com/a.png", "linux"), undefined);
 });
 
-test("file:// URL 转成本地路径", () => {
+test("file:// URL 转成本地路径（按注入的 platform 判定，不吃运行时平台）", () => {
   assert.equal(resolvePastedImagePath("file:///tmp/shot.png", "linux"), "/tmp/shot.png");
+  // 同一份代码在 Windows 运行时上：注入 win32 必须走盘符语义，注入 linux 必须走 POSIX
+  // 语义（#830 D3：`fileURLToPath` 原先只看运行时平台 => Windows 上这条必红）。
+  assert.equal(
+    resolvePastedImagePath("file:///C:/shots/a.png", "win32"),
+    "C:\\shots\\a.png",
+  );
+  assert.equal(resolvePastedImagePath("file:///tmp/shot.png", "win32"), undefined);
 });
 
 test("非 win32 反转义终端插入的反斜杠；win32 保留原样", () => {

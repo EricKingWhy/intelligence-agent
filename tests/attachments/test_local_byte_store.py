@@ -269,3 +269,74 @@ def test_metadata_sidecar_missing_falls_back_to_octet_stream(tmp_path: Path) -> 
     loaded = asyncio.run(store.load_bytes(blob.artifact_id))
     assert loaded.content == b"meta"
     assert loaded.mime_type == "application/octet-stream"
+
+
+# ── #830 D2：发布必须走二进制模式（Windows CRT 文本模式会撑开 `0x0A`）──────
+#
+# `_publish_blob` 用 `os.open` 落 staging 文件；Windows 的 CRT 在**没有** `O_BINARY`
+# 时默认文本模式，写盘把 `0x0A` 撑成 `0x0D 0x0A` ⇒ 对象字节数变化 ⇒ 读回时
+# `load_bytes` 的 content-addressable 自证报 `content hash mismatch`（附件静默降级成
+# 占位符）。Linux 无文本模式，所以缺陷只在 Windows 复现（GA #37941646937 job `cli`
+# 步骤 5：`tests/test_cli_image.py` 2 failed）。
+
+#: 模拟层的 `O_BINARY` 位。Linux 上 `os.O_BINARY` 不存在（`getattr` 取 0），只有把它
+#: 注入 `os` 模块，`_publish_blob` 的 `getattr(os, "O_BINARY", 0)` 才能在 Linux 上被观测。
+_EMULATED_O_BINARY = 0x8000
+
+
+def test_published_object_bytes_are_not_newline_expanded(tmp_path: Path) -> None:
+    """含 `0x0A` 的字节对象落盘后必须**逐字节**等于原文（#830 D2）。
+
+    断言刻意落在**落盘字节**上而不是只断言 roundtrip：Windows 上文本模式会在
+    `save_bytes` 与 `load_bytes` 之间同时发生，只断言 roundtrip 不足以把"文件被改写"
+    与"读回转换"分开；直接读对象文件才是缺陷的现场（也是证据包建议的补强读数）。
+    """
+    store = _store(tmp_path, "sess-a")
+    payload = b"\x89PNG\r\n\x1a\n" + bytes([0x0A]) * 8 + b"\r\n\x0a"
+    blob = asyncio.run(store.save_bytes("sess-a", payload, mime_type="image/png"))
+
+    object_path = _object_path(tmp_path, "sess-a", blob.artifact_id)
+    assert object_path.read_bytes() == payload, "落盘字节被平台换行转换改写"
+    loaded = asyncio.run(store.load_bytes(blob.artifact_id))
+    assert loaded.content == payload
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="本用例模拟 Windows CRT；真 Windows 上由 test_published_object_bytes_are_not_newline_expanded 覆盖",
+)
+def test_publish_blob_forces_binary_mode_under_emulated_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """把 Windows CRT 的文本模式搬成 **Linux 上可红**的回归（#830 D2）。
+
+    上一条用例在 Linux 上恒绿（Linux 没有文本模式），而 Linux 正是 CI 真正跑测试的
+    平台：只有这条用例能在 Linux 上守住"发布必须带 `O_BINARY`"这条纪律。做法是把
+    平台行为注入进来——`os.O_BINARY` 补一位模拟位、`os.open` 把它剥掉后再交给真
+    `os.open`（Linux 不认这个 flag），并让**不带**该位的 fd 走 CRT 文本模式语义
+    （写盘时 `0x0A` -> `0x0D 0x0A`）。缺陷机理与真 Windows 逐条同形。
+    """
+    monkeypatch.setattr(os, "O_BINARY", _EMULATED_O_BINARY, raising=False)
+    real_open, real_write = os.open, os.write
+    text_mode_fds: set[int] = set()
+
+    def emulating_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags & ~_EMULATED_O_BINARY, *args, **kwargs)
+        if not flags & _EMULATED_O_BINARY:
+            text_mode_fds.add(fd)
+        return fd
+
+    def emulating_write(fd, data):
+        if fd in text_mode_fds:
+            data = bytes(data).replace(b"\n", b"\r\n")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "open", emulating_open)
+    monkeypatch.setattr(os, "write", emulating_write)
+
+    store = _store(tmp_path, "sess-a")
+    payload = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+    blob = asyncio.run(store.save_bytes("sess-a", payload, mime_type="image/png"))
+
+    assert _object_path(tmp_path, "sess-a", blob.artifact_id).read_bytes() == payload
+    assert asyncio.run(store.load_bytes(blob.artifact_id)).content == payload

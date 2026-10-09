@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { TuiApp } from "../src/app.ts";
 import type { ConversationState } from "../src/adapter.ts";
@@ -31,8 +32,10 @@ const PNG_BYTES = Uint8Array.from([
 ]);
 
 /** 仓库内的真图片 fixture（AC2/AC4 要真读盘）。 */
-const FIXTURE_PNG = new URL("./fixtures/shot.png", import.meta.url).pathname;
-const MISSING_PNG = new URL("./fixtures/not-there.png", import.meta.url).pathname;
+// `URL.pathname` 在 Windows 上给 `/D:/...`（前导斜杠 + 正斜杠），`statSync` 解不出来
+// => 图被判"读不到"（#830 D3）。`fileURLToPath` 是本平台正确的转换。
+const FIXTURE_PNG = fileURLToPath(new URL("./fixtures/shot.png", import.meta.url));
+const MISSING_PNG = fileURLToPath(new URL("./fixtures/not-there.png", import.meta.url));
 
 /** 让挂起的异步剪贴板读取跑完（纯微任务，不涉真计时器）。 */
 async function settle(): Promise<void> {

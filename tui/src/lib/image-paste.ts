@@ -120,7 +120,11 @@ export function resolvePastedImagePath(
 
   if (raw.startsWith("file://")) {
     try {
-      return fileURLToPath(raw);
+      // 按**调用方给的** platform 判定路径语义：`fileURLToPath(url)` 只看运行时平台
+      // （本函数签名把 platform 显式暴露出来就是为了让它可注入），Node >=22.1 的
+      // `windows` 选项才让二者一致（#830 D3：Windows 上 `file:///tmp/x` 会抛错，
+      // 而调用方其实要的是 Linux 语义）。
+      return fileURLToPath(raw, { windows: platform === "win32" });
     } catch {
       return undefined;
     }
